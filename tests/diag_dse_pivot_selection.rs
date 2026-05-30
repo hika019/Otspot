@@ -98,22 +98,29 @@ fn make_lp_from_qp(qp: &QpProblem) -> LpProblem {
     .unwrap()
 }
 
-/// Random Le-only LP with finite upper bounds on every variable.
+/// Random Le-only LP with a budget constraint to keep the LP bounded.
 ///
-/// The previous generator left bounds at `(0, +∞)` while `c[j] < 0` made
-/// the objective want every `x_j → +∞`. With dense rows containing both
-/// positive and negative coefficients, *every* random seed at every size
-/// admitted an unbounded ray → solver returned `Unbounded` → `cold_basis`
-/// returned `None` → all 15 patterns were silently skipped (zero signal).
-/// `UB = 100.0` is large enough that the bound is non-binding on most
-/// variables at optimum (the LP behaves like an interior-bounded LP) but
-/// guarantees finite optimal so the dual simplex returns a valid basis.
+/// Previous versions used `VAR_UPPER_BOUND = 100.0` on every variable. That
+/// caused `solve_dual_advanced` to dispatch to the bounded path
+/// (`try_bounded` → `phase2_primal_bounded`), which uses `SteepestEdgePricing`
+/// (primal) and ignores `options.dual_pricing`. DSE vs MI distinction was lost
+/// → iter counts identical → wins = 0 (#175 P1).
+///
+/// Fix: bounds are `(0, +∞)` (no finite UBs), so the bounded-path gate
+/// (`problem.bounds.iter().any(ub.is_finite())`) is `false` and the legacy
+/// dual simplex path is taken. The LP is bounded via a single "budget"
+/// Le row `Σ x_j ≤ BUDGET` appended to the m structural rows.  With
+/// `c[j] < 0`, the objective pushes x_j toward BUDGET/n, producing a
+/// non-trivial interior optimal that exercises real dual-simplex iterations.
 fn make_random_le_lp(m: usize, n: usize, seed: u64, density: f64) -> LpProblem {
-    const VAR_UPPER_BOUND: f64 = 100.0;
+    /// Sum-of-variables upper bound: large enough to be non-binding at the
+    /// dense-LP interior optimum while tightly bounding the feasible region.
+    const BUDGET: f64 = 50.0;
     let mut rng = Lcg::new(seed);
     let mut rows: Vec<usize> = Vec::new();
     let mut cols: Vec<usize> = Vec::new();
     let mut vals: Vec<f64> = Vec::new();
+    // m structural rows.
     for i in 0..m {
         for j in 0..n {
             if rng.f64() < density {
@@ -122,17 +129,26 @@ fn make_random_le_lp(m: usize, n: usize, seed: u64, density: f64) -> LpProblem {
                 vals.push(rng.f64() * 2.0 - 1.0);
             }
         }
+        // Diagonal dominance: at least one nonzero per row to avoid degenerate bases.
         rows.push(i);
         cols.push(i % n);
         vals.push(0.5 + rng.f64());
     }
-    let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
-    let b: Vec<f64> = (0..m).map(|_| 1.0 + 2.0 * rng.f64()).collect();
+    // Budget row: Σ x_j ≤ BUDGET (bounds the LP without finite variable UBs).
+    for j in 0..n {
+        rows.push(m);
+        cols.push(j);
+        vals.push(1.0);
+    }
+    let total_rows = m + 1;
+    let a = CscMatrix::from_triplets(&rows, &cols, &vals, total_rows, n).unwrap();
+    let mut b: Vec<f64> = (0..m).map(|_| 1.0 + 2.0 * rng.f64()).collect();
+    b.push(BUDGET);
     let c: Vec<f64> = (0..n).map(|_| -(rng.f64() + 0.1)).collect();
     LpProblem::new_general(
         c, a, b,
-        vec![ConstraintType::Le; m],
-        vec![(0.0, VAR_UPPER_BOUND); n],
+        vec![ConstraintType::Le; total_rows],
+        vec![(0.0, f64::INFINITY); n],
         Some(format!("rand_le_m{}_n{}_s{}", m, n, seed)),
     )
     .unwrap()

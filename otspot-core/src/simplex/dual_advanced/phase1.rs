@@ -183,6 +183,14 @@ impl DualLeavingStrategy for ArtificialPriorityLeaving {
             .sum();
         neg_sum + art_sum
     }
+
+    /// Big-M Phase I must not repair lb-violations: they arise from LU eta
+    /// drift in natural (non-artificial) rows, not genuine warm-start
+    /// infeasibilities. Flipping trow signs on such rows finds no candidates
+    /// (all-negative trow) → ratio test returns None → false Unbounded.
+    fn allows_lb_repair(&self) -> bool {
+        false
+    }
 }
 
 /// Big-M ペナルティ算出時の coefficient 倍率。
@@ -1263,6 +1271,38 @@ mod tests {
         // safe fallback として許容 — adopt して numerical error を生まない。
         assert!(found || !matches!(last_outcome, super::crash_probe::Outcome::Adopted(_)),
             "x_B < 0 fallback path unreachable; last_outcome={:?}", last_outcome,
+        );
+    }
+
+    /// LOAD-BEARING (P0): `ArtificialPriorityLeaving::allows_lb_repair` must
+    /// return `false`.  Big-M Phase I x_B[r] < 0 is LU-eta drift in natural
+    /// rows, not a warm-start lb-violation.  Flipping trow signs on such rows
+    /// finds no entering candidates → ratio test returns None → false Unbounded
+    /// → false Infeasible.  Reverting this override to `true` (the default)
+    /// directly enables the sign-flip and reproduces the pilot87 false-Infeasible
+    /// regression (#175 P0).
+    #[test]
+    fn artificial_priority_allows_lb_repair_is_false() {
+        use super::ArtificialPriorityLeaving;
+        use crate::simplex::pricing::DualLeavingStrategy;
+        let strat = ArtificialPriorityLeaving { n_total: 4 };
+        assert!(
+            !strat.allows_lb_repair(),
+            "ArtificialPriorityLeaving must forbid lb-repair (allows_lb_repair == false); \
+             reverting to true re-enables the trow sign-flip that causes false Infeasible \
+             during Big-M Phase I (#175 P0)"
+        );
+    }
+
+    /// Companion: `MostInfeasibleLeaving` must use the default `true`
+    /// (warm-start lb-repair is valid for standard dual simplex).
+    #[test]
+    fn most_infeasible_allows_lb_repair_is_true() {
+        use crate::simplex::pricing::{DualLeavingStrategy, MostInfeasibleLeaving};
+        let strat = MostInfeasibleLeaving;
+        assert!(
+            strat.allows_lb_repair(),
+            "MostInfeasibleLeaving must allow lb-repair (allows_lb_repair == true)"
         );
     }
 }

@@ -35,6 +35,26 @@ fn make_leaving_strategy(pricing: DualPricing, m: usize) -> Box<dyn DualLeavingS
     }
 }
 
+/// Returns `true` when the given warm basis is dual-feasible under cost vector `c`,
+/// i.e. all reduced costs r_j = c_j − y^T a_j ≥ −dual_tol for non-basic j.
+///
+/// A basis optimal for LP1 may be dual-infeasible if only `c` changes (not `b`).
+/// Passing a dual-infeasible basis to the dual simplex causes it to exit as
+/// "Optimal" (no lb-violations in x_B) with a wrong objective value.
+fn warm_basis_is_dual_feasible(
+    a: &crate::sparse::CscMatrix,
+    c: &[f64],
+    basis_mgr: &mut LuBasis,
+    basis: &[usize],
+    is_basic: &[bool],
+    n_price: usize,
+    m: usize,
+    dual_tol: f64,
+) -> bool {
+    let rc = super::dual_common::compute_reduced_costs(a, c, basis_mgr, is_basic, n_price, m, basis);
+    rc.iter().enumerate().all(|(j, &r)| is_basic[j] || r >= -dual_tol)
+}
+
 /// Dual Simplex強化版エントリポイント
 ///
 /// warm-start提供時: 基底からx_Bを再計算し、dual_simplex_core_advancedを実行
@@ -74,11 +94,23 @@ pub(crate) fn solve_dual_advanced(
                     basis_mgr.ftran(&mut x_b_sv);
                     let mut x_b = x_b_sv.to_dense();
 
-                    // WarmStartBasis does not store at_upper, so nonbasics are assumed
-                    // at lb=0. For the "up" branch, the branched variable's lb is raised
-                    // above its parent value → x_b becomes negative (lb-violation);
-                    // fall through to cold start.
-                    if !super::has_lb_violation(&x_b, options.primal_tol) {
+                    // Guard: dual simplex requires r_j ≥ 0 for all non-basic j.
+                    // A basis optimal for LP1 is dual-infeasible when only c changes,
+                    // causing dual simplex to exit as Optimal with wrong objective.
+                    // Fall through to cold start if the basis is dual-infeasible.
+                    let is_basic: Vec<bool> = {
+                        let mut v = vec![false; sf.n_total];
+                        for &j in &basis {
+                            v[j] = true;
+                        }
+                        v
+                    };
+                    if !warm_basis_is_dual_feasible(
+                        &a, &c, &mut basis_mgr, &basis, &is_basic,
+                        sf.n_total, m, options.dual_tol,
+                    ) {
+                        // dual infeasible under new c → cold start
+                    } else {
                         let mut leaving = make_leaving_strategy(options.dual_pricing, m);
                         let mut total_iters: usize = 0;
                         let outcome = core::dual_simplex_core_advanced(
@@ -217,42 +249,64 @@ fn try_bounded(
                 let mut x_b_sv = SparseVec::from_dense(&b);
                 basis_mgr.ftran(&mut x_b_sv);
                 let x_b = x_b_sv.to_dense();
-                // WarmStartBasis does not store at_upper, so nonbasics are assumed
-                // at lb=0. If a basic variable's lb is tightened (up-branch), x_b
-                // becomes negative (lb-violation); fall through to cold start.
-                if !super::has_lb_violation(&x_b, options.primal_tol) {
-                    let mut is_basic = vec![false; bsf.n_total];
+                // Bounded path warm-start: has_lb_violation 時は cold-start fallback。
+                // Reason: bounded_core::iterate の BFRT は lower-bound 列のみ選択、
+                // sign flip equivalent なし → lb_violation は repair 不可、cycle→timeout (codex review #175)。
+                // 真因対処は #190 (WarmStartBasis.at_upper field 追加 + bounded core repair algorithm)。
+                //
+                // Also fall through when the warm basis is dual-infeasible under
+                // the new cost vector c: the dual simplex would exit immediately as
+                // Optimal with a wrong objective value.
+                let has_lb_violation = super::has_lb_violation(&x_b, options.primal_tol);
+                let is_basic_bounded: Vec<bool> = {
+                    let mut v = vec![false; bsf.n_total];
                     for &j in &warm.basis {
-                        is_basic[j] = true;
+                        v[j] = true;
                     }
+                    v
+                };
+                if !has_lb_violation
+                    && warm_basis_is_dual_feasible(
+                        &a, &c, &mut basis_mgr, &warm.basis, &is_basic_bounded,
+                        bsf.n_total, bsf.m, options.dual_tol,
+                    )
+                {
                     let state = BoundedDualState {
                         basis: warm.basis.clone(),
                         at_upper: vec![false; bsf.n_total],
                         x_b,
                         reduced_costs: vec![0.0; bsf.n_total],
-                        is_basic,
+                        is_basic: is_basic_bounded,
                         iterations: 0,
                     };
+                    let mut leaving = make_leaving_strategy(options.dual_pricing, bsf.m);
                     let (dual_out, dual_state) =
-                        bounded_iterate(state, bsf, &a, &c, options, &ubs);
+                        bounded_iterate(state, bsf, &a, &c, options, &ubs, leaving.as_mut());
                     total_iters = dual_state.iterations;
                     let result = finish_bounded(
                         dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
                         problem, options, &mut total_iters,
                     );
-                    if result.is_some() {
+                    // When the warm path started with lb-violations, a
+                    // BoundedOutcome::Unbounded (→Infeasible) may be a BFRT
+                    // numerical failure rather than true primal infeasibility.
+                    // Fall through to cold start for a clean re-solve.
+                    let warm_infeasible_with_lb_viol = has_lb_violation
+                        && result.as_ref().is_some_and(|r| r.status == SolveStatus::Infeasible);
+                    if result.is_some() && !warm_infeasible_with_lb_viol {
                         return result;
                     }
-                    // UbViolationOutOfScope from warm start → cold start
-                }
+                    // UbViolationOutOfScope or lb-violation-induced Infeasible → cold start
+                } // dual-infeasibility or unrepairable-lb-violation: fall through to cold start
             }
             // Singular warm basis → cold start
         }
     }
 
     // Cold start.
+    let mut leaving = make_leaving_strategy(options.dual_pricing, bsf.m);
     let (dual_out, dual_state) =
-        solve_bounded_dual(bsf, &a, &b, &c, options, &ubs);
+        solve_bounded_dual(bsf, &a, &b, &c, options, &ubs, leaving.as_mut());
     total_iters = dual_state.iterations;
     finish_bounded(
         dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
@@ -616,6 +670,69 @@ mod tests {
         }
     }
 
+    /// **P2-B** — Warm start is accepted even when the warm basis has
+    /// lb-violations after a b-perturbation (legacy path, no finite UBs).
+    ///
+    /// LP: min -3x0 - x1, x0+x1≤4, x0≤3, x1≤2, x0,x1 ≥ 0.
+    /// Cold optimal: x0=3, x1=1, obj=-10. Warm basis = {x0, x1, s2}.
+    /// Perturb b=[1,3,2]: B⁻¹·[1,3,2] = [3, -2, 4] → lb-violation at x1.
+    /// After guard removal (#175) the dual simplex repairs x1 and converges
+    /// to the perturbed-LP optimal x0=1, x1=0, obj=-3.
+    ///
+    /// If `has_lb_violation` were re-added to the legacy path, the warm
+    /// solve would fall through to cold start and still produce Optimal.
+    /// The definitive iteration-level sentinel is
+    /// `dse_iter_count_matches_or_beats_most_infeasible` in
+    /// `tests/diag_dse_pivot_selection.rs`.
+    #[test]
+    fn legacy_warm_start_lb_violation_repairs_and_converges() {
+        use crate::sparse::CscMatrix;
+        const OBJ_TOL: f64 = 1e-5;
+
+        // No finite UBs → legacy dual path.
+        // LP: min -3x0 - x1, x0+x1≤b[0], x0≤b[1], x1≤b[2], x0,x1≥0
+        let make_lp = |b: Vec<f64>| {
+            LpProblem::new_general(
+                vec![-3.0, -1.0],
+                CscMatrix::from_triplets(
+                    &[0, 0, 1, 2], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 3, 2,
+                ).unwrap(),
+                b,
+                vec![ConstraintType::Le, ConstraintType::Le, ConstraintType::Le],
+                vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+                None,
+            ).unwrap()
+        };
+
+        // Cold solve: b=[4,3,2], optimal x0=3, x1=1, obj=-10.
+        let lp_orig = make_lp(vec![4.0, 3.0, 2.0]);
+        let sf_orig = build_standard_form(&lp_orig);
+        let r_cold = solve_dual_advanced(&sf_orig, &lp_orig, &SolverOptions::default());
+        assert_eq!(r_cold.status, SolveStatus::Optimal, "cold: {:?}", r_cold.status);
+        assert!((r_cold.objective - (-10.0)).abs() < OBJ_TOL,
+            "cold obj={:.6e} expected -10", r_cold.objective);
+        let warm = r_cold.warm_start_basis.expect("cold solve must return warm_start_basis");
+
+        // Perturbed LP: b=[1,3,2]. Warm basis has x1=-2 (lb-violation).
+        // Dual simplex must repair and converge to x0=1, x1=0, obj=-3.
+        let lp_p = make_lp(vec![1.0, 3.0, 2.0]);
+        let sf_p = build_standard_form(&lp_p);
+        let r_warm = solve_dual_advanced(
+            &sf_p, &lp_p,
+            &SolverOptions { warm_start: Some(warm), ..SolverOptions::default() },
+        );
+        assert_eq!(r_warm.status, SolveStatus::Optimal,
+            "warm re-solve: {:?} — guard still present?", r_warm.status);
+        assert!((r_warm.objective - (-3.0)).abs() < OBJ_TOL,
+            "warm re-solve obj={:.6e} expected -3", r_warm.objective);
+
+        // Consistency: cold re-solve agrees.
+        let r_cold_p = solve_dual_advanced(&sf_p, &lp_p, &SolverOptions::default());
+        assert_eq!(r_cold_p.status, SolveStatus::Optimal);
+        assert!((r_cold_p.objective - r_warm.objective).abs() < OBJ_TOL,
+            "warm {:.6e} != cold {:.6e}", r_warm.objective, r_cold_p.objective);
+    }
+
     /// Warm start from a bounded-path solve is accepted and reused.
     /// Uses the flip-trigger LP so that the cold solve exercises the BFRT flip
     /// path and flip count > 0 becomes a load-bearing sentinel.
@@ -637,5 +754,65 @@ mod tests {
         assert_eq!(r2.status, SolveStatus::Optimal, "warm restart: {:?}", r2.status);
         assert!((r2.objective - r1.objective).abs() < 1e-5,
             "warm restart obj drift: {} vs {}", r2.objective, r1.objective);
+    }
+
+    /// **Sentinel**: warm-start with a basis that is dual-infeasible under the
+    /// new cost vector must NOT return the wrong objective.
+    ///
+    /// LP1: `min x0+x1, x0+x1 ≤ 3, x0,x1 ≥ 0` → optimal basis {slack}, obj=0.
+    /// LP2: `min -x0-x1, x0+x1 ≤ 3` — same structure, c flipped.
+    /// The warm basis {slack} has x_B=[3] ≥ 0 (no lb-violation), but r_x0=r_x1=-1
+    /// (dual infeasible under LP2's cost). Without the guard, dual simplex exits
+    /// immediately as Optimal with obj=0 (WRONG). With the guard, falls through to
+    /// cold start → obj=-3 (correct).
+    ///
+    /// no-op proof: if `warm_basis_is_dual_feasible` always returns `true` (guard
+    /// is a no-op), the dual simplex warm-start uses the dual-infeasible basis and
+    /// returns obj≈0 instead of -3 → assertion fails.
+    #[test]
+    fn warm_start_dual_infeasible_cost_change_falls_through_to_cold_start() {
+        use crate::sparse::CscMatrix;
+        const OBJ_TOL: f64 = 1e-6;
+
+        // LP1: min x0+x1, x0+x1 ≤ 3, x0,x1 ≥ 0.
+        // No finite UBs → legacy dual path.
+        let make_lp = |c: Vec<f64>| {
+            let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+            LpProblem::new_general(
+                c, a, vec![3.0],
+                vec![ConstraintType::Le],
+                vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+                None,
+            ).unwrap()
+        };
+
+        // Cold solve LP1: optimal basis is {slack=col 2}, x_B=[3], obj=0.
+        let lp1 = make_lp(vec![1.0, 1.0]);
+        let sf1 = build_standard_form(&lp1);
+        let r1 = solve_dual_advanced(&sf1, &lp1, &SolverOptions::default());
+        assert_eq!(r1.status, SolveStatus::Optimal, "LP1 cold solve: {:?}", r1.status);
+        assert!(r1.objective.abs() < OBJ_TOL,
+            "LP1 obj={:.6e} expected 0", r1.objective);
+        let ws = r1.warm_start_basis.expect("LP1 must return warm_start_basis");
+
+        // Warm-solve LP2: min -x0-x1 (cost flipped). The LP1 optimal warm basis
+        // {slack} is dual-infeasible: r_x0=r_x1=-1 < 0 under LP2's cost.
+        // Guard must fall through to cold start → correct obj=-3.
+        let lp2 = make_lp(vec![-1.0, -1.0]);
+        let sf2 = build_standard_form(&lp2);
+        let r2 = solve_dual_advanced(
+            &sf2, &lp2,
+            &SolverOptions { warm_start: Some(ws), ..SolverOptions::default() },
+        );
+        assert_eq!(r2.status, SolveStatus::Optimal,
+            "LP2 warm-solve status: {:?} (expected Optimal)", r2.status);
+        assert!((r2.objective - (-3.0)).abs() < OBJ_TOL,
+            "LP2 warm-solve obj={:.6e} expected -3 (got 0 = guard missing)", r2.objective);
+
+        // Consistency: cold re-solve of LP2 must agree.
+        let r2_cold = solve_dual_advanced(&sf2, &lp2, &SolverOptions::default());
+        assert_eq!(r2_cold.status, SolveStatus::Optimal);
+        assert!((r2_cold.objective - r2.objective).abs() < OBJ_TOL,
+            "cold {:.6e} != warm {:.6e}", r2_cold.objective, r2.objective);
     }
 }

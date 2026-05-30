@@ -16,7 +16,8 @@
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::WarmStartBasis;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::CscMatrix;
+use crate::sparse::{CscMatrix, SparseVec};
+use std::sync::atomic::{AtomicBool, Ordering};
 use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 
 /// y = B^{-T} c_B written into the caller's buffer. `y_out.len()` is the basis
@@ -186,6 +187,51 @@ pub(super) fn basic_obj(c: &[f64], basis: &[usize], x_b: &[f64]) -> f64 {
         .zip(x_b.iter())
         .map(|(&j, &v)| c[j] * v)
         .sum()
+}
+
+/// Periodic deadline-check interval inside the m-BTRAN gamma loop.
+/// Checked every `GAMMA_DEADLINE_CHECK_INTERVAL` rows; large enough to
+/// amortize the `Instant::now()` syscall but small enough to catch an
+/// expired deadline before a full O(m²) budget overrun on large warm-starts.
+const GAMMA_DEADLINE_CHECK_INTERVAL: usize = 10;
+
+/// γ_i = ||(B^{-1})_{i,:}||² for each basis row i via m BTRANs.
+///
+/// Used by DSE leaving strategies at warm-start and after refactor to set
+/// the exact initial weights. Cost O(m²); called once per warm-start solve
+/// or refactor boundary.
+///
+/// Returns `None` when `deadline` is `Some` and the deadline expires inside
+/// the loop (checked every `GAMMA_DEADLINE_CHECK_INTERVAL` rows), or when
+/// `cancel_flag` is `Some` and the flag is set. Callers must propagate this
+/// as a `Timeout` outcome so the solver stays within its time budget on large
+/// warm-start solves.
+pub(super) fn recompute_gamma_truth(
+    basis_mgr: &mut LuBasis,
+    m: usize,
+    deadline: Option<std::time::Instant>,
+    cancel_flag: Option<&AtomicBool>,
+) -> Option<Vec<f64>> {
+    let mut gamma_truth = vec![0.0f64; m];
+    let mut e_i = vec![0.0f64; m];
+    let mut rho_i = vec![0.0f64; m];
+    for i in 0..m {
+        if i % GAMMA_DEADLINE_CHECK_INTERVAL == 0 {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return None;
+            }
+            if cancel_flag.is_some_and(|f| f.load(Ordering::Relaxed)) {
+                return None;
+            }
+        }
+        e_i.iter_mut().for_each(|v| *v = 0.0);
+        e_i[i] = 1.0;
+        let mut sv = SparseVec::from_dense(&e_i);
+        basis_mgr.btran(&mut sv);
+        sv.to_dense_into(&mut rho_i);
+        gamma_truth[i] = rho_i.iter().map(|&v| v * v).sum();
+    }
+    Some(gamma_truth)
 }
 
 #[cfg(test)]
@@ -374,5 +420,56 @@ mod tests {
         let x_b = vec![-1.0, 2.0, -3.0];
         // obj = -1 + 4 + -9 = -6
         assert!((basic_obj(&c, &basis, &x_b) - (-6.0)).abs() < 1e-14);
+    }
+
+    /// An already-expired deadline must short-circuit the BTRAN loop immediately
+    /// (checked at i=0) and return `None`.
+    ///
+    /// no-op proof: removing the deadline check inside the loop (reverting
+    /// `recompute_gamma_truth` to a `-> Vec<f64>` that ignores `deadline`) makes
+    /// this test fail — it would return `Some(...)` instead of `None`.
+    #[test]
+    fn dse_expired_deadline_during_gamma_loop_returns_timeout() {
+        let m = 4;
+        let (a, _c, basis) = make_identity_plus(m + 2, m);
+        let mut bm = LuBasis::new(&a, &basis, 32).unwrap();
+        // deadline 1 second in the past — already expired before the first BTRAN
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let result = recompute_gamma_truth(&mut bm, m, Some(past), None);
+        assert!(
+            result.is_none(),
+            "expired deadline must short-circuit the BTRAN loop and return None; \
+             got Some (deadline check is missing or not firing at i=0)"
+        );
+        // No-deadline call must always succeed.
+        let result_no_dl = recompute_gamma_truth(&mut bm, m, None, None);
+        assert!(result_no_dl.is_some(), "None deadline must always return Some");
+    }
+
+    /// A pre-set cancel_flag must abort the BTRAN loop and return `None`.
+    ///
+    /// no-op proof: removing the cancel_flag check inside the loop makes this
+    /// test return `Some(...)` instead of `None` → test fails.
+    #[test]
+    fn recompute_gamma_truth_cancellation_during_sweep() {
+        use std::sync::Arc;
+        let m = 4;
+        let (a, _c, basis) = make_identity_plus(m + 2, m);
+        let mut bm = LuBasis::new(&a, &basis, 32).unwrap();
+        // Pre-set cancel flag: already true before the sweep starts.
+        let flag = Arc::new(AtomicBool::new(true));
+        let result = recompute_gamma_truth(&mut bm, m, None, Some(&flag));
+        assert!(
+            result.is_none(),
+            "pre-set cancel_flag must abort the BTRAN sweep and return None; \
+             got Some (cancel_flag check is missing or not firing)"
+        );
+        // Cleared flag: sweep must complete.
+        flag.store(false, Ordering::Relaxed);
+        let result_ok = recompute_gamma_truth(&mut bm, m, None, Some(&flag));
+        assert!(result_ok.is_some(), "cleared cancel_flag must allow sweep to complete");
+        // No flag at all: must always succeed.
+        let result_no_flag = recompute_gamma_truth(&mut bm, m, None, None);
+        assert!(result_no_flag.is_some(), "None cancel_flag must always return Some");
     }
 }

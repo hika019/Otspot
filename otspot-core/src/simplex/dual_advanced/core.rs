@@ -15,7 +15,7 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use super::ratio_test::{RatioTestStrategy, HarrisRatioTest, bland_ratio_test};
 use super::super::SimplexOutcome;
-use super::super::dual_common::{basic_obj, compute_dual_vars, compute_reduced_costs};
+use super::super::dual_common::{basic_obj, compute_dual_vars, compute_reduced_costs, recompute_gamma_truth};
 use super::super::pricing::DualLeavingStrategy;
 use std::sync::atomic::Ordering;
 
@@ -58,24 +58,6 @@ const NO_PROGRESS_REL_EPS: f64 = 1e-12;
 /// 1e-6 では cycle 行の reduced_cost diff (~1e-3 オーダー) を上回れず tie 残存。
 /// 1e-3 では Phase 1 の Infeasible 判定境界に影響しうるため間を取った。
 const LEX_PERTURB_REL: f64 = 1e-4;
-
-/// γ_i = ||(B^{-1})_{i,:}||² 真値再計算 (m BTRAN). DSE warm-start init と
-/// refactor 後の drift wipe で同一手順を踏むため、2 caller 重複を helper 化。
-/// O(m²) cost (m BTRAN). Caller は `leaving.set_initial_gamma(...)` に渡す。
-fn recompute_gamma_truth(basis_mgr: &mut LuBasis, m: usize) -> Vec<f64> {
-    let mut gamma_truth = vec![0.0f64; m];
-    let mut e_i = vec![0.0f64; m];
-    let mut rho_i = vec![0.0f64; m];
-    for i in 0..m {
-        e_i.iter_mut().for_each(|v| *v = 0.0);
-        e_i[i] = 1.0;
-        let mut sv = SparseVec::from_dense(&e_i);
-        basis_mgr.btran(&mut sv);
-        sv.to_dense_into(&mut rho_i);
-        gamma_truth[i] = rho_i.iter().map(|&v| v * v).sum();
-    }
-    gamma_truth
-}
 
 /// reduced_costs (non-basic only) と、オプションで x_b に lex 摂動を加える。
 ///
@@ -185,8 +167,16 @@ pub(crate) fn dual_simplex_core_advanced(
     // to FLOOR within a few pivots (verified on textbook degenerate LP).
     // Cost: O(m²). Acceptable: one-shot per warm-start solve.
     if needs_sigma {
-        let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
-        leaving.set_initial_gamma(&gamma_truth);
+        match recompute_gamma_truth(
+            &mut basis_mgr, m, options.deadline,
+            options.cancel_flag.as_deref(),
+        ) {
+            None => {
+                let obj = basic_obj(c, basis, x_b);
+                return SimplexOutcome::Timeout(obj);
+            }
+            Some(gamma_truth) => leaving.set_initial_gamma(&gamma_truth),
+        }
     }
 
     // Anti-cycling state: progress_metric が K iter 改善なし → Bland fallback。
@@ -263,6 +253,26 @@ pub(crate) fn dual_simplex_core_advanced(
             trow[j] = dot;
         }
 
+        // 3d': lb-violation 方向補正 (warm-start 経路専用)。
+        //
+        // 通常の双対 simplex 比率テストは trow[j] > 0 を入基候補とする (ub 違反方向)。
+        // ウォームスタート時の lb 違反 (x_b[r] < 0) を修復するには入基変数の「離基行への
+        // 影響が x_b[r] を増加させる方向」、すなわち trow[j] < 0 を選ばなければならない。
+        // trow を符号反転することで既存の比率テスト実装をそのまま再利用する。
+        //
+        // `allows_lb_repair()` が false の戦略 (Big-M Phase I) では符号反転を禁止する。
+        // Big-M Phase I で x_b[r] < 0 になるのは LU eta 蓄積による自然行ドリフト
+        // (≈ −primal_tol) であり、sign flip すると有効入基候補が消えて false Unbounded を
+        // 引き起こす。修復対象は「本物の lb 違反ウォームスタート」に限定する。
+        //
+        // 被縮小費用更新と離基変数の r 値も整合的に符号反転する (3i 参照)。
+        let lb_violation = x_b[leaving_row] < 0.0 && leaving.allows_lb_repair();
+        if lb_violation {
+            for t in trow[..n_price].iter_mut() {
+                *t = -*t;
+            }
+        }
+
         // 3e: ratio test → entering_col, theta
         // bland_mode では pure Bland (min ratio + smallest idx tiebreak)。
         let ratio_pick = if bland_mode {
@@ -270,6 +280,7 @@ pub(crate) fn dual_simplex_core_advanced(
         } else {
             ratio_tester.select_entering(&trow, &reduced_costs, &is_basic, n_price)
         };
+
         let (entering_col, theta) = match ratio_pick {
             None => {
                 // 候補なし: 双対非有界 = 主実行不可
@@ -335,9 +346,10 @@ pub(crate) fn dual_simplex_core_advanced(
                 reduced_costs[j] -= theta * trow[j];
             }
         }
-        // 離基変数の被縮小費用: r_{leaving_col} = -θ
+        // lb-violation: 離基変数は lb で退出 → reduced cost は正 (+theta)。
+        // ub-violation: 離基変数は ub で退出 → reduced cost は負 (-theta)。
         if leaving_col < n_price {
-            reduced_costs[leaving_col] = -theta;
+            reduced_costs[leaving_col] = if lb_violation { theta } else { -theta };
         }
 
         // 3j: DSE 重み更新 (stateless strategies は no-op)。
@@ -376,8 +388,16 @@ pub(crate) fn dual_simplex_core_advanced(
             // refactor 後の真の γ を m BTRAN で再計算 (initial init と同じ理由)。
             leaving.after_refactor(m);
             if needs_sigma {
-                let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
-                leaving.set_initial_gamma(&gamma_truth);
+                match recompute_gamma_truth(
+                    &mut basis_mgr, m, options.deadline,
+                    options.cancel_flag.as_deref(),
+                ) {
+                    None => {
+                        let obj = basic_obj(c, basis, x_b);
+                        return SimplexOutcome::Timeout(obj);
+                    }
+                    Some(gamma_truth) => leaving.set_initial_gamma(&gamma_truth),
+                }
             }
         }
 
@@ -404,6 +424,43 @@ pub(crate) fn dual_simplex_core_advanced(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sparse::CscMatrix;
+    use crate::options::SolverOptions;
+    use super::super::super::pricing::MostInfeasibleLeaving;
+
+    /// Sentinel (P0 proof): lb-violation + sign-flipped ratio test None
+    /// = dual-simplex infeasibility proof → must return `SimplexOutcome::Unbounded`.
+    ///
+    /// LP: min 0, s.t. x + s = -1, x,s ≥ 0. Infeasible (no feasible x,s ≥ 0 with x+s = -1).
+    /// Warm basis {s}: x_b = [-1] → lb-violation at row 0.
+    /// Sign-flip: trow[x] = -1 → no ratio-test candidate → Unbounded (= caller Infeasible).
+    ///
+    /// no-op proof: restoring the fb410eb fallback (trow restore + retry with ub direction)
+    /// finds trow[x]=1 > 0, pivot proceeds with step = -1/1 = -1 → x_b never reaches 0,
+    /// iteration cycles until the hard cap fires → Timeout, not Unbounded → test FAILS.
+    #[test]
+    fn warm_start_infeasible_basis_returns_unbounded_not_cycle() {
+        // A = [[1, 1]] (x, s columns), b = [-1], c = [0, 0], basis = [1] (s basic).
+        // B = [[1]] (s column), B^{-1} = [[1]], x_b = B^{-1} b = [-1].
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let c = vec![0.0_f64, 0.0];
+        let mut basis = vec![1usize]; // s in basis
+        let mut x_b = vec![-1.0_f64];  // lb-violation
+        let opts = SolverOptions::default();
+        let mut leaving = MostInfeasibleLeaving;
+        let mut iters = 0usize;
+
+        let outcome = dual_simplex_core_advanced(
+            &a, &mut x_b, &c, &mut basis,
+            1, 2, &opts, &mut leaving, &mut iters,
+        );
+        assert!(
+            matches!(outcome, SimplexOutcome::Unbounded),
+            "warm-start lb-violation with no lb-repair candidate must yield Unbounded \
+             (dual infeasibility proof); got {outcome:?}. \
+             If Timeout: fallback retry was restored — the no-op proof triggered."
+        );
+    }
 
     /// B4 sentinel: `apply_lex_perturbation` の `perturb_x=false` 時は x_b を変更しない。
     ///
