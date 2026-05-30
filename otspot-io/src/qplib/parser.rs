@@ -98,14 +98,13 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         c[i] = v;
     }
 
-    let q0_raw = ts.read_f64()?;
-    if !q0_raw.is_finite() {
+    let q0 = ts.read_f64()?;
+    if !q0.is_finite() {
         return Err(QplibError::ParseError(format!(
             "objective constant q0 is not finite: {}",
-            q0_raw
+            q0
         )));
     }
-    let q0 = q0_raw;
 
     // Constraint quadratic terms (QCQ only)
     let mut con_q_triplets: Vec<Vec<(usize, usize, f64)>> = if con_char == 'Q' {
