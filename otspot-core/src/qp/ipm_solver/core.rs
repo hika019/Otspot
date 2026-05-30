@@ -207,6 +207,15 @@ fn run_ipm_with(
     // so that dropping the `&& !kkt_already_pass` gate flips this to false.
     let krylov_ir_skipped = ipm_made_progress && !run_krylov_ir;
 
+    // Bound-only QP (num_constraints == 0): all refinement above is gated on
+    // num_constraints > 0 and is therefore skipped. After inertia-corrected IPM,
+    // the converged KKT is (Q+δI)x + z + c = 0, leaving a stationarity residual
+    // of δ*x in the original problem. Refit z directly from Qx+c so that z
+    // satisfies the original stationarity Qx + z + c = 0 unconditionally.
+    if !final_sol.solution.is_empty() && orig_problem.num_constraints == 0 && ipm_made_progress {
+        crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+    }
+
     let view = ProblemView {
         q: &orig_problem.q,
         a: &orig_problem.a,
