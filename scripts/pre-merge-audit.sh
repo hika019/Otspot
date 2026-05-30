@@ -29,17 +29,13 @@ else
 fi
 
 # 4. コメント品質 (CLAUDE.md L45-46)
+# diff scope ではなく full-scan を使用: gate を後付けする以前の commit に
+# 違反が残存しうるため (#203 設置時点で複数 file が threshold 超過、PR 段階
+# で trim 議論)。main に違反が確定混入した場合は ALLOWLIST 追加 or
+# threshold 調整で復帰、本 section の scope (full-scan) は保つ。
 echo
 echo "=== comment quality ==="
-MEMO_HITS=$(grep -rnE '(TODO|FIXME|XXX|HACK)' \
-  otspot-core/src otspot-io/src otspot-model/src otspot-dev/src \
-  --include='*.rs' 2>/dev/null || true)
-if [ -n "$MEMO_HITS" ]; then
-  echo "ERROR: production memo comments found:"
-  echo "$MEMO_HITS"
-  exit 1
-fi
-echo "(memo comments: none)"
+bash scripts/lib/check_memo_grep.sh
 bash scripts/check_comment_block_size.sh
 bash scripts/check_comment_ratio.sh
 

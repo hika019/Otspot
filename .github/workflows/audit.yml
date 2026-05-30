@@ -25,19 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Production memo-comment grep gate
-        run: |
-          set -e
-          HITS=$(grep -rnE '(TODO|FIXME|XXX|HACK)' \
-            otspot-core/src otspot-io/src otspot-model/src otspot-dev/src \
-            --include='*.rs' \
-            | grep -vE '#\[cfg\(test\)\]|mod tests' \
-            | grep -vE 'tests/.*\.rs:' \
-            || true)
-          if [ -n "$HITS" ]; then
-            echo "::error::Production code must not contain TODO/FIXME/XXX/HACK (CLAUDE.md L46)"
-            echo "$HITS"
-            exit 1
-          fi
+        run: bash scripts/lib/check_memo_grep.sh
       - name: Comment block size check
         run: bash scripts/check_comment_block_size.sh
       - name: Comment ratio check
