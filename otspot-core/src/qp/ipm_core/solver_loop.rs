@@ -166,6 +166,7 @@ pub(crate) fn solve_kkt_via_schur(
     r_p_mod: &[f64],
     dx_out: &mut [f64],
     dy_out: &mut [f64],
+    deadline: Option<std::time::Instant>,
 ) {
     use super::kkt::spmtv;
     use twofloat::TwoFloat;
@@ -185,7 +186,7 @@ pub(crate) fn solve_kkt_via_schur(
         .map(|(&r, &v)| r + v)
         .collect();
 
-    if s_fac.solve_with_deadline(&rhs_s, dx_out, None).is_err() {
+    if s_fac.solve_with_deadline(&rhs_s, dx_out, deadline).is_err() {
         for v in dx_out.iter_mut() {
             *v = 0.0;
         }
@@ -228,6 +229,7 @@ pub(crate) fn predictor_step_schur(
     a_ext: &CscMatrix,
     m_ext: usize,
     mu: f64,
+    deadline: Option<std::time::Instant>,
 ) -> PredictorResult {
     let r_c_pred: Vec<f64> = s
         .iter()
@@ -262,6 +264,7 @@ pub(crate) fn predictor_step_schur(
         &r_p_mod_pred,
         &mut dx,
         &mut dy_pred,
+        deadline,
     );
 
     let mut ds_pred = vec![0.0_f64; m_ext];
@@ -323,6 +326,7 @@ pub(crate) fn corrector_step_schur(
     dx: &mut [f64],
     dy: &mut [f64],
     ds: &mut [f64],
+    deadline: Option<std::time::Instant>,
 ) -> (f64, Vec<f64>) {
     let r_c_corr: Vec<f64> = s
         .iter()
@@ -355,7 +359,7 @@ pub(crate) fn corrector_step_schur(
         )
         .collect();
 
-    solve_kkt_via_schur(s_fac, d_inv, a_ext, r_dual, &r_p_mod_corr, dx, dy);
+    solve_kkt_via_schur(s_fac, d_inv, a_ext, r_dual, &r_p_mod_corr, dx, dy, deadline);
 
     for i in 0..m_ext {
         if is_eq_ext[i] {
@@ -463,6 +467,7 @@ pub(crate) fn gondzio_correctors_schur(
             &r_p_mod_gondzio,
             &mut dx_new,
             &mut dy_new,
+            deadline,
         );
 
         let ds_new: Vec<f64> = (0..m_ext)
@@ -891,6 +896,7 @@ mod tests {
             &r_p_mod,
             &mut dx_schur,
             &mut dy_schur,
+            None,
         );
 
         eprintln!("dx_aug   = {:?}", dx_aug);
@@ -985,6 +991,7 @@ mod tests {
             &r_p_mod,
             &mut dx_schur,
             &mut dy_schur,
+            None,
         );
 
         eprintln!("dx_aug = {:?}", dx_aug);
@@ -1009,6 +1016,59 @@ mod tests {
                 dy_schur[i]
             );
         }
+    }
+
+    /// Schur path must forward deadline into `solve_with_deadline`.
+    ///
+    /// Load-bearing for timeout propagation on iteration-0 / Schur paths:
+    /// with an iterative backend and an already-expired deadline, the inner solve
+    /// must fail immediately and this helper must zero the direction buffers.
+    /// If deadline were dropped (`None`), the same call would return non-zero
+    /// directions on this tiny 1x1 system.
+    #[test]
+    fn schur_solve_honors_expired_deadline() {
+        let s_mat = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let s_fac = crate::linalg::kkt_solver::KktFactor::Iterative(
+            crate::linalg::kkt_solver::PreconditionedMinres::new(s_mat),
+        );
+        let a_ext = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let d_inv = vec![1.0];
+        let r_d = vec![1.0];
+        let r_p_mod = vec![0.0];
+
+        // no-op proof: live deadline yields non-zero direction on this system.
+        let mut dx_live = vec![0.0];
+        let mut dy_live = vec![0.0];
+        solve_kkt_via_schur(
+            &s_fac,
+            &d_inv,
+            &a_ext,
+            &r_d,
+            &r_p_mod,
+            &mut dx_live,
+            &mut dy_live,
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+        );
+        assert!(dx_live[0].abs() > 1e-12, "live deadline should solve: dx={dx_live:?}");
+
+        // sentinel: expired deadline must force zeroed directions.
+        let mut dx_expired = vec![3.0];
+        let mut dy_expired = vec![-2.0];
+        solve_kkt_via_schur(
+            &s_fac,
+            &d_inv,
+            &a_ext,
+            &r_d,
+            &r_p_mod,
+            &mut dx_expired,
+            &mut dy_expired,
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
+        );
+        assert!(
+            dx_expired.iter().all(|v| v.abs() < 1e-15)
+                && dy_expired.iter().all(|v| v.abs() < 1e-15),
+            "expired deadline must short-circuit Schur solve: dx={dx_expired:?} dy={dy_expired:?}",
+        );
     }
 
     #[test]

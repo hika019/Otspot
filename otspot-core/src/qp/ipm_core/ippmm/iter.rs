@@ -347,11 +347,11 @@ pub(crate) fn solve_ippmm_inner(
                 .expect("d_inv must be set when use_schur");
             let pred = predictor_step_schur(
                 &s, &y, &is_eq_ext, m_ineq, &r_d_pmm, &r_p_pmm, &sigma_vec, &fac, d_inv, &a_ext,
-                m_ext, mu,
+                m_ext, mu, timeout_ctx.deadline,
             );
             corrector_step_schur(
                 &s, &y, &is_eq_ext, &pred, mu, &r_d_pmm, &r_p_pmm, &sigma_vec, &fac, d_inv, &a_ext,
-                m_ext, &mut dx, &mut dy, &mut ds,
+                m_ext, &mut dx, &mut dy, &mut ds, timeout_ctx.deadline,
             )
         } else {
             let pred = predictor_step(

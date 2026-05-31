@@ -163,7 +163,7 @@ fn mehrotra_cold_init(
             rhs_init[n..(m_ext + n)].copy_from_slice(&r_p[..m_ext]);
             let mut sol_init = vec![0.0_f64; n + m_ext];
             if fac_init
-                .solve_with_deadline(&rhs_init, &mut sol_init, None)
+                .solve_with_deadline(&rhs_init, &mut sol_init, timeout_ctx.deadline)
                 .is_ok()
             {
                 let dx_inf = sol_init[..n].iter().fold(0.0_f64, |a, &v| a.max(v.abs()));

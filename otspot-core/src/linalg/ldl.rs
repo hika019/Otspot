@@ -25,8 +25,17 @@ use faer::sparse::linalg::SupernodalThreshold;
 #[cfg(test)]
 use faer::sparse::Triplet;
 use faer::sparse::{SparseColMat, SymbolicSparseColMat};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::Instant;
+#[cfg(test)]
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+
+#[cfg(test)]
+static TEST_NUMERIC_FACTORIZE_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
 /// LDL分解エラー
 #[non_exhaustive]
@@ -253,19 +262,42 @@ fn do_numeric_factorize_with_cache(
         }
     }
 
+    let owned_signs = signs.map(|s| s.to_vec());
+    let l_values = factorize_numeric_with_deadline_watchdog(
+        Arc::clone(&symbolic),
+        a_upper,
+        owned_signs,
+        par,
+        deadline,
+    )?;
+
+    Ok((symbolic, l_values))
+}
+
+fn run_numeric_factorization(
+    symbolic: &SymbolicCholesky<usize>,
+    a_upper: &SparseColMat<usize, f64>,
+    signs: Option<&[i8]>,
+    par: faer::Par,
+) -> Result<Vec<f64>, LdlError> {
+    #[cfg(test)]
+    {
+        let ms = TEST_NUMERIC_FACTORIZE_DELAY_MS.load(Ordering::Relaxed);
+        if ms > 0 {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+    }
     let regularization = LdltRegularization {
         dynamic_regularization_signs: signs,
         dynamic_regularization_delta: LDLT_REG_DELTA,
         dynamic_regularization_epsilon: LDLT_REG_EPSILON,
     };
-
-    let mut l_values = vec![0.0f64; l_nnz];
+    let mut l_values = vec![0.0f64; symbolic.len_val()];
     let mut mem = MemBuffer::new(StackReq::any_of(&[
         symbolic.factorize_numeric_ldlt_scratch::<f64>(par, Default::default()),
         symbolic.solve_in_place_scratch::<f64>(1, par),
     ]));
     let stack = MemStack::new(&mut mem);
-
     symbolic
         .factorize_numeric_ldlt(
             &mut l_values,
@@ -277,8 +309,35 @@ fn do_numeric_factorize_with_cache(
             Default::default(),
         )
         .map_err(|_| LdlError::SingularOrIndefinite)?;
+    Ok(l_values)
+}
 
-    Ok((symbolic, l_values))
+fn factorize_numeric_with_deadline_watchdog(
+    symbolic: Arc<SymbolicCholesky<usize>>,
+    a_upper: SparseColMat<usize, f64>,
+    owned_signs: Option<Vec<i8>>,
+    par: faer::Par,
+    deadline: Option<Instant>,
+) -> Result<Vec<f64>, LdlError> {
+    let Some(dl) = deadline else {
+        return run_numeric_factorization(&symbolic, &a_upper, owned_signs.as_deref(), par);
+    };
+    if Instant::now() >= dl {
+        return Err(LdlError::DeadlineExceeded);
+    }
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let r = run_numeric_factorization(&symbolic, &a_upper, owned_signs.as_deref(), par);
+        let _ = tx.send(r);
+    });
+
+    let remain = dl.saturating_duration_since(Instant::now());
+    match rx.recv_timeout(remain) {
+        Ok(r) => r,
+        Err(RecvTimeoutError::Timeout) => Err(LdlError::DeadlineExceeded),
+        Err(RecvTimeoutError::Disconnected) => Err(LdlError::SingularOrIndefinite),
+    }
 }
 
 /// Q 行列から上三角 CSC を抽出する (row <= col のみ保持)。
@@ -803,6 +862,34 @@ mod tests {
         assert!(
             matches!(result, Err(LdlError::DeadlineExceeded)),
             "Expected DeadlineExceeded"
+        );
+    }
+
+    /// Numeric factorization is not preemptible inside faer; this sentinel ensures
+    /// the watchdog path returns `DeadlineExceeded` without waiting for numeric completion.
+    #[test]
+    fn test_factorize_deadline_watchdog_during_numeric() {
+        struct ResetDelay;
+        impl Drop for ResetDelay {
+            fn drop(&mut self) {
+                TEST_NUMERIC_FACTORIZE_DELAY_MS.store(0, Ordering::Relaxed);
+            }
+        }
+        let _reset = ResetDelay;
+        TEST_NUMERIC_FACTORIZE_DELAY_MS.store(50, Ordering::Relaxed);
+        let mat = upper_tri_csc(2, &[(0, 0, 2.0), (0, 1, 1.0), (1, 1, 3.0)]);
+        let perm = vec![0usize, 1];
+        let deadline = Some(Instant::now() + std::time::Duration::from_millis(5));
+        let result = factorize_quasidefinite_with_cached_perm_budget_par(
+            &mat,
+            &perm,
+            deadline,
+            None,
+            faer::Par::Seq,
+        );
+        assert!(
+            matches!(result, Err(LdlError::DeadlineExceeded)),
+            "expected watchdog timeout during numeric factorization",
         );
     }
 
