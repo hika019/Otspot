@@ -1407,9 +1407,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             }
         }
 
-        let effective_floor = if min_ratio.is_finite() {
-            stable_floor
-        } else if stable_mode {
+        let mut effective_floor = stable_floor;
+        if !min_ratio.is_finite() && stable_mode {
             for i in 0..m {
                 if d[i] > PIVOT_TOL {
                     let ratio = x_b[i] / d[i];
@@ -1418,10 +1417,23 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                     }
                 }
             }
-            PIVOT_TOL
-        } else {
-            PIVOT_TOL
-        };
+            effective_floor = PIVOT_TOL;
+        }
+        if !min_ratio.is_finite() {
+            // Last-chance fallback before declaring Unbounded: allow pivots above
+            // machine-noise scale. With heavily scaled models, true candidates can
+            // sit below PIVOT_TOL; rejecting them here causes false Unbounded.
+            let tiny_floor = f64::EPSILON * max_d_abs.max(1.0);
+            for i in 0..m {
+                if d[i] > tiny_floor {
+                    let ratio = x_b[i] / d[i];
+                    if ratio < min_ratio {
+                        min_ratio = ratio;
+                    }
+                }
+            }
+            effective_floor = tiny_floor;
+        }
 
         if !min_ratio.is_finite() {
             return SimplexOutcome::Unbounded;

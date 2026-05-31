@@ -341,6 +341,9 @@ fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
 }
 
 fn fill_lp_reduced_costs_from_dual(result: &mut SolverResult, problem: &LpProblem) {
+    if result.stats.lp_ipm_path {
+        return;
+    }
     if result.reduced_costs.len() == problem.num_vars {
         return;
     }
