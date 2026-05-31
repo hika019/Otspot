@@ -16,7 +16,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use otspot_core::options::{SimplexMethod, SolverOptions};
-use otspot_core::problem::{ConstraintType, SolveStatus};
+#[cfg(test)]
+use otspot_core::problem::TimingBreakdown;
+use otspot_core::problem::{ConstraintType, SolveStatus, SolverResult};
 use otspot_core::qp::{solve_qp_with, QpProblem};
 use otspot_dev::bench_utils::{
     check_baseline_objective, compute_dfeas_componentwise, compute_dfeas_orig,
@@ -115,6 +117,77 @@ fn dual_payload_summary(result: &otspot_core::problem::SolverResult) -> String {
         result.bound_duals.len(),
         result.reduced_costs.len()
     )
+}
+
+fn seconds_from_us(us: u64) -> f64 {
+    us as f64 / 1_000_000.0
+}
+
+fn phase_timing_note(result: &SolverResult) -> String {
+    let Some(tb) = result.timing_breakdown else {
+        return String::new();
+    };
+    let mut fields = vec![
+        format!("presolve={:.3}s", seconds_from_us(tb.presolve_us)),
+        format!("core={:.3}s", seconds_from_us(tb.solve_us)),
+        format!("postsolve={:.3}s", seconds_from_us(tb.postsolve_us)),
+    ];
+    if tb.ipm_factorize_us > 0
+        || tb.ipm_solve_us > 0
+        || tb.ipm_reg_retries > 0
+        || tb.ipm_used_iterative
+    {
+        fields.push(format!(
+            "ipm_factor={:.3}s",
+            seconds_from_us(tb.ipm_factorize_us)
+        ));
+        fields.push(format!(
+            "ipm_solve={:.3}s",
+            seconds_from_us(tb.ipm_solve_us)
+        ));
+        fields.push(format!("ipm_reg_retries={}", tb.ipm_reg_retries));
+        fields.push(format!("ipm_iterative={}", tb.ipm_used_iterative));
+    }
+    if tb.postsolve_map_us > 0
+        || tb.postsolve_lsq_us > 0
+        || tb.postsolve_recovery_us > 0
+        || tb.postsolve_refine_us > 0
+        || tb.postsolve_krylov_ir_us > 0
+    {
+        fields.push(format!(
+            "post_map={:.3}s",
+            seconds_from_us(tb.postsolve_map_us)
+        ));
+        fields.push(format!(
+            "post_lsq={:.3}s",
+            seconds_from_us(tb.postsolve_lsq_us)
+        ));
+        fields.push(format!(
+            "post_recovery={:.3}s",
+            seconds_from_us(tb.postsolve_recovery_us)
+        ));
+        fields.push(format!(
+            "post_refine={:.3}s",
+            seconds_from_us(tb.postsolve_refine_us)
+        ));
+        fields.push(format!(
+            "post_krylov={:.3}s",
+            seconds_from_us(tb.postsolve_krylov_ir_us)
+        ));
+    }
+    format!("phase=({})", fields.join(" "))
+}
+
+fn append_phase_timing(mut note: String, result: &SolverResult) -> String {
+    let timing = phase_timing_note(result);
+    if timing.is_empty() {
+        return note;
+    }
+    if !note.is_empty() {
+        note.push(' ');
+    }
+    note.push_str(&timing);
+    note
 }
 
 #[allow(clippy::items_after_test_module)] // fn main() follows this module; reorganising is disruptive
@@ -280,6 +353,43 @@ mod tests {
         assert!(residual_exceeds_eps(f64::INFINITY, 1e-6));
         assert!(residual_exceeds_eps(1e-5, 1e-6));
         assert!(!residual_exceeds_eps(1e-7, 1e-6));
+    }
+
+    #[test]
+    fn test_phase_timing_note_includes_lp_and_ipm_fields() {
+        let result = SolverResult {
+            timing_breakdown: Some(TimingBreakdown {
+                presolve_us: 1_000,
+                solve_us: 2_000,
+                postsolve_us: 3_000,
+                ipm_factorize_us: 4_000,
+                ipm_solve_us: 5_000,
+                ipm_reg_retries: 2,
+                ipm_used_iterative: true,
+                postsolve_map_us: 6_000,
+                postsolve_lsq_us: 7_000,
+                postsolve_recovery_us: 8_000,
+                postsolve_refine_us: 9_000,
+                postsolve_krylov_ir_us: 10_000,
+            }),
+            ..Default::default()
+        };
+
+        let note = phase_timing_note(&result);
+
+        assert!(note.contains("phase=("));
+        assert!(note.contains("presolve=0.001s"));
+        assert!(note.contains("core=0.002s"));
+        assert!(note.contains("postsolve=0.003s"));
+        assert!(note.contains("ipm_factor=0.004s"));
+        assert!(note.contains("ipm_solve=0.005s"));
+        assert!(note.contains("ipm_reg_retries=2"));
+        assert!(note.contains("ipm_iterative=true"));
+        assert!(note.contains("post_map=0.006s"));
+        assert!(note.contains("post_lsq=0.007s"));
+        assert!(note.contains("post_recovery=0.008s"));
+        assert!(note.contains("post_refine=0.009s"));
+        assert!(note.contains("post_krylov=0.010s"));
     }
 
     /// load_expected_statuses が INFEASIBLE エントリを正しく読む
@@ -816,6 +926,7 @@ fn main() {
                 ("FAIL:Unknown".to_string(), format!("[{}]", method_label))
             }
         };
+        let note = append_phase_timing(note, &result);
         println!(
             "{:<20} {:>6} {:>6} {:>15} {:>10.3} {}",
             name, n, m, status_str, elapsed_s, note
