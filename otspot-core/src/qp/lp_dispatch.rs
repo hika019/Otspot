@@ -751,6 +751,32 @@ mod tests {
         assert!(timing.postsolve_us > 0, "postsolve timing must be recorded");
     }
 
+    #[test]
+    fn ipm_path_does_not_overwrite_bound_duals_with_synthetic_rc() {
+        let lp = eq_lp_fixture(2, 1);
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0, 1.0],
+            dual_solution: vec![1.0],
+            reduced_costs: vec![],
+            bound_duals: vec![0.5, 0.0],
+            ..Default::default()
+        };
+        result.stats.lp_ipm_path = true;
+
+        fill_lp_reduced_costs_from_dual(&mut result, &lp);
+
+        assert!(
+            result.reduced_costs.is_empty(),
+            "IPM path must preserve reduced_costs empty for certificate path"
+        );
+        assert_eq!(
+            result.bound_duals,
+            vec![0.5, 0.0],
+            "IPM path bound_duals must not be cleared by LP synthetic RC fill"
+        );
+    }
+
     /// 非負変数の QP/LP を密行で構築するヘルパー (Farkas 検証 sentinel 用)。
     fn nonneg_qp(a_rows: &[Vec<f64>], b: &[f64], types: &[ConstraintType]) -> QpProblem {
         let m = a_rows.len();
