@@ -4,9 +4,15 @@ use super::state::{PostsolveStep, PresolveState, PresolveStatus};
 use crate::problem::ConstraintType;
 use crate::tolerances::ZERO_TOL;
 
-pub(super) fn step3a_empty_row(st: &mut PresolveState) -> Result<(), PresolveStatus> {
+pub(super) fn step3a_empty_row(
+    st: &mut PresolveState,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), PresolveStatus> {
     let m = st.b.len();
     for i in 0..m {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if st.removed_rows[i] {
             continue;
         }
@@ -37,9 +43,15 @@ pub(super) fn step3a_empty_row(st: &mut PresolveState) -> Result<(), PresolveSta
     Ok(())
 }
 
-pub(super) fn step3b_empty_column(st: &mut PresolveState) -> Result<(), PresolveStatus> {
+pub(super) fn step3b_empty_column(
+    st: &mut PresolveState,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), PresolveStatus> {
     let n = st.bounds.len();
     for j in 0..n {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if st.removed_cols[j] {
             continue;
         }
@@ -81,9 +93,15 @@ pub(super) fn step3b_empty_column(st: &mut PresolveState) -> Result<(), Presolve
     Ok(())
 }
 
-pub(super) fn step4_redundant_constraint(st: &mut PresolveState) -> Result<(), PresolveStatus> {
+pub(super) fn step4_redundant_constraint(
+    st: &mut PresolveState,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), PresolveStatus> {
     let m = st.b.len();
     for i in 0..m {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if st.removed_rows[i] {
             continue;
         }

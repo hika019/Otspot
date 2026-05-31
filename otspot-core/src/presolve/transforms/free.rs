@@ -8,9 +8,13 @@ use crate::tolerances::ZERO_TOL;
 pub(super) fn step7_free_var_substitution(
     st: &mut PresolveState,
     new_subst: &mut usize,
+    deadline: Option<std::time::Instant>,
 ) -> Result<(), PresolveStatus> {
     let n = st.bounds.len();
     for j in 0..n {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if st.removed_cols[j] {
             continue;
         }
@@ -57,9 +61,13 @@ pub(super) fn step7_free_var_substitution(
 pub(super) fn step8_free_singleton_col(
     st: &mut PresolveState,
     new_subst: &mut usize,
+    deadline: Option<std::time::Instant>,
 ) -> Result<(), PresolveStatus> {
     let n = st.bounds.len();
     for j in 0..n {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if st.removed_cols[j] {
             continue;
         }

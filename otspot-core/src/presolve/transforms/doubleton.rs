@@ -8,9 +8,13 @@ use crate::tolerances::ZERO_TOL;
 pub(super) fn step6_doubleton_equation(
     st: &mut PresolveState,
     new_subst: &mut usize,
+    deadline: Option<std::time::Instant>,
 ) -> Result<(), PresolveStatus> {
     let m = st.b.len();
     for i in 0..m {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if st.removed_rows[i] {
             continue;
         }

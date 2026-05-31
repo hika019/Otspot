@@ -3,9 +3,15 @@
 use super::state::{PostsolveStep, PresolveState, PresolveStatus};
 use crate::tolerances::ZERO_TOL;
 
-pub(super) fn step1_fixed_variable(st: &mut PresolveState) -> Result<(), PresolveStatus> {
+pub(super) fn step1_fixed_variable(
+    st: &mut PresolveState,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), PresolveStatus> {
     let n = st.bounds.len();
     for j in 0..n {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if st.removed_cols[j] {
             continue;
         }

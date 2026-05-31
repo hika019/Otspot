@@ -59,7 +59,7 @@ fn step5_le_positive_coeff_tightens_ub() {
         vec![(0.0, 1.0), (0.0, 10.0)],
     );
     let mut fixed = 0usize;
-    step5_bounds_tightening(&mut st, &mut fixed).unwrap();
+    step5_bounds_tightening(&mut st, &mut fixed, None).unwrap();
     let (lb_y, ub_y) = st.bounds[1];
     assert_eq!(lb_y, 0.0);
     assert!(
@@ -84,7 +84,7 @@ fn step5_ge_positive_coeff_tightens_lb() {
         vec![(0.0, 2.0), (0.0, 5.0)],
     );
     let mut fixed = 0usize;
-    step5_bounds_tightening(&mut st, &mut fixed).unwrap();
+    step5_bounds_tightening(&mut st, &mut fixed, None).unwrap();
     let (lb_x, _) = st.bounds[0];
     assert!(
         (lb_x - 0.5).abs() < 1e-10,
@@ -108,7 +108,7 @@ fn step5_le_infeasible_negative_rhs() {
         vec![(0.0, 5.0), (0.0, 5.0)],
     );
     let mut fixed = 0usize;
-    let res = step5_bounds_tightening(&mut st, &mut fixed);
+    let res = step5_bounds_tightening(&mut st, &mut fixed, None);
     assert_eq!(res, Err(PresolveStatus::Infeasible));
 }
 
@@ -127,7 +127,7 @@ fn step5_eq_tightens_finite_ub() {
         vec![(0.0, 10.0), (0.0, 10.0)],
     );
     let mut fixed = 0usize;
-    step5_bounds_tightening(&mut st, &mut fixed).unwrap();
+    step5_bounds_tightening(&mut st, &mut fixed, None).unwrap();
     assert!((st.bounds[0].1 - 3.0).abs() < 1e-10);
     assert!((st.bounds[1].1 - 3.0).abs() < 1e-10);
     assert!(count_bounds_tightened(&st) >= 2);
@@ -152,7 +152,7 @@ fn step6_basic_eliminates_one_var() {
         vec![(0.0, 10.0), (0.0, 10.0)],
     );
     let mut subst = 0usize;
-    step6_doubleton_equation(&mut st, &mut subst).unwrap();
+    step6_doubleton_equation(&mut st, &mut subst, None).unwrap();
     assert_eq!(subst, 1);
     assert!(st.removed_cols[0]);
     assert!(st.removed_rows[0]);
@@ -175,7 +175,7 @@ fn step6_prefers_free_pivot() {
         vec![(0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY)],
     );
     let mut subst = 0usize;
-    step6_doubleton_equation(&mut st, &mut subst).unwrap();
+    step6_doubleton_equation(&mut st, &mut subst, None).unwrap();
     assert_eq!(subst, 1);
     assert!(
         st.removed_cols[1],
@@ -199,7 +199,7 @@ fn step6_infeasible_when_doubleton_impossible() {
         vec![(0.0, 3.0), (0.0, 3.0)],
     );
     let mut subst = 0usize;
-    let res = step6_doubleton_equation(&mut st, &mut subst);
+    let res = step6_doubleton_equation(&mut st, &mut subst, None);
     assert_eq!(res, Err(PresolveStatus::Infeasible));
 }
 
@@ -222,7 +222,7 @@ fn step7_eliminates_free_var_with_eq_row() {
         vec![(0.0, 10.0), (0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY)],
     );
     let mut subst = 0usize;
-    step7_free_var_substitution(&mut st, &mut subst).unwrap();
+    step7_free_var_substitution(&mut st, &mut subst, None).unwrap();
     assert_eq!(subst, 1);
     assert!(st.removed_cols[2]);
     assert!(st.removed_rows[0]);
@@ -244,7 +244,7 @@ fn step7_skips_free_var_when_no_eq_row() {
         vec![(0.0, 10.0), (0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY)],
     );
     let mut subst = 0usize;
-    step7_free_var_substitution(&mut st, &mut subst).unwrap();
+    step7_free_var_substitution(&mut st, &mut subst, None).unwrap();
     assert_eq!(subst, 0, "no Eq row → free var stays");
     assert!(!st.removed_cols[2]);
 }
@@ -265,7 +265,7 @@ fn step7_picks_largest_magnitude_pivot() {
         vec![(0.0, 10.0), (0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY)],
     );
     let mut subst = 0usize;
-    step7_free_var_substitution(&mut st, &mut subst).unwrap();
+    step7_free_var_substitution(&mut st, &mut subst, None).unwrap();
     assert_eq!(subst, 1);
     let pivot_mag = st.postsolve_stack.iter().find_map(|s| match s {
         PostsolveStep::LinearSubstitution {
@@ -277,6 +277,55 @@ fn step7_picks_largest_magnitude_pivot() {
     assert!(
         (pivot_mag.unwrap() - 3.0).abs() < 1e-10,
         "should pick |3| over |1|"
+    );
+}
+
+#[test]
+fn step7_respects_expired_deadline() {
+    // no-op proof: with a live deadline, Step7 performs one substitution.
+    let mut st_live = make_state(
+        vec![0.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[2.0, 1.0],
+        1,
+        2,
+        vec![4.0],
+        vec![ConstraintType::Eq],
+        vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, 10.0)],
+    );
+    let mut subst_live = 0usize;
+    step7_free_var_substitution(
+        &mut st_live,
+        &mut subst_live,
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(200)),
+    )
+    .unwrap();
+    assert_eq!(subst_live, 1, "live deadline should allow substitution");
+
+    // Sentinel: expired deadline must return before mutating state.
+    let mut st_expired = make_state(
+        vec![0.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[2.0, 1.0],
+        1,
+        2,
+        vec![4.0],
+        vec![ConstraintType::Eq],
+        vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, 10.0)],
+    );
+    let mut subst_expired = 0usize;
+    step7_free_var_substitution(
+        &mut st_expired,
+        &mut subst_expired,
+        Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
+    )
+    .unwrap();
+    assert_eq!(subst_expired, 0);
+    assert!(
+        !st_expired.removed_cols[0] && !st_expired.removed_rows[0],
+        "expired deadline must short-circuit before elimination",
     );
 }
 
@@ -299,7 +348,7 @@ fn step8_eliminates_free_singleton_eq() {
         vec![(0.0, 10.0), (0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY)],
     );
     let mut subst = 0usize;
-    step8_free_singleton_col(&mut st, &mut subst).unwrap();
+    step8_free_singleton_col(&mut st, &mut subst, None).unwrap();
     assert_eq!(subst, 1);
     assert!(st.removed_cols[2]);
     assert!(st.removed_rows[1]);
@@ -320,7 +369,7 @@ fn step8_skips_free_singleton_in_le_row() {
         vec![(0.0, 10.0), (0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY)],
     );
     let mut subst = 0usize;
-    step8_free_singleton_col(&mut st, &mut subst).unwrap();
+    step8_free_singleton_col(&mut st, &mut subst, None).unwrap();
     assert_eq!(subst, 0);
     assert!(!st.removed_cols[2]);
 }
@@ -340,7 +389,7 @@ fn step8_skips_non_free_singleton() {
         vec![(0.0, 10.0), (0.0, 10.0), (0.0, 5.0)],
     );
     let mut subst = 0usize;
-    step8_free_singleton_col(&mut st, &mut subst).unwrap();
+    step8_free_singleton_col(&mut st, &mut subst, None).unwrap();
     assert_eq!(subst, 0);
     assert!(!st.removed_cols[2]);
 }

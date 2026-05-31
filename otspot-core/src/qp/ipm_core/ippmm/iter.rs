@@ -31,12 +31,28 @@ use crate::qp::ipm_core::solver_loop::{
 use crate::qp::problem::QpProblem;
 use crate::tolerances::any_nonfinite;
 
+fn timeout_trace_enabled() -> bool {
+    std::env::var("OTSPOT_TIMEOUT_TRACE").ok().as_deref() == Some("1")
+}
+
+fn timeout_trace(phase: &str) {
+    if !timeout_trace_enabled() {
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    eprintln!("[timeout-trace {ts:.3}] {phase}");
+}
+
 /// IP-PMM 内部ソルバー (Ruiz scaling 後の problem を受け取る)。
 pub(crate) fn solve_ippmm_inner(
     problem: &QpProblem,
     options: &SolverOptions,
     eps_orig: f64,
 ) -> SolverResult {
+    timeout_trace("ippmm: solve_ippmm_inner enter");
     let n = problem.num_vars;
     let timeout_ctx = TimeoutCtx::from_options(options);
     let par = solver_par_from_threads(options.threads);
@@ -75,6 +91,7 @@ pub(crate) fn solve_ippmm_inner(
         par,
     );
     let (mut x, mut s, mut y, warm_mu) = (init.x, init.s, init.y, init.warm_mu);
+    timeout_trace("ippmm: initial point built");
 
     let (rho_init, delta_init) = match warm_mu {
         // warm start: μ 規模に揃えた rho/delta で出発し proximal pull を最小化。
@@ -159,6 +176,9 @@ pub(crate) fn solve_ippmm_inner(
     let mut any_iterative = false;
 
     for iter in 0..options.ipm.max_iter {
+        if iter == 0 {
+            timeout_trace("ippmm: iter loop start");
+        }
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
             final_iter = iter;
@@ -315,6 +335,9 @@ pub(crate) fn solve_ippmm_inner(
             },
         };
         let factorize_outcome = factorize_kkt_with_retry(&fact_ctx, &mut factor_caches);
+        if iter == 0 {
+            timeout_trace("ippmm: iter0 factorize returned");
+        }
         let (mut fac, aug_mat, d_inv_opt, rho_retry) = match factorize_outcome {
             FactorizeOutcome::Ok {
                 factor,

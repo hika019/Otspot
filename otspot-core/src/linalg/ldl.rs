@@ -335,7 +335,18 @@ fn factorize_numeric_with_deadline_watchdog(
     let remain = dl.saturating_duration_since(Instant::now());
     match rx.recv_timeout(remain) {
         Ok(r) => r,
-        Err(RecvTimeoutError::Timeout) => Err(LdlError::DeadlineExceeded),
+        Err(RecvTimeoutError::Timeout) => {
+            if std::env::var("OTSPOT_TIMEOUT_TRACE").ok().as_deref() == Some("1") {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                eprintln!(
+                    "[timeout-trace {ts:.3}] ldl: numeric factorization watchdog timeout"
+                );
+            }
+            Err(LdlError::DeadlineExceeded)
+        }
         Err(RecvTimeoutError::Disconnected) => Err(LdlError::SingularOrIndefinite),
     }
 }

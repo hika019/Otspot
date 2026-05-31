@@ -24,12 +24,18 @@ const PROP_TOL: f64 = 1e-9;
 // Step 9: Parallel / duplicate row
 // ============================================================
 
-pub(super) fn step9_parallel_row(st: &mut PresolveState) -> Result<(), PresolveStatus> {
+pub(super) fn step9_parallel_row(
+    st: &mut PresolveState,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), PresolveStatus> {
     let m = st.b.len();
     // Group rows by sorted active-column pattern; only rows in the same group
     // can possibly be parallel.
     let mut groups: HashMap<Vec<usize>, Vec<usize>> = HashMap::new();
     for i in 0..m {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if st.removed_rows[i] {
             continue;
         }
@@ -42,10 +48,16 @@ pub(super) fn step9_parallel_row(st: &mut PresolveState) -> Result<(), PresolveS
         groups.entry(cols).or_default().push(i);
     }
     for (_, rows) in groups {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if rows.len() < 2 {
             continue;
         }
         for a_idx in 0..rows.len() {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Ok(());
+            }
             let i = rows[a_idx];
             if st.removed_rows[i] {
                 continue;
@@ -147,10 +159,14 @@ pub(super) fn step9_parallel_row(st: &mut PresolveState) -> Result<(), PresolveS
 pub(super) fn step10_dup_dom_col(
     st: &mut PresolveState,
     new_fixed: &mut usize,
+    deadline: Option<std::time::Instant>,
 ) -> Result<(), PresolveStatus> {
     let n = st.bounds.len();
     let mut groups: HashMap<Vec<usize>, Vec<usize>> = HashMap::new();
     for j in 0..n {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if st.removed_cols[j] {
             continue;
         }
@@ -163,10 +179,16 @@ pub(super) fn step10_dup_dom_col(
         groups.entry(rows).or_default().push(j);
     }
     for (_, cols) in groups {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if cols.len() < 2 {
             continue;
         }
         for a_idx in 0..cols.len() {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Ok(());
+            }
             let j = cols[a_idx];
             if st.removed_cols[j] {
                 continue;
@@ -249,9 +271,13 @@ pub(super) fn step10_dup_dom_col(
 pub(super) fn step11_dual_fixing(
     st: &mut PresolveState,
     new_fixed: &mut usize,
+    deadline: Option<std::time::Instant>,
 ) -> Result<(), PresolveStatus> {
     let n = st.bounds.len();
     for j in 0..n {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
         if st.removed_cols[j] {
             continue;
         }
