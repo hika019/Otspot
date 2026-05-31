@@ -113,7 +113,9 @@ qps_count_in_dir() {
         echo 0
         return
     fi
-    find "$dir" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' '
+    # data ディレクトリを別 worktree 共有の symlink にしている環境でも
+    # 問題数を正しく数えるため、リンク先を辿る。
+    find -L "$dir" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' '
 }
 
 # タイムスタンプ

@@ -7,7 +7,7 @@ use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::simplex::build_standard_form;
 use crate::simplex::crash::compute_crash_basis;
 use crate::sparse::CscMatrix;
-use crate::tolerances::{COMP_SLACK_REL_TOL, LARGE_PROBLEM_THRESHOLD, PIVOT_TOL};
+use crate::tolerances::{COMP_SLACK_REL_TOL, LARGE_PROBLEM_THRESHOLD, PIVOT_TOL, ZERO_TOL};
 use std::time::Instant;
 
 /// Relative tolerance below which a standard-form column is treated as at-bound
@@ -861,14 +861,28 @@ pub fn run_postsolve(
                 // recovered from the free var's stationarity rc[orig_col] = 0,
                 // using the pre-distribution column snapshot `col_orig_entries`.
                 if let Some(piv_row) = orig_row {
-                    let mut sum_other_rows = 0.0f64;
-                    for &(row_i, a_ij) in col_orig_entries {
-                        if row_i == *piv_row {
-                            continue;
+                    // If the eliminated column carries no stationarity information
+                    // (`c_orig≈0` and no remaining row entries), recovering y_piv
+                    // from that column fixes an arbitrary 0 and can violate rc-sign
+                    // on other original columns. In that underdetermined case,
+                    // recover from original-space rc-sign conditions instead.
+                    if col_orig_entries.is_empty() && c_orig.abs() <= ZERO_TOL {
+                        dual_solution[*piv_row] = recover_removed_row_dual(
+                            orig_problem,
+                            *piv_row,
+                            &solution,
+                            &dual_solution,
+                        );
+                    } else {
+                        let mut sum_other_rows = 0.0f64;
+                        for &(row_i, a_ij) in col_orig_entries {
+                            if row_i == *piv_row {
+                                continue;
+                            }
+                            sum_other_rows += a_ij * dual_solution[row_i];
                         }
-                        sum_other_rows += a_ij * dual_solution[row_i];
+                        dual_solution[*piv_row] = (c_orig - sum_other_rows) / pivot;
                     }
-                    dual_solution[*piv_row] = (c_orig - sum_other_rows) / pivot;
                 }
             }
         }
@@ -897,10 +911,14 @@ pub fn run_postsolve(
         let mut linsub_rows: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for step in &presolve_result.postsolve_stack {
             if let PostsolveStep::LinearSubstitution {
+                col_orig_entries,
+                c_orig,
                 orig_row: Some(r), ..
             } = step
             {
-                linsub_rows.insert(*r);
+                if !(col_orig_entries.is_empty() && c_orig.abs() <= ZERO_TOL) {
+                    linsub_rows.insert(*r);
+                }
             }
         }
         'gs_outer: for _ in 0..GS_MAX_ITER {
@@ -934,6 +952,9 @@ pub fn run_postsolve(
                     ..
                 } = step
                 {
+                    if col_orig_entries.is_empty() && c_orig.abs() <= ZERO_TOL {
+                        continue;
+                    }
                     let mut sum = 0.0f64;
                     for &(row_i, a_ij) in col_orig_entries {
                         if row_i == *piv {
