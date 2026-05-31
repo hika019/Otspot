@@ -799,6 +799,7 @@ pub fn run_postsolve(
 
     let mut solution = vec![0.0f64; n];
     let mut dual_solution = vec![0.0f64; m];
+    let input_dual_is_ipm = result.reduced_costs.is_empty() && !result.dual_solution.is_empty();
 
     for (j, &maybe_jj) in presolve_result.col_map.iter().enumerate() {
         if let Some(jj) = maybe_jj {
@@ -810,7 +811,11 @@ pub fn run_postsolve(
     for (i, &maybe_ii) in presolve_result.row_map.iter().enumerate() {
         if let Some(ii) = maybe_ii {
             if ii < result.dual_solution.len() {
-                dual_solution[i] = result.dual_solution[ii];
+                dual_solution[i] = if input_dual_is_ipm {
+                    -result.dual_solution[ii]
+                } else {
+                    result.dual_solution[ii]
+                };
             }
         }
     }
@@ -1146,7 +1151,8 @@ pub fn run_postsolve(
         dual_solution = y_lsq.expect("df_lsq finite implies Some");
     }
 
-    // Recompute reduced costs on the original problem now that the dual is final:
+    // Recompute simplex-convention reduced costs on the original problem now that
+    // the dual is final:
     //   reduced_cost[j] = c[j] - Σ_i A_ij · y_i.
     let mut reduced_costs = orig_problem.c.clone();
     for (j, rc) in reduced_costs.iter_mut().enumerate().take(n) {
@@ -1850,6 +1856,48 @@ mod bound_active_tol_tests {
             "fixed_tol={} must NOT classify [1e6,1e6+1.5] as fixed (gap={})",
             new_tol,
             gap
+        );
+    }
+}
+
+#[cfg(test)]
+mod ipm_dual_convention_tests {
+    use super::*;
+
+    #[test]
+    fn ipm_dual_is_converted_before_reduced_cost_recovery() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let presolve = PresolveResult::no_reduction(&lp);
+        let raw_ipm = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 1.0,
+            solution: vec![1.0],
+            dual_solution: vec![-1.0],
+            reduced_costs: vec![],
+            ..Default::default()
+        };
+
+        let lifted = run_postsolve(&raw_ipm, &presolve, &lp, Some(Instant::now()), false);
+
+        assert_eq!(
+            lifted.dual_solution,
+            vec![1.0],
+            "IPM/prove convention y=-1 must become LP simplex convention y=+1"
+        );
+        assert_eq!(lifted.reduced_costs.len(), 1);
+        assert!(
+            lifted.reduced_costs[0].abs() < 1e-12,
+            "simplex reduced cost must be c - A^T y = 0, got {}",
+            lifted.reduced_costs[0]
         );
     }
 }

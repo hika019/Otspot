@@ -192,7 +192,9 @@ fn main() {
         expected_statuses.len()
     );
     if baseline_objectives.is_empty() && expected_statuses.is_empty() {
-        eprintln!("WARNING: No known optimal values loaded. All problems will be PASS[no_ref].");
+        eprintln!(
+            "WARNING: No known optimal values loaded. Optimal-feasible problems will be CHECKED[no_ref], not PASS."
+        );
     }
 
     // .qplib ファイル一覧（ファイル名でソート）
@@ -457,7 +459,7 @@ fn main() {
                             ObjCheckResult::NoRef => {
                                 n_pass_noref += 1;
                                 (
-                                    "PASS[no_ref]".to_string(),
+                                    "CHECKED[no_ref]".to_string(),
                                     format!(
                                         "[{}] obj={:.6e} {} {}",
                                         method_label, result.objective, kkt_str, gap_str
@@ -608,7 +610,7 @@ fn main() {
     println!();
     println!("=== Summary ===");
     println!("  PASS:              {}", n_pass);
-    println!("  PASS[no_ref]:      {}", n_pass_noref);
+    println!("  CHECKED[no_ref]:   {}", n_pass_noref);
     println!("  PASS:Infeasible:   {}", n_pass_infeasible);
     println!("  PASS:Unbounded:    {}", n_pass_unbounded);
     println!("  TIMEOUT:           {}", n_timeout);

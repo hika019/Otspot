@@ -256,6 +256,27 @@ fn solve_reduced_lp_from_qp(
     let t_solve = Instant::now();
     let raw = solve_lp_backend_no_presolve(reduced_lp, &reduced_opts);
     let solve_us = t_solve.elapsed().as_micros() as u64;
+    if (raw.status == SolveStatus::NumericalError
+        || (raw.status == SolveStatus::SuboptimalSolution && raw.solution.is_empty()))
+        && options.deadline.is_none_or(|d| Instant::now() < d)
+    {
+        let mut fallback_opts = options.clone();
+        fallback_opts.presolve = false;
+        fallback_opts.warm_start = None;
+        fallback_opts.warm_start_lp = None;
+        let t_fallback = Instant::now();
+        let mut fallback = solve_original_lp_direct_retry(original_lp, &fallback_opts);
+        fill_lp_reduced_costs_from_dual(&mut fallback, original_lp);
+        add_qp_obj_offset(&mut fallback, qp_obj_offset);
+        fallback.timing_breakdown = Some(crate::problem::TimingBreakdown {
+            presolve_us,
+            solve_us: t_fallback.elapsed().as_micros() as u64,
+            postsolve_us: 0,
+            ..Default::default()
+        });
+        return fallback;
+    }
+
     if matches!(
         raw.status,
         SolveStatus::Optimal
@@ -297,6 +318,32 @@ fn solve_reduced_lp_from_qp(
             postsolve_us,
             ..Default::default()
         });
+        if postsolved_lp_needs_direct_retry(&lifted)
+            && options.deadline.is_none_or(|d| Instant::now() < d)
+        {
+            let keep_lifted = lifted.clone();
+            let mut fallback_opts = options.clone();
+            fallback_opts.presolve = false;
+            fallback_opts.warm_start = None;
+            fallback_opts.warm_start_lp = None;
+            let t_fallback = Instant::now();
+            let mut fallback = solve_original_lp_direct_retry(original_lp, &fallback_opts);
+            fill_lp_reduced_costs_from_dual(&mut fallback, original_lp);
+            add_qp_obj_offset(&mut fallback, qp_obj_offset);
+            if !matches!(
+                fallback.status,
+                SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
+            ) {
+                fallback.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                    presolve_us,
+                    solve_us: t_fallback.elapsed().as_micros() as u64,
+                    postsolve_us,
+                    ..Default::default()
+                });
+                return fallback;
+            }
+            lifted = keep_lifted;
+        }
         add_qp_obj_offset(&mut lifted, qp_obj_offset);
         return lifted;
     }
@@ -336,6 +383,14 @@ fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> Solv
     let mut result = pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex);
     fill_lp_reduced_costs_from_dual(&mut result, lp);
     result
+}
+
+fn solve_original_lp_direct_retry(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
+    if prefer_ipm_for_size(lp.num_vars, lp.num_constraints) {
+        solve_lp_backend_no_presolve(lp, options)
+    } else {
+        crate::lp::solve_lp_forwarded_from_qp(lp, options)
+    }
 }
 
 fn qp_from_lp(lp: &LpProblem) -> Option<QpProblem> {
@@ -444,6 +499,16 @@ fn lp_reduced_cost_bound_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -
         max_rel = max_rel.max(viol / scale);
     }
     max_rel
+}
+
+fn postsolved_lp_needs_direct_retry(result: &SolverResult) -> bool {
+    matches!(
+        result.status,
+        SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+    ) && (result
+        .postsolve_dfeas
+        .is_some_and(|d| d > crate::tolerances::PIVOT_TOL)
+        || result.status == SolveStatus::SuboptimalSolution)
 }
 
 /// Pick the better of an IPM result and a simplex result.

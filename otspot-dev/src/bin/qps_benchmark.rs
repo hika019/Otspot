@@ -16,7 +16,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use otspot_core::options::{SimplexMethod, SolverOptions};
-use otspot_core::problem::{ConstraintType, SolveStatus};
+#[cfg(test)]
+use otspot_core::problem::TimingBreakdown;
+use otspot_core::problem::{ConstraintType, SolveStatus, SolverResult};
 use otspot_core::qp::{solve_qp_with, QpProblem};
 use otspot_dev::bench_utils::{
     check_baseline_objective, compute_dfeas_componentwise, compute_dfeas_orig,
@@ -102,6 +104,90 @@ fn options_for_problem(
         solve_opts.known_optimal_obj = Some(known + baseline_obj_offset(baseline_csv, prob));
     }
     solve_opts
+}
+
+fn residual_exceeds_eps(value: f64, eps: f64) -> bool {
+    !value.is_finite() || value > eps
+}
+
+fn dual_payload_summary(result: &otspot_core::problem::SolverResult) -> String {
+    format!(
+        "dual_len={} bd_len={} rc_len={}",
+        result.dual_solution.len(),
+        result.bound_duals.len(),
+        result.reduced_costs.len()
+    )
+}
+
+fn seconds_from_us(us: u64) -> f64 {
+    us as f64 / 1_000_000.0
+}
+
+fn phase_timing_note(result: &SolverResult) -> String {
+    let Some(tb) = result.timing_breakdown else {
+        return String::new();
+    };
+    let mut fields = vec![
+        format!("presolve={:.3}s", seconds_from_us(tb.presolve_us)),
+        format!("core={:.3}s", seconds_from_us(tb.solve_us)),
+        format!("postsolve={:.3}s", seconds_from_us(tb.postsolve_us)),
+    ];
+    if tb.ipm_factorize_us > 0
+        || tb.ipm_solve_us > 0
+        || tb.ipm_reg_retries > 0
+        || tb.ipm_used_iterative
+    {
+        fields.push(format!(
+            "ipm_factor={:.3}s",
+            seconds_from_us(tb.ipm_factorize_us)
+        ));
+        fields.push(format!(
+            "ipm_solve={:.3}s",
+            seconds_from_us(tb.ipm_solve_us)
+        ));
+        fields.push(format!("ipm_reg_retries={}", tb.ipm_reg_retries));
+        fields.push(format!("ipm_iterative={}", tb.ipm_used_iterative));
+    }
+    if tb.postsolve_map_us > 0
+        || tb.postsolve_lsq_us > 0
+        || tb.postsolve_recovery_us > 0
+        || tb.postsolve_refine_us > 0
+        || tb.postsolve_krylov_ir_us > 0
+    {
+        fields.push(format!(
+            "post_map={:.3}s",
+            seconds_from_us(tb.postsolve_map_us)
+        ));
+        fields.push(format!(
+            "post_lsq={:.3}s",
+            seconds_from_us(tb.postsolve_lsq_us)
+        ));
+        fields.push(format!(
+            "post_recovery={:.3}s",
+            seconds_from_us(tb.postsolve_recovery_us)
+        ));
+        fields.push(format!(
+            "post_refine={:.3}s",
+            seconds_from_us(tb.postsolve_refine_us)
+        ));
+        fields.push(format!(
+            "post_krylov={:.3}s",
+            seconds_from_us(tb.postsolve_krylov_ir_us)
+        ));
+    }
+    format!("phase=({})", fields.join(" "))
+}
+
+fn append_phase_timing(mut note: String, result: &SolverResult) -> String {
+    let timing = phase_timing_note(result);
+    if timing.is_empty() {
+        return note;
+    }
+    if !note.is_empty() {
+        note.push(' ');
+    }
+    note.push_str(&timing);
+    note
 }
 
 #[allow(clippy::items_after_test_module)] // fn main() follows this module; reorganising is disruptive
@@ -261,6 +347,51 @@ mod tests {
         assert_eq!(solve_opts.known_optimal_obj, Some(12.5));
     }
 
+    #[test]
+    fn test_nonfinite_residuals_fail_quality_gate() {
+        assert!(residual_exceeds_eps(f64::NAN, 1e-6));
+        assert!(residual_exceeds_eps(f64::INFINITY, 1e-6));
+        assert!(residual_exceeds_eps(1e-5, 1e-6));
+        assert!(!residual_exceeds_eps(1e-7, 1e-6));
+    }
+
+    #[test]
+    fn test_phase_timing_note_includes_lp_and_ipm_fields() {
+        let result = SolverResult {
+            timing_breakdown: Some(TimingBreakdown {
+                presolve_us: 1_000,
+                solve_us: 2_000,
+                postsolve_us: 3_000,
+                ipm_factorize_us: 4_000,
+                ipm_solve_us: 5_000,
+                ipm_reg_retries: 2,
+                ipm_used_iterative: true,
+                postsolve_map_us: 6_000,
+                postsolve_lsq_us: 7_000,
+                postsolve_recovery_us: 8_000,
+                postsolve_refine_us: 9_000,
+                postsolve_krylov_ir_us: 10_000,
+            }),
+            ..Default::default()
+        };
+
+        let note = phase_timing_note(&result);
+
+        assert!(note.contains("phase=("));
+        assert!(note.contains("presolve=0.001s"));
+        assert!(note.contains("core=0.002s"));
+        assert!(note.contains("postsolve=0.003s"));
+        assert!(note.contains("ipm_factor=0.004s"));
+        assert!(note.contains("ipm_solve=0.005s"));
+        assert!(note.contains("ipm_reg_retries=2"));
+        assert!(note.contains("ipm_iterative=true"));
+        assert!(note.contains("post_map=0.006s"));
+        assert!(note.contains("post_lsq=0.007s"));
+        assert!(note.contains("post_recovery=0.008s"));
+        assert!(note.contains("post_refine=0.009s"));
+        assert!(note.contains("post_krylov=0.010s"));
+    }
+
     /// load_expected_statuses が INFEASIBLE エントリを正しく読む
     #[test]
     fn test_expected_status_infeasible_loaded() {
@@ -393,7 +524,9 @@ fn main() {
         );
     }
     if baseline_objectives.is_empty() && expected_statuses.is_empty() {
-        eprintln!("WARNING: No known optimal values loaded. All problems will be PASS[no_ref].");
+        eprintln!(
+            "WARNING: No known optimal values loaded. Optimal-feasible problems will be CHECKED[no_ref], not PASS."
+        );
     }
 
     // QPSファイル一覧を取得（ファイル名でソート）
@@ -420,7 +553,7 @@ fn main() {
 
     // 集計 — 7カテゴリ + 既存カテゴリ + infeasible/unbounded 正答
     let mut n_pass = 0usize;
-    let mut n_pass_noref = 0usize;
+    let mut n_checked_noref = 0usize;
     let mut n_pass_infeasible = 0usize; // 期待通り Infeasible と判定
     let mut n_pass_unbounded = 0usize; // 期待通り Unbounded と判定
     let mut n_pfeas_fail = 0usize;
@@ -488,7 +621,6 @@ fn main() {
         let m = prob.num_constraints;
         let nnz_before = prob.q.nnz() + prob.a.nnz();
         let is_qp = prob.q.nnz() > 0;
-
         let solve_opts =
             options_for_problem(&opts, &name, &prob, &baseline_objectives, &baseline_csv);
 
@@ -515,7 +647,6 @@ fn main() {
 
         // 生ステータスをそのまま評価する。LocallyOptimal の暗黙昇格は行わない。
         // バグ隠蔽を避けるため、昇格よりも未証明状態の可視化を優先する。
-        let result = result;
 
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
@@ -526,7 +657,7 @@ fn main() {
                 let pfeas_normalized = compute_pfeas_normalized(&prob, &result.solution);
 
                 // Step 4: pfeasチェック（正規化済み違反 > eps で失敗）
-                if pfeas_normalized > eps || bfeas > eps {
+                if residual_exceeds_eps(pfeas_normalized, eps) || residual_exceeds_eps(bfeas, eps) {
                     n_pfeas_fail += 1;
                     (
                         "PFEAS_FAIL".to_string(),
@@ -548,13 +679,19 @@ fn main() {
                         &result.reduced_costs,
                     );
 
-                    if !dfeas_rel.is_nan() && dfeas_rel > eps {
+                    if residual_exceeds_eps(dfeas_rel, eps) {
                         n_dfeas_fail += 1;
                         (
                             "DFEAS_FAIL".to_string(),
                             format!(
-                                "[{}] obj={:.2e} pf={:.1e} df={:.1e} dfr={:.1e} (eps={:.1e})",
-                                method_label, result.objective, pfeas, dfeas_abs, dfeas_rel, eps
+                                "[{}] obj={:.2e} pf={:.1e} df={:.1e} dfr={:.1e} (eps={:.1e}) {}",
+                                method_label,
+                                result.objective,
+                                pfeas,
+                                dfeas_abs,
+                                dfeas_rel,
+                                eps,
+                                dual_payload_summary(&result)
                             ),
                         )
                     } else {
@@ -620,7 +757,7 @@ fn main() {
                                     )
                             }
                             ObjCheckResult::NoRef => {
-                                n_pass_noref += 1;
+                                n_checked_noref += 1;
                                 let pfc = compute_pfeas_normalized(&prob, &result.solution);
                                 let dfc = compute_dfeas_componentwise(
                                     &prob,
@@ -638,7 +775,7 @@ fn main() {
                                     )
                                 };
                                 (
-                                        "PASS[no_ref]".to_string(),
+                                        "CHECKED[no_ref]".to_string(),
                                         format!(
                                             "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {}",
                                             method_label,
@@ -783,6 +920,7 @@ fn main() {
                 ("FAIL:Unknown".to_string(), format!("[{}]", method_label))
             }
         };
+        let note = append_phase_timing(note, &result);
         println!(
             "{:<20} {:>6} {:>6} {:>15} {:>10.3} {}",
             name, n, m, status_str, elapsed_s, note
@@ -798,7 +936,7 @@ fn main() {
     println!();
     println!("=== Summary ===");
     println!("  PASS:              {}", n_pass);
-    println!("  PASS[no_ref]:      {}", n_pass_noref);
+    println!("  CHECKED[no_ref]:   {}", n_checked_noref);
     println!("  PASS:Infeasible:   {}", n_pass_infeasible);
     println!("  PASS:Unbounded:    {}", n_pass_unbounded);
     println!("  PFEAS_FAIL:        {}", n_pfeas_fail);
@@ -813,7 +951,7 @@ fn main() {
     println!(
         "  TOTAL:             {}",
         n_pass
-            + n_pass_noref
+            + n_checked_noref
             + n_pass_infeasible
             + n_pass_unbounded
             + n_pfeas_fail

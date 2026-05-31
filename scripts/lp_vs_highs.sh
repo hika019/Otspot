@@ -280,7 +280,7 @@ with open(baseline_csv) as f:
 # note (PASS): obj=X.XXe+Y pf=... df=... [method] obj_err=X.XXX%
 # obj_err is {:.3}% — display resolution 0.001% = 1e-5 relative; "0.000%" means < 5e-6 relative
 KNOWN_STATUSES = {
-    'PASS', 'PASS[no_ref]', 'PASS:Infeasible', 'PASS:Unbounded',
+    'PASS', 'CHECKED[no_ref]', 'PASS:Infeasible', 'PASS:Unbounded',
     'TIMEOUT', 'MAXITER', 'ERROR', 'SKIP', 'PARSE_ERR',
     'NONCONVEX', 'SUBOPTIMAL', 'KKT_FAIL', 'OBJ_MISMATCH',
     'PFEAS_FAIL', 'DFEAS_FAIL', 'FAIL', 'FAIL:NumericalError', 'FAIL:Unknown',
