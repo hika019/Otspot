@@ -86,7 +86,7 @@ pub(crate) fn solve_dual_advanced(
         if warm.basis.len() == m && warm.basis.iter().all(|&idx| idx < sf.n_total) {
             let mut basis = warm.basis.clone();
 
-            match LuBasis::new(&a, &basis, options.max_etas) {
+            match LuBasis::new_timed(&a, &basis, options.max_etas, options.deadline) {
                 Ok(mut basis_mgr) => {
                     // x_B = B^{-1} b_new (FTRANで計算)
                     let mut x_b_sv = SparseVec::from_dense(&b);
@@ -252,7 +252,9 @@ fn try_bounded(
     // are present, so they fall through to cold start automatically.
     if let Some(warm) = &options.warm_start {
         if warm.basis.len() == bsf.m && warm.basis.iter().all(|&idx| idx < bsf.n_total) {
-            if let Ok(mut basis_mgr) = LuBasis::new(&a, &warm.basis, options.max_etas) {
+            if let Ok(mut basis_mgr) =
+                LuBasis::new_timed(&a, &warm.basis, options.max_etas, options.deadline)
+            {
                 let mut x_b_sv = SparseVec::from_dense(&b);
                 basis_mgr.ftran(&mut x_b_sv);
                 let x_b = x_b_sv.to_dense();

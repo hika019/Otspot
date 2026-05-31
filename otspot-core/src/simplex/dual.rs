@@ -29,7 +29,9 @@ pub(crate) fn two_phase_dual_simplex(
             let mut basis = warm.basis.clone();
 
             // Singular basis falls through to cold start.
-            if let Ok(mut basis_mgr) = LuBasis::new(&a, &basis, options.max_etas) {
+            if let Ok(mut basis_mgr) =
+                LuBasis::new_timed(&a, &basis, options.max_etas, options.deadline)
+            {
                 // x_B = B^{-1} b_new
                 let mut x_b_sv = SparseVec::from_dense(&b);
                 basis_mgr.ftran(&mut x_b_sv);
@@ -180,7 +182,7 @@ pub(super) fn dual_simplex_core(
 ) -> SimplexOutcome {
     let max_iter = usize::MAX; // timeout is the real guard
 
-    let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
+    let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(crate::error::SolverError::SingularBasis { .. }) => {
             return SimplexOutcome::SingularBasis;

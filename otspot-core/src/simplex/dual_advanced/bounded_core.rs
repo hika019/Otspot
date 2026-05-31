@@ -248,7 +248,8 @@ pub(crate) fn iterate(
     debug_assert_eq!(state.at_upper.len(), n_total);
     debug_assert_eq!(state.is_basic.len(), n_total);
 
-    let mut basis_mgr = match LuBasis::new(a, &state.basis, options.max_etas) {
+    let mut basis_mgr =
+        match LuBasis::new_timed(a, &state.basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(crate::error::SolverError::SingularBasis { .. }) => {
             return (BoundedOutcome::SingularBasis, state);
@@ -823,7 +824,8 @@ pub(crate) fn phase2_primal_bounded(
     let m = bsf.m;
     let n_total = bsf.n_total;
 
-    let mut basis_mgr = match LuBasis::new(a, &state.basis, options.max_etas) {
+    let mut basis_mgr =
+        match LuBasis::new_timed(a, &state.basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(_) => return (SimplexOutcome::SingularBasis, state),
     };

@@ -69,7 +69,8 @@ fn extract_farkas_certificate(
     if !basis.iter().any(|&col| col >= n_original) {
         return vec![];
     }
-    let mut basis_mgr = match LuBasis::new(a_ext, basis, options.max_etas) {
+    let mut basis_mgr =
+        match LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(_) => return vec![],
     };
@@ -330,6 +331,7 @@ pub(crate) fn two_phase_simplex(
                 sf.n_total,
                 &b,
                 options.max_etas,
+                options.deadline,
                 &basis,
             )
         } else {
@@ -915,6 +917,7 @@ fn try_apply_crash(
     n_total: usize,
     b_scaled: &[f64],
     max_etas: usize,
+    deadline: Option<std::time::Instant>,
     cold_basis: &[usize],
 ) -> Option<(Vec<usize>, Vec<f64>)> {
     use super::crash;
@@ -943,7 +946,7 @@ fn try_apply_crash(
     let mut x_b = vec![0.0_f64; m];
     let mut crashed_count = num_art_in - num_art_out;
     for round in 0..=CRASH_REVERT_MAX_ROUNDS {
-        let mut basis_mgr = match LuBasis::new(a_ext, &basis, max_etas) {
+        let mut basis_mgr = match LuBasis::new_timed(a_ext, &basis, max_etas, deadline) {
             Ok(b) => b,
             Err(_) => {
                 return None;
@@ -1222,7 +1225,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     enable_phase1_cycling_bail: bool,
 ) -> SimplexOutcome {
     let max_iter = usize::MAX; // timeout is the real guard
-    let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
+    let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(crate::error::SolverError::SingularBasis { .. }) => {
             return SimplexOutcome::SingularBasis;
@@ -1588,7 +1591,7 @@ fn revert_to_snapshot(
     for &col in basis.iter() {
         is_basic[col] = true;
     }
-    match LuBasis::new(a, basis, options.max_etas) {
+    match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(mut mgr) => {
             // Recompute x_B; carrying eta drift could leave a slack negative.
             x_b.copy_from_slice(b_rhs);
