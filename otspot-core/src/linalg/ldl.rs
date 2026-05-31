@@ -25,7 +25,6 @@ use faer::sparse::linalg::SupernodalThreshold;
 #[cfg(test)]
 use faer::sparse::Triplet;
 use faer::sparse::{SparseColMat, SymbolicSparseColMat};
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::Instant;
 #[cfg(test)]
@@ -263,10 +262,10 @@ fn do_numeric_factorize_with_cache(
     }
 
     let owned_signs = signs.map(|s| s.to_vec());
-    let l_values = factorize_numeric_with_deadline_watchdog(
-        Arc::clone(&symbolic),
-        a_upper,
-        owned_signs,
+    let l_values = factorize_numeric_with_deadline_check(
+        &symbolic,
+        &a_upper,
+        owned_signs.as_deref(),
         par,
         deadline,
     )?;
@@ -312,32 +311,26 @@ fn run_numeric_factorization(
     Ok(l_values)
 }
 
-fn factorize_numeric_with_deadline_watchdog(
-    symbolic: Arc<SymbolicCholesky<usize>>,
-    a_upper: SparseColMat<usize, f64>,
-    owned_signs: Option<Vec<i8>>,
+fn factorize_numeric_with_deadline_check(
+    symbolic: &SymbolicCholesky<usize>,
+    a_upper: &SparseColMat<usize, f64>,
+    signs: Option<&[i8]>,
     par: faer::Par,
     deadline: Option<Instant>,
 ) -> Result<Vec<f64>, LdlError> {
-    let Some(dl) = deadline else {
-        return run_numeric_factorization(&symbolic, &a_upper, owned_signs.as_deref(), par);
-    };
-    if Instant::now() >= dl {
-        return Err(LdlError::DeadlineExceeded);
+    if let Some(dl) = deadline {
+        if Instant::now() >= dl {
+            return Err(LdlError::DeadlineExceeded);
+        }
     }
 
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let r = run_numeric_factorization(&symbolic, &a_upper, owned_signs.as_deref(), par);
-        let _ = tx.send(r);
-    });
-
-    let remain = dl.saturating_duration_since(Instant::now());
-    match rx.recv_timeout(remain) {
-        Ok(r) => r,
-        Err(RecvTimeoutError::Timeout) => Err(LdlError::DeadlineExceeded),
-        Err(RecvTimeoutError::Disconnected) => Err(LdlError::SingularOrIndefinite),
+    let result = run_numeric_factorization(symbolic, a_upper, signs, par);
+    if let Some(dl) = deadline {
+        if Instant::now() >= dl {
+            return Err(LdlError::DeadlineExceeded);
+        }
     }
+    result
 }
 
 /// Q 行列から上三角 CSC を抽出する (row <= col のみ保持)。
@@ -865,10 +858,11 @@ mod tests {
         );
     }
 
-    /// Numeric factorization is not preemptible inside faer; this sentinel ensures
-    /// the watchdog path returns `DeadlineExceeded` without waiting for numeric completion.
+    /// Numeric factorization is not preemptible inside faer. The timeout path must
+    /// not detach it into a background thread, otherwise a later simplex fallback
+    /// can run concurrently with still-active LDL work even when `threads=1`.
     #[test]
-    fn test_factorize_deadline_watchdog_during_numeric() {
+    fn test_factorize_deadline_during_numeric_does_not_detach() {
         struct ResetDelay;
         impl Drop for ResetDelay {
             fn drop(&mut self) {
@@ -880,6 +874,7 @@ mod tests {
         let mat = upper_tri_csc(2, &[(0, 0, 2.0), (0, 1, 1.0), (1, 1, 3.0)]);
         let perm = vec![0usize, 1];
         let deadline = Some(Instant::now() + std::time::Duration::from_millis(5));
+        let start = Instant::now();
         let result = factorize_quasidefinite_with_cached_perm_budget_par(
             &mat,
             &perm,
@@ -889,7 +884,11 @@ mod tests {
         );
         assert!(
             matches!(result, Err(LdlError::DeadlineExceeded)),
-            "expected watchdog timeout during numeric factorization",
+            "expected deadline timeout during numeric factorization",
+        );
+        assert!(
+            start.elapsed() >= Duration::from_millis(50),
+            "numeric factorization must not be detached on timeout",
         );
     }
 
