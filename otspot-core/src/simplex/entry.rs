@@ -9,7 +9,23 @@ use crate::tolerances::PIVOT_TOL;
 use super::dual;
 use super::dual_advanced;
 use super::primal::two_phase_simplex;
-use super::standard_form::build_standard_form;
+use super::standard_form::build_standard_form_with_deadline;
+
+fn timeout_trace_enabled() -> bool {
+    std::env::var("OTSPOT_TIMEOUT_TRACE").ok().as_deref() == Some("1")
+}
+
+fn timeout_trace(phase: &str) {
+    if !timeout_trace_enabled() {
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "[timeout-trace {ts:.3}] {phase}");
+}
 
 /// Solve an LP with default options (raw simplex, without obj_offset).
 ///
@@ -25,6 +41,7 @@ pub(crate) fn solve(problem: &LpProblem) -> SolverResult {
 /// Returns [`SolveStatus::NumericalError`] immediately if `options` fails
 /// validation (invalid tolerance, zero threads, etc.).
 pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+    timeout_trace("simplex: solve_with enter");
     if options.validate().is_err() {
         return SolverResult::numerical_error();
     }
@@ -45,6 +62,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
     let mut non_reduced_presolve_us: Option<u64> = None;
 
     if options.presolve {
+        timeout_trace("simplex: presolve start");
         match presolve::run_presolve(problem, options.deadline) {
             Err(presolve::PresolveStatus::Infeasible) => {
                 return SolverResult {
@@ -71,6 +89,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 };
             }
             Ok(presolve_result) if presolve_result.was_reduced => {
+                timeout_trace("simplex: presolve reduced");
                 // Presolve renumbers variables, so a supplied warm_start is invalidated.
                 let opts_no_ws = if options.warm_start.is_some() {
                     let mut o = options.clone();
@@ -178,6 +197,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 return res;
             }
             Ok(_) => {
+                timeout_trace("simplex: presolve unchanged");
                 // Presolve did not reduce; record elapsed for timing_breakdown below.
                 non_reduced_presolve_us = Some(prof_t0.elapsed().as_micros() as u64);
             }
@@ -218,6 +238,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
 
 /// Solve without presolve.
 pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+    timeout_trace("simplex: solve_without_presolve enter");
     let m = problem.num_constraints;
     let n = problem.num_vars;
 
@@ -283,7 +304,21 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
         };
     }
 
-    let sf = build_standard_form(problem);
+    timeout_trace("simplex: build_standard_form start");
+    let Some(sf) = build_standard_form_with_deadline(problem, options.deadline) else {
+        timeout_trace("simplex: build_standard_form timed out");
+        return SolverResult {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            solution: vec![],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
+            ..Default::default()
+        };
+    };
+    timeout_trace("simplex: build_standard_form done");
 
     // Copy warm_start_lp.basis into warm_start so the LP-specific slot feeds
     // the existing simplex warm path.
@@ -314,6 +349,7 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
             dual_advanced::solve_dual_advanced(&sf, problem, options)
         }
     };
+    timeout_trace("simplex: core solve done");
     guard_lp_optimal(result, problem)
 }
 
