@@ -12,6 +12,7 @@
 #     [--timeout SEC] \
 #     [--eps EPS] \
 #     [--jobs N] \
+#     [--ext-timeout-buffer SEC] \
 #     [--from-bench-output FILE] \
 #     [--bench-output FILE] \
 #     [--report FILE]
@@ -32,6 +33,7 @@ JOBS="1"
 BENCH_OUTPUT=""
 REPORT_OUTPUT=""
 FROM_BENCH_OUTPUT=""
+EXT_TIMEOUT_BUFFER=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -39,6 +41,7 @@ while [[ $# -gt 0 ]]; do
         --timeout) TIMEOUT="$2"; shift 2 ;;
         --eps) EPS="$2"; shift 2 ;;
         --jobs) JOBS="$2"; shift 2 ;;
+        --ext-timeout-buffer) EXT_TIMEOUT_BUFFER="$2"; shift 2 ;;
         --from-bench-output) FROM_BENCH_OUTPUT="$2"; shift 2 ;;
         --bench-output) BENCH_OUTPUT="$2"; shift 2 ;;
         --report) REPORT_OUTPUT="$2"; shift 2 ;;
@@ -78,7 +81,12 @@ if [[ -z "$FROM_BENCH_OUTPUT" ]]; then
         ln -s "$src" "$WORK_DIR/$(basename "$src")"
     done
 
-    SOLVER_DIR="$SOLVER_ROOT" \
+    BENCH_ENV=()
+    if [[ -n "$EXT_TIMEOUT_BUFFER" ]]; then
+        BENCH_ENV+=("BENCH_EXT_TIMEOUT_BUFFER=$EXT_TIMEOUT_BUFFER")
+    fi
+
+    env "${BENCH_ENV[@]}" SOLVER_DIR="$SOLVER_ROOT" \
     bash "$SCRIPT_DIR/bench_parallel.sh" \
         --data-dir "$WORK_DIR" \
         --timeout "$TIMEOUT" \
