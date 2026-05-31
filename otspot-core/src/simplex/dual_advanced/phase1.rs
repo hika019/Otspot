@@ -84,9 +84,9 @@ fn farkas_infeasibility_certified(
 
     let mut basis_mgr =
         match LuBasis::new_timed(a_aug, basis_aug, options.max_etas, options.deadline) {
-        Ok(bm) => bm,
-        Err(_) => return false,
-    };
+            Ok(bm) => bm,
+            Err(_) => return false,
+        };
     let mut y = c_phase1;
     basis_mgr.btran_dense(&mut y);
 
@@ -430,13 +430,13 @@ fn try_build_crash_phase1_state(
 
     let mut basis_mgr =
         match LuBasis::new_timed(&a_aug, &basis_aug, options.max_etas, options.deadline) {
-        Ok(bm) => bm,
-        Err(_) => {
-            #[cfg(test)]
-            crash_probe::record(crash_probe::Outcome::LuFailed);
-            return None;
-        }
-    };
+            Ok(bm) => bm,
+            Err(_) => {
+                #[cfg(test)]
+                crash_probe::record(crash_probe::Outcome::LuFailed);
+                return None;
+            }
+        };
 
     // x_B = B^{-1} b
     let mut x_b_sv = SparseVec::from_dense(b);

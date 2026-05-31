@@ -562,7 +562,15 @@ mod tests {
         };
         let mut iters = 0usize;
         let _ = dual_simplex_core_advanced(
-            &a, &mut x_b, &c, &mut basis, 3, 6, &opts, &mut leaving, &mut iters,
+            &a,
+            &mut x_b,
+            &c,
+            &mut basis,
+            3,
+            6,
+            &opts,
+            &mut leaving,
+            &mut iters,
         );
 
         assert!(
