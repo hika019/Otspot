@@ -513,14 +513,9 @@ fn main() {
             None => String::new(),
         };
 
-        // LocallyOptimal で有効解を保持している場合のみ Optimal フローに乗せて品質判定
-        // (pfeas/bfeas/dfeas/obj_check) を通す。SuboptimalSolution / Timeout /
-        // MaxIterations / NumericalError / NonConvex は honest 報告。
-        let result = otspot_dev::bench_utils::apply_bench_status_promotion(
-            result,
-            prob.num_vars,
-            otspot_dev::bench_utils::BenchPromotionPolicy::QpsBenchmark,
-        );
+        // 生ステータスをそのまま評価する。LocallyOptimal の暗黙昇格は行わない。
+        // バグ隠蔽を避けるため、昇格よりも未証明状態の可視化を優先する。
+        let result = result;
 
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {

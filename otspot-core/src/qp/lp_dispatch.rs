@@ -14,9 +14,12 @@ use std::time::Instant;
 use super::certificate::guard_lp_optimal;
 use crate::options::SolverOptions;
 use crate::presolve;
-use crate::problem::{ConstraintType, LpProblem, SolveRoute, SolveStatus, SolverResult};
+use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
-use crate::tolerances::{any_nonfinite, feas_rel_tol};
+#[cfg(test)]
+use crate::problem::ConstraintType;
+#[cfg(test)]
+use crate::tolerances::any_nonfinite;
 
 use super::{ipm_solver, QpProblem};
 
@@ -172,28 +175,15 @@ fn solve_unpresolved_lp_from_qp(
             | SolveStatus::NumericalError
             | SolveStatus::MaxIterations => {
                 if options.deadline.is_some_and(|d| Instant::now() >= d) {
+                    fill_lp_reduced_costs_from_dual(&mut ipm_result, lp);
                     return ipm_result;
                 }
                 // 残時間で simplex 再試行。
             }
             SolveStatus::SuboptimalSolution => {
                 if options.deadline.is_some_and(|d| Instant::now() >= d) {
+                    fill_lp_reduced_costs_from_dual(&mut ipm_result, lp);
                     return ipm_result;
-                }
-                // known_optimal_obj が設定されており obj が一致するなら simplex retry 不要。
-                if let Some(ref_obj) = options.known_optimal_obj {
-                    if crate::tolerances::obj_within_tol(
-                        ipm_result.objective,
-                        ref_obj,
-                        crate::tolerances::OBJ_MATCH_REL_TOL,
-                    ) && !ipm_result.solution.is_empty()
-                    {
-                        let promoted = SolverResult {
-                            status: SolveStatus::Optimal,
-                            ..ipm_result
-                        };
-                        return guard_lp_optimal(promoted, lp);
-                    }
                 }
                 // IPM incumbent を保存して simplex 再試行。simplex が失敗したとき
                 // pick_best_ipm_or_simplex が SuboptimalSolution を復元する。
@@ -221,17 +211,7 @@ fn solve_unpresolved_lp_from_qp(
     ) {
         simplex_result.objective += problem.obj_offset;
     }
-    if simplex_result.status == SolveStatus::Timeout
-        && simplex_result.solution.is_empty()
-        && options.deadline.is_none_or(|d| Instant::now() < d)
-        && verified_farkas_timeout_fallback(problem, options)
-    {
-        let mut certified = SolverResult::infeasible();
-        certified.iterations = simplex_result.iterations;
-        return certified;
-    }
     let mut result = pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex_result);
-    promote_known_objective_incumbent(&mut result, lp, options);
     fill_lp_reduced_costs_from_dual(&mut result, lp);
     result
 }
@@ -263,7 +243,6 @@ fn solve_reduced_lp_from_qp(
         let t_fallback = Instant::now();
         let mut fallback = solve_original_lp_direct_retry(original_lp, &fallback_opts);
         add_qp_obj_offset(&mut fallback, qp_obj_offset);
-        promote_known_objective_incumbent(&mut fallback, original_lp, options);
         fallback.timing_breakdown = Some(crate::problem::TimingBreakdown {
             presolve_us,
             solve_us: t_fallback.elapsed().as_micros() as u64,
@@ -314,34 +293,7 @@ fn solve_reduced_lp_from_qp(
             postsolve_us,
             ..Default::default()
         });
-        if postsolved_lp_needs_direct_retry(&lifted)
-            && options.deadline.is_none_or(|d| Instant::now() < d)
-        {
-            let keep_lifted = lifted.clone();
-            let mut fallback_opts = options.clone();
-            fallback_opts.presolve = false;
-            fallback_opts.warm_start = None;
-            fallback_opts.warm_start_lp = None;
-            let t_fallback = Instant::now();
-            let mut fallback = solve_original_lp_direct_retry(original_lp, &fallback_opts);
-            add_qp_obj_offset(&mut fallback, qp_obj_offset);
-            promote_known_objective_incumbent(&mut fallback, original_lp, options);
-            if !matches!(
-                fallback.status,
-                SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
-            ) {
-                fallback.timing_breakdown = Some(crate::problem::TimingBreakdown {
-                    presolve_us,
-                    solve_us: t_fallback.elapsed().as_micros() as u64,
-                    postsolve_us,
-                    ..Default::default()
-                });
-                return fallback;
-            }
-            lifted = keep_lifted;
-        }
         add_qp_obj_offset(&mut lifted, qp_obj_offset);
-        promote_known_objective_incumbent(&mut lifted, original_lp, options);
         return lifted;
     }
 
@@ -367,6 +319,7 @@ fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> Solv
                 return guarded;
             }
             if options.deadline.is_some_and(|d| Instant::now() >= d) {
+                fill_lp_reduced_costs_from_dual(&mut ipm, lp);
                 return ipm;
             }
             if matches!(ipm.status, SolveStatus::SuboptimalSolution) && !ipm.solution.is_empty() {
@@ -415,77 +368,6 @@ fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
     }
 }
 
-fn promote_known_objective_incumbent(
-    result: &mut SolverResult,
-    problem: &LpProblem,
-    options: &SolverOptions,
-) {
-    if !matches!(
-        result.status,
-        SolveStatus::SuboptimalSolution | SolveStatus::Timeout | SolveStatus::MaxIterations
-    ) {
-        return;
-    }
-    let Some(ref_obj) = options.known_optimal_obj else {
-        return;
-    };
-    if !crate::tolerances::obj_within_tol(
-        result.objective,
-        ref_obj,
-        crate::tolerances::OBJ_MATCH_REL_TOL,
-    ) || !lp_primal_feasible(problem, &result.solution)
-    {
-        return;
-    }
-    result.status = SolveStatus::LocallyOptimal;
-}
-
-fn lp_primal_feasible(problem: &LpProblem, solution: &[f64]) -> bool {
-    if solution.len() != problem.num_vars {
-        return false;
-    }
-    let tol = feas_rel_tol();
-    let mut ax = vec![0.0_f64; problem.num_constraints];
-    for (j, &xj) in solution.iter().enumerate() {
-        let Ok((rows, vals)) = problem.a.get_column(j) else {
-            return false;
-        };
-        for (k, &row) in rows.iter().enumerate() {
-            ax[row] += vals[k] * xj;
-        }
-    }
-    for (&xj, &(lb, ub)) in solution.iter().zip(problem.bounds.iter()) {
-        if lb.is_finite() {
-            let scale = 1.0 + xj.abs() + lb.abs();
-            if (lb - xj).max(0.0) / scale > tol {
-                return false;
-            }
-        }
-        if ub.is_finite() {
-            let scale = 1.0 + xj.abs() + ub.abs();
-            if (xj - ub).max(0.0) / scale > tol {
-                return false;
-            }
-        }
-    }
-    for ((&ax_i, &b_i), kind) in ax
-        .iter()
-        .zip(problem.b.iter())
-        .zip(problem.constraint_types.iter())
-    {
-        let violation = match kind {
-            ConstraintType::Eq => (ax_i - b_i).abs(),
-            ConstraintType::Le => (ax_i - b_i).max(0.0),
-            ConstraintType::Ge => (b_i - ax_i).max(0.0),
-        };
-        let scale = 1.0 + ax_i.abs() + b_i.abs();
-        if violation / scale > tol {
-            return false;
-        }
-    }
-    true
-}
-
 fn fill_lp_reduced_costs_from_dual(result: &mut SolverResult, problem: &LpProblem) {
     if result.reduced_costs.len() == problem.num_vars {
         return;
@@ -501,26 +383,43 @@ fn fill_lp_reduced_costs_from_dual(result: &mut SolverResult, problem: &LpProble
     ) {
         return;
     }
+    let Some(rc) =
+        best_lp_reduced_costs_from_dual(problem, &result.solution, &result.dual_solution)
+    else {
+        result.reduced_costs.clear();
+        return;
+    };
+    result.reduced_costs = rc;
+    result.bound_duals.clear();
+}
+
+fn best_lp_reduced_costs_from_dual(
+    problem: &LpProblem,
+    solution: &[f64],
+    dual_solution: &[f64],
+) -> Option<Vec<f64>> {
+    if solution.len() != problem.num_vars || dual_solution.len() != problem.num_constraints {
+        return None;
+    }
     let mut rc_minus = problem.c.clone();
     let mut rc_plus = problem.c.clone();
     for j in 0..problem.num_vars {
         let Ok((rows, vals)) = problem.a.get_column(j) else {
-            result.reduced_costs.clear();
-            return;
+            return None;
         };
         for (k, &row) in rows.iter().enumerate() {
-            let term = vals[k] * result.dual_solution[row];
+            let term = vals[k] * dual_solution[row];
             rc_minus[j] -= term;
             rc_plus[j] += term;
         }
     }
-    let df_minus = lp_reduced_cost_bound_violation(problem, &result.solution, &rc_minus);
-    let df_plus = lp_reduced_cost_bound_violation(problem, &result.solution, &rc_plus);
-    result.reduced_costs = if df_plus < df_minus {
+    let df_minus = lp_reduced_cost_bound_violation(problem, solution, &rc_minus);
+    let df_plus = lp_reduced_cost_bound_violation(problem, solution, &rc_plus);
+    Some(if df_plus < df_minus {
         rc_plus
     } else {
         rc_minus
-    };
+    })
 }
 
 fn lp_reduced_cost_bound_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -> f64 {
@@ -546,16 +445,6 @@ fn lp_reduced_cost_bound_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -
         max_rel = max_rel.max(viol / scale);
     }
     max_rel
-}
-
-fn postsolved_lp_needs_direct_retry(result: &SolverResult) -> bool {
-    matches!(
-        result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution
-    ) && (result
-        .postsolve_dfeas
-        .is_some_and(|d| d > crate::tolerances::PIVOT_TOL)
-        || result.status == SolveStatus::SuboptimalSolution)
 }
 
 /// Pick the better of an IPM result and a simplex result.
@@ -595,6 +484,7 @@ fn ipm_opts_for_lp(options: &SolverOptions) -> SolverOptions {
 
 /// Try a normalized Farkas certificate after simplex Phase I stalls.
 /// This stays on nonnegative variables so bounds need no certificate terms.
+#[cfg(test)]
 fn verified_farkas_timeout_fallback(problem: &QpProblem, options: &SolverOptions) -> bool {
     if !problem
         .bounds
@@ -659,6 +549,7 @@ fn verified_farkas_timeout_fallback(problem: &QpProblem, options: &SolverOptions
 
 /// ユーザ行 (Ge/Le/Eq) を `Cx ≥ d` 形へ正規化し、行 i ごとの (cert_col, sign) と
 /// 正規化済 RHS d を返す。Eq は両向き (±) で 2 列。
+#[cfg(test)]
 fn normalized_farkas_rows(problem: &QpProblem) -> (Vec<Vec<(usize, f64)>>, Vec<f64>) {
     let mut cert_cols_by_row = vec![Vec::<(usize, f64)>::new(); problem.num_constraints];
     let mut cert_rhs = Vec::new();
@@ -682,6 +573,7 @@ fn normalized_farkas_rows(problem: &QpProblem) -> (Vec<Vec<(usize, f64)>>, Vec<f
 
 /// 正規化制約 dᵀy ≥ 1 の許容下限。1 は cert LP の正規化定数 (データスケール非依存)
 /// なので絶対 tol で安全。
+#[cfg(test)]
 const FARKAS_NORM_TOL: f64 = 1e-7;
 
 /// 内積 Σ sign·a·y の f64 累積丸め誤差を見積もる 1 項あたりの後退誤差係数。
@@ -698,17 +590,20 @@ const FARKAS_NORM_TOL: f64 = 1e-7;
 /// 上で reject される。klein3 の genuine cert (Cᵀy<0、厳密に負) と真の丸め
 /// (~n·ε·term_mag 以下) は通過する。soundness 最優先: 偽 accept を出さないことを、
 /// 境界際 genuine cert を取りこぼす (honest Timeout 化) より優先する。
+#[cfg(test)]
 const FARKAS_CTY_ROUNDOFF_PER_TERM: f64 = f64::EPSILON;
 
 /// 正の slack `aty = (Cᵀy)_j` が内積丸め誤差の範囲内か (= Cᵀy ≤ 0 を f64 精度で
 /// 満たすか)。`term_mag = Σ_k |sign·a·y|` はその成分の内積項 magnitude、
 /// `n_terms` は加算した項数。floor を `n_terms·ε·term_mag` とし、scale 不変かつ
 /// IPM tol から独立な丸め境界で判定する。
+#[cfg(test)]
 fn cty_slack_within_noise(aty: f64, term_mag: f64, n_terms: usize) -> bool {
     let roundoff_floor = (n_terms as f64) * FARKAS_CTY_ROUNDOFF_PER_TERM * term_mag;
     aty <= roundoff_floor
 }
 
+#[cfg(test)]
 fn verify_normalized_farkas(
     problem: &QpProblem,
     cert_cols_by_row: &[Vec<(usize, f64)>],
@@ -879,44 +774,6 @@ mod tests {
             .expect("LP-dispatched QP presolve/postsolve path must keep timing");
         assert!(timing.presolve_us > 0, "presolve timing must be recorded");
         assert!(timing.postsolve_us > 0, "postsolve timing must be recorded");
-    }
-
-    #[test]
-    fn known_objective_promotes_primal_feasible_suboptimal_incumbent() {
-        let lp = eq_lp_fixture(2, 1);
-        let mut result = SolverResult {
-            status: SolveStatus::SuboptimalSolution,
-            solution: vec![1.0, 1.0],
-            objective: 2.0,
-            ..Default::default()
-        };
-        let opts = SolverOptions {
-            known_optimal_obj: Some(2.0),
-            ..SolverOptions::default()
-        };
-
-        promote_known_objective_incumbent(&mut result, &lp, &opts);
-
-        assert_eq!(result.status, SolveStatus::LocallyOptimal);
-    }
-
-    #[test]
-    fn known_objective_does_not_promote_primal_infeasible_incumbent() {
-        let lp = eq_lp_fixture(2, 1);
-        let mut result = SolverResult {
-            status: SolveStatus::SuboptimalSolution,
-            solution: vec![0.0, 0.0],
-            objective: 2.0,
-            ..Default::default()
-        };
-        let opts = SolverOptions {
-            known_optimal_obj: Some(2.0),
-            ..SolverOptions::default()
-        };
-
-        promote_known_objective_incumbent(&mut result, &lp, &opts);
-
-        assert_eq!(result.status, SolveStatus::SuboptimalSolution);
     }
 
     /// 非負変数の QP/LP を密行で構築するヘルパー (Farkas 検証 sentinel 用)。
