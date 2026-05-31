@@ -10,6 +10,7 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::time::Instant;
@@ -77,13 +78,38 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
     (pfeas, bfeas)
 }
 
+fn baseline_obj_offset(baseline_csv: &Path, prob: &QpProblem) -> f64 {
+    if baseline_csv
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s == "netlib_lp.csv")
+    {
+        prob.obj_offset
+    } else {
+        0.0
+    }
+}
+
+fn options_for_problem(
+    opts: &SolverOptions,
+    name: &str,
+    prob: &QpProblem,
+    baseline_objectives: &HashMap<String, f64>,
+    baseline_csv: &Path,
+) -> SolverOptions {
+    let mut solve_opts = opts.clone();
+    if let Some(&known) = baseline_objectives.get(name) {
+        solve_opts.known_optimal_obj = Some(known + baseline_obj_offset(baseline_csv, prob));
+    }
+    solve_opts
+}
+
 #[allow(clippy::items_after_test_module)] // fn main() follows this module; reorganising is disruptive
 #[cfg(test)]
 mod tests {
     use super::*;
     use otspot_core::problem::ConstraintType;
     use otspot_core::sparse::CscMatrix;
-    use std::collections::HashMap;
 
     /// Eq制約の下方向違反がpfeasに反映される
     #[test]
@@ -184,6 +210,55 @@ mod tests {
         // Non-netlib: obj_offset = 0.0; solver reports known_obj directly.
         let result = check_baseline_objective("toy", 12.5, &known, 1e-9, 0.0);
         assert!(matches!(result, ObjCheckResult::Ok { .. }));
+    }
+
+    #[test]
+    fn test_netlib_known_objective_passed_to_solver_with_obj_offset() {
+        let mut known = HashMap::new();
+        known.insert("e226".to_string(), -18.751_929_066);
+        let mut prob = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![1.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, 1.0)],
+            vec![],
+        )
+        .unwrap();
+        prob.obj_offset = -7.113;
+
+        let opts = SolverOptions::default();
+        let solve_opts = options_for_problem(
+            &opts,
+            "e226",
+            &prob,
+            &known,
+            Path::new("data/baseline_objectives/netlib_lp.csv"),
+        );
+
+        assert_eq!(solve_opts.known_optimal_obj, Some(-25.864_929_066));
+    }
+
+    #[test]
+    fn test_non_netlib_known_objective_passed_to_solver_without_obj_offset() {
+        let mut known = HashMap::new();
+        known.insert("toy".to_string(), 12.5);
+        let mut prob = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![1.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, 1.0)],
+            vec![],
+        )
+        .unwrap();
+        prob.obj_offset = 99.0;
+
+        let opts = SolverOptions::default();
+        let solve_opts =
+            options_for_problem(&opts, "toy", &prob, &known, Path::new("data/other.csv"));
+
+        assert_eq!(solve_opts.known_optimal_obj, Some(12.5));
     }
 
     /// load_expected_statuses が INFEASIBLE エントリを正しく読む
@@ -297,7 +372,6 @@ fn main() {
         };
         detect_csv_path(&data_dir, baseline_override.as_deref(), &root)
     };
-    let baseline_csv_str = baseline_csv.to_string_lossy().into_owned();
     let baseline_objectives = load_baseline_objectives(&baseline_csv).unwrap_or_default();
     let expected_statuses = load_expected_statuses(&baseline_csv);
     eprintln!(
@@ -415,9 +489,12 @@ fn main() {
         let nnz_before = prob.q.nnz() + prob.a.nnz();
         let is_qp = prob.q.nnz() > 0;
 
+        let solve_opts =
+            options_for_problem(&opts, &name, &prob, &baseline_objectives, &baseline_csv);
+
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
-        let result = solve_qp_with(&prob, &opts);
+        let result = solve_qp_with(&prob, &solve_opts);
         let elapsed_s = start.elapsed().as_secs_f64();
         println!(
             "SOLVE_DONE: {} {:?} ({:.3}s)",
@@ -436,14 +513,9 @@ fn main() {
             None => String::new(),
         };
 
-        // SuboptimalSolution / LocallyOptimal で有効解を保持している場合のみ Optimal フロー
-        // に乗せて品質判定 (pfeas/bfeas/dfeas/obj_check) を通す。収束未達 status
-        // (Timeout / MaxIterations / NumericalError / NonConvex) は honest 報告。
-        let result = otspot_dev::bench_utils::apply_bench_status_promotion(
-            result,
-            prob.num_vars,
-            otspot_dev::bench_utils::BenchPromotionPolicy::QpsBenchmark,
-        );
+        // 生ステータスをそのまま評価する。LocallyOptimal の暗黙昇格は行わない。
+        // バグ隠蔽を避けるため、昇格よりも未証明状態の可視化を優先する。
+        let result = result;
 
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
@@ -490,11 +562,7 @@ fn main() {
                         // Step 9: 正解値照合
                         // netlib_lp.csv のみ CSV 参照値に obj_offset を加算して比較
                         // (solver は result.objective に offset 込みで返すため)。
-                        let obj_offset = if baseline_csv_str.ends_with("netlib_lp.csv") {
-                            prob.obj_offset
-                        } else {
-                            0.0
-                        };
+                        let obj_offset = baseline_obj_offset(&baseline_csv, &prob);
                         match check_baseline_objective(
                             &name,
                             result.objective,

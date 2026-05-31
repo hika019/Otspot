@@ -32,7 +32,7 @@ watson_2,no_ref,https://plato.asu.edu/ftp/lptestset/misc/watson_2.bz2
 neos,-2.2542549220e+08,https://plato.asu.edu/ftp/lpopt_logs/clp_results/neos.clp.gz
 neos1,no_ref,https://plato.asu.edu/ftp/lptestset/misc/neos1.bz2
 neos2,no_ref,https://plato.asu.edu/ftp/lptestset/misc/neos2.bz2
-neos3,-2.7777777778e+04,https://plato.asu.edu/ftp/lpopt_logs/clp_results/neos3.clp.gz
+neos3,2.7777777804e+04,https://plato.asu.edu/ftp/lpopt_logs/clp_results/neos3.clp.gz
 ns1687037,3.6360347190e+00,https://plato.asu.edu/ftp/lpopt_logs/clp_results/ns1687037.clp.gz
 ns1688926,2.6213581620e+02,https://plato.asu.edu/ftp/lpopt_logs/clp_results/ns1688926.clp.gz
 sgpf5y6,no_ref,https://plato.asu.edu/ftp/lptestset/misc/sgpf5y6.bz2

@@ -86,6 +86,20 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 let raw = solve_without_presolve(&presolve_result.reduced_problem, eff_opts);
                 let t_solve_done = std::time::Instant::now();
                 let solve_us = t_solve_done.duration_since(t_presolve_done).as_micros() as u64;
+                if raw.status == SolveStatus::Timeout
+                    && eff_opts
+                        .deadline
+                        .is_some_and(|d| std::time::Instant::now() >= d)
+                {
+                    let mut timeout = raw;
+                    timeout.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                        presolve_us,
+                        solve_us,
+                        postsolve_us: 0,
+                        ..Default::default()
+                    });
+                    return timeout;
+                }
                 // The reduced LP can be unsolvable while the original is fine
                 // (SingularBasis on the reduced initial basis, Eq drift in Phase II,
                 // or guard_lp_optimal catching a KKT failure on the reduced form).

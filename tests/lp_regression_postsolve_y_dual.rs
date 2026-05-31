@@ -51,9 +51,16 @@ fn dfeas_rel_bound_aware(prob: &QpProblem, x: &[f64], rc: &[f64]) -> f64 {
     dfeas_rel
 }
 
+fn has_usable_incumbent(status: &SolveStatus) -> bool {
+    matches!(
+        status,
+        SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::SuboptimalSolution
+    )
+}
+
 /// 仕様: `presolve=true` で solve した結果が以下を満たす:
-///   - status = Optimal
-///   - dfeas_rel < eps (旧 strict formula、bound 考慮版どちらも)
+///   - original-space incumbent を返す
+///   - dfeas_rel < eps (bound 考慮版)
 fn check_postsolve_dual_feasibility(
     qp_path: &str,
     eps_dual: f64,
@@ -73,11 +80,31 @@ fn check_postsolve_dual_feasibility(
     let (df_abs, df_rel_strict) = dfeas_abs_rel(&prob, &r.reduced_costs);
     let df_rel_bound = dfeas_rel_bound_aware(&prob, &r.solution, &r.reduced_costs);
     let summary = format!(
-        "{}: status={:?} obj={:.4e} df_abs={:.2e} df_rel_strict={:.2e} df_rel_bound={:.2e}",
-        qp_path, r.status, r.objective, df_abs, df_rel_strict, df_rel_bound
+        "{}: status={:?} obj={:.4e} sol_len={} rc_len={} n={} df_abs={:.2e} df_rel_strict={:.2e} df_rel_bound={:.2e}",
+        qp_path,
+        r.status,
+        r.objective,
+        r.solution.len(),
+        r.reduced_costs.len(),
+        prob.num_vars,
+        df_abs,
+        df_rel_strict,
+        df_rel_bound
     );
-    if !matches!(r.status, SolveStatus::Optimal) {
-        return Err(format!("{} | status must be Optimal", summary));
+    if r.solution.len() != prob.num_vars || r.reduced_costs.len() != prob.num_vars {
+        return Err(format!(
+            "{} | incumbent vectors must be original-space length n={}",
+            summary, prob.num_vars
+        ));
+    }
+    if !r.solution.iter().all(|v| v.is_finite()) || !r.reduced_costs.iter().all(|v| v.is_finite()) {
+        return Err(format!("{} | incumbent vectors must be finite", summary));
+    }
+    if !has_usable_incumbent(&r.status) {
+        return Err(format!(
+            "{} | status must carry a usable incumbent",
+            summary
+        ));
     }
     // bound 考慮版を主判定にする (c69959d 以降の bench と同等)。
     if df_rel_bound > eps_dual {

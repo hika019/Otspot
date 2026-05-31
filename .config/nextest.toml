@@ -40,11 +40,11 @@ threads-required = "num-cpus"
 filter = "test(lp_regression_postsolve_y_dual::greenbea_postsolve_dual_feasibility)"
 threads-required = "num-cpus"
 
-# lp_simplex_stall_synthetic_large_lp_converges: 2500×3500 sparse LP routed through
+# lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent: 2500×3500 sparse LP routed through
 # IPM, needs ~11s solo but times out at 30s budget under CPU contention from other
 # tests. Run exclusively so faer parallelism gets all cores.
 [[profile.default.overrides]]
-filter = "test(lp_simplex_stall_synthetic_large_lp_converges)"
+filter = "test(lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent)"
 threads-required = "num-cpus"
 
 # lp_simplex_stall_d6cube_noop_proof_short: noop-proof phase (10s simplex stall)

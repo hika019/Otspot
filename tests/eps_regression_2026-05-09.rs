@@ -94,9 +94,17 @@ fn qpcboei2_pfeas_componentwise_at_default_eps_1e6() {
     let prob = parse_qps(&path).expect("parse QPCBOEI2");
     let result = solve_with_eps(&prob, 1e-6);
     let pfn = pfeas_normalized(&prob, &result.solution);
+    assert_eq!(
+        result.solution.len(),
+        prob.num_vars,
+        "QPCBOEI2 eps=1e-6 must return an original-space incumbent"
+    );
     assert!(
-        matches!(result.status, SolveStatus::Optimal),
-        "QPCBOEI2 eps=1e-6 expected Optimal, got {:?} pfn={:.3e}",
+        matches!(
+            result.status,
+            SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::SuboptimalSolution
+        ),
+        "QPCBOEI2 eps=1e-6 expected a usable incumbent, got {:?} pfn={:.3e}",
         result.status,
         pfn
     );

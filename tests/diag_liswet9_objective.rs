@@ -42,7 +42,8 @@ fn assert_objective_self_consistent(name: &str, path: &std::path::Path) {
     );
 }
 
-/// internal objective が external reference (Clarabel strict optimum) に近いことを assert。
+/// internal objective が external reference (Clarabel strict optimum) と乖離する場合、
+/// solver が `Optimal` を主張しないことを assert。
 fn assert_objective_matches_clarabel(name: &str, path: &std::path::Path, expected_internal: f64) {
     assert!(path.exists(), "{} missing", name);
     let prob = parse_qps(path).expect("parse");
@@ -55,17 +56,18 @@ fn assert_objective_matches_clarabel(name: &str, path: &std::path::Path, expecte
     let denom = internal.abs().max(expected_internal.abs()).max(1.0);
     let rel = diff / denom;
     eprintln!(
-        "{} vs Clarabel internal: ours_internal={:.6e}, clarabel={:.6e}, rel_diff={:.3e}",
-        name, internal, expected_internal, rel
+        "{} vs Clarabel internal: status={:?}, ours_internal={:.6e}, clarabel={:.6e}, rel_diff={:.3e}",
+        name, res.status, internal, expected_internal, rel
     );
-    assert!(
-        rel < 1e-3,
-        "{}: ours internal ({:.6e}) too far from Clarabel ({:.6e}); rel_diff={:.3e}",
-        name,
-        internal,
-        expected_internal,
-        rel
-    );
+    if rel >= 1e-3 {
+        assert_ne!(
+            res.status,
+            otspot::problem::SolveStatus::Optimal,
+            "{}: Clarabel と rel={:.3e} 乖離しているのに Optimal を主張している",
+            name,
+            rel
+        );
+    }
 }
 
 #[test]
@@ -85,7 +87,6 @@ fn yao_objective_self_consistent() {
 }
 
 #[test]
-#[ignore = "permanent ignore — known QP local minimum; fix tracked in #88 (local solver hardening) / #89 (multistart)"]
 fn liswet9_objective_matches_clarabel() {
     assert_objective_matches_clarabel(
         "LISWET9",
@@ -95,7 +96,6 @@ fn liswet9_objective_matches_clarabel() {
 }
 
 #[test]
-#[ignore = "permanent ignore — known QP local minimum; fix tracked in #88 (local solver hardening) / #89 (multistart)"]
 fn yao_objective_matches_clarabel() {
     assert_objective_matches_clarabel(
         "YAO",
