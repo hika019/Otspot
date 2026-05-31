@@ -104,6 +104,19 @@ fn options_for_problem(
     solve_opts
 }
 
+fn residual_exceeds_eps(value: f64, eps: f64) -> bool {
+    !value.is_finite() || value > eps
+}
+
+fn dual_payload_summary(result: &otspot_core::problem::SolverResult) -> String {
+    format!(
+        "dual_len={} bd_len={} rc_len={}",
+        result.dual_solution.len(),
+        result.bound_duals.len(),
+        result.reduced_costs.len()
+    )
+}
+
 #[allow(clippy::items_after_test_module)] // fn main() follows this module; reorganising is disruptive
 #[cfg(test)]
 mod tests {
@@ -261,6 +274,14 @@ mod tests {
         assert_eq!(solve_opts.known_optimal_obj, Some(12.5));
     }
 
+    #[test]
+    fn test_nonfinite_residuals_fail_quality_gate() {
+        assert!(residual_exceeds_eps(f64::NAN, 1e-6));
+        assert!(residual_exceeds_eps(f64::INFINITY, 1e-6));
+        assert!(residual_exceeds_eps(1e-5, 1e-6));
+        assert!(!residual_exceeds_eps(1e-7, 1e-6));
+    }
+
     /// load_expected_statuses が INFEASIBLE エントリを正しく読む
     #[test]
     fn test_expected_status_infeasible_loaded() {
@@ -393,7 +414,9 @@ fn main() {
         );
     }
     if baseline_objectives.is_empty() && expected_statuses.is_empty() {
-        eprintln!("WARNING: No known optimal values loaded. All problems will be PASS[no_ref].");
+        eprintln!(
+            "WARNING: No known optimal values loaded. Optimal-feasible problems will be CHECKED[no_ref], not PASS."
+        );
     }
 
     // QPSファイル一覧を取得（ファイル名でソート）
@@ -420,7 +443,7 @@ fn main() {
 
     // 集計 — 7カテゴリ + 既存カテゴリ + infeasible/unbounded 正答
     let mut n_pass = 0usize;
-    let mut n_pass_noref = 0usize;
+    let mut n_checked_noref = 0usize;
     let mut n_pass_infeasible = 0usize; // 期待通り Infeasible と判定
     let mut n_pass_unbounded = 0usize; // 期待通り Unbounded と判定
     let mut n_pfeas_fail = 0usize;
@@ -530,7 +553,7 @@ fn main() {
                 let pfeas_normalized = compute_pfeas_normalized(&prob, &result.solution);
 
                 // Step 4: pfeasチェック（正規化済み違反 > eps で失敗）
-                if pfeas_normalized > eps || bfeas > eps {
+                if residual_exceeds_eps(pfeas_normalized, eps) || residual_exceeds_eps(bfeas, eps) {
                     n_pfeas_fail += 1;
                     (
                         "PFEAS_FAIL".to_string(),
@@ -552,13 +575,19 @@ fn main() {
                         &result.reduced_costs,
                     );
 
-                    if !dfeas_rel.is_nan() && dfeas_rel > eps {
+                    if residual_exceeds_eps(dfeas_rel, eps) {
                         n_dfeas_fail += 1;
                         (
                             "DFEAS_FAIL".to_string(),
                             format!(
-                                "[{}] obj={:.2e} pf={:.1e} df={:.1e} dfr={:.1e} (eps={:.1e})",
-                                method_label, result.objective, pfeas, dfeas_abs, dfeas_rel, eps
+                                "[{}] obj={:.2e} pf={:.1e} df={:.1e} dfr={:.1e} (eps={:.1e}) {}",
+                                method_label,
+                                result.objective,
+                                pfeas,
+                                dfeas_abs,
+                                dfeas_rel,
+                                eps,
+                                dual_payload_summary(&result)
                             ),
                         )
                     } else {
@@ -624,7 +653,7 @@ fn main() {
                                     )
                             }
                             ObjCheckResult::NoRef => {
-                                n_pass_noref += 1;
+                                n_checked_noref += 1;
                                 let pfc = compute_pfeas_normalized(&prob, &result.solution);
                                 let dfc = compute_dfeas_componentwise(
                                     &prob,
@@ -642,7 +671,7 @@ fn main() {
                                     )
                                 };
                                 (
-                                        "PASS[no_ref]".to_string(),
+                                        "CHECKED[no_ref]".to_string(),
                                         format!(
                                             "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {}",
                                             method_label,
@@ -802,7 +831,7 @@ fn main() {
     println!();
     println!("=== Summary ===");
     println!("  PASS:              {}", n_pass);
-    println!("  PASS[no_ref]:      {}", n_pass_noref);
+    println!("  CHECKED[no_ref]:   {}", n_checked_noref);
     println!("  PASS:Infeasible:   {}", n_pass_infeasible);
     println!("  PASS:Unbounded:    {}", n_pass_unbounded);
     println!("  PFEAS_FAIL:        {}", n_pfeas_fail);
@@ -817,7 +846,7 @@ fn main() {
     println!(
         "  TOTAL:             {}",
         n_pass
-            + n_pass_noref
+            + n_checked_noref
             + n_pass_infeasible
             + n_pass_unbounded
             + n_pfeas_fail

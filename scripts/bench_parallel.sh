@@ -102,7 +102,7 @@ else
 fi
 
 if [[ ! -f "$KNOWN_OPTIMAL" ]]; then
-  echo "警告: 正解値CSV '$KNOWN_OPTIMAL' が見つからない。PASS[no_ref]になる可能性あり" >&2
+  echo "警告: 正解値CSV '$KNOWN_OPTIMAL' が見つからない。CHECKED[no_ref]になる可能性あり" >&2
 fi
 
 # ファイル拡張子の自動判別
@@ -318,7 +318,7 @@ TOTAL_SKIP=0
 TOTAL_PROBLEMS=0
 TOTAL_DFEAS_FAIL=0
 TOTAL_PFEAS_FAIL=0
-TOTAL_PASS_NO_REF=0
+TOTAL_CHECKED_NO_REF=0
 TOTAL_PASS_INFEASIBLE=0
 TOTAL_PASS_UNBOUNDED=0
 TOTAL_OBJ_MISMATCH=0
@@ -348,7 +348,7 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   total=$(grep -E "^\s+TOTAL:" "$LOG" | awk '{print $2}' | head -1)
   dfeas_fail=$(grep -E "^\s+DFEAS_FAIL:" "$LOG" | awk '{print $2}' | head -1)
   pfeas_fail=$(grep -E "^\s+PFEAS_FAIL:" "$LOG" | awk '{print $2}' | head -1)
-  pass_no_ref=$(grep -E "^\s+PASS\[no_ref\]:" "$LOG" | awk '{print $2}' | head -1)
+  checked_no_ref=$(grep -E "^\s+CHECKED\[no_ref\]:" "$LOG" | awk '{print $2}' | head -1)
   pass_infeasible=$(grep -E "^\s+PASS:Infeasible:" "$LOG" | awk '{print $2}' | head -1)
   pass_unbounded=$(grep -E "^\s+PASS:Unbounded:" "$LOG" | awk '{print $2}' | head -1)
   obj_mismatch=$(grep -E "^\s+OBJ_MISMATCH:" "$LOG" | awk '{print $2}' | head -1)
@@ -365,7 +365,7 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   TOTAL_PROBLEMS=$(( TOTAL_PROBLEMS + ${total:-0} ))
   TOTAL_DFEAS_FAIL=$(( TOTAL_DFEAS_FAIL + ${dfeas_fail:-0} ))
   TOTAL_PFEAS_FAIL=$(( TOTAL_PFEAS_FAIL + ${pfeas_fail:-0} ))
-  TOTAL_PASS_NO_REF=$(( TOTAL_PASS_NO_REF + ${pass_no_ref:-0} ))
+  TOTAL_CHECKED_NO_REF=$(( TOTAL_CHECKED_NO_REF + ${checked_no_ref:-0} ))
   TOTAL_PASS_INFEASIBLE=$(( TOTAL_PASS_INFEASIBLE + ${pass_infeasible:-0} ))
   TOTAL_PASS_UNBOUNDED=$(( TOTAL_PASS_UNBOUNDED + ${pass_unbounded:-0} ))
   TOTAL_OBJ_MISMATCH=$(( TOTAL_OBJ_MISMATCH + ${obj_mismatch:-0} ))
@@ -382,7 +382,7 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
     # Summary block lines: 2 field, field1 ends with ":", field2 is integer
     NF == 2 && $1 ~ /:$/ && $2 ~ /^-?[0-9]+$/ { next }
     # Detail rows: contain a known STATUS token
-    /(^|[[:space:]])(PASS(\[no_ref\])?(:Infeasible|:Unbounded)?|TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL|FAIL(:[A-Za-z]+)?)([[:space:]]|$)/ { print }
+    /(^|[[:space:]])(PASS(:Infeasible|:Unbounded)?|CHECKED\[no_ref\]|TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL|FAIL(:[A-Za-z]+)?)([[:space:]]|$)/ { print }
   ' "$LOG" >> "$PROBLEM_DETAIL_FILE"
 done
 
@@ -403,7 +403,7 @@ done
   fi
   echo "=== Summary ==="
   printf "  PASS:              %d\n" "$TOTAL_PASS"
-  printf "  PASS[no_ref]:      %d\n" "$TOTAL_PASS_NO_REF"
+  printf "  CHECKED[no_ref]:   %d\n" "$TOTAL_CHECKED_NO_REF"
   printf "  PASS:Infeasible:   %d\n" "$TOTAL_PASS_INFEASIBLE"
   printf "  PASS:Unbounded:    %d\n" "$TOTAL_PASS_UNBOUNDED"
   printf "  TIMEOUT:           %d\n" "$TOTAL_TIMEOUT"
@@ -436,7 +436,7 @@ done
     # NOTE は PASS 系では冗長 (ipm metrics は 詳細 block 側で見れば良い) なので省略。
     awk '
       function is_status(s) {
-        return s == "PASS" || s == "PASS[no_ref]" \
+        return s == "PASS" || s == "CHECKED[no_ref]" \
             || s == "PASS:Infeasible" || s == "PASS:Unbounded" \
             || s == "TIMEOUT" || s == "MAXITER" || s == "ERROR" || s == "SKIP" \
             || s == "PARSE_ERR" || s == "NONCONVEX" || s == "SUBOPTIMAL" \
@@ -445,7 +445,7 @@ done
             || s ~ /^FAIL(:[A-Za-z]+)?$/
       }
       function is_pass(s) {
-        return s ~ /^PASS(\[no_ref\]|:Infeasible|:Unbounded)?$/
+        return s ~ /^PASS(:Infeasible|:Unbounded)?$/
       }
       {
         name = $1
@@ -496,7 +496,7 @@ done
 } | tee "$OUTPUT"
 
 # TOTAL整合性チェック
-CATEGORY_SUM=$(( TOTAL_PASS + TOTAL_PASS_NO_REF + TOTAL_PASS_INFEASIBLE + TOTAL_PASS_UNBOUNDED + \
+CATEGORY_SUM=$(( TOTAL_PASS + TOTAL_CHECKED_NO_REF + TOTAL_PASS_INFEASIBLE + TOTAL_PASS_UNBOUNDED + \
   TOTAL_TIMEOUT + TOTAL_FAIL + \
   TOTAL_DFEAS_FAIL + TOTAL_PFEAS_FAIL + TOTAL_OBJ_MISMATCH + TOTAL_KKT_FAIL + TOTAL_NONCONVEX + \
   TOTAL_SUBOPTIMAL + TOTAL_MAXITER + TOTAL_ERROR + TOTAL_SKIP ))
