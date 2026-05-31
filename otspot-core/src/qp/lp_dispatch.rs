@@ -14,10 +14,10 @@ use std::time::Instant;
 use super::certificate::guard_lp_optimal;
 use crate::options::SolverOptions;
 use crate::presolve;
-use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
-use crate::sparse::CscMatrix;
 #[cfg(test)]
 use crate::problem::ConstraintType;
+use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
+use crate::sparse::CscMatrix;
 #[cfg(test)]
 use crate::tolerances::any_nonfinite;
 

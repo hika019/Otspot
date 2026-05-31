@@ -918,7 +918,8 @@ pub fn run_postsolve(
             if let PostsolveStep::LinearSubstitution {
                 col_orig_entries,
                 c_orig,
-                orig_row: Some(r), ..
+                orig_row: Some(r),
+                ..
             } = step
             {
                 if !(col_orig_entries.is_empty() && c_orig.abs() <= ZERO_TOL) {
