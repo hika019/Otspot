@@ -210,8 +210,11 @@ fn solve_unpresolved_lp_from_qp(
                     fill_lp_reduced_costs_from_dual(&mut ipm_result, lp);
                     return ipm_result;
                 }
-                // IPM incumbent を保存して simplex 再試行。simplex が失敗したとき
-                // pick_best_ipm_or_simplex が SuboptimalSolution を復元する。
+                // Ruiz IPM が SuboptimalSolution: no-Ruiz fallback を試す。
+                if let Some(guarded) = try_no_ruiz_ipm_lp(problem, lp, options) {
+                    return guarded;
+                }
+                // no-Ruiz も失敗: incumbent を保存して simplex 再試行。
                 ipm_subopt_candidate = Some(ipm_result);
             }
             SolveStatus::NonConvex(_)
@@ -352,6 +355,37 @@ fn solve_reduced_lp_from_qp(
     raw
 }
 
+/// Ruiz IPM が SuboptimalSolution で返した後の no-Ruiz fallback。
+///
+/// Ruiz amplification が大きい LP (例: cre-b amplification≈5e5) では unscale 後に
+/// dual が増幅され comp_componentwise_rel が大きくなり prove_optimal が失敗する。
+/// no-Ruiz は original space で完全収束するため complementary slackness を満たし Optimal 率が高い。
+/// Optimal/LocallyOptimal が得られた場合は guard 済み結果を返す。失敗時は None。
+fn try_no_ruiz_ipm_lp(
+    qp: &super::QpProblem,
+    lp: &crate::problem::LpProblem,
+    options: &SolverOptions,
+) -> Option<SolverResult> {
+    if options.deadline.is_some_and(|d| Instant::now() >= d) {
+        return None;
+    }
+    let mut no_ruiz_opts = ipm_opts_for_lp(options);
+    no_ruiz_opts.use_ruiz_scaling = false;
+    // Box no-Ruiz deadline to preserve budget for simplex fallback (same logic as Ruiz 1st call).
+    no_ruiz_opts.deadline = ipm_box_deadline(options, Instant::now()).or(no_ruiz_opts.deadline);
+    let mut result = ipm_solver::solve_ipm(qp, &no_ruiz_opts);
+    result.stats.route = SolveRoute::LpForwardedFromQp;
+    result.stats.lp_ipm_path = true;
+    // guard_lp_optimal may demote Optimal→SuboptimalSolution; check status after guarding.
+    let mut guarded = guard_lp_optimal(result, lp);
+    if matches!(guarded.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
+        fill_lp_reduced_costs_from_dual(&mut guarded, lp);
+        Some(guarded)
+    } else {
+        None
+    }
+}
+
 fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
     let dispatch_disabled = std::env::var("LP_DISPATCH_NOOP").ok().as_deref() == Some("1");
     let mut ipm_subopt_candidate: Option<SolverResult> = None;
@@ -375,6 +409,12 @@ fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> Solv
                 return ipm;
             }
             if matches!(ipm.status, SolveStatus::SuboptimalSolution) && !ipm.solution.is_empty() {
+                // Ruiz IPM が SuboptimalSolution: prove_optimal が補完スラック条件で失敗する場合
+                // (Ruiz amplification が大きい LP で dual が unscale 後に増幅→comp_componentwise 大)。
+                // no-Ruiz は original space で完全収束しこの問題を回避する。
+                if let Some(guarded) = try_no_ruiz_ipm_lp(&qp, lp, options) {
+                    return guarded;
+                }
                 ipm_subopt_candidate = Some(ipm);
             }
         }
