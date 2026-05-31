@@ -42,22 +42,6 @@ const LP_IPM_FIRST_M: usize = 2_000;
 /// 両ケース bench 実測 backed = 必須 knob。
 const IPM_BUDGET_FRACTION: f64 = 0.5;
 
-fn timeout_trace_enabled() -> bool {
-    std::env::var("OTSPOT_TIMEOUT_TRACE").ok().as_deref() == Some("1")
-}
-
-fn timeout_trace(phase: &str) {
-    if !timeout_trace_enabled() {
-        return;
-    }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
-    use std::io::Write as _;
-    let _ = writeln!(std::io::stderr(), "[timeout-trace {ts:.3}] {phase}");
-}
-
 fn timeout_result_lp_dispatch() -> SolverResult {
     let mut timeout = SolverResult {
         status: SolveStatus::Timeout,
@@ -84,7 +68,6 @@ fn ipm_box_deadline(options: &SolverOptions, now: Instant) -> Option<Instant> {
 }
 
 pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    timeout_trace("lp_dispatch: solve_as_lp: enter");
     let opts_with_deadline;
     let options: &SolverOptions = if options.deadline.is_none() {
         if let Some(secs) = options.timeout_secs {
@@ -113,10 +96,8 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
         Ok(lp) => lp,
         Err(_) => return SolverResult::infeasible(),
     };
-    timeout_trace("lp_dispatch: solve_as_lp: lp model built");
 
     if options.presolve {
-        timeout_trace("lp_dispatch: solve_as_lp: presolve start");
         let t_presolve = Instant::now();
         match presolve::run_presolve(&lp, options.deadline) {
             Err(presolve::PresolveStatus::Infeasible) => {
@@ -143,7 +124,6 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
             }
             Ok(presolve_result) if presolve_result.was_reduced => {
                 let presolve_us = t_presolve.elapsed().as_micros() as u64;
-                timeout_trace("lp_dispatch: solve_as_lp: presolve reduced");
                 return solve_reduced_lp_from_qp(
                     &lp,
                     problem.obj_offset,
@@ -154,7 +134,6 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
             }
             Ok(_) => {
                 let presolve_us = t_presolve.elapsed().as_micros() as u64;
-                timeout_trace("lp_dispatch: solve_as_lp: presolve unchanged");
                 if options.deadline.is_some_and(|d| Instant::now() >= d) {
                     let mut timeout = timeout_result_lp_dispatch();
                     timeout.timing_breakdown = Some(crate::problem::TimingBreakdown {
@@ -194,7 +173,6 @@ fn solve_unpresolved_lp_from_qp(
     problem: &QpProblem,
     options: &SolverOptions,
 ) -> SolverResult {
-    timeout_trace("lp_dispatch: solve_unpresolved_lp_from_qp: enter");
     // 大規模 LP: IPM 先行、Timeout/NumericalError/Unbounded/MaxIter は simplex 再試行。
     // Optimal/LocallyOptimal/Infeasible は確定的 → 即返却。
     // Unbounded は IPM 側 Q=0 数値リスクがあるため simplex で再確認。
@@ -202,12 +180,10 @@ fn solve_unpresolved_lp_from_qp(
     let dispatch_disabled = std::env::var("LP_DISPATCH_NOOP").ok().as_deref() == Some("1");
     let mut ipm_subopt_candidate: Option<SolverResult> = None;
     if !dispatch_disabled && prefer_ipm_for_size(problem.num_vars, problem.num_constraints) {
-        timeout_trace("lp_dispatch: solve_unpresolved_lp_from_qp: ipm-first start");
         let mut ipm_opts = ipm_opts_for_lp(options);
         // IPM に残予算の一部のみ割り当て、残りを simplex fallback に確保する。
         ipm_opts.deadline = ipm_box_deadline(options, Instant::now()).or(ipm_opts.deadline);
         let mut ipm_result = ipm_solver::solve_ipm(problem, &ipm_opts);
-        timeout_trace("lp_dispatch: solve_unpresolved_lp_from_qp: ipm-first done");
         ipm_result.stats.route = SolveRoute::LpForwardedFromQp;
         ipm_result.stats.lp_ipm_path = true;
         // ipm_solver は内部で obj_offset を加算済み → そのまま返す。
@@ -254,7 +230,6 @@ fn solve_unpresolved_lp_from_qp(
     // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
     // QpProblem.obj_offset を別経路で加算する必要がある。
     let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(lp, options);
-    timeout_trace("lp_dispatch: solve_unpresolved_lp_from_qp: simplex done");
     if matches!(
         simplex_result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout

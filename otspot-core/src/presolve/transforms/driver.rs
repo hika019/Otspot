@@ -11,22 +11,6 @@ use crate::problem::{ConstraintType, LpProblem};
 use crate::sparse::CscMatrix;
 use crate::tolerances::ZERO_TOL;
 
-fn timeout_trace_enabled() -> bool {
-    std::env::var("OTSPOT_TIMEOUT_TRACE").ok().as_deref() == Some("1")
-}
-
-fn timeout_trace(phase: &str) {
-    if !timeout_trace_enabled() {
-        return;
-    }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
-    use std::io::Write as _;
-    let _ = writeln!(std::io::stderr(), "[timeout-trace {ts:.3}] {phase}");
-}
-
 pub fn run_presolve(
     problem: &LpProblem,
     deadline: Option<std::time::Instant>,
@@ -42,7 +26,6 @@ pub fn run_presolve_with_flags(
     deadline: Option<std::time::Instant>,
     flags: PresolveFlags,
 ) -> Result<PresolveResult, PresolveStatus> {
-    timeout_trace("presolve: run_presolve_with_flags: enter");
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return Ok(PresolveResult::no_reduction(problem));
     }
@@ -54,7 +37,6 @@ pub fn run_presolve_with_flags(
     // Loop until reduction == 0. Each step removes finitely many elements, so this
     // terminates; the per-step deadline check is the only safety bound.
     loop {
-        timeout_trace("presolve: loop begin");
         let prev_removed = st.removed_cols.iter().filter(|&&r| r).count()
             + st.removed_rows.iter().filter(|&&r| r).count();
         let mut new_fixed_by_step5 = 0usize;
@@ -63,97 +45,73 @@ pub fn run_presolve_with_flags(
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Ok(PresolveResult::no_reduction(problem));
         }
-        timeout_trace("presolve: step1 start");
         step1_fixed_variable(&mut st, deadline)?;
-        timeout_trace("presolve: step1 done");
 
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Ok(PresolveResult::no_reduction(problem));
         }
-        timeout_trace("presolve: step2 start");
         step2_singleton_row(&mut st, deadline)?;
-        timeout_trace("presolve: step2 done");
 
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Ok(PresolveResult::no_reduction(problem));
         }
-        timeout_trace("presolve: step3a start");
         step3a_empty_row(&mut st, deadline)?;
-        timeout_trace("presolve: step3a done");
 
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Ok(PresolveResult::no_reduction(problem));
         }
-        timeout_trace("presolve: step3b start");
         step3b_empty_column(&mut st, deadline)?;
-        timeout_trace("presolve: step3b done");
 
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Ok(PresolveResult::no_reduction(problem));
         }
-        timeout_trace("presolve: step4 start");
         step4_redundant_constraint(&mut st, deadline)?;
-        timeout_trace("presolve: step4 done");
 
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Ok(PresolveResult::no_reduction(problem));
         }
-        timeout_trace("presolve: step5 start");
         step5_bounds_tightening(&mut st, &mut new_fixed_by_step5, deadline)?;
-        timeout_trace("presolve: step5 done");
 
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Ok(PresolveResult::no_reduction(problem));
         }
-        timeout_trace("presolve: step6 start");
         step6_doubleton_equation(&mut st, &mut new_subst_steps, deadline)?;
-        timeout_trace("presolve: step6 done");
 
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Ok(PresolveResult::no_reduction(problem));
         }
-        timeout_trace("presolve: step7 start");
         step7_free_var_substitution(&mut st, &mut new_subst_steps, deadline)?;
-        timeout_trace("presolve: step7 done");
 
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Ok(PresolveResult::no_reduction(problem));
         }
-        timeout_trace("presolve: step8 start");
         step8_free_singleton_col(&mut st, &mut new_subst_steps, deadline)?;
-        timeout_trace("presolve: step8 done");
 
         if flags.enable_parallel_row {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 return Ok(PresolveResult::no_reduction(problem));
             }
-            timeout_trace("presolve: step9 start");
             crate::presolve::transforms_dup::step9_parallel_row(&mut st, deadline)?;
-            timeout_trace("presolve: step9 done");
         }
         if flags.enable_dup_dom_col {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 return Ok(PresolveResult::no_reduction(problem));
             }
-            timeout_trace("presolve: step10 start");
             crate::presolve::transforms_dup::step10_dup_dom_col(
                 &mut st,
                 &mut new_fixed_by_step5,
                 deadline,
             )?;
-            timeout_trace("presolve: step10 done");
         }
         if flags.enable_dual_fixing {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 return Ok(PresolveResult::no_reduction(problem));
             }
-            timeout_trace("presolve: step11 start");
             crate::presolve::transforms_dup::step11_dual_fixing(
                 &mut st,
                 &mut new_fixed_by_step5,
                 deadline,
             )?;
-            timeout_trace("presolve: step11 done");
         }
 
         let curr_removed = st.removed_cols.iter().filter(|&&r| r).count()
