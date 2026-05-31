@@ -608,7 +608,7 @@ fn cold_start_advanced(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options::SolverOptions;
+    use crate::options::{SolverOptions, WarmStartBasis};
     use crate::problem::{ConstraintType, LpProblem, SolveStatus};
     use crate::simplex::dual_advanced::bound_flip::{
         bfrt_flip_invocations, reset_bfrt_flip_invocations,
@@ -1042,5 +1042,22 @@ mod tests {
             "LP2 cold: expected Infeasible, got {:?}",
             r2_cold.status
         );
+    }
+
+    #[test]
+    fn warm_start_with_expired_deadline_returns_timeout() {
+        let lp = lp_2x2_boxed();
+        let sf = build_standard_form(&lp);
+        let options = SolverOptions {
+            warm_start: Some(WarmStartBasis {
+                basis: sf.initial_basis.clone(),
+                x_b: vec![],
+            }),
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
+            ..SolverOptions::default()
+        };
+
+        let result = solve_dual_advanced(&sf, &lp, &options);
+        assert_eq!(result.status, SolveStatus::Timeout);
     }
 }
