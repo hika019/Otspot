@@ -27,7 +27,7 @@ jobs:
         run: bash scripts/ensure_emps.sh
       - name: Download CI subset
         run: bash scripts/download_all_bench_data.sh --ci-subset
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - name: Run heavy (tier-2) tests
