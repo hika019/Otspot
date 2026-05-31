@@ -128,8 +128,7 @@ EOF
         echo "[lp_vs_highs] LP data not found — downloading via netlib_lp_download.sh..."
         EMPS="/tmp/emps"
         if [[ ! -x "$EMPS" ]]; then
-            curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c
-            cc -o "$EMPS" /tmp/emps.c
+            EMPS_BIN="$EMPS" bash "$SCRIPT_DIR/ensure_emps.sh"
         fi
         EMPS_BIN="$EMPS" bash "$SCRIPT_DIR/netlib_lp_download.sh" "$LP_DATA_DIR" || true
         LP_COUNT="$(qps_count_in_dir "$LP_DATA_DIR")"
