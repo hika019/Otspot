@@ -371,14 +371,14 @@ fn try_no_ruiz_ipm_lp(
     }
     let mut no_ruiz_opts = ipm_opts_for_lp(options);
     no_ruiz_opts.use_ruiz_scaling = false;
+    // Box no-Ruiz deadline to preserve budget for simplex fallback (same logic as Ruiz 1st call).
+    no_ruiz_opts.deadline = ipm_box_deadline(options, Instant::now()).or(no_ruiz_opts.deadline);
     let mut result = ipm_solver::solve_ipm(qp, &no_ruiz_opts);
     result.stats.route = SolveRoute::LpForwardedFromQp;
     result.stats.lp_ipm_path = true;
-    if matches!(
-        result.status,
-        SolveStatus::Optimal | SolveStatus::LocallyOptimal
-    ) {
-        let mut guarded = guard_lp_optimal(result, lp);
+    // guard_lp_optimal may demote Optimal→SuboptimalSolution; check status after guarding.
+    let mut guarded = guard_lp_optimal(result, lp);
+    if matches!(guarded.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
         fill_lp_reduced_costs_from_dual(&mut guarded, lp);
         Some(guarded)
     } else {
