@@ -43,7 +43,8 @@ fn timeout_trace(phase: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
-    eprintln!("[timeout-trace {ts:.3}] {phase}");
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "[timeout-trace {ts:.3}] {phase}");
 }
 
 /// IP-PMM 内部ソルバー (Ruiz scaling 後の problem を受け取る)。
@@ -369,12 +370,37 @@ pub(crate) fn solve_ippmm_inner(
                 .as_ref()
                 .expect("d_inv must be set when use_schur");
             let pred = predictor_step_schur(
-                &s, &y, &is_eq_ext, m_ineq, &r_d_pmm, &r_p_pmm, &sigma_vec, &fac, d_inv, &a_ext,
-                m_ext, mu, timeout_ctx.deadline,
+                &s,
+                &y,
+                &is_eq_ext,
+                m_ineq,
+                &r_d_pmm,
+                &r_p_pmm,
+                &sigma_vec,
+                &fac,
+                d_inv,
+                &a_ext,
+                m_ext,
+                mu,
+                timeout_ctx.deadline,
             );
             corrector_step_schur(
-                &s, &y, &is_eq_ext, &pred, mu, &r_d_pmm, &r_p_pmm, &sigma_vec, &fac, d_inv, &a_ext,
-                m_ext, &mut dx, &mut dy, &mut ds, timeout_ctx.deadline,
+                &s,
+                &y,
+                &is_eq_ext,
+                &pred,
+                mu,
+                &r_d_pmm,
+                &r_p_pmm,
+                &sigma_vec,
+                &fac,
+                d_inv,
+                &a_ext,
+                m_ext,
+                &mut dx,
+                &mut dy,
+                &mut ds,
+                timeout_ctx.deadline,
             )
         } else {
             let pred = predictor_step(
