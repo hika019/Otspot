@@ -140,7 +140,8 @@ pub(crate) fn bland_ratio_test(
         }
         if trow[j] > pivot_tol {
             let ratio = reduced_costs[j] / trow[j];
-            if ratio < best_ratio {
+            // negative ratio は逆方向ピボットで Bland 単調性を破るため除外
+            if ratio >= 0.0 && ratio < best_ratio {
                 best_ratio = ratio;
                 best_j = Some(j);
             }
