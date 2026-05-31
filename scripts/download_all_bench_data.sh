@@ -98,6 +98,14 @@ run_or_skip() {
   eval "$cmd"
 }
 
+ensure_emps_for_lp_downloads() {
+  case "$MODE" in
+    all|lp|ci-subset)
+      bash scripts/ensure_emps.sh
+      ;;
+  esac
+}
+
 ##############################################################################
 # Check mode
 ##############################################################################
@@ -246,6 +254,8 @@ if [[ "$MODE" == "all" || "$MODE" == "lp" ]]; then
   echo ""
   echo "########## LP data ##########"
 
+  ensure_emps_for_lp_downloads
+
   run_or_skip data/lp_problems           109 "bash scripts/netlib_lp_download.sh"
   run_or_skip data/lp_problems_infeas    29  "bash scripts/netlib_lp_infeas_download.sh"
   run_or_skip data/lp_problems_extra     4   "bash scripts/lp_extra_download.sh"
@@ -301,6 +311,8 @@ fi
 if [[ "$MODE" == "ci-subset" ]]; then
   echo ""
   echo "########## CI subset LP data ##########"
+
+  ensure_emps_for_lp_downloads
 
   run_or_skip data/lp_problems           109 "bash scripts/netlib_lp_download.sh"
   run_or_skip data/lp_problems_infeas    29  "bash scripts/netlib_lp_infeas_download.sh"

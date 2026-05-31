@@ -8,7 +8,7 @@
 //! `solve_qp_with` が `timeout_secs` を honor することを検証する。
 //! 実データでの再現は別タスク (要 `data/` 配置) で取り扱う。
 
-use otspot::io::qplib::{parse_qplib, QplibProblem};
+use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
 use otspot::problem::{ConstraintType, SolveStatus};
 use otspot::qp::{solve_qp_with, QpProblem};
@@ -247,20 +247,17 @@ fn qp_synthetic_lasso_mid_honors_deadline() {
 const IS_LASSO_300_TIMEOUT_SEC: f64 = 10.0;
 const IS_LASSO_300_SLACK_SEC: f64 = 2.0;
 const IS_LASSO_300_WATCHDOG_SEC: f64 = 30.0;
-const IS_LASSO_300_PATH: &str = "data/osqp_bench_illscaled/IS_LASSO_300_S33_E5.qplib";
+const IS_LASSO_300_PATH: &str = "data/osqp_bench_illscaled/IS_LASSO_300_S33_E5.qps";
 
 #[test]
-#[ignore = "requires data/osqp_bench_illscaled/IS_LASSO_300_S33_E5.qplib"]
+#[ignore = "requires data/osqp_bench_illscaled/IS_LASSO_300_S33_E5.qps"]
 fn qp_is_lasso_300_real_data_honors_deadline() {
     let path = Path::new(IS_LASSO_300_PATH);
     assert!(
         path.exists(),
         "data missing: {IS_LASSO_300_PATH} — place file or remove --include-ignored"
     );
-    let problem = match parse_qplib(path).expect("parse IS_LASSO_300") {
-        QplibProblem::Qp(p) => p,
-        other => panic!("expected continuous QP for lasso, got {:?}", other),
-    };
+    let problem = parse_qps(path).expect("parse IS_LASSO_300");
     let watchdog = Duration::from_secs_f64(IS_LASSO_300_WATCHDOG_SEC);
     let (status, wall) = solve_with_watchdog(
         problem,

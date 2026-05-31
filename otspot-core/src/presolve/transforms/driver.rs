@@ -23,7 +23,8 @@ fn timeout_trace(phase: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
-    eprintln!("[timeout-trace {ts:.3}] {phase}");
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "[timeout-trace {ts:.3}] {phase}");
 }
 
 pub fn run_presolve(

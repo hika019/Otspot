@@ -87,6 +87,14 @@ pub(crate) fn timeout_result_with_incumbent(
 /// Convert an LP into standard form: variable shifts/splits, upper-bound rows,
 /// row sign normalization, slacks, initial basis with artificials.
 pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
+    build_standard_form_with_deadline(problem, None)
+        .expect("build_standard_form without deadline must not time out")
+}
+
+pub(crate) fn build_standard_form_with_deadline(
+    problem: &LpProblem,
+    deadline: Option<std::time::Instant>,
+) -> Option<StandardForm> {
     let n_orig = problem.num_vars;
     let m_orig = problem.num_constraints;
 
@@ -96,6 +104,9 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     let mut new_c: Vec<f64> = Vec::new();
 
     for j in 0..n_orig {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let (lb, ub) = problem.bounds[j];
         if lb.is_finite() {
             let idx = n_shifted;
@@ -132,6 +143,9 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     // Upper bound rows.
     let mut ub_constraints: Vec<(usize, f64)> = Vec::new();
     for (j, info) in orig_var_info.iter().enumerate().take(n_orig) {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let (lb, ub) = problem.bounds[j];
         if lb.is_finite() && ub.is_finite() {
             let effective_ub = ub - lb;
@@ -145,6 +159,9 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     // b adjusted for variable shifts.
     let mut b = problem.b.clone();
     for (j, info) in orig_var_info.iter().enumerate().take(n_orig) {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let offset = info.offset;
         if offset.abs() > DROP_TOL {
             if let Ok((rows, vals)) = problem.a.get_column(j) {
@@ -170,6 +187,9 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     let mut slack_coeff = vec![0.0f64; m_ext];
 
     for i in 0..m_ext {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         match ctypes[i] {
             ConstraintType::Le => {
                 if b[i] < -PIVOT_TOL {
@@ -216,6 +236,9 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     let mut num_artificial = 0usize;
 
     for i in 0..m_ext {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         match slack_col_idx[i] {
             Some(s_idx) => {
                 let col = n_shifted + s_idx;
@@ -245,6 +268,9 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     let mut trip_vals = Vec::new();
 
     for (j, info) in orig_var_info.iter().enumerate().take(n_orig) {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         if let Ok((a_rows, a_vals)) = problem.a.get_column(j) {
             for (k, &row) in a_rows.iter().enumerate() {
                 let val = a_vals[k];
@@ -262,6 +288,9 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     }
 
     for (ub_idx, &(new_var_idx, _)) in ub_constraints.iter().enumerate() {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let row = m_orig + ub_idx;
         trip_rows.push(row);
         trip_cols.push(new_var_idx);
@@ -269,6 +298,9 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     }
 
     for i in 0..m_ext {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         if let Some(s_idx) = slack_col_idx[i] {
             let col = n_shifted + s_idx;
             trip_rows.push(i);
@@ -282,7 +314,7 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     let mut c_ext = vec![0.0; n_total];
     c_ext[..n_shifted].copy_from_slice(&new_c[..n_shifted]);
 
-    StandardForm {
+    Some(StandardForm {
         a,
         b,
         c: c_ext,
@@ -296,7 +328,7 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
         n_orig,
         orig_var_info,
         row_negated,
-    }
+    })
 }
 
 /// Standard-form LP that keeps **explicit per-variable upper bounds** instead

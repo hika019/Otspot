@@ -248,23 +248,24 @@ pub(crate) fn iterate(
     debug_assert_eq!(state.at_upper.len(), n_total);
     debug_assert_eq!(state.is_basic.len(), n_total);
 
-    let mut basis_mgr = match LuBasis::new(a, &state.basis, options.max_etas) {
-        Ok(bm) => bm,
-        Err(crate::error::SolverError::SingularBasis { .. }) => {
-            return (BoundedOutcome::SingularBasis, state);
-        }
-        Err(_) => {
-            let obj = bounded_obj(
-                c,
-                &state.basis,
-                &state.x_b,
-                &state.at_upper,
-                &state.is_basic,
-                ubs,
-            );
-            return (BoundedOutcome::Timeout(obj), state);
-        }
-    };
+    let mut basis_mgr =
+        match LuBasis::new_timed(a, &state.basis, options.max_etas, options.deadline) {
+            Ok(bm) => bm,
+            Err(crate::error::SolverError::SingularBasis { .. }) => {
+                return (BoundedOutcome::SingularBasis, state);
+            }
+            Err(_) => {
+                let obj = bounded_obj(
+                    c,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs,
+                );
+                return (BoundedOutcome::Timeout(obj), state);
+            }
+        };
 
     // Early-exit before O(m²) γ init; prevents budget overrun on large warm-start solves.
     if options
@@ -823,10 +824,11 @@ pub(crate) fn phase2_primal_bounded(
     let m = bsf.m;
     let n_total = bsf.n_total;
 
-    let mut basis_mgr = match LuBasis::new(a, &state.basis, options.max_etas) {
-        Ok(bm) => bm,
-        Err(_) => return (SimplexOutcome::SingularBasis, state),
-    };
+    let mut basis_mgr =
+        match LuBasis::new_timed(a, &state.basis, options.max_etas, options.deadline) {
+            Ok(bm) => bm,
+            Err(_) => return (SimplexOutcome::SingularBasis, state),
+        };
 
     let mut y = vec![0.0f64; m];
     let mut rc = vec![0.0f64; n_total];

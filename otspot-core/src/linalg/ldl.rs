@@ -341,7 +341,9 @@ fn factorize_numeric_with_deadline_watchdog(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs_f64())
                     .unwrap_or(0.0);
-                eprintln!(
+                use std::io::Write as _;
+                let _ = writeln!(
+                    std::io::stderr(),
                     "[timeout-trace {ts:.3}] ldl: numeric factorization watchdog timeout"
                 );
             }

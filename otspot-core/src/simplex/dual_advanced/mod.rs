@@ -86,7 +86,7 @@ pub(crate) fn solve_dual_advanced(
         if warm.basis.len() == m && warm.basis.iter().all(|&idx| idx < sf.n_total) {
             let mut basis = warm.basis.clone();
 
-            match LuBasis::new(&a, &basis, options.max_etas) {
+            match LuBasis::new_timed(&a, &basis, options.max_etas, options.deadline) {
                 Ok(mut basis_mgr) => {
                     // x_B = B^{-1} b_new (FTRANで計算)
                     let mut x_b_sv = SparseVec::from_dense(&b);
@@ -252,7 +252,9 @@ fn try_bounded(
     // are present, so they fall through to cold start automatically.
     if let Some(warm) = &options.warm_start {
         if warm.basis.len() == bsf.m && warm.basis.iter().all(|&idx| idx < bsf.n_total) {
-            if let Ok(mut basis_mgr) = LuBasis::new(&a, &warm.basis, options.max_etas) {
+            if let Ok(mut basis_mgr) =
+                LuBasis::new_timed(&a, &warm.basis, options.max_etas, options.deadline)
+            {
                 let mut x_b_sv = SparseVec::from_dense(&b);
                 basis_mgr.ftran(&mut x_b_sv);
                 let x_b = x_b_sv.to_dense();
@@ -606,7 +608,7 @@ fn cold_start_advanced(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options::SolverOptions;
+    use crate::options::{SolverOptions, WarmStartBasis};
     use crate::problem::{ConstraintType, LpProblem, SolveStatus};
     use crate::simplex::dual_advanced::bound_flip::{
         bfrt_flip_invocations, reset_bfrt_flip_invocations,
@@ -1040,5 +1042,22 @@ mod tests {
             "LP2 cold: expected Infeasible, got {:?}",
             r2_cold.status
         );
+    }
+
+    #[test]
+    fn warm_start_with_expired_deadline_returns_timeout() {
+        let lp = lp_2x2_boxed();
+        let sf = build_standard_form(&lp);
+        let options = SolverOptions {
+            warm_start: Some(WarmStartBasis {
+                basis: sf.initial_basis.clone(),
+                x_b: vec![],
+            }),
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
+            ..SolverOptions::default()
+        };
+
+        let result = solve_dual_advanced(&sf, &lp, &options);
+        assert_eq!(result.status, SolveStatus::Timeout);
     }
 }

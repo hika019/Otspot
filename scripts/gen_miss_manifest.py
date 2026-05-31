@@ -11,6 +11,7 @@ manifest of non-PASS benchmark cases.  Each miss is classified by root cause:
   suboptimal          — MaxIterations or SuboptimalSolution
   numerical           — NumericalError, parse failure, or unknown error
   skip_nonconvex      — problem outside scope (SKIP / NONCONVEX)
+  unchecked_reference — feasible result without an external/baseline reference
 
 Usage:
   python scripts/gen_miss_manifest.py LOGFILE [LOGFILE ...]
@@ -36,13 +37,15 @@ from pathlib import Path
 # Classification
 # ---------------------------------------------------------------------------
 
-PASS_STATUSES = frozenset({"PASS", "PASS[no_ref]", "PASS:Infeasible", "PASS:Unbounded"})
+PASS_STATUSES = frozenset({"PASS", "PASS:Infeasible", "PASS:Unbounded"})
 SKIP_STATUSES = frozenset({"SKIP", "NONCONVEX"})
 
 
 def classify(status: str) -> str:
     if status in PASS_STATUSES:
         return "pass"
+    if status == "CHECKED[no_ref]":
+        return "unchecked_reference"
     if status in SKIP_STATUSES:
         return "skip_nonconvex"
     if status == "TIMEOUT":
@@ -71,7 +74,7 @@ def classify(status: str) -> str:
 #   NAME   rows  cols         STATUS   time.ddd  [note...]
 # The format is: {:<20} {:>6} {:>6} {:>15} {:>10.3} {}
 _STATUS_PAT = (
-    r"PASS(?:\[no_ref\])?(?::Infeasible|:Unbounded)?"
+    r"PASS(?::Infeasible|:Unbounded)?|CHECKED\[no_ref\]"
     r"|TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL"
     r"|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL"
     r"|FAIL(?::[A-Za-z]+)?"

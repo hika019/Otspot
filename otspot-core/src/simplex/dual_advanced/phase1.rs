@@ -82,10 +82,11 @@ fn farkas_infeasibility_certified(
         .map(|i| if basis_aug[i] >= n_total { 1.0 } else { 0.0 })
         .collect();
 
-    let mut basis_mgr = match LuBasis::new(a_aug, basis_aug, options.max_etas) {
-        Ok(bm) => bm,
-        Err(_) => return false,
-    };
+    let mut basis_mgr =
+        match LuBasis::new_timed(a_aug, basis_aug, options.max_etas, options.deadline) {
+            Ok(bm) => bm,
+            Err(_) => return false,
+        };
     let mut y = c_phase1;
     basis_mgr.btran_dense(&mut y);
 
@@ -427,14 +428,15 @@ fn try_build_crash_phase1_state(
         }
     }
 
-    let mut basis_mgr = match LuBasis::new(&a_aug, &basis_aug, options.max_etas) {
-        Ok(bm) => bm,
-        Err(_) => {
-            #[cfg(test)]
-            crash_probe::record(crash_probe::Outcome::LuFailed);
-            return None;
-        }
-    };
+    let mut basis_mgr =
+        match LuBasis::new_timed(&a_aug, &basis_aug, options.max_etas, options.deadline) {
+            Ok(bm) => bm,
+            Err(_) => {
+                #[cfg(test)]
+                crash_probe::record(crash_probe::Outcome::LuFailed);
+                return None;
+            }
+        };
 
     // x_B = B^{-1} b
     let mut x_b_sv = SparseVec::from_dense(b);
@@ -601,7 +603,9 @@ pub(crate) fn big_m_cold_start(
         SimplexOutcome::Optimal(_, _) => {
             // Flush numerical drift accumulated during Phase I cycling by
             // recomputing x_B = B^{-1} b before Phase II (Maros §6 hygiene).
-            if let Ok(mut bm) = LuBasis::new(&a_aug, &basis_aug, options.max_etas) {
+            if let Ok(mut bm) =
+                LuBasis::new_timed(&a_aug, &basis_aug, options.max_etas, options.deadline)
+            {
                 let mut rhs = SparseVec::from_dense(b);
                 bm.ftran(&mut rhs);
                 let fresh = rhs.to_dense();

@@ -113,7 +113,9 @@ qps_count_in_dir() {
         echo 0
         return
     fi
-    find "$dir" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' '
+    # data ディレクトリを別 worktree 共有の symlink にしている環境でも
+    # 問題数を正しく数えるため、リンク先を辿る。
+    find -L "$dir" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' '
 }
 
 # タイムスタンプ
@@ -130,8 +132,7 @@ EMPS="/tmp/emps"
 ensure_emps() {
     if [ ! -x "$EMPS" ]; then
         echo "[run_lp_bench] emps バイナリが見つからないため、コンパイルします..." >&2
-        curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c
-        cc -o "$EMPS" /tmp/emps.c
+        EMPS_BIN="$EMPS" bash "$SCRIPT_DIR/ensure_emps.sh"
         echo "[run_lp_bench] emps コンパイル完了" >&2
     fi
 }

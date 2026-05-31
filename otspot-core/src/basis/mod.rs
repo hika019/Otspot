@@ -55,6 +55,7 @@ pub(crate) struct LuBasis {
 }
 
 impl LuBasis {
+    #[cfg(test)]
     pub fn new(a: &CscMatrix, basis: &[usize], max_etas: usize) -> Result<Self, SolverError> {
         Self::new_timed(a, basis, max_etas, None)
     }
