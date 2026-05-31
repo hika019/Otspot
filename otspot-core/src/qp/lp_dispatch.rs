@@ -58,6 +58,17 @@ fn timeout_trace(phase: &str) {
     let _ = writeln!(std::io::stderr(), "[timeout-trace {ts:.3}] {phase}");
 }
 
+fn timeout_result_lp_dispatch() -> SolverResult {
+    let mut timeout = SolverResult {
+        status: SolveStatus::Timeout,
+        objective: f64::INFINITY,
+        ..Default::default()
+    };
+    timeout.stats.route = SolveRoute::LpForwardedFromQp;
+    timeout.stats.deadline_triggered = true;
+    timeout
+}
+
 pub fn prefer_ipm_for_size(n: usize, m: usize) -> bool {
     n > LP_IPM_FIRST_N || m > LP_IPM_FIRST_M
 }
@@ -144,6 +155,16 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
             Ok(_) => {
                 let presolve_us = t_presolve.elapsed().as_micros() as u64;
                 timeout_trace("lp_dispatch: solve_as_lp: presolve unchanged");
+                if options.deadline.is_some_and(|d| Instant::now() >= d) {
+                    let mut timeout = timeout_result_lp_dispatch();
+                    timeout.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                        presolve_us,
+                        solve_us: 0,
+                        postsolve_us: 0,
+                        ..Default::default()
+                    });
+                    return timeout;
+                }
                 let t_solve = Instant::now();
                 let mut no_presolve_opts = options.clone();
                 no_presolve_opts.presolve = false;
@@ -159,6 +180,10 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
                 return result;
             }
         }
+    }
+
+    if options.deadline.is_some_and(|d| Instant::now() >= d) {
+        return timeout_result_lp_dispatch();
     }
 
     solve_unpresolved_lp_from_qp(&lp, problem, options)
@@ -839,6 +864,33 @@ mod tests {
             .expect("LP-dispatched QP presolve/postsolve path must keep timing");
         assert!(timing.presolve_us > 0, "presolve timing must be recorded");
         assert!(timing.postsolve_us > 0, "postsolve timing must be recorded");
+    }
+
+    #[test]
+    fn qp_zero_path_expired_deadline_after_presolve_returns_timeout() {
+        use crate::options::SolverOptions;
+        use crate::problem::{SolveRoute, SolveStatus};
+
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let problem = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![1.0],
+            a,
+            vec![1.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            presolve: true,
+            ..SolverOptions::default()
+        };
+
+        let result = solve_as_lp(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Timeout);
+        assert_eq!(result.stats.route, SolveRoute::LpForwardedFromQp);
+        assert!(result.stats.deadline_triggered);
     }
 
     #[test]
