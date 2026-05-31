@@ -132,8 +132,7 @@ EMPS="/tmp/emps"
 ensure_emps() {
     if [ ! -x "$EMPS" ]; then
         echo "[run_lp_bench] emps バイナリが見つからないため、コンパイルします..." >&2
-        curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c
-        cc -o "$EMPS" /tmp/emps.c
+        EMPS_BIN="$EMPS" bash "$SCRIPT_DIR/ensure_emps.sh"
         echo "[run_lp_bench] emps コンパイル完了" >&2
     fi
 }

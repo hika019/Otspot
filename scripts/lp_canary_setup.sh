@@ -45,8 +45,7 @@ INFEAS_DIR="$SOLVER_ROOT/data/lp_problems_infeas"
 # --- 依存元データが揃っているか確認、無ければダウンロード ---
 ensure_emps() {
   if [ ! -x "/tmp/emps" ]; then
-    curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c
-    cc -o /tmp/emps /tmp/emps.c
+    EMPS_BIN="/tmp/emps" bash "$SCRIPT_DIR/ensure_emps.sh"
   fi
 }
 

@@ -6,7 +6,18 @@ set -eo pipefail
 echo "=== pre-merge audit ==="
 echo
 
-# 1. build + test + clippy + file size
+# 1. CI workflow/data bootstrap checks
+bash -n scripts/ensure_emps.sh
+
+if grep -R "curl .*emps\\.c" .github/workflows scripts 2>/dev/null \
+  | grep -v "scripts/ensure_emps.sh" \
+  | grep -v "Compile with:" \
+  | grep -vE '^[^:]+:[[:space:]]*#'; then
+  echo "ERROR: emps.c download must go through scripts/ensure_emps.sh" >&2
+  exit 1
+fi
+
+# 2. build + test + clippy + file size
 cargo build --release
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run --release --test-threads 3
@@ -33,7 +44,7 @@ echo "=== branch diff vs main ==="
 git log main..HEAD --pretty='%h %s'
 git diff --stat main..HEAD | tail -3
 
-# 3. 公開 API diff (cargo-public-api installed 前提)
+# 4. 公開 API diff (cargo-public-api installed 前提)
 echo
 echo "=== public API diff ==="
 if command -v cargo-public-api >/dev/null 2>&1; then
@@ -42,7 +53,7 @@ else
   echo "(cargo-public-api 未 install、CI で確認)"
 fi
 
-# 4. コメント品質 (CLAUDE.md L45-46)
+# 5. コメント品質 (CLAUDE.md L45-46)
 # diff scope ではなく full-scan を使用: gate を後付けする以前の commit に
 # 違反が残存しうるため (#203 設置時点で複数 file が threshold 超過、PR 段階
 # で trim 議論)。main に違反が確定混入した場合は ALLOWLIST 追加 or
@@ -53,7 +64,7 @@ bash scripts/lib/check_memo_grep.sh
 bash scripts/check_comment_block_size.sh
 bash scripts/check_comment_ratio.sh
 
-# 5. magic 検出 (diff scope のみ、memory feedback_review_magic_detection)
+# 6. magic 検出 (diff scope のみ、memory feedback_review_magic_detection)
 echo
 echo "=== magic number scan (diff のみ) ==="
 echo "--- 新規 const without /// docstring ---"

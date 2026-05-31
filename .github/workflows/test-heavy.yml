@@ -24,9 +24,7 @@ jobs:
         run: pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*'
       - name: Build emps decoder (Netlib LP data 変換用)
         if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c
-          cc -o /tmp/emps /tmp/emps.c
+        run: bash scripts/ensure_emps.sh
       - name: Download CI subset
         run: bash scripts/download_all_bench_data.sh --ci-subset
       - uses: dtolnay/rust-toolchain@1.95.0
