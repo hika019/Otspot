@@ -24,7 +24,7 @@ pub(crate) use standard_form::build_standard_form;
 #[cfg(test)]
 pub(crate) use standard_form::OrigVarInfo;
 pub(crate) use standard_form::{
-    build_bounded_standard_form, scale_upper_bounds, BoundedStandardForm,
+    build_bounded_standard_form_with_deadline, scale_upper_bounds, BoundedStandardForm,
 };
 pub(crate) use standard_form::{
     extract_dual_info, timeout_result_with_incumbent, SimplexOutcome, StandardForm,

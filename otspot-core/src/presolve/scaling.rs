@@ -13,6 +13,8 @@ const LP_RUIZ_MAX_SWEEPS: usize = 20;
 /// Convergence tolerance for LP Ruiz scaling: stop early when max scale change < this value.
 const LP_RUIZ_CONV_TOL: f64 = 1e-4;
 
+type LpScalingResult = (CscMatrix, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+
 /// LP equilibration via Ruiz scaling.
 ///
 /// Static `scale()` only; not intended for instantiation.
@@ -33,7 +35,24 @@ impl LpEquilibration {
         matrix: &CscMatrix,
         b: &[f64],
         c: &[f64],
-    ) -> (CscMatrix, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    ) -> LpScalingResult {
+        Self::scale_with_deadline(matrix, b, c, None)
+            .expect("LpEquilibration::scale without deadline must not time out")
+    }
+
+    /// Deadline-aware Ruiz scaling. Returns `None` when the deadline expires
+    /// while scaling is in progress.
+    pub fn scale_with_deadline(
+        matrix: &CscMatrix,
+        b: &[f64],
+        c: &[f64],
+        deadline: Option<std::time::Instant>,
+    ) -> Option<LpScalingResult> {
+        #[inline]
+        fn expired(deadline: Option<std::time::Instant>) -> bool {
+            deadline.is_some_and(|d| std::time::Instant::now() >= d)
+        }
+
         let m = matrix.nrows;
         let n = matrix.ncols;
 
@@ -45,9 +64,15 @@ impl LpEquilibration {
         let mut cur_c = c.to_vec();
 
         for _ in 0..LP_RUIZ_MAX_SWEEPS {
+            if expired(deadline) {
+                return None;
+            }
             // Compute row maximums (iterate over all non-zeros)
             let mut row_max = vec![0.0f64; m];
             for k in 0..a.row_ind.len() {
+                if expired(deadline) {
+                    return None;
+                }
                 let row = a.row_ind[k];
                 let v = a.values[k].abs();
                 if v > row_max[row] {
@@ -58,9 +83,15 @@ impl LpEquilibration {
             // Compute column maximums
             let mut col_max = vec![0.0f64; n];
             for (j, col_max_j) in col_max.iter_mut().enumerate().take(n) {
+                if expired(deadline) {
+                    return None;
+                }
                 let start = a.col_ptr[j];
                 let end = a.col_ptr[j + 1];
                 for k in start..end {
+                    if expired(deadline) {
+                        return None;
+                    }
                     let v = a.values[k].abs();
                     if v > *col_max_j {
                         *col_max_j = v;
@@ -99,9 +130,15 @@ impl LpEquilibration {
 
             // Apply scaling to matrix entries: a[i,j] *= row_factor[i] * col_factor[j]
             for (j, &cf) in col_factor.iter().enumerate().take(n) {
+                if expired(deadline) {
+                    return None;
+                }
                 let start = a.col_ptr[j];
                 let end = a.col_ptr[j + 1];
                 for k in start..end {
+                    if expired(deadline) {
+                        return None;
+                    }
                     let row = a.row_ind[k];
                     a.values[k] *= row_factor[row] * cf;
                 }
@@ -109,17 +146,29 @@ impl LpEquilibration {
 
             // Apply scaling to b and c
             for i in 0..m {
+                if expired(deadline) {
+                    return None;
+                }
                 cur_b[i] *= row_factor[i];
             }
             for j in 0..n {
+                if expired(deadline) {
+                    return None;
+                }
                 cur_c[j] *= col_factor[j];
             }
 
             // Accumulate cumulative scales
             for i in 0..m {
+                if expired(deadline) {
+                    return None;
+                }
                 cumul_row[i] *= row_factor[i];
             }
             for j in 0..n {
+                if expired(deadline) {
+                    return None;
+                }
                 cumul_col[j] *= col_factor[j];
             }
 
@@ -128,7 +177,7 @@ impl LpEquilibration {
             }
         }
 
-        (a, cur_b, cur_c, cumul_row, cumul_col)
+        Some((a, cur_b, cur_c, cumul_row, cumul_col))
     }
 }
 

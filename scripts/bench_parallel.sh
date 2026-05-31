@@ -269,14 +269,14 @@ worker_func() {
     elif [[ $exit_code -eq $GTIMEOUT_EXIT_CODE ]]; then
       # gtimeout 強制終了 = solver 内部 timeout が機能していない。
       # 集計から脱落させない（問題数 invisible になるバグ）よう、
-      # log に TIMEOUT エントリを 1 件追記し、aggregator が拾える形式にする。
+      # log に EXTERNAL_TIMEOUT エントリを 1 件追記し、aggregator が拾える形式にする。
       local prob_file prob_name="?"
       for prob_file in "$group_dir"/*; do
         [[ -e "$prob_file" ]] && prob_name=$(basename "$prob_file") && break
       done
       {
-        echo "  $prob_name  TIMEOUT (external_timeout=${EXTERNAL_TIMEOUT}s, solver internal timeout 未機能)"
-        echo "    TIMEOUT: 1"
+        echo "  $prob_name  EXTERNAL_TIMEOUT (external_timeout=${EXTERNAL_TIMEOUT}s, solver internal timeout 未機能)"
+        echo "    EXTERNAL_TIMEOUT: 1"
         echo "    TOTAL:   1"
       } >> "$log"
       echo "[bench_parallel.sh] ワーカー $worker_id: $group_name 外部timeout発火 ($prob_name, ${EXTERNAL_TIMEOUT}s)" >&2
@@ -311,6 +311,7 @@ fi
 # 集計
 TOTAL_PASS=0
 TOTAL_TIMEOUT=0
+TOTAL_EXTERNAL_TIMEOUT=0
 TOTAL_FAIL=0
 TOTAL_MAXITER=0
 TOTAL_ERROR=0
@@ -341,6 +342,7 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   # Summaryから数値を抽出
   pass=$(grep -E "^\s+PASS:" "$LOG" | awk '{print $2}' | head -1)
   timeout=$(grep -E "^\s+TIMEOUT:" "$LOG" | awk '{print $2}' | head -1)
+  external_timeout=$(grep -E "^\s+EXTERNAL_TIMEOUT:" "$LOG" | awk '{print $2}' | head -1)
   fail=$(grep -E "^\s+FAIL:" "$LOG" | awk '{print $2}' | head -1)
   maxiter=$(grep -E "^\s+MAXITER:" "$LOG" | awk '{print $2}' | head -1)
   error=$(grep -E "^\s+ERROR:" "$LOG" | awk '{print $2}' | head -1)
@@ -358,6 +360,7 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
 
   TOTAL_PASS=$(( TOTAL_PASS + ${pass:-0} ))
   TOTAL_TIMEOUT=$(( TOTAL_TIMEOUT + ${timeout:-0} ))
+  TOTAL_EXTERNAL_TIMEOUT=$(( TOTAL_EXTERNAL_TIMEOUT + ${external_timeout:-0} ))
   TOTAL_FAIL=$(( TOTAL_FAIL + ${fail:-0} ))
   TOTAL_MAXITER=$(( TOTAL_MAXITER + ${maxiter:-0} ))
   TOTAL_ERROR=$(( TOTAL_ERROR + ${error:-0} ))
@@ -375,14 +378,14 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
 
   # 問題別詳細行抽出:
   # - bench binary 出力: `NAME ROWS COLS STATUS TIME ...` (NAME が非空白先頭)
-  # - 外部 timeout fallback (worker_func 内 fallback 行): `  NAME  TIMEOUT (...)` (NF=2+)
+  # - 外部 timeout fallback (worker_func 内 fallback 行): `  NAME  EXTERNAL_TIMEOUT (...)` (NF=2+)
   # - 除外: PARSE_/SOLVE_ progress lines、Summary block (`^\s+STATUS:\s+NUMBER\s*$`)
   awk '
     /^(PARSE_|SOLVE_)/ { next }
     # Summary block lines: 2 field, field1 ends with ":", field2 is integer
     NF == 2 && $1 ~ /:$/ && $2 ~ /^-?[0-9]+$/ { next }
     # Detail rows: contain a known STATUS token
-    /(^|[[:space:]])(PASS(:Infeasible|:Unbounded)?|CHECKED\[no_ref\]|TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL|FAIL(:[A-Za-z]+)?)([[:space:]]|$)/ { print }
+    /(^|[[:space:]])(PASS(:Infeasible|:Unbounded)?|CHECKED\[no_ref\]|TIMEOUT|EXTERNAL_TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL|FAIL(:[A-Za-z]+)?)([[:space:]]|$)/ { print }
   ' "$LOG" >> "$PROBLEM_DETAIL_FILE"
 done
 
@@ -407,6 +410,7 @@ done
   printf "  PASS:Infeasible:   %d\n" "$TOTAL_PASS_INFEASIBLE"
   printf "  PASS:Unbounded:    %d\n" "$TOTAL_PASS_UNBOUNDED"
   printf "  TIMEOUT:           %d\n" "$TOTAL_TIMEOUT"
+  printf "  EXTERNAL_TIMEOUT:  %d\n" "$TOTAL_EXTERNAL_TIMEOUT"
   printf "  FAIL:              %d\n" "$TOTAL_FAIL"
   printf "  DFEAS_FAIL:        %d\n" "$TOTAL_DFEAS_FAIL"
   printf "  PFEAS_FAIL:        %d\n" "$TOTAL_PFEAS_FAIL"
@@ -430,7 +434,7 @@ done
   if [[ -s "$PROBLEM_DETAIL_FILE" ]]; then
     # 各 detail 行から (STATUS, NAME, NOTE) を抽出してカテゴリ毎に列挙。
     # bench binary 行: $1=NAME $2=ROWS $3=COLS $4=STATUS $5=TIME $6..=NOTE
-    # 外部 timeout fallback 行: $1=NAME $2=TIMEOUT $3..=NOTE
+    # 外部 timeout fallback 行: $1=NAME $2=EXTERNAL_TIMEOUT $3..=NOTE
     # STATUS 判定は keyword set で行う (token を fuzzy 一致させると "solver" 等を
     # 誤って status と認識する事故が起きるため)。
     # NOTE は PASS 系では冗長 (ipm metrics は 詳細 block 側で見れば良い) なので省略。
@@ -438,7 +442,8 @@ done
       function is_status(s) {
         return s == "PASS" || s == "CHECKED[no_ref]" \
             || s == "PASS:Infeasible" || s == "PASS:Unbounded" \
-            || s == "TIMEOUT" || s == "MAXITER" || s == "ERROR" || s == "SKIP" \
+            || s == "TIMEOUT" || s == "EXTERNAL_TIMEOUT" \
+            || s == "MAXITER" || s == "ERROR" || s == "SKIP" \
             || s == "PARSE_ERR" || s == "NONCONVEX" || s == "SUBOPTIMAL" \
             || s == "KKT_FAIL" || s == "OBJ_MISMATCH" \
             || s == "PFEAS_FAIL" || s == "DFEAS_FAIL" \
@@ -497,7 +502,7 @@ done
 
 # TOTAL整合性チェック
 CATEGORY_SUM=$(( TOTAL_PASS + TOTAL_CHECKED_NO_REF + TOTAL_PASS_INFEASIBLE + TOTAL_PASS_UNBOUNDED + \
-  TOTAL_TIMEOUT + TOTAL_FAIL + \
+  TOTAL_TIMEOUT + TOTAL_EXTERNAL_TIMEOUT + TOTAL_FAIL + \
   TOTAL_DFEAS_FAIL + TOTAL_PFEAS_FAIL + TOTAL_OBJ_MISMATCH + TOTAL_KKT_FAIL + TOTAL_NONCONVEX + \
   TOTAL_SUBOPTIMAL + TOTAL_MAXITER + TOTAL_ERROR + TOTAL_SKIP ))
 if [[ "$CATEGORY_SUM" != "$TOTAL_PROBLEMS" ]]; then
@@ -519,6 +524,10 @@ fi
 
 # 異常終了グループがあれば exit 1
 if [[ ${#FAILED_GROUPS[@]} -gt 0 ]]; then
+  exit 1
+fi
+if [[ "$TOTAL_EXTERNAL_TIMEOUT" -gt 0 ]]; then
+  echo "エラー: 外部timeoutが ${TOTAL_EXTERNAL_TIMEOUT} 件発生しました。solver内部timeout未機能として失敗扱いにします。" >&2
   exit 1
 fi
 exit 0

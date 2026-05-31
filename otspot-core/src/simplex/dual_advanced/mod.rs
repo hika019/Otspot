@@ -6,7 +6,7 @@
 
 use super::dual_common::outcome_to_result;
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving};
-use super::{build_bounded_standard_form, scale_upper_bounds, BoundedStandardForm};
+use super::{build_bounded_standard_form_with_deadline, scale_upper_bounds, BoundedStandardForm};
 use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{DualPricing, SolverOptions, WarmStartBasis};
@@ -24,6 +24,34 @@ mod core;
 mod phase1;
 pub mod ratio_test;
 mod steepest_edge;
+
+fn timeout_trace_enabled() -> bool {
+    std::env::var("OTSPOT_TIMEOUT_TRACE").ok().as_deref() == Some("1")
+}
+
+fn timeout_trace(phase: &str) {
+    if !timeout_trace_enabled() {
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "[timeout-trace {ts:.3}] {phase}");
+}
+
+fn deadline_expired(deadline: Option<std::time::Instant>) -> bool {
+    deadline.is_some_and(|d| std::time::Instant::now() >= d)
+}
+
+fn timeout_result() -> SolverResult {
+    SolverResult {
+        status: SolveStatus::Timeout,
+        objective: f64::INFINITY,
+        ..Default::default()
+    }
+}
 
 /// Builds a [`DualLeavingStrategy`] from `pricing`; DSE initialises *m* weights to 1.
 fn make_leaving_strategy(pricing: DualPricing, m: usize) -> Box<dyn DualLeavingStrategy> {
@@ -66,12 +94,23 @@ pub(crate) fn solve_dual_advanced(
     problem: &LpProblem,
     options: &SolverOptions,
 ) -> SolverResult {
+    timeout_trace("dual_advanced: enter");
+    if deadline_expired(options.deadline) {
+        return timeout_result();
+    }
     // Bounded path: problems with finite upper bounds use BFRT-aware iteration.
     // Gate: Le-only (num_artificial == 0) and dispatch not disabled by test hook.
     if !bounded_dispatch_disabled() && problem.bounds.iter().any(|&(_, ub)| ub.is_finite()) {
-        let bsf = build_bounded_standard_form(problem);
+        timeout_trace("dual_advanced: bounded form start");
+        let Some(bsf) = build_bounded_standard_form_with_deadline(problem, options.deadline) else {
+            timeout_trace("dual_advanced: bounded form timeout");
+            return timeout_result();
+        };
+        timeout_trace("dual_advanced: bounded form done");
         if bsf.num_artificial == 0 {
+            timeout_trace("dual_advanced: bounded path start");
             if let Some(result) = try_bounded(&bsf, problem, options) {
+                timeout_trace("dual_advanced: bounded path done");
                 return result;
             }
             // UbViolationOutOfScope → fall through to legacy path
@@ -79,7 +118,14 @@ pub(crate) fn solve_dual_advanced(
     }
 
     let m = sf.m;
-    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
+    timeout_trace("dual_advanced: legacy scale start");
+    let Some((a, b, c, row_scale, col_scale)) =
+        LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
+    else {
+        timeout_trace("dual_advanced: legacy scale timeout");
+        return timeout_result();
+    };
+    timeout_trace("dual_advanced: legacy scale done");
 
     if let Some(warm) = &options.warm_start {
         // Warm start: 提供された基底でx_Bを新しいRHSから再計算
@@ -164,7 +210,9 @@ pub(crate) fn solve_dual_advanced(
     // (neos / rail2586 / rail4284). Removed — slow Primal now honors
     // the full budget and returns its incumbent, cycling Primal still bails
     // quickly via the early-bail.
+    timeout_trace("dual_advanced: ge/eq primal phase start");
     let primal_result = super::dual::two_phase_dual_simplex(sf, problem, options);
+    timeout_trace("dual_advanced: ge/eq primal phase done");
     match primal_result.status {
         SolveStatus::Timeout if primal_result.solution.is_empty() => {
             let bigm_result =
@@ -240,7 +288,17 @@ fn try_bounded(
     problem: &LpProblem,
     options: &SolverOptions,
 ) -> Option<SolverResult> {
-    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&bsf.a, &bsf.b, &bsf.c);
+    if deadline_expired(options.deadline) {
+        return Some(timeout_result());
+    }
+    timeout_trace("dual_advanced: bounded scale start");
+    let Some((a, b, c, row_scale, col_scale)) =
+        LpEquilibration::scale_with_deadline(&bsf.a, &bsf.b, &bsf.c, options.deadline)
+    else {
+        timeout_trace("dual_advanced: bounded scale timeout");
+        return Some(timeout_result());
+    };
+    timeout_trace("dual_advanced: bounded scale done");
     let ubs = scale_upper_bounds(&bsf.upper_bounds, &col_scale);
     // total_iters is always assigned before read (warm branch overwrites before
     // passing &mut to finish_bounded; cold path overwrites before return).

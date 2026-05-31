@@ -47,15 +47,17 @@
 //! wiring enters with `x_B = b ≥ 0` so this branch is never triggered there.
 
 use crate::basis::{BasisManager, LuBasis};
+use crate::error::SolverError;
 use crate::options::SolverOptions;
 use crate::problem::LpProblem;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use super::super::dual_common::{
-    basic_obj, compute_dual_vars_into, compute_reduced_costs_into, made_progress_with_floor,
-    recompute_gamma_truth, BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
+    basic_obj, compute_dual_vars_into, made_progress_with_floor, recompute_gamma_truth,
+    BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
 };
 use super::super::pricing::DualLeavingStrategy;
 use super::super::standard_form::{BoundedStandardForm, SimplexOutcome};
@@ -121,6 +123,44 @@ fn flip_apply_disabled() -> bool {
 /// Hard iteration cap shared by both bounded dual and bounded primal Phase 2 loops.
 /// Guarantees termination even when pricing degenerates or deadline is None (unit tests).
 const SIMPLEX_ITER_HARD_CAP: usize = 1_000_000;
+
+#[inline]
+fn deadline_expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|d| Instant::now() >= d)
+}
+
+fn compute_reduced_costs_into_timed(
+    a: &CscMatrix,
+    c: &[f64],
+    basis_mgr: &mut LuBasis,
+    is_basic: &[bool],
+    n_price: usize,
+    basis: &[usize],
+    y_buf: &mut [f64],
+    rc_out: &mut [f64],
+    deadline: Option<Instant>,
+) -> bool {
+    if deadline_expired(deadline) {
+        return false;
+    }
+    compute_dual_vars_into(c, basis_mgr, basis, y_buf);
+    for j in 0..n_price {
+        if deadline_expired(deadline) {
+            return false;
+        }
+        if is_basic[j] {
+            rc_out[j] = 0.0;
+            continue;
+        }
+        let (rows, vals) = a.get_column(j).unwrap();
+        let mut ya = 0.0;
+        for (k, &row) in rows.iter().enumerate() {
+            ya += y_buf[row] * vals[k];
+        }
+        rc_out[j] = c[j] - ya;
+    }
+    true
+}
 
 /// Internal state of the bounded dual simplex iteration. Built from
 /// `BoundedStandardForm` (cold) or hand-populated by tests / warm-start
@@ -318,7 +358,7 @@ pub(crate) fn iterate(
     let mut buf = IterBuffers::new(m, n_total, ubs);
 
     // Initial reduced costs (r_j = c̃_j − y^T a_j with y = B^{-T} c̃_B).
-    compute_reduced_costs_into(
+    if !compute_reduced_costs_into_timed(
         a,
         &c_perturbed,
         &mut basis_mgr,
@@ -327,7 +367,18 @@ pub(crate) fn iterate(
         &state.basis,
         &mut buf.y,
         &mut state.reduced_costs,
-    );
+        options.deadline,
+    ) {
+        let obj = bounded_obj(
+            c,
+            &state.basis,
+            &state.x_b,
+            &state.at_upper,
+            &state.is_basic,
+            ubs,
+        );
+        return (BoundedOutcome::Timeout(obj), state);
+    }
 
     // Anti-cycling: track progress; switch to Bland's rule when stalled.
     let k_trigger = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN);
@@ -384,6 +435,17 @@ pub(crate) fn iterate(
         // ub-violation scan (separate from lb-violation leaving selection).
         let mut ub_violation_row: Option<usize> = None;
         for i in 0..m {
+            if deadline_expired(options.deadline) {
+                let obj = bounded_obj(
+                    c,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs,
+                );
+                return (BoundedOutcome::Timeout(obj), state);
+            }
             let xi = state.x_b[i];
             let ub_i = ubs[state.basis[i]];
             if ub_i.is_finite() && xi > ub_i + options.primal_tol {
@@ -426,6 +488,17 @@ pub(crate) fn iterate(
 
         // PRICE trow[j] = ρ^T a_j on non-basic columns.
         for j in 0..n_total {
+            if deadline_expired(options.deadline) {
+                let obj = bounded_obj(
+                    c,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs,
+                );
+                return (BoundedOutcome::Timeout(obj), state);
+            }
             if state.is_basic[j] {
                 buf.trow[j] = 0.0;
                 continue;
@@ -440,6 +513,17 @@ pub(crate) fn iterate(
 
         // Refresh `col_bounds.at_upper` (uppers themselves never change).
         for j in 0..n_total {
+            if deadline_expired(options.deadline) {
+                let obj = bounded_obj(
+                    c,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs,
+                );
+                return (BoundedOutcome::Timeout(obj), state);
+            }
             buf.col_bounds[j].at_upper = state.at_upper[j];
         }
 
@@ -507,7 +591,7 @@ pub(crate) fn iterate(
                 return (BoundedOutcome::Timeout(obj), state);
             }
             leaving.after_refactor(m);
-            compute_reduced_costs_into(
+            if !compute_reduced_costs_into_timed(
                 a,
                 &c_perturbed,
                 &mut basis_mgr,
@@ -516,7 +600,18 @@ pub(crate) fn iterate(
                 &state.basis,
                 &mut buf.y,
                 &mut state.reduced_costs,
-            );
+                options.deadline,
+            ) {
+                let obj = bounded_obj(
+                    c,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs,
+                );
+                return (BoundedOutcome::Timeout(obj), state);
+            }
             continue;
         }
 
@@ -545,6 +640,17 @@ pub(crate) fn iterate(
         // The leaving column σ becomes non-basic with r_σ = −θ.
         let leaving_col = state.basis[r];
         for j in 0..n_total {
+            if deadline_expired(options.deadline) {
+                let obj = bounded_obj(
+                    c,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs,
+                );
+                return (BoundedOutcome::Timeout(obj), state);
+            }
             if !state.is_basic[j] {
                 state.reduced_costs[j] -= theta * buf.trow[j];
             }
@@ -611,7 +717,7 @@ pub(crate) fn iterate(
                 return (BoundedOutcome::Timeout(obj), state);
             }
             leaving.after_refactor(m);
-            compute_reduced_costs_into(
+            if !compute_reduced_costs_into_timed(
                 a,
                 &c_perturbed,
                 &mut basis_mgr,
@@ -620,7 +726,18 @@ pub(crate) fn iterate(
                 &state.basis,
                 &mut buf.y,
                 &mut state.reduced_costs,
-            );
+                options.deadline,
+            ) {
+                let obj = bounded_obj(
+                    c,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs,
+                );
+                return (BoundedOutcome::Timeout(obj), state);
+            }
         }
     }
 }
@@ -824,9 +941,24 @@ pub(crate) fn phase2_primal_bounded(
     let m = bsf.m;
     let n_total = bsf.n_total;
 
+    let timeout_obj = |state: &BoundedDualState| {
+        SimplexOutcome::Timeout(bounded_obj(
+            c,
+            &state.basis,
+            &state.x_b,
+            &state.at_upper,
+            &state.is_basic,
+            ubs,
+        ))
+    };
+    if deadline_expired(options.deadline) {
+        return (timeout_obj(&state), state);
+    }
+
     let mut basis_mgr =
         match LuBasis::new_timed(a, &state.basis, options.max_etas, options.deadline) {
             Ok(bm) => bm,
+            Err(SolverError::DeadlineExceeded) => return (timeout_obj(&state), state),
             Err(_) => return (SimplexOutcome::SingularBasis, state),
         };
 
@@ -866,7 +998,7 @@ pub(crate) fn phase2_primal_bounded(
             );
         }
 
-        compute_reduced_costs_into(
+        if !compute_reduced_costs_into_timed(
             a,
             c,
             &mut basis_mgr,
@@ -875,7 +1007,20 @@ pub(crate) fn phase2_primal_bounded(
             &state.basis,
             &mut y,
             &mut rc,
-        );
+            options.deadline,
+        ) {
+            return (
+                SimplexOutcome::Timeout(bounded_obj(
+                    c,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs,
+                )),
+                state,
+            );
+        }
 
         // Pricing: most-improving non-basic (Dantzig rule).
         // at_lb: enter if rc < 0 (increasing x improves min objective)
@@ -883,6 +1028,19 @@ pub(crate) fn phase2_primal_bounded(
         let mut best_score = PIVOT_TOL;
         let mut entering: Option<usize> = None;
         for j in 0..n_total {
+            if deadline_expired(options.deadline) {
+                return (
+                    SimplexOutcome::Timeout(bounded_obj(
+                        c,
+                        &state.basis,
+                        &state.x_b,
+                        &state.at_upper,
+                        &state.is_basic,
+                        ubs,
+                    )),
+                    state,
+                );
+            }
             if state.is_basic[j] {
                 continue;
             }
@@ -925,6 +1083,19 @@ pub(crate) fn phase2_primal_bounded(
         let mut leaving_at_ub = false;
 
         for i in 0..m {
+            if deadline_expired(options.deadline) {
+                return (
+                    SimplexOutcome::Timeout(bounded_obj(
+                        c,
+                        &state.basis,
+                        &state.x_b,
+                        &state.at_upper,
+                        &state.is_basic,
+                        ubs,
+                    )),
+                    state,
+                );
+            }
             let eff = alpha[i] * dir;
             let xi = state.x_b[i];
             let ub_i = ubs[state.basis[i]];

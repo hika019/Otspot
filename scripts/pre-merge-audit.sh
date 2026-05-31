@@ -37,6 +37,11 @@ if git diff main..HEAD --unified=0 -- .github scripts 'otspot-dev/src/bin/*.rs' 
   echo "::error::PASS[no_ref] は偽PASS経路。CHECKED[no_ref] 等の非PASS分類を使うこと" >&2
   exit 1
 fi
+if git diff main..HEAD --unified=0 -- scripts | grep -E '^\+[[:space:]]*echo "  .* TIMEOUT \(external_timeout=|^\+[[:space:]]*echo "    TIMEOUT: 1"' >/tmp/pre_merge_external_timeout.txt; then
+  cat /tmp/pre_merge_external_timeout.txt >&2
+  echo "::error::external_timeout を通常 TIMEOUT に混入させてはいけない。EXTERNAL_TIMEOUT として集計し、1件以上で失敗させること" >&2
+  exit 1
+fi
 
 # 2. commit 情報
 echo
