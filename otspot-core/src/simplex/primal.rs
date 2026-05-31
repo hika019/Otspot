@@ -69,8 +69,7 @@ fn extract_farkas_certificate(
     if !basis.iter().any(|&col| col >= n_original) {
         return vec![];
     }
-    let mut basis_mgr =
-        match LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline) {
+    let mut basis_mgr = match LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(_) => return vec![],
     };

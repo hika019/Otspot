@@ -100,20 +100,25 @@ cp "$BENCH_SCRIPT" "$FAKE_SOLVER_ROOT/scripts/bench_parallel.sh"
 FAKE_BENCH="$FAKE_SOLVER_ROOT/scripts/bench_parallel.sh"
 
 # ---------------------------------------------------------------
-echo "=== Test 1: child exit=124 (gtimeout 強制) → TIMEOUT 集計 ==="
+echo "=== Test 1: child exit=124 (gtimeout 強制) → EXTERNAL_TIMEOUT 集計 + exit 1 ==="
 OUT="$TMP_ROOT/t1.out"
 export BENCH_TEST_MODE=timeout
+set +e
 SUMMARY=$(SOLVER_DIR="$FAKE_SOLVER_ROOT" \
   bash "$FAKE_BENCH" \
   --data-dir "$DATA_DIR" \
   --timeout 1 \
   --eps 1e-6 \
   --jobs 1 \
-  --output "$OUT" 2>&1) || true
+  --output "$OUT" 2>&1)
+T1_EXIT=$?
 unset BENCH_TEST_MODE
 assert_contains "$SUMMARY" "外部timeout発火" "gtimeout 検知 log 出力"
 TIMEOUT_LINE=$(grep -E "^\s+TIMEOUT:" "$OUT" | head -1 | awk '{print $2}')
-assert_eq "$TIMEOUT_LINE" "3" "3 件全て TIMEOUT 集計"
+EXTERNAL_TIMEOUT_LINE=$(grep -E "^\s+EXTERNAL_TIMEOUT:" "$OUT" | head -1 | awk '{print $2}')
+assert_eq "$TIMEOUT_LINE" "0" "通常 TIMEOUT には混入しない"
+assert_eq "$EXTERNAL_TIMEOUT_LINE" "3" "3 件全て EXTERNAL_TIMEOUT 集計"
+assert_eq "$T1_EXIT" "1" "EXTERNAL_TIMEOUT > 0 は bench_parallel exit 1"
 # FAILED_GROUPS 行は出てはいけない（gtimeout は正常な safety net 動作）
 if grep -q "★ 異常終了グループ" "$OUT"; then
   echo "  FAIL: gtimeout 経路で 異常終了グループ ラベル混入" >&2

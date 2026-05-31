@@ -10,8 +10,8 @@
 //!   を計算し `leaving.after_pivot(...)` で γ を rank-1 更新
 
 use super::super::dual_common::{
-    basic_obj, compute_dual_vars, compute_reduced_costs, made_progress_with_floor,
-    recompute_gamma_truth, BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
+    basic_obj, compute_dual_vars, made_progress_with_floor, recompute_gamma_truth,
+    BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
 };
 use super::super::pricing::DualLeavingStrategy;
 use super::super::SimplexOutcome;
@@ -21,6 +21,22 @@ use crate::options::SolverOptions;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::sync::atomic::Ordering;
+
+fn timeout_trace_enabled() -> bool {
+    std::env::var("OTSPOT_TIMEOUT_TRACE").ok().as_deref() == Some("1")
+}
+
+fn timeout_trace(phase: &str) {
+    if !timeout_trace_enabled() {
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "[timeout-trace {ts:.3}] {phase}");
+}
 
 /// Lex 摂動 (bland_mode 起動時): reduced_costs (non-basic) と x_b に
 /// `eps·(1+i/n)·scale` を加算し ratio test の tie を解消、Bland's rule の有限終了
@@ -67,6 +83,43 @@ fn apply_lex_perturbation(
     }
 }
 
+#[inline]
+fn deadline_expired(deadline: Option<std::time::Instant>) -> bool {
+    deadline.is_some_and(|d| std::time::Instant::now() >= d)
+}
+
+fn compute_reduced_costs_timed(
+    a: &CscMatrix,
+    c: &[f64],
+    basis_mgr: &mut LuBasis,
+    is_basic: &[bool],
+    n_price: usize,
+    m: usize,
+    basis: &[usize],
+    deadline: Option<std::time::Instant>,
+) -> Option<Vec<f64>> {
+    if deadline_expired(deadline) {
+        return None;
+    }
+    let y = compute_dual_vars(c, basis_mgr, basis, m);
+    let mut reduced_costs = vec![0.0f64; n_price];
+    for j in 0..n_price {
+        if deadline_expired(deadline) {
+            return None;
+        }
+        if is_basic[j] {
+            continue;
+        }
+        let (rows, vals) = a.get_column(j).unwrap();
+        let mut ya = 0.0;
+        for (k, &row) in rows.iter().enumerate() {
+            ya += y[row] * vals[k];
+        }
+        reduced_costs[j] = c[j] - ya;
+    }
+    Some(reduced_costs)
+}
+
 /// Dual simplex core loop (advanced variant).
 ///
 /// - `leaving`: leaving-variable selection strategy (`&mut` to allow DSE weight updates).
@@ -82,7 +135,9 @@ pub(crate) fn dual_simplex_core_advanced(
     leaving: &mut dyn DualLeavingStrategy,
     iter_count_out: &mut usize,
 ) -> SimplexOutcome {
+    timeout_trace("dual_advanced_core: enter");
     // Step 1: LuBasis初期化
+    timeout_trace("dual_advanced_core: lu init start");
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(crate::error::SolverError::SingularBasis { .. }) => {
@@ -93,6 +148,7 @@ pub(crate) fn dual_simplex_core_advanced(
             return SimplexOutcome::Timeout(obj);
         }
     };
+    timeout_trace("dual_advanced_core: lu init done");
 
     // 基底追跡用フラグ
     let mut is_basic = vec![false; n_price];
@@ -103,8 +159,24 @@ pub(crate) fn dual_simplex_core_advanced(
     }
 
     // Step 2: 初期被縮小費用計算: r_j = c_j - y^T a_j
-    let mut reduced_costs =
-        compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
+    timeout_trace("dual_advanced_core: initial rc start");
+    let mut reduced_costs = match compute_reduced_costs_timed(
+        a,
+        c,
+        &mut basis_mgr,
+        &is_basic,
+        n_price,
+        m,
+        basis,
+        options.deadline,
+    ) {
+        Some(rc) => rc,
+        None => {
+            let obj: f64 = basic_obj(c, basis, x_b);
+            return SimplexOutcome::Timeout(obj);
+        }
+    };
+    timeout_trace("dual_advanced_core: initial rc done");
 
     // Harris ratio test（Phase 2ではデフォルト）
     let ratio_tester = HarrisRatioTest::new(options.dual_tol, PIVOT_TOL);
@@ -204,6 +276,10 @@ pub(crate) fn dual_simplex_core_advanced(
 
         // 3d: PRICE: trow[j] = ρ^T a_j（非基底列のみ）
         for j in 0..n_price {
+            if deadline_expired(options.deadline) {
+                let obj: f64 = basic_obj(c, basis, x_b);
+                return SimplexOutcome::Timeout(obj);
+            }
             if is_basic[j] {
                 trow[j] = 0.0;
                 continue;
@@ -271,8 +347,22 @@ pub(crate) fn dual_simplex_core_advanced(
                 let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }
-            reduced_costs =
-                compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
+            reduced_costs = match compute_reduced_costs_timed(
+                a,
+                c,
+                &mut basis_mgr,
+                &is_basic,
+                n_price,
+                m,
+                basis,
+                options.deadline,
+            ) {
+                Some(rc) => rc,
+                None => {
+                    let obj: f64 = basic_obj(c, basis, x_b);
+                    return SimplexOutcome::Timeout(obj);
+                }
+            };
             if bland_mode {
                 // rc は refactor で再計算済み; x_b は初回エントリ時に摂動済みなので再注入しない。
                 apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
@@ -305,6 +395,10 @@ pub(crate) fn dual_simplex_core_advanced(
         // r_j_new = r_j - θ * trow[j]（非基底変数全て）
         let leaving_col = basis[leaving_row];
         for j in 0..n_price {
+            if deadline_expired(options.deadline) {
+                let obj: f64 = basic_obj(c, basis, x_b);
+                return SimplexOutcome::Timeout(obj);
+            }
             if !is_basic[j] {
                 reduced_costs[j] -= theta * trow[j];
             }
@@ -341,8 +435,22 @@ pub(crate) fn dual_simplex_core_advanced(
                 return SimplexOutcome::Timeout(obj);
             }
             // refactor後は被縮小費用の数値誤差をリセット
-            reduced_costs =
-                compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
+            reduced_costs = match compute_reduced_costs_timed(
+                a,
+                c,
+                &mut basis_mgr,
+                &is_basic,
+                n_price,
+                m,
+                basis,
+                options.deadline,
+            ) {
+                Some(rc) => rc,
+                None => {
+                    let obj: f64 = basic_obj(c, basis, x_b);
+                    return SimplexOutcome::Timeout(obj);
+                }
+            };
             if bland_mode {
                 // rc は再計算済み; x_b は初回エントリ時に摂動済みなので再注入しない。
                 apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);

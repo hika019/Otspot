@@ -367,7 +367,16 @@ pub(crate) struct BoundedStandardForm {
 /// Convert an LP into bounded standard form: variable shifts/splits + row
 /// sign normalization + slacks for the *original* constraints only. Bounded
 /// variables keep their upper bound in `upper_bounds[j]`.
+#[cfg(test)]
 pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandardForm {
+    build_bounded_standard_form_with_deadline(problem, None)
+        .expect("build_bounded_standard_form without deadline must not time out")
+}
+
+pub(crate) fn build_bounded_standard_form_with_deadline(
+    problem: &LpProblem,
+    deadline: Option<std::time::Instant>,
+) -> Option<BoundedStandardForm> {
     let n_orig = problem.num_vars;
     let m_orig = problem.num_constraints;
 
@@ -378,6 +387,9 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
     let mut var_upper: Vec<f64> = Vec::new();
 
     for j in 0..n_orig {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let (lb, ub) = problem.bounds[j];
         if lb.is_finite() {
             let idx = n_shifted;
@@ -421,6 +433,9 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
 
     let mut b = problem.b.clone();
     for (j, info) in orig_var_info.iter().enumerate().take(n_orig) {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let offset = info.offset;
         if offset.abs() > DROP_TOL {
             if let Ok((rows, vals)) = problem.a.get_column(j) {
@@ -437,6 +452,9 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
     let mut slack_coeff = vec![0.0f64; m_orig];
 
     for i in 0..m_orig {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         match problem.constraint_types[i] {
             ConstraintType::Le => {
                 if b[i] < -PIVOT_TOL {
@@ -481,6 +499,9 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
     let mut num_artificial = 0usize;
 
     for i in 0..m_orig {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         match slack_col_idx[i] {
             Some(s_idx) => {
                 let col = n_shifted + s_idx;
@@ -510,6 +531,9 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
     let mut trip_vals = Vec::new();
 
     for (j, info) in orig_var_info.iter().enumerate().take(n_orig) {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         if let Ok((a_rows, a_vals)) = problem.a.get_column(j) {
             for (k, &row) in a_rows.iter().enumerate() {
                 let val = a_vals[k];
@@ -527,6 +551,9 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
     }
 
     for i in 0..m_orig {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         if let Some(s_idx) = slack_col_idx[i] {
             let col = n_shifted + s_idx;
             trip_rows.push(i);
@@ -543,7 +570,7 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
     let mut upper_bounds = vec![f64::INFINITY; n_total];
     upper_bounds[..n_shifted].copy_from_slice(&var_upper[..n_shifted]);
 
-    BoundedStandardForm {
+    Some(BoundedStandardForm {
         a,
         b,
         c: c_ext,
@@ -559,7 +586,7 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
         orig_var_info,
         row_negated,
         upper_bounds,
-    }
+    })
 }
 
 /// Scale upper bounds by the Ruiz column-scaling vector.

@@ -4,6 +4,8 @@ Parses one or more bench_parallel.sh output logs and generates a structured
 manifest of non-PASS benchmark cases.  Each miss is classified by root cause:
 
   timeout             — solver did not converge within the time limit
+  external_timeout    — external watchdog killed the worker before the
+                        solver honored its internal timeout
   status_honesty      — solver returned wrong status (e.g. Infeasible when
                         Optimal was expected)
   objective_mismatch  — Optimal claimed but objective differs from baseline
@@ -50,6 +52,8 @@ def classify(status: str) -> str:
         return "skip_nonconvex"
     if status == "TIMEOUT":
         return "timeout"
+    if status == "EXTERNAL_TIMEOUT":
+        return "external_timeout"
     if status == "MAXITER":
         return "suboptimal"
     if status == "SUBOPTIMAL":
@@ -75,7 +79,7 @@ def classify(status: str) -> str:
 # The format is: {:<20} {:>6} {:>6} {:>15} {:>10.3} {}
 _STATUS_PAT = (
     r"PASS(?::Infeasible|:Unbounded)?|CHECKED\[no_ref\]"
-    r"|TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL"
+    r"|TIMEOUT|EXTERNAL_TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL"
     r"|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL"
     r"|FAIL(?::[A-Za-z]+)?"
 )
@@ -89,9 +93,9 @@ DETAIL_RE = re.compile(
 )
 
 # External-timeout fallback line written by bench_parallel.sh worker_func:
-#   "  PROB_NAME  TIMEOUT (external_timeout=Xs, ...)"
+#   "  PROB_NAME  EXTERNAL_TIMEOUT (external_timeout=Xs, ...)"
 EXT_TIMEOUT_RE = re.compile(
-    r"^\s+(?P<name>\S+)\s+TIMEOUT\s+\(external_timeout=(?P<ext>\S+)"
+    r"^\s+(?P<name>\S+)\s+EXTERNAL_TIMEOUT\s+\(external_timeout=(?P<ext>\S+)"
 )
 
 # Info line written after each solve by qps_benchmark/bench_qplib:
@@ -193,7 +197,7 @@ def parse_log(path: Path) -> tuple[dict, list[dict]]:
                 name = m.group("name")
                 current = _new_record(
                     name=name,
-                    status="TIMEOUT",
+                    status="EXTERNAL_TIMEOUT",
                     time_s=meta.get("bench_timeout_s"),
                     note=f"external_timeout={m.group('ext')}",
                 )
