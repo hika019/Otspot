@@ -83,7 +83,7 @@ pub(crate) fn dual_simplex_core_advanced(
     iter_count_out: &mut usize,
 ) -> SimplexOutcome {
     // Step 1: LuBasis初期化
-    let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
+    let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(crate::error::SolverError::SingularBasis { .. }) => {
             return SimplexOutcome::SingularBasis;
