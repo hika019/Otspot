@@ -1,6 +1,6 @@
 """bench_parallel.sh の出力 (集計結果ファイル) から baseline CSV を生成する。
 
-集計結果の「問題別詳細」セクションから PASS / PASS[no_ref] / SUBOPTIMAL 行を
+集計結果の「問題別詳細」セクションから PASS / CHECKED[no_ref] / SUBOPTIMAL 行を
 抽出し、 obj=<value> を読んで baseline_objectives 形式で出力する。
 
 形式 (1行/問題):
@@ -18,12 +18,12 @@ from pathlib import Path
 
 
 # 問題行の例:
-#   OSQP_RANDOM_QP_20        20    200    PASS[no_ref]      0.013 [-] obj=1.14e1 pf=0.0e0 ...
+#   OSQP_RANDOM_QP_20        20    200    CHECKED[no_ref]   0.013 [-] obj=1.14e1 pf=0.0e0 ...
 LINE_RE = re.compile(
     r"^\s*([A-Za-z0-9_.\-]+)\s+\d+\s+\d+\s+([A-Z_\[\]a-z]+)\s+[\d.]+.*?\bobj=([-+0-9.eE]+|NA)"
 )
 
-PASS_STATUSES = {"PASS", "PASS[no_ref]"}
+PASS_STATUSES = {"PASS", "CHECKED[no_ref]"}
 
 
 def parse_log(log_path: Path, include_suboptimal: bool):

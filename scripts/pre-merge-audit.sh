@@ -13,6 +13,20 @@ cargo nextest run --release --test-threads 3
 bash scripts/check_file_size.sh
 python3 tests/test_check_data_coverage.py
 
+# 1b. merge gate regression scan
+echo
+echo "=== merge gate regression scan ==="
+if git diff main..HEAD --unified=0 -- '*.rs' | grep -E '^\+.*#\[ignore' >/tmp/pre_merge_added_ignore.txt; then
+  cat /tmp/pre_merge_added_ignore.txt >&2
+  echo "::error::新規 #[ignore] は merge gate で禁止。heavy 隔離が必要なら test-heavy.yml 側の明示 gate と一緒に追加すること" >&2
+  exit 1
+fi
+if git diff main..HEAD --unified=0 -- .github scripts 'otspot-dev/src/bin/*.rs' | grep -E '^\+.*PASS\[no_ref\]' >/tmp/pre_merge_pass_noref.txt; then
+  cat /tmp/pre_merge_pass_noref.txt >&2
+  echo "::error::PASS[no_ref] は偽PASS経路。CHECKED[no_ref] 等の非PASS分類を使うこと" >&2
+  exit 1
+fi
+
 # 2. commit 情報
 echo
 echo "=== branch diff vs main ==="
