@@ -22,22 +22,6 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::sync::atomic::Ordering;
 
-fn timeout_trace_enabled() -> bool {
-    std::env::var("OTSPOT_TIMEOUT_TRACE").ok().as_deref() == Some("1")
-}
-
-fn timeout_trace(phase: &str) {
-    if !timeout_trace_enabled() {
-        return;
-    }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
-    use std::io::Write as _;
-    let _ = writeln!(std::io::stderr(), "[timeout-trace {ts:.3}] {phase}");
-}
-
 /// Lex 摂動 (bland_mode 起動時): reduced_costs (non-basic) と x_b に
 /// `eps·(1+i/n)·scale` を加算し ratio test の tie を解消、Bland's rule の有限終了
 /// を保証する。reduced_costs 摂動が cycle 解消の本体 (klein3 観測 2-cycle 起因)、
@@ -135,9 +119,7 @@ pub(crate) fn dual_simplex_core_advanced(
     leaving: &mut dyn DualLeavingStrategy,
     iter_count_out: &mut usize,
 ) -> SimplexOutcome {
-    timeout_trace("dual_advanced_core: enter");
     // Step 1: LuBasis初期化
-    timeout_trace("dual_advanced_core: lu init start");
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(crate::error::SolverError::SingularBasis { .. }) => {
@@ -148,7 +130,6 @@ pub(crate) fn dual_simplex_core_advanced(
             return SimplexOutcome::Timeout(obj);
         }
     };
-    timeout_trace("dual_advanced_core: lu init done");
 
     // 基底追跡用フラグ
     let mut is_basic = vec![false; n_price];
@@ -159,7 +140,6 @@ pub(crate) fn dual_simplex_core_advanced(
     }
 
     // Step 2: 初期被縮小費用計算: r_j = c_j - y^T a_j
-    timeout_trace("dual_advanced_core: initial rc start");
     let mut reduced_costs = match compute_reduced_costs_timed(
         a,
         c,
@@ -176,7 +156,6 @@ pub(crate) fn dual_simplex_core_advanced(
             return SimplexOutcome::Timeout(obj);
         }
     };
-    timeout_trace("dual_advanced_core: initial rc done");
 
     // Harris ratio test（Phase 2ではデフォルト）
     let ratio_tester = HarrisRatioTest::new(options.dual_tol, PIVOT_TOL);
