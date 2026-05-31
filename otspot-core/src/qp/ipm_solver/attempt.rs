@@ -425,7 +425,9 @@ fn solve_ipm_with_runner(
     let mut iter_used: usize = 0;
 
     let base_tighten = dynamic_base_tighten(user_eps);
-    let attempts: Vec<(bool, f64)> = if presolve_did_ruiz {
+    // no-Ruiz only when: presolve already Ruiz-scaled (double scaling wrong), or caller
+    // explicitly disabled Ruiz (options.use_ruiz_scaling=false, e.g. no-Ruiz fallback path).
+    let attempts: Vec<(bool, f64)> = if presolve_did_ruiz || !options.use_ruiz_scaling {
         let mut v = vec![(false, base_tighten), (false, base_tighten * 10.0)];
         if base_tighten > 10.0 {
             v.push((false, base_tighten / 10.0));
