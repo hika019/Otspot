@@ -404,7 +404,7 @@ fn step8_skips_non_free_singleton() {
 #[test]
 fn fill_in_budget_allows_dense_pivot_with_few_targets() {
     // Pivot row 0 = x+y+z=2 (Eq), only one other row touches x.
-    // piv_others=2, col_j_others=1 → new_entries ≤ 2 ≤ 3*(1+2+1)=12 → allowed.
+    // piv_others=2, col_j_others=1 → Markowitz fill 1*2=2 ≤ removed 1+2+1=4 → allowed.
     let st = make_state(
         vec![0.0; 3],
         &[0, 0, 0, 1],
@@ -426,8 +426,8 @@ fn fill_in_budget_allows_dense_pivot_with_few_targets() {
 fn fill_in_budget_blocks_high_fill() {
     // Pivot row 0: x0+x1+x2+x3+x4+x5+x6+x7=8 (Eq, 8 cols including x0).
     // Rows 1..8: x0+x_(k+7)=k (Le, only x0 and one disjoint col each).
-    // piv_others=7 (x1..x7), col_j_others=7 (rows 1..7), all disjoint → fill=49.
-    // removed_nnz = 1+7+7=15, budget=45. 49 > 45 → blocked.
+    // piv_others=7 (x1..x7), col_j_others=7 (rows 1..7) → Markowitz fill 7*7=49.
+    // removed_nnz = 1+7+7=15. 49 > 15 → blocked.
     let n_extra = 7usize; // x1..x7
     let n_rows_extra = 7usize; // rows 1..7
     let n_cols = 1 + n_extra + n_rows_extra;
