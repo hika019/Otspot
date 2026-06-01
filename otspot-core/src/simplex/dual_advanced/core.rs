@@ -10,10 +10,11 @@
 //!   を計算し `leaving.after_pivot(...)` で γ を rank-1 更新
 
 use super::super::dual_common::{
-    basic_obj, compute_dual_vars, made_progress_with_floor, recompute_gamma_truth,
-    BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
+    basic_obj, compute_dual_vars, made_progress_with_floor, recompute_gamma_truth, NO_PROGRESS_MIN,
+    NO_PROGRESS_TRIGGER_FACTOR,
 };
 use super::super::pricing::DualLeavingStrategy;
+use super::super::trace::IterTrace;
 use super::super::SimplexOutcome;
 use super::ratio_test::{bland_ratio_test, HarrisRatioTest, RatioTestStrategy};
 use crate::basis::{BasisManager, LuBasis};
@@ -202,7 +203,7 @@ pub(crate) fn dual_simplex_core_advanced(
     let mut best_infeas = leaving.progress_metric(x_b, basis);
     let mut iters_since_progress: usize = 0;
     let mut bland_mode = false;
-    let mut bland_start_iter: usize = 0;
+    let mut trace = IterTrace::new("dual-advanced");
 
     // Step 3: 反復ループ
     loop {
@@ -220,12 +221,9 @@ pub(crate) fn dual_simplex_core_advanced(
             return SimplexOutcome::Timeout(obj);
         }
 
-        // Bland mode hard cap: if we have iterated > BLAND_ITER_CAP_FACTOR * n_price
-        // iterations in Bland mode, bail so the caller can run Farkas infeasibility
-        // check (catches klein3-class cycling that produces corrupt basis state).
-        if bland_mode && *iter_count_out - bland_start_iter > BLAND_ITER_CAP_FACTOR * n_price {
-            let obj: f64 = basic_obj(c, basis, x_b);
-            return SimplexOutcome::Timeout(obj);
+        if let Some(t) = trace.as_mut() {
+            let obj = basic_obj(c, basis, x_b);
+            t.log(*iter_count_out, obj, basis, bland_mode);
         }
 
         // 3b: 離基変数選択
@@ -447,7 +445,6 @@ pub(crate) fn dual_simplex_core_advanced(
                 iters_since_progress = iters_since_progress.saturating_add(1);
                 if iters_since_progress >= k_trigger {
                     bland_mode = true;
-                    bland_start_iter = *iter_count_out;
                     // 初回エントリ: rc と x_b の両方を摂動する。
                     apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, true);
                 }

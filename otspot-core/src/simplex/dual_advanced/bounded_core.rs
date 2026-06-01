@@ -57,10 +57,11 @@ use std::time::Instant;
 
 use super::super::dual_common::{
     basic_obj, compute_dual_vars_into, made_progress_with_floor, recompute_gamma_truth,
-    BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
+    NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
 };
 use super::super::pricing::DualLeavingStrategy;
 use super::super::standard_form::{BoundedStandardForm, SimplexOutcome};
+use super::super::trace::IterTrace;
 use super::bound_flip::{bfrt_select_entering, bump_bfrt_flip_invocations, ColBound};
 
 /// Terminal status of the bounded dual simplex iteration.
@@ -119,10 +120,6 @@ fn flip_apply_disabled() -> bool {
 fn flip_apply_disabled() -> bool {
     false
 }
-
-/// Hard iteration cap shared by both bounded dual and bounded primal Phase 2 loops.
-/// Guarantees termination even when pricing degenerates or deadline is None (unit tests).
-const SIMPLEX_ITER_HARD_CAP: usize = 1_000_000;
 
 #[inline]
 fn deadline_expired(deadline: Option<Instant>) -> bool {
@@ -385,21 +382,10 @@ pub(crate) fn iterate(
     let mut best_infeas = leaving.progress_metric(&state.x_b, &state.basis);
     let mut iters_since_progress: usize = 0;
     let mut bland_mode = false;
-    let mut bland_start_iter: usize = 0;
+    let mut trace = IterTrace::new("bounded-dual");
 
     loop {
         state.iterations = state.iterations.saturating_add(1);
-        if state.iterations > SIMPLEX_ITER_HARD_CAP {
-            let obj = bounded_obj(
-                c,
-                &state.basis,
-                &state.x_b,
-                &state.at_upper,
-                &state.is_basic,
-                ubs,
-            );
-            return (BoundedOutcome::Timeout(obj), state);
-        }
         let timed_out = options
             .deadline
             .is_some_and(|d| std::time::Instant::now() >= d);
@@ -419,8 +405,7 @@ pub(crate) fn iterate(
             return (BoundedOutcome::Timeout(obj), state);
         }
 
-        // Bland mode hard cap: bail after BLAND_ITER_CAP_FACTOR × n_total iters.
-        if bland_mode && state.iterations - bland_start_iter > BLAND_ITER_CAP_FACTOR * n_total {
+        if let Some(t) = trace.as_mut() {
             let obj = bounded_obj(
                 c,
                 &state.basis,
@@ -429,7 +414,7 @@ pub(crate) fn iterate(
                 &state.is_basic,
                 ubs,
             );
-            return (BoundedOutcome::Timeout(obj), state);
+            t.log(state.iterations, obj, &state.basis, bland_mode);
         }
 
         // ub-violation scan (separate from lb-violation leaving selection).
@@ -694,7 +679,6 @@ pub(crate) fn iterate(
                 iters_since_progress += 1;
                 if iters_since_progress >= k_trigger {
                     bland_mode = true;
-                    bland_start_iter = state.iterations;
                 }
             }
         }
@@ -965,22 +949,10 @@ pub(crate) fn phase2_primal_bounded(
     let mut y = vec![0.0f64; m];
     let mut rc = vec![0.0f64; n_total];
     let mut alpha = vec![0.0f64; m];
+    let mut trace = IterTrace::new("bounded-primal");
 
     loop {
         *iters = iters.saturating_add(1);
-        if *iters > SIMPLEX_ITER_HARD_CAP {
-            return (
-                SimplexOutcome::Timeout(bounded_obj(
-                    c,
-                    &state.basis,
-                    &state.x_b,
-                    &state.at_upper,
-                    &state.is_basic,
-                    ubs,
-                )),
-                state,
-            );
-        }
         if options
             .deadline
             .is_some_and(|d| std::time::Instant::now() >= d)
@@ -996,6 +968,18 @@ pub(crate) fn phase2_primal_bounded(
                 )),
                 state,
             );
+        }
+
+        if let Some(t) = trace.as_mut() {
+            let obj = bounded_obj(
+                c,
+                &state.basis,
+                &state.x_b,
+                &state.at_upper,
+                &state.is_basic,
+                ubs,
+            );
+            t.log(*iters, obj, &state.basis, false);
         }
 
         if !compute_reduced_costs_into_timed(
