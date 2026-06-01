@@ -52,6 +52,7 @@ pub(super) struct IterTrace {
     seen_basis: HashMap<u64, usize>,
     last_obj: Option<f64>,
     no_obj_progress: usize,
+    detail_lines: usize,
 }
 
 impl IterTrace {
@@ -68,6 +69,7 @@ impl IterTrace {
             seen_basis: HashMap::new(),
             last_obj: None,
             no_obj_progress: 0,
+            detail_lines: 0,
         })
     }
 
@@ -119,6 +121,37 @@ impl IterTrace {
             );
         }
     }
+
+    pub(super) fn log_ratio_test(
+        &mut self,
+        candidates: &[usize],
+        ratios: &[f64],
+        selected: Option<usize>,
+        is_bland: bool,
+    ) {
+        if self.detail_lines >= self.cfg.max_lines {
+            return;
+        }
+        self.detail_lines = self.detail_lines.saturating_add(1);
+        let selected_text = selected
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        eprintln!(
+            "[simplex-trace:{}] ratio_test(candidates={:?}, ratios={:?}, selected={}, is_bland={})",
+            self.tag, candidates, ratios, selected_text, is_bland
+        );
+    }
+
+    pub(super) fn log_lex_perturbation(&mut self, delta: f64, effect: f64) {
+        if self.detail_lines >= self.cfg.max_lines {
+            return;
+        }
+        self.detail_lines = self.detail_lines.saturating_add(1);
+        eprintln!(
+            "[simplex-trace:{}] lex perturbation applied: delta={:.9e}, effect={:.9e}",
+            self.tag, delta, effect
+        );
+    }
 }
 
 impl Drop for IterTrace {
@@ -127,9 +160,10 @@ impl Drop for IterTrace {
             return;
         }
         eprintln!(
-            "[simplex-trace:{}:summary] lines={} repeats={} unique_basis={}",
+            "[simplex-trace:{}:summary] lines={} detail_lines={} repeats={} unique_basis={}",
             self.tag,
             self.lines,
+            self.detail_lines,
             self.repeats,
             self.seen_basis.len()
         );

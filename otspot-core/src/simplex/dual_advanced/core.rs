@@ -34,6 +34,70 @@ use std::sync::atomic::Ordering;
 /// tie 残存、1e-3 は Phase 1 Infeasible 判定境界に影響する。
 const LEX_PERTURB_REL: f64 = 1e-4;
 
+#[derive(Clone, Copy, Debug, Default)]
+struct LexPerturbStats {
+    delta: f64,
+    effect: f64,
+}
+
+fn collect_bland_ratio_candidates(
+    trow: &[f64],
+    reduced_costs: &[f64],
+    is_basic: &[bool],
+    n_price: usize,
+    pivot_tol: f64,
+) -> (Vec<usize>, Vec<f64>) {
+    let mut candidates = Vec::new();
+    let mut ratios = Vec::new();
+    for j in 0..n_price {
+        if is_basic[j] || trow[j] <= pivot_tol {
+            continue;
+        }
+        let ratio = reduced_costs[j] / trow[j];
+        if ratio >= pivot_tol {
+            candidates.push(j);
+            ratios.push(ratio);
+        }
+    }
+    (candidates, ratios)
+}
+
+fn collect_harris_ratio_candidates(
+    trow: &[f64],
+    reduced_costs: &[f64],
+    is_basic: &[bool],
+    n_price: usize,
+    harris_tol: f64,
+    pivot_tol: f64,
+) -> (Vec<usize>, Vec<f64>) {
+    let mut theta_max = f64::INFINITY;
+    for j in 0..n_price {
+        if is_basic[j] || trow[j] <= pivot_tol {
+            continue;
+        }
+        let relaxed_ratio = (reduced_costs[j] + harris_tol) / trow[j];
+        if relaxed_ratio < theta_max {
+            theta_max = relaxed_ratio;
+        }
+    }
+    if !theta_max.is_finite() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut candidates = Vec::new();
+    let mut ratios = Vec::new();
+    for j in 0..n_price {
+        if is_basic[j] || trow[j] <= pivot_tol {
+            continue;
+        }
+        let ratio = reduced_costs[j] / trow[j];
+        if ratio <= theta_max {
+            candidates.push(j);
+            ratios.push(ratio);
+        }
+    }
+    (candidates, ratios)
+}
+
 /// reduced_costs (non-basic only) と、オプションで x_b に lex 摂動を加える。
 ///
 /// `perturb_x = true` は bland_mode 初回エントリ時のみ指定する。refactor 後の
@@ -46,7 +110,7 @@ fn apply_lex_perturbation(
     x_b: &mut [f64],
     m: usize,
     perturb_x: bool,
-) {
+) -> LexPerturbStats {
     let scale_r = reduced_costs
         .iter()
         .map(|v| v.abs())
@@ -54,17 +118,31 @@ fn apply_lex_perturbation(
         .max(1.0);
     let base_r = LEX_PERTURB_REL * scale_r;
     let n_price = reduced_costs.len();
+    let mut max_rc_delta = 0.0_f64;
     for (j, slot) in reduced_costs.iter_mut().enumerate() {
         if !is_basic[j] {
-            *slot += base_r * (1.0 + (j as f64) / (n_price as f64));
+            let delta = base_r * (1.0 + (j as f64) / (n_price as f64));
+            *slot += delta;
+            max_rc_delta = max_rc_delta.max(delta.abs());
         }
     }
+    let mut max_x_delta = 0.0_f64;
     if perturb_x {
         let scale_x = x_b.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
         let base_x = LEX_PERTURB_REL * scale_x;
         for (i, slot) in x_b.iter_mut().enumerate() {
-            *slot += base_x * (1.0 + (i as f64) / (m as f64));
+            let delta = base_x * (1.0 + (i as f64) / (m as f64));
+            *slot += delta;
+            max_x_delta = max_x_delta.max(delta.abs());
         }
+        return LexPerturbStats {
+            delta: base_r,
+            effect: max_rc_delta.max(max_x_delta),
+        };
+    }
+    LexPerturbStats {
+        delta: base_r,
+        effect: max_rc_delta,
     }
 }
 
@@ -291,11 +369,31 @@ pub(crate) fn dual_simplex_core_advanced(
 
         // 3e: ratio test → entering_col, theta
         // bland_mode では pure Bland (min ratio + smallest idx tiebreak)。
-        let ratio_pick = if bland_mode {
-            bland_ratio_test(&trow, &reduced_costs, &is_basic, n_price, PIVOT_TOL)
+        let (candidate_indices, candidate_ratios, ratio_pick) = if bland_mode {
+            let (indices, ratios) =
+                collect_bland_ratio_candidates(&trow, &reduced_costs, &is_basic, n_price, PIVOT_TOL);
+            let pick = bland_ratio_test(&trow, &reduced_costs, &is_basic, n_price, PIVOT_TOL);
+            (indices, ratios, pick)
         } else {
-            ratio_tester.select_entering(&trow, &reduced_costs, &is_basic, n_price)
+            let (indices, ratios) = collect_harris_ratio_candidates(
+                &trow,
+                &reduced_costs,
+                &is_basic,
+                n_price,
+                ratio_tester.harris_tol,
+                ratio_tester.pivot_tol,
+            );
+            let pick = ratio_tester.select_entering(&trow, &reduced_costs, &is_basic, n_price);
+            (indices, ratios, pick)
         };
+        if let Some(t) = trace.as_mut() {
+            t.log_ratio_test(
+                &candidate_indices,
+                &candidate_ratios,
+                ratio_pick.map(|(j, _)| j),
+                bland_mode,
+            );
+        }
 
         let (entering_col, theta) = match ratio_pick {
             None => {
@@ -342,7 +440,10 @@ pub(crate) fn dual_simplex_core_advanced(
             };
             if bland_mode {
                 // rc は refactor で再計算済み; x_b は初回エントリ時に摂動済みなので再注入しない。
-                apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
+                let stats = apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
+                if let Some(t) = trace.as_mut() {
+                    t.log_lex_perturbation(stats.delta, stats.effect);
+                }
             }
             leaving.after_refactor(m);
             continue;
@@ -430,7 +531,10 @@ pub(crate) fn dual_simplex_core_advanced(
             };
             if bland_mode {
                 // rc は再計算済み; x_b は初回エントリ時に摂動済みなので再注入しない。
-                apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
+                let stats = apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
+                if let Some(t) = trace.as_mut() {
+                    t.log_lex_perturbation(stats.delta, stats.effect);
+                }
             }
             leaving.after_refactor(m);
         }
@@ -446,7 +550,10 @@ pub(crate) fn dual_simplex_core_advanced(
                 if iters_since_progress >= k_trigger {
                     bland_mode = true;
                     // 初回エントリ: rc と x_b の両方を摂動する。
-                    apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, true);
+                    let stats = apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, true);
+                    if let Some(t) = trace.as_mut() {
+                        t.log_lex_perturbation(stats.delta, stats.effect);
+                    }
                 }
             }
         }
