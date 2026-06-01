@@ -2,19 +2,13 @@
 //!
 //! `run_postsolve` の cleanup LP は `min(df_loop, df_gs)` の sufficiency check で
 //! gate され、perturbation variant の deadline は plain variant の 4× に制限される。
-//! 本 test は wall-clock threshold を pin する。
-//!
-//! Gate は **simplex postsolve** 経路の挙動を pin するもの。`#33` の LP→IPM
-//! dispatch (`src/qp/lp_dispatch.rs`) 導入後、サイズ閾値を超える LP は IPM 経路で
-//! 解かれ simplex postsolve 自体が走らない。その判定は public accessor
-//! `otspot::qp::prefer_ipm_for_size(n, m)` を直接呼ぶ (`timing_breakdown`
-//! の NaN proxy は presolve OFF の simplex 経路でも NaN になるため brittle、
-//! reviewer C2 指摘で書き換え)。
+//! 本 test は simplex postsolve 経路の wall-clock threshold を pin する。
+//! (LP は IPM を撤廃し simplex 一本化したため、全 LP が simplex postsolve を通る。)
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
 use otspot::problem::SolveStatus;
-use otspot::qp::{prefer_ipm_for_size, solve_qp_with, QpProblem};
+use otspot::qp::{solve_qp_with, QpProblem};
 use std::path::Path;
 
 fn load(path: &str) -> QpProblem {
@@ -46,11 +40,6 @@ fn solve(prob: &QpProblem, timeout_s: f64) -> (SolveStatus, f64, f64) {
 #[test]
 fn wood1p_postsolve_under_2s() {
     let prob = load("data/lp_problems/wood1p.QPS");
-    // wood1p: n=2594, m=244 → simplex 経路 (n<3000, m<2000)。gate 適用対象。
-    assert!(
-        !prefer_ipm_for_size(prob.num_vars, prob.num_constraints),
-        "wood1p must remain on simplex path for this gate to apply"
-    );
     let (status, _wall, postsolve_s) = solve(&prob, 60.0);
     assert!(
         matches!(status, SolveStatus::Optimal),
@@ -68,10 +57,6 @@ fn wood1p_postsolve_under_2s() {
 #[test]
 fn d6cube_postsolve_under_1s() {
     let prob = load("data/lp_problems/d6cube.QPS");
-    if prefer_ipm_for_size(prob.num_vars, prob.num_constraints) {
-        // IPM 経路で解かれる → simplex cleanup-LP は走らない。
-        return;
-    }
     let (_status, _wall, postsolve_s) = solve(&prob, 60.0);
     assert!(
         postsolve_s < 1.0,
@@ -85,9 +70,6 @@ fn d6cube_postsolve_under_1s() {
 #[test]
 fn greenbea_postsolve_under_5s() {
     let prob = load("data/lp_problems/greenbea.QPS");
-    if prefer_ipm_for_size(prob.num_vars, prob.num_constraints) {
-        return;
-    }
     let (_status, _wall, postsolve_s) = solve(&prob, 60.0);
     assert!(
         postsolve_s < 5.0,
