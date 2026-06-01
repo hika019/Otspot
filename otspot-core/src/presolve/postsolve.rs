@@ -565,10 +565,17 @@ fn recover_removed_row_dual(
         if a_ij.abs() < f64::EPSILON {
             continue;
         }
-        let mut rc_at_y0 = orig_problem.c[j];
+        // Solve bounds for y_i from
+        //   rc_j = c_j - Σ_{k≠i} A_kj y_k - A_ij y_i.
+        // `rc_at_yi0` must exclude row i; including it makes the update depend on
+        // the current y_i and can oscillate (0 ↔ target) under Gauss-Seidel.
+        let mut rc_at_yi0 = orig_problem.c[j];
         if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
             for (k, &row) in rows.iter().enumerate() {
-                rc_at_y0 -= vals[k] * dual_solution[row];
+                if row == i {
+                    continue;
+                }
+                rc_at_yi0 -= vals[k] * dual_solution[row];
             }
         }
         let x_j = solution[j];
@@ -580,7 +587,7 @@ fn recover_removed_row_dual(
         if fixed {
             continue;
         }
-        let bound_val = rc_at_y0 / a_ij;
+        let bound_val = rc_at_yi0 / a_ij;
         if at_lb && !at_ub {
             if a_ij > 0.0 {
                 if bound_val < max_y_i {
@@ -1454,6 +1461,54 @@ mod cleanup_comp_tests {
                 i, ct, b, ax, expected, got,
             );
         }
+    }
+
+    /// Regression guard for `recover_removed_row_dual`:
+    /// recovering row `i` must solve with `Σ_{k≠i}` (exclude self term),
+    /// otherwise GS update oscillates and can pin y_i to 0, breaking rc=0 on
+    /// interior/basic columns tied to the removed row.
+    #[test]
+    fn recover_removed_row_dual_excludes_self_row_in_stationarity() {
+        // One interior column x0 participates in:
+        //   row0 (removed): 2*x0 >= 52  -> binding at x0=26
+        //   row1 (kept):    1*x0  = 26  -> dual fixed to y1=3
+        // Objective c0=7. Stationarity on interior x0 requires:
+        //   7 - 2*y0 - 1*y1 = 0  => y0 = 2.
+        let a = CscMatrix::from_triplets(&[0usize, 1], &[0usize, 0], &[2.0, 1.0], 2, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![7.0],
+            a,
+            vec![52.0, 26.0],
+            vec![ConstraintType::Ge, ConstraintType::Eq],
+            vec![(0.0, 100.0)],
+            None,
+        )
+        .unwrap();
+        let x = vec![26.0]; // strictly interior wrt [0, 100]
+        let y_with_bad_self = vec![11.0, 3.0];
+
+        let y0 = recover_removed_row_dual(&lp, 0, &x, &y_with_bad_self);
+        assert!(
+            (y0 - 2.0).abs() < 1e-12,
+            "row dual recovery must enforce interior rc=0, expected y0=2 got {}",
+            y0
+        );
+
+        // Idempotence under GS update: once recovered, re-applying must keep y0.
+        let y_reapplied = recover_removed_row_dual(&lp, 0, &x, &[y0, 3.0]);
+        assert!(
+            (y_reapplied - y0).abs() < 1e-12,
+            "GS update must not oscillate after recovery: y0={} -> {}",
+            y0,
+            y_reapplied
+        );
+
+        let rc0 = 7.0 - 2.0 * y0 - 1.0 * 3.0;
+        assert!(
+            rc0.abs() < 1e-12,
+            "interior/basic column must satisfy rc=0 after recovery, rc={}",
+            rc0
+        );
     }
 }
 
