@@ -4,7 +4,10 @@
 
 use super::bounds::step5_bounds_tightening;
 use super::doubleton::step6_doubleton_equation;
+use super::empty_redundant::{step3a_empty_row, step3b_empty_column, step4_redundant_constraint};
+use super::fixed::step1_fixed_variable;
 use super::free::{step7_free_var_substitution, step8_free_singleton_col};
+use super::singleton::step2_singleton_row;
 use super::state::{PostsolveStep, PresolveState, PresolveStatus};
 use super::substitution::fill_in_exceeds_budget;
 use crate::problem::{ConstraintType, LpProblem};
@@ -401,7 +404,7 @@ fn step8_skips_non_free_singleton() {
 #[test]
 fn fill_in_budget_allows_dense_pivot_with_few_targets() {
     // Pivot row 0 = x+y+z=2 (Eq), only one other row touches x.
-    // piv_others=2, col_j_others=1 → new_entries ≤ 2 ≤ 3*(1+2+1)=12 → allowed.
+    // piv_others=2, col_j_others=1 → Markowitz fill 1*2=2 ≤ removed 1+2+1=4 → allowed.
     let st = make_state(
         vec![0.0; 3],
         &[0, 0, 0, 1],
@@ -423,8 +426,8 @@ fn fill_in_budget_allows_dense_pivot_with_few_targets() {
 fn fill_in_budget_blocks_high_fill() {
     // Pivot row 0: x0+x1+x2+x3+x4+x5+x6+x7=8 (Eq, 8 cols including x0).
     // Rows 1..8: x0+x_(k+7)=k (Le, only x0 and one disjoint col each).
-    // piv_others=7 (x1..x7), col_j_others=7 (rows 1..7), all disjoint → fill=49.
-    // removed_nnz = 1+7+7=15, budget=45. 49 > 45 → blocked.
+    // piv_others=7 (x1..x7), col_j_others=7 (rows 1..7) → Markowitz fill 7*7=49.
+    // removed_nnz = 1+7+7=15. 49 > 15 → blocked.
     let n_extra = 7usize; // x1..x7
     let n_rows_extra = 7usize; // rows 1..7
     let n_cols = 1 + n_extra + n_rows_extra;
@@ -465,4 +468,369 @@ fn fill_in_budget_blocks_high_fill() {
         fill_in_exceeds_budget(&st, 0, 0),
         "dense disjoint fill should exceed budget"
     );
+}
+
+// -----------------------------------------------------------
+// step1_fixed_variable — negative fix value, multi-row b update, obj_offset sign
+// -----------------------------------------------------------
+
+#[test]
+fn step1_fixed_negative_value_updates_b_and_offset() {
+    // x0 fixed at -3 (lb==ub), appears in row0 (coef 1, b=10) and row1 (coef 4, b=20).
+    // After fixing: b0 = 10 - 1*(-3) = 13, b1 = 20 - 4*(-3) = 32, offset = c0*(-3) = 2*(-3) = -6.
+    let mut st = make_state(
+        vec![2.0, 0.0],
+        &[0, 1, 1],
+        &[0, 0, 1],
+        &[1.0, 4.0, 1.0],
+        2,
+        2,
+        vec![10.0, 20.0],
+        vec![ConstraintType::Le, ConstraintType::Le],
+        vec![(-3.0, -3.0), (0.0, 10.0)],
+    );
+    step1_fixed_variable(&mut st, None).unwrap();
+    assert!(st.removed_cols[0], "fixed col must be removed");
+    assert!((st.b[0] - 13.0).abs() < 1e-12, "b0 expected 13, got {}", st.b[0]);
+    assert!((st.b[1] - 32.0).abs() < 1e-12, "b1 expected 32, got {}", st.b[1]);
+    assert!(
+        (st.obj_offset - (-6.0)).abs() < 1e-12,
+        "offset expected -6, got {}",
+        st.obj_offset
+    );
+}
+
+#[test]
+fn step1_detects_lb_gt_ub() {
+    // Bound inconsistency injected post-construction → step1 must report Infeasible.
+    let mut st = make_state(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        1,
+        vec![],
+        vec![],
+        vec![(0.0, 1.0)],
+    );
+    st.bounds[0] = (3.0, 2.0);
+    assert_eq!(
+        step1_fixed_variable(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
+}
+
+// -----------------------------------------------------------
+// step2_singleton_row — negative coefficient, Le-row skip
+// -----------------------------------------------------------
+
+#[test]
+fn step2_singleton_negative_coeff_solves_negative_value() {
+    // Eq row0: -2*x0 = 6 → x0 = -3 (in [-5,0]). x0 also in Le row1 (coef 1, b=10).
+    // After: b1 = 10 - 1*(-3) = 13, offset = c0*(-3) = 1*(-3) = -3.
+    let mut st = make_state(
+        vec![1.0, 0.0],
+        &[0, 1, 1],
+        &[0, 0, 1],
+        &[-2.0, 1.0, 1.0],
+        2,
+        2,
+        vec![6.0, 10.0],
+        vec![ConstraintType::Eq, ConstraintType::Le],
+        vec![(-5.0, 0.0), (0.0, 10.0)],
+    );
+    step2_singleton_row(&mut st, None).unwrap();
+    assert!(st.removed_cols[0] && st.removed_rows[0]);
+    assert!((st.b[1] - 13.0).abs() < 1e-12, "b1 expected 13, got {}", st.b[1]);
+    assert!(
+        (st.obj_offset - (-3.0)).abs() < 1e-12,
+        "offset expected -3, got {}",
+        st.obj_offset
+    );
+}
+
+#[test]
+fn step2_skips_singleton_le_row() {
+    // A Le row with a single variable is NOT an equation → step2 must not solve it.
+    let mut st = make_state(
+        vec![1.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        1,
+        vec![6.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 10.0)],
+    );
+    step2_singleton_row(&mut st, None).unwrap();
+    assert!(!st.removed_rows[0], "Le singleton row must remain");
+    assert!(!st.removed_cols[0]);
+}
+
+#[test]
+fn step2_singleton_infeasible_out_of_bounds() {
+    // 2*x0 = 6 → x0 = 3, but x0 in [0,1] → Infeasible.
+    let mut st = make_state(
+        vec![1.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        1,
+        vec![6.0],
+        vec![ConstraintType::Eq],
+        vec![(0.0, 1.0)],
+    );
+    assert_eq!(
+        step2_singleton_row(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
+}
+
+// -----------------------------------------------------------
+// step3a_empty_row — Eq / Ge feasibility branches (Le covered in tests.rs)
+// -----------------------------------------------------------
+
+/// Build a 2-row state where row1 is structurally empty (no column touches it).
+fn empty_second_row_state(ct1: ConstraintType, b1: f64) -> PresolveState {
+    make_state(
+        vec![1.0],
+        &[0],
+        &[0],
+        &[1.0],
+        2,
+        1,
+        vec![5.0, b1],
+        vec![ConstraintType::Le, ct1],
+        vec![(0.0, f64::INFINITY)],
+    )
+}
+
+#[test]
+fn step3a_empty_eq_row_nonzero_rhs_infeasible() {
+    // Empty Eq row with b != 0 → 0 == b infeasible.
+    let mut st = empty_second_row_state(ConstraintType::Eq, 5.0);
+    assert_eq!(
+        step3a_empty_row(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
+}
+
+#[test]
+fn step3a_empty_eq_row_zero_rhs_feasible() {
+    // Empty Eq row with b == 0 → 0 == 0 feasible, row removed.
+    let mut st = empty_second_row_state(ConstraintType::Eq, 0.0);
+    step3a_empty_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[1], "empty 0==0 row must be removed");
+}
+
+#[test]
+fn step3a_empty_ge_row_positive_rhs_infeasible() {
+    // Empty Ge row: 0 >= b with b > 0 → infeasible.
+    let mut st = empty_second_row_state(ConstraintType::Ge, 5.0);
+    assert_eq!(
+        step3a_empty_row(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
+}
+
+#[test]
+fn step3a_empty_ge_row_nonpositive_rhs_feasible() {
+    // Empty Ge row: 0 >= b with b <= 0 → feasible, removed.
+    let mut st = empty_second_row_state(ConstraintType::Ge, -2.0);
+    step3a_empty_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[1]);
+}
+
+// -----------------------------------------------------------
+// step3b_empty_column — cost-sign × bound branches
+// -----------------------------------------------------------
+
+/// Build a 2-col state where col1 is structurally empty (no row touches it).
+fn empty_second_col_state(c1: f64, bounds1: (f64, f64)) -> PresolveState {
+    make_state(
+        vec![0.0, c1],
+        &[0],
+        &[0],
+        &[1.0],
+        1,
+        2,
+        vec![5.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 10.0), bounds1],
+    )
+}
+
+#[test]
+fn step3b_empty_col_positive_cost_no_lower_bound_unbounded() {
+    // c1 > 0, lb = -inf → minimizing drives x1 → -inf → Unbounded.
+    let mut st = empty_second_col_state(1.0, (f64::NEG_INFINITY, 10.0));
+    assert_eq!(
+        step3b_empty_column(&mut st, None),
+        Err(PresolveStatus::Unbounded)
+    );
+}
+
+#[test]
+fn step3b_empty_col_negative_cost_fixes_at_upper_bound() {
+    // c1 < 0, ub finite → x1 = ub = 5, offset += c1*ub = -2*5 = -10.
+    let mut st = empty_second_col_state(-2.0, (0.0, 5.0));
+    step3b_empty_column(&mut st, None).unwrap();
+    assert!(st.removed_cols[1]);
+    assert!(
+        (st.obj_offset - (-10.0)).abs() < 1e-12,
+        "offset expected -10, got {}",
+        st.obj_offset
+    );
+}
+
+#[test]
+fn step3b_empty_col_zero_cost_finite_lb_fixes_at_lower_bound() {
+    // c1 == 0, lb finite → x1 = lb = 3, offset unchanged.
+    let mut st = empty_second_col_state(0.0, (3.0, 10.0));
+    step3b_empty_column(&mut st, None).unwrap();
+    assert!(st.removed_cols[1]);
+    assert!(st.obj_offset.abs() < 1e-12, "zero-cost col adds no offset");
+    let value = st.postsolve_stack.iter().find_map(|s| match s {
+        PostsolveStep::EmptyColumn { orig_col: 1, value } => Some(*value),
+        _ => None,
+    });
+    assert!(
+        value.is_some_and(|v| (v - 3.0).abs() < 1e-12),
+        "empty col value must default to finite lb=3"
+    );
+}
+
+#[test]
+fn step3b_empty_col_zero_cost_free_fixes_at_zero() {
+    // c1 == 0, both bounds infinite (free) → x1 = 0.
+    let mut st = empty_second_col_state(0.0, (f64::NEG_INFINITY, f64::INFINITY));
+    step3b_empty_column(&mut st, None).unwrap();
+    assert!(st.removed_cols[1]);
+    let value = st.postsolve_stack.iter().find_map(|s| match s {
+        PostsolveStep::EmptyColumn { orig_col: 1, value } => Some(*value),
+        _ => None,
+    });
+    assert!(
+        value.is_some_and(|v| v.abs() < 1e-12),
+        "free zero-cost col value must default to 0"
+    );
+}
+
+// -----------------------------------------------------------
+// step4_redundant_constraint — Ge / Eq branches (Le covered in tests.rs)
+// -----------------------------------------------------------
+
+#[test]
+fn step4_ge_constraint_redundant_when_activity_floor_dominates() {
+    // x0 + x1 >= 1, x0,x1 in [1,5] → row activity min = 2 >= 1 → redundant.
+    let mut st = make_state(
+        vec![0.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![1.0],
+        vec![ConstraintType::Ge],
+        vec![(1.0, 5.0), (1.0, 5.0)],
+    );
+    step4_redundant_constraint(&mut st, None).unwrap();
+    assert!(st.removed_rows[0], "Ge with activity floor >= rhs must be redundant");
+}
+
+#[test]
+fn step4_ge_constraint_not_redundant_when_floor_below_rhs() {
+    // x0 + x1 >= 3, x0,x1 in [0,5] → activity min = 0 < 3 → NOT redundant.
+    let mut st = make_state(
+        vec![0.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![3.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    step4_redundant_constraint(&mut st, None).unwrap();
+    assert!(!st.removed_rows[0]);
+}
+
+#[test]
+fn step4_eq_constraint_redundant_when_activity_pins_rhs() {
+    // x0 + x1 = 4 with x0,x1 fixed at 2 → activity range [4,4] == rhs → redundant.
+    let mut st = make_state(
+        vec![0.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![4.0],
+        vec![ConstraintType::Eq],
+        vec![(2.0, 2.0), (2.0, 2.0)],
+    );
+    step4_redundant_constraint(&mut st, None).unwrap();
+    assert!(st.removed_rows[0], "Eq pinned to rhs by fixed vars must be redundant");
+}
+
+// -----------------------------------------------------------
+// step5_bounds_tightening — fixed-variable counting branch
+// -----------------------------------------------------------
+
+#[test]
+fn step5_tightening_to_point_increments_new_fixed() {
+    // x0 <= 0 with x0 in [0,10] → implied ub = 0, collapsing bounds to [0,0].
+    let mut st = make_state(
+        vec![0.0],
+        &[0],
+        &[0],
+        &[1.0],
+        1,
+        1,
+        vec![0.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 10.0)],
+    );
+    let mut fixed = 0usize;
+    step5_bounds_tightening(&mut st, &mut fixed, None).unwrap();
+    assert_eq!(fixed, 1, "tightening that pins lb==ub must count as a new fix");
+    let (lb, ub) = st.bounds[0];
+    assert!(lb.abs() < 1e-12 && ub.abs() < 1e-12, "bounds collapsed to [0,0]");
+}
+
+// -----------------------------------------------------------
+// step6_doubleton_equation — opposite-sign coefficients (ratio < 0)
+// -----------------------------------------------------------
+
+#[test]
+fn step6_opposite_sign_coeffs_tightens_other_bound() {
+    // x0 - x1 = 2, x0,x1 in [0,10]. Equal magnitudes, a1=1 >= a2=-1 → pivot=x0.
+    // ratio = 1/(-1) = -1 < 0 branch. bo = 2/(-1) = -2.
+    //   other_lb_impl = bo - ratio*lb_p = -2 - (-1)*0 = -2
+    //   other_ub_impl = bo - ratio*ub_p = -2 - (-1)*10 = 8
+    // x1 tightened: [max(0,-2), min(10,8)] = [0, 8]. Then x0 eliminated.
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, -1.0],
+        1,
+        2,
+        vec![2.0],
+        vec![ConstraintType::Eq],
+        vec![(0.0, 10.0), (0.0, 10.0)],
+    );
+    let mut subst = 0usize;
+    step6_doubleton_equation(&mut st, &mut subst, None).unwrap();
+    assert_eq!(subst, 1);
+    assert!(st.removed_cols[0] && st.removed_rows[0], "pivot x0 eliminated");
+    let (lb1, ub1) = st.bounds[1];
+    assert!(lb1.abs() < 1e-12, "x1 lb stays 0, got {lb1}");
+    assert!((ub1 - 8.0).abs() < 1e-12, "x1 ub tightened to 8, got {ub1}");
+    assert!(count_linear_subst(&st) >= 1);
+    assert!(count_bounds_tightened(&st) >= 1, "ratio<0 must tighten other bound");
 }

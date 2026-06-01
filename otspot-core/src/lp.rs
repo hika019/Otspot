@@ -156,4 +156,107 @@ mod tests {
             );
         }
     }
+
+    fn cx(lp: &LpProblem, sol: &[f64]) -> f64 {
+        lp.c.iter().zip(sol).map(|(c, x)| c * x).sum::<f64>() + lp.obj_offset
+    }
+
+    fn solve_lp_no_presolve(lp: &LpProblem) -> SolverResult {
+        let opts = SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        solve_lp_with(lp, &opts)
+    }
+
+    /// Reported objective must equal `c·x` of the returned solution for an LP
+    /// with a NONZERO lower bound that routes through the Big-M Phase I path.
+    ///
+    /// `min x  s.t.  x >= 5 (Ge),  x ∈ [3, ∞)` → optimum x=5, obj=5.
+    /// The Ge constraint forces artificials ⇒ `big_m_cold_start`. The standard
+    /// form shifts x = 3 + x', so `sf.obj_offset = c·lb = 3`.
+    ///
+    /// BUG (a4200da): `phase1.rs` recomputes `obj_orig = c·solution` from the
+    /// un-shifted solution (already = c·x = 5) and then ADDS `sf.obj_offset`
+    /// again ⇒ reports 8. The solution (x=5) is correct; only the scalar is wrong.
+    /// This test FAILS until the Big-M path stops double-adding `sf.obj_offset`.
+    /// Expected after fix: reported objective == 5.
+    #[test]
+    fn bigm_nonzero_lb_objective_double_count() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Ge],
+            vec![(3.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let res = solve_lp_no_presolve(&lp);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert!(
+            (res.solution[0] - 5.0).abs() < 1e-6,
+            "solution must be x=5; got {}",
+            res.solution[0]
+        );
+        assert!(
+            (res.objective - cx(&lp, &res.solution)).abs() < 1e-6,
+            "reported objective {} must equal c·x {} (Big-M path double-counts \
+             sf.obj_offset = c·lb = 3 ⇒ reports 8 instead of 5)",
+            res.objective,
+            cx(&lp, &res.solution)
+        );
+    }
+
+    /// Control: Le-only LP with nonzero lower bound routes through the Le-only
+    /// cold-start path, which correctly adds `sf.obj_offset` to the SHIFTED
+    /// `basic_obj`. `min x s.t. x <= 10, x ∈ [3, ∞)` → x=3, obj=3. PASSES.
+    /// Sentinel for the scope of the Big-M bug (this path must stay correct).
+    #[test]
+    fn le_only_nonzero_lb_objective_correct() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![10.0],
+            vec![ConstraintType::Le],
+            vec![(3.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let res = solve_lp_no_presolve(&lp);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert!(
+            (res.objective - cx(&lp, &res.solution)).abs() < 1e-6,
+            "Le-only path: reported {} must equal c·x {}",
+            res.objective,
+            cx(&lp, &res.solution)
+        );
+    }
+
+    /// Control: bounded LP (finite ub) with nonzero lower bound routes through
+    /// the BFRT bounded path, which is also correct. `min x s.t. x <= 10,
+    /// x ∈ [3, 8]` → x=3, obj=3. PASSES. Sentinel for the bounded path.
+    #[test]
+    fn bounded_nonzero_lb_objective_correct() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![10.0],
+            vec![ConstraintType::Le],
+            vec![(3.0, 8.0)],
+            None,
+        )
+        .unwrap();
+        let res = solve_lp_no_presolve(&lp);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert!(
+            (res.objective - cx(&lp, &res.solution)).abs() < 1e-6,
+            "bounded path: reported {} must equal c·x {}",
+            res.objective,
+            cx(&lp, &res.solution)
+        );
+    }
 }

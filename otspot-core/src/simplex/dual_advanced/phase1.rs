@@ -724,7 +724,9 @@ pub(crate) fn big_m_cold_start(
                 None
             };
 
-            // obj は元コスト c (Big-M ペナルティを含まない) で再計算
+            // solution は原空間 (un-shifted) なので c·x が完全な原目的値。
+            // 他経路は shifted basic_obj に sf.obj_offset を足すが、ここで足すと
+            // Σc_j·lb_j を二重計上する (Big-M 経路のみのバグだった)。
             let obj_orig: f64 = problem
                 .c
                 .iter()
@@ -734,7 +736,7 @@ pub(crate) fn big_m_cold_start(
 
             SolverResult {
                 status: SolveStatus::Optimal,
-                objective: obj_orig + sf.obj_offset,
+                objective: obj_orig,
                 solution,
                 dual_solution,
                 reduced_costs,
