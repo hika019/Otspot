@@ -746,3 +746,103 @@ mod roundtrip_kkt {
         assert_kkt_optimal(&lp, 3.0, "roundtrip_ge_constraint_dual_sign");
     }
 }
+
+// -----------------------------------------------------------
+// Step 7 free-variable substitution fill-in cascade (cont1/4/11 hang repro)
+// -----------------------------------------------------------
+//
+// REGRESSION GUARD — currently EXPECTED TO FAIL.
+//
+// On the cont* instances (continuous optimal-control LPs, ~201k constraints /
+// ~40k vars) `step7_free_var_substitution` consumes the entire solver timeout
+// in presolve pass 0 and never returns a reduced problem. Measured 2026-06-01
+// on cont1 (release): parse 0.18s, steps 1-6 each <0.02s, then step7 burns the
+// full 30s deadline after only 5708 of ~40k free-var eliminations, with the
+// per-elimination cost growing ~80x (0.17ms → 14ms) as the matrix densifies.
+// `fill_in_exceeds_budget` never fired (skip_budget=0): its budget scales with
+// the eliminated column's current row count, so an already-dense column is
+// allowed to densify further.
+//
+// This synthetic reproduces the same cascade at small scale: free "hub"
+// variables a_0..a_N chained by 3-term Eq pivot rows that all share one bounded
+// variable g, plus R load rows that initially reference a_0. Eliminating a_0
+// pushes a_1 and g into all R load rows; the cascade repeats down the chain, so
+// every elimination touches ~R rows and repeatedly rescans the dense column g.
+// Cost grows super-linearly in R (measured: doubling R ~3.5x time).
+//
+// EXPECTED AFTER FIX: presolve of this ~10.5k-var / ~10.5k-constraint LP must
+// finish well under MAX_PRESOLVE_SECS. Today it takes ~2.6s (release) and so
+// FAILS. The SAFETY_DEADLINE is only a non-hang guard; the assertion is on
+// wall-clock, not on whether the reduction completed (a fix may legitimately
+// eliminate the vars quickly OR skip them — either way it must be fast).
+#[test]
+fn test_step7_free_var_fillin_must_not_blow_up() {
+    use std::time::{Duration, Instant};
+
+    // Sized so the buggy path runs ~2.6s (release) — clearly over the bound —
+    // while the safety deadline keeps the test bounded if it ever hangs.
+    const N_HUBS: usize = 1500; // free chained variables a_0..a_N
+    const N_LOADS: usize = 9000; // load rows that densify around the chain
+    const MAX_PRESOLVE_SECS: f64 = 1.0; // post-fix budget (assertion)
+    const SAFETY_DEADLINE_SECS: f64 = 8.0; // non-hang guard only
+
+    let n_hub = N_HUBS + 1;
+    let idx_g = n_hub; // single shared bounded variable
+    let idx_d0 = n_hub + 1; // first load slack
+    let ncols = n_hub + 1 + N_LOADS;
+    let nrows = N_HUBS + N_LOADS; // N_HUBS pivot Eq rows + N_LOADS load Le rows
+
+    let mut rows: Vec<usize> = Vec::new();
+    let mut cols: Vec<usize> = Vec::new();
+    let mut vals: Vec<f64> = Vec::new();
+    // Pivot rows: 2*a_i - a_{i+1} - 0.5*g = 0  (3 terms ⇒ not a doubleton, so
+    // step6 skips it; a_i has the largest |coef| ⇒ step7 picks it to eliminate a_i).
+    for i in 0..N_HUBS {
+        rows.push(i);
+        cols.push(i);
+        vals.push(2.0);
+        rows.push(i);
+        cols.push(i + 1);
+        vals.push(-1.0);
+        rows.push(i);
+        cols.push(idx_g);
+        vals.push(-0.5);
+    }
+    // Load rows: a_0 + d_r <= 2.
+    for r in 0..N_LOADS {
+        let row = N_HUBS + r;
+        rows.push(row);
+        cols.push(0);
+        vals.push(1.0);
+        rows.push(row);
+        cols.push(idx_d0 + r);
+        vals.push(1.0);
+    }
+
+    let a = CscMatrix::from_triplets(&rows, &cols, &vals, nrows, ncols).unwrap();
+    let c = vec![0.0; ncols];
+    let mut b = vec![0.0; nrows];
+    let mut cts = vec![ConstraintType::Eq; nrows];
+    let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); ncols]; // hubs free
+    bounds[idx_g] = (0.0, 1.0);
+    for r in 0..N_LOADS {
+        b[N_HUBS + r] = 2.0;
+        cts[N_HUBS + r] = ConstraintType::Le;
+        bounds[idx_d0 + r] = (0.0, 1.0);
+    }
+    let lp = LpProblem::new_general(c, a, b, cts, bounds, None).unwrap();
+
+    let deadline = Some(Instant::now() + Duration::from_secs_f64(SAFETY_DEADLINE_SECS));
+    let t0 = Instant::now();
+    let _ = run_presolve(&lp, deadline).expect("presolve must not error on this LP");
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    assert!(
+        elapsed < MAX_PRESOLVE_SECS,
+        "step7 free-var substitution fill-in cascade: presolve took {:.3}s on a \
+         {}-var / {}-constraint LP (budget {:.1}s). The free-var elimination cost \
+         grows super-linearly as columns densify — see fill_in_exceeds_budget / \
+         eliminate_variable_via_eq_row in presolve/transforms.",
+        elapsed, ncols, nrows, MAX_PRESOLVE_SECS
+    );
+}
