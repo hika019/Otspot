@@ -33,7 +33,10 @@ use otspot_io::qps::parse_qps;
 /// Ge制約: max(0, b_i - Ax_i)（下方向）
 /// Le制約: max(0, Ax_i - b_i)（上方向、デフォルト）
 fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
-    if solution.is_empty() || solution.len() != prob.num_vars {
+    if solution.is_empty()
+        || solution.len() != prob.num_vars
+        || solution.iter().any(|v| !v.is_finite())
+    {
         return (f64::NAN, f64::NAN);
     }
 
@@ -51,31 +54,23 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
         Err(_) => f64::NAN,
     };
 
-    // bfeas: OSQP 式の全体相対化 ||v||_∞ / (1 + max(||x||_∞, ||lb||_∞, ||ub||_∞))
+    // bfeas: component-wise bound feasibility. Global scaling can hide a
+    // materially violated small bound when another variable is huge.
     let mut max_v = 0.0_f64;
-    let mut max_x = 0.0_f64;
-    let mut max_bnd = 0.0_f64;
     for (&xi, &(lb, ub)) in solution.iter().zip(prob.bounds.iter()) {
         let lb_viol = if lb.is_finite() {
-            (lb - xi).max(0.0)
+            (lb - xi).max(0.0) / (1.0 + xi.abs() + lb.abs())
         } else {
             0.0
         };
         let ub_viol = if ub.is_finite() {
-            (xi - ub).max(0.0)
+            (xi - ub).max(0.0) / (1.0 + xi.abs() + ub.abs())
         } else {
             0.0
         };
         max_v = max_v.max(lb_viol.max(ub_viol));
-        max_x = max_x.max(xi.abs());
-        if lb.is_finite() {
-            max_bnd = max_bnd.max(lb.abs());
-        }
-        if ub.is_finite() {
-            max_bnd = max_bnd.max(ub.abs());
-        }
     }
-    let bfeas = max_v / (1.0 + max_x.max(max_bnd));
+    let bfeas = max_v;
 
     (pfeas, bfeas)
 }
@@ -648,42 +643,67 @@ fn main() {
         // 生ステータスをそのまま評価する。LocallyOptimal の暗黙昇格は行わない。
         // バグ隠蔽を避けるため、昇格よりも未証明状態の可視化を優先する。
 
+        let timeout_overrun = elapsed_s > timeout_secs + 1.0;
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
-                // 判定フロー: pfeas → dfeas → 相補性 → 正解値照合
-
-                // Step 3: pfeas（行ノルム正規化版、本体ipm/mod.rsと同方式）
-                let (pfeas, bfeas) = compute_primal_quality(&prob, &result.solution);
-                let pfeas_normalized = compute_pfeas_normalized(&prob, &result.solution);
-
-                // Step 4: pfeasチェック（正規化済み違反 > eps で失敗）
-                if residual_exceeds_eps(pfeas_normalized, eps) || residual_exceeds_eps(bfeas, eps) {
-                    n_pfeas_fail += 1;
+                if timeout_overrun {
+                    n_timeout += 1;
                     (
-                        "PFEAS_FAIL".to_string(),
+                        "TIMEOUT_OVERRUN".to_string(),
                         format!(
-                            "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} bf={:.1e}",
-                            method_label, result.objective, pfeas, pfeas_normalized, bfeas
+                            "[{}] elapsed={:.3}s timeout={:.3}s",
+                            method_label, elapsed_s, timeout_secs
+                        ),
+                    )
+                } else if matches!(
+                    expected_statuses.get(&name),
+                    Some(ExpectedStatus::Infeasible | ExpectedStatus::Unbounded)
+                ) {
+                    n_fail += 1;
+                    (
+                        "FAIL:Optimal".to_string(),
+                        format!(
+                            "(expected {:?})",
+                            expected_statuses.get(&name).cloned().unwrap()
                         ),
                     )
                 } else {
-                    // Step 5: dfeas チェック（元空間 + 成分ごと相対化）
-                    // 判定は dfeas_rel < eps (OSQP/Clarabel 流). dfeas_abs は表示用。
-                    // 相対化により ill-conditioned 問題 (QFORPLAN: |Qx|≈|A^Ty|≈1e9 で
-                    // キャンセル後の残差 1e3) でも妥当な精度を測れる。
-                    let (dfeas_abs, dfeas_rel) = compute_dfeas_orig(
-                        &prob,
-                        &result.solution,
-                        &result.dual_solution,
-                        &result.bound_duals,
-                        &result.reduced_costs,
-                    );
+                    // 判定フロー: pfeas → dfeas → 相補性 → 正解値照合
 
-                    if residual_exceeds_eps(dfeas_rel, eps) {
-                        n_dfeas_fail += 1;
+                    // Step 3: pfeas（行ノルム正規化版、本体ipm/mod.rsと同方式）
+                    let (pfeas, bfeas) = compute_primal_quality(&prob, &result.solution);
+                    let pfeas_normalized = compute_pfeas_normalized(&prob, &result.solution);
+
+                    // Step 4: pfeasチェック（正規化済み違反 > eps で失敗）
+                    if residual_exceeds_eps(pfeas_normalized, eps)
+                        || residual_exceeds_eps(bfeas, eps)
+                    {
+                        n_pfeas_fail += 1;
                         (
-                            "DFEAS_FAIL".to_string(),
+                            "PFEAS_FAIL".to_string(),
                             format!(
+                                "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} bf={:.1e}",
+                                method_label, result.objective, pfeas, pfeas_normalized, bfeas
+                            ),
+                        )
+                    } else {
+                        // Step 5: dfeas チェック（元空間 + 成分ごと相対化）
+                        // 判定は dfeas_rel < eps (OSQP/Clarabel 流). dfeas_abs は表示用。
+                        // 相対化により ill-conditioned 問題 (QFORPLAN: |Qx|≈|A^Ty|≈1e9 で
+                        // キャンセル後の残差 1e3) でも妥当な精度を測れる。
+                        let (dfeas_abs, dfeas_rel) = compute_dfeas_orig(
+                            &prob,
+                            &result.solution,
+                            &result.dual_solution,
+                            &result.bound_duals,
+                            &result.reduced_costs,
+                        );
+
+                        if residual_exceeds_eps(dfeas_rel, eps) {
+                            n_dfeas_fail += 1;
+                            (
+                                "DFEAS_FAIL".to_string(),
+                                format!(
                                 "[{}] obj={:.2e} pf={:.1e} df={:.1e} dfr={:.1e} (eps={:.1e}) {}",
                                 method_label,
                                 result.objective,
@@ -693,55 +713,55 @@ fn main() {
                                 eps,
                                 dual_payload_summary(&result)
                             ),
-                        )
-                    } else {
-                        let dfeas = dfeas_abs;
-                        // Step 9: 正解値照合
-                        // netlib_lp.csv のみ CSV 参照値に obj_offset を加算して比較
-                        // (solver は result.objective に offset 込みで返すため)。
-                        let obj_offset = baseline_obj_offset(&baseline_csv, &prob);
-                        match check_baseline_objective(
-                            &name,
-                            result.objective,
-                            &baseline_objectives,
-                            eps_obj,
-                            obj_offset,
-                        ) {
-                            ObjCheckResult::Mismatch { rel_err } => {
-                                n_obj_mismatch += 1;
-                                (
-                                    "OBJ_MISMATCH".to_string(),
-                                    format!(
-                                        "[{}] obj={:.2e} known={:.2e} err={:.1}%",
-                                        method_label,
-                                        result.objective,
-                                        baseline_objectives.get(&name).unwrap(),
-                                        rel_err * 100.0
-                                    ),
-                                )
-                            }
-                            ObjCheckResult::Ok { rel_err } => {
-                                n_pass += 1;
-                                // 判定値 (pfn 全体相対化, dfr 全体相対化) と
-                                // 厳しい代替 (pfc, dfc 成分相対化) を併記し、
-                                // 同じ eps で見て componentwise も満たすか可視化する。
-                                let pfc = compute_pfeas_normalized(&prob, &result.solution);
-                                let dfc = compute_dfeas_componentwise(
-                                    &prob,
-                                    &result.solution,
-                                    &result.dual_solution,
-                                    &result.bound_duals,
-                                    &result.reduced_costs,
-                                );
-                                let df_str = if dfeas.is_nan() {
-                                    "df=NA dfr=NA dfc=NA".to_string()
-                                } else {
-                                    format!(
-                                        "df={:.1e} dfr={:.1e} dfc={:.1e}",
-                                        dfeas, dfeas_rel, dfc
+                            )
+                        } else {
+                            let dfeas = dfeas_abs;
+                            // Step 9: 正解値照合
+                            // netlib_lp.csv のみ CSV 参照値に obj_offset を加算して比較
+                            // (solver は result.objective に offset 込みで返すため)。
+                            let obj_offset = baseline_obj_offset(&baseline_csv, &prob);
+                            match check_baseline_objective(
+                                &name,
+                                result.objective,
+                                &baseline_objectives,
+                                eps_obj,
+                                obj_offset,
+                            ) {
+                                ObjCheckResult::Mismatch { rel_err } => {
+                                    n_obj_mismatch += 1;
+                                    (
+                                        "OBJ_MISMATCH".to_string(),
+                                        format!(
+                                            "[{}] obj={:.2e} known={:.2e} err={:.1}%",
+                                            method_label,
+                                            result.objective,
+                                            baseline_objectives.get(&name).unwrap(),
+                                            rel_err * 100.0
+                                        ),
                                     )
-                                };
-                                (
+                                }
+                                ObjCheckResult::Ok { rel_err } => {
+                                    n_pass += 1;
+                                    // 判定値 (pfn 全体相対化, dfr 全体相対化) と
+                                    // 厳しい代替 (pfc, dfc 成分相対化) を併記し、
+                                    // 同じ eps で見て componentwise も満たすか可視化する。
+                                    let pfc = compute_pfeas_normalized(&prob, &result.solution);
+                                    let dfc = compute_dfeas_componentwise(
+                                        &prob,
+                                        &result.solution,
+                                        &result.dual_solution,
+                                        &result.bound_duals,
+                                        &result.reduced_costs,
+                                    );
+                                    let df_str = if dfeas.is_nan() {
+                                        "df=NA dfr=NA dfc=NA".to_string()
+                                    } else {
+                                        format!(
+                                            "df={:.1e} dfr={:.1e} dfc={:.1e}",
+                                            dfeas, dfeas_rel, dfc
+                                        )
+                                    };
+                                    (
                                         "PASS".to_string(),
                                         format!(
                                             "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {} obj_err={:.3}%",
@@ -755,26 +775,26 @@ fn main() {
                                             rel_err * 100.0
                                         ),
                                     )
-                            }
-                            ObjCheckResult::NoRef => {
-                                n_checked_noref += 1;
-                                let pfc = compute_pfeas_normalized(&prob, &result.solution);
-                                let dfc = compute_dfeas_componentwise(
-                                    &prob,
-                                    &result.solution,
-                                    &result.dual_solution,
-                                    &result.bound_duals,
-                                    &result.reduced_costs,
-                                );
-                                let df_str = if dfeas.is_nan() {
-                                    "df=NA dfr=NA dfc=NA".to_string()
-                                } else {
-                                    format!(
-                                        "df={:.1e} dfr={:.1e} dfc={:.1e}",
-                                        dfeas, dfeas_rel, dfc
-                                    )
-                                };
-                                (
+                                }
+                                ObjCheckResult::NoRef => {
+                                    n_checked_noref += 1;
+                                    let pfc = compute_pfeas_normalized(&prob, &result.solution);
+                                    let dfc = compute_dfeas_componentwise(
+                                        &prob,
+                                        &result.solution,
+                                        &result.dual_solution,
+                                        &result.bound_duals,
+                                        &result.reduced_costs,
+                                    );
+                                    let df_str = if dfeas.is_nan() {
+                                        "df=NA dfr=NA dfc=NA".to_string()
+                                    } else {
+                                        format!(
+                                            "df={:.1e} dfr={:.1e} dfc={:.1e}",
+                                            dfeas, dfeas_rel, dfc
+                                        )
+                                    };
+                                    (
                                         "CHECKED[no_ref]".to_string(),
                                         format!(
                                             "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {}",
@@ -787,6 +807,7 @@ fn main() {
                                             df_str
                                         ),
                                     )
+                                }
                             }
                         }
                     }
@@ -809,9 +830,8 @@ fn main() {
                         )
                     }
                     _ => {
-                        // no_ref: 正解不明。FAIL として記録するが expected Optimal ではない
-                        n_fail += 1;
-                        ("FAIL:Infeasible".to_string(), String::new())
+                        n_checked_noref += 1;
+                        ("CHECKED[no_ref]:Infeasible".to_string(), String::new())
                     }
                 }
             }
@@ -828,8 +848,8 @@ fn main() {
                     )
                 }
                 _ => {
-                    n_fail += 1;
-                    ("FAIL:Unbounded".to_string(), String::new())
+                    n_checked_noref += 1;
+                    ("CHECKED[no_ref]:Unbounded".to_string(), String::new())
                 }
             },
             SolveStatus::MaxIterations => {

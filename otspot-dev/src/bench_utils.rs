@@ -27,7 +27,7 @@ pub fn primal_feas_max(
     x: &[f64],
 ) -> f64 {
     let n = bounds.len();
-    if x.len() != n {
+    if x.len() != n || x.iter().any(|v| !v.is_finite()) {
         return f64::INFINITY;
     }
     let ax = if a.nrows() > 0 {
@@ -50,6 +50,9 @@ pub fn primal_feas_max(
             ConstraintType::Eq => (ax[i] - b[i]).abs(),
             _ => continue,
         };
+        if !viol.is_finite() || !ax[i].is_finite() || !b[i].is_finite() {
+            return f64::INFINITY;
+        }
         let scale = 1.0 + ax[i].abs() + b[i].abs();
         max_v = max_v.max(viol / scale);
     }
@@ -378,7 +381,27 @@ pub fn compute_dfeas_orig(
     reduced_costs: &[f64],
 ) -> (f64, f64) {
     use twofloat::TwoFloat;
-    if solution.is_empty() || solution.len() != prob.num_vars {
+    if solution.is_empty()
+        || solution.len() != prob.num_vars
+        || solution.iter().any(|v| !v.is_finite())
+        || dual_solution.iter().any(|v| !v.is_finite())
+        || bound_duals.iter().any(|v| !v.is_finite())
+        || reduced_costs.iter().any(|v| !v.is_finite())
+    {
+        return (f64::NAN, f64::NAN);
+    }
+    if prob.num_constraints > 0 && dual_solution.len() != prob.num_constraints {
+        return (f64::INFINITY, f64::INFINITY);
+    }
+    let n_finite_bounds = prob
+        .bounds
+        .iter()
+        .map(|&(lb, ub)| usize::from(lb.is_finite()) + usize::from(ub.is_finite()))
+        .sum::<usize>();
+    if !bound_duals.is_empty() && bound_duals.len() != n_finite_bounds {
+        return (f64::INFINITY, f64::INFINITY);
+    }
+    if !reduced_costs.is_empty() && reduced_costs.len() != prob.num_vars {
         return (f64::NAN, f64::NAN);
     }
     let n = solution.len();
@@ -401,10 +424,6 @@ pub fn compute_dfeas_orig(
             if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
                 continue;
             }
-            if prob.a.col_ptr().len() > j + 1 && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0
-            {
-                continue;
-            }
             let rc = reduced_costs[j];
             let x_j = solution[j];
             let at_lb =
@@ -416,7 +435,7 @@ pub fn compute_dfeas_orig(
             } else if at_ub && !at_lb {
                 f64::max(0.0, rc)
             } else {
-                0.0
+                rc.abs()
             };
             dfeas_abs = dfeas_abs.max(viol);
             let scale_j = 1.0 + rc.abs() + prob.c[j].abs();
