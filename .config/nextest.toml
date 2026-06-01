@@ -22,17 +22,6 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 filter = "test(linalg::par_sentinel::)"
 threads-required = "num-cpus"
 
-# greenbea IPM-time-box sentinel (#51): boxed IPM + simplex fallback solve is
-# ~220s (300s deadline, 400s watchdog) — inherently above the 3min default cap
-# because greenbea itself is slow. It stays `#[ignore]`d (not in the default
-# fast suite) but must remain a *functional* guard under `--run-ignored`: the
-# default 180s terminate-after kills it mid-solve. Raise the kill ceiling above
-# the test's own 400s watchdog and run it exclusively so the wall stays stable.
-[[profile.default.overrides]]
-filter = "test(diag_greenbea_ipm_timebox_reaches_optimal)"
-slow-timeout = { period = "60s", terminate-after = 8 }
-threads-required = "num-cpus"
-
 # greenbea_postsolve_dual_feasibility: idle ~164s で converge、170s margin 6s。
 # #91 で CPU contention 1.04x でも FAIL することを実証 (threads-required では不十分) →
 # #[ignore] 復活で default 除外。本 override は `--run-ignored only` 時に CPU 専有で安定化させる用途。
@@ -40,18 +29,11 @@ threads-required = "num-cpus"
 filter = "test(lp_regression_postsolve_y_dual::greenbea_postsolve_dual_feasibility)"
 threads-required = "num-cpus"
 
-# lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent: 2500×3500 sparse LP routed through
-# IPM, needs ~11s solo but times out at 30s budget under CPU contention from other
-# tests. Run exclusively so faer parallelism gets all cores.
+# lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent: 2500×3500 sparse LP
+# solved by simplex; needs ~11s solo but times out at 30s budget under CPU contention
+# from other tests. Run exclusively so faer parallelism gets all cores.
 [[profile.default.overrides]]
 filter = "test(lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent)"
-threads-required = "num-cpus"
-
-# lp_simplex_stall_d6cube_noop_proof_short: noop-proof phase (10s simplex stall)
-# + IPM solve (up to 60s). Run exclusively for stable timing and safe set_var
-# isolation (no concurrent env-var mutation from other tests in this binary).
-[[profile.default.overrides]]
-filter = "test(lp_simplex_stall_d6cube_noop_proof_short)"
 threads-required = "num-cpus"
 
 # Memory-heavy qplib parse tests peak 100-800 MB each (QPLIB_8500 = 100 MB,
@@ -79,8 +61,8 @@ test-group = "qplib-memory-heavy"
 #   - tier-3 (> 180s Mac): 既存 #[ignore] 維持
 #
 # Tests gated here include: DSE pivot sentinel (~150s), lp_classify_1000s
-# (~30s–600s each), lp_coverage_screen (~5-6 min), greenbea IPM timebox
-# (~220s), ken-18/osa-60 (~60s each), lp_regression heavy LPs.
+# (~30s–600s each), lp_coverage_screen (~5-6 min), ken-18/osa-60 (~60s each),
+# lp_regression heavy LPs.
 # tier-2 追加 (#97): greenbea presolve-off (~88s), pilot87 (~142s),
 # dfl001 postsolve (~60s), pds-20 (~62s), ken18/ken13/ken11 (~28-34s),
 # liswet family (~20s), nonconvex kkt (~20s), qap15 (~18s),
@@ -94,14 +76,6 @@ slow-timeout = { period = "300s", terminate-after = 2 }
 [[profile.heavy.overrides]]
 filter = "test(lp_coverage_screen_all)"
 slow-timeout = { period = "360s", terminate-after = 2 }
-
-# greenbea IPM timebox: ~220s (inherits default.overrides kill ceiling bump).
-# Repeat here for the heavy profile so the same ceiling applies when the test
-# runs under --profile heavy.
-[[profile.heavy.overrides]]
-filter = "test(diag_greenbea_ipm_timebox_reaches_optimal)"
-slow-timeout = { period = "60s", terminate-after = 8 }
-threads-required = "num-cpus"
 
 # DSE pivot sentinel tests: ~150s each (6 Netlib × 2 arms × 90s timeout cap).
 # Serialise to avoid env-var (DSE_DISABLE_GAMMA_UPDATE) cross-contamination.

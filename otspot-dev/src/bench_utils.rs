@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // Re-export production utilities that also live in otspot-core.
-pub use otspot_core::qp::pick_best_ipm_or_simplex;
 pub use otspot_core::tolerances::{obj_within_tol, OBJ_MATCH_REL_TOL};
 
 /// Relative primal feasibility max-violation for LP / QP.

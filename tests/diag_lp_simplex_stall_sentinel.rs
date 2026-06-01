@@ -1,23 +1,18 @@
 //! Sentinel for #33: large LP must converge through `solve_qp_with` (the
-//! public LP entry point used by bench) instead of timing out in simplex.
+//! public LP entry point used by bench) — now via simplex alone.
 //!
-//! Validates the IPM-first dispatch installed in `src/qp/lp_dispatch.rs`.
-//! Multiple data patterns are exercised (CLAUDE.md「複数パターンのデータを
-//! 用意せよ」):
-//!  * 5 real Netlib LPs (ken-13 / ken-18 / cre-b / d6cube / pilot) – each
-//!    previously TIMED OUT in simplex; must now reach Optimal/LocallyOptimal.
-//!  * 1 synthetic large LP (200 × 600) – proves the size-gate fires on a
-//!    random-but-reproducible instance, independent of fixture quirks.
+//! LP は IPM を撤廃し simplex 一本化した (#19/#22)。本 sentinel は「以前 IPM が
+//! 隠していた大規模 LP の収束を、simplex 単独で達成できるか」を検証する
+//! Phase2 worklist そのもの。複数パターンのデータを用意 (CLAUDE.md):
+//!  * 6 real Netlib LPs (ken-13 / ken-18 / cre-b / d6cube / pilot / greenbea) – each
+//!    previously TIMED OUT in simplex; simplex 単独で Optimal/LocallyOptimal に
+//!    到達し truth と一致することを要求する。
+//!  * 1 synthetic large LP (2500 × 3500) – simplex 単独で budget 内に有限
+//!    incumbent を返す robustness 検証。
 //!
-//! **No-op proof** (memory feedback_sentinel_must_fail_under_noop):
-//! Setting `LP_DISPATCH_NOOP=1` in the environment makes the dispatch
-//! bypass IPM entirely (legacy simplex-only). Run the sentinel under that
-//! flag → the four large Netlib LPs MUST regress to non-Optimal. Manual
-//! verification:
-//!   LP_DISPATCH_NOOP=1 cargo test --release \
-//!     --test diag_lp_simplex_stall_sentinel \
-//!     -- --nocapture lp_simplex_stall_ken13_converges
-//! Expected (without fix): timeouts; with fix: PASS.
+//! これらは simplex 単独では fail しうる。それが Phase2 の正しい信号なので、
+//! fail を消すために assert 緩和/test 削除をしてはならない。heavy-ignore な
+//! ので標準 suite は緑、heavy run で honest に赤が出る = 想定通り。
 //!
 //! Reading dfl001 truth from data/baseline_objectives is preferred but
 //! adds CSV parsing; truths are inlined from netlib_lp.csv for terseness.
@@ -31,9 +26,8 @@ use otspot::qp::QpProblem;
 use otspot::{solve_qp_with, SolveStatus};
 
 const BUDGET_SECS: f64 = 180.0;
-/// Short budget for the synthetic case: 30s is plenty for IPM (≈3s observed)
-/// but well short of the simplex completion time on m=2500 (sentinel needs
-/// the no-op path to fail within a reasonable test runtime).
+/// Budget for the synthetic case. simplex 単独で有限 incumbent を返すことの
+/// 確認用 (最適性証明ではない)。
 const SYNTH_BUDGET_SECS: f64 = 30.0;
 const REL_TOL: f64 = 5e-3; // 0.5 % of truth – tighter than bench eps=1e-6.
 
@@ -63,11 +57,11 @@ const REAL_CASES: &[Case] = &[
         name: "pilot",
         truth: -5.5740430007e2,
     },
+    Case {
+        name: "greenbea",
+        truth: -7.2555248130e7,
+    },
 ];
-
-fn dispatch_disabled() -> bool {
-    std::env::var("LP_DISPATCH_NOOP").ok().as_deref() == Some("1")
-}
 
 fn load_qp(name: &str) -> Option<QpProblem> {
     let path_str = format!("data/lp_problems/{}.QPS", name);
@@ -83,6 +77,7 @@ fn rel_err(got: f64, truth: f64) -> f64 {
     (got - truth).abs() / scale
 }
 
+/// simplex 単独で real Netlib LP が BUDGET_SECS 以内に収束し truth と一致すること。
 fn assert_real_netlib_lp_converges(case: &Case) {
     let Some(qp) = load_qp(case.name) else {
         panic!("{}: data/lp_problems/{}.QPS missing", case.name, case.name);
@@ -93,16 +88,6 @@ fn assert_real_netlib_lp_converges(case: &Case) {
     let r = solve_qp_with(&qp, &opts);
     let converged = matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal);
     let close = r.objective.is_finite() && rel_err(r.objective, case.truth) <= REL_TOL;
-    if dispatch_disabled() {
-        assert!(
-            !(converged && close),
-            "{}: LP_DISPATCH_NOOP=1 unexpectedly converged: status={:?} obj={:.6e}",
-            case.name,
-            r.status,
-            r.objective
-        );
-        return;
-    }
     assert!(
         converged && close,
         "{}: status={:?} obj={:.6e} truth={:.6e} rel_err={:.2e}",
@@ -133,88 +118,15 @@ real_netlib_case_test!(lp_simplex_stall_ken18_converges, "ken-18");
 real_netlib_case_test!(lp_simplex_stall_cre_b_converges, "cre-b");
 real_netlib_case_test!(lp_simplex_stall_d6cube_converges, "d6cube");
 real_netlib_case_test!(lp_simplex_stall_pilot_converges, "pilot");
+real_netlib_case_test!(lp_simplex_stall_greenbea_converges, "greenbea");
 
-/// Short auto-verified no-op proof: d6cube (n=6_184 > LP_IPM_FIRST_N=3_000).
+/// Synthetic large LP: random sparse A, dense c, all Eq, large (m=2500, n=3500).
+/// simplex 単独で budget 内に有限 incumbent を返す robustness 検証。
 ///
-/// Two-phase sentinel (memory `feedback_sentinel_must_fail_under_noop`):
-///  1. Noop-proof: `LP_DISPATCH_NOOP=1` + 10 s budget → simplex stalls
-///     (lp_dispatch.rs bench evidence: 4.25% gap at 60s), result must NOT
-///     be Optimal/LocallyOptimal.
-///  2. Dispatch-enabled: 60 s budget → IPM converges to truth within REL_TOL.
-///
-/// Runs in the default suite. Exits early with a warning if
-/// `data/lp_problems/d6cube.QPS` is absent.
-#[test]
-fn lp_simplex_stall_d6cube_noop_proof_short() {
-    const D6CUBE_TRUTH: f64 = 3.1549166667e2;
-    const NOOP_BUDGET_SECS: f64 = 10.0;
-    const IPM_BUDGET_SECS: f64 = 60.0;
-
-    let Some(qp) = load_qp("d6cube") else {
-        eprintln!(
-            "[lp_simplex_stall_d6cube_noop_proof_short] SKIP: \
-             data/lp_problems/d6cube.QPS not found"
-        );
-        return;
-    };
-
-    // Phase 1: noop proof.
-    // SAFETY: LP_DISPATCH_NOOP is process-wide; nextest isolates each test
-    // in its own process, so no cross-test env-var leak occurs.
-    unsafe {
-        std::env::set_var("LP_DISPATCH_NOOP", "1");
-    }
-    let noop_result = {
-        let mut opts = SolverOptions::default();
-        opts.timeout_secs = Some(NOOP_BUDGET_SECS);
-        solve_qp_with(&qp, &opts)
-    };
-    unsafe {
-        std::env::remove_var("LP_DISPATCH_NOOP");
-    }
-
-    assert!(
-        !matches!(
-            noop_result.status,
-            SolveStatus::Optimal | SolveStatus::LocallyOptimal
-        ),
-        "LP_DISPATCH_NOOP=1 + {}s: d6cube must NOT converge in simplex \
-         (sentinel has no teeth if this passes). status={:?} obj={:.6e}",
-        NOOP_BUDGET_SECS,
-        noop_result.status,
-        noop_result.objective
-    );
-
-    // Phase 2: dispatch-enabled correctness check.
-    let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(IPM_BUDGET_SECS);
-    let r = solve_qp_with(&qp, &opts);
-
-    assert!(
-        matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
-        "d6cube with IPM dispatch must converge within {}s: status={:?} obj={:.6e}",
-        IPM_BUDGET_SECS,
-        r.status,
-        r.objective
-    );
-    assert!(
-        rel_err(r.objective, D6CUBE_TRUTH) <= REL_TOL,
-        "d6cube obj {:.6e} deviates from truth {:.6e} by {:.2e} (>= tol {:.2e})",
-        r.objective,
-        D6CUBE_TRUTH,
-        rel_err(r.objective, D6CUBE_TRUTH),
-        REL_TOL
-    );
-}
-
-/// Synthetic large LP: random sparse A, dense c, all Eq, large enough to
-/// trigger the IPM-first dispatch (m > 2000). Validates that the dispatch
-/// route is exercised on data outside the fixture set.
-///
-/// **Heavy tier**: IPM returns a primal-feasible incumbent within the 30s
+/// **Heavy tier**: simplex returns a primal-feasible incumbent within the 30s
 /// budget under full nextest contention. This test is not an optimality proof:
-/// there is no known optimum for this generated instance, so it checks route
-/// and incumbent validity rather than claiming `Optimal`.
+/// there is no known optimum for this generated instance, so it checks that a
+/// valid incumbent is returned rather than claiming `Optimal`.
 /// Run via `--profile heavy --run-ignored ignored-only`.
 #[test]
 #[ignore = "heavy: CPU contention 30s budget hit (2026-05-30 #130 lead-verify retest で再現); permanent heavy-tier ignore"]
@@ -223,10 +135,6 @@ fn lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent() {
 
     let m: usize = 2_500;
     let n: usize = 3_500;
-    assert!(
-        m > 2_000,
-        "must exceed LP_IPM_FIRST_M for size gate to fire"
-    );
 
     // Reproducible random A: each row picks ~6 columns via a deterministic LCG.
     let mut rows: Vec<usize> = Vec::new();
@@ -278,25 +186,8 @@ fn lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent() {
     opts.timeout_secs = Some(SYNTH_BUDGET_SECS);
     let r = solve_qp_with(&qp, &opts);
 
-    if dispatch_disabled() {
-        // No-op: simplex alone must NOT reach Optimal/LocallyOptimal on this
-        // size within the budget (proves the dispatch route is required).
-        eprintln!(
-            "[synthetic LP_DISPATCH_NOOP=1] status={:?} iters={} obj={:.3e} \
-             (budget={}s, m=2500, n=3500)",
-            r.status, r.iterations, r.objective, SYNTH_BUDGET_SECS
-        );
-        assert!(
-            !matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
-            "LP_DISPATCH_NOOP=1: simplex unexpectedly converged \
-             (sentinel cannot fail). status={:?} iters={}",
-            r.status,
-            r.iterations
-        );
-        return;
-    }
     eprintln!(
-        "[synthetic dispatch enabled] status={:?} iters={} obj={:.6e} \
+        "[synthetic simplex] status={:?} iters={} obj={:.6e} \
          (budget={}s, m=2500, n=3500)",
         r.status, r.iterations, r.objective, SYNTH_BUDGET_SECS
     );
@@ -322,11 +213,11 @@ fn lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent() {
     );
 
     // Objective validity (reviewer M2):
-    //  - r.objective <= obj_at_xstar (LP is a minimisation; the dispatched
-    //    solution must beat the feasible incumbent we constructed).
-    //  - r.objective >= obj_lb_bound_only (with x ∈ [0,1]^n, no objective
-    //    can be lower than summing all negative c_j with x_j = 1).
-    // Tolerance covers IPM final residual / postsolve drift.
+    //  - r.objective <= obj_at_xstar (LP is a minimisation; the solution must
+    //    beat the feasible incumbent we constructed).
+    //  - r.objective >= obj_lb_bound_only (with x ∈ [0,1]^n, no objective can be
+    //    lower than summing all negative c_j with x_j = 1).
+    // Tolerance covers final residual / postsolve drift.
     const OBJ_TOL: f64 = 1e-6;
     let scale = obj_at_xstar.abs().max(obj_lb_bound_only.abs()).max(1.0);
     assert!(
