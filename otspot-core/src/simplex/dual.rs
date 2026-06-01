@@ -23,7 +23,15 @@ pub(crate) fn two_phase_dual_simplex(
     options: &SolverOptions,
 ) -> SolverResult {
     let m = sf.m;
-    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
+    let Some((a, b, c, row_scale, col_scale)) =
+        LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
+    else {
+        return SolverResult {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            ..Default::default()
+        };
+    };
 
     if let Some(warm) = &options.warm_start {
         if warm.basis.len() == m && warm.basis.iter().all(|&idx| idx < sf.n_total) {

@@ -112,6 +112,10 @@ pub fn bfrt_select_entering(
         } else {
             continue;
         };
+        if theta < -pivot_tol {
+            continue;
+        }
+        let theta = theta.max(0.0);
         let weight = if b.upper.is_finite() {
             b.upper * abs_pivot
         } else {
@@ -131,7 +135,6 @@ pub fn bfrt_select_entering(
     // Step 3: walk breakpoints, tracking residual.
     let residual_target = leaving_residual.abs();
     let mut residual = residual_target;
-    let mut flips: Vec<usize> = Vec::new();
     let mut entering_idx: usize = 0;
     let mut found = false;
     for (k, &(_theta, _j, _abs_pivot, weight)) in breaks.iter().enumerate() {
@@ -157,9 +160,7 @@ pub fn bfrt_select_entering(
     }
 
     // Step 4: tie-aware entering selection. Among breakpoints within
-    // BFRT_TIE_TOL of the chosen θ, prefer the largest |pivot|. Tied
-    // breakpoints earlier in the sort still count as flips of preceding
-    // variables (we already consumed their weight from the residual).
+    // BFRT_TIE_TOL of the chosen θ, prefer the largest |pivot|.
     let chosen_theta = breaks[entering_idx].0;
     let mut best_idx = entering_idx;
     let mut best_pivot = breaks[entering_idx].2;
@@ -172,19 +173,12 @@ pub fn bfrt_select_entering(
             best_idx = k;
         }
     }
-    // Tied losers in [entering_idx, best_idx) are flips iff they have a
-    // finite upper bound — an ∞-upper column has no second bound to flip to
-    // and downstream wiring would corrupt state if it tried.
-    for k in entering_idx..best_idx {
-        let col = breaks[k].1;
-        if bounds[col].upper.is_finite() {
-            flips.push(col);
-        }
-    }
     // Flips that occurred during the residual walk (before entering_idx).
-    let mut flips_pre: Vec<usize> = (0..entering_idx).map(|k| breaks[k].1).collect();
-    flips_pre.append(&mut flips);
-    let flips = flips_pre;
+    // Candidates tied at the selected theta are not crossed by the dual step:
+    // the algorithm stops on that breakpoint and only the chosen column enters.
+    // Marking same-theta losers as flips changes the primal RHS without a
+    // corresponding step past their breakpoint and violates A*x=b.
+    let flips: Vec<usize> = (0..entering_idx).map(|k| breaks[k].1).collect();
 
     if !flips.is_empty() {
         bump_bfrt_flip_invocations();
@@ -363,6 +357,31 @@ mod tests {
             "flips must not contain infinite-upper columns: {:?}",
             res.flips,
         );
+    }
+
+    #[test]
+    fn bfrt_tie_loser_at_selected_breakpoint_is_not_flip() {
+        let trow = vec![1.0, 5.0];
+        let r = vec![0.1, 0.5];
+        let bounds = lb_bounds(&[1.0, 1.0]);
+        let res =
+            bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 0.5).unwrap();
+        assert_eq!(res.entering_col, 1);
+        assert!(
+            res.flips.is_empty(),
+            "same-theta losers are not crossed and must not flip"
+        );
+    }
+
+    #[test]
+    fn bfrt_skips_negative_breakpoints() {
+        let trow = vec![1.0, 2.0];
+        let r = vec![-1.0, 1.0];
+        let bounds = lb_bounds(&[f64::INFINITY, f64::INFINITY]);
+        let res =
+            bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 1.0).unwrap();
+        assert_eq!(res.entering_col, 1);
+        assert!((res.theta - 0.5).abs() < 1e-12);
     }
 
     /// Reviewer P1 regression: when *all* tie-zone candidates have infinite

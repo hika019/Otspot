@@ -56,6 +56,20 @@ use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 
+#[cfg(test)]
+static BIG_M_COLD_START_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(super) fn reset_big_m_cold_start_count() {
+    BIG_M_COLD_START_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(super) fn big_m_cold_start_count() -> usize {
+    BIG_M_COLD_START_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Farkas certificate verification for primal infeasibility.
 ///
 /// At a Big-M Phase I exit basis with artificials residual, construct the
@@ -515,6 +529,9 @@ pub(crate) fn big_m_cold_start(
     row_scale: &[f64],
     col_scale: &[f64],
 ) -> SolverResult {
+    #[cfg(test)]
+    BIG_M_COLD_START_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let m = sf.m;
     let n_total = sf.n_total;
 
@@ -568,16 +585,39 @@ pub(crate) fn big_m_cold_start(
 
     match phase1_outcome {
         SimplexOutcome::Unbounded => {
-            // 双対非有界 = 主実行不可
-            let mut r = SolverResult::infeasible();
-            r.iterations = total_iters;
-            return r;
+            // Dual-unbounded is only a primal-infeasibility proof when the
+            // current basis yields a verifiable Farkas ray. Degenerate Big-M
+            // Phase I can otherwise hit an empty ratio test after anti-cycling
+            // perturbation on feasible LPs; that is inconclusive, not proof.
+            // When the basis is still usable and time remains, let Phase II try
+            // to pivot artificials out under the original objective.
+            if farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options) {
+                let mut r = SolverResult::infeasible();
+                r.iterations = total_iters;
+                return r;
+            }
+            if options.deadline.is_some_and(|d| std::time::Instant::now() >= d)
+                || options
+                    .cancel_flag
+                    .as_ref()
+                    .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                return super::super::timeout_result_with_incumbent(
+                    sf,
+                    problem,
+                    &basis_aug,
+                    &x_b,
+                    col_scale,
+                    total_iters,
+                );
+            }
         }
         SimplexOutcome::Timeout(_) => {
             // 旧実装は artificial 残存だけで Infeasible を立てていたが、これは
             // slow-feasible LP (pilot/dfl001/ken-13/ken-18) でも発火する不健全
             // ヒューリスティック。Farkas 証明書 (A^T y ≤ 0, b^T y > 0) が
-            // 通った場合のみ Infeasible を返し、検証不能なら Timeout で honest に返す。
+            // 通った場合のみ Infeasible を返す。検証不能かつ時間が残っているなら
+            // Phase II へ渡し、期限切れ/キャンセルなら Timeout で honest に返す。
             let any_artificial_left =
                 (0..m).any(|i| basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol);
             if any_artificial_left
@@ -587,15 +627,21 @@ pub(crate) fn big_m_cold_start(
                 r.iterations = total_iters;
                 return r;
             }
-            let r = super::super::timeout_result_with_incumbent(
-                sf,
-                problem,
-                &basis_aug,
-                &x_b,
-                col_scale,
-                total_iters,
-            );
-            return r;
+            if options.deadline.is_some_and(|d| std::time::Instant::now() >= d)
+                || options
+                    .cancel_flag
+                    .as_ref()
+                    .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                return super::super::timeout_result_with_incumbent(
+                    sf,
+                    problem,
+                    &basis_aug,
+                    &x_b,
+                    col_scale,
+                    total_iters,
+                );
+            }
         }
         SimplexOutcome::SingularBasis => {
             return SolverResult::numerical_error();
@@ -626,6 +672,18 @@ pub(crate) fn big_m_cold_start(
                 return r;
             }
         }
+    }
+
+    // Flush numerical drift accumulated during Phase I, including inconclusive
+    // exits that fall through to Phase II. If refactor fails, the current basis
+    // is not a reliable warm start for primal cleanup.
+    if let Ok(mut bm) = LuBasis::new_timed(&a_aug, &basis_aug, options.max_etas, options.deadline) {
+        let mut rhs = SparseVec::from_dense(b);
+        bm.ftran(&mut rhs);
+        let fresh = rhs.to_dense();
+        x_b.copy_from_slice(&fresh);
+    } else {
+        return SolverResult::numerical_error();
     }
 
     // === Step 7: Phase II (Primal Simplex, 元コスト + Big-M で 1-phase 仕上げ) ===
@@ -659,12 +717,25 @@ pub(crate) fn big_m_cold_start(
     // === Step 8: Phase II 結果 + 人工変数残存判定 ===
     match phase2_outcome {
         SimplexOutcome::Optimal(_obj_aug, y) => {
-            // 人工変数が basis に残り値 > primal_tol → 元 LP infeasible
+            // 人工変数が basis に残り値 > primal_tol → 元 LP infeasible only
+            // when backed by a Farkas certificate. A finite Big-M penalty can
+            // otherwise stop at an augmented optimum that is not a proof for the
+            // original LP; returning Infeasible there is a false verdict risk.
             for i in 0..m {
                 if basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol {
-                    let mut r = SolverResult::infeasible();
-                    r.iterations = total_iters;
-                    return r;
+                    if farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options) {
+                        let mut r = SolverResult::infeasible();
+                        r.iterations = total_iters;
+                        return r;
+                    }
+                    return super::super::timeout_result_with_incumbent(
+                        sf,
+                        problem,
+                        &basis_aug,
+                        &x_b,
+                        col_scale,
+                        total_iters,
+                    );
                 }
             }
 
