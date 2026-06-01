@@ -52,13 +52,38 @@ use super::{extract_dual_info, SimplexOutcome, StandardForm};
 /// near-zero when equilibration shrinks the diagonal below f64 noise.
 const SLACK_DIAG_TOL: f64 = 1e-14;
 
+/// Phase I infeasibility verdict, gated on a verified Farkas certificate.
+///
+/// A non-empty `farkas` ray (`Aᵀy ≤ tol` ∀ j, `bᵀy > tol`) proves the original
+/// LP infeasible. An empty `farkas` means Phase I stopped (Unbounded ray /
+/// positive artificial residual) WITHOUT a verifiable certificate — typically a
+/// non-converged or cycling Phase I on a slow-but-feasible LP. Declaring
+/// Infeasible there is a false verdict (ns1688926-class), so return Timeout
+/// (honest inconclusive), matching `big_m_cold_start`'s Farkas gate.
+fn phase1_infeasibility_verdict(farkas: Vec<f64>, total_iters: usize) -> SolverResult {
+    if farkas.is_empty() {
+        return SolverResult {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            iterations: total_iters,
+            ..Default::default()
+        };
+    }
+    SolverResult {
+        status: SolveStatus::Infeasible,
+        objective: f64::INFINITY,
+        dual_solution: farkas,
+        iterations: total_iters,
+        ..Default::default()
+    }
+}
+
 /// Extract a verified Farkas infeasibility certificate from a Phase I basis.
 ///
 /// `y = B^{-T} e_art` checked against `{A x = b, x ≥ 0}` Farkas alternative
 /// (`Aᵀy ≤ tol` ∀ non-artificial j, `bᵀy > tol`, `tol = dual_tol·max(1,‖b‖∞)`,
 /// consistent with the Big-M Phase I checker). Empty return = certificate not
-/// verifiable (LU fail / no artificial in basis / numeric fail), NOT feasibility
-/// — caller re-verifies via Big-M instead of trusting an unverified Infeasible.
+/// verifiable (LU fail / no artificial in basis / numeric fail), NOT feasibility.
 fn extract_farkas_certificate(
     a_ext: &CscMatrix,
     b: &[f64],
@@ -479,24 +504,12 @@ pub(crate) fn two_phase_simplex(
                 }
 
                 if !phase1_feasible {
-                    // Extract and verify a Farkas certificate from the final Phase I basis.
-                    // True infeasible LPs have a valid dual ray at this basis (LP duality);
-                    // feasible LPs cycling in Phase I do not. The certificate is stored in
-                    // dual_solution so `solve_dual_advanced` can gate Big-M re-verification:
-                    // certified → trust; uncertified → pilot87-class false-Infeasible → Big-M.
+                    // Declare Infeasible only with a verified Farkas certificate.
+                    // True infeasible LPs have a valid dual ray at this basis;
+                    // feasible LPs cycling in Phase I do not (empty cert → Timeout).
                     let farkas =
                         extract_farkas_certificate(&a_ext, &b, &basis, m, sf.n_total, options);
-                    return SolverResult {
-                        status: SolveStatus::Infeasible,
-                        objective: f64::INFINITY,
-                        solution: vec![],
-                        dual_solution: farkas,
-                        reduced_costs: vec![],
-                        slack: vec![],
-                        warm_start_basis: None,
-                        iterations: total_iters,
-                        ..Default::default()
-                    };
+                    return phase1_infeasibility_verdict(farkas, total_iters);
                 }
 
                 // Phase I feasible: pivot out any remaining degenerate artificials
@@ -673,21 +686,11 @@ pub(crate) fn two_phase_simplex(
                 }
             }
             SimplexOutcome::Unbounded => {
-                // Phase I unbounded direction implies primal infeasibility. Attempt to
-                // extract a Farkas certificate from the current basis (same discriminator
-                // as the !phase1_feasible path).
+                // A Phase I unbounded ray suggests primal infeasibility, but only a
+                // verified Farkas certificate proves it; empty cert → Timeout
+                // (spurious unbounded ray on a feasible LP, ns1688926-class).
                 let farkas = extract_farkas_certificate(&a_ext, &b, &basis, m, sf.n_total, options);
-                SolverResult {
-                    status: SolveStatus::Infeasible,
-                    objective: f64::INFINITY,
-                    solution: vec![],
-                    dual_solution: farkas,
-                    reduced_costs: vec![],
-                    slack: vec![],
-                    warm_start_basis: None,
-                    iterations: total_iters,
-                    ..Default::default()
-                }
+                phase1_infeasibility_verdict(farkas, total_iters)
             }
             SimplexOutcome::Timeout(obj1) => {
                 // obj1 ≤ PIVOT_TOL ⇒ artificials look near-zero at timeout.
@@ -1629,5 +1632,70 @@ fn revert_to_snapshot(
             true
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod farkas_gate_tests {
+    //! Phase I infeasibility must be declared ONLY with a verified Farkas
+    //! certificate. ns1688926 (feasible, ‖b‖≈2.4e7) and cplex2 exit Phase I with
+    //! a spurious Unbounded ray whose `y = B^{-T} e_art` has `bᵀy ≈ 0` — not a
+    //! witness. Trusting that exit returned false-Infeasible. These sentinels
+    //! pin the gate: empty cert ⇒ Timeout, verified cert ⇒ Infeasible.
+
+    use super::{extract_farkas_certificate, phase1_infeasibility_verdict};
+    use crate::options::SolverOptions;
+    use crate::problem::SolveStatus;
+    use crate::sparse::CscMatrix;
+
+    /// No-op sentinel: reverting the gate to an unconditional `Infeasible`
+    /// return (the pre-fix behaviour) makes this assertion fail.
+    #[test]
+    fn empty_cert_yields_timeout_not_infeasible() {
+        let r = phase1_infeasibility_verdict(vec![], 7);
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "empty (unverifiable) Farkas cert must NOT be declared Infeasible"
+        );
+        assert_eq!(r.iterations, 7);
+    }
+
+    #[test]
+    fn verified_cert_yields_infeasible() {
+        let r = phase1_infeasibility_verdict(vec![-1.0, 1.0], 3);
+        assert_eq!(r.status, SolveStatus::Infeasible);
+        assert_eq!(r.dual_solution, vec![-1.0, 1.0]);
+        assert_eq!(r.iterations, 3);
+    }
+
+    /// The discriminator the gate depends on: an identical Phase I basis yields a
+    /// valid witness (`bᵀy > 0`) on a genuinely infeasible RHS but an empty cert
+    /// (`bᵀy ≈ 0`) on a feasible RHS. a_ext = [x0 | a0 | a1], rows x0=b0, x0=b1.
+    #[test]
+    fn extract_farkas_discriminates_witness_from_degenerate() {
+        // col0 = x0 (rows 0,1); col1 = a0 (row 0); col2 = a1 (row 1).
+        let a_ext =
+            CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3)
+                .unwrap();
+        let basis = [0usize, 2usize]; // x0 + artificial a1, a1 degenerate iff feasible
+        let n_original = 1;
+        let opts = SolverOptions::default();
+
+        // Infeasible: x0 = 1 ∧ x0 = 2. bᵀy = 1 > 0 ⇒ verified witness (non-empty).
+        let cert_infeasible =
+            extract_farkas_certificate(&a_ext, &[1.0, 2.0], &basis, 2, n_original, &opts);
+        assert!(
+            !cert_infeasible.is_empty(),
+            "true infeasible RHS must yield a verified Farkas certificate"
+        );
+
+        // Feasible: x0 = 1 ∧ x0 = 1. bᵀy = 0 ⇒ not a witness (empty).
+        let cert_feasible =
+            extract_farkas_certificate(&a_ext, &[1.0, 1.0], &basis, 2, n_original, &opts);
+        assert!(
+            cert_feasible.is_empty(),
+            "feasible RHS (degenerate artificial, bᵀy≈0) must NOT be certified infeasible"
+        );
     }
 }
