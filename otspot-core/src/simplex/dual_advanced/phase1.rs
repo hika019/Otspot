@@ -589,35 +589,25 @@ pub(crate) fn big_m_cold_start(
             // current basis yields a verifiable Farkas ray. Degenerate Big-M
             // Phase I can otherwise hit an empty ratio test after anti-cycling
             // perturbation on feasible LPs; that is inconclusive, not proof.
-            // When the basis is still usable and time remains, let Phase II try
-            // to pivot artificials out under the original objective.
             if farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options) {
                 let mut r = SolverResult::infeasible();
                 r.iterations = total_iters;
                 return r;
             }
-            if options.deadline.is_some_and(|d| std::time::Instant::now() >= d)
-                || options
-                    .cancel_flag
-                    .as_ref()
-                    .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
-            {
-                return super::super::timeout_result_with_incumbent(
-                    sf,
-                    problem,
-                    &basis_aug,
-                    &x_b,
-                    col_scale,
-                    total_iters,
-                );
-            }
+            return super::super::timeout_result_with_incumbent(
+                sf,
+                problem,
+                &basis_aug,
+                &x_b,
+                col_scale,
+                total_iters,
+            );
         }
         SimplexOutcome::Timeout(_) => {
             // 旧実装は artificial 残存だけで Infeasible を立てていたが、これは
             // slow-feasible LP (pilot/dfl001/ken-13/ken-18) でも発火する不健全
             // ヒューリスティック。Farkas 証明書 (A^T y ≤ 0, b^T y > 0) が
-            // 通った場合のみ Infeasible を返す。検証不能かつ時間が残っているなら
-            // Phase II へ渡し、期限切れ/キャンセルなら Timeout で honest に返す。
+            // 通った場合のみ Infeasible を返し、検証不能なら Timeout で honest に返す。
             let any_artificial_left =
                 (0..m).any(|i| basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol);
             if any_artificial_left
@@ -627,21 +617,14 @@ pub(crate) fn big_m_cold_start(
                 r.iterations = total_iters;
                 return r;
             }
-            if options.deadline.is_some_and(|d| std::time::Instant::now() >= d)
-                || options
-                    .cancel_flag
-                    .as_ref()
-                    .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
-            {
-                return super::super::timeout_result_with_incumbent(
-                    sf,
-                    problem,
-                    &basis_aug,
-                    &x_b,
-                    col_scale,
-                    total_iters,
-                );
-            }
+            return super::super::timeout_result_with_incumbent(
+                sf,
+                problem,
+                &basis_aug,
+                &x_b,
+                col_scale,
+                total_iters,
+            );
         }
         SimplexOutcome::SingularBasis => {
             return SolverResult::numerical_error();
@@ -672,18 +655,6 @@ pub(crate) fn big_m_cold_start(
                 return r;
             }
         }
-    }
-
-    // Flush numerical drift accumulated during Phase I, including inconclusive
-    // exits that fall through to Phase II. If refactor fails, the current basis
-    // is not a reliable warm start for primal cleanup.
-    if let Ok(mut bm) = LuBasis::new_timed(&a_aug, &basis_aug, options.max_etas, options.deadline) {
-        let mut rhs = SparseVec::from_dense(b);
-        bm.ftran(&mut rhs);
-        let fresh = rhs.to_dense();
-        x_b.copy_from_slice(&fresh);
-    } else {
-        return SolverResult::numerical_error();
     }
 
     // === Step 7: Phase II (Primal Simplex, 元コスト + Big-M で 1-phase 仕上げ) ===
