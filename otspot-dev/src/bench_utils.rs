@@ -464,34 +464,6 @@ pub fn compute_dfeas_componentwise(
     compute_dfeas_orig(prob, solution, dual_solution, bound_duals, reduced_costs).1
 }
 
-/// ベンチ評価ヘルパー: simplex 結果が非収束 (Timeout/NumericalError/MaxIterations)
-/// で、別途得た候補 (旧 IPM 等) が SuboptimalSolution/LocallyOptimal かつ非空解を
-/// 持つ場合のみ候補を採用する。それ以外は simplex 結果をそのまま返す。
-/// (otspot-core から LP IPM 経路を撤廃したため、solver core ではなく bench 評価
-/// ユーティリティとして保持する。)
-pub fn pick_best_ipm_or_simplex(
-    ipm_candidate: Option<otspot_core::problem::SolverResult>,
-    simplex_result: otspot_core::problem::SolverResult,
-) -> otspot_core::problem::SolverResult {
-    use otspot_core::problem::SolveStatus;
-    let simplex_failed = matches!(
-        simplex_result.status,
-        SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
-    );
-    if let Some(ipm) = ipm_candidate {
-        if simplex_failed
-            && matches!(
-                ipm.status,
-                SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal
-            )
-            && !ipm.solution.is_empty()
-        {
-            return ipm;
-        }
-    }
-    simplex_result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
