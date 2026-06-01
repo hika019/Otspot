@@ -4,6 +4,7 @@
 
 use super::dual_common::{basic_obj, compute_dual_vars, compute_reduced_costs, outcome_to_result};
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving, SteepestEdgePricing};
+use super::trace::IterTrace;
 use super::{timeout_result_with_incumbent, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
@@ -208,6 +209,7 @@ pub(super) fn dual_simplex_core(
     let mut rho_dense = vec![0.0f64; m];
     let mut trow = vec![0.0f64; n_price];
     let mut alpha_dense = vec![0.0f64; m];
+    let mut trace = IterTrace::new("dual-legacy");
 
     for _iter in 0..max_iter {
         *iter_count_out = iter_count_out.saturating_add(1);
@@ -221,6 +223,11 @@ pub(super) fn dual_simplex_core(
         if timed_out || cancelled {
             let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
+        }
+
+        if let Some(t) = trace.as_mut() {
+            let obj = basic_obj(c, basis, x_b);
+            t.log(*iter_count_out, obj, basis, false);
         }
 
         let leaving_row = match leaving_strategy.select_leaving(x_b, options.primal_tol, basis) {

@@ -44,6 +44,7 @@ use super::dual_common::{
     basic_obj, compute_dual_vars_into, compute_reduced_costs_into, made_progress_with_floor,
 };
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
+use super::trace::IterTrace;
 use super::{extract_dual_info, SimplexOutcome, StandardForm};
 
 /// Minimum absolute diagonal entry to trust when dividing `x_B[i]` by the
@@ -1273,6 +1274,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let mut best_obj: f64 = basic_obj(c, basis, x_b);
     let mut iters_since_obj_progress: usize = 0;
     let mut iters_since_step_progress: usize = 0;
+    let mut trace = IterTrace::new("primal-revised");
 
     for _iter in 0..max_iter {
         *iter_count_out = iter_count_out.saturating_add(1);
@@ -1286,6 +1288,11 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         if timed_out || cancelled {
             let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
+        }
+
+        if let Some(t) = trace.as_mut() {
+            let obj = basic_obj(c, basis, x_b);
+            t.log(*iter_count_out, obj, basis, false);
         }
 
         // y = B^{-T} c_B, then r_j = c_j − y^T a_j for non-basic j. Both steps

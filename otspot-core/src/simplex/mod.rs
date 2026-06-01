@@ -4,6 +4,7 @@ pub(crate) mod crash;
 pub mod dual;
 pub mod dual_advanced;
 mod dual_common;
+mod trace;
 mod entry;
 pub mod pricing;
 pub(crate) mod primal;
