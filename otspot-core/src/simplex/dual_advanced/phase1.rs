@@ -56,6 +56,20 @@ use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 
+#[cfg(test)]
+static BIG_M_COLD_START_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(super) fn reset_big_m_cold_start_count() {
+    BIG_M_COLD_START_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(super) fn big_m_cold_start_count() -> usize {
+    BIG_M_COLD_START_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Farkas certificate verification for primal infeasibility.
 ///
 /// At a Big-M Phase I exit basis with artificials residual, construct the
@@ -515,6 +529,9 @@ pub(crate) fn big_m_cold_start(
     row_scale: &[f64],
     col_scale: &[f64],
 ) -> SolverResult {
+    #[cfg(test)]
+    BIG_M_COLD_START_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let m = sf.m;
     let n_total = sf.n_total;
 
@@ -568,10 +585,23 @@ pub(crate) fn big_m_cold_start(
 
     match phase1_outcome {
         SimplexOutcome::Unbounded => {
-            // 双対非有界 = 主実行不可
-            let mut r = SolverResult::infeasible();
-            r.iterations = total_iters;
-            return r;
+            // Dual-unbounded is only a primal-infeasibility proof when the
+            // current basis yields a verifiable Farkas ray. Degenerate Big-M
+            // Phase I can otherwise hit an empty ratio test after anti-cycling
+            // perturbation on feasible LPs; that is inconclusive, not proof.
+            if farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options) {
+                let mut r = SolverResult::infeasible();
+                r.iterations = total_iters;
+                return r;
+            }
+            return super::super::timeout_result_with_incumbent(
+                sf,
+                problem,
+                &basis_aug,
+                &x_b,
+                col_scale,
+                total_iters,
+            );
         }
         SimplexOutcome::Timeout(_) => {
             // 旧実装は artificial 残存だけで Infeasible を立てていたが、これは
@@ -587,7 +617,7 @@ pub(crate) fn big_m_cold_start(
                 r.iterations = total_iters;
                 return r;
             }
-            let r = super::super::timeout_result_with_incumbent(
+            return super::super::timeout_result_with_incumbent(
                 sf,
                 problem,
                 &basis_aug,
@@ -595,7 +625,6 @@ pub(crate) fn big_m_cold_start(
                 col_scale,
                 total_iters,
             );
-            return r;
         }
         SimplexOutcome::SingularBasis => {
             return SolverResult::numerical_error();
@@ -659,12 +688,25 @@ pub(crate) fn big_m_cold_start(
     // === Step 8: Phase II 結果 + 人工変数残存判定 ===
     match phase2_outcome {
         SimplexOutcome::Optimal(_obj_aug, y) => {
-            // 人工変数が basis に残り値 > primal_tol → 元 LP infeasible
+            // 人工変数が basis に残り値 > primal_tol → 元 LP infeasible only
+            // when backed by a Farkas certificate. A finite Big-M penalty can
+            // otherwise stop at an augmented optimum that is not a proof for the
+            // original LP; returning Infeasible there is a false verdict risk.
             for i in 0..m {
                 if basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol {
-                    let mut r = SolverResult::infeasible();
-                    r.iterations = total_iters;
-                    return r;
+                    if farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options) {
+                        let mut r = SolverResult::infeasible();
+                        r.iterations = total_iters;
+                        return r;
+                    }
+                    return super::super::timeout_result_with_incumbent(
+                        sf,
+                        problem,
+                        &basis_aug,
+                        &x_b,
+                        col_scale,
+                        total_iters,
+                    );
                 }
             }
 

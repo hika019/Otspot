@@ -2,7 +2,7 @@
 
 use crate::options::{SimplexMethod, SolverOptions, WarmStartBasis};
 use crate::presolve;
-use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::qp::certificate::guard_lp_optimal;
 use crate::tolerances::PIVOT_TOL;
 
@@ -223,7 +223,12 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
 
     if n == 0 {
         for i in 0..m {
-            if problem.b[i] < -options.primal_tol {
+            let feasible = match problem.constraint_types[i] {
+                ConstraintType::Le => problem.b[i] >= -options.primal_tol,
+                ConstraintType::Ge => problem.b[i] <= options.primal_tol,
+                ConstraintType::Eq => problem.b[i].abs() <= options.primal_tol,
+            };
+            if !feasible {
                 return SolverResult {
                     status: SolveStatus::Infeasible,
                     objective: f64::INFINITY,
@@ -252,10 +257,24 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
         let mut x = vec![0.0; n];
         let mut obj = 0.0;
         for (j, x_j) in x.iter_mut().enumerate() {
-            if problem.c[j] < -options.primal_tol {
-                // Finite upper bound caps the maximizer; infinite ⇒ Unbounded.
-                let ub = problem.bounds[j].1;
-                if ub.is_infinite() {
+            let (lb, ub) = problem.bounds[j];
+            let cj = problem.c[j];
+            if cj > options.dual_tol {
+                if !lb.is_finite() {
+                    return SolverResult {
+                        status: SolveStatus::Unbounded,
+                        objective: f64::NEG_INFINITY,
+                        solution: vec![],
+                        dual_solution: vec![],
+                        reduced_costs: vec![],
+                        slack: vec![],
+                        warm_start_basis: None,
+                        ..Default::default()
+                    };
+                }
+                *x_j = lb;
+            } else if cj < -options.dual_tol {
+                if !ub.is_finite() {
                     return SolverResult {
                         status: SolveStatus::Unbounded,
                         objective: f64::NEG_INFINITY,
@@ -268,6 +287,8 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
                     };
                 }
                 *x_j = ub;
+            } else if lb.is_finite() {
+                *x_j = lb;
             }
             obj += problem.c[j] * *x_j;
         }
@@ -523,5 +544,82 @@ mod tests {
                 "simplex::solve_with with {label} must return NumericalError"
             );
         }
+    }
+
+    #[test]
+    fn zero_variable_rows_respect_constraint_type() {
+        let empty_a = CscMatrix::new(3, 0);
+        let lp = LpProblem::new_general(
+            vec![],
+            empty_a,
+            vec![1.0, -1.0, 0.0],
+            vec![ConstraintType::Le, ConstraintType::Ge, ConstraintType::Eq],
+            vec![],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            solve_without_presolve(&lp, &SolverOptions::default()).status,
+            SolveStatus::Optimal
+        );
+
+        let bad_ge = LpProblem::new_general(
+            vec![],
+            CscMatrix::new(1, 0),
+            vec![1.0],
+            vec![ConstraintType::Ge],
+            vec![],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            solve_without_presolve(&bad_ge, &SolverOptions::default()).status,
+            SolveStatus::Infeasible
+        );
+
+        let bad_eq = LpProblem::new_general(
+            vec![],
+            CscMatrix::new(1, 0),
+            vec![1.0],
+            vec![ConstraintType::Eq],
+            vec![],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            solve_without_presolve(&bad_eq, &SolverOptions::default()).status,
+            SolveStatus::Infeasible
+        );
+    }
+
+    #[test]
+    fn zero_constraint_bound_only_lp_uses_correct_bound_direction() {
+        let lp = LpProblem::new_general(
+            vec![2.0, -3.0, 0.0],
+            CscMatrix::new(0, 3),
+            vec![],
+            vec![],
+            vec![(1.0, 5.0), (-2.0, 4.0), (7.0, 9.0)],
+            None,
+        )
+        .unwrap();
+        let result = solve_without_presolve(&lp, &SolverOptions::default());
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert_eq!(result.solution, vec![1.0, 4.0, 7.0]);
+        assert!((result.objective + 10.0).abs() < 1e-12);
+
+        let unbounded_below = LpProblem::new_general(
+            vec![1.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            solve_without_presolve(&unbounded_below, &SolverOptions::default()).status,
+            SolveStatus::Unbounded
+        );
     }
 }

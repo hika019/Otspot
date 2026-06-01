@@ -129,6 +129,16 @@ fn extract_timeout_solution_reconciled(
     }
 }
 
+fn objective_from_solution(sf: &StandardForm, problem: &LpProblem, solution: &[f64]) -> f64 {
+    problem
+        .c
+        .iter()
+        .zip(solution.iter())
+        .map(|(&ci, &xi)| ci * xi)
+        .sum::<f64>()
+        + sf.obj_offset
+}
+
 /// Two-phase primal simplex on a standard-form LP. Skips Phase I when no
 /// artificials are needed. Phase I minimizes the sum of artificials; a
 /// positive minimum proves Infeasible. Ruiz equilibration is applied first.
@@ -140,7 +150,15 @@ pub(crate) fn two_phase_simplex(
     let m = sf.m;
     let mut total_iters: usize = 0;
 
-    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
+    let Some((a, b, c, row_scale, col_scale)) =
+        LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
+    else {
+        return SolverResult {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            ..Default::default()
+        };
+    };
 
     if sf.num_artificial == 0 {
         // Direct Phase II.
@@ -441,10 +459,10 @@ pub(crate) fn two_phase_simplex(
                     ) {
                         SimplexOutcome::Optimal(_, _) => {}
                         SimplexOutcome::Unbounded => break 'retry,
-                        SimplexOutcome::Timeout(obj1) => {
+                        SimplexOutcome::Timeout(_) => {
                             return SolverResult {
                                 status: SolveStatus::Timeout,
-                                objective: obj1 + sf.obj_offset,
+                                objective: f64::INFINITY,
                                 solution: vec![],
                                 dual_solution: vec![],
                                 reduced_costs: vec![],
@@ -513,7 +531,7 @@ pub(crate) fn two_phase_simplex(
                             );
                             return SolverResult {
                                 status: SolveStatus::Timeout,
-                                objective: sf.obj_offset,
+                                objective: objective_from_solution(sf, problem, &solution),
                                 solution,
                                 iterations: total_iters,
                                 ..Default::default()
@@ -692,7 +710,7 @@ pub(crate) fn two_phase_simplex(
                         {
                             return SolverResult {
                                 status: SolveStatus::Timeout,
-                                objective: obj1 + sf.obj_offset,
+                                objective: f64::INFINITY,
                                 solution: vec![],
                                 dual_solution: vec![],
                                 reduced_costs: vec![],
@@ -709,7 +727,7 @@ pub(crate) fn two_phase_simplex(
                     if rec_obj > PIVOT_TOL {
                         return SolverResult {
                             status: SolveStatus::Timeout,
-                            objective: obj1 + sf.obj_offset,
+                            objective: f64::INFINITY,
                             solution: vec![],
                             dual_solution: vec![],
                             reduced_costs: vec![],
@@ -750,7 +768,7 @@ pub(crate) fn two_phase_simplex(
                                 );
                                 return SolverResult {
                                     status: SolveStatus::Timeout,
-                                    objective: sf.obj_offset,
+                                    objective: objective_from_solution(sf, problem, &solution),
                                     solution,
                                     iterations: total_iters,
                                     ..Default::default()
@@ -880,7 +898,7 @@ pub(crate) fn two_phase_simplex(
                 // obj1 > PIVOT_TOL: Phase1 が実行可能基底を発見できないまま時間切れ。
                 SolverResult {
                     status: SolveStatus::Timeout,
-                    objective: obj1 + sf.obj_offset,
+                    objective: f64::INFINITY,
                     solution: vec![],
                     dual_solution: vec![],
                     reduced_costs: vec![],

@@ -21,6 +21,7 @@ use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 /// Lex 摂動 (bland_mode 起動時): reduced_costs (non-basic) と x_b に
@@ -38,6 +39,21 @@ const LEX_PERTURB_REL: f64 = 1e-4;
 struct LexPerturbStats {
     delta: f64,
     effect: f64,
+}
+
+#[derive(Default)]
+struct BasisCycleDetector {
+    seen: HashMap<Vec<usize>, usize>,
+}
+
+impl BasisCycleDetector {
+    fn repeated(&mut self, iter: usize, basis: &[usize]) -> bool {
+        self.seen.insert(basis.to_vec(), iter).is_some()
+    }
+
+    fn clear(&mut self) {
+        self.seen.clear();
+    }
 }
 
 fn collect_bland_ratio_candidates(
@@ -281,6 +297,7 @@ pub(crate) fn dual_simplex_core_advanced(
     let mut best_infeas = leaving.progress_metric(x_b, basis);
     let mut iters_since_progress: usize = 0;
     let mut bland_mode = false;
+    let mut cycle_detector = BasisCycleDetector::default();
     let mut trace = IterTrace::new("dual-advanced");
 
     // Step 3: 反復ループ
@@ -302,6 +319,10 @@ pub(crate) fn dual_simplex_core_advanced(
         if let Some(t) = trace.as_mut() {
             let obj = basic_obj(c, basis, x_b);
             t.log(*iter_count_out, obj, basis, bland_mode);
+        }
+
+        if !bland_mode && cycle_detector.repeated(*iter_count_out, basis) {
+            bland_mode = true;
         }
 
         // 3b: 離基変数選択
@@ -545,6 +566,7 @@ pub(crate) fn dual_simplex_core_advanced(
             if made_progress_with_floor(best_infeas, current, 0.0) {
                 best_infeas = current;
                 iters_since_progress = 0;
+                cycle_detector.clear();
             } else {
                 iters_since_progress = iters_since_progress.saturating_add(1);
                 if iters_since_progress >= k_trigger {
@@ -566,6 +588,22 @@ mod tests {
     use super::*;
     use crate::options::SolverOptions;
     use crate::sparse::CscMatrix;
+
+    #[test]
+    fn basis_cycle_detector_flags_repeated_basis_and_clear_resets() {
+        let mut detector = BasisCycleDetector::default();
+        assert!(!detector.repeated(1, &[1, 2, 3]));
+        assert!(!detector.repeated(2, &[1, 3, 2]));
+        assert!(
+            detector.repeated(3, &[1, 2, 3]),
+            "revisiting an earlier basis must trigger Bland/lex anti-cycling"
+        );
+        detector.clear();
+        assert!(
+            !detector.repeated(4, &[1, 2, 3]),
+            "real progress clears the cycle window"
+        );
+    }
 
     /// Sentinel (P0 proof): lb-violation + sign-flipped ratio test None
     /// = dual-simplex infeasibility proof → must return `SimplexOutcome::Unbounded`.
