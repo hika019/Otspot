@@ -200,9 +200,6 @@ pub(super) fn basic_obj(c: &[f64], basis: &[usize], x_b: &[f64]) -> f64 {
 pub(super) const NO_PROGRESS_TRIGGER_FACTOR: usize = 3;
 pub(super) const NO_PROGRESS_MIN: usize = 100;
 
-/// Once in Bland mode, bail after `BLAND_ITER_CAP_FACTOR * n_price` additional iterations.
-pub(super) const BLAND_ITER_CAP_FACTOR: usize = 10;
-
 /// Relative improvement threshold for progress detection:
 /// improvement is counted only when `best - current > |best| * NO_PROGRESS_REL_EPS`.
 pub(super) const NO_PROGRESS_REL_EPS: f64 = 1e-12;
