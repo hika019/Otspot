@@ -4,7 +4,7 @@
 //! LP は IPM を撤廃し simplex 一本化した (#19/#22)。本 sentinel は「以前 IPM が
 //! 隠していた大規模 LP の収束を、simplex 単独で達成できるか」を検証する
 //! Phase2 worklist そのもの。複数パターンのデータを用意 (CLAUDE.md):
-//!  * 5 real Netlib LPs (ken-13 / ken-18 / cre-b / d6cube / pilot) – each
+//!  * 6 real Netlib LPs (ken-13 / ken-18 / cre-b / d6cube / pilot / greenbea) – each
 //!    previously TIMED OUT in simplex; simplex 単独で Optimal/LocallyOptimal に
 //!    到達し truth と一致することを要求する。
 //!  * 1 synthetic large LP (2500 × 3500) – simplex 単独で budget 内に有限
@@ -56,6 +56,10 @@ const REAL_CASES: &[Case] = &[
     Case {
         name: "pilot",
         truth: -5.5740430007e2,
+    },
+    Case {
+        name: "greenbea",
+        truth: -7.2555248130e7,
     },
 ];
 
@@ -114,6 +118,7 @@ real_netlib_case_test!(lp_simplex_stall_ken18_converges, "ken-18");
 real_netlib_case_test!(lp_simplex_stall_cre_b_converges, "cre-b");
 real_netlib_case_test!(lp_simplex_stall_d6cube_converges, "d6cube");
 real_netlib_case_test!(lp_simplex_stall_pilot_converges, "pilot");
+real_netlib_case_test!(lp_simplex_stall_greenbea_converges, "greenbea");
 
 /// Synthetic large LP: random sparse A, dense c, all Eq, large (m=2500, n=3500).
 /// simplex 単独で budget 内に有限 incumbent を返す robustness 検証。

@@ -7,28 +7,19 @@
 //! The fix declares Infeasible ONLY via a verified Farkas certificate
 //! (A^T y ≤ tol ∧ b^T y > tol).
 //!
-//! ## Routing note (why some tests force simplex) and what each arm covers
+//! ## Routing note
 //!
-//! `solve_qp_with` routes large LPs (n > 3000 or m > 2000) to IPM first, which
-//! never touches the Big-M infeasibility arms. To exercise the simplex path we
-//! set `LP_DISPATCH_NOOP=1`, forcing the Big-M Phase I to run. ken-13/ken-18
-//! are too large to factorize a basis for (m ≫ 2000), so they stay on the IPM
-//! path and only guard that route.
+//! LP は IPM を撤廃し simplex 一本化した (#19/#22)。全 LP が simplex (Big-M
+//! Phase I) を通るため、feasible LP がここで false-Infeasible にならないことを
+//! `assert_not_infeasible` で検証する。これらは load-bearing: Big-M の
+//! Timeout-arm を `any_artificial_left && farkas` から `|| farkas` (a7b95ad の
+//! band-aid) に戻すと pilot/dfl001 が false-Infeasible に倒れて fail する。
 //!
-//! There are two Big-M infeasibility arms; they have *different* coverage:
-//! - **Timeout-arm** (`any_artificial_left && farkas`): pilot/dfl001 exhaust
-//!   their budgets (12s/30s) before Phase I finishes, so they exit through this
-//!   arm. These sentinels are load-bearing *for the Timeout-arm only* —
-//!   flipping its `&&` to `||` (the a7b95ad band-aid) flips both to
-//!   false-Infeasible (verified via no-op rewrite). This arm was already sound
-//!   on `main`; the sentinels guard against re-introducing the band-aid.
-//! - **Optimal-arm** (`any_artificial_in_basis && farkas`): no test reaches it
-//!   with a residual nonzero artificial — Phase I never declares Optimal here
-//!   on the available data. The #36 rework removed the Optimal-arm `any_nonzero`
-//!   short-circuit; that removal is verified safe by (a) monotone-safety (the
-//!   Farkas condition is a strict subset of `any_nonzero || farkas`, so
-//!   Infeasible verdicts can only decrease) and (b) the infeasible-29 bench
-//!   being bit-identical before/after — NOT by a direct sentinel here.
+//! 旧 Optimal-arm (`any_artificial_in_basis && farkas`) には available data で
+//! 到達する test がない。#36 rework での Optimal-arm `any_nonzero` 短絡除去は
+//! (a) monotone-safety (Farkas 条件は `any_nonzero || farkas` の真部分集合なので
+//! Infeasible 判定は減るのみ) と (b) infeasible-29 bench の bit-identical で検証
+//! 済み — 直接 sentinel ではない。
 
 use otspot::io::qps::parse_qps;
 use otspot::lp::solve_lp_with;
@@ -57,72 +48,47 @@ fn solve(path_str: &str, timeout_sec: f64) -> (SolveStatus, f64, usize) {
     (r.status, wall, r.iterations)
 }
 
-/// IPM-first routing (default for large LP).
-fn assert_not_infeasible_ipm(path_str: &str, timeout_sec: f64) {
+/// feasible LP を simplex 単独で解き、false-Infeasible にならないことを検証する。
+/// LOAD-BEARING: Big-M Timeout-arm を `any_artificial_left && farkas` から
+/// `|| farkas` に戻すと pilot/dfl001 等の feasible LP が false-Infeasible に倒れ
+/// fail する。
+fn assert_not_infeasible(path_str: &str, timeout_sec: f64) {
     let (status, _wall, _iters) = solve(path_str, timeout_sec);
     assert!(
         !matches!(status, SolveStatus::Infeasible),
-        "{} returned Infeasible on the IPM path — feasible LP must never be \
-         certified infeasible without a Farkas certificate",
+        "{} returned Infeasible — feasible LP must never be certified infeasible \
+         without a Farkas certificate (#37/#43 false-Infeasible bug)",
         path_str
     );
 }
 
-/// Force the simplex Big-M Phase I path (`LP_DISPATCH_NOOP=1`). pilot/dfl001
-/// exit via the **Timeout-arm** (budget exhausted before Phase I finishes).
-/// LOAD-BEARING for that arm: changing its `any_artificial_left && farkas` to
-/// `|| farkas` (the a7b95ad band-aid) flips these feasible LPs to
-/// false-Infeasible and fails the assert. (The Optimal-arm is not reached here;
-/// see the module docstring for its verification basis.)
-fn assert_not_infeasible_forced_simplex(path_str: &str, timeout_sec: f64) {
-    // SAFETY: env mutation scoped to this test; CLAUDE.md mandates nextest,
-    // which isolates each test in its own process (no cross-test leak).
-    std::env::set_var("LP_DISPATCH_NOOP", "1");
-    let (status, _wall, _iters) = solve(path_str, timeout_sec);
-    std::env::remove_var("LP_DISPATCH_NOOP");
-    assert!(
-        !matches!(status, SolveStatus::Infeasible),
-        "{} forced through Big-M simplex returned Infeasible — the residual \
-         artificial is NOT a Farkas certificate (#37/#43 false-Infeasible bug)",
-        path_str
-    );
-}
-
-/// pilot via the default IPM path must not be false-Infeasible.
-#[test]
-fn pilot_no_false_infeasible() {
-    assert_not_infeasible_ipm("data/lp_problems/pilot.QPS", 120.0);
-}
-
-/// LOAD-BEARING: pilot forced through Big-M simplex. The Phase I cannot finish
-/// in the budget so artificials remain in the basis at Timeout; the old
-/// `any_nonzero` heuristic declared this Infeasible (verified during rework).
+/// pilot は feasible。simplex 単独で false-Infeasible にならないこと。
+/// (Phase I が budget 内に終わらず artificial が残っても、それは Farkas 証明書
+/// ではないので Infeasible にしてはならない。)
 #[test]
 #[ignore = "tier-2 (Mac ~12s / CI 2.5x ~30s); heavy profile で実行 (#97)"]
-fn pilot_no_false_infeasible_forced_simplex() {
-    assert_not_infeasible_forced_simplex("data/lp_problems/pilot.QPS", 12.0);
+fn pilot_no_false_infeasible() {
+    assert_not_infeasible("data/lp_problems/pilot.QPS", 120.0);
 }
 
-/// LOAD-BEARING: dfl001 forced through Big-M simplex (un-ignored per #36).
-/// Same mechanism as pilot, larger instance. ~30s (within per-test budget).
+/// dfl001 も同機構。pilot より大きい instance。
 #[test]
 #[ignore = "tier-2 (Mac ~30s / CI 2.5x ~75s); heavy profile で実行 (#97)"]
-fn dfl001_no_false_infeasible_forced_simplex() {
-    assert_not_infeasible_forced_simplex("data/lp_problems/dfl001.QPS", 30.0);
+fn dfl001_no_false_infeasible() {
+    assert_not_infeasible("data/lp_problems/dfl001.QPS", 30.0);
 }
 
-/// ken-13 via IPM (m ≫ 2000 → simplex factorization impractical). Guards the
-/// IPM path; resolves to Optimal quickly.
+/// ken-13: feasible LP、simplex 単独で false-Infeasible にならないこと。
 #[test]
 fn ken13_no_false_infeasible() {
-    assert_not_infeasible_ipm("data/lp_problems/ken-13.QPS", 60.0);
+    assert_not_infeasible("data/lp_problems/ken-13.QPS", 60.0);
 }
 
-/// ken-18 via IPM (~96s; within 180s nextest cap).
+/// ken-18 (~96s; within 180s nextest cap)。
 #[test]
 #[ignore = "tier-2 (Mac ~28s / CI 2.5x ~70s); heavy profile で実行 (#97)"]
 fn ken18_no_false_infeasible() {
-    assert_not_infeasible_ipm("data/lp_problems/ken-18.QPS", 60.0);
+    assert_not_infeasible("data/lp_problems/ken-18.QPS", 60.0);
 }
 
 // ── Infeasible-arm sentinels (Farkas-cert gated routing) ─────────────────────
