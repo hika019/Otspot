@@ -390,19 +390,6 @@ pub fn compute_dfeas_orig(
     {
         return (f64::NAN, f64::NAN);
     }
-    // The LP/Simplex reduced-cost path (below) consumes only bounds, solution,
-    // reduced_costs and c — never `dual_solution`. So an empty/short dual must
-    // not reject a valid simplex output here; the length guard applies only to
-    // the KKT path that actually uses A^T·y.
-    let lp_reduced_cost_path = bound_duals.is_empty()
-        && !reduced_costs.is_empty()
-        && reduced_costs.len() == prob.num_vars;
-    if !lp_reduced_cost_path
-        && prob.num_constraints > 0
-        && dual_solution.len() != prob.num_constraints
-    {
-        return (f64::INFINITY, f64::INFINITY);
-    }
     let n_finite_bounds = prob
         .bounds
         .iter()
@@ -415,16 +402,12 @@ pub fn compute_dfeas_orig(
         return (f64::NAN, f64::NAN);
     }
     let n = solution.len();
-    let qx: Vec<f64> = dd_impl::qx(&prob.q, solution)
-        .iter()
-        .map(|&v| f64::from(v))
-        .collect();
-    let aty: Vec<f64> = dd_impl::aty(&prob.a, dual_solution, n)
-        .iter()
-        .map(|&v| f64::from(v))
-        .collect();
 
-    // LP/Simplex path: complementarity-aware sign check on reduced costs.
+    // LP/Simplex path: complementarity-aware sign check on reduced costs. This
+    // path is a pure function of bounds, solution, reduced_costs and c and never
+    // touches `dual_solution` / A^T·y, so it is evaluated BEFORE `aty` — a short
+    // or mismatched dual must yield a finite LP residual here, not an `aty` index
+    // panic. The dual-length guard therefore belongs only to the KKT path below.
     if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
         let rel_tol = PIVOT_TOL;
         let mut dfeas_abs = 0.0_f64;
@@ -458,12 +441,20 @@ pub fn compute_dfeas_orig(
         return (dfeas_abs, dfeas_rel);
     }
 
-    let mut bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bound_duals);
-    if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
-        for j in 0..n {
-            bound_contrib[j] = -reduced_costs[j];
-        }
+    // KKT path: the residual is built from A^T·y, so the dual must match
+    // num_constraints — otherwise `aty` would index `y` out of bounds.
+    if prob.num_constraints > 0 && dual_solution.len() != prob.num_constraints {
+        return (f64::INFINITY, f64::INFINITY);
     }
+    let qx: Vec<f64> = dd_impl::qx(&prob.q, solution)
+        .iter()
+        .map(|&v| f64::from(v))
+        .collect();
+    let aty: Vec<f64> = dd_impl::aty(&prob.a, dual_solution, n)
+        .iter()
+        .map(|&v| f64::from(v))
+        .collect();
+    let bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bound_duals);
     let mut dfeas_abs = 0.0_f64;
     let mut dfeas_rel_componentwise = 0.0_f64;
     for i in 0..n {
@@ -854,6 +845,33 @@ mod tests {
         assert!(
             abs_lp.is_finite(),
             "LP reduced-cost path must accept an empty dual, got {abs_lp}"
+        );
+    }
+
+    /// Regression (codex P2): the LP reduced-cost path is evaluated *before*
+    /// `aty`, so a short non-empty `dual_solution` is ignored (finite result),
+    /// never indexed out of bounds. Here num_constraints=2 with a length-1 dual:
+    /// if `aty` ran before the LP return it would index `y[1]` and panic.
+    ///
+    /// No-op sentinel: moving `aty` back ahead of the LP path makes this panic.
+    #[test]
+    fn test_dfeas_lp_path_ignores_short_dual_no_panic() {
+        // 2 vars, 2 Eq constraints (A = I₂); reduced_costs given ⇒ LP path.
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
+        let prob = QpProblem::new(
+            CscMatrix::new(2, 2),
+            vec![1.0, 1.0],
+            a,
+            vec![3.0, 4.0],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+        )
+        .unwrap();
+        // dual_solution.len()=1 < num_constraints=2: would panic `aty` at y[1].
+        let (abs, rel) = compute_dfeas_orig(&prob, &[3.0, 4.0], &[0.5], &[], &[1.0, 1.0]);
+        assert!(
+            abs.is_finite() && rel.is_finite(),
+            "LP path must ignore a short dual and return finite, got ({abs}, {rel})"
         );
     }
 }
