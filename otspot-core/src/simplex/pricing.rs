@@ -5,11 +5,15 @@
 //! - `SteepestEdgePricing`: Devex approximate steepest-edge pricing
 
 use crate::basis::LuBasis;
+use crate::tolerances::PIVOT_TOL;
 
 const EPS: f64 = 1e-8;
 
 /// Minimum weight floor to keep `sqrt(γ)` safe (prevents div-by-zero in score).
 const GAMMA_FLOOR: f64 = 1e-10;
+/// Cap for the pivot² Devex update. Normal non-degenerate weights are O(m);
+/// capping prevents tiny pivots from permanently distorting pricing.
+const CAP_MULT_OF_M: f64 = 100.0;
 
 /// Strategy for selecting the entering variable in the revised simplex.
 pub(crate) trait PricingStrategy {
@@ -125,35 +129,53 @@ impl PricingStrategy for SteepestEdgePricing {
         entering
     }
 
-    /// Devex weight update: γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering]).
+    /// Devex weight update — pivot² formula with a per-column cap at 100·m.
     ///
-    /// Uses γ[entering] as denominator (not pivot²). This provides implicit
-    /// anti-cycling: columns that have been entering frequently accumulate large
-    /// weights, reducing their priority and breaking cycling patterns on
-    /// degenerate LPs. The `leaving_row` parameter is retained for API
-    /// compatibility with callers that compute the pivot element.
+    ///   raw          = ‖η‖² / pivot², pivot = η[leaving_row]
+    ///   γ[leaving]  = max(γ[leaving], min(raw, 100·m))
+    ///   γ[entering] = 1.0
+    ///   γ[other j]  unchanged (per-column FTRAN avoided)
+    ///
+    /// When |pivot| ≤ PIVOT_TOL, the weight is not updated (degenerate pivot
+    /// guard). The cap prevents tiny-pivot weight blow-up from permanently
+    /// distorting pricing.
     fn update_weights(
         &mut self,
         _basis: &LuBasis,
         entering: usize,
         leaving: usize,
-        _leaving_row: usize,
+        leaving_row: usize,
         eta: &[f64],
     ) {
         if leaving < self.weights.len() {
-            let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
-            let gamma_e = self
-                .weights
-                .get(entering)
-                .copied()
-                .unwrap_or(1.0)
-                .max(GAMMA_FLOOR);
-            let new_weight = (eta_norm_sq / gamma_e).max(GAMMA_FLOOR);
-            self.weights[leaving] = self.weights[leaving].max(new_weight);
+            let pivot = eta.get(leaving_row).copied().unwrap_or(0.0);
+            if pivot.abs() > PIVOT_TOL {
+                let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
+                let cap = CAP_MULT_OF_M * (eta.len() as f64);
+                let raw = eta_norm_sq / (pivot * pivot);
+                let new_weight = raw.min(cap).max(GAMMA_FLOOR);
+                self.weights[leaving] = self.weights[leaving].max(new_weight);
+            }
         }
 
         if entering < self.weights.len() {
-            self.weights[entering] = 1.0;
+            // After leaving the basis, penalize re-entry: set entering weight
+            // to max(1, gamma_leaving / eta_norm_sq) so a column with high
+            // leaving weight gets higher entering weight → lower selection score
+            // → implicit anti-cycling for recently-left columns (old formula
+            // property retained). Columns not recently leaving start at 1.0.
+            let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
+            let gamma_leaving = if leaving < self.weights.len() {
+                self.weights[leaving]
+            } else {
+                1.0
+            };
+            let new_entering_w = if eta_norm_sq > GAMMA_FLOOR {
+                (gamma_leaving / eta_norm_sq).max(1.0)
+            } else {
+                1.0
+            };
+            self.weights[entering] = new_entering_w;
         }
     }
 
@@ -323,61 +345,49 @@ mod tests {
         crate::basis::LuBasis::new(&a, &[0, 1], 50).unwrap()
     }
 
-    /// Sentinel: `update_weights` uses γ[entering] as denominator.
+    /// Sentinel: `update_weights` uses the pivot² Sherman-Morrison form.
     ///
-    /// Formula: γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
+    /// With η = [0, 3, 4, 0, 0] (‖η‖² = 25), pivot = η[1] = 3:
+    ///   pivot² formula: 25 / 9 ≈ 2.778
     ///
-    /// With η = [0, 3, 4, 0, 0] (‖η‖² = 25), γ[entering=2] = 7.0:
-    ///   7.0 formula: 25 / 7 ≈ 3.571
-    ///
-    /// A no-op implementation would leave γ[leaving] = 1.0 < 3.571 and fail.
+    /// A no-op implementation would leave γ[leaving] = 1.0 < 2.778 and fail.
     #[test]
-    fn devex_leaving_weight_uses_gamma_entering() {
+    fn devex_leaving_weight_uses_pivot_squared() {
         let mut pricing = SteepestEdgePricing::new(5);
-        pricing.weights[2] = 7.0; // γ[entering] = 7.0
         let eta = vec![0.0, 3.0, 4.0, 0.0, 0.0]; // ‖η‖² = 25
-        let expected = 25.0_f64 / 7.0_f64;
+        let expected = 25.0_f64 / 9.0_f64; // pivot = eta[1] = 3
 
         let basis_id = make_identity_basis_2x2();
         pricing.update_weights(&basis_id, 2, 3, 1, &eta);
 
         assert!(
             (pricing.weights[3] - expected).abs() < 1e-12,
-            "expected γ[leaving] = {:.6} (‖η‖²/γ[entering]), got {:.6}",
+            "expected γ[leaving] = {:.6} (‖η‖²/pivot²), got {:.6}",
             expected,
             pricing.weights[3]
         );
+        // With γ[leaving=3]=2.778 and ‖η‖²=25: entering weight = max(1, 2.778/25)
+        // = max(1, 0.111) = 1.0 (no penalty since leaving weight < eta_norm_sq).
         assert_eq!(
             pricing.weights[2], 1.0,
-            "entering column weight must reset to 1"
+            "entering weight = 1.0 when γ[leaving] < ‖η‖² (no cycle-penalty case)"
         );
     }
 
-    /// Sentinel: degenerate-pivot scenario produces finite γ[leaving] via γ[entering] damping.
-    ///
-    /// With η = [0, 0.01, 4, 0, 0] (‖η‖² ≈ 16.0001), γ[entering=2] = 2.0:
-    ///   γ[entering] formula: 16.0001 / 2.0 ≈ 8.0  (finite, no blow-up)
+    /// Sentinel: tiny pivots below `PIVOT_TOL` do not update the leaving weight.
     ///
     /// Other column weights must remain untouched (no global reset side-effect).
     #[test]
-    fn devex_degenerate_pivot_no_blowup() {
+    fn devex_small_pivot_guard_skips_update() {
         let mut pricing = SteepestEdgePricing::new(5);
         pricing.weights[0] = 3.0;
         pricing.weights[1] = 5.0;
-        pricing.weights[2] = 2.0; // γ[entering] = 2.0
-        let eta = vec![0.0, 0.01_f64, 4.0, 0.0, 0.0];
-        let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
-        let expected = eta_norm_sq / 2.0;
+        let eta = vec![0.0, 1e-9_f64, 4.0, 0.0, 0.0];
 
         let basis_id = make_identity_basis_2x2();
         pricing.update_weights(&basis_id, 2, 3, 1, &eta);
 
-        assert!(
-            (pricing.weights[3] - expected).abs() < 1e-10,
-            "degenerate pivot: expected γ[leaving]={:.6} (finite), got {:.6}",
-            expected,
-            pricing.weights[3]
-        );
+        assert_eq!(pricing.weights[3], 1.0, "small pivot: weight must remain 1.0");
         assert!(
             (pricing.weights[0] - 3.0).abs() < 1e-15,
             "γ[0] must stay at 3.0 (no global reset), got {:.6}",
@@ -387,6 +397,47 @@ mod tests {
             (pricing.weights[1] - 5.0).abs() < 1e-15,
             "γ[1] must stay at 5.0 (no global reset), got {:.6}",
             pricing.weights[1]
+        );
+    }
+
+    /// Sentinel: entering weight is penalized proportional to γ[leaving] / ‖η‖².
+    ///
+    /// This gives anti-cycling memory: columns that just LEFT with a high weight
+    /// (were hard to displace) are penalized on re-entry, reducing the chance of
+    /// re-entering the same column in a short cycle.
+    ///
+    /// With η = [0, 2e-8, 4, 0, 0] (cap fires), γ[leaving=3] = 500 (cap),
+    /// ‖η‖² ≈ 16: entering weight = max(1, 500/16) ≈ 31.25 > 1.0 (penalized).
+    ///
+    /// no-op proof: if entering weight is always 1.0, assert(31.25 > 1.1) fails.
+    #[test]
+    fn devex_entering_weight_penalized_when_leaving_large() {
+        let mut pricing = SteepestEdgePricing::new(5);
+        let eta = vec![0.0, 2e-8_f64, 4.0, 0.0, 0.0]; // cap fires for leaving
+        let basis_id = make_identity_basis_2x2();
+        pricing.update_weights(&basis_id, 2, 3, 1, &eta);
+
+        // entering=2 should be penalized (weight > 1)
+        assert!(
+            pricing.weights[2] > 1.1,
+            "entering weight should be > 1 when γ[leaving] >> ‖η‖², got {:.6}",
+            pricing.weights[2]
+        );
+    }
+
+    /// Sentinel: the per-column cap clamps pivot² blow-up at 100·m.
+    #[test]
+    fn devex_pivot_squared_update_is_capped() {
+        let mut pricing = SteepestEdgePricing::new(5);
+        let eta = vec![0.0, 2e-8_f64, 4.0, 0.0, 0.0];
+        let basis_id = make_identity_basis_2x2();
+        pricing.update_weights(&basis_id, 2, 3, 1, &eta);
+
+        let cap = CAP_MULT_OF_M * eta.len() as f64;
+        assert!(
+            (pricing.weights[3] - cap).abs() <= 1e-9,
+            "expected capped γ[leaving]={cap:.3e}, got {:.3e}",
+            pricing.weights[3]
         );
     }
 
