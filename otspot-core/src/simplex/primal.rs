@@ -1573,7 +1573,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         }
         let leaving_col = basis[leaving_row];
 
-        pricing.update_weights(&basis_mgr, entering_col, leaving_col, d);
+        pricing.update_weights(&basis_mgr, entering_col, leaving_col, leaving_row, d);
 
         is_basic[leaving_col] = false;
         is_basic[entering_col] = true;
