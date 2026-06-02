@@ -1,6 +1,6 @@
 //! QP presolve steps 1-4: fix variables, singleton row/column, empty row/column.
 
-use super::helpers::{apply_fixed_variable, skip_step};
+use super::helpers::{apply_fixed_variable, col_has_structural_q, skip_step};
 use super::state::{QpPostsolveStep, QpPresolveResult, Workspace};
 use crate::qp::QpProblem;
 use crate::tolerances::ZERO_TOL;
@@ -123,14 +123,7 @@ pub(super) fn step3_singleton_col(
             continue;
         }
 
-        let q_nnz_j = {
-            let start = prob.q.col_ptr[j];
-            let end = prob.q.col_ptr[j + 1];
-            (start..end)
-                .filter(|&k| prob.q.values[k].abs() > ZERO_TOL)
-                .count()
-        };
-        if q_nnz_j > 0 {
+        if col_has_structural_q(&prob.q, j) {
             continue;
         }
 
@@ -249,14 +242,7 @@ pub(super) fn step4_empty(prob: &QpProblem, ws: &mut Workspace) -> Result<(), Qp
         if a_nnz > 0 {
             continue;
         }
-        let q_nnz = {
-            let start = prob.q.col_ptr[j];
-            let end = prob.q.col_ptr[j + 1];
-            (start..end)
-                .filter(|&k| prob.q.values[k].abs() > ZERO_TOL)
-                .count()
-        };
-        if q_nnz > 0 {
+        if col_has_structural_q(&prob.q, j) {
             continue;
         }
 
