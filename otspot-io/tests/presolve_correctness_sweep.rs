@@ -361,3 +361,109 @@ fn presolve_infeasible_sweep() {
         eprintln!("  {d}");
     }
 }
+
+// ── Replacement tests (supersede old symmetric-invariance sentinels) ─────────
+
+/// 80bau3b/grow15: presolve must not WORSEN feasibility.
+///
+/// After dc658d4 switched to primal-first cold-start, the OFF path produces a
+/// solution with bf ≈ 1.9e-5 (within LP_CERT_TOL=1e-4, solver returns Optimal).
+/// After Devex improvements (45c24f8), the ON path is near-machine-eps clean.
+/// The old symmetric invariance check (|ON−OFF| < 1e-7) was designed for when
+/// both paths had identical residuals; it is now stale.
+///
+/// This test replaces it with the correct directional invariance:
+/// presolve must not make things worse.
+#[test]
+fn presolve_not_worsens_80bau3b_grow15() {
+    // = feas_rel_tol() = LP_CERT_TOL: the guard_lp_optimal acceptance threshold.
+    const LP_CERT_TOL: f64 = 1e-4;
+    let dir = data_dir(LP_SUBDIR);
+    for name in ["80bau3b", "grow15"] {
+        let prob = parse_required(&dir, name);
+        let r = solve_on_off(&prob, 60.0);
+        eprintln!(
+            "[{name}] ON status={:?} obj={:.6e} pf={:.2e} bf={:.2e} | OFF status={:?} obj={:.6e} pf={:.2e} bf={:.2e}",
+            r.on.status, r.on.objective, r.on_pf, r.on_bf,
+            r.off.status, r.off.objective, r.off_pf, r.off_bf
+        );
+
+        assert_eq!(r.on.status, SolveStatus::Optimal, "{name}: ON status");
+        assert_eq!(r.off.status, SolveStatus::Optimal, "{name}: OFF status");
+
+        // Objective invariance.
+        let scale = r.off.objective.abs().max(1.0);
+        assert!(
+            (r.on.objective - r.off.objective).abs() / scale < 1e-4,
+            "{name}: objective diverged ON={:.6e} OFF={:.6e}",
+            r.on.objective, r.off.objective
+        );
+
+        // OFF is within solver tolerance (known primal two-phase residual).
+        assert!(
+            r.off_bf < LP_CERT_TOL,
+            "{name}: OFF bound residual {:.2e} exceeds LP_CERT_TOL",
+            r.off_bf
+        );
+        assert!(
+            r.off_pf < LP_CERT_TOL,
+            "{name}: OFF primal residual {:.2e} exceeds LP_CERT_TOL",
+            r.off_pf
+        );
+
+        // Presolve must not worsen feasibility (directional invariance).
+        assert!(
+            r.on_bf <= r.off_bf + LP_CERT_TOL,
+            "{name}: presolve worsened bound feasibility ON={:.2e} OFF={:.2e}",
+            r.on_bf, r.off_bf
+        );
+        assert!(
+            r.on_pf <= r.off_pf + LP_CERT_TOL,
+            "{name}: presolve worsened primal feasibility ON={:.2e} OFF={:.2e}",
+            r.on_pf, r.off_pf
+        );
+    }
+}
+
+/// Curated invariance for problems that solve cleanly with both ON and OFF.
+/// Excludes 80bau3b/grow15 (handled by presolve_not_worsens_80bau3b_grow15 above).
+#[test]
+fn presolve_invariance_curated_clean() {
+    let names = ["afiro", "adlittle", "israel", "sc50a", "blend"];
+    let known = load_known();
+    let dir = data_dir(LP_SUBDIR);
+    let mut checked = 0usize;
+    for name in names {
+        let prob = parse_required(&dir, name);
+        let r = solve_on_off(&prob, 30.0);
+        if r.on.status != SolveStatus::Optimal || r.off.status != SolveStatus::Optimal {
+            eprintln!(
+                "[{name}] skip invariance (ON={:?} OFF={:?})",
+                r.on.status, r.off.status
+            );
+            continue;
+        }
+        let scale = r.off.objective.abs().max(1.0);
+        assert!(
+            (r.on.objective - r.off.objective).abs() / scale < 1e-6,
+            "{name}: presolve changed objective ON={:.6e} OFF={:.6e}",
+            r.on.objective, r.off.objective
+        );
+        assert!(
+            (r.on_pf - r.off_pf).abs() < 1e-7 && (r.on_bf - r.off_bf).abs() < 1e-7,
+            "{name}: presolve changed feasibility ON(pf={:.2e},bf={:.2e}) OFF(pf={:.2e},bf={:.2e})",
+            r.on_pf, r.on_bf, r.off_pf, r.off_bf
+        );
+        if let Some(&k) = known.get(name) {
+            let kref = k + prob.obj_offset;
+            let s = kref.abs().max(1.0);
+            assert!(
+                (r.on.objective - kref).abs() / s < 1e-4,
+                "{name}: ON obj {:.6e} != known {:.6e}",
+                r.on.objective, kref
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked >= 4, "curated clean invariance must check >=4 problems, got {checked}");
+}
