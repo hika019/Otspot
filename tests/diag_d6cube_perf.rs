@@ -100,15 +100,15 @@ fn d6cube_optimal_within_60s() {
 
 /// d6cube must not return Infeasible — correctness guard without timing bound.
 /// d6cube is feasible (obj=315.49); any status except Infeasible is acceptable.
-/// Separated from the progress test so the correctness property survives even
-/// when the timing assertion is moved to tier-2.
+/// 15s is enough for Phase I to establish feasibility (measured <1s); Phase II
+/// runs until timeout. Using 15s keeps the default test suite fast.
 #[test]
 fn d6cube_not_infeasible() {
     let path = Path::new("data/lp_problems/d6cube.QPS");
     assert!(path.exists(), "data missing: {}", path.display());
     let prob = parse_qps(path).expect("parse d6cube");
     let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(D6CUBE_TIMEOUT_S);
+    opts.timeout_secs = Some(15.0); // Phase I < 1s; this guards false-Infeasible regressions
     let r = solve_qp_with(&prob, &opts);
     eprintln!("d6cube_not_infeasible: status={:?} obj={:.6e}", r.status, r.objective);
     assert!(
