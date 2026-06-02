@@ -316,6 +316,10 @@ pub(crate) fn dual_simplex_core_advanced(
     let mut iters_since_progress: usize = 0;
     let mut bland_mode = false;
     let mut cycle_detector = BasisCycleDetector::default();
+    let mut no_candidate_refreshed_basis: Option<Vec<usize>> = None;
+    let mut rejected_pivot_basis: Option<Vec<usize>> = None;
+    let mut rejected_pivot_row: Option<usize> = None;
+    let mut rejected_entering = vec![false; n_price];
     let mut trace = IterTrace::new("dual-advanced");
 
     // Step 3: 反復ループ
@@ -359,6 +363,27 @@ pub(crate) fn dual_simplex_core_advanced(
                 return SimplexOutcome::Optimal(obj, y);
             }
             Some(p) => p,
+        };
+        // rejected_entering は (basis, leaving_row) ペアにスコープされる。
+        // 違うペアに移行したらリセット。
+        if rejected_pivot_basis.as_deref() != Some(&*basis)
+            || rejected_pivot_row != Some(leaving_row)
+        {
+            rejected_pivot_basis = None;
+            rejected_pivot_row = None;
+            rejected_entering.fill(false);
+        }
+        let mut masked_is_basic: Vec<bool>;
+        let price_excluded: &[bool] = if rejected_entering.iter().any(|&v| v) {
+            masked_is_basic = is_basic.clone();
+            for (j, blocked) in rejected_entering.iter().enumerate().take(n_enter) {
+                if *blocked {
+                    masked_is_basic[j] = true;
+                }
+            }
+            &masked_is_basic
+        } else {
+            &is_basic
         };
         // 3c: BTRAN: ρ = B^{-T} e_p
         let mut e_p = vec![0.0f64; m];
@@ -409,8 +434,10 @@ pub(crate) fn dual_simplex_core_advanced(
         // and rely on the primal fallback (`two_phase_dual_simplex`) to recover,
         // which it does (verified Optimal even crash-off). Default config solves it
         // directly via the crash basis. See `big_m_phase1_artificial_lb_repair_edge_*`.
-        let lb_violation =
+        let mut lb_violation =
             x_b[leaving_row] < 0.0 && leaving.allows_lb_repair() && basis[leaving_row] < n_enter;
+        let artificial_lb_violation =
+            x_b[leaving_row] < 0.0 && leaving.allows_lb_repair() && basis[leaving_row] >= n_enter;
         if lb_violation {
             for t in trow[..n_price].iter_mut() {
                 *t = -*t;
@@ -419,23 +446,56 @@ pub(crate) fn dual_simplex_core_advanced(
 
         // 3e: ratio test → entering_col, theta
         // bland_mode では pure Bland (min ratio + smallest idx tiebreak)。
-        let (candidate_indices, candidate_ratios, ratio_pick) = if bland_mode {
+        let (mut candidate_indices, mut candidate_ratios, mut ratio_pick) = if bland_mode {
             let (indices, ratios) =
-                collect_bland_ratio_candidates(&trow, &reduced_costs, &is_basic, n_enter, PIVOT_TOL);
-            let pick = bland_ratio_test(&trow, &reduced_costs, &is_basic, n_enter, PIVOT_TOL);
+                collect_bland_ratio_candidates(&trow, &reduced_costs, price_excluded, n_enter, PIVOT_TOL);
+            let pick = bland_ratio_test(&trow, &reduced_costs, price_excluded, n_enter, PIVOT_TOL);
             (indices, ratios, pick)
         } else {
             let (indices, ratios) = collect_harris_ratio_candidates(
                 &trow,
                 &reduced_costs,
-                &is_basic,
+                price_excluded,
                 n_enter,
                 ratio_tester.harris_tol,
                 ratio_tester.pivot_tol,
             );
-            let pick = ratio_tester.select_entering(&trow, &reduced_costs, &is_basic, n_enter);
+            let pick = ratio_tester.select_entering(&trow, &reduced_costs, price_excluded, n_enter);
             (indices, ratios, pick)
         };
+        if ratio_pick.is_none() && artificial_lb_violation {
+            // 人工変数の lb-repair 方向で候補なし→ 標準方向で再試行。
+            // 人工の負値は lb-repair 側で駆出できないケース (maros/pilot 等) があり、
+            // 反転して再び ratio test することで構造列への pivot を試みる。
+            for t in trow[..n_price].iter_mut() {
+                *t = -*t;
+            }
+            lb_violation = true;
+            (candidate_indices, candidate_ratios, ratio_pick) = if bland_mode {
+                let (indices, ratios) = collect_bland_ratio_candidates(
+                    &trow,
+                    &reduced_costs,
+                    price_excluded,
+                    n_enter,
+                    PIVOT_TOL,
+                );
+                let pick =
+                    bland_ratio_test(&trow, &reduced_costs, price_excluded, n_enter, PIVOT_TOL);
+                (indices, ratios, pick)
+            } else {
+                let (indices, ratios) = collect_harris_ratio_candidates(
+                    &trow,
+                    &reduced_costs,
+                    price_excluded,
+                    n_enter,
+                    ratio_tester.harris_tol,
+                    ratio_tester.pivot_tol,
+                );
+                let pick =
+                    ratio_tester.select_entering(&trow, &reduced_costs, price_excluded, n_enter);
+                (indices, ratios, pick)
+            };
+        }
         if let Some(t) = trace.as_mut() {
             t.log_ratio_test(
                 &candidate_indices,
@@ -447,7 +507,52 @@ pub(crate) fn dual_simplex_core_advanced(
 
         let (entering_col, theta) = match ratio_pick {
             None => {
-                // 候補なし: 双対非有界 = 主実行不可
+                // rejected_entering が active → 全候補を除外した状態; fallback なし
+                if rejected_entering.iter().any(|&v| v) {
+                    let obj: f64 = basic_obj(c, basis, x_b);
+                    return SimplexOutcome::Timeout(obj);
+                }
+                // 候補なしは dual-unbounded の証明候補だが、Bland 長走では
+                // eta/rc drift が全候補を負 ratio 側へ押し出すことがある。
+                // 同一基底につき一度だけ fresh LU + rc で再試行し、
+                // 真の候補なしだけを Unbounded として返す。
+                if no_candidate_refreshed_basis.as_deref() != Some(&*basis) {
+                    no_candidate_refreshed_basis = Some(basis.to_vec());
+                    basis_mgr.force_refactor_timed(a, basis, options.deadline);
+                    if basis_mgr.refactor_failed {
+                        if basis_mgr.singular_basis {
+                            return SimplexOutcome::SingularBasis;
+                        }
+                        let obj: f64 = basic_obj(c, basis, x_b);
+                        return SimplexOutcome::Timeout(obj);
+                    }
+                    reduced_costs = match compute_reduced_costs_timed(
+                        a,
+                        c,
+                        &mut basis_mgr,
+                        &is_basic,
+                        n_price,
+                        m,
+                        basis,
+                        options.deadline,
+                    ) {
+                        Some(rc) => rc,
+                        None => {
+                            let obj: f64 = basic_obj(c, basis, x_b);
+                            return SimplexOutcome::Timeout(obj);
+                        }
+                    };
+                    if bland_mode {
+                        let stats =
+                            apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
+                        if let Some(t) = trace.as_mut() {
+                            t.log_lex_perturbation(stats.delta, stats.effect);
+                        }
+                    }
+                    leaving.after_refactor(m);
+                    continue;
+                }
+                // fresh factorization でも候補なし: 双対非有界 = 主実行不可
                 return SimplexOutcome::Unbounded;
             }
             Some(result) => result,
@@ -466,8 +571,15 @@ pub(crate) fn dual_simplex_core_advanced(
         // 3g: ピボット要素安定性チェック（|α[p]| < pivot_tolerance → refactorまたはskip）
         let pivot_element = alpha_dense[leaving_row];
         if pivot_element.abs() < PIVOT_TOL {
-            // 数値的に不安定 → refactorして被縮小費用を再計算
-            basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
+            // 数値的に不安定。refactor/recompute だけでは同じ候補を再選択して
+            // period=1 停滞になるため、この (basis, leaving_row) の間だけ
+            // この entering_col を候補から除外する。
+            rejected_pivot_basis = Some(basis.to_vec());
+            rejected_pivot_row = Some(leaving_row);
+            if entering_col < rejected_entering.len() {
+                rejected_entering[entering_col] = true;
+            }
+            basis_mgr.force_refactor_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
                 let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
@@ -550,6 +662,10 @@ pub(crate) fn dual_simplex_core_advanced(
         // 3k: 基底更新（LuBasis::update）
         basis_mgr.update(entering_col, leaving_row, &alpha_sv);
         basis[leaving_row] = entering_col;
+        no_candidate_refreshed_basis = None;
+        rejected_pivot_basis = None;
+        rejected_pivot_row = None;
+        rejected_entering.fill(false);
 
         // 3l: refactor判定（LuBasis::needs_refactor）+ 必要なら refactor + 被縮小費用再計算
         // needs_refactor()でeta蓄積数ベースに判定（50反復固定廃止）

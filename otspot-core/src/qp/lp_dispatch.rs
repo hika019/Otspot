@@ -240,10 +240,7 @@ fn solve_reduced_lp_from_qp(
             let mut fallback = solve_original_lp_direct_retry(original_lp, &fallback_opts);
             fill_lp_reduced_costs_from_dual(&mut fallback, original_lp);
             add_qp_obj_offset(&mut fallback, qp_obj_offset);
-            if !matches!(
-                fallback.status,
-                SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
-            ) {
+            if fallback.status == SolveStatus::Optimal {
                 fallback.timing_breakdown = Some(crate::problem::TimingBreakdown {
                     presolve_us,
                     solve_us: t_fallback.elapsed().as_micros() as u64,
@@ -268,7 +265,10 @@ fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> Solv
 }
 
 fn solve_original_lp_direct_retry(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
-    crate::lp::solve_lp_forwarded_from_qp(lp, options)
+    let mut retry_opts = options.clone();
+    retry_opts.presolve = false;
+    retry_opts.simplex_method = crate::options::SimplexMethod::Primal;
+    crate::lp::solve_lp_forwarded_from_qp(lp, &retry_opts)
 }
 
 fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
