@@ -1,6 +1,6 @@
 //! QP presolve steps 9–11: singleton-ineq→bound, implied-bound tightening, dual fixing.
 
-use super::helpers::skip_step;
+use super::helpers::{col_has_structural_q, skip_step};
 use super::state::{QpPostsolveStep, QpPresolveResult, Workspace};
 use crate::presolve::activity::activity_range;
 use crate::problem::ConstraintType;
@@ -185,14 +185,7 @@ pub(super) fn step11_dual_fixing(
         if ws.removed_cols[j] {
             continue;
         }
-        let q_nnz = {
-            let start = prob.q.col_ptr[j];
-            let end = prob.q.col_ptr[j + 1];
-            (start..end)
-                .filter(|&k| prob.q.values[k].abs() > ZERO_TOL)
-                .count()
-        };
-        if q_nnz > 0 {
+        if col_has_structural_q(&prob.q, j) {
             continue;
         }
         let a_nnz = {

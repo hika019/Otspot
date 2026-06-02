@@ -142,3 +142,58 @@ fn explicit_zero_q_value_is_structural_zero() {
     assert_eq!(r.status, SolveStatus::Optimal);
     assert!((r.objective - 2.0).abs() < 1e-9, "min x s.t. x≥2 → obj=2");
 }
+
+/// End-to-end codex P1 repro: a micro-Q column with a finite bound must reach
+/// the interior curvature optimum, NOT be fixed to its bound by a presolve LP
+/// step. `min 0.5·1e-13·x² − x, 0 ≤ x ≤ 2e13` → analytic x=1e13, obj=−5e12.
+///
+/// Two presolve paths used to fix x to ub=2e13 (obj=0): step11 dual-fixing
+/// (empty column) and step3 singleton-column (the variable in a single Le row).
+/// Both are exercised here. Reverting any `col_has_structural_q` site pins x to
+/// the bound → obj≈0 → these asserts fail.
+#[test]
+fn micro_q_finite_bound_not_pinned_to_bound() {
+    let q = CscMatrix::from_triplets(&[0], &[0], &[1e-13], 1, 1).unwrap();
+    let analytic_obj = -5e12; // -1/(2·1e-13)
+    let ub = 2e13;
+
+    // Path A — step11 dual-fixing: empty column (no A row), bounded.
+    let empty_col = QpProblem::new(
+        q.clone(),
+        vec![-1.0],
+        CscMatrix::new(0, 1),
+        vec![],
+        vec![(0.0, ub)],
+        vec![],
+    )
+    .unwrap();
+
+    // Path B — step3 singleton column: x is the singleton of a Le row (-x ≤ 0).
+    let singleton_le = QpProblem::new(
+        q,
+        vec![-1.0],
+        CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap(),
+        vec![0.0],
+        vec![(0.0, ub)],
+        vec![ConstraintType::Le],
+    )
+    .unwrap();
+
+    for (label, p) in [("step11 empty-col", empty_col), ("step3 singleton-Le", singleton_le)] {
+        let r = crate::qp::solve_qp_with(&p, &SolverOptions::default());
+        assert_ne!(r.status, SolveStatus::Unbounded, "{label}: must not be Unbounded");
+        // Must be well below 0 (the bound-pinned obj); allow IPM suboptimality.
+        assert!(
+            r.objective < 0.5 * analytic_obj,
+            "{label}: obj {} must be near analytic {analytic_obj} (interior optimum), \
+             not ~0 (pinned to ub={ub})",
+            r.objective
+        );
+        // x must be interior, not pinned at the upper bound.
+        assert!(
+            r.solution[0] < 0.9 * ub,
+            "{label}: x={} must be interior (≈1e13), not pinned at ub={ub}",
+            r.solution[0]
+        );
+    }
+}
