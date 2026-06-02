@@ -212,9 +212,15 @@ impl QpProblem {
         Self::new(q, c, a, b, bounds, vec![ConstraintType::Le; m])
     }
 
-    /// Q が全ゼロかどうかを検査する（LP退化ケース判定）
+    /// Q が構造的にゼロ（LP）かを判定する。
+    ///
+    /// LP/QP の dispatch 判定に使う。数値閾値ではなく**構造的ゼロ**で判定する:
+    /// stored 値が一つでも非ゼロなら QP (IPM 経路)。`CscMatrix::from_triplets` は
+    /// `|v| ≤ DROP_TOL` を構築時に落とすため、ここに残る値は構造的非ゼロである。
+    /// 閾値判定 (例 `|v| < 1e-12`) は微小 Q QP を LP 化して status を変える
+    /// (例 bounded QP → false-Unbounded)。dispatch は status を変えてはならない。
     pub fn is_zero_q(&self) -> bool {
-        self.q.values.iter().all(|&v| v.abs() < 1e-12)
+        self.q.values.iter().all(|&v| v == 0.0)
     }
 
     /// Returns `true` if the problem has at least one constraint with a non-zero quadratic term.

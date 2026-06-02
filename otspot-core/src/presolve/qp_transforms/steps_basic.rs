@@ -249,11 +249,15 @@ pub(super) fn step4_empty(prob: &QpProblem, ws: &mut Workspace) -> Result<(), Qp
         if a_nnz > 0 {
             continue;
         }
+        // 列 j に構造的 Q エントリがあれば曲率を持つ ⇒ pure-LP empty column では
+        // ない。数値閾値 (例 |q| > ZERO_TOL) で判定すると微小 Q (例 1e-13) を LP
+        // 変数扱いし cost 符号だけで false-Unbounded を出すため、構造的ゼロで判定。
+        // `from_triplets` が |v| ≤ DROP_TOL を落とすので stored 値は構造的非ゼロ。
         let q_nnz = {
             let start = prob.q.col_ptr[j];
             let end = prob.q.col_ptr[j + 1];
             (start..end)
-                .filter(|&k| prob.q.values[k].abs() > ZERO_TOL)
+                .filter(|&k| prob.q.values[k] != 0.0)
                 .count()
         };
         if q_nnz > 0 {

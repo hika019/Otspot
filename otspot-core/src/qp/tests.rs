@@ -4,6 +4,7 @@ mod concurrent;
 mod dual_recovery;
 mod dual_refit;
 mod emptycol_skip;
+mod micro_q_dispatch;
 mod pfeas;
 mod postsolve;
 mod presolve;
