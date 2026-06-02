@@ -1143,12 +1143,17 @@ fn test_hs51_free_var_no_singular_basis() {
 /// Sentinel: `pivot_out_degenerate_artificials` early-exit fires when no
 /// degenerate artificials remain after Phase I.
 ///
+/// `pivot_out_degenerate_artificials` lives only on the **primal** path
+/// (`two_phase_simplex`); `SimplexMethod::Auto`/`Dual` route Eq rows to the
+/// dual Big-M simplex and never reach it, so the cleanup counters stay put.
+/// The route must be forced to `Primal` to exercise the function.
+///
 /// Diagonal LP: m Eq rows `x_i = 1`. Phase I pivots each artificial out at
 /// value 1.0 (non-degenerate) → no degenerate artificials remain → early-exit
 /// must fire. Removing the early-exit makes `PIVOT_CLEAN_EARLY_EXIT_COUNT`
 /// stagnate, failing the assertion below (no-op FAIL).
 #[test]
-fn pivot_clean_early_exit_fires_when_no_degenerate_artificials() {
+fn primal_pivot_clean_early_exit_fires_when_no_degenerate_artificials() {
     use std::sync::atomic::Ordering;
 
     let before = primal::PIVOT_CLEAN_EARLY_EXIT_COUNT.load(Ordering::SeqCst);
@@ -1170,6 +1175,7 @@ fn pivot_clean_early_exit_fires_when_no_degenerate_artificials() {
 
     let mut opts = SolverOptions::default();
     opts.presolve = false; // force artificial path
+    opts.simplex_method = SimplexMethod::Primal; // primal-only cleanup path
     let result = solve_with(&lp, &opts);
 
     assert_eq!(
@@ -1196,8 +1202,11 @@ fn pivot_clean_early_exit_fires_when_no_degenerate_artificials() {
 /// (`PIVOT_CLEAN_CLEANUP_RAN_COUNT` increments). Construction uses redundant Eq
 /// rows so Phase I strands duplicates' artificials at value 0. Table-driven over
 /// two redundancy patterns; widening the early-exit causes no-op FAIL here.
+///
+/// `SimplexMethod::Primal` is forced: the cleanup lives only on the primal
+/// `two_phase_simplex` path (Auto/Dual route Eq to the dual Big-M simplex).
 #[test]
-fn pivot_cleanup_runs_when_degenerate_artificial_in_basis() {
+fn primal_pivot_cleanup_runs_when_degenerate_artificial_in_basis() {
     use std::sync::atomic::Ordering;
 
     // (rows, cols, vals, m, n, b, c, expected_obj, label)
@@ -1252,6 +1261,7 @@ fn pivot_cleanup_runs_when_degenerate_artificial_in_basis() {
 
         let mut opts = SolverOptions::default();
         opts.presolve = false; // force artificial path
+        opts.simplex_method = SimplexMethod::Primal; // primal-only cleanup path
         let result = solve_with(&lp, &opts);
 
         assert_eq!(
