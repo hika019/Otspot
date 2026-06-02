@@ -288,7 +288,11 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
                 }
                 *x_j = ub;
             } else if lb.is_finite() {
+                // Zero cost: any feasible bound is optimal. Match presolve
+                // step3b_empty_column — lb if finite, else ub, else 0.
                 *x_j = lb;
+            } else if ub.is_finite() {
+                *x_j = ub;
             }
             obj += problem.c[j] * *x_j;
         }
@@ -621,5 +625,86 @@ mod tests {
             solve_without_presolve(&unbounded_below, &SolverOptions::default()).status,
             SolveStatus::Unbounded
         );
+    }
+
+    /// Zero-cost variables in an empty-constraint LP must land on a feasible
+    /// bound, not x=0. The ub-only case (lb=-inf, ub finite) regressed: x stayed
+    /// at 0.0, violating ub, yet was returned Optimal.
+    ///
+    /// Sentinel: dropping the `else if ub.is_finite()` arm leaves x[0]=0.0 > ub=-1
+    /// in the first case, so the bound-feasibility assert fails.
+    #[test]
+    fn zero_cost_empty_constraint_lp_lands_on_feasible_bound() {
+        // (c, (lb, ub), expected_x): all four bound topologies under zero cost.
+        let cases: &[(f64, (f64, f64), f64)] = &[
+            // ub-only (the regressed case): lb=-inf, ub=-1 → must pick ub.
+            (0.0, (f64::NEG_INFINITY, -1.0), -1.0),
+            // lb-only: lb=2, ub=+inf → must pick lb.
+            (0.0, (2.0, f64::INFINITY), 2.0),
+            // both finite: pick lb (matches presolve step3b policy).
+            (0.0, (3.0, 7.0), 3.0),
+            // both infinite: x stays 0.0 (only feasible default).
+            (0.0, (f64::NEG_INFINITY, f64::INFINITY), 0.0),
+        ];
+        for &(c, (lb, ub), expected) in cases {
+            let lp = LpProblem::new_general(
+                vec![c],
+                CscMatrix::new(0, 1),
+                vec![],
+                vec![],
+                vec![(lb, ub)],
+                None,
+            )
+            .unwrap();
+            let result = solve_without_presolve(&lp, &SolverOptions::default());
+            assert_eq!(
+                result.status,
+                SolveStatus::Optimal,
+                "zero-cost empty-constraint LP with bounds ({lb}, {ub}) must be Optimal"
+            );
+            assert_eq!(
+                result.solution,
+                vec![expected],
+                "x must land on feasible bound for bounds ({lb}, {ub})"
+            );
+            // Feasibility: the returned x must respect both bounds.
+            assert!(
+                result.solution[0] >= lb - 1e-12 && result.solution[0] <= ub + 1e-12,
+                "x={} must satisfy lb={lb} ≤ x ≤ ub={ub}",
+                result.solution[0]
+            );
+        }
+    }
+
+    /// Nonzero-cost ub/lb-only cases stay correct (cost-sign branches unchanged).
+    #[test]
+    fn nonzero_cost_empty_constraint_lp_picks_optimal_bound() {
+        // c<0 with finite ub → maximize x toward ub.
+        let neg_cost = LpProblem::new_general(
+            vec![-2.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![],
+            vec![(f64::NEG_INFINITY, 4.0)],
+            None,
+        )
+        .unwrap();
+        let r = solve_without_presolve(&neg_cost, &SolverOptions::default());
+        assert_eq!(r.status, SolveStatus::Optimal);
+        assert_eq!(r.solution, vec![4.0]);
+
+        // c>0 with finite lb → minimize x toward lb.
+        let pos_cost = LpProblem::new_general(
+            vec![3.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![],
+            vec![(-5.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let r = solve_without_presolve(&pos_cost, &SolverOptions::default());
+        assert_eq!(r.status, SolveStatus::Optimal);
+        assert_eq!(r.solution, vec![-5.0]);
     }
 }
