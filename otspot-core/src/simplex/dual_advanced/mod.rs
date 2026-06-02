@@ -993,9 +993,19 @@ mod tests {
         );
     }
 
+    /// Sentinel: Ge/Eq cold-start (primal-first dispatch) must solve optimally.
+    ///
+    /// dc658d4 changed dispatch order: primal is tried first for Ge/Eq problems.
+    /// Big-M is the fallback only when primal fails (Timeout with empty solution).
+    /// This sentinel validates the end-to-end correctness of the new dispatch.
+    ///
+    /// no-op proof: removing the Ge/Eq dispatch branch (e.g. routing all Ge/Eq
+    /// to Big-M and skipping primal) causes `Optimal` with wrong objective when
+    /// Big-M stalls; a strict obj check would catch that.
     #[test]
-    fn ge_eq_cold_start_uses_bigm_phase1_before_primal_fallback() {
+    fn ge_eq_cold_start_primal_first_dispatch_solves_optimally() {
         use crate::sparse::CscMatrix;
+        const OBJ_TOL: f64 = 1e-6;
 
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let lp = LpProblem::new_general(
@@ -1009,14 +1019,13 @@ mod tests {
         .unwrap();
         let sf = build_standard_form(&lp);
 
-        phase1::reset_big_m_cold_start_count();
         let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
 
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!(
-            phase1::big_m_cold_start_count() > 0,
-            "DualAdvanced Ge/Eq cold-start must exercise Big-M dual Phase I; \
-             routing directly to primal Phase I can spend the full deadline before dual fallback"
+            (result.objective - 3.0).abs() < OBJ_TOL,
+            "Ge/Eq LP should have obj=3.0, got {:.6e}",
+            result.objective
         );
     }
 

@@ -39,6 +39,9 @@ pub(crate) trait PricingStrategy {
         leaving_row: usize,
         eta: &[f64],
     );
+
+    /// Reset all weights to 1.0 (cycle-breaking anti-degeneracy reset).
+    fn reset_weights(&mut self, n_vars: usize);
 }
 
 /// Classic Dantzig pricing: select the column with the most negative reduced cost.
@@ -64,6 +67,7 @@ impl PricingStrategy for DantzigPricing {
     }
 
     fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: usize, _: &[f64]) {}
+    fn reset_weights(&mut self, _n_vars: usize) {}
 }
 
 /// Devex approximate steepest-edge pricing (Harris 1973 / Price 1987).
@@ -96,8 +100,7 @@ impl SteepestEdgePricing {
         }
     }
 
-    /// Reset all weights to 1.0. Exposed for tests only.
-    #[cfg(test)]
+    /// Reset all weights to 1.0. Used for cycle-breaking in Phase II.
     pub(crate) fn reset_weights(&mut self, n_vars: usize) {
         if self.weights.len() != n_vars {
             self.weights = vec![1.0; n_vars];
@@ -127,6 +130,15 @@ impl PricingStrategy for SteepestEdgePricing {
     }
 
     /// Devex weight update — pivot² formula with a per-column cap at 100·m.
+    ///
+    ///   raw          = ‖η‖² / pivot², pivot = η[leaving_row]
+    ///   γ[leaving]  = max(γ[leaving], min(raw, 100·m))
+    ///   γ[entering] = 1.0
+    ///   γ[other j]  unchanged (per-column FTRAN avoided)
+    ///
+    /// When |pivot| ≤ PIVOT_TOL, the weight is not updated (degenerate pivot
+    /// guard). The cap prevents tiny-pivot weight blow-up from permanently
+    /// distorting pricing.
     fn update_weights(
         &mut self,
         _basis: &LuBasis,
@@ -147,7 +159,31 @@ impl PricingStrategy for SteepestEdgePricing {
         }
 
         if entering < self.weights.len() {
-            self.weights[entering] = 1.0;
+            // After leaving the basis, penalize re-entry: set entering weight
+            // to max(1, gamma_leaving / eta_norm_sq) so a column with high
+            // leaving weight gets higher entering weight → lower selection score
+            // → implicit anti-cycling for recently-left columns (old formula
+            // property retained). Columns not recently leaving start at 1.0.
+            let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
+            let gamma_leaving = if leaving < self.weights.len() {
+                self.weights[leaving]
+            } else {
+                1.0
+            };
+            let new_entering_w = if eta_norm_sq > GAMMA_FLOOR {
+                (gamma_leaving / eta_norm_sq).max(1.0)
+            } else {
+                1.0
+            };
+            self.weights[entering] = new_entering_w;
+        }
+    }
+
+    fn reset_weights(&mut self, n_vars: usize) {
+        if self.weights.len() != n_vars {
+            self.weights = vec![1.0; n_vars];
+        } else {
+            self.weights.fill(1.0);
         }
     }
 }
@@ -167,13 +203,19 @@ pub(crate) trait DualLeavingStrategy {
     /// smallest row index with `x_B[i] < -primal_tol`. Strategies with
     /// auxiliary objectives (e.g. artificial removal in Big-M Phase I) must
     /// override so bland_mode does not mask their secondary priority.
-    fn bland_leaving(&mut self, x_b: &[f64], primal_tol: f64, _basis: &[usize]) -> Option<usize> {
+    fn bland_leaving(&mut self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
+        // Bland's leaving rule: select the basic variable with the smallest
+        // column index (basis[i]) among those with x_B[i] < -primal_tol.
+        // Row-index selection breaks the anti-cycling guarantee.
+        let mut best_row: Option<usize> = None;
+        let mut best_var = usize::MAX;
         for (i, &v) in x_b.iter().enumerate() {
-            if v < -primal_tol {
-                return Some(i);
+            if v < -primal_tol && basis[i] < best_var {
+                best_var = basis[i];
+                best_row = Some(i);
             }
         }
-        None
+        best_row
     }
 
     /// Progress metric (smaller = closer to goal). bland_mode triggers when
@@ -304,6 +346,11 @@ mod tests {
     }
 
     /// Sentinel: `update_weights` uses the pivot² Sherman-Morrison form.
+    ///
+    /// With η = [0, 3, 4, 0, 0] (‖η‖² = 25), pivot = η[1] = 3:
+    ///   pivot² formula: 25 / 9 ≈ 2.778
+    ///
+    /// A no-op implementation would leave γ[leaving] = 1.0 < 2.778 and fail.
     #[test]
     fn devex_leaving_weight_uses_pivot_squared() {
         let mut pricing = SteepestEdgePricing::new(5);
@@ -319,13 +366,17 @@ mod tests {
             expected,
             pricing.weights[3]
         );
+        // With γ[leaving=3]=2.778 and ‖η‖²=25: entering weight = max(1, 2.778/25)
+        // = max(1, 0.111) = 1.0 (no penalty since leaving weight < eta_norm_sq).
         assert_eq!(
             pricing.weights[2], 1.0,
-            "entering column weight must reset to 1"
+            "entering weight = 1.0 when γ[leaving] < ‖η‖² (no cycle-penalty case)"
         );
     }
 
     /// Sentinel: tiny pivots below `PIVOT_TOL` do not update the leaving weight.
+    ///
+    /// Other column weights must remain untouched (no global reset side-effect).
     #[test]
     fn devex_small_pivot_guard_skips_update() {
         let mut pricing = SteepestEdgePricing::new(5);
@@ -336,7 +387,7 @@ mod tests {
         let basis_id = make_identity_basis_2x2();
         pricing.update_weights(&basis_id, 2, 3, 1, &eta);
 
-        assert_eq!(pricing.weights[3], 1.0);
+        assert_eq!(pricing.weights[3], 1.0, "small pivot: weight must remain 1.0");
         assert!(
             (pricing.weights[0] - 3.0).abs() < 1e-15,
             "γ[0] must stay at 3.0 (no global reset), got {:.6}",
@@ -346,6 +397,31 @@ mod tests {
             (pricing.weights[1] - 5.0).abs() < 1e-15,
             "γ[1] must stay at 5.0 (no global reset), got {:.6}",
             pricing.weights[1]
+        );
+    }
+
+    /// Sentinel: entering weight is penalized proportional to γ[leaving] / ‖η‖².
+    ///
+    /// This gives anti-cycling memory: columns that just LEFT with a high weight
+    /// (were hard to displace) are penalized on re-entry, reducing the chance of
+    /// re-entering the same column in a short cycle.
+    ///
+    /// With η = [0, 2e-8, 4, 0, 0] (cap fires), γ[leaving=3] = 500 (cap),
+    /// ‖η‖² ≈ 16: entering weight = max(1, 500/16) ≈ 31.25 > 1.0 (penalized).
+    ///
+    /// no-op proof: if entering weight is always 1.0, assert(31.25 > 1.1) fails.
+    #[test]
+    fn devex_entering_weight_penalized_when_leaving_large() {
+        let mut pricing = SteepestEdgePricing::new(5);
+        let eta = vec![0.0, 2e-8_f64, 4.0, 0.0, 0.0]; // cap fires for leaving
+        let basis_id = make_identity_basis_2x2();
+        pricing.update_weights(&basis_id, 2, 3, 1, &eta);
+
+        // entering=2 should be penalized (weight > 1)
+        assert!(
+            pricing.weights[2] > 1.1,
+            "entering weight should be > 1 when γ[leaving] >> ‖η‖², got {:.6}",
+            pricing.weights[2]
         );
     }
 
@@ -388,5 +464,27 @@ mod tests {
         pricing.reset_weights(5); // new size
         assert_eq!(pricing.weights.len(), 5);
         assert!(pricing.weights.iter().all(|&w| (w - 1.0).abs() < 1e-15));
+    }
+
+    /// Sentinel: `bland_leaving` selects the row whose *column index* (basis[i])
+    /// is smallest among all infeasible rows — Bland's rule, not row-index order.
+    ///
+    /// basis = [5, 1, 3], x_b = [-1.0, -2.0, -0.5]:
+    ///   row 0: basis=5, infeasible (-1.0)
+    ///   row 1: basis=1, infeasible (-2.0)  ← smallest column index
+    ///   row 2: basis=3, infeasible (-0.5)
+    /// Bland selects row 1 (column 1 is smallest). Row-index selection would
+    /// pick row 0 (first infeasible), which breaks the anti-cycling guarantee.
+    #[test]
+    fn bland_leaving_uses_smallest_column_index() {
+        let mut strat = MostInfeasibleLeaving;
+        let x_b = vec![-1.0_f64, -2.0, -0.5];
+        let basis = vec![5_usize, 1, 3];
+        let pick = strat.bland_leaving(&x_b, 1e-8, &basis);
+        assert_eq!(
+            pick,
+            Some(1),
+            "Bland leaving must select row with smallest basis[i]=1 (col 1), not row 0 (col 5)"
+        );
     }
 }

@@ -524,6 +524,34 @@ pub(crate) fn two_phase_simplex(
                         SimplexOutcome::Optimal(_, _) => {}
                         SimplexOutcome::Unbounded => break 'retry,
                         SimplexOutcome::Timeout(_) => {
+                            // Cycling bail may fire when Phase I objective is already 0
+                            // (artificials eliminated but degenerate basis stalls).
+                            // Reconcile with fresh LU before giving up: if all
+                            // artificials are truly gone (rec_obj ≤ PIVOT_TOL),
+                            // the bail was a false positive and Phase II can run.
+                            let mut y_check = vec![0.0f64; m];
+                            let reconciled = reconcile_final_basis_state(
+                                &a_ext,
+                                &b,
+                                &c_phase1,
+                                &basis,
+                                &mut x_b,
+                                &mut y_check,
+                                options.max_etas,
+                                options.deadline,
+                            )
+                            .is_ok();
+                            if reconciled {
+                                let rec_obj_retry: f64 = (0..m)
+                                    .map(|i| c_phase1[basis[i]] * x_b[i].max(0.0))
+                                    .sum();
+                                if rec_obj_retry <= PIVOT_TOL {
+                                    // Artificials are gone: treat as feasible and
+                                    // proceed to Phase II via the retry reconcile loop.
+                                    phase1_feasible = true;
+                                    break 'retry;
+                                }
+                            }
                             return SolverResult {
                                 status: SolveStatus::Timeout,
                                 objective: f64::INFINITY,
@@ -1714,6 +1742,13 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let mut best_obj: f64 = basic_obj(c, basis, x_b);
     let mut iters_since_obj_progress: usize = 0;
     let mut iters_since_step_progress: usize = 0;
+    // Cycle detection: when a basis repeats, block the entering variable that
+    // contributed to the cycle for m/2 iterations. This forces a different
+    // pricing path without changing the numerical method, breaking the cycle.
+    let mut cycle_basis_hashes: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let cycle_block_duration: usize = m / 2;
+    let mut cycle_block_col: Option<usize> = None;
+    let mut cycle_block_remaining: usize = 0;
     let mut trace = IterTrace::new("primal-revised");
 
     for _iter in 0..max_iter {
@@ -1752,6 +1787,20 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         for &j in &blocked_at_basis {
             if j < n_price {
                 rc_vec[j] = 0.0;
+            }
+        }
+
+        // Temporarily mask the blocked column to force a different pricing path
+        // when a cycle was recently detected. The mask is lifted after m/2 iters.
+        if cycle_block_remaining > 0 {
+            cycle_block_remaining -= 1;
+            if let Some(col) = cycle_block_col {
+                if col < n_price {
+                    rc_vec[col] = 0.0;
+                }
+            }
+            if cycle_block_remaining == 0 {
+                cycle_block_col = None;
             }
         }
 
@@ -1934,6 +1983,33 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         is_basic[leaving_col] = false;
         is_basic[entering_col] = true;
         basis[leaving_row] = entering_col;
+
+        // Cycle detection: if the new basis was seen before, re-apply Charnes
+        // perturbation to break the degenerate cycle. Near-zero x_b values are
+        // perturbed to unique small positives so the ratio test sees distinct
+        // step sizes, preventing the exact-tie sequence that causes cycling.
+        {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            basis.len().hash(&mut h);
+            basis.hash(&mut h);
+            let bhash = h.finish();
+            if !cycle_basis_hashes.insert(bhash) {
+                // Repeated basis: apply Charnes perturbation to ALL x_b values.
+                // The additive shift eps*(i+1) makes all ratios distinct, breaking
+                // the tie structure that enables cycling. x_b remains non-negative
+                // (primal simplex invariant: x_b ≥ 0 always). The reconcile after
+                // Phase II/I removes the perturbation drift.
+                let eps = PIVOT_TOL * (m as f64).max(1.0);
+                for (i, v) in x_b.iter_mut().enumerate() {
+                    *v += eps * (i as f64 + 1.0);
+                }
+                // Also block the entering column briefly to force path divergence.
+                cycle_block_col = Some(entering_col);
+                cycle_block_remaining = cycle_block_duration;
+                cycle_basis_hashes.clear();
+            }
+        }
 
         // Small pivot would blow up the eta inverse-pivot factor; refactor
         // instead of accumulating another eta.
