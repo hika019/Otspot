@@ -5,15 +5,11 @@
 //! - `SteepestEdgePricing`: Devex approximate steepest-edge pricing
 
 use crate::basis::LuBasis;
-use crate::tolerances::PIVOT_TOL;
 
 const EPS: f64 = 1e-8;
 
 /// Minimum weight floor to keep `sqrt(γ)` safe (prevents div-by-zero in score).
 const GAMMA_FLOOR: f64 = 1e-10;
-/// Cap for the pivot² Devex update. Normal non-degenerate weights are O(m);
-/// capping prevents tiny pivots from permanently distorting pricing.
-const CAP_MULT_OF_M: f64 = 100.0;
 
 /// Strategy for selecting the entering variable in the revised simplex.
 pub(crate) trait PricingStrategy {
@@ -39,6 +35,9 @@ pub(crate) trait PricingStrategy {
         leaving_row: usize,
         eta: &[f64],
     );
+
+    /// Reset all weights to 1.0 (cycle-breaking anti-degeneracy reset).
+    fn reset_weights(&mut self, n_vars: usize);
 }
 
 /// Classic Dantzig pricing: select the column with the most negative reduced cost.
@@ -64,6 +63,7 @@ impl PricingStrategy for DantzigPricing {
     }
 
     fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: usize, _: &[f64]) {}
+    fn reset_weights(&mut self, _n_vars: usize) {}
 }
 
 /// Devex approximate steepest-edge pricing (Harris 1973 / Price 1987).
@@ -96,8 +96,7 @@ impl SteepestEdgePricing {
         }
     }
 
-    /// Reset all weights to 1.0. Exposed for tests only.
-    #[cfg(test)]
+    /// Reset all weights to 1.0. Used for cycle-breaking in Phase II.
     pub(crate) fn reset_weights(&mut self, n_vars: usize) {
         if self.weights.len() != n_vars {
             self.weights = vec![1.0; n_vars];
@@ -126,28 +125,43 @@ impl PricingStrategy for SteepestEdgePricing {
         entering
     }
 
-    /// Devex weight update — pivot² formula with a per-column cap at 100·m.
+    /// Devex weight update: γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering]).
+    ///
+    /// Uses γ[entering] as denominator (not pivot²). This provides implicit
+    /// anti-cycling: columns that have been entering frequently accumulate large
+    /// weights, reducing their priority and breaking cycling patterns on
+    /// degenerate LPs. The `leaving_row` parameter is retained for API
+    /// compatibility with callers that compute the pivot element.
     fn update_weights(
         &mut self,
         _basis: &LuBasis,
         entering: usize,
         leaving: usize,
-        leaving_row: usize,
+        _leaving_row: usize,
         eta: &[f64],
     ) {
         if leaving < self.weights.len() {
-            let pivot = eta.get(leaving_row).copied().unwrap_or(0.0);
-            if pivot.abs() > PIVOT_TOL {
-                let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
-                let cap = CAP_MULT_OF_M * (eta.len() as f64);
-                let raw = eta_norm_sq / (pivot * pivot);
-                let new_weight = raw.min(cap).max(GAMMA_FLOOR);
-                self.weights[leaving] = self.weights[leaving].max(new_weight);
-            }
+            let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
+            let gamma_e = self
+                .weights
+                .get(entering)
+                .copied()
+                .unwrap_or(1.0)
+                .max(GAMMA_FLOOR);
+            let new_weight = (eta_norm_sq / gamma_e).max(GAMMA_FLOOR);
+            self.weights[leaving] = self.weights[leaving].max(new_weight);
         }
 
         if entering < self.weights.len() {
             self.weights[entering] = 1.0;
+        }
+    }
+
+    fn reset_weights(&mut self, n_vars: usize) {
+        if self.weights.len() != n_vars {
+            self.weights = vec![1.0; n_vars];
+        } else {
+            self.weights.fill(1.0);
         }
     }
 }
@@ -167,13 +181,19 @@ pub(crate) trait DualLeavingStrategy {
     /// smallest row index with `x_B[i] < -primal_tol`. Strategies with
     /// auxiliary objectives (e.g. artificial removal in Big-M Phase I) must
     /// override so bland_mode does not mask their secondary priority.
-    fn bland_leaving(&mut self, x_b: &[f64], primal_tol: f64, _basis: &[usize]) -> Option<usize> {
+    fn bland_leaving(&mut self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
+        // Bland's leaving rule: select the basic variable with the smallest
+        // column index (basis[i]) among those with x_B[i] < -primal_tol.
+        // Row-index selection breaks the anti-cycling guarantee.
+        let mut best_row: Option<usize> = None;
+        let mut best_var = usize::MAX;
         for (i, &v) in x_b.iter().enumerate() {
-            if v < -primal_tol {
-                return Some(i);
+            if v < -primal_tol && basis[i] < best_var {
+                best_var = basis[i];
+                best_row = Some(i);
             }
         }
-        None
+        best_row
     }
 
     /// Progress metric (smaller = closer to goal). bland_mode triggers when
@@ -303,19 +323,27 @@ mod tests {
         crate::basis::LuBasis::new(&a, &[0, 1], 50).unwrap()
     }
 
-    /// Sentinel: `update_weights` uses the pivot² Sherman-Morrison form.
+    /// Sentinel: `update_weights` uses γ[entering] as denominator.
+    ///
+    /// Formula: γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
+    ///
+    /// With η = [0, 3, 4, 0, 0] (‖η‖² = 25), γ[entering=2] = 7.0:
+    ///   7.0 formula: 25 / 7 ≈ 3.571
+    ///
+    /// A no-op implementation would leave γ[leaving] = 1.0 < 3.571 and fail.
     #[test]
-    fn devex_leaving_weight_uses_pivot_squared() {
+    fn devex_leaving_weight_uses_gamma_entering() {
         let mut pricing = SteepestEdgePricing::new(5);
+        pricing.weights[2] = 7.0; // γ[entering] = 7.0
         let eta = vec![0.0, 3.0, 4.0, 0.0, 0.0]; // ‖η‖² = 25
-        let expected = 25.0_f64 / 9.0_f64; // pivot = eta[1] = 3
+        let expected = 25.0_f64 / 7.0_f64;
 
         let basis_id = make_identity_basis_2x2();
         pricing.update_weights(&basis_id, 2, 3, 1, &eta);
 
         assert!(
             (pricing.weights[3] - expected).abs() < 1e-12,
-            "expected γ[leaving] = {:.6} (‖η‖²/pivot²), got {:.6}",
+            "expected γ[leaving] = {:.6} (‖η‖²/γ[entering]), got {:.6}",
             expected,
             pricing.weights[3]
         );
@@ -325,18 +353,31 @@ mod tests {
         );
     }
 
-    /// Sentinel: tiny pivots below `PIVOT_TOL` do not update the leaving weight.
+    /// Sentinel: degenerate-pivot scenario produces finite γ[leaving] via γ[entering] damping.
+    ///
+    /// With η = [0, 0.01, 4, 0, 0] (‖η‖² ≈ 16.0001), γ[entering=2] = 2.0:
+    ///   γ[entering] formula: 16.0001 / 2.0 ≈ 8.0  (finite, no blow-up)
+    ///
+    /// Other column weights must remain untouched (no global reset side-effect).
     #[test]
-    fn devex_small_pivot_guard_skips_update() {
+    fn devex_degenerate_pivot_no_blowup() {
         let mut pricing = SteepestEdgePricing::new(5);
         pricing.weights[0] = 3.0;
         pricing.weights[1] = 5.0;
-        let eta = vec![0.0, 1e-9_f64, 4.0, 0.0, 0.0];
+        pricing.weights[2] = 2.0; // γ[entering] = 2.0
+        let eta = vec![0.0, 0.01_f64, 4.0, 0.0, 0.0];
+        let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
+        let expected = eta_norm_sq / 2.0;
 
         let basis_id = make_identity_basis_2x2();
         pricing.update_weights(&basis_id, 2, 3, 1, &eta);
 
-        assert_eq!(pricing.weights[3], 1.0);
+        assert!(
+            (pricing.weights[3] - expected).abs() < 1e-10,
+            "degenerate pivot: expected γ[leaving]={:.6} (finite), got {:.6}",
+            expected,
+            pricing.weights[3]
+        );
         assert!(
             (pricing.weights[0] - 3.0).abs() < 1e-15,
             "γ[0] must stay at 3.0 (no global reset), got {:.6}",
@@ -346,22 +387,6 @@ mod tests {
             (pricing.weights[1] - 5.0).abs() < 1e-15,
             "γ[1] must stay at 5.0 (no global reset), got {:.6}",
             pricing.weights[1]
-        );
-    }
-
-    /// Sentinel: the per-column cap clamps pivot² blow-up at 100·m.
-    #[test]
-    fn devex_pivot_squared_update_is_capped() {
-        let mut pricing = SteepestEdgePricing::new(5);
-        let eta = vec![0.0, 2e-8_f64, 4.0, 0.0, 0.0];
-        let basis_id = make_identity_basis_2x2();
-        pricing.update_weights(&basis_id, 2, 3, 1, &eta);
-
-        let cap = CAP_MULT_OF_M * eta.len() as f64;
-        assert!(
-            (pricing.weights[3] - cap).abs() <= 1e-9,
-            "expected capped γ[leaving]={cap:.3e}, got {:.3e}",
-            pricing.weights[3]
         );
     }
 
@@ -388,5 +413,27 @@ mod tests {
         pricing.reset_weights(5); // new size
         assert_eq!(pricing.weights.len(), 5);
         assert!(pricing.weights.iter().all(|&w| (w - 1.0).abs() < 1e-15));
+    }
+
+    /// Sentinel: `bland_leaving` selects the row whose *column index* (basis[i])
+    /// is smallest among all infeasible rows — Bland's rule, not row-index order.
+    ///
+    /// basis = [5, 1, 3], x_b = [-1.0, -2.0, -0.5]:
+    ///   row 0: basis=5, infeasible (-1.0)
+    ///   row 1: basis=1, infeasible (-2.0)  ← smallest column index
+    ///   row 2: basis=3, infeasible (-0.5)
+    /// Bland selects row 1 (column 1 is smallest). Row-index selection would
+    /// pick row 0 (first infeasible), which breaks the anti-cycling guarantee.
+    #[test]
+    fn bland_leaving_uses_smallest_column_index() {
+        let mut strat = MostInfeasibleLeaving;
+        let x_b = vec![-1.0_f64, -2.0, -0.5];
+        let basis = vec![5_usize, 1, 3];
+        let pick = strat.bland_leaving(&x_b, 1e-8, &basis);
+        assert_eq!(
+            pick,
+            Some(1),
+            "Bland leaving must select row with smallest basis[i]=1 (col 1), not row 0 (col 5)"
+        );
     }
 }

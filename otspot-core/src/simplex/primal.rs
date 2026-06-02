@@ -524,6 +524,34 @@ pub(crate) fn two_phase_simplex(
                         SimplexOutcome::Optimal(_, _) => {}
                         SimplexOutcome::Unbounded => break 'retry,
                         SimplexOutcome::Timeout(_) => {
+                            // Cycling bail may fire when Phase I objective is already 0
+                            // (artificials eliminated but degenerate basis stalls).
+                            // Reconcile with fresh LU before giving up: if all
+                            // artificials are truly gone (rec_obj ≤ PIVOT_TOL),
+                            // the bail was a false positive and Phase II can run.
+                            let mut y_check = vec![0.0f64; m];
+                            let reconciled = reconcile_final_basis_state(
+                                &a_ext,
+                                &b,
+                                &c_phase1,
+                                &basis,
+                                &mut x_b,
+                                &mut y_check,
+                                options.max_etas,
+                                options.deadline,
+                            )
+                            .is_ok();
+                            if reconciled {
+                                let rec_obj_retry: f64 = (0..m)
+                                    .map(|i| c_phase1[basis[i]] * x_b[i].max(0.0))
+                                    .sum();
+                                if rec_obj_retry <= PIVOT_TOL {
+                                    // Artificials are gone: treat as feasible and
+                                    // proceed to Phase II via the retry reconcile loop.
+                                    phase1_feasible = true;
+                                    break 'retry;
+                                }
+                            }
                             return SolverResult {
                                 status: SolveStatus::Timeout,
                                 objective: f64::INFINITY,
@@ -1714,6 +1742,9 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let mut best_obj: f64 = basic_obj(c, basis, x_b);
     let mut iters_since_obj_progress: usize = 0;
     let mut iters_since_step_progress: usize = 0;
+    // Cycle detection for Phase II: track basis hashes; on repeat, reset
+    // Devex weights to break the cycle. Phase I uses the cycling bail instead.
+    let mut cycle_basis_hashes: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut trace = IterTrace::new("primal-revised");
 
     for _iter in 0..max_iter {
@@ -1934,6 +1965,21 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         is_basic[leaving_col] = false;
         is_basic[entering_col] = true;
         basis[leaving_row] = entering_col;
+
+        // Cycle detection: if the new basis was seen before, reset Devex
+        // weights to break the pricing cycle. Applies in both Phase I and II.
+        {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            basis.len().hash(&mut h);
+            basis.hash(&mut h);
+            let bhash = h.finish();
+            if !cycle_basis_hashes.insert(bhash) {
+                // Repeated basis: reset Devex weights to break the cycle.
+                pricing.reset_weights(n_cols);
+                cycle_basis_hashes.clear();
+            }
+        }
 
         // Small pivot would blow up the eta inverse-pivot factor; refactor
         // instead of accumulating another eta.

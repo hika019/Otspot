@@ -696,6 +696,21 @@ pub(crate) fn big_m_cold_start(
         c_aug_p2[*col] = big_m;
     }
 
+    // Charnes perturbation: degenerate rows (x_b ≈ 0) cause ratio-test step=0
+    // and degenerate cycles in Phase II. Perturb each such row by a unique tiny
+    // positive value so the ratio test produces step > 0. The final reconcile
+    // after Phase II restores exact B^{-1}b.
+    for i in 0..m {
+        if x_b[i].abs() < crate::tolerances::PIVOT_TOL {
+            x_b[i] = crate::tolerances::PIVOT_TOL * (i as f64 + 1.0);
+        }
+    }
+    for v in x_b.iter_mut() {
+        if *v < 0.0 {
+            *v = 0.0;
+        }
+    }
+
     let mut pricing = SteepestEdgePricing::new(n_aug);
     let phase2_outcome = super::super::revised_simplex_core(
         &a_aug,
