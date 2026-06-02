@@ -5,11 +5,15 @@
 //! - `SteepestEdgePricing`: Devex approximate steepest-edge pricing
 
 use crate::basis::LuBasis;
+use crate::tolerances::PIVOT_TOL;
 
 const EPS: f64 = 1e-8;
 
 /// Minimum weight floor to keep `sqrt(γ)` safe (prevents div-by-zero in score).
 const GAMMA_FLOOR: f64 = 1e-10;
+/// Cap for the pivot² Devex update. Normal non-degenerate weights are O(m);
+/// capping prevents tiny pivots from permanently distorting pricing.
+const CAP_MULT_OF_M: f64 = 100.0;
 
 /// Strategy for selecting the entering variable in the revised simplex.
 pub(crate) trait PricingStrategy {
@@ -24,8 +28,17 @@ pub(crate) trait PricingStrategy {
     ///
     /// `entering` = column index entering the basis.
     /// `leaving`  = column index leaving the basis (not the row index).
-    /// `eta`      = B⁻¹ * a_entering (FTRAN of entering column, dense).
-    fn update_weights(&mut self, basis: &LuBasis, entering: usize, leaving: usize, eta: &[f64]);
+    /// `leaving_row` = row index of the leaving basic variable, so pivot =
+    ///                 `eta[leaving_row]`.
+    /// `eta`         = B⁻¹ * a_entering (FTRAN of entering column, dense).
+    fn update_weights(
+        &mut self,
+        basis: &LuBasis,
+        entering: usize,
+        leaving: usize,
+        leaving_row: usize,
+        eta: &[f64],
+    );
 }
 
 /// Classic Dantzig pricing: select the column with the most negative reduced cost.
@@ -50,7 +63,7 @@ impl PricingStrategy for DantzigPricing {
         entering
     }
 
-    fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: &[f64]) {}
+    fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: usize, _: &[f64]) {}
 }
 
 /// Devex approximate steepest-edge pricing (Harris 1973 / Price 1987).
@@ -58,59 +71,16 @@ impl PricingStrategy for DantzigPricing {
 /// Maintains γ[j] ≈ ‖B⁻¹ a_j‖² for each non-basic column j.
 /// Selects the entering variable maximising `-rc_j / sqrt(γ_j)`.
 ///
-/// Weight update after a pivot:
-///   γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
-///   γ[entering] ← 1.0   (reset; entering becomes basic)
-///   γ[other j]  unchanged (approximation; exact update requires per-column FTRAN)
+/// Weight update after a pivot (pivot² formula with per-column cap):
+///   raw          = ‖η‖² / pivot², pivot = η[leaving_row]
+///   γ[leaving]  = max(γ[leaving], min(raw, 100·m))
+///   γ[entering] = 1.0
+///   γ[other j]  unchanged (per-column FTRAN avoided)
 ///
-/// The numerically exact leaving-column weight is `‖η‖²/pivot²` (Sherman-Morrison
-/// update of B⁻¹).  Multiple variants of that formula produced bench regressions
-/// when tested (see retreat history below), so we use `γ[entering]` as the
-/// denominator.  When |pivot| is small, γ[entering] tends to be large (the
-/// entering column had high steepest-edge weight), providing implicit damping
-/// that keeps γ[leaving] finite without any explicit cap.
-///
-/// **Retreat history — pivot² formula variants:**
-///
-/// **#75 (`‖η‖²/pivot²`, unguarded):** wood1p NumericalError. Mechanism (#178
-/// verified 2026-05-30): pricing distortion → false-Optimal at infeasible vertex
-/// → `check_eq_feasibility` FAIL (wood1p iter 3106, 676 γ-blowup, γ=6.6e17);
-/// Phase 2 LU instability (maros). Prior claim "permanent column exclusion →
-/// SingularBasis" was incorrect.
-///
-/// **#146 (pivot² with DEVEX_WEIGHT_CAP, three variants):**
-///
-/// Attempt 1 (per-column cap at 1·m): wood1p 14s → 2.7s, but maros (m=846)
-/// DFEAS_FAIL.  Normal pivots produce weights in [m, 100·m]; capping at m
-/// distorts pricing for those problems.
-///
-/// Attempt 2 (per-column cap at 100·m): wood1p PASS, grow22 PASS. Retreat
-/// claim "maros FAIL:Infeasible (0.7s)" **does not reproduce in current codebase**
-/// (post-2026-05-30, #178 Agent C verified). cap-100m is strictly better in
-/// tested 3: wood1p 17.6× faster, grow22 1.66× faster, maros parity, possibly
-/// because Phase 1 / dual_advanced / postsolve / KKT guard improvements since
-/// #146 reduced the perturbation sensitivity (unverified; #182 bisect で特定中).
-/// Full Netlib 109 + Maros 138 validation pending (#182).
-///
-/// Attempt 3 (global weight reset when any weight > 100·m): maros PASS, but
-/// grow22 PFEAS_FAIL.  A full reset wipes pricing history for all columns,
-/// causing Dantzig-like selection mid-solve that reaches a different optimal
-/// vertex and exposes a postsolve bound-check failure.
-///
-/// **#165 (per-row Charnes perturbation with DEGENERATE_ROW_THRESHOLD gate):**
-/// grow22 PFEAS_FAIL. Mechanism (#178 verified 2026-05-30, Agent B): bfeas=1.957e-3,
-/// x_b_neg=4 (basis truly primal-infeasible). ε addition skews ratio test →
-/// ineligible leaving row selected → reconciled basis primal-infeasible. Algorithm
-/// invalid (Scenario D pure); retreat confirmed.
-///
-/// **Future pivot² guard:** A guard `pivot_sq > 1e-16` is f64-boundary weak:
-/// `(1e-8)² = 1.0000000000000001e-16 > 1e-16` passes the guard. wood1p
-/// observation: col=77, pivot=1.48e-8 → γ=2.19e16 (blowup directly above
-/// guard). Stronger guard: `pivot.abs() > PIVOT_TOL` (compare before squaring).
-///
-/// γ[entering] formula confirmed: 109/109 PASS, eps=1e-6, timeout=1000s.
-/// Retreat decisions can become stale as the codebase evolves; re-evaluate
-/// pivot² variants against current main before dismissing.
+/// The pivot guard compares `pivot.abs()` before squaring. A squared guard at
+/// `1e-16` admits boundary pivots around 1e-8 due to f64 rounding and can
+/// produce weights around 1e17; the cap keeps those cases from dominating
+/// the rest of the solve while preserving normal O(m)..O(100m) weights.
 ///
 /// Weights start at 1.0 and are non-decreasing per column (the `max` prevents
 /// reducing a weight). Columns that never leave the basis retain γ = 1.0 and
@@ -156,24 +126,24 @@ impl PricingStrategy for SteepestEdgePricing {
         entering
     }
 
-    /// Devex weight update using γ[entering] as denominator.
-    ///
-    /// γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
-    /// γ[entering] ← 1.0
-    ///
-    /// See struct docstring for the retreat history documenting why the
-    /// numerically exact pivot² formula was abandoned.
-    fn update_weights(&mut self, _basis: &LuBasis, entering: usize, leaving: usize, eta: &[f64]) {
+    /// Devex weight update — pivot² formula with a per-column cap at 100·m.
+    fn update_weights(
+        &mut self,
+        _basis: &LuBasis,
+        entering: usize,
+        leaving: usize,
+        leaving_row: usize,
+        eta: &[f64],
+    ) {
         if leaving < self.weights.len() {
-            let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
-            let gamma_e = self
-                .weights
-                .get(entering)
-                .copied()
-                .unwrap_or(1.0)
-                .max(GAMMA_FLOOR);
-            let new_weight = (eta_norm_sq / gamma_e).max(GAMMA_FLOOR);
-            self.weights[leaving] = self.weights[leaving].max(new_weight);
+            let pivot = eta.get(leaving_row).copied().unwrap_or(0.0);
+            if pivot.abs() > PIVOT_TOL {
+                let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
+                let cap = CAP_MULT_OF_M * (eta.len() as f64);
+                let raw = eta_norm_sq / (pivot * pivot);
+                let new_weight = raw.min(cap).max(GAMMA_FLOOR);
+                self.weights[leaving] = self.weights[leaving].max(new_weight);
+            }
         }
 
         if entering < self.weights.len() {
@@ -193,20 +163,17 @@ pub(crate) trait DualLeavingStrategy {
     fn select_leaving(&mut self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize>;
 
     /// Anti-cycling fallback used when `dual_simplex_core_advanced` enters
-    /// bland_mode. Default = pure Bland (smallest `basis[i]` index among rows
-    /// with `x_B[i] < -primal_tol`). Strategies with auxiliary objectives
-    /// (e.g. artificial removal in Big-M Phase I) must override so bland_mode
-    /// does not mask their secondary priority.
-    fn bland_leaving(&mut self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
-        let mut best_row: Option<usize> = None;
-        let mut best_var = usize::MAX;
+    /// bland_mode. Default = pure Bland on the leaving row: select the
+    /// smallest row index with `x_B[i] < -primal_tol`. Strategies with
+    /// auxiliary objectives (e.g. artificial removal in Big-M Phase I) must
+    /// override so bland_mode does not mask their secondary priority.
+    fn bland_leaving(&mut self, x_b: &[f64], primal_tol: f64, _basis: &[usize]) -> Option<usize> {
         for (i, &v) in x_b.iter().enumerate() {
-            if v < -primal_tol && basis[i] < best_var {
-                best_var = basis[i];
-                best_row = Some(i);
+            if v < -primal_tol {
+                return Some(i);
             }
         }
-        best_row
+        None
     }
 
     /// Progress metric (smaller = closer to goal). bland_mode triggers when
@@ -336,28 +303,19 @@ mod tests {
         crate::basis::LuBasis::new(&a, &[0, 1], 50).unwrap()
     }
 
-    /// Sentinel: `update_weights` uses γ[entering] in the denominator (not pivot²).
-    ///
-    /// Formula: γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
-    ///
-    /// With η = [0, 3, 4, 0, 0] (‖η‖² = 25), γ[entering] = 7.0:
-    ///   γ[entering] formula: 25 / 7 ≈ 3.571
-    ///
-    /// A no-op implementation (e.g. returning early without updating) would leave
-    /// γ[leaving] = 1.0, which is strictly less than 3.571 and fails the assertion.
+    /// Sentinel: `update_weights` uses the pivot² Sherman-Morrison form.
     #[test]
-    fn devex_leaving_weight_uses_gamma_entering() {
+    fn devex_leaving_weight_uses_pivot_squared() {
         let mut pricing = SteepestEdgePricing::new(5);
-        pricing.weights[2] = 7.0; // γ[entering] = 7.0
         let eta = vec![0.0, 3.0, 4.0, 0.0, 0.0]; // ‖η‖² = 25
-        let expected = 25.0_f64 / 7.0_f64; // γ[entering] formula
+        let expected = 25.0_f64 / 9.0_f64; // pivot = eta[1] = 3
 
         let basis_id = make_identity_basis_2x2();
-        pricing.update_weights(&basis_id, 2, 3, &eta);
+        pricing.update_weights(&basis_id, 2, 3, 1, &eta);
 
         assert!(
             (pricing.weights[3] - expected).abs() < 1e-12,
-            "expected γ[leaving] = {:.6} (‖η‖²/γ[entering]), got {:.6}",
+            "expected γ[leaving] = {:.6} (‖η‖²/pivot²), got {:.6}",
             expected,
             pricing.weights[3]
         );
@@ -367,32 +325,18 @@ mod tests {
         );
     }
 
-    /// Sentinel: degenerate-pivot scenario produces a finite γ[leaving] (γ[entering] damps).
-    ///
-    /// With η = [0, 0.01, 4, 0, 0] (‖η‖² ≈ 16.0001), γ[entering] = 2.0:
-    ///   γ[entering] formula: 16.0001 / 2.0 ≈ 8.0  (finite, no cap needed)
-    ///   For contrast: pivot² with pivot=1e-5 gives 16.0001 / 1e-10 ≈ 1.6e11  (blow-up)
-    ///
-    /// Other column weights must remain untouched (no global reset side-effect).
+    /// Sentinel: tiny pivots below `PIVOT_TOL` do not update the leaving weight.
     #[test]
-    fn devex_degenerate_pivot_no_blowup() {
+    fn devex_small_pivot_guard_skips_update() {
         let mut pricing = SteepestEdgePricing::new(5);
         pricing.weights[0] = 3.0;
         pricing.weights[1] = 5.0;
-        pricing.weights[2] = 2.0; // γ[entering] = 2.0
-        let eta = vec![0.0, 0.01_f64, 4.0, 0.0, 0.0]; // ‖η‖² ≈ 16.0001
-        let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
-        let expected = eta_norm_sq / 2.0; // γ[entering]=2.0
+        let eta = vec![0.0, 1e-9_f64, 4.0, 0.0, 0.0];
 
         let basis_id = make_identity_basis_2x2();
-        pricing.update_weights(&basis_id, 2, 3, &eta);
+        pricing.update_weights(&basis_id, 2, 3, 1, &eta);
 
-        assert!(
-            (pricing.weights[3] - expected).abs() < 1e-10,
-            "degenerate pivot: expected γ[leaving]={:.6} (finite), got {:.6}",
-            expected,
-            pricing.weights[3]
-        );
+        assert_eq!(pricing.weights[3], 1.0);
         assert!(
             (pricing.weights[0] - 3.0).abs() < 1e-15,
             "γ[0] must stay at 3.0 (no global reset), got {:.6}",
@@ -402,6 +346,22 @@ mod tests {
             (pricing.weights[1] - 5.0).abs() < 1e-15,
             "γ[1] must stay at 5.0 (no global reset), got {:.6}",
             pricing.weights[1]
+        );
+    }
+
+    /// Sentinel: the per-column cap clamps pivot² blow-up at 100·m.
+    #[test]
+    fn devex_pivot_squared_update_is_capped() {
+        let mut pricing = SteepestEdgePricing::new(5);
+        let eta = vec![0.0, 2e-8_f64, 4.0, 0.0, 0.0];
+        let basis_id = make_identity_basis_2x2();
+        pricing.update_weights(&basis_id, 2, 3, 1, &eta);
+
+        let cap = CAP_MULT_OF_M * eta.len() as f64;
+        assert!(
+            (pricing.weights[3] - cap).abs() <= 1e-9,
+            "expected capped γ[leaving]={cap:.3e}, got {:.3e}",
+            pricing.weights[3]
         );
     }
 

@@ -1159,6 +1159,26 @@ pub fn run_postsolve(
         dual_solution = y_lsq.expect("df_lsq finite implies Some");
     }
 
+    // Crossover dual: when local per-transform / cleanup recovery is still
+    // dual-infeasible *beyond the LP certificate tolerance* (presolve rows serving
+    // multiple roles — forcing + pivot — that no local recovery can reconcile, e.g.
+    // pilot-ja), reconstruct an optimal basis *at* the primal optimum and read
+    // y = B⁻ᵀc_B, a globally dual-feasible dual. Gated at `LP_CERT_TOL` (the
+    // threshold `guard_lp_optimal` certifies against) so only would-be demotes pay
+    // the basis-reconstruction cost; adopted only when it strictly improves dfeas,
+    // so it can never regress another LP.
+    if matches!(result.status, SolveStatus::Optimal)
+        && min_df > crate::tolerances::feas_rel_tol()
+    {
+        if let Some((y_xover, _rc_xover)) =
+            crate::simplex::crossover_dual_from_primal(orig_problem, &solution, deadline)
+        {
+            if dfeas_bound(&y_xover) < min_df {
+                dual_solution = y_xover;
+            }
+        }
+    }
+
     // Recompute simplex-convention reduced costs on the original problem now that
     // the dual is final:
     //   reduced_cost[j] = c[j] - Σ_i A_ij · y_i.
