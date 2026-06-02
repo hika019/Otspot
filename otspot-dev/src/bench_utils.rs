@@ -390,7 +390,17 @@ pub fn compute_dfeas_orig(
     {
         return (f64::NAN, f64::NAN);
     }
-    if prob.num_constraints > 0 && dual_solution.len() != prob.num_constraints {
+    // The LP/Simplex reduced-cost path (below) consumes only bounds, solution,
+    // reduced_costs and c — never `dual_solution`. So an empty/short dual must
+    // not reject a valid simplex output here; the length guard applies only to
+    // the KKT path that actually uses A^T·y.
+    let lp_reduced_cost_path = bound_duals.is_empty()
+        && !reduced_costs.is_empty()
+        && reduced_costs.len() == prob.num_vars;
+    if !lp_reduced_cost_path
+        && prob.num_constraints > 0
+        && dual_solution.len() != prob.num_constraints
+    {
         return (f64::INFINITY, f64::INFINITY);
     }
     let n_finite_bounds = prob
@@ -430,12 +440,16 @@ pub fn compute_dfeas_orig(
                 lb_j.is_finite() && (x_j - lb_j).abs() <= rel_tol * (1.0 + x_j.abs() + lb_j.abs());
             let at_ub =
                 ub_j.is_finite() && (x_j - ub_j).abs() <= rel_tol * (1.0 + x_j.abs() + ub_j.abs());
+            // Interior (away from any finite bound) ⇒ basic in simplex, where rc
+            // is ~0 by construction; any reported magnitude is basis noise, so it
+            // is not a dual-feasibility violation. Only at-bound (nonbasic) vars
+            // are sign-checked above.
             let viol = if at_lb && !at_ub {
                 f64::max(0.0, -rc)
             } else if at_ub && !at_lb {
                 f64::max(0.0, rc)
             } else {
-                rc.abs()
+                0.0
             };
             dfeas_abs = dfeas_abs.max(viol);
             let scale_j = 1.0 + rc.abs() + prob.c[j].abs();
@@ -814,5 +828,32 @@ mod tests {
             "case C: at-ub componentwise must equal orig"
         );
         assert!(dfeas_c > 0.0, "case C: at ub, rc>0 → violation > 0");
+    }
+
+    /// The `dual_solution.len() != num_constraints` guard must stay scoped to the
+    /// KKT path: it still rejects a malformed dual there (INF), but must NOT
+    /// reject a valid simplex output on the reduced-cost path (empty dual).
+    ///
+    /// No-op sentinels: deleting the guard makes the KKT call return a finite
+    /// residual (1st assert fails); dropping the `!lp_reduced_cost_path` scope
+    /// makes the LP call return INF (2nd assert fails).
+    #[test]
+    fn test_dfeas_dual_length_guard_scoped_to_kkt_path() {
+        let p = make_single_var_prob(vec![(0.0, f64::INFINITY)], vec![1.0], 5.0);
+
+        // KKT path (bound_duals non-empty) with dual_solution.len()=0 ≠ 1 → INF.
+        let (abs, rel) = compute_dfeas_orig(&p, &[5.0], &[], &[0.5], &[]);
+        assert!(
+            abs.is_infinite() && rel.is_infinite(),
+            "KKT path with mismatched dual must be INF, got ({abs}, {rel})"
+        );
+
+        // Reduced-cost path (reduced_costs given, bound_duals empty) with the same
+        // empty dual must be accepted (finite), not rejected.
+        let (abs_lp, _) = compute_dfeas_orig(&p, &[5.0], &[], &[], &[-1.0]);
+        assert!(
+            abs_lp.is_finite(),
+            "LP reduced-cost path must accept an empty dual, got {abs_lp}"
+        );
     }
 }

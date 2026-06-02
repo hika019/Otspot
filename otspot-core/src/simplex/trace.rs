@@ -55,6 +55,10 @@ pub(super) struct IterTrace {
     detail_lines: usize,
 }
 
+// Env-gated diagnostic (OTSPOT_SIMPLEX_TRACE, default-off): the eprintln here are
+// the intended output of this tracer, not stray production prints. Allow clippy's
+// crate-wide print_stderr deny (and the audit no_eprintln gate keys on the same token).
+#[allow(clippy::print_stderr)]
 impl IterTrace {
     pub(super) fn new(tag: &'static str) -> Option<Self> {
         let cfg = *trace_config();
@@ -154,6 +158,7 @@ impl IterTrace {
     }
 }
 
+#[allow(clippy::print_stderr)] // env-gated diagnostic summary (see impl above)
 impl Drop for IterTrace {
     fn drop(&mut self) {
         if !self.cfg.enabled {
