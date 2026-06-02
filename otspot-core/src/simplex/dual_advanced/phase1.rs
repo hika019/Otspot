@@ -546,9 +546,23 @@ pub(crate) fn big_m_cold_start(
     // === Step 2: Big-M 動的算出 ===
     let c_norm = c.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
     let b_norm = b.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
-    let big_m = (c_norm * BIG_M_COST_MULT)
+    let big_m_computed = (c_norm * BIG_M_COST_MULT)
         .max(b_norm * BIG_M_COST_MULT)
         .max(BIG_M_FLOOR);
+    // Diagnostic override (env-gated, default-off): OTSPOT_BIGM_OVERRIDE=<value>
+    // overrides the computed big_m for magnitude sensitivity experiments.
+    // Production code is unaffected when the env var is absent.
+    #[allow(clippy::print_stderr)]
+    let big_m = std::env::var("OTSPOT_BIGM_OVERRIDE")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|&v| v.is_finite() && v > 0.0)
+        .map(|v| {
+            eprintln!("[bigm-diag] c_norm={:.3e} b_norm={:.3e} computed={:.3e} override={:.3e}",
+                c_norm, b_norm, big_m_computed, v);
+            v
+        })
+        .unwrap_or(big_m_computed);
 
     // crash 採用で artificial 列を structural 列に置換し Phase I 駆出対象を縮減。
     // LU / x_B ≥ 0 / dual feasibility のいずれかで失敗したら identity 経路に倒す。
