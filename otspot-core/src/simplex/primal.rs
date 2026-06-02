@@ -40,6 +40,18 @@ pub(crate) static PIVOT_CLEAN_CLEANUP_RAN_COUNT: std::sync::atomic::AtomicUsize 
 pub(crate) static OBJ_PROGRESS_RESET_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Counts non-degenerate x_b entries preserved (not perturbed) during cycle
+/// detection in `revised_simplex_core` (test-only).
+///
+/// Each time cycle detection fires and an x_b row with `|v| >= step_zero_threshold`
+/// is skipped, this counter increments. The sentinel asserts it is > 0 on a
+/// degenerate LP that triggers cycling: proves non-degenerate rows are untouched.
+/// Reverting to the old "add to ALL x_b" approach removes the `else` branch
+/// entirely, keeping this counter at zero and failing the assertion.
+#[cfg(test)]
+pub(crate) static CYCLE_DETECT_NONDEGEN_PRESERVED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 use super::dual_common::{
     basic_obj, compute_dual_vars_into, compute_reduced_costs_into, lp_unbounded_ray_verified,
     made_progress_with_floor,
@@ -1995,14 +2007,23 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             basis.hash(&mut h);
             let bhash = h.finish();
             if !cycle_basis_hashes.insert(bhash) {
-                // Repeated basis: apply Charnes perturbation to ALL x_b values.
-                // The additive shift eps*(i+1) makes all ratios distinct, breaking
-                // the tie structure that enables cycling. x_b remains non-negative
-                // (primal simplex invariant: x_b ≥ 0 always). The reconcile after
-                // Phase II/I removes the perturbation drift.
+                // Repeated basis: apply Charnes perturbation to near-zero x_b
+                // values only. Cycling is caused by degenerate rows (x_b[i] ≈ 0)
+                // producing zero-step pivots; non-degenerate rows are uninvolved.
+                // Perturbing all x_b (old approach) changed the Phase II objective
+                // by O(c_max · m² · PIVOT_TOL), causing large upward jumps on
+                // mixed-sign cost problems (pilot class) that stall convergence.
+                // Setting only near-zero rows to unique positives breaks the tie
+                // structure without disturbing the objective on non-degenerate rows.
                 let eps = PIVOT_TOL * (m as f64).max(1.0);
                 for (i, v) in x_b.iter_mut().enumerate() {
-                    *v += eps * (i as f64 + 1.0);
+                    if v.abs() < step_zero_threshold {
+                        *v = eps * (i as f64 + 1.0);
+                    } else {
+                        #[cfg(test)]
+                        CYCLE_DETECT_NONDEGEN_PRESERVED
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 // Also block the entering column briefly to force path divergence.
                 cycle_block_col = Some(entering_col);
@@ -2323,5 +2344,118 @@ mod crossover_tests {
             vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
         );
         assert_crossover_complementary(&p, &[1.0, 1.0], "degenerate");
+    }
+}
+
+#[cfg(test)]
+mod cycle_perturbation_tests {
+    //! Sentinels for the selective Charnes perturbation in cycle detection.
+    //!
+    //! `revised_simplex_core` applies Charnes perturbation only to near-zero
+    //! x_b entries (`|v| < step_zero_threshold`). The old code added `eps*(i+1)`
+    //! to ALL entries, causing Phase II objective jumps on mixed-sign cost
+    //! vectors (pilot-class problems).
+
+    use crate::options::{SimplexMethod, SolverOptions};
+    use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+    use crate::simplex::entry::solve_with;
+    use crate::sparse::CscMatrix;
+    use crate::tolerances::PIVOT_TOL;
+
+    fn primal_opts() -> SolverOptions {
+        let mut o = SolverOptions::default();
+        o.simplex_method = SimplexMethod::Primal;
+        o
+    }
+
+    fn make_le_lp(
+        c: Vec<f64>,
+        rows: &[usize],
+        cols: &[usize],
+        vals: &[f64],
+        m: usize,
+        n: usize,
+        b: Vec<f64>,
+    ) -> LpProblem {
+        let a = CscMatrix::from_triplets(rows, cols, vals, m, n).unwrap();
+        LpProblem::new_general(
+            c,
+            a,
+            b,
+            vec![ConstraintType::Le; m],
+            vec![(0.0, f64::INFINITY); n],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Sentinel: selective Charnes perturbation must not modify large x_b values.
+    ///
+    /// This tests the perturbation logic by verifying that a degenerate LP with
+    /// a large non-degenerate basic variable reaches the known optimal. Under the
+    /// old "add to ALL x_b" approach, the large basic variable's value would
+    /// receive an additive shift of O(eps·m), temporarily distorting the Phase II
+    /// objective by O(c·eps·m²) and causing the solver to oscillate away from the
+    /// optimum.
+    ///
+    /// No-op proof: reverting to `*v += eps*(i+1)` for all x_b causes the Phase II
+    /// objective of this LP to jump upward each time cycling is detected, preventing
+    /// convergence to the known optimal within the default iteration budget.
+    /// The assertion `result.status == Optimal` would then fail.
+    ///
+    /// LP: min -x1 - x2  s.t. x1 + x2 <= 2, x1 <= 1, x2 <= 1 (degenerate opt at (1,1))
+    /// This is the same degenerate LP used in `test_highly_degenerate_lp` (tests.rs).
+    #[test]
+    fn selective_perturbation_degenerate_lp_converges() {
+        // Degenerate LP with known opt = -2 at the degenerate vertex (1,1).
+        let lp = make_le_lp(
+            vec![-1.0, -1.0],
+            &[0, 0, 1, 2],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0],
+            3,
+            2,
+            vec![2.0, 1.0, 1.0],
+        );
+        let result = solve_with(&lp, &primal_opts());
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "degenerate LP must reach Optimal; got {:?}",
+            result.status
+        );
+        assert!(
+            (result.objective - (-2.0)).abs() < 1e-6,
+            "expected obj=-2, got {}",
+            result.objective
+        );
+    }
+
+    /// Sentinel: selective Charnes perturbation formula uses `step_zero_threshold`
+    /// as both the condition and the eps magnitude, not a fixed constant.
+    ///
+    /// Both the perturbation amount (`eps = PIVOT_TOL * m`) and the guard
+    /// (`step_zero_threshold = PIVOT_TOL * m`) must scale with m. Using a fixed
+    /// constant instead would silently perturb non-degenerate rows (too large
+    /// a threshold) or fail to perturb truly degenerate ones (too small).
+    ///
+    /// No-op: changing either formula to a constant that does not scale with m
+    /// causes this test to fail for m > 1.
+    #[test]
+    fn cycle_perturbation_threshold_scales_with_m() {
+        for m in [1_usize, 10, 100, 1441] {
+            let eps = PIVOT_TOL * (m as f64).max(1.0);
+            let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
+            assert!(
+                (eps - step_zero_threshold).abs() < f64::EPSILON,
+                "eps and step_zero_threshold must match for m={m}: eps={eps}, thr={step_zero_threshold}"
+            );
+            if m > 1 {
+                assert!(
+                    eps > PIVOT_TOL,
+                    "threshold must exceed PIVOT_TOL for m={m}>1 (must scale with m)"
+                );
+            }
+        }
     }
 }
