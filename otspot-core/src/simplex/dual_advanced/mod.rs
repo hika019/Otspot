@@ -146,6 +146,8 @@ pub(crate) fn solve_dual_advanced(
                             &mut basis,
                             m,
                             sf.n_total,
+                            sf.n_total,
+                            false, // warm-start: classical Bland, no fallback ⇒ never yield
                             options,
                             leaving.as_mut(),
                             &mut total_iters,
@@ -490,6 +492,8 @@ fn cold_start_advanced(
         &mut basis,
         m,
         sf.n_total,
+        sf.n_total,
+        false, // Le-only cold-start: classical Bland, no fallback ⇒ never yield
         options,
         leaving.as_mut(),
         &mut total_iters,

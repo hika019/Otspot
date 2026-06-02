@@ -199,12 +199,20 @@ impl DualLeavingStrategy for ArtificialPriorityLeaving {
         neg_sum + art_sum
     }
 
-    /// Big-M Phase I must not repair lb-violations: they arise from LU eta
-    /// drift in natural (non-artificial) rows, not genuine warm-start
-    /// infeasibilities. Flipping trow signs on such rows finds no candidates
-    /// (all-negative trow) → ratio test returns None → false Unbounded.
+    /// Big-M Phase I DOES repair genuine lb-violations. A Priority-2 artificial
+    /// removal pivot drives structural rows large-negative (beaconfd: x_B ≈ −9329,
+    /// far above any LU-eta-drift noise floor); the sign-flip ratio test repairs
+    /// them. The blanket `false` here previously sent the ratio test the wrong
+    /// way → unrepaired violation → 2-cycle (beaconfd/scrs8 TIMEOUT).
+    ///
+    /// The structural exclusion that keeps this safe lives in the core
+    /// (`dual_simplex_core_advanced` 3d'): the sign-flip is suppressed when the
+    /// leaving variable is itself an artificial (`basis[r] >= n_enter`). A
+    /// negative artificial must be *driven out* (standard direction + n_enter
+    /// re-entry ban), not sign-flip-repaired, which would otherwise keep it basic
+    /// and chase it indefinitely (sierra: 478-pivot Phase-II cycle).
     fn allows_lb_repair(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -571,6 +579,9 @@ pub(crate) fn big_m_cold_start(
     // Phase I は元 deadline を使用 (外側 split との二重 halving 回避)。
     let mut leaving = ArtificialPriorityLeaving { n_total };
     let mut total_iters: usize = 0;
+    // n_enter = n_total: artificials (cols [n_total, n_aug)) may start basic and
+    // be driven out, but never re-enter. This makes Priority-2 artificial removal
+    // monotone and rules out the degenerate artificial↔artificial swap cycle.
     let phase1_outcome = dual_simplex_core_advanced(
         &a_aug,
         &mut x_b,
@@ -578,6 +589,8 @@ pub(crate) fn big_m_cold_start(
         &mut basis_aug,
         m,
         n_aug,
+        n_total,
+        true, // yield_on_stall: Big-M has a primal fallback to hand off to
         options,
         &mut leaving,
         &mut total_iters,
@@ -746,17 +759,36 @@ pub(crate) fn big_m_cold_start(
                 ..Default::default()
             }
         }
-        SimplexOutcome::Unbounded => SolverResult {
-            status: SolveStatus::Unbounded,
-            objective: f64::NEG_INFINITY,
-            solution: vec![],
-            dual_solution: vec![],
-            reduced_costs: vec![],
-            slack: vec![],
-            warm_start_basis: None,
-            iterations: total_iters,
-            ..Default::default()
-        },
+        SimplexOutcome::Unbounded => {
+            // Gate the Unbounded verdict on a re-derived recession ray. A clean LU
+            // at the exit basis distinguishes a genuine ray from eta-drift noise.
+            // Unverified ⇒ honest Timeout, mirroring the Phase-I Farkas gate that
+            // turns an unproven infeasibility ray into Timeout.
+            if super::super::dual_common::lp_unbounded_ray_verified(
+                &a_aug, &basis_aug, &c_aug_p2, m, n_aug, n_total, options,
+            ) {
+                SolverResult {
+                    status: SolveStatus::Unbounded,
+                    objective: f64::NEG_INFINITY,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                    iterations: total_iters,
+                    ..Default::default()
+                }
+            } else {
+                super::super::timeout_result_with_incumbent(
+                    sf,
+                    problem,
+                    &basis_aug,
+                    &x_b,
+                    col_scale,
+                    total_iters,
+                )
+            }
+        }
         SimplexOutcome::Timeout(_) => super::super::timeout_result_with_incumbent(
             sf,
             problem,
@@ -798,6 +830,55 @@ mod tests {
         )
         .unwrap();
         assert_kkt_optimal(&lp, 3.0, "big_m_phase1_feasible_eq");
+    }
+
+    /// P2-#2 (codex completeness edge): a feasible Eq system whose Big-M Phase I
+    /// needs an lb-repair on an artificial-leaving row — which the anti-cycling
+    /// guard (`basis[r] < n_enter`, kept to stop sierra's 478-pivot chase)
+    /// suppresses, so Big-M abandons it *when the crash basis is disabled*. The
+    /// architecture's primal fallback (`two_phase_dual_simplex`) recovers it, so
+    /// the final verdict is still Optimal — the guard's conservatism is a
+    /// completeness trade-off, not a correctness bug.
+    ///
+    /// `-2x + y = 1, -2x + 2y = 3, x,y ≥ 0, min x + y` ⇒ x=0.5, y=2, obj=2.5.
+    /// Solved with presolve OFF and crash OFF to exercise the bare Big-M → fallback
+    /// path (default config solves it via crash; see report).
+    #[test]
+    fn big_m_phase1_artificial_lb_repair_edge_recovers_via_fallback() {
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 0, 1],
+            &[0, 0, 1, 1],
+            &[-2.0, -2.0, 1.0, 2.0],
+            2,
+            2,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![1.0, 3.0],
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            use_lp_crash_basis: false,
+            ..SolverOptions::default()
+        };
+        let r = solve_with(&lp, &opts);
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "bare Big-M (crash off) must still reach Optimal via the primal fallback; got {:?}",
+            r.status
+        );
+        assert!(
+            (r.objective - 2.5).abs() < 1e-6,
+            "expected obj 2.5, got {}",
+            r.objective
+        );
     }
 
     #[test]
@@ -1512,23 +1593,21 @@ mod tests {
         );
     }
 
-    /// LOAD-BEARING (P0): `ArtificialPriorityLeaving::allows_lb_repair` must
-    /// return `false`.  Big-M Phase I x_B[r] < 0 is LU-eta drift in natural
-    /// rows, not a warm-start lb-violation.  Flipping trow signs on such rows
-    /// finds no entering candidates → ratio test returns None → false Unbounded
-    /// → false Infeasible.  Reverting this override to `true` (the default)
-    /// directly enables the sign-flip and reproduces the pilot87 false-Infeasible
-    /// regression (#175 P0).
+    /// `ArtificialPriorityLeaving::allows_lb_repair` returns `true`: genuine
+    /// lb-violations from Priority-2 removal pivots must be repaired. The
+    /// artificial-vs-structural distinction that keeps this safe is enforced in
+    /// the core (sign-flip suppressed for artificial leaving rows), not here —
+    /// see `core.rs` 3d' and the end-to-end cycling sentinels below.
     #[test]
-    fn artificial_priority_allows_lb_repair_is_false() {
+    fn artificial_priority_allows_lb_repair_is_true() {
         use super::ArtificialPriorityLeaving;
         use crate::simplex::pricing::DualLeavingStrategy;
         let strat = ArtificialPriorityLeaving { n_total: 4 };
         assert!(
-            !strat.allows_lb_repair(),
-            "ArtificialPriorityLeaving must forbid lb-repair (allows_lb_repair == false); \
-             reverting to true re-enables the trow sign-flip that causes false Infeasible \
-             during Big-M Phase I (#175 P0)"
+            strat.allows_lb_repair(),
+            "ArtificialPriorityLeaving must allow lb-repair so Priority-2-manufactured \
+             lb-violations are sign-flip-repaired (blanket false re-introduces the \
+             beaconfd/scrs8 Phase-I 2-cycle)"
         );
     }
 
@@ -1543,4 +1622,5 @@ mod tests {
             "MostInfeasibleLeaving must allow lb-repair (allows_lb_repair == true)"
         );
     }
+
 }

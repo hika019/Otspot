@@ -41,11 +41,38 @@ pub(crate) static OBJ_PROGRESS_RESET_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 use super::dual_common::{
-    basic_obj, compute_dual_vars_into, compute_reduced_costs_into, made_progress_with_floor,
+    basic_obj, compute_dual_vars_into, compute_reduced_costs_into, lp_unbounded_ray_verified,
+    made_progress_with_floor,
 };
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
 use super::trace::IterTrace;
 use super::{extract_dual_info, SimplexOutcome, StandardForm};
+
+/// Verified-ray gate for a Phase II `Unbounded` exit (shared with the Big-M
+/// path). An eta-drift false-Unbounded (`B⁻¹a_q` reads ≤ 0 only because of a
+/// stale factorization) becomes an honest Timeout, mirroring the Phase-I Farkas
+/// gate. `n_enter` excludes artificials (`= sf.n_total`); pure-slack callers
+/// pass `n_enter = n_cols`.
+#[allow(clippy::too_many_arguments)]
+fn gate_phase2_unbounded(
+    outcome: SimplexOutcome,
+    a: &CscMatrix,
+    basis: &[usize],
+    c: &[f64],
+    x_b: &[f64],
+    m: usize,
+    n_cols: usize,
+    n_enter: usize,
+    options: &SolverOptions,
+) -> SimplexOutcome {
+    if matches!(outcome, SimplexOutcome::Unbounded)
+        && !lp_unbounded_ray_verified(a, basis, c, m, n_cols, n_enter, options)
+    {
+        SimplexOutcome::Timeout(basic_obj(c, basis, x_b))
+    } else {
+        outcome
+    }
+}
 
 /// Minimum absolute diagonal entry to trust when dividing `x_B[i]` by the
 /// Ruiz-scaled slack/artificial column's diagonal. Prevents division by
@@ -204,7 +231,7 @@ pub(crate) fn two_phase_simplex(
         }
         let mut pricing = SteepestEdgePricing::new(sf.n_total);
 
-        match revised_simplex_core(
+        let phase2_outcome = revised_simplex_core(
             &a,
             &mut x_b,
             &c,
@@ -217,7 +244,19 @@ pub(crate) fn two_phase_simplex(
             options,
             &mut total_iters,
             false,
-        ) {
+        );
+        let phase2_outcome = gate_phase2_unbounded(
+            phase2_outcome,
+            &a,
+            &basis,
+            &c,
+            &x_b,
+            m,
+            sf.n_total,
+            sf.n_total,
+            options,
+        );
+        match phase2_outcome {
             SimplexOutcome::Optimal(obj, mut y) => {
                 match reconcile_final_basis_state(
                     &a,
@@ -568,7 +607,7 @@ pub(crate) fn two_phase_simplex(
                 }
 
                 let mut pricing2 = SteepestEdgePricing::new(n_ext);
-                match revised_simplex_core(
+                let phase2_outcome = revised_simplex_core(
                     &a_ext,
                     &mut x_b,
                     &c_phase2,
@@ -581,7 +620,19 @@ pub(crate) fn two_phase_simplex(
                     options,
                     &mut total_iters,
                     false,
-                ) {
+                );
+                let phase2_outcome = gate_phase2_unbounded(
+                    phase2_outcome,
+                    &a_ext,
+                    &basis,
+                    &c_phase2,
+                    &x_b,
+                    m,
+                    n_ext,
+                    sf.n_total,
+                    options,
+                );
+                match phase2_outcome {
                     SimplexOutcome::Optimal(obj2, mut y) => {
                         match reconcile_final_basis_state(
                             &a_ext,
@@ -792,7 +843,7 @@ pub(crate) fn two_phase_simplex(
                     }
 
                     let mut pricing2 = SteepestEdgePricing::new(n_ext);
-                    match revised_simplex_core(
+                    let phase2_outcome = revised_simplex_core(
                         &a_ext,
                         &mut x_b,
                         &c_phase2,
@@ -805,7 +856,19 @@ pub(crate) fn two_phase_simplex(
                         options,
                         &mut total_iters,
                         false,
-                    ) {
+                    );
+                    let phase2_outcome = gate_phase2_unbounded(
+                        phase2_outcome,
+                        &a_ext,
+                        &basis,
+                        &c_phase2,
+                        &x_b,
+                        m,
+                        n_ext,
+                        sf.n_total,
+                        options,
+                    );
+                    match phase2_outcome {
                         SimplexOutcome::Optimal(obj2, mut y) => {
                             match reconcile_final_basis_state(
                                 &a_ext,

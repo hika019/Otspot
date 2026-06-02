@@ -57,6 +57,56 @@ fn test_timeout_result_with_incumbent_uses_original_objective() {
     );
 }
 
+/// Sentinel: a SHIFTED LP (lb ≠ 0 ⇒ obj_offset ≠ 0) must NOT double-count the
+/// shift constant. `extract_solution` already un-shifts, so `c·solution` is the
+/// complete original objective; adding `sf.obj_offset` on top double-counts
+/// `Σ c_j·lb_j` (the same defect the Big-M Optimal path was fixed for).
+///
+/// x0 ∈ [2, ∞), x1 ∈ [0, ∞), min 3x0 + x1, x0+x1 ≥ 1. obj_offset = 3·2 = 6.
+/// Incumbent = initial basis (structurals at lb) ⇒ x0=2, x1=0 ⇒ c·x = 6.
+///
+/// no-op proof: re-adding `+ sf.obj_offset` makes the reported objective 12,
+/// failing the `c·solution` equality.
+#[test]
+fn test_timeout_result_with_incumbent_no_double_count_on_shifted_lp() {
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+    let lp = LpProblem::new_general(
+        vec![3.0, 1.0],
+        a,
+        vec![1.0],
+        vec![ConstraintType::Ge],
+        vec![(2.0, f64::INFINITY), (0.0, f64::INFINITY)],
+        None,
+    )
+    .unwrap();
+    let sf = build_standard_form(&lp);
+    assert!(
+        sf.obj_offset.abs() > 1e-9,
+        "test LP must be shifted (obj_offset != 0); got {}",
+        sf.obj_offset
+    );
+    let basis = sf.initial_basis.clone();
+    let x_b = sf.b.clone();
+    let col_scale = vec![1.0; sf.n_total];
+
+    let result = timeout_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale, 7);
+
+    let expected_obj = lp
+        .c
+        .iter()
+        .zip(result.solution.iter())
+        .map(|(&ci, &xi)| ci * xi)
+        .sum::<f64>();
+    assert!(
+        (result.objective - expected_obj).abs() < 1e-9,
+        "shifted-LP incumbent obj must be c·solution (no obj_offset double-count); \
+         reported {} vs c·solution {} (diff = obj_offset {} ⇒ double-count)",
+        result.objective,
+        expected_obj,
+        sf.obj_offset
+    );
+}
+
 #[test]
 fn test_reconcile_final_basis_state_recomputes_xb_and_y() {
     let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 2, 1, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3)

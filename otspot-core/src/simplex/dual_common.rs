@@ -15,7 +15,7 @@
 
 use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
-use crate::options::WarmStartBasis;
+use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -186,6 +186,102 @@ pub(super) fn outcome_to_result(
         }
         SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
     }
+}
+
+/// Verify an LP `Unbounded` exit against a re-derived recession ray (symmetric
+/// to the Phase-I Farkas infeasibility gate: an unverified ray ⇒ honest Timeout).
+///
+/// A primal simplex can report Unbounded from eta drift: a stale `B⁻¹a_q` reads
+/// ≤ 0 (no leaving row) where a fresh factorization exposes one. This rebuilds a
+/// clean LU at the exit `basis` and confirms some column `q < n_enter` is BOTH
+/// improving (`r_q < −dual_tol`) AND an unbounded direction:
+///   - basic structural/slack rows: `(B⁻¹a_q)[i] ≤ ray_floor` (increasing `x_q`
+///     from lb=0 with ub=∞ keeps every basic value ≥ 0; the legacy standard form
+///     expands every finite ub into a slack row, so a real ub limit surfaces as a
+///     positive component);
+///   - basic artificial rows (`basis[i] ≥ n_enter`): `|(B⁻¹a_q)[i]| ≤ ray_floor`
+///     (a `< 0` entry increases the artificial off 0 ⇒ feasible only in the
+///     augmented system ⇒ not an original-LP ray).
+///
+/// `ray_floor = EPSILON·max(1,‖B⁻¹a_q‖∞)` is machine-noise scale, not `PIVOT_TOL`:
+/// any real positive pivot is a leaving row (bounded), so the looser tol would leak
+/// a false-Unbounded. `n_enter` excludes Big-M artificials from entering
+/// (`n_enter = n_total`); pure-slack paths pass `n_enter = n_price`. Empty witness
+/// ⇒ honest Timeout, not a false `Unbounded`.
+pub(super) fn lp_unbounded_ray_verified(
+    a: &CscMatrix,
+    basis: &[usize],
+    c: &[f64],
+    m: usize,
+    n_price: usize,
+    n_enter: usize,
+    options: &SolverOptions,
+) -> bool {
+    let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
+        Ok(bm) => bm,
+        Err(_) => return false,
+    };
+    let mut in_basis = vec![false; n_price];
+    for &col in basis {
+        if col < n_price {
+            in_basis[col] = true;
+        }
+    }
+    // y = B⁻ᵀ c_B
+    let mut y: Vec<f64> = basis.iter().map(|&col| c[col]).collect();
+    basis_mgr.btran_dense(&mut y);
+
+    for q in 0..n_enter {
+        if in_basis[q] {
+            continue;
+        }
+        let Ok((rows, vals)) = a.get_column(q) else {
+            continue;
+        };
+        let rc = c[q]
+            - rows
+                .iter()
+                .zip(vals.iter())
+                .map(|(&r, &v)| v * y[r])
+                .sum::<f64>();
+        if rc >= -options.dual_tol {
+            continue;
+        }
+        let mut d_sv = SparseVec {
+            indices: rows.to_vec(),
+            values: vals.to_vec(),
+            len: m,
+        };
+        basis_mgr.ftran(&mut d_sv);
+        // A recession ray needs every basic structural/slack component ≤ 0
+        // (increasing x_q from lb=0 with ub=∞ never drives a basic variable below
+        // its lower bound). The floor is machine-noise scale (`EPSILON·max(1,‖d‖∞)`),
+        // matching the simplex's own last-chance ratio test: any *real* positive
+        // pivot — even one below `PIVOT_TOL` (0 < d_i < 1e-8) — is a genuine leaving
+        // row, so the direction is bounded, NOT a ray. Using `PIVOT_TOL` here instead
+        // would re-admit those small-positive pivots and leak a false-Unbounded.
+        //
+        // Basic artificials (basis[i] ≥ n_enter) need the stricter |d_i| ≤ floor:
+        // d_i < 0 there *increases* the artificial off 0, so the direction stays
+        // feasible only in the augmented system, not the original LP — it is not a
+        // recession ray. Allowing it re-admits a false-Unbounded whenever a
+        // degenerate artificial lingers in the Phase-II basis (the symptom this gate
+        // exists to prevent).
+        let d = d_sv.to_dense();
+        let scale = d.iter().map(|v| v.abs()).fold(1.0_f64, f64::max);
+        let ray_floor = f64::EPSILON * scale;
+        let ray_ok = d.iter().enumerate().all(|(i, &di)| {
+            if basis[i] >= n_enter {
+                di.abs() <= ray_floor
+            } else {
+                di <= ray_floor
+            }
+        });
+        if ray_ok {
+            return true;
+        }
+    }
+    false
 }
 
 /// c_B^T x_B = Σ c[basis[i]] · x_B[i]. Shared between primal/dual simplex for
@@ -602,6 +698,76 @@ mod tests {
         assert!(
             made_progress_with_floor(1.0, 0.0, 0.0),
             "floor=0.0, best=1.0, current=0.0: clear improvement must return true"
+        );
+    }
+
+    /// LOAD-BEARING sentinel for the verified-Unbounded gate. Pins both directions:
+    /// a genuine recession ray must verify (else true-Unbounded → false Timeout),
+    /// and a bounded basis must NOT (else an eta-drift false-Unbounded survives).
+    /// Also pins the `n_enter` exclusion (artificials never enter a ray).
+    ///
+    /// no-op proof: a gate hard-wired to `true` fails the bounded assertion; one
+    /// hard-wired to `false` fails the genuine-ray assertion.
+    #[test]
+    fn lp_unbounded_ray_verified_distinguishes_genuine_bounded_and_artificial() {
+        let opts = crate::options::SolverOptions::default();
+
+        // Genuine unbounded: A=[[-1, 1]], basis={col1}, c=[-1,0]. col0 improving
+        // (r0=-1) with B⁻¹a_0=[-1] ≤ 0 ⇒ no leaving row ⇒ unbounded ray.
+        let a_unb = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, 1.0], 1, 2).unwrap();
+        assert!(
+            lp_unbounded_ray_verified(&a_unb, &[1], &[-1.0, 0.0], 1, 2, 2, &opts),
+            "genuine unbounded ray must verify (else true-Unbounded demoted to Timeout)"
+        );
+
+        // Bounded: A=[[1, 1]], same basis/c. col0 improving but B⁻¹a_0=[1] > 0
+        // ⇒ leaving row exists ⇒ no recession ray.
+        let a_bnd = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        assert!(
+            !lp_unbounded_ray_verified(&a_bnd, &[1], &[-1.0, 0.0], 1, 2, 2, &opts),
+            "bounded LP must NOT verify a ray (else eta-drift false-Unbounded survives)"
+        );
+
+        // n_enter exclusion: A=[[-1, 1, -1]], basis={col1}, c=[0,0,-1], n_enter=2.
+        // Only col2 is an unbounded direction, but it is ≥ n_enter (artificial) ⇒
+        // excluded ⇒ no verified ray.
+        let a_art =
+            CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[-1.0, 1.0, -1.0], 1, 3).unwrap();
+        assert!(
+            !lp_unbounded_ray_verified(&a_art, &[1], &[0.0, 0.0, -1.0], 1, 3, 2, &opts),
+            "a column ≥ n_enter (artificial) must be excluded from the recession ray"
+        );
+
+        // CONCERN B verification: bounded direction with 0 < pivot < PIVOT_TOL must NOT verify.
+        let a_smallpiv =
+            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[5e-9, 1.0], 1, 2).unwrap();
+        assert!(
+            !lp_unbounded_ray_verified(&a_smallpiv, &[1], &[-1.0, 0.0], 1, 2, 2, &opts),
+            "CONCERN B: a small positive pivot (0<d<PIVOT_TOL) is a leaving row ⇒ bounded, not a ray"
+        );
+    }
+
+    /// LOAD-BEARING sentinel for the basic-artificial ray check. A direction that
+    /// drives no structural variable below its lower bound but *increases* a basic
+    /// artificial off 0 is feasible only in the augmented system, not the original
+    /// LP — so it is NOT a recession ray and must be rejected.
+    ///
+    /// Setup (m=2, cols [struct0 | struct1 | artificial2], n_enter=2, n_price=3):
+    ///   A col0=(row0,1), col1=(row1,-1), col2=(row1,1); basis={col0, col2}=I, c=[0,-1,0].
+    ///   Entering col1 (rc=-1) gives d=B⁻¹a_1=[0,-1]: row0 structural d=0 ≤ floor (ok),
+    ///   row1 is the basic artificial (basis[1]=2 ≥ n_enter=2) with d=-1 < 0 ⇒ the
+    ///   artificial grows to +t ⇒ not an original-LP ray.
+    ///
+    /// no-op proof: dropping the `basis[i] ≥ n_enter ⇒ |d_i| ≤ floor` branch (i.e.
+    /// reverting to the plain `d_i ≤ floor` test) admits this direction as a ray and
+    /// this assertion flips to a false-Unbounded → the test fails.
+    #[test]
+    fn lp_unbounded_ray_verified_rejects_ray_that_increases_basic_artificial() {
+        let opts = crate::options::SolverOptions::default();
+        let a = CscMatrix::from_triplets(&[0, 1, 1], &[0, 1, 2], &[1.0, -1.0, 1.0], 2, 3).unwrap();
+        assert!(
+            !lp_unbounded_ray_verified(&a, &[0, 2], &[0.0, -1.0, 0.0], 2, 3, 2, &opts),
+            "a direction that increases a basic artificial off 0 must NOT verify as a recession ray"
         );
     }
 }
