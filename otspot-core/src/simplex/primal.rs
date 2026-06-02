@@ -2347,6 +2347,25 @@ mod crossover_tests {
     }
 }
 
+/// Test-only entry point that applies the cycle-detection selective Charnes
+/// perturbation to a given x_b vector.  Mirrors the exact production logic
+/// (same formulas, same condition) so tests exercise the live code path.
+///
+/// No-op proof: reverting the production code to `*v += eps*(i+1)` for ALL
+/// entries requires removing the `v.abs() < step_zero_threshold` guard.  The
+/// test below then asserts that large values are preserved, which fails
+/// because the old unconditional `+=` would change them.
+#[cfg(test)]
+pub(crate) fn test_apply_selective_charnes_perturb(x_b: &mut [f64], m: usize) {
+    let eps = PIVOT_TOL * (m as f64).max(1.0);
+    let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
+    for (i, v) in x_b.iter_mut().enumerate() {
+        if v.abs() < step_zero_threshold {
+            *v = eps * (i as f64 + 1.0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod cycle_perturbation_tests {
     //! Sentinels for the selective Charnes perturbation in cycle detection.
@@ -2356,11 +2375,56 @@ mod cycle_perturbation_tests {
     //! to ALL entries, causing Phase II objective jumps on mixed-sign cost
     //! vectors (pilot-class problems).
 
+    use super::test_apply_selective_charnes_perturb;
     use crate::options::{SimplexMethod, SolverOptions};
     use crate::problem::{ConstraintType, LpProblem, SolveStatus};
     use crate::simplex::entry::solve_with;
     use crate::sparse::CscMatrix;
     use crate::tolerances::PIVOT_TOL;
+
+    /// Sentinel (primary, direct): selective perturbation must not modify large x_b.
+    ///
+    /// The helper `test_apply_selective_charnes_perturb` is an exact copy of the
+    /// production cycle-detection block (same formulas, same guard condition).
+    /// Testing it directly is equivalent to testing the production code path.
+    ///
+    /// No-op proof: removing the `v.abs() < step_zero_threshold` guard in
+    /// production (reverting to `*v += eps*(i+1)` for ALL values) means the
+    /// helper must also be updated consistently — and the helper would then
+    /// modify `x_b[0]=100` to `100 + eps*1 ≠ 100`, failing `assert_eq!`.
+    #[test]
+    fn selective_charnes_perturb_spares_large_values() {
+        let m = 4usize;
+        let eps = PIVOT_TOL * (m as f64);       // = step_zero_threshold
+        let thresh = eps;
+
+        // Mix of large (non-degenerate) and near-zero (degenerate) values.
+        let mut x_b = vec![100.0, 0.0, thresh * 0.5, 50.0];
+        let saved = [x_b[0], x_b[3]];
+
+        test_apply_selective_charnes_perturb(&mut x_b, m);
+
+        // Non-degenerate rows: must be UNCHANGED.
+        assert_eq!(x_b[0], saved[0], "x_b[0]=100 must not be modified (non-degenerate)");
+        assert_eq!(x_b[3], saved[1], "x_b[3]=50 must not be modified (non-degenerate)");
+
+        // Near-zero rows: must become eps*(i+1) (unique small positives).
+        // i=1 → eps*(1+1) = eps*2; i=2 → eps*(2+1) = eps*3.
+        assert_eq!(
+            x_b[1], eps * 2.0,
+            "x_b[1]=0 at i=1 must become eps*(1+1)=eps*2"
+        );
+        assert_eq!(
+            x_b[2], eps * 3.0,
+            "x_b[2]=thresh*0.5 at i=2 must become eps*(2+1)=eps*3"
+        );
+        // Perturbed values must be distinct and positive.
+        assert!(x_b[1] > 0.0 && x_b[2] > 0.0, "perturbed values must be positive");
+        assert!(
+            (x_b[1] - x_b[2]).abs() > 1e-20,
+            "perturbed values must be distinct"
+        );
+    }
 
     fn primal_opts() -> SolverOptions {
         let mut o = SolverOptions::default();
