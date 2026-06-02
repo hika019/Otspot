@@ -2007,23 +2007,39 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             basis.hash(&mut h);
             let bhash = h.finish();
             if !cycle_basis_hashes.insert(bhash) {
-                // Repeated basis: apply Charnes perturbation to near-zero x_b
-                // values only. Cycling is caused by degenerate rows (x_b[i] ≈ 0)
-                // producing zero-step pivots; non-degenerate rows are uninvolved.
-                // Perturbing all x_b (old approach) changed the Phase II objective
-                // by O(c_max · m² · PIVOT_TOL), causing large upward jumps on
-                // mixed-sign cost problems (pilot class) that stall convergence.
-                // Setting only near-zero rows to unique positives breaks the tie
-                // structure without disturbing the objective on non-degenerate rows.
-                let eps = PIVOT_TOL * (m as f64).max(1.0);
-                for (i, v) in x_b.iter_mut().enumerate() {
-                    if v.abs() < step_zero_threshold {
-                        *v = eps * (i as f64 + 1.0);
-                    } else {
-                        #[cfg(test)]
-                        CYCLE_DETECT_NONDEGEN_PRESERVED
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Repeated basis detected. Phase I and Phase II use different
+                // strategies because their feasibility requirements differ:
+                //
+                // Phase I (enable_phase1_cycling_bail=true): Charnes perturbation
+                // on near-zero x_b rows. Degenerate artificials produce zero-step
+                // pivots that cause ratio-test ties; perturbing them to unique
+                // positives breaks the tie without touching non-degenerate rows.
+                // (Perturbing ALL x_b — old approach — unnecessarily disturbed
+                // structural/slack rows and was corrected to near-zero only.)
+                //
+                // Phase II (enable_phase1_cycling_bail=false): NO x_b perturbation.
+                // Phase II starts from a primal-feasible basis (x_b ≥ 0). Charnes
+                // perturbation changes the effective Phase II objective by
+                // O(c_max · eps · m), causing the solver to escape from near-optimal
+                // regions (e.g. pilot87 gets knocked from obj≈312 → 467 and then
+                // spends 100k+ iters recovering). Instead, reset the Devex weights
+                // to break the pricing pattern that caused the cycle. The column
+                // block below ensures a different entering variable next iteration.
+                if enable_phase1_cycling_bail {
+                    let eps = PIVOT_TOL * (m as f64).max(1.0);
+                    for (i, v) in x_b.iter_mut().enumerate() {
+                        if v.abs() < step_zero_threshold {
+                            *v = eps * (i as f64 + 1.0);
+                        } else {
+                            #[cfg(test)]
+                            CYCLE_DETECT_NONDEGEN_PRESERVED
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
+                } else {
+                    // Phase II: reset Devex weights to force a different pricing
+                    // direction. No x_b perturbation → no objective disruption.
+                    pricing.reset_weights(n_cols);
                 }
                 // Also block the entering column briefly to force path divergence.
                 cycle_block_col = Some(entering_col);
