@@ -759,17 +759,36 @@ pub(crate) fn big_m_cold_start(
                 ..Default::default()
             }
         }
-        SimplexOutcome::Unbounded => SolverResult {
-            status: SolveStatus::Unbounded,
-            objective: f64::NEG_INFINITY,
-            solution: vec![],
-            dual_solution: vec![],
-            reduced_costs: vec![],
-            slack: vec![],
-            warm_start_basis: None,
-            iterations: total_iters,
-            ..Default::default()
-        },
+        SimplexOutcome::Unbounded => {
+            // Gate the Unbounded verdict on a re-derived recession ray. A clean LU
+            // at the exit basis distinguishes a genuine ray from eta-drift noise.
+            // Unverified ⇒ honest Timeout, mirroring the Phase-I Farkas gate that
+            // turns an unproven infeasibility ray into Timeout.
+            if super::super::dual_common::lp_unbounded_ray_verified(
+                &a_aug, &basis_aug, &c_aug_p2, m, n_aug, n_total, options,
+            ) {
+                SolverResult {
+                    status: SolveStatus::Unbounded,
+                    objective: f64::NEG_INFINITY,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                    iterations: total_iters,
+                    ..Default::default()
+                }
+            } else {
+                super::super::timeout_result_with_incumbent(
+                    sf,
+                    problem,
+                    &basis_aug,
+                    &x_b,
+                    col_scale,
+                    total_iters,
+                )
+            }
+        }
         SimplexOutcome::Timeout(_) => super::super::timeout_result_with_incumbent(
             sf,
             problem,
