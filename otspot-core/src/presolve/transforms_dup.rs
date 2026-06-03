@@ -321,21 +321,26 @@ pub(super) fn step11_dual_fixing(
         }
 
         let (lb, ub) = st.bounds[j];
+        // Free variables (lb=-inf AND ub=+inf) cannot be determined unbounded by
+        // cost sign alone; they must be handled by step7/step8. Do not declare
+        // unbounded for free variables, even if pressure + cost suggest it.
+        let is_free = lb == f64::NEG_INFINITY && ub == f64::INFINITY;
         if pos_pressure && cj >= -ZERO_TOL {
             if lb.is_finite() {
                 if fix_to_lb(st, j)? {
                     *new_fixed += 1;
                 }
-            } else if cj > ZERO_TOL {
+            } else if cj > ZERO_TOL && !is_free {
                 return Err(PresolveStatus::Unbounded);
             }
             // cj ≈ 0 and lb = -∞: degenerate, leave alone for later passes.
+            // Free variables: skip unbounded declaration (step7 should have handled them).
         } else if neg_pressure && cj <= ZERO_TOL {
             if ub.is_finite() {
                 if fix_to_ub(st, j)? {
                     *new_fixed += 1;
                 }
-            } else if cj < -ZERO_TOL {
+            } else if cj < -ZERO_TOL && !is_free {
                 return Err(PresolveStatus::Unbounded);
             }
         }
