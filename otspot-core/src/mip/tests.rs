@@ -1737,18 +1737,22 @@ fn miqp_bt_detects_infeasibility_before_bb() {
     );
 }
 
-/// Sentinel (P2-B): MIQP BT tightens bounds (feasible) and reduces B&B node count.
+/// Sentinel (P2-B): MIQP BT tightens bounds (feasible) and reduces B&B node count
+/// strictly below the no-BT baseline.
 ///
 /// min x²-7x s.t. x ≤ 3.7, x ∈ [0,5] integer.
 /// BT: floor(3.7)=3 → ub tightened 5→3, search space reduced by 40%.
-/// With BT bounds [0,3]: root QP at x≈3 (boundary) → fractional → branch into
-/// [0,2] and [3,3]; total 3 nodes.
 ///
 /// No-op proof: removing `tighten_bounds_linear` from `solve_miqp_with_stats`
-/// leaves bounds [0,5]; root QP at x=3.5 + extra [4,5] infeasible child →
-/// 5 nodes total → the `nodes_processed == 3` assertion FAILS.
+/// leaves bounds [0,5]; root QP at x=3.5 with extra [4,5] infeasible child
+/// results in 5 nodes → `nodes_processed < 5` FAILS, confirming BT efficacy.
+///
+/// The exact count is intentionally not asserted: different LP dual solutions
+/// (e.g., from crossover-first postsolve) can yield fewer nodes while still
+/// respecting optimality. The sentinel captures BT effectiveness, not a
+/// particular solver path.
 #[test]
-fn miqp_bt_tightens_bounds_reduces_bb_nodes() {
+fn miqp_bt_reduces_bb_nodes_below_noop() {
     let qp = qp_problem(
         &[2.0],
         vec![-7.0],
@@ -1772,8 +1776,9 @@ fn miqp_bt_tightens_bounds_reduces_bb_nodes() {
         "optimal x=3 → obj=9-21=-12, got {}",
         r.objective
     );
-    assert_eq!(
-        stats.nodes_processed, 3,
-        "BT tightens x ≤ 3: 3 nodes (root+[0,2]+[3,3]); no-op leaves [0,5] giving 5 nodes"
+    assert!(
+        stats.nodes_processed < 5,
+        "BT must reduce nodes below no-BT baseline of 5; got {}",
+        stats.nodes_processed
     );
 }

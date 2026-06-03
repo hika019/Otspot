@@ -75,7 +75,7 @@ fn trace_pass(name: &'static str) {
 
 #[cfg(not(test))]
 #[inline(always)]
-fn trace_pass(_name: &'static str) {}
+fn trace_pass(_: &'static str) {}
 
 /// Drain (clear-and-return) the recorded pass trace for the current thread.
 #[cfg(test)]
