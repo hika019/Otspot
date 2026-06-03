@@ -37,8 +37,11 @@ jobs:
         # data-missing は CI subset に未含の data を要求する test を sync すること。
         # 解除条件は各 test の ignore message 参照。
         #
-        # permanent-failing (LP perf regression; fix tracked in #88/#89):
-        #   diag_osa60_must_reach_known_objective, diag_ken18_must_respect_internal_deadline
+        # permanent-failing (fix tracked in #88/#89):
+        #   diag_osa60_must_reach_known_objective — presolve 経路が 60s で Optimal を certify せず
+        #     (SuboptimalSolution、または Timeout で reduced 空間 solution を leak #37)。obj 自体は
+        #     到達: presolve=false で厳密最適 (companion diag_osa60_is_feasible_and_honest, ~33s)。
+        #   diag_ken18_must_respect_internal_deadline — postsolve cleanup_lp deadline 超過 (LP perf)。
         #
         # deferred (known honest non-Optimal; un-ignore after fix tracked in issue):
         #   diag_cycle_must_reach_known_objective (#31: cycle returns SuboptimalSolution; Optimal restore pending)
@@ -49,7 +52,11 @@ jobs:
         #
         # flaky (CPU contention 依存、170s margin 6s で CI 環境では不安定):
         #   greenbea_postsolve_dual_feasibility
+        #
+        # `--no-fail-fast`: 1件目の failure で打ち切ると残り test が走らず後続 fail が隠れる
+        #   (memory ci_failfast_hides_failures; cre-b/d6cube stall sentinel が cycle fail の裏に
+        #   隠れていた実例)。全 test を起動し全 failure を surface させる。
         run: |
-          cargo nextest run --release --profile heavy --run-ignored all \
+          cargo nextest run --release --profile heavy --run-ignored all --no-fail-fast \
             -E 'kind(test) and not (test(=diag_osa60_must_reach_known_objective) | test(=diag_ken18_must_respect_internal_deadline) | test(=diag_cycle_must_reach_known_objective) | test(=timeout_honored_on_neos_bigm_cold_start) | test(=qp_is_lasso_300_real_data_honors_deadline) | test(=greenbea_postsolve_dual_feasibility))' \
             --test-threads 3
