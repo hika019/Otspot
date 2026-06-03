@@ -1315,18 +1315,22 @@ fn test_solve_boeing1_feasibility_bug() {
     //             assert!((result.objective - (-335.21356751)).abs() < 1.0);
 }
 
-/// QBORE3D regression sentinel: presolve+Ruiz amplification caused SuboptimalSolution
-/// (dfeas=7.5e-4) because the inner IPM stalls before meeting the tightened threshold.
+/// QBORE3D regression sentinel: the presolve+Ruiz path fails (kkt stalls at 7.5e-4),
+/// so the no-presolve fallback fires and reaches obj≈3100.2. The fallback solution is
+/// numerically good (aggregate KKT all ≤ 1e-6) yet was demoted to SuboptimalSolution.
 ///
-/// Root cause: sigma_total ≈ 7.8e-4 forces eps_inner ≈ 7.8e-10, which the IPM cannot
-/// achieve (stalls at 7.7e-7). Postsolve singleton recovery then degrades j=282's dual
-/// residual from 2.3e-9 → 7.5e-4 via the overdetermined LSQ.
+/// Root cause: the fallback solved only to the inner IPM threshold (user_eps), whose
+/// complementarity stop is scale-aggregated. prove_optimal accepts on the stricter
+/// component-wise complementarity, where the worst component sits at 1.99e-6 > 1e-6.
+/// One extra inner iteration removes the gap (the aggregate hides it behind the ~5e4
+/// problem scale, so the IPM stops before driving that component under tol).
 ///
-/// Fix: no-presolve fallback — when all presolve+Ruiz attempts fail for small problems,
-/// solve directly on the original problem (no scaling amplification). DIAG_NO_PRESOLVE=1
-/// already confirmed this converges in 43 iterations.
+/// Fix: tighten the fallback's inner eps by base_tighten (matching the main attempt
+/// loop) so component-wise complementarity lands below user_eps; acceptance stays
+/// gated by satisfies_eps(user_eps). DIAG_NO_PRESOLVE=1 confirms obj=3.100201e3.
 ///
-/// Sentinel: reverting the no-presolve fallback → SuboptimalSolution (dfeas=7.5e-4).
+/// Sentinel: removing the no-presolve fallback OR its base_tighten → SuboptimalSolution
+/// (component-wise complementarity 1.99e-6 > 1e-6).
 #[test]
 fn test_qbore3d_optimal() {
     let path = Path::new("data/maros_meszaros/QBORE3D.QPS");
