@@ -1731,16 +1731,17 @@ fn max_pivot_within(
 ///
 /// The leaving step is bounded by the variable-tolerance maximum step
 ///   `θ = min_{i: d[i]>floor} (x_b[i] + feas_tol) / d[i]`,
-/// and among rows within `θ` we take the largest pivot `|d[i]|` for stability
-/// (Bland tie-break for anti-cycling). This enforces the primal-feasibility
-/// invariant `x_b ≥ −feas_tol`, capping the per-step violation at `feas_tol`
-/// **independent of `d[i]`**.
+/// and among rows within `θ` we take the largest pivot `|d[i]|` (Bland
+/// tie-break). For a leaving row with `x_b ≥ 0` this keeps every pivot-eligible
+/// basic value (`d[i] > floor`) at `≥ −feas_tol` independent of `d[i]`. A
+/// leaving row inside the `[−feas_tol, 0)` band gives a small negative step that
+/// can transiently breach `−feas_tol`; the optimality backstop (exact
+/// `x_b = B⁻¹b` recheck) then returns an honest Timeout, never false-Optimal.
 ///
-/// The predecessor used an absolute *ratio* window `min_ratio + ε`, whose
-/// overshoot was `ε·d[i]` — proportional to the pivot and unbounded for
-/// ill-scaled columns (pilot87: `d[i] ≈ 1.3e6` turned `ε = 1e-8` into a 0.013
-/// breach), producing an `x_b < 0` basis, negative ratios, and a wandering
-/// objective instead of convergence.
+/// The predecessor's absolute *ratio* window `min_ratio + ε` overshot by
+/// `ε·d[i]` — unbounded for ill-scaled columns (pilot87: `d[i] ≈ 1.3e6` turned
+/// `ε = 1e-8` into a 0.013 breach), producing an `x_b < 0` basis, negative
+/// ratios, and a wandering objective instead of convergence.
 ///
 /// `feas_tol` = `options.primal_tol`. Returns `None` for an unbounded direction.
 fn select_leaving_feasibility_preserving(
@@ -1893,20 +1894,26 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         let entering_col = match pricing.select_entering(&rc_vec, n_price) {
             None => {
                 // Optimal (dual-feasible). Verify primal feasibility on a fresh
-                // exact x_b = B⁻¹b. The EXPAND reset keeps the basis near-feasible,
-                // so this normally holds; if a basic variable is still below
-                // −primal_tol (Phase II only), the declared optimum is not a true
-                // feasible vertex — return an honest Timeout incumbent rather than
-                // a false-Optimal (no false-feasibility claim). Phase I feasibility
-                // is reconciled by its caller.
+                // exact x_b = B⁻¹b: a leaving row in the [−primal_tol, 0) band can
+                // leave the basis slightly infeasible. If a basic variable is still
+                // below −primal_tol (Phase II only), the declared optimum is not a
+                // true feasible vertex — return an honest Timeout incumbent rather
+                // than a false-Optimal. Phase I feasibility is reconciled by its
+                // caller.
                 basis_mgr.force_refactor_timed(a, basis, options.deadline);
-                if !basis_mgr.refactor_failed {
-                    x_b.copy_from_slice(b_rhs);
-                    basis_mgr.ftran_dense(x_b);
-                    for v in x_b.iter_mut() {
-                        if v.abs() < options.clamp_tol {
-                            *v = 0.0;
-                        }
+                if basis_mgr.refactor_failed {
+                    // Cannot recompute x_b to verify the vertex; never claim
+                    // Optimal on a stale x_b.
+                    if basis_mgr.singular_basis {
+                        return SimplexOutcome::SingularBasis;
+                    }
+                    return SimplexOutcome::Timeout(basic_obj(c, basis, x_b));
+                }
+                x_b.copy_from_slice(b_rhs);
+                basis_mgr.ftran_dense(x_b);
+                for v in x_b.iter_mut() {
+                    if v.abs() < options.clamp_tol {
+                        *v = 0.0;
                     }
                 }
                 let obj: f64 = basic_obj(c, basis, x_b);
@@ -1993,8 +2000,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         // `select_leaving_feasibility_preserving`). Pass 1 below derives the
         // pivot eligibility floor (`effective_floor`) and detects an unbounded
         // direction; the leaving row is then chosen by the bound-tolerance
-        // helper so the step cannot push any basic value below −ipm_eps (the
-        // solve's contract feasibility tolerance).
+        // helper so the step cannot push any pivot-eligible basic value below
+        // −primal_tol (the solve's primal feasibility tolerance).
         //
         // When `stable_mode` is on, eligibility uses a column-relative pivot
         // floor (~1% of |d|_∞) instead of the absolute PIVOT_TOL — necessary
