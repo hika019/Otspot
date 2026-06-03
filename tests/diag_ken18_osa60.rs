@@ -19,7 +19,7 @@
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
-use otspot::problem::{LpProblem, SolveStatus};
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus};
 use otspot::qp::solve_qp_with;
 use otspot::{solve_with, QpProblem};
 use std::path::Path;
@@ -131,6 +131,187 @@ fn diag_osa60_must_reach_known_objective() {
         tb.solve_us,
         tb.postsolve_us,
     );
+}
+
+/// Max relative primal infeasibility of `x` against `lp`:
+/// `(max_bound_violation, max_constraint_violation)`, each scaled so the magnitude
+/// of the row / bound cannot mask a small absolute violation.
+fn osa60_max_primal_infeasibility(lp: &LpProblem, x: &[f64]) -> (f64, f64) {
+    let mut max_bound = 0.0_f64;
+    for (&xj, &(lo, hi)) in x.iter().zip(lp.bounds.iter()) {
+        let span = hi.abs().max(lo.abs()).max(1.0);
+        let below = if lo.is_finite() { (lo - xj).max(0.0) / span } else { 0.0 };
+        let above = if hi.is_finite() { (xj - hi).max(0.0) / span } else { 0.0 };
+        max_bound = max_bound.max(below).max(above);
+    }
+    let ax = lp.a.mat_vec_mul(x).expect("Ax");
+    let mut max_con = 0.0_f64;
+    for (&row, (&rhs, &ct)) in ax.iter().zip(lp.b.iter().zip(lp.constraint_types.iter())) {
+        let scale = row.abs().max(rhs.abs()).max(1.0);
+        let viol = match ct {
+            ConstraintType::Le => (row - rhs).max(0.0),
+            ConstraintType::Ge => (rhs - row).max(0.0),
+            ConstraintType::Eq => (row - rhs).abs(),
+            // ConstraintType is `#[non_exhaustive]`; a new sense must trip this test.
+            #[allow(unreachable_patterns)]
+            _ => panic!("[osa-60] unhandled ConstraintType variant: {:?}", ct),
+        } / scale;
+        max_con = max_con.max(viol);
+    }
+    (max_bound, max_con)
+}
+
+/// Honest-behavior companion for osa-60: fills the verification blank left by
+/// excluding `diag_osa60_must_reach_known_objective` from the heavy gate.
+///
+/// Measured facts (HEAD, 90 s budget): osa-60 reaches the **exact** optimum —
+/// reported obj 4.0440725e6 vs known 4.0440725e6 (rel ≈ 8e-10), primal-feasible
+/// to ≈1e-11. The "obj err 5.2%" in the excluded test's ignore message is stale
+/// and false; the solver does not mis-value osa-60.
+///
+/// Solve path: presolve is **disabled**. With presolve enabled (the default), the
+/// 60 s deadline lands at a knife-edge: it either returns `SuboptimalSolution`
+/// with a full-length solution, or hits the `simplex::entry` timeout early-return
+/// (presolve reduced the problem, deadline fires mid-reduced-solve) and returns a
+/// solution in *reduced* variable space (length `num_vars - eliminated`, e.g.
+/// 232965 ≠ 232966) that never went through postsolve. That malformed-length
+/// return is a separate defect; gating on it here would make this sentinel flaky.
+/// presolve=false always returns a full-length original-space solution, so the
+/// honest contract below is well-defined every run.
+///
+/// Honest contract (the 5% optimality target is NOT required):
+///   - `Optimal`  ⇒ reported obj must match the known optimum (rel <
+///     `OPTIMAL_OBJ_TOL`) and the point must be primal-feasible. A miss here is a
+///     **false-Optimal correctness bug**.
+///   - `SuboptimalSolution` (found a feasible point, precision unmet) ⇒ the point
+///     must be primal-feasible AND obj must equal recomputed `c^T x + offset`.
+///   - `Timeout` / `MaxIterations` (did not finish) ⇒ only obj self-consistency
+///     is required (an unfinished incumbent may be infeasible — that is honest);
+///     feasibility is not demanded.
+///   - any other status (`Infeasible` / `Unbounded` / …) ⇒ **fail**: osa-60 is a
+///     feasible, bounded LP, so those are false verdicts.
+///
+/// Sentinels (no-op proofs): dropping the `Optimal` obj-match lets a false-Optimal
+/// pass; dropping feasibility lets an infeasible "solution" pass; dropping
+/// self-consistency lets a mis-reported objective pass.
+#[test]
+#[ignore = "tier-2: osa60 solve ~35s (presolve=false); honest-behavior companion (#88/#89, obj精度は別)"]
+fn diag_osa60_is_feasible_and_honest() {
+    let path = Path::new("data/lp_problems/osa-60.QPS");
+    assert!(
+        path.exists(),
+        "{:?} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        path
+    );
+    let qp = parse_qps(path).expect("parse osa-60");
+    let lp = make_lp(&qp);
+
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(90.0);
+    opts.presolve = false;
+
+    let r = solve_with(&lp, &opts);
+
+    const KNOWN_OBJ: f64 = 4.0440725e6;
+    const OPTIMAL_OBJ_TOL: f64 = 1e-5;
+    const OBJ_SELF_TOL: f64 = 1e-9;
+    const FEAS_TOL: f64 = 1e-6;
+
+    let recomputed_obj = lp
+        .c
+        .iter()
+        .zip(r.solution.iter())
+        .map(|(&c, &x)| c * x)
+        .sum::<f64>()
+        + lp.obj_offset;
+    let obj_vs_known = (r.objective - KNOWN_OBJ).abs() / KNOWN_OBJ.abs();
+    let denom = r.objective.abs().max(recomputed_obj.abs()).max(1.0);
+    let obj_self_rel = (r.objective - recomputed_obj).abs() / denom;
+    let full_length = r.solution.len() == lp.num_vars;
+    let (max_bound_viol, max_con_viol) = if full_length {
+        osa60_max_primal_infeasibility(&lp, &r.solution)
+    } else {
+        (f64::NAN, f64::NAN)
+    };
+    eprintln!(
+        "[osa-60/honest] status={:?} reported_obj={:.8e} recomputed_obj={:.8e} \
+         obj_vs_known_rel={:.3e} obj_self_rel={:.3e} max_bound_viol={:.3e} \
+         max_con_viol={:.3e} sol_len={}/n={}",
+        r.status,
+        r.objective,
+        recomputed_obj,
+        obj_vs_known,
+        obj_self_rel,
+        max_bound_viol,
+        max_con_viol,
+        r.solution.len(),
+        lp.num_vars,
+    );
+
+    let assert_self_consistent = || {
+        assert!(
+            obj_self_rel < OBJ_SELF_TOL,
+            "[osa-60] DISHONEST OBJECTIVE: reported {:.8e} ≠ recomputed c^T x + offset {:.8e} \
+             (rel {:.3e}); the solver misreports the value of the point it returns.",
+            r.objective,
+            recomputed_obj,
+            obj_self_rel,
+        );
+    };
+    let assert_feasible = || {
+        assert!(
+            full_length,
+            "[osa-60] solution length {} != num_vars {} — feasibility cannot be checked",
+            r.solution.len(),
+            lp.num_vars,
+        );
+        assert!(
+            max_bound_viol < FEAS_TOL,
+            "[osa-60] BOUND INFEASIBLE: max relative bound violation {:.3e} exceeds tol {:.0e}",
+            max_bound_viol,
+            FEAS_TOL,
+        );
+        assert!(
+            max_con_viol < FEAS_TOL,
+            "[osa-60] CONSTRAINT INFEASIBLE: max relative constraint violation {:.3e} exceeds tol {:.0e}",
+            max_con_viol,
+            FEAS_TOL,
+        );
+    };
+
+    match r.status {
+        SolveStatus::Optimal => {
+            assert!(
+                obj_vs_known < OPTIMAL_OBJ_TOL,
+                "[osa-60] FALSE-OPTIMAL: status==Optimal but reported obj {:.8e} differs from \
+                 known optimum {:.8e} by rel {:.3e} (>{:.0e}); claiming Optimal with a wrong \
+                 objective is a correctness bug.",
+                r.objective,
+                KNOWN_OBJ,
+                obj_vs_known,
+                OPTIMAL_OBJ_TOL,
+            );
+            assert_self_consistent();
+            assert_feasible();
+        }
+        SolveStatus::SuboptimalSolution => {
+            // Found a feasible incumbent but precision unmet: must be feasible + honest.
+            assert_self_consistent();
+            assert_feasible();
+        }
+        SolveStatus::Timeout | SolveStatus::MaxIterations => {
+            // Did not finish: incumbent may be infeasible (honest). Only require
+            // that the solver not lie about the value of whatever it returned.
+            if full_length {
+                assert_self_consistent();
+            }
+        }
+        ref other => panic!(
+            "[osa-60] unexpected status {:?}: osa-60 is a feasible, bounded LP with known \
+             optimum {:.8e}; Infeasible/Unbounded/NumericalError are false verdicts.",
+            other, KNOWN_OBJ,
+        ),
+    }
 }
 
 /// Task #3 (ken-18): solver wall-time must respect the internal deadline.
