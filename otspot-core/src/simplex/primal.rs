@@ -1064,29 +1064,21 @@ fn crossover_dual_infeasibility(problem: &LpProblem, x_star: &[f64], y: &[f64]) 
 }
 
 /// Derive a globally dual-feasible dual for `problem` from its known optimal
-/// primal `x_star` (the postsolved original-space optimum) via primal crossover.
+/// primal `x_star` (postsolved original-space optimum) via primal crossover:
+/// reconstruct an optimal basis *at* `x_star` and read `y = B⁻ᵀ c_B`.
 ///
-/// Reconstructs an optimal basis *at* `x_star` and reads `y = B⁻ᵀ c_B`:
 ///   1. Standard form + `x_star` → standard-form primal `x_std`.
-///   2. Initial basis = slacks ± one artificial per `needs_artificial` row — a
-///      permuted ±identity, provably non-singular (`a_ext`).
-///   3. `x_star`-driven refinement seats every support column (`x_std > 0`) into
-///      the basis via FTRAN pivots, so `B⁻¹b = x_star` and the basis represents
-///      the optimal vertex. Pivoting on a nonzero `(B⁻¹aⱼ)ᵢ` keeps `B` non-singular.
-///   4. Phase I drives the residual artificials out (degenerate at a feasible x*).
-///   5. The basis now reproduces `x_star`. If its dual is not yet dual-feasible
-///      (`x_star` is a degenerate vertex represented by several bases), a Phase II
-///      with NO perturbation takes only degenerate (step-0) pivots — it walks the
-///      bases at the fixed vertex until the reduced costs are dual-feasible, never
-///      moving the primal off `x_star`. `extract_dual_info` maps to original space.
+///   2. Initial basis = slacks ± one artificial per `needs_artificial` row (a
+///      permuted ±identity, provably non-singular).
+///   3. Seat every support column (`x_std > 0`) via FTRAN pivots, so `B⁻¹b =
+///      x_star` represents the optimal vertex (`B` stays non-singular).
+///   4. Phase I drives residual artificials out (degenerate at feasible x*).
+///   5. A no-perturbation Phase II takes only degenerate (step-0) pivots,
+///      walking bases at the fixed vertex to a dual-feasible one.
 ///
-/// Unlike incremental per-transform recovery, any optimal basis yields a
-/// dual-feasible dual, so this is degeneracy-robust: a single deleted presolve
-/// row serving multiple roles (forcing + pivot) cannot strand the recovery.
-///
-/// Returns `(dual_solution, reduced_costs)` in original space, or `None` if the
-/// crossover cannot complete (singular reconstruction / non-converged Phase I /
-/// deadline) — the caller then keeps its prior dual.
+/// Any optimal basis yields a dual-feasible dual, so this is degeneracy-robust
+/// where incremental per-transform recovery can strand. Returns `(dual,
+/// reduced_costs)` in original space, or `None` if the crossover cannot complete.
 pub(crate) fn crossover_dual_from_primal(
     problem: &LpProblem,
     x_star: &[f64],
@@ -1684,6 +1676,89 @@ const BAIL_TRIGGER_MIN: usize = 5_000;
 /// plateau (which can also come from f64 noise on real decrements), so
 /// fewer consecutive occurrences are required.
 const STEP_BAIL_RATIO: usize = 10;
+
+/// Maximum step that keeps every basic variable ≥ −`tol`:
+///   `θ = min_{i: d[i]>floor} (x_b[i] + tol) / d[i]`.
+/// `INFINITY` when no row is eligible (unbounded direction).
+fn bound_tolerance_step(x_b: &[f64], d: &[f64], m: usize, floor: f64, tol: f64) -> f64 {
+    let mut theta = f64::INFINITY;
+    for i in 0..m {
+        if d[i] > floor {
+            let t = (x_b[i] + tol) / d[i];
+            if t < theta {
+                theta = t;
+            }
+        }
+    }
+    theta
+}
+
+/// Pick the leaving row with the largest pivot `|d[i]|` among rows whose ratio
+/// `x_b[i]/d[i]` does not exceed `theta`; ties in `|d[i]|` break by Bland's rule
+/// (smallest basic index, anti-cycling). Returns the row, or `None`.
+fn max_pivot_within(
+    x_b: &[f64],
+    d: &[f64],
+    basis: &[usize],
+    m: usize,
+    floor: f64,
+    theta: f64,
+) -> Option<usize> {
+    let mut leaving: Option<usize> = None;
+    let mut best_pivot_abs = 0.0f64;
+    for i in 0..m {
+        if d[i] > floor {
+            let ratio = x_b[i] / d[i];
+            if ratio <= theta {
+                let d_abs = d[i].abs();
+                if d_abs > best_pivot_abs + PIVOT_TOL {
+                    best_pivot_abs = d_abs;
+                    leaving = Some(i);
+                } else if (d_abs - best_pivot_abs).abs() <= PIVOT_TOL {
+                    match leaving {
+                        None => leaving = Some(i),
+                        Some(prev) if basis[i] < basis[prev] => leaving = Some(i),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    leaving
+}
+
+/// Harris ratio test (Pass 2), **feasibility-preserving**.
+///
+/// The leaving step is bounded by the variable-tolerance maximum step
+///   `θ = min_{i: d[i]>floor} (x_b[i] + feas_tol) / d[i]`,
+/// and among rows within `θ` we take the largest pivot `|d[i]|` (Bland
+/// tie-break). For a leaving row with `x_b ≥ 0` this keeps every pivot-eligible
+/// basic value (`d[i] > floor`) at `≥ −feas_tol` independent of `d[i]`. A
+/// leaving row inside the `[−feas_tol, 0)` band gives a small negative step that
+/// can transiently breach `−feas_tol`; the optimality backstop (exact
+/// `x_b = B⁻¹b` recheck) then returns an honest Timeout, never false-Optimal.
+///
+/// The predecessor's absolute *ratio* window `min_ratio + ε` overshot by
+/// `ε·d[i]` — unbounded for ill-scaled columns (pilot87: `d[i] ≈ 1.3e6` turned
+/// `ε = 1e-8` into a 0.013 breach), producing an `x_b < 0` basis, negative
+/// ratios, and a wandering objective instead of convergence.
+///
+/// `feas_tol` = `options.primal_tol`. Returns `None` for an unbounded direction.
+fn select_leaving_feasibility_preserving(
+    x_b: &[f64],
+    d: &[f64],
+    basis: &[usize],
+    m: usize,
+    floor: f64,
+    feas_tol: f64,
+) -> Option<usize> {
+    let theta = bound_tolerance_step(x_b, d, m, floor, feas_tol);
+    if !theta.is_finite() {
+        return None;
+    }
+    max_pivot_within(x_b, d, basis, m, floor, theta)
+}
+
 /// Revised simplex core: BTRAN → pricing → FTRAN → Harris ratio test →
 /// rank-1 basis update, with on-demand LU refactor.
 ///
@@ -1818,7 +1893,36 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
 
         let entering_col = match pricing.select_entering(&rc_vec, n_price) {
             None => {
+                // Optimal (dual-feasible). Verify primal feasibility on a fresh
+                // exact x_b = B⁻¹b: a leaving row in the [−primal_tol, 0) band can
+                // leave the basis slightly infeasible. If a basic variable is still
+                // below −primal_tol (Phase II only), the declared optimum is not a
+                // true feasible vertex — return an honest Timeout incumbent rather
+                // than a false-Optimal. Phase I feasibility is reconciled by its
+                // caller.
+                basis_mgr.force_refactor_timed(a, basis, options.deadline);
+                if basis_mgr.refactor_failed {
+                    // Cannot recompute x_b to verify the vertex; never claim
+                    // Optimal on a stale x_b.
+                    if basis_mgr.singular_basis {
+                        return SimplexOutcome::SingularBasis;
+                    }
+                    return SimplexOutcome::Timeout(basic_obj(c, basis, x_b));
+                }
+                x_b.copy_from_slice(b_rhs);
+                basis_mgr.ftran_dense(x_b);
+                for v in x_b.iter_mut() {
+                    if v.abs() < options.clamp_tol {
+                        *v = 0.0;
+                    }
+                }
                 let obj: f64 = basic_obj(c, basis, x_b);
+                if !enable_phase1_cycling_bail {
+                    let min_basic = x_b.iter().copied().fold(f64::INFINITY, f64::min);
+                    if min_basic < -options.primal_tol {
+                        return SimplexOutcome::Timeout(obj);
+                    }
+                }
                 return SimplexOutcome::Optimal(obj, y_dense.clone());
             }
             Some(j) => j,
@@ -1892,8 +1996,12 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         }
         let d = &d_dense;
 
-        // Harris 2-pass ratio test. Pass 2 selects max |d[i]| within
-        // `min_ratio + PIVOT_TOL` and breaks ties by Bland's rule.
+        // Harris 2-pass ratio test (feasibility-preserving, see
+        // `select_leaving_feasibility_preserving`). Pass 1 below derives the
+        // pivot eligibility floor (`effective_floor`) and detects an unbounded
+        // direction; the leaving row is then chosen by the bound-tolerance
+        // helper so the step cannot push any pivot-eligible basic value below
+        // −primal_tol (the solve's primal feasibility tolerance).
         //
         // When `stable_mode` is on, eligibility uses a column-relative pivot
         // floor (~1% of |d|_∞) instead of the absolute PIVOT_TOL — necessary
@@ -1949,30 +2057,16 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             return SimplexOutcome::Unbounded;
         }
 
-        let harris_window = min_ratio + PIVOT_TOL;
-        let mut leaving: Option<usize> = None;
-        let mut best_pivot_abs = 0.0f64;
-        for i in 0..m {
-            if d[i] > effective_floor {
-                let ratio = x_b[i] / d[i];
-                if ratio <= harris_window {
-                    let d_abs = d[i].abs();
-                    if d_abs > best_pivot_abs + PIVOT_TOL {
-                        best_pivot_abs = d_abs;
-                        leaving = Some(i);
-                    } else if (d_abs - best_pivot_abs).abs() <= PIVOT_TOL {
-                        // tie: Bland's rule
-                        match leaving {
-                            None => leaving = Some(i),
-                            Some(prev) if basis[i] < basis[prev] => leaving = Some(i),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        let leaving_row = match leaving {
+        // Feasibility-preserving ratio test (δ = primal_tol): the leaving step
+        // keeps x_b ≥ −primal_tol, preventing the absolute-window cascade.
+        let leaving_row = match select_leaving_feasibility_preserving(
+            x_b,
+            d,
+            basis,
+            m,
+            effective_floor,
+            options.primal_tol,
+        ) {
             None => return SimplexOutcome::Unbounded,
             Some(i) => i,
         };
@@ -2007,24 +2101,18 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             basis.hash(&mut h);
             let bhash = h.finish();
             if !cycle_basis_hashes.insert(bhash) {
-                // Repeated basis detected. Phase I and Phase II use different
-                // strategies because their feasibility requirements differ:
+                // Repeated basis detected. Phase I and Phase II differ:
                 //
                 // Phase I (enable_phase1_cycling_bail=true): Charnes perturbation
-                // on near-zero x_b rows. Degenerate artificials produce zero-step
-                // pivots that cause ratio-test ties; perturbing them to unique
-                // positives breaks the tie without touching non-degenerate rows.
-                // (Perturbing ALL x_b — old approach — unnecessarily disturbed
-                // structural/slack rows and was corrected to near-zero only.)
+                // on near-zero x_b rows only — degenerate artificials produce
+                // zero-step pivots and ratio-test ties; nudging them to unique
+                // positives breaks the tie without disturbing non-degenerate rows.
                 //
-                // Phase II (enable_phase1_cycling_bail=false): NO x_b perturbation.
-                // Phase II starts from a primal-feasible basis (x_b ≥ 0). Charnes
-                // perturbation changes the effective Phase II objective by
-                // O(c_max · eps · m), causing the solver to escape from near-optimal
-                // regions (e.g. pilot87 gets knocked from obj≈312 → 467 and then
-                // spends 100k+ iters recovering). Instead, reset the Devex weights
-                // to break the pricing pattern that caused the cycle. The column
-                // block below ensures a different entering variable next iteration.
+                // Phase II (false): NO x_b perturbation — it starts primal-feasible
+                // (x_b ≥ 0), and Charnes shifts the objective by O(c_max·eps·m),
+                // knocking the solve off near-optimal regions (pilot87: 312 → 467,
+                // 100k+ iters to recover). Instead reset the Devex weights; the
+                // column block below forces a different entering variable.
                 if enable_phase1_cycling_bail {
                     let eps = PIVOT_TOL * (m as f64).max(1.0);
                     for (i, v) in x_b.iter_mut().enumerate() {
@@ -2443,9 +2531,10 @@ mod cycle_perturbation_tests {
     }
 
     fn primal_opts() -> SolverOptions {
-        let mut o = SolverOptions::default();
-        o.simplex_method = SimplexMethod::Primal;
-        o
+        SolverOptions {
+            simplex_method: SimplexMethod::Primal,
+            ..Default::default()
+        }
     }
 
     fn make_le_lp(
@@ -2537,5 +2626,147 @@ mod cycle_perturbation_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ratio_test_feasibility_tests {
+    //! Sentinels for the feasibility-preserving Harris ratio test
+    //! (`select_leaving_feasibility_preserving`).
+    //!
+    //! The leaving row must be chosen so the pivot step keeps every basic value
+    //! ≥ −feas_tol, with the violation bounded by `feas_tol` independent of the
+    //! pivot magnitude `d[i]`. The previous absolute-ratio window
+    //! `min_ratio + PIVOT_TOL` let a binding row overshoot by `PIVOT_TOL·d[i]`,
+    //! which for large `d[i]` (ill-scaled columns) exceeded any clamp and
+    //! cascaded into primal infeasibility (pilot87 Phase II).
+
+    use super::select_leaving_feasibility_preserving;
+    use crate::tolerances::PIVOT_TOL;
+
+    /// Apply the pivot for a chosen leaving row and return the minimum basic
+    /// value afterwards (the feasibility witness).
+    fn min_basic_after_pivot(x_b: &[f64], d: &[f64], leaving: usize) -> f64 {
+        let step = x_b[leaving] / d[leaving];
+        let mut min_v = f64::INFINITY;
+        for i in 0..x_b.len() {
+            let v = if i == leaving { step } else { x_b[i] - d[i] * step };
+            if v < min_v {
+                min_v = v;
+            }
+        }
+        min_v
+    }
+
+    /// Reference implementation of the OLD absolute-ratio window
+    /// (`min_ratio + PIVOT_TOL`, max |d|, Bland tie-break). Used only to prove
+    /// the no-op: reverting the production helper to this rule reintroduces the
+    /// feasibility breach this sentinel guards against.
+    fn old_absolute_window_leaving(x_b: &[f64], d: &[f64], basis: &[usize], floor: f64) -> usize {
+        let m = x_b.len();
+        let mut min_ratio = f64::INFINITY;
+        for i in 0..m {
+            if d[i] > floor {
+                min_ratio = min_ratio.min(x_b[i] / d[i]);
+            }
+        }
+        let window = min_ratio + PIVOT_TOL;
+        let mut leaving = None;
+        let mut best = 0.0f64;
+        for i in 0..m {
+            if d[i] > floor && x_b[i] / d[i] <= window {
+                let da = d[i].abs();
+                if da > best + PIVOT_TOL {
+                    best = da;
+                    leaving = Some(i);
+                } else if (da - best).abs() <= PIVOT_TOL {
+                    match leaving {
+                        None => leaving = Some(i),
+                        Some(p) if basis[i] < basis[p] => leaving = Some(i),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        leaving.unwrap()
+    }
+
+    /// Sentinel (no-op proof): an ill-scaled tie where the absolute-ratio window
+    /// breaches feasibility but the bound-tolerance helper does not.
+    ///
+    /// Two rows share a huge pivot (|d|=1e6). Row 0 has the true min ratio
+    /// (x_b=1e-9) and row 1 is far from it (x_b=1e-3). The absolute window
+    /// `min_ratio+PIVOT_TOL` admits BOTH and, on the |d| tie, Bland picks row 1
+    /// (lower basis index). Its step 1e-9 then drives row 0 to ≈ −1e-3 ≪ −tol.
+    /// The helper's bound-tolerance step admits only row 0, so no basic value
+    /// drops below −feas_tol.
+    ///
+    /// Reverting the helper to the absolute window makes it return row 1 →
+    /// `assert_eq!(leaving, 0)` and the feasibility assertion both FAIL.
+    #[test]
+    fn bound_tolerance_blocks_ill_scaled_overshoot() {
+        let x_b = [1e-9, 1e-3];
+        let d = [1e6, 1e6];
+        let basis = [5usize, 3usize];
+        let feas_tol = PIVOT_TOL;
+        let floor = PIVOT_TOL;
+
+        let leaving =
+            select_leaving_feasibility_preserving(&x_b, &d, &basis, x_b.len(), floor, feas_tol)
+                .expect("eligible leaving row exists");
+        assert_eq!(
+            leaving, 0,
+            "helper must pick the true-min-ratio row 0, not the far row 1"
+        );
+        let min_basic = min_basic_after_pivot(&x_b, &d, leaving);
+        assert!(
+            min_basic >= -feas_tol,
+            "helper pivot must keep basics ≥ −feas_tol; got {min_basic}"
+        );
+
+        // No-op proof: the old absolute-ratio window picks row 1 and breaches.
+        let old_leaving = old_absolute_window_leaving(&x_b, &d, &basis, floor);
+        assert_eq!(old_leaving, 1, "old window picks the far row (Bland tie)");
+        let old_min_basic = min_basic_after_pivot(&x_b, &d, old_leaving);
+        assert!(
+            old_min_basic < -feas_tol,
+            "old window must breach feasibility (proves the sentinel bites); got {old_min_basic}"
+        );
+        assert!(
+            old_min_basic < -1e-4,
+            "breach magnitude ∝ d[i]; expected ≈ −1e-3, got {old_min_basic}"
+        );
+    }
+
+    /// Stability is preserved: when several rows leave safely within the
+    /// bound-tolerance window, the helper still selects the largest pivot.
+    #[test]
+    fn picks_largest_pivot_within_window() {
+        // Both rows are at the degenerate vertex (x_b ≈ 0), so both are within
+        // θ. Row 1 has the larger pivot and must be chosen for stability.
+        let x_b = [0.0, 0.0];
+        let d = [0.5, 2.0];
+        let basis = [7usize, 4usize];
+        let leaving =
+            select_leaving_feasibility_preserving(&x_b, &d, &basis, x_b.len(), PIVOT_TOL, PIVOT_TOL)
+                .expect("eligible leaving row exists");
+        assert_eq!(leaving, 1, "must pick the larger pivot |d|=2.0 (row 1)");
+    }
+
+    /// No eligible row (all directions ≤ floor) ⇒ unbounded ⇒ None.
+    #[test]
+    fn no_eligible_row_is_unbounded() {
+        let x_b = [3.0, 4.0];
+        let d = [-1.0, 0.0];
+        let basis = [0usize, 1usize];
+        let leaving = select_leaving_feasibility_preserving(
+            &x_b,
+            &d,
+            &basis,
+            x_b.len(),
+            PIVOT_TOL,
+            PIVOT_TOL,
+        );
+        assert!(leaving.is_none(), "no positive direction ⇒ unbounded ⇒ None");
     }
 }
