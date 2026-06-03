@@ -99,15 +99,6 @@ impl SteepestEdgePricing {
             weights: vec![1.0; n_vars],
         }
     }
-
-    /// Reset all weights to 1.0. Used for cycle-breaking in Phase II.
-    pub(crate) fn reset_weights(&mut self, n_vars: usize) {
-        if self.weights.len() != n_vars {
-            self.weights = vec![1.0; n_vars];
-        } else {
-            self.weights.fill(1.0);
-        }
-    }
 }
 
 impl PricingStrategy for SteepestEdgePricing {
