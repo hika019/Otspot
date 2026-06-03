@@ -36,6 +36,29 @@ fn should_run_kept_perturbation(unresolved: bool, n: usize, m: usize) -> bool {
     unresolved && n + m <= LARGE_PROBLEM_THRESHOLD
 }
 
+/// Sub-deadline for the speculative crossover pass, reserving budget for the
+/// cleanup-LP / LSQ fallback.
+///
+/// Crossover runs *before* the cleanup LP it aims to elide, but it can fail to
+/// certify (degenerate Phase II, singular basis, or simply running out of time)
+/// only after burning wall-clock. Because the fallback bails the instant the
+/// clock has lapsed (`build_and_solve_cleanup_lp` returns `None` when
+/// `now >= deadline`), letting crossover spend the *whole* deadline before
+/// failing would starve the fallback to zero budget — regressing the final dual
+/// below the pre-crossover-first baseline on finite deadlines. So crossover is
+/// capped at an even split of the remaining wall-clock and the other half is held
+/// in reserve. The split is even — not a tuned constant — because either pass may
+/// be the one that certifies: skewing toward crossover reintroduces the
+/// starvation, while skewing toward cleanup fails crossover on a legitimately
+/// large problem and forces the slow cleanup LP it was meant to skip. The good
+/// case is unaffected: crossover certifies in seconds (ken-11 ~6s, osa-60 ~1s),
+/// far inside half of any bench deadline. A `None` (unbounded) deadline reserves
+/// nothing — those callers opted into unbounded runtime and have no fallback to
+/// starve.
+fn crossover_deadline_with_reserve(deadline: Option<Instant>, now: Instant) -> Option<Instant> {
+    deadline.map(|d| now + d.saturating_duration_since(now) / 2)
+}
+
 // Test-only, in-order trace of which dual-recovery passes `run_postsolve`
 // executed. Lets sentinels assert that the crossover pass runs first and can
 // elide the cleanup LP / LSQ passes. Compiled out (no-op) in non-test builds.
@@ -1090,7 +1113,11 @@ pub fn run_postsolve(
     let crossover: Option<Vec<f64>> =
         if matches!(result.status, SolveStatus::Optimal) && cheap_min > gate {
             trace_pass("crossover");
-            crate::simplex::crossover_dual_from_primal(orig_problem, &solution, deadline)
+            // Cap crossover at half the remaining wall-clock so a slow crossover
+            // failure cannot starve the cleanup-LP fallback below (which bails the
+            // instant the deadline lapses). See `crossover_deadline_with_reserve`.
+            let xover_deadline = crossover_deadline_with_reserve(deadline, Instant::now());
+            crate::simplex::crossover_dual_from_primal(orig_problem, &solution, xover_deadline)
                 .map(|(y, _rc)| y)
         } else {
             None
@@ -2187,6 +2214,55 @@ mod crossover_first_tests {
         ));
         // Already-resolved dual ⇒ never run, regardless of size.
         assert!(!should_run_kept_perturbation(false, 10, 10));
+    }
+
+    /// Crossover runs before the cleanup-LP fallback, so it must not be allowed to
+    /// consume the whole deadline: `crossover_deadline_with_reserve` caps it at the
+    /// midpoint of the remaining wall-clock, reserving the other half for the
+    /// fallback. The fallback bails the instant the clock lapses, so without this
+    /// reserve a slow crossover failure on a finite deadline starves cleanup to
+    /// zero budget and the final dual regresses below the baseline.
+    ///
+    /// No-op proof: returning `deadline` unchanged (handing crossover the full
+    /// budget) leaves zero reserve — both the `sub < deadline` and the
+    /// half-reserve assertions fail.
+    #[test]
+    fn crossover_reserves_half_deadline_for_cleanup_fallback() {
+        let now = Instant::now();
+        let span = std::time::Duration::from_secs(100);
+        let deadline = now + span;
+
+        let sub = crossover_deadline_with_reserve(Some(deadline), now)
+            .expect("a finite deadline must yield a finite crossover sub-deadline");
+
+        // Crossover stops strictly before the full deadline ...
+        assert!(
+            sub < deadline,
+            "crossover sub-deadline must precede the full deadline so cleanup keeps budget"
+        );
+        // ... leaving half the span as fallback reserve, and granting crossover the
+        // other half (a non-trivial budget that never blocks the good case).
+        assert_eq!(
+            deadline.saturating_duration_since(sub),
+            span / 2,
+            "fallback reserve must be half the remaining wall-clock"
+        );
+        assert_eq!(
+            sub.saturating_duration_since(now),
+            span / 2,
+            "crossover must keep half the wall-clock for the certify (good) case"
+        );
+
+        // An unbounded deadline reserves nothing (no fallback to starve).
+        assert_eq!(crossover_deadline_with_reserve(None, now), None);
+
+        // A fully-lapsed deadline grants crossover zero budget (immediate bail).
+        let sub_zero = crossover_deadline_with_reserve(Some(now), now)
+            .expect("a finite (lapsed) deadline still yields a finite sub-deadline");
+        assert_eq!(
+            sub_zero, now,
+            "a fully-lapsed deadline must grant crossover zero budget, not extend it"
+        );
     }
 
     /// Call-site wiring: above `LARGE_PROBLEM_THRESHOLD` the cleanup pert variant
