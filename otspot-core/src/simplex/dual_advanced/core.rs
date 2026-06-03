@@ -215,8 +215,7 @@ fn compute_reduced_costs_timed(
 ///   leaving rule for which Bland gives no finite-termination guarantee, and it
 ///   has a primal fallback (`two_phase_dual_simplex`) to yield to. Standard
 ///   callers (warm-start / Le-only cold-start) pass `false`: their leaving rule
-///   is classical Bland with guaranteed finite termination and they have NO
-///   fallback, so yielding would turn a solvable LP into a spurious Timeout.
+///   is classical Bland with guaranteed termination (no fallback → yield = Timeout).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dual_simplex_core_advanced(
     a: &CscMatrix,
