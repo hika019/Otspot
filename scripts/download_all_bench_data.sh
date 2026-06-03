@@ -219,6 +219,7 @@ if [[ "$MODE" == "ci-subset-check" ]]; then
   check_dir data/lp_problems         109 || fail=1
   check_dir data/lp_problems_infeas   29 || fail=1
   check_dir data/lp_problems_extra     4 || fail=1
+  check_dir data/lp_problems_unbounded 12 || fail=1
 
   echo "=== CI subset QP ==="
   check_dir data/maros_meszaros      138 || fail=1
@@ -317,6 +318,7 @@ if [[ "$MODE" == "ci-subset" ]]; then
   run_or_skip data/lp_problems           109 "bash scripts/netlib_lp_download.sh"
   run_or_skip data/lp_problems_infeas    29  "bash scripts/netlib_lp_infeas_download.sh"
   run_or_skip data/lp_problems_extra     4   "bash scripts/lp_extra_download.sh"
+  run_or_skip data/lp_problems_unbounded 12  "python3 scripts/gen_unbounded_lp.py"
 
   echo ""
   echo "########## CI subset QP data ##########"
