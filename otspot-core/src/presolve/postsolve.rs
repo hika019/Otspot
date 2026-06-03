@@ -52,9 +52,7 @@ fn should_run_kept_perturbation(unresolved: bool, n: usize, m: usize) -> bool {
 /// starvation, while skewing toward cleanup fails crossover on a legitimately
 /// large problem and forces the slow cleanup LP it was meant to skip. The good
 /// case is unaffected: crossover certifies in seconds (ken-11 ~6s, osa-60 ~1s),
-/// far inside half of any bench deadline. A `None` (unbounded) deadline reserves
-/// nothing — those callers opted into unbounded runtime and have no fallback to
-/// starve.
+/// far inside half of any bench deadline. `None` deadline reserves nothing.
 fn crossover_deadline_with_reserve(deadline: Option<Instant>, now: Instant) -> Option<Instant> {
     deadline.map(|d| now + d.saturating_duration_since(now) / 2)
 }

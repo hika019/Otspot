@@ -189,25 +189,19 @@ pub(super) fn outcome_to_result(
 }
 
 /// Verify an LP `Unbounded` exit against a re-derived recession ray (symmetric
-/// to the Phase-I Farkas infeasibility gate: an unverified ray ⇒ honest Timeout).
+/// to the Phase-I Farkas gate: unverified ray ⇒ honest Timeout).
 ///
-/// A primal simplex can report Unbounded from eta drift: a stale `B⁻¹a_q` reads
-/// ≤ 0 (no leaving row) where a fresh factorization exposes one. This rebuilds a
-/// clean LU at the exit `basis` and confirms some column `q < n_enter` is BOTH
-/// improving (`r_q < −dual_tol`) AND an unbounded direction:
-///   - basic structural/slack rows: `(B⁻¹a_q)[i] ≤ ray_floor` (increasing `x_q`
-///     from lb=0 with ub=∞ keeps every basic value ≥ 0; the legacy standard form
-///     expands every finite ub into a slack row, so a real ub limit surfaces as a
-///     positive component);
-///   - basic artificial rows (`basis[i] ≥ n_enter`): `|(B⁻¹a_q)[i]| ≤ ray_floor`
-///     (a `< 0` entry increases the artificial off 0 ⇒ feasible only in the
-///     augmented system ⇒ not an original-LP ray).
+/// Eta drift can falsely read `B⁻¹a_q ≤ 0`; this rebuilds a clean LU and
+/// confirms column `q < n_enter` is improving (`r_q < −dual_tol`) AND unbounded:
+///   - structural/slack rows: `(B⁻¹a_q)[i] ≤ ray_floor` (each finite UB is a
+///     slack row, so a real UB limit surfaces as a positive component);
+///   - artificial rows (`basis[i] ≥ n_enter`): `|(B⁻¹a_q)[i]| ≤ ray_floor`
+///     (a `< 0` entry increases the artificial off 0 ⇒ not an original-LP ray).
 ///
-/// `ray_floor = EPSILON·max(1,‖B⁻¹a_q‖∞)` is machine-noise scale, not `PIVOT_TOL`:
-/// any real positive pivot is a leaving row (bounded), so the looser tol would leak
-/// a false-Unbounded. `n_enter` excludes Big-M artificials from entering
-/// (`n_enter = n_total`); pure-slack paths pass `n_enter = n_price`. Empty witness
-/// ⇒ honest Timeout, not a false `Unbounded`.
+/// `ray_floor = EPSILON·max(1,‖B⁻¹a_q‖∞)` — machine-noise scale, not `PIVOT_TOL`
+/// (a real positive pivot is a leaving row; the looser tol leaks false Unbounded).
+/// `n_enter` excludes Big-M artificials; pure-slack paths pass `n_enter = n_price`.
+/// Empty witness ⇒ Timeout.
 pub(super) fn lp_unbounded_ray_verified(
     a: &CscMatrix,
     basis: &[usize],

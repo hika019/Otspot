@@ -25,8 +25,7 @@ use crate::tolerances::ZERO_TOL;
 /// estimate is `c * p` rather than the precise new-nonzero count because the
 /// `add_to_entry` cost is paid for every update, whether or not it lands on an
 /// existing entry. A free variable left unsubstituted is simply handed to the
-/// simplex stage, so the guard trades reduction depth for sparsity, never
-/// correctness.
+/// simplex stage, so the guard trades reduction depth for sparsity, not correctness.
 pub(super) fn fill_in_exceeds_budget(st: &PresolveState, piv_row: usize, j: usize) -> bool {
     let piv_others = st.row_entries[piv_row]
         .iter()
