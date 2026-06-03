@@ -6,6 +6,7 @@
 //!   * `QpProblem::is_zero_q` (`|v| < 1e-12`) sent it to the LP path.
 //!   * QP presolve step4 (`|q| > ZERO_TOL`) treated its column as a pure-LP
 //!     empty column and declared Unbounded on the cost sign.
+//!
 //! Both now test *structural* zero (`v == 0.0`); stored Q values are
 //! structurally non-zero (`from_triplets` drops `|v| ≤ DROP_TOL`).
 

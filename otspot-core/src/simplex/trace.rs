@@ -102,7 +102,7 @@ impl IterTrace {
         self.last_obj = Some(obj);
 
         let force_line = repeat_from.is_some();
-        if !force_line && iter % self.cfg.every != 0 {
+        if !force_line && !iter.is_multiple_of(self.cfg.every) {
             return;
         }
 

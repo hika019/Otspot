@@ -56,19 +56,6 @@ use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 
-#[cfg(test)]
-static BIG_M_COLD_START_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-pub(super) fn reset_big_m_cold_start_count() {
-    BIG_M_COLD_START_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(super) fn big_m_cold_start_count() -> usize {
-    BIG_M_COLD_START_COUNT.load(std::sync::atomic::Ordering::Relaxed)
-}
 
 /// Farkas certificate verification for primal infeasibility.
 ///
@@ -537,9 +524,6 @@ pub(crate) fn big_m_cold_start(
     row_scale: &[f64],
     col_scale: &[f64],
 ) -> SolverResult {
-    #[cfg(test)]
-    BIG_M_COLD_START_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
     let m = sf.m;
     let n_total = sf.n_total;
 
@@ -557,10 +541,9 @@ pub(crate) fn big_m_cold_start(
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|&v| v.is_finite() && v > 0.0)
-        .map(|v| {
+        .inspect(|&v| {
             eprintln!("[bigm-diag] c_norm={:.3e} b_norm={:.3e} computed={:.3e} override={:.3e}",
                 c_norm, b_norm, big_m_computed, v);
-            v
         })
         .unwrap_or(big_m_computed);
 

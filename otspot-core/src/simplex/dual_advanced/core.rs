@@ -410,30 +410,20 @@ pub(crate) fn dual_simplex_core_advanced(
             trow[j] = dot;
         }
 
-        // 3d': lb-violation 方向補正。
+        // 3d': lb-violation direction correction.
         //
-        // 通常の双対 simplex 比率テストは trow[j] > 0 を入基候補とする (ub 違反方向)。
-        // lb 違反 (x_b[r] < 0) を修復するには入基変数の「離基行への影響が x_b[r] を
-        // 増加させる方向」、すなわち trow[j] < 0 を選ぶ。trow を符号反転して既存の
-        // 比率テスト実装を再利用する。被縮小費用と離基変数の r 値も整合反転する (3i)。
+        // When x_b[r] < 0 (lb violation) the entering variable must increase x_b[r],
+        // i.e. select trow[j] < 0. Sign-flip trow to reuse the ub-repair ratio test;
+        // rc and the leaving r-value are also flipped (3i).
         //
-        // 適用条件は `x_b[r] < 0 ∧ allows_lb_repair ∧ 離基変数が人工でない`:
-        // - Big-M Phase I では人工駆出 (Priority 2) pivot が構造行を大きく lb 違反
-        //   させる (beaconfd: x_b ≈ −9329)。これは sign-flip で正しく repair する
-        //   (旧 blanket false は逆方向 pivot で 2-cycle を起こしていた)。
-        // - ただし離基変数自身が人工 (`basis[r] >= n_enter`) で負値の場合は repair
-        //   しない。人工の負値は sign-flip すると人工を basis に留めたまま値だけ
-        //   0 へ寄せ続け、478 連続 pivot → Phase II cycle に陥る (sierra)。人工は
-        //   標準方向で駆出する (n_enter により再入基も禁止済 → 単調に basis から消える)。
+        // Artificial-leaving guard (basis[r] >= n_enter): flipping drives the artificial
+        // value toward 0 without evicting it, producing a 478-pivot cycle (sierra).
+        // Artificials leave in the standard direction; re-entry is blocked by n_enter
+        // so they exit monotonically.
         //
-        // Completeness trade-off (codex P2-#2): a feasible Eq system can need a
-        // *valid* lb-repair on an artificial-leaving row. Suppressing it here makes
-        // bare Big-M abandon such cases (e.g. `-2x+y=1, -2x+2y=3` with crash off).
-        // We keep the guard — distinguishing a valid artificial lb-repair from
-        // sierra's chase is fragile and a wrong split re-opens the 478-pivot cycle —
-        // and rely on the primal fallback (`two_phase_dual_simplex`) to recover,
-        // which it does (verified Optimal even crash-off). Default config solves it
-        // directly via the crash basis. See `big_m_phase1_artificial_lb_repair_edge_*`.
+        // Suppressing lb-repair on an artificial-leaving row may cause bare Big-M to
+        // abandon some feasible Eq cases; the primal fallback recovers (verified Optimal).
+        // See `big_m_phase1_artificial_lb_repair_edge_*`.
         let mut lb_violation =
             x_b[leaving_row] < 0.0 && leaving.allows_lb_repair() && basis[leaving_row] < n_enter;
         let artificial_lb_violation =
