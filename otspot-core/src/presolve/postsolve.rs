@@ -24,6 +24,65 @@ const GS_MAX_ITER: usize = 50;
 /// Convergence tolerance for Gauss-Seidel: stops when max per-row change drops below this.
 const GS_CONV_TOL: f64 = 1e-12;
 
+/// Whether the kept-row perturbation cleanup variant is worth running.
+///
+/// The variant only differs from the plain cleanup LP when kept-row perturbation
+/// is actually engaged, which `build_and_solve_cleanup_lp` force-disables above
+/// `LARGE_PROBLEM_THRESHOLD` (`use_kept_perturbation` there gates on the same
+/// `n + m`). Above the threshold it would re-solve an identical LP, so running it
+/// is pure redundant runtime. It is also pointless once the plain variant already
+/// certifies a feasible dual (`unresolved == false`).
+fn should_run_kept_perturbation(unresolved: bool, n: usize, m: usize) -> bool {
+    unresolved && n + m <= LARGE_PROBLEM_THRESHOLD
+}
+
+/// Sub-deadline for the speculative crossover pass, reserving budget for the
+/// cleanup-LP / LSQ fallback.
+///
+/// Crossover runs *before* the cleanup LP it aims to elide, but it can fail to
+/// certify (degenerate Phase II, singular basis, or simply running out of time)
+/// only after burning wall-clock. Because the fallback bails the instant the
+/// clock has lapsed (`build_and_solve_cleanup_lp` returns `None` when
+/// `now >= deadline`), letting crossover spend the *whole* deadline before
+/// failing would starve the fallback to zero budget — regressing the final dual
+/// below the pre-crossover-first baseline on finite deadlines. So crossover is
+/// capped at an even split of the remaining wall-clock and the other half is held
+/// in reserve. The split is even — not a tuned constant — because either pass may
+/// be the one that certifies: skewing toward crossover reintroduces the
+/// starvation, while skewing toward cleanup fails crossover on a legitimately
+/// large problem and forces the slow cleanup LP it was meant to skip. The good
+/// case is unaffected: crossover certifies in seconds (ken-11 ~6s, osa-60 ~1s),
+/// far inside half of any bench deadline. A `None` (unbounded) deadline reserves
+/// nothing — those callers opted into unbounded runtime and have no fallback to
+/// starve.
+fn crossover_deadline_with_reserve(deadline: Option<Instant>, now: Instant) -> Option<Instant> {
+    deadline.map(|d| now + d.saturating_duration_since(now) / 2)
+}
+
+// Test-only, in-order trace of which dual-recovery passes `run_postsolve`
+// executed. Lets sentinels assert that the crossover pass runs first and can
+// elide the cleanup LP / LSQ passes. Compiled out (no-op) in non-test builds.
+#[cfg(test)]
+thread_local! {
+    static POSTSOLVE_PASS_TRACE: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn trace_pass(name: &'static str) {
+    POSTSOLVE_PASS_TRACE.with(|t| t.borrow_mut().push(name));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn trace_pass(_name: &'static str) {}
+
+/// Drain (clear-and-return) the recorded pass trace for the current thread.
+#[cfg(test)]
+fn drain_postsolve_pass_trace() -> Vec<&'static str> {
+    POSTSOLVE_PASS_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()))
+}
+
 /// Return the primal slack of original row `i` (always non-negative for feasible
 /// solutions): `b_i - Ax_i` for `Le`, `Ax_i - b_i` for `Ge`, `0` for `Eq`. The
 /// scale `1 + |b_i| + |Ax_i|` is returned alongside so the caller can pick a
@@ -1037,12 +1096,40 @@ pub fn run_postsolve(
     let cheap_min = df_loop.min(df_gs);
 
     // Gate at the strictest LP feasibility eps used by the bench (`PIVOT_TOL`);
-    // below this, cleanup LP cannot improve the verdict and only costs runtime.
+    // below this no dual-recovery pass can improve the verdict and only costs
+    // runtime.
     let gate = PIVOT_TOL;
 
-    let (y_cl_nopert, y_cl_pert) = if cheap_min <= gate {
+    // Crossover-first. The cleanup LP and LSQ passes dominate postsolve runtime on
+    // large LPs (cleanup alone is 95–99% on ken-11 / osa-60) yet do not improve
+    // dual feasibility there — the basis crossover is what actually produces a
+    // feasible dual. So try crossover *before* the expensive passes: if it
+    // certifies (dfeas ≤ `gate`, the same threshold below which cleanup is already
+    // known to be inert) the cleanup LP and LSQ are skipped entirely. Only valid at
+    // Optimal status, and only when the cheap candidates are themselves
+    // dual-infeasible (`cheap_min > gate`); otherwise nothing downstream would run.
+    // Crossover stays a candidate in the final min-dfeas selection below, so it can
+    // only ever improve the chosen dual, never regress it.
+    let crossover: Option<Vec<f64>> =
+        if matches!(result.status, SolveStatus::Optimal) && cheap_min > gate {
+            trace_pass("crossover");
+            // Cap crossover at half the remaining wall-clock so a slow crossover
+            // failure cannot starve the cleanup-LP fallback below (which bails the
+            // instant the deadline lapses). See `crossover_deadline_with_reserve`.
+            let xover_deadline = crossover_deadline_with_reserve(deadline, Instant::now());
+            crate::simplex::crossover_dual_from_primal(orig_problem, &solution, xover_deadline)
+                .map(|(y, _rc)| y)
+        } else {
+            None
+        };
+    let df_xover = crossover.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
+    let crossover_certified = df_xover <= gate;
+
+    // Cleanup LP fallback: run only when crossover did not certify a feasible dual.
+    let (y_cl_nopert, y_cl_pert) = if cheap_min <= gate || crossover_certified {
         (None, None)
     } else {
+        trace_pass("cleanup_nopert");
         let t0_nopert = std::time::Instant::now();
         let y_nopert = build_and_solve_cleanup_lp(
             orig_problem,
@@ -1056,10 +1143,17 @@ pub fn run_postsolve(
         let df_nopert = y_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
         let so_far = cheap_min.min(df_nopert);
         // The kept-y perturbation variant is much larger and often returns Inf dfeas;
-        // budget it at a small multiple of the plain variant's wall time.
-        let y_pert = if so_far <= gate {
+        // budget it at a small multiple of the plain variant's wall time. Above
+        // `LARGE_PROBLEM_THRESHOLD` it degenerates to the same LP as the plain
+        // variant (kept-row perturbation force-disabled), so it is skipped there.
+        let y_pert = if !should_run_kept_perturbation(
+            so_far > gate,
+            orig_problem.num_vars,
+            orig_problem.num_constraints,
+        ) {
             None
         } else {
+            trace_pass("cleanup_pert");
             let now = std::time::Instant::now();
             let pert_budget = t_nopert.saturating_mul(4);
             let pert_deadline = match deadline {
@@ -1098,7 +1192,7 @@ pub fn run_postsolve(
     // LSQ projection (A^T y ≈ -c) as a fourth candidate. Cleanup LP only adjusts
     // deleted-row y; LSQ ignores the kept/deleted boundary and can rebalance the
     // full y vector when coupling is strong.
-    let y_lsq: Option<Vec<f64>> = if cheap_min <= gate || cleanup_stagnant {
+    let y_lsq: Option<Vec<f64>> = if cheap_min <= gate || crossover_certified || cleanup_stagnant {
         #[cfg(debug_assertions)]
         {
             #[allow(clippy::print_stderr)]
@@ -1111,6 +1205,7 @@ pub fn run_postsolve(
         }
         None
     } else if m > 0 {
+        trace_pass("lsq");
         // 規模ガードは固定 size proxy ではなく compute_lsq_dual_y 内部に委ねる
         // (主経路は matrix-free CG、direct LDL fallback のみ memory_budget で skip)。
         let q_empty = CscMatrix::new(n, n);
@@ -1140,13 +1235,21 @@ pub fn run_postsolve(
         None
     };
 
-    // Adopt the candidate with smallest dfeas_bound; ties go to the cheaper computation.
+    // Adopt the candidate with smallest dfeas_bound; ties go to the cheaper
+    // computation (priority order loop > gs > cleanup > lsq > crossover), so the
+    // crossover dual is taken only when it *strictly* improves on every other
+    // candidate — matching the legacy "adopt only if it lowers dfeas" rule, hence
+    // it can never regress another LP. The crossover dual itself was computed
+    // earlier (a globally dual-feasible y = B⁻ᵀc_B reconstructed at the primal
+    // optimum), which is what reconciles presolve rows serving multiple roles
+    // (forcing + pivot) that no local recovery can fix, e.g. pilot-ja.
     let df_lsq = y_lsq.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let min_df = df_loop
         .min(df_gs)
         .min(df_cl_nopert)
         .min(df_cl_pert)
-        .min(df_lsq);
+        .min(df_lsq)
+        .min(df_xover);
     if df_loop == min_df {
         dual_solution = y_loop;
     } else if df_gs == min_df {
@@ -1155,28 +1258,10 @@ pub fn run_postsolve(
         dual_solution = y_cl_nopert.expect("df_cl_nopert finite implies Some");
     } else if df_cl_pert == min_df {
         dual_solution = y_cl_pert.expect("df_cl_pert finite implies Some");
-    } else {
+    } else if df_lsq == min_df {
         dual_solution = y_lsq.expect("df_lsq finite implies Some");
-    }
-
-    // Crossover dual: when local per-transform / cleanup recovery is still
-    // dual-infeasible *beyond the LP certificate tolerance* (presolve rows serving
-    // multiple roles — forcing + pivot — that no local recovery can reconcile, e.g.
-    // pilot-ja), reconstruct an optimal basis *at* the primal optimum and read
-    // y = B⁻ᵀc_B, a globally dual-feasible dual. Gated at `LP_CERT_TOL` (the
-    // threshold `guard_lp_optimal` certifies against) so only would-be demotes pay
-    // the basis-reconstruction cost; adopted only when it strictly improves dfeas,
-    // so it can never regress another LP.
-    if matches!(result.status, SolveStatus::Optimal)
-        && min_df > crate::tolerances::feas_rel_tol()
-    {
-        if let Some((y_xover, _rc_xover)) =
-            crate::simplex::crossover_dual_from_primal(orig_problem, &solution, deadline)
-        {
-            if dfeas_bound(&y_xover) < min_df {
-                dual_solution = y_xover;
-            }
-        }
+    } else {
+        dual_solution = crossover.expect("df_xover finite implies Some");
     }
 
     // Recompute simplex-convention reduced costs on the original problem now that
@@ -1974,6 +2059,249 @@ mod ipm_dual_convention_tests {
             lifted.reduced_costs[0].abs() < 1e-12,
             "simplex reduced cost must be c - A^T y = 0, got {}",
             lifted.reduced_costs[0]
+        );
+    }
+}
+
+#[cfg(test)]
+mod crossover_first_tests {
+    //! Sentinels for the crossover-first postsolve ordering and the redundant
+    //! kept-perturbation skip.
+    //!
+    //! The dual-recovery passes produce identical final duals regardless of order
+    //! (min-dfeas selection), so the *only* observable signal of the optimisation
+    //! is which passes actually ran — captured by the thread-local pass trace.
+    //! Each test drains the trace, runs `run_postsolve`, and asserts on the
+    //! recorded order/membership. No-op proofs are stated per test.
+    use super::*;
+
+    /// `min 2*x0 + 3*x1  s.t.  x0 + x1 = 1, x ≥ 0`. Optimum x* = (1, 0), with the
+    /// unique dual y0 = 2 (rc0 = 0 on basic x0, rc1 = 1 ≥ 0 on x1 at lb).
+    fn lp_clean_vertex() -> (LpProblem, Vec<f64>) {
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![2.0, 3.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
+        (lp, vec![1.0, 0.0])
+    }
+
+    /// Reduced-problem result with a deliberately dual-infeasible y (so the cheap
+    /// loop/GS candidates leave `cheap_min > gate` and the recovery machinery is
+    /// forced to engage). `reduced_costs` is non-empty so postsolve keeps the
+    /// simplex dual convention (no IPM sign flip).
+    fn result_with_dual(status: SolveStatus, solution: &[f64], y: Vec<f64>) -> SolverResult {
+        SolverResult {
+            status,
+            objective: 0.0,
+            solution: solution.to_vec(),
+            dual_solution: y,
+            reduced_costs: vec![0.0; solution.len()],
+            ..Default::default()
+        }
+    }
+
+    /// Crossover is tried before the cleanup LP / LSQ; when it certifies a feasible
+    /// dual (dfeas ≤ gate) those expensive passes are skipped entirely, yet the
+    /// returned dual is the (correct) crossover dual.
+    ///
+    /// No-op proof: reverting to cleanup-before-crossover, or dropping the
+    /// `crossover_certified` skip, makes `cleanup_nopert` appear in the trace and
+    /// flips both the membership and the order assertions.
+    #[test]
+    fn crossover_first_certifies_and_skips_cleanup() {
+        let (lp, x) = lp_clean_vertex();
+        let presolve = PresolveResult::no_reduction(&lp);
+        // y = [0] is dual-infeasible: rc0 = 2 - 0 = 2 on interior x0 ⇒ cheap_min ≈ 2.
+        let reduced = result_with_dual(SolveStatus::Optimal, &x, vec![0.0]);
+
+        let _ = drain_postsolve_pass_trace();
+        let lifted = run_postsolve(&reduced, &presolve, &lp, None, false);
+        let trace = drain_postsolve_pass_trace();
+
+        assert_eq!(
+            trace,
+            vec!["crossover"],
+            "crossover must run first and, on certifying, elide cleanup/LSQ; trace={trace:?}"
+        );
+        // Correctness: the adopted dual is the exact crossover dual y0 = 2.
+        assert!(
+            (lifted.dual_solution[0] - 2.0).abs() < 1e-6,
+            "crossover dual must recover y0 = 2, got {}",
+            lifted.dual_solution[0]
+        );
+        assert!(
+            lifted.postsolve_dfeas.unwrap() <= PIVOT_TOL,
+            "crossover-first dual must be feasible (dfeas ≤ gate), got {:?}",
+            lifted.postsolve_dfeas
+        );
+    }
+
+    /// When the cheap candidates already certify (`cheap_min ≤ gate`), no recovery
+    /// pass — crossover included — should run.
+    ///
+    /// No-op proof: triggering crossover unconditionally (dropping the
+    /// `cheap_min > gate` guard) puts `crossover` into the trace and fails the
+    /// empty-trace assertion.
+    #[test]
+    fn cheap_feasible_dual_runs_no_recovery_pass() {
+        let (lp, x) = lp_clean_vertex();
+        let presolve = PresolveResult::no_reduction(&lp);
+        // y = [2] is the exact dual ⇒ cheap_min ≈ 0 ≤ gate.
+        let reduced = result_with_dual(SolveStatus::Optimal, &x, vec![2.0]);
+
+        let _ = drain_postsolve_pass_trace();
+        let lifted = run_postsolve(&reduced, &presolve, &lp, None, false);
+        let trace = drain_postsolve_pass_trace();
+
+        assert!(
+            trace.is_empty(),
+            "a feasible cheap dual must skip every recovery pass; trace={trace:?}"
+        );
+        assert!(lifted.postsolve_dfeas.unwrap() <= PIVOT_TOL);
+    }
+
+    /// Crossover is gated on Optimal status; a non-Optimal result must not invoke
+    /// it (the basis reconstruction is only meaningful at a primal optimum).
+    ///
+    /// No-op proof: dropping the `matches!(Optimal)` guard puts `crossover` into
+    /// the trace.
+    #[test]
+    fn non_optimal_status_skips_crossover() {
+        let (lp, x) = lp_clean_vertex();
+        let presolve = PresolveResult::no_reduction(&lp);
+        let reduced = result_with_dual(SolveStatus::Infeasible, &x, vec![0.0]);
+
+        let _ = drain_postsolve_pass_trace();
+        let _ = run_postsolve(&reduced, &presolve, &lp, None, false);
+        let trace = drain_postsolve_pass_trace();
+
+        assert!(
+            !trace.contains(&"crossover"),
+            "non-Optimal status must not run crossover; trace={trace:?}"
+        );
+        // The cleanup fallback still engages on the infeasible cheap dual.
+        assert!(
+            trace.contains(&"cleanup_nopert"),
+            "cleanup fallback must run when crossover is skipped; trace={trace:?}"
+        );
+    }
+
+    /// `should_run_kept_perturbation` skips the perturbation variant once
+    /// `n + m > LARGE_PROBLEM_THRESHOLD`, where it would re-solve an identical LP.
+    ///
+    /// No-op proof: removing the `n + m <= LARGE_PROBLEM_THRESHOLD` term makes the
+    /// over-threshold cases return `true`, failing the first two assertions.
+    #[test]
+    fn should_run_kept_perturbation_respects_threshold() {
+        // Just over threshold ⇒ skip (variant is redundant there).
+        assert!(!should_run_kept_perturbation(true, LARGE_PROBLEM_THRESHOLD, 1));
+        assert!(!should_run_kept_perturbation(
+            true,
+            LARGE_PROBLEM_THRESHOLD + 1,
+            0
+        ));
+        // At threshold with an unresolved dual ⇒ run.
+        assert!(should_run_kept_perturbation(
+            true,
+            LARGE_PROBLEM_THRESHOLD - 1,
+            1
+        ));
+        // Already-resolved dual ⇒ never run, regardless of size.
+        assert!(!should_run_kept_perturbation(false, 10, 10));
+    }
+
+    /// Crossover runs before the cleanup-LP fallback, so it must not be allowed to
+    /// consume the whole deadline: `crossover_deadline_with_reserve` caps it at the
+    /// midpoint of the remaining wall-clock, reserving the other half for the
+    /// fallback. The fallback bails the instant the clock lapses, so without this
+    /// reserve a slow crossover failure on a finite deadline starves cleanup to
+    /// zero budget and the final dual regresses below the baseline.
+    ///
+    /// No-op proof: returning `deadline` unchanged (handing crossover the full
+    /// budget) leaves zero reserve — both the `sub < deadline` and the
+    /// half-reserve assertions fail.
+    #[test]
+    fn crossover_reserves_half_deadline_for_cleanup_fallback() {
+        let now = Instant::now();
+        let span = std::time::Duration::from_secs(100);
+        let deadline = now + span;
+
+        let sub = crossover_deadline_with_reserve(Some(deadline), now)
+            .expect("a finite deadline must yield a finite crossover sub-deadline");
+
+        // Crossover stops strictly before the full deadline ...
+        assert!(
+            sub < deadline,
+            "crossover sub-deadline must precede the full deadline so cleanup keeps budget"
+        );
+        // ... leaving half the span as fallback reserve, and granting crossover the
+        // other half (a non-trivial budget that never blocks the good case).
+        assert_eq!(
+            deadline.saturating_duration_since(sub),
+            span / 2,
+            "fallback reserve must be half the remaining wall-clock"
+        );
+        assert_eq!(
+            sub.saturating_duration_since(now),
+            span / 2,
+            "crossover must keep half the wall-clock for the certify (good) case"
+        );
+
+        // An unbounded deadline reserves nothing (no fallback to starve).
+        assert_eq!(crossover_deadline_with_reserve(None, now), None);
+
+        // A fully-lapsed deadline grants crossover zero budget (immediate bail).
+        let sub_zero = crossover_deadline_with_reserve(Some(now), now)
+            .expect("a finite (lapsed) deadline still yields a finite sub-deadline");
+        assert_eq!(
+            sub_zero, now,
+            "a fully-lapsed deadline must grant crossover zero budget, not extend it"
+        );
+    }
+
+    /// Call-site wiring: above `LARGE_PROBLEM_THRESHOLD` the cleanup pert variant
+    /// must not be invoked even when the plain variant ran. Non-Optimal status
+    /// deterministically bypasses crossover so the cleanup pert gate is exercised.
+    ///
+    /// No-op proof: reverting the call site to call the pert variant whenever the
+    /// dual is unresolved makes `cleanup_pert` appear in the trace.
+    #[test]
+    fn pert_variant_not_called_above_threshold() {
+        let n = LARGE_PROBLEM_THRESHOLD; // n + m = THRESHOLD + 1 > THRESHOLD
+        let rows = vec![0usize; n];
+        let cols: Vec<usize> = (0..n).collect();
+        let vals = vec![1.0_f64; n];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 1, n).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0; n],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY); n],
+            None,
+        )
+        .unwrap();
+        let presolve = PresolveResult::no_reduction(&lp);
+        // solution at lb, y = [2] ⇒ rc_j = 1 - 2 = -1 at lb ⇒ cheap_min = 1 > gate.
+        let reduced = result_with_dual(SolveStatus::Infeasible, &vec![0.0; n], vec![2.0]);
+
+        let _ = drain_postsolve_pass_trace();
+        let _ = run_postsolve(&reduced, &presolve, &lp, None, false);
+        let trace = drain_postsolve_pass_trace();
+
+        assert!(
+            trace.contains(&"cleanup_nopert"),
+            "plain cleanup variant must run on the infeasible cheap dual; trace={trace:?}"
+        );
+        assert!(
+            !trace.contains(&"cleanup_pert"),
+            "redundant pert variant must be skipped above LARGE_PROBLEM_THRESHOLD; trace={trace:?}"
         );
     }
 }
