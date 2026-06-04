@@ -746,3 +746,92 @@ mod roundtrip_kkt {
         assert_kkt_optimal(&lp, 3.0, "roundtrip_ge_constraint_dual_sign");
     }
 }
+
+// -----------------------------------------------------------
+// Step 7 free-variable substitution fill-in cascade (cont1/4/11 hang repro)
+// -----------------------------------------------------------
+//
+// REGRESSION GUARD — currently EXPECTED TO FAIL.
+//
+// `step7_free_var_substitution` hangs on cont* (measured 2026-06-01: burns full
+// 30s deadline after only 5708/~40k eliminations; `fill_in_exceeds_budget` never
+// fired because its budget scales with the current row count, so an already-dense
+// column is allowed to densify further).
+//
+// This synthetic reproduces the cascade at small scale: hub vars a_0..a_N chained
+// by shared pivot rows; eliminating a_0 densifies all R load rows repeatedly.
+// Cost grows super-linearly in R (measured: doubling R ≈ 3.5× time).
+//
+// EXPECTED AFTER FIX: must finish under MAX_PRESOLVE_SECS (~2.6s release → FAILS).
+// SAFETY_DEADLINE is a non-hang guard; assertion is on wall-clock.
+#[test]
+fn test_step7_free_var_fillin_must_not_blow_up() {
+    use std::time::{Duration, Instant};
+
+    // Sized so the buggy path runs ~2.6s (release) — clearly over the bound —
+    // while the safety deadline keeps the test bounded if it ever hangs.
+    const N_HUBS: usize = 1500; // free chained variables a_0..a_N
+    const N_LOADS: usize = 9000; // load rows that densify around the chain
+    const MAX_PRESOLVE_SECS: f64 = 1.0; // post-fix budget (assertion)
+    const SAFETY_DEADLINE_SECS: f64 = 8.0; // non-hang guard only
+
+    let n_hub = N_HUBS + 1;
+    let idx_g = n_hub; // single shared bounded variable
+    let idx_d0 = n_hub + 1; // first load slack
+    let ncols = n_hub + 1 + N_LOADS;
+    let nrows = N_HUBS + N_LOADS; // N_HUBS pivot Eq rows + N_LOADS load Le rows
+
+    let mut rows: Vec<usize> = Vec::new();
+    let mut cols: Vec<usize> = Vec::new();
+    let mut vals: Vec<f64> = Vec::new();
+    // Pivot rows: 2*a_i - a_{i+1} - 0.5*g = 0  (3 terms ⇒ not a doubleton, so
+    // step6 skips it; a_i has the largest |coef| ⇒ step7 picks it to eliminate a_i).
+    for i in 0..N_HUBS {
+        rows.push(i);
+        cols.push(i);
+        vals.push(2.0);
+        rows.push(i);
+        cols.push(i + 1);
+        vals.push(-1.0);
+        rows.push(i);
+        cols.push(idx_g);
+        vals.push(-0.5);
+    }
+    // Load rows: a_0 + d_r <= 2.
+    for r in 0..N_LOADS {
+        let row = N_HUBS + r;
+        rows.push(row);
+        cols.push(0);
+        vals.push(1.0);
+        rows.push(row);
+        cols.push(idx_d0 + r);
+        vals.push(1.0);
+    }
+
+    let a = CscMatrix::from_triplets(&rows, &cols, &vals, nrows, ncols).unwrap();
+    let c = vec![0.0; ncols];
+    let mut b = vec![0.0; nrows];
+    let mut cts = vec![ConstraintType::Eq; nrows];
+    let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); ncols]; // hubs free
+    bounds[idx_g] = (0.0, 1.0);
+    for r in 0..N_LOADS {
+        b[N_HUBS + r] = 2.0;
+        cts[N_HUBS + r] = ConstraintType::Le;
+        bounds[idx_d0 + r] = (0.0, 1.0);
+    }
+    let lp = LpProblem::new_general(c, a, b, cts, bounds, None).unwrap();
+
+    let deadline = Some(Instant::now() + Duration::from_secs_f64(SAFETY_DEADLINE_SECS));
+    let t0 = Instant::now();
+    let _ = run_presolve(&lp, deadline).expect("presolve must not error on this LP");
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    assert!(
+        elapsed < MAX_PRESOLVE_SECS,
+        "step7 free-var substitution fill-in cascade: presolve took {:.3}s on a \
+         {}-var / {}-constraint LP (budget {:.1}s). The free-var elimination cost \
+         grows super-linearly as columns densify — see fill_in_exceeds_budget / \
+         eliminate_variable_via_eq_row in presolve/transforms.",
+        elapsed, ncols, nrows, MAX_PRESOLVE_SECS
+    );
+}

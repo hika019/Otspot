@@ -1,12 +1,24 @@
 //! Primal (revised) simplex: two-phase driver and the iteration core.
 
+mod core;
+mod crossover;
+mod ratio_test;
+mod reconcile;
+
+pub(crate) use core::revised_simplex_core;
+pub(crate) use crossover::crossover_dual_from_primal;
+pub(crate) use reconcile::{extract_solution, reconcile_final_basis_state};
+
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::presolve::LpEquilibration;
-use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
-use crate::sparse::{CscMatrix, SparseVec};
+use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use crate::sparse::CscMatrix;
 use crate::tolerances::*;
-use std::sync::atomic::Ordering;
+use super::dual_common::{basic_obj, lp_unbounded_ray_verified};
+use super::pricing::SteepestEdgePricing;
+use super::{extract_dual_info, SimplexOutcome, StandardForm};
+use self::reconcile::{check_eq_feasibility, pivot_out_degenerate_artificials, try_apply_crash};
 
 /// Counts `pivot_out_degenerate_artificials` early-exit firings (test-only).
 ///
@@ -40,24 +52,81 @@ pub(crate) static PIVOT_CLEAN_CLEANUP_RAN_COUNT: std::sync::atomic::AtomicUsize 
 pub(crate) static OBJ_PROGRESS_RESET_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-use super::dual_common::{
-    basic_obj, compute_dual_vars_into, compute_reduced_costs_into, made_progress_with_floor,
-};
-use super::pricing::{PricingStrategy, SteepestEdgePricing};
-use super::{extract_dual_info, SimplexOutcome, StandardForm};
+/// Counts non-degenerate x_b entries preserved (not perturbed) during cycle
+/// detection in `revised_simplex_core` (test-only).
+///
+/// Each time cycle detection fires and an x_b row with `|v| >= step_zero_threshold`
+/// is skipped, this counter increments. The sentinel asserts it is > 0 on a
+/// degenerate LP that triggers cycling: proves non-degenerate rows are untouched.
+/// Reverting to the old "add to ALL x_b" approach removes the `else` branch
+/// entirely, keeping this counter at zero and failing the assertion.
+#[cfg(test)]
+pub(crate) static CYCLE_DETECT_NONDEGEN_PRESERVED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Verified-ray gate for a Phase II `Unbounded` exit (shared with the Big-M
+/// path). An eta-drift false-Unbounded (`B⁻¹a_q` reads ≤ 0 only because of a
+/// stale factorization) becomes an honest Timeout, mirroring the Phase-I Farkas
+/// gate. `n_enter` excludes artificials (`= sf.n_total`); pure-slack callers
+/// pass `n_enter = n_cols`.
+#[allow(clippy::too_many_arguments)]
+fn gate_phase2_unbounded(
+    outcome: SimplexOutcome,
+    a: &CscMatrix,
+    basis: &[usize],
+    c: &[f64],
+    x_b: &[f64],
+    m: usize,
+    n_cols: usize,
+    n_enter: usize,
+    options: &SolverOptions,
+) -> SimplexOutcome {
+    if matches!(outcome, SimplexOutcome::Unbounded)
+        && !lp_unbounded_ray_verified(a, basis, c, m, n_cols, n_enter, options)
+    {
+        SimplexOutcome::Timeout(basic_obj(c, basis, x_b))
+    } else {
+        outcome
+    }
+}
 
 /// Minimum absolute diagonal entry to trust when dividing `x_B[i]` by the
 /// Ruiz-scaled slack/artificial column's diagonal. Prevents division by
 /// near-zero when equilibration shrinks the diagonal below f64 noise.
 const SLACK_DIAG_TOL: f64 = 1e-14;
 
+/// Phase I infeasibility verdict, gated on a verified Farkas certificate.
+///
+/// A non-empty `farkas` ray (`Aᵀy ≤ tol` ∀ j, `bᵀy > tol`) proves the original
+/// LP infeasible. An empty `farkas` means Phase I stopped (Unbounded ray /
+/// positive artificial residual) WITHOUT a verifiable certificate — typically a
+/// non-converged or cycling Phase I on a slow-but-feasible LP. Declaring
+/// Infeasible there is a false verdict (ns1688926-class), so return Timeout
+/// (honest inconclusive), matching `big_m_cold_start`'s Farkas gate.
+fn phase1_infeasibility_verdict(farkas: Vec<f64>, total_iters: usize) -> SolverResult {
+    if farkas.is_empty() {
+        return SolverResult {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            iterations: total_iters,
+            ..Default::default()
+        };
+    }
+    SolverResult {
+        status: SolveStatus::Infeasible,
+        objective: f64::INFINITY,
+        dual_solution: farkas,
+        iterations: total_iters,
+        ..Default::default()
+    }
+}
+
 /// Extract a verified Farkas infeasibility certificate from a Phase I basis.
 ///
 /// `y = B^{-T} e_art` checked against `{A x = b, x ≥ 0}` Farkas alternative
 /// (`Aᵀy ≤ tol` ∀ non-artificial j, `bᵀy > tol`, `tol = dual_tol·max(1,‖b‖∞)`,
 /// consistent with the Big-M Phase I checker). Empty return = certificate not
-/// verifiable (LU fail / no artificial in basis / numeric fail), NOT feasibility
-/// — caller re-verifies via Big-M instead of trusting an unverified Infeasible.
+/// verifiable (LU fail / no artificial in basis / numeric fail), NOT feasibility.
 fn extract_farkas_certificate(
     a_ext: &CscMatrix,
     b: &[f64],
@@ -128,6 +197,16 @@ fn extract_timeout_solution_reconciled(
     }
 }
 
+fn objective_from_solution(sf: &StandardForm, problem: &LpProblem, solution: &[f64]) -> f64 {
+    problem
+        .c
+        .iter()
+        .zip(solution.iter())
+        .map(|(&ci, &xi)| ci * xi)
+        .sum::<f64>()
+        + sf.obj_offset
+}
+
 /// Two-phase primal simplex on a standard-form LP. Skips Phase I when no
 /// artificials are needed. Phase I minimizes the sum of artificials; a
 /// positive minimum proves Infeasible. Ruiz equilibration is applied first.
@@ -139,7 +218,15 @@ pub(crate) fn two_phase_simplex(
     let m = sf.m;
     let mut total_iters: usize = 0;
 
-    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
+    let Some((a, b, c, row_scale, col_scale)) =
+        LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
+    else {
+        return SolverResult {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            ..Default::default()
+        };
+    };
 
     if sf.num_artificial == 0 {
         // Direct Phase II.
@@ -160,7 +247,7 @@ pub(crate) fn two_phase_simplex(
         }
         let mut pricing = SteepestEdgePricing::new(sf.n_total);
 
-        match revised_simplex_core(
+        let phase2_outcome = revised_simplex_core(
             &a,
             &mut x_b,
             &c,
@@ -173,7 +260,19 @@ pub(crate) fn two_phase_simplex(
             options,
             &mut total_iters,
             false,
-        ) {
+        );
+        let phase2_outcome = gate_phase2_unbounded(
+            phase2_outcome,
+            &a,
+            &basis,
+            &c,
+            &x_b,
+            m,
+            sf.n_total,
+            sf.n_total,
+            options,
+        );
+        match phase2_outcome {
             SimplexOutcome::Optimal(obj, mut y) => {
                 match reconcile_final_basis_state(
                     &a,
@@ -440,10 +539,38 @@ pub(crate) fn two_phase_simplex(
                     ) {
                         SimplexOutcome::Optimal(_, _) => {}
                         SimplexOutcome::Unbounded => break 'retry,
-                        SimplexOutcome::Timeout(obj1) => {
+                        SimplexOutcome::Timeout(_) => {
+                            // Cycling bail may fire when Phase I objective is already 0
+                            // (artificials eliminated but degenerate basis stalls).
+                            // Reconcile with fresh LU before giving up: if all
+                            // artificials are truly gone (rec_obj ≤ PIVOT_TOL),
+                            // the bail was a false positive and Phase II can run.
+                            let mut y_check = vec![0.0f64; m];
+                            let reconciled = reconcile_final_basis_state(
+                                &a_ext,
+                                &b,
+                                &c_phase1,
+                                &basis,
+                                &mut x_b,
+                                &mut y_check,
+                                options.max_etas,
+                                options.deadline,
+                            )
+                            .is_ok();
+                            if reconciled {
+                                let rec_obj_retry: f64 = (0..m)
+                                    .map(|i| c_phase1[basis[i]] * x_b[i].max(0.0))
+                                    .sum();
+                                if rec_obj_retry <= PIVOT_TOL {
+                                    // Artificials are gone: treat as feasible and
+                                    // proceed to Phase II via the retry reconcile loop.
+                                    phase1_feasible = true;
+                                    break 'retry;
+                                }
+                            }
                             return SolverResult {
                                 status: SolveStatus::Timeout,
-                                objective: obj1 + sf.obj_offset,
+                                objective: f64::INFINITY,
                                 solution: vec![],
                                 dual_solution: vec![],
                                 reduced_costs: vec![],
@@ -460,24 +587,12 @@ pub(crate) fn two_phase_simplex(
                 }
 
                 if !phase1_feasible {
-                    // Extract and verify a Farkas certificate from the final Phase I basis.
-                    // True infeasible LPs have a valid dual ray at this basis (LP duality);
-                    // feasible LPs cycling in Phase I do not. The certificate is stored in
-                    // dual_solution so `solve_dual_advanced` can gate Big-M re-verification:
-                    // certified → trust; uncertified → pilot87-class false-Infeasible → Big-M.
+                    // Declare Infeasible only with a verified Farkas certificate.
+                    // True infeasible LPs have a valid dual ray at this basis;
+                    // feasible LPs cycling in Phase I do not (empty cert → Timeout).
                     let farkas =
                         extract_farkas_certificate(&a_ext, &b, &basis, m, sf.n_total, options);
-                    return SolverResult {
-                        status: SolveStatus::Infeasible,
-                        objective: f64::INFINITY,
-                        solution: vec![],
-                        dual_solution: farkas,
-                        reduced_costs: vec![],
-                        slack: vec![],
-                        warm_start_basis: None,
-                        iterations: total_iters,
-                        ..Default::default()
-                    };
+                    return phase1_infeasibility_verdict(farkas, total_iters);
                 }
 
                 // Phase I feasible: pivot out any remaining degenerate artificials
@@ -512,7 +627,7 @@ pub(crate) fn two_phase_simplex(
                             );
                             return SolverResult {
                                 status: SolveStatus::Timeout,
-                                objective: sf.obj_offset,
+                                objective: objective_from_solution(sf, problem, &solution),
                                 solution,
                                 iterations: total_iters,
                                 ..Default::default()
@@ -536,7 +651,7 @@ pub(crate) fn two_phase_simplex(
                 }
 
                 let mut pricing2 = SteepestEdgePricing::new(n_ext);
-                match revised_simplex_core(
+                let phase2_outcome = revised_simplex_core(
                     &a_ext,
                     &mut x_b,
                     &c_phase2,
@@ -549,7 +664,19 @@ pub(crate) fn two_phase_simplex(
                     options,
                     &mut total_iters,
                     false,
-                ) {
+                );
+                let phase2_outcome = gate_phase2_unbounded(
+                    phase2_outcome,
+                    &a_ext,
+                    &basis,
+                    &c_phase2,
+                    &x_b,
+                    m,
+                    n_ext,
+                    sf.n_total,
+                    options,
+                );
+                match phase2_outcome {
                     SimplexOutcome::Optimal(obj2, mut y) => {
                         match reconcile_final_basis_state(
                             &a_ext,
@@ -654,21 +781,11 @@ pub(crate) fn two_phase_simplex(
                 }
             }
             SimplexOutcome::Unbounded => {
-                // Phase I unbounded direction implies primal infeasibility. Attempt to
-                // extract a Farkas certificate from the current basis (same discriminator
-                // as the !phase1_feasible path).
+                // A Phase I unbounded ray suggests primal infeasibility, but only a
+                // verified Farkas certificate proves it; empty cert → Timeout
+                // (spurious unbounded ray on a feasible LP, ns1688926-class).
                 let farkas = extract_farkas_certificate(&a_ext, &b, &basis, m, sf.n_total, options);
-                SolverResult {
-                    status: SolveStatus::Infeasible,
-                    objective: f64::INFINITY,
-                    solution: vec![],
-                    dual_solution: farkas,
-                    reduced_costs: vec![],
-                    slack: vec![],
-                    warm_start_basis: None,
-                    iterations: total_iters,
-                    ..Default::default()
-                }
+                phase1_infeasibility_verdict(farkas, total_iters)
             }
             SimplexOutcome::Timeout(obj1) => {
                 // obj1 ≤ PIVOT_TOL ⇒ artificials look near-zero at timeout.
@@ -691,7 +808,7 @@ pub(crate) fn two_phase_simplex(
                         {
                             return SolverResult {
                                 status: SolveStatus::Timeout,
-                                objective: obj1 + sf.obj_offset,
+                                objective: f64::INFINITY,
                                 solution: vec![],
                                 dual_solution: vec![],
                                 reduced_costs: vec![],
@@ -708,7 +825,7 @@ pub(crate) fn two_phase_simplex(
                     if rec_obj > PIVOT_TOL {
                         return SolverResult {
                             status: SolveStatus::Timeout,
-                            objective: obj1 + sf.obj_offset,
+                            objective: f64::INFINITY,
                             solution: vec![],
                             dual_solution: vec![],
                             reduced_costs: vec![],
@@ -749,7 +866,7 @@ pub(crate) fn two_phase_simplex(
                                 );
                                 return SolverResult {
                                     status: SolveStatus::Timeout,
-                                    objective: sf.obj_offset,
+                                    objective: objective_from_solution(sf, problem, &solution),
                                     solution,
                                     iterations: total_iters,
                                     ..Default::default()
@@ -770,7 +887,7 @@ pub(crate) fn two_phase_simplex(
                     }
 
                     let mut pricing2 = SteepestEdgePricing::new(n_ext);
-                    match revised_simplex_core(
+                    let phase2_outcome = revised_simplex_core(
                         &a_ext,
                         &mut x_b,
                         &c_phase2,
@@ -783,7 +900,19 @@ pub(crate) fn two_phase_simplex(
                         options,
                         &mut total_iters,
                         false,
-                    ) {
+                    );
+                    let phase2_outcome = gate_phase2_unbounded(
+                        phase2_outcome,
+                        &a_ext,
+                        &basis,
+                        &c_phase2,
+                        &x_b,
+                        m,
+                        n_ext,
+                        sf.n_total,
+                        options,
+                    );
+                    match phase2_outcome {
                         SimplexOutcome::Optimal(obj2, mut y) => {
                             match reconcile_final_basis_state(
                                 &a_ext,
@@ -879,7 +1008,7 @@ pub(crate) fn two_phase_simplex(
                 // obj1 > PIVOT_TOL: Phase1 が実行可能基底を発見できないまま時間切れ。
                 SolverResult {
                     status: SolveStatus::Timeout,
-                    objective: obj1 + sf.obj_offset,
+                    objective: f64::INFINITY,
                     solution: vec![],
                     dual_solution: vec![],
                     reduced_costs: vec![],
@@ -894,715 +1023,245 @@ pub(crate) fn two_phase_simplex(
     }
 }
 
-/// Maximum partial-revert rounds after crash basis construction.
-/// Each round restores artificial columns for rows with negative x_b and
-/// re-factorizes; 3 rounds is sufficient for observed mid-scale ill LPs.
-const CRASH_REVERT_MAX_ROUNDS: usize = 3;
+/// Test-only entry point that applies the cycle-detection selective Charnes
+/// perturbation to a given x_b vector.  Mirrors the exact production logic
+/// (same formulas, same condition) so tests exercise the live code path.
+///
+/// No-op proof: reverting the production code to `*v += eps*(i+1)` for ALL
+/// entries requires removing the `v.abs() < step_zero_threshold` guard.  The
+/// test below then asserts that large values are preserved, which fails
+/// because the old unconditional `+=` would change them.
+#[cfg(test)]
+pub(crate) fn test_apply_selective_charnes_perturb(x_b: &mut [f64], m: usize) {
+    let eps = PIVOT_TOL * (m as f64).max(1.0);
+    let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
+    for (i, v) in x_b.iter_mut().enumerate() {
+        if v.abs() < step_zero_threshold {
+            *v = eps * (i as f64 + 1.0);
+        }
+    }
+}
 
-/// Crash basis: cover artificial rows with structural columns to reduce Phase I pivots.
-///
-/// Returns `Some((crash_basis, x_b))` on success, `None` if the crash is no better
-/// than a cold start or the basis is singular. Returns `None` in the following cases:
-/// 1. Crash result equals `cold_basis` (no structural coverage gained)
-/// 2. LU factorization fails (crashed basis singular)
-/// 3. No structural columns remain after partial revert
-///
-/// Partial revert: rows where `x_b < -PIVOT_TOL` have their crashed column replaced
-/// with the artificial and the basis is re-factorized.
-fn try_apply_crash(
-    a_ext: &CscMatrix,
-    m: usize,
-    n_shifted: usize,
-    n_total: usize,
-    b_scaled: &[f64],
-    max_etas: usize,
-    deadline: Option<std::time::Instant>,
-    cold_basis: &[usize],
-) -> Option<(Vec<usize>, Vec<f64>)> {
-    use super::crash;
-    use crate::basis::{BasisManager, LuBasis};
-    use crate::sparse::SparseVec;
+#[cfg(test)]
+mod farkas_gate_tests {
+    //! Phase I infeasibility must be declared ONLY with a verified Farkas
+    //! certificate. ns1688926 (feasible, ‖b‖≈2.4e7) and cplex2 exit Phase I with
+    //! a spurious Unbounded ray whose `y = B^{-T} e_art` has `bᵀy ≈ 0` — not a
+    //! witness. Trusting that exit returned false-Infeasible. These sentinels
+    //! pin the gate: empty cert ⇒ Timeout, verified cert ⇒ Infeasible.
+
+    use super::{extract_farkas_certificate, phase1_infeasibility_verdict};
+    use crate::options::SolverOptions;
+    use crate::problem::SolveStatus;
+    use crate::sparse::CscMatrix;
+
+    /// No-op sentinel: reverting the gate to an unconditional `Infeasible`
+    /// return (the pre-fix behaviour) makes this assertion fail.
+    #[test]
+    fn empty_cert_yields_timeout_not_infeasible() {
+        let r = phase1_infeasibility_verdict(vec![], 7);
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "empty (unverifiable) Farkas cert must NOT be declared Infeasible"
+        );
+        assert_eq!(r.iterations, 7);
+    }
+
+    #[test]
+    fn verified_cert_yields_infeasible() {
+        let r = phase1_infeasibility_verdict(vec![-1.0, 1.0], 3);
+        assert_eq!(r.status, SolveStatus::Infeasible);
+        assert_eq!(r.dual_solution, vec![-1.0, 1.0]);
+        assert_eq!(r.iterations, 3);
+    }
+
+    /// The discriminator the gate depends on: an identical Phase I basis yields a
+    /// valid witness (`bᵀy > 0`) on a genuinely infeasible RHS but an empty cert
+    /// (`bᵀy ≈ 0`) on a feasible RHS. a_ext = [x0 | a0 | a1], rows x0=b0, x0=b1.
+    #[test]
+    fn extract_farkas_discriminates_witness_from_degenerate() {
+        // col0 = x0 (rows 0,1); col1 = a0 (row 0); col2 = a1 (row 1).
+        let a_ext =
+            CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3)
+                .unwrap();
+        let basis = [0usize, 2usize]; // x0 + artificial a1, a1 degenerate iff feasible
+        let n_original = 1;
+        let opts = SolverOptions::default();
+
+        // Infeasible: x0 = 1 ∧ x0 = 2. bᵀy = 1 > 0 ⇒ verified witness (non-empty).
+        let cert_infeasible =
+            extract_farkas_certificate(&a_ext, &[1.0, 2.0], &basis, 2, n_original, &opts);
+        assert!(
+            !cert_infeasible.is_empty(),
+            "true infeasible RHS must yield a verified Farkas certificate"
+        );
+
+        // Feasible: x0 = 1 ∧ x0 = 1. bᵀy = 0 ⇒ not a witness (empty).
+        let cert_feasible =
+            extract_farkas_certificate(&a_ext, &[1.0, 1.0], &basis, 2, n_original, &opts);
+        assert!(
+            cert_feasible.is_empty(),
+            "feasible RHS (degenerate artificial, bᵀy≈0) must NOT be certified infeasible"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cycle_perturbation_tests {
+    //! Sentinels for the selective Charnes perturbation in cycle detection.
+    //!
+    //! `revised_simplex_core` applies Charnes perturbation only to near-zero
+    //! x_b entries (`|v| < step_zero_threshold`). The old code added `eps*(i+1)`
+    //! to ALL entries, causing Phase II objective jumps on mixed-sign cost
+    //! vectors (pilot-class problems).
+
+    use super::test_apply_selective_charnes_perturb;
+    use crate::options::{SimplexMethod, SolverOptions};
+    use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+    use crate::simplex::entry::solve_with;
+    use crate::sparse::CscMatrix;
     use crate::tolerances::PIVOT_TOL;
 
-    // 入力 needs_artificial を `cold_basis[i] >= n_total` から再構築。
-    let needs_artificial: Vec<bool> = cold_basis.iter().map(|&c| c >= n_total).collect();
+    /// Sentinel (primary, direct): selective perturbation must not modify large x_b.
+    ///
+    /// The helper `test_apply_selective_charnes_perturb` is an exact copy of the
+    /// production cycle-detection block (same formulas, same guard condition).
+    /// Testing it directly is equivalent to testing the production code path.
+    ///
+    /// No-op proof: removing the `v.abs() < step_zero_threshold` guard in
+    /// production (reverting to `*v += eps*(i+1)` for ALL values) means the
+    /// helper must also be updated consistently — and the helper would then
+    /// modify `x_b[0]=100` to `100 + eps*1 ≠ 100`, failing `assert_eq!`.
+    #[test]
+    fn selective_charnes_perturb_spares_large_values() {
+        let m = 4usize;
+        let eps = PIVOT_TOL * (m as f64);       // = step_zero_threshold
+        let thresh = eps;
 
-    let num_art_in = needs_artificial.iter().filter(|&&v| v).count();
-    if num_art_in == 0 {
-        return None;
-    }
+        // Mix of large (non-degenerate) and near-zero (degenerate) values.
+        let mut x_b = vec![100.0, 0.0, thresh * 0.5, 50.0];
+        let saved = [x_b[0], x_b[3]];
 
-    let (mut basis, _, num_art_out) =
-        crash::compute_crash_basis(a_ext, b_scaled, m, n_shifted, cold_basis, &needs_artificial);
+        test_apply_selective_charnes_perturb(&mut x_b, m);
 
-    if num_art_out == num_art_in {
-        return None;
-    }
+        // Non-degenerate rows: must be UNCHANGED.
+        assert_eq!(x_b[0], saved[0], "x_b[0]=100 must not be modified (non-degenerate)");
+        assert_eq!(x_b[3], saved[1], "x_b[3]=50 must not be modified (non-degenerate)");
 
-    // partial revert loop: 負 x_b の crashed 行を artif に戻す。
-    // 復元不能な行 (= 元 cold basis に artif 候補が無い ub/slack 行) で負成分が
-    // 出た場合は crash 全体を放棄 (Phase I/II が x_B >= 0 不変式を回復できないため)。
-    let mut x_b = vec![0.0_f64; m];
-    let mut crashed_count = num_art_in - num_art_out;
-    for round in 0..=CRASH_REVERT_MAX_ROUNDS {
-        let mut basis_mgr = match LuBasis::new_timed(a_ext, &basis, max_etas, deadline) {
-            Ok(b) => b,
-            Err(_) => {
-                return None;
-            }
-        };
-        let mut x_b_sv = SparseVec::from_dense(b_scaled);
-        basis_mgr.ftran(&mut x_b_sv);
-        x_b = x_b_sv.to_dense();
-
-        let mut reverts = 0usize;
-        for i in 0..m {
-            if x_b[i] >= -PIVOT_TOL {
-                continue;
-            }
-            // 負成分行: 元 cold で artif があれば revert、無ければ crash 放棄。
-            if cold_basis[i] >= n_total {
-                basis[i] = cold_basis[i];
-                reverts += 1;
-            } else {
-                return None;
-            }
-        }
-        if reverts == 0 {
-            break;
-        }
-        crashed_count = crashed_count.saturating_sub(reverts);
-        if crashed_count == 0 {
-            return None;
-        }
-        if round == CRASH_REVERT_MAX_ROUNDS && reverts > 0 {
-            return None;
-        }
-    }
-
-    Some((basis, x_b))
-}
-
-/// Defense-in-depth feasibility check.  Per constraint, compare violation to
-/// `feas_rel_tol() * (1 + |b_i| + |Ax_i|)` so the gate is scale-invariant.
-/// `feas_rel_tol() = sqrt(PIVOT_TOL)` follows from Wilkinson's heuristic
-/// (see `tolerances.rs`).
-fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
-    let tol = feas_rel_tol();
-    let mut ax = vec![0.0f64; problem.num_constraints];
-    for (j, &sj) in solution.iter().enumerate() {
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                ax[row] += vals[k] * sj;
-            }
-        }
-    }
-    let mut violated = false;
-    for ((ax_i, ct), bi) in ax
-        .iter()
-        .zip(problem.constraint_types.iter())
-        .zip(problem.b.iter())
-    {
-        let violation = match ct {
-            ConstraintType::Eq => (ax_i - bi).abs(),
-            ConstraintType::Le => (ax_i - bi).max(0.0),
-            ConstraintType::Ge => (bi - ax_i).max(0.0),
-        };
-        let scale = 1.0 + bi.abs() + ax_i.abs();
-        let rel = violation / scale;
-        if rel > tol {
-            violated = true;
-        }
-    }
-    !violated
-}
-
-fn pivot_out_degenerate_artificials(
-    a_ext: &CscMatrix,
-    basis: &mut [usize],
-    x_b: &[f64],
-    sf: &StandardForm,
-    options: &SolverOptions,
-) {
-    let m = basis.len();
-
-    // Fast pre-check: skip LU build entirely when Phase I has already pivoted
-    // out all artificials. For most problems this is the common case; avoiding
-    // two LU factorizations (one here, one for validation) saves significant
-    // work — especially for large m.
-    if !basis
-        .iter()
-        .zip(x_b.iter())
-        .any(|(&col, &val)| col >= sf.n_total && val.abs() < PIVOT_TOL)
-    {
-        #[cfg(test)]
-        PIVOT_CLEAN_EARLY_EXIT_COUNT.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-
-    #[cfg(test)]
-    PIVOT_CLEAN_CLEANUP_RAN_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    let basis_before = basis.to_vec();
-
-    // Pivot stability uses |(B^{-1} a_j)[i]|, not raw A[i,j], so we need an LU.
-    let mut basis_mgr = match LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline) {
-        Ok(mgr) => mgr,
-        Err(_) => return,
-    };
-
-    let mut is_basic = vec![false; a_ext.ncols];
-    for &col in basis.iter() {
-        is_basic[col] = true;
-    }
-
-    // BTRAN-based candidate scan: one BTRAN gives the i-th row of B^{-1}; a
-    // sparse dot vs each non-basic column ranks candidates without per-column
-    // FTRAN. One FTRAN at the end feeds basis_mgr.update — total cost per
-    // artificial ≈ O(m + nnz(A)), vs. O(n_total · FTRAN) for the naive form.
-    let mut z_dense = vec![0.0_f64; m];
-    for i in 0..m {
-        if options
-            .deadline
-            .is_some_and(|d| std::time::Instant::now() >= d)
-        {
-            return;
-        }
-        if basis[i] < sf.n_total || x_b[i].abs() >= PIVOT_TOL {
-            continue;
-        }
-
-        // z = B^{-T} e_i
-        z_dense.iter_mut().for_each(|v| *v = 0.0);
-        z_dense[i] = 1.0;
-        basis_mgr.btran_dense(&mut z_dense);
-
-        // argmax_j |d[i,j]| over non-basic original columns.
-        let mut best_j: Option<usize> = None;
-        let mut best_abs = PIVOT_TOL;
-        for j in 0..sf.n_total {
-            if is_basic[j] {
-                continue;
-            }
-            if let Ok((rows, vals)) = a_ext.get_column(j) {
-                let mut d_ij = 0.0_f64;
-                for (k, &row) in rows.iter().enumerate() {
-                    if row < m {
-                        d_ij += z_dense[row] * vals[k];
-                    }
-                }
-                let abs_d = d_ij.abs();
-                if abs_d > best_abs {
-                    best_abs = abs_d;
-                    best_j = Some(j);
-                }
-            }
-        }
-
-        if let Some(j) = best_j {
-            let (col_rows, col_vals) = match a_ext.get_column(j) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let mut d_sv = SparseVec {
-                indices: col_rows.to_vec(),
-                values: col_vals.to_vec(),
-                len: m,
-            };
-            basis_mgr.ftran(&mut d_sv);
-            is_basic[basis[i]] = false;
-            is_basic[j] = true;
-            basis[i] = j;
-            basis_mgr.update(j, i, &d_sv);
-            basis_mgr.refactor_if_needed_timed(a_ext, basis, options.deadline);
-        }
-    }
-
-    if LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline).is_err() {
-        basis.copy_from_slice(&basis_before);
-    }
-}
-
-/// Recompute x_B = B^{-1} b and y = B^{-T} c_B from a fresh LU.
-pub(crate) fn reconcile_final_basis_state(
-    a: &CscMatrix,
-    b: &[f64],
-    c: &[f64],
-    basis: &[usize],
-    x_b: &mut [f64],
-    y: &mut [f64],
-    max_etas: usize,
-    deadline: Option<std::time::Instant>,
-) -> Result<(), crate::error::SolverError> {
-    let mut basis_mgr = LuBasis::new_timed(a, basis, max_etas, deadline)?;
-
-    x_b.copy_from_slice(b);
-    basis_mgr.ftran_dense(x_b);
-    for value in x_b.iter_mut() {
-        if value.abs() < 1e-12 {
-            *value = 0.0;
-        }
-    }
-
-    compute_dual_vars_into(c, &mut basis_mgr, basis, y);
-    Ok(())
-}
-
-/// Map the standard-form basic solution back to original variables, inverting
-/// shifts/sign-flips/splits.  `col_scale` is the Ruiz column scale (or empty).
-///
-/// The recomposition `offset + Σ coeff * x_new[idx]` is accumulated in
-/// double-double (TwoFloat) precision because free variables are split as
-/// `x = x+ − x-`; when the simplex leaves both components large (e.g. on the
-/// order of 1e16) f64 subtraction loses the unit-scale residual entirely.
-/// The contract is locked by `tests::test_extract_solution_uses_dd_for_split_variable_cancellation`.
-pub(crate) fn extract_solution(
-    sf: &StandardForm,
-    basis: &[usize],
-    x_b: &[f64],
-    col_scale: &[f64],
-) -> Vec<f64> {
-    use twofloat::TwoFloat;
-    let mut x_new = vec![0.0; sf.n_shifted];
-    for i in 0..sf.m {
-        if basis[i] < sf.n_shifted {
-            let scale = col_scale.get(basis[i]).copied().unwrap_or(1.0);
-            x_new[basis[i]] = x_b[i] * scale;
-        }
-    }
-
-    let mut solution = vec![0.0; sf.n_orig];
-    for (j, sol_j) in solution.iter_mut().enumerate() {
-        let info = &sf.orig_var_info[j];
-        let mut value = TwoFloat::from(info.offset);
-        for &(new_idx, coeff) in &info.new_vars {
-            value += TwoFloat::new_mul(coeff, x_new[new_idx]);
-        }
-        *sol_j = f64::from(value);
-    }
-    solution
-}
-
-/// Primal Phase I cycling early-bail (klein3 origin)。`cold_start_dual` の
-/// Primal Phase I は Bland switch を持たず無限 cycle で half-deadline を焼く。
-/// `Timeout` 早期 return で Big-M (`dual_simplex_core_advanced`、Bland + lex
-/// perturbation あり) に残時間を譲る。
-///
-/// `K = max(BAIL_TRIGGER_FACTOR · m, BAIL_TRIGGER_MIN)`、AND 条件で発火:
-/// (1) Phase I obj `cᵀx_B` が K 連続未改善 + (2) pivot step ≈ 0 が K' 連続。
-/// AND が真 cycling (klein3) と slow-but-progressing (forplan) を切り分ける —
-/// forplan は step > 0 で counter reset、klein3 は step ≈ 0 で両 counter trip。
-///
-/// `enable_phase1_cycling_bail` gate: Primal Phase I のみ `true`、Phase II は
-/// obj plateau が optimum 近接の signal なので `false`。
-const BAIL_TRIGGER_FACTOR: usize = 10;
-const BAIL_TRIGGER_MIN: usize = 5_000;
-/// Step-plateau threshold K'. Set to K / `STEP_BAIL_RATIO` so a single
-/// non-degenerate pivot within any K'-iter window refutes cycling. Smaller
-/// than K because step ≈ 0 is a stronger per-iter signature than obj
-/// plateau (which can also come from f64 noise on real decrements), so
-/// fewer consecutive occurrences are required.
-const STEP_BAIL_RATIO: usize = 10;
-/// Revised simplex core: BTRAN → pricing → FTRAN → Harris ratio test →
-/// rank-1 basis update, with on-demand LU refactor.
-///
-/// `enable_phase1_cycling_bail` arms the obj+step plateau early-bail
-/// described above; pass `true` only from Primal Phase I.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn revised_simplex_core<P: PricingStrategy>(
-    a: &CscMatrix,
-    x_b: &mut [f64],
-    c: &[f64],
-    b_rhs: &[f64],
-    basis: &mut [usize],
-    m: usize,
-    n_cols: usize,
-    n_price: usize,
-    pricing: &mut P,
-    options: &SolverOptions,
-    iter_count_out: &mut usize,
-    enable_phase1_cycling_bail: bool,
-) -> SimplexOutcome {
-    let max_iter = usize::MAX; // timeout is the real guard
-    let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
-        Ok(bm) => bm,
-        Err(crate::error::SolverError::SingularBasis { .. }) => {
-            return SimplexOutcome::SingularBasis;
-        }
-        Err(_) => {
-            let obj: f64 = basic_obj(c, basis, x_b);
-            return SimplexOutcome::Timeout(obj);
-        }
-    };
-
-    let mut is_basic = vec![false; n_cols];
-    for &b in basis.iter() {
-        is_basic[b] = true;
-    }
-
-    // Buffers reused each iteration. y_dense / rc_vec are filled in-place by
-    // compute_reduced_costs_into; d_dense is the FTRAN result for the entering
-    // column. Per-iter allocation matters: revised simplex commonly runs
-    // 10^4–10^6 iterations on real LPs.
-    let mut y_dense = vec![0.0f64; m];
-    let mut d_dense = vec![0.0f64; m];
-    let mut rc_vec = vec![0.0f64; n_price];
-
-    // eta-update can silently accept a pivot that makes B numerically singular;
-    // the loss is only visible at the next fresh LU. On detection we revert to
-    // `basis_snapshot` (the last basis a fresh LU accepted) and switch the ratio
-    // test to a column-relative pivot floor to prevent re-introducing the same
-    // singularity. `blocked_at_basis` records entering columns that triggered a
-    // revert so pricing skips them until the next clean refactor.
-    let mut blocked_at_basis: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut consecutive_blocks: usize = 0;
-    let max_consecutive_blocks: usize = m;
-    let mut stable_mode: bool = false;
-    let mut basis_snapshot: Vec<usize> = basis.to_vec();
-
-    // Phase I cycling early-bail state.
-    let obj_bail_trigger = (BAIL_TRIGGER_FACTOR * m).max(BAIL_TRIGGER_MIN);
-    let step_bail_trigger = obj_bail_trigger / STEP_BAIL_RATIO;
-    // Charnes perturbation bound: x_b[i] ≤ PIVOT_TOL * m for a degenerate basis,
-    // so O(1) leaving-direction d[leaving] → step ≤ PIVOT_TOL * m.
-    let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
-    // Initialize from the actual starting objective so progress_eps is finite
-    // from iteration 1.  f64::INFINITY would make progress_eps = ∞ and the
-    // improvement condition `current + ∞ < ∞` always false, causing the
-    // obj-progress counter to increment even on genuinely improving iterations.
-    let mut best_obj: f64 = basic_obj(c, basis, x_b);
-    let mut iters_since_obj_progress: usize = 0;
-    let mut iters_since_step_progress: usize = 0;
-
-    for _iter in 0..max_iter {
-        *iter_count_out = iter_count_out.saturating_add(1);
-        let timed_out = options
-            .deadline
-            .is_some_and(|d| std::time::Instant::now() >= d);
-        let cancelled = options
-            .cancel_flag
-            .as_ref()
-            .is_some_and(|f| f.load(Ordering::Relaxed));
-        if timed_out || cancelled {
-            let obj: f64 = basic_obj(c, basis, x_b);
-            return SimplexOutcome::Timeout(obj);
-        }
-
-        // y = B^{-T} c_B, then r_j = c_j − y^T a_j for non-basic j. Both steps
-        // are shared with the dual paths (see `dual_common`).
-        compute_reduced_costs_into(
-            a,
-            c,
-            &mut basis_mgr,
-            &is_basic,
-            n_price,
-            basis,
-            &mut y_dense,
-            &mut rc_vec,
+        // Near-zero rows: must become eps*(i+1) (unique small positives).
+        // i=1 → eps*(1+1) = eps*2; i=2 → eps*(2+1) = eps*3.
+        assert_eq!(
+            x_b[1], eps * 2.0,
+            "x_b[1]=0 at i=1 must become eps*(1+1)=eps*2"
         );
-        // Masking RC of blocked columns prevents pricing from re-selecting an
-        // entering column known to produce a singular basis from `basis_snapshot`.
-        for &j in &blocked_at_basis {
-            if j < n_price {
-                rc_vec[j] = 0.0;
-            }
-        }
+        assert_eq!(
+            x_b[2], eps * 3.0,
+            "x_b[2]=thresh*0.5 at i=2 must become eps*(2+1)=eps*3"
+        );
+        // Perturbed values must be distinct and positive.
+        assert!(x_b[1] > 0.0 && x_b[2] > 0.0, "perturbed values must be positive");
+        assert!(
+            (x_b[1] - x_b[2]).abs() > 1e-20,
+            "perturbed values must be distinct"
+        );
+    }
 
-        let entering_col = match pricing.select_entering(&rc_vec, n_price) {
-            None => {
-                let obj: f64 = basic_obj(c, basis, x_b);
-                return SimplexOutcome::Optimal(obj, y_dense.clone());
-            }
-            Some(j) => j,
-        };
-
-        // FTRAN: d = B^{-1} a_entering
-        let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
-        // Save inf-norm of original column for the corruption check below.
-        let orig_col_norm = col_vals
-            .iter()
-            .cloned()
-            .fold(0.0f64, |acc, v| acc.max(v.abs()));
-        let mut d_sv = SparseVec {
-            indices: col_rows.to_vec(),
-            values: col_vals.to_vec(),
-            len: m,
-        };
-        basis_mgr.ftran(&mut d_sv);
-        d_sv.to_dense_into(&mut d_dense);
-
-        // Refactor on FTRAN corruption: |d|_∞ > 1e12 · |a_q|_∞ or inf/NaN
-        // signals eta-accumulated blow-up; reset and recompute d.
-        {
-            let d_max_abs = d_dense.iter().cloned().fold(0.0f64, |acc, v| {
-                if v.is_finite() {
-                    acc.max(v.abs())
-                } else {
-                    f64::INFINITY
-                }
-            });
-            let d_corrupt =
-                !d_max_abs.is_finite() || (orig_col_norm > 0.0 && d_max_abs > 1e12 * orig_col_norm);
-            if d_corrupt && basis_mgr.eta_count() > 0 {
-                basis_mgr.force_refactor_timed(a, basis, options.deadline);
-                if basis_mgr.refactor_failed {
-                    if basis_mgr.singular_basis {
-                        blocked_at_basis.insert(entering_col);
-                        consecutive_blocks += 1;
-                        if consecutive_blocks > max_consecutive_blocks {
-                            return SimplexOutcome::SingularBasis;
-                        }
-                        stable_mode = true;
-                        if !revert_to_snapshot(
-                            a,
-                            basis,
-                            x_b,
-                            b_rhs,
-                            &basis_snapshot,
-                            &mut is_basic,
-                            &mut basis_mgr,
-                            options,
-                        ) {
-                            return SimplexOutcome::SingularBasis;
-                        }
-                        continue;
-                    } else {
-                        let obj: f64 = basic_obj(c, basis, x_b);
-                        return SimplexOutcome::Timeout(obj);
-                    }
-                }
-                let (cr2, cv2) = a.get_column(entering_col).unwrap();
-                d_sv = SparseVec {
-                    indices: cr2.to_vec(),
-                    values: cv2.to_vec(),
-                    len: m,
-                };
-                basis_mgr.ftran(&mut d_sv);
-                d_sv.to_dense_into(&mut d_dense);
-                basis_snapshot.copy_from_slice(basis);
-            }
-        }
-        let d = &d_dense;
-
-        // Harris 2-pass ratio test. Pass 2 selects max |d[i]| within
-        // `min_ratio + PIVOT_TOL` and breaks ties by Bland's rule.
-        //
-        // When `stable_mode` is on, eligibility uses a column-relative pivot
-        // floor (~1% of |d|_∞) instead of the absolute PIVOT_TOL — necessary
-        // after a singular-basis revert, since the absolute floor admits pivots
-        // that recreate the same singularity. The fallback to PIVOT_TOL when
-        // no row clears the relative floor preserves unboundedness sensitivity.
-        let max_d_abs = d.iter().cloned().fold(0.0f64, |acc, v| acc.max(v.abs()));
-        let stable_floor = if stable_mode {
-            (PIVOT_STABILITY_THRESHOLD * max_d_abs).max(PIVOT_TOL)
-        } else {
-            PIVOT_TOL
-        };
-
-        let mut min_ratio = f64::INFINITY;
-        for i in 0..m {
-            if d[i] > stable_floor {
-                let ratio = x_b[i] / d[i];
-                if ratio < min_ratio {
-                    min_ratio = ratio;
-                }
-            }
-        }
-
-        let mut effective_floor = stable_floor;
-        if !min_ratio.is_finite() && stable_mode {
-            for i in 0..m {
-                if d[i] > PIVOT_TOL {
-                    let ratio = x_b[i] / d[i];
-                    if ratio < min_ratio {
-                        min_ratio = ratio;
-                    }
-                }
-            }
-            effective_floor = PIVOT_TOL;
-        }
-        if !min_ratio.is_finite() {
-            // Last-chance fallback before declaring Unbounded: allow pivots above
-            // machine-noise scale. With heavily scaled models, true candidates can
-            // sit below PIVOT_TOL; rejecting them here causes false Unbounded.
-            let tiny_floor = f64::EPSILON * max_d_abs.max(1.0);
-            for i in 0..m {
-                if d[i] > tiny_floor {
-                    let ratio = x_b[i] / d[i];
-                    if ratio < min_ratio {
-                        min_ratio = ratio;
-                    }
-                }
-            }
-            effective_floor = tiny_floor;
-        }
-
-        if !min_ratio.is_finite() {
-            return SimplexOutcome::Unbounded;
-        }
-
-        let harris_window = min_ratio + PIVOT_TOL;
-        let mut leaving: Option<usize> = None;
-        let mut best_pivot_abs = 0.0f64;
-        for i in 0..m {
-            if d[i] > effective_floor {
-                let ratio = x_b[i] / d[i];
-                if ratio <= harris_window {
-                    let d_abs = d[i].abs();
-                    if d_abs > best_pivot_abs + PIVOT_TOL {
-                        best_pivot_abs = d_abs;
-                        leaving = Some(i);
-                    } else if (d_abs - best_pivot_abs).abs() <= PIVOT_TOL {
-                        // tie: Bland's rule
-                        match leaving {
-                            None => leaving = Some(i),
-                            Some(prev) if basis[i] < basis[prev] => leaving = Some(i),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        let leaving_row = match leaving {
-            None => return SimplexOutcome::Unbounded,
-            Some(i) => i,
-        };
-
-        let step = x_b[leaving_row] / d[leaving_row];
-        for i in 0..m {
-            x_b[i] -= d[i] * step;
-        }
-        x_b[leaving_row] = step;
-
-        for val in x_b.iter_mut() {
-            if val.abs() < options.clamp_tol {
-                *val = 0.0;
-            }
-        }
-        let leaving_col = basis[leaving_row];
-
-        pricing.update_weights(&basis_mgr, entering_col, leaving_col, d);
-
-        is_basic[leaving_col] = false;
-        is_basic[entering_col] = true;
-        basis[leaving_row] = entering_col;
-
-        // Small pivot would blow up the eta inverse-pivot factor; refactor
-        // instead of accumulating another eta.
-        let pivot_unstable = d[leaving_row].abs() < PIVOT_STABILITY_THRESHOLD * max_d_abs
-            && basis_mgr.eta_count() > 0;
-
-        if pivot_unstable {
-            basis_mgr.force_refactor_timed(a, basis, options.deadline);
-        } else {
-            basis_mgr.update(entering_col, leaving_row, &d_sv);
-            basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
-        }
-
-        if basis_mgr.refactor_failed {
-            if basis_mgr.singular_basis {
-                blocked_at_basis.insert(entering_col);
-                consecutive_blocks += 1;
-
-                if consecutive_blocks > max_consecutive_blocks {
-                    return SimplexOutcome::SingularBasis;
-                }
-
-                stable_mode = true;
-                if !revert_to_snapshot(
-                    a,
-                    basis,
-                    x_b,
-                    b_rhs,
-                    &basis_snapshot,
-                    &mut is_basic,
-                    &mut basis_mgr,
-                    options,
-                ) {
-                    return SimplexOutcome::SingularBasis;
-                }
-                continue;
-            } else {
-                let obj: f64 = basic_obj(c, basis, x_b);
-                return SimplexOutcome::Timeout(obj);
-            }
-        }
-
-        // Snapshot the basis once a fresh LU accepts it; entries previously
-        // blocked may now be safe.
-        if basis_mgr.eta_count() == 0 {
-            basis_snapshot.copy_from_slice(basis);
-            if !blocked_at_basis.is_empty() {
-                blocked_at_basis.clear();
-                consecutive_blocks = 0;
-            }
-        }
-
-        // Cycling early-bail. Trigger requires (a) `c^T x_B`
-        // plateau for `obj_bail_trigger` iters AND (b) step ≈ 0 for
-        // `step_bail_trigger` iters AND (c) Phase I caller. Either signal
-        // alone is insufficient: forplan-style Phase I (slow real progress)
-        // has step > 0 and resets (b); a Phase II near the optimum sees
-        // obj plateau but is gated off by (c).
-        let current_obj: f64 = basic_obj(c, basis, x_b);
-        if made_progress_with_floor(best_obj, current_obj, 1.0) {
-            best_obj = current_obj;
-            iters_since_obj_progress = 0;
-            #[cfg(test)]
-            OBJ_PROGRESS_RESET_COUNT.fetch_add(1, Ordering::Relaxed);
-        } else {
-            iters_since_obj_progress = iters_since_obj_progress.saturating_add(1);
-        }
-        if step.abs() > step_zero_threshold {
-            iters_since_step_progress = 0;
-        } else {
-            iters_since_step_progress = iters_since_step_progress.saturating_add(1);
-        }
-        if enable_phase1_cycling_bail
-            && iters_since_obj_progress >= obj_bail_trigger
-            && iters_since_step_progress >= step_bail_trigger
-        {
-            return SimplexOutcome::Timeout(current_obj);
+    fn primal_opts() -> SolverOptions {
+        SolverOptions {
+            simplex_method: SimplexMethod::Primal,
+            ..Default::default()
         }
     }
 
-    let obj: f64 = basic_obj(c, basis, x_b);
-    SimplexOutcome::Timeout(obj)
-}
+    fn make_le_lp(
+        c: Vec<f64>,
+        rows: &[usize],
+        cols: &[usize],
+        vals: &[f64],
+        m: usize,
+        n: usize,
+        b: Vec<f64>,
+    ) -> LpProblem {
+        let a = CscMatrix::from_triplets(rows, cols, vals, m, n).unwrap();
+        LpProblem::new_general(
+            c,
+            a,
+            b,
+            vec![ConstraintType::Le; m],
+            vec![(0.0, f64::INFINITY); n],
+            None,
+        )
+        .unwrap()
+    }
 
-/// Restore `basis_snapshot` and rebuild `x_b = B^{-1} b` from a fresh LU.
-/// `false` ⇒ snapshot factors as singular (treat as fatal SingularBasis).
-fn revert_to_snapshot(
-    a: &CscMatrix,
-    basis: &mut [usize],
-    x_b: &mut [f64],
-    b_rhs: &[f64],
-    basis_snapshot: &[usize],
-    is_basic: &mut [bool],
-    basis_mgr: &mut LuBasis,
-    options: &SolverOptions,
-) -> bool {
-    basis.copy_from_slice(basis_snapshot);
-    for v in is_basic.iter_mut() {
-        *v = false;
+    /// Sentinel: selective Charnes perturbation must not modify large x_b values.
+    ///
+    /// This tests the perturbation logic by verifying that a degenerate LP with
+    /// a large non-degenerate basic variable reaches the known optimal. Under the
+    /// old "add to ALL x_b" approach, the large basic variable's value would
+    /// receive an additive shift of O(eps·m), temporarily distorting the Phase II
+    /// objective by O(c·eps·m²) and causing the solver to oscillate away from the
+    /// optimum.
+    ///
+    /// No-op proof: reverting to `*v += eps*(i+1)` for all x_b causes the Phase II
+    /// objective of this LP to jump upward each time cycling is detected, preventing
+    /// convergence to the known optimal within the default iteration budget.
+    /// The assertion `result.status == Optimal` would then fail.
+    ///
+    /// LP: min -x1 - x2  s.t. x1 + x2 <= 2, x1 <= 1, x2 <= 1 (degenerate opt at (1,1))
+    /// This is the same degenerate LP used in `test_highly_degenerate_lp` (tests.rs).
+    #[test]
+    fn selective_perturbation_degenerate_lp_converges() {
+        // Degenerate LP with known opt = -2 at the degenerate vertex (1,1).
+        let lp = make_le_lp(
+            vec![-1.0, -1.0],
+            &[0, 0, 1, 2],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0],
+            3,
+            2,
+            vec![2.0, 1.0, 1.0],
+        );
+        let result = solve_with(&lp, &primal_opts());
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "degenerate LP must reach Optimal; got {:?}",
+            result.status
+        );
+        assert!(
+            (result.objective - (-2.0)).abs() < 1e-6,
+            "expected obj=-2, got {}",
+            result.objective
+        );
     }
-    for &col in basis.iter() {
-        is_basic[col] = true;
-    }
-    match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
-        Ok(mut mgr) => {
-            // Recompute x_B; carrying eta drift could leave a slack negative.
-            x_b.copy_from_slice(b_rhs);
-            mgr.ftran_dense(x_b);
-            for v in x_b.iter_mut() {
-                if v.abs() < options.clamp_tol {
-                    *v = 0.0;
-                }
+
+    /// Sentinel: selective Charnes perturbation formula uses `step_zero_threshold`
+    /// as both the condition and the eps magnitude, not a fixed constant.
+    ///
+    /// Both the perturbation amount (`eps = PIVOT_TOL * m`) and the guard
+    /// (`step_zero_threshold = PIVOT_TOL * m`) must scale with m. Using a fixed
+    /// constant instead would silently perturb non-degenerate rows (too large
+    /// a threshold) or fail to perturb truly degenerate ones (too small).
+    ///
+    /// No-op: changing either formula to a constant that does not scale with m
+    /// causes this test to fail for m > 1.
+    #[test]
+    fn cycle_perturbation_threshold_scales_with_m() {
+        for m in [1_usize, 10, 100, 1441] {
+            let eps = PIVOT_TOL * (m as f64).max(1.0);
+            let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
+            assert!(
+                (eps - step_zero_threshold).abs() < f64::EPSILON,
+                "eps and step_zero_threshold must match for m={m}: eps={eps}, thr={step_zero_threshold}"
+            );
+            if m > 1 {
+                assert!(
+                    eps > PIVOT_TOL,
+                    "threshold must exceed PIVOT_TOL for m={m}>1 (must scale with m)"
+                );
             }
-            *basis_mgr = mgr;
-            true
         }
-        Err(_) => false,
     }
 }

@@ -146,6 +146,8 @@ pub(crate) fn solve_dual_advanced(
                             &mut basis,
                             m,
                             sf.n_total,
+                            sf.n_total,
+                            false, // warm-start: classical Bland, no fallback ⇒ never yield
                             options,
                             leaving.as_mut(),
                             &mut total_iters,
@@ -170,28 +172,20 @@ pub(crate) fn solve_dual_advanced(
         return cold_start_advanced(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
     }
 
-    // Cold-start with Ge/Eq constraints: run Primal first with the *full*
-    // user budget; only fall back to Big-M Phase I if Primal had no
-    // feasible incumbent (Phase I cycled on infeasibility — klein3 case).
-    // When Primal returned with a non-empty solution the LP is feasible,
-    // so Big-M's "Timeout + artificials left → Infeasible" heuristic would
-    // wrongly flip the verdict (observed on d6cube, pds-10).
+    // Cold-start with Ge/Eq constraints: try the standard two-phase simplex
+    // path first. On feasible-but-degenerate LPs (d6cube/pds-10 class), Big-M
+    // Phase I can spend the whole budget in its augmented Phase II even though
+    // the regular primal path quickly finds a feasible incumbent and may finish.
     //
-    // `revised_simplex_core` has a no-progress early-bail so a
-    // Primal Phase I cycle returns Timeout in O(K) pivots, leaving the
-    // remaining budget to Big-M. A defensive half-deadline split previously
-    // stacked with `phase1::big_m_cold_start`'s own inner split, producing
-    // wall ≈ 0.75 × user_budget for slow-but-progressing LPs
-    // (neos / rail2586 / rail4284). Removed — slow Primal now honors
-    // the full budget and returns its incumbent, cycling Primal still bails
-    // quickly via the early-bail.
+    // Big-M remains the fallback for cases where primal Phase I never produced
+    // a feasible incumbent, or where primal reported Infeasible without a
+    // verifiable Farkas ray.
     let primal_result = super::dual::two_phase_dual_simplex(sf, problem, options);
     match primal_result.status {
         SolveStatus::Timeout if primal_result.solution.is_empty() => {
             let bigm_result =
                 phase1::big_m_cold_start(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
             if bigm_result.status == SolveStatus::Timeout {
-                // Both phases timed out: sum iterations for observability.
                 let mut r = primal_result;
                 r.iterations = r.iterations.saturating_add(bigm_result.iterations);
                 r
@@ -199,16 +193,8 @@ pub(crate) fn solve_dual_advanced(
                 bigm_result
             }
         }
-        // Primal returned a Farkas-certified Infeasible (dual_solution is the ray).
-        // True infeasible LPs (galenet/ex72a/forest6) provide a valid Farkas proof
-        // at the final Phase I basis; no Big-M re-verification needed.
         SolveStatus::Infeasible if !primal_result.dual_solution.is_empty() => primal_result,
         SolveStatus::Infeasible => {
-            // Uncertified Infeasible: primal Phase I could not produce a Farkas proof.
-            // pilot87-class: feasible LP cycling in Phase I → Big-M is the arbiter.
-            //   - Big-M Optimal/feasible → pilot87-class false-Infeasible resolved
-            //   - Big-M Infeasible (certified via Farkas) → true infeasible confirmed
-            //   - Big-M Timeout → inconclusive; return Timeout, not the unverified Infeasible
             let bigm_result =
                 phase1::big_m_cold_start(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
             if bigm_result.status == SolveStatus::Timeout {
@@ -523,6 +509,8 @@ fn cold_start_advanced(
         &mut basis,
         m,
         sf.n_total,
+        sf.n_total,
+        false, // Le-only cold-start: classical Bland, no fallback ⇒ never yield
         options,
         leaving.as_mut(),
         &mut total_iters,
@@ -1002,6 +990,42 @@ mod tests {
             "cold {:.6e} != warm {:.6e}",
             r2_cold.objective,
             r2.objective
+        );
+    }
+
+    /// Sentinel: Ge/Eq cold-start (primal-first dispatch) must solve optimally.
+    ///
+    /// dc658d4 changed dispatch order: primal is tried first for Ge/Eq problems.
+    /// Big-M is the fallback only when primal fails (Timeout with empty solution).
+    /// This sentinel validates the end-to-end correctness of the new dispatch.
+    ///
+    /// no-op proof: removing the Ge/Eq dispatch branch (e.g. routing all Ge/Eq
+    /// to Big-M and skipping primal) causes `Optimal` with wrong objective when
+    /// Big-M stalls; a strict obj check would catch that.
+    #[test]
+    fn ge_eq_cold_start_primal_first_dispatch_solves_optimally() {
+        use crate::sparse::CscMatrix;
+        const OBJ_TOL: f64 = 1e-6;
+
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+
+        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(
+            (result.objective - 3.0).abs() < OBJ_TOL,
+            "Ge/Eq LP should have obj=3.0, got {:.6e}",
+            result.objective
         );
     }
 

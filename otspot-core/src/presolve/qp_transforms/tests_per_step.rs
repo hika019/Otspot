@@ -2,9 +2,11 @@
 //! (`steps_bounds`, `steps_free`, `steps_parallel`) is driven directly via the
 //! `Workspace` so a no-op rewrite of a step body produces an observable FAIL.
 
-use super::helpers::{early_infeasibility_check, with_skip_steps};
+use super::helpers::{
+    col_has_structural_q, count_block_components, early_infeasibility_check, with_skip_steps,
+};
 use super::state::{QpPostsolveStep, QpPresolveResult, QpPresolveStatus, Workspace};
-use super::steps_basic::step4_empty;
+use super::steps_basic::{step3_singleton_col, step4_empty};
 use super::steps_bounds::{
     step10_implied_bounds, step11_dual_fixing, step9_singleton_ineq_to_bound,
 };
@@ -1008,5 +1010,163 @@ fn early_check_does_not_flag_bounded_empty_cols() {
         status.is_none(),
         "bounded var must not trigger early Unbounded, got {:?}",
         status
+    );
+}
+
+// -----------------------------------------------------------
+// micro-Q structural classification (col_has_structural_q)
+//
+// A tiny-but-stored Q entry (e.g. 1e-13) gives a quadratic column curvature.
+// Every LP-style fix/eliminate step must recognise it as quadratic and defer
+// the column to the IPM; a numerical `|q| > ZERO_TOL` threshold mis-classifies
+// it as pure-LP and fixes the curvature optimum to a bound (suboptimal).
+// Stored values are structurally non-zero (`from_triplets` drops |v| ≤ DROP_TOL).
+// -----------------------------------------------------------
+
+/// `MICRO_Q` is below ZERO_TOL (1e-12) but stored (above DROP_TOL 1e-15): the
+/// exact band where the old threshold mis-classifies and the structural
+/// predicate is load-bearing.
+const MICRO_Q: f64 = 1e-13;
+
+/// The shared predicate counts any stored value as quadratic. Reverting to
+/// `|q| > ZERO_TOL` returns false for MICRO_Q → this fails.
+#[test]
+fn col_has_structural_q_detects_micro_and_explicit_zero() {
+    // MICRO_Q diagonal → structural quadratic.
+    let micro = make_qp(
+        &[0],
+        &[0],
+        &[MICRO_Q],
+        1,
+        vec![-1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![(0.0, 1.0)],
+        vec![],
+    );
+    assert!(
+        col_has_structural_q(&micro.q, 0),
+        "stored Q={MICRO_Q:e} must count as structural quadratic"
+    );
+
+    // Empty Q column → not quadratic.
+    let empty = make_qp(
+        &[],
+        &[],
+        &[],
+        1,
+        vec![-1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![(0.0, 1.0)],
+        vec![],
+    );
+    assert!(
+        !col_has_structural_q(&empty.q, 0),
+        "structurally empty Q column must not be quadratic"
+    );
+}
+
+/// step11 dual-fixing must NOT fix a micro-Q column to its bound.
+/// No-op (threshold q_nnz) fixes it → `removed_cols[0]` becomes true → fail.
+/// Mirrors `step11_skips_when_q_nonzero` at the sub-ZERO_TOL magnitude.
+#[test]
+fn step11_skips_when_q_micro() {
+    let prob = make_qp(
+        &[0],
+        &[0],
+        &[MICRO_Q],
+        1,
+        vec![-1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![(2.0, 5.0)],
+        vec![],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    expect_ok(step11_dual_fixing(&prob, &mut ws), "step11 ok");
+    assert!(
+        !ws.removed_cols[0],
+        "micro-Q column is quadratic; step11 must not fix it to a bound"
+    );
+}
+
+/// step3 singleton-column fixing must NOT fix a micro-Q singleton-Le column.
+/// Le row -x ≤ 0, c=-1, a=-1 → step3 would fix to ub; with curvature the
+/// optimum is interior. No-op (threshold) fixes it → fail.
+#[test]
+fn step3_singleton_col_skips_when_q_micro() {
+    let prob = make_qp(
+        &[0],
+        &[0],
+        &[MICRO_Q],
+        1,
+        vec![-1.0],
+        &[0],
+        &[0],
+        &[-1.0],
+        1,
+        vec![0.0],
+        vec![(0.0, 5.0)],
+        vec![ConstraintType::Le],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    expect_ok(step3_singleton_col(&prob, &mut ws, None), "step3 ok");
+    assert!(
+        !ws.removed_cols[0],
+        "micro-Q singleton-Le column is quadratic; step3 must not fix it to a bound"
+    );
+}
+
+/// step7 free-singleton elimination must NOT eliminate a micro-Q free variable.
+/// The Eq pins x = b/a so the primal is correct either way, but the guard
+/// (which protects postsolve dual reconstruction) must treat micro-Q as
+/// quadratic. No-op (threshold) eliminates it → fail.
+#[test]
+fn step7_free_var_skips_when_q_micro() {
+    // z free, Eq singleton row 2·z = 6, with a micro diagonal Q on z.
+    let prob = make_qp(
+        &[0],
+        &[0],
+        &[MICRO_Q],
+        1,
+        vec![-1.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        vec![6.0],
+        vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        vec![ConstraintType::Eq],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    expect_ok(step7_free_var(&prob, &mut ws, None), "step7 ok");
+    assert!(
+        !ws.removed_cols[0],
+        "micro-Q free variable is quadratic; step7 must defer it to the IPM"
+    );
+}
+
+/// Block-component counting uses the structural non-zero pattern: a micro
+/// off-diagonal Q entry couples the two variables into one block.
+/// No-op (threshold) treats it as no coupling → 2 blocks → fail.
+#[test]
+fn count_block_components_micro_offdiag_couples_variables() {
+    // 2x2 symmetric Q with only off-diagonal (0,1)/(1,0) = MICRO_Q; A empty.
+    let q = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[MICRO_Q, MICRO_Q], 2, 2).unwrap();
+    let a = CscMatrix::new(0, 2);
+    assert_eq!(
+        count_block_components(&q, &a, 2),
+        1,
+        "micro off-diagonal Q must couple the two variables into a single block"
     );
 }

@@ -18,7 +18,9 @@ use crate::sparse::CscMatrix;
 
 use super::bound::{all_bounds_finite, is_feasible_result};
 
-/// 値がゼロかどうかの数値的判定許容。`QpProblem::is_zero_q` と一致させる。
+/// McCormick 包絡を張る bilinear 項として扱う係数の下限。これ未満の係数は
+/// 包絡寄与が無視できるとして pair から除外する (LP/QP dispatch の
+/// `QpProblem::is_zero_q` とは別概念: あちらは構造的ゼロ判定)。
 const Q_ZERO_TOL: f64 = 1e-12;
 
 /// 1 つの off-diag bilinear 項に対する McCormick 不等式数 (LB×2 + UB×2)。

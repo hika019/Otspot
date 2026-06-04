@@ -56,6 +56,7 @@ use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 
+
 /// Farkas certificate verification for primal infeasibility.
 ///
 /// At a Big-M Phase I exit basis with artificials residual, construct the
@@ -185,12 +186,20 @@ impl DualLeavingStrategy for ArtificialPriorityLeaving {
         neg_sum + art_sum
     }
 
-    /// Big-M Phase I must not repair lb-violations: they arise from LU eta
-    /// drift in natural (non-artificial) rows, not genuine warm-start
-    /// infeasibilities. Flipping trow signs on such rows finds no candidates
-    /// (all-negative trow) → ratio test returns None → false Unbounded.
+    /// Big-M Phase I DOES repair genuine lb-violations. A Priority-2 artificial
+    /// removal pivot drives structural rows large-negative (beaconfd: x_B ≈ −9329,
+    /// far above any LU-eta-drift noise floor); the sign-flip ratio test repairs
+    /// them. The blanket `false` here previously sent the ratio test the wrong
+    /// way → unrepaired violation → 2-cycle (beaconfd/scrs8 TIMEOUT).
+    ///
+    /// The structural exclusion that keeps this safe lives in the core
+    /// (`dual_simplex_core_advanced` 3d'): the sign-flip is suppressed when the
+    /// leaving variable is itself an artificial (`basis[r] >= n_enter`). A
+    /// negative artificial must be *driven out* (standard direction + n_enter
+    /// re-entry ban), not sign-flip-repaired, which would otherwise keep it basic
+    /// and chase it indefinitely (sierra: 478-pivot Phase-II cycle).
     fn allows_lb_repair(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -521,9 +530,22 @@ pub(crate) fn big_m_cold_start(
     // === Step 2: Big-M 動的算出 ===
     let c_norm = c.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
     let b_norm = b.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
-    let big_m = (c_norm * BIG_M_COST_MULT)
+    let big_m_computed = (c_norm * BIG_M_COST_MULT)
         .max(b_norm * BIG_M_COST_MULT)
         .max(BIG_M_FLOOR);
+    // Diagnostic override (env-gated, default-off): OTSPOT_BIGM_OVERRIDE=<value>
+    // overrides the computed big_m for magnitude sensitivity experiments.
+    // Production code is unaffected when the env var is absent.
+    #[allow(clippy::print_stderr)]
+    let big_m = std::env::var("OTSPOT_BIGM_OVERRIDE")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|&v| v.is_finite() && v > 0.0)
+        .inspect(|&v| {
+            eprintln!("[bigm-diag] c_norm={:.3e} b_norm={:.3e} computed={:.3e} override={:.3e}",
+                c_norm, b_norm, big_m_computed, v);
+        })
+        .unwrap_or(big_m_computed);
 
     // crash 採用で artificial 列を structural 列に置換し Phase I 駆出対象を縮減。
     // LU / x_B ≥ 0 / dual feasibility のいずれかで失敗したら identity 経路に倒す。
@@ -554,6 +576,9 @@ pub(crate) fn big_m_cold_start(
     // Phase I は元 deadline を使用 (外側 split との二重 halving 回避)。
     let mut leaving = ArtificialPriorityLeaving { n_total };
     let mut total_iters: usize = 0;
+    // n_enter = n_total: artificials (cols [n_total, n_aug)) may start basic and
+    // be driven out, but never re-enter. This makes Priority-2 artificial removal
+    // monotone and rules out the degenerate artificial↔artificial swap cycle.
     let phase1_outcome = dual_simplex_core_advanced(
         &a_aug,
         &mut x_b,
@@ -561,6 +586,8 @@ pub(crate) fn big_m_cold_start(
         &mut basis_aug,
         m,
         n_aug,
+        n_total,
+        true, // yield_on_stall: Big-M has a primal fallback to hand off to
         options,
         &mut leaving,
         &mut total_iters,
@@ -568,10 +595,23 @@ pub(crate) fn big_m_cold_start(
 
     match phase1_outcome {
         SimplexOutcome::Unbounded => {
-            // 双対非有界 = 主実行不可
-            let mut r = SolverResult::infeasible();
-            r.iterations = total_iters;
-            return r;
+            // Dual-unbounded is only a primal-infeasibility proof when the
+            // current basis yields a verifiable Farkas ray. Degenerate Big-M
+            // Phase I can otherwise hit an empty ratio test after anti-cycling
+            // perturbation on feasible LPs; that is inconclusive, not proof.
+            if farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options) {
+                let mut r = SolverResult::infeasible();
+                r.iterations = total_iters;
+                return r;
+            }
+            return super::super::timeout_result_with_incumbent(
+                sf,
+                problem,
+                &basis_aug,
+                &x_b,
+                col_scale,
+                total_iters,
+            );
         }
         SimplexOutcome::Timeout(_) => {
             // 旧実装は artificial 残存だけで Infeasible を立てていたが、これは
@@ -587,7 +627,7 @@ pub(crate) fn big_m_cold_start(
                 r.iterations = total_iters;
                 return r;
             }
-            let r = super::super::timeout_result_with_incumbent(
+            return super::super::timeout_result_with_incumbent(
                 sf,
                 problem,
                 &basis_aug,
@@ -595,7 +635,6 @@ pub(crate) fn big_m_cold_start(
                 col_scale,
                 total_iters,
             );
-            return r;
         }
         SimplexOutcome::SingularBasis => {
             return SolverResult::numerical_error();
@@ -640,6 +679,21 @@ pub(crate) fn big_m_cold_start(
         c_aug_p2[*col] = big_m;
     }
 
+    // Charnes perturbation: degenerate rows (x_b ≈ 0) cause ratio-test step=0
+    // and degenerate cycles in Phase II. Perturb each such row by a unique tiny
+    // positive value so the ratio test produces step > 0. The final reconcile
+    // after Phase II restores exact B^{-1}b.
+    for i in 0..m {
+        if x_b[i].abs() < crate::tolerances::PIVOT_TOL {
+            x_b[i] = crate::tolerances::PIVOT_TOL * (i as f64 + 1.0);
+        }
+    }
+    for v in x_b.iter_mut() {
+        if *v < 0.0 {
+            *v = 0.0;
+        }
+    }
+
     let mut pricing = SteepestEdgePricing::new(n_aug);
     let phase2_outcome = super::super::revised_simplex_core(
         &a_aug,
@@ -659,12 +713,25 @@ pub(crate) fn big_m_cold_start(
     // === Step 8: Phase II 結果 + 人工変数残存判定 ===
     match phase2_outcome {
         SimplexOutcome::Optimal(_obj_aug, y) => {
-            // 人工変数が basis に残り値 > primal_tol → 元 LP infeasible
+            // 人工変数が basis に残り値 > primal_tol → 元 LP infeasible only
+            // when backed by a Farkas certificate. A finite Big-M penalty can
+            // otherwise stop at an augmented optimum that is not a proof for the
+            // original LP; returning Infeasible there is a false verdict risk.
             for i in 0..m {
                 if basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol {
-                    let mut r = SolverResult::infeasible();
-                    r.iterations = total_iters;
-                    return r;
+                    if farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options) {
+                        let mut r = SolverResult::infeasible();
+                        r.iterations = total_iters;
+                        return r;
+                    }
+                    return super::super::timeout_result_with_incumbent(
+                        sf,
+                        problem,
+                        &basis_aug,
+                        &x_b,
+                        col_scale,
+                        total_iters,
+                    );
                 }
             }
 
@@ -682,7 +749,9 @@ pub(crate) fn big_m_cold_start(
                 None
             };
 
-            // obj は元コスト c (Big-M ペナルティを含まない) で再計算
+            // solution は原空間 (un-shifted) なので c·x が完全な原目的値。
+            // 他経路は shifted basic_obj に sf.obj_offset を足すが、ここで足すと
+            // Σc_j·lb_j を二重計上する (Big-M 経路のみのバグだった)。
             let obj_orig: f64 = problem
                 .c
                 .iter()
@@ -692,7 +761,7 @@ pub(crate) fn big_m_cold_start(
 
             SolverResult {
                 status: SolveStatus::Optimal,
-                objective: obj_orig + sf.obj_offset,
+                objective: obj_orig,
                 solution,
                 dual_solution,
                 reduced_costs,
@@ -702,17 +771,36 @@ pub(crate) fn big_m_cold_start(
                 ..Default::default()
             }
         }
-        SimplexOutcome::Unbounded => SolverResult {
-            status: SolveStatus::Unbounded,
-            objective: f64::NEG_INFINITY,
-            solution: vec![],
-            dual_solution: vec![],
-            reduced_costs: vec![],
-            slack: vec![],
-            warm_start_basis: None,
-            iterations: total_iters,
-            ..Default::default()
-        },
+        SimplexOutcome::Unbounded => {
+            // Gate the Unbounded verdict on a re-derived recession ray. A clean LU
+            // at the exit basis distinguishes a genuine ray from eta-drift noise.
+            // Unverified ⇒ honest Timeout, mirroring the Phase-I Farkas gate that
+            // turns an unproven infeasibility ray into Timeout.
+            if super::super::dual_common::lp_unbounded_ray_verified(
+                &a_aug, &basis_aug, &c_aug_p2, m, n_aug, n_total, options,
+            ) {
+                SolverResult {
+                    status: SolveStatus::Unbounded,
+                    objective: f64::NEG_INFINITY,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                    iterations: total_iters,
+                    ..Default::default()
+                }
+            } else {
+                super::super::timeout_result_with_incumbent(
+                    sf,
+                    problem,
+                    &basis_aug,
+                    &x_b,
+                    col_scale,
+                    total_iters,
+                )
+            }
+        }
         SimplexOutcome::Timeout(_) => super::super::timeout_result_with_incumbent(
             sf,
             problem,
@@ -754,6 +842,55 @@ mod tests {
         )
         .unwrap();
         assert_kkt_optimal(&lp, 3.0, "big_m_phase1_feasible_eq");
+    }
+
+    /// P2-#2 (codex completeness edge): a feasible Eq system whose Big-M Phase I
+    /// needs an lb-repair on an artificial-leaving row — which the anti-cycling
+    /// guard (`basis[r] < n_enter`, kept to stop sierra's 478-pivot chase)
+    /// suppresses, so Big-M abandons it *when the crash basis is disabled*. The
+    /// architecture's primal fallback (`two_phase_dual_simplex`) recovers it, so
+    /// the final verdict is still Optimal — the guard's conservatism is a
+    /// completeness trade-off, not a correctness bug.
+    ///
+    /// `-2x + y = 1, -2x + 2y = 3, x,y ≥ 0, min x + y` ⇒ x=0.5, y=2, obj=2.5.
+    /// Solved with presolve OFF and crash OFF to exercise the bare Big-M → fallback
+    /// path (default config solves it via crash; see report).
+    #[test]
+    fn big_m_phase1_artificial_lb_repair_edge_recovers_via_fallback() {
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 0, 1],
+            &[0, 0, 1, 1],
+            &[-2.0, -2.0, 1.0, 2.0],
+            2,
+            2,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![1.0, 3.0],
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            use_lp_crash_basis: false,
+            ..SolverOptions::default()
+        };
+        let r = solve_with(&lp, &opts);
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "bare Big-M (crash off) must still reach Optimal via the primal fallback; got {:?}",
+            r.status
+        );
+        assert!(
+            (r.objective - 2.5).abs() < 1e-6,
+            "expected obj 2.5, got {}",
+            r.objective
+        );
     }
 
     #[test]
@@ -1468,23 +1605,21 @@ mod tests {
         );
     }
 
-    /// LOAD-BEARING (P0): `ArtificialPriorityLeaving::allows_lb_repair` must
-    /// return `false`.  Big-M Phase I x_B[r] < 0 is LU-eta drift in natural
-    /// rows, not a warm-start lb-violation.  Flipping trow signs on such rows
-    /// finds no entering candidates → ratio test returns None → false Unbounded
-    /// → false Infeasible.  Reverting this override to `true` (the default)
-    /// directly enables the sign-flip and reproduces the pilot87 false-Infeasible
-    /// regression (#175 P0).
+    /// `ArtificialPriorityLeaving::allows_lb_repair` returns `true`: genuine
+    /// lb-violations from Priority-2 removal pivots must be repaired. The
+    /// artificial-vs-structural distinction that keeps this safe is enforced in
+    /// the core (sign-flip suppressed for artificial leaving rows), not here —
+    /// see `core.rs` 3d' and the end-to-end cycling sentinels below.
     #[test]
-    fn artificial_priority_allows_lb_repair_is_false() {
+    fn artificial_priority_allows_lb_repair_is_true() {
         use super::ArtificialPriorityLeaving;
         use crate::simplex::pricing::DualLeavingStrategy;
         let strat = ArtificialPriorityLeaving { n_total: 4 };
         assert!(
-            !strat.allows_lb_repair(),
-            "ArtificialPriorityLeaving must forbid lb-repair (allows_lb_repair == false); \
-             reverting to true re-enables the trow sign-flip that causes false Infeasible \
-             during Big-M Phase I (#175 P0)"
+            strat.allows_lb_repair(),
+            "ArtificialPriorityLeaving must allow lb-repair so Priority-2-manufactured \
+             lb-violations are sign-flip-repaired (blanket false re-introduces the \
+             beaconfd/scrs8 Phase-I 2-cycle)"
         );
     }
 
@@ -1499,4 +1634,5 @@ mod tests {
             "MostInfeasibleLeaving must allow lb-repair (allows_lb_repair == true)"
         );
     }
+
 }

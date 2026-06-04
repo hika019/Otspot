@@ -10,16 +10,18 @@
 //!   を計算し `leaving.after_pivot(...)` で γ を rank-1 更新
 
 use super::super::dual_common::{
-    basic_obj, compute_dual_vars, made_progress_with_floor, recompute_gamma_truth,
-    BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
+    basic_obj, compute_dual_vars, made_progress_with_floor, recompute_gamma_truth, NO_PROGRESS_MIN,
+    NO_PROGRESS_TRIGGER_FACTOR,
 };
 use super::super::pricing::DualLeavingStrategy;
+use super::super::trace::IterTrace;
 use super::super::SimplexOutcome;
 use super::ratio_test::{bland_ratio_test, HarrisRatioTest, RatioTestStrategy};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 /// Lex 摂動 (bland_mode 起動時): reduced_costs (non-basic) と x_b に
@@ -33,6 +35,85 @@ use std::sync::atomic::Ordering;
 /// tie 残存、1e-3 は Phase 1 Infeasible 判定境界に影響する。
 const LEX_PERTURB_REL: f64 = 1e-4;
 
+#[derive(Clone, Copy, Debug, Default)]
+struct LexPerturbStats {
+    delta: f64,
+    effect: f64,
+}
+
+#[derive(Default)]
+struct BasisCycleDetector {
+    seen: HashMap<Vec<usize>, usize>,
+}
+
+impl BasisCycleDetector {
+    fn repeated(&mut self, iter: usize, basis: &[usize]) -> bool {
+        self.seen.insert(basis.to_vec(), iter).is_some()
+    }
+
+    fn clear(&mut self) {
+        self.seen.clear();
+    }
+}
+
+fn collect_bland_ratio_candidates(
+    trow: &[f64],
+    reduced_costs: &[f64],
+    is_basic: &[bool],
+    n_price: usize,
+    pivot_tol: f64,
+) -> (Vec<usize>, Vec<f64>) {
+    let mut candidates = Vec::new();
+    let mut ratios = Vec::new();
+    for j in 0..n_price {
+        if is_basic[j] || trow[j] <= pivot_tol {
+            continue;
+        }
+        let ratio = reduced_costs[j] / trow[j];
+        if ratio >= pivot_tol {
+            candidates.push(j);
+            ratios.push(ratio);
+        }
+    }
+    (candidates, ratios)
+}
+
+fn collect_harris_ratio_candidates(
+    trow: &[f64],
+    reduced_costs: &[f64],
+    is_basic: &[bool],
+    n_price: usize,
+    harris_tol: f64,
+    pivot_tol: f64,
+) -> (Vec<usize>, Vec<f64>) {
+    let mut theta_max = f64::INFINITY;
+    for j in 0..n_price {
+        if is_basic[j] || trow[j] <= pivot_tol {
+            continue;
+        }
+        let relaxed_ratio = (reduced_costs[j] + harris_tol) / trow[j];
+        if relaxed_ratio < theta_max {
+            theta_max = relaxed_ratio;
+        }
+    }
+    if !theta_max.is_finite() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut candidates = Vec::new();
+    let mut ratios = Vec::new();
+    for j in 0..n_price {
+        if is_basic[j] || trow[j] <= pivot_tol {
+            continue;
+        }
+        let ratio = reduced_costs[j] / trow[j];
+        if ratio <= theta_max {
+            candidates.push(j);
+            ratios.push(ratio);
+        }
+    }
+    (candidates, ratios)
+}
+
 /// reduced_costs (non-basic only) と、オプションで x_b に lex 摂動を加える。
 ///
 /// `perturb_x = true` は bland_mode 初回エントリ時のみ指定する。refactor 後の
@@ -45,7 +126,7 @@ fn apply_lex_perturbation(
     x_b: &mut [f64],
     m: usize,
     perturb_x: bool,
-) {
+) -> LexPerturbStats {
     let scale_r = reduced_costs
         .iter()
         .map(|v| v.abs())
@@ -53,17 +134,31 @@ fn apply_lex_perturbation(
         .max(1.0);
     let base_r = LEX_PERTURB_REL * scale_r;
     let n_price = reduced_costs.len();
+    let mut max_rc_delta = 0.0_f64;
     for (j, slot) in reduced_costs.iter_mut().enumerate() {
         if !is_basic[j] {
-            *slot += base_r * (1.0 + (j as f64) / (n_price as f64));
+            let delta = base_r * (1.0 + (j as f64) / (n_price as f64));
+            *slot += delta;
+            max_rc_delta = max_rc_delta.max(delta.abs());
         }
     }
+    let mut max_x_delta = 0.0_f64;
     if perturb_x {
         let scale_x = x_b.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
         let base_x = LEX_PERTURB_REL * scale_x;
         for (i, slot) in x_b.iter_mut().enumerate() {
-            *slot += base_x * (1.0 + (i as f64) / (m as f64));
+            let delta = base_x * (1.0 + (i as f64) / (m as f64));
+            *slot += delta;
+            max_x_delta = max_x_delta.max(delta.abs());
         }
+        return LexPerturbStats {
+            delta: base_r,
+            effect: max_rc_delta.max(max_x_delta),
+        };
+    }
+    LexPerturbStats {
+        delta: base_r,
+        effect: max_rc_delta,
     }
 }
 
@@ -107,6 +202,20 @@ fn compute_reduced_costs_timed(
 /// Dual simplex core loop (advanced variant).
 ///
 /// - `leaving`: leaving-variable selection strategy (`&mut` to allow DSE weight updates).
+/// - `n_enter`: number of leading columns eligible to *enter* the basis. Columns
+///   `[n_enter, n_price)` may start basic and leave, but the ratio test never
+///   re-selects them. Big-M Phase I passes `n_enter = n_total` so artificials,
+///   once driven out, cannot re-enter — this is what makes artificial removal
+///   monotone (each Priority-2 pivot replaces an artificial with a structural
+///   column) and forbids the degenerate artificial↔artificial swap cycle
+///   (nug08-3rd). Callers without artificials pass `n_enter = n_price`.
+/// - `yield_on_stall`: when true, a Bland-mode no-progress stall returns `Timeout`
+///   so the caller can hand off to an alternative method. ONLY the Big-M Phase I
+///   caller passes `true` — its Priority-2 artificial-removal is a non-standard
+///   leaving rule for which Bland gives no finite-termination guarantee, and it
+///   has a primal fallback (`two_phase_dual_simplex`) to yield to. Standard
+///   callers (warm-start / Le-only cold-start) pass `false`: their leaving rule
+///   is classical Bland with guaranteed termination (no fallback → yield = Timeout).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dual_simplex_core_advanced(
     a: &CscMatrix,
@@ -115,10 +224,13 @@ pub(crate) fn dual_simplex_core_advanced(
     basis: &mut [usize],
     m: usize,
     n_price: usize,
+    n_enter: usize,
+    yield_on_stall: bool,
     options: &SolverOptions,
     leaving: &mut dyn DualLeavingStrategy,
     iter_count_out: &mut usize,
 ) -> SimplexOutcome {
+    debug_assert!(n_enter <= n_price);
     // Step 1: LuBasis初期化
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
@@ -202,7 +314,12 @@ pub(crate) fn dual_simplex_core_advanced(
     let mut best_infeas = leaving.progress_metric(x_b, basis);
     let mut iters_since_progress: usize = 0;
     let mut bland_mode = false;
-    let mut bland_start_iter: usize = 0;
+    let mut cycle_detector = BasisCycleDetector::default();
+    let mut no_candidate_refreshed_basis: Option<Vec<usize>> = None;
+    let mut rejected_pivot_basis: Option<Vec<usize>> = None;
+    let mut rejected_pivot_row: Option<usize> = None;
+    let mut rejected_entering = vec![false; n_price];
+    let mut trace = IterTrace::new("dual-advanced");
 
     // Step 3: 反復ループ
     loop {
@@ -220,12 +337,13 @@ pub(crate) fn dual_simplex_core_advanced(
             return SimplexOutcome::Timeout(obj);
         }
 
-        // Bland mode hard cap: if we have iterated > BLAND_ITER_CAP_FACTOR * n_price
-        // iterations in Bland mode, bail so the caller can run Farkas infeasibility
-        // check (catches klein3-class cycling that produces corrupt basis state).
-        if bland_mode && *iter_count_out - bland_start_iter > BLAND_ITER_CAP_FACTOR * n_price {
-            let obj: f64 = basic_obj(c, basis, x_b);
-            return SimplexOutcome::Timeout(obj);
+        if let Some(t) = trace.as_mut() {
+            let obj = basic_obj(c, basis, x_b);
+            t.log(*iter_count_out, obj, basis, bland_mode);
+        }
+
+        if !bland_mode && cycle_detector.repeated(*iter_count_out, basis) {
+            bland_mode = true;
         }
 
         // 3b: 離基変数選択
@@ -245,7 +363,27 @@ pub(crate) fn dual_simplex_core_advanced(
             }
             Some(p) => p,
         };
-
+        // rejected_entering は (basis, leaving_row) ペアにスコープされる。
+        // 違うペアに移行したらリセット。
+        if rejected_pivot_basis.as_deref() != Some(&*basis)
+            || rejected_pivot_row != Some(leaving_row)
+        {
+            rejected_pivot_basis = None;
+            rejected_pivot_row = None;
+            rejected_entering.fill(false);
+        }
+        let mut masked_is_basic: Vec<bool>;
+        let price_excluded: &[bool] = if rejected_entering.iter().any(|&v| v) {
+            masked_is_basic = is_basic.clone();
+            for (j, blocked) in rejected_entering.iter().enumerate().take(n_enter) {
+                if *blocked {
+                    masked_is_basic[j] = true;
+                }
+            }
+            &masked_is_basic
+        } else {
+            &is_basic
+        };
         // 3c: BTRAN: ρ = B^{-T} e_p
         let mut e_p = vec![0.0f64; m];
         e_p[leaving_row] = 1.0;
@@ -271,20 +409,24 @@ pub(crate) fn dual_simplex_core_advanced(
             trow[j] = dot;
         }
 
-        // 3d': lb-violation 方向補正 (warm-start 経路専用)。
+        // 3d': lb-violation direction correction.
         //
-        // 通常の双対 simplex 比率テストは trow[j] > 0 を入基候補とする (ub 違反方向)。
-        // ウォームスタート時の lb 違反 (x_b[r] < 0) を修復するには入基変数の「離基行への
-        // 影響が x_b[r] を増加させる方向」、すなわち trow[j] < 0 を選ばなければならない。
-        // trow を符号反転することで既存の比率テスト実装をそのまま再利用する。
+        // When x_b[r] < 0 (lb violation) the entering variable must increase x_b[r],
+        // i.e. select trow[j] < 0. Sign-flip trow to reuse the ub-repair ratio test;
+        // rc and the leaving r-value are also flipped (3i).
         //
-        // `allows_lb_repair()` が false の戦略 (Big-M Phase I) では符号反転を禁止する。
-        // Big-M Phase I で x_b[r] < 0 になるのは LU eta 蓄積による自然行ドリフト
-        // (≈ −primal_tol) であり、sign flip すると有効入基候補が消えて false Unbounded を
-        // 引き起こす。修復対象は「本物の lb 違反ウォームスタート」に限定する。
+        // Artificial-leaving guard (basis[r] >= n_enter): flipping drives the artificial
+        // value toward 0 without evicting it, producing a 478-pivot cycle (sierra).
+        // Artificials leave in the standard direction; re-entry is blocked by n_enter
+        // so they exit monotonically.
         //
-        // 被縮小費用更新と離基変数の r 値も整合的に符号反転する (3i 参照)。
-        let lb_violation = x_b[leaving_row] < 0.0 && leaving.allows_lb_repair();
+        // Suppressing lb-repair on an artificial-leaving row may cause bare Big-M to
+        // abandon some feasible Eq cases; the primal fallback recovers (verified Optimal).
+        // See `big_m_phase1_artificial_lb_repair_edge_*`.
+        let mut lb_violation =
+            x_b[leaving_row] < 0.0 && leaving.allows_lb_repair() && basis[leaving_row] < n_enter;
+        let artificial_lb_violation =
+            x_b[leaving_row] < 0.0 && leaving.allows_lb_repair() && basis[leaving_row] >= n_enter;
         if lb_violation {
             for t in trow[..n_price].iter_mut() {
                 *t = -*t;
@@ -293,15 +435,113 @@ pub(crate) fn dual_simplex_core_advanced(
 
         // 3e: ratio test → entering_col, theta
         // bland_mode では pure Bland (min ratio + smallest idx tiebreak)。
-        let ratio_pick = if bland_mode {
-            bland_ratio_test(&trow, &reduced_costs, &is_basic, n_price, PIVOT_TOL)
+        let (mut candidate_indices, mut candidate_ratios, mut ratio_pick) = if bland_mode {
+            let (indices, ratios) =
+                collect_bland_ratio_candidates(&trow, &reduced_costs, price_excluded, n_enter, PIVOT_TOL);
+            let pick = bland_ratio_test(&trow, &reduced_costs, price_excluded, n_enter, PIVOT_TOL);
+            (indices, ratios, pick)
         } else {
-            ratio_tester.select_entering(&trow, &reduced_costs, &is_basic, n_price)
+            let (indices, ratios) = collect_harris_ratio_candidates(
+                &trow,
+                &reduced_costs,
+                price_excluded,
+                n_enter,
+                ratio_tester.harris_tol,
+                ratio_tester.pivot_tol,
+            );
+            let pick = ratio_tester.select_entering(&trow, &reduced_costs, price_excluded, n_enter);
+            (indices, ratios, pick)
         };
+        if ratio_pick.is_none() && artificial_lb_violation {
+            // 人工変数の lb-repair 方向で候補なし→ 標準方向で再試行。
+            // 人工の負値は lb-repair 側で駆出できないケース (maros/pilot 等) があり、
+            // 反転して再び ratio test することで構造列への pivot を試みる。
+            for t in trow[..n_price].iter_mut() {
+                *t = -*t;
+            }
+            lb_violation = true;
+            (candidate_indices, candidate_ratios, ratio_pick) = if bland_mode {
+                let (indices, ratios) = collect_bland_ratio_candidates(
+                    &trow,
+                    &reduced_costs,
+                    price_excluded,
+                    n_enter,
+                    PIVOT_TOL,
+                );
+                let pick =
+                    bland_ratio_test(&trow, &reduced_costs, price_excluded, n_enter, PIVOT_TOL);
+                (indices, ratios, pick)
+            } else {
+                let (indices, ratios) = collect_harris_ratio_candidates(
+                    &trow,
+                    &reduced_costs,
+                    price_excluded,
+                    n_enter,
+                    ratio_tester.harris_tol,
+                    ratio_tester.pivot_tol,
+                );
+                let pick =
+                    ratio_tester.select_entering(&trow, &reduced_costs, price_excluded, n_enter);
+                (indices, ratios, pick)
+            };
+        }
+        if let Some(t) = trace.as_mut() {
+            t.log_ratio_test(
+                &candidate_indices,
+                &candidate_ratios,
+                ratio_pick.map(|(j, _)| j),
+                bland_mode,
+            );
+        }
 
         let (entering_col, theta) = match ratio_pick {
             None => {
-                // 候補なし: 双対非有界 = 主実行不可
+                // rejected_entering が active → 全候補を除外した状態; fallback なし
+                if rejected_entering.iter().any(|&v| v) {
+                    let obj: f64 = basic_obj(c, basis, x_b);
+                    return SimplexOutcome::Timeout(obj);
+                }
+                // 候補なしは dual-unbounded の証明候補だが、Bland 長走では
+                // eta/rc drift が全候補を負 ratio 側へ押し出すことがある。
+                // 同一基底につき一度だけ fresh LU + rc で再試行し、
+                // 真の候補なしだけを Unbounded として返す。
+                if no_candidate_refreshed_basis.as_deref() != Some(&*basis) {
+                    no_candidate_refreshed_basis = Some(basis.to_vec());
+                    basis_mgr.force_refactor_timed(a, basis, options.deadline);
+                    if basis_mgr.refactor_failed {
+                        if basis_mgr.singular_basis {
+                            return SimplexOutcome::SingularBasis;
+                        }
+                        let obj: f64 = basic_obj(c, basis, x_b);
+                        return SimplexOutcome::Timeout(obj);
+                    }
+                    reduced_costs = match compute_reduced_costs_timed(
+                        a,
+                        c,
+                        &mut basis_mgr,
+                        &is_basic,
+                        n_price,
+                        m,
+                        basis,
+                        options.deadline,
+                    ) {
+                        Some(rc) => rc,
+                        None => {
+                            let obj: f64 = basic_obj(c, basis, x_b);
+                            return SimplexOutcome::Timeout(obj);
+                        }
+                    };
+                    if bland_mode {
+                        let stats =
+                            apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
+                        if let Some(t) = trace.as_mut() {
+                            t.log_lex_perturbation(stats.delta, stats.effect);
+                        }
+                    }
+                    leaving.after_refactor(m);
+                    continue;
+                }
+                // fresh factorization でも候補なし: 双対非有界 = 主実行不可
                 return SimplexOutcome::Unbounded;
             }
             Some(result) => result,
@@ -320,8 +560,15 @@ pub(crate) fn dual_simplex_core_advanced(
         // 3g: ピボット要素安定性チェック（|α[p]| < pivot_tolerance → refactorまたはskip）
         let pivot_element = alpha_dense[leaving_row];
         if pivot_element.abs() < PIVOT_TOL {
-            // 数値的に不安定 → refactorして被縮小費用を再計算
-            basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
+            // 数値的に不安定。refactor/recompute だけでは同じ候補を再選択して
+            // period=1 停滞になるため、この (basis, leaving_row) の間だけ
+            // この entering_col を候補から除外する。
+            rejected_pivot_basis = Some(basis.to_vec());
+            rejected_pivot_row = Some(leaving_row);
+            if entering_col < rejected_entering.len() {
+                rejected_entering[entering_col] = true;
+            }
+            basis_mgr.force_refactor_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
                 let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
@@ -344,7 +591,10 @@ pub(crate) fn dual_simplex_core_advanced(
             };
             if bland_mode {
                 // rc は refactor で再計算済み; x_b は初回エントリ時に摂動済みなので再注入しない。
-                apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
+                let stats = apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
+                if let Some(t) = trace.as_mut() {
+                    t.log_lex_perturbation(stats.delta, stats.effect);
+                }
             }
             leaving.after_refactor(m);
             continue;
@@ -401,6 +651,10 @@ pub(crate) fn dual_simplex_core_advanced(
         // 3k: 基底更新（LuBasis::update）
         basis_mgr.update(entering_col, leaving_row, &alpha_sv);
         basis[leaving_row] = entering_col;
+        no_candidate_refreshed_basis = None;
+        rejected_pivot_basis = None;
+        rejected_pivot_row = None;
+        rejected_entering.fill(false);
 
         // 3l: refactor判定（LuBasis::needs_refactor）+ 必要なら refactor + 被縮小費用再計算
         // needs_refactor()でeta蓄積数ベースに判定（50反復固定廃止）
@@ -432,24 +686,49 @@ pub(crate) fn dual_simplex_core_advanced(
             };
             if bland_mode {
                 // rc は再計算済み; x_b は初回エントリ時に摂動済みなので再注入しない。
-                apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
+                let stats = apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
+                if let Some(t) = trace.as_mut() {
+                    t.log_lex_perturbation(stats.delta, stats.effect);
+                }
             }
             leaving.after_refactor(m);
         }
 
-        // 3m: 進歩観測 → no-progress なら Bland mode へ遷移
-        if !bland_mode {
-            let current = leaving.progress_metric(x_b, basis);
-            if made_progress_with_floor(best_infeas, current, 0.0) {
-                best_infeas = current;
-                iters_since_progress = 0;
-            } else {
-                iters_since_progress = iters_since_progress.saturating_add(1);
-                if iters_since_progress >= k_trigger {
+        // 3m: 進歩観測 (bland_mode 中も継続)。
+        // - !bland_mode で K iter 改善なし → Bland mode へ遷移 (lex 摂動 + counter リセット)。
+        // - bland_mode でも K iter 改善なし:
+        //   * `yield_on_stall` (Big-M のみ): Priority-2 駆出規則は Bland の有限終了
+        //     保証外で、bland でも発散しうる (degen3)。Timeout を返し呼出側 primal
+        //     fallback (`two_phase_dual_simplex`) に譲る。固定 cap でなく多手法 handoff。
+        //   * それ以外 (warm / Le-only cold-start): leaving は古典 Bland で有限終了が
+        //     保証され、fallback も無い。yield すると可解 LP を偽 Timeout 化するため
+        //     yield せず Bland を継続する (counter のみリセット)。
+        let current = leaving.progress_metric(x_b, basis);
+        if made_progress_with_floor(best_infeas, current, 0.0) {
+            best_infeas = current;
+            iters_since_progress = 0;
+            if !bland_mode {
+                cycle_detector.clear();
+            }
+        } else {
+            iters_since_progress = iters_since_progress.saturating_add(1);
+            if iters_since_progress >= k_trigger {
+                if bland_mode {
+                    if yield_on_stall {
+                        let obj: f64 = basic_obj(c, basis, x_b);
+                        return SimplexOutcome::Timeout(obj);
+                    }
+                    // Standard caller: keep iterating; classical Bland terminates.
+                    iters_since_progress = 0;
+                } else {
                     bland_mode = true;
-                    bland_start_iter = *iter_count_out;
+                    iters_since_progress = 0;
                     // 初回エントリ: rc と x_b の両方を摂動する。
-                    apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, true);
+                    let stats =
+                        apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, true);
+                    if let Some(t) = trace.as_mut() {
+                        t.log_lex_perturbation(stats.delta, stats.effect);
+                    }
                 }
             }
         }
@@ -462,6 +741,22 @@ mod tests {
     use super::*;
     use crate::options::SolverOptions;
     use crate::sparse::CscMatrix;
+
+    #[test]
+    fn basis_cycle_detector_flags_repeated_basis_and_clear_resets() {
+        let mut detector = BasisCycleDetector::default();
+        assert!(!detector.repeated(1, &[1, 2, 3]));
+        assert!(!detector.repeated(2, &[1, 3, 2]));
+        assert!(
+            detector.repeated(3, &[1, 2, 3]),
+            "revisiting an earlier basis must trigger Bland/lex anti-cycling"
+        );
+        detector.clear();
+        assert!(
+            !detector.repeated(4, &[1, 2, 3]),
+            "real progress clears the cycle window"
+        );
+    }
 
     /// Sentinel (P0 proof): lb-violation + sign-flipped ratio test None
     /// = dual-simplex infeasibility proof → must return `SimplexOutcome::Unbounded`.
@@ -492,6 +787,8 @@ mod tests {
             &mut basis,
             1,
             2,
+            2,
+            false,
             &opts,
             &mut leaving,
             &mut iters,
@@ -501,6 +798,129 @@ mod tests {
             "warm-start lb-violation with no lb-repair candidate must yield Unbounded \
              (dual infeasibility proof); got {outcome:?}. \
              If Timeout: fallback retry was restored — the no-op proof triggered."
+        );
+    }
+
+    /// LOAD-BEARING sentinel (n_enter re-entry ban). The entering ratio test must
+    /// never select a column with index >= `n_enter`. This is the mechanism that
+    /// stops the Big-M Phase I artificial↔artificial swap cycle (nug08-3rd): once
+    /// an artificial leaves it cannot re-enter, so each Priority-2 pivot replaces
+    /// it with a structural column (monotone).
+    ///
+    /// Construction (1 row, 4 cols, a = [1,1,1,-1], basis = {col 0}, x_B = [-1]):
+    /// the lb-violation sign-flip leaves only col 3 with a positive `trow`. The
+    /// leaving variable is col 0 (< n_enter in both cases), so the *lb-repair*
+    /// decision is identical — only the *entering* exclusion differs:
+    ///   - n_enter = 4: col 3 enters → pivot → x_B = [1] ≥ 0 → Optimal.
+    ///   - n_enter = 2: col 3 (idx 3 ≥ 2) is excluded, no other candidate → Unbounded.
+    ///
+    /// no-op proof: reverting core to pass `n_price` to the ratio test makes the
+    /// n_enter=2 run also admit col 3 → Optimal, not Unbounded → this FAILS.
+    #[test]
+    fn n_enter_excludes_high_index_columns_from_entering() {
+        // a = [1, 1, 1, -1], single row.
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 0, 0], &[0, 1, 2, 3], &[1.0, 1.0, 1.0, -1.0], 1, 4)
+                .unwrap();
+        let c = vec![0.0_f64; 4];
+        let opts = SolverOptions::default();
+
+        let run = |n_enter: usize| {
+            let mut basis = vec![0usize];
+            let mut x_b = vec![-1.0_f64];
+            let mut leaving = MostInfeasibleLeaving;
+            let mut iters = 0usize;
+            dual_simplex_core_advanced(
+                &a, &mut x_b, &c, &mut basis, 1, 4, n_enter, false, &opts, &mut leaving, &mut iters,
+            )
+        };
+
+        assert!(
+            matches!(run(4), SimplexOutcome::Optimal(_, _)),
+            "n_enter=4 (col 3 enterable) must reach Optimal"
+        );
+        assert!(
+            matches!(run(2), SimplexOutcome::Unbounded),
+            "n_enter=2 must EXCLUDE col 3 (idx >= n_enter) from entering → Unbounded; \
+             got non-Unbounded ⇒ core passes n_price not n_enter (artificial re-entry ban reverted)"
+        );
+    }
+
+    /// LOAD-BEARING sentinel: the stall→Timeout yield must fire ONLY when the
+    /// caller opts in (`yield_on_stall = true`, i.e. Big-M, which has a fallback).
+    /// A standard caller (`false`) must keep iterating — classical Bland
+    /// terminates and there is no fallback, so yielding would turn a solvable LP
+    /// into a spurious Timeout (codex concern A).
+    ///
+    /// `AlwaysStallLeaving` forces an endless degenerate pivot loop with a
+    /// constant progress metric, so the core enters bland_mode and never makes
+    /// progress. With a short deadline:
+    ///   - yield_on_stall=true  → Timeout at the stall (~2·k_trigger iters).
+    ///   - yield_on_stall=false → Timeout only at the deadline (far more iters).
+    ///
+    /// no-op proof: if the yield ignores the flag (always yields), the no-yield
+    /// run stops at the same ~2·k_trigger point ⇒ `iters_noyield ≈ iters_yield`
+    /// ⇒ the `>` assertion fails.
+    #[test]
+    fn yield_on_stall_gated_by_caller_flag() {
+        use super::super::super::pricing::DualLeavingStrategy;
+
+        struct AlwaysStallLeaving;
+        impl DualLeavingStrategy for AlwaysStallLeaving {
+            fn select_leaving(&mut self, _x_b: &[f64], _t: f64, _b: &[usize]) -> Option<usize> {
+                Some(0)
+            }
+            fn bland_leaving(&mut self, _x_b: &[f64], _t: f64, _b: &[usize]) -> Option<usize> {
+                Some(0)
+            }
+            fn progress_metric(&mut self, _x_b: &[f64], _b: &[usize]) -> f64 {
+                1.0
+            }
+            // Suppress lb-repair so a negative x_B[0] is never sign-flip-repaired:
+            // every column has a[0]>0 ⇒ trow stays positive (no Unbounded), the
+            // forced negative leaving never resolves (no Optimal) ⇒ perpetual stall.
+            fn allows_lb_repair(&self) -> bool {
+                false
+            }
+        }
+
+        // m=1, three columns all with a[0]=1. Forcing row 0 to leave with x_B[0]<0
+        // and no lb-repair keeps x_B[0] negative forever (trow > 0 each iter), so
+        // the core enters bland_mode and never makes progress.
+        let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[1.0, 1.0, 1.0], 1, 3).unwrap();
+        let c = vec![0.0_f64, 0.0, 0.0];
+        let run = |yield_on_stall: bool| {
+            let opts = SolverOptions {
+                max_etas: 1,
+                deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(300)),
+                ..SolverOptions::default()
+            };
+            let mut basis = vec![2usize];
+            let mut x_b = vec![-1.0_f64];
+            let mut leaving = AlwaysStallLeaving;
+            let mut iters = 0usize;
+            let out = dual_simplex_core_advanced(
+                &a, &mut x_b, &c, &mut basis, 1, 3, 3, yield_on_stall, &opts, &mut leaving,
+                &mut iters,
+            );
+            (out, iters)
+        };
+
+        let (out_yield, iters_yield) = run(true);
+        let (out_noyield, iters_noyield) = run(false);
+        assert!(
+            matches!(out_yield, SimplexOutcome::Timeout(_)),
+            "yield path must Timeout (stall-yield)"
+        );
+        assert!(
+            matches!(out_noyield, SimplexOutcome::Timeout(_)),
+            "no-yield path must Timeout (deadline), not stall-yield"
+        );
+        assert!(
+            iters_noyield > iters_yield.saturating_mul(4),
+            "yield_on_stall=false must NOT stall-yield: it ran only {iters_noyield} iters \
+             vs the yield path's {iters_yield}; near-equal ⇒ the flag is ignored and a \
+             standard caller would be wrongly Timeout-ed"
         );
     }
 
@@ -655,6 +1075,8 @@ mod tests {
             &mut basis,
             3,
             6,
+            6,
+            false,
             &opts,
             &mut leaving,
             &mut iters,

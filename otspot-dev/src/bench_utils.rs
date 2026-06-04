@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // Re-export production utilities that also live in otspot-core.
-pub use otspot_core::qp::pick_best_ipm_or_simplex;
 pub use otspot_core::tolerances::{obj_within_tol, OBJ_MATCH_REL_TOL};
 
 /// Relative primal feasibility max-violation for LP / QP.
@@ -28,7 +27,7 @@ pub fn primal_feas_max(
     x: &[f64],
 ) -> f64 {
     let n = bounds.len();
-    if x.len() != n {
+    if x.len() != n || x.iter().any(|v| !v.is_finite()) {
         return f64::INFINITY;
     }
     let ax = if a.nrows() > 0 {
@@ -51,6 +50,9 @@ pub fn primal_feas_max(
             ConstraintType::Eq => (ax[i] - b[i]).abs(),
             _ => continue,
         };
+        if !viol.is_finite() || !ax[i].is_finite() || !b[i].is_finite() {
+            return f64::INFINITY;
+        }
         let scale = 1.0 + ax[i].abs() + b[i].abs();
         max_v = max_v.max(viol / scale);
     }
@@ -379,20 +381,33 @@ pub fn compute_dfeas_orig(
     reduced_costs: &[f64],
 ) -> (f64, f64) {
     use twofloat::TwoFloat;
-    if solution.is_empty() || solution.len() != prob.num_vars {
+    if solution.is_empty()
+        || solution.len() != prob.num_vars
+        || solution.iter().any(|v| !v.is_finite())
+        || dual_solution.iter().any(|v| !v.is_finite())
+        || bound_duals.iter().any(|v| !v.is_finite())
+        || reduced_costs.iter().any(|v| !v.is_finite())
+    {
+        return (f64::NAN, f64::NAN);
+    }
+    let n_finite_bounds = prob
+        .bounds
+        .iter()
+        .map(|&(lb, ub)| usize::from(lb.is_finite()) + usize::from(ub.is_finite()))
+        .sum::<usize>();
+    if !bound_duals.is_empty() && bound_duals.len() != n_finite_bounds {
+        return (f64::INFINITY, f64::INFINITY);
+    }
+    if !reduced_costs.is_empty() && reduced_costs.len() != prob.num_vars {
         return (f64::NAN, f64::NAN);
     }
     let n = solution.len();
-    let qx: Vec<f64> = dd_impl::qx(&prob.q, solution)
-        .iter()
-        .map(|&v| f64::from(v))
-        .collect();
-    let aty: Vec<f64> = dd_impl::aty(&prob.a, dual_solution, n)
-        .iter()
-        .map(|&v| f64::from(v))
-        .collect();
 
-    // LP/Simplex path: complementarity-aware sign check on reduced costs.
+    // LP/Simplex path: complementarity-aware sign check on reduced costs. This
+    // path is a pure function of bounds, solution, reduced_costs and c and never
+    // touches `dual_solution` / A^T·y, so it is evaluated BEFORE `aty` — a short
+    // or mismatched dual must yield a finite LP residual here, not an `aty` index
+    // panic. The dual-length guard therefore belongs only to the KKT path below.
     if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
         let rel_tol = PIVOT_TOL;
         let mut dfeas_abs = 0.0_f64;
@@ -402,16 +417,16 @@ pub fn compute_dfeas_orig(
             if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
                 continue;
             }
-            if prob.a.col_ptr().len() > j + 1 && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0
-            {
-                continue;
-            }
             let rc = reduced_costs[j];
             let x_j = solution[j];
             let at_lb =
                 lb_j.is_finite() && (x_j - lb_j).abs() <= rel_tol * (1.0 + x_j.abs() + lb_j.abs());
             let at_ub =
                 ub_j.is_finite() && (x_j - ub_j).abs() <= rel_tol * (1.0 + x_j.abs() + ub_j.abs());
+            // Interior (away from any finite bound) ⇒ basic in simplex, where rc
+            // is ~0 by construction; any reported magnitude is basis noise, so it
+            // is not a dual-feasibility violation. Only at-bound (nonbasic) vars
+            // are sign-checked above.
             let viol = if at_lb && !at_ub {
                 f64::max(0.0, -rc)
             } else if at_ub && !at_lb {
@@ -426,12 +441,20 @@ pub fn compute_dfeas_orig(
         return (dfeas_abs, dfeas_rel);
     }
 
-    let mut bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bound_duals);
-    if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
-        for j in 0..n {
-            bound_contrib[j] = -reduced_costs[j];
-        }
+    // KKT path: the residual is built from A^T·y, so the dual must match
+    // num_constraints — otherwise `aty` would index `y` out of bounds.
+    if prob.num_constraints > 0 && dual_solution.len() != prob.num_constraints {
+        return (f64::INFINITY, f64::INFINITY);
     }
+    let qx: Vec<f64> = dd_impl::qx(&prob.q, solution)
+        .iter()
+        .map(|&v| f64::from(v))
+        .collect();
+    let aty: Vec<f64> = dd_impl::aty(&prob.a, dual_solution, n)
+        .iter()
+        .map(|&v| f64::from(v))
+        .collect();
+    let bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bound_duals);
     let mut dfeas_abs = 0.0_f64;
     let mut dfeas_rel_componentwise = 0.0_f64;
     for i in 0..n {
@@ -796,5 +819,59 @@ mod tests {
             "case C: at-ub componentwise must equal orig"
         );
         assert!(dfeas_c > 0.0, "case C: at ub, rc>0 → violation > 0");
+    }
+
+    /// The `dual_solution.len() != num_constraints` guard must stay scoped to the
+    /// KKT path: it still rejects a malformed dual there (INF), but must NOT
+    /// reject a valid simplex output on the reduced-cost path (empty dual).
+    ///
+    /// No-op sentinels: deleting the guard makes the KKT call return a finite
+    /// residual (1st assert fails); dropping the `!lp_reduced_cost_path` scope
+    /// makes the LP call return INF (2nd assert fails).
+    #[test]
+    fn test_dfeas_dual_length_guard_scoped_to_kkt_path() {
+        let p = make_single_var_prob(vec![(0.0, f64::INFINITY)], vec![1.0], 5.0);
+
+        // KKT path (bound_duals non-empty) with dual_solution.len()=0 ≠ 1 → INF.
+        let (abs, rel) = compute_dfeas_orig(&p, &[5.0], &[], &[0.5], &[]);
+        assert!(
+            abs.is_infinite() && rel.is_infinite(),
+            "KKT path with mismatched dual must be INF, got ({abs}, {rel})"
+        );
+
+        // Reduced-cost path (reduced_costs given, bound_duals empty) with the same
+        // empty dual must be accepted (finite), not rejected.
+        let (abs_lp, _) = compute_dfeas_orig(&p, &[5.0], &[], &[], &[-1.0]);
+        assert!(
+            abs_lp.is_finite(),
+            "LP reduced-cost path must accept an empty dual, got {abs_lp}"
+        );
+    }
+
+    /// Regression (codex P2): the LP reduced-cost path is evaluated *before*
+    /// `aty`, so a short non-empty `dual_solution` is ignored (finite result),
+    /// never indexed out of bounds. Here num_constraints=2 with a length-1 dual:
+    /// if `aty` ran before the LP return it would index `y[1]` and panic.
+    ///
+    /// No-op sentinel: moving `aty` back ahead of the LP path makes this panic.
+    #[test]
+    fn test_dfeas_lp_path_ignores_short_dual_no_panic() {
+        // 2 vars, 2 Eq constraints (A = I₂); reduced_costs given ⇒ LP path.
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
+        let prob = QpProblem::new(
+            CscMatrix::new(2, 2),
+            vec![1.0, 1.0],
+            a,
+            vec![3.0, 4.0],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+        )
+        .unwrap();
+        // dual_solution.len()=1 < num_constraints=2: would panic `aty` at y[1].
+        let (abs, rel) = compute_dfeas_orig(&prob, &[3.0, 4.0], &[0.5], &[], &[1.0, 1.0]);
+        assert!(
+            abs.is_finite() && rel.is_finite(),
+            "LP path must ignore a short dual and return finite, got ({abs}, {rel})"
+        );
     }
 }

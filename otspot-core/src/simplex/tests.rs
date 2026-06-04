@@ -57,6 +57,56 @@ fn test_timeout_result_with_incumbent_uses_original_objective() {
     );
 }
 
+/// Sentinel: a SHIFTED LP (lb ≠ 0 ⇒ obj_offset ≠ 0) must NOT double-count the
+/// shift constant. `extract_solution` already un-shifts, so `c·solution` is the
+/// complete original objective; adding `sf.obj_offset` on top double-counts
+/// `Σ c_j·lb_j` (the same defect the Big-M Optimal path was fixed for).
+///
+/// x0 ∈ [2, ∞), x1 ∈ [0, ∞), min 3x0 + x1, x0+x1 ≥ 1. obj_offset = 3·2 = 6.
+/// Incumbent = initial basis (structurals at lb) ⇒ x0=2, x1=0 ⇒ c·x = 6.
+///
+/// no-op proof: re-adding `+ sf.obj_offset` makes the reported objective 12,
+/// failing the `c·solution` equality.
+#[test]
+fn test_timeout_result_with_incumbent_no_double_count_on_shifted_lp() {
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+    let lp = LpProblem::new_general(
+        vec![3.0, 1.0],
+        a,
+        vec![1.0],
+        vec![ConstraintType::Ge],
+        vec![(2.0, f64::INFINITY), (0.0, f64::INFINITY)],
+        None,
+    )
+    .unwrap();
+    let sf = build_standard_form(&lp);
+    assert!(
+        sf.obj_offset.abs() > 1e-9,
+        "test LP must be shifted (obj_offset != 0); got {}",
+        sf.obj_offset
+    );
+    let basis = sf.initial_basis.clone();
+    let x_b = sf.b.clone();
+    let col_scale = vec![1.0; sf.n_total];
+
+    let result = timeout_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale, 7);
+
+    let expected_obj = lp
+        .c
+        .iter()
+        .zip(result.solution.iter())
+        .map(|(&ci, &xi)| ci * xi)
+        .sum::<f64>();
+    assert!(
+        (result.objective - expected_obj).abs() < 1e-9,
+        "shifted-LP incumbent obj must be c·solution (no obj_offset double-count); \
+         reported {} vs c·solution {} (diff = obj_offset {} ⇒ double-count)",
+        result.objective,
+        expected_obj,
+        sf.obj_offset
+    );
+}
+
 #[test]
 fn test_reconcile_final_basis_state_recomputes_xb_and_y() {
     let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 2, 1, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3)
@@ -634,6 +684,179 @@ fn test_finite_ub_zero_constraints() {
     );
 }
 
+// --- m==0 early-return bound-selection tests ---
+//
+// All tests call `solve_without_presolve` directly so they exercise the
+// `if m == 0` branch in entry.rs rather than letting presolve intercept.
+
+/// Helper: solve m=0 problem without presolve and return the result.
+fn solve_m0(c: Vec<f64>, bounds: Vec<(f64, f64)>) -> (LpProblem, crate::problem::SolverResult) {
+    let n = c.len();
+    let a = CscMatrix::new(0, n);
+    let lp = LpProblem::new_general(c, a, vec![], vec![], bounds, None).unwrap();
+    let result = solve_without_presolve(&lp, &SolverOptions::default());
+    (lp, result)
+}
+
+/// Regression: c=0, lb=-inf, ub=-1 must return x=-1 (not x=0 which violates ub).
+/// Before the fix, the m==0 path left x=0 and returned Optimal, silently violating ub<0.
+#[test]
+fn test_m0_zero_cost_ub_negative_regression() {
+    let (lp, result) = solve_m0(vec![0.0], vec![(f64::NEG_INFINITY, -1.0)]);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "Expected Optimal, got {:?}",
+        result.status
+    );
+    assert_solver_invariants_lp(&result, &lp);
+    let x = result.solution[0];
+    assert!(
+        x <= -1.0 + PIVOT_TOL,
+        "x={x} violates ub=-1 (pre-fix bug: x=0 was returned)"
+    );
+}
+
+/// c>0, lb finite: optimizer drives x to lower bound.
+#[test]
+fn test_m0_positive_cost_lb_finite() {
+    let (lp, result) = solve_m0(vec![1.0], vec![(-3.0, f64::INFINITY)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    assert!(
+        (result.solution[0] - (-3.0)).abs() < PIVOT_TOL,
+        "Expected x=-3, got {}",
+        result.solution[0]
+    );
+    assert!(
+        (result.objective - (-3.0)).abs() < PIVOT_TOL,
+        "Expected obj=-3, got {}",
+        result.objective
+    );
+}
+
+/// c>0, lb=-inf: unbounded below.
+#[test]
+fn test_m0_positive_cost_lb_infinite_unbounded() {
+    let (_lp, result) = solve_m0(vec![1.0], vec![(f64::NEG_INFINITY, f64::INFINITY)]);
+    assert_eq!(
+        result.status,
+        SolveStatus::Unbounded,
+        "c>0 + lb=-inf must be Unbounded, got {:?}",
+        result.status
+    );
+}
+
+/// c<0, ub=+inf: unbounded above.
+#[test]
+fn test_m0_negative_cost_ub_infinite_unbounded() {
+    let (_lp, result) = solve_m0(vec![-1.0], vec![(0.0, f64::INFINITY)]);
+    assert_eq!(
+        result.status,
+        SolveStatus::Unbounded,
+        "c<0 + ub=+inf must be Unbounded, got {:?}",
+        result.status
+    );
+}
+
+/// c<0, ub finite: optimizer drives x to upper bound.
+#[test]
+fn test_m0_negative_cost_ub_finite() {
+    let (lp, result) = solve_m0(vec![-1.0], vec![(0.0, 3.0)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    assert!(
+        (result.solution[0] - 3.0).abs() < PIVOT_TOL,
+        "Expected x=3, got {}",
+        result.solution[0]
+    );
+    assert!(
+        (result.objective - (-3.0)).abs() < PIVOT_TOL,
+        "Expected obj=-3, got {}",
+        result.objective
+    );
+}
+
+/// c=0, lb finite: must land at lb (feasible and cost-free).
+#[test]
+fn test_m0_zero_cost_lb_finite() {
+    let (lp, result) = solve_m0(vec![0.0], vec![(2.0, f64::INFINITY)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    assert!(
+        result.solution[0] >= 2.0 - PIVOT_TOL,
+        "x={} must be >= lb=2",
+        result.solution[0]
+    );
+}
+
+/// c=0, lb=-inf, ub finite: must land at or below ub.
+#[test]
+fn test_m0_zero_cost_lb_inf_ub_finite() {
+    let (lp, result) = solve_m0(vec![0.0], vec![(f64::NEG_INFINITY, -1.0)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    let x = result.solution[0];
+    assert!(x <= -1.0 + PIVOT_TOL, "x={x} violates ub=-1");
+}
+
+/// c=0, both lb and ub finite: must land within [lb, ub].
+#[test]
+fn test_m0_zero_cost_both_bounds_finite() {
+    let (lp, result) = solve_m0(vec![0.0], vec![(1.0, 5.0)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    let x = result.solution[0];
+    assert!(
+        (1.0 - PIVOT_TOL..=5.0 + PIVOT_TOL).contains(&x),
+        "x={x} outside [1,5]"
+    );
+}
+
+/// c=0, both bounds infinite: x=0 is a valid feasible point.
+#[test]
+fn test_m0_zero_cost_both_bounds_infinite() {
+    let (lp, result) = solve_m0(vec![0.0], vec![(f64::NEG_INFINITY, f64::INFINITY)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+}
+
+/// Multi-variable m=0: mixed cost signs all satisfied simultaneously.
+#[test]
+fn test_m0_multi_var_mixed_costs() {
+    // 3 vars: c=[-1, 1, 0]
+    //   var0: c=-1 (negative), lb=0, ub=4      → x=4, obj contribution=-4
+    //   var1: c=+1 (positive), lb=-2, ub=inf   → x=-2, obj contribution=-2
+    //   var2: c=0  (zero),     lb=3, ub=7      → x∈[3,7]
+    let (lp, result) = solve_m0(
+        vec![-1.0, 1.0, 0.0],
+        vec![(0.0, 4.0), (-2.0, f64::INFINITY), (3.0, 7.0)],
+    );
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    let x = &result.solution;
+    assert!(
+        (x[0] - 4.0).abs() < PIVOT_TOL,
+        "var0 (c<0): expected x=4, got {}",
+        x[0]
+    );
+    assert!(
+        (x[1] - (-2.0)).abs() < PIVOT_TOL,
+        "var1 (c>0): expected x=-2, got {}",
+        x[1]
+    );
+    assert!(
+        x[2] >= 3.0 - PIVOT_TOL && x[2] <= 7.0 + PIVOT_TOL,
+        "var2 (c=0): expected x∈[3,7], got {}",
+        x[2]
+    );
+    assert!(
+        (result.objective - (-6.0)).abs() < PIVOT_TOL,
+        "Expected obj=-6, got {}",
+        result.objective
+    );
+}
+
 #[test]
 fn test_primal_simplex_timeout() {
     let n = 200usize;
@@ -1093,12 +1316,17 @@ fn test_hs51_free_var_no_singular_basis() {
 /// Sentinel: `pivot_out_degenerate_artificials` early-exit fires when no
 /// degenerate artificials remain after Phase I.
 ///
+/// `pivot_out_degenerate_artificials` lives only on the **primal** path
+/// (`two_phase_simplex`); `SimplexMethod::Auto`/`Dual` route Eq rows to the
+/// dual Big-M simplex and never reach it, so the cleanup counters stay put.
+/// The route must be forced to `Primal` to exercise the function.
+///
 /// Diagonal LP: m Eq rows `x_i = 1`. Phase I pivots each artificial out at
 /// value 1.0 (non-degenerate) → no degenerate artificials remain → early-exit
 /// must fire. Removing the early-exit makes `PIVOT_CLEAN_EARLY_EXIT_COUNT`
 /// stagnate, failing the assertion below (no-op FAIL).
 #[test]
-fn pivot_clean_early_exit_fires_when_no_degenerate_artificials() {
+fn primal_pivot_clean_early_exit_fires_when_no_degenerate_artificials() {
     use std::sync::atomic::Ordering;
 
     let before = primal::PIVOT_CLEAN_EARLY_EXIT_COUNT.load(Ordering::SeqCst);
@@ -1120,6 +1348,7 @@ fn pivot_clean_early_exit_fires_when_no_degenerate_artificials() {
 
     let mut opts = SolverOptions::default();
     opts.presolve = false; // force artificial path
+    opts.simplex_method = SimplexMethod::Primal; // primal-only cleanup path
     let result = solve_with(&lp, &opts);
 
     assert_eq!(
@@ -1146,8 +1375,11 @@ fn pivot_clean_early_exit_fires_when_no_degenerate_artificials() {
 /// (`PIVOT_CLEAN_CLEANUP_RAN_COUNT` increments). Construction uses redundant Eq
 /// rows so Phase I strands duplicates' artificials at value 0. Table-driven over
 /// two redundancy patterns; widening the early-exit causes no-op FAIL here.
+///
+/// `SimplexMethod::Primal` is forced: the cleanup lives only on the primal
+/// `two_phase_simplex` path (Auto/Dual route Eq to the dual Big-M simplex).
 #[test]
-fn pivot_cleanup_runs_when_degenerate_artificial_in_basis() {
+fn primal_pivot_cleanup_runs_when_degenerate_artificial_in_basis() {
     use std::sync::atomic::Ordering;
 
     // (rows, cols, vals, m, n, b, c, expected_obj, label)
@@ -1202,6 +1434,7 @@ fn pivot_cleanup_runs_when_degenerate_artificial_in_basis() {
 
         let mut opts = SolverOptions::default();
         opts.presolve = false; // force artificial path
+        opts.simplex_method = SimplexMethod::Primal; // primal-only cleanup path
         let result = solve_with(&lp, &opts);
 
         assert_eq!(

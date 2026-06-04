@@ -64,13 +64,16 @@ pub(crate) fn timeout_result_with_incumbent(
     iter: usize,
 ) -> SolverResult {
     let solution = extract_solution(sf, basis, x_b, col_scale);
+    // `extract_solution` already un-shifts to original variables, so `c·solution`
+    // IS the complete original objective. Adding `sf.obj_offset` (= Σ c_j·lb_j)
+    // would double-count the shift constant (same defect the Big-M Optimal path
+    // was fixed for) — wrong for any shifted LP (obj_offset ≠ 0).
     let objective = problem
         .c
         .iter()
         .zip(solution.iter())
         .map(|(&ci, &xi)| ci * xi)
-        .sum::<f64>()
-        + sf.obj_offset;
+        .sum::<f64>();
     SolverResult {
         status: SolveStatus::Timeout,
         objective,

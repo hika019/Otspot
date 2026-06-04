@@ -1,6 +1,6 @@
 //! QP presolve step 7: free-variable substitution via singleton Eq rows.
 
-use super::helpers::{apply_fixed_variable, skip_step};
+use super::helpers::{apply_fixed_variable, col_has_structural_q, skip_step};
 use super::state::{QpPostsolveStep, QpPresolveResult, Workspace};
 use crate::qp::QpProblem;
 use crate::tolerances::ZERO_TOL;
@@ -30,14 +30,7 @@ pub(super) fn step7_free_var(
             continue;
         }
 
-        let q_nnz_j = {
-            let start = prob.q.col_ptr[j];
-            let end = prob.q.col_ptr[j + 1];
-            (start..end)
-                .filter(|&k| prob.q.values[k].abs() > ZERO_TOL)
-                .count()
-        };
-        if q_nnz_j > 0 {
+        if col_has_structural_q(&prob.q, j) {
             continue;
         }
 

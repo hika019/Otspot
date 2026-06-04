@@ -1,13 +1,8 @@
 //! Q=0 (LP) dispatch.
 //!
-//! 中規模以下は `crate::lp::solve_lp_forwarded_from_qp` (telemetry 付き simplex) に
-//! forward する。`n > LP_IPM_FIRST_N` または `m > LP_IPM_FIRST_M` を満たす大規模 LP は
-//! IPM を先行し、収束しなければ残時間で simplex にフォールバック。
-//!
-//! QP presolve は Q=0 では使わない。LP presolve を先に通した上で、縮約後の
-//! LP に対して simplex/IPM を選ぶ。
-//!
-//! `LP_DISPATCH_NOOP=1` は sentinel 用 (no-op proof) で IPM 経路を無効化する。
+//! Q=0 の QP は LP として `crate::lp::solve_lp_forwarded_from_qp` (telemetry 付き
+//! simplex) に forward する。QP presolve は使わず、LP presolve を先に通した上で
+//! 縮約後の LP を simplex で解く。
 
 use std::time::Instant;
 
@@ -17,30 +12,21 @@ use crate::presolve;
 #[cfg(test)]
 use crate::problem::ConstraintType;
 use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
+#[cfg(test)]
 use crate::sparse::CscMatrix;
 #[cfg(test)]
 use crate::tolerances::any_nonfinite;
 
-use super::{ipm_solver, QpProblem};
+use super::QpProblem;
+#[cfg(test)]
+use super::ipm_solver;
 
-/// IPM を先に走らせる変数数閾値 / 制約数閾値。
-///
-/// 値根拠 (#67 撤退実証、2026-05-28): d6cube (n=415,m=404)、ken-13、ken-18、cre-b、pilot は
-/// simplex 単独で 60s timeout (d6cube 4.25% gap)。これら IPM 依存 LP を IPM 経路に乗せ、
-/// median Netlib (n<800) を simplex 経路に維持する両立点。bench 実測 backed = 必須 dispatch。
-/// 撤廃すると Netlib 109/109 → 約 104/109 退化。
-const LP_IPM_FIRST_N: usize = 3_000;
-const LP_IPM_FIRST_M: usize = 2_000;
-
-/// IPM 先行時に IPM へ割り当てる deadline 比率 (残予算に対する)。
-///
-/// 値 0.5 の根拠 (#67 撤退実証、2026-05-28):
-/// (1) greenbea stalling 対策: IPM が全予算消費 → simplex に時間なし。0.5 fraction で simplex
-///     fallback に予算確保 (simplex ~75s で完収束)。
-/// (2) dfl001 postsolve LSQ skip gate 発火: IPM 部分実行 → simplex で primal 準備 →
-///     postsolve LSQ skip 経路で <1s 完了。撤廃すると IPM 60s フル消費 → postsolve 43s 退化。
-/// 両ケース bench 実測 backed = 必須 knob。
-const IPM_BUDGET_FRACTION: f64 = 0.5;
+// Test-only hook: forces solve_reduced_lp_from_qp to treat the reduced solve
+// as if it returned Timeout with a reduced-space solution, bypassing wall-clock.
+#[cfg(test)]
+thread_local! {
+    static INJECT_REDUCED_TIMEOUT_QP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 fn timeout_result_lp_dispatch() -> SolverResult {
     let mut timeout = SolverResult {
@@ -51,20 +37,6 @@ fn timeout_result_lp_dispatch() -> SolverResult {
     timeout.stats.route = SolveRoute::LpForwardedFromQp;
     timeout.stats.deadline_triggered = true;
     timeout
-}
-
-pub fn prefer_ipm_for_size(n: usize, m: usize) -> bool {
-    n > LP_IPM_FIRST_N || m > LP_IPM_FIRST_M
-}
-
-/// IPM 先行時の IPM 用 deadline を計算する。全体 deadline がある場合のみ、残予算の
-/// `IPM_BUDGET_FRACTION` を IPM に割り当て、残りを simplex fallback に確保する。
-/// `None` (全体 deadline 非設定) の場合は box せず (`opts.deadline` をそのまま使う)。
-fn ipm_box_deadline(options: &SolverOptions, now: Instant) -> Option<Instant> {
-    options.deadline.map(|overall| {
-        let remaining = overall.saturating_duration_since(now);
-        now + remaining.mul_f64(IPM_BUDGET_FRACTION)
-    })
 }
 
 pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
@@ -94,7 +66,11 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
         None,
     ) {
         Ok(lp) => lp,
-        Err(_) => return SolverResult::infeasible(),
+        Err(_) => {
+            let mut r = SolverResult::numerical_error();
+            r.stats.route = SolveRoute::LpForwardedFromQp;
+            return r;
+        }
     };
 
     if options.presolve {
@@ -173,73 +149,15 @@ fn solve_unpresolved_lp_from_qp(
     problem: &QpProblem,
     options: &SolverOptions,
 ) -> SolverResult {
-    // 大規模 LP: IPM 先行、Timeout/NumericalError/Unbounded/MaxIter は simplex 再試行。
-    // Optimal/LocallyOptimal/Infeasible は確定的 → 即返却。
-    // Unbounded は IPM 側 Q=0 数値リスクがあるため simplex で再確認。
-    // LP_DISPATCH_NOOP=1 は sentinel 用 (no-op proof) で IPM 経路を無効化する。
-    let dispatch_disabled = std::env::var("LP_DISPATCH_NOOP").ok().as_deref() == Some("1");
-    let mut ipm_subopt_candidate: Option<SolverResult> = None;
-    if !dispatch_disabled && prefer_ipm_for_size(problem.num_vars, problem.num_constraints) {
-        let mut ipm_opts = ipm_opts_for_lp(options);
-        // IPM に残予算の一部のみ割り当て、残りを simplex fallback に確保する。
-        ipm_opts.deadline = ipm_box_deadline(options, Instant::now()).or(ipm_opts.deadline);
-        let mut ipm_result = ipm_solver::solve_ipm(problem, &ipm_opts);
-        ipm_result.stats.route = SolveRoute::LpForwardedFromQp;
-        ipm_result.stats.lp_ipm_path = true;
-        // ipm_solver は内部で obj_offset を加算済み → そのまま返す。
-        match ipm_result.status {
-            SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible => {
-                // 確定 status は simplex 再試行不要、即返却。
-                // Optimal は primal guard で false-Optimal を除去してから返す。
-                let mut guarded = guard_lp_optimal(ipm_result, lp);
-                fill_lp_reduced_costs_from_dual(&mut guarded, lp);
-                return guarded;
-            }
-            SolveStatus::Unbounded
-            | SolveStatus::Timeout
-            | SolveStatus::NumericalError
-            | SolveStatus::MaxIterations => {
-                if options.deadline.is_some_and(|d| Instant::now() >= d) {
-                    fill_lp_reduced_costs_from_dual(&mut ipm_result, lp);
-                    return ipm_result;
-                }
-                // 残時間で simplex 再試行。
-            }
-            SolveStatus::SuboptimalSolution => {
-                if options.deadline.is_some_and(|d| Instant::now() >= d) {
-                    fill_lp_reduced_costs_from_dual(&mut ipm_result, lp);
-                    return ipm_result;
-                }
-                // Ruiz IPM が SuboptimalSolution: no-Ruiz fallback を試す。
-                if let Some(guarded) = try_no_ruiz_ipm_lp(problem, lp, options) {
-                    return guarded;
-                }
-                // no-Ruiz も失敗: incumbent を保存して simplex 再試行。
-                ipm_subopt_candidate = Some(ipm_result);
-            }
-            SolveStatus::NonConvex(_)
-            | SolveStatus::NonconvexLocal
-            | SolveStatus::NonconvexGlobal => {
-                // LP dispatch は Q=0 前提 → 非凸 status は本経路には出ないが、
-                // non-exhaustive match を防ぎ safety net として simplex に倒す。
-            }
-            SolveStatus::NotSupported(_) => {
-                // Propagate immediately; simplex retry cannot help.
-                return ipm_result;
-            }
-        }
-    }
-
     // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
-    // QpProblem.obj_offset を別経路で加算する必要がある。
-    let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(lp, options);
+    // QpProblem.obj_offset を別経路で加算する。
+    let mut result = crate::lp::solve_lp_forwarded_from_qp(lp, options);
     if matches!(
-        simplex_result.status,
+        result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
     ) {
-        simplex_result.objective += problem.obj_offset;
+        result.objective += problem.obj_offset;
     }
-    let mut result = pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex_result);
     fill_lp_reduced_costs_from_dual(&mut result, lp);
     result
 }
@@ -260,6 +178,17 @@ fn solve_reduced_lp_from_qp(
     let t_solve = Instant::now();
     let raw = solve_lp_backend_no_presolve(reduced_lp, &reduced_opts);
     let solve_us = t_solve.elapsed().as_micros() as u64;
+    // Test hook: override raw with Timeout carrying a reduced-space solution.
+    #[cfg(test)]
+    let raw = if INJECT_REDUCED_TIMEOUT_QP.with(|v| v.get()) {
+        SolverResult {
+            status: SolveStatus::Timeout,
+            solution: vec![0.0; reduced_lp.num_vars],
+            ..Default::default()
+        }
+    } else {
+        raw
+    };
     if (raw.status == SolveStatus::NumericalError
         || (raw.status == SolveStatus::SuboptimalSolution && raw.solution.is_empty()))
         && options.deadline.is_none_or(|d| Instant::now() < d)
@@ -289,18 +218,31 @@ fn solve_reduced_lp_from_qp(
             | SolveStatus::Timeout
     ) && (!raw.solution.is_empty() || reduced_lp.num_vars == 0)
     {
-        if raw.status == SolveStatus::Timeout
-            && options.deadline.is_some_and(|d| Instant::now() >= d)
-        {
-            let mut timeout = raw;
+        let deadline_expired = options.deadline.is_some_and(|d| Instant::now() >= d);
+        #[cfg(test)]
+        let deadline_expired = deadline_expired || INJECT_REDUCED_TIMEOUT_QP.with(|v| v.get());
+        if raw.status == SolveStatus::Timeout && deadline_expired {
+            // `raw.solution` is in the reduced variable space; propagating it would
+            // violate the SolverResult contract (solution must be in the original
+            // variable space or empty). Return an empty Timeout result.
+            let mut timeout = SolverResult {
+                status: SolveStatus::Timeout,
+                objective: f64::INFINITY,
+                solution: vec![],
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+                timing_breakdown: Some(crate::problem::TimingBreakdown {
+                    presolve_us,
+                    solve_us,
+                    postsolve_us: 0,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
             timeout.stats.route = SolveRoute::LpForwardedFromQp;
             timeout.stats.deadline_triggered = true;
-            timeout.timing_breakdown = Some(crate::problem::TimingBreakdown {
-                presolve_us,
-                solve_us,
-                postsolve_us: 0,
-                ..Default::default()
-            });
             return timeout;
         }
         let t_postsolve = Instant::now();
@@ -312,7 +254,6 @@ fn solve_reduced_lp_from_qp(
             options.recover_warm_start_basis,
         );
         lifted.stats.route = SolveRoute::LpForwardedFromQp;
-        lifted.stats.lp_ipm_path = raw.stats.lp_ipm_path;
         lifted.stats.deadline_triggered = matches!(lifted.status, SolveStatus::Timeout);
         lifted = guard_lp_optimal(lifted, original_lp);
         let postsolve_us = t_postsolve.elapsed().as_micros() as u64;
@@ -334,10 +275,7 @@ fn solve_reduced_lp_from_qp(
             let mut fallback = solve_original_lp_direct_retry(original_lp, &fallback_opts);
             fill_lp_reduced_costs_from_dual(&mut fallback, original_lp);
             add_qp_obj_offset(&mut fallback, qp_obj_offset);
-            if !matches!(
-                fallback.status,
-                SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
-            ) {
+            if fallback.status == SolveStatus::Optimal {
                 fallback.timing_breakdown = Some(crate::problem::TimingBreakdown {
                     presolve_us,
                     solve_us: t_fallback.elapsed().as_micros() as u64,
@@ -355,97 +293,17 @@ fn solve_reduced_lp_from_qp(
     raw
 }
 
-/// Ruiz IPM が SuboptimalSolution で返した後の no-Ruiz fallback。
-///
-/// Ruiz amplification が大きい LP (例: cre-b amplification≈5e5) では unscale 後に
-/// dual が増幅され comp_componentwise_rel が大きくなり prove_optimal が失敗する。
-/// no-Ruiz は original space で完全収束するため complementary slackness を満たし Optimal 率が高い。
-/// Optimal/LocallyOptimal が得られた場合は guard 済み結果を返す。失敗時は None。
-fn try_no_ruiz_ipm_lp(
-    qp: &super::QpProblem,
-    lp: &crate::problem::LpProblem,
-    options: &SolverOptions,
-) -> Option<SolverResult> {
-    if options.deadline.is_some_and(|d| Instant::now() >= d) {
-        return None;
-    }
-    let mut no_ruiz_opts = ipm_opts_for_lp(options);
-    no_ruiz_opts.use_ruiz_scaling = false;
-    // Box no-Ruiz deadline to preserve budget for simplex fallback (same logic as Ruiz 1st call).
-    no_ruiz_opts.deadline = ipm_box_deadline(options, Instant::now()).or(no_ruiz_opts.deadline);
-    let mut result = ipm_solver::solve_ipm(qp, &no_ruiz_opts);
-    result.stats.route = SolveRoute::LpForwardedFromQp;
-    result.stats.lp_ipm_path = true;
-    // guard_lp_optimal may demote Optimal→SuboptimalSolution; check status after guarding.
-    let mut guarded = guard_lp_optimal(result, lp);
-    if matches!(guarded.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
-        fill_lp_reduced_costs_from_dual(&mut guarded, lp);
-        Some(guarded)
-    } else {
-        None
-    }
-}
-
 fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
-    let dispatch_disabled = std::env::var("LP_DISPATCH_NOOP").ok().as_deref() == Some("1");
-    let mut ipm_subopt_candidate: Option<SolverResult> = None;
-    if !dispatch_disabled && prefer_ipm_for_size(lp.num_vars, lp.num_constraints) {
-        if let Some(qp) = qp_from_lp(lp) {
-            let mut ipm_opts = ipm_opts_for_lp(options);
-            ipm_opts.deadline = ipm_box_deadline(options, Instant::now()).or(ipm_opts.deadline);
-            let mut ipm = ipm_solver::solve_ipm(&qp, &ipm_opts);
-            ipm.stats.route = SolveRoute::LpForwardedFromQp;
-            ipm.stats.lp_ipm_path = true;
-            if matches!(
-                ipm.status,
-                SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible
-            ) {
-                let mut guarded = guard_lp_optimal(ipm, lp);
-                fill_lp_reduced_costs_from_dual(&mut guarded, lp);
-                return guarded;
-            }
-            if options.deadline.is_some_and(|d| Instant::now() >= d) {
-                fill_lp_reduced_costs_from_dual(&mut ipm, lp);
-                return ipm;
-            }
-            if matches!(ipm.status, SolveStatus::SuboptimalSolution) && !ipm.solution.is_empty() {
-                // Ruiz IPM が SuboptimalSolution: prove_optimal が補完スラック条件で失敗する場合
-                // (Ruiz amplification が大きい LP で dual が unscale 後に増幅→comp_componentwise 大)。
-                // no-Ruiz は original space で完全収束しこの問題を回避する。
-                if let Some(guarded) = try_no_ruiz_ipm_lp(&qp, lp, options) {
-                    return guarded;
-                }
-                ipm_subopt_candidate = Some(ipm);
-            }
-        }
-    }
-
-    let simplex = crate::lp::solve_lp_forwarded_from_qp(lp, options);
-    let mut result = pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex);
+    let mut result = crate::lp::solve_lp_forwarded_from_qp(lp, options);
     fill_lp_reduced_costs_from_dual(&mut result, lp);
     result
 }
 
 fn solve_original_lp_direct_retry(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
-    if prefer_ipm_for_size(lp.num_vars, lp.num_constraints) {
-        solve_lp_backend_no_presolve(lp, options)
-    } else {
-        crate::lp::solve_lp_forwarded_from_qp(lp, options)
-    }
-}
-
-fn qp_from_lp(lp: &LpProblem) -> Option<QpProblem> {
-    let mut qp = QpProblem::new(
-        CscMatrix::new(lp.num_vars, lp.num_vars),
-        lp.c.clone(),
-        lp.a.clone(),
-        lp.b.clone(),
-        lp.bounds.clone(),
-        lp.constraint_types.clone(),
-    )
-    .ok()?;
-    qp.obj_offset = lp.obj_offset;
-    Some(qp)
+    let mut retry_opts = options.clone();
+    retry_opts.presolve = false;
+    retry_opts.simplex_method = crate::options::SimplexMethod::Primal;
+    crate::lp::solve_lp_forwarded_from_qp(lp, &retry_opts)
 }
 
 fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
@@ -461,9 +319,6 @@ fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
 }
 
 fn fill_lp_reduced_costs_from_dual(result: &mut SolverResult, problem: &LpProblem) {
-    if result.stats.lp_ipm_path {
-        return;
-    }
     if result.reduced_costs.len() == problem.num_vars {
         return;
     }
@@ -552,35 +407,8 @@ fn postsolved_lp_needs_direct_retry(result: &SolverResult) -> bool {
         || result.status == SolveStatus::SuboptimalSolution)
 }
 
-/// Pick the better of an IPM result and a simplex result.
-///
-/// If simplex timed out (or hit a non-convergence status) but IPM previously
-/// found a `SuboptimalSolution` or `LocallyOptimal` with a non-empty solution
-/// vector, the IPM result is returned.  In all other cases the simplex result
-/// is returned unchanged.
-pub fn pick_best_ipm_or_simplex(
-    ipm_candidate: Option<SolverResult>,
-    simplex_result: SolverResult,
-) -> SolverResult {
-    let simplex_failed = matches!(
-        simplex_result.status,
-        SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
-    );
-    if let Some(ipm) = ipm_candidate {
-        if simplex_failed
-            && matches!(
-                ipm.status,
-                SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal
-            )
-            && !ipm.solution.is_empty()
-        {
-            return ipm;
-        }
-    }
-    simplex_result
-}
-
-/// LP→IPM 呼び出し時に presolve を無効化したオプションを生成。
+/// LP→IPM 呼び出し時に presolve を無効化したオプションを生成 (Farkas cert 検証専用)。
+#[cfg(test)]
 fn ipm_opts_for_lp(options: &SolverOptions) -> SolverOptions {
     let mut o = options.clone();
     o.presolve = false;
@@ -751,44 +579,16 @@ fn verify_normalized_farkas(
     true
 }
 
+/// 旧 IPM dispatch を発火させた規模閾値。IPM 撤廃後は production では未使用で、
+/// 大規模 LP が simplex 経路を通ることを確認する test fixture としてのみ保持する。
+#[cfg(test)]
+const LP_IPM_FIRST_N: usize = 3_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sparse::CscMatrix;
     use std::time::Duration;
-
-    /// `ipm_box_deadline` reserves part of the remaining budget for the simplex
-    /// fallback: with an overall deadline it returns ~`IPM_BUDGET_FRACTION` of the
-    /// remaining time; without one it returns `None` (no box).
-    #[test]
-    fn ipm_box_deadline_reserves_simplex_budget() {
-        let now = Instant::now();
-        let cases = [10.0_f64, 100.0, 1000.0];
-        for &total in &cases {
-            let opts = SolverOptions {
-                deadline: Some(now + Duration::from_secs_f64(total)),
-                ..SolverOptions::default()
-            };
-            let box_dl = ipm_box_deadline(&opts, now).expect("deadline present → box");
-            let box_secs = box_dl.duration_since(now).as_secs_f64();
-            let expected = total * IPM_BUDGET_FRACTION;
-            assert!(
-                (box_secs - expected).abs() < 1e-6,
-                "box must be {IPM_BUDGET_FRACTION} of {total}s = {expected}s, got {box_secs}s",
-            );
-            // The reserved simplex share is strictly positive (fallback can run).
-            assert!(box_secs < total, "box must leave budget for simplex");
-        }
-        // No overall deadline → no box (IPM keeps its own deadline / unbounded).
-        let no_dl = SolverOptions {
-            deadline: None,
-            ..SolverOptions::default()
-        };
-        assert!(
-            ipm_box_deadline(&no_dl, now).is_none(),
-            "no deadline → no box"
-        );
-    }
 
     fn eq_lp_fixture(n: usize, m: usize) -> LpProblem {
         let mut rows = Vec::new();
@@ -835,12 +635,12 @@ mod tests {
         );
     }
 
-    /// Q=0 QP entry must run LP presolve before size-based IPM dispatch.
+    /// Q=0 QP entry must run LP presolve before reaching the simplex backend.
     ///
-    /// The unreduced problem has `n > LP_IPM_FIRST_N`, so skipping presolve would
-    /// set `lp_ipm_path=true`. LP presolve fixes the singleton row and empty
-    /// positive-cost columns, leaving a zero-size reduced LP that postsolves back
-    /// to the original space.
+    /// The unreduced problem has `n > LP_IPM_FIRST_N`. LP presolve fixes the
+    /// singleton row and empty positive-cost columns, leaving a zero-size reduced
+    /// LP that postsolves back to the original space. `lp_ipm_path` stays false
+    /// (IPM 経路は撤廃済み)。
     #[test]
     fn qp_zero_path_presolve_reduces_before_ipm_dispatch() {
         use crate::options::SolverOptions;
@@ -865,7 +665,7 @@ mod tests {
         assert_eq!(result.stats.route, SolveRoute::LpForwardedFromQp);
         assert!(
             !result.stats.lp_ipm_path,
-            "presolve must reduce before size-based IPM dispatch"
+            "presolve must reduce; LP path never sets lp_ipm_path"
         );
         assert_eq!(result.solution.len(), n);
         assert!((result.solution[0] - 1.0).abs() < 1e-9);
@@ -879,6 +679,48 @@ mod tests {
             .expect("LP-dispatched QP presolve/postsolve path must keep timing");
         assert!(timing.presolve_us > 0, "presolve timing must be recorded");
         assert!(timing.postsolve_us > 0, "postsolve timing must be recorded");
+    }
+
+    /// 大規模 LP (n > 旧 IPM 閾値) でも IPM を経由せず simplex 一本で解くこと。
+    /// IPM 撤廃の load-bearing sentinel: `lp_ipm_path` は常に false、route は
+    /// `LpForwardedFromQp`。presolve を切って simplex backend を直接通す。
+    #[test]
+    fn large_lp_dispatch_stays_on_simplex_path() {
+        use crate::options::SolverOptions;
+        use crate::problem::{SolveRoute, SolveStatus};
+
+        // n = 旧 IPM dispatch 発火規模。単一等式 x_0 = 1、min Σ x_i → x_0=1 他 0、obj=1。
+        let n = LP_IPM_FIRST_N + 1;
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap();
+        let problem = QpProblem::new(
+            CscMatrix::new(n, n),
+            vec![1.0; n],
+            a,
+            vec![1.0],
+            vec![(0.0, f64::INFINITY); n],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..SolverOptions::default()
+        };
+
+        let result = solve_as_lp(&problem, &opts);
+
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "large LP must solve via simplex; got {:?}",
+            result.status
+        );
+        assert_eq!(result.stats.route, SolveRoute::LpForwardedFromQp);
+        assert!(
+            !result.stats.lp_ipm_path,
+            "IPM 撤廃後 LP は simplex 一本: lp_ipm_path must be false for n>{LP_IPM_FIRST_N}"
+        );
+        assert_eq!(result.solution.len(), n);
+        assert!((result.objective - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -906,32 +748,6 @@ mod tests {
         assert_eq!(result.status, SolveStatus::Timeout);
         assert_eq!(result.stats.route, SolveRoute::LpForwardedFromQp);
         assert!(result.stats.deadline_triggered);
-    }
-
-    #[test]
-    fn ipm_path_does_not_overwrite_bound_duals_with_synthetic_rc() {
-        let lp = eq_lp_fixture(2, 1);
-        let mut result = SolverResult {
-            status: SolveStatus::Optimal,
-            solution: vec![1.0, 1.0],
-            dual_solution: vec![1.0],
-            reduced_costs: vec![],
-            bound_duals: vec![0.5, 0.0],
-            ..Default::default()
-        };
-        result.stats.lp_ipm_path = true;
-
-        fill_lp_reduced_costs_from_dual(&mut result, &lp);
-
-        assert!(
-            result.reduced_costs.is_empty(),
-            "IPM path must preserve reduced_costs empty for certificate path"
-        );
-        assert_eq!(
-            result.bound_duals,
-            vec![0.5, 0.0],
-            "IPM path bound_duals must not be cleared by LP synthetic RC fill"
-        );
     }
 
     /// 非負変数の QP/LP を密行で構築するヘルパー (Farkas 検証 sentinel 用)。
@@ -1108,8 +924,6 @@ mod tests {
     ///
     /// Sentinel: removing `objective: f64::INFINITY` from any simplex Infeasible arm
     /// (e.g. reverting to `objective: 0.0`) causes the assert to fail.
-    /// The status guard at lp_dispatch.rs:150-153 ensures the INFINITY value is
-    /// not further modified (INFINITY absorbs, but Timeout/NumericalError are also guarded).
     #[test]
     fn infeasible_lp_dispatch_obj_offset_not_added() {
         use crate::options::SolverOptions;
@@ -1155,126 +969,7 @@ mod tests {
         );
     }
 
-    // ── F.1: pick_best_ipm_or_simplex 全分岐 table-driven ──────────────────
-
-    fn make_result(status: SolveStatus, solution: Vec<f64>, objective: f64) -> SolverResult {
-        SolverResult {
-            status,
-            solution,
-            objective,
-            ..SolverResult::default()
-        }
-    }
-
-    /// `pick_best_ipm_or_simplex` の 3 条件 (simplex_failed × ipm_status × solution) を
-    /// 全パターン cover する table-driven sentinel。
-    /// no-op: 条件分岐を削除すると expected route と異なるオブジェクティブが返り fail。
-    #[test]
-    fn pick_best_ipm_or_simplex_all_branches() {
-        const IPM_OBJ: f64 = 1.0;
-        const SIMP_OBJ: f64 = 2.0;
-
-        struct Case {
-            name: &'static str,
-            ipm: Option<SolverResult>,
-            simplex: SolverResult,
-            expect_ipm: bool,
-        }
-
-        let cases = vec![
-            // (A) 全 3 条件 true → ipm を返す
-            Case {
-                name: "LocallyOptimal + Timeout + non-empty → ipm",
-                ipm: Some(make_result(SolveStatus::LocallyOptimal, vec![1.0], IPM_OBJ)),
-                simplex: make_result(SolveStatus::Timeout, vec![], SIMP_OBJ),
-                expect_ipm: true,
-            },
-            Case {
-                name: "SuboptimalSolution + Timeout + non-empty → ipm",
-                ipm: Some(make_result(
-                    SolveStatus::SuboptimalSolution,
-                    vec![1.0],
-                    IPM_OBJ,
-                )),
-                simplex: make_result(SolveStatus::Timeout, vec![], SIMP_OBJ),
-                expect_ipm: true,
-            },
-            Case {
-                name: "SuboptimalSolution + NumericalError + non-empty → ipm",
-                ipm: Some(make_result(
-                    SolveStatus::SuboptimalSolution,
-                    vec![1.0],
-                    IPM_OBJ,
-                )),
-                simplex: make_result(SolveStatus::NumericalError, vec![], SIMP_OBJ),
-                expect_ipm: true,
-            },
-            Case {
-                name: "SuboptimalSolution + MaxIterations + non-empty → ipm",
-                ipm: Some(make_result(
-                    SolveStatus::SuboptimalSolution,
-                    vec![2.0, 3.0],
-                    IPM_OBJ,
-                )),
-                simplex: make_result(SolveStatus::MaxIterations, vec![], SIMP_OBJ),
-                expect_ipm: true,
-            },
-            // (B) solution.is_empty() で条件破れ → simplex を返す
-            Case {
-                name: "LocallyOptimal + Timeout + empty solution → simplex",
-                ipm: Some(make_result(SolveStatus::LocallyOptimal, vec![], IPM_OBJ)),
-                simplex: make_result(SolveStatus::Timeout, vec![], SIMP_OBJ),
-                expect_ipm: false,
-            },
-            // (C) simplex_failed=false で条件破れ → simplex を返す
-            Case {
-                name: "SuboptimalSolution + Optimal simplex → simplex",
-                ipm: Some(make_result(
-                    SolveStatus::SuboptimalSolution,
-                    vec![1.0],
-                    IPM_OBJ,
-                )),
-                simplex: make_result(SolveStatus::Optimal, vec![1.0], SIMP_OBJ),
-                expect_ipm: false,
-            },
-            Case {
-                name: "SuboptimalSolution + Infeasible simplex → simplex",
-                ipm: Some(make_result(
-                    SolveStatus::SuboptimalSolution,
-                    vec![1.0],
-                    IPM_OBJ,
-                )),
-                simplex: make_result(SolveStatus::Infeasible, vec![], SIMP_OBJ),
-                expect_ipm: false,
-            },
-            // (D) ipm_candidate=None → simplex を返す
-            Case {
-                name: "None + Timeout → simplex",
-                ipm: None,
-                simplex: make_result(SolveStatus::Timeout, vec![], SIMP_OBJ),
-                expect_ipm: false,
-            },
-            // (E) ipm.status が対象外 (Optimal) → simplex を返す
-            Case {
-                name: "ipm Optimal + Timeout + non-empty → simplex",
-                ipm: Some(make_result(SolveStatus::Optimal, vec![1.0], IPM_OBJ)),
-                simplex: make_result(SolveStatus::Timeout, vec![], SIMP_OBJ),
-                expect_ipm: false,
-            },
-        ];
-
-        for case in &cases {
-            let result = pick_best_ipm_or_simplex(case.ipm.clone(), case.simplex.clone());
-            let expected_obj = if case.expect_ipm { IPM_OBJ } else { SIMP_OBJ };
-            assert_eq!(
-                result.objective, expected_obj,
-                "case `{}`: expected {} (ipm={}), got {}",
-                case.name, expected_obj, case.expect_ipm, result.objective,
-            );
-        }
-    }
-
-    // ── F.2: verified_farkas_timeout_fallback 早期 false return ────────────
+    // ── verified_farkas_timeout_fallback 早期 false return ────────────
 
     /// 非負制約 (lb=0, ub=∞) を持たない問題は Farkas 経路に入れない → false。
     ///
@@ -1335,7 +1030,7 @@ mod tests {
     /// 加算されることを確認する。
     ///
     /// sentinel: `SolveStatus::Timeout` を match から削除すると
-    /// `simplex_result.objective += problem.obj_offset` が実行されず、
+    /// `result.objective += problem.obj_offset` が実行されず、
     /// `result.objective == 0.0` のまま → assert FAIL。
     ///
     /// `c = [0.0]` により c^T x* = 0 (incumbent 不定でも)。cancel_flag=true で
@@ -1408,6 +1103,66 @@ mod tests {
         assert!(
             !verified_farkas_timeout_fallback(&zero_constraints, &opts),
             "zero constraints → empty cert_rhs must return false",
+        );
+    }
+
+    /// Sentinel: `solve_reduced_lp_from_qp` must not return a reduced-space solution on Timeout.
+    ///
+    /// Pre-fix (lines 202-212): returned `raw` which had `solution.len() == reduced_num_vars`.
+    /// Post-fix: returns `solution: vec![]`.
+    ///
+    /// LP fixture: 3-var problem where presolve fixes x via a singleton Eq row,
+    /// leaving a 2-var sub-problem (y,z). `orig_n=3`, `reduced_n=2`.
+    /// A reduced-space Timeout solution (len=2) is visibly wrong (not 0, not 3).
+    ///
+    ///   row 0: 1.0*x = 5          (singleton Eq — presolve fixes x=5)
+    ///   row 1: 2.0*y + 1.0*z >= 3
+    ///   row 2: 1.0*y + 2.0*z >= 3
+    #[test]
+    fn presolve_timeout_solution_never_leaks_reduced_space_in_qp_path() {
+        use crate::options::SolverOptions;
+        use crate::problem::SolveStatus;
+
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 2, 1, 2],
+            &[0, 1, 1, 2, 2],
+            &[1.0, 2.0, 1.0, 1.0, 2.0],
+            3,
+            3,
+        )
+        .unwrap();
+        let problem = QpProblem::new(
+            CscMatrix::new(3, 3),
+            vec![1.0, 1.0, 1.0],
+            a,
+            vec![5.0, 3.0, 3.0],
+            vec![(0.0, f64::INFINITY); 3],
+            vec![ConstraintType::Eq, ConstraintType::Ge, ConstraintType::Ge],
+        )
+        .unwrap();
+        let orig_n = problem.num_vars; // 3
+
+        // 1. Normal solve: solution must be in original space.
+        let r = solve_as_lp(&problem, &SolverOptions { presolve: true, ..Default::default() });
+        assert_eq!(r.status, SolveStatus::Optimal);
+        assert_eq!(
+            r.solution.len(),
+            orig_n,
+            "Optimal: solution.len() must equal orig_n={orig_n}"
+        );
+
+        // 2. Inject hook: force reduced-space Timeout and bypass wall-clock deadline check.
+        // Pre-fix: returns raw.solution.len() == reduced_n (2) — FAIL.
+        // Post-fix: returns solution: vec![] — PASS.
+        INJECT_REDUCED_TIMEOUT_QP.with(|v| v.set(true));
+        let r = solve_as_lp(&problem, &SolverOptions { presolve: true, ..Default::default() });
+        INJECT_REDUCED_TIMEOUT_QP.with(|v| v.set(false));
+        let n = r.solution.len();
+        assert_eq!(r.status, SolveStatus::Timeout, "injected path must return Timeout");
+        assert!(
+            n == 0 || n == orig_n,
+            "injected Timeout: solution.len()={n} must be 0 or {orig_n}, \
+             never 2 (reduced — lp_dispatch reduced-space leak)",
         );
     }
 }

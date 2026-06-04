@@ -524,7 +524,12 @@ fn solve_ipm_with_runner(
             opts.ipm.max_iter = per_attempt_cap;
             opts.use_ruiz_scaling = use_ruiz_fb;
             opts.tolerance = None;
-            opts.ipm.eps = user_eps.max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
+            // Tighten the inner target like the main attempt loop: the IPM stops on
+            // the scale-aggregated complementarity, but prove_optimal accepts on the
+            // stricter component-wise complementarity. Solving only to user_eps leaves
+            // the worst component just above tol (false SuboptimalSolution); base_tighten
+            // drives it below tol. acceptance is still gated by satisfies_eps(user_eps).
+            opts.ipm.eps = (user_eps / base_tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
             let fb = runner(problem, &fallback_pre, &opts);
             let charged_fb = if fb.satisfies_eps(user_eps) {
                 fb.iterations

@@ -9,35 +9,35 @@ use super::state::{PostsolveStep, PresolveState, PresolveStatus};
 use crate::problem::ConstraintType;
 use crate::tolerances::ZERO_TOL;
 
-/// Conservative fill-in budget: skip the substitution when the new nonzeros
-/// would exceed `FILL_IN_FACTOR` times the nonzeros removed.
+/// Markowitz fill guard: skip the substitution when it would densify the matrix.
+///
+/// Eliminating `x_j` through `piv_row` distributes the pivot row's `p` other
+/// entries into each of the `c` rows where `x_j` also appears. That performs up
+/// to `c * p` coefficient updates and creates up to `c * p` new nonzeros (the
+/// Markowitz fill count), while removing the `1 + p + c` nonzeros of the pivot
+/// row and of `x_j`'s entries in those rows.
+///
+/// Skipping exactly when the Markowitz fill exceeds the removed nonzeros keeps
+/// the stored nonzero count non-increasing across substitutions, which bounds
+/// both the fill and the `O(c * p)` update work: a low-`p` pivot can no longer
+/// repeatedly fatten a shared column across many rows (the cascade that made
+/// step 7 consume the whole deadline on dense optimal-control LPs). The work
+/// estimate is `c * p` rather than the precise new-nonzero count because the
+/// `add_to_entry` cost is paid for every update, whether or not it lands on an
+/// existing entry. A free variable left unsubstituted is simply handed to the
+/// simplex stage, so the guard trades reduction depth for sparsity, not correctness.
 pub(super) fn fill_in_exceeds_budget(st: &PresolveState, piv_row: usize, j: usize) -> bool {
-    const FILL_IN_FACTOR: usize = 3;
-    let piv_others_cols: Vec<usize> = st.row_entries[piv_row]
+    let piv_others = st.row_entries[piv_row]
         .iter()
         .filter(|&&(jj, v)| jj != j && !st.removed_cols[jj] && v.abs() >= ZERO_TOL)
-        .map(|&(jj, _)| jj)
-        .collect();
-    let col_j_other_rows: Vec<usize> = st.col_entries[j]
+        .count();
+    let col_j_other_rows = st.col_entries[j]
         .iter()
         .filter(|&&(ii, v)| ii != piv_row && !st.removed_rows[ii] && v.abs() >= ZERO_TOL)
-        .map(|&(ii, _)| ii)
-        .collect();
-    let mut new_entries: usize = 0;
-    for &i in &col_j_other_rows {
-        let existing: std::collections::HashSet<usize> = st.row_entries[i]
-            .iter()
-            .filter(|&&(_, v)| v.abs() >= ZERO_TOL)
-            .map(|&(jj, _)| jj)
-            .collect();
-        for &k in &piv_others_cols {
-            if !existing.contains(&k) {
-                new_entries += 1;
-            }
-        }
-    }
-    let removed_nnz = 1 + piv_others_cols.len() + col_j_other_rows.len();
-    new_entries > FILL_IN_FACTOR * removed_nnz.max(1)
+        .count();
+    let markowitz_fill = col_j_other_rows.saturating_mul(piv_others);
+    let removed_nnz = 1 + piv_others + col_j_other_rows;
+    markowitz_fill > removed_nnz
 }
 
 pub(super) fn eliminate_variable_via_eq_row(

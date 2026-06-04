@@ -21,6 +21,18 @@ pub(super) fn q_diagonal(q: &CscMatrix, j: usize) -> f64 {
     0.0
 }
 
+/// 列 `j` が構造的な二次項を持つか（pure-LP 列分類の単一判定点）。
+///
+/// LP-style な固定/消去 (empty/singleton/dual-fixing/free-singleton) を行う前段で
+/// 「この列に Q 構造があるか」を判定する。**数値閾値ではなく構造的ゼロ**で判定する:
+/// `|q| > ZERO_TOL` 等の閾値は微小 Q (例 1e-13) 列を pure-LP と誤分類し、曲率最適
+/// 解を境界へ固定して suboptimal を産む。`from_triplets` が `|v| ≤ DROP_TOL` を構築
+/// 時に落とすため、stored 値は構造的非ゼロである。全 step がこの単一述語を共有し、
+/// 横展開漏れ (閾値ドリフト) を構造的に封じる。
+pub(super) fn col_has_structural_q(q: &CscMatrix, j: usize) -> bool {
+    (q.col_ptr[j]..q.col_ptr[j + 1]).any(|k| q.values[k] != 0.0)
+}
+
 /// Kahan-compensated `*sum += delta` to keep presolve-induced rounding noise
 /// well below tight user-eps targets.
 #[inline]
@@ -120,7 +132,9 @@ pub(super) fn count_block_components(q: &CscMatrix, a: &CscMatrix, n: usize) -> 
         let end = q.col_ptr[j + 1];
         for k in start..end {
             let row = q.row_ind[k];
-            if row < n && row != j && q.values[k].abs() > ZERO_TOL {
+            // 構造的非ゼロ pattern で連結成分を数える (doc 通り)。微小 off-diag Q を
+            // 閾値で「結合なし」と誤分類しないよう構造的ゼロ判定に統一。
+            if row < n && row != j && q.values[k] != 0.0 {
                 union(&mut parent, j, row);
             }
         }
