@@ -779,21 +779,9 @@ mod tests {
         .unwrap()
     }
 
-    /// Sentinel: when presolve reduces a problem and the reduced solve times out
-    /// with the deadline exhausted, the returned solution must be in the original
-    /// variable space (len == orig_num_vars) or empty (len == 0).
-    ///
-    /// Pre-fix (entry.rs L89-102): the early-return propagated `raw` directly,
-    /// where `raw.solution.len() == reduced_num_vars < orig_num_vars`.
-    /// This assertion `n == 0 || n == orig_num_vars` fails.
-    ///
-    /// Post-fix: the early-return constructs a fresh `SolverResult` with
-    /// `solution: vec![]`, so `n == 0` and the assertion passes.
-    ///
-    /// The `INJECT_REDUCED_TIMEOUT` hook forces the buggy scenario
-    /// deterministically without relying on wall-clock timing: the hook makes the
-    /// reduced solve appear to have returned Timeout with a reduced-space solution,
-    /// then trips the early-return guard regardless of the actual deadline.
+    /// Sentinel: presolve Timeout early-return must not leak a reduced-space solution.
+    /// `INJECT_REDUCED_TIMEOUT` forces the buggy scenario deterministically.
+    /// Pre-fix: `solution.len() == reduced_n` → assertion fails.  Post-fix: `len == 0`.
     #[test]
     fn presolve_timeout_solution_never_leaks_reduced_space() {
         // 3-variable LP where presolve eliminates x but leaves y and z.
@@ -836,26 +824,30 @@ mod tests {
         );
     }
 
-    /// Sentinel: Timeout at the solve level (no presolve) must return solution
-    /// len == 0.  Verifies the baseline Timeout contract.
+    /// Sentinel: Timeout without presolve must return solution in {0, orig_num_vars}.
+    /// `cancel_flag=true` fires at the first simplex iteration → deterministic Timeout.
+    /// No-op proof: removing the cancel_flag check lets the LP solve Optimal → status
+    /// assert fails.
     #[test]
     fn timeout_no_presolve_solution_is_empty_or_orig() {
+        use std::sync::{atomic::AtomicBool, Arc};
         let lp = make_reducible_lp();
         let orig_n = lp.num_vars;
-        for &budget_us in &[1u64, 5, 50] {
-            let deadline = std::time::Instant::now()
-                + std::time::Duration::from_micros(budget_us);
-            let opts = SolverOptions {
-                presolve: false,
-                deadline: Some(deadline),
-                ..Default::default()
-            };
-            let r = solve_with(&lp, &opts);
-            let n = r.solution.len();
-            assert!(
-                n == 0 || n == orig_n,
-                "no-presolve budget={budget_us}μs: solution.len()={n} must be 0 or {orig_n}"
-            );
-        }
+        let opts = SolverOptions {
+            presolve: false,
+            cancel_flag: Some(Arc::new(AtomicBool::new(true))),
+            ..Default::default()
+        };
+        let r = solve_with(&lp, &opts);
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "cancel_flag=true must produce Timeout"
+        );
+        let n = r.solution.len();
+        assert!(
+            n == 0 || n == orig_n,
+            "Timeout (no presolve): solution.len()={n} must be 0 or {orig_n}"
+        );
     }
 }
