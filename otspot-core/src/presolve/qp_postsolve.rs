@@ -246,7 +246,16 @@ pub(crate) fn recover_y_for_singleton_row_with_bound(
     let target = -(qx_col + orig.c[col] + aty_col_others + bound_contrib_col);
     let y_new = target / a_row_col;
     if y_new.is_finite() {
-        sol.dual_solution[row] = y_new;
+        // Project onto the dual sign cone for the original constraint type.
+        // Le: y ≥ 0, Ge: y ≤ 0, Eq: free. Without projection, a Le/Ge row that
+        // reaches this function via the SingletonRow postsolve path (step2 non-Eq,
+        // lb==ub) stores a sign-violated dual that prove_optimal rejects.
+        let y_proj = match orig.constraint_types.get(row) {
+            Some(crate::problem::ConstraintType::Le) => y_new.max(0.0),
+            Some(crate::problem::ConstraintType::Ge) => y_new.min(0.0),
+            _ => y_new,
+        };
+        sol.dual_solution[row] = y_proj;
     }
 }
 
@@ -711,6 +720,85 @@ mod tests {
             sol.dual_solution[0] == 0.0,
             "near-singular pivot must be skipped: y stays at initial 0.0, got {}",
             sol.dual_solution[0]
+        );
+    }
+
+    /// Sentinel Fix-1: Le singleton row recovery must project y onto the dual sign cone (≥ 0).
+    ///
+    /// Problem: Q=0, c=[2], Le: 1·x ≤ 1, x free.
+    /// KKT for x (col 0): 0 + 2 + 1·y_Le + 0 = 0  →  y_new = -2 < 0 (violates Le ≥ 0).
+    /// With Fix 1: y_proj = max(-2, 0) = 0 (sign-feasible).
+    /// Reverting Fix 1 (remove the sign projection) stores y = -2 → assert fails → sentinel fires.
+    #[test]
+    fn test_sentinel_le_singleton_sign_projected() {
+        use crate::problem::ConstraintType;
+        let n = 1usize;
+        let m = 1usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![2.0_f64];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], m, n).unwrap();
+        let b = vec![1.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let cts = vec![ConstraintType::Le];
+        let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+
+        let mut sol = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0],
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        // Without Fix 1: y_new = -(0+2+0+0)/1 = -2; stored as-is → dual < 0.
+        // With Fix 1: projected via Le → max(-2, 0) = 0.
+        recover_y_for_singleton_row_with_bound(0, 0, &prob, &mut sol, 0.0);
+        assert!(
+            sol.dual_solution[0] >= 0.0,
+            "Le dual must be ≥ 0 after sign projection; got {} (sentinel: Fix 1 reverted?)",
+            sol.dual_solution[0]
+        );
+        assert_eq!(
+            sol.dual_solution[0],
+            0.0,
+            "Le dual must clamp to 0 when KKT gives -2 (sentinel fires if Fix 1 reverted)"
+        );
+    }
+
+    /// Sentinel Fix-1 (Ge case): Ge singleton row recovery must project y ≤ 0.
+    ///
+    /// Problem: Q=0, c=[-2], Ge: 1·x ≥ 1, x free.
+    /// KKT for x: 0 + (-2) + 1·y_Ge + 0 = 0  →  y_new = 2 > 0 (violates Ge ≤ 0).
+    /// With Fix 1: y_proj = min(2, 0) = 0. Reverting stores y = 2 → assert fails.
+    #[test]
+    fn test_sentinel_ge_singleton_sign_projected() {
+        use crate::problem::ConstraintType;
+        let n = 1usize;
+        let m = 1usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![-2.0_f64];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], m, n).unwrap();
+        let b = vec![1.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let cts = vec![ConstraintType::Ge];
+        let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+
+        let mut sol = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0],
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        recover_y_for_singleton_row_with_bound(0, 0, &prob, &mut sol, 0.0);
+        assert!(
+            sol.dual_solution[0] <= 0.0,
+            "Ge dual must be ≤ 0 after sign projection; got {} (sentinel: Fix 1 reverted?)",
+            sol.dual_solution[0]
+        );
+        assert_eq!(
+            sol.dual_solution[0],
+            0.0,
+            "Ge dual must clamp to 0 when KKT gives +2 (sentinel fires if Fix 1 reverted)"
         );
     }
 

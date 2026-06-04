@@ -7,6 +7,7 @@ use crate::qp::ipm_solver::kkt::{
     bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel,
 };
 use crate::qp::ipm_solver::outcome::{IpmOutcome, ProblemView};
+use crate::qp::kkt_resid::dual_sign_violation;
 use crate::qp::problem::QpProblem;
 
 /// primal projection の LDL 因子化に対する時間予算ガード。memory budget は factorize
@@ -63,6 +64,15 @@ pub(super) fn kkt_already_passes(
         &final_sol.bound_duals,
     );
     if comp > user_eps {
+        return false;
+    }
+    let dsign = dual_sign_violation(
+        &orig_problem.constraint_types,
+        &final_sol.dual_solution,
+        orig_problem.bounds.as_slice(),
+        &final_sol.bound_duals,
+    );
+    if dsign > user_eps {
         return false;
     }
     let gap = super::duality_gap::compute_duality_gap_rel(orig_problem, final_sol);
@@ -463,6 +473,67 @@ mod gate_predicate_tests {
         assert!(
             !kkt_already_passes(&prob, &res, &[], true, 1e-6),
             "z_lb=1e-3, y=-0.999: stationarity holds but comp≈2.9e-4≫1e-6 → gate must NOT skip IR"
+        );
+    }
+
+    /// Sentinel Fix-2: dual-sign violation alone (kkt/pres/bv/comp/gap all pass within eps)
+    /// must force kkt_already_passes to return false so Stage-2 IR is NOT skipped.
+    ///
+    /// Problem: min 0.5·x² − 2·x,  Le: x ≤ 1,  x ∈ [0, 1].
+    ///
+    /// Baseline (optimal): x=1, y_Le=1, z_lb=0, z_ub=0.
+    ///   stat: 1 − 2 + 1·1 + (−0 + 0) = 0  →  kkt = 0. Gate must pass.
+    ///
+    /// Corrupt: y_Le = −1e-4 (sign violation for Le), z_lb = 0, z_ub = 1+1e-4.
+    ///   stat: 1 − 2 + 1·(−1e-4) + (−0 + 1+1e-4) = 0  →  kkt = 0.
+    ///   pres: x ≤ 1, x=1  →  slack=0  →  pres = 0.
+    ///   bv:   x=1 ∈ [0,1]  →  bv = 0.
+    ///   comp: y_Le·slack_Le=(−1e-4)·0=0; z_ub·(ub−x)=(1+1e-4)·0=0  →  comp = 0.
+    ///   gap:  primal=dual=−1.5  →  gap = 0.
+    ///   dual_sign: y_Le = −1e-4 < 0 for Le  →  violation ≈ 1e-4 ≫ 1e-6.
+    ///
+    /// Reverting Fix 2 (removing the dual_sign check from kkt_already_passes) makes the gate
+    /// return true here (all other checks pass), causing this assertion to fail → sentinel fires.
+    #[test]
+    fn already_passes_false_when_dual_sign_violated() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![-2.0_f64],
+            a,
+            vec![1.0_f64],
+            vec![(0.0_f64, 1.0_f64)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+
+        // Baseline: x=1, y_Le=1, z_lb=0, z_ub=0.
+        // bound_duals layout: n_lb_finite=1, n_ub_finite=1 → [z_lb, z_ub].
+        // stat: 1−2+1+(−0+0)=0, pres=0, bv=0, comp=0, gap=0, dsign=0 → gate passes.
+        let baseline = crate::problem::SolverResult {
+            solution: vec![1.0_f64],
+            dual_solution: vec![1.0_f64],
+            bound_duals: vec![0.0_f64, 0.0_f64],
+            ..Default::default()
+        };
+        assert!(
+            kkt_already_passes(&prob, &baseline, &[], true, 1e-6),
+            "baseline optimal (y_Le=1, z_lb=0, z_ub=0) must pass the gate"
+        );
+
+        // Corrupt: y_Le=−1e-4, z_ub=1+1e-4. stat=0, comp=0, gap=0, but dsign≈1e-4≫1e-6.
+        // Without Fix 2 the gate returns true (kkt/pres/bv/comp/gap all pass); sentinel fires.
+        let corrupt = crate::problem::SolverResult {
+            solution: vec![1.0_f64],
+            dual_solution: vec![-1e-4_f64],
+            bound_duals: vec![0.0_f64, 1.0_f64 + 1e-4_f64],
+            ..Default::default()
+        };
+        assert!(
+            !kkt_already_passes(&prob, &corrupt, &[], true, 1e-6),
+            "y_Le=−1e-4 violates Le sign (dsign≈1e-4≫1e-6) → gate must NOT skip Stage-2 IR; \
+             reverting the dual_sign check from kkt_already_passes would return true here → sentinel fires"
         );
     }
 
