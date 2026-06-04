@@ -11,6 +11,15 @@ use crate::options::WarmStartBasis;
 use crate::sparse::CscMatrix;
 use std::fmt;
 
+/// Returns `true` if `(lb, ub)` is a valid bound pair.
+///
+/// Valid means: neither endpoint is NaN, `lb <= ub`, `lb < +∞`, and `ub > -∞`.
+/// The last two conditions reject empty intervals that `lb > ub` misses when both
+/// endpoints are the same infinity — e.g., `(+∞, +∞)` or `(-∞, -∞)`.
+pub(crate) fn is_valid_bound_pair(lb: f64, ub: f64) -> bool {
+    !lb.is_nan() && !ub.is_nan() && lb <= ub && lb < f64::INFINITY && ub > f64::NEG_INFINITY
+}
+
 /// LP問題における制約条件の種別
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -378,7 +387,7 @@ impl LpProblem {
             }
         }
         for (i, &(lb, ub)) in bounds.iter().enumerate() {
-            if lb.is_nan() || ub.is_nan() || lb > ub {
+            if !is_valid_bound_pair(lb, ub) {
                 return Err(SolverError::InvalidBounds { index: i, lb, ub });
             }
         }
@@ -639,5 +648,74 @@ mod tests {
             vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, f64::INFINITY)],
         );
         assert!(res.is_ok(), "±inf bounds should be valid");
+    }
+
+    // Bug C/D: (inf,inf) and (-inf,-inf) form empty intervals that lb>ub misses
+    // because inf==inf and -inf==-inf. These must be rejected.
+    #[test]
+    fn lp_empty_interval_same_inf_rejected() {
+        let cases: Vec<(f64, f64)> = vec![
+            (f64::INFINITY, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::NEG_INFINITY),
+        ];
+        for (lb, ub) in cases {
+            let res = make_lp(
+                vec![1.0, 2.0],
+                vec![5.0],
+                vec![1.0, 1.0],
+                vec![(lb, ub), (0.0, f64::INFINITY)],
+            );
+            assert!(
+                matches!(res, Err(SolverError::InvalidBounds { index: 0, .. })),
+                "expected InvalidBounds for ({lb},{ub})"
+            );
+        }
+    }
+
+    // Sentinel: valid half-infinite and fixed-var bounds must be accepted.
+    // If bound validation is replaced by a no-op, fixed-var or half-inf cases
+    // would still be Ok (no rejection) — these are *positive* sentinels that
+    // confirm the validator doesn't over-reject.  The reject sentinels above
+    // ensure no-op → FAIL.
+    #[test]
+    fn lp_valid_bound_variants_accepted() {
+        let valid_cases: Vec<Vec<(f64, f64)>> = vec![
+            vec![(f64::NEG_INFINITY, 5.0), (0.0, f64::INFINITY)],
+            vec![(0.0, f64::INFINITY), (f64::NEG_INFINITY, f64::INFINITY)],
+            vec![(3.0, 3.0), (0.0, 10.0)],
+            vec![(0.0, 0.0), (0.0, 0.0)],
+        ];
+        for bounds in valid_cases {
+            let res = make_lp(
+                vec![1.0, 2.0],
+                vec![5.0],
+                vec![1.0, 1.0],
+                bounds.clone(),
+            );
+            assert!(res.is_ok(), "expected Ok for bounds={bounds:?}");
+        }
+    }
+
+    // Sentinel: lb=+inf (alone) and ub=-inf (alone) must each be rejected.
+    #[test]
+    fn lp_lone_inf_bound_rejected() {
+        let cases: Vec<(f64, f64)> = vec![
+            (f64::INFINITY, 5.0),
+            (f64::INFINITY, f64::INFINITY),
+            (0.0, f64::NEG_INFINITY),
+            (f64::NEG_INFINITY, f64::NEG_INFINITY),
+        ];
+        for (lb, ub) in cases {
+            let res = make_lp(
+                vec![1.0, 2.0],
+                vec![5.0],
+                vec![1.0, 1.0],
+                vec![(lb, ub), (0.0, f64::INFINITY)],
+            );
+            assert!(
+                matches!(res, Err(SolverError::InvalidBounds { index: 0, .. })),
+                "expected InvalidBounds for ({lb},{ub})"
+            );
+        }
     }
 }

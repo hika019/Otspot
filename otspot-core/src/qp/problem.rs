@@ -1,6 +1,6 @@
 //! QP問題のデータ構造定義。
 
-use crate::problem::{ConstraintType, SolveStatus};
+use crate::problem::{is_valid_bound_pair, ConstraintType, SolveStatus};
 use crate::sparse::CscMatrix;
 
 /// Quadratic term storage for a single QCQP constraint.
@@ -181,7 +181,7 @@ impl QpProblem {
             }
         }
         for (i, &(lb, ub)) in bounds.iter().enumerate() {
-            if lb.is_nan() || ub.is_nan() || lb > ub {
+            if !is_valid_bound_pair(lb, ub) {
                 return Err(QpProblemError::InvalidBounds { index: i, lb, ub });
             }
         }
@@ -538,6 +538,74 @@ mod tests {
             vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, f64::INFINITY)],
         );
         assert!(res.is_ok(), "±inf bounds should be valid");
+    }
+
+    // Bug C/D: (inf,inf) and (-inf,-inf) form empty intervals that lb>ub misses
+    // because inf==inf and -inf==-inf. These must be rejected.
+    #[test]
+    fn qp_empty_interval_same_inf_rejected() {
+        let cases: Vec<(f64, f64)> = vec![
+            (f64::INFINITY, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::NEG_INFINITY),
+        ];
+        for (lb, ub) in cases {
+            let res = make_qp(
+                vec![1.0, 2.0],
+                vec![5.0],
+                vec![],
+                vec![1.0, 1.0],
+                vec![(lb, ub), (0.0, f64::INFINITY)],
+            );
+            assert!(
+                matches!(res, Err(QpProblemError::InvalidBounds { index: 0, .. })),
+                "expected InvalidBounds for ({lb},{ub})"
+            );
+        }
+    }
+
+    // Sentinel: valid half-infinite and fixed-var bounds must be accepted.
+    #[test]
+    fn qp_valid_bound_variants_accepted() {
+        let valid_cases: Vec<Vec<(f64, f64)>> = vec![
+            vec![(f64::NEG_INFINITY, 5.0), (0.0, f64::INFINITY)],
+            vec![(0.0, f64::INFINITY), (f64::NEG_INFINITY, f64::INFINITY)],
+            vec![(3.0, 3.0), (0.0, 10.0)],
+            vec![(0.0, 0.0), (0.0, 0.0)],
+        ];
+        for bounds in valid_cases {
+            let res = make_qp(
+                vec![1.0, 2.0],
+                vec![5.0],
+                vec![],
+                vec![1.0, 1.0],
+                bounds.clone(),
+            );
+            assert!(res.is_ok(), "expected Ok for bounds={bounds:?}");
+        }
+    }
+
+    // Sentinel: lb=+inf (alone) and ub=-inf (alone) must each be rejected.
+    #[test]
+    fn qp_lone_inf_bound_rejected() {
+        let cases: Vec<(f64, f64)> = vec![
+            (f64::INFINITY, 5.0),
+            (f64::INFINITY, f64::INFINITY),
+            (0.0, f64::NEG_INFINITY),
+            (f64::NEG_INFINITY, f64::NEG_INFINITY),
+        ];
+        for (lb, ub) in cases {
+            let res = make_qp(
+                vec![1.0, 2.0],
+                vec![5.0],
+                vec![],
+                vec![1.0, 1.0],
+                vec![(lb, ub), (0.0, f64::INFINITY)],
+            );
+            assert!(
+                matches!(res, Err(QpProblemError::InvalidBounds { index: 0, .. })),
+                "expected InvalidBounds for ({lb},{ub})"
+            );
+        }
     }
 
     // --- dimension mismatch still caught ---
