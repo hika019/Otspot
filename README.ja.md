@@ -113,13 +113,14 @@ let result = solve(&prob);
 
 | 問題種別 | セット | 問題数 | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
-| 実行可能 LP | Netlib | 109 | 最適解 109 | 最適解 105 |
-| 凸 QP | Maros–Mészáros | 138 | 最適解 129・有効解 7 | 最適解 125・有効解 4 |
-| 実行不可能 LP | Netlib | 29 | 正答 29 | 正答 29 |
+| 実行可能 LP | Netlib | 109 | 最適解 105 | 最適解 104 |
+| 凸 QP | Maros–Mészáros | 138 | 最適解 114 | 最適解 69 |
+| 実行不可能 LP | Netlib | 29 | 正答 28 | 正答 28 |
 | 非有界 LP | 合成 | 12 | 正答 12 | 正答 12 |
 
-**最適解** = 既知最適値と照合済み。**有効解** = ソルバー判定は最適だが外部参照なし。
-QP 残余ミス 9 件: LISWET 系 (LISWET1/7/8/9/10/12、6 件) + QGFRDXPN/QPCBOEI2/YAO (3 件)；status PFEAS\_FAIL (8 件) / DFEAS\_FAIL (1 件、QGFRDXPN obj≈1e11)。
+**最適解** = 既知最適値と照合済み（proof-carrying KKT）。`jobs=8` で計測。
+LP ミス @1e-6: `dfl001`/`ken-18`/`pds-20`（timeout、大規模 LP）、`cycle`（SuboptimalSolution）。実行不可能ミス: `cplex2`（timeout）。
+QP ミス @1e-6 (24 件): SuboptimalSolution 20 件（LISWET 系 + `STCQP1/2`、`QSHELL`、`AUG2DCQP` 等、KKT 証明が満たせず downgrade）+ timeout 1 件；`1e-8` では許容厳格化で 66 件が SuboptimalSolution に降格。
 再現（データは gitignored、[ベンチマークデータ](#ベンチマークデータ)参照）:
 
 ```bash
