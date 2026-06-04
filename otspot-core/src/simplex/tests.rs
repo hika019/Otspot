@@ -684,6 +684,179 @@ fn test_finite_ub_zero_constraints() {
     );
 }
 
+// --- m==0 early-return bound-selection tests ---
+//
+// All tests call `solve_without_presolve` directly so they exercise the
+// `if m == 0` branch in entry.rs rather than letting presolve intercept.
+
+/// Helper: solve m=0 problem without presolve and return the result.
+fn solve_m0(c: Vec<f64>, bounds: Vec<(f64, f64)>) -> (LpProblem, crate::problem::SolverResult) {
+    let n = c.len();
+    let a = CscMatrix::new(0, n);
+    let lp = LpProblem::new_general(c, a, vec![], vec![], bounds, None).unwrap();
+    let result = solve_without_presolve(&lp, &SolverOptions::default());
+    (lp, result)
+}
+
+/// Regression: c=0, lb=-inf, ub=-1 must return x=-1 (not x=0 which violates ub).
+/// Before the fix, the m==0 path left x=0 and returned Optimal, silently violating ub<0.
+#[test]
+fn test_m0_zero_cost_ub_negative_regression() {
+    let (lp, result) = solve_m0(vec![0.0], vec![(f64::NEG_INFINITY, -1.0)]);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "Expected Optimal, got {:?}",
+        result.status
+    );
+    assert_solver_invariants_lp(&result, &lp);
+    let x = result.solution[0];
+    assert!(
+        x <= -1.0 + PIVOT_TOL,
+        "x={x} violates ub=-1 (pre-fix bug: x=0 was returned)"
+    );
+}
+
+/// c>0, lb finite: optimizer drives x to lower bound.
+#[test]
+fn test_m0_positive_cost_lb_finite() {
+    let (lp, result) = solve_m0(vec![1.0], vec![(-3.0, f64::INFINITY)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    assert!(
+        (result.solution[0] - (-3.0)).abs() < PIVOT_TOL,
+        "Expected x=-3, got {}",
+        result.solution[0]
+    );
+    assert!(
+        (result.objective - (-3.0)).abs() < PIVOT_TOL,
+        "Expected obj=-3, got {}",
+        result.objective
+    );
+}
+
+/// c>0, lb=-inf: unbounded below.
+#[test]
+fn test_m0_positive_cost_lb_infinite_unbounded() {
+    let (_lp, result) = solve_m0(vec![1.0], vec![(f64::NEG_INFINITY, f64::INFINITY)]);
+    assert_eq!(
+        result.status,
+        SolveStatus::Unbounded,
+        "c>0 + lb=-inf must be Unbounded, got {:?}",
+        result.status
+    );
+}
+
+/// c<0, ub=+inf: unbounded above.
+#[test]
+fn test_m0_negative_cost_ub_infinite_unbounded() {
+    let (_lp, result) = solve_m0(vec![-1.0], vec![(0.0, f64::INFINITY)]);
+    assert_eq!(
+        result.status,
+        SolveStatus::Unbounded,
+        "c<0 + ub=+inf must be Unbounded, got {:?}",
+        result.status
+    );
+}
+
+/// c<0, ub finite: optimizer drives x to upper bound.
+#[test]
+fn test_m0_negative_cost_ub_finite() {
+    let (lp, result) = solve_m0(vec![-1.0], vec![(0.0, 3.0)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    assert!(
+        (result.solution[0] - 3.0).abs() < PIVOT_TOL,
+        "Expected x=3, got {}",
+        result.solution[0]
+    );
+    assert!(
+        (result.objective - (-3.0)).abs() < PIVOT_TOL,
+        "Expected obj=-3, got {}",
+        result.objective
+    );
+}
+
+/// c=0, lb finite: must land at lb (feasible and cost-free).
+#[test]
+fn test_m0_zero_cost_lb_finite() {
+    let (lp, result) = solve_m0(vec![0.0], vec![(2.0, f64::INFINITY)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    assert!(
+        result.solution[0] >= 2.0 - PIVOT_TOL,
+        "x={} must be >= lb=2",
+        result.solution[0]
+    );
+}
+
+/// c=0, lb=-inf, ub finite: must land at or below ub.
+#[test]
+fn test_m0_zero_cost_lb_inf_ub_finite() {
+    let (lp, result) = solve_m0(vec![0.0], vec![(f64::NEG_INFINITY, -1.0)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    let x = result.solution[0];
+    assert!(x <= -1.0 + PIVOT_TOL, "x={x} violates ub=-1");
+}
+
+/// c=0, both lb and ub finite: must land within [lb, ub].
+#[test]
+fn test_m0_zero_cost_both_bounds_finite() {
+    let (lp, result) = solve_m0(vec![0.0], vec![(1.0, 5.0)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    let x = result.solution[0];
+    assert!(
+        x >= 1.0 - PIVOT_TOL && x <= 5.0 + PIVOT_TOL,
+        "x={x} outside [1,5]"
+    );
+}
+
+/// c=0, both bounds infinite: x=0 is a valid feasible point.
+#[test]
+fn test_m0_zero_cost_both_bounds_infinite() {
+    let (lp, result) = solve_m0(vec![0.0], vec![(f64::NEG_INFINITY, f64::INFINITY)]);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+}
+
+/// Multi-variable m=0: mixed cost signs all satisfied simultaneously.
+#[test]
+fn test_m0_multi_var_mixed_costs() {
+    // 3 vars: c=[-1, 1, 0]
+    //   var0: c=-1 (negative), lb=0, ub=4      → x=4, obj contribution=-4
+    //   var1: c=+1 (positive), lb=-2, ub=inf   → x=-2, obj contribution=-2
+    //   var2: c=0  (zero),     lb=3, ub=7      → x∈[3,7]
+    let (lp, result) = solve_m0(
+        vec![-1.0, 1.0, 0.0],
+        vec![(0.0, 4.0), (-2.0, f64::INFINITY), (3.0, 7.0)],
+    );
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
+    let x = &result.solution;
+    assert!(
+        (x[0] - 4.0).abs() < PIVOT_TOL,
+        "var0 (c<0): expected x=4, got {}",
+        x[0]
+    );
+    assert!(
+        (x[1] - (-2.0)).abs() < PIVOT_TOL,
+        "var1 (c>0): expected x=-2, got {}",
+        x[1]
+    );
+    assert!(
+        x[2] >= 3.0 - PIVOT_TOL && x[2] <= 7.0 + PIVOT_TOL,
+        "var2 (c=0): expected x∈[3,7], got {}",
+        x[2]
+    );
+    assert!(
+        (result.objective - (-6.0)).abs() < PIVOT_TOL,
+        "Expected obj=-6, got {}",
+        result.objective
+    );
+}
+
 #[test]
 fn test_primal_simplex_timeout() {
     let n = 200usize;
