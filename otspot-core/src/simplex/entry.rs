@@ -55,6 +55,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
     if options.presolve {
         match presolve::run_presolve(problem, options.deadline) {
             Err(presolve::PresolveStatus::Infeasible) => {
+                let presolve_us = prof_t0.elapsed().as_micros() as u64;
                 return SolverResult {
                     status: SolveStatus::Infeasible,
                     objective: f64::INFINITY,
@@ -63,10 +64,15 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
+                    timing_breakdown: Some(crate::problem::TimingBreakdown {
+                        presolve_us,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 };
             }
             Err(presolve::PresolveStatus::Unbounded) => {
+                let presolve_us = prof_t0.elapsed().as_micros() as u64;
                 return SolverResult {
                     status: SolveStatus::Unbounded,
                     objective: f64::NEG_INFINITY,
@@ -75,6 +81,10 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
+                    timing_breakdown: Some(crate::problem::TimingBreakdown {
+                        presolve_us,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 };
             }
@@ -157,6 +167,37 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                         options
                     };
                     return solve_without_presolve(problem, fb);
+                }
+                // Infeasible/Unbounded on the reduced LP propagates directly to the
+                // original (presolve is feasibility-preserving). run_postsolve must not
+                // be called: it would fill solution/dual vectors from the postsolve stack
+                // (e.g. SingletonRow fixed values), producing a spurious non-empty
+                // solution with Infeasible/Unbounded status.
+                if matches!(
+                    raw.status,
+                    SolveStatus::Infeasible | SolveStatus::Unbounded
+                ) {
+                    let objective = if raw.status == SolveStatus::Infeasible {
+                        f64::INFINITY
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                    return SolverResult {
+                        status: raw.status,
+                        objective,
+                        solution: vec![],
+                        dual_solution: vec![],
+                        reduced_costs: vec![],
+                        slack: vec![],
+                        warm_start_basis: None,
+                        timing_breakdown: Some(crate::problem::TimingBreakdown {
+                            presolve_us,
+                            solve_us,
+                            postsolve_us: 0,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
                 }
                 let mut res = presolve::postsolve::run_postsolve(
                     &raw,
@@ -779,6 +820,44 @@ mod tests {
         .unwrap()
     }
 
+    // min x0+x1+x2+x3  s.t.  x0=5 (Eq singleton),  x1-x2<=-1,  x2-x3<=-1,  x3-x1<=-1
+    //
+    // The cycle x1-x2<=-1, x2-x3<=-1, x3-x1<=-1 sums to 0<=-3 → infeasible.
+    // Presolve reduces (removes x0 via singleton row, was_reduced=true) but
+    // cannot detect the cycle infeasibility (bounds propagation is incomplete
+    // for this 3-constraint Farkas cycle). Simplex on the reduced problem
+    // returns Infeasible.
+    //
+    // Before the fix: run_postsolve was called and replayed SingletonRow
+    // {x0=5.0}, producing solution=[5,0,0,0] with status=Infeasible (spurious).
+    // After the fix: early return with solution=[] before run_postsolve.
+    fn make_presolve_reduced_infeasible_lp() -> LpProblem {
+        // Rows: [x0=5, x1-x2<=-1, x2-x3<=-1, x3-x1<=-1]
+        let rows = [0usize, 1, 1, 2, 2, 3, 3];
+        let cols = [0usize, 1, 2, 2, 3, 3, 1];
+        let vals = [1.0f64, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 4, 4).unwrap();
+        LpProblem::new_general(
+            vec![1.0, 1.0, 1.0, 1.0],
+            a,
+            vec![5.0, -1.0, -1.0, -1.0],
+            vec![
+                ConstraintType::Eq,
+                ConstraintType::Le,
+                ConstraintType::Le,
+                ConstraintType::Le,
+            ],
+            vec![
+                (0.0, f64::INFINITY),
+                (0.0, f64::INFINITY),
+                (0.0, f64::INFINITY),
+                (0.0, f64::INFINITY),
+            ],
+            None,
+        )
+        .unwrap()
+    }
+
     /// Sentinel: presolve Timeout early-return must not leak a reduced-space solution.
     /// `INJECT_REDUCED_TIMEOUT` forces the buggy scenario deterministically.
     /// Pre-fix: `solution.len() == reduced_n` → assertion fails.  Post-fix: `len == 0`.
@@ -848,6 +927,176 @@ mod tests {
         assert!(
             n == 0 || n == orig_n,
             "Timeout (no presolve): solution.len()={n} must be 0 or {orig_n}"
+        );
+    }
+
+    /// Reduced-problem Infeasible must propagate with empty solution, not through
+    /// run_postsolve which would fill in postsolve-stack values (e.g. x0=5 from
+    /// SingletonRow).
+    ///
+    /// Sentinel: removing the Infeasible guard before run_postsolve causes
+    /// result.solution to be non-empty ([5.0, 0.0, 0.0, 0.0]), failing this test.
+    #[test]
+    fn reduced_infeasible_propagates_without_postsolve() {
+        let lp = make_presolve_reduced_infeasible_lp();
+
+        // Confirm presolve reduces (precondition for the test path).
+        let pr = crate::presolve::run_presolve(&lp, None)
+            .expect("presolve must not detect infeasibility at its own level for this LP");
+        assert!(
+            pr.was_reduced,
+            "LP must be reduced by presolve (x0 singleton row)"
+        );
+
+        let opts = SolverOptions {
+            presolve: true,
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&lp, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::Infeasible,
+            "cycle LP must be Infeasible"
+        );
+        assert!(
+            result.solution.is_empty(),
+            "Infeasible result must have empty solution, not postsolve-fabricated values (got {:?})",
+            result.solution
+        );
+        assert!(
+            result.dual_solution.is_empty(),
+            "Infeasible result must have empty dual_solution"
+        );
+        assert!(result.slack.is_empty(), "Infeasible result must have empty slack");
+        assert_eq!(
+            result.objective,
+            f64::INFINITY,
+            "Infeasible objective must be +∞"
+        );
+        assert!(
+            result.timing_breakdown.is_some(),
+            "timing_breakdown must be set even for reduced-Infeasible path"
+        );
+    }
+
+    // min -x1-x2-x3  s.t.  x0=5 (Eq singleton),
+    //   x1-x2<=1, x2-x3<=1, x3-x1<=1
+    //
+    // After presolve removes x0 (was_reduced=true), the reduced problem is
+    // min -(x1+x2+x3) with the three Le constraints.  Direction d=(1,1,1)
+    // satisfies all constraints (each difference stays constant), c^T d = -3 < 0
+    // → UNBOUNDED.  Presolve cannot detect this: x1,x2,x3 appear in active
+    // rows (step3b does not fire) and bounds propagation gives no finite upper
+    // bounds (ub_finite=false for all three constraints, step4 stays inactive,
+    // step5 gives no tightening).
+    //
+    // Before the fix: run_postsolve was called, producing solution=[5,0,0,0] with
+    // status=Unbounded (spurious x0=5 from SingletonRow).
+    // After the fix: early return with solution=[] before run_postsolve.
+    fn make_presolve_reduced_unbounded_lp() -> LpProblem {
+        // Row 0: x0 = 5 (Eq singleton)
+        // Rows 1,2,3: x1-x2<=1, x2-x3<=1, x3-x1<=1
+        let rows = [0usize, 1, 1, 2, 2, 3, 3];
+        let cols = [0usize, 1, 2, 2, 3, 3, 1];
+        let vals = [1.0f64, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 4, 4).unwrap();
+        LpProblem::new_general(
+            vec![0.0, -1.0, -1.0, -1.0],
+            a,
+            vec![5.0, 1.0, 1.0, 1.0],
+            vec![
+                ConstraintType::Eq,
+                ConstraintType::Le,
+                ConstraintType::Le,
+                ConstraintType::Le,
+            ],
+            vec![
+                (0.0, f64::INFINITY),
+                (0.0, f64::INFINITY),
+                (0.0, f64::INFINITY),
+                (0.0, f64::INFINITY),
+            ],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Reduced-problem Unbounded must propagate with empty solution, not through
+    /// run_postsolve which would fill in postsolve-stack values (x0=5 from SingletonRow).
+    ///
+    /// Sentinel: removing the Unbounded guard before run_postsolve causes
+    /// result.solution to be non-empty, failing this test.
+    #[test]
+    fn reduced_unbounded_propagates_without_postsolve() {
+        let lp = make_presolve_reduced_unbounded_lp();
+
+        // Confirm presolve reduces without detecting unboundedness.
+        let pr = crate::presolve::run_presolve(&lp, None)
+            .expect("presolve must not detect Unbounded at its own level for this LP");
+        assert!(
+            pr.was_reduced,
+            "LP must be reduced by presolve (x0 singleton row)"
+        );
+
+        let opts = SolverOptions {
+            presolve: true,
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&lp, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::Unbounded,
+            "LP must be Unbounded after presolve reduction"
+        );
+        assert!(
+            result.solution.is_empty(),
+            "Unbounded result must have empty solution, not postsolve-fabricated values (got {:?})",
+            result.solution
+        );
+        assert!(
+            result.dual_solution.is_empty(),
+            "Unbounded result must have empty dual_solution"
+        );
+        assert!(result.slack.is_empty(), "Unbounded result must have empty slack");
+        assert_eq!(
+            result.objective,
+            f64::NEG_INFINITY,
+            "Unbounded objective must be -∞"
+        );
+        assert!(
+            result.timing_breakdown.is_some(),
+            "timing_breakdown must be set even for reduced-Unbounded path"
+        );
+    }
+
+    /// timing_breakdown is set when presolve itself detects Infeasible (H observability).
+    ///
+    /// LP: x = -1 (Eq singleton), x >= 0 → presolve step2 detects value=-1 < lb=0 → Infeasible.
+    /// Sentinel: removing the timing_breakdown from the presolve-Infeasible early return
+    /// causes result.timing_breakdown to be None, failing this assertion.
+    #[test]
+    fn timing_breakdown_set_when_presolve_detects_infeasible() {
+        // x = -1 with x >= 0 → immediately Infeasible at presolve (value < lb).
+        let a = CscMatrix::from_triplets(&[0usize], &[0usize], &[1.0f64], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![-1.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+
+        let opts = SolverOptions {
+            presolve: true,
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&lp, &opts);
+        assert_eq!(result.status, SolveStatus::Infeasible);
+        assert!(
+            result.timing_breakdown.is_some(),
+            "timing_breakdown must be Some when presolve itself detects Infeasible (H observability)"
         );
     }
 }
