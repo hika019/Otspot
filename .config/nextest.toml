@@ -101,3 +101,16 @@ threads-required = "num-cpus"
 filter = "test(dfl001_postsolve_skips_lsq_when_cleanup_stagnant) + test(diag_pds20_deadline_regression_guard)"
 slow-timeout = { period = "60s", terminate-after = 3 }
 threads-required = "num-cpus"
+
+# greenbea_postsolve_under_5s: postsolve は solo 3.94s (<5s) だが --test-threads 3 contention 下
+# では 6.30s に膨らみ閾値超過 (#39, --no-fail-fast で露出)。default profile の同種 override
+# (threads-required) が heavy には無く contention 化していた。CPU 専有で公平な timing にする。
+[[profile.heavy.overrides]]
+filter = "test(greenbea_postsolve_under_5s)"
+threads-required = "num-cpus"
+
+# lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent: default profile と同様に
+# CPU 専有で fair timing にする (heavy --test-threads 1 でも他の heavy test との contention 対策)。
+[[profile.heavy.overrides]]
+filter = "test(lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent)"
+threads-required = "num-cpus"

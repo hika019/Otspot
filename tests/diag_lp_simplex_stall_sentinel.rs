@@ -25,7 +25,13 @@ use otspot::problem::ConstraintType;
 use otspot::qp::QpProblem;
 use otspot::{solve_qp_with, SolveStatus};
 
-const BUDGET_SECS: f64 = 180.0;
+/// Quiet single-thread convergence (harris bench, 1000s 逐次, obj_err 0.000%):
+/// cre-b 242s / ken-13 187s / d6cube 150s / pilot 90s. 180s sat below
+/// cre-b/ken-13 even when quiet and failed under --test-threads 3 contention (cre-b 8.8%,
+/// ken-13 17.6% —未収束 timing artifact). 360s covers the slowest quiet case (cre-b 242s)
+/// with margin. These 4 run in a dedicated `--test-threads 1` heavy step for fair timing
+/// (see test-heavy.yml). REL_TOL stays 5e-3. ken-18 is excluded (真の非収束, #23).
+const BUDGET_SECS: f64 = 360.0;
 /// Budget for the synthetic case. simplex 単独で有限 incumbent を返すことの
 /// 確認用 (最適性証明ではない)。
 const SYNTH_BUDGET_SECS: f64 = 30.0;
