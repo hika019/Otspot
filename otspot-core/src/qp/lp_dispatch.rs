@@ -66,7 +66,11 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
         None,
     ) {
         Ok(lp) => lp,
-        Err(_) => return SolverResult::infeasible(),
+        Err(_) => {
+            let mut r = SolverResult::numerical_error();
+            r.stats.route = SolveRoute::LpForwardedFromQp;
+            return r;
+        }
     };
 
     if options.presolve {
