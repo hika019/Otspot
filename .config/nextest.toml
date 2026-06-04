@@ -108,3 +108,9 @@ threads-required = "num-cpus"
 [[profile.heavy.overrides]]
 filter = "test(greenbea_postsolve_under_5s)"
 threads-required = "num-cpus"
+
+# lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent: default profile と同様に
+# CPU 専有で fair timing にする (heavy --test-threads 1 でも他の heavy test との contention 対策)。
+[[profile.heavy.overrides]]
+filter = "test(lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent)"
+threads-required = "num-cpus"
