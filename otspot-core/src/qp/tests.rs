@@ -1,6 +1,7 @@
 mod api;
 mod bound_duals;
 mod concurrent;
+mod dispatch;
 mod dual_recovery;
 mod dual_refit;
 mod emptycol_skip;
