@@ -808,7 +808,7 @@ fn test_m0_zero_cost_both_bounds_finite() {
     assert_solver_invariants_lp(&result, &lp);
     let x = result.solution[0];
     assert!(
-        x >= 1.0 - PIVOT_TOL && x <= 5.0 + PIVOT_TOL,
+        (1.0 - PIVOT_TOL..=5.0 + PIVOT_TOL).contains(&x),
         "x={x} outside [1,5]"
     );
 }
