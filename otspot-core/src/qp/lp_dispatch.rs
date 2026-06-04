@@ -21,6 +21,13 @@ use super::QpProblem;
 #[cfg(test)]
 use super::ipm_solver;
 
+// Test-only hook: forces solve_reduced_lp_from_qp to treat the reduced solve
+// as if it returned Timeout with a reduced-space solution, bypassing wall-clock.
+#[cfg(test)]
+thread_local! {
+    static INJECT_REDUCED_TIMEOUT_QP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn timeout_result_lp_dispatch() -> SolverResult {
     let mut timeout = SolverResult {
         status: SolveStatus::Timeout,
@@ -167,6 +174,17 @@ fn solve_reduced_lp_from_qp(
     let t_solve = Instant::now();
     let raw = solve_lp_backend_no_presolve(reduced_lp, &reduced_opts);
     let solve_us = t_solve.elapsed().as_micros() as u64;
+    // Test hook: override raw with Timeout carrying a reduced-space solution.
+    #[cfg(test)]
+    let raw = if INJECT_REDUCED_TIMEOUT_QP.with(|v| v.get()) {
+        SolverResult {
+            status: SolveStatus::Timeout,
+            solution: vec![0.0; reduced_lp.num_vars],
+            ..Default::default()
+        }
+    } else {
+        raw
+    };
     if (raw.status == SolveStatus::NumericalError
         || (raw.status == SolveStatus::SuboptimalSolution && raw.solution.is_empty()))
         && options.deadline.is_none_or(|d| Instant::now() < d)
@@ -196,18 +214,31 @@ fn solve_reduced_lp_from_qp(
             | SolveStatus::Timeout
     ) && (!raw.solution.is_empty() || reduced_lp.num_vars == 0)
     {
-        if raw.status == SolveStatus::Timeout
-            && options.deadline.is_some_and(|d| Instant::now() >= d)
-        {
-            let mut timeout = raw;
+        let deadline_expired = options.deadline.is_some_and(|d| Instant::now() >= d);
+        #[cfg(test)]
+        let deadline_expired = deadline_expired || INJECT_REDUCED_TIMEOUT_QP.with(|v| v.get());
+        if raw.status == SolveStatus::Timeout && deadline_expired {
+            // `raw.solution` is in the reduced variable space; propagating it would
+            // violate the SolverResult contract (solution must be in the original
+            // variable space or empty). Return an empty Timeout result.
+            let mut timeout = SolverResult {
+                status: SolveStatus::Timeout,
+                objective: f64::INFINITY,
+                solution: vec![],
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+                timing_breakdown: Some(crate::problem::TimingBreakdown {
+                    presolve_us,
+                    solve_us,
+                    postsolve_us: 0,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
             timeout.stats.route = SolveRoute::LpForwardedFromQp;
             timeout.stats.deadline_triggered = true;
-            timeout.timing_breakdown = Some(crate::problem::TimingBreakdown {
-                presolve_us,
-                solve_us,
-                postsolve_us: 0,
-                ..Default::default()
-            });
             return timeout;
         }
         let t_postsolve = Instant::now();
@@ -1068,6 +1099,66 @@ mod tests {
         assert!(
             !verified_farkas_timeout_fallback(&zero_constraints, &opts),
             "zero constraints → empty cert_rhs must return false",
+        );
+    }
+
+    /// Sentinel: `solve_reduced_lp_from_qp` must not return a reduced-space solution on Timeout.
+    ///
+    /// Pre-fix (lines 202-212): returned `raw` which had `solution.len() == reduced_num_vars`.
+    /// Post-fix: returns `solution: vec![]`.
+    ///
+    /// LP fixture: 3-var problem where presolve fixes x via a singleton Eq row,
+    /// leaving a 2-var sub-problem (y,z). `orig_n=3`, `reduced_n=2`.
+    /// A reduced-space Timeout solution (len=2) is visibly wrong (not 0, not 3).
+    ///
+    ///   row 0: 1.0*x = 5          (singleton Eq — presolve fixes x=5)
+    ///   row 1: 2.0*y + 1.0*z >= 3
+    ///   row 2: 1.0*y + 2.0*z >= 3
+    #[test]
+    fn presolve_timeout_solution_never_leaks_reduced_space_in_qp_path() {
+        use crate::options::SolverOptions;
+        use crate::problem::SolveStatus;
+
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 2, 1, 2],
+            &[0, 1, 1, 2, 2],
+            &[1.0, 2.0, 1.0, 1.0, 2.0],
+            3,
+            3,
+        )
+        .unwrap();
+        let problem = QpProblem::new(
+            CscMatrix::new(3, 3),
+            vec![1.0, 1.0, 1.0],
+            a,
+            vec![5.0, 3.0, 3.0],
+            vec![(0.0, f64::INFINITY); 3],
+            vec![ConstraintType::Eq, ConstraintType::Ge, ConstraintType::Ge],
+        )
+        .unwrap();
+        let orig_n = problem.num_vars; // 3
+
+        // 1. Normal solve: solution must be in original space.
+        let r = solve_as_lp(&problem, &SolverOptions { presolve: true, ..Default::default() });
+        assert_eq!(r.status, SolveStatus::Optimal);
+        assert_eq!(
+            r.solution.len(),
+            orig_n,
+            "Optimal: solution.len() must equal orig_n={orig_n}"
+        );
+
+        // 2. Inject hook: force reduced-space Timeout and bypass wall-clock deadline check.
+        // Pre-fix: returns raw.solution.len() == reduced_n (2) — FAIL.
+        // Post-fix: returns solution: vec![] — PASS.
+        INJECT_REDUCED_TIMEOUT_QP.with(|v| v.set(true));
+        let r = solve_as_lp(&problem, &SolverOptions { presolve: true, ..Default::default() });
+        INJECT_REDUCED_TIMEOUT_QP.with(|v| v.set(false));
+        let n = r.solution.len();
+        assert_eq!(r.status, SolveStatus::Timeout, "injected path must return Timeout");
+        assert!(
+            n == 0 || n == orig_n,
+            "injected Timeout: solution.len()={n} must be 0 or {orig_n}, \
+             never 2 (reduced — lp_dispatch reduced-space leak)",
         );
     }
 }
