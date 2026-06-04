@@ -11,6 +11,14 @@ use super::dual_advanced;
 use super::primal::two_phase_simplex;
 use super::standard_form::build_standard_form_with_deadline;
 
+// Test-only hook: forces the was_reduced=true branch to treat the reduced solve
+// as if it returned Timeout with a reduced-space solution, bypassing wall-clock.
+// This lets sentinels verify the early-return contract deterministically.
+#[cfg(test)]
+thread_local! {
+    static INJECT_REDUCED_TIMEOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Solve an LP with default options (raw simplex, without obj_offset).
 ///
 /// Use [`crate::solve`] for the full pipeline including `obj_offset`.
@@ -86,19 +94,47 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 let raw = solve_without_presolve(&presolve_result.reduced_problem, eff_opts);
                 let t_solve_done = std::time::Instant::now();
                 let solve_us = t_solve_done.duration_since(t_presolve_done).as_micros() as u64;
-                if raw.status == SolveStatus::Timeout
-                    && eff_opts
-                        .deadline
-                        .is_some_and(|d| std::time::Instant::now() >= d)
-                {
-                    let mut timeout = raw;
-                    timeout.timing_breakdown = Some(crate::problem::TimingBreakdown {
-                        presolve_us,
-                        solve_us,
-                        postsolve_us: 0,
+                // Test hook: override raw with a Timeout carrying a reduced-space solution.
+                #[cfg(test)]
+                let raw = if INJECT_REDUCED_TIMEOUT.with(|v| v.get()) {
+                    SolverResult {
+                        status: SolveStatus::Timeout,
+                        solution: vec![0.0; presolve_result.reduced_problem.num_vars],
                         ..Default::default()
-                    });
-                    return timeout;
+                    }
+                } else {
+                    raw
+                };
+                let deadline_expired = eff_opts
+                    .deadline
+                    .is_some_and(|d| std::time::Instant::now() >= d);
+                // In tests the hook also bypasses the wall-clock deadline check so
+                // the sentinel doesn't depend on timing.
+                #[cfg(test)]
+                let deadline_expired =
+                    deadline_expired || INJECT_REDUCED_TIMEOUT.with(|v| v.get());
+                if raw.status == SolveStatus::Timeout && deadline_expired {
+                    // The reduced solve timed out and the deadline is exhausted.
+                    // `raw.solution` is in the *reduced* variable space — propagating
+                    // it would violate the SolverResult contract (solution must be in
+                    // the original variable space or empty).  Return an empty Timeout
+                    // result, consistent with the Infeasible/Unbounded early-returns.
+                    return SolverResult {
+                        status: SolveStatus::Timeout,
+                        objective: f64::INFINITY,
+                        solution: vec![],
+                        dual_solution: vec![],
+                        reduced_costs: vec![],
+                        slack: vec![],
+                        warm_start_basis: None,
+                        timing_breakdown: Some(crate::problem::TimingBreakdown {
+                            presolve_us,
+                            solve_us,
+                            postsolve_us: 0,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
                 }
                 // The reduced LP can be unsolvable while the original is fine
                 // (SingularBasis on the reduced initial basis, Eq drift in Phase II,
@@ -706,5 +742,112 @@ mod tests {
         let r = solve_without_presolve(&pos_cost, &SolverOptions::default());
         assert_eq!(r.status, SolveStatus::Optimal);
         assert_eq!(r.solution, vec![-5.0]);
+    }
+
+    // LP with 3 variables (x, y, z) where presolve fixes x via a singleton Eq row,
+    // but the remaining 2-variable problem (y, z) is the same as `make_non_reducible_lp`
+    // which presolve cannot reduce further.
+    //
+    // Result: was_reduced=true, reduced_num_vars=2 (y,z remain), orig_num_vars=3.
+    // This gives 0 < reduced_n < orig_n, required so that a reduced-space Timeout
+    // solution (len=2) is visibly wrong (not 0, not 3).
+    //
+    //   row 0: 1.0*x = 5          (Eq singleton — presolve fixes x=5)
+    //   row 1: 2.0*y + 1.0*z >= 3 (Ge — part of the non-reducible 2-var sub-LP)
+    //   row 2: 1.0*y + 2.0*z >= 3 (Ge — part of the non-reducible 2-var sub-LP)
+    fn make_partial_reducible_lp() -> LpProblem {
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 2, 1, 2],
+            &[0, 1, 1, 2, 2],
+            &[1.0, 2.0, 1.0, 1.0, 2.0],
+            3,
+            3,
+        )
+        .unwrap();
+        LpProblem::new_general(
+            vec![1.0, 1.0, 1.0],
+            a,
+            vec![5.0, 3.0, 3.0],
+            vec![ConstraintType::Eq, ConstraintType::Ge, ConstraintType::Ge],
+            vec![
+                (0.0, f64::INFINITY),
+                (0.0, f64::INFINITY),
+                (0.0, f64::INFINITY),
+            ],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Sentinel: presolve Timeout early-return must not leak a reduced-space solution.
+    /// `INJECT_REDUCED_TIMEOUT` forces the buggy scenario deterministically.
+    /// Pre-fix: `solution.len() == reduced_n` → assertion fails.  Post-fix: `len == 0`.
+    #[test]
+    fn presolve_timeout_solution_never_leaks_reduced_space() {
+        // 3-variable LP where presolve eliminates x but leaves y and z.
+        // orig_num_vars=3, reduced_num_vars=2 (y,z remain).
+        let lp = make_partial_reducible_lp();
+        let orig_n = lp.num_vars; // 3
+
+        let pr = crate::presolve::run_presolve(&lp, None)
+            .expect("make_partial_reducible_lp must not be Infeasible/Unbounded at presolve");
+        assert!(pr.was_reduced, "make_partial_reducible_lp must produce was_reduced=true");
+        let reduced_n = pr.reduced_problem.num_vars;
+        assert!(
+            reduced_n > 0 && reduced_n < orig_n,
+            "reduced_n={reduced_n} must be in (0, {orig_n}) — needed to expose the leak"
+        );
+
+        // 1. Optimal path (no deadline): solution must be in original space.
+        let r = solve_with(&lp, &SolverOptions { presolve: true, ..Default::default() });
+        assert_eq!(r.status, SolveStatus::Optimal);
+        assert_eq!(
+            r.solution.len(),
+            orig_n,
+            "Optimal: solution.len() must equal orig_num_vars={orig_n}"
+        );
+
+        // 2. Deterministic sentinel via injection hook.
+        // The hook forces raw = Timeout(solution: vec![0; reduced_n]) and bypasses
+        // the wall-clock deadline check, reliably triggering the early-return path.
+        // Pre-fix: early-return returned raw → solution.len() == reduced_n (< orig_n) → FAIL.
+        // Post-fix: early-return returns vec![] → solution.len() == 0 → PASS.
+        INJECT_REDUCED_TIMEOUT.with(|v| v.set(true));
+        let r = solve_with(&lp, &SolverOptions { presolve: true, ..Default::default() });
+        INJECT_REDUCED_TIMEOUT.with(|v| v.set(false));
+        let n = r.solution.len();
+        assert_eq!(r.status, SolveStatus::Timeout, "injected path must return Timeout");
+        assert!(
+            n == 0 || n == orig_n,
+            "injected Timeout: solution.len()={n} must be 0 or {orig_n} (orig), \
+             never {reduced_n} (reduced — pre-fix reduced-space leak)",
+        );
+    }
+
+    /// Sentinel: Timeout without presolve must return solution in {0, orig_num_vars}.
+    /// `cancel_flag=true` fires at the first simplex iteration → deterministic Timeout.
+    /// No-op proof: removing the cancel_flag check lets the LP solve Optimal → status
+    /// assert fails.
+    #[test]
+    fn timeout_no_presolve_solution_is_empty_or_orig() {
+        use std::sync::{atomic::AtomicBool, Arc};
+        let lp = make_reducible_lp();
+        let orig_n = lp.num_vars;
+        let opts = SolverOptions {
+            presolve: false,
+            cancel_flag: Some(Arc::new(AtomicBool::new(true))),
+            ..Default::default()
+        };
+        let r = solve_with(&lp, &opts);
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "cancel_flag=true must produce Timeout"
+        );
+        let n = r.solution.len();
+        assert!(
+            n == 0 || n == orig_n,
+            "Timeout (no presolve): solution.len()={n} must be 0 or {orig_n}"
+        );
     }
 }
