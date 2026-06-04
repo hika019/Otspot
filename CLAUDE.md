@@ -1,6 +1,6 @@
 # claude code
 - チームを使用. tmux使用
-- ベンチ実行 or テスト実行 or downloadなどの軽量タスク=haiku, バグ調査, 実装, リファクタ, テスト修正=codex5.5, それ以外=Opus. これを基準にAgentのmodelを設定
+- ベンチ実行 or テスト実行 or downloadなどの軽量タスク=haiku, バグ調査, 実装, リファクタ, テスト修正=codex5.5 or sonnet, それ以外=Opus. これを基準にAgentのmodelを設定
 - タスクが一つでもエージェントに振れ
 - エージェントのコンテキストを考え、タスクを分割・アサイン. Agentはbackground起動. tmux.
 - エージェント追加時に、既存Agentの確認. 不要Agentの場合削除. kill可
@@ -63,6 +63,26 @@
 - PASS数にこだわり目的を見失うな. 収束しているかが指標
 - バグ修正によって、他のバグが表面化することはよくある。安易に決めつけるな
 - 既存コードはテストが欠落している可能性がある. 必要に応じて追加
+
+# 事実積み上げ (検証フロンティア) — バグ対応の基本手法
+- 全バグ対応の基本。対象を入力→出力の処理段に分解し、各段の正当性を入力から順に「事実」として確定する。前段が proven でなければ下流の正誤は判定不能 (発生場所≠真因)。proven 判定は推論禁止・実測のみ。
+- 処理段は対象ごとに定義 (どんな対象も「入力 → 変換段 … → 出力」に分解)。例: LP = parse→presolve→Phase I→Phase II→postsolve。QP = presolve→IPM(IPPMM)反復→postsolve。MIP/非凸QP は各 B&B ノードが LP/QP を呼ぶ土台依存。
+- フロンティア = proven 済の最下流の「次の段」。検証も修正も常にフロンティア段に対して行う。上流が未 proven のまま下流症状を追うな。
+- 各段で全種のバグを洗い出す (片方だけ見るな、複数バグ前提): correctness (誤った出力 / 符号反転 / 誤った変換・縮小 / 不変条件違反 / 偽判定 false-Infeasible 等) と それ以外 (収束しない / hang / cycle / stall / 性能劣化)。
+- proven の具体手段 (実測。推論で済ますな):
+  - 入力段 = 内部表現を生入力と機械突合 (例 parse: 制約数/sense/RHS/bound/変数数)。
+  - 中間変換段 = 入出力の等価性・不変条件を機械検査 + 全分岐 sentinel test (no-op で fail する設計) (例 presolve: ON/OFF/known 不変性スイープで符号・縮小誤りを検出)。
+  - 計算段 = 出力を独立再計算 or 証明書で検証 (例 Phase I: 基底の実行可能性・Farkas・dual符号 / 最終解: 原制約充足・report obj == 再計算 obj・往復不変)。
+- ループ (1 iteration):
+  1. 観測を再現 (ソルバは bench: timeout=400 or 1000, eps=1e-6 固定) — Agent 実行。
+  2. 異常を【段】×【correctness / それ以外】で分類 (実測値: timing/iters/残差 等から)。
+  3. フロンティア段を厳密検証し proven か全バグかを確定 (Agent/worktree、env-gated トレース可・報告後 revert)。
+  4. 見つけた全バグを真因修正 (本来あるべき形・マジックナンバー禁止・sentinel test。暫定 / cap / 症状隠し / 当該段の無効化 は禁止)。
+  5. 別 Agent レビュー + `codex review --commit <SHA>` gate (実施者≠レビュアー)。
+  6. lead-verify full-suite (`cargo nextest run --release --test-threads 3`) → integrate へ --no-ff マージ。
+  7. フロンティア段の proven を再確認 → フロンティア前進 → 再観測 (次 iteration)。
+- Agent 報告は推論。lead がテスト実走 / grep / 実測値で fact 化してから確定。
+- 停止条件: フロンティアが出力到達 (全段 proven) / 要 user 判断 / 割込。
 
 # 実行
 - `./scripts/` を使用するなど効率よく進めよ
