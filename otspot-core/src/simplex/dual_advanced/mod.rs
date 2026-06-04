@@ -82,16 +82,24 @@ pub(crate) fn solve_dual_advanced(
         return timeout_result();
     }
     // Bounded path: problems with finite upper bounds use BFRT-aware iteration.
-    // Gate: Le-only (num_artificial == 0) and dispatch not disabled by test hook.
     if !bounded_dispatch_disabled() && problem.bounds.iter().any(|&(_, ub)| ub.is_finite()) {
         let Some(bsf) = build_bounded_standard_form_with_deadline(problem, options.deadline) else {
             return timeout_result();
         };
         if bsf.num_artificial == 0 {
+            // Gate: Le-only — run BFRT bounded dual+primal.
             if let Some(result) = try_bounded(&bsf, problem, options) {
                 return result;
             }
             // UbViolationOutOfScope → fall through to legacy path
+        } else {
+            // Ge/Eq with UBs: run Big-M Phase I on the BSF (no UB rows) then BFRT
+            // Phase II. The legacy SF inflates Phase I by adding n_ub UB rows, making
+            // it 2-6× slower. BSF keeps it at the natural m_orig dimensions.
+            if let Some(result) = try_bsf_bigm_phase1_then_bfrt(&bsf, problem, options) {
+                return result;
+            }
+            // Phase I failed → fall through to legacy path
         }
     }
 
@@ -616,6 +624,103 @@ fn cold_start_advanced(
         SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
     };
     result.iterations = total_iters;
+    result
+}
+
+// ── BSF Big-M Phase I + BFRT Phase II ────────────────────────────────────────
+
+/// Try solving a bounded Eq/Ge LP via Big-M Phase I on the Bounded Standard
+/// Form (no UB rows) followed by BFRT-aware bounded primal Phase II.
+///
+/// The legacy standard form adds n_ub UB rows for bounded variables, inflating
+/// the Phase I system. For a 2500×3500 all-Eq bounded LP this means Phase I
+/// runs on 6000×9500 instead of 2500×6000 — roughly 5x more work per pivot.
+///
+/// Returns `Some(SolverResult)` on success; `None` if Phase I fails or the
+/// Phase II start state is infeasible (caller falls back to legacy path).
+fn try_bsf_bigm_phase1_then_bfrt(
+    bsf: &BoundedStandardForm,
+    problem: &LpProblem,
+    options: &SolverOptions,
+) -> Option<SolverResult> {
+    if deadline_expired(options.deadline) {
+        return None;
+    }
+    let Some((a_bsf, b_bsf, c_bsf, row_scale, col_scale)) =
+        LpEquilibration::scale_with_deadline(&bsf.a, &bsf.b, &bsf.c, options.deadline)
+    else {
+        return None;
+    };
+
+    // Build a mini StandardForm from BSF for use with bigm_phase1_basis.
+    let mini_sf = crate::simplex::StandardForm {
+        a: bsf.a.clone(),
+        b: bsf.b.clone(),
+        c: bsf.c.clone(),
+        m: bsf.m,
+        n_shifted: bsf.n_shifted,
+        n_total: bsf.n_total,
+        initial_basis: bsf.initial_basis.clone(),
+        needs_artificial: bsf.needs_artificial.clone(),
+        num_artificial: bsf.num_artificial,
+        obj_offset: bsf.obj_offset,
+        n_orig: bsf.n_orig,
+        orig_var_info: bsf.orig_var_info.clone(),
+        row_negated: bsf.row_negated.clone(),
+    };
+
+    let p1_result = phase1::bigm_phase1_basis(&mini_sf, options, &a_bsf, &b_bsf, &c_bsf);
+    let (basis_p1, x_b_p1, n_total, p1_iters) = p1_result?;
+
+    // Construct BoundedDualState from the Phase I result.
+    // All non-basic variables start at their lower bound (at_upper = false).
+    let mut is_basic_bsf = vec![false; bsf.n_total];
+    for &j in &basis_p1 {
+        if j < bsf.n_total {
+            is_basic_bsf[j] = true;
+        }
+    }
+
+    // Verify: x_b_p1 must be non-negative for a valid primal Phase II start.
+    if x_b_p1.iter().any(|&v| v < -crate::tolerances::PIVOT_TOL) {
+        return None;
+    }
+    let mut x_b_clean = x_b_p1;
+    for v in x_b_clean.iter_mut() {
+        if *v < 0.0 {
+            *v = 0.0;
+        }
+    }
+
+    let ubs = scale_upper_bounds(&bsf.upper_bounds, &col_scale);
+
+    let state = bounded_core::BoundedDualState {
+        basis: basis_p1,
+        at_upper: vec![false; bsf.n_total],
+        x_b: x_b_clean,
+        reduced_costs: vec![0.0; bsf.n_total],
+        is_basic: is_basic_bsf,
+        iterations: p1_iters,
+    };
+
+    let mut total_iters = p1_iters;
+    let result = finish_bounded(
+        bounded_core::BoundedOutcome::Optimal(0.0, vec![0.0; bsf.m]),
+        state,
+        bsf,
+        &a_bsf,
+        &c_bsf,
+        &row_scale,
+        &col_scale,
+        &ubs,
+        problem,
+        options,
+        &mut total_iters,
+    );
+
+    // finish_bounded returns None only for UbViolationOutOfScope; that falls
+    // back to the legacy path via the None return of this function.
+    let _ = n_total; // suppress unused warning
     result
 }
 
