@@ -8,13 +8,32 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### 変更
 
+### 修正
+
+### 内部
+
+### 依存
+
+## [0.4.0] - 2026-06-04
+
+### 追加
+
+### 変更
+
 - **BREAKING**: `LpProblem` に `obj_offset: f64` フィールド追加 — MPS N-row RHS 定数を正しく求解結果へ反映 (#191)
 - **BREAKING**: `SolverOptions.psd_check_max_n` フィールド削除 — production caller 0 件、soundness 穴 (size-skip) の除去 (#130)
 
 ### 修正
 
+- (±inf,±inf)/(-inf,-inf) 縮退 bound を reject する共有 validator を導入 — LP/QP の空区間誤受理を解消 (bug C/D)
+- postsolve が Infeasible/Unbounded の reduced LP を postsolve せず早期返却 — 偽 solution vector 生成を防止 (bug F)
+- QP→LP dispatch の変換エラーを Infeasible でなく NumericalError として返し route を設定 (bug G)
+- 空制約 LP (m==0) の zero-cost 上界変数で ub 違反 x=0 を Optimal 誤判定する退化に回帰テスト追加 (bug A)
+
 ### 内部
 
+- #42 BSF Big-M Phase I を revert — Eq/Ge+UB LP を SuboptimalSolution に退化させ統合テストを壊していたため (収束改善は v0.5.0 で gate 限定+sentinel 再投入予定)
+- README Performance 表を現行ベンチ実測値へ更新 (proof-carrying KKT 基準)
 - `osqp_bench.csv` に SS_* SuiteSparse 行を統合 (旧 `osqp_bench_optional.csv` 削除、#133):
   以前の split 設計 (osqp_bench.csv + osqp_bench_optional.csv) は bench_utils::detect_csv_path が optional CSV を
   load しないため SS_* baseline が bench runner の退行検知から除外される欠陥があった。single-file 設計で修正。
