@@ -160,7 +160,7 @@ fn pivot_out_sequential(
         z_dense.iter_mut().for_each(|v| *v = 0.0);
         z_dense[i] = 1.0;
         #[cfg(test)]
-        super::PIVOT_OUT_BTRAN_COUNT.fetch_add(1, Ordering::Relaxed);
+        super::PIVOT_OUT_BTRAN_COUNT.with(|c| c.set(c.get() + 1));
         basis_mgr.btran_dense(&mut z_dense);
 
         let mut best_j: Option<usize> = None;
@@ -324,7 +324,7 @@ pub(super) fn pivot_out_degenerate_artificials(
             }
 
             #[cfg(test)]
-            super::PIVOT_OUT_BATCH_LU_COUNT.fetch_add(1, Ordering::Relaxed);
+            super::PIVOT_OUT_BATCH_LU_COUNT.with(|c| c.set(c.get() + 1));
 
             let committed = if LuBasis::new_timed(a_ext, &trial_basis, options.max_etas, options.deadline).is_ok() {
                 // Full slice is non-singular: commit all.
@@ -374,28 +374,32 @@ pub(super) fn pivot_out_degenerate_artificials(
         // dual blow-up in subsequent simplex iterations.
         //
         // Checking all N_art pivots would restore O(N_art × FTRAN) cost, undoing the
-        // batch speedup for large problems (e.g., pds-20 with ~33 k degenerate rows).
-        // Instead, sample at most STABILITY_CHECK_LIMIT evenly-spaced pivots.  For
-        // small match counts the entire set is checked; for large counts the step
-        // distributes checks uniformly so early, middle and late pivots are all covered.
+        // batch speedup for large problems (e.g., pds-20 ~33 k degenerate rows). Instead
+        // sample n_samples = min(match_offset, STABILITY_CHECK_LIMIT) pivots, mapping
+        // idx = k·(match_offset-1)/(n_samples-1) onto [0,match_offset-1] with both
+        // endpoints inclusive — the naive k·match_offset/n_samples would drop the LAST
+        // pivot for every match_offset > limit, leaving tail-only instability undetected.
         //
-        // b_before_opt is None only if the Phase-I exit basis is singular (should
-        // never happen); in that case accept the batch and let the final guard decide.
+        // b_before_opt is None only on a singular Phase-I exit basis (should never
+        // happen); then accept the batch and let the final guard decide.
         const STABILITY_CHECK_LIMIT: usize = 64;
         let batch_stable = match_offset == 0 || b_before_opt.is_none() || {
             let b_lu = b_before_opt.as_mut().unwrap();
             let mut col_dense = vec![0.0_f64; m];
             let mut stable = true;
-            let check_step = (match_offset / STABILITY_CHECK_LIMIT).max(1);
-            let mut n_checked = 0usize;
-            let mut idx = 0usize;
-            while idx < match_offset && n_checked < STABILITY_CHECK_LIMIT {
+            let n_samples = match_offset.min(STABILITY_CHECK_LIMIT);
+            for k in 0..n_samples {
+                let idx = if n_samples == 1 {
+                    0
+                } else {
+                    k * (match_offset - 1) / (n_samples - 1)
+                };
                 let (r, j) = matches[idx];
                 col_dense.iter_mut().for_each(|v| *v = 0.0);
                 if let Ok((rows, vals)) = a_ext.get_column(j) {
-                    for (k, &row) in rows.iter().enumerate() {
+                    for (p, &row) in rows.iter().enumerate() {
                         if row < m {
-                            col_dense[row] = vals[k];
+                            col_dense[row] = vals[p];
                         }
                     }
                 }
@@ -410,8 +414,6 @@ pub(super) fn pivot_out_degenerate_artificials(
                     stable = false;
                     break;
                 }
-                idx += check_step;
-                n_checked += 1;
             }
             stable
         };
@@ -421,7 +423,7 @@ pub(super) fn pivot_out_degenerate_artificials(
             // using B_before (already factorized above, reused here).
             basis.copy_from_slice(&basis_before);
             #[cfg(test)]
-            super::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+            super::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.with(|c| c.set(c.get() + 1));
             if let Some(mut b_lu) = b_before_opt {
                 let mut seq_is_basic = vec![false; a_ext.ncols];
                 for &col in basis.iter() {

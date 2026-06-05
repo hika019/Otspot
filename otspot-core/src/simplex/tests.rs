@@ -1584,8 +1584,6 @@ fn b2_obj_progress_reset_fires_on_improving_objective() {
 ///   failing both assertions below.
 #[test]
 fn batch_pivot_out_uses_single_lu_and_no_btrans() {
-    use std::sync::atomic::Ordering;
-
     const N: usize = 50;
     let m = N + 1;
     let n = N + 1;
@@ -1617,13 +1615,13 @@ fn batch_pivot_out_uses_single_lu_and_no_btrans() {
     opts.simplex_method = SimplexMethod::Primal;
     opts.use_lp_crash_basis = false;
 
-    let btran_before = primal::PIVOT_OUT_BTRAN_COUNT.load(Ordering::SeqCst);
-    let batch_lu_before = primal::PIVOT_OUT_BATCH_LU_COUNT.load(Ordering::SeqCst);
+    let btran_before = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
+    let batch_lu_before = primal::PIVOT_OUT_BATCH_LU_COUNT.with(|c| c.get());
 
     let result = solve_with(&lp, &opts);
 
-    let btran_after = primal::PIVOT_OUT_BTRAN_COUNT.load(Ordering::SeqCst);
-    let batch_lu_after = primal::PIVOT_OUT_BATCH_LU_COUNT.load(Ordering::SeqCst);
+    let btran_after = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
+    let batch_lu_after = primal::PIVOT_OUT_BATCH_LU_COUNT.with(|c| c.get());
 
     assert_eq!(
         result.status,
@@ -1701,8 +1699,6 @@ fn batch_pivot_out_uses_single_lu_and_no_btrans() {
 /// After scaling, FTRAN ratio at row 1 ≈ δ·(r1/r0) ≈ δ < 0.01 — instability survives.
 #[test]
 fn batch_pivot_out_falls_back_to_sequential_for_ill_conditioned_basis() {
-    use std::sync::atomic::Ordering;
-
     // δ: FTRAN cancellation ratio at row 1 (δ/1 = 0.001 < threshold 0.01).
     // Also equals the trial-basis determinant contribution ensuring LU succeeds.
     const DELTA: f64 = 0.001;
@@ -1733,11 +1729,11 @@ fn batch_pivot_out_falls_back_to_sequential_for_ill_conditioned_basis() {
     opts.use_lp_crash_basis = false;
     opts.simplex_method = SimplexMethod::Primal;
 
-    let fallback_before = primal::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.load(Ordering::SeqCst);
+    let fallback_before = primal::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.with(|c| c.get());
 
     let result = solve_with(&lp, &opts);
 
-    let fallback_after = primal::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.load(Ordering::SeqCst);
+    let fallback_after = primal::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.with(|c| c.get());
 
     assert_eq!(
         result.status,
