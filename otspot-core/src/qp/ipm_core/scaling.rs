@@ -217,6 +217,9 @@ pub(crate) fn check_dfeas_status(
     threshold: f64,
 ) -> SolveStatus {
     let n = x.len();
+    if !kkt_resid::bound_duals_valid_for_residual(&problem.bounds, bound_duals) {
+        return SolveStatus::SuboptimalSolution;
+    }
     let qx = match problem.q.mat_vec_mul(x) {
         Ok(v) => v,
         Err(_) => return SolveStatus::SuboptimalSolution,
@@ -251,6 +254,9 @@ pub(crate) fn check_dfeas_status_relative(
 ) -> SolveStatus {
     use twofloat::TwoFloat;
     let n = x.len();
+    if !kkt_resid::bound_duals_valid_for_residual(&problem.bounds, bound_duals) {
+        return SolveStatus::SuboptimalSolution;
+    }
     let zero_dd = TwoFloat::from(0.0);
     let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
     for col in 0..n {
@@ -505,6 +511,23 @@ mod tests {
         let bound_duals = vec![1.0]; // z_lb=1 satisfies stationarity (c - z_lb = 0)
         let status = check_dfeas_status_relative(&problem, &x, &y, &bound_duals, 1e-6);
         // comp = 1 * (1-0) / scale ≈ 0.33 >> 1e-6 → SuboptimalSolution
+        assert_eq!(status, crate::problem::SolveStatus::SuboptimalSolution);
+    }
+
+    #[test]
+    fn check_dfeas_status_relative_rejects_malformed_bound_duals_before_scaling() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::new(0, 1);
+        let problem = crate::qp::problem::QpProblem::new_all_le(
+            q,
+            vec![-1.0e150_f64],
+            a,
+            vec![],
+            vec![(0.0_f64, 1.0e200_f64)],
+        )
+        .unwrap();
+
+        let status = check_dfeas_status_relative(&problem, &[1.0e150], &[], &[0.0], 1e-6);
         assert_eq!(status, crate::problem::SolveStatus::SuboptimalSolution);
     }
 
