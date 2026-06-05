@@ -479,18 +479,9 @@ mod gate_predicate_tests {
     /// Sentinel Fix-2: dual-sign violation alone (kkt/pres/bv/comp/gap all pass within eps)
     /// must force kkt_already_passes to return false so Stage-2 IR is NOT skipped.
     ///
-    /// Problem: min 0.5·x² − 2·x,  Le: x ≤ 1,  x ∈ [0, 1].
-    ///
-    /// Baseline (optimal): x=1, y_Le=1, z_lb=0, z_ub=0.
-    ///   stat: 1 − 2 + 1·1 + (−0 + 0) = 0  →  kkt = 0. Gate must pass.
-    ///
-    /// Corrupt: y_Le = −1e-4 (sign violation for Le), z_lb = 0, z_ub = 1+1e-4.
-    ///   stat: 1 − 2 + 1·(−1e-4) + (−0 + 1+1e-4) = 0  →  kkt = 0.
-    ///   pres: x ≤ 1, x=1  →  slack=0  →  pres = 0.
-    ///   bv:   x=1 ∈ [0,1]  →  bv = 0.
-    ///   comp: y_Le·slack_Le=(−1e-4)·0=0; z_ub·(ub−x)=(1+1e-4)·0=0  →  comp = 0.
-    ///   gap:  primal=dual=−1.5  →  gap = 0.
-    ///   dual_sign: y_Le = −1e-4 < 0 for Le  →  violation ≈ 1e-4 ≫ 1e-6.
+    /// Problem: min 0.5·x² − 2·x, Le: x ≤ 1, x ∈ [0,1]. Baseline optimum x=1, y_Le=1.
+    /// Corrupt: y_Le=−1e-4 (Le sign violation), z_ub=1+1e-4. Then stat/pres/bv/comp/gap
+    /// all evaluate to 0 within eps — only dual_sign sees y_Le<0, violation ≈1e-4 ≫1e-6.
     ///
     /// Reverting Fix 2 (removing the dual_sign check from kkt_already_passes) makes the gate
     /// return true here (all other checks pass), causing this assertion to fail → sentinel fires.

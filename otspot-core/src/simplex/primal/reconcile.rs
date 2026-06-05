@@ -363,25 +363,17 @@ pub(super) fn pivot_out_degenerate_artificials(
             match_offset += committed;
         }
 
-        // Stability verification: sample up to STABILITY_CHECK_LIMIT pivots (r, j),
-        // FTRAN a_j through B_before, and check |d[r]| / max|d| ≥ PIVOT_STABILITY_THRESHOLD.
-        //
-        // The batch selects columns by raw |A[r,j]|, which can differ from the
-        // FTRAN-stability ordering |B⁻¹ a_j|[r] used by the sequential path.  On
-        // highly-degenerate LPs, a raw-A–preferred column can have a near-zero FTRAN
-        // entry at row r (the column is nearly in the span of the existing basis),
-        // producing a non-singular but ill-conditioned aggregate basis that causes
-        // dual blow-up in subsequent simplex iterations.
-        //
-        // Checking all N_art pivots would restore O(N_art × FTRAN) cost, undoing the
-        // batch speedup for large problems (e.g., pds-20 ~33 k degenerate rows). Instead
-        // sample n_samples = min(match_offset, STABILITY_CHECK_LIMIT) pivots, mapping
-        // idx = k·(match_offset-1)/(n_samples-1) onto [0,match_offset-1] with both
-        // endpoints inclusive — the naive k·match_offset/n_samples would drop the LAST
-        // pivot for every match_offset > limit, leaving tail-only instability undetected.
-        //
-        // b_before_opt is None only on a singular Phase-I exit basis (should never
-        // happen); then accept the batch and let the final guard decide.
+        // Stability verification: sample up to STABILITY_CHECK_LIMIT committed pivots,
+        // FTRAN a_j through B_before, reject the batch if |d[r]|/max|d| <
+        // PIVOT_STABILITY_THRESHOLD. The greedy picks columns by raw |A[r,j]|, which can
+        // differ from the FTRAN ordering |B⁻¹a_j|[r]: on highly-degenerate LPs a raw-A
+        // column may have a near-zero FTRAN entry at row r (nearly in the basis span),
+        // yielding a non-singular but ill-conditioned basis that blows up later duals.
+        // Sampling n_samples = min(match_offset, LIMIT) bounds cost; the index map
+        // idx = k·(match_offset-1)/(n_samples-1) covers [0,match_offset-1] inclusive —
+        // a naive k·match_offset/n_samples drops the last pivot once match_offset > LIMIT.
+        // b_before_opt is None only on a singular Phase-I basis (never expected); then
+        // accept the batch and let the final guard decide.
         const STABILITY_CHECK_LIMIT: usize = 64;
         let batch_stable = match_offset == 0 || b_before_opt.is_none() || {
             let b_lu = b_before_opt.as_mut().unwrap();
