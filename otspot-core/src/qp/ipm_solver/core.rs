@@ -8,7 +8,8 @@ mod postsolve_dual;
 mod warm_start;
 
 use super::kkt::{
-    bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel,
+    bound_violation, complementarity_componentwise_rel, complementarity_residual_rel,
+    kkt_residual_rel, primal_residual_rel,
 };
 use super::outcome::{IpmOutcome, ProblemView};
 use crate::options::SolverOptions;
@@ -264,7 +265,13 @@ fn run_ipm_with(
         &final_sol.solution,
         &final_sol.dual_solution,
         &final_sol.bound_duals,
-    );
+    )
+    .max(complementarity_componentwise_rel(
+        &view,
+        &final_sol.solution,
+        &final_sol.dual_solution,
+        &final_sol.bound_duals,
+    ));
     let dual_gap = compute_duality_gap_rel(orig_problem, &final_sol);
 
     // Invariant: 報告 objective は返却 x で計算。post-processing 後の整合性を保証。
@@ -286,7 +293,6 @@ fn run_ipm_with(
             .sum();
         0.5 * xqx + cx + orig_problem.obj_offset
     };
-
     // IPM inner solver が収集した KKT timing に postsolve timing を合算。
     let ipm_base = result.timing_breakdown.unwrap_or_default();
     let postsolve_total_us = postsolve_map_us
@@ -322,4 +328,3 @@ fn run_ipm_with(
         timing: Some(combined_timing),
     }
 }
-
