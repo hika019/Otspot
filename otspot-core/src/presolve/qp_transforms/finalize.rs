@@ -194,15 +194,14 @@ fn apply_large_coeff_if_needed(
     reduced: &mut QpProblem,
     postsolve_stack: &mut super::state::QpPostsolveStack,
 ) {
+    if opts.use_ruiz_scaling {
+        return;
+    }
+
+    let n_new = reduced.num_vars;
     let mut a_mut = reduced.a.clone();
     let mut b_mut = reduced.b.clone();
-    let skip_lcs = opts.use_ruiz_scaling;
-    let n_new = reduced.num_vars;
-    let scales = if skip_lcs {
-        vec![1.0; reduced.a.nrows]
-    } else {
-        apply_large_coeff_rescaling(&mut a_mut, &mut b_mut, n_new)
-    };
+    let scales = apply_large_coeff_rescaling(&mut a_mut, &mut b_mut, n_new);
     let any_scaled = scales.iter().any(|&s| (s - 1.0).abs() > 1e-12);
     if any_scaled {
         if let Ok(p) = QpProblem::new(
@@ -250,5 +249,67 @@ fn maybe_apply_ruiz(
             Some(scaler)
         }
         Err(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::problem::ConstraintType;
+
+    #[test]
+    fn large_coeff_rescaling_is_skipped_before_ruiz_without_touching_problem() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0e12_f64], 1, 1).unwrap();
+        let mut reduced = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![2.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        let original_a = reduced.a.clone();
+        let original_b = reduced.b.clone();
+        let opts = SolverOptions {
+            use_ruiz_scaling: true,
+            ..SolverOptions::default()
+        };
+        let mut stack = super::super::state::QpPostsolveStack::new();
+
+        apply_large_coeff_if_needed(&opts, &mut reduced, &mut stack);
+
+        assert_eq!(reduced.a.values, original_a.values);
+        assert_eq!(reduced.a.col_ptr, original_a.col_ptr);
+        assert_eq!(reduced.a.row_ind, original_a.row_ind);
+        assert_eq!(reduced.b, original_b);
+        assert!(stack.steps.is_empty());
+    }
+
+    #[test]
+    fn large_coeff_rescaling_still_runs_without_ruiz() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0e12_f64], 1, 1).unwrap();
+        let mut reduced = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![2.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            use_ruiz_scaling: false,
+            ..SolverOptions::default()
+        };
+        let mut stack = super::super::state::QpPostsolveStack::new();
+
+        apply_large_coeff_if_needed(&opts, &mut reduced, &mut stack);
+
+        assert!(reduced.a.values[0] < 1.0e12);
+        assert!(reduced.b[0] < 2.0);
+        assert_eq!(stack.steps.len(), 1);
     }
 }
