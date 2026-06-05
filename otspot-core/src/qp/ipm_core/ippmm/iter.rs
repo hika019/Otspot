@@ -136,7 +136,7 @@ pub(crate) fn solve_ippmm_inner(
 
     // 終了条件は Some(Optimal) / Some(Timeout) のみ。MaxIterations 経路は除去。
     let mut status: Option<SolveStatus> = None;
-    let mut final_iter = options.ipm.max_iter;
+    let mut iterations_consumed = 0usize;
     let mut final_residuals: Option<(f64, f64, f64)> = None;
 
     // NaN guard で崩壊解を返さないための best-so-far スナップショット。
@@ -144,7 +144,6 @@ pub(crate) fn solve_ippmm_inner(
     let mut best_x = x.clone();
     let mut best_y = y.clone();
     let mut best_s = s.clone();
-    let mut best_iter: usize = 0;
     let mut best_residuals: (f64, f64, f64) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
     let mut best_rel_gap: f64 = f64::INFINITY;
 
@@ -157,11 +156,9 @@ pub(crate) fn solve_ippmm_inner(
     let mut total_solve_ns: u128 = 0;
     let mut total_reg_retries: u32 = 0;
     let mut any_iterative = false;
-
     for iter in 0..options.ipm.max_iter {
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
-            final_iter = iter;
             break;
         }
 
@@ -217,7 +214,6 @@ pub(crate) fn solve_ippmm_inner(
                 best_x.copy_from_slice(&x);
                 best_y.copy_from_slice(&y);
                 best_s.copy_from_slice(&s);
-                best_iter = iter;
                 best_residuals = (nr_p, nr_d, mu);
                 best_rel_gap = rel_gap;
             }
@@ -258,7 +254,6 @@ pub(crate) fn solve_ippmm_inner(
         // 残差小・duality gap 大の偽 Optimal (rank-deficient Q + c=0) を弾くため rel_gap も要求。
         if nr_p_rel < eps && nr_d_rel < eps && mu < eps && rel_gap.abs() < DUALITY_GAP_TOL {
             status = Some(SolveStatus::Optimal);
-            final_iter = iter;
             break;
         }
 
@@ -288,7 +283,6 @@ pub(crate) fn solve_ippmm_inner(
 
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
-            final_iter = iter;
             break;
         }
 
@@ -332,7 +326,6 @@ pub(crate) fn solve_ippmm_inner(
             }
             FactorizeOutcome::Timeout => {
                 status = Some(SolveStatus::Timeout);
-                final_iter = iter;
                 break;
             }
             FactorizeOutcome::Failure => return numerical_error_result(n),
@@ -479,7 +472,6 @@ pub(crate) fn solve_ippmm_inner(
                 x.copy_from_slice(&best_x);
                 y.copy_from_slice(&best_y);
                 s.copy_from_slice(&best_s);
-                final_iter = best_iter;
                 final_residuals = Some(best_residuals);
                 let quality_threshold = 10.0 * eps_orig;
                 let combined_quasi =
@@ -493,7 +485,6 @@ pub(crate) fn solve_ippmm_inner(
                 };
                 status = Some(exit_status);
             } else {
-                final_iter = iter;
                 status = Some(SolveStatus::NumericalError);
             }
             break;
@@ -514,7 +505,6 @@ pub(crate) fn solve_ippmm_inner(
                 x.copy_from_slice(&best_x);
                 y.copy_from_slice(&best_y);
                 s.copy_from_slice(&best_s);
-                final_iter = best_iter;
                 final_residuals = Some(best_residuals);
                 status = Some(SolveStatus::Optimal);
                 break;
@@ -526,13 +516,11 @@ pub(crate) fn solve_ippmm_inner(
                     x.copy_from_slice(&best_x);
                     y.copy_from_slice(&best_y);
                     s.copy_from_slice(&best_s);
-                    final_iter = best_iter;
                     final_residuals = Some(best_residuals);
                     status = Some(SolveStatus::SuboptimalSolution);
                     break;
                 }
                 status = Some(infeas_status);
-                final_iter = iter;
                 break;
             }
         } else {
@@ -571,6 +559,7 @@ pub(crate) fn solve_ippmm_inner(
         total_solve_ns += t_solve.elapsed().as_nanos();
 
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
+        iterations_consumed = iter.saturating_add(1);
 
         // alpha=0 持続 = line search 停止 = 数値飽和 / null-space 漂流。best-so-far で復帰。
         if alpha < alpha_stall_eps_for(eps_orig) {
@@ -588,7 +577,6 @@ pub(crate) fn solve_ippmm_inner(
             x.copy_from_slice(&best_x);
             y.copy_from_slice(&best_y);
             s.copy_from_slice(&best_s);
-            final_iter = best_iter;
             final_residuals = Some(best_residuals);
             status = Some(SolveStatus::SuboptimalSolution);
             break;
@@ -602,7 +590,6 @@ pub(crate) fn solve_ippmm_inner(
             x.copy_from_slice(&best_x);
             y.copy_from_slice(&best_y);
             s.copy_from_slice(&best_s);
-            final_iter = best_iter;
             final_residuals = Some(best_residuals);
             status = Some(SolveStatus::SuboptimalSolution);
             break;
@@ -704,6 +691,10 @@ pub(crate) fn solve_ippmm_inner(
         pmm.prev_nr_d = nr_d;
     }
 
+    if status.is_none() {
+        iterations_consumed = options.ipm.max_iter;
+    }
+
     let status = status.unwrap_or(SolveStatus::Timeout);
 
     // 素の Timeout 経路は発散 x をそのまま返してしまうので best-so-far で上書き。
@@ -721,7 +712,6 @@ pub(crate) fn solve_ippmm_inner(
             x.copy_from_slice(&best_x);
             y.copy_from_slice(&best_y);
             s.copy_from_slice(&best_s);
-            final_iter = best_iter;
             final_residuals = Some(best_residuals);
         }
     }
@@ -764,7 +754,7 @@ pub(crate) fn solve_ippmm_inner(
         dual_solution,
         bound_duals,
 
-        iterations: final_iter,
+        iterations: iterations_consumed,
         final_residuals,
         // best-so-far の rel gap。unscale_ipm_result の昇格ゲート用。
         duality_gap_rel: if best_rel_gap.is_finite() {

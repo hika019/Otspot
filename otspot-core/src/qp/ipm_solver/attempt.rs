@@ -147,6 +147,83 @@ fn dynamic_base_tighten(user_eps: f64) -> f64 {
     10_f64.powf(pow.min(3.0))
 }
 
+fn outcome_proves_optimal(outcome: &IpmOutcome, view: &ProblemView<'_>, user_eps: f64) -> bool {
+    if !outcome.satisfies_eps(user_eps) {
+        return false;
+    }
+    prove_optimal(
+        view,
+        &outcome.solution,
+        &outcome.dual_solution,
+        &outcome.bound_duals,
+        outcome.duality_gap_rel,
+        user_eps,
+    )
+    .is_ok()
+}
+
+fn outcome_certificate_score(outcome: &IpmOutcome, view: &ProblemView<'_>, user_eps: f64) -> f64 {
+    if outcome.solution.is_empty() || outcome.numerical_failure {
+        return f64::INFINITY;
+    }
+    match prove_optimal(
+        view,
+        &outcome.solution,
+        &outcome.dual_solution,
+        &outcome.bound_duals,
+        outcome.duality_gap_rel,
+        user_eps,
+    ) {
+        Ok(_) => 0.0,
+        Err(not_proven) => outcome
+            .quality_score()
+            .max(not_proven.stationarity_rel.abs())
+            .max(not_proven.primal_residual_rel.abs())
+            .max(not_proven.bound_violation.abs())
+            .max(not_proven.complementarity_rel.abs())
+            .max(not_proven.duality_gap_rel.abs())
+            .max(not_proven.dual_sign_violation.abs()),
+    }
+}
+
+fn outcome_is_better_candidate(
+    candidate: &IpmOutcome,
+    incumbent: &IpmOutcome,
+    view: &ProblemView<'_>,
+    user_eps: f64,
+) -> bool {
+    match (
+        candidate.infeasibility_status.is_some(),
+        incumbent.infeasibility_status.is_some(),
+    ) {
+        (true, false) => return false,
+        (false, true) => return true,
+        (true, true) => return false,
+        (false, false) => {}
+    }
+
+    let candidate_score = outcome_certificate_score(candidate, view, user_eps);
+    let incumbent_score = outcome_certificate_score(incumbent, view, user_eps);
+    match candidate_score.total_cmp(&incumbent_score) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        std::cmp::Ordering::Equal => candidate.objective.total_cmp(&incumbent.objective).is_lt(),
+    }
+}
+
+fn fallback_can_replace_unproven(
+    fallback: &IpmOutcome,
+    incumbent: &IpmOutcome,
+    view: &ProblemView<'_>,
+    user_eps: f64,
+) -> bool {
+    if incumbent.infeasibility_status.is_some() {
+        return false;
+    }
+    outcome_is_better_candidate(fallback, incumbent, view, user_eps)
+        && fallback.objective.total_cmp(&incumbent.objective).is_le()
+}
+
 /// Q が対角なら s_j=1/√Q_jj の column scaling で Q'_jj=1 に均等化し、解後 x_orig=D·x_scaled で復元。
 ///
 /// Returns [`SolverResult`] with [`SolveStatus::NumericalError`] immediately if
@@ -474,23 +551,25 @@ fn solve_ipm_with_runner(
         opts.ipm.eps = (user_eps / tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
 
         let outcome = runner(problem, &presolve_result, &opts);
+        let outcome_satisfies = outcome.satisfies_eps(user_eps);
+        let outcome_proven = outcome_satisfies && outcome_proves_optimal(&outcome, &view, user_eps);
         // Charge per_attempt_cap for failed attempts: stall paths return best_iter which
         // can be far below the actual iterations consumed, causing the outer guard to
         // undercount and permit more total iterations than user_max_iter.
-        let charged = if outcome.satisfies_eps(user_eps) {
+        let charged = if outcome_satisfies {
             outcome.iterations
         } else {
             per_attempt_cap
         };
         iter_used = iter_used.saturating_add(charged);
 
-        if outcome.satisfies_eps(user_eps) {
+        if outcome_proven {
             best = Some(outcome);
             break;
         }
         match &best {
             None => best = Some(outcome),
-            Some(prev) if outcome.quality_score() < prev.quality_score() => {
+            Some(prev) if outcome_is_better_candidate(&outcome, prev, &view, user_eps) => {
                 best = Some(outcome);
             }
             _ => {}
@@ -506,7 +585,7 @@ fn solve_ipm_with_runner(
     // problems that are too large to re-solve without reduction.
     let best_ok = best
         .as_ref()
-        .map(|b| b.satisfies_eps(user_eps))
+        .map(|b| outcome_proves_optimal(b, &view, user_eps))
         .unwrap_or(false);
     if !best_ok && presolve_did_ruiz && n_orig <= NO_PRESOLVE_FALLBACK_LIMIT {
         let fallback_pre = QpPresolveResult::no_reduction(problem);
@@ -528,24 +607,26 @@ fn solve_ipm_with_runner(
             // the scale-aggregated complementarity, but prove_optimal accepts on the
             // stricter component-wise complementarity. Solving only to user_eps leaves
             // the worst component just above tol (false SuboptimalSolution); base_tighten
-            // drives it below tol. acceptance is still gated by satisfies_eps(user_eps).
+            // drives it below tol. acceptance is still gated by prove_optimal(user_eps).
             opts.ipm.eps = (user_eps / base_tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
             let fb = runner(problem, &fallback_pre, &opts);
-            let charged_fb = if fb.satisfies_eps(user_eps) {
+            let fb_satisfies = fb.satisfies_eps(user_eps);
+            let fb_proven = fb_satisfies && outcome_proves_optimal(&fb, &view, user_eps);
+            let charged_fb = if fb_satisfies {
                 fb.iterations
             } else {
                 per_attempt_cap
             };
             iter_used = iter_used.saturating_add(charged_fb);
-            // Replace best only when the fallback actually satisfies user_eps. A
-            // non-satisfying fallback must NOT displace the presolve result:
-            // quality_score is KKT-only and ignores objective value, so a fallback
-            // with smaller kkt_rel but a far-worse objective would wrongly win.
-            // (After the attempt loop `best` is always Some, so the prior-None
-            // branch was unreachable and is dropped.)
-            if fb.satisfies_eps(user_eps) {
+            if fb_proven {
                 best = Some(fb);
                 break;
+            }
+            if best
+                .as_ref()
+                .is_some_and(|prev| fallback_can_replace_unproven(&fb, prev, &view, user_eps))
+            {
+                best = Some(fb);
             }
         }
     }
@@ -700,6 +781,115 @@ fn finalize_outcome(
 mod tests {
     use super::*;
     use crate::sparse::CscMatrix;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static GAP_ACCEPTANCE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static INFEAS_RETRY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn runner_gap_fail_then_proven(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+    ) -> IpmOutcome {
+        let call = GAP_ACCEPTANCE_CALLS.fetch_add(1, Ordering::SeqCst);
+        IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: if call == 0 { 1e-3 } else { 0.0 },
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        }
+    }
+
+    fn runner_infeasible_then_fallback_suboptimal(
+        _problem: &QpProblem,
+        presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+    ) -> IpmOutcome {
+        if presolve.ruiz_scaler.is_some() {
+            return IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible);
+        }
+        IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0, 0.0],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 1e-3,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        }
+    }
+
+    fn runner_infeasible_then_finite_retry(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+    ) -> IpmOutcome {
+        let call = INFEAS_RETRY_CALLS.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            return IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible);
+        }
+        IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0, 0.0],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 1e-3,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        }
+    }
+
+    fn runner_incumbent_then_worse_fallback(
+        _problem: &QpProblem,
+        presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+    ) -> IpmOutcome {
+        let is_fallback = presolve.ruiz_scaler.is_none();
+        IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0, 0.0],
+            objective: if is_fallback { 1.0e9 } else { 0.0 },
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: if is_fallback { 1e-3 } else { 1e-2 },
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        }
+    }
 
     /// B.1 sentinel: IPM finalize_outcome must never set reduced_costs.
     /// The debug_assert fires if any code path were to populate this field.
@@ -829,6 +1019,326 @@ mod tests {
             r_unmasked.status,
             crate::problem::SolveStatus::SuboptimalSolution,
             "no-op proof: empty mask must false-demote (mask is load-bearing)",
+        );
+    }
+
+    #[test]
+    fn attempt_acceptance_requires_prove_optimal_gap() {
+        let prob = make_convex_plus_empty_col_qp();
+        let mask = vec![false, true];
+        let view = ProblemView {
+            q: &prob.q,
+            a: &prob.a,
+            c: &prob.c,
+            b: &prob.b,
+            bounds: &prob.bounds,
+            constraint_types: &prob.constraint_types,
+            eliminated_cols: &mask,
+        };
+        let outcome = IpmOutcome {
+            solution: vec![0.0, 0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0, 1.0, 0.0, 0.0],
+            objective: 0.0,
+            iterations: 5,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 1e-3,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        };
+        assert!(
+            outcome.satisfies_eps(1e-6),
+            "loose satisfies_eps still accepts gap below promotion tolerance"
+        );
+        assert!(
+            !outcome_proves_optimal(&outcome, &view, 1e-6),
+            "attempt acceptance must match prove_optimal gap<=user_eps"
+        );
+        assert!(
+            outcome_certificate_score(&outcome, &view, 1e-6) >= 1e-3,
+            "certificate score must include user-eps gap failure"
+        );
+    }
+
+    #[test]
+    fn attempt_acceptance_requires_prove_optimal_dual_sign() {
+        use crate::problem::ConstraintType;
+
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        let view = ProblemView::from_problem(&prob);
+        let outcome = IpmOutcome {
+            solution: vec![1.0],
+            dual_solution: vec![-1.0],
+            bound_duals: vec![],
+            objective: 0.5,
+            iterations: 5,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 0.0,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        };
+        assert!(
+            outcome.satisfies_eps(1e-6),
+            "satisfies_eps intentionally has no dual-sign check"
+        );
+        assert!(
+            !outcome_proves_optimal(&outcome, &view, 1e-6),
+            "attempt acceptance must not stop on a dual-sign-invalid point"
+        );
+        assert!(
+            outcome_certificate_score(&outcome, &view, 1e-6) > 0.0,
+            "certificate score must include dual-sign failure"
+        );
+    }
+
+    #[test]
+    fn candidate_order_prefers_certificate_then_objective() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        )
+        .unwrap();
+        let view = ProblemView::from_problem(&prob);
+        let mut incumbent = IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 1e-2,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        };
+        let mut better_cert = incumbent.clone();
+        better_cert.objective = 1.0e9;
+        better_cert.duality_gap_rel = 1e-3;
+        assert!(
+            outcome_is_better_candidate(&better_cert, &incumbent, &view, 1e-6),
+            "certificate residual improvement is the primary ordering key"
+        );
+
+        let mut better_obj = incumbent.clone();
+        better_obj.objective = -1.0;
+        incumbent.objective = 1.0;
+        assert!(
+            outcome_is_better_candidate(&better_obj, &incumbent, &view, 1e-6),
+            "objective is the tie-breaker when certificate residuals are equal"
+        );
+
+        let mut worse_obj_better_cert = incumbent.clone();
+        worse_obj_better_cert.objective = 1.0e9;
+        worse_obj_better_cert.duality_gap_rel = 1e-3;
+        assert!(
+            !fallback_can_replace_unproven(&worse_obj_better_cert, &incumbent, &view, 1e-6),
+            "unproven fallback must not replace an incumbent when objective gets worse"
+        );
+    }
+
+    #[test]
+    fn candidate_order_preserves_structural_status_over_unproven_iterate() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let view = ProblemView::from_problem(&prob);
+        let structural = IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible);
+        let finite_unproven = IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 1e-3,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        };
+
+        assert!(
+            outcome_is_better_candidate(&finite_unproven, &structural, &view, 1e-6),
+            "a finite retry candidate must displace a retry-local infeasibility status"
+        );
+        assert!(
+            !outcome_is_better_candidate(&structural, &finite_unproven, &view, 1e-6),
+            "a retry-local infeasibility status must not displace a finite incumbent"
+        );
+        assert!(
+            !fallback_can_replace_unproven(&finite_unproven, &structural, &view, 1e-6),
+            "an unproven no-presolve fallback must not displace an incumbent infeasibility status"
+        );
+    }
+
+    #[test]
+    fn attempt_loop_does_not_stop_on_satisfies_only_gap_failure() {
+        GAP_ACCEPTANCE_CALLS.store(0, Ordering::SeqCst);
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        )
+        .unwrap();
+        let mut options = SolverOptions {
+            presolve: false,
+            use_ruiz_scaling: false,
+            ..SolverOptions::default()
+        };
+        options.ipm.eps = 1e-6;
+        options.ipm.max_iter = MAX_ITER_PER_ATTEMPT;
+
+        let (result, _) = solve_ipm_with_runner(&prob, &options, runner_gap_fail_then_proven);
+
+        assert_eq!(
+            GAP_ACCEPTANCE_CALLS.load(Ordering::SeqCst),
+            2,
+            "first satisfies_eps-only outcome must not terminate the attempt loop"
+        );
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::Optimal,
+            "second proven outcome must be the accepted result"
+        );
+    }
+
+    #[test]
+    fn no_presolve_fallback_does_not_replace_structural_infeasible() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let mut options = SolverOptions {
+            presolve: true,
+            use_ruiz_scaling: true,
+            ..SolverOptions::default()
+        };
+        options.ipm.eps = 1e-6;
+        options.ipm.max_iter = MAX_ITER_PER_ATTEMPT * 4 + 2;
+
+        let (result, _) =
+            solve_ipm_with_runner(&prob, &options, runner_infeasible_then_fallback_suboptimal);
+
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::Infeasible,
+            "no-presolve fallback must not replace a structural infeasibility certificate with an unproven finite iterate"
+        );
+    }
+
+    #[test]
+    fn attempt_loop_keeps_finite_retry_over_infeasibility_status() {
+        INFEAS_RETRY_CALLS.store(0, Ordering::SeqCst);
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let mut options = SolverOptions {
+            presolve: false,
+            use_ruiz_scaling: false,
+            ..SolverOptions::default()
+        };
+        options.ipm.eps = 1e-6;
+        options.ipm.max_iter = MAX_ITER_PER_ATTEMPT * 2;
+
+        let (result, _) =
+            solve_ipm_with_runner(&prob, &options, runner_infeasible_then_finite_retry);
+
+        assert!(
+            INFEAS_RETRY_CALLS.load(Ordering::SeqCst) >= 2,
+            "retry-local infeasibility must not terminate before a finite retry is considered"
+        );
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::SuboptimalSolution,
+            "finite unproven retry must be returned instead of a retry-local infeasibility status"
+        );
+        assert_eq!(result.objective, 0.0);
+    }
+
+    #[test]
+    fn no_presolve_fallback_does_not_replace_better_objective_incumbent() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let mut options = SolverOptions {
+            presolve: true,
+            use_ruiz_scaling: true,
+            ..SolverOptions::default()
+        };
+        options.ipm.eps = 1e-6;
+        options.ipm.max_iter = MAX_ITER_PER_ATTEMPT * 4 + 2;
+
+        let (result, _) =
+            solve_ipm_with_runner(&prob, &options, runner_incumbent_then_worse_fallback);
+
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::SuboptimalSolution
+        );
+        assert_eq!(
+            result.objective, 0.0,
+            "unproven fallback with a worse objective must not displace the incumbent"
         );
     }
 

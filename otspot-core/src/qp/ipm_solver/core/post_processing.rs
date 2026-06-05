@@ -4,9 +4,10 @@
 use crate::options::SolverOptions;
 use crate::problem::SolverResult;
 use crate::qp::ipm_solver::kkt::{
-    bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel,
+    bound_violation, complementarity_componentwise_rel, complementarity_residual_rel,
+    kkt_residual_rel, primal_residual_rel,
 };
-use crate::qp::ipm_solver::outcome::{IpmOutcome, ProblemView};
+use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid::dual_sign_violation;
 use crate::qp::problem::QpProblem;
 
@@ -24,11 +25,11 @@ pub(super) fn allow_primal_projection(orig_problem: &QpProblem) -> bool {
     problem_size <= LARGE_PROBLEM_THRESHOLD
 }
 
-/// IPM 出口で既に satisfies_eps の全条件を満たした Optimal なら post-processing skip。
+/// IPM 出口で既に証明条件を満たした Optimal なら post-processing skip。
 ///
 /// kkt + primal に加え、complementarity と duality gap も確認する。Krylov IR は
 /// kkt/pres だけでなく comp/gap も改善するため、これらが未収束の場合に skip すると
-/// satisfies_eps が失敗して SuboptimalSolution になる。
+/// prove_optimal が失敗して SuboptimalSolution になる。
 pub(super) fn kkt_already_passes(
     orig_problem: &QpProblem,
     final_sol: &SolverResult,
@@ -62,7 +63,13 @@ pub(super) fn kkt_already_passes(
         &final_sol.solution,
         &final_sol.dual_solution,
         &final_sol.bound_duals,
-    );
+    )
+    .max(complementarity_componentwise_rel(
+        &view,
+        &final_sol.solution,
+        &final_sol.dual_solution,
+        &final_sol.bound_duals,
+    ));
     if comp > user_eps {
         return false;
     }
@@ -76,7 +83,7 @@ pub(super) fn kkt_already_passes(
         return false;
     }
     let gap = super::duality_gap::compute_duality_gap_rel(orig_problem, final_sol);
-    gap < IpmOutcome::PROMOTION_GAP_TOL
+    gap <= user_eps
 }
 
 /// Post-processing stage 1+2: primal projection + y/z 交互 refit + IRLS。
@@ -319,6 +326,9 @@ mod gate_predicate_tests {
     use super::{build_view, kkt_already_passes, kkt_residual_rel, primal_residual_rel};
     use crate::options::SolverOptions;
     use crate::problem::ConstraintType;
+    use crate::qp::ipm_solver::kkt::{
+        complementarity_componentwise_rel, complementarity_residual_rel,
+    };
     use crate::qp::problem::QpProblem;
     use crate::sparse::CscMatrix;
 
@@ -473,6 +483,52 @@ mod gate_predicate_tests {
         assert!(
             !kkt_already_passes(&prob, &res, &[], true, 1e-6),
             "z_lb=1e-3, y=-0.999: stationarity holds but comp≈2.9e-4≫1e-6 → gate must NOT skip IR"
+        );
+    }
+
+    #[test]
+    fn already_passes_false_when_only_componentwise_comp_fails() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![-1.0e12_f64],
+            a,
+            vec![1.0_f64],
+            vec![(0.0_f64, f64::INFINITY)],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+        let res = crate::problem::SolverResult {
+            solution: vec![1.0_f64],
+            dual_solution: vec![1.0e12_f64 + 1.0e-3_f64],
+            bound_duals: vec![1.0e-3_f64],
+            ..Default::default()
+        };
+        let view = build_view(&prob, &[]);
+        let aggregate = complementarity_residual_rel(
+            &view,
+            &res.solution,
+            &res.dual_solution,
+            &res.bound_duals,
+        );
+        let componentwise = complementarity_componentwise_rel(
+            &view,
+            &res.solution,
+            &res.dual_solution,
+            &res.bound_duals,
+        );
+        assert!(
+            aggregate < 1e-6,
+            "fixture must keep aggregate comp below eps, got {aggregate:.3e}"
+        );
+        assert!(
+            componentwise > 1e-6,
+            "fixture must expose componentwise comp above eps, got {componentwise:.3e}"
+        );
+        assert!(
+            !kkt_already_passes(&prob, &res, &[], true, 1e-6),
+            "componentwise comp failure must prevent post-processing skip"
         );
     }
 
