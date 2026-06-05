@@ -646,7 +646,7 @@ where
             return None;
         }
         SimplexOutcome::Timeout(_) => {
-            let solution = extract_solution_bounded(bsf, &state, &col_scale);
+            let solution = extract_solution_bounded(bsf, &state, col_scale);
             return Some(mark_eq_ub_path(SolverResult {
                 status: SolveStatus::Timeout,
                 objective: bsf.obj_offset,
@@ -681,7 +681,7 @@ where
     // so any that remain basic at 0 do not bias the objective. They are never
     // priced (n_struct = bsf.n_total) so they cannot re-enter.
     let mut c_p2 = vec![0.0f64; n_aug];
-    c_p2[..bsf.n_total].copy_from_slice(&c);
+    c_p2[..bsf.n_total].copy_from_slice(c);
     let p2_out = bounded_primal_phase2_aug(
         &a_aug,
         &c_p2,
@@ -694,9 +694,9 @@ where
 
     match p2_out {
         SimplexOutcome::Optimal(obj, y) => {
-            let solution = extract_solution_bounded(bsf, &state, &col_scale);
+            let solution = extract_solution_bounded(bsf, &state, col_scale);
             let (dual_solution, reduced_costs, slack) =
-                extract_dual_info_bounded(bsf, problem, &y, &solution, &row_scale);
+                extract_dual_info_bounded(bsf, problem, &y, &solution, row_scale);
             // Warm-start basis only when no artificial remains basic; else the
             // legacy warm path would index outside `bsf.n_total`.
             let ws = if state.basis.iter().all(|&j| j < bsf.n_total) {
@@ -726,7 +726,7 @@ where
             ..Default::default()
         })),
         SimplexOutcome::Timeout(obj) => {
-            let solution = extract_solution_bounded(bsf, &state, &col_scale);
+            let solution = extract_solution_bounded(bsf, &state, col_scale);
             Some(mark_eq_ub_path(SolverResult {
                 status: SolveStatus::Timeout,
                 objective: obj + bsf.obj_offset,
@@ -1790,27 +1790,14 @@ mod tests {
         );
     }
 
-    // ── P1-hypothesis: artificial goes positive in Phase II ──────────────────
+    // P1-hypothesis: degenerate Phase I leaves a basic artificial at 0; in
+    // Phase II a structural entering column has a NEGATIVE eta in the artificial
+    // row, ratio-test skips it (ub=∞), and the step grows the artificial back
+    // positive — yielding a solution violating the Eq constraint.
     //
-    // Scenario: degenerate Phase I (b=0 on the Eq row) leaves the artificial
-    // basic at value 0.  In Phase II a structural entering column has a
-    // NEGATIVE eta in the artificial row.  The ratio-test skips that row
-    // (ub=∞, eff < 0, `ub_i.is_finite()` is false), so min_step is set by
-    // another row.  After the step the artificial's basic value grows positive,
-    // yielding a solution that violates the Eq constraint.
-    //
-    // LP:  min -x1
-    //      x0 - x1 = 0   (Eq, b = 0)
-    //      x1     ≤ 3    (Le)
-    //      0 ≤ x0 ≤ 2,   0 ≤ x1 ≤ 3
-    //
-    // Feasible optimal: x0 = x1 = 3 is infeasible (x0 ≤ 2).
-    // True optimum under x0 - x1 = 0: x0 = x1 ≤ 2, so obj = -2 (x0=x1=2).
-    // If the bug fires the returned solution has x0 = 0, x1 = 3, obj = -3,
-    // which violates x0 - x1 = -3 ≠ 0.
-    //
-    // We assert (a) Eq constraint satisfaction and (b) the correct objective.
-    // A failing test here confirms the bug hypothesis is REAL.
+    // LP: min -x1; x0-x1=0 (Eq, b=0); x1≤3 (Le); 0≤x0≤2, 0≤x1≤3.
+    // True optimum: x0=x1=2, obj=-2. Bug returns x0=0, x1=3, obj=-3 (Eq=-3≠0).
+    // Asserts (a) Eq satisfaction and (b) correct objective.
     #[test]
     fn p1_hypothesis_art_goes_positive_in_phase2() {
         use crate::sparse::CscMatrix;

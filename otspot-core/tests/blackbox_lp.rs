@@ -1,3 +1,8 @@
+// Synthetic data builders index into multiple parallel vecs by row/col, so the
+// numeric loops can't be rewritten as a single .iter().enumerate() without
+// shuffling the helpers; allow the range-loop pattern here.
+#![allow(clippy::needless_range_loop)]
+
 //! Black-box tests for LP solve (simplex), presolve, and postsolve/dual stages.
 //!
 //! Every expected value is hand-computed from the problem data (independent oracle).

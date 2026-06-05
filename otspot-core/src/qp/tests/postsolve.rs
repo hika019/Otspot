@@ -308,7 +308,7 @@ fn test_sentinel_le_singleton_row_sign_feasible_and_optimal() {
         result.status
     );
     // The Le constraint dual (row 0) must be sign-feasible (≥ 0).
-    let y_le = result.dual_solution.get(0).copied().unwrap_or(f64::NAN);
+    let y_le = result.dual_solution.first().copied().unwrap_or(f64::NAN);
     assert!(
         y_le >= -1e-6,
         "Le dual must be ≥ 0 (sign-feasible); got {y_le:.3e}. Fix 1 reverted?"

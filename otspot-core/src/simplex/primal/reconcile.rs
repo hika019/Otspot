@@ -143,7 +143,7 @@ fn pivot_out_sequential(
     options: &SolverOptions,
     target_rows: &[usize],
     basis_mgr: &mut LuBasis,
-    is_basic: &mut Vec<bool>,
+    is_basic: &mut [bool],
 ) {
     let m = basis.len();
     let mut z_dense = vec![0.0_f64; m];
@@ -335,7 +335,7 @@ pub(super) fn pivot_out_degenerate_artificials(
                 let mut lo = 0usize;
                 let mut hi = slice.len().saturating_sub(1);
                 while lo < hi {
-                    let mid = lo + (hi - lo + 1) / 2; // ceiling midpoint ensures progress
+                    let mid = lo + (hi - lo).div_ceil(2); // ceiling midpoint ensures progress
                     let mut t = basis.to_vec();
                     for &(r, j) in &slice[..mid] {
                         t[r] = j;
