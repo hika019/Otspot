@@ -40,55 +40,30 @@ impl Expression {
 
     // --- Constraint builders ---
 
-    /// Create a `<=` constraint: `self <= rhs`.
-    pub fn leq(self, rhs: impl Into<Expression>) -> Constraint {
+    fn constraint(self, rhs: impl Into<Expression>, sense: ConstraintSense) -> Constraint {
         let mut lhs = self;
         let mut rhs_expr = rhs.into();
-        // Normalize: move rhs to left → (lhs - rhs) <= 0
-        // Keep as: lhs_expr sense rhs_val
-        // We store as `lhs - rhs.constant` and `rhs.variables` moved to lhs negated
         for (var, coeff) in rhs_expr.coefficients.drain() {
             *lhs.coefficients.entry(var).or_insert(0.0) -= coeff;
         }
         let rhs_val = rhs_expr.constant - lhs.constant;
         lhs.constant = 0.0;
-        Constraint {
-            lhs,
-            rhs: rhs_val,
-            sense: ConstraintSense::Le,
-        }
+        Constraint { lhs, rhs: rhs_val, sense }
+    }
+
+    /// Create a `<=` constraint: `self <= rhs`.
+    pub fn leq(self, rhs: impl Into<Expression>) -> Constraint {
+        self.constraint(rhs, ConstraintSense::Le)
     }
 
     /// Create a `>=` constraint: `self >= rhs`.
     pub fn geq(self, rhs: impl Into<Expression>) -> Constraint {
-        let mut lhs = self;
-        let mut rhs_expr = rhs.into();
-        for (var, coeff) in rhs_expr.coefficients.drain() {
-            *lhs.coefficients.entry(var).or_insert(0.0) -= coeff;
-        }
-        let rhs_val = rhs_expr.constant - lhs.constant;
-        lhs.constant = 0.0;
-        Constraint {
-            lhs,
-            rhs: rhs_val,
-            sense: ConstraintSense::Ge,
-        }
+        self.constraint(rhs, ConstraintSense::Ge)
     }
 
     /// Create an `==` constraint: `self == rhs`.
     pub fn eq_constraint(self, rhs: impl Into<Expression>) -> Constraint {
-        let mut lhs = self;
-        let mut rhs_expr = rhs.into();
-        for (var, coeff) in rhs_expr.coefficients.drain() {
-            *lhs.coefficients.entry(var).or_insert(0.0) -= coeff;
-        }
-        let rhs_val = rhs_expr.constant - lhs.constant;
-        lhs.constant = 0.0;
-        Constraint {
-            lhs,
-            rhs: rhs_val,
-            sense: ConstraintSense::Eq,
-        }
+        self.constraint(rhs, ConstraintSense::Eq)
     }
 }
 

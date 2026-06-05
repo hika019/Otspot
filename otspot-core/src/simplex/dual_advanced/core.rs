@@ -23,6 +23,7 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use super::deadline_expired;
 
 /// Lex 摂動 (bland_mode 起動時): reduced_costs (non-basic) と x_b に
 /// `eps·(1+i/n)·scale` を加算し ratio test の tie を解消、Bland's rule の有限終了
@@ -160,11 +161,6 @@ fn apply_lex_perturbation(
         delta: base_r,
         effect: max_rc_delta,
     }
-}
-
-#[inline]
-fn deadline_expired(deadline: Option<std::time::Instant>) -> bool {
-    deadline.is_some_and(|d| std::time::Instant::now() >= d)
 }
 
 fn compute_reduced_costs_timed(
@@ -325,9 +321,7 @@ pub(crate) fn dual_simplex_core_advanced(
     loop {
         *iter_count_out = iter_count_out.saturating_add(1);
         // 3a: タイムアウト/キャンセルチェック
-        let timed_out = options
-            .deadline
-            .is_some_and(|d| std::time::Instant::now() >= d);
+        let timed_out = deadline_expired(options.deadline);
         let cancelled = options
             .cancel_flag
             .as_ref()

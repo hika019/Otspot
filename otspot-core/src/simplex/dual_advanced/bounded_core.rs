@@ -54,6 +54,7 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
+use super::deadline_expired;
 
 use super::super::dual_common::{
     basic_obj, compute_dual_vars_into, made_progress_with_floor, recompute_gamma_truth,
@@ -119,11 +120,6 @@ fn flip_apply_disabled() -> bool {
 #[inline(always)]
 fn flip_apply_disabled() -> bool {
     false
-}
-
-#[inline]
-fn deadline_expired(deadline: Option<Instant>) -> bool {
-    deadline.is_some_and(|d| Instant::now() >= d)
 }
 
 fn compute_reduced_costs_into_timed(
@@ -305,9 +301,7 @@ pub(crate) fn iterate(
         };
 
     // Early-exit before O(m²) γ init; prevents budget overrun on large warm-start solves.
-    if options
-        .deadline
-        .is_some_and(|d| std::time::Instant::now() >= d)
+    if deadline_expired(options.deadline)
         || options
             .cancel_flag
             .as_ref()
@@ -386,9 +380,7 @@ pub(crate) fn iterate(
 
     loop {
         state.iterations = state.iterations.saturating_add(1);
-        let timed_out = options
-            .deadline
-            .is_some_and(|d| std::time::Instant::now() >= d);
+        let timed_out = deadline_expired(options.deadline);
         let cancelled = options
             .cancel_flag
             .as_ref()
@@ -953,10 +945,7 @@ pub(crate) fn phase2_primal_bounded(
 
     loop {
         *iters = iters.saturating_add(1);
-        if options
-            .deadline
-            .is_some_and(|d| std::time::Instant::now() >= d)
-        {
+        if deadline_expired(options.deadline) {
             return (
                 SimplexOutcome::Timeout(bounded_obj(
                     c,

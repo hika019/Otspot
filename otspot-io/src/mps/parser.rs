@@ -9,7 +9,7 @@ use otspot_core::sparse::CscMatrix;
 use super::types::{
     integer_marker_kind, BoundType, IntegerMarker, Section, INTEGER_DEFAULT_UPPER_BINARY,
 };
-use crate::common::{is_fixed_width_format, parse_mps_free_pairs, RowType};
+use crate::common::{is_fixed_width_format, parse_mps_free_pairs, parse_objsense_value, RowType, SectionState};
 
 pub(super) struct MpsParser {
     problem_name: Option<String>,
@@ -45,8 +45,7 @@ impl MpsParser {
         &mut self,
         reader: R,
     ) -> Result<(LpProblem, Vec<usize>), MpsError> {
-        let mut current_section = Section::None;
-        let mut seen_sections = std::collections::HashSet::new();
+        let mut state = SectionState::new(Section::None);
         let mut line_num = 0;
 
         for line_result in reader.lines() {
@@ -63,29 +62,26 @@ impl MpsParser {
                     if self.in_integer_marker && section != Section::Columns {
                         return Err(MpsError::UnclosedIntegerMarker);
                     }
-                    if section != Section::Name
-                        && section != Section::EndData
-                        && seen_sections.contains(&section)
-                    {
-                        return Err(MpsError::DuplicateSection(format!("{:?}", section)));
-                    }
-                    seen_sections.insert(section);
-                    current_section = section;
-
+                    let should_break = state.advance(
+                        section,
+                        Section::Name,
+                        Section::EndData,
+                        MpsError::DuplicateSection,
+                    )?;
                     if section == Section::Name && trimmed.len() > 4 {
                         let name_part = trimmed[4..].trim();
                         if !name_part.is_empty() {
                             self.problem_name = Some(name_part.to_string());
                         }
                     }
-                    if section == Section::EndData {
+                    if should_break {
                         break;
                     }
                     continue;
                 }
             }
 
-            match current_section {
+            match state.current {
                 Section::None => {
                     return Err(MpsError::ParseError {
                         line: line_num,
@@ -103,34 +99,23 @@ impl MpsParser {
             }
         }
 
-        if !seen_sections.contains(&Section::EndData) {
-            return Err(MpsError::MissingSection("ENDATA".to_string()));
-        }
-        if !seen_sections.contains(&Section::Rows) {
-            return Err(MpsError::MissingSection("ROWS".to_string()));
-        }
-        if !seen_sections.contains(&Section::Columns) {
-            return Err(MpsError::MissingSection("COLUMNS".to_string()));
-        }
+        state.require(
+            &[
+                (Section::EndData, "ENDATA"),
+                (Section::Rows, "ROWS"),
+                (Section::Columns, "COLUMNS"),
+            ],
+            MpsError::MissingSection,
+        )?;
 
         self.build_lp_problem()
     }
 
     fn parse_objsense_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
-        let upper = line.trim().to_uppercase();
-        match upper.as_str() {
-            "MAX" => self.maximize = true,
-            "MIN" => self.maximize = false,
-            _ => {
-                return Err(MpsError::ParseError {
-                    line: line_num,
-                    message: format!(
-                        "Invalid OBJSENSE value '{}'; expected MIN or MAX",
-                        line.trim()
-                    ),
-                });
-            }
-        }
+        self.maximize = parse_objsense_value(line).map_err(|msg| MpsError::ParseError {
+            line: line_num,
+            message: msg,
+        })?;
         Ok(())
     }
 
