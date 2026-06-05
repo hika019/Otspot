@@ -310,6 +310,12 @@ impl Model {
                 self.obj_expr_constant
             )));
         }
+        if !self.obj_offset.is_finite() {
+            return Err(ModelError::InvalidInput(format!(
+                "objective: non-finite obj_offset: {}",
+                self.obj_offset
+            )));
+        }
         if let Some(q) = &self.quadratic_objective {
             if let Some(&v) = q.values().iter().find(|v| !v.is_finite()) {
                 return Err(ModelError::InvalidInput(format!(
@@ -2878,6 +2884,26 @@ mod mip_model_tests {
                     "P2-i [{label}]: expected InvalidInput, got {result:?}"
                 );
             }
+        }
+    }
+
+    /// Sentinel: set_obj_offset with NaN/Inf must cause solve() to return InvalidInput.
+    /// Removing the obj_offset check from validate_objective → Ok instead of Err → assertion fails.
+    #[test]
+    fn test_sentinel_obj_offset_non_finite_rejected() {
+        for &(label, bad_offset) in &[
+            ("nan_offset", f64::NAN),
+            ("inf_offset", f64::INFINITY),
+            ("neg_inf_offset", f64::NEG_INFINITY),
+        ] {
+            let mut m = Model::new(label);
+            let x = m.add_var("x", 0.0, f64::INFINITY);
+            m.minimize(x);
+            m.set_obj_offset(bad_offset);
+            assert!(
+                matches!(m.solve(), Err(ModelError::InvalidInput(_))),
+                "[{label}]: non-finite obj_offset must be rejected at solve, got Ok"
+            );
         }
     }
 }

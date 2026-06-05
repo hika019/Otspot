@@ -254,7 +254,13 @@ impl MpsParser {
 
         for i in (1..parts.len()).step_by(2) {
             if i + 1 >= parts.len() {
-                break;
+                return Err(MpsError::ParseError {
+                    line: line_num,
+                    message: format!(
+                        "odd trailing token '{}' in COLUMNS (row name without a value)",
+                        parts[i]
+                    ),
+                });
             }
             let row_name = parts[i].to_string();
             let value = parts[i + 1]
@@ -360,6 +366,18 @@ impl MpsParser {
             "UI" => BoundType::UI,
             _ => return Err(MpsError::InvalidBoundType(bound_type_str.to_string())),
         };
+
+        let value_required =
+            matches!(bound_type, BoundType::LO | BoundType::UP | BoundType::FX | BoundType::LI | BoundType::UI);
+        if value_required && value.is_none() {
+            return Err(MpsError::ParseError {
+                line: line_num,
+                message: format!(
+                    "BOUNDS type {} requires a value for col='{}'",
+                    bound_type_str, col_name
+                ),
+            });
+        }
 
         if matches!(bound_type, BoundType::BV | BoundType::LI | BoundType::UI) {
             self.integer_cols.insert(col_name.clone());

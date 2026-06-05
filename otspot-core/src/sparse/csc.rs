@@ -105,6 +105,14 @@ impl CscMatrix {
                 got: vals.len(),
             });
         }
+        for (i, &v) in vals.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(SolverError::NonFiniteCoefficient {
+                    field: "matrix",
+                    index: i,
+                });
+            }
+        }
         // CSC: 主軸=列、副軸=行
         let (col_ptr, row_ind, values) = build_compressed_format(ncols, nrows, cols, rows, vals)?;
         Ok(Self {
@@ -402,5 +410,20 @@ mod tests {
     fn test_from_triplets_mismatched_lengths() {
         let result = CscMatrix::from_triplets(&[0, 1], &[0], &[1.0, 2.0], 2, 2);
         assert!(result.is_err());
+    }
+
+    /// Sentinel: non-finite values in triplets must be rejected at construction.
+    /// Removing the finiteness check turns Err into Ok → assertion fails (no-op fail).
+    #[test]
+    fn test_sentinel_triplet_non_finite_rejected() {
+        let r = CscMatrix::from_triplets(&[0], &[0], &[f64::NAN], 1, 1);
+        assert!(r.is_err(), "NaN in triplet vals must be rejected");
+        let r = CscMatrix::from_triplets(&[0], &[0], &[f64::INFINITY], 1, 1);
+        assert!(r.is_err(), "+Inf in triplet vals must be rejected");
+        let r = CscMatrix::from_triplets(&[0], &[0], &[f64::NEG_INFINITY], 1, 1);
+        assert!(r.is_err(), "-Inf in triplet vals must be rejected");
+        // Finite values still accepted.
+        let r = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1);
+        assert!(r.is_ok(), "finite value must still be accepted");
     }
 }
