@@ -4,7 +4,7 @@ use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem};
 use crate::sparse::{CscMatrix, SparseVec};
-use crate::tolerances::{feas_rel_tol, PIVOT_TOL};
+use crate::tolerances::{feas_rel_tol, PIVOT_STABILITY_THRESHOLD, PIVOT_TOL};
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 use super::super::dual_common::compute_dual_vars_into;
@@ -294,10 +294,12 @@ pub(super) fn pivot_out_degenerate_artificials(
         }
     } else {
         // Batch: apply all greedy matches, then one full LU instead of num_art incremental updates.
-        let mut candidate_basis = basis.to_vec();
-        for &(r, j) in &matches {
-            candidate_basis[r] = j;
-        }
+        //
+        // Build B_before now for two purposes:
+        //  1. Post-batch FTRAN stability check (non-singular ≠ well-conditioned).
+        //  2. Sequential fallback if the stability check fails.
+        let mut b_before_opt: Option<LuBasis> =
+            LuBasis::new_timed(a_ext, &basis_before, options.max_etas, options.deadline).ok();
 
         // Multi-level batch: each iteration commits as many matches as possible via a
         // single LU, then recurses on the remainder.  For rank-saturated LPs the second
@@ -361,13 +363,66 @@ pub(super) fn pivot_out_degenerate_artificials(
             match_offset += committed;
         }
 
-        // Sequential BTRAN only for true unmatched rows (no raw-A candidate found by the
-        // greedy).  Rows in matches[match_offset..] are rank-saturated and would yield
-        // best_j=None — skipping their BTRANs saves O(N_unprocessable) solver work.
-        if !unmatched_rows.is_empty() {
-            if let Ok(mut basis_mgr) =
-                LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline)
-            {
+        // Stability verification: sample up to STABILITY_CHECK_LIMIT pivots (r, j),
+        // FTRAN a_j through B_before, and check |d[r]| / max|d| ≥ PIVOT_STABILITY_THRESHOLD.
+        //
+        // The batch selects columns by raw |A[r,j]|, which can differ from the
+        // FTRAN-stability ordering |B⁻¹ a_j|[r] used by the sequential path.  On
+        // highly-degenerate LPs, a raw-A–preferred column can have a near-zero FTRAN
+        // entry at row r (the column is nearly in the span of the existing basis),
+        // producing a non-singular but ill-conditioned aggregate basis that causes
+        // dual blow-up in subsequent simplex iterations.
+        //
+        // Checking all N_art pivots would restore O(N_art × FTRAN) cost, undoing the
+        // batch speedup for large problems (e.g., pds-20 with ~33 k degenerate rows).
+        // Instead, sample at most STABILITY_CHECK_LIMIT evenly-spaced pivots.  For
+        // small match counts the entire set is checked; for large counts the step
+        // distributes checks uniformly so early, middle and late pivots are all covered.
+        //
+        // b_before_opt is None only if the Phase-I exit basis is singular (should
+        // never happen); in that case accept the batch and let the final guard decide.
+        const STABILITY_CHECK_LIMIT: usize = 64;
+        let batch_stable = match_offset == 0 || b_before_opt.is_none() || {
+            let b_lu = b_before_opt.as_mut().unwrap();
+            let mut col_dense = vec![0.0_f64; m];
+            let mut stable = true;
+            let check_step = (match_offset / STABILITY_CHECK_LIMIT).max(1);
+            let mut n_checked = 0usize;
+            let mut idx = 0usize;
+            while idx < match_offset && n_checked < STABILITY_CHECK_LIMIT {
+                let (r, j) = matches[idx];
+                col_dense.iter_mut().for_each(|v| *v = 0.0);
+                if let Ok((rows, vals)) = a_ext.get_column(j) {
+                    for (k, &row) in rows.iter().enumerate() {
+                        if row < m {
+                            col_dense[row] = vals[k];
+                        }
+                    }
+                }
+                b_lu.ftran_dense(&mut col_dense);
+                let max_abs = col_dense
+                    .iter()
+                    .map(|v| v.abs())
+                    .fold(0.0_f64, f64::max);
+                if max_abs <= PIVOT_TOL
+                    || col_dense[r].abs() < PIVOT_STABILITY_THRESHOLD * max_abs
+                {
+                    stable = false;
+                    break;
+                }
+                idx += check_step;
+                n_checked += 1;
+            }
+            stable
+        };
+
+        if !batch_stable {
+            // Ill-conditioned batch: revert and run sequential for all degenerate rows
+            // using B_before (already factorized above, reused here).
+            basis.copy_from_slice(&basis_before);
+            #[cfg(test)]
+            super::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+            if let Some(mut b_lu) = b_before_opt {
                 let mut seq_is_basic = vec![false; a_ext.ncols];
                 for &col in basis.iter() {
                     seq_is_basic[col] = true;
@@ -377,10 +432,33 @@ pub(super) fn pivot_out_degenerate_artificials(
                     basis,
                     sf,
                     options,
-                    &unmatched_rows,
-                    &mut basis_mgr,
+                    &degen_rows,
+                    &mut b_lu,
                     &mut seq_is_basic,
                 );
+            }
+        } else {
+            // Batch stable. Sequential BTRAN only for true unmatched rows (no raw-A candidate
+            // found by the greedy).  Rows in matches[match_offset..] are rank-saturated and
+            // would yield best_j=None — skipping their BTRANs saves O(N_unprocessable) work.
+            if !unmatched_rows.is_empty() {
+                if let Ok(mut basis_mgr) =
+                    LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline)
+                {
+                    let mut seq_is_basic = vec![false; a_ext.ncols];
+                    for &col in basis.iter() {
+                        seq_is_basic[col] = true;
+                    }
+                    pivot_out_sequential(
+                        a_ext,
+                        basis,
+                        sf,
+                        options,
+                        &unmatched_rows,
+                        &mut basis_mgr,
+                        &mut seq_is_basic,
+                    );
+                }
             }
         }
     }

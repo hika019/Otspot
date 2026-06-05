@@ -86,6 +86,17 @@ pub(crate) static PIVOT_OUT_BTRAN_COUNT: std::sync::atomic::AtomicUsize =
 pub(crate) static PIVOT_OUT_BATCH_LU_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Counts batch→sequential reverts in `pivot_out_degenerate_artificials` (test-only).
+///
+/// Incremented once each time the post-batch FTRAN stability check rejects the batch
+/// assignment (ill-conditioned pivots) and the per-row sequential path is taken instead.
+/// Sentinel asserts it increases by exactly 1 on a known ill-conditioned instance
+/// (degen2): removing the stability check keeps this at zero — the unstable batch is
+/// accepted and the correctness assertion downstream fails (no-op FAIL).
+#[cfg(test)]
+pub(crate) static PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Verified-ray gate for a Phase II `Unbounded` exit (shared with the Big-M
 /// path). An eta-drift false-Unbounded (`B⁻¹a_q` reads ≤ 0 only because of a
 /// stale factorization) becomes an honest Timeout, mirroring the Phase-I Farkas
