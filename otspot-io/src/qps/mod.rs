@@ -622,4 +622,60 @@ ENDATA
             "NaN for unknown row in named RHS line must error (not silent accept)"
         );
     }
+
+    // ── Sentinel tests: input-validation audit ────────────────────────────────
+
+    /// Fix-3: BOUNDS entry referencing a column not in COLUMNS must error.
+    /// Sentinel: reverting the UndefinedReference return to `continue` → Ok instead of Err.
+    #[test]
+    fn test_sentinel_qps_bounds_undefined_column_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n LO BND  ghost  1.0\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "BOUNDS referencing undefined column must error, not be silently ignored"
+        );
+    }
+
+    /// Fix-3: QUADOBJ entry referencing a column not in COLUMNS must error.
+    /// Sentinel: reverting to `continue` → Ok instead of Err.
+    #[test]
+    fn test_sentinel_qps_quadobj_undefined_column_is_error() {
+        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nRHS\nQUADOBJ\n    x1 ghost 2.0\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "QUADOBJ referencing undefined column must error, not be silently ignored"
+        );
+    }
+
+    /// Fix-4: value-bearing BOUNDS type (LO) with missing value must error.
+    /// Sentinel: reverting to silent None default → Ok instead of Err.
+    #[test]
+    fn test_sentinel_qps_bounds_lo_missing_value_is_error() {
+        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nRHS\nBOUNDS\n LO BND x1\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "LO bound without a value must error"
+        );
+    }
+
+    /// Fix-4: value-bearing BOUNDS type (FX) with missing value must error.
+    #[test]
+    fn test_sentinel_qps_bounds_fx_missing_value_is_error() {
+        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nRHS\nBOUNDS\n FX BND x1\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "FX bound without a value must error"
+        );
+    }
+
+    /// Fix-5: odd trailing token in COLUMNS (row name with no value) must error.
+    /// Sentinel: reverting trailing-token check → Ok instead of Err.
+    #[test]
+    fn test_sentinel_qps_columns_trailing_row_no_value_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0 obj\nRHS\n    rhs c1 5.0\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "trailing row name without a value in COLUMNS must error"
+        );
+    }
 }

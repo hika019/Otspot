@@ -1130,4 +1130,48 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
             result.objective
         );
     }
+
+    // ── Sentinel tests: input-validation audit ────────────────────────────────
+
+    /// Fix-4: value-bearing BOUNDS type (LO) with missing value must error in MPS.
+    /// Sentinel: reverting the value_required check → Ok instead of Err.
+    #[test]
+    fn test_sentinel_mps_bounds_lo_missing_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n LO BND x1\nENDATA\n";
+        assert!(
+            parse_mps(mps).is_err(),
+            "LO bound without a value must error in MPS"
+        );
+    }
+
+    /// Fix-4: value-bearing BOUNDS type (FX) with missing value must error in MPS.
+    #[test]
+    fn test_sentinel_mps_bounds_fx_missing_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n FX BND x1\nENDATA\n";
+        assert!(
+            parse_mps(mps).is_err(),
+            "FX bound without a value must error in MPS"
+        );
+    }
+
+    /// Fix-4: value-bearing BOUNDS type (UI) with missing value must error in MPS.
+    #[test]
+    fn test_sentinel_mps_bounds_ui_missing_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n UI BND x1\nENDATA\n";
+        assert!(
+            parse_milp(mps).is_err(),
+            "UI bound without a value must error in MPS"
+        );
+    }
+
+    /// Fix-5: odd trailing token in COLUMNS (row name with no value) must error in MPS.
+    /// Sentinel: reverting the break→error → Ok instead of Err.
+    #[test]
+    fn test_sentinel_mps_columns_trailing_row_no_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1\nRHS\n    rhs c1 5.0\nENDATA\n";
+        assert!(
+            parse_mps(mps).is_err(),
+            "trailing row name without a value in COLUMNS must error in MPS"
+        );
+    }
 }
