@@ -1655,48 +1655,18 @@ fn batch_pivot_out_uses_single_lu_and_no_btrans() {
 }
 
 /// Sentinel: batch pivot_out falls back to sequential when the greedy-selected column
-/// is ill-conditioned (large raw |A[r,j]| but FTRAN entry at r nearly cancels to zero).
+/// is ill-conditioned — large raw |A[r,j]| but its FTRAN entry at row r nearly cancels.
 ///
-/// LP construction (3 rows, 4 structural cols):
-///
-///   col0 = x0: A[:,0] = [1,   1,   1  ]  (Phase I enters this; covers all rows)
-///   col1 = x1: A[:,1] = [1,  −0.5, 0  ]  (well-conditioned alternative for row 1)
-///   col2 = x2: A[:,2] = [0.7, 0,   1  ]  (covers row 2; A[0,x2]=0.7 keeps rc≥0 in Phase I)
-///   col3 = s:  A[:,3] = [1,   1+δ, 0  ]  (spoiler: |A[1,s]|=1+δ > |A[1,x1]|=0.5
-///                                          but FTRAN at row 1 ≈ δ via near-cancellation)
-///   b = [1, 1, 1],  c = [0,0,0,0],  all Eq,  all vars ≥ 0
-///
-/// Phase I dual after x0 enters row 0 (step=1):
-///   y = B_before⁻ᵀ c_B = [−2, 1, 1]  (B_before = [x0|art1|art2], c_B=[0,1,1])
-///   rc_x1 = −y·[1,−0.5,0] =  2.5 > 0  ✓
-///   rc_x2 = −y·[0.7,0,1]  =  0.4 > 0  ✓   (A[0,x2]=0.7 keeps this positive)
-///   rc_s  = −y·[1,1+δ,0]  =  1−δ > 0  ✓
-///
-///   All rc ≥ 0 → Phase I exits immediately with basis=[x0,art1,art2], x_b=[1,0,0].
-///   art1 and art2 are degenerate at rows 1 and 2.  pivot_out is called.
-///
-/// Batch greedy:
-///   row 1: compares |A[1,s]|=1+δ vs |A[1,x1]|=0.5 → picks s.
-///   row 2: only x2 has A[2,x2]=1 ≥ PIVOT_TOL → assigns x2.
-///
-/// B_before⁻¹ = [[1,0,0],[−1,1,0],[−1,0,1]].
-///
-/// Trial basis [x0,s,x2] det = 1·(1+δ)·1 − 1·1·1 + 0.7·(0−1.001) ≈ −0.666 ≠ 0,
-/// so the batch LU SUCCEEDS and commits both pivots.
-///
-/// FTRAN stability for s (j=3, r=1):
-///   d = B_before⁻¹ · [1, 1+δ, 0]ᵀ = [1, δ, −1]ᵀ
-///   |d[1]| / max|d| = δ / 1 = δ = 0.001 < PIVOT_STABILITY_THRESHOLD=0.01 → UNSTABLE.
-///   batch_stable = false → fallback fires. PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT++.
-///
-/// Sequential BTRAN selects x1 for row 1 (z·x1 = −1−0.5 = −1.5 ≫ z·s = δ ≈ 0).
-/// Final basis [x0,x1,x2] is non-singular → solve reaches Optimal with obj=0.
-///
-/// No-op proof: removing the stability check → batch_stable=true, fallback never fires,
-/// counter stays zero → assertion fails.
-///
-/// Ruiz robustness: the LP is near Ruiz-normal (all row/col maxes ≤ 1+δ).
-/// After scaling, FTRAN ratio at row 1 ≈ δ·(r1/r0) ≈ δ < 0.01 — instability survives.
+/// 3 rows × 4 cols, all Eq, c=0: x0=[1,1,1], x1=[1,−0.5,0], x2=[0.7,0,1],
+/// s=[1,1+δ,0], δ=0.001. Phase I enters x0 and exits with all rc≥0, leaving art1,art2
+/// degenerate at rows 1,2 → pivot_out runs. Batch greedy picks s for row 1
+/// (|A[1,s]|=1+δ > |A[1,x1]|=0.5) and x2 for row 2; trial basis [x0,s,x2] is
+/// non-singular so the LU commits. But FTRAN of s gives d=[1,δ,−1], so
+/// |d[1]|/max|d| = δ < PIVOT_STABILITY_THRESHOLD=0.01 → batch rejected, fallback fires
+/// (counter++), sequential BTRAN picks the well-conditioned x1, solve reaches Optimal
+/// obj=0. No-op proof: drop the stability check → batch accepted, fallback never fires,
+/// counter stays zero → assertion fails. The LP is near Ruiz-normal (row/col maxes
+/// ≤ 1+δ) so the instability survives scaling.
 #[test]
 fn batch_pivot_out_falls_back_to_sequential_for_ill_conditioned_basis() {
     // δ: FTRAN cancellation ratio at row 1 (δ/1 = 0.001 < threshold 0.01).
