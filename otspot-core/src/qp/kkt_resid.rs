@@ -12,6 +12,11 @@ use crate::problem::ConstraintType;
 use crate::sparse::CscMatrix;
 use crate::tolerances::any_nonfinite;
 
+fn bound_dual_len(bounds: &[(f64, f64)]) -> usize {
+    bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count()
+        + bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count()
+}
+
 /// KKT dual-sign violation (componentwise relative max).
 ///
 /// Stationarity `Qx + c + Aᵀy + bound_contrib = 0` の符号規約:
@@ -27,16 +32,15 @@ pub fn dual_sign_violation(
     bounds: &[(f64, f64)],
     z: &[f64],
 ) -> f64 {
-    if any_nonfinite(y) {
+    if y.len() != ct.len() || any_nonfinite(y) {
         return f64::INFINITY;
     }
 
     let mut max_rel = 0.0_f64;
 
     // Constraint dual sign check.
-    let m = ct.len().min(y.len());
     #[allow(unreachable_patterns)]
-    for i in 0..m {
+    for i in 0..ct.len() {
         let viol = match ct[i] {
             ConstraintType::Le => (-y[i]).max(0.0), // must be >= 0
             ConstraintType::Ge => y[i].max(0.0),    // must be <= 0
@@ -55,12 +59,13 @@ pub fn dual_sign_violation(
     // z layout mirrors bound_contrib: lb-finite columns first, then ub-finite columns.
     let n_lb_finite = bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
     let n_ub_finite = bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count();
+    let expected_z_len = n_lb_finite + n_ub_finite;
     debug_assert_eq!(
-        z.len(), n_lb_finite + n_ub_finite,
+        z.len(), expected_z_len,
         "z.len()={} must equal n_lb_finite={} + n_ub_finite={}: caller must pass z with correct length",
         z.len(), n_lb_finite, n_ub_finite,
     );
-    if any_nonfinite(z) {
+    if (!z.is_empty() && z.len() != expected_z_len) || any_nonfinite(z) {
         return f64::INFINITY;
     }
     if z.is_empty() {
@@ -104,15 +109,18 @@ pub fn bound_contrib(bounds: &[(f64, f64)], bd: &[f64]) -> Vec<f64> {
     if bd.is_empty() {
         return contrib;
     }
+    if bd.len() != bound_dual_len(bounds) || any_nonfinite(bd) {
+        return vec![f64::INFINITY; n];
+    }
     let mut idx = 0_usize;
     for (j, &(lb, _)) in bounds.iter().enumerate() {
-        if lb.is_finite() && idx < bd.len() {
+        if lb.is_finite() {
             contrib[j] -= bd[idx];
             idx += 1;
         }
     }
     for (j, &(_, ub)) in bounds.iter().enumerate() {
-        if ub.is_finite() && idx < bd.len() {
+        if ub.is_finite() {
             contrib[j] += bd[idx];
             idx += 1;
         }
@@ -130,15 +138,19 @@ pub fn comp_bound_products(bounds: &[(f64, f64)], x: &[f64], bd: &[f64]) -> Vec<
     if bd.is_empty() {
         return out;
     }
+    let expected_bd_len = bound_dual_len(bounds);
+    if x.len() < bounds.len() || bd.len() != expected_bd_len || any_nonfinite(bd) {
+        return vec![f64::INFINITY; expected_bd_len];
+    }
     let mut idx = 0_usize;
     for (j, &(lb, _)) in bounds.iter().enumerate() {
-        if lb.is_finite() && idx < bd.len() {
+        if lb.is_finite() {
             out.push((bd[idx] * (x[j] - lb)).abs());
             idx += 1;
         }
     }
     for (j, &(_, ub)) in bounds.iter().enumerate() {
-        if ub.is_finite() && idx < bd.len() {
+        if ub.is_finite() {
             out.push((bd[idx] * (ub - x[j])).abs());
             idx += 1;
         }
@@ -369,6 +381,20 @@ mod tests {
     }
 
     #[test]
+    fn bound_contrib_truncated_bd_returns_infinity_components() {
+        let bounds = vec![(0.0, 10.0), (5.0, f64::INFINITY)];
+        let c = bound_contrib(&bounds, &[1.0]);
+        assert_eq!(c, vec![f64::INFINITY, f64::INFINITY]);
+    }
+
+    #[test]
+    fn bound_contrib_nonfinite_bd_returns_infinity_components() {
+        let bounds = vec![(0.0, f64::INFINITY)];
+        let c = bound_contrib(&bounds, &[f64::NAN]);
+        assert_eq!(c, vec![f64::INFINITY]);
+    }
+
+    #[test]
     fn comp_bound_products_lb_then_ub_layout() {
         let bounds = vec![(0.0, 10.0), (5.0, f64::INFINITY)];
         let x = vec![2.0, 7.0];
@@ -390,6 +416,21 @@ mod tests {
         let x = vec![0.5];
         let p = comp_bound_products(&bounds, &x, &[]);
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn comp_bound_products_truncated_bd_returns_infinity_products() {
+        let bounds = vec![(0.0, 10.0), (5.0, f64::INFINITY)];
+        let x = vec![2.0, 7.0];
+        let p = comp_bound_products(&bounds, &x, &[1.5]);
+        assert_eq!(p, vec![f64::INFINITY, f64::INFINITY, f64::INFINITY]);
+    }
+
+    #[test]
+    fn comp_bound_products_short_x_returns_infinity_products() {
+        let bounds = vec![(0.0, 10.0), (5.0, f64::INFINITY)];
+        let p = comp_bound_products(&bounds, &[2.0], &[1.5, 0.5, 4.0]);
+        assert_eq!(p, vec![f64::INFINITY, f64::INFINITY, f64::INFINITY]);
     }
 
     #[test]
@@ -519,6 +560,18 @@ mod tests {
         // Ge violation: 0.3 / (1 + 0.3) = 0.3/1.3 ≈ 0.2308
         let expected = 0.3 / 1.3;
         assert!((v - expected).abs() < 1e-12, "got {v}, expected {expected}");
+    }
+
+    #[test]
+    fn dual_sign_truncated_y_returns_infinity() {
+        use ConstraintType::*;
+        let ct = vec![Le, Ge];
+        let y = vec![1.0];
+        let v = dual_sign_violation(&ct, &y, &[], &[]);
+        assert!(
+            v.is_infinite() && v > 0.0,
+            "truncated y must give +INFINITY, got {v}"
+        );
     }
 
     /// z_lb must be >= 0: negative z_lb is a violation.
