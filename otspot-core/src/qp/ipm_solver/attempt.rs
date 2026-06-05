@@ -6,7 +6,7 @@ use std::time::Instant;
 #[cfg(test)]
 use crate::ScopedDisable;
 
-use super::core::run_ipm;
+use super::core::run_ipm_with_user_eps;
 use super::kkt::{bound_violation, kkt_residual_rel, primal_residual_rel};
 use super::outcome::{IpmOutcome, ProblemView};
 use crate::options::SolverOptions;
@@ -129,7 +129,7 @@ const MAX_ITER_PER_ATTEMPT: usize = 500;
 /// re-solve from scratch economically.
 const NO_PRESOLVE_FALLBACK_LIMIT: usize = 10_000;
 
-type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;
+type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions, f64) -> IpmOutcome;
 
 /// tighten = ceil_pow10(user_eps / 1e-8) ∈ [1, 1000]。上限 1000 は IPM floor 制約。
 ///
@@ -239,11 +239,11 @@ pub fn solve_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     if let Some((scaled_problem, col_scales)) = try_q_diagonal_scaling(problem) {
         let scaled_options = scale_warm_start_for_q_diag(options, &col_scales);
         let (mut result, eliminated_cols) =
-            solve_ipm_with_runner(&scaled_problem, &scaled_options, run_ipm);
+            solve_ipm_with_runner(&scaled_problem, &scaled_options, run_ipm_with_user_eps);
         unscale_q_diagonal(&mut result, &col_scales, problem);
         return guard_qp_optimal(result, problem, &eliminated_cols);
     }
-    let (result, eliminated_cols) = solve_ipm_with_runner(problem, options, run_ipm);
+    let (result, eliminated_cols) = solve_ipm_with_runner(problem, options, run_ipm_with_user_eps);
     guard_qp_optimal(result, problem, &eliminated_cols)
 }
 
@@ -550,7 +550,7 @@ fn solve_ipm_with_runner(
         opts.use_ruiz_scaling = use_ruiz;
         opts.ipm.eps = (user_eps / tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
 
-        let outcome = runner(problem, &presolve_result, &opts);
+        let outcome = runner(problem, &presolve_result, &opts, user_eps);
         let outcome_satisfies = outcome.satisfies_eps(user_eps);
         let outcome_proven = outcome_satisfies && outcome_proves_optimal(&outcome, &view, user_eps);
         // Charge per_attempt_cap for failed attempts: stall paths return best_iter which
@@ -609,7 +609,7 @@ fn solve_ipm_with_runner(
             // the worst component just above tol (false SuboptimalSolution); base_tighten
             // drives it below tol. acceptance is still gated by prove_optimal(user_eps).
             opts.ipm.eps = (user_eps / base_tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
-            let fb = runner(problem, &fallback_pre, &opts);
+            let fb = runner(problem, &fallback_pre, &opts, user_eps);
             let fb_satisfies = fb.satisfies_eps(user_eps);
             let fb_proven = fb_satisfies && outcome_proves_optimal(&fb, &view, user_eps);
             let charged_fb = if fb_satisfies {
@@ -790,6 +790,7 @@ mod tests {
         _problem: &QpProblem,
         _presolve: &QpPresolveResult,
         _options: &SolverOptions,
+        _user_eps: f64,
     ) -> IpmOutcome {
         let call = GAP_ACCEPTANCE_CALLS.fetch_add(1, Ordering::SeqCst);
         IpmOutcome {
@@ -815,6 +816,7 @@ mod tests {
         _problem: &QpProblem,
         presolve: &QpPresolveResult,
         _options: &SolverOptions,
+        _user_eps: f64,
     ) -> IpmOutcome {
         if presolve.ruiz_scaler.is_some() {
             return IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible);
@@ -842,6 +844,7 @@ mod tests {
         _problem: &QpProblem,
         _presolve: &QpPresolveResult,
         _options: &SolverOptions,
+        _user_eps: f64,
     ) -> IpmOutcome {
         let call = INFEAS_RETRY_CALLS.fetch_add(1, Ordering::SeqCst);
         if call == 0 {
@@ -870,6 +873,7 @@ mod tests {
         _problem: &QpProblem,
         presolve: &QpPresolveResult,
         _options: &SolverOptions,
+        _user_eps: f64,
     ) -> IpmOutcome {
         let is_fallback = presolve.ruiz_scaler.is_none();
         IpmOutcome {
@@ -1823,7 +1827,12 @@ mod tests {
             static CALL_COUNT: Cell<usize> = const { Cell::new(0) };
         }
 
-        fn mock_runner(_: &QpProblem, _: &QpPresolveResult, _: &SolverOptions) -> IpmOutcome {
+        fn mock_runner(
+            _: &QpProblem,
+            _: &QpPresolveResult,
+            _: &SolverOptions,
+            _: f64,
+        ) -> IpmOutcome {
             CALL_COUNT.with(|c| c.set(c.get() + 1));
             // iterations=0 simulates stall best_iter undercount; never converges.
             IpmOutcome::empty()
@@ -1846,6 +1855,174 @@ mod tests {
             "iter guard must stop after 1 attempt when per_attempt_cap charges full budget \
              (got {} runner calls)",
             count
+        );
+    }
+
+    /// The attempt loop tightens `opts.ipm.eps` for the inner IPM solve, but
+    /// postsolve/original-space gates must still evaluate against the user eps.
+    #[test]
+    fn runner_receives_user_eps_separate_from_attempt_eps() {
+        use std::cell::Cell;
+        thread_local! {
+            static SEEN_ATTEMPT_EPS: Cell<f64> = const { Cell::new(f64::NAN) };
+            static SEEN_USER_EPS: Cell<f64> = const { Cell::new(f64::NAN) };
+        }
+
+        fn mock_runner(
+            _: &QpProblem,
+            _: &QpPresolveResult,
+            options: &SolverOptions,
+            user_eps: f64,
+        ) -> IpmOutcome {
+            SEEN_ATTEMPT_EPS.with(|c| c.set(options.ipm.eps));
+            SEEN_USER_EPS.with(|c| c.set(user_eps));
+            IpmOutcome::empty()
+        }
+
+        let prob = make_simple_eq_qp();
+        let mut opts = SolverOptions::default();
+        opts.ipm.eps = 1e-6;
+        opts.ipm.max_iter = 1;
+        opts.presolve = false;
+        SEEN_ATTEMPT_EPS.with(|c| c.set(f64::NAN));
+        SEEN_USER_EPS.with(|c| c.set(f64::NAN));
+
+        let _ = solve_ipm_with_runner(&prob, &opts, mock_runner);
+
+        let attempt_eps = SEEN_ATTEMPT_EPS.with(|c| c.get());
+        let user_eps = SEEN_USER_EPS.with(|c| c.get());
+        assert!(
+            attempt_eps < user_eps,
+            "attempt eps must be tightened below user eps; attempt={attempt_eps:e} user={user_eps:e}"
+        );
+        assert_eq!(
+            user_eps, 1e-6,
+            "runner must receive the external user eps, not the tightened attempt eps"
+        );
+    }
+
+    /// The no-presolve fallback clears `opts.tolerance` while keeping the inner
+    /// IPM target tightened; the runner must still receive the external user eps.
+    #[test]
+    fn fallback_runner_receives_user_eps_after_tolerance_clear() {
+        use std::cell::Cell;
+        thread_local! {
+            static FALLBACK_ATTEMPT_EPS: Cell<f64> = const { Cell::new(f64::NAN) };
+            static FALLBACK_USER_EPS: Cell<f64> = const { Cell::new(f64::NAN) };
+        }
+
+        fn mock_runner(
+            _: &QpProblem,
+            presolve: &QpPresolveResult,
+            options: &SolverOptions,
+            user_eps: f64,
+        ) -> IpmOutcome {
+            if presolve.ruiz_scaler.is_none() {
+                FALLBACK_ATTEMPT_EPS.with(|c| c.set(options.ipm.eps));
+                FALLBACK_USER_EPS.with(|c| c.set(user_eps));
+            }
+            IpmOutcome {
+                solution: vec![0.0],
+                dual_solution: vec![],
+                bound_duals: vec![0.0],
+                objective: 0.0,
+                iterations: 1,
+                kkt_residual_rel: 0.0,
+                primal_residual_rel: 0.0,
+                bound_violation: 0.0,
+                complementarity_residual_rel: 0.0,
+                duality_gap_rel: 1e-3,
+                numerical_failure: false,
+                infeasibility_status: None,
+                is_locally_optimal: false,
+                postsolve_krylov_ir_skipped: false,
+                timing: None,
+            }
+        }
+
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let mut opts = SolverOptions {
+            presolve: true,
+            use_ruiz_scaling: true,
+            ..SolverOptions::default()
+        };
+        opts.ipm.eps = 1e-6;
+        opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT * 4 + 2;
+        FALLBACK_ATTEMPT_EPS.with(|c| c.set(f64::NAN));
+        FALLBACK_USER_EPS.with(|c| c.set(f64::NAN));
+
+        let _ = solve_ipm_with_runner(&prob, &opts, mock_runner);
+
+        let attempt_eps = FALLBACK_ATTEMPT_EPS.with(|c| c.get());
+        let user_eps = FALLBACK_USER_EPS.with(|c| c.get());
+        assert!(
+            attempt_eps.is_finite() && attempt_eps < user_eps,
+            "fallback attempt eps must be tightened below user eps; attempt={attempt_eps:e} user={user_eps:e}"
+        );
+        assert_eq!(
+            user_eps, 1e-6,
+            "fallback runner must receive the external user eps after tolerance is cleared"
+        );
+    }
+
+    /// Q-diagonal scaling calls the same attempt runner on the scaled problem;
+    /// the scaled path must keep user eps separate from the tightened attempt eps.
+    #[test]
+    fn q_diagonal_scaled_runner_receives_user_eps() {
+        use std::cell::Cell;
+        thread_local! {
+            static SEEN_ATTEMPT_EPS: Cell<f64> = const { Cell::new(f64::NAN) };
+            static SEEN_USER_EPS: Cell<f64> = const { Cell::new(f64::NAN) };
+        }
+
+        fn mock_runner(
+            _: &QpProblem,
+            _: &QpPresolveResult,
+            options: &SolverOptions,
+            user_eps: f64,
+        ) -> IpmOutcome {
+            SEEN_ATTEMPT_EPS.with(|c| c.set(options.ipm.eps));
+            SEEN_USER_EPS.with(|c| c.set(user_eps));
+            IpmOutcome::empty()
+        }
+
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1e-7_f64, 2.0], 2, 2).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0, 0.0],
+            CscMatrix::new(0, 2),
+            vec![],
+            vec![(0.0, 1.0), (0.0, 1.0)],
+        )
+        .unwrap();
+        let (scaled_prob, col_scales) =
+            try_q_diagonal_scaling(&prob).expect("ill-conditioned diagonal Q must scale");
+        let mut scaled_opts = scale_warm_start_for_q_diag(&SolverOptions::default(), &col_scales);
+        scaled_opts.ipm.eps = 1e-6;
+        scaled_opts.ipm.max_iter = 1;
+        scaled_opts.presolve = false;
+        SEEN_ATTEMPT_EPS.with(|c| c.set(f64::NAN));
+        SEEN_USER_EPS.with(|c| c.set(f64::NAN));
+
+        let _ = solve_ipm_with_runner(&scaled_prob, &scaled_opts, mock_runner);
+
+        let attempt_eps = SEEN_ATTEMPT_EPS.with(|c| c.get());
+        let user_eps = SEEN_USER_EPS.with(|c| c.get());
+        assert!(
+            attempt_eps < user_eps,
+            "scaled attempt eps must be tightened below user eps; attempt={attempt_eps:e} user={user_eps:e}"
+        );
+        assert_eq!(
+            user_eps, 1e-6,
+            "Q-diagonal scaled runner must receive the external user eps"
         );
     }
 }
