@@ -66,7 +66,7 @@ pub(crate) fn refine_kkt_iterative(
             n_dual_total += n_dual;
             outer_made_progress = true;
             // side-effect refit only; KKT score is reused in the else branch via pre/post diff.
-            let _: f64 = run_dual_recovery_postprocess(problem, &view, result, deadline);
+            let _: f64 = run_dual_recovery_postprocess(problem, &view, result, deadline, target_pf);
         } else {
             let pre_cleanup_kkt = kkt_residual_rel(
                 &view,
@@ -74,7 +74,7 @@ pub(crate) fn refine_kkt_iterative(
                 &result.dual_solution,
                 &result.bound_duals,
             );
-            let post_cleanup_kkt = run_dual_recovery_postprocess(problem, &view, result, deadline);
+            let post_cleanup_kkt = run_dual_recovery_postprocess(problem, &view, result, deadline, target_pf);
             if post_cleanup_kkt
                 + dual_recovery_progress_tol(pre_cleanup_kkt, post_cleanup_kkt, target_pf)
                 < pre_cleanup_kkt
@@ -409,7 +409,7 @@ pub(crate) fn refine_kkt_iterative(
         let mut tmp = result.clone();
         tmp.solution = x_new;
         tmp.dual_solution = y_new;
-        refit_bound_duals_kkt(problem, &mut tmp);
+        refit_bound_duals_kkt(problem, &mut tmp, target_pf);
 
         let (_, _, pf_new, df_new) =
             compute_residuals(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals);

@@ -237,7 +237,7 @@ fn run_ipm_with(
     // of δ*x in the original problem. Refit z directly from Qx+c so that z
     // satisfies the original stationarity Qx + z + c = 0 unconditionally.
     if !final_sol.solution.is_empty() && orig_problem.num_constraints == 0 && ipm_made_progress {
-        crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+        crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol, opts.ipm_eps());
     }
 
     let view = ProblemView {

@@ -21,7 +21,7 @@ fn test_refit_bound_duals_lb_only_active() {
         objective: 0.0,
         ..SolverResult::default()
     };
-    refit_bound_duals_kkt(&problem, &mut result);
+    refit_bound_duals_kkt(&problem, &mut result, 1e-6);
     assert!(
         (result.bound_duals[0] - 2.5).abs() < 1e-9,
         "got {}",
@@ -48,7 +48,7 @@ fn test_refit_bound_duals_ub_only_active() {
         objective: 0.0,
         ..SolverResult::default()
     };
-    refit_bound_duals_kkt(&problem, &mut result);
+    refit_bound_duals_kkt(&problem, &mut result, 1e-6);
     assert!(
         (result.bound_duals[0] - 3.0).abs() < 1e-9,
         "got {}",
@@ -75,7 +75,7 @@ fn test_refit_bound_duals_interior_keeps_zero() {
         objective: -4.0,
         ..SolverResult::default()
     };
-    refit_bound_duals_kkt(&problem, &mut result);
+    refit_bound_duals_kkt(&problem, &mut result, 1e-6);
     assert!(result.bound_duals[0].abs() < 1e-9);
     assert!(result.bound_duals[1].abs() < 1e-9);
 }
@@ -99,7 +99,7 @@ fn test_refit_bound_duals_kkt_guard_no_regression() {
         objective: 0.0,
         ..SolverResult::default()
     };
-    refit_bound_duals_kkt(&problem, &mut result);
+    refit_bound_duals_kkt(&problem, &mut result, 1e-6);
     assert!(
         (result.bound_duals[0] - 2.0).abs() < 1e-9,
         "got {}",
@@ -126,7 +126,7 @@ fn test_refit_bound_duals_with_constraint() {
         objective: 0.0,
         ..SolverResult::default()
     };
-    refit_bound_duals_kkt(&problem, &mut result);
+    refit_bound_duals_kkt(&problem, &mut result, 1e-6);
     assert!((result.bound_duals[0] - 1.0).abs() < 1e-9);
     assert!(result.bound_duals[1].abs() < 1e-9);
 }
@@ -150,7 +150,7 @@ fn test_project_duals_from_singleton_columns_clamps_infeasible_positive_le_dual(
     };
 
     project_duals_from_singleton_columns(&problem, &mut result);
-    refit_bound_duals_kkt(&problem, &mut result);
+    refit_bound_duals_kkt(&problem, &mut result, 1e-6);
 
     assert!(result.dual_solution[0].abs() < 1e-12);
     assert!(result.bound_duals.iter().all(|v| v.abs() < 1e-12));
@@ -175,7 +175,7 @@ fn test_project_duals_from_singleton_columns_respects_lb_only_lower_bound() {
     };
 
     project_duals_from_singleton_columns(&problem, &mut result);
-    refit_bound_duals_kkt(&problem, &mut result);
+    refit_bound_duals_kkt(&problem, &mut result, 1e-6);
 
     assert!((result.dual_solution[0] - 2.0).abs() < 1e-12);
     assert!(result.bound_duals[0].abs() < 1e-12);
@@ -270,4 +270,89 @@ fn test_refine_dual_worst_active_block_updates_row_and_bound_duals_together() {
     assert!((result.dual_solution[0] - 1.0).abs() < 1e-9);
     assert!(result.bound_duals[0].abs() < 1e-12);
     assert!((result.bound_duals[1] - 1.0).abs() < 1e-9);
+}
+
+/// REFIT-T-COMPCONS-NEAR: comp-consistent criterion assigns bound dual for a
+/// near-active variable (GOULDQP2-like: x interior but comp_candidate << comp_tol).
+///
+/// Setup: box-bounded j with x=0.998, lb=0, ub=1, c=-1e-6 (Q=0, no constraints).
+/// stationarity target = -(Qx + c) = 1e-6 > 0 → z_ub candidate = 1e-6.
+/// comp_candidate = 1e-6 * (1-0.998) / (1 + 1e-6 * (0.998+1)) ≈ 2e-9 < comp_tol=1e-6.
+/// → z_ub MUST be assigned.
+///
+/// Sentinel: reverting to the old `DUAL_RECOVERY_ACTIVE_TOL_REL=1e-8` activity check
+/// causes this test to FAIL (rel_gap ≈ 6.7e-4 >> 1e-8 → z_ub stays 0 → assertion fails).
+#[test]
+fn test_refit_bound_duals_comp_consistent_near_active_assigns_dual() {
+    let n = 1usize;
+    let q = CscMatrix::new(n, n);
+    // c = -1e-6: target = -(Qx + c) = 1e-6 > 0, z_ub candidate
+    let c = vec![-1e-6_f64];
+    let a = CscMatrix::new(0, n);
+    let b = vec![];
+    // box-bounded: lb=0, ub=1, x=0.998 (interior by 0.002, rel≈6.7e-4)
+    let bounds = vec![(0.0_f64, 1.0_f64)];
+    let problem =
+        QpProblem::new(q, c, a, b, bounds, vec![]).unwrap();
+
+    let mut result = crate::problem::SolverResult {
+        status: SolveStatus::Optimal,
+        solution: vec![0.998_f64],
+        dual_solution: vec![],
+        // layout: [z_lb, z_ub] (n_lb=1 finite, n_ub=1 finite)
+        bound_duals: vec![0.0_f64, 0.0_f64],
+        ..crate::problem::SolverResult::default()
+    };
+
+    refit_bound_duals_kkt(&problem, &mut result, 1e-6);
+
+    // z_ub should be ≈ 1e-6 (absorbs stationarity; comp ≈ 2e-9 < 1e-6)
+    let z_ub = result.bound_duals[1];
+    assert!(
+        (z_ub - 1e-6).abs() < 1e-10,
+        "near-active box variable must have z_ub ≈ 1e-6, got z_ub={z_ub:.3e}; \
+         reverting to DUAL_RECOVERY_ACTIVE_TOL_REL=1e-8 activity check causes z_ub=0 here"
+    );
+    // z_lb must stay 0 (x not near lb)
+    assert!(result.bound_duals[0].abs() < 1e-12);
+}
+
+/// REFIT-T-COMPCONS-FAR: comp-consistent criterion leaves bound dual at 0 for a
+/// far-interior variable (QFORPLAN-like: comp_candidate >> comp_tol).
+///
+/// Setup: box-bounded j with x=0.5, lb=0, ub=1, c=-1.0 (Q=0, no constraints).
+/// stationarity target = 1.0, comp_candidate = 1.0*0.5/(1+1.0*1.5) = 0.2 >> 1e-6.
+/// → z_ub must NOT be assigned (spurious assignment would violate comp check).
+///
+/// Sentinel: reverting to the old pre-QFORPLAN-fix behavior (always assign for box
+/// bounds regardless of comp) causes bound_duals[1] = 1.0 ≠ 0 → assertion fails.
+#[test]
+fn test_refit_bound_duals_comp_consistent_far_interior_keeps_zero() {
+    let n = 1usize;
+    let q = CscMatrix::new(n, n);
+    // c = -1.0: target = 1.0 (large), comp_candidate ≈ 0.2 >> comp_tol=1e-6
+    let c = vec![-1.0_f64];
+    let a = CscMatrix::new(0, n);
+    let b = vec![];
+    let bounds = vec![(0.0_f64, 1.0_f64)];
+    let problem =
+        QpProblem::new(q, c, a, b, bounds, vec![]).unwrap();
+
+    let mut result = crate::problem::SolverResult {
+        status: SolveStatus::Optimal,
+        solution: vec![0.5_f64],
+        dual_solution: vec![],
+        bound_duals: vec![0.0_f64, 0.0_f64],
+        ..crate::problem::SolverResult::default()
+    };
+
+    refit_bound_duals_kkt(&problem, &mut result, 1e-6);
+
+    // z_ub must stay 0 (far interior; assigning would give comp ≈ 0.2 >> 1e-6)
+    let z_ub = result.bound_duals[1];
+    assert!(
+        z_ub.abs() < 1e-12,
+        "far-interior box variable must not receive z_ub (comp would be ≈0.2>>1e-6), got {z_ub:.3e}; \
+         reverting to always-assign (pre-QFORPLAN-fix) behavior causes z_ub=1.0 here"
+    );
 }

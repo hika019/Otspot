@@ -35,7 +35,7 @@ fn test_dual_recovery_postprocess_can_improve_without_dual_ir() {
         &result.dual_solution,
         &result.bound_duals,
     );
-    let post = run_dual_recovery_postprocess(&problem, &view, &mut result, None);
+    let post = run_dual_recovery_postprocess(&problem, &view, &mut result, None, 1e-6);
 
     assert!(post < pre);
     assert!(post < 1e-12);
