@@ -419,6 +419,35 @@ fn build_a_aug_for_eq(
     (a_aug, art_col_of_row, n_art)
 }
 
+/// Initial basic values `x_B = B^{-1} b` for the slack/artificial starting
+/// basis. That basis is structurally diagonal — each slack column and each
+/// artificial column has its single nonzero at its own row — but after Ruiz
+/// scaling the Le-slack diagonals are non-unit, so `x_B[i] = b[i] / diag_i`,
+/// not `b[i]`. Artificial columns have `diag = 1`. Negative results are clamped
+/// to 0: the bounded primal starts inside the box and a feasible slack/art
+/// basis yields `x_B ≥ 0` (the clamp is a no-op there and only guards roundoff).
+fn diag_basis_initial_x_b(a_aug: &CscMatrix, basis: &[usize], b: &[f64]) -> Vec<f64> {
+    let m = basis.len();
+    let mut x_b = vec![0.0f64; m];
+    for i in 0..m {
+        let (rows, vals) = a_aug.get_column(basis[i]).unwrap();
+        let mut diag = 0.0f64;
+        for (k, &r) in rows.iter().enumerate() {
+            if r == i {
+                diag = vals[k];
+                break;
+            }
+        }
+        debug_assert!(
+            diag != 0.0,
+            "slack/artificial starting basis must be diagonal (nonzero pivot at its own row)"
+        );
+        let v = b[i] / diag;
+        x_b[i] = if v < 0.0 { 0.0 } else { v };
+    }
+    x_b
+}
+
 /// Eq+UB cold start: augment with artificials, run primal Phase I (minimise
 /// sum of artificials), then primal Phase II on the augmented matrix with
 /// pricing restricted to structural columns.
@@ -464,12 +493,7 @@ fn try_bounded_phase1_eq(
         for &j in &basis {
             is_basic[j] = true;
         }
-        let mut x_b = b.clone();
-        for v in x_b.iter_mut() {
-            if *v < 0.0 {
-                *v = 0.0;
-            }
-        }
+        let x_b = diag_basis_initial_x_b(&a_aug, &basis, &b);
         (a_aug, art_col_of_row, ubs_aug, basis, is_basic, x_b)
     };
 
@@ -541,13 +565,9 @@ fn try_bounded_phase1_eq(
                 }
             }
         } else {
-            let mut x_b = b.clone();
-            for v in x_b.iter_mut() {
-                if *v < 0.0 {
-                    *v = 0.0;
-                }
-            }
-            x_b
+            // Crash made no change → basis is still the slack/art identity
+            // (diagonal); use the scaled-diagonal solve, not a raw b.clone().
+            diag_basis_initial_x_b(&a_aug, &basis, &b)
         };
         (a_aug, art_col_of_row, ubs_aug, basis, is_basic, x_b)
     } else {
@@ -1628,6 +1648,76 @@ mod tests {
             assert_eq!(r.status, SolveStatus::Optimal, "pattern B");
             assert!((r.objective - (-4.0)).abs() < 1e-6, "pattern B obj={}", r.objective);
         }
+    }
+
+    /// **Direct sentinel** for the scaled-slack initial value (codex review
+    /// P1). The starting slack/artificial basis is diagonal, but after Ruiz
+    /// scaling the Le-slack diagonal is not 1, so `x_B = B^{-1} b` must divide
+    /// by that diagonal — `b.clone()` is wrong whenever `diag ≠ 1`. Here the
+    /// basis columns have diagonals 2 and 4, so `x_B` must be `[5, 3]`, not
+    /// `[10, 12]`. Returns the raw RHS (fails) if the division is dropped.
+    #[test]
+    fn diag_basis_initial_x_b_divides_by_diagonal() {
+        use crate::sparse::CscMatrix;
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 4.0], 2, 2).unwrap();
+        let x_b = diag_basis_initial_x_b(&a, &[0, 1], &[10.0, 12.0]);
+        assert!((x_b[0] - 5.0).abs() < 1e-12, "row0: expected b/diag=5, got {}", x_b[0]);
+        assert!((x_b[1] - 3.0).abs() < 1e-12, "row1: expected b/diag=3, got {}", x_b[1]);
+    }
+
+    /// Integration smoke: mixed Eq+Le with a large Le coefficient solves
+    /// correctly through the new path. Ruiz usually equilibrates the slack
+    /// diagonal back to ≈1 here, so this is coverage rather than a strict
+    /// no-op proof of the division (that is the direct test above).
+    ///
+    /// LP: `min -x1`, `x0 - x1 = 0` (Eq → artificial → new path),
+    /// `100 x1 ≤ 100` (Le), `0 ≤ x0 ≤ 2`, `0 ≤ x1 ≤ 2`. Optimum: x0=x1=1, obj=-1.
+    #[test]
+    fn eq_ub_phase1_scaled_le_slack_feasible() {
+        use crate::sparse::CscMatrix;
+        // row 0 Eq: x0 - x1 = 0 ; row 1 Le: 100 x1 <= 100
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1],
+            &[0, 1, 1],
+            &[1.0, -1.0, 100.0],
+            2,
+            2,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0, -1.0],
+            a,
+            vec![0.0, 100.0],
+            vec![ConstraintType::Eq, ConstraintType::Le],
+            vec![(0.0, 2.0), (0.0, 2.0)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        bounded_core::reset_eq_ub_dispatch_count();
+        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert!(
+            bounded_core::eq_ub_dispatch_count() > 0,
+            "new Eq+UB path not dispatched"
+        );
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "feasible LP misreported as {:?} (scaled-slack init bug)",
+            r.status
+        );
+        assert!(
+            (r.objective - (-1.0)).abs() < 1e-6,
+            "expected obj=-1, got {:.6e}",
+            r.objective
+        );
+        // Eq constraint x0 - x1 = 0 must hold on the returned solution.
+        assert!(
+            (r.solution[0] - r.solution[1]).abs() < 1e-6,
+            "Eq x0-x1=0 violated: x0={}, x1={}",
+            r.solution[0],
+            r.solution[1]
+        );
     }
 
     /// **BFRT flip count > 0 under the new path** — confirms the at-upper
