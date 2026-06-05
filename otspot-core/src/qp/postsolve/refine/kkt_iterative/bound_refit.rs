@@ -4,6 +4,7 @@
 use crate::qp::kkt_resid;
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
+use crate::qp::postsolve::dual_recovery::DUAL_RECOVERY_ACTIVE_TOL_REL;
 
 pub(crate) fn refit_bound_duals_kkt(
     problem: &QpProblem,
@@ -66,11 +67,19 @@ pub(crate) fn refit_bound_duals_kkt(
         if lb_finite && ub_finite {
             // FX (lb==ub) は postsolve 慣例で 0 埋め、KKT 評価からも除外。
             if (lb - ub).abs() >= FX_TOL {
-                if target > 0.0 {
+                // Complementarity: only assign z_ub if x is at (or near) ub,
+                // and z_lb only if x is at lb.  If x is interior, both are 0.
+                // This prevents spurious z_ub > 0 for inactive bounds that cause
+                // componentwise comp violations in prove_optimal.
+                let xj = if j < x.len() { x[j] } else { 0.0 };
+                let act_tol_ub = DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + xj.abs() + ub.abs());
+                let act_tol_lb = DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + xj.abs() + lb.abs());
+                if ub - xj <= act_tol_ub && target > 0.0 {
                     new_bd[ub_idx] = target;
-                } else {
+                } else if xj - lb <= act_tol_lb && target < 0.0 {
                     new_bd[lb_idx] = -target;
                 }
+                // Interior (neither bound active): new_bd slots remain 0.
             }
             lb_idx += 1;
             ub_idx += 1;
