@@ -19,6 +19,12 @@ thread_local! {
     static INJECT_REDUCED_TIMEOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Iteration count the test hook stamps onto the injected reduced-space Timeout,
+/// so a sentinel can assert the early-return carries `iterations` through. A 0
+/// here would re-introduce the `iters=0` reporting artifact.
+#[cfg(test)]
+const REDUCED_TIMEOUT_INJECT_ITERS: usize = 7919;
+
 /// Solve an LP with default options (raw simplex, without obj_offset).
 ///
 /// Use [`crate::solve`] for the full pipeline including `obj_offset`.
@@ -110,6 +116,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     SolverResult {
                         status: SolveStatus::Timeout,
                         solution: vec![0.0; presolve_result.reduced_problem.num_vars],
+                        iterations: REDUCED_TIMEOUT_INJECT_ITERS,
                         ..Default::default()
                     }
                 } else {
@@ -129,6 +136,9 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     // it would violate the SolverResult contract (solution must be in
                     // the original variable space or empty).  Return an empty Timeout
                     // result, consistent with the Infeasible/Unbounded early-returns.
+                    // `iterations` is reduced-space-independent diagnostic metadata, so
+                    // it IS carried over: dropping it reports a misleading `iters=0` for
+                    // a solve that actually ran many pivots (masks "slow" vs "stuck").
                     return SolverResult {
                         status: SolveStatus::Timeout,
                         objective: f64::INFINITY,
@@ -137,6 +147,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                         reduced_costs: vec![],
                         slack: vec![],
                         warm_start_basis: None,
+                        iterations: raw.iterations,
                         timing_breakdown: Some(crate::problem::TimingBreakdown {
                             presolve_us,
                             solve_us,
@@ -900,6 +911,27 @@ mod tests {
             n == 0 || n == orig_n,
             "injected Timeout: solution.len()={n} must be 0 or {orig_n} (orig), \
              never {reduced_n} (reduced — pre-fix reduced-space leak)",
+        );
+    }
+
+    /// Sentinel: the reduced-space Timeout early-return must carry the reduced
+    /// solve's `iterations` through (diagnostic metadata), not drop it to 0.
+    /// The injected raw stamps `REDUCED_TIMEOUT_INJECT_ITERS`; pre-fix the
+    /// rebuilt result used `..Default::default()` (iterations=0), masking a
+    /// solve that ran many pivots as a misleading `iters=0` (the pds-20
+    /// reporting artifact that mimicked a stuck/初回-LU hang).
+    #[test]
+    fn reduced_timeout_preserves_iteration_count() {
+        let lp = make_partial_reducible_lp();
+        INJECT_REDUCED_TIMEOUT.with(|v| v.set(true));
+        let r = solve_with(&lp, &SolverOptions { presolve: true, ..Default::default() });
+        INJECT_REDUCED_TIMEOUT.with(|v| v.set(false));
+        assert_eq!(r.status, SolveStatus::Timeout, "injected path must return Timeout");
+        assert_eq!(
+            r.iterations, REDUCED_TIMEOUT_INJECT_ITERS,
+            "reduced-space Timeout early-return must carry raw.iterations ({}); \
+             got {} — dropping it reports a misleading iters=0 for a long solve",
+            REDUCED_TIMEOUT_INJECT_ITERS, r.iterations
         );
     }
 
