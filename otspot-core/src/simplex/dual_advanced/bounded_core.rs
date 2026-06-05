@@ -1181,6 +1181,276 @@ pub(crate) fn phase2_primal_bounded(
     }
 }
 
+// ── augmented bounded primal (Eq + UB Phase I / Phase II) ─────────────────────
+
+// Eq+UB dispatch counter — sentinel tests only.
+#[cfg(test)]
+thread_local! {
+    static EQ_UB_DISPATCH_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_eq_ub_dispatch_count() {
+    EQ_UB_DISPATCH_COUNT.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn eq_ub_dispatch_count() -> u64 {
+    EQ_UB_DISPATCH_COUNT.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(super) fn bump_eq_ub_dispatch_count() {
+    EQ_UB_DISPATCH_COUNT.with(|c| c.set(c.get().saturating_add(1)));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(super) fn bump_eq_ub_dispatch_count() {}
+
+/// Bounded primal simplex on the augmented matrix `[bsf.a | I_art]` with
+/// pricing restricted to the first `n_struct` columns (structural + slacks).
+/// Artificial columns at `[n_struct, n_aug)` may be basic but never priced —
+/// Phase I drives them out via leaving pivots; Phase II keeps any remaining
+/// at value 0 (the Phase I optimality check rejects nonzero residuals).
+///
+/// State sizing:
+/// - `state.basis.len() == bsf.m`, `state.x_b.len() == bsf.m`.
+/// - `state.at_upper.len() == state.is_basic.len() == n_aug` (caller pre-sized).
+///
+/// Cost `c_aug` has length `n_aug`. Phase I passes `[0; n_struct] ++ [1; n_art]`;
+/// Phase II passes `[c_scaled; n_struct] ++ [0; n_art]`.
+///
+/// Returns the primal `SimplexOutcome` (`Optimal(obj, y)` etc.). The objective
+/// includes the at-upper contribution from `ubs_aug` and is computed against
+/// `c_aug` as supplied (Phase I: artificial sum; Phase II: original objective).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bounded_primal_phase1(
+    a_aug: &CscMatrix,
+    c_aug: &[f64],
+    ubs_aug: &[f64],
+    n_struct: usize,
+    state: &mut BoundedDualState,
+    options: &SolverOptions,
+    iters: &mut usize,
+) -> SimplexOutcome {
+    primal_simplex_aug(a_aug, c_aug, ubs_aug, n_struct, state, options, iters)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bounded_primal_phase2_aug(
+    a_aug: &CscMatrix,
+    c_aug: &[f64],
+    ubs_aug: &[f64],
+    n_struct: usize,
+    state: &mut BoundedDualState,
+    options: &SolverOptions,
+    iters: &mut usize,
+) -> SimplexOutcome {
+    primal_simplex_aug(a_aug, c_aug, ubs_aug, n_struct, state, options, iters)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn primal_simplex_aug(
+    a_aug: &CscMatrix,
+    c_aug: &[f64],
+    ubs_aug: &[f64],
+    n_struct: usize,
+    state: &mut BoundedDualState,
+    options: &SolverOptions,
+    iters: &mut usize,
+) -> SimplexOutcome {
+    let m = state.basis.len();
+    let n_aug = state.at_upper.len();
+    debug_assert_eq!(state.x_b.len(), m);
+    debug_assert_eq!(state.is_basic.len(), n_aug);
+    debug_assert_eq!(ubs_aug.len(), n_aug);
+    debug_assert_eq!(c_aug.len(), n_aug);
+    debug_assert!(n_struct <= n_aug);
+
+    let timeout_obj = |st: &BoundedDualState| {
+        SimplexOutcome::Timeout(bounded_obj(
+            c_aug,
+            &st.basis,
+            &st.x_b,
+            &st.at_upper,
+            &st.is_basic,
+            ubs_aug,
+        ))
+    };
+    if deadline_expired(options.deadline) {
+        return timeout_obj(state);
+    }
+
+    let mut basis_mgr =
+        match LuBasis::new_timed(a_aug, &state.basis, options.max_etas, options.deadline) {
+            Ok(bm) => bm,
+            Err(SolverError::DeadlineExceeded) => return timeout_obj(state),
+            Err(_) => return SimplexOutcome::SingularBasis,
+        };
+
+    let mut y = vec![0.0f64; m];
+    let mut rc = vec![0.0f64; n_struct];
+    let mut alpha = vec![0.0f64; m];
+    let mut trace = IterTrace::new("bounded-aug-primal");
+
+    loop {
+        *iters = iters.saturating_add(1);
+        if deadline_expired(options.deadline)
+            || options
+                .cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Relaxed))
+        {
+            return timeout_obj(state);
+        }
+
+        if let Some(t) = trace.as_mut() {
+            let obj = bounded_obj(
+                c_aug,
+                &state.basis,
+                &state.x_b,
+                &state.at_upper,
+                &state.is_basic,
+                ubs_aug,
+            );
+            t.log(*iters, obj, &state.basis, false);
+        }
+
+        if !compute_reduced_costs_into_timed(
+            a_aug,
+            c_aug,
+            &mut basis_mgr,
+            &state.is_basic,
+            n_struct,
+            &state.basis,
+            &mut y,
+            &mut rc,
+            options.deadline,
+        ) {
+            return timeout_obj(state);
+        }
+
+        let mut best_score = PIVOT_TOL;
+        let mut entering: Option<usize> = None;
+        for j in 0..n_struct {
+            if state.is_basic[j] {
+                continue;
+            }
+            let score = if state.at_upper[j] { rc[j] } else { -rc[j] };
+            if score > best_score {
+                best_score = score;
+                entering = Some(j);
+            }
+        }
+
+        let q = match entering {
+            None => {
+                let obj = bounded_obj(
+                    c_aug,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs_aug,
+                );
+                return SimplexOutcome::Optimal(obj, y);
+            }
+            Some(q) => q,
+        };
+
+        let from_ub = state.at_upper[q];
+        let dir = if from_ub { -1.0f64 } else { 1.0 };
+
+        ftran_column(a_aug, &mut basis_mgr, q, m, &mut alpha);
+
+        let mut min_step = f64::INFINITY;
+        let mut leaving_row: Option<usize> = None;
+        let mut leaving_at_ub = false;
+        for i in 0..m {
+            let eff = alpha[i] * dir;
+            let xi = state.x_b[i];
+            let ub_i = ubs_aug[state.basis[i]];
+            if eff > PIVOT_TOL {
+                let step = xi / eff;
+                if step < min_step {
+                    min_step = step.max(0.0);
+                    leaving_row = Some(i);
+                    leaving_at_ub = false;
+                }
+            } else if eff < -PIVOT_TOL && ub_i.is_finite() {
+                let step = (ub_i - xi) / (-eff);
+                if step < min_step {
+                    min_step = step.max(0.0);
+                    leaving_row = Some(i);
+                    leaving_at_ub = true;
+                }
+            }
+        }
+
+        let ub_q = ubs_aug[q];
+        if ub_q.is_finite() && ub_q < min_step {
+            bump_bfrt_flip_invocations();
+            for i in 0..m {
+                state.x_b[i] -= alpha[i] * dir * ub_q;
+            }
+            state.at_upper[q] = !from_ub;
+            basis_mgr.refactor_if_needed_timed(a_aug, &state.basis, options.deadline);
+            if basis_mgr.refactor_failed {
+                return if basis_mgr.singular_basis {
+                    SimplexOutcome::SingularBasis
+                } else {
+                    timeout_obj(state)
+                };
+            }
+            continue;
+        }
+
+        let r = match leaving_row {
+            None => return SimplexOutcome::Unbounded,
+            Some(r) => r,
+        };
+        let theta = min_step;
+        let leaving_col = state.basis[r];
+
+        for i in 0..m {
+            state.x_b[i] -= alpha[i] * dir * theta;
+        }
+        state.x_b[r] = if from_ub { ub_q - theta } else { theta };
+        for v in state.x_b.iter_mut() {
+            if v.abs() < options.clamp_tol {
+                *v = 0.0;
+            }
+        }
+
+        state.at_upper[leaving_col] = leaving_at_ub;
+        state.at_upper[q] = false;
+        state.is_basic[leaving_col] = false;
+        state.is_basic[q] = true;
+        state.basis[r] = q;
+
+        let (cr, cv) = a_aug.get_column(q).unwrap();
+        let mut alpha_sv = SparseVec {
+            indices: cr.to_vec(),
+            values: cv.to_vec(),
+            len: m,
+        };
+        basis_mgr.ftran(&mut alpha_sv);
+        basis_mgr.update(q, r, &alpha_sv);
+
+        if basis_mgr.needs_refactor() {
+            basis_mgr.refactor_if_needed_timed(a_aug, &state.basis, options.deadline);
+            if basis_mgr.refactor_failed {
+                return if basis_mgr.singular_basis {
+                    SimplexOutcome::SingularBasis
+                } else {
+                    timeout_obj(state)
+                };
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
