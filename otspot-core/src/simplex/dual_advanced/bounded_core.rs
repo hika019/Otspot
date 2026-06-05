@@ -889,6 +889,123 @@ fn bounded_obj(
     basic + at_ub
 }
 
+/// Outcome of the bounded (two-sided) ratio test.
+#[cfg_attr(test, derive(Debug))]
+enum BoundedLeave {
+    /// Entering variable reaches its own opposite bound before any basic
+    /// variable; flip it without a basis change (step = `ub_q`).
+    Flip,
+    /// Basic variable in `row` leaves at its lower (`at_ub = false`) or upper
+    /// (`at_ub = true`) bound; `step` is the primal step length.
+    Pivot { row: usize, at_ub: bool, step: f64 },
+    /// No basic variable blocks the step and the entering bound is infinite.
+    Unbounded,
+}
+
+/// Two-sided Harris ratio test for the bounded primal cores.
+///
+/// `eff[i] = alpha[i] · dir` is the effective pivot column. A basic variable
+/// leaves at its lower bound when `eff[i] > floor` (decreasing toward 0) or at
+/// its upper bound when `eff[i] < -floor` with finite `ub_i` (increasing toward
+/// `ub_i`). The entering variable instead flips at its own bound `ub_q`.
+///
+/// Pass 1 computes the feasibility-preserving step
+/// `θ = min_i (room_i + feas_tol) / |eff_i|` (capped by `ub_q`); pass 2 selects,
+/// among rows whose *true* ratio is within `θ`, the largest pivot `|eff_i|`,
+/// breaking ties by Bland's rule. Choosing the largest pivot — rather than the
+/// strict-min-ratio row — keeps the basis well-conditioned under degeneracy,
+/// where many rows share a zero ratio and a strict-min rule would repeatedly
+/// pick near-zero pivots until the LU factorization turns singular. This mirrors
+/// the one-sided `primal::ratio_test::select_leaving_feasibility_preserving`.
+fn select_leaving_bounded(
+    alpha: &[f64],
+    dir: f64,
+    x_b: &[f64],
+    basis: &[usize],
+    ubs: &[f64],
+    ub_q: f64,
+    m: usize,
+    floor: f64,
+    feas_tol: f64,
+) -> BoundedLeave {
+    let mut theta = f64::INFINITY;
+    let mut min_true = f64::INFINITY;
+    for i in 0..m {
+        let eff = alpha[i] * dir;
+        let xi = x_b[i];
+        let ub_i = ubs[basis[i]];
+        if eff > floor {
+            theta = theta.min((xi + feas_tol) / eff);
+            min_true = min_true.min(xi / eff);
+        } else if eff < -floor && ub_i.is_finite() {
+            let neg = -eff;
+            theta = theta.min((ub_i - xi + feas_tol) / neg);
+            min_true = min_true.min((ub_i - xi) / neg);
+        }
+    }
+
+    // Entering bound binds strictly first → flip (preserves "pivot on ties",
+    // never flips past a degenerate blocking row whose true ratio is 0).
+    if ub_q.is_finite() && ub_q < min_true {
+        return BoundedLeave::Flip;
+    }
+    // Never step past the entering variable's own bound.
+    if ub_q.is_finite() {
+        theta = theta.min(ub_q);
+    }
+    if !theta.is_finite() {
+        return BoundedLeave::Unbounded;
+    }
+
+    let mut leaving: Option<usize> = None;
+    let mut leaving_at_ub = false;
+    let mut chosen_step = 0.0f64;
+    let mut best_pivot_abs = 0.0f64;
+    for i in 0..m {
+        let eff = alpha[i] * dir;
+        let xi = x_b[i];
+        let ub_i = ubs[basis[i]];
+        let (true_ratio, at_ub, pivot_abs) = if eff > floor {
+            (xi / eff, false, eff)
+        } else if eff < -floor && ub_i.is_finite() {
+            ((ub_i - xi) / (-eff), true, -eff)
+        } else {
+            continue;
+        };
+        if true_ratio <= theta {
+            if pivot_abs > best_pivot_abs + PIVOT_TOL {
+                best_pivot_abs = pivot_abs;
+                leaving = Some(i);
+                leaving_at_ub = at_ub;
+                chosen_step = true_ratio.max(0.0);
+            } else if (pivot_abs - best_pivot_abs).abs() <= PIVOT_TOL {
+                match leaving {
+                    None => {
+                        leaving = Some(i);
+                        leaving_at_ub = at_ub;
+                        chosen_step = true_ratio.max(0.0);
+                    }
+                    Some(prev) if basis[i] < basis[prev] => {
+                        leaving = Some(i);
+                        leaving_at_ub = at_ub;
+                        chosen_step = true_ratio.max(0.0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    match leaving {
+        Some(row) => BoundedLeave::Pivot {
+            row,
+            at_ub: leaving_at_ub,
+            step: chosen_step,
+        },
+        None => BoundedLeave::Unbounded,
+    }
+}
+
 /// Drive primal Phase 2 from a primal-feasible `BoundedDualState`.
 ///
 /// Caller supplies the state produced by `solve_bounded_dual` (perturbed-cost
@@ -1045,87 +1162,65 @@ pub(crate) fn phase2_primal_bounded(
 
         ftran_column(a, &mut basis_mgr, q, m, &mut alpha);
 
-        // Bounded ratio test.
-        // Update rule: x_b[i] += delta[i] * theta, where delta[i] = -alpha[i] * dir.
-        // Leaving at lb: delta[r] < 0, theta = x_b[r] / (-delta[r]) = x_b[r] * dir / alpha[r]...
-        // Equivalent formulation (cleaner): treat "effective pivot column" as alpha[i]*dir.
-        // Leaving at lb: eff_alpha[r] > PIVOT_TOL, theta = x_b[r] / eff_alpha[r]
-        // Leaving at ub: eff_alpha[r] < -PIVOT_TOL, theta = (ub_r - x_b[r]) / (-eff_alpha[r])
-        let mut min_step = f64::INFINITY;
-        let mut leaving_row: Option<usize> = None;
-        let mut leaving_at_ub = false;
-
-        for i in 0..m {
-            if deadline_expired(options.deadline) {
-                return (
-                    SimplexOutcome::Timeout(bounded_obj(
-                        c,
-                        &state.basis,
-                        &state.x_b,
-                        &state.at_upper,
-                        &state.is_basic,
-                        ubs,
-                    )),
-                    state,
-                );
-            }
-            let eff = alpha[i] * dir;
-            let xi = state.x_b[i];
-            let ub_i = ubs[state.basis[i]];
-
-            if eff > PIVOT_TOL {
-                let step = xi / eff;
-                if step < min_step {
-                    min_step = step.max(0.0);
-                    leaving_row = Some(i);
-                    leaving_at_ub = false;
-                }
-            } else if eff < -PIVOT_TOL && ub_i.is_finite() {
-                let step = (ub_i - xi) / (-eff);
-                if step < min_step {
-                    min_step = step.max(0.0);
-                    leaving_row = Some(i);
-                    leaving_at_ub = true;
-                }
-            }
+        if deadline_expired(options.deadline) {
+            return (
+                SimplexOutcome::Timeout(bounded_obj(
+                    c,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs,
+                )),
+                state,
+            );
         }
 
-        // Check if entering variable hits its own opposite bound first.
+        // Two-sided Harris ratio test (largest pivot within the feasibility
+        // tolerance) — strict-min-ratio selection would pick near-zero pivots
+        // under degeneracy and drive the LU basis singular.
         let ub_q = ubs[q];
-        if ub_q.is_finite() && ub_q < min_step {
-            // Flip entering var to opposite bound; no basis change.
-            bump_bfrt_flip_invocations();
-            for i in 0..m {
-                state.x_b[i] -= alpha[i] * dir * ub_q;
+        let (r, leaving_at_ub, theta) = match select_leaving_bounded(
+            &alpha,
+            dir,
+            &state.x_b,
+            &state.basis,
+            ubs,
+            ub_q,
+            m,
+            PIVOT_TOL,
+            options.primal_tol,
+        ) {
+            BoundedLeave::Flip => {
+                bump_bfrt_flip_invocations();
+                for i in 0..m {
+                    state.x_b[i] -= alpha[i] * dir * ub_q;
+                }
+                state.at_upper[q] = !from_ub;
+                basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
+                if basis_mgr.refactor_failed {
+                    return if basis_mgr.singular_basis {
+                        (SimplexOutcome::SingularBasis, state)
+                    } else {
+                        (
+                            SimplexOutcome::Timeout(bounded_obj(
+                                c,
+                                &state.basis,
+                                &state.x_b,
+                                &state.at_upper,
+                                &state.is_basic,
+                                ubs,
+                            )),
+                            state,
+                        )
+                    };
+                }
+                continue;
             }
-            state.at_upper[q] = !from_ub;
-            basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
-            if basis_mgr.refactor_failed {
-                return if basis_mgr.singular_basis {
-                    (SimplexOutcome::SingularBasis, state)
-                } else {
-                    (
-                        SimplexOutcome::Timeout(bounded_obj(
-                            c,
-                            &state.basis,
-                            &state.x_b,
-                            &state.at_upper,
-                            &state.is_basic,
-                            ubs,
-                        )),
-                        state,
-                    )
-                };
-            }
-            continue;
-        }
-
-        let r = match leaving_row {
-            None => return (SimplexOutcome::Unbounded, state),
-            Some(r) => r,
+            BoundedLeave::Unbounded => return (SimplexOutcome::Unbounded, state),
+            BoundedLeave::Pivot { row, at_ub, step } => (row, at_ub, step),
         };
 
-        let theta = min_step;
         let leaving_col = state.basis[r];
 
         // Update x_b: all rows by -alpha[i]*dir*theta, then override row r.
@@ -1364,53 +1459,40 @@ fn primal_simplex_aug(
 
         ftran_column(a_aug, &mut basis_mgr, q, m, &mut alpha);
 
-        let mut min_step = f64::INFINITY;
-        let mut leaving_row: Option<usize> = None;
-        let mut leaving_at_ub = false;
-        for i in 0..m {
-            let eff = alpha[i] * dir;
-            let xi = state.x_b[i];
-            let ub_i = ubs_aug[state.basis[i]];
-            if eff > PIVOT_TOL {
-                let step = xi / eff;
-                if step < min_step {
-                    min_step = step.max(0.0);
-                    leaving_row = Some(i);
-                    leaving_at_ub = false;
-                }
-            } else if eff < -PIVOT_TOL && ub_i.is_finite() {
-                let step = (ub_i - xi) / (-eff);
-                if step < min_step {
-                    min_step = step.max(0.0);
-                    leaving_row = Some(i);
-                    leaving_at_ub = true;
-                }
-            }
-        }
-
+        // Two-sided Harris ratio test (largest pivot within the feasibility
+        // tolerance) — strict-min-ratio selection would pick near-zero pivots
+        // under degeneracy and drive the LU basis singular (grow22 Phase II).
         let ub_q = ubs_aug[q];
-        if ub_q.is_finite() && ub_q < min_step {
-            bump_bfrt_flip_invocations();
-            for i in 0..m {
-                state.x_b[i] -= alpha[i] * dir * ub_q;
+        let (r, leaving_at_ub, theta) = match select_leaving_bounded(
+            &alpha,
+            dir,
+            &state.x_b,
+            &state.basis,
+            ubs_aug,
+            ub_q,
+            m,
+            PIVOT_TOL,
+            options.primal_tol,
+        ) {
+            BoundedLeave::Flip => {
+                bump_bfrt_flip_invocations();
+                for i in 0..m {
+                    state.x_b[i] -= alpha[i] * dir * ub_q;
+                }
+                state.at_upper[q] = !from_ub;
+                basis_mgr.refactor_if_needed_timed(a_aug, &state.basis, options.deadline);
+                if basis_mgr.refactor_failed {
+                    return if basis_mgr.singular_basis {
+                        SimplexOutcome::SingularBasis
+                    } else {
+                        timeout_obj(state)
+                    };
+                }
+                continue;
             }
-            state.at_upper[q] = !from_ub;
-            basis_mgr.refactor_if_needed_timed(a_aug, &state.basis, options.deadline);
-            if basis_mgr.refactor_failed {
-                return if basis_mgr.singular_basis {
-                    SimplexOutcome::SingularBasis
-                } else {
-                    timeout_obj(state)
-                };
-            }
-            continue;
-        }
-
-        let r = match leaving_row {
-            None => return SimplexOutcome::Unbounded,
-            Some(r) => r,
+            BoundedLeave::Unbounded => return SimplexOutcome::Unbounded,
+            BoundedLeave::Pivot { row, at_ub, step } => (row, at_ub, step),
         };
-        let theta = min_step;
         let leaving_col = state.basis[r];
 
         for i in 0..m {
@@ -2574,6 +2656,113 @@ mod tests {
                 );
             }
             other => panic!("expected Timeout with expired deadline, got {other:?}"),
+        }
+    }
+
+    /// Reference implementation of the OLD strict-min-ratio bounded ratio test
+    /// (`step < min_step`, first eligible row wins on a tie). Used only to prove
+    /// the sentinel below bites: reverting `select_leaving_bounded` to this rule
+    /// reselects the near-zero pivot under degeneracy.
+    fn old_strict_min_leaving(
+        alpha: &[f64],
+        dir: f64,
+        x_b: &[f64],
+        basis: &[usize],
+        ubs: &[f64],
+        ub_q: f64,
+        m: usize,
+    ) -> Option<usize> {
+        let mut min_step = f64::INFINITY;
+        let mut leaving_row: Option<usize> = None;
+        for i in 0..m {
+            let eff = alpha[i] * dir;
+            let xi = x_b[i];
+            let ub_i = ubs[basis[i]];
+            if eff > PIVOT_TOL {
+                let step = (xi / eff).max(0.0);
+                if step < min_step {
+                    min_step = step;
+                    leaving_row = Some(i);
+                }
+            } else if eff < -PIVOT_TOL && ub_i.is_finite() {
+                let step = ((ub_i - xi) / (-eff)).max(0.0);
+                if step < min_step {
+                    min_step = step;
+                    leaving_row = Some(i);
+                }
+            }
+        }
+        if ub_q.is_finite() && ub_q < min_step {
+            return None; // flip
+        }
+        leaving_row
+    }
+
+    /// Sentinel (no-op proof) for the grow22 regression: under full degeneracy
+    /// (every basic variable at a zero ratio) the bounded ratio test must select
+    /// the row with the *largest* pivot for numerical stability. The previous
+    /// strict-min-ratio rule kept the first eligible row regardless of pivot
+    /// magnitude; on grow22's all-`Eq` Phase II this repeatedly chose pivots of
+    /// order 1e-8, accumulating LU error until the basis turned singular and the
+    /// solve returned NumericalError.
+    ///
+    /// Three rows share ratio 0 with pivots `10·PIVOT_TOL` (row 0, just above
+    /// the eligibility floor), 50 (row 1), and 1.0 (row 2).
+    /// `select_leaving_bounded` must pick row 1 (largest |pivot|). Reverting to
+    /// `old_strict_min_leaving` picks row 0 (the tiny pivot), so the
+    /// `assert_eq!(row, 1)` below FAILs — proving the fix is load-bearing.
+    #[test]
+    fn select_leaving_bounded_picks_large_pivot_under_degeneracy() {
+        let tiny = PIVOT_TOL * 10.0; // eligible (> floor) but ill-conditioned
+        let alpha = [tiny, 50.0, 1.0];
+        let dir = 1.0;
+        let x_b = [0.0, 0.0, 0.0]; // fully degenerate vertex
+        let basis = [0usize, 1, 2];
+        let ubs = [f64::INFINITY; 3];
+        let ub_q = f64::INFINITY;
+        let m = 3;
+
+        match select_leaving_bounded(
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL,
+        ) {
+            BoundedLeave::Pivot { row, step, .. } => {
+                assert_eq!(row, 1, "must pick the largest pivot (row 1, |α|=50)");
+                assert_eq!(step, 0.0, "degenerate vertex ⇒ zero step");
+            }
+            other => panic!("expected a Pivot, got {other:?}"),
+        }
+
+        // No-op proof: the old strict-min rule selects the tiny-pivot row 0.
+        let old = old_strict_min_leaving(&alpha, dir, &x_b, &basis, &ubs, ub_q, m);
+        assert_eq!(
+            old,
+            Some(0),
+            "old strict-min rule must select the tiny-pivot row 0 (proves the sentinel bites)"
+        );
+    }
+
+    /// The upper-bound leaving branch must also obey largest-pivot selection.
+    /// Two basic variables sit exactly at their upper bound (room 0, ratio 0)
+    /// with increasing direction; pivots are 1e-8 (row 0) and 8.0 (row 1).
+    #[test]
+    fn select_leaving_bounded_picks_large_pivot_at_upper_bound() {
+        // dir·alpha < 0 ⇒ basic variable increases toward its ub.
+        let alpha = [-(PIVOT_TOL * 10.0), -8.0];
+        let dir = 1.0;
+        let x_b = [5.0, 5.0]; // already at ub ⇒ room 0 ⇒ degenerate
+        let basis = [0usize, 1];
+        let ubs = [5.0, 5.0];
+        let ub_q = f64::INFINITY;
+        let m = 2;
+
+        match select_leaving_bounded(
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL,
+        ) {
+            BoundedLeave::Pivot { row, at_ub, .. } => {
+                assert_eq!(row, 1, "must pick the largest ub-pivot (row 1, |α|=8)");
+                assert!(at_ub, "leaving variable hits its upper bound");
+            }
+            other => panic!("expected a Pivot, got {other:?}"),
         }
     }
 }
