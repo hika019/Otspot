@@ -1,3 +1,9 @@
+// Synthetic Q / data builders index into multiple parallel vecs by row/col.
+// The numeric loops can't be rewritten as a single .iter().enumerate() without
+// shuffling the helpers; allow the range-loop pattern here. The redundant `q`
+// rebinding is part of a "scale q by half" idiom used by hand-derived oracles.
+#![allow(clippy::needless_range_loop, clippy::let_and_return)]
+
 //! Black-box tests for QP solve (IPM), presolve, and postsolve/dual stages.
 //!
 //! Every expected value is hand-computed from the problem data (independent oracle).
@@ -1443,7 +1449,6 @@ fn hard_qp_nonfinite_coefficients_rejected_by_qpproblem_new() {
         "QpProblem::new must reject non-finite Q, got {err:?}"
     );
 
-    let q = q;
     let a_direct = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1)
         .unwrap()
         .scale_values(f64::NAN);
