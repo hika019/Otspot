@@ -122,19 +122,18 @@ fn ep_qp_constrained_equality_optimal() {
     assert_x(r.solution[1], 2.5, "ep_eq_constrained y*=2.5");
 
     // KKT stationarity: Qx*+c+A'λ ≈ 0
-    if !r.dual_solution.is_empty() {
-        let lambda = r.dual_solution[0];
-        let kkt_x = 2.0 * r.solution[0] + (-4.0) + lambda;
-        let kkt_y = 2.0 * r.solution[1] + (-6.0) + lambda;
-        assert!(
-            kkt_x.abs() < EPS_DUAL,
-            "ep_eq_constrained KKT[x]={kkt_x:.2e}"
-        );
-        assert!(
-            kkt_y.abs() < EPS_DUAL,
-            "ep_eq_constrained KKT[y]={kkt_y:.2e}"
-        );
-    }
+    assert!(!r.dual_solution.is_empty(), "ep_eq_constrained: solver must return duals at Optimal");
+    let lambda = r.dual_solution[0];
+    let kkt_x = 2.0 * r.solution[0] + (-4.0) + lambda;
+    let kkt_y = 2.0 * r.solution[1] + (-6.0) + lambda;
+    assert!(
+        kkt_x.abs() < EPS_DUAL,
+        "ep_eq_constrained KKT[x]={kkt_x:.2e}"
+    );
+    assert!(
+        kkt_y.abs() < EPS_DUAL,
+        "ep_eq_constrained KKT[y]={kkt_y:.2e}"
+    );
     // Primal feasibility: x+y=4
     let sum = r.solution[0] + r.solution[1];
     assert!(
@@ -254,13 +253,12 @@ fn bva_qp_optimal_interior_inactive_constraint() {
     assert_x(r.solution[0], 0.0, "bva_qp_interior x*=0");
     assert_x(r.solution[1], 0.0, "bva_qp_interior y*=0");
     // Inactive constraint → dual ≈ 0
-    if !r.dual_solution.is_empty() {
-        assert!(
-            r.dual_solution[0].abs() < EPS_DUAL,
-            "bva_qp_interior: dual[0]={} must ≈0 (inactive Le)",
-            r.dual_solution[0]
-        );
-    }
+    assert!(!r.dual_solution.is_empty(), "bva_qp_interior: solver must return duals at Optimal");
+    assert!(
+        r.dual_solution[0].abs() < EPS_DUAL,
+        "bva_qp_interior: dual[0]={} must ≈0 (inactive Le)",
+        r.dual_solution[0]
+    );
 }
 
 /// BVA: Degenerate QP — two constraints both active at the unique optimum.
@@ -430,27 +428,26 @@ fn postsolve_qp_dual_recovery_with_eq_singleton() {
     );
 
     // KKT stationarity (independent verification)
-    if !r.dual_solution.is_empty() {
-        let lambda_le = r.dual_solution[0]; // row 0: Le
-        let lambda_eq = r.dual_solution[1]; // row 1: Eq
-        // For x: Qx[0]+c[0]+A[1,0]*λ_eq = 2*x*-6+λ_eq = 0 → λ_eq=2
-        let kkt_x = 2.0 * r.solution[0] + (-6.0) + lambda_eq;
-        // For y: Qx[1]+c[1]+A[0,1]*λ_le = 2*y*-8+λ_le = 0 → λ_le=0
-        let kkt_y = 2.0 * r.solution[1] + (-8.0) + lambda_le;
-        assert!(
-            kkt_x.abs() < EPS_DUAL,
-            "postsolve_qp_eq KKT[x]={kkt_x:.2e} must ≈0"
-        );
-        assert!(
-            kkt_y.abs() < EPS_DUAL,
-            "postsolve_qp_eq KKT[y]={kkt_y:.2e} must ≈0"
-        );
-        // Le inactive → λ_le ≈ 0
-        assert!(
-            lambda_le.abs() < EPS_DUAL,
-            "postsolve_qp_eq: λ_le={lambda_le:.2e} must ≈0 (Le inactive)"
-        );
-    }
+    assert!(!r.dual_solution.is_empty(), "postsolve_qp_eq: solver must return duals at Optimal");
+    let lambda_le = r.dual_solution[0]; // row 0: Le
+    let lambda_eq = r.dual_solution[1]; // row 1: Eq
+    // For x: Qx[0]+c[0]+A[1,0]*λ_eq = 2*x*-6+λ_eq = 0 → λ_eq=2
+    let kkt_x = 2.0 * r.solution[0] + (-6.0) + lambda_eq;
+    // For y: Qx[1]+c[1]+A[0,1]*λ_le = 2*y*-8+λ_le = 0 → λ_le=0
+    let kkt_y = 2.0 * r.solution[1] + (-8.0) + lambda_le;
+    assert!(
+        kkt_x.abs() < EPS_DUAL,
+        "postsolve_qp_eq KKT[x]={kkt_x:.2e} must ≈0"
+    );
+    assert!(
+        kkt_y.abs() < EPS_DUAL,
+        "postsolve_qp_eq KKT[y]={kkt_y:.2e} must ≈0"
+    );
+    // Le inactive → λ_le ≈ 0
+    assert!(
+        lambda_le.abs() < EPS_DUAL,
+        "postsolve_qp_eq: λ_le={lambda_le:.2e} must ≈0 (Le inactive)"
+    );
 }
 
 // ─── EQUIVALENCE PARTITIONING (ADDITIONAL) ─────────────────────────────────────
@@ -535,33 +532,32 @@ fn ep_qp_zero_q_linear_dispatch() {
 
 // ─── BOUNDARY VALUE ANALYSIS (ADDITIONAL) ─────────────────────────────────────
 
-/// BVA: Ge RHS at the feasible boundary — unique feasible point (3, 3).
+/// BVA: Ge RHS at the feasible boundary — unique feasible point (4, 2).
 ///
-/// Problem: min x^2 + y^2  s.t. x + y >= 6,  0 <= x,y <= 3.
-/// Q = diag(2,2), c = [0,0].
-/// Oracle: max(x+y) with x,y in [0,3] is 6 (only at x=y=3).
-///   x* = 3, y* = 3.  Internal obj = 1/2*(2*9+2*9) = 18.
-///   scipy SLSQP: fun=18.0, x=[3,3].
-///
-/// KKT: Qx*+c-A'λ = [6-λ,6-λ]=0 → λ=6. Ge active ✓. Ub bounds at x=y=3: rc <= 0.
+/// Problem: min (x-4)^2 + y^2  s.t. x + y >= 6,  0 <= x <= 4,  0 <= y <= 2.
+/// Q = diag(2,2), c = [-8,0] (expansion of (x-4)^2+y^2 omits constant 16).
+/// Oracle: max(x+y) with x∈[0,4], y∈[0,2] is 6, achieved uniquely at (4,2).
+///   x* = 4, y* = 2.  Internal obj = 1/2*(2*16+2*4)+(-8*4) = 20-32 = -12.
+///   Geometric: (4-4)^2+2^2=4=-12+16 ✓.
+///   scipy SLSQP: fun=-12.0, x=[4,2].
 #[test]
 fn bva_qp_rhs_boundary_exact() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
     let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
     let qp = QpProblem::new(
         q,
-        vec![0.0, 0.0],
+        vec![-8.0, 0.0],
         a,
         vec![6.0],
-        vec![(0.0, 3.0), (0.0, 3.0)],
+        vec![(0.0, 4.0), (0.0, 2.0)],
         vec![ConstraintType::Ge],
     )
     .unwrap();
     let r = solve_qp_with(&qp, &opts());
     assert_eq!(r.status, SolveStatus::Optimal, "bva_qp_boundary: status");
-    assert_obj(r.objective, 18.0, "bva_qp_boundary obj=18");
-    assert_x(r.solution[0], 3.0, "bva_qp_boundary x*=3");
-    assert_x(r.solution[1], 3.0, "bva_qp_boundary y*=3");
+    assert_obj(r.objective, -12.0, "bva_qp_boundary obj=-12");
+    assert_x(r.solution[0], 4.0, "bva_qp_boundary x*=4");
+    assert_x(r.solution[1], 2.0, "bva_qp_boundary y*=2");
 }
 
 /// BVA: Ge RHS + ε beyond the feasible boundary → Infeasible.
@@ -598,8 +594,7 @@ fn bva_qp_rhs_eps_infeasible() {
 ///   Unconstrained min: [2x-2,2y-8]=0 → (x,y)=(1,4). Eq forces x=2.
 ///   With x=2: min (1/2)*2*4+(-2*2) for x (constant) + (1/2)*2*y^2+(-8*y).
 ///   For y: 2y-8=0 → y*=4 (unconstrained, 4<=5 ✓).
-///   x*=2, y*=4.  Internal obj = 1/2*(2*4+2*16)+(-2*2-8*4) = 20-44 = -24.
-///   Wait: 1/2*2*x^2+c_x*x = 4-4=0; 1/2*2*y^2+c_y*y = 16-32=-16. Total=-16.
+///   x*=2, y*=4.  1/2*2*x^2+c_x*x = 4-4=0; 1/2*2*y^2+c_y*y = 16-32=-16. Total=-16.
 ///   scipy SLSQP: fun=-16.0, x=[2,4].
 ///
 /// KKT stationarity for x: 2*2-2+lambda_eq=0 → lambda_eq=-2.
@@ -626,27 +621,26 @@ fn bva_qp_fixed_by_eq_constraint() {
     assert_x(r.solution[1], 4.0, "bva_qp_eq_fixed y*=4");
 
     // KKT stationarity (independent verification)
-    if !r.dual_solution.is_empty() {
-        let lam_eq = r.dual_solution[0]; // row 0: Eq(x=2)
-        let lam_le = r.dual_solution[1]; // row 1: Le(y<=5)
-        // x: 2*x*-2+lam_eq=0 → lam_eq should be -2
-        let kkt_x = 2.0 * r.solution[0] - 2.0 + lam_eq;
-        // y: 2*y*-8+lam_le=0 → lam_le should be 0
-        let kkt_y = 2.0 * r.solution[1] - 8.0 + lam_le;
-        assert!(
-            kkt_x.abs() < EPS_DUAL,
-            "bva_qp_eq_fixed KKT[x]={kkt_x:.2e}"
-        );
-        assert!(
-            kkt_y.abs() < EPS_DUAL,
-            "bva_qp_eq_fixed KKT[y]={kkt_y:.2e}"
-        );
-        // Le inactive → dual ≈ 0
-        assert!(
-            lam_le.abs() < EPS_DUAL,
-            "bva_qp_eq_fixed: lam_le={lam_le:.2e} must≈0 (Le inactive)"
-        );
-    }
+    assert!(!r.dual_solution.is_empty(), "bva_qp_eq_fixed: solver must return duals at Optimal");
+    let lam_eq = r.dual_solution[0]; // row 0: Eq(x=2)
+    let lam_le = r.dual_solution[1]; // row 1: Le(y<=5)
+    // x: 2*x*-2+lam_eq=0 → lam_eq should be -2
+    let kkt_x = 2.0 * r.solution[0] - 2.0 + lam_eq;
+    // y: 2*y*-8+lam_le=0 → lam_le should be 0
+    let kkt_y = 2.0 * r.solution[1] - 8.0 + lam_le;
+    assert!(
+        kkt_x.abs() < EPS_DUAL,
+        "bva_qp_eq_fixed KKT[x]={kkt_x:.2e}"
+    );
+    assert!(
+        kkt_y.abs() < EPS_DUAL,
+        "bva_qp_eq_fixed KKT[y]={kkt_y:.2e}"
+    );
+    // Le inactive → dual ≈ 0
+    assert!(
+        lam_le.abs() < EPS_DUAL,
+        "bva_qp_eq_fixed: lam_le={lam_le:.2e} must≈0 (Le inactive)"
+    );
 }
 
 // ─── DECISION TABLE (ADDITIONAL) ───────────────────────────────────────────────
@@ -726,13 +720,12 @@ fn dt_qp_le_free_min_active() {
     assert_x(r.solution[1], 0.5, "dt_qp_le_free y*=0.5");
 
     // KKT stationarity check (λ=1)
-    if !r.dual_solution.is_empty() {
-        let lam = r.dual_solution[0];
-        let kkt_x = 2.0 * r.solution[0] - 4.0 + lam;
-        let kkt_y = 2.0 * r.solution[1] - 2.0 + lam;
-        assert!(kkt_x.abs() < EPS_DUAL, "dt_qp_le_free KKT[x]={kkt_x:.2e}");
-        assert!(kkt_y.abs() < EPS_DUAL, "dt_qp_le_free KKT[y]={kkt_y:.2e}");
-    }
+    assert!(!r.dual_solution.is_empty(), "dt_qp_le_free: solver must return duals at Optimal");
+    let lam = r.dual_solution[0];
+    let kkt_x = 2.0 * r.solution[0] - 4.0 + lam;
+    let kkt_y = 2.0 * r.solution[1] - 2.0 + lam;
+    assert!(kkt_x.abs() < EPS_DUAL, "dt_qp_le_free KKT[x]={kkt_x:.2e}");
+    assert!(kkt_y.abs() < EPS_DUAL, "dt_qp_le_free KKT[y]={kkt_y:.2e}");
 }
 
 /// DT: Eq + box + min — unique interior optimum on constraint manifold.
@@ -772,13 +765,12 @@ fn dt_qp_eq_box_min() {
         "dt_qp_eq_box: x+y={sum:.6} must=5"
     );
     // KKT: λ=-1 (Eq dual); stationarity
-    if !r.dual_solution.is_empty() {
-        let lam = r.dual_solution[0];
-        let kkt_x = 2.0 * r.solution[0] - 2.0 + lam;
-        let kkt_y = 2.0 * r.solution[1] - 6.0 + lam;
-        assert!(kkt_x.abs() < EPS_DUAL, "dt_qp_eq_box KKT[x]={kkt_x:.2e}");
-        assert!(kkt_y.abs() < EPS_DUAL, "dt_qp_eq_box KKT[y]={kkt_y:.2e}");
-    }
+    assert!(!r.dual_solution.is_empty(), "dt_qp_eq_box: solver must return duals at Optimal");
+    let lam = r.dual_solution[0];
+    let kkt_x = 2.0 * r.solution[0] - 2.0 + lam;
+    let kkt_y = 2.0 * r.solution[1] - 6.0 + lam;
+    assert!(kkt_x.abs() < EPS_DUAL, "dt_qp_eq_box KKT[x]={kkt_x:.2e}");
+    assert!(kkt_y.abs() < EPS_DUAL, "dt_qp_eq_box KKT[y]={kkt_y:.2e}");
 }
 
 // ─── STATE TRANSITION (ADDITIONAL) ─────────────────────────────────────────────
@@ -820,13 +812,12 @@ fn st_qp_le_inactive_to_active() {
     assert_x(r1.solution[0], 3.0, "st_qp_inactive P1 x*=3");
     assert_x(r1.solution[1], 3.0, "st_qp_inactive P1 y*=3");
     // Le inactive → dual ≈ 0
-    if !r1.dual_solution.is_empty() {
-        assert!(
-            r1.dual_solution[0].abs() < EPS_DUAL,
-            "st_qp_inactive P1: dual={} must≈0",
-            r1.dual_solution[0]
-        );
-    }
+    assert!(!r1.dual_solution.is_empty(), "st_qp_inactive P1: solver must return duals at Optimal");
+    assert!(
+        r1.dual_solution[0].abs() < EPS_DUAL,
+        "st_qp_inactive P1: dual={} must≈0",
+        r1.dual_solution[0]
+    );
 
     // b=5: Le active, x*=y*=2.5
     let r2 = solve_qp_with(&build(5.0), &opts());
@@ -889,13 +880,14 @@ fn st_qp_ge_feasible_to_infeasible() {
 //   P4 scale:  {unit(~1), ill(~1e6 spread)}
 //   P5 degen:  {non-degenerate(interior or single active), degenerate(≥2 constraints active)}
 //
-// Pairwise coverage table:
-// | Test | P1  | P2    | P4   | P5    |
-// |------|-----|-------|------|-------|
-// | pw1  | Le  | box   | unit | non   |
-// | pw2  | Ge  | box   | unit | degen |
-// | pw3  | Eq  | free  | ill  | non   |
-// | pw4  | Le  | fixed | unit | non   |
+// Representative parameter combination coverage (not full pairwise — see LP set):
+// | Test | P1  | P2      | P4   | P5    |
+// |------|-----|---------|------|-------|
+// | pw1  | Le  | box     | unit | non   |
+// | pw2  | Ge  | box     | unit | degen |
+// | pw3  | Eq  | free    | ill  | non   |
+// | pw4  | Le  | fixed   | unit | non   |
+// | pw5  | Le  | lb-only | unit | non   |
 
 /// PW: Le + box + min + unit + non-degenerate (interior optimum, Le inactive).
 ///
@@ -923,13 +915,12 @@ fn pw_qp_le_box_min_unit_nondeg() {
     assert_x(r.solution[0], 1.0, "pw_qp_le_box x*=1");
     assert_x(r.solution[1], 2.0, "pw_qp_le_box y*=2");
     // Le inactive → dual ≈ 0
-    if !r.dual_solution.is_empty() {
-        assert!(
-            r.dual_solution[0].abs() < EPS_DUAL,
-            "pw_qp_le_box: Le dual={} must≈0 (inactive)",
-            r.dual_solution[0]
-        );
-    }
+    assert!(!r.dual_solution.is_empty(), "pw_qp_le_box: solver must return duals at Optimal");
+    assert!(
+        r.dual_solution[0].abs() < EPS_DUAL,
+        "pw_qp_le_box: Le dual={} must≈0 (inactive)",
+        r.dual_solution[0]
+    );
 }
 
 /// PW: Ge + box + min + unit + degenerate (two Ge constraints both active).
@@ -1033,6 +1024,40 @@ fn pw_qp_le_fixed_min_unit() {
     assert_x(r.solution[0], 2.0, "pw_qp_le_fixed x*=2");
 }
 
+/// PW: Le + lb-only + min + unit + non-degenerate (interior optimum, Le inactive).
+///
+/// Problem: min (x-1)^2+(y-1)^2  s.t. x+y<=3, x,y >= 0 (lb-only bounds).
+/// Q=diag(2,2), c=[-2,-2] (constant=2 not in solver output).
+/// Oracle: unconstrained min at x*=1,y*=1. 1+1=2<=3 → Le inactive.
+///   Internal obj = 1/2*(2+2)+(-2-2) = 2-4 = -2.
+///   scipy SLSQP: fun=-2.0, x=[1,1].
+#[test]
+fn pw_qp_le_lbonly_min_unit_nondeg() {
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+    let qp = QpProblem::new(
+        q,
+        vec![-2.0, -2.0],
+        a,
+        vec![3.0],
+        vec![(0.0, INF), (0.0, INF)],
+        vec![ConstraintType::Le],
+    )
+    .unwrap();
+    let r = solve_qp_with(&qp, &opts());
+    assert_eq!(r.status, SolveStatus::Optimal, "pw_qp_le_lbonly: status");
+    assert_obj(r.objective, -2.0, "pw_qp_le_lbonly obj=-2");
+    assert_x(r.solution[0], 1.0, "pw_qp_le_lbonly x*=1");
+    assert_x(r.solution[1], 1.0, "pw_qp_le_lbonly y*=1");
+    // Le inactive → dual ≈ 0
+    assert!(!r.dual_solution.is_empty(), "pw_qp_le_lbonly: solver must return duals at Optimal");
+    assert!(
+        r.dual_solution[0].abs() < EPS_DUAL,
+        "pw_qp_le_lbonly: Le dual={} must≈0 (inactive)",
+        r.dual_solution[0]
+    );
+}
+
 // ─── CLASSIFICATION TREE METHOD ────────────────────────────────────────────────
 //
 // Classification tree for QP test design:
@@ -1102,13 +1127,12 @@ fn ct_qp_dense_hessian_3var() {
     assert_x(r.solution[1], 2.0, "ct_qp_dense y*=2");
     assert_x(r.solution[2], 1.0, "ct_qp_dense z*=1");
     // Le inactive → dual ≈ 0
-    if !r.dual_solution.is_empty() {
-        assert!(
-            r.dual_solution[0].abs() < EPS_DUAL,
-            "ct_qp_dense: Le dual={} must≈0 (inactive)",
-            r.dual_solution[0]
-        );
-    }
+    assert!(!r.dual_solution.is_empty(), "ct_qp_dense: solver must return duals at Optimal");
+    assert!(
+        r.dual_solution[0].abs() < EPS_DUAL,
+        "ct_qp_dense: Le dual={} must≈0 (inactive)",
+        r.dual_solution[0]
+    );
     // KKT stationarity: Qx*+c = [2+2-4, 1+4+1-6, 2+2-4] = [0,0,0]
     let kkt0 = 2.0 * r.solution[0] + r.solution[1] - 4.0;
     let kkt1 = r.solution[0] + 2.0 * r.solution[1] + r.solution[2] - 6.0;

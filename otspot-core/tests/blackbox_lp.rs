@@ -915,7 +915,7 @@ fn bva_lp_rhs_large_1e8() {
 /// Oracle: x* = 1e-6, obj = 1e-6.
 ///   scipy: linprog([1], A_ub=[[-1]], b_ub=[-1e-6], bounds=[(0,1)]) → fun=1e-6
 #[test]
-fn bva_lp_rhs_small_1e6() {
+fn bva_lp_rhs_small_1em6() {
     let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
     let lp = LpProblem::new_general(
         vec![1.0],
@@ -1259,7 +1259,10 @@ fn st_lp_unbounded_to_optimal_by_constraint() {
 //   P4 scale:  {unit(~1), ill(~1e6 spread)}
 //   P5 degen:  {non-degenerate, degenerate(≥2 constraints active at optimum)}
 //
-// Pairwise coverage table (each pair of parameter values appears in ≥1 test):
+// Representative parameter combination sample (NOT full 2-way pairwise — P1×P2 alone
+// has 15 pairs requiring ≥15 tests; 6 tests cannot achieve full pairwise coverage).
+//
+// Pairs covered per parameter combination (P1×P2, P1×P3, P2×P3 are representative):
 //
 // | Test | P1    | P2    | P3  | P4   | P5    |
 // |------|-------|-------|-----|------|-------|
@@ -1269,6 +1272,11 @@ fn st_lp_unbounded_to_optimal_by_constraint() {
 // | pw4  | Ge    | fixed | min | unit | degen |
 // | pw5  | Ge    | box   | min | ill  | degen |
 // | pw6  | Le    | ub    | max | ill  | non   |
+//
+// Covered P1×P2 pairs: (Le,free),(Le,ub),(Ge,box),(Ge,fixed),(Eq,lb)
+// Covered P1×P3 pairs: (Le,max),(Ge,min),(Eq,min)
+// Covered P2×P3 pairs: (free,max),(box,min),(lb,min),(fixed,min),(ub,max)
+// Covered P4×P5 pairs: (unit,non),(unit,degen),(ill,non),(ill,degen) — all 4
 
 /// PW: Le + free + max + unit + non-degenerate.
 ///
@@ -1407,13 +1415,7 @@ fn pw_lp_ge_box_min_ill_degen() {
     .unwrap();
     let r = solve_lp_with(&lp, &opts());
     assert_eq!(r.status, SolveStatus::Optimal, "pw_ge_ill_degen: status");
-    // Expected obj = 3e-4; use relative tolerance since value is small
-    let rel = (r.objective - 3e-4).abs() / (1.0 + 3e-4_f64.abs());
-    assert!(
-        rel < 1e-4,
-        "pw_ge_ill_degen: obj={:.4e} expected=3e-4 rel={rel:.2e}",
-        r.objective
-    );
+    assert_obj(r.objective, 3e-4, "pw_ge_ill_degen obj=3e-4");
     assert_x(r.solution[0], 2.0, "pw_ge_ill_degen x*=2");
     assert_x(r.solution[1], 1.0, "pw_ge_ill_degen y*=1");
 }
