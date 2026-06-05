@@ -7,10 +7,10 @@ AUG2D,1.67e6,bench_722f_ippmm_1000s
 AUG2DC,1.80e6,bench_722f_ippmm_1000s
 AUG2DCQP,6.48e6,bench_722f_ippmm_1000s
 AUG2DQP,6.22e6,bench_722f_ippmm_1000s
-AUG3D,-2.12e3,bench_722f_ippmm_1000s
-AUG3DC,-3.10e3,bench_722f_ippmm_1000s
-AUG3DCQP,-2.88e3,bench_722f_ippmm_1000s
-AUG3DQP,-2.00e3,bench_722f_ippmm_1000s
+AUG3D,-7.824322739640e2,kkt_osqp_crosscheck_20260606
+AUG3DC,-1.165237561744e3,kkt_osqp_crosscheck_20260606
+AUG3DCQP,-9.431378406874e2,kkt_osqp_crosscheck_20260606
+AUG3DQP,-6.612623221186e2,kkt_osqp_crosscheck_20260606
 BOYD1,-6.17e7,bench_722f_ippmm_1000s
 BOYD2,2.13e1,bench_722f_ippmm_1000s
 CONT-050,-4.56e0,bench_722f_ippmm_1000s

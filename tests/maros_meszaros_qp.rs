@@ -3,11 +3,20 @@
 use otspot::qp::{solve_qp, solve_qp_with, QpProblem, QpWarmStart};
 use otspot::sparse::CscMatrix;
 use otspot::SolveStatus;
+use otspot_dev::bench_utils::load_baseline_objectives;
+use otspot_io::qps::parse_qps;
+use std::path::Path;
 
 // 通常解変数の絶対許容値 (postsolve 後の丸め ≈ 数×eps)
 const EPS_SOL: f64 = 1e-5;
 // 退化制約境界 (λ*=0) は補完余裕 λs=μ より s≈√μ で収束するため O(√eps)
 const EPS_DEG: f64 = 5e-4;
+const AUG3D_KKT_REFERENCE_OBJS: [(&str, f64); 4] = [
+    ("AUG3D", -7.824322739640e2),
+    ("AUG3DC", -1.165237561744e3),
+    ("AUG3DCQP", -9.431378406874e2),
+    ("AUG3DQP", -6.612623221186e2),
+];
 
 /// 相対誤差 eps=1e-6 で目的値を検証 (solver の relative gap 収束判定と整合)。
 fn assert_obj_close(actual: f64, expected: f64, name: &str) {
@@ -259,4 +268,39 @@ fn test_qpcstair_like() {
         );
     }
     assert_obj_close(result.objective, -9.375, "QPCSTAIR: QP objective = -9.375");
+}
+
+#[test]
+fn aug3d_baseline_matches_qps_kkt_solution() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let qps_path = Path::new(manifest)
+        .join("tests/fixtures/maros_meszaros")
+        .join("AUG3D.QPS");
+    assert!(
+        qps_path.exists(),
+        "{} not found",
+        qps_path.display()
+    );
+    let baseline_path = Path::new(manifest)
+        .join("data/baseline_objectives")
+        .join("maros_meszaros.csv");
+    let baselines = load_baseline_objectives(&baseline_path).expect("load maros baseline");
+    for (name, expected) in AUG3D_KKT_REFERENCE_OBJS {
+        let csv_expected = *baselines
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} baseline exists"));
+        assert_obj_close(csv_expected, expected, &format!("{name} CSV baseline objective"));
+    }
+
+    let prob = parse_qps(&qps_path).expect("parse AUG3D");
+    let mut opts: otspot::SolverOptions = Default::default();
+    opts.ipm.eps = 1e-6;
+    opts.timeout_secs = Some(30.0);
+    let result = solve_qp_with(&prob, &opts);
+    assert_eq!(result.status, SolveStatus::Optimal, "AUG3D status");
+    assert_obj_close(
+        result.objective,
+        AUG3D_KKT_REFERENCE_OBJS[0].1,
+        "AUG3D KKT reference objective",
+    );
 }
