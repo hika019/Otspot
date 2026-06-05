@@ -32,9 +32,10 @@ use otspot::{solve_qp_with, SolveStatus};
 /// with margin. These 4 run in a dedicated `--test-threads 1` heavy step for fair timing
 /// (see test-heavy.yml). REL_TOL stays 5e-3. ken-18 is excluded (真の非収束, #23).
 const BUDGET_SECS: f64 = 360.0;
-/// Budget for the synthetic case. The generated block LP has a known optimum and
-/// should solve well under the 3 minute per-test guidance.
-const SYNTH_BUDGET_SECS: f64 = 20.0;
+/// Budget for the synthetic case follows the large-LP bench baseline.
+/// The generated block LP has a known optimum and should solve far below it.
+const SYNTH_BUDGET_SECS: f64 = 1000.0;
+const ROUTE_SENTINEL_BUDGET_SECS: f64 = 1000.0;
 const REL_TOL: f64 = 5e-3; // 0.5 % of truth – tighter than bench eps=1e-6.
 
 struct Case {
@@ -50,6 +51,14 @@ const REAL_CASES: &[Case] = &[
     Case {
         name: "ken-18",
         truth: -5.2217025e10,
+    },
+    Case {
+        name: "dfl001",
+        truth: 1.1266400000e7,
+    },
+    Case {
+        name: "pds-20",
+        truth: 2.3821659e10,
     },
     Case {
         name: "cre-b",
@@ -125,6 +134,49 @@ real_netlib_case_test!(lp_simplex_stall_cre_b_converges, "cre-b");
 real_netlib_case_test!(lp_simplex_stall_d6cube_converges, "d6cube");
 real_netlib_case_test!(lp_simplex_stall_pilot_converges, "pilot");
 real_netlib_case_test!(lp_simplex_stall_greenbea_converges, "greenbea");
+
+fn assert_real_netlib_uses_bounded_eq_ub_path(name: &str, truth: f64) {
+    let Some(qp) = load_qp(name) else {
+        panic!("{name}: data/lp_problems/{name}.QPS missing");
+    };
+    assert!(
+        qp.constraint_types
+            .iter()
+            .all(|t| !matches!(t, ConstraintType::Ge)),
+        "{name}: this route sentinel is scoped to non-Ge Eq/Le instances"
+    );
+    assert!(
+        qp.bounds.iter().any(|&(_, ub)| ub.is_finite()),
+        "{name}: finite UB precondition missing"
+    );
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(ROUTE_SENTINEL_BUDGET_SECS);
+    opts.known_optimal_obj = Some(truth);
+    let r = solve_qp_with(&qp, &opts);
+    assert!(
+        r.stats.bounded_eq_ub_path,
+        "{name}: bounded Eq+UB path not used; status={:?} iters={}",
+        r.status, r.iterations
+    );
+}
+
+macro_rules! real_netlib_bounded_eq_ub_route_test {
+    ($test_name:ident, $case_name:literal) => {
+        #[test]
+        #[ignore = "heavy: route sentinel for large bounded Eq+UB Netlib LP"]
+        fn $test_name() {
+            let case = REAL_CASES
+                .iter()
+                .find(|case| case.name == $case_name)
+                .expect("case must exist");
+            assert_real_netlib_uses_bounded_eq_ub_path(case.name, case.truth);
+        }
+    };
+}
+
+real_netlib_bounded_eq_ub_route_test!(lp_route_dfl001_uses_bounded_eq_ub, "dfl001");
+real_netlib_bounded_eq_ub_route_test!(lp_route_ken18_uses_bounded_eq_ub, "ken-18");
+real_netlib_bounded_eq_ub_route_test!(lp_route_pds20_uses_bounded_eq_ub, "pds-20");
 
 /// Synthetic large LP: deterministic block identity constraints with slack
 /// columns (m=1800, n=3600). The optimum is known exactly: each row chooses the

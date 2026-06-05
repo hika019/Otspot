@@ -17,9 +17,9 @@ use crate::sparse::CscMatrix;
 #[cfg(test)]
 use crate::tolerances::any_nonfinite;
 
-use super::QpProblem;
 #[cfg(test)]
 use super::ipm_solver;
+use super::QpProblem;
 
 // Test-only hook: forces solve_reduced_lp_from_qp to treat the reduced solve
 // as if it returned Timeout with a reduced-space solution, bypassing wall-clock.
@@ -191,6 +191,10 @@ fn solve_reduced_lp_from_qp(
             status: SolveStatus::Timeout,
             solution: vec![0.0; reduced_lp.num_vars],
             iterations: REDUCED_TIMEOUT_QP_INJECT_ITERS,
+            stats: crate::problem::SolveStats {
+                bounded_eq_ub_path: true,
+                ..Default::default()
+            },
             ..Default::default()
         }
     } else {
@@ -251,6 +255,7 @@ fn solve_reduced_lp_from_qp(
                     postsolve_us: 0,
                     ..Default::default()
                 }),
+                stats: raw.stats.clone(),
                 ..Default::default()
             };
             timeout.stats.route = SolveRoute::LpForwardedFromQp;
@@ -265,6 +270,7 @@ fn solve_reduced_lp_from_qp(
             options.deadline,
             options.recover_warm_start_basis,
         );
+        lifted.stats = raw.stats.clone();
         lifted.stats.route = SolveRoute::LpForwardedFromQp;
         lifted.stats.deadline_triggered = matches!(lifted.status, SolveStatus::Timeout);
         lifted = guard_lp_optimal(lifted, original_lp);
@@ -1155,7 +1161,13 @@ mod tests {
         let orig_n = problem.num_vars; // 3
 
         // 1. Normal solve: solution must be in original space.
-        let r = solve_as_lp(&problem, &SolverOptions { presolve: true, ..Default::default() });
+        let r = solve_as_lp(
+            &problem,
+            &SolverOptions {
+                presolve: true,
+                ..Default::default()
+            },
+        );
         assert_eq!(r.status, SolveStatus::Optimal);
         assert_eq!(
             r.solution.len(),
@@ -1167,10 +1179,20 @@ mod tests {
         // Pre-fix: returns raw.solution.len() == reduced_n (2) — FAIL.
         // Post-fix: returns solution: vec![] — PASS.
         INJECT_REDUCED_TIMEOUT_QP.with(|v| v.set(true));
-        let r = solve_as_lp(&problem, &SolverOptions { presolve: true, ..Default::default() });
+        let r = solve_as_lp(
+            &problem,
+            &SolverOptions {
+                presolve: true,
+                ..Default::default()
+            },
+        );
         INJECT_REDUCED_TIMEOUT_QP.with(|v| v.set(false));
         let n = r.solution.len();
-        assert_eq!(r.status, SolveStatus::Timeout, "injected path must return Timeout");
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "injected path must return Timeout"
+        );
         assert!(
             n == 0 || n == orig_n,
             "injected Timeout: solution.len()={n} must be 0 or {orig_n}, \
@@ -1208,14 +1230,28 @@ mod tests {
         .unwrap();
 
         INJECT_REDUCED_TIMEOUT_QP.with(|v| v.set(true));
-        let r = solve_as_lp(&problem, &SolverOptions { presolve: true, ..Default::default() });
+        let r = solve_as_lp(
+            &problem,
+            &SolverOptions {
+                presolve: true,
+                ..Default::default()
+            },
+        );
         INJECT_REDUCED_TIMEOUT_QP.with(|v| v.set(false));
-        assert_eq!(r.status, SolveStatus::Timeout, "injected path must return Timeout");
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "injected path must return Timeout"
+        );
         assert_eq!(
             r.iterations, REDUCED_TIMEOUT_QP_INJECT_ITERS,
             "QP→LP-dispatch reduced Timeout must carry raw.iterations ({}); got {} \
              — dropping it reports a misleading iters=0 (pds-20 artifact)",
             REDUCED_TIMEOUT_QP_INJECT_ITERS, r.iterations
+        );
+        assert!(
+            r.stats.bounded_eq_ub_path,
+            "QP→LP-dispatch reduced Timeout must carry raw route stats"
         );
     }
 }

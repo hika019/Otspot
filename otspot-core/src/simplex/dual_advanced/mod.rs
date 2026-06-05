@@ -13,12 +13,12 @@ use crate::options::{DualPricing, SolverOptions, WarmStartBasis};
 use crate::presolve::LpEquilibration;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
+use crate::tolerances::DROP_TOL;
 use bounded_core::{
     bounded_primal_phase1, bounded_primal_phase2_aug, bump_eq_ub_dispatch_count,
     extract_dual_info_bounded, extract_solution_bounded, iterate as bounded_iterate,
     phase2_primal_bounded, solve_bounded_dual, BoundedDualState, BoundedOutcome,
 };
-use crate::tolerances::DROP_TOL;
 
 pub mod bound_flip;
 mod bounded_core;
@@ -478,8 +478,7 @@ fn try_bounded_phase1_eq(
     // when disabled. Crash is applied opportunistically; if x_b ≥ 0 fails after
     // FTRAN, we fall back to identity (no recursion: re-derive on the spot).
     let identity_state = || {
-        let (a_aug, art_col_of_row, n_art) =
-            build_a_aug_for_eq(bsf, &a, &bsf.needs_artificial);
+        let (a_aug, art_col_of_row, n_art) = build_a_aug_for_eq(bsf, &a, &bsf.needs_artificial);
         let n_aug = bsf.n_total + n_art;
         let mut ubs_aug = vec![f64::INFINITY; n_aug];
         ubs_aug[..bsf.n_total].copy_from_slice(&ubs);
@@ -605,6 +604,11 @@ where
         Vec<f64>,
     ),
 {
+    fn mark_eq_ub_path(mut r: SolverResult) -> SolverResult {
+        r.stats.bounded_eq_ub_path = true;
+        r
+    }
+
     let (a_aug, art_col_of_row, mut ubs_aug, basis, is_basic, x_b) = state_factory();
     let n_aug = a_aug.ncols;
     let mut state = BoundedDualState {
@@ -623,11 +627,19 @@ where
     }
     let mut iters: usize = 0;
     let p1_out = bounded_primal_phase1(
-        &a_aug, &c_p1, &ubs_aug, bsf.n_total, &mut state, options, &mut iters,
+        &a_aug,
+        &c_p1,
+        &ubs_aug,
+        bsf.n_total,
+        &mut state,
+        options,
+        &mut iters,
     );
 
     match p1_out {
-        SimplexOutcome::SingularBasis => return Some(SolverResult::numerical_error()),
+        SimplexOutcome::SingularBasis => {
+            return Some(mark_eq_ub_path(SolverResult::numerical_error()));
+        }
         SimplexOutcome::Unbounded => {
             // Phase I obj = sum of artificials ≥ 0, bounded below. Should not
             // happen; treat as "no decision" and fall through to legacy.
@@ -635,20 +647,20 @@ where
         }
         SimplexOutcome::Timeout(_) => {
             let solution = extract_solution_bounded(bsf, &state, &col_scale);
-            return Some(SolverResult {
+            return Some(mark_eq_ub_path(SolverResult {
                 status: SolveStatus::Timeout,
                 objective: bsf.obj_offset,
                 solution,
                 iterations: iters,
                 ..Default::default()
-            });
+            }));
         }
         SimplexOutcome::Optimal(art_sum, _) => {
             if art_sum > options.primal_tol {
                 // Phase I converged with residual artificials → infeasible.
                 let mut r = SolverResult::infeasible();
                 r.iterations = iters;
-                return Some(r);
+                return Some(mark_eq_ub_path(r));
             }
         }
     }
@@ -671,7 +683,13 @@ where
     let mut c_p2 = vec![0.0f64; n_aug];
     c_p2[..bsf.n_total].copy_from_slice(&c);
     let p2_out = bounded_primal_phase2_aug(
-        &a_aug, &c_p2, &ubs_aug, bsf.n_total, &mut state, options, &mut iters,
+        &a_aug,
+        &c_p2,
+        &ubs_aug,
+        bsf.n_total,
+        &mut state,
+        options,
+        &mut iters,
     );
 
     match p2_out {
@@ -689,7 +707,7 @@ where
             } else {
                 None
             };
-            Some(SolverResult {
+            Some(mark_eq_ub_path(SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj + bsf.obj_offset,
                 solution,
@@ -699,25 +717,25 @@ where
                 warm_start_basis: ws,
                 iterations: iters,
                 ..Default::default()
-            })
+            }))
         }
-        SimplexOutcome::Unbounded => Some(SolverResult {
+        SimplexOutcome::Unbounded => Some(mark_eq_ub_path(SolverResult {
             status: SolveStatus::Unbounded,
             objective: f64::NEG_INFINITY,
             iterations: iters,
             ..Default::default()
-        }),
+        })),
         SimplexOutcome::Timeout(obj) => {
             let solution = extract_solution_bounded(bsf, &state, &col_scale);
-            Some(SolverResult {
+            Some(mark_eq_ub_path(SolverResult {
                 status: SolveStatus::Timeout,
                 objective: obj + bsf.obj_offset,
                 solution,
                 iterations: iters,
                 ..Default::default()
-            })
+            }))
         }
-        SimplexOutcome::SingularBasis => Some(SolverResult::numerical_error()),
+        SimplexOutcome::SingularBasis => Some(mark_eq_ub_path(SolverResult::numerical_error())),
     }
 }
 
@@ -1620,20 +1638,19 @@ mod tests {
             let sf = build_standard_form(&lp);
             let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
             assert_eq!(r.status, SolveStatus::Optimal, "pattern A");
-            assert!((r.objective - 5.0).abs() < 1e-6, "pattern A obj={}", r.objective);
+            assert!(
+                (r.objective - 5.0).abs() < 1e-6,
+                "pattern A obj={}",
+                r.objective
+            );
         }
         // Pattern B: Le + Eq + finite UBs.
         // min -x0 - x1, x0 + x1 = 4, x0 ≤ 5, 0 ≤ x0 ≤ 3, 0 ≤ x1 ≤ 3
         // Optimal: x0=3, x1=1, obj=-4. (Equivalent: x0=1, x1=3.)
         {
-            let a = CscMatrix::from_triplets(
-                &[0, 1, 0, 1],
-                &[0, 0, 1, 1],
-                &[1.0, 1.0, 1.0, 1.0],
-                2,
-                2,
-            )
-            .unwrap();
+            let a =
+                CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+                    .unwrap();
             let lp = LpProblem::new_general(
                 vec![-1.0, -1.0],
                 a,
@@ -1646,7 +1663,11 @@ mod tests {
             let sf = build_standard_form(&lp);
             let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
             assert_eq!(r.status, SolveStatus::Optimal, "pattern B");
-            assert!((r.objective - (-4.0)).abs() < 1e-6, "pattern B obj={}", r.objective);
+            assert!(
+                (r.objective - (-4.0)).abs() < 1e-6,
+                "pattern B obj={}",
+                r.objective
+            );
         }
     }
 
@@ -1661,8 +1682,16 @@ mod tests {
         use crate::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 4.0], 2, 2).unwrap();
         let x_b = diag_basis_initial_x_b(&a, &[0, 1], &[10.0, 12.0]);
-        assert!((x_b[0] - 5.0).abs() < 1e-12, "row0: expected b/diag=5, got {}", x_b[0]);
-        assert!((x_b[1] - 3.0).abs() < 1e-12, "row1: expected b/diag=3, got {}", x_b[1]);
+        assert!(
+            (x_b[0] - 5.0).abs() < 1e-12,
+            "row0: expected b/diag=5, got {}",
+            x_b[0]
+        );
+        assert!(
+            (x_b[1] - 3.0).abs() < 1e-12,
+            "row1: expected b/diag=3, got {}",
+            x_b[1]
+        );
     }
 
     /// Integration smoke: mixed Eq+Le with a large Le coefficient solves
@@ -1676,14 +1705,8 @@ mod tests {
     fn eq_ub_phase1_scaled_le_slack_feasible() {
         use crate::sparse::CscMatrix;
         // row 0 Eq: x0 - x1 = 0 ; row 1 Le: 100 x1 <= 100
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1],
-            &[0, 1, 1],
-            &[1.0, -1.0, 100.0],
-            2,
-            2,
-        )
-        .unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, -1.0, 100.0], 2, 2).unwrap();
         let lp = LpProblem::new_general(
             vec![0.0, -1.0],
             a,
@@ -1792,14 +1815,7 @@ mod tests {
     fn p1_hypothesis_art_goes_positive_in_phase2() {
         use crate::sparse::CscMatrix;
         // x0 - x1 = 0 (row 0 Eq), x1 <= 3 (row 1 Le)
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1],
-            &[0, 1, 1],
-            &[1.0, -1.0, 1.0],
-            2,
-            2,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, -1.0, 1.0], 2, 2).unwrap();
         let lp = LpProblem::new_general(
             vec![0.0, -1.0],
             a,

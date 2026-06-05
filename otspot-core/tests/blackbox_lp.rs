@@ -27,6 +27,9 @@ const HARD_LP_INF: f64 = f64::INFINITY;
 const HARD_LP_LARGE_M: usize = 50;
 const HARD_LP_LARGE_N: usize = 100;
 const HARD_LP_LARGE_EXPECTED_OBJ: f64 = -4.406_871_388_953_238;
+const HARD_LP_LARGE_EQ_GE_PAIRS: usize = 96;
+const HARD_LP_LARGE_EQ_GE_K: usize = 37;
+const HARD_LP_LARGE_EQ_GE_EXPECTED_OBJ: f64 = 3.404;
 const HARD_LP_ILL_EXPECTED_OBJ: f64 = -6.099_999_999_814_999;
 const HARD_LP_DEGENERATE_EXPECTED_OBJ: f64 = -1.0;
 const HARD_LP_NEAR_TIE_EXPECTED_OBJ: f64 = -1.000_000_005_9;
@@ -1732,6 +1735,81 @@ fn hard_lp_large_eq_ub_expression_scipy_oracle() {
         HARD_LP_LARGE_EXPECTED_OBJ,
         "hard_lp_large_eq_ub",
     );
+}
+
+/// Hard LP: scaled Eq rows + one Ge row + finite UBs.
+///
+/// SciPy oracle:
+/// `linprog(c, A_eq=Aeq, b_eq=beq, A_ub=[-ge], b_ub=[-37], bounds=[(0,1)]*192, method="highs")`
+/// returned status 0, fun = 3.404.  The independent construction oracle is the
+/// same: each pair satisfies `x_i + y_i = 1`, all `y_i` have zero cost, and
+/// `sum x_i >= 37`, so the optimum sets the 37 cheapest `x_i` to one.
+#[test]
+fn hard_lp_large_scaled_eq_ge_ub_scipy_oracle() {
+    let pairs = HARD_LP_LARGE_EQ_GE_PAIRS;
+    let n = 2 * pairs;
+    let mut rows = Vec::with_capacity(2 * pairs + pairs);
+    let mut cols = Vec::with_capacity(2 * pairs + pairs);
+    let mut vals = Vec::with_capacity(2 * pairs + pairs);
+    let mut b = Vec::with_capacity(pairs + 1);
+    let mut ctypes = Vec::with_capacity(pairs + 1);
+    let mut c = vec![0.0; n];
+
+    for i in 0..pairs {
+        let scale = 10.0_f64.powi((i % 9) as i32 - 4);
+        rows.push(i);
+        cols.push(i);
+        vals.push(scale);
+        rows.push(i);
+        cols.push(pairs + i);
+        vals.push(scale);
+        b.push(scale);
+        ctypes.push(ConstraintType::Eq);
+
+        c[i] = 0.02 + 0.004 * i as f64;
+    }
+
+    let ge_row = pairs;
+    for i in 0..pairs {
+        rows.push(ge_row);
+        cols.push(i);
+        vals.push(1.0);
+    }
+    b.push(HARD_LP_LARGE_EQ_GE_K as f64);
+    ctypes.push(ConstraintType::Ge);
+
+    let a = CscMatrix::from_triplets(&rows, &cols, &vals, pairs + 1, n).unwrap();
+    let lp = LpProblem::new_general(c.clone(), a, b, ctypes, vec![(0.0, 1.0); n], None).unwrap();
+    let mut options = opts();
+    options.timeout_secs = Some(HARD_LP_TIMEOUT_SECS);
+    let r = solve_lp_with(&lp, &options);
+
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "hard_lp_large_scaled_eq_ge_ub status"
+    );
+    assert_obj(
+        r.objective,
+        HARD_LP_LARGE_EQ_GE_EXPECTED_OBJ,
+        "hard_lp_large_scaled_eq_ge_ub obj",
+    );
+    let sum_x: f64 = r.solution[..pairs].iter().sum();
+    hard_lp_assert_resid(
+        sum_x,
+        HARD_LP_LARGE_EQ_GE_K as f64,
+        "hard_lp_large_scaled_eq_ge_ub active Ge",
+    );
+    for i in 0..HARD_LP_LARGE_EQ_GE_K {
+        assert_x(r.solution[i], 1.0, &format!("hard_lp_large_eq_ge x[{i}]"));
+    }
+    for i in HARD_LP_LARGE_EQ_GE_K..pairs {
+        assert_x(r.solution[i], 0.0, &format!("hard_lp_large_eq_ge x[{i}]"));
+    }
+    for i in 0..pairs {
+        let pair_sum = r.solution[i] + r.solution[pairs + i];
+        hard_lp_assert_resid(pair_sum, 1.0, &format!("hard_lp_large_eq_ge pair[{i}]"));
+    }
 }
 
 /// Hard LP: Eq and UB are contradictory.
