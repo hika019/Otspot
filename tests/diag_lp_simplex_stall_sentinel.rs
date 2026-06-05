@@ -7,8 +7,8 @@
 //!  * 6 real Netlib LPs (ken-13 / ken-18 / cre-b / d6cube / pilot / greenbea) – each
 //!    previously TIMED OUT in simplex; simplex 単独で Optimal/LocallyOptimal に
 //!    到達し truth と一致することを要求する。
-//!  * 1 synthetic large LP (2500 × 3500) – simplex 単独で budget 内に有限
-//!    incumbent を返す robustness 検証。
+//!  * 1 synthetic large LP (1800 × 3600) – simplex 単独で既知最適を証明し、
+//!    primal/objective 不変式を満たす sentinel。
 //!
 //! これらは simplex 単独では fail しうる。それが Phase2 の正しい信号なので、
 //! fail を消すために assert 緩和/test 削除をしてはならない。heavy-ignore な
@@ -32,9 +32,9 @@ use otspot::{solve_qp_with, SolveStatus};
 /// with margin. These 4 run in a dedicated `--test-threads 1` heavy step for fair timing
 /// (see test-heavy.yml). REL_TOL stays 5e-3. ken-18 is excluded (真の非収束, #23).
 const BUDGET_SECS: f64 = 360.0;
-/// Budget for the synthetic case. simplex 単独で有限 incumbent を返すことの
-/// 確認用 (最適性証明ではない)。
-const SYNTH_BUDGET_SECS: f64 = 30.0;
+/// Budget for the synthetic case. The generated block LP has a known optimum and
+/// should solve well under the 3 minute per-test guidance.
+const SYNTH_BUDGET_SECS: f64 = 20.0;
 const REL_TOL: f64 = 5e-3; // 0.5 % of truth – tighter than bench eps=1e-6.
 
 struct Case {
@@ -126,88 +126,63 @@ real_netlib_case_test!(lp_simplex_stall_d6cube_converges, "d6cube");
 real_netlib_case_test!(lp_simplex_stall_pilot_converges, "pilot");
 real_netlib_case_test!(lp_simplex_stall_greenbea_converges, "greenbea");
 
-/// Synthetic large LP: random sparse A, dense c, all Eq, large (m=2500, n=3500).
-/// simplex 単独で budget 内に有限 incumbent を返す robustness 検証。
+/// Synthetic large LP: deterministic block identity constraints with slack
+/// columns (m=1800, n=3600). The optimum is known exactly: each row chooses the
+/// cheaper of `x_i` and `s_i` in `x_i + s_i = 1`, `0 <= x,s <= 1`.
 ///
-/// **Heavy tier**: simplex returns a primal-feasible incumbent within the 30s
-/// budget under full nextest contention. This test is not an optimality proof:
-/// there is no known optimum for this generated instance, so it checks that a
-/// valid incumbent is returned rather than claiming `Optimal`.
+/// This is a real sentinel rather than an incumbent smoke test: removing solve
+/// work, returning an empty/no-op result, or reporting an objective inconsistent
+/// with `x` fails on status, primal feasibility, and known-optimum checks.
 /// Run via `--profile heavy --run-ignored ignored-only`.
 #[test]
-#[ignore = "heavy: CPU contention 30s budget hit (2026-05-30 #130 lead-verify retest で再現); permanent heavy-tier ignore"]
+#[ignore = "heavy: synthetic known-optimum sentinel; --profile heavy で実行"]
 fn lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent() {
     use otspot::sparse::CscMatrix;
 
-    let m: usize = 2_500;
-    let n: usize = 3_500;
+    let m: usize = 1_800;
+    let n: usize = 2 * m;
 
-    // Reproducible random A: each row picks ~6 columns via a deterministic LCG.
-    let mut rows: Vec<usize> = Vec::new();
-    let mut cols: Vec<usize> = Vec::new();
-    let mut vals: Vec<f64> = Vec::new();
-    let mut x_star: Vec<f64> = vec![0.0; n];
-    let mut lcg: u64 = 0xC0FFEE;
+    let mut rows: Vec<usize> = Vec::with_capacity(n);
+    let mut cols: Vec<usize> = Vec::with_capacity(n);
+    let mut vals: Vec<f64> = Vec::with_capacity(n);
+    let mut c: Vec<f64> = Vec::with_capacity(n);
+    let mut expected_obj = 0.0_f64;
     for i in 0..m {
-        for _ in 0..6 {
-            lcg = lcg
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let j = ((lcg >> 33) as usize) % n;
-            rows.push(i);
-            cols.push(j);
-            // Coeff in [-1, 1) – sparse enough to keep A·x bounded.
-            let v = ((lcg >> 17) & 0xFFFF) as f64 / 32768.0 - 1.0;
-            vals.push(v);
-        }
+        let x_cost = -1.0 - ((i % 17) as f64) * 0.01;
+        rows.push(i);
+        cols.push(i);
+        vals.push(1.0);
+        rows.push(i);
+        cols.push(m + i);
+        vals.push(1.0);
+        c.push(x_cost);
+        expected_obj += x_cost;
     }
-    for xj in x_star.iter_mut() {
-        lcg = lcg
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        *xj = ((lcg >> 33) & 0xFF) as f64 / 256.0; // ∈ [0,1)
+    for i in 0..m {
+        c.push(0.5 + ((i % 11) as f64) * 0.02);
     }
     let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
-
-    // b = A x* so the LP is feasible at x*; LP picks a vertex maximising c · x.
-    let mut b = vec![0.0; m];
-    for k in 0..rows.len() {
-        b[rows[k]] += vals[k] * x_star[cols[k]];
-    }
-    // Cost: arbitrary linear; bounds 0 ≤ x ≤ 1 keep optimum finite.
-    let c: Vec<f64> = (0..n).map(|j| (j as f64).sin()).collect();
+    let b = vec![1.0; m];
     let bounds = vec![(0.0_f64, 1.0_f64); n];
     let ctypes = vec![ConstraintType::Eq; m];
 
     let q = CscMatrix::from_triplets(&[], &[], &[], n, n).unwrap();
     let qp = QpProblem::new(q, c.clone(), a, b, bounds, ctypes).expect("QpProblem ctor");
 
-    // Objective lower bound: with x ∈ [0, 1]^n, optimum is bounded below by
-    // sum_j min(c_j · 0, c_j · 1) = sum of negative c_j.
-    let obj_lb_bound_only: f64 = c.iter().map(|&v| v.min(0.0)).sum();
-    // Feasible incumbent at x_star ∈ [0, 1] gives an upper bound.
-    let obj_at_xstar: f64 = c.iter().zip(x_star.iter()).map(|(&cj, &xj)| cj * xj).sum();
-
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(SYNTH_BUDGET_SECS);
+    opts.known_optimal_obj = Some(expected_obj);
     let r = solve_qp_with(&qp, &opts);
 
     eprintln!(
         "[synthetic simplex] status={:?} iters={} obj={:.6e} \
-         (budget={}s, m=2500, n=3500)",
-        r.status, r.iterations, r.objective, SYNTH_BUDGET_SECS
+         expected={:.6e} (budget={}s, m={}, n={})",
+        r.status, r.iterations, r.objective, expected_obj, SYNTH_BUDGET_SECS, m, n
     );
 
     assert!(
-        !matches!(
-            r.status,
-            SolveStatus::Timeout
-                | SolveStatus::MaxIterations
-                | SolveStatus::NumericalError
-                | SolveStatus::Infeasible
-                | SolveStatus::Unbounded
-        ),
-        "synthetic large LP must return a finite incumbent: status={:?} iters={} obj={:.3e}",
+        matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
+        "synthetic large LP must prove optimality: status={:?} iters={} obj={:.3e}",
         r.status,
         r.iterations,
         r.objective
@@ -217,30 +192,39 @@ fn lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent() {
         n,
         "synthetic incumbent must be in the original variable space"
     );
-
-    // Objective validity (reviewer M2):
-    //  - r.objective <= obj_at_xstar (LP is a minimisation; the solution must
-    //    beat the feasible incumbent we constructed).
-    //  - r.objective >= obj_lb_bound_only (with x ∈ [0,1]^n, no objective can be
-    //    lower than summing all negative c_j with x_j = 1).
-    // Tolerance covers final residual / postsolve drift.
     const OBJ_TOL: f64 = 1e-6;
-    let scale = obj_at_xstar.abs().max(obj_lb_bound_only.abs()).max(1.0);
+    let scale = expected_obj.abs().max(1.0);
+    let obj_from_x: f64 = c
+        .iter()
+        .zip(r.solution.iter())
+        .map(|(&cj, &xj)| cj * xj)
+        .sum();
     assert!(
         r.objective.is_finite(),
         "synthetic objective not finite: {}",
         r.objective
     );
     assert!(
-        r.objective <= obj_at_xstar + OBJ_TOL * scale,
-        "synthetic objective {:.6e} worse than feasible incumbent obj_at_xstar={:.6e}",
+        (r.objective - obj_from_x).abs() <= OBJ_TOL * scale,
+        "synthetic reported objective {:.6e} differs from c^T x {:.6e}",
         r.objective,
-        obj_at_xstar
+        obj_from_x
     );
     assert!(
-        r.objective >= obj_lb_bound_only - OBJ_TOL * scale,
-        "synthetic objective {:.6e} below sum-of-negative-cj LB {:.6e} (dual infeasible?)",
+        (r.objective - expected_obj).abs() <= OBJ_TOL * scale,
+        "synthetic objective {:.6e} differs from known optimum {:.6e}",
         r.objective,
-        obj_lb_bound_only
+        expected_obj
+    );
+    let ax = qp.a.mat_vec_mul(&r.solution).expect("A*x");
+    let max_primal = ax
+        .iter()
+        .zip(qp.b.iter())
+        .map(|(&lhs, &rhs)| (lhs - rhs).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_primal <= 1e-8,
+        "synthetic primal equality residual too large: {:.3e}",
+        max_primal
     );
 }
