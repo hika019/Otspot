@@ -1584,8 +1584,6 @@ fn b2_obj_progress_reset_fires_on_improving_objective() {
 ///   failing both assertions below.
 #[test]
 fn batch_pivot_out_uses_single_lu_and_no_btrans() {
-    use std::sync::atomic::Ordering;
-
     const N: usize = 50;
     let m = N + 1;
     let n = N + 1;
@@ -1617,13 +1615,13 @@ fn batch_pivot_out_uses_single_lu_and_no_btrans() {
     opts.simplex_method = SimplexMethod::Primal;
     opts.use_lp_crash_basis = false;
 
-    let btran_before = primal::PIVOT_OUT_BTRAN_COUNT.load(Ordering::SeqCst);
-    let batch_lu_before = primal::PIVOT_OUT_BATCH_LU_COUNT.load(Ordering::SeqCst);
+    let btran_before = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
+    let batch_lu_before = primal::PIVOT_OUT_BATCH_LU_COUNT.with(|c| c.get());
 
     let result = solve_with(&lp, &opts);
 
-    let btran_after = primal::PIVOT_OUT_BTRAN_COUNT.load(Ordering::SeqCst);
-    let batch_lu_after = primal::PIVOT_OUT_BATCH_LU_COUNT.load(Ordering::SeqCst);
+    let btran_after = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
+    let batch_lu_after = primal::PIVOT_OUT_BATCH_LU_COUNT.with(|c| c.get());
 
     assert_eq!(
         result.status,
@@ -1653,5 +1651,107 @@ fn batch_pivot_out_uses_single_lu_and_no_btrans() {
         "batch path must call exactly one LU for {N} matched rows; \
          sequential path never increments this counter \
          (before={batch_lu_before}, after={batch_lu_after})"
+    );
+}
+
+/// Sentinel: batch pivot_out falls back to sequential when the greedy-selected column
+/// is ill-conditioned (large raw |A[r,j]| but FTRAN entry at r nearly cancels to zero).
+///
+/// LP construction (3 rows, 4 structural cols):
+///
+///   col0 = x0: A[:,0] = [1,   1,   1  ]  (Phase I enters this; covers all rows)
+///   col1 = x1: A[:,1] = [1,  −0.5, 0  ]  (well-conditioned alternative for row 1)
+///   col2 = x2: A[:,2] = [0.7, 0,   1  ]  (covers row 2; A[0,x2]=0.7 keeps rc≥0 in Phase I)
+///   col3 = s:  A[:,3] = [1,   1+δ, 0  ]  (spoiler: |A[1,s]|=1+δ > |A[1,x1]|=0.5
+///                                          but FTRAN at row 1 ≈ δ via near-cancellation)
+///   b = [1, 1, 1],  c = [0,0,0,0],  all Eq,  all vars ≥ 0
+///
+/// Phase I dual after x0 enters row 0 (step=1):
+///   y = B_before⁻ᵀ c_B = [−2, 1, 1]  (B_before = [x0|art1|art2], c_B=[0,1,1])
+///   rc_x1 = −y·[1,−0.5,0] =  2.5 > 0  ✓
+///   rc_x2 = −y·[0.7,0,1]  =  0.4 > 0  ✓   (A[0,x2]=0.7 keeps this positive)
+///   rc_s  = −y·[1,1+δ,0]  =  1−δ > 0  ✓
+///
+///   All rc ≥ 0 → Phase I exits immediately with basis=[x0,art1,art2], x_b=[1,0,0].
+///   art1 and art2 are degenerate at rows 1 and 2.  pivot_out is called.
+///
+/// Batch greedy:
+///   row 1: compares |A[1,s]|=1+δ vs |A[1,x1]|=0.5 → picks s.
+///   row 2: only x2 has A[2,x2]=1 ≥ PIVOT_TOL → assigns x2.
+///
+/// B_before⁻¹ = [[1,0,0],[−1,1,0],[−1,0,1]].
+///
+/// Trial basis [x0,s,x2] det = 1·(1+δ)·1 − 1·1·1 + 0.7·(0−1.001) ≈ −0.666 ≠ 0,
+/// so the batch LU SUCCEEDS and commits both pivots.
+///
+/// FTRAN stability for s (j=3, r=1):
+///   d = B_before⁻¹ · [1, 1+δ, 0]ᵀ = [1, δ, −1]ᵀ
+///   |d[1]| / max|d| = δ / 1 = δ = 0.001 < PIVOT_STABILITY_THRESHOLD=0.01 → UNSTABLE.
+///   batch_stable = false → fallback fires. PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT++.
+///
+/// Sequential BTRAN selects x1 for row 1 (z·x1 = −1−0.5 = −1.5 ≫ z·s = δ ≈ 0).
+/// Final basis [x0,x1,x2] is non-singular → solve reaches Optimal with obj=0.
+///
+/// No-op proof: removing the stability check → batch_stable=true, fallback never fires,
+/// counter stays zero → assertion fails.
+///
+/// Ruiz robustness: the LP is near Ruiz-normal (all row/col maxes ≤ 1+δ).
+/// After scaling, FTRAN ratio at row 1 ≈ δ·(r1/r0) ≈ δ < 0.01 — instability survives.
+#[test]
+fn batch_pivot_out_falls_back_to_sequential_for_ill_conditioned_basis() {
+    // δ: FTRAN cancellation ratio at row 1 (δ/1 = 0.001 < threshold 0.01).
+    // Also equals the trial-basis determinant contribution ensuring LU succeeds.
+    const DELTA: f64 = 0.001;
+
+    // A (3×4):
+    //   col0=x0=[1,1,1], col1=x1=[1,-0.5,0], col2=x2=[0.7,0,1], col3=s=[1,1+δ,0]
+    let a = CscMatrix::from_triplets(
+        &[0, 1, 2,  0, 1,  0, 2,  0, 1],
+        &[0, 0, 0,  1, 1,  2, 2,  3, 3],
+        &[1.0, 1.0, 1.0,  1.0, -0.5,  0.7, 1.0,  1.0, 1.0 + DELTA],
+        3,
+        4,
+    )
+    .unwrap();
+
+    let lp = LpProblem::new_general(
+        vec![0.0; 4],
+        a,
+        vec![1.0; 3],
+        vec![ConstraintType::Eq; 3],
+        vec![(0.0, f64::INFINITY); 4],
+        None,
+    )
+    .unwrap();
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.use_lp_crash_basis = false;
+    opts.simplex_method = SimplexMethod::Primal;
+
+    let fallback_before = primal::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.with(|c| c.get());
+
+    let result = solve_with(&lp, &opts);
+
+    let fallback_after = primal::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.with(|c| c.get());
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "LP with ill-conditioned batch must reach Optimal via sequential fallback; got {:?}",
+        result.status
+    );
+    assert!(
+        result.objective.abs() < 1e-8,
+        "trivial zero-cost objective must be 0.0; got {}",
+        result.objective
+    );
+    assert!(
+        fallback_after > fallback_before,
+        "FTRAN stability check must detect ill-conditioned batch (ratio δ={DELTA} < \
+         PIVOT_STABILITY_THRESHOLD=0.01) and trigger sequential fallback; \
+         PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT must increase \
+         (before={fallback_before}, after={fallback_after}). \
+         No-op: removing the stability check keeps this at zero — assertion fails."
     );
 }
