@@ -1566,3 +1566,92 @@ fn b2_obj_progress_reset_fires_on_improving_objective() {
          so the improvement condition never fires"
     );
 }
+
+/// Sentinel: `pivot_out_degenerate_artificials` uses the batch path (O(1) LU, zero BTRANs)
+/// when many degenerate artificials can each be matched to a unique non-basic structural column.
+///
+/// LP construction: m=N+1 rows, n=N+1 structural vars (x_0..x_N), all Eq constraints.
+///   Row 0:        x_0         = 1   (Phase I pivots x_0 in non-degenerately)
+///   Row i=1..N:   x_0 - x_i  = 1   (x_b[i] → 0 after x_0 enters row 0)
+///
+/// The replacement columns x_1..x_N carry coefficient -1 in rows 1..N. Their Phase I
+/// reduced costs = +1 (positive), so Phase I never enters them. The N degenerate
+/// artificials stay in the basis until pivot_out.
+///
+/// No-op proof:
+///   Reverting to the O(num_art) sequential path (btran per row) makes
+///   `PIVOT_OUT_BTRAN_COUNT` increase by N and `PIVOT_OUT_BATCH_LU_COUNT` stay at 0,
+///   failing both assertions below.
+#[test]
+fn batch_pivot_out_uses_single_lu_and_no_btrans() {
+    use std::sync::atomic::Ordering;
+
+    const N: usize = 50;
+    let m = N + 1;
+    let n = N + 1;
+
+    // A[0,0]=1; A[i,0]=1, A[i,i]=-1 for i=1..N  (x_0 - x_i = 1)
+    let mut trip_rows = vec![0usize];
+    let mut trip_cols = vec![0usize];
+    let mut trip_vals = vec![1.0f64];
+    for i in 1..=N {
+        trip_rows.extend_from_slice(&[i, i]);
+        trip_cols.extend_from_slice(&[0, i]);
+        trip_vals.extend_from_slice(&[1.0, -1.0]);
+    }
+    let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n).unwrap();
+
+    // b=[1]*m, c=[1]*n.  Optimal: x_0=1, x_i=0 for i=1..N, obj=1.
+    let lp = LpProblem::new_general(
+        vec![1.0f64; n],
+        a,
+        vec![1.0f64; m],
+        vec![ConstraintType::Eq; m],
+        vec![(0.0f64, f64::INFINITY); n],
+        None,
+    )
+    .unwrap();
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.simplex_method = SimplexMethod::Primal;
+    opts.use_lp_crash_basis = false;
+
+    let btran_before = primal::PIVOT_OUT_BTRAN_COUNT.load(Ordering::SeqCst);
+    let batch_lu_before = primal::PIVOT_OUT_BATCH_LU_COUNT.load(Ordering::SeqCst);
+
+    let result = solve_with(&lp, &opts);
+
+    let btran_after = primal::PIVOT_OUT_BTRAN_COUNT.load(Ordering::SeqCst);
+    let batch_lu_after = primal::PIVOT_OUT_BATCH_LU_COUNT.load(Ordering::SeqCst);
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "LP with {N} degenerate artificials must reach Optimal; got {:?}",
+        result.status
+    );
+    assert!(
+        (result.objective - 1.0).abs() < 1e-6,
+        "expected obj=1.0, got {}",
+        result.objective
+    );
+
+    // Batch path issues zero BTRANs (greedy uses raw |A[r,j]|, not B^{-T}e_i).
+    // Reverting to sequential adds N BTRANs → this fails.
+    assert_eq!(
+        btran_after, btran_before,
+        "batch path must issue zero BTRANs for {N} degenerate artificials; \
+         sequential path would add {N} (before={btran_before}, after={btran_after})"
+    );
+
+    // Batch path does exactly one LU for all N matched rows.
+    // Reverting to sequential never increments this → this fails.
+    assert_eq!(
+        batch_lu_after,
+        batch_lu_before + 1,
+        "batch path must call exactly one LU for {N} matched rows; \
+         sequential path never increments this counter \
+         (before={batch_lu_before}, after={batch_lu_after})"
+    );
+}

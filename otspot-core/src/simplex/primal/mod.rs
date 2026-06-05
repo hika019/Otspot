@@ -64,6 +64,28 @@ pub(crate) static OBJ_PROGRESS_RESET_COUNT: std::sync::atomic::AtomicUsize =
 pub(crate) static CYCLE_DETECT_NONDEGEN_PRESERVED: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Counts BTRAN calls issued inside `pivot_out_degenerate_artificials` sequential fallback
+/// (test-only).
+///
+/// Incremented each time `btran_dense` is called in the per-row sequential path within
+/// `pivot_out_degenerate_artificials`. In the batch path this stays at zero (no BTRANs
+/// needed). Sentinel asserts it is zero after solving an LP where all degenerate
+/// artificials are handled by the batch: reverting to the O(num_art) sequential path
+/// makes it increase by num_art, failing the assertion (no-op FAIL).
+#[cfg(test)]
+pub(crate) static PIVOT_OUT_BTRAN_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts batch LU factorization attempts in `pivot_out_degenerate_artificials` (test-only).
+///
+/// Incremented once each time the batch greedy assignment is attempted and a single
+/// `LuBasis::new_timed` is called for all matched rows. Sentinel asserts it increases
+/// by exactly 1 when the batch path is taken. Reverting to the sequential path keeps
+/// this at zero and fails the assertion (no-op FAIL).
+#[cfg(test)]
+pub(crate) static PIVOT_OUT_BATCH_LU_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Verified-ray gate for a Phase II `Unbounded` exit (shared with the Big-M
 /// path). An eta-drift false-Unbounded (`B⁻¹a_q` reads ≤ 0 only because of a
 /// stale factorization) becomes an honest Timeout, mirroring the Phase-I Farkas
