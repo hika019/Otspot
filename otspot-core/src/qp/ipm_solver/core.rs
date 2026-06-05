@@ -38,6 +38,15 @@ pub fn run_ipm(
     presolve_result: &QpPresolveResult,
     opts: &SolverOptions,
 ) -> IpmOutcome {
+    run_ipm_with_user_eps(orig_problem, presolve_result, opts, opts.ipm_eps())
+}
+
+pub(super) fn run_ipm_with_user_eps(
+    orig_problem: &QpProblem,
+    presolve_result: &QpPresolveResult,
+    opts: &SolverOptions,
+    user_eps: f64,
+) -> IpmOutcome {
     if opts.validate().is_err() {
         return IpmOutcome {
             numerical_failure: true,
@@ -48,6 +57,7 @@ pub fn run_ipm(
         orig_problem,
         presolve_result,
         opts,
+        user_eps,
         crate::qp::ipm_core::solve_qp_ippmm,
     )
 }
@@ -56,6 +66,7 @@ fn run_ipm_with(
     orig_problem: &QpProblem,
     presolve_result: &QpPresolveResult,
     opts: &SolverOptions,
+    user_eps: f64,
     inner_solver: InnerSolver,
 ) -> IpmOutcome {
     let reduced = &presolve_result.reduced;
@@ -182,13 +193,12 @@ fn run_ipm_with(
     let ipm_made_progress = result.iterations > 0;
     let allow_primal = allow_primal_projection(orig_problem);
 
-    let user_eps_for_skip = opts.ipm_eps();
     let kkt_already_pass = kkt_already_passes(
         orig_problem,
         &final_sol,
         &eliminated_cols,
         result.status == SolveStatus::Optimal,
-        user_eps_for_skip,
+        user_eps,
     );
     // Stage 1+2 (primal projection + y/z refit/IRLS): run for side effects on
     // `final_sol` only when the solution does not already meet the tolerance.
