@@ -28,6 +28,12 @@ thread_local! {
     static INJECT_REDUCED_TIMEOUT_QP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Iteration count the test hook stamps onto the injected reduced-space Timeout,
+/// so a sentinel can assert the QP→LP-dispatch early-return carries `iterations`
+/// through. A 0 here would re-introduce the pds-20 `iters=0` reporting artifact.
+#[cfg(test)]
+const REDUCED_TIMEOUT_QP_INJECT_ITERS: usize = 6271;
+
 fn timeout_result_lp_dispatch() -> SolverResult {
     let mut timeout = SolverResult {
         status: SolveStatus::Timeout,
@@ -184,6 +190,7 @@ fn solve_reduced_lp_from_qp(
         SolverResult {
             status: SolveStatus::Timeout,
             solution: vec![0.0; reduced_lp.num_vars],
+            iterations: REDUCED_TIMEOUT_QP_INJECT_ITERS,
             ..Default::default()
         }
     } else {
@@ -224,7 +231,11 @@ fn solve_reduced_lp_from_qp(
         if raw.status == SolveStatus::Timeout && deadline_expired {
             // `raw.solution` is in the reduced variable space; propagating it would
             // violate the SolverResult contract (solution must be in the original
-            // variable space or empty). Return an empty Timeout result.
+            // variable space or empty). Return an empty Timeout result — but carry
+            // `raw.iterations` through: it is reduced-space-independent diagnostic
+            // metadata, and dropping it reports a misleading `iters=0` for a solve
+            // that ran many pivots (this is the pds-20 QP→LP-dispatch artifact that
+            // masqueraded as an initial-LU hang).
             let mut timeout = SolverResult {
                 status: SolveStatus::Timeout,
                 objective: f64::INFINITY,
@@ -233,6 +244,7 @@ fn solve_reduced_lp_from_qp(
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+                iterations: raw.iterations,
                 timing_breakdown: Some(crate::problem::TimingBreakdown {
                     presolve_us,
                     solve_us,
@@ -1163,6 +1175,47 @@ mod tests {
             n == 0 || n == orig_n,
             "injected Timeout: solution.len()={n} must be 0 or {orig_n}, \
              never 2 (reduced — lp_dispatch reduced-space leak)",
+        );
+    }
+
+    /// Sentinel: the QP→LP-dispatch reduced-space Timeout early-return must carry
+    /// the reduced solve's `iterations` through, not drop it to 0. The injected raw
+    /// stamps `REDUCED_TIMEOUT_QP_INJECT_ITERS`; pre-fix the rebuilt result used
+    /// `..Default::default()` (iterations=0) — the exact pds-20 artifact where a
+    /// 15000+-pivot solve reported `iters=0`, masking ⑤ (slow/time-limited) as a
+    /// stuck/initial-LU hang.
+    #[test]
+    fn reduced_timeout_preserves_iteration_count_in_qp_path() {
+        use crate::options::SolverOptions;
+        use crate::problem::SolveStatus;
+
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 2, 1, 2],
+            &[0, 1, 1, 2, 2],
+            &[1.0, 2.0, 1.0, 1.0, 2.0],
+            3,
+            3,
+        )
+        .unwrap();
+        let problem = QpProblem::new(
+            CscMatrix::new(3, 3),
+            vec![1.0, 1.0, 1.0],
+            a,
+            vec![5.0, 3.0, 3.0],
+            vec![(0.0, f64::INFINITY); 3],
+            vec![ConstraintType::Eq, ConstraintType::Ge, ConstraintType::Ge],
+        )
+        .unwrap();
+
+        INJECT_REDUCED_TIMEOUT_QP.with(|v| v.set(true));
+        let r = solve_as_lp(&problem, &SolverOptions { presolve: true, ..Default::default() });
+        INJECT_REDUCED_TIMEOUT_QP.with(|v| v.set(false));
+        assert_eq!(r.status, SolveStatus::Timeout, "injected path must return Timeout");
+        assert_eq!(
+            r.iterations, REDUCED_TIMEOUT_QP_INJECT_ITERS,
+            "QP→LP-dispatch reduced Timeout must carry raw.iterations ({}); got {} \
+             — dropping it reports a misleading iters=0 (pds-20 artifact)",
+            REDUCED_TIMEOUT_QP_INJECT_ITERS, r.iterations
         );
     }
 }
