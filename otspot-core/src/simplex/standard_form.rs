@@ -354,9 +354,9 @@ pub(crate) struct BoundedStandardForm {
     pub(crate) n_shifted: usize,
     pub(crate) n_total: usize,
     pub(crate) initial_basis: Vec<usize>,
-    /// Which rows require an artificial variable. Only needed by the test
-    /// helper `wrap_to_legacy`; not read in production.
-    #[cfg(test)]
+    /// Which rows require an artificial variable. Read by the Eq+UB bounded
+    /// Phase I path to place artificials and gate dispatch; also used by the
+    /// test helper `wrap_to_legacy`.
     pub(crate) needs_artificial: Vec<bool>,
     pub(crate) num_artificial: usize,
     pub(crate) obj_offset: f64,
@@ -497,7 +497,6 @@ pub(crate) fn build_bounded_standard_form_with_deadline(
     let n_total = n_shifted + n_slack;
 
     let mut initial_basis = vec![0usize; m_orig];
-    #[cfg(test)]
     let mut needs_artificial = vec![false; m_orig];
     let mut num_artificial = 0usize;
 
@@ -511,19 +510,13 @@ pub(crate) fn build_bounded_standard_form_with_deadline(
                 if slack_coeff[i] > 0.0 || b[i].abs() <= PIVOT_TOL {
                     initial_basis[i] = col;
                 } else {
-                    #[cfg(test)]
-                    {
-                        needs_artificial[i] = true;
-                    }
+                    needs_artificial[i] = true;
                     num_artificial += 1;
                     initial_basis[i] = col;
                 }
             }
             None => {
-                #[cfg(test)]
-                {
-                    needs_artificial[i] = true;
-                }
+                needs_artificial[i] = true;
                 num_artificial += 1;
             }
         }
@@ -581,7 +574,6 @@ pub(crate) fn build_bounded_standard_form_with_deadline(
         n_shifted,
         n_total,
         initial_basis,
-        #[cfg(test)]
         needs_artificial,
         num_artificial,
         obj_offset,
