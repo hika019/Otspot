@@ -88,6 +88,7 @@ pub(super) fn refine_post_processing(
     opts: &SolverOptions,
     allow_primal: bool,
 ) -> f64 {
+    let user_eps = opts.ipm_eps();
     let view = build_view(orig_problem, eliminated_cols);
 
     // (1) primal projection: 違反制約に対して x を最小ノルム射影。
@@ -100,7 +101,7 @@ pub(super) fn refine_post_processing(
             final_sol.solution = pre_x;
         } else {
             // x 改善時は z を新 x に合わせて refit。
-            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, user_eps);
         }
     }
 
@@ -149,7 +150,7 @@ pub(super) fn refine_post_processing(
         }
 
         let pre_z = final_sol.bound_duals.clone();
-        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, user_eps);
         let post_kkt = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -168,7 +169,6 @@ pub(super) fn refine_post_processing(
     }
 
     // 標準 LSQ が componentwise eps を満たさない場合 IRLS で L∞ 風 y を試行。
-    let user_eps = opts.ipm_eps();
     loop {
         if current_kkt <= user_eps {
             break;
@@ -213,7 +213,7 @@ pub(super) fn refine_post_processing(
         if post_kkt_irls < current_kkt {
             current_kkt = post_kkt_irls;
             let pre_z = final_sol.bound_duals.clone();
-            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, user_eps);
             let post_kkt_z = kkt_residual_rel(
                 &view,
                 &final_sol.solution,
@@ -285,7 +285,7 @@ pub(super) fn refine_krylov_and_projection(
         crate::qp::refine_primal_lsq(orig_problem, final_sol, opts.deadline);
         let post_pres2 = primal_residual_rel(&view, &final_sol.solution);
         if post_pres2 < pres_post_ir {
-            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, user_eps);
             let kkt_after2 = kkt_residual_rel(
                 &view,
                 &final_sol.solution,

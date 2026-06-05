@@ -13,6 +13,7 @@ pub(crate) fn run_dual_recovery_postprocess(
     view: &crate::qp::ipm_solver::outcome::ProblemView<'_>,
     result: &mut crate::problem::SolverResult,
     deadline: Option<std::time::Instant>,
+    comp_tol: f64,
 ) -> f64 {
     let eliminated_cols = view.eliminated_cols;
     let pre_cleanup = result.clone();
@@ -34,7 +35,7 @@ pub(crate) fn run_dual_recovery_postprocess(
         &result.dual_solution,
         &result.bound_duals,
     );
-    refit_bound_duals_kkt(problem, result);
+    refit_bound_duals_kkt(problem, result, comp_tol);
     let post_refit_kkt = crate::qp::ipm_solver::kkt::kkt_residual_rel(
         view,
         &result.solution,

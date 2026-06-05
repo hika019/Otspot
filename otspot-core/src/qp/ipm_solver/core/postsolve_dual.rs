@@ -53,7 +53,7 @@ pub(super) fn refine_postsolve_dual_lsq(
             *final_sol = best_sol;
             return;
         }
-        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, opts.ipm_eps());
         crate::qp::refine_dual_lsq(orig_problem, final_sol, eliminated_cols, opts.deadline);
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
@@ -69,7 +69,7 @@ pub(super) fn refine_postsolve_dual_lsq(
             eliminated_cols,
             opts.deadline,
         );
-        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, opts.ipm_eps());
         let cur = kkt_residual_rel(
             &view0,
             &final_sol.solution,
@@ -123,7 +123,7 @@ pub(super) fn refine_postsolve_recovery(
             *final_sol = best_sol;
             return;
         }
-        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, opts.ipm_eps());
         // y[row] を逆順で SingletonRow から復元 (後退代入)
         for step in presolve_result.postsolve_stack.steps.iter().rev() {
             let (row, col) = match step {
@@ -147,7 +147,7 @@ pub(super) fn refine_postsolve_recovery(
             eliminated_cols,
             opts.deadline,
         );
-        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, opts.ipm_eps());
         let cur_kkt = kkt_residual_rel(
             &view0,
             &final_sol.solution,

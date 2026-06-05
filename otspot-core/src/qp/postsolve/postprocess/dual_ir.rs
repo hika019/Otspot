@@ -394,7 +394,7 @@ pub(crate) fn try_dual_only_ir(
         tmp.dual_solution[i] = f64::from(y_dd[i]);
     }
     // 採用判定前に z を取り直す (y-only 更新を stale な z で評価すると改善候補を落とす)。
-    refit_bound_duals_kkt(problem, &mut tmp);
+    refit_bound_duals_kkt(problem, &mut tmp, target_pf);
 
     let kkt_post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
         &view,
