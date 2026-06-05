@@ -4,7 +4,7 @@
 use otspot::io::qps::parse_qps;
 
 use otspot::options::SolverOptions;
-use otspot::problem::SolveStatus;
+use otspot::problem::{ConstraintType, SolveStatus};
 use otspot::qp::{solve_qp_with, QpProblem};
 use std::path::Path;
 
@@ -51,6 +51,67 @@ fn dfeas_rel_bound_aware(prob: &QpProblem, x: &[f64], rc: &[f64]) -> f64 {
     dfeas_rel
 }
 
+fn primal_feas_rel(prob: &QpProblem, x: &[f64]) -> Result<f64, String> {
+    let ax = prob
+        .a
+        .mat_vec_mul(x)
+        .map_err(|e| format!("A*x failed: {:?}", e))?;
+    let mut worst = 0.0_f64;
+    for (i, ((&lhs, &rhs), &ctype)) in ax
+        .iter()
+        .zip(prob.b.iter())
+        .zip(prob.constraint_types.iter())
+        .enumerate()
+    {
+        let viol = match ctype {
+            ConstraintType::Le => f64::max(0.0, lhs - rhs),
+            ConstraintType::Ge => f64::max(0.0, rhs - lhs),
+            ConstraintType::Eq => (lhs - rhs).abs(),
+            _ => return Err(format!("row {i}: unsupported constraint type")),
+        };
+        let scale = 1.0 + lhs.abs() + rhs.abs();
+        let rel = viol / scale;
+        if rel > worst {
+            worst = rel;
+        }
+        if !rel.is_finite() {
+            return Err(format!("row {i}: non-finite primal residual"));
+        }
+    }
+    for (j, (&xj, &(lb, ub))) in x.iter().zip(prob.bounds.iter()).enumerate() {
+        let lb_viol = if lb.is_finite() {
+            f64::max(0.0, lb - xj)
+        } else {
+            0.0
+        };
+        let ub_viol = if ub.is_finite() {
+            f64::max(0.0, xj - ub)
+        } else {
+            0.0
+        };
+        let lb_scale = if lb.is_finite() { lb.abs() } else { 0.0 };
+        let ub_scale = if ub.is_finite() { ub.abs() } else { 0.0 };
+        let scale = 1.0 + xj.abs() + lb_scale + ub_scale;
+        let rel = lb_viol.max(ub_viol) / scale;
+        if rel > worst {
+            worst = rel;
+        }
+        if !rel.is_finite() {
+            return Err(format!("var {j}: non-finite bound residual"));
+        }
+    }
+    Ok(worst)
+}
+
+fn lp_objective(prob: &QpProblem, x: &[f64]) -> f64 {
+    prob.c
+        .iter()
+        .zip(x.iter())
+        .map(|(&cj, &xj)| cj * xj)
+        .sum::<f64>()
+        + prob.obj_offset
+}
+
 fn has_usable_incumbent(status: &SolveStatus) -> bool {
     matches!(
         status,
@@ -65,6 +126,7 @@ fn check_postsolve_dual_feasibility(
     qp_path: &str,
     eps_dual: f64,
     timeout_s: f64,
+    expected_obj: Option<f64>,
 ) -> Result<String, String> {
     let path = Path::new(qp_path);
     assert!(
@@ -76,17 +138,30 @@ fn check_postsolve_dual_feasibility(
     let mut opts = SolverOptions::default();
     opts.presolve = true;
     opts.timeout_secs = Some(timeout_s);
+    opts.known_optimal_obj = expected_obj;
     let r = solve_qp_with(&prob, &opts);
     let (df_abs, df_rel_strict) = dfeas_abs_rel(&prob, &r.reduced_costs);
     let df_rel_bound = dfeas_rel_bound_aware(&prob, &r.solution, &r.reduced_costs);
+    let primal_rel = if r.solution.len() == prob.num_vars {
+        primal_feas_rel(&prob, &r.solution)?
+    } else {
+        f64::INFINITY
+    };
+    let obj_recomputed = if r.solution.len() == prob.num_vars {
+        lp_objective(&prob, &r.solution)
+    } else {
+        f64::INFINITY
+    };
     let summary = format!(
-        "{}: status={:?} obj={:.4e} sol_len={} rc_len={} n={} df_abs={:.2e} df_rel_strict={:.2e} df_rel_bound={:.2e}",
+        "{}: status={:?} obj={:.4e} obj_recomputed={:.4e} sol_len={} rc_len={} n={} primal_rel={:.2e} df_abs={:.2e} df_rel_strict={:.2e} df_rel_bound={:.2e}",
         qp_path,
         r.status,
         r.objective,
+        obj_recomputed,
         r.solution.len(),
         r.reduced_costs.len(),
         prob.num_vars,
+        primal_rel,
         df_abs,
         df_rel_strict,
         df_rel_bound
@@ -106,6 +181,25 @@ fn check_postsolve_dual_feasibility(
             summary
         ));
     }
+    if primal_rel > eps_dual {
+        return Err(format!("{} | primal_rel > eps={}", summary, eps_dual));
+    }
+    let obj_scale = r.objective.abs().max(obj_recomputed.abs()).max(1.0);
+    if (r.objective - obj_recomputed).abs() / obj_scale > eps_dual {
+        return Err(format!(
+            "{} | reported objective must match c^T x within eps={}",
+            summary, eps_dual
+        ));
+    }
+    if let Some(expected) = expected_obj {
+        let expected_scale = expected.abs().max(1.0);
+        if (r.objective - expected).abs() / expected_scale > 5e-3 {
+            return Err(format!(
+                "{} | objective must match known optimum {:.6e} within rel_tol=5e-3",
+                summary, expected
+            ));
+        }
+    }
     // bound 考慮版を主判定にする (c69959d 以降の bench と同等)。
     if df_rel_bound > eps_dual {
         return Err(format!("{} | df_rel_bound > eps={}", summary, eps_dual));
@@ -116,7 +210,7 @@ fn check_postsolve_dual_feasibility(
 /// perold: postsolve dual 復元退化の canary。
 #[test]
 fn perold_postsolve_dual_feasibility() {
-    let r = check_postsolve_dual_feasibility("data/lp_problems/perold.QPS", 1e-6, 120.0);
+    let r = check_postsolve_dual_feasibility("data/lp_problems/perold.QPS", 1e-6, 120.0, None);
     match r {
         Ok(s) => eprintln!("PASS {}", s),
         Err(e) => panic!("{}", e),
@@ -167,7 +261,7 @@ macro_rules! netlib_postsolve_test {
     ($name:ident, $file:expr, $eps:expr, $timeout:expr) => {
         #[test]
         fn $name() {
-            let r = check_postsolve_dual_feasibility($file, $eps, $timeout);
+            let r = check_postsolve_dual_feasibility($file, $eps, $timeout, None);
             match r {
                 Ok(s) => eprintln!("PASS {}", s),
                 Err(e) => panic!("{}", e),
@@ -215,7 +309,12 @@ netlib_postsolve_test!(
 #[test]
 #[ignore = "重 LP (timeout 300s 必要); cargo test -- --ignored で明示実行"]
 fn cre_b_postsolve_dual_feasibility() {
-    let r = check_postsolve_dual_feasibility("data/lp_problems/cre-b.QPS", 1e-6, 300.0);
+    let r = check_postsolve_dual_feasibility(
+        "data/lp_problems/cre-b.QPS",
+        1e-6,
+        360.0,
+        Some(2.3129640e7),
+    );
     match r {
         Ok(s) => eprintln!("PASS {}", s),
         Err(e) => panic!("{}", e),
@@ -230,7 +329,12 @@ fn cre_b_postsolve_dual_feasibility() {
 #[test]
 #[ignore = "heavy ~164s idle、bench 並行下 flaky (170s margin 6s)。--run-ignored only"]
 fn greenbea_postsolve_dual_feasibility() {
-    let r = check_postsolve_dual_feasibility("data/lp_problems/greenbea.QPS", 1e-6, 170.0);
+    let r = check_postsolve_dual_feasibility(
+        "data/lp_problems/greenbea.QPS",
+        1e-6,
+        170.0,
+        Some(-7.2555248130e7),
+    );
     match r {
         Ok(s) => eprintln!("PASS {}", s),
         Err(e) => panic!("{}", e),
@@ -241,7 +345,12 @@ fn greenbea_postsolve_dual_feasibility() {
 #[test]
 #[ignore = "重 LP (≈ 200s); cargo test -- --ignored で明示実行"]
 fn pds_10_postsolve_dual_feasibility() {
-    let r = check_postsolve_dual_feasibility("data/lp_problems/pds-10.QPS", 1e-6, 200.0);
+    let r = check_postsolve_dual_feasibility(
+        "data/lp_problems/pds-10.QPS",
+        1e-6,
+        180.0,
+        Some(2.6727095e10),
+    );
     match r {
         Ok(s) => eprintln!("PASS {}", s),
         Err(e) => panic!("{}", e),
