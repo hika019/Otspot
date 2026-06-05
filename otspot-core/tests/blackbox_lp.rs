@@ -13,11 +13,23 @@ use otspot_core::lp::solve_lp_with;
 use otspot_core::options::SolverOptions;
 use otspot_core::problem::{ConstraintType, LpProblem, SolveStatus};
 use otspot_core::sparse::CscMatrix;
+use otspot_model::{Expression, Model, ModelError, SolveError, Variable};
 
 const INF: f64 = f64::INFINITY;
 const EPS_OBJ: f64 = 1e-6;
 const EPS_X: f64 = 1e-5;
 const EPS_RC: f64 = 1e-5;
+const HARD_LP_EPS_OBJ: f64 = 5e-6;
+const HARD_LP_EPS_X: f64 = 2e-4;
+const HARD_LP_EPS_RESID: f64 = 2e-5;
+const HARD_LP_TIMEOUT_SECS: f64 = 10.0;
+const HARD_LP_INF: f64 = f64::INFINITY;
+const HARD_LP_LARGE_M: usize = 50;
+const HARD_LP_LARGE_N: usize = 100;
+const HARD_LP_LARGE_EXPECTED_OBJ: f64 = -4.406_871_388_953_238;
+const HARD_LP_ILL_EXPECTED_OBJ: f64 = -6.099_999_999_814_999;
+const HARD_LP_DEGENERATE_EXPECTED_OBJ: f64 = -1.0;
+const HARD_LP_NEAR_TIE_EXPECTED_OBJ: f64 = -1.000_000_005_9;
 
 fn opts() -> SolverOptions {
     SolverOptions::default()
@@ -36,6 +48,38 @@ fn assert_x(actual: f64, expected: f64, label: &str) {
     assert!(
         diff < EPS_X,
         "{label}: x={actual:.9e} expected={expected:.9e} diff={diff:.3e}"
+    );
+}
+
+fn hard_lp_expr(vars: &[Variable], terms: &[(usize, f64)]) -> Expression {
+    let mut expr = Expression::from_constant(0.0);
+    for &(var_idx, coeff) in terms {
+        expr = expr + coeff * vars[var_idx];
+    }
+    expr
+}
+
+fn hard_lp_assert_model_obj(actual: f64, expected: f64, label: &str) {
+    let rel = (actual - expected).abs() / (1.0 + expected.abs());
+    assert!(
+        rel < HARD_LP_EPS_OBJ,
+        "{label}: obj={actual:.12e} expected={expected:.12e} rel={rel:.3e}"
+    );
+}
+
+fn hard_lp_assert_model_x(actual: f64, expected: f64, label: &str) {
+    let diff = (actual - expected).abs();
+    assert!(
+        diff < HARD_LP_EPS_X,
+        "{label}: x={actual:.12e} expected={expected:.12e} diff={diff:.3e}"
+    );
+}
+
+fn hard_lp_assert_resid(actual: f64, expected: f64, label: &str) {
+    let diff = (actual - expected).abs();
+    assert!(
+        diff < HARD_LP_EPS_RESID,
+        "{label}: residual actual={actual:.12e} expected={expected:.12e} diff={diff:.3e}"
     );
 }
 
@@ -59,7 +103,11 @@ fn ep_lp_infeasible() {
     )
     .unwrap();
     let r = solve_lp_with(&lp, &opts());
-    assert_eq!(r.status, SolveStatus::Infeasible, "ep_lp_infeasible: status");
+    assert_eq!(
+        r.status,
+        SolveStatus::Infeasible,
+        "ep_lp_infeasible: status"
+    );
 }
 
 /// EP: Unbounded LP — minimizing in a direction with no lower bound.
@@ -70,15 +118,7 @@ fn ep_lp_infeasible() {
 fn ep_lp_unbounded() {
     // No constraint rows — lb=0, ub=+inf, c=-1: unbounded below.
     let a = CscMatrix::new(0, 1);
-    let lp = LpProblem::new_general(
-        vec![-1.0],
-        a,
-        vec![],
-        vec![],
-        vec![(0.0, INF)],
-        None,
-    )
-    .unwrap();
+    let lp = LpProblem::new_general(vec![-1.0], a, vec![], vec![], vec![(0.0, INF)], None).unwrap();
     let r = solve_lp_with(&lp, &opts());
     assert_eq!(r.status, SolveStatus::Unbounded, "ep_lp_unbounded: status");
 }
@@ -114,14 +154,8 @@ fn ep_lp_single_variable() {
 #[test]
 fn ep_lp_all_equality() {
     // A: row0=(1,1), row1=(1,-1)
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 0, 1],
-        &[1.0, 1.0, 1.0, -1.0],
-        2,
-        2,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2)
+        .unwrap();
     let lp = LpProblem::new_general(
         vec![1.0, 2.0],
         a,
@@ -305,14 +339,8 @@ fn bva_lp_tight_constraint() {
 #[test]
 fn bva_lp_degenerate_vertex() {
     // Constraints: rows 0=Ge(x>=1), 1=Ge(y>=1), 2=Le(x+y<=5)
-    let a = CscMatrix::from_triplets(
-        &[0, 1, 2, 2],
-        &[0, 1, 0, 1],
-        &[1.0, 1.0, 1.0, 1.0],
-        3,
-        2,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 1, 2, 2], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 3, 2)
+        .unwrap();
     let lp = LpProblem::new_general(
         vec![1.0, 1.0],
         a,
@@ -378,10 +406,7 @@ fn dt_lp_ge_box_min() {
     assert_obj(r.objective, 4.0, "dt_ge_box_min obj=4");
     // Primal feasibility: x+y >= 4
     let sum = r.solution[0] + r.solution[1];
-    assert!(
-        sum >= 4.0 - 1e-5,
-        "dt_ge_box_min: x+y={sum:.6} must be ≥4"
-    );
+    assert!(sum >= 4.0 - 1e-5, "dt_ge_box_min: x+y={sum:.6} must be ≥4");
 }
 
 /// DT: Eq + box + minimize → unique optimum at specific vertex.
@@ -537,15 +562,8 @@ fn st_lp_flip_to_unbounded() {
 
     // P2: no constraint at all (ub=+inf, c=-1 → min -x unbounded)
     let a2 = CscMatrix::new(0, 1);
-    let lp2 = LpProblem::new_general(
-        vec![-1.0],
-        a2,
-        vec![],
-        vec![],
-        vec![(0.0, INF)],
-        None,
-    )
-    .unwrap();
+    let lp2 =
+        LpProblem::new_general(vec![-1.0], a2, vec![], vec![], vec![(0.0, INF)], None).unwrap();
     let r2 = solve_lp_with(&lp2, &opts());
     assert_eq!(r2.status, SolveStatus::Unbounded, "st_unbounded: P2 status");
 }
@@ -562,14 +580,8 @@ fn st_lp_flip_to_unbounded() {
 #[test]
 fn presolve_singleton_eq_postsolve_roundtrip() {
     // rows: 0=Le(x+y+z<=10), 1=Eq(x=4)
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 0, 1],
-        &[0, 1, 2, 0],
-        &[1.0, 1.0, 1.0, 1.0],
-        2,
-        3,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 0, 1], &[0, 1, 2, 0], &[1.0, 1.0, 1.0, 1.0], 2, 3)
+        .unwrap();
     let lp = LpProblem::new_general(
         vec![2.0, 3.0, 5.0],
         a,
@@ -580,7 +592,11 @@ fn presolve_singleton_eq_postsolve_roundtrip() {
     )
     .unwrap();
     let r = solve_lp_with(&lp, &opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "presolve_singleton_eq: status");
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "presolve_singleton_eq: status"
+    );
     assert_obj(r.objective, 8.0, "presolve_singleton_eq");
     assert_x(r.solution[0], 4.0, "presolve_singleton_eq x*=4");
     assert_x(r.solution[1], 0.0, "presolve_singleton_eq y*=0");
@@ -595,14 +611,7 @@ fn presolve_singleton_eq_postsolve_roundtrip() {
 #[test]
 fn presolve_forcing_constraint_postsolve_roundtrip() {
     // rows: 0=Le(x+y<=3), 1=Ge(x>=3)
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1],
-        &[0, 1, 0],
-        &[1.0, 1.0, 1.0],
-        2,
-        2,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 0], &[1.0, 1.0, 1.0], 2, 2).unwrap();
     let lp = LpProblem::new_general(
         vec![1.0, 1.0],
         a,
@@ -676,10 +685,7 @@ fn postsolve_lp_le_dual_kkt() {
 
     // Primal feasibility: x+y ≤ 6
     let axb = r.solution[0] + r.solution[1];
-    assert!(
-        axb <= 6.0 + 1e-5,
-        "dual_le primal feas: x+y={axb:.6} ≤ 6"
-    );
+    assert!(axb <= 6.0 + 1e-5, "dual_le primal feas: x+y={axb:.6} ≤ 6");
 
     // Dual feasibility: Le binding → dual ≤ 0
     if !r.dual_solution.is_empty() {
@@ -738,10 +744,7 @@ fn postsolve_lp_ge_dual_kkt() {
 
     // Primal feasibility: x+y ≥ 2
     let axb = r.solution[0] + r.solution[1];
-    assert!(
-        axb >= 2.0 - 1e-5,
-        "dual_ge primal feas: x+y={axb:.6} ≥ 2"
-    );
+    assert!(axb >= 2.0 - 1e-5, "dual_ge primal feas: x+y={axb:.6} ≥ 2");
 
     // Dual feasibility: Ge binding → dual ≥ 0
     if !r.dual_solution.is_empty() {
@@ -860,14 +863,8 @@ fn ep_lp_free_bounded_mix() {
 ///   x*=1, y*=5, obj=-17.
 #[test]
 fn ep_lp_max_two_constraints_active() {
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 0, 1],
-        &[1.0, 1.0, 2.0, 1.0],
-        2,
-        2,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 2.0, 1.0], 2, 2)
+        .unwrap();
     let lp = LpProblem::new_general(
         vec![-2.0, -3.0],
         a,
@@ -1163,7 +1160,11 @@ fn st_lp_rhs_parametric_sweep() {
     assert_obj(r2.objective, 5.0, "st_sweep P2 obj=5");
 
     let r3 = solve_lp_with(&build(11.0), &opts());
-    assert_eq!(r3.status, SolveStatus::Infeasible, "st_sweep P3: Infeasible");
+    assert_eq!(
+        r3.status,
+        SolveStatus::Infeasible,
+        "st_sweep P3: Infeasible"
+    );
 }
 
 /// ST: Le constraint transitions active → inactive as RHS is raised.
@@ -1221,15 +1222,8 @@ fn st_lp_le_active_to_inactive() {
 fn st_lp_unbounded_to_optimal_by_constraint() {
     // P1: no Le constraint, unbounded
     let a1 = CscMatrix::new(0, 1);
-    let lp1 = LpProblem::new_general(
-        vec![-1.0],
-        a1,
-        vec![],
-        vec![],
-        vec![(0.0, INF)],
-        None,
-    )
-    .unwrap();
+    let lp1 =
+        LpProblem::new_general(vec![-1.0], a1, vec![], vec![], vec![(0.0, INF)], None).unwrap();
     let r1 = solve_lp_with(&lp1, &opts());
     assert_eq!(r1.status, SolveStatus::Unbounded, "st_unbounded P1: status");
 
@@ -1313,14 +1307,7 @@ fn pw_lp_le_free_max_unit() {
 #[test]
 fn pw_lp_ge_box_min_unit_degen() {
     // rows: 0=Ge(x+y>=4), 1=Ge(x>=2)
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1],
-        &[0, 1, 0],
-        &[1.0, 1.0, 1.0],
-        2,
-        2,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 0], &[1.0, 1.0, 1.0], 2, 2).unwrap();
     let lp = LpProblem::new_general(
         vec![1.0, 1.0],
         a,
@@ -1396,14 +1383,7 @@ fn pw_lp_ge_fixed_min_unit() {
 ///           bounds=[(0,5),(0,5)]) → fun=3e-4
 #[test]
 fn pw_lp_ge_box_min_ill_degen() {
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1],
-        &[0, 1, 0],
-        &[1.0, 1.0, 1.0],
-        2,
-        2,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 0], &[1.0, 1.0, 1.0], 2, 2).unwrap();
     let lp = LpProblem::new_general(
         vec![1e-4, 1e-4],
         a,
@@ -1478,14 +1458,8 @@ fn pw_lp_le_ub_max_ill() {
 ///   scipy: linprog([-3,-2], A_ub=[[1,1],[1,2]], b_ub=[4,6], bounds=[(0,3),(0,3)]) → fun=-11.0
 #[test]
 fn ct_lp_small_le_box_max() {
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 0, 1],
-        &[1.0, 1.0, 1.0, 2.0],
-        2,
-        2,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 2.0], 2, 2)
+        .unwrap();
     let lp = LpProblem::new_general(
         vec![-3.0, -2.0],
         a,
@@ -1515,14 +1489,8 @@ fn ct_lp_small_le_box_max() {
 fn ct_lp_small_mixed_le_ge_ill() {
     // row 0: Ge x+y+z>=2 → stored as -x-y-z<=-2
     // row 1: Le y<=3
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 0, 1],
-        &[0, 1, 2, 1],
-        &[1.0, 1.0, 1.0, 1.0],
-        2,
-        3,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 0, 1], &[0, 1, 2, 1], &[1.0, 1.0, 1.0, 1.0], 2, 3)
+        .unwrap();
     let lp = LpProblem::new_general(
         vec![1e4, 1.0, 1.0],
         a,
@@ -1585,4 +1553,229 @@ fn ct_lp_medium_10var_ge() {
     for i in 0..5 {
         assert_x(r.solution[i], 2.0, &format!("ct_medium_10var x[{i}]*=2"));
     }
+}
+
+// ─── HARD DATA SENTINELS (SCIPY ORACLES, MODEL EXPRESSION API) ─────────────
+
+/// Hard LP: Eq + UB with coefficients spanning 1e-10..1e10.
+///
+/// SciPy oracle:
+/// `linprog(c, A_eq=A, b_eq=b, bounds=bounds, method="highs")`
+/// returned status 0, fun = -6.099999999814999, x = [4,2,4,0,0,3].
+#[test]
+fn hard_lp_ill_scaled_eq_ub_expression_scipy_oracle() {
+    let mut model = Model::new("hard_lp_ill_scaled_eq_ub_expression");
+    model.set_timeout(HARD_LP_TIMEOUT_SECS);
+    let vars = vec![
+        model.add_var("x0", 0.0, 5.0),
+        model.add_var("x1", 0.0, 4.0),
+        model.add_var("x2", 0.0, 4.5),
+        model.add_var("x3", 0.0, 3.0),
+        model.add_var("x4", 0.0, 2.0),
+        model.add_var("x5", 0.0, 3.0),
+    ];
+
+    model.add_constraint(
+        hard_lp_expr(&vars, &[(0, 1e-10), (1, 1.0)]).eq_constraint(2.000_000_000_3),
+    );
+    model.add_constraint(
+        hard_lp_expr(&vars, &[(2, 1e10), (3, 1.0)]).eq_constraint(40_000_000_001.0),
+    );
+    model.add_constraint(hard_lp_expr(&vars, &[(0, 1.0), (2, 1.0), (4, 1.0)]).eq_constraint(8.0));
+    model.add_constraint(hard_lp_expr(&vars, &[(1, 1.0), (3, 1.0), (5, 1.0)]).eq_constraint(5.0));
+    model.minimize(hard_lp_expr(
+        &vars,
+        &[
+            (0, -1.0),
+            (1, 0.25),
+            (2, -0.5),
+            (3, 0.75),
+            (4, 0.1),
+            (5, -0.2),
+        ],
+    ));
+
+    let r = model.solve().unwrap();
+    hard_lp_assert_model_obj(
+        r.objective(),
+        HARD_LP_ILL_EXPECTED_OBJ,
+        "hard_lp_ill_scaled",
+    );
+    for (idx, expected) in [4.0, 2.0, 4.000_000_000_1, 0.0, 0.0, 3.0]
+        .into_iter()
+        .enumerate()
+    {
+        hard_lp_assert_model_x(
+            r[vars[idx]],
+            expected,
+            &format!("hard_lp_ill_scaled x{idx}"),
+        );
+    }
+}
+
+/// Hard LP: degenerate ratio tie with multiple simultaneous leaving candidates.
+///
+/// SciPy oracle:
+/// `linprog([-1,-1,0,0], A_ub=[[1,1,0,0],[1,0,1,0],[0,1,0,1]], ...)`
+/// returned status 0 and fun = -1.0. The primal solution is intentionally
+/// non-unique; the sentinel checks objective and active row feasibility.
+#[test]
+fn hard_lp_degenerate_ratio_tie_expression_scipy_oracle() {
+    let mut model = Model::new("hard_lp_degenerate_ratio_tie_expression");
+    model.set_timeout(HARD_LP_TIMEOUT_SECS);
+    let vars: Vec<_> = (0..4)
+        .map(|idx| model.add_var(&format!("x{idx}"), 0.0, HARD_LP_INF))
+        .collect();
+
+    model.add_constraint(hard_lp_expr(&vars, &[(0, 1.0), (1, 1.0)]).leq(1.0));
+    model.add_constraint(hard_lp_expr(&vars, &[(0, 1.0), (2, 1.0)]).leq(1.0));
+    model.add_constraint(hard_lp_expr(&vars, &[(1, 1.0), (3, 1.0)]).leq(1.0));
+    model.minimize(hard_lp_expr(&vars, &[(0, -1.0), (1, -1.0)]));
+
+    let r = model.solve().unwrap();
+    hard_lp_assert_model_obj(
+        r.objective(),
+        HARD_LP_DEGENERATE_EXPECTED_OBJ,
+        "hard_lp_degenerate",
+    );
+    hard_lp_assert_resid(
+        r[vars[0]] + r[vars[1]],
+        1.0,
+        "hard_lp_degenerate active row",
+    );
+}
+
+/// Hard LP: finite UB becomes active under a near pivot tie.
+///
+/// SciPy oracle:
+/// `linprog(c, A_eq=[[1,1,1],[1,1+1e-10,0]], b_eq=[1+1e-8,1+5e-9], bounds=[(0,1)]*3)`
+/// returned status 0, fun = -1.0000000059, x = [0,1,0] within HiGHS feasibility tolerance.
+#[test]
+fn hard_lp_upper_bound_near_tie_expression_scipy_oracle() {
+    let mut model = Model::new("hard_lp_upper_bound_near_tie_expression");
+    model.set_timeout(HARD_LP_TIMEOUT_SECS);
+    let vars: Vec<_> = (0..3)
+        .map(|idx| model.add_var(&format!("x{idx}"), 0.0, 1.0))
+        .collect();
+
+    model.add_constraint(
+        hard_lp_expr(&vars, &[(0, 1.0), (1, 1.0), (2, 1.0)]).eq_constraint(1.000_000_01),
+    );
+    model.add_constraint(
+        hard_lp_expr(&vars, &[(0, 1.0), (1, 1.000_000_000_1)]).eq_constraint(1.000_000_005),
+    );
+    model.minimize(hard_lp_expr(
+        &vars,
+        &[(0, -1.0), (1, -1.000_000_001), (2, 0.05)],
+    ));
+
+    let r = model.solve().unwrap();
+    hard_lp_assert_model_obj(
+        r.objective(),
+        HARD_LP_NEAR_TIE_EXPECTED_OBJ,
+        "hard_lp_near_tie",
+    );
+    hard_lp_assert_model_x(r[vars[1]], 1.0, "hard_lp_near_tie y at ub");
+}
+
+/// Hard LP: m=50, n=100 Eq+UB synthetic instance for Phase I + Harris stress.
+///
+/// SciPy oracle:
+/// deterministic A/c/x_ref below, then
+/// `linprog(c, A_eq=A, b_eq=A@x_ref, bounds=[(0,1)]*100, method="highs")`
+/// returned status 0, fun = -4.406871388953238.
+#[test]
+fn hard_lp_large_eq_ub_expression_scipy_oracle() {
+    let mut model = Model::new("hard_lp_large_eq_ub_expression");
+    model.set_timeout(HARD_LP_TIMEOUT_SECS);
+    let vars: Vec<_> = (0..HARD_LP_LARGE_N)
+        .map(|idx| model.add_var(&format!("x{idx}"), 0.0, 1.0))
+        .collect();
+
+    let mut x_ref = vec![0.0; HARD_LP_LARGE_N];
+    for (j, xj) in x_ref.iter_mut().enumerate() {
+        *xj = ((j * 37) % HARD_LP_LARGE_N) as f64 / 99.0;
+        if j % 17 == 0 {
+            *xj = 1.0;
+        }
+        if j % 19 == 0 {
+            *xj = 0.0;
+        }
+    }
+
+    for i in 0..HARD_LP_LARGE_M {
+        let mut terms = Vec::new();
+        let mut rhs = 0.0;
+        for j in 0..HARD_LP_LARGE_N {
+            if matches!((i * 31 + j * 17) % 7, 0 | 3 | 5) {
+                let scale = 10.0_f64.powi(((i + j) % 9) as i32 - 4);
+                let sign = if (i + 2 * j) % 2 == 0 { 1.0 } else { -1.0 };
+                let coeff = sign * scale * (1.0 + ((i * j) % 5) as f64 * 0.1);
+                terms.push((j, coeff));
+                rhs += coeff * x_ref[j];
+            }
+        }
+        model.add_constraint(hard_lp_expr(&vars, &terms).eq_constraint(rhs));
+    }
+
+    let obj_terms: Vec<_> = (0..HARD_LP_LARGE_N)
+        .map(|j| {
+            let sign = if j % 2 == 0 { 1.0 } else { -1.0 };
+            (j, sign * (0.01 + (j % 11) as f64 * 0.03))
+        })
+        .collect();
+    model.minimize(hard_lp_expr(&vars, &obj_terms));
+
+    let r = model.solve().unwrap();
+    hard_lp_assert_model_obj(
+        r.objective(),
+        HARD_LP_LARGE_EXPECTED_OBJ,
+        "hard_lp_large_eq_ub",
+    );
+}
+
+/// Hard LP: Eq and UB are contradictory.
+///
+/// SciPy oracle:
+/// `linprog([0,0], A_eq=[[1,1]], b_eq=[3], bounds=[(0,1),(0,1)], method="highs")`
+/// returned status 2 (infeasible).
+#[test]
+fn hard_lp_infeasible_eq_ub_expression_scipy_oracle() {
+    let mut model = Model::new("hard_lp_infeasible_eq_ub_expression");
+    model.set_timeout(HARD_LP_TIMEOUT_SECS);
+    let x = model.add_var("x", 0.0, 1.0);
+    let y = model.add_var("y", 0.0, 1.0);
+    let vars = [x, y];
+
+    model.add_constraint(hard_lp_expr(&vars, &[(0, 1.0), (1, 1.0)]).eq_constraint(3.0));
+    model.minimize(Expression::from_constant(0.0));
+
+    let err = model.solve().unwrap_err();
+    assert!(
+        matches!(err, ModelError::SolveError(SolveError::Infeasible)),
+        "hard_lp_infeasible_eq_ub: expected infeasible, got {err:?}"
+    );
+}
+
+/// Hard LP: Eq row plus ill-scaled cost has an unbounded improving ray.
+///
+/// SciPy oracle:
+/// `linprog([-1e10,0], A_eq=[[0,1e-10]], b_eq=[0], bounds=[(None,None),(0,1)])`
+/// returned status 3 (unbounded).
+#[test]
+fn hard_lp_unbounded_eq_ill_scaled_cost_expression_scipy_oracle() {
+    let mut model = Model::new("hard_lp_unbounded_eq_ill_scaled_cost_expression");
+    model.set_timeout(HARD_LP_TIMEOUT_SECS);
+    let ray = model.add_var("ray", f64::NEG_INFINITY, HARD_LP_INF);
+    let pinned = model.add_var("pinned", 0.0, 1.0);
+    let vars = [ray, pinned];
+
+    model.add_constraint(hard_lp_expr(&vars, &[(1, 1e-10)]).eq_constraint(0.0));
+    model.minimize(hard_lp_expr(&vars, &[(0, -1e10)]));
+
+    let err = model.solve().unwrap_err();
+    assert!(
+        matches!(err, ModelError::SolveError(SolveError::Unbounded)),
+        "hard_lp_unbounded_eq_ill_scaled_cost: expected unbounded, got {err:?}"
+    );
 }
