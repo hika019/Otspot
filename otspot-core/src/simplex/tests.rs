@@ -1725,3 +1725,88 @@ fn batch_pivot_out_falls_back_to_sequential_for_ill_conditioned_basis() {
          No-op: removing the stability check keeps this at zero — assertion fails."
     );
 }
+
+/// Sentinel: uncommitted_rows fallback fires when all greedy matches fail the batch LU
+/// (match_offset == 0 path). Sequential BTRAN is attempted but may find no valid pivot
+/// when the structural columns are coplanar with the committed basis.
+///
+/// LP construction: m=2, n=2 structural (x0, x1), both rows identical (x0 + x1 = 0),
+/// bounds [0, ∞). Phase I (with Charnes perturbation) pivots x0 into one row,
+/// leaving basis=[x0, art1] with x_b=[0, 0] after reconciliation.
+///
+/// Entering pivot_out_degenerate_artificials with basis=[x0, art1]:
+///   degen_rows = [1] (only art1 remains degenerate).
+///   Greedy matches row1 → x1 (the only non-basic structural column with |A[1,1]|=1).
+///   matches = [(1, x1)].
+///
+/// Batch loop (single-element slice):
+///   Full trial basis [x0, x1]: A[:,x0]=A[:,x1]=[1,1] — rank 1 → singular.
+///   Binary search: lo=0, hi=slice.len()-1=0 → no iterations → committed=lo=0.
+///   Break with match_offset=0.
+///
+/// batch_stable short-circuits to true (match_offset==0 short-circuit).
+/// uncommitted_rows = matches[0..] = [row1] → sequential BTRAN fires (BTRAN_COUNT increases).
+/// Sequential: BTRAN(e1) gives z=B^{-T}e1; dot with x1 = 0 (x1 coplanar with x0 in B).
+/// No valid pivot found; art1 remains in basis at value 0.
+/// Phase II proceeds; result: Optimal with obj=0.
+///
+/// No-op proof: if uncommitted_rows fallback is removed (match_offset==0 path deleted),
+/// PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT stays zero — assertion fails.
+#[test]
+fn batch_pivot_out_uncommitted_rows_fallback_fires_for_rank_saturated_batch() {
+    // m=2, n=2: both rows x0+x1=0, so all-matches batch is singular.
+    let a = CscMatrix::from_triplets(
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 1],
+        &[1.0, 1.0, 1.0, 1.0],
+        2,
+        2,
+    )
+    .unwrap();
+
+    let lp = LpProblem::new_general(
+        vec![0.0, 0.0],
+        a,
+        vec![0.0, 0.0],
+        vec![ConstraintType::Eq; 2],
+        vec![(0.0, f64::INFINITY); 2],
+        None,
+    )
+    .unwrap();
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.use_lp_crash_basis = false;
+    opts.simplex_method = SimplexMethod::Primal;
+
+    let uncommitted_before =
+        primal::PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT.with(|c| c.get());
+    let btran_before = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
+
+    let result = solve_with(&lp, &opts);
+
+    let uncommitted_after =
+        primal::PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT.with(|c| c.get());
+    let btran_after = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "rank-saturated batch LP must reach Optimal via uncommitted_rows sequential \
+         fallback; got {:?}",
+        result.status
+    );
+    assert!(
+        uncommitted_after > uncommitted_before,
+        "uncommitted_rows fallback must fire (match_offset==0 path); \
+         PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT must increase \
+         (before={uncommitted_before}, after={uncommitted_after}). \
+         No-op: removing match_offset==0 uncommitted_rows path keeps this zero."
+    );
+    assert!(
+        btran_after > btran_before,
+        "sequential BTRAN must be issued for uncommitted rows \
+         (before={btran_before}, after={btran_after}). \
+         No-op: skipping uncommitted_rows path issues no BTRANs — assertion fails."
+    );
+}

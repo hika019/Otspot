@@ -96,6 +96,15 @@ thread_local! {
     /// correctness assertion downstream fails (no-op FAIL).
     #[cfg(test)]
     pub(crate) static PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// Counts rows routed to pivot_out_sequential via the uncommitted_rows path.
+    /// Incremented for each row in matches[match_offset..] (partial-commit case,
+    /// match_offset > 0) or in matches[0..] (no-commit case, match_offset == 0,
+    /// batch_stable short-circuited). Sentinel asserts this is positive when the
+    /// batch LU fails for the full match set; removing the uncommitted_rows path
+    /// keeps it at zero — assertion fails (no-op FAIL).
+    #[cfg(test)]
+    pub(crate) static PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Verified-ray gate for a Phase II `Unbounded` exit (shared with the Big-M

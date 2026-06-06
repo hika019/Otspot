@@ -454,6 +454,19 @@ fn diag_scorpion_y_off_vs_on() {
         .fold(0.0f64, |a, &rc| a.max(f64::max(0.0, -rc)));
     println!("df (max(0,-rc)) off={:e} on={:e}", df_off, df_on);
 
+    // dual_solution が空だと下の loop で OOB するため、先に Optimal を assert。
+    assert_eq!(
+        r_off.status,
+        otspot::problem::SolveStatus::Optimal,
+        "scorpion presolve=OFF must be Optimal (got {:?}); regression in simplex without presolve",
+        r_off.status
+    );
+    assert_eq!(
+        r_on.status,
+        otspot::problem::SolveStatus::Optimal,
+        "scorpion presolve=ON must be Optimal (got {:?}); regression in postsolve/cleanup LP",
+        r_on.status
+    );
     let mut max_y_diff = 0.0f64;
     let mut argmax_i = 0usize;
     for i in 0..m {
