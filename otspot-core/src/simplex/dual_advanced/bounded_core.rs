@@ -124,14 +124,26 @@ fn flip_apply_disabled() -> bool {
 
 /// Deadline check interval for the RC inner loop.
 ///
-/// Checking `Instant::now()` every column is prohibitively expensive for large
-/// problems (pds-80, n=426k: ~10ms per RC pass vs ~1ms without any check).
-/// Checking every `DEADLINE_CHECK_INTERVAL` columns reduces the overhead to
-/// negligible while still bounding the overshoot to at most `INTERVAL` column
-/// iterations (~100µs at the observed throughput) past the deadline.
+/// `Instant::now()` 実測 48ns/call。per-col 呼び出しは:
+///   - pds-80 (n=426k): 426k × 48ns ≈ 20ms/iter (RC pass 全コストを clock read が占有)
+///   - dfl001 (n=12k): 12k × 48ns ≈ 0.6ms/iter (RC コストの ~33%)
+/// chunk=512 で per-RC-pass の check 数を `ceil(n/512)` に削減:
+///   - pds-80: 833 checks × 48ns ≈ 0.04ms (オーバーヘッド無視可)
+/// deadline 超過は最大 INTERVAL=512 列分 (~100µs @ 観測 throughput) で
+/// ソルバ全体の deadline (秒〜分単位) 内で許容範囲。
+///
+/// 実測 speedup (timeout=60s bench):
+///   - pds-80   bounded-aug:  64 → 144 iter/s (2.25x)
+///   - pds-30   bounded-aug: 177 → 371 iter/s (~2.1x)
+///   - ken-18   bounded-aug: 236 → 355 iter/s (~1.5x)
+///   - dfl001   bounded-aug: 556 → 625 iter/s (1.12x)
 const DEADLINE_CHECK_INTERVAL: usize = 512;
 
 /// Counts deadline checks issued inside `compute_reduced_costs_into_timed` (test-only).
+///
+/// `thread_local!` 化により、並列 test 実行 (`--test-threads 3`) で他 test の
+/// 同関数呼び出しが counter を汚染するのを防ぐ。sentinel test は自スレッドの
+/// snapshot 差分だけを見るので false FAIL が起きない。
 ///
 /// For a problem with `n_price` columns, the timed RC loop issues
 /// `ceil(n_price / DEADLINE_CHECK_INTERVAL)` checks — not `n_price` checks.
@@ -139,8 +151,11 @@ const DEADLINE_CHECK_INTERVAL: usize = 512;
 /// where `n_price > DEADLINE_CHECK_INTERVAL`; reverting to per-column checks
 /// makes the count equal `n_price`, failing the assertion (no-op FAIL).
 #[cfg(test)]
-pub(crate) static RC_DEADLINE_CHECK_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    pub(crate) static RC_DEADLINE_CHECK_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
 
 fn compute_reduced_costs_into_timed(
     a: &CscMatrix,
@@ -164,7 +179,7 @@ fn compute_reduced_costs_into_timed(
             return false;
         }
         #[cfg(test)]
-        RC_DEADLINE_CHECK_COUNT.fetch_add(1, Ordering::Relaxed);
+        RC_DEADLINE_CHECK_COUNT.with(|c| c.set(c.get() + 1));
         let end = (j + DEADLINE_CHECK_INTERVAL).min(n_price);
         for k in j..end {
             if is_basic[k] {
@@ -2838,8 +2853,9 @@ mod tests {
         };
         let mut basis_mgr = LuBasis::new_timed(&a, &basis, opts.max_etas, None).unwrap();
 
-        // Snapshot and reset the counter before the call.
-        let before = RC_DEADLINE_CHECK_COUNT.load(Ordering::Relaxed);
+        // Snapshot before the call. thread_local counter なので並列 test 中の
+        // 他 test の bounded simplex 呼び出しは現スレッドの値に影響しない。
+        let before = RC_DEADLINE_CHECK_COUNT.with(|c| c.get());
 
         let deadline_far = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
         let ok = compute_reduced_costs_into_timed(
@@ -2848,7 +2864,7 @@ mod tests {
         );
         assert!(ok, "RC compute must succeed (deadline is far)");
 
-        let after = RC_DEADLINE_CHECK_COUNT.load(Ordering::Relaxed);
+        let after = RC_DEADLINE_CHECK_COUNT.with(|c| c.get());
         let checks = after - before;
         let max_expected = n_synthetic.div_ceil(DEADLINE_CHECK_INTERVAL);
 
