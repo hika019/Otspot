@@ -152,7 +152,7 @@ fn lp_coverage_screen_sample_fast() {
 /// `cycle` LP convergence — tier-2 because it takes ~19-20s on a loaded system.
 /// Uses 30s timeout to avoid false failures under 3-thread full-suite load.
 #[test]
-#[ignore = "tier-2: cycle takes ~19-20s, may exceed default timeout under load"]
+#[ignore = "broken: #31 cycle returns SuboptimalSolution≠Optimal; honest companion exists"]
 fn lp_coverage_screen_cycle_tier2() {
     let baseline = load_baseline_objectives(Path::new(BASELINE_CSV))
         .expect("baseline CSV missing");
