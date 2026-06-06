@@ -629,8 +629,22 @@ pub(crate) fn big_m_cold_start(
             // Feasible LP では人工変数が必ず除去できるため、Unbounded に到達しない。
             // 数値ドリフトで Farkas 証明書の A^T y ≤ 0 チェックが失敗しても、
             // 「正の人工変数残存 + Unbounded」の組合せは実行不可確定の十分条件。
+            //
+            // ETA 累積誤差で `x_b` が drift しているので fresh FTRAN で再計算 (B⁻¹ b)。
+            // ドリフトと数値悪化の両方を排除して soundness を強化 (reviewer P1)。
+            let x_b_check: Vec<f64> = match crate::basis::LuBasis::new_timed(
+                &a_aug, &basis_aug, options.max_etas, options.deadline,
+            ) {
+                Ok(mut bm) => {
+                    let mut rhs = b.to_vec();
+                    bm.ftran_dense(&mut rhs);
+                    rhs
+                }
+                // factorize 失敗時は drift した x_b にフォールバック (元の動作)。
+                Err(_) => x_b.clone(),
+            };
             let any_positive_art = (0..m)
-                .any(|i| basis_aug[i] >= n_total && x_b[i] > options.primal_tol);
+                .any(|i| basis_aug[i] >= n_total && x_b_check[i] > options.primal_tol);
             if any_positive_art {
                 let mut r = SolverResult::infeasible();
                 r.iterations = total_iters;
