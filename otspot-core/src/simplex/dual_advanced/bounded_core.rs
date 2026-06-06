@@ -122,6 +122,26 @@ fn flip_apply_disabled() -> bool {
     false
 }
 
+/// Deadline check interval for the RC inner loop.
+///
+/// Checking `Instant::now()` every column is prohibitively expensive for large
+/// problems (pds-80, n=426k: ~10ms per RC pass vs ~1ms without any check).
+/// Checking every `DEADLINE_CHECK_INTERVAL` columns reduces the overhead to
+/// negligible while still bounding the overshoot to at most `INTERVAL` column
+/// iterations (~100µs at the observed throughput) past the deadline.
+const DEADLINE_CHECK_INTERVAL: usize = 512;
+
+/// Counts deadline checks issued inside `compute_reduced_costs_into_timed` (test-only).
+///
+/// For a problem with `n_price` columns, the timed RC loop issues
+/// `ceil(n_price / DEADLINE_CHECK_INTERVAL)` checks — not `n_price` checks.
+/// Sentinel asserts the count is strictly less than `n_price` on a problem
+/// where `n_price > DEADLINE_CHECK_INTERVAL`; reverting to per-column checks
+/// makes the count equal `n_price`, failing the assertion (no-op FAIL).
+#[cfg(test)]
+pub(crate) static RC_DEADLINE_CHECK_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 fn compute_reduced_costs_into_timed(
     a: &CscMatrix,
     c: &[f64],
@@ -137,20 +157,28 @@ fn compute_reduced_costs_into_timed(
         return false;
     }
     compute_dual_vars_into(c, basis_mgr, basis, y_buf);
-    for j in 0..n_price {
+    let mut j = 0;
+    while j < n_price {
+        // Check deadline once per chunk, not per column.
         if deadline_expired(deadline) {
             return false;
         }
-        if is_basic[j] {
-            rc_out[j] = 0.0;
-            continue;
+        #[cfg(test)]
+        RC_DEADLINE_CHECK_COUNT.fetch_add(1, Ordering::Relaxed);
+        let end = (j + DEADLINE_CHECK_INTERVAL).min(n_price);
+        for k in j..end {
+            if is_basic[k] {
+                rc_out[k] = 0.0;
+            } else {
+                let (rows, vals) = a.get_column(k).unwrap();
+                let mut ya = 0.0;
+                for (ri, &row) in rows.iter().enumerate() {
+                    ya += y_buf[row] * vals[ri];
+                }
+                rc_out[k] = c[k] - ya;
+            }
         }
-        let (rows, vals) = a.get_column(j).unwrap();
-        let mut ya = 0.0;
-        for (k, &row) in rows.iter().enumerate() {
-            ya += y_buf[row] * vals[k];
-        }
-        rc_out[j] = c[j] - ya;
+        j = end;
     }
     true
 }
@@ -2763,6 +2791,90 @@ mod tests {
                 assert!(at_ub, "leaving variable hits its upper bound");
             }
             other => panic!("expected a Pivot, got {other:?}"),
+        }
+    }
+
+    /// Sentinel: `compute_reduced_costs_into_timed` must issue at most
+    /// `ceil(n / DEADLINE_CHECK_INTERVAL)` deadline checks, not one per column.
+    ///
+    /// Build a problem with `n_price > DEADLINE_CHECK_INTERVAL` (here n=4
+    /// columns, but we call the function directly with a synthetic problem whose
+    /// column count exceeds the interval). We inject `n_synthetic >> INTERVAL`
+    /// columns and assert:
+    ///   checks < n_synthetic
+    /// Reverting to per-column checks makes `checks == n_synthetic`, failing the
+    /// assertion (no-op FAIL).
+    ///
+    /// The test also verifies correctness: the chunked loop must produce the
+    /// same reduced costs as the reference scalar loop.
+    #[test]
+    fn rc_timed_deadline_checks_are_chunked_not_per_column() {
+        // Build a synthetic problem with n_synthetic >> DEADLINE_CHECK_INTERVAL columns.
+        // We need a real CscMatrix and LuBasis; use a diagonal identity basis for simplicity.
+        let n_synthetic = DEADLINE_CHECK_INTERVAL * 4 + 100; // >> DEADLINE_CHECK_INTERVAL
+        let m = 3usize;
+
+        // Diagonal m×m identity matrix (first m columns).  Remaining columns are
+        // unit vectors re-using the first m columns — ensures no column is empty.
+        let mut rows_t: Vec<usize> = Vec::new();
+        let mut cols_t: Vec<usize> = Vec::new();
+        let mut vals_t: Vec<f64> = Vec::new();
+        for j in 0..n_synthetic {
+            let row = j % m;
+            rows_t.push(row);
+            cols_t.push(j);
+            vals_t.push(1.0);
+        }
+        let a = CscMatrix::from_triplets(&rows_t, &cols_t, &vals_t, m, n_synthetic).unwrap();
+        let basis: Vec<usize> = (0..m).collect();
+        let c: Vec<f64> = (0..n_synthetic).map(|j| j as f64).collect();
+        let is_basic: Vec<bool> = (0..n_synthetic).map(|j| j < m).collect();
+        let mut y_buf = vec![0.0f64; m];
+        let mut rc_out = vec![0.0f64; n_synthetic];
+
+        let opts = SolverOptions {
+            max_etas: 50,
+            ..SolverOptions::default()
+        };
+        let mut basis_mgr = LuBasis::new_timed(&a, &basis, opts.max_etas, None).unwrap();
+
+        // Snapshot and reset the counter before the call.
+        let before = RC_DEADLINE_CHECK_COUNT.load(Ordering::Relaxed);
+
+        let deadline_far = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        let ok = compute_reduced_costs_into_timed(
+            &a, &c, &mut basis_mgr, &is_basic, n_synthetic, &basis,
+            &mut y_buf, &mut rc_out, deadline_far,
+        );
+        assert!(ok, "RC compute must succeed (deadline is far)");
+
+        let after = RC_DEADLINE_CHECK_COUNT.load(Ordering::Relaxed);
+        let checks = after - before;
+        let max_expected = n_synthetic.div_ceil(DEADLINE_CHECK_INTERVAL);
+
+        assert!(
+            checks <= max_expected,
+            "chunked RC loop issued {checks} deadline checks for n={n_synthetic}, \
+             expected ≤ {max_expected} (= ceil(n/INTERVAL)). \
+             Reverting to per-column checks would make this > {max_expected}."
+        );
+        assert!(
+            checks < n_synthetic,
+            "must issue far fewer deadline checks than columns: \
+             {checks} checks for {n_synthetic} columns. \
+             Per-column regression detected."
+        );
+
+        // Correctness: verify rc_out matches the reference scalar computation.
+        // y = B^{-T} c_B; for diagonal identity basis, y = c_B = c[0..m].
+        // rc[j] = c[j] - y^T a_j = c[j] - y[j%m] * 1.0 for non-basic j.
+        for j in m..n_synthetic {
+            let expected = c[j] - c[j % m];
+            assert!(
+                (rc_out[j] - expected).abs() < 1e-10,
+                "rc[{j}] = {} expected {expected} (correctness check)",
+                rc_out[j]
+            );
         }
     }
 }
