@@ -36,6 +36,10 @@ jobs:
           # 自動 hash は cache を不要に bust しがちで、netlib 不安定時に CI が
           # 復旧不能となるリスクがあるため。
           key: bench-data-v1
+          # 旧 hash-based key (bench-data-{md5}) の cache を fallback で活用。
+          # netlib 不通時に v1 が無くても過去成功 run の cache から復元できる。
+          restore-keys: |
+            bench-data-
       - name: Restore git-tracked baselines (cache 上書き対策)
         run: git checkout HEAD -- data/baseline_objectives/
       - name: Install python deps for data generation
