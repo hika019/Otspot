@@ -124,19 +124,24 @@ fn flip_apply_disabled() -> bool {
 
 /// Deadline check interval for the RC inner loop.
 ///
-/// `Instant::now()` 実測 48ns/call。per-col 呼び出しは:
-///   - pds-80 (n=426k): 426k × 48ns ≈ 20ms/iter (RC pass 全コストを clock read が占有)
-///   - dfl001 (n=12k): 12k × 48ns ≈ 0.6ms/iter (RC コストの ~33%)
+/// `Instant::now()` 実測 48ns/call。per-col 呼び出しは大規模問題で支配的:
+///
+/// - pds-80 (n=426k): 426k × 48ns ≈ 20ms/iter (RC pass 全コストを clock read が占有)
+/// - dfl001 (n=12k): 12k × 48ns ≈ 0.6ms/iter (RC コストの ~33%)
+///
 /// chunk=512 で per-RC-pass の check 数を `ceil(n/512)` に削減:
-///   - pds-80: 833 checks × 48ns ≈ 0.04ms (オーバーヘッド無視可)
+///
+/// - pds-80: 833 checks × 48ns ≈ 0.04ms (オーバーヘッド無視可)
+///
 /// deadline 超過は最大 INTERVAL=512 列分 (~100µs @ 観測 throughput) で
 /// ソルバ全体の deadline (秒〜分単位) 内で許容範囲。
 ///
 /// 実測 speedup (timeout=60s bench):
-///   - pds-80   bounded-aug:  64 → 144 iter/s (2.25x)
-///   - pds-30   bounded-aug: 177 → 371 iter/s (~2.1x)
-///   - ken-18   bounded-aug: 236 → 355 iter/s (~1.5x)
-///   - dfl001   bounded-aug: 556 → 625 iter/s (1.12x)
+///
+/// - pds-80   bounded-aug:  64 → 144 iter/s (2.25x)
+/// - pds-30   bounded-aug: 177 → 371 iter/s (~2.1x)
+/// - ken-18   bounded-aug: 236 → 355 iter/s (~1.5x)
+/// - dfl001   bounded-aug: 556 → 625 iter/s (1.12x)
 const DEADLINE_CHECK_INTERVAL: usize = 512;
 
 /// Counts deadline checks issued inside `compute_reduced_costs_into_timed` (test-only).
