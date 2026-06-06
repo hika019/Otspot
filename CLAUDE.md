@@ -20,7 +20,7 @@
 - 作業が完了したブランチは削除 or 放置
 - 1 branch = 1-2 commit 理想. 3+ で merge 前 squash 検討 (logical unit 集約). main 上の commit 履歴改変禁止 (rebase/squash/amend は branch 内のみ).
 - mainへマージする前にtestを実行.
-- 1タスクを複数Phaseに分割した場合, 中間ブランチを作成し、そこへ各Phaseをマージ. Phase終了後mainへマージ
+- 1タスクを複数Phaseに分割した場合, 中間ブランチを作成し、そこへ各Phaseをマージ. Phase終了後mainへマージ. マージ前後でテストを実施。範囲は全てのテスト.
 
 # 方針/実装
 - *判断に困ったら本来あるべき形を考え、選択*
