@@ -190,35 +190,94 @@ fn extract_farkas_certificate(
     n_original: usize,
     options: &SolverOptions,
 ) -> Vec<f64> {
-    if !basis.iter().any(|&col| col >= n_original) {
+    let art_rows: Vec<usize> = (0..m)
+        .filter(|&i| basis[i] >= n_original)
+        .collect();
+    if art_rows.is_empty() {
         return vec![];
     }
     let mut basis_mgr = match LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(_) => return vec![],
     };
-    let mut y: Vec<f64> = (0..m)
-        .map(|i| if basis[i] >= n_original { 1.0 } else { 0.0 })
-        .collect();
-    basis_mgr.btran_dense(&mut y);
 
     let b_norm = b.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
     let tol = options.dual_tol * (1.0_f64).max(b_norm);
 
-    let by: f64 = b.iter().zip(y.iter()).map(|(&bi, &yi)| bi * yi).sum();
-    if by <= tol {
-        return vec![];
-    }
-    for j in 0..n_original {
-        let Ok((rows, vals)) = a_ext.get_column(j) else {
-            return vec![];
-        };
-        let aty: f64 = rows.iter().zip(vals.iter()).map(|(&r, &v)| v * y[r]).sum();
-        if aty > tol {
-            return vec![];
+    // Helper: check A^T y <= tol for all original columns.
+    let aty_ok = |y: &[f64]| -> bool {
+        for j in 0..n_original {
+            let Ok((rows, vals)) = a_ext.get_column(j) else {
+                return false;
+            };
+            let aty: f64 = rows.iter().zip(vals.iter()).map(|(&r, &v)| v * y[r]).sum();
+            if aty > tol {
+                return false;
+            }
+        }
+        true
+    };
+
+    // Compute fresh x_B = B^{-1} b to identify which artificial rows are genuinely
+    // infeasible (positive) vs numerically negative (eta-drift artifact).
+    let mut x_b_fresh = b.to_vec();
+    basis_mgr.ftran_dense(&mut x_b_fresh);
+
+    // Strategy 1: joint indicator over ALL artificial rows.
+    // `by = sum_art x_B[i]` can approach zero when positive and negative art rows
+    // cancel (cplex2-class: primal Phase I cycling leaves mixed-sign art x_B).
+    {
+        let mut y: Vec<f64> = (0..m)
+            .map(|i| if basis[i] >= n_original { 1.0 } else { 0.0 })
+            .collect();
+        basis_mgr.btran_dense(&mut y);
+        let by: f64 = b.iter().zip(y.iter()).map(|(&bi, &yi)| bi * yi).sum();
+        if by > tol && aty_ok(&y) {
+            return y;
         }
     }
-    y
+
+    // Strategy 2: positive-art-only indicator — avoids sign cancellation.
+    // Uses only artificial rows where the fresh x_B > PIVOT_TOL (genuinely
+    // infeasible rows).  `by = sum_{pos-art} x_B[i]^2 / norm` stays positive.
+    // At the dual-feasible Phase I basis, the full joint indicator satisfies
+    // A^T y ≤ 0; the positive-only subset may or may not, so we verify.
+    {
+        let pos_art_indicator: Vec<f64> = (0..m)
+            .map(|i| {
+                if basis[i] >= n_original && x_b_fresh[i] > PIVOT_TOL {
+                    x_b_fresh[i]
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        if pos_art_indicator.iter().any(|&v| v > 0.0) {
+            let mut y = pos_art_indicator;
+            basis_mgr.btran_dense(&mut y);
+            let by: f64 = b.iter().zip(y.iter()).map(|(&bi, &yi)| bi * yi).sum();
+            if by > PIVOT_TOL && aty_ok(&y) {
+                return y;
+            }
+        }
+    }
+
+    // Strategy 3: per-row probes — tries each positive-x_B artificial row
+    // individually.  Useful when the weighted combination still fails aty_ok.
+    for &row in &art_rows {
+        if x_b_fresh[row] <= PIVOT_TOL {
+            continue;
+        }
+        let mut e_i = vec![0.0_f64; m];
+        e_i[row] = 1.0;
+        basis_mgr.btran_dense(&mut e_i);
+        let by: f64 = b.iter().zip(e_i.iter()).map(|(&bi, &yi)| bi * yi).sum();
+        if by > tol && aty_ok(&e_i) {
+            return e_i;
+        }
+    }
+
+    vec![]
 }
 
 fn extract_timeout_solution_reconciled(

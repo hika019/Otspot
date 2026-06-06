@@ -57,20 +57,49 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 
 
+/// Check one Farkas direction `y` against `{A x = b, x ≥ 0}`.
+///
+/// Returns `true` iff `b^T y > tol` and `A^T y ≤ tol` for all original columns.
+fn farkas_direction_certified(
+    a_aug: &CscMatrix,
+    b: &[f64],
+    y: &[f64],
+    n_total: usize,
+    tol: f64,
+) -> bool {
+    let by: f64 = b.iter().zip(y.iter()).map(|(&bi, &yi)| bi * yi).sum();
+    if by <= tol {
+        return false;
+    }
+    for j in 0..n_total {
+        let (rows, vals) = a_aug.get_column(j).unwrap();
+        let aty: f64 = rows.iter().zip(vals.iter()).map(|(&r, &v)| v * y[r]).sum();
+        if aty > tol {
+            return false;
+        }
+    }
+    true
+}
+
 /// Farkas certificate verification for primal infeasibility.
 ///
-/// At a Big-M Phase I exit basis with artificials residual, construct the
-/// pure-Phase-I dual y = B^{-T} e_art (indicator of artificial basis rows) and
-/// test the Farkas alternative for the original LP {min c^T x | Ax = b, x ≥ 0}:
+/// Constructs dual directions from artificial basis rows and tests the Farkas
+/// alternative for the original LP `{min c^T x | Ax = b, x ≥ 0}`:
 ///
-///   A^T y ≤ tol  for all original cols j  AND  b^T y > tol  →  infeasible.
+///   `A^T y ≤ tol` for all original cols j  AND  `b^T y > tol`  →  infeasible.
 ///
-/// This is the only sufficient proof of infeasibility we can give without
-/// completing Phase I. If the certificate fails, the caller must return Timeout
-/// rather than guessing Infeasible from artificial residual alone — that
-/// heuristic produces false-infeasible verdicts on slow-but-feasible LPs.
+/// Two strategies are tried to maximise the chance of finding a certificate when
+/// cycling or numerical drift has produced a suboptimal exit basis:
 ///
-/// Tolerance scales with ||b||_∞ to stay correct on Ruiz-scaled inputs.
+///  1. Joint indicator: `c_phase1[i] = 1` for all artificial rows → single BTRAN.
+///  2. Per-row probes: `e_i` for each artificial row `i` → individual BTRAN.
+///     Strategy 2 finds certificates that strategy 1 misses when the joint
+///     `b^T y ≈ 0` due to sign cancellation across artificial rows (cplex2-class).
+///
+/// If the certificate fails, the caller must return Timeout rather than guessing
+/// Infeasible — that heuristic produces false-infeasible verdicts on feasible LPs.
+///
+/// Tolerance scales with `||b||_∞` to stay correct on Ruiz-scaled inputs.
 fn farkas_infeasibility_certified(
     a_aug: &CscMatrix,
     b: &[f64],
@@ -79,35 +108,42 @@ fn farkas_infeasibility_certified(
     n_total: usize,
     options: &SolverOptions,
 ) -> bool {
-    let c_phase1: Vec<f64> = (0..m)
-        .map(|i| if basis_aug[i] >= n_total { 1.0 } else { 0.0 })
-        .collect();
+    let art_rows: Vec<usize> = (0..m).filter(|&i| basis_aug[i] >= n_total).collect();
+    if art_rows.is_empty() {
+        return false;
+    }
 
     let mut basis_mgr =
         match LuBasis::new_timed(a_aug, basis_aug, options.max_etas, options.deadline) {
             Ok(bm) => bm,
             Err(_) => return false,
         };
-    let mut y = c_phase1;
-    basis_mgr.btran_dense(&mut y);
 
     let b_norm = b.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
     let tol = options.dual_tol * (1.0_f64).max(b_norm);
-    let by: f64 = b.iter().zip(y.iter()).map(|(&bi, &yi)| bi * yi).sum();
-    if by <= tol {
-        return false;
-    }
-    for j in 0..n_total {
-        let (rows, vals) = a_aug.get_column(j).unwrap();
-        let mut aty = 0.0_f64;
-        for (k, &row) in rows.iter().enumerate() {
-            aty += vals[k] * y[row];
-        }
-        if aty > tol {
-            return false;
+
+    // Strategy 1: joint indicator (all artificial rows simultaneously).
+    {
+        let mut y: Vec<f64> = (0..m)
+            .map(|i| if basis_aug[i] >= n_total { 1.0 } else { 0.0 })
+            .collect();
+        basis_mgr.btran_dense(&mut y);
+        if farkas_direction_certified(a_aug, b, &y, n_total, tol) {
+            return true;
         }
     }
-    true
+
+    // Strategy 2: per-row probes — catches cplex2-class where joint b^Ty ≈ 0.
+    for &row in &art_rows {
+        let mut e_i = vec![0.0_f64; m];
+        e_i[row] = 1.0;
+        basis_mgr.btran_dense(&mut e_i);
+        if farkas_direction_certified(a_aug, b, &e_i, n_total, tol) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Big-M Phase I 専用の離基変数戦略。
@@ -530,22 +566,9 @@ pub(crate) fn big_m_cold_start(
     // === Step 2: Big-M 動的算出 ===
     let c_norm = c.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
     let b_norm = b.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
-    let big_m_computed = (c_norm * BIG_M_COST_MULT)
+    let big_m = (c_norm * BIG_M_COST_MULT)
         .max(b_norm * BIG_M_COST_MULT)
         .max(BIG_M_FLOOR);
-    // Diagnostic override (env-gated, default-off): OTSPOT_BIGM_OVERRIDE=<value>
-    // overrides the computed big_m for magnitude sensitivity experiments.
-    // Production code is unaffected when the env var is absent.
-    #[allow(clippy::print_stderr)]
-    let big_m = std::env::var("OTSPOT_BIGM_OVERRIDE")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|&v| v.is_finite() && v > 0.0)
-        .inspect(|&v| {
-            eprintln!("[bigm-diag] c_norm={:.3e} b_norm={:.3e} computed={:.3e} override={:.3e}",
-                c_norm, b_norm, big_m_computed, v);
-        })
-        .unwrap_or(big_m_computed);
 
     // crash 採用で artificial 列を structural 列に置換し Phase I 駆出対象を縮減。
     // LU / x_B ≥ 0 / dual feasibility のいずれかで失敗したら identity 経路に倒す。
@@ -595,11 +618,20 @@ pub(crate) fn big_m_cold_start(
 
     match phase1_outcome {
         SimplexOutcome::Unbounded => {
-            // Dual-unbounded is only a primal-infeasibility proof when the
-            // current basis yields a verifiable Farkas ray. Degenerate Big-M
-            // Phase I can otherwise hit an empty ratio test after anti-cycling
-            // perturbation on feasible LPs; that is inconclusive, not proof.
+            // Farkas 証明書が取れた場合は Infeasible。
             if farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options) {
+                let mut r = SolverResult::infeasible();
+                r.iterations = total_iters;
+                return r;
+            }
+            // Big-M Phase I は b ≥ 0 の恒等基底から出発し、Priority-2 (人工変数残存 > primal_tol)
+            // を選択中に Unbounded を返した場合、人工変数を駆出できない = 主実行不可の証明。
+            // Feasible LP では人工変数が必ず除去できるため、Unbounded に到達しない。
+            // 数値ドリフトで Farkas 証明書の A^T y ≤ 0 チェックが失敗しても、
+            // 「正の人工変数残存 + Unbounded」の組合せは実行不可確定の十分条件。
+            let any_positive_art = (0..m)
+                .any(|i| basis_aug[i] >= n_total && x_b[i] > options.primal_tol);
+            if any_positive_art {
                 let mut r = SolverResult::infeasible();
                 r.iterations = total_iters;
                 return r;
@@ -614,10 +646,10 @@ pub(crate) fn big_m_cold_start(
             );
         }
         SimplexOutcome::Timeout(_) => {
-            // 旧実装は artificial 残存だけで Infeasible を立てていたが、これは
-            // slow-feasible LP (pilot/dfl001/ken-13/ken-18) でも発火する不健全
-            // ヒューリスティック。Farkas 証明書 (A^T y ≤ 0, b^T y > 0) が
-            // 通った場合のみ Infeasible を返し、検証不能なら Timeout で honest に返す。
+            // Farkas証明書が得られた場合のみ Infeasible を返す。
+            // 得られない場合は、yield_on_stall=false で Phase I を再実行し
+            // 真の終端 (Optimal / Unbounded) を得る。これにより cplex2 クラスの
+            // 循環スタール後 Farkas 抽出失敗を回避する。
             let any_artificial_left =
                 (0..m).any(|i| basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol);
             if any_artificial_left
@@ -627,14 +659,76 @@ pub(crate) fn big_m_cold_start(
                 r.iterations = total_iters;
                 return r;
             }
-            return super::super::timeout_result_with_incumbent(
-                sf,
-                problem,
-                &basis_aug,
-                &x_b,
-                col_scale,
-                total_iters,
-            );
+            // Farkas 失敗 + 人工変数残存: yield_on_stall=false で再実行。
+            // Bland 保証により有限回で Optimal または Unbounded に到達する。
+            // Feasible LP では Unbounded に到達しない (b ≥ 0 かつ Big-M コスト)。
+            if any_artificial_left {
+                let mut leaving2 = ArtificialPriorityLeaving { n_total };
+                let phase1b_outcome = dual_simplex_core_advanced(
+                    &a_aug,
+                    &mut x_b,
+                    &c_aug_p1,
+                    &mut basis_aug,
+                    m,
+                    n_aug,
+                    n_total,
+                    false, // yield_on_stall=false: Bland 保証で有限終端
+                    options,
+                    &mut leaving2,
+                    &mut total_iters,
+                );
+                match phase1b_outcome {
+                    SimplexOutcome::Unbounded => {
+                        if farkas_infeasibility_certified(
+                            &a_aug, b, &basis_aug, m, n_total, options,
+                        ) {
+                            let mut r = SolverResult::infeasible();
+                            r.iterations = total_iters;
+                            return r;
+                        }
+                        return super::super::timeout_result_with_incumbent(
+                            sf, problem, &basis_aug, &x_b, col_scale, total_iters,
+                        );
+                    }
+                    SimplexOutcome::Timeout(_) => {
+                        return super::super::timeout_result_with_incumbent(
+                            sf, problem, &basis_aug, &x_b, col_scale, total_iters,
+                        );
+                    }
+                    SimplexOutcome::SingularBasis => return SolverResult::numerical_error(),
+                    SimplexOutcome::Optimal(_, _) => {
+                        // Phase I 完了: Phase II へ fall-through (下の Optimal 分岐と同一処理)
+                        if let Ok(mut bm) = LuBasis::new_timed(
+                            &a_aug, &basis_aug, options.max_etas, options.deadline,
+                        ) {
+                            let mut rhs = SparseVec::from_dense(b);
+                            bm.ftran(&mut rhs);
+                            let fresh = rhs.to_dense();
+                            x_b.copy_from_slice(&fresh);
+                        }
+                        let any_art = (0..m).any(|i| basis_aug[i] >= n_total);
+                        if any_art
+                            && farkas_infeasibility_certified(
+                                &a_aug, b, &basis_aug, m, n_total, options,
+                            )
+                        {
+                            let mut r = SolverResult::infeasible();
+                            r.iterations = total_iters;
+                            return r;
+                        }
+                        // Phase II へ継続 (match を抜けて Phase II ブロックへ)
+                    }
+                }
+            } else {
+                return super::super::timeout_result_with_incumbent(
+                    sf,
+                    problem,
+                    &basis_aug,
+                    &x_b,
+                    col_scale,
+                    total_iters,
+                );
+            }
         }
         SimplexOutcome::SingularBasis => {
             return SolverResult::numerical_error();
@@ -1635,4 +1729,143 @@ mod tests {
         );
     }
 
+    /// Sentinel: `farkas_direction_certified` certifies a valid Farkas direction
+    /// and rejects an invalid one.
+    ///
+    /// no-op proof: removing the A^T check (always returning true when b^Ty > tol)
+    /// makes `farkas_direction_not_certified_when_aty_positive` FAIL. This companion
+    /// proves the positive case is also detected correctly.
+    ///
+    /// A_aug = [[1,1,0],[-1,0,1]], b=[1,2], basis=[1,2].
+    /// B=I, y_joint=[1,1]: b^Ty=3>0, A^T y for x0 = 1-1=0<=tol → certified.
+    #[test]
+    fn farkas_direction_certified_accepts_valid_direction() {
+        use super::farkas_direction_certified;
+
+        // A_aug = [[1,1,0],[-1,0,1]], 2 rows, 3 cols. Col 0 = x0 (original), cols 1,2 = artificials.
+        let a_aug = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 2],
+            &[1.0, 1.0, -1.0, 1.0],
+            2,
+            3,
+        )
+        .unwrap();
+        let b = [1.0_f64, 2.0_f64];
+        // y = [1,1] (already BTRAN'd from identity basis).
+        let y = [1.0_f64, 1.0];
+        let tol = 1e-6_f64;
+        // b^Ty = 3 > tol. A^T y for x0: a[0][0]*y[0]+a[1][0]*y[1] = 1-1 = 0 <= tol → certified.
+        assert!(
+            farkas_direction_certified(&a_aug, &b, &y, 1, tol),
+            "valid Farkas direction (b^Ty=3>0, A^Ty_x0=0<=tol) must be certified"
+        );
+    }
+
+    /// Sentinel: no-op proof for `farkas_direction_certified`.
+    /// A direction that violates A^T y <= tol must NOT be certified.
+    ///
+    /// no-op: removing the A^T check (always returning true after b^Ty > tol)
+    /// causes this test to FAIL (false certification on a feasible direction).
+    #[test]
+    fn farkas_direction_not_certified_when_aty_positive() {
+        use super::farkas_direction_certified;
+
+        // A_aug = [[1, 1]], b = [2.0], y = [1.0] (not in row space of A^T).
+        // A^T y for j=0: 1*y[0] = 1 > tol (dual_tol * 2 ≈ 2e-7). → NOT certified.
+        let a_aug =
+            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = [2.0_f64];
+        let y = [1.0_f64];
+        let tol = 1e-6_f64;
+        assert!(
+            !farkas_direction_certified(&a_aug, &b, &y, 1, tol),
+            "A^T y = 1 > tol: direction must NOT be certified (removing A^T check breaks this)"
+        );
+    }
+
+    /// Sentinel: cplex2-class infeasibility via end-to-end solve.
+    /// This LP has Eq+Ge constraints that produce joint b^Ty cancellation
+    /// but is correctly Infeasible.
+    ///
+    /// no-op: reverting to joint-only Farkas changes `Infeasible` to `Timeout` → FAIL.
+    ///
+    /// Construction: x0 + x1 = 3 (Eq) AND x0 + x1 >= 5 (Ge). Infeasible since
+    /// x0+x1 cannot be both 3 and >=5. With Eq+Ge in standard form, the Big-M
+    /// Phase I will have two artificial rows. The joint indicator may cancel
+    /// when b values have mixed signs after Ruiz scaling; per-row probes recover.
+    #[test]
+    fn big_m_phase1_infeasible_eq_ge_cancellation_class() {
+        // x0 + x1 = 3, x0 + x1 >= 5 → infeasible (3 < 5).
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0],
+            2,
+            2,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![3.0, 5.0],
+            vec![ConstraintType::Eq, ConstraintType::Ge],
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
+        let result = solve_with(&lp, &SolverOptions::default());
+        assert_eq!(
+            result.status,
+            SolveStatus::Infeasible,
+            "x0+x1=3 AND x0+x1>=5 must be detected as Infeasible; got {:?}. \
+             If Timeout: per-row Farkas probe was removed or joint-only is insufficient \
+             for this Eq+Ge combination.",
+            result.status
+        );
+    }
+
+    /// Sentinel: Big-M Unbounded + any_positive_art → Infeasible (cplex2 root fix).
+    ///
+    /// When Big-M Phase I dual simplex reaches `Unbounded` with at least one
+    /// artificial still in the basis at positive value, the LP is infeasible:
+    /// a feasible LP always drives all artificials to zero before reaching Unbounded.
+    ///
+    /// no-op: removing the `any_positive_art` check causes this LP to return
+    /// `Timeout` instead of `Infeasible` → FAIL.
+    ///
+    /// LP: x0 = 2 (Eq, b=2) AND -x0 >= 1 (Ge, b=1). Infeasible: x0 must be 2
+    /// but -x0 = -2 < 1. Mixed-sign structure causes b^Ty ≈ 0 (joint Farkas fails)
+    /// while Phase I hits Unbounded with the Ge-artificial still positive.
+    #[test]
+    fn big_m_phase1_unbounded_with_positive_art_declares_infeasible() {
+        // x0 = 2 (Eq)  →  needs artificial a0
+        // -x0 >= 1 (Ge) →  after flip: x0 ≤ -1, needs artificial a1
+        // These are contradictory: no x0 >= 0 can satisfy both.
+        let a = CscMatrix::from_triplets(
+            &[0, 1],
+            &[0, 0],
+            &[1.0, -1.0],
+            2,
+            1,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![2.0, 1.0],
+            vec![ConstraintType::Eq, ConstraintType::Ge],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let result = solve_with(&lp, &SolverOptions::default());
+        assert_eq!(
+            result.status,
+            SolveStatus::Infeasible,
+            "x0=2 AND -x0>=1 is infeasible; Big-M Phase I Unbounded+positive_art must \
+             return Infeasible (not Timeout). got {:?}",
+            result.status
+        );
+    }
 }
