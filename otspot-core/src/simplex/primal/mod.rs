@@ -8,6 +8,8 @@ mod reconcile;
 pub(crate) use core::revised_simplex_core;
 pub(crate) use crossover::crossover_dual_from_primal;
 pub(crate) use reconcile::{extract_solution, reconcile_final_basis_state};
+#[cfg(test)]
+pub(crate) use reconcile::pivot_out_degenerate_artificials as test_pivot_out_degenerate_artificials;
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
@@ -19,6 +21,16 @@ use super::dual_common::{basic_obj, lp_unbounded_ray_verified};
 use super::pricing::SteepestEdgePricing;
 use super::{extract_dual_info, SimplexOutcome, StandardForm};
 use self::reconcile::{check_eq_feasibility, pivot_out_degenerate_artificials, try_apply_crash};
+
+#[allow(clippy::print_stderr)]
+fn trace_stage(message: impl std::fmt::Display) {
+    if std::env::var("OTSPOT_SIMPLEX_STAGE_TRACE")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        eprintln!("[simplex-stage] {message}");
+    }
+}
 
 /// Counts `pivot_out_degenerate_artificials` early-exit firings (test-only).
 ///
@@ -261,9 +273,15 @@ pub(crate) fn two_phase_simplex(
     let m = sf.m;
     let mut total_iters: usize = 0;
 
+    trace_stage(format_args!(
+        "start m={} n_total={} n_artificial={}",
+        sf.m, sf.n_total, sf.num_artificial
+    ));
+
     let Some((a, b, c, row_scale, col_scale)) =
         LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
     else {
+        trace_stage("equilibration timeout");
         return SolverResult {
             status: SolveStatus::Timeout,
             objective: f64::INFINITY,
@@ -273,6 +291,7 @@ pub(crate) fn two_phase_simplex(
 
     if sf.num_artificial == 0 {
         // Direct Phase II.
+        trace_stage("direct phase2 start");
         let mut basis = sf.initial_basis.clone();
         let mut x_b = b.clone();
         // Ruiz equilibration scales slack diagonals away from 1; divide by the
@@ -329,6 +348,7 @@ pub(crate) fn two_phase_simplex(
                 ) {
                     Ok(()) => {}
                     Err(crate::error::SolverError::DeadlineExceeded) => {
+                        trace_stage("direct phase2 final reconcile deadline");
                         let solution = extract_timeout_solution_reconciled(
                             sf,
                             &a,
@@ -348,11 +368,15 @@ pub(crate) fn two_phase_simplex(
                             ..Default::default()
                         };
                     }
-                    Err(_) => return SolverResult::numerical_error(),
+                    Err(_) => {
+                        trace_stage("direct phase2 final reconcile numerical");
+                        return SolverResult::numerical_error();
+                    }
                 }
                 let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                 // Defense-in-depth against false Optimal on Eq constraints.
                 if !check_eq_feasibility(problem, &solution) {
+                    trace_stage("direct phase2 final feasibility failed");
                     return SolverResult {
                         status: SolveStatus::NumericalError,
                         objective: obj + sf.obj_offset,
@@ -417,10 +441,14 @@ pub(crate) fn two_phase_simplex(
                     ..Default::default()
                 }
             }
-            SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+            SimplexOutcome::SingularBasis => {
+                trace_stage("direct phase2 singular basis");
+                SolverResult::numerical_error()
+            }
         }
     } else {
         // Phase I + Phase II (Ruiz-scaled system)
+        trace_stage("phase1 setup start");
         let mut trip_rows: Vec<usize> = Vec::new();
         let mut trip_cols: Vec<usize> = Vec::new();
         let mut trip_vals: Vec<f64> = Vec::new();
@@ -454,6 +482,7 @@ pub(crate) fn two_phase_simplex(
         let n_ext = art_col;
 
         let a_ext = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_ext).unwrap();
+        trace_stage(format_args!("phase1 setup done n_ext={n_ext}"));
 
         // Phase I cost: penalize all artificials.
         let mut c_phase1 = vec![0.0; n_ext];
@@ -479,9 +508,11 @@ pub(crate) fn two_phase_simplex(
             None
         };
         if let Some((crash_basis, crash_x_b)) = crashed {
+            trace_stage("crash basis accepted");
             basis = crash_basis;
             x_b = crash_x_b;
         } else {
+            trace_stage("cold artificial basis");
             // Correct x_b for diagonal entries of initial basis columns.
             // Art cols have entry 1.0 → no change. Scaled slack cols → divide by diagonal.
             for i in 0..m {
@@ -506,6 +537,7 @@ pub(crate) fn two_phase_simplex(
         }
 
         let mut pricing1 = SteepestEdgePricing::new(n_ext);
+        trace_stage("phase1 core start");
         let phase1_outcome = revised_simplex_core(
             &a_ext,
             &mut x_b,
@@ -522,6 +554,7 @@ pub(crate) fn two_phase_simplex(
         );
         match phase1_outcome {
             SimplexOutcome::Optimal(_obj, _) => {
+                trace_stage(format_args!("phase1 optimal iters={total_iters}"));
                 // Phase I can declare Optimal while eta drift leaves x_b < 0.
                 // Re-factor with fresh LU; if primal-infeasibility persists, retry
                 // Phase I. MAX_PHASE1_RETRIES caps the loop to avoid infinite
@@ -549,7 +582,10 @@ pub(crate) fn two_phase_simplex(
                         Ok(()) => (0..m)
                             .map(|i| c_phase1[basis[i]] * x_b[i].max(0.0))
                             .sum::<f64>(),
-                        Err(_) => break 'retry,
+                        Err(_) => {
+                            trace_stage("phase1 reconcile failed");
+                            break 'retry;
+                        }
                     };
                     if rec_obj <= PIVOT_TOL {
                         phase1_feasible = true;
@@ -624,12 +660,14 @@ pub(crate) fn two_phase_simplex(
                             };
                         }
                         SimplexOutcome::SingularBasis => {
+                            trace_stage("phase1 retry singular basis");
                             return SolverResult::numerical_error();
                         }
                     }
                 }
 
                 if !phase1_feasible {
+                    trace_stage("phase1 not feasible; extracting farkas");
                     // Declare Infeasible only with a verified Farkas certificate.
                     // True infeasible LPs have a valid dual ray at this basis;
                     // feasible LPs cycling in Phase I do not (empty cert → Timeout).
@@ -639,12 +677,18 @@ pub(crate) fn two_phase_simplex(
                 }
 
                 // Phase I feasible: pivot out any remaining degenerate artificials
+                trace_stage("pivot out degenerate artificials start");
                 pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, sf, options);
+                let remaining_art = basis.iter().filter(|&&col| col >= sf.n_total).count();
+                trace_stage(format_args!(
+                    "pivot out degenerate artificials done remaining_art={remaining_art}"
+                ));
 
                 let mut c_phase2 = vec![0.0; n_ext];
                 c_phase2[..sf.n_total].copy_from_slice(&c[..sf.n_total]);
                 {
                     let mut y_transition = vec![0.0f64; m];
+                    trace_stage("phase2 transition reconcile start");
                     match reconcile_final_basis_state(
                         &a_ext,
                         &b,
@@ -657,6 +701,7 @@ pub(crate) fn two_phase_simplex(
                     ) {
                         Ok(()) => {}
                         Err(crate::error::SolverError::DeadlineExceeded) => {
+                            trace_stage("phase2 transition reconcile deadline");
                             let solution = extract_timeout_solution_reconciled(
                                 sf,
                                 &a_ext,
@@ -676,7 +721,10 @@ pub(crate) fn two_phase_simplex(
                                 ..Default::default()
                             };
                         }
-                        Err(_) => return SolverResult::numerical_error(),
+                        Err(_) => {
+                            trace_stage("phase2 transition reconcile numerical");
+                            return SolverResult::numerical_error();
+                        }
                     }
                 }
                 // Charnes perturbation for Phase II anti-cycling.
@@ -694,6 +742,7 @@ pub(crate) fn two_phase_simplex(
                 }
 
                 let mut pricing2 = SteepestEdgePricing::new(n_ext);
+                trace_stage("phase2 core start");
                 let phase2_outcome = revised_simplex_core(
                     &a_ext,
                     &mut x_b,
@@ -721,6 +770,7 @@ pub(crate) fn two_phase_simplex(
                 );
                 match phase2_outcome {
                     SimplexOutcome::Optimal(obj2, mut y) => {
+                        trace_stage(format_args!("phase2 optimal iters={total_iters}"));
                         match reconcile_final_basis_state(
                             &a_ext,
                             &b,
@@ -733,6 +783,7 @@ pub(crate) fn two_phase_simplex(
                         ) {
                             Ok(()) => {}
                             Err(crate::error::SolverError::DeadlineExceeded) => {
+                                trace_stage("phase2 final reconcile deadline");
                                 let solution = extract_timeout_solution_reconciled(
                                     sf,
                                     &a_ext,
@@ -752,10 +803,14 @@ pub(crate) fn two_phase_simplex(
                                     ..Default::default()
                                 };
                             }
-                            Err(_) => return SolverResult::numerical_error(),
+                            Err(_) => {
+                                trace_stage("phase2 final reconcile numerical");
+                                return SolverResult::numerical_error();
+                            }
                         }
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                         if !check_eq_feasibility(problem, &solution) {
+                            trace_stage("phase2 final feasibility failed");
                             return SolverResult {
                                 status: SolveStatus::NumericalError,
                                 objective: obj2 + sf.obj_offset,
@@ -820,10 +875,14 @@ pub(crate) fn two_phase_simplex(
                             ..Default::default()
                         }
                     }
-                    SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+                    SimplexOutcome::SingularBasis => {
+                        trace_stage("phase2 singular basis");
+                        SolverResult::numerical_error()
+                    }
                 }
             }
             SimplexOutcome::Unbounded => {
+                trace_stage(format_args!("phase1 unbounded iters={total_iters}"));
                 // A Phase I unbounded ray suggests primal infeasibility, but only a
                 // verified Farkas certificate proves it; empty cert → Timeout
                 // (spurious unbounded ray on a feasible LP, ns1688926-class).
@@ -831,6 +890,7 @@ pub(crate) fn two_phase_simplex(
                 phase1_infeasibility_verdict(farkas, total_iters)
             }
             SimplexOutcome::Timeout(obj1) => {
+                trace_stage(format_args!("phase1 timeout iters={total_iters} obj={obj1:.9e}"));
                 // obj1 ≤ PIVOT_TOL ⇒ artificials look near-zero at timeout.
                 // Reconcile with a fresh LU; only enter Phase II if the
                 // accurate x_b still shows feasibility.

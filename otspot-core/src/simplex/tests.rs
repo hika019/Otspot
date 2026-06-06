@@ -1810,3 +1810,70 @@ fn batch_pivot_out_uncommitted_rows_fallback_fires_for_rank_saturated_batch() {
          No-op: skipping uncommitted_rows path issues no BTRANs — assertion fails."
     );
 }
+
+/// Sentinel: a partially committed batch must run sequential cleanup for the
+/// matched rows that were left after the non-singular prefix.
+///
+/// Basis before cleanup: `[x0, art1, art2]`, with rows 1 and 2 degenerate.
+/// Greedy raw-A matching picks row1→x1 and row2→x2.  The full trial
+/// `[x0, x1, x2]` is singular, but the prefix `[x0, x1, art2]` is valid and
+/// row 2 can still pivot to x3 by the BTRAN search.  Reverting the fix that
+/// appends `matches[match_offset..]` to the sequential rows strands `art2` in
+/// the basis, so the final assertion fails.
+#[test]
+fn batch_pivot_out_cleans_uncommitted_matched_rows_sequentially() {
+    let a_ext = CscMatrix::from_triplets(
+        &[
+            0, 1, // x0
+            1, 2, // x1
+            0, 1, 2, // x2 = x1 - x0
+            2, // x3, valid sequential replacement for row 2
+            1, // art1
+            2, // art2
+        ],
+        &[
+            0, 0, //
+            1, 1, //
+            2, 2, 2, //
+            3, //
+            4, //
+            5, //
+        ],
+        &[
+            1.0, 1.0, //
+            2.0, 1.0, //
+            -1.0, 1.0, 1.0, //
+            1.0, //
+            1.0, //
+            1.0, //
+        ],
+        3,
+        6,
+    )
+    .unwrap();
+    let sf = super::standard_form::StandardForm {
+        a: CscMatrix::from_triplets(&[], &[], &[], 3, 4).unwrap(),
+        b: vec![1.0, 0.0, 0.0],
+        c: vec![0.0; 4],
+        m: 3,
+        n_shifted: 4,
+        n_total: 4,
+        initial_basis: vec![0, 4, 5],
+        needs_artificial: vec![false, true, true],
+        num_artificial: 2,
+        obj_offset: 0.0,
+        n_orig: 4,
+        orig_var_info: Vec::new(),
+        row_negated: vec![false; 3],
+    };
+    let mut basis = vec![0usize, 4, 5];
+    let x_b = vec![1.0, 0.0, 0.0];
+    let opts = SolverOptions::default();
+
+    primal::test_pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, &sf, &opts);
+
+    assert!(
+        basis.iter().all(|&col| col < sf.n_total),
+        "all degenerate artificials must be pivoted out; got basis={basis:?}"
+    );
+}

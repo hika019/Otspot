@@ -111,10 +111,17 @@ pub(super) fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> boo
         }
     }
     let mut violated = false;
-    for ((ax_i, ct), bi) in ax
+    let mut max_rel = 0.0_f64;
+    let mut max_abs = 0.0_f64;
+    let mut max_row = 0usize;
+    let mut max_ct = ConstraintType::Eq;
+    let mut max_ax = 0.0_f64;
+    let mut max_b = 0.0_f64;
+    for (i, ((ax_i, ct), bi)) in ax
         .iter()
         .zip(problem.constraint_types.iter())
         .zip(problem.b.iter())
+        .enumerate()
     {
         let violation = match ct {
             ConstraintType::Eq => (ax_i - bi).abs(),
@@ -123,10 +130,21 @@ pub(super) fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> boo
         };
         let scale = 1.0 + bi.abs() + ax_i.abs();
         let rel = violation / scale;
+        if rel > max_rel {
+            max_rel = rel;
+            max_abs = violation;
+            max_row = i;
+            max_ct = *ct;
+            max_ax = *ax_i;
+            max_b = *bi;
+        }
         if rel > tol {
             violated = true;
         }
     }
+    super::trace_stage(format_args!(
+        "feasibility check max_rel={max_rel:.9e} max_abs={max_abs:.9e} row={max_row} ct={max_ct:?} ax={max_ax:.9e} b={max_b:.9e} tol={tol:.9e}"
+    ));
     !violated
 }
 
@@ -203,7 +221,7 @@ fn pivot_out_sequential(
     }
 }
 
-pub(super) fn pivot_out_degenerate_artificials(
+pub(crate) fn pivot_out_degenerate_artificials(
     a_ext: &CscMatrix,
     basis: &mut [usize],
     x_b: &[f64],
@@ -472,7 +490,7 @@ pub(super) fn pivot_out_degenerate_artificials(
                     for &col in basis.iter() {
                         seq_is_basic[col] = true;
                     }
-                    // P2: combine both residual groups into a single sequential call.
+                    // Combine both residual groups into a single sequential call.
                     let combined_rows: Vec<usize> = uncommitted_rows
                         .iter()
                         .chain(unmatched_rows.iter())
