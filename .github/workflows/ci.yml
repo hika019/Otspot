@@ -32,7 +32,10 @@ jobs:
         id: cache
         with:
           path: data/
-          key: bench-data-${{ hashFiles('scripts/*.sh', 'scripts/gen_*.py') }}
+          # NOTE: 手動 version pin。データシェイプ変更時のみ bump。script の
+          # 自動 hash は cache を不要に bust しがちで、netlib 不安定時に CI が
+          # 復旧不能となるリスクがあるため。
+          key: bench-data-v1
       - name: Restore git-tracked baselines (cache 上書き対策)
         run: git checkout HEAD -- data/baseline_objectives/
       - name: Install python deps for data generation
