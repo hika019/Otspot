@@ -351,8 +351,11 @@ pub(super) fn pivot_out_degenerate_artificials(
             };
 
             if committed == 0 {
-                // No progress: all remaining columns are in the basis span (rank saturated).
-                // Leaving those artificials is correct; sequential BTRAN would find no pivot.
+                // No progress in this iteration: all remaining candidate columns are
+                // rank-saturated in the current basis span. Sequential BTRAN (in B⁻¹aⱼ
+                // space) is attempted below for these rows; it too will typically find
+                // no valid pivot in a fully rank-saturated subspace, but the attempt is
+                // harmless and ensures correctness in partially-degenerate edge cases.
                 break 'batch;
             }
 
@@ -432,10 +435,36 @@ pub(super) fn pivot_out_degenerate_artificials(
                 );
             }
         } else {
-            // Batch stable. Sequential BTRAN only for true unmatched rows (no raw-A candidate
-            // found by the greedy).  Rows in matches[match_offset..] are rank-saturated and
-            // would yield best_j=None — skipping their BTRANs saves O(N_unprocessable) work.
-            if !unmatched_rows.is_empty() {
+            // Batch stable. Run sequential BTRAN for residual rows that the batch could not
+            // commit, then for greedy-unmatched rows.
+            //
+            // `uncommitted_rows`: rows where greedy found a raw-A candidate but the multi-level
+            // batch left them uncommitted. match_offset > 0: some rows committed, remainder
+            // rank-saturated in raw-A space. match_offset == 0: all greedy matches failed the
+            // batch LU (e.g. a single candidate column already coplanar with the basis); the
+            // batch_stable short-circuit applies and sequential BTRAN is attempted for all.
+            // `unmatched_rows`: greedy found no candidate; sequential BTRAN is the only option.
+            let uncommitted_rows: Vec<usize> = if match_offset > 0 {
+                // Some rows were committed by the batch; the remainder are rank-saturated
+                // in raw-A space. Sequential BTRAN uses B⁻¹aⱼ strength and may succeed.
+                #[cfg(test)]
+                super::PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT
+                    .with(|c| c.set(c.get() + matches[match_offset..].len()));
+                matches[match_offset..].iter().map(|&(r, _)| r).collect()
+            } else {
+                // match_offset == 0: no rows committed by the batch (batch_stable
+                // short-circuits). All greedy matches failed as a group (single-element
+                // slices fail immediately when the candidate column is coplanar with the
+                // existing basis). Sequential BTRAN attempts each row individually;
+                // it will find no pivot in a fully rank-saturated subspace, but the
+                // attempt is correct for partially-degenerate edge cases.
+                #[cfg(test)]
+                super::PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT
+                    .with(|c| c.set(c.get() + matches.len()));
+                matches.iter().map(|&(r, _)| r).collect()
+            };
+            let has_residual = !unmatched_rows.is_empty() || !uncommitted_rows.is_empty();
+            if has_residual {
                 if let Ok(mut basis_mgr) =
                     LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline)
                 {
@@ -443,15 +472,23 @@ pub(super) fn pivot_out_degenerate_artificials(
                     for &col in basis.iter() {
                         seq_is_basic[col] = true;
                     }
-                    pivot_out_sequential(
-                        a_ext,
-                        basis,
-                        sf,
-                        options,
-                        &unmatched_rows,
-                        &mut basis_mgr,
-                        &mut seq_is_basic,
-                    );
+                    // P2: combine both residual groups into a single sequential call.
+                    let combined_rows: Vec<usize> = uncommitted_rows
+                        .iter()
+                        .chain(unmatched_rows.iter())
+                        .copied()
+                        .collect();
+                    if !combined_rows.is_empty() {
+                        pivot_out_sequential(
+                            a_ext,
+                            basis,
+                            sf,
+                            options,
+                            &combined_rows,
+                            &mut basis_mgr,
+                            &mut seq_is_basic,
+                        );
+                    }
                 }
             }
         }
