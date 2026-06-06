@@ -144,17 +144,17 @@ fn flip_apply_disabled() -> bool {
 /// - dfl001   bounded-aug: 556 → 625 iter/s (1.12x)
 const DEADLINE_CHECK_INTERVAL: usize = 512;
 
-/// Counts deadline checks issued inside `compute_reduced_costs_into_timed` (test-only).
-///
-/// `thread_local!` 化により、並列 test 実行 (`--test-threads 3`) で他 test の
-/// 同関数呼び出しが counter を汚染するのを防ぐ。sentinel test は自スレッドの
-/// snapshot 差分だけを見るので false FAIL が起きない。
-///
-/// For a problem with `n_price` columns, the timed RC loop issues
-/// `ceil(n_price / DEADLINE_CHECK_INTERVAL)` checks — not `n_price` checks.
-/// Sentinel asserts the count is strictly less than `n_price` on a problem
-/// where `n_price > DEADLINE_CHECK_INTERVAL`; reverting to per-column checks
-/// makes the count equal `n_price`, failing the assertion (no-op FAIL).
+// Counts deadline checks issued inside `compute_reduced_costs_into_timed` (test-only).
+//
+// `thread_local!` 化により、並列 test 実行 (`--test-threads 3`) で他 test の
+// 同関数呼び出しが counter を汚染するのを防ぐ。sentinel test は自スレッドの
+// snapshot 差分だけを見るので false FAIL が起きない。
+//
+// For a problem with `n_price` columns, the timed RC loop issues
+// `ceil(n_price / DEADLINE_CHECK_INTERVAL)` checks — not `n_price` checks.
+// Sentinel asserts the count is strictly less than `n_price` on a problem
+// where `n_price > DEADLINE_CHECK_INTERVAL`; reverting to per-column checks
+// makes the count equal `n_price`, failing the assertion (no-op FAIL).
 #[cfg(test)]
 thread_local! {
     pub(crate) static RC_DEADLINE_CHECK_COUNT: std::cell::Cell<usize> = const {

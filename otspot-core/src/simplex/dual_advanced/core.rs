@@ -168,8 +168,8 @@ fn apply_lex_perturbation(
 /// 1 回 deadline チェック。詳細は bounded_core.rs の同名定数コメント参照。
 const CORE_RC_DEADLINE_CHECK_INTERVAL: usize = 512;
 
-/// Counts deadline checks issued inside `compute_reduced_costs_timed` (test-only).
-/// thread_local 化で並列 test 中の汚染を回避。
+// Counts deadline checks issued inside `compute_reduced_costs_timed` (test-only).
+// thread_local 化で並列 test 中の汚染を回避。
 #[cfg(test)]
 thread_local! {
     pub(crate) static CORE_RC_DEADLINE_CHECK_COUNT: std::cell::Cell<usize> = const {
