@@ -66,14 +66,12 @@ fn assert_not_infeasible(path_str: &str, timeout_sec: f64) {
 /// (Phase I が budget 内に終わらず artificial が残っても、それは Farkas 証明書
 /// ではないので Infeasible にしてはならない。)
 #[test]
-#[ignore = "tier-2 (Mac ~12s / CI 2.5x ~30s); heavy profile で実行 (#97)"]
 fn pilot_no_false_infeasible() {
     assert_not_infeasible("data/lp_problems/pilot.QPS", 120.0);
 }
 
 /// dfl001 も同機構。pilot より大きい instance。
 #[test]
-#[ignore = "tier-2 (Mac ~30s / CI 2.5x ~75s); heavy profile で実行 (#97)"]
 fn dfl001_no_false_infeasible() {
     assert_not_infeasible("data/lp_problems/dfl001.QPS", 30.0);
 }
@@ -86,7 +84,6 @@ fn ken13_no_false_infeasible() {
 
 /// ken-18 (~96s; within 180s nextest cap)。
 #[test]
-#[ignore = "tier-2 (Mac ~28s / CI 2.5x ~70s); heavy profile で実行 (#97)"]
 fn ken18_no_false_infeasible() {
     assert_not_infeasible("data/lp_problems/ken-18.QPS", 60.0);
 }
@@ -116,7 +113,6 @@ fn ken18_no_false_infeasible() {
 ///
 /// Budget: 150s total (primal ~68s + Big-M remaining ≤ 3min guideline).
 #[test]
-#[ignore = "tier-2 (Mac ~142s / CI 2.5x ~355s); heavy profile で実行 (#97)"]
 fn pilot87_presolve_false_not_infeasible() {
     let path = Path::new("data/lp_problems/pilot87.QPS");
     assert!(path.exists(), "data missing: {}", path.display());

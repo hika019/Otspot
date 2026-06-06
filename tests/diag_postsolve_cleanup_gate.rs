@@ -59,7 +59,7 @@ fn wood1p_postsolve_under_2s() {
 /// 未収束だと postsolve に到達せず gate が vacuous になるため default から外す。
 /// 収束自体は lp_simplex_stall_d6cube_converges が追跡。
 #[test]
-#[ignore = "tier-2: d6cube simplex 収束待ち (Phase2); heavy profile で実行"]
+#[ignore = "broken: d6cube simplex Phase 2 収束待ち (depends on d6cube_optimal_tier2 fix)"]
 fn d6cube_postsolve_under_1s() {
     let prob = load("data/lp_problems/d6cube.QPS");
     let (_status, _wall, postsolve_s) = solve(&prob, 60.0);
@@ -77,7 +77,7 @@ fn d6cube_postsolve_under_1s() {
 /// 未収束だと postsolve に到達せず gate が vacuous になるため default から外す。
 /// 収束自体は lp_simplex_stall_greenbea_converges が追跡。
 #[test]
-#[ignore = "tier-2: heavy ~30s; greenbea postsolve speed sentinel"]
+#[ignore = "broken: CI ~49s vs 5s budget = perf regression; greenbea postsolve speed sentinel"]
 fn greenbea_postsolve_under_5s() {
     let prob = load("data/lp_problems/greenbea.QPS");
     let (_status, _wall, postsolve_s) = solve(&prob, 60.0);

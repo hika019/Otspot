@@ -93,7 +93,6 @@ fn klein2_infeasible_within_60s() {
 /// basis-derived certificate before its anti-cycling cap; LP dispatch must
 /// still certify the original nonnegative LP through a verified Farkas fallback.
 #[test]
-#[ignore = "tier-2 (Mac ~13s / CI 2.5x ~33s); heavy profile で実行 (#97)"]
 fn klein3_no_false_optimal_within_60s() {
     let (status, wall, _iters) = run_klein("data/lp_problems_infeas/klein3.QPS");
     assert_eq!(
@@ -121,7 +120,6 @@ fn klein3_no_false_optimal_within_60s() {
 /// klein3 のような highly degenerate infeasible LP は Phase I 完了に
 /// 時間を要するため Timeout も正当な結末。Optimal/Unbounded は依然 bug。
 #[test]
-#[ignore = "tier-2 (Mac ~12s / CI 2.5x ~30s); heavy profile で実行 (#97)"]
 fn klein3_infeasible_via_bland_anticycling() {
     let path = Path::new("data/lp_problems_infeas/klein3.QPS");
     assert!(path.exists(), "data missing: {}", path.display());
@@ -160,7 +158,6 @@ fn klein3_infeasible_via_bland_anticycling() {
 /// dual-feasibility 未到達で certificate fail → honest Timeout。Optimal/
 /// Unbounded は real bug。検証空白を作らないため status を必ず assert する。
 #[test]
-#[ignore = "tier-2 (Mac ~12s / CI 2.5x ~30s); heavy profile で実行 (#97)"]
 fn diag_klein3_no_presolve() {
     let (status, wall, iters) =
         run_klein_with_presolve("data/lp_problems_infeas/klein3.QPS", false);
@@ -192,7 +189,6 @@ fn diag_klein3_no_presolve() {
 /// Primal early-bail の effectiveness sentinel — 60s deadline で wall ≪ 60s
 /// (Primal が cycling を検出して Big-M に時間を譲っている) を確認する。
 #[test]
-#[ignore = "tier-2 (Mac ~14s / CI 2.5x ~35s); heavy profile で実行 (#97)"]
 fn klein3_primal_early_bail_speedup() {
     let path = Path::new("data/lp_problems_infeas/klein3.QPS");
     assert!(path.exists(), "data missing: {}", path.display());

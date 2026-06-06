@@ -30,60 +30,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - name: Run heavy (tier-2) tests
-        # `--run-ignored all` は known-failing + data-missing も含めて全 ignored test を起動する。
-        # 永久 RED 化を避けるため、下記 test を明示 exclude する。
-        # LIST SYNC 注意: permanent-failing は `grep 'permanent ignore' tests/`、
-        # data-missing は CI subset に未含の data を要求する test を sync すること。
-        # 解除条件は各 test の ignore message 参照。
-        #
-        # permanent-failing (fix tracked in #88/#89):
-        #   diag_osa60_must_reach_known_objective — presolve 経路が 60s で Optimal を certify せず
-        #     (SuboptimalSolution、または Timeout で reduced 空間 solution を leak #37)。obj 自体は
-        #     到達: presolve=false で厳密最適 (companion diag_osa60_is_feasible_and_honest, ~33s)。
-        #   diag_ken18_must_respect_internal_deadline — postsolve cleanup_lp deadline 超過 (LP perf)。
-        #
-        # deferred (known honest non-Optimal; un-ignore after fix tracked in issue):
-        #   diag_cycle_must_reach_known_objective (#31: cycle returns SuboptimalSolution; Optimal restore pending)
-        #   lp_coverage_screen_cycle_tier2 (#31: cycle returns SuboptimalSolution≠Optimal;
-        #     honest companion diag_cycle_is_feasible_and_near_optimal が挙動を cover)
-        #
-        # non-convergent core-bound (#23; un-exclude on convergence):
-        #   lp_simplex_stall_ken18_converges (harris bench 1000s 逐次でも TIMEOUT = 真の非収束)
-        #
-        # contention-isolated → 下記 "convergence sentinels (serial)" step で実行 (main から除外):
-        #   lp_simplex_stall_{cre_b,d6cube,pilot}_converges — 厳密最適に収束する
-        #   (harris bench obj_err 0.000%) が quiet 収束時間が長く (cre-b/d6cube/pilot)、
-        #   --test-threads 3 contention 下では未収束化する timing artifact。
-        #
-        # known non-certified convergence:
-        #   lp_simplex_stall_ken13_converges (360s: obj truth rel_err≈2e-8, but
-        #   status=SuboptimalSolution; do not claim convergence without certificate)
-        #
-        # data-missing (CI subset に lp_problems_hard / osqp_bench_illscaled 未含):
-        #   timeout_honored_on_neos_bigm_cold_start (requires data/lp_problems_hard/neos.QPS)
-        #   qp_is_lasso_300_real_data_honors_deadline (requires data/osqp_bench_illscaled/IS_LASSO_300_S33_E5.qplib)
-        #
-        # flaky (CPU contention 依存、170s margin 6s で CI 環境では不安定):
-        #   diag_greenbea_dfeas_full_green
-        #   greenbea_postsolve_dual_feasibility
-        #
-        # known dual-recovery failure:
-        #   cre_b_postsolve_dual_feasibility (360s: primal/objective OK, df_rel_bound≈9e-1)
-        #
-        # long single-test sentinel (local ~86-93s solo; keep out of --test-threads 3 contention):
-        #   pds_10_postsolve_dual_feasibility
-        #
-        # seed-flaky (#41; pre-existing, seed 依存で間欠 fail):
-        #   prop_nonconvex_qp_kkt_invariants_constrained (非凸 QP KKT 0.871 を LocallyOptimal 主張)
-        #
-        # `--no-fail-fast`: 1件目の failure で打ち切ると残り test が走らず後続 fail が隠れる
-        #   (memory ci_failfast_hides_failures; cre-b/d6cube stall sentinel が cycle fail の裏に
-        #   隠れていた実例)。全 test を起動し全 failure を surface させる。
+      - name: Run heavy (broken/flaky/permanent surveillance) tests
+        # tier-2 廃止後の構造: default profile が ignore 以外を全実走するため、
+        # heavy profile は #[ignore = "broken: ..."] / "flaky: ..." / "permanent ignore"
+        # で残った tests を `--run-ignored all` で起動するサーベイランス用途。
+        # broken/flaky は known-failing なので exit 100 が想定通り (CI RED 必然)。
+        # 解除条件: 各 test の ignore message 参照、 broken→fix or flaky→stabilize 後に attr 除去。
         run: |
-          cargo nextest run --release --profile heavy --run-ignored all --no-fail-fast \
-            -E 'kind(test) and not (test(=diag_osa60_must_reach_known_objective) | test(=diag_ken18_must_respect_internal_deadline) | test(=diag_cycle_must_reach_known_objective) | test(=lp_coverage_screen_cycle_tier2) | test(=lp_simplex_stall_ken18_converges) | test(=lp_simplex_stall_cre_b_converges) | test(=lp_simplex_stall_d6cube_converges) | test(=lp_simplex_stall_ken13_converges) | test(=lp_simplex_stall_pilot_converges) | test(=timeout_honored_on_neos_bigm_cold_start) | test(=qp_is_lasso_300_real_data_honors_deadline) | test(=diag_greenbea_dfeas_full_green) | test(=greenbea_postsolve_dual_feasibility) | test(=cre_b_postsolve_dual_feasibility) | test(=pds_10_postsolve_dual_feasibility) | test(=prop_nonconvex_qp_kkt_invariants_constrained))' \
-            --test-threads 3
+          cargo nextest run --release --features parallel --profile heavy \
+            --run-ignored all --no-fail-fast --test-threads 1
       - name: Run heavy convergence sentinels (serial, full CPU)
         # cre-b/d6cube/pilot は厳密最適に収束 (harris bench 1000s 逐次, obj_err 0.000%) するが
         # quiet 収束時間が長く、--test-threads 3 の contention 下では BUDGET=360s でも未収束化する。

@@ -36,7 +36,7 @@ fn load_lp(path: &str) -> LpProblem {
 ///
 /// tier-2 (Mac ~12s); heavy profile (#97).
 #[test]
-#[ignore = "tier-2 (Mac ~12s); heavy profile"]
+#[ignore = "broken: postsolve_dfeas must be populated for Optimal LP, panics"]
 fn pilot_ja_postsolve_dual_is_feasible() {
     let prob = load_lp("data/lp_problems/pilot-ja.QPS");
     let mut opts = SolverOptions::default();

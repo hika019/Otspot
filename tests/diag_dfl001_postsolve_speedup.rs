@@ -12,7 +12,6 @@ use std::path::Path;
 use std::time::Instant;
 
 #[test]
-#[ignore = "tier-2 (Mac ~60s / CI 2.5x ~150s); heavy profile で実行 (#97)"]
 fn dfl001_postsolve_skips_lsq_when_cleanup_stagnant() {
     let path = Path::new("data/lp_problems/dfl001.QPS");
     assert!(

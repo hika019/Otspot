@@ -21,7 +21,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --release --features parallel -E 'kind(lib) + kind(bin)'
+      - run: cargo nextest run --release --features parallel --profile lib-only
 
   test-integration:
     name: Tests (integration, real data)
@@ -52,7 +52,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --release --features parallel -E 'kind(test)' --test-threads 3
+      # default profile = ignore以外の全テスト (lib + bin + test、 旧 tier-2 promote 含む)
+      - run: cargo nextest run --release --features parallel
 
   clippy:
     name: clippy
