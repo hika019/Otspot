@@ -15,11 +15,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # rust-toolchain + nextest install を Download 前に配置: Download が
+      # netlib intermittent で fail しても `if: always()` の test step が
+      # `nextest 不在` で死なないようにする。
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
       - uses: actions/cache@v4
         id: cache
         with:
           path: data/
-          key: bench-data-${{ hashFiles('scripts/*.sh', 'scripts/gen_*.py') }}
+          key: bench-data-v1
+          restore-keys: |
+            bench-data-
+      - name: Restore git-tracked baselines (cache 上書き対策)
+        run: git checkout HEAD -- data/baseline_objectives/
       - name: Install python deps for data generation
         run: pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*'
       - name: Build emps decoder (Netlib LP data 変換用)
@@ -27,9 +37,6 @@ jobs:
         run: bash scripts/ensure_emps.sh
       - name: Download CI subset
         run: bash scripts/download_all_bench_data.sh --ci-subset
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
       - name: Run heavy (broken/flaky/permanent surveillance) tests
         # tier-2 廃止後の構造: default profile が ignore 以外を全実走するため、
         # heavy profile は #[ignore = "broken: ..."] / "flaky: ..." / "permanent ignore"
