@@ -111,10 +111,17 @@ pub(super) fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> boo
         }
     }
     let mut violated = false;
-    for ((ax_i, ct), bi) in ax
+    let mut max_rel = 0.0_f64;
+    let mut max_abs = 0.0_f64;
+    let mut max_row = 0usize;
+    let mut max_ct = ConstraintType::Eq;
+    let mut max_ax = 0.0_f64;
+    let mut max_b = 0.0_f64;
+    for (i, ((ax_i, ct), bi)) in ax
         .iter()
         .zip(problem.constraint_types.iter())
         .zip(problem.b.iter())
+        .enumerate()
     {
         let violation = match ct {
             ConstraintType::Eq => (ax_i - bi).abs(),
@@ -123,10 +130,21 @@ pub(super) fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> boo
         };
         let scale = 1.0 + bi.abs() + ax_i.abs();
         let rel = violation / scale;
+        if rel > max_rel {
+            max_rel = rel;
+            max_abs = violation;
+            max_row = i;
+            max_ct = *ct;
+            max_ax = *ax_i;
+            max_b = *bi;
+        }
         if rel > tol {
             violated = true;
         }
     }
+    super::trace_stage(format_args!(
+        "feasibility check max_rel={max_rel:.9e} max_abs={max_abs:.9e} row={max_row} ct={max_ct:?} ax={max_ax:.9e} b={max_b:.9e} tol={tol:.9e}"
+    ));
     !violated
 }
 
@@ -203,7 +221,7 @@ fn pivot_out_sequential(
     }
 }
 
-pub(super) fn pivot_out_degenerate_artificials(
+pub(crate) fn pivot_out_degenerate_artificials(
     a_ext: &CscMatrix,
     basis: &mut [usize],
     x_b: &[f64],
@@ -432,10 +450,14 @@ pub(super) fn pivot_out_degenerate_artificials(
                 );
             }
         } else {
-            // Batch stable. Sequential BTRAN only for true unmatched rows (no raw-A candidate
-            // found by the greedy).  Rows in matches[match_offset..] are rank-saturated and
-            // would yield best_j=None — skipping their BTRANs saves O(N_unprocessable) work.
-            if !unmatched_rows.is_empty() {
+            // Batch stable. Rows that never got a raw-A match still need the
+            // sequential BTRAN search. Rows left after the committed prefix also
+            // need it: a failed all-at-once batch only proves the whole remaining
+            // assignment is singular, not that each individual row has no valid
+            // pivot after the committed basis changes.
+            let mut sequential_rows = unmatched_rows;
+            sequential_rows.extend(matches[match_offset..].iter().map(|&(r, _)| r));
+            if !sequential_rows.is_empty() {
                 if let Ok(mut basis_mgr) =
                     LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline)
                 {
@@ -448,7 +470,7 @@ pub(super) fn pivot_out_degenerate_artificials(
                         basis,
                         sf,
                         options,
-                        &unmatched_rows,
+                        &sequential_rows,
                         &mut basis_mgr,
                         &mut seq_is_basic,
                     );
