@@ -56,6 +56,14 @@ fn bounded_obj_from_state(c: &[f64], ubs: &[f64], state: &BoundedDualState) -> f
     basic + at_ub
 }
 
+enum BoundedTerminalReconcile {
+    Optimal(f64),
+    Timeout(f64),
+    BoundViolation(f64),
+    MatrixAccessError,
+    SingularBasis,
+}
+
 fn reconcile_bounded_terminal_state(
     a: &CscMatrix,
     b: &[f64],
@@ -63,7 +71,7 @@ fn reconcile_bounded_terminal_state(
     ubs: &[f64],
     state: &mut BoundedDualState,
     options: &SolverOptions,
-) -> SimplexOutcome {
+) -> BoundedTerminalReconcile {
     let mut rhs = b.to_vec();
     for (j, &at_ub) in state.at_upper.iter().enumerate() {
         if state.is_basic[j] || !at_ub {
@@ -74,7 +82,7 @@ fn reconcile_bounded_terminal_state(
             continue;
         }
         let Ok((rows, vals)) = a.get_column(j) else {
-            return SimplexOutcome::SingularBasis;
+            return BoundedTerminalReconcile::MatrixAccessError;
         };
         for (k, &row) in rows.iter().enumerate() {
             rhs[row] -= vals[k] * ub;
@@ -85,9 +93,9 @@ fn reconcile_bounded_terminal_state(
         match LuBasis::new_timed(a, &state.basis, options.max_etas, options.deadline) {
             Ok(bm) => bm,
             Err(crate::error::SolverError::DeadlineExceeded) => {
-                return SimplexOutcome::Timeout(bounded_obj_from_state(c, ubs, state));
+                return BoundedTerminalReconcile::Timeout(bounded_obj_from_state(c, ubs, state));
             }
-            Err(_) => return SimplexOutcome::SingularBasis,
+            Err(_) => return BoundedTerminalReconcile::SingularBasis,
         };
     let mut x_b_sv = SparseVec::from_dense(&rhs);
     basis_mgr.ftran(&mut x_b_sv);
@@ -101,14 +109,14 @@ fn reconcile_bounded_terminal_state(
     let obj = bounded_obj_from_state(c, ubs, state);
     for (i, &x_i) in state.x_b.iter().enumerate() {
         if x_i < -options.primal_tol {
-            return SimplexOutcome::Timeout(obj);
+            return BoundedTerminalReconcile::BoundViolation(obj);
         }
         let ub = ubs[state.basis[i]];
         if ub.is_finite() && x_i > ub + options.primal_tol {
-            return SimplexOutcome::Timeout(obj);
+            return BoundedTerminalReconcile::BoundViolation(obj);
         }
     }
-    SimplexOutcome::Optimal(obj, Vec::new())
+    BoundedTerminalReconcile::Optimal(obj)
 }
 
 /// Builds a [`DualLeavingStrategy`] from `pricing`; DSE initialises *m* weights to 1.
@@ -736,8 +744,8 @@ where
             let art_sum = match reconcile_bounded_terminal_state(
                 &a_aug, &b, &c_p1, &ubs_aug, &mut state, options,
             ) {
-                SimplexOutcome::Optimal(obj, _) => obj,
-                SimplexOutcome::Timeout(_) => {
+                BoundedTerminalReconcile::Optimal(obj) => obj,
+                BoundedTerminalReconcile::Timeout(_) => {
                     let solution = extract_solution_bounded(bsf, &state, col_scale);
                     return Some(mark_eq_ub_path(SolverResult {
                         status: SolveStatus::Timeout,
@@ -747,10 +755,11 @@ where
                         ..Default::default()
                     }));
                 }
-                SimplexOutcome::SingularBasis => {
+                BoundedTerminalReconcile::BoundViolation(_) => return None,
+                BoundedTerminalReconcile::MatrixAccessError
+                | BoundedTerminalReconcile::SingularBasis => {
                     return Some(mark_eq_ub_path(SolverResult::numerical_error()));
                 }
-                SimplexOutcome::Unbounded => return None,
             };
             if art_sum > options.primal_tol {
                 // Phase I converged with residual artificials → infeasible.
@@ -790,11 +799,12 @@ where
 
     match p2_out {
         SimplexOutcome::Optimal(_, y) => {
+            let pre_reconcile_x_b = state.x_b.clone();
             let obj = match reconcile_bounded_terminal_state(
                 &a_aug, &b, &c_p2, &ubs_aug, &mut state, options,
             ) {
-                SimplexOutcome::Optimal(obj, _) => obj,
-                SimplexOutcome::Timeout(obj) => {
+                BoundedTerminalReconcile::Optimal(obj) => obj,
+                BoundedTerminalReconcile::Timeout(obj) => {
                     let solution = extract_solution_bounded(bsf, &state, col_scale);
                     return Some(mark_eq_ub_path(SolverResult {
                         status: SolveStatus::Timeout,
@@ -804,16 +814,21 @@ where
                         ..Default::default()
                     }));
                 }
-                SimplexOutcome::SingularBasis => {
-                    return Some(mark_eq_ub_path(SolverResult::numerical_error()));
-                }
-                SimplexOutcome::Unbounded => {
+                BoundedTerminalReconcile::BoundViolation(obj) => {
+                    let invalid_x_b = std::mem::replace(&mut state.x_b, pre_reconcile_x_b);
+                    let solution = extract_solution_bounded(bsf, &state, col_scale);
+                    state.x_b = invalid_x_b;
                     return Some(mark_eq_ub_path(SolverResult {
-                        status: SolveStatus::Unbounded,
-                        objective: f64::NEG_INFINITY,
+                        status: SolveStatus::Timeout,
+                        objective: obj + bsf.obj_offset,
+                        solution,
                         iterations: iters,
                         ..Default::default()
                     }));
+                }
+                BoundedTerminalReconcile::MatrixAccessError
+                | BoundedTerminalReconcile::SingularBasis => {
+                    return Some(mark_eq_ub_path(SolverResult::numerical_error()));
                 }
             };
             let solution = extract_solution_bounded(bsf, &state, col_scale);
@@ -911,9 +926,16 @@ fn finish_bounded(
                 phase2_primal_bounded(bsf, dual_state, a, c, options, total_iters, ubs);
             let p2_out = match p2_out {
                 SimplexOutcome::Optimal(_, y) => {
+                    let pre_reconcile_x_b = p2_state.x_b.clone();
                     match reconcile_bounded_terminal_state(a, b, c, ubs, &mut p2_state, options) {
-                        SimplexOutcome::Optimal(obj, _) => SimplexOutcome::Optimal(obj, y),
-                        other => other,
+                        BoundedTerminalReconcile::Optimal(obj) => SimplexOutcome::Optimal(obj, y),
+                        BoundedTerminalReconcile::Timeout(obj) => SimplexOutcome::Timeout(obj),
+                        BoundedTerminalReconcile::BoundViolation(obj) => {
+                            p2_state.x_b = pre_reconcile_x_b;
+                            SimplexOutcome::Timeout(obj)
+                        }
+                        BoundedTerminalReconcile::MatrixAccessError
+                        | BoundedTerminalReconcile::SingularBasis => SimplexOutcome::SingularBasis,
                     }
                 }
                 other => other,
