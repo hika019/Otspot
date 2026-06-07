@@ -67,7 +67,7 @@ test-group = "qplib-memory-heavy"
 # Heavy/nightly profile: runs ALL tests including #[ignore]d heavy ones.
 #
 # Usage:
-#   cargo nextest run --workspace --profile heavy --run-ignored all --test-threads 1
+#   cargo nextest run --workspace --profile heavy --run-ignored all --test-threads 3
 #
 # run-ignored は nextest profile キーとして無効 (unknown key warning が出る)。
 # #[ignore] テストを含めるには CLI フラグ `--run-ignored all` を必ず付けること。
@@ -86,7 +86,7 @@ test-group = "qplib-memory-heavy"
 # liswet9 complementarity (~16s), kkt_repro_50 (~16s), klein3 (~12-14s),
 # dfl001 forced simplex (~30s), prop_nonconvex_constrained (~29s).
 [profile.heavy]
-test-threads = 1
+test-threads = 3
 slow-timeout = { period = "300s", terminate-after = 2 }
 
 # lp_coverage_screen: 90 LP screen ~5–6 min — raise kill ceiling to 12 min.
@@ -127,7 +127,7 @@ filter = "test(greenbea_postsolve_under_5s)"
 threads-required = "num-cpus"
 
 # lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent: default profile と同様に
-# CPU 専有で fair timing にする (heavy --test-threads 1 でも他の heavy test との contention 対策)。
+# CPU 専有で fair timing にする (heavy --test-threads 3 での他の heavy test との contention 対策)。
 [[profile.heavy.overrides]]
 filter = "test(lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent)"
 threads-required = "num-cpus"
