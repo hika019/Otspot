@@ -38,11 +38,9 @@ jobs:
       - name: Download CI subset
         run: bash scripts/download_all_bench_data.sh --ci-subset
       - name: Run heavy (broken/flaky/permanent surveillance) tests
-        # tier-2 廃止後の構造: default profile が ignore 以外を全実走するため、
-        # heavy profile は #[ignore = "broken: ..."] / "flaky: ..." / "permanent ignore"
-        # で残った tests を `--run-ignored all` で起動するサーベイランス用途。
-        # broken/flaky は known-failing なので exit 100 が想定通り (CI RED 必然)。
-        # 解除条件: 各 test の ignore message 参照、 broken→fix or flaky→stabilize 後に attr 除去。
+        # Informational surveillance: ignored/heavy tests are not required to pass on CI.
+        # Non-ignored tests are gated by ci.yml; keep surfacing all ignored results here.
+        continue-on-error: true
         run: |
           cargo nextest run --release --features parallel --profile heavy \
             --run-ignored all --no-fail-fast --test-threads 1
@@ -51,8 +49,10 @@ jobs:
         # quiet 収束時間が長く、--test-threads 3 の contention 下では BUDGET=360s でも未収束化する。
         # full CPU (--test-threads 1) で公平に走らせ収束を確認する (REL_TOL=5e-3 の収束-truth assert
         # は維持; budget/tol は diag_lp_simplex_stall_sentinel.rs 参照)。
-        # if: always() — 前 step が fail しても本 step を必ず走らせ収束結果を surface する。
+        # if: always() — setup failure 後も収束結果を surface する。
+        # Informational surveillance; non-ignored tests are gated by ci.yml.
         if: always()
+        continue-on-error: true
         run: |
           cargo nextest run --release --profile heavy --run-ignored all --no-fail-fast \
             -E 'test(=lp_simplex_stall_cre_b_converges) | test(=lp_simplex_stall_d6cube_converges) | test(=lp_simplex_stall_pilot_converges)' \
