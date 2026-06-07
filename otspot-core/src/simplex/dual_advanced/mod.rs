@@ -59,7 +59,7 @@ fn bounded_obj_from_state(c: &[f64], ubs: &[f64], state: &BoundedDualState) -> f
 enum BoundedTerminalReconcile {
     Optimal(f64),
     Timeout(f64),
-    BoundViolation(f64),
+    BoundViolation,
     MatrixAccessError,
     SingularBasis,
 }
@@ -106,16 +106,16 @@ fn reconcile_bounded_terminal_state(
         }
     }
 
-    let obj = bounded_obj_from_state(c, ubs, state);
     for (i, &x_i) in state.x_b.iter().enumerate() {
         if x_i < -options.primal_tol {
-            return BoundedTerminalReconcile::BoundViolation(obj);
+            return BoundedTerminalReconcile::BoundViolation;
         }
         let ub = ubs[state.basis[i]];
         if ub.is_finite() && x_i > ub + options.primal_tol {
-            return BoundedTerminalReconcile::BoundViolation(obj);
+            return BoundedTerminalReconcile::BoundViolation;
         }
     }
+    let obj = bounded_obj_from_state(c, ubs, state);
     BoundedTerminalReconcile::Optimal(obj)
 }
 
@@ -755,7 +755,7 @@ where
                         ..Default::default()
                     }));
                 }
-                BoundedTerminalReconcile::BoundViolation(_) => return None,
+                BoundedTerminalReconcile::BoundViolation => return None,
                 BoundedTerminalReconcile::MatrixAccessError
                 | BoundedTerminalReconcile::SingularBasis => {
                     return Some(mark_eq_ub_path(SolverResult::numerical_error()));
@@ -814,10 +814,10 @@ where
                         ..Default::default()
                     }));
                 }
-                BoundedTerminalReconcile::BoundViolation(obj) => {
-                    let invalid_x_b = std::mem::replace(&mut state.x_b, pre_reconcile_x_b);
+                BoundedTerminalReconcile::BoundViolation => {
+                    state.x_b = pre_reconcile_x_b;
+                    let obj = bounded_obj_from_state(&c_p2, &ubs_aug, &state);
                     let solution = extract_solution_bounded(bsf, &state, col_scale);
-                    state.x_b = invalid_x_b;
                     return Some(mark_eq_ub_path(SolverResult {
                         status: SolveStatus::Timeout,
                         objective: obj + bsf.obj_offset,
@@ -930,8 +930,9 @@ fn finish_bounded(
                     match reconcile_bounded_terminal_state(a, b, c, ubs, &mut p2_state, options) {
                         BoundedTerminalReconcile::Optimal(obj) => SimplexOutcome::Optimal(obj, y),
                         BoundedTerminalReconcile::Timeout(obj) => SimplexOutcome::Timeout(obj),
-                        BoundedTerminalReconcile::BoundViolation(obj) => {
+                        BoundedTerminalReconcile::BoundViolation => {
                             p2_state.x_b = pre_reconcile_x_b;
+                            let obj = bounded_obj_from_state(c, ubs, &p2_state);
                             SimplexOutcome::Timeout(obj)
                         }
                         BoundedTerminalReconcile::MatrixAccessError
@@ -1218,6 +1219,49 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn bound_violation_timeout_objective_uses_restored_incumbent() {
+        use crate::sparse::CscMatrix;
+
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let c = vec![10.0, 1.0];
+        let ubs = vec![3.0, 10.0];
+        let mut state = BoundedDualState {
+            basis: vec![1],
+            at_upper: vec![true, false],
+            x_b: vec![0.5],
+            reduced_costs: vec![0.0, 0.0],
+            is_basic: vec![false, true],
+            iterations: 0,
+        };
+        let pre_reconcile_x_b = state.x_b.clone();
+
+        assert!(matches!(
+            reconcile_bounded_terminal_state(
+                &a,
+                &b,
+                &c,
+                &ubs,
+                &mut state,
+                &SolverOptions::default()
+            ),
+            BoundedTerminalReconcile::BoundViolation
+        ));
+        let invalid_obj = bounded_obj_from_state(&c, &ubs, &state);
+        state.x_b = pre_reconcile_x_b;
+        let timeout_obj = bounded_obj_from_state(&c, &ubs, &state);
+        let restored_solution = [ubs[0], state.x_b[0]];
+        let recomputed_obj: f64 = c
+            .iter()
+            .zip(restored_solution.iter())
+            .map(|(&c_j, &x_j)| c_j * x_j)
+            .sum();
+
+        assert_ne!(invalid_obj, timeout_obj);
+        assert_eq!(timeout_obj, recomputed_obj);
     }
 
     /// **Flip > 0 sentinel**: solving a boxed LP via `solve_dual_advanced`
