@@ -2122,7 +2122,7 @@ mod tests {
         );
         assert_eq!(
             rc[1], 0.0,
-            "negative lower-bound reduced cost must not be hidden by z_ub"
+            "negative lower-bound reduced cost is an active z_lb and must be projected to zero"
         );
         assert_eq!(
             rc[2], 0.0,
@@ -2924,15 +2924,8 @@ mod tests {
 
         let deadline_far = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
         let ok = compute_reduced_costs_into_timed(
-            &a,
-            &c,
-            &mut basis_mgr,
-            &is_basic,
-            n_synthetic,
-            &basis,
-            &mut y_buf,
-            &mut rc_out,
-            deadline_far,
+            &a, &c, &mut basis_mgr, &is_basic, n_synthetic, &basis,
+            &mut y_buf, &mut rc_out, deadline_far,
         );
         assert!(ok, "RC compute must succeed (deadline is far)");
 

@@ -5,18 +5,8 @@ use otspot::qp::solve_qp_with;
 use otspot_dev::bench_utils::compute_pfeas_normalized;
 use std::path::Path;
 
-fn lp_data_path(name: &str) -> String {
-    for base in ["data/lp_problems", "data/data/lp_problems"] {
-        let candidate = format!("{base}/{name}.QPS");
-        if Path::new(&candidate).exists() {
-            return candidate;
-        }
-    }
-    format!("data/lp_problems/{name}.QPS")
-}
-
 fn assert_grow_primal_feasible(name: &str) {
-    let path = lp_data_path(name);
+    let path = format!("data/lp_problems/{name}.QPS");
     let path = Path::new(&path);
     assert!(path.exists(), "data missing: {}", path.display());
 
@@ -49,7 +39,7 @@ fn bounded_grow_family_primal_feasible() {
 
 #[test]
 fn bounded_pilot_we_certifies_optimal() {
-    let path = lp_data_path("pilot-we");
+    let path = format!("data/lp_problems/pilot-we.QPS");
     let path = Path::new(&path);
     assert!(path.exists(), "data missing: {}", path.display());
 
