@@ -46,15 +46,15 @@
 //! fall back to legacy `core.rs`. The cold-start path used by production
 //! wiring enters with `x_B = b ≥ 0` so this branch is never triggered there.
 
+use super::deadline_expired;
 use crate::basis::{BasisManager, LuBasis};
 use crate::error::SolverError;
 use crate::options::SolverOptions;
 use crate::problem::LpProblem;
 use crate::sparse::{CscMatrix, SparseVec};
-use crate::tolerances::PIVOT_TOL;
+use crate::tolerances::{feas_rel_tol, PIVOT_TOL};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
-use super::deadline_expired;
 
 use super::super::dual_common::{
     basic_obj, compute_dual_vars_into, made_progress_with_floor, recompute_gamma_truth,
@@ -893,8 +893,37 @@ pub(crate) fn extract_dual_info_bounded(
             }
         }
     }
+    project_reduced_costs_to_active_bounds(problem, solution, &mut reduced_costs);
 
     (dual_solution, reduced_costs, slack)
+}
+
+fn active_at_bound(x: f64, bound: f64) -> bool {
+    bound.is_finite() && (x - bound).abs() <= feas_rel_tol() * (1.0 + x.abs() + bound.abs())
+}
+
+fn project_reduced_costs_to_active_bounds(
+    problem: &LpProblem,
+    solution: &[f64],
+    reduced_costs: &mut [f64],
+) {
+    for (j, rc) in reduced_costs.iter_mut().enumerate().take(problem.num_vars) {
+        if j >= solution.len() {
+            continue;
+        }
+        let (lb, ub) = problem.bounds[j];
+        let at_lb = active_at_bound(solution[j], lb);
+        let at_ub = active_at_bound(solution[j], ub);
+        *rc = if at_lb && !at_ub {
+            rc.max(0.0)
+        } else if at_ub && !at_lb {
+            rc.min(0.0)
+        } else if at_lb && at_ub {
+            *rc
+        } else {
+            0.0
+        };
+    }
 }
 
 // ── bounded primal Phase 2 ─────────────────────────────────────────────────
@@ -2068,6 +2097,37 @@ mod tests {
         fn drop(&mut self) {
             set_at_upper_apply_disabled(false);
         }
+    }
+
+    #[test]
+    fn reduced_cost_projection_zeros_inactive_bound_duals() {
+        let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[1.0, 1.0, 1.0], 1, 3).unwrap();
+        let problem = LpProblem::new_general(
+            vec![0.0; 3],
+            a,
+            vec![10.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 100.0), (0.0, 5.0), (0.0, 5.0)],
+            None,
+        )
+        .unwrap();
+        let solution = vec![2.0, 0.0, 5.0];
+        let mut rc = vec![-1.0e-8, -2.0, 3.0];
+
+        project_reduced_costs_to_active_bounds(&problem, &solution, &mut rc);
+
+        assert_eq!(
+            rc[0], 0.0,
+            "inactive upper-bound roundoff must not become a positive z_ub"
+        );
+        assert_eq!(
+            rc[1], 0.0,
+            "negative lower-bound reduced cost is an active z_lb and must be projected to zero"
+        );
+        assert_eq!(
+            rc[2], 0.0,
+            "positive upper-bound reduced cost must not be hidden by z_lb"
+        );
     }
 
     /// Table-driven fixture for extract_solution_bounded.
