@@ -49,7 +49,7 @@ jobs:
         # quiet 収束時間が長く、--test-threads 3 の contention 下では BUDGET=360s でも未収束化する。
         # full CPU (--test-threads 1) で公平に走らせ収束を確認する (REL_TOL=5e-3 の収束-truth assert
         # は維持; budget/tol は diag_lp_simplex_stall_sentinel.rs 参照)。
-        # if: always() — 前 step が fail しても本 step を必ず走らせ収束結果を surface する。
+        # if: always() — setup failure 後も収束結果を surface する。
         # Informational surveillance; non-ignored tests are gated by ci.yml.
         if: always()
         continue-on-error: true
