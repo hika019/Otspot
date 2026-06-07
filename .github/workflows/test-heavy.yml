@@ -43,17 +43,14 @@ jobs:
         continue-on-error: true
         run: |
           cargo nextest run --release --features parallel --profile heavy \
-            --run-ignored all --no-fail-fast --test-threads 1
-      - name: Run heavy convergence sentinels (serial, full CPU)
-        # cre-b/d6cube/pilot は厳密最適に収束 (harris bench 1000s 逐次, obj_err 0.000%) するが
-        # quiet 収束時間が長く、--test-threads 3 の contention 下では BUDGET=360s でも未収束化する。
-        # full CPU (--test-threads 1) で公平に走らせ収束を確認する (REL_TOL=5e-3 の収束-truth assert
-        # は維持; budget/tol は diag_lp_simplex_stall_sentinel.rs 参照)。
+            --run-ignored all --no-fail-fast --test-threads 3
+      - name: Run heavy convergence sentinels (surveillance)
+        # Informational surveillance for convergence sentinels; results are surfaced but non-gating.
+        # budget/tol は diag_lp_simplex_stall_sentinel.rs 参照。
         # if: always() — setup failure 後も収束結果を surface する。
-        # Informational surveillance; non-ignored tests are gated by ci.yml.
         if: always()
         continue-on-error: true
         run: |
           cargo nextest run --release --profile heavy --run-ignored all --no-fail-fast \
             -E 'test(=lp_simplex_stall_cre_b_converges) | test(=lp_simplex_stall_d6cube_converges) | test(=lp_simplex_stall_pilot_converges)' \
-            --test-threads 1
+            --test-threads 3
