@@ -60,7 +60,7 @@ use super::super::dual_common::{
     basic_obj, compute_dual_vars_into, made_progress_with_floor, recompute_gamma_truth,
     NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
 };
-use super::super::pricing::DualLeavingStrategy;
+use super::super::pricing::{DualLeavingStrategy, CAP_MULT_OF_M, GAMMA_FLOOR};
 use super::super::standard_form::{BoundedStandardForm, SimplexOutcome};
 use super::super::trace::IterTrace;
 use super::bound_flip::{bfrt_select_entering, bump_bfrt_flip_invocations, ColBound};
@@ -143,8 +143,6 @@ fn flip_apply_disabled() -> bool {
 /// - ken-18   bounded-aug: 236 → 355 iter/s (~1.5x)
 /// - dfl001   bounded-aug: 556 → 625 iter/s (1.12x)
 const DEADLINE_CHECK_INTERVAL: usize = 512;
-const AUG_DEVEX_GAMMA_FLOOR: f64 = 1e-10;
-const AUG_DEVEX_CAP_MULT_OF_M: f64 = 100.0;
 
 // Counts deadline checks issued inside `compute_reduced_costs_into_timed` (test-only).
 //
@@ -1508,7 +1506,7 @@ fn primal_simplex_aug(
             return timeout_obj(state);
         }
 
-        let mut best_score = PIVOT_TOL;
+        let mut best_score = 0.0;
         let mut entering: Option<usize> = None;
         for j in 0..n_struct {
             if state.is_basic[j] {
@@ -1518,7 +1516,7 @@ fn primal_simplex_aug(
             if violation <= PIVOT_TOL {
                 continue;
             }
-            let gamma = devex_weights[j].max(AUG_DEVEX_GAMMA_FLOOR);
+            let gamma = devex_weights[j].max(GAMMA_FLOOR);
             let weighted_score = violation / gamma.sqrt();
             if weighted_score > best_score {
                 best_score = weighted_score;
@@ -1611,16 +1609,16 @@ fn primal_simplex_aug(
             gamma_leaving = devex_weights[leaving_col];
             let pivot = alpha[r];
             if pivot.abs() > PIVOT_TOL {
-                let cap = AUG_DEVEX_CAP_MULT_OF_M * (m as f64).max(1.0);
+                let cap = CAP_MULT_OF_M * (m as f64).max(1.0);
                 let new_weight = (norm_sq / (pivot * pivot))
                     .min(cap)
-                    .max(AUG_DEVEX_GAMMA_FLOOR);
+                    .max(GAMMA_FLOOR);
                 devex_weights[leaving_col] = devex_weights[leaving_col].max(new_weight);
                 gamma_leaving = devex_weights[leaving_col];
             }
         }
         if q < n_struct {
-            devex_weights[q] = if norm_sq > AUG_DEVEX_GAMMA_FLOOR {
+            devex_weights[q] = if norm_sq > GAMMA_FLOOR {
                 (gamma_leaving / norm_sq).max(1.0)
             } else {
                 1.0
