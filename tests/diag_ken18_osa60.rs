@@ -200,7 +200,6 @@ fn osa60_max_primal_infeasibility(lp: &LpProblem, x: &[f64]) -> (f64, f64) {
 /// pass; dropping feasibility lets an infeasible "solution" pass; dropping
 /// self-consistency lets a mis-reported objective pass.
 #[test]
-#[ignore = "tier-2: osa60 solve ~35s (presolve=false); honest-behavior companion (#88/#89, obj精度は別)"]
 fn diag_osa60_is_feasible_and_honest() {
     let path = Path::new("data/lp_problems/osa-60.QPS");
     assert!(

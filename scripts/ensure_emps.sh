@@ -1,10 +1,15 @@
 #!/bin/bash
 # Build the Netlib emps decoder used by LP benchmark-data download scripts.
+#
+# scripts/vendor/emps.c に同梱した netlib emps.c を優先使用。
+# 同梱が無い場合のみ EMPS_URL から download (古い setup 互換)。
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EMPS_OUT="${EMPS_BIN:-/tmp/emps}"
 EMPS_SRC="${EMPS_SRC:-/tmp/emps.c}"
+EMPS_VENDORED="${EMPS_VENDORED:-$SCRIPT_DIR/vendor/emps.c}"
 EMPS_URL="${EMPS_URL:-https://www.netlib.org/lp/data/emps.c}"
 
 CURL_RETRY="${EMPS_CURL_RETRY:-5}"
@@ -17,37 +22,44 @@ if [[ -x "$EMPS_OUT" ]]; then
   exit 0
 fi
 
-tmp_src="$(mktemp "${EMPS_SRC}.XXXXXX")"
-cleanup() {
-  rm -f "$tmp_src"
-}
-trap cleanup EXIT
+src_path=""
+if [[ -s "$EMPS_VENDORED" ]]; then
+  echo "[ensure_emps] vendored: $EMPS_VENDORED"
+  src_path="$EMPS_VENDORED"
+else
+  tmp_src="$(mktemp "${EMPS_SRC}.XXXXXX")"
+  cleanup() {
+    rm -f "$tmp_src"
+  }
+  trap cleanup EXIT
 
-echo "[ensure_emps] download: $EMPS_URL"
-curl \
-  --fail \
-  --show-error \
-  --location \
-  --retry "$CURL_RETRY" \
-  --retry-delay "$CURL_RETRY_DELAY" \
-  --retry-all-errors \
-  --connect-timeout "$CURL_CONNECT_TIMEOUT" \
-  --max-time "$CURL_MAX_TIME" \
-  "$EMPS_URL" \
-  --output "$tmp_src"
+  echo "[ensure_emps] download: $EMPS_URL"
+  curl \
+    --fail \
+    --show-error \
+    --location \
+    --retry "$CURL_RETRY" \
+    --retry-delay "$CURL_RETRY_DELAY" \
+    --retry-all-errors \
+    --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+    --max-time "$CURL_MAX_TIME" \
+    "$EMPS_URL" \
+    --output "$tmp_src"
 
-if [[ ! -s "$tmp_src" ]]; then
-  echo "[ensure_emps] error: downloaded source is empty: $EMPS_URL" >&2
-  exit 1
+  if [[ ! -s "$tmp_src" ]]; then
+    echo "[ensure_emps] error: downloaded source is empty: $EMPS_URL" >&2
+    exit 1
+  fi
+  cp "$tmp_src" "$EMPS_SRC" 2>/dev/null || true
+  src_path="$tmp_src"
 fi
 
 mkdir -p "$(dirname "$EMPS_OUT")"
-cc -x c -o "$EMPS_OUT" "$tmp_src"
+cc -x c -o "$EMPS_OUT" "$src_path"
 
 if [[ ! -x "$EMPS_OUT" ]]; then
   echo "[ensure_emps] error: build did not produce executable: $EMPS_OUT" >&2
   exit 1
 fi
 
-cp "$tmp_src" "$EMPS_SRC" 2>/dev/null || true
 echo "[ensure_emps] built: $EMPS_OUT"

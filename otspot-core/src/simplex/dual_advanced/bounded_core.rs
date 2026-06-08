@@ -46,12 +46,13 @@
 //! fall back to legacy `core.rs`. The cold-start path used by production
 //! wiring enters with `x_B = b ≥ 0` so this branch is never triggered there.
 
+use super::deadline_expired;
 use crate::basis::{BasisManager, LuBasis};
 use crate::error::SolverError;
 use crate::options::SolverOptions;
 use crate::problem::LpProblem;
 use crate::sparse::{CscMatrix, SparseVec};
-use crate::tolerances::PIVOT_TOL;
+use crate::tolerances::{feas_rel_tol, PIVOT_TOL};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -59,7 +60,7 @@ use super::super::dual_common::{
     basic_obj, compute_dual_vars_into, made_progress_with_floor, recompute_gamma_truth,
     NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
 };
-use super::super::pricing::DualLeavingStrategy;
+use super::super::pricing::{DualLeavingStrategy, CAP_MULT_OF_M, GAMMA_FLOOR};
 use super::super::standard_form::{BoundedStandardForm, SimplexOutcome};
 use super::super::trace::IterTrace;
 use super::bound_flip::{bfrt_select_entering, bump_bfrt_flip_invocations, ColBound};
@@ -121,9 +122,44 @@ fn flip_apply_disabled() -> bool {
     false
 }
 
-#[inline]
-fn deadline_expired(deadline: Option<Instant>) -> bool {
-    deadline.is_some_and(|d| Instant::now() >= d)
+/// Deadline check interval for the RC inner loop.
+///
+/// `Instant::now()` 実測 48ns/call。per-col 呼び出しは大規模問題で支配的:
+///
+/// - pds-80 (n=426k): 426k × 48ns ≈ 20ms/iter (RC pass 全コストを clock read が占有)
+/// - dfl001 (n=12k): 12k × 48ns ≈ 0.6ms/iter (RC コストの ~33%)
+///
+/// chunk=512 で per-RC-pass の check 数を `ceil(n/512)` に削減:
+///
+/// - pds-80: 833 checks × 48ns ≈ 0.04ms (オーバーヘッド無視可)
+///
+/// deadline 超過は最大 INTERVAL=512 列分 (~100µs @ 観測 throughput) で
+/// ソルバ全体の deadline (秒〜分単位) 内で許容範囲。
+///
+/// 実測 speedup (timeout=60s bench):
+///
+/// - pds-80   bounded-aug:  64 → 144 iter/s (2.25x)
+/// - pds-30   bounded-aug: 177 → 371 iter/s (~2.1x)
+/// - ken-18   bounded-aug: 236 → 355 iter/s (~1.5x)
+/// - dfl001   bounded-aug: 556 → 625 iter/s (1.12x)
+const DEADLINE_CHECK_INTERVAL: usize = 512;
+
+// Counts deadline checks issued inside `compute_reduced_costs_into_timed` (test-only).
+//
+// `thread_local!` 化により、並列 test 実行 (`--test-threads 3`) で他 test の
+// 同関数呼び出しが counter を汚染するのを防ぐ。sentinel test は自スレッドの
+// snapshot 差分だけを見るので false FAIL が起きない。
+//
+// For a problem with `n_price` columns, the timed RC loop issues
+// `ceil(n_price / DEADLINE_CHECK_INTERVAL)` checks — not `n_price` checks.
+// Sentinel asserts the count is strictly less than `n_price` on a problem
+// where `n_price > DEADLINE_CHECK_INTERVAL`; reverting to per-column checks
+// makes the count equal `n_price`, failing the assertion (no-op FAIL).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RC_DEADLINE_CHECK_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
 }
 
 fn compute_reduced_costs_into_timed(
@@ -141,20 +177,28 @@ fn compute_reduced_costs_into_timed(
         return false;
     }
     compute_dual_vars_into(c, basis_mgr, basis, y_buf);
-    for j in 0..n_price {
+    let mut j = 0;
+    while j < n_price {
+        // Check deadline once per chunk, not per column.
         if deadline_expired(deadline) {
             return false;
         }
-        if is_basic[j] {
-            rc_out[j] = 0.0;
-            continue;
+        #[cfg(test)]
+        RC_DEADLINE_CHECK_COUNT.with(|c| c.set(c.get() + 1));
+        let end = (j + DEADLINE_CHECK_INTERVAL).min(n_price);
+        for k in j..end {
+            if is_basic[k] {
+                rc_out[k] = 0.0;
+            } else {
+                let (rows, vals) = a.get_column(k).unwrap();
+                let mut ya = 0.0;
+                for (ri, &row) in rows.iter().enumerate() {
+                    ya += y_buf[row] * vals[ri];
+                }
+                rc_out[k] = c[k] - ya;
+            }
         }
-        let (rows, vals) = a.get_column(j).unwrap();
-        let mut ya = 0.0;
-        for (k, &row) in rows.iter().enumerate() {
-            ya += y_buf[row] * vals[k];
-        }
-        rc_out[j] = c[j] - ya;
+        j = end;
     }
     true
 }
@@ -305,9 +349,7 @@ pub(crate) fn iterate(
         };
 
     // Early-exit before O(m²) γ init; prevents budget overrun on large warm-start solves.
-    if options
-        .deadline
-        .is_some_and(|d| std::time::Instant::now() >= d)
+    if deadline_expired(options.deadline)
         || options
             .cancel_flag
             .as_ref()
@@ -386,9 +428,7 @@ pub(crate) fn iterate(
 
     loop {
         state.iterations = state.iterations.saturating_add(1);
-        let timed_out = options
-            .deadline
-            .is_some_and(|d| std::time::Instant::now() >= d);
+        let timed_out = deadline_expired(options.deadline);
         let cancelled = options
             .cancel_flag
             .as_ref()
@@ -853,8 +893,37 @@ pub(crate) fn extract_dual_info_bounded(
             }
         }
     }
+    project_reduced_costs_to_active_bounds(problem, solution, &mut reduced_costs);
 
     (dual_solution, reduced_costs, slack)
+}
+
+fn active_at_bound(x: f64, bound: f64) -> bool {
+    bound.is_finite() && (x - bound).abs() <= feas_rel_tol() * (1.0 + x.abs() + bound.abs())
+}
+
+fn project_reduced_costs_to_active_bounds(
+    problem: &LpProblem,
+    solution: &[f64],
+    reduced_costs: &mut [f64],
+) {
+    for (j, rc) in reduced_costs.iter_mut().enumerate().take(problem.num_vars) {
+        if j >= solution.len() {
+            continue;
+        }
+        let (lb, ub) = problem.bounds[j];
+        let at_lb = active_at_bound(solution[j], lb);
+        let at_ub = active_at_bound(solution[j], ub);
+        *rc = if at_lb && !at_ub {
+            rc.max(0.0)
+        } else if at_ub && !at_lb {
+            rc.min(0.0)
+        } else if at_lb && at_ub {
+            *rc
+        } else {
+            0.0
+        };
+    }
 }
 
 // ── bounded primal Phase 2 ─────────────────────────────────────────────────
@@ -895,6 +964,123 @@ fn bounded_obj(
         .map(|(j, _)| c[j] * ubs[j])
         .sum();
     basic + at_ub
+}
+
+/// Outcome of the bounded (two-sided) ratio test.
+#[cfg_attr(test, derive(Debug))]
+enum BoundedLeave {
+    /// Entering variable reaches its own opposite bound before any basic
+    /// variable; flip it without a basis change (step = `ub_q`).
+    Flip,
+    /// Basic variable in `row` leaves at its lower (`at_ub = false`) or upper
+    /// (`at_ub = true`) bound; `step` is the primal step length.
+    Pivot { row: usize, at_ub: bool, step: f64 },
+    /// No basic variable blocks the step and the entering bound is infinite.
+    Unbounded,
+}
+
+/// Two-sided Harris ratio test for the bounded primal cores.
+///
+/// `eff[i] = alpha[i] · dir` is the effective pivot column. A basic variable
+/// leaves at its lower bound when `eff[i] > floor` (decreasing toward 0) or at
+/// its upper bound when `eff[i] < -floor` with finite `ub_i` (increasing toward
+/// `ub_i`). The entering variable instead flips at its own bound `ub_q`.
+///
+/// Pass 1 computes the feasibility-preserving step
+/// `θ = min_i (room_i + feas_tol) / |eff_i|` (capped by `ub_q`); pass 2 selects,
+/// among rows whose *true* ratio is within `θ`, the largest pivot `|eff_i|`,
+/// breaking ties by Bland's rule. Choosing the largest pivot — rather than the
+/// strict-min-ratio row — keeps the basis well-conditioned under degeneracy,
+/// where many rows share a zero ratio and a strict-min rule would repeatedly
+/// pick near-zero pivots until the LU factorization turns singular. This mirrors
+/// the one-sided `primal::ratio_test::select_leaving_feasibility_preserving`.
+fn select_leaving_bounded(
+    alpha: &[f64],
+    dir: f64,
+    x_b: &[f64],
+    basis: &[usize],
+    ubs: &[f64],
+    ub_q: f64,
+    m: usize,
+    floor: f64,
+    feas_tol: f64,
+) -> BoundedLeave {
+    let mut theta = f64::INFINITY;
+    let mut min_true = f64::INFINITY;
+    for i in 0..m {
+        let eff = alpha[i] * dir;
+        let xi = x_b[i];
+        let ub_i = ubs[basis[i]];
+        if eff > floor {
+            theta = theta.min((xi + feas_tol) / eff);
+            min_true = min_true.min(xi / eff);
+        } else if eff < -floor && ub_i.is_finite() {
+            let neg = -eff;
+            theta = theta.min((ub_i - xi + feas_tol) / neg);
+            min_true = min_true.min((ub_i - xi) / neg);
+        }
+    }
+
+    // Entering bound binds strictly first → flip (preserves "pivot on ties",
+    // never flips past a degenerate blocking row whose true ratio is 0).
+    if ub_q.is_finite() && ub_q < min_true {
+        return BoundedLeave::Flip;
+    }
+    // Never step past the entering variable's own bound.
+    if ub_q.is_finite() {
+        theta = theta.min(ub_q);
+    }
+    if !theta.is_finite() {
+        return BoundedLeave::Unbounded;
+    }
+
+    let mut leaving: Option<usize> = None;
+    let mut leaving_at_ub = false;
+    let mut chosen_step = 0.0f64;
+    let mut best_pivot_abs = 0.0f64;
+    for i in 0..m {
+        let eff = alpha[i] * dir;
+        let xi = x_b[i];
+        let ub_i = ubs[basis[i]];
+        let (true_ratio, at_ub, pivot_abs) = if eff > floor {
+            (xi / eff, false, eff)
+        } else if eff < -floor && ub_i.is_finite() {
+            ((ub_i - xi) / (-eff), true, -eff)
+        } else {
+            continue;
+        };
+        if true_ratio <= theta {
+            if pivot_abs > best_pivot_abs + PIVOT_TOL {
+                best_pivot_abs = pivot_abs;
+                leaving = Some(i);
+                leaving_at_ub = at_ub;
+                chosen_step = true_ratio.max(0.0);
+            } else if (pivot_abs - best_pivot_abs).abs() <= PIVOT_TOL {
+                match leaving {
+                    None => {
+                        leaving = Some(i);
+                        leaving_at_ub = at_ub;
+                        chosen_step = true_ratio.max(0.0);
+                    }
+                    Some(prev) if basis[i] < basis[prev] => {
+                        leaving = Some(i);
+                        leaving_at_ub = at_ub;
+                        chosen_step = true_ratio.max(0.0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    match leaving {
+        Some(row) => BoundedLeave::Pivot {
+            row,
+            at_ub: leaving_at_ub,
+            step: chosen_step,
+        },
+        None => BoundedLeave::Unbounded,
+    }
 }
 
 /// Drive primal Phase 2 from a primal-feasible `BoundedDualState`.
@@ -953,10 +1139,7 @@ pub(crate) fn phase2_primal_bounded(
 
     loop {
         *iters = iters.saturating_add(1);
-        if options
-            .deadline
-            .is_some_and(|d| std::time::Instant::now() >= d)
-        {
+        if deadline_expired(options.deadline) {
             return (
                 SimplexOutcome::Timeout(bounded_obj(
                     c,
@@ -1056,87 +1239,65 @@ pub(crate) fn phase2_primal_bounded(
 
         ftran_column(a, &mut basis_mgr, q, m, &mut alpha);
 
-        // Bounded ratio test.
-        // Update rule: x_b[i] += delta[i] * theta, where delta[i] = -alpha[i] * dir.
-        // Leaving at lb: delta[r] < 0, theta = x_b[r] / (-delta[r]) = x_b[r] * dir / alpha[r]...
-        // Equivalent formulation (cleaner): treat "effective pivot column" as alpha[i]*dir.
-        // Leaving at lb: eff_alpha[r] > PIVOT_TOL, theta = x_b[r] / eff_alpha[r]
-        // Leaving at ub: eff_alpha[r] < -PIVOT_TOL, theta = (ub_r - x_b[r]) / (-eff_alpha[r])
-        let mut min_step = f64::INFINITY;
-        let mut leaving_row: Option<usize> = None;
-        let mut leaving_at_ub = false;
-
-        for i in 0..m {
-            if deadline_expired(options.deadline) {
-                return (
-                    SimplexOutcome::Timeout(bounded_obj(
-                        c,
-                        &state.basis,
-                        &state.x_b,
-                        &state.at_upper,
-                        &state.is_basic,
-                        ubs,
-                    )),
-                    state,
-                );
-            }
-            let eff = alpha[i] * dir;
-            let xi = state.x_b[i];
-            let ub_i = ubs[state.basis[i]];
-
-            if eff > PIVOT_TOL {
-                let step = xi / eff;
-                if step < min_step {
-                    min_step = step.max(0.0);
-                    leaving_row = Some(i);
-                    leaving_at_ub = false;
-                }
-            } else if eff < -PIVOT_TOL && ub_i.is_finite() {
-                let step = (ub_i - xi) / (-eff);
-                if step < min_step {
-                    min_step = step.max(0.0);
-                    leaving_row = Some(i);
-                    leaving_at_ub = true;
-                }
-            }
+        if deadline_expired(options.deadline) {
+            return (
+                SimplexOutcome::Timeout(bounded_obj(
+                    c,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs,
+                )),
+                state,
+            );
         }
 
-        // Check if entering variable hits its own opposite bound first.
+        // Two-sided Harris ratio test (largest pivot within the feasibility
+        // tolerance) — strict-min-ratio selection would pick near-zero pivots
+        // under degeneracy and drive the LU basis singular.
         let ub_q = ubs[q];
-        if ub_q.is_finite() && ub_q < min_step {
-            // Flip entering var to opposite bound; no basis change.
-            bump_bfrt_flip_invocations();
-            for i in 0..m {
-                state.x_b[i] -= alpha[i] * dir * ub_q;
+        let (r, leaving_at_ub, theta) = match select_leaving_bounded(
+            &alpha,
+            dir,
+            &state.x_b,
+            &state.basis,
+            ubs,
+            ub_q,
+            m,
+            PIVOT_TOL,
+            options.primal_tol,
+        ) {
+            BoundedLeave::Flip => {
+                bump_bfrt_flip_invocations();
+                for i in 0..m {
+                    state.x_b[i] -= alpha[i] * dir * ub_q;
+                }
+                state.at_upper[q] = !from_ub;
+                basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
+                if basis_mgr.refactor_failed {
+                    return if basis_mgr.singular_basis {
+                        (SimplexOutcome::SingularBasis, state)
+                    } else {
+                        (
+                            SimplexOutcome::Timeout(bounded_obj(
+                                c,
+                                &state.basis,
+                                &state.x_b,
+                                &state.at_upper,
+                                &state.is_basic,
+                                ubs,
+                            )),
+                            state,
+                        )
+                    };
+                }
+                continue;
             }
-            state.at_upper[q] = !from_ub;
-            basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
-            if basis_mgr.refactor_failed {
-                return if basis_mgr.singular_basis {
-                    (SimplexOutcome::SingularBasis, state)
-                } else {
-                    (
-                        SimplexOutcome::Timeout(bounded_obj(
-                            c,
-                            &state.basis,
-                            &state.x_b,
-                            &state.at_upper,
-                            &state.is_basic,
-                            ubs,
-                        )),
-                        state,
-                    )
-                };
-            }
-            continue;
-        }
-
-        let r = match leaving_row {
-            None => return (SimplexOutcome::Unbounded, state),
-            Some(r) => r,
+            BoundedLeave::Unbounded => return (SimplexOutcome::Unbounded, state),
+            BoundedLeave::Pivot { row, at_ub, step } => (row, at_ub, step),
         };
 
-        let theta = min_step;
         let leaving_col = state.basis[r];
 
         // Update x_b: all rows by -alpha[i]*dir*theta, then override row r.
@@ -1186,6 +1347,292 @@ pub(crate) fn phase2_primal_bounded(
                         )),
                         state,
                     )
+                };
+            }
+        }
+    }
+}
+
+// ── augmented bounded primal (Eq + UB Phase I / Phase II) ─────────────────────
+
+// Eq+UB dispatch counter — sentinel tests only.
+#[cfg(test)]
+thread_local! {
+    static EQ_UB_DISPATCH_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_eq_ub_dispatch_count() {
+    EQ_UB_DISPATCH_COUNT.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn eq_ub_dispatch_count() -> u64 {
+    EQ_UB_DISPATCH_COUNT.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(super) fn bump_eq_ub_dispatch_count() {
+    EQ_UB_DISPATCH_COUNT.with(|c| c.set(c.get().saturating_add(1)));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(super) fn bump_eq_ub_dispatch_count() {}
+
+/// Bounded primal simplex on the augmented matrix `[bsf.a | I_art]` with
+/// pricing restricted to the first `n_struct` columns (structural + slacks).
+/// Artificial columns at `[n_struct, n_aug)` may be basic but never priced —
+/// Phase I drives them out via leaving pivots; Phase II keeps any remaining
+/// at value 0 (the Phase I optimality check rejects nonzero residuals).
+///
+/// State sizing:
+/// - `state.basis.len() == bsf.m`, `state.x_b.len() == bsf.m`.
+/// - `state.at_upper.len() == state.is_basic.len() == n_aug` (caller pre-sized).
+///
+/// Cost `c_aug` has length `n_aug`. Phase I passes `[0; n_struct] ++ [1; n_art]`;
+/// Phase II passes `[c_scaled; n_struct] ++ [0; n_art]`.
+///
+/// Returns the primal `SimplexOutcome` (`Optimal(obj, y)` etc.). The objective
+/// includes the at-upper contribution from `ubs_aug` and is computed against
+/// `c_aug` as supplied (Phase I: artificial sum; Phase II: original objective).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bounded_primal_phase1(
+    a_aug: &CscMatrix,
+    c_aug: &[f64],
+    ubs_aug: &[f64],
+    n_struct: usize,
+    state: &mut BoundedDualState,
+    options: &SolverOptions,
+    iters: &mut usize,
+) -> SimplexOutcome {
+    primal_simplex_aug(a_aug, c_aug, ubs_aug, n_struct, state, options, iters)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bounded_primal_phase2_aug(
+    a_aug: &CscMatrix,
+    c_aug: &[f64],
+    ubs_aug: &[f64],
+    n_struct: usize,
+    state: &mut BoundedDualState,
+    options: &SolverOptions,
+    iters: &mut usize,
+) -> SimplexOutcome {
+    primal_simplex_aug(a_aug, c_aug, ubs_aug, n_struct, state, options, iters)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn primal_simplex_aug(
+    a_aug: &CscMatrix,
+    c_aug: &[f64],
+    ubs_aug: &[f64],
+    n_struct: usize,
+    state: &mut BoundedDualState,
+    options: &SolverOptions,
+    iters: &mut usize,
+) -> SimplexOutcome {
+    let m = state.basis.len();
+    let n_aug = state.at_upper.len();
+    debug_assert_eq!(state.x_b.len(), m);
+    debug_assert_eq!(state.is_basic.len(), n_aug);
+    debug_assert_eq!(ubs_aug.len(), n_aug);
+    debug_assert_eq!(c_aug.len(), n_aug);
+    debug_assert!(n_struct <= n_aug);
+
+    let timeout_obj = |st: &BoundedDualState| {
+        SimplexOutcome::Timeout(bounded_obj(
+            c_aug,
+            &st.basis,
+            &st.x_b,
+            &st.at_upper,
+            &st.is_basic,
+            ubs_aug,
+        ))
+    };
+    if deadline_expired(options.deadline) {
+        return timeout_obj(state);
+    }
+
+    let mut basis_mgr =
+        match LuBasis::new_timed(a_aug, &state.basis, options.max_etas, options.deadline) {
+            Ok(bm) => bm,
+            Err(SolverError::DeadlineExceeded) => return timeout_obj(state),
+            Err(_) => return SimplexOutcome::SingularBasis,
+        };
+
+    let mut y = vec![0.0f64; m];
+    let mut rc = vec![0.0f64; n_struct];
+    let mut alpha = vec![0.0f64; m];
+    // Devex pricing mirrors the standard primal core: scaled reduced-cost
+    // scores avoid repeatedly choosing dense/degenerate columns by raw RC alone.
+    let mut devex_weights = vec![1.0f64; n_struct];
+    let mut trace = IterTrace::new("bounded-aug-primal");
+
+    loop {
+        *iters = iters.saturating_add(1);
+        if deadline_expired(options.deadline)
+            || options
+                .cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Relaxed))
+        {
+            return timeout_obj(state);
+        }
+
+        if let Some(t) = trace.as_mut() {
+            let obj = bounded_obj(
+                c_aug,
+                &state.basis,
+                &state.x_b,
+                &state.at_upper,
+                &state.is_basic,
+                ubs_aug,
+            );
+            t.log(*iters, obj, &state.basis, false);
+        }
+
+        if !compute_reduced_costs_into_timed(
+            a_aug,
+            c_aug,
+            &mut basis_mgr,
+            &state.is_basic,
+            n_struct,
+            &state.basis,
+            &mut y,
+            &mut rc,
+            options.deadline,
+        ) {
+            return timeout_obj(state);
+        }
+
+        let mut best_score = 0.0;
+        let mut entering: Option<usize> = None;
+        for j in 0..n_struct {
+            if state.is_basic[j] {
+                continue;
+            }
+            let violation = if state.at_upper[j] { rc[j] } else { -rc[j] };
+            if violation <= PIVOT_TOL {
+                continue;
+            }
+            let gamma = devex_weights[j].max(GAMMA_FLOOR);
+            let weighted_score = violation / gamma.sqrt();
+            if weighted_score > best_score {
+                best_score = weighted_score;
+                entering = Some(j);
+            }
+        }
+
+        let q = match entering {
+            None => {
+                let obj = bounded_obj(
+                    c_aug,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs_aug,
+                );
+                return SimplexOutcome::Optimal(obj, y);
+            }
+            Some(q) => q,
+        };
+
+        let from_ub = state.at_upper[q];
+        let dir = if from_ub { -1.0f64 } else { 1.0 };
+
+        ftran_column(a_aug, &mut basis_mgr, q, m, &mut alpha);
+
+        // Two-sided Harris ratio test (largest pivot within the feasibility
+        // tolerance) — strict-min-ratio selection would pick near-zero pivots
+        // under degeneracy and drive the LU basis singular (grow22 Phase II).
+        let ub_q = ubs_aug[q];
+        let (r, leaving_at_ub, theta) = match select_leaving_bounded(
+            &alpha,
+            dir,
+            &state.x_b,
+            &state.basis,
+            ubs_aug,
+            ub_q,
+            m,
+            PIVOT_TOL,
+            options.primal_tol,
+        ) {
+            BoundedLeave::Flip => {
+                bump_bfrt_flip_invocations();
+                for i in 0..m {
+                    state.x_b[i] -= alpha[i] * dir * ub_q;
+                }
+                state.at_upper[q] = !from_ub;
+                basis_mgr.refactor_if_needed_timed(a_aug, &state.basis, options.deadline);
+                if basis_mgr.refactor_failed {
+                    return if basis_mgr.singular_basis {
+                        SimplexOutcome::SingularBasis
+                    } else {
+                        timeout_obj(state)
+                    };
+                }
+                continue;
+            }
+            BoundedLeave::Unbounded => return SimplexOutcome::Unbounded,
+            BoundedLeave::Pivot { row, at_ub, step } => (row, at_ub, step),
+        };
+        let leaving_col = state.basis[r];
+
+        for i in 0..m {
+            state.x_b[i] -= alpha[i] * dir * theta;
+        }
+        state.x_b[r] = if from_ub { ub_q - theta } else { theta };
+        for v in state.x_b.iter_mut() {
+            if v.abs() < options.clamp_tol {
+                *v = 0.0;
+            }
+        }
+
+        state.at_upper[leaving_col] = leaving_at_ub;
+        state.at_upper[q] = false;
+        state.is_basic[leaving_col] = false;
+        state.is_basic[q] = true;
+        state.basis[r] = q;
+
+        let (cr, cv) = a_aug.get_column(q).unwrap();
+        let mut alpha_sv = SparseVec {
+            indices: cr.to_vec(),
+            values: cv.to_vec(),
+            len: m,
+        };
+        basis_mgr.ftran(&mut alpha_sv);
+        let norm_sq: f64 = alpha.iter().map(|&v| v * v).sum();
+        let mut gamma_leaving = 1.0;
+        if leaving_col < n_struct {
+            gamma_leaving = devex_weights[leaving_col];
+            let pivot = alpha[r];
+            if pivot.abs() > PIVOT_TOL {
+                let cap = CAP_MULT_OF_M * (m as f64).max(1.0);
+                let new_weight = (norm_sq / (pivot * pivot))
+                    .min(cap)
+                    .max(GAMMA_FLOOR);
+                devex_weights[leaving_col] = devex_weights[leaving_col].max(new_weight);
+                gamma_leaving = devex_weights[leaving_col];
+            }
+        }
+        if q < n_struct {
+            devex_weights[q] = if norm_sq > GAMMA_FLOOR {
+                (gamma_leaving / norm_sq).max(1.0)
+            } else {
+                1.0
+            };
+        }
+        basis_mgr.update(q, r, &alpha_sv);
+
+        if basis_mgr.needs_refactor() {
+            basis_mgr.refactor_if_needed_timed(a_aug, &state.basis, options.deadline);
+            if basis_mgr.refactor_failed {
+                return if basis_mgr.singular_basis {
+                    SimplexOutcome::SingularBasis
+                } else {
+                    timeout_obj(state)
                 };
             }
         }
@@ -1679,6 +2126,37 @@ mod tests {
         fn drop(&mut self) {
             set_at_upper_apply_disabled(false);
         }
+    }
+
+    #[test]
+    fn reduced_cost_projection_zeros_inactive_bound_duals() {
+        let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[1.0, 1.0, 1.0], 1, 3).unwrap();
+        let problem = LpProblem::new_general(
+            vec![0.0; 3],
+            a,
+            vec![10.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 100.0), (0.0, 5.0), (0.0, 5.0)],
+            None,
+        )
+        .unwrap();
+        let solution = vec![2.0, 0.0, 5.0];
+        let mut rc = vec![-1.0e-8, -2.0, 3.0];
+
+        project_reduced_costs_to_active_bounds(&problem, &solution, &mut rc);
+
+        assert_eq!(
+            rc[0], 0.0,
+            "inactive upper-bound roundoff must not become a positive z_ub"
+        );
+        assert_eq!(
+            rc[1], 0.0,
+            "negative lower-bound reduced cost is an active z_lb and must be projected to zero"
+        );
+        assert_eq!(
+            rc[2], 0.0,
+            "positive upper-bound reduced cost must not be hidden by z_lb"
+        );
     }
 
     /// Table-driven fixture for extract_solution_bounded.
@@ -2315,6 +2793,205 @@ mod tests {
                 );
             }
             other => panic!("expected Timeout with expired deadline, got {other:?}"),
+        }
+    }
+
+    /// Reference implementation of the OLD strict-min-ratio bounded ratio test
+    /// (`step < min_step`, first eligible row wins on a tie). Used only to prove
+    /// the sentinel below bites: reverting `select_leaving_bounded` to this rule
+    /// reselects the near-zero pivot under degeneracy.
+    fn old_strict_min_leaving(
+        alpha: &[f64],
+        dir: f64,
+        x_b: &[f64],
+        basis: &[usize],
+        ubs: &[f64],
+        ub_q: f64,
+        m: usize,
+    ) -> Option<usize> {
+        let mut min_step = f64::INFINITY;
+        let mut leaving_row: Option<usize> = None;
+        for i in 0..m {
+            let eff = alpha[i] * dir;
+            let xi = x_b[i];
+            let ub_i = ubs[basis[i]];
+            if eff > PIVOT_TOL {
+                let step = (xi / eff).max(0.0);
+                if step < min_step {
+                    min_step = step;
+                    leaving_row = Some(i);
+                }
+            } else if eff < -PIVOT_TOL && ub_i.is_finite() {
+                let step = ((ub_i - xi) / (-eff)).max(0.0);
+                if step < min_step {
+                    min_step = step;
+                    leaving_row = Some(i);
+                }
+            }
+        }
+        if ub_q.is_finite() && ub_q < min_step {
+            return None; // flip
+        }
+        leaving_row
+    }
+
+    /// Sentinel (no-op proof) for the grow22 regression: under full degeneracy
+    /// (every basic variable at a zero ratio) the bounded ratio test must select
+    /// the row with the *largest* pivot for numerical stability. The previous
+    /// strict-min-ratio rule kept the first eligible row regardless of pivot
+    /// magnitude; on grow22's all-`Eq` Phase II this repeatedly chose pivots of
+    /// order 1e-8, accumulating LU error until the basis turned singular and the
+    /// solve returned NumericalError.
+    ///
+    /// Three rows share ratio 0 with pivots `10·PIVOT_TOL` (row 0, just above
+    /// the eligibility floor), 50 (row 1), and 1.0 (row 2).
+    /// `select_leaving_bounded` must pick row 1 (largest |pivot|). Reverting to
+    /// `old_strict_min_leaving` picks row 0 (the tiny pivot), so the
+    /// `assert_eq!(row, 1)` below FAILs — proving the fix is load-bearing.
+    #[test]
+    fn select_leaving_bounded_picks_large_pivot_under_degeneracy() {
+        let tiny = PIVOT_TOL * 10.0; // eligible (> floor) but ill-conditioned
+        let alpha = [tiny, 50.0, 1.0];
+        let dir = 1.0;
+        let x_b = [0.0, 0.0, 0.0]; // fully degenerate vertex
+        let basis = [0usize, 1, 2];
+        let ubs = [f64::INFINITY; 3];
+        let ub_q = f64::INFINITY;
+        let m = 3;
+
+        match select_leaving_bounded(
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL,
+        ) {
+            BoundedLeave::Pivot { row, step, .. } => {
+                assert_eq!(row, 1, "must pick the largest pivot (row 1, |α|=50)");
+                assert_eq!(step, 0.0, "degenerate vertex ⇒ zero step");
+            }
+            other => panic!("expected a Pivot, got {other:?}"),
+        }
+
+        // No-op proof: the old strict-min rule selects the tiny-pivot row 0.
+        let old = old_strict_min_leaving(&alpha, dir, &x_b, &basis, &ubs, ub_q, m);
+        assert_eq!(
+            old,
+            Some(0),
+            "old strict-min rule must select the tiny-pivot row 0 (proves the sentinel bites)"
+        );
+    }
+
+    /// The upper-bound leaving branch must also obey largest-pivot selection.
+    /// Two basic variables sit exactly at their upper bound (room 0, ratio 0)
+    /// with increasing direction; pivots are 1e-8 (row 0) and 8.0 (row 1).
+    #[test]
+    fn select_leaving_bounded_picks_large_pivot_at_upper_bound() {
+        // dir·alpha < 0 ⇒ basic variable increases toward its ub.
+        let alpha = [-(PIVOT_TOL * 10.0), -8.0];
+        let dir = 1.0;
+        let x_b = [5.0, 5.0]; // already at ub ⇒ room 0 ⇒ degenerate
+        let basis = [0usize, 1];
+        let ubs = [5.0, 5.0];
+        let ub_q = f64::INFINITY;
+        let m = 2;
+
+        match select_leaving_bounded(
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL,
+        ) {
+            BoundedLeave::Pivot { row, at_ub, .. } => {
+                assert_eq!(row, 1, "must pick the largest ub-pivot (row 1, |α|=8)");
+                assert!(at_ub, "leaving variable hits its upper bound");
+            }
+            other => panic!("expected a Pivot, got {other:?}"),
+        }
+    }
+
+    /// Sentinel: `compute_reduced_costs_into_timed` must issue at most
+    /// `ceil(n / DEADLINE_CHECK_INTERVAL)` deadline checks, not one per column.
+    ///
+    /// Build a problem with `n_price > DEADLINE_CHECK_INTERVAL` (here n=4
+    /// columns, but we call the function directly with a synthetic problem whose
+    /// column count exceeds the interval). We inject `n_synthetic >> INTERVAL`
+    /// columns and assert:
+    ///   checks < n_synthetic
+    /// Reverting to per-column checks makes `checks == n_synthetic`, failing the
+    /// assertion (no-op FAIL).
+    ///
+    /// The test also verifies correctness: the chunked loop must produce the
+    /// same reduced costs as the reference scalar loop.
+    #[test]
+    fn rc_timed_deadline_checks_are_chunked_not_per_column() {
+        // Build a synthetic problem with n_synthetic >> DEADLINE_CHECK_INTERVAL columns.
+        // We need a real CscMatrix and LuBasis; use a diagonal identity basis for simplicity.
+        let n_synthetic = DEADLINE_CHECK_INTERVAL * 4 + 100; // >> DEADLINE_CHECK_INTERVAL
+        let m = 3usize;
+
+        // Diagonal m×m identity matrix (first m columns).  Remaining columns are
+        // unit vectors re-using the first m columns — ensures no column is empty.
+        let mut rows_t: Vec<usize> = Vec::new();
+        let mut cols_t: Vec<usize> = Vec::new();
+        let mut vals_t: Vec<f64> = Vec::new();
+        for j in 0..n_synthetic {
+            let row = j % m;
+            rows_t.push(row);
+            cols_t.push(j);
+            vals_t.push(1.0);
+        }
+        let a = CscMatrix::from_triplets(&rows_t, &cols_t, &vals_t, m, n_synthetic).unwrap();
+        let basis: Vec<usize> = (0..m).collect();
+        let c: Vec<f64> = (0..n_synthetic).map(|j| j as f64).collect();
+        let is_basic: Vec<bool> = (0..n_synthetic).map(|j| j < m).collect();
+        let mut y_buf = vec![0.0f64; m];
+        let mut rc_out = vec![0.0f64; n_synthetic];
+
+        let opts = SolverOptions {
+            max_etas: 50,
+            ..SolverOptions::default()
+        };
+        let mut basis_mgr = LuBasis::new_timed(&a, &basis, opts.max_etas, None).unwrap();
+
+        // Snapshot before the call. thread_local counter なので並列 test 中の
+        // 他 test の bounded simplex 呼び出しは現スレッドの値に影響しない。
+        let before = RC_DEADLINE_CHECK_COUNT.with(|c| c.get());
+
+        let deadline_far = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        let ok = compute_reduced_costs_into_timed(
+            &a,
+            &c,
+            &mut basis_mgr,
+            &is_basic,
+            n_synthetic,
+            &basis,
+            &mut y_buf,
+            &mut rc_out,
+            deadline_far,
+        );
+        assert!(ok, "RC compute must succeed (deadline is far)");
+
+        let after = RC_DEADLINE_CHECK_COUNT.with(|c| c.get());
+        let checks = after - before;
+        let max_expected = n_synthetic.div_ceil(DEADLINE_CHECK_INTERVAL);
+
+        assert!(
+            checks <= max_expected,
+            "chunked RC loop issued {checks} deadline checks for n={n_synthetic}, \
+             expected ≤ {max_expected} (= ceil(n/INTERVAL)). \
+             Reverting to per-column checks would make this > {max_expected}."
+        );
+        assert!(
+            checks < n_synthetic,
+            "must issue far fewer deadline checks than columns: \
+             {checks} checks for {n_synthetic} columns. \
+             Per-column regression detected."
+        );
+
+        // Correctness: verify rc_out matches the reference scalar computation.
+        // y = B^{-T} c_B; for diagonal identity basis, y = c_B = c[0..m].
+        // rc[j] = c[j] - y^T a_j = c[j] - y[j%m] * 1.0 for non-basic j.
+        for j in m..n_synthetic {
+            let expected = c[j] - c[j % m];
+            assert!(
+                (rc_out[j] - expected).abs() < 1e-10,
+                "rc[{j}] = {} expected {expected} (correctness check)",
+                rc_out[j]
+            );
         }
     }
 }

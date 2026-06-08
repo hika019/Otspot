@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::problem::SolveStatus;
+use crate::problem::{ConstraintType, SolveStatus};
 use crate::sparse::CscMatrix;
 
 /// presolve OFF 基準線。
@@ -270,6 +270,49 @@ fn test_postsolve_e4_lcs_no_presolve_elimination() {
     let tol_rel = 1e-5_f64;
     assert!((result.slack[0] - slack_expected).abs() <= tol_rel * slack_expected.abs().max(1.0));
     assert_eq!(result.reduced_costs.len(), n);
+}
+
+/// Sentinel Fix-1+2 (integration): Le singleton row via SingletonRow postsolve step must yield
+/// sign-feasible dual AND status Optimal.
+///
+/// Construction: x₀ ∈ [1,1] (fixed), Le: 2e5·x₀ ≤ 2e5 (large coeff → step1 LARGE_B_THRESHOLD
+/// skips; step2 non-Eq path pushes SingletonRow{row=0,col=0}).
+/// x₁ is the optimization variable: min 0.5·x₁².
+/// c = [1e3, 0] so KKT for x₀ gives y_Le = -(0 + 1e3 + 0) / 2e5 = -5e-3 < 0 without Fix 1.
+///
+/// Without Fix 1: y_Le = -5e-3 (sign violation) → prove_optimal fails → SuboptimalSolution.
+/// With Fix 1:    y_Le projected to 0 (sign-feasible) → Optimal.
+/// The dual_solution for the Le row must be ≥ 0 with the fix.
+#[test]
+fn test_sentinel_le_singleton_row_sign_feasible_and_optimal() {
+    let n = 2usize;
+    // Q = diag(0, 1): only x₁ has a quadratic term.
+    let q = CscMatrix::from_triplets(&[1], &[1], &[1.0_f64], n, n).unwrap();
+    // c = [1e3, 0]: cost on x₀ creates a non-trivial Le dual via KKT.
+    let c = vec![1e3_f64, 0.0_f64];
+    // Le: 2e5·x₀ ≤ 2e5  (singleton row for x₀; large coeff bypasses step1 LARGE_B_THRESHOLD).
+    let a = CscMatrix::from_triplets(&[0], &[0], &[2e5_f64], 1, n).unwrap();
+    let b = vec![2e5_f64];
+    // x₀ fixed at 1 (lb=ub=1); x₁ free.
+    let bounds = vec![(1.0_f64, 1.0_f64), (f64::NEG_INFINITY, f64::INFINITY)];
+    let cts = vec![ConstraintType::Le];
+    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+
+    let result = solve_qp_with(&prob, &SolverOptions::default());
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "Le singleton row (SingletonRow path) must yield Optimal; got {:?}. \
+         Without Fix 1 KKT-recovered y_Le = -5e-3 → sign violation → SuboptimalSolution.",
+        result.status
+    );
+    // The Le constraint dual (row 0) must be sign-feasible (≥ 0).
+    let y_le = result.dual_solution.first().copied().unwrap_or(f64::NAN);
+    assert!(
+        y_le >= -1e-6,
+        "Le dual must be ≥ 0 (sign-feasible); got {y_le:.3e}. Fix 1 reverted?"
+    );
 }
 
 /// Q=0 (LP) で reduced_costs が理論値と一致 (Simplex 経路保持)。

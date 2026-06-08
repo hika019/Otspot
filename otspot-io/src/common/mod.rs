@@ -1,6 +1,70 @@
 //! Shared MPS/QPS parsing primitives (field extraction + free/fixed-format
 //! pair parsing)。input validation (finite values, non-empty names) を集約する。
 
+/// Parse an OBJSENSE value; returns `true` for MAX, `false` for MIN.
+/// On failure returns an error message string (caller wraps it into its own error type).
+pub(crate) fn parse_objsense_value(line: &str) -> Result<bool, String> {
+    match line.trim().to_uppercase().as_str() {
+        "MAX" => Ok(true),
+        "MIN" => Ok(false),
+        _ => Err(format!(
+            "Invalid OBJSENSE value '{}'; expected MIN or MAX",
+            line.trim()
+        )),
+    }
+}
+
+/// Tracks the current section and the set of sections already seen.
+///
+/// Encapsulates duplicate-section detection and required-section checks common
+/// to both the MPS and QPS parsers.
+pub(crate) struct SectionState<S> {
+    pub current: S,
+    seen: std::collections::HashSet<S>,
+}
+
+impl<S: Copy + Eq + std::hash::Hash + std::fmt::Debug> SectionState<S> {
+    pub fn new(initial: S) -> Self {
+        Self {
+            current: initial,
+            seen: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Advance to `section`. Returns `true` when `section == enddata_section`
+    /// (caller should `break`). Returns `Err` on duplicate sections; `name_section`
+    /// and `enddata_section` are exempt from the duplicate check.
+    pub fn advance<E>(
+        &mut self,
+        section: S,
+        name_section: S,
+        enddata_section: S,
+        make_dup_err: impl Fn(String) -> E,
+    ) -> Result<bool, E> {
+        if section != name_section && section != enddata_section && self.seen.contains(&section) {
+            return Err(make_dup_err(format!("{:?}", section)));
+        }
+        self.seen.insert(section);
+        self.current = section;
+        Ok(section == enddata_section)
+    }
+
+    /// Verify that each `(section, name)` pair in `required` was seen (in order).
+    /// Returns an error for the first missing section.
+    pub fn require<E>(
+        &self,
+        required: &[(S, &str)],
+        make_err: impl Fn(String) -> E,
+    ) -> Result<(), E> {
+        for (section, name) in required {
+            if !self.seen.contains(section) {
+                return Err(make_err((*name).to_string()));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Row type as defined in the ROWS section.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RowType {

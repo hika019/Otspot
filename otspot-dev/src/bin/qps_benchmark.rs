@@ -185,6 +185,16 @@ fn append_phase_timing(mut note: String, result: &SolverResult) -> String {
     note
 }
 
+fn append_route_stats(mut note: String, result: &SolverResult) -> String {
+    if result.stats.bounded_eq_ub_path {
+        if !note.is_empty() {
+            note.push(' ');
+        }
+        note.push_str("bounded_eq_ub=1");
+    }
+    note
+}
+
 #[allow(clippy::items_after_test_module)] // fn main() follows this module; reorganising is disruptive
 #[cfg(test)]
 mod tests {
@@ -940,7 +950,7 @@ fn main() {
                 ("FAIL:Unknown".to_string(), format!("[{}]", method_label))
             }
         };
-        let note = append_phase_timing(note, &result);
+        let note = append_route_stats(append_phase_timing(note, &result), &result);
         println!(
             "{:<20} {:>6} {:>6} {:>15} {:>10.3} {}",
             name, n, m, status_str, elapsed_s, note

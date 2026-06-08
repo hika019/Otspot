@@ -5,9 +5,19 @@ use crate::qp::kkt_resid;
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
 
+/// Refit bound duals from KKT stationarity residual.
+///
+/// `comp_tol` is the complementarity tolerance used by `prove_optimal` (the solve eps).
+/// For a box-bounded variable, a bound dual is assigned only when the resulting
+/// componentwise complementarity violation would not exceed `comp_tol`:
+///   `z_candidate * gap / (1 + z_candidate * (|x| + |bound|)) ≤ comp_tol`
+///
+/// This criterion is consistent with `complementarity_componentwise_rel` in `prove_optimal`,
+/// so "active for dual assignment" ⟺ "active for the comp check".
 pub(crate) fn refit_bound_duals_kkt(
     problem: &QpProblem,
     result: &mut crate::problem::SolverResult,
+    comp_tol: f64,
 ) {
     let n = problem.num_vars;
     if result.solution.len() != n {
@@ -66,11 +76,35 @@ pub(crate) fn refit_bound_duals_kkt(
         if lb_finite && ub_finite {
             // FX (lb==ub) は postsolve 慣例で 0 埋め、KKT 評価からも除外。
             if (lb - ub).abs() >= FX_TOL {
+                // Comp-consistent activity: assign z_ub (or z_lb) only when the
+                // resulting componentwise complementarity violation stays ≤ comp_tol.
+                // The criterion mirrors complementarity_componentwise_rel in prove_optimal:
+                //   comp = z_candidate * gap / (1 + z_candidate * (|x| + |bound|)) ≤ comp_tol
+                // This ensures "active for dual assignment" ⟺ "active for the comp check".
+                //
+                // For far-interior variables (gap large relative to bound scale) the comp
+                // fraction approaches gap/(|x|+|bound|) ≈ O(1) >> comp_tol, so they are
+                // correctly excluded (QFORPLAN case: x=7200, ub=9999999 → comp≈0.58).
+                // For near-active variables (gap small) the fraction is tiny and assignment
+                // is allowed (GOULDQP2 case: gap/scale ≈ 1e-3, target ≈ 1e-6 → comp≈5e-9).
+                let xj = if j < x.len() { x[j] } else { 0.0 };
                 if target > 0.0 {
-                    new_bd[ub_idx] = target;
-                } else {
-                    new_bd[lb_idx] = -target;
+                    let gap_ub = (ub - xj).max(0.0);
+                    let comp_ub =
+                        target * gap_ub / (1.0 + target * (xj.abs() + ub.abs()));
+                    if comp_ub <= comp_tol {
+                        new_bd[ub_idx] = target;
+                    }
+                } else if target < 0.0 {
+                    let t_lb = -target;
+                    let gap_lb = (xj - lb).max(0.0);
+                    let comp_lb =
+                        t_lb * gap_lb / (1.0 + t_lb * (xj.abs() + lb.abs()));
+                    if comp_lb <= comp_tol {
+                        new_bd[lb_idx] = t_lb;
+                    }
                 }
+                // target == 0: stationarity already satisfied, leave both at 0.
             }
             lb_idx += 1;
             ub_idx += 1;

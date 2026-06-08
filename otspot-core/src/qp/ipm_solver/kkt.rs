@@ -19,6 +19,9 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
     if x.len() != n {
         return f64::INFINITY;
     }
+    if !kkt_resid::bound_duals_valid_for_residual(prob.bounds, z) {
+        return f64::INFINITY;
+    }
     let qx_dd = dd_impl::qx(prob.q, x);
     let aty_dd = dd_impl::aty(prob.a, y, n);
     let bound_contrib = kkt_resid::bound_contrib(prob.bounds, z);
@@ -90,6 +93,14 @@ pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
 /// z=0 埋めされ slack=0 にもなるため自動的に 0 寄与。
 pub fn complementarity_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> f64 {
     let ax_dd = dd_impl::ax(prob.a, x);
+    let z_full = if z.is_empty() {
+        Vec::new()
+    } else {
+        let Some(z_full) = kkt_resid::bound_duals_full_layout(prob.bounds, z) else {
+            return f64::INFINITY;
+        };
+        z_full
+    };
 
     let yb: f64 = y.iter().zip(prob.b.iter()).map(|(&yi, &bi)| yi * bi).sum();
     let yax: f64 = y
@@ -101,14 +112,14 @@ pub fn complementarity_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z:
         let mut s = 0.0_f64;
         let mut idx = 0_usize;
         for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
-            if lb.is_finite() && idx < z.len() {
-                s += z[idx] * x[j];
+            if lb.is_finite() && idx < z_full.len() {
+                s += z_full[idx] * x[j];
                 idx += 1;
             }
         }
         for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
-            if ub.is_finite() && idx < z.len() {
-                s += z[idx] * x[j];
+            if ub.is_finite() && idx < z_full.len() {
+                s += z_full[idx] * x[j];
                 idx += 1;
             }
         }
@@ -154,17 +165,25 @@ pub fn complementarity_componentwise_rel(
     }
 
     let comp_b = kkt_resid::comp_bound_products(prob.bounds, x, z);
+    let z_full = if z.is_empty() {
+        Vec::new()
+    } else {
+        let Some(z_full) = kkt_resid::bound_duals_full_layout(prob.bounds, z) else {
+            return f64::INFINITY;
+        };
+        z_full
+    };
     let mut idx = 0_usize;
     for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
-        if lb.is_finite() && idx < z.len() {
-            let scale = 1.0 + z[idx].abs() * (x[j].abs() + lb.abs());
+        if lb.is_finite() && idx < z_full.len() {
+            let scale = 1.0 + z_full[idx].abs() * (x[j].abs() + lb.abs());
             worst = worst.max(comp_b[idx] / scale);
             idx += 1;
         }
     }
     for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
-        if ub.is_finite() && idx < z.len() {
-            let scale = 1.0 + z[idx].abs() * (x[j].abs() + ub.abs());
+        if ub.is_finite() && idx < z_full.len() {
+            let scale = 1.0 + z_full[idx].abs() * (x[j].abs() + ub.abs());
             worst = worst.max(comp_b[idx] / scale);
             idx += 1;
         }
@@ -276,6 +295,80 @@ mod tests {
 
         let r = kkt_residual_rel(&view, &x, &y, &z);
         assert!(r > 0.4 && r < 0.6, "got r={:.3e}", r);
+    }
+
+    #[test]
+    fn kkt_residual_rel_rejects_malformed_bound_duals_without_nan_masking() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::new(0, 1);
+        let c = vec![0.0_f64];
+        let b = vec![];
+        let bounds = vec![(0.0_f64, 1.0_f64)];
+        let cts = vec![];
+        let view = build_view(&q, &a, &c, &b, &bounds, &cts);
+
+        let r = kkt_residual_rel(&view, &[0.5], &[], &[0.0]);
+        assert!(
+            r.is_infinite() && r > 0.0,
+            "malformed bound_duals must remain a stationarity failure, got {r}"
+        );
+    }
+
+    #[test]
+    fn kkt_residual_rel_rejects_malformed_bound_duals_before_scaling() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::new(0, 1);
+        let x = vec![1.0e150_f64];
+        let c = vec![-1.0e150_f64];
+        let b = vec![];
+        let bounds = vec![(0.0_f64, 1.0e200_f64)];
+        let cts = vec![];
+        let view = build_view(&q, &a, &c, &b, &bounds, &cts);
+
+        let r = kkt_residual_rel(&view, &x, &[], &[0.0]);
+        assert!(
+            r.is_infinite() && r > 0.0,
+            "invalid bound-dual layout must fail before component scaling, got {r}"
+        );
+    }
+
+    #[test]
+    fn complementarity_residual_rel_rejects_malformed_bound_duals_before_scaling() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::new(0, 1);
+        let x = vec![1.0e150_f64];
+        let c = vec![-1.0e150_f64];
+        let b = vec![];
+        let bounds = vec![(0.0_f64, 1.0e200_f64)];
+        let cts = vec![];
+        let view = build_view(&q, &a, &c, &b, &bounds, &cts);
+
+        let r = complementarity_residual_rel(&view, &x, &[], &[0.0]);
+        assert!(
+            r.is_infinite() && r > 0.0,
+            "invalid bound-dual layout must fail before residual scaling, got {r}"
+        );
+    }
+
+    #[test]
+    fn complementarity_componentwise_rel_maps_fixed_omitted_bound_duals() {
+        let q = CscMatrix::new(3, 3);
+        let a = CscMatrix::new(0, 3);
+        let c = vec![0.0_f64; 3];
+        let b = vec![];
+        let bounds = vec![
+            (1.0_f64, 1.0_f64),
+            (0.0, f64::INFINITY),
+            (0.0, f64::INFINITY),
+        ];
+        let cts = vec![];
+        let view = build_view(&q, &a, &c, &b, &bounds, &cts);
+
+        let r = complementarity_componentwise_rel(&view, &[1.0, 0.0, 10.0], &[], &[0.0, 2.0]);
+        assert!(
+            (r - 20.0 / 21.0).abs() < 1e-12,
+            "third-column product must use third-column scale, got {r}"
+        );
     }
 
     #[test]

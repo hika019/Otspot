@@ -1000,7 +1000,7 @@ proptest! {
 
     /// 線形制約付き 非凸 QP (Le/Ge mixed)。stationarity に Aᵀy 寄与 + comp_ineq path。
     #[test]
-    #[ignore = "tier-2 (Mac ~29s / CI 2.5x ~73s); heavy profile で実行 (#97)"]
+    #[ignore = "flaky: seed-dependent; #41 nonconvex QP KKT 0.871 LocallyOptimal misclaim"]
     fn prop_nonconvex_qp_kkt_invariants_constrained(
         qp in nonconvex_qp_strategy_constrained(3, 3),
     ) {

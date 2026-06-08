@@ -10,10 +10,10 @@ use crate::tolerances::PIVOT_TOL;
 const EPS: f64 = 1e-8;
 
 /// Minimum weight floor to keep `sqrt(γ)` safe (prevents div-by-zero in score).
-const GAMMA_FLOOR: f64 = 1e-10;
+pub(crate) const GAMMA_FLOOR: f64 = 1e-10;
 /// Cap for the pivot² Devex update. Normal non-degenerate weights are O(m);
 /// capping prevents tiny pivots from permanently distorting pricing.
-const CAP_MULT_OF_M: f64 = 100.0;
+pub(crate) const CAP_MULT_OF_M: f64 = 100.0;
 
 /// Strategy for selecting the entering variable in the revised simplex.
 pub(crate) trait PricingStrategy {

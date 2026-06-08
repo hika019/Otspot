@@ -8,7 +8,8 @@ mod postsolve_dual;
 mod warm_start;
 
 use super::kkt::{
-    bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel,
+    bound_violation, complementarity_componentwise_rel, complementarity_residual_rel,
+    kkt_residual_rel, primal_residual_rel,
 };
 use super::outcome::{IpmOutcome, ProblemView};
 use crate::options::SolverOptions;
@@ -37,6 +38,15 @@ pub fn run_ipm(
     presolve_result: &QpPresolveResult,
     opts: &SolverOptions,
 ) -> IpmOutcome {
+    run_ipm_with_user_eps(orig_problem, presolve_result, opts, opts.ipm_eps())
+}
+
+pub(super) fn run_ipm_with_user_eps(
+    orig_problem: &QpProblem,
+    presolve_result: &QpPresolveResult,
+    opts: &SolverOptions,
+    user_eps: f64,
+) -> IpmOutcome {
     if opts.validate().is_err() {
         return IpmOutcome {
             numerical_failure: true,
@@ -47,6 +57,7 @@ pub fn run_ipm(
         orig_problem,
         presolve_result,
         opts,
+        user_eps,
         crate::qp::ipm_core::solve_qp_ippmm,
     )
 }
@@ -55,6 +66,7 @@ fn run_ipm_with(
     orig_problem: &QpProblem,
     presolve_result: &QpPresolveResult,
     opts: &SolverOptions,
+    user_eps: f64,
     inner_solver: InnerSolver,
 ) -> IpmOutcome {
     let reduced = &presolve_result.reduced;
@@ -181,13 +193,12 @@ fn run_ipm_with(
     let ipm_made_progress = result.iterations > 0;
     let allow_primal = allow_primal_projection(orig_problem);
 
-    let user_eps_for_skip = opts.ipm_eps();
     let kkt_already_pass = kkt_already_passes(
         orig_problem,
         &final_sol,
         &eliminated_cols,
         result.status == SolveStatus::Optimal,
-        user_eps_for_skip,
+        user_eps,
     );
     // Stage 1+2 (primal projection + y/z refit/IRLS): run for side effects on
     // `final_sol` only when the solution does not already meet the tolerance.
@@ -237,7 +248,7 @@ fn run_ipm_with(
     // of δ*x in the original problem. Refit z directly from Qx+c so that z
     // satisfies the original stationarity Qx + z + c = 0 unconditionally.
     if !final_sol.solution.is_empty() && orig_problem.num_constraints == 0 && ipm_made_progress {
-        crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+        crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol, opts.ipm_eps());
     }
 
     let view = ProblemView {
@@ -264,7 +275,13 @@ fn run_ipm_with(
         &final_sol.solution,
         &final_sol.dual_solution,
         &final_sol.bound_duals,
-    );
+    )
+    .max(complementarity_componentwise_rel(
+        &view,
+        &final_sol.solution,
+        &final_sol.dual_solution,
+        &final_sol.bound_duals,
+    ));
     let dual_gap = compute_duality_gap_rel(orig_problem, &final_sol);
 
     // Invariant: 報告 objective は返却 x で計算。post-processing 後の整合性を保証。
@@ -286,7 +303,6 @@ fn run_ipm_with(
             .sum();
         0.5 * xqx + cx + orig_problem.obj_offset
     };
-
     // IPM inner solver が収集した KKT timing に postsolve timing を合算。
     let ipm_base = result.timing_breakdown.unwrap_or_default();
     let postsolve_total_us = postsolve_map_us

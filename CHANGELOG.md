@@ -14,6 +14,38 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### 依存
 
+## [0.5.0] - 2026-06-08
+
+公開API破壊的変更なし (`cargo public-api diff` = 変更なし)。LP/QP correctness 修正・性能改善・ベンチ基準値の外部検証補正が主体。
+
+### 追加
+
+- bounded-variable Phase I を Eq+UB LP で開通 (従来 SuboptimalSolution に退化していた経路を正規サポート)
+- LP/QP ブラックボックステストを独立オラクル (SciPy / OSQP / Clarabel / SCS) で大幅拡張
+
+### 変更
+
+- README Performance 表を現行ベンチ実測値へ更新 (proof-carrying KKT 基準: Feasible LP 105/109・Convex QP 121/138・Infeasible 29/29 @1e-6)
+- default テストプロファイルが ignore 以外を全実走 (tier-2 廃止)
+
+### 修正
+
+- bounded simplex の退化を複数修正 — 終端 stale x_b の原始非実行可能解 (grow7/15/22, pilot87)、非アクティブ境界双対の射影漏れ (pilot-we)、反復効率 (ken-13 Devex)、Harris ratio test (grow22)
+- QP correctness — QFORPLAN (dual 符号射影 + bound activity)、GOULDQP2 (bound dual の comp 一貫基準)、IPM 証明条件を収束判定へ整合
+- pds-20 / cplex2 / scorpion / osa-60 の correctness 回帰を真因修正 (FTRAN 安定性 / Phase I fresh FTRAN / 人工変数 cleanup)
+- 大規模 LP の性能改善 — reduced-cost ループ chunk 化 (iter/sec 2-2.25x)、pivot_out バッチ化 (pds-20 約 59s→0.8s)
+- Maros-Mészáros (16 件) / AUG3D 系 QP の基準目的値を外部オラクル (Clarabel / OSQP / SCS) 検証値へ補正
+- その他 — 入力検証 hardening、postsolve Krylov IR gate 回帰、KKT 残差の双対長不足検出、Timeout 目的値の復元解再計算、iters=0 報告 artifact
+
+### 内部
+
+- 重複削減 (parser / objsense / Expression / deadline_expired 共通化)
+- CI: heavy 非ゲート化 + `--test-threads 3`、netlib 依存解消 (emps.c vendoring + cache)、gate 整備 (clippy / comment-block / package)
+
+### 依存
+
+- log 0.4.30 → 0.4.32 (#11)
+
 ## [0.4.0] - 2026-06-04
 
 ### 追加

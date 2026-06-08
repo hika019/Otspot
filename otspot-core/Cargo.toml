@@ -19,3 +19,5 @@ log = "0.4"
 rayon = "1"
 twofloat = "0.8"
 
+[dev-dependencies]
+otspot-model = { path = "../otspot-model", version = "0.5.0" }

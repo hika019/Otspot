@@ -36,7 +36,7 @@ fn d6cube_not_infeasible() {
 /// d6cube solves to Optimal with correct objective (≈315.49) — full convergence test.
 /// d6cube takes ~286s; run under heavy profile or standalone.
 #[test]
-#[ignore = "tier-2: d6cube needs ~286s for full convergence — run with --profile heavy"]
+#[ignore = "broken: d6cube needs ~286s convergence, exceeds default 180s kill; LP perf fix tracked"]
 fn d6cube_optimal_tier2() {
     let path = Path::new("data/lp_problems/d6cube.QPS");
     assert!(path.exists(), "data missing: {}", path.display());

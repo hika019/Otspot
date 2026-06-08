@@ -68,6 +68,11 @@ pub struct SolveStats {
     /// returned result came from the IPM, `false` if from simplex. Lets callers
     /// (e.g. benchmarks) label the actual route instead of a static size guess.
     pub lp_ipm_path: bool,
+    /// LP simplex used the bounded-variable Eq+finite-UB Phase I path.
+    ///
+    /// This is a load-bearing route sentinel for large Netlib LPs whose upper
+    /// bounds must stay as variable bounds instead of expanded UB rows.
+    pub bounded_eq_ub_path: bool,
 }
 
 /// ソルバーの求解結果ステータス
@@ -686,12 +691,7 @@ mod tests {
             vec![(0.0, 0.0), (0.0, 0.0)],
         ];
         for bounds in valid_cases {
-            let res = make_lp(
-                vec![1.0, 2.0],
-                vec![5.0],
-                vec![1.0, 1.0],
-                bounds.clone(),
-            );
+            let res = make_lp(vec![1.0, 2.0], vec![5.0], vec![1.0, 1.0], bounds.clone());
             assert!(res.is_ok(), "expected Ok for bounds={bounds:?}");
         }
     }

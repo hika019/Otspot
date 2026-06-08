@@ -1130,4 +1130,205 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
             result.objective
         );
     }
+
+    // ── Sentinel tests: input-validation audit ────────────────────────────────
+
+    /// Fix-4: value-bearing BOUNDS type (LO) with missing value must error in MPS.
+    /// Sentinel: reverting the value_required check → Ok instead of Err.
+    #[test]
+    fn test_sentinel_mps_bounds_lo_missing_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n LO BND x1\nENDATA\n";
+        assert!(
+            parse_mps(mps).is_err(),
+            "LO bound without a value must error in MPS"
+        );
+    }
+
+    /// Fix-4: value-bearing BOUNDS type (FX) with missing value must error in MPS.
+    #[test]
+    fn test_sentinel_mps_bounds_fx_missing_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n FX BND x1\nENDATA\n";
+        assert!(
+            parse_mps(mps).is_err(),
+            "FX bound without a value must error in MPS"
+        );
+    }
+
+    /// Fix-4: value-bearing BOUNDS type (UI) with missing value must error in MPS.
+    #[test]
+    fn test_sentinel_mps_bounds_ui_missing_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n UI BND x1\nENDATA\n";
+        assert!(
+            parse_milp(mps).is_err(),
+            "UI bound without a value must error in MPS"
+        );
+    }
+
+    /// Fix-5: odd trailing token in COLUMNS (row name with no value) must error in MPS.
+    /// Sentinel: reverting the break→error → Ok instead of Err.
+    #[test]
+    fn test_sentinel_mps_columns_trailing_row_no_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1\nRHS\n    rhs c1 5.0\nENDATA\n";
+        assert!(
+            parse_mps(mps).is_err(),
+            "trailing row name without a value in COLUMNS must error in MPS"
+        );
+    }
+
+    // ── Black-box parse tests ─────────────────────────────────────────────────
+
+    /// TECHNIQUE: EQUIVALENCE PARTITIONING — one MPS file exercises all three row
+    /// types (Le/Ge/Eq) simultaneously, plus the N (objective) row.
+    ///
+    /// Oracle (hand-derived from MPS text):
+    ///   Rows: le1 (L→Le), ge1 (G→Ge), eq1 (E→Eq).
+    ///   Columns: x1 → c[0]=1, x2 → c[1]=2.
+    ///   A: le1: x1*2+x2*3=10; ge1: x1*1+x2*2=4; eq1: x1*1+x2*1=3.
+    ///   b: [10, 4, 3]. Default bounds: (0, +inf).
+    #[test]
+    fn ep_mps_all_row_types() {
+        let mps = "\
+NAME          ep_all_row_types
+ROWS
+ N  obj
+ L  le1
+ G  ge1
+ E  eq1
+COLUMNS
+    x1  obj  1.0  le1  2.0
+    x1  ge1  1.0  eq1  1.0
+    x2  obj  2.0  le1  3.0
+    x2  ge1  2.0  eq1  1.0
+RHS
+    rhs  le1  10.0
+    rhs  ge1  4.0
+    rhs  eq1  3.0
+ENDATA
+";
+        let lp = parse_mps(mps).expect("ep_mps_all_row_types: valid MPS must parse");
+        assert_eq!(lp.num_vars, 2, "num_vars");
+        assert_eq!(lp.num_constraints, 3, "num_constraints");
+        assert_eq!(lp.c, vec![1.0, 2.0], "objective coefficients");
+        assert_eq!(
+            lp.constraint_types,
+            vec![ConstraintType::Le, ConstraintType::Ge, ConstraintType::Eq],
+            "constraint types: L→Le, G→Ge, E→Eq"
+        );
+        assert_eq!(lp.b, vec![10.0, 4.0, 3.0], "RHS values");
+        assert_eq!(
+            lp.bounds,
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            "default bounds (0, +inf)"
+        );
+    }
+
+    /// TECHNIQUE: BOUNDARY VALUE ANALYSIS — bound types at the extremes:
+    /// FX (fixed, lb==ub), FR (free, lb=-inf/ub=+inf), LO+UP (explicit range).
+    ///
+    /// Oracle (hand-derived):
+    ///   x1: FX 3.0 → bounds (3.0, 3.0).
+    ///   x2: FR    → bounds (-inf, +inf).
+    ///   x3: LO 1.5 + UP 8.0 → bounds (1.5, 8.0).
+    #[test]
+    fn bva_mps_bounds_fx_fr_lo_up() {
+        let mps = "\
+NAME          bva_bounds
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+    x2  obj  1.0  c1  1.0
+    x3  obj  1.0  c1  1.0
+RHS
+    rhs  c1  20.0
+BOUNDS
+ FX BND  x1  3.0
+ FR BND  x2
+ LO BND  x3  1.5
+ UP BND  x3  8.0
+ENDATA
+";
+        let lp = parse_mps(mps).expect("bva_mps_bounds: valid MPS must parse");
+        assert_eq!(lp.num_vars, 3, "num_vars");
+        assert_eq!(lp.bounds[0], (3.0, 3.0), "x1: FX 3.0 → (3,3)");
+        assert_eq!(
+            lp.bounds[1].0,
+            f64::NEG_INFINITY,
+            "x2: FR → lb = -inf"
+        );
+        assert_eq!(lp.bounds[1].1, f64::INFINITY, "x2: FR → ub = +inf");
+        assert_eq!(lp.bounds[2], (1.5, 8.0), "x3: LO 1.5 UP 8.0 → (1.5,8.0)");
+    }
+
+    /// TECHNIQUE: BOUNDARY VALUE ANALYSIS — RHS = 0 (zero boundary).
+    ///
+    /// Oracle: single Le constraint with RHS=0. b[0]=0.0 after parse.
+    /// Non-trivial because a zero-valued token must not be skipped or misread.
+    #[test]
+    fn bva_mps_rhs_zero() {
+        let mps = "\
+NAME          bva_rhs_zero
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+RHS
+    rhs  c1  0.0
+ENDATA
+";
+        let lp = parse_mps(mps).expect("bva_mps_rhs_zero: valid MPS must parse");
+        assert_eq!(lp.num_constraints, 1, "num_constraints");
+        assert_eq!(lp.b, vec![0.0], "RHS = 0.0 must be preserved");
+        assert_eq!(lp.constraint_types, vec![ConstraintType::Le]);
+    }
+
+    /// TECHNIQUE: DECISION TABLE — 2-var × (Le/Ge/Eq) matrix-structure check.
+    ///
+    /// Oracle (hand-derived from MPS text):
+    ///   A matrix (3×2), rows in order le1=0, ge1=1, eq1=2:
+    ///   A[0,0]=2, A[0,1]=3 (le1)
+    ///   A[1,0]=1, A[1,1]=2 (ge1)
+    ///   A[2,0]=1, A[2,1]=1 (eq1)
+    ///   Verified by get_column queries on the parsed CSC matrix.
+    #[test]
+    fn dt_mps_2var_le_ge_eq_matrix_structure() {
+        let mps = "\
+NAME          dt_2var_matrix
+ROWS
+ N  obj
+ L  le1
+ G  ge1
+ E  eq1
+COLUMNS
+    x1  obj  1.0  le1  2.0
+    x1  ge1  1.0  eq1  1.0
+    x2  obj  2.0  le1  3.0
+    x2  ge1  2.0  eq1  1.0
+RHS
+    rhs  le1  10.0  ge1  4.0
+    rhs  eq1  3.0
+ENDATA
+";
+        let lp = parse_mps(mps).expect("dt_mps_2var_matrix: valid MPS must parse");
+        assert_eq!(lp.num_vars, 2);
+        assert_eq!(lp.num_constraints, 3);
+
+        // Column 0 (x1): rows 0,1,2 with values 2,1,1
+        let (rows0, vals0) = lp.a.get_column(0).expect("col 0");
+        let col0: std::collections::HashMap<usize, f64> =
+            rows0.iter().copied().zip(vals0.iter().copied()).collect();
+        assert!((col0[&0] - 2.0).abs() < 1e-12, "A[le1,x1]=2.0");
+        assert!((col0[&1] - 1.0).abs() < 1e-12, "A[ge1,x1]=1.0");
+        assert!((col0[&2] - 1.0).abs() < 1e-12, "A[eq1,x1]=1.0");
+
+        // Column 1 (x2): rows 0,1,2 with values 3,2,1
+        let (rows1, vals1) = lp.a.get_column(1).expect("col 1");
+        let col1: std::collections::HashMap<usize, f64> =
+            rows1.iter().copied().zip(vals1.iter().copied()).collect();
+        assert!((col1[&0] - 3.0).abs() < 1e-12, "A[le1,x2]=3.0");
+        assert!((col1[&1] - 2.0).abs() < 1e-12, "A[ge1,x2]=2.0");
+        assert!((col1[&2] - 1.0).abs() < 1e-12, "A[eq1,x2]=1.0");
+    }
 }

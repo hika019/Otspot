@@ -128,7 +128,6 @@ fn diag_cycle_must_reach_known_objective() {
 /// keeps both asserts true).
 ///
 /// tier-2 (~100s): cycle's postsolve dual crossover storm dominates wall time.
-#[ignore = "tier-2: cycle postsolve crossover storm ~100s; honest-feasibility companion (#31)"]
 #[test]
 fn diag_cycle_is_feasible_and_near_optimal() {
     let path = Path::new("data/lp_problems/cycle.QPS");

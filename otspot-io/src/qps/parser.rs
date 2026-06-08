@@ -7,7 +7,7 @@ use otspot_core::sparse::CscMatrix;
 
 use super::types::{BoundType, Section};
 use super::QpsError;
-use crate::common::{mps_field, parse_mps_fixed_pairs, parse_mps_free_pairs, RowType};
+use crate::common::{mps_field, parse_mps_fixed_pairs, parse_mps_free_pairs, parse_objsense_value, RowType, SectionState};
 
 pub(super) struct QpsParser {
     rows: Vec<(String, RowType)>,
@@ -39,8 +39,7 @@ impl QpsParser {
     }
 
     pub(super) fn parse_reader<R: BufRead>(&mut self, reader: R) -> Result<QpProblem, QpsError> {
-        let mut current_section = Section::None;
-        let mut seen_sections = std::collections::HashSet::new();
+        let mut state = SectionState::new(Section::None);
         let mut line_num = 0;
 
         for line_result in reader.lines() {
@@ -54,15 +53,13 @@ impl QpsParser {
 
             if !line.starts_with(' ') && !line.starts_with('\t') {
                 if let Some(section) = Section::from_line(trimmed) {
-                    if section != Section::Name
-                        && section != Section::EndData
-                        && seen_sections.contains(&section)
-                    {
-                        return Err(QpsError::DuplicateSection(format!("{:?}", section)));
-                    }
-                    seen_sections.insert(section);
-                    current_section = section;
-                    if section == Section::EndData {
+                    let should_break = state.advance(
+                        section,
+                        Section::Name,
+                        Section::EndData,
+                        QpsError::DuplicateSection,
+                    )?;
+                    if should_break {
                         break;
                     }
                     continue;
@@ -74,7 +71,7 @@ impl QpsParser {
                 }
             }
 
-            match current_section {
+            match state.current {
                 Section::ObjSense => self.parse_objsense_line(&line, line_num)?,
                 Section::Rows => self.parse_rows_line(&line, line_num)?,
                 Section::Columns => self.parse_columns_line(&line, line_num)?,
@@ -87,34 +84,23 @@ impl QpsParser {
             }
         }
 
-        if !seen_sections.contains(&Section::EndData) {
-            return Err(QpsError::MissingSection("ENDATA".to_string()));
-        }
-        if !seen_sections.contains(&Section::Rows) {
-            return Err(QpsError::MissingSection("ROWS".to_string()));
-        }
-        if !seen_sections.contains(&Section::Columns) {
-            return Err(QpsError::MissingSection("COLUMNS".to_string()));
-        }
+        state.require(
+            &[
+                (Section::EndData, "ENDATA"),
+                (Section::Rows, "ROWS"),
+                (Section::Columns, "COLUMNS"),
+            ],
+            QpsError::MissingSection,
+        )?;
 
         self.build_qp_problem()
     }
 
     fn parse_objsense_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
-        let upper = line.trim().to_uppercase();
-        match upper.as_str() {
-            "MAX" => self.maximize = true,
-            "MIN" => self.maximize = false,
-            _ => {
-                return Err(QpsError::ParseError {
-                    line: line_num,
-                    message: format!(
-                        "Invalid OBJSENSE value '{}'; expected MIN or MAX",
-                        line.trim()
-                    ),
-                });
-            }
-        }
+        self.maximize = parse_objsense_value(line).map_err(|msg| QpsError::ParseError {
+            line: line_num,
+            message: msg,
+        })?;
         Ok(())
     }
 
@@ -259,6 +245,15 @@ impl QpsParser {
             }
             self.columns.push((col_name.clone(), row_name, value));
             i += 2;
+        }
+        if i < parts.len() {
+            return Err(QpsError::ParseError {
+                line: line_num,
+                message: format!(
+                    "odd trailing token '{}' in COLUMNS (row name without a value)",
+                    parts[i]
+                ),
+            });
         }
         Ok(())
     }
@@ -441,6 +436,15 @@ impl QpsParser {
             }
             (parts[1].to_string(), Some(v))
         } else {
+            if value_taking {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: format!(
+                        "BOUNDS type {} requires a value but none provided for col='{}'",
+                        parts[0], parts[2]
+                    ),
+                });
+            }
             (parts[2].to_string(), None)
         };
         self.bounds.push((bound_type, col_name, value));
@@ -658,7 +662,12 @@ impl QpsParser {
         for (bound_type, col_name, value) in &self.bounds {
             let col_idx = match col_map.get(col_name) {
                 Some(&idx) => idx,
-                None => continue,
+                None => {
+                    return Err(QpsError::UndefinedReference {
+                        kind: "column".to_string(),
+                        name: col_name.clone(),
+                    })
+                }
             };
             match bound_type {
                 BoundType::LO => bounds[col_idx].0 = value.unwrap_or(0.0),
@@ -682,11 +691,21 @@ impl QpsParser {
         for (col1, col2, value) in &self.quadobj {
             let i = match col_map.get(col1) {
                 Some(&idx) => idx,
-                None => continue,
+                None => {
+                    return Err(QpsError::UndefinedReference {
+                        kind: "column".to_string(),
+                        name: col1.clone(),
+                    })
+                }
             };
             let j = match col_map.get(col2) {
                 Some(&idx) => idx,
-                None => continue,
+                None => {
+                    return Err(QpsError::UndefinedReference {
+                        kind: "column".to_string(),
+                        name: col2.clone(),
+                    })
+                }
             };
             q_rows.push(i);
             q_cols.push(j);

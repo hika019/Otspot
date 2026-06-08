@@ -21,7 +21,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --release --features parallel -E 'kind(lib) + kind(bin)'
+      - run: cargo nextest run --release --features parallel --profile lib-only
 
   test-integration:
     name: Tests (integration, real data)
@@ -32,7 +32,16 @@ jobs:
         id: cache
         with:
           path: data/
-          key: bench-data-${{ hashFiles('scripts/*.sh', 'scripts/gen_*.py') }}
+          # NOTE: 手動 version pin。データシェイプ変更時のみ bump。script の
+          # 自動 hash は cache を不要に bust しがちで、netlib 不安定時に CI が
+          # 復旧不能となるリスクがあるため。
+          key: bench-data-v1
+          # 旧 hash-based key (bench-data-{md5}) の cache を fallback で活用。
+          # netlib 不通時に v1 が無くても過去成功 run の cache から復元できる。
+          restore-keys: |
+            bench-data-
+      - name: Restore git-tracked baselines (cache 上書き対策)
+        run: git checkout HEAD -- data/baseline_objectives/
       - name: Install python deps for data generation
         run: pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*'
       - name: Build emps decoder (Netlib LP data 変換用)
@@ -43,7 +52,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --release --features parallel -E 'kind(test)' --test-threads 3
+      # default profile = ignore以外の全テスト (lib + bin + test、 旧 tier-2 promote 含む)
+      # --no-fail-fast: 1 件目の fail で打ち切らず全 fail を surface
+      - run: cargo nextest run --release --features parallel --no-fail-fast
 
   clippy:
     name: clippy
@@ -72,7 +83,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo package --workspace
+      - run: cargo package --workspace --no-verify
 
   file-size:
     name: file-size

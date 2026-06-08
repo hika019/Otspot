@@ -8,6 +8,8 @@ mod reconcile;
 pub(crate) use core::revised_simplex_core;
 pub(crate) use crossover::crossover_dual_from_primal;
 pub(crate) use reconcile::{extract_solution, reconcile_final_basis_state};
+#[cfg(test)]
+pub(crate) use reconcile::pivot_out_degenerate_artificials as test_pivot_out_degenerate_artificials;
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
@@ -19,6 +21,16 @@ use super::dual_common::{basic_obj, lp_unbounded_ray_verified};
 use super::pricing::SteepestEdgePricing;
 use super::{extract_dual_info, SimplexOutcome, StandardForm};
 use self::reconcile::{check_eq_feasibility, pivot_out_degenerate_artificials, try_apply_crash};
+
+#[allow(clippy::print_stderr)]
+fn trace_stage(message: impl std::fmt::Display) {
+    if std::env::var("OTSPOT_SIMPLEX_STAGE_TRACE")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        eprintln!("[simplex-stage] {message}");
+    }
+}
 
 /// Counts `pivot_out_degenerate_artificials` early-exit firings (test-only).
 ///
@@ -63,6 +75,49 @@ pub(crate) static OBJ_PROGRESS_RESET_COUNT: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 pub(crate) static CYCLE_DETECT_NONDEGEN_PRESERVED: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+// Pivot-out sentinel counters (test-only). These are `thread_local` rather than global
+// atomics: `pivot_out_degenerate_artificials` and its sequential fallback always run on
+// the thread that drives the solve, so a thread-local counter captures exactly the
+// increments of the solve invoked on this thread. Under `cargo test` (a shared thread
+// pool) one test's solve can no longer corrupt another's counter delta, and under
+// nextest (process-per-test) each process starts fresh — so the before/after deltas the
+// sentinels assert on are exact under either runner with no inter-test locking.
+thread_local! {
+    /// Counts BTRAN calls issued inside `pivot_out_degenerate_artificials` sequential
+    /// fallback. In the batch path this stays at zero (no BTRANs needed). Sentinel asserts
+    /// the delta is zero after solving an LP where all degenerate artificials are handled
+    /// by the batch: reverting to the O(num_art) sequential path makes it increase by
+    /// num_art, failing the assertion (no-op FAIL).
+    #[cfg(test)]
+    pub(crate) static PIVOT_OUT_BTRAN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// Counts batch LU factorization attempts in `pivot_out_degenerate_artificials`.
+    /// Incremented once each time the batch greedy assignment is attempted and a single
+    /// `LuBasis::new_timed` is called for all matched rows. Sentinel asserts the delta is
+    /// exactly 1 when the batch path is taken. Reverting to the sequential path keeps this
+    /// at zero and fails the assertion (no-op FAIL).
+    #[cfg(test)]
+    pub(crate) static PIVOT_OUT_BATCH_LU_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// Counts batch→sequential reverts in `pivot_out_degenerate_artificials`. Incremented
+    /// once each time the post-batch FTRAN stability check rejects the batch assignment
+    /// (ill-conditioned pivots) and the per-row sequential path is taken instead. Sentinel
+    /// asserts the delta is positive on a known ill-conditioned instance (degen2): removing
+    /// the stability check keeps this at zero — the unstable batch is accepted and the
+    /// correctness assertion downstream fails (no-op FAIL).
+    #[cfg(test)]
+    pub(crate) static PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// Counts rows routed to pivot_out_sequential via the uncommitted_rows path.
+    /// Incremented for each row in matches[match_offset..] (partial-commit case,
+    /// match_offset > 0) or in matches[0..] (no-commit case, match_offset == 0,
+    /// batch_stable short-circuited). Sentinel asserts this is positive when the
+    /// batch LU fails for the full match set; removing the uncommitted_rows path
+    /// keeps it at zero — assertion fails (no-op FAIL).
+    #[cfg(test)]
+    pub(crate) static PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Verified-ray gate for a Phase II `Unbounded` exit (shared with the Big-M
 /// path). An eta-drift false-Unbounded (`B⁻¹a_q` reads ≤ 0 only because of a
@@ -135,35 +190,94 @@ fn extract_farkas_certificate(
     n_original: usize,
     options: &SolverOptions,
 ) -> Vec<f64> {
-    if !basis.iter().any(|&col| col >= n_original) {
+    let art_rows: Vec<usize> = (0..m)
+        .filter(|&i| basis[i] >= n_original)
+        .collect();
+    if art_rows.is_empty() {
         return vec![];
     }
     let mut basis_mgr = match LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(_) => return vec![],
     };
-    let mut y: Vec<f64> = (0..m)
-        .map(|i| if basis[i] >= n_original { 1.0 } else { 0.0 })
-        .collect();
-    basis_mgr.btran_dense(&mut y);
 
     let b_norm = b.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
     let tol = options.dual_tol * (1.0_f64).max(b_norm);
 
-    let by: f64 = b.iter().zip(y.iter()).map(|(&bi, &yi)| bi * yi).sum();
-    if by <= tol {
-        return vec![];
-    }
-    for j in 0..n_original {
-        let Ok((rows, vals)) = a_ext.get_column(j) else {
-            return vec![];
-        };
-        let aty: f64 = rows.iter().zip(vals.iter()).map(|(&r, &v)| v * y[r]).sum();
-        if aty > tol {
-            return vec![];
+    // Helper: check A^T y <= tol for all original columns.
+    let aty_ok = |y: &[f64]| -> bool {
+        for j in 0..n_original {
+            let Ok((rows, vals)) = a_ext.get_column(j) else {
+                return false;
+            };
+            let aty: f64 = rows.iter().zip(vals.iter()).map(|(&r, &v)| v * y[r]).sum();
+            if aty > tol {
+                return false;
+            }
+        }
+        true
+    };
+
+    // Compute fresh x_B = B^{-1} b to identify which artificial rows are genuinely
+    // infeasible (positive) vs numerically negative (eta-drift artifact).
+    let mut x_b_fresh = b.to_vec();
+    basis_mgr.ftran_dense(&mut x_b_fresh);
+
+    // Strategy 1: joint indicator over ALL artificial rows.
+    // `by = sum_art x_B[i]` can approach zero when positive and negative art rows
+    // cancel (cplex2-class: primal Phase I cycling leaves mixed-sign art x_B).
+    {
+        let mut y: Vec<f64> = (0..m)
+            .map(|i| if basis[i] >= n_original { 1.0 } else { 0.0 })
+            .collect();
+        basis_mgr.btran_dense(&mut y);
+        let by: f64 = b.iter().zip(y.iter()).map(|(&bi, &yi)| bi * yi).sum();
+        if by > tol && aty_ok(&y) {
+            return y;
         }
     }
-    y
+
+    // Strategy 2: positive-art-only indicator — avoids sign cancellation.
+    // Uses only artificial rows where the fresh x_B > PIVOT_TOL (genuinely
+    // infeasible rows).  `by = sum_{pos-art} x_B[i]^2 / norm` stays positive.
+    // At the dual-feasible Phase I basis, the full joint indicator satisfies
+    // A^T y ≤ 0; the positive-only subset may or may not, so we verify.
+    {
+        let pos_art_indicator: Vec<f64> = (0..m)
+            .map(|i| {
+                if basis[i] >= n_original && x_b_fresh[i] > PIVOT_TOL {
+                    x_b_fresh[i]
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        if pos_art_indicator.iter().any(|&v| v > 0.0) {
+            let mut y = pos_art_indicator;
+            basis_mgr.btran_dense(&mut y);
+            let by: f64 = b.iter().zip(y.iter()).map(|(&bi, &yi)| bi * yi).sum();
+            if by > PIVOT_TOL && aty_ok(&y) {
+                return y;
+            }
+        }
+    }
+
+    // Strategy 3: per-row probes — tries each positive-x_B artificial row
+    // individually.  Useful when the weighted combination still fails aty_ok.
+    for &row in &art_rows {
+        if x_b_fresh[row] <= PIVOT_TOL {
+            continue;
+        }
+        let mut e_i = vec![0.0_f64; m];
+        e_i[row] = 1.0;
+        basis_mgr.btran_dense(&mut e_i);
+        let by: f64 = b.iter().zip(e_i.iter()).map(|(&bi, &yi)| bi * yi).sum();
+        if by > tol && aty_ok(&e_i) {
+            return e_i;
+        }
+    }
+
+    vec![]
 }
 
 fn extract_timeout_solution_reconciled(
@@ -218,9 +332,15 @@ pub(crate) fn two_phase_simplex(
     let m = sf.m;
     let mut total_iters: usize = 0;
 
+    trace_stage(format_args!(
+        "start m={} n_total={} n_artificial={}",
+        sf.m, sf.n_total, sf.num_artificial
+    ));
+
     let Some((a, b, c, row_scale, col_scale)) =
         LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
     else {
+        trace_stage("equilibration timeout");
         return SolverResult {
             status: SolveStatus::Timeout,
             objective: f64::INFINITY,
@@ -230,6 +350,7 @@ pub(crate) fn two_phase_simplex(
 
     if sf.num_artificial == 0 {
         // Direct Phase II.
+        trace_stage("direct phase2 start");
         let mut basis = sf.initial_basis.clone();
         let mut x_b = b.clone();
         // Ruiz equilibration scales slack diagonals away from 1; divide by the
@@ -286,6 +407,7 @@ pub(crate) fn two_phase_simplex(
                 ) {
                     Ok(()) => {}
                     Err(crate::error::SolverError::DeadlineExceeded) => {
+                        trace_stage("direct phase2 final reconcile deadline");
                         let solution = extract_timeout_solution_reconciled(
                             sf,
                             &a,
@@ -305,11 +427,15 @@ pub(crate) fn two_phase_simplex(
                             ..Default::default()
                         };
                     }
-                    Err(_) => return SolverResult::numerical_error(),
+                    Err(_) => {
+                        trace_stage("direct phase2 final reconcile numerical");
+                        return SolverResult::numerical_error();
+                    }
                 }
                 let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                 // Defense-in-depth against false Optimal on Eq constraints.
                 if !check_eq_feasibility(problem, &solution) {
+                    trace_stage("direct phase2 final feasibility failed");
                     return SolverResult {
                         status: SolveStatus::NumericalError,
                         objective: obj + sf.obj_offset,
@@ -374,10 +500,14 @@ pub(crate) fn two_phase_simplex(
                     ..Default::default()
                 }
             }
-            SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+            SimplexOutcome::SingularBasis => {
+                trace_stage("direct phase2 singular basis");
+                SolverResult::numerical_error()
+            }
         }
     } else {
         // Phase I + Phase II (Ruiz-scaled system)
+        trace_stage("phase1 setup start");
         let mut trip_rows: Vec<usize> = Vec::new();
         let mut trip_cols: Vec<usize> = Vec::new();
         let mut trip_vals: Vec<f64> = Vec::new();
@@ -411,6 +541,7 @@ pub(crate) fn two_phase_simplex(
         let n_ext = art_col;
 
         let a_ext = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_ext).unwrap();
+        trace_stage(format_args!("phase1 setup done n_ext={n_ext}"));
 
         // Phase I cost: penalize all artificials.
         let mut c_phase1 = vec![0.0; n_ext];
@@ -436,9 +567,11 @@ pub(crate) fn two_phase_simplex(
             None
         };
         if let Some((crash_basis, crash_x_b)) = crashed {
+            trace_stage("crash basis accepted");
             basis = crash_basis;
             x_b = crash_x_b;
         } else {
+            trace_stage("cold artificial basis");
             // Correct x_b for diagonal entries of initial basis columns.
             // Art cols have entry 1.0 → no change. Scaled slack cols → divide by diagonal.
             for i in 0..m {
@@ -463,6 +596,7 @@ pub(crate) fn two_phase_simplex(
         }
 
         let mut pricing1 = SteepestEdgePricing::new(n_ext);
+        trace_stage("phase1 core start");
         let phase1_outcome = revised_simplex_core(
             &a_ext,
             &mut x_b,
@@ -479,6 +613,7 @@ pub(crate) fn two_phase_simplex(
         );
         match phase1_outcome {
             SimplexOutcome::Optimal(_obj, _) => {
+                trace_stage(format_args!("phase1 optimal iters={total_iters}"));
                 // Phase I can declare Optimal while eta drift leaves x_b < 0.
                 // Re-factor with fresh LU; if primal-infeasibility persists, retry
                 // Phase I. MAX_PHASE1_RETRIES caps the loop to avoid infinite
@@ -506,7 +641,10 @@ pub(crate) fn two_phase_simplex(
                         Ok(()) => (0..m)
                             .map(|i| c_phase1[basis[i]] * x_b[i].max(0.0))
                             .sum::<f64>(),
-                        Err(_) => break 'retry,
+                        Err(_) => {
+                            trace_stage("phase1 reconcile failed");
+                            break 'retry;
+                        }
                     };
                     if rec_obj <= PIVOT_TOL {
                         phase1_feasible = true;
@@ -581,12 +719,14 @@ pub(crate) fn two_phase_simplex(
                             };
                         }
                         SimplexOutcome::SingularBasis => {
+                            trace_stage("phase1 retry singular basis");
                             return SolverResult::numerical_error();
                         }
                     }
                 }
 
                 if !phase1_feasible {
+                    trace_stage("phase1 not feasible; extracting farkas");
                     // Declare Infeasible only with a verified Farkas certificate.
                     // True infeasible LPs have a valid dual ray at this basis;
                     // feasible LPs cycling in Phase I do not (empty cert → Timeout).
@@ -596,12 +736,18 @@ pub(crate) fn two_phase_simplex(
                 }
 
                 // Phase I feasible: pivot out any remaining degenerate artificials
+                trace_stage("pivot out degenerate artificials start");
                 pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, sf, options);
+                let remaining_art = basis.iter().filter(|&&col| col >= sf.n_total).count();
+                trace_stage(format_args!(
+                    "pivot out degenerate artificials done remaining_art={remaining_art}"
+                ));
 
                 let mut c_phase2 = vec![0.0; n_ext];
                 c_phase2[..sf.n_total].copy_from_slice(&c[..sf.n_total]);
                 {
                     let mut y_transition = vec![0.0f64; m];
+                    trace_stage("phase2 transition reconcile start");
                     match reconcile_final_basis_state(
                         &a_ext,
                         &b,
@@ -614,6 +760,7 @@ pub(crate) fn two_phase_simplex(
                     ) {
                         Ok(()) => {}
                         Err(crate::error::SolverError::DeadlineExceeded) => {
+                            trace_stage("phase2 transition reconcile deadline");
                             let solution = extract_timeout_solution_reconciled(
                                 sf,
                                 &a_ext,
@@ -633,7 +780,10 @@ pub(crate) fn two_phase_simplex(
                                 ..Default::default()
                             };
                         }
-                        Err(_) => return SolverResult::numerical_error(),
+                        Err(_) => {
+                            trace_stage("phase2 transition reconcile numerical");
+                            return SolverResult::numerical_error();
+                        }
                     }
                 }
                 // Charnes perturbation for Phase II anti-cycling.
@@ -651,6 +801,7 @@ pub(crate) fn two_phase_simplex(
                 }
 
                 let mut pricing2 = SteepestEdgePricing::new(n_ext);
+                trace_stage("phase2 core start");
                 let phase2_outcome = revised_simplex_core(
                     &a_ext,
                     &mut x_b,
@@ -678,6 +829,7 @@ pub(crate) fn two_phase_simplex(
                 );
                 match phase2_outcome {
                     SimplexOutcome::Optimal(obj2, mut y) => {
+                        trace_stage(format_args!("phase2 optimal iters={total_iters}"));
                         match reconcile_final_basis_state(
                             &a_ext,
                             &b,
@@ -690,6 +842,7 @@ pub(crate) fn two_phase_simplex(
                         ) {
                             Ok(()) => {}
                             Err(crate::error::SolverError::DeadlineExceeded) => {
+                                trace_stage("phase2 final reconcile deadline");
                                 let solution = extract_timeout_solution_reconciled(
                                     sf,
                                     &a_ext,
@@ -709,10 +862,14 @@ pub(crate) fn two_phase_simplex(
                                     ..Default::default()
                                 };
                             }
-                            Err(_) => return SolverResult::numerical_error(),
+                            Err(_) => {
+                                trace_stage("phase2 final reconcile numerical");
+                                return SolverResult::numerical_error();
+                            }
                         }
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                         if !check_eq_feasibility(problem, &solution) {
+                            trace_stage("phase2 final feasibility failed");
                             return SolverResult {
                                 status: SolveStatus::NumericalError,
                                 objective: obj2 + sf.obj_offset,
@@ -777,10 +934,14 @@ pub(crate) fn two_phase_simplex(
                             ..Default::default()
                         }
                     }
-                    SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+                    SimplexOutcome::SingularBasis => {
+                        trace_stage("phase2 singular basis");
+                        SolverResult::numerical_error()
+                    }
                 }
             }
             SimplexOutcome::Unbounded => {
+                trace_stage(format_args!("phase1 unbounded iters={total_iters}"));
                 // A Phase I unbounded ray suggests primal infeasibility, but only a
                 // verified Farkas certificate proves it; empty cert → Timeout
                 // (spurious unbounded ray on a feasible LP, ns1688926-class).
@@ -788,6 +949,7 @@ pub(crate) fn two_phase_simplex(
                 phase1_infeasibility_verdict(farkas, total_iters)
             }
             SimplexOutcome::Timeout(obj1) => {
+                trace_stage(format_args!("phase1 timeout iters={total_iters} obj={obj1:.9e}"));
                 // obj1 ≤ PIVOT_TOL ⇒ artificials look near-zero at timeout.
                 // Reconcile with a fresh LU; only enter Phase II if the
                 // accurate x_b still shows feasibility.

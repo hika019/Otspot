@@ -23,6 +23,7 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use super::deadline_expired;
 
 /// Lex 摂動 (bland_mode 起動時): reduced_costs (non-basic) と x_b に
 /// `eps·(1+i/n)·scale` を加算し ratio test の tie を解消、Bland's rule の有限終了
@@ -162,9 +163,18 @@ fn apply_lex_perturbation(
     }
 }
 
-#[inline]
-fn deadline_expired(deadline: Option<std::time::Instant>) -> bool {
-    deadline.is_some_and(|d| std::time::Instant::now() >= d)
+/// `Instant::now()` per-col 呼び出しは大規模問題で RC コストを支配する。
+/// bounded_core.rs::DEADLINE_CHECK_INTERVAL と同じ chunk 戦略で 512 列に
+/// 1 回 deadline チェック。詳細は bounded_core.rs の同名定数コメント参照。
+const CORE_RC_DEADLINE_CHECK_INTERVAL: usize = 512;
+
+// Counts deadline checks issued inside `compute_reduced_costs_timed` (test-only).
+// thread_local 化で並列 test 中の汚染を回避。
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CORE_RC_DEADLINE_CHECK_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
 }
 
 fn compute_reduced_costs_timed(
@@ -182,19 +192,26 @@ fn compute_reduced_costs_timed(
     }
     let y = compute_dual_vars(c, basis_mgr, basis, m);
     let mut reduced_costs = vec![0.0f64; n_price];
-    for j in 0..n_price {
+    let mut j = 0;
+    while j < n_price {
         if deadline_expired(deadline) {
             return None;
         }
-        if is_basic[j] {
-            continue;
+        #[cfg(test)]
+        CORE_RC_DEADLINE_CHECK_COUNT.with(|c| c.set(c.get() + 1));
+        let end = (j + CORE_RC_DEADLINE_CHECK_INTERVAL).min(n_price);
+        for k in j..end {
+            if is_basic[k] {
+                continue;
+            }
+            let (rows, vals) = a.get_column(k).unwrap();
+            let mut ya = 0.0;
+            for (idx, &row) in rows.iter().enumerate() {
+                ya += y[row] * vals[idx];
+            }
+            reduced_costs[k] = c[k] - ya;
         }
-        let (rows, vals) = a.get_column(j).unwrap();
-        let mut ya = 0.0;
-        for (k, &row) in rows.iter().enumerate() {
-            ya += y[row] * vals[k];
-        }
-        reduced_costs[j] = c[j] - ya;
+        j = end;
     }
     Some(reduced_costs)
 }
@@ -325,9 +342,7 @@ pub(crate) fn dual_simplex_core_advanced(
     loop {
         *iter_count_out = iter_count_out.saturating_add(1);
         // 3a: タイムアウト/キャンセルチェック
-        let timed_out = options
-            .deadline
-            .is_some_and(|d| std::time::Instant::now() >= d);
+        let timed_out = deadline_expired(options.deadline);
         let cancelled = options
             .cancel_flag
             .as_ref()
@@ -1095,5 +1110,66 @@ mod tests {
             init_calls.get(),
             refactor_calls.get(),
         );
+    }
+
+    /// Sentinel: `compute_reduced_costs_timed` (core.rs legacy path) must issue
+    /// `ceil(n / INTERVAL)` deadline checks, not per-column. Same design as
+    /// `bounded_core.rs::rc_timed_deadline_checks_are_chunked_not_per_column`
+    /// for the bounded path; this covers the `UbViolationOutOfScope` legacy
+    /// fallback path.
+    #[test]
+    fn core_rc_timed_deadline_checks_are_chunked_not_per_column() {
+        use crate::basis::LuBasis;
+        let n_synthetic = CORE_RC_DEADLINE_CHECK_INTERVAL * 4 + 100;
+        let m = 3usize;
+        let mut rows_t: Vec<usize> = Vec::new();
+        let mut cols_t: Vec<usize> = Vec::new();
+        let mut vals_t: Vec<f64> = Vec::new();
+        for j in 0..n_synthetic {
+            rows_t.push(j % m);
+            cols_t.push(j);
+            vals_t.push(1.0);
+        }
+        let a = CscMatrix::from_triplets(&rows_t, &cols_t, &vals_t, m, n_synthetic).unwrap();
+        let basis: Vec<usize> = (0..m).collect();
+        let c: Vec<f64> = (0..n_synthetic).map(|j| j as f64).collect();
+        let is_basic: Vec<bool> = (0..n_synthetic).map(|j| j < m).collect();
+        let opts = SolverOptions {
+            max_etas: 50,
+            ..SolverOptions::default()
+        };
+        let mut basis_mgr = LuBasis::new_timed(&a, &basis, opts.max_etas, None).unwrap();
+
+        let before = CORE_RC_DEADLINE_CHECK_COUNT.with(|c| c.get());
+        let deadline_far = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        let rc_opt = compute_reduced_costs_timed(
+            &a, &c, &mut basis_mgr, &is_basic, n_synthetic, m, &basis, deadline_far,
+        );
+        assert!(rc_opt.is_some(), "RC compute must succeed (deadline is far)");
+        let rc = rc_opt.unwrap();
+
+        let after = CORE_RC_DEADLINE_CHECK_COUNT.with(|c| c.get());
+        let checks = after - before;
+        let max_expected = n_synthetic.div_ceil(CORE_RC_DEADLINE_CHECK_INTERVAL);
+        assert!(
+            checks <= max_expected,
+            "core compute_reduced_costs_timed issued {checks} deadline checks for \
+             n={n_synthetic}, expected ≤ {max_expected}. Per-column regression."
+        );
+        assert!(
+            checks < n_synthetic,
+            "core RC must issue far fewer deadline checks than columns: \
+             {checks} for {n_synthetic} columns."
+        );
+
+        // Correctness: rc[j] = c[j] - c[j%m] for non-basic j (diagonal basis y=c_B).
+        for j in m..n_synthetic {
+            let expected = c[j] - c[j % m];
+            assert!(
+                (rc[j] - expected).abs() < 1e-10,
+                "rc[{j}] = {} expected {expected} (correctness check)",
+                rc[j]
+            );
+        }
     }
 }

@@ -74,7 +74,7 @@ pub fn parse_qps_str(input: &str) -> Result<QpProblem, QpsError> {
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 mod tests {
     use super::*;
-    use otspot_core::problem::SolveStatus;
+    use otspot_core::problem::{ConstraintType, SolveStatus};
     use otspot_core::qp::solve_qp;
 
     #[test]
@@ -621,5 +621,157 @@ ENDATA
             parse_qps_str(qps).is_err(),
             "NaN for unknown row in named RHS line must error (not silent accept)"
         );
+    }
+
+    // ── Sentinel tests: input-validation audit ────────────────────────────────
+
+    /// Fix-3: BOUNDS entry referencing a column not in COLUMNS must error.
+    /// Sentinel: reverting the UndefinedReference return to `continue` → Ok instead of Err.
+    #[test]
+    fn test_sentinel_qps_bounds_undefined_column_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n LO BND  ghost  1.0\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "BOUNDS referencing undefined column must error, not be silently ignored"
+        );
+    }
+
+    /// Fix-3: QUADOBJ entry referencing a column not in COLUMNS must error.
+    /// Sentinel: reverting to `continue` → Ok instead of Err.
+    #[test]
+    fn test_sentinel_qps_quadobj_undefined_column_is_error() {
+        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nRHS\nQUADOBJ\n    x1 ghost 2.0\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "QUADOBJ referencing undefined column must error, not be silently ignored"
+        );
+    }
+
+    /// Fix-4: value-bearing BOUNDS type (LO) with missing value must error.
+    /// Sentinel: reverting to silent None default → Ok instead of Err.
+    #[test]
+    fn test_sentinel_qps_bounds_lo_missing_value_is_error() {
+        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nRHS\nBOUNDS\n LO BND x1\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "LO bound without a value must error"
+        );
+    }
+
+    /// Fix-4: value-bearing BOUNDS type (FX) with missing value must error.
+    #[test]
+    fn test_sentinel_qps_bounds_fx_missing_value_is_error() {
+        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nRHS\nBOUNDS\n FX BND x1\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "FX bound without a value must error"
+        );
+    }
+
+    /// Fix-5: odd trailing token in COLUMNS (row name with no value) must error.
+    /// Sentinel: reverting trailing-token check → Ok instead of Err.
+    #[test]
+    fn test_sentinel_qps_columns_trailing_row_no_value_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0 obj\nRHS\n    rhs c1 5.0\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "trailing row name without a value in COLUMNS must error"
+        );
+    }
+
+    // ── Black-box parse tests ─────────────────────────────────────────────────
+
+    /// TECHNIQUE: EQUIVALENCE PARTITIONING — well-formed 2-var QPS with QUADOBJ.
+    ///
+    /// Oracle (hand-derived):
+    ///   c = [-1, -2] (linear objective from COLUMNS).
+    ///   b = [5.0], constraint_types = [Le], num_vars=2, num_constraints=1.
+    ///   QUADOBJ: x1 x1 2.0 → Q[0,0]=2.0; x2 x2 4.0 → Q[1,1]=4.0.
+    ///   Convention: min 1/2 x'Qx + c'x, so QUADOBJ stores Q directly.
+    ///   Default bounds: (0, +inf) for both variables.
+    #[test]
+    fn ep_qps_2var_quadobj_structure() {
+        let qps = "\
+NAME      tiny2var
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  -1.0  c1  1.0
+    x2  obj  -2.0  c1  1.0
+RHS
+    rhs  c1  5.0
+QUADOBJ
+    x1  x1  2.0
+    x2  x2  4.0
+ENDATA
+";
+        let qp = parse_qps_str(qps).expect("ep_qps_2var_quadobj: valid QPS must parse");
+        assert_eq!(qp.num_vars, 2, "num_vars");
+        assert_eq!(qp.num_constraints, 1, "num_constraints");
+        assert_eq!(qp.c, vec![-1.0, -2.0], "linear objective c");
+        assert_eq!(qp.b, vec![5.0], "RHS");
+        assert_eq!(
+            qp.constraint_types,
+            vec![ConstraintType::Le],
+            "L row → Le"
+        );
+        // Q[0,0] = 2.0
+        let (rows0, vals0) = qp.q.get_column(0).expect("Q col 0 must exist");
+        let q00 = rows0
+            .iter()
+            .zip(vals0.iter())
+            .find_map(|(&r, &v)| (r == 0).then_some(v))
+            .expect("Q[0,0] must be present");
+        assert!((q00 - 2.0).abs() < 1e-12, "Q[0,0]=2.0 got {q00}");
+        // Q[1,1] = 4.0
+        let (rows1, vals1) = qp.q.get_column(1).expect("Q col 1 must exist");
+        let q11 = rows1
+            .iter()
+            .zip(vals1.iter())
+            .find_map(|(&r, &v)| (r == 1).then_some(v))
+            .expect("Q[1,1] must be present");
+        assert!((q11 - 4.0).abs() < 1e-12, "Q[1,1]=4.0 got {q11}");
+        // Default bounds
+        assert_eq!(qp.bounds[0].0, 0.0, "x1 lb=0 (default)");
+        assert_eq!(qp.bounds[1].0, 0.0, "x2 lb=0 (default)");
+    }
+
+    /// TECHNIQUE: DECISION TABLE — QPS G and E row types parsed correctly.
+    ///
+    /// Oracle (hand-derived from QPS parser source):
+    ///   The QPS parser normalises G rows to Le form by negating: G becomes Le with
+    ///   A-entries multiplied by -1 and RHS negated. E rows become Eq unchanged.
+    ///   ge1 (G row, x1+x2>=2): stored as Le, b[0]=-2.0, A entries negated.
+    ///   eq1 (E row, x1=1):     stored as Eq, b[1]=1.0, A entries unchanged.
+    ///   constraint_types = [Le, Eq], b = [-2.0, 1.0].
+    #[test]
+    fn dt_qps_ge_eq_row_types() {
+        let qps = "\
+NAME      dt_ge_eq
+ROWS
+ N  obj
+ G  ge1
+ E  eq1
+COLUMNS
+    x1  obj  1.0  ge1  1.0
+    x1  eq1  1.0
+    x2  obj  2.0  ge1  1.0
+RHS
+    rhs  ge1  2.0
+    rhs  eq1  1.0
+ENDATA
+";
+        let qp = parse_qps_str(qps).expect("dt_qps_ge_eq: valid QPS must parse");
+        assert_eq!(qp.num_vars, 2, "num_vars");
+        assert_eq!(qp.num_constraints, 2, "num_constraints");
+        // G row is normalised to Le (negated); E row stays Eq.
+        assert_eq!(
+            qp.constraint_types,
+            vec![ConstraintType::Le, ConstraintType::Eq],
+            "G→Le (negated), E→Eq"
+        );
+        // G row RHS 2.0 is negated to -2.0; E row RHS 1.0 is unchanged.
+        assert_eq!(qp.b, vec![-2.0, 1.0], "b: G-row negated, E-row unchanged");
     }
 }

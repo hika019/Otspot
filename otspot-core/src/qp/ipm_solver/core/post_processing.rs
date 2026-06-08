@@ -4,9 +4,11 @@
 use crate::options::SolverOptions;
 use crate::problem::SolverResult;
 use crate::qp::ipm_solver::kkt::{
-    bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel,
+    bound_violation, complementarity_componentwise_rel, complementarity_residual_rel,
+    kkt_residual_rel, primal_residual_rel,
 };
-use crate::qp::ipm_solver::outcome::{IpmOutcome, ProblemView};
+use crate::qp::ipm_solver::outcome::ProblemView;
+use crate::qp::kkt_resid::dual_sign_violation;
 use crate::qp::problem::QpProblem;
 
 /// primal projection の LDL 因子化に対する時間予算ガード。memory budget は factorize
@@ -23,11 +25,11 @@ pub(super) fn allow_primal_projection(orig_problem: &QpProblem) -> bool {
     problem_size <= LARGE_PROBLEM_THRESHOLD
 }
 
-/// IPM 出口で既に satisfies_eps の全条件を満たした Optimal なら post-processing skip。
+/// IPM 出口で既に証明条件を満たした Optimal なら post-processing skip。
 ///
 /// kkt + primal に加え、complementarity と duality gap も確認する。Krylov IR は
 /// kkt/pres だけでなく comp/gap も改善するため、これらが未収束の場合に skip すると
-/// satisfies_eps が失敗して SuboptimalSolution になる。
+/// prove_optimal が失敗して SuboptimalSolution になる。
 pub(super) fn kkt_already_passes(
     orig_problem: &QpProblem,
     final_sol: &SolverResult,
@@ -61,12 +63,27 @@ pub(super) fn kkt_already_passes(
         &final_sol.solution,
         &final_sol.dual_solution,
         &final_sol.bound_duals,
-    );
+    )
+    .max(complementarity_componentwise_rel(
+        &view,
+        &final_sol.solution,
+        &final_sol.dual_solution,
+        &final_sol.bound_duals,
+    ));
     if comp > user_eps {
         return false;
     }
+    let dsign = dual_sign_violation(
+        &orig_problem.constraint_types,
+        &final_sol.dual_solution,
+        orig_problem.bounds.as_slice(),
+        &final_sol.bound_duals,
+    );
+    if dsign > user_eps {
+        return false;
+    }
     let gap = super::duality_gap::compute_duality_gap_rel(orig_problem, final_sol);
-    gap < IpmOutcome::PROMOTION_GAP_TOL
+    gap <= user_eps
 }
 
 /// Post-processing stage 1+2: primal projection + y/z 交互 refit + IRLS。
@@ -78,6 +95,7 @@ pub(super) fn refine_post_processing(
     opts: &SolverOptions,
     allow_primal: bool,
 ) -> f64 {
+    let user_eps = opts.ipm_eps();
     let view = build_view(orig_problem, eliminated_cols);
 
     // (1) primal projection: 違反制約に対して x を最小ノルム射影。
@@ -90,7 +108,7 @@ pub(super) fn refine_post_processing(
             final_sol.solution = pre_x;
         } else {
             // x 改善時は z を新 x に合わせて refit。
-            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, user_eps);
         }
     }
 
@@ -139,7 +157,7 @@ pub(super) fn refine_post_processing(
         }
 
         let pre_z = final_sol.bound_duals.clone();
-        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, user_eps);
         let post_kkt = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -158,7 +176,6 @@ pub(super) fn refine_post_processing(
     }
 
     // 標準 LSQ が componentwise eps を満たさない場合 IRLS で L∞ 風 y を試行。
-    let user_eps = opts.ipm_eps();
     loop {
         if current_kkt <= user_eps {
             break;
@@ -203,7 +220,7 @@ pub(super) fn refine_post_processing(
         if post_kkt_irls < current_kkt {
             current_kkt = post_kkt_irls;
             let pre_z = final_sol.bound_duals.clone();
-            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, user_eps);
             let post_kkt_z = kkt_residual_rel(
                 &view,
                 &final_sol.solution,
@@ -275,7 +292,7 @@ pub(super) fn refine_krylov_and_projection(
         crate::qp::refine_primal_lsq(orig_problem, final_sol, opts.deadline);
         let post_pres2 = primal_residual_rel(&view, &final_sol.solution);
         if post_pres2 < pres_post_ir {
-            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, user_eps);
             let kkt_after2 = kkt_residual_rel(
                 &view,
                 &final_sol.solution,
@@ -309,6 +326,9 @@ mod gate_predicate_tests {
     use super::{build_view, kkt_already_passes, kkt_residual_rel, primal_residual_rel};
     use crate::options::SolverOptions;
     use crate::problem::ConstraintType;
+    use crate::qp::ipm_solver::kkt::{
+        complementarity_componentwise_rel, complementarity_residual_rel,
+    };
     use crate::qp::problem::QpProblem;
     use crate::sparse::CscMatrix;
 
@@ -463,6 +483,104 @@ mod gate_predicate_tests {
         assert!(
             !kkt_already_passes(&prob, &res, &[], true, 1e-6),
             "z_lb=1e-3, y=-0.999: stationarity holds but comp≈2.9e-4≫1e-6 → gate must NOT skip IR"
+        );
+    }
+
+    #[test]
+    fn already_passes_false_when_only_componentwise_comp_fails() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![-1.0e12_f64],
+            a,
+            vec![1.0_f64],
+            vec![(0.0_f64, f64::INFINITY)],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+        let res = crate::problem::SolverResult {
+            solution: vec![1.0_f64],
+            dual_solution: vec![1.0e12_f64 + 1.0e-3_f64],
+            bound_duals: vec![1.0e-3_f64],
+            ..Default::default()
+        };
+        let view = build_view(&prob, &[]);
+        let aggregate = complementarity_residual_rel(
+            &view,
+            &res.solution,
+            &res.dual_solution,
+            &res.bound_duals,
+        );
+        let componentwise = complementarity_componentwise_rel(
+            &view,
+            &res.solution,
+            &res.dual_solution,
+            &res.bound_duals,
+        );
+        assert!(
+            aggregate < 1e-6,
+            "fixture must keep aggregate comp below eps, got {aggregate:.3e}"
+        );
+        assert!(
+            componentwise > 1e-6,
+            "fixture must expose componentwise comp above eps, got {componentwise:.3e}"
+        );
+        assert!(
+            !kkt_already_passes(&prob, &res, &[], true, 1e-6),
+            "componentwise comp failure must prevent post-processing skip"
+        );
+    }
+
+    /// Sentinel Fix-2: dual-sign violation alone (kkt/pres/bv/comp/gap all pass within eps)
+    /// must force kkt_already_passes to return false so Stage-2 IR is NOT skipped.
+    ///
+    /// Problem: min 0.5·x² − 2·x, Le: x ≤ 1, x ∈ [0,1]. Baseline optimum x=1, y_Le=1.
+    /// Corrupt: y_Le=−1e-4 (Le sign violation), z_ub=1+1e-4. Then stat/pres/bv/comp/gap
+    /// all evaluate to 0 within eps — only dual_sign sees y_Le<0, violation ≈1e-4 ≫1e-6.
+    ///
+    /// Reverting Fix 2 (removing the dual_sign check from kkt_already_passes) makes the gate
+    /// return true here (all other checks pass), causing this assertion to fail → sentinel fires.
+    #[test]
+    fn already_passes_false_when_dual_sign_violated() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![-2.0_f64],
+            a,
+            vec![1.0_f64],
+            vec![(0.0_f64, 1.0_f64)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+
+        // Baseline: x=1, y_Le=1, z_lb=0, z_ub=0.
+        // bound_duals layout: n_lb_finite=1, n_ub_finite=1 → [z_lb, z_ub].
+        // stat: 1−2+1+(−0+0)=0, pres=0, bv=0, comp=0, gap=0, dsign=0 → gate passes.
+        let baseline = crate::problem::SolverResult {
+            solution: vec![1.0_f64],
+            dual_solution: vec![1.0_f64],
+            bound_duals: vec![0.0_f64, 0.0_f64],
+            ..Default::default()
+        };
+        assert!(
+            kkt_already_passes(&prob, &baseline, &[], true, 1e-6),
+            "baseline optimal (y_Le=1, z_lb=0, z_ub=0) must pass the gate"
+        );
+
+        // Corrupt: y_Le=−1e-4, z_ub=1+1e-4. stat=0, comp=0, gap=0, but dsign≈1e-4≫1e-6.
+        // Without Fix 2 the gate returns true (kkt/pres/bv/comp/gap all pass); sentinel fires.
+        let corrupt = crate::problem::SolverResult {
+            solution: vec![1.0_f64],
+            dual_solution: vec![-1e-4_f64],
+            bound_duals: vec![0.0_f64, 1.0_f64 + 1e-4_f64],
+            ..Default::default()
+        };
+        assert!(
+            !kkt_already_passes(&prob, &corrupt, &[], true, 1e-6),
+            "y_Le=−1e-4 violates Le sign (dsign≈1e-4≫1e-6) → gate must NOT skip Stage-2 IR; \
+             reverting the dual_sign check from kkt_already_passes would return true here → sentinel fires"
         );
     }
 

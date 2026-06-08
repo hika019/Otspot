@@ -1566,3 +1566,314 @@ fn b2_obj_progress_reset_fires_on_improving_objective() {
          so the improvement condition never fires"
     );
 }
+
+/// Sentinel: `pivot_out_degenerate_artificials` uses the batch path (O(1) LU, zero BTRANs)
+/// when many degenerate artificials can each be matched to a unique non-basic structural column.
+///
+/// LP construction: m=N+1 rows, n=N+1 structural vars (x_0..x_N), all Eq constraints.
+///   Row 0:        x_0         = 1   (Phase I pivots x_0 in non-degenerately)
+///   Row i=1..N:   x_0 - x_i  = 1   (x_b[i] → 0 after x_0 enters row 0)
+///
+/// The replacement columns x_1..x_N carry coefficient -1 in rows 1..N. Their Phase I
+/// reduced costs = +1 (positive), so Phase I never enters them. The N degenerate
+/// artificials stay in the basis until pivot_out.
+///
+/// No-op proof:
+///   Reverting to the O(num_art) sequential path (btran per row) makes
+///   `PIVOT_OUT_BTRAN_COUNT` increase by N and `PIVOT_OUT_BATCH_LU_COUNT` stay at 0,
+///   failing both assertions below.
+#[test]
+fn batch_pivot_out_uses_single_lu_and_no_btrans() {
+    const N: usize = 50;
+    let m = N + 1;
+    let n = N + 1;
+
+    // A[0,0]=1; A[i,0]=1, A[i,i]=-1 for i=1..N  (x_0 - x_i = 1)
+    let mut trip_rows = vec![0usize];
+    let mut trip_cols = vec![0usize];
+    let mut trip_vals = vec![1.0f64];
+    for i in 1..=N {
+        trip_rows.extend_from_slice(&[i, i]);
+        trip_cols.extend_from_slice(&[0, i]);
+        trip_vals.extend_from_slice(&[1.0, -1.0]);
+    }
+    let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n).unwrap();
+
+    // b=[1]*m, c=[1]*n.  Optimal: x_0=1, x_i=0 for i=1..N, obj=1.
+    let lp = LpProblem::new_general(
+        vec![1.0f64; n],
+        a,
+        vec![1.0f64; m],
+        vec![ConstraintType::Eq; m],
+        vec![(0.0f64, f64::INFINITY); n],
+        None,
+    )
+    .unwrap();
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.simplex_method = SimplexMethod::Primal;
+    opts.use_lp_crash_basis = false;
+
+    let btran_before = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
+    let batch_lu_before = primal::PIVOT_OUT_BATCH_LU_COUNT.with(|c| c.get());
+
+    let result = solve_with(&lp, &opts);
+
+    let btran_after = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
+    let batch_lu_after = primal::PIVOT_OUT_BATCH_LU_COUNT.with(|c| c.get());
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "LP with {N} degenerate artificials must reach Optimal; got {:?}",
+        result.status
+    );
+    assert!(
+        (result.objective - 1.0).abs() < 1e-6,
+        "expected obj=1.0, got {}",
+        result.objective
+    );
+
+    // Batch path issues zero BTRANs (greedy uses raw |A[r,j]|, not B^{-T}e_i).
+    // Reverting to sequential adds N BTRANs → this fails.
+    assert_eq!(
+        btran_after, btran_before,
+        "batch path must issue zero BTRANs for {N} degenerate artificials; \
+         sequential path would add {N} (before={btran_before}, after={btran_after})"
+    );
+
+    // Batch path does exactly one LU for all N matched rows.
+    // Reverting to sequential never increments this → this fails.
+    assert_eq!(
+        batch_lu_after,
+        batch_lu_before + 1,
+        "batch path must call exactly one LU for {N} matched rows; \
+         sequential path never increments this counter \
+         (before={batch_lu_before}, after={batch_lu_after})"
+    );
+}
+
+/// Sentinel: batch pivot_out falls back to sequential when the greedy-selected column
+/// is ill-conditioned — large raw |A[r,j]| but its FTRAN entry at row r nearly cancels.
+///
+/// 3 rows × 4 cols, all Eq, c=0: x0=[1,1,1], x1=[1,−0.5,0], x2=[0.7,0,1],
+/// s=[1,1+δ,0], δ=0.001. Phase I enters x0 and exits with all rc≥0, leaving art1,art2
+/// degenerate at rows 1,2 → pivot_out runs. Batch greedy picks s for row 1
+/// (|A[1,s]|=1+δ > |A[1,x1]|=0.5) and x2 for row 2; trial basis [x0,s,x2] is
+/// non-singular so the LU commits. But FTRAN of s gives d=[1,δ,−1], so
+/// |d[1]|/max|d| = δ < PIVOT_STABILITY_THRESHOLD=0.01 → batch rejected, fallback fires
+/// (counter++), sequential BTRAN picks the well-conditioned x1, solve reaches Optimal
+/// obj=0. No-op proof: drop the stability check → batch accepted, fallback never fires,
+/// counter stays zero → assertion fails. The LP is near Ruiz-normal (row/col maxes
+/// ≤ 1+δ) so the instability survives scaling.
+#[test]
+fn batch_pivot_out_falls_back_to_sequential_for_ill_conditioned_basis() {
+    // δ: FTRAN cancellation ratio at row 1 (δ/1 = 0.001 < threshold 0.01).
+    // Also equals the trial-basis determinant contribution ensuring LU succeeds.
+    const DELTA: f64 = 0.001;
+
+    // A (3×4):
+    //   col0=x0=[1,1,1], col1=x1=[1,-0.5,0], col2=x2=[0.7,0,1], col3=s=[1,1+δ,0]
+    let a = CscMatrix::from_triplets(
+        &[0, 1, 2,  0, 1,  0, 2,  0, 1],
+        &[0, 0, 0,  1, 1,  2, 2,  3, 3],
+        &[1.0, 1.0, 1.0,  1.0, -0.5,  0.7, 1.0,  1.0, 1.0 + DELTA],
+        3,
+        4,
+    )
+    .unwrap();
+
+    let lp = LpProblem::new_general(
+        vec![0.0; 4],
+        a,
+        vec![1.0; 3],
+        vec![ConstraintType::Eq; 3],
+        vec![(0.0, f64::INFINITY); 4],
+        None,
+    )
+    .unwrap();
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.use_lp_crash_basis = false;
+    opts.simplex_method = SimplexMethod::Primal;
+
+    let fallback_before = primal::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.with(|c| c.get());
+
+    let result = solve_with(&lp, &opts);
+
+    let fallback_after = primal::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.with(|c| c.get());
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "LP with ill-conditioned batch must reach Optimal via sequential fallback; got {:?}",
+        result.status
+    );
+    assert!(
+        result.objective.abs() < 1e-8,
+        "trivial zero-cost objective must be 0.0; got {}",
+        result.objective
+    );
+    assert!(
+        fallback_after > fallback_before,
+        "FTRAN stability check must detect ill-conditioned batch (ratio δ={DELTA} < \
+         PIVOT_STABILITY_THRESHOLD=0.01) and trigger sequential fallback; \
+         PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT must increase \
+         (before={fallback_before}, after={fallback_after}). \
+         No-op: removing the stability check keeps this at zero — assertion fails."
+    );
+}
+
+/// Sentinel: uncommitted_rows fallback fires when all greedy matches fail the batch LU
+/// (match_offset == 0 path). Sequential BTRAN is attempted but may find no valid pivot
+/// when the structural columns are coplanar with the committed basis.
+///
+/// LP construction: m=2, n=2 structural (x0, x1), both rows identical (x0 + x1 = 0),
+/// bounds [0, ∞). Phase I (with Charnes perturbation) pivots x0 into one row,
+/// leaving basis=[x0, art1] with x_b=[0, 0] after reconciliation.
+///
+/// Entering pivot_out_degenerate_artificials with basis=[x0, art1]:
+///   degen_rows = [1] (only art1 remains degenerate).
+///   Greedy matches row1 → x1 (the only non-basic structural column with |A[1,1]|=1).
+///   matches = [(1, x1)].
+///
+/// Batch loop (single-element slice):
+///   Full trial basis [x0, x1]: A[:,x0]=A[:,x1]=[1,1] — rank 1 → singular.
+///   Binary search: lo=0, hi=slice.len()-1=0 → no iterations → committed=lo=0.
+///   Break with match_offset=0.
+///
+/// batch_stable short-circuits to true (match_offset==0 short-circuit).
+/// uncommitted_rows = matches[0..] = [row1] → sequential BTRAN fires (BTRAN_COUNT increases).
+/// Sequential: BTRAN(e1) gives z=B^{-T}e1; dot with x1 = 0 (x1 coplanar with x0 in B).
+/// No valid pivot found; art1 remains in basis at value 0.
+/// Phase II proceeds; result: Optimal with obj=0.
+///
+/// No-op proof: if uncommitted_rows fallback is removed (match_offset==0 path deleted),
+/// PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT stays zero — assertion fails.
+#[test]
+fn batch_pivot_out_uncommitted_rows_fallback_fires_for_rank_saturated_batch() {
+    // m=2, n=2: both rows x0+x1=0, so all-matches batch is singular.
+    let a = CscMatrix::from_triplets(
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 1],
+        &[1.0, 1.0, 1.0, 1.0],
+        2,
+        2,
+    )
+    .unwrap();
+
+    let lp = LpProblem::new_general(
+        vec![0.0, 0.0],
+        a,
+        vec![0.0, 0.0],
+        vec![ConstraintType::Eq; 2],
+        vec![(0.0, f64::INFINITY); 2],
+        None,
+    )
+    .unwrap();
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.use_lp_crash_basis = false;
+    opts.simplex_method = SimplexMethod::Primal;
+
+    let uncommitted_before =
+        primal::PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT.with(|c| c.get());
+    let btran_before = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
+
+    let result = solve_with(&lp, &opts);
+
+    let uncommitted_after =
+        primal::PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT.with(|c| c.get());
+    let btran_after = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "rank-saturated batch LP must reach Optimal via uncommitted_rows sequential \
+         fallback; got {:?}",
+        result.status
+    );
+    assert!(
+        uncommitted_after > uncommitted_before,
+        "uncommitted_rows fallback must fire (match_offset==0 path); \
+         PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT must increase \
+         (before={uncommitted_before}, after={uncommitted_after}). \
+         No-op: removing match_offset==0 uncommitted_rows path keeps this zero."
+    );
+    assert!(
+        btran_after > btran_before,
+        "sequential BTRAN must be issued for uncommitted rows \
+         (before={btran_before}, after={btran_after}). \
+         No-op: skipping uncommitted_rows path issues no BTRANs — assertion fails."
+    );
+}
+
+/// Sentinel: a partially committed batch must run sequential cleanup for the
+/// matched rows that were left after the non-singular prefix.
+///
+/// Basis before cleanup: `[x0, art1, art2]`, with rows 1 and 2 degenerate.
+/// Greedy raw-A matching picks row1→x1 and row2→x2.  The full trial
+/// `[x0, x1, x2]` is singular, but the prefix `[x0, x1, art2]` is valid and
+/// row 2 can still pivot to x3 by the BTRAN search.  Reverting the fix that
+/// appends `matches[match_offset..]` to the sequential rows strands `art2` in
+/// the basis, so the final assertion fails.
+#[test]
+fn batch_pivot_out_cleans_uncommitted_matched_rows_sequentially() {
+    let a_ext = CscMatrix::from_triplets(
+        &[
+            0, 1, // x0
+            1, 2, // x1
+            0, 1, 2, // x2 = x1 - x0
+            2, // x3, valid sequential replacement for row 2
+            1, // art1
+            2, // art2
+        ],
+        &[
+            0, 0, //
+            1, 1, //
+            2, 2, 2, //
+            3, //
+            4, //
+            5, //
+        ],
+        &[
+            1.0, 1.0, //
+            2.0, 1.0, //
+            -1.0, 1.0, 1.0, //
+            1.0, //
+            1.0, //
+            1.0, //
+        ],
+        3,
+        6,
+    )
+    .unwrap();
+    let sf = super::standard_form::StandardForm {
+        a: CscMatrix::from_triplets(&[], &[], &[], 3, 4).unwrap(),
+        b: vec![1.0, 0.0, 0.0],
+        c: vec![0.0; 4],
+        m: 3,
+        n_shifted: 4,
+        n_total: 4,
+        initial_basis: vec![0, 4, 5],
+        needs_artificial: vec![false, true, true],
+        num_artificial: 2,
+        obj_offset: 0.0,
+        n_orig: 4,
+        orig_var_info: Vec::new(),
+        row_negated: vec![false; 3],
+    };
+    let mut basis = vec![0usize, 4, 5];
+    let x_b = vec![1.0, 0.0, 0.0];
+    let opts = SolverOptions::default();
+
+    primal::test_pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, &sf, &opts);
+
+    assert!(
+        basis.iter().all(|&col| col < sf.n_total),
+        "all degenerate artificials must be pivoted out; got basis={basis:?}"
+    );
+}

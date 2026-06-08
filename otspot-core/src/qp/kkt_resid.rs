@@ -10,7 +10,78 @@
 
 use crate::problem::ConstraintType;
 use crate::sparse::CscMatrix;
-use crate::tolerances::any_nonfinite;
+use crate::tolerances::{any_nonfinite, FX_TOL};
+
+const INVALID_BOUND_DUAL_RESIDUAL: f64 = 1.0e100;
+
+fn bound_dual_len(bounds: &[(f64, f64)]) -> usize {
+    bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count()
+        + bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count()
+}
+
+fn is_fixed_bound(lb: f64, ub: f64) -> bool {
+    lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL
+}
+
+fn bound_dual_len_without_fixed(bounds: &[(f64, f64)]) -> usize {
+    bounds
+        .iter()
+        .filter(|&&(lb, ub)| !is_fixed_bound(lb, ub) && lb.is_finite())
+        .count()
+        + bounds
+            .iter()
+            .filter(|&&(lb, ub)| !is_fixed_bound(lb, ub) && ub.is_finite())
+            .count()
+}
+
+fn bound_dual_layout_skips_fixed(bounds: &[(f64, f64)], len: usize) -> Option<bool> {
+    let full_len = bound_dual_len(bounds);
+    if len == full_len {
+        return Some(false);
+    }
+    let without_fixed_len = bound_dual_len_without_fixed(bounds);
+    if without_fixed_len != full_len && len == without_fixed_len {
+        return Some(true);
+    }
+    None
+}
+
+pub(crate) fn bound_duals_full_layout(bounds: &[(f64, f64)], bd: &[f64]) -> Option<Vec<f64>> {
+    let skip_fixed = bound_dual_layout_skips_fixed(bounds, bd.len())?;
+    if !skip_fixed {
+        return Some(bd.to_vec());
+    }
+
+    let n_lb = bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let mut full = vec![0.0_f64; bound_dual_len(bounds)];
+    let mut src = 0_usize;
+    let mut dst = 0_usize;
+    for &(lb, ub) in bounds.iter() {
+        if lb.is_finite() {
+            if !is_fixed_bound(lb, ub) {
+                full[dst] = bd[src];
+                src += 1;
+            }
+            dst += 1;
+        }
+    }
+    let mut ub_dst = n_lb;
+    for &(lb, ub) in bounds.iter() {
+        if ub.is_finite() {
+            if !is_fixed_bound(lb, ub) {
+                full[ub_dst] = bd[src];
+                src += 1;
+            }
+            ub_dst += 1;
+        }
+    }
+    Some(full)
+}
+
+pub(crate) fn bound_duals_valid_for_residual(bounds: &[(f64, f64)], bd: &[f64]) -> bool {
+    bd.is_empty()
+        || (bound_dual_layout_skips_fixed(bounds, bd.len()).is_some() && !any_nonfinite(bd))
+}
 
 /// KKT dual-sign violation (componentwise relative max).
 ///
@@ -27,16 +98,15 @@ pub fn dual_sign_violation(
     bounds: &[(f64, f64)],
     z: &[f64],
 ) -> f64 {
-    if any_nonfinite(y) {
+    if y.len() != ct.len() || any_nonfinite(y) {
         return f64::INFINITY;
     }
 
     let mut max_rel = 0.0_f64;
 
     // Constraint dual sign check.
-    let m = ct.len().min(y.len());
     #[allow(unreachable_patterns)]
-    for i in 0..m {
+    for i in 0..ct.len() {
         let viol = match ct[i] {
             ConstraintType::Le => (-y[i]).max(0.0), // must be >= 0
             ConstraintType::Ge => y[i].max(0.0),    // must be <= 0
@@ -55,20 +125,27 @@ pub fn dual_sign_violation(
     // z layout mirrors bound_contrib: lb-finite columns first, then ub-finite columns.
     let n_lb_finite = bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
     let n_ub_finite = bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count();
-    debug_assert_eq!(
-        z.len(), n_lb_finite + n_ub_finite,
-        "z.len()={} must equal n_lb_finite={} + n_ub_finite={}: caller must pass z with correct length",
-        z.len(), n_lb_finite, n_ub_finite,
+    let expected_z_len = n_lb_finite + n_ub_finite;
+    let skips_fixed = bound_dual_layout_skips_fixed(bounds, z.len());
+    debug_assert!(
+        skips_fixed.is_some(),
+        "z.len()={} must equal the full bound-dual length {} or the FX-omitted length",
+        z.len(),
+        expected_z_len,
     );
-    if any_nonfinite(z) {
+    if (!z.is_empty() && skips_fixed.is_none()) || any_nonfinite(z) {
         return f64::INFINITY;
     }
     if z.is_empty() {
         return max_rel;
     }
+    let skip_fixed = skips_fixed.unwrap_or(false);
     let mut idx = 0_usize;
-    for &(lb, _) in bounds.iter() {
-        if lb.is_finite() && idx < z.len() {
+    for &(lb, ub) in bounds.iter() {
+        if skip_fixed && is_fixed_bound(lb, ub) {
+            continue;
+        }
+        if lb.is_finite() {
             let v = (-z[idx]).max(0.0); // z_lb must be >= 0
             if v > 0.0 {
                 let rel = v / (1.0 + z[idx].abs());
@@ -79,8 +156,11 @@ pub fn dual_sign_violation(
             idx += 1;
         }
     }
-    for &(_, ub) in bounds.iter() {
-        if ub.is_finite() && idx < z.len() {
+    for &(lb, ub) in bounds.iter() {
+        if skip_fixed && is_fixed_bound(lb, ub) {
+            continue;
+        }
+        if ub.is_finite() {
             let v = (-z[idx]).max(0.0); // z_ub must be >= 0
             if v > 0.0 {
                 let rel = v / (1.0 + z[idx].abs());
@@ -104,16 +184,22 @@ pub fn bound_contrib(bounds: &[(f64, f64)], bd: &[f64]) -> Vec<f64> {
     if bd.is_empty() {
         return contrib;
     }
+    let Some(full_bd) = bound_duals_full_layout(bounds, bd) else {
+        return vec![INVALID_BOUND_DUAL_RESIDUAL; n];
+    };
+    if any_nonfinite(bd) {
+        return vec![INVALID_BOUND_DUAL_RESIDUAL; n];
+    }
     let mut idx = 0_usize;
     for (j, &(lb, _)) in bounds.iter().enumerate() {
-        if lb.is_finite() && idx < bd.len() {
-            contrib[j] -= bd[idx];
+        if lb.is_finite() {
+            contrib[j] -= full_bd[idx];
             idx += 1;
         }
     }
     for (j, &(_, ub)) in bounds.iter().enumerate() {
-        if ub.is_finite() && idx < bd.len() {
-            contrib[j] += bd[idx];
+        if ub.is_finite() {
+            contrib[j] += full_bd[idx];
             idx += 1;
         }
     }
@@ -122,24 +208,32 @@ pub fn bound_contrib(bounds: &[(f64, f64)], bd: &[f64]) -> Vec<f64> {
 
 /// Raw bound complementarity products `|bd_j · (x_j − bnd_j)|`.
 ///
-/// Output length = `bd.len()`, ordering matches [`bound_contrib`]: lb-half
-/// followed by ub-half. caller が componentwise scale で割るか global scale で
-/// 割るかは別。
+/// Output uses the full bound-dual layout. If `bd` omits fixed-variable slots,
+/// those products are returned as zero while the remaining entries stay aligned
+/// with the full `[lb-half, ub-half]` slots.
 pub fn comp_bound_products(bounds: &[(f64, f64)], x: &[f64], bd: &[f64]) -> Vec<f64> {
     let mut out = Vec::with_capacity(bd.len());
     if bd.is_empty() {
         return out;
     }
+    let expected_bd_len = bound_dual_len(bounds);
+    let Some(full_bd) = bound_duals_full_layout(bounds, bd) else {
+        return vec![INVALID_BOUND_DUAL_RESIDUAL; expected_bd_len];
+    };
+    if x.len() < bounds.len() || any_nonfinite(bd) {
+        return vec![INVALID_BOUND_DUAL_RESIDUAL; expected_bd_len];
+    }
+    out.reserve(expected_bd_len.saturating_sub(out.capacity()));
     let mut idx = 0_usize;
     for (j, &(lb, _)) in bounds.iter().enumerate() {
-        if lb.is_finite() && idx < bd.len() {
-            out.push((bd[idx] * (x[j] - lb)).abs());
+        if lb.is_finite() {
+            out.push((full_bd[idx] * (x[j] - lb)).abs());
             idx += 1;
         }
     }
     for (j, &(_, ub)) in bounds.iter().enumerate() {
-        if ub.is_finite() && idx < bd.len() {
-            out.push((bd[idx] * (ub - x[j])).abs());
+        if ub.is_finite() {
+            out.push((full_bd[idx] * (ub - x[j])).abs());
             idx += 1;
         }
     }
@@ -369,6 +463,30 @@ mod tests {
     }
 
     #[test]
+    fn bound_contrib_truncated_bd_returns_invalid_components() {
+        let bounds = vec![(0.0, 10.0), (5.0, f64::INFINITY)];
+        let c = bound_contrib(&bounds, &[1.0]);
+        assert_eq!(
+            c,
+            vec![INVALID_BOUND_DUAL_RESIDUAL, INVALID_BOUND_DUAL_RESIDUAL]
+        );
+    }
+
+    #[test]
+    fn bound_contrib_nonfinite_bd_returns_invalid_components() {
+        let bounds = vec![(0.0, f64::INFINITY)];
+        let c = bound_contrib(&bounds, &[f64::NAN]);
+        assert_eq!(c, vec![INVALID_BOUND_DUAL_RESIDUAL]);
+    }
+
+    #[test]
+    fn bound_contrib_accepts_fixed_variable_omitted_layout() {
+        let bounds = vec![(1.0, 1.0), (0.0, f64::INFINITY), (0.0, f64::INFINITY)];
+        let c = bound_contrib(&bounds, &[2.0, 3.0]);
+        assert_eq!(c, vec![0.0, -2.0, -3.0]);
+    }
+
+    #[test]
     fn comp_bound_products_lb_then_ub_layout() {
         let bounds = vec![(0.0, 10.0), (5.0, f64::INFINITY)];
         let x = vec![2.0, 7.0];
@@ -390,6 +508,43 @@ mod tests {
         let x = vec![0.5];
         let p = comp_bound_products(&bounds, &x, &[]);
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn comp_bound_products_truncated_bd_returns_invalid_products() {
+        let bounds = vec![(0.0, 10.0), (5.0, f64::INFINITY)];
+        let x = vec![2.0, 7.0];
+        let p = comp_bound_products(&bounds, &x, &[1.5]);
+        assert_eq!(
+            p,
+            vec![
+                INVALID_BOUND_DUAL_RESIDUAL,
+                INVALID_BOUND_DUAL_RESIDUAL,
+                INVALID_BOUND_DUAL_RESIDUAL
+            ]
+        );
+    }
+
+    #[test]
+    fn comp_bound_products_short_x_returns_invalid_products() {
+        let bounds = vec![(0.0, 10.0), (5.0, f64::INFINITY)];
+        let p = comp_bound_products(&bounds, &[2.0], &[1.5, 0.5, 4.0]);
+        assert_eq!(
+            p,
+            vec![
+                INVALID_BOUND_DUAL_RESIDUAL,
+                INVALID_BOUND_DUAL_RESIDUAL,
+                INVALID_BOUND_DUAL_RESIDUAL
+            ]
+        );
+    }
+
+    #[test]
+    fn comp_bound_products_accepts_fixed_variable_omitted_layout() {
+        let bounds = vec![(1.0, 1.0), (0.0, f64::INFINITY), (0.0, f64::INFINITY)];
+        let x = vec![1.0, 2.0, 4.0];
+        let p = comp_bound_products(&bounds, &x, &[2.0, 3.0]);
+        assert_eq!(p, vec![0.0, 4.0, 12.0, 0.0]);
     }
 
     #[test]
@@ -519,6 +674,28 @@ mod tests {
         // Ge violation: 0.3 / (1 + 0.3) = 0.3/1.3 ≈ 0.2308
         let expected = 0.3 / 1.3;
         assert!((v - expected).abs() < 1e-12, "got {v}, expected {expected}");
+    }
+
+    #[test]
+    fn dual_sign_truncated_y_returns_infinity() {
+        use ConstraintType::*;
+        let ct = vec![Le, Ge];
+        let y = vec![1.0];
+        let v = dual_sign_violation(&ct, &y, &[], &[]);
+        assert!(
+            v.is_infinite() && v > 0.0,
+            "truncated y must give +INFINITY, got {v}"
+        );
+    }
+
+    #[test]
+    fn dual_sign_accepts_fixed_variable_omitted_z_layout() {
+        let ct: Vec<ConstraintType> = vec![];
+        let y: Vec<f64> = vec![];
+        let bounds = vec![(1.0, 1.0), (0.0, f64::INFINITY), (0.0, f64::INFINITY)];
+        let z = vec![0.2, 0.3];
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        assert_eq!(v, 0.0);
     }
 
     /// z_lb must be >= 0: negative z_lb is a violation.
