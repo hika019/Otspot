@@ -805,6 +805,34 @@ fn at_upper_apply_disabled() -> bool {
     false
 }
 
+// ── test-only hook: force zero alpha_sv in primal simplex LU update ───────────
+
+#[cfg(test)]
+thread_local! {
+    /// When true, the primal simplex LU update replaces `SparseVec::from_dense(&alpha)`
+    /// with an empty sparse vector. This makes `add_eta_sparse` see pivot_element = 0
+    /// → inv_pivot = ∞, corrupting subsequent FTRAN/BTRAN operations. Used by the
+    /// no-op proof sentinels to confirm the dense-to-sparse conversion is load-bearing.
+    /// Release builds see a const-false inlined by the optimizer.
+    static PRIMAL_ALPHA_SV_DISABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_primal_alpha_sv_disabled(v: bool) {
+    PRIMAL_ALPHA_SV_DISABLE.with(|c| c.set(v));
+}
+
+#[cfg(test)]
+fn primal_alpha_sv_disabled() -> bool {
+    PRIMAL_ALPHA_SV_DISABLE.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn primal_alpha_sv_disabled() -> bool {
+    false
+}
+
 // ── bounded solution / dual recovery ──────────────────────────────────────────
 
 /// Recover the full primal vector from a bounded dual terminal state.
@@ -1320,14 +1348,13 @@ pub(crate) fn phase2_primal_bounded(
         state.is_basic[q] = true;
         state.basis[r] = q;
 
-        // Eta update.
-        let (cr, cv) = a.get_column(q).unwrap();
-        let mut alpha_sv = SparseVec {
-            indices: cr.to_vec(),
-            values: cv.to_vec(),
-            len: m,
+        // Eta update: reuse the already-computed B^{-1} a_q (dense `alpha`) —
+        // sparsifying avoids a second redundant FTRAN on the original column.
+        let alpha_sv = if primal_alpha_sv_disabled() {
+            SparseVec { indices: vec![], values: vec![], len: m }
+        } else {
+            SparseVec::from_dense(&alpha)
         };
-        basis_mgr.ftran(&mut alpha_sv);
         basis_mgr.update(q, r, &alpha_sv);
 
         if basis_mgr.needs_refactor() {
@@ -1596,13 +1623,13 @@ fn primal_simplex_aug(
         state.is_basic[q] = true;
         state.basis[r] = q;
 
-        let (cr, cv) = a_aug.get_column(q).unwrap();
-        let mut alpha_sv = SparseVec {
-            indices: cr.to_vec(),
-            values: cv.to_vec(),
-            len: m,
+        // Eta update: reuse dense `alpha` (already B^{-1} a_q from ftran_column above);
+        // sparsifying avoids a second redundant FTRAN on the original column.
+        let alpha_sv = if primal_alpha_sv_disabled() {
+            SparseVec { indices: vec![], values: vec![], len: m }
+        } else {
+            SparseVec::from_dense(&alpha)
         };
-        basis_mgr.ftran(&mut alpha_sv);
         let norm_sq: f64 = alpha.iter().map(|&v| v * v).sum();
         let mut gamma_leaving = 1.0;
         if leaving_col < n_struct {
@@ -2992,6 +3019,285 @@ mod tests {
                 "rc[{j}] = {} expected {expected} (correctness check)",
                 rc_out[j]
             );
+        }
+    }
+
+    // ── sentinel: single-FTRAN primal update ─────────────────────────────────
+
+    /// RAII guard for `PRIMAL_ALPHA_SV_DISABLE`. Restores the flag on drop so
+    /// a panicking test cannot leak the disabled state to sibling tests.
+    struct PrimalAlphaSvGuard;
+    impl PrimalAlphaSvGuard {
+        fn disabled() -> Self {
+            set_primal_alpha_sv_disabled(true);
+            Self
+        }
+    }
+    impl Drop for PrimalAlphaSvGuard {
+        fn drop(&mut self) {
+            set_primal_alpha_sv_disabled(false);
+        }
+    }
+
+    /// (a) Numerical equivalence: `SparseVec::from_dense(&alpha)` matches the
+    /// result of applying `basis_mgr.ftran` directly to the original column data.
+    /// This is the invariant that makes the single-FTRAN path correct.
+    ///
+    /// Algebraic no-op proof embedded: a zero sparse vector does NOT match the
+    /// correct FTRAN result — proving that using `from_dense` is non-trivially
+    /// different from using an empty vector.
+    #[test]
+    fn primal_ftran_alpha_sv_numerical_equiv() {
+        use crate::basis::BasisManager;
+
+        // 2-row LP: slacks as initial basis. Structural cols 0,1 have
+        // non-trivial FTRAN images (not just identity columns).
+        let m = 2;
+        // Matrix [1 1 1 0; 0.5 1 0 1] (struct + slacks)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 0, 1],
+            &[0, 1, 0, 1, 2, 3],
+            &[1.0, 1.0, 0.5, 1.0, 1.0, 1.0],
+            m,
+            4,
+        )
+        .unwrap();
+        let basis = vec![2usize, 3]; // slack basis
+        let opts = SolverOptions { max_etas: 50, ..SolverOptions::default() };
+        let mut basis_mgr = LuBasis::new_timed(&a, &basis, opts.max_etas, None).unwrap();
+
+        for col in 0..2usize {
+            // Dense alpha via ftran_column (what the modified loop uses).
+            let mut alpha = vec![0.0f64; m];
+            ftran_column(&a, &mut basis_mgr, col, m, &mut alpha);
+
+            // Sparse alpha via the old code path (raw column → ftran).
+            let (cr, cv) = a.get_column(col).unwrap();
+            let mut alpha_sv_old = SparseVec {
+                indices: cr.to_vec(),
+                values: cv.to_vec(),
+                len: m,
+            };
+            basis_mgr.ftran(&mut alpha_sv_old);
+
+            // New code path: from_dense.
+            let alpha_sv_new = SparseVec::from_dense(&alpha);
+
+            // Must match within 1e-10 (both compute B^{-1} a_q; rounding is negligible).
+            let d_old = alpha_sv_old.to_dense();
+            let d_new = alpha_sv_new.to_dense();
+            for i in 0..m {
+                assert!(
+                    (d_old[i] - d_new[i]).abs() < 1e-10,
+                    "col {col} row {i}: old_ftran={:.6e} from_dense={:.6e}",
+                    d_old[i],
+                    d_new[i]
+                );
+            }
+
+            // Algebraic no-op proof: a zero sparse vector must differ from the
+            // correct FTRAN result, proving `from_dense` is non-trivially correct.
+            let zero_sv = SparseVec { indices: vec![], values: vec![], len: m };
+            let d_zero = zero_sv.to_dense();
+            let max_diff: f64 = (0..m)
+                .map(|i| (d_old[i] - d_zero[i]).abs())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                max_diff > 1e-6,
+                "col {col}: no-op proof FAILED — zero sv matches FTRAN result (max_diff={max_diff:.3e}); \
+                 choose a column with non-trivial FTRAN image"
+            );
+        }
+    }
+
+    /// (b) Optimality invariant for `phase2_primal_bounded` (Site 2): the LP
+    ///     must reach the known optimal with the single-FTRAN path active.
+    ///
+    /// LP: min -x0-x1, x0+x1≤6, x0-x1≤2, 0≤x0≤4, 0≤x1≤4
+    /// Known optimal: x0=4, x1=2, obj=-6.
+    #[test]
+    fn phase2_primal_bounded_single_ftran_reaches_known_optimal() {
+        let lp = lp_boxed_2x2_degenerate();
+        let bsf = build_bounded_standard_form(&lp);
+        let opts = SolverOptions::default();
+        let (dual_outcome, dual_state) = solve_bounded_dual(
+            &bsf,
+            &bsf.a,
+            &bsf.b,
+            &bsf.c,
+            &opts,
+            &bsf.upper_bounds,
+            &mut MostInfeasibleLeaving,
+        );
+        assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
+
+        let mut iters = 0usize;
+        let (outcome, p2_state) = phase2_primal_bounded(
+            &bsf,
+            dual_state,
+            &bsf.a,
+            &bsf.c,
+            &opts,
+            &mut iters,
+            &bsf.upper_bounds,
+        );
+        match outcome {
+            SimplexOutcome::Optimal(obj, _) => {
+                assert!(
+                    (obj - (-6.0)).abs() < 1e-6,
+                    "expected obj=-6.0 (x0=4,x1=2), got {obj:.6e}"
+                );
+            }
+            other => panic!("expected Optimal, got {other:?}"),
+        }
+        let sol = extract_solution_bounded(&bsf, &p2_state, &[]);
+        assert!(
+            (sol[0] - 4.0).abs() < 1e-6 && (sol[1] - 2.0).abs() < 1e-6,
+            "expected (x0,x1)=(4,2), got ({:.3e},{:.3e})",
+            sol[0],
+            sol[1]
+        );
+        assert!(iters > 0, "phase2 must make at least one iteration");
+    }
+
+    /// (c) No-op proof for `phase2_primal_bounded` (Site 2): with
+    /// `PRIMAL_ALPHA_SV_DISABLE` forced on, the LU update receives a zero sparse
+    /// vector (inv_pivot = ∞), corrupting the eta matrix. The corrupt BTRAN in the
+    /// next iteration produces ∞ → NaN reduced costs → wrong pivot selection →
+    /// wrong final x_b → wrong objective (-4 instead of -6).
+    ///
+    /// Sentinel design: if the fix is REVERTED, the hook has no effect and the
+    /// solve returns the correct obj = -6 → the assertion below FAILS.
+    #[test]
+    fn phase2_primal_bounded_single_ftran_noop_proof() {
+        let lp = lp_boxed_2x2_degenerate();
+        let bsf = build_bounded_standard_form(&lp);
+        let opts = SolverOptions::default();
+        let (dual_outcome, dual_state) = solve_bounded_dual(
+            &bsf,
+            &bsf.a,
+            &bsf.b,
+            &bsf.c,
+            &opts,
+            &bsf.upper_bounds,
+            &mut MostInfeasibleLeaving,
+        );
+        assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
+
+        let _guard = PrimalAlphaSvGuard::disabled();
+        let mut iters = 0usize;
+        let (outcome, _) = phase2_primal_bounded(
+            &bsf,
+            dual_state,
+            &bsf.a,
+            &bsf.c,
+            &opts,
+            &mut iters,
+            &bsf.upper_bounds,
+        );
+        let obj = match outcome {
+            SimplexOutcome::Optimal(o, _) => o,
+            // Non-optimal outcomes also demonstrate that the corrupt eta broke the solve.
+            _ => return,
+        };
+        assert!(
+            (obj - (-6.0)).abs() > 1e-3,
+            "no-op proof FAILED: corrupt (zero) alpha_sv still yields correct obj={obj:.6e}; \
+             the from_dense conversion is NOT load-bearing (fix had no effect on this path)"
+        );
+    }
+
+    /// (b') Optimality invariant for `bounded_primal_phase1` / `primal_simplex_aug`
+    ///     (Site 3): Phase I on a 2-row Eq LP must drive art_sum to zero.
+    ///
+    /// LP: x0+x1=4, x0+2*x1=5, 0≤x0≤3, 0≤x1≤∞.
+    /// Unique solution: x0=3, x1=1. Phase I optimal iff art_sum ≈ 0.
+    #[test]
+    fn primal_simplex_aug_single_ftran_reaches_feasible() {
+        // Augmented matrix: [x0 x1 art0 art1], 2 rows.
+        // art0 for row 0 (x0+x1=4), art1 for row 1 (x0+2x1=5).
+        let a_aug = CscMatrix::from_triplets(
+            &[0, 1, 0, 1, 0, 1],
+            &[0, 0, 1, 1, 2, 3],
+            &[1.0, 1.0, 1.0, 2.0, 1.0, 1.0],
+            2,
+            4,
+        )
+        .unwrap();
+        let n_struct = 2usize;
+        let ubs_aug = vec![3.0f64, f64::INFINITY, f64::INFINITY, f64::INFINITY];
+        let c_p1 = vec![0.0f64, 0.0, 1.0, 1.0]; // minimize art_sum
+
+        let mut state = BoundedDualState {
+            basis: vec![2usize, 3],
+            at_upper: vec![false; 4],
+            x_b: vec![4.0f64, 5.0],
+            reduced_costs: vec![0.0; 4],
+            is_basic: vec![false, false, true, true],
+            iterations: 0,
+        };
+        let opts = SolverOptions::default();
+        let mut iters = 0usize;
+        let outcome = bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters);
+
+        match outcome {
+            SimplexOutcome::Optimal(art_sum, _) => {
+                assert!(
+                    art_sum.abs() < 1e-6,
+                    "Phase I must reach art_sum≈0 (LP feasible); got {art_sum:.6e}"
+                );
+            }
+            other => panic!("expected Phase I Optimal, got {other:?}"),
+        }
+        assert!(iters > 0, "Phase I must make at least one pivot");
+    }
+
+    /// (c') No-op proof for `primal_simplex_aug` (Site 3): with
+    /// `PRIMAL_ALPHA_SV_DISABLE` forced on, the corrupt eta causes wrong BTRAN
+    /// in the next iteration, producing NaN reduced costs. All NaN violations are
+    /// treated as non-entering, so Phase I exits early with a residual artificial
+    /// (art_sum > 0 — feasible LP declared infeasible-looking).
+    ///
+    /// Sentinel design: if the fix is REVERTED, the hook has no effect and Phase I
+    /// correctly reaches art_sum ≈ 0 → the assertion below FAILS.
+    #[test]
+    fn primal_simplex_aug_single_ftran_noop_proof() {
+        let a_aug = CscMatrix::from_triplets(
+            &[0, 1, 0, 1, 0, 1],
+            &[0, 0, 1, 1, 2, 3],
+            &[1.0, 1.0, 1.0, 2.0, 1.0, 1.0],
+            2,
+            4,
+        )
+        .unwrap();
+        let n_struct = 2usize;
+        let ubs_aug = vec![3.0f64, f64::INFINITY, f64::INFINITY, f64::INFINITY];
+        let c_p1 = vec![0.0f64, 0.0, 1.0, 1.0];
+
+        let mut state = BoundedDualState {
+            basis: vec![2usize, 3],
+            at_upper: vec![false; 4],
+            x_b: vec![4.0f64, 5.0],
+            reduced_costs: vec![0.0; 4],
+            is_basic: vec![false, false, true, true],
+            iterations: 0,
+        };
+        let opts = SolverOptions::default();
+        let mut iters = 0usize;
+
+        let _guard = PrimalAlphaSvGuard::disabled();
+        let outcome = bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters);
+
+        match outcome {
+            SimplexOutcome::Optimal(art_sum, _) => {
+                assert!(
+                    art_sum > 1e-6,
+                    "no-op proof FAILED: corrupt (zero) alpha_sv still reaches art_sum≈0 ({art_sum:.6e}); \
+                     the from_dense conversion is NOT load-bearing (fix had no effect on this path)"
+                );
+            }
+            // Any non-Optimal outcome also demonstrates corruption.
+            _ => {}
         }
     }
 }
