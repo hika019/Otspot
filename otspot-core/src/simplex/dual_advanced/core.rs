@@ -1173,110 +1173,211 @@ mod tests {
         }
     }
 
-    /// Sentinel: `after_pivot` is called exactly once per successful pivot when
-    /// `needs_sigma()` returns `true` (DSE path).
+    /// Sentinel: `DualSteepestEdgeLeaving::needs_sigma()` must return `true`.
     ///
-    /// The core loop computes σ = B^{-1} ρ_p (extra FTRAN) only when the
-    /// leaving strategy declares `needs_sigma = true`, then passes σ to
-    /// `after_pivot`.  A stateless strategy (`MostInfeasibleLeaving`) returns
-    /// `needs_sigma = false` → `after_pivot` is never invoked → γ weights are
-    /// never updated (no-op equivalent).
+    /// `core.rs` allocates `sigma_dense` and runs the σ FTRAN only when
+    /// `leaving.needs_sigma()` is `true`.  If it returns `false`, `sigma_dense`
+    /// stays empty and `after_pivot` receives `sigma = &[]`; the
+    /// Forrest-Goldfarb update indexes into that slice and panics on the first
+    /// real pivot.
     ///
-    /// no-op proof: replacing `DualSteepestEdgeLeaving` with `MostInfeasibleLeaving`
-    /// (or implementing `needs_sigma()` → `false`) sets `pivot_calls = 0` while
-    /// `iters > 0` → the `assert_eq!(pivot_calls, iters)` FAILS.
+    /// no-op proof: change `DualSteepestEdgeLeaving::needs_sigma` to return
+    /// `false` → this assert fires immediately, before any LP solve.
     #[test]
-    fn dse_after_pivot_called_once_per_iteration() {
+    fn dse_needs_sigma_returns_true() {
         use super::super::steepest_edge::DualSteepestEdgeLeaving;
-        use std::cell::Cell;
+        let dse = DualSteepestEdgeLeaving::new(4);
+        assert!(
+            dse.needs_sigma(),
+            "DualSteepestEdgeLeaving::needs_sigma() must return true; \
+             reverting to false skips sigma FTRAN and causes a slice-index \
+             panic in after_pivot on the first pivot"
+        );
+        // Stateless strategy must keep the trait default (false).
+        let mi = MostInfeasibleLeaving;
+        assert!(
+            !mi.needs_sigma(),
+            "MostInfeasibleLeaving::needs_sigma() must be false (stateless)"
+        );
+    }
 
-        struct CountingDseLeaving<'a> {
-            inner: DualSteepestEdgeLeaving,
-            pivot_calls: &'a Cell<usize>,
+    /// Sentinel: DSE γ-update reduces warm-start iteration count vs γ-frozen equivalent.
+    ///
+    /// Builds 5 deterministic random Le-only LPs (15 × 30, seeds 11–113) using an
+    /// inline LCG (no data files), cold-solves each for an optimal basis, perturbs b
+    /// (× 0.7 / × 1.3 alternating) to create primal violations, then re-solves via
+    /// `solve_dual_advanced` (the `make_leaving_strategy` production path) with:
+    ///   - DSE γ ON  : `DualPricing::SteepestEdge` (γ updated each pivot)
+    ///   - DSE γ OFF : same pricing but `DSE_DISABLE_GAMMA_UPDATE=1` (γ ≡ 1 → MI-equivalent)
+    ///
+    /// Correctness: both arms must reach the same optimal objective (within 1e-5).
+    /// Sentinel: γ-update must produce a strict iteration win on ≥ 1 seed.
+    ///
+    /// no-op proof: set `gamma_update_disabled()` to always return `true` in
+    /// `steepest_edge.rs` → γ stays frozen for both arms → DSE-ON iters == DSE-OFF
+    /// iters → wins = 0 → `assert!(wins >= MIN_WINS)` FAILS.
+    #[test]
+    fn dse_gamma_update_reduces_iterations() {
+        use crate::options::{DualPricing, WarmStartBasis};
+        use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+        use crate::simplex::standard_form::build_standard_form;
+
+        // Inline LCG (mirrors diag_dse_pivot_selection.rs; no rand dep).
+        struct Lcg(u64);
+        impl Lcg {
+            fn new(s: u64) -> Self {
+                Self(if s == 0 { 0xDEAD_BEEF_CAFE_F00D } else { s })
+            }
+            fn next_u64(&mut self) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                self.0
+            }
+            fn f64(&mut self) -> f64 {
+                (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64)
+            }
         }
-        impl<'a> DualLeavingStrategy for CountingDseLeaving<'a> {
-            fn select_leaving(
-                &mut self,
-                x_b: &[f64],
-                primal_tol: f64,
-                basis: &[usize],
-            ) -> Option<usize> {
-                self.inner.select_leaving(x_b, primal_tol, basis)
+
+        const M: usize = 15;
+        const N: usize = 30;
+        const DENSITY: f64 = 0.35;
+        const BUDGET: f64 = 50.0;
+        const PERTURB_LO: f64 = 0.7;
+        const PERTURB_HI: f64 = 1.3;
+        const OBJ_TOL: f64 = 1e-5;
+        /// At least one seed must show DSE-ON strictly fewer iters than DSE-OFF.
+        const MIN_WINS: usize = 1;
+        const SEEDS: &[u64] = &[11, 23, 47, 71, 113];
+
+        let mut wins = 0usize;
+        let mut skipped = 0usize;
+
+        for &seed in SEEDS {
+            // Build Le-only LP for this seed (no finite UBs → legacy dual path).
+            let mut rng = Lcg::new(seed);
+            let mut rows: Vec<usize> = Vec::new();
+            let mut cols: Vec<usize> = Vec::new();
+            let mut vals: Vec<f64> = Vec::new();
+            for i in 0..M {
+                for j in 0..N {
+                    if rng.f64() < DENSITY {
+                        rows.push(i);
+                        cols.push(j);
+                        vals.push(rng.f64() * 2.0 - 1.0);
+                    }
+                }
+                // Diagonal dominance: at least one nonzero per row.
+                rows.push(i);
+                cols.push(i % N);
+                vals.push(0.5 + rng.f64());
             }
-            fn needs_sigma(&self) -> bool {
-                true // DSE declares σ needed → core computes σ and calls after_pivot
+            // Budget row: Σ x_j ≤ BUDGET (bounds the LP without finite variable UBs).
+            for j in 0..N {
+                rows.push(M);
+                cols.push(j);
+                vals.push(1.0);
             }
-            fn after_pivot(
-                &mut self,
-                leaving_row: usize,
-                alpha: &[f64],
-                sigma: &[f64],
-                pivot: f64,
-            ) {
-                self.pivot_calls.set(self.pivot_calls.get() + 1);
-                self.inner.after_pivot(leaving_row, alpha, sigma, pivot);
+            let total_rows = M + 1;
+            let a = CscMatrix::from_triplets(&rows, &cols, &vals, total_rows, N).unwrap();
+            let mut b: Vec<f64> = (0..M).map(|_| 1.0 + 2.0 * rng.f64()).collect();
+            b.push(BUDGET);
+            let c: Vec<f64> = (0..N).map(|_| -(rng.f64() + 0.1)).collect();
+            let lp = LpProblem::new_general(
+                c,
+                a,
+                b,
+                vec![ConstraintType::Le; total_rows],
+                vec![(0.0, f64::INFINITY); N],
+                None,
+            )
+            .unwrap();
+
+            // Cold solve to get an optimal basis.
+            let sf = build_standard_form(&lp);
+            let cold = super::super::solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            if cold.status != SolveStatus::Optimal {
+                eprintln!(
+                    "[dse_gamma_update seed={seed}] cold non-Optimal: {:?}",
+                    cold.status
+                );
+                skipped += 1;
+                continue;
             }
-            fn after_refactor(&mut self, m: usize) {
-                self.inner.after_refactor(m);
+            let warm_basis = match cold.warm_start_basis {
+                Some(wb) => wb,
+                None => {
+                    eprintln!("[dse_gamma_update seed={seed}] no warm_start_basis");
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+            // Perturb b alternating to create warm primal violations.
+            let mut lp_p = lp.clone();
+            for (i, v) in lp_p.b.iter_mut().enumerate() {
+                *v *= if i % 2 == 0 { PERTURB_LO } else { PERTURB_HI };
             }
-            fn set_initial_gamma(&mut self, gamma_truth: &[f64]) {
-                self.inner.set_initial_gamma(gamma_truth);
+            let sf_p = build_standard_form(&lp_p);
+
+            let make_warm_opts = |pricing: DualPricing, basis: Vec<usize>| SolverOptions {
+                dual_pricing: pricing,
+                warm_start: Some(WarmStartBasis { basis, x_b: Vec::new() }),
+                ..SolverOptions::default()
+            };
+
+            // DSE γ ON (normal Forrest-Goldfarb update).
+            let r_on = super::super::solve_dual_advanced(
+                &sf_p,
+                &lp_p,
+                &make_warm_opts(DualPricing::SteepestEdge, warm_basis.basis.clone()),
+            );
+
+            // DSE γ OFF: γ frozen ≡ 1 → score = x_B[i]² → MI-equivalent.
+            // SAFETY: nextest spawns one OS process per test; the env write is
+            // visible only within this process and on this single thread.
+            unsafe { std::env::set_var("DSE_DISABLE_GAMMA_UPDATE", "1") };
+            let r_off = super::super::solve_dual_advanced(
+                &sf_p,
+                &lp_p,
+                &make_warm_opts(DualPricing::SteepestEdge, warm_basis.basis),
+            );
+            unsafe { std::env::remove_var("DSE_DISABLE_GAMMA_UPDATE") };
+
+            if r_on.status != SolveStatus::Optimal || r_off.status != SolveStatus::Optimal {
+                eprintln!(
+                    "[dse_gamma_update seed={seed}] non-Optimal: on={:?} off={:?}",
+                    r_on.status, r_off.status
+                );
+                skipped += 1;
+                continue;
+            }
+
+            assert!(
+                (r_on.objective - r_off.objective).abs() < OBJ_TOL,
+                "seed={seed}: γ-ON obj={:.7} γ-OFF obj={:.7} differ by >{OBJ_TOL}; \
+                 DSE and MI must converge to the same optimal",
+                r_on.objective,
+                r_off.objective,
+            );
+
+            eprintln!(
+                "[dse_gamma_update seed={seed}] γ-ON iters={} γ-OFF iters={}",
+                r_on.iterations, r_off.iterations
+            );
+
+            if r_on.iterations < r_off.iterations {
+                wins += 1;
             }
         }
 
-        // 3×6 LP with 3 lb-violations: requires exactly 3 successful pivots to reach
-        // primal feasibility.  Same data as `recompute_gamma_after_refactor_not_called`.
-        let rows = [0, 2, 0, 1, 1, 2, 0, 1, 2];
-        let cols = [0, 0, 1, 1, 2, 2, 3, 4, 5];
-        let vals = [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
-        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 6).unwrap();
-        let c = vec![4.0, 5.0, 6.0, 0.0, 0.0, 0.0];
-        let mut basis = vec![3usize, 4, 5];
-        let mut x_b = vec![-1.0_f64, -2.0, -1.0];
-        let opts = SolverOptions::default();
-        let pivot_calls = Cell::new(0usize);
-        let mut leaving = CountingDseLeaving {
-            inner: DualSteepestEdgeLeaving::new(3),
-            pivot_calls: &pivot_calls,
-        };
-        let mut iters = 0usize;
-        let _ = dual_simplex_core_advanced(
-            &a,
-            &mut x_b,
-            &c,
-            &mut basis,
-            3,
-            6,
-            6,
-            false,
-            &opts,
-            &mut leaving,
-            &mut iters,
-        );
-
         assert!(
-            iters > 0,
-            "LP must require at least one pivot (all x_b < 0 initially)"
-        );
-        // `iters` counts all loop iterations, including those rejected for pivot
-        // instability (step 3g continues without calling after_pivot).
-        // `pivot_calls` counts successful pivots where σ was computed and γ updated.
-        // Invariant: 0 < pivot_calls ≤ iters.
-        //
-        // no-op proof: replacing this strategy with MostInfeasibleLeaving (or
-        // returning `needs_sigma() = false`) skips σ FTRAN and after_pivot entirely
-        // → pivot_calls = 0, failing the `pivot_calls > 0` assertion below.
-        assert!(
-            pivot_calls.get() > 0,
-            "after_pivot must fire at least once (DSE γ update must execute); \
-             no-op replacement (MostInfeasible or needs_sigma=false) gives pivot_calls=0, \
-             iters={iters}"
-        );
-        assert!(
-            pivot_calls.get() <= iters,
-            "pivot_calls={} must not exceed iters={} (after_pivot fires only on successful pivots)",
-            pivot_calls.get(),
-            iters
+            wins >= MIN_WINS,
+            "DSE γ-update must produce ≥{MIN_WINS} strict win(s) over γ-frozen (= MI) \
+             across {} seeds; got {wins} with {skipped} skipped. \
+             no-op: gamma_update_disabled()≡true makes wins=0 here.",
+            SEEDS.len(),
         );
     }
 }
