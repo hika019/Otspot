@@ -79,12 +79,14 @@ const REAL_CASES: &[Case] = &[
 ];
 
 fn load_qp(name: &str) -> Option<QpProblem> {
-    let path_str = format!("data/lp_problems/{}.QPS", name);
-    let path = Path::new(&path_str);
-    if !path.exists() {
-        return None;
+    for prefix in ["data/lp_problems", "data/data/lp_problems"] {
+        let path_str = format!("{prefix}/{}.QPS", name);
+        let path = Path::new(&path_str);
+        if path.exists() {
+            return parse_qps(path).ok();
+        }
     }
-    parse_qps(path).ok()
+    None
 }
 
 fn rel_err(got: f64, truth: f64) -> f64 {
@@ -177,6 +179,47 @@ macro_rules! real_netlib_bounded_eq_ub_route_test {
 real_netlib_bounded_eq_ub_route_test!(lp_route_dfl001_uses_bounded_eq_ub, "dfl001");
 real_netlib_bounded_eq_ub_route_test!(lp_route_ken18_uses_bounded_eq_ub, "ken-18");
 real_netlib_bounded_eq_ub_route_test!(lp_route_pds20_uses_bounded_eq_ub, "pds-20");
+
+#[test]
+#[ignore = "heavy: bounded Eq+UB pricing efficiency sentinel"]
+fn lp_bounded_eq_ub_ken13_iteration_efficiency() {
+    let case = REAL_CASES
+        .iter()
+        .find(|case| case.name == "ken-13")
+        .expect("case must exist");
+    let Some(qp) = load_qp(case.name) else {
+        panic!("{}: data/lp_problems/{}.QPS missing", case.name, case.name);
+    };
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(ROUTE_SENTINEL_BUDGET_SECS);
+    opts.known_optimal_obj = Some(case.truth);
+    let r = solve_qp_with(&qp, &opts);
+    eprintln!(
+        "ken-13 bounded Eq+UB efficiency: status={:?} obj={:.6e} iterations={} bounded_eq_ub={}",
+        r.status, r.objective, r.iterations, r.stats.bounded_eq_ub_path
+    );
+    assert!(
+        matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal)
+            && r.objective.is_finite()
+            && rel_err(r.objective, case.truth) <= REL_TOL
+            && r.stats.bounded_eq_ub_path,
+        "ken-13: expected certified Optimal on bounded Eq+UB path, got status={:?} obj={:.6e} rel_err={:.2e} bounded_eq_ub={}",
+        r.status,
+        r.objective,
+        rel_err(r.objective, case.truth),
+        r.stats.bounded_eq_ub_path
+    );
+    // Main-era expanded-UB path solved ken-13 in about 62,928 pivots; the
+    // regressed compact Eq+UB path took about 145,525. 100k is deliberately
+    // between those regimes, with wide headroom over main but below the
+    // regression, so this catches pricing-efficiency loss without pinning an
+    // exact machine-dependent count.
+    assert!(
+        r.iterations < 100_000,
+        "ken-13 bounded Eq+UB iterations regressed: got {}, expected < 100000",
+        r.iterations
+    );
+}
 
 /// Synthetic large LP: deterministic block identity constraints with slack
 /// columns (m=1800, n=3600). The optimum is known exactly: each row chooses the
