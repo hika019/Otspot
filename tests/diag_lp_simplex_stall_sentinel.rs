@@ -79,14 +79,12 @@ const REAL_CASES: &[Case] = &[
 ];
 
 fn load_qp(name: &str) -> Option<QpProblem> {
-    for prefix in ["data/lp_problems", "data/data/lp_problems"] {
-        let path_str = format!("{prefix}/{}.QPS", name);
-        let path = Path::new(&path_str);
-        if path.exists() {
-            return parse_qps(path).ok();
-        }
+    let path_str = format!("data/lp_problems/{}.QPS", name);
+    let path = Path::new(&path_str);
+    if !path.exists() {
+        return None;
     }
-    None
+    parse_qps(path).ok()
 }
 
 fn rel_err(got: f64, truth: f64) -> f64 {
@@ -187,9 +185,12 @@ fn lp_bounded_eq_ub_ken13_iteration_efficiency() {
         .iter()
         .find(|case| case.name == "ken-13")
         .expect("case must exist");
-    let Some(qp) = load_qp(case.name) else {
-        panic!("{}: data/lp_problems/{}.QPS missing", case.name, case.name);
+    let path_str = format!("data/lp_problems/{}.QPS", case.name);
+    let path = Path::new(&path_str);
+    if !path.exists() {
+        panic!("{}: {} missing", case.name, path_str);
     };
+    let qp = parse_qps(path).expect("ken-13 QPS must parse");
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(ROUTE_SENTINEL_BUDGET_SECS);
     opts.known_optimal_obj = Some(case.truth);
