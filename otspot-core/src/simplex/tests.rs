@@ -1726,32 +1726,20 @@ fn batch_pivot_out_falls_back_to_sequential_for_ill_conditioned_basis() {
     );
 }
 
-/// Sentinel: uncommitted_rows fallback fires when all greedy matches fail the batch LU
-/// (match_offset == 0 path). Sequential BTRAN is attempted but may find no valid pivot
-/// when the structural columns are coplanar with the committed basis.
+/// Sentinel: uncommitted_rows fallback fires when all greedy matches fail batch LU
+/// with match_offset == 0.
 ///
-/// LP construction: m=2, n=2 structural (x0, x1), both rows identical (x0 + x1 = 0),
-/// bounds [0, ∞). Phase I (with Charnes perturbation) pivots x0 into one row,
-/// leaving basis=[x0, art1] with x_b=[0, 0] after reconciliation.
+/// LP: m=2, n=2, both rows x0 + x1 = 0. Phase I pivots x0 into one
+/// row, leaving basis=[x0, art1]. The only remaining degenerate artificial
+/// greedily matches x1, but trial basis [x0, x1] is singular because both
+/// structural columns are identical.
 ///
-/// Entering pivot_out_degenerate_artificials with basis=[x0, art1]:
-///   degen_rows = [1] (only art1 remains degenerate).
-///   Greedy matches row1 → x1 (the only non-basic structural column with |A[1,1]|=1).
-///   matches = [(1, x1)].
-///
-/// Batch loop (single-element slice):
-///   Full trial basis [x0, x1]: A[:,x0]=A[:,x1]=[1,1] — rank 1 → singular.
-///   Binary search: lo=0, hi=slice.len()-1=0 → no iterations → committed=lo=0.
-///   Break with match_offset=0.
-///
-/// batch_stable short-circuits to true (match_offset==0 short-circuit).
-/// uncommitted_rows = matches[0..] = [row1] → sequential BTRAN fires (BTRAN_COUNT increases).
-/// Sequential: BTRAN(e1) gives z=B^{-T}e1; dot with x1 = 0 (x1 coplanar with x0 in B).
-/// No valid pivot found; art1 remains in basis at value 0.
-/// Phase II proceeds; result: Optimal with obj=0.
+/// The batch path commits no row, then uncommitted_rows triggers sequential
+/// BTRAN for row1. It may still find no valid pivot, so art1 remains
+/// degenerate and Phase II reaches Optimal with obj=0.
 ///
 /// No-op proof: if uncommitted_rows fallback is removed (match_offset==0 path deleted),
-/// PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT stays zero — assertion fails.
+/// PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT stays zero and the assertion fails.
 #[test]
 fn batch_pivot_out_uncommitted_rows_fallback_fires_for_rank_saturated_batch() {
     // m=2, n=2: both rows x0+x1=0, so all-matches batch is singular.
