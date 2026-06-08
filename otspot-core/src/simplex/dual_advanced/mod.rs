@@ -742,7 +742,7 @@ where
         }
         SimplexOutcome::Optimal(_, _) => {
             let art_sum = match reconcile_bounded_terminal_state(
-                &a_aug, &b, &c_p1, &ubs_aug, &mut state, options,
+                &a_aug, b, &c_p1, &ubs_aug, &mut state, options,
             ) {
                 BoundedTerminalReconcile::Optimal(obj) => obj,
                 BoundedTerminalReconcile::Timeout(_) => {
@@ -801,7 +801,7 @@ where
         SimplexOutcome::Optimal(_, y) => {
             let pre_reconcile_x_b = state.x_b.clone();
             let obj = match reconcile_bounded_terminal_state(
-                &a_aug, &b, &c_p2, &ubs_aug, &mut state, options,
+                &a_aug, b, &c_p2, &ubs_aug, &mut state, options,
             ) {
                 BoundedTerminalReconcile::Optimal(obj) => obj,
                 BoundedTerminalReconcile::Timeout(obj) => {
