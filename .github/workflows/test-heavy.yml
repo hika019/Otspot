@@ -19,7 +19,7 @@ jobs:
       # rust-toolchain + nextest install を Download 前に配置: Download が
       # netlib intermittent で fail しても `if: always()` の test step が
       # `nextest 不在` で死なないようにする。
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - uses: actions/cache@v4
