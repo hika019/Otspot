@@ -20,4 +20,4 @@ rayon = "1"
 twofloat = "0.8"
 
 [dev-dependencies]
-otspot-model = { path = "../otspot-model", version = "0.5.0" }
+otspot-model = { path = "../otspot-model" }
