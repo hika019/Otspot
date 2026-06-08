@@ -16,60 +16,31 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [0.5.0] - 2026-06-08
 
-公開APIに破壊的変更はなし (`otspot` クレートの公開シグネチャは v0.4.0 と同一)。本リリースは
-LP/QP ソルバの correctness 修正・性能改善・ベンチ基準値の外部検証補正が主体。
+公開API破壊的変更なし (`cargo public-api diff` = 変更なし)。LP/QP correctness 修正・性能改善・ベンチ基準値の外部検証補正が主体。
 
 ### 追加
 
-- bounded-variable Phase I を Eq+UB LP で開通 — 従来 SuboptimalSolution に退化していた境界付き
-  等式+上界制約の経路を正規にサポート
-- LP/QP ブラックボックステスト群を大幅追加 — パイプライン全段を独立オラクル (SciPy / OSQP /
-  Clarabel / SCS) で検証。「優しくない」LP/QP センチネルと各処理段の sentinel test を整備
+- bounded-variable Phase I を Eq+UB LP で開通 (従来 SuboptimalSolution に退化していた経路を正規サポート)
+- LP/QP ブラックボックステストを独立オラクル (SciPy / OSQP / Clarabel / SCS) で大幅拡張
 
 ### 変更
 
-- README Performance 表を proof-carrying KKT 基準の現行実測値へ更新 —
-  Feasible LP 105/109・Convex QP 121/138・Infeasible LP 29/29・Unbounded LP 12/12 (@1e-6)
+- README Performance 表を現行ベンチ実測値へ更新 (proof-carrying KKT 基準: Feasible LP 105/109・Convex QP 121/138・Infeasible 29/29 @1e-6)
 - default テストプロファイルが ignore 以外を全実走 (tier-2 廃止)
 
 ### 修正
 
-correctness:
-
-- bounded simplex 終端の stale x_b による原始非実行可能解を修正 (grow7/15/22, pilot87)
-- bounded 双対の非アクティブ境界射影漏れによる pilot-we の偽 SuboptimalSolution を修正
-- ken-13 の反復効率退化を Devex pricing 採用で解消
-- grow22 回帰を bounded primal の Harris ratio test 採用で修正
-- GOULDQP2 回帰を bound dual activity の comp 一貫基準で修正
-- QFORPLAN QP correctness — dual 符号射影 + bound activity 判定を修正
-- pds-20 degen2 correctness 回帰 — FTRAN 安定性検証 + sequential fallback
-- cplex2 の偽 non-convergent を真因対処 — Phase I で人工変数判定前に x_b を fresh FTRAN で再計算
-- scorpion presolve=OFF の NumericalError を修正
-- postsolve の Krylov IR skip 判定をユーザー許容値基準へ戻す (gate 回帰修正)
-- QP 収束 — IPM 証明条件を収束判定に揃える + iteration accounting 整合
-- 入力検証を hardening — 不正入力 (縮退 bound 等) を明示エラーで拒否
-- iters=0 報告 artifact を修正 — reduced-space Timeout で iteration count を保持
-
-performance:
-
-- 大規模 LP の reduced-cost ループを chunk 化し iter/sec を 2-2.25x 改善
-- pivot_out のバッチ化で pds-20 を約 59s → 0.8s (72×)
-- Ruiz スケーリング前の未使用 clone を回避
-
-ベンチ基準値 (外部オラクル検証):
-
-- Maros-Mészáros QP の基準目的値 16 件を Clarabel 0.11.1 (tol 1e-12) の独立検証値へ補正 —
-  旧自己計測値の約 2 倍の規約誤りを解消
-- AUG3D 系 QP の基準値を OSQP / Clarabel / SCS の 3 独立オラクル一致値へ補正
+- bounded simplex の退化を複数修正 — 終端 stale x_b の原始非実行可能解 (grow7/15/22, pilot87)、非アクティブ境界双対の射影漏れ (pilot-we)、反復効率 (ken-13 Devex)、Harris ratio test (grow22)
+- QP correctness — QFORPLAN (dual 符号射影 + bound activity)、GOULDQP2 (bound dual の comp 一貫基準)、IPM 証明条件を収束判定へ整合
+- pds-20 / cplex2 / scorpion / osa-60 の correctness 回帰を真因修正 (FTRAN 安定性 / Phase I fresh FTRAN / 人工変数 cleanup)
+- 大規模 LP の性能改善 — reduced-cost ループ chunk 化 (iter/sec 2-2.25x)、pivot_out バッチ化 (pds-20 約 59s→0.8s)
+- Maros-Mészáros (16 件) / AUG3D 系 QP の基準目的値を外部オラクル (Clarabel / OSQP / SCS) 検証値へ補正
+- その他 — 入力検証 hardening、postsolve Krylov IR gate 回帰、KKT 残差の双対長不足検出、Timeout 目的値の復元解再計算、iters=0 報告 artifact
 
 ### 内部
 
-- 重複削減 — parser section driver / objsense / Expression / deadline_expired を共通化
-- CI: heavy サーベイランステストを非ゲート化 (ignore/broken の赤を gate から除外)、nextest を
-  `--test-threads 3` に統一
-- CI: netlib 依存を解消 (emps.c vendoring + cache からの baseline restore)、cache key を整備
-- CI gate 整備 — clippy / comment-block / `cargo package --no-verify`
-- docs(CLAUDE.md): Phase マージ時のテスト範囲を明文化
+- 重複削減 (parser / objsense / Expression / deadline_expired 共通化)
+- CI: heavy 非ゲート化 + `--test-threads 3`、netlib 依存解消 (emps.c vendoring + cache)、gate 整備 (clippy / comment-block / package)
 
 ### 依存
 
