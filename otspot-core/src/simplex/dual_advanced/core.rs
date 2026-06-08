@@ -1172,4 +1172,111 @@ mod tests {
             );
         }
     }
+
+    /// Sentinel: `after_pivot` is called exactly once per successful pivot when
+    /// `needs_sigma()` returns `true` (DSE path).
+    ///
+    /// The core loop computes σ = B^{-1} ρ_p (extra FTRAN) only when the
+    /// leaving strategy declares `needs_sigma = true`, then passes σ to
+    /// `after_pivot`.  A stateless strategy (`MostInfeasibleLeaving`) returns
+    /// `needs_sigma = false` → `after_pivot` is never invoked → γ weights are
+    /// never updated (no-op equivalent).
+    ///
+    /// no-op proof: replacing `DualSteepestEdgeLeaving` with `MostInfeasibleLeaving`
+    /// (or implementing `needs_sigma()` → `false`) sets `pivot_calls = 0` while
+    /// `iters > 0` → the `assert_eq!(pivot_calls, iters)` FAILS.
+    #[test]
+    fn dse_after_pivot_called_once_per_iteration() {
+        use super::super::steepest_edge::DualSteepestEdgeLeaving;
+        use std::cell::Cell;
+
+        struct CountingDseLeaving<'a> {
+            inner: DualSteepestEdgeLeaving,
+            pivot_calls: &'a Cell<usize>,
+        }
+        impl<'a> DualLeavingStrategy for CountingDseLeaving<'a> {
+            fn select_leaving(
+                &mut self,
+                x_b: &[f64],
+                primal_tol: f64,
+                basis: &[usize],
+            ) -> Option<usize> {
+                self.inner.select_leaving(x_b, primal_tol, basis)
+            }
+            fn needs_sigma(&self) -> bool {
+                true // DSE declares σ needed → core computes σ and calls after_pivot
+            }
+            fn after_pivot(
+                &mut self,
+                leaving_row: usize,
+                alpha: &[f64],
+                sigma: &[f64],
+                pivot: f64,
+            ) {
+                self.pivot_calls.set(self.pivot_calls.get() + 1);
+                self.inner.after_pivot(leaving_row, alpha, sigma, pivot);
+            }
+            fn after_refactor(&mut self, m: usize) {
+                self.inner.after_refactor(m);
+            }
+            fn set_initial_gamma(&mut self, gamma_truth: &[f64]) {
+                self.inner.set_initial_gamma(gamma_truth);
+            }
+        }
+
+        // 3×6 LP with 3 lb-violations: requires exactly 3 successful pivots to reach
+        // primal feasibility.  Same data as `recompute_gamma_after_refactor_not_called`.
+        let rows = [0, 2, 0, 1, 1, 2, 0, 1, 2];
+        let cols = [0, 0, 1, 1, 2, 2, 3, 4, 5];
+        let vals = [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 6).unwrap();
+        let c = vec![4.0, 5.0, 6.0, 0.0, 0.0, 0.0];
+        let mut basis = vec![3usize, 4, 5];
+        let mut x_b = vec![-1.0_f64, -2.0, -1.0];
+        let opts = SolverOptions::default();
+        let pivot_calls = Cell::new(0usize);
+        let mut leaving = CountingDseLeaving {
+            inner: DualSteepestEdgeLeaving::new(3),
+            pivot_calls: &pivot_calls,
+        };
+        let mut iters = 0usize;
+        let _ = dual_simplex_core_advanced(
+            &a,
+            &mut x_b,
+            &c,
+            &mut basis,
+            3,
+            6,
+            6,
+            false,
+            &opts,
+            &mut leaving,
+            &mut iters,
+        );
+
+        assert!(
+            iters > 0,
+            "LP must require at least one pivot (all x_b < 0 initially)"
+        );
+        // `iters` counts all loop iterations, including those rejected for pivot
+        // instability (step 3g continues without calling after_pivot).
+        // `pivot_calls` counts successful pivots where σ was computed and γ updated.
+        // Invariant: 0 < pivot_calls ≤ iters.
+        //
+        // no-op proof: replacing this strategy with MostInfeasibleLeaving (or
+        // returning `needs_sigma() = false`) skips σ FTRAN and after_pivot entirely
+        // → pivot_calls = 0, failing the `pivot_calls > 0` assertion below.
+        assert!(
+            pivot_calls.get() > 0,
+            "after_pivot must fire at least once (DSE γ update must execute); \
+             no-op replacement (MostInfeasible or needs_sigma=false) gives pivot_calls=0, \
+             iters={iters}"
+        );
+        assert!(
+            pivot_calls.get() <= iters,
+            "pivot_calls={} must not exceed iters={} (after_pivot fires only on successful pivots)",
+            pivot_calls.get(),
+            iters
+        );
+    }
 }

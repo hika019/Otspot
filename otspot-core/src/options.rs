@@ -39,21 +39,19 @@ impl std::error::Error for OptionsError {}
 
 /// Dual simplex leaving (depart) strategy.
 ///
-/// `MostInfeasible`: select the most negative x_B\[i\] (Dantzig rule).
-/// Stable but inflates iteration count on large problems.
-///
-/// `SteepestEdge`: Forrest-Goldfarb 1992 Dual Steepest Edge.
+/// `SteepestEdge`: Forrest-Goldfarb 1992 Dual Steepest Edge (default).
 /// Maintains weight γ_i = ||(B^{-1})_{i,:}||² and maximises
 /// score = x_B\[i\]² / γ_i.  Typical 3-10× speed-up (HiGHS/CPLEX) at the cost
 /// of one extra FTRAN per iteration.
 ///
-/// Default: `MostInfeasible` (easy A/B comparison; preserves existing behaviour).
+/// `MostInfeasible`: select the most negative x_B\[i\] (Dantzig rule).
+/// Stable but inflates iteration count on large problems.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DualPricing {
     #[default]
-    MostInfeasible,
     SteepestEdge,
+    MostInfeasible,
 }
 
 /// Simplex algorithm selection.
@@ -488,7 +486,7 @@ pub struct SolverOptions {
     pub simplex_method: SimplexMethod,
     /// Dual feasibility threshold.  Default: `PIVOT_TOL`.
     pub dual_tol: f64,
-    /// Dual simplex leaving strategy.  Default: `MostInfeasible`.
+    /// Dual simplex leaving strategy.  Default: `SteepestEdge`.
     pub dual_pricing: DualPricing,
     /// LP warm-start basis.  `None` = cold start.
     pub warm_start: Option<WarmStartBasis>,
@@ -728,6 +726,33 @@ impl SolverOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- DualPricing default sentinel ------------------------------------
+
+    /// Sentinel: `DualPricing::default()` must be `SteepestEdge`.
+    ///
+    /// Reverting `#[default]` to `MostInfeasible` silently degrades solver
+    /// performance.  This test fails immediately if the annotation is moved,
+    /// making the regression visible before any bench run.
+    ///
+    /// no-op proof: swapping `#[default]` back to `MostInfeasible` in the
+    /// enum declaration makes `DualPricing::default()` return `MostInfeasible`
+    /// → `assert_eq!` fails.
+    #[test]
+    fn dual_pricing_default_is_steepest_edge() {
+        assert_eq!(
+            DualPricing::default(),
+            DualPricing::SteepestEdge,
+            "DualPricing default must be SteepestEdge; \
+             moving #[default] to MostInfeasible will fail this sentinel"
+        );
+        let opts = SolverOptions::default();
+        assert_eq!(
+            opts.dual_pricing,
+            DualPricing::SteepestEdge,
+            "SolverOptions::default() must inherit DualPricing::SteepestEdge"
+        );
+    }
 
     // ---- Tolerance translation -------------------------------------------
 
