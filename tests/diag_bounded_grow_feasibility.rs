@@ -39,8 +39,7 @@ fn bounded_grow_family_primal_feasible() {
 
 #[test]
 fn bounded_pilot_we_certifies_optimal() {
-    let path = format!("data/lp_problems/pilot-we.QPS");
-    let path = Path::new(&path);
+    let path = Path::new("data/lp_problems/pilot-we.QPS");
     assert!(path.exists(), "data missing: {}", path.display());
 
     let problem = parse_qps(path).expect("parse pilot-we");
