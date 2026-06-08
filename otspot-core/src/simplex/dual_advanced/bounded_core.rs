@@ -60,7 +60,7 @@ use super::super::dual_common::{
     basic_obj, compute_dual_vars_into, made_progress_with_floor, recompute_gamma_truth,
     NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
 };
-use super::super::pricing::DualLeavingStrategy;
+use super::super::pricing::{DualLeavingStrategy, CAP_MULT_OF_M, GAMMA_FLOOR};
 use super::super::standard_form::{BoundedStandardForm, SimplexOutcome};
 use super::super::trace::IterTrace;
 use super::bound_flip::{bfrt_select_entering, bump_bfrt_flip_invocations, ColBound};
@@ -1464,6 +1464,9 @@ fn primal_simplex_aug(
     let mut y = vec![0.0f64; m];
     let mut rc = vec![0.0f64; n_struct];
     let mut alpha = vec![0.0f64; m];
+    // Devex pricing mirrors the standard primal core: scaled reduced-cost
+    // scores avoid repeatedly choosing dense/degenerate columns by raw RC alone.
+    let mut devex_weights = vec![1.0f64; n_struct];
     let mut trace = IterTrace::new("bounded-aug-primal");
 
     loop {
@@ -1503,15 +1506,20 @@ fn primal_simplex_aug(
             return timeout_obj(state);
         }
 
-        let mut best_score = PIVOT_TOL;
+        let mut best_score = 0.0;
         let mut entering: Option<usize> = None;
         for j in 0..n_struct {
             if state.is_basic[j] {
                 continue;
             }
-            let score = if state.at_upper[j] { rc[j] } else { -rc[j] };
-            if score > best_score {
-                best_score = score;
+            let violation = if state.at_upper[j] { rc[j] } else { -rc[j] };
+            if violation <= PIVOT_TOL {
+                continue;
+            }
+            let gamma = devex_weights[j].max(GAMMA_FLOOR);
+            let weighted_score = violation / gamma.sqrt();
+            if weighted_score > best_score {
+                best_score = weighted_score;
                 entering = Some(j);
             }
         }
@@ -1595,6 +1603,27 @@ fn primal_simplex_aug(
             len: m,
         };
         basis_mgr.ftran(&mut alpha_sv);
+        let norm_sq: f64 = alpha.iter().map(|&v| v * v).sum();
+        let mut gamma_leaving = 1.0;
+        if leaving_col < n_struct {
+            gamma_leaving = devex_weights[leaving_col];
+            let pivot = alpha[r];
+            if pivot.abs() > PIVOT_TOL {
+                let cap = CAP_MULT_OF_M * (m as f64).max(1.0);
+                let new_weight = (norm_sq / (pivot * pivot))
+                    .min(cap)
+                    .max(GAMMA_FLOOR);
+                devex_weights[leaving_col] = devex_weights[leaving_col].max(new_weight);
+                gamma_leaving = devex_weights[leaving_col];
+            }
+        }
+        if q < n_struct {
+            devex_weights[q] = if norm_sq > GAMMA_FLOOR {
+                (gamma_leaving / norm_sq).max(1.0)
+            } else {
+                1.0
+            };
+        }
         basis_mgr.update(q, r, &alpha_sv);
 
         if basis_mgr.needs_refactor() {
@@ -2924,8 +2953,15 @@ mod tests {
 
         let deadline_far = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
         let ok = compute_reduced_costs_into_timed(
-            &a, &c, &mut basis_mgr, &is_basic, n_synthetic, &basis,
-            &mut y_buf, &mut rc_out, deadline_far,
+            &a,
+            &c,
+            &mut basis_mgr,
+            &is_basic,
+            n_synthetic,
+            &basis,
+            &mut y_buf,
+            &mut rc_out,
+            deadline_far,
         );
         assert!(ok, "RC compute must succeed (deadline is far)");
 
