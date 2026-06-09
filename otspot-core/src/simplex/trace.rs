@@ -53,6 +53,9 @@ pub(super) struct IterTrace {
     last_obj: Option<f64>,
     no_obj_progress: usize,
     detail_lines: usize,
+    pivots: usize,
+    degenerate_pivots: usize,
+    flips: usize,
 }
 
 // Env-gated diagnostic (OTSPOT_SIMPLEX_TRACE, default-off): the eprintln here are
@@ -74,7 +77,26 @@ impl IterTrace {
             last_obj: None,
             no_obj_progress: 0,
             detail_lines: 0,
+            pivots: 0,
+            degenerate_pivots: 0,
+            flips: 0,
         })
+    }
+
+    /// Record one basis-changing pivot and its primal step length. A step at or
+    /// below `tol` is a *degenerate* pivot (the basic solution does not move).
+    /// The degenerate fraction distinguishes a degenerate stall (most pivots
+    /// near-zero step) from genuinely slow pricing (large steps, few iters).
+    pub(super) fn note_pivot(&mut self, step: f64, tol: f64) {
+        self.pivots = self.pivots.saturating_add(1);
+        if step <= tol {
+            self.degenerate_pivots = self.degenerate_pivots.saturating_add(1);
+        }
+    }
+
+    /// Record one bound-flip iteration (no basis change).
+    pub(super) fn note_flip(&mut self) {
+        self.flips = self.flips.saturating_add(1);
     }
 
     pub(super) fn log(&mut self, iter: usize, obj: f64, basis: &[usize], bland_mode: bool) {
@@ -164,13 +186,23 @@ impl Drop for IterTrace {
         if !self.cfg.enabled {
             return;
         }
+        let degen_frac = if self.pivots > 0 {
+            self.degenerate_pivots as f64 / self.pivots as f64
+        } else {
+            0.0
+        };
         eprintln!(
-            "[simplex-trace:{}:summary] lines={} detail_lines={} repeats={} unique_basis={}",
+            "[simplex-trace:{}:summary] lines={} detail_lines={} repeats={} unique_basis={} \
+             pivots={} degenerate_pivots={} degen_frac={:.4} flips={}",
             self.tag,
             self.lines,
             self.detail_lines,
             self.repeats,
-            self.seen_basis.len()
+            self.seen_basis.len(),
+            self.pivots,
+            self.degenerate_pivots,
+            degen_frac,
+            self.flips,
         );
     }
 }

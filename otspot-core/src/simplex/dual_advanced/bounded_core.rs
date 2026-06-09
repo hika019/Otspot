@@ -1816,6 +1816,9 @@ fn primal_simplex_aug(
         ) {
             BoundedLeave::Flip => {
                 bump_bfrt_flip_invocations();
+                if let Some(t) = trace.as_mut() {
+                    t.note_flip();
+                }
                 for i in 0..m {
                     state.x_b[i] -= alpha[i] * dir * ub_q;
                 }
@@ -1833,6 +1836,9 @@ fn primal_simplex_aug(
             BoundedLeave::Unbounded => return SimplexOutcome::Unbounded,
             BoundedLeave::Pivot { row, at_ub, step } => (row, at_ub, step),
         };
+        if let Some(t) = trace.as_mut() {
+            t.note_pivot(theta, options.primal_tol);
+        }
         let leaving_col = state.basis[r];
 
         for i in 0..m {
