@@ -1399,6 +1399,191 @@ mod tests {
         );
     }
 
+    /// **Ge infeasible (sentinel):** a Ge-constrained LP whose Ge bound exceeds the
+    /// variable's upper bound must solve to Infeasible via the bounded path.
+    ///
+    /// LP: min x  s.t. x ≥ 5 (Ge),  0 ≤ x ≤ 3.
+    /// The Ge constraint requires x ≥ 5 but the UB forces x ≤ 3; infeasible.
+    /// The finite UB causes the bounded Phase I path to be taken.
+    ///
+    /// No-op proof: if Phase I incorrectly declares artificials = 0 for an
+    /// infeasible Ge system, the solver returns Optimal or SuboptimalSolution,
+    /// failing the Infeasible assertion.
+    #[test]
+    fn ge_infeasible_bounded_path_returns_infeasible() {
+        use crate::sparse::CscMatrix;
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 3.0)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert_eq!(
+            r.status,
+            SolveStatus::Infeasible,
+            "Ge infeasible LP (x>=5, UB=3) must be Infeasible, got {:?} (obj={:.6e})",
+            r.status,
+            r.objective
+        );
+    }
+
+    /// **Ge at-upper-bound (sentinel):** in a Ge LP whose optimal places a
+    /// variable non-basic at its upper bound, `extract_solution_bounded` must
+    /// apply the `at_upper` correction so the solution and objective are correct.
+    ///
+    /// LP: min -x  s.t. x ≥ 2 (Ge),  0 ≤ x ≤ 3.
+    /// Optimal: x = 3 (at UB, non-basic), obj = -3.
+    ///
+    /// No-op proof: `bounded_core::set_at_upper_apply_disabled(true)` causes
+    /// `extract_solution_bounded` to leave x at 0 instead of its upper bound,
+    /// yielding obj = 0 ≠ -3 and failing the objective assertion.
+    #[test]
+    fn ge_at_upper_bound_solution_extracted_correctly() {
+        use crate::sparse::CscMatrix;
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![-1.0],
+            a,
+            vec![2.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 3.0)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "Ge at-UB LP status: {:?}",
+            r.status
+        );
+        assert!(
+            (r.objective - (-3.0)).abs() < 1e-6,
+            "Ge at-UB obj={:.6e} expected -3 (x should be at UB=3); \
+             disabled at_upper correction would yield obj=0",
+            r.objective
+        );
+        assert!(
+            r.solution.first().copied().unwrap_or(0.0) > 2.5,
+            "Ge at-UB solution[0]={:.6e} expected ≈3 (at upper bound)",
+            r.solution.first().copied().unwrap_or(0.0)
+        );
+    }
+
+    /// **Ge + Eq + Le mixed (sentinel):** a LP with all three constraint kinds
+    /// (multiple artificials) must solve correctly via the bounded Phase I path.
+    ///
+    /// LP: min x + y + z
+    ///       x + y ≥ 2  (Ge)
+    ///       x     = 1  (Eq)
+    ///       y + z ≤ 3  (Le)
+    ///       0 ≤ x,y,z ≤ 4
+    ///
+    /// Optimal (by hand): x=1 (Eq), y=1 (Ge binding, minimize y+z with z≥0),
+    /// z=0, obj=2.
+    ///
+    /// No-op proof: if Ge or Eq artificials are mishandled (wrong Phase I
+    /// placement or incorrect basis injection), the solver returns a wrong
+    /// status or objective, failing the assertions below.
+    #[test]
+    fn ge_eq_le_mixed_types_solve_correctly() {
+        use crate::sparse::CscMatrix;
+        use crate::test_kkt::assert_solver_invariants_lp;
+        // rows=[0,0,1,2,2], cols=[0,1,0,1,2]:
+        //   Row 0 (Ge): x + y >= 2
+        //   Row 1 (Eq): x     = 1
+        //   Row 2 (Le): y + z <= 3
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 2, 2],
+            &[0, 1, 0, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0, 1.0],
+            3,
+            3,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0, 1.0],
+            a,
+            vec![2.0, 1.0, 3.0],
+            vec![ConstraintType::Ge, ConstraintType::Eq, ConstraintType::Le],
+            vec![(0.0, 4.0), (0.0, 4.0), (0.0, 4.0)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "Ge+Eq+Le mixed LP must be Optimal, got {:?}",
+            r.status
+        );
+        assert!(
+            (r.objective - 2.0).abs() < 1e-6,
+            "Ge+Eq+Le obj={:.6e} expected 2.0",
+            r.objective
+        );
+        assert_solver_invariants_lp(&r, &lp);
+    }
+
+    /// **Ge dual sign (sentinel):** for a min LP with a binding Ge constraint,
+    /// `dual_solution[i]` must be ≥ 0 (LP simplex convention: Ge dual ≥ 0).
+    ///
+    /// LP: min x + y  s.t. x + y ≥ 3 (Ge),  0 ≤ x,y ≤ 4.
+    /// Optimal: x + y = 3 (binding), obj = 3.
+    /// KKT stationarity: 1 - 1·y0 = 0 ⟹ y0 = 1 > 0. ✓
+    ///
+    /// No-op proof: if `extract_dual_info_bounded` applies the wrong negation
+    /// for a `row_negated` Ge row, `dual_solution[0]` becomes ≤ −1, failing
+    /// both the sign assertion and `assert_solver_invariants_lp` dual-sign check.
+    #[test]
+    fn ge_dual_sign_nonnegative_in_min_problem() {
+        use crate::sparse::CscMatrix;
+        use crate::test_kkt::assert_solver_invariants_lp;
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 4.0), (0.0, 4.0)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert_eq!(r.status, SolveStatus::Optimal, "Ge dual status: {:?}", r.status);
+        assert!(
+            (r.objective - 3.0).abs() < 1e-6,
+            "Ge dual obj={:.6e} expected 3",
+            r.objective
+        );
+        assert!(
+            !r.dual_solution.is_empty(),
+            "dual_solution must be non-empty for Ge dual sign check"
+        );
+        assert!(
+            r.dual_solution[0] >= -1e-6,
+            "Ge dual (LP simplex convention) must be ≥ 0 for binding Ge in min LP, \
+             got {:.6e}; wrong row_negated sign in extract_dual_info_bounded would yield ≤ -1",
+            r.dual_solution[0]
+        );
+        // Quantitative check: KKT stationarity gives y0 = 1 for this LP.
+        assert!(
+            r.dual_solution[0] > 0.5,
+            "Ge dual expected ≈1.0 (KKT stationarity: 1 - y0 = 0), got {:.6e}",
+            r.dual_solution[0]
+        );
+        assert_solver_invariants_lp(&r, &lp);
+    }
+
     /// **P2-B** — Warm start is accepted even when the warm basis has
     /// lb-violations after a b-perturbation (legacy path, no finite UBs).
     ///
