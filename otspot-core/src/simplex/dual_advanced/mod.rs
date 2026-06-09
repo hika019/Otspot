@@ -11,7 +11,7 @@ use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{DualPricing, SolverOptions, WarmStartBasis};
 use crate::presolve::LpEquilibration;
-use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::DROP_TOL;
 use bounded_core::{
@@ -166,9 +166,14 @@ pub(crate) fn solve_dual_advanced(
     // Bounded path: problems with finite upper bounds use BFRT-aware iteration.
     // Two sub-paths gated on the BSF shape:
     //   - Le-only (num_artificial == 0)        → `try_bounded` (dual BFRT then primal).
-    //   - Eq + UB (num_artificial > 0, no Ge)  → `try_bounded_phase1_eq` (augmented
+    //   - Has artificials (num_artificial > 0) → `try_bounded_phase1_eq` (augmented
     //     primal Phase I+II); preserves m (no UB-row blow-up) and dispatch is
     //     skipped via thread-local hook in tests for no-op proofs.
+    // Le / Ge / Eq rows are handled uniformly: the constraint sense only sets the
+    // standard-form slack sign and `needs_artificial`, both already baked into
+    // `bsf`. Phase I minimises Σ artificials independent of the original sense, so
+    // Ge needs no special path. A spurious "Optimal" is still caught by
+    // `guard_lp_optimal` at the entry, so opening Ge cannot return a wrong answer.
     if !bounded_dispatch_disabled() && problem.bounds.iter().any(|&(_, ub)| ub.is_finite()) {
         let Some(bsf) = build_bounded_standard_form_with_deadline(problem, options.deadline) else {
             return timeout_result();
@@ -178,17 +183,9 @@ pub(crate) fn solve_dual_advanced(
                 return result;
             }
             // UbViolationOutOfScope → fall through to legacy path
-        } else {
-            let has_ge = problem
-                .constraint_types
-                .iter()
-                .any(|t| matches!(t, ConstraintType::Ge));
-            if !has_ge {
-                if let Some(result) = try_bounded_phase1_eq(&bsf, problem, options) {
-                    return result;
-                }
-                // Phase I infeasibility undecided → fall through to legacy path
-            }
+        } else if let Some(result) = try_bounded_phase1_eq(&bsf, problem, options) {
+            return result;
+            // Phase I infeasibility undecided → fall through to legacy path
         }
     }
 
@@ -1360,6 +1357,46 @@ mod tests {
             let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
             assert_eq!(r.status, SolveStatus::Optimal, "pattern 3 status");
         }
+    }
+
+    /// **Ge + UB bounded path (sentinel):** a `Ge`-constrained LP with finite
+    /// upper bounds must solve via the bounded Phase I path, not the legacy
+    /// UB-row-expanded path. The bounded path emits a `warm_start_basis`; the
+    /// legacy `two_phase_dual_simplex` cold path does not.
+    ///
+    /// No-op proof: re-adding the `!has_ge` gate in `solve_dual_advanced` routes
+    /// this LP to the legacy path, which returns `warm_start_basis = None`,
+    /// failing the `is_some()` assertion. The objective check guards correctness
+    /// of the opened path (a wrong dual sign would be demoted by guard_lp_optimal
+    /// upstream, but here we assert the raw Optimal value directly).
+    #[test]
+    fn ge_with_ub_solves_via_bounded_path_with_warm_basis() {
+        use crate::sparse::CscMatrix;
+        // min x + y  s.t.  x + y >= 3 (Ge),  0 <= x,y <= 4.
+        // Optimal: x + y = 3 (any split), obj = 3.
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 4.0), (0.0, 4.0)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert_eq!(r.status, SolveStatus::Optimal, "Ge+UB status: {:?}", r.status);
+        assert!(
+            (r.objective - 3.0).abs() < 1e-6,
+            "Ge+UB obj={} expected 3",
+            r.objective
+        );
+        assert!(
+            r.warm_start_basis.is_some(),
+            "Ge+UB must route to the bounded path (emits warm_start_basis); \
+             None means it fell back to the legacy path (has_ge gate re-added)"
+        );
     }
 
     /// **P2-B** — Warm start is accepted even when the warm basis has
