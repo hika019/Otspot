@@ -13,13 +13,12 @@ use crate::error::SolverError;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{DROP_TOL, PIVOT_STABILITY_THRESHOLD, ZERO_TOL};
 use faer::sparse::SparseColMatRef;
+use std::time::Instant;
 
 /// 可変 U 行列 (CSC, 行 index 昇順, 対角ポインタ保持)。
 ///
 /// Phase 2b の BGR rank-1 更新が列を書き換える対象。
 /// `diag_ptr[j]` は列 j の U[j,j] の row_ind/values 上の絶対インデックス。
-// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct MutableU {
     pub(crate) n: usize,
@@ -29,8 +28,6 @@ pub(crate) struct MutableU {
     pub(crate) diag_ptr: Vec<usize>,
 }
 
-// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
-#[allow(dead_code)]
 impl MutableU {
     /// faer の U 因子 (行 index 未ソート) から構築する。列内行 index を昇順にソートする。
     pub(crate) fn from_faer(n: usize, u_ref: &SparseColMatRef<'_, usize, f64>) -> Self {
@@ -176,8 +173,6 @@ fn forward_sub_l(n: usize, l_ref: &SparseColMatRef<'_, usize, f64>, y: &mut [f64
 
 /// faer の L^T (unit upper triangular) の後退代入。
 /// 対角は unit = 1 のため除算不要。
-// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
-#[allow(dead_code)]
 fn backward_sub_lt(n: usize, l_ref: &SparseColMatRef<'_, usize, f64>, y: &mut [f64]) {
     for j in (0..n).rev() {
         for (row, &val) in l_ref
@@ -222,8 +217,6 @@ fn apply_ft_ops_ftran(ops: &[FtOp], v: &mut [f64]) {
 }
 
 /// BGR 行操作を btran 方向 (転置・逆順) に適用する。
-// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
-#[allow(dead_code)]
 fn apply_ft_ops_btran(ops: &[FtOp], v: &mut [f64]) {
     for op in ops.iter().rev() {
         match *op {
@@ -242,10 +235,8 @@ fn apply_ft_ops_btran(ops: &[FtOp], v: &mut [f64]) {
 /// `L0` (faer unit-lower) と行置換 `Pr` は初期分解で固定し、基底列の差替を
 /// `u_mat` の書き換え + 行 eta (`ft_ops`) + 列巡回置換 (`col_perm`) で吸収する
 /// (BGR 変種: L 固定・U と row-eta が成長)。
-// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
-#[allow(dead_code)]
 #[derive(Clone)]
-pub(crate) struct FtLu<'a> {
+pub(crate) struct FtLu {
     pub(crate) n: usize,
     pub(crate) lu0: LuFactorization,
     pub(crate) u_mat: MutableU,
@@ -257,16 +248,20 @@ pub(crate) struct FtLu<'a> {
     ft_ops: Vec<FtOp>,
     /// 現在の基底列インデックス (basis 位置 → A 列)。
     basis_indices: Vec<usize>,
-    a: &'a CscMatrix,
+    /// 元の制約行列 (rank-1 更新で参照する)。
+    a: CscMatrix,
     /// 小 pivot / eta 蓄積で再分解が望ましい場合に立つ。
     needs_refactor: bool,
 }
 
-// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
-#[allow(dead_code)]
-impl<'a> FtLu<'a> {
-    pub(crate) fn new(a: &'a CscMatrix, basis: &[usize]) -> Result<Self, SolverError> {
-        let lu0 = LuFactorization::factorize_timed(a, basis, None)?;
+impl FtLu {
+    /// 初期因子分解。`deadline` は None = 無制限。
+    pub(crate) fn new_timed(
+        a: &CscMatrix,
+        basis: &[usize],
+        deadline: Option<Instant>,
+    ) -> Result<Self, SolverError> {
+        let lu0 = LuFactorization::factorize_timed(a, basis, deadline)?;
         let n = lu0.n;
 
         let (row_perm_fwd, row_perm_inv) = {
@@ -294,14 +289,25 @@ impl<'a> FtLu<'a> {
             col_perm_inv,
             ft_ops: Vec::new(),
             basis_indices: basis.to_vec(),
-            a,
+            a: a.clone(),
             needs_refactor: false,
         })
+    }
+
+    /// deadline なし版 (テスト・内部利用)。
+    #[cfg(test)]
+    pub(crate) fn new(a: &CscMatrix, basis: &[usize]) -> Result<Self, SolverError> {
+        Self::new_timed(a, basis, None)
     }
 
     /// 再分解が望ましいか (小 pivot 等)。
     pub(crate) fn needs_refactor(&self) -> bool {
         self.needs_refactor
+    }
+
+    /// 蓄積 FT 行操作数 (eta_count 相当)。
+    pub(crate) fn ft_op_count(&self) -> usize {
+        self.ft_ops.len()
     }
 
     /// FTRAN (dense): `B · x = rhs` を in-place で解く。

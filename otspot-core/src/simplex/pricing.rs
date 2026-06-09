@@ -4,7 +4,7 @@
 //! - `DantzigPricing`: classic most-negative-reduced-cost rule (test-only)
 //! - `SteepestEdgePricing`: Devex approximate steepest-edge pricing
 
-use crate::basis::LuBasis;
+use crate::basis::BasisMgr;
 use crate::tolerances::PIVOT_TOL;
 
 const EPS: f64 = 1e-8;
@@ -33,7 +33,7 @@ pub(crate) trait PricingStrategy {
     /// `eta`         = B⁻¹ * a_entering (FTRAN of entering column, dense).
     fn update_weights(
         &mut self,
-        basis: &LuBasis,
+        basis: &BasisMgr,
         entering: usize,
         leaving: usize,
         leaving_row: usize,
@@ -66,7 +66,7 @@ impl PricingStrategy for DantzigPricing {
         entering
     }
 
-    fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: usize, _: &[f64]) {}
+    fn update_weights(&mut self, _: &BasisMgr, _: usize, _: usize, _: usize, _: &[f64]) {}
     fn reset_weights(&mut self, _n_vars: usize) {}
 }
 
@@ -132,7 +132,7 @@ impl PricingStrategy for SteepestEdgePricing {
     /// distorting pricing.
     fn update_weights(
         &mut self,
-        _basis: &LuBasis,
+        _basis: &BasisMgr,
         entering: usize,
         leaving: usize,
         leaving_row: usize,
@@ -330,10 +330,10 @@ mod tests {
         assert!(entering == Some(0) || entering == Some(1));
     }
 
-    fn make_identity_basis_2x2() -> crate::basis::LuBasis {
+    fn make_identity_basis_2x2() -> crate::basis::BasisMgr {
         let a =
             crate::sparse::CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
-        crate::basis::LuBasis::new(&a, &[0, 1], 50).unwrap()
+        crate::basis::BasisMgr::new_timed(&a, &[0, 1], 50, None, false).unwrap()
     }
 
     /// Sentinel: `update_weights` uses the pivot² Sherman-Morrison form.

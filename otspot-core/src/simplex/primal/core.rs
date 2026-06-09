@@ -1,6 +1,6 @@
 //! Revised simplex core iteration loop.
 
-use crate::basis::{BasisManager, LuBasis};
+use crate::basis::{BasisManager, BasisMgr};
 use crate::options::SolverOptions;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{PIVOT_STABILITY_THRESHOLD, PIVOT_TOL};
@@ -53,7 +53,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     enable_phase1_cycling_bail: bool,
 ) -> SimplexOutcome {
     let max_iter = usize::MAX; // timeout is the real guard
-    let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
+    let mut basis_mgr = match BasisMgr::new_timed(a, basis, options.max_etas, options.deadline, options.use_ft_basis) {
         Ok(bm) => bm,
         Err(crate::error::SolverError::SingularBasis { .. }) => {
             return SimplexOutcome::SingularBasis;
@@ -174,10 +174,10 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 // than a false-Optimal. Phase I feasibility is reconciled by its
                 // caller.
                 basis_mgr.force_refactor_timed(a, basis, options.deadline);
-                if basis_mgr.refactor_failed {
+                if basis_mgr.refactor_failed() {
                     // Cannot recompute x_b to verify the vertex; never claim
                     // Optimal on a stale x_b.
-                    if basis_mgr.singular_basis {
+                    if basis_mgr.singular_basis() {
                         return SimplexOutcome::SingularBasis;
                     }
                     return SimplexOutcome::Timeout(basic_obj(c, basis, x_b));
@@ -230,8 +230,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 !d_max_abs.is_finite() || (orig_col_norm > 0.0 && d_max_abs > 1e12 * orig_col_norm);
             if d_corrupt && basis_mgr.eta_count() > 0 {
                 basis_mgr.force_refactor_timed(a, basis, options.deadline);
-                if basis_mgr.refactor_failed {
-                    if basis_mgr.singular_basis {
+                if basis_mgr.refactor_failed() {
+                    if basis_mgr.singular_basis() {
                         blocked_at_basis.insert(entering_col);
                         consecutive_blocks += 1;
                         if consecutive_blocks > max_consecutive_blocks {
@@ -421,8 +421,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
         }
 
-        if basis_mgr.refactor_failed {
-            if basis_mgr.singular_basis {
+        if basis_mgr.refactor_failed() {
+            if basis_mgr.singular_basis() {
                 blocked_at_basis.insert(entering_col);
                 consecutive_blocks += 1;
 
@@ -501,7 +501,7 @@ fn revert_to_snapshot(
     b_rhs: &[f64],
     basis_snapshot: &[usize],
     is_basic: &mut [bool],
-    basis_mgr: &mut LuBasis,
+    basis_mgr: &mut BasisMgr,
     options: &SolverOptions,
 ) -> bool {
     basis.copy_from_slice(basis_snapshot);
@@ -511,7 +511,7 @@ fn revert_to_snapshot(
     for &col in basis.iter() {
         is_basic[col] = true;
     }
-    match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
+    match BasisMgr::new_timed(a, basis, options.max_etas, options.deadline, options.use_ft_basis) {
         Ok(mut mgr) => {
             // Recompute x_B; carrying eta drift could leave a slack negative.
             x_b.copy_from_slice(b_rhs);

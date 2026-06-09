@@ -47,7 +47,9 @@
 //! wiring enters with `x_B = b ≥ 0` so this branch is never triggered there.
 
 use super::deadline_expired;
-use crate::basis::{BasisManager, LuBasis};
+use crate::basis::{BasisManager, BasisMgr};
+#[cfg(test)]
+use crate::basis::LuBasis;
 use crate::error::SolverError;
 use crate::options::SolverOptions;
 use crate::problem::LpProblem;
@@ -165,7 +167,7 @@ thread_local! {
 fn compute_reduced_costs_into_timed(
     a: &CscMatrix,
     c: &[f64],
-    basis_mgr: &mut LuBasis,
+    basis_mgr: &mut impl BasisManager,
     is_basic: &[bool],
     n_price: usize,
     basis: &[usize],
@@ -330,7 +332,7 @@ pub(crate) fn iterate(
     debug_assert_eq!(state.is_basic.len(), n_total);
 
     let mut basis_mgr =
-        match LuBasis::new_timed(a, &state.basis, options.max_etas, options.deadline) {
+        match BasisMgr::new_timed(a, &state.basis, options.max_etas, options.deadline, options.use_ft_basis) {
             Ok(bm) => bm,
             Err(crate::error::SolverError::SingularBasis { .. }) => {
                 return (BoundedOutcome::SingularBasis, state);
@@ -601,8 +603,8 @@ pub(crate) fn iterate(
             // Numerically unstable pivot — refactor and recompute reduced
             // costs. Matches the legacy core's recovery path.
             basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
-            if basis_mgr.refactor_failed {
-                if basis_mgr.singular_basis {
+            if basis_mgr.refactor_failed() {
+                if basis_mgr.singular_basis() {
                     return (BoundedOutcome::SingularBasis, state);
                 }
                 let obj = bounded_obj(
@@ -726,8 +728,8 @@ pub(crate) fn iterate(
         // Refactor + reduced-cost refresh on the LU's request (eta cap).
         if basis_mgr.needs_refactor() {
             basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
-            if basis_mgr.refactor_failed {
-                if basis_mgr.singular_basis {
+            if basis_mgr.refactor_failed() {
+                if basis_mgr.singular_basis() {
                     return (BoundedOutcome::SingularBasis, state);
                 }
                 let obj = bounded_obj(
@@ -768,7 +770,7 @@ pub(crate) fn iterate(
 
 /// FTRAN a column of `a` and dump into `out` (length `m`). Wraps the
 /// `SparseVec` boilerplate that every FTRAN site repeats.
-fn ftran_column(a: &CscMatrix, basis_mgr: &mut LuBasis, col: usize, m: usize, out: &mut [f64]) {
+fn ftran_column(a: &CscMatrix, basis_mgr: &mut impl BasisManager, col: usize, m: usize, out: &mut [f64]) {
     let (rows, vals) = a.get_column(col).unwrap();
     let mut sv = SparseVec {
         indices: rows.to_vec(),
@@ -1154,7 +1156,7 @@ pub(crate) fn phase2_primal_bounded(
     }
 
     let mut basis_mgr =
-        match LuBasis::new_timed(a, &state.basis, options.max_etas, options.deadline) {
+        match BasisMgr::new_timed(a, &state.basis, options.max_etas, options.deadline, options.use_ft_basis) {
             Ok(bm) => bm,
             Err(SolverError::DeadlineExceeded) => return (timeout_obj(&state), state),
             Err(_) => return (SimplexOutcome::SingularBasis, state),
@@ -1303,8 +1305,8 @@ pub(crate) fn phase2_primal_bounded(
                 }
                 state.at_upper[q] = !from_ub;
                 basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
-                if basis_mgr.refactor_failed {
-                    return if basis_mgr.singular_basis {
+                if basis_mgr.refactor_failed() {
+                    return if basis_mgr.singular_basis() {
                         (SimplexOutcome::SingularBasis, state)
                     } else {
                         (
@@ -1359,8 +1361,8 @@ pub(crate) fn phase2_primal_bounded(
 
         if basis_mgr.needs_refactor() {
             basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
-            if basis_mgr.refactor_failed {
-                return if basis_mgr.singular_basis {
+            if basis_mgr.refactor_failed() {
+                return if basis_mgr.singular_basis() {
                     (SimplexOutcome::SingularBasis, state)
                 } else {
                     (
@@ -1482,7 +1484,7 @@ fn primal_simplex_aug(
     }
 
     let mut basis_mgr =
-        match LuBasis::new_timed(a_aug, &state.basis, options.max_etas, options.deadline) {
+        match BasisMgr::new_timed(a_aug, &state.basis, options.max_etas, options.deadline, options.use_ft_basis) {
             Ok(bm) => bm,
             Err(SolverError::DeadlineExceeded) => return timeout_obj(state),
             Err(_) => return SimplexOutcome::SingularBasis,
@@ -1593,8 +1595,8 @@ fn primal_simplex_aug(
                 }
                 state.at_upper[q] = !from_ub;
                 basis_mgr.refactor_if_needed_timed(a_aug, &state.basis, options.deadline);
-                if basis_mgr.refactor_failed {
-                    return if basis_mgr.singular_basis {
+                if basis_mgr.refactor_failed() {
+                    return if basis_mgr.singular_basis() {
                         SimplexOutcome::SingularBasis
                     } else {
                         timeout_obj(state)
@@ -1655,8 +1657,8 @@ fn primal_simplex_aug(
 
         if basis_mgr.needs_refactor() {
             basis_mgr.refactor_if_needed_timed(a_aug, &state.basis, options.deadline);
-            if basis_mgr.refactor_failed {
-                return if basis_mgr.singular_basis {
+            if basis_mgr.refactor_failed() {
+                return if basis_mgr.singular_basis() {
                     SimplexOutcome::SingularBasis
                 } else {
                     timeout_obj(state)

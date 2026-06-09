@@ -8,7 +8,7 @@ use super::dual_common::outcome_to_result;
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving};
 use super::{build_bounded_standard_form_with_deadline, scale_upper_bounds, BoundedStandardForm};
 use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
-use crate::basis::{BasisManager, LuBasis};
+use crate::basis::{BasisManager, BasisMgr};
 use crate::options::{DualPricing, SolverOptions, WarmStartBasis};
 use crate::presolve::LpEquilibration;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
@@ -90,7 +90,7 @@ fn reconcile_bounded_terminal_state(
     }
 
     let mut basis_mgr =
-        match LuBasis::new_timed(a, &state.basis, options.max_etas, options.deadline) {
+        match BasisMgr::new_timed(a, &state.basis, options.max_etas, options.deadline, options.use_ft_basis) {
             Ok(bm) => bm,
             Err(crate::error::SolverError::DeadlineExceeded) => {
                 return BoundedTerminalReconcile::Timeout(bounded_obj_from_state(c, ubs, state));
@@ -136,7 +136,7 @@ fn make_leaving_strategy(pricing: DualPricing, m: usize) -> Box<dyn DualLeavingS
 fn warm_basis_is_dual_feasible(
     a: &crate::sparse::CscMatrix,
     c: &[f64],
-    basis_mgr: &mut LuBasis,
+    basis_mgr: &mut BasisMgr,
     basis: &[usize],
     is_basic: &[bool],
     n_price: usize,
@@ -204,7 +204,7 @@ pub(crate) fn solve_dual_advanced(
         if warm.basis.len() == m && warm.basis.iter().all(|&idx| idx < sf.n_total) {
             let mut basis = warm.basis.clone();
 
-            match LuBasis::new_timed(&a, &basis, options.max_etas, options.deadline) {
+            match BasisMgr::new_timed(&a, &basis, options.max_etas, options.deadline, options.use_ft_basis) {
                 Ok(mut basis_mgr) => {
                     // x_B = B^{-1} b_new (FTRANで計算)
                     let mut x_b_sv = SparseVec::from_dense(&b);
@@ -364,7 +364,7 @@ fn try_bounded(
     if let Some(warm) = &options.warm_start {
         if warm.basis.len() == bsf.m && warm.basis.iter().all(|&idx| idx < bsf.n_total) {
             if let Ok(mut basis_mgr) =
-                LuBasis::new_timed(&a, &warm.basis, options.max_etas, options.deadline)
+                BasisMgr::new_timed(&a, &warm.basis, options.max_etas, options.deadline, options.use_ft_basis)
             {
                 let mut x_b_sv = SparseVec::from_dense(&b);
                 basis_mgr.ftran(&mut x_b_sv);
@@ -608,7 +608,7 @@ fn try_bounded_phase1_eq(
             .zip(bsf.needs_artificial.iter())
             .any(|(post, orig)| post != orig);
         let x_b = if needs_ftran {
-            match LuBasis::new_timed(&a_aug, &basis, options.max_etas, options.deadline) {
+            match BasisMgr::new_timed(&a_aug, &basis, options.max_etas, options.deadline, options.use_ft_basis) {
                 Ok(mut bm) => {
                     let mut sv = SparseVec::from_dense(&b);
                     bm.ftran(&mut sv);

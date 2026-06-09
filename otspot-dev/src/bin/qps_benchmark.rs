@@ -585,6 +585,12 @@ fn main() {
     if dual_advanced_mode {
         opts.simplex_method = SimplexMethod::DualAdvanced;
     }
+    if matches!(
+        env::var("OTSPOT_FT_BASIS").as_deref(),
+        Ok("1") | Ok("true")
+    ) {
+        opts.use_ft_basis = true;
+    }
 
     // QP問題かどうかの判定用定数
     let eps_obj: f64 = 1e-2; // 目的関数照合の相対許容誤差: 1%

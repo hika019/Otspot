@@ -14,7 +14,7 @@
 //! for objective reporting on Optimal/Timeout/SingularBasis exits.
 
 use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
-use crate::basis::{BasisManager, LuBasis};
+use crate::basis::{BasisManager, BasisMgr};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// dimension m; the caller owns the allocation so a hot loop can reuse it.
 pub(super) fn compute_dual_vars_into(
     c: &[f64],
-    basis_mgr: &mut LuBasis,
+    basis_mgr: &mut impl BasisManager,
     basis: &[usize],
     y_out: &mut [f64],
 ) {
@@ -39,7 +39,7 @@ pub(super) fn compute_dual_vars_into(
 /// only need y once) use this. Hot loops should use `_into` + a reused buffer.
 pub(super) fn compute_dual_vars(
     c: &[f64],
-    basis_mgr: &mut LuBasis,
+    basis_mgr: &mut impl BasisManager,
     basis: &[usize],
     m: usize,
 ) -> Vec<f64> {
@@ -55,7 +55,7 @@ pub(super) fn compute_dual_vars(
 pub(super) fn compute_reduced_costs_into(
     a: &CscMatrix,
     c: &[f64],
-    basis_mgr: &mut LuBasis,
+    basis_mgr: &mut impl BasisManager,
     is_basic: &[bool],
     n_price: usize,
     basis: &[usize],
@@ -84,7 +84,7 @@ pub(super) fn compute_reduced_costs_into(
 pub(super) fn compute_reduced_costs(
     a: &CscMatrix,
     c: &[f64],
-    basis_mgr: &mut LuBasis,
+    basis_mgr: &mut impl BasisManager,
     is_basic: &[bool],
     n_price: usize,
     m: usize,
@@ -211,7 +211,7 @@ pub(super) fn lp_unbounded_ray_verified(
     n_enter: usize,
     options: &SolverOptions,
 ) -> bool {
-    let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
+    let mut basis_mgr = match BasisMgr::new_timed(a, basis, options.max_etas, options.deadline, options.use_ft_basis) {
         Ok(bm) => bm,
         Err(_) => return false,
     };
@@ -322,7 +322,7 @@ const GAMMA_DEADLINE_CHECK_INTERVAL: usize = 10;
 /// as a `Timeout` outcome so the solver stays within its time budget on large
 /// warm-start solves.
 pub(super) fn recompute_gamma_truth(
-    basis_mgr: &mut LuBasis,
+    basis_mgr: &mut impl BasisManager,
     m: usize,
     deadline: Option<std::time::Instant>,
     cancel_flag: Option<&AtomicBool>,

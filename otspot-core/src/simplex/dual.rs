@@ -9,7 +9,7 @@ use super::dual_common::{
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving, SteepestEdgePricing};
 use super::trace::IterTrace;
 use super::{timeout_result_with_incumbent, SimplexOutcome, StandardForm};
-use crate::basis::{BasisManager, LuBasis};
+use crate::basis::{BasisManager, BasisMgr};
 use crate::options::SolverOptions;
 use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
@@ -42,7 +42,7 @@ pub(crate) fn two_phase_dual_simplex(
 
             // Singular basis falls through to cold start.
             if let Ok(mut basis_mgr) =
-                LuBasis::new_timed(&a, &basis, options.max_etas, options.deadline)
+                BasisMgr::new_timed(&a, &basis, options.max_etas, options.deadline, options.use_ft_basis)
             {
                 // x_B = B^{-1} b_new
                 let mut x_b_sv = SparseVec::from_dense(&b);
@@ -206,7 +206,7 @@ pub(super) fn dual_simplex_core(
 ) -> SimplexOutcome {
     let max_iter = usize::MAX; // timeout is the real guard
 
-    let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
+    let mut basis_mgr = match BasisMgr::new_timed(a, basis, options.max_etas, options.deadline, options.use_ft_basis) {
         Ok(bm) => bm,
         Err(crate::error::SolverError::SingularBasis { .. }) => {
             return SimplexOutcome::SingularBasis;
@@ -303,8 +303,8 @@ pub(super) fn dual_simplex_core(
         if pivot_element.abs() < PIVOT_TOL {
             // Unstable pivot: refactor and recompute reduced costs.
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
-            if basis_mgr.refactor_failed {
-                if basis_mgr.singular_basis {
+            if basis_mgr.refactor_failed() {
+                if basis_mgr.singular_basis() {
                     return SimplexOutcome::SingularBasis;
                 }
                 let obj: f64 = basic_obj(c, basis, x_b);
@@ -349,8 +349,8 @@ pub(super) fn dual_simplex_core(
 
         if basis_mgr_needs_refactor_approx(_iter) {
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
-            if basis_mgr.refactor_failed {
-                if basis_mgr.singular_basis {
+            if basis_mgr.refactor_failed() {
+                if basis_mgr.singular_basis() {
                     return SimplexOutcome::SingularBasis;
                 }
                 let obj: f64 = basic_obj(c, basis, x_b);

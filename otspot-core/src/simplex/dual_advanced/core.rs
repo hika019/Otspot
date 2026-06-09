@@ -17,7 +17,7 @@ use super::super::pricing::DualLeavingStrategy;
 use super::super::trace::IterTrace;
 use super::super::SimplexOutcome;
 use super::ratio_test::{bland_ratio_test, HarrisRatioTest, RatioTestStrategy};
-use crate::basis::{BasisManager, LuBasis};
+use crate::basis::{BasisManager, BasisMgr};
 use crate::options::SolverOptions;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
@@ -180,7 +180,7 @@ thread_local! {
 fn compute_reduced_costs_timed(
     a: &CscMatrix,
     c: &[f64],
-    basis_mgr: &mut LuBasis,
+    basis_mgr: &mut impl BasisManager,
     is_basic: &[bool],
     n_price: usize,
     m: usize,
@@ -248,8 +248,7 @@ pub(crate) fn dual_simplex_core_advanced(
     iter_count_out: &mut usize,
 ) -> SimplexOutcome {
     debug_assert!(n_enter <= n_price);
-    // Step 1: LuBasis初期化
-    let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
+    let mut basis_mgr = match BasisMgr::new_timed(a, basis, options.max_etas, options.deadline, options.use_ft_basis) {
         Ok(bm) => bm,
         Err(crate::error::SolverError::SingularBasis { .. }) => {
             return SimplexOutcome::SingularBasis;
@@ -523,8 +522,8 @@ pub(crate) fn dual_simplex_core_advanced(
                 if no_candidate_refreshed_basis.as_deref() != Some(&*basis) {
                     no_candidate_refreshed_basis = Some(basis.to_vec());
                     basis_mgr.force_refactor_timed(a, basis, options.deadline);
-                    if basis_mgr.refactor_failed {
-                        if basis_mgr.singular_basis {
+                    if basis_mgr.refactor_failed() {
+                        if basis_mgr.singular_basis() {
                             return SimplexOutcome::SingularBasis;
                         }
                         let obj: f64 = basic_obj(c, basis, x_b);
@@ -584,7 +583,7 @@ pub(crate) fn dual_simplex_core_advanced(
                 rejected_entering[entering_col] = true;
             }
             basis_mgr.force_refactor_timed(a, basis, options.deadline);
-            if basis_mgr.refactor_failed {
+            if basis_mgr.refactor_failed() {
                 let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }
@@ -675,8 +674,8 @@ pub(crate) fn dual_simplex_core_advanced(
         // needs_refactor()でeta蓄積数ベースに判定（50反復固定廃止）
         if basis_mgr.needs_refactor() {
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
-            if basis_mgr.refactor_failed {
-                if basis_mgr.singular_basis {
+            if basis_mgr.refactor_failed() {
+                if basis_mgr.singular_basis() {
                     return SimplexOutcome::SingularBasis;
                 }
                 let obj: f64 = basic_obj(c, basis, x_b);

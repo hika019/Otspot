@@ -556,6 +556,13 @@ pub struct SolverOptions {
     /// `|obj − ref_obj| / (1 + |ref_obj|) < OBJ_MATCH_REL_TOL`.
     /// Used by bench harnesses.  `None` = no early-exit.
     pub known_optimal_obj: Option<f64>,
+
+    /// Use the Bartels-Golub-Reid FT-LU basis backend instead of eta-file LU.
+    ///
+    /// **Default: `false`** (eta-file LU, behaviour identical to all previous releases).
+    /// Set `true` to enable experimental FT-LU; bench results may differ from the
+    /// default path until calibration (Phase 3b) is complete.
+    pub use_ft_basis: bool,
 }
 
 /// Divisor for the `max_etas` heuristic: floor(m / MAX_ETAS_DIVISOR).
@@ -604,6 +611,7 @@ impl Default for SolverOptions {
             global_optimization: None,
             threads: 1,
             known_optimal_obj: None,
+            use_ft_basis: false,
         }
     }
 }
