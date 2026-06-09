@@ -198,6 +198,46 @@ fn cut_validity_brute_force() {
     }
 }
 
+/// **Validity for the UbOnly mapping (lb=-∞, ub finite):** the finite-lb problems
+/// never exercise the `x_std = ub - x_p` structural image. Here x has bounds
+/// (-∞, 2]; we enumerate a finite integer window and assert no feasible integer
+/// point is sliced. A sign error in the UbOnly image fails this test.
+#[test]
+fn cut_validity_ub_only_var() {
+    // min -x s.t. 2x<=3, x∈(-∞,2] integer. LP opt x=1.5 (UbOnly source). Integer
+    // feasible: x<=1.
+    let l = lp(
+        vec![-1.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(f64::NEG_INFINITY, 2.0)],
+    );
+    let milp = MilpProblem::new(l, vec![0]).unwrap();
+    let out = add_root_cuts(&milp, &SolverOptions::default(), &cuts_cfg(3));
+    let m_old = milp.lp.num_constraints;
+    let m_new = out.lp.num_constraints;
+    assert!(m_new > m_old, "a GMI cut must be generated for the UbOnly source");
+    for xi in -8..=2 {
+        let x = vec![xi as f64];
+        if !feasible_orig(&milp.lp, &x) {
+            continue;
+        }
+        let ax = out.lp.a.mat_vec_mul(&x).unwrap();
+        for i in m_old..m_new {
+            assert!(
+                ax[i] >= out.lp.b[i] - 1e-6,
+                "INVALID CUT (UbOnly): integer x={xi} removed by cut row {i}: {} < {}",
+                ax[i],
+                out.lp.b[i]
+            );
+        }
+    }
+}
+
 /// Cuts are generated AND they cut the fractional LP optimum. A no-op generator
 /// (empty cuts, or a cut equal to a trivially-satisfied inequality) fails here.
 #[test]
