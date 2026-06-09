@@ -1,8 +1,8 @@
-//! Forrest-Tomlin LU solve インフラ (Phase 2a)
+//! Bartels-Golub-Reid (BGR) 変種 LU solve インフラ (Phase 2a/2b)
 //!
 //! Phase 2a: 自前の可変 U 表現と FT-aware solve を構築し、
 //! 更新ゼロの状態で `LuFactorization` との solve 一致を確認する。
-//! Phase 2b でこの土台の上に FT rank-1 更新を実装する。
+//! Phase 2b でこの土台の上に BGR rank-1 更新を実装する。
 //!
 //! ## solve 順序
 //! - FTRAN: `x = P_c⁻¹ · U⁻¹ · ft_etas · L0⁻¹ · P_r · rhs`
@@ -16,8 +16,10 @@ use faer::sparse::SparseColMatRef;
 
 /// 可変 U 行列 (CSC, 行 index 昇順, 対角ポインタ保持)。
 ///
-/// Phase 2b の FT rank-1 更新が列を書き換える対象。
+/// Phase 2b の BGR rank-1 更新が列を書き換える対象。
 /// `diag_ptr[j]` は列 j の U[j,j] の row_ind/values 上の絶対インデックス。
+// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct MutableU {
     pub(crate) n: usize,
@@ -27,6 +29,8 @@ pub(crate) struct MutableU {
     pub(crate) diag_ptr: Vec<usize>,
 }
 
+// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
+#[allow(dead_code)]
 impl MutableU {
     /// faer の U 因子 (行 index 未ソート) から構築する。列内行 index を昇順にソートする。
     pub(crate) fn from_faer(n: usize, u_ref: &SparseColMatRef<'_, usize, f64>) -> Self {
@@ -172,6 +176,8 @@ fn forward_sub_l(n: usize, l_ref: &SparseColMatRef<'_, usize, f64>, y: &mut [f64
 
 /// faer の L^T (unit upper triangular) の後退代入。
 /// 対角は unit = 1 のため除算不要。
+// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
+#[allow(dead_code)]
 fn backward_sub_lt(n: usize, l_ref: &SparseColMatRef<'_, usize, f64>, y: &mut [f64]) {
     for j in (0..n).rev() {
         for (row, &val) in l_ref
@@ -186,7 +192,7 @@ fn backward_sub_lt(n: usize, l_ref: &SparseColMatRef<'_, usize, f64>, y: &mut [f
     }
 }
 
-/// FT 行更新の素 (elementary) 操作。working frame で `L0⁻¹` と `U` の間に作用する。
+/// BGR 行更新の素 (elementary) 操作。working frame で `L0⁻¹` と `U` の間に作用する。
 ///
 /// `Swap` は部分ピボットの隣接行交換、`Axpy` は `v[target] -= mult · v[source]` の
 /// 行消去。`U_new = (Op_k · … · Op_1) · U_H` を満たすよう順に蓄積され、ftran では
@@ -201,7 +207,7 @@ enum FtOp {
     },
 }
 
-/// FT 行操作を ftran 方向 (記録順) に適用する。
+/// BGR 行操作を ftran 方向 (記録順) に適用する。
 fn apply_ft_ops_ftran(ops: &[FtOp], v: &mut [f64]) {
     for op in ops {
         match *op {
@@ -215,7 +221,9 @@ fn apply_ft_ops_ftran(ops: &[FtOp], v: &mut [f64]) {
     }
 }
 
-/// FT 行操作を btran 方向 (転置・逆順) に適用する。
+/// BGR 行操作を btran 方向 (転置・逆順) に適用する。
+// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
+#[allow(dead_code)]
 fn apply_ft_ops_btran(ops: &[FtOp], v: &mut [f64]) {
     for op in ops.iter().rev() {
         match *op {
@@ -229,11 +237,13 @@ fn apply_ft_ops_btran(ops: &[FtOp], v: &mut [f64]) {
     }
 }
 
-/// Forrest-Tomlin LU solve 構造体。
+/// Bartels-Golub-Reid (BGR) 変種 LU solve 構造体。
 ///
 /// `L0` (faer unit-lower) と行置換 `Pr` は初期分解で固定し、基底列の差替を
 /// `u_mat` の書き換え + 行 eta (`ft_ops`) + 列巡回置換 (`col_perm`) で吸収する
-/// (真の Forrest-Tomlin: L 固定・U と row-eta が成長)。
+/// (BGR 変種: L 固定・U と row-eta が成長)。
+// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
+#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct FtLu<'a> {
     pub(crate) n: usize,
@@ -252,6 +262,8 @@ pub(crate) struct FtLu<'a> {
     needs_refactor: bool,
 }
 
+// TODO(Phase3): FtLu が simplex に配線された後、#[allow(dead_code)] を外す。
+#[allow(dead_code)]
 impl<'a> FtLu<'a> {
     pub(crate) fn new(a: &'a CscMatrix, basis: &[usize]) -> Result<Self, SolverError> {
         let lu0 = LuFactorization::factorize_timed(a, basis, None)?;
@@ -337,7 +349,7 @@ impl<'a> FtLu<'a> {
         *rhs = SparseVec::from_dense(&dense);
     }
 
-    /// Forrest-Tomlin 基底更新: basis 位置 `leaving_row` の列を `entering_col` (A の列) で
+    /// BGR (Bartels-Golub-Reid) 基底更新: basis 位置 `leaving_row` の列を `entering_col` (A の列) で
     /// 置換する。
     ///
     /// 手順 (working frame):
@@ -348,7 +360,7 @@ impl<'a> FtLu<'a> {
     ///    隣接行交換)。乗数・交換を `FtOp` 列に記録。
     /// 4. 記録した行操作を bump 右側の列 (>t) に sparse に replay し、`u_mat` を upper-triangular
     ///    に書き戻す (PFI と異なり U の値自体を書き換える)。col_perm に巡回を畳み込む。
-    /// 5. 最終 pivot が小さければ `needs_refactor`、`< DROP_TOL` なら `SingularBasis`。
+    /// 5. 中間 pivot と最終 pivot が小さければ `needs_refactor`、`< DROP_TOL` なら `SingularBasis`。
     #[allow(dead_code)]
     pub(crate) fn update(
         &mut self,
@@ -448,6 +460,10 @@ impl<'a> FtLu<'a> {
             if pivot.abs() < DROP_TOL {
                 self.needs_refactor = true;
                 return Err(SolverError::SingularBasis { step: leaving_row });
+            }
+            // 中間 bump pivot が不安定 → backward_sub の除数として精度劣化するため refactor 要求。
+            if pivot.abs() < PIVOT_STABILITY_THRESHOLD * snorm_inf {
+                self.needs_refactor = true;
             }
             let mult = bump[(j + 1) * bsz + j] / pivot;
             if mult != 0.0 {
@@ -977,6 +993,7 @@ mod tests {
 
     /// 主 sentinel: 逐次ランダム列差替で FtLu が毎回フル再分解 (ground truth) と
     /// 1e-9 一致。U が上三角を保ち、値が実際に書き換わり、ln|det| 一致。≥5 seed。
+    /// bump カバレッジ: t>c / partial-pivot swap / bsz>=3 が各1回以上発生を assert。
     #[test]
     fn test_ftlu_update_matches_full_refactor() {
         let sizes = [20usize, 35, 50];
@@ -984,6 +1001,11 @@ mod tests {
         let n_updates = 50usize;
 
         let nvar = 4usize;
+        // bump カバレッジカウンタ: 全 (m, seed) の総計で assert。
+        let mut cnt_bump = 0usize;
+        let mut cnt_pivot_swap = 0usize;
+        let mut cnt_bsz3 = 0usize;
+
         for &m in &sizes {
             for &seed in &seeds {
                 let a = gen_update_problem(m, nvar, seed);
@@ -993,6 +1015,7 @@ mod tests {
 
                 let mut applied = 0usize;
                 let mut attempts = 0usize;
+
                 while applied < n_updates && attempts < n_updates * 8 {
                     attempts += 1;
                     // 支配行 r を保つ列差替: 位置 r に支配行 r の別 variant を入れる。
@@ -1010,6 +1033,37 @@ mod tests {
                         Ok(lu) => lu,
                         Err(_) => continue,
                     };
+
+                    // bump カバレッジ計測 (update 前に spike と U を調べる)。
+                    let (s_dbg, c_dbg, t_dbg) = ft.debug_spike(q, r);
+                    if t_dbg > c_dbg {
+                        cnt_bump += 1;
+                        let bsz_dbg = t_dbg - c_dbg + 1;
+                        if bsz_dbg >= 3 {
+                            cnt_bsz3 += 1;
+                        }
+                        // partial-pivot swap が起きたか: 巡回後の bump 先頭列は旧 U 列 c+1 の
+                        // 行 c..=t スライス。bump[1,0] > bump[0,0] ↔ 旧 U[c+1,c+1] > 旧 U[c,c+1]。
+                        let col_c1 = c_dbg + 1;
+                        let u_diag = ft
+                            .u_mat
+                            .col_ptr[col_c1]..ft.u_mat.col_ptr[col_c1 + 1];
+                        let mut bump00 = 0.0f64;
+                        let mut bump10 = 0.0f64;
+                        for k in u_diag {
+                            let row = ft.u_mat.row_ind[k];
+                            let val = ft.u_mat.values[k];
+                            if row == c_dbg {
+                                bump00 = val;
+                            } else if row == c_dbg + 1 {
+                                bump10 = val;
+                            }
+                        }
+                        if bump10.abs() > bump00.abs() {
+                            cnt_pivot_swap += 1;
+                        }
+                        let _ = s_dbg; // used via debug_spike; silence unused warning
+                    }
 
                     let u_before = ft.u_mat.values.clone();
                     ft.update(q, r)
@@ -1095,6 +1149,10 @@ mod tests {
                 );
             }
         }
+        // bump カバレッジ (全 (m, seed) 総計): t>c / bsz>=3 / partial-pivot swap が各1回以上。
+        assert!(cnt_bump >= 1, "no bump (t>c) path in any config");
+        assert!(cnt_bsz3 >= 1, "no bsz>=3 path in any config");
+        assert!(cnt_pivot_swap >= 1, "no partial-pivot swap in any config");
     }
 
     /// no-op proof: 巡回シフト+Hessenberg 消去を省く (素朴な列置換) と U に subdiagonal が
@@ -1182,6 +1240,99 @@ mod tests {
         ft.ftran(&mut x);
         let resid = max_abs_diff(&basis_mat_vec(&a, &new_basis, &x), &rhs);
         assert!(resid < 1e-9, "ftran residual={resid:.2e}");
+    }
+
+    /// ill-conditioned sentinel: 退化に近い基底で BGR update の match-or-refactor 不変条件。
+    ///
+    /// 不変条件: 各ケースで「FT solve がフル再分解と tol 一致」または
+    /// 「needs_refactor が立ち、FtLu::new 後に一致が回復」のどちらかが必ず成立。
+    /// P2 の中間 pivot 安定性チェックが無効だと、ill-cond ケースで不一致かつ
+    /// needs_refactor 未発火になり fail する (load-bearing sentinel)。
+    #[test]
+    fn test_ftlu_update_ill_conditioned_match_or_refactor() {
+        // ill-cond 基底生成: 対角が強いが一部列が互いに近い (大きな条件数)。
+        // B_base = diag(10, 10, .., 10) + off-diag 0.1 * ones (rank-1扰動)。
+        // entering_col は B の1列を微小スカラー倍 + 別行への成分を追加して
+        // bump 中間 pivot が snorm_inf の PIVOT_STABILITY_THRESHOLD 付近になるよう調整。
+        let m = 6usize;
+        // A の列: 0..m は単位ベクトル×10 (初期基底 = 対角)、m..2m は ill-cond 列。
+        // ill-cond 列 j (j in m..2m): 行 j%m に 10.0、行 (j+1)%m に 1e-3 (小 pivot を誘発)。
+        let mut rows_a = Vec::new();
+        let mut cols_a = Vec::new();
+        let mut vals_a: Vec<f64> = Vec::new();
+        // 初期基底列 (単位×10)。
+        for j in 0..m {
+            rows_a.push(j);
+            cols_a.push(j);
+            vals_a.push(10.0);
+        }
+        // ill-cond 列: 支配行 j%m に 10.0、次行に ε=5e-3 (小中間 pivot を誘発)。
+        let eps = 5e-3f64;
+        for j in 0..m {
+            rows_a.push(j);
+            cols_a.push(m + j);
+            vals_a.push(10.0);
+            // 次行に小 off-diagonal (bump を作り中間 pivot が小さくなる)。
+            let next = (j + 1) % m;
+            rows_a.push(next);
+            cols_a.push(m + j);
+            vals_a.push(eps);
+        }
+        let a = CscMatrix::from_triplets(&rows_a, &cols_a, &vals_a, m, 2 * m).unwrap();
+
+        let init_basis: Vec<usize> = (0..m).collect();
+        let mut match_cnt = 0usize;
+        let mut refactor_cnt = 0usize;
+
+        // 各位置 r で ill-cond 列 m+r を入基。
+        for r in 0..m {
+            let q = m + r;
+            let mut ft = FtLu::new(&a, &init_basis).unwrap();
+            let mut basis_after = init_basis.clone();
+            basis_after[r] = q;
+
+            let ref_lu = match LuFactorization::factorize_timed(&a, &basis_after, None) {
+                Ok(lu) => lu,
+                Err(_) => continue,
+            };
+            if ft.update(q, r).is_err() {
+                continue;
+            }
+
+            let rhs = gen_rhs(m, 42 + r as u64);
+            let mut x_ft = rhs.clone();
+            ft.ftran(&mut x_ft);
+            let mut x_ref = rhs.clone();
+            solve_ftran(&ref_lu, &mut x_ref);
+            let xscale = 1.0 + x_ref.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+            let rel = max_abs_diff(&x_ft, &x_ref) / xscale;
+
+            if rel < 1e-6 {
+                // FT solve が参照と一致: OK。
+                match_cnt += 1;
+            } else {
+                // 不一致ならば needs_refactor が必ず立っていること。
+                assert!(
+                    ft.needs_refactor(),
+                    "r={r}: FT solve inaccurate (rel={rel:.2e}) but needs_refactor not set — P2 fix missing?"
+                );
+                // 再分解後は一致が回復する。
+                let ft2 = FtLu::new(&a, &basis_after).unwrap();
+                let mut x_re = rhs.clone();
+                ft2.ftran(&mut x_re);
+                let rel2 = max_abs_diff(&x_re, &x_ref) / xscale;
+                assert!(
+                    rel2 < 1e-9,
+                    "r={r}: after FtLu::new refactor rel={rel2:.2e} still inaccurate"
+                );
+                refactor_cnt += 1;
+            }
+        }
+        // 少なくとも1ケースは検証できた。
+        assert!(
+            match_cnt + refactor_cnt >= 1,
+            "no ill-cond case was exercised"
+        );
     }
 
     /// 退化基底 (入基列が既存基底列の複製) で SingularBasis を返し、state 不変。
