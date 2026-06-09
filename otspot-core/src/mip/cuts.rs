@@ -45,6 +45,10 @@ const MIN_OBJ_IMPROVEMENT_REL: f64 = 1e-4;
 /// Reject a cut whose coefficient magnitudes span more than this ratio: such a
 /// row is numerically unreliable in f64 (≈9 orders is already at the edge).
 const GMI_MAX_COEF_DYNAMISM: f64 = 1e9;
+/// Fraction of the remaining solve budget root cut generation may consume. The
+/// rest is reserved for branch-and-bound, so cuts never starve the search (an
+/// unbudgeted loop on a large LP can eat the whole deadline → B&B runs 0 nodes).
+const CUT_TIME_FRACTION: f64 = 0.3;
 
 /// A generated cut `coeffs · x >= rhs` (always stored as a `Ge` row over the
 /// original variable space).
@@ -105,54 +109,106 @@ pub(crate) fn add_root_cuts(
         cfg.max_cut_rounds
     };
 
-    let mut lp = milp.lp.clone();
+    // `committed` is always an LP that solves cleanly; cuts are committed only
+    // after the candidate is re-validated with the *same* solver the B&B uses, so
+    // the returned root is never one B&B cannot solve. (Higher-round GMI cuts can
+    // degrade numerical conditioning; without this guard an unsolvable root would
+    // be handed to B&B and surface as a spurious Timeout.)
+    let mut committed = milp.lp.clone();
     let mut prev_obj: Option<f64> = None;
+    // Hard ceiling on total cut rows so the relaxation never more than doubles in
+    // size — beyond this, every downstream B&B-node LP solve slows enough to starve
+    // the search (observed: 6+ rounds on p0201 drive B&B to 0 nodes).
+    let max_total_cuts = milp.lp.num_constraints.max(MAX_CUTS_PER_ROUND);
+    let mut total_cuts = 0usize;
+
+    // Bound cut work to a fraction of the remaining budget (reserves time for B&B).
+    let cut_deadline = options.deadline.map(|d| {
+        let now = std::time::Instant::now();
+        now + d.saturating_duration_since(now).mul_f64(CUT_TIME_FRACTION)
+    });
 
     for _ in 0..max_rounds {
-        if deadline_passed(options) {
+        if deadline_passed(cut_deadline) {
             break;
         }
-        let res = solve_cut_lp(&lp, options);
+        // Primal solve (no presolve) gives a legacy-standard-form basis for GMI.
+        let res = solve_cut_lp(&committed, options, cut_deadline);
         if res.status != SolveStatus::Optimal {
             break;
         }
         let Some(ws) = res.warm_start_basis.as_ref() else {
             break;
         };
-        // Stop when the LP bound stops improving meaningfully.
         if let Some(po) = prev_obj {
             let scale = 1.0_f64.max(po.abs());
             if (res.objective - po).abs() <= MIN_OBJ_IMPROVEMENT_REL * scale {
-                // First round always proceeds (prev_obj None); here the bound is
-                // (near-)stalled, so further rounds are unlikely to pay off.
                 break;
             }
         }
         prev_obj = Some(res.objective);
 
-        let cuts = generate_round(&lp, &integer_mask, &res.solution, &ws.basis);
+        let cuts = generate_round(&committed, &integer_mask, &res.solution, &ws.basis);
         if cuts.is_empty() {
             break;
         }
-        lp = append_ge_rows(&lp, &cuts);
+        let candidate = append_ge_rows(&committed, &cuts);
+        // Reject the round if the augmented LP no longer solves to Optimal under
+        // the B&B solver (numerically unstable cuts): keep the last good LP.
+        let check = solve_validate(&candidate, options, cut_deadline);
+        if check.status != SolveStatus::Optimal {
+            break;
+        }
+        committed = candidate;
+        total_cuts += cuts.len();
+        if total_cuts >= max_total_cuts {
+            break;
+        }
     }
 
     MilpProblem {
-        lp,
+        lp: committed,
         integer_vars: milp.integer_vars.clone(),
     }
 }
 
+/// Solve the cut-augmented candidate with the solver / presolve the B&B will use
+/// at the root, to confirm the added cuts did not make the relaxation
+/// numerically unsolvable.
+fn solve_validate(
+    lp: &LpProblem,
+    options: &SolverOptions,
+    deadline: Option<std::time::Instant>,
+) -> crate::problem::SolverResult {
+    let opts = SolverOptions {
+        recover_warm_start_basis: false,
+        warm_start: None,
+        warm_start_lp: None,
+        deadline,
+        timeout_secs: None,
+        primal_tol: options.primal_tol,
+        dual_tol: options.dual_tol,
+        threads: options.threads,
+        tolerance: options.tolerance,
+        ..SolverOptions::default()
+    };
+    crate::lp::solve_lp_with(lp, &opts)
+}
+
 /// Solve the cut-generation LP via the primal simplex with presolve disabled so
 /// the returned basis lives in `build_standard_form(lp)`'s column space.
-fn solve_cut_lp(lp: &LpProblem, options: &SolverOptions) -> crate::problem::SolverResult {
+fn solve_cut_lp(
+    lp: &LpProblem,
+    options: &SolverOptions,
+    deadline: Option<std::time::Instant>,
+) -> crate::problem::SolverResult {
     let opts = SolverOptions {
         presolve: false,
         simplex_method: SimplexMethod::Primal,
         recover_warm_start_basis: true,
         warm_start: None,
         warm_start_lp: None,
-        deadline: options.deadline,
+        deadline,
         timeout_secs: None,
         primal_tol: options.primal_tol,
         dual_tol: options.dual_tol,
@@ -162,10 +218,8 @@ fn solve_cut_lp(lp: &LpProblem, options: &SolverOptions) -> crate::problem::Solv
     crate::lp::solve_lp_with(lp, &opts)
 }
 
-fn deadline_passed(options: &SolverOptions) -> bool {
-    options
-        .deadline
-        .is_some_and(|d| std::time::Instant::now() >= d)
+fn deadline_passed(deadline: Option<std::time::Instant>) -> bool {
+    deadline.is_some_and(|d| std::time::Instant::now() >= d)
 }
 
 /// Generate one round of GMI cuts from the optimal `basis` (legacy std-form

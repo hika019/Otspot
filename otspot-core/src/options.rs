@@ -249,8 +249,10 @@ pub const DEFAULT_MIP_MAX_DEPTH: usize = 1_000;
 /// default would change node counts / timings of every existing MILP solve. The
 /// effect is opted into explicitly (sentinels + bench show the ON benefit).
 pub const DEFAULT_MIP_CUTS: bool = false;
-/// `max_cut_rounds == 0` ⇒ use this many root cut rounds (auto).
-pub const DEFAULT_MAX_CUT_ROUNDS: usize = 10;
+/// `max_cut_rounds == 0` ⇒ use this many root cut rounds (auto). Kept small: most
+/// GMI gain is in the first few rounds, and deep rounds bloat the LP (slowing
+/// every downstream B&B node) for diminishing bound improvement.
+pub const DEFAULT_MAX_CUT_ROUNDS: usize = 5;
 
 /// MILP/MIQP branch-and-bound config.
 ///

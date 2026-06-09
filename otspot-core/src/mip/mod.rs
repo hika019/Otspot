@@ -83,6 +83,13 @@ pub struct MipStats {
 
     /// Whether the feasibility pump found an initial incumbent before branch-and-bound.
     pub fp_incumbent_found: bool,
+
+    /// Objective of the first trusted (Optimal) root relaxation, i.e. the root LP
+    /// bound used to start branch-and-bound. With cuts enabled this reflects the
+    /// cut-tightened relaxation, so comparing it against the cuts-off value
+    /// isolates root gap closure from downstream node-count noise.
+    /// `NEG_INFINITY` when no root relaxation solved to Optimal.
+    pub root_lp_bound: f64,
 }
 
 /// Solve a MILP to (relative) ε-optimality via branch-and-bound.
@@ -240,6 +247,7 @@ fn solve_mip_core<R: Relaxation>(
 ) -> (SolverResult, MipStats) {
     let mut stats = MipStats {
         approx_bounds_bytes_per_node: problem.num_vars() * 2 * std::mem::size_of::<f64>(),
+        root_lp_bound: f64::NEG_INFINITY,
         ..MipStats::default()
     };
 
@@ -374,6 +382,11 @@ fn solve_mip_core<R: Relaxation>(
 
         if trusted {
             // Optimal relaxation objective is a valid lower bound for this region.
+            // The first processed node is the root (best-bound queue, root pushed
+            // first): record its bound to isolate root cut gap closure.
+            if stats.nodes_processed == 1 {
+                stats.root_lp_bound = res.objective;
+            }
             let node_lb = node.lower_bound.max(res.objective);
 
             if let Some(inc) = state.incumbent_obj {

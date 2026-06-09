@@ -83,7 +83,7 @@ fn feasible_orig(p: &LpProblem, x: &[f64]) -> bool {
 
 /// Solve the LP root the way the cut generator does (primal, no presolve).
 fn lp_root(p: &LpProblem) -> crate::problem::SolverResult {
-    super::solve_cut_lp(p, &SolverOptions::default())
+    super::solve_cut_lp(p, &SolverOptions::default(), None)
 }
 
 // ── Test problems (all-integer, small box ⇒ brute-forceable) ───────────────
