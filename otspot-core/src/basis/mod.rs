@@ -4,6 +4,7 @@
 //! ピボット更新（eta ファイル）および定期的な再因子分解をサポートする。
 
 pub(crate) mod eta;
+pub(crate) mod ft;
 pub(crate) mod lu;
 pub(crate) mod refactor;
 
