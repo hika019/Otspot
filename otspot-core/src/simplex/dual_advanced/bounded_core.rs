@@ -166,10 +166,29 @@ const DEADLINE_CHECK_INTERVAL: usize = 512;
 /// blow-up. Tune against `timeout=1000, eps=1e-6` before treating as final.
 const PARTIAL_PRICE_CHUNK: usize = 2048;
 
+/// Read `OTSPOT_PP_CHUNK` from the environment once; `None` means "not set / invalid".
+///
+/// Cached via `OnceLock` so repeated calls are a single pointer load.
+/// Intended for bench calibration only — production default remains
+/// `PARTIAL_PRICE_CHUNK`.
+fn env_pp_chunk() -> Option<usize> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Option<usize>> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("OTSPOT_PP_CHUNK")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+    })
+}
+
 /// Effective partial-pricing window for a given `n_price`, clamped to
-/// `[1, n_price]`. A `#[cfg(test)]` override lets sentinels drive small windows
-/// on small LPs without touching the production constant; release builds inline
-/// the constant and elide the override branch.
+/// `[1, n_price]`.
+///
+/// Priority (highest first):
+/// 1. `#[cfg(test)]` thread-local override (unit-test sentinels).
+/// 2. `OTSPOT_PP_CHUNK` environment variable (bench calibration).
+/// 3. `PARTIAL_PRICE_CHUNK` named constant (production default).
 fn partial_price_chunk(n_price: usize) -> usize {
     let base = {
         #[cfg(test)]
@@ -177,13 +196,15 @@ fn partial_price_chunk(n_price: usize) -> usize {
             let o = PARTIAL_PRICE_CHUNK_OVERRIDE.with(|c| c.get());
             if o != 0 {
                 o
+            } else if let Some(v) = env_pp_chunk() {
+                v
             } else {
                 PARTIAL_PRICE_CHUNK
             }
         }
         #[cfg(not(test))]
         {
-            PARTIAL_PRICE_CHUNK
+            env_pp_chunk().unwrap_or(PARTIAL_PRICE_CHUNK)
         }
     };
     base.clamp(1, n_price.max(1))
