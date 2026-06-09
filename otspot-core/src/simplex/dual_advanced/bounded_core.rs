@@ -3288,16 +3288,13 @@ mod tests {
         let _guard = PrimalAlphaSvGuard::disabled();
         let outcome = bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters);
 
-        match outcome {
-            SimplexOutcome::Optimal(art_sum, _) => {
-                assert!(
-                    art_sum > 1e-6,
-                    "no-op proof FAILED: corrupt (zero) alpha_sv still reaches art_sum≈0 ({art_sum:.6e}); \
-                     the from_dense conversion is NOT load-bearing (fix had no effect on this path)"
-                );
-            }
+        if let SimplexOutcome::Optimal(art_sum, _) = outcome {
+            assert!(
+                art_sum > 1e-6,
+                "no-op proof FAILED: corrupt (zero) alpha_sv still reaches art_sum≈0 ({art_sum:.6e}); \
+                 the from_dense conversion is NOT load-bearing (fix had no effect on this path)"
+            );
             // Any non-Optimal outcome also demonstrates corruption.
-            _ => {}
         }
     }
 }
