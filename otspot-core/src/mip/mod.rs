@@ -6,6 +6,7 @@
 //! MIQP is out of scope and reported as [`SolveStatus::NonConvex`].
 
 pub(crate) mod branch;
+pub(crate) mod cuts;
 pub(crate) mod heuristics;
 pub(crate) mod node;
 pub(crate) mod presolve;
@@ -120,33 +121,36 @@ pub fn solve_milp_with_stats(
     // integer rounding return early here before entering the B&B.
     if !problem.integer_vars.is_empty() {
         let mask = integer_mask(problem.lp.num_vars, &problem.integer_vars);
-        match presolve::tighten_integer_bounds(&problem.lp, &mask) {
+        // Root presolve: coefficient propagation tightens integer bounds. Build the
+        // effective problem (bound-tightened clone or the original) so the cut and
+        // B&B stages share one code path.
+        let problem_bt: MilpProblem = match presolve::tighten_integer_bounds(&problem.lp, &mask) {
             None => return (SolverResult::infeasible(), MipStats::default()),
             Some(tightened) if tightened != problem.lp.bounds => {
                 let mut lp_bt = problem.lp.clone();
                 lp_bt.bounds = tightened;
-                let problem_bt = MilpProblem {
+                MilpProblem {
                     lp: lp_bt,
                     integer_vars: problem.integer_vars.clone(),
-                };
-                let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
-                    &problem_bt.lp,
-                    &problem_bt.integer_vars,
-                    cfg.integer_feas_tol,
-                    &opts_with_dl,
-                );
-                return solve_mip_core(&problem_bt, &opts_with_dl, cfg, mask, fp_inc);
+                }
             }
-            Some(_) => {
-                let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
-                    &problem.lp,
-                    &problem.integer_vars,
-                    cfg.integer_feas_tol,
-                    &opts_with_dl,
-                );
-                return solve_mip_core(problem, &opts_with_dl, cfg, mask, fp_inc);
-            }
-        }
+            Some(_) => problem.clone(),
+        };
+        // Root GMI cuts tighten the LP relaxation without removing any
+        // integer-feasible point, so the optimum is unchanged while the tree
+        // shrinks. The added rows leave `num_vars` (hence `mask`) untouched.
+        let effective = if cfg.cuts {
+            cuts::add_root_cuts(&problem_bt, &opts_with_dl, cfg)
+        } else {
+            problem_bt
+        };
+        let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
+            &effective.lp,
+            &effective.integer_vars,
+            cfg.integer_feas_tol,
+            &opts_with_dl,
+        );
+        return solve_mip_core(&effective, &opts_with_dl, cfg, mask, fp_inc);
     }
     solve_mip_with_stats(problem, &opts_with_dl, cfg)
 }
