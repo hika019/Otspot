@@ -136,9 +136,8 @@ fn p_two_le() -> MilpProblem {
     MilpProblem::new(l, vec![0, 1]).unwrap()
 }
 
-/// 3-var lb-only (ub=inf) integer problem: constraint slacks are continuous in
-/// GMI, structural cols are pure lb-shifts (no UB rows).
-/// min -x-y-z s.t. 3x+2y+4z<=7, x,y,z>=0 int (bounded above for enumeration).
+/// 3-var bounded integer problem: min -x-y-z s.t. 3x+2y+4z<=7, x,y,z∈[0,3].
+/// UB rows ARE generated (bounds are finite); structural cols are LbShift.
 fn p_lb_only() -> MilpProblem {
     let l = lp(
         vec![-1.0, -1.0, -1.0],
@@ -149,6 +148,22 @@ fn p_lb_only() -> MilpProblem {
         vec![7.0],
         vec![ConstraintType::Le],
         vec![(0.0, 3.0), (0.0, 3.0), (0.0, 3.0)],
+    );
+    MilpProblem::new(l, vec![0, 1, 2]).unwrap()
+}
+
+/// True lb-only (ub=+∞): min -x-y-z s.t. 3x+2y+4z<=7, x,y,z≥0 (no UB rows).
+/// Structural cols are pure LbShift; no UB slack is generated.
+fn p_lb_only_inf() -> MilpProblem {
+    let l = lp(
+        vec![-1.0, -1.0, -1.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[3.0, 2.0, 4.0],
+        1,
+        vec![7.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY), (0.0, f64::INFINITY)],
     );
     MilpProblem::new(l, vec![0, 1, 2]).unwrap()
 }
@@ -374,6 +389,287 @@ fn tableau_row_matches_dense() {
             );
         }
     }
+}
+
+/// Enumerate integer points in `[lo, hi]^n_vars` (used when some bounds are ∞).
+fn enumerate_int_window(n_vars: usize, lo: i64, hi: i64) -> Vec<Vec<f64>> {
+    let mut pts = vec![vec![]];
+    for _ in 0..n_vars {
+        let mut next = Vec::new();
+        for p in &pts {
+            for v in lo..=hi {
+                let mut q = p.clone();
+                q.push(v as f64);
+                next.push(q);
+            }
+        }
+        pts = next;
+    }
+    pts
+}
+
+/// Shared validity+non-vacuous check: assert that cuts were generated (non-vacuous)
+/// and that every feasible integer point in `int_pts` satisfies every cut.
+fn assert_cuts_valid_nonvacuous(
+    milp: &MilpProblem,
+    int_pts: &[Vec<f64>],
+    name: &str,
+    rounds: usize,
+) -> usize {
+    let out = add_root_cuts(milp, &SolverOptions::default(), &cuts_cfg(rounds));
+    let m_old = milp.lp.num_constraints;
+    let m_new = out.lp.num_constraints;
+    assert!(
+        m_new > m_old,
+        "{name}: no cuts generated (LP relaxation must be fractional for non-vacuous check)"
+    );
+    for x in int_pts {
+        if !feasible_orig(&milp.lp, x) {
+            continue;
+        }
+        let ax = out.lp.a.mat_vec_mul(x).unwrap();
+        for i in m_old..m_new {
+            assert_eq!(out.lp.constraint_types[i], ConstraintType::Ge);
+            assert!(
+                ax[i] >= out.lp.b[i] - 1e-6,
+                "{name}: INVALID CUT — integer point {x:?} removed by cut row {i}: \
+                 lhs={} < rhs={}",
+                ax[i],
+                out.lp.b[i]
+            );
+        }
+    }
+    m_new - m_old
+}
+
+/// **Negative lb (lb-shift in negative direction):** x,y ∈ [-1, 2] forces
+/// `x_std = x - (-1) = x + 1` with offset = -1.  The LP relaxation is
+/// fractional at x=y=0.75; integer opt is (1,0) or (0,1).
+#[test]
+fn cut_validity_negative_lb() {
+    // min -x-y  s.t. 2x+2y <= 3,  x,y ∈ [-1, 2] integer.
+    // LP opt: x=y=0.75 (fractional). lb-shift offset = -1 (negative).
+    let l = lp(
+        vec![-1.0, -1.0],
+        &[0, 0],
+        &[0, 1],
+        &[2.0, 2.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(-1.0, 2.0), (-1.0, 2.0)],
+    );
+    let milp = MilpProblem::new(l, vec![0, 1]).unwrap();
+    let pts = enumerate_int_box(&milp.lp.bounds);
+    let n = assert_cuts_valid_nonvacuous(&milp, &pts, "neg_lb", 5);
+    assert!(n > 0, "negative-lb path must generate ≥1 cut");
+}
+
+/// **Negative RHS / row-negation path:** Le constraint with coefficient signs
+/// that produce `b_shifted < 0`, triggering `row_negated = true` in
+/// `build_standard_form`.  Checks that `classify_slack_cols` tracks the
+/// ConstraintLe mapping correctly through the sign flip.
+#[test]
+fn cut_validity_negative_rhs_row_negation() {
+    // min x+y  s.t. -2x-2y <= -3,  x,y ∈ [0, 2] integer.
+    // Equivalent to 2x+2y >= 3. LP opt: x=y=0.75 (fractional).
+    // b_shifted = -3 < 0 → Le row is negated in standard form.
+    let l = lp(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[-2.0, -2.0],
+        1,
+        vec![-3.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 2.0), (0.0, 2.0)],
+    );
+    let milp = MilpProblem::new(l, vec![0, 1]).unwrap();
+    let pts = enumerate_int_box(&milp.lp.bounds);
+    let n = assert_cuts_valid_nonvacuous(&milp, &pts, "neg_rhs_row_negation", 5);
+    assert!(n > 0, "row-negation path must generate ≥1 cut");
+}
+
+/// **Le and Ge mixed in the same problem:** exercises the two slack-kind paths
+/// (`ConstraintLe` and `ConstraintGe`) within a single cut round.
+#[test]
+fn cut_validity_mixed_le_ge() {
+    // min -x-y  s.t. 2x+2y<=3 (Le), x+y>=0 (Ge),  x,y ∈ [0, 2] integer.
+    // LP opt: x=y=0.75; Ge is slack at opt. Integer opt: (1,0) or (0,1).
+    let l = lp(
+        vec![-1.0, -1.0],
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 1],
+        &[2.0, 2.0, 1.0, 1.0],
+        2,
+        vec![3.0, 0.0],
+        vec![ConstraintType::Le, ConstraintType::Ge],
+        vec![(0.0, 2.0), (0.0, 2.0)],
+    );
+    let milp = MilpProblem::new(l, vec![0, 1]).unwrap();
+    let pts = enumerate_int_box(&milp.lp.bounds);
+    let n = assert_cuts_valid_nonvacuous(&milp, &pts, "mixed_le_ge", 5);
+    assert!(n > 0, "mixed Le/Ge path must generate ≥1 cut");
+}
+
+/// **True lb-only (ub = +∞):** UB rows are NOT generated for these variables
+/// (only the Le constraint adds slacks). Exercises the lb-only structural path
+/// where `classify_slack_cols` sees only constraint slacks, no UB-row slacks.
+#[test]
+fn cut_validity_true_lb_only_inf_ub() {
+    let milp = p_lb_only_inf();
+    // Enumerate in window [0,4]^3 — all feasible integer points satisfy 3x+2y+4z<=7
+    // with x,y,z>=0, so x<=2, y<=3, z<=1; window [0,4] is conservative.
+    let pts = enumerate_int_window(3, 0, 4);
+    let n = assert_cuts_valid_nonvacuous(&milp, &pts, "true_lb_only_inf", 5);
+    assert!(n > 0, "true lb-only (ub=∞) path must generate ≥1 cut");
+}
+
+/// **Multi-var UbOnly columns + Eq row:** two UbOnly variables (lb=-∞, ub=3)
+/// plus an equality constraint (no slack column). Exercises the Eq-row no-slack
+/// path in `classify_slack_cols` and the UbOnly image in `accumulate_column`.
+#[test]
+fn cut_validity_multi_var_ubonly_eq_row() {
+    // min -x-2y  s.t.  x+y=2 (Eq),  2x+4y<=7 (Le),  x,y ∈ (-∞, 3] integer.
+    // Substituting y=2-x: 2x+4(2-x)<=7 → -2x<=-1 → x>=0.5 (fractional LP opt).
+    // Integer feasible (x+y=2, 2x+4y<=7, x,y<=3):
+    //   x=1,y=1: 2+4=6<=7 ✓   x=2,y=0: 4+0=4<=7 ✓   x=3,y=-1: 6-4=2<=7 ✓
+    let l = lp(
+        vec![-1.0, -2.0],
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 1],
+        &[1.0, 1.0, 2.0, 4.0],
+        2,
+        vec![2.0, 7.0],
+        vec![ConstraintType::Eq, ConstraintType::Le],
+        vec![(f64::NEG_INFINITY, 3.0), (f64::NEG_INFINITY, 3.0)],
+    );
+    let milp = MilpProblem::new(l, vec![0, 1]).unwrap();
+    // Enumerate window [-2, 4]^2.
+    let pts = enumerate_int_window(2, -2, 4);
+    let n = assert_cuts_valid_nonvacuous(&milp, &pts, "ubonly_eq_row", 5);
+    assert!(n > 0, "UbOnly + Eq row path must generate ≥1 cut");
+}
+
+/// **Deterministic LCG fuzz:** generates ≥100 2-variable MILPs with fractional
+/// LP relaxation optima (verified via the LP solver before testing), varying
+/// constraint types, coefficients, RHS and bounds.  For every problem the test
+/// asserts that no integer-feasible point is removed by any generated cut.
+/// `with_cuts` tracks how many problems actually produce cuts; the test asserts
+/// at least some do (guards against a silent no-op generator).
+#[test]
+fn cut_validity_fuzz_lcg() {
+    fn lcg(s: &mut u64) -> u64 {
+        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s
+    }
+    fn lcg_f(s: &mut u64, lo: f64, hi: f64) -> f64 {
+        lo + ((lcg(s) >> 11) as f64 / (1u64 << 53) as f64) * (hi - lo)
+    }
+    fn is_frac(v: f64) -> bool {
+        let f = v - v.floor();
+        f > 1e-4 && f < 1.0 - 1e-4
+    }
+
+    let mut rng: u64 = 0xdead_beef_cafe_babe;
+    let mut total = 0usize;
+    let mut with_cuts = 0usize;
+
+    // Try up to 600 candidates to collect ≥100 fractional-LP problems.
+    for _ in 0..600 {
+        if total >= 160 {
+            break;
+        }
+
+        // Integer-valued bounds.
+        let lb0 = lcg_f(&mut rng, -2.0, 0.9).round();
+        let lb1 = lcg_f(&mut rng, -2.0, 0.9).round();
+        let ub0 = lcg_f(&mut rng, 2.0, 4.0).round();
+        let ub1 = lcg_f(&mut rng, 2.0, 4.0).round();
+        if lb0 >= ub0 || lb1 >= ub1 {
+            continue;
+        }
+
+        // Integer coefficients to avoid trivially-integer LP vertices.
+        let a00 = lcg_f(&mut rng, 1.0, 5.0).round();
+        let a01 = lcg_f(&mut rng, 1.0, 5.0).round();
+        let is_le = lcg(&mut rng) % 2 == 0;
+
+        // Pick RHS strictly between min_ax and max_ax so the constraint is
+        // active at the LP optimum, making a fractional solution likely.
+        let min_ax = a00 * lb0 + a01 * lb1;
+        let max_ax = a00 * ub0 + a01 * ub1;
+        let range = max_ax - min_ax;
+        if range < 2.0 {
+            continue;
+        }
+        // Half-integer RHS near the centre (forces fractional LP optimal).
+        let mid = (min_ax + max_ax) / 2.0;
+        let rhs = mid.floor() + 0.5;
+        // Flip sign for Ge so the sense matches: Ge with the same half-int rhs.
+        let ct = if is_le { ConstraintType::Le } else { ConstraintType::Ge };
+        let actual_rhs = if is_le { rhs } else { rhs };
+        // Ge must satisfy: rhs <= max_ax and rhs >= min_ax.
+        if actual_rhs <= min_ax || actual_rhs >= max_ax {
+            continue;
+        }
+
+        let l = lp(
+            vec![-1.0, -1.0],
+            &[0, 0],
+            &[0, 1],
+            &[a00, a01],
+            1,
+            vec![actual_rhs],
+            vec![ct],
+            vec![(lb0, ub0), (lb1, ub1)],
+        );
+        let milp = match MilpProblem::new(l, vec![0, 1]) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        // Keep only problems whose LP relaxation is actually fractional.
+        let root = lp_root(&milp.lp);
+        if root.status != SolveStatus::Optimal {
+            continue;
+        }
+        let fractional_lp = root.solution.iter().any(|&v| is_frac(v));
+        if !fractional_lp {
+            continue;
+        }
+
+        total += 1;
+        let out = add_root_cuts(&milp, &SolverOptions::default(), &cuts_cfg(3));
+        let m_old = milp.lp.num_constraints;
+        let m_new = out.lp.num_constraints;
+        if m_new > m_old {
+            with_cuts += 1;
+        }
+
+        let pts = enumerate_int_box(&milp.lp.bounds);
+        for x in &pts {
+            if !feasible_orig(&milp.lp, x) {
+                continue;
+            }
+            let ax = out.lp.a.mat_vec_mul(x).unwrap();
+            for i in m_old..m_new {
+                assert!(
+                    ax[i] >= out.lp.b[i] - 1e-6,
+                    "fuzz INVALID CUT — a=[{a00},{a01}] rhs={actual_rhs} ct={ct:?} \
+                     int-pt {x:?} violates cut row {i}: lhs={} < rhs={}",
+                    ax[i],
+                    out.lp.b[i]
+                );
+            }
+        }
+    }
+
+    assert!(total >= 100, "fuzz: need ≥100 fractional-LP problems, got {total}");
+    assert!(
+        with_cuts > 0,
+        "fuzz: at least one fractional-LP problem must generate cuts (got 0/{total})"
+    );
 }
 
 fn csc_to_dense(a: &CscMatrix, m: usize, n: usize) -> Vec<Vec<f64>> {

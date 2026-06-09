@@ -427,8 +427,10 @@ fn accumulate_column(
                 *d += gamma * ub;
             }
             None => {
-                // Eq rows carry no slack column; such a column index is never
-                // nonbasic-with-slack here. Defensive: ignore.
+                // A slack-range column that maps to None means the slack/kind
+                // table is inconsistent (should be unreachable). Dropping the
+                // term would silently strengthen the cut and risk invalidity.
+                return false;
             }
         }
     }
@@ -550,9 +552,11 @@ fn classify_slack_cols(lp: &LpProblem, sf: &StandardForm) -> Vec<Option<SlackKin
     }
     // UB rows (all `Le`, always slacked).
     for &p in &ub_row_vars {
-        if s < n_slack {
-            kinds[s] = Some(SlackKind::UbRow(p));
-        }
+        assert!(
+            s < n_slack,
+            "UB-row count exceeds slack column count: s={s} >= n_slack={n_slack}"
+        );
+        kinds[s] = Some(SlackKind::UbRow(p));
         s += 1;
     }
     debug_assert_eq!(s, n_slack, "slack count mismatch vs standard form");
