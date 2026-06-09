@@ -493,6 +493,7 @@ mod tests {
         let basis: Vec<usize> = (0..n).collect();
         let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
 
+        // Verify correctness of FTRAN (内部表現は faer 内部、L/U 直接検査は不可)
         let rhs_orig: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
         let mut rhs = rhs_orig.clone();
         solve_ftran(&lu, &mut rhs);
@@ -619,12 +620,17 @@ mod tests {
     ///
     /// perm 合成を誤る (row_perm/col_perm 交換, 方向逆転など) と LU の積が
     /// 置換済み基底行列と一致しなくなり fail する。
+    ///
+    /// 行列は partial-pivoting で 3-cycle 行置換 (fwd=[1,2,0], inv=[2,0,1]) を
+    /// 強制するよう選択されており、fwd/inv を取り違えると diff≈6 で fail する。
     #[test]
     fn test_lu_accessor_lu_equals_perm_b() {
-        // B = [[4,1,0],[2,5,1],[0,3,6]] (非対称、複数スパースパターン)
+        // B = [[0.001,1,0],[5,2,1],[0,3,6]]
+        // 列0 の最大 pivot は行1 (|5|)、次に列1 の残余最大は行2 (|3|) →
+        // 行置換が 3-cycle (fwd=[1,2,0], inv=[2,0,1]) となり非対合。
         let dense = vec![
-            vec![4.0, 1.0, 0.0],
-            vec![2.0, 5.0, 1.0],
+            vec![0.001, 1.0, 0.0],
+            vec![5.0, 2.0, 1.0],
             vec![0.0, 3.0, 6.0],
         ];
         let n = 3;
@@ -659,19 +665,18 @@ mod tests {
         }
 
         // P_r·B·P_c⁻¹ を構築。
-        // row_perm_fwd[i] = p → 元の行 i が置換後の行 p に移動。
-        // (P_r · B)[p, j] = B[i, j] where row_perm_fwd[i] = p
-        //   → (P_r · B)[row_perm_fwd[i], j] = B[i, j]
-        // col_perm_fwd[k] = q → 元の列 k が置換後の列 q に移動。
-        // P_c⁻¹ は col_perm の逆、つまり (P_c⁻¹)[j, q] = (P_c)[q, j]。
-        // (P_r·B·P_c⁻¹)[row_perm_fwd[i], col_perm_inv[j]] = B[i, j]
-        let (row_perm_fwd, _) = lu.row_perm().arrays();
+        // faer の row_perm_fwd[p] = i は「置換後の行 p が元の行 i から来る」(permuted→original)。
+        // row_perm_inv[i] = p は「元の行 i が置換後の行 p に移動」(original→permuted)。
+        // (P_r · B)[p, j] = B[fwd[p], j] → 逆方向: (P_r·B)[inv[i], j] = B[i, j]
+        // col_perm_inv も同様に original→permuted。
+        // → (P_r·B·P_c⁻¹)[row_perm_inv[i], col_perm_inv[j]] = B[i, j]
+        let (_, row_perm_inv) = lu.row_perm().arrays();
         let (col_perm_fwd, col_perm_inv) = lu.col_perm().arrays();
         let _ = col_perm_fwd;
         let mut perm_b = vec![0.0f64; n * n];
         for i in 0..n {
             for j in 0..n {
-                let pr = row_perm_fwd[i];
+                let pr = row_perm_inv[i];
                 let pc_inv = col_perm_inv[j];
                 perm_b[pr * n + pc_inv] = dense[i][j];
             }
