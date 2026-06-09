@@ -144,6 +144,102 @@ fn flip_apply_disabled() -> bool {
 /// - dfl001   bounded-aug: 556 → 625 iter/s (1.12x)
 const DEADLINE_CHECK_INTERVAL: usize = 512;
 
+/// Cyclic partial-pricing window size for the bounded primal cores
+/// (`phase2_primal_bounded` / `primal_simplex_aug`).
+///
+/// Each pricing pass reduces-cost-prices at most this many non-basic columns,
+/// starting from a rotating cursor (`state.price_start`), instead of all
+/// `n_price`. The full scan is *deferred*, never skipped: optimality is only
+/// declared after a complete `n_price` sweep finds no improving column (see
+/// `partial_price_entering`). On large network LPs (pds/ken/dfl001) the
+/// per-iteration reduced-cost scan (`yᵀaⱼ` over every non-basic column)
+/// dominates wall time; windowing it cuts the per-iteration price cost while
+/// preserving the exact optimality test.
+///
+/// For `n_price ≤ PARTIAL_PRICE_CHUNK` the window covers every column, so small
+/// and medium LPs price fully (identical behaviour to the pre-partial cores).
+///
+/// Value: placeholder pending bench calibration (dfl001/ken-18 net throughput
+/// vs. the 105/109 PASS set). A fixed absolute window gives the largest
+/// relative reduction exactly where the scan dominates (large `n_price`), and
+/// keeps the entering candidate sample large enough to avoid an iteration-count
+/// blow-up. Tune against `timeout=1000, eps=1e-6` before treating as final.
+const PARTIAL_PRICE_CHUNK: usize = 2048;
+
+/// Effective partial-pricing window for a given `n_price`, clamped to
+/// `[1, n_price]`. A `#[cfg(test)]` override lets sentinels drive small windows
+/// on small LPs without touching the production constant; release builds inline
+/// the constant and elide the override branch.
+fn partial_price_chunk(n_price: usize) -> usize {
+    let base = {
+        #[cfg(test)]
+        {
+            let o = PARTIAL_PRICE_CHUNK_OVERRIDE.with(|c| c.get());
+            if o != 0 {
+                o
+            } else {
+                PARTIAL_PRICE_CHUNK
+            }
+        }
+        #[cfg(not(test))]
+        {
+            PARTIAL_PRICE_CHUNK
+        }
+    };
+    base.clamp(1, n_price.max(1))
+}
+
+// ── partial-pricing test hooks (compiled out of release) ──────────────────────
+#[cfg(test)]
+thread_local! {
+    /// Override for `PARTIAL_PRICE_CHUNK` (0 = use the production constant).
+    static PARTIAL_PRICE_CHUNK_OVERRIDE: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    /// When `true`, `partial_price_entering` declares Optimal after the FIRST
+    /// window even if the full `n_price` sweep is incomplete — the broken
+    /// behaviour the false-optimal no-op proof must catch.
+    static PARTIAL_PRICE_SINGLE_WINDOW: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    /// Running count of columns actually reduced-cost-priced across pricing
+    /// passes. Sentinels snapshot the delta to assert partial < full.
+    static PARTIAL_PRICE_COLS_SCANNED: std::cell::Cell<u64> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn set_partial_price_chunk_override(v: usize) {
+    PARTIAL_PRICE_CHUNK_OVERRIDE.with(|c| c.set(v));
+}
+
+#[cfg(test)]
+pub(crate) fn set_partial_price_single_window(v: bool) {
+    PARTIAL_PRICE_SINGLE_WINDOW.with(|c| c.set(v));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_partial_price_cols_scanned() {
+    PARTIAL_PRICE_COLS_SCANNED.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn partial_price_cols_scanned() -> u64 {
+    PARTIAL_PRICE_COLS_SCANNED.with(|c| c.get())
+}
+
+#[cfg(test)]
+fn partial_price_single_window() -> bool {
+    PARTIAL_PRICE_SINGLE_WINDOW.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn partial_price_single_window() -> bool {
+    false
+}
+
 // Counts deadline checks issued inside `compute_reduced_costs_into_timed` (test-only).
 //
 // `thread_local!` 化により、並列 test 実行 (`--test-threads 3`) で他 test の
@@ -177,30 +273,149 @@ fn compute_reduced_costs_into_timed(
         return false;
     }
     compute_dual_vars_into(c, basis_mgr, basis, y_buf);
-    let mut j = 0;
-    while j < n_price {
+    compute_reduced_costs_window(a, c, is_basic, y_buf, rc_out, 0, n_price, deadline)
+}
+
+/// Reduced costs `r_k = c_k − yᵀa_k` for the column window `[start, end)` only,
+/// written into `rc_out[start..end]` (basic columns zeroed). `y` is precomputed
+/// (`B^{-T}c_B`); the caller computes it once per pricing pass and reuses it
+/// across windows of the same basis. Deadline is checked per
+/// `DEADLINE_CHECK_INTERVAL` chunk, not per column. Returns `false` on deadline.
+#[allow(clippy::too_many_arguments)]
+fn compute_reduced_costs_window(
+    a: &CscMatrix,
+    c: &[f64],
+    is_basic: &[bool],
+    y: &[f64],
+    rc_out: &mut [f64],
+    start: usize,
+    end: usize,
+    deadline: Option<Instant>,
+) -> bool {
+    let mut j = start;
+    while j < end {
         // Check deadline once per chunk, not per column.
         if deadline_expired(deadline) {
             return false;
         }
         #[cfg(test)]
         RC_DEADLINE_CHECK_COUNT.with(|c| c.set(c.get() + 1));
-        let end = (j + DEADLINE_CHECK_INTERVAL).min(n_price);
-        for k in j..end {
+        let chunk_end = (j + DEADLINE_CHECK_INTERVAL).min(end);
+        for k in j..chunk_end {
             if is_basic[k] {
                 rc_out[k] = 0.0;
             } else {
                 let (rows, vals) = a.get_column(k).unwrap();
                 let mut ya = 0.0;
                 for (ri, &row) in rows.iter().enumerate() {
-                    ya += y_buf[row] * vals[ri];
+                    ya += y[row] * vals[ri];
                 }
                 rc_out[k] = c[k] - ya;
             }
         }
-        j = end;
+        j = chunk_end;
     }
     true
+}
+
+/// Outcome of a partial-pricing pass.
+enum PartialPrice {
+    /// `entering` won pricing; `next_start` is where the next pass should begin.
+    Entering { entering: usize, next_start: usize },
+    /// A full `n_price` sweep found no improving column → Optimal. `next_start`
+    /// is reset so a warm re-entry begins fresh.
+    Optimal { next_start: usize },
+    /// Deadline expired mid-window.
+    Deadline,
+}
+
+/// Cyclic partial pricing for the bounded primal cores.
+///
+/// Starting at `price_start`, prices the reduced costs of successive
+/// `partial_price_chunk(n_price)`-sized windows (wrapping around `n_price`),
+/// scoring each non-basic column via `score`. The first window that contains an
+/// improving column wins; among that window's columns the best score is chosen
+/// (Dantzig-within-window). `next_start` advances past the chosen window so the
+/// next pass continues from fresh territory.
+///
+/// **False-optimal invariant (load-bearing):** `Optimal` is returned ONLY after
+/// a complete `n_price` sweep (every column priced under the *current* basis)
+/// produced no improving column. Windowing merely defers that sweep across
+/// pivots; an improving column in a not-yet-scanned window can never trigger
+/// Optimal. The `partial_price_single_window` test hook breaks exactly this rule
+/// (declares Optimal after one window) so the no-op proof can detect a
+/// regression that prices only a single window before declaring optimality.
+///
+/// `score(j, rc_j) -> Option<f64>`: `None` = column `j` is not improving;
+/// `Some(s)` = improving with score `s` (larger wins). `rc_j` is freshly priced.
+fn partial_price_entering<F>(
+    a: &CscMatrix,
+    c: &[f64],
+    is_basic: &[bool],
+    y: &[f64],
+    rc_out: &mut [f64],
+    n_price: usize,
+    price_start: usize,
+    deadline: Option<Instant>,
+    mut score: F,
+) -> PartialPrice
+where
+    F: FnMut(usize, f64) -> Option<f64>,
+{
+    if n_price == 0 {
+        return PartialPrice::Optimal { next_start: 0 };
+    }
+    let chunk = partial_price_chunk(n_price);
+    let single_window = partial_price_single_window();
+    let mut start = price_start % n_price;
+    let mut scanned = 0usize;
+    let mut best_score = f64::NEG_INFINITY;
+    let mut entering: Option<usize> = None;
+
+    while scanned < n_price {
+        // Contiguous window: capped by chunk, by columns left in the sweep, and
+        // by the distance to the end of the array (wrap handled by resetting
+        // `start` to 0 below). Capping by the remaining-sweep count keeps every
+        // column priced at most once per sweep when `price_start != 0`.
+        let remaining = n_price - scanned;
+        let seg_len = chunk.min(remaining).min(n_price - start);
+        let end = start + seg_len;
+
+        if !compute_reduced_costs_window(a, c, is_basic, y, rc_out, start, end, deadline) {
+            return PartialPrice::Deadline;
+        }
+        #[cfg(test)]
+        PARTIAL_PRICE_COLS_SCANNED.with(|cnt| cnt.set(cnt.get() + seg_len as u64));
+
+        for j in start..end {
+            if is_basic[j] {
+                continue;
+            }
+            if let Some(s) = score(j, rc_out[j]) {
+                if s > best_score {
+                    best_score = s;
+                    entering = Some(j);
+                }
+            }
+        }
+
+        scanned += seg_len;
+        start = if end >= n_price { 0 } else { end };
+
+        if let Some(entering) = entering {
+            return PartialPrice::Entering {
+                entering,
+                next_start: start,
+            };
+        }
+        // Test-only: stop after the first window to PROVE the full-sweep
+        // requirement is load-bearing. `false` (and branch-eliminated) in release.
+        if single_window {
+            break;
+        }
+    }
+
+    PartialPrice::Optimal { next_start: start }
 }
 
 /// Internal state of the bounded dual simplex iteration. Built from
@@ -223,6 +438,11 @@ pub(crate) struct BoundedDualState {
     pub(crate) reduced_costs: Vec<f64>,
     pub(crate) is_basic: Vec<bool>,
     pub(crate) iterations: usize,
+    /// Cyclic partial-pricing cursor for the bounded primal cores: the next
+    /// pricing pass begins its window scan here and advances it past the window
+    /// that yields an entering column. Carried in the state so it persists
+    /// across iterations (and Phase I → Phase II). Unused by the dual loop.
+    pub(crate) price_start: usize,
 }
 
 impl BoundedDualState {
@@ -249,6 +469,7 @@ impl BoundedDualState {
             reduced_costs: vec![0.0; n_total],
             is_basic,
             iterations: 0,
+            price_start: 0,
         }
     }
 }
@@ -1193,72 +1414,53 @@ pub(crate) fn phase2_primal_bounded(
             t.log(*iters, obj, &state.basis, false);
         }
 
-        if !compute_reduced_costs_into_timed(
-            a,
-            c,
-            &mut basis_mgr,
-            &state.is_basic,
-            n_total,
-            &state.basis,
-            &mut y,
-            &mut rc,
-            options.deadline,
-        ) {
-            return (
-                SimplexOutcome::Timeout(bounded_obj(
-                    c,
-                    &state.basis,
-                    &state.x_b,
-                    &state.at_upper,
-                    &state.is_basic,
-                    ubs,
-                )),
-                state,
-            );
+        // Dual vars (reused across partial-pricing windows of this basis).
+        if deadline_expired(options.deadline) {
+            return (timeout_obj(&state), state);
         }
+        compute_dual_vars_into(c, &mut basis_mgr, &state.basis, &mut y);
 
-        // Pricing: most-improving non-basic (Dantzig rule).
+        // Pricing: cyclic partial pricing, most-improving within the first
+        // improving window (Dantzig rule).
         // at_lb: enter if rc < 0 (increasing x improves min objective)
         // at_ub: enter if rc > 0 (decreasing x improves min objective)
-        let mut best_score = PIVOT_TOL;
-        let mut entering: Option<usize> = None;
-        for j in 0..n_total {
-            if deadline_expired(options.deadline) {
-                return (
-                    SimplexOutcome::Timeout(bounded_obj(
+        let q = {
+            let at_upper = &state.at_upper;
+            match partial_price_entering(
+                a,
+                c,
+                &state.is_basic,
+                &y,
+                &mut rc,
+                n_total,
+                state.price_start,
+                options.deadline,
+                |j, rc_j| {
+                    let score = if at_upper[j] { rc_j } else { -rc_j };
+                    (score > PIVOT_TOL).then_some(score)
+                },
+            ) {
+                PartialPrice::Deadline => return (timeout_obj(&state), state),
+                PartialPrice::Optimal { next_start } => {
+                    state.price_start = next_start;
+                    let obj = bounded_obj(
                         c,
                         &state.basis,
                         &state.x_b,
                         &state.at_upper,
                         &state.is_basic,
                         ubs,
-                    )),
-                    state,
-                );
+                    );
+                    return (SimplexOutcome::Optimal(obj, y), state);
+                }
+                PartialPrice::Entering {
+                    entering,
+                    next_start,
+                } => {
+                    state.price_start = next_start;
+                    entering
+                }
             }
-            if state.is_basic[j] {
-                continue;
-            }
-            let score = if state.at_upper[j] { rc[j] } else { -rc[j] };
-            if score > best_score {
-                best_score = score;
-                entering = Some(j);
-            }
-        }
-
-        let q = match entering {
-            None => {
-                let obj = bounded_obj(
-                    c,
-                    &state.basis,
-                    &state.x_b,
-                    &state.at_upper,
-                    &state.is_basic,
-                    ubs,
-                );
-                return (SimplexOutcome::Optimal(obj, y), state);
-            }
-            Some(q) => q,
         };
 
         let from_ub = state.at_upper[q];
@@ -1519,51 +1721,56 @@ fn primal_simplex_aug(
             t.log(*iters, obj, &state.basis, false);
         }
 
-        if !compute_reduced_costs_into_timed(
-            a_aug,
-            c_aug,
-            &mut basis_mgr,
-            &state.is_basic,
-            n_struct,
-            &state.basis,
-            &mut y,
-            &mut rc,
-            options.deadline,
-        ) {
+        // Dual vars (reused across partial-pricing windows of this basis).
+        if deadline_expired(options.deadline) {
             return timeout_obj(state);
         }
+        compute_dual_vars_into(c_aug, &mut basis_mgr, &state.basis, &mut y);
 
-        let mut best_score = 0.0;
-        let mut entering: Option<usize> = None;
-        for j in 0..n_struct {
-            if state.is_basic[j] {
-                continue;
+        // Cyclic partial pricing over the first `n_struct` (priced) columns;
+        // artificials at `[n_struct, n_aug)` are never priced. Devex-weighted
+        // most-improving within the first improving window.
+        let q = {
+            let at_upper = &state.at_upper;
+            match partial_price_entering(
+                a_aug,
+                c_aug,
+                &state.is_basic,
+                &y,
+                &mut rc,
+                n_struct,
+                state.price_start,
+                options.deadline,
+                |j, rc_j| {
+                    let violation = if at_upper[j] { rc_j } else { -rc_j };
+                    if violation <= PIVOT_TOL {
+                        return None;
+                    }
+                    let gamma = devex_weights[j].max(GAMMA_FLOOR);
+                    Some(violation / gamma.sqrt())
+                },
+            ) {
+                PartialPrice::Deadline => return timeout_obj(state),
+                PartialPrice::Optimal { next_start } => {
+                    state.price_start = next_start;
+                    let obj = bounded_obj(
+                        c_aug,
+                        &state.basis,
+                        &state.x_b,
+                        &state.at_upper,
+                        &state.is_basic,
+                        ubs_aug,
+                    );
+                    return SimplexOutcome::Optimal(obj, y);
+                }
+                PartialPrice::Entering {
+                    entering,
+                    next_start,
+                } => {
+                    state.price_start = next_start;
+                    entering
+                }
             }
-            let violation = if state.at_upper[j] { rc[j] } else { -rc[j] };
-            if violation <= PIVOT_TOL {
-                continue;
-            }
-            let gamma = devex_weights[j].max(GAMMA_FLOOR);
-            let weighted_score = violation / gamma.sqrt();
-            if weighted_score > best_score {
-                best_score = weighted_score;
-                entering = Some(j);
-            }
-        }
-
-        let q = match entering {
-            None => {
-                let obj = bounded_obj(
-                    c_aug,
-                    &state.basis,
-                    &state.x_b,
-                    &state.at_upper,
-                    &state.is_basic,
-                    ubs_aug,
-                );
-                return SimplexOutcome::Optimal(obj, y);
-            }
-            Some(q) => q,
         };
 
         let from_ub = state.at_upper[q];
@@ -3235,6 +3442,7 @@ mod tests {
             reduced_costs: vec![0.0; 4],
             is_basic: vec![false, false, true, true],
             iterations: 0,
+            price_start: 0,
         };
         let opts = SolverOptions::default();
         let mut iters = 0usize;
@@ -3281,6 +3489,7 @@ mod tests {
             reduced_costs: vec![0.0; 4],
             is_basic: vec![false, false, true, true],
             iterations: 0,
+            price_start: 0,
         };
         let opts = SolverOptions::default();
         let mut iters = 0usize;
