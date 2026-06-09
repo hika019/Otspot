@@ -92,6 +92,9 @@ impl Relaxation for MilpProblem {
         sub.bounds = bounds.to_vec();
         crate::lp::solve_lp_with(&sub, opts)
     }
+    fn skip_node_presolve(&self) -> bool {
+        true
+    }
 }
 
 /// Mixed-Integer **convex** Quadratic Program: minimize `1/2 x^T Q x + c^T x`

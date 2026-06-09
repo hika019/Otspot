@@ -103,8 +103,21 @@ fn main() -> ExitCode {
     println!("root_lp_bound: {}", stats.root_lp_bound);
     println!("nodes: {}", stats.nodes_processed);
     println!("incumbent_updates: {}", stats.incumbent_updates);
+    println!("fp_incumbent_found: {}", stats.fp_incumbent_found);
     println!("max_depth: {}", stats.max_depth_seen);
     println!("pruned: {}", stats.pruned);
+    println!("lp_presolve_us: {}", stats.lp_presolve_us_total);
+    println!("lp_solve_us: {}", stats.lp_solve_us_total);
+    println!("lp_postsolve_us: {}", stats.lp_postsolve_us_total);
+    if stats.nodes_processed > 0 {
+        let n = stats.nodes_processed as f64;
+        println!(
+            "per_node_us: presolve={:.1} solve={:.1} postsolve={:.1}",
+            stats.lp_presolve_us_total as f64 / n,
+            stats.lp_solve_us_total as f64 / n,
+            stats.lp_postsolve_us_total as f64 / n,
+        );
+    }
 
     ExitCode::SUCCESS
 }

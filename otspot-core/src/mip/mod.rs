@@ -40,6 +40,14 @@ pub(crate) trait Relaxation {
     /// `opts` already has multistart / global_optimization stripped and the
     /// deadline fixed by the driver.
     fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult;
+    /// Whether the driver should disable presolve on every B&B *node* solve.
+    /// True for MILP: each node re-solves the same LP with only bounds tightened,
+    /// so per-node presolve is redundant and its variable renumbering drops the
+    /// propagated warm-start basis. False (default) for MIQP, whose IPM relies on
+    /// presolve's Ruiz scaling for per-node conditioning.
+    fn skip_node_presolve(&self) -> bool {
+        false
+    }
 }
 
 /// Search statistics returned by [`solve_milp_with_stats`] / [`solve_miqp_with_stats`].
@@ -273,6 +281,13 @@ fn solve_mip_core<R: Relaxation>(
     // Enable basis recovery so LP solves return warm_start_basis for child nodes.
     shared.recover_warm_start_basis = true;
     shared.warm_start = None;
+    // MILP nodes skip per-node presolve (redundant re-reduction that also discards
+    // the propagated warm-start basis). MIQP keeps it (IPM needs Ruiz scaling).
+    // Placed after the no-integer-var passthrough above, so a pure-LP solve still
+    // gets full presolve.
+    if problem.skip_node_presolve() {
+        shared.presolve = false;
+    }
 
     let mut state = MipState::new();
 
