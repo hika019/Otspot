@@ -254,6 +254,7 @@ pub(crate) fn crossover_dual_from_primal(
             &options,
             &mut iters,
             true,
+            Some(n_total),
         ) {
             SimplexOutcome::Optimal(_, _) => {}
             _ => return None,
@@ -329,6 +330,7 @@ pub(crate) fn crossover_dual_from_primal(
         &options,
         &mut iters2,
         false,
+        None,
     );
     match phase2 {
         SimplexOutcome::Optimal(_, mut y2) => {

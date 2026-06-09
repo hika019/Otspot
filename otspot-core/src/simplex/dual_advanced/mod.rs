@@ -1176,6 +1176,7 @@ fn cold_start_advanced(
         options,
         &mut total_iters,
         false,
+        None,
     );
 
     // Phase 2はPrimalなのでUnbounded=主非有界
