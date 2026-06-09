@@ -3509,4 +3509,314 @@ mod tests {
             _ => {}
         }
     }
+
+    // ── partial pricing sentinels ────────────────────────────────────────────
+
+    /// Override `PARTIAL_PRICE_CHUNK` for the lifetime of the guard. Restores the
+    /// production constant (override = 0) on drop, even across a panic unwind.
+    struct PartialPriceChunkGuard;
+    impl PartialPriceChunkGuard {
+        fn set(chunk: usize) -> Self {
+            set_partial_price_chunk_override(chunk);
+            Self
+        }
+    }
+    impl Drop for PartialPriceChunkGuard {
+        fn drop(&mut self) {
+            set_partial_price_chunk_override(0);
+        }
+    }
+
+    /// Engage the broken single-window mode (declares Optimal after one window
+    /// without the full sweep). Restores the correct behaviour on drop.
+    struct PartialPriceSingleWindowGuard;
+    impl PartialPriceSingleWindowGuard {
+        fn enabled() -> Self {
+            set_partial_price_single_window(true);
+            Self
+        }
+    }
+    impl Drop for PartialPriceSingleWindowGuard {
+        fn drop(&mut self) {
+            set_partial_price_single_window(false);
+        }
+    }
+
+    /// Window override that forces a single full-sweep window on any LP in this
+    /// file (`≥ n_price`, clamped by `partial_price_chunk`).
+    const FULL_PRICE: usize = 1_000_000;
+
+    /// Boxed LP whose unique optimum places `x1` at its UPPER bound, so Phase 2
+    /// must execute a primal bound-flip (`BoundedLeave::Flip`).
+    /// min −2x0 − 3x1 ; x0 + x1 ≤ 5 ; 0 ≤ x0 ≤ 2, 0 ≤ x1 ≤ 4.
+    /// Optimum: x0 = 1, x1 = 4, obj = −14.
+    fn lp2_boxed_flip() -> LpProblem {
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        LpProblem::new_general(
+            vec![-2.0, -3.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 2.0), (0.0, 4.0)],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Run `lp`'s Phase 2 from its bounded-dual terminal state with the given
+    /// partial-pricing chunk override. Returns the objective recomputed from the
+    /// recovered solution against `lp.c` (independent of the solver's reported
+    /// obj), the iteration count, and the Phase-2 primal bound-flip count.
+    fn solve_phase2_obj(lp: &LpProblem, chunk: usize) -> (f64, usize, u64) {
+        let bsf = build_bounded_standard_form(lp);
+        let opts = SolverOptions::default();
+        let (dual_outcome, dual_state) = solve_bounded_dual(
+            &bsf,
+            &bsf.a,
+            &bsf.b,
+            &bsf.c,
+            &opts,
+            &bsf.upper_bounds,
+            &mut MostInfeasibleLeaving,
+        );
+        assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
+        let _chunk = PartialPriceChunkGuard::set(chunk);
+        reset_bfrt_flip_invocations();
+        let mut iters = 0usize;
+        let (outcome, state) = phase2_primal_bounded(
+            &bsf,
+            dual_state,
+            &bsf.a,
+            &bsf.c,
+            &opts,
+            &mut iters,
+            &bsf.upper_bounds,
+        );
+        let flips = bfrt_flip_invocations();
+        assert!(
+            matches!(outcome, SimplexOutcome::Optimal(..)),
+            "phase2 not Optimal: {outcome:?}"
+        );
+        let sol = extract_solution_bounded(&bsf, &state, &[]);
+        let obj: f64 = lp.c.iter().zip(sol.iter()).map(|(c, x)| c * x).sum();
+        (obj, iters, flips)
+    }
+
+    /// **Same-obj sentinel + BFRT-flip preservation.** Partial pricing (1-column
+    /// windows) and full pricing must reach the SAME externally-known optimum on
+    /// boxed/degenerate LPs, and any fixture whose full-pricing solve executes a
+    /// primal bound-flip must still flip under partial pricing (the flip path is
+    /// not dropped by windowing the entering scan). Breaking partial pricing into
+    /// a single-window false-optimal (or dropping flips) diverges the objective.
+    #[test]
+    fn partial_pricing_phase2_matches_full_and_preserves_flips() {
+        let cases: [(LpProblem, f64); 2] = [
+            (lp_boxed_2x2_degenerate(), -6.0),
+            (lp2_boxed_flip(), -14.0),
+        ];
+        let mut any_flip = false;
+        for (lp, known) in &cases {
+            let (obj_full, _, flips_full) = solve_phase2_obj(lp, FULL_PRICE);
+            let (obj_partial, _, flips_partial) = solve_phase2_obj(lp, 1);
+            assert!(
+                (obj_full - known).abs() < 1e-6,
+                "full pricing obj {obj_full:.6e} != known {known:.6e}"
+            );
+            assert!(
+                (obj_partial - known).abs() < 1e-6,
+                "partial pricing obj {obj_partial:.6e} != known {known:.6e}"
+            );
+            assert!(
+                (obj_partial - obj_full).abs() < 1e-9,
+                "partial {obj_partial:.6e} != full {obj_full:.6e}"
+            );
+            if flips_full > 0 {
+                assert!(
+                    flips_partial > 0,
+                    "primal bound-flip dropped under partial pricing \
+                     (full flips={flips_full}, partial flips={flips_partial})"
+                );
+                any_flip = true;
+            }
+        }
+        assert!(
+            any_flip,
+            "no fixture exercised a primal bound-flip — flip coverage is vacuous"
+        );
+    }
+
+    /// **False-optimal no-op proof (the most important sentinel).** Optimality
+    /// must be declared ONLY after a full `n_price` sweep finds no improving
+    /// column. At the cold Phase-2 vertex of this LP the first column (x0) is
+    /// non-improving while x1 is improving and at_ub at the optimum. With
+    /// 1-column windows starting at `price_start = 0`, the full-sweep (correct)
+    /// run skips the empty first window and prices x1, reaching the true optimum
+    /// −6; the single-window (broken) run prices only the first window, finds
+    /// nothing, and WRONGLY declares Optimal at the cold objective 0.
+    ///
+    /// The broken obj must differ from the known optimum; if the full-sweep
+    /// requirement were removed, the correct run would also miss −6 and its
+    /// assertion would fail.
+    #[test]
+    fn partial_pricing_false_optimal_requires_full_sweep_noop_proof() {
+        const KNOWN: f64 = -6.0;
+        let lp = LpProblem::new_general(
+            vec![1.0, -2.0],
+            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap(),
+            vec![4.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 3.0), (0.0, 3.0)],
+            None,
+        )
+        .unwrap();
+
+        let solve = |single_window: bool| -> f64 {
+            let bsf = build_bounded_standard_form(&lp);
+            let opts = SolverOptions::default();
+            let (_d, dual_state) = solve_bounded_dual(
+                &bsf,
+                &bsf.a,
+                &bsf.b,
+                &bsf.c,
+                &opts,
+                &bsf.upper_bounds,
+                &mut MostInfeasibleLeaving,
+            );
+            let _chunk = PartialPriceChunkGuard::set(1);
+            let _sw = single_window.then(PartialPriceSingleWindowGuard::enabled);
+            let mut iters = 0usize;
+            let (out, state) = phase2_primal_bounded(
+                &bsf,
+                dual_state,
+                &bsf.a,
+                &bsf.c,
+                &opts,
+                &mut iters,
+                &bsf.upper_bounds,
+            );
+            assert!(
+                matches!(out, SimplexOutcome::Optimal(..)),
+                "expected Optimal, got {out:?}"
+            );
+            let sol = extract_solution_bounded(&bsf, &state, &[]);
+            lp.c.iter().zip(sol.iter()).map(|(c, x)| c * x).sum()
+        };
+
+        let correct = solve(false);
+        let broken = solve(true);
+        assert!(
+            (correct - KNOWN).abs() < 1e-6,
+            "full-sweep partial pricing must reach {KNOWN}, got {correct:.6e}"
+        );
+        assert!(
+            (broken - KNOWN).abs() > 1e-3,
+            "no-op proof FAILED: single-window (no full sweep) still reached the \
+             optimum (got {broken:.6e}); the full-sweep optimality requirement is \
+             not load-bearing — a false-optimal would slip through"
+        );
+    }
+
+    /// **Pricing-scan reduction (effectiveness, with no-op anchor).** Full
+    /// pricing reduced-cost-prices every column every iteration (exactly
+    /// `iters * n_price`). Partial pricing must price strictly fewer — it stops
+    /// each non-final iteration at the first improving window. The full-pricing
+    /// `== iters*n_price` equality is the no-op anchor: if windowing were
+    /// disabled, the partial run would hit the same product and the strict-`<`
+    /// assertion would fail.
+    #[test]
+    fn partial_pricing_reduces_per_iteration_scan() {
+        let lp = lp_boxed_2x2_degenerate();
+        let bsf = build_bounded_standard_form(&lp);
+        let n_price = bsf.n_total;
+        let opts = SolverOptions::default();
+
+        let run = |chunk: usize| -> (u64, usize) {
+            let (_d, dual_state) = solve_bounded_dual(
+                &bsf,
+                &bsf.a,
+                &bsf.b,
+                &bsf.c,
+                &opts,
+                &bsf.upper_bounds,
+                &mut MostInfeasibleLeaving,
+            );
+            let _g = PartialPriceChunkGuard::set(chunk);
+            reset_partial_price_cols_scanned();
+            let mut iters = 0usize;
+            let (out, _s) = phase2_primal_bounded(
+                &bsf,
+                dual_state,
+                &bsf.a,
+                &bsf.c,
+                &opts,
+                &mut iters,
+                &bsf.upper_bounds,
+            );
+            assert!(matches!(out, SimplexOutcome::Optimal(..)));
+            (partial_price_cols_scanned(), iters)
+        };
+
+        let (scanned_partial, iters_partial) = run(1);
+        let (scanned_full, iters_full) = run(FULL_PRICE);
+
+        assert_eq!(
+            scanned_full,
+            (iters_full * n_price) as u64,
+            "full pricing must price all {n_price} cols on each of {iters_full} iters"
+        );
+        assert!(
+            scanned_partial < (iters_partial * n_price) as u64,
+            "partial pricing scanned {scanned_partial} cols over {iters_partial} iters \
+             (≥ full {iters_partial}*{n_price}); windowing is not active"
+        );
+    }
+
+    /// Partial pricing must also preserve correctness on the augmented Phase I
+    /// core (`primal_simplex_aug`). Eq LP x0+x1=4, x0+2x1=5, 0≤x0≤3, x1≥0;
+    /// Phase I must drive the artificial sum to zero under both full and
+    /// partial pricing.
+    #[test]
+    fn partial_pricing_aug_phase1_matches_full() {
+        let a_aug = CscMatrix::from_triplets(
+            &[0, 1, 0, 1, 0, 1],
+            &[0, 0, 1, 1, 2, 3],
+            &[1.0, 1.0, 1.0, 2.0, 1.0, 1.0],
+            2,
+            4,
+        )
+        .unwrap();
+        let n_struct = 2usize;
+        let ubs_aug = vec![3.0f64, f64::INFINITY, f64::INFINITY, f64::INFINITY];
+        let c_p1 = vec![0.0f64, 0.0, 1.0, 1.0];
+        let opts = SolverOptions::default();
+
+        let build_state = || BoundedDualState {
+            basis: vec![2usize, 3],
+            at_upper: vec![false; 4],
+            x_b: vec![4.0f64, 5.0],
+            reduced_costs: vec![0.0; 4],
+            is_basic: vec![false, false, true, true],
+            iterations: 0,
+            price_start: 0,
+        };
+
+        let run = |chunk: usize| -> f64 {
+            let _g = PartialPriceChunkGuard::set(chunk);
+            let mut state = build_state();
+            let mut iters = 0usize;
+            match bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters)
+            {
+                SimplexOutcome::Optimal(art_sum, _) => art_sum,
+                other => panic!("expected Phase I Optimal, got {other:?}"),
+            }
+        };
+
+        let art_full = run(FULL_PRICE);
+        let art_partial = run(1);
+        assert!(art_full.abs() < 1e-6, "full Phase I art_sum {art_full:.6e}");
+        assert!(
+            art_partial.abs() < 1e-6,
+            "partial Phase I art_sum {art_partial:.6e} — partial pricing broke Phase I feasibility"
+        );
+    }
 }
