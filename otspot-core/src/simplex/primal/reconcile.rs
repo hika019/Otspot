@@ -1,6 +1,6 @@
 //! Basis reconciliation, crash, feasibility check, and solution extraction.
 
-use crate::basis::{BasisManager, LuBasis};
+use crate::basis::{BasisManager, BasisMgr, LuBasis};
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem};
 use crate::sparse::{CscMatrix, SparseVec};
@@ -160,7 +160,7 @@ fn pivot_out_sequential(
     sf: &StandardForm,
     options: &SolverOptions,
     target_rows: &[usize],
-    basis_mgr: &mut LuBasis,
+    basis_mgr: &mut BasisMgr,
     is_basic: &mut [bool],
 ) {
     let m = basis.len();
@@ -298,7 +298,7 @@ pub(crate) fn pivot_out_degenerate_artificials(
     if matches.is_empty() {
         // Nothing the batch can do: run sequential for all degenerate rows.
         if let Ok(mut basis_mgr) =
-            LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline)
+            BasisMgr::new_timed(a_ext, basis, options.max_etas, options.deadline, options.use_ft_basis)
         {
             pivot_out_sequential(
                 a_ext,
@@ -316,8 +316,8 @@ pub(crate) fn pivot_out_degenerate_artificials(
         // Build B_before now for two purposes:
         //  1. Post-batch FTRAN stability check (non-singular ≠ well-conditioned).
         //  2. Sequential fallback if the stability check fails.
-        let mut b_before_opt: Option<LuBasis> =
-            LuBasis::new_timed(a_ext, &basis_before, options.max_etas, options.deadline).ok();
+        let mut b_before_opt: Option<BasisMgr> =
+            BasisMgr::new_timed(a_ext, &basis_before, options.max_etas, options.deadline, options.use_ft_basis).ok();
 
         // Multi-level batch: each iteration commits as many matches as possible via a
         // single LU, then recurses on the remainder.  For rank-saturated LPs the second
@@ -484,7 +484,7 @@ pub(crate) fn pivot_out_degenerate_artificials(
             let has_residual = !unmatched_rows.is_empty() || !uncommitted_rows.is_empty();
             if has_residual {
                 if let Ok(mut basis_mgr) =
-                    LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline)
+                    BasisMgr::new_timed(a_ext, basis, options.max_etas, options.deadline, options.use_ft_basis)
                 {
                     let mut seq_is_basic = vec![false; a_ext.ncols];
                     for &col in basis.iter() {

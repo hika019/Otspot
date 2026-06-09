@@ -1,6 +1,6 @@
 //! Primal-to-dual crossover: reconstruct an optimal basis from a known primal solution.
 
-use crate::basis::{BasisManager, LuBasis};
+use crate::basis::{BasisManager, BasisMgr};
 use crate::options::SolverOptions;
 use crate::problem::LpProblem;
 use crate::sparse::{CscMatrix, SparseVec};
@@ -165,7 +165,7 @@ pub(crate) fn crossover_dual_from_primal(
     // (a blind index swap does not). A non-binding Ge surplus slack starts
     // nonbasic, so seating slacks too is required or B⁻¹b ≠ x*.
     {
-        let mut basis_mgr = LuBasis::new_timed(&a_ext, &basis, options.max_etas, deadline).ok()?;
+        let mut basis_mgr = BasisMgr::new_timed(&a_ext, &basis, options.max_etas, deadline, options.use_ft_basis).ok()?;
         let mut is_basic = vec![false; n_ext];
         for &col in basis.iter() {
             is_basic[col] = true;

@@ -50,7 +50,7 @@ use super::super::crash;
 use super::super::pricing::{DualLeavingStrategy, SteepestEdgePricing};
 use super::super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use super::core::dual_simplex_core_advanced;
-use crate::basis::{BasisManager, LuBasis};
+use crate::basis::{BasisManager, BasisMgr};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
@@ -114,7 +114,7 @@ fn farkas_infeasibility_certified(
     }
 
     let mut basis_mgr =
-        match LuBasis::new_timed(a_aug, basis_aug, options.max_etas, options.deadline) {
+        match BasisMgr::new_timed(a_aug, basis_aug, options.max_etas, options.deadline, options.use_ft_basis) {
             Ok(bm) => bm,
             Err(_) => return false,
         };
@@ -474,7 +474,7 @@ fn try_build_crash_phase1_state(
     }
 
     let mut basis_mgr =
-        match LuBasis::new_timed(&a_aug, &basis_aug, options.max_etas, options.deadline) {
+        match BasisMgr::new_timed(&a_aug, &basis_aug, options.max_etas, options.deadline, options.use_ft_basis) {
             Ok(bm) => bm,
             Err(_) => {
                 #[cfg(test)]
@@ -632,8 +632,8 @@ pub(crate) fn big_m_cold_start(
             //
             // ETA 累積誤差で `x_b` が drift しているので fresh FTRAN で再計算 (B⁻¹ b)。
             // ドリフトと数値悪化の両方を排除して soundness を強化 (reviewer P1)。
-            let x_b_check: Vec<f64> = match crate::basis::LuBasis::new_timed(
-                &a_aug, &basis_aug, options.max_etas, options.deadline,
+            let x_b_check: Vec<f64> = match BasisMgr::new_timed(
+                &a_aug, &basis_aug, options.max_etas, options.deadline, options.use_ft_basis,
             ) {
                 Ok(mut bm) => {
                     let mut rhs = b.to_vec();
@@ -712,8 +712,8 @@ pub(crate) fn big_m_cold_start(
                     SimplexOutcome::SingularBasis => return SolverResult::numerical_error(),
                     SimplexOutcome::Optimal(_, _) => {
                         // Phase I 完了: Phase II へ fall-through (下の Optimal 分岐と同一処理)
-                        if let Ok(mut bm) = LuBasis::new_timed(
-                            &a_aug, &basis_aug, options.max_etas, options.deadline,
+                        if let Ok(mut bm) = BasisMgr::new_timed(
+                            &a_aug, &basis_aug, options.max_etas, options.deadline, options.use_ft_basis,
                         ) {
                             let mut rhs = SparseVec::from_dense(b);
                             bm.ftran(&mut rhs);
@@ -751,7 +751,7 @@ pub(crate) fn big_m_cold_start(
             // Flush numerical drift accumulated during Phase I cycling by
             // recomputing x_B = B^{-1} b before Phase II (Maros §6 hygiene).
             if let Ok(mut bm) =
-                LuBasis::new_timed(&a_aug, &basis_aug, options.max_etas, options.deadline)
+                BasisMgr::new_timed(&a_aug, &basis_aug, options.max_etas, options.deadline, options.use_ft_basis)
             {
                 let mut rhs = SparseVec::from_dense(b);
                 bm.ftran(&mut rhs);

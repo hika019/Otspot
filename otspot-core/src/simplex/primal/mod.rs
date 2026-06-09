@@ -11,7 +11,7 @@ pub(crate) use reconcile::{extract_solution, reconcile_final_basis_state};
 #[cfg(test)]
 pub(crate) use reconcile::pivot_out_degenerate_artificials as test_pivot_out_degenerate_artificials;
 
-use crate::basis::{BasisManager, LuBasis};
+use crate::basis::{BasisManager, BasisMgr};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
@@ -196,7 +196,7 @@ fn extract_farkas_certificate(
     if art_rows.is_empty() {
         return vec![];
     }
-    let mut basis_mgr = match LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline) {
+    let mut basis_mgr = match BasisMgr::new_timed(a_ext, basis, options.max_etas, options.deadline, options.use_ft_basis) {
         Ok(bm) => bm,
         Err(_) => return vec![],
     };
