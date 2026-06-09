@@ -300,7 +300,6 @@ impl<'a> FtLu<'a> {
     }
 
     /// 再分解が望ましいか (小 pivot 等)。
-    #[allow(dead_code)]
     pub(crate) fn needs_refactor(&self) -> bool {
         self.needs_refactor
     }
@@ -361,7 +360,6 @@ impl<'a> FtLu<'a> {
     /// 4. 記録した行操作を bump 右側の列 (>t) に sparse に replay し、`u_mat` を upper-triangular
     ///    に書き戻す (PFI と異なり U の値自体を書き換える)。col_perm に巡回を畳み込む。
     /// 5. 中間 pivot と最終 pivot が小さければ `needs_refactor`、`< DROP_TOL` なら `SingularBasis`。
-    #[allow(dead_code)]
     pub(crate) fn update(
         &mut self,
         entering_col: usize,
@@ -462,6 +460,9 @@ impl<'a> FtLu<'a> {
                 return Err(SolverError::SingularBasis { step: leaving_row });
             }
             // 中間 bump pivot が不安定 → backward_sub の除数として精度劣化するため refactor 要求。
+            // snorm_inf (spike の L-∞ ノルム) を全 bump 列共通の scale に流用している。
+            // より厳密には bump 列ごとの L-∞ ノルムを使うべきだが、spike が最悪 scale を
+            // 代表するため実用上十分。 per-column scale が必要な場合は Phase 3 再検討。
             if pivot.abs() < PIVOT_STABILITY_THRESHOLD * snorm_inf {
                 self.needs_refactor = true;
             }
@@ -1242,12 +1243,15 @@ mod tests {
         assert!(resid < 1e-9, "ftran residual={resid:.2e}");
     }
 
-    /// ill-conditioned sentinel: 退化に近い基底で BGR update の match-or-refactor 不変条件。
+    /// ill-conditioned sentinel: match arm + recovery 機構のテスト。
     ///
-    /// 不変条件: 各ケースで「FT solve がフル再分解と tol 一致」または
-    /// 「needs_refactor が立ち、FtLu::new 後に一致が回復」のどちらかが必ず成立。
-    /// P2 の中間 pivot 安定性チェックが無効だと、ill-cond ケースで不一致かつ
-    /// needs_refactor 未発火になり fail する (load-bearing sentinel)。
+    /// 不変条件: 各ケースで「FT solve がフル再分解と tol 一致 (match arm)」または
+    /// 「needs_refactor が立ち、FtLu::new 後に一致が回復 (refactor arm)」が成立。
+    ///
+    /// このテストでは partial pivoting が小 pivot を救うため全6ケースが match arm に入り、
+    /// needs_refactor が立つ決定論的なケースは含まない。interior bump pivot の
+    /// 決定論的発火 (bsz≥3, line 465) は `test_ftlu_interior_bump_pivot_fires_needs_refactor`
+    /// が担い、そちらが P2 修正の load-bearing 証明となる。
     #[test]
     fn test_ftlu_update_ill_conditioned_match_or_refactor() {
         // ill-cond 基底生成: 対角が強いが一部列が互いに近い (大きな条件数)。
@@ -1358,5 +1362,86 @@ mod tests {
         );
         // Err 経路で u_mat は不変 (needs_refactor のみ変化)。
         assert_eq!(ft.u_mat.values, u_before, "u_mat must be untouched on Err");
+    }
+
+    /// load-bearing sentinel: interior bump pivot stability check (ft.rs:464-467) を
+    /// bsz=5 (≥3) の決定論的構成で発火させる。
+    ///
+    /// 構成:
+    /// - 初期基底 (cols 0..4) の LU 因子が working 位置 (1,1) に U[1,1]=5e-6 を持つよう設計。
+    ///   COLAMD は col 3 (δ のみ) を working col 1 に配置するためこの値が得られる。
+    /// - 入基列 col 5 (leaving_row=4) で spike が working 行 0..4 全体に届き bsz=5 を強制。
+    /// - bump col 0 = U col 1: bump[0][0]=0, bump[1][0]=5e-6 → partial pivot swap →
+    ///   pivot=5e-6 < PIVOT_STABILITY_THRESHOLD(0.01) × snorm_inf(≈0.98) → ft.rs:465 が発火。
+    /// - final_pivot ≈ 0.3 (large) → ft.rs:541 は不発 → needs_refactor の原因が ft.rs:465 のみ。
+    ///
+    /// load-bearing 証明: ft.rs:464-467 を削除すると needs_refactor が立たず、
+    /// `assert!(ft.needs_refactor())` が FAIL する (実機確認済)。
+    #[test]
+    fn test_ftlu_interior_bump_pivot_fires_needs_refactor() {
+        let n = 5usize;
+        let delta = 5e-6f64;
+
+        // 初期基底列 (cols 0..4): COLAMD が col 3 を working col 1 (U[1,1]=δ) に配置する構成。
+        // col 3 は rows 2,3 のみ (小値 δ の 2×2 小行列) → COLAMD がスパースな列を先頭近くに置く。
+        let mut rows_a: Vec<usize> = Vec::new();
+        let mut cols_a: Vec<usize> = Vec::new();
+        let mut vals_a: Vec<f64> = Vec::new();
+
+        // col 0: row 0 = 1.0
+        rows_a.push(0); cols_a.push(0); vals_a.push(1.0);
+        // col 1: row 0 = 0.5, row 1 = 1.0
+        rows_a.push(0); cols_a.push(1); vals_a.push(0.5);
+        rows_a.push(1); cols_a.push(1); vals_a.push(1.0);
+        // col 2: row 0 = 0.3, row 1 = 0.2, row 2 = 1.0
+        rows_a.push(0); cols_a.push(2); vals_a.push(0.3);
+        rows_a.push(1); cols_a.push(2); vals_a.push(0.2);
+        rows_a.push(2); cols_a.push(2); vals_a.push(1.0);
+        // col 3: row 2 = δ, row 3 = δ  (小値 → U[1,1]=δ after COLAMD reorder)
+        rows_a.push(2); cols_a.push(3); vals_a.push(delta);
+        rows_a.push(3); cols_a.push(3); vals_a.push(delta);
+        // col 4: row 4 = 1.0
+        rows_a.push(4); cols_a.push(4); vals_a.push(1.0);
+        // entering col 5: rows 1,2,3,4 → spike 全 5 working 行に届き bsz=5 を強制
+        rows_a.push(1); cols_a.push(5); vals_a.push(1.0);
+        rows_a.push(2); cols_a.push(5); vals_a.push(0.5);
+        rows_a.push(3); cols_a.push(5); vals_a.push(0.4);
+        rows_a.push(4); cols_a.push(5); vals_a.push(0.3);
+
+        let a = CscMatrix::from_triplets(&rows_a, &cols_a, &vals_a, n, 6).unwrap();
+        let init_basis: Vec<usize> = (0..n).collect();
+        let mut ft = FtLu::new(&a, &init_basis).unwrap();
+        assert!(!ft.needs_refactor());
+
+        // entering=5, leaving=4: c=0, t=4, bsz=5, snorm_inf≈0.98
+        // bump[1][0] = U[1,1] = 5e-6 > bump[0][0] = U[0,1] = 0 → swap →
+        // pivot = 5e-6 < 0.01 × 0.98 → ft.rs:465 発火。
+        ft.update(5, 4).expect("update must succeed (pivot=δ > DROP_TOL=1e-15)");
+
+        // ft.rs:465 が立てた needs_refactor が true である必要がある。
+        // ft.rs:464-467 を削除すると final_pivot=0.3 (ft.rs:541 不発) のため
+        // needs_refactor=false となり、ここで FAIL する (load-bearing 証明)。
+        assert!(
+            ft.needs_refactor(),
+            "interior bump pivot (δ={delta:.2e}) must fire ft.rs:465 and set needs_refactor; \
+             removing ft.rs:464-467 causes this assert to fail"
+        );
+
+        // refactor (FtLu::new) 後に solve 精度が回復する。
+        let new_basis = vec![0usize, 1, 2, 3, 5];
+        let ref_lu = LuFactorization::factorize_timed(&a, &new_basis, None)
+            .expect("new basis [0,1,2,3,5] must be non-singular");
+        let ft2 = FtLu::new(&a, &new_basis).unwrap();
+        let rhs = vec![1.0f64, 2.0, 3.0, 4.0, 5.0];
+        let mut x_ft2 = rhs.clone();
+        ft2.ftran(&mut x_ft2);
+        let mut x_ref = rhs.clone();
+        solve_ftran(&ref_lu, &mut x_ref);
+        let xscale = 1.0 + x_ref.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
+        let rel = max_abs_diff(&x_ft2, &x_ref) / xscale;
+        assert!(
+            rel < 1e-9,
+            "after FtLu::new refactor, ftran rel diff={rel:.2e}"
+        );
     }
 }
