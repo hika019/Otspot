@@ -1172,4 +1172,213 @@ mod tests {
             );
         }
     }
+
+    /// Sentinel: `DualSteepestEdgeLeaving::needs_sigma()` must return `true`.
+    ///
+    /// `core.rs` allocates `sigma_dense` and runs the σ FTRAN only when
+    /// `leaving.needs_sigma()` is `true`.  If it returns `false`, `sigma_dense`
+    /// stays empty and `after_pivot` receives `sigma = &[]`; the
+    /// Forrest-Goldfarb update indexes into that slice and panics on the first
+    /// real pivot.
+    ///
+    /// no-op proof: change `DualSteepestEdgeLeaving::needs_sigma` to return
+    /// `false` → this assert fires immediately, before any LP solve.
+    #[test]
+    fn dse_needs_sigma_returns_true() {
+        use super::super::steepest_edge::DualSteepestEdgeLeaving;
+        let dse = DualSteepestEdgeLeaving::new(4);
+        assert!(
+            dse.needs_sigma(),
+            "DualSteepestEdgeLeaving::needs_sigma() must return true; \
+             reverting to false skips sigma FTRAN and causes a slice-index \
+             panic in after_pivot on the first pivot"
+        );
+        // Stateless strategy must keep the trait default (false).
+        let mi = MostInfeasibleLeaving;
+        assert!(
+            !mi.needs_sigma(),
+            "MostInfeasibleLeaving::needs_sigma() must be false (stateless)"
+        );
+    }
+
+    /// Sentinel: DSE γ-update reduces warm-start iteration count vs γ-frozen equivalent.
+    ///
+    /// Builds 5 deterministic random Le-only LPs (15 × 30, seeds 11–113) using an
+    /// inline LCG (no data files), cold-solves each for an optimal basis, perturbs b
+    /// (× 0.7 / × 1.3 alternating) to create primal violations, then re-solves via
+    /// `solve_dual_advanced` (the `make_leaving_strategy` production path) with:
+    ///   - DSE γ ON  : `DualPricing::SteepestEdge` (γ updated each pivot)
+    ///   - DSE γ OFF : same pricing but `DSE_DISABLE_GAMMA_UPDATE=1` (γ ≡ 1 → MI-equivalent)
+    ///
+    /// Correctness: both arms must reach the same optimal objective (within 1e-5).
+    /// Sentinel: γ-update must produce a strict iteration win on ≥ 1 seed.
+    ///
+    /// no-op proof: set `gamma_update_disabled()` to always return `true` in
+    /// `steepest_edge.rs` → γ stays frozen for both arms → DSE-ON iters == DSE-OFF
+    /// iters → wins = 0 → `assert!(wins >= MIN_WINS)` FAILS.
+    #[allow(clippy::print_stderr)]
+    #[test]
+    fn dse_gamma_update_reduces_iterations() {
+        use crate::options::{DualPricing, WarmStartBasis};
+        use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+        use crate::simplex::standard_form::build_standard_form;
+
+        // Inline LCG (mirrors diag_dse_pivot_selection.rs; no rand dep).
+        struct Lcg(u64);
+        impl Lcg {
+            fn new(s: u64) -> Self {
+                Self(if s == 0 { 0xDEAD_BEEF_CAFE_F00D } else { s })
+            }
+            fn next_u64(&mut self) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                self.0
+            }
+            fn f64(&mut self) -> f64 {
+                (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64)
+            }
+        }
+
+        const M: usize = 15;
+        const N: usize = 30;
+        const DENSITY: f64 = 0.35;
+        const BUDGET: f64 = 50.0;
+        const PERTURB_LO: f64 = 0.7;
+        const PERTURB_HI: f64 = 1.3;
+        const OBJ_TOL: f64 = 1e-5;
+        /// At least one seed must show DSE-ON strictly fewer iters than DSE-OFF.
+        const MIN_WINS: usize = 1;
+        const SEEDS: &[u64] = &[11, 23, 47, 71, 113];
+
+        let mut wins = 0usize;
+        let mut skipped = 0usize;
+
+        for &seed in SEEDS {
+            // Build Le-only LP for this seed (no finite UBs → legacy dual path).
+            let mut rng = Lcg::new(seed);
+            let mut rows: Vec<usize> = Vec::new();
+            let mut cols: Vec<usize> = Vec::new();
+            let mut vals: Vec<f64> = Vec::new();
+            for i in 0..M {
+                for j in 0..N {
+                    if rng.f64() < DENSITY {
+                        rows.push(i);
+                        cols.push(j);
+                        vals.push(rng.f64() * 2.0 - 1.0);
+                    }
+                }
+                // Diagonal dominance: at least one nonzero per row.
+                rows.push(i);
+                cols.push(i % N);
+                vals.push(0.5 + rng.f64());
+            }
+            // Budget row: Σ x_j ≤ BUDGET (bounds the LP without finite variable UBs).
+            for j in 0..N {
+                rows.push(M);
+                cols.push(j);
+                vals.push(1.0);
+            }
+            let total_rows = M + 1;
+            let a = CscMatrix::from_triplets(&rows, &cols, &vals, total_rows, N).unwrap();
+            let mut b: Vec<f64> = (0..M).map(|_| 1.0 + 2.0 * rng.f64()).collect();
+            b.push(BUDGET);
+            let c: Vec<f64> = (0..N).map(|_| -(rng.f64() + 0.1)).collect();
+            let lp = LpProblem::new_general(
+                c,
+                a,
+                b,
+                vec![ConstraintType::Le; total_rows],
+                vec![(0.0, f64::INFINITY); N],
+                None,
+            )
+            .unwrap();
+
+            // Cold solve to get an optimal basis.
+            let sf = build_standard_form(&lp);
+            let cold = super::super::solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            if cold.status != SolveStatus::Optimal {
+                eprintln!(
+                    "[dse_gamma_update seed={seed}] cold non-Optimal: {:?}",
+                    cold.status
+                );
+                skipped += 1;
+                continue;
+            }
+            let warm_basis = match cold.warm_start_basis {
+                Some(wb) => wb,
+                None => {
+                    eprintln!("[dse_gamma_update seed={seed}] no warm_start_basis");
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+            // Perturb b alternating to create warm primal violations.
+            let mut lp_p = lp.clone();
+            for (i, v) in lp_p.b.iter_mut().enumerate() {
+                *v *= if i % 2 == 0 { PERTURB_LO } else { PERTURB_HI };
+            }
+            let sf_p = build_standard_form(&lp_p);
+
+            let make_warm_opts = |pricing: DualPricing, basis: Vec<usize>| SolverOptions {
+                dual_pricing: pricing,
+                warm_start: Some(WarmStartBasis { basis, x_b: Vec::new() }),
+                ..SolverOptions::default()
+            };
+
+            // DSE γ ON (normal Forrest-Goldfarb update).
+            let r_on = super::super::solve_dual_advanced(
+                &sf_p,
+                &lp_p,
+                &make_warm_opts(DualPricing::SteepestEdge, warm_basis.basis.clone()),
+            );
+
+            // DSE γ OFF: γ frozen ≡ 1 → score = x_B[i]² → MI-equivalent.
+            // SAFETY: nextest spawns one OS process per test; the env write is
+            // visible only within this process and on this single thread.
+            unsafe { std::env::set_var("DSE_DISABLE_GAMMA_UPDATE", "1") };
+            let r_off = super::super::solve_dual_advanced(
+                &sf_p,
+                &lp_p,
+                &make_warm_opts(DualPricing::SteepestEdge, warm_basis.basis),
+            );
+            unsafe { std::env::remove_var("DSE_DISABLE_GAMMA_UPDATE") };
+
+            if r_on.status != SolveStatus::Optimal || r_off.status != SolveStatus::Optimal {
+                eprintln!(
+                    "[dse_gamma_update seed={seed}] non-Optimal: on={:?} off={:?}",
+                    r_on.status, r_off.status
+                );
+                skipped += 1;
+                continue;
+            }
+
+            assert!(
+                (r_on.objective - r_off.objective).abs() < OBJ_TOL,
+                "seed={seed}: γ-ON obj={:.7} γ-OFF obj={:.7} differ by >{OBJ_TOL}; \
+                 DSE and MI must converge to the same optimal",
+                r_on.objective,
+                r_off.objective,
+            );
+
+            eprintln!(
+                "[dse_gamma_update seed={seed}] γ-ON iters={} γ-OFF iters={}",
+                r_on.iterations, r_off.iterations
+            );
+
+            if r_on.iterations < r_off.iterations {
+                wins += 1;
+            }
+        }
+
+        assert!(
+            wins >= MIN_WINS,
+            "DSE γ-update must produce ≥{MIN_WINS} strict win(s) over γ-frozen (= MI) \
+             across {} seeds; got {wins} with {skipped} skipped. \
+             no-op: gamma_update_disabled()≡true makes wins=0 here.",
+            SEEDS.len(),
+        );
+    }
 }

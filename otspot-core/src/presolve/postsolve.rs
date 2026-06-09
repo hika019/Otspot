@@ -1613,6 +1613,68 @@ mod cleanup_comp_tests {
             rc0
         );
     }
+
+    /// Deadline sentinel: an already-expired deadline must cause `build_and_solve_cleanup_lp`
+    /// to bail immediately and return `None` without constructing or solving the inner LP.
+    ///
+    /// No-op proof: the companion test `cleanup_lp_live_deadline_noop_proof` verifies
+    /// that the same fixture with `deadline = None` (unlimited) does return `Some(y)`,
+    /// confirming the expired-deadline `None` is a genuine bail, not a trivial always-None
+    /// path. Removing both the early-exit guard **and** the `opts.deadline = deadline`
+    /// wiring causes the expired-deadline case to solve the LP and return `Some`, failing
+    /// this test.
+    #[test]
+    fn cleanup_lp_expired_deadline_returns_none() {
+        let (lp, sol, dual, del) = fixture_eq_kept_le_deleted();
+        let presolve_result = presolve_result_with_deleted_row(&lp, del);
+
+        let expired = Instant::now() - std::time::Duration::from_secs(100);
+        let result = build_and_solve_cleanup_lp(
+            &lp,
+            &presolve_result,
+            &sol,
+            &dual,
+            Some(expired),
+            false,
+        );
+
+        assert!(
+            result.is_none(),
+            "expired deadline must cause immediate bail (result must be None); \
+             removing the deadline guard or deadline wiring from build_and_solve_cleanup_lp \
+             allows the cleanup LP to solve and return Some, failing this sentinel"
+        );
+    }
+
+    /// No-op proof for `cleanup_lp_expired_deadline_returns_none`: the same fixture
+    /// with `deadline = None` (unlimited runtime) must return `Some(y)`, proving
+    /// the LP is actually solvable and the expired-deadline None is a genuine bail.
+    #[test]
+    fn cleanup_lp_live_deadline_noop_proof() {
+        let (lp, sol, dual, del) = fixture_eq_kept_le_deleted();
+        let presolve_result = presolve_result_with_deleted_row(&lp, del);
+
+        let result = build_and_solve_cleanup_lp(
+            &lp,
+            &presolve_result,
+            &sol,
+            &dual,
+            None,
+            false,
+        );
+
+        assert!(
+            result.is_some(),
+            "unlimited deadline must allow the cleanup LP to solve and return Some(y); \
+             an always-None implementation would break this no-op proof"
+        );
+        let y = result.unwrap();
+        assert_eq!(
+            y.len(),
+            lp.num_constraints,
+            "returned y must cover all original constraints"
+        );
+    }
 }
 
 #[cfg(test)]

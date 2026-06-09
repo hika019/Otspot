@@ -144,6 +144,123 @@ fn flip_apply_disabled() -> bool {
 /// - dfl001   bounded-aug: 556 → 625 iter/s (1.12x)
 const DEADLINE_CHECK_INTERVAL: usize = 512;
 
+/// Cyclic partial-pricing window size for the bounded primal cores
+/// (`phase2_primal_bounded` / `primal_simplex_aug`).
+///
+/// Each pricing pass reduces-cost-prices at most this many non-basic columns,
+/// starting from a rotating cursor (`state.price_start`), instead of all
+/// `n_price`. The full scan is *deferred*, never skipped: optimality is only
+/// declared after a complete `n_price` sweep finds no improving column (see
+/// `partial_price_entering`). On large network LPs (pds/ken/dfl001) the
+/// per-iteration reduced-cost scan (`yᵀaⱼ` over every non-basic column)
+/// dominates wall time; windowing it cuts the per-iteration price cost while
+/// preserving the exact optimality test.
+///
+/// For `n_price ≤ PARTIAL_PRICE_CHUNK` the window covers every column, so small
+/// and medium LPs price fully (identical behaviour to the pre-partial cores).
+///
+/// Value: placeholder pending bench calibration (dfl001/ken-18 net throughput
+/// vs. the 105/109 PASS set). A fixed absolute window gives the largest
+/// relative reduction exactly where the scan dominates (large `n_price`), and
+/// keeps the entering candidate sample large enough to avoid an iteration-count
+/// blow-up. Tune against `timeout=1000, eps=1e-6` before treating as final.
+const PARTIAL_PRICE_CHUNK: usize = 2048;
+
+/// Read `OTSPOT_PP_CHUNK` from the environment once; `None` means "not set / invalid".
+///
+/// Cached via `OnceLock` so repeated calls are a single pointer load.
+/// Intended for bench calibration only — production default remains
+/// `PARTIAL_PRICE_CHUNK`.
+fn env_pp_chunk() -> Option<usize> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Option<usize>> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("OTSPOT_PP_CHUNK")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+    })
+}
+
+/// Effective partial-pricing window for a given `n_price`, clamped to
+/// `[1, n_price]`.
+///
+/// Priority (highest first):
+/// 1. `#[cfg(test)]` thread-local override (unit-test sentinels).
+/// 2. `OTSPOT_PP_CHUNK` environment variable (bench calibration).
+/// 3. `PARTIAL_PRICE_CHUNK` named constant (production default).
+fn partial_price_chunk(n_price: usize) -> usize {
+    let base = {
+        #[cfg(test)]
+        {
+            let o = PARTIAL_PRICE_CHUNK_OVERRIDE.with(|c| c.get());
+            if o != 0 {
+                o
+            } else if let Some(v) = env_pp_chunk() {
+                v
+            } else {
+                PARTIAL_PRICE_CHUNK
+            }
+        }
+        #[cfg(not(test))]
+        {
+            env_pp_chunk().unwrap_or(PARTIAL_PRICE_CHUNK)
+        }
+    };
+    base.clamp(1, n_price.max(1))
+}
+
+// ── partial-pricing test hooks (compiled out of release) ──────────────────────
+#[cfg(test)]
+thread_local! {
+    /// Override for `PARTIAL_PRICE_CHUNK` (0 = use the production constant).
+    static PARTIAL_PRICE_CHUNK_OVERRIDE: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    /// When `true`, `partial_price_entering` declares Optimal after the FIRST
+    /// window even if the full `n_price` sweep is incomplete — the broken
+    /// behaviour the false-optimal no-op proof must catch.
+    static PARTIAL_PRICE_SINGLE_WINDOW: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    /// Running count of columns actually reduced-cost-priced across pricing
+    /// passes. Sentinels snapshot the delta to assert partial < full.
+    static PARTIAL_PRICE_COLS_SCANNED: std::cell::Cell<u64> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn set_partial_price_chunk_override(v: usize) {
+    PARTIAL_PRICE_CHUNK_OVERRIDE.with(|c| c.set(v));
+}
+
+#[cfg(test)]
+pub(crate) fn set_partial_price_single_window(v: bool) {
+    PARTIAL_PRICE_SINGLE_WINDOW.with(|c| c.set(v));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_partial_price_cols_scanned() {
+    PARTIAL_PRICE_COLS_SCANNED.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn partial_price_cols_scanned() -> u64 {
+    PARTIAL_PRICE_COLS_SCANNED.with(|c| c.get())
+}
+
+#[cfg(test)]
+fn partial_price_single_window() -> bool {
+    PARTIAL_PRICE_SINGLE_WINDOW.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn partial_price_single_window() -> bool {
+    false
+}
+
 // Counts deadline checks issued inside `compute_reduced_costs_into_timed` (test-only).
 //
 // `thread_local!` 化により、並列 test 実行 (`--test-threads 3`) で他 test の
@@ -177,30 +294,149 @@ fn compute_reduced_costs_into_timed(
         return false;
     }
     compute_dual_vars_into(c, basis_mgr, basis, y_buf);
-    let mut j = 0;
-    while j < n_price {
+    compute_reduced_costs_window(a, c, is_basic, y_buf, rc_out, 0, n_price, deadline)
+}
+
+/// Reduced costs `r_k = c_k − yᵀa_k` for the column window `[start, end)` only,
+/// written into `rc_out[start..end]` (basic columns zeroed). `y` is precomputed
+/// (`B^{-T}c_B`); the caller computes it once per pricing pass and reuses it
+/// across windows of the same basis. Deadline is checked per
+/// `DEADLINE_CHECK_INTERVAL` chunk, not per column. Returns `false` on deadline.
+#[allow(clippy::too_many_arguments)]
+fn compute_reduced_costs_window(
+    a: &CscMatrix,
+    c: &[f64],
+    is_basic: &[bool],
+    y: &[f64],
+    rc_out: &mut [f64],
+    start: usize,
+    end: usize,
+    deadline: Option<Instant>,
+) -> bool {
+    let mut j = start;
+    while j < end {
         // Check deadline once per chunk, not per column.
         if deadline_expired(deadline) {
             return false;
         }
         #[cfg(test)]
         RC_DEADLINE_CHECK_COUNT.with(|c| c.set(c.get() + 1));
-        let end = (j + DEADLINE_CHECK_INTERVAL).min(n_price);
-        for k in j..end {
+        let chunk_end = (j + DEADLINE_CHECK_INTERVAL).min(end);
+        for k in j..chunk_end {
             if is_basic[k] {
                 rc_out[k] = 0.0;
             } else {
                 let (rows, vals) = a.get_column(k).unwrap();
                 let mut ya = 0.0;
                 for (ri, &row) in rows.iter().enumerate() {
-                    ya += y_buf[row] * vals[ri];
+                    ya += y[row] * vals[ri];
                 }
                 rc_out[k] = c[k] - ya;
             }
         }
-        j = end;
+        j = chunk_end;
     }
     true
+}
+
+/// Outcome of a partial-pricing pass.
+enum PartialPrice {
+    /// `entering` won pricing; `next_start` is where the next pass should begin.
+    Entering { entering: usize, next_start: usize },
+    /// A full `n_price` sweep found no improving column → Optimal. `next_start`
+    /// is reset so a warm re-entry begins fresh.
+    Optimal { next_start: usize },
+    /// Deadline expired mid-window.
+    Deadline,
+}
+
+/// Cyclic partial pricing for the bounded primal cores.
+///
+/// Starting at `price_start`, prices the reduced costs of successive
+/// `partial_price_chunk(n_price)`-sized windows (wrapping around `n_price`),
+/// scoring each non-basic column via `score`. The first window that contains an
+/// improving column wins; among that window's columns the best score is chosen
+/// (Dantzig-within-window). `next_start` advances past the chosen window so the
+/// next pass continues from fresh territory.
+///
+/// **False-optimal invariant (load-bearing):** `Optimal` is returned ONLY after
+/// a complete `n_price` sweep (every column priced under the *current* basis)
+/// produced no improving column. Windowing merely defers that sweep across
+/// pivots; an improving column in a not-yet-scanned window can never trigger
+/// Optimal. The `partial_price_single_window` test hook breaks exactly this rule
+/// (declares Optimal after one window) so the no-op proof can detect a
+/// regression that prices only a single window before declaring optimality.
+///
+/// `score(j, rc_j) -> Option<f64>`: `None` = column `j` is not improving;
+/// `Some(s)` = improving with score `s` (larger wins). `rc_j` is freshly priced.
+fn partial_price_entering<F>(
+    a: &CscMatrix,
+    c: &[f64],
+    is_basic: &[bool],
+    y: &[f64],
+    rc_out: &mut [f64],
+    n_price: usize,
+    price_start: usize,
+    deadline: Option<Instant>,
+    mut score: F,
+) -> PartialPrice
+where
+    F: FnMut(usize, f64) -> Option<f64>,
+{
+    if n_price == 0 {
+        return PartialPrice::Optimal { next_start: 0 };
+    }
+    let chunk = partial_price_chunk(n_price);
+    let single_window = partial_price_single_window();
+    let mut start = price_start % n_price;
+    let mut scanned = 0usize;
+    let mut best_score = f64::NEG_INFINITY;
+    let mut entering: Option<usize> = None;
+
+    while scanned < n_price {
+        // Contiguous window: capped by chunk, by columns left in the sweep, and
+        // by the distance to the end of the array (wrap handled by resetting
+        // `start` to 0 below). Capping by the remaining-sweep count keeps every
+        // column priced at most once per sweep when `price_start != 0`.
+        let remaining = n_price - scanned;
+        let seg_len = chunk.min(remaining).min(n_price - start);
+        let end = start + seg_len;
+
+        if !compute_reduced_costs_window(a, c, is_basic, y, rc_out, start, end, deadline) {
+            return PartialPrice::Deadline;
+        }
+        #[cfg(test)]
+        PARTIAL_PRICE_COLS_SCANNED.with(|cnt| cnt.set(cnt.get() + seg_len as u64));
+
+        for j in start..end {
+            if is_basic[j] {
+                continue;
+            }
+            if let Some(s) = score(j, rc_out[j]) {
+                if s > best_score {
+                    best_score = s;
+                    entering = Some(j);
+                }
+            }
+        }
+
+        scanned += seg_len;
+        start = if end >= n_price { 0 } else { end };
+
+        if let Some(entering) = entering {
+            return PartialPrice::Entering {
+                entering,
+                next_start: start,
+            };
+        }
+        // Test-only: stop after the first window to PROVE the full-sweep
+        // requirement is load-bearing. `false` (and branch-eliminated) in release.
+        if single_window {
+            break;
+        }
+    }
+
+    PartialPrice::Optimal { next_start: start }
 }
 
 /// Internal state of the bounded dual simplex iteration. Built from
@@ -223,6 +459,11 @@ pub(crate) struct BoundedDualState {
     pub(crate) reduced_costs: Vec<f64>,
     pub(crate) is_basic: Vec<bool>,
     pub(crate) iterations: usize,
+    /// Cyclic partial-pricing cursor for the bounded primal cores: the next
+    /// pricing pass begins its window scan here and advances it past the window
+    /// that yields an entering column. Carried in the state so it persists
+    /// across iterations (and Phase I → Phase II). Unused by the dual loop.
+    pub(crate) price_start: usize,
 }
 
 impl BoundedDualState {
@@ -249,6 +490,7 @@ impl BoundedDualState {
             reduced_costs: vec![0.0; n_total],
             is_basic,
             iterations: 0,
+            price_start: 0,
         }
     }
 }
@@ -805,6 +1047,34 @@ fn at_upper_apply_disabled() -> bool {
     false
 }
 
+// ── test-only hook: force zero alpha_sv in primal simplex LU update ───────────
+
+#[cfg(test)]
+thread_local! {
+    /// When true, the primal simplex LU update replaces `SparseVec::from_dense(&alpha)`
+    /// with an empty sparse vector. This makes `add_eta_sparse` see pivot_element = 0
+    /// → inv_pivot = ∞, corrupting subsequent FTRAN/BTRAN operations. Used by the
+    /// no-op proof sentinels to confirm the dense-to-sparse conversion is load-bearing.
+    /// Release builds see a const-false inlined by the optimizer.
+    static PRIMAL_ALPHA_SV_DISABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_primal_alpha_sv_disabled(v: bool) {
+    PRIMAL_ALPHA_SV_DISABLE.with(|c| c.set(v));
+}
+
+#[cfg(test)]
+fn primal_alpha_sv_disabled() -> bool {
+    PRIMAL_ALPHA_SV_DISABLE.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn primal_alpha_sv_disabled() -> bool {
+    false
+}
+
 // ── bounded solution / dual recovery ──────────────────────────────────────────
 
 /// Recover the full primal vector from a bounded dual terminal state.
@@ -1165,72 +1435,53 @@ pub(crate) fn phase2_primal_bounded(
             t.log(*iters, obj, &state.basis, false);
         }
 
-        if !compute_reduced_costs_into_timed(
-            a,
-            c,
-            &mut basis_mgr,
-            &state.is_basic,
-            n_total,
-            &state.basis,
-            &mut y,
-            &mut rc,
-            options.deadline,
-        ) {
-            return (
-                SimplexOutcome::Timeout(bounded_obj(
-                    c,
-                    &state.basis,
-                    &state.x_b,
-                    &state.at_upper,
-                    &state.is_basic,
-                    ubs,
-                )),
-                state,
-            );
+        // Dual vars (reused across partial-pricing windows of this basis).
+        if deadline_expired(options.deadline) {
+            return (timeout_obj(&state), state);
         }
+        compute_dual_vars_into(c, &mut basis_mgr, &state.basis, &mut y);
 
-        // Pricing: most-improving non-basic (Dantzig rule).
+        // Pricing: cyclic partial pricing, most-improving within the first
+        // improving window (Dantzig rule).
         // at_lb: enter if rc < 0 (increasing x improves min objective)
         // at_ub: enter if rc > 0 (decreasing x improves min objective)
-        let mut best_score = PIVOT_TOL;
-        let mut entering: Option<usize> = None;
-        for j in 0..n_total {
-            if deadline_expired(options.deadline) {
-                return (
-                    SimplexOutcome::Timeout(bounded_obj(
+        let q = {
+            let at_upper = &state.at_upper;
+            match partial_price_entering(
+                a,
+                c,
+                &state.is_basic,
+                &y,
+                &mut rc,
+                n_total,
+                state.price_start,
+                options.deadline,
+                |j, rc_j| {
+                    let score = if at_upper[j] { rc_j } else { -rc_j };
+                    (score > PIVOT_TOL).then_some(score)
+                },
+            ) {
+                PartialPrice::Deadline => return (timeout_obj(&state), state),
+                PartialPrice::Optimal { next_start } => {
+                    state.price_start = next_start;
+                    let obj = bounded_obj(
                         c,
                         &state.basis,
                         &state.x_b,
                         &state.at_upper,
                         &state.is_basic,
                         ubs,
-                    )),
-                    state,
-                );
+                    );
+                    return (SimplexOutcome::Optimal(obj, y), state);
+                }
+                PartialPrice::Entering {
+                    entering,
+                    next_start,
+                } => {
+                    state.price_start = next_start;
+                    entering
+                }
             }
-            if state.is_basic[j] {
-                continue;
-            }
-            let score = if state.at_upper[j] { rc[j] } else { -rc[j] };
-            if score > best_score {
-                best_score = score;
-                entering = Some(j);
-            }
-        }
-
-        let q = match entering {
-            None => {
-                let obj = bounded_obj(
-                    c,
-                    &state.basis,
-                    &state.x_b,
-                    &state.at_upper,
-                    &state.is_basic,
-                    ubs,
-                );
-                return (SimplexOutcome::Optimal(obj, y), state);
-            }
-            Some(q) => q,
         };
 
         let from_ub = state.at_upper[q];
@@ -1320,14 +1571,13 @@ pub(crate) fn phase2_primal_bounded(
         state.is_basic[q] = true;
         state.basis[r] = q;
 
-        // Eta update.
-        let (cr, cv) = a.get_column(q).unwrap();
-        let mut alpha_sv = SparseVec {
-            indices: cr.to_vec(),
-            values: cv.to_vec(),
-            len: m,
+        // Eta update: reuse the already-computed B^{-1} a_q (dense `alpha`) —
+        // sparsifying avoids a second redundant FTRAN on the original column.
+        let alpha_sv = if primal_alpha_sv_disabled() {
+            SparseVec { indices: vec![], values: vec![], len: m }
+        } else {
+            SparseVec::from_dense(&alpha)
         };
-        basis_mgr.ftran(&mut alpha_sv);
         basis_mgr.update(q, r, &alpha_sv);
 
         if basis_mgr.needs_refactor() {
@@ -1492,51 +1742,56 @@ fn primal_simplex_aug(
             t.log(*iters, obj, &state.basis, false);
         }
 
-        if !compute_reduced_costs_into_timed(
-            a_aug,
-            c_aug,
-            &mut basis_mgr,
-            &state.is_basic,
-            n_struct,
-            &state.basis,
-            &mut y,
-            &mut rc,
-            options.deadline,
-        ) {
+        // Dual vars (reused across partial-pricing windows of this basis).
+        if deadline_expired(options.deadline) {
             return timeout_obj(state);
         }
+        compute_dual_vars_into(c_aug, &mut basis_mgr, &state.basis, &mut y);
 
-        let mut best_score = 0.0;
-        let mut entering: Option<usize> = None;
-        for j in 0..n_struct {
-            if state.is_basic[j] {
-                continue;
+        // Cyclic partial pricing over the first `n_struct` (priced) columns;
+        // artificials at `[n_struct, n_aug)` are never priced. Devex-weighted
+        // most-improving within the first improving window.
+        let q = {
+            let at_upper = &state.at_upper;
+            match partial_price_entering(
+                a_aug,
+                c_aug,
+                &state.is_basic,
+                &y,
+                &mut rc,
+                n_struct,
+                state.price_start,
+                options.deadline,
+                |j, rc_j| {
+                    let violation = if at_upper[j] { rc_j } else { -rc_j };
+                    if violation <= PIVOT_TOL {
+                        return None;
+                    }
+                    let gamma = devex_weights[j].max(GAMMA_FLOOR);
+                    Some(violation / gamma.sqrt())
+                },
+            ) {
+                PartialPrice::Deadline => return timeout_obj(state),
+                PartialPrice::Optimal { next_start } => {
+                    state.price_start = next_start;
+                    let obj = bounded_obj(
+                        c_aug,
+                        &state.basis,
+                        &state.x_b,
+                        &state.at_upper,
+                        &state.is_basic,
+                        ubs_aug,
+                    );
+                    return SimplexOutcome::Optimal(obj, y);
+                }
+                PartialPrice::Entering {
+                    entering,
+                    next_start,
+                } => {
+                    state.price_start = next_start;
+                    entering
+                }
             }
-            let violation = if state.at_upper[j] { rc[j] } else { -rc[j] };
-            if violation <= PIVOT_TOL {
-                continue;
-            }
-            let gamma = devex_weights[j].max(GAMMA_FLOOR);
-            let weighted_score = violation / gamma.sqrt();
-            if weighted_score > best_score {
-                best_score = weighted_score;
-                entering = Some(j);
-            }
-        }
-
-        let q = match entering {
-            None => {
-                let obj = bounded_obj(
-                    c_aug,
-                    &state.basis,
-                    &state.x_b,
-                    &state.at_upper,
-                    &state.is_basic,
-                    ubs_aug,
-                );
-                return SimplexOutcome::Optimal(obj, y);
-            }
-            Some(q) => q,
         };
 
         let from_ub = state.at_upper[q];
@@ -1596,13 +1851,13 @@ fn primal_simplex_aug(
         state.is_basic[q] = true;
         state.basis[r] = q;
 
-        let (cr, cv) = a_aug.get_column(q).unwrap();
-        let mut alpha_sv = SparseVec {
-            indices: cr.to_vec(),
-            values: cv.to_vec(),
-            len: m,
+        // Eta update: reuse dense `alpha` (already B^{-1} a_q from ftran_column above);
+        // sparsifying avoids a second redundant FTRAN on the original column.
+        let alpha_sv = if primal_alpha_sv_disabled() {
+            SparseVec { indices: vec![], values: vec![], len: m }
+        } else {
+            SparseVec::from_dense(&alpha)
         };
-        basis_mgr.ftran(&mut alpha_sv);
         let norm_sq: f64 = alpha.iter().map(|&v| v * v).sum();
         let mut gamma_leaving = 1.0;
         if leaving_col < n_struct {
@@ -2993,5 +3248,597 @@ mod tests {
                 rc_out[j]
             );
         }
+    }
+
+    // ── sentinel: single-FTRAN primal update ─────────────────────────────────
+
+    /// RAII guard for `PRIMAL_ALPHA_SV_DISABLE`. Restores the flag on drop so
+    /// a panicking test cannot leak the disabled state to sibling tests.
+    struct PrimalAlphaSvGuard;
+    impl PrimalAlphaSvGuard {
+        fn disabled() -> Self {
+            set_primal_alpha_sv_disabled(true);
+            Self
+        }
+    }
+    impl Drop for PrimalAlphaSvGuard {
+        fn drop(&mut self) {
+            set_primal_alpha_sv_disabled(false);
+        }
+    }
+
+    /// (a) Numerical equivalence: `SparseVec::from_dense(&alpha)` matches the
+    /// result of applying `basis_mgr.ftran` directly to the original column data.
+    /// This is the invariant that makes the single-FTRAN path correct.
+    ///
+    /// Algebraic no-op proof embedded: a zero sparse vector does NOT match the
+    /// correct FTRAN result — proving that using `from_dense` is non-trivially
+    /// different from using an empty vector.
+    #[test]
+    fn primal_ftran_alpha_sv_numerical_equiv() {
+        use crate::basis::BasisManager;
+
+        // 2-row LP: slacks as initial basis. Structural cols 0,1 have
+        // non-trivial FTRAN images (not just identity columns).
+        let m = 2;
+        // Matrix [1 1 1 0; 0.5 1 0 1] (struct + slacks)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 0, 1],
+            &[0, 1, 0, 1, 2, 3],
+            &[1.0, 1.0, 0.5, 1.0, 1.0, 1.0],
+            m,
+            4,
+        )
+        .unwrap();
+        let basis = vec![2usize, 3]; // slack basis
+        let opts = SolverOptions { max_etas: 50, ..SolverOptions::default() };
+        let mut basis_mgr = LuBasis::new_timed(&a, &basis, opts.max_etas, None).unwrap();
+
+        for col in 0..2usize {
+            // Dense alpha via ftran_column (what the modified loop uses).
+            let mut alpha = vec![0.0f64; m];
+            ftran_column(&a, &mut basis_mgr, col, m, &mut alpha);
+
+            // Sparse alpha via the old code path (raw column → ftran).
+            let (cr, cv) = a.get_column(col).unwrap();
+            let mut alpha_sv_old = SparseVec {
+                indices: cr.to_vec(),
+                values: cv.to_vec(),
+                len: m,
+            };
+            basis_mgr.ftran(&mut alpha_sv_old);
+
+            // New code path: from_dense.
+            let alpha_sv_new = SparseVec::from_dense(&alpha);
+
+            // Must match within 1e-10 (both compute B^{-1} a_q; rounding is negligible).
+            let d_old = alpha_sv_old.to_dense();
+            let d_new = alpha_sv_new.to_dense();
+            for i in 0..m {
+                assert!(
+                    (d_old[i] - d_new[i]).abs() < 1e-10,
+                    "col {col} row {i}: old_ftran={:.6e} from_dense={:.6e}",
+                    d_old[i],
+                    d_new[i]
+                );
+            }
+
+            // Algebraic no-op proof: a zero sparse vector must differ from the
+            // correct FTRAN result, proving `from_dense` is non-trivially correct.
+            let zero_sv = SparseVec { indices: vec![], values: vec![], len: m };
+            let d_zero = zero_sv.to_dense();
+            let max_diff: f64 = (0..m)
+                .map(|i| (d_old[i] - d_zero[i]).abs())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                max_diff > 1e-6,
+                "col {col}: no-op proof FAILED — zero sv matches FTRAN result (max_diff={max_diff:.3e}); \
+                 choose a column with non-trivial FTRAN image"
+            );
+        }
+    }
+
+    /// (b) Optimality invariant for `phase2_primal_bounded` (Site 2): the LP
+    ///     must reach the known optimal with the single-FTRAN path active.
+    ///
+    /// LP: min -x0-x1, x0+x1≤6, x0-x1≤2, 0≤x0≤4, 0≤x1≤4
+    /// Known optimal: x0=4, x1=2, obj=-6.
+    #[test]
+    fn phase2_primal_bounded_single_ftran_reaches_known_optimal() {
+        let lp = lp_boxed_2x2_degenerate();
+        let bsf = build_bounded_standard_form(&lp);
+        let opts = SolverOptions::default();
+        let (dual_outcome, dual_state) = solve_bounded_dual(
+            &bsf,
+            &bsf.a,
+            &bsf.b,
+            &bsf.c,
+            &opts,
+            &bsf.upper_bounds,
+            &mut MostInfeasibleLeaving,
+        );
+        assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
+
+        let mut iters = 0usize;
+        let (outcome, p2_state) = phase2_primal_bounded(
+            &bsf,
+            dual_state,
+            &bsf.a,
+            &bsf.c,
+            &opts,
+            &mut iters,
+            &bsf.upper_bounds,
+        );
+        match outcome {
+            SimplexOutcome::Optimal(obj, _) => {
+                assert!(
+                    (obj - (-6.0)).abs() < 1e-6,
+                    "expected obj=-6.0 (x0=4,x1=2), got {obj:.6e}"
+                );
+            }
+            other => panic!("expected Optimal, got {other:?}"),
+        }
+        let sol = extract_solution_bounded(&bsf, &p2_state, &[]);
+        assert!(
+            (sol[0] - 4.0).abs() < 1e-6 && (sol[1] - 2.0).abs() < 1e-6,
+            "expected (x0,x1)=(4,2), got ({:.3e},{:.3e})",
+            sol[0],
+            sol[1]
+        );
+        assert!(iters > 0, "phase2 must make at least one iteration");
+    }
+
+    /// (c) No-op proof for `phase2_primal_bounded` (Site 2): with
+    /// `PRIMAL_ALPHA_SV_DISABLE` forced on, the LU update receives a zero sparse
+    /// vector (inv_pivot = ∞), corrupting the eta matrix. The corrupt BTRAN in the
+    /// next iteration produces ∞ → NaN reduced costs → wrong pivot selection →
+    /// wrong final x_b → wrong objective (-4 instead of -6).
+    ///
+    /// Sentinel design: if the fix is REVERTED, the hook has no effect and the
+    /// solve returns the correct obj = -6 → the assertion below FAILS.
+    #[test]
+    fn phase2_primal_bounded_single_ftran_noop_proof() {
+        let lp = lp_boxed_2x2_degenerate();
+        let bsf = build_bounded_standard_form(&lp);
+        let opts = SolverOptions::default();
+        let (dual_outcome, dual_state) = solve_bounded_dual(
+            &bsf,
+            &bsf.a,
+            &bsf.b,
+            &bsf.c,
+            &opts,
+            &bsf.upper_bounds,
+            &mut MostInfeasibleLeaving,
+        );
+        assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
+
+        let _guard = PrimalAlphaSvGuard::disabled();
+        let mut iters = 0usize;
+        let (outcome, _) = phase2_primal_bounded(
+            &bsf,
+            dual_state,
+            &bsf.a,
+            &bsf.c,
+            &opts,
+            &mut iters,
+            &bsf.upper_bounds,
+        );
+        let obj = match outcome {
+            SimplexOutcome::Optimal(o, _) => o,
+            // Non-optimal outcomes also demonstrate that the corrupt eta broke the solve.
+            _ => return,
+        };
+        assert!(
+            (obj - (-6.0)).abs() > 1e-3,
+            "no-op proof FAILED: corrupt (zero) alpha_sv still yields correct obj={obj:.6e}; \
+             the from_dense conversion is NOT load-bearing (fix had no effect on this path)"
+        );
+    }
+
+    /// (b') Optimality invariant for `bounded_primal_phase1` / `primal_simplex_aug`
+    ///     (Site 3): Phase I on a 2-row Eq LP must drive art_sum to zero.
+    ///
+    /// LP: x0+x1=4, x0+2*x1=5, 0≤x0≤3, 0≤x1≤∞.
+    /// Unique solution: x0=3, x1=1. Phase I optimal iff art_sum ≈ 0.
+    #[test]
+    fn primal_simplex_aug_single_ftran_reaches_feasible() {
+        // Augmented matrix: [x0 x1 art0 art1], 2 rows.
+        // art0 for row 0 (x0+x1=4), art1 for row 1 (x0+2x1=5).
+        let a_aug = CscMatrix::from_triplets(
+            &[0, 1, 0, 1, 0, 1],
+            &[0, 0, 1, 1, 2, 3],
+            &[1.0, 1.0, 1.0, 2.0, 1.0, 1.0],
+            2,
+            4,
+        )
+        .unwrap();
+        let n_struct = 2usize;
+        let ubs_aug = vec![3.0f64, f64::INFINITY, f64::INFINITY, f64::INFINITY];
+        let c_p1 = vec![0.0f64, 0.0, 1.0, 1.0]; // minimize art_sum
+
+        let mut state = BoundedDualState {
+            basis: vec![2usize, 3],
+            at_upper: vec![false; 4],
+            x_b: vec![4.0f64, 5.0],
+            reduced_costs: vec![0.0; 4],
+            is_basic: vec![false, false, true, true],
+            iterations: 0,
+            price_start: 0,
+        };
+        let opts = SolverOptions::default();
+        let mut iters = 0usize;
+        let outcome = bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters);
+
+        match outcome {
+            SimplexOutcome::Optimal(art_sum, _) => {
+                assert!(
+                    art_sum.abs() < 1e-6,
+                    "Phase I must reach art_sum≈0 (LP feasible); got {art_sum:.6e}"
+                );
+            }
+            other => panic!("expected Phase I Optimal, got {other:?}"),
+        }
+        assert!(iters > 0, "Phase I must make at least one pivot");
+    }
+
+    /// (c') No-op proof for `primal_simplex_aug` (Site 3): with
+    /// `PRIMAL_ALPHA_SV_DISABLE` forced on, the corrupt eta causes wrong BTRAN
+    /// in the next iteration, producing NaN reduced costs. All NaN violations are
+    /// treated as non-entering, so Phase I exits early with a residual artificial
+    /// (art_sum > 0 — feasible LP declared infeasible-looking).
+    ///
+    /// Sentinel design: if the fix is REVERTED, the hook has no effect and Phase I
+    /// correctly reaches art_sum ≈ 0 → the assertion below FAILS.
+    #[allow(clippy::single_match)]
+    #[test]
+    fn primal_simplex_aug_single_ftran_noop_proof() {
+        let a_aug = CscMatrix::from_triplets(
+            &[0, 1, 0, 1, 0, 1],
+            &[0, 0, 1, 1, 2, 3],
+            &[1.0, 1.0, 1.0, 2.0, 1.0, 1.0],
+            2,
+            4,
+        )
+        .unwrap();
+        let n_struct = 2usize;
+        let ubs_aug = vec![3.0f64, f64::INFINITY, f64::INFINITY, f64::INFINITY];
+        let c_p1 = vec![0.0f64, 0.0, 1.0, 1.0];
+
+        let mut state = BoundedDualState {
+            basis: vec![2usize, 3],
+            at_upper: vec![false; 4],
+            x_b: vec![4.0f64, 5.0],
+            reduced_costs: vec![0.0; 4],
+            is_basic: vec![false, false, true, true],
+            iterations: 0,
+            price_start: 0,
+        };
+        let opts = SolverOptions::default();
+        let mut iters = 0usize;
+
+        let _guard = PrimalAlphaSvGuard::disabled();
+        let outcome = bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters);
+
+        match outcome {
+            SimplexOutcome::Optimal(art_sum, _) => {
+                assert!(
+                    art_sum > 1e-6,
+                    "no-op proof FAILED: corrupt (zero) alpha_sv still reaches art_sum≈0 ({art_sum:.6e}); \
+                     the from_dense conversion is NOT load-bearing (fix had no effect on this path)"
+                );
+            }
+            // Any non-Optimal outcome also demonstrates corruption.
+            _ => {}
+        }
+    }
+
+    // ── partial pricing sentinels ────────────────────────────────────────────
+
+    /// Override `PARTIAL_PRICE_CHUNK` for the lifetime of the guard. Restores the
+    /// production constant (override = 0) on drop, even across a panic unwind.
+    struct PartialPriceChunkGuard;
+    impl PartialPriceChunkGuard {
+        fn set(chunk: usize) -> Self {
+            set_partial_price_chunk_override(chunk);
+            Self
+        }
+    }
+    impl Drop for PartialPriceChunkGuard {
+        fn drop(&mut self) {
+            set_partial_price_chunk_override(0);
+        }
+    }
+
+    /// Engage the broken single-window mode (declares Optimal after one window
+    /// without the full sweep). Restores the correct behaviour on drop.
+    struct PartialPriceSingleWindowGuard;
+    impl PartialPriceSingleWindowGuard {
+        fn enabled() -> Self {
+            set_partial_price_single_window(true);
+            Self
+        }
+    }
+    impl Drop for PartialPriceSingleWindowGuard {
+        fn drop(&mut self) {
+            set_partial_price_single_window(false);
+        }
+    }
+
+    /// Window override that forces a single full-sweep window on any LP in this
+    /// file (`≥ n_price`, clamped by `partial_price_chunk`).
+    const FULL_PRICE: usize = 1_000_000;
+
+    /// Boxed LP whose unique optimum places `x1` at its UPPER bound, so Phase 2
+    /// must execute a primal bound-flip (`BoundedLeave::Flip`).
+    /// min −2x0 − 3x1 ; x0 + x1 ≤ 5 ; 0 ≤ x0 ≤ 2, 0 ≤ x1 ≤ 4.
+    /// Optimum: x0 = 1, x1 = 4, obj = −14.
+    fn lp2_boxed_flip() -> LpProblem {
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        LpProblem::new_general(
+            vec![-2.0, -3.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 2.0), (0.0, 4.0)],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Run `lp`'s Phase 2 from its bounded-dual terminal state with the given
+    /// partial-pricing chunk override. Returns the objective recomputed from the
+    /// recovered solution against `lp.c` (independent of the solver's reported
+    /// obj), the iteration count, and the Phase-2 primal bound-flip count.
+    fn solve_phase2_obj(lp: &LpProblem, chunk: usize) -> (f64, usize, u64) {
+        let bsf = build_bounded_standard_form(lp);
+        let opts = SolverOptions::default();
+        let (dual_outcome, dual_state) = solve_bounded_dual(
+            &bsf,
+            &bsf.a,
+            &bsf.b,
+            &bsf.c,
+            &opts,
+            &bsf.upper_bounds,
+            &mut MostInfeasibleLeaving,
+        );
+        assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
+        let _chunk = PartialPriceChunkGuard::set(chunk);
+        reset_bfrt_flip_invocations();
+        let mut iters = 0usize;
+        let (outcome, state) = phase2_primal_bounded(
+            &bsf,
+            dual_state,
+            &bsf.a,
+            &bsf.c,
+            &opts,
+            &mut iters,
+            &bsf.upper_bounds,
+        );
+        let flips = bfrt_flip_invocations();
+        assert!(
+            matches!(outcome, SimplexOutcome::Optimal(..)),
+            "phase2 not Optimal: {outcome:?}"
+        );
+        let sol = extract_solution_bounded(&bsf, &state, &[]);
+        let obj: f64 = lp.c.iter().zip(sol.iter()).map(|(c, x)| c * x).sum();
+        (obj, iters, flips)
+    }
+
+    /// **Same-obj sentinel + BFRT-flip preservation.** Partial pricing (1-column
+    /// windows) and full pricing must reach the SAME externally-known optimum on
+    /// boxed/degenerate LPs, and any fixture whose full-pricing solve executes a
+    /// primal bound-flip must still flip under partial pricing (the flip path is
+    /// not dropped by windowing the entering scan). Breaking partial pricing into
+    /// a single-window false-optimal (or dropping flips) diverges the objective.
+    #[test]
+    fn partial_pricing_phase2_matches_full_and_preserves_flips() {
+        let cases: [(LpProblem, f64); 2] = [
+            (lp_boxed_2x2_degenerate(), -6.0),
+            (lp2_boxed_flip(), -14.0),
+        ];
+        let mut any_flip = false;
+        for (lp, known) in &cases {
+            let (obj_full, _, flips_full) = solve_phase2_obj(lp, FULL_PRICE);
+            let (obj_partial, _, flips_partial) = solve_phase2_obj(lp, 1);
+            assert!(
+                (obj_full - known).abs() < 1e-6,
+                "full pricing obj {obj_full:.6e} != known {known:.6e}"
+            );
+            assert!(
+                (obj_partial - known).abs() < 1e-6,
+                "partial pricing obj {obj_partial:.6e} != known {known:.6e}"
+            );
+            assert!(
+                (obj_partial - obj_full).abs() < 1e-9,
+                "partial {obj_partial:.6e} != full {obj_full:.6e}"
+            );
+            if flips_full > 0 {
+                assert!(
+                    flips_partial > 0,
+                    "primal bound-flip dropped under partial pricing \
+                     (full flips={flips_full}, partial flips={flips_partial})"
+                );
+                any_flip = true;
+            }
+        }
+        assert!(
+            any_flip,
+            "no fixture exercised a primal bound-flip — flip coverage is vacuous"
+        );
+    }
+
+    /// **False-optimal no-op proof (the most important sentinel).** Optimality
+    /// must be declared ONLY after a full `n_price` sweep finds no improving
+    /// column. At the cold Phase-2 vertex of this LP the first column (x0) is
+    /// non-improving while x1 is improving and at_ub at the optimum. With
+    /// 1-column windows starting at `price_start = 0`, the full-sweep (correct)
+    /// run skips the empty first window and prices x1, reaching the true optimum
+    /// −6; the single-window (broken) run prices only the first window, finds
+    /// nothing, and WRONGLY declares Optimal at the cold objective 0.
+    ///
+    /// The broken obj must differ from the known optimum; if the full-sweep
+    /// requirement were removed, the correct run would also miss −6 and its
+    /// assertion would fail.
+    #[test]
+    fn partial_pricing_false_optimal_requires_full_sweep_noop_proof() {
+        const KNOWN: f64 = -6.0;
+        let lp = LpProblem::new_general(
+            vec![1.0, -2.0],
+            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap(),
+            vec![4.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 3.0), (0.0, 3.0)],
+            None,
+        )
+        .unwrap();
+
+        let solve = |single_window: bool| -> f64 {
+            let bsf = build_bounded_standard_form(&lp);
+            let opts = SolverOptions::default();
+            let (_d, dual_state) = solve_bounded_dual(
+                &bsf,
+                &bsf.a,
+                &bsf.b,
+                &bsf.c,
+                &opts,
+                &bsf.upper_bounds,
+                &mut MostInfeasibleLeaving,
+            );
+            let _chunk = PartialPriceChunkGuard::set(1);
+            let _sw = single_window.then(PartialPriceSingleWindowGuard::enabled);
+            let mut iters = 0usize;
+            let (out, state) = phase2_primal_bounded(
+                &bsf,
+                dual_state,
+                &bsf.a,
+                &bsf.c,
+                &opts,
+                &mut iters,
+                &bsf.upper_bounds,
+            );
+            assert!(
+                matches!(out, SimplexOutcome::Optimal(..)),
+                "expected Optimal, got {out:?}"
+            );
+            let sol = extract_solution_bounded(&bsf, &state, &[]);
+            lp.c.iter().zip(sol.iter()).map(|(c, x)| c * x).sum()
+        };
+
+        let correct = solve(false);
+        let broken = solve(true);
+        assert!(
+            (correct - KNOWN).abs() < 1e-6,
+            "full-sweep partial pricing must reach {KNOWN}, got {correct:.6e}"
+        );
+        assert!(
+            (broken - KNOWN).abs() > 1e-3,
+            "no-op proof FAILED: single-window (no full sweep) still reached the \
+             optimum (got {broken:.6e}); the full-sweep optimality requirement is \
+             not load-bearing — a false-optimal would slip through"
+        );
+    }
+
+    /// **Pricing-scan reduction (effectiveness, with no-op anchor).** Full
+    /// pricing reduced-cost-prices every column every iteration (exactly
+    /// `iters * n_price`). Partial pricing must price strictly fewer — it stops
+    /// each non-final iteration at the first improving window. The full-pricing
+    /// `== iters*n_price` equality is the no-op anchor: if windowing were
+    /// disabled, the partial run would hit the same product and the strict-`<`
+    /// assertion would fail.
+    #[test]
+    fn partial_pricing_reduces_per_iteration_scan() {
+        let lp = lp_boxed_2x2_degenerate();
+        let bsf = build_bounded_standard_form(&lp);
+        let n_price = bsf.n_total;
+        let opts = SolverOptions::default();
+
+        let run = |chunk: usize| -> (u64, usize) {
+            let (_d, dual_state) = solve_bounded_dual(
+                &bsf,
+                &bsf.a,
+                &bsf.b,
+                &bsf.c,
+                &opts,
+                &bsf.upper_bounds,
+                &mut MostInfeasibleLeaving,
+            );
+            let _g = PartialPriceChunkGuard::set(chunk);
+            reset_partial_price_cols_scanned();
+            let mut iters = 0usize;
+            let (out, _s) = phase2_primal_bounded(
+                &bsf,
+                dual_state,
+                &bsf.a,
+                &bsf.c,
+                &opts,
+                &mut iters,
+                &bsf.upper_bounds,
+            );
+            assert!(matches!(out, SimplexOutcome::Optimal(..)));
+            (partial_price_cols_scanned(), iters)
+        };
+
+        let (scanned_partial, iters_partial) = run(1);
+        let (scanned_full, iters_full) = run(FULL_PRICE);
+
+        assert_eq!(
+            scanned_full,
+            (iters_full * n_price) as u64,
+            "full pricing must price all {n_price} cols on each of {iters_full} iters"
+        );
+        assert!(
+            scanned_partial < (iters_partial * n_price) as u64,
+            "partial pricing scanned {scanned_partial} cols over {iters_partial} iters \
+             (≥ full {iters_partial}*{n_price}); windowing is not active"
+        );
+    }
+
+    /// Partial pricing must also preserve correctness on the augmented Phase I
+    /// core (`primal_simplex_aug`). Eq LP x0+x1=4, x0+2x1=5, 0≤x0≤3, x1≥0;
+    /// Phase I must drive the artificial sum to zero under both full and
+    /// partial pricing.
+    #[test]
+    fn partial_pricing_aug_phase1_matches_full() {
+        let a_aug = CscMatrix::from_triplets(
+            &[0, 1, 0, 1, 0, 1],
+            &[0, 0, 1, 1, 2, 3],
+            &[1.0, 1.0, 1.0, 2.0, 1.0, 1.0],
+            2,
+            4,
+        )
+        .unwrap();
+        let n_struct = 2usize;
+        let ubs_aug = vec![3.0f64, f64::INFINITY, f64::INFINITY, f64::INFINITY];
+        let c_p1 = vec![0.0f64, 0.0, 1.0, 1.0];
+        let opts = SolverOptions::default();
+
+        let build_state = || BoundedDualState {
+            basis: vec![2usize, 3],
+            at_upper: vec![false; 4],
+            x_b: vec![4.0f64, 5.0],
+            reduced_costs: vec![0.0; 4],
+            is_basic: vec![false, false, true, true],
+            iterations: 0,
+            price_start: 0,
+        };
+
+        let run = |chunk: usize| -> f64 {
+            let _g = PartialPriceChunkGuard::set(chunk);
+            let mut state = build_state();
+            let mut iters = 0usize;
+            match bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters)
+            {
+                SimplexOutcome::Optimal(art_sum, _) => art_sum,
+                other => panic!("expected Phase I Optimal, got {other:?}"),
+            }
+        };
+
+        let art_full = run(FULL_PRICE);
+        let art_partial = run(1);
+        assert!(art_full.abs() < 1e-6, "full Phase I art_sum {art_full:.6e}");
+        assert!(
+            art_partial.abs() < 1e-6,
+            "partial Phase I art_sum {art_partial:.6e} — partial pricing broke Phase I feasibility"
+        );
     }
 }

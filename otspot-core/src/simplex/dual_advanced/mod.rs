@@ -404,6 +404,7 @@ fn try_bounded(
                         reduced_costs: vec![0.0; bsf.n_total],
                         is_basic: is_basic_bounded,
                         iterations: 0,
+                        price_start: 0,
                     };
                     let mut leaving = make_leaving_strategy(options.dual_pricing, bsf.m);
                     let (dual_out, dual_state) =
@@ -703,6 +704,7 @@ where
         reduced_costs: vec![0.0; n_aug],
         is_basic,
         iterations: 0,
+        price_start: 0,
     };
 
     // Phase I: minimise sum of artificials. Structural cost = 0.
@@ -1236,6 +1238,7 @@ mod tests {
             reduced_costs: vec![0.0, 0.0],
             is_basic: vec![false, true],
             iterations: 0,
+            price_start: 0,
         };
         let pre_reconcile_x_b = state.x_b.clone();
 
