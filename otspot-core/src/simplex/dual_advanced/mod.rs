@@ -31,6 +31,42 @@ fn deadline_expired(deadline: Option<std::time::Instant>) -> bool {
     deadline.is_some_and(|d| std::time::Instant::now() >= d)
 }
 
+/// Applies deterministic per-row upward jitter to `x_B` with magnitude `mag`.
+/// Row 0 always has frac=0 (Knuth PRNG: `0 * SPREAD_MULT = 0`), so the first
+/// element is never modified; the jitter remains upward-only and keeps the
+/// starting point primal-feasible (`x_B ≥ 0`).
+fn perturb_x_b_with_mag(x_b: &mut [f64], mag: f64) {
+    /// Odd 32-bit multiplier (Knuth LCG) spreading per-row jitter deterministically.
+    const SPREAD_MULT: u64 = 2_654_435_761;
+    for (i, v) in x_b.iter_mut().enumerate() {
+        let frac = ((i as u64).wrapping_mul(SPREAD_MULT) & 0xFFFF_FFFF) as f64 / 4_294_967_296.0;
+        *v += mag * (v.abs() + 1.0) * frac;
+    }
+}
+
+// Test-only thread-local: when Some(mag), `maybe_perturb_initial_xb` applies
+// the jitter with that explicit magnitude, bypassing the env-gated OnceLock.
+// Set and restored via ScopedDisable; never leaks across test boundaries.
+#[cfg(test)]
+thread_local! {
+    static PERTURB_MAG_OVERRIDE: std::cell::Cell<Option<f64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Set the per-thread perturbation magnitude override (test use only).
+#[cfg(test)]
+pub(crate) fn set_perturb_mag_override(v: Option<f64>) {
+    PERTURB_MAG_OVERRIDE.with(|c| c.set(v));
+}
+
+/// Apply the production jitter formula to `x_b` with explicit `mag`.
+/// Bypasses the env-gated `OnceLock`; used by sentinels that need a
+/// before/after-reconcile comparison at a known magnitude.
+#[cfg(test)]
+pub(crate) fn test_apply_perturb_with_mag(x_b: &mut [f64], mag: f64) {
+    perturb_x_b_with_mag(x_b, mag);
+}
+
 /// Env-gated (`OTSPOT_PERTURB=1`) anti-degeneracy experiment: perturb the initial
 /// basic values by a small per-row deterministic jitter. Because the bounded
 /// primal core carries `x_B` forward incrementally, this is equivalent to an RHS
@@ -41,11 +77,14 @@ fn deadline_expired(deadline: Option<std::time::Instant>) -> bool {
 /// than returning a wrong answer. Off by default — measurement only, not yet
 /// bench-validated across the full LP suite.
 fn maybe_perturb_initial_xb(x_b: &mut [f64]) {
+    #[cfg(test)]
+    if let Some(test_mag) = PERTURB_MAG_OVERRIDE.with(|c| c.get()) {
+        perturb_x_b_with_mag(x_b, test_mag);
+        return;
+    }
+
     use std::sync::OnceLock;
-    /// Relative jitter magnitude (fraction of each basic value's scale).
     const PERTURB_MAG_DEFAULT: f64 = 1e-7;
-    /// Odd 32-bit multiplier (Knuth) spreading the per-row jitter deterministically.
-    const SPREAD_MULT: u64 = 2_654_435_761;
     static MAG: OnceLock<Option<f64>> = OnceLock::new();
     let mag = *MAG.get_or_init(|| {
         let on = std::env::var("OTSPOT_PERTURB")
@@ -62,12 +101,7 @@ fn maybe_perturb_initial_xb(x_b: &mut [f64]) {
         Some(m)
     });
     let Some(mag) = mag else { return };
-    for (i, v) in x_b.iter_mut().enumerate() {
-        // frac ∈ [0,1): distinct per row, deterministic.
-        let frac = ((i as u64).wrapping_mul(SPREAD_MULT) & 0xFFFF_FFFF) as f64 / 4_294_967_296.0;
-        // Upward-only jitter keeps the starting point primal-feasible (x_B ≥ 0).
-        *v += mag * (v.abs() + 1.0) * frac;
-    }
+    perturb_x_b_with_mag(x_b, mag);
 }
 
 fn timeout_result() -> SolverResult {
@@ -1932,6 +1966,167 @@ mod tests {
             (x_b[1] - 3.0).abs() < 1e-12,
             "row1: expected b/diag=3, got {}",
             x_b[1]
+        );
+    }
+
+    // ── P2-b: perturbation sentinels ─────────────────────────────────────────
+
+    /// Degenerate 2-Eq + UB LP for perturbation sentinels.
+    ///
+    /// `min x0+x1+x2`, `x0+x1=1` (Eq), `x1+x2=1` (Eq), `0 ≤ xᵢ ≤ 1`.
+    /// Unique optimal: `x0=0, x1=1, x2=0`, `obj=1`. Two Eq rows → two initial
+    /// artificials (crash disabled), so `perturb_x_b_with_mag` affects row 1
+    /// (frac₁ ≈ 0.618 ≠ 0).
+    fn lp_degenerate_2eq() -> LpProblem {
+        use crate::sparse::CscMatrix;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0],
+            2,
+            3,
+        )
+        .unwrap();
+        LpProblem::new_general(
+            vec![1.0, 1.0, 1.0],
+            a,
+            vec![1.0, 1.0],
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+            vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Sentinel (P2-b): perturbation ON (mag ∈ {1e-7, 1e-2}) and OFF reach
+    /// the same optimal status, objective, and solution.
+    ///
+    /// `maybe_perturb_initial_xb` jitters the initial `x_B` before Phase I of
+    /// the Eq+UB path. `reconcile_bounded_terminal_state` then recomputes
+    /// `x_B = B⁻¹b` (true `b`) at the end of Phase I and Phase II, removing
+    /// the jitter before the solution is reported.
+    ///
+    /// No-op proof: see `perturb_noop_proof_reconcile_removes_perturbation`.
+    #[test]
+    fn perturb_on_off_same_optimal_degenerate_eq_ub() {
+        let lp = lp_degenerate_2eq();
+        let sf = build_standard_form(&lp);
+        const OBJ_TOL: f64 = 1e-6;
+
+        // Reference: perturbation OFF.
+        let opts_off = SolverOptions {
+            use_lp_crash_basis: false,
+            ..SolverOptions::default()
+        };
+        let r_off = solve_dual_advanced(&sf, &lp, &opts_off);
+        assert_eq!(
+            r_off.status,
+            SolveStatus::Optimal,
+            "OFF: expected Optimal, got {:?}",
+            r_off.status
+        );
+        assert!(
+            (r_off.objective - 1.0).abs() < OBJ_TOL,
+            "OFF: obj={:.9e} expected 1.0",
+            r_off.objective
+        );
+        assert_eq!(r_off.solution.len(), 3);
+        assert!((r_off.solution[1] - 1.0).abs() < OBJ_TOL, "OFF: x1={:.6e}", r_off.solution[1]);
+
+        for &mag in &[1e-7_f64, 1e-2_f64] {
+            let _g = crate::ScopedDisable::new(
+                || set_perturb_mag_override(Some(mag)),
+                || set_perturb_mag_override(None),
+            );
+            let opts_on = SolverOptions {
+                use_lp_crash_basis: false,
+                ..SolverOptions::default()
+            };
+            let r_on = solve_dual_advanced(&sf, &lp, &opts_on);
+            assert_eq!(
+                r_on.status,
+                SolveStatus::Optimal,
+                "mag={mag:.0e}: expected Optimal, got {:?}",
+                r_on.status
+            );
+            assert!(
+                (r_on.objective - r_off.objective).abs() < OBJ_TOL,
+                "mag={mag:.0e}: perturbed obj={:.9e} != off obj={:.9e} (reconcile did not remove perturbation)",
+                r_on.objective,
+                r_off.objective
+            );
+            assert!(
+                (r_on.solution[1] - 1.0).abs() < OBJ_TOL,
+                "mag={mag:.0e}: x1={:.6e} expected 1.0",
+                r_on.solution[1]
+            );
+        }
+    }
+
+    /// No-op proof (P2-b): applying perturbation to a known-optimal `x_B`
+    /// yields a wrong objective *before* reconcile, and the true objective
+    /// *after* reconcile.
+    ///
+    /// Design: if this test's first `assert!` (perturbation changes obj) were
+    /// removed and `reconcile_bounded_terminal_state` were also skipped, the
+    /// second `assert!` (reconciled obj = true) would fail — proving that
+    /// reconcile is the mechanism that removes the perturbation.
+    ///
+    /// System: `A = diag(1,1)`, `b = [2, 3]`, `c = [1, 1]`, `ubs = [∞, ∞]`.
+    /// Optimal basis = {x0, x1}, `x_B = [2, 3]`, `obj = 5`.
+    /// After `perturb_x_b_with_mag(x_b, 0.01)`: row 0 unchanged (frac₀=0),
+    /// row 1 shifted by ≈ 0.0247 → `obj ≈ 5.025 ≠ 5`.
+    #[test]
+    fn perturb_noop_proof_reconcile_removes_perturbation() {
+        use crate::sparse::CscMatrix;
+        const TRUE_OBJ: f64 = 5.0;
+        const OBJ_TOL: f64 = 1e-6;
+        const MAG: f64 = 0.01;
+
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
+        let b = vec![2.0_f64, 3.0];
+        let c = vec![1.0_f64, 1.0];
+        let ubs = vec![f64::INFINITY; 2];
+
+        // Optimal state with PERTURBED x_b (simulates pre-reconcile state).
+        let mut x_b = vec![2.0_f64, 3.0];
+        test_apply_perturb_with_mag(&mut x_b, MAG);
+        // frac[0]=0 → x_b[0] unchanged; frac[1]≈0.618 → x_b[1] ≈ 3.025.
+
+        let mut state = BoundedDualState {
+            basis: vec![0, 1],
+            at_upper: vec![false, false],
+            x_b: x_b.clone(),
+            reduced_costs: vec![0.0; 2],
+            is_basic: vec![true, true],
+            iterations: 0,
+            price_start: 0,
+        };
+
+        // Before reconcile: perturbed x_b gives wrong objective.
+        let before_obj = bounded_obj_from_state(&c, &ubs, &state);
+        assert!(
+            (before_obj - TRUE_OBJ).abs() > OBJ_TOL,
+            "no-op proof precondition: perturbation must change obj \
+             ({before_obj:.9e} vs {TRUE_OBJ:.9e}); if this fails, \
+             `perturb_x_b_with_mag` is broken"
+        );
+
+        // After reconcile: x_b = B⁻¹b (true b) → correct objective.
+        let after_obj = match reconcile_bounded_terminal_state(
+            &a,
+            &b,
+            &c,
+            &ubs,
+            &mut state,
+            &SolverOptions::default(),
+        ) {
+            BoundedTerminalReconcile::Optimal(obj) => obj,
+            _ => panic!("reconcile must succeed on a valid optimal state"),
+        };
+        assert!(
+            (after_obj - TRUE_OBJ).abs() < OBJ_TOL,
+            "reconcile must restore true obj: expected {TRUE_OBJ:.9e}, got {after_obj:.9e}"
         );
     }
 

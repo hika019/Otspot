@@ -1376,15 +1376,21 @@ fn select_leaving_bounded(
     }
 }
 
-/// Strict min-ratio leaving selection with Bland's smallest-index tie-break.
+/// Practical Bland leaving: minimum-ratio within a `PIVOT_TOL` tolerance band,
+/// ties broken by smallest basic-variable index.
 ///
 /// Used by `primal_simplex_aug` once a degenerate stall triggers anti-cycling.
 /// Unlike `select_leaving_bounded` (largest-pivot Harris, chosen for LU
-/// conditioning), this takes the strict minimum ratio and, among ties, the
-/// smallest basic-variable index. Paired with Bland entering (smallest improving
-/// column index) it makes the pivot sequence provably finite — the rule that
-/// breaks a degenerate cycle. Conditioning is sacrificed deliberately; Bland
-/// mode is a transient escape, not the steady-state pricing.
+/// conditioning), this selects the smallest-basis-index row among those whose
+/// ratio lies in `[min_ratio, min_ratio + PIVOT_TOL]`. Paired with Bland
+/// entering (smallest improving column index) it breaks degenerate cycling in
+/// practice.
+///
+/// The `PIVOT_TOL` band deviates from strict Bland: exact Bland finiteness
+/// requires the strict minimum ratio; the band can admit additional candidates
+/// beyond that strict minimum, so the theoretical finiteness guarantee is
+/// weakened in proportion to `PIVOT_TOL`. Conditioning is sacrificed
+/// deliberately; Bland mode is a transient escape, not the steady-state pricing.
 fn select_leaving_bland_bounded(
     alpha: &[f64],
     dir: f64,
