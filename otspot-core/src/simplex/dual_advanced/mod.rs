@@ -31,6 +31,45 @@ fn deadline_expired(deadline: Option<std::time::Instant>) -> bool {
     deadline.is_some_and(|d| std::time::Instant::now() >= d)
 }
 
+/// Env-gated (`OTSPOT_PERTURB=1`) anti-degeneracy experiment: perturb the initial
+/// basic values by a small per-row deterministic jitter. Because the bounded
+/// primal core carries `x_B` forward incrementally, this is equivalent to an RHS
+/// perturbation `b ← b + ξ` that breaks degenerate ties (`B⁻¹b` avoids exact
+/// zeros) without touching the iteration logic. The terminal `reconcile`
+/// recomputes `x_B = B⁻¹b` against the *true* `b` and validates feasibility, so a
+/// perturbation that pushes the optimal basis infeasible falls back safely rather
+/// than returning a wrong answer. Off by default — measurement only, not yet
+/// bench-validated across the full LP suite.
+fn maybe_perturb_initial_xb(x_b: &mut [f64]) {
+    use std::sync::OnceLock;
+    /// Relative jitter magnitude (fraction of each basic value's scale).
+    const PERTURB_MAG_DEFAULT: f64 = 1e-7;
+    /// Odd 32-bit multiplier (Knuth) spreading the per-row jitter deterministically.
+    const SPREAD_MULT: u64 = 2_654_435_761;
+    static MAG: OnceLock<Option<f64>> = OnceLock::new();
+    let mag = *MAG.get_or_init(|| {
+        let on = std::env::var("OTSPOT_PERTURB")
+            .ok()
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        if !on {
+            return None;
+        }
+        let m = std::env::var("OTSPOT_PERTURB_MAG")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|&v| v > 0.0)
+            .unwrap_or(PERTURB_MAG_DEFAULT);
+        Some(m)
+    });
+    let Some(mag) = mag else { return };
+    for (i, v) in x_b.iter_mut().enumerate() {
+        // frac ∈ [0,1): distinct per row, deterministic.
+        let frac = ((i as u64).wrapping_mul(SPREAD_MULT) & 0xFFFF_FFFF) as f64 / 4_294_967_296.0;
+        // Upward-only jitter keeps the starting point primal-feasible (x_B ≥ 0).
+        *v += mag * (v.abs() + 1.0) * frac;
+    }
+}
+
 fn timeout_result() -> SolverResult {
     SolverResult {
         status: SolveStatus::Timeout,
@@ -695,8 +734,9 @@ where
         r
     }
 
-    let (a_aug, art_col_of_row, mut ubs_aug, basis, is_basic, x_b) = state_factory();
+    let (a_aug, art_col_of_row, mut ubs_aug, basis, is_basic, mut x_b) = state_factory();
     let n_aug = a_aug.ncols;
+    maybe_perturb_initial_xb(&mut x_b);
     let mut state = BoundedDualState {
         basis,
         at_upper: vec![false; n_aug],
