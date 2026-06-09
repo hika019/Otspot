@@ -2,13 +2,19 @@
 //!
 //! 線形計画法の単体法 (改訂単体法) で用いる基底行列 B に対して、faer の
 //! 疎LU分解 (`faer::sparse::linalg::lu`) を利用する。faer LU は COLAMD column
-//! ordering と partial pivoting で fill-in を抑え、Markowitz より高速。
+//! ordering と partial pivoting で fill-in を抑える。
 //!
 //! 設計選択: symbolic factorize に `SupernodalThreshold::FORCE_SIMPLICIAL` を渡し
 //! simplicial 経路を恒久的に強制する。faer 0.24.0 の AUTO ヒューリスティックは
 //! 構造的特異基底で usize underflow を起こす (`factorize_timed` 内コメント参照) ため、
 //! supernodal 自動選択は採用しない。ETA 機構 (`src/basis/eta.rs`) は LU の上に被せる
 //! 更新層で、本 module の変更とは独立に動作する。
+//!
+//! ## 低レベル経路への移行 (Phase 1)
+//! `NumericLu` ラッパの代わりに `simplicial::SimplicialLu` と row perm を直接所有する。
+//! `SimplicialLu::solve_in_place_with_conj` は高レベル `LuRef::solve_in_place_with_conj`
+//! の simplicial 分岐と等価 (同じ呼び出し列)。solve の数学は変わらない。
+//! Phase 2 (FT 更新) が消費する L/U/perm アクセサを事前に解禁する。
 
 use crate::error::SolverError;
 use crate::sparse::CscMatrix;
@@ -16,9 +22,11 @@ use crate::sparse::CscMatrix;
 /// (col_ptr, row_ind, values) triple for a reconstructed basis CSC matrix.
 type BasisCscParts = (Vec<usize>, Vec<usize>, Vec<f64>);
 use faer::dyn_stack::{MemBuffer, MemStack};
-use faer::sparse::linalg::lu::{
-    factorize_symbolic_lu, LuRef, LuSymbolicParams, NumericLu, SymbolicLu,
+use faer::perm::PermRef;
+use faer::sparse::linalg::lu::simplicial::{
+    self, factorize_simplicial_numeric_lu, factorize_simplicial_numeric_lu_scratch, SimplicialLu,
 };
+use faer::sparse::linalg::lu::{factorize_symbolic_lu, LuSymbolicParams, SymbolicLu};
 use faer::sparse::linalg::{LuError, SupernodalThreshold};
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 use faer::{Conj, MatMut, Par};
@@ -26,12 +34,16 @@ use std::time::Instant;
 
 /// LU分解の結果を保持する構造体。
 ///
-/// faer の (`SymbolicLu`, `NumericLu`) ペアを保持し、必要時に `LuRef` を
-/// 構築して solve に使う。基底次元 `n` を併せて保持。
+/// faer の `SymbolicLu` (COLAMD col perm) と simplicial 経路の `SimplicialLu`
+/// (L/U 因子) および row pivoting 置換を直接保持する。
+/// `l_factor()`/`u_factor()`/`row_perm()`/`col_perm()` アクセサで
+/// Phase 2 (FT 更新) に L/U/perm を公開する。
 #[derive(Debug, Clone)]
 pub(crate) struct LuFactorization {
     pub(crate) symbolic: SymbolicLu<usize>,
-    pub(crate) numeric: NumericLu<usize, f64>,
+    sim_lu: SimplicialLu<usize, f64>,
+    row_perm_fwd: Vec<usize>,
+    row_perm_inv: Vec<usize>,
     pub(crate) n: usize,
 }
 
@@ -83,18 +95,28 @@ impl LuFactorization {
         }
 
         let a_num = SparseColMatRef::<'_, usize, f64>::new(a_sym, &values);
+        let col_perm = symbolic.col_perm();
 
-        let mut numeric = NumericLu::<usize, f64>::new();
-        let req = symbolic.factorize_numeric_lu_scratch::<f64>(Par::Seq, Default::default());
+        let mut sim_lu = SimplicialLu::<usize, f64>::new();
+        let mut row_perm_fwd = vec![0usize; m];
+        let mut row_perm_inv = vec![0usize; m];
+
+        let req = factorize_simplicial_numeric_lu_scratch::<usize, f64>(m, m);
         let mut mem = MemBuffer::new(req);
         let stack = MemStack::new(&mut mem);
 
-        symbolic
-            .factorize_numeric_lu(&mut numeric, a_num, Par::Seq, stack, Default::default())
-            .map_err(|e| match e {
-                LuError::SymbolicSingular { index } => SolverError::SingularBasis { step: index },
-                _ => SolverError::SingularBasis { step: 0 },
-            })?;
+        factorize_simplicial_numeric_lu(
+            &mut row_perm_fwd,
+            &mut row_perm_inv,
+            &mut sim_lu,
+            a_num,
+            col_perm,
+            stack,
+        )
+        .map_err(|e| match e {
+            LuError::SymbolicSingular { index } => SolverError::SingularBasis { step: index },
+            _ => SolverError::SingularBasis { step: 0 },
+        })?;
 
         if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(SolverError::DeadlineExceeded);
@@ -102,27 +124,62 @@ impl LuFactorization {
 
         // 数値 singularity post-check: faer の partial pivoting は 0 pivot を
         // 許容して進む (LuError::SymbolicSingular は pivot 不在ケースのみ raise)
-        // ため、Mehrotra IPM の Markowitz pivoting で検出されていた数値 singular
-        // (test_lu_singular_detection の [1,2,3;4,5,6;1,2,3] 等) が後段に漏れる。
-        // 単位 vector を 1 回 solve → 結果が非有限なら singular とみなす。
+        // ため、数値 singular (test_lu_singular_detection の [1,2,3;4,5,6;1,2,3] 等)
+        // が後段に漏れる。単位 vector を 1 回 solve → 結果が非有限なら singular とみなす。
         // O(nnz) コストで factorize 全体のコストに対して 1% 未満。
         let mut probe = vec![0.0_f64; m];
         probe[0] = 1.0;
-        let probe_req = symbolic.solve_in_place_scratch::<f64>(1, Par::Seq);
+        let row_perm_ref =
+            unsafe { PermRef::new_unchecked(&row_perm_fwd, &row_perm_inv, m) };
+        let col_perm = symbolic.col_perm();
+        let probe_req = simplicial::solve_in_place_scratch::<usize, f64>(m, 1, Par::Seq);
         let mut probe_mem = MemBuffer::new(probe_req);
         let probe_stack = MemStack::new(&mut probe_mem);
-        let probe_lu = LuRef::new_unchecked(&symbolic, &numeric);
         let probe_mat = MatMut::from_column_major_slice_mut(&mut probe, m, 1);
-        probe_lu.solve_in_place_with_conj(Conj::No, probe_mat, Par::Seq, probe_stack);
+        sim_lu.solve_in_place_with_conj(
+            row_perm_ref,
+            col_perm,
+            Conj::No,
+            probe_mat,
+            Par::Seq,
+            probe_stack,
+        );
         if !probe.iter().all(|v| v.is_finite()) {
             return Err(SolverError::SingularBasis { step: 0 });
         }
 
         Ok(LuFactorization {
             symbolic,
-            numeric,
+            sim_lu,
+            row_perm_fwd,
+            row_perm_inv,
             n: m,
         })
+    }
+
+    /// L 因子を返す (行 index は unsorted)。Phase 2 (FT 更新) が消費する。
+    #[allow(dead_code)]
+    pub(crate) fn l_factor(&self) -> SparseColMatRef<'_, usize, f64> {
+        self.sim_lu.l_factor_unsorted()
+    }
+
+    /// U 因子を返す (行 index は unsorted)。Phase 2 (FT 更新) が消費する。
+    #[allow(dead_code)]
+    pub(crate) fn u_factor(&self) -> SparseColMatRef<'_, usize, f64> {
+        self.sim_lu.u_factor_unsorted()
+    }
+
+    /// row pivoting 置換 (fwd: original → permuted) を返す。
+    /// `L·U = row_perm · B · col_perm⁻¹` を満たす。
+    #[allow(dead_code)]
+    pub(crate) fn row_perm(&self) -> PermRef<'_, usize> {
+        unsafe { PermRef::new_unchecked(&self.row_perm_fwd, &self.row_perm_inv, self.n) }
+    }
+
+    /// COLAMD column 置換 (fwd: original → permuted) を返す。
+    #[allow(dead_code)]
+    pub(crate) fn col_perm(&self) -> PermRef<'_, usize> {
+        self.symbolic.col_perm()
     }
 }
 
@@ -163,24 +220,27 @@ fn build_basis_csc(a: &CscMatrix, basis: &[usize], m: usize) -> Result<BasisCscP
 
 /// FTRAN: `B × x = rhs` を LU 因子で解く。in-place で rhs を書き換える。
 pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut [f64]) {
-    let lu_ref = LuRef::new_unchecked(&lu.symbolic, &lu.numeric);
-    let req = lu.symbolic.solve_in_place_scratch::<f64>(1, Par::Seq);
+    let row_perm = unsafe { PermRef::new_unchecked(&lu.row_perm_fwd, &lu.row_perm_inv, lu.n) };
+    let col_perm = lu.symbolic.col_perm();
+    let req = simplicial::solve_in_place_scratch::<usize, f64>(lu.n, 1, Par::Seq);
     let mut mem = MemBuffer::new(req);
     let stack = MemStack::new(&mut mem);
     let rhs_mat = MatMut::from_column_major_slice_mut(rhs, lu.n, 1);
-    lu_ref.solve_in_place_with_conj(Conj::No, rhs_mat, Par::Seq, stack);
+    lu.sim_lu
+        .solve_in_place_with_conj(row_perm, col_perm, Conj::No, rhs_mat, Par::Seq, stack);
 }
 
 /// BTRAN: `B^T × x = rhs` を LU 因子で解く。in-place で rhs を書き換える。
 pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut [f64]) {
-    let lu_ref = LuRef::new_unchecked(&lu.symbolic, &lu.numeric);
-    let req = lu
-        .symbolic
-        .solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
+    let row_perm = unsafe { PermRef::new_unchecked(&lu.row_perm_fwd, &lu.row_perm_inv, lu.n) };
+    let col_perm = lu.symbolic.col_perm();
+    let req = simplicial::solve_in_place_scratch::<usize, f64>(lu.n, 1, Par::Seq);
     let mut mem = MemBuffer::new(req);
     let stack = MemStack::new(&mut mem);
     let rhs_mat = MatMut::from_column_major_slice_mut(rhs, lu.n, 1);
-    lu_ref.solve_transpose_in_place_with_conj(Conj::No, rhs_mat, Par::Seq, stack);
+    lu.sim_lu.solve_transpose_in_place_with_conj(
+        row_perm, col_perm, Conj::No, rhs_mat, Par::Seq, stack,
+    );
 }
 
 #[cfg(test)]
@@ -433,7 +493,6 @@ mod tests {
         let basis: Vec<usize> = (0..n).collect();
         let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
 
-        // Verify correctness of FTRAN (内部表現は faer 内部、L/U 直接検査は不可)
         let rhs_orig: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
         let mut rhs = rhs_orig.clone();
         solve_ftran(&lu, &mut rhs);
@@ -550,5 +609,189 @@ mod tests {
         solve_btran(&lu, &mut rhs2);
         let check2 = bt.mat_vec_mul(&rhs2).unwrap();
         assert_vec_near(&check2, &rhs_orig, 1e-6);
+    }
+
+    // =========================================================================
+    // 低レベル経路 sentinel: 挙動不変・アクセサ正当性
+    // =========================================================================
+
+    /// sentinel: L·U = P_r·B·P_c⁻¹ の検証 (アクセサの正当性)。
+    ///
+    /// perm 合成を誤る (row_perm/col_perm 交換, 方向逆転など) と LU の積が
+    /// 置換済み基底行列と一致しなくなり fail する。
+    #[test]
+    fn test_lu_accessor_lu_equals_perm_b() {
+        // B = [[4,1,0],[2,5,1],[0,3,6]] (非対称、複数スパースパターン)
+        let dense = vec![
+            vec![4.0, 1.0, 0.0],
+            vec![2.0, 5.0, 1.0],
+            vec![0.0, 3.0, 6.0],
+        ];
+        let n = 3;
+        let a = dense_to_csc(&dense, n, n);
+        let basis = vec![0, 1, 2];
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
+
+        // L と U を dense に展開。
+        let l_ref = lu.l_factor();
+        let u_ref = lu.u_factor();
+        let mut l_dense = vec![0.0f64; n * n];
+        let mut u_dense = vec![0.0f64; n * n];
+        for j in 0..n {
+            for (i, &v) in l_ref.row_idx_of_col(j).zip(l_ref.val_of_col(j).iter()) {
+                l_dense[i * n + j] = v;
+            }
+            for (i, &v) in u_ref.row_idx_of_col(j).zip(u_ref.val_of_col(j).iter()) {
+                u_dense[i * n + j] = v;
+            }
+        }
+
+        // L·U (dense m×m 行列積)。
+        let mut lu_prod = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for k in 0..n {
+                    s += l_dense[i * n + k] * u_dense[k * n + j];
+                }
+                lu_prod[i * n + j] = s;
+            }
+        }
+
+        // P_r·B·P_c⁻¹ を構築。
+        // row_perm_fwd[i] = p → 元の行 i が置換後の行 p に移動。
+        // (P_r · B)[p, j] = B[i, j] where row_perm_fwd[i] = p
+        //   → (P_r · B)[row_perm_fwd[i], j] = B[i, j]
+        // col_perm_fwd[k] = q → 元の列 k が置換後の列 q に移動。
+        // P_c⁻¹ は col_perm の逆、つまり (P_c⁻¹)[j, q] = (P_c)[q, j]。
+        // (P_r·B·P_c⁻¹)[row_perm_fwd[i], col_perm_inv[j]] = B[i, j]
+        let (row_perm_fwd, _) = lu.row_perm().arrays();
+        let (col_perm_fwd, col_perm_inv) = lu.col_perm().arrays();
+        let _ = col_perm_fwd;
+        let mut perm_b = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let pr = row_perm_fwd[i];
+                let pc_inv = col_perm_inv[j];
+                perm_b[pr * n + pc_inv] = dense[i][j];
+            }
+        }
+
+        // L·U と P_r·B·P_c⁻¹ が 1e-10 以内で一致すること。
+        for i in 0..n {
+            for j in 0..n {
+                let diff = (lu_prod[i * n + j] - perm_b[i * n + j]).abs();
+                assert!(
+                    diff < 1e-10,
+                    "L·U ≠ P_r·B·P_c⁻¹ at ({i},{j}): lu={:.6e} perm={:.6e} diff={:.2e}",
+                    lu_prod[i * n + j],
+                    perm_b[i * n + j],
+                    diff
+                );
+            }
+        }
+    }
+
+    /// sentinel: 複数パターン (非対称疎行列) での新経路 ftran 残差検証。
+    ///
+    /// 移行後の simplicial 経路で perm 合成を誤った場合 (`row_perm` / `col_perm`
+    /// 交換など) は B·x = rhs の残差が爆発するため、正しい実装でのみ PASS する。
+    #[test]
+    fn test_lu_lowlevel_ftran_residual_multiple_patterns() {
+        // パターン 1: 疎行列 (sparse off-diagonal)
+        let dense1 = vec![
+            vec![5.0, 1.0, 0.0, 0.0],
+            vec![2.0, 8.0, 3.0, 0.0],
+            vec![0.0, 1.0, 7.0, 2.0],
+            vec![0.0, 0.0, 4.0, 9.0],
+        ];
+        // パターン 2: 密行列
+        let dense2 = vec![
+            vec![3.0, 2.0, 1.0, 4.0],
+            vec![1.0, 5.0, 2.0, 3.0],
+            vec![4.0, 1.0, 6.0, 2.0],
+            vec![2.0, 3.0, 1.0, 7.0],
+        ];
+        // パターン 3: 対角優位 (退化近傍)
+        let dense3 = vec![
+            vec![100.0, 1.0, 0.5, 0.0],
+            vec![1.0, 200.0, 0.0, 2.0],
+            vec![0.5, 0.0, 150.0, 1.5],
+            vec![0.0, 2.0, 1.5, 300.0],
+        ];
+        for (idx, dense) in [dense1, dense2, dense3].iter().enumerate() {
+            let n = 4;
+            let a = dense_to_csc(dense, n, n);
+            let basis = vec![0, 1, 2, 3];
+            let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
+
+            // 複数 RHS で残差チェック
+            for k in 0..3usize {
+                let rhs_orig: Vec<f64> = (0..n).map(|i| ((i + k * 3) % 7) as f64 - 3.0).collect();
+                let mut rhs = rhs_orig.clone();
+                solve_ftran(&lu, &mut rhs);
+                let check = a.mat_vec_mul(&rhs).unwrap();
+                let residual: f64 = check
+                    .iter()
+                    .zip(rhs_orig.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max);
+                assert!(
+                    residual < 1e-10,
+                    "pattern {idx} rhs {k}: ftran residual={residual:.2e} exceeds 1e-10"
+                );
+            }
+
+            // BTRAN 残差チェック
+            let rhs_orig: Vec<f64> = (0..n).map(|i| i as f64 + 1.0).collect();
+            let mut rhs = rhs_orig.clone();
+            solve_btran(&lu, &mut rhs);
+            let bt = a.transpose();
+            let check = bt.mat_vec_mul(&rhs).unwrap();
+            let residual: f64 = check
+                .iter()
+                .zip(rhs_orig.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                residual < 1e-10,
+                "pattern {idx}: btran residual={residual:.2e} exceeds 1e-10"
+            );
+        }
+    }
+
+    /// sentinel: ftran→btran 往復整合 (adjoint 性)。
+    ///
+    /// BTRAN が FTRAN の転置として正確に実装されていることを xᵀc == bᵀy で検証。
+    /// perm の方向を誤ると adjoint 性が崩れる。
+    #[test]
+    fn test_lu_lowlevel_adjoint_roundtrip() {
+        let dense = vec![
+            vec![6.0, 2.0, 1.0, 0.5],
+            vec![2.0, 9.0, 3.0, 1.0],
+            vec![1.0, 3.0, 7.0, 2.0],
+            vec![0.5, 1.0, 2.0, 5.0],
+        ];
+        let n = 4;
+        let a = dense_to_csc(&dense, n, n);
+        let basis = vec![0, 1, 2, 3];
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
+
+        let b = vec![1.0, 2.0, 3.0, 4.0];
+        let c = vec![5.0, 6.0, 7.0, 8.0];
+
+        let mut x = b.clone();
+        solve_ftran(&lu, &mut x); // x = B⁻¹ b
+
+        let mut y = c.clone();
+        solve_btran(&lu, &mut y); // y = (B^T)⁻¹ c
+
+        // xᵀc = bᵀy iff B⁻¹ and (B^T)⁻¹ are adjoint
+        let xtc: f64 = x.iter().zip(c.iter()).map(|(a, b)| a * b).sum();
+        let bty: f64 = b.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
+        assert!(
+            (xtc - bty).abs() < 1e-10,
+            "Adjoint roundtrip failed: x^T·c={xtc:.10e} vs b^T·y={bty:.10e}"
+        );
     }
 }
