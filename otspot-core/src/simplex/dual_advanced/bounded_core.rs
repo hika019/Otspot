@@ -1272,6 +1272,42 @@ enum BoundedLeave {
     Unbounded,
 }
 
+/// Running best leaving candidate for the two-sided Harris ratio test: largest
+/// pivot `|eff|`, ties (within `PIVOT_TOL`) broken by Bland's rule (smallest
+/// basic index). Tracks the bound side and step so the chosen row carries them.
+#[derive(Default)]
+struct LeaveCand {
+    row: Option<usize>,
+    at_ub: bool,
+    step: f64,
+    best_pivot_abs: f64,
+}
+
+impl LeaveCand {
+    fn relax(&mut self, i: usize, pivot_abs: f64, at_ub: bool, step: f64, basis: &[usize]) {
+        if pivot_abs > self.best_pivot_abs + PIVOT_TOL {
+            self.best_pivot_abs = pivot_abs;
+            self.row = Some(i);
+            self.at_ub = at_ub;
+            self.step = step;
+        } else if (pivot_abs - self.best_pivot_abs).abs() <= PIVOT_TOL {
+            match self.row {
+                None => {
+                    self.row = Some(i);
+                    self.at_ub = at_ub;
+                    self.step = step;
+                }
+                Some(prev) if basis[i] < basis[prev] => {
+                    self.row = Some(i);
+                    self.at_ub = at_ub;
+                    self.step = step;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Two-sided Harris ratio test for the bounded primal cores.
 ///
 /// `eff[i] = alpha[i] · dir` is the effective pivot column. A basic variable
@@ -1287,6 +1323,15 @@ enum BoundedLeave {
 /// where many rows share a zero ratio and a strict-min rule would repeatedly
 /// pick near-zero pivots until the LU factorization turns singular. This mirrors
 /// the one-sided `primal::ratio_test::select_leaving_feasibility_preserving`.
+///
+/// Phase I artificial preference: when `art_threshold = Some(t)` and the tie-band
+/// (rows with true ratio ≤ θ) contains an artificial basic variable
+/// (`basis[i] >= t`), the leaving row is taken among the artificials only. This
+/// is the standard HiGHS/GLPK Phase I min-ratio preference — on a degenerate
+/// vertex many structural rows share the tie and would otherwise leave the
+/// artificials stranded at tiny-step pivots (dfl001 slow tail). θ is unchanged,
+/// so the step stays feasibility-preserving; only the choice among equally
+/// eligible rows differs.
 fn select_leaving_bounded(
     alpha: &[f64],
     dir: f64,
@@ -1297,6 +1342,7 @@ fn select_leaving_bounded(
     m: usize,
     floor: f64,
     feas_tol: f64,
+    art_threshold: Option<usize>,
 ) -> BoundedLeave {
     let mut theta = f64::INFINITY;
     let mut min_true = f64::INFINITY;
@@ -1327,10 +1373,11 @@ fn select_leaving_bounded(
         return BoundedLeave::Unbounded;
     }
 
-    let mut leaving: Option<usize> = None;
-    let mut leaving_at_ub = false;
-    let mut chosen_step = 0.0f64;
-    let mut best_pivot_abs = 0.0f64;
+    // Pass 2: among rows with true ratio ≤ θ, take the largest pivot (Bland
+    // tie-break). `best_art` tracks the same over artificial rows only; when an
+    // artificial sits in the tie-band it is preferred (Phase I, see above).
+    let mut best = LeaveCand::default();
+    let mut best_art = LeaveCand::default();
     for i in 0..m {
         let eff = alpha[i] * dir;
         let xi = x_b[i];
@@ -1343,34 +1390,20 @@ fn select_leaving_bounded(
             continue;
         };
         if true_ratio <= theta {
-            if pivot_abs > best_pivot_abs + PIVOT_TOL {
-                best_pivot_abs = pivot_abs;
-                leaving = Some(i);
-                leaving_at_ub = at_ub;
-                chosen_step = true_ratio.max(0.0);
-            } else if (pivot_abs - best_pivot_abs).abs() <= PIVOT_TOL {
-                match leaving {
-                    None => {
-                        leaving = Some(i);
-                        leaving_at_ub = at_ub;
-                        chosen_step = true_ratio.max(0.0);
-                    }
-                    Some(prev) if basis[i] < basis[prev] => {
-                        leaving = Some(i);
-                        leaving_at_ub = at_ub;
-                        chosen_step = true_ratio.max(0.0);
-                    }
-                    _ => {}
-                }
+            let step = true_ratio.max(0.0);
+            best.relax(i, pivot_abs, at_ub, step, basis);
+            if art_threshold.is_some_and(|t| basis[i] >= t) {
+                best_art.relax(i, pivot_abs, at_ub, step, basis);
             }
         }
     }
 
-    match leaving {
+    let chosen = if best_art.row.is_some() { best_art } else { best };
+    match chosen.row {
         Some(row) => BoundedLeave::Pivot {
             row,
-            at_ub: leaving_at_ub,
-            step: chosen_step,
+            at_ub: chosen.at_ub,
+            step: chosen.step,
         },
         None => BoundedLeave::Unbounded,
     }
@@ -1662,6 +1695,7 @@ pub(crate) fn phase2_primal_bounded(
             m,
             PIVOT_TOL,
             options.primal_tol,
+            None,
         ) {
             BoundedLeave::Flip => {
                 bump_bfrt_flip_invocations();
@@ -1800,7 +1834,18 @@ pub(crate) fn bounded_primal_phase1(
     options: &SolverOptions,
     iters: &mut usize,
 ) -> SimplexOutcome {
-    primal_simplex_aug(a_aug, c_aug, ubs_aug, n_struct, state, options, iters)
+    // Phase I minimizes Σartificial: prefer driving artificials out of the basis
+    // (artificials live at columns `[n_struct, n_aug)`).
+    primal_simplex_aug(
+        a_aug,
+        c_aug,
+        ubs_aug,
+        n_struct,
+        state,
+        options,
+        iters,
+        Some(n_struct),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1813,7 +1858,8 @@ pub(crate) fn bounded_primal_phase2_aug(
     options: &SolverOptions,
     iters: &mut usize,
 ) -> SimplexOutcome {
-    primal_simplex_aug(a_aug, c_aug, ubs_aug, n_struct, state, options, iters)
+    // Phase II optimizes the original objective; no artificial preference.
+    primal_simplex_aug(a_aug, c_aug, ubs_aug, n_struct, state, options, iters, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1825,6 +1871,7 @@ fn primal_simplex_aug(
     state: &mut BoundedDualState,
     options: &SolverOptions,
     iters: &mut usize,
+    art_threshold: Option<usize>,
 ) -> SimplexOutcome {
     let m = state.basis.len();
     let n_aug = state.at_upper.len();
@@ -2003,6 +2050,7 @@ fn primal_simplex_aug(
                 m,
                 PIVOT_TOL,
                 options.primal_tol,
+                art_threshold,
             )
         };
         let (r, leaving_at_ub, theta) = match leave {
@@ -3334,7 +3382,7 @@ mod tests {
         let m = 3;
 
         match select_leaving_bounded(
-            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL,
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL, None,
         ) {
             BoundedLeave::Pivot { row, step, .. } => {
                 assert_eq!(row, 1, "must pick the largest pivot (row 1, |α|=50)");
@@ -3367,7 +3415,7 @@ mod tests {
         let m = 2;
 
         match select_leaving_bounded(
-            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL,
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL, None,
         ) {
             BoundedLeave::Pivot { row, at_ub, .. } => {
                 assert_eq!(row, 1, "must pick the largest ub-pivot (row 1, |α|=8)");
@@ -3375,6 +3423,93 @@ mod tests {
             }
             other => panic!("expected a Pivot, got {other:?}"),
         }
+    }
+
+    /// Phase I artificial preference (ON vs OFF) for `select_leaving_bounded`.
+    /// The tie-band (ratio ≤ θ) holds a structural row (basis 2, larger pivot)
+    /// and an artificial row (basis 5 ≥ threshold, smaller pivot), both at the
+    /// degenerate vertex (ratio 0). `art_threshold = Some(5)` drives the
+    /// artificial out; `None` keeps the largest-pivot structural choice. θ —
+    /// hence the step (0 here) and feasibility — is identical for both.
+    #[test]
+    fn select_leaving_bounded_phase1_prefers_artificial() {
+        let alpha = [4.0, 1.0];
+        let dir = 1.0;
+        let x_b = [0.0, 0.0];
+        let basis = [2usize, 5usize];
+        let ubs = [f64::INFINITY; 6];
+        let ub_q = f64::INFINITY;
+        let m = 2;
+
+        // OFF: largest pivot (structural row 0).
+        let off = select_leaving_bounded(
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL, None,
+        );
+        match off {
+            BoundedLeave::Pivot { row, .. } => assert_eq!(row, 0, "OFF picks structural row 0"),
+            other => panic!("expected Pivot, got {other:?}"),
+        }
+
+        // ON: artificial row 1 (basis 5 ≥ 5) leaves first.
+        let on = select_leaving_bounded(
+            &alpha,
+            dir,
+            &x_b,
+            &basis,
+            &ubs,
+            ub_q,
+            m,
+            PIVOT_TOL,
+            PIVOT_TOL,
+            Some(5),
+        );
+        match on {
+            BoundedLeave::Pivot { row, step, .. } => {
+                assert_eq!(row, 1, "ON drives the artificial (row 1) out first");
+                assert_eq!(step, 0.0, "degenerate vertex ⇒ zero step (θ unchanged)");
+            }
+            other => panic!("expected Pivot, got {other:?}"),
+        }
+    }
+
+    /// No-op proof: an artificial row OUTSIDE the tie-band (ratio 1 ≫ θ) is never
+    /// preferred — the preference reorders only within θ and never changes the
+    /// min ratio. `Some(threshold)` matches `None` here.
+    #[test]
+    fn select_leaving_bounded_phase1_artificial_outside_band_noop() {
+        let alpha = [1.0, 1.0];
+        let dir = 1.0;
+        let x_b = [0.0, 1.0]; // row 0 ratio 0 (in band), row 1 artificial ratio 1
+        let basis = [2usize, 5usize];
+        let ubs = [f64::INFINITY; 6];
+        let ub_q = f64::INFINITY;
+        let m = 2;
+
+        let off = select_leaving_bounded(
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL, None,
+        );
+        let on = select_leaving_bounded(
+            &alpha,
+            dir,
+            &x_b,
+            &basis,
+            &ubs,
+            ub_q,
+            m,
+            PIVOT_TOL,
+            PIVOT_TOL,
+            Some(5),
+        );
+        let off_row = match off {
+            BoundedLeave::Pivot { row, .. } => row,
+            other => panic!("expected Pivot, got {other:?}"),
+        };
+        let on_row = match on {
+            BoundedLeave::Pivot { row, .. } => row,
+            other => panic!("expected Pivot, got {other:?}"),
+        };
+        assert_eq!(on_row, 0, "out-of-band artificial must NOT be selected");
+        assert_eq!(on_row, off_row, "preference is a no-op outside the tie-band");
     }
 
     /// Sentinel: `compute_reduced_costs_into_timed` must issue at most
@@ -3878,7 +4013,7 @@ mod tests {
             other => panic!("expected Bland Pivot, got {other:?}"),
         };
         let harris_row = match select_leaving_bounded(
-            &alpha, 1.0, &x_b, &basis, &ubs, inf, 2, PIVOT_TOL, 1e-9,
+            &alpha, 1.0, &x_b, &basis, &ubs, inf, 2, PIVOT_TOL, 1e-9, None,
         ) {
             BoundedLeave::Pivot { row, .. } => row,
             other => panic!("expected Harris Pivot, got {other:?}"),
