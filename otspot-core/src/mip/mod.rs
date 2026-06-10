@@ -6,6 +6,7 @@
 //! MIQP is out of scope and reported as [`SolveStatus::NonConvex`].
 
 pub(crate) mod branch;
+pub(crate) mod cuts;
 pub(crate) mod heuristics;
 pub(crate) mod node;
 pub(crate) mod presolve;
@@ -39,6 +40,14 @@ pub(crate) trait Relaxation {
     /// `opts` already has multistart / global_optimization stripped and the
     /// deadline fixed by the driver.
     fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult;
+    /// Whether the driver should disable presolve on every B&B *node* solve.
+    /// True for MILP: each node re-solves the same LP with only bounds tightened,
+    /// so per-node presolve is redundant and its variable renumbering drops the
+    /// propagated warm-start basis. False (default) for MIQP, whose IPM relies on
+    /// presolve's Ruiz scaling for per-node conditioning.
+    fn skip_node_presolve(&self) -> bool {
+        false
+    }
 }
 
 /// Search statistics returned by [`solve_milp_with_stats`] / [`solve_miqp_with_stats`].
@@ -82,6 +91,13 @@ pub struct MipStats {
 
     /// Whether the feasibility pump found an initial incumbent before branch-and-bound.
     pub fp_incumbent_found: bool,
+
+    /// Objective of the first trusted (Optimal) root relaxation, i.e. the root LP
+    /// bound used to start branch-and-bound. With cuts enabled this reflects the
+    /// cut-tightened relaxation, so comparing it against the cuts-off value
+    /// isolates root gap closure from downstream node-count noise.
+    /// `NEG_INFINITY` when no root relaxation solved to Optimal.
+    pub root_lp_bound: f64,
 }
 
 /// Solve a MILP to (relative) ε-optimality via branch-and-bound.
@@ -120,33 +136,36 @@ pub fn solve_milp_with_stats(
     // integer rounding return early here before entering the B&B.
     if !problem.integer_vars.is_empty() {
         let mask = integer_mask(problem.lp.num_vars, &problem.integer_vars);
-        match presolve::tighten_integer_bounds(&problem.lp, &mask) {
+        // Root presolve: coefficient propagation tightens integer bounds. Build the
+        // effective problem (bound-tightened clone or the original) so the cut and
+        // B&B stages share one code path.
+        let problem_bt: MilpProblem = match presolve::tighten_integer_bounds(&problem.lp, &mask) {
             None => return (SolverResult::infeasible(), MipStats::default()),
             Some(tightened) if tightened != problem.lp.bounds => {
                 let mut lp_bt = problem.lp.clone();
                 lp_bt.bounds = tightened;
-                let problem_bt = MilpProblem {
+                MilpProblem {
                     lp: lp_bt,
                     integer_vars: problem.integer_vars.clone(),
-                };
-                let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
-                    &problem_bt.lp,
-                    &problem_bt.integer_vars,
-                    cfg.integer_feas_tol,
-                    &opts_with_dl,
-                );
-                return solve_mip_core(&problem_bt, &opts_with_dl, cfg, mask, fp_inc);
+                }
             }
-            Some(_) => {
-                let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
-                    &problem.lp,
-                    &problem.integer_vars,
-                    cfg.integer_feas_tol,
-                    &opts_with_dl,
-                );
-                return solve_mip_core(problem, &opts_with_dl, cfg, mask, fp_inc);
-            }
-        }
+            Some(_) => problem.clone(),
+        };
+        // Root GMI cuts tighten the LP relaxation without removing any
+        // integer-feasible point, so the optimum is unchanged while the tree
+        // shrinks. The added rows leave `num_vars` (hence `mask`) untouched.
+        let effective = if cfg.cuts {
+            cuts::add_root_cuts(&problem_bt, &opts_with_dl, cfg)
+        } else {
+            problem_bt
+        };
+        let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
+            &effective.lp,
+            &effective.integer_vars,
+            cfg.integer_feas_tol,
+            &opts_with_dl,
+        );
+        return solve_mip_core(&effective, &opts_with_dl, cfg, mask, fp_inc);
     }
     solve_mip_with_stats(problem, &opts_with_dl, cfg)
 }
@@ -236,6 +255,7 @@ fn solve_mip_core<R: Relaxation>(
 ) -> (SolverResult, MipStats) {
     let mut stats = MipStats {
         approx_bounds_bytes_per_node: problem.num_vars() * 2 * std::mem::size_of::<f64>(),
+        root_lp_bound: f64::NEG_INFINITY,
         ..MipStats::default()
     };
 
@@ -261,6 +281,13 @@ fn solve_mip_core<R: Relaxation>(
     // Enable basis recovery so LP solves return warm_start_basis for child nodes.
     shared.recover_warm_start_basis = true;
     shared.warm_start = None;
+    // MILP nodes skip per-node presolve (redundant re-reduction that also discards
+    // the propagated warm-start basis). MIQP keeps it (IPM needs Ruiz scaling).
+    // Placed after the no-integer-var passthrough above, so a pure-LP solve still
+    // gets full presolve.
+    if problem.skip_node_presolve() {
+        shared.presolve = false;
+    }
 
     let mut state = MipState::new();
 
@@ -370,6 +397,11 @@ fn solve_mip_core<R: Relaxation>(
 
         if trusted {
             // Optimal relaxation objective is a valid lower bound for this region.
+            // The first processed node is the root (best-bound queue, root pushed
+            // first): record its bound to isolate root cut gap closure.
+            if stats.nodes_processed == 1 {
+                stats.root_lp_bound = res.objective;
+            }
             let node_lb = node.lower_bound.max(res.objective);
 
             if let Some(inc) = state.incumbent_obj {
