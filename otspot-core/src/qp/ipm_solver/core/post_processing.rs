@@ -16,9 +16,28 @@ use crate::qp::problem::QpProblem;
 /// 因子化自体が分単位かかり deadline を空費する。これは「分単位 factorize を
 /// post-processing 段で行うか否か」の時間 proxy ガード (n+m で判定)。
 use crate::tolerances::LARGE_PROBLEM_THRESHOLD;
+/// 進捗 stall の絶対 floor。残差が ~0 近傍 (相対閾値が underflow する regime) で
+/// sub-floor の丸め noise を吸収しループを終端させる。残差が大きい regime では
+/// `REFIT_REL_STALL` 相対項が支配するため、この floor は near-zero 専用。
 const REFIT_PROGRESS_EPS: f64 = 1e-12;
+/// 相対進捗 stall 閾値。refit/IRLS の KKT 残差は各 sub-step の revert guard により
+/// 単調非増加。1 反復の改善 `prev - cur` が現残差の本割合を下回ると、f64 蓄積丸め
+/// (ill-cond 系では KKT が f64 限界に張り付き相対 noise ~1e-10 しか動かない) と
+/// 区別できない実質ゼロ進捗とみなし break する。絶対 `REFIT_PROGRESS_EPS` 単独では
+/// 大残差 (~0.1) で drop≈1e-11 > 1e-12 を「進捗あり」と誤判定し deadline まで無駄
+/// 反復していた。真の (低速含む) 線形収束は相対 drop が桁違いに大きい (>=1e-4) ため
+/// 早期 break しない。1e-8 は noise floor (~1e-10) の 100x 上、収束 drop の桁下。
+const REFIT_REL_STALL: f64 = 1e-8;
 const IRLS_INNER_MAX_ITERS: usize = 30;
 const KRYLOV_MAX_ITERS: usize = 400;
+
+/// refit/IRLS の進捗 stall 判定。`prev_kkt`/`current_kkt` は revert guard により
+/// `current_kkt <= prev_kkt`。改善 drop が「相対 (`REFIT_REL_STALL · prev_kkt`)」と
+/// 「絶対 floor (`REFIT_PROGRESS_EPS`)」の大きい方を下回ったら stall とみなす。
+fn refit_progress_stalled(prev_kkt: f64, current_kkt: f64) -> bool {
+    let threshold = (REFIT_REL_STALL * prev_kkt).max(REFIT_PROGRESS_EPS);
+    current_kkt + threshold >= prev_kkt
+}
 
 pub(super) fn allow_primal_projection(orig_problem: &QpProblem) -> bool {
     let problem_size = orig_problem.num_vars + orig_problem.num_constraints;
@@ -113,37 +132,48 @@ pub(super) fn refine_post_processing(
     }
 
     // (2) y/z 交互 refit。
+    let diag = DiagPostsolve::new();
     let mut current_kkt = kkt_residual_rel(
         &view,
         &final_sol.solution,
         &final_sol.dual_solution,
         &final_sol.bound_duals,
     );
+    let mut refit_iters = 0usize;
     loop {
         if opts
             .deadline
             .is_some_and(|d| std::time::Instant::now() >= d)
         {
+            diag.note(&format!("refit-loop break: deadline at iter {refit_iters}"));
             break;
         }
         let prev_kkt = current_kkt;
 
         let pre_dual_step = final_sol.clone();
+        let t = diag.tic();
         crate::qp::refine_dual_lsq(orig_problem, final_sol, eliminated_cols, opts.deadline);
+        diag.acc("refit.dual_lsq", t);
+        let t = diag.tic();
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
+        diag.acc("refit.zero+project", t);
+        let t = diag.tic();
         crate::qp::refine_dual_projected_gradient(
             orig_problem,
             final_sol,
             eliminated_cols,
             opts.deadline,
         );
+        diag.acc("refit.proj_grad", t);
+        let t = diag.tic();
         crate::qp::refine_dual_worst_active_block(
             orig_problem,
             final_sol,
             eliminated_cols,
             opts.deadline,
         );
+        diag.acc("refit.worst_active", t);
         let post_kkt = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -157,7 +187,9 @@ pub(super) fn refine_post_processing(
         }
 
         let pre_z = final_sol.bound_duals.clone();
+        let t = diag.tic();
         crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, user_eps);
+        diag.acc("refit.refit_z", t);
         let post_kkt = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -170,12 +202,19 @@ pub(super) fn refine_post_processing(
             final_sol.bound_duals = pre_z;
         }
 
-        if current_kkt + REFIT_PROGRESS_EPS >= prev_kkt {
+        refit_iters += 1;
+        diag.trajectory("refit", refit_iters, prev_kkt, current_kkt);
+        if refit_progress_stalled(prev_kkt, current_kkt) {
+            diag.note(&format!(
+                "refit-loop break: stall at iter {refit_iters} (prev={prev_kkt:.6e} cur={current_kkt:.6e})"
+            ));
             break;
         }
     }
+    diag.report("refit-loop", refit_iters);
 
     // 標準 LSQ が componentwise eps を満たさない場合 IRLS で L∞ 風 y を試行。
+    let mut irls_iters = 0usize;
     loop {
         if current_kkt <= user_eps {
             break;
@@ -184,11 +223,13 @@ pub(super) fn refine_post_processing(
             .deadline
             .is_some_and(|d| std::time::Instant::now() >= d)
         {
+            diag.note(&format!("irls-loop break: deadline at iter {irls_iters}"));
             break;
         }
         let prev_kkt = current_kkt;
 
         let pre_dual_step = final_sol.clone();
+        let t = diag.tic();
         crate::qp::refine_dual_lsq_irls(
             orig_problem,
             final_sol,
@@ -197,6 +238,8 @@ pub(super) fn refine_post_processing(
             IRLS_INNER_MAX_ITERS,
             opts.deadline,
         );
+        diag.acc("irls.dual_lsq_irls", t);
+        let t = diag.tic();
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
         crate::qp::refine_dual_projected_gradient(
@@ -211,6 +254,7 @@ pub(super) fn refine_post_processing(
             eliminated_cols,
             opts.deadline,
         );
+        diag.acc("irls.proj+worst", t);
         let post_kkt_irls = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -234,15 +278,74 @@ pub(super) fn refine_post_processing(
             }
         } else {
             *final_sol = pre_dual_step;
+            diag.note(&format!("irls-loop break: no progress at iter {irls_iters}"));
             break;
         }
 
-        if current_kkt + REFIT_PROGRESS_EPS >= prev_kkt {
+        irls_iters += 1;
+        diag.trajectory("irls", irls_iters, prev_kkt, current_kkt);
+        if refit_progress_stalled(prev_kkt, current_kkt) {
+            diag.note(&format!(
+                "irls-loop break: stall at iter {irls_iters} (prev={prev_kkt:.6e} cur={current_kkt:.6e})"
+            ));
             break;
         }
     }
+    diag.report("irls-loop", irls_iters);
 
     current_kkt
+}
+
+/// Env-gated (OTSPOT_DIAG_POSTSOLVE=1) diagnostic accumulator for postsolve
+/// refine loops. No-op unless the env var is set; isolated diagnostic scaffolding.
+struct DiagPostsolve {
+    on: bool,
+    acc: std::cell::RefCell<std::collections::BTreeMap<&'static str, (std::time::Duration, u64)>>,
+}
+impl DiagPostsolve {
+    fn new() -> Self {
+        DiagPostsolve {
+            on: std::env::var("OTSPOT_DIAG_POSTSOLVE").is_ok(),
+            acc: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+        }
+    }
+    fn tic(&self) -> Option<std::time::Instant> {
+        if self.on {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        }
+    }
+    fn acc(&self, key: &'static str, t: Option<std::time::Instant>) {
+        if let Some(t0) = t {
+            let mut m = self.acc.borrow_mut();
+            let e = m.entry(key).or_insert((std::time::Duration::ZERO, 0));
+            e.0 += t0.elapsed();
+            e.1 += 1;
+        }
+    }
+    #[allow(clippy::print_stderr)] // env-gated diagnostic trace
+    fn trajectory(&self, tag: &str, iter: usize, prev: f64, cur: f64) {
+        if self.on && (iter <= 5 || iter.is_multiple_of(50)) {
+            eprintln!("[diag {tag}] iter={iter} kkt {prev:.6e} -> {cur:.6e} (drop={:.3e})", prev - cur);
+        }
+    }
+    #[allow(clippy::print_stderr)] // env-gated diagnostic trace
+    fn note(&self, msg: &str) {
+        if self.on {
+            eprintln!("[diag] {msg}");
+        }
+    }
+    #[allow(clippy::print_stderr)] // env-gated diagnostic trace
+    fn report(&self, tag: &str, iters: usize) {
+        if !self.on {
+            return;
+        }
+        eprintln!("[diag {tag}] total_iters={iters}");
+        for (k, (d, calls)) in self.acc.borrow().iter() {
+            eprintln!("  {k:24} = {:8.2}s  calls={calls}", d.as_secs_f64());
+        }
+    }
 }
 
 /// Post-processing stage 3: saddle-point Krylov IR (K [dx;dy] = -[r_d;r_p]) +
@@ -616,5 +719,143 @@ mod gate_predicate_tests {
             !kkt_already_passes(&prob0, &res0, &[], true, 1e-6),
             "m=0 must short-circuit to false"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
+mod stall_gate_tests {
+    //! Sentinels for the relative progress stall gate (`refit_progress_stalled`).
+    //!
+    //! The refit/IRLS loops break when one iteration's KKT improvement is
+    //! indistinguishable from f64 accumulation noise. The gate combines a
+    //! relative term (`REFIT_REL_STALL · prev`) — for the ill-conditioned regime
+    //! where KKT is pinned at the f64 limit (~0.1) and only relative noise
+    //! (~1e-10) moves — with an absolute floor (`REFIT_PROGRESS_EPS`) for the
+    //! near-zero regime. Reverting to the absolute-only gate re-introduces the
+    //! 979s LISWET spin (see `detects_noise_floor_flat_residual`).
+    use super::{
+        build_view, kkt_residual_rel, refine_post_processing, refit_progress_stalled,
+        REFIT_PROGRESS_EPS,
+    };
+    use crate::options::SolverOptions;
+    use crate::problem::{ConstraintType, SolverResult};
+    use crate::qp::problem::QpProblem;
+    use crate::sparse::CscMatrix;
+
+    /// ill-cond regime: KKT pinned at the f64 limit (~0.1), per-iteration drop is
+    /// only relative noise (~1e-11 abs, ~1e-10 rel). The relative gate must flag
+    /// this as stall. Reverting to the absolute 1e-12 floor would NOT (1e-11 >
+    /// 1e-12) → the loop spins to the deadline (the original 979s LISWET hang).
+    #[test]
+    fn detects_noise_floor_flat_residual() {
+        let prev = 1e-1_f64;
+        let cur = prev - 1e-11_f64; // relative drop ~1e-10, absolute drop 1e-11
+        assert!(
+            refit_progress_stalled(prev, cur),
+            "flat residual at noise floor must be stall (abs drop {:.1e}, rel {:.1e})",
+            prev - cur,
+            (prev - cur) / prev
+        );
+        // Pin the failure mode of the abandoned absolute-only gate: with a 1e-12
+        // floor the same point is (wrongly) seen as progress.
+        assert!(
+            cur + REFIT_PROGRESS_EPS < prev,
+            "absolute-only gate would treat this noise drop as progress → spin"
+        );
+    }
+
+    /// Genuine progress — even slow linear convergence — must NOT be flagged as
+    /// stall. If `REFIT_REL_STALL` were set too aggressively the loop would break
+    /// early and degrade the solution.
+    #[test]
+    fn keeps_going_on_meaningful_relative_progress() {
+        // (prev, cur): relative drops 0.5, 1e-4, 1e-5 — all ≫ REFIT_REL_STALL.
+        for &(prev, cur) in &[
+            (1e-1_f64, 5e-2_f64),
+            (1.0_f64, 1.0_f64 - 1e-4_f64),
+            (1e3_f64, 1e3_f64 - 1e-2_f64),
+        ] {
+            assert!(
+                !refit_progress_stalled(prev, cur),
+                "relative drop {:.1e} is meaningful → must continue",
+                (prev - cur) / prev
+            );
+        }
+    }
+
+    /// near-zero regime: the relative threshold underflows (`REFIT_REL_STALL·prev`
+    /// ≪ floor), so the absolute floor must still terminate the loop. Removing the
+    /// `.max(REFIT_PROGRESS_EPS)` floor (pure-relative gate) would spin here.
+    #[test]
+    fn absolute_floor_terminates_near_zero() {
+        let prev = 1e-12_f64;
+        let cur = prev - 1e-13_f64;
+        assert!(
+            refit_progress_stalled(prev, cur),
+            "near-zero residual: absolute floor must detect stall"
+        );
+        // Exact no-change is always stall regardless of magnitude.
+        assert!(refit_progress_stalled(0.5, 0.5));
+    }
+
+    /// Convergence case unchanged: a well-conditioned Eq QP whose dual starts
+    /// perturbed. The refit loop must drive KKT below user_eps (genuine
+    /// convergence is NOT cut short by the relative gate) while leaving the primal
+    /// `x` untouched (allow_primal=false). The relative gate only changes
+    /// behaviour when KKT is pinned ≫ floor with noise-level drops; once KKT
+    /// converges toward zero the absolute floor governs — identical to the old
+    /// gate. An over-aggressive `REFIT_REL_STALL` would break before y is refined,
+    /// leaving KKT large → this test fails.
+    #[test]
+    fn refit_converges_and_preserves_primal() {
+        let n = 4usize;
+        let idx: Vec<usize> = (0..n).collect();
+        // min 0.5·Σx² s.t. Σx = 2 (Eq), x free. Optimum x_i = 0.5, dual fixed by
+        // stationarity. x is already optimal; only the dual needs refitting.
+        let q = CscMatrix::from_triplets(&idx, &idx, &vec![1.0_f64; n], n, n).unwrap();
+        let a = CscMatrix::from_triplets(&vec![0usize; n], &idx, &vec![1.0_f64; n], 1, n).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![0.0_f64; n],
+            a,
+            vec![2.0_f64],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+        let x_opt = vec![0.5_f64; n];
+        let mut sol = SolverResult {
+            solution: x_opt.clone(),
+            dual_solution: vec![0.0_f64], // perturbed away from the optimal dual
+            bound_duals: vec![],
+            ..Default::default()
+        };
+        let mut opts = SolverOptions::default();
+        opts.ipm.eps = 1e-6;
+
+        let view = build_view(&prob, &[]);
+        let kkt_before = kkt_residual_rel(
+            &view,
+            &sol.solution,
+            &sol.dual_solution,
+            &sol.bound_duals,
+        );
+        assert!(kkt_before > 1e-3, "fixture must start with a real dual residual");
+
+        let kkt_after = refine_post_processing(&prob, &mut sol, &[], &opts, false);
+
+        assert!(
+            kkt_after <= opts.ipm.eps,
+            "refit must converge below user_eps (kkt {kkt_before:.3e} -> {kkt_after:.3e}); \
+             an over-aggressive relative gate would break early here"
+        );
+        for (i, &xi) in sol.solution.iter().enumerate() {
+            assert!(
+                (xi - x_opt[i]).abs() < 1e-12,
+                "primal x must be untouched: x[{i}]={xi} != {}",
+                x_opt[i]
+            );
+        }
     }
 }

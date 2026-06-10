@@ -12,6 +12,18 @@ use crate::qp::FX_TOL;
 use crate::sparse::CscMatrix;
 use crate::tolerances::any_nonfinite;
 
+/// Maximum dense local normal-equation dimension for worst-active correction.
+///
+/// This stage is a local repair pass. Its cost is cubic in the number of active
+/// row/bound variables in the selected cluster, so clusters above this bound are
+/// not "local" in the algorithmic sense and must not monopolize postsolve until
+/// the global deadline.
+const WORST_ACTIVE_MAX_DENSE_DIM: usize = 256;
+
+fn worst_active_dense_dim_allowed(dim: usize) -> bool {
+    dim <= WORST_ACTIVE_MAX_DENSE_DIM
+}
+
 pub(crate) fn refine_dual_worst_active_block(
     problem: &QpProblem,
     result: &mut crate::problem::SolverResult,
@@ -85,6 +97,9 @@ pub(crate) fn refine_dual_worst_active_block(
     rows.sort_unstable();
     rows.dedup();
     let rlen = rows.len();
+    if !worst_active_dense_dim_allowed(rlen) {
+        return;
+    }
 
     let mut row_pos = vec![usize::MAX; m];
     for (pos, &row) in rows.iter().enumerate() {
@@ -145,6 +160,9 @@ pub(crate) fn refine_dual_worst_active_block(
             nrows: rlen,
             ncols: rlen,
         };
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return;
+        }
         crate::linalg::ldl::factorize(&row_csc)
             .ok()
             .map(|factor| {
@@ -196,6 +214,12 @@ pub(crate) fn refine_dual_worst_active_block(
 
     let ulen = rlen + local_bounds.len();
     if ulen == 0 {
+        return;
+    }
+    if !worst_active_dense_dim_allowed(ulen) {
+        return;
+    }
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return;
     }
     let mut gram = vec![0.0_f64; ulen * ulen];
@@ -268,6 +292,9 @@ pub(crate) fn refine_dual_worst_active_block(
         nrows: ulen,
         ncols: ulen,
     };
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return;
+    }
     let Ok(factor) = crate::linalg::ldl::factorize(&gram_csc) else {
         return;
     };
@@ -300,6 +327,9 @@ pub(crate) fn refine_dual_worst_active_block(
     let mut best_kkt = pre;
     let mut step = 1.0_f64;
     while step > 0.0 {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return;
+        }
         let mut tmp = result.clone();
         for (pos, &row) in rows.iter().enumerate() {
             let mut v = result.dual_solution[row] + step * block_sol[pos];
@@ -338,5 +368,19 @@ pub(crate) fn refine_dual_worst_active_block(
     if best_kkt < pre {
         result.dual_solution = best.dual_solution;
         result.bound_duals = best.bound_duals;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{worst_active_dense_dim_allowed, WORST_ACTIVE_MAX_DENSE_DIM};
+
+    #[test]
+    fn dense_cluster_cap_rejects_nonlocal_worst_active_blocks() {
+        assert!(worst_active_dense_dim_allowed(WORST_ACTIVE_MAX_DENSE_DIM));
+        assert!(
+            !worst_active_dense_dim_allowed(WORST_ACTIVE_MAX_DENSE_DIM + 1),
+            "worst-active local correction must not build an unbounded dense Gram"
+        );
     }
 }
