@@ -113,37 +113,48 @@ pub(super) fn refine_post_processing(
     }
 
     // (2) y/z 交互 refit。
+    let diag = DiagPostsolve::new();
     let mut current_kkt = kkt_residual_rel(
         &view,
         &final_sol.solution,
         &final_sol.dual_solution,
         &final_sol.bound_duals,
     );
+    let mut refit_iters = 0usize;
     loop {
         if opts
             .deadline
             .is_some_and(|d| std::time::Instant::now() >= d)
         {
+            diag.note(&format!("refit-loop break: deadline at iter {refit_iters}"));
             break;
         }
         let prev_kkt = current_kkt;
 
         let pre_dual_step = final_sol.clone();
+        let t = diag.tic();
         crate::qp::refine_dual_lsq(orig_problem, final_sol, eliminated_cols, opts.deadline);
+        diag.acc("refit.dual_lsq", t);
+        let t = diag.tic();
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
+        diag.acc("refit.zero+project", t);
+        let t = diag.tic();
         crate::qp::refine_dual_projected_gradient(
             orig_problem,
             final_sol,
             eliminated_cols,
             opts.deadline,
         );
+        diag.acc("refit.proj_grad", t);
+        let t = diag.tic();
         crate::qp::refine_dual_worst_active_block(
             orig_problem,
             final_sol,
             eliminated_cols,
             opts.deadline,
         );
+        diag.acc("refit.worst_active", t);
         let post_kkt = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -157,7 +168,9 @@ pub(super) fn refine_post_processing(
         }
 
         let pre_z = final_sol.bound_duals.clone();
+        let t = diag.tic();
         crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, user_eps);
+        diag.acc("refit.refit_z", t);
         let post_kkt = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -170,12 +183,19 @@ pub(super) fn refine_post_processing(
             final_sol.bound_duals = pre_z;
         }
 
+        refit_iters += 1;
+        diag.trajectory("refit", refit_iters, prev_kkt, current_kkt);
         if current_kkt + REFIT_PROGRESS_EPS >= prev_kkt {
+            diag.note(&format!(
+                "refit-loop break: stall at iter {refit_iters} (prev={prev_kkt:.6e} cur={current_kkt:.6e})"
+            ));
             break;
         }
     }
+    diag.report("refit-loop", refit_iters);
 
     // 標準 LSQ が componentwise eps を満たさない場合 IRLS で L∞ 風 y を試行。
+    let mut irls_iters = 0usize;
     loop {
         if current_kkt <= user_eps {
             break;
@@ -184,11 +204,13 @@ pub(super) fn refine_post_processing(
             .deadline
             .is_some_and(|d| std::time::Instant::now() >= d)
         {
+            diag.note(&format!("irls-loop break: deadline at iter {irls_iters}"));
             break;
         }
         let prev_kkt = current_kkt;
 
         let pre_dual_step = final_sol.clone();
+        let t = diag.tic();
         crate::qp::refine_dual_lsq_irls(
             orig_problem,
             final_sol,
@@ -197,6 +219,8 @@ pub(super) fn refine_post_processing(
             IRLS_INNER_MAX_ITERS,
             opts.deadline,
         );
+        diag.acc("irls.dual_lsq_irls", t);
+        let t = diag.tic();
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
         crate::qp::refine_dual_projected_gradient(
@@ -211,6 +235,7 @@ pub(super) fn refine_post_processing(
             eliminated_cols,
             opts.deadline,
         );
+        diag.acc("irls.proj+worst", t);
         let post_kkt_irls = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -234,15 +259,71 @@ pub(super) fn refine_post_processing(
             }
         } else {
             *final_sol = pre_dual_step;
+            diag.note(&format!("irls-loop break: no progress at iter {irls_iters}"));
             break;
         }
 
+        irls_iters += 1;
+        diag.trajectory("irls", irls_iters, prev_kkt, current_kkt);
         if current_kkt + REFIT_PROGRESS_EPS >= prev_kkt {
+            diag.note(&format!(
+                "irls-loop break: stall at iter {irls_iters} (prev={prev_kkt:.6e} cur={current_kkt:.6e})"
+            ));
             break;
         }
     }
+    diag.report("irls-loop", irls_iters);
 
     current_kkt
+}
+
+/// Env-gated (OTSPOT_DIAG_POSTSOLVE=1) diagnostic accumulator for postsolve
+/// refine loops. No-op unless the env var is set; isolated diagnostic scaffolding.
+struct DiagPostsolve {
+    on: bool,
+    acc: std::cell::RefCell<std::collections::BTreeMap<&'static str, (std::time::Duration, u64)>>,
+}
+impl DiagPostsolve {
+    fn new() -> Self {
+        DiagPostsolve {
+            on: std::env::var("OTSPOT_DIAG_POSTSOLVE").is_ok(),
+            acc: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+        }
+    }
+    fn tic(&self) -> Option<std::time::Instant> {
+        if self.on {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        }
+    }
+    fn acc(&self, key: &'static str, t: Option<std::time::Instant>) {
+        if let Some(t0) = t {
+            let mut m = self.acc.borrow_mut();
+            let e = m.entry(key).or_insert((std::time::Duration::ZERO, 0));
+            e.0 += t0.elapsed();
+            e.1 += 1;
+        }
+    }
+    fn trajectory(&self, tag: &str, iter: usize, prev: f64, cur: f64) {
+        if self.on && (iter <= 5 || iter % 50 == 0) {
+            eprintln!("[diag {tag}] iter={iter} kkt {prev:.6e} -> {cur:.6e} (drop={:.3e})", prev - cur);
+        }
+    }
+    fn note(&self, msg: &str) {
+        if self.on {
+            eprintln!("[diag] {msg}");
+        }
+    }
+    fn report(&self, tag: &str, iters: usize) {
+        if !self.on {
+            return;
+        }
+        eprintln!("[diag {tag}] total_iters={iters}");
+        for (k, (d, calls)) in self.acc.borrow().iter() {
+            eprintln!("  {k:24} = {:8.2}s  calls={calls}", d.as_secs_f64());
+        }
+    }
 }
 
 /// Post-processing stage 3: saddle-point Krylov IR (K [dx;dy] = -[r_d;r_p]) +

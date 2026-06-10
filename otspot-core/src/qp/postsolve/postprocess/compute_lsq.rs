@@ -120,8 +120,10 @@ fn solve_aat_cg(
     // best-seen y (stagnation/divergence 対策): rdr が増加に転じたら best_y で early-exit。
     let mut best_y = y.clone();
     let mut best_rdr = rdr;
+    let mut cg_iters = 0usize;
 
     for iter_idx in 0..m_sub {
+        cg_iters = iter_idx + 1;
         // 暴走 CG を deadline で打ち切り best-seen y を返す (size gate 除去で
         // m_sub が大規模化し得るため)。下流 DD-guard が best-effort y を refine/reject。
         if iter_idx % CG_DEADLINE_CHECK_STRIDE == 0
@@ -159,6 +161,11 @@ fn solve_aat_cg(
         rdr = rdr_new;
     }
 
+    if std::env::var("OTSPOT_DIAG_POSTSOLVE").is_ok() {
+        eprintln!(
+            "[diag cg] m_sub={m_sub} iters_run={cg_iters} converged={converged} (cap={m_sub})"
+        );
+    }
     if any_nonfinite(&best_y) {
         return (None, false);
     }
