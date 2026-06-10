@@ -324,16 +324,19 @@ impl DiagPostsolve {
             e.1 += 1;
         }
     }
+    #[allow(clippy::print_stderr)] // env-gated diagnostic trace
     fn trajectory(&self, tag: &str, iter: usize, prev: f64, cur: f64) {
-        if self.on && (iter <= 5 || iter % 50 == 0) {
+        if self.on && (iter <= 5 || iter.is_multiple_of(50)) {
             eprintln!("[diag {tag}] iter={iter} kkt {prev:.6e} -> {cur:.6e} (drop={:.3e})", prev - cur);
         }
     }
+    #[allow(clippy::print_stderr)] // env-gated diagnostic trace
     fn note(&self, msg: &str) {
         if self.on {
             eprintln!("[diag] {msg}");
         }
     }
+    #[allow(clippy::print_stderr)] // env-gated diagnostic trace
     fn report(&self, tag: &str, iters: usize) {
         if !self.on {
             return;

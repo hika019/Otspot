@@ -161,6 +161,7 @@ fn solve_aat_cg(
         rdr = rdr_new;
     }
 
+    #[allow(clippy::print_stderr)] // env-gated diagnostic trace
     if std::env::var("OTSPOT_DIAG_POSTSOLVE").is_ok() {
         eprintln!(
             "[diag cg] m_sub={m_sub} iters_run={cg_iters} converged={converged} (cap={m_sub})"
