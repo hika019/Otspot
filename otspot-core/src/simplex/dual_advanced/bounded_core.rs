@@ -3489,6 +3489,7 @@ mod tests {
     ///
     /// Sentinel design: if the fix is REVERTED, the hook has no effect and Phase I
     /// correctly reaches art_sum ≈ 0 → the assertion below FAILS.
+    #[allow(clippy::single_match)]
     #[test]
     fn primal_simplex_aug_single_ftran_noop_proof() {
         let a_aug = CscMatrix::from_triplets(

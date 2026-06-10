@@ -1216,6 +1216,7 @@ mod tests {
     /// no-op proof: set `gamma_update_disabled()` to always return `true` in
     /// `steepest_edge.rs` → γ stays frozen for both arms → DSE-ON iters == DSE-OFF
     /// iters → wins = 0 → `assert!(wins >= MIN_WINS)` FAILS.
+    #[allow(clippy::print_stderr)]
     #[test]
     fn dse_gamma_update_reduces_iterations() {
         use crate::options::{DualPricing, WarmStartBasis};
