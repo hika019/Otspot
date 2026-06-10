@@ -6,6 +6,21 @@ use crate::qp::postsolve::postprocess::{run_dual_recovery_postprocess, try_dual_
 use crate::qp::problem::QpProblem;
 use crate::tolerances::any_nonfinite;
 
+/// Relative progress threshold for Krylov IR residual scores. Strict decreases
+/// below this relative scale are indistinguishable from f64/DD accumulation
+/// noise on ill-conditioned postsolve systems.
+const KRYLOV_REL_STALL: f64 = 1e-8;
+/// Absolute floor for near-zero residual scores, matching the post-refit stall
+/// policy so tiny sub-floor changes do not keep IR alive.
+const KRYLOV_PROGRESS_EPS: f64 = 1e-12;
+
+fn krylov_score_made_progress(score_cur: f64, score_new: f64, target_pf: f64) -> bool {
+    let progress_tol = dual_recovery_progress_tol(score_cur, score_new, target_pf)
+        .max(KRYLOV_REL_STALL * score_cur.abs())
+        .max(KRYLOV_PROGRESS_EPS);
+    score_new + progress_tol < score_cur
+}
+
 pub(crate) fn refine_kkt_iterative(
     problem: &QpProblem,
     result: &mut crate::problem::SolverResult,
@@ -357,6 +372,13 @@ pub(crate) fn refine_kkt_iterative(
     }
 
     let mut accepted = n_dual_total;
+    let mut best_saddle_kkt = kkt_residual_rel(
+        &view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    );
+    let mut best_saddle_result = result.clone();
     // 残差悪化許容: max(pre_rel × 2, target_pf × 100) を超えたら revert。
     const RESID_TOLERANCE_FACTOR: f64 = 2.0;
     const RESID_FLOOR_RATIO: f64 = 100.0;
@@ -414,19 +436,49 @@ pub(crate) fn refine_kkt_iterative(
         let (_, _, pf_new, df_new) =
             compute_residuals(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals);
 
-        // 採用: max(pf_rel, df_rel) strict 減少 + 両者 guardrail 内。
+        // 採用: max(pf_rel, df_rel) の意味ある減少 + 両者 guardrail 内。
         let score_cur = pf_cur.max(df_cur);
         let score_new = pf_new.max(df_new);
-        let progress = score_new < score_cur;
+        let progress = krylov_score_made_progress(score_cur, score_new, target_pf);
         let pf_safe = pf_new < pf_limit;
         let df_safe = df_new < df_limit;
         if progress && pf_safe && df_safe {
             *result = tmp;
             accepted += 1;
+            let cur_kkt = kkt_residual_rel(
+                &view,
+                &result.solution,
+                &result.dual_solution,
+                &result.bound_duals,
+            );
+            if cur_kkt < best_saddle_kkt {
+                best_saddle_kkt = cur_kkt;
+                best_saddle_result = result.clone();
+            }
         } else {
             break;
         }
     }
 
+    *result = best_saddle_result;
     accepted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::krylov_score_made_progress;
+
+    #[test]
+    fn krylov_progress_rejects_noise_floor_drops() {
+        let score_cur = 1.0e-1_f64;
+        let score_new = score_cur - 1.0e-11_f64;
+        assert!(
+            !krylov_score_made_progress(score_cur, score_new, 1.0e-6),
+            "strict-but-noise-sized residual drops must not keep Krylov IR spinning"
+        );
+        assert!(
+            krylov_score_made_progress(score_cur, score_cur * 0.5, 1.0e-6),
+            "large residual reduction is real progress"
+        );
+    }
 }
