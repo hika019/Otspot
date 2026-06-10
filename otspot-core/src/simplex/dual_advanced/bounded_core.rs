@@ -104,6 +104,13 @@ thread_local! {
     /// thread-local slot nor the branch (verified via `nm` on the release
     /// `rlib` — symbol must be absent).
     static FLIP_APPLY_DISABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// Test-only hook: when `true`, `primal_simplex_aug` starts in Bland mode
+    /// (smallest-index entering / strict-min-ratio leaving) from iteration 0.
+    /// Sentinels flip this to prove that the anti-cycling rule reaches the *same*
+    /// optimum as Devex pricing — i.e. Bland breaks degenerate stalls without
+    /// changing the LP solution. Lives behind `#[cfg(test)]` (absent in release).
+    static FORCE_BLAND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -114,6 +121,22 @@ pub(crate) fn set_flip_apply_disabled(v: bool) {
 #[cfg(test)]
 fn flip_apply_disabled() -> bool {
     FLIP_APPLY_DISABLE.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn set_primal_force_bland(v: bool) {
+    FORCE_BLAND.with(|c| c.set(v));
+}
+
+#[cfg(test)]
+fn primal_force_bland() -> bool {
+    FORCE_BLAND.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn primal_force_bland() -> bool {
+    false
 }
 
 #[cfg(not(test))]
@@ -1249,6 +1272,42 @@ enum BoundedLeave {
     Unbounded,
 }
 
+/// Running best leaving candidate for the two-sided Harris ratio test: largest
+/// pivot `|eff|`, ties (within `PIVOT_TOL`) broken by Bland's rule (smallest
+/// basic index). Tracks the bound side and step so the chosen row carries them.
+#[derive(Default)]
+struct LeaveCand {
+    row: Option<usize>,
+    at_ub: bool,
+    step: f64,
+    best_pivot_abs: f64,
+}
+
+impl LeaveCand {
+    fn relax(&mut self, i: usize, pivot_abs: f64, at_ub: bool, step: f64, basis: &[usize]) {
+        if pivot_abs > self.best_pivot_abs + PIVOT_TOL {
+            self.best_pivot_abs = pivot_abs;
+            self.row = Some(i);
+            self.at_ub = at_ub;
+            self.step = step;
+        } else if (pivot_abs - self.best_pivot_abs).abs() <= PIVOT_TOL {
+            match self.row {
+                None => {
+                    self.row = Some(i);
+                    self.at_ub = at_ub;
+                    self.step = step;
+                }
+                Some(prev) if basis[i] < basis[prev] => {
+                    self.row = Some(i);
+                    self.at_ub = at_ub;
+                    self.step = step;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Two-sided Harris ratio test for the bounded primal cores.
 ///
 /// `eff[i] = alpha[i] · dir` is the effective pivot column. A basic variable
@@ -1264,6 +1323,15 @@ enum BoundedLeave {
 /// where many rows share a zero ratio and a strict-min rule would repeatedly
 /// pick near-zero pivots until the LU factorization turns singular. This mirrors
 /// the one-sided `primal::ratio_test::select_leaving_feasibility_preserving`.
+///
+/// Phase I artificial preference: when `art_threshold = Some(t)` and the tie-band
+/// (rows with true ratio ≤ θ) contains an artificial basic variable
+/// (`basis[i] >= t`), the leaving row is taken among the artificials only. This
+/// is the standard HiGHS/GLPK Phase I min-ratio preference — on a degenerate
+/// vertex many structural rows share the tie and would otherwise leave the
+/// artificials stranded at tiny-step pivots (dfl001 slow tail). θ is unchanged,
+/// so the step stays feasibility-preserving; only the choice among equally
+/// eligible rows differs.
 fn select_leaving_bounded(
     alpha: &[f64],
     dir: f64,
@@ -1274,6 +1342,7 @@ fn select_leaving_bounded(
     m: usize,
     floor: f64,
     feas_tol: f64,
+    art_threshold: Option<usize>,
 ) -> BoundedLeave {
     let mut theta = f64::INFINITY;
     let mut min_true = f64::INFINITY;
@@ -1304,10 +1373,11 @@ fn select_leaving_bounded(
         return BoundedLeave::Unbounded;
     }
 
-    let mut leaving: Option<usize> = None;
-    let mut leaving_at_ub = false;
-    let mut chosen_step = 0.0f64;
-    let mut best_pivot_abs = 0.0f64;
+    // Pass 2: among rows with true ratio ≤ θ, take the largest pivot (Bland
+    // tie-break). `best_art` tracks the same over artificial rows only; when an
+    // artificial sits in the tie-band it is preferred (Phase I, see above).
+    let mut best = LeaveCand::default();
+    let mut best_art = LeaveCand::default();
     for i in 0..m {
         let eff = alpha[i] * dir;
         let xi = x_b[i];
@@ -1320,25 +1390,101 @@ fn select_leaving_bounded(
             continue;
         };
         if true_ratio <= theta {
-            if pivot_abs > best_pivot_abs + PIVOT_TOL {
-                best_pivot_abs = pivot_abs;
-                leaving = Some(i);
-                leaving_at_ub = at_ub;
-                chosen_step = true_ratio.max(0.0);
-            } else if (pivot_abs - best_pivot_abs).abs() <= PIVOT_TOL {
-                match leaving {
-                    None => {
-                        leaving = Some(i);
-                        leaving_at_ub = at_ub;
-                        chosen_step = true_ratio.max(0.0);
-                    }
-                    Some(prev) if basis[i] < basis[prev] => {
-                        leaving = Some(i);
-                        leaving_at_ub = at_ub;
-                        chosen_step = true_ratio.max(0.0);
-                    }
-                    _ => {}
+            let step = true_ratio.max(0.0);
+            best.relax(i, pivot_abs, at_ub, step, basis);
+            if art_threshold.is_some_and(|t| basis[i] >= t) {
+                best_art.relax(i, pivot_abs, at_ub, step, basis);
+            }
+        }
+    }
+
+    let chosen = if best_art.row.is_some() { best_art } else { best };
+    match chosen.row {
+        Some(row) => BoundedLeave::Pivot {
+            row,
+            at_ub: chosen.at_ub,
+            step: chosen.step,
+        },
+        None => BoundedLeave::Unbounded,
+    }
+}
+
+/// Practical Bland leaving: minimum-ratio within a `PIVOT_TOL` tolerance band,
+/// ties broken by smallest basic-variable index.
+///
+/// Used by `primal_simplex_aug` once a degenerate stall triggers anti-cycling.
+/// Unlike `select_leaving_bounded` (largest-pivot Harris, chosen for LU
+/// conditioning), this selects the smallest-basis-index row among those whose
+/// ratio lies in `[min_ratio, min_ratio + PIVOT_TOL]`. Paired with Bland
+/// entering (smallest improving column index) it breaks degenerate cycling in
+/// practice.
+///
+/// The `PIVOT_TOL` band deviates from strict Bland: exact Bland finiteness
+/// requires the strict minimum ratio; the band can admit additional candidates
+/// beyond that strict minimum, so the theoretical finiteness guarantee is
+/// weakened in proportion to `PIVOT_TOL`. Conditioning is sacrificed
+/// deliberately; Bland mode is a transient escape, not the steady-state pricing.
+fn select_leaving_bland_bounded(
+    alpha: &[f64],
+    dir: f64,
+    x_b: &[f64],
+    basis: &[usize],
+    ubs: &[f64],
+    ub_q: f64,
+    m: usize,
+    floor: f64,
+) -> BoundedLeave {
+    let mut min_ratio = f64::INFINITY;
+    for i in 0..m {
+        let eff = alpha[i] * dir;
+        let xi = x_b[i];
+        let ub_i = ubs[basis[i]];
+        if eff > floor {
+            min_ratio = min_ratio.min(xi / eff);
+        } else if eff < -floor && ub_i.is_finite() {
+            min_ratio = min_ratio.min((ub_i - xi) / (-eff));
+        }
+    }
+
+    if ub_q.is_finite() && ub_q < min_ratio {
+        return BoundedLeave::Flip;
+    }
+    if ub_q.is_finite() {
+        min_ratio = min_ratio.min(ub_q);
+    }
+    if !min_ratio.is_finite() {
+        return BoundedLeave::Unbounded;
+    }
+
+    // Among rows achieving the minimum ratio (within PIVOT_TOL), Bland selects
+    // the smallest basic-variable index — never the largest pivot.
+    let mut leaving: Option<usize> = None;
+    let mut leaving_at_ub = false;
+    let mut chosen_step = 0.0f64;
+    for i in 0..m {
+        let eff = alpha[i] * dir;
+        let xi = x_b[i];
+        let ub_i = ubs[basis[i]];
+        let (true_ratio, at_ub) = if eff > floor {
+            (xi / eff, false)
+        } else if eff < -floor && ub_i.is_finite() {
+            ((ub_i - xi) / (-eff), true)
+        } else {
+            continue;
+        };
+        if true_ratio <= min_ratio + PIVOT_TOL {
+            match leaving {
+                None => {
+                    leaving = Some(i);
+                    leaving_at_ub = at_ub;
+                    chosen_step = true_ratio.max(0.0);
                 }
+                Some(prev) if basis[i] < basis[prev] => {
+                    leaving = Some(i);
+                    leaving_at_ub = at_ub;
+                    chosen_step = true_ratio.max(0.0);
+                }
+                _ => {}
             }
         }
     }
@@ -1351,6 +1497,37 @@ fn select_leaving_bounded(
         },
         None => BoundedLeave::Unbounded,
     }
+}
+
+/// Bland entering for `primal_simplex_aug`: the smallest structural-column
+/// index whose reduced cost is improving. Scanning from index 0 (rather than the
+/// Devex / partial-pricing order) is what gives Bland its anti-cycling guarantee.
+/// Reduced cost is recomputed directly from the current duals `y`; artificials
+/// `[n_struct, n_aug)` are never priced.
+fn bland_entering(
+    a: &CscMatrix,
+    c: &[f64],
+    is_basic: &[bool],
+    at_upper: &[bool],
+    y: &[f64],
+    n_struct: usize,
+    floor: f64,
+) -> Option<usize> {
+    for j in 0..n_struct {
+        if is_basic[j] {
+            continue;
+        }
+        let (rows, vals) = a.get_column(j).unwrap();
+        let mut rc = c[j];
+        for (k, &row) in rows.iter().enumerate() {
+            rc -= vals[k] * y[row];
+        }
+        let violation = if at_upper[j] { rc } else { -rc };
+        if violation > floor {
+            return Some(j);
+        }
+    }
+    None
 }
 
 /// Drive primal Phase 2 from a primal-feasible `BoundedDualState`.
@@ -1518,6 +1695,7 @@ pub(crate) fn phase2_primal_bounded(
             m,
             PIVOT_TOL,
             options.primal_tol,
+            None,
         ) {
             BoundedLeave::Flip => {
                 bump_bfrt_flip_invocations();
@@ -1656,7 +1834,18 @@ pub(crate) fn bounded_primal_phase1(
     options: &SolverOptions,
     iters: &mut usize,
 ) -> SimplexOutcome {
-    primal_simplex_aug(a_aug, c_aug, ubs_aug, n_struct, state, options, iters)
+    // Phase I minimizes Σartificial: prefer driving artificials out of the basis
+    // (artificials live at columns `[n_struct, n_aug)`).
+    primal_simplex_aug(
+        a_aug,
+        c_aug,
+        ubs_aug,
+        n_struct,
+        state,
+        options,
+        iters,
+        Some(n_struct),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1669,7 +1858,8 @@ pub(crate) fn bounded_primal_phase2_aug(
     options: &SolverOptions,
     iters: &mut usize,
 ) -> SimplexOutcome {
-    primal_simplex_aug(a_aug, c_aug, ubs_aug, n_struct, state, options, iters)
+    // Phase II optimizes the original objective; no artificial preference.
+    primal_simplex_aug(a_aug, c_aug, ubs_aug, n_struct, state, options, iters, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1681,6 +1871,7 @@ fn primal_simplex_aug(
     state: &mut BoundedDualState,
     options: &SolverOptions,
     iters: &mut usize,
+    art_threshold: Option<usize>,
 ) -> SimplexOutcome {
     let m = state.basis.len();
     let n_aug = state.at_upper.len();
@@ -1719,6 +1910,16 @@ fn primal_simplex_aug(
     let mut devex_weights = vec![1.0f64; n_struct];
     let mut trace = IterTrace::new("bounded-aug-primal");
 
+    // Anti-cycling: after `k_trigger` consecutive degenerate (step ≈ 0) pivots
+    // — the signature of a cycle — switch to Bland's rule (smallest improving
+    // column / smallest min-ratio row), which terminates finitely. Revert to
+    // Devex once a productive step resumes so steady-state pricing stays fast.
+    let k_trigger = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN);
+    let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
+    let force_bland = primal_force_bland();
+    let mut iters_since_progress: usize = 0;
+    let mut bland_mode = force_bland;
+
     loop {
         *iters = iters.saturating_add(1);
         if deadline_expired(options.deadline)
@@ -1739,7 +1940,7 @@ fn primal_simplex_aug(
                 &state.is_basic,
                 ubs_aug,
             );
-            t.log(*iters, obj, &state.basis, false);
+            t.log(*iters, obj, &state.basis, bland_mode);
         }
 
         // Dual vars (reused across partial-pricing windows of this basis).
@@ -1748,10 +1949,34 @@ fn primal_simplex_aug(
         }
         compute_dual_vars_into(c_aug, &mut basis_mgr, &state.basis, &mut y);
 
-        // Cyclic partial pricing over the first `n_struct` (priced) columns;
-        // artificials at `[n_struct, n_aug)` are never priced. Devex-weighted
-        // most-improving within the first improving window.
-        let q = {
+        // Entering selection. Bland mode (anti-cycling) scans from column 0 for
+        // the smallest improving index; the steady-state path uses cyclic partial
+        // pricing with Devex weighting (most-improving within the first improving
+        // window). Artificials at `[n_struct, n_aug)` are never priced in either.
+        let q = if bland_mode {
+            match bland_entering(
+                a_aug,
+                c_aug,
+                &state.is_basic,
+                &state.at_upper,
+                &y,
+                n_struct,
+                PIVOT_TOL,
+            ) {
+                Some(j) => j,
+                None => {
+                    let obj = bounded_obj(
+                        c_aug,
+                        &state.basis,
+                        &state.x_b,
+                        &state.at_upper,
+                        &state.is_basic,
+                        ubs_aug,
+                    );
+                    return SimplexOutcome::Optimal(obj, y);
+                }
+            }
+        } else {
             let at_upper = &state.at_upper;
             match partial_price_entering(
                 a_aug,
@@ -1803,23 +2028,47 @@ fn primal_simplex_aug(
         // tolerance) — strict-min-ratio selection would pick near-zero pivots
         // under degeneracy and drive the LU basis singular (grow22 Phase II).
         let ub_q = ubs_aug[q];
-        let (r, leaving_at_ub, theta) = match select_leaving_bounded(
-            &alpha,
-            dir,
-            &state.x_b,
-            &state.basis,
-            ubs_aug,
-            ub_q,
-            m,
-            PIVOT_TOL,
-            options.primal_tol,
-        ) {
+        let leave = if bland_mode {
+            select_leaving_bland_bounded(
+                &alpha,
+                dir,
+                &state.x_b,
+                &state.basis,
+                ubs_aug,
+                ub_q,
+                m,
+                PIVOT_TOL,
+            )
+        } else {
+            select_leaving_bounded(
+                &alpha,
+                dir,
+                &state.x_b,
+                &state.basis,
+                ubs_aug,
+                ub_q,
+                m,
+                PIVOT_TOL,
+                options.primal_tol,
+                art_threshold,
+            )
+        };
+        let (r, leaving_at_ub, theta) = match leave {
             BoundedLeave::Flip => {
                 bump_bfrt_flip_invocations();
+                if let Some(t) = trace.as_mut() {
+                    t.note_flip();
+                }
                 for i in 0..m {
                     state.x_b[i] -= alpha[i] * dir * ub_q;
                 }
                 state.at_upper[q] = !from_ub;
+                // A flip moves x by a full bound width — genuine progress; reset
+                // the degenerate-stall counter and leave Bland mode.
+                iters_since_progress = 0;
+                if !force_bland {
+                    bland_mode = false;
+                }
                 basis_mgr.refactor_if_needed_timed(a_aug, &state.basis, options.deadline);
                 if basis_mgr.refactor_failed {
                     return if basis_mgr.singular_basis {
@@ -1833,6 +2082,24 @@ fn primal_simplex_aug(
             BoundedLeave::Unbounded => return SimplexOutcome::Unbounded,
             BoundedLeave::Pivot { row, at_ub, step } => (row, at_ub, step),
         };
+        if let Some(t) = trace.as_mut() {
+            t.note_pivot(theta, options.primal_tol);
+        }
+
+        // Anti-cycling bookkeeping. A near-zero step makes no progress; once
+        // `k_trigger` such steps accumulate, switch to Bland to break a possible
+        // cycle. A productive step resets the counter and reverts to Devex.
+        if theta > step_zero_threshold {
+            iters_since_progress = 0;
+            if !force_bland {
+                bland_mode = false;
+            }
+        } else {
+            iters_since_progress = iters_since_progress.saturating_add(1);
+            if iters_since_progress >= k_trigger {
+                bland_mode = true;
+            }
+        }
         let leaving_col = state.basis[r];
 
         for i in 0..m {
@@ -3115,7 +3382,7 @@ mod tests {
         let m = 3;
 
         match select_leaving_bounded(
-            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL,
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL, None,
         ) {
             BoundedLeave::Pivot { row, step, .. } => {
                 assert_eq!(row, 1, "must pick the largest pivot (row 1, |α|=50)");
@@ -3148,7 +3415,7 @@ mod tests {
         let m = 2;
 
         match select_leaving_bounded(
-            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL,
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL, None,
         ) {
             BoundedLeave::Pivot { row, at_ub, .. } => {
                 assert_eq!(row, 1, "must pick the largest ub-pivot (row 1, |α|=8)");
@@ -3156,6 +3423,93 @@ mod tests {
             }
             other => panic!("expected a Pivot, got {other:?}"),
         }
+    }
+
+    /// Phase I artificial preference (ON vs OFF) for `select_leaving_bounded`.
+    /// The tie-band (ratio ≤ θ) holds a structural row (basis 2, larger pivot)
+    /// and an artificial row (basis 5 ≥ threshold, smaller pivot), both at the
+    /// degenerate vertex (ratio 0). `art_threshold = Some(5)` drives the
+    /// artificial out; `None` keeps the largest-pivot structural choice. θ —
+    /// hence the step (0 here) and feasibility — is identical for both.
+    #[test]
+    fn select_leaving_bounded_phase1_prefers_artificial() {
+        let alpha = [4.0, 1.0];
+        let dir = 1.0;
+        let x_b = [0.0, 0.0];
+        let basis = [2usize, 5usize];
+        let ubs = [f64::INFINITY; 6];
+        let ub_q = f64::INFINITY;
+        let m = 2;
+
+        // OFF: largest pivot (structural row 0).
+        let off = select_leaving_bounded(
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL, None,
+        );
+        match off {
+            BoundedLeave::Pivot { row, .. } => assert_eq!(row, 0, "OFF picks structural row 0"),
+            other => panic!("expected Pivot, got {other:?}"),
+        }
+
+        // ON: artificial row 1 (basis 5 ≥ 5) leaves first.
+        let on = select_leaving_bounded(
+            &alpha,
+            dir,
+            &x_b,
+            &basis,
+            &ubs,
+            ub_q,
+            m,
+            PIVOT_TOL,
+            PIVOT_TOL,
+            Some(5),
+        );
+        match on {
+            BoundedLeave::Pivot { row, step, .. } => {
+                assert_eq!(row, 1, "ON drives the artificial (row 1) out first");
+                assert_eq!(step, 0.0, "degenerate vertex ⇒ zero step (θ unchanged)");
+            }
+            other => panic!("expected Pivot, got {other:?}"),
+        }
+    }
+
+    /// No-op proof: an artificial row OUTSIDE the tie-band (ratio 1 ≫ θ) is never
+    /// preferred — the preference reorders only within θ and never changes the
+    /// min ratio. `Some(threshold)` matches `None` here.
+    #[test]
+    fn select_leaving_bounded_phase1_artificial_outside_band_noop() {
+        let alpha = [1.0, 1.0];
+        let dir = 1.0;
+        let x_b = [0.0, 1.0]; // row 0 ratio 0 (in band), row 1 artificial ratio 1
+        let basis = [2usize, 5usize];
+        let ubs = [f64::INFINITY; 6];
+        let ub_q = f64::INFINITY;
+        let m = 2;
+
+        let off = select_leaving_bounded(
+            &alpha, dir, &x_b, &basis, &ubs, ub_q, m, PIVOT_TOL, PIVOT_TOL, None,
+        );
+        let on = select_leaving_bounded(
+            &alpha,
+            dir,
+            &x_b,
+            &basis,
+            &ubs,
+            ub_q,
+            m,
+            PIVOT_TOL,
+            PIVOT_TOL,
+            Some(5),
+        );
+        let off_row = match off {
+            BoundedLeave::Pivot { row, .. } => row,
+            other => panic!("expected Pivot, got {other:?}"),
+        };
+        let on_row = match on {
+            BoundedLeave::Pivot { row, .. } => row,
+            other => panic!("expected Pivot, got {other:?}"),
+        };
+        assert_eq!(on_row, 0, "out-of-band artificial must NOT be selected");
+        assert_eq!(on_row, off_row, "preference is a no-op outside the tie-band");
     }
 
     /// Sentinel: `compute_reduced_costs_into_timed` must issue at most
@@ -3530,6 +3884,172 @@ mod tests {
             // Any non-Optimal outcome also demonstrates corruption.
             _ => {}
         }
+    }
+
+    // ── anti-degeneracy (Bland) sentinels ────────────────────────────────────
+
+    /// RAII guard for the test-only `FORCE_BLAND` hook (restores on unwind).
+    struct ForceBlandGuard;
+    impl ForceBlandGuard {
+        fn on() -> Self {
+            set_primal_force_bland(true);
+            Self
+        }
+    }
+    impl Drop for ForceBlandGuard {
+        fn drop(&mut self) {
+            set_primal_force_bland(false);
+        }
+    }
+
+    /// Degenerate Eq+UB augmented Phase I instance shared by the Bland sentinels.
+    ///
+    /// LP: min x0+x1+x2  s.t. x0+x1=1, x1+x2=1, 0≤xi≤1. Unique optimum x=(0,1,0),
+    /// obj=1; degenerate because a single basic x1 covers both rows (x0,x2 sit at
+    /// 0). Returns `(a_aug, ubs_aug, n_struct)` with artificials in cols [3,4].
+    fn degenerate_phase1_aug() -> (CscMatrix, Vec<f64>, usize) {
+        // cols: x0,x1,x2,art0,art1.  x1 spans both rows; artificials are identity.
+        let a_aug = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 0, 1],
+            &[0, 1, 1, 2, 3, 4],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            2,
+            5,
+        )
+        .unwrap();
+        let ubs_aug = vec![1.0f64, 1.0, 1.0, f64::INFINITY, f64::INFINITY];
+        (a_aug, ubs_aug, 3)
+    }
+
+    fn fresh_phase1_state() -> BoundedDualState {
+        BoundedDualState {
+            basis: vec![3usize, 4],
+            at_upper: vec![false; 5],
+            x_b: vec![1.0f64, 1.0],
+            reduced_costs: vec![0.0; 5],
+            is_basic: vec![false, false, false, true, true],
+            iterations: 0,
+            price_start: 0,
+        }
+    }
+
+    /// Run both phases of the bounded primal core on `degenerate_phase1_aug` and
+    /// return the true objective `c·x` at the optimum.
+    fn solve_degenerate_via_core(opts: &SolverOptions) -> f64 {
+        let (a_aug, mut ubs_aug, n_struct) = degenerate_phase1_aug();
+        let c_p1 = vec![0.0f64, 0.0, 0.0, 1.0, 1.0];
+        let mut state = fresh_phase1_state();
+        let mut iters = 0usize;
+        match bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, opts, &mut iters)
+        {
+            SimplexOutcome::Optimal(art_sum, _) => {
+                assert!(art_sum.abs() < 1e-9, "Phase I art_sum {art_sum:.3e} ≠ 0");
+            }
+            other => panic!("Phase I expected Optimal, got {other:?}"),
+        }
+        // Pin artificials out for Phase II, then minimise the true objective.
+        for col in n_struct..ubs_aug.len() {
+            ubs_aug[col] = 0.0;
+        }
+        let c_p2 = vec![1.0f64, 1.0, 1.0, 0.0, 0.0];
+        match bounded_primal_phase2_aug(
+            &a_aug, &c_p2, &ubs_aug, n_struct, &mut state, opts, &mut iters,
+        ) {
+            SimplexOutcome::Optimal(_, _) => {}
+            other => panic!("Phase II expected Optimal, got {other:?}"),
+        }
+        bounded_obj(
+            &c_p2,
+            &state.basis,
+            &state.x_b,
+            &state.at_upper,
+            &state.is_basic,
+            &ubs_aug,
+        )
+    }
+
+    /// Forcing Bland from iteration 0 reaches the *same* optimum as Devex on the
+    /// degenerate LP — anti-cycling must never change the solution. No-op proof:
+    /// a Bland rule that stepped past a blocking row (or mis-priced) would land
+    /// on a different objective, breaking the `obj_bland == obj_devex == 1`
+    /// assertion. Routes through the production core (no presolve short-circuit).
+    #[test]
+    fn force_bland_reaches_same_optimum_as_devex() {
+        let opts = SolverOptions::default();
+        let obj_devex = solve_degenerate_via_core(&opts);
+        let obj_bland = {
+            let _g = ForceBlandGuard::on();
+            solve_degenerate_via_core(&opts)
+        };
+        assert!(
+            (obj_devex - 1.0).abs() < 1e-9,
+            "Devex optimum must be 1.0, got {obj_devex:.9}"
+        );
+        assert!(
+            (obj_bland - obj_devex).abs() < 1e-9,
+            "Bland changed the optimum: devex={obj_devex:.9} bland={obj_bland:.9}"
+        );
+    }
+
+    /// Bland leaving picks the smallest basic-variable index among min-ratio
+    /// ties — *not* the largest pivot. No-op proof: reverting
+    /// `select_leaving_bland_bounded` to the largest-pivot rule (==
+    /// `select_leaving_bounded`) makes the Bland row equal the Harris row, so the
+    /// `bland_row == 1` / `assert_ne!` checks FAIL.
+    #[test]
+    fn bland_leaving_breaks_ties_by_smallest_index() {
+        // Two rows tie at ratio 1.0: row 0 has the larger pivot (2.0), row 1 the
+        // smaller basic index (3 < 5).
+        let alpha = [2.0f64, 1.0];
+        let x_b = [2.0f64, 1.0];
+        let basis = [5usize, 3];
+        let ubs = vec![f64::INFINITY; 6];
+        let inf = f64::INFINITY;
+
+        let bland_row = match select_leaving_bland_bounded(
+            &alpha, 1.0, &x_b, &basis, &ubs, inf, 2, PIVOT_TOL,
+        ) {
+            BoundedLeave::Pivot { row, .. } => row,
+            other => panic!("expected Bland Pivot, got {other:?}"),
+        };
+        let harris_row = match select_leaving_bounded(
+            &alpha, 1.0, &x_b, &basis, &ubs, inf, 2, PIVOT_TOL, 1e-9, None,
+        ) {
+            BoundedLeave::Pivot { row, .. } => row,
+            other => panic!("expected Harris Pivot, got {other:?}"),
+        };
+        assert_eq!(bland_row, 1, "Bland must take the smallest-index row (basis 3)");
+        assert_eq!(harris_row, 0, "Harris must take the largest-pivot row (pivot 2.0)");
+        assert_ne!(bland_row, harris_row, "the two rules must diverge on this tie");
+    }
+
+    /// Bland entering returns the smallest *improving* column index, skipping
+    /// non-improving columns — never the most-improving. No-op proof: an
+    /// argmax-violation rule would return column 2 (violation 5 > 1), failing the
+    /// `Some(0)` / `Some(1)` assertions.
+    #[test]
+    fn bland_entering_returns_smallest_improving_index() {
+        // 1 row, 3 cols, all coeff 1, zero duals ⇒ rc_j = c_j.
+        let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[1.0, 1.0, 1.0], 1, 3).unwrap();
+        let y = [0.0f64];
+        let is_basic = [false, false, false];
+        let at_upper = [false, false, false];
+
+        // cols 0 and 2 improving at lb (rc<0), col 2 most-improving.
+        let c0 = [-1.0f64, 0.5, -5.0];
+        assert_eq!(
+            bland_entering(&a, &c0, &is_basic, &at_upper, &y, 3, PIVOT_TOL),
+            Some(0),
+            "smallest improving index is 0, not the most-improving col 2"
+        );
+
+        // col 0 non-improving (rc>0 at lb) ⇒ skip to col 1.
+        let c1 = [5.0f64, -1.0, -5.0];
+        assert_eq!(
+            bland_entering(&a, &c1, &is_basic, &at_upper, &y, 3, PIVOT_TOL),
+            Some(1),
+            "must skip non-improving col 0 and take col 1"
+        );
     }
 
     // ── partial pricing sentinels ────────────────────────────────────────────

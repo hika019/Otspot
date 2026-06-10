@@ -816,6 +816,7 @@ pub(crate) fn big_m_cold_start(
         options,
         &mut total_iters,
         false,
+        None,
     );
 
     // === Step 8: Phase II 結果 + 人工変数残存判定 ===

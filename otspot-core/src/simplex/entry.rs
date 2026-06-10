@@ -309,6 +309,30 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
     let m = problem.num_constraints;
     let n = problem.num_vars;
 
+    // Empty variable box (lb > ub beyond the feasibility tolerance) is structurally
+    // infeasible. The bounded simplex path detects this, but the `m == 0` and
+    // `n == 0` special cases below do not — they pick a variable bound by cost sign
+    // without checking lb ≤ ub, returning a false Optimal. B&B branching routinely
+    // produces empty boxes (e.g. an integer var pinned between consecutive integers,
+    // ⌈lb⌉ > ⌊ub⌋), so the relaxation solver must report Infeasible for them
+    // regardless of constraint count. Presolve previously masked this.
+    if problem
+        .bounds
+        .iter()
+        .any(|&(lo, hi)| lo - hi > options.primal_tol)
+    {
+        return SolverResult {
+            status: SolveStatus::Infeasible,
+            objective: f64::INFINITY,
+            solution: vec![],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
+            ..Default::default()
+        };
+    }
+
     if n == 0 {
         for i in 0..m {
             let feasible = match problem.constraint_types[i] {
@@ -458,6 +482,73 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    /// Empty variable box (lb > ub) is Infeasible for every constraint count.
+    ///
+    /// B&B branching produces empty boxes (an integer var pinned between
+    /// consecutive integers → ⌈lb⌉ > ⌊ub⌋) by *mutating* `bounds` after
+    /// construction (`MilpProblem::solve` sets `sub.bounds` directly), bypassing
+    /// `new_general`'s lb ≤ ub validation. The relaxation solver must then report
+    /// Infeasible, not pick a bound by cost sign and claim Optimal.
+    ///
+    /// No-op proof: removing the empty-box guard makes the `m == 0` / `n == 0`
+    /// special cases return Optimal with x at a bound (false-Optimal), failing
+    /// the Infeasible assertion. Cases (a) m=0 and (b) m≥1 both must agree; case
+    /// (c) proves a genuinely fixed var (lb == ub) is not over-rejected.
+    #[test]
+    fn empty_variable_box_is_infeasible_for_all_constraint_counts() {
+        // (a) m == 0, single var; box emptied post-construction (B&B style).
+        let mut m0 = LpProblem::new_general(
+            vec![1.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![],
+            vec![(0.0, 5.0)],
+            None,
+        )
+        .unwrap();
+        m0.bounds = vec![(1.8, 1.2)];
+        assert_eq!(
+            solve_without_presolve(&m0, &SolverOptions::default()).status,
+            SolveStatus::Infeasible,
+            "m=0 empty box (lb=1.8 > ub=1.2) must be Infeasible, not false-Optimal"
+        );
+
+        // (b) m >= 1: one feasible Le row but the box itself is empty.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let mut m1 = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![10.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 5.0)],
+            None,
+        )
+        .unwrap();
+        m1.bounds = vec![(2.0, 1.0)];
+        assert_eq!(
+            solve_without_presolve(&m1, &SolverOptions::default()).status,
+            SolveStatus::Infeasible,
+            "m=1 empty box (lb=2 > ub=1) must be Infeasible"
+        );
+
+        // (c) A genuinely fixed variable (lb == ub) must stay feasible (no
+        // over-rejection): proves the guard uses lb - ub > tol, not lb != ub.
+        let fixed = LpProblem::new_general(
+            vec![1.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![],
+            vec![(3.0, 3.0)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            solve_without_presolve(&fixed, &SolverOptions::default()).status,
+            SolveStatus::Optimal,
+            "fixed var (lb == ub) must remain feasible, not be rejected as empty"
+        );
     }
 
     /// guard_lp_optimal demotes a corrupt Optimal (x = 1e12 >> b = 5) to SuboptimalSolution.

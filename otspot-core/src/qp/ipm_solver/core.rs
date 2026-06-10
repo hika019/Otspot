@@ -219,13 +219,22 @@ fn run_ipm_with(
     }
     let postsolve_refine_us = t_refine.elapsed().as_micros() as u64;
 
+    let kkt_pass_after_refine = kkt_already_pass
+        || kkt_already_passes(
+            orig_problem,
+            &final_sol,
+            &eliminated_cols,
+            result.status == SolveStatus::Optimal,
+            user_eps,
+        );
+
     // Skip the saddle-point Krylov IR when the solution already meets the
     // user tolerance (satisfies_eps: kkt + pres + bv + comp + duality_gap all
     // pass). The IR factorizes the full augmented K = [Q+δI, Aᵀ; A, -δI] (n+m),
     // which fills catastrophically for dense constraint rows (fit2d: ~7s) yet
     // performs zero refinement on an already-converged point. This mirrors the
     // `!kkt_already_pass` gate on `refine_post_processing` above.
-    let run_krylov_ir = ipm_made_progress && !kkt_already_pass;
+    let run_krylov_ir = should_run_krylov_ir(ipm_made_progress, kkt_pass_after_refine);
     let t_krylov = std::time::Instant::now();
     if run_krylov_ir {
         refine_krylov_and_projection(
@@ -336,5 +345,31 @@ fn run_ipm_with(
         is_locally_optimal,
         postsolve_krylov_ir_skipped: krylov_ir_skipped,
         timing: Some(combined_timing),
+    }
+}
+
+fn should_run_krylov_ir(ipm_made_progress: bool, kkt_pass_after_refine: bool) -> bool {
+    ipm_made_progress && !kkt_pass_after_refine
+}
+
+#[cfg(test)]
+mod postsolve_krylov_gate_tests {
+    use super::should_run_krylov_ir;
+
+    #[test]
+    fn krylov_gate_uses_post_refine_pass_state() {
+        assert!(
+            !should_run_krylov_ir(true, true),
+            "once refit/IRLS brings the original-space certificate under eps, \
+             Krylov IR must be skipped; using the pre-refine gate here would run it"
+        );
+        assert!(
+            should_run_krylov_ir(true, false),
+            "IPM progress plus a still-failing certificate must run Krylov IR"
+        );
+        assert!(
+            !should_run_krylov_ir(false, false),
+            "no IPM progress must not let postsolve synthesize a solution"
+        );
     }
 }

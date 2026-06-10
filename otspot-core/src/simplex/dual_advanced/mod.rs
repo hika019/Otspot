@@ -11,7 +11,7 @@ use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{DualPricing, SolverOptions, WarmStartBasis};
 use crate::presolve::LpEquilibration;
-use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::DROP_TOL;
 use bounded_core::{
@@ -29,6 +29,79 @@ mod steepest_edge;
 
 fn deadline_expired(deadline: Option<std::time::Instant>) -> bool {
     deadline.is_some_and(|d| std::time::Instant::now() >= d)
+}
+
+/// Applies deterministic per-row upward jitter to `x_B` with magnitude `mag`.
+/// Row 0 always has frac=0 (Knuth PRNG: `0 * SPREAD_MULT = 0`), so the first
+/// element is never modified; the jitter remains upward-only and keeps the
+/// starting point primal-feasible (`x_B ≥ 0`).
+fn perturb_x_b_with_mag(x_b: &mut [f64], mag: f64) {
+    /// Odd 32-bit multiplier (Knuth LCG) spreading per-row jitter deterministically.
+    const SPREAD_MULT: u64 = 2_654_435_761;
+    for (i, v) in x_b.iter_mut().enumerate() {
+        let frac = ((i as u64).wrapping_mul(SPREAD_MULT) & 0xFFFF_FFFF) as f64 / 4_294_967_296.0;
+        *v += mag * (v.abs() + 1.0) * frac;
+    }
+}
+
+// Test-only thread-local: when Some(mag), `maybe_perturb_initial_xb` applies
+// the jitter with that explicit magnitude, bypassing the env-gated OnceLock.
+// Set and restored via ScopedDisable; never leaks across test boundaries.
+#[cfg(test)]
+thread_local! {
+    static PERTURB_MAG_OVERRIDE: std::cell::Cell<Option<f64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Set the per-thread perturbation magnitude override (test use only).
+#[cfg(test)]
+pub(crate) fn set_perturb_mag_override(v: Option<f64>) {
+    PERTURB_MAG_OVERRIDE.with(|c| c.set(v));
+}
+
+/// Apply the production jitter formula to `x_b` with explicit `mag`.
+/// Bypasses the env-gated `OnceLock`; used by sentinels that need a
+/// before/after-reconcile comparison at a known magnitude.
+#[cfg(test)]
+pub(crate) fn test_apply_perturb_with_mag(x_b: &mut [f64], mag: f64) {
+    perturb_x_b_with_mag(x_b, mag);
+}
+
+/// Env-gated (`OTSPOT_PERTURB=1`) anti-degeneracy experiment: perturb the initial
+/// basic values by a small per-row deterministic jitter. Because the bounded
+/// primal core carries `x_B` forward incrementally, this is equivalent to an RHS
+/// perturbation `b ← b + ξ` that breaks degenerate ties (`B⁻¹b` avoids exact
+/// zeros) without touching the iteration logic. The terminal `reconcile`
+/// recomputes `x_B = B⁻¹b` against the *true* `b` and validates feasibility, so a
+/// perturbation that pushes the optimal basis infeasible falls back safely rather
+/// than returning a wrong answer. Off by default — measurement only, not yet
+/// bench-validated across the full LP suite.
+fn maybe_perturb_initial_xb(x_b: &mut [f64]) {
+    #[cfg(test)]
+    if let Some(test_mag) = PERTURB_MAG_OVERRIDE.with(|c| c.get()) {
+        perturb_x_b_with_mag(x_b, test_mag);
+        return;
+    }
+
+    use std::sync::OnceLock;
+    const PERTURB_MAG_DEFAULT: f64 = 1e-7;
+    static MAG: OnceLock<Option<f64>> = OnceLock::new();
+    let mag = *MAG.get_or_init(|| {
+        let on = std::env::var("OTSPOT_PERTURB")
+            .ok()
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        if !on {
+            return None;
+        }
+        let m = std::env::var("OTSPOT_PERTURB_MAG")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|&v| v > 0.0)
+            .unwrap_or(PERTURB_MAG_DEFAULT);
+        Some(m)
+    });
+    let Some(mag) = mag else { return };
+    perturb_x_b_with_mag(x_b, mag);
 }
 
 fn timeout_result() -> SolverResult {
@@ -166,9 +239,14 @@ pub(crate) fn solve_dual_advanced(
     // Bounded path: problems with finite upper bounds use BFRT-aware iteration.
     // Two sub-paths gated on the BSF shape:
     //   - Le-only (num_artificial == 0)        → `try_bounded` (dual BFRT then primal).
-    //   - Eq + UB (num_artificial > 0, no Ge)  → `try_bounded_phase1_eq` (augmented
+    //   - Has artificials (num_artificial > 0) → `try_bounded_phase1_eq` (augmented
     //     primal Phase I+II); preserves m (no UB-row blow-up) and dispatch is
     //     skipped via thread-local hook in tests for no-op proofs.
+    // Le / Ge / Eq rows are handled uniformly: the constraint sense only sets the
+    // standard-form slack sign and `needs_artificial`, both already baked into
+    // `bsf`. Phase I minimises Σ artificials independent of the original sense, so
+    // Ge needs no special path. A spurious "Optimal" is still caught by
+    // `guard_lp_optimal` at the entry, so opening Ge cannot return a wrong answer.
     if !bounded_dispatch_disabled() && problem.bounds.iter().any(|&(_, ub)| ub.is_finite()) {
         let Some(bsf) = build_bounded_standard_form_with_deadline(problem, options.deadline) else {
             return timeout_result();
@@ -178,17 +256,9 @@ pub(crate) fn solve_dual_advanced(
                 return result;
             }
             // UbViolationOutOfScope → fall through to legacy path
-        } else {
-            let has_ge = problem
-                .constraint_types
-                .iter()
-                .any(|t| matches!(t, ConstraintType::Ge));
-            if !has_ge {
-                if let Some(result) = try_bounded_phase1_eq(&bsf, problem, options) {
-                    return result;
-                }
-                // Phase I infeasibility undecided → fall through to legacy path
-            }
+        } else if let Some(result) = try_bounded_phase1_eq(&bsf, problem, options) {
+            return result;
+            // Phase I infeasibility undecided → fall through to legacy path
         }
     }
 
@@ -695,8 +765,9 @@ where
         r
     }
 
-    let (a_aug, art_col_of_row, mut ubs_aug, basis, is_basic, x_b) = state_factory();
+    let (a_aug, art_col_of_row, mut ubs_aug, basis, is_basic, mut x_b) = state_factory();
     let n_aug = a_aug.ncols;
+    maybe_perturb_initial_xb(&mut x_b);
     let mut state = BoundedDualState {
         basis,
         at_upper: vec![false; n_aug],
@@ -1105,6 +1176,7 @@ fn cold_start_advanced(
         options,
         &mut total_iters,
         false,
+        None,
     );
 
     // Phase 2はPrimalなのでUnbounded=主非有界
@@ -1360,6 +1432,231 @@ mod tests {
             let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
             assert_eq!(r.status, SolveStatus::Optimal, "pattern 3 status");
         }
+    }
+
+    /// **Ge + UB bounded path (sentinel):** a `Ge`-constrained LP with finite
+    /// upper bounds must solve via the bounded Phase I path, not the legacy
+    /// UB-row-expanded path. The bounded path emits a `warm_start_basis`; the
+    /// legacy `two_phase_dual_simplex` cold path does not.
+    ///
+    /// No-op proof: re-adding the `!has_ge` gate in `solve_dual_advanced` routes
+    /// this LP to the legacy path, which returns `warm_start_basis = None`,
+    /// failing the `is_some()` assertion. The objective check guards correctness
+    /// of the opened path (a wrong dual sign would be demoted by guard_lp_optimal
+    /// upstream, but here we assert the raw Optimal value directly).
+    #[test]
+    fn ge_with_ub_solves_via_bounded_path_with_warm_basis() {
+        use crate::sparse::CscMatrix;
+        // min x + y  s.t.  x + y >= 3 (Ge),  0 <= x,y <= 4.
+        // Optimal: x + y = 3 (any split), obj = 3.
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 4.0), (0.0, 4.0)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert_eq!(r.status, SolveStatus::Optimal, "Ge+UB status: {:?}", r.status);
+        assert!(
+            (r.objective - 3.0).abs() < 1e-6,
+            "Ge+UB obj={} expected 3",
+            r.objective
+        );
+        assert!(
+            r.warm_start_basis.is_some(),
+            "Ge+UB must route to the bounded path (emits warm_start_basis); \
+             None means it fell back to the legacy path (has_ge gate re-added)"
+        );
+    }
+
+    /// **Ge infeasible (sentinel):** a Ge-constrained LP whose Ge bound exceeds the
+    /// variable's upper bound must solve to Infeasible via the bounded path.
+    ///
+    /// LP: min x  s.t. x ≥ 5 (Ge),  0 ≤ x ≤ 3.
+    /// The Ge constraint requires x ≥ 5 but the UB forces x ≤ 3; infeasible.
+    /// The finite UB causes the bounded Phase I path to be taken.
+    ///
+    /// No-op proof: if Phase I incorrectly declares artificials = 0 for an
+    /// infeasible Ge system, the solver returns Optimal or SuboptimalSolution,
+    /// failing the Infeasible assertion.
+    #[test]
+    fn ge_infeasible_bounded_path_returns_infeasible() {
+        use crate::sparse::CscMatrix;
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 3.0)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert_eq!(
+            r.status,
+            SolveStatus::Infeasible,
+            "Ge infeasible LP (x>=5, UB=3) must be Infeasible, got {:?} (obj={:.6e})",
+            r.status,
+            r.objective
+        );
+    }
+
+    /// **Ge at-upper-bound (sentinel):** in a Ge LP whose optimal places a
+    /// variable non-basic at its upper bound, `extract_solution_bounded` must
+    /// apply the `at_upper` correction so the solution and objective are correct.
+    ///
+    /// LP: min -x  s.t. x ≥ 2 (Ge),  0 ≤ x ≤ 3.
+    /// Optimal: x = 3 (at UB, non-basic), obj = -3.
+    ///
+    /// No-op proof: `bounded_core::set_at_upper_apply_disabled(true)` causes
+    /// `extract_solution_bounded` to leave x at 0 instead of its upper bound,
+    /// yielding obj = 0 ≠ -3 and failing the objective assertion.
+    #[test]
+    fn ge_at_upper_bound_solution_extracted_correctly() {
+        use crate::sparse::CscMatrix;
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![-1.0],
+            a,
+            vec![2.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 3.0)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "Ge at-UB LP status: {:?}",
+            r.status
+        );
+        assert!(
+            (r.objective - (-3.0)).abs() < 1e-6,
+            "Ge at-UB obj={:.6e} expected -3 (x should be at UB=3); \
+             disabled at_upper correction would yield obj=0",
+            r.objective
+        );
+        assert!(
+            r.solution.first().copied().unwrap_or(0.0) > 2.5,
+            "Ge at-UB solution[0]={:.6e} expected ≈3 (at upper bound)",
+            r.solution.first().copied().unwrap_or(0.0)
+        );
+    }
+
+    /// **Ge + Eq + Le mixed (sentinel):** a LP with all three constraint kinds
+    /// (multiple artificials) must solve correctly via the bounded Phase I path.
+    ///
+    /// LP: min x + y + z
+    ///       x + y ≥ 2  (Ge)
+    ///       x     = 1  (Eq)
+    ///       y + z ≤ 3  (Le)
+    ///       0 ≤ x,y,z ≤ 4
+    ///
+    /// Optimal (by hand): x=1 (Eq), y=1 (Ge binding, minimize y+z with z≥0),
+    /// z=0, obj=2.
+    ///
+    /// No-op proof: if Ge or Eq artificials are mishandled (wrong Phase I
+    /// placement or incorrect basis injection), the solver returns a wrong
+    /// status or objective, failing the assertions below.
+    #[test]
+    fn ge_eq_le_mixed_types_solve_correctly() {
+        use crate::sparse::CscMatrix;
+        use crate::test_kkt::assert_solver_invariants_lp;
+        // rows=[0,0,1,2,2], cols=[0,1,0,1,2]:
+        //   Row 0 (Ge): x + y >= 2
+        //   Row 1 (Eq): x     = 1
+        //   Row 2 (Le): y + z <= 3
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 2, 2],
+            &[0, 1, 0, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0, 1.0],
+            3,
+            3,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0, 1.0],
+            a,
+            vec![2.0, 1.0, 3.0],
+            vec![ConstraintType::Ge, ConstraintType::Eq, ConstraintType::Le],
+            vec![(0.0, 4.0), (0.0, 4.0), (0.0, 4.0)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "Ge+Eq+Le mixed LP must be Optimal, got {:?}",
+            r.status
+        );
+        assert!(
+            (r.objective - 2.0).abs() < 1e-6,
+            "Ge+Eq+Le obj={:.6e} expected 2.0",
+            r.objective
+        );
+        assert_solver_invariants_lp(&r, &lp);
+    }
+
+    /// **Ge dual sign (sentinel):** for a min LP with a binding Ge constraint,
+    /// `dual_solution[i]` must be ≥ 0 (LP simplex convention: Ge dual ≥ 0).
+    ///
+    /// LP: min x + y  s.t. x + y ≥ 3 (Ge),  0 ≤ x,y ≤ 4.
+    /// Optimal: x + y = 3 (binding), obj = 3.
+    /// KKT stationarity: 1 - 1·y0 = 0 ⟹ y0 = 1 > 0. ✓
+    ///
+    /// No-op proof: if `extract_dual_info_bounded` applies the wrong negation
+    /// for a `row_negated` Ge row, `dual_solution[0]` becomes ≤ −1, failing
+    /// both the sign assertion and `assert_solver_invariants_lp` dual-sign check.
+    #[test]
+    fn ge_dual_sign_nonnegative_in_min_problem() {
+        use crate::sparse::CscMatrix;
+        use crate::test_kkt::assert_solver_invariants_lp;
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 4.0), (0.0, 4.0)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert_eq!(r.status, SolveStatus::Optimal, "Ge dual status: {:?}", r.status);
+        assert!(
+            (r.objective - 3.0).abs() < 1e-6,
+            "Ge dual obj={:.6e} expected 3",
+            r.objective
+        );
+        assert!(
+            !r.dual_solution.is_empty(),
+            "dual_solution must be non-empty for Ge dual sign check"
+        );
+        assert!(
+            r.dual_solution[0] >= -1e-6,
+            "Ge dual (LP simplex convention) must be ≥ 0 for binding Ge in min LP, \
+             got {:.6e}; wrong row_negated sign in extract_dual_info_bounded would yield ≤ -1",
+            r.dual_solution[0]
+        );
+        // Quantitative check: KKT stationarity gives y0 = 1 for this LP.
+        assert!(
+            r.dual_solution[0] > 0.5,
+            "Ge dual expected ≈1.0 (KKT stationarity: 1 - y0 = 0), got {:.6e}",
+            r.dual_solution[0]
+        );
+        assert_solver_invariants_lp(&r, &lp);
     }
 
     /// **P2-B** — Warm start is accepted even when the warm basis has
@@ -1892,6 +2189,167 @@ mod tests {
             (x_b[1] - 3.0).abs() < 1e-12,
             "row1: expected b/diag=3, got {}",
             x_b[1]
+        );
+    }
+
+    // ── P2-b: perturbation sentinels ─────────────────────────────────────────
+
+    /// Degenerate 2-Eq + UB LP for perturbation sentinels.
+    ///
+    /// `min x0+x1+x2`, `x0+x1=1` (Eq), `x1+x2=1` (Eq), `0 ≤ xᵢ ≤ 1`.
+    /// Unique optimal: `x0=0, x1=1, x2=0`, `obj=1`. Two Eq rows → two initial
+    /// artificials (crash disabled), so `perturb_x_b_with_mag` affects row 1
+    /// (frac₁ ≈ 0.618 ≠ 0).
+    fn lp_degenerate_2eq() -> LpProblem {
+        use crate::sparse::CscMatrix;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0],
+            2,
+            3,
+        )
+        .unwrap();
+        LpProblem::new_general(
+            vec![1.0, 1.0, 1.0],
+            a,
+            vec![1.0, 1.0],
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+            vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Sentinel (P2-b): perturbation ON (mag ∈ {1e-7, 1e-2}) and OFF reach
+    /// the same optimal status, objective, and solution.
+    ///
+    /// `maybe_perturb_initial_xb` jitters the initial `x_B` before Phase I of
+    /// the Eq+UB path. `reconcile_bounded_terminal_state` then recomputes
+    /// `x_B = B⁻¹b` (true `b`) at the end of Phase I and Phase II, removing
+    /// the jitter before the solution is reported.
+    ///
+    /// No-op proof: see `perturb_noop_proof_reconcile_removes_perturbation`.
+    #[test]
+    fn perturb_on_off_same_optimal_degenerate_eq_ub() {
+        let lp = lp_degenerate_2eq();
+        let sf = build_standard_form(&lp);
+        const OBJ_TOL: f64 = 1e-6;
+
+        // Reference: perturbation OFF.
+        let opts_off = SolverOptions {
+            use_lp_crash_basis: false,
+            ..SolverOptions::default()
+        };
+        let r_off = solve_dual_advanced(&sf, &lp, &opts_off);
+        assert_eq!(
+            r_off.status,
+            SolveStatus::Optimal,
+            "OFF: expected Optimal, got {:?}",
+            r_off.status
+        );
+        assert!(
+            (r_off.objective - 1.0).abs() < OBJ_TOL,
+            "OFF: obj={:.9e} expected 1.0",
+            r_off.objective
+        );
+        assert_eq!(r_off.solution.len(), 3);
+        assert!((r_off.solution[1] - 1.0).abs() < OBJ_TOL, "OFF: x1={:.6e}", r_off.solution[1]);
+
+        for &mag in &[1e-7_f64, 1e-2_f64] {
+            let _g = crate::ScopedDisable::new(
+                || set_perturb_mag_override(Some(mag)),
+                || set_perturb_mag_override(None),
+            );
+            let opts_on = SolverOptions {
+                use_lp_crash_basis: false,
+                ..SolverOptions::default()
+            };
+            let r_on = solve_dual_advanced(&sf, &lp, &opts_on);
+            assert_eq!(
+                r_on.status,
+                SolveStatus::Optimal,
+                "mag={mag:.0e}: expected Optimal, got {:?}",
+                r_on.status
+            );
+            assert!(
+                (r_on.objective - r_off.objective).abs() < OBJ_TOL,
+                "mag={mag:.0e}: perturbed obj={:.9e} != off obj={:.9e} (reconcile did not remove perturbation)",
+                r_on.objective,
+                r_off.objective
+            );
+            assert!(
+                (r_on.solution[1] - 1.0).abs() < OBJ_TOL,
+                "mag={mag:.0e}: x1={:.6e} expected 1.0",
+                r_on.solution[1]
+            );
+        }
+    }
+
+    /// No-op proof (P2-b): applying perturbation to a known-optimal `x_B`
+    /// yields a wrong objective *before* reconcile, and the true objective
+    /// *after* reconcile.
+    ///
+    /// Design: if this test's first `assert!` (perturbation changes obj) were
+    /// removed and `reconcile_bounded_terminal_state` were also skipped, the
+    /// second `assert!` (reconciled obj = true) would fail — proving that
+    /// reconcile is the mechanism that removes the perturbation.
+    ///
+    /// System: `A = diag(1,1)`, `b = [2, 3]`, `c = [1, 1]`, `ubs = [∞, ∞]`.
+    /// Optimal basis = {x0, x1}, `x_B = [2, 3]`, `obj = 5`.
+    /// After `perturb_x_b_with_mag(x_b, 0.01)`: row 0 unchanged (frac₀=0),
+    /// row 1 shifted by ≈ 0.0247 → `obj ≈ 5.025 ≠ 5`.
+    #[test]
+    fn perturb_noop_proof_reconcile_removes_perturbation() {
+        use crate::sparse::CscMatrix;
+        const TRUE_OBJ: f64 = 5.0;
+        const OBJ_TOL: f64 = 1e-6;
+        const MAG: f64 = 0.01;
+
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
+        let b = vec![2.0_f64, 3.0];
+        let c = vec![1.0_f64, 1.0];
+        let ubs = vec![f64::INFINITY; 2];
+
+        // Optimal state with PERTURBED x_b (simulates pre-reconcile state).
+        let mut x_b = vec![2.0_f64, 3.0];
+        test_apply_perturb_with_mag(&mut x_b, MAG);
+        // frac[0]=0 → x_b[0] unchanged; frac[1]≈0.618 → x_b[1] ≈ 3.025.
+
+        let mut state = BoundedDualState {
+            basis: vec![0, 1],
+            at_upper: vec![false, false],
+            x_b: x_b.clone(),
+            reduced_costs: vec![0.0; 2],
+            is_basic: vec![true, true],
+            iterations: 0,
+            price_start: 0,
+        };
+
+        // Before reconcile: perturbed x_b gives wrong objective.
+        let before_obj = bounded_obj_from_state(&c, &ubs, &state);
+        assert!(
+            (before_obj - TRUE_OBJ).abs() > OBJ_TOL,
+            "no-op proof precondition: perturbation must change obj \
+             ({before_obj:.9e} vs {TRUE_OBJ:.9e}); if this fails, \
+             `perturb_x_b_with_mag` is broken"
+        );
+
+        // After reconcile: x_b = B⁻¹b (true b) → correct objective.
+        let after_obj = match reconcile_bounded_terminal_state(
+            &a,
+            &b,
+            &c,
+            &ubs,
+            &mut state,
+            &SolverOptions::default(),
+        ) {
+            BoundedTerminalReconcile::Optimal(obj) => obj,
+            _ => panic!("reconcile must succeed on a valid optimal state"),
+        };
+        assert!(
+            (after_obj - TRUE_OBJ).abs() < OBJ_TOL,
+            "reconcile must restore true obj: expected {TRUE_OBJ:.9e}, got {after_obj:.9e}"
         );
     }
 

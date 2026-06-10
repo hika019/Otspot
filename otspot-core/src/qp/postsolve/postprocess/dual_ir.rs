@@ -15,6 +15,14 @@ use crate::tolerances::any_nonfinite;
 /// G + δ·I regularization: prevents F64 round-off cancellation.
 /// δ × ‖α‖ acts as a floor for the new r_d_free (typically 1e-12 × 1e2 = 1e-10, well below target 1e-6).
 const DUAL_IR_REG_DEFAULT: f64 = 1e-12;
+/// Maximum dense local normal-equation dimension in dual-only IR. The local
+/// cluster solve is O(k^3); larger clusters are not a local refinement anymore
+/// and should fall back to the outer guarded postsolve path.
+const DUAL_IR_MAX_DENSE_DIM: usize = 256;
+
+fn dual_ir_dense_dim_allowed(dim: usize) -> bool {
+    dim <= DUAL_IR_MAX_DENSE_DIM
+}
 
 pub(crate) fn try_dual_only_ir(
     problem: &QpProblem,
@@ -208,6 +216,9 @@ pub(crate) fn try_dual_only_ir(
         if ulen == 0 {
             break;
         }
+        if !dual_ir_dense_dim_allowed(ulen) {
+            break;
+        }
         let mut gram = vec![0.0_f64; ulen * ulen];
         let mut rhs = vec![0.0_f64; ulen];
         for (fi, &j) in free_idx.iter().enumerate() {
@@ -270,6 +281,9 @@ pub(crate) fn try_dual_only_ir(
             nrows: ulen,
             ncols: ulen,
         };
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
         let factor = match crate::linalg::ldl::factorize(&gram_csc) {
             Ok(f) => f,
             Err(_) => break,
@@ -407,5 +421,19 @@ pub(crate) fn try_dual_only_ir(
         accepted_iters
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dual_ir_dense_dim_allowed, DUAL_IR_MAX_DENSE_DIM};
+
+    #[test]
+    fn dense_cluster_cap_rejects_nonlocal_dual_ir_blocks() {
+        assert!(dual_ir_dense_dim_allowed(DUAL_IR_MAX_DENSE_DIM));
+        assert!(
+            !dual_ir_dense_dim_allowed(DUAL_IR_MAX_DENSE_DIM + 1),
+            "dual-only IR must not build unbounded dense local normal equations"
+        );
     }
 }
