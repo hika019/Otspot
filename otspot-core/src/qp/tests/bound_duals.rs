@@ -204,3 +204,41 @@ fn test_bd_t7_constraint_active_lb_dual_nonzero_kkt() {
     let kkt_y = result.solution[1] - dual - result.bound_duals[1];
     assert!(kkt_y.abs() < 1e-3);
 }
+
+/// BD-SENTINEL: 固定変数を含む QP を解いた後、bound_duals は常に full layout
+/// (len == n_lb_finite + n_ub_finite) である不変条件を確認。
+/// bound_contrib の呼び出し元が fixed-omitted layout を渡すと誤インデックスになる潜在バグを防ぐ。
+#[test]
+fn test_bd_sentinel_bound_duals_full_layout_invariant_with_fixed_var() {
+    // bounds: [box(0,5), fixed(3,3), lb-only(2,∞)] → full layout len = 3+2 = 5
+    let n = 3usize;
+    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], n, n).unwrap();
+    let c = vec![0.0, 0.0, 0.0];
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+    let b = vec![10.0];
+    let bounds = vec![
+        (0.0_f64, 5.0_f64),
+        (3.0_f64, 3.0_f64),
+        (2.0_f64, f64::INFINITY),
+    ];
+    let problem = QpProblem::new_all_le(q, c, a, b, bounds.clone()).unwrap();
+    let opts = SolverOptions {
+        presolve: true,
+        ..SolverOptions::default()
+    };
+    let result = solve_qp_with(&problem, &opts);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_qp(&result, &problem);
+
+    // full layout invariant: len == n_lb_finite + n_ub_finite (fixed var 分含む)
+    let n_lb = bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let n_ub = bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count();
+    let expected_full_len = n_lb + n_ub; // = 3 + 2 = 5
+    assert_eq!(
+        result.bound_duals.len(),
+        expected_full_len,
+        "bound_duals must use full layout (len={}), got len={}",
+        expected_full_len,
+        result.bound_duals.len()
+    );
+}

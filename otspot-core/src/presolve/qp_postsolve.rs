@@ -198,8 +198,9 @@ pub fn postsolve_qp_with_dual_recovery(
 /// KKT for `col`: `Q[col,:]·x + c[col] + Σ_k A[k,col]·y[k] + bound_contrib_col = 0`
 ///
 /// `bound_contrib_col` = `-z_lb + z_ub` for variable `col`.  Pass the value
-/// from `bound_contrib_at_var` once `bound_duals` are mapped to the original
-/// space.  Before that mapping (initial postsolve pass), pass `0.0` explicitly.
+/// from `kkt_resid::bound_contrib(bounds, bound_duals)[col]` once `bound_duals`
+/// are mapped to the original space.  Before that mapping (initial postsolve
+/// pass), pass `0.0` explicitly.
 pub(crate) fn recover_y_for_singleton_row_with_bound(
     row: usize,
     col: usize,
@@ -257,33 +258,6 @@ pub(crate) fn recover_y_for_singleton_row_with_bound(
         };
         sol.dual_solution[row] = y_proj;
     }
-}
-
-/// orig 空間の bound_duals レイアウトから 1 変数の bound_contrib (-z_lb + z_ub) を取得。
-/// `bound_duals` 長 = n_lb + n_ub (orig.bounds 順)。
-pub(crate) fn bound_contrib_at_var(bounds: &[(f64, f64)], bound_duals: &[f64], var: usize) -> f64 {
-    if bound_duals.is_empty() {
-        return 0.0;
-    }
-    let n_lb_total = bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
-    let mut contrib = 0.0_f64;
-    let mut lb_idx = 0_usize;
-    let mut ub_idx = n_lb_total;
-    for (j, &(lb, ub)) in bounds.iter().enumerate() {
-        if lb.is_finite() {
-            if j == var && lb_idx < bound_duals.len() {
-                contrib -= bound_duals[lb_idx];
-            }
-            lb_idx += 1;
-        }
-        if ub.is_finite() {
-            if j == var && ub_idx < bound_duals.len() {
-                contrib += bound_duals[ub_idx];
-            }
-            ub_idx += 1;
-        }
-    }
-    contrib
 }
 
 /// 対称行列 Q (全要素格納の対称 Q、CSC col-major 慣例) で Q[col, :] · x を計算する。

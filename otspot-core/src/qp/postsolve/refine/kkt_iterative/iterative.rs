@@ -29,7 +29,6 @@ pub(crate) fn refine_kkt_iterative(
     target_pf: f64,
     deadline: Option<std::time::Instant>,
 ) -> usize {
-    use crate::presolve::bound_contrib_at_var;
     use crate::problem::ConstraintType;
     use crate::qp::ipm_solver::kkt::kkt_residual_rel;
 
@@ -297,12 +296,13 @@ pub(crate) fn refine_kkt_iterative(
                     aty_dd[col] += TwoFloat::new_mul(v, y[row]);
                 }
             }
+            let bc_vec = crate::qp::kkt_resid::bound_contrib(&problem.bounds, z);
             let mut r_d = vec![0.0_f64; n];
             for j in 0..n {
                 if exclude_var[j] {
                     continue;
                 }
-                let bc = bound_contrib_at_var(&problem.bounds, z, j);
+                let bc = bc_vec[j];
                 let r = qx_dd[j] + TwoFloat::from(problem.c[j]) + aty_dd[j] + TwoFloat::from(bc);
                 r_d[j] = f64::from(r);
             }
@@ -354,7 +354,7 @@ pub(crate) fn refine_kkt_iterative(
                 }
                 let qx_j = f64::from(qx_dd[j]).abs();
                 let aty_j = f64::from(aty_dd[j]).abs();
-                let bc = bound_contrib_at_var(&problem.bounds, z, j);
+                let bc = bc_vec[j];
                 let scale_j = 1.0 + qx_j + problem.c[j].abs() + aty_j + bc.abs();
                 let rel_j = r_d[j].abs() / scale_j;
                 if rel_j > df_rel_componentwise {

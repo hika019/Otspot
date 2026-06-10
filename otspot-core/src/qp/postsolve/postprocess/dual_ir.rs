@@ -31,7 +31,7 @@ pub(crate) fn try_dual_only_ir(
     target_pf: f64,
     deadline: Option<std::time::Instant>,
 ) -> usize {
-    use crate::presolve::bound_contrib_at_var;
+    use crate::qp::kkt_resid::bound_contrib;
     use twofloat::TwoFloat;
 
     let m = problem.num_constraints;
@@ -66,6 +66,7 @@ pub(crate) fn try_dual_only_ir(
     let mut r_d_eval = vec![0.0_f64; n_free_eval];
     let mut r_d_rel_eval = vec![0.0_f64; n_free_eval];
     let mut df_rel_pre = 0.0_f64;
+    let bc_eval = bound_contrib(&problem.bounds, &result.bound_duals);
     for (fi, &j) in free_eval_idx.iter().enumerate() {
         // r_d_free 用に Q x も加算する必要 (Q≠0 の QP で正確性必須)
         let mut qx = TwoFloat::from(0.0);
@@ -80,7 +81,7 @@ pub(crate) fn try_dual_only_ir(
             aty += TwoFloat::new_mul(problem.a.values[k], result.dual_solution[r]);
         }
         let aty_f = f64::from(aty);
-        let bc = bound_contrib_at_var(&problem.bounds, &result.bound_duals, j);
+        let bc = bc_eval[j];
         let r_d = qx_f + problem.c[j] + aty_f + bc;
         r_d_eval[fi] = r_d;
         let scale = 1.0 + qx_f.abs() + problem.c[j].abs() + aty_f.abs() + bc.abs();
@@ -221,6 +222,7 @@ pub(crate) fn try_dual_only_ir(
         }
         let mut gram = vec![0.0_f64; ulen * ulen];
         let mut rhs = vec![0.0_f64; ulen];
+        let bc_tmp = bound_contrib(&problem.bounds, &tmp.bound_duals);
         for (fi, &j) in free_idx.iter().enumerate() {
             let residual = current_r_d_free[fi];
 
@@ -234,7 +236,7 @@ pub(crate) fn try_dual_only_ir(
             for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
                 aty_j += problem.a.values[k] * f64::from(y_dd[problem.a.row_ind[k]]);
             }
-            let bc_j = bound_contrib_at_var(&problem.bounds, &tmp.bound_duals, j);
+            let bc_j = bc_tmp[j];
             let scale_j =
                 (1.0 + qx_j.abs() + problem.c[j].abs() + aty_j.abs() + bc_j.abs()).max(1.0);
             let inv_scale2 = 1.0 / (scale_j * scale_j);
@@ -339,6 +341,7 @@ pub(crate) fn try_dual_only_ir(
             // 新 r_d_free を y_dd_new から DD 精度で計算 (Q x は変化なし、aty のみ更新)
             let mut new_r_d_free = vec![0.0_f64; n_free];
             let mut new_df_rel = 0.0_f64;
+            let bc_new = bound_contrib(&problem.bounds, &bound_duals_new);
             for &j in &free_eval_idx {
                 let mut qx = TwoFloat::from(0.0);
                 for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
@@ -350,7 +353,7 @@ pub(crate) fn try_dual_only_ir(
                     let r = problem.a.row_ind[k];
                     aty += y_dd_new[r] * problem.a.values[k];
                 }
-                let bc = bound_contrib_at_var(&problem.bounds, &bound_duals_new, j);
+                let bc = bc_new[j];
                 let r_d = f64::from(qx + TwoFloat::from(problem.c[j]) + aty + TwoFloat::from(bc));
                 if let Some(local_pos) = free_idx.iter().position(|&jj| jj == j) {
                     new_r_d_free[local_pos] = r_d;
