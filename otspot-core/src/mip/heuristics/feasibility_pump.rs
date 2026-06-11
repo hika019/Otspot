@@ -63,9 +63,9 @@ pub(crate) fn run_feasibility_pump(
 
     if is_integer_feasible(&root.solution, &mask, integer_feas_tol) {
         let x_rounded = round_integer_vars(&root.solution, &mask);
-        if validate_against_bounds(&x_rounded, &lp.bounds)
-            && validate_against_constraints(&x_rounded, &lp.a, &lp.b, &lp.constraint_types)
-        {
+        let b_ok = validate_against_bounds(&x_rounded, &lp.bounds);
+        let c_ok = validate_against_constraints(&x_rounded, &lp.a, &lp.b, &lp.constraint_types);
+        if b_ok && c_ok {
             return Some(make_result(&lp.c, lp.obj_offset, x_rounded));
         }
         return None;
@@ -90,16 +90,15 @@ pub(crate) fn run_feasibility_pump(
 
         if is_integer_feasible(&x_lp, &mask, integer_feas_tol) {
             let x_rounded = round_integer_vars(&x_lp, &mask);
-            if validate_against_bounds(&x_rounded, &lp.bounds)
-                && validate_against_constraints(&x_rounded, &lp.a, &lp.b, &lp.constraint_types)
-            {
+            let b_ok = validate_against_bounds(&x_rounded, &lp.bounds);
+            let c_ok = validate_against_constraints(&x_rounded, &lp.a, &lp.b, &lp.constraint_types);
+            if b_ok && c_ok {
                 return Some(make_result(&lp.c, lp.obj_offset, x_rounded));
             }
             break;
         }
 
         let new_x_int = round_integer_vars(&x_lp, &mask);
-
         let stalled = prev_x_int
             .as_ref()
             .is_some_and(|p| integers_same(p, &new_x_int, &mask));

@@ -151,20 +151,27 @@ pub fn solve_milp_with_stats(
             }
             Some(_) => problem.clone(),
         };
+        // Run the feasibility pump on the original (bound-tightened) LP before
+        // augmenting with cuts.  FP must see the unmodified constraint structure
+        // so that the LP pump LPs and the final validation both use the original
+        // bounds and Le/Ge rows, not the GMI cut rows added below.
+        let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
+            &problem_bt.lp,
+            &problem_bt.integer_vars,
+            cfg.integer_feas_tol,
+            &opts_with_dl,
+        );
         // Root GMI cuts tighten the LP relaxation without removing any
         // integer-feasible point, so the optimum is unchanged while the tree
         // shrinks. The added rows leave `num_vars` (hence `mask`) untouched.
+        // KNOWN OPEN BUG: cuts=true adds Ge rows; skip_node_presolve=true then sets
+        // presolve=false for every B&B node, which can yield garbage incumbents on
+        // Ge-heavy instances (e.g. mas76 --cuts → obj≈1e12). True cause unidentified.
         let effective = if cfg.cuts {
             cuts::add_root_cuts(&problem_bt, &opts_with_dl, cfg)
         } else {
             problem_bt
         };
-        let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
-            &effective.lp,
-            &effective.integer_vars,
-            cfg.integer_feas_tol,
-            &opts_with_dl,
-        );
         return solve_mip_core(&effective, &opts_with_dl, cfg, mask, fp_inc);
     }
     solve_mip_with_stats(problem, &opts_with_dl, cfg)

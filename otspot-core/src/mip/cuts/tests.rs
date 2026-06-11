@@ -350,6 +350,46 @@ fn cuts_preserve_optimum() {
     }
 }
 
+/// **Bug 1 regression guard:** `solve_milp_with_stats` with cuts ON must reach the
+/// correct integer optimum and report a finite `root_lp_bound`.
+///
+/// - Bug 1 (FP false incumbent): FP receives `effective.lp` (cut-augmented) instead
+///   of `problem_bt.lp`, potentially finding a trivially-feasible x=0 with
+///   obj=0 as incumbent; B&B then prunes the true optimal.
+///
+/// Sentinel: reverting Bug 1 produces an incorrect objective (Bug 1), failing here.
+#[test]
+fn cuts_on_root_lp_bound_valid_and_optimum_correct() {
+    use crate::solve_milp_with_stats;
+    let opts = SolverOptions {
+        timeout_secs: Some(10.0),
+        ..Default::default()
+    };
+    for (name, milp) in all_problems() {
+        let bf = brute_force_min(&milp);
+        let (res, stats) =
+            solve_milp_with_stats(&milp, &opts, &cuts_cfg(3));
+        assert_eq!(
+            res.status,
+            SolveStatus::Optimal,
+            "{name}: cuts-on solve must reach Optimal"
+        );
+        assert!(
+            stats.root_lp_bound.is_finite(),
+            "{name}: root_lp_bound must be finite"
+        );
+        if let Some(opt) = bf {
+            assert!(
+                (res.objective - opt).abs() < 1e-6,
+                "{name}: cuts-on objective {} must equal brute-force {} \
+                 (Bug 1: FP false incumbent corrupts B&B pruning)",
+                res.objective,
+                opt
+            );
+        }
+    }
+}
+
 /// **Tableau row correctness:** `alpha = e_i^T B^{-1} A_std` for a hand-built LP
 /// matches a direct dense computation of `B^{-1} A`. Locks the BTRAN + column-dot
 /// path that the GMI formula consumes.

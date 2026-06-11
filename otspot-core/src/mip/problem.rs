@@ -234,6 +234,44 @@ mod tests {
         QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap()
     }
 
+    /// `skip_node_presolve` must return `true` unconditionally for all `MilpProblem` instances.
+    ///
+    /// Per-node presolve is disabled to preserve warm-start basis propagation.
+    /// Sentinel: reintroducing the Le-only condition (Bug 2) returns `false` for Ge
+    /// problems, re-enabling per-node presolve, which regresses mas76 nocuts from a
+    /// valid incumbent (~67932) to garbage (~1e12).
+    #[test]
+    fn skip_node_presolve_unconditional() {
+        let a_le = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp_le = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a_le,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 5.0), (0.0, 5.0)],
+            None,
+        )
+        .unwrap();
+        let milp_le = MilpProblem::new(lp_le, vec![0]).unwrap();
+        assert!(milp_le.skip_node_presolve(), "Le: skip must be true");
+
+        let a_ge = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp_ge = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a_ge,
+            vec![1.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 5.0), (0.0, 5.0)],
+            None,
+        )
+        .unwrap();
+        let milp_ge = MilpProblem::new(lp_ge, vec![0]).unwrap();
+        assert!(
+            milp_ge.skip_node_presolve(),
+            "Ge: skip must also be true (Bug 2 regression guard)"
+        );
+    }
+
     #[test]
     fn new_sorts_and_dedups_integer_vars() {
         let m = MilpProblem::new(lp_2var(), vec![1, 0, 1]).unwrap();
