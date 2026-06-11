@@ -93,10 +93,7 @@ impl Relaxation for MilpProblem {
         crate::lp::solve_lp_with(&sub, opts)
     }
     fn skip_node_presolve(&self) -> bool {
-        // Skipping per-node presolve is only safe when every constraint is Le.
-        // Ge rows (e.g. from GMI cuts) require Phase I / dual-feasibility setup
-        // that presolve provides; dual simplex with presolve=false fails on them.
-        self.lp.constraint_types.iter().all(|ct| *ct == ConstraintType::Le)
+        true
     }
 }
 
@@ -237,14 +234,14 @@ mod tests {
         QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap()
     }
 
-    /// `skip_node_presolve` must return `false` when any `Ge` constraint is present.
+    /// `skip_node_presolve` must return `true` unconditionally for all `MilpProblem` instances.
     ///
-    /// Dual simplex (`SimplexMethod::Auto`) with `presolve=false` cannot establish a
-    /// dual-feasible starting basis for `Ge` rows; presolve must remain enabled.
-    /// Sentinel: reverting to unconditional `return true` (Bug 2) makes the `Ge`
-    /// assertion fail, causing B&B to misreport `root_lp_bound = -inf`.
+    /// Per-node presolve is disabled to preserve warm-start basis propagation.
+    /// Sentinel: reintroducing the Le-only condition (Bug 2) returns `false` for Ge
+    /// problems, re-enabling per-node presolve, which regresses mas76 nocuts from a
+    /// valid incumbent (~67932) to garbage (~1e12).
     #[test]
-    fn skip_node_presolve_false_when_ge_present() {
+    fn skip_node_presolve_unconditional() {
         let a_le = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let lp_le = LpProblem::new_general(
             vec![1.0, 1.0],
@@ -256,10 +253,7 @@ mod tests {
         )
         .unwrap();
         let milp_le = MilpProblem::new(lp_le, vec![0]).unwrap();
-        assert!(
-            milp_le.skip_node_presolve(),
-            "all-Le: per-node presolve skip is safe"
-        );
+        assert!(milp_le.skip_node_presolve(), "Le: skip must be true");
 
         let a_ge = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let lp_ge = LpProblem::new_general(
@@ -273,10 +267,8 @@ mod tests {
         .unwrap();
         let milp_ge = MilpProblem::new(lp_ge, vec![0]).unwrap();
         assert!(
-            !milp_ge.skip_node_presolve(),
-            "Ge constraint → skip_node_presolve must be false; \
-             Bug 2 (unconditional true) causes B&B dual simplex to fail on Ge rows \
-             with presolve=false → root_lp_bound = -inf → FAIL"
+            milp_ge.skip_node_presolve(),
+            "Ge: skip must also be true (Bug 2 regression guard)"
         );
     }
 

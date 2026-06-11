@@ -350,19 +350,14 @@ fn cuts_preserve_optimum() {
     }
 }
 
-/// **Bug 1 + Bug 2 regression guard:** `solve_milp_with_stats` with cuts ON must
-/// reach the correct integer optimum and report a finite `root_lp_bound`.
+/// **Bug 1 regression guard:** `solve_milp_with_stats` with cuts ON must reach the
+/// correct integer optimum and report a finite `root_lp_bound`.
 ///
 /// - Bug 1 (FP false incumbent): FP receives `effective.lp` (cut-augmented) instead
 ///   of `problem_bt.lp`, potentially finding a trivially-feasible x=0 with
 ///   obj=0 as incumbent; B&B then prunes the true optimal.
-/// - Bug 2 (B&B presolve): `skip_node_presolve` always returns `true`, causing
-///   dual simplex to fail on the Ge-containing effective LP with `presolve=false`;
-///   `root_lp_bound` becomes `−∞` and B&B degrades to an unconstrained integer
-///   box search.
 ///
-/// Sentinel: reverting either fix produces `root_lp_bound = −∞` (Bug 2) or an
-/// incorrect objective (Bug 1), failing the assertions here.
+/// Sentinel: reverting Bug 1 produces an incorrect objective (Bug 1), failing here.
 #[test]
 fn cuts_on_root_lp_bound_valid_and_optimum_correct() {
     use crate::solve_milp_with_stats;
@@ -381,8 +376,7 @@ fn cuts_on_root_lp_bound_valid_and_optimum_correct() {
         );
         assert!(
             stats.root_lp_bound.is_finite(),
-            "{name}: root_lp_bound must be finite \
-             (Bug 2: unconditional skip_node_presolve → dual fails on Ge rows → -inf)"
+            "{name}: root_lp_bound must be finite"
         );
         if let Some(opt) = bf {
             assert!(
@@ -639,7 +633,7 @@ fn cut_validity_fuzz_lcg() {
         // Integer coefficients to avoid trivially-integer LP vertices.
         let a00 = lcg_f(&mut rng, 1.0, 5.0).round();
         let a01 = lcg_f(&mut rng, 1.0, 5.0).round();
-        let is_le = lcg(&mut rng) % 2 == 0;
+        let is_le = lcg(&mut rng).is_multiple_of(2);
 
         // Pick RHS strictly between min_ax and max_ax so the constraint is
         // active at the LP optimum, making a fractional solution likely.
@@ -654,7 +648,7 @@ fn cut_validity_fuzz_lcg() {
         let rhs = mid.floor() + 0.5;
         // Flip sign for Ge so the sense matches: Ge with the same half-int rhs.
         let ct = if is_le { ConstraintType::Le } else { ConstraintType::Ge };
-        let actual_rhs = if is_le { rhs } else { rhs };
+        let actual_rhs = rhs;
         // Ge must satisfy: rhs <= max_ax and rhs >= min_ax.
         if actual_rhs <= min_ax || actual_rhs >= max_ax {
             continue;

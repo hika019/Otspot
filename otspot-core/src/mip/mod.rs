@@ -164,6 +164,9 @@ pub fn solve_milp_with_stats(
         // Root GMI cuts tighten the LP relaxation without removing any
         // integer-feasible point, so the optimum is unchanged while the tree
         // shrinks. The added rows leave `num_vars` (hence `mask`) untouched.
+        // KNOWN OPEN BUG: cuts=true adds Ge rows; skip_node_presolve=true then sets
+        // presolve=false for every B&B node, which can yield garbage incumbents on
+        // Ge-heavy instances (e.g. mas76 --cuts → obj≈1e12). True cause unidentified.
         let effective = if cfg.cuts {
             cuts::add_root_cuts(&problem_bt, &opts_with_dl, cfg)
         } else {
