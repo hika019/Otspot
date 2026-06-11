@@ -860,6 +860,72 @@ mod tests {
         );
     }
 
+    /// STEP-1 実測: full layout + 固定変数で bound_contrib_at_var と bound_contrib[j] が一致。
+    ///
+    /// bounds = [box(0,5), fixed(3,3), lb-only(2,∞)]
+    /// full layout len = 3 lb-finite + 2 ub-finite = 5
+    /// fixed var スロット(idx=1, 3)は 0 埋め。
+    /// 乖離が出れば実 correctness バグ、一致なら「重複+O(n²)のみ」。
+    #[test]
+    fn bound_contrib_at_var_agrees_with_bound_contrib_full_layout_fixed_var() {
+        let bounds = vec![
+            (0.0_f64, 5.0_f64),              // lb+ub finite (box)
+            (3.0_f64, 3.0_f64),              // fixed (lb==ub)
+            (2.0_f64, f64::INFINITY),        // lb-only
+        ];
+        // full layout: lb-half=[j0=1.5, j1_fx=0, j2=2.0], ub-half=[j0=3.0, j1_fx=0]
+        let bd = vec![1.5_f64, 0.0, 2.0, 3.0, 0.0];
+        let vec_result = bound_contrib(&bounds, &bd);
+
+        // bound_contrib_at_var 相当を手計算 (同関数の仕様を展開)。
+        // j=0: lb_idx=0 → -bd[0]=-1.5, ub_idx=3 → +bd[3]=3.0 → contrib=1.5
+        // j=1: lb_idx=1 → -bd[1]=0,   ub_idx=4 → +bd[4]=0   → contrib=0.0
+        // j=2: lb_idx=2 → -bd[2]=-2.0, ub_finite=false      → contrib=-2.0
+        let expected = [1.5_f64, 0.0, -2.0];
+
+        for j in 0..bounds.len() {
+            assert!(
+                (vec_result[j] - expected[j]).abs() < 1e-15,
+                "j={j}: bound_contrib={} expected={}",
+                vec_result[j],
+                expected[j]
+            );
+        }
+        // bound_contrib_at_var の実装と同一結果を確認 (削除前の等価性実測)。
+        let at_var_results: Vec<f64> = (0..bounds.len())
+            .map(|j| {
+                let n_lb_total = bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+                let mut contrib = 0.0_f64;
+                let mut lb_idx = 0_usize;
+                let mut ub_idx = n_lb_total;
+                for (jj, &(lb, ub)) in bounds.iter().enumerate() {
+                    if lb.is_finite() {
+                        if jj == j && lb_idx < bd.len() {
+                            contrib -= bd[lb_idx];
+                        }
+                        lb_idx += 1;
+                    }
+                    if ub.is_finite() {
+                        if jj == j && ub_idx < bd.len() {
+                            contrib += bd[ub_idx];
+                        }
+                        ub_idx += 1;
+                    }
+                }
+                contrib
+            })
+            .collect();
+
+        for j in 0..bounds.len() {
+            assert!(
+                (vec_result[j] - at_var_results[j]).abs() < 1e-15,
+                "j={j}: bound_contrib[j]={} vs at_var={} — layout mismatch would be a correctness bug",
+                vec_result[j],
+                at_var_results[j]
+            );
+        }
+    }
+
     #[test]
     fn dd_qx_aty_ax_match_f64_on_well_conditioned() {
         use crate::sparse::CscMatrix;

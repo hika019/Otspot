@@ -4,9 +4,8 @@
 
 use crate::options::SolverOptions;
 use crate::presolve::qp_transforms::QpPostsolveStep;
-use crate::presolve::{
-    bound_contrib_at_var, recover_y_for_singleton_row_with_bound, QpPresolveResult,
-};
+use crate::presolve::{recover_y_for_singleton_row_with_bound, QpPresolveResult};
+use crate::qp::kkt_resid::bound_contrib;
 use crate::problem::SolverResult;
 use crate::qp::ipm_solver::kkt::kkt_residual_rel;
 use crate::qp::ipm_solver::outcome::ProblemView;
@@ -125,12 +124,13 @@ pub(super) fn refine_postsolve_recovery(
         }
         crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, opts.ipm_eps());
         // y[row] を逆順で SingletonRow から復元 (後退代入)
+        let bc_vec = bound_contrib(&orig_problem.bounds, &final_sol.bound_duals);
         for step in presolve_result.postsolve_stack.steps.iter().rev() {
             let (row, col) = match step {
                 QpPostsolveStep::SingletonRow { row, col, .. } => (*row, *col),
                 _ => continue,
             };
-            let bc = bound_contrib_at_var(&orig_problem.bounds, &final_sol.bound_duals, col);
+            let bc = bc_vec.get(col).copied().unwrap_or(0.0);
             recover_y_for_singleton_row_with_bound(row, col, orig_problem, final_sol, bc);
         }
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
