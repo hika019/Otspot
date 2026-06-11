@@ -306,6 +306,18 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
 
 /// Solve without presolve.
 pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+    let t_solve_start = std::time::Instant::now();
+    let mut result = solve_without_presolve_inner(problem, options);
+    if result.timing_breakdown.is_none() {
+        result.timing_breakdown = Some(crate::problem::TimingBreakdown {
+            solve_us: t_solve_start.elapsed().as_micros() as u64,
+            ..Default::default()
+        });
+    }
+    result
+}
+
+fn solve_without_presolve_inner(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let m = problem.num_constraints;
     let n = problem.num_vars;
 
@@ -622,6 +634,63 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    fn make_timing_sentinel_lp() -> LpProblem {
+        const VARS: usize = 8;
+        const ROWS: usize = 8;
+        const BASE_RHS: f64 = 1.0;
+        const COST_STEP: f64 = 0.125;
+        const DIAG_COEFF: f64 = 2.0;
+        const OFF_DIAG_COEFF: f64 = 0.25;
+
+        let mut rows = Vec::with_capacity(VARS * ROWS);
+        let mut cols = Vec::with_capacity(VARS * ROWS);
+        let mut vals = Vec::with_capacity(VARS * ROWS);
+        for col in 0..VARS {
+            for row in 0..ROWS {
+                rows.push(row);
+                cols.push(col);
+                vals.push(if row == col {
+                    DIAG_COEFF
+                } else {
+                    OFF_DIAG_COEFF
+                });
+            }
+        }
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, ROWS, VARS).unwrap();
+        let c = (0..VARS)
+            .map(|j| (j as f64 + BASE_RHS) * COST_STEP)
+            .collect();
+        LpProblem::new_general(
+            c,
+            a,
+            vec![BASE_RHS; ROWS],
+            vec![ConstraintType::Ge; ROWS],
+            vec![(0.0, f64::INFINITY); VARS],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Sentinel: the no-presolve LP path must still record simplex solve time.
+    #[test]
+    fn timing_breakdown_set_when_presolve_disabled() {
+        let opts = SolverOptions {
+            presolve: false,
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&make_timing_sentinel_lp(), &opts);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        let timing = result
+            .timing_breakdown
+            .expect("presolve=false LP solve must still return timing_breakdown");
+        assert!(
+            timing.solve_us > 0,
+            "presolve=false LP solve must record non-zero solve_us"
+        );
+        assert_eq!(timing.presolve_us, 0);
+        assert_eq!(timing.postsolve_us, 0);
     }
 
     /// timing_breakdown is Some on the was_reduced=false path (non-reducing presolve).

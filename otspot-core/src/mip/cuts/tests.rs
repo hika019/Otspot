@@ -593,7 +593,7 @@ fn cut_validity_fuzz_lcg() {
         // Integer coefficients to avoid trivially-integer LP vertices.
         let a00 = lcg_f(&mut rng, 1.0, 5.0).round();
         let a01 = lcg_f(&mut rng, 1.0, 5.0).round();
-        let is_le = lcg(&mut rng) % 2 == 0;
+        let is_le = lcg(&mut rng).is_multiple_of(2);
 
         // Pick RHS strictly between min_ax and max_ax so the constraint is
         // active at the LP optimum, making a fractional solution likely.
@@ -608,7 +608,7 @@ fn cut_validity_fuzz_lcg() {
         let rhs = mid.floor() + 0.5;
         // Flip sign for Ge so the sense matches: Ge with the same half-int rhs.
         let ct = if is_le { ConstraintType::Le } else { ConstraintType::Ge };
-        let actual_rhs = if is_le { rhs } else { rhs };
+        let actual_rhs = rhs;
         // Ge must satisfy: rhs <= max_ax and rhs >= min_ax.
         if actual_rhs <= min_ax || actual_rhs >= max_ax {
             continue;
