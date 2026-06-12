@@ -85,6 +85,12 @@ fn main() -> ExitCode {
         ..Default::default()
     };
 
+    let profile = otspot_core::diag::lp_scale_profile_enabled();
+    if profile {
+        otspot_core::diag::reset_lp_scale_profile();
+        otspot_core::diag::reset_simplex_fallback_profile();
+    }
+
     let start = Instant::now();
     let (res, stats) = solve_milp_with_stats(&milp, &opts, &cfg);
     let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -109,6 +115,23 @@ fn main() -> ExitCode {
     println!("lp_presolve_us: {}", stats.lp_presolve_us_total);
     println!("lp_solve_us: {}", stats.lp_solve_us_total);
     println!("lp_postsolve_us: {}", stats.lp_postsolve_us_total);
+    if profile {
+        println!("lp_solve_us_root: {}", stats.lp_solve_us_root);
+        println!("lp_solve_us_desc: {}", stats.lp_solve_us_desc);
+        println!("lp_scale_us_root: {}", stats.lp_scale_us_root);
+        println!("lp_scale_us_desc: {}", stats.lp_scale_us_desc);
+        println!("lp_scale_calls_root: {}", stats.lp_scale_calls_root);
+        println!("lp_scale_calls_desc: {}", stats.lp_scale_calls_desc);
+        println!(
+            "fallback_ub_violation_out_of_scope: {}",
+            stats.fallback_ub_violation_out_of_scope
+        );
+        println!(
+            "fallback_phase1_bound_violation: {}",
+            stats.fallback_phase1_bound_violation
+        );
+        println!("fallback_crash_infeasible: {}", stats.fallback_crash_infeasible);
+    }
     if stats.nodes_processed > 0 {
         let n = stats.nodes_processed as f64;
         println!(

@@ -31,6 +31,34 @@ pub mod lp;
 pub mod mip;
 pub mod qp;
 
+#[doc(hidden)]
+pub mod diag {
+    pub use crate::presolve::scaling::{
+        lp_scale_profile_enabled, lp_scale_profile_snapshot, reset_lp_scale_profile,
+        LpScaleProfileSnapshot,
+    };
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct SimplexFallbackSnapshot {
+        pub ub_violation_out_of_scope: u64,
+        pub phase1_bound_violation: u64,
+        pub crash_infeasible: u64,
+    }
+
+    pub fn reset_simplex_fallback_profile() {
+        crate::simplex::dual_advanced::reset_fallback_profile();
+    }
+
+    pub fn simplex_fallback_profile_snapshot() -> SimplexFallbackSnapshot {
+        let s = crate::simplex::dual_advanced::fallback_profile_snapshot();
+        SimplexFallbackSnapshot {
+            ub_violation_out_of_scope: s.ub_violation_out_of_scope,
+            phase1_bound_violation: s.phase1_bound_violation,
+            crash_infeasible: s.crash_infeasible,
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_kkt;
 
