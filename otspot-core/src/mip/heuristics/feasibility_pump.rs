@@ -63,12 +63,7 @@ pub(crate) fn run_feasibility_pump(
 
     if is_integer_feasible(&root.solution, &mask, integer_feas_tol) {
         let x_rounded = round_integer_vars(&root.solution, &mask);
-        let b_ok = validate_against_bounds(&x_rounded, &lp.bounds);
-        let c_ok = validate_against_constraints(&x_rounded, &lp.a, &lp.b, &lp.constraint_types);
-        if b_ok && c_ok {
-            return Some(make_result(&lp.c, lp.obj_offset, x_rounded));
-        }
-        return None;
+        return repair_with_fixed_integers(lp, integer_vars, &x_rounded, opts);
     }
 
     let mut x_lp = root.solution;
@@ -90,12 +85,7 @@ pub(crate) fn run_feasibility_pump(
 
         if is_integer_feasible(&x_lp, &mask, integer_feas_tol) {
             let x_rounded = round_integer_vars(&x_lp, &mask);
-            let b_ok = validate_against_bounds(&x_rounded, &lp.bounds);
-            let c_ok = validate_against_constraints(&x_rounded, &lp.a, &lp.b, &lp.constraint_types);
-            if b_ok && c_ok {
-                return Some(make_result(&lp.c, lp.obj_offset, x_rounded));
-            }
-            break;
+            return repair_with_fixed_integers(lp, integer_vars, &x_rounded, opts);
         }
 
         let new_x_int = round_integer_vars(&x_lp, &mask);
@@ -122,6 +112,44 @@ fn round_integer_vars(x: &[f64], mask: &[bool]) -> Vec<f64> {
         .zip(mask.iter())
         .map(|(&xi, &is_int)| if is_int { xi.round() } else { xi })
         .collect()
+}
+
+/// Optimize the continuous variables under the original objective after fixing
+/// the FP integer assignment. The FP projection objective ignores continuous
+/// variables, so accepting its raw LP point can preserve arbitrary values on
+/// zero-cost continuous columns in the projection LP.
+fn repair_with_fixed_integers(
+    lp: &LpProblem,
+    integer_vars: &[usize],
+    x_int: &[f64],
+    opts: &SolverOptions,
+) -> Option<SolverResult> {
+    let mut repaired_lp = lp.clone();
+    for &j in integer_vars {
+        let xj = x_int[j];
+        let (lb, ub) = lp.bounds[j];
+        if !xj.is_finite() || xj < lb || xj > ub {
+            return None;
+        }
+        repaired_lp.bounds[j] = (xj, xj);
+    }
+
+    let repaired = solve_lp_with(&repaired_lp, opts);
+    if !matches!(repaired.status, SolveStatus::Optimal) || repaired.solution.is_empty() {
+        return None;
+    }
+
+    let mut x = repaired.solution;
+    for &j in integer_vars {
+        x[j] = x_int[j];
+    }
+    let b_ok = validate_against_bounds(&x, &lp.bounds);
+    let c_ok = validate_against_constraints(&x, &lp.a, &lp.b, &lp.constraint_types);
+    if b_ok && c_ok {
+        Some(make_result(&lp.c, lp.obj_offset, x))
+    } else {
+        None
+    }
 }
 
 /// Build the signed FP objective coefficient vector.
@@ -372,6 +400,48 @@ mod tests {
             "FP must reject rounded incumbent that violates UB={}; \
              no-op (remove validate_against_bounds) returns Some(solution[0]=1.0) → FAIL",
             near_ub
+        );
+    }
+
+    /// FP repairs continuous variables under the original objective before adoption.
+    ///
+    /// The projected FP LP has zero cost on continuous variables. If its point is
+    /// accepted directly, the continuous objective variable `y` below can remain at
+    /// its large upper bound and produce a garbage incumbent. Fixing the integer
+    /// assignment and re-solving the original LP must reduce `y` to the true lower
+    /// feasible value.
+    ///
+    /// Sentinel: replacing `repair_with_fixed_integers` with `make_result` keeps
+    /// `y = large_ub`, so the objective assertion fails.
+    #[test]
+    fn fp_repairs_continuous_objective_variable_before_adoption() {
+        const LARGE_UB: f64 = 1.0e12;
+        const REQUIRED_Y: f64 = 5.0;
+
+        // Variables: x integer, y continuous.  min y, s.t. y >= REQUIRED_Y.
+        let a = CscMatrix::from_triplets(&[0], &[1], &[1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0, 1.0],
+            a,
+            vec![REQUIRED_Y],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 1.0), (0.0, LARGE_UB)],
+            None,
+        )
+        .unwrap();
+        let fp_candidate = vec![1.0, LARGE_UB];
+
+        let r = repair_with_fixed_integers(&lp, &[0], &fp_candidate, &opts())
+            .expect("fixed integer assignment is feasible");
+        assert!(
+            (r.solution[1] - REQUIRED_Y).abs() < 1e-6,
+            "continuous y must be repaired to {REQUIRED_Y}, got {}",
+            r.solution[1]
+        );
+        assert!(
+            (r.objective - REQUIRED_Y).abs() < 1e-6,
+            "objective must use repaired y={REQUIRED_Y}, got {}",
+            r.objective
         );
     }
 
