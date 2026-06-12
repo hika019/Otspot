@@ -1,32 +1,20 @@
 //! Root Gomory Mixed-Integer (GMI) cutting planes for MILP.
 //!
-//! Cuts tighten the LP relaxation at the root node without removing any
-//! integer-feasible point, so the MILP optimum is preserved while the search
-//! tree shrinks. The textbook GMI derivation needs the LP optimum's simplex
-//! tableau: this module reconstructs it from the *legacy* standard form
-//! (`build_standard_form`: `A_std x_std = b_std`, `x_std >= 0`, nonbasic columns
-//! at value 0, upper bounds expanded into explicit rows). That form is chosen
-//! deliberately — the bounded/Ruiz-scaled dual path returns a basis with
-//! nonbasic-at-upper variables and scaled values, which would complicate the GMI
-//! formula and risk *invalid* cuts. The primal path keeps every nonbasic at 0,
-//! making the derivation and the back-substitution to original variables clean
-//! and numerically checkable.
+//! Cuts tighten the LP relaxation without removing integer-feasible points.
+//! Uses the primal-simplex legacy standard form (`build_standard_form`) where
+//! every nonbasic sits at 0; the bounded/Ruiz-scaled dual path would place
+//! nonbasics at upper bounds and scaled values, complicating the GMI formula
+//! and risking invalid cuts.
 //!
 //! Pipeline per round:
-//!   1. Solve the current LP with the primal simplex (no presolve) to get a
-//!      legacy-standard-form optimal basis.
-//!   2. Rebuild `B = LuBasis(A_std, basis)`, recompute `beta = B^{-1} b_std`
-//!      (FTRAN) — the unscaled basic values.
-//!   3. For each fractional basic *integer* structural variable, form the tableau
-//!      row `alpha = e_i^T B^{-1} A_std` (BTRAN(e_i), then dot with each nonbasic
-//!      column) and emit a GMI cut over the nonbasic columns.
-//!   4. Substitute each standard-form column by its affine image in the original
-//!      variables (`v_j = d_j + g_j·x`) to express the cut as `G·x >= rhs`.
+//!   1. Solve the LP (primal simplex, no presolve) for a standard-form basis.
+//!   2. Recompute `beta = B^{-1} b_std` via FTRAN.
+//!   3. For each fractional integer basic, form the tableau row (BTRAN + dot)
+//!      and emit a GMI cut over the nonbasic columns.
+//!   4. Back-substitute to original variables (`v_j = d_j + g_j·x`, `G·x >= rhs`).
 //!
-//! Validity is enforced structurally (GMI coefficients are >= 0 and the cut is
-//! valid for the integer hull) and verified by the brute-force sentinel in the
-//! tests: every integer-feasible point of the original problem must satisfy
-//! every generated cut.
+//! GMI validity (coefficients >= 0, integer hull) is structural; a brute-force
+//! sentinel in tests checks every integer-feasible point satisfies every cut.
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{MipConfig, SimplexMethod, SolverOptions, DEFAULT_MAX_CUT_ROUNDS};

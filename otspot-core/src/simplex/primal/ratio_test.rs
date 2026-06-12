@@ -88,24 +88,14 @@ pub(super) fn max_pivot_within(
 
 /// Harris ratio test (Pass 2), **feasibility-preserving**.
 ///
-/// The leaving step is bounded by the variable-tolerance maximum step
-///   `θ = min_{i: d[i]>floor} (x_b[i] + feas_tol) / d[i]`,
-/// and among rows within `θ` we take the largest pivot `|d[i]|` (Bland
-/// tie-break). For a leaving row with `x_b ≥ 0` this keeps every pivot-eligible
-/// basic value (`d[i] > floor`) at `≥ −feas_tol` independent of `d[i]`. A
-/// leaving row inside the `[−feas_tol, 0)` band gives a small negative step that
-/// can transiently breach `−feas_tol`; the optimality backstop (exact
-/// `x_b = B⁻¹b` recheck) then returns an honest Timeout, never false-Optimal.
-///
-/// The predecessor's absolute *ratio* window `min_ratio + ε` overshot by
-/// `ε·d[i]` — unbounded for ill-scaled columns (pilot87: `d[i] ≈ 1.3e6` turned
-/// `ε = 1e-8` into a 0.013 breach), producing an `x_b < 0` basis, negative
-/// ratios, and a wandering objective instead of convergence.
+/// Computes `θ = min_{i: d[i]>floor} (x_b[i] + feas_tol) / d[i]` and picks
+/// the largest-pivot row within `θ` (Bland tie-break). Keeps all pivot-eligible
+/// basics at `≥ −feas_tol`; a row in `[−feas_tol, 0)` can give a small negative
+/// step, and the optimality backstop returns Timeout rather than false-Optimal.
 ///
 /// `feas_tol` = `options.primal_tol`. Returns `None` for an unbounded direction.
 /// `art_threshold = Some(t)` enables the Phase I artificial leaving preference
-/// (see `max_pivot_within`); `None` (Phase II / non-artificial) leaves the
-/// largest-pivot rule unchanged.
+/// (see `max_pivot_within`); `None` leaves the largest-pivot rule unchanged.
 pub(super) fn select_leaving_feasibility_preserving(
     x_b: &[f64],
     d: &[f64],
