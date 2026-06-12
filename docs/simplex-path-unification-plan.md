@@ -238,6 +238,84 @@ sentinel:
 - `solve_cut_lp` は `LegacyTableauBasis` を返し、B&B child warm-start に使えない型にする。
 - no-op fail: GMI に bounded basis を渡すと type/test が fail。
 
+## 決定実験の結果
+
+実施日: 2026-06-13
+
+計測 commit:
+
+- fresh baseline: `investigate/simplex-path-unify` + `diag: simplex path decision counters`
+- bounded-only cache 再現: detached `166a85a20ec2e1ebf112e7da61cb9d9b18529d86`
+- 補助確認: detached `4cb7e10`
+
+計測は `cargo build --release` 後、`OTSPOT_LP_SOLVE_PROFILE=1` で実行した。
+
+### 実験1: scale_us 再実測
+
+| problem | status | objective | nodes | root lp_solve_us | root scale_us | root scale% | desc lp_solve_us | desc scale_us | desc scale% |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `gt2 --cuts --timeout 60 --eps 1e-6` | Optimal | 21166.000000000 | 219 | 29,890 | 23,283 | 77.9% | 2,813,583 | 2,376,391 | 84.5% |
+| `flugpl --cuts --timeout 60 --eps 1e-6` | Optimal | 1201500.000000000 | 13,863 | 1,077 | 590 | 54.8% | 18,002,242 | 12,640,292 | 70.2% |
+
+事実: 現ブランチでも descendant LP solve time の大部分が Ruiz scaling である。
+
+### 実験2: 乖離ノード bisect
+
+`166a85a` bounded-only cache 相当をそのまま実行した結果:
+
+```text
+gt2 --cuts --timeout 60 --eps 1e-6
+status: Optimal
+objective: 21166.000000000
+nodes: 219
+```
+
+fresh baseline は同一条件で:
+
+```text
+status: Optimal
+objective: 21166.000000000
+nodes: 219
+```
+
+事実: `166a85a` bounded-only cache では、今回の `gt2 --cuts` で tree 乖離は再現しなかった。したがって「最初に乖離する node」は存在せず、原因分類 (a)/(b) はこの実験対象では該当なし。
+
+補助確認として cache 初版 `4cb7e10` を同一条件で実行すると:
+
+```text
+status: Optimal
+objective: 21166.000000000
+nodes: 2949
+```
+
+事実: tree を崩した再現可能な commit は今回の実測では `4cb7e10` であり、`166a85a` ではない。`166a85a` が legacy cache を外して bounded-only に縮退した変更は、少なくともこの `gt2 --cuts` 実測では fresh tree exact である。
+
+### 実験3: fallback census
+
+| problem | status | nodes / LP solve | `UbViolationOutOfScope` | Phase I `BoundViolation` | crash-infeasible fallback |
+|---|---:|---:|---:|---:|---:|
+| `gt2 --cuts --timeout 60 --eps 1e-6` | Optimal | 219 nodes | 0 | 0 | 211 |
+| `flugpl --cuts --timeout 60 --eps 1e-6` | Optimal | 13,863 nodes | 0 | 0 | 4,982 |
+| `mas76 --cuts --timeout 60 --eps 1e-6` | Timeout | 2,585 nodes | 0 | 0 | 2,585 |
+| `afiro.QPS --timeout 100 --eps 1e-6` | Optimal | 1 LP | 0 | 0 | 0 |
+| `adlittle.QPS --timeout 100 --eps 1e-6` | Optimal | 1 LP | 0 | 0 | 1 |
+| `25fv47.QPS --timeout 100 --eps 1e-6` | Optimal | 1 LP | 0 | 0 | 0 |
+| `pilot-ja.QPS --timeout 100 --eps 1e-6` | Optimal | 1 LP | 0 | 0 | 0 |
+
+事実: 今回の対象では `UbViolationOutOfScope` と Phase I `BoundViolation` は 0 回だった。一方、Eq+UB crash basis が bounded-infeasible start を作って legacy fallback する経路は MIP で高頻度に発火した。
+
+### Verdict
+
+今回の実測だけで確定できる結論:
+
+- P2-a は再 proven: `gt2` descendant 84.5%、`flugpl` descendant 70.2% が scaling。
+- P1-b の「`166a85a` bounded-only cache が `gt2 --cuts` の tree を崩す」は再現しない。bounded-only cache は同条件で fresh と `status/objective/nodes` が一致した。
+- P1-a は `UbViolationOutOfScope` ではなく crash-infeasible fallback が実際の主要 fallback だった。
+
+判定: 「統一必要だが Stage 順は修正 (UB-repair先行)」。
+
+理由: bounded-only scaling reuse 自体は `gt2 --cuts` で小修正不要な exact 結果だったため、これを path 統一の根拠には使えない。一方、MIP node の多くが crash-infeasible fallback で legacy へ落ちる実測があり、solver path 統一より先に bounded Eq+UB crash/warm start の UB repair または crash fallback 除去を片付けないと、scaling reuse の適用範囲が広がらない。
+
 legacy 依存の実コード確認:
 
 - `mip/cuts.rs` は legacy SF tableau を使うと明記している。
