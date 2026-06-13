@@ -239,16 +239,16 @@ fn perold_presolve_off_baseline() {
         "perold[presolve=off]: status={:?} obj={:.4e} df_rel_bound={:.2e}",
         r.status, r.objective, df_rel_bound
     );
-    // SKIP allowed for status: 別経路で NumericalError でも本テストの目的ではない。
-    if matches!(r.status, SolveStatus::Optimal) {
-        assert!(
-            df_rel_bound < 1e-6,
-            "perold[presolve=off]: df_rel_bound={:.3e} → simplex 単体に別バグの疑い",
-            df_rel_bound
-        );
-    } else {
-        eprintln!("perold[presolve=off]: status={:?}", r.status);
-    }
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "perold[presolve=off] must solve cleanly on the direct simplex path"
+    );
+    assert!(
+        df_rel_bound < 1e-6,
+        "perold[presolve=off]: df_rel_bound={:.3e} → simplex 単体に別バグの疑い",
+        df_rel_bound
+    );
 }
 
 /// 小規模 Netlib LP の post-solve dual feasibility 網羅テスト。
@@ -271,6 +271,12 @@ macro_rules! netlib_postsolve_test {
 }
 
 netlib_postsolve_test!(afiro_postsolve, "data/lp_problems/afiro.QPS", 1e-6, 30.0);
+netlib_postsolve_test!(
+    adlittle_postsolve,
+    "data/lp_problems/adlittle.QPS",
+    1e-6,
+    30.0
+);
 netlib_postsolve_test!(sc50a_postsolve, "data/lp_problems/sc50a.QPS", 1e-6, 30.0);
 netlib_postsolve_test!(sc50b_postsolve, "data/lp_problems/sc50b.QPS", 1e-6, 30.0);
 netlib_postsolve_test!(sc105_postsolve, "data/lp_problems/sc105.QPS", 1e-6, 30.0);
@@ -302,6 +308,7 @@ netlib_postsolve_test!(
     1e-6,
     30.0
 );
+netlib_postsolve_test!(fv25_postsolve, "data/lp_problems/25fv47.QPS", 1e-6, 60.0);
 
 // 大規模 LP の dfeas_rel assertion (network/重 LP は #[ignore] で default 除外)。
 
