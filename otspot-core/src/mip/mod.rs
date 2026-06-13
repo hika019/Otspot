@@ -82,8 +82,26 @@ pub struct MipStats {
     pub lp_presolve_us_total: u64,
     /// Cumulative LP solve (simplex) microseconds across all nodes.
     pub lp_solve_us_total: u64,
+    /// LP solve microseconds in the root node.
+    pub lp_solve_us_root: u64,
+    /// Cumulative LP solve microseconds in descendant nodes.
+    pub lp_solve_us_desc: u64,
     /// Cumulative LP postsolve microseconds across all nodes.
     pub lp_postsolve_us_total: u64,
+    /// Cumulative Ruiz scaling microseconds in root node LP solve.
+    pub lp_scale_us_root: u64,
+    /// Cumulative Ruiz scaling microseconds in descendant node LP solves.
+    pub lp_scale_us_desc: u64,
+    /// Number of Ruiz scaling calls in root node LP solve.
+    pub lp_scale_calls_root: u64,
+    /// Number of Ruiz scaling calls in descendant node LP solves.
+    pub lp_scale_calls_desc: u64,
+    /// Bounded dual fallback count: terminal UB violation outside current repair scope.
+    pub fallback_ub_violation_out_of_scope: u64,
+    /// Bounded artificial Phase I fallback count: reconciled bound violation.
+    pub fallback_phase1_bound_violation: u64,
+    /// Eq+UB crash-basis fallback count: crash produced bounded-infeasible start.
+    pub fallback_crash_infeasible: u64,
 
     /// Approximate bytes per node for the bounds clone: `n_vars × 2 × size_of::<f64>()`.
     /// Gives a rough idea of per-node memory traffic regardless of node count.
@@ -287,6 +305,7 @@ fn solve_mip_core<R: Relaxation>(
 
     // Enable basis recovery so LP solves return warm_start_basis for child nodes.
     shared.recover_warm_start_basis = true;
+    shared.use_lp_crash_basis = false;
     shared.warm_start = None;
     // MILP nodes skip per-node presolve (redundant re-reduction that also discards
     // the propagated warm-start basis). MIQP keeps it (IPM needs Ruiz scaling).
@@ -345,6 +364,8 @@ fn solve_mip_core<R: Relaxation>(
             }
         }
 
+        let scale_before = crate::presolve::scaling::lp_scale_profile_snapshot();
+        let fallback_before = crate::simplex::dual_advanced::fallback_profile_snapshot();
         let t0 = Instant::now();
         let res = if let Some(ref ws) = node.warm_start {
             let mut no = shared.clone();
@@ -354,6 +375,14 @@ fn solve_mip_core<R: Relaxation>(
             problem.solve(&node.var_bounds, &shared)
         };
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let scale_delta = crate::presolve::scaling::lp_scale_profile_delta(
+            scale_before,
+            crate::presolve::scaling::lp_scale_profile_snapshot(),
+        );
+        let fallback_delta = crate::simplex::dual_advanced::fallback_profile_delta(
+            fallback_before,
+            crate::simplex::dual_advanced::fallback_profile_snapshot(),
+        );
 
         stats.nodes_processed += 1;
         stats.max_depth_seen = stats.max_depth_seen.max(node.depth);
@@ -362,10 +391,23 @@ fn solve_mip_core<R: Relaxation>(
         stats.relaxation_time_total_ms += elapsed_ms;
         if !root_solved {
             stats.relaxation_time_root_ms = elapsed_ms;
+            stats.lp_scale_us_root += scale_delta.scale_us;
+            stats.lp_scale_calls_root += scale_delta.calls;
+            if let Some(tb) = res.timing_breakdown {
+                stats.lp_solve_us_root += tb.solve_us;
+            }
             root_solved = true;
         } else {
             stats.relaxation_time_desc_ms += elapsed_ms;
+            stats.lp_scale_us_desc += scale_delta.scale_us;
+            stats.lp_scale_calls_desc += scale_delta.calls;
+            if let Some(tb) = res.timing_breakdown {
+                stats.lp_solve_us_desc += tb.solve_us;
+            }
         }
+        stats.fallback_ub_violation_out_of_scope += fallback_delta.ub_violation_out_of_scope;
+        stats.fallback_phase1_bound_violation += fallback_delta.phase1_bound_violation;
+        stats.fallback_crash_infeasible += fallback_delta.crash_infeasible;
         match res.status {
             SolveStatus::Optimal => stats.relaxation_time_optimal_ms += elapsed_ms,
             SolveStatus::Infeasible => stats.relaxation_time_infeasible_ms += elapsed_ms,

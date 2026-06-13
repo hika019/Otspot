@@ -5,6 +5,7 @@
 
 use crate::sparse::CscMatrix;
 use crate::tolerances::UNDERFLOW_GUARD;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum Ruiz equilibration sweeps for LP presolve.
 /// QP uses a separate RUIZ_SWEEPS (53) in `qp/ipm_core/scaling.rs`.
@@ -14,6 +15,43 @@ const LP_RUIZ_MAX_SWEEPS: usize = 20;
 const LP_RUIZ_CONV_TOL: f64 = 1e-4;
 
 type LpScalingResult = (CscMatrix, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+
+static LP_SCALE_PROFILE_US: AtomicU64 = AtomicU64::new(0);
+static LP_SCALE_PROFILE_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LpScaleProfileSnapshot {
+    pub calls: u64,
+    pub scale_us: u64,
+}
+
+pub fn lp_scale_profile_enabled() -> bool {
+    std::env::var("OTSPOT_LP_SOLVE_PROFILE")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+pub fn reset_lp_scale_profile() {
+    LP_SCALE_PROFILE_CALLS.store(0, Ordering::Relaxed);
+    LP_SCALE_PROFILE_US.store(0, Ordering::Relaxed);
+}
+
+pub fn lp_scale_profile_snapshot() -> LpScaleProfileSnapshot {
+    LpScaleProfileSnapshot {
+        calls: LP_SCALE_PROFILE_CALLS.load(Ordering::Relaxed),
+        scale_us: LP_SCALE_PROFILE_US.load(Ordering::Relaxed),
+    }
+}
+
+pub fn lp_scale_profile_delta(
+    before: LpScaleProfileSnapshot,
+    after: LpScaleProfileSnapshot,
+) -> LpScaleProfileSnapshot {
+    LpScaleProfileSnapshot {
+        calls: after.calls.saturating_sub(before.calls),
+        scale_us: after.scale_us.saturating_sub(before.scale_us),
+    }
+}
 
 /// LP equilibration via Ruiz scaling.
 ///
@@ -43,6 +81,22 @@ impl LpEquilibration {
     /// Deadline-aware Ruiz scaling. Returns `None` when the deadline expires
     /// while scaling is in progress.
     pub fn scale_with_deadline(
+        matrix: &CscMatrix,
+        b: &[f64],
+        c: &[f64],
+        deadline: Option<std::time::Instant>,
+    ) -> Option<LpScalingResult> {
+        let profile = lp_scale_profile_enabled();
+        let t_profile = profile.then(std::time::Instant::now);
+        let result = Self::scale_with_deadline_inner(matrix, b, c, deadline);
+        if let Some(t0) = t_profile {
+            LP_SCALE_PROFILE_CALLS.fetch_add(1, Ordering::Relaxed);
+            LP_SCALE_PROFILE_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn scale_with_deadline_inner(
         matrix: &CscMatrix,
         b: &[f64],
         c: &[f64],

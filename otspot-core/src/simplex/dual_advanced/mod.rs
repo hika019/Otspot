@@ -14,6 +14,7 @@ use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::DROP_TOL;
+use std::sync::atomic::{AtomicU64, Ordering};
 use bounded_core::{
     bounded_primal_phase1, bounded_primal_phase2_aug, bump_eq_ub_dispatch_count,
     extract_dual_info_bounded, extract_solution_bounded, iterate as bounded_iterate,
@@ -26,6 +27,50 @@ mod core;
 mod phase1;
 pub mod ratio_test;
 mod steepest_edge;
+
+static UB_VIOLATION_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static PHASE1_BOUND_VIOLATION_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static CRASH_INFEASIBLE_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
+fn fallback_profile_enabled() -> bool {
+    crate::presolve::scaling::lp_scale_profile_enabled()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SimplexFallbackSnapshot {
+    pub ub_violation_out_of_scope: u64,
+    pub phase1_bound_violation: u64,
+    pub crash_infeasible: u64,
+}
+
+pub(crate) fn reset_fallback_profile() {
+    UB_VIOLATION_FALLBACKS.store(0, Ordering::Relaxed);
+    PHASE1_BOUND_VIOLATION_FALLBACKS.store(0, Ordering::Relaxed);
+    CRASH_INFEASIBLE_FALLBACKS.store(0, Ordering::Relaxed);
+}
+
+pub(crate) fn fallback_profile_snapshot() -> SimplexFallbackSnapshot {
+    SimplexFallbackSnapshot {
+        ub_violation_out_of_scope: UB_VIOLATION_FALLBACKS.load(Ordering::Relaxed),
+        phase1_bound_violation: PHASE1_BOUND_VIOLATION_FALLBACKS.load(Ordering::Relaxed),
+        crash_infeasible: CRASH_INFEASIBLE_FALLBACKS.load(Ordering::Relaxed),
+    }
+}
+
+pub(crate) fn fallback_profile_delta(
+    before: SimplexFallbackSnapshot,
+    after: SimplexFallbackSnapshot,
+) -> SimplexFallbackSnapshot {
+    SimplexFallbackSnapshot {
+        ub_violation_out_of_scope: after
+            .ub_violation_out_of_scope
+            .saturating_sub(before.ub_violation_out_of_scope),
+        phase1_bound_violation: after
+            .phase1_bound_violation
+            .saturating_sub(before.phase1_bound_violation),
+        crash_infeasible: after.crash_infeasible.saturating_sub(before.crash_infeasible),
+    }
+}
 
 fn deadline_expired(deadline: Option<std::time::Instant>) -> bool {
     deadline.is_some_and(|d| std::time::Instant::now() >= d)
@@ -700,6 +745,9 @@ fn try_bounded_phase1_eq(
                         // Big-M, UB rows expanded) can absorb violations the
                         // bounded primal start cannot. Hand off rather than
                         // silently dropping crash's iter savings.
+                        if fallback_profile_enabled() {
+                            CRASH_INFEASIBLE_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+                        }
                         return None;
                     }
                     xb
@@ -828,7 +876,12 @@ where
                         ..Default::default()
                     }));
                 }
-                BoundedTerminalReconcile::BoundViolation => return None,
+                BoundedTerminalReconcile::BoundViolation => {
+                    if fallback_profile_enabled() {
+                        PHASE1_BOUND_VIOLATION_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return None;
+                }
                 BoundedTerminalReconcile::MatrixAccessError
                 | BoundedTerminalReconcile::SingularBasis => {
                     return Some(mark_eq_ub_path(SolverResult::numerical_error()));
@@ -968,7 +1021,12 @@ fn finish_bounded(
     total_iters: &mut usize,
 ) -> Option<SolverResult> {
     match dual_out {
-        BoundedOutcome::UbViolationOutOfScope { .. } => None,
+        BoundedOutcome::UbViolationOutOfScope { .. } => {
+            if fallback_profile_enabled() {
+                UB_VIOLATION_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+            }
+            None
+        }
         BoundedOutcome::Unbounded => Some(SolverResult {
             status: SolveStatus::Infeasible,
             objective: f64::INFINITY,
