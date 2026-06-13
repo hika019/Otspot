@@ -413,7 +413,9 @@ fn mip_nodes_disable_lp_crash_basis_before_relaxation_solve() {
     // x_B=2 while the column bound is x<=1, so the bounded crash path records a
     // crash-infeasible fallback.
     // The honest fallback counter is gated by the LP profiling env var.
-    std::env::set_var("OTSPOT_LP_SOLVE_PROFILE", "1");
+    // SAFETY: nextest runs one OS process per test, but cargo test shares a
+    // process; restore the env var before other tests can see profiler state.
+    unsafe { std::env::set_var("OTSPOT_LP_SOLVE_PROFILE", "1") };
     crate::presolve::scaling::reset_lp_scale_profile();
     crate::simplex::dual_advanced::reset_fallback_profile();
     let mut crash_on = opts();
@@ -422,6 +424,7 @@ fn mip_nodes_disable_lp_crash_basis_before_relaxation_solve() {
     crash_on.recover_warm_start_basis = true;
     let _ = crate::lp::solve_lp_with(&crash_infeasible_lp(), &crash_on);
     let precondition = crate::simplex::dual_advanced::fallback_profile_snapshot();
+    unsafe { std::env::remove_var("OTSPOT_LP_SOLVE_PROFILE") };
     assert!(
         precondition.crash_infeasible > 0,
         "test precondition failed: crash-enabled baseline must hit fallback"
