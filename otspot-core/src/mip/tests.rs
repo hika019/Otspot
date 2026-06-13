@@ -357,6 +357,92 @@ fn no_integer_vars_fallback_preserves_caller_warm_start() {
 }
 
 #[test]
+fn mip_nodes_disable_lp_crash_basis_before_relaxation_solve() {
+    use std::cell::Cell;
+
+    fn crash_infeasible_lp() -> LpProblem {
+        build_lp(
+            vec![0.0],
+            &[0],
+            &[0],
+            &[1.0],
+            1,
+            vec![2.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, 1.0)],
+        )
+    }
+
+    struct CrashLpNodeMock {
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+        saw_crash_disabled: Cell<bool>,
+    }
+
+    impl CrashLpNodeMock {
+        fn new() -> Self {
+            Self {
+                root_bounds: [(0.0, 1.0)],
+                int_vars: [0],
+                saw_crash_disabled: Cell::new(false),
+            }
+        }
+    }
+
+    impl super::Relaxation for CrashLpNodeMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            self.saw_crash_disabled.set(!opts.use_lp_crash_basis);
+            crate::lp::solve_lp_with(&crash_infeasible_lp(), opts)
+        }
+        fn skip_node_presolve(&self) -> bool {
+            true
+        }
+    }
+
+    // Precondition: before MIP disables LP crash, this relaxation is non-vacuous.
+    // With crash enabled, the equality row adopts structural x as basic and gets
+    // x_B=2 while the column bound is x<=1, so the bounded crash path records a
+    // crash-infeasible fallback.
+    // The honest fallback counter is gated by the LP profiling env var.
+    std::env::set_var("OTSPOT_LP_SOLVE_PROFILE", "1");
+    crate::presolve::scaling::reset_lp_scale_profile();
+    crate::simplex::dual_advanced::reset_fallback_profile();
+    let mut crash_on = opts();
+    crash_on.presolve = false;
+    crash_on.use_lp_crash_basis = true;
+    crash_on.recover_warm_start_basis = true;
+    let _ = crate::lp::solve_lp_with(&crash_infeasible_lp(), &crash_on);
+    let precondition = crate::simplex::dual_advanced::fallback_profile_snapshot();
+    assert!(
+        precondition.crash_infeasible > 0,
+        "test precondition failed: crash-enabled baseline must hit fallback"
+    );
+
+    crate::presolve::scaling::reset_lp_scale_profile();
+    crate::simplex::dual_advanced::reset_fallback_profile();
+    let mock = CrashLpNodeMock::new();
+    let (r, stats) = super::solve_mip_core(&mock, &opts(), &MipConfig::default(), vec![true], None);
+    assert_eq!(r.status, SolveStatus::Infeasible);
+    assert!(
+        mock.saw_crash_disabled.get(),
+        "B&B node LP options must force use_lp_crash_basis=false"
+    );
+    assert_eq!(
+        stats.fallback_crash_infeasible, 0,
+        "MIP node solve must not enter crash-infeasible legacy fallback"
+    );
+}
+
+#[test]
 fn two_var_general_integer_program() {
     // min -(x + y) s.t. x + y <= 3.5, x <= 2.5, y <= 2.5, x,y in [0,5] integer.
     // Integer optimum: x + y = 3 (e.g. x=1,y=2 or x=2,y=1) → obj -3.

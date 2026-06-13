@@ -305,6 +305,7 @@ fn solve_mip_core<R: Relaxation>(
 
     // Enable basis recovery so LP solves return warm_start_basis for child nodes.
     shared.recover_warm_start_basis = true;
+    shared.use_lp_crash_basis = false;
     shared.warm_start = None;
     // MILP nodes skip per-node presolve (redundant re-reduction that also discards
     // the propagated warm-start basis). MIQP keeps it (IPM needs Ruiz scaling).
