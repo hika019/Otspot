@@ -16,6 +16,7 @@
 use otspot::io::qps::parse_qps;
 use otspot::lp::solve_lp_with;
 use otspot::options::SolverOptions;
+use otspot::presolve;
 use otspot::problem::{LpProblem, SolveStatus};
 use std::path::Path;
 
@@ -36,13 +37,55 @@ fn load_lp(path: &str) -> LpProblem {
 ///
 /// tier-2 (Mac ~12s); heavy profile (#97).
 #[test]
-#[ignore = "broken: postsolve_dfeas must be populated for Optimal LP, panics"]
 fn pilot_ja_postsolve_dual_is_feasible() {
     let prob = load_lp("data/lp_problems/pilot-ja.QPS");
+    eprintln!(
+        "pilot-ja[parse]: vars={} rows={} nnz={}",
+        prob.num_vars,
+        prob.num_constraints,
+        prob.a.nnz()
+    );
+
+    let presolved = presolve::run_presolve(&prob, None).expect("pilot-ja presolve");
+    assert!(presolved.was_reduced, "pilot-ja must exercise LP postsolve");
+    eprintln!(
+        "pilot-ja[presolve]: reduced_vars={} reduced_rows={}",
+        presolved.reduced_problem.num_vars, presolved.reduced_problem.num_constraints
+    );
+
+    let mut raw_opts = SolverOptions::default();
+    raw_opts.presolve = false;
+    raw_opts.timeout_secs = Some(400.0);
+    let raw = solve_lp_with(&presolved.reduced_problem, &raw_opts);
+    eprintln!(
+        "pilot-ja[reduced-simplex]: status={:?} obj={:.6e}",
+        raw.status, raw.objective
+    );
+    assert_eq!(
+        raw.status,
+        SolveStatus::Optimal,
+        "pilot-ja reduced LP must solve before postsolve can be blamed"
+    );
+
+    let lifted = presolve::postsolve::run_postsolve(&raw, &presolved, &prob, None, false);
+    eprintln!(
+        "pilot-ja[postsolve]: status={:?} obj={:.6e} dfeas={:?}",
+        lifted.status, lifted.objective, lifted.postsolve_dfeas
+    );
+    assert_eq!(lifted.status, SolveStatus::Optimal);
+    assert!(
+        lifted.postsolve_dfeas.unwrap_or(f64::INFINITY) < 1e-6,
+        "postsolve dual recovery itself must certify dfeas before guard"
+    );
+
     let mut opts = SolverOptions::default();
     opts.presolve = true;
     opts.timeout_secs = Some(400.0);
     let r = solve_lp_with(&prob, &opts);
+    eprintln!(
+        "pilot-ja[presolve=on]: status={:?} obj={:.6e} postsolve_dfeas={:?} timing={:?}",
+        r.status, r.objective, r.postsolve_dfeas, r.timing_breakdown
+    );
 
     assert_eq!(
         r.status,
