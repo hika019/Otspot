@@ -59,10 +59,15 @@ fn wood1p_postsolve_under_2s() {
 /// 未収束だと postsolve に到達せず gate が vacuous になるため default から外す。
 /// 収束自体は lp_simplex_stall_d6cube_converges が追跡。
 #[test]
-#[ignore = "broken: d6cube simplex Phase 2 収束待ち (depends on d6cube_optimal_tier2 fix)"]
+#[ignore = "perf-open/heavy: 60s run currently times out before postsolve; requires Optimal before checking <1s gate"]
 fn d6cube_postsolve_under_1s() {
     let prob = load("data/lp_problems/d6cube.QPS");
-    let (_status, _wall, postsolve_s) = solve(&prob, 60.0);
+    let (status, _wall, postsolve_s) = solve(&prob, 60.0);
+    assert!(
+        matches!(status, SolveStatus::Optimal),
+        "d6cube must reach Optimal before postsolve gate is meaningful; got {:?}",
+        status
+    );
     assert!(
         postsolve_s < 1.0,
         "d6cube postsolve {:.2}s exceeded 1s — cleanup-LP gate likely regressed",
@@ -77,7 +82,7 @@ fn d6cube_postsolve_under_1s() {
 /// 未収束だと postsolve に到達せず gate が vacuous になるため default から外す。
 /// 収束自体は lp_simplex_stall_greenbea_converges が追跡。
 #[test]
-#[ignore = "broken: CI ~49s vs 5s budget = perf regression; greenbea postsolve speed sentinel"]
+#[ignore = "perf-open/heavy: measured postsolve 8.29s > 5s budget (2026-06-14); speed sentinel"]
 fn greenbea_postsolve_under_5s() {
     let prob = load("data/lp_problems/greenbea.QPS");
     let (_status, _wall, postsolve_s) = solve(&prob, 60.0);

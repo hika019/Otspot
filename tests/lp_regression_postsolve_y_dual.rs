@@ -329,12 +329,12 @@ fn cre_b_postsolve_dual_feasibility() {
 }
 
 /// greenbea: IPM-pathological LP (5405 vars × 2392 rows、IPM_BUDGET_FRACTION=0.5)。
-/// アイドル時 ~164s で converge (IPM stall 85s + simplex fallback 79s)、
-/// CPU contention 1.04x 以上で 170s budget を超えて FAIL するため default 除外。
+/// Measured 2026-06-14 on this worktree: ~30.6s and converges with
+/// df_rel_bound=4.20e-11. Still over the default-test budget, so default 除外。
 /// regression sentinel として heavy profile 実行で機能 (`cargo nextest run --run-ignored only`)。
 /// #91 で v0.2.0→HEAD のコード regression なしを実証済。
 #[test]
-#[ignore = "heavy ~164s idle、bench 並行下 flaky (170s margin 6s)。--run-ignored only"]
+#[ignore = "heavy: greenbea dual-feas sentinel is correct but ~30.6s (>30s default); --run-ignored only"]
 fn greenbea_postsolve_dual_feasibility() {
     let r = check_postsolve_dual_feasibility(
         "data/lp_problems/greenbea.QPS",
