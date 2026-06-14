@@ -152,10 +152,13 @@ fn lp_coverage_screen_sample_fast() {
     );
 }
 
-/// `cycle` LP convergence: current f64 behavior honestly returns
-/// `SuboptimalSolution` at the known optimum instead of falsely claiming
-/// `Optimal`.
+/// `cycle` LP convergence — tier-2 because it takes ~19-20s on a loaded system.
+/// This remains the post-#31 canary: current behavior is honest
+/// `SuboptimalSolution` at the known optimum, covered by
+/// `diag_cycle_is_feasible_and_near_optimal`, but this test stays pinned to
+/// `Optimal` until crossover certification is fixed.
 #[test]
+#[ignore = "open #31: Optimal 未証明 (postsolve crossover storm)。現挙動は diag_cycle_is_feasible_and_near_optimal が honest 検証済"]
 fn lp_coverage_screen_cycle_tier2() {
     let baseline = load_baseline_objectives(Path::new(BASELINE_CSV))
         .expect("baseline CSV missing");
@@ -184,12 +187,10 @@ fn lp_coverage_screen_cycle_tier2() {
         "cycle: status={:?} obj={:.10e} expected={:.10e} rel_err={:.2e} {:.2}s",
         result.status, result.objective, expected, rel_err, elapsed
     );
-    assert!(
-        matches!(
-            result.status,
-            SolveStatus::Optimal | SolveStatus::SuboptimalSolution
-        ),
-        "cycle expected honest Optimal/SuboptimalSolution, got {:?}",
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "cycle expected Optimal, got {:?}",
         result.status
     );
     assert!(
