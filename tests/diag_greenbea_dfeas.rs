@@ -124,11 +124,11 @@ fn run_once_with_timeout(
 }
 
 /// Primary regression: presolve=on (default), must converge to dfeas_rel ≤ eps.
-/// Mac local ~48s で converge、CI Linux x86_64 では 120s budget 超で SuboptimalSolution。
-/// env-sensitive (CI runner Mac の 2.5x 遅)、heavy profile / `--run-ignored only` で実行。
+/// Measured 2026-06-14 on this worktree: 30.426s, Optimal, dfeas_rel=4.20e-11.
+/// This is correct but just over the default-test budget, so keep it in heavy.
 /// 系統的真因深掘りは #97 (env-sensitive test 群)。
 #[test]
-#[ignore = "env-sensitive: Mac ~48s / CI Linux > 120s budget。heavy profile で実行、#97 で深掘り"]
+#[ignore = "heavy/env-sensitive: currently correct but ~30.4s (>30s default); run under heavy profile"]
 fn diag_greenbea_dfeas_full_green() {
     let (status, _elapsed, obj_rel_err, dfeas_rel, _timing) =
         run_once_with_timeout("presolve_on", true, 120.0);

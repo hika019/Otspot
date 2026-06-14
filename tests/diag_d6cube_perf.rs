@@ -26,7 +26,10 @@ fn d6cube_not_infeasible() {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(15.0); // Phase I < 1s; this guards false-Infeasible regressions
     let r = solve_qp_with(&prob, &opts);
-    eprintln!("d6cube_not_infeasible: status={:?} obj={:.6e}", r.status, r.objective);
+    eprintln!(
+        "d6cube_not_infeasible: status={:?} obj={:.6e}",
+        r.status, r.objective
+    );
     assert!(
         !matches!(r.status, SolveStatus::Infeasible),
         "d6cube returned Infeasible — Phase I regression"
@@ -34,9 +37,10 @@ fn d6cube_not_infeasible() {
 }
 
 /// d6cube solves to Optimal with correct objective (≈315.49) — full convergence test.
-/// d6cube takes ~286s; run under heavy profile or standalone.
+/// Measured 2026-06-14 on this worktree: 116.80s, so this is a heavy tier test
+/// even though it now completes inside the 400s solver budget.
 #[test]
-#[ignore = "broken: d6cube needs ~286s convergence, exceeds default 180s kill; LP perf fix tracked"]
+#[ignore = "heavy/tier2: d6cube reaches Optimal in ~117s here (>30s default budget); run explicitly"]
 fn d6cube_optimal_tier2() {
     let path = Path::new("data/lp_problems/d6cube.QPS");
     assert!(path.exists(), "data missing: {}", path.display());

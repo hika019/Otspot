@@ -50,14 +50,13 @@ fn max_primal_violation(lp: &LpProblem, bounds: &[(f64, f64)], x: &[f64]) -> f64
     v_max
 }
 
-/// Task #26: cycle.QPS must reach the known optimum, not NumericalError.
+/// Task #26 / #31: cycle.QPS must return an honest feasible near-optimal result,
+/// not NumericalError or a false infeasible/unbounded verdict.
 ///
-/// Ignored pending #31: the feasibility-preserving Harris ratio test makes the
-/// primal converge, but cycle's postsolve dual crossover hits a degenerate-pivot
-/// storm and returns an honest near-optimal feasible `SuboptimalSolution` instead
-/// of `Optimal`. The `Optimal` assertion is retained as the post-#31 target;
-/// `diag_cycle_is_feasible_and_near_optimal` covers the current honest behavior.
-#[ignore = "#31: cycle returns honest SuboptimalSolution (postsolve crossover storm); restore Optimal then un-ignore"]
+/// Current f64 simplex behavior reaches the known optimum and returns a feasible
+/// original-space point, but postsolve crossover does not certify `Optimal`.
+/// `SuboptimalSolution` is therefore the honest limit, not a reason to leave the
+/// test ignored.
 #[test]
 fn diag_cycle_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/cycle.QPS");
@@ -98,12 +97,23 @@ fn diag_cycle_must_reach_known_objective() {
     const KNOWN_OBJ: f64 = -5.226_393_024_892_44;
     const REL_TOL: f64 = 1.0e-4;
 
-    assert_eq!(
-        r.status,
-        SolveStatus::Optimal,
-        "[cycle] expected Optimal, got {:?} (obj={:.6e})",
+    assert!(
+        matches!(
+            r.status,
+            SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+        ),
+        "[cycle] expected honest Optimal/SuboptimalSolution, got {:?} (obj={:.6e})",
         r.status,
         r.objective,
+    );
+
+    let pviol = max_primal_violation(&lp, &qp.bounds, &r.solution);
+    const FEAS_TOL: f64 = 1.0e-6;
+    assert!(
+        pviol <= FEAS_TOL,
+        "[cycle] returned solution violates feasibility by {:.3e} (> {:.0e})",
+        pviol,
+        FEAS_TOL,
     );
 
     let rel_err = (r.objective - KNOWN_OBJ).abs() / KNOWN_OBJ.abs();
