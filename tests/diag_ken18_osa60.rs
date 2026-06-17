@@ -336,10 +336,8 @@ fn diag_osa60_is_feasible_and_honest() {
 /// At HEAD this FAILS: empirically wall ≈ 365 s for a 120 s internal
 /// budget. Scaled to 30 s internal it lands well past the 60 s slack ceiling.
 #[test]
-#[ignore = "deadline wiring implemented (postsolve.rs lines 125-129 guard + opts.deadline propagation, \
-            merged in 74d8c91); cannot un-ignore without data/lp_problems/ken-18.QPS to measure \
-            wall time empirically. Run manually with: \
-            cargo nextest run --run-ignored only --test diag_ken18_osa60 diag_ken18_must_respect_internal_deadline"]
+#[ignore = "heavy/timing: measured 30.02s Timeout within 30s+30s wall contract (2026-06-14), \
+            but >30s default budget; run explicitly"]
 fn diag_ken18_must_respect_internal_deadline() {
     let path = Path::new("data/lp_problems/ken-18.QPS");
     assert!(

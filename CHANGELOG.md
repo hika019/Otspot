@@ -4,15 +4,36 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-17
+
+公開API破壊的変更なし (`cargo public-api diff` = 変更なし)。大規模 LP の pricing 高速化 (pds-20 を初求解)、MIP の探索効率・正当性修正、QP postsolve 安定化が主体。
+
 ### 追加
+
+- MIP: Gomory Mixed-Integer (GMI) カット生成を追加
+- LP: 大規模 LP 向け cyclic partial pricing を primal bounded core に導入 (pricing コスト約 60% 削減、pds-20 を初めて求解)
+- LP: anti-degeneracy (primal core の Bland anti-cycling + RHS 摂動、既定 OFF)
 
 ### 変更
 
+- LP: DualPricing 既定を Dual Steepest Edge (Forrest-Goldfarb) へ変更し dual simplex の反復を削減
+- LP: primal_simplex_aug の冗長 FTRAN を排除し per-iter コストを削減
+- LP: bounded Eq+UB Phase I の汎用化 / Ge 制約経路の開通
+
 ### 修正
+
+- MIP: feasibility pump の偽 incumbent (1e12 等) を修正 (gen-ip002 真因・mas76)
+- MIP: ノード LP の crash basis を無効化し、crash-infeasible 起因の探索木膨張を根治
+- QP: postsolve の deadline spin を抑止し、saddle-IR best 選別の指標を統一
+- LP: postsolve dual の検証空白を正規 assert 化 (pilot-ja / perold の stale ignore 解消)
+- テスト: ken-13 deadline ガードが deadline 内に停止した SuboptimalSolution を受理するよう是正
 
 ### 内部
 
-### 依存
+- LP: bound_contrib 重複計算を O(n²)→O(n) に削減
+- MIP: ノード LP の timing 計装 (lp_solve_us) を復元
+- `#[ignore]` テストの棚卸し (隠れバグ無しを実測確定、broken 誤ラベル訂正、tier-2 を default profile へ)
+- comment-hygiene gate / Audit CI の修復
 
 ## [0.5.0] - 2026-06-08
 

@@ -955,6 +955,7 @@ fn test_singular_initial_basis_not_optimal() {
         &opts,
         &mut iters,
         false,
+        None,
     );
     assert!(!matches!(outcome, SimplexOutcome::Optimal(..)));
 }
@@ -1017,6 +1018,7 @@ fn test_refactor_failed_no_deadline_returns_timeout() {
         &opts,
         &mut iters,
         false,
+        None,
     );
     assert!(matches!(
         outcome,

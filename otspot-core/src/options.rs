@@ -244,6 +244,15 @@ pub const DEFAULT_MIP_GAP_TOL: f64 = 1e-6;
 pub const DEFAULT_INTEGER_FEAS_TOL: f64 = 1e-6;
 pub const DEFAULT_MIP_MAX_NODES: usize = 1_000_000;
 pub const DEFAULT_MIP_MAX_DEPTH: usize = 1_000;
+/// Default root cutting-plane state. OFF for safe introduction: cuts only tighten
+/// the relaxation, so correctness is unchanged either way, but enabling them by
+/// default would change node counts / timings of every existing MILP solve. The
+/// effect is opted into explicitly (sentinels + bench show the ON benefit).
+pub const DEFAULT_MIP_CUTS: bool = false;
+/// `max_cut_rounds == 0` ⇒ use this many root cut rounds (auto). Kept small: most
+/// GMI gain is in the first few rounds, and deep rounds bloat the LP (slowing
+/// every downstream B&B node) for diminishing bound improvement.
+pub const DEFAULT_MAX_CUT_ROUNDS: usize = 5;
 
 /// MILP/MIQP branch-and-bound config.
 ///
@@ -260,6 +269,16 @@ pub struct MipConfig {
     pub max_nodes: usize,
     pub max_depth: usize,
     pub branching: MipBranching,
+    /// Generate Gomory Mixed-Integer cuts at the root before branch-and-bound.
+    /// Cuts tighten the LP relaxation without removing any integer-feasible point,
+    /// so the optimum is unchanged; they reduce the search tree. Default OFF
+    /// (see [`DEFAULT_MIP_CUTS`]).
+    pub cuts: bool,
+    /// Maximum root cut-generation rounds. `0` ⇒ [`DEFAULT_MAX_CUT_ROUNDS`].
+    /// Each round re-solves the LP and adds GMI cuts from the fractional basic
+    /// integer variables; rounds stop early when no fractional source remains or
+    /// the LP bound stops improving.
+    pub max_cut_rounds: usize,
 }
 
 impl Default for MipConfig {
@@ -270,6 +289,8 @@ impl Default for MipConfig {
             max_nodes: DEFAULT_MIP_MAX_NODES,
             max_depth: DEFAULT_MIP_MAX_DEPTH,
             branching: MipBranching::MostFractional,
+            cuts: DEFAULT_MIP_CUTS,
+            max_cut_rounds: DEFAULT_MAX_CUT_ROUNDS,
         }
     }
 }

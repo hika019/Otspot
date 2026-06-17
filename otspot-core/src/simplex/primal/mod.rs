@@ -381,6 +381,7 @@ pub(crate) fn two_phase_simplex(
             options,
             &mut total_iters,
             false,
+            None,
         );
         let phase2_outcome = gate_phase2_unbounded(
             phase2_outcome,
@@ -610,6 +611,7 @@ pub(crate) fn two_phase_simplex(
             options,
             &mut total_iters,
             true,
+            Some(sf.n_total),
         );
         match phase1_outcome {
             SimplexOutcome::Optimal(_obj, _) => {
@@ -674,6 +676,7 @@ pub(crate) fn two_phase_simplex(
                         options,
                         &mut total_iters,
                         true,
+                        Some(sf.n_total),
                     ) {
                         SimplexOutcome::Optimal(_, _) => {}
                         SimplexOutcome::Unbounded => break 'retry,
@@ -815,6 +818,7 @@ pub(crate) fn two_phase_simplex(
                     options,
                     &mut total_iters,
                     false,
+                    None,
                 );
                 let phase2_outcome = gate_phase2_unbounded(
                     phase2_outcome,
@@ -1062,6 +1066,7 @@ pub(crate) fn two_phase_simplex(
                         options,
                         &mut total_iters,
                         false,
+                        None,
                     );
                     let phase2_outcome = gate_phase2_unbounded(
                         phase2_outcome,
@@ -1424,6 +1429,82 @@ mod cycle_perturbation_tests {
                     "threshold must exceed PIVOT_TOL for m={m}>1 (must scale with m)"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod phase1_artificial_preference_tests {
+    //! End-to-end sentinel for the Phase I artificial leaving preference.
+    //!
+    //! The ratio-test unit no-op proof lives in `ratio_test.rs` (ON vs OFF on a
+    //! single tie-band). Here we prove the production Phase I path — artificial
+    //! preference always ON — still finds a feasible vertex and the correct
+    //! optimum on a degenerate LP whose equality constraints force several
+    //! artificials (one redundant ⇒ a residual degenerate artificial). The
+    //! preference must not strand an artificial (false-Infeasible) nor shift the
+    //! optimum.
+
+    use crate::options::{SimplexMethod, SolverOptions};
+    use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+    use crate::simplex::entry::solve_with;
+    use crate::sparse::CscMatrix;
+
+    fn primal_opts() -> SolverOptions {
+        SolverOptions {
+            simplex_method: SimplexMethod::Primal,
+            ..Default::default()
+        }
+    }
+
+    /// Degenerate 2×2 transportation LP: supplies (1,1), demands (1,1). Four
+    /// equality rows — one redundant (Σsupply = Σdemand) — give four artificials
+    /// with a residual degenerate artificial at the feasible vertex. The feasible
+    /// set is x = (t, 1−t, 1−t, t), t ∈ [0,1]; cost (1,2,2,1) ⇒ obj = 4 − 2t,
+    /// minimized at t = 1: x* = (1,0,0,1), obj = 2.
+    #[test]
+    fn degenerate_transportation_phase1_finds_optimum() {
+        // Rows: x1+x2=1, x3+x4=1, x1+x3=1, x2+x4=1.
+        let a = CscMatrix::from_triplets(
+            &[0, 2, 0, 3, 1, 2, 1, 3],
+            &[0, 0, 1, 1, 2, 2, 3, 3],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            4,
+            4,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 2.0, 2.0, 1.0],
+            a,
+            vec![1.0, 1.0, 1.0, 1.0],
+            vec![ConstraintType::Eq; 4],
+            vec![(0.0, f64::INFINITY); 4],
+            None,
+        )
+        .unwrap();
+
+        let result = solve_with(&lp, &primal_opts());
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "degenerate multi-artificial LP must be feasible+Optimal (no false-Infeasible); got {:?}",
+            result.status
+        );
+        assert!(
+            (result.objective - 2.0).abs() < 1e-6,
+            "artificial preference must not shift the optimum; expected obj=2, got {}",
+            result.objective
+        );
+        // Primal feasibility: every equality residual ≈ 0 and x ≥ 0.
+        let x = &result.solution;
+        assert!(x.iter().all(|&v| v >= -1e-6), "x must be ≥ 0: {x:?}");
+        let rows = [[0, 1], [2, 3], [0, 2], [1, 3]];
+        for r in rows {
+            let lhs = x[r[0]] + x[r[1]];
+            assert!(
+                (lhs - 1.0).abs() < 1e-6,
+                "equality row {r:?} must hold: lhs={lhs}"
+            );
         }
     }
 }

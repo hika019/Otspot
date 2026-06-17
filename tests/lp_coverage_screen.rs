@@ -8,7 +8,10 @@
 //! ソルバーは N-row RHS を problem.obj_offset として加算して報告するため、比較は
 //! exp_adjusted = netlib_ref + problem.obj_offset で補正する。
 
+use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::qp::solve_qp_with;
 use otspot_dev::bench_utils::load_baseline_objectives;
 use otspot_dev::screening::{is_bug, screen_single};
 use std::path::Path;
@@ -150,9 +153,12 @@ fn lp_coverage_screen_sample_fast() {
 }
 
 /// `cycle` LP convergence — tier-2 because it takes ~19-20s on a loaded system.
-/// Uses 30s timeout to avoid false failures under 3-thread full-suite load.
+/// This remains the post-#31 canary: current behavior is honest
+/// `SuboptimalSolution` at the known optimum, covered by
+/// `diag_cycle_is_feasible_and_near_optimal`, but this test stays pinned to
+/// `Optimal` until crossover certification is fixed.
 #[test]
-#[ignore = "broken: #31 cycle returns SuboptimalSolution≠Optimal; honest companion exists"]
+#[ignore = "open #31: Optimal 未証明 (postsolve crossover storm)。現挙動は diag_cycle_is_feasible_and_near_optimal が honest 検証済"]
 fn lp_coverage_screen_cycle_tier2() {
     let baseline = load_baseline_objectives(Path::new(BASELINE_CSV))
         .expect("baseline CSV missing");
@@ -168,11 +174,29 @@ fn lp_coverage_screen_cycle_tier2() {
     }
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(30.0);
-    let screen = screen_single(&path, "cycle", &opts, &baseline, DEFAULT_REL_TOL);
-    eprintln!("cycle: {:?} {:.2}s", screen.verdict, screen.elapsed_secs);
+    let problem = parse_qps(&path).expect("parse cycle.QPS");
+    let t0 = std::time::Instant::now();
+    let result = solve_qp_with(&problem, &opts);
+    let elapsed = t0.elapsed().as_secs_f64();
+    let expected = baseline
+        .get("cycle")
+        .copied()
+        .expect("cycle baseline missing");
+    let rel_err = (result.objective - expected).abs() / expected.abs().max(1.0);
+    eprintln!(
+        "cycle: status={:?} obj={:.10e} expected={:.10e} rel_err={:.2e} {:.2}s",
+        result.status, result.objective, expected, rel_err, elapsed
+    );
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "cycle expected Optimal, got {:?}",
+        result.status
+    );
     assert!(
-        !is_bug(&screen.verdict),
-        "cycle failed: {:?}",
-        screen.verdict
+        rel_err < DEFAULT_REL_TOL,
+        "cycle obj rel_err {:.2e} >= {:.0e}",
+        rel_err,
+        DEFAULT_REL_TOL
     );
 }

@@ -130,13 +130,18 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
                 let mut no_presolve_opts = options.clone();
                 no_presolve_opts.presolve = false;
                 let mut result = solve_unpresolved_lp_from_qp(&lp, problem, &no_presolve_opts);
-                if result.timing_breakdown.is_none() {
-                    result.timing_breakdown = Some(crate::problem::TimingBreakdown {
-                        presolve_us,
-                        solve_us: t_solve.elapsed().as_micros() as u64,
-                        postsolve_us: 0,
-                        ..Default::default()
-                    });
+                match result.timing_breakdown.as_mut() {
+                    Some(timing) => {
+                        timing.presolve_us += presolve_us;
+                    }
+                    None => {
+                        result.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                            presolve_us,
+                            solve_us: t_solve.elapsed().as_micros() as u64,
+                            postsolve_us: 0,
+                            ..Default::default()
+                        });
+                    }
                 }
                 return result;
             }
@@ -608,6 +613,18 @@ mod tests {
     use crate::sparse::CscMatrix;
     use std::time::Duration;
 
+    const NONREDUCING_QP_VARS: usize = 2;
+    const NONREDUCING_QP_ROWS: usize = 2;
+    const NONREDUCING_QP_NNZ: usize = 4;
+    const NONREDUCING_QP_RHS: f64 = 1.0;
+    const NONREDUCING_QP_OBJ_X0: f64 = 1.0;
+    const NONREDUCING_QP_OBJ_X1: f64 = 2.0;
+    const NONREDUCING_QP_A_ROWS: [usize; NONREDUCING_QP_NNZ] = [0, 0, 1, 1];
+    const NONREDUCING_QP_A_COLS: [usize; NONREDUCING_QP_NNZ] = [0, 1, 0, 1];
+    const NONREDUCING_QP_A_VALS: [f64; NONREDUCING_QP_NNZ] = [1.0, 1.0, -1.0, -1.0];
+    const NONREDUCING_QP_EXPECTED_OBJ: f64 = NONREDUCING_QP_OBJ_X0;
+    const NONREDUCING_QP_OBJ_TOL: f64 = 1e-9;
+
     fn eq_lp_fixture(n: usize, m: usize) -> LpProblem {
         let mut rows = Vec::new();
         let mut cols = Vec::new();
@@ -626,6 +643,38 @@ mod tests {
         let ctypes = vec![crate::problem::ConstraintType::Eq; m];
         let bounds = vec![(0.0_f64, f64::INFINITY); n];
         LpProblem::new_general(c, a, b, ctypes, bounds, None).unwrap()
+    }
+
+    fn nonreducing_q_zero_qp_fixture() -> QpProblem {
+        let a = CscMatrix::from_triplets(
+            &NONREDUCING_QP_A_ROWS,
+            &NONREDUCING_QP_A_COLS,
+            &NONREDUCING_QP_A_VALS,
+            NONREDUCING_QP_ROWS,
+            NONREDUCING_QP_VARS,
+        )
+        .unwrap();
+        QpProblem::new(
+            CscMatrix::new(NONREDUCING_QP_VARS, NONREDUCING_QP_VARS),
+            vec![NONREDUCING_QP_OBJ_X0, NONREDUCING_QP_OBJ_X1],
+            a,
+            vec![NONREDUCING_QP_RHS, -NONREDUCING_QP_RHS],
+            vec![(0.0, f64::INFINITY); NONREDUCING_QP_VARS],
+            vec![ConstraintType::Ge, ConstraintType::Ge],
+        )
+        .unwrap()
+    }
+
+    fn lp_from_qp_fixture(qp: &QpProblem) -> LpProblem {
+        LpProblem::new_general(
+            qp.c.clone(),
+            qp.a.clone(),
+            qp.b.clone(),
+            qp.constraint_types.clone(),
+            qp.bounds.clone(),
+            None,
+        )
+        .unwrap()
     }
 
     /// 2 solve を独立実行し、それぞれの route stats が独立していることを確認。
@@ -697,6 +746,51 @@ mod tests {
             .expect("LP-dispatched QP presolve/postsolve path must keep timing");
         assert!(timing.presolve_us > 0, "presolve timing must be recorded");
         assert!(timing.postsolve_us > 0, "postsolve timing must be recorded");
+    }
+
+    #[test]
+    fn qp_zero_path_nonreducing_presolve_keeps_outer_presolve_timing() {
+        use crate::options::SolverOptions;
+        use crate::problem::{SolveRoute, SolveStatus};
+
+        let problem = nonreducing_q_zero_qp_fixture();
+        let lp = lp_from_qp_fixture(&problem);
+        let presolve_result = crate::presolve::run_presolve(&lp, None)
+            .expect("sentinel fixture must not terminate in presolve");
+        assert!(
+            !presolve_result.was_reduced,
+            "sentinel fixture must exercise the non-reducing presolve fallthrough"
+        );
+
+        let result = solve_as_lp(&problem, &SolverOptions::default());
+
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert_eq!(result.stats.route, SolveRoute::LpForwardedFromQp);
+        assert!(
+            (result.objective - NONREDUCING_QP_EXPECTED_OBJ).abs() < NONREDUCING_QP_OBJ_TOL,
+            "sentinel objective changed: got {} expected {}",
+            result.objective,
+            NONREDUCING_QP_EXPECTED_OBJ
+        );
+        let timing = result
+            .timing_breakdown
+            .expect("LP-dispatched QP must report timing");
+        assert!(
+            timing.presolve_us > 0,
+            "outer presolve timing must be kept when inner no-presolve solve returns timing"
+        );
+
+        let no_presolve_opts = SolverOptions {
+            presolve: false,
+            ..SolverOptions::default()
+        };
+        let no_presolve_result = solve_as_lp(&problem, &no_presolve_opts);
+        assert_eq!(result.status, no_presolve_result.status);
+        assert_eq!(result.iterations, no_presolve_result.iterations);
+        assert!(
+            (result.objective - no_presolve_result.objective).abs() < NONREDUCING_QP_OBJ_TOL,
+            "presolve timing fix must not change the numerical objective"
+        );
     }
 
     /// 大規模 LP (n > 旧 IPM 閾値) でも IPM を経由せず simplex 一本で解くこと。

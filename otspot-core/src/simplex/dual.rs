@@ -164,6 +164,7 @@ fn cold_start_dual(
         options,
         &mut total_iters,
         false,
+        None,
     );
 
     // Gate a Phase II `Unbounded` on a re-derived recession ray (same verified

@@ -37,6 +37,10 @@ const STEP_BAIL_RATIO: usize = 10;
 ///
 /// `enable_phase1_cycling_bail` arms the obj+step plateau early-bail
 /// described above; pass `true` only from Primal Phase I.
+///
+/// `art_threshold = Some(t)` enables the Phase I artificial leaving preference in
+/// the ratio test (basis columns `>= t` are artificials, driven out first within
+/// the Harris tie-band); pass `None` from Phase II / non-artificial solves.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     a: &CscMatrix,
@@ -51,6 +55,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     options: &SolverOptions,
     iter_count_out: &mut usize,
     enable_phase1_cycling_bail: bool,
+    art_threshold: Option<usize>,
 ) -> SimplexOutcome {
     let max_iter = usize::MAX; // timeout is the real guard
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
@@ -339,6 +344,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             m,
             effective_floor,
             options.primal_tol,
+            art_threshold,
         ) {
             None => return SimplexOutcome::Unbounded,
             Some(i) => i,

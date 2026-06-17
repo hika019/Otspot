@@ -102,6 +102,10 @@ fn diag_ken13_deadline_must_stop_within_watchdog() {
             status,
             SolveStatus::Timeout
                 | SolveStatus::Optimal
+                // deadline-stopped feasible incumbent: ken-13 reaches the optimal
+                // objective but the 30s cutoff lands before full certification, so
+                // the honoured-deadline result is reported as SuboptimalSolution.
+                | SolveStatus::SuboptimalSolution
                 | SolveStatus::NumericalError
                 | SolveStatus::Infeasible
         ),

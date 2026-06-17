@@ -239,16 +239,16 @@ fn perold_presolve_off_baseline() {
         "perold[presolve=off]: status={:?} obj={:.4e} df_rel_bound={:.2e}",
         r.status, r.objective, df_rel_bound
     );
-    // SKIP allowed for status: 別経路で NumericalError でも本テストの目的ではない。
-    if matches!(r.status, SolveStatus::Optimal) {
-        assert!(
-            df_rel_bound < 1e-6,
-            "perold[presolve=off]: df_rel_bound={:.3e} → simplex 単体に別バグの疑い",
-            df_rel_bound
-        );
-    } else {
-        eprintln!("perold[presolve=off]: status={:?}", r.status);
-    }
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "perold[presolve=off] must solve cleanly on the direct simplex path"
+    );
+    assert!(
+        df_rel_bound < 1e-6,
+        "perold[presolve=off]: df_rel_bound={:.3e} → simplex 単体に別バグの疑い",
+        df_rel_bound
+    );
 }
 
 /// 小規模 Netlib LP の post-solve dual feasibility 網羅テスト。
@@ -271,6 +271,12 @@ macro_rules! netlib_postsolve_test {
 }
 
 netlib_postsolve_test!(afiro_postsolve, "data/lp_problems/afiro.QPS", 1e-6, 30.0);
+netlib_postsolve_test!(
+    adlittle_postsolve,
+    "data/lp_problems/adlittle.QPS",
+    1e-6,
+    30.0
+);
 netlib_postsolve_test!(sc50a_postsolve, "data/lp_problems/sc50a.QPS", 1e-6, 30.0);
 netlib_postsolve_test!(sc50b_postsolve, "data/lp_problems/sc50b.QPS", 1e-6, 30.0);
 netlib_postsolve_test!(sc105_postsolve, "data/lp_problems/sc105.QPS", 1e-6, 30.0);
@@ -302,6 +308,7 @@ netlib_postsolve_test!(
     1e-6,
     30.0
 );
+netlib_postsolve_test!(fv25_postsolve, "data/lp_problems/25fv47.QPS", 1e-6, 60.0);
 
 // 大規模 LP の dfeas_rel assertion (network/重 LP は #[ignore] で default 除外)。
 
@@ -322,12 +329,12 @@ fn cre_b_postsolve_dual_feasibility() {
 }
 
 /// greenbea: IPM-pathological LP (5405 vars × 2392 rows、IPM_BUDGET_FRACTION=0.5)。
-/// アイドル時 ~164s で converge (IPM stall 85s + simplex fallback 79s)、
-/// CPU contention 1.04x 以上で 170s budget を超えて FAIL するため default 除外。
+/// Measured 2026-06-14 on this worktree: ~30.6s and converges with
+/// df_rel_bound=4.20e-11. Still over the default-test budget, so default 除外。
 /// regression sentinel として heavy profile 実行で機能 (`cargo nextest run --run-ignored only`)。
 /// #91 で v0.2.0→HEAD のコード regression なしを実証済。
 #[test]
-#[ignore = "heavy ~164s idle、bench 並行下 flaky (170s margin 6s)。--run-ignored only"]
+#[ignore = "heavy: greenbea dual-feas sentinel is correct but ~30.6s (>30s default); --run-ignored only"]
 fn greenbea_postsolve_dual_feasibility() {
     let r = check_postsolve_dual_feasibility(
         "data/lp_problems/greenbea.QPS",

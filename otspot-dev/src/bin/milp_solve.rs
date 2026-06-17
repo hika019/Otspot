@@ -28,6 +28,8 @@ fn main() -> ExitCode {
     let mut path: Option<String> = None;
     let mut timeout_secs = 100.0_f64;
     let mut eps = 1e-6_f64;
+    let mut cuts = false;
+    let mut cut_rounds = 0usize;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -38,6 +40,12 @@ fn main() -> ExitCode {
             "--eps" => {
                 i += 1;
                 eps = args[i].parse().expect("--eps value");
+            }
+            "--cuts" => cuts = true,
+            "--cut-rounds" => {
+                i += 1;
+                cut_rounds = args[i].parse().expect("--cut-rounds value");
+                cuts = true;
             }
             other => path = Some(other.to_string()),
         }
@@ -72,8 +80,16 @@ fn main() -> ExitCode {
     let cfg = MipConfig {
         gap_tol: eps,
         integer_feas_tol: eps,
+        cuts,
+        max_cut_rounds: cut_rounds,
         ..Default::default()
     };
+
+    let profile = otspot_core::diag::lp_scale_profile_enabled();
+    if profile {
+        otspot_core::diag::reset_lp_scale_profile();
+        otspot_core::diag::reset_simplex_fallback_profile();
+    }
 
     let start = Instant::now();
     let (res, stats) = solve_milp_with_stats(&milp, &opts, &cfg);
@@ -90,10 +106,41 @@ fn main() -> ExitCode {
         println!("objective: {}", res.objective);
     }
     println!("wall_ms: {wall_ms:.3}");
+    println!("root_lp_bound: {}", stats.root_lp_bound);
     println!("nodes: {}", stats.nodes_processed);
     println!("incumbent_updates: {}", stats.incumbent_updates);
+    println!("fp_incumbent_found: {}", stats.fp_incumbent_found);
     println!("max_depth: {}", stats.max_depth_seen);
     println!("pruned: {}", stats.pruned);
+    println!("lp_presolve_us: {}", stats.lp_presolve_us_total);
+    println!("lp_solve_us: {}", stats.lp_solve_us_total);
+    println!("lp_postsolve_us: {}", stats.lp_postsolve_us_total);
+    if profile {
+        println!("lp_solve_us_root: {}", stats.lp_solve_us_root);
+        println!("lp_solve_us_desc: {}", stats.lp_solve_us_desc);
+        println!("lp_scale_us_root: {}", stats.lp_scale_us_root);
+        println!("lp_scale_us_desc: {}", stats.lp_scale_us_desc);
+        println!("lp_scale_calls_root: {}", stats.lp_scale_calls_root);
+        println!("lp_scale_calls_desc: {}", stats.lp_scale_calls_desc);
+        println!(
+            "fallback_ub_violation_out_of_scope: {}",
+            stats.fallback_ub_violation_out_of_scope
+        );
+        println!(
+            "fallback_phase1_bound_violation: {}",
+            stats.fallback_phase1_bound_violation
+        );
+        println!("fallback_crash_infeasible: {}", stats.fallback_crash_infeasible);
+    }
+    if stats.nodes_processed > 0 {
+        let n = stats.nodes_processed as f64;
+        println!(
+            "per_node_us: presolve={:.1} solve={:.1} postsolve={:.1}",
+            stats.lp_presolve_us_total as f64 / n,
+            stats.lp_solve_us_total as f64 / n,
+            stats.lp_postsolve_us_total as f64 / n,
+        );
+    }
 
     ExitCode::SUCCESS
 }
