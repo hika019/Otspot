@@ -311,3 +311,68 @@ fn faer_par_threads_sweep_monotone() {
         );
     }
 }
+
+/// threads=1 で実際に QP を solve したとき、Par::Seq が使われることを確認する
+/// end-to-end sentinel。
+///
+/// 検証:
+/// 1. `solver_par_from_threads(1)` が `Par::Seq` (thread count = 1) を返す。
+/// 2. 1-thread rayon pool 内で `solve_qp_with` が正しく完了する。
+///
+/// 失敗条件: `solver_par_from_threads(1)` が `Par::Rayon(N>1)` を返すよう改変すると
+/// `par_thread_count == 1` の assert が FAIL する。
+/// 1-thread pool 内で `Par::Rayon(N)` が使われた場合も rayon 設計上デッドロックはしないが
+/// エンコーディング assert で検出される。
+#[test]
+fn ipm_threads_1_par_seq_budget_sentinel() {
+    use crate::options::SolverOptions;
+    use crate::problem::SolveStatus;
+    use crate::qp::{solve_qp_with, QpProblem};
+
+    // 凸 QP (1/2 規約): 1/2 * 2 * x^2 + (-2)*x = x^2 - 2x
+    // s.t. 0 ≤ x ≤ 3 → 最適解 x=1, obj=-1
+    let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+    let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+    let prob =
+        QpProblem::new(q, vec![-2.0], a, vec![], vec![(0.0_f64, 3.0_f64)], vec![]).unwrap();
+
+    let opts = SolverOptions {
+        threads: 1,
+        presolve: false,
+        ..SolverOptions::default()
+    };
+
+    // (1) エンコーディング: threads=1 → Par::Seq (= thread count 1)
+    let par = solver_par_from_threads(1);
+    let encoded = par_thread_count(par);
+    assert_eq!(
+        encoded, 1,
+        "threads=1 must encode Par::Seq (thread count 1); got {encoded} \
+         (sentinel: solver_par_from_threads を Par::Rayon に改変すると FAIL)"
+    );
+
+    // (2) 1-thread rayon pool 内で solve が完了する (Par::Seq は rayon 未使用)
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("build 1-thread rayon pool");
+
+    let pool_size = pool.install(rayon::current_num_threads);
+    assert_eq!(pool_size, 1, "installed pool must report exactly 1 active thread");
+
+    let result = pool.install(|| solve_qp_with(&prob, &opts));
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "threads=1 QP solve inside 1-thread pool must reach Optimal; got {:?}",
+        result.status
+    );
+
+    const EXPECTED_OBJ: f64 = -1.0; // x^2 - 2x at x=1 = -1
+    assert!(
+        (result.objective - EXPECTED_OBJ).abs() < 1e-4,
+        "optimal obj must be {EXPECTED_OBJ}; got {} (solution={:?})",
+        result.objective,
+        result.solution
+    );
+}
