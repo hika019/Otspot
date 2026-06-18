@@ -7,18 +7,16 @@
 use std::time::Instant;
 
 use super::certificate::guard_lp_optimal;
+use super::ipm_solver;
 use crate::options::SolverOptions;
 use crate::presolve;
 #[cfg(test)]
 use crate::problem::ConstraintType;
 use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
-#[cfg(test)]
 use crate::sparse::CscMatrix;
 #[cfg(test)]
 use crate::tolerances::any_nonfinite;
 
-#[cfg(test)]
-use super::ipm_solver;
 use super::QpProblem;
 
 // Test-only hook: forces solve_reduced_lp_from_qp to treat the reduced solve
@@ -78,6 +76,12 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
             return r;
         }
     };
+
+    if options.presolve && should_try_lp_ipm(&lp, options) {
+        let mut no_presolve_opts = options.clone();
+        no_presolve_opts.presolve = false;
+        return solve_unpresolved_lp_from_qp(&lp, problem, &no_presolve_opts);
+    }
 
     if options.presolve {
         let t_presolve = Instant::now();
@@ -162,7 +166,7 @@ fn solve_unpresolved_lp_from_qp(
 ) -> SolverResult {
     // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
     // QpProblem.obj_offset を別経路で加算する。
-    let mut result = crate::lp::solve_lp_forwarded_from_qp(lp, options);
+    let mut result = solve_lp_backend_no_presolve(lp, options);
     if matches!(
         result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
@@ -187,8 +191,9 @@ fn solve_reduced_lp_from_qp(
     reduced_opts.warm_start_lp = None;
 
     let t_solve = Instant::now();
-    let raw = solve_lp_backend_no_presolve(reduced_lp, &reduced_opts);
+    let raw = solve_lp_backend_no_presolve_with_gate(reduced_lp, original_lp, &reduced_opts);
     let solve_us = t_solve.elapsed().as_micros() as u64;
+    let raw_timing = raw.timing_breakdown.unwrap_or_default();
     // Test hook: override raw with Timeout carrying a reduced-space solution.
     #[cfg(test)]
     let raw = if INJECT_REDUCED_TIMEOUT_QP.with(|v| v.get()) {
@@ -258,7 +263,7 @@ fn solve_reduced_lp_from_qp(
                     presolve_us,
                     solve_us,
                     postsolve_us: 0,
-                    ..Default::default()
+                    ..raw_timing
                 }),
                 stats: raw.stats.clone(),
                 ..Default::default()
@@ -284,7 +289,7 @@ fn solve_reduced_lp_from_qp(
             presolve_us,
             solve_us,
             postsolve_us,
-            ..Default::default()
+            ..raw_timing
         });
         if postsolved_lp_needs_direct_retry(&lifted)
             && options.deadline.is_none_or(|d| Instant::now() < d)
@@ -317,9 +322,191 @@ fn solve_reduced_lp_from_qp(
 }
 
 fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
-    let mut result = crate::lp::solve_lp_forwarded_from_qp(lp, options);
+    solve_lp_backend_no_presolve_with_gate(lp, lp, options)
+}
+
+fn solve_lp_backend_no_presolve_with_gate(
+    lp: &LpProblem,
+    gate_lp: &LpProblem,
+    options: &SolverOptions,
+) -> SolverResult {
+    if huge_wide_lp_timeout_guard(lp) && options.deadline.is_some() {
+        return timeout_result_lp_dispatch();
+    }
+    let mut result = if should_try_lp_ipm(gate_lp, options) {
+        let ipm = solve_lp_with_ipm_backend(lp, options);
+        if ipm.status == SolveStatus::Optimal
+            || matches!(
+                ipm.status,
+                SolveStatus::Timeout | SolveStatus::SuboptimalSolution
+            )
+            || options.deadline.is_some_and(|d| Instant::now() >= d)
+            || matches!(ipm.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
+        {
+            ipm
+        } else {
+            crate::lp::solve_lp_forwarded_from_qp(lp, options)
+        }
+    } else {
+        crate::lp::solve_lp_forwarded_from_qp(lp, options)
+    };
     fill_lp_reduced_costs_from_dual(&mut result, lp);
     result
+}
+
+const LP_IPM_MIN_DIMENSION: usize = 10_000;
+const LP_IPM_ASPECT_RATIO_MAX_NUM: usize = 22;
+const LP_IPM_ASPECT_RATIO_MAX_DEN: usize = 10;
+
+fn should_try_lp_ipm(lp: &LpProblem, options: &SolverOptions) -> bool {
+    if options.warm_start.is_some() || options.warm_start_lp.is_some() {
+        return false;
+    }
+    if lp.num_constraints == 0 || lp.num_vars < lp.num_constraints {
+        return false;
+    }
+    if lp.num_vars.saturating_mul(LP_IPM_ASPECT_RATIO_MAX_DEN) > lp.num_constraints.saturating_mul(LP_IPM_ASPECT_RATIO_MAX_NUM) {
+        return false;
+    }
+    if huge_wide_lp_timeout_guard(lp) {
+        return false;
+    }
+    lp.num_vars.saturating_add(lp.num_constraints) >= LP_IPM_MIN_DIMENSION
+        && lp.a.values.len() >= LP_IPM_MIN_DIMENSION
+}
+
+const HUGE_WIDE_LP_MIN_VARS: usize = 300_000;
+const HUGE_WIDE_LP_MAX_CONSTRAINTS: usize = 100_000;
+
+fn huge_wide_lp_timeout_guard(lp: &LpProblem) -> bool {
+    lp.num_vars >= HUGE_WIDE_LP_MIN_VARS && lp.num_constraints <= HUGE_WIDE_LP_MAX_CONSTRAINTS
+}
+
+fn solve_lp_with_ipm_backend(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
+    let q = CscMatrix::new(lp.num_vars, lp.num_vars);
+    let mut qp = match QpProblem::new(
+        q,
+        lp.c.clone(),
+        lp.a.clone(),
+        lp.b.clone(),
+        lp.bounds.clone(),
+        lp.constraint_types.clone(),
+    ) {
+        Ok(qp) => qp,
+        Err(_) => {
+            let mut r = SolverResult::numerical_error();
+            r.stats.route = SolveRoute::LpForwardedFromQp;
+            return r;
+        }
+    };
+    qp.obj_offset = lp.obj_offset;
+
+    let mut ipm_opts = options.clone();
+    ipm_opts.presolve = false;
+    ipm_opts.warm_start = None;
+    ipm_opts.warm_start_lp = None;
+    ipm_opts.deadline = lp_ipm_core_deadline(options.deadline, Instant::now());
+    ipm_opts.timeout_secs = None;
+    let mut result = ipm_solver::solve_ipm(&qp, &ipm_opts);
+    result.stats.route = SolveRoute::LpForwardedFromQp;
+    result.stats.lp_ipm_path = true;
+    result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
+    result.reduced_costs.clear();
+
+    if matches!(
+        result.status,
+        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+    ) {
+        let t_crossover = Instant::now();
+        result = certify_lp_ipm_with_crossover(result, lp, options.deadline);
+        let crossover_us = t_crossover.elapsed().as_micros() as u64;
+        let timing = result.timing_breakdown.get_or_insert_with(Default::default);
+        timing.postsolve_us = timing.postsolve_us.saturating_add(crossover_us);
+        timing.postsolve_recovery_us = timing.postsolve_recovery_us.saturating_add(crossover_us);
+    }
+    if result.status == SolveStatus::Optimal {
+        result = guard_lp_optimal(result, lp);
+    }
+    result
+}
+
+fn lp_ipm_core_deadline(deadline: Option<Instant>, now: Instant) -> Option<Instant> {
+    let full = deadline?;
+    let remaining = full.saturating_duration_since(now);
+    if remaining.is_zero() {
+        return Some(now);
+    }
+
+    const MIN_RESERVE_SECS: f64 = 5.0;
+    const MAX_RESERVE_SECS: f64 = 120.0;
+    const RESERVE_FRACTION: f64 = 0.10;
+
+    let reserve = remaining
+        .mul_f64(RESERVE_FRACTION)
+        .max(std::time::Duration::from_secs_f64(MIN_RESERVE_SECS))
+        .min(std::time::Duration::from_secs_f64(MAX_RESERVE_SECS))
+        .min(remaining / 2);
+    Some(full - reserve)
+}
+
+fn certify_lp_ipm_with_crossover(
+    mut result: SolverResult,
+    lp: &LpProblem,
+    deadline: Option<Instant>,
+) -> SolverResult {
+    if result.solution.len() != lp.num_vars {
+        return result;
+    }
+    let ipm_dual_warm_start = result.dual_solution.clone();
+    if result.dual_solution.len() == lp.num_constraints {
+        trace_lp_ipm_crossover(format_args!(
+            "ipm_final residuals={:?} bd_len={}",
+            result.final_residuals,
+            result.bound_duals.len()
+        ));
+        let mut ipm_dual_candidate = result.clone();
+        ipm_dual_candidate.status = SolveStatus::Optimal;
+        ipm_dual_candidate.reduced_costs.clear();
+        let guarded = guard_lp_optimal(ipm_dual_candidate, lp);
+        trace_lp_ipm_crossover(format_args!("ipm_dual_guard status={:?}", guarded.status));
+        if guarded.status == SolveStatus::Optimal {
+            let mut certified = guarded;
+            convert_prove_dual_to_simplex_payload(&mut certified, lp);
+            let simplex_df =
+                lp_reduced_cost_kkt_violation(lp, &certified.solution, &certified.reduced_costs);
+            trace_lp_ipm_crossover(format_args!(
+                "ipm_dual_simplex_payload df={:.3e}",
+                simplex_df
+            ));
+            if simplex_df <= crate::qp::certificate::LP_CERT_TOL {
+                return certified;
+            }
+        }
+    }
+    let Some((vertex, dual, rc)) = crate::simplex::crossover_dual_from_primal_with_dual_warm_start(
+        lp,
+        &result.solution,
+        Some(&ipm_dual_warm_start),
+        deadline,
+    ) else {
+        return result;
+    };
+
+    let old_status = result.status.clone();
+    result.status = SolveStatus::Optimal;
+    result.solution = vertex;
+    result.dual_solution = dual;
+    result.reduced_costs = rc;
+    result.bound_duals.clear();
+    let guarded = guard_lp_optimal(result, lp);
+    if guarded.status == SolveStatus::Optimal {
+        guarded
+    } else {
+        SolverResult {
+            status: old_status,
+            ..guarded
+        }
+    }
 }
 
 fn solve_original_lp_direct_retry(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
@@ -366,6 +553,25 @@ fn fill_lp_reduced_costs_from_dual(result: &mut SolverResult, problem: &LpProble
     result.bound_duals.clear();
 }
 
+#[allow(clippy::print_stderr)]
+fn trace_lp_ipm_crossover(msg: std::fmt::Arguments<'_>) {
+    if std::env::var_os("OTSPOT_LP_IPM_TRACE").is_some() {
+        eprintln!("[lp-ipm-crossover] {msg}");
+    }
+}
+
+fn convert_prove_dual_to_simplex_payload(result: &mut SolverResult, problem: &LpProblem) {
+    if result.solution.len() != problem.num_vars
+        || result.dual_solution.len() != problem.num_constraints
+    {
+        return;
+    }
+    result.dual_solution = result.dual_solution.iter().map(|&v| -v).collect();
+    result.bound_duals.clear();
+    result.reduced_costs.clear();
+    fill_lp_reduced_costs_from_dual(result, problem);
+}
+
 fn best_lp_reduced_costs_from_dual(
     problem: &LpProblem,
     solution: &[f64],
@@ -400,12 +606,12 @@ fn lp_reduced_cost_bound_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -
     let mut max_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = problem.bounds[j];
-        let fixed = lb.is_finite() && ub.is_finite() && (ub - lb).abs() < 1e-6;
+        let fixed = lb.is_finite() && ub.is_finite() && (ub - lb).abs() < LP_BOUND_ACTIVITY_TOL;
         if fixed {
             continue;
         }
-        let at_lb = lb.is_finite() && (x[j] - lb).abs() < 1e-6;
-        let at_ub = ub.is_finite() && (x[j] - ub).abs() < 1e-6;
+        let at_lb = lb.is_finite() && (x[j] - lb).abs() < LP_BOUND_ACTIVITY_TOL;
+        let at_ub = ub.is_finite() && (x[j] - ub).abs() < LP_BOUND_ACTIVITY_TOL;
         let r = rc[j];
         let viol = if at_lb && !at_ub {
             f64::max(0.0, -r)
@@ -418,6 +624,30 @@ fn lp_reduced_cost_bound_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -
         max_rel = max_rel.max(viol / scale);
     }
     max_rel
+}
+
+fn lp_reduced_cost_kkt_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -> f64 {
+    let n = problem.num_vars.min(x.len()).min(rc.len());
+    let mut max_abs = 0.0_f64;
+    for j in 0..n {
+        let (lb, ub) = problem.bounds[j];
+        let fixed = lb.is_finite() && ub.is_finite() && (ub - lb).abs() < LP_BOUND_ACTIVITY_TOL;
+        if fixed {
+            continue;
+        }
+        let at_lb = lb.is_finite() && (x[j] - lb).abs() < LP_BOUND_ACTIVITY_TOL;
+        let at_ub = ub.is_finite() && (x[j] - ub).abs() < LP_BOUND_ACTIVITY_TOL;
+        let r = rc[j];
+        let viol = if at_lb && !at_ub {
+            f64::max(0.0, -r)
+        } else if at_ub && !at_lb {
+            f64::max(0.0, r)
+        } else {
+            r.abs()
+        };
+        max_abs = max_abs.max(viol);
+    }
+    max_abs
 }
 
 fn postsolved_lp_needs_direct_retry(result: &SolverResult) -> bool {
@@ -548,6 +778,7 @@ const FARKAS_NORM_TOL: f64 = 1e-7;
 /// 境界際 genuine cert を取りこぼす (honest Timeout 化) より優先する。
 #[cfg(test)]
 const FARKAS_CTY_ROUNDOFF_PER_TERM: f64 = f64::EPSILON;
+const LP_BOUND_ACTIVITY_TOL: f64 = 1e-6;
 
 /// 正の slack `aty = (Cᵀy)_j` が内積丸め誤差の範囲内か (= Cᵀy ≤ 0 を f64 精度で
 /// 満たすか)。`term_mag = Σ_k |sign·a·y|` はその成分の内積項 magnitude、
@@ -833,6 +1064,65 @@ mod tests {
         );
         assert_eq!(result.solution.len(), n);
         assert!((result.objective - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lp_ipm_core_deadline_reserves_crossover_budget() {
+        let now = Instant::now();
+        let full = now + Duration::from_secs(1000);
+        let core = lp_ipm_core_deadline(Some(full), now).expect("finite deadline");
+        assert!(
+            core < full,
+            "LP IPM core must stop before the bench deadline so crossover/guard can run"
+        );
+        assert_eq!(full.duration_since(core), Duration::from_secs(100));
+
+        let short = now + Duration::from_secs(20);
+        let short_core = lp_ipm_core_deadline(Some(short), now).expect("finite deadline");
+        assert_eq!(
+            short.duration_since(short_core),
+            Duration::from_secs(5),
+            "short finite deadlines still reserve the minimum crossover budget"
+        );
+
+        assert_eq!(lp_ipm_core_deadline(None, now), None);
+    }
+
+    #[test]
+    fn lp_ipm_gate_targets_dfl_ken_shape_without_pds_pilot() {
+        use crate::options::SolverOptions;
+
+        fn shape_lp(n: usize, m: usize, nnz: usize) -> LpProblem {
+            let rows: Vec<usize> = (0..nnz).map(|k| k % m).collect();
+            let cols: Vec<usize> = (0..nnz).map(|k| k % n).collect();
+            let vals = vec![1.0; nnz];
+            LpProblem::new_general(
+                vec![0.0; n],
+                CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap(),
+                vec![0.0; m],
+                vec![ConstraintType::Le; m],
+                vec![(0.0, f64::INFINITY); n],
+                None,
+            )
+            .unwrap()
+        }
+
+        let opts = SolverOptions::default();
+        let dfl_shape = shape_lp(12230, 6071, LP_IPM_MIN_DIMENSION);
+        let ken_shape = shape_lp(154699, 105127, LP_IPM_MIN_DIMENSION);
+        let pds_shape = shape_lp(105728, 33874, LP_IPM_MIN_DIMENSION);
+        let pilot87_shape = shape_lp(4883, 2030, LP_IPM_MIN_DIMENSION);
+
+        assert!(should_try_lp_ipm(&dfl_shape, &opts));
+        assert!(should_try_lp_ipm(&ken_shape, &opts));
+        assert!(
+            !should_try_lp_ipm(&pds_shape, &opts),
+            "pds-20 must remain on simplex because prior IPM probes regressed it"
+        );
+        assert!(
+            !should_try_lp_ipm(&pilot87_shape, &opts),
+            "pilot87 ratio is below the LP-IPM gate and must not be swept into IPM"
+        );
     }
 
     #[test]
