@@ -12,6 +12,7 @@ use crate::tolerances::*;
 /// `B^{-1}` の1ステップ更新を疎表現で保持する。
 /// 非零エントリのみを `indices` / `values` に格納し、空間効率を確保する。
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct EtaMatrix {
     pub leaving_row: usize,
     pub indices: Vec<usize>,
@@ -25,11 +26,13 @@ pub(crate) struct EtaMatrix {
 ///
 /// [`needs_refactor`]: EtaFile::needs_refactor
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct EtaFile {
     pub etas: Vec<EtaMatrix>,
     pub max_etas: usize,
 }
 
+#[allow(dead_code)]
 impl EtaFile {
     pub fn new(max_etas: usize) -> Self {
         Self {
@@ -70,6 +73,7 @@ pub(crate) fn add_eta(pivot_col: &[f64], leaving_row: usize) -> EtaMatrix {
 }
 
 /// Builds an [`EtaMatrix`] from a sparse pivot column. Avoids dense conversion; output is sorted by index.
+#[allow(dead_code)]
 pub(crate) fn add_eta_sparse(pivot_col: &SparseVec, leaving_row: usize) -> EtaMatrix {
     let pivot_element = match pivot_col.indices.binary_search(&leaving_row) {
         Ok(pos) => pivot_col.values[pos],
@@ -109,6 +113,7 @@ pub(crate) fn add_eta_sparse(pivot_col: &SparseVec, leaving_row: usize) -> EtaMa
 }
 
 /// FTRAN: applies accumulated eta matrices to `rhs` in-place (approximates B⁻¹ · rhs).
+#[allow(dead_code)]
 pub(crate) fn apply_ftran(etas: &[EtaMatrix], rhs: &mut [f64]) {
     for eta in etas {
         let r = eta.leaving_row;
@@ -126,6 +131,7 @@ pub(crate) fn apply_ftran(etas: &[EtaMatrix], rhs: &mut [f64]) {
 }
 
 /// BTRAN: applies eta matrices in reverse order to `rhs` in-place (approximates rhs^T · B⁻¹).
+#[allow(dead_code)]
 pub(crate) fn apply_btran(etas: &[EtaMatrix], rhs: &mut [f64]) {
     for eta in etas.iter().rev() {
         let r = eta.leaving_row;

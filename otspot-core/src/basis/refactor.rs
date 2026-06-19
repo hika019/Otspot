@@ -21,6 +21,7 @@ use std::time::Instant;
 ///
 /// # エラー
 /// LU 分解が失敗（特異）または deadline 超過した場合は `Err` を返す
+#[allow(dead_code)]
 pub(crate) fn refactor_timed(
     a: &CscMatrix,
     basis: &[usize],
