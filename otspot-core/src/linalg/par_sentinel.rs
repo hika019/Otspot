@@ -376,3 +376,61 @@ fn ipm_threads_1_par_seq_budget_sentinel() {
         result.solution
     );
 }
+
+/// threads=2 で `solver_par_from_threads(2)` が `Par::Rayon(2)` を返し、
+/// 2-thread rayon pool 内で QP solve が Optimal に到達することを確認する
+/// end-to-end sentinel。
+///
+/// 失敗条件: `solver_par_from_threads(2)` が `Par::Seq` を返すよう改変すると
+/// `par_thread_count == 2` の assert が FAIL する。
+#[test]
+fn ipm_threads_2_par_rayon_budget_sentinel() {
+    use crate::options::SolverOptions;
+    use crate::problem::SolveStatus;
+    use crate::qp::{solve_qp_with, QpProblem};
+
+    let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+    let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+    let prob =
+        QpProblem::new(q, vec![-2.0], a, vec![], vec![(0.0_f64, 3.0_f64)], vec![]).unwrap();
+
+    let opts = SolverOptions {
+        threads: 2,
+        presolve: false,
+        ..SolverOptions::default()
+    };
+
+    // (1) threads=2 → Par::Rayon(2) (thread count 2)
+    let par = solver_par_from_threads(2);
+    let encoded = par_thread_count(par);
+    assert_eq!(
+        encoded, 2,
+        "threads=2 must encode Par::Rayon(2) (thread count 2); got {encoded} \
+         (sentinel: solver_par_from_threads を Par::Seq に改変すると FAIL)"
+    );
+
+    // (2) 2-thread rayon pool 内で solve が完了する
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .expect("build 2-thread rayon pool");
+
+    let pool_size = pool.install(rayon::current_num_threads);
+    assert_eq!(pool_size, 2, "installed pool must report exactly 2 active threads");
+
+    let result = pool.install(|| solve_qp_with(&prob, &opts));
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "threads=2 QP solve inside 2-thread pool must reach Optimal; got {:?}",
+        result.status
+    );
+
+    const EXPECTED_OBJ: f64 = -1.0; // x^2 - 2x at x=1 = -1
+    assert!(
+        (result.objective - EXPECTED_OBJ).abs() < 1e-4,
+        "optimal obj must be {EXPECTED_OBJ}; got {} (solution={:?})",
+        result.objective,
+        result.solution
+    );
+}
