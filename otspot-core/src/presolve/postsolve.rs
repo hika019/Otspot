@@ -1116,7 +1116,7 @@ pub fn run_postsolve(
             // instant the deadline lapses). See `crossover_deadline_with_reserve`.
             let xover_deadline = crossover_deadline_with_reserve(deadline, Instant::now());
             crate::simplex::crossover_dual_from_primal(orig_problem, &solution, xover_deadline)
-                .map(|(y, _rc)| y)
+                .map(|(_vertex, y, _rc)| y)
         } else {
             None
         };

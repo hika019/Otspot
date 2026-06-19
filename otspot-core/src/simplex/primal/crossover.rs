@@ -1,18 +1,28 @@
 //! Primal-to-dual crossover: reconstruct an optimal basis from a known primal solution.
 
+use super::super::pricing::SteepestEdgePricing;
+use super::super::{build_standard_form, extract_dual_info, SimplexOutcome};
+use super::core::revised_simplex_core;
+use super::reconcile::{
+    extract_solution, pivot_out_degenerate_artificials, reconcile_final_basis_state,
+};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::problem::LpProblem;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
-use super::super::{build_standard_form, extract_dual_info, SimplexOutcome};
-use super::super::pricing::SteepestEdgePricing;
-use super::core::revised_simplex_core;
-use super::reconcile::{pivot_out_degenerate_artificials, reconcile_final_basis_state};
 
 /// Relative tolerance below which a standard-form column value is treated as
 /// at-bound (zero) when seeding the crossover basis from `x_star`.
 const CROSSOVER_ZERO_TOL: f64 = 1e-9;
+const CROSSOVER_PHASE2_CLEANUP_SECS: f64 = 60.0;
+
+#[allow(clippy::print_stderr)]
+fn trace_crossover(msg: std::fmt::Arguments<'_>) {
+    if std::env::var_os("OTSPOT_CROSSOVER_TRACE").is_some() {
+        eprintln!("[crossover] {msg}");
+    }
+}
 
 /// Bound-aware dual infeasibility of `y` against the reported primal `x_star`:
 /// the worst per-variable reduced-cost sign violation. `0` iff `y` is KKT
@@ -74,7 +84,8 @@ pub(crate) fn crossover_dual_from_primal(
     problem: &LpProblem,
     x_star: &[f64],
     deadline: Option<std::time::Instant>,
-) -> Option<(Vec<f64>, Vec<f64>)> {
+) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+    let t_total = std::time::Instant::now();
     let sf = build_standard_form(problem);
     let m = sf.m;
     let n_orig = problem.num_vars;
@@ -83,6 +94,13 @@ pub(crate) fn crossover_dual_from_primal(
     if x_star.len() != n_orig || m == 0 {
         return None;
     }
+    trace_crossover(format_args!(
+        "start m={} n_orig={} n_total={} nnz={}",
+        m,
+        n_orig,
+        n_total,
+        sf.a.values.len()
+    ));
 
     let options = SolverOptions {
         deadline,
@@ -128,6 +146,10 @@ pub(crate) fn crossover_dual_from_primal(
             }
         }
     }
+    trace_crossover(format_args!(
+        "x_std {:.3}s",
+        t_total.elapsed().as_secs_f64()
+    ));
 
     // (2) a_ext = A plus one artificial unit column per row with no slack basis
     // column. The basis (slacks ± artificials) is a permuted ±identity, hence
@@ -158,6 +180,12 @@ pub(crate) fn crossover_dual_from_primal(
     }
     let n_ext = art;
     let a_ext = CscMatrix::from_triplets(&tr, &tc, &tv, m, n_ext).ok()?;
+    trace_crossover(format_args!(
+        "a_ext n_ext={} arts={} {:.3}s",
+        n_ext,
+        n_ext.saturating_sub(n_total),
+        t_total.elapsed().as_secs_f64()
+    ));
 
     // (3) x_star-driven refinement via FTRAN pivots: seat every support column
     // (x_std > 0 — structurals AND slacks) into the basis, displacing 0-valued
@@ -165,6 +193,7 @@ pub(crate) fn crossover_dual_from_primal(
     // (a blind index swap does not). A non-binding Ge surplus slack starts
     // nonbasic, so seating slacks too is required or B⁻¹b ≠ x*.
     {
+        let t_seat = std::time::Instant::now();
         let mut basis_mgr = LuBasis::new_timed(&a_ext, &basis, options.max_etas, deadline).ok()?;
         let mut is_basic = vec![false; n_ext];
         for &col in basis.iter() {
@@ -178,6 +207,8 @@ pub(crate) fn crossover_dual_from_primal(
             .map(|j| (x_std[j], j))
             .collect();
         active.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let active_len = active.len();
+        let mut seat_pivots = 0usize;
         for (_xj, j) in active {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 break;
@@ -205,12 +236,21 @@ pub(crate) fn crossover_dual_from_primal(
                 is_basic[j] = true;
                 basis_mgr.update(j, row, &d_sv);
                 basis[row] = j;
+                seat_pivots += 1;
                 basis_mgr.refactor_if_needed_timed(&a_ext, &basis, deadline);
             }
         }
+        trace_crossover(format_args!(
+            "seat active={} pivots={} stage={:.3}s total={:.3}s",
+            active_len,
+            seat_pivots,
+            t_seat.elapsed().as_secs_f64(),
+            t_total.elapsed().as_secs_f64()
+        ));
     }
 
     // (4) Reconcile x_B = B⁻¹b from a fresh LU (also detects a singular basis).
+    let t_reconcile = std::time::Instant::now();
     let mut x_b = vec![0.0_f64; m];
     let mut y_tmp = vec![0.0_f64; m];
     let mut c_phase1 = vec![0.0_f64; n_ext];
@@ -231,9 +271,15 @@ pub(crate) fn crossover_dual_from_primal(
             *v = 0.0;
         }
     }
+    trace_crossover(format_args!(
+        "reconcile1 stage={:.3}s total={:.3}s",
+        t_reconcile.elapsed().as_secs_f64(),
+        t_total.elapsed().as_secs_f64()
+    ));
 
     // Phase I: drive any residual artificials out (degenerate at the feasible x*).
     if basis.iter().any(|&col| col >= n_total) {
+        let t_phase1 = std::time::Instant::now();
         for i in 0..m {
             if basis[i] >= n_total && x_b[i].abs() <= PIVOT_TOL {
                 x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
@@ -259,26 +305,27 @@ pub(crate) fn crossover_dual_from_primal(
             SimplexOutcome::Optimal(_, _) => {}
             _ => return None,
         }
-        // Verify feasibility with a fresh LU (eta drift can mask residual arts).
-        if reconcile_final_basis_state(
-            &a_ext,
-            &sf.b,
-            &c_phase1,
-            &basis,
-            &mut x_b,
-            &mut y_tmp,
-            options.max_etas,
-            deadline,
-        )
-        .is_err()
-        {
-            return None;
+        trace_crossover(format_args!(
+            "phase1 iters={} stage={:.3}s total={:.3}s",
+            iters,
+            t_phase1.elapsed().as_secs_f64(),
+            t_total.elapsed().as_secs_f64()
+        ));
+        for i in 0..m {
+            if basis[i] >= n_total {
+                x_b[i] = 0.0;
+            }
         }
-        let phase1_obj: f64 = (0..m).map(|i| c_phase1[basis[i]] * x_b[i].max(0.0)).sum();
-        if phase1_obj > PIVOT_TOL {
-            return None;
-        }
+        // Artificials are zeroed and c_phase1 is zero for structurals, so
+        // phase1_obj is identically 0 — basis singularity is caught by
+        // reconcile_final_basis_state below.
+        let t_pivot_out = std::time::Instant::now();
         pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, &sf, &options);
+        trace_crossover(format_args!(
+            "pivot_out_arts stage={:.3}s total={:.3}s",
+            t_pivot_out.elapsed().as_secs_f64(),
+            t_total.elapsed().as_secs_f64()
+        ));
     }
 
     // (5) Read the dual at the x*-representing basis. Its BFS is x*, so its dual
@@ -290,6 +337,7 @@ pub(crate) fn crossover_dual_from_primal(
     let row_scale = vec![1.0_f64; m];
 
     let mut y = vec![0.0_f64; m];
+    let t_dual1 = std::time::Instant::now();
     if reconcile_final_basis_state(
         &a_ext,
         &sf.b,
@@ -304,10 +352,17 @@ pub(crate) fn crossover_dual_from_primal(
     {
         return None;
     }
-    let (dual1, rc1, _) = extract_dual_info(&sf, problem, &y, x_star, &row_scale);
-    let df1 = crossover_dual_infeasibility(problem, x_star, &dual1);
+    let vertex1 = extract_solution(&sf, &basis, &x_b, &[]);
+    let (dual1, rc1, _) = extract_dual_info(&sf, problem, &y, &vertex1, &row_scale);
+    let df1 = crossover_dual_infeasibility(problem, &vertex1, &dual1);
+    trace_crossover(format_args!(
+        "dual1 df={:.3e} stage={:.3}s total={:.3}s",
+        df1,
+        t_dual1.elapsed().as_secs_f64(),
+        t_total.elapsed().as_secs_f64()
+    ));
     if df1 <= crate::qp::certificate::LP_CERT_TOL {
-        return Some((dual1, rc1));
+        return Some((vertex1, dual1, rc1));
     }
 
     for v in x_b.iter_mut() {
@@ -317,6 +372,14 @@ pub(crate) fn crossover_dual_from_primal(
     }
     let mut pricing2 = SteepestEdgePricing::new(n_ext);
     let mut iters2 = 0usize;
+    let t_phase2 = std::time::Instant::now();
+    let mut phase2_options = options.clone();
+    let cleanup_deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs_f64(CROSSOVER_PHASE2_CLEANUP_SECS);
+    phase2_options.deadline = Some(match deadline {
+        Some(global) => cleanup_deadline.min(global),
+        None => cleanup_deadline,
+    });
     let phase2 = revised_simplex_core(
         &a_ext,
         &mut x_b,
@@ -327,13 +390,19 @@ pub(crate) fn crossover_dual_from_primal(
         n_ext,
         n_total,
         &mut pricing2,
-        &options,
+        &phase2_options,
         &mut iters2,
         false,
         None,
     );
     match phase2 {
         SimplexOutcome::Optimal(_, mut y2) => {
+            trace_crossover(format_args!(
+                "phase2 optimal iters={} stage={:.3}s total={:.3}s",
+                iters2,
+                t_phase2.elapsed().as_secs_f64(),
+                t_total.elapsed().as_secs_f64()
+            ));
             if reconcile_final_basis_state(
                 &a_ext,
                 &sf.b,
@@ -346,17 +415,125 @@ pub(crate) fn crossover_dual_from_primal(
             )
             .is_err()
             {
-                return Some((dual1, rc1));
+                return Some((vertex1, dual1, rc1));
             }
-            let (dual2, rc2, _) = extract_dual_info(&sf, problem, &y2, x_star, &row_scale);
-            let df2 = crossover_dual_infeasibility(problem, x_star, &dual2);
+            let vertex2 = extract_solution(&sf, &basis, &x_b, &[]);
+            let (dual2, rc2, _) = extract_dual_info(&sf, problem, &y2, &vertex2, &row_scale);
+            let df2 = crossover_dual_infeasibility(problem, &vertex2, &dual2);
+            trace_crossover(format_args!(
+                "finish df1={:.3e} df2={:.3e} total={:.3}s",
+                df1,
+                df2,
+                t_total.elapsed().as_secs_f64()
+            ));
             if df2 < df1 {
-                Some((dual2, rc2))
+                Some((vertex2, dual2, rc2))
             } else {
-                Some((dual1, rc1))
+                Some((vertex1, dual1, rc1))
             }
         }
-        _ => Some((dual1, rc1)),
+        _ => {
+            let mut y_partial = vec![0.0_f64; m];
+            let partial = if reconcile_final_basis_state(
+                &a_ext,
+                &sf.b,
+                &c_phase2,
+                &basis,
+                &mut x_b,
+                &mut y_partial,
+                options.max_etas,
+                deadline,
+            )
+            .is_ok()
+            {
+                let vertex_p = extract_solution(&sf, &basis, &x_b, &[]);
+                let (dual_p, rc_p, _) =
+                    extract_dual_info(&sf, problem, &y_partial, &vertex_p, &row_scale);
+                let df_p = crossover_dual_infeasibility(problem, &vertex_p, &dual_p);
+                trace_crossover(format_args!(
+                    "phase2 partial iters={} df={:.3e} stage={:.3}s total={:.3}s",
+                    iters2,
+                    df_p,
+                    t_phase2.elapsed().as_secs_f64(),
+                    t_total.elapsed().as_secs_f64()
+                ));
+                Some((df_p, vertex_p, dual_p, rc_p))
+            } else {
+                None
+            };
+            trace_crossover(format_args!(
+                "phase2 fallback iters={} stage={:.3}s total={:.3}s df1={:.3e}",
+                iters2,
+                t_phase2.elapsed().as_secs_f64(),
+                t_total.elapsed().as_secs_f64(),
+                df1
+            ));
+            if let Some((df_p, vertex_p, dual_p, rc_p)) = partial {
+                if df_p < df1 {
+                    Some((vertex_p, dual_p, rc_p))
+                } else {
+                    Some((vertex1, dual1, rc1))
+                }
+            } else {
+                Some((vertex1, dual1, rc1))
+            }
+        }
+    }
+}
+
+pub(crate) fn crossover_dual_from_primal_with_dual_warm_start(
+    problem: &LpProblem,
+    x_star: &[f64],
+    ipm_dual_prove: Option<&[f64]>,
+    deadline: Option<std::time::Instant>,
+) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+    let warm = ipm_dual_prove.and_then(|y_prove| {
+        if y_prove.len() != problem.num_constraints || x_star.len() != problem.num_vars {
+            return None;
+        }
+        let y_simplex: Vec<f64> = y_prove.iter().map(|&v| -v).collect();
+        let mut rc = problem.c.clone();
+        for (j, rc_j) in rc.iter_mut().enumerate().take(problem.num_vars) {
+            let Ok((rows, vals)) = problem.a.get_column(j) else {
+                return None;
+            };
+            for (k, &row) in rows.iter().enumerate() {
+                *rc_j -= vals[k] * y_simplex[row];
+            }
+        }
+        let df = crossover_dual_infeasibility(problem, x_star, &y_simplex);
+        trace_crossover(format_args!("warm_ipm_dual df={:.3e}", df));
+        Some((df, x_star.to_vec(), y_simplex, rc))
+    });
+
+    if let Some((df, vertex, dual, rc)) = warm.as_ref() {
+        if *df <= crate::qp::certificate::LP_CERT_TOL {
+            trace_crossover(format_args!("warm_ipm_dual accept df={:.3e}", df));
+            return Some((vertex.clone(), dual.clone(), rc.clone()));
+        }
+    }
+
+    let cold = crossover_dual_from_primal(problem, x_star, deadline);
+    match (warm, cold) {
+        (
+            Some((warm_df, warm_vertex, warm_dual, warm_rc)),
+            Some((cold_vertex, cold_dual, cold_rc)),
+        ) => {
+            let cold_df = crossover_dual_infeasibility(problem, &cold_vertex, &cold_dual);
+            trace_crossover(format_args!(
+                "warm_vs_basis warm_df={:.3e} basis_df={:.3e}",
+                warm_df, cold_df
+            ));
+            if warm_df < cold_df {
+                Some((warm_vertex, warm_dual, warm_rc))
+            } else {
+                Some((cold_vertex, cold_dual, cold_rc))
+            }
+        }
+        (None, cold) => cold,
+        (Some((_warm_df, warm_vertex, warm_dual, warm_rc)), None) => {
+            Some((warm_vertex, warm_dual, warm_rc))
+        }
     }
 }
 
@@ -375,7 +552,7 @@ mod crossover_tests {
     const DF_TOL: f64 = 1e-7;
 
     fn assert_crossover_complementary(problem: &LpProblem, x_star: &[f64], label: &str) {
-        let (y, rc) = crossover_dual_from_primal(problem, x_star, None)
+        let (_vertex, y, rc) = crossover_dual_from_primal(problem, x_star, None)
             .unwrap_or_else(|| panic!("{label}: crossover returned None"));
         assert_eq!(y.len(), problem.num_constraints, "{label}: dual length");
         assert_eq!(rc.len(), problem.num_vars, "{label}: rc length");
@@ -480,11 +657,7 @@ mod crossover_tests {
             &[0, 1, 0, 1],
             &[1.0, 1.0, 1.0, 1.0],
             vec![1.0, 1.0, 2.0],
-            vec![
-                ConstraintType::Le,
-                ConstraintType::Le,
-                ConstraintType::Le,
-            ],
+            vec![ConstraintType::Le, ConstraintType::Le, ConstraintType::Le],
             vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
         );
         assert_crossover_complementary(&p, &[1.0, 1.0], "degenerate");

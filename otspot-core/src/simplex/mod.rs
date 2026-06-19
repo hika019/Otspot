@@ -20,7 +20,8 @@ pub(crate) use primal::reconcile_final_basis_state;
 #[cfg(test)]
 pub(crate) use primal::OBJ_PROGRESS_RESET_COUNT;
 pub(crate) use primal::{
-    crossover_dual_from_primal, extract_solution, revised_simplex_core, two_phase_simplex,
+    crossover_dual_from_primal, crossover_dual_from_primal_with_dual_warm_start, extract_solution,
+    revised_simplex_core, two_phase_simplex,
 };
 
 pub(crate) use standard_form::build_standard_form;

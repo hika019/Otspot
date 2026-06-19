@@ -6,7 +6,9 @@ mod ratio_test;
 mod reconcile;
 
 pub(crate) use core::revised_simplex_core;
-pub(crate) use crossover::crossover_dual_from_primal;
+pub(crate) use crossover::{
+    crossover_dual_from_primal, crossover_dual_from_primal_with_dual_warm_start,
+};
 pub(crate) use reconcile::{extract_solution, reconcile_final_basis_state};
 #[cfg(test)]
 pub(crate) use reconcile::pivot_out_degenerate_artificials as test_pivot_out_degenerate_artificials;
