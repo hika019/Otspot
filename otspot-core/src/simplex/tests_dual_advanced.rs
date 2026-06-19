@@ -17,20 +17,20 @@ fn make_lp(
     LpProblem::new(c, a, b).unwrap()
 }
 
-/// LP1 (obj=-7) → reuse basis on LP2 with RHS=[5,3,3] (obj=-8).
+/// LP1 (obj=-7) → reuse basis on LP2 with RHS=[5,2,2] (obj=-8.5).
 #[test]
 fn test_dual_advanced_warm_start_rhs_change() {
+    // x0+x1<=4; -x0+x1<=2; x0-x1<=2 (non-reducible: no singletons)
     let lp1 = make_lp(
         vec![-1.0, -2.0],
-        &[0, 0, 1, 2],
-        &[0, 1, 0, 1],
-        &[1.0, 1.0, 1.0, 1.0],
+        &[0, 0, 1, 1, 2, 2],
+        &[0, 1, 0, 1, 0, 1],
+        &[1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
         3,
         2,
-        vec![4.0, 3.0, 3.0],
+        vec![4.0, 2.0, 2.0],
     );
 
-    // LP1 を default solver で解いて warm_start_basis を取得
     let result1 = solve_with(&lp1, &SolverOptions::default());
     assert_eq!(result1.status, SolveStatus::Optimal);
     assert_solver_invariants_lp(&result1, &lp1);
@@ -39,23 +39,21 @@ fn test_dual_advanced_warm_start_rhs_change() {
         "LP1 は warm_start_basis を返すべき"
     );
 
-    // LP2: RHS のみ変更 b=[5, 3, 3]
+    // LP2: RHS only change b=[5, 2, 2]
     let lp2 = make_lp(
         vec![-1.0, -2.0],
-        &[0, 0, 1, 2],
-        &[0, 1, 0, 1],
-        &[1.0, 1.0, 1.0, 1.0],
+        &[0, 0, 1, 1, 2, 2],
+        &[0, 1, 0, 1, 0, 1],
+        &[1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
         3,
         2,
-        vec![5.0, 3.0, 3.0],
+        vec![5.0, 2.0, 2.0],
     );
 
-    // cold-start で正解を確認
     let result2_cold = solve_with(&lp2, &SolverOptions::default());
     assert_eq!(result2_cold.status, SolveStatus::Optimal);
     assert_solver_invariants_lp(&result2_cold, &lp2);
 
-    // DualAdvanced warm-start で解く → warm-start 経路を通す
     let opts_warm = SolverOptions {
         warm_start: result1.warm_start_basis.clone(),
         simplex_method: SimplexMethod::DualAdvanced,
@@ -77,17 +75,18 @@ fn test_dual_advanced_warm_start_rhs_change() {
     );
 }
 
-/// LP1 (obj=-4) → reuse basis on LP2 with RHS=[6,4,4] (obj=-8).
+/// LP1 (obj=-4) → reuse basis on LP2 with larger RHS.
 #[test]
 fn test_dual_advanced_warm_start_larger_rhs() {
+    // x0+x1<=4; -x0+x1<=2; x0-x1<=2 (non-reducible: no singletons)
     let lp1 = make_lp(
         vec![-1.0, -1.0],
-        &[0, 0, 1, 2],
-        &[0, 1, 0, 1],
-        &[1.0, 1.0, 1.0, 1.0],
+        &[0, 0, 1, 1, 2, 2],
+        &[0, 1, 0, 1, 0, 1],
+        &[1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
         3,
         2,
-        vec![4.0, 3.0, 3.0],
+        vec![4.0, 2.0, 2.0],
     );
 
     let result1 = solve_with(&lp1, &SolverOptions::default());
@@ -98,15 +97,15 @@ fn test_dual_advanced_warm_start_larger_rhs() {
         "LP1 は warm_start_basis を返すべき"
     );
 
-    // LP2: RHS 拡大 b=[6, 4, 4] → 最適解 x1+x2=8, obj=-8
+    // LP2: RHS expanded b=[6, 3, 3]
     let lp2 = make_lp(
         vec![-1.0, -1.0],
-        &[0, 0, 1, 2],
-        &[0, 1, 0, 1],
-        &[1.0, 1.0, 1.0, 1.0],
+        &[0, 0, 1, 1, 2, 2],
+        &[0, 1, 0, 1, 0, 1],
+        &[1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
         3,
         2,
-        vec![6.0, 4.0, 4.0],
+        vec![6.0, 3.0, 3.0],
     );
 
     // cold-start で正解を確認

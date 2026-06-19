@@ -1,8 +1,9 @@
-//! LP presolve: collects 11 reductions and the inverse metadata for postsolve.
+//! LP presolve: collects 12 reductions and the inverse metadata for postsolve.
 //!
 //! Fixpoint loop over `MAX_PRESOLVE_ITER` passes of:
 //! 1. Fixed variable (lb == ub)
-//! 2. Singleton Eq row → variable value
+//! 2. Singleton row (Eq / Le / Ge) → variable value or bound tightening
+//!    2b. Forcing row (activity-tight → fix all vars)
 //!    3a/3b. Empty row / column
 //! 4. Redundant row from activity
 //! 5. Bounds tightening
@@ -16,6 +17,7 @@ mod doubleton;
 mod driver;
 mod empty_redundant;
 mod fixed;
+mod forcing;
 mod free;
 mod singleton;
 mod state;

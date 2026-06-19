@@ -25,6 +25,15 @@ pub(crate) enum PostsolveStep {
         orig_col: usize,
         value: f64,
     },
+    /// Le/Ge singleton row absorbed into a variable bound.
+    #[allow(dead_code)]
+    SingletonInequalityRow {
+        orig_row: usize,
+        orig_col: usize,
+        coeff: f64,
+        old_lb: f64,
+        old_ub: f64,
+    },
     RedundantConstraint {
         orig_row: usize,
     },
@@ -42,6 +51,11 @@ pub(crate) enum PostsolveStep {
         others: Vec<(usize, f64)>,
         col_orig_entries: Vec<(usize, f64)>,
         c_orig: f64,
+    },
+    /// Forcing row: all variables forced to their contributing bounds.
+    ForcingRow {
+        orig_row: usize,
+        fixed_vars: Vec<(usize, f64, f64, f64)>,
     },
 }
 

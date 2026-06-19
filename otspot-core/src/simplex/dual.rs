@@ -489,30 +489,31 @@ mod tests {
     /// would miss dfeas degradation on the warm-start path).
     #[test]
     fn test_dual_warm_start_rhs_change() {
-        // LP1: min -x1 - 2*x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3 → x1=1, x2=3, obj=-7
+        // LP1: min -x1 - 2*x2 s.t. x1+x2 ≤ 4; -x1+x2 ≤ 2; x1-x2 ≤ 2
+        // x1,x2 in [0,inf). Optimal: x1=1, x2=3, obj=-7.
         let lp1 = make_lp(
             vec![-1.0, -2.0],
-            &[0, 0, 1, 2],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 1.0],
+            &[0, 0, 1, 1, 2, 2],
+            &[0, 1, 0, 1, 0, 1],
+            &[1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
             3,
             2,
-            vec![4.0, 3.0, 3.0],
+            vec![4.0, 2.0, 2.0],
         );
 
         let result1 = solve_with(&lp1, &SolverOptions::default());
         assert_eq!(result1.status, SolveStatus::Optimal);
         assert!(result1.warm_start_basis.is_some());
 
-        // LP2: 同構造で b=[5,3,3] → x1=2, x2=3, obj=-8
+        // LP2: same structure, b=[5,2,2] → x1=1.5, x2=3.5, obj=-8.5
         let lp2 = make_lp(
             vec![-1.0, -2.0],
-            &[0, 0, 1, 2],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 1.0],
+            &[0, 0, 1, 1, 2, 2],
+            &[0, 1, 0, 1, 0, 1],
+            &[1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
             3,
             2,
-            vec![5.0, 3.0, 3.0],
+            vec![5.0, 2.0, 2.0],
         );
 
         let opts_warm = SolverOptions {
@@ -520,7 +521,7 @@ mod tests {
             simplex_method: SimplexMethod::Dual,
             ..SolverOptions::default()
         };
-        assert_kkt_optimal_with(&lp2, -8.0, "test_dual_warm_start_rhs_change", &opts_warm);
+        assert_kkt_optimal_with(&lp2, -8.5, "test_dual_warm_start_rhs_change", &opts_warm);
     }
 
     #[test]

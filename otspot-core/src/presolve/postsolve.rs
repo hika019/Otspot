@@ -910,6 +910,26 @@ pub fn run_postsolve(
                     recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
             PostsolveStep::BoundsTightened => {}
+            PostsolveStep::SingletonInequalityRow {
+                orig_row,
+                orig_col: _,
+                coeff: _,
+                old_lb: _,
+                old_ub: _,
+            } => {
+                dual_solution[*orig_row] =
+                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+            }
+            PostsolveStep::ForcingRow {
+                orig_row,
+                fixed_vars,
+            } => {
+                for &(col, value, _, _) in fixed_vars {
+                    solution[col] = value;
+                }
+                dual_solution[*orig_row] =
+                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+            }
             PostsolveStep::LinearSubstitution {
                 orig_col,
                 orig_row,
@@ -1746,13 +1766,20 @@ mod warm_basis_recovery_tests {
     /// (this comes from simplex directly, not postsolve; sentinel ensures the
     /// postsolve fix didn't regress the non-reducible path).
     fn lp_non_reducible() -> LpProblem {
-        // min -x0 - 2*x1 s.t. x0 + x1 ≤ 4; x0 ≤ 3; x1 ≤ 3
-        let a = CscMatrix::from_triplets(&[0, 0, 1, 2], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 3, 2)
-            .unwrap();
+        // min -x0 - 2*x1 s.t. x0 + x1 ≤ 4; -x0 + x1 ≤ 2; x0 - x1 ≤ 2
+        // Optimal: x0=1, x1=3, obj=-7.
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2],
+            &[0, 1, 0, 1, 0, 1],
+            &[1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
+            3,
+            2,
+        )
+        .unwrap();
         LpProblem::new_general(
             vec![-1.0, -2.0],
             a,
-            vec![4.0, 3.0, 3.0],
+            vec![4.0, 2.0, 2.0],
             vec![ConstraintType::Le; 3],
             vec![(0.0, f64::INFINITY); 2],
             None,

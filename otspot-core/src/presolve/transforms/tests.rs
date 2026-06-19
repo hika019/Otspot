@@ -337,8 +337,10 @@ fn test_presolve_no_crash_netlib_like() {
         vec![4.0, 3.0, 3.0, 3.0],
     );
     let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced);
+    // Singleton Le rows (1-3) absorbed into bounds; row 0 remains with tightened bounds.
     assert_eq!(result.reduced_problem.num_vars, 3);
-    assert_eq!(result.reduced_problem.num_constraints, 4);
+    assert_eq!(result.reduced_problem.num_constraints, 1);
 }
 
 #[test]
@@ -834,4 +836,161 @@ fn test_step7_free_var_fillin_must_not_blow_up() {
          eliminate_variable_via_eq_row in presolve/transforms.",
         elapsed, ncols, nrows, MAX_PRESOLVE_SECS
     );
+}
+
+// -----------------------------------------------------------
+// Singleton Le/Ge — end-to-end
+// -----------------------------------------------------------
+
+#[test]
+fn test_singleton_le_reduces_and_round_trips() {
+    // min -x - y, s.t. 3x <= 6 (singleton Le), x + y <= 5, x,y in [0,5].
+    // Singleton Le tightens x_ub to 2. Row 1 not redundant: max=2+5=7>5.
+    let lp = make_lp_general(
+        vec![-1.0, -1.0],
+        &[0, 1, 1],
+        &[0, 0, 1],
+        &[3.0, 1.0, 1.0],
+        2,
+        2,
+        vec![6.0, 5.0],
+        vec![ConstraintType::Le, ConstraintType::Le],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced, "singleton Le must reduce the problem");
+    assert_eq!(result.reduced_problem.num_constraints, 1, "singleton Le row removed");
+}
+
+#[test]
+fn test_singleton_ge_reduces_and_round_trips() {
+    // min -x - y, s.t. 2x >= 4 (singleton Ge), x + y <= 5, x,y in [0,5].
+    // Singleton Ge tightens x_lb to 2. Row 1 not redundant: max=5+5=10>5.
+    let lp = make_lp_general(
+        vec![-1.0, -1.0],
+        &[0, 1, 1],
+        &[0, 0, 1],
+        &[2.0, 1.0, 1.0],
+        2,
+        2,
+        vec![4.0, 5.0],
+        vec![ConstraintType::Ge, ConstraintType::Le],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced, "singleton Ge must reduce the problem");
+    assert_eq!(result.reduced_problem.num_constraints, 1, "singleton Ge row removed");
+}
+
+#[test]
+fn test_singleton_le_infeasible_at_presolve() {
+    // 2x <= 1, x in [3, 5] → implied ub = 0.5 < lb = 3 → infeasible.
+    let lp = make_lp_general(
+        vec![1.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        1,
+        vec![1.0],
+        vec![ConstraintType::Le],
+        vec![(3.0, 5.0)],
+    );
+    assert!(matches!(
+        run_presolve(&lp, None),
+        Err(PresolveStatus::Infeasible)
+    ));
+}
+
+// -----------------------------------------------------------
+// Forcing row — end-to-end
+// -----------------------------------------------------------
+
+#[test]
+fn test_forcing_le_all_positive_reduces() {
+    // min -x - y, s.t. x + y <= 0, -x + z <= 5, x in [0,1], y in [0,2], z in [0,6].
+    // Forcing: min = 0+0 = 0 >= 0. x→0, y→0. Row 0 removed, x,y fixed.
+    // Row 1 becomes -0+z <= 5 (singleton Le, tightens z_ub to 5). Row 1 removed.
+    // z with c=-0 but row gone → empty col. c(z)=0 so any value: fix at lb=0.
+    // obj_offset = 0 (x=0, y=0, z=0).
+    let lp = make_lp_general(
+        vec![-1.0, -1.0, 0.0],
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 2],
+        &[1.0, 1.0, -1.0, 1.0],
+        2,
+        3,
+        vec![0.0, 5.0],
+        vec![ConstraintType::Le, ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 2.0), (0.0, 6.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced);
+    // Forcing + subsequent reductions eliminate everything.
+    assert_eq!(result.reduced_problem.num_vars, 0);
+    assert_eq!(result.reduced_problem.num_constraints, 0);
+}
+
+#[test]
+fn test_forcing_ge_reduces() {
+    // x + y >= 3, x in [0,1], y in [0,2]. max=3 <= 3.
+    // Forcing from max: x→1, y→2. Row removed.
+    let lp = make_lp_general(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![3.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced);
+    assert_eq!(result.reduced_problem.num_vars, 0);
+    assert!((result.obj_offset - 3.0).abs() < 1e-10, "obj = 1*1 + 1*2 = 3");
+}
+
+#[test]
+fn test_forcing_eq_reduces() {
+    // x + y = 3, x in [0,1], y in [0,2]. max=3 <= 3. Forced.
+    let lp = make_lp_general(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![3.0],
+        vec![ConstraintType::Eq],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced);
+    assert_eq!(result.reduced_problem.num_vars, 0);
+    assert!((result.obj_offset - 3.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_forcing_not_triggered_when_slack() {
+    // -x + y <= 10, x in [0,1], y in [0,2]. min=-1 < 10, not forcing.
+    // Not redundant: max=0+2=2 <= 10 → redundant. Use tighter rhs.
+    // 3x + 2y <= 5, x in [0,1], y in [0,2]. min=0 < 5, not forcing.
+    // max=3+4=7 > 5, not redundant.
+    let lp = make_lp_general(
+        vec![-1.0, -1.0],
+        &[0, 0],
+        &[0, 1],
+        &[3.0, 2.0],
+        1,
+        2,
+        vec![5.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    // Not forcing, not redundant. Bounds tighten but no rows/cols removed.
+    assert_eq!(result.reduced_problem.num_vars, 2, "vars stay");
+    assert_eq!(result.reduced_problem.num_constraints, 1, "row stays");
 }
