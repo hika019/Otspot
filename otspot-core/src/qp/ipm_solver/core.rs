@@ -70,6 +70,7 @@ fn run_ipm_with(
     inner_solver: InnerSolver,
 ) -> IpmOutcome {
     let reduced = &presolve_result.reduced;
+    let lp_crossover_will_certify = orig_problem.is_zero_q();
 
     let mut opts_for_ipm = tighten_ipm_eps_for_presolve_scale(opts, presolve_result);
     translate_warm_start_for_presolve(&mut opts_for_ipm, presolve_result, reduced);
@@ -170,7 +171,10 @@ fn run_ipm_with(
     // した場合のみ実施 (cancel/timeout=0 で冷状態 x=0 から後処理が独自解を作らない)。
     let t_lsq = std::time::Instant::now();
     let mut postsolve_recovery_us = 0u64;
-    if presolve_result.was_reduced && !presolve_result.postsolve_stack.steps.is_empty() {
+    if !lp_crossover_will_certify
+        && presolve_result.was_reduced
+        && !presolve_result.postsolve_stack.steps.is_empty()
+    {
         refine_postsolve_dual_lsq(orig_problem, &mut final_sol, &eliminated_cols, opts);
         let t_recovery = std::time::Instant::now();
         if result.iterations > 0 {
@@ -193,13 +197,14 @@ fn run_ipm_with(
     let ipm_made_progress = result.iterations > 0;
     let allow_primal = allow_primal_projection(orig_problem);
 
-    let kkt_already_pass = kkt_already_passes(
-        orig_problem,
-        &final_sol,
-        &eliminated_cols,
-        result.status == SolveStatus::Optimal,
-        user_eps,
-    );
+    let kkt_already_pass = !lp_crossover_will_certify
+        && kkt_already_passes(
+            orig_problem,
+            &final_sol,
+            &eliminated_cols,
+            result.status == SolveStatus::Optimal,
+            user_eps,
+        );
     // Stage 1+2 (primal projection + y/z refit/IRLS): run for side effects on
     // `final_sol` only when the solution does not already meet the tolerance.
     // The returned residual is recomputed below as `kkt_final`.
@@ -207,6 +212,7 @@ fn run_ipm_with(
     if !final_sol.solution.is_empty()
         && orig_problem.num_constraints > 0
         && ipm_made_progress
+        && !lp_crossover_will_certify
         && !kkt_already_pass
     {
         refine_post_processing(
@@ -219,14 +225,15 @@ fn run_ipm_with(
     }
     let postsolve_refine_us = t_refine.elapsed().as_micros() as u64;
 
-    let kkt_pass_after_refine = kkt_already_pass
-        || kkt_already_passes(
-            orig_problem,
-            &final_sol,
-            &eliminated_cols,
-            result.status == SolveStatus::Optimal,
-            user_eps,
-        );
+    let kkt_pass_after_refine = !lp_crossover_will_certify
+        && (kkt_already_pass
+            || kkt_already_passes(
+                orig_problem,
+                &final_sol,
+                &eliminated_cols,
+                result.status == SolveStatus::Optimal,
+                user_eps,
+            ));
 
     // Skip the saddle-point Krylov IR when the solution already meets the
     // user tolerance (satisfies_eps: kkt + pres + bv + comp + duality_gap all
@@ -234,7 +241,8 @@ fn run_ipm_with(
     // which fills catastrophically for dense constraint rows (fit2d: ~7s) yet
     // performs zero refinement on an already-converged point. This mirrors the
     // `!kkt_already_pass` gate on `refine_post_processing` above.
-    let run_krylov_ir = should_run_krylov_ir(ipm_made_progress, kkt_pass_after_refine);
+    let run_krylov_ir = !lp_crossover_will_certify
+        && should_run_krylov_ir(ipm_made_progress, kkt_pass_after_refine);
     let t_krylov = std::time::Instant::now();
     if run_krylov_ir {
         refine_krylov_and_projection(
