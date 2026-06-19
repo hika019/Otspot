@@ -31,20 +31,30 @@ pub(super) fn step2_singleton_row(
                 return Err(PresolveStatus::Infeasible);
             }
             let value = value.clamp(lb, ub);
+            // Capture dual-recovery data before removing row/col.
+            let coeff = a_ij;
+            let col_orig_entries: Vec<(usize, f64)> = st.col_entries[j]
+                .iter()
+                .filter(|&&(row_k, _)| !st.removed_rows[row_k] && row_k != i)
+                .copied()
+                .collect();
+            let c_orig = st.c[j];
             let col_copy = st.col_entries[j].clone();
             for (row, val) in col_copy {
                 if !st.removed_rows[row] && row != i {
                     st.b[row] -= val * value;
                 }
             }
-            let c_j_snapshot = st.c[j];
-            st.obj_offset += c_j_snapshot * value;
+            st.obj_offset += c_orig * value;
             st.removed_cols[j] = true;
             st.removed_rows[i] = true;
             st.postsolve_stack.push(PostsolveStep::SingletonRow {
                 orig_row: i,
                 orig_col: j,
                 value,
+                coeff,
+                col_orig_entries,
+                c_orig,
             });
         }
     }

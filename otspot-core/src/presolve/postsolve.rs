@@ -893,21 +893,28 @@ pub fn run_postsolve(
                 solution[*orig_col] = *value;
             }
             PostsolveStep::EmptyRow { orig_row } => {
-                dual_solution[*orig_row] =
-                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+                dual_solution[*orig_row] = 0.0;
             }
             PostsolveStep::SingletonRow {
                 orig_col,
                 orig_row,
                 value,
+                coeff,
+                col_orig_entries,
+                c_orig,
             } => {
                 solution[*orig_col] = *value;
-                dual_solution[*orig_row] =
-                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+                // Recover y[orig_row] from stationarity of orig_col:
+                //   c_orig = coeff * y[orig_row] + Σ_{k != orig_row} A[k,orig_col] * y[k]
+                //   => y[orig_row] = (c_orig - sum_ay) / coeff
+                let sum_ay: f64 = col_orig_entries
+                    .iter()
+                    .map(|&(row_k, a_kj)| a_kj * dual_solution[row_k])
+                    .sum();
+                dual_solution[*orig_row] = (c_orig - sum_ay) / coeff;
             }
             PostsolveStep::RedundantConstraint { orig_row } => {
-                dual_solution[*orig_row] =
-                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+                dual_solution[*orig_row] = 0.0;
             }
             PostsolveStep::BoundsTightened => {}
             PostsolveStep::LinearSubstitution {
@@ -930,28 +937,14 @@ pub fn run_postsolve(
                 // recovered from the free var's stationarity rc[orig_col] = 0,
                 // using the pre-distribution column snapshot `col_orig_entries`.
                 if let Some(piv_row) = orig_row {
-                    // If the eliminated column carries no stationarity information
-                    // (`c_orig≈0` and no remaining row entries), recovering y_piv
-                    // from that column fixes an arbitrary 0 and can violate rc-sign
-                    // on other original columns. In that underdetermined case,
-                    // recover from original-space rc-sign conditions instead.
-                    if col_orig_entries.is_empty() && c_orig.abs() <= ZERO_TOL {
-                        dual_solution[*piv_row] = recover_removed_row_dual(
-                            orig_problem,
-                            *piv_row,
-                            &solution,
-                            &dual_solution,
-                        );
-                    } else {
-                        let mut sum_other_rows = 0.0f64;
-                        for &(row_i, a_ij) in col_orig_entries {
-                            if row_i == *piv_row {
-                                continue;
-                            }
-                            sum_other_rows += a_ij * dual_solution[row_i];
+                    let mut sum_other_rows = 0.0f64;
+                    for &(row_i, a_ij) in col_orig_entries {
+                        if row_i == *piv_row {
+                            continue;
                         }
-                        dual_solution[*piv_row] = (c_orig - sum_other_rows) / pivot;
+                        sum_other_rows += a_ij * dual_solution[row_i];
                     }
+                    dual_solution[*piv_row] = (c_orig - sum_other_rows) / pivot;
                 }
             }
         }
