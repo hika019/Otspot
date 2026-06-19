@@ -19,6 +19,7 @@ pub(crate) use lp_dispatch::solve_as_lp;
 pub(crate) use postsolve::bound_dual::{
     project_duals_from_singleton_columns, remap_bound_duals_to_orig, zero_inactive_inequality_duals,
 };
+#[cfg(test)]
 pub(crate) use postsolve::postprocess::compute_lsq_dual_y;
 pub(crate) use postsolve::refine::kkt_iterative::{refine_kkt_iterative, refit_bound_duals_kkt};
 pub(crate) use postsolve::refine::lsq::{refine_dual_lsq, refine_dual_lsq_irls};
