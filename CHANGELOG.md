@@ -4,6 +4,26 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-06-19
+
+公開API破壊的変更なし。wide LP (n/m比 1.0–2.2, 10k変数以上) を IPM 経由で解く dispatch 機構を追加し、simplex 単独では timeout していた大規模 LP を新規求解。
+
+### 追加
+
+- LP: wide LP を IPM 経由で解く dispatch 機構を追加 (dfl001/ken-18 を新規求解、ken-13 を 28x 高速化)
+- LP: IPM→simplex crossover (dual warm start, vertex 抽出, Phase2 cleanup deadline)
+- LP: 不要な IPM postsolve (LSQ, Krylov IR) をスキップする lp_crossover_will_certify フラグ
+- テスト: threads=1 スレッド予算 sentinel テスト追加
+- テスト: dfl001 postsolve テストを IPM dispatch 経路に対応
+
+### 削除
+
+- 廃止した simplex path 統合計画書を削除
+
+### ベンチマーク
+
+- standard 108/109 PASS (v0.5.1: 106)、hard 27 PASS + 25 TIMEOUT + 1 SUBOPT、extra 2 PASS + 2 TIMEOUT、infeas 29/29 PASS
+
 ## [0.5.1] - 2026-06-17
 
 公開API破壊的変更なし (`cargo public-api diff` = 変更なし)。大規模 LP の pricing 高速化 (pds-20 を初求解)、MIP の探索効率・正当性修正、QP postsolve 安定化が主体。
