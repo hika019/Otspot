@@ -24,6 +24,13 @@ pub(crate) enum PostsolveStep {
         orig_row: usize,
         orig_col: usize,
         value: f64,
+        /// A[orig_row, orig_col] coefficient.
+        coeff: f64,
+        /// (row_k, A[row_k, orig_col]) for all rows k != orig_row that were active
+        /// at elimination time. Used to recover y[orig_row] via stationarity.
+        col_orig_entries: Vec<(usize, f64)>,
+        /// Objective coefficient c[orig_col] at elimination time.
+        c_orig: f64,
     },
     /// Le/Ge singleton row absorbed into a variable bound.
     #[allow(dead_code)]

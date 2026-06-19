@@ -2,13 +2,14 @@
 //! space by replaying `PostsolveStack` in LIFO order.
 
 use super::transforms::{PostsolveStep, PresolveResult};
-use crate::options::{SolverOptions, WarmStartBasis};
+use crate::options::WarmStartBasis;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::simplex::build_standard_form;
 use crate::simplex::crash::compute_crash_basis;
-use crate::sparse::CscMatrix;
-use crate::tolerances::{COMP_SLACK_REL_TOL, LARGE_PROBLEM_THRESHOLD, PIVOT_TOL, ZERO_TOL};
+use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
 use std::time::Instant;
+#[cfg(test)]
+use crate::sparse::CscMatrix;
 
 /// Relative tolerance below which a standard-form column is treated as at-bound
 /// (non-basic candidate) when synthesising the postsolved warm-start basis.
@@ -19,43 +20,6 @@ const WARM_BASIS_BUILD_TOL: f64 = 1e-9;
 /// pivots that would inflate the basis matrix condition number.
 const MARKOWITZ_PIVOT_RATIO: f64 = 0.1;
 
-/// Maximum Gauss-Seidel iterations for dual variable recovery.
-const GS_MAX_ITER: usize = 50;
-/// Convergence tolerance for Gauss-Seidel: stops when max per-row change drops below this.
-const GS_CONV_TOL: f64 = 1e-12;
-
-/// Whether the kept-row perturbation cleanup variant is worth running.
-///
-/// The variant only differs from the plain cleanup LP when kept-row perturbation
-/// is actually engaged, which `build_and_solve_cleanup_lp` force-disables above
-/// `LARGE_PROBLEM_THRESHOLD` (`use_kept_perturbation` there gates on the same
-/// `n + m`). Above the threshold it would re-solve an identical LP, so running it
-/// is pure redundant runtime. It is also pointless once the plain variant already
-/// certifies a feasible dual (`unresolved == false`).
-fn should_run_kept_perturbation(unresolved: bool, n: usize, m: usize) -> bool {
-    unresolved && n + m <= LARGE_PROBLEM_THRESHOLD
-}
-
-/// Sub-deadline for the speculative crossover pass, reserving budget for the
-/// cleanup-LP / LSQ fallback.
-///
-/// Crossover runs *before* the cleanup LP it aims to elide, but it can fail to
-/// certify (degenerate Phase II, singular basis, or simply running out of time)
-/// only after burning wall-clock. Because the fallback bails the instant the
-/// clock has lapsed (`build_and_solve_cleanup_lp` returns `None` when
-/// `now >= deadline`), letting crossover spend the *whole* deadline before
-/// failing would starve the fallback to zero budget — regressing the final dual
-/// below the pre-crossover-first baseline on finite deadlines. So crossover is
-/// capped at an even split of the remaining wall-clock and the other half is held
-/// in reserve. The split is even — not a tuned constant — because either pass may
-/// be the one that certifies: skewing toward crossover reintroduces the
-/// starvation, while skewing toward cleanup fails crossover on a legitimately
-/// large problem and forces the slow cleanup LP it was meant to skip. The good
-/// case is unaffected: crossover certifies in seconds (ken-11 ~6s, osa-60 ~1s),
-/// far inside half of any bench deadline. `None` deadline reserves nothing.
-fn crossover_deadline_with_reserve(deadline: Option<Instant>, now: Instant) -> Option<Instant> {
-    deadline.map(|d| now + d.saturating_duration_since(now) / 2)
-}
 
 // Test-only, in-order trace of which dual-recovery passes `run_postsolve`
 // executed. Lets sentinels assert that the crossover pass runs first and can
@@ -81,489 +45,6 @@ fn drain_postsolve_pass_trace() -> Vec<&'static str> {
     POSTSOLVE_PASS_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()))
 }
 
-/// Return the primal slack of original row `i` (always non-negative for feasible
-/// solutions): `b_i - Ax_i` for `Le`, `Ax_i - b_i` for `Ge`, `0` for `Eq`. The
-/// scale `1 + |b_i| + |Ax_i|` is returned alongside so the caller can pick a
-/// relative non-binding threshold.
-fn row_slack_and_scale(orig_problem: &LpProblem, i: usize, solution: &[f64]) -> (f64, f64) {
-    let row_entries = collect_row_entries(orig_problem, i);
-    let ax_i: f64 = row_entries.iter().map(|&(j, a)| a * solution[j]).sum();
-    let b_i = orig_problem.b[i];
-    let slack = match orig_problem.constraint_types[i] {
-        ConstraintType::Le => b_i - ax_i,
-        ConstraintType::Ge => ax_i - b_i,
-        ConstraintType::Eq => 0.0,
-    };
-    let scale = 1.0 + b_i.abs() + ax_i.abs();
-    (slack, scale)
-}
-
-/// `true` iff row `i` is strictly non-binding at `solution` (slack exceeds the
-/// scaled complementarity tolerance), in which case KKT forces `y_i = 0`.
-fn is_row_nonbinding(orig_problem: &LpProblem, i: usize, solution: &[f64]) -> bool {
-    let (slack, scale) = row_slack_and_scale(orig_problem, i, solution);
-    slack > COMP_SLACK_REL_TOL * scale
-}
-
-/// Build and solve a cleanup LP that recovers `y_i` for deleted rows (and optionally a
-/// perturbation on kept rows) so the full dual is KKT-consistent.
-///
-/// Phase 1 minimises `Σ slack` for feasibility; Phase 2 fixes the Phase-1 slack and
-/// minimises `Σ|y_del| + Σ|dy|` to break ties. Kept-row perturbation is required when
-/// kept↔deleted coupling is strong; it is disabled above `LARGE_PROBLEM_THRESHOLD`.
-/// Returns an `m`-sized y vector, or `None` on construction/solve failure.
-fn build_and_solve_cleanup_lp(
-    orig_problem: &LpProblem,
-    presolve_result: &PresolveResult,
-    solution: &[f64],
-    dual_solution_known: &[f64],
-    deadline: Option<Instant>,
-    allow_kept_perturbation: bool,
-) -> Option<Vec<f64>> {
-    // Bail if the parent deadline has already lapsed; a `None` deadline means
-    // the caller opted into unbounded runtime (required by KKT-accuracy unit tests).
-    if let Some(d) = deadline {
-        if Instant::now() >= d {
-            return None;
-        }
-    }
-    let n = orig_problem.num_vars;
-    let m = orig_problem.num_constraints;
-    let deleted_rows: Vec<usize> = (0..m)
-        .filter(|&i| presolve_result.row_map[i].is_none())
-        .collect();
-    let k = deleted_rows.len();
-    if k == 0 {
-        return None;
-    }
-
-    let row_to_var: std::collections::HashMap<usize, usize> = deleted_rows
-        .iter()
-        .enumerate()
-        .map(|(idx, &r)| (r, idx))
-        .collect();
-
-    let use_kept_perturbation = allow_kept_perturbation && n + m <= LARGE_PROBLEM_THRESHOLD;
-    // Take the bipartite closure (deleted rows ↔ columns ↔ kept rows) so that any
-    // kept row whose `y` is coupled to a deleted row gets a `dy` perturbation variable.
-    // A naive 1-pass (only kept rows sharing a column with a deleted row) misses
-    // indirectly-coupled violation columns and leaves Phase-1 slack non-zero.
-    let coupled_kept: Vec<usize> = if use_kept_perturbation {
-        // Inverted index row → cols (CSC is col-major; row traversal is otherwise slow).
-        let mut row_to_cols: Vec<Vec<usize>> = vec![Vec::new(); m];
-        for j in 0..n {
-            if let Ok((rows, _)) = orig_problem.a.get_column(j) {
-                for &row in rows {
-                    row_to_cols[row].push(j);
-                }
-            }
-        }
-        let mut col_affected: Vec<bool> = vec![false; n];
-        let mut col_queue: Vec<usize> = Vec::new();
-        for &del_row in &deleted_rows {
-            for &j in &row_to_cols[del_row] {
-                if !col_affected[j] {
-                    col_affected[j] = true;
-                    col_queue.push(j);
-                }
-            }
-        }
-        for step in &presolve_result.postsolve_stack {
-            if let PostsolveStep::LinearSubstitution { orig_col, .. } = step {
-                let j = *orig_col;
-                if !col_affected[j] {
-                    col_affected[j] = true;
-                    col_queue.push(j);
-                }
-            }
-        }
-        let mut kept_in_set: Vec<bool> = vec![false; m];
-        let mut coupled: Vec<usize> = Vec::new();
-        let mut head = 0usize;
-        while head < col_queue.len() {
-            let j = col_queue[head];
-            head += 1;
-            if let Ok((rows, _)) = orig_problem.a.get_column(j) {
-                for &row in rows {
-                    if presolve_result.row_map[row].is_some() && !kept_in_set[row] {
-                        kept_in_set[row] = true;
-                        coupled.push(row);
-                        for &j2 in &row_to_cols[row] {
-                            if !col_affected[j2] {
-                                col_affected[j2] = true;
-                                col_queue.push(j2);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        coupled
-    } else {
-        Vec::new()
-    };
-    let row_to_kept_var: std::collections::HashMap<usize, usize> = coupled_kept
-        .iter()
-        .enumerate()
-        .map(|(idx, &r)| (r, idx))
-        .collect();
-    let m_kept = coupled_kept.len();
-
-    // Variable layout: [y_del | dy | slack].
-    let m_kept_var = if use_kept_perturbation { m_kept } else { 0 };
-    let dy_offset = k;
-    let slack_offset = k + m_kept_var;
-
-    // rc_known[j] = c[j] - Σ_{i: kept} A_ij * y_kept[i]. Deleted-row y is what we solve for.
-    let mut rc_known = orig_problem.c.clone();
-    for j in 0..n {
-        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
-            for (kk, &row) in rows.iter().enumerate() {
-                if presolve_result.row_map[row].is_some() {
-                    rc_known[j] -= vals[kk] * dual_solution_known[row];
-                }
-            }
-        }
-    }
-
-    let mut tri_rows: Vec<usize> = Vec::new();
-    let mut tri_cols: Vec<usize> = Vec::new();
-    let mut tri_vals: Vec<f64> = Vec::new();
-    let mut b_clean: Vec<f64> = Vec::new();
-    let mut ct_clean: Vec<ConstraintType> = Vec::new();
-
-    // (i) rc-sign constraints for non-fixed columns j.
-    for j in 0..n {
-        let x_j = solution[j];
-        let (lb_j, ub_j) = orig_problem.bounds[j];
-        let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < at_lb_tol(lb_j);
-        let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < at_ub_tol(ub_j);
-        let fixed =
-            lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
-        if fixed {
-            continue;
-        }
-
-        let mut col_terms: Vec<(usize, f64)> = Vec::new();
-        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
-            for (kk, &row) in rows.iter().enumerate() {
-                if let Some(&var_idx) = row_to_var.get(&row) {
-                    col_terms.push((var_idx, vals[kk]));
-                } else if use_kept_perturbation {
-                    if let Some(&kept_idx) = row_to_kept_var.get(&row) {
-                        col_terms.push((dy_offset + kept_idx, vals[kk]));
-                    }
-                }
-            }
-        }
-        if col_terms.is_empty() {
-            continue;
-        }
-
-        // Complementary slackness sign on rc[j]: at lb → rc ≥ 0, at ub → rc ≤ 0,
-        // interior → rc = 0. Phase-1 slack absorbs any infeasibility from degeneracy.
-        let ct = if at_lb && !at_ub {
-            ConstraintType::Le
-        } else if at_ub && !at_lb {
-            ConstraintType::Ge
-        } else {
-            ConstraintType::Eq
-        };
-        let row_idx = b_clean.len();
-        for &(var_idx, a) in &col_terms {
-            tri_rows.push(row_idx);
-            tri_cols.push(var_idx);
-            tri_vals.push(a);
-        }
-        b_clean.push(rc_known[j]);
-        ct_clean.push(ct);
-    }
-
-    // (ii) Free-variable stationarity rc[orig_col] = 0 for each LinearSubstitution.
-    for step in &presolve_result.postsolve_stack {
-        if let PostsolveStep::LinearSubstitution { orig_col, .. } = step {
-            let j = *orig_col;
-            let mut col_terms: Vec<(usize, f64)> = Vec::new();
-            if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
-                for (kk, &row) in rows.iter().enumerate() {
-                    if let Some(&var_idx) = row_to_var.get(&row) {
-                        col_terms.push((var_idx, vals[kk]));
-                    } else if use_kept_perturbation {
-                        if let Some(&kept_idx) = row_to_kept_var.get(&row) {
-                            col_terms.push((dy_offset + kept_idx, vals[kk]));
-                        }
-                    }
-                }
-            }
-            if col_terms.is_empty() {
-                continue;
-            }
-            let row_idx = b_clean.len();
-            for &(var_idx, a) in &col_terms {
-                tri_rows.push(row_idx);
-                tri_cols.push(var_idx);
-                tri_vals.push(a);
-            }
-            b_clean.push(rc_known[j]);
-            ct_clean.push(ConstraintType::Eq);
-        }
-    }
-
-    if b_clean.is_empty() {
-        return None;
-    }
-
-    // Add Phase-1 slack to guarantee feasibility: Le/Ge use one slack, Eq uses ± pair.
-    // Objective `min Σ slack` returns 0 iff exact rc-sign satisfaction is possible.
-    let m_clean = b_clean.len();
-    let mut slack_count = 0usize;
-    let mut slack_cols_per_row: Vec<(usize, Option<usize>)> = Vec::with_capacity(m_clean);
-    for ct in &ct_clean {
-        match ct {
-            ConstraintType::Eq => {
-                let pos = slack_offset + slack_count;
-                let neg = slack_offset + slack_count + 1;
-                slack_cols_per_row.push((pos, Some(neg)));
-                slack_count += 2;
-            }
-            _ => {
-                slack_cols_per_row.push((slack_offset + slack_count, None));
-                slack_count += 1;
-            }
-        }
-    }
-    for (row_idx, (s_pos, s_neg_opt)) in slack_cols_per_row.iter().enumerate() {
-        let sign = match ct_clean[row_idx] {
-            ConstraintType::Le => -1.0,
-            ConstraintType::Ge => 1.0,
-            ConstraintType::Eq => 1.0,
-        };
-        tri_rows.push(row_idx);
-        tri_cols.push(*s_pos);
-        tri_vals.push(sign);
-        if let Some(s_neg) = s_neg_opt {
-            tri_rows.push(row_idx);
-            tri_cols.push(*s_neg);
-            tri_vals.push(-1.0);
-        }
-    }
-    let total_vars = slack_offset + slack_count;
-
-    // Variable bounds: y_del follows the row's sign convention; dy is shifted by -y_kept[i]
-    // so y_kept + dy still satisfies the sign convention; slack ∈ [0, ∞).
-    // Comp slackness: non-binding rows (slack > tol) clamp `y` to 0 — for deleted
-    // rows that pins `y_del` at 0; for coupled kept rows it pins `dy` at `-y_kept_i`.
-    let mut bounds_clean: Vec<(f64, f64)> = Vec::with_capacity(total_vars);
-    for &i in &deleted_rows {
-        let nonbinding = is_row_nonbinding(orig_problem, i, solution);
-        if nonbinding {
-            bounds_clean.push((0.0, 0.0));
-            continue;
-        }
-        match orig_problem.constraint_types[i] {
-            ConstraintType::Le => bounds_clean.push((f64::NEG_INFINITY, 0.0)),
-            ConstraintType::Ge => bounds_clean.push((0.0, f64::INFINITY)),
-            ConstraintType::Eq => bounds_clean.push((f64::NEG_INFINITY, f64::INFINITY)),
-        }
-    }
-    if use_kept_perturbation {
-        for &i in &coupled_kept {
-            let y_kept_i = dual_solution_known[i];
-            let nonbinding = is_row_nonbinding(orig_problem, i, solution);
-            if nonbinding {
-                bounds_clean.push((-y_kept_i, -y_kept_i));
-                continue;
-            }
-            match orig_problem.constraint_types[i] {
-                ConstraintType::Le => bounds_clean.push((f64::NEG_INFINITY, -y_kept_i)),
-                ConstraintType::Ge => bounds_clean.push((-y_kept_i, f64::INFINITY)),
-                ConstraintType::Eq => bounds_clean.push((f64::NEG_INFINITY, f64::INFINITY)),
-            }
-        }
-    }
-    for _ in 0..slack_count {
-        bounds_clean.push((0.0, f64::INFINITY));
-    }
-
-    let mut c_clean = vec![0.0f64; total_vars];
-    for j in slack_offset..total_vars {
-        c_clean[j] = 1.0;
-    }
-
-    let a_clean = CscMatrix::from_triplets(&tri_rows, &tri_cols, &tri_vals, m_clean, total_vars)
-        .expect("triplets invariant");
-    let b_clean_keep = b_clean.clone();
-    let ct_clean_keep = ct_clean.clone();
-    // LpProblem::new_general can reject ±Inf in derived b_clean (large coefficient overflow case);
-    // preserve the cheap postsolve fallback by returning None instead of panicking.
-    // See codex review on #185 a5de15d.
-    let cleanup_lp =
-        LpProblem::new_general(c_clean, a_clean, b_clean, ct_clean, bounds_clean, None).ok()?;
-
-    // Wire the parent deadline straight through so every inner stage (parse, scale,
-    // factorize, simplex iterate) checks the same clock; otherwise large cleanup
-    // LPs can spend minutes in setup before any per-call budget kicks in.
-    let opts = SolverOptions {
-        presolve: false,
-        warm_start: None,
-        deadline,
-        ..SolverOptions::default()
-    };
-    let r1 = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
-    if r1.status != SolveStatus::Optimal || r1.solution.len() != total_vars {
-        return None;
-    }
-    let y_del_phase1: Vec<f64> = r1.solution[..k].to_vec();
-    let dy_phase1: Vec<f64> = if use_kept_perturbation {
-        r1.solution[dy_offset..dy_offset + m_kept_var].to_vec()
-    } else {
-        Vec::new()
-    };
-    let slack_phase1: Vec<f64> = r1.solution[slack_offset..].to_vec();
-    // Combine: deleted rows use y_del, coupled kept rows use y_kept + dy,
-    // non-coupled kept rows keep their known dual.
-    let assemble_full_y = |y_del: &[f64], dy: &[f64]| -> Vec<f64> {
-        let mut y = dual_solution_known.to_vec();
-        for (idx, &row) in deleted_rows.iter().enumerate() {
-            y[row] = y_del[idx];
-        }
-        if use_kept_perturbation {
-            for (idx, &row) in coupled_kept.iter().enumerate() {
-                y[row] = dual_solution_known[row] + dy[idx];
-            }
-        }
-        y
-    };
-
-    // Phase 2 tie-break: fix Phase-1 slack and minimise `Σ|y_del| + Σ|dy|` so
-    // dual degeneracy cannot pick an arbitrary large-|y| solution. Layout:
-    //   [y_del | dy | d_pos | d_neg], with Eq rows `(y_del|dy)[i] - d_pos[i] + d_neg[i] = 0`.
-    let n_yvars = k + m_kept_var;
-    let phase2_total_vars = 3 * n_yvars;
-    let phase2_total_cons = m_clean + n_yvars;
-    let mut p2_tri_rows: Vec<usize> = Vec::with_capacity(tri_rows.len() + 3 * n_yvars);
-    let mut p2_tri_cols: Vec<usize> = Vec::with_capacity(tri_rows.len() + 3 * n_yvars);
-    let mut p2_tri_vals: Vec<f64> = Vec::with_capacity(tri_rows.len() + 3 * n_yvars);
-    let mut p2_b: Vec<f64> = Vec::with_capacity(phase2_total_cons);
-    let mut p2_ct: Vec<ConstraintType> = Vec::with_capacity(phase2_total_cons);
-    let p2_slack_offset = slack_offset;
-    // (i) Replicate Phase-1 a*y constraints without slack, with RHS relaxed by Phase-1 slack.
-    for (orig_idx, (slack_pos, slack_neg_opt)) in slack_cols_per_row.iter().enumerate() {
-        for (k_t, &row) in tri_rows.iter().enumerate() {
-            if row != orig_idx {
-                continue;
-            }
-            let col = tri_cols[k_t];
-            if col >= p2_slack_offset {
-                continue;
-            }
-            p2_tri_rows.push(orig_idx);
-            p2_tri_cols.push(col);
-            p2_tri_vals.push(tri_vals[k_t]);
-        }
-        let s_p_val = slack_phase1[*slack_pos - p2_slack_offset];
-        let rhs = match ct_clean_keep[orig_idx] {
-            ConstraintType::Le => b_clean_keep[orig_idx] + s_p_val,
-            ConstraintType::Ge => b_clean_keep[orig_idx] - s_p_val,
-            ConstraintType::Eq => {
-                let s_n_val = slack_phase1[slack_neg_opt.unwrap() - p2_slack_offset];
-                b_clean_keep[orig_idx] - s_p_val + s_n_val
-            }
-        };
-        p2_b.push(rhs);
-        p2_ct.push(ct_clean_keep[orig_idx]);
-    }
-    // (ii) Tie-break Eq rows: (y_del|dy)[i] - d_pos[i] + d_neg[i] = 0.
-    for i in 0..n_yvars {
-        let row_idx = m_clean + i;
-        p2_tri_rows.push(row_idx);
-        p2_tri_cols.push(i);
-        p2_tri_vals.push(1.0);
-        p2_tri_rows.push(row_idx);
-        p2_tri_cols.push(n_yvars + i);
-        p2_tri_vals.push(-1.0);
-        p2_tri_rows.push(row_idx);
-        p2_tri_cols.push(2 * n_yvars + i);
-        p2_tri_vals.push(1.0);
-        p2_b.push(0.0);
-        p2_ct.push(ConstraintType::Eq);
-    }
-    let mut p2_bounds: Vec<(f64, f64)> = Vec::with_capacity(phase2_total_vars);
-    for &i in &deleted_rows {
-        if is_row_nonbinding(orig_problem, i, solution) {
-            p2_bounds.push((0.0, 0.0));
-            continue;
-        }
-        match orig_problem.constraint_types[i] {
-            ConstraintType::Le => p2_bounds.push((f64::NEG_INFINITY, 0.0)),
-            ConstraintType::Ge => p2_bounds.push((0.0, f64::INFINITY)),
-            ConstraintType::Eq => p2_bounds.push((f64::NEG_INFINITY, f64::INFINITY)),
-        }
-    }
-    if use_kept_perturbation {
-        for &i in &coupled_kept {
-            let y_kept_i = dual_solution_known[i];
-            if is_row_nonbinding(orig_problem, i, solution) {
-                p2_bounds.push((-y_kept_i, -y_kept_i));
-                continue;
-            }
-            match orig_problem.constraint_types[i] {
-                ConstraintType::Le => p2_bounds.push((f64::NEG_INFINITY, -y_kept_i)),
-                ConstraintType::Ge => p2_bounds.push((-y_kept_i, f64::INFINITY)),
-                ConstraintType::Eq => p2_bounds.push((f64::NEG_INFINITY, f64::INFINITY)),
-            }
-        }
-    }
-    for _ in 0..(2 * n_yvars) {
-        p2_bounds.push((0.0, f64::INFINITY));
-    }
-    let mut p2_c = vec![0.0f64; phase2_total_vars];
-    for j in n_yvars..(3 * n_yvars) {
-        p2_c[j] = 1.0;
-    }
-
-    let p2_a = match CscMatrix::from_triplets(
-        &p2_tri_rows,
-        &p2_tri_cols,
-        &p2_tri_vals,
-        phase2_total_cons,
-        phase2_total_vars,
-    ) {
-        Ok(m) => m,
-        Err(_) => return Some(assemble_full_y(&y_del_phase1, &dy_phase1)),
-    };
-    let p2_lp = match LpProblem::new_general(p2_c, p2_a, p2_b, p2_ct, p2_bounds, None) {
-        Ok(l) => l,
-        Err(_) => return Some(assemble_full_y(&y_del_phase1, &dy_phase1)),
-    };
-    let r2 = crate::simplex::solve_without_presolve(&p2_lp, &opts);
-    if r2.status == SolveStatus::Optimal && r2.solution.len() == phase2_total_vars {
-        let y_del_p2: Vec<f64> = r2.solution[..k].to_vec();
-        let dy_p2: Vec<f64> = if use_kept_perturbation {
-            r2.solution[dy_offset..dy_offset + m_kept_var].to_vec()
-        } else {
-            Vec::new()
-        };
-        Some(assemble_full_y(&y_del_p2, &dy_p2))
-    } else {
-        Some(assemble_full_y(&y_del_phase1, &dy_phase1))
-    }
-}
-
-/// Enumerate row `i`'s entries `(j, A_ij)` from a CSC matrix in O(nnz_total).
-fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> {
-    let mut out = Vec::new();
-    for j in 0..orig_problem.num_vars {
-        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                if row == i {
-                    out.push((j, vals[k]));
-                }
-            }
-        }
-    }
-    out
-}
 
 /// Relative tolerance for treating `x[j]` as active at a bound or for detecting fixed variables.
 ///
@@ -600,11 +81,42 @@ fn fixed_tol(lb: f64, ub: f64) -> f64 {
     BOUND_ACTIVE_REL_TOL * (1.0 + lb_s.max(ub_s))
 }
 
-/// Recover `y_i` of a removed row to satisfy LP dual feasibility, given the rest of `y`.
-/// For each column the required rc sign yields a permissible range on `y_i`; the row's
-/// constraint type (Le: y≤0, Ge: y≥0, Eq: free) intersects that range and we pick the
-/// value closest to zero. Rows whose primal is strictly non-binding short-circuit to
-/// `y_i = 0` because the rc-sign-only walk otherwise admits slackness-violating duals.
+/// Collect `(col, A[row, col])` for every column participating in row `i`.
+fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> {
+    let mut out = Vec::new();
+    for j in 0..orig_problem.num_vars {
+        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                if row == i {
+                    out.push((j, vals[k]));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Compute `(slack, scale)` for row `i`. Slack is non-negative for feasible constraints.
+fn row_slack_and_scale(orig_problem: &LpProblem, i: usize, solution: &[f64]) -> (f64, f64) {
+    let row_entries = collect_row_entries(orig_problem, i);
+    let ax_i: f64 = row_entries.iter().map(|&(j, a)| a * solution[j]).sum();
+    let b_i = orig_problem.b[i];
+    let slack = match orig_problem.constraint_types[i] {
+        ConstraintType::Le => b_i - ax_i,
+        ConstraintType::Ge => ax_i - b_i,
+        ConstraintType::Eq => 0.0,
+    };
+    let scale = 1.0 + b_i.abs() + ax_i.abs();
+    (slack, scale)
+}
+
+/// True when constraint `i` has positive slack (non-binding), so its dual must be zero.
+fn is_row_nonbinding(orig_problem: &LpProblem, i: usize, solution: &[f64]) -> bool {
+    let (slack, scale) = row_slack_and_scale(orig_problem, i, solution);
+    slack > COMP_SLACK_REL_TOL * scale
+}
+
+/// Recover the dual value for a removed row from dual feasibility (KKT stationarity).
 fn recover_removed_row_dual(
     orig_problem: &LpProblem,
     i: usize,
@@ -624,8 +136,6 @@ fn recover_removed_row_dual(
         }
         // Solve bounds for y_i from
         //   rc_j = c_j - Σ_{k≠i} A_kj y_k - A_ij y_i.
-        // `rc_at_yi0` must exclude row i; including it makes the update depend on
-        // the current y_i and can oscillate (0 ↔ target) under Gauss-Seidel.
         let mut rc_at_yi0 = orig_problem.c[j];
         if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
             for (k, &row) in rows.iter().enumerate() {
@@ -689,6 +199,7 @@ fn recover_removed_row_dual(
         0.0
     }
 }
+
 
 /// Synthesise an original-LP standard-form basis from the postsolved primal solution.
 ///
@@ -893,21 +404,28 @@ pub fn run_postsolve(
                 solution[*orig_col] = *value;
             }
             PostsolveStep::EmptyRow { orig_row } => {
-                dual_solution[*orig_row] =
-                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+                dual_solution[*orig_row] = 0.0;
             }
             PostsolveStep::SingletonRow {
                 orig_col,
                 orig_row,
                 value,
+                coeff,
+                col_orig_entries,
+                c_orig,
             } => {
                 solution[*orig_col] = *value;
-                dual_solution[*orig_row] =
-                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+                // Recover y[orig_row] from stationarity of orig_col:
+                //   c_orig = coeff * y[orig_row] + Σ_{k != orig_row} A[k,orig_col] * y[k]
+                //   => y[orig_row] = (c_orig - sum_ay) / coeff
+                let sum_ay: f64 = col_orig_entries
+                    .iter()
+                    .map(|&(row_k, a_kj)| a_kj * dual_solution[row_k])
+                    .sum();
+                dual_solution[*orig_row] = (c_orig - sum_ay) / coeff;
             }
             PostsolveStep::RedundantConstraint { orig_row } => {
-                dual_solution[*orig_row] =
-                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+                dual_solution[*orig_row] = 0.0;
             }
             PostsolveStep::BoundsTightened => {}
             PostsolveStep::SingletonInequalityRow {
@@ -950,28 +468,14 @@ pub fn run_postsolve(
                 // recovered from the free var's stationarity rc[orig_col] = 0,
                 // using the pre-distribution column snapshot `col_orig_entries`.
                 if let Some(piv_row) = orig_row {
-                    // If the eliminated column carries no stationarity information
-                    // (`c_orig≈0` and no remaining row entries), recovering y_piv
-                    // from that column fixes an arbitrary 0 and can violate rc-sign
-                    // on other original columns. In that underdetermined case,
-                    // recover from original-space rc-sign conditions instead.
-                    if col_orig_entries.is_empty() && c_orig.abs() <= ZERO_TOL {
-                        dual_solution[*piv_row] = recover_removed_row_dual(
-                            orig_problem,
-                            *piv_row,
-                            &solution,
-                            &dual_solution,
-                        );
-                    } else {
-                        let mut sum_other_rows = 0.0f64;
-                        for &(row_i, a_ij) in col_orig_entries {
-                            if row_i == *piv_row {
-                                continue;
-                            }
-                            sum_other_rows += a_ij * dual_solution[row_i];
+                    let mut sum_other_rows = 0.0f64;
+                    for &(row_i, a_ij) in col_orig_entries {
+                        if row_i == *piv_row {
+                            continue;
                         }
-                        dual_solution[*piv_row] = (c_orig - sum_other_rows) / pivot;
+                        sum_other_rows += a_ij * dual_solution[row_i];
                     }
+                    dual_solution[*piv_row] = (c_orig - sum_other_rows) / pivot;
                 }
             }
         }
@@ -987,97 +491,12 @@ pub fn run_postsolve(
         }
     }
 
-    // Compute several deleted-row y candidates and adopt whichever achieves the smallest
-    // bound-aware dual-feasibility violation. Cleanup-LP alone is not guaranteed to be
-    // dual-feasible under dual degeneracy, so it is compared against the Gauss-Seidel path.
+    // Compute dual-recovery candidates (y_loop, crossover) and adopt the one
+    // with the smallest bound-aware dual-feasibility violation.
     let y_loop = dual_solution.clone();
 
-    // Gauss-Seidel: iterate `recover_removed_row_dual` and the LinearSubstitution y_piv.
-    // The deadline is checked at the outer loop and every 1024 rows so very large
-    // postsolves cannot ignore the parent budget.
-    let y_gs = {
-        let mut y = y_loop.clone();
-        let mut linsub_rows: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        for step in &presolve_result.postsolve_stack {
-            if let PostsolveStep::LinearSubstitution {
-                col_orig_entries,
-                c_orig,
-                orig_row: Some(r),
-                ..
-            } = step
-            {
-                if !(col_orig_entries.is_empty() && c_orig.abs() <= ZERO_TOL) {
-                    linsub_rows.insert(*r);
-                }
-            }
-        }
-        'gs_outer: for _ in 0..GS_MAX_ITER {
-            if deadline.is_some_and(|d| Instant::now() >= d) {
-                break 'gs_outer;
-            }
-            let mut max_diff = 0.0f64;
-            for i in 0..m {
-                if presolve_result.row_map[i].is_some() {
-                    continue;
-                }
-                if linsub_rows.contains(&i) {
-                    continue;
-                }
-                if i & 0x3ff == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
-                    break 'gs_outer;
-                }
-                let new_y = recover_removed_row_dual(orig_problem, i, &solution, &y);
-                let diff = (y[i] - new_y).abs();
-                if diff > max_diff {
-                    max_diff = diff;
-                }
-                y[i] = new_y;
-            }
-            for step in &presolve_result.postsolve_stack {
-                if let PostsolveStep::LinearSubstitution {
-                    orig_row: Some(piv),
-                    col_orig_entries,
-                    c_orig,
-                    pivot,
-                    ..
-                } = step
-                {
-                    if col_orig_entries.is_empty() && c_orig.abs() <= ZERO_TOL {
-                        continue;
-                    }
-                    let mut sum = 0.0f64;
-                    for &(row_i, a_ij) in col_orig_entries {
-                        if row_i == *piv {
-                            continue;
-                        }
-                        sum += a_ij * y[row_i];
-                    }
-                    let new_y = (c_orig - sum) / pivot;
-                    let diff = (y[*piv] - new_y).abs();
-                    if diff > max_diff {
-                        max_diff = diff;
-                    }
-                    y[*piv] = new_y;
-                }
-            }
-            if max_diff < GS_CONV_TOL {
-                break 'gs_outer;
-            }
-        }
-        y
-    };
-
-    // Build a KKT-consistent rc residual metric first so the cheap candidates
-    // (y_loop, y_gs) can gate the far more expensive cleanup-LP candidates.
-    //
-    // Per-column violation:
-    //   at lb only: max(0, -rc)
-    //   at ub only: max(0,  rc)
-    //   interior / both-active: |rc|
-    //
-    // The previous metric ignored interior columns (0 contribution), which let
-    // postsolve choose a y with tiny bound-sign error but large stationarity drift
-    // on interior columns.
+    // Dual-feasibility metric: max per-column KKT violation.
+    // at lb only: max(0, -rc); at ub only: max(0, rc); interior: |rc|.
     let dfeas_bound = |y: &[f64]| -> f64 {
         let mut max_viol = 0.0f64;
         for j in 0..n {
@@ -1110,174 +529,25 @@ pub fn run_postsolve(
     };
 
     let df_loop = dfeas_bound(&y_loop);
-    let df_gs = dfeas_bound(&y_gs);
-    let cheap_min = df_loop.min(df_gs);
 
-    // Gate at the strictest LP feasibility eps used by the bench (`PIVOT_TOL`);
-    // below this no dual-recovery pass can improve the verdict and only costs
-    // runtime.
+    // Try crossover at Optimal status when loop candidate is dual-infeasible.
+    // Crossover reconstructs a globally dual-feasible y = B⁻ᵀc_B at the primal
+    // optimum; this is what reconciles presolve rows serving multiple roles
+    // (forcing + pivot) that no local recovery can fix, e.g. pilot-ja.
     let gate = PIVOT_TOL;
-
-    // Crossover-first. The cleanup LP and LSQ passes dominate postsolve runtime on
-    // large LPs (cleanup alone is 95–99% on ken-11 / osa-60) yet do not improve
-    // dual feasibility there — the basis crossover is what actually produces a
-    // feasible dual. So try crossover *before* the expensive passes: if it
-    // certifies (dfeas ≤ `gate`, the same threshold below which cleanup is already
-    // known to be inert) the cleanup LP and LSQ are skipped entirely. Only valid at
-    // Optimal status, and only when the cheap candidates are themselves
-    // dual-infeasible (`cheap_min > gate`); otherwise nothing downstream would run.
-    // Crossover stays a candidate in the final min-dfeas selection below, so it can
-    // only ever improve the chosen dual, never regress it.
     let crossover: Option<Vec<f64>> =
-        if matches!(result.status, SolveStatus::Optimal) && cheap_min > gate {
+        if matches!(result.status, SolveStatus::Optimal) && df_loop > gate {
             trace_pass("crossover");
-            // Cap crossover at half the remaining wall-clock so a slow crossover
-            // failure cannot starve the cleanup-LP fallback below (which bails the
-            // instant the deadline lapses). See `crossover_deadline_with_reserve`.
-            let xover_deadline = crossover_deadline_with_reserve(deadline, Instant::now());
-            crate::simplex::crossover_dual_from_primal(orig_problem, &solution, xover_deadline)
+            crate::simplex::crossover_dual_from_primal(orig_problem, &solution, deadline)
                 .map(|(_vertex, y, _rc)| y)
         } else {
             None
         };
     let df_xover = crossover.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
-    let crossover_certified = df_xover <= gate;
 
-    // Cleanup LP fallback: run only when crossover did not certify a feasible dual.
-    let (y_cl_nopert, y_cl_pert) = if cheap_min <= gate || crossover_certified {
-        (None, None)
-    } else {
-        trace_pass("cleanup_nopert");
-        let t0_nopert = std::time::Instant::now();
-        let y_nopert = build_and_solve_cleanup_lp(
-            orig_problem,
-            presolve_result,
-            &solution,
-            &y_gs,
-            deadline,
-            false,
-        );
-        let t_nopert = t0_nopert.elapsed();
-        let df_nopert = y_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
-        let so_far = cheap_min.min(df_nopert);
-        // The kept-y perturbation variant is much larger and often returns Inf dfeas;
-        // budget it at a small multiple of the plain variant's wall time. Above
-        // `LARGE_PROBLEM_THRESHOLD` it degenerates to the same LP as the plain
-        // variant (kept-row perturbation force-disabled), so it is skipped there.
-        let y_pert = if !should_run_kept_perturbation(
-            so_far > gate,
-            orig_problem.num_vars,
-            orig_problem.num_constraints,
-        ) {
-            None
-        } else {
-            trace_pass("cleanup_pert");
-            let now = std::time::Instant::now();
-            let pert_budget = t_nopert.saturating_mul(4);
-            let pert_deadline = match deadline {
-                Some(d) => Some(d.min(now + pert_budget)),
-                None => Some(now + pert_budget),
-            };
-            build_and_solve_cleanup_lp(
-                orig_problem,
-                presolve_result,
-                &solution,
-                &y_gs,
-                pert_deadline,
-                true,
-            )
-        };
-        (y_nopert, y_pert)
-    };
-
-    // Compute cleanup dfeas before the LSQ gate so we can decide whether the
-    // LSQ pass is worth the (often dominant) runtime.
-    let df_cl_nopert = y_cl_nopert
-        .as_ref()
-        .map_or(f64::INFINITY, |y| dfeas_bound(y));
-    let df_cl_pert = y_cl_pert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
-    let df_cl_min = df_cl_nopert.min(df_cl_pert);
-
-    // LSQ skip gate: cleanup が cheap_min より 0.1% 以上改善していない場合は
-    // LSQ が同一データで stagnate すると期待されるため skip する
-    // (dfl001: LSQ が postsolve の 98% ≈ ~3s を消費、lp_dispatch.rs bench 実測)。
-    // 撤廃 (0.0) では標準 test suite に退化なし (dfl001 は #[ignore])。
-    // (lp_dispatch.rs: dfl001 bench 実測) skip gate 撤廃 → dfl001 で IPM 60s 全消費 + postsolve 43s 退化。
-    const LSQ_CLEANUP_REL_IMPROVE: f64 = 1e-3;
-    let cleanup_stagnant =
-        df_cl_min.is_finite() && df_cl_min >= cheap_min * (1.0 - LSQ_CLEANUP_REL_IMPROVE);
-
-    // LSQ projection (A^T y ≈ -c) as a fourth candidate. Cleanup LP only adjusts
-    // deleted-row y; LSQ ignores the kept/deleted boundary and can rebalance the
-    // full y vector when coupling is strong.
-    let y_lsq: Option<Vec<f64>> = if cheap_min <= gate || crossover_certified || cleanup_stagnant {
-        #[cfg(debug_assertions)]
-        {
-            #[allow(clippy::print_stderr)]
-            if cleanup_stagnant {
-                eprintln!(
-                    "[postsolve] LSQ skip: improvement-stagnant (cheap_min={:.3e} df_cl_min={:.3e})",
-                    cheap_min, df_cl_min
-                );
-            }
-        }
-        None
-    } else if m > 0 {
-        trace_pass("lsq");
-        // 規模ガードは固定 size proxy ではなく compute_lsq_dual_y 内部に委ねる
-        // (主経路は matrix-free CG、direct LDL fallback のみ memory_budget で skip)。
-        let q_empty = CscMatrix::new(n, n);
-        let qp = crate::qp::QpProblem::new(
-            q_empty,
-            orig_problem.c.clone(),
-            orig_problem.a.clone(),
-            orig_problem.b.clone(),
-            orig_problem.bounds.clone(),
-            orig_problem.constraint_types.clone(),
-        )
-        .ok();
-        qp.and_then(|qp| {
-            let seed = y_cl_pert
-                .as_ref()
-                .or(y_cl_nopert.as_ref())
-                .cloned()
-                .unwrap_or_else(|| y_gs.clone());
-            let tmp_result = crate::problem::SolverResult {
-                solution: solution.clone(),
-                dual_solution: seed,
-                ..Default::default()
-            };
-            crate::qp::compute_lsq_dual_y(&qp, &tmp_result, deadline)
-        })
-    } else {
-        None
-    };
-
-    // Adopt the candidate with smallest dfeas_bound; ties go to the cheaper
-    // computation (priority order loop > gs > cleanup > lsq > crossover), so the
-    // crossover dual is taken only when it *strictly* improves on every other
-    // candidate — matching the legacy "adopt only if it lowers dfeas" rule, hence
-    // it can never regress another LP. The crossover dual itself was computed
-    // earlier (a globally dual-feasible y = B⁻ᵀc_B reconstructed at the primal
-    // optimum), which is what reconciles presolve rows serving multiple roles
-    // (forcing + pivot) that no local recovery can fix, e.g. pilot-ja.
-    let df_lsq = y_lsq.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
-    let min_df = df_loop
-        .min(df_gs)
-        .min(df_cl_nopert)
-        .min(df_cl_pert)
-        .min(df_lsq)
-        .min(df_xover);
-    if df_loop == min_df {
+    // Select candidate with lowest dual infeasibility.
+    if df_loop <= df_xover {
         dual_solution = y_loop;
-    } else if df_gs == min_df {
-        dual_solution = y_gs;
-    } else if df_cl_nopert == min_df {
-        dual_solution = y_cl_nopert.expect("df_cl_nopert finite implies Some");
-    } else if df_cl_pert == min_df {
-        dual_solution = y_cl_pert.expect("df_cl_pert finite implies Some");
-    } else if df_lsq == min_df {
-        dual_solution = y_lsq.expect("df_lsq finite implies Some");
     } else {
         dual_solution = crossover.expect("df_xover finite implies Some");
     }
@@ -1323,379 +593,6 @@ pub fn run_postsolve(
     }
 }
 
-#[cfg(test)]
-mod cleanup_comp_tests {
-    //! cleanup-LP comp slackness sentinels.
-    //!
-    //! Each fixture pins `dual_solution_known` for a kept row to a drifted value;
-    //! without the comp clamp the cleanup LP would absorb the drift into the
-    //! deleted non-binding row's `y_del` (sign-feasible but slackness-violating).
-    //! With the clamp `y_del` is pinned at 0 and Phase-1 slack carries the drift.
-    //! Toggle: removing the `is_row_nonbinding` branch in `bounds_clean` /
-    //! `p2_bounds` flips `y_del` non-zero and the assertions fail.
-    use super::*;
-    use crate::presolve::transforms::{PostsolveStep, PresolveResult};
-    use crate::problem::{ConstraintType, LpProblem};
-    use crate::sparse::CscMatrix;
-    use std::sync::Once;
-
-    /// Drifted dual for kept rows — large enough that a non-binding deleted row
-    /// would absorb a measurable y to mask the rc-sign violation without comp.
-    const DRIFT_MAGNITUDE: f64 = 5e-3;
-    /// Comp residual threshold for asserting the fix is alive.
-    const COMP_RESID_TIGHT: f64 = 1e-9;
-
-    fn presolve_result_with_deleted_row(problem: &LpProblem, deleted_row: usize) -> PresolveResult {
-        let n = problem.num_vars;
-        let m = problem.num_constraints;
-        // Keep all columns; only the chosen row is removed.
-        let col_map = (0..n).map(Some).collect();
-        let row_map: Vec<Option<usize>> = (0..m)
-            .map(|i| {
-                if i == deleted_row {
-                    None
-                } else {
-                    Some(if i < deleted_row { i } else { i - 1 })
-                }
-            })
-            .collect();
-        let postsolve_stack = vec![PostsolveStep::EmptyRow {
-            orig_row: deleted_row,
-        }];
-        PresolveResult {
-            reduced_problem: problem.clone(),
-            postsolve_stack,
-            orig_num_vars: n,
-            orig_num_constraints: m,
-            col_map,
-            row_map,
-            was_reduced: true,
-            obj_offset: 0.0,
-        }
-    }
-
-    /// max_j {|rc_sign_violation|} over the recovered y, using the constraint-active
-    /// reduced-cost rule (rc must be ≥0 at lb, ≤0 at ub, =0 interior).
-    fn rc_sign_violation(problem: &LpProblem, solution: &[f64], y: &[f64]) -> f64 {
-        let mut max_v = 0.0_f64;
-        for j in 0..problem.num_vars {
-            let (lb, ub) = problem.bounds[j];
-            let at_lb = lb.is_finite() && (solution[j] - lb).abs() < 1e-6;
-            let at_ub = ub.is_finite() && (solution[j] - ub).abs() < 1e-6;
-            let mut rc = problem.c[j];
-            if let Ok((rows, vals)) = problem.a.get_column(j) {
-                for (k, &row) in rows.iter().enumerate() {
-                    rc -= vals[k] * y[row];
-                }
-            }
-            let v = if at_lb && !at_ub {
-                (-rc).max(0.0)
-            } else if at_ub && !at_lb {
-                rc.max(0.0)
-            } else {
-                rc.abs()
-            };
-            if v > max_v {
-                max_v = v;
-            }
-        }
-        max_v
-    }
-
-    /// Residual of `|y_i · slack_i|` over the recovered y.
-    fn comp_residual(problem: &LpProblem, solution: &[f64], y: &[f64]) -> f64 {
-        let mut max_c = 0.0_f64;
-        for i in 0..problem.num_constraints {
-            let (slack, scale) = row_slack_and_scale(problem, i, solution);
-            let prod = (y[i] * slack).abs() / scale;
-            if prod > max_c {
-                max_c = prod;
-            }
-        }
-        max_c
-    }
-
-    /// Fixture 1: 1 kept Eq + 1 deleted Le row. The deleted Le row is
-    /// non-binding at the optimum; cleanup-LP must keep its y at 0 even though
-    /// the kept Eq y is intentionally drifted.
-    fn fixture_eq_kept_le_deleted() -> (LpProblem, Vec<f64>, Vec<f64>, usize) {
-        // min x1 + x2 s.t. x1 + x2 = 1, x2 ≤ 10, x ≥ 0.
-        // Optimum: x* = (0, 1), row 0 binding, row 1 slack = 9.
-        let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, 1.0, 1.0], 2, 2).unwrap();
-        let lp = LpProblem::new_general(
-            vec![1.0, 1.0],
-            a,
-            vec![1.0, 10.0],
-            vec![ConstraintType::Eq, ConstraintType::Le],
-            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
-            None,
-        )
-        .unwrap();
-        let solution = vec![0.0, 1.0];
-        // Drifted kept dual: true y_0 = 1.0; drift breaks rc sign for x1.
-        let dual_known = vec![1.0 + DRIFT_MAGNITUDE, 0.0];
-        (lp, solution, dual_known, 1)
-    }
-
-    /// Fixture 2: 1 kept Eq + 1 deleted Ge row. Verifies the Ge branch of
-    /// `bounds_clean`/`p2_bounds` (y_del default `(0, ∞)`) gets clamped to
-    /// `(0, 0)` for the non-binding row. Same primal as Fixture 1 with the
-    /// deleted row's A negated so cleanup-LP prefers `y_del = DRIFT` without
-    /// the clamp.
-    fn fixture_eq_kept_ge_deleted() -> (LpProblem, Vec<f64>, Vec<f64>, usize) {
-        // min x1 + x2 s.t. x1 + x2 = 1, -x1 - x2 ≥ -10, x ≥ 0.
-        // Optimum x* = (0, 1); row 0 binding, row 1 slack = 9.
-        let a =
-            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, -1.0, -1.0], 2, 2)
-                .unwrap();
-        let lp = LpProblem::new_general(
-            vec![1.0, 1.0],
-            a,
-            vec![1.0, -10.0],
-            vec![ConstraintType::Eq, ConstraintType::Ge],
-            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
-            None,
-        )
-        .unwrap();
-        let solution = vec![0.0, 1.0];
-        let dual_known = vec![1.0 + DRIFT_MAGNITUDE, 0.0];
-        (lp, solution, dual_known, 1)
-    }
-
-    fn init_logger() {
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {});
-    }
-
-    fn run_fixture(
-        problem: &LpProblem,
-        solution: &[f64],
-        dual_known: &[f64],
-        deleted_row: usize,
-    ) -> Vec<f64> {
-        init_logger();
-        let presolve_result = presolve_result_with_deleted_row(problem, deleted_row);
-        let y = build_and_solve_cleanup_lp(
-            problem,
-            &presolve_result,
-            solution,
-            dual_known,
-            None,
-            false,
-        )
-        .expect("cleanup LP must converge for the sentinel fixture");
-        assert_eq!(y.len(), problem.num_constraints);
-        y
-    }
-
-    #[test]
-    fn cleanup_lp_eq_kept_le_deleted_comp_holds() {
-        let (lp, sol, dual, del) = fixture_eq_kept_le_deleted();
-        let y = run_fixture(&lp, &sol, &dual, del);
-        let comp = comp_residual(&lp, &sol, &y);
-        assert!(
-            comp < COMP_RESID_TIGHT,
-            "comp={:.3e} >= {:.0e}; y={:?} (clamp on non-binding Le row must pin y[{}]=0)",
-            comp,
-            COMP_RESID_TIGHT,
-            y,
-            del,
-        );
-        // y for the deleted non-binding Le row must be exactly 0.
-        assert_eq!(
-            y[del], 0.0,
-            "non-binding Le deleted row y must be 0, got {}",
-            y[del]
-        );
-    }
-
-    #[test]
-    fn cleanup_lp_eq_kept_ge_deleted_comp_holds() {
-        let (lp, sol, dual, del) = fixture_eq_kept_ge_deleted();
-        let y = run_fixture(&lp, &sol, &dual, del);
-        let comp = comp_residual(&lp, &sol, &y);
-        assert!(
-            comp < COMP_RESID_TIGHT,
-            "comp={:.3e} >= {:.0e}; y={:?} (clamp on non-binding Ge row must pin y[{}]=0)",
-            comp,
-            COMP_RESID_TIGHT,
-            y,
-            del,
-        );
-        assert_eq!(
-            y[del], 0.0,
-            "non-binding Ge deleted row y must be 0, got {}",
-            y[del]
-        );
-    }
-
-    /// No-op proof: feed in the dual the un-clamped cleanup-LP would have
-    /// chosen (y_del = -DRIFT on the non-binding Le row to satisfy the Eq
-    /// stationarity constraint on the interior x2 column), and confirm the
-    /// comp detector flags it. Confirms the detector itself has teeth — and
-    /// that if the clamp is reverted the tight assertions above flip to FAIL
-    /// with drift in this same band.
-    #[test]
-    fn cleanup_lp_unclamped_dual_violates_comp_detector() {
-        let (lp, sol, _dual, _del) = fixture_eq_kept_le_deleted();
-        let broken_y = vec![1.0 + DRIFT_MAGNITUDE, -DRIFT_MAGNITUDE];
-        let comp = comp_residual(&lp, &sol, &broken_y);
-        assert!(
-            comp >= DRIFT_MAGNITUDE * 0.5,
-            "broken dual comp={:.3e} should be >= {:.3e}; detector is no-op'd",
-            comp,
-            DRIFT_MAGNITUDE * 0.5,
-        );
-        // Sanity: rc_sign_violation alone is NOT a substitute — the un-clamped
-        // dual passes rc-sign on the interior x2 column even though it violates
-        // comp. (The col-0 rc violation here is inherited drift, unrelated.)
-        let _rc_v_inherited = rc_sign_violation(&lp, &sol, &broken_y);
-    }
-
-    /// Cross-check: the helper `is_row_nonbinding` matches the comp-residual
-    /// reasoning across multiple input scales — guards against future refactors
-    /// of the tolerance (relative vs absolute).
-    #[test]
-    fn is_row_nonbinding_detects_known_patterns() {
-        let cases: Vec<(ConstraintType, f64, f64, bool)> = vec![
-            // (ct, b, ax, expected_nonbinding)
-            (ConstraintType::Le, 10.0, 5.0, true), // slack 5 ≫ tol
-            (ConstraintType::Le, 10.0, 10.0, false), // slack 0, binding
-            (ConstraintType::Ge, 1.0, 100.0, true), // slack 99
-            (ConstraintType::Ge, 1.0, 1.0, false),
-            (ConstraintType::Eq, 1.0, 1.0, false),
-            (ConstraintType::Eq, 1.0, 0.5, false), // Eq is never non-binding
-        ];
-        for (i, (ct, b, ax, expected)) in cases.iter().enumerate() {
-            let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-            let lp = LpProblem::new_general(
-                vec![0.0],
-                a,
-                vec![*b],
-                vec![*ct],
-                vec![(f64::NEG_INFINITY, f64::INFINITY)],
-                None,
-            )
-            .unwrap();
-            let got = is_row_nonbinding(&lp, 0, &[*ax]);
-            assert_eq!(
-                got, *expected,
-                "case {} ({:?}, b={}, ax={}): expected {}, got {}",
-                i, ct, b, ax, expected, got,
-            );
-        }
-    }
-
-    /// Regression guard for `recover_removed_row_dual`:
-    /// recovering row `i` must solve with `Σ_{k≠i}` (exclude self term),
-    /// otherwise GS update oscillates and can pin y_i to 0, breaking rc=0 on
-    /// interior/basic columns tied to the removed row.
-    #[test]
-    fn recover_removed_row_dual_excludes_self_row_in_stationarity() {
-        // One interior column x0 participates in:
-        //   row0 (removed): 2*x0 >= 52  -> binding at x0=26
-        //   row1 (kept):    1*x0  = 26  -> dual fixed to y1=3
-        // Objective c0=7. Stationarity on interior x0 requires:
-        //   7 - 2*y0 - 1*y1 = 0  => y0 = 2.
-        let a = CscMatrix::from_triplets(&[0usize, 1], &[0usize, 0], &[2.0, 1.0], 2, 1).unwrap();
-        let lp = LpProblem::new_general(
-            vec![7.0],
-            a,
-            vec![52.0, 26.0],
-            vec![ConstraintType::Ge, ConstraintType::Eq],
-            vec![(0.0, 100.0)],
-            None,
-        )
-        .unwrap();
-        let x = vec![26.0]; // strictly interior wrt [0, 100]
-        let y_with_bad_self = vec![11.0, 3.0];
-
-        let y0 = recover_removed_row_dual(&lp, 0, &x, &y_with_bad_self);
-        assert!(
-            (y0 - 2.0).abs() < 1e-12,
-            "row dual recovery must enforce interior rc=0, expected y0=2 got {}",
-            y0
-        );
-
-        // Idempotence under GS update: once recovered, re-applying must keep y0.
-        let y_reapplied = recover_removed_row_dual(&lp, 0, &x, &[y0, 3.0]);
-        assert!(
-            (y_reapplied - y0).abs() < 1e-12,
-            "GS update must not oscillate after recovery: y0={} -> {}",
-            y0,
-            y_reapplied
-        );
-
-        let rc0 = 7.0 - 2.0 * y0 - 1.0 * 3.0;
-        assert!(
-            rc0.abs() < 1e-12,
-            "interior/basic column must satisfy rc=0 after recovery, rc={}",
-            rc0
-        );
-    }
-
-    /// Deadline sentinel: an already-expired deadline must cause `build_and_solve_cleanup_lp`
-    /// to bail immediately and return `None` without constructing or solving the inner LP.
-    ///
-    /// No-op proof: the companion test `cleanup_lp_live_deadline_noop_proof` verifies
-    /// that the same fixture with `deadline = None` (unlimited) does return `Some(y)`,
-    /// confirming the expired-deadline `None` is a genuine bail, not a trivial always-None
-    /// path. Removing both the early-exit guard **and** the `opts.deadline = deadline`
-    /// wiring causes the expired-deadline case to solve the LP and return `Some`, failing
-    /// this test.
-    #[test]
-    fn cleanup_lp_expired_deadline_returns_none() {
-        let (lp, sol, dual, del) = fixture_eq_kept_le_deleted();
-        let presolve_result = presolve_result_with_deleted_row(&lp, del);
-
-        let expired = Instant::now() - std::time::Duration::from_secs(100);
-        let result = build_and_solve_cleanup_lp(
-            &lp,
-            &presolve_result,
-            &sol,
-            &dual,
-            Some(expired),
-            false,
-        );
-
-        assert!(
-            result.is_none(),
-            "expired deadline must cause immediate bail (result must be None); \
-             removing the deadline guard or deadline wiring from build_and_solve_cleanup_lp \
-             allows the cleanup LP to solve and return Some, failing this sentinel"
-        );
-    }
-
-    /// No-op proof for `cleanup_lp_expired_deadline_returns_none`: the same fixture
-    /// with `deadline = None` (unlimited runtime) must return `Some(y)`, proving
-    /// the LP is actually solvable and the expired-deadline None is a genuine bail.
-    #[test]
-    fn cleanup_lp_live_deadline_noop_proof() {
-        let (lp, sol, dual, del) = fixture_eq_kept_le_deleted();
-        let presolve_result = presolve_result_with_deleted_row(&lp, del);
-
-        let result = build_and_solve_cleanup_lp(
-            &lp,
-            &presolve_result,
-            &sol,
-            &dual,
-            None,
-            false,
-        );
-
-        assert!(
-            result.is_some(),
-            "unlimited deadline must allow the cleanup LP to solve and return Some(y); \
-             an always-None implementation would break this no-op proof"
-        );
-        let y = result.unwrap();
-        assert_eq!(
-            y.len(),
-            lp.num_constraints,
-            "returned y must cover all original constraints"
-        );
-    }
-}
 
 #[cfg(test)]
 mod warm_basis_recovery_tests {
@@ -2152,8 +1049,7 @@ mod ipm_dual_convention_tests {
 
 #[cfg(test)]
 mod crossover_first_tests {
-    //! Sentinels for the crossover-first postsolve ordering and the redundant
-    //! kept-perturbation skip.
+    //! Sentinels for the crossover-first postsolve ordering.
     //!
     //! The dual-recovery passes produce identical final duals regardless of order
     //! (min-dfeas selection), so the *only* observable signal of the optimisation
@@ -2193,13 +1089,10 @@ mod crossover_first_tests {
         }
     }
 
-    /// Crossover is tried before the cleanup LP / LSQ; when it certifies a feasible
-    /// dual (dfeas ≤ gate) those expensive passes are skipped entirely, yet the
-    /// returned dual is the (correct) crossover dual.
+    /// Crossover certifies a feasible dual when the loop candidate is dual-infeasible.
     ///
-    /// No-op proof: reverting to cleanup-before-crossover, or dropping the
-    /// `crossover_certified` skip, makes `cleanup_nopert` appear in the trace and
-    /// flips both the membership and the order assertions.
+    /// No-op proof: dropping the `df_loop > gate` guard or making crossover
+    /// unconditional eliminates the skipping of the recovery when cheap_min ≤ gate.
     #[test]
     fn crossover_first_certifies_and_skips_cleanup() {
         let (lp, x) = lp_clean_vertex();
@@ -2257,7 +1150,7 @@ mod crossover_first_tests {
     /// it (the basis reconstruction is only meaningful at a primal optimum).
     ///
     /// No-op proof: dropping the `matches!(Optimal)` guard puts `crossover` into
-    /// the trace.
+    /// the trace and fails the assertion.
     #[test]
     fn non_optimal_status_skips_crossover() {
         let (lp, x) = lp_clean_vertex();
@@ -2272,123 +1165,6 @@ mod crossover_first_tests {
             !trace.contains(&"crossover"),
             "non-Optimal status must not run crossover; trace={trace:?}"
         );
-        // The cleanup fallback still engages on the infeasible cheap dual.
-        assert!(
-            trace.contains(&"cleanup_nopert"),
-            "cleanup fallback must run when crossover is skipped; trace={trace:?}"
-        );
     }
 
-    /// `should_run_kept_perturbation` skips the perturbation variant once
-    /// `n + m > LARGE_PROBLEM_THRESHOLD`, where it would re-solve an identical LP.
-    ///
-    /// No-op proof: removing the `n + m <= LARGE_PROBLEM_THRESHOLD` term makes the
-    /// over-threshold cases return `true`, failing the first two assertions.
-    #[test]
-    fn should_run_kept_perturbation_respects_threshold() {
-        // Just over threshold ⇒ skip (variant is redundant there).
-        assert!(!should_run_kept_perturbation(true, LARGE_PROBLEM_THRESHOLD, 1));
-        assert!(!should_run_kept_perturbation(
-            true,
-            LARGE_PROBLEM_THRESHOLD + 1,
-            0
-        ));
-        // At threshold with an unresolved dual ⇒ run.
-        assert!(should_run_kept_perturbation(
-            true,
-            LARGE_PROBLEM_THRESHOLD - 1,
-            1
-        ));
-        // Already-resolved dual ⇒ never run, regardless of size.
-        assert!(!should_run_kept_perturbation(false, 10, 10));
-    }
-
-    /// Crossover runs before the cleanup-LP fallback, so it must not be allowed to
-    /// consume the whole deadline: `crossover_deadline_with_reserve` caps it at the
-    /// midpoint of the remaining wall-clock, reserving the other half for the
-    /// fallback. The fallback bails the instant the clock lapses, so without this
-    /// reserve a slow crossover failure on a finite deadline starves cleanup to
-    /// zero budget and the final dual regresses below the baseline.
-    ///
-    /// No-op proof: returning `deadline` unchanged (handing crossover the full
-    /// budget) leaves zero reserve — both the `sub < deadline` and the
-    /// half-reserve assertions fail.
-    #[test]
-    fn crossover_reserves_half_deadline_for_cleanup_fallback() {
-        let now = Instant::now();
-        let span = std::time::Duration::from_secs(100);
-        let deadline = now + span;
-
-        let sub = crossover_deadline_with_reserve(Some(deadline), now)
-            .expect("a finite deadline must yield a finite crossover sub-deadline");
-
-        // Crossover stops strictly before the full deadline ...
-        assert!(
-            sub < deadline,
-            "crossover sub-deadline must precede the full deadline so cleanup keeps budget"
-        );
-        // ... leaving half the span as fallback reserve, and granting crossover the
-        // other half (a non-trivial budget that never blocks the good case).
-        assert_eq!(
-            deadline.saturating_duration_since(sub),
-            span / 2,
-            "fallback reserve must be half the remaining wall-clock"
-        );
-        assert_eq!(
-            sub.saturating_duration_since(now),
-            span / 2,
-            "crossover must keep half the wall-clock for the certify (good) case"
-        );
-
-        // An unbounded deadline reserves nothing (no fallback to starve).
-        assert_eq!(crossover_deadline_with_reserve(None, now), None);
-
-        // A fully-lapsed deadline grants crossover zero budget (immediate bail).
-        let sub_zero = crossover_deadline_with_reserve(Some(now), now)
-            .expect("a finite (lapsed) deadline still yields a finite sub-deadline");
-        assert_eq!(
-            sub_zero, now,
-            "a fully-lapsed deadline must grant crossover zero budget, not extend it"
-        );
-    }
-
-    /// Call-site wiring: above `LARGE_PROBLEM_THRESHOLD` the cleanup pert variant
-    /// must not be invoked even when the plain variant ran. Non-Optimal status
-    /// deterministically bypasses crossover so the cleanup pert gate is exercised.
-    ///
-    /// No-op proof: reverting the call site to call the pert variant whenever the
-    /// dual is unresolved makes `cleanup_pert` appear in the trace.
-    #[test]
-    fn pert_variant_not_called_above_threshold() {
-        let n = LARGE_PROBLEM_THRESHOLD; // n + m = THRESHOLD + 1 > THRESHOLD
-        let rows = vec![0usize; n];
-        let cols: Vec<usize> = (0..n).collect();
-        let vals = vec![1.0_f64; n];
-        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 1, n).unwrap();
-        let lp = LpProblem::new_general(
-            vec![1.0; n],
-            a,
-            vec![1.0],
-            vec![ConstraintType::Eq],
-            vec![(0.0, f64::INFINITY); n],
-            None,
-        )
-        .unwrap();
-        let presolve = PresolveResult::no_reduction(&lp);
-        // solution at lb, y = [2] ⇒ rc_j = 1 - 2 = -1 at lb ⇒ cheap_min = 1 > gate.
-        let reduced = result_with_dual(SolveStatus::Infeasible, &vec![0.0; n], vec![2.0]);
-
-        let _ = drain_postsolve_pass_trace();
-        let _ = run_postsolve(&reduced, &presolve, &lp, None, false);
-        let trace = drain_postsolve_pass_trace();
-
-        assert!(
-            trace.contains(&"cleanup_nopert"),
-            "plain cleanup variant must run on the infeasible cheap dual; trace={trace:?}"
-        );
-        assert!(
-            !trace.contains(&"cleanup_pert"),
-            "redundant pert variant must be skipped above LARGE_PROBLEM_THRESHOLD; trace={trace:?}"
-        );
-    }
 }

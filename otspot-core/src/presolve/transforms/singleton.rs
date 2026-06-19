@@ -52,11 +52,23 @@ fn singleton_eq(
         return Err(PresolveStatus::Infeasible);
     }
     let value = value.clamp(lb, ub);
+
+    // Snapshot dual-recovery data before fix_and_remove mutates state.
+    let c_orig = st.c[j];
+    let col_orig_entries: Vec<(usize, f64)> = st.col_entries[j]
+        .iter()
+        .filter(|&&(r, v)| r != i && !st.removed_rows[r] && v.abs() >= ZERO_TOL)
+        .copied()
+        .collect();
+
     fix_and_remove(st, i, j, value);
     st.postsolve_stack.push(PostsolveStep::SingletonRow {
         orig_row: i,
         orig_col: j,
         value,
+        coeff: a_ij,
+        col_orig_entries,
+        c_orig,
     });
     Ok(())
 }
