@@ -55,7 +55,28 @@ Otspot: **29/29 正解 (100%)**
 
 LISWET 族の SUBOPT は f64 精度限界による正しい拒否 (バグではない)。
 
-QP は native IPM (IPPMM) を持ち、HiGHS (simplex QP) や OSQP (ADMM) とは異なるアプローチ。中小規模凸 QP で competitive。
+### QP 速度比較 (vs Clarabel / OSQP)
+
+66問の共通テストセットで比較:
+
+| Solver | Solved | Rate |
+|--------|--------|------|
+| Clarabel (IPM-conic) | 66/66 | **100%** |
+| Otspot (IPPMM) | 58 PASS + 7 SUBOPT + 1 OBJ_MISMATCH | 88% |
+| OSQP (ADMM) | 48/66 | 73% |
+
+速度 (31問で3 solver 全て solve、shifted geometric mean):
+
+| Solver | Shifted Geomean | vs Clarabel |
+|--------|-----------------|-------------|
+| Clarabel | 1.39s | 1.00x |
+| Otspot | 2.38s | **1.71x** |
+| OSQP | 2.92s | 2.10x |
+
+- Clarabel が最速・最も堅牢。CVXQP1_L で 9.7s vs Otspot 105.9s (11x)
+- Otspot は OSQP より速い。BOYD1 で 7.2s vs Clarabel 9.2s など Otspot 勝利ケースもあり
+- OSQP は大規模・悪条件で 18/66 失敗。IPM 系に劣後
+- Otspot 全138問で TIMEOUT=0 は堅牢性の証
 
 ## MIP — MIPLIB Small (20問)
 
