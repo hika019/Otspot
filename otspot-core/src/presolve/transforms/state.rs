@@ -69,9 +69,10 @@ pub(crate) enum PostsolveStep {
         orig_row: usize,
         fixed_vars: Vec<(usize, f64, f64, f64)>,
         /// (col, A[orig_row, col]) for all columns active at elimination time.
-        /// Snapshot used in postsolve to compute slack without depending on
-        /// LIFO ordering of other restored variables.
-        col_orig_entries: Vec<(usize, f64)>,
+        /// Snapshot used in postsolve for stationarity-based dual recovery,
+        /// bypassing the activity-based binding check that would read
+        /// partially-restored LIFO solutions.
+        row_orig_entries: Vec<(usize, f64)>,
     },
 }
 

@@ -113,7 +113,7 @@ pub(super) fn step2b_forcing_row(
         st.postsolve_stack.push(PostsolveStep::ForcingRow {
             orig_row: i,
             fixed_vars,
-            col_orig_entries: active,
+            row_orig_entries: active,
         });
     }
     Ok(())

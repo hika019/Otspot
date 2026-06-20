@@ -480,7 +480,7 @@ pub fn run_postsolve(
             PostsolveStep::ForcingRow {
                 orig_row,
                 fixed_vars,
-                col_orig_entries,
+                row_orig_entries,
             } => {
                 for &(col, value, _, _) in fixed_vars {
                     solution[col] = value;
@@ -489,7 +489,7 @@ pub fn run_postsolve(
                 // matches RHS). Use the presolve-time snapshot to bypass is_row_nonbinding,
                 // which would compute Ax with partially restored variables under LIFO replay.
                 dual_solution[*orig_row] =
-                    stationarity_dual(orig_problem, *orig_row, col_orig_entries, &solution, &dual_solution);
+                    stationarity_dual(orig_problem, *orig_row, row_orig_entries, &solution, &dual_solution);
             }
             PostsolveStep::LinearSubstitution {
                 orig_col,

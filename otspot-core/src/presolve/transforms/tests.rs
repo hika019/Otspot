@@ -1135,8 +1135,7 @@ fn test_forcing_row_dual_eq_with_prior_fixed_variable() {
     // step2b: x1 + x2 = 0, min=0=rhs, forcing from below: x1→0, x2→0
     // At optimum: x0=5, x1=0, x2=0; row = 5 = rhs → binding.
     // Eq row dual unconstrained in sign.
-    // KKT for x1 at lb=0 (x1 at lb and ub coincide since forced): both at_lb and at_ub.
-    // For Eq: stationarity gives a range; dual must be non-zero (row is not redundant).
+    // KKT for x1 at lb=0: rc_1 = -1 - y >= 0 → y <= -1. Dual = -1.
     let lp = make_lp_general(
         vec![0.0, -1.0, -1.0],
         &[0, 0, 0],
@@ -1152,10 +1151,83 @@ fn test_forcing_row_dual_eq_with_prior_fixed_variable() {
     assert!((result.solution[0] - 5.0).abs() < 1e-6, "x0={}", result.solution[0]);
     assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
     assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
-    // Eq row binding; dual should be non-zero (= -1 from stationarity).
     assert!(
-        result.dual_solution[0].abs() > 1e-6,
-        "Eq forcing-row dual must be non-zero, got {}",
+        (result.dual_solution[0] - (-1.0)).abs() < 1e-6,
+        "Eq forcing-row dual should be -1, got {}",
         result.dual_solution[0]
+    );
+}
+
+#[test]
+fn test_forcing_row_dual_le_mixed_sign_with_prior_fixed_variable() {
+    // min -x1 + x2
+    // 2*x0 + x1 - x2 <= 4,  x0 in [1,1], x1 in [0,3], x2 in [0,3]
+    //
+    // step1: x0 fixed at 1 → modified_b = 4 - 2 = 2
+    // step2b: x1 - x2 <= 2, min = 0 + (-1)*3 = -3 < 2, not forcing.
+    // Try: 2*x0 + x1 - x2 <= -1,  x0 in [1,1], x1 in [0,3], x2 in [0,3]
+    //   modified_b = -1 - 2 = -3. x1 - x2 <= -3. min = 0 + (-1)*3 = -3 >= -3 → forcing.
+    //   x1→0 (pos coeff, to lb), x2→3 (neg coeff, to ub).
+    // At optimum: x0=1, x1=0, x2=3; row = 2+0-3 = -1 = rhs → binding.
+    // KKT for x1 at lb=0: rc_1 = -1 - 1*y >= 0 → y <= -1.
+    // KKT for x2 at ub=3: rc_2 = 1 - (-1)*y <= 0 → 1 + y <= 0 → y <= -1. Dual = -1.
+    let lp = make_lp_general(
+        vec![0.0, -1.0, 1.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[2.0, 1.0, -1.0],
+        1, 3,
+        vec![-1.0],
+        vec![ConstraintType::Le],
+        vec![(1.0, 1.0), (0.0, 3.0), (0.0, 3.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 1.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!((result.solution[2] - 3.0).abs() < 1e-6, "x2={}", result.solution[2]);
+    assert!(
+        (result.dual_solution[0] - (-1.0)).abs() < 1e-6,
+        "dual should be -1, got {}",
+        result.dual_solution[0]
+    );
+}
+
+#[test]
+fn test_forcing_row_dual_multirow_with_prior_fixed_variable() {
+    // min -x1 - x2
+    // row0: x0 + x1 + x2 <= 5,  x0 in [5,5], x1 in [0,2], x2 in [0,2]
+    // row1: x1 + x2 <= 10 (slack, non-binding)
+    //
+    // step1: x0 fixed at 5 → row0 modified_b = 0
+    // step2b: x1 + x2 <= 0, forcing: x1→0, x2→0
+    // Row1 survives presolve. At optimum: x0=5, x1=0, x2=0.
+    // Row0: 5+0+0 = 5 = rhs → binding, dual = -1.
+    // Row1: 0+0 = 0 <= 10 → non-binding, dual = 0.
+    // KKT for x1 at lb=0: rc_1 = -1 - y0 - y1 = -1 - (-1) - 0 = 0.  OK.
+    let lp = make_lp_general(
+        vec![0.0, -1.0, -1.0],
+        &[0, 0, 0, 1, 1],
+        &[0, 1, 2, 1, 2],
+        &[1.0, 1.0, 1.0, 1.0, 1.0],
+        2, 3,
+        vec![5.0, 10.0],
+        vec![ConstraintType::Le, ConstraintType::Le],
+        vec![(5.0, 5.0), (0.0, 2.0), (0.0, 2.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 5.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
+    assert!(
+        (result.dual_solution[0] - (-1.0)).abs() < 1e-6,
+        "row0 dual should be -1, got {}",
+        result.dual_solution[0]
+    );
+    assert!(
+        result.dual_solution[1].abs() < 1e-6,
+        "row1 (non-binding) dual should be 0, got {}",
+        result.dual_solution[1]
     );
 }
