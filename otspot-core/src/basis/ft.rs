@@ -25,6 +25,8 @@ use faer::sparse::linalg::{LuError, SupernodalThreshold};
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 use std::time::Instant;
 
+const FORCE_REFACTOR_SENTINEL: usize = usize::MAX / 2;
+
 /// A single Forrest-Tomlin row operation: Row(k+1) -= mult * Row(k),
 /// applied between L-solve and U-solve.
 #[derive(Debug, Clone)]
@@ -346,17 +348,15 @@ impl FtFactors {
             for k in p..n - 1 {
                 let sub_val = find_entry(&self.u_cols[k], k + 1);
                 if sub_val.abs() <= ZERO_TOL { continue; }
-                let diag_val = u_col_diag(&self.u_cols[k], k);
+                let mut diag_val = u_col_diag(&self.u_cols[k], k);
 
                 if diag_val.abs() <= ZERO_TOL {
-                    // Zero diagonal in Hessenberg elimination: the FT
-                    // update cannot proceed without a row permutation
-                    // that would complicate the factorization. Signal
-                    // that a full refactorization is needed by setting
-                    // update_count to max. The caller will detect this
-                    // via needs_refactor() and trigger refactorization.
-                    self.update_count = usize::MAX / 2;
-                    return;
+                    // Zero diagonal: insert 1.0 to keep U nonsingular
+                    // and complete elimination so U stays upper triangular.
+                    // Numerically incorrect, but refactorization will overwrite.
+                    set_entry(&mut self.u_cols[k], k, 1.0);
+                    diag_val = 1.0;
+                    self.update_count = FORCE_REFACTOR_SENTINEL;
                 }
 
                 let mult = sub_val / diag_val;
@@ -410,6 +410,23 @@ fn update_entry(col: &mut Vec<(usize, f64)>, row: usize, delta: f64) {
 fn remove_entry(col: &mut Vec<(usize, f64)>, row: usize) {
     if let Ok(pos) = col.binary_search_by_key(&row, |&(r, _)| r) {
         col.remove(pos);
+    }
+}
+
+fn set_entry(col: &mut Vec<(usize, f64)>, row: usize, value: f64) {
+    match col.binary_search_by_key(&row, |&(r, _)| r) {
+        Ok(pos) => {
+            if value.abs() <= ZERO_TOL {
+                col.remove(pos);
+            } else {
+                col[pos].1 = value;
+            }
+        }
+        Err(pos) => {
+            if value.abs() > ZERO_TOL {
+                col.insert(pos, (row, value));
+            }
+        }
     }
 }
 
@@ -685,6 +702,72 @@ mod tests {
         ft.btran_dense(&mut rhs);
         let check = bt.mat_vec_mul(&rhs).unwrap();
         assert_vec_near(&check, &rhs_orig, 1e-8);
+    }
+
+
+    #[test]
+    fn test_ft_zero_diagonal_completes_elimination() {
+        // Diagonal 4x4 basis: after column replacement and shift,
+        // shifted columns have zero diagonals because the original
+        // diagonal U has no off-diagonal entries.
+        let dense = vec![
+            vec![2.0, 0.0, 0.0, 0.0, 1.0],
+            vec![0.0, 3.0, 0.0, 0.0, 1.0],
+            vec![0.0, 0.0, 5.0, 0.0, 1.0],
+            vec![0.0, 0.0, 0.0, 7.0, 1.0],
+        ];
+        let a = dense_to_csc(&dense, 4, 5);
+        let basis = vec![0, 1, 2, 3];
+        let mut ft = FtFactors::factorize(&a, &basis, None).unwrap();
+
+        let mut d = vec![1.0, 1.0, 1.0, 1.0];
+        ft.ftran_dense(&mut d);
+
+        ft.ft_update(0, &d);
+
+        assert!(
+            ft.update_count() >= FORCE_REFACTOR_SENTINEL,
+            "update_count should signal refactor need, got {}",
+            ft.update_count()
+        );
+
+        // U must be structurally valid: FTRAN/BTRAN must not panic or produce NaN
+        let mut test_rhs = vec![1.0, 2.0, 3.0, 4.0];
+        ft.ftran_dense(&mut test_rhs);
+        assert!(
+            test_rhs.iter().all(|v| v.is_finite()),
+            "FTRAN result must be finite after zero-diagonal recovery"
+        );
+
+        let mut test_rhs2 = vec![1.0, 2.0, 3.0, 4.0];
+        ft.btran_dense(&mut test_rhs2);
+        assert!(
+            test_rhs2.iter().all(|v| v.is_finite()),
+            "BTRAN result must be finite after zero-diagonal recovery"
+        );
+
+        // After refactorization with updated basis, results must be correct
+        let new_basis = vec![4, 1, 2, 3];
+        let ft2 = FtFactors::factorize(&a, &new_basis, None).unwrap();
+        let rhs = vec![1.0, 2.0, 3.0, 4.0];
+        let mut x = rhs.clone();
+        ft2.ftran_dense(&mut x);
+
+        let b_new_dense = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![1.0, 3.0, 0.0, 0.0],
+            vec![1.0, 0.0, 5.0, 0.0],
+            vec![1.0, 0.0, 0.0, 7.0],
+        ];
+        let b_new = dense_to_csc(&b_new_dense, 4, 4);
+        let check = b_new.mat_vec_mul(&x).unwrap();
+        assert_vec_near(&check, &rhs, 1e-10);
+
+        let mut y = rhs.clone();
+        ft2.btran_dense(&mut y);
+        let bt = b_new.transpose();
+        let check_bt = bt.mat_vec_mul(&y).unwrap();
+        assert_vec_near(&check_bt, &rhs, 1e-10);
     }
 
     fn build_basis_from_a(a: &CscMatrix, basis: &[usize], m: usize) -> CscMatrix {

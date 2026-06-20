@@ -309,4 +309,47 @@ mod tests {
         let check = a.mat_vec_mul(&x).unwrap();
         assert_vec_near(&check, &rhs_orig, 1e-10);
     }
+
+    #[test]
+    fn test_lu_basis_zero_diagonal_recovery() {
+        let dense = vec![
+            vec![2.0, 0.0, 0.0, 0.0, 1.0],
+            vec![0.0, 3.0, 0.0, 0.0, 1.0],
+            vec![0.0, 0.0, 5.0, 0.0, 1.0],
+            vec![0.0, 0.0, 0.0, 7.0, 1.0],
+        ];
+        let a = dense_to_csc(&dense, 4, 5);
+        let mut basis = vec![0, 1, 2, 3];
+        let mut lb = LuBasis::new(&a, &basis, 50).unwrap();
+
+        let mut d = vec![1.0, 1.0, 1.0, 1.0];
+        lb.ftran_dense(&mut d);
+        lb.update(4, 0, &SparseVec::from_dense(&d));
+        basis[0] = 4;
+
+        assert!(lb.needs_refactor(), "Zero diagonal should trigger refactor");
+
+        lb.refactor_if_needed_timed(&a, &basis, None);
+        assert!(!lb.needs_refactor());
+
+        let rhs = vec![1.0, 2.0, 3.0, 4.0];
+        let mut x = rhs.clone();
+        lb.ftran_dense(&mut x);
+
+        let b_new_dense = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![1.0, 3.0, 0.0, 0.0],
+            vec![1.0, 0.0, 5.0, 0.0],
+            vec![1.0, 0.0, 0.0, 7.0],
+        ];
+        let b_new = dense_to_csc(&b_new_dense, 4, 4);
+        let check = b_new.mat_vec_mul(&x).unwrap();
+        assert_vec_near(&check, &rhs, 1e-10);
+
+        let mut y = rhs.clone();
+        lb.btran_dense(&mut y);
+        let bt = b_new.transpose();
+        let check_bt = bt.mat_vec_mul(&y).unwrap();
+        assert_vec_near(&check_bt, &rhs, 1e-10);
+    }
 }
