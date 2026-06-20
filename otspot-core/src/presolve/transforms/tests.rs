@@ -326,7 +326,7 @@ fn test_bounds_tightening_negative_coeff_ge_feasible() {
 // Roundtrip
 // -----------------------------------------------------------
 #[test]
-fn test_presolve_no_crash_netlib_like() {
+fn test_presolve_singleton_le_netlib_like() {
     let lp = make_lp(
         vec![-1.0, -1.0, -1.0],
         &[0, 0, 0, 1, 2, 3],

@@ -17,9 +17,11 @@ fn make_lp(
     LpProblem::new(c, a, b).unwrap()
 }
 
-/// LP1 (obj=-7) → reuse basis on LP2 with RHS=[5,2,2] (obj=-8.5).
+/// LP1 (obj=-7) -> reuse basis on LP2 with RHS=[5,2,2] (obj=-8.5).
+/// Uses a non-reducible LP (no singleton rows) to ensure presolve does not eliminate
+/// the warm-start test path.
 #[test]
-fn test_dual_advanced_warm_start_rhs_change() {
+fn test_dual_advanced_warm_start_rhs_change_nonreducible() {
     // x0+x1<=4; -x0+x1<=2; x0-x1<=2 (non-reducible: no singletons)
     let lp1 = make_lp(
         vec![-1.0, -2.0],
@@ -75,9 +77,11 @@ fn test_dual_advanced_warm_start_rhs_change() {
     );
 }
 
-/// LP1 (obj=-4) → reuse basis on LP2 with larger RHS.
+/// LP1 (obj=-4) -> reuse basis on LP2 with larger RHS.
+/// Uses a non-reducible LP (no singleton rows) to ensure presolve does not eliminate
+/// the warm-start test path.
 #[test]
-fn test_dual_advanced_warm_start_larger_rhs() {
+fn test_dual_advanced_warm_start_larger_rhs_nonreducible() {
     // x0+x1<=4; -x0+x1<=2; x0-x1<=2 (non-reducible: no singletons)
     let lp1 = make_lp(
         vec![-1.0, -1.0],
@@ -108,12 +112,10 @@ fn test_dual_advanced_warm_start_larger_rhs() {
         vec![6.0, 3.0, 3.0],
     );
 
-    // cold-start で正解を確認
     let result2_cold = solve_with(&lp2, &SolverOptions::default());
     assert_eq!(result2_cold.status, SolveStatus::Optimal);
     assert_solver_invariants_lp(&result2_cold, &lp2);
 
-    // DualAdvanced warm-start で解く
     let opts_warm = SolverOptions {
         warm_start: result1.warm_start_basis.clone(),
         simplex_method: SimplexMethod::DualAdvanced,

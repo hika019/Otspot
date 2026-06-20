@@ -1176,3 +1176,51 @@ fn step2b_forcing_ge_mixed_signs() {
     assert!(st.removed_rows[0]);
     assert!(st.removed_cols[0] && st.removed_cols[1]);
 }
+
+// -----------------------------------------------------------
+// step2_singleton_row — Ge infeasible
+// -----------------------------------------------------------
+
+#[test]
+fn step2_singleton_ge_infeasible_lb_exceeds_ub() {
+    // 2x >= 6, x in [0, 2] -> implied lb = 6/2 = 3 > ub = 2 -> Infeasible.
+    let mut st = make_state(
+        vec![0.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        1,
+        vec![6.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 2.0)],
+    );
+    assert_eq!(
+        step2_singleton_row(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
+}
+
+// -----------------------------------------------------------
+// step2b_forcing_row — infeasible (min activity > rhs)
+// -----------------------------------------------------------
+
+#[test]
+fn step2b_forcing_le_infeasible_min_exceeds_rhs() {
+    // x + y <= -1, x,y in [0,1]. min activity = 0+0 = 0 > rhs = -1 -> Infeasible.
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![-1.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 1.0)],
+    );
+    assert_eq!(
+        step2b_forcing_row(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
+}

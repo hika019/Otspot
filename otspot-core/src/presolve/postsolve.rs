@@ -1168,3 +1168,123 @@ mod crossover_first_tests {
     }
 
 }
+
+#[cfg(test)]
+mod recover_removed_row_dual_tests {
+    use super::*;
+
+    /// Binding Le row: min -x  s.t.  x <= 2,  x in [0, inf).
+    /// Optimal x=2 (binding). KKT stationarity: rc = c - a*y = -1 - 1*y = 0 => y = -1.
+    #[test]
+    fn binding_le_row_returns_nonzero_dual() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![-1.0],
+            a,
+            vec![2.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let solution = vec![2.0];
+        let dual_solution = vec![0.0];
+        let y = recover_removed_row_dual(&lp, 0, &solution, &dual_solution);
+        assert!(
+            (y - (-1.0)).abs() < 1e-6,
+            "Le binding dual should be -1, got {y}"
+        );
+    }
+
+    /// Non-binding Le row: min -x  s.t.  x <= 5,  x in [0, 2].
+    /// Optimal x=2 (at ub, not at row bound). slack = 5 - 2 = 3 > 0. dual = 0.
+    #[test]
+    fn nonbinding_le_row_returns_zero() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![-1.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 2.0)],
+            None,
+        )
+        .unwrap();
+        let solution = vec![2.0];
+        let dual_solution = vec![0.0];
+        let y = recover_removed_row_dual(&lp, 0, &solution, &dual_solution);
+        assert!(
+            y.abs() < 1e-10,
+            "non-binding Le dual should be 0, got {y}"
+        );
+    }
+
+    /// Binding Ge row: min x  s.t.  x >= 2,  x in [0, inf).
+    /// Optimal x=2 (binding). KKT: rc = c - a*y = 1 - 1*y = 0 => y = 1.
+    #[test]
+    fn binding_ge_row_returns_nonzero_dual() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![2.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let solution = vec![2.0];
+        let dual_solution = vec![0.0];
+        let y = recover_removed_row_dual(&lp, 0, &solution, &dual_solution);
+        assert!(
+            (y - 1.0).abs() < 1e-6,
+            "Ge binding dual should be 1, got {y}"
+        );
+    }
+
+    /// Non-binding Ge row: min x  s.t.  x >= -10,  x in [0, 5].
+    /// Optimal x=0 (at lb). slack = 0 - (-10) = 10 > 0. dual = 0.
+    #[test]
+    fn nonbinding_ge_row_returns_zero() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![-10.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 5.0)],
+            None,
+        )
+        .unwrap();
+        let solution = vec![0.0];
+        let dual_solution = vec![0.0];
+        let y = recover_removed_row_dual(&lp, 0, &solution, &dual_solution);
+        assert!(
+            y.abs() < 1e-10,
+            "non-binding Ge dual should be 0, got {y}"
+        );
+    }
+
+    /// Binding Eq row: min x  s.t.  x = 3,  x in [0, inf).
+    /// Optimal x=3. KKT: rc = c - a*y = 1 - 1*y = 0 => y = 1.
+    #[test]
+    fn binding_eq_row_returns_nonzero_dual() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let solution = vec![3.0];
+        let dual_solution = vec![0.0];
+        let y = recover_removed_row_dual(&lp, 0, &solution, &dual_solution);
+        assert!(
+            (y - 1.0).abs() < 1e-6,
+            "Eq binding dual should be 1, got {y}"
+        );
+    }
+}
