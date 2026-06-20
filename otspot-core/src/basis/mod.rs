@@ -6,8 +6,6 @@
 pub(crate) mod eta;
 pub(crate) mod lu;
 pub(crate) mod refactor;
-#[allow(dead_code)]
-pub(crate) mod ft;
 
 #[cfg(test)]
 pub(crate) mod test_utils;
