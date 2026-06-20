@@ -747,6 +747,27 @@ mod roundtrip_kkt {
         );
         assert_kkt_optimal(&lp, 3.0, "roundtrip_ge_constraint_dual_sign");
     }
+
+    /// singleton Le (non-binding) の dual が complementarity により 0 であることを確認。
+    #[test]
+    fn test_singleton_le_nonbinding_dual_zero() {
+        // min -x, s.t. x <= 10 (singleton Le, non-binding), x + 0*y <= 5, x,y in [0,5].
+        // Presolve: x <= 10 doesn't tighten x_ub (already 5 < 10), row removed.
+        // Optimal: x=5, y=0, obj=-5.
+        // Row 0 slack = 10 - 5 = 5 > 0, so dual must be 0 (complementarity).
+        let lp = make_lp_general(
+            vec![-1.0, 0.0],
+            &[0, 1, 1],
+            &[0, 0, 1],
+            &[1.0, 1.0, 0.0],
+            2,
+            2,
+            vec![10.0, 5.0],
+            vec![ConstraintType::Le, ConstraintType::Le],
+            vec![(0.0, 5.0), (0.0, 5.0)],
+        );
+        assert_kkt_optimal(&lp, -5.0, "singleton_le_nonbinding_dual_zero");
+    }
 }
 
 // -----------------------------------------------------------

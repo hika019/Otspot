@@ -437,23 +437,28 @@ pub fn run_postsolve(
                 col_orig_entries,
                 c_orig,
             } => {
-                // Stationarity-based dual recovery: y[i] = (c_orig - Σ A_kj y_k) / coeff,
-                // then clamp to Le (y <= 0) or Ge (y >= 0) sign constraint.
-                let sum_ay: f64 = col_orig_entries
-                    .iter()
-                    .map(|&(row_k, a_kj)| a_kj * dual_solution[row_k])
-                    .sum();
-                let mut y_i = (c_orig - sum_ay) / coeff;
-                match orig_problem.constraint_types[*orig_row] {
-                    crate::problem::ConstraintType::Le => {
-                        if y_i > 0.0 { y_i = 0.0; }
+                // Complementarity: non-binding inequality rows must have dual = 0.
+                if is_row_nonbinding(orig_problem, *orig_row, &solution) {
+                    dual_solution[*orig_row] = 0.0;
+                } else {
+                    // Stationarity-based dual recovery: y[i] = (c_orig - Σ A_kj y_k) / coeff,
+                    // then clamp to Le (y <= 0) or Ge (y >= 0) sign constraint.
+                    let sum_ay: f64 = col_orig_entries
+                        .iter()
+                        .map(|&(row_k, a_kj)| a_kj * dual_solution[row_k])
+                        .sum();
+                    let mut y_i = (c_orig - sum_ay) / coeff;
+                    match orig_problem.constraint_types[*orig_row] {
+                        crate::problem::ConstraintType::Le => {
+                            if y_i > 0.0 { y_i = 0.0; }
+                        }
+                        crate::problem::ConstraintType::Ge => {
+                            if y_i < 0.0 { y_i = 0.0; }
+                        }
+                        crate::problem::ConstraintType::Eq => {}
                     }
-                    crate::problem::ConstraintType::Ge => {
-                        if y_i < 0.0 { y_i = 0.0; }
-                    }
-                    crate::problem::ConstraintType::Eq => {}
+                    dual_solution[*orig_row] = y_i;
                 }
-                dual_solution[*orig_row] = y_i;
             }
             PostsolveStep::ForcingRow {
                 orig_row,
