@@ -116,26 +116,24 @@ fn is_row_nonbinding(orig_problem: &LpProblem, i: usize, solution: &[f64]) -> bo
     slack > COMP_SLACK_REL_TOL * scale
 }
 
-/// Recover the dual value for a removed row from dual feasibility (KKT stationarity).
-fn recover_removed_row_dual(
+/// Stationarity-based dual recovery for row `i`, iterating over the provided column entries.
+///
+/// Derives bounds on `y[i]` from KKT complementarity of each column in `row_entries`,
+/// then picks the tightest feasible value respecting the constraint-type sign constraint.
+fn stationarity_dual(
     orig_problem: &LpProblem,
     i: usize,
+    row_entries: &[(usize, f64)],
     solution: &[f64],
     dual_solution: &[f64],
 ) -> f64 {
-    if is_row_nonbinding(orig_problem, i, solution) {
-        return 0.0;
-    }
-    let row_entries = collect_row_entries(orig_problem, i);
-
     let mut min_y_i = f64::NEG_INFINITY;
     let mut max_y_i = f64::INFINITY;
-    for &(j, a_ij) in &row_entries {
+    for &(j, a_ij) in row_entries {
         if a_ij.abs() < f64::EPSILON {
             continue;
         }
-        // Solve bounds for y_i from
-        //   rc_j = c_j - Σ_{k≠i} A_kj y_k - A_ij y_i.
+        // Bound on y_i from rc_j = c_j - Σ_{k≠i} A_kj y_k - A_ij y_i.
         let mut rc_at_yi0 = orig_problem.c[j];
         if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
             for (k, &row) in rows.iter().enumerate() {
@@ -198,6 +196,25 @@ fn recover_removed_row_dual(
     } else {
         0.0
     }
+}
+
+/// Recover the dual value for a removed row from dual feasibility (KKT stationarity).
+///
+/// Checks binding first via `is_row_nonbinding`; returns 0 for non-binding rows.
+/// Callers that already know the row is binding (e.g. ForcingRow postsolve) should
+/// call `stationarity_dual` directly to avoid the incomplete-solution binding check.
+#[cfg_attr(not(test), allow(dead_code))]
+fn recover_removed_row_dual(
+    orig_problem: &LpProblem,
+    i: usize,
+    solution: &[f64],
+    dual_solution: &[f64],
+) -> f64 {
+    if is_row_nonbinding(orig_problem, i, solution) {
+        return 0.0;
+    }
+    let row_entries = collect_row_entries(orig_problem, i);
+    stationarity_dual(orig_problem, i, &row_entries, solution, dual_solution)
 }
 
 
@@ -463,12 +480,16 @@ pub fn run_postsolve(
             PostsolveStep::ForcingRow {
                 orig_row,
                 fixed_vars,
+                col_orig_entries,
             } => {
                 for &(col, value, _, _) in fixed_vars {
                     solution[col] = value;
                 }
+                // Forcing rows are always binding (activity at contributing bounds exactly
+                // matches RHS). Use the presolve-time snapshot to bypass is_row_nonbinding,
+                // which would compute Ax with partially restored variables under LIFO replay.
                 dual_solution[*orig_row] =
-                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+                    stationarity_dual(orig_problem, *orig_row, col_orig_entries, &solution, &dual_solution);
             }
             PostsolveStep::LinearSubstitution {
                 orig_col,

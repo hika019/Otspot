@@ -1015,3 +1015,147 @@ fn test_forcing_not_triggered_when_slack() {
     assert_eq!(result.reduced_problem.num_vars, 2, "vars stay");
     assert_eq!(result.reduced_problem.num_constraints, 1, "row stays");
 }
+
+// -----------------------------------------------------------
+// P1-1: ForcingRow dual recovery with prior FixedVariable
+// -----------------------------------------------------------
+// When step1 (FixedVariable) removes x0 before step2b (ForcingRow) runs,
+// LIFO replay processes ForcingRow first with solution[x0]=0 (not yet restored).
+// is_row_nonbinding computed Ax using orig_problem (includes x0 with stale value),
+// yielding an inflated slack → binding row misclassified as non-binding → dual=0.
+// Fix: ForcingRow snapshot stores active entries at presolve time; postsolve uses
+// these entries directly, bypassing the incomplete-solution binding check.
+
+#[test]
+fn test_forcing_row_dual_le_with_prior_fixed_variable() {
+    // min -x1 - x2
+    // x0 + x1 + x2 <= 5,  x0 in [5,5], x1 in [0,2], x2 in [0,2]
+    //
+    // step1: x0 fixed at 5 → modified_b = 5 - 5 = 0
+    // step2b: x1 + x2 <= 0, min=0=rhs, forcing: x1→0, x2→0
+    // At optimum: x0=5, x1=0, x2=0; row = 5+0+0 = 5 = rhs → binding.
+    // KKT for x1 at lb=0 (Le row): rc_1 = -1 - y >= 0 → y <= -1.
+    // KKT for x2 at lb=0: rc_2 = -1 - y >= 0 → y <= -1.  Dual = -1.
+    let lp = make_lp_general(
+        vec![0.0, -1.0, -1.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[1.0, 1.0, 1.0],
+        1, 3,
+        vec![5.0],
+        vec![ConstraintType::Le],
+        vec![(5.0, 5.0), (0.0, 2.0), (0.0, 2.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 5.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
+    // Le row is binding; dual must be -1.
+    assert!(
+        (result.dual_solution[0] - (-1.0)).abs() < 1e-6,
+        "dual should be -1, got {}",
+        result.dual_solution[0]
+    );
+}
+
+#[test]
+fn test_forcing_row_dual_ge_with_prior_fixed_variable() {
+    // min x1 + x2
+    // x0 + x1 + x2 >= 5,  x0 in [1,1], x1 in [0,2], x2 in [0,2]
+    //
+    // step1: x0 fixed at 1 → modified_b = 5 - 1 = 4
+    // step2b: x1 + x2 >= 4, max=4=rhs, forcing: x1→2, x2→2
+    // At optimum: x0=1, x1=2, x2=2; row = 1+2+2 = 5 = rhs → binding.
+    // KKT for x1 at ub=2 (Ge row): rc_1 = 1 - y <= 0 → y >= 1.
+    // KKT for x2 at ub=2: rc_2 = 1 - y <= 0 → y >= 1.  Dual = 1.
+    let lp = make_lp_general(
+        vec![0.0, 1.0, 1.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[1.0, 1.0, 1.0],
+        1, 3,
+        vec![5.0],
+        vec![ConstraintType::Ge],
+        vec![(1.0, 1.0), (0.0, 2.0), (0.0, 2.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 1.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!((result.solution[1] - 2.0).abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!((result.solution[2] - 2.0).abs() < 1e-6, "x2={}", result.solution[2]);
+    // Ge row is binding; dual must be 1.
+    assert!(
+        (result.dual_solution[0] - 1.0).abs() < 1e-6,
+        "dual should be 1, got {}",
+        result.dual_solution[0]
+    );
+}
+
+#[test]
+fn test_forcing_row_dual_le_multiple_prior_fixed_vars() {
+    // min -x2 - x3
+    // x0 + x1 + x2 + x3 <= 3,  x0 in [1,1], x1 in [2,2], x2 in [0,2], x3 in [0,2]
+    //
+    // step1: x0 fixed (modified_b = 2), x1 fixed (modified_b = 0)
+    // step2b: x2 + x3 <= 0, min=0=rhs, forcing: x2→0, x3→0
+    // At optimum: x0=1, x1=2, x2=0, x3=0; row = 3 = rhs → binding.
+    // KKT for x2 at lb=0: rc_2 = -1 - y >= 0 → y <= -1.
+    // KKT for x3 at lb=0: rc_3 = -1 - y >= 0 → y <= -1.  Dual = -1.
+    let lp = make_lp_general(
+        vec![0.0, 0.0, -1.0, -1.0],
+        &[0, 0, 0, 0],
+        &[0, 1, 2, 3],
+        &[1.0, 1.0, 1.0, 1.0],
+        1, 4,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(1.0, 1.0), (2.0, 2.0), (0.0, 2.0), (0.0, 2.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 1.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!((result.solution[1] - 2.0).abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
+    assert!(result.solution[3].abs() < 1e-6, "x3={}", result.solution[3]);
+    // Le row is binding; dual must be -1.
+    assert!(
+        (result.dual_solution[0] - (-1.0)).abs() < 1e-6,
+        "dual should be -1, got {}",
+        result.dual_solution[0]
+    );
+}
+
+#[test]
+fn test_forcing_row_dual_eq_with_prior_fixed_variable() {
+    // min -x1 - x2
+    // x0 + x1 + x2 = 5,  x0 in [5,5], x1 in [0,2], x2 in [0,2]
+    //
+    // step1: x0 fixed at 5 → modified_b = 0
+    // step2b: x1 + x2 = 0, min=0=rhs, forcing from below: x1→0, x2→0
+    // At optimum: x0=5, x1=0, x2=0; row = 5 = rhs → binding.
+    // Eq row dual unconstrained in sign.
+    // KKT for x1 at lb=0 (x1 at lb and ub coincide since forced): both at_lb and at_ub.
+    // For Eq: stationarity gives a range; dual must be non-zero (row is not redundant).
+    let lp = make_lp_general(
+        vec![0.0, -1.0, -1.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[1.0, 1.0, 1.0],
+        1, 3,
+        vec![5.0],
+        vec![ConstraintType::Eq],
+        vec![(5.0, 5.0), (0.0, 2.0), (0.0, 2.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 5.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
+    // Eq row binding; dual should be non-zero (= -1 from stationarity).
+    assert!(
+        result.dual_solution[0].abs() > 1e-6,
+        "Eq forcing-row dual must be non-zero, got {}",
+        result.dual_solution[0]
+    );
+}

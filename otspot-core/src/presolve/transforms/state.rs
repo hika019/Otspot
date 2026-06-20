@@ -68,6 +68,10 @@ pub(crate) enum PostsolveStep {
     ForcingRow {
         orig_row: usize,
         fixed_vars: Vec<(usize, f64, f64, f64)>,
+        /// (col, A[orig_row, col]) for all columns active at elimination time.
+        /// Snapshot used in postsolve to compute slack without depending on
+        /// LIFO ordering of other restored variables.
+        col_orig_entries: Vec<(usize, f64)>,
     },
 }
 
