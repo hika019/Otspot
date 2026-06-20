@@ -28,15 +28,15 @@ pub(super) fn step2b_forcing_row(
         let ct = st.constraint_types[i];
 
         // Detect infeasibility before checking forcing.
-        if lb_fin && ub_fin {
-            let infeasible = match ct {
-                ConstraintType::Le => row_lb > rhs + ZERO_TOL,
-                ConstraintType::Ge => row_ub < rhs - ZERO_TOL,
-                ConstraintType::Eq => row_lb > rhs + ZERO_TOL || row_ub < rhs - ZERO_TOL,
-            };
-            if infeasible {
-                return Err(PresolveStatus::Infeasible);
+        let infeasible = match ct {
+            ConstraintType::Le => lb_fin && row_lb > rhs + ZERO_TOL,
+            ConstraintType::Ge => ub_fin && row_ub < rhs - ZERO_TOL,
+            ConstraintType::Eq => {
+                (lb_fin && row_lb > rhs + ZERO_TOL) || (ub_fin && row_ub < rhs - ZERO_TOL)
             }
+        };
+        if infeasible {
+            return Err(PresolveStatus::Infeasible);
         }
 
         // Forcing: the activity bound equals rhs, so all variables are at their

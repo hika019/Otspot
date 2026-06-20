@@ -1224,3 +1224,24 @@ fn step2b_forcing_le_infeasible_min_exceeds_rhs() {
         Err(PresolveStatus::Infeasible)
     );
 }
+
+#[test]
+fn step2b_forcing_le_infeasible_unbounded_ub() {
+    // x + y <= -1, x,y in [0, +inf). lb_fin=true, ub_fin=false.
+    // min activity = 0 > rhs = -1 -> Infeasible (lb_fin alone suffices for Le).
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![-1.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+    );
+    assert_eq!(
+        step2b_forcing_row(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
+}

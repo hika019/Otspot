@@ -108,6 +108,14 @@ fn singleton_ineq(
         }
     }
 
+    // Snapshot dual-recovery data before removing the row.
+    let c_orig = st.c[j];
+    let col_orig_entries: Vec<(usize, f64)> = st.col_entries[j]
+        .iter()
+        .filter(|&&(r, v)| r != i && !st.removed_rows[r] && v.abs() >= ZERO_TOL)
+        .copied()
+        .collect();
+
     st.removed_rows[i] = true;
     st.postsolve_stack
         .push(PostsolveStep::SingletonInequalityRow {
@@ -116,6 +124,8 @@ fn singleton_ineq(
             coeff: a_ij,
             old_lb: lb,
             old_ub: ub,
+            col_orig_entries,
+            c_orig,
         });
     Ok(())
 }

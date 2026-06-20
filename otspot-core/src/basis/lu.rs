@@ -14,7 +14,6 @@ use crate::error::SolverError;
 use crate::sparse::CscMatrix;
 
 /// (col_ptr, row_ind, values) triple for a reconstructed basis CSC matrix.
-#[allow(dead_code)]
 type BasisCscParts = (Vec<usize>, Vec<usize>, Vec<f64>);
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::sparse::linalg::lu::{
@@ -30,14 +29,12 @@ use std::time::Instant;
 /// faer の (`SymbolicLu`, `NumericLu`) ペアを保持し、必要時に `LuRef` を
 /// 構築して solve に使う。基底次元 `n` を併せて保持。
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct LuFactorization {
     pub(crate) symbolic: SymbolicLu<usize>,
     pub(crate) numeric: NumericLu<usize, f64>,
     pub(crate) n: usize,
 }
 
-#[allow(dead_code)]
 impl LuFactorization {
     /// deadline 付き LU 分解。faer 自体は deadline 非対応のため、前後 2 段で
     /// チェックする (AMD wrapper と同じパターン)。
@@ -131,7 +128,6 @@ impl LuFactorization {
 
 /// 基底列を CSC 形式 (m×m) で再構築する。faer は列内 row 昇順を期待するため
 /// (`SymbolicSparseColMatRef::new_unchecked` の前提)、列ごとにソートする。
-#[allow(dead_code)]
 fn build_basis_csc(a: &CscMatrix, basis: &[usize], m: usize) -> Result<BasisCscParts, SolverError> {
     let mut col_ptr = vec![0usize; m + 1];
     let mut row_ind: Vec<usize> = Vec::new();
@@ -166,7 +162,6 @@ fn build_basis_csc(a: &CscMatrix, basis: &[usize], m: usize) -> Result<BasisCscP
 }
 
 /// FTRAN: `B × x = rhs` を LU 因子で解く。in-place で rhs を書き換える。
-#[allow(dead_code)]
 pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut [f64]) {
     let lu_ref = LuRef::new_unchecked(&lu.symbolic, &lu.numeric);
     let req = lu.symbolic.solve_in_place_scratch::<f64>(1, Par::Seq);
@@ -177,7 +172,6 @@ pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut [f64]) {
 }
 
 /// BTRAN: `B^T × x = rhs` を LU 因子で解く。in-place で rhs を書き換える。
-#[allow(dead_code)]
 pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut [f64]) {
     let lu_ref = LuRef::new_unchecked(&lu.symbolic, &lu.numeric);
     let req = lu

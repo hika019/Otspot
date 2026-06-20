@@ -40,6 +40,11 @@ pub(crate) enum PostsolveStep {
         coeff: f64,
         old_lb: f64,
         old_ub: f64,
+        /// (row_k, A[row_k, orig_col]) for all rows k != orig_row that were active
+        /// at elimination time. Used for stationarity-based dual recovery.
+        col_orig_entries: Vec<(usize, f64)>,
+        /// Objective coefficient c[orig_col] at elimination time.
+        c_orig: f64,
     },
     RedundantConstraint {
         orig_row: usize,
