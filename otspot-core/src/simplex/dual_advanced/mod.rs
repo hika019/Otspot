@@ -14,8 +14,9 @@ use crate::options::{DualPricing, SolverOptions};
 use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
-use std::sync::atomic::{AtomicU64, Ordering};
+use bounded_core::extract::bounded_obj;
 use bounded_core::BoundedDualState;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod bound_flip;
 mod bounded_core;
@@ -144,20 +145,14 @@ fn maybe_perturb_initial_xb(x_b: &mut [f64]) {
 }
 
 fn bounded_obj_from_state(c: &[f64], ubs: &[f64], state: &BoundedDualState) -> f64 {
-    let basic: f64 = state
-        .basis
-        .iter()
-        .zip(state.x_b.iter())
-        .map(|(&j, &v)| c[j] * v)
-        .sum();
-    let at_ub: f64 = state
-        .at_upper
-        .iter()
-        .enumerate()
-        .filter(|&(j, &flag)| flag && !state.is_basic[j])
-        .map(|(j, _)| c[j] * ubs[j])
-        .sum();
-    basic + at_ub
+    bounded_obj(
+        c,
+        &state.basis,
+        &state.x_b,
+        &state.at_upper,
+        &state.is_basic,
+        ubs,
+    )
 }
 
 enum BoundedTerminalReconcile {

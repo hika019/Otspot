@@ -150,7 +150,7 @@ pub(super) fn project_reduced_costs_to_active_bounds(
 /// Invariant: `at_upper[j] ⇒ !is_basic[j]`, maintained by `iterate` /
 /// `phase2_primal_bounded`. `debug_assert` traps violations in debug/test
 /// builds; release builds rely on callers maintaining the invariant.
-pub(super) fn bounded_obj(
+pub(in crate::simplex::dual_advanced) fn bounded_obj(
     c: &[f64],
     basis: &[usize],
     x_b: &[f64],
