@@ -14,6 +14,7 @@
 //! negative tableau entry α — GMI uses `−α / (1 − f₀)`, MIR drops the term.
 
 use crate::basis::{BasisManager, LuBasis};
+use crate::linalg::timeout::deadline_reached;
 use crate::options::{MipConfig, SimplexMethod, SolverOptions, DEFAULT_MAX_CUT_ROUNDS};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
 use crate::simplex::{build_standard_form, StandardForm};
@@ -105,7 +106,7 @@ pub(crate) fn add_root_cuts(
     });
 
     for round_idx in 0..max_rounds {
-        if deadline_passed(cut_deadline) {
+        if deadline_reached(cut_deadline) {
             break;
         }
         let res = solve_cut_lp(&committed, options, cut_deadline);
@@ -196,10 +197,6 @@ fn solve_cut_lp(
         ..SolverOptions::default()
     };
     crate::lp::solve_lp_with(lp, &opts)
-}
-
-fn deadline_passed(deadline: Option<std::time::Instant>) -> bool {
-    deadline.is_some_and(|d| std::time::Instant::now() >= d)
 }
 
 /// Generate one round of cuts from the optimal `basis` and LP solution `x_star`.
