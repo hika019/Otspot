@@ -19,6 +19,9 @@ violations=""
 for crate_src in src otspot-core/src otspot-io/src otspot-model/src otspot-dev/src; do
   [ -d "$crate_src" ] || continue
   while IFS= read -r f; do
+    # tests.rs は純テストモジュール — CLAUDE.md「テストコードは除く」に該当
+    case "$(basename "$f")" in tests.rs) continue ;; esac
+
     # `mod tests` 宣言 (可視性修飾子付きも含む) を test 開始点とする
     test_mod_line=$(grep -nE '^[[:space:]]*(pub[[:space:]]*(\([^)]+\))?[[:space:]]+)?mod[[:space:]]+tests\b' "$f" 2>/dev/null \
       | head -1 | cut -d: -f1 || true)
