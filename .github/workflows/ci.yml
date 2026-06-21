@@ -17,7 +17,7 @@ jobs:
     name: Tests (lib unit, fast)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
@@ -27,7 +27,7 @@ jobs:
     name: Tests (integration, real data)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/cache@v4
         id: cache
         with:
@@ -60,7 +60,7 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy
@@ -71,7 +71,7 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -80,7 +80,7 @@ jobs:
     name: package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo package --workspace --no-verify
@@ -89,14 +89,14 @@ jobs:
     name: file-size
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - run: bash scripts/check_file_size.sh
 
   unused-deps:
     name: unused-deps
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: taiki-e/install-action@v2
         with:
@@ -107,7 +107,7 @@ jobs:
     name: public-api
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@nightly
@@ -126,7 +126,7 @@ jobs:
     name: todo-budget
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: count TODO/FIXME
         run: |
           COUNT=$(grep -rE 'TODO|FIXME|XXX|HACK' otspot-core/src otspot-io/src otspot-model/src otspot-dev/src src 2>/dev/null | wc -l)
