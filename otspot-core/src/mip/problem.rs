@@ -95,6 +95,27 @@ impl Relaxation for MilpProblem {
     fn skip_node_presolve(&self) -> bool {
         true
     }
+    fn propagation_data(
+        &self,
+    ) -> Option<(
+        &crate::sparse::CscMatrix,
+        &[f64],
+        &[crate::problem::ConstraintType],
+    )> {
+        Some((&self.lp.a, &self.lp.b, &self.lp.constraint_types))
+    }
+    fn run_rins(
+        &self,
+        x_lp: &[f64],
+        x_inc: &[f64],
+        cfg: &crate::options::MipConfig,
+        deadline: &Option<std::time::Instant>,
+    ) -> Option<crate::problem::SolverResult> {
+        if !cfg.rins_enabled {
+            return None;
+        }
+        crate::mip::heuristics::rins::run_rins(self, x_lp, x_inc, cfg, deadline)
+    }
 }
 
 /// Mixed-Integer **convex** Quadratic Program: minimize `1/2 x^T Q x + c^T x`

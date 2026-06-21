@@ -227,10 +227,17 @@ impl Default for MultiStartConfig {
 ///
 /// `MostFractional`: branch on the integer-constrained variable whose
 /// relaxation value is closest to 0.5.  Ties broken by variable index.
+///
+/// `Reliability`: pseudocost-based branching with strong-branching warm-up.
+/// Variables with fewer than `RELIABILITY_THRESHOLD` observations use
+/// actual LP re-solves to estimate the cost; variables with enough history
+/// use accumulated pseudocosts.  Scores are combined via `PSEUDOCOST_MU`.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MipBranching {
     MostFractional,
+    #[default]
+    Reliability,
 }
 
 /// Defaults for [`MipConfig`].
@@ -245,10 +252,10 @@ pub const DEFAULT_INTEGER_FEAS_TOL: f64 = 1e-6;
 pub const DEFAULT_MIP_MAX_NODES: usize = 1_000_000;
 pub const DEFAULT_MIP_MAX_DEPTH: usize = 1_000;
 /// Default root cutting-plane state. OFF for safe introduction: cuts only tighten
-/// the relaxation, so correctness is unchanged either way, but enabling them by
-/// default would change node counts / timings of every existing MILP solve. The
-/// effect is opted into explicitly (sentinels + bench show the ON benefit).
-pub const DEFAULT_MIP_CUTS: bool = false;
+/// the relaxation, so correctness is unchanged either way. Enabled by default:
+/// alternating GMI/MIR rounds tighten the LP bound at the root, shrinking the
+/// B&B tree for most instances with fractional LP optima.
+pub const DEFAULT_MIP_CUTS: bool = true;
 /// `max_cut_rounds == 0` ⇒ use this many root cut rounds (auto). Kept small: most
 /// GMI gain is in the first few rounds, and deep rounds bloat the LP (slowing
 /// every downstream B&B node) for diminishing bound improvement.
@@ -279,6 +286,9 @@ pub struct MipConfig {
     /// integer variables; rounds stop early when no fractional source remains or
     /// the LP bound stops improving.
     pub max_cut_rounds: usize,
+    /// Enable the RINS heuristic inside branch-and-bound.
+    /// Automatically set to `false` in sub-MIP calls to prevent recursive RINS.
+    pub rins_enabled: bool,
 }
 
 impl Default for MipConfig {
@@ -288,9 +298,10 @@ impl Default for MipConfig {
             integer_feas_tol: DEFAULT_INTEGER_FEAS_TOL,
             max_nodes: DEFAULT_MIP_MAX_NODES,
             max_depth: DEFAULT_MIP_MAX_DEPTH,
-            branching: MipBranching::MostFractional,
+            branching: MipBranching::default(),
             cuts: DEFAULT_MIP_CUTS,
             max_cut_rounds: DEFAULT_MAX_CUT_ROUNDS,
+            rins_enabled: true,
         }
     }
 }

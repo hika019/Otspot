@@ -550,24 +550,7 @@ fn step2_singleton_negative_coeff_solves_negative_value() {
     );
 }
 
-#[test]
-fn step2_skips_singleton_le_row() {
-    // A Le row with a single variable is NOT an equation → step2 must not solve it.
-    let mut st = make_state(
-        vec![1.0],
-        &[0],
-        &[0],
-        &[2.0],
-        1,
-        1,
-        vec![6.0],
-        vec![ConstraintType::Le],
-        vec![(0.0, 10.0)],
-    );
-    step2_singleton_row(&mut st, None).unwrap();
-    assert!(!st.removed_rows[0], "Le singleton row must remain");
-    assert!(!st.removed_cols[0]);
-}
+
 
 #[test]
 fn step2_singleton_infeasible_out_of_bounds() {
@@ -833,4 +816,432 @@ fn step6_opposite_sign_coeffs_tightens_other_bound() {
     assert!((ub1 - 8.0).abs() < 1e-12, "x1 ub tightened to 8, got {ub1}");
     assert!(count_linear_subst(&st) >= 1);
     assert!(count_bounds_tightened(&st) >= 1, "ratio<0 must tighten other bound");
+}
+
+// -----------------------------------------------------------
+// step2_singleton_row — Le / Ge inequality extensions
+// -----------------------------------------------------------
+
+#[test]
+fn step2_singleton_le_positive_coeff_tightens_ub() {
+    // 3x <= 6, x in [0,10] → x <= 2. Row removed.
+    let mut st = make_state(
+        vec![0.0],
+        &[0],
+        &[0],
+        &[3.0],
+        1,
+        1,
+        vec![6.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 10.0)],
+    );
+    step2_singleton_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0], "singleton Le row must be removed");
+    assert!(!st.removed_cols[0], "column stays active");
+    let (lb, ub) = st.bounds[0];
+    assert!((lb - 0.0).abs() < 1e-12);
+    assert!((ub - 2.0).abs() < 1e-12, "ub tightened to 2, got {ub}");
+}
+
+#[test]
+fn step2_singleton_le_negative_coeff_tightens_lb() {
+    // -2x <= -6, x in [0,10] → x >= 3. Row removed.
+    let mut st = make_state(
+        vec![0.0],
+        &[0],
+        &[0],
+        &[-2.0],
+        1,
+        1,
+        vec![-6.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 10.0)],
+    );
+    step2_singleton_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0]);
+    let (lb, _ub) = st.bounds[0];
+    assert!((lb - 3.0).abs() < 1e-12, "lb tightened to 3, got {lb}");
+}
+
+#[test]
+fn step2_singleton_ge_positive_coeff_tightens_lb() {
+    // 4x >= 8, x in [0,10] → x >= 2. Row removed.
+    let mut st = make_state(
+        vec![0.0],
+        &[0],
+        &[0],
+        &[4.0],
+        1,
+        1,
+        vec![8.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 10.0)],
+    );
+    step2_singleton_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0]);
+    let (lb, ub) = st.bounds[0];
+    assert!((lb - 2.0).abs() < 1e-12, "lb tightened to 2, got {lb}");
+    assert!((ub - 10.0).abs() < 1e-12);
+}
+
+#[test]
+fn step2_singleton_ge_negative_coeff_tightens_ub() {
+    // -5x >= -15, x in [0,10] → x <= 3. Row removed.
+    let mut st = make_state(
+        vec![0.0],
+        &[0],
+        &[0],
+        &[-5.0],
+        1,
+        1,
+        vec![-15.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 10.0)],
+    );
+    step2_singleton_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0]);
+    let (lb, ub) = st.bounds[0];
+    assert!((lb - 0.0).abs() < 1e-12);
+    assert!((ub - 3.0).abs() < 1e-12, "ub tightened to 3, got {ub}");
+}
+
+#[test]
+fn step2_singleton_le_infeasible() {
+    // 2x <= 1, x in [3,10] → implied ub = 0.5 < lb = 3. Infeasible.
+    let mut st = make_state(
+        vec![0.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        1,
+        vec![1.0],
+        vec![ConstraintType::Le],
+        vec![(3.0, 10.0)],
+    );
+    assert_eq!(
+        step2_singleton_row(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
+}
+
+#[test]
+fn step2_singleton_ge_infeasible() {
+    // -1x >= 5, x in [0,2] → implied ub = -5 < lb = 0. Infeasible.
+    let mut st = make_state(
+        vec![0.0],
+        &[0],
+        &[0],
+        &[-1.0],
+        1,
+        1,
+        vec![5.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 2.0)],
+    );
+    assert_eq!(
+        step2_singleton_row(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
+}
+
+#[test]
+fn step2_singleton_le_redundant_no_tightening() {
+    // 2x <= 30, x in [0,10] → implied ub=15 > current ub=10. No tightening, row still removed.
+    let mut st = make_state(
+        vec![0.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        1,
+        vec![30.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 10.0)],
+    );
+    step2_singleton_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0]);
+    let (lb, ub) = st.bounds[0];
+    assert!((lb - 0.0).abs() < 1e-12);
+    assert!((ub - 10.0).abs() < 1e-12, "ub unchanged at 10, got {ub}");
+}
+
+#[test]
+fn step2_singleton_le_free_variable() {
+    // 1x <= 5, x in (-inf, +inf) → ub tightened to 5.
+    let mut st = make_state(
+        vec![0.0],
+        &[0],
+        &[0],
+        &[1.0],
+        1,
+        1,
+        vec![5.0],
+        vec![ConstraintType::Le],
+        vec![(f64::NEG_INFINITY, f64::INFINITY)],
+    );
+    step2_singleton_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0]);
+    let (lb, ub) = st.bounds[0];
+    assert_eq!(lb, f64::NEG_INFINITY);
+    assert!((ub - 5.0).abs() < 1e-12, "ub tightened to 5, got {ub}");
+}
+
+// -----------------------------------------------------------
+// step2b_forcing_row
+// -----------------------------------------------------------
+
+use super::forcing::step2b_forcing_row;
+
+#[test]
+fn step2b_forcing_le_all_positive() {
+    // x + y <= 3, x in [0,1], y in [0,2]. min = 0+0 = 0 < 3. max = 1+2 = 3.
+    // a_min=0 < rhs=3 but a_max=3 = rhs → redundant, NOT forcing.
+    // For forcing: a_min >= rhs. Let's use: x + y <= 0, x in [0,1], y in [0,2].
+    // a_min=0 >= 0. Forcing from min: x→0, y→0.
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![0.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    step2b_forcing_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0]);
+    assert!(st.removed_cols[0] && st.removed_cols[1]);
+    assert!(
+        matches!(
+            st.postsolve_stack.last(),
+            Some(PostsolveStep::ForcingRow { .. })
+        ),
+        "must push ForcingRow"
+    );
+}
+
+#[test]
+fn step2b_forcing_ge_all_positive() {
+    // x + y >= 3, x in [0,1], y in [0,2]. max = 1+2 = 3 <= rhs=3. Forcing from max: x→1, y→2.
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![3.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    step2b_forcing_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0]);
+    assert!(st.removed_cols[0] && st.removed_cols[1]);
+}
+
+#[test]
+fn step2b_forcing_le_mixed_signs() {
+    // 2x - y <= -1, x in [0,1], y in [0,3].
+    // min = 2*0 + (-1)*3 = -3. -3 < -1 → not forcing.
+    // Use: 2x - y <= -3. min = -3 >= -3 → forcing from min. x→0 (pos coeff), y→3 (neg coeff).
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[2.0, -1.0],
+        1,
+        2,
+        vec![-3.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 3.0)],
+    );
+    step2b_forcing_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0]);
+    assert!(st.removed_cols[0] && st.removed_cols[1]);
+}
+
+#[test]
+fn step2b_forcing_eq_forced_from_below() {
+    // x + y = 0, x in [0,1], y in [0,2]. min = 0+0 = 0 >= 0. Forced from below.
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![0.0],
+        vec![ConstraintType::Eq],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    step2b_forcing_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0]);
+    assert!(st.removed_cols[0] && st.removed_cols[1]);
+}
+
+#[test]
+fn step2b_forcing_eq_forced_from_above() {
+    // x + y = 3, x in [0,1], y in [0,2]. max = 1+2 = 3 <= 3. Forced from above.
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![3.0],
+        vec![ConstraintType::Eq],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    step2b_forcing_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0]);
+    assert!(st.removed_cols[0] && st.removed_cols[1]);
+}
+
+#[test]
+fn step2b_forcing_single_var_skip() {
+    // Singleton rows are handled by step2, step2b requires len >= 2.
+    let mut st = make_state(
+        vec![1.0],
+        &[0],
+        &[0],
+        &[1.0],
+        1,
+        1,
+        vec![0.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0)],
+    );
+    step2b_forcing_row(&mut st, None).unwrap();
+    assert!(!st.removed_rows[0], "singleton should not be caught by forcing");
+}
+
+#[test]
+fn step2b_near_forcing_no_trigger() {
+    // x + y <= 1, x in [0,1], y in [0,2]. min=0 < 1. NOT forcing.
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![1.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    step2b_forcing_row(&mut st, None).unwrap();
+    assert!(!st.removed_rows[0], "near-forcing should NOT trigger");
+}
+
+#[test]
+fn step2b_forcing_unbounded_var_skip() {
+    // x + y <= 0, x in [0,1], y in (-inf,2]. min involves -inf, so lb_fin=false. Skip.
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![0.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (f64::NEG_INFINITY, 2.0)],
+    );
+    step2b_forcing_row(&mut st, None).unwrap();
+    // lb_fin is false due to y's lower bound being -inf, so activity_range min is not finite.
+    // The forcing condition lb_fin && row_lb >= rhs fails.
+    assert!(!st.removed_rows[0], "unbounded contributing bound must skip");
+}
+
+#[test]
+fn step2b_forcing_ge_mixed_signs() {
+    // -x + 2y >= 4, x in [0,1], y in [0,2].
+    // max = (-1)*0 + 2*2 = 4 <= 4. Forcing from max: x→0 (neg coeff→lb), y→2 (pos coeff→ub).
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[-1.0, 2.0],
+        1,
+        2,
+        vec![4.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    step2b_forcing_row(&mut st, None).unwrap();
+    assert!(st.removed_rows[0]);
+    assert!(st.removed_cols[0] && st.removed_cols[1]);
+}
+
+// -----------------------------------------------------------
+// step2_singleton_row — Ge infeasible
+// -----------------------------------------------------------
+
+#[test]
+fn step2_singleton_ge_infeasible_lb_exceeds_ub() {
+    // 2x >= 6, x in [0, 2] -> implied lb = 6/2 = 3 > ub = 2 -> Infeasible.
+    let mut st = make_state(
+        vec![0.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        1,
+        vec![6.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 2.0)],
+    );
+    assert_eq!(
+        step2_singleton_row(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
+}
+
+// -----------------------------------------------------------
+// step2b_forcing_row — infeasible (min activity > rhs)
+// -----------------------------------------------------------
+
+#[test]
+fn step2b_forcing_le_infeasible_min_exceeds_rhs() {
+    // x + y <= -1, x,y in [0,1]. min activity = 0+0 = 0 > rhs = -1 -> Infeasible.
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![-1.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 1.0)],
+    );
+    assert_eq!(
+        step2b_forcing_row(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
+}
+
+#[test]
+fn step2b_forcing_le_infeasible_unbounded_ub() {
+    // x + y <= -1, x,y in [0, +inf). lb_fin=true, ub_fin=false.
+    // min activity = 0 > rhs = -1 -> Infeasible (lb_fin alone suffices for Le).
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![-1.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+    );
+    assert_eq!(
+        step2b_forcing_row(&mut st, None),
+        Err(PresolveStatus::Infeasible)
+    );
 }

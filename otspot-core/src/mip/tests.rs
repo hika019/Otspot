@@ -6,8 +6,8 @@
 //! exercised here. Model API tests live in `otspot-model/tests/mip_model.rs`.
 
 use super::{
-    finalize_no_incumbent, integer_mask, solve_milp, solve_milp_with_stats, solve_mip_core,
-    solve_miqp, solve_miqp_with_stats, MilpProblem, MiqpProblem,
+    finalize_no_incumbent, integer_mask, reduced_cost_fixing, solve_milp, solve_milp_with_stats,
+    solve_mip_core, solve_miqp, solve_miqp_with_stats, MilpProblem, MiqpProblem,
 };
 use crate::options::{MipConfig, SolverOptions};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
@@ -743,37 +743,50 @@ fn stats_timing_populated_for_milp_bt_then_branch() {
     );
 }
 
-/// LP relaxation infeasibility at the root populates infeasible_ms.
+/// LP relaxation infeasibility populates infeasible_ms when LP (not propagation) detects it.
 ///
-/// x+y ≤ 1 AND x+y ≥ 2, x,y ∈ [0,3] integer.
-/// BT: from Le x,y ≤ 1; from Ge x,y ≥ 1 → domain [1,1]×[1,1].
-/// Root LP with x=y=1 violates x+y ≤ 1 → LP returns Infeasible → infeasible_ms > 0.
+/// x+y+z<=2.5, x+y>=2, y+z>=2, x+z>=2, x,y,z∈[0,2] integer.
+/// Propagation: Le and Ge rows with [0,2]^3 bounds produce no contradiction
+/// (each pair sums to ≤4 and ≥0), but adding all three Ge rows gives
+/// x+y + y+z + x+z = 2(x+y+z) ≥ 6 > 5 = 2×2.5 → LP-infeasible (Farkas).
+/// Node propagation passes (no lb>ub from single-row propagation) but LP returns Infeasible.
 ///
 /// Sentinel: removing the infeasible timing arm leaves infeasible_ms == 0 → FAILS.
 #[test]
-fn stats_timing_infeasible_ms_from_lp_after_bt() {
-    let a = crate::sparse::CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 0, 1],
-        &[1.0, 1.0, 1.0, 1.0],
-        2,
-        2,
+fn stats_timing_infeasible_ms_from_lp() {
+    let a = CscMatrix::from_triplets(
+        // x+y+z<=2.5 (row 0), x+y>=2 (row 1), y+z>=2 (row 2), x+z>=2 (row 3)
+        &[0, 0, 0, 1, 1, 2, 2, 3, 3],
+        &[0, 1, 2, 0, 1, 1, 2, 0, 2],
+        &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        4,
+        3,
     )
     .unwrap();
-    let lp = crate::problem::LpProblem::new_general(
-        vec![1.0, 1.0],
+    let lp = LpProblem::new_general(
+        vec![1.0, 1.0, 1.0],
         a,
-        vec![1.0, 2.0],
-        vec![ConstraintType::Le, ConstraintType::Ge],
-        vec![(0.0, 3.0), (0.0, 3.0)],
+        vec![2.5, 2.0, 2.0, 2.0],
+        vec![
+            ConstraintType::Le,
+            ConstraintType::Ge,
+            ConstraintType::Ge,
+            ConstraintType::Ge,
+        ],
+        vec![(0.0, 2.0), (0.0, 2.0), (0.0, 2.0)],
         None,
     )
     .unwrap();
-    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &MipConfig::default());
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1, 2]), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Infeasible);
     assert!(
+        stats.nodes_processed >= 1,
+        "LP must be invoked (propagation alone cannot detect Farkas infeasibility); nodes={}",
+        stats.nodes_processed
+    );
+    assert!(
         stats.relaxation_time_infeasible_ms > 0.0,
-        "infeasible_ms must be >0; pruned={} nodes={}",
+        "infeasible_ms must be >0 when LP detects infeasibility; pruned={} nodes={}",
         stats.pruned,
         stats.nodes_processed,
     );
@@ -1120,8 +1133,12 @@ fn knapsack_truncated_has_no_bound_gap_cert() {
         vec![ConstraintType::Le],
         vec![(0.0, 1.0), (0.0, 1.0)],
     );
+    // Disable cuts: with cuts=true this tiny instance solves to optimality at
+    // the root, defeating the truncation sentinel (max_nodes=2 would never fire).
+    // This test exercises the truncation/cert path; cuts behaviour is separate.
     let cfg = MipConfig {
         max_nodes: 2,
+        cuts: false,
         ..MipConfig::default()
     };
     let (r, _) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &cfg);
@@ -1868,6 +1885,678 @@ fn miqp_bt_reduces_bb_nodes_below_noop() {
     assert!(
         stats.nodes_processed < 5,
         "BT must reduce nodes below no-BT baseline of 5; got {}",
+        stats.nodes_processed
+    );
+}
+
+// Hybrid node selection (best-bound + depth-first diving)
+// ---------------------------------------------------------------------------
+
+/// Diving mode does not corrupt B&B correctness on a 3-variable binary knapsack.
+///
+/// With DIVE_FREQUENCY_NO_INCUMBENT=2 and no pre-computed incumbent, the hybrid
+/// queue triggers at least one depth-first dive during the search. This test
+/// verifies that diving nodes are handled correctly (not lost, not double-visited)
+/// and the solver still reaches the known optimal solution.
+///
+/// Sentinel: removing `end_dive` flush in `NodeQueue::end_dive` can drop
+/// dive-stack nodes (losing subproblems) → the solver may miss the optimum
+/// and return a wrong objective or `SuboptimalSolution` → test FAILS.
+#[test]
+fn hybrid_node_selection_correctness_3var_knapsack() {
+    // min -6x0 - 10x1 - 5x2  s.t. 3x0+5x1+2x2 <= 6, xi in {0,1}.
+    // Optimal: x0=1, x2=1 → obj=−11 (weight=5).
+    let lp = build_lp(
+        vec![-6.0, -10.0, -5.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[3.0, 5.0, 2.0],
+        1,
+        vec![6.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)],
+    );
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1, 2]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal, "got {:?}", r.status);
+    assert!(
+        (r.objective - (-11.0)).abs() < EPS,
+        "expected obj=-11, got {}",
+        r.objective
+    );
+    assert!(
+        stats.nodes_processed >= 2,
+        "branching expected; nodes={}",
+        stats.nodes_processed
+    );
+}
+
+/// Dive termination on infeasible LP does not orphan sibling nodes.
+///
+/// When a diving LP solve returns Infeasible, `end_dive` must flush remaining
+/// dive-stack siblings to the best-bound heap so they are still explored.
+///
+/// A mock relaxation orchestrates the sequence:
+///   call 0 — root [0,2]: Optimal, x=0.5 → branch [0,0] and [1,2].
+///   Dive starts (no incumbent, DIVE_FREQUENCY_NO_INCUMBENT after root).
+///   call 1 — [0,0] (dive node, LIFO): Infeasible → end_dive, sibling [1,2] flushed.
+///   call 2 — [1,2] (best-bound from heap): Optimal, x=1 (integer) → incumbent.
+///
+/// Sentinel: dropping `end_dive` on Infeasible leaves [1,2] in the dive stack.
+/// The stack auto-empties when next popped but no explicit flush means the
+/// dive mode is never exited properly and siblings may be missed in edge cases.
+/// Here the mock call-count sentinel detects whether [1,2] was ever processed.
+#[test]
+fn dive_ends_on_infeasible_and_sibling_explored() {
+    use crate::options::SolverOptions;
+    use crate::problem::SolverResult;
+    use std::cell::Cell;
+
+    struct DiveMock {
+        call: Cell<usize>,
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+    }
+    impl DiveMock {
+        fn new() -> Self {
+            Self {
+                call: Cell::new(0),
+                root_bounds: [(0.0, 2.0)],
+                int_vars: [0],
+            }
+        }
+    }
+    impl super::Relaxation for DiveMock {
+        fn num_vars(&self) -> usize { 1 }
+        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
+        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn solve(&self, bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            let n = self.call.get();
+            self.call.set(n + 1);
+            match n {
+                // Root: fractional → branch [0,0] and [1,2].
+                0 => SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 0.5,
+                    solution: vec![0.5],
+                    ..Default::default()
+                },
+                // One child: Infeasible (down-branch [0,0] or up-branch [1,2]).
+                1 => SolverResult {
+                    status: SolveStatus::Infeasible,
+                    objective: f64::INFINITY,
+                    solution: vec![],
+                    ..Default::default()
+                },
+                // Other child: integer-feasible → becomes incumbent.
+                _ => {
+                    let x = bounds[0].0.ceil().max(bounds[0].0);
+                    SolverResult {
+                        status: SolveStatus::Optimal,
+                        objective: x,
+                        solution: vec![x],
+                        ..Default::default()
+                    }
+                }
+            }
+        }
+    }
+
+    let mock = DiveMock::new();
+    let cfg = MipConfig { branching: crate::options::MipBranching::MostFractional, ..MipConfig::default() };
+    let (r, stats) = super::solve_mip_with_stats(&mock, &opts(), &cfg);
+    assert_eq!(
+        r.status, SolveStatus::Optimal,
+        "sibling must be explored after infeasible dive node; got {:?}", r.status
+    );
+    assert_eq!(
+        mock.call.get(), 3,
+        "all 3 nodes (root + 2 children) must be processed; got {}",
+        mock.call.get()
+    );
+    assert_eq!(
+        stats.nodes_processed, 3,
+        "nodes_processed must be 3; got {}",
+        stats.nodes_processed
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Node-level bound propagation sentinels
+// ---------------------------------------------------------------------------
+
+/// Node propagation avoids LP solve when bounds are infeasible after multi-pass.
+///
+/// Uses a mock relaxation (bypassing root presolve) so per-node propagation
+/// fires inside solve_mip_core. The mock exposes constraints x+y<=2.9 and
+/// x+y>=2.1 via propagation_data(). At the root B&B node with bounds [0,5]²:
+///   Pass 1, Le: x_ub→2, y_ub→2; Ge: x_lb→1, y_lb→1 → bounds [1,2]².
+///   Pass 2, Le: x_ub→1, y_ub→1; Ge: x_lb→ceil(2.1-1)=2 > x_ub=1 → infeasible.
+/// Root node pruned by propagation before any LP solve → nodes_processed=0.
+///
+/// Sentinel: removing tighten_bounds_at_node from solve_mip_core causes
+/// mock.solve() to be called at root → nodes_processed=1 → assertion fails.
+#[test]
+fn node_propagation_prunes_infeasible_node_before_lp() {
+    use std::cell::Cell;
+    struct NodePropMock {
+        a: CscMatrix,
+        b: Vec<f64>,
+        ct: Vec<ConstraintType>,
+        root_bounds: Vec<(f64, f64)>,
+        int_vars: Vec<usize>,
+        lp_calls: Cell<usize>,
+    }
+    impl super::Relaxation for NodePropMock {
+        fn num_vars(&self) -> usize { 2 }
+        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
+        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            self.lp_calls.set(self.lp_calls.get() + 1);
+            SolverResult {
+                status: SolveStatus::Infeasible,
+                objective: f64::INFINITY,
+                solution: vec![],
+                ..Default::default()
+            }
+        }
+        fn propagation_data(&self) -> Option<(&CscMatrix, &[f64], &[ConstraintType])> {
+            Some((&self.a, &self.b, &self.ct))
+        }
+    }
+    let a = CscMatrix::from_triplets(
+        &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2,
+    ).unwrap();
+    let mock = NodePropMock {
+        a,
+        b: vec![2.9, 2.1],
+        ct: vec![ConstraintType::Le, ConstraintType::Ge],
+        root_bounds: vec![(0.0, 5.0), (0.0, 5.0)],
+        int_vars: vec![0, 1],
+        lp_calls: Cell::new(0),
+    };
+    let (r, stats) = super::solve_mip_with_stats(&mock, &opts(), &MipConfig::default());
+    assert_eq!(
+        r.status,
+        SolveStatus::Infeasible,
+        "no integer satisfies x+y<=2.9 ∧ x+y>=2.1 simultaneously"
+    );
+    assert_eq!(
+        stats.nodes_processed, 0,
+        "multi-pass propagation prunes root before LP; no-op gives nodes=1"
+    );
+    assert_eq!(
+        stats.propagation_pruned, 1,
+        "root itself counted in propagation_pruned; no-op gives 0"
+    );
+    assert_eq!(
+        mock.lp_calls.get(), 0,
+        "LP must not be called when propagation prunes; no-op gives 1"
+    );
+}
+
+/// Propagation counter increments when a node is pruned before LP solve.
+#[test]
+fn node_propagation_counter_increments_for_propagation_prune() {
+    use std::cell::Cell;
+    struct NodePropMock2 {
+        a: CscMatrix,
+        b: Vec<f64>,
+        ct: Vec<ConstraintType>,
+        root_bounds: Vec<(f64, f64)>,
+        int_vars: Vec<usize>,
+        lp_calls: Cell<usize>,
+    }
+    impl super::Relaxation for NodePropMock2 {
+        fn num_vars(&self) -> usize { 2 }
+        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
+        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            self.lp_calls.set(self.lp_calls.get() + 1);
+            SolverResult {
+                status: SolveStatus::Infeasible,
+                objective: f64::INFINITY,
+                solution: vec![],
+                ..Default::default()
+            }
+        }
+        fn propagation_data(&self) -> Option<(&CscMatrix, &[f64], &[ConstraintType])> {
+            Some((&self.a, &self.b, &self.ct))
+        }
+    }
+    let a = CscMatrix::from_triplets(
+        &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2,
+    ).unwrap();
+    let mock = NodePropMock2 {
+        a,
+        b: vec![2.9, 2.1],
+        ct: vec![ConstraintType::Le, ConstraintType::Ge],
+        root_bounds: vec![(0.0, 5.0), (0.0, 5.0)],
+        int_vars: vec![0, 1],
+        lp_calls: Cell::new(0),
+    };
+    let (_, stats) = super::solve_mip_with_stats(&mock, &opts(), &MipConfig::default());
+    assert!(
+        stats.propagation_pruned > 0,
+        "propagation_pruned must be positive when children are infeasible by propagation; \
+         no-op gives 0"
+    );
+    assert!(
+        stats.pruned >= stats.propagation_pruned,
+        "propagation_pruned must be a subset of pruned"
+    );
+}
+
+/// MIQP does not use node propagation (propagation_data returns None).
+///
+/// Sentinel: if MIQP accidentally returns propagation_data, propagation_pruned
+/// may incorrectly increase; this test verifies it stays zero on a trivial MIQP.
+#[test]
+fn miqp_node_propagation_not_applied() {
+    let qp = qp_problem(
+        &[2.0, 2.0],
+        vec![0.0, 0.0],        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let (r, stats) =
+        super::solve_miqp_with_stats(&miqp(qp, vec![0, 1]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert_eq!(
+        stats.propagation_pruned, 0,
+        "MIQP must not use node propagation; propagation_pruned must stay 0"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// reduced_cost_fixing unit tests
+// ---------------------------------------------------------------------------
+
+fn lp_result_with_rc(obj: f64, solution: Vec<f64>, rc: Vec<f64>) -> crate::problem::SolverResult {
+    crate::problem::SolverResult {
+        status: SolveStatus::Optimal,
+        objective: obj,
+        solution,
+        reduced_costs: rc,
+        ..crate::problem::SolverResult::default()
+    }
+}
+
+/// At lower bound with rc > gap → variable is fixed to lb.
+///
+/// Sentinel: removing the `rcj > gap` check leaves the variable unfixed → count=0 → FAILS.
+#[test]
+fn rc_fixing_fixes_at_lower_bound() {
+    let res = lp_result_with_rc(0.0, vec![0.0], vec![5.0]);
+    let mut bounds = vec![(0.0_f64, 1.0_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 1, "variable at lb with rc=5 > gap=3 must be fixed");
+    assert_eq!(bounds[0], (0.0, 0.0), "fixed to lb");
+}
+
+/// At upper bound with -rc > gap → variable is fixed to ub.
+///
+/// Sentinel: removing the `-rcj > gap` check leaves the variable unfixed → count=0 → FAILS.
+#[test]
+fn rc_fixing_fixes_at_upper_bound() {
+    let res = lp_result_with_rc(0.0, vec![1.0], vec![-5.0]);
+    let mut bounds = vec![(0.0_f64, 1.0_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 1, "variable at ub with rc=-5 (-rc=5 > gap=3) must be fixed");
+    assert_eq!(bounds[0], (1.0, 1.0), "fixed to ub");
+}
+
+/// rc exactly equal to gap is not sufficient — strict inequality required.
+///
+/// Sentinel: using `>=` instead of `>` would fix this variable → count=1 → FAILS.
+#[test]
+fn rc_fixing_no_fix_when_rc_equals_gap() {
+    let res = lp_result_with_rc(0.0, vec![0.0], vec![3.0]);
+    let mut bounds = vec![(0.0_f64, 1.0_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 0, "rc == gap must not fix (strict inequality)");
+    assert_eq!(bounds[0], (0.0, 1.0), "bounds unchanged");
+}
+
+/// rc < gap → no fixing.
+#[test]
+fn rc_fixing_no_fix_when_rc_less_than_gap() {
+    let res = lp_result_with_rc(0.0, vec![0.0], vec![2.0]);
+    let mut bounds = vec![(0.0_f64, 1.0_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 0, "rc=2 < gap=3 must not fix");
+    assert_eq!(bounds[0], (0.0, 1.0));
+}
+
+/// Empty reduced_costs → no fixing, no panic.
+///
+/// Sentinel: removing the early-return guard causes index-out-of-bounds or wrong results → FAILS.
+#[test]
+fn rc_fixing_empty_reduced_costs_returns_zero() {
+    let res = lp_result_with_rc(0.0, vec![0.0], vec![]);
+    let mut bounds = vec![(0.0_f64, 1.0_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 0, "empty reduced_costs must return 0");
+}
+
+/// Non-positive gap (LP obj >= incumbent) → no fixing.
+///
+/// Sentinel: removing the `gap <= 0` guard would compare rc to a negative gap → wrong fixes → FAILS.
+#[test]
+fn rc_fixing_no_fix_when_gap_nonpositive() {
+    let res = lp_result_with_rc(5.0, vec![0.0], vec![10.0]);
+    let mut bounds = vec![(0.0_f64, 1.0_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 0, "non-positive gap must not fix any variable");
+}
+
+/// Already-fixed variable (lb == ub) is skipped.
+#[test]
+fn rc_fixing_skips_already_fixed_variable() {
+    let res = lp_result_with_rc(0.0, vec![0.0], vec![10.0]);
+    let mut bounds = vec![(0.0_f64, 0.0_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 0, "already-fixed variable must not be counted again");
+    assert_eq!(bounds[0], (0.0, 0.0));
+}
+
+/// Variable not at any bound (interior LP value) → no fixing.
+#[test]
+fn rc_fixing_no_fix_for_interior_value() {
+    let res = lp_result_with_rc(0.0, vec![0.5], vec![10.0]);
+    let mut bounds = vec![(0.0_f64, 1.0_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 0, "interior LP value must not be fixed");
+    assert_eq!(bounds[0], (0.0, 1.0));
+}
+
+/// Multiple variables: only those satisfying the criterion are fixed.
+#[test]
+fn rc_fixing_multiple_vars_selective_fixing() {
+    let res = lp_result_with_rc(0.0, vec![0.0, 2.0, 0.0, 0.0], vec![10.0, -10.0, 2.0, 3.0]);
+    let mut bounds = vec![(0.0, 1.0), (0.0, 2.0), (0.0, 1.0), (0.0, 1.0)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0, 1, 2, 3]);
+    assert_eq!(count, 2, "exactly 2 vars qualify for fixing");
+    assert_eq!(bounds[0], (0.0, 0.0), "x0 fixed to lb");
+    assert_eq!(bounds[1], (2.0, 2.0), "x1 fixed to ub");
+    assert_eq!(bounds[2], (0.0, 1.0), "x2 unchanged");
+    assert_eq!(bounds[3], (0.0, 1.0), "x3 unchanged (rc == gap, strict)");
+}
+
+/// Out-of-bounds variable index is silently skipped (no panic).
+#[test]
+fn rc_fixing_out_of_bounds_index_ignored() {
+    let res = lp_result_with_rc(0.0, vec![0.0], vec![10.0]);
+    let mut bounds = vec![(0.0_f64, 1.0_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[5]);
+    assert_eq!(count, 0, "out-of-bounds index must be skipped silently");
+}
+
+// ---------------------------------------------------------------------------
+// rc_vars_fixed stats sentinel
+// ---------------------------------------------------------------------------
+
+/// Reduced-cost fixing fires in the B&B loop and increments rc_vars_fixed.
+///
+/// Sentinel: removing the `reduced_cost_fixing(...)` call in `solve_mip_core` leaves
+/// `stats.rc_vars_fixed == 0` → this test FAILS.
+#[test]
+fn rc_fixing_fires_in_bb_loop_stats_sentinel() {
+    use crate::options::{SolverOptions, WarmStartBasis};
+    use crate::problem::SolverResult;
+    use std::cell::Cell;
+
+    struct RcMock {
+        call: Cell<usize>,
+        root_bounds: [(f64, f64); 2],
+        int_vars: [usize; 2],
+    }
+
+    impl RcMock {
+        fn new() -> Self {
+            Self {
+                call: Cell::new(0),
+                root_bounds: [(0.0, 2.0), (0.0, 1.0)],
+                int_vars: [0, 1],
+            }
+        }
+    }
+
+    impl super::Relaxation for RcMock {
+        fn num_vars(&self) -> usize { 2 }
+        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
+        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn solve(&self, bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            let n = self.call.get();
+            self.call.set(n + 1);
+            match n {
+                // Root: x0=1.5 (fractional), x1=0 (at lb). rc[x1]=5 > gap=2 → x1 fixed.
+                0 => SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 0.0,
+                    solution: vec![1.5, 0.0],
+                    reduced_costs: vec![0.0, 5.0],
+                    warm_start_basis: Some(WarmStartBasis {
+                        basis: vec![0, 1],
+                        x_b: vec![1.5, 0.0],
+                    }),
+                    ..SolverResult::default()
+                },
+                // Down-branch [0,1]×[0,0]: integer-feasible.
+                _ if bounds[1] == (0.0, 0.0) && bounds[0].1 <= 1.0 => SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: bounds[0].0.ceil(),
+                    solution: vec![bounds[0].0.ceil(), 0.0],
+                    reduced_costs: vec![1.0, 0.0],
+                    ..SolverResult::default()
+                },
+                // Up-branch [2,2]×[0,0]: integer-feasible.
+                _ => SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 2.0,
+                    solution: vec![2.0, 0.0],
+                    reduced_costs: vec![1.0, 0.0],
+                    ..SolverResult::default()
+                },
+            }
+        }
+    }
+
+    // Inject incumbent with obj=2 so gap = 2-0 = 2 at root, rc[x1]=5 > 2 → x1 fixed.
+    let initial_inc = SolverResult {
+        status: SolveStatus::Optimal,
+        objective: 2.0,
+        solution: vec![2.0, 0.0],
+        ..SolverResult::default()
+    };
+
+    let mock = RcMock::new();
+    let mask = integer_mask(2, &[0, 1]);
+    let (r, stats) = super::solve_mip_core(
+        &mock,
+        &opts(),
+        &crate::options::MipConfig::default(),
+        mask,
+        Some(initial_inc),
+    );
+    assert!(
+        matches!(r.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution),
+        "unexpected status {:?}",
+        r.status
+    );
+    assert!(
+        stats.rc_vars_fixed >= 1,
+        "rc_vars_fixed must be >= 1 when RC fixing fires at root; \
+         removing the reduced_cost_fixing call gives 0 → FAILS"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RINS integration tests
+// ---------------------------------------------------------------------------
+
+/// RINS stats fields are initialised to zero and only increment when RINS triggers.
+///
+/// A 1-variable problem solves in 1 node — RINS never fires (needs an
+/// incumbent AND nodes_processed % RINS_INTERVAL == 0 at a non-root node).
+#[test]
+fn rins_stats_zero_for_single_node_problem() {
+    let lp = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert_eq!(stats.rins_calls, 0, "RINS must not fire in single-node solve");
+    assert_eq!(stats.rins_improvements, 0);
+}
+
+/// Disabling RINS (rins_enabled=false) does not change solution correctness.
+///
+/// The 2-variable MILP must still reach its optimal regardless of the RINS flag.
+///
+/// Sentinel: if rins_enabled=false broke B&B (e.g. accidental early exit),
+/// the status would not be Optimal.
+#[test]
+fn rins_disabled_still_optimal() {
+    let lp = build_lp(
+        vec![-1.0, -1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 3.0), (0.0, 3.0)],
+    );
+    let cfg = MipConfig { rins_enabled: false, ..MipConfig::default() };
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &cfg);
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!(r.objective < -2.9, "obj={}", r.objective);
+    assert_eq!(
+        stats.rins_calls, 0,
+        "no RINS calls expected when rins_enabled=false"
+    );
+}
+
+/// RINS stats are consistent: improvements <= calls.
+///
+/// Uses a 4-variable problem where RINS may or may not fire.
+/// The invariant `improvements <= calls` must always hold.
+#[test]
+fn rins_stats_improvements_le_calls() {
+    // 4-variable binary knapsack: min -(3x0+5x1+2x2+4x3) s.t. 3x0+5x1+2x2+4x3<=7
+    let lp = build_lp(
+        vec![-3.0, -5.0, -2.0, -4.0],
+        &[0, 0, 0, 0],
+        &[0, 1, 2, 3],
+        &[3.0, 5.0, 2.0, 4.0],
+        1,
+        vec![7.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0); 4],
+    );
+    let (r, stats) =
+        solve_milp_with_stats(&milp(lp, vec![0, 1, 2, 3]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!(
+        stats.rins_improvements <= stats.rins_calls,
+        "improvements={} must be <= calls={}",
+        stats.rins_improvements,
+        stats.rins_calls
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Conflict analysis integration tests
+// ---------------------------------------------------------------------------
+
+/// Conflict stats are zero when no node is infeasible (all pruned by bounds).
+///
+/// A problem where LP root is already optimal: no branching, no infeasible
+/// nodes → conflict_clauses_learned == 0.
+#[test]
+fn conflict_stats_zero_for_integer_root() {
+    let lp = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
+    let (_, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(
+        stats.conflict_clauses_learned, 0,
+        "no infeasible LP nodes → no conflict clauses"
+    );
+    assert_eq!(stats.conflict_pruned, 0);
+}
+
+/// Conflict analysis learns clauses from infeasible nodes and the stats reflect this.
+///
+/// Sentinel: removing `conflicts.learn(...)` keeps conflict_clauses_learned == 0
+/// even when infeasible LP nodes exist → FAILS.
+#[test]
+fn conflict_learns_from_infeasible_nodes() {
+    let a = CscMatrix::from_triplets(
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 1],
+        &[1.0, 1.0, 1.0, -1.0], // x+y<=3, x-y<=0.5
+        2,
+        2,
+    )
+    .unwrap();
+    let lp = LpProblem::new_general(
+        vec![1.0, 1.0],
+        a,
+        vec![3.0, 0.5],
+        vec![ConstraintType::Le, ConstraintType::Le],
+        vec![(0.0, 2.0), (0.0, 2.0)],
+        None,
+    )
+    .unwrap();
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!(
+        stats.conflict_pruned <= stats.nodes_processed,
+        "conflict_pruned={} > nodes_processed={}",
+        stats.conflict_pruned,
+        stats.nodes_processed
+    );
+}
+
+/// conflict_pruned <= nodes_processed always (a pruned node is a node we saved).
+///
+/// This invariant must hold for any MILP solve.
+#[test]
+fn conflict_pruned_le_nodes_processed() {
+    let lp = build_lp(
+        vec![-1.0, -2.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![4.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 3.0), (0.0, 3.0)],
+    );
+    let (_, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &MipConfig::default());
+    assert!(
+        stats.conflict_pruned <= stats.nodes_processed,
+        "conflict_pruned={} must be <= nodes_processed={}",
+        stats.conflict_pruned,
         stats.nodes_processed
     );
 }

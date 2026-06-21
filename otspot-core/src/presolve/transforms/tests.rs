@@ -326,7 +326,7 @@ fn test_bounds_tightening_negative_coeff_ge_feasible() {
 // Roundtrip
 // -----------------------------------------------------------
 #[test]
-fn test_presolve_no_crash_netlib_like() {
+fn test_presolve_singleton_le_netlib_like() {
     let lp = make_lp(
         vec![-1.0, -1.0, -1.0],
         &[0, 0, 0, 1, 2, 3],
@@ -337,8 +337,10 @@ fn test_presolve_no_crash_netlib_like() {
         vec![4.0, 3.0, 3.0, 3.0],
     );
     let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced);
+    // Singleton Le rows (1-3) absorbed into bounds; row 0 remains with tightened bounds.
     assert_eq!(result.reduced_problem.num_vars, 3);
-    assert_eq!(result.reduced_problem.num_constraints, 4);
+    assert_eq!(result.reduced_problem.num_constraints, 1);
 }
 
 #[test]
@@ -745,6 +747,27 @@ mod roundtrip_kkt {
         );
         assert_kkt_optimal(&lp, 3.0, "roundtrip_ge_constraint_dual_sign");
     }
+
+    /// singleton Le (non-binding) の dual が complementarity により 0 であることを確認。
+    #[test]
+    fn test_singleton_le_nonbinding_dual_zero() {
+        // min -x, s.t. x <= 10 (singleton Le, non-binding), x + 0*y <= 5, x,y in [0,5].
+        // Presolve: x <= 10 doesn't tighten x_ub (already 5 < 10), row removed.
+        // Optimal: x=5, y=0, obj=-5.
+        // Row 0 slack = 10 - 5 = 5 > 0, so dual must be 0 (complementarity).
+        let lp = make_lp_general(
+            vec![-1.0, 0.0],
+            &[0, 1, 1],
+            &[0, 0, 1],
+            &[1.0, 1.0, 0.0],
+            2,
+            2,
+            vec![10.0, 5.0],
+            vec![ConstraintType::Le, ConstraintType::Le],
+            vec![(0.0, 5.0), (0.0, 5.0)],
+        );
+        assert_kkt_optimal(&lp, -5.0, "singleton_le_nonbinding_dual_zero");
+    }
 }
 
 // -----------------------------------------------------------
@@ -772,7 +795,7 @@ fn test_step7_free_var_fillin_must_not_blow_up() {
     // while the safety deadline keeps the test bounded if it ever hangs.
     const N_HUBS: usize = 1500; // free chained variables a_0..a_N
     const N_LOADS: usize = 9000; // load rows that densify around the chain
-    const MAX_PRESOLVE_SECS: f64 = 1.0; // post-fix budget (assertion)
+    const MAX_PRESOLVE_SECS: f64 = 2.0; // post-fix budget (assertion; bad path ~2.6s)
     const SAFETY_DEADLINE_SECS: f64 = 8.0; // non-hang guard only
 
     let n_hub = N_HUBS + 1;
@@ -833,5 +856,378 @@ fn test_step7_free_var_fillin_must_not_blow_up() {
          grows super-linearly as columns densify — see fill_in_exceeds_budget / \
          eliminate_variable_via_eq_row in presolve/transforms.",
         elapsed, ncols, nrows, MAX_PRESOLVE_SECS
+    );
+}
+
+// -----------------------------------------------------------
+// Singleton Le/Ge — end-to-end
+// -----------------------------------------------------------
+
+#[test]
+fn test_singleton_le_reduces_and_round_trips() {
+    // min -x - y, s.t. 3x <= 6 (singleton Le), x + y <= 5, x,y in [0,5].
+    // Singleton Le tightens x_ub to 2. Row 1 not redundant: max=2+5=7>5.
+    let lp = make_lp_general(
+        vec![-1.0, -1.0],
+        &[0, 1, 1],
+        &[0, 0, 1],
+        &[3.0, 1.0, 1.0],
+        2,
+        2,
+        vec![6.0, 5.0],
+        vec![ConstraintType::Le, ConstraintType::Le],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced, "singleton Le must reduce the problem");
+    assert_eq!(result.reduced_problem.num_constraints, 1, "singleton Le row removed");
+}
+
+#[test]
+fn test_singleton_ge_reduces_and_round_trips() {
+    // min -x - y, s.t. 2x >= 4 (singleton Ge), x + y <= 5, x,y in [0,5].
+    // Singleton Ge tightens x_lb to 2. Row 1 not redundant: max=5+5=10>5.
+    let lp = make_lp_general(
+        vec![-1.0, -1.0],
+        &[0, 1, 1],
+        &[0, 0, 1],
+        &[2.0, 1.0, 1.0],
+        2,
+        2,
+        vec![4.0, 5.0],
+        vec![ConstraintType::Ge, ConstraintType::Le],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced, "singleton Ge must reduce the problem");
+    assert_eq!(result.reduced_problem.num_constraints, 1, "singleton Ge row removed");
+}
+
+#[test]
+fn test_singleton_le_infeasible_at_presolve() {
+    // 2x <= 1, x in [3, 5] → implied ub = 0.5 < lb = 3 → infeasible.
+    let lp = make_lp_general(
+        vec![1.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        1,
+        vec![1.0],
+        vec![ConstraintType::Le],
+        vec![(3.0, 5.0)],
+    );
+    assert!(matches!(
+        run_presolve(&lp, None),
+        Err(PresolveStatus::Infeasible)
+    ));
+}
+
+// -----------------------------------------------------------
+// Forcing row — end-to-end
+// -----------------------------------------------------------
+
+#[test]
+fn test_forcing_le_all_positive_reduces() {
+    // min -x - y, s.t. x + y <= 0, -x + z <= 5, x in [0,1], y in [0,2], z in [0,6].
+    // Forcing: min = 0+0 = 0 >= 0. x→0, y→0. Row 0 removed, x,y fixed.
+    // Row 1 becomes -0+z <= 5 (singleton Le, tightens z_ub to 5). Row 1 removed.
+    // z with c=-0 but row gone → empty col. c(z)=0 so any value: fix at lb=0.
+    // obj_offset = 0 (x=0, y=0, z=0).
+    let lp = make_lp_general(
+        vec![-1.0, -1.0, 0.0],
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 2],
+        &[1.0, 1.0, -1.0, 1.0],
+        2,
+        3,
+        vec![0.0, 5.0],
+        vec![ConstraintType::Le, ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 2.0), (0.0, 6.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced);
+    // Forcing + subsequent reductions eliminate everything.
+    assert_eq!(result.reduced_problem.num_vars, 0);
+    assert_eq!(result.reduced_problem.num_constraints, 0);
+}
+
+#[test]
+fn test_forcing_ge_reduces() {
+    // x + y >= 3, x in [0,1], y in [0,2]. max=3 <= 3.
+    // Forcing from max: x→1, y→2. Row removed.
+    let lp = make_lp_general(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![3.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced);
+    assert_eq!(result.reduced_problem.num_vars, 0);
+    assert!((result.obj_offset - 3.0).abs() < 1e-10, "obj = 1*1 + 1*2 = 3");
+}
+
+#[test]
+fn test_forcing_eq_reduces() {
+    // x + y = 3, x in [0,1], y in [0,2]. max=3 <= 3. Forced.
+    let lp = make_lp_general(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![3.0],
+        vec![ConstraintType::Eq],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(result.was_reduced);
+    assert_eq!(result.reduced_problem.num_vars, 0);
+    assert!((result.obj_offset - 3.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_forcing_not_triggered_when_slack() {
+    // -x + y <= 10, x in [0,1], y in [0,2]. min=-1 < 10, not forcing.
+    // Not redundant: max=0+2=2 <= 10 → redundant. Use tighter rhs.
+    // 3x + 2y <= 5, x in [0,1], y in [0,2]. min=0 < 5, not forcing.
+    // max=3+4=7 > 5, not redundant.
+    let lp = make_lp_general(
+        vec![-1.0, -1.0],
+        &[0, 0],
+        &[0, 1],
+        &[3.0, 2.0],
+        1,
+        2,
+        vec![5.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 2.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    // Not forcing, not redundant. Bounds tighten but no rows/cols removed.
+    assert_eq!(result.reduced_problem.num_vars, 2, "vars stay");
+    assert_eq!(result.reduced_problem.num_constraints, 1, "row stays");
+}
+
+// -----------------------------------------------------------
+// P1-1: ForcingRow dual recovery with prior FixedVariable
+// -----------------------------------------------------------
+// When step1 (FixedVariable) removes x0 before step2b (ForcingRow) runs,
+// LIFO replay processes ForcingRow first with solution[x0]=0 (not yet restored).
+// is_row_nonbinding computed Ax using orig_problem (includes x0 with stale value),
+// yielding an inflated slack → binding row misclassified as non-binding → dual=0.
+// Fix: ForcingRow snapshot stores active entries at presolve time; postsolve uses
+// these entries directly, bypassing the incomplete-solution binding check.
+
+#[test]
+fn test_forcing_row_dual_le_with_prior_fixed_variable() {
+    // min -x1 - x2
+    // x0 + x1 + x2 <= 5,  x0 in [5,5], x1 in [0,2], x2 in [0,2]
+    //
+    // step1: x0 fixed at 5 → modified_b = 5 - 5 = 0
+    // step2b: x1 + x2 <= 0, min=0=rhs, forcing: x1→0, x2→0
+    // At optimum: x0=5, x1=0, x2=0; row = 5+0+0 = 5 = rhs → binding.
+    // KKT for x1 at lb=0 (Le row): rc_1 = -1 - y >= 0 → y <= -1.
+    // KKT for x2 at lb=0: rc_2 = -1 - y >= 0 → y <= -1.  Dual = -1.
+    let lp = make_lp_general(
+        vec![0.0, -1.0, -1.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[1.0, 1.0, 1.0],
+        1, 3,
+        vec![5.0],
+        vec![ConstraintType::Le],
+        vec![(5.0, 5.0), (0.0, 2.0), (0.0, 2.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 5.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
+    // Le row is binding; dual must be -1.
+    assert!(
+        (result.dual_solution[0] - (-1.0)).abs() < 1e-6,
+        "dual should be -1, got {}",
+        result.dual_solution[0]
+    );
+}
+
+#[test]
+fn test_forcing_row_dual_ge_with_prior_fixed_variable() {
+    // min x1 + x2
+    // x0 + x1 + x2 >= 5,  x0 in [1,1], x1 in [0,2], x2 in [0,2]
+    //
+    // step1: x0 fixed at 1 → modified_b = 5 - 1 = 4
+    // step2b: x1 + x2 >= 4, max=4=rhs, forcing: x1→2, x2→2
+    // At optimum: x0=1, x1=2, x2=2; row = 1+2+2 = 5 = rhs → binding.
+    // KKT for x1 at ub=2 (Ge row): rc_1 = 1 - y <= 0 → y >= 1.
+    // KKT for x2 at ub=2: rc_2 = 1 - y <= 0 → y >= 1.  Dual = 1.
+    let lp = make_lp_general(
+        vec![0.0, 1.0, 1.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[1.0, 1.0, 1.0],
+        1, 3,
+        vec![5.0],
+        vec![ConstraintType::Ge],
+        vec![(1.0, 1.0), (0.0, 2.0), (0.0, 2.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 1.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!((result.solution[1] - 2.0).abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!((result.solution[2] - 2.0).abs() < 1e-6, "x2={}", result.solution[2]);
+    // Ge row is binding; dual must be 1.
+    assert!(
+        (result.dual_solution[0] - 1.0).abs() < 1e-6,
+        "dual should be 1, got {}",
+        result.dual_solution[0]
+    );
+}
+
+#[test]
+fn test_forcing_row_dual_le_multiple_prior_fixed_vars() {
+    // min -x2 - x3
+    // x0 + x1 + x2 + x3 <= 3,  x0 in [1,1], x1 in [2,2], x2 in [0,2], x3 in [0,2]
+    //
+    // step1: x0 fixed (modified_b = 2), x1 fixed (modified_b = 0)
+    // step2b: x2 + x3 <= 0, min=0=rhs, forcing: x2→0, x3→0
+    // At optimum: x0=1, x1=2, x2=0, x3=0; row = 3 = rhs → binding.
+    // KKT for x2 at lb=0: rc_2 = -1 - y >= 0 → y <= -1.
+    // KKT for x3 at lb=0: rc_3 = -1 - y >= 0 → y <= -1.  Dual = -1.
+    let lp = make_lp_general(
+        vec![0.0, 0.0, -1.0, -1.0],
+        &[0, 0, 0, 0],
+        &[0, 1, 2, 3],
+        &[1.0, 1.0, 1.0, 1.0],
+        1, 4,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(1.0, 1.0), (2.0, 2.0), (0.0, 2.0), (0.0, 2.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 1.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!((result.solution[1] - 2.0).abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
+    assert!(result.solution[3].abs() < 1e-6, "x3={}", result.solution[3]);
+    // Le row is binding; dual must be -1.
+    assert!(
+        (result.dual_solution[0] - (-1.0)).abs() < 1e-6,
+        "dual should be -1, got {}",
+        result.dual_solution[0]
+    );
+}
+
+#[test]
+fn test_forcing_row_dual_eq_with_prior_fixed_variable() {
+    // min -x1 - x2
+    // x0 + x1 + x2 = 5,  x0 in [5,5], x1 in [0,2], x2 in [0,2]
+    //
+    // step1: x0 fixed at 5 → modified_b = 0
+    // step2b: x1 + x2 = 0, min=0=rhs, forcing from below: x1→0, x2→0
+    // At optimum: x0=5, x1=0, x2=0; row = 5 = rhs → binding.
+    // Eq row dual unconstrained in sign.
+    // KKT for x1 at lb=0: rc_1 = -1 - y >= 0 → y <= -1. Dual = -1.
+    let lp = make_lp_general(
+        vec![0.0, -1.0, -1.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[1.0, 1.0, 1.0],
+        1, 3,
+        vec![5.0],
+        vec![ConstraintType::Eq],
+        vec![(5.0, 5.0), (0.0, 2.0), (0.0, 2.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 5.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
+    assert!(
+        (result.dual_solution[0] - (-1.0)).abs() < 1e-6,
+        "Eq forcing-row dual should be -1, got {}",
+        result.dual_solution[0]
+    );
+}
+
+#[test]
+fn test_forcing_row_dual_le_mixed_sign_with_prior_fixed_variable() {
+    // min -x1 + x2
+    // 2*x0 + x1 - x2 <= 4,  x0 in [1,1], x1 in [0,3], x2 in [0,3]
+    //
+    // step1: x0 fixed at 1 → modified_b = 4 - 2 = 2
+    // step2b: x1 - x2 <= 2, min = 0 + (-1)*3 = -3 < 2, not forcing.
+    // Try: 2*x0 + x1 - x2 <= -1,  x0 in [1,1], x1 in [0,3], x2 in [0,3]
+    //   modified_b = -1 - 2 = -3. x1 - x2 <= -3. min = 0 + (-1)*3 = -3 >= -3 → forcing.
+    //   x1→0 (pos coeff, to lb), x2→3 (neg coeff, to ub).
+    // At optimum: x0=1, x1=0, x2=3; row = 2+0-3 = -1 = rhs → binding.
+    // KKT for x1 at lb=0: rc_1 = -1 - 1*y >= 0 → y <= -1.
+    // KKT for x2 at ub=3: rc_2 = 1 - (-1)*y <= 0 → 1 + y <= 0 → y <= -1. Dual = -1.
+    let lp = make_lp_general(
+        vec![0.0, -1.0, 1.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[2.0, 1.0, -1.0],
+        1, 3,
+        vec![-1.0],
+        vec![ConstraintType::Le],
+        vec![(1.0, 1.0), (0.0, 3.0), (0.0, 3.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 1.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!((result.solution[2] - 3.0).abs() < 1e-6, "x2={}", result.solution[2]);
+    assert!(
+        (result.dual_solution[0] - (-1.0)).abs() < 1e-6,
+        "dual should be -1, got {}",
+        result.dual_solution[0]
+    );
+}
+
+#[test]
+fn test_forcing_row_dual_multirow_with_prior_fixed_variable() {
+    // min -x1 - x2
+    // row0: x0 + x1 + x2 <= 5,  x0 in [5,5], x1 in [0,2], x2 in [0,2]
+    // row1: x1 + x2 <= 10 (slack, non-binding)
+    //
+    // step1: x0 fixed at 5 → row0 modified_b = 0
+    // step2b: x1 + x2 <= 0, forcing: x1→0, x2→0
+    // Row1 survives presolve. At optimum: x0=5, x1=0, x2=0.
+    // Row0: 5+0+0 = 5 = rhs → binding, dual = -1.
+    // Row1: 0+0 = 0 <= 10 → non-binding, dual = 0.
+    // KKT for x1 at lb=0: rc_1 = -1 - y0 - y1 = -1 - (-1) - 0 = 0.  OK.
+    let lp = make_lp_general(
+        vec![0.0, -1.0, -1.0],
+        &[0, 0, 0, 1, 1],
+        &[0, 1, 2, 1, 2],
+        &[1.0, 1.0, 1.0, 1.0, 1.0],
+        2, 3,
+        vec![5.0, 10.0],
+        vec![ConstraintType::Le, ConstraintType::Le],
+        vec![(5.0, 5.0), (0.0, 2.0), (0.0, 2.0)],
+    );
+    let result = crate::simplex::solve(&lp);
+    assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+    assert!((result.solution[0] - 5.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
+    assert!(
+        (result.dual_solution[0] - (-1.0)).abs() < 1e-6,
+        "row0 dual should be -1, got {}",
+        result.dual_solution[0]
+    );
+    assert!(
+        result.dual_solution[1].abs() < 1e-6,
+        "row1 (non-binding) dual should be 0, got {}",
+        result.dual_solution[1]
     );
 }

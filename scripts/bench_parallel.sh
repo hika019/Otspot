@@ -3,7 +3,7 @@
 # 他の bench suite と並行実行禁止 (CLAUDE.md L72 PC リソース contention 回避、各 suite 順次実行)
 #
 # solver_bench.sh経由で --jobs 数のワーカーが問題キューを処理し、結果を集計する。
-# .qps / .qplib の両形式に対応。
+# .qps / .qplib / .mps の三形式に対応。
 #
 # 使い方:
 #   SOLVER_DIR=/path/to/solver \
@@ -17,7 +17,7 @@
 #
 # 注意:
 # - solver_bench.sh 経由（§43準拠）。直接バイナリ呼び出し禁止
-# - .qps と .qplib の混在ディレクトリは非対応（エラーで終了）
+# - 形式混在ディレクトリは非対応（.mps と .qps/.qplib の混在、または .qps と .qplib の混在はエラーで終了）
 # - ワークプール方式: 問題を3問/グループに分割し、Nワーカーが動的に取得
 
 set -euo pipefail
@@ -97,6 +97,8 @@ elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?unbounded"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/lp_problems_unbounded.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "miplib[_-]?small"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/miplib_small.csv"
 else
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp.csv"
 fi
@@ -108,14 +110,19 @@ fi
 # ファイル拡張子の自動判別
 QPS_COUNT=$(find "$DATA_DIR" -maxdepth 1 \( -iname "*.qps" \) | wc -l | tr -d ' ')
 QPLIB_COUNT=$(find "$DATA_DIR" -maxdepth 1 -name "*.qplib" | wc -l | tr -d ' ')
+MPS_COUNT=$(find "$DATA_DIR" -maxdepth 1 -iname "*.mps" | wc -l | tr -d ' ')
 
+if [[ "$MPS_COUNT" -gt 0 && ( "$QPS_COUNT" -gt 0 || "$QPLIB_COUNT" -gt 0 ) ]]; then
+  echo "エラー: .mps と .qps/.qplib が混在している。非対応。" >&2
+  exit 1
+fi
 if [[ "$QPS_COUNT" -gt 0 && "$QPLIB_COUNT" -gt 0 ]]; then
   echo "エラー: .qps と .qplib が混在している。非対応。" >&2
   exit 1
 fi
 
-if [[ "$QPS_COUNT" -eq 0 && "$QPLIB_COUNT" -eq 0 ]]; then
-  echo "エラー: '$DATA_DIR' に .qps/.qplib ファイルが存在しない" >&2
+if [[ "$QPS_COUNT" -eq 0 && "$QPLIB_COUNT" -eq 0 && "$MPS_COUNT" -eq 0 ]]; then
+  echo "エラー: '$DATA_DIR' に .qps/.qplib/.mps ファイルが存在しない" >&2
   exit 1
 fi
 
@@ -125,11 +132,16 @@ if [[ "$QPS_COUNT" -gt 0 ]]; then
   while IFS= read -r f; do
     FILES+=("$f")
   done < <(find "$DATA_DIR" -maxdepth 1 \( -iname "*.qps" \) | sort)
-else
+elif [[ "$QPLIB_COUNT" -gt 0 ]]; then
   BIN="bench_qplib"
   while IFS= read -r f; do
     FILES+=("$f")
   done < <(find "$DATA_DIR" -maxdepth 1 -name "*.qplib" | sort)
+else
+  BIN="milp_solve"
+  while IFS= read -r f; do
+    FILES+=("$f")
+  done < <(find "$DATA_DIR" -maxdepth 1 -iname "*.mps" | sort)
 fi
 
 TOTAL_FILES=${#FILES[@]}

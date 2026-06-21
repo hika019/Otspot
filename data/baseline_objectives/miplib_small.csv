@@ -1,0 +1,21 @@
+# 出典: MIPLIB 2017 (https://miplib.zib.de/) の既知最適値
+# 用途: 外部参照照合 + 退行検知
+# Source: MIPLIB 2017 known optimal values (https://miplib.zib.de/)
+# Purpose: correctness verification against external reference + regression detection
+problem_name,optimal_obj,source
+dcmulti,188182,miplib2017
+enlight_hard,0,miplib2017
+flugpl,1201500,miplib2017
+gr4x6,202.35,miplib2017
+gt2,21166,miplib2017
+khb05250,106940226,miplib2017
+markshare1,1,miplib2017
+markshare_4_0,1,miplib2017
+markshare_5_0,1,miplib2017
+mas74,11801.1857,miplib2017
+mas76,40005.0541,miplib2017
+neos5,15,miplib2017
+noswot,-43,miplib2017
+p0201,7615,miplib2017
+pk1,11,miplib2017
+timtab1,764772,miplib2017

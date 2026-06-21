@@ -82,7 +82,7 @@ fn d6cube_postsolve_under_1s() {
 /// 未収束だと postsolve に到達せず gate が vacuous になるため default から外す。
 /// 収束自体は lp_simplex_stall_greenbea_converges が追跡。
 #[test]
-#[ignore = "perf-open/heavy: measured postsolve 8.29s > 5s budget (2026-06-14); speed sentinel"]
+#[ignore = "perf-open/heavy: greenbea does not converge within 60s; postsolve gate is vacuous; run via --profile heavy"]
 fn greenbea_postsolve_under_5s() {
     let prob = load("data/lp_problems/greenbea.QPS");
     let (_status, _wall, postsolve_s) = solve(&prob, 60.0);

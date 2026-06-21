@@ -115,13 +115,13 @@ Solve-rate benchmark on standard public sets via the `otspot-dev` `qps_benchmark
 
 | Problem type | Set | # | @ 1e-6 | @ 1e-8 |
 |---|---|---:|---|---|
-| Feasible LP | Netlib | 109 | 108 optimal | 105 optimal |
+| Feasible LP | Netlib | 109 | 109 optimal | 105 optimal |
 | Convex QP | Maros–Mészáros | 138 | 121 optimal | 100 optimal |
 | Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
 **Optimal** = verified against known objective (proof-carrying KKT). Measured on `jobs=8`.
-LP misses @1e-6 (1): `cycle` (SuboptimalSolution); @1e-8 adds `greenbea` (primal-infeasible at the tighter tolerance).
+LP @1e-6: 109/109 optimal (v0.5.2 miss `cycle` resolved). @1e-8: 105 optimal (adds `greenbea` etc.).
 QP misses @1e-6 (17): 11 SuboptimalSolution (LISWET family + `AUG2DCQP`, `QPCBOEI2`, `STADAT1`, `UBH1`, `VALUES`, `YAO` — downgraded when the KKT certificate is not met) + 1 timeout (`LISWET12`) + 1 objective mismatch (`LISWET7`, baseline ambiguous) + 4 solved-but-unverified (no published reference). At `1e-8` the tighter tolerance downgrades 35 to SuboptimalSolution (100 optimal).
 
 Reproduce (data is gitignored; see [Benchmark data](#benchmark-data)):

@@ -1,4 +1,6 @@
-//! GMI cut sentinels.
+//! GMI/MIR cut sentinels.
+//!
+//! Cuts are appended as Le rows (`−g·x ≤ −rhs`, equivalent to `g·x ≥ rhs`).
 //!
 //! The load-bearing test is `cut_validity_brute_force`: it enumerates every
 //! integer point of small all-integer MILPs and asserts that no original-feasible
@@ -178,11 +180,12 @@ fn all_problems() -> Vec<(&'static str, MilpProblem)> {
 }
 
 /// **Cut validity (load-bearing):** every integer-feasible point of the original
-/// problem must satisfy every generated cut. A single sliced integer point fails.
+/// problem must satisfy every generated cut. Cuts are Le rows (`−g·x ≤ −rhs`);
+/// a valid cut means `ax[i] ≤ b[i] + ε` for all original-feasible integer x.
+/// A sign error in the GMI/MIR formula or the Le negation fails this test.
 #[test]
 fn cut_validity_brute_force() {
     for (name, milp) in all_problems() {
-        // Multiple rounds + multiple cuts → broad coverage of the GMI formula.
         for rounds in [1usize, 5] {
             let out = add_root_cuts(&milp, &SolverOptions::default(), &cuts_cfg(rounds));
             let m_old = milp.lp.num_constraints;
@@ -196,14 +199,14 @@ fn cut_validity_brute_force() {
                 if !feasible_orig(&milp.lp, x) {
                     continue;
                 }
-                // Check the original feasible integer point against the cut rows.
+                // Cuts are Le rows (−g·x ≤ −rhs): valid for x when ax[i] ≤ b[i] + ε.
                 let ax = out.lp.a.mat_vec_mul(x).unwrap();
                 for i in m_old..m_new {
-                    assert_eq!(out.lp.constraint_types[i], ConstraintType::Ge);
+                    assert_eq!(out.lp.constraint_types[i], ConstraintType::Le);
                     assert!(
-                        ax[i] >= out.lp.b[i] - 1e-6,
+                        ax[i] <= out.lp.b[i] + 1e-6,
                         "{name} round={rounds}: INVALID CUT — integer point {x:?} \
-                         removed by cut row {i}: {} < {}",
+                         removed by Le cut row {i}: −g·x={} > −rhs={}",
                         ax[i],
                         out.lp.b[i]
                     );
@@ -235,7 +238,7 @@ fn cut_validity_ub_only_var() {
     let out = add_root_cuts(&milp, &SolverOptions::default(), &cuts_cfg(3));
     let m_old = milp.lp.num_constraints;
     let m_new = out.lp.num_constraints;
-    assert!(m_new > m_old, "a GMI cut must be generated for the UbOnly source");
+    assert!(m_new > m_old, "a cut must be generated for the UbOnly source");
     for xi in -8..=2 {
         let x = vec![xi as f64];
         if !feasible_orig(&milp.lp, &x) {
@@ -243,9 +246,10 @@ fn cut_validity_ub_only_var() {
         }
         let ax = out.lp.a.mat_vec_mul(&x).unwrap();
         for i in m_old..m_new {
+            assert_eq!(out.lp.constraint_types[i], ConstraintType::Le);
             assert!(
-                ax[i] >= out.lp.b[i] - 1e-6,
-                "INVALID CUT (UbOnly): integer x={xi} removed by cut row {i}: {} < {}",
+                ax[i] <= out.lp.b[i] + 1e-6,
+                "INVALID CUT (UbOnly): integer x={xi} removed by Le cut row {i}: {} > {}",
                 ax[i],
                 out.lp.b[i]
             );
@@ -255,6 +259,7 @@ fn cut_validity_ub_only_var() {
 
 /// Cuts are generated AND they cut the fractional LP optimum. A no-op generator
 /// (empty cuts, or a cut equal to a trivially-satisfied inequality) fails here.
+/// Cuts are Le rows: x* violates when `ax[i] > b[i] + ε` (i.e., `−g·x* > −rhs`).
 #[test]
 fn cuts_are_generated_and_cut_lp_optimum() {
     for (name, milp) in all_problems() {
@@ -267,11 +272,11 @@ fn cuts_are_generated_and_cut_lp_optimum() {
         let m_new = out.lp.num_constraints;
         assert!(
             m_new > m_old,
-            "{name}: at least one GMI cut must be generated (root LP is fractional)"
+            "{name}: at least one cut must be generated (root LP is fractional)"
         );
-        // Some generated cut must be violated by x* (the cut is effective).
+        // Le cut violated by x*: −g·x* > −rhs + ε, i.e., ax[i] > b[i] + ε.
         let ax = out.lp.a.mat_vec_mul(x_star).unwrap();
-        let any_violated = (m_old..m_new).any(|i| ax[i] < out.lp.b[i] - 1e-6);
+        let any_violated = (m_old..m_new).any(|i| ax[i] > out.lp.b[i] + 1e-6);
         assert!(
             any_violated,
             "{name}: a generated cut must violate the fractional LP optimum {x_star:?}"
@@ -288,14 +293,12 @@ fn cuts_tighten_lp_bound_without_crossing_integer_optimum() {
         let out = add_root_cuts(&milp, &SolverOptions::default(), &cuts_cfg(5));
         let cut_root = lp_root(&out.lp);
         assert_eq!(cut_root.status, SolveStatus::Optimal, "{name}");
-        // Minimization: cut LP objective >= original LP objective (tighter).
         assert!(
             cut_root.objective >= root.objective - 1e-6,
             "{name}: cut LP bound {} must not be looser than root {}",
             cut_root.objective,
             root.objective
         );
-        // The cut LP bound must still under-estimate the integer optimum.
         let int_opt = brute_force_min(&milp);
         if let Some(opt) = int_opt {
             assert!(
@@ -395,7 +398,6 @@ fn cuts_on_root_lp_bound_valid_and_optimum_correct() {
 /// path that the GMI formula consumes.
 #[test]
 fn tableau_row_matches_dense() {
-    // min -x-y s.t. 2x+2y<=3, x,y in [0,1]. (Same as p_box_le's LP.)
     let l = p_box_le().lp;
     let root = lp_root(&l);
     assert_eq!(root.status, SolveStatus::Optimal);
@@ -405,20 +407,17 @@ fn tableau_row_matches_dense() {
     assert_eq!(basis.len(), sf.m);
     let mut lu = LuBasis::new_timed(&sf.a, basis, 0, None).unwrap();
 
-    // Dense B^{-1} A: column-by-column FTRAN of each A_std column.
     let m = sf.m;
     let n = sf.n_total;
     let dense_a = csc_to_dense(&sf.a, m, n);
     let b_inv = dense_basis_inverse(&dense_a, basis);
 
     for i in 0..m {
-        // alpha_i,: via BTRAN(e_i) then column_dot — the production path.
         let mut rho = vec![0.0; m];
         rho[i] = 1.0;
         lu.btran_dense(&mut rho);
         for j in 0..n {
             let via_btran = column_dot(&sf.a, j, &rho);
-            // Direct: (B^{-1} A)_{i,j} = row i of B^{-1} dotted with column j of A.
             let mut direct = 0.0;
             for k in 0..m {
                 direct += b_inv[i][k] * dense_a[k][j];
@@ -449,7 +448,8 @@ fn enumerate_int_window(n_vars: usize, lo: i64, hi: i64) -> Vec<Vec<f64>> {
 }
 
 /// Shared validity+non-vacuous check: assert that cuts were generated (non-vacuous)
-/// and that every feasible integer point in `int_pts` satisfies every cut.
+/// and that every feasible integer point in `int_pts` satisfies every Le cut
+/// (`ax[i] ≤ b[i] + ε`).
 fn assert_cuts_valid_nonvacuous(
     milp: &MilpProblem,
     int_pts: &[Vec<f64>],
@@ -469,11 +469,11 @@ fn assert_cuts_valid_nonvacuous(
         }
         let ax = out.lp.a.mat_vec_mul(x).unwrap();
         for i in m_old..m_new {
-            assert_eq!(out.lp.constraint_types[i], ConstraintType::Ge);
+            assert_eq!(out.lp.constraint_types[i], ConstraintType::Le);
             assert!(
-                ax[i] >= out.lp.b[i] - 1e-6,
-                "{name}: INVALID CUT — integer point {x:?} removed by cut row {i}: \
-                 lhs={} < rhs={}",
+                ax[i] <= out.lp.b[i] + 1e-6,
+                "{name}: INVALID CUT — integer point {x:?} removed by Le cut row {i}: \
+                 −g·x={} > −rhs={}",
                 ax[i],
                 out.lp.b[i]
             );
@@ -487,8 +487,6 @@ fn assert_cuts_valid_nonvacuous(
 /// fractional at x=y=0.75; integer opt is (1,0) or (0,1).
 #[test]
 fn cut_validity_negative_lb() {
-    // min -x-y  s.t. 2x+2y <= 3,  x,y ∈ [-1, 2] integer.
-    // LP opt: x=y=0.75 (fractional). lb-shift offset = -1 (negative).
     let l = lp(
         vec![-1.0, -1.0],
         &[0, 0],
@@ -507,13 +505,9 @@ fn cut_validity_negative_lb() {
 
 /// **Negative RHS / row-negation path:** Le constraint with coefficient signs
 /// that produce `b_shifted < 0`, triggering `row_negated = true` in
-/// `build_standard_form`.  Checks that `classify_slack_cols` tracks the
-/// ConstraintLe mapping correctly through the sign flip.
+/// `build_standard_form`.
 #[test]
 fn cut_validity_negative_rhs_row_negation() {
-    // min x+y  s.t. -2x-2y <= -3,  x,y ∈ [0, 2] integer.
-    // Equivalent to 2x+2y >= 3. LP opt: x=y=0.75 (fractional).
-    // b_shifted = -3 < 0 → Le row is negated in standard form.
     let l = lp(
         vec![1.0, 1.0],
         &[0, 0],
@@ -534,8 +528,6 @@ fn cut_validity_negative_rhs_row_negation() {
 /// (`ConstraintLe` and `ConstraintGe`) within a single cut round.
 #[test]
 fn cut_validity_mixed_le_ge() {
-    // min -x-y  s.t. 2x+2y<=3 (Le), x+y>=0 (Ge),  x,y ∈ [0, 2] integer.
-    // LP opt: x=y=0.75; Ge is slack at opt. Integer opt: (1,0) or (0,1).
     let l = lp(
         vec![-1.0, -1.0],
         &[0, 0, 1, 1],
@@ -552,28 +544,19 @@ fn cut_validity_mixed_le_ge() {
     assert!(n > 0, "mixed Le/Ge path must generate ≥1 cut");
 }
 
-/// **True lb-only (ub = +∞):** UB rows are NOT generated for these variables
-/// (only the Le constraint adds slacks). Exercises the lb-only structural path
-/// where `classify_slack_cols` sees only constraint slacks, no UB-row slacks.
+/// **True lb-only (ub = +∞):** UB rows are NOT generated for these variables.
 #[test]
 fn cut_validity_true_lb_only_inf_ub() {
     let milp = p_lb_only_inf();
-    // Enumerate in window [0,4]^3 — all feasible integer points satisfy 3x+2y+4z<=7
-    // with x,y,z>=0, so x<=2, y<=3, z<=1; window [0,4] is conservative.
     let pts = enumerate_int_window(3, 0, 4);
     let n = assert_cuts_valid_nonvacuous(&milp, &pts, "true_lb_only_inf", 5);
     assert!(n > 0, "true lb-only (ub=∞) path must generate ≥1 cut");
 }
 
 /// **Multi-var UbOnly columns + Eq row:** two UbOnly variables (lb=-∞, ub=3)
-/// plus an equality constraint (no slack column). Exercises the Eq-row no-slack
-/// path in `classify_slack_cols` and the UbOnly image in `accumulate_column`.
+/// plus an equality constraint (no slack column).
 #[test]
 fn cut_validity_multi_var_ubonly_eq_row() {
-    // min -x-2y  s.t.  x+y=2 (Eq),  2x+4y<=7 (Le),  x,y ∈ (-∞, 3] integer.
-    // Substituting y=2-x: 2x+4(2-x)<=7 → -2x<=-1 → x>=0.5 (fractional LP opt).
-    // Integer feasible (x+y=2, 2x+4y<=7, x,y<=3):
-    //   x=1,y=1: 2+4=6<=7 ✓   x=2,y=0: 4+0=4<=7 ✓   x=3,y=-1: 6-4=2<=7 ✓
     let l = lp(
         vec![-1.0, -2.0],
         &[0, 0, 1, 1],
@@ -585,18 +568,16 @@ fn cut_validity_multi_var_ubonly_eq_row() {
         vec![(f64::NEG_INFINITY, 3.0), (f64::NEG_INFINITY, 3.0)],
     );
     let milp = MilpProblem::new(l, vec![0, 1]).unwrap();
-    // Enumerate window [-2, 4]^2.
     let pts = enumerate_int_window(2, -2, 4);
     let n = assert_cuts_valid_nonvacuous(&milp, &pts, "ubonly_eq_row", 5);
     assert!(n > 0, "UbOnly + Eq row path must generate ≥1 cut");
 }
 
 /// **Deterministic LCG fuzz:** generates ≥100 2-variable MILPs with fractional
-/// LP relaxation optima (verified via the LP solver before testing), varying
-/// constraint types, coefficients, RHS and bounds.  For every problem the test
-/// asserts that no integer-feasible point is removed by any generated cut.
-/// `with_cuts` tracks how many problems actually produce cuts; the test asserts
-/// at least some do (guards against a silent no-op generator).
+/// LP relaxation optima, varying constraint types, coefficients, RHS and bounds.
+/// For every problem the test asserts that no integer-feasible point is removed
+/// by any generated cut. `with_cuts` tracks how many problems actually produce
+/// cuts; the test asserts at least some do.
 #[test]
 fn cut_validity_fuzz_lcg() {
     fn lcg(s: &mut u64) -> u64 {
@@ -615,13 +596,11 @@ fn cut_validity_fuzz_lcg() {
     let mut total = 0usize;
     let mut with_cuts = 0usize;
 
-    // Try up to 600 candidates to collect ≥100 fractional-LP problems.
     for _ in 0..600 {
         if total >= 160 {
             break;
         }
 
-        // Integer-valued bounds.
         let lb0 = lcg_f(&mut rng, -2.0, 0.9).round();
         let lb1 = lcg_f(&mut rng, -2.0, 0.9).round();
         let ub0 = lcg_f(&mut rng, 2.0, 4.0).round();
@@ -630,26 +609,20 @@ fn cut_validity_fuzz_lcg() {
             continue;
         }
 
-        // Integer coefficients to avoid trivially-integer LP vertices.
         let a00 = lcg_f(&mut rng, 1.0, 5.0).round();
         let a01 = lcg_f(&mut rng, 1.0, 5.0).round();
         let is_le = lcg(&mut rng).is_multiple_of(2);
 
-        // Pick RHS strictly between min_ax and max_ax so the constraint is
-        // active at the LP optimum, making a fractional solution likely.
         let min_ax = a00 * lb0 + a01 * lb1;
         let max_ax = a00 * ub0 + a01 * ub1;
         let range = max_ax - min_ax;
         if range < 2.0 {
             continue;
         }
-        // Half-integer RHS near the centre (forces fractional LP optimal).
         let mid = (min_ax + max_ax) / 2.0;
         let rhs = mid.floor() + 0.5;
-        // Flip sign for Ge so the sense matches: Ge with the same half-int rhs.
         let ct = if is_le { ConstraintType::Le } else { ConstraintType::Ge };
         let actual_rhs = rhs;
-        // Ge must satisfy: rhs <= max_ax and rhs >= min_ax.
         if actual_rhs <= min_ax || actual_rhs >= max_ax {
             continue;
         }
@@ -669,7 +642,6 @@ fn cut_validity_fuzz_lcg() {
             Err(_) => continue,
         };
 
-        // Keep only problems whose LP relaxation is actually fractional.
         let root = lp_root(&milp.lp);
         if root.status != SolveStatus::Optimal {
             continue;
@@ -694,10 +666,11 @@ fn cut_validity_fuzz_lcg() {
             }
             let ax = out.lp.a.mat_vec_mul(x).unwrap();
             for i in m_old..m_new {
+                // Le cut: −g·x ≤ −rhs. Valid for x when ax[i] ≤ b[i] + ε.
                 assert!(
-                    ax[i] >= out.lp.b[i] - 1e-6,
+                    ax[i] <= out.lp.b[i] + 1e-6,
                     "fuzz INVALID CUT — a=[{a00},{a01}] rhs={actual_rhs} ct={ct:?} \
-                     int-pt {x:?} violates cut row {i}: lhs={} < rhs={}",
+                     int-pt {x:?} violates Le cut row {i}: −g·x={} > −rhs={}",
                     ax[i],
                     out.lp.b[i]
                 );
@@ -735,7 +708,6 @@ fn dense_basis_inverse(dense_a: &[Vec<f64>], basis: &[usize]) -> Vec<Vec<f64>> {
         row[m + r] = 1.0;
     }
     for c in 0..m {
-        // Partial pivot.
         let mut piv = c;
         for r in (c + 1)..m {
             if aug[r][c].abs() > aug[piv][c].abs() {
@@ -758,4 +730,77 @@ fn dense_basis_inverse(dense_a: &[Vec<f64>], basis: &[usize]) -> Vec<Vec<f64>> {
         }
     }
     aug.iter().map(|row| row[m..].to_vec()).collect()
+}
+
+/// **MIR coefficient:** for integer variables MIR == GMI; for continuous variables
+/// MIR clips negative tableau entries to 0 while GMI maps them to `−α/(1−f₀)`.
+#[test]
+fn mir_coeff_continuous_clips_negative() {
+    let f0 = 0.4_f64;
+    let omf0 = 0.6_f64;
+    let pos = 0.3_f64;
+    assert!((mir_coeff(pos, f0, omf0, false) - pos / f0).abs() < 1e-12);
+    assert!((gmi_coeff(pos, f0, omf0, false) - pos / f0).abs() < 1e-12);
+    let neg = -0.2_f64;
+    assert_eq!(mir_coeff(neg, f0, omf0, false), 0.0);
+    assert!((gmi_coeff(neg, f0, omf0, false) - (-neg) / omf0).abs() < 1e-12);
+    for &alpha in &[-1.7_f64, -0.3, 0.0, 0.3, 1.2, 2.7] {
+        let g = gmi_coeff(alpha, f0, omf0, true);
+        let m = mir_coeff(alpha, f0, omf0, true);
+        assert!(
+            (m - g).abs() < 1e-12,
+            "integer case must be identical: alpha={alpha} gmi={g} mir={m}"
+        );
+    }
+}
+
+/// **MIR cuts generated:** two-round run (GMI round 0, MIR round 1) must still
+/// produce cuts for every standard test problem with a fractional LP optimum.
+#[test]
+fn mir_cuts_generated_after_two_rounds() {
+    for (name, milp) in all_problems() {
+        let out = add_root_cuts(&milp, &SolverOptions::default(), &cuts_cfg(2));
+        let m_old = milp.lp.num_constraints;
+        let m_new = out.lp.num_constraints;
+        assert!(
+            m_new > m_old,
+            "{name}: GMI+MIR (2 rounds) must generate at least one cut"
+        );
+    }
+}
+
+/// **Multi-Ge optimality invariance:** `solve_milp` with cuts=true must reach
+/// the correct integer optimum on a problem with multiple Ge constraints.
+///
+/// Regression guard for the presolve-mismatch bug: `solve_validate` previously
+/// ran with presolve=true while B&B nodes used presolve=false. Cuts that passed
+/// validate but were numerically unstable without presolve corrupted B&B
+/// incumbents (obj ≈ 1e12 on mas76). Fix: cuts are appended as Le rows
+/// (numerically stable without presolve) and `solve_validate` uses presolve=false.
+#[test]
+fn cuts_preserve_optimum_multi_ge() {
+    use crate::solve_milp;
+    // min x+y  s.t. 2x+2y>=3 (Ge), x+3y>=4 (Ge),  x,y∈[0,3] integer.
+    // LP opt: x=0, y=1.5 (fractional). Integer opt: obj=2 at (1,1) or (0,2).
+    let l = lp(
+        vec![1.0, 1.0],
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 1],
+        &[2.0, 2.0, 1.0, 3.0],
+        2,
+        vec![3.0, 4.0],
+        vec![ConstraintType::Ge, ConstraintType::Ge],
+        vec![(0.0, 3.0), (0.0, 3.0)],
+    );
+    let milp = MilpProblem::new(l, vec![0, 1]).unwrap();
+    let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+    let on = solve_milp(&milp, &opts, &cuts_cfg(3));
+    assert_eq!(on.status, SolveStatus::Optimal);
+    let bf = brute_force_min(&milp).expect("feasible");
+    assert!(
+        (on.objective - bf).abs() < 1e-6,
+        "cuts+multi-Ge corrupted incumbent: got {} expected {}",
+        on.objective,
+        bf
+    );
 }

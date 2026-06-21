@@ -4,6 +4,7 @@ use super::bounds::step5_bounds_tightening;
 use super::doubleton::step6_doubleton_equation;
 use super::empty_redundant::{step3a_empty_row, step3b_empty_column, step4_redundant_constraint};
 use super::fixed::step1_fixed_variable;
+use super::forcing::step2b_forcing_row;
 use super::free::{step7_free_var_substitution, step8_free_singleton_col};
 use super::singleton::step2_singleton_row;
 use super::state::{PresolveFlags, PresolveResult, PresolveState, PresolveStatus};
@@ -51,6 +52,11 @@ pub fn run_presolve_with_flags(
             return Ok(PresolveResult::no_reduction(problem));
         }
         step2_singleton_row(&mut st, deadline)?;
+
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(PresolveResult::no_reduction(problem));
+        }
+        step2b_forcing_row(&mut st, deadline)?;
 
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Ok(PresolveResult::no_reduction(problem));
