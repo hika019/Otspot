@@ -23,7 +23,7 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use super::deadline_expired;
+use crate::linalg::timeout::deadline_reached;
 
 /// Lex 摂動 (bland_mode 起動時): reduced_costs (non-basic) と x_b に
 /// `eps·(1+i/n)·scale` を加算し ratio test の tie を解消、Bland's rule の有限終了
@@ -187,14 +187,14 @@ fn compute_reduced_costs_timed(
     basis: &[usize],
     deadline: Option<std::time::Instant>,
 ) -> Option<Vec<f64>> {
-    if deadline_expired(deadline) {
+    if deadline_reached(deadline) {
         return None;
     }
     let y = compute_dual_vars(c, basis_mgr, basis, m);
     let mut reduced_costs = vec![0.0f64; n_price];
     let mut j = 0;
     while j < n_price {
-        if deadline_expired(deadline) {
+        if deadline_reached(deadline) {
             return None;
         }
         #[cfg(test)]
@@ -342,7 +342,7 @@ pub(crate) fn dual_simplex_core_advanced(
     loop {
         *iter_count_out = iter_count_out.saturating_add(1);
         // 3a: タイムアウト/キャンセルチェック
-        let timed_out = deadline_expired(options.deadline);
+        let timed_out = deadline_reached(options.deadline);
         let cancelled = options
             .cancel_flag
             .as_ref()
@@ -408,7 +408,7 @@ pub(crate) fn dual_simplex_core_advanced(
 
         // 3d: PRICE: trow[j] = ρ^T a_j（非基底列のみ）
         for j in 0..n_price {
-            if deadline_expired(options.deadline) {
+            if deadline_reached(options.deadline) {
                 let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }
@@ -639,7 +639,7 @@ pub(crate) fn dual_simplex_core_advanced(
         // r_j_new = r_j - θ * trow[j]（非基底変数全て）
         let leaving_col = basis[leaving_row];
         for j in 0..n_price {
-            if deadline_expired(options.deadline) {
+            if deadline_reached(options.deadline) {
                 let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }

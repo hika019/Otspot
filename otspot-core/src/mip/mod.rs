@@ -16,6 +16,7 @@ pub(crate) mod queue;
 
 pub use problem::{MilpProblem, MipProblemError, MiqpProblem};
 
+use crate::linalg::timeout::deadline_reached;
 use crate::options::{MipBranching, MipConfig, SolverOptions};
 use crate::problem::certificate::BoundGapCertificate;
 use crate::problem::{ConstraintType, SolveStatus, SolverResult};
@@ -461,7 +462,7 @@ fn solve_mip_core<R: Relaxation>(
     let root_bounds = problem.root_bounds().to_vec();
 
     while let Some(mut node) = q.pop() {
-        if deadline_hit(&deadline) {
+        if deadline_reached(deadline) {
             open_lb = open_lb.min(node.lower_bound);
             had_open = true;
             deadline_stop = true;
@@ -710,7 +711,7 @@ fn solve_mip_core<R: Relaxation>(
                 // Run strong branching for unreliable candidates.
                 let sb_cands =
                     strong_branch_candidates(&res.solution, &mask, &integer_vars, cfg.integer_feas_tol, &pc);
-                let strong_scores = if !sb_cands.is_empty() && !deadline_hit(&deadline) {
+                let strong_scores = if !sb_cands.is_empty() && !deadline_reached(deadline) {
                     measure_strong_branch_scores(
                         problem,
                         &node.var_bounds,
@@ -889,10 +890,6 @@ fn nonconvex_result() -> SolverResult {
         solution: vec![],
         ..Default::default()
     }
-}
-
-fn deadline_hit(deadline: &Option<Instant>) -> bool {
-    deadline.is_some_and(|d| Instant::now() >= d)
 }
 
 /// Round the integer components of `sol` to exact integers (relaxation noise removal).

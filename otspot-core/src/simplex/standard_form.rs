@@ -12,7 +12,7 @@
 //! `StandardForm` (UB-row-expanded) so existing solver paths can run on
 //! it unchanged — this is the equivalence the sentinel locks in.
 
-use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use crate::problem::{ConstraintType, LpProblem, SolverResult};
 use crate::sparse::CscMatrix;
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 
@@ -66,8 +66,7 @@ pub(crate) fn timeout_result_with_incumbent(
     let solution = extract_solution(sf, basis, x_b, col_scale);
     // `extract_solution` already un-shifts to original variables, so `c·solution`
     // IS the complete original objective. Adding `sf.obj_offset` (= Σ c_j·lb_j)
-    // would double-count the shift constant (same defect the Big-M Optimal path
-    // was fixed for) — wrong for any shifted LP (obj_offset ≠ 0).
+    // would double-count the shift constant.
     let objective = problem
         .c
         .iter()
@@ -75,15 +74,10 @@ pub(crate) fn timeout_result_with_incumbent(
         .map(|(&ci, &xi)| ci * xi)
         .sum::<f64>();
     SolverResult {
-        status: SolveStatus::Timeout,
         objective,
         solution,
-        dual_solution: vec![],
-        reduced_costs: vec![],
-        slack: vec![],
-        warm_start_basis: None,
         iterations: iter,
-        ..Default::default()
+        ..SolverResult::timeout()
     }
 }
 

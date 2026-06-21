@@ -35,3 +35,9 @@ impl TimeoutCtx {
         self.cancel.load(Ordering::Relaxed) || self.deadline.is_some_and(|d| Instant::now() >= d)
     }
 }
+
+/// Returns `true` if `deadline` is set and the current time has passed it.
+#[inline]
+pub(crate) fn deadline_reached(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|d| Instant::now() >= d)
+}

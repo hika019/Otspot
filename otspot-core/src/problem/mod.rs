@@ -256,6 +256,17 @@ impl Default for SolverResult {
     }
 }
 
+impl SolverResult {
+    /// Creates a bare-minimum Timeout result (no solution, objective = ∞).
+    pub(crate) fn timeout() -> Self {
+        Self {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            ..Self::default()
+        }
+    }
+}
+
 impl fmt::Display for SolverResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Status: {}, Objective: {}", self.status, self.objective)

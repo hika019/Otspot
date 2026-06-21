@@ -46,7 +46,7 @@
 //! fall back to legacy `core.rs`. The cold-start path used by production
 //! wiring enters with `x_B = b ≥ 0` so this branch is never triggered there.
 
-use super::deadline_expired;
+use crate::linalg::timeout::deadline_reached;
 use crate::basis::{BasisManager, LuBasis};
 use crate::error::SolverError;
 use crate::options::SolverOptions;
@@ -313,7 +313,7 @@ fn compute_reduced_costs_into_timed(
     rc_out: &mut [f64],
     deadline: Option<Instant>,
 ) -> bool {
-    if deadline_expired(deadline) {
+    if deadline_reached(deadline) {
         return false;
     }
     compute_dual_vars_into(c, basis_mgr, basis, y_buf);
@@ -339,7 +339,7 @@ fn compute_reduced_costs_window(
     let mut j = start;
     while j < end {
         // Check deadline once per chunk, not per column.
-        if deadline_expired(deadline) {
+        if deadline_reached(deadline) {
             return false;
         }
         #[cfg(test)]
@@ -614,7 +614,7 @@ pub(crate) fn iterate(
         };
 
     // Early-exit before O(m²) γ init; prevents budget overrun on large warm-start solves.
-    if deadline_expired(options.deadline)
+    if deadline_reached(options.deadline)
         || options
             .cancel_flag
             .as_ref()
@@ -693,7 +693,7 @@ pub(crate) fn iterate(
 
     loop {
         state.iterations = state.iterations.saturating_add(1);
-        let timed_out = deadline_expired(options.deadline);
+        let timed_out = deadline_reached(options.deadline);
         let cancelled = options
             .cancel_flag
             .as_ref()
@@ -725,7 +725,7 @@ pub(crate) fn iterate(
         // ub-violation scan (separate from lb-violation leaving selection).
         let mut ub_violation_row: Option<usize> = None;
         for i in 0..m {
-            if deadline_expired(options.deadline) {
+            if deadline_reached(options.deadline) {
                 let obj = bounded_obj(
                     c,
                     &state.basis,
@@ -778,7 +778,7 @@ pub(crate) fn iterate(
 
         // PRICE trow[j] = ρ^T a_j on non-basic columns.
         for j in 0..n_total {
-            if deadline_expired(options.deadline) {
+            if deadline_reached(options.deadline) {
                 let obj = bounded_obj(
                     c,
                     &state.basis,
@@ -803,7 +803,7 @@ pub(crate) fn iterate(
 
         // Refresh `col_bounds.at_upper` (uppers themselves never change).
         for j in 0..n_total {
-            if deadline_expired(options.deadline) {
+            if deadline_reached(options.deadline) {
                 let obj = bounded_obj(
                     c,
                     &state.basis,
@@ -930,7 +930,7 @@ pub(crate) fn iterate(
         // The leaving column σ becomes non-basic with r_σ = −θ.
         let leaving_col = state.basis[r];
         for j in 0..n_total {
-            if deadline_expired(options.deadline) {
+            if deadline_reached(options.deadline) {
                 let obj = bounded_obj(
                     c,
                     &state.basis,
@@ -1568,7 +1568,7 @@ pub(crate) fn phase2_primal_bounded(
             ubs,
         ))
     };
-    if deadline_expired(options.deadline) {
+    if deadline_reached(options.deadline) {
         return (timeout_obj(&state), state);
     }
 
@@ -1586,7 +1586,7 @@ pub(crate) fn phase2_primal_bounded(
 
     loop {
         *iters = iters.saturating_add(1);
-        if deadline_expired(options.deadline) {
+        if deadline_reached(options.deadline) {
             return (
                 SimplexOutcome::Timeout(bounded_obj(
                     c,
@@ -1613,7 +1613,7 @@ pub(crate) fn phase2_primal_bounded(
         }
 
         // Dual vars (reused across partial-pricing windows of this basis).
-        if deadline_expired(options.deadline) {
+        if deadline_reached(options.deadline) {
             return (timeout_obj(&state), state);
         }
         compute_dual_vars_into(c, &mut basis_mgr, &state.basis, &mut y);
@@ -1667,7 +1667,7 @@ pub(crate) fn phase2_primal_bounded(
 
         ftran_column(a, &mut basis_mgr, q, m, &mut alpha);
 
-        if deadline_expired(options.deadline) {
+        if deadline_reached(options.deadline) {
             return (
                 SimplexOutcome::Timeout(bounded_obj(
                     c,
@@ -1891,7 +1891,7 @@ fn primal_simplex_aug(
             ubs_aug,
         ))
     };
-    if deadline_expired(options.deadline) {
+    if deadline_reached(options.deadline) {
         return timeout_obj(state);
     }
 
@@ -1922,7 +1922,7 @@ fn primal_simplex_aug(
 
     loop {
         *iters = iters.saturating_add(1);
-        if deadline_expired(options.deadline)
+        if deadline_reached(options.deadline)
             || options
                 .cancel_flag
                 .as_ref()
@@ -1944,7 +1944,7 @@ fn primal_simplex_aug(
         }
 
         // Dual vars (reused across partial-pricing windows of this basis).
-        if deadline_expired(options.deadline) {
+        if deadline_reached(options.deadline) {
             return timeout_obj(state);
         }
         compute_dual_vars_into(c_aug, &mut basis_mgr, &state.basis, &mut y);

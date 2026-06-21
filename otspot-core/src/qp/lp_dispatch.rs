@@ -33,14 +33,10 @@ thread_local! {
 const REDUCED_TIMEOUT_QP_INJECT_ITERS: usize = 6271;
 
 fn timeout_result_lp_dispatch() -> SolverResult {
-    let mut timeout = SolverResult {
-        status: SolveStatus::Timeout,
-        objective: f64::INFINITY,
-        ..Default::default()
-    };
-    timeout.stats.route = SolveRoute::LpForwardedFromQp;
-    timeout.stats.deadline_triggered = true;
-    timeout
+    let mut r = SolverResult::timeout();
+    r.stats.route = SolveRoute::LpForwardedFromQp;
+    r.stats.deadline_triggered = true;
+    r
 }
 
 pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {

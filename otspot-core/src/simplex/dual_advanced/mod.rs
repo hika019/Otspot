@@ -9,6 +9,7 @@ use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving};
 use super::{build_bounded_standard_form_with_deadline, scale_upper_bounds, BoundedStandardForm};
 use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
+use crate::linalg::timeout::deadline_reached;
 use crate::options::{DualPricing, SolverOptions, WarmStartBasis};
 use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
@@ -70,10 +71,6 @@ pub(crate) fn fallback_profile_delta(
             .saturating_sub(before.phase1_bound_violation),
         crash_infeasible: after.crash_infeasible.saturating_sub(before.crash_infeasible),
     }
-}
-
-fn deadline_expired(deadline: Option<std::time::Instant>) -> bool {
-    deadline.is_some_and(|d| std::time::Instant::now() >= d)
 }
 
 /// Applies deterministic per-row upward jitter to `x_B` with magnitude `mag`.
@@ -147,14 +144,6 @@ fn maybe_perturb_initial_xb(x_b: &mut [f64]) {
     });
     let Some(mag) = mag else { return };
     perturb_x_b_with_mag(x_b, mag);
-}
-
-fn timeout_result() -> SolverResult {
-    SolverResult {
-        status: SolveStatus::Timeout,
-        objective: f64::INFINITY,
-        ..Default::default()
-    }
 }
 
 fn bounded_obj_from_state(c: &[f64], ubs: &[f64], state: &BoundedDualState) -> f64 {
@@ -278,8 +267,8 @@ pub(crate) fn solve_dual_advanced(
     problem: &LpProblem,
     options: &SolverOptions,
 ) -> SolverResult {
-    if deadline_expired(options.deadline) {
-        return timeout_result();
+    if deadline_reached(options.deadline) {
+        return SolverResult::timeout();
     }
     // Bounded path: problems with finite upper bounds use BFRT-aware iteration.
     // Two sub-paths gated on the BSF shape:
@@ -294,7 +283,7 @@ pub(crate) fn solve_dual_advanced(
     // `guard_lp_optimal` at the entry, so opening Ge cannot return a wrong answer.
     if !bounded_dispatch_disabled() && problem.bounds.iter().any(|&(_, ub)| ub.is_finite()) {
         let Some(bsf) = build_bounded_standard_form_with_deadline(problem, options.deadline) else {
-            return timeout_result();
+            return SolverResult::timeout();
         };
         if bsf.num_artificial == 0 {
             if let Some(result) = try_bounded(&bsf, problem, options) {
@@ -311,7 +300,7 @@ pub(crate) fn solve_dual_advanced(
     let Some((a, b, c, row_scale, col_scale)) =
         LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
     else {
-        return timeout_result();
+        return SolverResult::timeout();
     };
 
     if let Some(warm) = &options.warm_start {
@@ -459,13 +448,13 @@ fn try_bounded(
     problem: &LpProblem,
     options: &SolverOptions,
 ) -> Option<SolverResult> {
-    if deadline_expired(options.deadline) {
-        return Some(timeout_result());
+    if deadline_reached(options.deadline) {
+        return Some(SolverResult::timeout());
     }
     let Some((a, b, c, row_scale, col_scale)) =
         LpEquilibration::scale_with_deadline(&bsf.a, &bsf.b, &bsf.c, options.deadline)
     else {
-        return Some(timeout_result());
+        return Some(SolverResult::timeout());
     };
     let ubs = scale_upper_bounds(&bsf.upper_bounds, &col_scale);
     // total_iters is always assigned before read (warm branch overwrites before
@@ -658,13 +647,13 @@ fn try_bounded_phase1_eq(
     problem: &LpProblem,
     options: &SolverOptions,
 ) -> Option<SolverResult> {
-    if deadline_expired(options.deadline) {
-        return Some(timeout_result());
+    if deadline_reached(options.deadline) {
+        return Some(SolverResult::timeout());
     }
     let Some((a, b, c, row_scale, col_scale)) =
         LpEquilibration::scale_with_deadline(&bsf.a, &bsf.b, &bsf.c, options.deadline)
     else {
-        return Some(timeout_result());
+        return Some(SolverResult::timeout());
     };
     let ubs = scale_upper_bounds(&bsf.upper_bounds, &col_scale);
 
