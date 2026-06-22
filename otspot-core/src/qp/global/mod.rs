@@ -16,6 +16,7 @@ pub(crate) mod node;
 pub(crate) mod pruning;
 pub(crate) mod tree;
 
+use crate::linalg::timeout::deadline_reached;
 use crate::options::{GlobalOptimizationConfig, QpWarmStart, SolverOptions};
 use crate::problem::certificate::BoundGapCertificate;
 use crate::problem::{SolveStatus, SolverResult};
@@ -192,7 +193,7 @@ pub fn solve_qp_global_with_stats(
     let mut depth_discard_lb: f64 = f64::INFINITY;
 
     while let Some(node) = tree.pop() {
-        if deadline_hit(&deadline) {
+        if deadline_reached(deadline) {
             break;
         }
         if stats.nodes_processed >= cfg.max_nodes {
@@ -265,7 +266,7 @@ pub fn solve_qp_global_with_stats(
     // - それ以外 → 未証明 (incumbent あれば LocallyOptimal)
     let halted_early = !tree.is_empty()
         || max_depth_breached
-        || deadline_hit(&deadline)
+        || deadline_reached(deadline)
         || stats.nodes_processed >= cfg.max_nodes;
 
     let result = if halted_early {
@@ -304,10 +305,6 @@ pub fn solve_qp_global_with_stats(
 /// = caller 視点では nonconvex 確実、と扱う (Gershgorin は十分条件、必要ではない)。
 fn is_q_indefinite(problem: &QpProblem) -> bool {
     gershgorin_alpha(&problem.q) > 0.0
-}
-
-fn deadline_hit(deadline: &Option<Instant>) -> bool {
-    deadline.is_some_and(|d| Instant::now() >= d)
 }
 
 /// 当該 box に対する lower bound。
