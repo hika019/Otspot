@@ -876,3 +876,59 @@ fn cuts_preserve_optimum_multi_ge() {
         bf
     );
 }
+
+/// **Le re-validation — happy path:** the Le LP returned by `add_root_cuts` must
+/// solve Optimally without presolve (same conditions B&B uses). This verifies
+/// the Le re-validation gate added after `convert_cuts_to_le` runs and passes.
+#[test]
+fn le_revalidation_lp_is_optimal_no_presolve() {
+    for (name, milp) in all_problems() {
+        let out = add_root_cuts(&milp, &SolverOptions::default(), &cuts_cfg(3));
+        if out.lp.num_constraints == milp.lp.num_constraints {
+            continue; // no cuts generated for this problem
+        }
+        // Solve the Le LP without presolve — the conditions B&B uses.
+        let check = solve_cut_lp(&out.lp, &SolverOptions::default(), None);
+        assert_eq!(
+            check.status,
+            SolveStatus::Optimal,
+            "{name}: Le cut LP must be Optimal without presolve (Le re-validation passed)"
+        );
+    }
+}
+
+/// **Le re-validation — fallback detection:** a manually-constructed Le LP whose
+/// cut rows are infeasible must not validate as Optimal.  This is the condition
+/// `add_root_cuts` guards against via the Le re-validation fallback.
+///
+/// Ge cut `0·x >= 1` is infeasible; after `convert_cuts_to_le` it becomes
+/// `0·x <= −1`, which is also infeasible.  `solve_validate` must return
+/// non-Optimal, confirming the gate would trigger the fallback.
+#[test]
+fn le_revalidation_detects_infeasible_le_cut() {
+    let milp = p_box_le();
+    let m_orig = milp.lp.num_constraints;
+
+    // Build a committed LP with an all-zero-coefficient Ge row (rhs=1.0).
+    // This is infeasible in both Ge and Le form; after conversion the Le row
+    // is `0·x <= −1`, which solve_validate must reject.
+    let infeasible_cut = CutRow { coeffs: vec![0.0, 0.0], rhs: 1.0 };
+    let committed_bad = append_ge_rows(&milp.lp, &[infeasible_cut]);
+    let le_bad = convert_cuts_to_le(committed_bad, m_orig);
+
+    let check = solve_validate(&le_bad, &SolverOptions::default(), None);
+    assert_ne!(
+        check.status,
+        SolveStatus::Optimal,
+        "infeasible Le cut LP (0·x <= -1) must not validate as Optimal — \
+         this is the condition the add_root_cuts fallback guards against"
+    );
+
+    // Confirm the original LP (fallback target) is still solvable.
+    let orig_check = solve_validate(&milp.lp, &SolverOptions::default(), None);
+    assert_eq!(
+        orig_check.status,
+        SolveStatus::Optimal,
+        "original LP must remain Optimal (fallback is meaningful)"
+    );
+}

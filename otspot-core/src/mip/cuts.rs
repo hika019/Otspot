@@ -149,8 +149,19 @@ pub(crate) fn add_root_cuts(
     // passed to B&B changes representation.
     let lp = convert_cuts_to_le(committed, m_orig);
 
+    // Re-validate the Le form: negated rows (slacks vs. surplus) have different
+    // numerical properties under presolve=false. If the Le LP does not solve
+    // Optimally, fall back to the original cut-free LP so B&B is never handed
+    // an unsolvable root.
+    let le_check = solve_validate(&lp, options, cut_deadline);
+    let final_lp = if le_check.status == SolveStatus::Optimal {
+        lp
+    } else {
+        milp.lp.clone()
+    };
+
     MilpProblem {
-        lp,
+        lp: final_lp,
         integer_vars: milp.integer_vars.clone(),
     }
 }
