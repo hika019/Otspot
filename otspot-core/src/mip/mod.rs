@@ -784,7 +784,7 @@ fn pick_branch_var<R: Relaxation>(
     if use_reliability {
         let sb_cands =
             strong_branch_candidates(sol, mask, integer_vars, cfg.integer_feas_tol, pc);
-        let strong_scores = if !sb_cands.is_empty() && !deadline_reached(deadline) {
+        let strong_scores = if !sb_cands.is_empty() && !deadline_reached(*deadline) {
             measure_strong_branch_scores(
                 problem, node_bounds, sol, obj, &sb_cands, j_to_k, shared, pc,
             )
