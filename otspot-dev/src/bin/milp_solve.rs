@@ -77,13 +77,11 @@ fn main() -> ExitCode {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(timeout_secs);
     opts.tolerance = Some(Tolerance::Custom(eps));
-    let cfg = MipConfig {
-        gap_tol: eps,
-        integer_feas_tol: eps,
-        cuts,
-        max_cut_rounds: cut_rounds,
-        ..Default::default()
-    };
+    let mut cfg = MipConfig::default();
+    cfg.gap_tol = eps;
+    cfg.integer_feas_tol = eps;
+    cfg.cuts = cuts;
+    cfg.max_cut_rounds = cut_rounds;
 
     let profile = otspot_core::diag::lp_scale_profile_enabled();
     if profile {

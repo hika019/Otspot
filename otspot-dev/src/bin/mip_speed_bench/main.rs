@@ -264,11 +264,9 @@ fn main() {
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(timeout_secs);
-    let cfg = MipConfig {
-        gap_tol: 1e-6,
-        branching: MipBranching::MostFractional,
-        ..Default::default()
-    };
+    let mut cfg = MipConfig::default();
+    cfg.gap_tol = 1e-6;
+    cfg.branching = MipBranching::MostFractional;
 
     // Knapsack is single-constraint → density-independent (one run per
     // (n, int_ratio, seed)); assignment and MIQP run per density. Every CSV

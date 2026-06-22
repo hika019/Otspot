@@ -270,6 +270,7 @@ pub const DEFAULT_MAX_CUT_ROUNDS: usize = 5;
 /// - `integer_feas_tol > 0`
 /// - `max_nodes >= 1`, `max_depth >= 1`
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MipConfig {
     pub gap_tol: f64,
     pub integer_feas_tol: f64,
