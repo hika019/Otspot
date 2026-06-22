@@ -158,10 +158,9 @@ pub fn apply_bench_status_promotion(
         BenchPromotionPolicy::BenchQplib => result.objective.is_finite(),
     };
     if eligible_status && has_full_solution && obj_ok {
-        SolverResult {
-            status: SolveStatus::Optimal,
-            ..result
-        }
+        let mut promoted = result;
+        promoted.status = SolveStatus::Optimal;
+        promoted
     } else {
         result
     }

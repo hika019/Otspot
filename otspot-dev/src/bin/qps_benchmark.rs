@@ -362,23 +362,21 @@ mod tests {
 
     #[test]
     fn test_phase_timing_note_includes_lp_and_ipm_fields() {
-        let result = SolverResult {
-            timing_breakdown: Some(TimingBreakdown {
-                presolve_us: 1_000,
-                solve_us: 2_000,
-                postsolve_us: 3_000,
-                ipm_factorize_us: 4_000,
-                ipm_solve_us: 5_000,
-                ipm_reg_retries: 2,
-                ipm_used_iterative: true,
-                postsolve_map_us: 6_000,
-                postsolve_lsq_us: 7_000,
-                postsolve_recovery_us: 8_000,
-                postsolve_refine_us: 9_000,
-                postsolve_krylov_ir_us: 10_000,
-            }),
-            ..Default::default()
-        };
+        let mut td = TimingBreakdown::default();
+        td.presolve_us = 1_000;
+        td.solve_us = 2_000;
+        td.postsolve_us = 3_000;
+        td.ipm_factorize_us = 4_000;
+        td.ipm_solve_us = 5_000;
+        td.ipm_reg_retries = 2;
+        td.ipm_used_iterative = true;
+        td.postsolve_map_us = 6_000;
+        td.postsolve_lsq_us = 7_000;
+        td.postsolve_recovery_us = 8_000;
+        td.postsolve_refine_us = 9_000;
+        td.postsolve_krylov_ir_us = 10_000;
+        let mut result = SolverResult::default();
+        result.timing_breakdown = Some(td);
 
         let note = phase_timing_note(&result);
 

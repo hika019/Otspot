@@ -2,6 +2,7 @@
 //! は内部ファクトリ経由でのみ生成され、保持自体が proof token になる。
 
 /// KKT optimality certificate — minted only by [`crate::qp::certificate::prove_optimal`].
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct OptimalCertificate {
     stationarity_rel: f64,
@@ -55,6 +56,7 @@ impl OptimalCertificate {
 }
 
 /// Reason why `prove_optimal` failed: observed residuals + failing condition names.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct NotProven {
     pub stationarity_rel: f64,
@@ -70,6 +72,7 @@ pub struct NotProven {
 /// B&B gap certificate — minted by the B&B driver when no region was abandoned
 /// (`proof_uncertain == false`) and `gap_rel ≤ gap_tol`. External code cannot
 /// construct it.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct BoundGapCertificate {
     incumbent_obj: f64,

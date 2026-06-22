@@ -223,11 +223,7 @@ fn diagnose(name: &str) {
     };
     let mut opts_ws = SolverOptions::default();
     opts_ws.timeout_secs = Some(60.0);
-    opts_ws.warm_start_qp = Some(QpWarmStart {
-        x: x_ref.clone(),
-        y: y_ws,
-        mu: mu_ws,
-    });
+    opts_ws.warm_start_qp = Some(QpWarmStart::new(x_ref.clone(), y_ws, mu_ws));
     let res_ws = solve_qp_with(&prob, &opts_ws);
     let obj_ws = obj_internal(&prob, &res_ws.solution);
 

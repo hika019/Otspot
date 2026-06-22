@@ -19,6 +19,7 @@ use std::time::Instant;
 ///
 /// Produced by [`IpmOptions::validate`] and [`SolverOptions::validate`], and
 /// by builder methods (`with_*`) that validate on assignment.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct OptionsError {
     /// Name of the offending field (e.g. `"ipm.eps"`).
@@ -95,11 +96,19 @@ pub struct WarmStartBasis {
 ///
 /// Interior corrections (μ floor / x bound margin / y positivity) are applied
 /// on entry so boundary or zero values are safe to pass.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct QpWarmStart {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
     pub mu: f64,
+}
+
+impl QpWarmStart {
+    /// Construct a QP warm-start point from primal, dual, and barrier parameter.
+    pub fn new(x: Vec<f64>, y: Vec<f64>, mu: f64) -> Self {
+        Self { x, y, mu }
+    }
 }
 
 /// Extended LP warm-start.
@@ -112,6 +121,7 @@ pub struct QpWarmStart {
 ///   Size mismatch: logged and dropped (not silently ignored).
 /// - `x_orig`: length = problem.num_vars (original variable space)
 /// - `y_orig`: length = problem.num_constraints (original constraint space, user sign)
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct LpWarmStart {
     pub basis: Vec<usize>,
@@ -506,6 +516,7 @@ pub const DEFAULT_CLAMP_TOL: f64 = 1e-14;
 /// ## Solver-specific parameters
 ///
 /// Use the [`SolverOptions::ipm`] sub-struct for IPM-specific settings.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct SolverOptions {
     // --- Common ---

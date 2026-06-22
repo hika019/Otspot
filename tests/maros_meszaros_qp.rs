@@ -160,11 +160,7 @@ fn test_hs51() {
 
     // Phase I LP は全自由変数（-INF/INF）で未界を誤検知する場合がある。
     // 既知の実行可能点 x*=[1,...,1] を warm-start として Phase I をバイパスする。
-    let ws = QpWarmStart {
-        x: vec![1.0; n],
-        y: vec![0.0; 6],
-        mu: 1.0,
-    };
+    let ws = QpWarmStart::new(vec![1.0; n], vec![0.0; 6], 1.0);
     let mut opts: otspot::SolverOptions = Default::default();
     opts.warm_start_qp = Some(ws);
     let result = solve_qp_with(&problem, &opts);
