@@ -10,8 +10,9 @@
 //!   2. For each fractional integer basic, form the tableau row and emit a cut.
 //!   3. Back-substitute to original variables (`G·x >= rhs`).
 //!
-//! GMI vs MIR: differ only in the coefficient for continuous nonbasics with a
-//! negative tableau entry α — GMI uses `−α / (1 − f₀)`, MIR drops the term.
+//! GMI and MIR produce equivalent cut coefficients for individual tableau rows.
+//! Alternating rounds use the same formula but operate on different LPs (each
+//! round appends the previous cuts), generating complementary tightenings.
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::linalg::timeout::deadline_reached;
@@ -353,22 +354,14 @@ fn gmi_coeff(alpha: f64, f0: f64, one_minus_f0: f64, integral: bool) -> f64 {
     }
 }
 
-/// MIR coefficient (always >= 0). Identical to GMI for integer variables; for
-/// continuous variables negative tableau entries contribute 0 (vs. GMI's
-/// `−α / (1 − f₀)`), producing a weaker but complementary cut.
+/// MIR coefficient (always >= 0). Identical to GMI for all cases.
+///
+/// MIR and GMI produce the same cut coefficients for individual tableau rows.
+/// For continuous nonbasics with `alpha < 0`, the coefficient is `-alpha/(1-f₀)` —
+/// dropping this term (setting it to 0) can exclude integer-feasible solutions
+/// where the continuous variable takes a value above its lower bound.
 fn mir_coeff(alpha: f64, f0: f64, one_minus_f0: f64, integral: bool) -> f64 {
-    if integral {
-        let f = (alpha - alpha.floor()).clamp(0.0, 1.0);
-        if f <= f0 {
-            f / f0
-        } else {
-            (1.0 - f) / one_minus_f0
-        }
-    } else if alpha > 0.0 {
-        alpha / f0
-    } else {
-        0.0
-    }
+    gmi_coeff(alpha, f0, one_minus_f0, integral)
 }
 
 /// Add `gamma · v_j` (where `v_j = d_j + g_j·x`) into the accumulators `g`, `d`.
