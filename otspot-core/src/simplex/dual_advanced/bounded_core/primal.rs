@@ -1,6 +1,6 @@
 //! Primal simplex phases for bounded standard form.
 
-use super::super::deadline_expired;
+use crate::linalg::timeout::deadline_reached;
 use super::extract::bounded_obj;
 use super::iterate::ftran_column;
 use super::leaving::{
@@ -103,7 +103,7 @@ pub(crate) fn phase2_primal_bounded(
             ubs,
         ))
     };
-    if deadline_expired(options.deadline) {
+    if deadline_reached(options.deadline) {
         return (timeout_obj(&state), state);
     }
 
@@ -121,7 +121,7 @@ pub(crate) fn phase2_primal_bounded(
 
     loop {
         *iters = iters.saturating_add(1);
-        if deadline_expired(options.deadline) {
+        if deadline_reached(options.deadline) {
             return (
                 SimplexOutcome::Timeout(bounded_obj(
                     c,
@@ -147,7 +147,7 @@ pub(crate) fn phase2_primal_bounded(
             t.log(*iters, obj, &state.basis, false);
         }
 
-        if deadline_expired(options.deadline) {
+        if deadline_reached(options.deadline) {
             return (timeout_obj(&state), state);
         }
         compute_dual_vars_into(c, &mut basis_mgr, &state.basis, &mut y);
@@ -196,7 +196,7 @@ pub(crate) fn phase2_primal_bounded(
 
         ftran_column(a, &mut basis_mgr, q, m, &mut alpha);
 
-        if deadline_expired(options.deadline) {
+        if deadline_reached(options.deadline) {
             return (
                 SimplexOutcome::Timeout(bounded_obj(
                     c,
@@ -331,7 +331,7 @@ pub(super) fn primal_simplex_aug(
             ubs_aug,
         ))
     };
-    if deadline_expired(options.deadline) {
+    if deadline_reached(options.deadline) {
         return timeout_obj(state);
     }
 
@@ -356,7 +356,7 @@ pub(super) fn primal_simplex_aug(
 
     loop {
         *iters = iters.saturating_add(1);
-        if deadline_expired(options.deadline)
+        if deadline_reached(options.deadline)
             || options
                 .cancel_flag
                 .as_ref()
@@ -377,7 +377,7 @@ pub(super) fn primal_simplex_aug(
             t.log(*iters, obj, &state.basis, bland_mode);
         }
 
-        if deadline_expired(options.deadline) {
+        if deadline_reached(options.deadline) {
             return timeout_obj(state);
         }
         compute_dual_vars_into(c_aug, &mut basis_mgr, &state.basis, &mut y);
