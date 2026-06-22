@@ -54,28 +54,14 @@ impl LeaveCand {
 
 /// Two-sided Harris ratio test for the bounded primal cores.
 ///
-/// `eff[i] = alpha[i] · dir` is the effective pivot column. A basic variable
-/// leaves at its lower bound when `eff[i] > floor` (decreasing toward 0) or at
-/// its upper bound when `eff[i] < -floor` with finite `ub_i` (increasing toward
-/// `ub_i`). The entering variable instead flips at its own bound `ub_q`.
+/// Pass 1: feasibility-preserving step `θ = min_i (room_i + feas_tol) / |eff_i|`
+/// (capped by `ub_q`). Pass 2: among rows with true ratio ≤ θ, pick the
+/// largest pivot `|eff_i|` (Bland tie-break). Largest-pivot selection keeps
+/// the basis well-conditioned under degeneracy.
 ///
-/// Pass 1 computes the feasibility-preserving step
-/// `θ = min_i (room_i + feas_tol) / |eff_i|` (capped by `ub_q`); pass 2 selects,
-/// among rows whose *true* ratio is within `θ`, the largest pivot `|eff_i|`,
-/// breaking ties by Bland's rule. Choosing the largest pivot — rather than the
-/// strict-min-ratio row — keeps the basis well-conditioned under degeneracy,
-/// where many rows share a zero ratio and a strict-min rule would repeatedly
-/// pick near-zero pivots until the LU factorization turns singular. This mirrors
-/// the one-sided `primal::ratio_test::select_leaving_feasibility_preserving`.
-///
-/// Phase I artificial preference: when `art_threshold = Some(t)` and the tie-band
-/// (rows with true ratio ≤ θ) contains an artificial basic variable
-/// (`basis[i] >= t`), the leaving row is taken among the artificials only. This
-/// is the standard HiGHS/GLPK Phase I min-ratio preference — on a degenerate
-/// vertex many structural rows share the tie and would otherwise leave the
-/// artificials stranded at tiny-step pivots (dfl001 slow tail). θ is unchanged,
-/// so the step stays feasibility-preserving; only the choice among equally
-/// eligible rows differs.
+/// Phase I artificial preference: when `art_threshold = Some(t)`, artificials
+/// in the tie-band are preferred as the leaving variable (standard HiGHS/GLPK
+/// Phase I rule — avoids stranding artificials on degenerate vertices).
 pub(super) fn select_leaving_bounded(
     alpha: &[f64],
     dir: f64,

@@ -8,46 +8,20 @@ use std::time::Instant;
 
 /// Deadline check interval for the RC inner loop.
 ///
-/// `Instant::now()` 実測 48ns/call。per-col 呼び出しは大規模問題で支配的:
-///
-/// - pds-80 (n=426k): 426k × 48ns ≈ 20ms/iter (RC pass 全コストを clock read が占有)
-/// - dfl001 (n=12k): 12k × 48ns ≈ 0.6ms/iter (RC コストの ~33%)
-///
-/// chunk=512 で per-RC-pass の check 数を `ceil(n/512)` に削減:
-///
-/// - pds-80: 833 checks × 48ns ≈ 0.04ms (オーバーヘッド無視可)
-///
-/// deadline 超過は最大 INTERVAL=512 列分 (~100µs @ 観測 throughput) で
-/// ソルバ全体の deadline (秒〜分単位) 内で許容範囲。
-///
-/// 実測 speedup (timeout=60s bench):
-///
-/// - pds-80   bounded-aug:  64 → 144 iter/s (2.25x)
-/// - pds-30   bounded-aug: 177 → 371 iter/s (~2.1x)
-/// - ken-18   bounded-aug: 236 → 355 iter/s (~1.5x)
-/// - dfl001   bounded-aug: 556 → 625 iter/s (1.12x)
+/// `Instant::now()` costs ~48ns/call; per-col checks dominate on large LPs.
+/// chunk=512 reduces checks to `ceil(n/512)`, making overhead negligible.
+/// Max deadline overshoot is ~512 cols (~100µs), well within solver-level
+/// deadlines. Measured 1.5–2.25× speedup on large network LPs.
 pub(super) const DEADLINE_CHECK_INTERVAL: usize = 512;
 
-/// Cyclic partial-pricing window size for the bounded primal cores
-/// (`phase2_primal_bounded` / `primal_simplex_aug`).
+/// Cyclic partial-pricing window size for bounded primal cores.
 ///
-/// Each pricing pass reduces-cost-prices at most this many non-basic columns,
-/// starting from a rotating cursor (`state.price_start`), instead of all
-/// `n_price`. The full scan is *deferred*, never skipped: optimality is only
-/// declared after a complete `n_price` sweep finds no improving column (see
-/// `partial_price_entering`). On large network LPs (pds/ken/dfl001) the
-/// per-iteration reduced-cost scan (`yᵀaⱼ` over every non-basic column)
-/// dominates wall time; windowing it cuts the per-iteration price cost while
-/// preserving the exact optimality test.
-///
-/// For `n_price ≤ PARTIAL_PRICE_CHUNK` the window covers every column, so small
-/// and medium LPs price fully (identical behaviour to the pre-partial cores).
-///
-/// Value: placeholder pending bench calibration (dfl001/ken-18 net throughput
-/// vs. the 105/109 PASS set). A fixed absolute window gives the largest
-/// relative reduction exactly where the scan dominates (large `n_price`), and
-/// keeps the entering candidate sample large enough to avoid an iteration-count
-/// blow-up. Tune against `timeout=1000, eps=1e-6` before treating as final.
+/// Each pass prices at most this many non-basic columns from a rotating cursor.
+/// Optimality requires a full `n_price` sweep with no improving column (see
+/// `partial_price_entering`). For `n_price ≤ PARTIAL_PRICE_CHUNK`, pricing is
+/// full (identical to pre-partial cores). On large network LPs the RC scan
+/// dominates wall time; windowing cuts per-iter cost while preserving the
+/// exact optimality test.
 const PARTIAL_PRICE_CHUNK: usize = 2048;
 
 /// Read `OTSPOT_PP_CHUNK` from the environment once; `None` means "not set / invalid".
@@ -235,23 +209,14 @@ pub(super) enum PartialPrice {
 
 /// Cyclic partial pricing for the bounded primal cores.
 ///
-/// Starting at `price_start`, prices the reduced costs of successive
-/// `partial_price_chunk(n_price)`-sized windows (wrapping around `n_price`),
-/// scoring each non-basic column via `score`. The first window that contains an
-/// improving column wins; among that window's columns the best score is chosen
-/// (Dantzig-within-window). `next_start` advances past the chosen window so the
-/// next pass continues from fresh territory.
+/// Prices `partial_price_chunk`-sized windows from `price_start`, wrapping
+/// around `n_price`. First window with an improving column wins (Dantzig
+/// within window). `Optimal` requires a full `n_price` sweep with no
+/// improving column — windowing defers that sweep across pivots but never
+/// short-circuits it.
 ///
-/// **False-optimal invariant (load-bearing):** `Optimal` is returned ONLY after
-/// a complete `n_price` sweep (every column priced under the *current* basis)
-/// produced no improving column. Windowing merely defers that sweep across
-/// pivots; an improving column in a not-yet-scanned window can never trigger
-/// Optimal. The `partial_price_single_window` test hook breaks exactly this rule
-/// (declares Optimal after one window) so the no-op proof can detect a
-/// regression that prices only a single window before declaring optimality.
-///
-/// `score(j, rc_j) -> Option<f64>`: `None` = column `j` is not improving;
-/// `Some(s)` = improving with score `s` (larger wins). `rc_j` is freshly priced.
+/// `score(j, rc_j) -> Option<f64>`: `None` = not improving;
+/// `Some(s)` = improving with score `s` (larger wins).
 pub(super) fn partial_price_entering<F>(
     a: &CscMatrix,
     c: &[f64],
