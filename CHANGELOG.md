@@ -6,35 +6,27 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [0.5.3] - unreleased
 
-LP presolve/postsolve 改善 + MIP 標準機能7つ統合 + GMI カットバグ修正。公開API破壊的変更なし。
+MIP B&B の標準機能一式 + LP presolve/postsolve 改善 + リファクタリング。公開API破壊的変更なし。
 
 ### 追加
 
-- MIP: pseudocost/reliability branching — 信頼性に基づく変数選択
-- MIP: hybrid node selection — best-bound + depth-first diving
-- MIP: per-node bound propagation — B&B ループ内の各ノードで制約伝播
-- MIP: presolve strengthening — multi-pass propagation + binary probing with envelope tightening
-- MIP: reduced cost fixing — incumbent 発見後の変数固定
-- MIP: RINS heuristic + conflict analysis
-- MIP: MIR (Mixed-Integer Rounding) カット生成
-- LP presolve: singleton Le/Ge 行と forcing row の2つの presolve ルールを追加
-- LP postsolve: 補助LP/crossover/LSQ dual recovery を廃止し stack replay に一本化 (コード大幅削減)
+- MIP: pseudocost branching / hybrid node selection / bound propagation / reduced cost fixing / RINS / conflict analysis / MIR cuts
+- LP: singleton Le/Ge + forcing row presolve、postsolve を stack replay に一本化
 
 ### 修正
 
-- LP postsolve: ForcingRow の LIFO replay 中に未復元変数で dual 誤判定するバグを修正 (snapshot方式に変更)
-- LP postsolve: SingletonInequalityRow の non-binding 行で complementarity 違反を修正
-- MIP: GMI カットの Ge 行が surplus 変数で数値不安定になるバグを修正 (Le 変換)
-- MIP: pseudocost の fractionality 計算を floor/ceil に修正
+- LP postsolve: ForcingRow dual 誤判定 + SingletonInequalityRow complementarity 違反
+- MIP: GMI カット Ge 行の数値不安定 (Le 変換)、pseudocost fractionality 計算
 
-### 削除
+### 内部
 
-- FT (Forrest-Tomlin) 基底更新モジュールを削除 (PFI にrevert済みの dead code)
+- deadline/timeout 重複を共通化、巨大関数 3 本を分割 (two_phase_simplex 875→115行 等)
+- bounded_core.rs (4364行) / dual_advanced/mod.rs を マイクロアーキテクチャ分割
+- FT 基底更新モジュール削除 (PFI revert 済み dead code)
 
 ### ベンチマーク
 
-- LP (Netlib): 109/109 optimal @1e-6 (v0.5.2: 108)
-- QP (Maros-Meszaros): 121/138 optimal @1e-6 (変化なし)
+- LP 109/109, QP 121/138 @1e-6, MILP 6/20 @1e-6 @1e-8 共通 (MIPLIB small, 初計測)
 
 ## [0.5.2] - 2026-06-19
 

@@ -117,7 +117,7 @@ Solve-rate benchmark on standard public sets via the `otspot-dev` `qps_benchmark
 |---|---|---:|---|---|
 | Feasible LP | Netlib | 109 | 109 optimal | 105 optimal |
 | Convex QP | Maros–Mészáros | 138 | 121 optimal | 100 optimal |
-| MILP | MIPLIB 2017 small | 20 | 6 optimal | — |
+| MILP | MIPLIB 2017 small | 20 | 6 optimal | 6 optimal |
 | Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
