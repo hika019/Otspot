@@ -2295,6 +2295,74 @@ fn rc_fixing_out_of_bounds_index_ignored() {
     assert_eq!(count, 0, "out-of-bounds index must be skipped silently");
 }
 
+/// Non-integer lower bound is rounded up to ceil(lb) before fixing.
+///
+/// If an integer variable has lb=0.5 and the LP solution is at lb (xj=0.5),
+/// fixing to 0.5 is invalid (integer variables must take integer values).
+/// The fix must use ceil(lb)=1.0.
+///
+/// Sentinel: the old code `node_bounds[j] = (lb, lb)` with lb=0.5 produces (0.5, 0.5)
+/// instead of (1.0, 1.0) → this test FAILS.
+#[test]
+fn rc_fixing_rounds_noninteger_lower_bound_to_ceil() {
+    let res = lp_result_with_rc(0.0, vec![0.5], vec![5.0]);
+    let mut bounds = vec![(0.5_f64, 3.0_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 1, "must fix the variable");
+    assert_eq!(
+        bounds[0],
+        (1.0, 1.0),
+        "must fix to ceil(lb)=1.0 not 0.5 (non-integer lb for integer var)"
+    );
+}
+
+/// Non-integer upper bound is rounded down to floor(ub) before fixing.
+///
+/// Sentinel: old `node_bounds[j] = (ub, ub)` with ub=2.5 produces (2.5, 2.5)
+/// instead of (2.0, 2.0) → this test FAILS.
+#[test]
+fn rc_fixing_rounds_noninteger_upper_bound_to_floor() {
+    let res = lp_result_with_rc(0.0, vec![2.5], vec![-5.0]);
+    let mut bounds = vec![(0.0_f64, 2.5_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 1, "must fix the variable");
+    assert_eq!(
+        bounds[0],
+        (2.0, 2.0),
+        "must fix to floor(ub)=2.0 not 2.5 (non-integer ub for integer var)"
+    );
+}
+
+/// Integer bounds (most common case) are unchanged by ceil/floor.
+///
+/// Regression guard: ceil(0.0)=0.0 and floor(1.0)=1.0, so the behavior for
+/// integer bounds is identical to the old code.
+#[test]
+fn rc_fixing_integer_bounds_unaffected_by_rounding() {
+    // lb=0, rc=5 > gap=3 → fix to ceil(0)=0.
+    let res = lp_result_with_rc(0.0, vec![0.0], vec![5.0]);
+    let mut bounds = vec![(0.0_f64, 1.0_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 1);
+    assert_eq!(bounds[0], (0.0, 0.0), "integer lb=0 unchanged by ceil");
+    // ub=1, -rc=5 > gap=3 → fix to floor(1)=1.
+    let res2 = lp_result_with_rc(0.0, vec![1.0], vec![-5.0]);
+    let mut bounds2 = vec![(0.0_f64, 1.0_f64)];
+    let count2 = reduced_cost_fixing(&res2, 3.0, &mut bounds2, &[0]);
+    assert_eq!(count2, 1);
+    assert_eq!(bounds2[0], (1.0, 1.0), "integer ub=1 unchanged by floor");
+}
+
+#[test]
+fn rc_fixing_skips_empty_integer_range() {
+    // lb=0.7, ub=0.3 → ceil(0.7)=1 > floor(0.3)=0 → empty integer range, skip fix
+    let res = lp_result_with_rc(0.0, vec![0.7], vec![5.0]);
+    let mut bounds = vec![(0.7_f64, 0.3_f64)];
+    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
+    assert_eq!(count, 0, "empty integer range must not be fixed");
+    assert_eq!(bounds[0], (0.7, 0.3), "bounds unchanged");
+}
+
 // ---------------------------------------------------------------------------
 // rc_vars_fixed stats sentinel
 // ---------------------------------------------------------------------------

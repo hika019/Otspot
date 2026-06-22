@@ -1056,8 +1056,11 @@ const BOUND_AT_TOL: f64 = 1e-8;
 /// reduced cost exceeds the MIP gap, `x[j]` cannot improve on the incumbent
 /// by moving away from that bound — so we fix it there:
 ///
-/// - `x[j] ≈ lb[j]` and `rc[j] > gap`:  fix `x[j] = lb[j]`
-/// - `x[j] ≈ ub[j]` and `-rc[j] > gap`: fix `x[j] = ub[j]`
+/// - `x[j] ≈ lb[j]` and `rc[j] > gap`:  fix `x[j] = ceil(lb)`
+/// - `x[j] ≈ ub[j]` and `-rc[j] > gap`: fix `x[j] = floor(ub)`
+///
+/// Bounds are rounded to the nearest feasible integer before fixing. If the
+/// rounded bounds are inconsistent (`ceil(lb) > floor(ub)`), the fix is skipped.
 ///
 /// `gap = incumbent_obj - lp_result.objective` (must be positive).
 /// Returns the number of variables fixed.
@@ -1085,13 +1088,18 @@ pub(crate) fn reduced_cost_fixing(
         if (lb - ub).abs() < BOUND_AT_TOL {
             continue; // already fixed
         }
+        let int_lb = lb.ceil();
+        let int_ub = ub.floor();
+        if int_lb > int_ub + BOUND_AT_TOL {
+            continue; // empty integer range after rounding
+        }
         let xj = x[j];
         let rcj = rc[j];
         if (xj - lb).abs() <= BOUND_AT_TOL && rcj > gap {
-            node_bounds[j] = (lb, lb);
+            node_bounds[j] = (int_lb, int_lb);
             count += 1;
         } else if (xj - ub).abs() <= BOUND_AT_TOL && -rcj > gap {
-            node_bounds[j] = (ub, ub);
+            node_bounds[j] = (int_ub, int_ub);
             count += 1;
         }
     }

@@ -732,24 +732,96 @@ fn dense_basis_inverse(dense_a: &[Vec<f64>], basis: &[usize]) -> Vec<Vec<f64>> {
     aug.iter().map(|row| row[m..].to_vec()).collect()
 }
 
-/// **MIR coefficient:** for integer variables MIR == GMI; for continuous variables
-/// MIR clips negative tableau entries to 0 while GMI maps them to `−α/(1−f₀)`.
+/// **MIR coefficient equals GMI:** MIR and GMI produce identical coefficients for all
+/// cases. For continuous nonbasics with negative α, the coefficient is `−α/(1−f₀)` —
+/// setting it to 0 is invalid and can exclude integer-feasible solutions.
 #[test]
-fn mir_coeff_continuous_clips_negative() {
+fn mir_coeff_equals_gmi_for_all_cases() {
     let f0 = 0.4_f64;
     let omf0 = 0.6_f64;
+    // Positive alpha: both use alpha/f0.
     let pos = 0.3_f64;
     assert!((mir_coeff(pos, f0, omf0, false) - pos / f0).abs() < 1e-12);
     assert!((gmi_coeff(pos, f0, omf0, false) - pos / f0).abs() < 1e-12);
+    // Negative alpha: MIR must use -alpha/(1-f0), not 0.
     let neg = -0.2_f64;
-    assert_eq!(mir_coeff(neg, f0, omf0, false), 0.0);
-    assert!((gmi_coeff(neg, f0, omf0, false) - (-neg) / omf0).abs() < 1e-12);
+    let expected = (-neg) / omf0;
+    assert!(
+        (mir_coeff(neg, f0, omf0, false) - expected).abs() < 1e-12,
+        "MIR must use -alpha/(1-f0) for continuous negative alpha: \
+         got {} expected {} (returning 0 excludes integer-feasible solutions)",
+        mir_coeff(neg, f0, omf0, false),
+        expected
+    );
+    assert!((gmi_coeff(neg, f0, omf0, false) - expected).abs() < 1e-12);
+    // Integer case: identical for all alpha values.
     for &alpha in &[-1.7_f64, -0.3, 0.0, 0.3, 1.2, 2.7] {
         let g = gmi_coeff(alpha, f0, omf0, true);
         let m = mir_coeff(alpha, f0, omf0, true);
         assert!(
             (m - g).abs() < 1e-12,
             "integer case must be identical: alpha={alpha} gmi={g} mir={m}"
+        );
+    }
+}
+
+/// **MIR cut validity with continuous nonbasic having negative tableau entry:**
+///
+/// LP: min −x₁ + 10·x₂  s.t. x₁ − x₂ ≤ 2.5, x₁ ∈ [0,3] integer, x₂ ≥ 0 continuous.
+/// LP opt: x₁=2.5, x₂=0. In the tableau row for x₁ (basic, f₀=0.5), x₂ has α=−1
+/// (negative, structural continuous at its lower bound).
+///
+/// With the correct MIR = GMI formula, the cut is −2·x₁ + 4·x₂ ≥ −4, which holds
+/// for every integer-feasible solution. If MIR used 0 for negative-α continuous
+/// columns, the cut would be −2·x₁ + 2·x₂ ≥ −4, which the integer-feasible witness
+/// (x₁=3, x₂=0.5) violates: −6 + 1 = −5 < −4.
+#[test]
+fn mir_cut_validity_continuous_nonbasic_negative_alpha() {
+    // LP: min -x1 + 10*x2, s.t. x1 - x2 <= 2.5, 0 <= x1 <= 3, x2 >= 0.
+    // A is 1×2: row=[0,0], col=[0,1], val=[1,-1] → x1 - x2 <= 2.5.
+    let l = lp(
+        vec![-1.0, 10.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, -1.0],
+        1,
+        vec![2.5],
+        vec![ConstraintType::Le],
+        vec![(0.0, 3.0), (0.0, f64::INFINITY)],
+    );
+    let milp = MilpProblem::new(l.clone(), vec![0]).unwrap();
+
+    let lp_res = lp_root(&l);
+    assert_eq!(lp_res.status, SolveStatus::Optimal, "LP must solve");
+    assert!(
+        (lp_res.solution[0] - 2.5).abs() < 1e-6,
+        "LP opt must be x1=2.5, got {}",
+        lp_res.solution[0]
+    );
+    assert!(
+        lp_res.solution[1].abs() < 1e-6,
+        "LP opt must be x2=0 (high cost keeps x2 at LB), got {}",
+        lp_res.solution[1]
+    );
+
+    let integer_mask = super::super::integer_mask(l.num_vars, milp.integer_vars.as_slice());
+    let basis = lp_res.warm_start_basis.as_ref().unwrap().basis.clone();
+
+    // Direct MIR round: if alpha<0 continuous → 0 (buggy), the cut becomes -2x1+2x2 >= -4.
+    // With MIR = GMI (correct): -2x1+4x2 >= -4.
+    let cuts = generate_round(&l, &integer_mask, &lp_res.solution, &basis, CutKind::Mir);
+    assert!(!cuts.is_empty(), "MIR must generate a cut for the fractional LP");
+
+    // Witness: (x1=3, x2=0.5) is integer-feasible: x1∈Z, x2>=0, 3-0.5=2.5<=2.5.
+    let witness = [3.0_f64, 0.5_f64];
+    for (i, cut) in cuts.iter().enumerate() {
+        let lhs: f64 = cut.coeffs.iter().zip(witness.iter()).map(|(&g, &x)| g * x).sum();
+        assert!(
+            lhs >= cut.rhs - 1e-9,
+            "MIR cut {i} INVALID: integer-feasible witness (x1=3, x2=0.5) violates \
+             g·x={lhs} < rhs={} (bug: negative-alpha continuous coeff was 0 instead of \
+             -alpha/(1-f0))",
+            cut.rhs
         );
     }
 }
