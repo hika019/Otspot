@@ -174,6 +174,7 @@ fn solve_validate(
     deadline: Option<std::time::Instant>,
 ) -> crate::problem::SolverResult {
     let opts = SolverOptions {
+        presolve: false,
         recover_warm_start_basis: false,
         warm_start: None,
         warm_start_lp: None,
@@ -183,6 +184,7 @@ fn solve_validate(
         dual_tol: options.dual_tol,
         threads: options.threads,
         tolerance: options.tolerance,
+        cancel_flag: options.cancel_flag.clone(),
         ..SolverOptions::default()
     };
     crate::lp::solve_lp_with(lp, &opts)
@@ -206,6 +208,7 @@ fn solve_cut_lp(
         primal_tol: options.primal_tol,
         dual_tol: options.dual_tol,
         threads: options.threads,
+        cancel_flag: options.cancel_flag.clone(),
         ..SolverOptions::default()
     };
     crate::lp::solve_lp_with(lp, &opts)
