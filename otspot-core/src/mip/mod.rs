@@ -372,9 +372,10 @@ fn measure_strong_branch_scores<R: Relaxation>(
             }
         }
 
-        let f_down = v - v.floor();
-        let f_up = v.ceil() - v;
-        let score = branch::pseudocost_score(d_down * f_down, d_up * f_up);
+        // d_down / d_up are already the raw objective improvements for this
+        // branching decision; use them directly.  Multiplying by fractionality
+        // here would double-normalize and unfairly suppress near-integer candidates.
+        let score = branch::pseudocost_score(d_down, d_up);
         scores.insert(j, score);
     }
     scores

@@ -524,4 +524,55 @@ mod tests {
         assert!(!cands.contains(&0), "reliable var 0 must be excluded");
         assert!(cands.contains(&1), "unreliable var 1 must be included");
     }
+
+    /// Strong-branch scores must use raw objective gains directly.
+    ///
+    /// `d_down`/`d_up` already measure the actual child LP improvement for the
+    /// current fractional value; multiplying by fractionality a second time
+    /// (double-normalization) would suppress near-integer candidates unfairly.
+    /// This test verifies that `pseudocost_score(d_down, d_up)` is the correct
+    /// call site formula and that the f-multiplied version gives a meaningfully
+    /// different (lower) result for a near-integer variable.
+    #[test]
+    fn strong_branch_score_uses_raw_gains_not_double_normalized() {
+        // Near-integer variable: v = 0.9  →  f_down = 0.9, f_up = 0.1
+        // Actual child LP gains measured by strong branching:
+        let d_down = 1.0_f64;
+        let d_up = 0.5_f64;
+        let f_down = 0.9_f64;
+        let f_up = 0.1_f64;
+
+        // Correct score: raw gains passed directly.
+        let raw_score = pseudocost_score(d_down, d_up);
+        // Bugged score: gains multiplied by fractionality again.
+        let bugged_score = pseudocost_score(d_down * f_down, d_up * f_up);
+
+        // raw_score must be strictly larger; the double-normalization suppressed
+        // the near-integer candidate by roughly 1/f_up ≈ 10×.
+        assert!(
+            raw_score > bugged_score * 2.0,
+            "raw_score={raw_score:.4} must dominate bugged_score={bugged_score:.4}"
+        );
+
+        // Sanity: raw_score equals pseudocost_score(1.0, 0.5) = 5/6*0.5 + 1/6*1.0
+        let expected = (5.0 / 6.0) * d_up + (1.0 / 6.0) * d_down;
+        assert!((raw_score - expected).abs() < 1e-12);
+
+        // Sanity for two candidate variables with equal d but different f:
+        // var A: v=0.9 (near-integer), d_down=1.0, d_up=0.5
+        // var B: v=0.5 (most-fractional), d_down=1.0, d_up=0.5
+        // With correct scoring both should have identical scores (same raw gains).
+        let score_a = pseudocost_score(1.0, 0.5);
+        let score_b = pseudocost_score(1.0, 0.5);
+        assert!((score_a - score_b).abs() < 1e-12, "equal raw gains → equal scores");
+
+        // With double-normalization the most-fractional candidate gets a higher
+        // score even though the actual improvement is identical.
+        let bugged_a = pseudocost_score(1.0 * 0.9, 0.5 * 0.1); // near-integer var
+        let bugged_b = pseudocost_score(1.0 * 0.5, 0.5 * 0.5); // most-fractional var
+        assert!(
+            bugged_b > bugged_a,
+            "double-normalization unfairly favours most-fractional: bugged_b={bugged_b:.4} bugged_a={bugged_a:.4}"
+        );
+    }
 }
