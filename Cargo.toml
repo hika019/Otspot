@@ -4,16 +4,16 @@ members = [".", "otspot-core", "otspot-io", "otspot-model", "otspot-dev"]
 default-members = [".", "otspot-core", "otspot-io", "otspot-model", "otspot-dev"]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 repository = "https://github.com/hika019/otspot"
 homepage = "https://github.com/hika019/otspot"
 
 [workspace.dependencies]
-otspot-core = { path = "otspot-core", version = "0.5.2" }
-otspot-io = { path = "otspot-io", version = "0.5.2" }
-otspot-model = { path = "otspot-model", version = "0.5.2" }
+otspot-core = { path = "otspot-core", version = "0.6.0" }
+otspot-io = { path = "otspot-io", version = "0.6.0" }
+otspot-model = { path = "otspot-model", version = "0.6.0" }
 
 [package]
 name = "otspot"

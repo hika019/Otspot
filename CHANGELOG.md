@@ -4,7 +4,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-## [0.5.3] - unreleased
+## [0.6.0] - unreleased
 
 MIP B&B の標準機能一式 + LP presolve/postsolve 改善 + リファクタリング。
 
