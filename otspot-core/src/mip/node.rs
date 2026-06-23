@@ -27,6 +27,9 @@ pub(crate) struct MipNode {
     pub branch_up: bool,
     /// Parent relaxation LP objective; used for pseudocost update on arrival.
     pub parent_obj: f64,
+    /// Parent solution value at `branch_var`; used to derive fractionality for
+    /// per-unit pseudocost normalization. `0.0` when `branch_var` is `None`.
+    pub branch_parent_val: f64,
 }
 
 impl MipNode {
@@ -39,6 +42,7 @@ impl MipNode {
             branch_var: None,
             branch_up: false,
             parent_obj: f64::NEG_INFINITY,
+            branch_parent_val: 0.0,
         }
     }
 
@@ -60,6 +64,7 @@ impl MipNode {
             branch_var: None,
             branch_up: false,
             parent_obj: f64::NEG_INFINITY,
+            branch_parent_val: 0.0,
         }
     }
 
@@ -71,6 +76,7 @@ impl MipNode {
         branch_var: usize,
         branch_up: bool,
         parent_obj: f64,
+        branch_parent_val: f64,
     ) -> Self {
         Self {
             var_bounds: new_bounds,
@@ -80,6 +86,7 @@ impl MipNode {
             branch_var: Some(branch_var),
             branch_up,
             parent_obj,
+            branch_parent_val,
         }
     }
 }
