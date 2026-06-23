@@ -83,6 +83,7 @@ pub(crate) trait Relaxation {
 /// its behaviour.  The timing fields help separate *exploration explosion* (many
 /// nodes) from *per-node cost* (slow relaxation solves).
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct MipStats {
     /// Relaxation solves performed (root included).
     pub nodes_processed: usize,

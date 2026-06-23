@@ -158,6 +158,7 @@ pub enum StartStrategy {
 /// `n_starts >= 2`: start #0 = cold, #1..n = random (warm_start_qp.x injected).
 /// All starts share the same deadline.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MultiStartConfig {
     /// Number of starting points.  1 disables multi-start.  Default = 1.
     pub n_starts: usize,
@@ -201,6 +202,7 @@ pub const DEFAULT_GLOBAL_MAX_NODES: usize = 10_000;
 /// - `gap_tol > 0`: relative gap = |UB − LB| / max(1, |UB|)
 /// - `max_depth >= 1`, `max_nodes >= 1`
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct GlobalOptimizationConfig {
     pub gap_tol: f64,
     pub max_depth: usize,

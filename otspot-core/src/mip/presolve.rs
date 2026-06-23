@@ -24,6 +24,7 @@ const MAX_PROBE_CANDIDATES: usize = 40;
 
 /// Summary returned by [`tighten_bounds_with_probing`].
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct PresolveSummary {
     /// Number of bound-propagation rounds completed.
     pub rounds: usize,
