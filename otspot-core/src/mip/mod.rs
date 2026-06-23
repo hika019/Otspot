@@ -205,6 +205,7 @@ pub fn solve_milp_with_stats(
             &problem.lp.constraint_types,
             &mut tightened,
             &problem.integer_vars,
+            deadline,
         );
         let presolve_ms = presolve_t0.elapsed().as_secs_f64() * 1000.0;
         let problem_bt: MilpProblem = match presolve_ok {

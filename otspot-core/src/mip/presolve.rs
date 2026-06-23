@@ -5,12 +5,14 @@
 //! which is strictly stronger: a real-valued implied ub of 3.7 gives only `x ≤ 3`
 //! for an integer variable rather than `x ≤ 3.7`.
 
+use crate::linalg::timeout::deadline_reached;
 use crate::presolve::activity::propagate_row_bounds;
 use crate::problem::ConstraintType;
 #[cfg(test)]
 use crate::problem::LpProblem;
 use crate::sparse::CscMatrix;
 use crate::tolerances::ZERO_TOL;
+use std::time::Instant;
 
 /// Maximum number of bound-propagation rounds in the iterative tightening loop.
 const MAX_PRESOLVE_ROUNDS: usize = 10;
@@ -269,6 +271,7 @@ pub fn tighten_bounds_with_probing(
     constraint_types: &[ConstraintType],
     bounds: &mut [(f64, f64)],
     integer_vars: &[usize],
+    deadline: Option<Instant>,
 ) -> Option<PresolveSummary> {
     let n = bounds.len();
     let m = b.len();
@@ -286,6 +289,10 @@ pub fn tighten_bounds_with_probing(
 
     // Initial propagation to convergence (only count rounds that tightened something).
     for _ in 0..MAX_PRESOLVE_ROUNDS {
+        if deadline_reached(deadline) {
+            bounds.copy_from_slice(&bounds_vec);
+            return Some(summary);
+        }
         let t = propagation_pass(&rows, constraint_types, b, &mut bounds_vec, &integer_mask)?;
         if t == 0 {
             break;
@@ -298,6 +305,10 @@ pub fn tighten_bounds_with_probing(
     let mut candidates = binary_var_indices(integer_vars, &bounds_vec);
     candidates.truncate(MAX_PROBE_CANDIDATES);
     for _ in 0..MAX_PRESOLVE_ROUNDS {
+        if deadline_reached(deadline) {
+            bounds.copy_from_slice(&bounds_vec);
+            return Some(summary);
+        }
         if candidates.is_empty() {
             break;
         }
@@ -317,6 +328,10 @@ pub fn tighten_bounds_with_probing(
 
         // Re-propagate after probing fixes.
         for _ in 0..MAX_PRESOLVE_ROUNDS {
+            if deadline_reached(deadline) {
+                bounds.copy_from_slice(&bounds_vec);
+                return Some(summary);
+            }
             let t =
                 propagation_pass(&rows, constraint_types, b, &mut bounds_vec, &integer_mask)?;
             if t == 0 {
@@ -716,6 +731,7 @@ mod tests {
             &[ConstraintType::Ge],
             &mut bounds,
             &[0, 1],
+            None,
         );
         assert!(result.is_none(), "both fixings infeasible → None");
     }
@@ -735,6 +751,7 @@ mod tests {
             &[ConstraintType::Ge],
             &mut bounds,
             &[0, 1],
+            None,
         )
         .expect("feasible");
         assert!(
@@ -756,6 +773,7 @@ mod tests {
             &[ConstraintType::Le],
             &mut bounds,
             &[0],
+            None,
         )
         .expect("feasible");
         assert!(
@@ -783,6 +801,7 @@ mod tests {
             &[ConstraintType::Le],
             &mut bounds,
             &[0, 1],
+            None,
         )
         .expect("feasible");
         assert!(
@@ -799,7 +818,7 @@ mod tests {
         let a = CscMatrix::new(0, 1);
         let mut bounds = vec![(0.0_f64, 1.0_f64)];
         let summary =
-            tighten_bounds_with_probing(&a, &[], &[], &mut bounds, &[0]).expect("feasible");
+            tighten_bounds_with_probing(&a, &[], &[], &mut bounds, &[0], None).expect("feasible");
         assert_eq!(summary.rounds, 0, "no constraints → 0 rounds");
     }
 
@@ -808,7 +827,7 @@ mod tests {
     fn probing_no_integer_vars_propagation_still_runs() {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let mut bounds = vec![(0.0_f64, 5.0_f64)];
-        tighten_bounds_with_probing(&a, &[3.0], &[ConstraintType::Le], &mut bounds, &[])
+        tighten_bounds_with_probing(&a, &[3.0], &[ConstraintType::Le], &mut bounds, &[], None)
             .expect("feasible");
         assert!(
             (bounds[0].1 - 3.0).abs() < 1e-9,
@@ -823,7 +842,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let mut bounds = vec![(0.0_f64, 2.0_f64)];
         let summary =
-            tighten_bounds_with_probing(&a, &[5.0], &[ConstraintType::Le], &mut bounds, &[0])
+            tighten_bounds_with_probing(&a, &[5.0], &[ConstraintType::Le], &mut bounds, &[0], None)
                 .expect("feasible");
         assert_eq!(
             summary.tightened_by_probing, 0,
