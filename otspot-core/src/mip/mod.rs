@@ -364,17 +364,16 @@ fn measure_strong_branch_scores<R: Relaxation>(
         };
 
         if let Some(&k) = j_to_k.get(&j) {
-            if d_down.is_finite() {
-                pc.record_down(k, d_down);
+            let f_down = v - v.floor();
+            let f_up = v.ceil() - v;
+            if d_down.is_finite() && f_down > 1e-12 {
+                pc.record_down(k, d_down / f_down);
             }
-            if d_up.is_finite() {
-                pc.record_up(k, d_up);
+            if d_up.is_finite() && f_up > 1e-12 {
+                pc.record_up(k, d_up / f_up);
             }
         }
 
-        // d_down / d_up are already the raw objective improvements for this
-        // branching decision; use them directly.  Multiplying by fractionality
-        // here would double-normalize and unfairly suppress near-integer candidates.
         let score = branch::pseudocost_score(d_down, d_up);
         scores.insert(j, score);
     }
@@ -627,9 +626,9 @@ fn solve_mip_core<R: Relaxation>(
                     q.end_dive();
                 }
                 match kind {
-                    ChildKind::Branched { jb, res_obj, down_ws, up_ws } => {
-                        q.push(node.child_branched(down, node_lb, down_ws, jb, false, res_obj));
-                        q.push(node.child_branched(up, node_lb, up_ws, jb, true, res_obj));
+                    ChildKind::Branched { jb, res_obj, jb_val, down_ws, up_ws } => {
+                        q.push(node.child_branched(down, node_lb, down_ws, jb, false, res_obj, jb_val));
+                        q.push(node.child_branched(up, node_lb, up_ws, jb, true, res_obj, jb_val));
                     }
                     ChildKind::Split => {
                         q.push(node.child(down, node_lb));
@@ -710,6 +709,8 @@ enum ChildKind {
     Branched {
         jb: usize,
         res_obj: f64,
+        /// Parent LP solution value at `jb`; used to compute per-unit pseudocost.
+        jb_val: f64,
         down_ws: Option<WarmStartBasis>,
         up_ws: Option<WarmStartBasis>,
     },
@@ -862,15 +863,23 @@ fn process_node_outcome<R: Relaxation>(
     dive_start_depth: usize,
 ) -> NodeAction {
     if trusted {
-        // Pseudocost update from this node's objective improvement over parent.
+        // Pseudocost update: record per-unit cost (delta / fractionality) so
+        // that score() can correctly predict gains at different fractionalities.
         if use_reliability {
             if let Some(jb) = node.branch_var {
                 if let Some(&k) = j_to_k.get(&jb) {
                     let delta = (res.objective - node.parent_obj).max(0.0);
+                    let v = node.branch_parent_val;
                     if node.branch_up {
-                        pc.record_up(k, delta);
+                        let f_up = v.ceil() - v;
+                        if f_up > 1e-12 {
+                            pc.record_up(k, delta / f_up);
+                        }
                     } else {
-                        pc.record_down(k, delta);
+                        let f_down = v - v.floor();
+                        if f_down > 1e-12 {
+                            pc.record_down(k, delta / f_down);
+                        }
                     }
                 }
             }
@@ -944,7 +953,7 @@ fn process_node_outcome<R: Relaxation>(
             node_lb,
             down,
             up,
-            kind: ChildKind::Branched { jb, res_obj: res.objective, down_ws, up_ws },
+            kind: ChildKind::Branched { jb, res_obj: res.objective, jb_val: res.solution[jb], down_ws, up_ws },
             end_dive,
         }
     } else {

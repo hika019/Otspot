@@ -575,4 +575,53 @@ mod tests {
             "double-normalization unfairly favours most-fractional: bugged_b={bugged_b:.4} bugged_a={bugged_a:.4}"
         );
     }
+
+    /// Pseudocost observations must be stored as per-unit costs (delta / fractionality).
+    ///
+    /// `score()` computes `up_cost(k) * f_up` where `f_up` is the current node's
+    /// fractionality.  Recording raw deltas mixes observation-site fractionality into
+    /// the stored cost, making predictions incorrect for future nodes with different
+    /// fractionalities.  After normalising, the score at any fractionality equals
+    /// `avg_per_unit * current_f`.
+    #[test]
+    fn pseudocost_record_per_unit_normalizes_observations() {
+        let mut pc = PseudocostState::new(1);
+
+        // Observation: branched at v=0.2 → f_up=0.8; raw gain = 2.0.
+        // Per-unit cost = 2.0 / 0.8 = 2.5.
+        let v_obs = 0.2_f64;
+        let f_up_obs = v_obs.ceil() - v_obs; // 0.8
+        let f_down_obs = v_obs - v_obs.floor(); // 0.2
+        let d_up_raw = 2.0_f64;
+        let d_down_raw = 0.4_f64;
+        pc.record_up(0, d_up_raw / f_up_obs); // stores 2.5
+        pc.record_down(0, d_down_raw / f_down_obs); // stores 2.0
+
+        assert!(
+            (pc.up_cost(0).unwrap() - 2.5).abs() < 1e-12,
+            "up_cost should be per-unit 2.5"
+        );
+        assert!(
+            (pc.down_cost(0).unwrap() - 2.0).abs() < 1e-12,
+            "down_cost should be per-unit 2.0"
+        );
+
+        // At v=0.5: predicted d_up = 2.5*0.5 = 1.25, d_down = 2.0*0.5 = 1.0.
+        let score = pc.score(0, 0.5);
+        let expected = pseudocost_score(1.0, 1.25);
+        assert!(
+            (score - expected).abs() < 1e-12,
+            "score at v=0.5 should use per-unit rates: got={score} expected={expected}"
+        );
+
+        // Contrast: if raw gain were recorded instead, up_cost = 2.0 ≠ 2.5.
+        // The prediction at v=0.5 would then be 2.0*0.5=1.0 for up — different.
+        let mut pc_raw = PseudocostState::new(1);
+        pc_raw.record_up(0, d_up_raw); // stores raw 2.0
+        let score_raw = pc_raw.score(0, 0.5);
+        assert!(
+            (score - score_raw).abs() > 1e-6,
+            "per-unit and raw recording must yield different scores"
+        );
+    }
 }
