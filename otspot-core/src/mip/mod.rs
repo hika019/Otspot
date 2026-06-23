@@ -71,6 +71,7 @@ pub(crate) trait Relaxation {
         _x_inc: &[f64],
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
+        _opts: &SolverOptions,
     ) -> Option<SolverResult> {
         None
     }
@@ -815,6 +816,7 @@ fn try_rins<R: Relaxation>(
     state: &mut MipState,
     cfg: &MipConfig,
     deadline: &Option<Instant>,
+    opts: &SolverOptions,
     rel_sol: &[f64],
 ) {
     if !cfg.rins_enabled
@@ -829,7 +831,7 @@ fn try_rins<R: Relaxation>(
             None => return,
         };
         stats.rins_calls += 1;
-        problem.run_rins(rel_sol, inc_sol, cfg, deadline)
+        problem.run_rins(rel_sol, inc_sol, cfg, deadline, opts)
     };
     if let Some(res) = rins_res {
         if state.consider(&res) {
@@ -906,7 +908,7 @@ fn process_node_outcome<R: Relaxation>(
         }
 
         // RINS: attempt incumbent improvement via sub-MIP.
-        try_rins(problem, stats, state, cfg, deadline, &res.solution);
+        try_rins(problem, stats, state, cfg, deadline, shared, &res.solution);
 
         // Max-depth limit.
         if node.depth + 1 > cfg.max_depth {
