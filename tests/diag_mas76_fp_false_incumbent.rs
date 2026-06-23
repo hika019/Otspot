@@ -34,11 +34,9 @@ fn mas76_cuts_does_not_accept_fp_upper_bound_objective() {
     opts.timeout_secs = Some(TEST_TIMEOUT_SECS);
     opts.tolerance = Some(Tolerance::Custom(1.0e-6));
 
-    let cfg = MipConfig {
-        cuts: true,
-        max_nodes: 0,
-        ..Default::default()
-    };
+    let mut cfg = MipConfig::default();
+    cfg.cuts = true;
+    cfg.max_nodes = 0;
     let (res, stats) = solve_milp_with_stats(&milp, &opts, &cfg);
 
     if stats.fp_incumbent_found {

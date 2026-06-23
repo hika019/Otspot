@@ -66,15 +66,16 @@ fn warm_start_30pct_speedup_smoke() {
     );
     let cold_iters = cold_result.iterations;
 
-    let ws = QpWarmStart {
-        x: cold_result.solution.clone(),
-        y: cold_result.dual_solution.clone(),
-        mu: cold_result
-            .final_residuals
-            .map(|(_, _, g)| g)
-            .unwrap_or(1e-6)
-            .max(1e-10),
-    };
+    let mu = cold_result
+        .final_residuals
+        .map(|(_, _, g)| g)
+        .unwrap_or(1e-6)
+        .max(1e-10);
+    let ws = QpWarmStart::new(
+        cold_result.solution.clone(),
+        cold_result.dual_solution.clone(),
+        mu,
+    );
     let mut warm_opts = SolverOptions::default();
     warm_opts.timeout_secs = Some(60.0);
     warm_opts.warm_start_qp = Some(ws.clone());
@@ -143,11 +144,7 @@ fn warm_start_degenerate_inputs_handled() {
     let cold = solve_qp_with(&problem, &cold_opts);
     assert_eq!(cold.status, SolveStatus::Optimal);
 
-    let ws = QpWarmStart {
-        x: vec![-2.0; 40],
-        y: vec![0.0; 20],
-        mu: 0.0,
-    };
+    let ws = QpWarmStart::new(vec![-2.0; 40], vec![0.0; 20], 0.0);
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(30.0);
     opts.warm_start_qp = Some(ws);
@@ -260,15 +257,12 @@ fn warm_start_propagates_through_q_diag_scaling() {
     let cold = solve_qp_with(&problem, &cold_opts);
     assert_eq!(cold.status, SolveStatus::Optimal, "cold must Optimal");
 
-    let ws = QpWarmStart {
-        x: cold.solution.clone(),
-        y: cold.dual_solution.clone(),
-        mu: cold
-            .final_residuals
-            .map(|(_, _, g)| g)
-            .unwrap_or(1e-6)
-            .max(1e-10),
-    };
+    let mu = cold
+        .final_residuals
+        .map(|(_, _, g)| g)
+        .unwrap_or(1e-6)
+        .max(1e-10);
+    let ws = QpWarmStart::new(cold.solution.clone(), cold.dual_solution.clone(), mu);
     let mut warm_opts = SolverOptions::default();
     warm_opts.timeout_secs = Some(60.0);
     warm_opts.warm_start_qp = Some(ws);
@@ -352,15 +346,12 @@ fn warm_start_propagates_through_presolve_reduction() {
         "fixed var must be 0.5"
     );
 
-    let ws = QpWarmStart {
-        x: cold.solution.clone(),
-        y: cold.dual_solution.clone(),
-        mu: cold
-            .final_residuals
-            .map(|(_, _, g)| g)
-            .unwrap_or(1e-6)
-            .max(1e-10),
-    };
+    let mu = cold
+        .final_residuals
+        .map(|(_, _, g)| g)
+        .unwrap_or(1e-6)
+        .max(1e-10);
+    let ws = QpWarmStart::new(cold.solution.clone(), cold.dual_solution.clone(), mu);
     let mut warm_opts = SolverOptions::default();
     warm_opts.timeout_secs = Some(10.0);
     warm_opts.warm_start_qp = Some(ws);

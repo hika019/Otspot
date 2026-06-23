@@ -227,15 +227,13 @@ fn guard_lp_optimal_load_bearing_production_path() {
     .unwrap();
 
     // Corrupt primal: x=1e12 violates x≤5 → primal feasibility fails → SuboptimalSolution.
-    let corrupt_primal = SolverResult {
-        status: SolveStatus::Optimal,
-        objective: 1e12,
-        solution: vec![1e12],
-        dual_solution: vec![0.0],
-        reduced_costs: vec![0.0],
-        slack: vec![0.0],
-        ..Default::default()
-    };
+    let mut corrupt_primal = SolverResult::default();
+    corrupt_primal.status = SolveStatus::Optimal;
+    corrupt_primal.objective = 1e12;
+    corrupt_primal.solution = vec![1e12];
+    corrupt_primal.dual_solution = vec![0.0];
+    corrupt_primal.reduced_costs = vec![0.0];
+    corrupt_primal.slack = vec![0.0];
     let guarded = otspot::apply_lp_primal_guard(corrupt_primal, &lp_le);
     assert_eq!(
         guarded.status,
@@ -257,15 +255,13 @@ fn guard_lp_optimal_load_bearing_production_path() {
     .unwrap();
 
     // Wrong-sign dual: Le should have y ≤ 0 in simplex convention; +1 is wrong.
-    let wrong_sign = SolverResult {
-        status: SolveStatus::Optimal,
-        objective: -1.0,
-        solution: vec![1.0],
-        dual_solution: vec![1.0], // should be −1 for Le
-        reduced_costs: vec![0.0],
-        slack: vec![0.0],
-        ..Default::default()
-    };
+    let mut wrong_sign = SolverResult::default();
+    wrong_sign.status = SolveStatus::Optimal;
+    wrong_sign.objective = -1.0;
+    wrong_sign.solution = vec![1.0];
+    wrong_sign.dual_solution = vec![1.0]; // should be −1 for Le
+    wrong_sign.reduced_costs = vec![0.0];
+    wrong_sign.slack = vec![0.0];
     let guarded2 = otspot::apply_lp_primal_guard(wrong_sign, &lp2);
     assert_eq!(
         guarded2.status,

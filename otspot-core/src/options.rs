@@ -19,6 +19,7 @@ use std::time::Instant;
 ///
 /// Produced by [`IpmOptions::validate`] and [`SolverOptions::validate`], and
 /// by builder methods (`with_*`) that validate on assignment.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct OptionsError {
     /// Name of the offending field (e.g. `"ipm.eps"`).
@@ -95,11 +96,19 @@ pub struct WarmStartBasis {
 ///
 /// Interior corrections (μ floor / x bound margin / y positivity) are applied
 /// on entry so boundary or zero values are safe to pass.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct QpWarmStart {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
     pub mu: f64,
+}
+
+impl QpWarmStart {
+    /// Construct a QP warm-start point from primal, dual, and barrier parameter.
+    pub fn new(x: Vec<f64>, y: Vec<f64>, mu: f64) -> Self {
+        Self { x, y, mu }
+    }
 }
 
 /// Extended LP warm-start.
@@ -112,6 +121,7 @@ pub struct QpWarmStart {
 ///   Size mismatch: logged and dropped (not silently ignored).
 /// - `x_orig`: length = problem.num_vars (original variable space)
 /// - `y_orig`: length = problem.num_constraints (original constraint space, user sign)
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct LpWarmStart {
     pub basis: Vec<usize>,
@@ -148,6 +158,7 @@ pub enum StartStrategy {
 /// `n_starts >= 2`: start #0 = cold, #1..n = random (warm_start_qp.x injected).
 /// All starts share the same deadline.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MultiStartConfig {
     /// Number of starting points.  1 disables multi-start.  Default = 1.
     pub n_starts: usize,
@@ -191,6 +202,7 @@ pub const DEFAULT_GLOBAL_MAX_NODES: usize = 10_000;
 /// - `gap_tol > 0`: relative gap = |UB − LB| / max(1, |UB|)
 /// - `max_depth >= 1`, `max_nodes >= 1`
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct GlobalOptimizationConfig {
     pub gap_tol: f64,
     pub max_depth: usize,
@@ -227,10 +239,17 @@ impl Default for MultiStartConfig {
 ///
 /// `MostFractional`: branch on the integer-constrained variable whose
 /// relaxation value is closest to 0.5.  Ties broken by variable index.
+///
+/// `Reliability`: pseudocost-based branching with strong-branching warm-up.
+/// Variables with fewer than `RELIABILITY_THRESHOLD` observations use
+/// actual LP re-solves to estimate the cost; variables with enough history
+/// use accumulated pseudocosts.  Scores are combined via `PSEUDOCOST_MU`.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MipBranching {
     MostFractional,
+    #[default]
+    Reliability,
 }
 
 /// Defaults for [`MipConfig`].
@@ -245,10 +264,10 @@ pub const DEFAULT_INTEGER_FEAS_TOL: f64 = 1e-6;
 pub const DEFAULT_MIP_MAX_NODES: usize = 1_000_000;
 pub const DEFAULT_MIP_MAX_DEPTH: usize = 1_000;
 /// Default root cutting-plane state. OFF for safe introduction: cuts only tighten
-/// the relaxation, so correctness is unchanged either way, but enabling them by
-/// default would change node counts / timings of every existing MILP solve. The
-/// effect is opted into explicitly (sentinels + bench show the ON benefit).
-pub const DEFAULT_MIP_CUTS: bool = false;
+/// the relaxation, so correctness is unchanged either way. Enabled by default:
+/// alternating GMI/MIR rounds tighten the LP bound at the root, shrinking the
+/// B&B tree for most instances with fractional LP optima.
+pub const DEFAULT_MIP_CUTS: bool = true;
 /// `max_cut_rounds == 0` ⇒ use this many root cut rounds (auto). Kept small: most
 /// GMI gain is in the first few rounds, and deep rounds bloat the LP (slowing
 /// every downstream B&B node) for diminishing bound improvement.
@@ -263,6 +282,7 @@ pub const DEFAULT_MAX_CUT_ROUNDS: usize = 5;
 /// - `integer_feas_tol > 0`
 /// - `max_nodes >= 1`, `max_depth >= 1`
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MipConfig {
     pub gap_tol: f64,
     pub integer_feas_tol: f64,
@@ -279,6 +299,9 @@ pub struct MipConfig {
     /// integer variables; rounds stop early when no fractional source remains or
     /// the LP bound stops improving.
     pub max_cut_rounds: usize,
+    /// Enable the RINS heuristic inside branch-and-bound.
+    /// Automatically set to `false` in sub-MIP calls to prevent recursive RINS.
+    pub rins_enabled: bool,
 }
 
 impl Default for MipConfig {
@@ -288,9 +311,10 @@ impl Default for MipConfig {
             integer_feas_tol: DEFAULT_INTEGER_FEAS_TOL,
             max_nodes: DEFAULT_MIP_MAX_NODES,
             max_depth: DEFAULT_MIP_MAX_DEPTH,
-            branching: MipBranching::MostFractional,
+            branching: MipBranching::default(),
             cuts: DEFAULT_MIP_CUTS,
             max_cut_rounds: DEFAULT_MAX_CUT_ROUNDS,
+            rins_enabled: true,
         }
     }
 }
@@ -494,6 +518,7 @@ pub const DEFAULT_CLAMP_TOL: f64 = 1e-14;
 /// ## Solver-specific parameters
 ///
 /// Use the [`SolverOptions::ipm`] sub-struct for IPM-specific settings.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct SolverOptions {
     // --- Common ---

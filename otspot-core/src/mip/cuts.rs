@@ -1,22 +1,21 @@
-//! Root Gomory Mixed-Integer (GMI) cutting planes for MILP.
+//! Root Gomory Mixed-Integer (GMI) and Mixed-Integer Rounding (MIR) cutting
+//! planes for MILP.
 //!
 //! Cuts tighten the LP relaxation without removing integer-feasible points.
-//! Uses the primal-simplex legacy standard form (`build_standard_form`) where
-//! every nonbasic sits at 0; the bounded/Ruiz-scaled dual path would place
-//! nonbasics at upper bounds and scaled values, complicating the GMI formula
-//! and risking invalid cuts.
+//! Uses the primal-simplex standard form (`build_standard_form`) so every
+//! nonbasic sits at 0, simplifying the tableau row formulae.
 //!
 //! Pipeline per round:
-//!   1. Solve the LP (primal simplex, no presolve) for a standard-form basis.
-//!   2. Recompute `beta = B^{-1} b_std` via FTRAN.
-//!   3. For each fractional integer basic, form the tableau row (BTRAN + dot)
-//!      and emit a GMI cut over the nonbasic columns.
-//!   4. Back-substitute to original variables (`v_j = d_j + g_j·x`, `G·x >= rhs`).
+//!   1. Solve the LP relaxation (primal simplex, no presolve).
+//!   2. For each fractional integer basic, form the tableau row and emit a cut.
+//!   3. Back-substitute to original variables (`G·x >= rhs`).
 //!
-//! GMI validity (coefficients >= 0, integer hull) is structural; a brute-force
-//! sentinel in tests checks every integer-feasible point satisfies every cut.
+//! GMI and MIR produce equivalent cut coefficients for individual tableau rows.
+//! Alternating rounds use the same formula but operate on different LPs (each
+//! round appends the previous cuts), generating complementary tightenings.
 
 use crate::basis::{BasisManager, LuBasis};
+use crate::linalg::timeout::deadline_reached;
 use crate::options::{MipConfig, SimplexMethod, SolverOptions, DEFAULT_MAX_CUT_ROUNDS};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
 use crate::simplex::{build_standard_form, StandardForm};
@@ -25,23 +24,17 @@ use crate::tolerances::{feas_rel_tol, ZERO_TOL};
 
 use super::problem::MilpProblem;
 
-/// Maximum GMI cuts added per round. Bounds LP growth and numerical pollution;
-/// the most-fractional sources (closest to 0.5) are kept first.
+/// Maximum cuts added per round.
 const MAX_CUTS_PER_ROUND: usize = 64;
-/// Relative LP-bound improvement below which cut rounds stop (diminishing return).
+/// Relative LP-bound improvement below which cut rounds stop.
 const MIN_OBJ_IMPROVEMENT_REL: f64 = 1e-4;
-/// Reject a cut whose coefficient magnitudes span more than this ratio: such a
-/// row is numerically unreliable in f64 (≈9 orders is already at the edge).
+/// Reject a cut whose coefficient magnitudes span more than this ratio.
 const GMI_MAX_COEF_DYNAMISM: f64 = 1e9;
-/// Fraction of the remaining solve budget root cut generation may consume. The
-/// rest is reserved for branch-and-bound, so cuts never starve the search (an
-/// unbudgeted loop on a large LP can eat the whole deadline → B&B runs 0 nodes).
+/// Fraction of the remaining solve budget root cut generation may consume.
 const CUT_TIME_FRACTION: f64 = 0.3;
 
-/// A generated cut `coeffs · x >= rhs` (always stored as a `Ge` row over the
-/// original variable space).
+/// A generated cut `coeffs · x >= rhs` over the original variable space.
 struct CutRow {
-    /// Dense coefficient vector over the original variables (length `num_vars`).
     coeffs: Vec<f64>,
     rhs: f64,
 }
@@ -49,12 +42,8 @@ struct CutRow {
 /// Classification of an original variable's structural standard-form column.
 #[derive(Clone, Copy)]
 enum StructKind {
-    /// `x_std = x_p - lb`; integer iff `x_p` integer and `lb` integer.
     LbShift,
-    /// `x_std = ub - x_p` (lb = -inf, ub finite); integer iff `x_p`, `ub` integer.
     UbOnly,
-    /// Half of a free-variable split (`x_p = x_plus - x_minus`); no single-var
-    /// affine image, so any cut whose support touches it is rejected.
     FreeSplit,
 }
 
@@ -64,27 +53,31 @@ struct StructCol {
     var: usize,
     offset: f64,
     kind: StructKind,
-    /// `x_std` is integer-constrained (var is integer and the shift is integral).
     integral: bool,
 }
 
 /// What a standard-form slack column measures, in original variables.
 #[derive(Clone, Copy)]
 enum SlackKind {
-    /// Original `Le` row `i`: `v = b_i - A_i·x`.
     ConstraintLe(usize),
-    /// Original `Ge` row `i`: `v = A_i·x - b_i`.
     ConstraintGe(usize),
-    /// Upper-bound row for bounded var `p`: `v = ub_p - x_p`.
     UbRow(usize),
 }
 
-/// Append GMI cuts found at the root to `milp`, returning the augmented problem.
+/// Which cutting-plane formula to apply.
+#[derive(Clone, Copy)]
+enum CutKind {
+    Gmi,
+    Mir,
+}
+
+/// Append GMI and MIR cuts at the root, returning the augmented problem.
 ///
-/// When no usable cut is found (or the LP cannot be solved cleanly) the input is
-/// returned unchanged. The integer-variable set is preserved; only inequality
-/// rows are added, all valid for the integer hull, so the MILP optimum is
-/// unchanged (verified by the optimality-invariance sentinel).
+/// Rounds alternate GMI (even) / MIR (odd). Multi-round generation uses Ge rows
+/// internally (preserving the original simplex path and numerical properties).
+/// After all rounds, added Ge cut rows are converted to Le (`−g·x ≤ −rhs`) before
+/// returning, so B&B node solves (primal simplex, presolve=false) use slack
+/// variables (coeff +1) rather than surplus variables (coeff −1).
 pub(crate) fn add_root_cuts(
     milp: &MilpProblem,
     options: &SolverOptions,
@@ -102,25 +95,21 @@ pub(crate) fn add_root_cuts(
     // the returned root is never one B&B cannot solve. (Higher-round GMI cuts can
     // degrade numerical conditioning; without this guard an unsolvable root would
     // be handed to B&B and surface as a spurious Timeout.)
+    let m_orig = milp.lp.num_constraints;
     let mut committed = milp.lp.clone();
     let mut prev_obj: Option<f64> = None;
-    // Hard ceiling on total cut rows so the relaxation never more than doubles in
-    // size — beyond this, every downstream B&B-node LP solve slows enough to starve
-    // the search (observed: 6+ rounds on p0201 drive B&B to 0 nodes).
-    let max_total_cuts = milp.lp.num_constraints.max(MAX_CUTS_PER_ROUND);
+    let max_total_cuts = m_orig.max(MAX_CUTS_PER_ROUND);
     let mut total_cuts = 0usize;
 
-    // Bound cut work to a fraction of the remaining budget (reserves time for B&B).
     let cut_deadline = options.deadline.map(|d| {
         let now = std::time::Instant::now();
         now + d.saturating_duration_since(now).mul_f64(CUT_TIME_FRACTION)
     });
 
-    for _ in 0..max_rounds {
-        if deadline_passed(cut_deadline) {
+    for round_idx in 0..max_rounds {
+        if deadline_reached(cut_deadline) {
             break;
         }
-        // Primal solve (no presolve) gives a legacy-standard-form basis for GMI.
         let res = solve_cut_lp(&committed, options, cut_deadline);
         if res.status != SolveStatus::Optimal {
             break;
@@ -136,13 +125,12 @@ pub(crate) fn add_root_cuts(
         }
         prev_obj = Some(res.objective);
 
-        let cuts = generate_round(&committed, &integer_mask, &res.solution, &ws.basis);
+        let kind = if round_idx % 2 == 0 { CutKind::Gmi } else { CutKind::Mir };
+        let cuts = generate_round(&committed, &integer_mask, &res.solution, &ws.basis, kind);
         if cuts.is_empty() {
             break;
         }
         let candidate = append_ge_rows(&committed, &cuts);
-        // Reject the round if the augmented LP no longer solves to Optimal under
-        // the B&B solver (numerically unstable cuts): keep the last good LP.
         let check = solve_validate(&candidate, options, cut_deadline);
         if check.status != SolveStatus::Optimal {
             break;
@@ -154,21 +142,39 @@ pub(crate) fn add_root_cuts(
         }
     }
 
+    // Convert added Ge cut rows to Le before handing to B&B, so B&B node
+    // solves (presolve=false, primal simplex) use slacks (coeff +1) rather than
+    // surplus variables (coeff −1). Multi-round generation above uses Ge internally
+    // (same simplex path as the original single-kind loop) and only the final LP
+    // passed to B&B changes representation.
+    let lp = convert_cuts_to_le(committed, m_orig);
+
+    // Re-validate the Le form: negated rows (slacks vs. surplus) have different
+    // numerical properties under presolve=false. If the Le LP does not solve
+    // Optimally, fall back to the original cut-free LP so B&B is never handed
+    // an unsolvable root.
+    let le_check = solve_validate(&lp, options, cut_deadline);
+    let final_lp = if le_check.status == SolveStatus::Optimal {
+        lp
+    } else {
+        milp.lp.clone()
+    };
+
     MilpProblem {
-        lp: committed,
+        lp: final_lp,
         integer_vars: milp.integer_vars.clone(),
     }
 }
 
-/// Solve the cut-augmented candidate with the solver / presolve the B&B will use
-/// at the root, to confirm the added cuts did not make the relaxation
-/// numerically unsolvable.
+/// Validate the augmented LP (still as Ge) to confirm the added cuts did not
+/// make the relaxation numerically unsolvable.
 fn solve_validate(
     lp: &LpProblem,
     options: &SolverOptions,
     deadline: Option<std::time::Instant>,
 ) -> crate::problem::SolverResult {
     let opts = SolverOptions {
+        presolve: false,
         recover_warm_start_basis: false,
         warm_start: None,
         warm_start_lp: None,
@@ -178,12 +184,13 @@ fn solve_validate(
         dual_tol: options.dual_tol,
         threads: options.threads,
         tolerance: options.tolerance,
+        cancel_flag: options.cancel_flag.clone(),
         ..SolverOptions::default()
     };
     crate::lp::solve_lp_with(lp, &opts)
 }
 
-/// Solve the cut-generation LP via the primal simplex with presolve disabled so
+/// Solve the cut-generation LP via primal simplex with presolve disabled so
 /// the returned basis lives in `build_standard_form(lp)`'s column space.
 fn solve_cut_lp(
     lp: &LpProblem,
@@ -201,29 +208,24 @@ fn solve_cut_lp(
         primal_tol: options.primal_tol,
         dual_tol: options.dual_tol,
         threads: options.threads,
+        cancel_flag: options.cancel_flag.clone(),
         ..SolverOptions::default()
     };
     crate::lp::solve_lp_with(lp, &opts)
 }
 
-fn deadline_passed(deadline: Option<std::time::Instant>) -> bool {
-    deadline.is_some_and(|d| std::time::Instant::now() >= d)
-}
-
-/// Generate one round of GMI cuts from the optimal `basis` (legacy std-form
-/// column indices) and LP solution `x_star`.
+/// Generate one round of cuts from the optimal `basis` and LP solution `x_star`.
 fn generate_round(
     lp: &LpProblem,
     integer_mask: &[bool],
     x_star: &[f64],
     basis: &[usize],
+    kind: CutKind,
 ) -> Vec<CutRow> {
     let sf = build_standard_form(lp);
     if basis.len() != sf.m {
         return Vec::new();
     }
-    // An artificial still basic (index >= n_total) means the basis is not a clean
-    // structural+slack basis; skip rather than mis-index A_std.
     if basis.iter().any(|&j| j >= sf.n_total) {
         return Vec::new();
     }
@@ -238,16 +240,12 @@ fn generate_round(
         in_basis[j] = true;
     }
 
-    // Reconstruct the basis factorization and recompute the unscaled basic values
-    // beta = B^{-1} b_std (FTRAN). The basis column SET is scale-invariant, so the
-    // primal path's Ruiz scaling does not affect which columns are basic.
     let Ok(mut lu) = LuBasis::new_timed(&sf.a, basis, 0, None) else {
         return Vec::new();
     };
     let mut beta = sf.b.clone();
     lu.ftran_dense(&mut beta);
 
-    // Candidate source rows: basic, structural, integer-constrained, fractional.
     let mut sources: Vec<(usize, f64)> = Vec::new();
     for (i, &col) in basis.iter().enumerate() {
         if col >= sf.n_shifted {
@@ -264,13 +262,12 @@ fn generate_round(
         }
         sources.push((i, (f0 - 0.5).abs()));
     }
-    // Most-fractional first (closest to 0.5), capped per round.
     sources.sort_by(|a, b| a.1.total_cmp(&b.1));
     sources.truncate(MAX_CUTS_PER_ROUND);
 
     let mut cuts = Vec::new();
     for (i, _) in sources {
-        if let Some(cut) = build_gmi_cut(
+        if let Some(cut) = build_cut(
             &sf,
             &mut lu,
             &beta,
@@ -282,6 +279,7 @@ fn generate_round(
             lp,
             x_star,
             frac_tol,
+            kind,
         ) {
             cuts.push(cut);
         }
@@ -289,11 +287,11 @@ fn generate_round(
     cuts
 }
 
-/// Build the GMI cut from basis row `i` (whose basic variable is fractional).
+/// Build a cut from basis row `i`.
 /// Returns `None` when the cut is unusable (free-var support, degenerate, weak,
 /// or numerically unstable).
 #[allow(clippy::too_many_arguments)]
-fn build_gmi_cut(
+fn build_cut(
     sf: &StandardForm,
     lu: &mut LuBasis,
     beta: &[f64],
@@ -305,20 +303,18 @@ fn build_gmi_cut(
     lp: &LpProblem,
     x_star: &[f64],
     frac_tol: f64,
+    kind: CutKind,
 ) -> Option<CutRow> {
     let f0 = {
         let b = beta[i];
         b - b.floor()
     };
-    // f0 ∈ (frac_tol, 1-frac_tol) guaranteed by the caller's source filter.
     let one_minus_f0 = 1.0 - f0;
 
-    // rho = B^{-T} e_i (BTRAN of the i-th unit vector).
     let mut rho = vec![0.0; sf.m];
     rho[i] = 1.0;
     lu.btran_dense(&mut rho);
 
-    // Accumulate the cut G·x >= 1 - D from gamma_j · v_j over nonbasic columns.
     let mut g = vec![0.0; lp.num_vars];
     let mut d = 0.0_f64;
 
@@ -331,12 +327,23 @@ fn build_gmi_cut(
             continue;
         }
         let integral = j < sf.n_shifted && struct_cols[j].integral;
-        let gamma = gmi_coeff(alpha, f0, one_minus_f0, integral);
+        // MIR's `max(alpha,0)/f0` suppression for continuous nonbasics is only
+        // valid for original-problem structural variables. Slack columns (of any
+        // constraint, including UB rows and previous cut rows) must use GMI to
+        // guarantee integer hull membership.
+        let effective_kind = if matches!(kind, CutKind::Mir) && j >= sf.n_shifted {
+            CutKind::Gmi
+        } else {
+            kind
+        };
+        let gamma = match effective_kind {
+            CutKind::Gmi => gmi_coeff(alpha, f0, one_minus_f0, integral),
+            CutKind::Mir => mir_coeff(alpha, f0, one_minus_f0, integral),
+        };
         if gamma <= ZERO_TOL {
             continue;
         }
         if !accumulate_column(j, gamma, sf, struct_cols, slack_kinds, rows, lp, &mut g, &mut d) {
-            // Free-variable split column in the support: no affine image → reject.
             return None;
         }
     }
@@ -345,9 +352,7 @@ fn build_gmi_cut(
     finalize_cut(g, rhs, x_star, frac_tol)
 }
 
-/// GMI coefficient (always >= 0) for a nonbasic column with tableau entry
-/// `alpha`. `integral` selects the integer (fractional-part) formula; otherwise
-/// the continuous formula is used (always valid, possibly weaker).
+/// GMI coefficient (always >= 0) for a nonbasic column with tableau entry `alpha`.
 fn gmi_coeff(alpha: f64, f0: f64, one_minus_f0: f64, integral: bool) -> f64 {
     if integral {
         let f = (alpha - alpha.floor()).clamp(0.0, 1.0);
@@ -361,6 +366,16 @@ fn gmi_coeff(alpha: f64, f0: f64, one_minus_f0: f64, integral: bool) -> f64 {
     } else {
         -alpha / one_minus_f0
     }
+}
+
+/// MIR coefficient (always >= 0). Identical to GMI for all cases.
+///
+/// MIR and GMI produce the same cut coefficients for individual tableau rows.
+/// For continuous nonbasics with `alpha < 0`, the coefficient is `-alpha/(1-f₀)` —
+/// dropping this term (setting it to 0) can exclude integer-feasible solutions
+/// where the continuous variable takes a value above its lower bound.
+fn mir_coeff(alpha: f64, f0: f64, one_minus_f0: f64, integral: bool) -> f64 {
+    gmi_coeff(alpha, f0, one_minus_f0, integral)
 }
 
 /// Add `gamma · v_j` (where `v_j = d_j + g_j·x`) into the accumulators `g`, `d`.
@@ -381,12 +396,10 @@ fn accumulate_column(
         let sc = struct_cols[j];
         match sc.kind {
             StructKind::LbShift => {
-                // v = x_p - lb  (d = -lb, g_p = +1)
                 g[sc.var] += gamma;
                 *d += gamma * (-sc.offset);
             }
             StructKind::UbOnly => {
-                // v = ub - x_p  (d = ub, g_p = -1)
                 g[sc.var] -= gamma;
                 *d += gamma * sc.offset;
             }
@@ -395,37 +408,28 @@ fn accumulate_column(
     } else {
         match slack_kinds[j - sf.n_shifted] {
             Some(SlackKind::ConstraintLe(r)) => {
-                // v = b_r - A_r·x  (d = b_r, g = -A_r)
                 *d += gamma * lp.b[r];
                 for &(c, v) in &rows[r] {
                     g[c] -= gamma * v;
                 }
             }
             Some(SlackKind::ConstraintGe(r)) => {
-                // v = A_r·x - b_r  (d = -b_r, g = A_r)
                 *d += gamma * (-lp.b[r]);
                 for &(c, v) in &rows[r] {
                     g[c] += gamma * v;
                 }
             }
             Some(SlackKind::UbRow(p)) => {
-                // v = ub_p - x_p  (d = ub_p, g_p = -1)
                 let ub = lp.bounds[p].1;
                 g[p] -= gamma;
                 *d += gamma * ub;
             }
-            None => {
-                // A slack-range column that maps to None means the slack/kind
-                // table is inconsistent (should be unreachable). Dropping the
-                // term would silently strengthen the cut and risk invalidity.
-                return false;
-            }
+            None => return false,
         }
     }
     true
 }
 
-/// Dot product of standard-form column `j` with the dense vector `rho`.
 fn column_dot(a: &CscMatrix, j: usize, rho: &[f64]) -> f64 {
     let (rows, vals) = a.get_column(j).expect("valid std-form column index");
     rows.iter()
@@ -434,7 +438,6 @@ fn column_dot(a: &CscMatrix, j: usize, rho: &[f64]) -> f64 {
         .sum::<f64>()
 }
 
-/// Apply density / strength / stability guards and build the final `Ge` cut.
 fn finalize_cut(g: Vec<f64>, rhs: f64, x_star: &[f64], frac_tol: f64) -> Option<CutRow> {
     if !rhs.is_finite() || g.iter().any(|v| !v.is_finite()) {
         return None;
@@ -448,24 +451,20 @@ fn finalize_cut(g: Vec<f64>, rhs: f64, x_star: &[f64], frac_tol: f64) -> Option<
             min_abs = min_abs.min(a);
         }
     }
-    // Degenerate (all-zero) cut: 0 >= rhs. Dropping it is correct — a valid GMI
-    // can only degenerate by cancellation, never to a true `0 >= positive`.
     if max_abs <= ZERO_TOL {
         return None;
     }
     if max_abs / min_abs > GMI_MAX_COEF_DYNAMISM {
         return None;
     }
-    // Effectiveness: the cut must actually violate the current LP optimum.
     let lhs: f64 = g.iter().zip(x_star).map(|(&gi, &xi)| gi * xi).sum();
-    let violation = rhs - lhs; // Ge cut violated when g·x* < rhs
+    let violation = rhs - lhs;
     if violation <= frac_tol * (1.0 + rhs.abs()) {
         return None;
     }
     Some(CutRow { coeffs: g, rhs })
 }
 
-/// Build per-structural-column metadata.
 fn classify_struct_cols(sf: &StandardForm, integer_mask: &[bool]) -> Vec<StructCol> {
     let mut cols = vec![
         StructCol {
@@ -479,7 +478,6 @@ fn classify_struct_cols(sf: &StandardForm, integer_mask: &[bool]) -> Vec<StructC
     for (p, info) in sf.orig_var_info.iter().enumerate() {
         let is_int = integer_mask[p];
         if info.new_vars.len() == 2 {
-            // Free-variable split (x_plus, x_minus).
             for &(idx, _) in &info.new_vars {
                 cols[idx] = StructCol {
                     var: p,
@@ -492,12 +490,10 @@ fn classify_struct_cols(sf: &StandardForm, integer_mask: &[bool]) -> Vec<StructC
         }
         let (idx, coeff) = info.new_vars[0];
         let kind = if coeff > 0.0 {
-            StructKind::LbShift // x_std = x_p - lb
+            StructKind::LbShift
         } else {
-            StructKind::UbOnly // x_std = ub - x_p
+            StructKind::UbOnly
         };
-        // Integral in std space iff the variable is integer AND the shift is an
-        // integer (so x_std integrality ⇔ x_p integrality).
         let shift_integral = (info.offset - info.offset.round()).abs() <= ZERO_TOL;
         cols[idx] = StructCol {
             var: p,
@@ -509,13 +505,10 @@ fn classify_struct_cols(sf: &StandardForm, integer_mask: &[bool]) -> Vec<StructC
     cols
 }
 
-/// Build the slack-column → meaning map, replaying `build_standard_form`'s slack
-/// assignment order over the extended row set (original rows then UB rows).
 fn classify_slack_cols(lp: &LpProblem, sf: &StandardForm) -> Vec<Option<SlackKind>> {
     let n_slack = sf.n_total - sf.n_shifted;
     let mut kinds = vec![None; n_slack];
 
-    // UB rows are appended for variables with both bounds finite, in var order.
     let ub_row_vars: Vec<usize> = (0..lp.num_vars)
         .filter(|&p| {
             let (lo, hi) = lp.bounds[p];
@@ -524,7 +517,6 @@ fn classify_slack_cols(lp: &LpProblem, sf: &StandardForm) -> Vec<Option<SlackKin
         .collect();
 
     let mut s = 0usize;
-    // Original constraint rows.
     for (r, &ct) in lp.constraint_types.iter().enumerate() {
         match ct {
             ConstraintType::Le => {
@@ -535,10 +527,9 @@ fn classify_slack_cols(lp: &LpProblem, sf: &StandardForm) -> Vec<Option<SlackKin
                 kinds[s] = Some(SlackKind::ConstraintGe(r));
                 s += 1;
             }
-            ConstraintType::Eq => { /* no slack column */ }
+            ConstraintType::Eq => {}
         }
     }
-    // UB rows (all `Le`, always slacked).
     for &p in &ub_row_vars {
         assert!(
             s < n_slack,
@@ -551,7 +542,6 @@ fn classify_slack_cols(lp: &LpProblem, sf: &StandardForm) -> Vec<Option<SlackKin
     kinds
 }
 
-/// Sparse rows of `A` (row → list of (col, value)).
 fn row_lists(a: &CscMatrix, num_rows: usize) -> Vec<Vec<(usize, f64)>> {
     let mut rows = vec![Vec::new(); num_rows];
     for c in 0..a.ncols {
@@ -563,7 +553,8 @@ fn row_lists(a: &CscMatrix, num_rows: usize) -> Vec<Vec<(usize, f64)>> {
     rows
 }
 
-/// Return a new LP with the cut rows appended as `Ge` constraints.
+/// Append cuts as Ge rows during multi-round generation (preserves original
+/// simplex path; same numerical behavior as the original code).
 fn append_ge_rows(lp: &LpProblem, cuts: &[CutRow]) -> LpProblem {
     let m_old = lp.num_constraints;
     let n = lp.num_vars;
@@ -602,6 +593,47 @@ fn append_ge_rows(lp: &LpProblem, cuts: &[CutRow]) -> LpProblem {
 
     let mut out = LpProblem::new_general(lp.c.clone(), a, b, ctypes, lp.bounds.clone(), lp.name.clone())
         .expect("cut-augmented LP is valid");
+    out.obj_offset = lp.obj_offset;
+    out
+}
+
+/// Convert the Ge cut rows (indices `m_orig..`) to equivalent Le rows (`−g·x ≤ −rhs`).
+///
+/// B&B node solves run with presolve=false (primal simplex). Le slacks (coeff +1)
+/// are numerically better in that setting than Ge surplus variables (coeff −1).
+/// Multi-round generation ran on the Ge form (same simplex path as original code);
+/// only the LP handed to B&B has the Le representation.
+fn convert_cuts_to_le(lp: LpProblem, m_orig: usize) -> LpProblem {
+    if lp.num_constraints == m_orig {
+        return lp;
+    }
+    let m_total = lp.num_constraints;
+    let n = lp.num_vars;
+
+    let mut trip_rows: Vec<usize> = Vec::new();
+    let mut trip_cols: Vec<usize> = Vec::new();
+    let mut trip_vals: Vec<f64> = Vec::new();
+    for c in 0..lp.a.ncols {
+        let (rs, vs) = lp.a.get_column(c).expect("valid column");
+        for (&r, &v) in rs.iter().zip(vs) {
+            trip_rows.push(r);
+            trip_cols.push(c);
+            // Negate the coefficient for cut rows.
+            trip_vals.push(if r >= m_orig { -v } else { v });
+        }
+    }
+    let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_total, n)
+        .expect("cut-Le conversion is well-formed");
+
+    let mut b = lp.b[..m_orig].to_vec();
+    let mut ctypes = lp.constraint_types[..m_orig].to_vec();
+    for i in m_orig..m_total {
+        b.push(-lp.b[i]);
+        ctypes.push(ConstraintType::Le);
+    }
+
+    let mut out = LpProblem::new_general(lp.c.clone(), a, b, ctypes, lp.bounds.clone(), lp.name.clone())
+        .expect("cut-Le LP is valid");
     out.obj_offset = lp.obj_offset;
     out
 }

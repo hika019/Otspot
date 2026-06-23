@@ -57,11 +57,10 @@ fn parallel_path_wallclock_bounded_by_deadline_table_driven() {
     for (label, build) in problems.iter() {
         let prob = build();
         for &(n_starts, threads, deadline_ms) in cases.iter() {
-            let cfg = MultiStartConfig {
-                n_starts,
-                seed: 0xC0FFEE,
-                strategy: StartStrategy::RandomBox,
-            };
+            let mut cfg = MultiStartConfig::default();
+            cfg.n_starts = n_starts;
+            cfg.seed = 0xC0FFEE;
+            cfg.strategy = StartStrategy::RandomBox;
             let mut opts = SolverOptions::default();
             opts.timeout_secs = Some(deadline_ms as f64 / 1000.0);
             opts.threads = threads;
@@ -85,11 +84,10 @@ fn parallel_path_wallclock_bounded_at_near_zero_deadline() {
     // deadline 1ms (= 実質直ぐ越え) で大量 starts → shortcut で wall-clock 短く
     // (timeout_secs 経由 = public API、SolverOptions::deadline は pub(crate) のため)。
     let prob = build_indef_n(20, 5.0);
-    let cfg = MultiStartConfig {
-        n_starts: 16,
-        seed: 1,
-        strategy: StartStrategy::RandomBox,
-    };
+    let mut cfg = MultiStartConfig::default();
+    cfg.n_starts = 16;
+    cfg.seed = 1;
+    cfg.strategy = StartStrategy::RandomBox;
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(0.001); // 1ms
     opts.threads = 4;
@@ -109,11 +107,10 @@ fn serial_path_also_short_circuits() {
     // threads=1 の serial path でも take_while + worker check で deadline 超過後の
     // worker が起動しないこと (= serial path の既存挙動を保護)。
     let prob = build_indef_n(20, 5.0);
-    let cfg = MultiStartConfig {
-        n_starts: 16,
-        seed: 1,
-        strategy: StartStrategy::RandomBox,
-    };
+    let mut cfg = MultiStartConfig::default();
+    cfg.n_starts = 16;
+    cfg.seed = 1;
+    cfg.strategy = StartStrategy::RandomBox;
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(0.2);
     opts.threads = 1;

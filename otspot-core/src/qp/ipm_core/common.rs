@@ -222,13 +222,8 @@ pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx)
 
 pub(crate) fn timeout_result(n: usize) -> SolverResult {
     SolverResult {
-        status: SolveStatus::Timeout,
-        objective: f64::INFINITY,
         solution: vec![0.0; n],
-        dual_solution: vec![],
-        bound_duals: vec![],
-        iterations: 0,
-        ..Default::default()
+        ..SolverResult::timeout()
     }
 }
 

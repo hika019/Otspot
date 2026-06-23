@@ -24,6 +24,27 @@ pub(crate) enum PostsolveStep {
         orig_row: usize,
         orig_col: usize,
         value: f64,
+        /// A[orig_row, orig_col] coefficient.
+        coeff: f64,
+        /// (row_k, A[row_k, orig_col]) for all rows k != orig_row that were active
+        /// at elimination time. Used to recover y[orig_row] via stationarity.
+        col_orig_entries: Vec<(usize, f64)>,
+        /// Objective coefficient c[orig_col] at elimination time.
+        c_orig: f64,
+    },
+    /// Le/Ge singleton row absorbed into a variable bound.
+    #[allow(dead_code)]
+    SingletonInequalityRow {
+        orig_row: usize,
+        orig_col: usize,
+        coeff: f64,
+        old_lb: f64,
+        old_ub: f64,
+        /// (row_k, A[row_k, orig_col]) for all rows k != orig_row that were active
+        /// at elimination time. Used for stationarity-based dual recovery.
+        col_orig_entries: Vec<(usize, f64)>,
+        /// Objective coefficient c[orig_col] at elimination time.
+        c_orig: f64,
     },
     RedundantConstraint {
         orig_row: usize,
@@ -42,6 +63,16 @@ pub(crate) enum PostsolveStep {
         others: Vec<(usize, f64)>,
         col_orig_entries: Vec<(usize, f64)>,
         c_orig: f64,
+    },
+    /// Forcing row: all variables forced to their contributing bounds.
+    ForcingRow {
+        orig_row: usize,
+        fixed_vars: Vec<(usize, f64, f64, f64)>,
+        /// (col, A[orig_row, col]) for all columns active at elimination time.
+        /// Snapshot used in postsolve for stationarity-based dual recovery,
+        /// bypassing the activity-based binding check that would read
+        /// partially-restored LIFO solutions.
+        row_orig_entries: Vec<(usize, f64)>,
     },
 }
 

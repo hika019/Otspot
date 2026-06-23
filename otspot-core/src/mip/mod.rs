@@ -6,6 +6,7 @@
 //! MIQP is out of scope and reported as [`SolveStatus::NonConvex`].
 
 pub(crate) mod branch;
+pub(crate) mod conflict;
 pub(crate) mod cuts;
 pub(crate) mod heuristics;
 pub(crate) mod node;
@@ -15,18 +16,22 @@ pub(crate) mod queue;
 
 pub use problem::{MilpProblem, MipProblemError, MiqpProblem};
 
-use crate::options::{MipConfig, SolverOptions};
+use crate::linalg::timeout::deadline_reached;
+use crate::options::{MipBranching, MipConfig, SolverOptions, WarmStartBasis};
 use crate::problem::certificate::BoundGapCertificate;
-use crate::problem::{SolveStatus, SolverResult};
+use crate::problem::{ConstraintType, SolveStatus, SolverResult};
 use crate::qp::global::pruning::{should_prune, within_gap};
+use crate::sparse::CscMatrix;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use branch::{
-    branch_bounds, is_integer_feasible, select_branching_variable, split_integer_box,
-    widest_splittable_integer,
+    branch_bounds, is_integer_feasible, select_branching_variable,
+    select_branching_variable_reliability, split_integer_box, strong_branch_candidates,
+    widest_splittable_integer, PseudocostState,
 };
 use node::MipNode;
-use queue::NodeQueue;
+use queue::{NodeQueue, DIVE_FREQUENCY, DIVE_FREQUENCY_NO_INCUMBENT, MAX_DIVE_DEPTH};
 
 /// A continuous relaxation the MIP branch-and-bound driver can solve over
 /// arbitrary variable bounds. MILP uses an LP relaxation; convex MIQP uses a
@@ -48,6 +53,28 @@ pub(crate) trait Relaxation {
     fn skip_node_presolve(&self) -> bool {
         false
     }
+    /// Return constraint data for per-node bound propagation, or `None` to skip it.
+    ///
+    /// MILP returns `Some((&A, &b, &constraint_types))` so the B&B driver can call
+    /// [`presolve::tighten_bounds_at_node`] before each LP solve. MIQP returns `None`
+    /// because it relies on per-node Ruiz scaling (presolve) for conditioning instead.
+    fn propagation_data(&self) -> Option<(&CscMatrix, &[f64], &[ConstraintType])> {
+        None
+    }
+
+    /// Run the RINS heuristic: fix integer variables where the LP relaxation and
+    /// the incumbent agree and solve a sub-MIP over the remaining variables.
+    /// Returns `None` for MIQP (default) or when RINS is disabled.
+    fn run_rins(
+        &self,
+        _x_lp: &[f64],
+        _x_inc: &[f64],
+        _cfg: &MipConfig,
+        _deadline: &Option<std::time::Instant>,
+        _opts: &SolverOptions,
+    ) -> Option<SolverResult> {
+        None
+    }
 }
 
 /// Search statistics returned by [`solve_milp_with_stats`] / [`solve_miqp_with_stats`].
@@ -56,13 +83,18 @@ pub(crate) trait Relaxation {
 /// its behaviour.  The timing fields help separate *exploration explosion* (many
 /// nodes) from *per-node cost* (slow relaxation solves).
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct MipStats {
     /// Relaxation solves performed (root included).
     pub nodes_processed: usize,
+    /// Number of integer-variable bound fixings applied by reduced-cost fixing.
+    pub rc_vars_fixed: usize,
     /// Maximum branching depth reached.
     pub max_depth_seen: usize,
     /// Nodes discarded by bound/infeasibility before branching.
     pub pruned: usize,
+    /// Nodes pruned by bound propagation before the LP/QP solve.
+    pub propagation_pruned: usize,
     /// Number of incumbent improvements (including the first one found).
     pub incumbent_updates: usize,
 
@@ -116,6 +148,16 @@ pub struct MipStats {
     /// isolates root gap closure from downstream node-count noise.
     /// `NEG_INFINITY` when no root relaxation solved to Optimal.
     pub root_lp_bound: f64,
+
+    /// Number of RINS heuristic calls attempted.
+    pub rins_calls: usize,
+    /// Number of times RINS found an improving incumbent.
+    pub rins_improvements: usize,
+
+    /// Number of conflict clauses learned from infeasible nodes.
+    pub conflict_clauses_learned: usize,
+    /// Number of nodes pruned by conflict analysis (LP solve skipped).
+    pub conflict_pruned: usize,
 }
 
 /// Solve a MILP to (relative) ε-optimality via branch-and-bound.
@@ -154,12 +196,29 @@ pub fn solve_milp_with_stats(
     // integer rounding return early here before entering the B&B.
     if !problem.integer_vars.is_empty() {
         let mask = integer_mask(problem.lp.num_vars, &problem.integer_vars);
-        // Root presolve: coefficient propagation tightens integer bounds. Build the
-        // effective problem (bound-tightened clone or the original) so the cut and
-        // B&B stages share one code path.
-        let problem_bt: MilpProblem = match presolve::tighten_integer_bounds(&problem.lp, &mask) {
-            None => return (SolverResult::infeasible(), MipStats::default()),
-            Some(tightened) if tightened != problem.lp.bounds => {
+        // Root presolve: multi-pass propagation + probing tightens integer bounds.
+        let mut tightened = problem.lp.bounds.clone();
+        let presolve_t0 = std::time::Instant::now();
+        let presolve_ok = presolve::tighten_bounds_with_probing(
+            &problem.lp.a,
+            &problem.lp.b,
+            &problem.lp.constraint_types,
+            &mut tightened,
+            &problem.integer_vars,
+            deadline,
+        );
+        let presolve_ms = presolve_t0.elapsed().as_secs_f64() * 1000.0;
+        let problem_bt: MilpProblem = match presolve_ok {
+            None => {
+                // Infeasibility detected at presolve. Report the presolve time as
+                // relaxation_time_infeasible_ms so callers see a nonzero infeasibility cost.
+                let stats = MipStats {
+                    relaxation_time_infeasible_ms: presolve_ms,
+                    ..Default::default()
+                };
+                return (SolverResult::infeasible(), stats);
+            }
+            Some(_) if tightened != problem.lp.bounds => {
                 let mut lp_bt = problem.lp.clone();
                 lp_bt.bounds = tightened;
                 MilpProblem {
@@ -182,9 +241,6 @@ pub fn solve_milp_with_stats(
         // Root GMI cuts tighten the LP relaxation without removing any
         // integer-feasible point, so the optimum is unchanged while the tree
         // shrinks. The added rows leave `num_vars` (hence `mask`) untouched.
-        // KNOWN OPEN BUG: cuts=true adds Ge rows; skip_node_presolve=true then sets
-        // presolve=false for every B&B node, which can yield garbage incumbents on
-        // Ge-heavy instances (e.g. mas76 --cuts → obj≈1e12). True cause unidentified.
         let effective = if cfg.cuts {
             cuts::add_root_cuts(&problem_bt, &opts_with_dl, cfg)
         } else {
@@ -264,6 +320,69 @@ fn solve_mip_with_stats<R: Relaxation>(
     solve_mip_core(problem, options, cfg, mask, None)
 }
 
+/// Solve candidate LPs for strong branching and return per-variable scores.
+///
+/// For each candidate variable `j`, solves down and up child LPs, records the
+/// objective improvements as pseudocost observations, and returns the combined
+/// branching score keyed by `j`.  Candidates that fail to solve to Optimal are
+/// skipped (no pseudocost update, no score entry).
+#[allow(clippy::too_many_arguments)]
+fn measure_strong_branch_scores<R: Relaxation>(
+    problem: &R,
+    parent_bounds: &[(f64, f64)],
+    parent_sol: &[f64],
+    parent_obj: f64,
+    candidates: &[usize],
+    j_to_k: &HashMap<usize, usize>,
+    shared: &SolverOptions,
+    pc: &mut PseudocostState,
+) -> HashMap<usize, f64> {
+    let mut scores = HashMap::new();
+    let mut sb_opts = shared.clone();
+    sb_opts.warm_start = None;
+
+    for &j in candidates {
+        let v = parent_sol[j];
+        let (down_bounds, up_bounds) = branch::branch_bounds(parent_bounds, j, v);
+
+        let r_down = problem.solve(&down_bounds, &sb_opts);
+        let r_up = problem.solve(&up_bounds, &sb_opts);
+
+        let down_ok = matches!(r_down.status, SolveStatus::Optimal | SolveStatus::Infeasible);
+        let up_ok = matches!(r_up.status, SolveStatus::Optimal | SolveStatus::Infeasible);
+
+        if !down_ok || !up_ok {
+            continue;
+        }
+
+        let d_down = if r_down.status == SolveStatus::Infeasible {
+            f64::INFINITY
+        } else {
+            (r_down.objective - parent_obj).max(0.0)
+        };
+        let d_up = if r_up.status == SolveStatus::Infeasible {
+            f64::INFINITY
+        } else {
+            (r_up.objective - parent_obj).max(0.0)
+        };
+
+        if let Some(&k) = j_to_k.get(&j) {
+            let f_down = v - v.floor();
+            let f_up = v.ceil() - v;
+            if d_down.is_finite() && f_down > 1e-12 {
+                pc.record_down(k, d_down / f_down);
+            }
+            if d_up.is_finite() && f_up > 1e-12 {
+                pc.record_up(k, d_up / f_up);
+            }
+        }
+
+        let score = branch::pseudocost_score(d_down, d_up);
+        scores.insert(j, score);
+    }
+    scores
+}
+
 /// Core B&B driver that accepts a precomputed `integer_mask` to avoid
 /// recomputing it when the caller (e.g. `solve_milp_with_stats`) already has it.
 ///
@@ -284,7 +403,6 @@ fn solve_mip_core<R: Relaxation>(
         ..MipStats::default()
     };
 
-    // deadline: prefer an explicit deadline, else derive from timeout_secs.
     let deadline = options.deadline.or_else(|| {
         options
             .timeout_secs
@@ -296,28 +414,24 @@ fn solve_mip_core<R: Relaxation>(
     shared.multistart = None;
     shared.global_optimization = None;
 
-    // Degenerate: no integer variables → pure LP/QP passthrough.
-    // Return before applying MIP-specific warm-start mutations so the caller's
-    // `warm_start` and `recover_warm_start_basis` settings are preserved.
     if problem.integer_vars().is_empty() {
         return (problem.solve(problem.root_bounds(), &shared), stats);
     }
 
-    // Enable basis recovery so LP solves return warm_start_basis for child nodes.
     shared.recover_warm_start_basis = true;
     shared.use_lp_crash_basis = false;
     shared.warm_start = None;
-    // MILP nodes skip per-node presolve (redundant re-reduction that also discards
-    // the propagated warm-start basis). MIQP keeps it (IPM needs Ruiz scaling).
-    // Placed after the no-integer-var passthrough above, so a pure-LP solve still
-    // gets full presolve.
     if problem.skip_node_presolve() {
         shared.presolve = false;
     }
 
-    let mut state = MipState::new();
+    let integer_vars = problem.integer_vars().to_vec();
+    let j_to_k: HashMap<usize, usize> =
+        integer_vars.iter().enumerate().map(|(k, &j)| (j, k)).collect();
+    let use_reliability = cfg.branching == MipBranching::Reliability;
+    let mut pc = PseudocostState::new(integer_vars.len());
 
-    // Seed with an initial incumbent (e.g., from the feasibility pump heuristic).
+    let mut state = MipState::new();
     if let Some(inc) = initial_incumbent {
         if state.consider(&inc) {
             stats.incumbent_updates += 1;
@@ -326,53 +440,104 @@ fn solve_mip_core<R: Relaxation>(
     }
 
     let mut q = NodeQueue::new();
-    // The root carries no valid lower bound yet (−∞): a bound is adopted only from an
-    // Optimal relaxation. The loop solves the root uniformly with every other node, so
-    // Infeasible / Unbounded / stalling roots are all handled in one place.
-    q.push(MipNode::root(
-        problem.root_bounds().to_vec(),
-        f64::NEG_INFINITY,
-    ));
+    q.push(MipNode::root(problem.root_bounds().to_vec(), f64::NEG_INFINITY));
 
-    let mut open_lb = f64::INFINITY; // smallest valid bound over unexplored regions
-    let mut had_open = false; // any region left unexplored?
-    let mut proof_uncertain = false; // an unexplored region stems from a non-Optimal relaxation
+    let mut open_lb = f64::INFINITY;
+    let mut had_open = false;
+    let mut proof_uncertain = false;
     let mut deadline_stop = false;
     let mut maxnodes_stop = false;
     let mut unbounded = false;
-    let mut root_solved = false; // first relaxation solve distinguishes root timing
+    let mut root_solved = false;
+    let mut nodes_since_dive: usize = 0;
+    let mut dive_start_depth: usize = 0;
+    let mut conflicts = conflict::ConflictStore::new();
+    let root_bounds = problem.root_bounds().to_vec();
 
-    while let Some(node) = q.pop() {
-        if deadline_hit(&deadline) {
+    while let Some(mut node) = q.pop() {
+        // --- Stop conditions ---
+        if deadline_reached(deadline) {
             open_lb = open_lb.min(node.lower_bound);
             had_open = true;
             deadline_stop = true;
+            if q.is_diving() {
+                q.end_dive();
+            }
             break;
         }
         if stats.nodes_processed >= cfg.max_nodes {
             open_lb = open_lb.min(node.lower_bound);
             had_open = true;
             maxnodes_stop = true;
+            if q.is_diving() {
+                q.end_dive();
+            }
             break;
         }
 
-        // Fathom by the inherited (parent) bound before spending a relaxation solve.
-        if let Some(inc) = state.incumbent_obj {
-            if should_prune(node.lower_bound, Some(inc), cfg.gap_tol) {
-                stats.pruned += 1;
-                continue;
+        // --- Dive management: start a dive every DIVE_FREQUENCY best-bound pops ---
+        if !q.is_diving() {
+            nodes_since_dive += 1;
+            let freq = if state.incumbent_obj.is_none() {
+                DIVE_FREQUENCY_NO_INCUMBENT
+            } else {
+                DIVE_FREQUENCY
+            };
+            if nodes_since_dive >= freq {
+                nodes_since_dive = 0;
+                dive_start_depth = node.depth;
+                q.start_dive();
             }
         }
 
+        // --- Incumbent-bound pruning and conflict pruning ---
+        if let Some(inc) = state.incumbent_obj {
+            if should_prune(node.lower_bound, Some(inc), cfg.gap_tol) {
+                stats.pruned += 1;
+                if q.is_diving() {
+                    q.end_dive();
+                }
+                continue;
+            }
+        }
+        if node.depth > 0 && conflicts.is_conflicted(&node.var_bounds) {
+            stats.pruned += 1;
+            stats.conflict_pruned += 1;
+            continue;
+        }
+
+        // --- Per-node bound propagation (MILP only; MIQP returns None) ---
+        let tightened = if let Some((prop_a, prop_b, prop_ct)) = problem.propagation_data() {
+            match presolve::tighten_bounds_at_node(
+                problem.num_vars(),
+                prop_a,
+                prop_b,
+                prop_ct,
+                &node.var_bounds,
+                &mask,
+            ) {
+                Ok(tb) => Some(tb),
+                Err(()) => {
+                    stats.pruned += 1;
+                    stats.propagation_pruned += 1;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let solve_bounds: &[(f64, f64)] = tightened.as_deref().unwrap_or(&node.var_bounds);
+
+        // --- Relaxation solve ---
         let scale_before = crate::presolve::scaling::lp_scale_profile_snapshot();
         let fallback_before = crate::simplex::dual_advanced::fallback_profile_snapshot();
         let t0 = Instant::now();
         let res = if let Some(ref ws) = node.warm_start {
             let mut no = shared.clone();
             no.warm_start = Some(ws.clone());
-            problem.solve(&node.var_bounds, &no)
+            problem.solve(solve_bounds, &no)
         } else {
-            problem.solve(&node.var_bounds, &shared)
+            problem.solve(solve_bounds, &shared)
         };
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let scale_delta = crate::presolve::scaling::lp_scale_profile_delta(
@@ -383,155 +548,103 @@ fn solve_mip_core<R: Relaxation>(
             fallback_before,
             crate::simplex::dual_advanced::fallback_profile_snapshot(),
         );
+        accumulate_node_stats(
+            &mut stats,
+            elapsed_ms,
+            &scale_delta,
+            &fallback_delta,
+            &res,
+            &mut root_solved,
+            node.depth,
+        );
 
-        stats.nodes_processed += 1;
-        stats.max_depth_seen = stats.max_depth_seen.max(node.depth);
-
-        // Accumulate timing.
-        stats.relaxation_time_total_ms += elapsed_ms;
-        if !root_solved {
-            stats.relaxation_time_root_ms = elapsed_ms;
-            stats.lp_scale_us_root += scale_delta.scale_us;
-            stats.lp_scale_calls_root += scale_delta.calls;
-            if let Some(tb) = res.timing_breakdown {
-                stats.lp_solve_us_root += tb.solve_us;
-            }
-            root_solved = true;
-        } else {
-            stats.relaxation_time_desc_ms += elapsed_ms;
-            stats.lp_scale_us_desc += scale_delta.scale_us;
-            stats.lp_scale_calls_desc += scale_delta.calls;
-            if let Some(tb) = res.timing_breakdown {
-                stats.lp_solve_us_desc += tb.solve_us;
-            }
-        }
-        stats.fallback_ub_violation_out_of_scope += fallback_delta.ub_violation_out_of_scope;
-        stats.fallback_phase1_bound_violation += fallback_delta.phase1_bound_violation;
-        stats.fallback_crash_infeasible += fallback_delta.crash_infeasible;
-        match res.status {
-            SolveStatus::Optimal => stats.relaxation_time_optimal_ms += elapsed_ms,
-            SolveStatus::Infeasible => stats.relaxation_time_infeasible_ms += elapsed_ms,
-            _ => {}
-        }
-        if let Some(tb) = res.timing_breakdown {
-            stats.lp_presolve_us_total += tb.presolve_us;
-            stats.lp_solve_us_total += tb.solve_us;
-            stats.lp_postsolve_us_total += tb.postsolve_us;
-        }
-
+        // --- Status dispatch ---
         match res.status {
             SolveStatus::Infeasible => {
                 stats.pruned += 1;
+                if q.is_diving() {
+                    q.end_dive();
+                }
+                conflicts.learn(&node.var_bounds, &root_bounds);
+                stats.conflict_clauses_learned = conflicts.len();
                 continue;
             }
             SolveStatus::Unbounded => {
                 unbounded = true;
+                if q.is_diving() {
+                    q.end_dive();
+                }
                 break;
             }
             SolveStatus::Timeout => {
                 open_lb = open_lb.min(node.lower_bound);
                 had_open = true;
                 deadline_stop = true;
+                if q.is_diving() {
+                    q.end_dive();
+                }
                 break;
             }
             _ => {}
         }
 
-        // Trust ONLY an exactly-Optimal relaxation (this includes the fixed-point
-        // evaluator, which returns Optimal) as a lower bound. A SuboptimalSolution
-        // primal objective is an UPPER bound on the relaxation optimum, NOT a lower
-        // bound — using it to fathom would over-prune and could drop the true optimum
-        // (the box-only off-diagonal silent-wrong).
+        // --- Node outcome: prune / leaf / branch ---
         let trusted = matches!(res.status, SolveStatus::Optimal) && !res.solution.is_empty();
-
-        if trusted {
-            // Optimal relaxation objective is a valid lower bound for this region.
-            // The first processed node is the root (best-bound queue, root pushed
-            // first): record its bound to isolate root cut gap closure.
-            if stats.nodes_processed == 1 {
-                stats.root_lp_bound = res.objective;
-            }
-            let node_lb = node.lower_bound.max(res.objective);
-
-            if let Some(inc) = state.incumbent_obj {
-                if should_prune(node_lb, Some(inc), cfg.gap_tol) {
-                    stats.pruned += 1;
-                    continue;
+        match process_node_outcome(
+            problem,
+            &mut node,
+            &res,
+            trusted,
+            &mut state,
+            &mut stats,
+            cfg,
+            &shared,
+            &mask,
+            &integer_vars,
+            &j_to_k,
+            &mut pc,
+            use_reliability,
+            &deadline,
+            dive_start_depth,
+        ) {
+            NodeAction::Skip { end_dive } => {
+                if end_dive && q.is_diving() {
+                    q.end_dive();
                 }
-            }
-
-            // Integer-feasible Optimal relaxation → incumbent (feasible point, exact UB).
-            if is_integer_feasible(&res.solution, &mask, cfg.integer_feas_tol) {
-                if state.consider(&res) {
-                    stats.incumbent_updates += 1;
-                }
-                continue; // integer-feasible leaf — nothing to branch on
-            }
-
-            if node.depth + 1 > cfg.max_depth {
-                open_lb = open_lb.min(node_lb);
-                had_open = true;
                 continue;
             }
-
-            // Guided branching on the most-fractional integer variable.
-            let jb = select_branching_variable(
-                &res.solution,
-                &mask,
-                cfg.integer_feas_tol,
-                cfg.branching,
-            )
-            .expect("a non-integer-feasible Optimal relaxation has a fractional integer var");
-            let (down, up) = branch_bounds(&node.var_bounds, jb, res.solution[jb]);
-            // Propagate parent basis to children. Skip warm-start when the
-            // branching variable's bound type changes (e.g. ub=∞→finite adds
-            // a UB row in standard form, invalidating basis indices). The
-            // up-branch typically triggers lb-violation and cold-starts anyway.
-            let child_ws = res.warm_start_basis.clone();
-            let down_ws = if bound_layout_changes(&node.var_bounds, &down, jb) {
-                None
-            } else {
-                child_ws.clone()
-            };
-            let up_ws = if bound_layout_changes(&node.var_bounds, &up, jb) {
-                None
-            } else {
-                child_ws
-            };
-            q.push(node.child_warm(down, node_lb, down_ws));
-            q.push(node.child_warm(up, node_lb, up_ws));
-        } else {
-            // Relaxation did not solve to Optimal: a SuboptimalSolution from an IPM stall
-            // (box-only off-diagonal QP), MaxIterations, or NumericalError on a region
-            // with no interior (e.g. an equality constraint pins it to a point). Its
-            // objective is NOT a valid lower bound, so neither fathom nor tighten by it.
-            // Fall back to integer-box bisection so the search still reaches an all-fixed
-            // leaf (solved exactly by the fixed-point evaluator), never silently dropping
-            // a region. The inherited (valid) parent bound is carried forward.
-            match widest_splittable_integer(&node.var_bounds, &mask) {
-                Some(_) if node.depth + 1 > cfg.max_depth => {
-                    open_lb = open_lb.min(node.lower_bound);
-                    had_open = true;
+            NodeAction::OpenLb { node_lb, uncertain, end_dive } => {
+                open_lb = open_lb.min(node_lb);
+                had_open = true;
+                if uncertain {
                     proof_uncertain = true;
                 }
-                Some(jb) => {
-                    let (down, up) = split_integer_box(&node.var_bounds, jb);
-                    q.push(node.child(down, node.lower_bound));
-                    q.push(node.child(up, node.lower_bound));
+                if end_dive && q.is_diving() {
+                    q.end_dive();
                 }
-                None => {
-                    // No integer box left to split and the relaxation is unsolvable
-                    // (e.g. continuous variables in a no-interior region). The region is
-                    // left unexplored without a reliable bound → mark the proof uncertain
-                    // so the final status never falsely claims Optimal.
-                    open_lb = open_lb.min(node.lower_bound);
-                    had_open = true;
-                    proof_uncertain = true;
+                continue;
+            }
+            NodeAction::PushChildren { node_lb, down, up, kind, end_dive } => {
+                if end_dive && q.is_diving() {
+                    q.end_dive();
+                }
+                match kind {
+                    ChildKind::Branched { jb, res_obj, jb_val, down_ws, up_ws } => {
+                        q.push(node.child_branched(down, node_lb, down_ws, jb, false, res_obj, jb_val));
+                        q.push(node.child_branched(up, node_lb, up_ws, jb, true, res_obj, jb_val));
+                    }
+                    ChildKind::Split => {
+                        q.push(node.child(down, node_lb));
+                        q.push(node.child(up, node_lb));
+                    }
                 }
             }
         }
     }
 
+    if q.is_diving() {
+        q.end_dive();
+    }
     if unbounded {
         return (SolverResult::unbounded(), stats);
     }
@@ -545,17 +658,9 @@ fn solve_mip_core<R: Relaxation>(
     match state.incumbent.take() {
         Some(mut inc) => {
             let inc_obj = state.incumbent_obj.expect("incumbent objective set");
-            // Proven optimal only when (a) no unexplored region can beat the incumbent
-            // by more than the gap (within_gap on a *valid* lower bound), AND (b) no
-            // region was left unresolved by a non-Optimal relaxation. Otherwise we still
-            // return the incumbent (possibly suboptimal) but never disguise it as a
-            // proven optimum.
             let proven = !proof_uncertain && within_gap(inc_obj, remaining_lb, cfg.gap_tol);
             inc.solution = round_integers(inc.solution, problem.integer_vars());
             inc.status = if proven {
-                // Clamp remaining_lb to inc_obj: when the queue is fully drained
-                // (no open regions), remaining_lb = ∞ and the effective lower bound
-                // equals the incumbent itself (gap = 0).
                 let effective_lb = remaining_lb.min(inc_obj);
                 let scale = 1.0_f64.max(inc_obj.abs());
                 let gap_rel = (inc_obj - effective_lb) / scale;
@@ -577,6 +682,298 @@ fn solve_mip_core<R: Relaxation>(
             finalize_no_incumbent(interrupted, had_open, q.is_empty(), deadline_stop),
             stats,
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B&B node processing helpers
+// ---------------------------------------------------------------------------
+
+/// Action the B&B loop should take after processing a node's outcome.
+enum NodeAction {
+    /// Skip node (pruned or integer-feasible leaf). End dive when `end_dive`.
+    Skip { end_dive: bool },
+    /// Record open lower bound (max-depth or proof-uncertain region).
+    /// Mark `proof_uncertain` when `uncertain`. End dive when `end_dive`.
+    OpenLb { node_lb: f64, uncertain: bool, end_dive: bool },
+    /// Push two child nodes. End dive when `end_dive`.
+    PushChildren {
+        node_lb: f64,
+        down: Vec<(f64, f64)>,
+        up: Vec<(f64, f64)>,
+        kind: ChildKind,
+        end_dive: bool,
+    },
+}
+
+/// Metadata distinguishing trusted-Optimal branches from non-Optimal bisections.
+enum ChildKind {
+    /// Trusted (Optimal) branch: children carry warm-start bases and pseudocost metadata.
+    Branched {
+        jb: usize,
+        res_obj: f64,
+        /// Parent LP solution value at `jb`; used to compute per-unit pseudocost.
+        jb_val: f64,
+        down_ws: Option<WarmStartBasis>,
+        up_ws: Option<WarmStartBasis>,
+    },
+    /// Non-Optimal bisection on widest integer interval; no warm-start or metadata.
+    Split,
+}
+
+/// Accumulate per-node timing and profiling counters into `stats`.
+fn accumulate_node_stats(
+    stats: &mut MipStats,
+    elapsed_ms: f64,
+    scale_delta: &crate::presolve::scaling::LpScaleProfileSnapshot,
+    fallback_delta: &crate::simplex::dual_advanced::SimplexFallbackSnapshot,
+    res: &SolverResult,
+    root_solved: &mut bool,
+    node_depth: usize,
+) {
+    stats.nodes_processed += 1;
+    stats.max_depth_seen = stats.max_depth_seen.max(node_depth);
+    stats.relaxation_time_total_ms += elapsed_ms;
+    if !*root_solved {
+        stats.relaxation_time_root_ms = elapsed_ms;
+        stats.lp_scale_us_root += scale_delta.scale_us;
+        stats.lp_scale_calls_root += scale_delta.calls;
+        if let Some(tb) = res.timing_breakdown {
+            stats.lp_solve_us_root += tb.solve_us;
+        }
+        *root_solved = true;
+    } else {
+        stats.relaxation_time_desc_ms += elapsed_ms;
+        stats.lp_scale_us_desc += scale_delta.scale_us;
+        stats.lp_scale_calls_desc += scale_delta.calls;
+        if let Some(tb) = res.timing_breakdown {
+            stats.lp_solve_us_desc += tb.solve_us;
+        }
+    }
+    stats.fallback_ub_violation_out_of_scope += fallback_delta.ub_violation_out_of_scope;
+    stats.fallback_phase1_bound_violation += fallback_delta.phase1_bound_violation;
+    stats.fallback_crash_infeasible += fallback_delta.crash_infeasible;
+    match res.status {
+        SolveStatus::Optimal => stats.relaxation_time_optimal_ms += elapsed_ms,
+        SolveStatus::Infeasible => stats.relaxation_time_infeasible_ms += elapsed_ms,
+        _ => {}
+    }
+    if let Some(tb) = res.timing_breakdown {
+        stats.lp_presolve_us_total += tb.presolve_us;
+        stats.lp_solve_us_total += tb.solve_us;
+        stats.lp_postsolve_us_total += tb.postsolve_us;
+    }
+}
+
+/// Select the variable to branch on for an Optimal relaxation solution.
+///
+/// With `use_reliability`, runs strong-branching trials for candidates with
+/// insufficient pseudocost observations, then falls back to reliability
+/// pseudocost selection. Without it, delegates to the configured heuristic
+/// (most-infeasible, least-infeasible, etc.).
+#[allow(clippy::too_many_arguments)]
+fn pick_branch_var<R: Relaxation>(
+    problem: &R,
+    node_bounds: &[(f64, f64)],
+    sol: &[f64],
+    obj: f64,
+    mask: &[bool],
+    integer_vars: &[usize],
+    j_to_k: &HashMap<usize, usize>,
+    shared: &SolverOptions,
+    cfg: &MipConfig,
+    deadline: &Option<Instant>,
+    pc: &mut PseudocostState,
+    use_reliability: bool,
+) -> usize {
+    if use_reliability {
+        let sb_cands =
+            strong_branch_candidates(sol, mask, integer_vars, cfg.integer_feas_tol, pc);
+        let strong_scores = if !sb_cands.is_empty() && !deadline_reached(*deadline) {
+            measure_strong_branch_scores(
+                problem, node_bounds, sol, obj, &sb_cands, j_to_k, shared, pc,
+            )
+        } else {
+            HashMap::new()
+        };
+        select_branching_variable_reliability(
+            sol,
+            mask,
+            integer_vars,
+            cfg.integer_feas_tol,
+            pc,
+            if strong_scores.is_empty() { None } else { Some(&strong_scores) },
+        )
+        .expect("non-integer-feasible Optimal relaxation has a fractional integer var")
+    } else {
+        select_branching_variable(sol, mask, cfg.integer_feas_tol, cfg.branching)
+            .expect("non-integer-feasible Optimal relaxation has a fractional integer var")
+    }
+}
+
+/// Attempt a RINS heuristic call and update stats/incumbent when it improves.
+fn try_rins<R: Relaxation>(
+    problem: &R,
+    stats: &mut MipStats,
+    state: &mut MipState,
+    cfg: &MipConfig,
+    deadline: &Option<Instant>,
+    opts: &SolverOptions,
+    rel_sol: &[f64],
+) {
+    if !cfg.rins_enabled
+        || !stats.nodes_processed.is_multiple_of(heuristics::rins::RINS_INTERVAL)
+        || state.incumbent_obj.is_none()
+    {
+        return;
+    }
+    let rins_res = {
+        let inc_sol = match state.incumbent {
+            Some(ref inc) => &inc.solution,
+            None => return,
+        };
+        stats.rins_calls += 1;
+        problem.run_rins(rel_sol, inc_sol, cfg, deadline, opts)
+    };
+    if let Some(res) = rins_res {
+        if state.consider(&res) {
+            stats.incumbent_updates += 1;
+            stats.rins_improvements += 1;
+        }
+    }
+}
+
+/// Determine what the B&B loop should do after a node's relaxation result.
+///
+/// Handles both trusted (Optimal) and non-trusted paths: pseudocost updates,
+/// integer-feasibility detection, RINS, max-depth, reduced-cost fixing,
+/// branching variable selection, and child bound computation.
+#[allow(clippy::too_many_arguments)]
+fn process_node_outcome<R: Relaxation>(
+    problem: &R,
+    node: &mut MipNode,
+    res: &SolverResult,
+    trusted: bool,
+    state: &mut MipState,
+    stats: &mut MipStats,
+    cfg: &MipConfig,
+    shared: &SolverOptions,
+    mask: &[bool],
+    integer_vars: &[usize],
+    j_to_k: &HashMap<usize, usize>,
+    pc: &mut PseudocostState,
+    use_reliability: bool,
+    deadline: &Option<Instant>,
+    dive_start_depth: usize,
+) -> NodeAction {
+    if trusted {
+        // Pseudocost update: record per-unit cost (delta / fractionality) so
+        // that score() can correctly predict gains at different fractionalities.
+        if use_reliability {
+            if let Some(jb) = node.branch_var {
+                if let Some(&k) = j_to_k.get(&jb) {
+                    let delta = (res.objective - node.parent_obj).max(0.0);
+                    let v = node.branch_parent_val;
+                    if node.branch_up {
+                        let f_up = v.ceil() - v;
+                        if f_up > 1e-12 {
+                            pc.record_up(k, delta / f_up);
+                        }
+                    } else {
+                        let f_down = v - v.floor();
+                        if f_down > 1e-12 {
+                            pc.record_down(k, delta / f_down);
+                        }
+                    }
+                }
+            }
+        }
+        if stats.nodes_processed == 1 {
+            stats.root_lp_bound = res.objective;
+        }
+        let node_lb = node.lower_bound.max(res.objective);
+
+        // Post-solve bound pruning.
+        if let Some(inc) = state.incumbent_obj {
+            if should_prune(node_lb, Some(inc), cfg.gap_tol) {
+                stats.pruned += 1;
+                return NodeAction::Skip { end_dive: false };
+            }
+        }
+
+        // Integer-feasible leaf.
+        if is_integer_feasible(&res.solution, mask, cfg.integer_feas_tol) {
+            if state.consider(res) {
+                stats.incumbent_updates += 1;
+            }
+            return NodeAction::Skip { end_dive: true };
+        }
+
+        // RINS: attempt incumbent improvement via sub-MIP.
+        try_rins(problem, stats, state, cfg, deadline, shared, &res.solution);
+
+        // Max-depth limit.
+        if node.depth + 1 > cfg.max_depth {
+            return NodeAction::OpenLb { node_lb, uncertain: false, end_dive: true };
+        }
+
+        // End dive when it has descended MAX_DIVE_DEPTH levels below the pivot.
+        let end_dive = node.depth >= dive_start_depth + MAX_DIVE_DEPTH;
+
+        // Reduced-cost fixing: tighten integer-variable bounds for children.
+        if let Some(inc_obj) = state.incumbent_obj {
+            stats.rc_vars_fixed +=
+                reduced_cost_fixing(res, inc_obj, &mut node.var_bounds, problem.integer_vars());
+        }
+
+        // Select branching variable and compute child bounds.
+        let jb = pick_branch_var(
+            problem,
+            &node.var_bounds,
+            &res.solution,
+            res.objective,
+            mask,
+            integer_vars,
+            j_to_k,
+            shared,
+            cfg,
+            deadline,
+            pc,
+            use_reliability,
+        );
+        let (down, up) = branch_bounds(&node.var_bounds, jb, res.solution[jb]);
+        let child_ws = res.warm_start_basis.clone();
+        let down_ws = if bound_layout_changes(&node.var_bounds, &down, jb) {
+            None
+        } else {
+            child_ws.clone()
+        };
+        let up_ws = if bound_layout_changes(&node.var_bounds, &up, jb) {
+            None
+        } else {
+            child_ws
+        };
+        NodeAction::PushChildren {
+            node_lb,
+            down,
+            up,
+            kind: ChildKind::Branched { jb, res_obj: res.objective, jb_val: res.solution[jb], down_ws, up_ws },
+            end_dive,
+        }
+    } else {
+        // Non-Optimal relaxation: bisect on the widest integer interval.
+        let node_lb = node.lower_bound;
+        match widest_splittable_integer(&node.var_bounds, mask) {
+            Some(_) if node.depth + 1 > cfg.max_depth => {
+                NodeAction::OpenLb { node_lb, uncertain: true, end_dive: true }
+            }
+            Some(jb) => {
+                let end_dive = node.depth >= dive_start_depth + MAX_DIVE_DEPTH;
+                let (down, up) = split_integer_box(&node.var_bounds, jb);
+                NodeAction::PushChildren { node_lb, down, up, kind: ChildKind::Split, end_dive }
+            }
+            None => NodeAction::OpenLb { node_lb, uncertain: true, end_dive: true },
+        }
     }
 }
 
@@ -627,10 +1024,6 @@ fn nonconvex_result() -> SolverResult {
     }
 }
 
-fn deadline_hit(deadline: &Option<Instant>) -> bool {
-    deadline.is_some_and(|d| Instant::now() >= d)
-}
-
 /// Round the integer components of `sol` to exact integers (relaxation noise removal).
 fn round_integers(mut sol: Vec<f64>, integer_vars: &[usize]) -> Vec<f64> {
     for &j in integer_vars {
@@ -663,6 +1056,68 @@ fn no_solution_result(status: SolveStatus) -> SolverResult {
         solution: vec![],
         ..Default::default()
     }
+}
+
+/// Maximum distance from a variable value to a bound for it to be considered "at" that bound.
+///
+/// Used in reduced-cost fixing to decide whether `x[j]` is at its lower or upper bound.
+/// Matches typical LP primal feasibility tolerances.
+const BOUND_AT_TOL: f64 = 1e-8;
+
+/// Apply reduced-cost fixing to variable bounds in preparation for branching.
+///
+/// For each integer variable `j` where the LP value is at a bound and the
+/// reduced cost exceeds the MIP gap, `x[j]` cannot improve on the incumbent
+/// by moving away from that bound — so we fix it there:
+///
+/// - `x[j] ≈ lb[j]` and `rc[j] > gap`:  fix `x[j] = ceil(lb)`
+/// - `x[j] ≈ ub[j]` and `-rc[j] > gap`: fix `x[j] = floor(ub)`
+///
+/// Bounds are rounded to the nearest feasible integer before fixing. If the
+/// rounded bounds are inconsistent (`ceil(lb) > floor(ub)`), the fix is skipped.
+///
+/// `gap = incumbent_obj - lp_result.objective` (must be positive).
+/// Returns the number of variables fixed.
+pub(crate) fn reduced_cost_fixing(
+    lp_result: &SolverResult,
+    incumbent_obj: f64,
+    node_bounds: &mut [(f64, f64)],
+    integer_vars: &[usize],
+) -> usize {
+    if lp_result.reduced_costs.is_empty() || lp_result.solution.is_empty() {
+        return 0;
+    }
+    let gap = incumbent_obj - lp_result.objective;
+    if gap <= 0.0 {
+        return 0;
+    }
+    let rc = &lp_result.reduced_costs;
+    let x = &lp_result.solution;
+    let mut count = 0usize;
+    for &j in integer_vars {
+        if j >= node_bounds.len() || j >= rc.len() || j >= x.len() {
+            continue;
+        }
+        let (lb, ub) = node_bounds[j];
+        if (lb - ub).abs() < BOUND_AT_TOL {
+            continue; // already fixed
+        }
+        let int_lb = lb.ceil();
+        let int_ub = ub.floor();
+        if int_lb > int_ub + BOUND_AT_TOL {
+            continue; // empty integer range after rounding
+        }
+        let xj = x[j];
+        let rcj = rc[j];
+        if (xj - lb).abs() <= BOUND_AT_TOL && rcj > gap {
+            node_bounds[j] = (int_lb, int_lb);
+            count += 1;
+        } else if (xj - ub).abs() <= BOUND_AT_TOL && -rcj > gap {
+            node_bounds[j] = (int_ub, int_ub);
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Incumbent (best integer-feasible upper bound) tracking.

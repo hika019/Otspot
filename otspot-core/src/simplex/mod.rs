@@ -13,6 +13,7 @@ mod standard_form;
 #[cfg(test)]
 pub(crate) use entry::solve;
 pub(crate) use entry::solve_with;
+#[cfg(test)]
 pub(crate) use entry::solve_without_presolve;
 
 #[cfg(test)]

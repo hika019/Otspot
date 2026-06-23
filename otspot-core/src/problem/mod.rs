@@ -51,6 +51,7 @@ pub enum SolveRoute {
 ///
 /// Replaces process-global `AtomicU64` counters so parallel tests observe
 /// independent stats without reset/race issues.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct SolveStats {
     /// Route taken for this solve.
@@ -143,6 +144,7 @@ impl fmt::Display for SolveStatus {
 /// LP求解（Simplex等）と QP求解（AS/IPM/Concurrent）の両方で使用できる統一結果型。
 /// LP固有フィールド（`reduced_costs`, `slack`, `warm_start_basis`）は QP求解時は空/None。
 /// QP固有フィールド（`bound_duals`, `iterations`）は LP求解時は空/0。
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct SolverResult {
     /// 求解ステータス
@@ -200,6 +202,7 @@ pub struct SolverResult {
 }
 
 /// 各 phase 所要時間 (μs精度)。LP simplex と QP IPM の両経路で共用。
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct TimingBreakdown {
     // ── LP simplex 経路 ───────────────────────────────────────────────────────
@@ -256,6 +259,17 @@ impl Default for SolverResult {
     }
 }
 
+impl SolverResult {
+    /// Creates a bare-minimum Timeout result (no solution, objective = ∞).
+    pub(crate) fn timeout() -> Self {
+        Self {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            ..Self::default()
+        }
+    }
+}
+
 impl fmt::Display for SolverResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Status: {}, Objective: {}", self.status, self.objective)
@@ -269,6 +283,7 @@ impl fmt::Display for SolverResult {
 ///
 /// `obj_offset` は MPS/QPS の N 行 RHS (objective constant) に対応する。
 /// `LpProblem::new` / `new_general` では 0.0 に初期化される。
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct LpProblem {
     /// 目的関数係数ベクトル（長さ: `num_vars`）

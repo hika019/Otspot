@@ -39,6 +39,13 @@ threads-required = "num-cpus"
 filter = "test(lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent)"
 threads-required = "num-cpus"
 
+# test_step7_free_var_fillin_must_not_blow_up: 10502-var / 10500-constraint LP presolve
+# timing test. Solo: ~0.85-1.15s (under 1.0s budget). Under CPU contention from parallel
+# tests it spikes to 4-5s and fails. Run exclusively to ensure fair timing.
+[[profile.default.overrides]]
+filter = "test(presolve::transforms::tests::test_step7_free_var_fillin_must_not_blow_up)"
+threads-required = "num-cpus"
+
 # 旧 tier-2 を default に promote した tests に per-test 高負荷 override を追加。
 # heavy profile からそのまま移植 (default で fairness を確保)。
 [[profile.default.overrides]]
@@ -51,6 +58,12 @@ threads-required = "num-cpus"
 
 [[profile.default.overrides]]
 filter = "test(dfl001_postsolve_skips_lsq_when_cleanup_stagnant) + test(diag_pds20_deadline_regression_guard)"
+threads-required = "num-cpus"
+
+# warm_start_30pct_speedup_smoke: wall-ratio assert (< 0.75) is sensitive to
+# CPU contention — serialise to give the wall measurement a fair comparison.
+[[profile.default.overrides]]
+filter = "test(warm_start_30pct_speedup_smoke)"
 threads-required = "num-cpus"
 
 # Memory-heavy qplib parse tests peak 100-800 MB each (QPLIB_8500 = 100 MB,

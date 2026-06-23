@@ -338,11 +338,9 @@ fn main() {
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
         let result = if use_global {
-            let cfg = GlobalOptimizationConfig {
-                gap_tol: global_gap_tol,
-                max_nodes: global_max_nodes,
-                ..GlobalOptimizationConfig::default()
-            };
+            let mut cfg = GlobalOptimizationConfig::default();
+            cfg.gap_tol = global_gap_tol;
+            cfg.max_nodes = global_max_nodes;
             solve_qp_global(&prob, &opts, &cfg)
         } else {
             solve_qp_with(&prob, &opts)

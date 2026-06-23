@@ -4,6 +4,35 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.6.0] - unreleased
+
+MIP B&B の標準機能一式 + LP presolve/postsolve 改善 + リファクタリング。
+
+### 追加
+
+- MIP: pseudocost branching / hybrid node selection / bound propagation / reduced cost fixing / RINS / conflict analysis / MIR cuts
+- LP: singleton Le/Ge + forcing row presolve、postsolve を stack replay に一本化
+
+### 修正
+
+- LP postsolve: ForcingRow dual 誤判定 + SingletonInequalityRow complementarity 違反
+- MIP: GMI カット Ge 行の数値不安定 (Le 変換)、pseudocost fractionality 計算
+
+### 変更
+
+- **BREAKING**: public config/stats struct に `#[non_exhaustive]` を追加 (`SolverOptions`, `MipConfig`, `MipStats`, `IpmOptions` 等)。struct literal → `Default::default()` + フィールド代入に移行が必要
+- MIP: `MipConfig::default()` の `cuts` を `true` に変更 (GMI/MIR カットがデフォルト有効)
+
+### 内部
+
+- deadline/timeout 重複を共通化、巨大関数 3 本を分割 (two_phase_simplex 875→115行 等)
+- bounded_core.rs (4364行) / dual_advanced/mod.rs を マイクロアーキテクチャ分割
+- FT 基底更新モジュール削除 (PFI revert 済み dead code)
+
+### ベンチマーク
+
+- LP 109/109, QP 121/138 @1e-6, MILP 6/20 @1e-6 @1e-8 共通 (MIPLIB small, 初計測)
+
 ## [0.5.2] - 2026-06-19
 
 公開API破壊的変更なし。wide LP (n/m比 1.0–2.2, 10k変数以上) を IPM 経由で解く dispatch 機構を追加し、simplex 単独では timeout していた大規模 LP を新規求解。

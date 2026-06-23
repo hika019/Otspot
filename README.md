@@ -15,7 +15,7 @@ MILP / convex MIQP: branch-and-bound.
 - **Revised simplex (LP)** — sparse LU, Markowitz-threshold pivoting, steepest-edge pricing
 - **Interior-point (QP)** — Mehrotra predictor–corrector / IP-PMM for convex QP
 - **Non-convex QP (global)** — spatial B&B (α-BB / McCormick); global optimum carries bound-gap certificate, local-only reported as `NonconvexLocal`
-- **Mixed-integer (MILP / convex MIQP)** — branch-and-bound; cuts / heuristics / SOS not implemented
+- **Mixed-integer (MILP / convex MIQP)** — branch-and-bound with GMI/MIR cuts, pseudocost branching, RINS, conflict analysis
 - **Proof-carrying optimality** — `Optimal` requires full KKT certificate; unprovable solutions are downgraded
 - **Infeasibility / unboundedness certification**
 - **Dual solution output** — dual values, reduced costs, slacks
@@ -27,7 +27,7 @@ Requires Rust (edition 2021, stable).
 
 ```toml
 [dependencies]
-otspot = "0.3"
+otspot = "0.6"
 ```
 
 ```bash
@@ -115,14 +115,16 @@ Solve-rate benchmark on standard public sets via the `otspot-dev` `qps_benchmark
 
 | Problem type | Set | # | @ 1e-6 | @ 1e-8 |
 |---|---|---:|---|---|
-| Feasible LP | Netlib | 109 | 108 optimal | 105 optimal |
+| Feasible LP | Netlib | 109 | 109 optimal | 105 optimal |
 | Convex QP | Maros–Mészáros | 138 | 121 optimal | 100 optimal |
+| MILP | MIPLIB 2017 small | 20 | 6 optimal | 6 optimal |
 | Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
 **Optimal** = verified against known objective (proof-carrying KKT). Measured on `jobs=8`.
-LP misses @1e-6 (1): `cycle` (SuboptimalSolution); @1e-8 adds `greenbea` (primal-infeasible at the tighter tolerance).
+LP @1e-6: 109/109 optimal (v0.5.2 miss `cycle` resolved). @1e-8: 105 optimal (adds `greenbea` etc.).
 QP misses @1e-6 (17): 11 SuboptimalSolution (LISWET family + `AUG2DCQP`, `QPCBOEI2`, `STADAT1`, `UBH1`, `VALUES`, `YAO` — downgraded when the KKT certificate is not met) + 1 timeout (`LISWET12`) + 1 objective mismatch (`LISWET7`, baseline ambiguous) + 4 solved-but-unverified (no published reference). At `1e-8` the tighter tolerance downgrades 35 to SuboptimalSolution (100 optimal).
+MILP @1e-6 (`timeout=100s`): 6/20 proven optimal (dcmulti, flugpl, gr4x6, gt2, khb05250, p0201). 10 timeout with incumbent, 4 timeout without feasible solution. Early-stage MIP — presolve/cuts/branching are functional but not yet competitive with production solvers.
 
 Reproduce (data is gitignored; see [Benchmark data](#benchmark-data)):
 
@@ -130,6 +132,7 @@ Reproduce (data is gitignored; see [Benchmark data](#benchmark-data)):
 bash scripts/run_lp_bench.sh  --suite standard --eps 1e-6 --jobs 8 --timeout 1000   # Feasible LP (Netlib)
 bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps 1e-6 --jobs 8 \
      --timeout 1000 --output /tmp/qp_maros.txt                                      # Convex QP (Maros)
+bash scripts/milp_vs_highs.sh --timeout 100 --jobs 6                                 # MILP (MIPLIB small)
 ```
 
 ## Tests

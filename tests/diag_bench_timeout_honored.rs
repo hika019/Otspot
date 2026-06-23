@@ -7,12 +7,11 @@ use otspot::problem::{SolveStatus, SolverResult};
 use otspot_dev::bench_utils::{apply_bench_status_promotion, BenchPromotionPolicy};
 
 fn make(status: SolveStatus, solution: Vec<f64>, objective: f64) -> SolverResult {
-    SolverResult {
-        status,
-        solution,
-        objective,
-        ..Default::default()
-    }
+    let mut r = SolverResult::default();
+    r.status = status;
+    r.solution = solution;
+    r.objective = objective;
+    r
 }
 
 /// regression sentinel: Timeout + 有効解 でも Optimal 格上げしない。
