@@ -116,6 +116,16 @@ if [[ "$bin" == "milp_solve" ]]; then
     bench_status="FAIL"
     note=""
 
+    # Look up reference objective from known-optimal baseline (empty if not found).
+    ref_obj=""
+    if [[ -n "$KNOWN_OPT_FILE" && -f "$KNOWN_OPT_FILE" ]]; then
+      ref_obj=$(awk -v name="$prob_name" '
+        /^#/ { next }
+        /^problem_name/ { next }
+        { split($0, parts, ","); if (parts[1] == name) { print parts[2]; exit } }
+      ' "$KNOWN_OPT_FILE")
+    fi
+
     case "${status_raw:-}" in
       PARSE_ERROR)
         bench_status="ERROR"; note="parse_error"
@@ -171,12 +181,22 @@ if [[ "$bin" == "milp_solve" ]]; then
         esac
         ;;
       Infeasible)
-        bench_status="PASS:Infeasible"
-        n_pass_infeasible=$(( n_pass_infeasible + 1 ))
+        if [ -n "$ref_obj" ]; then
+          bench_status="FAIL:false_infeasible"
+          n_fail=$(( n_fail + 1 ))
+        else
+          bench_status="PASS:Infeasible"
+          n_pass_infeasible=$(( n_pass_infeasible + 1 ))
+        fi
         ;;
       Unbounded)
-        bench_status="PASS:Unbounded"
-        n_pass_unbounded=$(( n_pass_unbounded + 1 ))
+        if [ -n "$ref_obj" ]; then
+          bench_status="FAIL:false_unbounded"
+          n_fail=$(( n_fail + 1 ))
+        else
+          bench_status="PASS:Unbounded"
+          n_pass_unbounded=$(( n_pass_unbounded + 1 ))
+        fi
         ;;
       Timeout)
         bench_status="TIMEOUT"

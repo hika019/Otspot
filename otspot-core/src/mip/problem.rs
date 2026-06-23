@@ -110,11 +110,12 @@ impl Relaxation for MilpProblem {
         x_inc: &[f64],
         cfg: &crate::options::MipConfig,
         deadline: &Option<std::time::Instant>,
+        opts: &crate::options::SolverOptions,
     ) -> Option<crate::problem::SolverResult> {
         if !cfg.rins_enabled {
             return None;
         }
-        crate::mip::heuristics::rins::run_rins(self, x_lp, x_inc, cfg, deadline)
+        crate::mip::heuristics::rins::run_rins(self, x_lp, x_inc, cfg, deadline, opts)
     }
 }
 

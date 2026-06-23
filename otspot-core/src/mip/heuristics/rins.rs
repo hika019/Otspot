@@ -27,12 +27,16 @@ const RINS_MIN_REMAINING_SECS: f64 = 1.0;
 /// Fixes integer variables where `round(x_lp[j]) == round(x_inc[j])`, then
 /// solves the reduced sub-MIP with a short timeout and node limit. Returns an
 /// improved `SolverResult` or `None` when no improvement is found.
+///
+/// `parent_opts` is cloned and its timeout/deadline overridden so that
+/// tolerance, cancellation flag, and other settings are inherited by the sub-MIP.
 pub(crate) fn run_rins(
     problem: &MilpProblem,
     x_lp: &[f64],
     x_inc: &[f64],
     cfg: &MipConfig,
     deadline: &Option<Instant>,
+    parent_opts: &SolverOptions,
 ) -> Option<SolverResult> {
     let remaining_secs = remaining_budget(deadline);
     if remaining_secs < RINS_MIN_REMAINING_SECS {
@@ -66,12 +70,19 @@ pub(crate) fn run_rins(
 
     let mut sub_cfg = cfg.clone();
     sub_cfg.max_nodes = RINS_NODE_LIMIT;
-    sub_cfg.rins_enabled = false; // prevent recursive RINS inside sub-MIP
+    sub_cfg.rins_enabled = false;
 
-    let sub_opts = SolverOptions {
-        timeout_secs: Some(sub_timeout),
-        ..Default::default()
-    };
+    let mut sub_opts = parent_opts.clone();
+    sub_opts.timeout_secs = Some(sub_timeout);
+    sub_opts.deadline = None;
+    sub_opts.warm_start = None;
+    sub_opts.warm_start_qp = None;
+    sub_opts.warm_start_lp = None;
+    sub_opts.known_optimal_obj = None;
+    sub_opts.presolve = true;
+    sub_opts.use_lp_crash_basis = true;
+    sub_opts.recover_warm_start_basis = false;
+    sub_opts.threads = 1;
 
     let result = crate::mip::solve_milp(&sub_problem, &sub_opts, &sub_cfg);
     if matches!(
@@ -132,7 +143,7 @@ mod tests {
         let x_lp = vec![1.4, 1.6];
         let x_inc = vec![1.0, 1.0];
 
-        let result = run_rins(&problem, &x_lp, &x_inc, &cfg, &None)
+        let result = run_rins(&problem, &x_lp, &x_inc, &cfg, &None, &SolverOptions::default())
             .expect("RINS must return Some when at least one variable is fixed");
         assert!(
             result.objective < -1.9,
@@ -152,7 +163,7 @@ mod tests {
         let x_lp = vec![0.4, 2.6];
         let x_inc = vec![1.0, 2.0];
         assert!(
-            run_rins(&problem, &x_lp, &x_inc, &cfg, &None).is_none(),
+            run_rins(&problem, &x_lp, &x_inc, &cfg, &None, &SolverOptions::default()).is_none(),
             "RINS must return None when no variable is fixed"
         );
     }
@@ -168,7 +179,8 @@ mod tests {
         let x_inc = vec![1.0, 1.0];
         let past = Instant::now() - std::time::Duration::from_secs(1);
         assert!(
-            run_rins(&problem, &x_lp, &x_inc, &cfg, &Some(past)).is_none(),
+            run_rins(&problem, &x_lp, &x_inc, &cfg, &Some(past), &SolverOptions::default())
+                .is_none(),
             "RINS must not run when deadline is expired"
         );
     }
