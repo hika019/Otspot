@@ -581,13 +581,7 @@ pub fn run_postsolve(
     let crossover: Option<Vec<f64>> =
         if matches!(result.status, SolveStatus::Optimal) && df_loop > gate {
             trace_pass("crossover");
-            // Reserve half the remaining budget for the fallback simplex path;
-            // without this the crossover can exhaust the deadline entirely.
-            let crossover_deadline = deadline.map(|d| {
-                let remaining = d.saturating_duration_since(Instant::now());
-                Instant::now() + remaining / 2
-            });
-            crate::simplex::crossover_dual_from_primal(orig_problem, &solution, crossover_deadline)
+            crate::simplex::crossover_dual_from_primal(orig_problem, &solution, deadline)
                 .map(|(_vertex, y, _rc)| y)
         } else {
             None
