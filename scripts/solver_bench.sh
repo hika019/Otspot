@@ -89,6 +89,13 @@ if [[ "$bin" == "milp_solve" ]]; then
 
   echo "[solver_bench.sh] milp_solve mode: timeout=${MIP_TIMEOUT}s eps=${MIP_EPS} known-optimal=${KNOWN_OPT_FILE:-none}"
 
+  MIP_TIMEOUT_CMD=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
+  if [[ -n "$MIP_TIMEOUT_CMD" ]]; then
+    echo "[solver_bench.sh] 外部timeout: ${MIP_TIMEOUT_CMD} $((MIP_TIMEOUT + 10))s (内部 ${MIP_TIMEOUT}s + 10s 猶予)"
+  else
+    echo "[solver_bench.sh] 警告: 外部timeout 利用不可（gtimeout/timeout コマンドが見つからない）"
+  fi
+
   n_pass=0; n_checked_noref=0; n_pass_infeasible=0; n_pass_unbounded=0
   n_timeout=0; n_fail=0; n_maxiter=0; n_error=0; n_skip=0
   n_dfeas_fail=0; n_pfeas_fail=0; n_obj_mismatch=0; n_kkt_fail=0
@@ -103,8 +110,13 @@ if [[ "$bin" == "milp_solve" ]]; then
 
     mps_out=""
     mps_exit=0
-    mps_out=$(./target/release/milp_solve "$mps_file" \
-      --timeout "$MIP_TIMEOUT" --eps "$MIP_EPS" 2>/dev/null) || mps_exit=$?
+    if [[ -n "$MIP_TIMEOUT_CMD" ]]; then
+      mps_out=$("$MIP_TIMEOUT_CMD" "$((MIP_TIMEOUT + 10))" ./target/release/milp_solve "$mps_file" \
+        --timeout "$MIP_TIMEOUT" --eps "$MIP_EPS" 2>/dev/null) || mps_exit=$?
+    else
+      mps_out=$(./target/release/milp_solve "$mps_file" \
+        --timeout "$MIP_TIMEOUT" --eps "$MIP_EPS" 2>/dev/null) || mps_exit=$?
+    fi
 
     status_raw=$(printf '%s\n' "$mps_out" | grep "^status:" | awk '{print $2}' | head -1)
     obj_str=$(printf '%s\n' "$mps_out" | grep "^objective:" | awk '{print $2}' | head -1)

@@ -5,7 +5,7 @@
 //! MILP-vs-HiGHS comparison harness.
 //!
 //! Usage:
-//!   `cargo run --release --bin milp_solve -- <file.mps> [--timeout <secs>] [--eps <tol>]`
+//!   `cargo run --release --bin milp_solve -- <file.mps> [--timeout <secs>] [--eps <tol>] [--no-cuts] [--cut-rounds N]`
 
 use mimalloc::MiMalloc;
 #[global_allocator]
@@ -21,14 +21,14 @@ use std::time::Instant;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: milp_solve <file.mps> [--timeout <secs>] [--eps <tol>]");
+        eprintln!("usage: milp_solve <file.mps> [--timeout <secs>] [--eps <tol>] [--no-cuts] [--cut-rounds N]");
         return ExitCode::from(2);
     }
 
     let mut path: Option<String> = None;
     let mut timeout_secs = 100.0_f64;
     let mut eps = 1e-6_f64;
-    let mut cuts = false;
+    let mut cuts = true;
     let mut cut_rounds = 0usize;
     let mut i = 1;
     while i < args.len() {
@@ -42,6 +42,7 @@ fn main() -> ExitCode {
                 eps = args[i].parse().expect("--eps value");
             }
             "--cuts" => cuts = true,
+            "--no-cuts" => cuts = false,
             "--cut-rounds" => {
                 i += 1;
                 cut_rounds = args[i].parse().expect("--cut-rounds value");
