@@ -52,13 +52,12 @@ fn opts(timeout_secs: f64) -> SolverOptions {
 }
 
 fn cfg(gap_tol: f64) -> GlobalOptimizationConfig {
-    GlobalOptimizationConfig {
-        gap_tol,
-        max_depth: 20,
-        max_nodes: 10_000,
-        branching: BranchingStrategy::MaxViolation,
-        ..GlobalOptimizationConfig::default()
-    }
+    let mut cfg = GlobalOptimizationConfig::default();
+    cfg.gap_tol = gap_tol;
+    cfg.max_depth = 20;
+    cfg.max_nodes = 10_000;
+    cfg.branching = BranchingStrategy::MaxViolation;
+    cfg
 }
 
 /// 期待値との相対差を計算。
@@ -336,13 +335,11 @@ fn unbounded_variable_returns_locally_optimal_not_optimal() {
         vec![otspot::problem::ConstraintType::Eq],
     )
     .unwrap();
-    let cfg = GlobalOptimizationConfig {
-        gap_tol: 1e-3,
-        max_depth: 20,
-        max_nodes: 1_000,
-        branching: BranchingStrategy::MaxViolation,
-        ..GlobalOptimizationConfig::default()
-    };
+    let mut cfg = GlobalOptimizationConfig::default();
+    cfg.gap_tol = 1e-3;
+    cfg.max_depth = 20;
+    cfg.max_nodes = 1_000;
+    cfg.branching = BranchingStrategy::MaxViolation;
     let r = solve_qp_global(&p, &opts(5.0), &cfg);
     // Q indefinite (-2 diag) + semi-infinite bounds → BB 打切 → NonconvexLocal。
     // 旧コードでは LocallyOptimal、Phase 6 で indefinite Q を分離。
@@ -383,13 +380,11 @@ fn pure_convex_qp_solves_at_root_with_optimal_status() {
 #[test]
 fn pruning_keeps_node_count_well_below_cap() {
     let p = build_diag_concave_nd(5, 1.0);
-    let cfg = GlobalOptimizationConfig {
-        gap_tol: 1e-3,
-        max_depth: 20,
-        max_nodes: 2_000,
-        branching: BranchingStrategy::MaxViolation,
-        ..GlobalOptimizationConfig::default()
-    };
+    let mut cfg = GlobalOptimizationConfig::default();
+    cfg.gap_tol = 1e-3;
+    cfg.max_depth = 20;
+    cfg.max_nodes = 2_000;
+    cfg.branching = BranchingStrategy::MaxViolation;
     let (r, stats) = solve_qp_global_with_stats(&p, &opts(60.0), &cfg);
     eprintln!(
         "PRUNING_SMOKE: nodes={} pruned={} max_depth={} status={:?} obj={}",

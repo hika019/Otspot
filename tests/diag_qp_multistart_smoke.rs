@@ -81,11 +81,10 @@ fn multi_solve(
     strategy: StartStrategy,
 ) -> (SolveStatus, f64) {
     let opts = opts_with_timeout(20.0);
-    let cfg = MultiStartConfig {
-        n_starts,
-        seed,
-        strategy,
-    };
+    let mut cfg = MultiStartConfig::default();
+    cfg.n_starts = n_starts;
+    cfg.seed = seed;
+    cfg.strategy = strategy;
     let r = solve_qp_multistart(problem, &opts, &cfg);
     (r.status, r.objective)
 }
@@ -321,11 +320,10 @@ fn api_threads_n_with_multistart_still_improves() {
     // threads=4 + multistart で saddle escape が機能する (並列下でも logic 健在)。
     let prob = build_diag_concave(2, 3.0);
     let (_, cold_obj) = cold_solve(&prob);
-    let cfg = MultiStartConfig {
-        n_starts: 12,
-        seed: 0xBEEF,
-        strategy: StartStrategy::RandomBox,
-    };
+    let mut cfg = MultiStartConfig::default();
+    cfg.n_starts = 12;
+    cfg.seed = 0xBEEF;
+    cfg.strategy = StartStrategy::RandomBox;
     let mut opts = opts_with_timeout(20.0);
     opts.threads = 4;
     opts.multistart = Some(cfg);
@@ -342,11 +340,10 @@ fn api_threads_n_with_multistart_still_improves() {
 fn api_threads_n_with_multistart_deterministic_across_threads() {
     // 同 seed + threads=1 と threads=4 で同 objective (race-free + index-reduce)。
     let prob = build_diag_concave(2, 3.0);
-    let cfg = MultiStartConfig {
-        n_starts: 10,
-        seed: 0xABCD,
-        strategy: StartStrategy::RandomBox,
-    };
+    let mut cfg = MultiStartConfig::default();
+    cfg.n_starts = 10;
+    cfg.seed = 0xABCD;
+    cfg.strategy = StartStrategy::RandomBox;
     let mut o1 = opts_with_timeout(20.0);
     o1.threads = 1;
     let r1 = solve_qp_multistart(&prob, &o1, &cfg);
@@ -365,11 +362,10 @@ fn api_threads_n_with_multistart_deterministic_across_threads() {
 fn multistart_dispatch_via_options_field_matches_explicit_call() {
     // SolverOptions::multistart 経由 dispatch も同じ結果 (solve_qp_with 内 if 分岐)。
     let prob = build_diag_concave(2, 3.0);
-    let cfg = MultiStartConfig {
-        n_starts: 8,
-        seed: 0xC0DE,
-        strategy: StartStrategy::RandomBox,
-    };
+    let mut cfg = MultiStartConfig::default();
+    cfg.n_starts = 8;
+    cfg.seed = 0xC0DE;
+    cfg.strategy = StartStrategy::RandomBox;
     let opts_explicit = opts_with_timeout(10.0);
     let r_explicit = solve_qp_multistart(&prob, &opts_explicit, &cfg);
 

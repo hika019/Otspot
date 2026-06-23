@@ -30,14 +30,14 @@ fn opts() -> SolverOptions {
 }
 
 fn cfg(use_alpha_bb: bool, use_mccormick: bool) -> GlobalOptimizationConfig {
-    GlobalOptimizationConfig {
-        gap_tol: TEST_GAP_TOL,
-        max_depth: TEST_MAX_DEPTH,
-        max_nodes: TEST_MAX_NODES,
-        branching: BranchingStrategy::MaxViolation,
-        use_alpha_bb,
-        use_mccormick,
-    }
+    let mut cfg = GlobalOptimizationConfig::default();
+    cfg.gap_tol = TEST_GAP_TOL;
+    cfg.max_depth = TEST_MAX_DEPTH;
+    cfg.max_nodes = TEST_MAX_NODES;
+    cfg.branching = BranchingStrategy::MaxViolation;
+    cfg.use_alpha_bb = use_alpha_bb;
+    cfg.use_mccormick = use_mccormick;
+    cfg
 }
 
 // ---------------- fixtures (BB driver 経由で利用) ----------------
