@@ -516,6 +516,7 @@ pub const DEFAULT_CLAMP_TOL: f64 = 1e-14;
 /// ## Solver-specific parameters
 ///
 /// Use the [`SolverOptions::ipm`] sub-struct for IPM-specific settings.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct SolverOptions {
     // --- Common ---
