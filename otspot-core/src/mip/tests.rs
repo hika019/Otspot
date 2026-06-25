@@ -3043,3 +3043,76 @@ fn conflict_pruned_le_nodes_processed() {
         stats.nodes_processed
     );
 }
+
+// ---------------------------------------------------------------------------
+// Static symmetry breaking (lex-leader)
+// ---------------------------------------------------------------------------
+
+/// **Sentinel**: lex-leader symmetry breaking must reduce the node count on a
+/// highly symmetric instance WITHOUT changing the optimum.
+///
+/// Eight interchangeable binaries under `2·Σ x_i ≤ 9` (⇔ `Σ x_i ≤ 4.5`),
+/// maximising `Σ x_i` (min `−Σ x_i`). The integer optimum is 4 with `C(8,4)=70`
+/// symmetric optimal assignments; plain B&B explores the equivalent subtrees,
+/// while the lex-leader rows `x_i ≥ x_{i+1}` collapse each orbit to its single
+/// descending representative.
+///
+/// Cuts and RINS are disabled so the measured difference isolates the symmetry
+/// effect. Fails if symmetry is a no-op (equal node counts) or alters the
+/// optimum (objective mismatch).
+#[test]
+fn symmetry_breaking_reduces_nodes_and_preserves_optimum() {
+    let n = 8usize;
+    let rows: Vec<usize> = vec![0; n];
+    let cols: Vec<usize> = (0..n).collect();
+    let vals: Vec<f64> = vec![2.0; n];
+    let lp = build_lp(
+        vec![-1.0; n],
+        &rows,
+        &cols,
+        &vals,
+        1,
+        vec![9.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0); n],
+    );
+    let m = milp(lp, (0..n).collect());
+
+    let base = MipConfig {
+        cuts: false,
+        rins_enabled: false,
+        symmetry: false,
+        ..MipConfig::default()
+    };
+    let sym = MipConfig {
+        symmetry: true,
+        ..base.clone()
+    };
+
+    let (r_off, s_off) = solve_milp_with_stats(&m, &opts(), &base);
+    let (r_on, s_on) = solve_milp_with_stats(&m, &opts(), &sym);
+
+    assert_eq!(r_off.status, SolveStatus::Optimal, "baseline must solve");
+    assert_eq!(r_on.status, SolveStatus::Optimal, "symmetry run must solve");
+
+    // Optimum unchanged: both reach the true integer optimum −4.
+    assert!(
+        (r_off.objective - (-4.0)).abs() < 1e-6,
+        "baseline optimum must be -4, got {}",
+        r_off.objective
+    );
+    assert!(
+        (r_on.objective - r_off.objective).abs() < 1e-6,
+        "symmetry breaking changed the optimum: off={} on={}",
+        r_off.objective,
+        r_on.objective
+    );
+
+    // Node count strictly reduced.
+    assert!(
+        s_on.nodes_processed < s_off.nodes_processed,
+        "lex-leader must shrink the tree: off={} on={}",
+        s_off.nodes_processed,
+        s_on.nodes_processed
+    );
+}
