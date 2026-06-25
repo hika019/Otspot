@@ -1269,3 +1269,191 @@ fn structural_cuts_validity_end_to_end() {
         }
     }
 }
+
+// ── In-tree separation sentinel ─────────────────────────────────────────────
+
+/// Knapsack-style general-integer MILP used as the in-tree-cut sentinel.
+///
+/// max Σ c_j x_j  s.t.  Σ a_j x_j ≤ 23,  x_j ∈ {0..5} integer (min of −c).
+/// Its LP relaxation stays fractional several levels deep, so re-separating
+/// GMI/MIR at interior B&B nodes tightens bounds the root cuts miss.
+fn tree_cut_sentinel_milp() -> MilpProblem {
+    let c = [12.0, 17.0, 13.0, 21.0, 9.0, 16.0, 7.0, 19.0];
+    let a = [5.0, 7.0, 6.0, 9.0, 4.0, 7.0, 3.0, 8.0];
+    let n = c.len();
+    let cneg: Vec<f64> = c.iter().map(|v| -v).collect();
+    let rows = vec![0usize; n];
+    let cols: Vec<usize> = (0..n).collect();
+    let l = lp(
+        cneg,
+        &rows,
+        &cols,
+        &a,
+        1,
+        vec![23.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 5.0); n],
+    );
+    MilpProblem::new(l, cols).unwrap()
+}
+
+/// **Sentinel**: in-tree cuts must measurably shrink the search vs `tree_cuts=off`.
+///
+/// Root cuts are disabled in *both* runs so the only difference is in-tree
+/// separation. If `tree_cuts` is a no-op (hook never fires, pool always rejects,
+/// or the re-solve is discarded), node counts are identical and this FAILS. The
+/// optimum must be unchanged — cuts only remove fractional points.
+#[test]
+fn tree_cuts_reduce_node_count_sentinel() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
+
+    let cfg_off = MipConfig { cuts: false, tree_cuts: false, ..MipConfig::default() };
+    let cfg_on = MipConfig { cuts: false, tree_cuts: true, ..MipConfig::default() };
+
+    let (r_off, s_off) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_off);
+    let (r_on, s_on) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_on);
+
+    assert_eq!(r_off.status, SolveStatus::Optimal);
+    assert_eq!(r_on.status, SolveStatus::Optimal);
+    assert!(
+        (r_on.objective - r_off.objective).abs() < 1e-6,
+        "in-tree cuts must not change the optimum: on={} off={}",
+        r_on.objective,
+        r_off.objective
+    );
+    assert!(
+        s_on.tree_cut_rounds > 0,
+        "in-tree separation must fire at least one accepted round (got 0)"
+    );
+    assert!(
+        s_on.nodes_processed < s_off.nodes_processed,
+        "in-tree cuts must reduce node count: on={} off={}",
+        s_on.nodes_processed,
+        s_off.nodes_processed
+    );
+}
+
+/// Regression guard: with `tree_cuts=off` no separation fires (counter stays 0).
+#[test]
+fn tree_cuts_off_does_not_separate() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
+    let cfg = MipConfig { cuts: false, tree_cuts: false, ..MipConfig::default() };
+    let (_, s) = super::super::solve_milp_with_stats(&milp, &opts, &cfg);
+    assert_eq!(s.tree_cut_rounds, 0, "tree_cuts=off must never separate");
+}
+
+// ── Optimum-preservation sweep (cross-node soundness gate) ───────────────────
+
+/// Deterministic LCG so the sweep is reproducible (no `rand` dependency).
+struct SweepRng(u64);
+impl SweepRng {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+    fn range(&mut self, lo: i64, hi: i64) -> i64 {
+        lo + (self.next() as i64).rem_euclid(hi - lo + 1)
+    }
+}
+
+/// Random all-integer MILP: `min c·x` s.t. `A x ≤ b`, `x ∈ {0..ub}`.
+fn sweep_milp(rng: &mut SweepRng, n: usize, m: usize, ub: f64) -> MilpProblem {
+    let c: Vec<f64> = (0..n).map(|_| rng.range(-7, 7) as f64).collect();
+    let (mut rows, mut cols, mut vals, mut b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for r in 0..m {
+        for j in 0..n {
+            let v = rng.range(-4, 8);
+            if v != 0 {
+                rows.push(r);
+                cols.push(j);
+                vals.push(v as f64);
+            }
+        }
+        b.push(rng.range(5, 20) as f64);
+    }
+    let l = lp(c, &rows, &cols, &vals, m, b, vec![ConstraintType::Le; m], vec![(0.0, ub); n]);
+    MilpProblem::new(l, (0..n).collect()).unwrap()
+}
+
+/// Brute-force optimum over the integer lattice: `Some(min c·x)` over feasible
+/// points, or `None` when none is feasible. Used as ground truth.
+fn brute_force_opt(milp: &MilpProblem) -> Option<f64> {
+    let lp = &milp.lp;
+    let mut best: Option<f64> = None;
+    for x in enumerate_int_box(&lp.bounds) {
+        if !feasible_orig(lp, &x) {
+            continue;
+        }
+        let obj: f64 = lp.c.iter().zip(&x).map(|(&ci, &xi)| ci * xi).sum();
+        best = Some(best.map_or(obj, |b| b.min(obj)));
+    }
+    best
+}
+
+/// **P0 soundness sentinel**: in-tree cuts must never change the optimum.
+///
+/// In-tree GMI/MIR cuts bake in the generating node's branching-tightened bounds,
+/// so they are valid only within that node's subtree. A cross-node cut pool (the
+/// original buggy design) re-applies them at sibling/non-descendant nodes,
+/// slicing off globally integer-feasible points and returning a too-good
+/// "Optimal" objective. This sweep solves a deterministic batch of small random
+/// MILPs three ways — brute force (ground truth), `tree_cuts=off`, and
+/// `tree_cuts=on` — and asserts all three agree. Under the buggy cross-node pool
+/// several instances in this seed mismatch, so it FAILS; node-local separation
+/// passes. `fired > 0` proves separation is actually exercised (else the test is
+/// vacuous).
+#[test]
+fn tree_cuts_preserve_optimum_sweep() {
+    let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
+    let cfg_off = MipConfig { cuts: false, tree_cuts: false, ..MipConfig::default() };
+    let cfg_on = MipConfig { cuts: false, tree_cuts: true, ..MipConfig::default() };
+
+    let mut rng = SweepRng(12345);
+    let mut fired = 0usize;
+    let mut checked = 0usize;
+    for it in 0..500usize {
+        let n = 5 + it % 3; // 5..7
+        let m = 2 + it % 3; // 2..4
+        let milp = sweep_milp(&mut rng, n, m, 4.0);
+
+        let truth = brute_force_opt(&milp);
+        let (r_off, _) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_off);
+        let (r_on, s_on) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_on);
+        if s_on.tree_cut_rounds > 0 {
+            fired += 1;
+        }
+
+        match truth {
+            None => {
+                // Infeasible MILP: neither configuration may invent a solution.
+                assert_ne!(r_off.status, SolveStatus::Optimal, "it={it}: off feasible but brute says infeasible");
+                assert_ne!(r_on.status, SolveStatus::Optimal, "it={it}: ON invented a solution for infeasible MILP");
+            }
+            Some(opt) => {
+                assert_eq!(r_off.status, SolveStatus::Optimal, "it={it}: off must solve feasible MILP");
+                assert!(
+                    (r_off.objective - opt).abs() < 1e-6,
+                    "it={it}: OFF baseline wrong: off={} brute={opt}",
+                    r_off.objective
+                );
+                assert_eq!(r_on.status, SolveStatus::Optimal, "it={it}: ON must solve feasible MILP");
+                assert!(
+                    (r_on.objective - opt).abs() < 1e-6,
+                    "it={it}: in-tree cuts changed the optimum (cross-node leak): on={} brute={opt}",
+                    r_on.objective
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "sweep must verify at least one feasible instance");
+    assert!(
+        fired > 0,
+        "in-tree separation must fire on the sweep (else the soundness check is vacuous)"
+    );
+}

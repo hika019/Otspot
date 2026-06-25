@@ -279,6 +279,11 @@ pub const DEFAULT_MAX_CUT_ROUNDS: usize = 5;
 /// optimum — so enable it for highly symmetric models (assignment / packing /
 /// identical-machine scheduling).
 pub const DEFAULT_MIP_SYMMETRY: bool = false;
+/// Default in-tree cut separation state. ON: re-separating GMI/MIR at selected
+/// B&B nodes tightens deep node relaxations the root cuts miss, shrinking the
+/// tree. Like root cuts it only removes fractional points, so correctness is
+/// unchanged either way.
+pub const DEFAULT_MIP_TREE_CUTS: bool = true;
 
 /// MILP/MIQP branch-and-bound config.
 ///
@@ -306,6 +311,10 @@ pub struct MipConfig {
     /// integer variables; rounds stop early when no fractional source remains or
     /// the LP bound stops improving.
     pub max_cut_rounds: usize,
+    /// Re-separate GMI/MIR cuts at selected branch-and-bound nodes (not just the
+    /// root). Cuts are node-local and filtered through a violation/orthogonality/
+    /// aging pool. Default ON (see [`DEFAULT_MIP_TREE_CUTS`]).
+    pub tree_cuts: bool,
     /// Enable the RINS heuristic inside branch-and-bound.
     /// Automatically set to `false` in sub-MIP calls to prevent recursive RINS.
     pub rins_enabled: bool,
@@ -339,6 +348,7 @@ impl Default for MipConfig {
             branching: MipBranching::default(),
             cuts: DEFAULT_MIP_CUTS,
             max_cut_rounds: DEFAULT_MAX_CUT_ROUNDS,
+            tree_cuts: DEFAULT_MIP_TREE_CUTS,
             rins_enabled: true,
             symmetry: DEFAULT_MIP_SYMMETRY,
             rens_enabled: true,

@@ -15,11 +15,12 @@
 use crate::basis::{BasisManager, LuBasis};
 use crate::linalg::timeout::deadline_reached;
 use crate::options::{MipConfig, SimplexMethod, SolverOptions, DEFAULT_MAX_CUT_ROUNDS};
-use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::simplex::{build_standard_form, StandardForm};
 use crate::sparse::CscMatrix;
 use crate::tolerances::{feas_rel_tol, ZERO_TOL};
 
+use super::cut_pool::{Cut, CutPool};
 use super::problem::MilpProblem;
 
 mod flow_cover;
@@ -33,6 +34,23 @@ const MIN_OBJ_IMPROVEMENT_REL: f64 = 1e-4;
 const GMI_MAX_COEF_DYNAMISM: f64 = 1e9;
 /// Fraction of the remaining solve budget root cut generation may consume.
 const CUT_TIME_FRACTION: f64 = 0.3;
+
+/// In-tree separation runs at nodes whose depth is a multiple of this. Cuts near
+/// a subtree's root close gaps that propagate to all its descendants, so effort
+/// concentrates there rather than at every (mostly redundant) node.
+const TREE_CUT_DEPTH_INTERVAL: usize = 4;
+/// In-tree separation also runs every this-many processed nodes regardless of
+/// depth, so long dives still receive periodic re-tightening.
+const TREE_CUT_NODE_INTERVAL: usize = 32;
+/// Minimum relative node-bound gain for a re-separated node LP to be accepted.
+/// Below this the cuts did not meaningfully tighten the bound, so the original
+/// (warm-startable) result is kept to avoid pessimising children with a
+/// basis-less re-solve. Mirrors the root [`MIN_OBJ_IMPROVEMENT_REL`] threshold.
+const MIN_TREE_CUT_GAIN_REL: f64 = 1e-4;
+/// Maximum separation rounds per node. Each round re-solves the node LP and adds
+/// a GMI (even) / MIR (odd) batch; kept small so a separating node costs only a
+/// few extra LP solves. Rounds also stop early when the bound stalls.
+const TREE_CUT_MAX_ROUNDS: usize = 4;
 
 /// A generated cut `coeffs · x >= rhs` over the original variable space.
 struct CutRow {
@@ -958,6 +976,123 @@ fn generate_implied_bound_cuts(
         }
     }
     cuts
+}
+
+// ── In-tree separation ──────────────────────────────────────────────────────
+
+/// Whether in-tree separation should run at this node (depth- or count-gated).
+fn tree_cut_node_selected(depth: usize, node_index: usize) -> bool {
+    (depth > 0 && depth.is_multiple_of(TREE_CUT_DEPTH_INTERVAL))
+        || (node_index > 0 && node_index.is_multiple_of(TREE_CUT_NODE_INTERVAL))
+}
+
+/// Re-separate GMI/MIR cuts from a B&B node's LP relaxation and return a
+/// cut-tightened node result when its bound improves by at least
+/// [`MIN_TREE_CUT_GAIN_REL`], else `None` (keep the original result).
+///
+/// **Soundness (node-local).** GMI/MIR cuts derive from the node tableau and
+/// bake in the node's branching-tightened bounds (`accumulate_column` uses the
+/// raised lower / lowered upper bounds), so each cut is valid *only* within this
+/// node's subtree — it can remove integer points that are feasible elsewhere.
+/// Therefore the [`CutPool`] is created fresh **per call** (it only dedups and
+/// orthogonalises within this node's own rounds) and the cut rows are appended
+/// solely to this node's re-solve. They are never stored across nodes nor
+/// propagated to children, which keeps the search globally optimal: the only
+/// thing handed back to B&B is the tightened bound/solution of this node, and
+/// the cuts are valid throughout this node's subtree so that bound is a valid
+/// lower bound for it.
+///
+/// `node_lp` is the original relaxation with this node's bounds applied. The loop
+/// mirrors root [`add_root_cuts`] but stays node-local: re-solve → generate →
+/// pool-filter → append (Ge) → re-solve, stopping when the bound stalls.
+pub(crate) fn separate_tree_cuts(
+    node_lp: &LpProblem,
+    integer_mask: &[bool],
+    options: &SolverOptions,
+    node_res: &SolverResult,
+    depth: usize,
+    node_index: usize,
+) -> Option<SolverResult> {
+    if !tree_cut_node_selected(depth, node_index) {
+        return None;
+    }
+    let base_obj = node_res.objective;
+    // Fresh per-node pool: cuts are valid only in this subtree (see soundness note).
+    let mut pool = CutPool::new();
+    let mut committed = node_lp.clone();
+    let mut accepted: Option<SolverResult> = None;
+    let mut prev_obj = base_obj;
+
+    for round_idx in 0..TREE_CUT_MAX_ROUNDS {
+        // Re-solve through the cold primal cut path to recover a *full* size-`m`
+        // simplex basis (the node's warm-start basis is a compact form).
+        let cut_res = solve_cut_lp(&committed, options, options.deadline);
+        if cut_res.status != SolveStatus::Optimal {
+            break;
+        }
+        let Some(ws) = cut_res.warm_start_basis.as_ref() else {
+            break;
+        };
+        let x_star = &cut_res.solution;
+        if x_star.is_empty() {
+            break;
+        }
+
+        let kind = if round_idx % 2 == 0 {
+            CutKind::Gmi
+        } else {
+            CutKind::Mir
+        };
+        let cuts = generate_round(&committed, integer_mask, x_star, &ws.basis, kind);
+        if cuts.is_empty() {
+            break;
+        }
+        let pool_candidates: Vec<Cut> = cuts
+            .into_iter()
+            .map(|c| Cut {
+                coeffs: c.coeffs,
+                rhs: c.rhs,
+                sense: ConstraintType::Ge,
+            })
+            .collect();
+        let selected = pool.separate_round(pool_candidates, x_star);
+        if selected.is_empty() {
+            break;
+        }
+
+        let rows: Vec<CutRow> = selected
+            .into_iter()
+            .map(|c| CutRow {
+                coeffs: c.coeffs,
+                rhs: c.rhs,
+            })
+            .collect();
+        let candidate = append_ge_rows(&committed, &rows);
+        let check = solve_validate(&candidate, options, options.deadline);
+        if check.status != SolveStatus::Optimal {
+            break;
+        }
+        committed = candidate;
+        let obj = check.objective;
+        accepted = Some(check);
+
+        // Stop once the bound stops improving meaningfully.
+        let scale = 1.0_f64.max(prev_obj.abs());
+        if obj <= prev_obj + MIN_TREE_CUT_GAIN_REL * scale {
+            break;
+        }
+        prev_obj = obj;
+    }
+
+    // Accept only a meaningful tightening over the node's existing bound. The
+    // returned result carries no warm-start basis (its augmented layout would not
+    // match child node solves, which use the original constraint structure).
+    let res = accepted?;
+    let scale = 1.0_f64.max(base_obj.abs());
+    if res.objective <= base_obj + MIN_TREE_CUT_GAIN_REL * scale {
+        return None;
+    }
+    Some(res)
 }
 
 #[cfg(test)]

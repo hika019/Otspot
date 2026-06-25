@@ -7,6 +7,7 @@
 
 pub(crate) mod branch;
 pub(crate) mod conflict;
+pub(crate) mod cut_pool;
 pub(crate) mod cuts;
 pub(crate) mod heuristics;
 pub(crate) mod node;
@@ -65,6 +66,26 @@ pub(crate) trait Relaxation {
     /// [`presolve::tighten_bounds_at_node`] before each LP solve. MIQP returns `None`
     /// because it relies on per-node Ruiz scaling (presolve) for conditioning instead.
     fn propagation_data(&self) -> Option<(&CscMatrix, &[f64], &[ConstraintType])> {
+        None
+    }
+
+    /// In-tree cut separation hook. Default: no-op (returns `None`).
+    ///
+    /// MILP overrides this to re-separate GMI/MIR from the node LP relaxation and
+    /// return a cut-tightened result when the node bound improves. Cuts bake in
+    /// the node's branching-tightened bounds, so they are valid only within this
+    /// node's subtree: separation is **node-local** (a fresh pool per call, never
+    /// reused at other nodes) and the cut rows are not propagated to children.
+    /// `bounds` are the node's bounds; `res` is its (Optimal) relaxation result.
+    fn separate_tree_cuts(
+        &self,
+        _bounds: &[(f64, f64)],
+        _res: &SolverResult,
+        _mask: &[bool],
+        _opts: &SolverOptions,
+        _depth: usize,
+        _node_index: usize,
+    ) -> Option<SolverResult> {
         None
     }
 
@@ -212,6 +233,11 @@ pub struct MipStats {
     pub conflict_clauses_learned: usize,
     /// Number of nodes pruned by conflict analysis (LP solve skipped).
     pub conflict_pruned: usize,
+
+    /// Number of B&B nodes where in-tree separation produced a cut-tightened
+    /// (accepted) relaxation result. Zero when `tree_cuts` is off or no cut
+    /// improved a node bound.
+    pub tree_cut_rounds: usize,
 }
 
 /// Solve a MILP to (relative) ε-optimality via branch-and-bound.
@@ -718,7 +744,7 @@ fn solve_mip_core<R: Relaxation>(
         if let Some(ref ws) = node.warm_start {
             node_options.warm_start = Some(ws.clone());
         }
-        let res = if node_options.use_ruiz_scaling {
+        let mut res = if node_options.use_ruiz_scaling {
             problem.solve(solve_bounds, &node_options)
         } else {
             let mut retry_options = node_options.clone();
@@ -777,6 +803,24 @@ fn solve_mip_core<R: Relaxation>(
                 break;
             }
             _ => {}
+        }
+
+        // --- In-tree cut separation (gated; MILP overrides, MIQP no-op) ---
+        if cfg.tree_cuts
+            && matches!(res.status, SolveStatus::Optimal)
+            && !res.solution.is_empty()
+        {
+            if let Some(improved) = problem.separate_tree_cuts(
+                solve_bounds,
+                &res,
+                &mask,
+                &node_options,
+                node.depth,
+                stats.nodes_processed,
+            ) {
+                stats.tree_cut_rounds += 1;
+                res = improved;
+            }
         }
 
         // --- Node outcome: prune / leaf / branch ---
