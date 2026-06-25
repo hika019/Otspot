@@ -69,7 +69,16 @@ fn legacy_basis_from_warm_start(
             let (_, ub) = problem.bounds[orig];
             ub.is_finite() && (ub - solution.get(orig).copied().unwrap_or(0.0)).abs() <= BOUND_ACTIVE_TOL
         };
-        legacy.push(if at_upper { j } else { slack_col });
+        // The structural column j is the UB-row basic only when j is non-basic at
+        // its upper bound. If j is already basic (e.g. degenerate basic-at-upper),
+        // the UB row's basic variable is its slack (zero-valued, degenerate), so
+        // pushing j would duplicate a basis column and make B singular.
+        let j_already_basic = basis.contains(&j);
+        legacy.push(if at_upper && !j_already_basic {
+            j
+        } else {
+            slack_col
+        });
     }
     Some(legacy)
 }
@@ -819,5 +828,30 @@ mod tests {
         let (down, up) = sens.rhs_ranges[0];
         assert!((down - 2.0).abs() < 1e-6, "rhs down expected 2, got {}", down);
         assert!((up - 3.0).abs() < 1e-6, "rhs up expected 3, got {}", up);
+    }
+
+    #[test]
+    fn bounded_lp_var_basic_at_ub_has_sensitivity() {
+        // Degenerate: an equality forces x1 to its upper bound, so x1 is BOTH
+        // basic (in the eq row) and at its UB. The UB row must take the slack,
+        // not a duplicate of x1's column. Previously this returned None.
+        // Min -x2  s.t. x1 = 4 (Eq), x1 + x2 <= 12 ; 0<=x1<=4, 0<=x2<=10.
+        let a = CscMatrix::from_triplets(&[0, 1, 1], &[0, 0, 1], &[1.0, 1.0, 1.0], 2, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0, -1.0],
+            a,
+            vec![4.0, 12.0],
+            vec![ConstraintType::Eq, ConstraintType::Le],
+            vec![(0.0, 4.0), (0.0, 10.0)],
+            None,
+        )
+        .unwrap();
+        let result = solve_no_presolve(&lp);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!((result.solution[0] - 4.0).abs() < 1e-9, "x1 must be at its UB");
+        let sens = compute_sensitivity(&lp, &result)
+            .expect("basic-at-upper degenerate basis must still yield sensitivity");
+        assert_eq!(sens.rhs_ranges.len(), 2);
+        assert_eq!(sens.obj_ranges.len(), 2);
     }
 }
