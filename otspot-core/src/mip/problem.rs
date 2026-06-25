@@ -120,6 +120,30 @@ impl Relaxation for MilpProblem {
         }
         crate::mip::heuristics::rins::run_rins(self, x_lp, x_inc, cfg, deadline, opts)
     }
+    fn run_rens(
+        &self,
+        x_lp: &[f64],
+        cfg: &crate::options::MipConfig,
+        deadline: &Option<std::time::Instant>,
+        opts: &crate::options::SolverOptions,
+    ) -> Option<crate::problem::SolverResult> {
+        if !cfg.rens_enabled {
+            return None;
+        }
+        crate::mip::heuristics::rens::run_rens(self, x_lp, cfg, deadline, opts)
+    }
+    fn run_local_branching(
+        &self,
+        x_inc: &[f64],
+        cfg: &crate::options::MipConfig,
+        deadline: &Option<std::time::Instant>,
+        opts: &crate::options::SolverOptions,
+    ) -> Option<crate::problem::SolverResult> {
+        if !cfg.local_branching_enabled {
+            return None;
+        }
+        crate::mip::heuristics::local_branching::run_local_branching(self, x_inc, cfg, deadline, opts)
+    }
 }
 
 /// Mixed-Integer **convex** Quadratic Program: minimize `1/2 x^T Q x + c^T x`

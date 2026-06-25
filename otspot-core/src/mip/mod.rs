@@ -80,6 +80,32 @@ pub(crate) trait Relaxation {
     ) -> Option<SolverResult> {
         None
     }
+
+    /// Run the RENS heuristic: round a node LP relaxation by fixing integral
+    /// components and restricting fractional ones to `{floor, ceil}`, then solve
+    /// the small sub-MIP. Returns `None` for MIQP (default) or when disabled.
+    fn run_rens(
+        &self,
+        _x_lp: &[f64],
+        _cfg: &MipConfig,
+        _deadline: &Option<std::time::Instant>,
+        _opts: &SolverOptions,
+    ) -> Option<SolverResult> {
+        None
+    }
+
+    /// Run the local-branching heuristic: add a Hamming-distance ≤ k cut on the
+    /// binary variables around the incumbent and solve the neighborhood sub-MIP.
+    /// Returns `None` for MIQP (default) or when disabled.
+    fn run_local_branching(
+        &self,
+        _x_inc: &[f64],
+        _cfg: &MipConfig,
+        _deadline: &Option<std::time::Instant>,
+        _opts: &SolverOptions,
+    ) -> Option<SolverResult> {
+        None
+    }
 }
 
 /// Search statistics returned by [`solve_milp_with_stats`] / [`solve_miqp_with_stats`].
@@ -172,6 +198,14 @@ pub struct MipStats {
     pub rins_calls: usize,
     /// Number of times RINS found an improving incumbent.
     pub rins_improvements: usize,
+    /// Number of RENS heuristic calls attempted.
+    pub rens_calls: usize,
+    /// Number of times RENS found an improving incumbent.
+    pub rens_improvements: usize,
+    /// Number of local-branching heuristic calls attempted.
+    pub local_branching_calls: usize,
+    /// Number of times local branching found an improving incumbent.
+    pub local_branching_improvements: usize,
 
     /// Number of conflict clauses learned from infeasible nodes.
     pub conflict_clauses_learned: usize,
@@ -1027,6 +1061,67 @@ fn try_rins<R: Relaxation>(
     }
 }
 
+/// Attempt a RENS heuristic call on the node LP relaxation and update
+/// stats/incumbent when it yields an improving feasible point. Unlike RINS,
+/// RENS does not require an existing incumbent (it manufactures one).
+fn try_rens<R: Relaxation>(
+    problem: &R,
+    stats: &mut MipStats,
+    state: &mut MipState,
+    cfg: &MipConfig,
+    deadline: &Option<Instant>,
+    opts: &SolverOptions,
+    rel_sol: &[f64],
+) {
+    if !cfg.rens_enabled
+        || !stats
+            .nodes_processed
+            .is_multiple_of(heuristics::rens::RENS_INTERVAL)
+    {
+        return;
+    }
+    stats.rens_calls += 1;
+    if let Some(res) = problem.run_rens(rel_sol, cfg, deadline, opts) {
+        if state.consider(&res) {
+            stats.incumbent_updates += 1;
+            stats.rens_improvements += 1;
+        }
+    }
+}
+
+/// Attempt a local-branching heuristic call around the current incumbent and
+/// update stats/incumbent when it strictly improves.
+fn try_local_branching<R: Relaxation>(
+    problem: &R,
+    stats: &mut MipStats,
+    state: &mut MipState,
+    cfg: &MipConfig,
+    deadline: &Option<Instant>,
+    opts: &SolverOptions,
+) {
+    if !cfg.local_branching_enabled
+        || !stats
+            .nodes_processed
+            .is_multiple_of(heuristics::local_branching::LOCAL_BRANCHING_INTERVAL)
+    {
+        return;
+    }
+    let lb_res = {
+        let inc_sol = match state.incumbent {
+            Some(ref inc) => &inc.solution,
+            None => return,
+        };
+        stats.local_branching_calls += 1;
+        problem.run_local_branching(inc_sol, cfg, deadline, opts)
+    };
+    if let Some(res) = lb_res {
+        if state.consider(&res) {
+            stats.incumbent_updates += 1;
+            stats.local_branching_improvements += 1;
+        }
+    }
+}
+
 /// Determine what the B&B loop should do after a node's relaxation result.
 ///
 /// Handles both trusted (Optimal) and non-trusted paths: pseudocost updates,
@@ -1093,8 +1188,11 @@ fn process_node_outcome<R: Relaxation>(
             return NodeAction::Skip { end_dive: true };
         }
 
-        // RINS: attempt incumbent improvement via sub-MIP.
+        // Primal heuristics on this fractional node: RENS rounds the LP point to
+        // manufacture an incumbent; RINS and local branching refine an existing one.
+        try_rens(problem, stats, state, cfg, deadline, shared, &res.solution);
         try_rins(problem, stats, state, cfg, deadline, shared, &res.solution);
+        try_local_branching(problem, stats, state, cfg, deadline, shared);
 
         // Max-depth limit.
         if node.depth + 1 > cfg.max_depth {
