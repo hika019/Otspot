@@ -7,10 +7,72 @@
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::simplex::build_standard_form;
+use crate::simplex::{
+    build_bounded_standard_form_with_deadline, build_standard_form, extract_solution, StandardForm,
+};
 
 /// Numerical threshold for the ratio test in sensitivity ranging.
 const RATIO_TOL: f64 = 1e-10;
+/// Tolerance for deciding a variable sits at its finite upper bound when
+/// translating a bounded-form warm-start basis into the UB-row legacy form.
+const BOUND_ACTIVE_TOL: f64 = 1e-7;
+/// Relative tolerance for validating the reconstructed legacy basis against the
+/// solver's reported primal solution.
+const BASIS_RECON_TOL: f64 = 1e-6;
+
+/// Translate the solver's warm-start basis into a legacy UB-row-expanded basis
+/// of length `sf.m`.
+///
+/// The default dual-advanced path solves in `BoundedStandardForm` (per-variable
+/// upper bounds, no UB rows), so its `WarmStartBasis` has one entry per original
+/// constraint row. `compute_sensitivity` works in the UB-row-expanded
+/// `StandardForm`, which adds one row (and one basic variable) per finite upper
+/// bound. For each such UB row the basic variable is the structural column when
+/// that variable sits at its upper bound, otherwise the UB slack. Returns `None`
+/// when the basis is neither legacy- nor bounded-shaped.
+fn legacy_basis_from_warm_start(
+    problem: &LpProblem,
+    sf: &StandardForm,
+    solution: &[f64],
+    basis: &[usize],
+) -> Option<Vec<usize>> {
+    if basis.iter().any(|&c| c >= sf.n_total) {
+        return None;
+    }
+    if basis.len() == sf.m {
+        return Some(basis.to_vec()); // already legacy form (e.g. no finite UBs)
+    }
+    let bsf = build_bounded_standard_form_with_deadline(problem, None)?;
+    if basis.len() != bsf.m {
+        return None;
+    }
+    let n_shifted = bsf.n_shifted;
+    let ub_cols: Vec<usize> = (0..n_shifted)
+        .filter(|&j| bsf.upper_bounds[j].is_finite())
+        .collect();
+    if bsf.m + ub_cols.len() != sf.m {
+        return None;
+    }
+    let mut col_to_orig = vec![usize::MAX; n_shifted];
+    for (orig, info) in bsf.orig_var_info.iter().enumerate() {
+        for &(col, _) in &info.new_vars {
+            if col < n_shifted {
+                col_to_orig[col] = orig;
+            }
+        }
+    }
+    let mut legacy = basis.to_vec();
+    for (k, &j) in ub_cols.iter().enumerate() {
+        let slack_col = bsf.n_total + k; // UB slacks are appended after bounded columns
+        let orig = col_to_orig[j];
+        let at_upper = orig != usize::MAX && {
+            let (_, ub) = problem.bounds[orig];
+            ub.is_finite() && (ub - solution.get(orig).copied().unwrap_or(0.0)).abs() <= BOUND_ACTIVE_TOL
+        };
+        legacy.push(if at_upper { j } else { slack_col });
+    }
+    Some(legacy)
+}
 
 /// LP sensitivity analysis result.
 ///
@@ -54,28 +116,44 @@ pub fn compute_sensitivity(
     let m_orig = problem.num_constraints;
     let n_orig = problem.num_vars;
 
-    // Dimension guard: basis must cover all m_ext rows with valid column indices.
-    if ws.basis.len() != m_ext || ws.basis.iter().any(|&c| c >= n_total) {
+    // The default bounded path returns a basis over BoundedStandardForm rows;
+    // translate it into this UB-row-expanded form (no-op when already legacy).
+    let basis = legacy_basis_from_warm_start(problem, &sf, &result.solution, &ws.basis)?;
+    if basis.len() != m_ext || basis.iter().any(|&c| c >= n_total) {
         return None;
     }
 
     // Build LU factorization of the basis matrix B.
-    let mut bm = LuBasis::new_timed(&sf.a, &ws.basis, 0, None).ok()?;
+    let mut bm = LuBasis::new_timed(&sf.a, &basis, 0, None).ok()?;
 
     // x_B = B^{-1} b  (recomputed for accuracy; ws.x_b is a hint only).
     let mut x_b = sf.b.clone();
     bm.ftran_dense(&mut x_b);
 
+    // Reject rather than emit ranges from a wrong basis: the (possibly
+    // bound-translated) basis must reproduce the solver's reported primal.
+    let col_scale = vec![1.0_f64; n_total];
+    let recon = extract_solution(&sf, &basis, &x_b, &col_scale);
+    if recon.len() != n_orig
+        || result.solution.len() != n_orig
+        || recon
+            .iter()
+            .zip(result.solution.iter())
+            .any(|(&r, &s)| !r.is_finite() || (r - s).abs() > BASIS_RECON_TOL * (1.0 + s.abs()))
+    {
+        return None;
+    }
+
     // is_basic[col] and basis_row_map[col] → row index.
     let mut is_basic = vec![false; n_total];
     let mut basis_row_map = vec![usize::MAX; n_total];
-    for (row, &col) in ws.basis.iter().enumerate() {
+    for (row, &col) in basis.iter().enumerate() {
         is_basic[col] = true;
         basis_row_map[col] = row;
     }
 
     // Standard-form dual: y_sf = B^{-T} c_sf_B.
-    let mut y_sf: Vec<f64> = ws.basis.iter().map(|&col| sf.c[col]).collect();
+    let mut y_sf: Vec<f64> = basis.iter().map(|&col| sf.c[col]).collect();
     bm.btran_dense(&mut y_sf);
 
     // Reduced costs for non-basic columns: c̄_sf[k] = c_sf[k] - y_sf^T a_sf_k.
@@ -681,5 +759,65 @@ mod tests {
             "free non-basic Δ_up expected 0.0, got {}",
             up
         );
+    }
+    fn make_bounded_lp_var_at_ub() -> LpProblem {
+        // Min -2x1 - x2  s.t. x1 + x2 <= 10 ; 0<=x1<=4, 0<=x2<=7.
+        // Optimal x1=4 (at UB), x2=6 (basic), obj=-14.
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        LpProblem::new_general(
+            vec![-2.0, -1.0],
+            a,
+            vec![10.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 4.0), (0.0, 7.0)],
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bounded_lp_with_var_at_ub_has_sensitivity() {
+        // Regression: the bounded dual-advanced path returns a basis over
+        // BoundedStandardForm rows; sensitivity must translate it (previously None).
+        let lp = make_bounded_lp_var_at_ub();
+        let result = solve_no_presolve(&lp);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        let sens =
+            compute_sensitivity(&lp, &result).expect("bounded-form basis must yield sensitivity");
+        assert_eq!(sens.rhs_ranges.len(), 1);
+        assert_eq!(sens.obj_ranges.len(), 2);
+        // b0 in [10-6, 10+1]: down until x2=0, up until x2 hits its UB 7.
+        let (down, up) = sens.rhs_ranges[0];
+        assert!((down - 6.0).abs() < 1e-6, "rhs down expected 6, got {}", down);
+        assert!((up - 1.0).abs() < 1e-6, "rhs up expected 1, got {}", up);
+    }
+
+    fn make_bounded_lp_var_interior() -> LpProblem {
+        // Min -x1 - 0.1x2  s.t. x1 + x2 <= 2 ; 0<=x1<=5, 0<=x2<=5.
+        // Optimal x1=2 (interior wrt UB 5), x2=0, obj=-2.
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        LpProblem::new_general(
+            vec![-1.0, -0.1],
+            a,
+            vec![2.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 5.0), (0.0, 5.0)],
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bounded_lp_all_interior_ub_slacks_basic() {
+        // No variable sits at its upper bound: every UB row keeps its slack basic.
+        let lp = make_bounded_lp_var_interior();
+        let result = solve_no_presolve(&lp);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        let sens =
+            compute_sensitivity(&lp, &result).expect("bounded-form basis must yield sensitivity");
+        // b0 in [2-2, 2+3]: down until x1=0, up until x1 hits its UB 5.
+        let (down, up) = sens.rhs_ranges[0];
+        assert!((down - 2.0).abs() < 1e-6, "rhs down expected 2, got {}", down);
+        assert!((up - 3.0).abs() < 1e-6, "rhs up expected 3, got {}", up);
     }
 }
