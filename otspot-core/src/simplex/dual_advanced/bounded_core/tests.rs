@@ -2198,3 +2198,119 @@ fn partial_pricing_aug_phase1_matches_full() {
         "partial Phase I art_sum {art_partial:.6e} — partial pricing broke Phase I feasibility"
     );
 }
+
+// ── anti-degeneracy: phase2_primal_bounded Bland sentinels ───────────────────
+
+/// Bland mode in `phase2_primal_bounded` must reach the *same* optimum as the
+/// default Devex pricing on the existing Le-only fixtures. No-op proof: a Bland
+/// implementation that mispriced or stepped past a blocking row would land on a
+/// different objective value, failing the equality assertion.
+#[test]
+fn phase2_primal_bland_matches_devex() {
+    let cases: [(LpProblem, f64); 2] = [
+        (lp_boxed_2x2_degenerate(), -6.0),
+        (lp2_boxed_flip(), -14.0),
+    ];
+    for (lp, known) in &cases {
+        let (obj_devex, _, _) = solve_phase2_obj(lp, FULL_PRICE);
+        let (obj_bland, _, _) = {
+            let _g = ForceBlandGuard::on();
+            solve_phase2_obj(lp, FULL_PRICE)
+        };
+        assert!(
+            (obj_devex - known).abs() < 1e-9,
+            "Devex optimum {obj_devex:.9} ≠ known {known}"
+        );
+        assert!(
+            (obj_bland - obj_devex).abs() < 1e-9,
+            "Bland changed phase2_primal_bounded optimum: devex={obj_devex:.9} bland={obj_bland:.9}"
+        );
+    }
+}
+
+/// Highly degenerate Le-only LP that exercises `phase2_primal_bounded` with
+/// many degenerate pivots. All variables share a tight total-capacity constraint,
+/// creating near-zero slacks and extensive degeneracy in Phase 2.
+///
+/// With Bland anti-cycling, Phase 2 must converge to the known optimum.
+/// The LP structure (unit-cost min with tight box + linking constraints)
+/// forces the solver through the degenerate region of the feasible polytope.
+#[test]
+fn phase2_primal_degenerate_lp_converges() {
+    // n vars, n+1 Le constraints. Row j: x_j <= cap_j. Row n: sum(x_j) <= S.
+    // Optimum: each x_j = cap_j, obj = -sum(cap_j). All n+1 constraints
+    // active at the optimum -> degenerate vertex.
+    let n = 50;
+    let m = n + 1;
+
+    let mut trip_rows: Vec<usize> = Vec::new();
+    let mut trip_cols: Vec<usize> = Vec::new();
+    let mut trip_vals: Vec<f64> = Vec::new();
+    let mut b = Vec::with_capacity(m);
+    let mut c = Vec::with_capacity(n);
+
+    let mut sum_cap = 0.0f64;
+    for j in 0..n {
+        // Row j: x_j <= cap_j
+        let cap_j = 1.0 + 0.01 * (j as f64);
+        trip_rows.push(j);
+        trip_cols.push(j);
+        trip_vals.push(1.0);
+        b.push(cap_j);
+        sum_cap += cap_j;
+
+        // Linking row (n): sum(x_j) <= sum(cap_j)
+        trip_rows.push(n);
+        trip_cols.push(j);
+        trip_vals.push(1.0);
+
+        c.push(-1.0);
+    }
+    b.push(sum_cap);
+
+    let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n).unwrap();
+    let ctypes = vec![ConstraintType::Le; m];
+    let bounds: Vec<(f64, f64)> = (0..n)
+        .map(|j| (0.0, 1.0 + 0.01 * (j as f64)))
+        .collect();
+    let lp = LpProblem::new_general(c.clone(), a, b, ctypes, bounds, None).unwrap();
+
+    let bsf = build_bounded_standard_form(&lp);
+    let opts = SolverOptions::default();
+    let (dual_outcome, dual_state) = solve_bounded_dual(
+        &bsf,
+        &bsf.a,
+        &bsf.b,
+        &bsf.c,
+        &opts,
+        &bsf.upper_bounds,
+        &mut MostInfeasibleLeaving,
+    );
+    assert!(
+        matches!(dual_outcome, BoundedOutcome::Optimal(..)),
+        "dual phase must complete: {dual_outcome:?}"
+    );
+    let mut iters = 0usize;
+    let (outcome, state) = phase2_primal_bounded(
+        &bsf,
+        dual_state,
+        &bsf.a,
+        &bsf.c,
+        &opts,
+        &mut iters,
+        &bsf.upper_bounds,
+    );
+    assert!(
+        matches!(outcome, SimplexOutcome::Optimal(..)),
+        "degenerate Phase 2 must reach Optimal: {outcome:?} (iters={iters})"
+    );
+
+    let sol = extract_solution_bounded(&bsf, &state, &[]);
+    let obj: f64 = lp.c.iter().zip(sol.iter()).map(|(&ci, &xi)| ci * xi).sum();
+    assert!(
+        (obj - (-sum_cap)).abs() < 1e-6,
+        "degenerate LP obj {obj:.9e} ≠ expected {:.9e}",
+        -sum_cap
+    );
+}
+

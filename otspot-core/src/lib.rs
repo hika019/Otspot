@@ -30,6 +30,7 @@ pub mod linalg;
 pub mod lp;
 pub mod mip;
 pub mod qp;
+pub mod sensitivity;
 
 #[doc(hidden)]
 pub mod diag {
