@@ -4,30 +4,46 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-## [0.6.1] - 2026-06-24
+## [0.7.0] - 2026-06-25
 
-公開API破壊的変更なし。MIP node LP と LP presolve のホットパスを軽量化。
+MIP カット/分岐の拡充、LP 感度分析、QP LISWET7 修正、ホットパス軽量化。
+`LpProblem::a` の型変更を含む (下記 BREAKING)。
+
+### 追加
+
+- MIP: Cover / Clique / Implied Bound カット (既存 GMI/MIR に追加)
+- LP: 感度分析 `compute_sensitivity` — RHS / 目的関数係数の ranging
+
+### 破壊的変更 (BREAKING)
+
+- `LpProblem::a` の型を `CscMatrix` → `Arc<CscMatrix>` に変更。B&B の問題複製 (`LpProblem::clone`) を O(1) 化するため。メソッド呼び出しは `Deref` で互換だが、`CscMatrix` を期待する型注釈や所有権移動を伴うコードは `(*problem.a).clone()` 等への修正が必要
 
 ### 変更
 
 - MIP: root 後の node LP / strong-branching LP は、bounds だけが変わる relax solve で Ruiz scaling をまず省略し、数値的に証明不能な結果だけ scaled retry するよう変更
-- MIP: デフォルト branching を強分岐付き Reliability から MostFractional に変更し、強分岐の試行LPが短時間 budget を消費して探索が進まないケースを回避。明示 `Reliability` 指定時は強分岐を維持しつつ試行量を削減
+- MIP: デフォルト Reliability branching のパラメータを縮小 (RELIABILITY_THRESHOLD=2, MAX_CANDIDATES=2) し強分岐の試行量を削減
 - MIP: `OTSPOT_LP_SOLVE_PROFILE=1` 時の MIP profile に FP / root cut / node propagation / strong branching の時間・回数を追加
 - LP presolve: 置換処理中の `PresolveState::add_to_entry` を該当 row/col エントリだけ更新・削除する実装へ変更し、不要な全体 `retain` 走査を削減
+
+### 修正
+
+- QP: LISWET7 の false-Optimal を修正 (kkt_already_passes の skip 判定を厳格化)
+- LP 感度分析: 有限上界を持つ LP で bounded-form warm-start を UB 行展開形へ翻訳し感度分析を有効化 (退化 basic-at-upper を含む)
+- MIP: 強分岐試行に infinite→finite 境界変化時の warm-start drop ガードを適用 (片側無限の整数変数でのスコア破損を防止)
 
 ### テスト
 
 - MIP: root は scaling 維持、descendant node は repeated scaling を省略する option 伝播 sentinel を追加
-- MIP: デフォルト branching が強分岐を避けること、明示 `Reliability` では strong-branching stats が非ゼロになることを検証する sentinel を追加
+- MIP: 明示 `Reliability` で strong-branching stats が非ゼロになること、強分岐試行が layout 変化時に warm-start を drop することを検証する sentinel を追加
+- LP 感度分析: 上界 active / 全 interior / 退化 basic-at-upper の各経路を手計算 range で検証
 - LP presolve: 疎 row/col 表現の同期、ゼロ化削除、微小 delta no-op を直接検証する sentinel を追加
 
-### 実測
+### 実測 (eps=1e-6, timeout=1000s, jobs=6)
 
-- `mas76.mps --timeout 30 --no-cuts`: descendant scaling calls 3675→6、nodes 3676→6111、per-node solve 3274us→1977us
-- `gen-ip002.mps --timeout 20 --no-cuts`: descendant scaling calls 0、nodes 20708、per-node solve 315us
-- `dcmulti.mps --timeout 10 --eps 1e-6`: strong_branch_us 6.18s→0、nodes 1→12
-- `enlight_hard.mps --timeout 10 --eps 1e-6`: strong_branch_us 9.13s→0、nodes 14→339
-- `gen-ip002.mps --timeout 30 --eps 1e-6`: nodes 5134→9455、incumbent -4660.05→-4728.58
+- LP Netlib: 108/109 optimal (`dfl001`/`ken-18` は LP IPM 経路で解決、0 timeout)
+- QP Maros–Mészáros: 121/138 optimal (0 timeout)
+- MILP MIPLIB small: 5/20 optimal
+- `mas76.mps --timeout 30 --no-cuts`: descendant scaling calls 3675→6、per-node solve 3274us→1977us
 
 ## [0.6.0] - 2026-06-24
 
