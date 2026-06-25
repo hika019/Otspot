@@ -315,6 +315,18 @@ pub struct MipConfig {
     /// orbit, so the optimum is unchanged while the tree shrinks. Default OFF
     /// (see [`DEFAULT_MIP_SYMMETRY`]).
     pub symmetry: bool,
+    /// Enable the RENS (Relaxation Enforced Neighborhood Search) heuristic.
+    /// Rounds a node LP relaxation by fixing integral components and restricting
+    /// fractional ones to `{floor, ceil}`, then solves the small sub-MIP for a
+    /// feasible incumbent. Default ON: it only ever discovers feasible points and
+    /// never changes the proven optimum. Set to `false` in sub-MIP calls to
+    /// prevent recursion.
+    pub rens_enabled: bool,
+    /// Enable the local-branching primal heuristic. Around an incumbent, adds a
+    /// Hamming-distance ≤ k cut on the binary variables and solves the
+    /// neighborhood sub-MIP to improve the incumbent. Default ON (improvement-only,
+    /// optimum-preserving). Set to `false` in sub-MIP calls to prevent recursion.
+    pub local_branching_enabled: bool,
 }
 
 impl Default for MipConfig {
@@ -329,6 +341,8 @@ impl Default for MipConfig {
             max_cut_rounds: DEFAULT_MAX_CUT_ROUNDS,
             rins_enabled: true,
             symmetry: DEFAULT_MIP_SYMMETRY,
+            rens_enabled: true,
+            local_branching_enabled: true,
         }
     }
 }
