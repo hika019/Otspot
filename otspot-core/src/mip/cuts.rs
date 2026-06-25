@@ -22,6 +22,9 @@ use crate::tolerances::{feas_rel_tol, ZERO_TOL};
 
 use super::problem::MilpProblem;
 
+mod flow_cover;
+mod knapsack_cover;
+
 /// Maximum cuts added per round.
 const MAX_CUTS_PER_ROUND: usize = 64;
 /// Relative LP-bound improvement below which cut rounds stop.
@@ -148,6 +151,16 @@ pub(crate) fn add_root_cuts(
             structural.extend(generate_cover_cuts(&committed, &integer_mask, &res.solution));
             structural.extend(generate_clique_cuts(&committed, &integer_mask, &res.solution));
             structural.extend(generate_implied_bound_cuts(
+                &committed,
+                &integer_mask,
+                &res.solution,
+            ));
+            structural.extend(flow_cover::generate_flow_cover_cuts(
+                &committed,
+                &integer_mask,
+                &res.solution,
+            ));
+            structural.extend(knapsack_cover::generate_lifted_knapsack_cover_cuts(
                 &committed,
                 &integer_mask,
                 &res.solution,
