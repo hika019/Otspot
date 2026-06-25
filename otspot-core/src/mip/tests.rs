@@ -1757,6 +1757,88 @@ fn bound_layout_changes_inf_ub_to_finite_drops_warm_start() {
     );
 }
 
+/// Sentinel: strong-branch trials drop the warm start on infinite→finite bound
+/// flips, same as the real-children path.
+///
+/// `max_nodes=1` + Reliability runs only the root's strong-branch trials (no
+/// child node is expanded), so every recorded child solve is a strong-branch
+/// trial. The down trial `(0.0, 1.0)` flips ub ∞→finite → layout changes →
+/// warm_start must be None. Removing the guard in `measure_strong_branch_scores`
+/// propagates the parent basis to the down trial → all-true → this test FAILS.
+#[test]
+fn strong_branch_drops_warm_start_on_layout_change() {
+    use crate::options::WarmStartBasis;
+    use std::cell::{Cell, RefCell};
+
+    struct InfBoundSbMock {
+        call: Cell<usize>,
+        trial_got_ws: RefCell<Vec<bool>>,
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+    }
+
+    impl super::Relaxation for InfBoundSbMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
+        fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            let n = self.call.get();
+            self.call.set(n + 1);
+            if n == 0 {
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 1.5,
+                    solution: vec![1.5],
+                    warm_start_basis: Some(WarmStartBasis {
+                        basis: vec![0],
+                        x_b: vec![1.5],
+                    }),
+                    ..SolverResult::default()
+                }
+            } else {
+                self.trial_got_ws
+                    .borrow_mut()
+                    .push(opts.warm_start.is_some());
+                let x = bounds[0].0.ceil();
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: x,
+                    solution: vec![x],
+                    ..SolverResult::default()
+                }
+            }
+        }
+        fn skip_node_presolve(&self) -> bool {
+            true
+        }
+    }
+
+    let cfg = MipConfig {
+        max_nodes: 1,
+        branching: crate::options::MipBranching::Reliability,
+        ..MipConfig::default()
+    };
+    let mock = InfBoundSbMock {
+        call: Cell::new(0),
+        trial_got_ws: RefCell::new(vec![]),
+        root_bounds: [(0.0, f64::INFINITY)],
+        int_vars: [0],
+    };
+    let _ = super::solve_mip_with_stats(&mock, &opts(), &cfg);
+    let got = mock.trial_got_ws.borrow();
+    assert!(
+        got.iter().any(|&ws| !ws),
+        "down strong-branch trial (ub ∞→finite) must drop the warm start; \
+         skipping the layout guard gives all-true: {got:?}"
+    );
+}
+
 /// B&B driver propagates parent warm-start basis to child nodes.
 ///
 /// Sentinel: replacing `node.child_warm(down, lb, ws)` with `node.child(down, lb)`

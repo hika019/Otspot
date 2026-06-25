@@ -375,16 +375,33 @@ fn measure_strong_branch_scores<R: Relaxation>(
     }
     let mut sb_retry_opts = sb_opts.clone();
     sb_retry_opts.use_ruiz_scaling = true;
+    // Cold variants for children that change the standard-form column layout
+    // (infinite→finite bound): the parent basis indices no longer match those
+    // columns, so the warm start must be dropped — same guard the real-children
+    // path applies. Without this, strong-branch scores for one-sided integer
+    // variables are computed from a layout-mismatched warm start.
+    let mut sb_opts_cold = sb_opts.clone();
+    sb_opts_cold.warm_start = None;
+    let mut sb_retry_opts_cold = sb_retry_opts.clone();
+    sb_retry_opts_cold.warm_start = None;
 
     for &j in candidates {
         let v = parent_sol[j];
         let (down_bounds, up_bounds) = branch::branch_bounds(parent_bounds, j, v);
+        let (down_o, down_ro) = if bound_layout_changes(parent_bounds, &down_bounds, j) {
+            (&sb_opts_cold, &sb_retry_opts_cold)
+        } else {
+            (&sb_opts, &sb_retry_opts)
+        };
+        let (up_o, up_ro) = if bound_layout_changes(parent_bounds, &up_bounds, j) {
+            (&sb_opts_cold, &sb_retry_opts_cold)
+        } else {
+            (&sb_opts, &sb_retry_opts)
+        };
 
         let t0 = Instant::now();
-        let r_down =
-            solve_relaxation_with_scaling_retry(problem, &down_bounds, &sb_opts, &sb_retry_opts);
-        let r_up =
-            solve_relaxation_with_scaling_retry(problem, &up_bounds, &sb_opts, &sb_retry_opts);
+        let r_down = solve_relaxation_with_scaling_retry(problem, &down_bounds, down_o, down_ro);
+        let r_up = solve_relaxation_with_scaling_retry(problem, &up_bounds, up_o, up_ro);
         stats.strong_branch_lp_solves += 2;
         stats.strong_branch_us = stats
             .strong_branch_us
