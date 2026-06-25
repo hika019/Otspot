@@ -70,17 +70,17 @@ pub(crate) trait Relaxation {
 
     /// In-tree cut separation hook. Default: no-op (returns `None`).
     ///
-    /// MILP overrides this to re-separate GMI/MIR from the node LP relaxation,
-    /// filter them through `pool`, append survivors to the node subproblem, and
-    /// return a cut-tightened result when the node bound improves. `pool`
-    /// persists across the whole search so cuts accumulate and age. `bounds` are
-    /// the node's bounds; `res` is its (Optimal) relaxation result.
+    /// MILP overrides this to re-separate GMI/MIR from the node LP relaxation and
+    /// return a cut-tightened result when the node bound improves. Cuts bake in
+    /// the node's branching-tightened bounds, so they are valid only within this
+    /// node's subtree: separation is **node-local** (a fresh pool per call, never
+    /// reused at other nodes) and the cut rows are not propagated to children.
+    /// `bounds` are the node's bounds; `res` is its (Optimal) relaxation result.
     fn separate_tree_cuts(
         &self,
         _bounds: &[(f64, f64)],
         _res: &SolverResult,
         _mask: &[bool],
-        _pool: &mut cut_pool::CutPool,
         _opts: &SolverOptions,
         _depth: usize,
         _node_index: usize,
@@ -599,7 +599,6 @@ fn solve_mip_core<R: Relaxation>(
     let mut nodes_since_dive: usize = 0;
     let mut dive_start_depth: usize = 0;
     let mut conflicts = conflict::ConflictStore::new();
-    let mut cut_pool = cut_pool::CutPool::new();
     let root_bounds = problem.root_bounds().to_vec();
 
     while let Some(mut node) = q.pop() {
@@ -770,7 +769,6 @@ fn solve_mip_core<R: Relaxation>(
                 solve_bounds,
                 &res,
                 &mask,
-                &mut cut_pool,
                 &node_options,
                 node.depth,
                 stats.nodes_processed,

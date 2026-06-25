@@ -44,6 +44,10 @@ const TREE_CUT_NODE_INTERVAL: usize = 32;
 /// (warm-startable) result is kept to avoid pessimising children with a
 /// basis-less re-solve. Mirrors the root [`MIN_OBJ_IMPROVEMENT_REL`] threshold.
 const MIN_TREE_CUT_GAIN_REL: f64 = 1e-4;
+/// Maximum separation rounds per node. Each round re-solves the node LP and adds
+/// a GMI (even) / MIR (odd) batch; kept small so a separating node costs only a
+/// few extra LP solves. Rounds also stop early when the bound stalls.
+const TREE_CUT_MAX_ROUNDS: usize = 4;
 
 /// A generated cut `coeffs · x >= rhs` over the original variable space.
 struct CutRow {
@@ -969,21 +973,29 @@ fn tree_cut_node_selected(depth: usize, node_index: usize) -> bool {
         || (node_index > 0 && node_index.is_multiple_of(TREE_CUT_NODE_INTERVAL))
 }
 
-/// Re-separate GMI/MIR cuts from a B&B node's LP relaxation, filter them through
-/// the persistent [`CutPool`], append the survivors to the node subproblem, and
-/// re-solve. Returns the cut-tightened node result when the LP bound improves by
-/// at least [`MIN_TREE_CUT_GAIN_REL`], else `None` (keep the original result).
+/// Re-separate GMI/MIR cuts from a B&B node's LP relaxation and return a
+/// cut-tightened node result when its bound improves by at least
+/// [`MIN_TREE_CUT_GAIN_REL`], else `None` (keep the original result).
 ///
-/// `node_lp` is the original relaxation with this node's bounds applied; it is
-/// re-solved here to recover a full simplex basis for the tableau generators.
-/// `node_res` supplies the bound B&B already holds at this node. Cuts are
-/// node-local: they are *not* baked into the shared LP, so the returned result
-/// carries no warm-start basis (its augmented layout would not match children).
+/// **Soundness (node-local).** GMI/MIR cuts derive from the node tableau and
+/// bake in the node's branching-tightened bounds (`accumulate_column` uses the
+/// raised lower / lowered upper bounds), so each cut is valid *only* within this
+/// node's subtree — it can remove integer points that are feasible elsewhere.
+/// Therefore the [`CutPool`] is created fresh **per call** (it only dedups and
+/// orthogonalises within this node's own rounds) and the cut rows are appended
+/// solely to this node's re-solve. They are never stored across nodes nor
+/// propagated to children, which keeps the search globally optimal: the only
+/// thing handed back to B&B is the tightened bound/solution of this node, and
+/// the cuts are valid throughout this node's subtree so that bound is a valid
+/// lower bound for it.
+///
+/// `node_lp` is the original relaxation with this node's bounds applied. The loop
+/// mirrors root [`add_root_cuts`] but stays node-local: re-solve → generate →
+/// pool-filter → append (Ge) → re-solve, stopping when the bound stalls.
 pub(crate) fn separate_tree_cuts(
     node_lp: &LpProblem,
     integer_mask: &[bool],
     options: &SolverOptions,
-    pool: &mut CutPool,
     node_res: &SolverResult,
     depth: usize,
     node_index: usize,
@@ -991,58 +1003,78 @@ pub(crate) fn separate_tree_cuts(
     if !tree_cut_node_selected(depth, node_index) {
         return None;
     }
-    // Re-solve the node LP through the cold primal cut path to obtain a *full*
-    // size-`m` simplex basis. The basis carried by `node_res` is the compact
-    // warm-start form (not the full basic set the tableau generators need), and
-    // re-solving also makes separation independent of the node's solver path.
-    let cut_res = solve_cut_lp(node_lp, options, options.deadline);
-    if cut_res.status != SolveStatus::Optimal {
-        return None;
-    }
-    let ws = cut_res.warm_start_basis.as_ref()?;
-    let x_star = &cut_res.solution;
-    if x_star.is_empty() {
-        return None;
+    let base_obj = node_res.objective;
+    // Fresh per-node pool: cuts are valid only in this subtree (see soundness note).
+    let mut pool = CutPool::new();
+    let mut committed = node_lp.clone();
+    let mut accepted: Option<SolverResult> = None;
+    let mut prev_obj = base_obj;
+
+    for round_idx in 0..TREE_CUT_MAX_ROUNDS {
+        // Re-solve through the cold primal cut path to recover a *full* size-`m`
+        // simplex basis (the node's warm-start basis is a compact form).
+        let cut_res = solve_cut_lp(&committed, options, options.deadline);
+        if cut_res.status != SolveStatus::Optimal {
+            break;
+        }
+        let Some(ws) = cut_res.warm_start_basis.as_ref() else {
+            break;
+        };
+        let x_star = &cut_res.solution;
+        if x_star.is_empty() {
+            break;
+        }
+
+        let kind = if round_idx % 2 == 0 {
+            CutKind::Gmi
+        } else {
+            CutKind::Mir
+        };
+        let cuts = generate_round(&committed, integer_mask, x_star, &ws.basis, kind);
+        if cuts.is_empty() {
+            break;
+        }
+        let pool_candidates: Vec<Cut> = cuts
+            .into_iter()
+            .map(|c| Cut {
+                coeffs: c.coeffs,
+                rhs: c.rhs,
+                sense: ConstraintType::Ge,
+            })
+            .collect();
+        let selected = pool.separate_round(pool_candidates, x_star);
+        if selected.is_empty() {
+            break;
+        }
+
+        let rows: Vec<CutRow> = selected
+            .into_iter()
+            .map(|c| CutRow {
+                coeffs: c.coeffs,
+                rhs: c.rhs,
+            })
+            .collect();
+        let candidate = append_ge_rows(&committed, &rows);
+        let check = solve_validate(&candidate, options, options.deadline);
+        if check.status != SolveStatus::Optimal {
+            break;
+        }
+        committed = candidate;
+        let obj = check.objective;
+        accepted = Some(check);
+
+        // Stop once the bound stops improving meaningfully.
+        let scale = 1.0_f64.max(prev_obj.abs());
+        if obj <= prev_obj + MIN_TREE_CUT_GAIN_REL * scale {
+            break;
+        }
+        prev_obj = obj;
     }
 
-    // Reuse the root tableau-based generators on the node LP relaxation.
-    let mut candidates: Vec<CutRow> =
-        generate_round(node_lp, integer_mask, x_star, &ws.basis, CutKind::Gmi);
-    candidates.extend(generate_round(node_lp, integer_mask, x_star, &ws.basis, CutKind::Mir));
-    if candidates.is_empty() {
-        return None;
-    }
-
-    let pool_candidates: Vec<Cut> = candidates
-        .into_iter()
-        .map(|c| Cut {
-            coeffs: c.coeffs,
-            rhs: c.rhs,
-            sense: ConstraintType::Ge,
-        })
-        .collect();
-    let selected = pool.separate_round(pool_candidates, x_star);
-    if selected.is_empty() {
-        return None;
-    }
-
-    // Append the surviving Ge cuts to the node LP and re-solve.
-    let rows: Vec<CutRow> = selected
-        .into_iter()
-        .map(|c| CutRow {
-            coeffs: c.coeffs,
-            rhs: c.rhs,
-        })
-        .collect();
-    let augmented = append_ge_rows(node_lp, &rows);
-    let res = solve_validate(&augmented, options, options.deadline);
-    if res.status != SolveStatus::Optimal {
-        return None;
-    }
-
-    // Accept only a meaningful tightening: the re-solved bound must rise above
-    // the bound B&B already holds for this node (lower bound for a minimisation).
-    let base_obj = node_res.objective.max(cut_res.objective);
+    // Accept only a meaningful tightening over the node's existing bound. The
+    // returned result carries no warm-start basis (its augmented layout would not
+    // match child node solves, which use the original constraint structure).
+    let res = accepted?;
     let scale = 1.0_f64.max(base_obj.abs());
     if res.objective <= base_obj + MIN_TREE_CUT_GAIN_REL * scale {
         return None;

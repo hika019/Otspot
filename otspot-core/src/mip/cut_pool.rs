@@ -1,16 +1,21 @@
 //! Cut pool for in-tree MILP separation.
 //!
-//! Holds generated cutting-plane rows (`coeffs · x {>=,<=} rhs`) across the whole
-//! branch-and-bound search and decides, per separation round, which cuts to feed
-//! into the current node LP. Three filters keep the pool useful and bounded:
+//! Holds generated cutting-plane rows (`coeffs · x {>=,<=} rhs`) for a single B&B
+//! node's separation rounds and decides, per round, which cuts to feed into that
+//! node's LP. The pool is **node-local**: in-tree GMI/MIR cuts bake in the node's
+//! branching-tightened bounds and so are valid only within that node's subtree —
+//! reusing them across nodes would slice off globally feasible points (a wrong
+//! optimum). [`super::cuts::separate_tree_cuts`] therefore creates a fresh pool
+//! per node, and aging operates over that node's own rounds. Three filters keep
+//! the pool useful and bounded:
 //!
 //!   * **violation** — only cuts the current LP point breaches are worth adding;
 //!     an already-satisfied cut does not tighten the relaxation.
 //!   * **orthogonality** — near-parallel cuts carry little independent
 //!     information while inflating the basis and inviting degeneracy, so only one
 //!     of a parallel group is kept.
-//!   * **aging** — a cut not selected for any node for several rounds (e.g. its
-//!     subtree was pruned) is evicted so the pool does not grow without bound.
+//!   * **aging** — a cut not selected for several rounds is evicted so the pool
+//!     does not grow without bound during a node's separation loop.
 
 use crate::problem::ConstraintType;
 use crate::tolerances::ZERO_TOL;
@@ -25,9 +30,9 @@ const VIOLATION_TOL: f64 = 1e-6;
 /// face but doubles the basis pressure, so it is dropped (degeneracy guard).
 const MAX_PARALLEL_COSINE: f64 = 0.999;
 
-/// Rounds a cut may go unselected before eviction. Caps pool lifetime so cuts
-/// from abandoned subtrees do not linger; 10 rounds outlives a short dive while
-/// still reclaiming stale rows promptly.
+/// Rounds a cut may go unselected before eviction. Caps pool lifetime so stale
+/// rows do not accumulate across a node's separation rounds; 10 comfortably
+/// outlives the per-node round budget while still reclaiming dead cuts.
 const MAX_UNUSED_ROUNDS: usize = 10;
 
 /// Hard cap on stored cuts. Bounds memory and per-node LP cost on pathological

@@ -112,16 +112,16 @@ impl Relaxation for MilpProblem {
         bounds: &[(f64, f64)],
         res: &SolverResult,
         mask: &[bool],
-        pool: &mut super::cut_pool::CutPool,
         opts: &SolverOptions,
         depth: usize,
         node_index: usize,
     ) -> Option<SolverResult> {
-        // Node LP = the original relaxation with this node's bounds, so its
-        // standard form matches the basis carried by `res`.
+        // Node LP = the original relaxation with this node's bounds. Separation
+        // is node-local: cuts are valid only in this subtree and are never reused
+        // elsewhere; see `cuts::separate_tree_cuts`.
         let mut node_lp = self.lp.clone();
         node_lp.bounds = bounds.to_vec();
-        super::cuts::separate_tree_cuts(&node_lp, mask, opts, pool, res, depth, node_index)
+        super::cuts::separate_tree_cuts(&node_lp, mask, opts, res, depth, node_index)
     }
     fn run_rins(
         &self,
