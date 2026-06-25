@@ -13,6 +13,7 @@ pub(crate) mod node;
 pub(crate) mod presolve;
 mod problem;
 pub(crate) mod queue;
+pub(crate) mod symmetry;
 
 pub use problem::{MilpProblem, MipProblemError, MiqpProblem};
 
@@ -246,6 +247,16 @@ pub fn solve_milp_with_stats(
                 }
             }
             Some(_) => problem.clone(),
+        };
+        // Static symmetry breaking: append lex-leader ordering rows for orbits
+        // of interchangeable binary variables. The rows preserve at least one
+        // optimal representative per orbit (objective unchanged) while shrinking
+        // the search tree, so the whole downstream pipeline (FP, cuts, B&B) may
+        // operate on the reduced symmetric space.
+        let problem_bt = if cfg.symmetry {
+            symmetry::break_symmetry(&problem_bt)
+        } else {
+            problem_bt
         };
         // Run the feasibility pump on the original (bound-tightened) LP before
         // augmenting with cuts.  FP must see the unmodified constraint structure

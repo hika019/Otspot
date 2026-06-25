@@ -272,6 +272,13 @@ pub const DEFAULT_MIP_CUTS: bool = true;
 /// GMI gain is in the first few rounds, and deep rounds bloat the LP (slowing
 /// every downstream B&B node) for diminishing bound improvement.
 pub const DEFAULT_MAX_CUT_ROUNDS: usize = 5;
+/// Default static symmetry-breaking state. OFF for safe introduction: detection
+/// only groups *exactly* interchangeable binary columns (a comparatively rare
+/// structure), and the added lex-leader rows perturb node counts on the tuned
+/// benchmark suite. Correctness is unconditional — the rows never cut a true
+/// optimum — so enable it for highly symmetric models (assignment / packing /
+/// identical-machine scheduling).
+pub const DEFAULT_MIP_SYMMETRY: bool = false;
 
 /// MILP/MIQP branch-and-bound config.
 ///
@@ -302,6 +309,12 @@ pub struct MipConfig {
     /// Enable the RINS heuristic inside branch-and-bound.
     /// Automatically set to `false` in sub-MIP calls to prevent recursive RINS.
     pub rins_enabled: bool,
+    /// Break structural symmetry by adding static lex-leader ordering rows for
+    /// orbits of interchangeable binary variables (identical objective and
+    /// constraint columns). Preserves at least one optimal representative per
+    /// orbit, so the optimum is unchanged while the tree shrinks. Default OFF
+    /// (see [`DEFAULT_MIP_SYMMETRY`]).
+    pub symmetry: bool,
 }
 
 impl Default for MipConfig {
@@ -315,6 +328,7 @@ impl Default for MipConfig {
             cuts: DEFAULT_MIP_CUTS,
             max_cut_rounds: DEFAULT_MAX_CUT_ROUNDS,
             rins_enabled: true,
+            symmetry: DEFAULT_MIP_SYMMETRY,
         }
     }
 }
