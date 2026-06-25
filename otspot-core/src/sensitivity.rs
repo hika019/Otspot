@@ -1,24 +1,9 @@
 //! LP sensitivity analysis (ranging).
 //!
 //! Computes RHS and objective coefficient ranges over which the current
-//! optimal basis remains primal-feasible and dual-feasible (i.e. optimal).
-//!
-//! # Usage
-//!
-//! Solve the LP with `presolve = false` to obtain a `SolverResult` with a
-//! populated `warm_start_basis`, then call [`compute_sensitivity`].
-//!
-//! ```rust,ignore
-//! use otspot_core::{solve_lp_with, SolverOptions};
-//! use otspot_core::sensitivity::compute_sensitivity;
-//!
-//! let opts = SolverOptions { presolve: false, ..Default::default() };
-//! let result = solve_lp_with(&problem, &opts);
-//! if let Some(sens) = compute_sensitivity(&problem, &result) {
-//!     let (down, up) = sens.rhs_ranges[0];
-//!     println!("RHS[0] in [{:.3}, +{:.3}] from current value", -down, up);
-//! }
-//! ```
+//! optimal basis stays optimal (primal- and dual-feasible). Solve with
+//! `presolve = false` to obtain a `warm_start_basis`, then call
+//! [`compute_sensitivity`]; see the module tests for a worked example.
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
@@ -45,23 +30,15 @@ pub struct SensitivityResult {
 
 /// Compute LP sensitivity analysis from an optimal simplex result.
 ///
-/// Returns `None` when:
-/// - `result.status` is not `Optimal`, or
-/// - `result.warm_start_basis` is absent (IPM solve, presolve enabled, or
-///   non-optimal termination).
+/// Returns `None` when `result.status` is not `Optimal` or
+/// `result.warm_start_basis` is absent (IPM solve, presolve enabled, or
+/// non-optimal termination). Otherwise `rhs_ranges[i]` / `obj_ranges[j]`
+/// correspond to constraint `i` / variable `j` in original order.
 ///
-/// When `Some` is returned, `rhs_ranges[i]` and `obj_ranges[j]` correspond to
-/// constraint `i` and variable `j` of `problem` in their original order.
-///
-/// # Algorithm
-///
-/// RHS ranging for constraint i uses B^{-1} e_i (one FTRAN per constraint):
-/// the ratio test on x_B + (B^{-1} e_i) * δ ≥ 0 gives the allowable δ range.
-///
-/// Objective ranging for a basic variable j uses B^{-T} e_p (one BTRAN per
-/// basic variable, where p is the basis row of j) and then a reduced-cost
-/// ratio test across all non-basic columns.  For a non-basic variable the
-/// original-space reduced cost suffices.
+/// RHS ranging uses B^{-1} e_i (one FTRAN per constraint) with a ratio test on
+/// x_B + (B^{-1} e_i)·δ ≥ 0. Objective ranging for a basic variable uses
+/// B^{-T} e_p (one BTRAN) then a reduced-cost ratio test over non-basic
+/// columns; a non-basic variable uses its original-space reduced cost.
 pub fn compute_sensitivity(
     problem: &LpProblem,
     result: &SolverResult,
@@ -272,26 +249,15 @@ mod tests {
         solve_lp_with(problem, &opts)
     }
 
-    // ── 2×2 LP, hand-calculated ranging ──────────────────────────────────────
-    //
-    // Minimize  -2 x1 - x2
-    // s.t.  x1 + x2  ≤ 4   (constraint 0, b0=4)
-    //       x1 + 2x2 ≤ 6   (constraint 1, b1=6)
-    //       x1, x2 ≥ 0
-    //
-    // Optimal: x1=4, x2=0  (obj=-8).
-    // Basis: {x1 at row 0, s2 at row 1}.  Non-basic: {x2 (rc=1), s1 (rc=2)}.
-    //
-    // B = A_sf[:, {x1, s2}] = [[1,0],[1,1]],  B^{-1} = [[1,0],[-1,1]].
-    // y_sf = B^{-T} c_B = B^{-T} [-2,0] = [-2,0].
-    //
+    // ── 2×2 LP, hand-calculated ranging ──
+    // Min -2x1 - x2  s.t.  x1+x2 ≤ 4 (b0=4),  x1+2x2 ≤ 6 (b1=6),  x1,x2 ≥ 0.
+    // Optimal x1=4, x2=0 (obj=-8). Basis {x1@row0, s2@row1}; nonbasic {x2 rc=1, s1 rc=2}.
+    // B = [[1,0],[1,1]], B^{-1} = [[1,0],[-1,1]], y_sf = B^{-T}[-2,0] = [-2,0].
     // Hand-calculated ranges:
-    //   RHS[0]: d = B^{-1}[1,0] = [1,-1]  → Δ_down = x_B[0]/1 = 4, Δ_up = x_B[1]/1 = 2
-    //   RHS[1]: d = B^{-1}[0,1] = [0,1]   → Δ_down = x_B[1]/1 = 2, Δ_up = ∞
-    //   Obj[x1]: π_0 = B^{-T} e_0 = [1,0]; η_{x2}=1, η_{s1}=1
-    //             C_{x2}=0-1*1=-1, C_{s1}=0-1*1=-1
-    //             → Δ_up = min(1/1, 2/1) = 1, Δ_down = ∞
-    //   Obj[x2]: non-basic at lb, rc=1 → Δ_down=1, Δ_up=∞
+    //   RHS[0]: d=[1,-1] → Δ_down=4, Δ_up=2
+    //   RHS[1]: d=[0,1]  → Δ_down=2, Δ_up=∞
+    //   Obj[x1]: π_0=[1,0]; C_{x2}=-1, C_{s1}=-1 → Δ_up=min(1,2)=1, Δ_down=∞
+    //   Obj[x2]: nonbasic at lb, rc=1 → Δ_down=1, Δ_up=∞
 
     fn make_2x2_lp() -> LpProblem {
         let a = CscMatrix::from_triplets(

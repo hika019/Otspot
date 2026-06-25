@@ -10,7 +10,7 @@ use super::{
 };
 use crate::linalg::timeout::deadline_reached;
 use crate::basis::{BasisManager, LuBasis};
-use crate::presolve::LpEquilibration;
+use crate::presolve::{LpEquilibration, LpScalingResult};
 use crate::problem::{LpProblem, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::DROP_TOL;
@@ -22,7 +22,7 @@ use crate::options::SolverOptions;
 fn scale_bounded_standard_form(
     bsf: &BoundedStandardForm,
     options: &SolverOptions,
-) -> Option<(CscMatrix, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
+) -> Option<LpScalingResult> {
     if options.use_ruiz_scaling {
         LpEquilibration::scale_with_deadline(&bsf.a, &bsf.b, &bsf.c, options.deadline)
     } else {
