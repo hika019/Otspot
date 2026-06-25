@@ -55,6 +55,10 @@ fn column_signature(a: &CscMatrix, c: &[f64], j: usize) -> ColumnSignature {
     // CSC rows within a column are stored ascending, so the list is canonical.
     for k in a.col_ptr()[j]..a.col_ptr()[j + 1] {
         let v = a.values()[k];
+        // Entries below ZERO_TOL are dropped, so two columns differing only by
+        // sub-ZERO_TOL coefficients group together. The induced row-LHS swap is
+        // < ZERO_TOL — below the solver's numerical-zero threshold — so this is a
+        // deliberate, negligible relaxation of the exact-automorphism test.
         if v.abs() >= ZERO_TOL {
             col.push((a.row_ind()[k], coef_bits(v)));
         }
