@@ -1,6 +1,6 @@
 # claude code
 - チームを使用. tmux使用
-- ベンチ実行 or テスト実行 or downloadなどの軽量タスク=haiku, バグ調査, 実装, リファクタ, テスト修正=codex5.5 or opus4.8, それ以外=Opus4.8. これを基準にAgentのmodelを設定
+- ベンチ実行 or テスト実行 or downloadなどの軽量タスク=haiku, バグ調査, 実装, リファクタ, テスト修正=codex5.5,　レビュー=codex5.5とOpus4.8, それ以外=Opus4.8. これを基準にAgentのmodelを設定
 - タスクが一つでもエージェントに振れ
 - エージェントのコンテキストを考え、タスクを分割・アサイン. Agentはbackground起動. tmux.
 - エージェント追加時に、既存Agentの確認. 不要Agentの場合削除. kill可
