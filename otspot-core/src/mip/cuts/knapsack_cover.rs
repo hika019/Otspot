@@ -174,10 +174,13 @@ fn separate_lifted_cover(
     }
     let rhs = -(beta_0 as f64);
 
-    debug_assert!(
-        lifted_cover_is_valid(row, b, &coeff, beta_0),
-        "lifted knapsack-cover inequality fails exhaustive support-enumeration check"
-    );
+    // Release-mode safety net (size-bounded): drop the cut if the exhaustive
+    // support check fails, so a future lifting-coefficient regression can never
+    // ship a cut that removes an integer-feasible point. A no-op while the
+    // exact-lifting proof holds.
+    if !lifted_cover_is_valid(row, b, &coeff, beta_0) {
+        return None;
+    }
 
     finalize_cut(g, rhs, x_star, frac_tol)
 }

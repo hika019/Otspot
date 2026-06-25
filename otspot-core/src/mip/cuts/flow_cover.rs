@@ -215,10 +215,13 @@ fn separate_flow_cover(
     }
     let rhs = -b + sum_coef;
 
-    debug_assert!(
-        flow_cover_is_valid(items, &cover, b, lambda),
-        "flow-cover inequality fails exhaustive y-enumeration validity check"
-    );
+    // Release-mode safety net: the (size-bounded) exhaustive check runs in
+    // release too, and an invalid cut is dropped rather than shipped — so a
+    // future regression in the structural argument can never remove an
+    // integer-feasible point. A no-op while the proof holds.
+    if !flow_cover_is_valid(items, &cover, b, lambda) {
+        return None;
+    }
 
     finalize_cut(g, rhs, x_star, frac_tol)
 }
