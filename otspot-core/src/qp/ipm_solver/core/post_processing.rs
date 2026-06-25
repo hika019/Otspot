@@ -30,6 +30,7 @@ const REFIT_PROGRESS_EPS: f64 = 1e-12;
 const REFIT_REL_STALL: f64 = 1e-8;
 const IRLS_INNER_MAX_ITERS: usize = 30;
 const KRYLOV_MAX_ITERS: usize = 400;
+const KKT_SKIP_MARGIN: f64 = 100.0;
 
 /// refit/IRLS の進捗 stall 判定。`prev_kkt`/`current_kkt` は revert guard により
 /// `current_kkt <= prev_kkt`。改善 drop が「相対 (`REFIT_REL_STALL · prev_kkt`)」と
@@ -59,6 +60,7 @@ pub(super) fn kkt_already_passes(
     if final_sol.solution.is_empty() || orig_problem.num_constraints == 0 || !ipm_status_optimal {
         return false;
     }
+    let skip_tol = user_eps / KKT_SKIP_MARGIN;
     let view = build_view(orig_problem, eliminated_cols);
     let kkt0 = kkt_residual_rel(
         &view,
@@ -66,11 +68,11 @@ pub(super) fn kkt_already_passes(
         &final_sol.dual_solution,
         &final_sol.bound_duals,
     );
-    if kkt0 >= user_eps {
+    if kkt0 >= skip_tol {
         return false;
     }
     let pres0 = primal_residual_rel(&view, &final_sol.solution);
-    if pres0 >= user_eps {
+    if pres0 >= skip_tol {
         return false;
     }
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
@@ -684,6 +686,68 @@ mod gate_predicate_tests {
             !kkt_already_passes(&prob, &corrupt, &[], true, 1e-6),
             "y_Le=−1e-4 violates Le sign (dsign≈1e-4≫1e-6) → gate must NOT skip Stage-2 IR; \
              reverting the dual_sign check from kkt_already_passes would return true here → sentinel fires"
+        );
+    }
+
+    /// LISWET7 regression: kkt < skip_tol だが pres ∈ [skip_tol, user_eps) → false を返す。
+    ///
+    /// ill-conditioned QP (LISWET7: cond(AAᵀ) ≈ 1e16) では f64 算術が kkt ≈ 3e-11,
+    /// pres ≈ 9e-8 の偽収束残差を生成する。旧コード (threshold = user_eps) では kkt も pres も
+    /// user_eps = 1e-6 未満として skip → prove_optimal が偽 Optimal を返していた。
+    /// fix では skip_tol = user_eps / KKT_SKIP_MARGIN (100) に厳格化し refinement を強制。
+    ///
+    /// 構成: min 0.5·x², s.t. x = 1 (Eq), x ∈ (-∞,+∞)。
+    /// 停留性 (Qx + c + Aᵀy = 0): x + y = 0 → y = -x。
+    /// テスト点: x = 1 + δ, y = -(1 + δ) → kkt = 0 (完全停留), pres = δ/(3+δ) ≈ δ/3。
+    ///
+    /// Sentinel: pres 閾値を skip_tol → user_eps に戻すと pres=6.7e-8 < user_eps なので
+    /// kkt_already_passes が true を返し、このアサーションが失敗する → fix が load-bearing。
+    #[test]
+    fn already_passes_false_when_pres_between_skip_tol_and_eps() {
+        let user_eps = 1e-6_f64;
+        let skip_tol = user_eps / super::KKT_SKIP_MARGIN;
+
+        // min 0.5·x², s.t. x = 1, x free
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![0.0_f64],
+            a,
+            vec![1.0_f64],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+
+        // δ = 2e-7: pres = δ/(1 + |1+δ| + |1|) ≈ δ/3 ≈ 6.7e-8 ∈ [skip_tol, user_eps)
+        // y = -(1+δ) により停留性 x + y = (1+δ) + (-(1+δ)) = 0 → kkt = 0
+        let delta = 2e-7_f64;
+        let x = 1.0_f64 + delta;
+        let y = -(1.0_f64 + delta);
+        let res = crate::problem::SolverResult {
+            solution: vec![x],
+            dual_solution: vec![y],
+            bound_duals: vec![],
+            ..Default::default()
+        };
+
+        let view = build_view(&prob, &[]);
+        let kkt = kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals);
+        let pres = primal_residual_rel(&view, &res.solution);
+
+        assert!(
+            kkt < skip_tol,
+            "fixture: kkt={kkt:.3e} must be < skip_tol={skip_tol:.3e}"
+        );
+        assert!(
+            pres >= skip_tol && pres < user_eps,
+            "fixture: pres={pres:.3e} must be in [skip_tol={skip_tol:.3e}, user_eps={user_eps:.3e})"
+        );
+        assert!(
+            !kkt_already_passes(&prob, &res, &[], true, user_eps),
+            "kkt={kkt:.3e} < skip_tol but pres={pres:.3e} ≥ skip_tol \
+             → post-processing must NOT be skipped (LISWET7 false-Optimal regression)"
         );
     }
 
