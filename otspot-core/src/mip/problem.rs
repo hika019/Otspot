@@ -95,6 +95,9 @@ impl Relaxation for MilpProblem {
     fn skip_node_presolve(&self) -> bool {
         true
     }
+    fn can_skip_repeated_lp_scaling(&self) -> bool {
+        true
+    }
     fn propagation_data(
         &self,
     ) -> Option<(

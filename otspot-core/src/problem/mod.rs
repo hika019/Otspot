@@ -10,6 +10,7 @@ use crate::error::SolverError;
 use crate::options::WarmStartBasis;
 use crate::sparse::CscMatrix;
 use std::fmt;
+use std::sync::Arc;
 
 /// Returns `true` if `(lb, ub)` is a valid bound pair.
 ///
@@ -289,7 +290,7 @@ pub struct LpProblem {
     /// 目的関数係数ベクトル（長さ: `num_vars`）
     pub c: Vec<f64>,
     /// 制約行列（CSC形式、サイズ: `num_constraints` x `num_vars`）
-    pub a: CscMatrix,
+    pub a: Arc<CscMatrix>,
     /// 制約右辺ベクトル（長さ: `num_constraints`）
     pub b: Vec<f64>,
     /// 決定変数の数
@@ -416,7 +417,7 @@ impl LpProblem {
             num_vars: c.len(),
             num_constraints: b.len(),
             c,
-            a,
+            a: Arc::new(a),
             b,
             constraint_types,
             bounds,

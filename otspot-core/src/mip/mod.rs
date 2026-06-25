@@ -19,7 +19,7 @@ pub use problem::{MilpProblem, MipProblemError, MiqpProblem};
 use crate::linalg::timeout::deadline_reached;
 use crate::options::{MipBranching, MipConfig, SolverOptions, WarmStartBasis};
 use crate::problem::certificate::BoundGapCertificate;
-use crate::problem::{ConstraintType, SolveStatus, SolverResult};
+use crate::problem::{ConstraintType, SolveStatus, SolverResult, TimingBreakdown};
 use crate::qp::global::pruning::{should_prune, within_gap};
 use crate::sparse::CscMatrix;
 use std::collections::HashMap;
@@ -51,6 +51,11 @@ pub(crate) trait Relaxation {
     /// propagated warm-start basis. False (default) for MIQP, whose IPM relies on
     /// presolve's Ruiz scaling for per-node conditioning.
     fn skip_node_presolve(&self) -> bool {
+        false
+    }
+    /// Whether repeated LP Ruiz scaling can be skipped on root-child relaxations
+    /// whose matrix/objective are unchanged and only bounds differ.
+    fn can_skip_repeated_lp_scaling(&self) -> bool {
         false
     }
     /// Return constraint data for per-node bound propagation, or `None` to skip it.
@@ -95,6 +100,8 @@ pub struct MipStats {
     pub pruned: usize,
     /// Nodes pruned by bound propagation before the LP/QP solve.
     pub propagation_pruned: usize,
+    /// Wall-clock microseconds spent in per-node bound propagation.
+    pub node_propagation_us: u64,
     /// Number of incumbent improvements (including the first one found).
     pub incumbent_updates: usize,
 
@@ -128,6 +135,14 @@ pub struct MipStats {
     pub lp_scale_calls_root: u64,
     /// Number of Ruiz scaling calls in descendant node LP solves.
     pub lp_scale_calls_desc: u64,
+    /// Number of branch-variable selections that invoked strong branching.
+    pub strong_branch_calls: usize,
+    /// Total candidate variables evaluated by strong branching.
+    pub strong_branch_candidates: usize,
+    /// Total child relaxation solves launched by strong branching.
+    pub strong_branch_lp_solves: usize,
+    /// Wall-clock microseconds spent in strong-branching child solves.
+    pub strong_branch_us: u64,
     /// Bounded dual fallback count: terminal UB violation outside current repair scope.
     pub fallback_ub_violation_out_of_scope: u64,
     /// Bounded artificial Phase I fallback count: reconciled bound violation.
@@ -141,6 +156,10 @@ pub struct MipStats {
 
     /// Whether the feasibility pump found an initial incumbent before branch-and-bound.
     pub fp_incumbent_found: bool,
+    /// Wall-clock microseconds spent in the pre-B&B feasibility pump.
+    pub fp_us: u64,
+    /// Wall-clock microseconds spent adding root cuts before branch-and-bound.
+    pub root_cut_us: u64,
 
     /// Objective of the first trusted (Optimal) root relaxation, i.e. the root LP
     /// bound used to start branch-and-bound. With cuts enabled this reflects the
@@ -232,21 +251,28 @@ pub fn solve_milp_with_stats(
         // augmenting with cuts.  FP must see the unmodified constraint structure
         // so that the LP pump LPs and the final validation both use the original
         // bounds and Le/Ge rows, not the GMI cut rows added below.
+        let fp_t0 = Instant::now();
         let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
             &problem_bt.lp,
             &problem_bt.integer_vars,
             cfg.integer_feas_tol,
             &opts_with_dl,
         );
+        let fp_us = fp_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         // Root GMI cuts tighten the LP relaxation without removing any
         // integer-feasible point, so the optimum is unchanged while the tree
         // shrinks. The added rows leave `num_vars` (hence `mask`) untouched.
+        let cut_t0 = Instant::now();
         let effective = if cfg.cuts {
             cuts::add_root_cuts(&problem_bt, &opts_with_dl, cfg)
         } else {
             problem_bt
         };
-        return solve_mip_core(&effective, &opts_with_dl, cfg, mask, fp_inc);
+        let root_cut_us = cut_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        let (res, mut stats) = solve_mip_core(&effective, &opts_with_dl, cfg, mask, fp_inc);
+        stats.fp_us = fp_us;
+        stats.root_cut_us = root_cut_us;
+        return (res, stats);
     }
     solve_mip_with_stats(problem, &opts_with_dl, cfg)
 }
@@ -335,20 +361,39 @@ fn measure_strong_branch_scores<R: Relaxation>(
     candidates: &[usize],
     j_to_k: &HashMap<usize, usize>,
     shared: &SolverOptions,
+    parent_warm_start: Option<&WarmStartBasis>,
     pc: &mut PseudocostState,
+    stats: &mut MipStats,
 ) -> HashMap<usize, f64> {
     let mut scores = HashMap::new();
+    stats.strong_branch_calls += 1;
+    stats.strong_branch_candidates += candidates.len();
     let mut sb_opts = shared.clone();
-    sb_opts.warm_start = None;
+    sb_opts.warm_start = parent_warm_start.cloned();
+    if problem.can_skip_repeated_lp_scaling() {
+        sb_opts.use_ruiz_scaling = false;
+    }
+    let mut sb_retry_opts = sb_opts.clone();
+    sb_retry_opts.use_ruiz_scaling = true;
 
     for &j in candidates {
         let v = parent_sol[j];
         let (down_bounds, up_bounds) = branch::branch_bounds(parent_bounds, j, v);
 
-        let r_down = problem.solve(&down_bounds, &sb_opts);
-        let r_up = problem.solve(&up_bounds, &sb_opts);
+        let t0 = Instant::now();
+        let r_down =
+            solve_relaxation_with_scaling_retry(problem, &down_bounds, &sb_opts, &sb_retry_opts);
+        let r_up =
+            solve_relaxation_with_scaling_retry(problem, &up_bounds, &sb_opts, &sb_retry_opts);
+        stats.strong_branch_lp_solves += 2;
+        stats.strong_branch_us = stats
+            .strong_branch_us
+            .saturating_add(t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
 
-        let down_ok = matches!(r_down.status, SolveStatus::Optimal | SolveStatus::Infeasible);
+        let down_ok = matches!(
+            r_down.status,
+            SolveStatus::Optimal | SolveStatus::Infeasible
+        );
         let up_ok = matches!(r_up.status, SolveStatus::Optimal | SolveStatus::Infeasible);
 
         if !down_ok || !up_ok {
@@ -381,6 +426,59 @@ fn measure_strong_branch_scores<R: Relaxation>(
         scores.insert(j, score);
     }
     scores
+}
+
+fn solve_relaxation_with_scaling_retry<R: Relaxation>(
+    problem: &R,
+    bounds: &[(f64, f64)],
+    fast_opts: &SolverOptions,
+    retry_opts: &SolverOptions,
+) -> SolverResult {
+    let res = problem.solve(bounds, fast_opts);
+    if fast_opts.use_ruiz_scaling
+        || !needs_scaled_retry(&res)
+        || deadline_reached(fast_opts.deadline)
+    {
+        return res;
+    }
+    let mut retry = problem.solve(bounds, retry_opts);
+    retry.timing_breakdown = combine_timing(res.timing_breakdown, retry.timing_breakdown);
+    retry
+}
+
+fn needs_scaled_retry(res: &SolverResult) -> bool {
+    matches!(
+        res.status,
+        SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::SuboptimalSolution
+    )
+}
+
+fn combine_timing(
+    first: Option<TimingBreakdown>,
+    second: Option<TimingBreakdown>,
+) -> Option<TimingBreakdown> {
+    match (first, second) {
+        (None, None) => None,
+        (Some(t), None) | (None, Some(t)) => Some(t),
+        (Some(a), Some(b)) => Some(TimingBreakdown {
+            presolve_us: a.presolve_us.saturating_add(b.presolve_us),
+            solve_us: a.solve_us.saturating_add(b.solve_us),
+            postsolve_us: a.postsolve_us.saturating_add(b.postsolve_us),
+            ipm_factorize_us: a.ipm_factorize_us.saturating_add(b.ipm_factorize_us),
+            ipm_solve_us: a.ipm_solve_us.saturating_add(b.ipm_solve_us),
+            ipm_reg_retries: a.ipm_reg_retries.saturating_add(b.ipm_reg_retries),
+            ipm_used_iterative: a.ipm_used_iterative || b.ipm_used_iterative,
+            postsolve_map_us: a.postsolve_map_us.saturating_add(b.postsolve_map_us),
+            postsolve_lsq_us: a.postsolve_lsq_us.saturating_add(b.postsolve_lsq_us),
+            postsolve_recovery_us: a
+                .postsolve_recovery_us
+                .saturating_add(b.postsolve_recovery_us),
+            postsolve_refine_us: a.postsolve_refine_us.saturating_add(b.postsolve_refine_us),
+            postsolve_krylov_ir_us: a
+                .postsolve_krylov_ir_us
+                .saturating_add(b.postsolve_krylov_ir_us),
+        }),
+    }
 }
 
 /// Core B&B driver that accepts a precomputed `integer_mask` to avoid
@@ -426,8 +524,11 @@ fn solve_mip_core<R: Relaxation>(
     }
 
     let integer_vars = problem.integer_vars().to_vec();
-    let j_to_k: HashMap<usize, usize> =
-        integer_vars.iter().enumerate().map(|(k, &j)| (j, k)).collect();
+    let j_to_k: HashMap<usize, usize> = integer_vars
+        .iter()
+        .enumerate()
+        .map(|(k, &j)| (j, k))
+        .collect();
     let use_reliability = cfg.branching == MipBranching::Reliability;
     let mut pc = PseudocostState::new(integer_vars.len());
 
@@ -440,7 +541,10 @@ fn solve_mip_core<R: Relaxation>(
     }
 
     let mut q = NodeQueue::new();
-    q.push(MipNode::root(problem.root_bounds().to_vec(), f64::NEG_INFINITY));
+    q.push(MipNode::root(
+        problem.root_bounds().to_vec(),
+        f64::NEG_INFINITY,
+    ));
 
     let mut open_lb = f64::INFINITY;
     let mut had_open = false;
@@ -507,6 +611,7 @@ fn solve_mip_core<R: Relaxation>(
         }
 
         // --- Per-node bound propagation (MILP only; MIQP returns None) ---
+        let propagation_t0 = Instant::now();
         let tightened = if let Some((prop_a, prop_b, prop_ct)) = problem.propagation_data() {
             match presolve::tighten_bounds_at_node(
                 problem.num_vars(),
@@ -518,6 +623,12 @@ fn solve_mip_core<R: Relaxation>(
             ) {
                 Ok(tb) => Some(tb),
                 Err(()) => {
+                    stats.node_propagation_us = stats.node_propagation_us.saturating_add(
+                        propagation_t0
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX)) as u64,
+                    );
                     stats.pruned += 1;
                     stats.propagation_pruned += 1;
                     continue;
@@ -526,18 +637,36 @@ fn solve_mip_core<R: Relaxation>(
         } else {
             None
         };
+        stats.node_propagation_us = stats.node_propagation_us.saturating_add(
+            propagation_t0
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         let solve_bounds: &[(f64, f64)] = tightened.as_deref().unwrap_or(&node.var_bounds);
 
         // --- Relaxation solve ---
         let scale_before = crate::presolve::scaling::lp_scale_profile_snapshot();
         let fallback_before = crate::simplex::dual_advanced::fallback_profile_snapshot();
         let t0 = Instant::now();
-        let res = if let Some(ref ws) = node.warm_start {
-            let mut no = shared.clone();
-            no.warm_start = Some(ws.clone());
-            problem.solve(solve_bounds, &no)
+        let mut node_options = shared.clone();
+        if root_solved && problem.can_skip_repeated_lp_scaling() {
+            node_options.use_ruiz_scaling = false;
+        }
+        if let Some(ref ws) = node.warm_start {
+            node_options.warm_start = Some(ws.clone());
+        }
+        let res = if node_options.use_ruiz_scaling {
+            problem.solve(solve_bounds, &node_options)
         } else {
-            problem.solve(solve_bounds, &shared)
+            let mut retry_options = node_options.clone();
+            retry_options.use_ruiz_scaling = true;
+            solve_relaxation_with_scaling_retry(
+                problem,
+                solve_bounds,
+                &node_options,
+                &retry_options,
+            )
         };
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let scale_delta = crate::presolve::scaling::lp_scale_profile_delta(
@@ -613,7 +742,11 @@ fn solve_mip_core<R: Relaxation>(
                 }
                 continue;
             }
-            NodeAction::OpenLb { node_lb, uncertain, end_dive } => {
+            NodeAction::OpenLb {
+                node_lb,
+                uncertain,
+                end_dive,
+            } => {
                 open_lb = open_lb.min(node_lb);
                 had_open = true;
                 if uncertain {
@@ -624,13 +757,27 @@ fn solve_mip_core<R: Relaxation>(
                 }
                 continue;
             }
-            NodeAction::PushChildren { node_lb, down, up, kind, end_dive } => {
+            NodeAction::PushChildren {
+                node_lb,
+                down,
+                up,
+                kind,
+                end_dive,
+            } => {
                 if end_dive && q.is_diving() {
                     q.end_dive();
                 }
                 match kind {
-                    ChildKind::Branched { jb, res_obj, jb_val, down_ws, up_ws } => {
-                        q.push(node.child_branched(down, node_lb, down_ws, jb, false, res_obj, jb_val));
+                    ChildKind::Branched {
+                        jb,
+                        res_obj,
+                        jb_val,
+                        down_ws,
+                        up_ws,
+                    } => {
+                        q.push(
+                            node.child_branched(down, node_lb, down_ws, jb, false, res_obj, jb_val),
+                        );
                         q.push(node.child_branched(up, node_lb, up_ws, jb, true, res_obj, jb_val));
                     }
                     ChildKind::Split => {
@@ -695,7 +842,11 @@ enum NodeAction {
     Skip { end_dive: bool },
     /// Record open lower bound (max-depth or proof-uncertain region).
     /// Mark `proof_uncertain` when `uncertain`. End dive when `end_dive`.
-    OpenLb { node_lb: f64, uncertain: bool, end_dive: bool },
+    OpenLb {
+        node_lb: f64,
+        uncertain: bool,
+        end_dive: bool,
+    },
     /// Push two child nodes. End dive when `end_dive`.
     PushChildren {
         node_lb: f64,
@@ -783,15 +934,25 @@ fn pick_branch_var<R: Relaxation>(
     shared: &SolverOptions,
     cfg: &MipConfig,
     deadline: &Option<Instant>,
+    parent_warm_start: Option<&WarmStartBasis>,
     pc: &mut PseudocostState,
+    stats: &mut MipStats,
     use_reliability: bool,
 ) -> usize {
     if use_reliability {
-        let sb_cands =
-            strong_branch_candidates(sol, mask, integer_vars, cfg.integer_feas_tol, pc);
+        let sb_cands = strong_branch_candidates(sol, mask, integer_vars, cfg.integer_feas_tol, pc);
         let strong_scores = if !sb_cands.is_empty() && !deadline_reached(*deadline) {
             measure_strong_branch_scores(
-                problem, node_bounds, sol, obj, &sb_cands, j_to_k, shared, pc,
+                problem,
+                node_bounds,
+                sol,
+                obj,
+                &sb_cands,
+                j_to_k,
+                shared,
+                parent_warm_start,
+                pc,
+                stats,
             )
         } else {
             HashMap::new()
@@ -802,7 +963,11 @@ fn pick_branch_var<R: Relaxation>(
             integer_vars,
             cfg.integer_feas_tol,
             pc,
-            if strong_scores.is_empty() { None } else { Some(&strong_scores) },
+            if strong_scores.is_empty() {
+                None
+            } else {
+                Some(&strong_scores)
+            },
         )
         .expect("non-integer-feasible Optimal relaxation has a fractional integer var")
     } else {
@@ -822,7 +987,9 @@ fn try_rins<R: Relaxation>(
     rel_sol: &[f64],
 ) {
     if !cfg.rins_enabled
-        || !stats.nodes_processed.is_multiple_of(heuristics::rins::RINS_INTERVAL)
+        || !stats
+            .nodes_processed
+            .is_multiple_of(heuristics::rins::RINS_INTERVAL)
         || state.incumbent_obj.is_none()
     {
         return;
@@ -914,7 +1081,11 @@ fn process_node_outcome<R: Relaxation>(
 
         // Max-depth limit.
         if node.depth + 1 > cfg.max_depth {
-            return NodeAction::OpenLb { node_lb, uncertain: false, end_dive: true };
+            return NodeAction::OpenLb {
+                node_lb,
+                uncertain: false,
+                end_dive: true,
+            };
         }
 
         // End dive when it has descended MAX_DIVE_DEPTH levels below the pivot.
@@ -938,7 +1109,9 @@ fn process_node_outcome<R: Relaxation>(
             shared,
             cfg,
             deadline,
+            res.warm_start_basis.as_ref(),
             pc,
+            stats,
             use_reliability,
         );
         let (down, up) = branch_bounds(&node.var_bounds, jb, res.solution[jb]);
@@ -957,22 +1130,40 @@ fn process_node_outcome<R: Relaxation>(
             node_lb,
             down,
             up,
-            kind: ChildKind::Branched { jb, res_obj: res.objective, jb_val: res.solution[jb], down_ws, up_ws },
+            kind: ChildKind::Branched {
+                jb,
+                res_obj: res.objective,
+                jb_val: res.solution[jb],
+                down_ws,
+                up_ws,
+            },
             end_dive,
         }
     } else {
         // Non-Optimal relaxation: bisect on the widest integer interval.
         let node_lb = node.lower_bound;
         match widest_splittable_integer(&node.var_bounds, mask) {
-            Some(_) if node.depth + 1 > cfg.max_depth => {
-                NodeAction::OpenLb { node_lb, uncertain: true, end_dive: true }
-            }
+            Some(_) if node.depth + 1 > cfg.max_depth => NodeAction::OpenLb {
+                node_lb,
+                uncertain: true,
+                end_dive: true,
+            },
             Some(jb) => {
                 let end_dive = node.depth >= dive_start_depth + MAX_DIVE_DEPTH;
                 let (down, up) = split_integer_box(&node.var_bounds, jb);
-                NodeAction::PushChildren { node_lb, down, up, kind: ChildKind::Split, end_dive }
+                NodeAction::PushChildren {
+                    node_lb,
+                    down,
+                    up,
+                    kind: ChildKind::Split,
+                    end_dive,
+                }
             }
-            None => NodeAction::OpenLb { node_lb, uncertain: true, end_dive: true },
+            None => NodeAction::OpenLb {
+                node_lb,
+                uncertain: true,
+                end_dive: true,
+            },
         }
     }
 }

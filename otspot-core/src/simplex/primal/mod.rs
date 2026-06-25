@@ -612,11 +612,26 @@ pub(crate) fn two_phase_simplex(
         "start m={} n_total={} n_artificial={}", sf.m, sf.n_total, sf.num_artificial
     ));
 
-    let Some((a, b, c, row_scale, col_scale)) =
-        LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
-    else {
-        trace_stage("equilibration timeout");
-        return SolverResult { status: SolveStatus::Timeout, objective: f64::INFINITY, ..Default::default() };
+    let (a, b, c, row_scale, col_scale) = if options.use_ruiz_scaling {
+        let Some(scaled) =
+            LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
+        else {
+            trace_stage("equilibration timeout");
+            return SolverResult {
+                status: SolveStatus::Timeout,
+                objective: f64::INFINITY,
+                ..Default::default()
+            };
+        };
+        scaled
+    } else {
+        (
+            sf.a.clone(),
+            sf.b.clone(),
+            sf.c.clone(),
+            vec![1.0; sf.m],
+            vec![1.0; sf.n_total],
+        )
     };
 
     // Direct Phase II — no artificials needed.

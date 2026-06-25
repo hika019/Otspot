@@ -90,7 +90,8 @@ pub(crate) fn alpha_bb_lower_bound(
     alpha: f64,
     base_opts: &SolverOptions,
     deadline: Option<Instant>,
-) -> Option<f64> {
+    warm_start: Option<crate::options::QpWarmStart>,
+) -> Option<(f64, Option<crate::options::QpWarmStart>)> {
     if alpha <= 0.0 {
         return None;
     }
@@ -101,16 +102,33 @@ pub(crate) fn alpha_bb_lower_bound(
     let mut opts = base_opts.clone();
     opts.multistart = None;
     opts.global_optimization = None;
-    // sub-solve hygiene: caller の warm hint は凸化後の解空間で意味が変わるため全消去
     opts.warm_start = None;
-    opts.warm_start_qp = None;
+    opts.warm_start_qp = warm_start.map(|mut ws| {
+        for (xi, &(lb, ub)) in ws.x.iter_mut().zip(node_bounds.iter()) {
+            *xi = xi.clamp(lb, ub);
+        }
+        ws
+    });
     opts.warm_start_lp = None;
     opts.deadline = deadline;
     let res: SolverResult = crate::qp::solve_qp_with(&sub, &opts);
     if !is_feasible_result(&res.status) {
         return None;
     }
-    Some(res.objective)
+    let warm_out = if res.solution.is_empty() {
+        None
+    } else {
+        Some(crate::options::QpWarmStart {
+            x: res.solution.clone(),
+            y: res.dual_solution.clone(),
+            mu: res
+                .final_residuals
+                .map(|(_, _, g)| g)
+                .unwrap_or(1e-6)
+                .max(1e-10),
+        })
+    };
+    Some((res.objective, warm_out))
 }
 
 #[cfg(test)]
@@ -230,14 +248,14 @@ mod tests {
         let problem = build_problem(&[-2.0], &[0.0], vec![(f64::NEG_INFINITY, 1.0)]);
         let alpha = 1.0;
         let opts = SolverOptions::default();
-        assert!(alpha_bb_lower_bound(&problem, &problem.bounds, alpha, &opts, None).is_none());
+        assert!(alpha_bb_lower_bound(&problem, &problem.bounds, alpha, &opts, None, None).is_none());
     }
 
     #[test]
     fn alpha_bb_returns_none_for_zero_alpha() {
         let problem = build_problem(&[2.0], &[0.0], vec![(-1.0, 1.0)]);
         let opts = SolverOptions::default();
-        assert!(alpha_bb_lower_bound(&problem, &problem.bounds, 0.0, &opts, None).is_none());
+        assert!(alpha_bb_lower_bound(&problem, &problem.bounds, 0.0, &opts, None, None).is_none());
     }
 
     #[test]
@@ -246,9 +264,8 @@ mod tests {
         let problem = build_problem(&[-2.0], &[0.0], vec![(-2.0, 2.0)]);
         let alpha = gershgorin_alpha(&problem.q);
         let opts = SolverOptions::default();
-        let lb = alpha_bb_lower_bound(&problem, &problem.bounds, alpha, &opts, None)
+        let (lb, _) = alpha_bb_lower_bound(&problem, &problem.bounds, alpha, &opts, None, None)
             .expect("convex relaxation must solve on bounded concave 1d");
-        // lb must be a valid lower bound (≤ -4) and finite
         assert!(lb.is_finite(), "lb must be finite, got {lb}");
         assert!(lb <= -4.0 + 1e-6, "lb must be ≤ global -4, got {lb}");
     }
@@ -259,10 +276,10 @@ mod tests {
         let problem_wide = build_problem(&[-2.0], &[0.0], vec![(-2.0, 2.0)]);
         let alpha = gershgorin_alpha(&problem_wide.q);
         let opts = SolverOptions::default();
-        let lb_wide =
-            alpha_bb_lower_bound(&problem_wide, &[(-2.0, 2.0)], alpha, &opts, None).expect("wide");
-        let lb_narrow =
-            alpha_bb_lower_bound(&problem_wide, &[(0.0, 1.0)], alpha, &opts, None).expect("narrow");
+        let (lb_wide, _) =
+            alpha_bb_lower_bound(&problem_wide, &[(-2.0, 2.0)], alpha, &opts, None, None).expect("wide");
+        let (lb_narrow, _) =
+            alpha_bb_lower_bound(&problem_wide, &[(0.0, 1.0)], alpha, &opts, None, None).expect("narrow");
         assert!(
             lb_narrow >= lb_wide - 1e-9,
             "narrow lb ({lb_narrow}) should not be worse than wide ({lb_wide})"
@@ -285,11 +302,40 @@ mod tests {
         .unwrap();
         let alpha = gershgorin_alpha(&p.q);
         let opts = SolverOptions::default();
-        let lb = alpha_bb_lower_bound(&p, &p.bounds, alpha, &opts, None)
+        let (lb, _) = alpha_bb_lower_bound(&p, &p.bounds, alpha, &opts, None, None)
             .expect("constrained α-BB must solve");
         assert!(
             lb.is_finite() && lb <= -1.0 + 1e-6,
             "lb must be ≤ -1 (global) and finite, got {lb}"
+        );
+    }
+
+    #[test]
+    fn alpha_bb_returns_warm_start_with_x_clamped_to_bounds() {
+        // f = -x², box [-2, 2]: convex relaxation is feasible so warm start must be Some.
+        // warm start x must lie within node_bounds after clamping.
+        let problem = build_problem(&[-2.0], &[0.0], vec![(-2.0, 2.0)]);
+        let node_bounds = vec![(-2.0_f64, 2.0_f64)];
+        let alpha = gershgorin_alpha(&problem.q);
+        assert!(alpha > 0.0, "alpha must be positive for concave Q");
+        let opts = SolverOptions::default();
+        let (lb, warm) =
+            alpha_bb_lower_bound(&problem, &node_bounds, alpha, &opts, None, None)
+                .expect("convex relaxation must solve on bounded concave 1d");
+        assert!(lb.is_finite(), "lb must be finite");
+        let ws = warm.expect("warm start must be Some when relaxation yields a solution");
+        assert_eq!(ws.x.len(), 1, "warm start x must have 1 component");
+        assert!(
+            ws.x[0] >= node_bounds[0].0 - 1e-12,
+            "warm start x[0]={} must be >= lb={}",
+            ws.x[0],
+            node_bounds[0].0
+        );
+        assert!(
+            ws.x[0] <= node_bounds[0].1 + 1e-12,
+            "warm start x[0]={} must be <= ub={}",
+            ws.x[0],
+            node_bounds[0].1
         );
     }
 }

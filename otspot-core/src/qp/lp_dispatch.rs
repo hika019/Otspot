@@ -383,7 +383,7 @@ fn solve_lp_with_ipm_backend(lp: &LpProblem, options: &SolverOptions) -> SolverR
     let mut qp = match QpProblem::new(
         q,
         lp.c.clone(),
-        lp.a.clone(),
+        (*lp.a).clone(),
         lp.b.clone(),
         lp.bounds.clone(),
         lp.constraint_types.clone(),

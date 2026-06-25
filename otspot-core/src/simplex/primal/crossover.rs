@@ -15,6 +15,7 @@ use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
 /// Relative tolerance below which a standard-form column value is treated as
 /// at-bound (zero) when seeding the crossover basis from `x_star`.
 const CROSSOVER_ZERO_TOL: f64 = 1e-9;
+const CROSSOVER_PHASE1_CLEANUP_SECS: f64 = 30.0;
 const CROSSOVER_PHASE2_CLEANUP_SECS: f64 = 60.0;
 
 #[allow(clippy::print_stderr)]
@@ -287,6 +288,13 @@ pub(crate) fn crossover_dual_from_primal(
         }
         let mut pricing1 = SteepestEdgePricing::new(n_ext);
         let mut iters = 0usize;
+        let phase1_cleanup_deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs_f64(CROSSOVER_PHASE1_CLEANUP_SECS);
+        let mut phase1_options = options.clone();
+        phase1_options.deadline = Some(match deadline {
+            Some(global) => phase1_cleanup_deadline.min(global),
+            None => phase1_cleanup_deadline,
+        });
         match revised_simplex_core(
             &a_ext,
             &mut x_b,
@@ -297,7 +305,7 @@ pub(crate) fn crossover_dual_from_primal(
             n_ext,
             n_ext,
             &mut pricing1,
-            &options,
+            &phase1_options,
             &mut iters,
             true,
             Some(n_total),

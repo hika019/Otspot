@@ -15,7 +15,7 @@ use crate::sparse::CscMatrix;
 
 /// (col_ptr, row_ind, values) triple for a reconstructed basis CSC matrix.
 type BasisCscParts = (Vec<usize>, Vec<usize>, Vec<f64>);
-use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::sparse::linalg::lu::{
     factorize_symbolic_lu, LuRef, LuSymbolicParams, NumericLu, SymbolicLu,
 };
@@ -179,6 +179,34 @@ pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut [f64]) {
         .solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
     let mut mem = MemBuffer::new(req);
     let stack = MemStack::new(&mut mem);
+    let rhs_mat = MatMut::from_column_major_slice_mut(rhs, lu.n, 1);
+    lu_ref.solve_transpose_in_place_with_conj(Conj::No, rhs_mat, Par::Seq, stack);
+}
+
+pub(crate) fn make_solve_scratch(lu: &LuFactorization) -> MemBuffer {
+    let req_f = lu.symbolic.solve_in_place_scratch::<f64>(1, Par::Seq);
+    let req_b = lu.symbolic.solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
+    MemBuffer::new(StackReq::any_of(&[req_f, req_b]))
+}
+
+pub(crate) fn solve_ftran_cached(lu: &LuFactorization, rhs: &mut [f64], scratch: &mut MemBuffer) {
+    let req = lu.symbolic.solve_in_place_scratch::<f64>(1, Par::Seq);
+    if scratch.len() < req.size_bytes() {
+        *scratch = MemBuffer::new(req);
+    }
+    let lu_ref = LuRef::new_unchecked(&lu.symbolic, &lu.numeric);
+    let stack = MemStack::new(scratch);
+    let rhs_mat = MatMut::from_column_major_slice_mut(rhs, lu.n, 1);
+    lu_ref.solve_in_place_with_conj(Conj::No, rhs_mat, Par::Seq, stack);
+}
+
+pub(crate) fn solve_btran_cached(lu: &LuFactorization, rhs: &mut [f64], scratch: &mut MemBuffer) {
+    let req = lu.symbolic.solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
+    if scratch.len() < req.size_bytes() {
+        *scratch = MemBuffer::new(req);
+    }
+    let lu_ref = LuRef::new_unchecked(&lu.symbolic, &lu.numeric);
+    let stack = MemStack::new(scratch);
     let rhs_mat = MatMut::from_column_major_slice_mut(rhs, lu.n, 1);
     lu_ref.solve_transpose_in_place_with_conj(Conj::No, rhs_mat, Par::Seq, stack);
 }

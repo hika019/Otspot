@@ -4,7 +4,32 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-## [0.6.0] - unreleased
+## [0.6.1] - 2026-06-24
+
+公開API破壊的変更なし。MIP node LP と LP presolve のホットパスを軽量化。
+
+### 変更
+
+- MIP: root 後の node LP / strong-branching LP は、bounds だけが変わる relax solve で Ruiz scaling をまず省略し、数値的に証明不能な結果だけ scaled retry するよう変更
+- MIP: デフォルト branching を強分岐付き Reliability から MostFractional に変更し、強分岐の試行LPが短時間 budget を消費して探索が進まないケースを回避。明示 `Reliability` 指定時は強分岐を維持しつつ試行量を削減
+- MIP: `OTSPOT_LP_SOLVE_PROFILE=1` 時の MIP profile に FP / root cut / node propagation / strong branching の時間・回数を追加
+- LP presolve: 置換処理中の `PresolveState::add_to_entry` を該当 row/col エントリだけ更新・削除する実装へ変更し、不要な全体 `retain` 走査を削減
+
+### テスト
+
+- MIP: root は scaling 維持、descendant node は repeated scaling を省略する option 伝播 sentinel を追加
+- MIP: デフォルト branching が強分岐を避けること、明示 `Reliability` では strong-branching stats が非ゼロになることを検証する sentinel を追加
+- LP presolve: 疎 row/col 表現の同期、ゼロ化削除、微小 delta no-op を直接検証する sentinel を追加
+
+### 実測
+
+- `mas76.mps --timeout 30 --no-cuts`: descendant scaling calls 3675→6、nodes 3676→6111、per-node solve 3274us→1977us
+- `gen-ip002.mps --timeout 20 --no-cuts`: descendant scaling calls 0、nodes 20708、per-node solve 315us
+- `dcmulti.mps --timeout 10 --eps 1e-6`: strong_branch_us 6.18s→0、nodes 1→12
+- `enlight_hard.mps --timeout 10 --eps 1e-6`: strong_branch_us 9.13s→0、nodes 14→339
+- `gen-ip002.mps --timeout 30 --eps 1e-6`: nodes 5134→9455、incumbent -4660.05→-4728.58
+
+## [0.6.0] - 2026-06-24
 
 MIP B&B の標準機能一式 + LP presolve/postsolve 改善 + リファクタリング。
 

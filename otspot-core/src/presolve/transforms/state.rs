@@ -227,29 +227,18 @@ impl PresolveState {
         if delta.abs() < ZERO_TOL {
             return;
         }
-        let mut found_row = false;
-        for entry in self.row_entries[i].iter_mut() {
-            if entry.0 == j {
-                entry.1 += delta;
-                found_row = true;
-                break;
-            }
+        update_sparse_entry(&mut self.row_entries[i], j, delta);
+        update_sparse_entry(&mut self.col_entries[j], i, delta);
+    }
+}
+
+fn update_sparse_entry(entries: &mut Vec<(usize, f64)>, index: usize, delta: f64) {
+    if let Some(pos) = entries.iter().position(|&(idx, _)| idx == index) {
+        entries[pos].1 += delta;
+        if entries[pos].1.abs() < ZERO_TOL {
+            entries.remove(pos);
         }
-        if !found_row {
-            self.row_entries[i].push((j, delta));
-        }
-        let mut found_col = false;
-        for entry in self.col_entries[j].iter_mut() {
-            if entry.0 == i {
-                entry.1 += delta;
-                found_col = true;
-                break;
-            }
-        }
-        if !found_col {
-            self.col_entries[j].push((i, delta));
-        }
-        self.row_entries[i].retain(|&(jj, v)| jj != j || v.abs() >= ZERO_TOL);
-        self.col_entries[j].retain(|&(ii, v)| ii != i || v.abs() >= ZERO_TOL);
+    } else {
+        entries.push((index, delta));
     }
 }

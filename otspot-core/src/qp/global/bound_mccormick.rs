@@ -459,7 +459,7 @@ mod tests {
         let p = build_problem(q, vec![0.0, 0.0], vec![(-2.0, 1.0), (-1.0, 2.0)]);
         let opts = SolverOptions::default();
         let alpha = gershgorin_alpha(&p.q);
-        let lb_alpha = alpha_bb_lower_bound(&p, &p.bounds, alpha, &opts, None).expect("α-BB");
+        let (lb_alpha, _) = alpha_bb_lower_bound(&p, &p.bounds, alpha, &opts, None, None).expect("α-BB");
         let lb_mc = mccormick_lower_bound(&p, &p.bounds, &opts, None).expect("McCormick");
         // 両 lb とも valid (≤ −2)、ただし McCormick は厳密に tight、α-BB は緩い。
         assert!(

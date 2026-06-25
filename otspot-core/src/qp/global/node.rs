@@ -12,6 +12,7 @@ pub(crate) struct BBNode {
     pub lower_bound: f64,
     pub depth: usize,
     pub warm: Option<QpWarmStart>,
+    pub alpha_bb_warm: Option<QpWarmStart>,
 }
 
 impl BBNode {
@@ -21,6 +22,7 @@ impl BBNode {
             lower_bound,
             depth: 0,
             warm: None,
+            alpha_bb_warm: None,
         }
     }
 
@@ -29,12 +31,14 @@ impl BBNode {
         new_bounds: Vec<(f64, f64)>,
         lower_bound: f64,
         warm: Option<QpWarmStart>,
+        alpha_bb_warm: Option<QpWarmStart>,
     ) -> Self {
         Self {
             var_bounds: new_bounds,
             lower_bound,
             depth: self.depth + 1,
             warm,
+            alpha_bb_warm,
         }
     }
 }
@@ -60,7 +64,7 @@ mod tests {
             y: vec![],
             mu: 1e-6,
         };
-        let c = p.child(vec![(0.0, 0.5)], -2.5, Some(warm.clone()));
+        let c = p.child(vec![(0.0, 0.5)], -2.5, Some(warm.clone()), None);
         assert_eq!(c.depth, 1);
         let w = c.warm.expect("warm propagated");
         assert_eq!(w.x, vec![0.5]);

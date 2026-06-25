@@ -121,6 +121,16 @@ fn main() -> ExitCode {
         println!("lp_scale_us_desc: {}", stats.lp_scale_us_desc);
         println!("lp_scale_calls_root: {}", stats.lp_scale_calls_root);
         println!("lp_scale_calls_desc: {}", stats.lp_scale_calls_desc);
+        println!("fp_us: {}", stats.fp_us);
+        println!("root_cut_us: {}", stats.root_cut_us);
+        println!("node_propagation_us: {}", stats.node_propagation_us);
+        println!("strong_branch_calls: {}", stats.strong_branch_calls);
+        println!(
+            "strong_branch_candidates: {}",
+            stats.strong_branch_candidates
+        );
+        println!("strong_branch_lp_solves: {}", stats.strong_branch_lp_solves);
+        println!("strong_branch_us: {}", stats.strong_branch_us);
         println!(
             "fallback_ub_violation_out_of_scope: {}",
             stats.fallback_ub_violation_out_of_scope
@@ -129,7 +139,10 @@ fn main() -> ExitCode {
             "fallback_phase1_bound_violation: {}",
             stats.fallback_phase1_bound_violation
         );
-        println!("fallback_crash_infeasible: {}", stats.fallback_crash_infeasible);
+        println!(
+            "fallback_crash_infeasible: {}",
+            stats.fallback_crash_infeasible
+        );
     }
     if stats.nodes_processed > 0 {
         let n = stats.nodes_processed as f64;

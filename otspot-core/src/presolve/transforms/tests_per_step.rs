@@ -44,6 +44,43 @@ fn count_linear_subst(st: &PresolveState) -> usize {
 }
 
 // -----------------------------------------------------------
+// PresolveState sparse-entry update hot path
+// -----------------------------------------------------------
+
+#[test]
+fn add_to_entry_updates_prunes_and_keeps_row_col_in_sync() {
+    let mut st = make_state(
+        vec![0.0; 3],
+        &[0, 0, 1],
+        &[0, 1, 1],
+        &[1.0, 2.0, 3.0],
+        2,
+        3,
+        vec![0.0; 2],
+        vec![ConstraintType::Eq, ConstraintType::Le],
+        vec![(0.0, 10.0); 3],
+    );
+
+    st.add_to_entry(0, 1, 0.5);
+    assert_eq!(st.coeff(0, 1), 2.5);
+    assert!(st.row_entries[0].contains(&(1, 2.5)));
+    assert!(st.col_entries[1].contains(&(0, 2.5)));
+
+    st.add_to_entry(1, 2, -4.0);
+    assert_eq!(st.coeff(1, 2), -4.0);
+    assert!(st.row_entries[1].contains(&(2, -4.0)));
+    assert!(st.col_entries[2].contains(&(1, -4.0)));
+
+    st.add_to_entry(0, 1, -2.5);
+    assert_eq!(st.coeff(0, 1), 0.0);
+    assert!(!st.row_entries[0].iter().any(|&(j, _)| j == 1));
+    assert!(!st.col_entries[1].iter().any(|&(i, _)| i == 0));
+
+    st.add_to_entry(1, 2, crate::tolerances::ZERO_TOL * 0.5);
+    assert_eq!(st.coeff(1, 2), -4.0);
+}
+
+// -----------------------------------------------------------
 // step5_bounds_tightening
 // -----------------------------------------------------------
 

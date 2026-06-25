@@ -136,7 +136,7 @@ pub fn solve_qp_global_with_stats(
     // use_alpha_bb=false でも判定だけは行う (status 判別は探索戦略に依存させない)。
     let q_indefinite = is_q_indefinite(problem);
 
-    let root_lb = compute_node_lower_bound(
+    let (root_lb, _) = compute_node_lower_bound(
         problem,
         &root_bounds,
         alpha,
@@ -144,6 +144,9 @@ pub fn solve_qp_global_with_stats(
         deadline,
         cfg.use_alpha_bb,
         cfg.use_mccormick,
+        None,
+        cfg.gap_tol,
+        None,
     );
 
     let mut state = SearchState::new(root_solve);
@@ -181,7 +184,7 @@ pub fn solve_qp_global_with_stats(
         }
         Some(j) => {
             let warm = state.build_warm();
-            let (l, r) = split_node(&root_node, j, root_x[j], warm);
+            let (l, r) = split_node(&root_node, j, root_x[j], warm, None);
             tree.push(l);
             tree.push(r);
         }
@@ -207,7 +210,7 @@ pub fn solve_qp_global_with_stats(
         }
 
         // 自前で再計算した lb (Phase 4/5: interval + α-BB + McCormick の max) で tight 化、再 prune
-        let local_lb = compute_node_lower_bound(
+        let (local_lb, ab_warm_for_children) = compute_node_lower_bound(
             problem,
             &node.var_bounds,
             alpha,
@@ -215,6 +218,9 @@ pub fn solve_qp_global_with_stats(
             deadline,
             cfg.use_alpha_bb,
             cfg.use_mccormick,
+            Some(state.incumbent_obj),
+            cfg.gap_tol,
+            node.alpha_bb_warm.clone(),
         );
         let node_lb = local_lb.max(node.lower_bound);
         if should_prune(node_lb, Some(state.incumbent_obj), cfg.gap_tol) {
@@ -251,7 +257,7 @@ pub fn solve_qp_global_with_stats(
         }
         if let Some(j) = select_branching_variable(&node, &res.solution) {
             let warm = build_warm_from(&res);
-            let (left, right) = split_node(&node, j, res.solution[j], warm);
+            let (left, right) = split_node(&node, j, res.solution[j], warm, ab_warm_for_children);
             tree.push(left);
             tree.push(right);
         }
@@ -319,12 +325,22 @@ fn compute_node_lower_bound(
     deadline: Option<Instant>,
     use_alpha_bb: bool,
     use_mccormick: bool,
-) -> f64 {
+    incumbent_obj: Option<f64>,
+    gap_tol: f64,
+    alpha_bb_warm_in: Option<QpWarmStart>,
+) -> (f64, Option<QpWarmStart>) {
     let (interval_lb, _) = interval_quadratic_bounds(problem, bounds);
     let mut lb = interval_lb;
+    let mut ab_warm_out: Option<QpWarmStart> = None;
+    if should_prune(lb, incumbent_obj, gap_tol) {
+        return (lb, None);
+    }
     if use_alpha_bb {
-        if let Some(ab_lb) = alpha_bb_lower_bound(problem, bounds, alpha, base_opts, deadline) {
+        if let Some((ab_lb, ab_warm)) =
+            alpha_bb_lower_bound(problem, bounds, alpha, base_opts, deadline, alpha_bb_warm_in)
+        {
             lb = lb.max(ab_lb);
+            ab_warm_out = ab_warm;
         }
     }
     if use_mccormick {
@@ -332,7 +348,7 @@ fn compute_node_lower_bound(
             lb = lb.max(mc_lb);
         }
     }
-    lb
+    (lb, ab_warm_out)
 }
 
 fn build_warm_from(res: &SolverResult) -> Option<QpWarmStart> {
