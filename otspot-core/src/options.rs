@@ -564,9 +564,11 @@ pub struct SolverOptions {
     pub(crate) cancel_flag: Option<Arc<AtomicBool>>,
     /// Solve deadline computed from `timeout_secs` at solve entry (internal use).
     pub(crate) deadline: Option<Instant>,
+    /// Cached Schur complement decision from `probe_schur_decision`.
+    pub(crate) schur_hint: Option<bool>,
 
     // --- Ruiz scaling ---
-    /// Apply Ruiz equilibration scaling before IPM.  Default: `true`.
+    /// Apply Ruiz equilibration scaling before LP simplex / IPM.  Default: `true`.
     pub use_ruiz_scaling: bool,
 
     // --- Tolerance abstraction ---
@@ -643,6 +645,7 @@ impl Default for SolverOptions {
             timeout_secs: None,
             cancel_flag: None,
             deadline: None,
+            schur_hint: None,
             use_ruiz_scaling: true,
             tolerance: None,
             ipm: IpmOptions::default(),

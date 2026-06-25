@@ -1,5 +1,4 @@
-//! Root Gomory Mixed-Integer (GMI) and Mixed-Integer Rounding (MIR) cutting
-//! planes for MILP.
+//! Root cutting planes for MILP: GMI, MIR, cover, clique, and implied-bound cuts.
 //!
 //! Cuts tighten the LP relaxation without removing integer-feasible points.
 //! Uses the primal-simplex standard form (`build_standard_form`) so every
@@ -10,9 +9,8 @@
 //!   2. For each fractional integer basic, form the tableau row and emit a cut.
 //!   3. Back-substitute to original variables (`G·x >= rhs`).
 //!
-//! GMI and MIR produce equivalent cut coefficients for individual tableau rows.
-//! Alternating rounds use the same formula but operate on different LPs (each
-//! round appends the previous cuts), generating complementary tightenings.
+//! After the GMI/MIR rounds, a structural cut phase runs cover, clique, and
+//! implied-bound cuts directly from the constraint matrix and LP solution.
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::linalg::timeout::deadline_reached;
@@ -73,11 +71,12 @@ enum CutKind {
 
 /// Append GMI and MIR cuts at the root, returning the augmented problem.
 ///
-/// Rounds alternate GMI (even) / MIR (odd). Multi-round generation uses Ge rows
-/// internally (preserving the original simplex path and numerical properties).
-/// After all rounds, added Ge cut rows are converted to Le (`−g·x ≤ −rhs`) before
-/// returning, so B&B node solves (primal simplex, presolve=false) use slack
-/// variables (coeff +1) rather than surplus variables (coeff −1).
+/// Rounds alternate GMI (even) / MIR (odd). After the tableau-based rounds,
+/// a structural phase adds cover, clique, and implied-bound cuts.
+/// Multi-round generation uses Ge rows internally (preserving the original
+/// simplex path). After all rounds, added Ge cut rows are converted to Le
+/// (`−g·x ≤ −rhs`) before returning, so B&B node solves use slack variables
+/// (coeff +1) rather than surplus variables (coeff −1).
 pub(crate) fn add_root_cuts(
     milp: &MilpProblem,
     options: &SolverOptions,
@@ -91,10 +90,7 @@ pub(crate) fn add_root_cuts(
     };
 
     // `committed` is always an LP that solves cleanly; cuts are committed only
-    // after the candidate is re-validated with the *same* solver the B&B uses, so
-    // the returned root is never one B&B cannot solve. (Higher-round GMI cuts can
-    // degrade numerical conditioning; without this guard an unsolvable root would
-    // be handed to B&B and surface as a spurious Timeout.)
+    // after the candidate is re-validated with the *same* solver the B&B uses.
     let m_orig = milp.lp.num_constraints;
     let mut committed = milp.lp.clone();
     let mut prev_obj: Option<f64> = None;
@@ -106,6 +102,7 @@ pub(crate) fn add_root_cuts(
         now + d.saturating_duration_since(now).mul_f64(CUT_TIME_FRACTION)
     });
 
+    // GMI / MIR tableau-based rounds.
     for round_idx in 0..max_rounds {
         if deadline_reached(cut_deadline) {
             break;
@@ -142,17 +139,33 @@ pub(crate) fn add_root_cuts(
         }
     }
 
-    // Convert added Ge cut rows to Le before handing to B&B, so B&B node
-    // solves (presolve=false, primal simplex) use slacks (coeff +1) rather than
-    // surplus variables (coeff −1). Multi-round generation above uses Ge internally
-    // (same simplex path as the original single-kind loop) and only the final LP
-    // passed to B&B changes representation.
+    // Structural cut phase: cover, clique, implied-bound.
+    if total_cuts < max_total_cuts && !deadline_reached(cut_deadline) {
+        let res = solve_cut_lp(&committed, options, cut_deadline);
+        if res.status == SolveStatus::Optimal {
+            let budget = max_total_cuts.saturating_sub(total_cuts);
+            let mut structural: Vec<CutRow> = Vec::new();
+            structural.extend(generate_cover_cuts(&committed, &integer_mask, &res.solution));
+            structural.extend(generate_clique_cuts(&committed, &integer_mask, &res.solution));
+            structural.extend(generate_implied_bound_cuts(
+                &committed,
+                &integer_mask,
+                &res.solution,
+            ));
+            structural.truncate(budget);
+            if !structural.is_empty() {
+                let candidate = append_ge_rows(&committed, &structural);
+                let check = solve_validate(&candidate, options, cut_deadline);
+                if check.status == SolveStatus::Optimal {
+                    committed = candidate;
+                }
+            }
+        }
+    }
+
+    // Convert added Ge cut rows to Le before handing to B&B.
     let lp = convert_cuts_to_le(committed, m_orig);
 
-    // Re-validate the Le form: negated rows (slacks vs. surplus) have different
-    // numerical properties under presolve=false. If the Le LP does not solve
-    // Optimally, fall back to the original cut-free LP so B&B is never handed
-    // an unsolvable root.
     let le_check = solve_validate(&lp, options, cut_deadline);
     let final_lp = if le_check.status == SolveStatus::Optimal {
         lp
@@ -166,8 +179,6 @@ pub(crate) fn add_root_cuts(
     }
 }
 
-/// Validate the augmented LP (still as Ge) to confirm the added cuts did not
-/// make the relaxation numerically unsolvable.
 fn solve_validate(
     lp: &LpProblem,
     options: &SolverOptions,
@@ -190,8 +201,6 @@ fn solve_validate(
     crate::lp::solve_lp_with(lp, &opts)
 }
 
-/// Solve the cut-generation LP via primal simplex with presolve disabled so
-/// the returned basis lives in `build_standard_form(lp)`'s column space.
 fn solve_cut_lp(
     lp: &LpProblem,
     options: &SolverOptions,
@@ -214,7 +223,6 @@ fn solve_cut_lp(
     crate::lp::solve_lp_with(lp, &opts)
 }
 
-/// Generate one round of cuts from the optimal `basis` and LP solution `x_star`.
 fn generate_round(
     lp: &LpProblem,
     integer_mask: &[bool],
@@ -287,9 +295,6 @@ fn generate_round(
     cuts
 }
 
-/// Build a cut from basis row `i`.
-/// Returns `None` when the cut is unusable (free-var support, degenerate, weak,
-/// or numerically unstable).
 #[allow(clippy::too_many_arguments)]
 fn build_cut(
     sf: &StandardForm,
@@ -327,10 +332,6 @@ fn build_cut(
             continue;
         }
         let integral = j < sf.n_shifted && struct_cols[j].integral;
-        // MIR's `max(alpha,0)/f0` suppression for continuous nonbasics is only
-        // valid for original-problem structural variables. Slack columns (of any
-        // constraint, including UB rows and previous cut rows) must use GMI to
-        // guarantee integer hull membership.
         let effective_kind = if matches!(kind, CutKind::Mir) && j >= sf.n_shifted {
             CutKind::Gmi
         } else {
@@ -352,7 +353,6 @@ fn build_cut(
     finalize_cut(g, rhs, x_star, frac_tol)
 }
 
-/// GMI coefficient (always >= 0) for a nonbasic column with tableau entry `alpha`.
 fn gmi_coeff(alpha: f64, f0: f64, one_minus_f0: f64, integral: bool) -> f64 {
     if integral {
         let f = (alpha - alpha.floor()).clamp(0.0, 1.0);
@@ -368,18 +368,11 @@ fn gmi_coeff(alpha: f64, f0: f64, one_minus_f0: f64, integral: bool) -> f64 {
     }
 }
 
-/// MIR coefficient (always >= 0). Identical to GMI for all cases.
-///
-/// MIR and GMI produce the same cut coefficients for individual tableau rows.
-/// For continuous nonbasics with `alpha < 0`, the coefficient is `-alpha/(1-f₀)` —
-/// dropping this term (setting it to 0) can exclude integer-feasible solutions
-/// where the continuous variable takes a value above its lower bound.
+/// MIR coefficient — identical to GMI for all cases.
 fn mir_coeff(alpha: f64, f0: f64, one_minus_f0: f64, integral: bool) -> f64 {
     gmi_coeff(alpha, f0, one_minus_f0, integral)
 }
 
-/// Add `gamma · v_j` (where `v_j = d_j + g_j·x`) into the accumulators `g`, `d`.
-/// Returns `false` if the column is a free-variable split (no affine image).
 #[allow(clippy::too_many_arguments)]
 fn accumulate_column(
     j: usize,
@@ -553,8 +546,6 @@ fn row_lists(a: &CscMatrix, num_rows: usize) -> Vec<Vec<(usize, f64)>> {
     rows
 }
 
-/// Append cuts as Ge rows during multi-round generation (preserves original
-/// simplex path; same numerical behavior as the original code).
 fn append_ge_rows(lp: &LpProblem, cuts: &[CutRow]) -> LpProblem {
     let m_old = lp.num_constraints;
     let n = lp.num_vars;
@@ -597,12 +588,6 @@ fn append_ge_rows(lp: &LpProblem, cuts: &[CutRow]) -> LpProblem {
     out
 }
 
-/// Convert the Ge cut rows (indices `m_orig..`) to equivalent Le rows (`−g·x ≤ −rhs`).
-///
-/// B&B node solves run with presolve=false (primal simplex). Le slacks (coeff +1)
-/// are numerically better in that setting than Ge surplus variables (coeff −1).
-/// Multi-round generation ran on the Ge form (same simplex path as original code);
-/// only the LP handed to B&B has the Le representation.
 fn convert_cuts_to_le(lp: LpProblem, m_orig: usize) -> LpProblem {
     if lp.num_constraints == m_orig {
         return lp;
@@ -618,7 +603,6 @@ fn convert_cuts_to_le(lp: LpProblem, m_orig: usize) -> LpProblem {
         for (&r, &v) in rs.iter().zip(vs) {
             trip_rows.push(r);
             trip_cols.push(c);
-            // Negate the coefficient for cut rows.
             trip_vals.push(if r >= m_orig { -v } else { v });
         }
     }
@@ -636,6 +620,331 @@ fn convert_cuts_to_le(lp: LpProblem, m_orig: usize) -> LpProblem {
         .expect("cut-Le LP is valid");
     out.obj_offset = lp.obj_offset;
     out
+}
+
+// ── Structural cuts (cover, clique, implied bound) ──────────────────────────
+
+/// Returns `true` when variable `j` is a binary integer (bounds within [0,1]).
+fn is_binary(j: usize, integer_mask: &[bool], bounds: &[(f64, f64)]) -> bool {
+    j < integer_mask.len()
+        && integer_mask[j]
+        && bounds[j].0 >= -ZERO_TOL
+        && bounds[j].1 <= 1.0 + ZERO_TOL
+}
+
+/// Cover cuts for 0-1 knapsack Le constraints.
+///
+/// For each Le row whose support is entirely non-negative binary, finds a
+/// minimal cover C (Σ_{j∈C} a_j > b) and emits −Σ_{j∈C} x_j ≥ −(|C|−1).
+fn generate_cover_cuts(
+    lp: &LpProblem,
+    integer_mask: &[bool],
+    x_star: &[f64],
+) -> Vec<CutRow> {
+    let frac_tol = feas_rel_tol();
+    let rows = row_lists(&lp.a, lp.num_constraints);
+    let mut cuts = Vec::new();
+
+    'row: for r in 0..lp.num_constraints {
+        if cuts.len() >= MAX_CUTS_PER_ROUND {
+            break;
+        }
+        if lp.constraint_types[r] != ConstraintType::Le {
+            continue;
+        }
+        let b = lp.b[r];
+        if b <= ZERO_TOL {
+            continue;
+        }
+        let row = &rows[r];
+        if row.len() < 2 {
+            continue;
+        }
+        // Every nonzero entry must be a positive-coefficient binary variable.
+        for &(j, v) in row {
+            if v <= ZERO_TOL || !is_binary(j, integer_mask, &lp.bounds) {
+                continue 'row;
+            }
+        }
+
+        // Sort by coefficient descending; greedy cover.
+        let mut sorted: Vec<(usize, f64)> = row.to_vec();
+        sorted.sort_by(|a, b_| b_.1.total_cmp(&a.1));
+
+        let mut cover: Vec<usize> = Vec::new();
+        let mut sum = 0.0_f64;
+        for &(j, v) in &sorted {
+            cover.push(j);
+            sum += v;
+            if sum > b {
+                break;
+            }
+        }
+        if sum <= b {
+            continue; // all variables needed; no cover exists
+        }
+
+        // Minimise: remove smallest-coefficient elements that keep sum > b.
+        let mut k = cover.len();
+        while k > 0 {
+            k -= 1;
+            let j = cover[k];
+            let coeff_j = sorted.iter().find(|&&(jj, _)| jj == j).map_or(0.0, |&(_, v)| v);
+            if sum - coeff_j > b {
+                sum -= coeff_j;
+                cover.swap_remove(k);
+            }
+        }
+
+        if cover.len() < 2 {
+            continue;
+        }
+
+        let mut g = vec![0.0; lp.num_vars];
+        for &j in &cover {
+            g[j] = -1.0;
+        }
+        let rhs = -((cover.len() - 1) as f64);
+        if let Some(cut) = finalize_cut(g, rhs, x_star, frac_tol) {
+            cuts.push(cut);
+        }
+    }
+    cuts
+}
+
+/// Clique cuts via global pairwise conflict graph.
+///
+/// Two binary variables i, j "conflict" when some Le row has a_i + a_j > b_r
+/// (both being 1 would violate that constraint). We build this conflict graph
+/// from all rows, then for each fractional binary variable greedily extend to a
+/// clique in the conflict graph. Cliques of size ≥ 3 that the LP solution
+/// violates (Σ x_star[j] > 1) are emitted as −Σ_{j∈clique} x_j ≥ −1.
+fn generate_clique_cuts(
+    lp: &LpProblem,
+    integer_mask: &[bool],
+    x_star: &[f64],
+) -> Vec<CutRow> {
+    let frac_tol = feas_rel_tol();
+    let rows = row_lists(&lp.a, lp.num_constraints);
+    let n = lp.num_vars;
+
+    // Build conflict adjacency: conflicts[i] contains all j that conflict with i.
+    let mut conflicts: Vec<Vec<usize>> = vec![Vec::new(); n];
+    'row: for r in 0..lp.num_constraints {
+        if lp.constraint_types[r] != ConstraintType::Le {
+            continue;
+        }
+        let b = lp.b[r];
+        if b <= ZERO_TOL {
+            continue;
+        }
+        let row = &rows[r];
+        if row.len() < 2 {
+            continue;
+        }
+        // Pairwise conflict a_i + a_j > b is only valid when the residual
+        // min-activity of all other variables is ≥ 0. Require every entry to be
+        // a positive-coefficient binary variable (same guard as cover cuts).
+        for &(j, v) in row {
+            if v <= ZERO_TOL || !is_binary(j, integer_mask, &lp.bounds) {
+                continue 'row;
+            }
+        }
+        let bin_entries: Vec<(usize, f64)> = row.to_vec();
+        for pi in 0..bin_entries.len() {
+            for pj in (pi + 1)..bin_entries.len() {
+                let (i, ai) = bin_entries[pi];
+                let (j, aj) = bin_entries[pj];
+                if ai + aj > b + ZERO_TOL {
+                    if !conflicts[i].contains(&j) {
+                        conflicts[i].push(j);
+                    }
+                    if !conflicts[j].contains(&i) {
+                        conflicts[j].push(i);
+                    }
+                }
+            }
+        }
+    }
+
+    // For each fractional binary variable, greedily grow a clique in the conflict
+    // graph and emit a cut if the LP solution violates Σ x_j ≤ 1.
+    let mut cuts = Vec::new();
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+    for seed in 0..n {
+        if cuts.len() >= MAX_CUTS_PER_ROUND {
+            break;
+        }
+        if !is_binary(seed, integer_mask, &lp.bounds) {
+            continue;
+        }
+        let x_seed = if seed < x_star.len() { x_star[seed] } else { continue };
+        if x_seed <= frac_tol {
+            continue; // seed is at zero, no incentive to include
+        }
+        if conflicts[seed].is_empty() {
+            continue;
+        }
+
+        // Start clique with seed; extend by adding neighbours that conflict with all.
+        let mut clique: Vec<usize> = vec![seed];
+        // Candidate: neighbours of seed, sorted by x_star descending (greedy).
+        let mut candidates: Vec<usize> = conflicts[seed].clone();
+        candidates.sort_by(|&a, &b| {
+            let xa = if a < x_star.len() { x_star[a] } else { 0.0 };
+            let xb = if b < x_star.len() { x_star[b] } else { 0.0 };
+            xb.total_cmp(&xa)
+        });
+        for cand in candidates {
+            // cand must conflict with every current clique member.
+            if clique.iter().all(|&m| conflicts[cand].contains(&m)) {
+                clique.push(cand);
+            }
+        }
+
+        if clique.len() < 3 {
+            continue;
+        }
+
+        // Deduplicate.
+        let mut key_vec = clique.clone();
+        key_vec.sort_unstable();
+        let key: u64 = key_vec
+            .iter()
+            .take(5)
+            .fold(0u64, |acc, &j| acc.wrapping_mul(1_000_003).wrapping_add(j as u64 + 1));
+        if !seen.insert(key) {
+            continue;
+        }
+
+        let mut g = vec![0.0; lp.num_vars];
+        for &j in &clique {
+            g[j] = -1.0;
+        }
+        if let Some(cut) = finalize_cut(g, -1.0, x_star, frac_tol) {
+            cuts.push(cut);
+        }
+    }
+    cuts
+}
+
+/// Implied bound cuts derived from constraint activity bounds.
+///
+/// For integer variable i, the continuous implied bound is rounded to the
+/// tightest integer value (floor for upper bounds, ceil for lower bounds).
+/// This creates a violation gap when the LP solution is fractional between
+/// the integer implied bound and the variable's original bound.
+///
+/// Le row, integer var i with a_i > 0:
+///   implied_ub_int = floor((b − activity_min_without_i) / a_i)
+///   Cut: −x_i ≥ −implied_ub_int
+///
+/// Ge row, integer var i with a_i > 0:
+///   implied_lb_int = ceil((b − activity_max_without_i) / a_i)
+///   Cut: x_i ≥ implied_lb_int
+fn generate_implied_bound_cuts(
+    lp: &LpProblem,
+    integer_mask: &[bool],
+    x_star: &[f64],
+) -> Vec<CutRow> {
+    use crate::tolerances::INT_ROUND_TOL;
+    let frac_tol = feas_rel_tol();
+    let rows = row_lists(&lp.a, lp.num_constraints);
+    let mut cuts = Vec::new();
+
+    'row: for r in 0..lp.num_constraints {
+        if cuts.len() >= MAX_CUTS_PER_ROUND {
+            break;
+        }
+        let b = lp.b[r];
+        let row = &rows[r];
+        if row.is_empty() {
+            continue;
+        }
+
+        match lp.constraint_types[r] {
+            ConstraintType::Le => {
+                // activity_min: a_j * lb_j (a_j > 0) + a_j * ub_j (a_j < 0)
+                let mut activity_min = 0.0_f64;
+                for &(j, v) in row {
+                    let (lb, ub) = lp.bounds[j];
+                    let bound = if v > 0.0 { lb } else { ub };
+                    if !bound.is_finite() {
+                        continue 'row;
+                    }
+                    activity_min += v * bound;
+                }
+
+                for &(i, ai) in row {
+                    if cuts.len() >= MAX_CUTS_PER_ROUND {
+                        break;
+                    }
+                    if ai <= ZERO_TOL || !integer_mask[i] {
+                        continue;
+                    }
+                    let (lb_i, ub_i) = lp.bounds[i];
+                    if !ub_i.is_finite() {
+                        continue;
+                    }
+                    let lb_i_val = if lb_i.is_finite() { lb_i } else { continue };
+                    // Remove var i's own contribution (positive coeff → used lb_i).
+                    let activity_min_i = activity_min - ai * lb_i_val;
+                    let raw_ub = (b - activity_min_i) / ai;
+                    // Floor to integer (INT_ROUND_TOL guards floating-point drift).
+                    let implied_ub = (raw_ub + INT_ROUND_TOL).floor();
+                    if implied_ub >= ub_i - frac_tol {
+                        continue; // not tighter than current bound
+                    }
+                    let mut g = vec![0.0; lp.num_vars];
+                    g[i] = -1.0;
+                    if let Some(cut) = finalize_cut(g, -implied_ub, x_star, frac_tol) {
+                        cuts.push(cut);
+                    }
+                }
+            }
+            ConstraintType::Ge => {
+                // activity_max: a_j * ub_j (a_j > 0) + a_j * lb_j (a_j < 0)
+                let mut activity_max = 0.0_f64;
+                for &(j, v) in row {
+                    let (lb, ub) = lp.bounds[j];
+                    let bound = if v > 0.0 { ub } else { lb };
+                    if !bound.is_finite() {
+                        continue 'row;
+                    }
+                    activity_max += v * bound;
+                }
+
+                for &(i, ai) in row {
+                    if cuts.len() >= MAX_CUTS_PER_ROUND {
+                        break;
+                    }
+                    if ai <= ZERO_TOL || !integer_mask[i] {
+                        continue;
+                    }
+                    let (lb_i, ub_i) = lp.bounds[i];
+                    if !lb_i.is_finite() {
+                        continue;
+                    }
+                    let ub_i_val = if ub_i.is_finite() { ub_i } else { continue };
+                    let activity_max_i = activity_max - ai * ub_i_val;
+                    let raw_lb = (b - activity_max_i) / ai;
+                    // Ceil to integer.
+                    let implied_lb = (raw_lb - INT_ROUND_TOL).ceil();
+                    if implied_lb <= lb_i + frac_tol {
+                        continue;
+                    }
+                    let mut g = vec![0.0; lp.num_vars];
+                    g[i] = 1.0;
+                    if let Some(cut) = finalize_cut(g, implied_lb, x_star, frac_tol) {
+                        cuts.push(cut);
+                    }
+                }
+            }
+            ConstraintType::Eq => {}
+        }
+    }
+    cuts
 }
 
 #[cfg(test)]
