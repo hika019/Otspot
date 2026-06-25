@@ -1269,3 +1269,77 @@ fn structural_cuts_validity_end_to_end() {
         }
     }
 }
+
+// ── In-tree separation sentinel ─────────────────────────────────────────────
+
+/// Knapsack-style general-integer MILP used as the in-tree-cut sentinel.
+///
+/// max Σ c_j x_j  s.t.  Σ a_j x_j ≤ 23,  x_j ∈ {0..5} integer (min of −c).
+/// Its LP relaxation stays fractional several levels deep, so re-separating
+/// GMI/MIR at interior B&B nodes tightens bounds the root cuts miss.
+fn tree_cut_sentinel_milp() -> MilpProblem {
+    let c = [12.0, 17.0, 13.0, 21.0, 9.0, 16.0, 7.0, 19.0];
+    let a = [5.0, 7.0, 6.0, 9.0, 4.0, 7.0, 3.0, 8.0];
+    let n = c.len();
+    let cneg: Vec<f64> = c.iter().map(|v| -v).collect();
+    let rows = vec![0usize; n];
+    let cols: Vec<usize> = (0..n).collect();
+    let l = lp(
+        cneg,
+        &rows,
+        &cols,
+        &a,
+        1,
+        vec![23.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 5.0); n],
+    );
+    MilpProblem::new(l, cols).unwrap()
+}
+
+/// **Sentinel**: in-tree cuts must measurably shrink the search vs `tree_cuts=off`.
+///
+/// Root cuts are disabled in *both* runs so the only difference is in-tree
+/// separation. If `tree_cuts` is a no-op (hook never fires, pool always rejects,
+/// or the re-solve is discarded), node counts are identical and this FAILS. The
+/// optimum must be unchanged — cuts only remove fractional points.
+#[test]
+fn tree_cuts_reduce_node_count_sentinel() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
+
+    let cfg_off = MipConfig { cuts: false, tree_cuts: false, ..MipConfig::default() };
+    let cfg_on = MipConfig { cuts: false, tree_cuts: true, ..MipConfig::default() };
+
+    let (r_off, s_off) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_off);
+    let (r_on, s_on) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_on);
+
+    assert_eq!(r_off.status, SolveStatus::Optimal);
+    assert_eq!(r_on.status, SolveStatus::Optimal);
+    assert!(
+        (r_on.objective - r_off.objective).abs() < 1e-6,
+        "in-tree cuts must not change the optimum: on={} off={}",
+        r_on.objective,
+        r_off.objective
+    );
+    assert!(
+        s_on.tree_cut_rounds > 0,
+        "in-tree separation must fire at least one accepted round (got 0)"
+    );
+    assert!(
+        s_on.nodes_processed < s_off.nodes_processed,
+        "in-tree cuts must reduce node count: on={} off={}",
+        s_on.nodes_processed,
+        s_off.nodes_processed
+    );
+}
+
+/// Regression guard: with `tree_cuts=off` no separation fires (counter stays 0).
+#[test]
+fn tree_cuts_off_does_not_separate() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
+    let cfg = MipConfig { cuts: false, tree_cuts: false, ..MipConfig::default() };
+    let (_, s) = super::super::solve_milp_with_stats(&milp, &opts, &cfg);
+    assert_eq!(s.tree_cut_rounds, 0, "tree_cuts=off must never separate");
+}
