@@ -1344,6 +1344,36 @@ fn tree_cuts_off_does_not_separate() {
     assert_eq!(s.tree_cut_rounds, 0, "tree_cuts=off must never separate");
 }
 
+#[test]
+fn separate_tree_cuts_drops_augmented_warm_start_basis() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
+    let root = lp_root(&milp.lp);
+    assert_eq!(root.status, SolveStatus::Optimal);
+    assert!(root.warm_start_basis.is_some());
+
+    let mut mask = vec![false; milp.lp.num_vars];
+    for &j in &milp.integer_vars {
+        mask[j] = true;
+    }
+
+    let improved = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &root,
+        TREE_CUT_DEPTH_INTERVAL,
+        0,
+    )
+    .expect("selected tree-cut node must accept a tighter result");
+
+    assert!(improved.objective > root.objective);
+    assert!(
+        improved.warm_start_basis.is_none(),
+        "tree-cut result must not expose its cut-augmented basis to child solves"
+    );
+}
+
 // ── Optimum-preservation sweep (cross-node soundness gate) ───────────────────
 
 /// Deterministic LCG so the sweep is reproducible (no `rand` dependency).
