@@ -68,7 +68,7 @@ pub(crate) fn run_rins(
     // integer_vars were already validated on the original; num_vars unchanged.
     let sub_problem = MilpProblem::new(sub_lp, problem.integer_vars.clone()).ok()?;
 
-    let sub_cfg = rins_sub_config(cfg);
+    let sub_cfg = rins_sub_mip_config(cfg);
 
     let mut sub_opts = parent_opts.clone();
     sub_opts.timeout_secs = Some(sub_timeout);
@@ -104,7 +104,7 @@ fn remaining_budget(deadline: &Option<Instant>) -> f64 {
     }
 }
 
-fn rins_sub_config(cfg: &MipConfig) -> MipConfig {
+fn rins_sub_mip_config(cfg: &MipConfig) -> MipConfig {
     let mut sub_cfg = cfg.clone();
     sub_cfg.max_nodes = RINS_NODE_LIMIT;
     sub_cfg.rins_enabled = false;
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn rins_sub_config_disables_nested_primal_heuristics() {
+    fn rins_sub_mip_disables_recursive_primal_heuristics() {
         let cfg = MipConfig {
             max_nodes: 99_999,
             rins_enabled: true,
@@ -218,7 +218,7 @@ mod tests {
             ..MipConfig::default()
         };
 
-        let sub_cfg = rins_sub_config(&cfg);
+        let sub_cfg = rins_sub_mip_config(&cfg);
         assert_eq!(sub_cfg.max_nodes, RINS_NODE_LIMIT);
         assert!(!sub_cfg.rins_enabled);
         assert!(!sub_cfg.rens_enabled);
