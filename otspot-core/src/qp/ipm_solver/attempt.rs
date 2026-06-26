@@ -1123,6 +1123,64 @@ mod tests {
         );
     }
 
+    fn runner_extended_ir_dual_sign_invalid_but_metric_clean(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+        _user_eps: f64,
+    ) -> IpmOutcome {
+        IpmOutcome {
+            solution: vec![1.0],
+            dual_solution: vec![-1e-4],
+            bound_duals: vec![0.0, 1.0 + 1e-4],
+            objective: -1.5,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 0.0,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        }
+    }
+
+    #[test]
+    fn solve_runner_extended_ir_still_demotes_dual_sign_invalid_postsolve_outcome() {
+        use crate::problem::ConstraintType;
+
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![-2.0_f64],
+            a,
+            vec![1.0_f64],
+            vec![(0.0_f64, 1.0_f64)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        let mut opts = SolverOptions::default();
+        opts.ipm.eps = 1e-6;
+        opts.ipm.max_iter = 1;
+        opts.ipm.extended_ir = true;
+
+        let (result, _mask) = solve_ipm_with_runner(
+            &prob,
+            &opts,
+            runner_extended_ir_dual_sign_invalid_but_metric_clean,
+        );
+
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::SuboptimalSolution,
+            "extended_ir=true solve path must let prove_optimal demote a metric-clean but dual-sign-invalid postsolve outcome"
+        );
+    }
+
     #[test]
     fn candidate_order_prefers_certificate_then_objective() {
         let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();

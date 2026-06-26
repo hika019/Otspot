@@ -178,6 +178,17 @@ impl IterTrace {
             self.tag, delta, effect
         );
     }
+
+    pub(super) fn log_stall_bail(&mut self, iter: usize, obj: f64, trigger: usize) {
+        if self.detail_lines >= self.cfg.max_lines {
+            return;
+        }
+        self.detail_lines = self.detail_lines.saturating_add(1);
+        eprintln!(
+            "[simplex-trace:{}] cleanup stall bail: iter={} obj={:.9e} no_progress_trigger={}",
+            self.tag, iter, obj, trigger
+        );
+    }
 }
 
 #[allow(clippy::print_stderr)] // env-gated diagnostic summary (see impl above)

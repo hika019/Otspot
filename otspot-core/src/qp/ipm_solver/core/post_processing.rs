@@ -374,6 +374,27 @@ pub(super) fn refine_krylov_and_projection(
         opts.deadline,
     );
 
+    // Stage 3a: extended-precision IR with TwoFloat accumulation.
+    // Runs only when standard Krylov IR stalled above eps and the option is enabled.
+    if opts.ipm.extended_ir {
+        let kkt_post_std = kkt_residual_rel(
+            &view,
+            &final_sol.solution,
+            &final_sol.dual_solution,
+            &final_sol.bound_duals,
+        );
+        let pres_post_std = primal_residual_rel(&view, &final_sol.solution);
+        if kkt_post_std > user_eps || pres_post_std > user_eps {
+            crate::qp::refine_kkt_extended_precision(
+                orig_problem,
+                final_sol,
+                eliminated_cols,
+                target_pf,
+                opts.deadline,
+            );
+        }
+    }
+
     // (3b) KKT IR 後に pres > eps なら primal projection を 1 回追加。
     // 採用条件: pres 改善 AND kkt <= user_eps を厳守 (df 退行防止)。
     if !allow_primal {

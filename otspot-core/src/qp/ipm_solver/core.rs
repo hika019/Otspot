@@ -381,3 +381,85 @@ mod postsolve_krylov_gate_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod extended_ir_postsolve_path_tests {
+    use super::run_ipm_with;
+    use crate::options::SolverOptions;
+    use crate::presolve::QpPresolveResult;
+    use crate::problem::{ConstraintType, SolveStatus, SolverResult};
+    use crate::qp::certificate::prove_optimal;
+    use crate::qp::ipm_solver::outcome::ProblemView;
+    use crate::qp::kkt_resid::dual_sign_violation;
+    use crate::qp::problem::QpProblem;
+    use crate::sparse::CscMatrix;
+
+    fn stationarity_requires_wrong_sign_le_inner(
+        _problem: &QpProblem,
+        _opts: &SolverOptions,
+    ) -> SolverResult {
+        SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0],
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            iterations: 1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn extended_ir_postsolve_path_does_not_hide_wrong_sign_dual_from_prove_optimal() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[0.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let problem = QpProblem::new(
+            q,
+            vec![1.0_f64],
+            a,
+            vec![10.0_f64],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        let presolve = QpPresolveResult::no_reduction(&problem);
+        let mut opts = SolverOptions::default();
+        opts.ipm.eps = 1e-6;
+        opts.ipm.extended_ir = true;
+
+        let outcome = run_ipm_with(
+            &problem,
+            &presolve,
+            &opts,
+            opts.ipm_eps(),
+            stationarity_requires_wrong_sign_le_inner,
+        );
+        let view = ProblemView::from_problem(&problem);
+        let proof = prove_optimal(
+            &view,
+            &outcome.solution,
+            &outcome.dual_solution,
+            &outcome.bound_duals,
+            outcome.duality_gap_rel,
+            opts.ipm_eps(),
+        );
+        let dsign = dual_sign_violation(
+            &problem.constraint_types,
+            &outcome.dual_solution,
+            &problem.bounds,
+            &outcome.bound_duals,
+        );
+
+        assert!(
+            !outcome.satisfies_eps(opts.ipm_eps()),
+            "extended_ir postsolve path must not accept the wrong-sign Le dual candidate as eps-satisfying"
+        );
+        assert!(
+            proof.is_err(),
+            "prove_optimal must reject the same postsolve outcome when the certificate is not met"
+        );
+        assert!(
+            dsign <= opts.ipm_eps(),
+            "postsolve must preserve dual-sign feasibility instead of trading it for stationarity, dsign={dsign:.3e}"
+        );
+    }
+}

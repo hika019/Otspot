@@ -956,6 +956,8 @@ fn test_singular_initial_basis_not_optimal() {
         &mut iters,
         false,
         None,
+        false,
+        None,
     );
     assert!(!matches!(outcome, SimplexOutcome::Optimal(..)));
 }
@@ -1019,11 +1021,307 @@ fn test_refactor_failed_no_deadline_returns_timeout() {
         &mut iters,
         false,
         None,
+        false,
+        None,
     );
     assert!(matches!(
         outcome,
         SimplexOutcome::Optimal(..) | SimplexOutcome::Timeout(_) | SimplexOutcome::SingularBasis
     ));
+}
+
+struct ScriptedPricing {
+    sequence: Vec<usize>,
+    pos: usize,
+    repeat: bool,
+}
+
+impl ScriptedPricing {
+    fn once(sequence: Vec<usize>) -> Self {
+        Self {
+            sequence,
+            pos: 0,
+            repeat: false,
+        }
+    }
+
+    fn repeating(sequence: Vec<usize>) -> Self {
+        Self {
+            sequence,
+            pos: 0,
+            repeat: true,
+        }
+    }
+}
+
+impl crate::simplex::pricing::PricingStrategy for ScriptedPricing {
+    fn select_entering(&self, reduced_costs: &[f64], n_price: usize) -> Option<usize> {
+        if self.sequence.is_empty() {
+            return None;
+        }
+        let idx = if self.repeat {
+            self.pos % self.sequence.len()
+        } else if self.pos < self.sequence.len() {
+            self.pos
+        } else {
+            return None;
+        };
+        let col = self.sequence[idx];
+        (col < n_price && col < reduced_costs.len()).then_some(col)
+    }
+
+    fn update_weights(
+        &mut self,
+        _basis: &crate::basis::LuBasis,
+        _entering: usize,
+        _leaving: usize,
+        _leaving_row: usize,
+        _eta: &[f64],
+    ) {
+        self.pos = self.pos.saturating_add(1);
+    }
+
+    fn reset_weights(&mut self, _n_vars: usize) {}
+}
+
+fn one_row_duplicate_columns(n: usize) -> CscMatrix {
+    let rows = vec![0usize; n];
+    let cols: Vec<usize> = (0..n).collect();
+    let vals = vec![1.0f64; n];
+    CscMatrix::from_triplets(&rows, &cols, &vals, 1, n).unwrap()
+}
+
+/// Sentinel (fire): cleanup stall bail must trigger only after reduced-cost
+/// dual infeasibility has stayed flat for the no-progress patience window.
+///
+/// The one-row duplicate-column basis walks degenerately at x=0. The scripted
+/// pricing alternates between two zero-cost duplicate columns while a third
+/// nonbasic column keeps reduced-cost infeasibility fixed at 1.0. Removing the
+/// cleanup guard makes this test run until the deadline; counting objective
+/// progress would be a meaningless pass here because the objective is also
+/// fixed at 0 throughout the Phase II-style walk.
+#[test]
+fn cleanup_stall_bail_fires_on_flat_reduced_cost_infeasibility() {
+    let a = one_row_duplicate_columns(3);
+    let c = vec![0.0, 0.0, -1.0];
+    let mut x_b = vec![0.0];
+    let b = vec![0.0];
+    let mut basis = vec![0usize];
+    let mut pricing = ScriptedPricing::repeating(vec![1, 0]);
+    let opts = SolverOptions::default();
+    let mut iters = 0usize;
+
+    let outcome = revised_simplex_core(
+        &a,
+        &mut x_b,
+        &c,
+        &b,
+        &mut basis,
+        1,
+        3,
+        3,
+        &mut pricing,
+        &opts,
+        &mut iters,
+        false,
+        None,
+        true,
+        None,
+    );
+
+    let trigger = 100usize;
+    assert!(
+        matches!(outcome, SimplexOutcome::Timeout(obj) if obj.abs() < 1e-12),
+        "flat df cleanup walk must bail with Timeout at incumbent obj=0; got {outcome:?}"
+    );
+    assert!(
+        (trigger..=trigger + 2).contains(&iters),
+        "flat df must bail at the cleanup no-progress trigger, not a deadline \
+         or unrelated cap; trigger={trigger}, iters={iters}"
+    );
+}
+
+/// Sentinel (no-op): enabling the cleanup guard must not change a normal
+/// non-degenerate solve. Both runs perform one improving pivot and then return
+/// Optimal on the second iteration.
+#[test]
+fn cleanup_stall_bail_noop_on_normal_convergence() {
+    use crate::simplex::pricing::DantzigPricing;
+
+    let run = |enable_cleanup_stall_bail: bool| {
+        let a = one_row_duplicate_columns(2);
+        let c = vec![-1.0, 0.0];
+        let mut x_b = vec![1.0];
+        let b = vec![1.0];
+        let mut basis = vec![1usize];
+        let mut pricing = DantzigPricing;
+        let opts = SolverOptions::default();
+        let mut iters = 0usize;
+        let outcome = revised_simplex_core(
+            &a,
+            &mut x_b,
+            &c,
+            &b,
+            &mut basis,
+            1,
+            2,
+            2,
+            &mut pricing,
+            &opts,
+            &mut iters,
+            false,
+            None,
+            enable_cleanup_stall_bail,
+            None,
+        );
+        (outcome, iters, basis, x_b)
+    };
+
+    let (without_guard, iters_without, basis_without, x_without) = run(false);
+    let (with_guard, iters_with, basis_with, x_with) = run(true);
+
+    assert!(matches!(without_guard, SimplexOutcome::Optimal(obj, _) if (obj + 1.0).abs() < 1e-12));
+    assert!(matches!(with_guard, SimplexOutcome::Optimal(obj, _) if (obj + 1.0).abs() < 1e-12));
+    assert_eq!(iters_with, iters_without);
+    assert_eq!(basis_with, basis_without);
+    assert_eq!(x_with, x_without);
+}
+
+/// Sentinel (slow progress): a degenerate Phase II cleanup walk may need more
+/// than K=max(m,100) pivots while still making real reduced-cost progress.
+///
+/// There is one row, b=0, and 131 duplicate columns. The scripted pricing moves
+/// through costs 0, -1, -2, ..., -130 one basis at a time. Every pivot has step
+/// 0, so the objective is always 0, but the reduced-cost infeasibility drops by
+/// exactly 1 each iteration. The df-based guard must allow all 130 pivots and
+/// finish Optimal; the old objective-plateau guard would truncate at K=100.
+#[test]
+fn cleanup_stall_bail_allows_slow_df_progress_past_patience() {
+    const LAST_COL: usize = 130;
+    let n = LAST_COL + 1;
+    let a = one_row_duplicate_columns(n);
+    let c: Vec<f64> = (0..n).map(|j| -(j as f64)).collect();
+    let mut x_b = vec![0.0];
+    let b = vec![0.0];
+    let mut basis = vec![0usize];
+    let mut pricing = ScriptedPricing::once((1..=LAST_COL).collect());
+    let opts = SolverOptions::default();
+    let mut iters = 0usize;
+
+    let outcome = revised_simplex_core(
+        &a,
+        &mut x_b,
+        &c,
+        &b,
+        &mut basis,
+        1,
+        n,
+        n,
+        &mut pricing,
+        &opts,
+        &mut iters,
+        false,
+        None,
+        true,
+        None,
+    );
+
+    assert!(
+        matches!(outcome, SimplexOutcome::Optimal(obj, _) if obj.abs() < 1e-12),
+        "df-improving degenerate cleanup walk must finish Optimal; got {outcome:?}"
+    );
+    assert!(
+        iters > 100,
+        "test must run beyond the cleanup patience to distinguish df progress \
+         from the old objective plateau cap; iters={iters}"
+    );
+    assert_eq!(basis, vec![LAST_COL]);
+}
+
+/// Sentinel: plateau bail restores the best reduced-cost certificate, not the
+/// basis that happens to be current when patience expires.
+#[test]
+fn cleanup_stall_bail_restores_best_df_basis() {
+    let a = one_row_duplicate_columns(4);
+    let c = vec![0.0, 1.0, 1.0, -1.0];
+    let mut x_b = vec![0.0];
+    let b = vec![0.0];
+    let mut basis = vec![0usize];
+    let mut pricing = ScriptedPricing::repeating(vec![1, 2, 0]);
+    let opts = SolverOptions::default();
+    let mut iters = 0usize;
+
+    let outcome = revised_simplex_core(
+        &a,
+        &mut x_b,
+        &c,
+        &b,
+        &mut basis,
+        1,
+        4,
+        4,
+        &mut pricing,
+        &opts,
+        &mut iters,
+        false,
+        None,
+        true,
+        None,
+    );
+
+    assert!(
+        matches!(outcome, SimplexOutcome::Timeout(obj) if obj.abs() < 1e-12),
+        "plateau cleanup must bail with the best incumbent objective; got {outcome:?}"
+    );
+    assert_eq!(
+        basis,
+        vec![0],
+        "bail must restore the best-df basis; without restore this scripted walk \
+         exits on a worse basis"
+    );
+}
+
+/// Sentinel: crossover cleanup can stop as soon as its certificate target is
+/// reached, without waiting for the plateau patience window or strict simplex
+/// reduced-cost optimality.
+#[test]
+fn cleanup_target_df_returns_before_plateau_patience() {
+    let a = one_row_duplicate_columns(3);
+    let c = vec![0.0, -1.0, -2.0];
+    let mut x_b = vec![0.0];
+    let b = vec![0.0];
+    let mut basis = vec![0usize];
+    let mut pricing = ScriptedPricing::once(vec![1]);
+    let opts = SolverOptions::default();
+    let mut iters = 0usize;
+
+    let outcome = revised_simplex_core(
+        &a,
+        &mut x_b,
+        &c,
+        &b,
+        &mut basis,
+        1,
+        3,
+        3,
+        &mut pricing,
+        &opts,
+        &mut iters,
+        false,
+        None,
+        true,
+        Some(1.0),
+    );
+
+    assert!(
+        matches!(outcome, SimplexOutcome::Timeout(obj) if obj.abs() < 1e-12),
+        "target-df cleanup returns the recovered vertex as a fallback candidate; got {outcome:?}"
+    );
+    assert_eq!(basis, vec![1]);
+    assert!(
+        iters < 100,
+        "target df reached before plateau patience, but cleanup waited {iters} iterations"
+    );
 }
 
 /// timeout_secs=0 must propagate to Timeout (small LP path).

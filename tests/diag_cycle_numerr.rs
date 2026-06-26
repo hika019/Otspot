@@ -51,13 +51,6 @@ fn max_primal_violation(lp: &LpProblem, bounds: &[(f64, f64)], x: &[f64]) -> f64
 }
 
 /// Task #26 / #31: cycle.QPS must reach the known optimum, not NumericalError.
-///
-/// Ignored pending #31: current f64 simplex behavior reaches the known optimum
-/// and returns a feasible original-space point, but postsolve crossover does not
-/// certify `Optimal`. The `Optimal` assertion is retained as the post-#31
-/// target; `diag_cycle_is_feasible_and_near_optimal` covers the current honest
-/// `SuboptimalSolution` behavior.
-#[ignore = "open #31: Optimal 未証明 (postsolve crossover storm)。現挙動は diag_cycle_is_feasible_and_near_optimal が honest 検証済"]
 #[test]
 fn diag_cycle_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/cycle.QPS");
@@ -71,7 +64,7 @@ fn diag_cycle_must_reach_known_objective() {
     let lp = make_lp(&qp);
 
     let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(60.0);
+    opts.timeout_secs = Some(120.0);
 
     let t0 = Instant::now();
     let r = solve_with(&lp, &opts);
@@ -126,7 +119,7 @@ fn diag_cycle_must_reach_known_objective() {
     );
 }
 
-/// Honest-behavior companion to the (#31-)ignored Optimal guard.
+/// Honest-behavior companion to the Optimal guard.
 ///
 /// Does NOT require `Optimal`. Verifies the current, honest contract: cycle.QPS
 /// returns a feasible-terminal status whose **returned solution is genuinely

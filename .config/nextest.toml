@@ -60,6 +60,13 @@ threads-required = "num-cpus"
 filter = "test(dfl001_postsolve_skips_lsq_when_cleanup_stagnant) + test(diag_pds20_deadline_regression_guard)"
 threads-required = "num-cpus"
 
+# cycle.QPS promoted into default integration includes two long solver-budget
+# guards (120s / 250s). They keep the data-missing panic semantics, but should
+# not contend with other CPU-bound integration tests under default test-threads=3.
+[[profile.default.overrides]]
+filter = "test(diag_cycle_must_reach_known_objective) + test(diag_cycle_is_feasible_and_near_optimal)"
+threads-required = "num-cpus"
+
 # warm_start_30pct_speedup_smoke: wall-ratio assert (< 0.75) is sensitive to
 # CPU contention — serialise to give the wall measurement a fair comparison.
 [[profile.default.overrides]]

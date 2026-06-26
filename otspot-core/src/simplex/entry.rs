@@ -241,8 +241,10 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     if deadline_ok {
                         let mut opts_off = options.clone();
                         opts_off.presolve = false;
-                        // Force primal: 初回試行で feasibility 既知のため Primal で直行。
-                        opts_off.simplex_method = crate::options::SimplexMethod::Primal;
+                        // Auto: bounded dual path handles Eq+UB problems (e.g. cycle)
+                        // where forced Primal Phase II hits false-Timeout from tiny
+                        // numerical violations in the primal feasibility guard.
+                        opts_off.simplex_method = crate::options::SimplexMethod::Auto;
                         let t_alt_start = std::time::Instant::now();
                         let mut alt = solve_without_presolve(problem, &opts_off);
                         let alt_solve_us = t_alt_start.elapsed().as_micros() as u64;

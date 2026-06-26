@@ -20,9 +20,21 @@ const CROSSOVER_PHASE2_CLEANUP_SECS: f64 = 60.0;
 
 #[allow(clippy::print_stderr)]
 fn trace_crossover(msg: std::fmt::Arguments<'_>) {
-    if std::env::var_os("OTSPOT_CROSSOVER_TRACE").is_some() {
+    if crossover_trace_enabled() {
         eprintln!("[crossover] {msg}");
     }
+}
+
+fn crossover_trace_enabled() -> bool {
+    std::env::var_os("OTSPOT_CROSSOVER_TRACE").is_some()
+}
+
+fn cleanup_deadline(
+    caller_deadline: Option<std::time::Instant>,
+    local_cap_secs: f64,
+) -> Option<std::time::Instant> {
+    let local = std::time::Instant::now() + std::time::Duration::from_secs_f64(local_cap_secs);
+    Some(caller_deadline.map_or(local, |global| local.min(global)))
 }
 
 /// Bound-aware dual infeasibility of `y` against the reported primal `x_star`:
@@ -63,6 +75,45 @@ fn crossover_dual_infeasibility(problem: &LpProblem, x_star: &[f64], y: &[f64]) 
         }
     }
     max_viol
+}
+
+fn crossover_dual_infeasibility_detail(
+    problem: &LpProblem,
+    x_star: &[f64],
+    y: &[f64],
+) -> Option<(usize, f64, f64, f64, f64, bool, bool)> {
+    let n = problem.num_vars;
+    let mut worst: Option<(usize, f64, f64, f64, f64, bool, bool)> = None;
+    for j in 0..n {
+        let (lb, ub) = problem.bounds[j];
+        let lb_s = if lb.is_finite() { lb.abs() } else { 0.0 };
+        let ub_s = if ub.is_finite() { ub.abs() } else { 0.0 };
+        let fixed = lb.is_finite()
+            && ub.is_finite()
+            && (ub - lb).abs() < COMP_SLACK_REL_TOL * (1.0 + lb_s.max(ub_s));
+        if fixed {
+            continue;
+        }
+        let at_lb = lb.is_finite() && (x_star[j] - lb).abs() < COMP_SLACK_REL_TOL * (1.0 + lb_s);
+        let at_ub = ub.is_finite() && (x_star[j] - ub).abs() < COMP_SLACK_REL_TOL * (1.0 + ub_s);
+        let mut rc = problem.c[j];
+        if let Ok((rows, vals)) = problem.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                rc -= vals[k] * y[row];
+            }
+        }
+        let viol = if at_lb && !at_ub {
+            f64::max(0.0, -rc)
+        } else if at_ub && !at_lb {
+            f64::max(0.0, rc)
+        } else {
+            rc.abs()
+        };
+        if worst.is_none_or(|(_, best, _, _, _, _, _)| viol > best) {
+            worst = Some((j, viol, rc, x_star[j], lb, at_lb, at_ub));
+        }
+    }
+    worst
 }
 
 /// Derive a globally dual-feasible dual for `problem` from its known optimal
@@ -288,13 +339,8 @@ pub(crate) fn crossover_dual_from_primal(
         }
         let mut pricing1 = SteepestEdgePricing::new(n_ext);
         let mut iters = 0usize;
-        let phase1_cleanup_deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs_f64(CROSSOVER_PHASE1_CLEANUP_SECS);
         let mut phase1_options = options.clone();
-        phase1_options.deadline = Some(match deadline {
-            Some(global) => phase1_cleanup_deadline.min(global),
-            None => phase1_cleanup_deadline,
-        });
+        phase1_options.deadline = cleanup_deadline(deadline, CROSSOVER_PHASE1_CLEANUP_SECS);
         match revised_simplex_core(
             &a_ext,
             &mut x_b,
@@ -309,6 +355,8 @@ pub(crate) fn crossover_dual_from_primal(
             &mut iters,
             true,
             Some(n_total),
+            false,
+            None,
         ) {
             SimplexOutcome::Optimal(_, _) => {}
             _ => return None,
@@ -369,6 +417,12 @@ pub(crate) fn crossover_dual_from_primal(
         t_dual1.elapsed().as_secs_f64(),
         t_total.elapsed().as_secs_f64()
     ));
+    if crossover_trace_enabled() {
+        trace_crossover(format_args!(
+            "dual1 detail {:?}",
+            crossover_dual_infeasibility_detail(problem, &vertex1, &dual1)
+        ));
+    }
     if df1 <= crate::qp::certificate::LP_CERT_TOL {
         return Some((vertex1, dual1, rc1));
     }
@@ -382,12 +436,7 @@ pub(crate) fn crossover_dual_from_primal(
     let mut iters2 = 0usize;
     let t_phase2 = std::time::Instant::now();
     let mut phase2_options = options.clone();
-    let cleanup_deadline = std::time::Instant::now()
-        + std::time::Duration::from_secs_f64(CROSSOVER_PHASE2_CLEANUP_SECS);
-    phase2_options.deadline = Some(match deadline {
-        Some(global) => cleanup_deadline.min(global),
-        None => cleanup_deadline,
-    });
+    phase2_options.deadline = cleanup_deadline(deadline, CROSSOVER_PHASE2_CLEANUP_SECS);
     let phase2 = revised_simplex_core(
         &a_ext,
         &mut x_b,
@@ -402,6 +451,8 @@ pub(crate) fn crossover_dual_from_primal(
         &mut iters2,
         false,
         None,
+        true,
+        Some(crate::qp::certificate::LP_CERT_TOL),
     );
     match phase2 {
         SimplexOutcome::Optimal(_, mut y2) => {
@@ -434,6 +485,12 @@ pub(crate) fn crossover_dual_from_primal(
                 df2,
                 t_total.elapsed().as_secs_f64()
             ));
+            if crossover_trace_enabled() {
+                trace_crossover(format_args!(
+                    "finish detail {:?}",
+                    crossover_dual_infeasibility_detail(problem, &vertex2, &dual2)
+                ));
+            }
             if df2 < df1 {
                 Some((vertex2, dual2, rc2))
             } else {
@@ -465,6 +522,12 @@ pub(crate) fn crossover_dual_from_primal(
                     t_phase2.elapsed().as_secs_f64(),
                     t_total.elapsed().as_secs_f64()
                 ));
+                if crossover_trace_enabled() {
+                    trace_crossover(format_args!(
+                        "phase2 partial detail {:?}",
+                        crossover_dual_infeasibility_detail(problem, &vertex_p, &dual_p)
+                    ));
+                }
                 Some((df_p, vertex_p, dual_p, rc_p))
             } else {
                 None

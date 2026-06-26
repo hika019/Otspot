@@ -430,6 +430,22 @@ pub struct IpmOptions {
     /// fall back to MINRES automatically.
     #[doc(hidden)]
     pub kkt_memory_budget_bytes: Option<usize>,
+    /// Extended-precision iterative refinement using TwoFloat accumulation.
+    ///
+    /// When `true`, the postsolve pipeline runs an additional opt-in IR pass
+    /// that maintains the running solution in TwoFloat (~106-bit mantissa),
+    /// accumulating f64 LDL corrections without rounding loss. This can convert
+    /// honest `SuboptimalSolution` results into proven `Optimal` on ill-conditioned
+    /// QPs (e.g. LISWET family, AUG2DCQP) where f64 cancellation in the KKT
+    /// stationarity residual prevents the standard f64 IR from reaching `eps`.
+    ///
+    /// Default: `false`.
+    ///
+    /// The feature preserves the original result unless extended IR improves
+    /// the same composite score used by optimality classification:
+    /// `max(stationarity, primal feasibility, bound violation, complementarity, dual sign)`,
+    /// where complementarity is the max of problem-level and componentwise metrics.
+    pub extended_ir: bool,
 }
 
 impl Default for IpmOptions {
@@ -444,6 +460,7 @@ impl Default for IpmOptions {
             dd_ldl: false,
             minres_ir: None,
             kkt_memory_budget_bytes: None,
+            extended_ir: false,
         }
     }
 }
@@ -1195,6 +1212,7 @@ mod tests {
             o.kkt_memory_budget_bytes.is_none(),
             "kkt_memory_budget_bytes default None"
         );
+        assert!(!o.extended_ir, "extended_ir default false");
     }
 
     #[test]

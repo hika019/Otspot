@@ -434,7 +434,7 @@ fn verify_phase1_feasibility(
         let mut pricing_retry = SteepestEdgePricing::new(n_ext);
         match revised_simplex_core(
             a_ext, x_b, c_phase1, b, basis, m, n_ext, n_ext,
-            &mut pricing_retry, options, total_iters, true, Some(n_total),
+            &mut pricing_retry, options, total_iters, true, Some(n_total), false, None,
         ) {
             SimplexOutcome::Optimal(_, _) => {}
             SimplexOutcome::Unbounded => break,
@@ -537,7 +537,7 @@ fn finalize_phase2(
     let mut pricing = SteepestEdgePricing::new(n_cols);
     let outcome = revised_simplex_core(
         a, x_b, c, b, basis, m, n_cols, sf.n_total,
-        &mut pricing, options, total_iters, false, None,
+        &mut pricing, options, total_iters, false, None, false, None,
     );
     let outcome = gate_phase2_unbounded(outcome, a, basis, c, x_b, m, n_cols, sf.n_total, options);
 
@@ -656,7 +656,7 @@ pub(crate) fn two_phase_simplex(
     trace_stage("phase1 core start");
     let phase1_outcome = revised_simplex_core(
         &a_ext, &mut x_b, &c_phase1, &b, &mut basis, m, n_ext, n_ext,
-        &mut pricing1, options, &mut total_iters, true, Some(sf.n_total),
+        &mut pricing1, options, &mut total_iters, true, Some(sf.n_total), false, None,
     );
 
     match phase1_outcome {
