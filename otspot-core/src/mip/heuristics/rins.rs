@@ -82,7 +82,7 @@ pub(crate) fn run_rins(
     sub_opts.recover_warm_start_basis = false;
     sub_opts.threads = 1;
 
-    let result = crate::mip::solve_milp(&sub_problem, &sub_opts, &sub_cfg);
+    let result = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
     if matches!(
         result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution
@@ -223,6 +223,35 @@ mod tests {
         assert!(!sub_cfg.rins_enabled);
         assert!(!sub_cfg.rens_enabled);
         assert!(!sub_cfg.local_branching_enabled);
+    }
+
+    #[test]
+    fn rins_run_path_passes_recursive_sub_mip_config() {
+        let problem = two_var_milp([-1.0, -1.0], 3.0);
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            rins_enabled: true,
+            rens_enabled: true,
+            local_branching_enabled: true,
+            ..MipConfig::default()
+        };
+        let x_lp = vec![1.4, 1.6];
+        let x_inc = vec![1.0, 1.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let result = run_rins(&problem, &x_lp, &x_inc, &cfg, &None, &SolverOptions::default());
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(result.is_some(), "test premise: RINS must call the recursive sub-MIP");
+        assert_eq!(configs.len(), 1, "RINS run path must solve exactly one sub-MIP");
+        let sub_cfg = &configs[0];
+        assert_eq!(sub_cfg.max_nodes, RINS_NODE_LIMIT);
+        assert!(!sub_cfg.rins_enabled, "recursive RINS must be disabled");
+        assert!(!sub_cfg.rens_enabled, "recursive RENS must be disabled");
+        assert!(
+            !sub_cfg.local_branching_enabled,
+            "recursive local branching must be disabled"
+        );
     }
 
     #[test]
