@@ -1345,7 +1345,7 @@ fn tree_cuts_off_does_not_separate() {
 }
 
 #[test]
-fn accepted_tree_cut_result_clears_augmented_warm_start_basis() {
+fn separate_tree_cuts_drops_augmented_warm_start_basis() {
     let milp = tree_cut_sentinel_milp();
     let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
     let node_res = lp_root(&milp.lp);
@@ -1365,6 +1365,7 @@ fn accepted_tree_cut_result_clears_augmented_warm_start_basis() {
         1,
     )
     .expect("sentinel node must accept at least one tree-cut tightening");
+    assert!(tightened.objective > node_res.objective);
     assert!(
         tightened.warm_start_basis.is_none(),
         "tree-cut result must not return a basis from the augmented node-local LP"
