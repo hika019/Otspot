@@ -32,8 +32,54 @@ REQUIRED_REFERENCES = [
 ]
 
 COMMAND_RE = re.compile(r"`(cargo nextest run [^`]+)`")
+SELECTOR_EXPR_RE = re.compile(r"-E\s+'([^']+)'")
 NEXT_RUN_ONLY_ARGS = {"--no-fail-fast", "--test-threads"}
 HEAVY_SURVEILLANCE_COUNT = 11
+EXPECTED_GATE_SELECTOR_EXPRESSIONS = {
+    "Functional suitability": [],
+    "Performance efficiency": [
+        "binary(memory_regression) | binary(diag_bench_timeout_honored) | binary(diag_dfl001_postsolve_speedup)",
+        "binary(diag_lp_simplex_stall_sentinel)",
+    ],
+    "Compatibility": [],
+    "Usability": [
+        "test(model_api) | binary(api_correctness) | binary(solver_wide_api_contract)",
+    ],
+    "Reliability": [],
+    "Security": [],
+    "Maintainability": [],
+    "Portability": [],
+}
+EXPECTED_NONEMPTY_BINARY_GATE_SELECTORS = {
+    "Performance efficiency": [
+        {
+            "selector": "binary(memory_regression)",
+            "command": "cargo nextest run --release --features parallel -E 'binary(memory_regression)' --test-threads 3",
+        },
+        {
+            "selector": "binary(diag_bench_timeout_honored)",
+            "command": "cargo nextest run --release --features parallel -E 'binary(diag_bench_timeout_honored)' --test-threads 3",
+        },
+        {
+            "selector": "binary(diag_dfl001_postsolve_speedup)",
+            "command": "cargo nextest run --release --features parallel -E 'binary(diag_dfl001_postsolve_speedup)' --test-threads 3",
+        },
+        {
+            "selector": "binary(diag_lp_simplex_stall_sentinel)",
+            "command": "cargo nextest run --release --features parallel --profile heavy --run-ignored all -E 'binary(diag_lp_simplex_stall_sentinel)' --test-threads 3",
+        },
+    ],
+    "Usability": [
+        {
+            "selector": "binary(api_correctness)",
+            "command": "cargo nextest run --release -E 'binary(api_correctness)'",
+        },
+        {
+            "selector": "binary(solver_wide_api_contract)",
+            "command": "cargo nextest run --release -E 'binary(solver_wide_api_contract)'",
+        },
+    ],
+}
 
 
 def _nextest_list_command(command):
@@ -62,10 +108,40 @@ def _listed_test_count(command):
     return sum(1 for line in result.stdout.splitlines() if "::" in line)
 
 
+def _listed_tests(command):
+    result = subprocess.run(
+        _nextest_list_command(command),
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return [line for line in result.stdout.splitlines() if "::" in line]
+
+
 def _documented_nextest_selector_commands(text):
     for command in COMMAND_RE.findall(text):
         if " -E " in command:
             yield command
+
+
+def _selector_expr(command):
+    match = SELECTOR_EXPR_RE.search(command)
+    assert match, command
+    return match.group(1)
+
+
+def _characteristic_row(text, name):
+    prefix = f"| {name} |"
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            return line
+    raise AssertionError(name)
+
+
+def _characteristic_selector_exprs(text, name):
+    row = _characteristic_row(text, name)
+    return [_selector_expr(command) for command in _documented_nextest_selector_commands(row)]
 
 
 def test_iso_25010_matrix_covers_product_quality_characteristics():
@@ -97,6 +173,29 @@ def test_iso_25010_nextest_release_gate_selectors_are_nonempty():
         assert _listed_test_count(command) > 0, command
 
 
+def test_iso_25010_expected_gate_selector_expressions_match_documented_rows_exactly():
+    text = MATRIX.read_text(encoding="utf-8")
+    assert set(EXPECTED_GATE_SELECTOR_EXPRESSIONS) == set(CHARACTERISTICS)
+    for characteristic, expected_exprs in EXPECTED_GATE_SELECTOR_EXPRESSIONS.items():
+        actual_exprs = _characteristic_selector_exprs(text, characteristic)
+        assert actual_exprs == expected_exprs, (
+            f"{characteristic}: expected {expected_exprs}, got {actual_exprs}"
+        )
+
+
+def test_iso_25010_expected_binary_gate_selectors_are_documented_and_nonempty():
+    text = MATRIX.read_text(encoding="utf-8")
+    for characteristic, selectors in EXPECTED_NONEMPTY_BINARY_GATE_SELECTORS.items():
+        selector_exprs = _characteristic_selector_exprs(text, characteristic)
+        for entry in selectors:
+            selector = entry["selector"]
+            assert any(selector in expr for expr in selector_exprs), (
+                f"{characteristic}: {selector}"
+            )
+            tests = _listed_tests(entry["command"])
+            assert tests, f"{characteristic}: {selector}"
+
+
 def test_iso_25010_heavy_surveillance_selector_count_is_pinned():
     text = MATRIX.read_text(encoding="utf-8")
     commands = [
@@ -114,5 +213,7 @@ if __name__ == "__main__":
     test_iso_25010_matrix_references_existing_repo_gates()
     test_iso_25010_matrix_keeps_gates_actionable()
     test_iso_25010_nextest_release_gate_selectors_are_nonempty()
+    test_iso_25010_expected_gate_selector_expressions_match_documented_rows_exactly()
+    test_iso_25010_expected_binary_gate_selectors_are_documented_and_nonempty()
     test_iso_25010_heavy_surveillance_selector_count_is_pinned()
     print("iso 25010 quality matrix check: OK")

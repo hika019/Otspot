@@ -19,6 +19,13 @@ use super::{finalize_cut, is_binary, row_lists, CutRow, MAX_CUTS_PER_ROUND};
 
 /// Minimum cover cardinality (a 1-element cover gives the trivial `x_j ≤ 0`).
 const MIN_COVER_SIZE: usize = 2;
+/// Skip lifted-cover separation on very wide rows: sequential up-lifting runs
+/// one value-indexed DP per non-cover variable, so uncapped support can stall
+/// root cuts before branch-and-bound starts.
+const KNAPSACK_LIFT_MAX_SUPPORT: usize = 256;
+/// Skip lifting when the value-indexed DP state would grow beyond this many
+/// value slots. This bounds both runtime and `minw` allocation size.
+const KNAPSACK_LIFT_MAX_DP_VALUES: i64 = 4_096;
 /// Cap on the cut-support size for the debug-only exhaustive validity check.
 const KNAPSACK_VALIDITY_BRUTE_FORCE_LIMIT: usize = 18;
 
@@ -27,6 +34,20 @@ const KNAPSACK_VALIDITY_BRUTE_FORCE_LIMIT: usize = 18;
 struct KItem {
     weight: f64,
     coeff: i64,
+}
+
+fn knapsack_dp_value_slots(items: &[KItem]) -> Option<i64> {
+    items
+        .iter()
+        .try_fold(0i64, |sum, it| sum.checked_add(it.coeff.max(0)))?
+        .checked_add(1)
+}
+
+fn knapsack_dp_fits_value_slot_cap(items: &[KItem]) -> bool {
+    matches!(
+        knapsack_dp_value_slots(items),
+        Some(slots) if slots <= KNAPSACK_LIFT_MAX_DP_VALUES
+    )
 }
 
 /// Max `Σ value` over a 0-1 knapsack with capacity `cap`, via a value-indexed DP
@@ -107,6 +128,10 @@ fn separate_lifted_cover(
     x_star: &[f64],
     frac_tol: f64,
 ) -> Option<CutRow> {
+    if row.len() > KNAPSACK_LIFT_MAX_SUPPORT {
+        return None;
+    }
+
     // Greedy cover by LP value descending (small 1−x* first ⇒ most violated).
     let mut order: Vec<usize> = (0..row.len()).collect();
     order.sort_by(|&i, &j| {
@@ -155,6 +180,9 @@ fn separate_lifted_cover(
     let mut non_cover: Vec<usize> = (0..row.len()).filter(|&i| !in_cover[i]).collect();
     non_cover.sort_by(|&i, &j| row[j].1.total_cmp(&row[i].1));
     for &idx in &non_cover {
+        if !knapsack_dp_fits_value_slot_cap(&lift_set) {
+            return None;
+        }
         let (var, weight) = row[idx];
         let z = match knapsack_max_value(&lift_set, b - weight) {
             Some(z) => z,
@@ -321,5 +349,104 @@ mod tests {
             assert_eq!(dp, brute, "DP != brute force at cap={cap}");
         }
         assert_eq!(knapsack_max_value(&items, -1.0), None);
+    }
+
+    #[test]
+    fn knapsack_dp_value_slot_cap_allows_exact_boundary() {
+        let at_cap = [KItem {
+            weight: 1.0,
+            coeff: KNAPSACK_LIFT_MAX_DP_VALUES - 1,
+        }];
+        assert_eq!(
+            knapsack_dp_value_slots(&at_cap),
+            Some(KNAPSACK_LIFT_MAX_DP_VALUES)
+        );
+        assert!(knapsack_dp_fits_value_slot_cap(&at_cap));
+
+        let beyond_cap = [KItem {
+            weight: 1.0,
+            coeff: KNAPSACK_LIFT_MAX_DP_VALUES,
+        }];
+        assert_eq!(
+            knapsack_dp_value_slots(&beyond_cap),
+            Some(KNAPSACK_LIFT_MAX_DP_VALUES + 1)
+        );
+        assert!(!knapsack_dp_fits_value_slot_cap(&beyond_cap));
+    }
+
+    #[test]
+    fn lifted_cover_skips_oversized_support() {
+        let n = KNAPSACK_LIFT_MAX_SUPPORT + 1;
+        let rows = vec![0usize; n];
+        let cols: Vec<usize> = (0..n).collect();
+        let vals = vec![1.0; n];
+        let a = crate::sparse::CscMatrix::from_triplets(&rows, &cols, &vals, 1, n).unwrap();
+        let lp = LpProblem::new_general(
+            vec![-1.0; n],
+            a,
+            vec![n as f64 - 1.5],
+            vec![ConstraintType::Le],
+            vec![(0.0, 1.0); n],
+            None,
+        )
+        .unwrap();
+        let mask = vec![true; n];
+        let x_star = vec![0.5; n];
+
+        let cuts = generate_lifted_knapsack_cover_cuts(&lp, &mask, &x_star);
+        assert!(
+            cuts.is_empty(),
+            "oversized lifted-cover rows must be skipped to bound DP work"
+        );
+    }
+
+    #[test]
+    fn lifted_cover_skips_when_dp_value_space_exceeds_cap() {
+        let cover_len = 65usize;
+        let beta_0 = (cover_len - 1) as i64;
+        let lifts_before_guard = (KNAPSACK_LIFT_MAX_DP_VALUES / beta_0) as usize + 1;
+        let non_cover_len = lifts_before_guard + 1;
+        let n = cover_len + non_cover_len;
+        assert!(n <= KNAPSACK_LIFT_MAX_SUPPORT);
+
+        let b = cover_len as f64 - 0.5;
+        let mut row = Vec::with_capacity(n);
+        let mut rows = Vec::with_capacity(n);
+        let mut cols = Vec::with_capacity(n);
+        let mut vals = Vec::with_capacity(n);
+        for j in 0..cover_len {
+            row.push((j, 1.0));
+            rows.push(0usize);
+            cols.push(j);
+            vals.push(1.0);
+        }
+        for j in cover_len..n {
+            row.push((j, b));
+            rows.push(0usize);
+            cols.push(j);
+            vals.push(b);
+        }
+
+        let a = crate::sparse::CscMatrix::from_triplets(&rows, &cols, &vals, 1, n).unwrap();
+        let lp = LpProblem::new_general(
+            vec![-1.0; n],
+            a,
+            vec![b],
+            vec![ConstraintType::Le],
+            vec![(0.0, 1.0); n],
+            None,
+        )
+        .unwrap();
+        let mut x_star = vec![0.75; n];
+        x_star[..cover_len].fill(1.0);
+
+        let dp_slots_at_guard = beta_0 + lifts_before_guard as i64 * beta_0 + 1;
+        assert!(dp_slots_at_guard > KNAPSACK_LIFT_MAX_DP_VALUES);
+
+        let cut = separate_lifted_cover(&lp, &row, b, &x_star, feas_rel_tol());
+        assert!(
+            cut.is_none(),
+            "lifting must stop before allocating an oversized value-indexed DP"
+        );
     }
 }

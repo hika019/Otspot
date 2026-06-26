@@ -28,7 +28,7 @@ Requires Rust (edition 2021, stable).
 
 ```toml
 [dependencies]
-otspot = "0.6"
+otspot = "0.7"
 ```
 
 ```bash

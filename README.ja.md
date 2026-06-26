@@ -28,7 +28,7 @@ MILP / 凸MIQP: branch-and-bound。
 
 ```toml
 [dependencies]
-otspot = "0.6"
+otspot = "0.7"
 ```
 
 ```bash
