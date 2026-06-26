@@ -46,11 +46,7 @@ fn column_signature(a: &CscMatrix, c: &[f64], j: usize) -> ColumnSignature {
     // CSC rows within a column are stored ascending, so the list is canonical.
     for k in a.col_ptr()[j]..a.col_ptr()[j + 1] {
         let v = a.values()[k];
-        // Entries below ZERO_TOL are dropped, so two columns differing only by
-        // sub-ZERO_TOL coefficients group together. The induced row-LHS swap is
-        // < ZERO_TOL — below the solver's numerical-zero threshold — so this is a
-        // deliberate, negligible relaxation of the exact-automorphism test.
-        if v.abs() >= ZERO_TOL {
+        if v != 0.0 {
             col.push((a.row_ind()[k], coef_bits(v)));
         }
     }
@@ -214,6 +210,32 @@ mod tests {
         .unwrap();
         let milp = MilpProblem::new(lp, vec![0, 1]).unwrap();
         assert!(binary_orbits(&milp).is_empty());
+    }
+
+    /// Coefficients retained by CSC must participate in the signature.
+    #[test]
+    fn drop_tol_to_zero_tol_gap_coefficient_is_not_symmetric() {
+        const GAP_COEF: f64 = crate::tolerances::DROP_TOL * 100.0;
+        assert!(GAP_COEF > crate::tolerances::DROP_TOL);
+        assert!(GAP_COEF < ZERO_TOL);
+
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, 1.0, GAP_COEF], 2, 2).unwrap();
+        assert_eq!(a.nnz(), 3);
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![1.0, 1.0],
+            vec![ConstraintType::Le, ConstraintType::Le],
+            vec![(0.0, 1.0), (0.0, 1.0)],
+            None,
+        )
+        .unwrap();
+        let milp = MilpProblem::new(lp, vec![0, 1]).unwrap();
+
+        assert!(binary_orbits(&milp).is_empty());
+        let out = break_symmetry(&milp);
+        assert_eq!(out.lp.num_constraints, 2);
     }
 
     /// Non-binary integer variables (and presolve-fixed binaries) are excluded.

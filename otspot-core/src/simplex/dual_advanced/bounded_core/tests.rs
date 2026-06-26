@@ -2313,4 +2313,3 @@ fn phase2_primal_degenerate_lp_converges() {
         -sum_cap
     );
 }
-
