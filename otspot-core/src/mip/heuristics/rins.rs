@@ -68,9 +68,7 @@ pub(crate) fn run_rins(
     // integer_vars were already validated on the original; num_vars unchanged.
     let sub_problem = MilpProblem::new(sub_lp, problem.integer_vars.clone()).ok()?;
 
-    let mut sub_cfg = cfg.clone();
-    sub_cfg.max_nodes = RINS_NODE_LIMIT;
-    sub_cfg.rins_enabled = false;
+    let sub_cfg = rins_sub_config(cfg);
 
     let mut sub_opts = parent_opts.clone();
     sub_opts.timeout_secs = Some(sub_timeout);
@@ -104,6 +102,15 @@ fn remaining_budget(deadline: &Option<Instant>) -> f64 {
             if now >= *d { 0.0 } else { (*d - now).as_secs_f64() }
         }
     }
+}
+
+fn rins_sub_config(cfg: &MipConfig) -> MipConfig {
+    let mut sub_cfg = cfg.clone();
+    sub_cfg.max_nodes = RINS_NODE_LIMIT;
+    sub_cfg.rins_enabled = false;
+    sub_cfg.rens_enabled = false;
+    sub_cfg.local_branching_enabled = false;
+    sub_cfg
 }
 
 #[cfg(test)]
@@ -199,6 +206,23 @@ mod tests {
         let result = crate::mip::solve_milp(&problem, &opts, &cfg);
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!(result.objective < -2.9, "obj={}", result.objective);
+    }
+
+    #[test]
+    fn rins_sub_config_disables_nested_primal_heuristics() {
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            rins_enabled: true,
+            rens_enabled: true,
+            local_branching_enabled: true,
+            ..MipConfig::default()
+        };
+
+        let sub_cfg = rins_sub_config(&cfg);
+        assert_eq!(sub_cfg.max_nodes, RINS_NODE_LIMIT);
+        assert!(!sub_cfg.rins_enabled);
+        assert!(!sub_cfg.rens_enabled);
+        assert!(!sub_cfg.local_branching_enabled);
     }
 
     #[test]

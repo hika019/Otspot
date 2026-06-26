@@ -1083,11 +1083,12 @@ pub(crate) fn separate_tree_cuts(
     // Accept only a meaningful tightening over the node's existing bound. The
     // returned result carries no warm-start basis (its augmented layout would not
     // match child node solves, which use the original constraint structure).
-    let res = accepted?;
+    let mut res = accepted?;
     let scale = 1.0_f64.max(base_obj.abs());
     if res.objective <= base_obj + MIN_TREE_CUT_GAIN_REL * scale {
         return None;
     }
+    res.warm_start_basis = None;
     Some(res)
 }
 
