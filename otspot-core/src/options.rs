@@ -1,12 +1,4 @@
 //! Solver configuration parameters.
-//!
-//! [`SolverOptions`] controls simplex and IPM solver behaviour: tolerances,
-//! iteration limits, refactorisation frequency, and algorithm selection.
-//!
-//! ## Solver-specific options
-//!
-//! IPM-specific parameters live in [`IpmOptions`], accessed via
-//! [`SolverOptions::ipm`].
 
 use crate::tolerances::*;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -39,14 +31,6 @@ impl std::error::Error for OptionsError {}
 // ---- Enum / simple struct types ---------------------------------------
 
 /// Dual simplex leaving (depart) strategy.
-///
-/// `SteepestEdge`: Forrest-Goldfarb 1992 Dual Steepest Edge (default).
-/// Maintains weight γ_i = ||(B^{-1})_{i,:}||² and maximises
-/// score = x_B\[i\]² / γ_i.  Typical 3-10× speed-up (HiGHS/CPLEX) at the cost
-/// of one extra FTRAN per iteration.
-///
-/// `MostInfeasible`: select the most negative x_B\[i\] (Dantzig rule).
-/// Stable but inflates iteration count on large problems.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DualPricing {
@@ -84,23 +68,14 @@ pub struct WarmStartBasis {
 }
 
 /// QP IP-PMM interior-point warm-start data.
-///
-/// Passes the optimal (x, y, μ) from a parent B&B node as the starting point
-/// on the central path for the child node.  LP warm-start uses basis indices
-/// ([`WarmStartBasis`]); QP warm-start uses a central-path point.
-///
-/// Convention:
-/// - `x`: length = n (primal)
-/// - `y`: length = m (dual, user sign convention; Ge constraints inverted internally)
-/// - `mu`: barrier parameter ≈ sᵀy / m_ineq of the parent final iterate
-///
-/// Interior corrections (μ floor / x bound margin / y positivity) are applied
-/// on entry so boundary or zero values are safe to pass.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct QpWarmStart {
+    /// Primal point, length = number of original variables.
     pub x: Vec<f64>,
+    /// Constraint duals in user sign convention.
     pub y: Vec<f64>,
+    /// Parent barrier estimate; entry code repairs boundary values.
     pub mu: f64,
 }
 
@@ -112,20 +87,14 @@ impl QpWarmStart {
 }
 
 /// Extended LP warm-start.
-///
-/// Superset of [`WarmStartBasis`]: accepts (x, y, basis) from an external
-/// solver and lands simplex at that point.  Takes priority over `warm_start`.
-///
-/// Convention:
-/// - `basis`: length = m_ext (standard-form rows), each value < n_total.
-///   Size mismatch: logged and dropped (not silently ignored).
-/// - `x_orig`: length = problem.num_vars (original variable space)
-/// - `y_orig`: length = problem.num_constraints (original constraint space, user sign)
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct LpWarmStart {
+    /// Standard-form basis indices, length = extended row count.
     pub basis: Vec<usize>,
+    /// Optional original-space primal point.
     pub x_orig: Option<Vec<f64>>,
+    /// Optional original-space constraint duals in user sign convention.
     pub y_orig: Option<Vec<f64>>,
 }
 
@@ -144,19 +113,6 @@ pub enum StartStrategy {
 }
 
 /// Multi-start local search user-facing config.
-///
-/// Solves `n_starts` independent IPM problems from different starting points
-/// and returns the best objective.  Improves escape rate on non-convex QPs
-/// and supplies incumbents for spatial B&B.
-///
-/// **User-controlled (pub fields):**
-/// - `n_starts`: parallelism / hit probability
-/// - `seed`: reproducibility (`0` is internally clamped to 1 to avoid LCG lock)
-/// - `strategy`: sampling strategy
-///
-/// `n_starts == 1`: single cold solve (existing behaviour).
-/// `n_starts >= 2`: start #0 = cold, #1..n = random (warm_start_qp.x injected).
-/// All starts share the same deadline.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct MultiStartConfig {
@@ -183,24 +139,11 @@ pub enum BranchingStrategy {
 }
 
 /// Defaults for [`GlobalOptimizationConfig`].
-///
-/// - `DEFAULT_GLOBAL_GAP_TOL = 1e-3`: Phase 3 interval-arithmetic bounds are
-///   loose; tightening to 1e-6 causes node explosion.  Phase 4 (α-BB) can tighten.
-/// - `DEFAULT_GLOBAL_MAX_DEPTH = 20`: tree depth cap (2^20 ≈ 1 M nodes).
-/// - `DEFAULT_GLOBAL_MAX_NODES = 10_000`: node budget (~1 IPM solve per node).
 pub const DEFAULT_GLOBAL_GAP_TOL: f64 = 1e-3;
 pub const DEFAULT_GLOBAL_MAX_DEPTH: usize = 20;
 pub const DEFAULT_GLOBAL_MAX_NODES: usize = 10_000;
 
 /// Spatial Branch-and-Bound config for global QP optimisation.
-///
-/// Set [`SolverOptions::global_optimization`] and call `solve_qp_global`
-/// explicitly.  `solve_qp_with` does **not** dispatch to this path (prevents
-/// accidental wall-time blow-up for existing users).
-///
-/// Rules:
-/// - `gap_tol > 0`: relative gap = |UB − LB| / max(1, |UB|)
-/// - `max_depth >= 1`, `max_nodes >= 1`
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct GlobalOptimizationConfig {
@@ -253,36 +196,17 @@ pub enum MipBranching {
 }
 
 /// Defaults for [`MipConfig`].
-///
-/// - `DEFAULT_MIP_GAP_TOL = 1e-6`: tighter than spatial B&B (1e-3) because LP/QP
-///   relaxations give exact lower bounds.
-/// - `DEFAULT_INTEGER_FEAS_TOL = 1e-6`: integrality threshold.
-/// - `DEFAULT_MIP_MAX_NODES = 1_000_000`: safety cap (deadline is primary cutoff).
-/// - `DEFAULT_MIP_MAX_DEPTH = 1_000`: depth cap.
 pub const DEFAULT_MIP_GAP_TOL: f64 = 1e-6;
 pub const DEFAULT_INTEGER_FEAS_TOL: f64 = 1e-6;
 pub const DEFAULT_MIP_MAX_NODES: usize = 1_000_000;
 pub const DEFAULT_MIP_MAX_DEPTH: usize = 1_000;
-/// Default root cutting-plane state. OFF for safe introduction: cuts only tighten
-/// the relaxation, so correctness is unchanged either way. Enabled by default:
-/// alternating GMI/MIR rounds tighten the LP bound at the root, shrinking the
-/// B&B tree for most instances with fractional LP optima.
+/// Default root cutting-plane state.
 pub const DEFAULT_MIP_CUTS: bool = true;
-/// `max_cut_rounds == 0` ⇒ use this many root cut rounds (auto). Kept small: most
-/// GMI gain is in the first few rounds, and deep rounds bloat the LP (slowing
-/// every downstream B&B node) for diminishing bound improvement.
+/// Root cut-round count used when `max_cut_rounds == 0`.
 pub const DEFAULT_MAX_CUT_ROUNDS: usize = 5;
-/// Default static symmetry-breaking state. OFF for safe introduction: detection
-/// only groups *exactly* interchangeable binary columns (a comparatively rare
-/// structure), and the added lex-leader rows perturb node counts on the tuned
-/// benchmark suite. Correctness is unconditional — the rows never cut a true
-/// optimum — so enable it for highly symmetric models (assignment / packing /
-/// identical-machine scheduling).
+/// Default static symmetry-breaking state.
 pub const DEFAULT_MIP_SYMMETRY: bool = false;
-/// Default in-tree cut separation state. ON: re-separating GMI/MIR at selected
-/// B&B nodes tightens deep node relaxations the root cuts miss, shrinking the
-/// tree. Like root cuts it only removes fractional points, so correctness is
-/// unchanged either way.
+/// Default in-tree cut separation state.
 pub const DEFAULT_MIP_TREE_CUTS: bool = true;
 
 /// MILP/MIQP branch-and-bound config.
@@ -302,18 +226,13 @@ pub struct MipConfig {
     pub max_depth: usize,
     pub branching: MipBranching,
     /// Generate Gomory Mixed-Integer cuts at the root before branch-and-bound.
-    /// Cuts tighten the LP relaxation without removing any integer-feasible point,
-    /// so the optimum is unchanged; they reduce the search tree. Default OFF
-    /// (see [`DEFAULT_MIP_CUTS`]).
     pub cuts: bool,
     /// Maximum root cut-generation rounds. `0` ⇒ [`DEFAULT_MAX_CUT_ROUNDS`].
     /// Each round re-solves the LP and adds GMI cuts from the fractional basic
     /// integer variables; rounds stop early when no fractional source remains or
     /// the LP bound stops improving.
     pub max_cut_rounds: usize,
-    /// Re-separate GMI/MIR cuts at selected branch-and-bound nodes (not just the
-    /// root). Cuts are node-local and filtered through a violation/orthogonality/
-    /// aging pool. Default ON (see [`DEFAULT_MIP_TREE_CUTS`]).
+    /// Re-separate GMI/MIR cuts at selected branch-and-bound nodes.
     pub tree_cuts: bool,
     /// Enable the RINS heuristic inside branch-and-bound.
     /// Automatically set to `false` in sub-MIP calls to prevent recursive RINS.
@@ -325,16 +244,8 @@ pub struct MipConfig {
     /// (see [`DEFAULT_MIP_SYMMETRY`]).
     pub symmetry: bool,
     /// Enable the RENS (Relaxation Enforced Neighborhood Search) heuristic.
-    /// Rounds a node LP relaxation by fixing integral components and restricting
-    /// fractional ones to `{floor, ceil}`, then solves the small sub-MIP for a
-    /// feasible incumbent. Default ON: it only ever discovers feasible points and
-    /// never changes the proven optimum. Set to `false` in sub-MIP calls to
-    /// prevent recursion.
     pub rens_enabled: bool,
-    /// Enable the local-branching primal heuristic. Around an incumbent, adds a
-    /// Hamming-distance ≤ k cut on the binary variables and solves the
-    /// neighborhood sub-MIP to improve the incumbent. Default ON (improvement-only,
-    /// optimum-preserving). Set to `false` in sub-MIP calls to prevent recursion.
+    /// Enable the local-branching primal heuristic.
     pub local_branching_enabled: bool,
 }
 
@@ -431,20 +342,6 @@ pub struct IpmOptions {
     #[doc(hidden)]
     pub kkt_memory_budget_bytes: Option<usize>,
     /// Extended-precision iterative refinement using TwoFloat accumulation.
-    ///
-    /// When `true`, the postsolve pipeline runs an additional opt-in IR pass
-    /// that maintains the running solution in TwoFloat (~106-bit mantissa),
-    /// accumulating f64 LDL corrections without rounding loss. This can convert
-    /// honest `SuboptimalSolution` results into proven `Optimal` on ill-conditioned
-    /// QPs (e.g. LISWET family, AUG2DCQP) where f64 cancellation in the KKT
-    /// stationarity residual prevents the standard f64 IR from reaching `eps`.
-    ///
-    /// Default: `false`.
-    ///
-    /// The feature preserves the original result unless extended IR improves
-    /// the same composite score used by optimality classification:
-    /// `max(stationarity, primal feasibility, bound violation, complementarity, dual sign)`,
-    /// where complementarity is the max of problem-level and componentwise metrics.
     pub extended_ir: bool,
 }
 
