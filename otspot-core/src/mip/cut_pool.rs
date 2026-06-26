@@ -1,21 +1,14 @@
 //! Cut pool for in-tree MILP separation.
 //!
-//! Holds generated cutting-plane rows (`coeffs · x {>=,<=} rhs`) for a single B&B
-//! node's separation rounds and decides, per round, which cuts to feed into that
-//! node's LP. The pool is **node-local**: in-tree GMI/MIR cuts bake in the node's
-//! branching-tightened bounds and so are valid only within that node's subtree —
-//! reusing them across nodes would slice off globally feasible points (a wrong
-//! optimum). [`super::cuts::separate_tree_cuts`] therefore creates a fresh pool
-//! per node, and aging operates over that node's own rounds. Three filters keep
-//! the pool useful and bounded:
+//! Stores cutting-plane rows for one B&B node and chooses cuts to add each round.
+//! The pool is **node-local**: in-tree GMI/MIR cuts bake in branching-tightened
+//! bounds and are valid only within that node's subtree. Reusing them globally
+//! can remove feasible integer points, so [`super::cuts::separate_tree_cuts`]
+//! creates a fresh pool per node and ages cuts only across that node's rounds.
 //!
-//!   * **violation** — only cuts the current LP point breaches are worth adding;
-//!     an already-satisfied cut does not tighten the relaxation.
-//!   * **orthogonality** — near-parallel cuts carry little independent
-//!     information while inflating the basis and inviting degeneracy, so only one
-//!     of a parallel group is kept.
-//!   * **aging** — a cut not selected for several rounds is evicted so the pool
-//!     does not grow without bound during a node's separation loop.
+//! Filters keep it useful and bounded: violated cuts tighten the relaxation;
+//! near-parallel cuts are skipped to avoid redundant basis pressure; and stale
+//! cuts are evicted after several unselected rounds.
 
 use crate::problem::ConstraintType;
 use crate::tolerances::ZERO_TOL;

@@ -1,29 +1,20 @@
 //! Static structural symmetry breaking for MILP.
 //!
-//! Many MILP models contain *interchangeable* binary variables — columns that
-//! are identical in the objective and in every constraint. Permuting such
-//! variables maps any feasible point to another feasible point with the same
-//! objective, so branch-and-bound wastes effort exploring symmetric subtrees
-//! that are guaranteed to contain equivalent solutions.
+//! Many MILP models contain interchangeable binary variables: columns identical
+//! in the objective and every constraint. Permuting them maps any feasible point
+//! to another with the same objective, so branch-and-bound can waste effort on
+//! equivalent subtrees.
 //!
-//! We detect orbits of interchangeable binaries and break the symmetry with a
-//! static **lex-leader** ordering: within each orbit (in increasing variable
-//! index order) we add `x_i >= x_{i+1}`. This forces the canonical, descending
-//! assignment `1…1 0…0`, leaving exactly one representative of each orbit
-//! feasible.
+//! We detect orbits of interchangeable binaries and add a static lex-leader
+//! ordering `x_i >= x_{i+1}` within each orbit, forcing the canonical descending
+//! assignment `1…1 0…0`.
 //!
-//! ## Correctness
-//!
-//! The ordering rows are valid (they never cut a *true* optimum) because:
-//!
-//! 1. Detection groups two binaries only when their objective coefficients are
-//!    bit-for-bit equal **and** their constraint columns are identical (same set
-//!    of `(row, coefficient)` entries). Swapping two such columns is an exact
-//!    automorphism of the feasible region and objective.
-//! 2. For any feasible assignment of an orbit, sorting its values in descending
-//!    order yields another feasible assignment (by the automorphism) with the
-//!    same objective that satisfies every `x_i >= x_{i+1}`. Hence at least one
-//!    optimal representative of every orbit survives.
+//! Correctness relies on exact grouping: binaries share an orbit only when their
+//! objective coefficients are bit-for-bit equal and their constraint columns have
+//! identical `(row, coefficient)` entries. Swapping such columns is an exact
+//! automorphism, so sorting any feasible orbit assignment in descending order
+//! preserves feasibility and objective value. At least one optimal representative
+//! therefore remains after adding the ordering rows.
 
 use super::problem::MilpProblem;
 use crate::problem::{ConstraintType, LpProblem};

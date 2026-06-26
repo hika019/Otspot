@@ -987,24 +987,20 @@ fn tree_cut_node_selected(depth: usize, node_index: usize) -> bool {
 }
 
 /// Re-separate GMI/MIR cuts from a B&B node's LP relaxation and return a
-/// cut-tightened node result when its bound improves by at least
-/// [`MIN_TREE_CUT_GAIN_REL`], else `None` (keep the original result).
+/// cut-tightened result when its bound improves by at least
+/// [`MIN_TREE_CUT_GAIN_REL`], else `None`.
 ///
-/// **Soundness (node-local).** GMI/MIR cuts derive from the node tableau and
-/// bake in the node's branching-tightened bounds (`accumulate_column` uses the
-/// raised lower / lowered upper bounds), so each cut is valid *only* within this
-/// node's subtree — it can remove integer points that are feasible elsewhere.
-/// Therefore the [`CutPool`] is created fresh **per call** (it only dedups and
-/// orthogonalises within this node's own rounds) and the cut rows are appended
-/// solely to this node's re-solve. They are never stored across nodes nor
-/// propagated to children, which keeps the search globally optimal: the only
-/// thing handed back to B&B is the tightened bound/solution of this node, and
-/// the cuts are valid throughout this node's subtree so that bound is a valid
-/// lower bound for it.
+/// **Soundness (node-local).** GMI/MIR cuts derive from the node tableau and bake
+/// in branching-tightened bounds, so each cut is valid only inside this node's
+/// subtree and may remove integer points feasible elsewhere. [`CutPool`] is
+/// therefore created fresh per call, dedups/orthogonalises only within this
+/// node's rounds, and appends rows solely to this node's re-solve. No cut is
+/// stored across nodes or propagated to children; B&B receives only this node's
+/// tightened bound/solution, which remains a valid lower bound for the subtree.
 ///
-/// `node_lp` is the original relaxation with this node's bounds applied. The loop
-/// mirrors root [`add_root_cuts`] but stays node-local: re-solve → generate →
-/// pool-filter → append (Ge) → re-solve, stopping when the bound stalls.
+/// `node_lp` is the original relaxation with node bounds applied. The loop
+/// mirrors root [`add_root_cuts`] while staying node-local: re-solve → generate
+/// → pool-filter → append (Ge) → re-solve, stopping when the bound stalls.
 pub(crate) fn separate_tree_cuts(
     node_lp: &LpProblem,
     integer_mask: &[bool],

@@ -75,29 +75,23 @@ const BAIL_TRIGGER_MIN: usize = 5_000;
 /// fewer consecutive occurrences are required.
 const STEP_BAIL_RATIO: usize = 10;
 
-/// Revised simplex core: BTRAN → pricing → FTRAN → Harris ratio test →
-/// rank-1 basis update, with on-demand LU refactor.
+/// Revised simplex core with on-demand LU refactor.
 ///
-/// `enable_phase1_cycling_bail` arms the obj+step plateau early-bail
-/// described above; pass `true` only from Primal Phase I.
+/// `enable_phase1_cycling_bail` arms the obj+step plateau early-bail; pass
+/// `true` only from Primal Phase I.
 ///
-/// `art_threshold = Some(t)` enables the Phase I artificial leaving preference in
-/// the ratio test (basis columns `>= t` are artificials, driven out first within
-/// the Harris tie-band); pass `None` from Phase II / non-artificial solves.
+/// `art_threshold = Some(t)` enables Phase I artificial leaving preference:
+/// basis columns `>= t` leave first within the Harris tie-band. Pass `None` from
+/// Phase II / non-artificial solves.
 ///
-/// `enable_cleanup_stall_bail` arms an iteration-based no-progress guard for
-/// crossover cleanup only. The shared primal core normally must keep searching:
-/// a flat Phase II objective may simply mean "near optimum". Crossover cleanup is
-/// different because the caller already has a certificate candidate and can keep
-/// the best recovered vertex if degenerate pivots stop improving the cleanup
-/// merit. Progress is measured by reduced-cost dual infeasibility: Phase II
-/// crossover walks bases at a fixed primal vertex, so `c^T x` is constant and
-/// objective progress is not a valid signal. In Phase I cleanup, removing an
-/// artificial from the basis also counts as structural progress.
+/// `enable_cleanup_stall_bail` is for crossover cleanup only. Shared primal
+/// solves must keep searching because a flat Phase II objective can mean "near
+/// optimum". Cleanup may keep the best recovered vertex when degenerate pivots
+/// stop improving reduced-cost dual infeasibility; Phase I artificial removal
+/// also counts as progress.
 ///
-/// `cleanup_target_df` is a crossover-only certificate target. When set, the
-/// loop restores the best reduced-cost certificate seen so far and returns as
-/// soon as that target is met; ordinary simplex callers pass `None`.
+/// `cleanup_target_df` restores the best certificate seen and returns once the
+/// target is met; ordinary simplex callers pass `None`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     a: &CscMatrix,
