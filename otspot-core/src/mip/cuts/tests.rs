@@ -1345,6 +1345,51 @@ fn tree_cuts_off_does_not_separate() {
 }
 
 #[test]
+fn tree_cut_node_gate_depth_node_boundary_decision_table() {
+    let cases = [
+        // depth gate | node gate | boundary purpose | selected
+        (0, 0, false, "root node: both gates off"),
+        (3, TREE_CUT_NODE_INTERVAL - 1, false, "just below both gates"),
+        (TREE_CUT_DEPTH_INTERVAL, 0, true, "first positive depth multiple"),
+        (0, TREE_CUT_NODE_INTERVAL, true, "first positive node multiple"),
+        (
+            TREE_CUT_DEPTH_INTERVAL,
+            TREE_CUT_NODE_INTERVAL,
+            true,
+            "both gates true",
+        ),
+        (
+            TREE_CUT_DEPTH_INTERVAL * 2,
+            1,
+            true,
+            "later depth multiple with non-gating node",
+        ),
+        (
+            1,
+            TREE_CUT_NODE_INTERVAL * 2,
+            true,
+            "later node multiple with non-gating depth",
+        ),
+    ];
+
+    for (depth, node_index, expected, label) in cases {
+        assert_eq!(
+            tree_cut_node_selected(depth, node_index),
+            expected,
+            "{label}: depth={depth}, node_index={node_index}"
+        );
+    }
+}
+
+#[test]
+fn tree_cut_gate_rejects_zero_depth_zero_node_sentinel() {
+    assert!(
+        !tree_cut_node_selected(TREE_CUT_DEPTH_INTERVAL * 0, TREE_CUT_NODE_INTERVAL * 0),
+        "zero is a numeric multiple, but root separation is intentionally rejected"
+    );
+}
+
+#[test]
 fn separate_tree_cuts_drops_augmented_warm_start_basis() {
     let milp = tree_cut_sentinel_milp();
     let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
