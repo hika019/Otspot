@@ -1384,7 +1384,7 @@ fn tree_cut_node_gate_depth_node_boundary_decision_table() {
 #[test]
 fn tree_cut_gate_rejects_zero_depth_zero_node_sentinel() {
     assert!(
-        !tree_cut_node_selected(TREE_CUT_DEPTH_INTERVAL * 0, TREE_CUT_NODE_INTERVAL * 0),
+        !tree_cut_node_selected(0, 0),
         "zero is a numeric multiple, but root separation is intentionally rejected"
     );
 }
