@@ -216,8 +216,8 @@ mod tests {
     #[test]
     fn drop_tol_to_zero_tol_gap_coefficient_is_not_symmetric() {
         const GAP_COEF: f64 = crate::tolerances::DROP_TOL * 100.0;
-        assert!(GAP_COEF > crate::tolerances::DROP_TOL);
-        assert!(GAP_COEF < ZERO_TOL);
+        const { assert!(GAP_COEF > crate::tolerances::DROP_TOL) };
+        const { assert!(GAP_COEF < ZERO_TOL) };
 
         let a =
             CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, 1.0, GAP_COEF], 2, 2).unwrap();
