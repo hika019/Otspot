@@ -18,7 +18,7 @@
 //! IMPORTANT: the solver returns 1/2 x'Qx + c'x WITHOUT any constant term.
 //! All expected objectives are the internal QP form (no constant offset).
 
-use otspot_core::options::SolverOptions;
+use otspot_core::options::{QpWarmStart, SolverOptions, Tolerance};
 use otspot_core::problem::{ConstraintType, SolveStatus};
 use otspot_core::qp::solve_qp_with;
 use otspot_core::qp::QpProblemError;
@@ -103,7 +103,45 @@ fn hard_qp_assert_model_x(actual: f64, expected: f64, label: &str) {
 }
 
 fn hard_qp_assert_model_route_qp_ipm(route: impl std::fmt::Debug, label: &str) {
-    assert_eq!(format!("{route:?}"), "QpIpm", "{label}: route must be QpIpm");
+    assert_eq!(
+        format!("{route:?}"),
+        "QpIpm",
+        "{label}: route must be QpIpm"
+    );
+}
+
+fn n2_active_le_qp() -> QpProblem {
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+    QpProblem::new(
+        q,
+        vec![-4.0, -2.0],
+        a,
+        vec![2.0],
+        vec![(0.0, 2.0), (0.0, 2.0)],
+        vec![ConstraintType::Le],
+    )
+    .unwrap()
+}
+
+fn assert_n2_active_le_solution(r: &otspot_core::problem::SolverResult, label: &str) {
+    assert_eq!(r.status, SolveStatus::Optimal, "{label}: status");
+    assert_obj(r.objective, -4.5, label);
+    assert_x(r.solution[0], 1.5, label);
+    assert_x(r.solution[1], 0.5, label);
+    let y = r
+        .dual_solution
+        .first()
+        .copied()
+        .expect("active Le dual must be returned");
+    assert!(
+        y >= -EPS_DUAL,
+        "{label}: Le dual must be non-negative, got {y:.3e}"
+    );
+    let kkt_x = 2.0 * r.solution[0] - 4.0 + y;
+    let kkt_y = 2.0 * r.solution[1] - 2.0 + y;
+    assert!(kkt_x.abs() < 5e-4, "{label}: KKT x={kkt_x:.3e}");
+    assert!(kkt_y.abs() < 5e-4, "{label}: KKT y={kkt_y:.3e}");
 }
 
 // ─── EQUIVALENCE PARTITIONING ──────────────────────────────────────────────
@@ -1484,5 +1522,113 @@ fn hard_qp_infeasible_eq_ub_expression_scipy_oracle() {
     assert!(
         matches!(err, ModelError::SolveError(SolveError::Infeasible)),
         "hard_qp_infeasible_eq_ub: expected infeasible, got {err:?}"
+    );
+}
+
+/// DT + pairwise: IPM precision/refinement switches keep the same certified KKT point.
+#[test]
+fn n2_ipm_option_pairwise_flags_preserve_active_le_kkt() {
+    let qp = n2_active_le_qp();
+    let defaults = SolverOptions::default();
+
+    let mut extended_ir = SolverOptions::default();
+    extended_ir.ipm.extended_ir = true;
+
+    let mut dd_ldl_minres_budget = SolverOptions::default();
+    dd_ldl_minres_budget.ipm.dd_ldl = true;
+    dd_ldl_minres_budget.ipm.minres_ir = Some(10);
+    dd_ldl_minres_budget.ipm.kkt_memory_budget_bytes = Some(0);
+
+    let mut tolerance_fast = SolverOptions::default();
+    tolerance_fast.tolerance = Some(Tolerance::Fast);
+    tolerance_fast.ipm.eps = 1e-12;
+    tolerance_fast.ipm.minres_ir = Some(0);
+
+    let cases: [(&str, SolverOptions); 4] = [
+        ("defaults", defaults),
+        ("extended_ir_opt_in", extended_ir),
+        ("dd_ldl_minres_budget_boundaries", dd_ldl_minres_budget),
+        ("tolerance_fast_overrides_ipm_eps", tolerance_fast),
+    ];
+
+    for (label, mut opts) in cases {
+        opts.timeout_secs = Some(10.0);
+        let r = solve_qp_with(&qp, &opts);
+        assert_n2_active_le_solution(&r, label);
+    }
+}
+
+/// BVA + state transition: repaired warm-start values must enter as a valid interior seed.
+#[test]
+fn n2_warm_start_qp_repairs_out_of_box_negative_mu_and_wrong_sign_y() {
+    let qp = n2_active_le_qp();
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(10.0);
+    opts.warm_start_qp = Some(QpWarmStart::new(vec![-100.0, 100.0], vec![-50.0], -1.0));
+
+    let r = solve_qp_with(&qp, &opts);
+    assert_n2_active_le_solution(&r, "warm_start_repair");
+}
+
+/// Classification tree: presolve on/off are equivalent for a fixed-column QP reduction.
+#[test]
+fn n2_presolve_on_off_fixed_column_roundtrip_agree() {
+    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 1.0], 3, 3).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[1.0, 1.0, 1.0], 1, 3).unwrap();
+    let qp = QpProblem::new(
+        q,
+        vec![-4.0, -2.0, 0.0],
+        a,
+        vec![2.25],
+        vec![(0.0, 2.0), (0.0, 2.0), (0.25, 0.25)],
+        vec![ConstraintType::Eq],
+    )
+    .unwrap();
+
+    let mut on = SolverOptions::default();
+    on.presolve = true;
+    on.timeout_secs = Some(10.0);
+    let r_on = solve_qp_with(&qp, &on);
+
+    let mut off = SolverOptions::default();
+    off.presolve = false;
+    off.timeout_secs = Some(10.0);
+    let r_off = solve_qp_with(&qp, &off);
+
+    assert_eq!(r_on.status, SolveStatus::Optimal, "presolve on status");
+    assert_eq!(r_off.status, SolveStatus::Optimal, "presolve off status");
+    assert_obj(r_on.objective, -4.46875, "presolve on objective");
+    assert_obj(r_off.objective, -4.46875, "presolve off objective");
+    for (j, expected) in [1.5, 0.5, 0.25].iter().enumerate() {
+        assert_x(r_on.solution[j], *expected, "presolve on x");
+        assert_x(r_off.solution[j], *expected, "presolve off x");
+    }
+    assert_x(r_on.solution[0], 1.5, "presolve fixed x0");
+    assert_x(r_on.solution[1], 0.5, "presolve fixed x1");
+    assert_x(r_on.solution[2], 0.25, "presolve fixed x2");
+}
+
+/// EP + BVA: feasible boundary and contradictory-bound classes must not blur status.
+#[test]
+fn n2_optimal_vs_infeasible_classification_boundaries() {
+    let r = solve_qp_with(&n2_active_le_qp(), &SolverOptions::default());
+    assert_n2_active_le_solution(&r, "classification_optimal_boundary");
+
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+    let infeasible = QpProblem::new(
+        q,
+        vec![0.0, 0.0],
+        a,
+        vec![3.0],
+        vec![(0.0, 1.0), (0.0, 1.0)],
+        vec![ConstraintType::Eq],
+    )
+    .unwrap();
+    let r_bad = solve_qp_with(&infeasible, &SolverOptions::default());
+    assert_eq!(
+        r_bad.status,
+        SolveStatus::Infeasible,
+        "classification infeasible boundary"
     );
 }
