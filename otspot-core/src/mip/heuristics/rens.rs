@@ -13,8 +13,11 @@ use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use std::time::Instant;
 
-/// Run RENS every this many B&B nodes.
-pub(crate) const RENS_INTERVAL: usize = 200;
+/// Regular RENS cadence once branch-and-bound already has an incumbent.
+///
+/// After the first incumbent, RENS is an improvement heuristic competing with
+/// the main tree search for time, so keep the historical spacing here.
+pub(crate) const RENS_INTERVAL_WITH_INCUMBENT: usize = 200;
 
 /// Node limit for the RENS sub-MIP.
 const RENS_NODE_LIMIT: usize = 2_000;

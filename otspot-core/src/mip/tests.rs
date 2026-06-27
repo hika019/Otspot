@@ -2960,6 +2960,267 @@ fn rins_stats_improvements_le_calls() {
 }
 
 // ---------------------------------------------------------------------------
+// RENS scheduling tests
+// ---------------------------------------------------------------------------
+
+use std::cell::{Cell, RefCell};
+
+struct RensScheduleMock {
+    calls: Cell<usize>,
+    root_bounds: [(f64, f64); 1],
+    int_vars: [usize; 1],
+    responses: RefCell<Vec<Option<SolverResult>>>,
+}
+
+impl RensScheduleMock {
+    fn new(responses: Vec<Option<SolverResult>>) -> Self {
+        Self {
+            calls: Cell::new(0),
+            root_bounds: [(0.0, 1.0)],
+            int_vars: [0],
+            responses: RefCell::new(responses),
+        }
+    }
+}
+
+impl super::Relaxation for RensScheduleMock {
+    fn num_vars(&self) -> usize {
+        1
+    }
+    fn root_bounds(&self) -> &[(f64, f64)] {
+        &self.root_bounds
+    }
+    fn integer_vars(&self) -> &[usize] {
+        &self.int_vars
+    }
+    fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+        unreachable!("RENS scheduling sentinel should not solve node relaxations")
+    }
+    fn run_rens(
+        &self,
+        _x_lp: &[f64],
+        _cfg: &MipConfig,
+        _deadline: &Option<std::time::Instant>,
+        _opts: &SolverOptions,
+    ) -> Option<SolverResult> {
+        self.calls.set(self.calls.get() + 1);
+        self.responses.borrow_mut().remove(0)
+    }
+}
+
+/// The first no-incumbent fractional node gets one immediate RENS try.
+///
+/// If that try succeeds, branch-and-bound now has an incumbent and RENS must
+/// return to the regular cadence immediately rather than keeping a special
+/// short-cycle mode alive.
+#[test]
+fn rens_first_incumbent_success_switches_to_regular_cadence() {
+    let problem = RensScheduleMock::new(vec![
+        Some(SolverResult {
+            status: SolveStatus::Optimal,
+            objective: -1.0,
+            solution: vec![1.0],
+            ..SolverResult::default()
+        }),
+        None,
+    ]);
+    let cfg = MipConfig::default();
+    let mut state = super::MipState::new();
+    let mut stats = super::MipStats::default();
+
+    stats.nodes_processed = 1;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "first fractional node must try RENS immediately"
+    );
+    assert_eq!(
+        stats.rens_calls, 1,
+        "rens_calls counts actual run_rens invocations"
+    );
+    assert_eq!(
+        stats.incumbent_updates, 1,
+        "successful first try must install the incumbent"
+    );
+    assert_eq!(state.incumbent_obj, Some(-1.0));
+    assert!(
+        state.rens_first_incumbent_attempted,
+        "the one-shot flag must be consumed by the first attempt"
+    );
+
+    stats.nodes_processed = 2;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "after the incumbent appears, the next non-cadence node must not re-run RENS"
+    );
+    assert_eq!(stats.rens_calls, 1);
+    assert_eq!(stats.incumbent_updates, 1);
+
+    stats.nodes_processed = super::heuristics::rens::RENS_INTERVAL_WITH_INCUMBENT;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        2,
+        "regular cadence must still trigger RENS later"
+    );
+    assert_eq!(stats.rens_calls, 2);
+    assert_eq!(
+        stats.incumbent_updates, 1,
+        "None must not be counted as an incumbent update"
+    );
+}
+
+/// The no-incumbent one-shot is consumed even when the first attempt fails.
+#[test]
+fn rens_first_incumbent_failure_waits_for_regular_cadence() {
+    let problem = RensScheduleMock::new(vec![None, None]);
+    let cfg = MipConfig::default();
+    let mut state = super::MipState::new();
+    let mut stats = super::MipStats::default();
+
+    stats.nodes_processed = 1;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "first fractional node must consume the one-shot attempt"
+    );
+    assert_eq!(stats.rens_calls, 1);
+    assert_eq!(state.incumbent_obj, None);
+    assert!(state.rens_first_incumbent_attempted);
+
+    stats.nodes_processed = 2;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "failed first-incumbent RENS must not spin on every following node"
+    );
+    assert_eq!(stats.rens_calls, 1);
+
+    stats.nodes_processed = super::heuristics::rens::RENS_INTERVAL_WITH_INCUMBENT;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        2,
+        "failed first try still returns to the regular cadence"
+    );
+    assert_eq!(stats.rens_calls, 2);
+}
+
+/// Starting with an incumbent skips the one-shot path and waits for cadence.
+#[test]
+fn rens_with_incumbent_waits_for_regular_interval() {
+    let problem = RensScheduleMock::new(vec![None]);
+    let cfg = MipConfig::default();
+    let incumbent = SolverResult {
+        status: SolveStatus::Optimal,
+        objective: -1.0,
+        solution: vec![1.0],
+        ..SolverResult::default()
+    };
+    let mut state = super::MipState::new();
+    let mut stats = super::MipStats::default();
+    assert!(
+        state.consider(&incumbent),
+        "fixture should seed the incumbent"
+    );
+    assert!(
+        !state.rens_first_incumbent_attempted,
+        "seeding an incumbent directly must not consume the no-incumbent one-shot"
+    );
+
+    stats.nodes_processed = 1;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        0,
+        "with an incumbent already present, RENS must wait for the regular cadence"
+    );
+    assert_eq!(stats.rens_calls, 0);
+    assert!(
+        !state.rens_first_incumbent_attempted,
+        "regular incumbent-driven scheduling must not touch the no-incumbent one-shot flag"
+    );
+
+    stats.nodes_processed = super::heuristics::rens::RENS_INTERVAL_WITH_INCUMBENT;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "regular cadence must trigger once an incumbent exists"
+    );
+    assert_eq!(stats.rens_calls, 1);
+}
+
+// ---------------------------------------------------------------------------
 // Conflict analysis integration tests
 // ---------------------------------------------------------------------------
 

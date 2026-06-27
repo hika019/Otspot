@@ -1128,11 +1128,24 @@ fn try_rens<R: Relaxation>(
     opts: &SolverOptions,
     rel_sol: &[f64],
 ) {
-    if !cfg.rens_enabled
-        || !stats
+    if !cfg.rens_enabled {
+        return;
+    }
+    let should_try = if state.incumbent_obj.is_none() {
+        if !state.rens_first_incumbent_attempted {
+            state.rens_first_incumbent_attempted = true;
+            true
+        } else {
+            stats
+                .nodes_processed
+                .is_multiple_of(heuristics::rens::RENS_INTERVAL_WITH_INCUMBENT)
+        }
+    } else {
+        stats
             .nodes_processed
-            .is_multiple_of(heuristics::rens::RENS_INTERVAL)
-    {
+            .is_multiple_of(heuristics::rens::RENS_INTERVAL_WITH_INCUMBENT)
+    };
+    if !should_try {
         return;
     }
     stats.rens_calls += 1;
@@ -1485,6 +1498,7 @@ pub(crate) fn reduced_cost_fixing(
 struct MipState {
     incumbent: Option<SolverResult>,
     incumbent_obj: Option<f64>,
+    rens_first_incumbent_attempted: bool,
 }
 
 impl MipState {
@@ -1492,6 +1506,7 @@ impl MipState {
         Self {
             incumbent: None,
             incumbent_obj: None,
+            rens_first_incumbent_attempted: false,
         }
     }
 
