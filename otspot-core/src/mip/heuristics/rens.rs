@@ -10,7 +10,7 @@
 
 use crate::mip::{MilpProblem, MipConfig};
 use crate::options::SolverOptions;
-use crate::problem::{SolveStatus, SolverResult};
+use crate::problem::SolverResult;
 use std::time::Instant;
 
 /// Regular RENS cadence once branch-and-bound already has an incumbent.
@@ -114,15 +114,7 @@ pub(crate) fn run_rens(
     sub_opts.threads = 1;
 
     let result = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
-    if matches!(
-        result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution
-    ) && !result.solution.is_empty()
-    {
-        Some(result)
-    } else {
-        None
-    }
+    super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol)
 }
 
 fn remaining_budget(deadline: &Option<Instant>) -> f64 {
@@ -130,7 +122,11 @@ fn remaining_budget(deadline: &Option<Instant>) -> f64 {
         None => f64::INFINITY,
         Some(d) => {
             let now = Instant::now();
-            if now >= *d { 0.0 } else { (*d - now).as_secs_f64() }
+            if now >= *d {
+                0.0
+            } else {
+                (*d - now).as_secs_f64()
+            }
         }
     }
 }
@@ -195,6 +191,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rens_run_path_accepts_feasible_timeout_incumbent() {
+        let problem = knap2([-1.0, -1.0], 1.0);
+        let cfg = MipConfig::default();
+        let x_lp = vec![0.5, 0.5];
+        super::super::set_next_sub_mip_result(SolverResult {
+            status: crate::problem::SolveStatus::Timeout,
+            objective: -1.0e100,
+            solution: vec![1.0, 0.0],
+            ..SolverResult::default()
+        });
+
+        let result = run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default())
+            .expect("RENS must keep feasible timeout incumbent from sub-MIP");
+
+        assert_eq!(result.solution, vec![1.0, 0.0]);
+        assert_eq!(result.objective, -1.0);
+    }
+
     /// RENS returns `None` when the LP point is already integral (nothing to
     /// enforce — the caller adopts it directly as a leaf).
     ///
@@ -257,8 +272,15 @@ mod tests {
         let result = run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
         let configs = super::super::take_recorded_sub_mip_configs();
 
-        assert!(result.is_some(), "test premise: RENS must call the recursive sub-MIP");
-        assert_eq!(configs.len(), 1, "RENS run path must solve exactly one sub-MIP");
+        assert!(
+            result.is_some(),
+            "test premise: RENS must call the recursive sub-MIP"
+        );
+        assert_eq!(
+            configs.len(),
+            1,
+            "RENS run path must solve exactly one sub-MIP"
+        );
         let sub_cfg = &configs[0];
         assert_eq!(sub_cfg.max_nodes, RENS_NODE_LIMIT);
         assert!(!sub_cfg.rins_enabled, "recursive RINS must be disabled");
@@ -277,7 +299,14 @@ mod tests {
         let x_lp = vec![0.5, 0.5];
         let past = Instant::now() - std::time::Duration::from_secs(1);
         assert!(
-            run_rens(&problem, &x_lp, &cfg, &Some(past), &SolverOptions::default()).is_none(),
+            run_rens(
+                &problem,
+                &x_lp,
+                &cfg,
+                &Some(past),
+                &SolverOptions::default()
+            )
+            .is_none(),
             "RENS must not run after the deadline"
         );
     }

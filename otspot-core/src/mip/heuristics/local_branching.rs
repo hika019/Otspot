@@ -17,7 +17,7 @@
 
 use crate::mip::{MilpProblem, MipConfig};
 use crate::options::SolverOptions;
-use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use crate::problem::{ConstraintType, LpProblem, SolverResult};
 use crate::sparse::CscMatrix;
 use crate::tolerances::INT_ROUND_TOL;
 use std::time::Instant;
@@ -55,7 +55,14 @@ pub(crate) fn run_local_branching(
     deadline: &Option<Instant>,
     parent_opts: &SolverOptions,
 ) -> Option<SolverResult> {
-    local_branching_with_k(problem, x_inc, LOCAL_BRANCHING_K, cfg, deadline, parent_opts)
+    local_branching_with_k(
+        problem,
+        x_inc,
+        LOCAL_BRANCHING_K,
+        cfg,
+        deadline,
+        parent_opts,
+    )
 }
 
 /// Core implementation parameterized by the neighborhood radius `k`, so tests
@@ -115,15 +122,7 @@ fn local_branching_with_k(
     sub_opts.threads = 1;
 
     let result = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
-    if matches!(
-        result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution
-    ) && !result.solution.is_empty()
-    {
-        Some(result)
-    } else {
-        None
-    }
+    super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol)
 }
 
 /// Append the local-branching Hamming-distance row to a copy of `lp`.
@@ -170,8 +169,8 @@ fn augment_with_local_branching_cut(
         }
     }
 
-    let a = CscMatrix::from_triplets(&rows, &cols, &vals, lp.num_constraints + 1, lp.num_vars)
-        .ok()?;
+    let a =
+        CscMatrix::from_triplets(&rows, &cols, &vals, lp.num_constraints + 1, lp.num_vars).ok()?;
 
     let mut b = lp.b.clone();
     b.push(k as f64 - s1_count as f64);
@@ -196,7 +195,11 @@ fn remaining_budget(deadline: &Option<Instant>) -> f64 {
         None => f64::INFINITY,
         Some(d) => {
             let now = Instant::now();
-            if now >= *d { 0.0 } else { (*d - now).as_secs_f64() }
+            if now >= *d {
+                0.0
+            } else {
+                (*d - now).as_secs_f64()
+            }
         }
     }
 }
@@ -255,6 +258,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn local_branching_run_path_accepts_feasible_timeout_incumbent() {
+        let problem = binary_knapsack(vec![-1.0, -1.0, -1.0], 2.0);
+        let cfg = MipConfig::default();
+        let x_inc = vec![1.0, 0.0, 0.0];
+        super::super::set_next_sub_mip_result(SolverResult {
+            status: crate::problem::SolveStatus::Timeout,
+            objective: -1.0e100,
+            solution: vec![1.0, 1.0, 0.0],
+            ..SolverResult::default()
+        });
+
+        let result = run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default())
+            .expect("local branching must keep feasible timeout incumbent from sub-MIP");
+
+        assert_eq!(result.solution, vec![1.0, 1.0, 0.0]);
+        assert_eq!(result.objective, -2.0);
+    }
+
     /// SENTINEL: the local-branching constraint is load-bearing — radius `k`
     /// genuinely restricts the search, it is not silently dropped.
     ///
@@ -268,15 +290,9 @@ mod tests {
         let cfg = MipConfig::default();
         let x_inc = vec![0.0, 0.0, 0.0];
 
-        let res = local_branching_with_k(
-            &problem,
-            &x_inc,
-            1,
-            &cfg,
-            &None,
-            &SolverOptions::default(),
-        )
-        .expect("k=1 neighborhood is feasible (contains the incumbent)");
+        let res =
+            local_branching_with_k(&problem, &x_inc, 1, &cfg, &None, &SolverOptions::default())
+                .expect("k=1 neighborhood is feasible (contains the incumbent)");
         assert!(
             (res.objective - (-1.0)).abs() < 1e-6,
             "k=1 caps improvement at one flip (-1), not the global -3; got {}. \
@@ -292,15 +308,9 @@ mod tests {
         let cfg = MipConfig::default();
         let x_inc = vec![1.0, 0.0, 0.0];
 
-        let res = local_branching_with_k(
-            &problem,
-            &x_inc,
-            0,
-            &cfg,
-            &None,
-            &SolverOptions::default(),
-        )
-        .expect("k=0 neighborhood still contains the incumbent");
+        let res =
+            local_branching_with_k(&problem, &x_inc, 0, &cfg, &None, &SolverOptions::default())
+                .expect("k=0 neighborhood still contains the incumbent");
         assert!(
             (res.objective - (-1.0)).abs() < 1e-6,
             "k=0 must keep the incumbent objective -1; got {}",
@@ -372,8 +382,14 @@ mod tests {
         let x_inc = vec![1.0, 0.0, 0.0];
         let past = Instant::now() - std::time::Duration::from_secs(1);
         assert!(
-            run_local_branching(&problem, &x_inc, &cfg, &Some(past), &SolverOptions::default())
-                .is_none(),
+            run_local_branching(
+                &problem,
+                &x_inc,
+                &cfg,
+                &Some(past),
+                &SolverOptions::default()
+            )
+            .is_none(),
             "local branching must not run after the deadline"
         );
     }

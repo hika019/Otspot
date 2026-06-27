@@ -1,12 +1,9 @@
 use std::fs;
 use std::process::Command;
 
-#[test]
-fn milp_solve_reports_generic_mip_stats_as_key_value_lines() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("tiny_binary.mps");
+fn write_tiny_binary_mps(path: &std::path::Path) {
     fs::write(
-        &path,
+        path,
         r"NAME tiny_binary
 ROWS
  N  obj
@@ -21,6 +18,13 @@ ENDATA
 ",
     )
     .unwrap();
+}
+
+#[test]
+fn milp_solve_reports_generic_mip_stats_as_key_value_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiny_binary.mps");
+    write_tiny_binary_mps(&path);
 
     let output = Command::new(env!("CARGO_BIN_EXE_milp_solve"))
         .arg(&path)

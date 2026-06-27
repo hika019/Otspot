@@ -19,47 +19,18 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("usage: milp_solve <file.mps> [--timeout <secs>] [--eps <tol>] [--no-cuts] [--cut-rounds N]");
-        return ExitCode::from(2);
-    }
-
-    let mut path: Option<String> = None;
-    let mut timeout_secs = 100.0_f64;
-    let mut eps = 1e-6_f64;
-    let mut cuts = true;
-    let mut cut_rounds = 0usize;
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--timeout" => {
-                i += 1;
-                timeout_secs = args[i].parse().expect("--timeout value");
-            }
-            "--eps" => {
-                i += 1;
-                eps = args[i].parse().expect("--eps value");
-            }
-            "--cuts" => cuts = true,
-            "--no-cuts" => cuts = false,
-            "--cut-rounds" => {
-                i += 1;
-                cut_rounds = args[i].parse().expect("--cut-rounds value");
-                cuts = true;
-            }
-            other => path = Some(other.to_string()),
-        }
-        i += 1;
-    }
-
-    let path = match path {
-        Some(p) => p,
-        None => {
-            eprintln!("error: no MPS file given");
+    let cli = match parse_args(std::env::args().skip(1)) {
+        Ok(cli) => cli,
+        Err(message) => {
+            eprintln!("{message}");
             return ExitCode::from(2);
         }
     };
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(cli.timeout_secs);
+    opts.tolerance = Some(Tolerance::Custom(cli.eps));
+    let cfg = mip_config_from_cli(&cli);
+    let path = cli.path;
 
     let milp = match parse_milp_file(Path::new(&path)) {
         Ok(m) => m,
@@ -74,15 +45,6 @@ fn main() -> ExitCode {
     let n_vars = milp.num_vars();
     let n_cons = milp.lp.num_constraints;
     let n_int = milp.integer_vars.len();
-
-    let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(timeout_secs);
-    opts.tolerance = Some(Tolerance::Custom(eps));
-    let mut cfg = MipConfig::default();
-    cfg.gap_tol = eps;
-    cfg.integer_feas_tol = eps;
-    cfg.cuts = cuts;
-    cfg.max_cut_rounds = cut_rounds;
 
     let profile = otspot_core::diag::lp_scale_profile_enabled();
     if profile {
@@ -172,4 +134,116 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CliArgs {
+    path: String,
+    timeout_secs: f64,
+    eps: f64,
+    cuts: bool,
+    cut_rounds: usize,
+}
+
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> {
+    let mut path: Option<String> = None;
+    let mut timeout_secs = 100.0_f64;
+    let mut eps = 1e-6_f64;
+    let mut cuts = true;
+    let mut cut_rounds = 0usize;
+    let args: Vec<String> = args.into_iter().collect();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--timeout" => {
+                i += 1;
+                let value = args.get(i).ok_or("error: --timeout requires a value")?;
+                timeout_secs = value.parse().expect("--timeout value");
+            }
+            "--eps" => {
+                i += 1;
+                let value = args.get(i).ok_or("error: --eps requires a value")?;
+                eps = value.parse().expect("--eps value");
+            }
+            "--cuts" => cuts = true,
+            "--no-cuts" => cuts = false,
+            "--cut-rounds" => {
+                i += 1;
+                let value = args.get(i).ok_or("error: --cut-rounds requires a value")?;
+                cut_rounds = value.parse().expect("--cut-rounds value");
+                cuts = true;
+            }
+            other => path = Some(other.to_string()),
+        }
+        i += 1;
+    }
+
+    let path = path.ok_or_else(|| {
+        "usage: milp_solve <file.mps> [--timeout <secs>] [--eps <tol>] [--no-cuts] [--cut-rounds N]".to_string()
+    })?;
+    Ok(CliArgs {
+        path,
+        timeout_secs,
+        eps,
+        cuts,
+        cut_rounds,
+    })
+}
+
+fn mip_config_from_cli(cli: &CliArgs) -> MipConfig {
+    let mut cfg = MipConfig::default();
+    cfg.gap_tol = cli.eps;
+    cfg.integer_feas_tol = cli.eps;
+    configure_cuts(&mut cfg, cli.cuts, cli.cut_rounds);
+    cfg
+}
+
+fn configure_cuts(cfg: &mut MipConfig, cuts: bool, cut_rounds: usize) {
+    cfg.cuts = cuts;
+    cfg.tree_cuts = cuts;
+    cfg.max_cut_rounds = cut_rounds;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_cuts_disables_root_and_tree_cuts() {
+        let mut cfg = MipConfig::default();
+        cfg.cuts = true;
+        cfg.tree_cuts = true;
+        cfg.max_cut_rounds = 7;
+
+        configure_cuts(&mut cfg, false, 0);
+
+        assert!(!cfg.cuts);
+        assert!(!cfg.tree_cuts);
+        assert_eq!(cfg.max_cut_rounds, 0);
+    }
+
+    #[test]
+    fn no_cuts_cli_option_disables_root_and_tree_cuts() {
+        let cli = parse_args(["tiny.mps".to_string(), "--no-cuts".to_string()]).unwrap();
+        let cfg = mip_config_from_cli(&cli);
+
+        assert!(!cfg.cuts);
+        assert!(!cfg.tree_cuts);
+    }
+
+    #[test]
+    fn cut_rounds_cli_option_reenables_root_and_tree_cuts() {
+        let cli = parse_args([
+            "tiny.mps".to_string(),
+            "--no-cuts".to_string(),
+            "--cut-rounds".to_string(),
+            "3".to_string(),
+        ])
+        .unwrap();
+        let cfg = mip_config_from_cli(&cli);
+
+        assert!(cfg.cuts);
+        assert!(cfg.tree_cuts);
+        assert_eq!(cfg.max_cut_rounds, 3);
+    }
 }

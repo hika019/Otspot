@@ -105,7 +105,7 @@ def _listed_test_count(command):
         text=True,
         capture_output=True,
     )
-    return sum(1 for line in result.stdout.splitlines() if "::" in line)
+    return len(_parse_nextest_list_tests(result.stdout))
 
 
 def _listed_tests(command):
@@ -116,7 +116,20 @@ def _listed_tests(command):
         text=True,
         capture_output=True,
     )
-    return [line for line in result.stdout.splitlines() if "::" in line]
+    return _parse_nextest_list_tests(result.stdout)
+
+
+def _parse_nextest_list_tests(output):
+    tests = []
+    for line in output.splitlines():
+        name = line.strip()
+        if not name or name.startswith("package:") or name.endswith(":"):
+            continue
+        if line[:1].isspace():
+            tests.append(name)
+        elif " " in name and "::" in name.split()[0]:
+            tests.append(name)
+    return tests
 
 
 def _documented_nextest_selector_commands(text):
@@ -165,6 +178,24 @@ def test_iso_25010_matrix_keeps_gates_actionable():
     assert "cargo clippy" in text
 
 
+def test_nextest_list_parser_counts_root_level_tests_without_counting_headers():
+    sample = """
+package: otspot-dev
+diag_lp_simplex_stall_sentinel:
+    detects_stall_at_root
+    honors_timeout_budget
+    simplex::phase_one_recovers
+otspot::diag_lp_simplex_stall_sentinel root_level_from_full_output
+"""
+    expected = [
+        "detects_stall_at_root",
+        "honors_timeout_budget",
+        "simplex::phase_one_recovers",
+        "otspot::diag_lp_simplex_stall_sentinel root_level_from_full_output",
+    ]
+    assert _parse_nextest_list_tests(sample) == expected
+    assert len(_parse_nextest_list_tests(sample)) == 4
+
 def test_iso_25010_nextest_release_gate_selectors_are_nonempty():
     text = MATRIX.read_text(encoding="utf-8")
     commands = list(_documented_nextest_selector_commands(text))
@@ -212,6 +243,7 @@ if __name__ == "__main__":
     test_iso_25010_matrix_covers_product_quality_characteristics()
     test_iso_25010_matrix_references_existing_repo_gates()
     test_iso_25010_matrix_keeps_gates_actionable()
+    test_nextest_list_parser_counts_root_level_tests_without_counting_headers()
     test_iso_25010_nextest_release_gate_selectors_are_nonempty()
     test_iso_25010_expected_gate_selector_expressions_match_documented_rows_exactly()
     test_iso_25010_expected_binary_gate_selectors_are_documented_and_nonempty()
