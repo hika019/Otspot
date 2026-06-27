@@ -351,7 +351,7 @@ impl DiagPostsolve {
 }
 
 /// Clear inactive inequality duals and refit bound duals when doing so improves
-/// the full dual certificate, including complementarity.
+/// the full dual certificate without worsening the duality gap.
 pub(super) fn cleanup_inactive_dual_complementarity(
     orig_problem: &QpProblem,
     final_sol: &mut SolverResult,
@@ -363,11 +363,13 @@ pub(super) fn cleanup_inactive_dual_complementarity(
     }
     let view = build_view(orig_problem, eliminated_cols);
     let before = dual_certificate_residual_max(orig_problem, &view, final_sol);
+    let gap_before = super::compute_duality_gap_rel(orig_problem, final_sol);
     let mut candidate = final_sol.clone();
     crate::qp::zero_inactive_inequality_duals(orig_problem, &mut candidate);
     crate::qp::refit_bound_duals_kkt(orig_problem, &mut candidate, user_eps);
     let after = dual_certificate_residual_max(orig_problem, &view, &candidate);
-    if after.is_finite() && after <= before {
+    let gap_after = super::compute_duality_gap_rel(orig_problem, &candidate);
+    if after.is_finite() && after <= before && gap_after.is_finite() && gap_after <= gap_before {
         *final_sol = candidate;
     }
 }
@@ -1018,6 +1020,56 @@ mod stall_gate_tests {
         );
         assert_eq!(sol.solution, x, "dual cleanup must not move primal x");
         assert!(sol.dual_solution.iter().all(|v| v.abs() < 1e-12));
+    }
+
+    #[test]
+    fn cleanup_rejects_candidate_that_improves_complementarity_but_worsens_gap() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::new(1, 1);
+        let prob = QpProblem::new(
+            q,
+            vec![1.0_f64],
+            a,
+            vec![1.0_f64],
+            vec![(1.0_f64, 3.0_f64)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        let mut sol = SolverResult {
+            solution: vec![2.0_f64],
+            dual_solution: vec![0.0_f64],
+            bound_duals: vec![100.0_f64, 98.0_f64 / 3.0_f64],
+            ..Default::default()
+        };
+        let original = sol.clone();
+        let view = build_view(&prob, &[]);
+        let before = dual_certificate_residual_max(&prob, &view, &sol);
+        let gap_before = super::super::compute_duality_gap_rel(&prob, &sol);
+
+        let mut candidate = sol.clone();
+        crate::qp::zero_inactive_inequality_duals(&prob, &mut candidate);
+        crate::qp::refit_bound_duals_kkt(&prob, &mut candidate, 1e-6);
+        let after = dual_certificate_residual_max(&prob, &view, &candidate);
+        let gap_after = super::super::compute_duality_gap_rel(&prob, &candidate);
+
+        assert!(
+            after < before,
+            "fixture must improve the non-gap certificate ({before:.3e} -> {after:.3e})"
+        );
+        assert!(
+            gap_after > gap_before,
+            "fixture must worsen duality gap ({gap_before:.3e} -> {gap_after:.3e})"
+        );
+
+        cleanup_inactive_dual_complementarity(&prob, &mut sol, &[], 1e-6);
+        assert_eq!(
+            sol.dual_solution, original.dual_solution,
+            "gap-worsening cleanup candidate must be rejected"
+        );
+        assert_eq!(
+            sol.bound_duals, original.bound_duals,
+            "gap-worsening bound-dual refit must be rejected"
+        );
     }
 
     /// Convergence case unchanged: a well-conditioned Eq QP whose dual starts
