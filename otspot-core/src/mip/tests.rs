@@ -3026,9 +3026,10 @@ fn rens_first_incumbent_success_switches_to_regular_cadence() {
     ]);
     let cfg = MipConfig::default();
     let mut state = super::MipState::new();
-    let mut stats = super::MipStats::default();
-
-    stats.nodes_processed = 1;
+    let mut stats = super::MipStats {
+        nodes_processed: 1,
+        ..Default::default()
+    };
     super::try_rens(
         &problem,
         &mut stats,
@@ -3103,9 +3104,10 @@ fn rens_first_incumbent_failure_waits_for_regular_cadence() {
     let problem = RensScheduleMock::new(vec![None, None]);
     let cfg = MipConfig::default();
     let mut state = super::MipState::new();
-    let mut stats = super::MipStats::default();
-
-    stats.nodes_processed = 1;
+    let mut stats = super::MipStats {
+        nodes_processed: 1,
+        ..Default::default()
+    };
     super::try_rens(
         &problem,
         &mut stats,
@@ -3171,7 +3173,10 @@ fn rens_with_incumbent_waits_for_regular_interval() {
         ..SolverResult::default()
     };
     let mut state = super::MipState::new();
-    let mut stats = super::MipStats::default();
+    let mut stats = super::MipStats {
+        nodes_processed: 1,
+        ..Default::default()
+    };
     assert!(
         state.consider(&incumbent),
         "fixture should seed the incumbent"
@@ -3181,7 +3186,6 @@ fn rens_with_incumbent_waits_for_regular_interval() {
         "seeding an incumbent directly must not consume the no-incumbent one-shot"
     );
 
-    stats.nodes_processed = 1;
     super::try_rens(
         &problem,
         &mut stats,
