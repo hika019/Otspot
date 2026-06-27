@@ -21,8 +21,8 @@ use crate::tolerances::any_nonfinite;
 pub(crate) use duality_gap::compute_duality_gap_rel;
 use eps_tighten::tighten_ipm_eps_for_presolve_scale;
 use post_processing::{
-    allow_primal_projection, kkt_already_passes, refine_krylov_and_projection,
-    refine_post_processing,
+    allow_primal_projection, cleanup_inactive_dual_complementarity, kkt_already_passes,
+    refine_krylov_and_projection, refine_post_processing,
 };
 use postsolve_dual::{refine_postsolve_dual_lsq, refine_postsolve_recovery};
 use warm_start::translate_warm_start_for_presolve;
@@ -266,6 +266,14 @@ fn run_ipm_with(
     // satisfies the original stationarity Qx + z + c = 0 unconditionally.
     if !final_sol.solution.is_empty() && orig_problem.num_constraints == 0 && ipm_made_progress {
         crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol, opts.ipm_eps());
+    }
+    if ipm_made_progress {
+        cleanup_inactive_dual_complementarity(
+            orig_problem,
+            &mut final_sol,
+            &eliminated_cols,
+            opts.ipm_eps(),
+        );
     }
 
     let view = ProblemView {

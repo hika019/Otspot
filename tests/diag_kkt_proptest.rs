@@ -788,6 +788,54 @@ fn nonconvex_qp_strategy_constrained(nmax: usize, mmax: usize) -> impl Strategy<
     })
 }
 
+fn ci_nonconvex_constrained_kkt_repro_qp() -> QpProblem {
+    let q = CscMatrix::from_triplets(
+        &[0, 1, 2, 0, 1, 2, 0, 1, 2],
+        &[0, 0, 0, 1, 1, 1, 2, 2, 2],
+        &[
+            0.4180730178857338,
+            -0.3388321916091331,
+            -0.11128811645712924,
+            -0.3388321916091331,
+            -0.998339628454278,
+            0.7899096104935973,
+            -0.11128811645712924,
+            0.7899096104935973,
+            0.16528704821825724,
+        ],
+        3,
+        3,
+    )
+    .expect("q");
+    let a = CscMatrix::from_triplets(
+        &[0, 2, 2, 1, 2],
+        &[0, 0, 1, 2, 2],
+        &[
+            0.20362059179708952,
+            -0.49156994635882434,
+            0.6899251194067307,
+            0.35089945702726577,
+            -0.20609706471316191,
+        ],
+        3,
+        3,
+    )
+    .expect("a");
+    QpProblem::new(
+        q,
+        vec![0.9627433629541278, 1.1223543296642184, 0.7793851438408713],
+        a,
+        vec![-2.8845159230823487, -2.3497565244678635, 2.748374601409619],
+        vec![
+            (-2.770611501419692, 2.770611501419692),
+            (-0.8857981031127659, 0.8857981031127659),
+            (-0.9049511230872764, 0.9049511230872764),
+        ],
+        vec![ConstraintType::Ge, ConstraintType::Ge, ConstraintType::Le],
+    )
+    .expect("CI nonconvex constrained QP")
+}
+
 /// 解 status と KKT 残差が一致するかを assert (Optimal のみ強制)。
 fn assert_kkt_when_optimal_lp(
     lp: &LpProblem,
@@ -853,6 +901,34 @@ fn assert_kkt_when_optimal_qp(
         threshold,
     );
     Ok(())
+}
+
+#[test]
+fn ci_nonconvex_constrained_nonconvex_local_has_consistent_kkt() {
+    let qp = ci_nonconvex_constrained_kkt_repro_qp();
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(GLOBAL_TIMEOUT_SECS);
+    let cfg = GlobalOptimizationConfig::default();
+    let res = solve_qp_global(&qp, &opts, &cfg);
+    assert!(
+        matches!(
+            res.status,
+            SolveStatus::NonconvexLocal | SolveStatus::NonconvexGlobal
+        ),
+        "unexpected status {:?}",
+        res.status,
+    );
+    let kkt = compute_qp_kkt_max(&qp, &res.solution, &res.dual_solution, &res.bound_duals);
+    assert!(
+        kkt.is_finite() && kkt < EPS_KKT_NONCONVEX_LOCAL,
+        "status={:?} KKT max={:.3e} >= {:.0e}; x={:?}; y={:?}; bd={:?}",
+        res.status,
+        kkt,
+        EPS_KKT_NONCONVEX_LOCAL,
+        res.solution,
+        res.dual_solution,
+        res.bound_duals,
+    );
 }
 
 // ---- proptest body ----
