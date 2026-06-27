@@ -22,7 +22,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: cache
         with:
           path: data/
