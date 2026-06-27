@@ -126,7 +126,39 @@ timeout_s  = float(os.environ['_MV_TIMEOUT'])
 eps        = float(os.environ['_MV_EPS'])
 
 def parse_otspot(path):
-    d = {'status': 'NA', 'obj': None, 'time': None, 'nodes': None, 'n_int': None}
+    d = {
+        'status': 'NA',
+        'obj': None,
+        'time': None,
+        'nodes': None,
+        'n_int': None,
+        'rens_calls': None,
+        'rens_improvements': None,
+        'rins_calls': None,
+        'rins_improvements': None,
+        'local_branching_calls': None,
+        'local_branching_improvements': None,
+        'tree_cut_rounds': None,
+        'conflict_clauses_learned': None,
+        'conflict_pruned': None,
+        'propagation_pruned': None,
+        'rc_vars_fixed': None,
+    }
+    int_fields = {
+        'nodes',
+        'n_int',
+        'rens_calls',
+        'rens_improvements',
+        'rins_calls',
+        'rins_improvements',
+        'local_branching_calls',
+        'local_branching_improvements',
+        'tree_cut_rounds',
+        'conflict_clauses_learned',
+        'conflict_pruned',
+        'propagation_pruned',
+        'rc_vars_fixed',
+    }
     if not os.path.exists(path):
         return d
     for line in open(path):
@@ -142,11 +174,8 @@ def parse_otspot(path):
         elif k == 'wall_ms':
             try: d['time'] = float(v) / 1000.0
             except ValueError: pass
-        elif k == 'nodes':
-            try: d['nodes'] = int(v)
-            except ValueError: pass
-        elif k == 'n_int':
-            try: d['n_int'] = int(v)
+        elif k in int_fields:
+            try: d[k] = int(v)
             except ValueError: pass
     return d
 
@@ -200,6 +229,9 @@ for name in names:
 csv_path = os.path.join(result_dir, 'results.csv')
 with open(csv_path, 'w') as f:
     f.write('instance,n_int,otspot_status,otspot_obj,otspot_time,otspot_nodes,'
+            'rens_calls,rens_improvements,rins_calls,rins_improvements,'
+            'local_branching_calls,local_branching_improvements,tree_cut_rounds,'
+            'conflict_clauses_learned,conflict_pruned,propagation_pruned,rc_vars_fixed,'
             'highs_status,highs_obj,highs_time,obj_match\n')
     for r in rows:
         o, h = r['o'], r['h']
@@ -208,6 +240,17 @@ with open(csv_path, 'w') as f:
             f"{o['obj']:.6f}" if o['obj'] is not None else 'NA',
             f"{o['time']:.3f}" if o['time'] is not None else 'NA',
             o['nodes'] if o['nodes'] is not None else 'NA',
+            o['rens_calls'] if o['rens_calls'] is not None else 'NA',
+            o['rens_improvements'] if o['rens_improvements'] is not None else 'NA',
+            o['rins_calls'] if o['rins_calls'] is not None else 'NA',
+            o['rins_improvements'] if o['rins_improvements'] is not None else 'NA',
+            o['local_branching_calls'] if o['local_branching_calls'] is not None else 'NA',
+            o['local_branching_improvements'] if o['local_branching_improvements'] is not None else 'NA',
+            o['tree_cut_rounds'] if o['tree_cut_rounds'] is not None else 'NA',
+            o['conflict_clauses_learned'] if o['conflict_clauses_learned'] is not None else 'NA',
+            o['conflict_pruned'] if o['conflict_pruned'] is not None else 'NA',
+            o['propagation_pruned'] if o['propagation_pruned'] is not None else 'NA',
+            o['rc_vars_fixed'] if o['rc_vars_fixed'] is not None else 'NA',
             h['status'],
             f"{h['obj']:.6f}" if h['obj'] is not None else 'NA',
             f"{h['time']:.3f}" if h['time'] is not None else 'NA',

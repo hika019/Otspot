@@ -111,6 +111,23 @@ fn main() -> ExitCode {
     println!("fp_incumbent_found: {}", stats.fp_incumbent_found);
     println!("max_depth: {}", stats.max_depth_seen);
     println!("pruned: {}", stats.pruned);
+    println!("propagation_pruned: {}", stats.propagation_pruned);
+    println!(
+        "conflict_clauses_learned: {}",
+        stats.conflict_clauses_learned
+    );
+    println!("conflict_pruned: {}", stats.conflict_pruned);
+    println!("rc_vars_fixed: {}", stats.rc_vars_fixed);
+    println!("rens_calls: {}", stats.rens_calls);
+    println!("rens_improvements: {}", stats.rens_improvements);
+    println!("rins_calls: {}", stats.rins_calls);
+    println!("rins_improvements: {}", stats.rins_improvements);
+    println!("local_branching_calls: {}", stats.local_branching_calls);
+    println!(
+        "local_branching_improvements: {}",
+        stats.local_branching_improvements
+    );
+    println!("tree_cut_rounds: {}", stats.tree_cut_rounds);
     println!("lp_presolve_us: {}", stats.lp_presolve_us_total);
     println!("lp_solve_us: {}", stats.lp_solve_us_total);
     println!("lp_postsolve_us: {}", stats.lp_postsolve_us_total);
