@@ -53,9 +53,14 @@ ENDATA
         "propagation_pruned",
         "rc_vars_fixed",
     ] {
-        assert!(
-            stdout.contains(&format!("{key}: ")),
-            "missing {key} in stdout:\n{stdout}"
-        );
+        let expected = format!("{key}:");
+        let line = stdout
+            .lines()
+            .find(|line| line.starts_with(&expected))
+            .unwrap_or_else(|| panic!("missing {key} in stdout:\n{stdout}"));
+        let _value: i64 = line[expected.len()..]
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("could not parse integer for {key}: {line}"));
     }
 }
