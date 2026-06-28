@@ -293,7 +293,22 @@ worker_func() {
       } >> "$log"
       echo "[bench_parallel.sh] ワーカー $worker_id: $group_name 外部timeout発火 ($prob_name, ${EXTERNAL_TIMEOUT}s)" >&2
     else
-      echo "$group_name" >> "$FAILED_GROUPS_FILE"
+      echo "$group_name $exit_code" >> "$FAILED_GROUPS_FILE"
+      if ! grep -q "^=== Summary ===" "$log" 2>/dev/null; then
+        local prob_file prob_name error_count=0
+        for prob_file in "$group_dir"/*; do
+          [[ -e "$prob_file" ]] || continue
+          prob_name=$(basename "$prob_file")
+          echo "  $prob_name  ERROR worker_exit=$exit_code" >> "$log"
+          error_count=$(( error_count + 1 ))
+        done
+        {
+          echo ""
+          echo "=== Summary ==="
+          echo "    ERROR: $error_count"
+          echo "    TOTAL: $error_count"
+        } >> "$log"
+      fi
       echo "[bench_parallel.sh] ワーカー $worker_id: $group_name 異常終了 (exit=$exit_code)" >&2
     fi
   done
@@ -314,9 +329,12 @@ done
 
 # 失敗グループ収集
 FAILED_GROUPS=()
+declare -A FAILED_GROUP_EXIT=()
 if [[ -s "$FAILED_GROUPS_FILE" ]]; then
-  while IFS= read -r g; do
-    [[ -n "$g" ]] && FAILED_GROUPS+=("$g")
+  while read -r g exit_code _; do
+    [[ -n "$g" ]] || continue
+    FAILED_GROUPS+=("$g")
+    FAILED_GROUP_EXIT["$g"]="${exit_code:-unknown}"
   done < "$FAILED_GROUPS_FILE"
 fi
 
@@ -346,8 +364,31 @@ PROBLEM_DETAIL_FILE="$TMPDIR_BASE/problem_details.txt"
 for g in $(seq 1 "$TOTAL_GROUPS"); do
   group_name="group_$(printf '%03d' "$g")"
   LOG="$TMPDIR_BASE/${group_name}.log"
+  group_failed=0
+  failed_exit_code=""
+  if [[ -n "${FAILED_GROUP_EXIT[$group_name]:-}" ]]; then
+    group_failed=1
+    failed_exit_code="${FAILED_GROUP_EXIT[$group_name]}"
+  fi
+
   if [[ ! -f "$LOG" ]]; then
     echo "[bench_parallel.sh] 警告: $group_name のログが存在しない" >&2
+  fi
+
+  if [[ $group_failed -eq 1 ]]; then
+    group_file_count=0
+    for prob_file in "$TMPDIR_BASE/$group_name"/*; do
+      [[ -e "$prob_file" ]] || continue
+      prob_name=$(basename "$prob_file")
+      echo "  $prob_name  ERROR worker_exit=${failed_exit_code}" >> "$PROBLEM_DETAIL_FILE"
+      group_file_count=$(( group_file_count + 1 ))
+    done
+    TOTAL_ERROR=$(( TOTAL_ERROR + group_file_count ))
+    TOTAL_PROBLEMS=$(( TOTAL_PROBLEMS + group_file_count ))
+    continue
+  fi
+
+  if [[ ! -f "$LOG" ]]; then
     continue
   fi
 

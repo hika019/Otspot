@@ -77,12 +77,14 @@ cat > "$FAKE_SOLVER_ROOT/scripts/solver_bench.sh" <<'SOL'
 #   slow      → 1s sleep してから PASS（TMPDIR 削除の race を観測しやすくする）
 #   timeout   → exit 124 (gtimeout 強制終了相当)
 #   fail      → exit 7   (真の異常終了相当)
+#   partial   → Summary を一部だけ出して exit 7
 set -u
 mode="${BENCH_TEST_MODE:-ok}"
 echo "[fake] mode=$mode run=${BENCH_TEST_RUN_ID:-}" >&2
 case "$mode" in
   timeout) exit 124 ;;
   fail)    exit 7   ;;
+  partial) prob=$(basename "$(find "$2" -type l -o -type f | head -1)"); echo "  $prob  PASS"; echo "=== Summary ==="; echo "    PASS: 1"; echo "    ERROR: 0"; echo "    TOTAL: 1"; exit 7 ;;
   slow)    sleep "${SLOW_WORKER_SLEEP_S:-5}"; echo "  PASS"; echo "    PASS: 1"; echo "    TOTAL: 1" ;;
   *)
     prob=$(basename "$(find "$2" -type l -o -type f | head -1)")
@@ -226,6 +228,51 @@ else
   echo "  FAIL: FAILED_GROUPS に集約されず" >&2
   FAIL=$((FAIL + 1))
 fi
+ERROR_LINE=$(grep -E "^\s+ERROR:" "$OUT" | head -1 | awk '{print $2}')
+TOTAL_LINE=$(grep -E "^\s+TOTAL:" "$OUT" | head -1 | awk '{print $2}')
+assert_eq "$ERROR_LINE" "3" "異常終了も ERROR に計上"
+assert_eq "$TOTAL_LINE" "3" "異常終了も TOTAL に計上"
+
+# ---------------------------------------------------------------
+echo "=== Test 3b: 異常終了 + partial Summary → 未集計分を ERROR/TOTAL に補完 ==="
+OUT="$TMP_ROOT/t3b.out"
+LOG="$TMP_ROOT/t3b.log"
+export BENCH_TEST_MODE=partial
+SOLVER_DIR="$FAKE_SOLVER_ROOT" \
+bash "$FAKE_BENCH" \
+  --data-dir "$DATA_DIR" \
+  --timeout 5 \
+  --eps 1e-6 \
+  --jobs 1 \
+  --output "$OUT" >"$LOG" 2>&1 || true
+unset BENCH_TEST_MODE
+ERROR_LINE=$(grep -E "^\s+ERROR:" "$OUT" | head -1 | awk '{print $2}')
+TOTAL_LINE=$(grep -E "^\s+TOTAL:" "$OUT" | head -1 | awk '{print $2}')
+assert_eq "$ERROR_LINE" "3" "partial Summary 後の異常終了も ERROR に補完"
+assert_eq "$TOTAL_LINE" "3" "partial Summary 後の異常終了も TOTAL に補完"
+assert_contains "$(cat "$OUT")" "worker_exit=7" "Summary 後の worker 非0終了を detail に明示"
+
+# ---------------------------------------------------------------
+echo "=== Test 3c: solver_bench milp_solve 内部の外部timeout → EXTERNAL_TIMEOUT/TOTAL ==="
+MIP_DATA="$TMP_ROOT/mip_data"
+FAKE_TIMEOUT_DIR="$TMP_ROOT/fake_timeout_bin"
+mkdir -p "$MIP_DATA" "$FAKE_TIMEOUT_DIR"
+: > "$MIP_DATA/p.mps"
+cat > "$FAKE_TIMEOUT_DIR/timeout" <<'FAKE_TIMEOUT'
+#!/bin/bash
+exit 124
+FAKE_TIMEOUT
+chmod +x "$FAKE_TIMEOUT_DIR/timeout"
+MIP_OUT="$TMP_ROOT/t3c.out"
+(
+  cd "$REPO_ROOT" && \
+  _BENCH_PARALLEL_CALLER=1 PATH="$FAKE_TIMEOUT_DIR:$PATH" \
+  bash "$SCRIPT_DIR/solver_bench.sh" milp_solve "$MIP_DATA" --eps 1e-6 --timeout 5
+) > "$MIP_OUT" 2>&1
+MIP_EXT_LINE=$(grep -E "^\s+EXTERNAL_TIMEOUT:" "$MIP_OUT" | head -1 | awk '{print $2}')
+MIP_TOTAL_LINE=$(grep -E "^\s+TOTAL:" "$MIP_OUT" | head -1 | awk '{print $2}')
+assert_eq "$MIP_EXT_LINE" "1" "MIP per-file 外部timeoutを EXTERNAL_TIMEOUT に計上"
+assert_eq "$MIP_TOTAL_LINE" "1" "MIP per-file 外部timeoutを TOTAL に計上"
 
 # ---------------------------------------------------------------
 echo "=== Test 4: per-category aggregation (KKT_FAIL counter + CATEGORY_SUM 整合性) ==="
