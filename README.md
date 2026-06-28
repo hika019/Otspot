@@ -117,8 +117,8 @@ Solve-rate benchmark on standard public sets via the `otspot-dev` benchmark harn
 | Problem type | Set | # | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
 | Feasible LP | Netlib | 109 | 108 optimal, 1 suboptimal | 107 optimal, 1 primal-feasibility fail, 1 suboptimal |
-| Convex QP | Maros–Mészáros | 138 | 121 optimal | 93 optimal |
-| MILP | MIPLIB 2017 small | 20 | 5 optimal, 14/19 normal timeouts, 1 abnormal run | 5 optimal, 13/18 normal timeouts, 2 abnormal runs |
+| Convex QP | Maros–Mészáros | 138 | 121 optimal, 12 suboptimal, 1 mismatch, 4 no-ref | 93 optimal, 42 suboptimal, 1 timeout, 2 no-ref |
+| MILP | MIPLIB 2017 small | 20 | 5 optimal, 13 timeout, 2 error | 5 optimal, 13 timeout, 2 error |
 | Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
@@ -128,7 +128,7 @@ LP: @1e-6 is 108/109 optimal, 0 timeout; the sole miss is `cycle` (SuboptimalSol
 
 QP: @1e-6 is 121/138 optimal, 0 timeout. Misses are 12 SuboptimalSolution, 1 OBJ_MISMATCH (`LISWET7`), and 4 solved-but-unverified cases with no published reference. @1e-8 is 93/138 optimal, with 42 SuboptimalSolution, 1 TIMEOUT (`POWELL20`), and 2 solved-but-unverified cases.
 
-MILP: @1e-6 and @1e-8 both prove 5/20 optimal (`flugpl`, `gr4x6`, `gt2`, `khb05250`, `p0201`). The latest Otspot-only MIPLIB small runs exposed abnormal benchmark exits: @1e-6 `timtab1`; @1e-8 `noswot` and `timtab1`. `bench_parallel.sh` reports abnormal groups outside `TOTAL`, so the normal-result denominators are 19 and 18 respectively; abnormal runs are not counted as solved or as normal timeouts.
+MILP: @1e-6 and @1e-8 both prove 5/20 optimal (`flugpl`, `gr4x6`, `gt2`, `khb05250`, `p0201`). Both runs also report 13 TIMEOUT and 2 ERROR inside `TOTAL`; the ERROR cases are `noswot` and `timtab1` (`no_output_exit=101`).
 
 Reproduce (data is gitignored; see [Benchmark data](#benchmark-data)):
 
@@ -141,7 +141,7 @@ for eps in 1e-6 1e-8; do
   bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps "$eps" --jobs 6 \
        --timeout 1000 --output "/tmp/qp_maros_${eps}.txt"
   bash scripts/bench_parallel.sh --data-dir data/miplib_small --eps "$eps" --jobs 6 \
-       --timeout 1000 --output "/tmp/miplib_small_${eps}.txt"  # exits non-zero if abnormal groups occur
+       --timeout 1000 --output "/tmp/miplib_small_${eps}.txt"  # exits non-zero on ERROR/external timeout
 done
 ```
 

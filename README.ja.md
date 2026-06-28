@@ -115,8 +115,8 @@ let result = solve(&prob);
 | 問題種別 | セット | 問題数 | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
 | 実行可能 LP | Netlib | 109 | 最適解 108、SuboptimalSolution 1 | 最適解 107、PFEAS_FAIL 1、SuboptimalSolution 1 |
-| 凸 QP | Maros–Mészáros | 138 | 最適解 121 | 最適解 93 |
-| MILP | MIPLIB 2017 small | 20 | 最適解 5、通常timeout 14/19、異常終了 1 | 最適解 5、通常timeout 13/18、異常終了 2 |
+| 凸 QP | Maros–Mészáros | 138 | 最適解 121、SuboptimalSolution 12、OBJ_MISMATCH 1、参照値なし 4 | 最適解 93、SuboptimalSolution 42、TIMEOUT 1、参照値なし 2 |
+| MILP | MIPLIB 2017 small | 20 | 最適解 5、TIMEOUT 13、ERROR 2 | 最適解 5、TIMEOUT 13、ERROR 2 |
 | 実行不可能 LP | Netlib | 29 | 正答 29 | 正答 29 |
 | 非有界 LP | 合成 | 12 | 正答 12 | 正答 12 |
 
@@ -126,7 +126,7 @@ LP: @1e-6 は 108/109 最適解、timeout 0。ミスは `cycle` (SuboptimalSolut
 
 QP: @1e-6 は 121/138 最適解、timeout 0。ミスは SuboptimalSolution 12 件、OBJ_MISMATCH 1 件 (`LISWET7`)、公開参照値なしの検査済み 4 件。@1e-8 は 93/138 最適解、SuboptimalSolution 42 件、TIMEOUT 1 件 (`POWELL20`)、公開参照値なしの検査済み 2 件。
 
-MILP: @1e-6 / @1e-8 とも 5/20 最適解（`flugpl`、`gr4x6`、`gt2`、`khb05250`、`p0201`）。最新の Otspot 単体 MIPLIB small 実行では異常終了も露出した: @1e-6 は `timtab1`、@1e-8 は `noswot` と `timtab1`。`bench_parallel.sh` は異常終了グループを `TOTAL` の外に出すため、通常結果の分母はそれぞれ 19 と 18。異常終了は正常なtimeoutや解決済みには数えていない。
+MILP: @1e-6 / @1e-8 とも 5/20 最適解（`flugpl`、`gr4x6`、`gt2`、`khb05250`、`p0201`）。どちらも `TOTAL` 内に TIMEOUT 13 件、ERROR 2 件を計上した。ERROR は `noswot` と `timtab1`（`no_output_exit=101`）。
 
 再現（データは gitignored、[ベンチマークデータ](#ベンチマークデータ)参照）:
 
@@ -139,7 +139,7 @@ for eps in 1e-6 1e-8; do
   bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps "$eps" --jobs 6 \
        --timeout 1000 --output "/tmp/qp_maros_${eps}.txt"
   bash scripts/bench_parallel.sh --data-dir data/miplib_small --eps "$eps" --jobs 6 \
-       --timeout 1000 --output "/tmp/miplib_small_${eps}.txt"  # 異常終了グループがある場合は非ゼロ終了
+       --timeout 1000 --output "/tmp/miplib_small_${eps}.txt"  # ERROR / 外部timeout がある場合は非ゼロ終了
 done
 ```
 
