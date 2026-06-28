@@ -110,31 +110,37 @@ let result = solve(&prob);
 
 ## 性能
 
-標準公開セットでの求解率ベンチ。otspot-dev の `qps_benchmark` harness（shell スクリプト — **`cargo bench` ではない**）で計測、`timeout = 1000s`:
+標準公開セットでの求解率ベンチ。otspot-dev の benchmark harness（shell スクリプト — **`cargo bench` ではない**）で計測、`timeout = 1000s`:
 
-| 問題種別 | セット | 問題数 | @1e-6 |
-|---|---|---:|---|
-| 実行可能 LP | Netlib | 109 | 最適解 108、SuboptimalSolution 1 |
-| 凸 QP | Maros–Mészáros | 138 | 最適解 121 |
-| MILP | MIPLIB 2017 small | 20 | 最適解 5 |
-| 実行不可能 LP | Netlib | 29 | 正答 29 |
-| 非有界 LP | 合成 | 12 | 正答 12 |
+| 問題種別 | セット | 問題数 | @1e-6 | @1e-8 |
+|---|---|---:|---|---|
+| 実行可能 LP | Netlib | 109 | 最適解 108、SuboptimalSolution 1 | 最適解 107、PFEAS_FAIL 1、SuboptimalSolution 1 |
+| 凸 QP | Maros–Mészáros | 138 | 最適解 121 | 最適解 93 |
+| MILP | MIPLIB 2017 small | 20 | 最適解 5、通常timeout 14/19、異常終了 1 | 最適解 5、通常timeout 13/18、異常終了 2 |
+| 実行不可能 LP | Netlib | 29 | 正答 29 | 正答 29 |
+| 非有界 LP | 合成 | 12 | 正答 12 | 正答 12 |
 
 **最適解** = 既知最適値と照合済み（proof-carrying KKT）。`timeout = 1000s`、`jobs = 6` で計測。
 
-LP @1e-6: 108/109 最適解、タイムアウト 0。唯一のミス `cycle` は SuboptimalSolution（simplex core は 0.2s で収束するが postsolve/crossover 段が ~62s 停滞し KKT 証明書を満たさない）。以前タイムアウトしていた `dfl001`・`ken-18` は LP 内点法経路（大規模 LP gate、simplex フォールバック付き）で解決（各 384s、83s）。
+LP: @1e-6 は 108/109 最適解、timeout 0。ミスは `cycle` (SuboptimalSolution)。@1e-8 は 107/109 最適解、timeout 0。ミスは `greenbea` (PFEAS_FAIL) と `cycle` (SuboptimalSolution)。
 
-QP @1e-6: 121/138 最適解、タイムアウト 0。ミス (17): SuboptimalSolution 12 件（`LISWET1/8/9/10/11/12`、`AUG2DCQP`、`QPCBOEI2`、`STADAT1`、`UBH1`、`VALUES`、`YAO`）、OBJ_MISMATCH 1 件（`LISWET7` — 公開 baseline が曖昧で 50% 乖離）、参照値なし 4 件（`DPKLO1`、`QFORPLAN`、`QGFRDXPN`、`QPILOTNO`）。SuboptimalSolution = f64 精度限界で KKT 証明不能。
+QP: @1e-6 は 121/138 最適解、timeout 0。ミスは SuboptimalSolution 12 件、OBJ_MISMATCH 1 件 (`LISWET7`)、公開参照値なしの検査済み 4 件。@1e-8 は 93/138 最適解、SuboptimalSolution 42 件、TIMEOUT 1 件 (`POWELL20`)、公開参照値なしの検査済み 2 件。
 
-MILP @1e-6: 5/20 最適解（flugpl、gr4x6、gt2、khb05250、p0201）。cover/clique/implied-bound カットと reliability 分岐を実装。初期段階であり商用ソルバーには未到達。
+MILP: @1e-6 / @1e-8 とも 5/20 最適解（`flugpl`、`gr4x6`、`gt2`、`khb05250`、`p0201`）。最新の Otspot 単体 MIPLIB small 実行では異常終了も露出した: @1e-6 は `timtab1`、@1e-8 は `noswot` と `timtab1`。`bench_parallel.sh` は異常終了グループを `TOTAL` の外に出すため、通常結果の分母はそれぞれ 19 と 18。異常終了は正常なtimeoutや解決済みには数えていない。
 
 再現（データは gitignored、[ベンチマークデータ](#ベンチマークデータ)参照）:
 
 ```bash
-bash scripts/run_lp_bench.sh  --suite standard --eps 1e-6 --jobs 6 --timeout 1000   # 実行可能 LP (Netlib)
-bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps 1e-6 --jobs 6 \
-     --timeout 1000 --output /tmp/qp_maros.txt                                      # 凸 QP (Maros)
-bash scripts/milp_vs_highs.sh --timeout 1000 --jobs 6                                # MILP (MIPLIB small)
+for eps in 1e-6 1e-8; do
+  bash scripts/run_lp_bench.sh --suite standard --eps "$eps" --jobs 6 --timeout 1000
+  bash scripts/run_lp_bench.sh --suite infeas --eps "$eps" --jobs 6 --timeout 1000
+  bash scripts/bench_parallel.sh --data-dir data/lp_problems_unbounded --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/lp_unbounded_${eps}.txt"
+  bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/qp_maros_${eps}.txt"
+  bash scripts/bench_parallel.sh --data-dir data/miplib_small --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/miplib_small_${eps}.txt"  # 異常終了グループがある場合は非ゼロ終了
+done
 ```
 
 ## テスト

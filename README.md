@@ -111,32 +111,38 @@ let result = solve(&prob);
 
 ## Performance
 
-Solve-rate benchmark on standard public sets via the `otspot-dev` `qps_benchmark` harness
+Solve-rate benchmark on standard public sets via the `otspot-dev` benchmark harness
 (shell scripts — **not** `cargo bench`), `timeout = 1000s`:
 
-| Problem type | Set | # | @ 1e-6 |
-|---|---|---:|---|
-| Feasible LP | Netlib | 109 | 108 optimal, 1 suboptimal |
-| Convex QP | Maros–Mészáros | 138 | 121 optimal |
-| MILP | MIPLIB 2017 small | 20 | 5 optimal |
-| Infeasible LP | Netlib | 29 | 29 certified |
-| Unbounded LP | synthetic | 12 | 12 certified |
+| Problem type | Set | # | @1e-6 | @1e-8 |
+|---|---|---:|---|---|
+| Feasible LP | Netlib | 109 | 108 optimal, 1 suboptimal | 107 optimal, 1 primal-feasibility fail, 1 suboptimal |
+| Convex QP | Maros–Mészáros | 138 | 121 optimal | 93 optimal |
+| MILP | MIPLIB 2017 small | 20 | 5 optimal, 14/19 normal timeouts, 1 abnormal run | 5 optimal, 13/18 normal timeouts, 2 abnormal runs |
+| Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
+| Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
 **Optimal** = verified against known objective (proof-carrying KKT). `timeout = 1000s`, `jobs = 6`.
 
-LP @1e-6: 108/109 optimal, 0 timeout. The sole miss (`cycle`) is SuboptimalSolution: the simplex core converges in 0.2s but the postsolve/crossover phase stalls (~62s) without meeting the KKT certificate. Previously-timing-out `dfl001` and `ken-18` are now solved via the LP interior-point path (large-LP gate with simplex fallback), 384s and 83s respectively.
+LP: @1e-6 is 108/109 optimal, 0 timeout; the sole miss is `cycle` (SuboptimalSolution). @1e-8 is 107/109 optimal, 0 timeout; misses are `greenbea` (PFEAS_FAIL) and `cycle` (SuboptimalSolution).
 
-QP @1e-6: 121/138 optimal, 0 timeout. Misses (17): 12 SuboptimalSolution (`LISWET1/8/9/10/11/12`, `AUG2DCQP`, `QPCBOEI2`, `STADAT1`, `UBH1`, `VALUES`, `YAO`), 1 OBJ_MISMATCH (`LISWET7` — 50% gap to an ambiguous published baseline), 4 solved-but-unverified (no published reference: `DPKLO1`, `QFORPLAN`, `QGFRDXPN`, `QPILOTNO`). SuboptimalSolution = KKT certificate not met at f64 precision.
+QP: @1e-6 is 121/138 optimal, 0 timeout. Misses are 12 SuboptimalSolution, 1 OBJ_MISMATCH (`LISWET7`), and 4 solved-but-unverified cases with no published reference. @1e-8 is 93/138 optimal, with 42 SuboptimalSolution, 1 TIMEOUT (`POWELL20`), and 2 solved-but-unverified cases.
 
-MILP @1e-6: 5/20 proven optimal (flugpl, gr4x6, gt2, khb05250, p0201). Early-stage MIP with cover/clique/implied-bound cuts and reliability branching; not yet competitive with production solvers.
+MILP: @1e-6 and @1e-8 both prove 5/20 optimal (`flugpl`, `gr4x6`, `gt2`, `khb05250`, `p0201`). The latest Otspot-only MIPLIB small runs exposed abnormal benchmark exits: @1e-6 `timtab1`; @1e-8 `noswot` and `timtab1`. `bench_parallel.sh` reports abnormal groups outside `TOTAL`, so the normal-result denominators are 19 and 18 respectively; abnormal runs are not counted as solved or as normal timeouts.
 
 Reproduce (data is gitignored; see [Benchmark data](#benchmark-data)):
 
 ```bash
-bash scripts/run_lp_bench.sh  --suite standard --eps 1e-6 --jobs 6 --timeout 1000   # Feasible LP (Netlib)
-bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps 1e-6 --jobs 6 \
-     --timeout 1000 --output /tmp/qp_maros.txt                                      # Convex QP (Maros)
-bash scripts/milp_vs_highs.sh --timeout 1000 --jobs 6                                # MILP (MIPLIB small)
+for eps in 1e-6 1e-8; do
+  bash scripts/run_lp_bench.sh --suite standard --eps "$eps" --jobs 6 --timeout 1000
+  bash scripts/run_lp_bench.sh --suite infeas --eps "$eps" --jobs 6 --timeout 1000
+  bash scripts/bench_parallel.sh --data-dir data/lp_problems_unbounded --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/lp_unbounded_${eps}.txt"
+  bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/qp_maros_${eps}.txt"
+  bash scripts/bench_parallel.sh --data-dir data/miplib_small --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/miplib_small_${eps}.txt"  # exits non-zero if abnormal groups occur
+done
 ```
 
 ## Tests
