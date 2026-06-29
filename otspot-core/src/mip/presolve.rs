@@ -250,9 +250,7 @@ fn probing_pass(
                     }
                     let new_lb = b0[k].0.min(b1[k].0).max(bounds[k].0);
                     let new_ub = b0[k].1.max(b1[k].1).min(bounds[k].1);
-                    let Some((new_lb, new_ub)) = canonicalize_tightened_bounds(new_lb, new_ub) else {
-                        return None;
-                    };
+                    let (new_lb, new_ub) = canonicalize_tightened_bounds(new_lb, new_ub)?;
                     if (new_lb - bounds[k].0).abs() > ZERO_TOL
                         || (new_ub - bounds[k].1).abs() > ZERO_TOL
                     {
