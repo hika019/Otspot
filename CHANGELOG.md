@@ -4,16 +4,15 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-- LP/QP→LP の未証明解を `Optimal` として返す経路と、MIP tree cut で微小な bound 逆転が panic する問題を修正
+## [0.7.0] - 2026-06-29
 
-## [0.7.0] - 2026-06-25
-
-MIP のカット・分岐強化、LP 感度分析の追加、QP の正当性修正。
+MIP のカット・分岐強化、LP 感度分析の追加、QP/LP の正当性修正。
 
 - BREAKING: `LpProblem::a` の型を `CscMatrix` から `Arc<CscMatrix>` に変更し、B&B のサブ問題複製コストを削減
 - MIP のカットを Cover / Clique / Implied Bound まで拡張し、分岐設定も調整して探索を高速化
 - LP 感度分析 `compute_sensitivity` を追加し、退化した最適基底や有限上界を持つケースの算出も修正
 - QP の LISWET7 で KKT 証明を満たさない解が偽 `Optimal` になる問題を修正
+- LP/QP→LP の未証明解を `Optimal` として返す経路と、MIP tree cut で微小な bound 逆転が panic する問題を修正
 - ベンチマーク: LP 108/109 optimal + 1 SuboptimalSolution、QP 121/138 @1e-6、MILP 5/20 optimal + 15 TIMEOUT + 0 ERROR @1e-6
 
 ## [0.6.0] - 2026-06-24
