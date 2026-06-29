@@ -107,7 +107,7 @@ fn p_box_le() -> MilpProblem {
 }
 
 #[test]
-fn append_ge_rows_normalizes_near_empty_bounds() {
+fn append_ge_rows_snaps_near_empty_integer_bounds_to_integer_point() {
     let mut milp = p_box_le();
     milp.lp.bounds[0] = (1.0 + ZERO_TOL * 0.5, 1.0);
     let cuts = [CutRow {
@@ -115,10 +115,9 @@ fn append_ge_rows_normalizes_near_empty_bounds() {
         rhs: 0.5,
     }];
 
-    let out = append_ge_rows(&milp.lp, &cuts);
+    let out = append_ge_rows_with_integer_mask(&milp.lp, &cuts, &[true, true]);
 
-    assert_eq!(out.bounds[0].0, out.bounds[0].1);
-    assert!(out.bounds[0].0 >= 1.0);
+    assert_eq!(out.bounds[0], (1.0, 1.0));
     assert_eq!(out.num_constraints, milp.lp.num_constraints + 1);
 }
 

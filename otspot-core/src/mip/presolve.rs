@@ -37,15 +37,27 @@ pub struct PresolveSummary {
 }
 
 /// Build CSR row lists from a CSC matrix.
-fn canonicalize_tightened_bounds(lb: f64, ub: f64) -> Option<(f64, f64)> {
+fn canonicalize_tightened_bounds(lb: f64, ub: f64, is_integer: bool) -> Option<(f64, f64)> {
     if lb <= ub {
         return Some((lb, ub));
     }
-    if lb - ub <= ZERO_TOL {
-        let fixed = 0.5 * (lb + ub);
-        Some((fixed, fixed))
+    if lb - ub > ZERO_TOL {
+        return None;
+    }
+    if is_integer {
+        let int_lb = lb.ceil();
+        let int_ub = ub.floor();
+        if int_lb <= int_ub {
+            Some((int_lb, int_ub))
+        } else if (lb - int_ub).abs() <= ZERO_TOL {
+            Some((int_ub, int_ub))
+        } else if (int_lb - ub).abs() <= ZERO_TOL {
+            Some((int_lb, int_lb))
+        } else {
+            None
+        }
     } else {
-        None
+        Some((ub, ub))
     }
 }
 
@@ -250,7 +262,8 @@ fn probing_pass(
                     }
                     let new_lb = b0[k].0.min(b1[k].0).max(bounds[k].0);
                     let new_ub = b0[k].1.max(b1[k].1).min(bounds[k].1);
-                    let (new_lb, new_ub) = canonicalize_tightened_bounds(new_lb, new_ub)?;
+                    let (new_lb, new_ub) =
+                        canonicalize_tightened_bounds(new_lb, new_ub, integer_mask[k])?;
                     if (new_lb - bounds[k].0).abs() > ZERO_TOL
                         || (new_ub - bounds[k].1).abs() > ZERO_TOL
                     {
@@ -820,6 +833,20 @@ mod tests {
             bounds[1].1
         );
         assert!(summary.tightened_by_probing > 0 || summary.tightened_by_propagation > 0);
+    }
+
+    #[test]
+    fn probing_near_empty_integer_bounds_snap_to_integer_point() {
+        let snapped = canonicalize_tightened_bounds(29.0 + ZERO_TOL * 0.5, 29.0, true)
+            .expect("near-empty integer interval should preserve the integer point");
+        assert_eq!(snapped, (29.0, 29.0));
+    }
+
+    #[test]
+    fn probing_near_empty_integer_bounds_without_integer_point_is_infeasible() {
+        assert!(
+            canonicalize_tightened_bounds(29.25, 29.25 - ZERO_TOL * 0.5, true).is_none()
+        );
     }
 
     /// PresolveSummary is returned on a trivial no-constraint instance.

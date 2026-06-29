@@ -237,6 +237,15 @@ pub fn compute_sensitivity(
     let mut obj_ranges = Vec::with_capacity(n_orig);
 
     for j in 0..n_orig {
+        let (lb, ub) = problem.bounds[j];
+        if lb.is_finite() && ub.is_finite() && lb == ub {
+            // A fixed variable contributes only the constant c_j * lb to every
+            // feasible solution, regardless of whether its transformed column
+            // is basic or non-basic.
+            obj_ranges.push((f64::INFINITY, f64::INFINITY));
+            continue;
+        }
+
         let info = &sf.orig_var_info[j];
 
         let basic_entry = info.new_vars.iter().find(|&&(col, _)| is_basic[col]);
@@ -769,6 +778,33 @@ mod tests {
             up
         );
     }
+
+    #[test]
+    fn fixed_variable_obj_ranging_is_unbounded() {
+        // Min 7x + y, x fixed at 3, 0 <= y <= 5, y <= 5.
+        // Changing c_x changes every feasible objective by the same constant
+        // delta * 3, so the allowable objective range for x is unbounded both
+        // downward and upward.
+        let a = CscMatrix::from_triplets(&[0], &[1], &[1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![7.0, 1.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(3.0, 3.0), (0.0, 5.0)],
+            None,
+        )
+        .unwrap();
+        let result = solve_no_presolve(&lp);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!((result.solution[0] - 3.0).abs() < 1e-9, "x must stay fixed");
+        let sens = compute_sensitivity(&lp, &result).expect("basis required");
+
+        let (down, up) = sens.obj_ranges[0];
+        assert!(down.is_infinite() && down.is_sign_positive(), "fixed x down={down}");
+        assert!(up.is_infinite() && up.is_sign_positive(), "fixed x up={up}");
+    }
+
     fn make_bounded_lp_var_at_ub() -> LpProblem {
         // Min -2x1 - x2  s.t. x1 + x2 <= 10 ; 0<=x1<=4, 0<=x2<=7.
         // Optimal x1=4 (at UB), x2=6 (basic), obj=-14.

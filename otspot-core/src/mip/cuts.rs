@@ -148,7 +148,7 @@ pub(crate) fn add_root_cuts(
         if cuts.is_empty() {
             break;
         }
-        let candidate = append_ge_rows(&committed, &cuts);
+        let candidate = append_ge_rows_with_integer_mask(&committed, &cuts, &integer_mask);
         let check = solve_validate(&candidate, options, cut_deadline);
         if check.status != SolveStatus::Optimal {
             break;
@@ -185,7 +185,8 @@ pub(crate) fn add_root_cuts(
             ));
             structural.truncate(budget);
             if !structural.is_empty() {
-                let candidate = append_ge_rows(&committed, &structural);
+                let candidate =
+                    append_ge_rows_with_integer_mask(&committed, &structural, &integer_mask);
                 let check = solve_validate(&candidate, options, cut_deadline);
                 if check.status == SolveStatus::Optimal {
                     committed = candidate;
@@ -195,7 +196,7 @@ pub(crate) fn add_root_cuts(
     }
 
     // Convert added Ge cut rows to Le before handing to B&B.
-    let lp = convert_cuts_to_le(committed, m_orig);
+    let lp = convert_cuts_to_le_with_integer_mask(committed, m_orig, &integer_mask);
 
     let le_check = solve_validate(&lp, options, cut_deadline);
     let final_lp = if le_check.status == SolveStatus::Optimal {
@@ -577,7 +578,16 @@ fn row_lists(a: &CscMatrix, num_rows: usize) -> Vec<Vec<(usize, f64)>> {
     rows
 }
 
+#[cfg(test)]
 fn append_ge_rows(lp: &LpProblem, cuts: &[CutRow]) -> LpProblem {
+    append_ge_rows_with_integer_mask(lp, cuts, &[])
+}
+
+fn append_ge_rows_with_integer_mask(
+    lp: &LpProblem,
+    cuts: &[CutRow],
+    integer_mask: &[bool],
+) -> LpProblem {
     let m_old = lp.num_constraints;
     let n = lp.num_vars;
     let m_new = m_old + cuts.len();
@@ -613,31 +623,54 @@ fn append_ge_rows(lp: &LpProblem, cuts: &[CutRow]) -> LpProblem {
         ctypes.push(ConstraintType::Ge);
     }
 
-    let bounds = normalize_near_empty_bounds(&lp.bounds);
+    let bounds = normalize_near_empty_bounds(&lp.bounds, integer_mask);
     let mut out = LpProblem::new_general(lp.c.clone(), a, b, ctypes, bounds, lp.name.clone())
         .expect("cut-augmented LP is valid");
     out.obj_offset = lp.obj_offset;
     out
 }
 
-fn normalize_near_empty_bounds(bounds: &[(f64, f64)]) -> Vec<(f64, f64)> {
+fn normalize_near_empty_bounds(bounds: &[(f64, f64)], integer_mask: &[bool]) -> Vec<(f64, f64)> {
     bounds
         .iter()
-        .map(|&(lb, ub)| {
+        .enumerate()
+        .map(|(j, &(lb, ub))| {
             if lb <= ub {
                 return (lb, ub);
             }
-            if lb - ub <= ZERO_TOL {
+            if lb - ub > ZERO_TOL {
+                return (lb, ub);
+            }
+            if integer_mask.get(j).copied().unwrap_or(false) {
+                let int_lb = lb.ceil();
+                let int_ub = ub.floor();
+                if int_lb <= int_ub {
+                    (int_lb, int_ub)
+                } else if (lb - int_ub).abs() <= ZERO_TOL {
+                    (int_ub, int_ub)
+                } else if (int_lb - ub).abs() <= ZERO_TOL {
+                    (int_lb, int_lb)
+                } else {
+                    (lb, ub)
+                }
+            } else {
                 let fixed = 0.5 * (lb + ub);
                 (fixed, fixed)
-            } else {
-                (lb, ub)
             }
         })
         .collect()
 }
 
+#[cfg(test)]
 fn convert_cuts_to_le(lp: LpProblem, m_orig: usize) -> LpProblem {
+    convert_cuts_to_le_with_integer_mask(lp, m_orig, &[])
+}
+
+fn convert_cuts_to_le_with_integer_mask(
+    lp: LpProblem,
+    m_orig: usize,
+    integer_mask: &[bool],
+) -> LpProblem {
     if lp.num_constraints == m_orig {
         return lp;
     }
@@ -665,7 +698,7 @@ fn convert_cuts_to_le(lp: LpProblem, m_orig: usize) -> LpProblem {
         ctypes.push(ConstraintType::Le);
     }
 
-    let bounds = normalize_near_empty_bounds(&lp.bounds);
+    let bounds = normalize_near_empty_bounds(&lp.bounds, integer_mask);
     let mut out = LpProblem::new_general(lp.c.clone(), a, b, ctypes, bounds, lp.name.clone())
         .expect("cut-Le LP is valid");
     out.obj_offset = lp.obj_offset;
@@ -1082,7 +1115,7 @@ pub(crate) fn separate_tree_cuts(
                 rhs: c.rhs,
             })
             .collect();
-        let candidate = append_ge_rows(&committed, &rows);
+        let candidate = append_ge_rows_with_integer_mask(&committed, &rows, integer_mask);
         let check = solve_validate(&candidate, options, options.deadline);
         if check.status != SolveStatus::Optimal {
             break;
