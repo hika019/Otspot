@@ -106,6 +106,48 @@ fn p_box_le() -> MilpProblem {
     MilpProblem::new(l, vec![0, 1]).unwrap()
 }
 
+#[test]
+fn append_ge_rows_normalizes_near_empty_bounds() {
+    let mut milp = p_box_le();
+    milp.lp.bounds[0] = (1.0 + ZERO_TOL * 0.5, 1.0);
+    let cuts = [CutRow {
+        coeffs: vec![1.0, 0.0],
+        rhs: 0.5,
+    }];
+
+    let out = append_ge_rows(&milp.lp, &cuts);
+
+    assert_eq!(out.bounds[0].0, out.bounds[0].1);
+    assert!(out.bounds[0].0 >= 1.0);
+    assert_eq!(out.num_constraints, milp.lp.num_constraints + 1);
+}
+
+#[test]
+#[should_panic(expected = "cut-augmented LP is valid")]
+fn append_ge_rows_does_not_scale_away_large_bound_gap() {
+    let mut milp = p_box_le();
+    milp.lp.bounds[0] = (1.0e12 + 1.0, 1.0e12);
+    let cuts = [CutRow {
+        coeffs: vec![1.0, 0.0],
+        rhs: 0.5,
+    }];
+
+    let _ = append_ge_rows(&milp.lp, &cuts);
+}
+
+#[test]
+#[should_panic(expected = "cut-augmented LP is valid")]
+fn append_ge_rows_keeps_material_invalid_bounds_as_error() {
+    let mut milp = p_box_le();
+    milp.lp.bounds[0] = (1.0 + ZERO_TOL * 10.0, 1.0);
+    let cuts = [CutRow {
+        coeffs: vec![1.0, 0.0],
+        rhs: 0.5,
+    }];
+
+    let _ = append_ge_rows(&milp.lp, &cuts);
+}
+
 /// min x+y s.t. 2x+2y>=3, x,y∈[0,3]. Ge constraint ⇒ surplus-slack mapping.
 /// LP opt x+y=1.5 (fractional).
 fn p_box_ge() -> MilpProblem {

@@ -15,7 +15,7 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use otspot_core::options::{SimplexMethod, SolverOptions};
+use otspot_core::options::{SimplexMethod, SolverOptions, Tolerance};
 #[cfg(test)]
 use otspot_core::problem::TimingBreakdown;
 use otspot_core::problem::{ConstraintType, SolveStatus, SolverResult};
@@ -579,6 +579,7 @@ fn main() {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(timeout_secs);
     opts.ipm.eps = eps;
+    opts.tolerance = Some(Tolerance::Custom(eps));
     opts.threads = threads;
     if dual_advanced_mode {
         opts.simplex_method = SimplexMethod::DualAdvanced;

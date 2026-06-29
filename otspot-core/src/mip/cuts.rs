@@ -613,10 +613,28 @@ fn append_ge_rows(lp: &LpProblem, cuts: &[CutRow]) -> LpProblem {
         ctypes.push(ConstraintType::Ge);
     }
 
-    let mut out = LpProblem::new_general(lp.c.clone(), a, b, ctypes, lp.bounds.clone(), lp.name.clone())
+    let bounds = normalize_near_empty_bounds(&lp.bounds);
+    let mut out = LpProblem::new_general(lp.c.clone(), a, b, ctypes, bounds, lp.name.clone())
         .expect("cut-augmented LP is valid");
     out.obj_offset = lp.obj_offset;
     out
+}
+
+fn normalize_near_empty_bounds(bounds: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    bounds
+        .iter()
+        .map(|&(lb, ub)| {
+            if lb <= ub {
+                return (lb, ub);
+            }
+            if lb - ub <= ZERO_TOL {
+                let fixed = 0.5 * (lb + ub);
+                (fixed, fixed)
+            } else {
+                (lb, ub)
+            }
+        })
+        .collect()
 }
 
 fn convert_cuts_to_le(lp: LpProblem, m_orig: usize) -> LpProblem {
@@ -647,7 +665,8 @@ fn convert_cuts_to_le(lp: LpProblem, m_orig: usize) -> LpProblem {
         ctypes.push(ConstraintType::Le);
     }
 
-    let mut out = LpProblem::new_general(lp.c.clone(), a, b, ctypes, lp.bounds.clone(), lp.name.clone())
+    let bounds = normalize_near_empty_bounds(&lp.bounds);
+    let mut out = LpProblem::new_general(lp.c.clone(), a, b, ctypes, bounds, lp.name.clone())
         .expect("cut-Le LP is valid");
     out.obj_offset = lp.obj_offset;
     out

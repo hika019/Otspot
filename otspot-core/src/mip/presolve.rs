@@ -37,6 +37,18 @@ pub struct PresolveSummary {
 }
 
 /// Build CSR row lists from a CSC matrix.
+fn canonicalize_tightened_bounds(lb: f64, ub: f64) -> Option<(f64, f64)> {
+    if lb <= ub {
+        return Some((lb, ub));
+    }
+    if lb - ub <= ZERO_TOL {
+        let fixed = 0.5 * (lb + ub);
+        Some((fixed, fixed))
+    } else {
+        None
+    }
+}
+
 fn build_rows(n: usize, a: &CscMatrix, m: usize) -> Vec<Vec<(usize, f64)>> {
     let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
     for j in 0..n {
@@ -238,9 +250,9 @@ fn probing_pass(
                     }
                     let new_lb = b0[k].0.min(b1[k].0).max(bounds[k].0);
                     let new_ub = b0[k].1.max(b1[k].1).min(bounds[k].1);
-                    if new_lb > new_ub + ZERO_TOL {
+                    let Some((new_lb, new_ub)) = canonicalize_tightened_bounds(new_lb, new_ub) else {
                         return None;
-                    }
+                    };
                     if (new_lb - bounds[k].0).abs() > ZERO_TOL
                         || (new_ub - bounds[k].1).abs() > ZERO_TOL
                     {
