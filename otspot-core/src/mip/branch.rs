@@ -5,10 +5,10 @@ use crate::options::MipBranching;
 
 /// Minimum observation count before a variable uses pseudocosts instead of
 /// strong branching.
-pub(crate) const RELIABILITY_THRESHOLD: u32 = 8;
+pub(crate) const RELIABILITY_THRESHOLD: u32 = 2;
 
 /// Maximum number of strong-branching candidates evaluated per node.
-pub(crate) const MAX_STRONG_BRANCH_CANDIDATES: usize = 10;
+pub(crate) const MAX_STRONG_BRANCH_CANDIDATES: usize = 2;
 
 /// Score mixing parameter μ: `(1-μ)·min + μ·max`.  μ = 1/6 follows Achterberg 2005.
 pub(crate) const PSEUDOCOST_MU: f64 = 1.0 / 6.0;
@@ -346,6 +346,13 @@ mod tests {
     }
 
     #[test]
+    fn default_branching_is_reliability() {
+        // Restored in b95b038: MostFractional caused khb05250 3.4x / p0201 2.6x
+        // regressions; Reliability (reduced params) is overall superior.
+        assert_eq!(MipBranching::default(), MipBranching::Reliability);
+    }
+
+    #[test]
     fn branch_bounds_floor_and_ceil() {
         let parent = vec![(0.0, 5.0), (0.0, 5.0)];
         let (down, up) = branch_bounds(&parent, 0, 2.4);
@@ -460,7 +467,10 @@ mod tests {
         let u = 4.0_f64;
         let expected = (5.0 / 6.0) * d + (1.0 / 6.0) * u;
         let got = pseudocost_score(d, u);
-        assert!((got - expected).abs() < 1e-12, "got={got} expected={expected}");
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "got={got} expected={expected}"
+        );
     }
 
     #[test]
@@ -489,8 +499,7 @@ mod tests {
         let mask = vec![true, true];
         let ivars = vec![0, 1];
         let pc = PseudocostState::new(2);
-        let j =
-            select_branching_variable_reliability(&x, &mask, &ivars, 1e-6, &pc, None);
+        let j = select_branching_variable_reliability(&x, &mask, &ivars, 1e-6, &pc, None);
         assert!(j.is_none());
     }
 
@@ -564,7 +573,10 @@ mod tests {
         // With correct scoring both should have identical scores (same raw gains).
         let score_a = pseudocost_score(1.0, 0.5);
         let score_b = pseudocost_score(1.0, 0.5);
-        assert!((score_a - score_b).abs() < 1e-12, "equal raw gains → equal scores");
+        assert!(
+            (score_a - score_b).abs() < 1e-12,
+            "equal raw gains → equal scores"
+        );
 
         // With double-normalization the most-fractional candidate gets a higher
         // score even though the actual improvement is identical.

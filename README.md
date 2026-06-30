@@ -15,7 +15,8 @@ MILP / convex MIQP: branch-and-bound.
 - **Revised simplex (LP)** — sparse LU, Markowitz-threshold pivoting, steepest-edge pricing
 - **Interior-point (QP)** — Mehrotra predictor–corrector / IP-PMM for convex QP
 - **Non-convex QP (global)** — spatial B&B (α-BB / McCormick); global optimum carries bound-gap certificate, local-only reported as `NonconvexLocal`
-- **Mixed-integer (MILP / convex MIQP)** — branch-and-bound with GMI/MIR cuts, pseudocost branching, RINS, conflict analysis
+- **Mixed-integer (MILP / convex MIQP)** — branch-and-bound with GMI/MIR/cover/clique/implied-bound cuts, reliability branching, RINS, conflict analysis
+- **Sensitivity analysis (LP)** — RHS and objective coefficient ranging
 - **Proof-carrying optimality** — `Optimal` requires full KKT certificate; unprovable solutions are downgraded
 - **Infeasibility / unboundedness certification**
 - **Dual solution output** — dual values, reduced costs, slacks
@@ -27,7 +28,7 @@ Requires Rust (edition 2021, stable).
 
 ```toml
 [dependencies]
-otspot = "0.6"
+otspot = "0.7"
 ```
 
 ```bash
@@ -110,29 +111,38 @@ let result = solve(&prob);
 
 ## Performance
 
-Solve-rate benchmark on standard public sets via the `otspot-dev` `qps_benchmark` harness
+Solve-rate benchmark on standard public sets via the `otspot-dev` benchmark harness
 (shell scripts — **not** `cargo bench`), `timeout = 1000s`:
 
-| Problem type | Set | # | @ 1e-6 | @ 1e-8 |
+| Problem type | Set | # | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
-| Feasible LP | Netlib | 109 | 109 optimal | 105 optimal |
-| Convex QP | Maros–Mészáros | 138 | 121 optimal | 100 optimal |
-| MILP | MIPLIB 2017 small | 20 | 6 optimal | 6 optimal |
+| Feasible LP | Netlib | 109 | 108 optimal, 1 suboptimal | 108 optimal, 1 suboptimal |
+| Convex QP | Maros–Mészáros | 138 | 121 optimal, 12 suboptimal, 1 mismatch, 4 no-ref | 93 optimal, 42 suboptimal, 1 timeout, 2 no-ref |
+| MILP | MIPLIB 2017 small | 20 | 5 optimal, 15 timeout, 0 error | 5 optimal, 15 timeout, 0 error |
 | Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
-**Optimal** = verified against known objective (proof-carrying KKT). Measured on `jobs=8`.
-LP @1e-6: 109/109 optimal (v0.5.2 miss `cycle` resolved). @1e-8: 105 optimal (adds `greenbea` etc.).
-QP misses @1e-6 (17): 11 SuboptimalSolution (LISWET family + `AUG2DCQP`, `QPCBOEI2`, `STADAT1`, `UBH1`, `VALUES`, `YAO` — downgraded when the KKT certificate is not met) + 1 timeout (`LISWET12`) + 1 objective mismatch (`LISWET7`, baseline ambiguous) + 4 solved-but-unverified (no published reference). At `1e-8` the tighter tolerance downgrades 35 to SuboptimalSolution (100 optimal).
-MILP @1e-6 (`timeout=100s`): 6/20 proven optimal (dcmulti, flugpl, gr4x6, gt2, khb05250, p0201). 10 timeout with incumbent, 4 timeout without feasible solution. Early-stage MIP — presolve/cuts/branching are functional but not yet competitive with production solvers.
+**Optimal** = verified against known objective (proof-carrying KKT). `timeout = 1000s`, `jobs = 6`.
+
+LP: @1e-6 is 108/109 optimal, 0 timeout; the sole miss is `cycle` (SuboptimalSolution). @1e-8 is 108/109 optimal, 0 timeout; the sole miss is `greenbea` (SuboptimalSolution after failing the stricter primal proof gate).
+
+QP: @1e-6 is 121/138 optimal, 0 timeout. Misses are 12 SuboptimalSolution, 1 OBJ_MISMATCH (`LISWET7`), and 4 solved-but-unverified cases with no published reference. @1e-8 is 93/138 optimal, with 42 SuboptimalSolution, 1 TIMEOUT (`POWELL20`), and 2 solved-but-unverified cases.
+
+MILP: @1e-6 and @1e-8 both prove 5/20 optimal (`flugpl`, `gr4x6`, `gt2`, `khb05250`, `p0201`). Both runs report 15 TIMEOUT and 0 ERROR inside `TOTAL`; `noswot` and `timtab1` now time out instead of panicking in tree-cut separation.
 
 Reproduce (data is gitignored; see [Benchmark data](#benchmark-data)):
 
 ```bash
-bash scripts/run_lp_bench.sh  --suite standard --eps 1e-6 --jobs 8 --timeout 1000   # Feasible LP (Netlib)
-bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps 1e-6 --jobs 8 \
-     --timeout 1000 --output /tmp/qp_maros.txt                                      # Convex QP (Maros)
-bash scripts/milp_vs_highs.sh --timeout 100 --jobs 6                                 # MILP (MIPLIB small)
+for eps in 1e-6 1e-8; do
+  bash scripts/run_lp_bench.sh --suite standard --eps "$eps" --jobs 6 --timeout 1000
+  bash scripts/run_lp_bench.sh --suite infeas --eps "$eps" --jobs 6 --timeout 1000
+  bash scripts/bench_parallel.sh --data-dir data/lp_problems_unbounded --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/lp_unbounded_${eps}.txt"
+  bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/qp_maros_${eps}.txt"
+  bash scripts/bench_parallel.sh --data-dir data/miplib_small --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/miplib_small_${eps}.txt"  # exits non-zero on ERROR/external timeout
+done
 ```
 
 ## Tests

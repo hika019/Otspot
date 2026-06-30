@@ -1,15 +1,58 @@
 //! Revised simplex core iteration loop.
 
-use crate::basis::{BasisManager, LuBasis};
-use crate::options::SolverOptions;
-use crate::sparse::{CscMatrix, SparseVec};
-use crate::tolerances::{PIVOT_STABILITY_THRESHOLD, PIVOT_TOL};
-use std::sync::atomic::Ordering;
-use super::super::dual_common::{basic_obj, compute_reduced_costs_into, made_progress_with_floor};
+use super::super::dual_common::{
+    basic_obj, compute_reduced_costs_into, made_progress_with_floor,
+    reduced_cost_dual_infeasibility, NO_PROGRESS_MIN,
+};
 use super::super::pricing::PricingStrategy;
 use super::super::trace::IterTrace;
 use super::super::SimplexOutcome;
 use super::ratio_test::select_leaving_feasibility_preserving;
+use crate::basis::{BasisManager, LuBasis};
+use crate::options::SolverOptions;
+use crate::qp::certificate::LP_CERT_TOL;
+use crate::sparse::{CscMatrix, SparseVec};
+use crate::tolerances::{PIVOT_STABILITY_THRESHOLD, PIVOT_TOL};
+use std::sync::atomic::Ordering;
+
+fn cleanup_trace_enabled() -> bool {
+    std::env::var_os("OTSPOT_CLEANUP_TRACE_DETAIL").is_some()
+}
+
+fn cleanup_trace_every() -> usize {
+    std::env::var("OTSPOT_CLEANUP_TRACE_EVERY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(1000)
+}
+
+fn top_reduced_cost_violation(
+    reduced_costs: &[f64],
+    is_basic: &[bool],
+    n_price: usize,
+) -> Option<(usize, f64)> {
+    let limit = n_price.min(reduced_costs.len()).min(is_basic.len());
+    let mut best: Option<(usize, f64)> = None;
+    for j in 0..limit {
+        if is_basic[j] {
+            continue;
+        }
+        let rc = reduced_costs[j];
+        if !rc.is_finite() {
+            return Some((j, rc));
+        }
+        let viol = (-rc).max(0.0);
+        if best.is_none_or(|(_, best_viol)| viol > best_viol) {
+            best = Some((j, viol));
+        }
+    }
+    best
+}
+
+fn made_cleanup_df_progress(best: f64, current: f64, target_df: f64) -> bool {
+    best - current > best.abs().max(target_df) * target_df
+}
 
 /// Primal Phase I cycling early-bail (klein3 origin)。`cold_start_dual` の
 /// Primal Phase I は Bland switch を持たず無限 cycle で half-deadline を焼く。
@@ -32,15 +75,23 @@ const BAIL_TRIGGER_MIN: usize = 5_000;
 /// fewer consecutive occurrences are required.
 const STEP_BAIL_RATIO: usize = 10;
 
-/// Revised simplex core: BTRAN → pricing → FTRAN → Harris ratio test →
-/// rank-1 basis update, with on-demand LU refactor.
+/// Revised simplex core with on-demand LU refactor.
 ///
-/// `enable_phase1_cycling_bail` arms the obj+step plateau early-bail
-/// described above; pass `true` only from Primal Phase I.
+/// `enable_phase1_cycling_bail` arms the obj+step plateau early-bail; pass
+/// `true` only from Primal Phase I.
 ///
-/// `art_threshold = Some(t)` enables the Phase I artificial leaving preference in
-/// the ratio test (basis columns `>= t` are artificials, driven out first within
-/// the Harris tie-band); pass `None` from Phase II / non-artificial solves.
+/// `art_threshold = Some(t)` enables Phase I artificial leaving preference:
+/// basis columns `>= t` leave first within the Harris tie-band. Pass `None` from
+/// Phase II / non-artificial solves.
+///
+/// `enable_cleanup_stall_bail` is for crossover cleanup only. Shared primal
+/// solves must keep searching because a flat Phase II objective can mean "near
+/// optimum". Cleanup may keep the best recovered vertex when degenerate pivots
+/// stop improving reduced-cost dual infeasibility; Phase I artificial removal
+/// also counts as progress.
+///
+/// `cleanup_target_df` restores the best certificate seen and returns once the
+/// target is met; ordinary simplex callers pass `None`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     a: &CscMatrix,
@@ -56,6 +107,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     iter_count_out: &mut usize,
     enable_phase1_cycling_bail: bool,
     art_threshold: Option<usize>,
+    enable_cleanup_stall_bail: bool,
+    cleanup_target_df: Option<f64>,
 ) -> SimplexOutcome {
     let max_iter = usize::MAX; // timeout is the real guard
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
@@ -107,6 +160,20 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let mut best_obj: f64 = basic_obj(c, basis, x_b);
     let mut iters_since_obj_progress: usize = 0;
     let mut iters_since_step_progress: usize = 0;
+    // Crossover cleanup has no Bland switch in the primal core. Treat K as
+    // no-progress patience: if reduced-cost infeasibility cannot improve for
+    // K = max(m, 100) consecutive iterations, assume a degenerate cleanup
+    // cycle and bail to the caller's best-vertex handoff. The global deadline
+    // remains the hard backstop.
+    let cleanup_stall_trigger = m.max(NO_PROGRESS_MIN);
+    let cleanup_trace_detail = cleanup_trace_enabled();
+    let cleanup_trace_every = cleanup_trace_every();
+    let mut cleanup_best_df: Option<f64> = None;
+    let mut cleanup_best_basis: Vec<usize> = basis.to_vec();
+    let mut cleanup_best_x_b: Vec<f64> = x_b.to_vec();
+    let mut cleanup_best_artificials =
+        art_threshold.map(|t| basis.iter().copied().filter(|&col| col >= t).count());
+    let mut cleanup_iters_since_progress: usize = 0;
     // Cycle detection: when a basis repeats, block the entering variable that
     // contributed to the cycle for m/2 iterations. This forces a different
     // pricing path without changing the numerical method, breaking the cycle.
@@ -147,6 +214,119 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             &mut y_dense,
             &mut rc_vec,
         );
+        if enable_cleanup_stall_bail {
+            let current_df = reduced_cost_dual_infeasibility(&rc_vec, &is_basic, n_price);
+            if cleanup_trace_detail && (*iter_count_out).is_multiple_of(cleanup_trace_every) {
+                let top = top_reduced_cost_violation(&rc_vec, &is_basic, n_price);
+                #[allow(clippy::print_stderr)]
+                {
+                    eprintln!(
+                        "[cleanup-detail] iter={} df={:.9e} best={:.9e} top={:?} no_prog={}",
+                        *iter_count_out,
+                        current_df,
+                        cleanup_best_df.unwrap_or(f64::INFINITY),
+                        top,
+                        cleanup_iters_since_progress
+                    );
+                }
+            }
+            let progress_target = cleanup_target_df.unwrap_or(LP_CERT_TOL);
+            let (df_progress, new_best_df) = match cleanup_best_df {
+                Some(best_df) => (
+                    made_cleanup_df_progress(best_df, current_df, progress_target),
+                    current_df < best_df,
+                ),
+                None => (true, true),
+            };
+            if new_best_df {
+                cleanup_best_df = Some(current_df);
+                cleanup_best_basis.copy_from_slice(basis);
+                cleanup_best_x_b.copy_from_slice(x_b);
+            }
+            let artificial_progress = if let (Some(threshold), Some(best_artificials)) =
+                (art_threshold, cleanup_best_artificials.as_mut())
+            {
+                let current_artificials = basis
+                    .iter()
+                    .copied()
+                    .filter(|&col| col >= threshold)
+                    .count();
+                if current_artificials < *best_artificials {
+                    *best_artificials = current_artificials;
+                    cleanup_best_basis.copy_from_slice(basis);
+                    cleanup_best_x_b.copy_from_slice(x_b);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if cleanup_target_df.is_some_and(|target| current_df <= target) {
+                basis.copy_from_slice(&cleanup_best_basis);
+                x_b.copy_from_slice(&cleanup_best_x_b);
+                let obj = basic_obj(c, basis, x_b);
+                return SimplexOutcome::Timeout(obj);
+            }
+
+            if df_progress || artificial_progress {
+                cleanup_iters_since_progress = 0;
+            } else {
+                cleanup_iters_since_progress = cleanup_iters_since_progress.saturating_add(1);
+                if cleanup_iters_since_progress >= cleanup_stall_trigger {
+                    if cleanup_trace_detail {
+                        let fresh_df = match LuBasis::new_timed(
+                            a,
+                            basis,
+                            options.max_etas,
+                            options.deadline,
+                        ) {
+                            Ok(mut fresh_mgr) => {
+                                let mut y_fresh = vec![0.0f64; m];
+                                let mut rc_fresh = vec![0.0f64; n_price];
+                                compute_reduced_costs_into(
+                                    a,
+                                    c,
+                                    &mut fresh_mgr,
+                                    &is_basic,
+                                    n_price,
+                                    basis,
+                                    &mut y_fresh,
+                                    &mut rc_fresh,
+                                );
+                                reduced_cost_dual_infeasibility(&rc_fresh, &is_basic, n_price)
+                            }
+                            Err(_) => f64::NAN,
+                        };
+                        #[allow(clippy::print_stderr)]
+                        {
+                            eprintln!(
+                                "[cleanup-detail] bail iter={} current_df={:.9e} best_df={:.9e} fresh_df={:.9e} top={:?}",
+                                *iter_count_out,
+                                current_df,
+                                cleanup_best_df.unwrap_or(f64::INFINITY),
+                                fresh_df,
+                                top_reduced_cost_violation(&rc_vec, &is_basic, n_price)
+                            );
+                        }
+                    }
+                    basis.copy_from_slice(&cleanup_best_basis);
+                    x_b.copy_from_slice(&cleanup_best_x_b);
+                    for v in is_basic.iter_mut() {
+                        *v = false;
+                    }
+                    for &col in basis.iter() {
+                        is_basic[col] = true;
+                    }
+                    let obj = basic_obj(c, basis, x_b);
+                    if let Some(t) = trace.as_mut() {
+                        t.log_stall_bail(*iter_count_out, obj, cleanup_stall_trigger);
+                    }
+                    return SimplexOutcome::Timeout(obj);
+                }
+            }
+        }
         // Masking RC of blocked columns prevents pricing from re-selecting an
         // entering column known to produce a singular basis from `basis_snapshot`.
         for &j in &blocked_at_basis {
@@ -362,6 +542,10 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             }
         }
         let leaving_col = basis[leaving_row];
+
+        if let Some(t) = trace.as_mut() {
+            t.note_pivot(step.abs(), step_zero_threshold);
+        }
 
         pricing.update_weights(&basis_mgr, entering_col, leaving_col, leaving_row, d);
 

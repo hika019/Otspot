@@ -533,6 +533,11 @@ fn solve_ipm_with_runner(
         v
     };
 
+    opts.schur_hint = Some(crate::qp::ipm_core::ippmm::probe_schur_decision(
+        &presolve_result.reduced,
+        &opts,
+    ));
+
     for &(use_ruiz, tighten) in attempts.iter() {
         if let Some(d) = total_deadline {
             if Instant::now() >= d {
@@ -588,6 +593,7 @@ fn solve_ipm_with_runner(
         .map(|b| outcome_proves_optimal(b, &view, user_eps))
         .unwrap_or(false);
     if !best_ok && presolve_did_ruiz && n_orig <= NO_PRESOLVE_FALLBACK_LIMIT {
+        opts.schur_hint = None;
         let fallback_pre = QpPresolveResult::no_reduction(problem);
         for use_ruiz_fb in [false, true] {
             if total_deadline.is_some_and(|d| Instant::now() >= d) {
@@ -1114,6 +1120,64 @@ mod tests {
         assert!(
             outcome_certificate_score(&outcome, &view, 1e-6) > 0.0,
             "certificate score must include dual-sign failure"
+        );
+    }
+
+    fn runner_extended_ir_dual_sign_invalid_but_metric_clean(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+        _user_eps: f64,
+    ) -> IpmOutcome {
+        IpmOutcome {
+            solution: vec![1.0],
+            dual_solution: vec![-1e-4],
+            bound_duals: vec![0.0, 1.0 + 1e-4],
+            objective: -1.5,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 0.0,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        }
+    }
+
+    #[test]
+    fn solve_runner_extended_ir_still_demotes_dual_sign_invalid_postsolve_outcome() {
+        use crate::problem::ConstraintType;
+
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![-2.0_f64],
+            a,
+            vec![1.0_f64],
+            vec![(0.0_f64, 1.0_f64)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        let mut opts = SolverOptions::default();
+        opts.ipm.eps = 1e-6;
+        opts.ipm.max_iter = 1;
+        opts.ipm.extended_ir = true;
+
+        let (result, _mask) = solve_ipm_with_runner(
+            &prob,
+            &opts,
+            runner_extended_ir_dual_sign_invalid_but_metric_clean,
+        );
+
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::SuboptimalSolution,
+            "extended_ir=true solve path must let prove_optimal demote a metric-clean but dual-sign-invalid postsolve outcome"
         );
     }
 
@@ -2023,6 +2087,90 @@ mod tests {
         assert_eq!(
             user_eps, 1e-6,
             "Q-diagonal scaled runner must receive the external user eps"
+        );
+    }
+
+    /// Sentinel: `opts.schur_hint` is set to `Some(...)` before the main attempt loop,
+    /// then reset to `None` at the start of the no-presolve fallback.
+    ///
+    /// A mock runner records the `schur_hint` seen during the fallback invocation
+    /// (identified by `presolve.ruiz_scaler.is_none()`). The reset ensures the
+    /// fallback IPM re-probes Schur suitability on the original (non-reduced) problem
+    /// rather than reusing the decision from the presolve-reduced problem.
+    ///
+    /// **Sentinel**: removing `opts.schur_hint = None` at line ~596 of
+    /// `solve_ipm_with_runner` causes the fallback runner to see `Some(_)`, making
+    /// `fallback_schur_hint.get()` non-None → this test FAILS.
+    #[test]
+    fn schur_hint_is_reset_before_fallback() {
+        use std::cell::Cell;
+        thread_local! {
+            static FALLBACK_SCHUR_HINT_IS_NONE: Cell<bool> = const { Cell::new(false) };
+            static FALLBACK_REACHED: Cell<bool> = const { Cell::new(false) };
+        }
+
+        fn mock_runner(
+            _: &QpProblem,
+            presolve: &QpPresolveResult,
+            options: &SolverOptions,
+            _user_eps: f64,
+        ) -> IpmOutcome {
+            if presolve.ruiz_scaler.is_none() {
+                FALLBACK_REACHED.with(|c| c.set(true));
+                FALLBACK_SCHUR_HINT_IS_NONE.with(|c| c.set(options.schur_hint.is_none()));
+            }
+            // Always return unproven to force the fallback path to run.
+            IpmOutcome {
+                solution: vec![0.0],
+                dual_solution: vec![],
+                bound_duals: vec![0.0],
+                objective: 0.0,
+                iterations: 1,
+                kkt_residual_rel: 0.0,
+                primal_residual_rel: 0.0,
+                bound_violation: 0.0,
+                complementarity_residual_rel: 0.0,
+                duality_gap_rel: 1e-3,
+                numerical_failure: false,
+                infeasibility_status: None,
+                is_locally_optimal: false,
+                postsolve_krylov_ir_skipped: false,
+                timing: None,
+            }
+        }
+
+        // Use a small convex QP that triggers the no-presolve fallback path:
+        // presolve=true + use_ruiz_scaling=true causes Ruiz scaling, and when the
+        // main attempts do not prove optimal (duality_gap_rel=1e-3 > user_eps), the
+        // fallback is invoked on the original problem (ruiz_scaler=None).
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let mut opts = SolverOptions {
+            presolve: true,
+            use_ruiz_scaling: true,
+            ..SolverOptions::default()
+        };
+        opts.ipm.eps = 1e-6;
+        opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT * 4 + 2;
+        FALLBACK_REACHED.with(|c| c.set(false));
+        FALLBACK_SCHUR_HINT_IS_NONE.with(|c| c.set(false));
+
+        let _ = solve_ipm_with_runner(&prob, &opts, mock_runner);
+
+        assert!(
+            FALLBACK_REACHED.with(|c| c.get()),
+            "no-presolve fallback must be reached for this test to be meaningful"
+        );
+        assert!(
+            FALLBACK_SCHUR_HINT_IS_NONE.with(|c| c.get()),
+            "opts.schur_hint must be None when the no-presolve fallback runner is called"
         );
     }
 }

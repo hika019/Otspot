@@ -264,15 +264,12 @@ pub(crate) fn iterate(
             *slot = 0.0;
         }
         buf.rho[r] = 1.0;
-        let mut rho_sv = SparseVec::from_dense(&buf.rho);
-        basis_mgr.btran(&mut rho_sv);
-        rho_sv.to_dense_into(&mut buf.rho);
+        basis_mgr.btran_dense(&mut buf.rho);
 
         // σ = B^{-1} ρ (needed by DSE after_pivot weight update).
         if needs_sigma {
-            let mut sigma_sv = SparseVec::from_dense(&buf.rho);
-            basis_mgr.ftran(&mut sigma_sv);
-            sigma_sv.to_dense_into(&mut buf.sigma);
+            buf.sigma.copy_from_slice(&buf.rho);
+            basis_mgr.ftran_dense(&mut buf.sigma);
         }
 
         // PRICE trow[j] = ρ^T a_j on non-basic columns.
@@ -518,12 +515,11 @@ pub(crate) fn iterate(
 
 /// FTRAN a column of `a` and dump into `out` (length `m`).
 pub(super) fn ftran_column(a: &CscMatrix, basis_mgr: &mut LuBasis, col: usize, m: usize, out: &mut [f64]) {
+    debug_assert_eq!(out.len(), m);
+    out.fill(0.0);
     let (rows, vals) = a.get_column(col).unwrap();
-    let mut sv = SparseVec {
-        indices: rows.to_vec(),
-        values: vals.to_vec(),
-        len: m,
-    };
-    basis_mgr.ftran(&mut sv);
-    sv.to_dense_into(out);
+    for (i, &row) in rows.iter().enumerate() {
+        out[row] = vals[i];
+    }
+    basis_mgr.ftran_dense(out);
 }

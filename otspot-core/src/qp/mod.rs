@@ -21,7 +21,9 @@ pub(crate) use postsolve::bound_dual::{
 };
 #[cfg(test)]
 pub(crate) use postsolve::postprocess::compute_lsq_dual_y;
-pub(crate) use postsolve::refine::kkt_iterative::{refine_kkt_iterative, refit_bound_duals_kkt};
+pub(crate) use postsolve::refine::kkt_iterative::{
+    refine_kkt_extended_precision, refine_kkt_iterative, refit_bound_duals_kkt,
+};
 pub(crate) use postsolve::refine::lsq::{refine_dual_lsq, refine_dual_lsq_irls};
 pub(crate) use postsolve::refine::primal_lsq::refine_primal_lsq;
 pub(crate) use postsolve::refine::projected_gradient::refine_dual_projected_gradient;

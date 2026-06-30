@@ -10,6 +10,8 @@ use super::certificate::guard_lp_optimal;
 use super::ipm_solver;
 use crate::options::SolverOptions;
 use crate::presolve;
+use crate::qp::ipm_solver::kkt::bound_violation;
+use crate::qp::kkt_resid::f64_impl::primal_residual_rel;
 #[cfg(test)]
 use crate::problem::ConstraintType;
 use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
@@ -287,7 +289,7 @@ fn solve_reduced_lp_from_qp(
             postsolve_us,
             ..raw_timing
         });
-        if postsolved_lp_needs_direct_retry(&lifted)
+        if postsolved_lp_needs_direct_retry(&lifted, original_lp, options)
             && options.deadline.is_none_or(|d| Instant::now() < d)
         {
             let keep_lifted = lifted.clone();
@@ -306,6 +308,9 @@ fn solve_reduced_lp_from_qp(
                     postsolve_us,
                     ..Default::default()
                 });
+                if lp_original_primal_bad(&fallback, original_lp, options.primal_tol) {
+                    fallback.status = SolveStatus::SuboptimalSolution;
+                }
                 return fallback;
             }
             lifted = keep_lifted;
@@ -383,7 +388,7 @@ fn solve_lp_with_ipm_backend(lp: &LpProblem, options: &SolverOptions) -> SolverR
     let mut qp = match QpProblem::new(
         q,
         lp.c.clone(),
-        lp.a.clone(),
+        (*lp.a).clone(),
         lp.b.clone(),
         lp.bounds.clone(),
         lp.constraint_types.clone(),
@@ -508,7 +513,7 @@ fn certify_lp_ipm_with_crossover(
 fn solve_original_lp_direct_retry(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
     let mut retry_opts = options.clone();
     retry_opts.presolve = false;
-    retry_opts.simplex_method = crate::options::SimplexMethod::Primal;
+    retry_opts.simplex_method = crate::options::SimplexMethod::Auto;
     crate::lp::solve_lp_forwarded_from_qp(lp, &retry_opts)
 }
 
@@ -646,14 +651,42 @@ fn lp_reduced_cost_kkt_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -> 
     max_abs
 }
 
-fn postsolved_lp_needs_direct_retry(result: &SolverResult) -> bool {
-    matches!(
+fn lp_original_primal_residuals(result: &SolverResult, original_lp: &LpProblem) -> (f64, f64) {
+    if result.solution.len() != original_lp.num_vars {
+        return (f64::INFINITY, f64::INFINITY);
+    }
+    (
+        primal_residual_rel(
+            &original_lp.a,
+            &original_lp.b,
+            &original_lp.constraint_types,
+            &result.solution,
+        ),
+        bound_violation(&original_lp.bounds, &result.solution),
+    )
+}
+
+fn lp_original_primal_bad(result: &SolverResult, original_lp: &LpProblem, primal_tol: f64) -> bool {
+    let (pfeas, bfeas) = lp_original_primal_residuals(result, original_lp);
+    pfeas > primal_tol || bfeas > primal_tol
+}
+
+fn postsolved_lp_needs_direct_retry(
+    result: &SolverResult,
+    original_lp: &LpProblem,
+    options: &SolverOptions,
+) -> bool {
+    if !matches!(
         result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution
-    ) && (result
-        .postsolve_dfeas
-        .is_some_and(|d| d > crate::tolerances::PIVOT_TOL)
-        || result.status == SolveStatus::SuboptimalSolution)
+    ) {
+        return false;
+    }
+    let (postsolve_pfeas, postsolve_bfeas) = lp_original_primal_residuals(result, original_lp);
+    result.postsolve_dfeas.is_some_and(|d| d > options.dual_tol)
+        || postsolve_pfeas > options.primal_tol
+        || postsolve_bfeas > options.primal_tol
+        || result.status == SolveStatus::SuboptimalSolution
 }
 
 /// LP→IPM 呼び出し時に presolve を無効化したオプションを生成 (Farkas cert 検証専用)。
@@ -902,6 +935,39 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn postsolved_lp_retry_gate_uses_original_primal_tolerance() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0 + 5.0e-8],
+            objective: 0.0,
+            ..Default::default()
+        };
+        let loose = SolverOptions {
+            primal_tol: 1.0e-6,
+            dual_tol: 1.0e-6,
+            ..Default::default()
+        };
+        let tight = SolverOptions {
+            primal_tol: 1.0e-8,
+            dual_tol: 1.0e-8,
+            ..Default::default()
+        };
+
+        assert!(!postsolved_lp_needs_direct_retry(&result, &lp, &loose));
+        assert!(postsolved_lp_needs_direct_retry(&result, &lp, &tight));
     }
 
     /// 2 solve を独立実行し、それぞれの route stats が独立していることを確認。

@@ -106,6 +106,47 @@ fn p_box_le() -> MilpProblem {
     MilpProblem::new(l, vec![0, 1]).unwrap()
 }
 
+#[test]
+fn append_ge_rows_snaps_near_empty_integer_bounds_to_integer_point() {
+    let mut milp = p_box_le();
+    milp.lp.bounds[0] = (1.0 + ZERO_TOL * 0.5, 1.0);
+    let cuts = [CutRow {
+        coeffs: vec![1.0, 0.0],
+        rhs: 0.5,
+    }];
+
+    let out = append_ge_rows_with_integer_mask(&milp.lp, &cuts, &[true, true]);
+
+    assert_eq!(out.bounds[0], (1.0, 1.0));
+    assert_eq!(out.num_constraints, milp.lp.num_constraints + 1);
+}
+
+#[test]
+#[should_panic(expected = "cut-augmented LP is valid")]
+fn append_ge_rows_does_not_scale_away_large_bound_gap() {
+    let mut milp = p_box_le();
+    milp.lp.bounds[0] = (1.0e12 + 1.0, 1.0e12);
+    let cuts = [CutRow {
+        coeffs: vec![1.0, 0.0],
+        rhs: 0.5,
+    }];
+
+    let _ = append_ge_rows(&milp.lp, &cuts);
+}
+
+#[test]
+#[should_panic(expected = "cut-augmented LP is valid")]
+fn append_ge_rows_keeps_material_invalid_bounds_as_error() {
+    let mut milp = p_box_le();
+    milp.lp.bounds[0] = (1.0 + ZERO_TOL * 10.0, 1.0);
+    let cuts = [CutRow {
+        coeffs: vec![1.0, 0.0],
+        rhs: 0.5,
+    }];
+
+    let _ = append_ge_rows(&milp.lp, &cuts);
+}
+
 /// min x+y s.t. 2x+2y>=3, x,y∈[0,3]. Ge constraint ⇒ surplus-slack mapping.
 /// LP opt x+y=1.5 (fractional).
 fn p_box_ge() -> MilpProblem {
@@ -930,5 +971,603 @@ fn le_revalidation_detects_infeasible_le_cut() {
         orig_check.status,
         SolveStatus::Optimal,
         "original LP must remain Optimal (fallback is meaningful)"
+    );
+}
+
+// ── Structural cut tests (cover, clique, implied bound) ─────────────────────
+
+/// Build a 0-1 knapsack MILP: max Σ c_j x_j s.t. Σ a_j x_j ≤ b, x_j ∈ {0,1}.
+fn knapsack_milp(c: Vec<f64>, a: Vec<f64>, b: f64) -> MilpProblem {
+    let n = c.len();
+    assert_eq!(a.len(), n);
+    let rows: Vec<usize> = vec![0; n];
+    let cols: Vec<usize> = (0..n).collect();
+    let l = lp(
+        c.iter().map(|&v| -v).collect(), // minimise -obj
+        &rows,
+        &cols,
+        &a,
+        1,
+        vec![b],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0); n],
+    );
+    let ivars: Vec<usize> = (0..n).collect();
+    MilpProblem::new(l, ivars).unwrap()
+}
+
+/// **Cover cut validity:** no original integer-feasible point is removed.
+///
+/// 2x1+2x2+2x3≤5, max x1+x2+x3, xi∈{0,1}.
+/// LP opt: x1=x2=1, x3=0.5 (obj=2.5, fractional).
+/// Cover {x1,x2,x3}: 2+2+2=6>5, minimal (removing any gives sum=4<5 wait—
+/// 2+2=4<5 so can't remove any). Cut: x1+x2+x3≤2.
+/// LP violates: 2.5>2.
+#[test]
+fn cover_cut_validity_brute_force() {
+    let milp = knapsack_milp(vec![1.0, 1.0, 1.0], vec![2.0, 2.0, 2.0], 5.0);
+    let x_lp = lp_root(&milp.lp).solution;
+    let mask = super::super::integer_mask(3, &[0, 1, 2]);
+    let cuts = generate_cover_cuts(&milp.lp, &mask, &x_lp);
+    assert!(!cuts.is_empty(), "cover cut must be generated for this knapsack");
+
+    let pts = enumerate_int_box(&milp.lp.bounds);
+    for x in &pts {
+        if !feasible_orig(&milp.lp, x) {
+            continue;
+        }
+        for (k, cut) in cuts.iter().enumerate() {
+            let lhs: f64 = cut.coeffs.iter().zip(x.iter()).map(|(&g, &xi)| g * xi).sum();
+            assert!(
+                lhs >= cut.rhs - 1e-9,
+                "cover cut {k} removes integer-feasible point {x:?}: lhs={lhs} < rhs={}",
+                cut.rhs
+            );
+        }
+    }
+}
+
+/// **Cover cut generation:** LP-fractional knapsack must produce ≥1 cover cut
+/// and those cuts must violate the LP optimum.
+#[test]
+fn cover_cut_generated_and_cuts_lp_opt() {
+    // 2x1+2x2+2x3≤5 has fractional LP opt (sum=2.5); cover cut: x1+x2+x3≤2.
+    let milp = knapsack_milp(vec![1.0, 1.0, 1.0], vec![2.0, 2.0, 2.0], 5.0);
+    let lp_res = lp_root(&milp.lp);
+    assert_eq!(lp_res.status, SolveStatus::Optimal);
+    let x_star = &lp_res.solution;
+    let mask = super::super::integer_mask(3, &[0, 1, 2]);
+    let cuts = generate_cover_cuts(&milp.lp, &mask, x_star);
+    assert!(!cuts.is_empty(), "must generate ≥1 cover cut");
+    let any_violated = cuts.iter().any(|cut| {
+        let lhs: f64 = cut.coeffs.iter().zip(x_star.iter()).map(|(&g, &xi)| g * xi).sum();
+        lhs < cut.rhs - 1e-9
+    });
+    assert!(any_violated, "at least one cover cut must violate LP optimum {x_star:?}");
+}
+
+/// **Cover cuts end-to-end:** `add_root_cuts` on a knapsack must not change the
+/// integer optimum (correctness invariant).
+#[test]
+fn cover_cuts_preserve_optimum() {
+    use crate::solve_milp;
+    let milp = knapsack_milp(vec![1.0, 1.0, 1.0], vec![2.0, 2.0, 2.0], 5.0);
+    let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+    let cfg = cuts_cfg(5);
+    let res = solve_milp(&milp, &opts, &cfg);
+    assert_eq!(res.status, SolveStatus::Optimal);
+    let bf = brute_force_min(&milp).expect("feasible");
+    assert!(
+        (res.objective - bf).abs() < 1e-6,
+        "cuts changed optimum: got {} expected {}",
+        res.objective,
+        bf
+    );
+}
+
+/// **Clique cut validity and generation via pairwise conflicts.**
+///
+/// Three binary vars x1,x2,x3. Three pairwise constraints:
+///   x1+x2≤1, x1+x3≤1, x2+x3≤1 (each pair conflicts: a_i+a_j=2>1=b).
+/// LP min -(x1+x2+x3): LP opt x1=x2=x3=0.5, sum=1.5>1 — violates clique cut.
+/// Clique cut Σ x_j ≤ 1 must be generated and must not remove any {0,1}^3 feasible point.
+#[test]
+fn clique_cut_validity_brute_force() {
+    // Three pairwise Le rows; binary vars. LP opt has fractional x_i=0.5.
+    let l = lp(
+        vec![-1.0, -1.0, -1.0],
+        &[0, 1, 0, 2, 1, 2],
+        &[0, 0, 1, 1, 2, 2],
+        &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        3,
+        vec![1.0, 1.0, 1.0],
+        vec![ConstraintType::Le, ConstraintType::Le, ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)],
+    );
+    let milp = MilpProblem::new(l, vec![0, 1, 2]).unwrap();
+    let lp_res = lp_root(&milp.lp);
+    assert_eq!(lp_res.status, SolveStatus::Optimal);
+    let x_star = &lp_res.solution;
+    let mask = super::super::integer_mask(3, &[0, 1, 2]);
+    let cuts = generate_clique_cuts(&milp.lp, &mask, x_star);
+    assert!(!cuts.is_empty(), "must generate clique cut from pairwise conflict graph");
+
+    let pts = enumerate_int_box(&milp.lp.bounds);
+    for x in &pts {
+        if !feasible_orig(&milp.lp, x) {
+            continue;
+        }
+        for (k, cut) in cuts.iter().enumerate() {
+            let lhs: f64 = cut.coeffs.iter().zip(x.iter()).map(|(&g, &xi)| g * xi).sum();
+            assert!(
+                lhs >= cut.rhs - 1e-9,
+                "clique cut {k} removes integer-feasible point {x:?}: lhs={lhs} < rhs={}",
+                cut.rhs
+            );
+        }
+    }
+}
+
+/// **Clique cut: no cut when no pairwise conflict exists.**
+/// 2x1+2x2≤5: a_i+a_j=4 < b=5, no conflict. No clique cut.
+#[test]
+fn clique_cut_not_generated_without_conflict() {
+    let l = lp(
+        vec![-1.0, -1.0],
+        &[0, 0],
+        &[0, 1],
+        &[2.0, 2.0],
+        1,
+        vec![5.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 1.0)],
+    );
+    let milp = MilpProblem::new(l, vec![0, 1]).unwrap();
+    let x_star = lp_root(&milp.lp).solution;
+    let mask = super::super::integer_mask(2, &[0, 1]);
+    let cuts = generate_clique_cuts(&milp.lp, &mask, &x_star);
+    assert!(
+        cuts.is_empty(),
+        "no conflict (a_i+a_j=4 < b=5) must produce no clique cut, got {}",
+        cuts.len()
+    );
+}
+
+/// **Clique cut: mixed-sign row must not produce false conflicts.**
+///
+/// x1+x2+x3 - 3*x4 ≤ 1, all binary. a_1+a_2=2 > b=1, but (1,1,0,1) is
+/// feasible (activity = 1+1-3 = -1 ≤ 1). A naïve conflict check that ignores
+/// the negative coefficient would falsely conclude x1, x2 conflict, leading to
+/// an unsound clique cut x1+x2+x3 ≤ 1 that removes the optimal point (1,1,1,1).
+#[test]
+fn clique_cut_mixed_sign_row_no_false_conflict() {
+    let l = lp(
+        vec![-2.0, -2.0, -2.0, 3.0],
+        &[0, 0, 0, 0],
+        &[0, 1, 2, 3],
+        &[1.0, 1.0, 1.0, -3.0],
+        1,
+        vec![1.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0)],
+    );
+    let milp = MilpProblem::new(l, vec![0, 1, 2, 3]).unwrap();
+    let x_star = lp_root(&milp.lp).solution;
+    let mask = super::super::integer_mask(4, &[0, 1, 2, 3]);
+    let cuts = generate_clique_cuts(&milp.lp, &mask, &x_star);
+    assert!(
+        cuts.is_empty(),
+        "mixed-sign row must not produce clique cuts (negative coeff invalidates pairwise test), got {}",
+        cuts.len()
+    );
+
+    // End-to-end: cuts must not change the optimal objective.
+    let cfg = MipConfig { cuts: true, ..MipConfig::default() };
+    let cfg_off = MipConfig { cuts: false, ..MipConfig::default() };
+    let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+    let r_on = super::super::solve_milp(&milp, &opts, &cfg);
+    let r_off = super::super::solve_milp(&milp, &opts, &cfg_off);
+    assert_eq!(r_on.status, SolveStatus::Optimal);
+    assert_eq!(r_off.status, SolveStatus::Optimal);
+    assert!(
+        (r_on.objective - r_off.objective).abs() < 1e-6,
+        "cuts must not change optimum: on={} off={}",
+        r_on.objective,
+        r_off.objective
+    );
+}
+
+/// **Implied bound cut validity:** no original integer-feasible point removed.
+///
+/// 3x1 + x2 ≤ 5, x1 ∈ [0,2] integer, x2 ∈ [0,3].
+/// Continuous implied ub for x1 = (5-0)/3 = 1.667. Floor → 1.
+/// LP opt (min -x1): x1=5/3≈1.667. Violated: 1.667 > 1 (the integer bound).
+/// All integer-feasible points have x1 ∈ {0,1} so no integer point is removed.
+#[test]
+fn implied_bound_cut_validity_brute_force() {
+    let l = lp(
+        vec![-1.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[3.0, 1.0],
+        1,
+        vec![5.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 2.0), (0.0, 3.0)],
+    );
+    let milp = MilpProblem::new(l, vec![0]).unwrap();
+    let x_star = lp_root(&milp.lp).solution;
+    let mask = super::super::integer_mask(2, &[0]);
+    let cuts = generate_implied_bound_cuts(&milp.lp, &mask, &x_star);
+    assert!(!cuts.is_empty(), "must generate implied bound cut (floor of 1.667 = 1 < ub=2)");
+
+    let pts = enumerate_int_box(&milp.lp.bounds);
+    for x in &pts {
+        if !feasible_orig(&milp.lp, x) {
+            continue;
+        }
+        for (k, cut) in cuts.iter().enumerate() {
+            let lhs: f64 = cut.coeffs.iter().zip(x.iter()).map(|(&g, &xi)| g * xi).sum();
+            assert!(
+                lhs >= cut.rhs - 1e-9,
+                "implied bound cut {k} removes integer-feasible point {x:?}: lhs={lhs} < rhs={}",
+                cut.rhs
+            );
+        }
+    }
+}
+
+/// **Implied bound cut: Ge row** implies a lower bound.
+#[test]
+fn implied_bound_cut_ge_row_validity() {
+    // 3x1 + x2 >= 4, x1 ∈ [0,3] integer, x2 ∈ [0,3].
+    // Implied lb for x1: (4 - 3*3) / 3 = (4-9)/3 = -5/3 (not useful).
+    // Use tighter: x2 ∈ [0,1]. Then activity_max_without_x1 = 1*1 = 1.
+    // implied_lb(x1) = (4 - 1) / 3 = 1.0 (tighter than lb=0).
+    // LP opt (min x1): x1 = 1 (already integer) when x2=1.
+    // For LP opt (min -x2, s.t. 3x1+x2>=4, x1 integer ∈ [0,3], x2 ∈ [0,1]):
+    // LP: maximise x2, which means x2=1, 3x1>=3, x1>=1. LP opt x1=1,x2=1 (already int).
+    // Let's choose objective that makes LP fractional: min x1 s.t. 3x1+x2>=4, x1∈[0,3] int, x2∈[0,1].
+    // LP: x1=1, x2=1 (all integer → no cut needed).
+    // Let's try x2∈[0,2]: implied_lb(x1) = (4-2)/3 = 0.67. LP min x1: x1=0.67 fractional!
+    let l = lp(
+        vec![1.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[3.0, 1.0],
+        1,
+        vec![4.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 3.0), (0.0, 2.0)],
+    );
+    let milp = MilpProblem::new(l, vec![0]).unwrap();
+    let x_star = lp_root(&milp.lp).solution;
+    let mask = super::super::integer_mask(2, &[0]);
+    let cuts = generate_implied_bound_cuts(&milp.lp, &mask, &x_star);
+    // Verify no integer-feasible point is removed.
+    let pts = enumerate_int_box(&milp.lp.bounds);
+    for x in &pts {
+        if !feasible_orig(&milp.lp, x) {
+            continue;
+        }
+        for (k, cut) in cuts.iter().enumerate() {
+            let lhs: f64 = cut.coeffs.iter().zip(x.iter()).map(|(&g, &xi)| g * xi).sum();
+            assert!(
+                lhs >= cut.rhs - 1e-9,
+                "Ge implied bound cut {k} removes integer-feasible point {x:?}: lhs={lhs} < rhs={}",
+                cut.rhs
+            );
+        }
+    }
+}
+
+/// **Structural cuts end-to-end:** `add_root_cuts` with structural cuts must
+/// not change the integer optimum for any of the standard test problems.
+#[test]
+fn structural_cuts_preserve_optimum() {
+    use crate::solve_milp;
+    let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+    let cfg = cuts_cfg(5);
+    for (name, milp) in all_problems() {
+        let res = solve_milp(&milp, &opts, &cfg);
+        assert_eq!(res.status, SolveStatus::Optimal, "{name}: must reach Optimal");
+        let bf = brute_force_min(&milp).expect("feasible");
+        assert!(
+            (res.objective - bf).abs() < 1e-6,
+            "{name}: structural cuts changed optimum: got {} expected {}",
+            res.objective,
+            bf
+        );
+    }
+}
+
+/// **Structural cut validity end-to-end:** Le cut rows added by `add_root_cuts`
+/// (which includes structural cuts) must not remove any integer-feasible point.
+#[test]
+fn structural_cuts_validity_end_to_end() {
+    let mut problems: Vec<(&str, MilpProblem)> = all_problems();
+    problems.push(("knapsack_3var", knapsack_milp(vec![1.0, 1.0, 1.0], vec![2.0, 2.0, 2.0], 5.0)));
+    for (name, milp) in &problems {
+        let out = add_root_cuts(milp, &SolverOptions::default(), &cuts_cfg(5));
+        let m_old = milp.lp.num_constraints;
+        let m_new = out.lp.num_constraints;
+        let pts = enumerate_int_box(&milp.lp.bounds);
+        for x in &pts {
+            if !feasible_orig(&milp.lp, x) {
+                continue;
+            }
+            let ax = out.lp.a.mat_vec_mul(x).unwrap();
+            for i in m_old..m_new {
+                assert_eq!(out.lp.constraint_types[i], ConstraintType::Le);
+                assert!(
+                    ax[i] <= out.lp.b[i] + 1e-6,
+                    "{name}: structural cut row {i} removes integer-feasible point {x:?}: \
+                     ax={} > b={}",
+                    ax[i],
+                    out.lp.b[i]
+                );
+            }
+        }
+    }
+}
+
+// ── In-tree separation sentinel ─────────────────────────────────────────────
+
+/// Knapsack-style general-integer MILP used as the in-tree-cut sentinel.
+///
+/// max Σ c_j x_j  s.t.  Σ a_j x_j ≤ 23,  x_j ∈ {0..5} integer (min of −c).
+/// Its LP relaxation stays fractional several levels deep, so re-separating
+/// GMI/MIR at interior B&B nodes tightens bounds the root cuts miss.
+fn tree_cut_sentinel_milp() -> MilpProblem {
+    let c = [12.0, 17.0, 13.0, 21.0, 9.0, 16.0, 7.0, 19.0];
+    let a = [5.0, 7.0, 6.0, 9.0, 4.0, 7.0, 3.0, 8.0];
+    let n = c.len();
+    let cneg: Vec<f64> = c.iter().map(|v| -v).collect();
+    let rows = vec![0usize; n];
+    let cols: Vec<usize> = (0..n).collect();
+    let l = lp(
+        cneg,
+        &rows,
+        &cols,
+        &a,
+        1,
+        vec![23.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 5.0); n],
+    );
+    MilpProblem::new(l, cols).unwrap()
+}
+
+/// **Sentinel**: in-tree cuts must measurably shrink the search vs `tree_cuts=off`.
+///
+/// Root cuts are disabled in *both* runs so the only difference is in-tree
+/// separation. If `tree_cuts` is a no-op (hook never fires, pool always rejects,
+/// or the re-solve is discarded), node counts are identical and this FAILS. The
+/// optimum must be unchanged — cuts only remove fractional points.
+#[test]
+fn tree_cuts_reduce_node_count_sentinel() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
+
+    let cfg_off = MipConfig { cuts: false, tree_cuts: false, ..MipConfig::default() };
+    let cfg_on = MipConfig { cuts: false, tree_cuts: true, ..MipConfig::default() };
+
+    let (r_off, s_off) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_off);
+    let (r_on, s_on) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_on);
+
+    assert_eq!(r_off.status, SolveStatus::Optimal);
+    assert_eq!(r_on.status, SolveStatus::Optimal);
+    assert!(
+        (r_on.objective - r_off.objective).abs() < 1e-6,
+        "in-tree cuts must not change the optimum: on={} off={}",
+        r_on.objective,
+        r_off.objective
+    );
+    assert!(
+        s_on.tree_cut_rounds > 0,
+        "in-tree separation must fire at least one accepted round (got 0)"
+    );
+    assert!(
+        s_on.nodes_processed < s_off.nodes_processed,
+        "in-tree cuts must reduce node count: on={} off={}",
+        s_on.nodes_processed,
+        s_off.nodes_processed
+    );
+}
+
+/// Regression guard: with `tree_cuts=off` no separation fires (counter stays 0).
+#[test]
+fn tree_cuts_off_does_not_separate() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
+    let cfg = MipConfig { cuts: false, tree_cuts: false, ..MipConfig::default() };
+    let (_, s) = super::super::solve_milp_with_stats(&milp, &opts, &cfg);
+    assert_eq!(s.tree_cut_rounds, 0, "tree_cuts=off must never separate");
+}
+
+#[test]
+fn tree_cut_node_gate_depth_node_boundary_decision_table() {
+    let cases = [
+        // depth gate | node gate | boundary purpose | selected
+        (0, 0, false, "root node: both gates off"),
+        (3, TREE_CUT_NODE_INTERVAL - 1, false, "just below both gates"),
+        (TREE_CUT_DEPTH_INTERVAL, 0, true, "first positive depth multiple"),
+        (0, TREE_CUT_NODE_INTERVAL, true, "first positive node multiple"),
+        (
+            TREE_CUT_DEPTH_INTERVAL,
+            TREE_CUT_NODE_INTERVAL,
+            true,
+            "both gates true",
+        ),
+        (
+            TREE_CUT_DEPTH_INTERVAL * 2,
+            1,
+            true,
+            "later depth multiple with non-gating node",
+        ),
+        (
+            1,
+            TREE_CUT_NODE_INTERVAL * 2,
+            true,
+            "later node multiple with non-gating depth",
+        ),
+    ];
+
+    for (depth, node_index, expected, label) in cases {
+        assert_eq!(
+            tree_cut_node_selected(depth, node_index),
+            expected,
+            "{label}: depth={depth}, node_index={node_index}"
+        );
+    }
+}
+
+#[test]
+fn tree_cut_gate_rejects_zero_depth_zero_node_sentinel() {
+    assert!(
+        !tree_cut_node_selected(0, 0),
+        "zero is a numeric multiple, but root separation is intentionally rejected"
+    );
+}
+
+#[test]
+fn separate_tree_cuts_drops_augmented_warm_start_basis() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+    assert!(
+        node_res.warm_start_basis.is_some(),
+        "node LP solve should expose a basis before tree-cut tightening"
+    );
+
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+    let tightened = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+    )
+    .expect("sentinel node must accept at least one tree-cut tightening");
+    assert!(tightened.objective > node_res.objective);
+    assert!(
+        tightened.warm_start_basis.is_none(),
+        "tree-cut result must not return a basis from the augmented node-local LP"
+    );
+}
+
+// ── Optimum-preservation sweep (cross-node soundness gate) ───────────────────
+
+/// Deterministic LCG so the sweep is reproducible (no `rand` dependency).
+struct SweepRng(u64);
+impl SweepRng {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+    fn range(&mut self, lo: i64, hi: i64) -> i64 {
+        lo + (self.next() as i64).rem_euclid(hi - lo + 1)
+    }
+}
+
+/// Random all-integer MILP: `min c·x` s.t. `A x ≤ b`, `x ∈ {0..ub}`.
+fn sweep_milp(rng: &mut SweepRng, n: usize, m: usize, ub: f64) -> MilpProblem {
+    let c: Vec<f64> = (0..n).map(|_| rng.range(-7, 7) as f64).collect();
+    let (mut rows, mut cols, mut vals, mut b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for r in 0..m {
+        for j in 0..n {
+            let v = rng.range(-4, 8);
+            if v != 0 {
+                rows.push(r);
+                cols.push(j);
+                vals.push(v as f64);
+            }
+        }
+        b.push(rng.range(5, 20) as f64);
+    }
+    let l = lp(c, &rows, &cols, &vals, m, b, vec![ConstraintType::Le; m], vec![(0.0, ub); n]);
+    MilpProblem::new(l, (0..n).collect()).unwrap()
+}
+
+/// Brute-force optimum over the integer lattice: `Some(min c·x)` over feasible
+/// points, or `None` when none is feasible. Used as ground truth.
+fn brute_force_opt(milp: &MilpProblem) -> Option<f64> {
+    let lp = &milp.lp;
+    let mut best: Option<f64> = None;
+    for x in enumerate_int_box(&lp.bounds) {
+        if !feasible_orig(lp, &x) {
+            continue;
+        }
+        let obj: f64 = lp.c.iter().zip(&x).map(|(&ci, &xi)| ci * xi).sum();
+        best = Some(best.map_or(obj, |b| b.min(obj)));
+    }
+    best
+}
+
+/// **P0 soundness sentinel**: in-tree cuts must never change the optimum.
+///
+/// In-tree GMI/MIR cuts bake in the generating node's branching-tightened bounds,
+/// so they are valid only within that node's subtree. A cross-node cut pool (the
+/// original buggy design) re-applies them at sibling/non-descendant nodes,
+/// slicing off globally integer-feasible points and returning a too-good
+/// "Optimal" objective. This sweep solves a deterministic batch of small random
+/// MILPs three ways — brute force (ground truth), `tree_cuts=off`, and
+/// `tree_cuts=on` — and asserts all three agree. Under the buggy cross-node pool
+/// several instances in this seed mismatch, so it FAILS; node-local separation
+/// passes. `fired > 0` proves separation is actually exercised (else the test is
+/// vacuous).
+#[test]
+fn tree_cuts_preserve_optimum_sweep() {
+    let opts = SolverOptions { timeout_secs: Some(30.0), ..Default::default() };
+    let cfg_off = MipConfig { cuts: false, tree_cuts: false, ..MipConfig::default() };
+    let cfg_on = MipConfig { cuts: false, tree_cuts: true, ..MipConfig::default() };
+
+    let mut rng = SweepRng(12345);
+    let mut fired = 0usize;
+    let mut checked = 0usize;
+    for it in 0..500usize {
+        let n = 5 + it % 3; // 5..7
+        let m = 2 + it % 3; // 2..4
+        let milp = sweep_milp(&mut rng, n, m, 4.0);
+
+        let truth = brute_force_opt(&milp);
+        let (r_off, _) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_off);
+        let (r_on, s_on) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_on);
+        if s_on.tree_cut_rounds > 0 {
+            fired += 1;
+        }
+
+        match truth {
+            None => {
+                // Infeasible MILP: neither configuration may invent a solution.
+                assert_ne!(r_off.status, SolveStatus::Optimal, "it={it}: off feasible but brute says infeasible");
+                assert_ne!(r_on.status, SolveStatus::Optimal, "it={it}: ON invented a solution for infeasible MILP");
+            }
+            Some(opt) => {
+                assert_eq!(r_off.status, SolveStatus::Optimal, "it={it}: off must solve feasible MILP");
+                assert!(
+                    (r_off.objective - opt).abs() < 1e-6,
+                    "it={it}: OFF baseline wrong: off={} brute={opt}",
+                    r_off.objective
+                );
+                assert_eq!(r_on.status, SolveStatus::Optimal, "it={it}: ON must solve feasible MILP");
+                assert!(
+                    (r_on.objective - opt).abs() < 1e-6,
+                    "it={it}: in-tree cuts changed the optimum (cross-node leak): on={} brute={opt}",
+                    r_on.objective
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "sweep must verify at least one feasible instance");
+    assert!(
+        fired > 0,
+        "in-tree separation must fire on the sweep (else the soundness check is vacuous)"
     );
 }

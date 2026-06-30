@@ -12,12 +12,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: taiki-e/install-action@nextest
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
       - run: cargo audit
       - name: data coverage sentinel
         run: python3 tests/test_check_data_coverage.py
+      - name: ISO 25010 quality matrix sentinel
+        run: python3 tests/test_iso_25010_quality_matrix.py
 
   comment-hygiene:
     name: comment-hygiene

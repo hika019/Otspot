@@ -30,6 +30,7 @@ const REFIT_PROGRESS_EPS: f64 = 1e-12;
 const REFIT_REL_STALL: f64 = 1e-8;
 const IRLS_INNER_MAX_ITERS: usize = 30;
 const KRYLOV_MAX_ITERS: usize = 400;
+const KKT_SKIP_MARGIN: f64 = 100.0;
 
 /// refit/IRLS の進捗 stall 判定。`prev_kkt`/`current_kkt` は revert guard により
 /// `current_kkt <= prev_kkt`。改善 drop が「相対 (`REFIT_REL_STALL · prev_kkt`)」と
@@ -59,6 +60,7 @@ pub(super) fn kkt_already_passes(
     if final_sol.solution.is_empty() || orig_problem.num_constraints == 0 || !ipm_status_optimal {
         return false;
     }
+    let skip_tol = user_eps / KKT_SKIP_MARGIN;
     let view = build_view(orig_problem, eliminated_cols);
     let kkt0 = kkt_residual_rel(
         &view,
@@ -66,11 +68,11 @@ pub(super) fn kkt_already_passes(
         &final_sol.dual_solution,
         &final_sol.bound_duals,
     );
-    if kkt0 >= user_eps {
+    if kkt0 >= skip_tol {
         return false;
     }
     let pres0 = primal_residual_rel(&view, &final_sol.solution);
-    if pres0 >= user_eps {
+    if pres0 >= skip_tol {
         return false;
     }
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
@@ -348,6 +350,61 @@ impl DiagPostsolve {
     }
 }
 
+/// Clear inactive inequality duals and refit bound duals when doing so improves
+/// the full dual certificate without worsening the duality gap.
+pub(super) fn cleanup_inactive_dual_complementarity(
+    orig_problem: &QpProblem,
+    final_sol: &mut SolverResult,
+    eliminated_cols: &[bool],
+    user_eps: f64,
+) {
+    if final_sol.solution.is_empty() || orig_problem.num_constraints == 0 {
+        return;
+    }
+    let view = build_view(orig_problem, eliminated_cols);
+    let before = dual_certificate_residual_max(orig_problem, &view, final_sol);
+    let gap_before = super::compute_duality_gap_rel(orig_problem, final_sol);
+    let mut candidate = final_sol.clone();
+    crate::qp::zero_inactive_inequality_duals(orig_problem, &mut candidate);
+    crate::qp::refit_bound_duals_kkt(orig_problem, &mut candidate, user_eps);
+    let after = dual_certificate_residual_max(orig_problem, &view, &candidate);
+    let gap_after = super::compute_duality_gap_rel(orig_problem, &candidate);
+    if after.is_finite() && after <= before && gap_after.is_finite() && gap_after <= gap_before {
+        *final_sol = candidate;
+    }
+}
+
+fn dual_certificate_residual_max(
+    orig_problem: &QpProblem,
+    view: &ProblemView<'_>,
+    result: &SolverResult,
+) -> f64 {
+    kkt_residual_rel(
+        view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    )
+    .max(complementarity_residual_rel(
+        view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    ))
+    .max(complementarity_componentwise_rel(
+        view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    ))
+    .max(dual_sign_violation(
+        &orig_problem.constraint_types,
+        &result.dual_solution,
+        orig_problem.bounds.as_slice(),
+        &result.bound_duals,
+    ))
+}
+
 /// Post-processing stage 3: saddle-point Krylov IR (K [dx;dy] = -[r_d;r_p]) +
 /// pres 残留時の 2nd primal projection (KKT-guard 付き)。
 pub(super) fn refine_krylov_and_projection(
@@ -371,6 +428,27 @@ pub(super) fn refine_krylov_and_projection(
         target_pf,
         opts.deadline,
     );
+
+    // Stage 3a: extended-precision IR with TwoFloat accumulation.
+    // Runs only when standard Krylov IR stalled above eps and the option is enabled.
+    if opts.ipm.extended_ir {
+        let kkt_post_std = kkt_residual_rel(
+            &view,
+            &final_sol.solution,
+            &final_sol.dual_solution,
+            &final_sol.bound_duals,
+        );
+        let pres_post_std = primal_residual_rel(&view, &final_sol.solution);
+        if kkt_post_std > user_eps || pres_post_std > user_eps {
+            crate::qp::refine_kkt_extended_precision(
+                orig_problem,
+                final_sol,
+                eliminated_cols,
+                target_pf,
+                opts.deadline,
+            );
+        }
+    }
 
     // (3b) KKT IR 後に pres > eps なら primal projection を 1 回追加。
     // 採用条件: pres 改善 AND kkt <= user_eps を厳守 (df 退行防止)。
@@ -687,6 +765,68 @@ mod gate_predicate_tests {
         );
     }
 
+    /// LISWET7 regression: kkt < skip_tol だが pres ∈ [skip_tol, user_eps) → false を返す。
+    ///
+    /// ill-conditioned QP (LISWET7: cond(AAᵀ) ≈ 1e16) では f64 算術が kkt ≈ 3e-11,
+    /// pres ≈ 9e-8 の偽収束残差を生成する。旧コード (threshold = user_eps) では kkt も pres も
+    /// user_eps = 1e-6 未満として skip → prove_optimal が偽 Optimal を返していた。
+    /// fix では skip_tol = user_eps / KKT_SKIP_MARGIN (100) に厳格化し refinement を強制。
+    ///
+    /// 構成: min 0.5·x², s.t. x = 1 (Eq), x ∈ (-∞,+∞)。
+    /// 停留性 (Qx + c + Aᵀy = 0): x + y = 0 → y = -x。
+    /// テスト点: x = 1 + δ, y = -(1 + δ) → kkt = 0 (完全停留), pres = δ/(3+δ) ≈ δ/3。
+    ///
+    /// Sentinel: pres 閾値を skip_tol → user_eps に戻すと pres=6.7e-8 < user_eps なので
+    /// kkt_already_passes が true を返し、このアサーションが失敗する → fix が load-bearing。
+    #[test]
+    fn already_passes_false_when_pres_between_skip_tol_and_eps() {
+        let user_eps = 1e-6_f64;
+        let skip_tol = user_eps / super::KKT_SKIP_MARGIN;
+
+        // min 0.5·x², s.t. x = 1, x free
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![0.0_f64],
+            a,
+            vec![1.0_f64],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+
+        // δ = 2e-7: pres = δ/(1 + |1+δ| + |1|) ≈ δ/3 ≈ 6.7e-8 ∈ [skip_tol, user_eps)
+        // y = -(1+δ) により停留性 x + y = (1+δ) + (-(1+δ)) = 0 → kkt = 0
+        let delta = 2e-7_f64;
+        let x = 1.0_f64 + delta;
+        let y = -(1.0_f64 + delta);
+        let res = crate::problem::SolverResult {
+            solution: vec![x],
+            dual_solution: vec![y],
+            bound_duals: vec![],
+            ..Default::default()
+        };
+
+        let view = build_view(&prob, &[]);
+        let kkt = kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals);
+        let pres = primal_residual_rel(&view, &res.solution);
+
+        assert!(
+            kkt < skip_tol,
+            "fixture: kkt={kkt:.3e} must be < skip_tol={skip_tol:.3e}"
+        );
+        assert!(
+            pres >= skip_tol && pres < user_eps,
+            "fixture: pres={pres:.3e} must be in [skip_tol={skip_tol:.3e}, user_eps={user_eps:.3e})"
+        );
+        assert!(
+            !kkt_already_passes(&prob, &res, &[], true, user_eps),
+            "kkt={kkt:.3e} < skip_tol but pres={pres:.3e} ≥ skip_tol \
+             → post-processing must NOT be skipped (LISWET7 false-Optimal regression)"
+        );
+    }
+
     /// Degenerate inputs short-circuit to false: empty solution and m=0.
     #[test]
     fn already_passes_false_for_degenerate_inputs() {
@@ -735,8 +875,8 @@ mod stall_gate_tests {
     //! near-zero regime. Reverting to the absolute-only gate re-introduces the
     //! 979s LISWET spin (see `detects_noise_floor_flat_residual`).
     use super::{
-        build_view, kkt_residual_rel, refine_post_processing, refit_progress_stalled,
-        REFIT_PROGRESS_EPS,
+        build_view, cleanup_inactive_dual_complementarity, dual_certificate_residual_max,
+        kkt_residual_rel, refine_post_processing, refit_progress_stalled, REFIT_PROGRESS_EPS,
     };
     use crate::options::SolverOptions;
     use crate::problem::{ConstraintType, SolverResult};
@@ -797,6 +937,139 @@ mod stall_gate_tests {
         );
         // Exact no-change is always stall regardless of magnitude.
         assert!(refit_progress_stalled(0.5, 0.5));
+    }
+
+    #[test]
+    fn cleanup_inactive_duals_repairs_complementarity_without_moving_primal() {
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 2, 0, 1, 2, 0, 1, 2],
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2],
+            &[
+                0.4180730178857338,
+                -0.3388321916091331,
+                -0.11128811645712924,
+                -0.3388321916091331,
+                -0.998339628454278,
+                0.7899096104935973,
+                -0.11128811645712924,
+                0.7899096104935973,
+                0.16528704821825724,
+            ],
+            3,
+            3,
+        )
+        .unwrap();
+        let a = CscMatrix::from_triplets(
+            &[0, 2, 2, 1, 2],
+            &[0, 0, 1, 2, 2],
+            &[
+                0.20362059179708952,
+                -0.49156994635882434,
+                0.6899251194067307,
+                0.35089945702726577,
+                -0.20609706471316191,
+            ],
+            3,
+            3,
+        )
+        .unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![0.9627433629541278, 1.1223543296642184, 0.7793851438408713],
+            a,
+            vec![-2.8845159230823487, -2.3497565244678635, 2.748374601409619],
+            vec![
+                (-2.770611501419692, 2.770611501419692),
+                (-0.8857981031127659, 0.8857981031127659),
+                (-0.9049511230872764, 0.9049511230872764),
+            ],
+            vec![ConstraintType::Ge, ConstraintType::Ge, ConstraintType::Le],
+        )
+        .unwrap();
+        let x = vec![-2.770611501419515, -0.8857981031127654, -0.9049511230872724];
+        let mut sol = SolverResult {
+            solution: x.clone(),
+            dual_solution: vec![
+                -1.0081132368485388,
+                -0.6795226652062781,
+                4.512057531342496e-8,
+            ],
+            bound_duals: vec![
+                3.3676306743224416e-8,
+                2.230624487910973,
+                1.1878225070205417e-9,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            ..Default::default()
+        };
+        let view = build_view(&prob, &[]);
+        let before = dual_certificate_residual_max(&prob, &view, &sol);
+        assert!(
+            before > 0.5,
+            "fixture must expose the inactive-row dual bug"
+        );
+
+        cleanup_inactive_dual_complementarity(&prob, &mut sol, &[], 1e-6);
+        let after = dual_certificate_residual_max(&prob, &view, &sol);
+
+        assert!(
+            after < 1e-10,
+            "cleanup must repair KKT certificate, got {after:.3e}"
+        );
+        assert_eq!(sol.solution, x, "dual cleanup must not move primal x");
+        assert!(sol.dual_solution.iter().all(|v| v.abs() < 1e-12));
+    }
+
+    #[test]
+    fn cleanup_rejects_candidate_that_improves_complementarity_but_worsens_gap() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::new(1, 1);
+        let prob = QpProblem::new(
+            q,
+            vec![1.0_f64],
+            a,
+            vec![1.0_f64],
+            vec![(1.0_f64, 3.0_f64)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        let mut sol = SolverResult {
+            solution: vec![2.0_f64],
+            dual_solution: vec![0.0_f64],
+            bound_duals: vec![100.0_f64, 98.0_f64 / 3.0_f64],
+            ..Default::default()
+        };
+        let original = sol.clone();
+        let view = build_view(&prob, &[]);
+        let before = dual_certificate_residual_max(&prob, &view, &sol);
+        let gap_before = super::super::compute_duality_gap_rel(&prob, &sol);
+
+        let mut candidate = sol.clone();
+        crate::qp::zero_inactive_inequality_duals(&prob, &mut candidate);
+        crate::qp::refit_bound_duals_kkt(&prob, &mut candidate, 1e-6);
+        let after = dual_certificate_residual_max(&prob, &view, &candidate);
+        let gap_after = super::super::compute_duality_gap_rel(&prob, &candidate);
+
+        assert!(
+            after < before,
+            "fixture must improve the non-gap certificate ({before:.3e} -> {after:.3e})"
+        );
+        assert!(
+            gap_after > gap_before,
+            "fixture must worsen duality gap ({gap_before:.3e} -> {gap_after:.3e})"
+        );
+
+        cleanup_inactive_dual_complementarity(&prob, &mut sol, &[], 1e-6);
+        assert_eq!(
+            sol.dual_solution, original.dual_solution,
+            "gap-worsening cleanup candidate must be rejected"
+        );
+        assert_eq!(
+            sol.bound_duals, original.bound_duals,
+            "gap-worsening bound-dual refit must be rejected"
+        );
     }
 
     /// Convergence case unchanged: a well-conditioned Eq QP whose dual starts

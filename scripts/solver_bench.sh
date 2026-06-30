@@ -97,7 +97,7 @@ if [[ "$bin" == "milp_solve" ]]; then
   fi
 
   n_pass=0; n_checked_noref=0; n_pass_infeasible=0; n_pass_unbounded=0
-  n_timeout=0; n_fail=0; n_maxiter=0; n_error=0; n_skip=0
+  n_timeout=0; n_external_timeout=0; n_fail=0; n_maxiter=0; n_error=0; n_skip=0
   n_dfeas_fail=0; n_pfeas_fail=0; n_obj_mismatch=0; n_kkt_fail=0
   n_nonconvex=0; n_suboptimal=0; n_total=0
 
@@ -118,11 +118,11 @@ if [[ "$bin" == "milp_solve" ]]; then
         --timeout "$MIP_TIMEOUT" --eps "$MIP_EPS" 2>/dev/null) || mps_exit=$?
     fi
 
-    status_raw=$(printf '%s\n' "$mps_out" | grep "^status:" | awk '{print $2}' | head -1)
-    obj_str=$(printf '%s\n' "$mps_out" | grep "^objective:" | awk '{print $2}' | head -1)
-    wall_ms=$(printf '%s\n' "$mps_out" | grep "^wall_ms:" | awk '{print $2}' | head -1)
-    n_vars=$(printf '%s\n' "$mps_out" | grep "^n_vars:" | awk '{print $2}' | head -1)
-    n_cons=$(printf '%s\n' "$mps_out" | grep "^n_cons:" | awk '{print $2}' | head -1)
+    status_raw=$(printf '%s\n' "$mps_out" | awk '/^status:/ { print $2; exit }')
+    obj_str=$(printf '%s\n' "$mps_out" | awk '/^objective:/ { print $2; exit }')
+    wall_ms=$(printf '%s\n' "$mps_out" | awk '/^wall_ms:/ { print $2; exit }')
+    n_vars=$(printf '%s\n' "$mps_out" | awk '/^n_vars:/ { print $2; exit }')
+    n_cons=$(printf '%s\n' "$mps_out" | awk '/^n_cons:/ { print $2; exit }')
     time_s=$(awk "BEGIN{printf \"%.3f\", ${wall_ms:-0}/1000.0}")
 
     bench_status="FAIL"
@@ -227,8 +227,13 @@ if [[ "$bin" == "milp_solve" ]]; then
         n_error=$(( n_error + 1 ))
         ;;
       "")
-        bench_status="ERROR"; note="no_output_exit=${mps_exit}"
-        n_error=$(( n_error + 1 ))
+        if [[ "$mps_exit" == "124" ]]; then
+          bench_status="EXTERNAL_TIMEOUT"; note="external_timeout_exit=${mps_exit}"
+          n_external_timeout=$(( n_external_timeout + 1 ))
+        else
+          bench_status="ERROR"; note="no_output_exit=${mps_exit}"
+          n_error=$(( n_error + 1 ))
+        fi
         ;;
       *)
         bench_status="ERROR"; note="unknown_status=${status_raw}"
@@ -253,6 +258,7 @@ if [[ "$bin" == "milp_solve" ]]; then
   printf "  OBJ_MISMATCH:      %d\n" "$n_obj_mismatch"
   printf "  MAXITER:           %d\n" "$n_maxiter"
   printf "  TIMEOUT:           %d\n" "$n_timeout"
+  printf "  EXTERNAL_TIMEOUT:  %d\n" "$n_external_timeout"
   printf "  NONCONVEX:         %d\n" "$n_nonconvex"
   printf "  FAIL:              %d\n" "$n_fail"
   printf "  ERROR:             %d\n" "$n_error"

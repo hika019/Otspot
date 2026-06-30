@@ -17,5 +17,18 @@ mod warm_start;
 
 pub(crate) use iter::solve_ippmm_inner;
 
+pub(crate) fn probe_schur_decision(
+    problem: &crate::qp::problem::QpProblem,
+    options: &crate::options::SolverOptions,
+) -> bool {
+    use crate::linalg::parallelism::solver_par_from_threads;
+    use crate::linalg::timeout::TimeoutCtx;
+    use crate::qp::ipm_core::kkt::build_extended_constraints;
+    let timeout_ctx = TimeoutCtx::from_options(options);
+    let par = solver_par_from_threads(options.threads);
+    let (a_ext, _, m_ext, _, _, _) = build_extended_constraints(problem);
+    factorize::auto_schur_enabled(problem, &a_ext, m_ext, options, &timeout_ctx, par)
+}
+
 #[cfg(test)]
 mod tests;

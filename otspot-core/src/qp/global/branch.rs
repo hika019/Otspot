@@ -59,6 +59,20 @@ pub(crate) fn select_branching_variable(node: &BBNode, x: &[f64]) -> Option<usiz
     best.map(|(j, _, _)| j)
 }
 
+fn alpha_bb_warm_for_child(
+    warm: Option<&QpWarmStart>,
+    child_bounds: &[(f64, f64)],
+) -> Option<QpWarmStart> {
+    warm.and_then(|ws| {
+        let within = ws
+            .x
+            .iter()
+            .zip(child_bounds.iter())
+            .all(|(&xi, &(lb, ub))| xi >= lb - 1e-8 && xi <= ub + 1e-8);
+        if within { Some(ws.clone()) } else { None }
+    })
+}
+
 /// Split node: var j を split_at で 2 子に分割。
 /// split_at が [lb_j+ε, ub_j-ε] interior 外なら midpoint に fall back
 /// (= 縮退分割を避ける、片側 child が parent と同 box になる事故を防ぐ)。
@@ -67,6 +81,7 @@ pub(crate) fn split_node(
     j: usize,
     split_at: f64,
     parent_warm: Option<QpWarmStart>,
+    alpha_bb_warm: Option<QpWarmStart>,
 ) -> (BBNode, BBNode) {
     let (lb, ub) = parent.var_bounds[j];
     let mid = 0.5 * (lb + ub);
@@ -79,11 +94,11 @@ pub(crate) fn split_node(
     left[j].1 = s;
     let mut right = parent.var_bounds.clone();
     right[j].0 = s;
-    // 子の lower_bound 初期値 = 親 lb (分枝で下界が悪化することはない)。
-    // 実 lb は bound::interval_quadratic_bounds で再計算される。
+    let ab_warm_left = alpha_bb_warm_for_child(alpha_bb_warm.as_ref(), &left);
+    let ab_warm_right = alpha_bb_warm_for_child(alpha_bb_warm.as_ref(), &right);
     (
-        parent.child(left, parent.lower_bound, parent_warm.clone()),
-        parent.child(right, parent.lower_bound, parent_warm),
+        parent.child(left, parent.lower_bound, parent_warm.clone(), ab_warm_left),
+        parent.child(right, parent.lower_bound, parent_warm, ab_warm_right),
     )
 }
 
@@ -127,7 +142,7 @@ mod tests {
     #[test]
     fn split_at_interior_uses_provided_point() {
         let p = BBNode::root(vec![(0.0, 10.0)], -1.0);
-        let (l, r) = split_node(&p, 0, 3.0, None);
+        let (l, r) = split_node(&p, 0, 3.0, None, None);
         assert_eq!(l.var_bounds[0], (0.0, 3.0));
         assert_eq!(r.var_bounds[0], (3.0, 10.0));
         assert_eq!(l.depth, 1);
@@ -138,7 +153,7 @@ mod tests {
     fn split_at_boundary_falls_back_to_midpoint() {
         let p = BBNode::root(vec![(0.0, 10.0)], -1.0);
         // split_at = 0.0 (lb 上) → midpoint = 5.0 にフォールバック
-        let (l, r) = split_node(&p, 0, 0.0, None);
+        let (l, r) = split_node(&p, 0, 0.0, None, None);
         assert_eq!(l.var_bounds[0], (0.0, 5.0));
         assert_eq!(r.var_bounds[0], (5.0, 10.0));
     }
@@ -162,7 +177,7 @@ mod tests {
             y: vec![],
             mu: 1e-6,
         };
-        let (l, r) = split_node(&p, 0, 2.0, Some(warm));
+        let (l, r) = split_node(&p, 0, 2.0, Some(warm), None);
         assert!(l.warm.is_some());
         assert!(r.warm.is_some());
     }

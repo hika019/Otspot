@@ -10,7 +10,7 @@ use super::{
 };
 use crate::linalg::timeout::deadline_reached;
 use crate::basis::{BasisManager, LuBasis};
-use crate::presolve::LpEquilibration;
+use crate::presolve::{LpEquilibration, LpScalingResult};
 use crate::problem::{LpProblem, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::DROP_TOL;
@@ -18,6 +18,23 @@ use std::sync::atomic::Ordering;
 
 use super::super::{scale_upper_bounds, BoundedStandardForm};
 use crate::options::SolverOptions;
+
+fn scale_bounded_standard_form(
+    bsf: &BoundedStandardForm,
+    options: &SolverOptions,
+) -> Option<LpScalingResult> {
+    if options.use_ruiz_scaling {
+        LpEquilibration::scale_with_deadline(&bsf.a, &bsf.b, &bsf.c, options.deadline)
+    } else {
+        Some((
+            bsf.a.clone(),
+            bsf.b.clone(),
+            bsf.c.clone(),
+            vec![1.0; bsf.m],
+            vec![1.0; bsf.n_total],
+        ))
+    }
+}
 
 /// Try to solve a Le-only bounded LP via the BFRT-aware dual+primal path.
 ///
@@ -32,9 +49,7 @@ pub(super) fn try_bounded(
     if deadline_reached(options.deadline) {
         return Some(SolverResult::timeout());
     }
-    let Some((a, b, c, row_scale, col_scale)) =
-        LpEquilibration::scale_with_deadline(&bsf.a, &bsf.b, &bsf.c, options.deadline)
-    else {
+    let Some((a, b, c, row_scale, col_scale)) = scale_bounded_standard_form(bsf, options) else {
         return Some(SolverResult::timeout());
     };
     let ubs = scale_upper_bounds(&bsf.upper_bounds, &col_scale);
@@ -231,9 +246,7 @@ pub(super) fn try_bounded_phase1_eq(
     if deadline_reached(options.deadline) {
         return Some(SolverResult::timeout());
     }
-    let Some((a, b, c, row_scale, col_scale)) =
-        LpEquilibration::scale_with_deadline(&bsf.a, &bsf.b, &bsf.c, options.deadline)
-    else {
+    let Some((a, b, c, row_scale, col_scale)) = scale_bounded_standard_form(bsf, options) else {
         return Some(SolverResult::timeout());
     };
     let ubs = scale_upper_bounds(&bsf.upper_bounds, &col_scale);

@@ -105,6 +105,33 @@ pub(super) fn compute_reduced_costs(
     reduced_costs
 }
 
+/// Standard-form dual infeasibility from reduced costs: maximum negative
+/// reduced-cost violations over nonbasic priced columns. In the primal core all
+/// nonbasic variables are at their lower bound, so dual feasibility is
+/// `r_j >= 0`; the magnitude, not the count, is the progress signal.
+pub(super) fn reduced_cost_dual_infeasibility(
+    reduced_costs: &[f64],
+    is_basic: &[bool],
+    n_price: usize,
+) -> f64 {
+    let limit = n_price.min(reduced_costs.len()).min(is_basic.len());
+    let mut infeas = 0.0;
+    for j in 0..limit {
+        if is_basic[j] {
+            continue;
+        }
+        let rc = reduced_costs[j];
+        if !rc.is_finite() {
+            return f64::INFINITY;
+        }
+        let viol = (-rc).max(0.0);
+        if viol > infeas {
+            infeas = viol;
+        }
+    }
+    infeas
+}
+
 /// Convert a `SimplexOutcome` to a `SolverResult`.
 ///
 /// Single implementation shared by all three simplex dispatch paths:

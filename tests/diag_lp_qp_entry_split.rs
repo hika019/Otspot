@@ -374,7 +374,7 @@ fn qp_entry_with_zero_q_forwards_to_lp_module() {
     let qp = QpProblem::new(
         q_zero,
         lp.c.clone(),
-        lp.a.clone(),
+        (*lp.a).clone(),
         lp.b.clone(),
         lp.bounds.clone(),
         lp.constraint_types.clone(),
@@ -424,7 +424,7 @@ fn sentinel_proves_lp_path_regression_detectable() {
         let qp = QpProblem::new(
             q_zero,
             lp.c.clone(),
-            lp.a.clone(),
+            (*lp.a).clone(),
             lp.b.clone(),
             lp.bounds.clone(),
             lp.constraint_types.clone(),
@@ -458,7 +458,7 @@ fn cross_check_lp_direct_vs_qp_forward_objective() {
         let qp = QpProblem::new(
             q_zero,
             lp.c.clone(),
-            lp.a.clone(),
+            (*lp.a).clone(),
             lp.b.clone(),
             lp.bounds.clone(),
             lp.constraint_types.clone(),
@@ -529,7 +529,7 @@ fn parallel_solve_stats_are_independent() {
         let qp2 = QpProblem::new(
             q_zero,
             lp2.c,
-            lp2.a,
+            (*lp2.a).clone(),
             lp2.b,
             lp2.bounds,
             lp2.constraint_types,

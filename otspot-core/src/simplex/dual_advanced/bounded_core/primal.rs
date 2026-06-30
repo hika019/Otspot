@@ -117,7 +117,13 @@ pub(crate) fn phase2_primal_bounded(
     let mut y = vec![0.0f64; m];
     let mut rc = vec![0.0f64; n_total];
     let mut alpha = vec![0.0f64; m];
-    let mut trace = IterTrace::new("bounded-primal");
+    let mut trace = IterTrace::new("bounded-phase2-primal");
+
+    let k_trigger = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN);
+    let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
+    let force_bland = primal_force_bland();
+    let mut iters_since_progress: usize = 0;
+    let mut bland_mode = force_bland;
 
     loop {
         *iters = iters.saturating_add(1);
@@ -144,7 +150,7 @@ pub(crate) fn phase2_primal_bounded(
                 &state.is_basic,
                 ubs,
             );
-            t.log(*iters, obj, &state.basis, false);
+            t.log(*iters, obj, &state.basis, bland_mode);
         }
 
         if deadline_reached(options.deadline) {
@@ -152,7 +158,30 @@ pub(crate) fn phase2_primal_bounded(
         }
         compute_dual_vars_into(c, &mut basis_mgr, &state.basis, &mut y);
 
-        let q = {
+        let q = if bland_mode {
+            match bland_entering(
+                a,
+                c,
+                &state.is_basic,
+                &state.at_upper,
+                &y,
+                n_total,
+                PIVOT_TOL,
+            ) {
+                Some(j) => j,
+                None => {
+                    let obj = bounded_obj(
+                        c,
+                        &state.basis,
+                        &state.x_b,
+                        &state.at_upper,
+                        &state.is_basic,
+                        ubs,
+                    );
+                    return (SimplexOutcome::Optimal(obj, y), state);
+                }
+            }
+        } else {
             let at_upper = &state.at_upper;
             match partial_price_entering(
                 a,
@@ -211,24 +240,42 @@ pub(crate) fn phase2_primal_bounded(
         }
 
         let ub_q = ubs[q];
-        let (r, leaving_at_ub, theta) = match select_leaving_bounded(
-            &alpha,
-            dir,
-            &state.x_b,
-            &state.basis,
-            ubs,
-            ub_q,
-            m,
-            PIVOT_TOL,
-            options.primal_tol,
-            None,
-        ) {
+        let leave = if bland_mode {
+            select_leaving_bland_bounded(
+                &alpha,
+                dir,
+                &state.x_b,
+                &state.basis,
+                ubs,
+                ub_q,
+                m,
+                PIVOT_TOL,
+            )
+        } else {
+            select_leaving_bounded(
+                &alpha,
+                dir,
+                &state.x_b,
+                &state.basis,
+                ubs,
+                ub_q,
+                m,
+                PIVOT_TOL,
+                options.primal_tol,
+                None,
+            )
+        };
+        let (r, leaving_at_ub, theta) = match leave {
             BoundedLeave::Flip => {
                 bump_bfrt_flip_invocations();
                 for i in 0..m {
                     state.x_b[i] -= alpha[i] * dir * ub_q;
                 }
                 state.at_upper[q] = !from_ub;
+                iters_since_progress = 0;
+                if !force_bland {
+                    bland_mode = false;
+                }
                 basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
                 if basis_mgr.refactor_failed {
                     return if basis_mgr.singular_basis {
@@ -252,6 +299,18 @@ pub(crate) fn phase2_primal_bounded(
             BoundedLeave::Unbounded => return (SimplexOutcome::Unbounded, state),
             BoundedLeave::Pivot { row, at_ub, step } => (row, at_ub, step),
         };
+
+        if theta > step_zero_threshold {
+            iters_since_progress = 0;
+            if !force_bland {
+                bland_mode = false;
+            }
+        } else {
+            iters_since_progress = iters_since_progress.saturating_add(1);
+            if iters_since_progress >= k_trigger {
+                bland_mode = true;
+            }
+        }
 
         let leaving_col = state.basis[r];
 

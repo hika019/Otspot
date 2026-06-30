@@ -302,7 +302,7 @@ fn probe_ldl_health(
 }
 
 /// Schur auto-detect (probe).
-pub(super) fn auto_schur_enabled(
+pub(crate) fn auto_schur_enabled(
     problem: &QpProblem,
     a_ext: &CscMatrix,
     m_ext: usize,

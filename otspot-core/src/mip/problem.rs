@@ -95,6 +95,9 @@ impl Relaxation for MilpProblem {
     fn skip_node_presolve(&self) -> bool {
         true
     }
+    fn can_skip_repeated_lp_scaling(&self) -> bool {
+        true
+    }
     fn propagation_data(
         &self,
     ) -> Option<(
@@ -103,6 +106,22 @@ impl Relaxation for MilpProblem {
         &[crate::problem::ConstraintType],
     )> {
         Some((&self.lp.a, &self.lp.b, &self.lp.constraint_types))
+    }
+    fn separate_tree_cuts(
+        &self,
+        bounds: &[(f64, f64)],
+        res: &SolverResult,
+        mask: &[bool],
+        opts: &SolverOptions,
+        depth: usize,
+        node_index: usize,
+    ) -> Option<SolverResult> {
+        // Node LP = the original relaxation with this node's bounds. Separation
+        // is node-local: cuts are valid only in this subtree and are never reused
+        // elsewhere; see `cuts::separate_tree_cuts`.
+        let mut node_lp = self.lp.clone();
+        node_lp.bounds = bounds.to_vec();
+        super::cuts::separate_tree_cuts(&node_lp, mask, opts, res, depth, node_index)
     }
     fn run_rins(
         &self,
@@ -116,6 +135,30 @@ impl Relaxation for MilpProblem {
             return None;
         }
         crate::mip::heuristics::rins::run_rins(self, x_lp, x_inc, cfg, deadline, opts)
+    }
+    fn run_rens(
+        &self,
+        x_lp: &[f64],
+        cfg: &crate::options::MipConfig,
+        deadline: &Option<std::time::Instant>,
+        opts: &crate::options::SolverOptions,
+    ) -> Option<crate::problem::SolverResult> {
+        if !cfg.rens_enabled {
+            return None;
+        }
+        crate::mip::heuristics::rens::run_rens(self, x_lp, cfg, deadline, opts)
+    }
+    fn run_local_branching(
+        &self,
+        x_inc: &[f64],
+        cfg: &crate::options::MipConfig,
+        deadline: &Option<std::time::Instant>,
+        opts: &crate::options::SolverOptions,
+    ) -> Option<crate::problem::SolverResult> {
+        if !cfg.local_branching_enabled {
+            return None;
+        }
+        crate::mip::heuristics::local_branching::run_local_branching(self, x_inc, cfg, deadline, opts)
     }
 }
 

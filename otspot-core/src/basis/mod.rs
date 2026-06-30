@@ -12,6 +12,7 @@ pub(crate) mod test_utils;
 
 use crate::error::SolverError;
 use crate::sparse::{CscMatrix, SparseVec};
+use faer::dyn_stack::MemBuffer;
 use std::time::Instant;
 
 /// 改訂単体法の基底管理トレイト
@@ -52,6 +53,7 @@ pub(crate) struct LuBasis {
     /// 再因子分解が失敗した場合 true（SingularBasis または DeadlineExceeded）。
     /// 呼び出し元はこのフラグを確認してsolverを安全に打ち切ること。
     pub(crate) refactor_failed: bool,
+    solve_scratch: MemBuffer,
 }
 
 impl LuBasis {
@@ -73,12 +75,14 @@ impl LuBasis {
         } else {
             max_etas
         };
+        let solve_scratch = lu::make_solve_scratch(&lu);
         Ok(Self {
             lu,
             eta_file: eta::EtaFile::new(effective_max_etas),
             basis_indices: basis.to_vec(),
             singular_basis: false,
             refactor_failed: false,
+            solve_scratch,
         })
     }
 
@@ -168,13 +172,13 @@ impl BasisManager for LuBasis {
     }
 
     fn ftran_dense(&mut self, rhs: &mut [f64]) {
-        lu::solve_ftran(&self.lu, rhs);
+        lu::solve_ftran_cached(&self.lu, rhs, &mut self.solve_scratch);
         eta::apply_ftran(&self.eta_file.etas, rhs);
     }
 
     fn btran_dense(&mut self, rhs: &mut [f64]) {
         eta::apply_btran(&self.eta_file.etas, rhs);
-        lu::solve_btran(&self.lu, rhs);
+        lu::solve_btran_cached(&self.lu, rhs, &mut self.solve_scratch);
     }
 
     fn update(&mut self, entering_col: usize, leaving_row: usize, pivot_col: &SparseVec) {

@@ -15,4 +15,5 @@ Highs.log
 /.claude
 dashboard.md
 .worktrees/
+.codex-worktrees/
 *.profraw

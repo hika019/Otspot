@@ -15,7 +15,8 @@ MILP / 凸MIQP: branch-and-bound。
 - **修正シンプレックス法（LP）** — 疎LU分解、Markowitz閾値ピボット、最急勾配価格決定
 - **内点法（QP）** — 凸QPに対するMehrotra predictor–corrector / IP-PMM
 - **非凸QP（大域）** — 空間B&B（α-BB / McCormick）。大域最適は証明書付き、局所解は `NonconvexLocal`
-- **混合整数（MILP / 凸MIQP）** — branch-and-bound。カット・発見的手法・SOS は未実装
+- **混合整数（MILP / 凸MIQP）** — branch-and-bound（GMI/MIR/cover/clique/implied-bound カット、reliability 分岐、RINS、競合分析）
+- **感度分析（LP）** — RHS および目的関数係数の変動幅解析（ranging）
 - **証明付き最適性** — `Optimal` は完全KKT証明書を要求。証明不能な解は降格
 - **実行不可能・非有界の判定**
 - **双対解出力** — 双対変数、簡約費用、スラック
@@ -27,7 +28,7 @@ MILP / 凸MIQP: branch-and-bound。
 
 ```toml
 [dependencies]
-otspot = "0.6"
+otspot = "0.7"
 ```
 
 ```bash
@@ -109,24 +110,37 @@ let result = solve(&prob);
 
 ## 性能
 
-標準公開セットでの求解率ベンチ。otspot-dev の `qps_benchmark` harness（shell スクリプト — **`cargo bench` ではない**）で計測、`timeout = 1000s`:
+標準公開セットでの求解率ベンチ。otspot-dev の benchmark harness（shell スクリプト — **`cargo bench` ではない**）で計測、`timeout = 1000s`:
 
 | 問題種別 | セット | 問題数 | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
-| 実行可能 LP | Netlib | 109 | 最適解 108 | 最適解 105 |
-| 凸 QP | Maros–Mészáros | 138 | 最適解 121 | 最適解 100 |
+| 実行可能 LP | Netlib | 109 | 最適解 108、SuboptimalSolution 1 | 最適解 108、SuboptimalSolution 1 |
+| 凸 QP | Maros–Mészáros | 138 | 最適解 121、SuboptimalSolution 12、OBJ_MISMATCH 1、参照値なし 4 | 最適解 93、SuboptimalSolution 42、TIMEOUT 1、参照値なし 2 |
+| MILP | MIPLIB 2017 small | 20 | 最適解 5、TIMEOUT 15、ERROR 0 | 最適解 5、TIMEOUT 15、ERROR 0 |
 | 実行不可能 LP | Netlib | 29 | 正答 29 | 正答 29 |
 | 非有界 LP | 合成 | 12 | 正答 12 | 正答 12 |
 
-**最適解** = 既知最適値と照合済み（proof-carrying KKT）。`jobs=8` で計測。
-LP ミス @1e-6 (1 件): `cycle`（SuboptimalSolution）。`1e-8` では `greenbea`（厳格許容で primal-infeasible）が加わる。
-QP ミス @1e-6 (17 件): SuboptimalSolution 11 件（LISWET 系 + `AUG2DCQP`、`QPCBOEI2`、`STADAT1`、`UBH1`、`VALUES`、`YAO` — KKT 証明が満たせず downgrade）+ timeout 1 件（`LISWET12`）+ 目的値不一致 1 件（`LISWET7`、baseline 曖昧）+ 参照値なし 4 件。`1e-8` では許容厳格化で 35 件が SuboptimalSolution に降格（最適解 100）。
+**最適解** = 既知最適値と照合済み（proof-carrying KKT）。`timeout = 1000s`、`jobs = 6` で計測。
+
+LP: @1e-6 は 108/109 最適解、timeout 0。ミスは `cycle` (SuboptimalSolution)。@1e-8 は 108/109 最適解、timeout 0。ミスは `greenbea`（より厳しい primal 証明ゲートで SuboptimalSolution）。
+
+QP: @1e-6 は 121/138 最適解、timeout 0。ミスは SuboptimalSolution 12 件、OBJ_MISMATCH 1 件 (`LISWET7`)、公開参照値なしの検査済み 4 件。@1e-8 は 93/138 最適解、SuboptimalSolution 42 件、TIMEOUT 1 件 (`POWELL20`)、公開参照値なしの検査済み 2 件。
+
+MILP: @1e-6 / @1e-8 とも 5/20 最適解（`flugpl`、`gr4x6`、`gt2`、`khb05250`、`p0201`）。どちらも `TOTAL` 内に TIMEOUT 15 件、ERROR 0 件を計上する。`noswot` と `timtab1` は tree-cut separation の panic ではなく TIMEOUT になる。
+
 再現（データは gitignored、[ベンチマークデータ](#ベンチマークデータ)参照）:
 
 ```bash
-bash scripts/run_lp_bench.sh  --suite standard --eps 1e-6 --jobs 8 --timeout 1000   # 実行可能 LP (Netlib)
-bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps 1e-6 --jobs 8 \
-     --timeout 1000 --output /tmp/qp_maros.txt                                      # 凸 QP (Maros)
+for eps in 1e-6 1e-8; do
+  bash scripts/run_lp_bench.sh --suite standard --eps "$eps" --jobs 6 --timeout 1000
+  bash scripts/run_lp_bench.sh --suite infeas --eps "$eps" --jobs 6 --timeout 1000
+  bash scripts/bench_parallel.sh --data-dir data/lp_problems_unbounded --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/lp_unbounded_${eps}.txt"
+  bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/qp_maros_${eps}.txt"
+  bash scripts/bench_parallel.sh --data-dir data/miplib_small --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/miplib_small_${eps}.txt"  # ERROR / 外部timeout がある場合は非ゼロ終了
+done
 ```
 
 ## テスト

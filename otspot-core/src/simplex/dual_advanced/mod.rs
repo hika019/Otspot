@@ -289,10 +289,21 @@ pub(crate) fn solve_dual_advanced(
     }
 
     let m = sf.m;
-    let Some((a, b, c, row_scale, col_scale)) =
-        LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
-    else {
-        return SolverResult::timeout();
+    let (a, b, c, row_scale, col_scale) = if options.use_ruiz_scaling {
+        let Some(scaled) =
+            LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
+        else {
+            return SolverResult::timeout();
+        };
+        scaled
+    } else {
+        (
+            sf.a.clone(),
+            sf.b.clone(),
+            sf.c.clone(),
+            vec![1.0; sf.m],
+            vec![1.0; sf.n_total],
+        )
     };
 
     if let Some(warm) = &options.warm_start {

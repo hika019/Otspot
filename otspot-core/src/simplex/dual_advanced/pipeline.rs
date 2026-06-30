@@ -439,6 +439,8 @@ pub(super) fn cold_start_advanced(
         &mut total_iters,
         false,
         None,
+        false,
+        None,
     );
 
     let mut result = match phase2_outcome {

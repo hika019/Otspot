@@ -14,7 +14,8 @@ const LP_RUIZ_MAX_SWEEPS: usize = 20;
 /// Convergence tolerance for LP Ruiz scaling: stop early when max scale change < this value.
 const LP_RUIZ_CONV_TOL: f64 = 1e-4;
 
-type LpScalingResult = (CscMatrix, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+/// Scaled LP data: `(matrix, b, c, row_scale, col_scale)`.
+pub type LpScalingResult = (CscMatrix, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
 
 static LP_SCALE_PROFILE_US: AtomicU64 = AtomicU64::new(0);
 static LP_SCALE_PROFILE_CALLS: AtomicU64 = AtomicU64::new(0);

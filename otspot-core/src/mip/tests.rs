@@ -10,7 +10,7 @@ use super::{
     solve_mip_core, solve_miqp, solve_miqp_with_stats, MilpProblem, MiqpProblem,
 };
 use crate::options::{MipConfig, SolverOptions};
-use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult, TimingBreakdown};
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
 
@@ -406,6 +406,9 @@ fn mip_nodes_disable_lp_crash_basis_before_relaxation_solve() {
         fn skip_node_presolve(&self) -> bool {
             true
         }
+        fn can_skip_repeated_lp_scaling(&self) -> bool {
+            true
+        }
     }
 
     // Precondition: before MIP disables LP crash, this relaxation is non-vacuous.
@@ -743,6 +746,289 @@ fn stats_timing_populated_for_milp_bt_then_branch() {
     );
 }
 
+#[test]
+fn mip_descendant_nodes_skip_repeated_lp_ruiz_scaling() {
+    use std::cell::RefCell;
+
+    struct ScalingOptionMock {
+        calls: RefCell<Vec<bool>>,
+        bounds: Vec<(f64, f64)>,
+        ints: Vec<usize>,
+    }
+
+    impl super::Relaxation for ScalingOptionMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.ints
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            let mut calls = self.calls.borrow_mut();
+            calls.push(opts.use_ruiz_scaling);
+            if calls.len() == 1 {
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 0.0,
+                    solution: vec![0.5],
+                    ..Default::default()
+                }
+            } else {
+                SolverResult::infeasible()
+            }
+        }
+        fn skip_node_presolve(&self) -> bool {
+            true
+        }
+        fn can_skip_repeated_lp_scaling(&self) -> bool {
+            true
+        }
+    }
+
+    let mock = ScalingOptionMock {
+        calls: RefCell::new(Vec::new()),
+        bounds: vec![(0.0, 2.0)],
+        ints: vec![0],
+    };
+    let cfg = MipConfig {
+        branching: crate::options::MipBranching::MostFractional,
+        ..MipConfig::default()
+    };
+    let (_, stats) = solve_mip_core(&mock, &opts(), &cfg, vec![true], None);
+    let calls = mock.calls.borrow();
+
+    assert!(
+        stats.nodes_processed >= 3,
+        "mock must branch into descendants"
+    );
+    assert_eq!(calls.first().copied(), Some(true), "root keeps LP scaling");
+    assert!(
+        calls.iter().skip(1).all(|&enabled| !enabled),
+        "descendant node LP solves must disable repeated scaling; calls={calls:?}"
+    );
+}
+
+#[test]
+fn mip_descendant_scaling_retry_runs_and_accounts_first_attempt_timing() {
+    use std::cell::RefCell;
+
+    struct RetryMock {
+        calls: RefCell<Vec<bool>>,
+        bounds: Vec<(f64, f64)>,
+        ints: Vec<usize>,
+    }
+
+    impl super::Relaxation for RetryMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.ints
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            let mut calls = self.calls.borrow_mut();
+            calls.push(opts.use_ruiz_scaling);
+            if calls.len() == 1 {
+                return SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 0.0,
+                    solution: vec![0.5],
+                    timing_breakdown: Some(TimingBreakdown {
+                        solve_us: 1,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+            }
+            if opts.use_ruiz_scaling {
+                SolverResult {
+                    status: SolveStatus::Infeasible,
+                    objective: f64::INFINITY,
+                    timing_breakdown: Some(TimingBreakdown {
+                        solve_us: 100,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
+            } else {
+                SolverResult {
+                    status: SolveStatus::NumericalError,
+                    timing_breakdown: Some(TimingBreakdown {
+                        solve_us: 10,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
+            }
+        }
+        fn skip_node_presolve(&self) -> bool {
+            true
+        }
+        fn can_skip_repeated_lp_scaling(&self) -> bool {
+            true
+        }
+    }
+
+    let mock = RetryMock {
+        calls: RefCell::new(Vec::new()),
+        bounds: vec![(0.0, 2.0)],
+        ints: vec![0],
+    };
+    let cfg = MipConfig {
+        branching: crate::options::MipBranching::MostFractional,
+        ..MipConfig::default()
+    };
+    let (_, stats) = solve_mip_core(&mock, &opts(), &cfg, vec![true], None);
+    let calls = mock.calls.borrow();
+
+    assert!(calls.windows(2).any(|w| w == [false, true]));
+    assert!(
+        stats.lp_solve_us_desc >= 220,
+        "two descendant retries must include unscaled + scaled timing; desc_solve_us={}",
+        stats.lp_solve_us_desc
+    );
+}
+
+#[test]
+fn branching_strategy_controls_strong_branch_stats() {
+    use std::cell::Cell;
+
+    struct BranchStatsMock {
+        calls: Cell<usize>,
+        bounds: [(f64, f64); 1],
+        ints: [usize; 1],
+    }
+
+    impl BranchStatsMock {
+        fn new() -> Self {
+            Self {
+                calls: Cell::new(0),
+                bounds: [(0.0, 2.0)],
+                ints: [0],
+            }
+        }
+    }
+
+    impl super::Relaxation for BranchStatsMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.ints
+        }
+        fn solve(&self, bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            self.calls.set(self.calls.get() + 1);
+            if bounds == self.bounds {
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 0.0,
+                    solution: vec![0.5],
+                    ..Default::default()
+                }
+            } else {
+                SolverResult::infeasible()
+            }
+        }
+        fn skip_node_presolve(&self) -> bool {
+            true
+        }
+    }
+
+    let cfg_most = MipConfig {
+        max_nodes: 1,
+        branching: crate::options::MipBranching::MostFractional,
+        ..MipConfig::default()
+    };
+    let most = BranchStatsMock::new();
+    let (_, most_stats) = super::solve_mip_with_stats(&most, &opts(), &cfg_most);
+    assert_eq!(most_stats.strong_branch_calls, 0);
+    assert_eq!(most_stats.strong_branch_lp_solves, 0);
+    assert_eq!(
+        most.calls.get(),
+        1,
+        "MostFractional should solve only the root before max_nodes stops"
+    );
+
+    let cfg_reliability = MipConfig {
+        max_nodes: 1,
+        branching: crate::options::MipBranching::Reliability,
+        ..MipConfig::default()
+    };
+    let reliability = BranchStatsMock::new();
+    let (_, reliability_stats) =
+        super::solve_mip_with_stats(&reliability, &opts(), &cfg_reliability);
+    assert_eq!(reliability_stats.strong_branch_calls, 1);
+    assert_eq!(reliability_stats.strong_branch_candidates, 1);
+    assert_eq!(reliability_stats.strong_branch_lp_solves, 2);
+    // strong_branch_us is wall-clock over instant-returning mock solves and can
+    // legitimately round to 0µs (flaky); the lp_solves/calls counts already prove
+    // the strong-branch child solves ran, so timing is not asserted here.
+    assert_eq!(
+        reliability.calls.get(),
+        3,
+        "Reliability should solve root plus down/up strong-branch trials"
+    );
+}
+
+#[test]
+fn scaling_retry_does_not_run_after_deadline_expired() {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    struct DeadlineRetryMock {
+        calls: Cell<usize>,
+    }
+
+    impl super::Relaxation for DeadlineRetryMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &[(0.0, 1.0)]
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &[0]
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            self.calls.set(self.calls.get() + 1);
+            SolverResult::numerical_error()
+        }
+        fn can_skip_repeated_lp_scaling(&self) -> bool {
+            true
+        }
+    }
+
+    let mock = DeadlineRetryMock {
+        calls: Cell::new(0),
+    };
+    let fast = SolverOptions {
+        use_ruiz_scaling: false,
+        deadline: Some(Instant::now() - Duration::from_secs(1)),
+        ..SolverOptions::default()
+    };
+    let retry = SolverOptions {
+        use_ruiz_scaling: true,
+        deadline: fast.deadline,
+        ..SolverOptions::default()
+    };
+    let _ = super::solve_relaxation_with_scaling_retry(&mock, &[(0.0, 1.0)], &fast, &retry);
+
+    assert_eq!(
+        mock.calls.get(),
+        1,
+        "expired deadline must not trigger retry"
+    );
+}
+
 /// LP relaxation infeasibility populates infeasible_ms when LP (not propagation) detects it.
 ///
 /// x+y+z<=2.5, x+y>=2, y+z>=2, x+z>=2, x,y,z∈[0,2] integer.
@@ -777,7 +1063,8 @@ fn stats_timing_infeasible_ms_from_lp() {
         None,
     )
     .unwrap();
-    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1, 2]), &opts(), &MipConfig::default());
+    let (r, stats) =
+        solve_milp_with_stats(&milp(lp, vec![0, 1, 2]), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Infeasible);
     assert!(
         stats.nodes_processed >= 1,
@@ -1470,6 +1757,88 @@ fn bound_layout_changes_inf_ub_to_finite_drops_warm_start() {
     );
 }
 
+/// Sentinel: strong-branch trials drop the warm start on infinite→finite bound
+/// flips, same as the real-children path.
+///
+/// `max_nodes=1` + Reliability runs only the root's strong-branch trials (no
+/// child node is expanded), so every recorded child solve is a strong-branch
+/// trial. The down trial `(0.0, 1.0)` flips ub ∞→finite → layout changes →
+/// warm_start must be None. Removing the guard in `measure_strong_branch_scores`
+/// propagates the parent basis to the down trial → all-true → this test FAILS.
+#[test]
+fn strong_branch_drops_warm_start_on_layout_change() {
+    use crate::options::WarmStartBasis;
+    use std::cell::{Cell, RefCell};
+
+    struct InfBoundSbMock {
+        call: Cell<usize>,
+        trial_got_ws: RefCell<Vec<bool>>,
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+    }
+
+    impl super::Relaxation for InfBoundSbMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
+        fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            let n = self.call.get();
+            self.call.set(n + 1);
+            if n == 0 {
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 1.5,
+                    solution: vec![1.5],
+                    warm_start_basis: Some(WarmStartBasis {
+                        basis: vec![0],
+                        x_b: vec![1.5],
+                    }),
+                    ..SolverResult::default()
+                }
+            } else {
+                self.trial_got_ws
+                    .borrow_mut()
+                    .push(opts.warm_start.is_some());
+                let x = bounds[0].0.ceil();
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: x,
+                    solution: vec![x],
+                    ..SolverResult::default()
+                }
+            }
+        }
+        fn skip_node_presolve(&self) -> bool {
+            true
+        }
+    }
+
+    let cfg = MipConfig {
+        max_nodes: 1,
+        branching: crate::options::MipBranching::Reliability,
+        ..MipConfig::default()
+    };
+    let mock = InfBoundSbMock {
+        call: Cell::new(0),
+        trial_got_ws: RefCell::new(vec![]),
+        root_bounds: [(0.0, f64::INFINITY)],
+        int_vars: [0],
+    };
+    let _ = super::solve_mip_with_stats(&mock, &opts(), &cfg);
+    let got = mock.trial_got_ws.borrow();
+    assert!(
+        got.iter().any(|&ws| !ws),
+        "down strong-branch trial (ub ∞→finite) must drop the warm start; \
+         skipping the layout guard gives all-true: {got:?}"
+    );
+}
+
 /// B&B driver propagates parent warm-start basis to child nodes.
 ///
 /// Sentinel: replacing `node.child_warm(down, lb, ws)` with `node.child(down, lb)`
@@ -1899,6 +2268,8 @@ fn miqp_bt_reduces_bb_nodes_below_noop() {
 /// verifies that diving nodes are handled correctly (not lost, not double-visited)
 /// and the solver still reaches the known optimal solution.
 ///
+/// Cuts are disabled so the LP root remains fractional and branching is guaranteed.
+///
 /// Sentinel: removing `end_dive` flush in `NodeQueue::end_dive` can drop
 /// dive-stack nodes (losing subproblems) → the solver may miss the optimum
 /// and return a wrong objective or `SuboptimalSolution` → test FAILS.
@@ -1906,6 +2277,7 @@ fn miqp_bt_reduces_bb_nodes_below_noop() {
 fn hybrid_node_selection_correctness_3var_knapsack() {
     // min -6x0 - 10x1 - 5x2  s.t. 3x0+5x1+2x2 <= 6, xi in {0,1}.
     // Optimal: x0=1, x2=1 → obj=−11 (weight=5).
+    // LP relaxation is fractional (x1=0.2) so branching is guaranteed.
     let lp = build_lp(
         vec![-6.0, -10.0, -5.0],
         &[0, 0, 0],
@@ -1916,7 +2288,8 @@ fn hybrid_node_selection_correctness_3var_knapsack() {
         vec![ConstraintType::Le],
         vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)],
     );
-    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1, 2]), &opts(), &MipConfig::default());
+    let cfg = MipConfig { cuts: false, ..MipConfig::default() };
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1, 2]), &opts(), &cfg);
     assert_eq!(r.status, SolveStatus::Optimal, "got {:?}", r.status);
     assert!(
         (r.objective - (-11.0)).abs() < EPS,
@@ -1966,9 +2339,15 @@ fn dive_ends_on_infeasible_and_sibling_explored() {
         }
     }
     impl super::Relaxation for DiveMock {
-        fn num_vars(&self) -> usize { 1 }
-        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
-        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
         fn solve(&self, bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
             let n = self.call.get();
             self.call.set(n + 1);
@@ -2002,14 +2381,20 @@ fn dive_ends_on_infeasible_and_sibling_explored() {
     }
 
     let mock = DiveMock::new();
-    let cfg = MipConfig { branching: crate::options::MipBranching::MostFractional, ..MipConfig::default() };
+    let cfg = MipConfig {
+        branching: crate::options::MipBranching::MostFractional,
+        ..MipConfig::default()
+    };
     let (r, stats) = super::solve_mip_with_stats(&mock, &opts(), &cfg);
     assert_eq!(
-        r.status, SolveStatus::Optimal,
-        "sibling must be explored after infeasible dive node; got {:?}", r.status
+        r.status,
+        SolveStatus::Optimal,
+        "sibling must be explored after infeasible dive node; got {:?}",
+        r.status
     );
     assert_eq!(
-        mock.call.get(), 3,
+        mock.call.get(),
+        3,
         "all 3 nodes (root + 2 children) must be processed; got {}",
         mock.call.get()
     );
@@ -2047,9 +2432,15 @@ fn node_propagation_prunes_infeasible_node_before_lp() {
         lp_calls: Cell<usize>,
     }
     impl super::Relaxation for NodePropMock {
-        fn num_vars(&self) -> usize { 2 }
-        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
-        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn num_vars(&self) -> usize {
+            2
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
         fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
             self.lp_calls.set(self.lp_calls.get() + 1);
             SolverResult {
@@ -2063,9 +2454,8 @@ fn node_propagation_prunes_infeasible_node_before_lp() {
             Some((&self.a, &self.b, &self.ct))
         }
     }
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2,
-    ).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+        .unwrap();
     let mock = NodePropMock {
         a,
         b: vec![2.9, 2.1],
@@ -2089,7 +2479,8 @@ fn node_propagation_prunes_infeasible_node_before_lp() {
         "root itself counted in propagation_pruned; no-op gives 0"
     );
     assert_eq!(
-        mock.lp_calls.get(), 0,
+        mock.lp_calls.get(),
+        0,
         "LP must not be called when propagation prunes; no-op gives 1"
     );
 }
@@ -2107,9 +2498,15 @@ fn node_propagation_counter_increments_for_propagation_prune() {
         lp_calls: Cell<usize>,
     }
     impl super::Relaxation for NodePropMock2 {
-        fn num_vars(&self) -> usize { 2 }
-        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
-        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn num_vars(&self) -> usize {
+            2
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
         fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
             self.lp_calls.set(self.lp_calls.get() + 1);
             SolverResult {
@@ -2123,9 +2520,8 @@ fn node_propagation_counter_increments_for_propagation_prune() {
             Some((&self.a, &self.b, &self.ct))
         }
     }
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2,
-    ).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+        .unwrap();
     let mock = NodePropMock2 {
         a,
         b: vec![2.9, 2.1],
@@ -2154,7 +2550,8 @@ fn node_propagation_counter_increments_for_propagation_prune() {
 fn miqp_node_propagation_not_applied() {
     let qp = qp_problem(
         &[2.0, 2.0],
-        vec![0.0, 0.0],        &[0, 0],
+        vec![0.0, 0.0],
+        &[0, 0],
         &[0, 1],
         &[1.0, 1.0],
         1,
@@ -2205,7 +2602,10 @@ fn rc_fixing_fixes_at_upper_bound() {
     let res = lp_result_with_rc(0.0, vec![1.0], vec![-5.0]);
     let mut bounds = vec![(0.0_f64, 1.0_f64)];
     let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[0]);
-    assert_eq!(count, 1, "variable at ub with rc=-5 (-rc=5 > gap=3) must be fixed");
+    assert_eq!(
+        count, 1,
+        "variable at ub with rc=-5 (-rc=5 > gap=3) must be fixed"
+    );
     assert_eq!(bounds[0], (1.0, 1.0), "fixed to ub");
 }
 
@@ -2394,9 +2794,15 @@ fn rc_fixing_fires_in_bb_loop_stats_sentinel() {
     }
 
     impl super::Relaxation for RcMock {
-        fn num_vars(&self) -> usize { 2 }
-        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
-        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn num_vars(&self) -> usize {
+            2
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
         fn solve(&self, bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
             let n = self.call.get();
             self.call.set(n + 1);
@@ -2451,7 +2857,10 @@ fn rc_fixing_fires_in_bb_loop_stats_sentinel() {
         Some(initial_inc),
     );
     assert!(
-        matches!(r.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution),
+        matches!(
+            r.status,
+            SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+        ),
         "unexpected status {:?}",
         r.status
     );
@@ -2484,7 +2893,10 @@ fn rins_stats_zero_for_single_node_problem() {
     );
     let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Optimal);
-    assert_eq!(stats.rins_calls, 0, "RINS must not fire in single-node solve");
+    assert_eq!(
+        stats.rins_calls, 0,
+        "RINS must not fire in single-node solve"
+    );
     assert_eq!(stats.rins_improvements, 0);
 }
 
@@ -2506,7 +2918,10 @@ fn rins_disabled_still_optimal() {
         vec![ConstraintType::Le],
         vec![(0.0, 3.0), (0.0, 3.0)],
     );
-    let cfg = MipConfig { rins_enabled: false, ..MipConfig::default() };
+    let cfg = MipConfig {
+        rins_enabled: false,
+        ..MipConfig::default()
+    };
     let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &cfg);
     assert_eq!(r.status, SolveStatus::Optimal);
     assert!(r.objective < -2.9, "obj={}", r.objective);
@@ -2542,6 +2957,271 @@ fn rins_stats_improvements_le_calls() {
         stats.rins_improvements,
         stats.rins_calls
     );
+}
+
+// ---------------------------------------------------------------------------
+// RENS scheduling tests
+// ---------------------------------------------------------------------------
+
+use std::cell::{Cell, RefCell};
+
+struct RensScheduleMock {
+    calls: Cell<usize>,
+    root_bounds: [(f64, f64); 1],
+    int_vars: [usize; 1],
+    responses: RefCell<Vec<Option<SolverResult>>>,
+}
+
+impl RensScheduleMock {
+    fn new(responses: Vec<Option<SolverResult>>) -> Self {
+        Self {
+            calls: Cell::new(0),
+            root_bounds: [(0.0, 1.0)],
+            int_vars: [0],
+            responses: RefCell::new(responses),
+        }
+    }
+}
+
+impl super::Relaxation for RensScheduleMock {
+    fn num_vars(&self) -> usize {
+        1
+    }
+    fn root_bounds(&self) -> &[(f64, f64)] {
+        &self.root_bounds
+    }
+    fn integer_vars(&self) -> &[usize] {
+        &self.int_vars
+    }
+    fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+        unreachable!("RENS scheduling sentinel should not solve node relaxations")
+    }
+    fn run_rens(
+        &self,
+        _x_lp: &[f64],
+        _cfg: &MipConfig,
+        _deadline: &Option<std::time::Instant>,
+        _opts: &SolverOptions,
+    ) -> Option<SolverResult> {
+        self.calls.set(self.calls.get() + 1);
+        self.responses.borrow_mut().remove(0)
+    }
+}
+
+/// The first no-incumbent fractional node gets one immediate RENS try.
+///
+/// If that try succeeds, branch-and-bound now has an incumbent and RENS must
+/// return to the regular cadence immediately rather than keeping a special
+/// short-cycle mode alive.
+#[test]
+fn rens_first_incumbent_success_switches_to_regular_cadence() {
+    let problem = RensScheduleMock::new(vec![
+        Some(SolverResult {
+            status: SolveStatus::Optimal,
+            objective: -1.0,
+            solution: vec![1.0],
+            ..SolverResult::default()
+        }),
+        None,
+    ]);
+    let cfg = MipConfig::default();
+    let mut state = super::MipState::new();
+    let mut stats = super::MipStats {
+        nodes_processed: 1,
+        ..Default::default()
+    };
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "first fractional node must try RENS immediately"
+    );
+    assert_eq!(
+        stats.rens_calls, 1,
+        "rens_calls counts actual run_rens invocations"
+    );
+    assert_eq!(
+        stats.incumbent_updates, 1,
+        "successful first try must install the incumbent"
+    );
+    assert_eq!(state.incumbent_obj, Some(-1.0));
+    assert!(
+        state.rens_first_incumbent_attempted,
+        "the one-shot flag must be consumed by the first attempt"
+    );
+
+    stats.nodes_processed = 2;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "after the incumbent appears, the next non-cadence node must not re-run RENS"
+    );
+    assert_eq!(stats.rens_calls, 1);
+    assert_eq!(stats.incumbent_updates, 1);
+
+    stats.nodes_processed = super::heuristics::rens::RENS_INTERVAL_WITH_INCUMBENT;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        2,
+        "regular cadence must still trigger RENS later"
+    );
+    assert_eq!(stats.rens_calls, 2);
+    assert_eq!(
+        stats.incumbent_updates, 1,
+        "None must not be counted as an incumbent update"
+    );
+}
+
+/// The no-incumbent one-shot is consumed even when the first attempt fails.
+#[test]
+fn rens_first_incumbent_failure_waits_for_regular_cadence() {
+    let problem = RensScheduleMock::new(vec![None, None]);
+    let cfg = MipConfig::default();
+    let mut state = super::MipState::new();
+    let mut stats = super::MipStats {
+        nodes_processed: 1,
+        ..Default::default()
+    };
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "first fractional node must consume the one-shot attempt"
+    );
+    assert_eq!(stats.rens_calls, 1);
+    assert_eq!(state.incumbent_obj, None);
+    assert!(state.rens_first_incumbent_attempted);
+
+    stats.nodes_processed = 2;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "failed first-incumbent RENS must not spin on every following node"
+    );
+    assert_eq!(stats.rens_calls, 1);
+
+    stats.nodes_processed = super::heuristics::rens::RENS_INTERVAL_WITH_INCUMBENT;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        2,
+        "failed first try still returns to the regular cadence"
+    );
+    assert_eq!(stats.rens_calls, 2);
+}
+
+/// Starting with an incumbent skips the one-shot path and waits for cadence.
+#[test]
+fn rens_with_incumbent_waits_for_regular_interval() {
+    let problem = RensScheduleMock::new(vec![None]);
+    let cfg = MipConfig::default();
+    let incumbent = SolverResult {
+        status: SolveStatus::Optimal,
+        objective: -1.0,
+        solution: vec![1.0],
+        ..SolverResult::default()
+    };
+    let mut state = super::MipState::new();
+    let mut stats = super::MipStats {
+        nodes_processed: 1,
+        ..Default::default()
+    };
+    assert!(
+        state.consider(&incumbent),
+        "fixture should seed the incumbent"
+    );
+    assert!(
+        !state.rens_first_incumbent_attempted,
+        "seeding an incumbent directly must not consume the no-incumbent one-shot"
+    );
+
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        0,
+        "with an incumbent already present, RENS must wait for the regular cadence"
+    );
+    assert_eq!(stats.rens_calls, 0);
+    assert!(
+        !state.rens_first_incumbent_attempted,
+        "regular incumbent-driven scheduling must not touch the no-incumbent one-shot flag"
+    );
+
+    stats.nodes_processed = super::heuristics::rens::RENS_INTERVAL_WITH_INCUMBENT;
+    super::try_rens(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "regular cadence must trigger once an incumbent exists"
+    );
+    assert_eq!(stats.rens_calls, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -2626,5 +3306,78 @@ fn conflict_pruned_le_nodes_processed() {
         "conflict_pruned={} must be <= nodes_processed={}",
         stats.conflict_pruned,
         stats.nodes_processed
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Static symmetry breaking (lex-leader)
+// ---------------------------------------------------------------------------
+
+/// **Sentinel**: lex-leader symmetry breaking must reduce the node count on a
+/// highly symmetric instance WITHOUT changing the optimum.
+///
+/// Eight interchangeable binaries under `2·Σ x_i ≤ 9` (⇔ `Σ x_i ≤ 4.5`),
+/// maximising `Σ x_i` (min `−Σ x_i`). The integer optimum is 4 with `C(8,4)=70`
+/// symmetric optimal assignments; plain B&B explores the equivalent subtrees,
+/// while the lex-leader rows `x_i ≥ x_{i+1}` collapse each orbit to its single
+/// descending representative.
+///
+/// Cuts and RINS are disabled so the measured difference isolates the symmetry
+/// effect. Fails if symmetry is a no-op (equal node counts) or alters the
+/// optimum (objective mismatch).
+#[test]
+fn symmetry_breaking_reduces_nodes_and_preserves_optimum() {
+    let n = 8usize;
+    let rows: Vec<usize> = vec![0; n];
+    let cols: Vec<usize> = (0..n).collect();
+    let vals: Vec<f64> = vec![2.0; n];
+    let lp = build_lp(
+        vec![-1.0; n],
+        &rows,
+        &cols,
+        &vals,
+        1,
+        vec![9.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0); n],
+    );
+    let m = milp(lp, (0..n).collect());
+
+    let base = MipConfig {
+        cuts: false,
+        rins_enabled: false,
+        symmetry: false,
+        ..MipConfig::default()
+    };
+    let sym = MipConfig {
+        symmetry: true,
+        ..base.clone()
+    };
+
+    let (r_off, s_off) = solve_milp_with_stats(&m, &opts(), &base);
+    let (r_on, s_on) = solve_milp_with_stats(&m, &opts(), &sym);
+
+    assert_eq!(r_off.status, SolveStatus::Optimal, "baseline must solve");
+    assert_eq!(r_on.status, SolveStatus::Optimal, "symmetry run must solve");
+
+    // Optimum unchanged: both reach the true integer optimum −4.
+    assert!(
+        (r_off.objective - (-4.0)).abs() < 1e-6,
+        "baseline optimum must be -4, got {}",
+        r_off.objective
+    );
+    assert!(
+        (r_on.objective - r_off.objective).abs() < 1e-6,
+        "symmetry breaking changed the optimum: off={} on={}",
+        r_off.objective,
+        r_on.objective
+    );
+
+    // Node count strictly reduced.
+    assert!(
+        s_on.nodes_processed < s_off.nodes_processed,
+        "lex-leader must shrink the tree: off={} on={}",
+        s_off.nodes_processed,
+        s_on.nodes_processed
     );
 }

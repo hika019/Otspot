@@ -4,7 +4,8 @@ use crate::options::{SimplexMethod, SolverOptions, WarmStartBasis};
 use crate::presolve;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::qp::certificate::guard_lp_optimal;
-use crate::tolerances::PIVOT_TOL;
+use crate::qp::ipm_solver::kkt::bound_violation;
+use crate::qp::kkt_resid::f64_impl::primal_residual_rel;
 
 use super::dual;
 use super::dual_advanced;
@@ -42,6 +43,16 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
     if options.validate().is_err() {
         return SolverResult::numerical_error();
     }
+    let mut opts_with_tolerance;
+    let options = if options.tolerance.is_some() {
+        opts_with_tolerance = options.clone();
+        let eps = opts_with_tolerance.ipm_eps();
+        opts_with_tolerance.primal_tol = eps;
+        opts_with_tolerance.dual_tol = eps;
+        &opts_with_tolerance
+    } else {
+        options
+    };
     // timeout_secs → deadline (mirrors qp_solve_impl).
     let mut opts_with_deadline;
     let options = if let (Some(secs), true) = (options.timeout_secs, options.deadline.is_none()) {
@@ -225,10 +236,13 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     postsolve_us,
                     ..Default::default()
                 });
-                // Postsolve dfeas above PIVOT_TOL (or guard-caught KKT failure) means
-                // dual-recovery cannot reconstruct the structure presolve removed.
+                // Postsolve residuals above the requested LP tolerances mean the
+                // reduced solution did not reconstruct a valid original-space answer.
                 // The original LP solves cleanly, so re-attempt on the remaining deadline.
-                let postsolve_bad = res.postsolve_dfeas.is_some_and(|d| d > PIVOT_TOL)
+                let (postsolve_pfeas, postsolve_bfeas) = lp_primal_residuals(problem, &res);
+                let postsolve_bad = res.postsolve_dfeas.is_some_and(|d| d > options.dual_tol)
+                    || postsolve_pfeas > options.primal_tol
+                    || postsolve_bfeas > options.primal_tol
                     || res.status == SolveStatus::SuboptimalSolution;
                 if matches!(
                     res.status,
@@ -241,13 +255,18 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     if deadline_ok {
                         let mut opts_off = options.clone();
                         opts_off.presolve = false;
-                        // Force primal: 初回試行で feasibility 既知のため Primal で直行。
-                        opts_off.simplex_method = crate::options::SimplexMethod::Primal;
+                        // Auto: bounded dual path handles Eq+UB problems (e.g. cycle)
+                        // where forced Primal Phase II hits false-Timeout from tiny
+                        // numerical violations in the primal feasibility guard.
+                        opts_off.simplex_method = crate::options::SimplexMethod::Auto;
                         let t_alt_start = std::time::Instant::now();
                         let mut alt = solve_without_presolve(problem, &opts_off);
                         let alt_solve_us = t_alt_start.elapsed().as_micros() as u64;
+                        let (alt_pfeas, alt_bfeas) = lp_primal_residuals(problem, &alt);
                         if alt.status == SolveStatus::Optimal
                             && alt.postsolve_dfeas.is_none()
+                            && alt_pfeas <= options.primal_tol
+                            && alt_bfeas <= options.primal_tol
                             && alt.objective.is_finite()
                         {
                             // Preserve the original presolve/postsolve times: both phases
@@ -262,6 +281,9 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                             return alt;
                         }
                     }
+                }
+                if res.status == SolveStatus::Optimal && postsolve_bad {
+                    res.status = SolveStatus::SuboptimalSolution;
                 }
                 return res;
             }
@@ -305,6 +327,21 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
 }
 
 /// Solve without presolve.
+pub(crate) fn lp_primal_residuals(problem: &LpProblem, result: &SolverResult) -> (f64, f64) {
+    if result.solution.len() != problem.num_vars {
+        return (f64::INFINITY, f64::INFINITY);
+    }
+    (
+        primal_residual_rel(
+            &problem.a,
+            &problem.b,
+            &problem.constraint_types,
+            &result.solution,
+        ),
+        bound_violation(&problem.bounds, &result.solution),
+    )
+}
+
 pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let t_solve_start = std::time::Instant::now();
     let mut result = solve_without_presolve_inner(problem, options);
