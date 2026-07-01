@@ -25,6 +25,7 @@ pub use options::{
     BranchingStrategy, DualPricing, GlobalOptimizationConfig, LpWarmStart, MipBranching, MipConfig,
     SolverOptions, Tolerance, WarmStartBasis,
 };
+pub mod conic;
 #[doc(hidden)]
 pub mod linalg;
 pub mod lp;
@@ -64,6 +65,11 @@ pub mod diag {
 pub(crate) mod test_kkt;
 
 // --- re-export: ユーザーが最も使う型を最短パスで ---
+pub use conic::{
+    solve_miqcp, solve_misocp, solve_qcqp, solve_socp, BbOptions, ConeSpec, ConicOptions,
+    ConicProblem, ConicResult, MisocpProblem, MisocpResult, QcqpProblem, QcqpResult,
+    QuadConstraint,
+};
 pub use lp::solve_lp_with;
 pub use mip::{
     solve_milp, solve_milp_with_stats, solve_miqp, solve_miqp_with_stats, MilpProblem,
