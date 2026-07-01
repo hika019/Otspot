@@ -145,8 +145,16 @@ fn osa60_max_primal_infeasibility(lp: &LpProblem, x: &[f64]) -> (f64, f64) {
     let mut max_bound = 0.0_f64;
     for (&xj, &(lo, hi)) in x.iter().zip(lp.bounds.iter()) {
         let span = hi.abs().max(lo.abs()).max(1.0);
-        let below = if lo.is_finite() { (lo - xj).max(0.0) / span } else { 0.0 };
-        let above = if hi.is_finite() { (xj - hi).max(0.0) / span } else { 0.0 };
+        let below = if lo.is_finite() {
+            (lo - xj).max(0.0) / span
+        } else {
+            0.0
+        };
+        let above = if hi.is_finite() {
+            (xj - hi).max(0.0) / span
+        } else {
+            0.0
+        };
         max_bound = max_bound.max(below).max(above);
     }
     let ax = lp.a.mat_vec_mul(x).expect("Ax");
@@ -221,13 +229,12 @@ fn diag_osa60_is_feasible_and_honest() {
     const OBJ_SELF_TOL: f64 = 1e-9;
     const FEAS_TOL: f64 = 1e-6;
 
-    let recomputed_obj = lp
-        .c
-        .iter()
-        .zip(r.solution.iter())
-        .map(|(&c, &x)| c * x)
-        .sum::<f64>()
-        + lp.obj_offset;
+    let recomputed_obj =
+        lp.c.iter()
+            .zip(r.solution.iter())
+            .map(|(&c, &x)| c * x)
+            .sum::<f64>()
+            + lp.obj_offset;
     let obj_vs_known = (r.objective - KNOWN_OBJ).abs() / KNOWN_OBJ.abs();
     let denom = r.objective.abs().max(recomputed_obj.abs()).max(1.0);
     let obj_self_rel = (r.objective - recomputed_obj).abs() / denom;

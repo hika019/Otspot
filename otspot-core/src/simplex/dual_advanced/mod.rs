@@ -67,7 +67,9 @@ pub(crate) fn fallback_profile_delta(
         phase1_bound_violation: after
             .phase1_bound_violation
             .saturating_sub(before.phase1_bound_violation),
-        crash_infeasible: after.crash_infeasible.saturating_sub(before.crash_infeasible),
+        crash_infeasible: after
+            .crash_infeasible
+            .saturating_sub(before.crash_infeasible),
     }
 }
 
@@ -441,11 +443,10 @@ fn bounded_dispatch_disabled() -> bool {
     }
 }
 
-use dispatch::{try_bounded, try_bounded_phase1_eq};
 #[cfg(test)]
 use dispatch::diag_basis_initial_x_b;
+use dispatch::{try_bounded, try_bounded_phase1_eq};
 use pipeline::cold_start_advanced;
-
 
 // ── Wiring sentinels ──────────────────────────────────────────────────────────
 
@@ -676,7 +677,12 @@ mod tests {
         .unwrap();
         let sf = build_standard_form(&lp);
         let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
-        assert_eq!(r.status, SolveStatus::Optimal, "Ge+UB status: {:?}", r.status);
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "Ge+UB status: {:?}",
+            r.status
+        );
         assert!(
             (r.objective - 3.0).abs() < 1e-6,
             "Ge+UB obj={} expected 3",
@@ -849,7 +855,12 @@ mod tests {
         .unwrap();
         let sf = build_standard_form(&lp);
         let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
-        assert_eq!(r.status, SolveStatus::Optimal, "Ge dual status: {:?}", r.status);
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "Ge dual status: {:?}",
+            r.status
+        );
         assert!(
             (r.objective - 3.0).abs() < 1e-6,
             "Ge dual obj={:.6e} expected 3",
@@ -1417,14 +1428,8 @@ mod tests {
     /// (frac₁ ≈ 0.618 ≠ 0).
     fn lp_degenerate_2eq() -> LpProblem {
         use crate::sparse::CscMatrix;
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 1, 2],
-            &[1.0, 1.0, 1.0, 1.0],
-            2,
-            3,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 1, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3)
+            .unwrap();
         LpProblem::new_general(
             vec![1.0, 1.0, 1.0],
             a,
@@ -1469,7 +1474,11 @@ mod tests {
             r_off.objective
         );
         assert_eq!(r_off.solution.len(), 3);
-        assert!((r_off.solution[1] - 1.0).abs() < OBJ_TOL, "OFF: x1={:.6e}", r_off.solution[1]);
+        assert!(
+            (r_off.solution[1] - 1.0).abs() < OBJ_TOL,
+            "OFF: x1={:.6e}",
+            r_off.solution[1]
+        );
 
         for &mag in &[1e-7_f64, 1e-2_f64] {
             let _g = crate::ScopedDisable::new(

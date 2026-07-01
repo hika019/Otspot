@@ -91,7 +91,6 @@ fn lp_coverage_screen_all() {
     // Screening mode: do not assert — caller inspects output.
 }
 
-
 // ── Replacement tests (supersede timing-sensitive lp_coverage_screen_sample) ─
 
 /// Fast screening: same diversity coverage as lp_coverage_screen_sample but
@@ -99,8 +98,7 @@ fn lp_coverage_screen_all() {
 /// `cycle` is tested separately in lp_coverage_screen_cycle_tier2.
 #[test]
 fn lp_coverage_screen_sample_fast() {
-    let baseline = load_baseline_objectives(Path::new(BASELINE_CSV))
-        .expect("baseline CSV missing");
+    let baseline = load_baseline_objectives(Path::new(BASELINE_CSV)).expect("baseline CSV missing");
 
     let afiro_path = Path::new(FIXTURE_DIR).join("afiro.QPS");
     assert!(afiro_path.exists(), "tests/lp_problems/afiro.QPS missing");
@@ -138,7 +136,11 @@ fn lp_coverage_screen_sample_fast() {
         o.timeout_secs = Some(DEFAULT_TIMEOUT_SEC);
         let screen = screen_single(&path, name, &o, &baseline, DEFAULT_REL_TOL);
         if is_bug(&screen.verdict) {
-            bugs.push((screen.name, format!("{:?}", screen.verdict), screen.elapsed_secs));
+            bugs.push((
+                screen.name,
+                format!("{:?}", screen.verdict),
+                screen.elapsed_secs,
+            ));
         }
     }
     if found == 0 {
@@ -160,8 +162,7 @@ fn lp_coverage_screen_sample_fast() {
 #[test]
 #[ignore = "open #31: Optimal 未証明 (postsolve crossover storm)。現挙動は diag_cycle_is_feasible_and_near_optimal が honest 検証済"]
 fn lp_coverage_screen_cycle_tier2() {
-    let baseline = load_baseline_objectives(Path::new(BASELINE_CSV))
-        .expect("baseline CSV missing");
+    let baseline = load_baseline_objectives(Path::new(BASELINE_CSV)).expect("baseline CSV missing");
     let data_dir = Path::new(PROBLEMS_DIR);
     if !data_dir.exists() {
         eprintln!("SKIP: {} absent", PROBLEMS_DIR);

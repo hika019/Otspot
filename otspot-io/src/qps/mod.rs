@@ -640,7 +640,8 @@ ENDATA
     /// Sentinel: reverting to `continue` → Ok instead of Err.
     #[test]
     fn test_sentinel_qps_quadobj_undefined_column_is_error() {
-        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nRHS\nQUADOBJ\n    x1 ghost 2.0\nENDATA\n";
+        let qps =
+            "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nRHS\nQUADOBJ\n    x1 ghost 2.0\nENDATA\n";
         assert!(
             parse_qps_str(qps).is_err(),
             "QUADOBJ referencing undefined column must error, not be silently ignored"
@@ -672,7 +673,8 @@ ENDATA
     /// Sentinel: reverting trailing-token check → Ok instead of Err.
     #[test]
     fn test_sentinel_qps_columns_trailing_row_no_value_is_error() {
-        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0 obj\nRHS\n    rhs c1 5.0\nENDATA\n";
+        let qps =
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0 obj\nRHS\n    rhs c1 5.0\nENDATA\n";
         assert!(
             parse_qps_str(qps).is_err(),
             "trailing row name without a value in COLUMNS must error"
@@ -711,11 +713,7 @@ ENDATA
         assert_eq!(qp.num_constraints, 1, "num_constraints");
         assert_eq!(qp.c, vec![-1.0, -2.0], "linear objective c");
         assert_eq!(qp.b, vec![5.0], "RHS");
-        assert_eq!(
-            qp.constraint_types,
-            vec![ConstraintType::Le],
-            "L row → Le"
-        );
+        assert_eq!(qp.constraint_types, vec![ConstraintType::Le], "L row → Le");
         // Q[0,0] = 2.0
         let (rows0, vals0) = qp.q.get_column(0).expect("Q col 0 must exist");
         let q00 = rows0

@@ -528,8 +528,16 @@ fn step1_fixed_negative_value_updates_b_and_offset() {
     );
     step1_fixed_variable(&mut st, None).unwrap();
     assert!(st.removed_cols[0], "fixed col must be removed");
-    assert!((st.b[0] - 13.0).abs() < 1e-12, "b0 expected 13, got {}", st.b[0]);
-    assert!((st.b[1] - 32.0).abs() < 1e-12, "b1 expected 32, got {}", st.b[1]);
+    assert!(
+        (st.b[0] - 13.0).abs() < 1e-12,
+        "b0 expected 13, got {}",
+        st.b[0]
+    );
+    assert!(
+        (st.b[1] - 32.0).abs() < 1e-12,
+        "b1 expected 32, got {}",
+        st.b[1]
+    );
     assert!(
         (st.obj_offset - (-6.0)).abs() < 1e-12,
         "offset expected -6, got {}",
@@ -579,15 +587,17 @@ fn step2_singleton_negative_coeff_solves_negative_value() {
     );
     step2_singleton_row(&mut st, None).unwrap();
     assert!(st.removed_cols[0] && st.removed_rows[0]);
-    assert!((st.b[1] - 13.0).abs() < 1e-12, "b1 expected 13, got {}", st.b[1]);
+    assert!(
+        (st.b[1] - 13.0).abs() < 1e-12,
+        "b1 expected 13, got {}",
+        st.b[1]
+    );
     assert!(
         (st.obj_offset - (-3.0)).abs() < 1e-12,
         "offset expected -3, got {}",
         st.obj_offset
     );
 }
-
-
 
 #[test]
 fn step2_singleton_infeasible_out_of_bounds() {
@@ -758,7 +768,10 @@ fn step4_ge_constraint_redundant_when_activity_floor_dominates() {
         vec![(1.0, 5.0), (1.0, 5.0)],
     );
     step4_redundant_constraint(&mut st, None).unwrap();
-    assert!(st.removed_rows[0], "Ge with activity floor >= rhs must be redundant");
+    assert!(
+        st.removed_rows[0],
+        "Ge with activity floor >= rhs must be redundant"
+    );
 }
 
 #[test]
@@ -794,7 +807,10 @@ fn step4_eq_constraint_redundant_when_activity_pins_rhs() {
         vec![(2.0, 2.0), (2.0, 2.0)],
     );
     step4_redundant_constraint(&mut st, None).unwrap();
-    assert!(st.removed_rows[0], "Eq pinned to rhs by fixed vars must be redundant");
+    assert!(
+        st.removed_rows[0],
+        "Eq pinned to rhs by fixed vars must be redundant"
+    );
 }
 
 // -----------------------------------------------------------
@@ -817,9 +833,15 @@ fn step5_tightening_to_point_increments_new_fixed() {
     );
     let mut fixed = 0usize;
     step5_bounds_tightening(&mut st, &mut fixed, None).unwrap();
-    assert_eq!(fixed, 1, "tightening that pins lb==ub must count as a new fix");
+    assert_eq!(
+        fixed, 1,
+        "tightening that pins lb==ub must count as a new fix"
+    );
     let (lb, ub) = st.bounds[0];
-    assert!(lb.abs() < 1e-12 && ub.abs() < 1e-12, "bounds collapsed to [0,0]");
+    assert!(
+        lb.abs() < 1e-12 && ub.abs() < 1e-12,
+        "bounds collapsed to [0,0]"
+    );
 }
 
 // -----------------------------------------------------------
@@ -847,12 +869,18 @@ fn step6_opposite_sign_coeffs_tightens_other_bound() {
     let mut subst = 0usize;
     step6_doubleton_equation(&mut st, &mut subst, None).unwrap();
     assert_eq!(subst, 1);
-    assert!(st.removed_cols[0] && st.removed_rows[0], "pivot x0 eliminated");
+    assert!(
+        st.removed_cols[0] && st.removed_rows[0],
+        "pivot x0 eliminated"
+    );
     let (lb1, ub1) = st.bounds[1];
     assert!(lb1.abs() < 1e-12, "x1 lb stays 0, got {lb1}");
     assert!((ub1 - 8.0).abs() < 1e-12, "x1 ub tightened to 8, got {ub1}");
     assert!(count_linear_subst(&st) >= 1);
-    assert!(count_bounds_tightened(&st) >= 1, "ratio<0 must tighten other bound");
+    assert!(
+        count_bounds_tightened(&st) >= 1,
+        "ratio<0 must tighten other bound"
+    );
 }
 
 // -----------------------------------------------------------
@@ -1153,7 +1181,10 @@ fn step2b_forcing_single_var_skip() {
         vec![(0.0, 1.0)],
     );
     step2b_forcing_row(&mut st, None).unwrap();
-    assert!(!st.removed_rows[0], "singleton should not be caught by forcing");
+    assert!(
+        !st.removed_rows[0],
+        "singleton should not be caught by forcing"
+    );
 }
 
 #[test]
@@ -1191,7 +1222,10 @@ fn step2b_forcing_unbounded_var_skip() {
     step2b_forcing_row(&mut st, None).unwrap();
     // lb_fin is false due to y's lower bound being -inf, so activity_range min is not finite.
     // The forcing condition lb_fin && row_lb >= rhs fails.
-    assert!(!st.removed_rows[0], "unbounded contributing bound must skip");
+    assert!(
+        !st.removed_rows[0],
+        "unbounded contributing bound must skip"
+    );
 }
 
 #[test]

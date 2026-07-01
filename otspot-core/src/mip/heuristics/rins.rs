@@ -99,7 +99,11 @@ fn remaining_budget(deadline: &Option<Instant>) -> f64 {
         None => f64::INFINITY,
         Some(d) => {
             let now = Instant::now();
-            if now >= *d { 0.0 } else { (*d - now).as_secs_f64() }
+            if now >= *d {
+                0.0
+            } else {
+                (*d - now).as_secs_f64()
+            }
         }
     }
 }
@@ -150,8 +154,15 @@ mod tests {
         let x_lp = vec![1.4, 1.6];
         let x_inc = vec![1.0, 1.0];
 
-        let result = run_rins(&problem, &x_lp, &x_inc, &cfg, &None, &SolverOptions::default())
-            .expect("RINS must return Some when at least one variable is fixed");
+        let result = run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &None,
+            &SolverOptions::default(),
+        )
+        .expect("RINS must return Some when at least one variable is fixed");
         assert!(
             result.objective < -1.9,
             "RINS should improve below -2; got {}",
@@ -170,7 +181,15 @@ mod tests {
         let x_lp = vec![0.4, 2.6];
         let x_inc = vec![1.0, 2.0];
         assert!(
-            run_rins(&problem, &x_lp, &x_inc, &cfg, &None, &SolverOptions::default()).is_none(),
+            run_rins(
+                &problem,
+                &x_lp,
+                &x_inc,
+                &cfg,
+                &None,
+                &SolverOptions::default()
+            )
+            .is_none(),
             "RINS must return None when no variable is fixed"
         );
     }
@@ -186,8 +205,15 @@ mod tests {
         let x_inc = vec![1.0, 1.0];
         let past = Instant::now() - std::time::Duration::from_secs(1);
         assert!(
-            run_rins(&problem, &x_lp, &x_inc, &cfg, &Some(past), &SolverOptions::default())
-                .is_none(),
+            run_rins(
+                &problem,
+                &x_lp,
+                &x_inc,
+                &cfg,
+                &Some(past),
+                &SolverOptions::default()
+            )
+            .is_none(),
             "RINS must not run when deadline is expired"
         );
     }
@@ -198,7 +224,10 @@ mod tests {
     #[test]
     fn rins_disabled_cfg_does_not_break_solve() {
         let problem = two_var_milp([-1.0, -1.0], 3.0);
-        let cfg = MipConfig { rins_enabled: false, ..MipConfig::default() };
+        let cfg = MipConfig {
+            rins_enabled: false,
+            ..MipConfig::default()
+        };
         let opts = SolverOptions {
             timeout_secs: Some(5.0),
             ..Default::default()
@@ -239,11 +268,25 @@ mod tests {
         let x_inc = vec![1.0, 1.0];
 
         super::super::clear_recorded_sub_mip_configs();
-        let result = run_rins(&problem, &x_lp, &x_inc, &cfg, &None, &SolverOptions::default());
+        let result = run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &None,
+            &SolverOptions::default(),
+        );
         let configs = super::super::take_recorded_sub_mip_configs();
 
-        assert!(result.is_some(), "test premise: RINS must call the recursive sub-MIP");
-        assert_eq!(configs.len(), 1, "RINS run path must solve exactly one sub-MIP");
+        assert!(
+            result.is_some(),
+            "test premise: RINS must call the recursive sub-MIP"
+        );
+        assert_eq!(
+            configs.len(),
+            1,
+            "RINS run path must solve exactly one sub-MIP"
+        );
         let sub_cfg = &configs[0];
         assert_eq!(sub_cfg.max_nodes, RINS_NODE_LIMIT);
         assert!(!sub_cfg.rins_enabled, "recursive RINS must be disabled");

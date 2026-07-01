@@ -18,12 +18,12 @@ use super::super::trace::IterTrace;
 use super::super::SimplexOutcome;
 use super::ratio_test::{bland_ratio_test, HarrisRatioTest, RatioTestStrategy};
 use crate::basis::{BasisManager, LuBasis};
+use crate::linalg::timeout::deadline_reached;
 use crate::options::SolverOptions;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use crate::linalg::timeout::deadline_reached;
 
 /// Lex 摂動 (bland_mode 起動時): reduced_costs (non-basic) と x_b に
 /// `eps·(1+i/n)·scale` を加算し ratio test の tie を解消、Bland's rule の有限終了
@@ -451,8 +451,13 @@ pub(crate) fn dual_simplex_core_advanced(
         // 3e: ratio test → entering_col, theta
         // bland_mode では pure Bland (min ratio + smallest idx tiebreak)。
         let (mut candidate_indices, mut candidate_ratios, mut ratio_pick) = if bland_mode {
-            let (indices, ratios) =
-                collect_bland_ratio_candidates(&trow, &reduced_costs, price_excluded, n_enter, PIVOT_TOL);
+            let (indices, ratios) = collect_bland_ratio_candidates(
+                &trow,
+                &reduced_costs,
+                price_excluded,
+                n_enter,
+                PIVOT_TOL,
+            );
             let pick = bland_ratio_test(&trow, &reduced_costs, price_excluded, n_enter, PIVOT_TOL);
             (indices, ratios, pick)
         } else {
@@ -739,8 +744,7 @@ pub(crate) fn dual_simplex_core_advanced(
                     bland_mode = true;
                     iters_since_progress = 0;
                     // 初回エントリ: rc と x_b の両方を摂動する。
-                    let stats =
-                        apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, true);
+                    let stats = apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, true);
                     if let Some(t) = trace.as_mut() {
                         t.log_lex_perturbation(stats.delta, stats.effect);
                     }
@@ -846,7 +850,17 @@ mod tests {
             let mut leaving = MostInfeasibleLeaving;
             let mut iters = 0usize;
             dual_simplex_core_advanced(
-                &a, &mut x_b, &c, &mut basis, 1, 4, n_enter, false, &opts, &mut leaving, &mut iters,
+                &a,
+                &mut x_b,
+                &c,
+                &mut basis,
+                1,
+                4,
+                n_enter,
+                false,
+                &opts,
+                &mut leaving,
+                &mut iters,
             )
         };
 
@@ -915,7 +929,16 @@ mod tests {
             let mut leaving = AlwaysStallLeaving;
             let mut iters = 0usize;
             let out = dual_simplex_core_advanced(
-                &a, &mut x_b, &c, &mut basis, 1, 3, 3, yield_on_stall, &opts, &mut leaving,
+                &a,
+                &mut x_b,
+                &c,
+                &mut basis,
+                1,
+                3,
+                3,
+                yield_on_stall,
+                &opts,
+                &mut leaving,
                 &mut iters,
             );
             (out, iters)
@@ -1143,9 +1166,19 @@ mod tests {
         let before = CORE_RC_DEADLINE_CHECK_COUNT.with(|c| c.get());
         let deadline_far = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
         let rc_opt = compute_reduced_costs_timed(
-            &a, &c, &mut basis_mgr, &is_basic, n_synthetic, m, &basis, deadline_far,
+            &a,
+            &c,
+            &mut basis_mgr,
+            &is_basic,
+            n_synthetic,
+            m,
+            &basis,
+            deadline_far,
         );
-        assert!(rc_opt.is_some(), "RC compute must succeed (deadline is far)");
+        assert!(
+            rc_opt.is_some(),
+            "RC compute must succeed (deadline is far)"
+        );
         let rc = rc_opt.unwrap();
 
         let after = CORE_RC_DEADLINE_CHECK_COUNT.with(|c| c.get());
@@ -1324,7 +1357,10 @@ mod tests {
 
             let make_warm_opts = |pricing: DualPricing, basis: Vec<usize>| SolverOptions {
                 dual_pricing: pricing,
-                warm_start: Some(WarmStartBasis { basis, x_b: Vec::new() }),
+                warm_start: Some(WarmStartBasis {
+                    basis,
+                    x_b: Vec::new(),
+                }),
                 ..SolverOptions::default()
             };
 

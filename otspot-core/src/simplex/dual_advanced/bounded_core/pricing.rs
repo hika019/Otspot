@@ -1,8 +1,8 @@
 //! Reduced-cost pricing for bounded primal/dual simplex cores.
 
-use crate::linalg::timeout::deadline_reached;
 use super::super::super::dual_common::compute_dual_vars_into;
 use crate::basis::LuBasis;
+use crate::linalg::timeout::deadline_reached;
 use crate::sparse::CscMatrix;
 use std::time::Instant;
 

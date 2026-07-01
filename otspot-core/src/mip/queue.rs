@@ -251,7 +251,7 @@ mod tests {
         q.push(node(3.0, 0)); // heap
         q.start_dive();
         q.push(node(0.5, 1)); // dive_stack — lower bound, but NOT in heap
-        // best_lower_bound reflects only the heap.
+                              // best_lower_bound reflects only the heap.
         assert_eq!(q.best_lower_bound(), Some(3.0));
         q.end_dive();
         // After flush both are in heap; 0.5 becomes the best.
@@ -294,10 +294,16 @@ mod tests {
 
         // Next pop is the depth-2 grandchild (deepest first).
         let grandchild = q.pop().unwrap();
-        assert_eq!(grandchild.depth, 2, "depth-first: grandchild before sibling");
+        assert_eq!(
+            grandchild.depth, 2,
+            "depth-first: grandchild before sibling"
+        );
 
         // Remaining: child_a (depth 1) in dive_stack.
         let sibling = q.pop().unwrap();
-        assert_eq!(sibling.depth, 1, "sibling of child_b explored after grandchild");
+        assert_eq!(
+            sibling.depth, 1,
+            "sibling of child_b explored after grandchild"
+        );
     }
 }

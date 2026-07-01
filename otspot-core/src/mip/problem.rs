@@ -158,7 +158,9 @@ impl Relaxation for MilpProblem {
         if !cfg.local_branching_enabled {
             return None;
         }
-        crate::mip::heuristics::local_branching::run_local_branching(self, x_inc, cfg, deadline, opts)
+        crate::mip::heuristics::local_branching::run_local_branching(
+            self, x_inc, cfg, deadline, opts,
+        )
     }
 }
 

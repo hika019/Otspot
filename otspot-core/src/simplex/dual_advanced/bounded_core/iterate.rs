@@ -1,10 +1,10 @@
 //! Core dual simplex iteration loop for bounded standard form.
 
-use crate::linalg::timeout::deadline_reached;
 use super::extract::bounded_obj;
 use super::pricing::compute_reduced_costs_into_timed;
 use super::{BoundedDualState, BoundedOutcome};
 use crate::basis::{BasisManager, LuBasis};
+use crate::linalg::timeout::deadline_reached;
 use crate::options::SolverOptions;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
@@ -514,7 +514,13 @@ pub(crate) fn iterate(
 }
 
 /// FTRAN a column of `a` and dump into `out` (length `m`).
-pub(super) fn ftran_column(a: &CscMatrix, basis_mgr: &mut LuBasis, col: usize, m: usize, out: &mut [f64]) {
+pub(super) fn ftran_column(
+    a: &CscMatrix,
+    basis_mgr: &mut LuBasis,
+    col: usize,
+    m: usize,
+    out: &mut [f64],
+) {
     debug_assert_eq!(out.len(), m);
     out.fill(0.0);
     let (rows, vals) = a.get_column(col).unwrap();

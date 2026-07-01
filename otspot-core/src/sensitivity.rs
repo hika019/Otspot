@@ -67,7 +67,8 @@ fn legacy_basis_from_warm_start(
         let orig = col_to_orig[j];
         let at_upper = orig != usize::MAX && {
             let (_, ub) = problem.bounds[orig];
-            ub.is_finite() && (ub - solution.get(orig).copied().unwrap_or(0.0)).abs() <= BOUND_ACTIVE_TOL
+            ub.is_finite()
+                && (ub - solution.get(orig).copied().unwrap_or(0.0)).abs() <= BOUND_ACTIVE_TOL
         };
         // The structural column j is the UB-row basic only when j is non-basic at
         // its upper bound. If j is already basic (e.g. degenerate basic-at-upper),
@@ -325,7 +326,10 @@ pub fn compute_sensitivity(
         obj_ranges.push((delta_down, delta_up));
     }
 
-    Some(SensitivityResult { rhs_ranges, obj_ranges })
+    Some(SensitivityResult {
+        rhs_ranges,
+        obj_ranges,
+    })
 }
 
 #[cfg(test)]
@@ -356,14 +360,8 @@ mod tests {
     //   Obj[x2]: nonbasic at lb, rc=1 → Δ_down=1, Δ_up=∞
 
     fn make_2x2_lp() -> LpProblem {
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 0, 1],
-            &[0, 0, 1, 1],
-            &[1.0, 1.0, 1.0, 2.0],
-            2,
-            2,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 1.0, 1.0, 2.0], 2, 2)
+            .unwrap();
         LpProblem::new_general(
             vec![-2.0, -1.0],
             a,
@@ -380,16 +378,28 @@ mod tests {
         let lp = make_2x2_lp();
         let result = solve_no_presolve(&lp);
         assert_eq!(result.status, SolveStatus::Optimal);
-        let sens =
-            compute_sensitivity(&lp, &result).expect("should return Some for optimal LP with basis");
+        let sens = compute_sensitivity(&lp, &result)
+            .expect("should return Some for optimal LP with basis");
 
         let tol = 1e-6;
         let (down0, up0) = sens.rhs_ranges[0];
         let (down1, up1) = sens.rhs_ranges[1];
 
-        assert!((down0 - 4.0).abs() < tol, "RHS[0] Δ_down expected 4.0, got {}", down0);
-        assert!((up0 - 2.0).abs() < tol, "RHS[0] Δ_up expected 2.0, got {}", up0);
-        assert!((down1 - 2.0).abs() < tol, "RHS[1] Δ_down expected 2.0, got {}", down1);
+        assert!(
+            (down0 - 4.0).abs() < tol,
+            "RHS[0] Δ_down expected 4.0, got {}",
+            down0
+        );
+        assert!(
+            (up0 - 2.0).abs() < tol,
+            "RHS[0] Δ_up expected 2.0, got {}",
+            up0
+        );
+        assert!(
+            (down1 - 2.0).abs() < tol,
+            "RHS[1] Δ_down expected 2.0, got {}",
+            down1
+        );
         assert!(up1.is_infinite(), "RHS[1] Δ_up expected ∞, got {}", up1);
     }
 
@@ -443,7 +453,10 @@ mod tests {
         // At Δ_up boundary (b0 = 6): x_B = [6, 0] ≥ 0 (barely feasible).
         let xb0 = b0_new;
         let xb1 = 6.0 - b0_new;
-        assert!(xb0 >= -1e-9 && xb1 >= -1e-9, "basis must stay feasible at Δ_up boundary");
+        assert!(
+            xb0 >= -1e-9 && xb1 >= -1e-9,
+            "basis must stay feasible at Δ_up boundary"
+        );
     }
 
     // ── No-basis path returns None ────────────────────────────────────────────
@@ -653,8 +666,18 @@ mod tests {
             .chain(sens.obj_ranges.iter())
             .enumerate()
         {
-            assert!(d >= 0.0, "entry {} allowable_decrease must be >= 0, got {}", i, d);
-            assert!(u >= 0.0, "entry {} allowable_increase must be >= 0, got {}", i, u);
+            assert!(
+                d >= 0.0,
+                "entry {} allowable_decrease must be >= 0, got {}",
+                i,
+                d
+            );
+            assert!(
+                u >= 0.0,
+                "entry {} allowable_increase must be >= 0, got {}",
+                i,
+                u
+            );
         }
     }
 
@@ -671,14 +694,7 @@ mod tests {
     // RHS[1] (Le): standard slack path.
 
     fn make_ge_lp() -> LpProblem {
-        let a = CscMatrix::from_triplets(
-            &[0, 1],
-            &[0, 0],
-            &[1.0, 1.0],
-            2,
-            1,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
         LpProblem::new_general(
             vec![1.0],
             a,
@@ -739,14 +755,7 @@ mod tests {
 
     fn make_free_var_nonbasic_lp() -> LpProblem {
         // A has 1 row and 2 columns; only x1 (col 0) appears in the constraint.
-        let a = CscMatrix::from_triplets(
-            &[0],
-            &[0],
-            &[1.0],
-            1,
-            2,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 2).unwrap();
         LpProblem::new_general(
             vec![1.0, 0.0],
             a,
@@ -801,7 +810,10 @@ mod tests {
         let sens = compute_sensitivity(&lp, &result).expect("basis required");
 
         let (down, up) = sens.obj_ranges[0];
-        assert!(down.is_infinite() && down.is_sign_positive(), "fixed x down={down}");
+        assert!(
+            down.is_infinite() && down.is_sign_positive(),
+            "fixed x down={down}"
+        );
         assert!(up.is_infinite() && up.is_sign_positive(), "fixed x up={up}");
     }
 
@@ -833,7 +845,11 @@ mod tests {
         assert_eq!(sens.obj_ranges.len(), 2);
         // b0 in [10-6, 10+1]: down until x2=0, up until x2 hits its UB 7.
         let (down, up) = sens.rhs_ranges[0];
-        assert!((down - 6.0).abs() < 1e-6, "rhs down expected 6, got {}", down);
+        assert!(
+            (down - 6.0).abs() < 1e-6,
+            "rhs down expected 6, got {}",
+            down
+        );
         assert!((up - 1.0).abs() < 1e-6, "rhs up expected 1, got {}", up);
     }
 
@@ -862,7 +878,11 @@ mod tests {
             compute_sensitivity(&lp, &result).expect("bounded-form basis must yield sensitivity");
         // b0 in [2-2, 2+3]: down until x1=0, up until x1 hits its UB 5.
         let (down, up) = sens.rhs_ranges[0];
-        assert!((down - 2.0).abs() < 1e-6, "rhs down expected 2, got {}", down);
+        assert!(
+            (down - 2.0).abs() < 1e-6,
+            "rhs down expected 2, got {}",
+            down
+        );
         assert!((up - 3.0).abs() < 1e-6, "rhs up expected 3, got {}", up);
     }
 
@@ -884,7 +904,10 @@ mod tests {
         .unwrap();
         let result = solve_no_presolve(&lp);
         assert_eq!(result.status, SolveStatus::Optimal);
-        assert!((result.solution[0] - 4.0).abs() < 1e-9, "x1 must be at its UB");
+        assert!(
+            (result.solution[0] - 4.0).abs() < 1e-9,
+            "x1 must be at its UB"
+        );
         let sens = compute_sensitivity(&lp, &result)
             .expect("basic-at-upper degenerate basis must still yield sensitivity");
         assert_eq!(sens.rhs_ranges.len(), 2);

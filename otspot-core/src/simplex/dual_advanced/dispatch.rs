@@ -8,8 +8,8 @@ use super::{
     fallback_profile_enabled, make_leaving_strategy, warm_basis_is_dual_feasible,
     CRASH_INFEASIBLE_FALLBACKS,
 };
-use crate::linalg::timeout::deadline_reached;
 use crate::basis::{BasisManager, LuBasis};
+use crate::linalg::timeout::deadline_reached;
 use crate::presolve::{LpEquilibration, LpScalingResult};
 use crate::problem::{LpProblem, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};

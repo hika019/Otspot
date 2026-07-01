@@ -919,8 +919,9 @@ fn step9_postsolve_stack_pushed_and_noop_proof() {
     assert_eq!(n_steps, 1, "step9 must push SingletonIneqToBound");
 
     // No-op proof: thread-local skip → m_reduced unchanged (row NOT absorbed)
-    let result_noop =
-        with_skip_steps(&[9], || run_qp_presolve_phase1(&prob, &SolverOptions::default()));
+    let result_noop = with_skip_steps(&[9], || {
+        run_qp_presolve_phase1(&prob, &SolverOptions::default())
+    });
     assert_eq!(
         result_noop.reduced.num_constraints, 1,
         "no-op: skip step9 must leave singleton Le row in constraint matrix"

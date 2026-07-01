@@ -132,9 +132,9 @@ pub(crate) fn solve_ippmm_inner(
     let inexact_eta = inexact_eta_for_eps(eps_orig);
 
     // augmented LDL が memory budget 超過なら Schur (n×n SPD) に切替。
-    let use_schur = options.schur_hint.unwrap_or_else(|| {
-        auto_schur_enabled(problem, &a_ext, m_ext, options, &timeout_ctx, par)
-    });
+    let use_schur = options
+        .schur_hint
+        .unwrap_or_else(|| auto_schur_enabled(problem, &a_ext, m_ext, options, &timeout_ctx, par));
 
     // 終了条件は Some(Optimal) / Some(Timeout) のみ。MaxIterations 経路は除去。
     let mut status: Option<SolveStatus> = None;

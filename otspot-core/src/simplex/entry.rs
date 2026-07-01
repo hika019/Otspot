@@ -139,8 +139,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 // In tests the hook also bypasses the wall-clock deadline check so
                 // the sentinel doesn't depend on timing.
                 #[cfg(test)]
-                let deadline_expired =
-                    deadline_expired || INJECT_REDUCED_TIMEOUT.with(|v| v.get());
+                let deadline_expired = deadline_expired || INJECT_REDUCED_TIMEOUT.with(|v| v.get());
                 if raw.status == SolveStatus::Timeout && deadline_expired {
                     // The reduced solve timed out and the deadline is exhausted.
                     // `raw.solution` is in the *reduced* variable space — propagating
@@ -195,10 +194,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 // be called: it would fill solution/dual vectors from the postsolve stack
                 // (e.g. SingletonRow fixed values), producing a spurious non-empty
                 // solution with Infeasible/Unbounded status.
-                if matches!(
-                    raw.status,
-                    SolveStatus::Infeasible | SolveStatus::Unbounded
-                ) {
+                if matches!(raw.status, SolveStatus::Infeasible | SolveStatus::Unbounded) {
                     let objective = if raw.status == SolveStatus::Infeasible {
                         f64::INFINITY
                     } else {
@@ -1078,7 +1074,10 @@ mod tests {
 
         let pr = crate::presolve::run_presolve(&lp, None)
             .expect("make_partial_reducible_lp must not be Infeasible/Unbounded at presolve");
-        assert!(pr.was_reduced, "make_partial_reducible_lp must produce was_reduced=true");
+        assert!(
+            pr.was_reduced,
+            "make_partial_reducible_lp must produce was_reduced=true"
+        );
         let reduced_n = pr.reduced_problem.num_vars;
         assert!(
             reduced_n > 0 && reduced_n < orig_n,
@@ -1086,7 +1085,13 @@ mod tests {
         );
 
         // 1. Optimal path (no deadline): solution must be in original space.
-        let r = solve_with(&lp, &SolverOptions { presolve: true, ..Default::default() });
+        let r = solve_with(
+            &lp,
+            &SolverOptions {
+                presolve: true,
+                ..Default::default()
+            },
+        );
         assert_eq!(r.status, SolveStatus::Optimal);
         assert_eq!(
             r.solution.len(),
@@ -1100,10 +1105,20 @@ mod tests {
         // Pre-fix: early-return returned raw → solution.len() == reduced_n (< orig_n) → FAIL.
         // Post-fix: early-return returns vec![] → solution.len() == 0 → PASS.
         INJECT_REDUCED_TIMEOUT.with(|v| v.set(true));
-        let r = solve_with(&lp, &SolverOptions { presolve: true, ..Default::default() });
+        let r = solve_with(
+            &lp,
+            &SolverOptions {
+                presolve: true,
+                ..Default::default()
+            },
+        );
         INJECT_REDUCED_TIMEOUT.with(|v| v.set(false));
         let n = r.solution.len();
-        assert_eq!(r.status, SolveStatus::Timeout, "injected path must return Timeout");
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "injected path must return Timeout"
+        );
         assert!(
             n == 0 || n == orig_n,
             "injected Timeout: solution.len()={n} must be 0 or {orig_n} (orig), \
@@ -1121,9 +1136,19 @@ mod tests {
     fn reduced_timeout_preserves_iteration_count() {
         let lp = make_partial_reducible_lp();
         INJECT_REDUCED_TIMEOUT.with(|v| v.set(true));
-        let r = solve_with(&lp, &SolverOptions { presolve: true, ..Default::default() });
+        let r = solve_with(
+            &lp,
+            &SolverOptions {
+                presolve: true,
+                ..Default::default()
+            },
+        );
         INJECT_REDUCED_TIMEOUT.with(|v| v.set(false));
-        assert_eq!(r.status, SolveStatus::Timeout, "injected path must return Timeout");
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "injected path must return Timeout"
+        );
         assert_eq!(
             r.iterations, REDUCED_TIMEOUT_INJECT_ITERS,
             "reduced-space Timeout early-return must carry raw.iterations ({}); \
@@ -1196,7 +1221,10 @@ mod tests {
             result.dual_solution.is_empty(),
             "Infeasible result must have empty dual_solution"
         );
-        assert!(result.slack.is_empty(), "Infeasible result must have empty slack");
+        assert!(
+            result.slack.is_empty(),
+            "Infeasible result must have empty slack"
+        );
         assert_eq!(
             result.objective,
             f64::INFINITY,
@@ -1286,7 +1314,10 @@ mod tests {
             result.dual_solution.is_empty(),
             "Unbounded result must have empty dual_solution"
         );
-        assert!(result.slack.is_empty(), "Unbounded result must have empty slack");
+        assert!(
+            result.slack.is_empty(),
+            "Unbounded result must have empty slack"
+        );
         assert_eq!(
             result.objective,
             f64::NEG_INFINITY,

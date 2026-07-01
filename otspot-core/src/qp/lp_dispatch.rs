@@ -10,11 +10,11 @@ use super::certificate::guard_lp_optimal;
 use super::ipm_solver;
 use crate::options::SolverOptions;
 use crate::presolve;
-use crate::qp::ipm_solver::kkt::bound_violation;
-use crate::qp::kkt_resid::f64_impl::primal_residual_rel;
 #[cfg(test)]
 use crate::problem::ConstraintType;
 use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
+use crate::qp::ipm_solver::kkt::bound_violation;
+use crate::qp::kkt_resid::f64_impl::primal_residual_rel;
 use crate::sparse::CscMatrix;
 #[cfg(test)]
 use crate::tolerances::any_nonfinite;
@@ -366,7 +366,10 @@ fn should_try_lp_ipm(lp: &LpProblem, options: &SolverOptions) -> bool {
     if lp.num_constraints == 0 || lp.num_vars < lp.num_constraints {
         return false;
     }
-    if lp.num_vars.saturating_mul(LP_IPM_ASPECT_RATIO_MAX_DEN) > lp.num_constraints.saturating_mul(LP_IPM_ASPECT_RATIO_MAX_NUM) {
+    if lp.num_vars.saturating_mul(LP_IPM_ASPECT_RATIO_MAX_DEN)
+        > lp.num_constraints
+            .saturating_mul(LP_IPM_ASPECT_RATIO_MAX_NUM)
+    {
         return false;
     }
     if huge_wide_lp_timeout_guard(lp) {

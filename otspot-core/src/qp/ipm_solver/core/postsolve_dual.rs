@@ -5,10 +5,10 @@
 use crate::options::SolverOptions;
 use crate::presolve::qp_transforms::QpPostsolveStep;
 use crate::presolve::{recover_y_for_singleton_row_with_bound, QpPresolveResult};
-use crate::qp::kkt_resid::bound_contrib;
 use crate::problem::SolverResult;
 use crate::qp::ipm_solver::kkt::kkt_residual_rel;
 use crate::qp::ipm_solver::outcome::ProblemView;
+use crate::qp::kkt_resid::bound_contrib;
 use crate::qp::problem::QpProblem;
 
 const POST_LSQ_PROGRESS_EPS: f64 = 1e-12;

@@ -248,7 +248,9 @@ mod tests {
         let problem = build_problem(&[-2.0], &[0.0], vec![(f64::NEG_INFINITY, 1.0)]);
         let alpha = 1.0;
         let opts = SolverOptions::default();
-        assert!(alpha_bb_lower_bound(&problem, &problem.bounds, alpha, &opts, None, None).is_none());
+        assert!(
+            alpha_bb_lower_bound(&problem, &problem.bounds, alpha, &opts, None, None).is_none()
+        );
     }
 
     #[test]
@@ -277,9 +279,11 @@ mod tests {
         let alpha = gershgorin_alpha(&problem_wide.q);
         let opts = SolverOptions::default();
         let (lb_wide, _) =
-            alpha_bb_lower_bound(&problem_wide, &[(-2.0, 2.0)], alpha, &opts, None, None).expect("wide");
+            alpha_bb_lower_bound(&problem_wide, &[(-2.0, 2.0)], alpha, &opts, None, None)
+                .expect("wide");
         let (lb_narrow, _) =
-            alpha_bb_lower_bound(&problem_wide, &[(0.0, 1.0)], alpha, &opts, None, None).expect("narrow");
+            alpha_bb_lower_bound(&problem_wide, &[(0.0, 1.0)], alpha, &opts, None, None)
+                .expect("narrow");
         assert!(
             lb_narrow >= lb_wide - 1e-9,
             "narrow lb ({lb_narrow}) should not be worse than wide ({lb_wide})"
@@ -319,9 +323,8 @@ mod tests {
         let alpha = gershgorin_alpha(&problem.q);
         assert!(alpha > 0.0, "alpha must be positive for concave Q");
         let opts = SolverOptions::default();
-        let (lb, warm) =
-            alpha_bb_lower_bound(&problem, &node_bounds, alpha, &opts, None, None)
-                .expect("convex relaxation must solve on bounded concave 1d");
+        let (lb, warm) = alpha_bb_lower_bound(&problem, &node_bounds, alpha, &opts, None, None)
+            .expect("convex relaxation must solve on bounded concave 1d");
         assert!(lb.is_finite(), "lb must be finite");
         let ws = warm.expect("warm start must be Some when relaxation yields a solution");
         assert_eq!(ws.x.len(), 1, "warm start x must have 1 component");

@@ -185,7 +185,9 @@ pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut [f64]) {
 
 pub(crate) fn make_solve_scratch(lu: &LuFactorization) -> MemBuffer {
     let req_f = lu.symbolic.solve_in_place_scratch::<f64>(1, Par::Seq);
-    let req_b = lu.symbolic.solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
+    let req_b = lu
+        .symbolic
+        .solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
     MemBuffer::new(StackReq::any_of(&[req_f, req_b]))
 }
 
@@ -201,7 +203,9 @@ pub(crate) fn solve_ftran_cached(lu: &LuFactorization, rhs: &mut [f64], scratch:
 }
 
 pub(crate) fn solve_btran_cached(lu: &LuFactorization, rhs: &mut [f64], scratch: &mut MemBuffer) {
-    let req = lu.symbolic.solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
+    let req = lu
+        .symbolic
+        .solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
     if scratch.len() < req.size_bytes() {
         *scratch = MemBuffer::new(req);
     }

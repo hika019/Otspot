@@ -7,7 +7,10 @@ use otspot_core::sparse::CscMatrix;
 
 use super::types::{BoundType, Section};
 use super::QpsError;
-use crate::common::{mps_field, parse_mps_fixed_pairs, parse_mps_free_pairs, parse_objsense_value, RowType, SectionState};
+use crate::common::{
+    mps_field, parse_mps_fixed_pairs, parse_mps_free_pairs, parse_objsense_value, RowType,
+    SectionState,
+};
 
 pub(super) struct QpsParser {
     rows: Vec<(String, RowType)>,

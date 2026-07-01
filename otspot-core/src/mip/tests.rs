@@ -2288,7 +2288,10 @@ fn hybrid_node_selection_correctness_3var_knapsack() {
         vec![ConstraintType::Le],
         vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)],
     );
-    let cfg = MipConfig { cuts: false, ..MipConfig::default() };
+    let cfg = MipConfig {
+        cuts: false,
+        ..MipConfig::default()
+    };
     let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1, 2]), &opts(), &cfg);
     assert_eq!(r.status, SolveStatus::Optimal, "got {:?}", r.status);
     assert!(

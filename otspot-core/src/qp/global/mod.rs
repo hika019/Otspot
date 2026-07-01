@@ -336,9 +336,14 @@ fn compute_node_lower_bound(
         return (lb, None);
     }
     if use_alpha_bb {
-        if let Some((ab_lb, ab_warm)) =
-            alpha_bb_lower_bound(problem, bounds, alpha, base_opts, deadline, alpha_bb_warm_in)
-        {
+        if let Some((ab_lb, ab_warm)) = alpha_bb_lower_bound(
+            problem,
+            bounds,
+            alpha,
+            base_opts,
+            deadline,
+            alpha_bb_warm_in,
+        ) {
             lb = lb.max(ab_lb);
             ab_warm_out = ab_warm;
         }
@@ -491,7 +496,10 @@ fn is_polish_kkt_recovery(
     gap_tol: f64,
     user_eps: f64,
 ) -> bool {
-    if !matches!(polished.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
+    if !matches!(
+        polished.status,
+        SolveStatus::Optimal | SolveStatus::LocallyOptimal
+    ) {
         return false;
     }
     if !polished.objective.is_finite() {
@@ -623,22 +631,19 @@ impl SearchState {
         opts.timeout_secs = None;
         let user_eps = base_opts.ipm_eps();
         let polished = crate::qp::solve_qp_with(problem, &opts);
-        if is_polish_acceptable(&polished.status, polished.objective, self.incumbent_obj, gap_tol)
-            || is_polish_suboptimal_acceptable(
-                &polished,
-                problem,
-                self.incumbent_obj,
-                gap_tol,
-                user_eps,
-            )
-            || (relax_for_nonconvex
-                && is_polish_kkt_recovery(
-                    &polished,
-                    problem,
-                    self.incumbent_obj,
-                    gap_tol,
-                    user_eps,
-                ))
+        if is_polish_acceptable(
+            &polished.status,
+            polished.objective,
+            self.incumbent_obj,
+            gap_tol,
+        ) || is_polish_suboptimal_acceptable(
+            &polished,
+            problem,
+            self.incumbent_obj,
+            gap_tol,
+            user_eps,
+        ) || (relax_for_nonconvex
+            && is_polish_kkt_recovery(&polished, problem, self.incumbent_obj, gap_tol, user_eps))
         {
             self.update_incumbent(&polished);
         }
@@ -1750,7 +1755,10 @@ mod tests {
         let res = solve_qp_global(&problem, &o, &cfg);
 
         assert!(
-            matches!(res.status, SolveStatus::NonconvexLocal | SolveStatus::NonconvexGlobal),
+            matches!(
+                res.status,
+                SolveStatus::NonconvexLocal | SolveStatus::NonconvexGlobal
+            ),
             "expected NonconvexLocal/NonconvexGlobal, got {:?}",
             res.status
         );
@@ -1765,12 +1773,7 @@ mod tests {
             constraint_types: &problem.constraint_types,
             eliminated_cols: &elim,
         };
-        let comp = kkt_comp_residual(
-            &view,
-            &res.solution,
-            &res.dual_solution,
-            &res.bound_duals,
-        );
+        let comp = kkt_comp_residual(&view, &res.solution, &res.dual_solution, &res.bound_duals);
         let stat = kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals);
         let pf = kkt_primal_residual(&view, &res.solution);
         assert!(

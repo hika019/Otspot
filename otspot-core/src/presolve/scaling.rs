@@ -70,11 +70,7 @@ impl LpEquilibration {
     ///   c̃ = diag(col_scale) * c
     ///
     /// Iterates up to 20 rounds, stopping early when max scale change < 1e-4.
-    pub fn scale(
-        matrix: &CscMatrix,
-        b: &[f64],
-        c: &[f64],
-    ) -> LpScalingResult {
+    pub fn scale(matrix: &CscMatrix, b: &[f64], c: &[f64]) -> LpScalingResult {
         Self::scale_with_deadline(matrix, b, c, None)
             .expect("LpEquilibration::scale without deadline must not time out")
     }

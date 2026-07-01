@@ -56,7 +56,6 @@ use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 
-
 /// Check one Farkas direction `y` against `{A x = b, x ≥ 0}`.
 ///
 /// Returns `true` iff `b^T y > tol` and `A^T y ≤ tol` for all original columns.
@@ -633,7 +632,10 @@ pub(crate) fn big_m_cold_start(
             // ETA 累積誤差で `x_b` が drift しているので fresh FTRAN で再計算 (B⁻¹ b)。
             // ドリフトと数値悪化の両方を排除して soundness を強化 (reviewer P1)。
             let x_b_check: Vec<f64> = match crate::basis::LuBasis::new_timed(
-                &a_aug, &basis_aug, options.max_etas, options.deadline,
+                &a_aug,
+                &basis_aug,
+                options.max_etas,
+                options.deadline,
             ) {
                 Ok(mut bm) => {
                     let mut rhs = b.to_vec();
@@ -643,8 +645,8 @@ pub(crate) fn big_m_cold_start(
                 // factorize 失敗時は drift した x_b にフォールバック (元の動作)。
                 Err(_) => x_b.clone(),
             };
-            let any_positive_art = (0..m)
-                .any(|i| basis_aug[i] >= n_total && x_b_check[i] > options.primal_tol);
+            let any_positive_art =
+                (0..m).any(|i| basis_aug[i] >= n_total && x_b_check[i] > options.primal_tol);
             if any_positive_art {
                 let mut r = SolverResult::infeasible();
                 r.iterations = total_iters;
@@ -701,19 +703,32 @@ pub(crate) fn big_m_cold_start(
                             return r;
                         }
                         return super::super::timeout_result_with_incumbent(
-                            sf, problem, &basis_aug, &x_b, col_scale, total_iters,
+                            sf,
+                            problem,
+                            &basis_aug,
+                            &x_b,
+                            col_scale,
+                            total_iters,
                         );
                     }
                     SimplexOutcome::Timeout(_) => {
                         return super::super::timeout_result_with_incumbent(
-                            sf, problem, &basis_aug, &x_b, col_scale, total_iters,
+                            sf,
+                            problem,
+                            &basis_aug,
+                            &x_b,
+                            col_scale,
+                            total_iters,
                         );
                     }
                     SimplexOutcome::SingularBasis => return SolverResult::numerical_error(),
                     SimplexOutcome::Optimal(_, _) => {
                         // Phase I 完了: Phase II へ fall-through (下の Optimal 分岐と同一処理)
                         if let Ok(mut bm) = LuBasis::new_timed(
-                            &a_aug, &basis_aug, options.max_etas, options.deadline,
+                            &a_aug,
+                            &basis_aug,
+                            options.max_etas,
+                            options.deadline,
                         ) {
                             let mut rhs = SparseVec::from_dense(b);
                             bm.ftran(&mut rhs);
@@ -968,14 +983,9 @@ mod tests {
     /// path (default config solves it via crash; see report).
     #[test]
     fn big_m_phase1_artificial_lb_repair_edge_recovers_via_fallback() {
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 0, 1],
-            &[0, 0, 1, 1],
-            &[-2.0, -2.0, 1.0, 2.0],
-            2,
-            2,
-        )
-        .unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[-2.0, -2.0, 1.0, 2.0], 2, 2)
+                .unwrap();
         let lp = LpProblem::new_general(
             vec![1.0, 1.0],
             a,
@@ -1760,14 +1770,9 @@ mod tests {
         use super::farkas_direction_certified;
 
         // A_aug = [[1,1,0],[-1,0,1]], 2 rows, 3 cols. Col 0 = x0 (original), cols 1,2 = artificials.
-        let a_aug = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 2],
-            &[1.0, 1.0, -1.0, 1.0],
-            2,
-            3,
-        )
-        .unwrap();
+        let a_aug =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 2], &[1.0, 1.0, -1.0, 1.0], 2, 3)
+                .unwrap();
         let b = [1.0_f64, 2.0_f64];
         // y = [1,1] (already BTRAN'd from identity basis).
         let y = [1.0_f64, 1.0];
@@ -1790,8 +1795,7 @@ mod tests {
 
         // A_aug = [[1, 1]], b = [2.0], y = [1.0] (not in row space of A^T).
         // A^T y for j=0: 1*y[0] = 1 > tol (dual_tol * 2 ≈ 2e-7). → NOT certified.
-        let a_aug =
-            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let a_aug = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let b = [2.0_f64];
         let y = [1.0_f64];
         let tol = 1e-6_f64;
@@ -1814,14 +1818,8 @@ mod tests {
     #[test]
     fn big_m_phase1_infeasible_eq_ge_cancellation_class() {
         // x0 + x1 = 3, x0 + x1 >= 5 → infeasible (3 < 5).
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 1.0],
-            2,
-            2,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+            .unwrap();
         let lp = LpProblem::new_general(
             vec![1.0, 1.0],
             a,
@@ -1859,14 +1857,7 @@ mod tests {
         // x0 = 2 (Eq)  →  needs artificial a0
         // -x0 >= 1 (Ge) →  after flip: x0 ≤ -1, needs artificial a1
         // These are contradictory: no x0 >= 0 can satisfy both.
-        let a = CscMatrix::from_triplets(
-            &[0, 1],
-            &[0, 0],
-            &[1.0, -1.0],
-            2,
-            1,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, 1).unwrap();
         let lp = LpProblem::new_general(
             vec![1.0],
             a,

@@ -128,7 +128,11 @@ pub(super) fn select_leaving_bounded(
         }
     }
 
-    let chosen = if best_art.row.is_some() { best_art } else { best };
+    let chosen = if best_art.row.is_some() {
+        best_art
+    } else {
+        best
+    };
     match chosen.row {
         Some(row) => BoundedLeave::Pivot {
             row,

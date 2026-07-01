@@ -28,9 +28,30 @@ struct Expect {
 // Ground truth from the raw .QPS ROWS/COLUMNS sections. The parser converts
 // G (>=) rows into Le by negation, so `le` counts L plus G rows.
 const PROBLEMS: &[Expect] = &[
-    Expect { name: "israel",   vars: 142, cons: 174, le: 174, eq: 0,  known_opt: -8.9664482186e+05 },
-    Expect { name: "afiro",    vars: 32,  cons: 27,  le: 19,  eq: 8,  known_opt: -4.6475314286e+02 },
-    Expect { name: "adlittle", vars: 97,  cons: 56,  le: 41,  eq: 15, known_opt:  2.2549496316e+05 },
+    Expect {
+        name: "israel",
+        vars: 142,
+        cons: 174,
+        le: 174,
+        eq: 0,
+        known_opt: -8.9664482186e+05,
+    },
+    Expect {
+        name: "afiro",
+        vars: 32,
+        cons: 27,
+        le: 19,
+        eq: 8,
+        known_opt: -4.6475314286e+02,
+    },
+    Expect {
+        name: "adlittle",
+        vars: 97,
+        cons: 56,
+        le: 41,
+        eq: 15,
+        known_opt: 2.2549496316e+05,
+    },
 ];
 
 fn parse(name: &str) -> Option<QpProblem> {
@@ -49,8 +70,16 @@ fn parse(name: &str) -> Option<QpProblem> {
 fn parse_fidelity_matches_raw_qps() {
     for e in PROBLEMS {
         let Some(prob) = parse(e.name) else { continue };
-        let le = prob.constraint_types.iter().filter(|c| matches!(c, ConstraintType::Le)).count();
-        let eq = prob.constraint_types.iter().filter(|c| matches!(c, ConstraintType::Eq)).count();
+        let le = prob
+            .constraint_types
+            .iter()
+            .filter(|c| matches!(c, ConstraintType::Le))
+            .count();
+        let eq = prob
+            .constraint_types
+            .iter()
+            .filter(|c| matches!(c, ConstraintType::Eq))
+            .count();
         assert_eq!(prob.num_vars, e.vars, "{}: num_vars", e.name);
         assert_eq!(prob.num_constraints, e.cons, "{}: num_constraints", e.name);
         assert_eq!(le, e.le, "{}: Le count", e.name);
@@ -84,8 +113,18 @@ fn presolve_objective_invariance() {
         let Some(prob) = parse(e.name) else { continue };
         let on = solve(&prob, true);
         let off = solve(&prob, false);
-        assert_eq!(on.status, SolveStatus::Optimal, "{}: presolve=on status", e.name);
-        assert_eq!(off.status, SolveStatus::Optimal, "{}: presolve=off status", e.name);
+        assert_eq!(
+            on.status,
+            SolveStatus::Optimal,
+            "{}: presolve=on status",
+            e.name
+        );
+        assert_eq!(
+            off.status,
+            SolveStatus::Optimal,
+            "{}: presolve=off status",
+            e.name
+        );
         let scale = e.known_opt.abs().max(1.0);
         assert!(
             (on.objective - off.objective).abs() / scale < 1e-6,

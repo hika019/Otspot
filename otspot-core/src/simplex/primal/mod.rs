@@ -9,20 +9,20 @@ pub(crate) use core::revised_simplex_core;
 pub(crate) use crossover::{
     crossover_dual_from_primal, crossover_dual_from_primal_with_dual_warm_start,
 };
-pub(crate) use reconcile::{extract_solution, reconcile_final_basis_state};
 #[cfg(test)]
 pub(crate) use reconcile::pivot_out_degenerate_artificials as test_pivot_out_degenerate_artificials;
+pub(crate) use reconcile::{extract_solution, reconcile_final_basis_state};
 
+use self::reconcile::{check_eq_feasibility, pivot_out_degenerate_artificials, try_apply_crash};
+use super::dual_common::{basic_obj, lp_unbounded_ray_verified};
+use super::pricing::SteepestEdgePricing;
+use super::{extract_dual_info, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
 use crate::tolerances::*;
-use super::dual_common::{basic_obj, lp_unbounded_ray_verified};
-use super::pricing::SteepestEdgePricing;
-use super::{extract_dual_info, SimplexOutcome, StandardForm};
-use self::reconcile::{check_eq_feasibility, pivot_out_degenerate_artificials, try_apply_crash};
 
 #[allow(clippy::print_stderr)]
 fn trace_stage(message: impl std::fmt::Display) {
@@ -192,9 +192,7 @@ fn extract_farkas_certificate(
     n_original: usize,
     options: &SolverOptions,
 ) -> Vec<f64> {
-    let art_rows: Vec<usize> = (0..m)
-        .filter(|&i| basis[i] >= n_original)
-        .collect();
+    let art_rows: Vec<usize> = (0..m).filter(|&i| basis[i] >= n_original).collect();
     if art_rows.is_empty() {
         return vec![];
     }
@@ -361,7 +359,9 @@ fn build_phase1_system(
     let mut x_b = b.to_vec();
     let mut art_col = sf.n_total;
     for i in 0..m {
-        if !sf.needs_artificial[i] { continue; }
+        if !sf.needs_artificial[i] {
+            continue;
+        }
         trip_rows.push(i);
         trip_cols.push(art_col);
         trip_vals.push(1.0);
@@ -374,14 +374,21 @@ fn build_phase1_system(
     let mut c_phase1 = vec![0.0; n_ext];
     c_phase1[sf.n_total..].fill(1.0);
 
-    let crashed = if options.warm_start.is_none()
-        && options.use_lp_crash_basis
-        && sf.num_artificial > 0
-    {
-        try_apply_crash(&a_ext, m, sf.n_shifted, sf.n_total, b, options.max_etas, options.deadline, &basis)
-    } else {
-        None
-    };
+    let crashed =
+        if options.warm_start.is_none() && options.use_lp_crash_basis && sf.num_artificial > 0 {
+            try_apply_crash(
+                &a_ext,
+                m,
+                sf.n_shifted,
+                sf.n_total,
+                b,
+                options.max_etas,
+                options.deadline,
+                &basis,
+            )
+        } else {
+            None
+        };
     if let Some((crash_basis, crash_x_b)) = crashed {
         trace_stage("crash basis accepted");
         basis = crash_basis;
@@ -416,41 +423,88 @@ fn verify_phase1_feasibility(
 ) -> Result<(), SolverResult> {
     use crate::options::MAX_PHASE1_RETRIES;
     for attempt in 0..=MAX_PHASE1_RETRIES {
-        if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        if options
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
             break;
         }
         let mut y_dummy = vec![0.0f64; m];
         let rec_obj = match reconcile_final_basis_state(
-            a_ext, b, c_phase1, basis, x_b, &mut y_dummy,
-            options.max_etas, options.deadline,
+            a_ext,
+            b,
+            c_phase1,
+            basis,
+            x_b,
+            &mut y_dummy,
+            options.max_etas,
+            options.deadline,
         ) {
-            Ok(()) => (0..m).map(|i| c_phase1[basis[i]] * x_b[i].max(0.0)).sum::<f64>(),
-            Err(_) => { trace_stage("phase1 reconcile failed"); break; }
+            Ok(()) => (0..m)
+                .map(|i| c_phase1[basis[i]] * x_b[i].max(0.0))
+                .sum::<f64>(),
+            Err(_) => {
+                trace_stage("phase1 reconcile failed");
+                break;
+            }
         };
-        if rec_obj <= PIVOT_TOL { return Ok(()); }
-        if attempt == MAX_PHASE1_RETRIES { break; }
+        if rec_obj <= PIVOT_TOL {
+            return Ok(());
+        }
+        if attempt == MAX_PHASE1_RETRIES {
+            break;
+        }
 
-        for v in x_b.iter_mut() { if *v < 0.0 { *v = 0.0; } }
+        for v in x_b.iter_mut() {
+            if *v < 0.0 {
+                *v = 0.0;
+            }
+        }
         let mut pricing_retry = SteepestEdgePricing::new(n_ext);
         match revised_simplex_core(
-            a_ext, x_b, c_phase1, b, basis, m, n_ext, n_ext,
-            &mut pricing_retry, options, total_iters, true, Some(n_total), false, None,
+            a_ext,
+            x_b,
+            c_phase1,
+            b,
+            basis,
+            m,
+            n_ext,
+            n_ext,
+            &mut pricing_retry,
+            options,
+            total_iters,
+            true,
+            Some(n_total),
+            false,
+            None,
         ) {
             SimplexOutcome::Optimal(_, _) => {}
             SimplexOutcome::Unbounded => break,
             SimplexOutcome::Timeout(_) => {
                 let mut y_check = vec![0.0f64; m];
                 if reconcile_final_basis_state(
-                    a_ext, b, c_phase1, basis, x_b, &mut y_check,
-                    options.max_etas, options.deadline,
-                ).is_ok() {
-                    let rec_obj_retry: f64 = (0..m)
-                        .map(|i| c_phase1[basis[i]] * x_b[i].max(0.0)).sum();
-                    if rec_obj_retry <= PIVOT_TOL { return Ok(()); }
+                    a_ext,
+                    b,
+                    c_phase1,
+                    basis,
+                    x_b,
+                    &mut y_check,
+                    options.max_etas,
+                    options.deadline,
+                )
+                .is_ok()
+                {
+                    let rec_obj_retry: f64 =
+                        (0..m).map(|i| c_phase1[basis[i]] * x_b[i].max(0.0)).sum();
+                    if rec_obj_retry <= PIVOT_TOL {
+                        return Ok(());
+                    }
                 }
                 return Err(SolverResult {
-                    status: SolveStatus::Timeout, objective: f64::INFINITY,
-                    iterations: *total_iters, ..Default::default()
+                    status: SolveStatus::Timeout,
+                    objective: f64::INFINITY,
+                    iterations: *total_iters,
+                    ..Default::default()
                 });
             }
             SimplexOutcome::SingularBasis => {
@@ -482,27 +536,44 @@ fn transition_to_phase2(
 ) -> Result<Vec<f64>, SolverResult> {
     pivot_out_degenerate_artificials(a_ext, basis, x_b, sf, options);
     let remaining_art = basis.iter().filter(|&&col| col >= sf.n_total).count();
-    trace_stage(format_args!("pivot out degenerate artificials done remaining_art={remaining_art}"));
+    trace_stage(format_args!(
+        "pivot out degenerate artificials done remaining_art={remaining_art}"
+    ));
 
     let mut c_phase2 = vec![0.0; n_ext];
     c_phase2[..sf.n_total].copy_from_slice(&c[..sf.n_total]);
     {
         let mut y_transition = vec![0.0f64; m];
         match reconcile_final_basis_state(
-            a_ext, b, &c_phase2, basis, x_b, &mut y_transition,
-            options.max_etas, options.deadline,
+            a_ext,
+            b,
+            &c_phase2,
+            basis,
+            x_b,
+            &mut y_transition,
+            options.max_etas,
+            options.deadline,
         ) {
             Ok(()) => {}
             Err(crate::error::SolverError::DeadlineExceeded) => {
                 trace_stage("phase2 transition reconcile deadline");
                 let solution = extract_timeout_solution_reconciled(
-                    sf, a_ext, b, &c_phase2, basis, x_b, col_scale,
-                    options.max_etas, options.deadline,
+                    sf,
+                    a_ext,
+                    b,
+                    &c_phase2,
+                    basis,
+                    x_b,
+                    col_scale,
+                    options.max_etas,
+                    options.deadline,
                 );
                 return Err(SolverResult {
                     status: SolveStatus::Timeout,
                     objective: objective_from_solution(sf, problem, &solution),
-                    solution, iterations: total_iters, ..Default::default()
+                    solution,
+                    iterations: total_iters,
+                    ..Default::default()
                 });
             }
             Err(_) => {
@@ -512,9 +583,15 @@ fn transition_to_phase2(
         }
     }
     for i in 0..m {
-        if x_b[i].abs() < PIVOT_TOL { x_b[i] = PIVOT_TOL * (i as f64 + 1.0); }
+        if x_b[i].abs() < PIVOT_TOL {
+            x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
+        }
     }
-    for v in x_b.iter_mut() { if *v < 0.0 { *v = 0.0; } }
+    for v in x_b.iter_mut() {
+        if *v < 0.0 {
+            *v = 0.0;
+        }
+    }
     Ok(c_phase2)
 }
 
@@ -536,25 +613,56 @@ fn finalize_phase2(
     let n_cols = a.ncols;
     let mut pricing = SteepestEdgePricing::new(n_cols);
     let outcome = revised_simplex_core(
-        a, x_b, c, b, basis, m, n_cols, sf.n_total,
-        &mut pricing, options, total_iters, false, None, false, None,
+        a,
+        x_b,
+        c,
+        b,
+        basis,
+        m,
+        n_cols,
+        sf.n_total,
+        &mut pricing,
+        options,
+        total_iters,
+        false,
+        None,
+        false,
+        None,
     );
     let outcome = gate_phase2_unbounded(outcome, a, basis, c, x_b, m, n_cols, sf.n_total, options);
 
     match outcome {
         SimplexOutcome::Optimal(obj, mut y) => {
             match reconcile_final_basis_state(
-                a, b, c, basis, x_b, &mut y, options.max_etas, options.deadline,
+                a,
+                b,
+                c,
+                basis,
+                x_b,
+                &mut y,
+                options.max_etas,
+                options.deadline,
             ) {
                 Ok(()) => {}
                 Err(crate::error::SolverError::DeadlineExceeded) => {
                     trace_stage("phase2 final reconcile deadline");
                     let solution = extract_timeout_solution_reconciled(
-                        sf, a, b, c, basis, x_b, col_scale, options.max_etas, options.deadline,
+                        sf,
+                        a,
+                        b,
+                        c,
+                        basis,
+                        x_b,
+                        col_scale,
+                        options.max_etas,
+                        options.deadline,
                     );
                     return SolverResult {
-                        status: SolveStatus::Timeout, objective: obj + sf.obj_offset,
-                        solution, iterations: *total_iters, ..Default::default()
+                        status: SolveStatus::Timeout,
+                        objective: obj + sf.obj_offset,
+                        solution,
+                        iterations: *total_iters,
+                        ..Default::default()
                     };
                 }
                 Err(_) => {
@@ -572,22 +680,42 @@ fn finalize_phase2(
             SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj + sf.obj_offset,
-                solution, dual_solution, reduced_costs, slack,
-                warm_start_basis: Some(WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() }),
-                iterations: *total_iters, ..Default::default()
+                solution,
+                dual_solution,
+                reduced_costs,
+                slack,
+                warm_start_basis: Some(WarmStartBasis {
+                    basis: basis.to_vec(),
+                    x_b: x_b.to_vec(),
+                }),
+                iterations: *total_iters,
+                ..Default::default()
             }
         }
         SimplexOutcome::Unbounded => SolverResult {
-            status: SolveStatus::Unbounded, objective: f64::NEG_INFINITY,
-            iterations: *total_iters, ..Default::default()
+            status: SolveStatus::Unbounded,
+            objective: f64::NEG_INFINITY,
+            iterations: *total_iters,
+            ..Default::default()
         },
         SimplexOutcome::Timeout(obj) => {
             let solution = extract_timeout_solution_reconciled(
-                sf, a, b, c, basis, x_b, col_scale, options.max_etas, options.deadline,
+                sf,
+                a,
+                b,
+                c,
+                basis,
+                x_b,
+                col_scale,
+                options.max_etas,
+                options.deadline,
             );
             SolverResult {
-                status: SolveStatus::Timeout, objective: obj + sf.obj_offset,
-                solution, iterations: *total_iters, ..Default::default()
+                status: SolveStatus::Timeout,
+                objective: obj + sf.obj_offset,
+                solution,
+                iterations: *total_iters,
+                ..Default::default()
             }
         }
         SimplexOutcome::SingularBasis => {
@@ -609,7 +737,8 @@ pub(crate) fn two_phase_simplex(
     let mut total_iters: usize = 0;
 
     trace_stage(format_args!(
-        "start m={} n_total={} n_artificial={}", sf.m, sf.n_total, sf.num_artificial
+        "start m={} n_total={} n_artificial={}",
+        sf.m, sf.n_total, sf.num_artificial
     ));
 
     let (a, b, c, row_scale, col_scale) = if options.use_ruiz_scaling {
@@ -641,45 +770,93 @@ pub(crate) fn two_phase_simplex(
         let mut x_b = b.clone();
         adjust_xb_for_scaled_diag(&a, &basis, &mut x_b, m);
         return finalize_phase2(
-            sf, problem, &a, &b, &c, &mut basis, &mut x_b,
-            &col_scale, &row_scale, options, &mut total_iters,
+            sf,
+            problem,
+            &a,
+            &b,
+            &c,
+            &mut basis,
+            &mut x_b,
+            &col_scale,
+            &row_scale,
+            options,
+            &mut total_iters,
         );
     }
 
     // Phase I + Phase II
     trace_stage("phase1 setup start");
-    let (a_ext, mut basis, mut x_b, c_phase1, n_ext) =
-        build_phase1_system(sf, &a, &b, m, options);
+    let (a_ext, mut basis, mut x_b, c_phase1, n_ext) = build_phase1_system(sf, &a, &b, m, options);
     trace_stage(format_args!("phase1 setup done n_ext={n_ext}"));
 
     let mut pricing1 = SteepestEdgePricing::new(n_ext);
     trace_stage("phase1 core start");
     let phase1_outcome = revised_simplex_core(
-        &a_ext, &mut x_b, &c_phase1, &b, &mut basis, m, n_ext, n_ext,
-        &mut pricing1, options, &mut total_iters, true, Some(sf.n_total), false, None,
+        &a_ext,
+        &mut x_b,
+        &c_phase1,
+        &b,
+        &mut basis,
+        m,
+        n_ext,
+        n_ext,
+        &mut pricing1,
+        options,
+        &mut total_iters,
+        true,
+        Some(sf.n_total),
+        false,
+        None,
     );
 
     match phase1_outcome {
         SimplexOutcome::Optimal(_obj, _) => {
             trace_stage(format_args!("phase1 optimal iters={total_iters}"));
             if let Err(result) = verify_phase1_feasibility(
-                &a_ext, &b, &c_phase1, &mut basis, &mut x_b,
-                m, n_ext, sf.n_total, options, &mut total_iters,
+                &a_ext,
+                &b,
+                &c_phase1,
+                &mut basis,
+                &mut x_b,
+                m,
+                n_ext,
+                sf.n_total,
+                options,
+                &mut total_iters,
             ) {
                 return result;
             }
             trace_stage("pivot out degenerate artificials start");
             let c_phase2 = match transition_to_phase2(
-                sf, problem, &a_ext, &b, &c, &mut basis, &mut x_b,
-                &col_scale, m, n_ext, options, total_iters,
+                sf,
+                problem,
+                &a_ext,
+                &b,
+                &c,
+                &mut basis,
+                &mut x_b,
+                &col_scale,
+                m,
+                n_ext,
+                options,
+                total_iters,
             ) {
                 Ok(c2) => c2,
                 Err(result) => return result,
             };
             trace_stage("phase2 core start");
             finalize_phase2(
-                sf, problem, &a_ext, &b, &c_phase2, &mut basis, &mut x_b,
-                &col_scale, &row_scale, options, &mut total_iters,
+                sf,
+                problem,
+                &a_ext,
+                &b,
+                &c_phase2,
+                &mut basis,
+                &mut x_b,
+                &col_scale,
+                &row_scale,
+                options,
+                &mut total_iters,
             )
         }
         SimplexOutcome::Unbounded => {
@@ -688,43 +865,78 @@ pub(crate) fn two_phase_simplex(
             phase1_infeasibility_verdict(farkas, total_iters)
         }
         SimplexOutcome::Timeout(obj1) => {
-            trace_stage(format_args!("phase1 timeout iters={total_iters} obj={obj1:.9e}"));
+            trace_stage(format_args!(
+                "phase1 timeout iters={total_iters} obj={obj1:.9e}"
+            ));
             if obj1 > PIVOT_TOL {
                 return SolverResult {
-                    status: SolveStatus::Timeout, objective: f64::INFINITY,
-                    iterations: total_iters, ..Default::default()
+                    status: SolveStatus::Timeout,
+                    objective: f64::INFINITY,
+                    iterations: total_iters,
+                    ..Default::default()
                 };
             }
             // Near-feasible at timeout: reconcile and verify.
             {
                 let mut y_dummy = vec![0.0_f64; m];
                 if reconcile_final_basis_state(
-                    &a_ext, &b, &c_phase1, &basis, &mut x_b, &mut y_dummy,
-                    options.max_etas, options.deadline,
-                ).is_err() {
+                    &a_ext,
+                    &b,
+                    &c_phase1,
+                    &basis,
+                    &mut x_b,
+                    &mut y_dummy,
+                    options.max_etas,
+                    options.deadline,
+                )
+                .is_err()
+                {
                     return SolverResult {
-                        status: SolveStatus::Timeout, objective: f64::INFINITY,
-                        iterations: total_iters, ..Default::default()
+                        status: SolveStatus::Timeout,
+                        objective: f64::INFINITY,
+                        iterations: total_iters,
+                        ..Default::default()
                     };
                 }
             }
             let rec_obj: f64 = (0..m).map(|i| c_phase1[basis[i]] * x_b[i].max(0.0)).sum();
             if rec_obj > PIVOT_TOL {
                 return SolverResult {
-                    status: SolveStatus::Timeout, objective: f64::INFINITY,
-                    iterations: total_iters, ..Default::default()
+                    status: SolveStatus::Timeout,
+                    objective: f64::INFINITY,
+                    iterations: total_iters,
+                    ..Default::default()
                 };
             }
             let c_phase2 = match transition_to_phase2(
-                sf, problem, &a_ext, &b, &c, &mut basis, &mut x_b,
-                &col_scale, m, n_ext, options, total_iters,
+                sf,
+                problem,
+                &a_ext,
+                &b,
+                &c,
+                &mut basis,
+                &mut x_b,
+                &col_scale,
+                m,
+                n_ext,
+                options,
+                total_iters,
             ) {
                 Ok(c2) => c2,
                 Err(result) => return result,
             };
             finalize_phase2(
-                sf, problem, &a_ext, &b, &c_phase2, &mut basis, &mut x_b,
-                &col_scale, &row_scale, options, &mut total_iters,
+                sf,
+                problem,
+                &a_ext,
+                &b,
+                &c_phase2,
+                &mut basis,
+                &mut x_b,
+                &col_scale,
+                &row_scale,
+                options,
+                &mut total_iters,
             )
         }
         SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
@@ -844,7 +1056,7 @@ mod cycle_perturbation_tests {
     #[test]
     fn selective_charnes_perturb_spares_large_values() {
         let m = 4usize;
-        let eps = PIVOT_TOL * (m as f64);       // = step_zero_threshold
+        let eps = PIVOT_TOL * (m as f64); // = step_zero_threshold
         let thresh = eps;
 
         // Mix of large (non-degenerate) and near-zero (degenerate) values.
@@ -854,21 +1066,32 @@ mod cycle_perturbation_tests {
         test_apply_selective_charnes_perturb(&mut x_b, m);
 
         // Non-degenerate rows: must be UNCHANGED.
-        assert_eq!(x_b[0], saved[0], "x_b[0]=100 must not be modified (non-degenerate)");
-        assert_eq!(x_b[3], saved[1], "x_b[3]=50 must not be modified (non-degenerate)");
+        assert_eq!(
+            x_b[0], saved[0],
+            "x_b[0]=100 must not be modified (non-degenerate)"
+        );
+        assert_eq!(
+            x_b[3], saved[1],
+            "x_b[3]=50 must not be modified (non-degenerate)"
+        );
 
         // Near-zero rows: must become eps*(i+1) (unique small positives).
         // i=1 → eps*(1+1) = eps*2; i=2 → eps*(2+1) = eps*3.
         assert_eq!(
-            x_b[1], eps * 2.0,
+            x_b[1],
+            eps * 2.0,
             "x_b[1]=0 at i=1 must become eps*(1+1)=eps*2"
         );
         assert_eq!(
-            x_b[2], eps * 3.0,
+            x_b[2],
+            eps * 3.0,
             "x_b[2]=thresh*0.5 at i=2 must become eps*(2+1)=eps*3"
         );
         // Perturbed values must be distinct and positive.
-        assert!(x_b[1] > 0.0 && x_b[2] > 0.0, "perturbed values must be positive");
+        assert!(
+            x_b[1] > 0.0 && x_b[2] > 0.0,
+            "perturbed values must be positive"
+        );
         assert!(
             (x_b[1] - x_b[2]).abs() > 1e-20,
             "perturbed values must be distinct"

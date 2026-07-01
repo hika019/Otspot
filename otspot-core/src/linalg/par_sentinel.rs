@@ -333,8 +333,7 @@ fn ipm_threads_1_par_seq_budget_sentinel() {
     // s.t. 0 ≤ x ≤ 3 → 最適解 x=1, obj=-1
     let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
-    let prob =
-        QpProblem::new(q, vec![-2.0], a, vec![], vec![(0.0_f64, 3.0_f64)], vec![]).unwrap();
+    let prob = QpProblem::new(q, vec![-2.0], a, vec![], vec![(0.0_f64, 3.0_f64)], vec![]).unwrap();
 
     let opts = SolverOptions {
         threads: 1,
@@ -358,7 +357,10 @@ fn ipm_threads_1_par_seq_budget_sentinel() {
         .expect("build 1-thread rayon pool");
 
     let pool_size = pool.install(rayon::current_num_threads);
-    assert_eq!(pool_size, 1, "installed pool must report exactly 1 active thread");
+    assert_eq!(
+        pool_size, 1,
+        "installed pool must report exactly 1 active thread"
+    );
 
     let result = pool.install(|| solve_qp_with(&prob, &opts));
     assert_eq!(
@@ -391,8 +393,7 @@ fn ipm_threads_2_par_rayon_budget_sentinel() {
 
     let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
-    let prob =
-        QpProblem::new(q, vec![-2.0], a, vec![], vec![(0.0_f64, 3.0_f64)], vec![]).unwrap();
+    let prob = QpProblem::new(q, vec![-2.0], a, vec![], vec![(0.0_f64, 3.0_f64)], vec![]).unwrap();
 
     let opts = SolverOptions {
         threads: 2,
@@ -416,7 +417,10 @@ fn ipm_threads_2_par_rayon_budget_sentinel() {
         .expect("build 2-thread rayon pool");
 
     let pool_size = pool.install(rayon::current_num_threads);
-    assert_eq!(pool_size, 2, "installed pool must report exactly 2 active threads");
+    assert_eq!(
+        pool_size, 2,
+        "installed pool must report exactly 2 active threads"
+    );
 
     let result = pool.install(|| solve_qp_with(&prob, &opts));
     assert_eq!(

@@ -91,8 +91,7 @@ fn propagation_pass(
         let updates =
             propagate_row_bounds(row, bounds, constraint_types[i], b[i], Some(integer_mask))?;
         for (j, new_lb, new_ub) in updates {
-            if (new_lb - bounds[j].0).abs() > ZERO_TOL || (new_ub - bounds[j].1).abs() > ZERO_TOL
-            {
+            if (new_lb - bounds[j].0).abs() > ZERO_TOL || (new_ub - bounds[j].1).abs() > ZERO_TOL {
                 tightened += 1;
             }
             bounds[j] = (new_lb, new_ub);
@@ -164,10 +163,7 @@ pub(crate) fn tighten_bounds_at_node(
 /// Returns `None` when infeasibility is detected. Returns the tightened bounds
 /// otherwise.
 #[cfg(test)]
-fn tighten_integer_bounds(
-    lp: &LpProblem,
-    integer_mask: &[bool],
-) -> Option<Vec<(f64, f64)>> {
+fn tighten_integer_bounds(lp: &LpProblem, integer_mask: &[bool]) -> Option<Vec<(f64, f64)>> {
     tighten_bounds_linear(
         lp.num_vars,
         &lp.a,
@@ -355,8 +351,7 @@ pub fn tighten_bounds_with_probing(
                 bounds.copy_from_slice(&bounds_vec);
                 return Some(summary);
             }
-            let t =
-                propagation_pass(&rows, constraint_types, b, &mut bounds_vec, &integer_mask)?;
+            let t = propagation_pass(&rows, constraint_types, b, &mut bounds_vec, &integer_mask)?;
             if t == 0 {
                 break;
             }
@@ -584,9 +579,8 @@ mod tests {
     /// contradiction and skips LP pruning → assertion fails.
     #[test]
     fn at_node_infeasible_returns_err() {
-        let a =
-            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
-                .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+            .unwrap();
         let b = vec![2.9, 2.1];
         let ct = vec![ConstraintType::Le, ConstraintType::Ge];
         let mask = vec![true, true];
@@ -638,8 +632,7 @@ mod tests {
     /// Pass 2: row0 uses x1_ub=0 → implied_ub(x0) = 0.3+0=0.3 → floor(0.3)=0. Tightened.
     #[test]
     fn multi_pass_tightens_chain_that_single_pass_misses() {
-        let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, -1.0, 1.0], 2, 2)
-            .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, -1.0, 1.0], 2, 2).unwrap();
         let lp = LpProblem::new_general(
             vec![1.0, 1.0],
             a,
@@ -675,7 +668,11 @@ mod tests {
         let mask = vec![true];
         let bounds =
             tighten_bounds_at_node(1, &a, &b, &ct, &[(0.0, 3.0)], &mask).expect("feasible");
-        assert_eq!(bounds, vec![(0.0, 3.0)], "no tightening possible → unchanged");
+        assert_eq!(
+            bounds,
+            vec![(0.0, 3.0)],
+            "no tightening possible → unchanged"
+        );
     }
 
     /// Multi-pass: second pass tightens beyond what one pass achieves.
@@ -686,14 +683,8 @@ mod tests {
     /// Pass 2: no further change → fixed-point.
     #[test]
     fn at_node_multi_pass_tightens_cascade() {
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 2, 1],
-            &[1.0, 1.0, 1.0, 1.0],
-            2,
-            3,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 2, 1], &[1.0, 1.0, 1.0, 1.0], 2, 3)
+            .unwrap();
         let b = vec![3.5, 2.5];
         let ct = vec![ConstraintType::Le, ConstraintType::Ge];
         let mask = vec![true, true, true];
@@ -714,14 +705,8 @@ mod tests {
     /// Multi-pass terminates without hanging.
     #[test]
     fn multi_pass_terminates() {
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 1.0],
-            2,
-            2,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+            .unwrap();
         let lp = LpProblem::new_general(
             vec![1.0, 1.0],
             a,
@@ -790,15 +775,8 @@ mod tests {
     fn probing_fixes_var_when_one_fixing_is_infeasible() {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let mut bounds = vec![(0.0_f64, 1.0_f64)];
-        tighten_bounds_with_probing(
-            &a,
-            &[0.5],
-            &[ConstraintType::Le],
-            &mut bounds,
-            &[0],
-            None,
-        )
-        .expect("feasible");
+        tighten_bounds_with_probing(&a, &[0.5], &[ConstraintType::Le], &mut bounds, &[0], None)
+            .expect("feasible");
         assert!(
             (bounds[0].0 - 0.0).abs() < 1e-9 && (bounds[0].1 - 0.0).abs() < 1e-9,
             "x0 must be fixed to 0, got [{},{}]",
@@ -844,9 +822,7 @@ mod tests {
 
     #[test]
     fn probing_near_empty_integer_bounds_without_integer_point_is_infeasible() {
-        assert!(
-            canonicalize_tightened_bounds(29.25, 29.25 - ZERO_TOL * 0.5, true).is_none()
-        );
+        assert!(canonicalize_tightened_bounds(29.25, 29.25 - ZERO_TOL * 0.5, true).is_none());
     }
 
     /// PresolveSummary is returned on a trivial no-constraint instance.

@@ -855,7 +855,10 @@ fn test_step7_free_var_fillin_must_not_blow_up() {
          {}-var / {}-constraint LP (budget {:.1}s). The free-var elimination cost \
          grows super-linearly as columns densify — see fill_in_exceeds_budget / \
          eliminate_variable_via_eq_row in presolve/transforms.",
-        elapsed, ncols, nrows, MAX_PRESOLVE_SECS
+        elapsed,
+        ncols,
+        nrows,
+        MAX_PRESOLVE_SECS
     );
 }
 
@@ -880,7 +883,10 @@ fn test_singleton_le_reduces_and_round_trips() {
     );
     let result = run_presolve(&lp, None).unwrap();
     assert!(result.was_reduced, "singleton Le must reduce the problem");
-    assert_eq!(result.reduced_problem.num_constraints, 1, "singleton Le row removed");
+    assert_eq!(
+        result.reduced_problem.num_constraints, 1,
+        "singleton Le row removed"
+    );
 }
 
 #[test]
@@ -900,7 +906,10 @@ fn test_singleton_ge_reduces_and_round_trips() {
     );
     let result = run_presolve(&lp, None).unwrap();
     assert!(result.was_reduced, "singleton Ge must reduce the problem");
-    assert_eq!(result.reduced_problem.num_constraints, 1, "singleton Ge row removed");
+    assert_eq!(
+        result.reduced_problem.num_constraints, 1,
+        "singleton Ge row removed"
+    );
 }
 
 #[test]
@@ -970,7 +979,10 @@ fn test_forcing_ge_reduces() {
     let result = run_presolve(&lp, None).unwrap();
     assert!(result.was_reduced);
     assert_eq!(result.reduced_problem.num_vars, 0);
-    assert!((result.obj_offset - 3.0).abs() < 1e-10, "obj = 1*1 + 1*2 = 3");
+    assert!(
+        (result.obj_offset - 3.0).abs() < 1e-10,
+        "obj = 1*1 + 1*2 = 3"
+    );
 }
 
 #[test]
@@ -1041,14 +1053,19 @@ fn test_forcing_row_dual_le_with_prior_fixed_variable() {
         &[0, 0, 0],
         &[0, 1, 2],
         &[1.0, 1.0, 1.0],
-        1, 3,
+        1,
+        3,
         vec![5.0],
         vec![ConstraintType::Le],
         vec![(5.0, 5.0), (0.0, 2.0), (0.0, 2.0)],
     );
     let result = crate::simplex::solve(&lp);
     assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
-    assert!((result.solution[0] - 5.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(
+        (result.solution[0] - 5.0).abs() < 1e-6,
+        "x0={}",
+        result.solution[0]
+    );
     assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
     assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
     // Le row is binding; dual must be -1.
@@ -1074,16 +1091,29 @@ fn test_forcing_row_dual_ge_with_prior_fixed_variable() {
         &[0, 0, 0],
         &[0, 1, 2],
         &[1.0, 1.0, 1.0],
-        1, 3,
+        1,
+        3,
         vec![5.0],
         vec![ConstraintType::Ge],
         vec![(1.0, 1.0), (0.0, 2.0), (0.0, 2.0)],
     );
     let result = crate::simplex::solve(&lp);
     assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
-    assert!((result.solution[0] - 1.0).abs() < 1e-6, "x0={}", result.solution[0]);
-    assert!((result.solution[1] - 2.0).abs() < 1e-6, "x1={}", result.solution[1]);
-    assert!((result.solution[2] - 2.0).abs() < 1e-6, "x2={}", result.solution[2]);
+    assert!(
+        (result.solution[0] - 1.0).abs() < 1e-6,
+        "x0={}",
+        result.solution[0]
+    );
+    assert!(
+        (result.solution[1] - 2.0).abs() < 1e-6,
+        "x1={}",
+        result.solution[1]
+    );
+    assert!(
+        (result.solution[2] - 2.0).abs() < 1e-6,
+        "x2={}",
+        result.solution[2]
+    );
     // Ge row is binding; dual must be 1.
     assert!(
         (result.dual_solution[0] - 1.0).abs() < 1e-6,
@@ -1107,15 +1137,24 @@ fn test_forcing_row_dual_le_multiple_prior_fixed_vars() {
         &[0, 0, 0, 0],
         &[0, 1, 2, 3],
         &[1.0, 1.0, 1.0, 1.0],
-        1, 4,
+        1,
+        4,
         vec![3.0],
         vec![ConstraintType::Le],
         vec![(1.0, 1.0), (2.0, 2.0), (0.0, 2.0), (0.0, 2.0)],
     );
     let result = crate::simplex::solve(&lp);
     assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
-    assert!((result.solution[0] - 1.0).abs() < 1e-6, "x0={}", result.solution[0]);
-    assert!((result.solution[1] - 2.0).abs() < 1e-6, "x1={}", result.solution[1]);
+    assert!(
+        (result.solution[0] - 1.0).abs() < 1e-6,
+        "x0={}",
+        result.solution[0]
+    );
+    assert!(
+        (result.solution[1] - 2.0).abs() < 1e-6,
+        "x1={}",
+        result.solution[1]
+    );
     assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
     assert!(result.solution[3].abs() < 1e-6, "x3={}", result.solution[3]);
     // Le row is binding; dual must be -1.
@@ -1141,14 +1180,19 @@ fn test_forcing_row_dual_eq_with_prior_fixed_variable() {
         &[0, 0, 0],
         &[0, 1, 2],
         &[1.0, 1.0, 1.0],
-        1, 3,
+        1,
+        3,
         vec![5.0],
         vec![ConstraintType::Eq],
         vec![(5.0, 5.0), (0.0, 2.0), (0.0, 2.0)],
     );
     let result = crate::simplex::solve(&lp);
     assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
-    assert!((result.solution[0] - 5.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(
+        (result.solution[0] - 5.0).abs() < 1e-6,
+        "x0={}",
+        result.solution[0]
+    );
     assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
     assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
     assert!(
@@ -1176,16 +1220,25 @@ fn test_forcing_row_dual_le_mixed_sign_with_prior_fixed_variable() {
         &[0, 0, 0],
         &[0, 1, 2],
         &[2.0, 1.0, -1.0],
-        1, 3,
+        1,
+        3,
         vec![-1.0],
         vec![ConstraintType::Le],
         vec![(1.0, 1.0), (0.0, 3.0), (0.0, 3.0)],
     );
     let result = crate::simplex::solve(&lp);
     assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
-    assert!((result.solution[0] - 1.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(
+        (result.solution[0] - 1.0).abs() < 1e-6,
+        "x0={}",
+        result.solution[0]
+    );
     assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
-    assert!((result.solution[2] - 3.0).abs() < 1e-6, "x2={}", result.solution[2]);
+    assert!(
+        (result.solution[2] - 3.0).abs() < 1e-6,
+        "x2={}",
+        result.solution[2]
+    );
     assert!(
         (result.dual_solution[0] - (-1.0)).abs() < 1e-6,
         "dual should be -1, got {}",
@@ -1210,14 +1263,19 @@ fn test_forcing_row_dual_multirow_with_prior_fixed_variable() {
         &[0, 0, 0, 1, 1],
         &[0, 1, 2, 1, 2],
         &[1.0, 1.0, 1.0, 1.0, 1.0],
-        2, 3,
+        2,
+        3,
         vec![5.0, 10.0],
         vec![ConstraintType::Le, ConstraintType::Le],
         vec![(5.0, 5.0), (0.0, 2.0), (0.0, 2.0)],
     );
     let result = crate::simplex::solve(&lp);
     assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
-    assert!((result.solution[0] - 5.0).abs() < 1e-6, "x0={}", result.solution[0]);
+    assert!(
+        (result.solution[0] - 5.0).abs() < 1e-6,
+        "x0={}",
+        result.solution[0]
+    );
     assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
     assert!(result.solution[2].abs() < 1e-6, "x2={}", result.solution[2]);
     assert!(

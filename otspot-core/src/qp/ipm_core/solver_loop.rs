@@ -1049,7 +1049,10 @@ mod tests {
             &mut dy_live,
             Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
         );
-        assert!(dx_live[0].abs() > 1e-12, "live deadline should solve: dx={dx_live:?}");
+        assert!(
+            dx_live[0].abs() > 1e-12,
+            "live deadline should solve: dx={dx_live:?}"
+        );
 
         // sentinel: expired deadline must force zeroed directions.
         let mut dx_expired = vec![3.0];

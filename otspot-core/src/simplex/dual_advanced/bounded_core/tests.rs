@@ -268,9 +268,7 @@ fn measure_iterate_residual(
     }
     let pre_residual = basis_rhs_residual(&state, &bsf);
     let opts = SolverOptions {
-        deadline: Some(
-            std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms),
-        ),
+        deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms)),
         ..SolverOptions::default()
     };
     let _guard = if flip_disabled {
@@ -1346,7 +1344,10 @@ fn select_leaving_bounded_phase1_artificial_outside_band_noop() {
         other => panic!("expected Pivot, got {other:?}"),
     };
     assert_eq!(on_row, 0, "out-of-band artificial must NOT be selected");
-    assert_eq!(on_row, off_row, "preference is a no-op outside the tie-band");
+    assert_eq!(
+        on_row, off_row,
+        "preference is a no-op outside the tie-band"
+    );
 }
 
 /// Sentinel: `compute_reduced_costs_into_timed` must issue at most
@@ -1482,7 +1483,10 @@ fn primal_ftran_alpha_sv_numerical_equiv() {
     )
     .unwrap();
     let basis = vec![2usize, 3]; // slack basis
-    let opts = SolverOptions { max_etas: 50, ..SolverOptions::default() };
+    let opts = SolverOptions {
+        max_etas: 50,
+        ..SolverOptions::default()
+    };
     let mut basis_mgr = LuBasis::new_timed(&a, &basis, opts.max_etas, None).unwrap();
 
     for col in 0..2usize {
@@ -1516,7 +1520,11 @@ fn primal_ftran_alpha_sv_numerical_equiv() {
 
         // Algebraic no-op proof: a zero sparse vector must differ from the
         // correct FTRAN result, proving `from_dense` is non-trivially correct.
-        let zero_sv = SparseVec { indices: vec![], values: vec![], len: m };
+        let zero_sv = SparseVec {
+            indices: vec![],
+            values: vec![],
+            len: m,
+        };
         let d_zero = zero_sv.to_dense();
         let max_diff: f64 = (0..m)
             .map(|i| (d_old[i] - d_zero[i]).abs())
@@ -1658,7 +1666,9 @@ fn primal_simplex_aug_single_ftran_reaches_feasible() {
     };
     let opts = SolverOptions::default();
     let mut iters = 0usize;
-    let outcome = bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters);
+    let outcome = bounded_primal_phase1(
+        &a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters,
+    );
 
     match outcome {
         SimplexOutcome::Optimal(art_sum, _) => {
@@ -1708,7 +1718,9 @@ fn primal_simplex_aug_single_ftran_noop_proof() {
     let mut iters = 0usize;
 
     let _guard = PrimalAlphaSvGuard::disabled();
-    let outcome = bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters);
+    let outcome = bounded_primal_phase1(
+        &a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters,
+    );
 
     match outcome {
         SimplexOutcome::Optimal(art_sum, _) => {
@@ -1777,8 +1789,9 @@ fn solve_degenerate_via_core(opts: &SolverOptions) -> f64 {
     let c_p1 = vec![0.0f64, 0.0, 0.0, 1.0, 1.0];
     let mut state = fresh_phase1_state();
     let mut iters = 0usize;
-    match bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, opts, &mut iters)
-    {
+    match bounded_primal_phase1(
+        &a_aug, &c_p1, &ubs_aug, n_struct, &mut state, opts, &mut iters,
+    ) {
         SimplexOutcome::Optimal(art_sum, _) => {
             assert!(art_sum.abs() < 1e-9, "Phase I art_sum {art_sum:.3e} ≠ 0");
         }
@@ -1843,21 +1856,29 @@ fn bland_leaving_breaks_ties_by_smallest_index() {
     let ubs = vec![f64::INFINITY; 6];
     let inf = f64::INFINITY;
 
-    let bland_row = match select_leaving_bland_bounded(
-        &alpha, 1.0, &x_b, &basis, &ubs, inf, 2, PIVOT_TOL,
-    ) {
-        BoundedLeave::Pivot { row, .. } => row,
-        other => panic!("expected Bland Pivot, got {other:?}"),
-    };
+    let bland_row =
+        match select_leaving_bland_bounded(&alpha, 1.0, &x_b, &basis, &ubs, inf, 2, PIVOT_TOL) {
+            BoundedLeave::Pivot { row, .. } => row,
+            other => panic!("expected Bland Pivot, got {other:?}"),
+        };
     let harris_row = match select_leaving_bounded(
         &alpha, 1.0, &x_b, &basis, &ubs, inf, 2, PIVOT_TOL, 1e-9, None,
     ) {
         BoundedLeave::Pivot { row, .. } => row,
         other => panic!("expected Harris Pivot, got {other:?}"),
     };
-    assert_eq!(bland_row, 1, "Bland must take the smallest-index row (basis 3)");
-    assert_eq!(harris_row, 0, "Harris must take the largest-pivot row (pivot 2.0)");
-    assert_ne!(bland_row, harris_row, "the two rules must diverge on this tie");
+    assert_eq!(
+        bland_row, 1,
+        "Bland must take the smallest-index row (basis 3)"
+    );
+    assert_eq!(
+        harris_row, 0,
+        "Harris must take the largest-pivot row (pivot 2.0)"
+    );
+    assert_ne!(
+        bland_row, harris_row,
+        "the two rules must diverge on this tie"
+    );
 }
 
 /// Bland entering returns the smallest *improving* column index, skipping
@@ -1989,10 +2010,8 @@ fn solve_phase2_obj(lp: &LpProblem, chunk: usize) -> (f64, usize, u64) {
 /// a single-window false-optimal (or dropping flips) diverges the objective.
 #[test]
 fn partial_pricing_phase2_matches_full_and_preserves_flips() {
-    let cases: [(LpProblem, f64); 2] = [
-        (lp_boxed_2x2_degenerate(), -6.0),
-        (lp2_boxed_flip(), -14.0),
-    ];
+    let cases: [(LpProblem, f64); 2] =
+        [(lp_boxed_2x2_degenerate(), -6.0), (lp2_boxed_flip(), -14.0)];
     let mut any_flip = false;
     for (lp, known) in &cases {
         let (obj_full, _, flips_full) = solve_phase2_obj(lp, FULL_PRICE);
@@ -2183,8 +2202,9 @@ fn partial_pricing_aug_phase1_matches_full() {
         let _g = PartialPriceChunkGuard::set(chunk);
         let mut state = build_state();
         let mut iters = 0usize;
-        match bounded_primal_phase1(&a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters)
-        {
+        match bounded_primal_phase1(
+            &a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters,
+        ) {
             SimplexOutcome::Optimal(art_sum, _) => art_sum,
             other => panic!("expected Phase I Optimal, got {other:?}"),
         }
@@ -2207,10 +2227,8 @@ fn partial_pricing_aug_phase1_matches_full() {
 /// different objective value, failing the equality assertion.
 #[test]
 fn phase2_primal_bland_matches_devex() {
-    let cases: [(LpProblem, f64); 2] = [
-        (lp_boxed_2x2_degenerate(), -6.0),
-        (lp2_boxed_flip(), -14.0),
-    ];
+    let cases: [(LpProblem, f64); 2] =
+        [(lp_boxed_2x2_degenerate(), -6.0), (lp2_boxed_flip(), -14.0)];
     for (lp, known) in &cases {
         let (obj_devex, _, _) = solve_phase2_obj(lp, FULL_PRICE);
         let (obj_bland, _, _) = {
@@ -2270,9 +2288,7 @@ fn phase2_primal_degenerate_lp_converges() {
 
     let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n).unwrap();
     let ctypes = vec![ConstraintType::Le; m];
-    let bounds: Vec<(f64, f64)> = (0..n)
-        .map(|j| (0.0, 1.0 + 0.01 * (j as f64)))
-        .collect();
+    let bounds: Vec<(f64, f64)> = (0..n).map(|j| (0.0, 1.0 + 0.01 * (j as f64))).collect();
     let lp = LpProblem::new_general(c.clone(), a, b, ctypes, bounds, None).unwrap();
 
     let bsf = build_bounded_standard_form(&lp);

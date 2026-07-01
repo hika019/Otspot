@@ -9,7 +9,9 @@ use otspot_core::sparse::CscMatrix;
 use super::types::{
     integer_marker_kind, BoundType, IntegerMarker, Section, INTEGER_DEFAULT_UPPER_BINARY,
 };
-use crate::common::{is_fixed_width_format, parse_mps_free_pairs, parse_objsense_value, RowType, SectionState};
+use crate::common::{
+    is_fixed_width_format, parse_mps_free_pairs, parse_objsense_value, RowType, SectionState,
+};
 
 pub(super) struct MpsParser {
     problem_name: Option<String>,
@@ -352,8 +354,10 @@ impl MpsParser {
             _ => return Err(MpsError::InvalidBoundType(bound_type_str.to_string())),
         };
 
-        let value_required =
-            matches!(bound_type, BoundType::LO | BoundType::UP | BoundType::FX | BoundType::LI | BoundType::UI);
+        let value_required = matches!(
+            bound_type,
+            BoundType::LO | BoundType::UP | BoundType::FX | BoundType::LI | BoundType::UI
+        );
         if value_required && value.is_none() {
             return Err(MpsError::ParseError {
                 line: line_num,

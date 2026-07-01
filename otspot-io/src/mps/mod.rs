@@ -1168,7 +1168,8 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
     /// Sentinel: reverting the break→error → Ok instead of Err.
     #[test]
     fn test_sentinel_mps_columns_trailing_row_no_value_is_error() {
-        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1\nRHS\n    rhs c1 5.0\nENDATA\n";
+        let mps =
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1\nRHS\n    rhs c1 5.0\nENDATA\n";
         assert!(
             parse_mps(mps).is_err(),
             "trailing row name without a value in COLUMNS must error in MPS"
@@ -1252,11 +1253,7 @@ ENDATA
         let lp = parse_mps(mps).expect("bva_mps_bounds: valid MPS must parse");
         assert_eq!(lp.num_vars, 3, "num_vars");
         assert_eq!(lp.bounds[0], (3.0, 3.0), "x1: FX 3.0 → (3,3)");
-        assert_eq!(
-            lp.bounds[1].0,
-            f64::NEG_INFINITY,
-            "x2: FR → lb = -inf"
-        );
+        assert_eq!(lp.bounds[1].0, f64::NEG_INFINITY, "x2: FR → lb = -inf");
         assert_eq!(lp.bounds[1].1, f64::INFINITY, "x2: FR → ub = +inf");
         assert_eq!(lp.bounds[2], (1.5, 8.0), "x3: LO 1.5 UP 8.0 → (1.5,8.0)");
     }

@@ -48,7 +48,11 @@ impl Expression {
         }
         let rhs_val = rhs_expr.constant - lhs.constant;
         lhs.constant = 0.0;
-        Constraint { lhs, rhs: rhs_val, sense }
+        Constraint {
+            lhs,
+            rhs: rhs_val,
+            sense,
+        }
     }
 
     /// Create a `<=` constraint: `self <= rhs`.

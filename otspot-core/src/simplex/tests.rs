@@ -91,12 +91,11 @@ fn test_timeout_result_with_incumbent_no_double_count_on_shifted_lp() {
 
     let result = timeout_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale, 7);
 
-    let expected_obj = lp
-        .c
-        .iter()
-        .zip(result.solution.iter())
-        .map(|(&ci, &xi)| ci * xi)
-        .sum::<f64>();
+    let expected_obj =
+        lp.c.iter()
+            .zip(result.solution.iter())
+            .map(|(&ci, &xi)| ci * xi)
+            .sum::<f64>();
     assert!(
         (result.objective - expected_obj).abs() < 1e-9,
         "shifted-LP incumbent obj must be c·solution (no obj_offset double-count); \
@@ -1976,9 +1975,9 @@ fn batch_pivot_out_falls_back_to_sequential_for_ill_conditioned_basis() {
     // A (3×4):
     //   col0=x0=[1,1,1], col1=x1=[1,-0.5,0], col2=x2=[0.7,0,1], col3=s=[1,1+δ,0]
     let a = CscMatrix::from_triplets(
-        &[0, 1, 2,  0, 1,  0, 2,  0, 1],
-        &[0, 0, 0,  1, 1,  2, 2,  3, 3],
-        &[1.0, 1.0, 1.0,  1.0, -0.5,  0.7, 1.0,  1.0, 1.0 + DELTA],
+        &[0, 1, 2, 0, 1, 0, 2, 0, 1],
+        &[0, 0, 0, 1, 1, 2, 2, 3, 3],
+        &[1.0, 1.0, 1.0, 1.0, -0.5, 0.7, 1.0, 1.0, 1.0 + DELTA],
         3,
         4,
     )
@@ -2043,14 +2042,8 @@ fn batch_pivot_out_falls_back_to_sequential_for_ill_conditioned_basis() {
 #[test]
 fn batch_pivot_out_uncommitted_rows_fallback_fires_for_rank_saturated_batch() {
     // m=2, n=2: both rows x0+x1=0, so all-matches batch is singular.
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 0, 1],
-        &[1.0, 1.0, 1.0, 1.0],
-        2,
-        2,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+        .unwrap();
 
     let lp = LpProblem::new_general(
         vec![0.0, 0.0],
@@ -2067,14 +2060,12 @@ fn batch_pivot_out_uncommitted_rows_fallback_fires_for_rank_saturated_batch() {
     opts.use_lp_crash_basis = false;
     opts.simplex_method = SimplexMethod::Primal;
 
-    let uncommitted_before =
-        primal::PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT.with(|c| c.get());
+    let uncommitted_before = primal::PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT.with(|c| c.get());
     let btran_before = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
 
     let result = solve_with(&lp, &opts);
 
-    let uncommitted_after =
-        primal::PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT.with(|c| c.get());
+    let uncommitted_after = primal::PIVOT_OUT_UNCOMMITTED_SEQUENTIAL_COUNT.with(|c| c.get());
     let btran_after = primal::PIVOT_OUT_BTRAN_COUNT.with(|c| c.get());
 
     assert_eq!(

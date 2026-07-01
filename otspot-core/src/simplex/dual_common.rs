@@ -760,8 +760,7 @@ mod tests {
         );
 
         // CONCERN B verification: bounded direction with 0 < pivot < PIVOT_TOL must NOT verify.
-        let a_smallpiv =
-            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[5e-9, 1.0], 1, 2).unwrap();
+        let a_smallpiv = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[5e-9, 1.0], 1, 2).unwrap();
         assert!(
             !lp_unbounded_ray_verified(&a_smallpiv, &[1], &[-1.0, 0.0], 1, 2, 2, &opts),
             "CONCERN B: a small positive pivot (0<d<PIVOT_TOL) is a leaving row ⇒ bounded, not a ray"

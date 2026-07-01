@@ -8,6 +8,7 @@ echo
 
 # 1. CI workflow/data bootstrap checks
 bash -n scripts/ensure_emps.sh
+cargo fmt --all -- --check
 
 if grep -R "curl .*emps\\.c" .github/workflows scripts 2>/dev/null \
   | grep -v "scripts/ensure_emps.sh" \

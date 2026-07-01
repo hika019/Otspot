@@ -806,10 +806,7 @@ fn solve_mip_core<R: Relaxation>(
         }
 
         // --- In-tree cut separation (gated; MILP overrides, MIQP no-op) ---
-        if cfg.tree_cuts
-            && matches!(res.status, SolveStatus::Optimal)
-            && !res.solution.is_empty()
-        {
+        if cfg.tree_cuts && matches!(res.status, SolveStatus::Optimal) && !res.solution.is_empty() {
             if let Some(improved) = problem.separate_tree_cuts(
                 solve_bounds,
                 &res,

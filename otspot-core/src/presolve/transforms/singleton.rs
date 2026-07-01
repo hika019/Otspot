@@ -89,8 +89,8 @@ fn singleton_ineq(
     let (lb, ub) = st.bounds[j];
     let ct = st.constraint_types[i];
 
-    let tightens_ub = (ct == ConstraintType::Le && a_ij > 0.0)
-        || (ct == ConstraintType::Ge && a_ij < 0.0);
+    let tightens_ub =
+        (ct == ConstraintType::Le && a_ij > 0.0) || (ct == ConstraintType::Ge && a_ij < 0.0);
 
     if tightens_ub {
         if implied < lb - ZERO_TOL {

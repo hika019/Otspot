@@ -732,8 +732,7 @@ mod tests {
             sol.dual_solution[0]
         );
         assert_eq!(
-            sol.dual_solution[0],
-            0.0,
+            sol.dual_solution[0], 0.0,
             "Le dual must clamp to 0 when KKT gives -2 (sentinel fires if Fix 1 reverted)"
         );
     }
@@ -770,8 +769,7 @@ mod tests {
             sol.dual_solution[0]
         );
         assert_eq!(
-            sol.dual_solution[0],
-            0.0,
+            sol.dual_solution[0], 0.0,
             "Ge dual must clamp to 0 when KKT gives +2 (sentinel fires if Fix 1 reverted)"
         );
     }

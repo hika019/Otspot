@@ -90,16 +90,14 @@ pub(crate) fn refit_bound_duals_kkt(
                 let xj = if j < x.len() { x[j] } else { 0.0 };
                 if target > 0.0 {
                     let gap_ub = (ub - xj).max(0.0);
-                    let comp_ub =
-                        target * gap_ub / (1.0 + target * (xj.abs() + ub.abs()));
+                    let comp_ub = target * gap_ub / (1.0 + target * (xj.abs() + ub.abs()));
                     if comp_ub <= comp_tol {
                         new_bd[ub_idx] = target;
                     }
                 } else if target < 0.0 {
                     let t_lb = -target;
                     let gap_lb = (xj - lb).max(0.0);
-                    let comp_lb =
-                        t_lb * gap_lb / (1.0 + t_lb * (xj.abs() + lb.abs()));
+                    let comp_lb = t_lb * gap_lb / (1.0 + t_lb * (xj.abs() + lb.abs()));
                     if comp_lb <= comp_tol {
                         new_bd[lb_idx] = t_lb;
                     }

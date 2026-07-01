@@ -869,9 +869,9 @@ mod tests {
     #[test]
     fn bound_contrib_at_var_agrees_with_bound_contrib_full_layout_fixed_var() {
         let bounds = vec![
-            (0.0_f64, 5.0_f64),              // lb+ub finite (box)
-            (3.0_f64, 3.0_f64),              // fixed (lb==ub)
-            (2.0_f64, f64::INFINITY),        // lb-only
+            (0.0_f64, 5.0_f64),       // lb+ub finite (box)
+            (3.0_f64, 3.0_f64),       // fixed (lb==ub)
+            (2.0_f64, f64::INFINITY), // lb-only
         ];
         // full layout: lb-half=[j0=1.5, j1_fx=0, j2=2.0], ub-half=[j0=3.0, j1_fx=0]
         let bd = vec![1.5_f64, 0.0, 2.0, 3.0, 0.0];

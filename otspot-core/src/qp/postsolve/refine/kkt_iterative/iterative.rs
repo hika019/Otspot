@@ -88,7 +88,8 @@ pub(crate) fn refine_kkt_iterative(
                 &result.dual_solution,
                 &result.bound_duals,
             );
-            let post_cleanup_kkt = run_dual_recovery_postprocess(problem, &view, result, deadline, target_pf);
+            let post_cleanup_kkt =
+                run_dual_recovery_postprocess(problem, &view, result, deadline, target_pf);
             if post_cleanup_kkt
                 + dual_recovery_progress_tol(pre_cleanup_kkt, post_cleanup_kkt, target_pf)
                 < pre_cleanup_kkt
@@ -217,8 +218,7 @@ pub(crate) fn refine_kkt_iterative(
                         let ce = current_k.col_ptr[j + 1];
                         for k in cs..ce {
                             if current_k.row_ind[k] == j {
-                                k_diag_max_retry =
-                                    k_diag_max_retry.max(current_k.values[k].abs());
+                                k_diag_max_retry = k_diag_max_retry.max(current_k.values[k].abs());
                                 break;
                             }
                         }
@@ -270,99 +270,98 @@ pub(crate) fn refine_kkt_iterative(
     // Wilkinson IR の "double the working precision": Qx, A^T y, Ax を TwoFloat (DD) で積算し
     // residual を f64 limit 以下に精密化。LDL solve は f64 のまま。
     // 戻り値: (r_d, r_p, pf_rel, df_rel)、pf_rel/df_rel は OSQP-style componentwise。
-    let compute_residuals =
-        |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64) {
-            use twofloat::TwoFloat;
-            let zero_dd = TwoFloat::from(0.0);
-            // Q は全要素格納 (上下三角両方)、symmetric duplication せず CSC 全走査。
-            let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
-            for j in 0..n {
-                let xv = x[j];
-                let cs = problem.q.col_ptr[j];
-                let ce = problem.q.col_ptr[j + 1];
-                for k in cs..ce {
-                    let row = problem.q.row_ind[k];
-                    let v = problem.q.values[k];
-                    qx_dd[row] += TwoFloat::new_mul(v, xv);
-                }
+    let compute_residuals = |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64) {
+        use twofloat::TwoFloat;
+        let zero_dd = TwoFloat::from(0.0);
+        // Q は全要素格納 (上下三角両方)、symmetric duplication せず CSC 全走査。
+        let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+        for j in 0..n {
+            let xv = x[j];
+            let cs = problem.q.col_ptr[j];
+            let ce = problem.q.col_ptr[j + 1];
+            for k in cs..ce {
+                let row = problem.q.row_ind[k];
+                let v = problem.q.values[k];
+                qx_dd[row] += TwoFloat::new_mul(v, xv);
             }
-            let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
-            for col in 0..n {
-                let cs = problem.a.col_ptr[col];
-                let ce = problem.a.col_ptr[col + 1];
-                for k in cs..ce {
-                    let row = problem.a.row_ind[k];
-                    let v = problem.a.values[k];
-                    aty_dd[col] += TwoFloat::new_mul(v, y[row]);
-                }
+        }
+        let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            let cs = problem.a.col_ptr[col];
+            let ce = problem.a.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = problem.a.row_ind[k];
+                let v = problem.a.values[k];
+                aty_dd[col] += TwoFloat::new_mul(v, y[row]);
             }
-            let bc_vec = crate::qp::kkt_resid::bound_contrib(&problem.bounds, z);
-            let mut r_d = vec![0.0_f64; n];
-            for j in 0..n {
-                if exclude_var[j] {
-                    continue;
-                }
-                let bc = bc_vec[j];
-                let r = qx_dd[j] + TwoFloat::from(problem.c[j]) + aty_dd[j] + TwoFloat::from(bc);
-                r_d[j] = f64::from(r);
+        }
+        let bc_vec = crate::qp::kkt_resid::bound_contrib(&problem.bounds, z);
+        let mut r_d = vec![0.0_f64; n];
+        for j in 0..n {
+            if exclude_var[j] {
+                continue;
             }
-            let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
-            for col in 0..n {
-                let cs = problem.a.col_ptr[col];
-                let ce = problem.a.col_ptr[col + 1];
-                for k in cs..ce {
-                    let row = problem.a.row_ind[k];
-                    let v = problem.a.values[k];
-                    ax_dd[row] += TwoFloat::new_mul(v, x[col]);
-                }
+            let bc = bc_vec[j];
+            let r = qx_dd[j] + TwoFloat::from(problem.c[j]) + aty_dd[j] + TwoFloat::from(bc);
+            r_d[j] = f64::from(r);
+        }
+        let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
+        for col in 0..n {
+            let cs = problem.a.col_ptr[col];
+            let ce = problem.a.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = problem.a.row_ind[k];
+                let v = problem.a.values[k];
+                ax_dd[row] += TwoFloat::new_mul(v, x[col]);
             }
-            let mut r_p = vec![0.0_f64; m];
-            let mut pf_rel_componentwise = 0.0_f64;
-            for i in 0..m {
-                let raw_dd = ax_dd[i] - TwoFloat::from(problem.b[i]);
-                let raw = f64::from(raw_dd);
-                let v = match problem.constraint_types[i] {
-                    ConstraintType::Eq => raw,
-                    ConstraintType::Ge => {
-                        if raw < 0.0 {
-                            raw
-                        } else {
-                            0.0
-                        }
+        }
+        let mut r_p = vec![0.0_f64; m];
+        let mut pf_rel_componentwise = 0.0_f64;
+        for i in 0..m {
+            let raw_dd = ax_dd[i] - TwoFloat::from(problem.b[i]);
+            let raw = f64::from(raw_dd);
+            let v = match problem.constraint_types[i] {
+                ConstraintType::Eq => raw,
+                ConstraintType::Ge => {
+                    if raw < 0.0 {
+                        raw
+                    } else {
+                        0.0
                     }
-                    ConstraintType::Le => {
-                        if raw > 0.0 {
-                            raw
-                        } else {
-                            0.0
-                        }
+                }
+                ConstraintType::Le => {
+                    if raw > 0.0 {
+                        raw
+                    } else {
+                        0.0
                     }
-                };
-                r_p[i] = v;
-                let ax_i_abs = f64::from(ax_dd[i]).abs();
-                let scale_i = 1.0 + ax_i_abs + problem.b[i].abs();
-                let rel_i = v.abs() / scale_i;
-                if rel_i > pf_rel_componentwise {
-                    pf_rel_componentwise = rel_i;
                 }
+            };
+            r_p[i] = v;
+            let ax_i_abs = f64::from(ax_dd[i]).abs();
+            let scale_i = 1.0 + ax_i_abs + problem.b[i].abs();
+            let rel_i = v.abs() / scale_i;
+            if rel_i > pf_rel_componentwise {
+                pf_rel_componentwise = rel_i;
             }
-            // componentwise が必須 (全体相対化は ill-scaled で 1 成分外れを見逃す)。
-            let mut df_rel_componentwise = 0.0_f64;
-            for j in 0..n {
-                if exclude_var[j] {
-                    continue;
-                }
-                let qx_j = f64::from(qx_dd[j]).abs();
-                let aty_j = f64::from(aty_dd[j]).abs();
-                let bc = bc_vec[j];
-                let scale_j = 1.0 + qx_j + problem.c[j].abs() + aty_j + bc.abs();
-                let rel_j = r_d[j].abs() / scale_j;
-                if rel_j > df_rel_componentwise {
-                    df_rel_componentwise = rel_j;
-                }
+        }
+        // componentwise が必須 (全体相対化は ill-scaled で 1 成分外れを見逃す)。
+        let mut df_rel_componentwise = 0.0_f64;
+        for j in 0..n {
+            if exclude_var[j] {
+                continue;
             }
-            (r_d, r_p, pf_rel_componentwise, df_rel_componentwise)
-        };
+            let qx_j = f64::from(qx_dd[j]).abs();
+            let aty_j = f64::from(aty_dd[j]).abs();
+            let bc = bc_vec[j];
+            let scale_j = 1.0 + qx_j + problem.c[j].abs() + aty_j + bc.abs();
+            let rel_j = r_d[j].abs() / scale_j;
+            if rel_j > df_rel_componentwise {
+                df_rel_componentwise = rel_j;
+            }
+        }
+        (r_d, r_p, pf_rel_componentwise, df_rel_componentwise)
+    };
 
     let pre_z = result.bound_duals.clone();
     let (_, _, pre_pf_rel, pre_df_rel) =
@@ -521,8 +520,7 @@ mod tests {
             !old_updated,
             "stationarity-only old logic must NOT update best (stationarity worsened: \
              cur_kkt {:.2} ≥ best_kkt {:.2})",
-            cur_kkt_old,
-            pre_df,
+            cur_kkt_old, pre_df,
         );
         // If old_updated were true the no-op proof would be invalid;
         // if the call-site regressed to stationarity init the new_logic_updated
