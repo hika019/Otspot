@@ -1,6 +1,6 @@
 # claude code
 - チームを使用. tmux使用
-- ベンチ実行 or テスト実行 or downloadなどの軽量タスク=haiku, バグ調査, 実装, リファクタ, テスト修正=codex5.5,　レビュー=codex5.5とOpus4.8, それ以外=Opus4.8. これを基準にAgentのmodelを設定
+- ベンチ実行 or テスト実行 or downloadなどの軽量タスク=haiku, バグ調査, 実装, リファクタ, テスト修正=claude-sonnet-5,　レビュー=claude-sonnet-5, それ以外=claude-sonnet-5. これを基準にAgentのmodelを設定
 - タスクが一つでもエージェントに振れ
 - エージェントのコンテキストを考え、タスクを分割・アサイン. Agentはbackground起動. tmux.
 - エージェント追加時に、既存Agentの確認. 不要Agentの場合削除. kill可
@@ -78,7 +78,6 @@
   2. 異常を【段】×【correctness / それ以外】で分類 (実測値: timing/iters/残差 等から)。
   3. フロンティア段を厳密検証し proven か全バグかを確定 (Agent/worktree、env-gated トレース可・報告後 revert)。
   4. 見つけた全バグを真因修正 (本来あるべき形・マジックナンバー禁止・sentinel test。暫定 / cap / 症状隠し / 当該段の無効化 は禁止)。
-  5. 別 Agent レビュー + `codex review --commit <SHA>` gate (実施者≠レビュアー)。
   6. lead-verify full-suite (`cargo nextest run --release --test-threads 3`) → integrate へ --no-ff マージ。
   7. フロンティア段の proven を再確認 → フロンティア前進 → 再観測 (次 iteration)。
 - Agent 報告は推論。lead がテスト実走 / grep / 実測値で fact 化してから確定。
