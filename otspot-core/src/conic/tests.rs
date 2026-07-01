@@ -247,3 +247,84 @@ fn infeasible_lp_detected() {
     let res = solve_socp(&prob, &ConicOptions::default());
     assert_eq!(res.status, SolveStatus::Infeasible, "{res:?}");
 }
+
+#[test]
+fn misocp_ball_integer_optimum() {
+    // max x0 + x1  (min -x0 -x1)  s.t. ||(x0,x1)|| <= sqrt(2.5), x in {0,1,2}^2.
+    // Continuous opt ~ (1.118,1.118); integer opt (1,1), obj = -2.
+    let n = 2usize;
+    let r = 2.5_f64.sqrt();
+    // SOC dim 3: s = (r, x0, x1) in Q3.
+    let g = csc(&[vec![0.0, 0.0], vec![-1.0, 0.0], vec![0.0, -1.0]], 3, 2);
+    let base = ConicProblem {
+        c: vec![-1.0, -1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b: vec![],
+        g,
+        h: vec![r, 0.0, 0.0],
+        cone: ConeSpec { l: 0, soc: vec![3] },
+    };
+    let prob = MisocpProblem {
+        base,
+        integers: vec![0, 1],
+        int_lb: vec![0.0, 0.0],
+        int_ub: vec![2.0, 2.0],
+    };
+    let res = solve_misocp(&prob, &ConicOptions::default(), &BbOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!(
+        (res.objective - (-2.0)).abs() < 1e-4,
+        "obj={}",
+        res.objective
+    );
+    assert!((res.x[0] - 1.0).abs() < 1e-4 && (res.x[1] - 1.0).abs() < 1e-4);
+}
+
+#[test]
+fn miqcp_integer_ball_matches_enumeration() {
+    // min -x0 - 2 x1  s.t. x0^2 + x1^2 <= 5, x integer in [0,3]^2.
+    // Enumerate: feasible ints with x0^2+x1^2<=5; maximise x0+2x1.
+    let n = 2usize;
+    let p = csc(&[vec![2.0, 0.0], vec![0.0, 2.0]], 2, 2); // (1/2)x^T(2I)x = x0^2+x1^2
+    let qp = QcqpProblem {
+        n,
+        p0: None,
+        q0: vec![-1.0, -2.0],
+        quad: vec![QuadConstraint {
+            p,
+            q: vec![0.0, 0.0],
+            r: -5.0,
+        }],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+    };
+    // brute force reference
+    let mut best = f64::INFINITY;
+    for x0 in 0..=3 {
+        for x1 in 0..=3 {
+            if (x0 * x0 + x1 * x1) as f64 <= 5.0 {
+                let obj = -(x0 as f64) - 2.0 * (x1 as f64);
+                if obj < best {
+                    best = obj;
+                }
+            }
+        }
+    }
+    let res = solve_miqcp(
+        &qp,
+        &[0, 1],
+        &[0.0, 0.0],
+        &[3.0, 3.0],
+        &ConicOptions::default(),
+        &BbOptions::default(),
+    );
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!(
+        (res.objective - best).abs() < 1e-3,
+        "miqcp {} vs brute {}",
+        res.objective,
+        best
+    );
+}

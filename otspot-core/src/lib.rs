@@ -66,8 +66,9 @@ pub(crate) mod test_kkt;
 
 // --- re-export: ユーザーが最も使う型を最短パスで ---
 pub use conic::{
-    solve_qcqp, solve_socp, ConeSpec, ConicOptions, ConicProblem, ConicResult, QcqpProblem,
-    QcqpResult, QuadConstraint,
+    solve_miqcp, solve_misocp, solve_qcqp, solve_socp, BbOptions, ConeSpec, ConicOptions,
+    ConicProblem, ConicResult, MisocpProblem, MisocpResult, QcqpProblem, QcqpResult,
+    QuadConstraint,
 };
 pub use lp::solve_lp_with;
 pub use mip::{

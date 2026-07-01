@@ -16,10 +16,12 @@
 
 mod cone;
 mod ipm;
+mod misocp;
 mod qcqp;
 #[cfg(test)]
 mod tests;
 
+pub use misocp::{solve_miqcp, solve_misocp, BbOptions, MisocpProblem, MisocpResult};
 pub use qcqp::{solve_qcqp, to_conic, QcqpProblem, QcqpResult, QuadConstraint};
 
 use crate::problem::SolveStatus;
