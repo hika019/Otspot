@@ -328,3 +328,163 @@ fn miqcp_integer_ball_matches_enumeration() {
         best
     );
 }
+
+/// Benchmark suite across SOCP / QCQP / MISOCP / MIQCP. Writes a CSV report to
+/// `/tmp/conic_bench_results.csv`. Run with `--ignored`.
+#[test]
+#[ignore = "benchmark: run with --ignored; writes /tmp/conic_bench_results.csv"]
+fn bench_conic_suite() {
+    use std::fmt::Write as _;
+    use std::time::Instant;
+
+    let mut csv = String::from(
+        "class,name,n,m,status,objective,expected,iters_or_nodes,pres,dres,gap,micros\n",
+    );
+
+    // ---- SOCP: min c^T x s.t. ||x||_2 <= 1  => obj = -||c||. ----
+    for &n in &[2usize, 5, 10, 20, 40] {
+        let mut rng = Lcg((n as u64) * 1009 + 1);
+        let c: Vec<f64> = (0..n).map(|_| rng.next_f(-1.0, 1.0)).collect();
+        let mut grows = Vec::new();
+        let mut h = Vec::new();
+        grows.push(vec![0.0; n]);
+        h.push(1.0);
+        for j in 0..n {
+            let mut r = vec![0.0; n];
+            r[j] = -1.0;
+            grows.push(r);
+            h.push(0.0);
+        }
+        let g = csc(&grows, n + 1, n);
+        let prob = ConicProblem {
+            c: c.clone(),
+            a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b: vec![],
+            g,
+            h,
+            cone: ConeSpec {
+                l: 0,
+                soc: vec![n + 1],
+            },
+        };
+        let t0 = Instant::now();
+        let res = solve_socp(&prob, &ConicOptions::default());
+        let us = t0.elapsed().as_micros();
+        let expected = -(c.iter().map(|v| v * v).sum::<f64>().sqrt());
+        assert_eq!(res.status, SolveStatus::Optimal, "socp n={n}");
+        assert!((res.objective - expected).abs() < 1e-5, "socp n={n}");
+        writeln!(
+            csv,
+            "SOCP,unit_ball_{n},{n},{},{:?},{:.6},{:.6},{},{:.2e},{:.2e},{:.2e},{}",
+            prob.m(),
+            res.status,
+            res.objective,
+            expected,
+            res.iterations,
+            res.residuals.0,
+            res.residuals.1,
+            res.residuals.2,
+            us
+        )
+        .unwrap();
+    }
+
+    // ---- QCQP: diagonal box QP, closed-form optimum. ----
+    for &n in &[3usize, 8, 16, 32] {
+        let mut rng = Lcg((n as u64) * 7919 + 3);
+        let mut prows = vec![vec![0.0; n]; n];
+        let mut q = vec![0.0; n];
+        let mut expected = 0.0;
+        for j in 0..n {
+            let pj = rng.next_f(0.5, 3.0);
+            let xj = rng.next_f(1.0, 4.0);
+            prows[j][j] = pj;
+            q[j] = -pj * xj;
+            expected += 0.5 * pj * xj * xj + q[j] * xj;
+        }
+        let mut grows = Vec::new();
+        let mut h = Vec::new();
+        for j in 0..n {
+            let mut r = vec![0.0; n];
+            r[j] = 1.0;
+            grows.push(r);
+            h.push(10.0);
+            let mut r2 = vec![0.0; n];
+            r2[j] = -1.0;
+            grows.push(r2);
+            h.push(0.0);
+        }
+        let qp = QcqpProblem {
+            n,
+            p0: Some(csc(&prows, n, n)),
+            q0: q.clone(),
+            quad: vec![],
+            g_lin: csc(&grows, grows.len(), n),
+            h_lin: h,
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+        };
+        let t0 = Instant::now();
+        let res = solve_qcqp(&qp, &ConicOptions::default());
+        let us = t0.elapsed().as_micros();
+        assert_eq!(res.status, SolveStatus::Optimal, "qcqp n={n}");
+        assert!((res.objective - expected).abs() < 1e-3, "qcqp n={n}");
+        writeln!(
+            csv,
+            "QCQP,box_diag_{n},{n},-,{:?},{:.6},{:.6},{},-,-,-,{}",
+            res.status, res.objective, expected, res.iterations, us
+        )
+        .unwrap();
+    }
+
+    // ---- MISOCP / MIQCP: integer point in a ball, brute-force reference. ----
+    for &(r2, k) in &[(5.0f64, 3i64), (8.0, 3), (13.0, 4)] {
+        let n = 2usize;
+        let p = csc(&[vec![2.0, 0.0], vec![0.0, 2.0]], 2, 2);
+        let qp = QcqpProblem {
+            n,
+            p0: None,
+            q0: vec![-1.0, -2.0],
+            quad: vec![QuadConstraint {
+                p,
+                q: vec![0.0, 0.0],
+                r: -r2,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+        };
+        let mut best = f64::INFINITY;
+        for x0 in 0..=k {
+            for x1 in 0..=k {
+                if (x0 * x0 + x1 * x1) as f64 <= r2 {
+                    let obj = -(x0 as f64) - 2.0 * (x1 as f64);
+                    if obj < best {
+                        best = obj;
+                    }
+                }
+            }
+        }
+        let t0 = Instant::now();
+        let res = solve_miqcp(
+            &qp,
+            &[0, 1],
+            &[0.0, 0.0],
+            &[k as f64, k as f64],
+            &ConicOptions::default(),
+            &BbOptions::default(),
+        );
+        let us = t0.elapsed().as_micros();
+        assert_eq!(res.status, SolveStatus::Optimal, "miqcp r2={r2}");
+        assert!((res.objective - best).abs() < 1e-3, "miqcp r2={r2}");
+        writeln!(
+            csv,
+            "MIQCP,int_ball_r2_{r2},{n},-,{:?},{:.6},{:.6},{},-,-,-,{}",
+            res.status, res.objective, best, res.nodes, us
+        )
+        .unwrap();
+    }
+
+    std::fs::write("/tmp/conic_bench_results.csv", &csv).unwrap();
+}
