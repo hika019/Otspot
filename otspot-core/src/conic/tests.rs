@@ -488,3 +488,134 @@ fn bench_conic_suite() {
 
     std::fs::write("/tmp/conic_bench_results.csv", &csv).unwrap();
 }
+
+#[test]
+fn nonconvex_bilinear_box_global_min() {
+    use super::nonconvex::*;
+    // min x0*x1  over [-1,1]^2.  (1/2)x^T P x with P=[[0,1],[1,0]] = x0*x1.
+    // Global min = -1 at (-1,1) or (1,-1).
+    let n = 2usize;
+    let p = csc(&[vec![0.0, 1.0], vec![1.0, 0.0]], 2, 2);
+    let qp = NonconvexQcqp {
+        n,
+        p0: Some(p),
+        q0: vec![0.0, 0.0],
+        quad: vec![],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+        lb: vec![-1.0, -1.0],
+        ub: vec![1.0, 1.0],
+    };
+    let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!(
+        (res.objective - (-1.0)).abs() < 1e-3,
+        "obj={}",
+        res.objective
+    );
+}
+
+#[test]
+fn nonconvex_concave_max_box() {
+    use super::nonconvex::*;
+    // min -x0^2 over [0,1]  => global min -1 at x0=1.  P0 = [[-2]] => (1/2)(-2)x^2 = -x^2.
+    let n = 1usize;
+    let p = csc(&[vec![-2.0]], 1, 1);
+    let qp = NonconvexQcqp {
+        n,
+        p0: Some(p),
+        q0: vec![0.0],
+        quad: vec![],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+        lb: vec![0.0],
+        ub: vec![1.0],
+    };
+    let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!(
+        (res.objective - (-1.0)).abs() < 1e-3,
+        "obj={}",
+        res.objective
+    );
+}
+
+#[test]
+fn nonconvex_constraint_hyperbola() {
+    use super::nonconvex::*;
+    // min x0 + x1 s.t. x0*x1 >= 1, x in [0.1,3]^2.  Global min = 2 at (1,1).
+    // x0*x1 >= 1  <=>  -x0*x1 + 1 <= 0.  P = [[0,-1],[-1,0]] => (1/2)x^TPx = -x0*x1.
+    let n = 2usize;
+    let p = csc(&[vec![0.0, -1.0], vec![-1.0, 0.0]], 2, 2);
+    let qp = NonconvexQcqp {
+        n,
+        p0: None,
+        q0: vec![1.0, 1.0],
+        quad: vec![GQuadConstraint {
+            p,
+            q: vec![0.0, 0.0],
+            r: 1.0,
+        }],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+        lb: vec![0.1, 0.1],
+        ub: vec![3.0, 3.0],
+    };
+    let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!((res.objective - 2.0).abs() < 5e-3, "obj={}", res.objective);
+}
+
+#[test]
+fn qp_problem_bridge_solves_convex_qcqp_constraint() {
+    use crate::qp::{QcqpMatrix, QpProblem};
+    // min -x0-x1  s.t. x0^2+x1^2 <= 1, x>=0.  Optimum (1/sqrt2,1/sqrt2).
+    let n = 2usize;
+    let q_obj = CscMatrix::new(n, n);
+    let c = vec![-1.0, -1.0];
+    // one linear row is zero; the quadratic matrix carries the true constraint.
+    let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+    let b = vec![1.0];
+    let bounds = vec![(0.0, f64::INFINITY); n];
+    let mut qc = QcqpMatrix::new(n);
+    // constraint uses 1/2 x^T Qc x <= 1, so Qc = 2I.
+    qc.triplets.push((0, 0, 2.0));
+    qc.triplets.push((1, 1, 2.0));
+    let mut qp = QpProblem::new(q_obj, c, a, b, bounds, vec![ConstraintType::Le]).unwrap();
+    qp.set_quadratic_constraints(vec![qc]).unwrap();
+    let res = solve_qp_problem_as_qcqp(&qp, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!(
+        (res.objective + 2.0_f64.sqrt()).abs() < 1e-4,
+        "obj={}",
+        res.objective
+    );
+}
+
+#[test]
+fn qp_problem_bridge_rejects_quadratic_ge() {
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let n = 1usize;
+    let q_obj = CscMatrix::new(n, n);
+    let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 0, 2.0));
+    let mut qp = QpProblem::new(
+        q_obj,
+        vec![0.0],
+        a,
+        vec![1.0],
+        vec![(0.0, 2.0)],
+        vec![ConstraintType::Ge],
+    )
+    .unwrap();
+    qp.set_quadratic_constraints(vec![qc]).unwrap();
+    let res = solve_qp_problem_as_qcqp(&qp, &ConicOptions::default());
+    assert!(matches!(res.status, SolveStatus::NotSupported(_)));
+}

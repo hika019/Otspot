@@ -302,3 +302,140 @@ fn qcqp_objective(qp: &QcqpProblem, x: &[f64]) -> f64 {
     }
     obj
 }
+
+use crate::problem::ConstraintType;
+use crate::qp::{QcqpMatrix, QpProblem};
+
+fn csc_from_rows(rows: &[Vec<f64>], ncols: usize) -> CscMatrix {
+    let mut rr = Vec::new();
+    let mut cc = Vec::new();
+    let mut vv = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            if v != 0.0 {
+                rr.push(i);
+                cc.push(j);
+                vv.push(v);
+            }
+        }
+    }
+    CscMatrix::from_triplets(&rr, &cc, &vv, rows.len(), ncols).expect("row-built CSC is valid")
+}
+
+fn qcqp_matrix_to_csc(q: &QcqpMatrix) -> CscMatrix {
+    let mut r = Vec::with_capacity(q.triplets.len());
+    let mut c = Vec::with_capacity(q.triplets.len());
+    let mut v = Vec::with_capacity(q.triplets.len());
+    for &(i, j, val) in &q.triplets {
+        if val != 0.0 {
+            r.push(i);
+            c.push(j);
+            v.push(val);
+        }
+    }
+    CscMatrix::from_triplets(&r, &c, &v, q.n, q.n).expect("QCQP triplets were validated")
+}
+
+/// Convert a core [`QpProblem`] (including QPLIB QCQP output) to a convex
+/// conic [`QcqpProblem`]. Linear constraints are split into `<=` and `=`, `>=`
+/// rows are sign-flipped, and finite variable bounds become linear inequalities.
+///
+/// Quadratic constraints must be of `<=` type for this convex conic bridge.
+/// Equal/greater quadratic constraints are rejected because a PSD quadratic
+/// equality/greater-than set is generally nonconvex.
+pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
+    let n = src.num_vars;
+    let ad = dense(&src.a);
+    let mut gl_rows: Vec<Vec<f64>> = Vec::new();
+    let mut hl: Vec<f64> = Vec::new();
+    let mut ae_rows: Vec<Vec<f64>> = Vec::new();
+    let mut be: Vec<f64> = Vec::new();
+    let mut quad = Vec::new();
+
+    let has_qc = !src.quadratic_constraints.is_empty();
+    for k in 0..src.num_constraints {
+        let qmat = if has_qc {
+            Some(&src.quadratic_constraints[k])
+        } else {
+            None
+        };
+        let row = ad[k].clone();
+        match src.constraint_types[k] {
+            ConstraintType::Le => {
+                if let Some(qc) = qmat {
+                    if qc.nnz() > 0 {
+                        quad.push(QuadConstraint {
+                            p: qcqp_matrix_to_csc(qc),
+                            q: row,
+                            r: -src.b[k],
+                        });
+                    } else {
+                        gl_rows.push(row);
+                        hl.push(src.b[k]);
+                    }
+                } else {
+                    gl_rows.push(row);
+                    hl.push(src.b[k]);
+                }
+            }
+            ConstraintType::Ge => {
+                if qmat.is_some_and(|qc| qc.nnz() > 0) {
+                    return Err(
+                        "quadratic >= constraints are nonconvex for the convex QCQP bridge".into(),
+                    );
+                }
+                gl_rows.push(row.iter().map(|v| -v).collect());
+                hl.push(-src.b[k]);
+            }
+            ConstraintType::Eq => {
+                if qmat.is_some_and(|qc| qc.nnz() > 0) {
+                    return Err("quadratic equality constraints are not supported by the convex QCQP bridge".into());
+                }
+                ae_rows.push(row);
+                be.push(src.b[k]);
+            }
+        }
+    }
+    // Variable bounds as linear inequalities.
+    for j in 0..n {
+        let (lb, ub) = src.bounds[j];
+        if ub.is_finite() {
+            let mut r = vec![0.0; n];
+            r[j] = 1.0;
+            gl_rows.push(r);
+            hl.push(ub);
+        }
+        if lb.is_finite() {
+            let mut r = vec![0.0; n];
+            r[j] = -1.0;
+            gl_rows.push(r);
+            hl.push(-lb);
+        }
+    }
+
+    let g_lin = csc_from_rows(&gl_rows, n);
+    let a_eq = csc_from_rows(&ae_rows, n);
+    Ok(QcqpProblem {
+        n,
+        p0: Some(src.q.clone()),
+        q0: src.c.clone(),
+        quad,
+        g_lin,
+        h_lin: hl,
+        a_eq,
+        b_eq: be,
+    })
+}
+
+/// Solve a convex QCQP represented by [`QpProblem`] through the conic bridge.
+pub fn solve_qp_problem_as_qcqp(src: &QpProblem, opts: &ConicOptions) -> QcqpResult {
+    match qcqp_from_qp_problem(src) {
+        Ok(qp) => solve_qcqp(&qp, opts),
+        Err(e) => QcqpResult {
+            status: SolveStatus::NotSupported(e),
+            objective: f64::NAN,
+            x: vec![0.0; src.num_vars],
+            iterations: 0,
+        },
+    }
+}
