@@ -205,7 +205,7 @@ pub const DEFAULT_MIP_CUTS: bool = true;
 /// Root cut-round count used when `max_cut_rounds == 0`.
 pub const DEFAULT_MAX_CUT_ROUNDS: usize = 5;
 /// Default static symmetry-breaking state.
-pub const DEFAULT_MIP_SYMMETRY: bool = false;
+pub const DEFAULT_MIP_SYMMETRY: bool = true;
 /// Default in-tree cut separation state.
 pub const DEFAULT_MIP_TREE_CUTS: bool = true;
 
@@ -240,7 +240,7 @@ pub struct MipConfig {
     /// Break structural symmetry by adding static lex-leader ordering rows for
     /// orbits of interchangeable binary variables (identical objective and
     /// constraint columns). Preserves at least one optimal representative per
-    /// orbit, so the optimum is unchanged while the tree shrinks. Default OFF
+    /// orbit, so the optimum is unchanged while the tree shrinks. Default ON
     /// (see [`DEFAULT_MIP_SYMMETRY`]).
     pub symmetry: bool,
     /// Enable the RENS (Relaxation Enforced Neighborhood Search) heuristic.
