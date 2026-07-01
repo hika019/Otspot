@@ -17,12 +17,19 @@
 mod cone;
 mod ipm;
 mod misocp;
+mod nonconvex;
 mod qcqp;
 #[cfg(test)]
 mod tests;
 
 pub use misocp::{solve_miqcp, solve_misocp, BbOptions, MisocpProblem, MisocpResult};
-pub use qcqp::{solve_qcqp, to_conic, QcqpProblem, QcqpResult, QuadConstraint};
+pub use nonconvex::{
+    solve_global_qcqp, GQuadConstraint, GlobalOptions, GlobalResult, NonconvexQcqp,
+};
+pub use qcqp::{
+    qcqp_from_qp_problem, solve_qcqp, solve_qp_problem_as_qcqp, to_conic, QcqpProblem, QcqpResult,
+    QuadConstraint,
+};
 
 use crate::problem::SolveStatus;
 use crate::sparse::CscMatrix;
