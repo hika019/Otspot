@@ -4,8 +4,8 @@
 //! Handles indefinite objective/constraint matrices. Requires finite variable
 //! bounds `[lb, ub]` (needed for valid McCormick envelopes and termination).
 
-use super::{solve_socp, ConeSpec, ConicOptions, ConicProblem};
-use crate::problem::SolveStatus;
+use super::{ConeSpec, ConicOptions, ConicProblem};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus};
 use crate::sparse::CscMatrix;
 
 /// A (possibly nonconvex) quadratic constraint `(1/2) x^T P x + q^T x + r <= 0`.
@@ -71,6 +71,8 @@ pub struct GlobalOptions {
     pub feas_tol: f64,
     /// Node limit.
     pub max_nodes: usize,
+    /// Integrality tolerance (for mixed-integer variants).
+    pub int_tol: f64,
 }
 
 impl Default for GlobalOptions {
@@ -80,6 +82,7 @@ impl Default for GlobalOptions {
             bilinear_tol: 1e-6,
             feas_tol: 1e-6,
             max_nodes: 50_000,
+            int_tol: 1e-6,
         }
     }
 }
@@ -142,6 +145,62 @@ fn quad_val(p: &CscMatrix, x: &[f64]) -> f64 {
 struct Relax {
     prob: ConicProblem,
     npair: usize,
+}
+
+struct RelaxResult {
+    status: SolveStatus,
+    objective: f64,
+    x: Vec<f64>,
+}
+
+/// McCormick relaxations are pure LPs. Use the mature simplex LP path rather
+/// than the generic conic IPM, which is intentionally small and aimed at SOC
+/// blocks.
+fn solve_relax_lp(prob: &ConicProblem) -> RelaxResult {
+    let n = prob.n();
+    let gd = dense(&prob.g);
+    let ad = dense(&prob.a);
+    let mut rows = Vec::with_capacity(prob.p() + prob.m());
+    let mut rhs = Vec::with_capacity(prob.p() + prob.m());
+    let mut ctypes = Vec::with_capacity(prob.p() + prob.m());
+    for (i, row) in ad.iter().enumerate() {
+        rows.push(row.clone());
+        rhs.push(prob.b[i]);
+        ctypes.push(ConstraintType::Eq);
+    }
+    for (i, row) in gd.iter().enumerate() {
+        rows.push(row.clone());
+        rhs.push(prob.h[i]);
+        ctypes.push(ConstraintType::Le);
+    }
+    let mut rr = Vec::new();
+    let mut cc = Vec::new();
+    let mut vv = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            if v != 0.0 {
+                rr.push(i);
+                cc.push(j);
+                vv.push(v);
+            }
+        }
+    }
+    let a = CscMatrix::from_triplets(&rr, &cc, &vv, rows.len(), n).unwrap();
+    let lp = LpProblem::new_general(
+        prob.c.clone(),
+        a,
+        rhs,
+        ctypes,
+        vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        None,
+    )
+    .unwrap();
+    let res = crate::lp::solve_lp_with(&lp, &crate::options::SolverOptions::default());
+    RelaxResult {
+        status: res.status,
+        objective: res.objective,
+        x: res.solution,
+    }
 }
 
 /// Build the McCormick LP relaxation for the current box `[lb, ub]`.
@@ -385,6 +444,35 @@ pub fn solve_global_qcqp(
     opts: &ConicOptions,
     g: &GlobalOptions,
 ) -> GlobalResult {
+    global_core(qp, &[], opts, g)
+}
+
+/// Globally optimise a nonconvex mixed-integer QCQP. `integers` lists variable
+/// indices constrained to integer values; their bounds come from `qp.lb`/`qp.ub`.
+/// Combines integer branching with spatial (McCormick) branching.
+pub fn solve_global_miqcp(
+    qp: &NonconvexQcqp,
+    integers: &[usize],
+    opts: &ConicOptions,
+    g: &GlobalOptions,
+) -> GlobalResult {
+    global_core(qp, integers, opts, g)
+}
+
+fn frac_dist(v: f64) -> f64 {
+    (v - v.round()).abs()
+}
+
+fn all_integral(x: &[f64], integers: &[usize], tol: f64) -> bool {
+    integers.iter().all(|&k| frac_dist(x[k]) <= tol)
+}
+
+fn global_core(
+    qp: &NonconvexQcqp,
+    integers: &[usize],
+    _opts: &ConicOptions,
+    g: &GlobalOptions,
+) -> GlobalResult {
     let pairs = collect_pairs(qp);
     let mut pair_idx = std::collections::HashMap::new();
     for (pi, &pr) in pairs.iter().enumerate() {
@@ -399,6 +487,23 @@ pub fn solve_global_qcqp(
     let mut stack = vec![(qp.lb.clone(), qp.ub.clone())];
     let mut frontier_min = f64::INFINITY;
 
+    let accept = |x: &[f64], incumbent: &mut f64, inc_x: &mut Vec<f64>, tol: f64| {
+        if feasible(qp, x, tol) && all_integral(x, integers, g.int_tol) {
+            // Round integers for a clean reported solution.
+            let mut xr = x.to_vec();
+            for &k in integers {
+                xr[k] = xr[k].round();
+            }
+            if feasible(qp, &xr, tol.max(1e-6)) {
+                let ov = objective(qp, &xr);
+                if ov < *incumbent {
+                    *incumbent = ov;
+                    *inc_x = xr;
+                }
+            }
+        }
+    };
+
     while let Some((lb, ub)) = stack.pop() {
         if nodes >= g.max_nodes {
             limited = true;
@@ -406,7 +511,7 @@ pub fn solve_global_qcqp(
         }
         nodes += 1;
         let relax = build_relax(qp, &pairs, &pair_idx, &lb, &ub);
-        let res = solve_socp(&relax.prob, opts);
+        let res = solve_relax_lp(&relax.prob);
         if res.status != SolveStatus::Optimal {
             continue;
         }
@@ -416,17 +521,41 @@ pub fn solve_global_qcqp(
         }
         frontier_min = frontier_min.min(lower);
         let x = res.x[..qp.n].to_vec();
+        let _ = relax.npair;
 
-        // Try incumbent from the relaxation point (project handled by feasibility).
-        if feasible(qp, &x, g.feas_tol) {
-            let ov = objective(qp, &x);
-            if ov < incumbent {
-                incumbent = ov;
-                inc_x = x.clone();
+        accept(&x, &mut incumbent, &mut inc_x, g.feas_tol);
+
+        // (1) integer branching first: pick the most fractional integer var.
+        let mut int_branch = None;
+        let mut worst_if = g.int_tol;
+        for &k in integers {
+            let d = frac_dist(x[k]);
+            if d > worst_if {
+                worst_if = d;
+                int_branch = Some(k);
             }
         }
+        if let Some(k) = int_branch {
+            let fl = x[k].floor();
+            let ce = x[k].ceil();
+            // down: ub_k = floor
+            if fl >= lb[k] - 1e-9 {
+                let lb_d = lb.clone();
+                let mut ub_d = ub.clone();
+                ub_d[k] = fl;
+                stack.push((lb_d, ub_d));
+            }
+            // up: lb_k = ceil
+            if ce <= ub[k] + 1e-9 {
+                let mut lb_u = lb.clone();
+                let ub_u = ub.clone();
+                lb_u[k] = ce;
+                stack.push((lb_u, ub_u));
+            }
+            continue;
+        }
 
-        // Worst McCormick term gap.
+        // (2) spatial branching on the worst McCormick term gap.
         let mut worst_gap = 0.0;
         let mut branch_var = None;
         for (pi, &(i, j)) in pairs.iter().enumerate() {
@@ -434,7 +563,6 @@ pub fn solve_global_qcqp(
             let gap = (wv - x[i] * x[j]).abs();
             if gap > worst_gap {
                 worst_gap = gap;
-                // branch on the wider-range variable of the pair.
                 branch_var = Some(if (ub[i] - lb[i]) >= (ub[j] - lb[j]) {
                     i
                 } else {
@@ -442,17 +570,9 @@ pub fn solve_global_qcqp(
                 });
             }
         }
-        let _ = relax.npair;
 
         if worst_gap <= g.bilinear_tol {
-            // Relaxation is tight here: x is (near) feasible for the true model.
-            if feasible(qp, &x, g.feas_tol * 100.0) {
-                let ov = objective(qp, &x);
-                if ov < incumbent {
-                    incumbent = ov;
-                    inc_x = x.clone();
-                }
-            }
+            accept(&x, &mut incumbent, &mut inc_x, g.feas_tol * 100.0);
             continue;
         }
 

@@ -24,7 +24,8 @@ mod tests;
 
 pub use misocp::{solve_miqcp, solve_misocp, BbOptions, MisocpProblem, MisocpResult};
 pub use nonconvex::{
-    solve_global_qcqp, GQuadConstraint, GlobalOptions, GlobalResult, NonconvexQcqp,
+    solve_global_miqcp, solve_global_qcqp, GQuadConstraint, GlobalOptions, GlobalResult,
+    NonconvexQcqp,
 };
 pub use qcqp::{
     qcqp_from_qp_problem, solve_qcqp, solve_qp_problem_as_qcqp, to_conic, QcqpProblem, QcqpResult,

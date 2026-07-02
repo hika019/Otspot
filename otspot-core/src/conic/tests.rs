@@ -619,3 +619,41 @@ fn qp_problem_bridge_rejects_quadratic_ge() {
     let res = solve_qp_problem_as_qcqp(&qp, &ConicOptions::default());
     assert!(matches!(res.status, SolveStatus::NotSupported(_)));
 }
+
+#[test]
+fn nonconvex_miqcp_integer_bilinear() {
+    use super::nonconvex::*;
+    // min x0*x1  s.t. x0,x1 integer in [-2,2].  Global min = -4 at (-2,2)/(2,-2).
+    let n = 2usize;
+    let p = csc(&[vec![0.0, 1.0], vec![1.0, 0.0]], 2, 2); // (1/2)x^TPx = x0*x1
+    let qp = NonconvexQcqp {
+        n,
+        p0: Some(p),
+        q0: vec![0.0, 0.0],
+        quad: vec![],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+        lb: vec![-2.0, -2.0],
+        ub: vec![2.0, 2.0],
+    };
+    let res = solve_global_miqcp(
+        &qp,
+        &[0, 1],
+        &ConicOptions::default(),
+        &GlobalOptions::default(),
+    );
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!(
+        (res.objective - (-4.0)).abs() < 1e-3,
+        "obj={}",
+        res.objective
+    );
+    for k in 0..2 {
+        assert!(
+            (res.x[k] - res.x[k].round()).abs() < 1e-6,
+            "x{k} not integral"
+        );
+    }
+}
