@@ -51,6 +51,7 @@ pub struct Model {
     name: Option<String>,
     variables: Vec<VariableDefinition>,
     constraints: Vec<Constraint>,
+    quadratic_constraints: Vec<(QuadExpr, f64)>,
     objective: Option<Expression>,
     sense: OptimizationSense,
     /// Quadratic objective Q matrix for QP problems (None = LP mode).
@@ -88,6 +89,7 @@ impl Model {
             name: Some(name.to_string()),
             variables: Vec::new(),
             constraints: Vec::new(),
+            quadratic_constraints: Vec::new(),
             objective: None,
             sense: OptimizationSense::Minimize,
             quadratic_objective: None,
@@ -252,6 +254,17 @@ impl Model {
             return self;
         }
         self.constraints.push(c);
+        self
+    }
+
+    /// Add a convex quadratic constraint `expr <= rhs`.
+    ///
+    /// This extends the algebraic DSL to QCQP/MIQCP models. For example,
+    /// `model.add_qc_le(x * x + y * y, 1.0)` represents the unit disk.
+    /// Second-order cone constraints such as `||v||_2 <= t` can be expressed
+    /// as `sum(v_i * v_i) <= t * t` when the right-hand side is constant.
+    pub fn add_qc_le(&mut self, expr: impl Into<QuadExpr>, rhs: f64) -> &mut Self {
+        self.quadratic_constraints.push((expr.into(), rhs));
         self
     }
 
@@ -503,6 +516,18 @@ impl Model {
             .filter(|(_, v)| v.kind != VarKind::Continuous)
             .map(|(i, _)| i)
             .collect();
+        if !self.quadratic_constraints.is_empty() {
+            return self.solve_qcqp_internal(
+                c,
+                a,
+                b,
+                constraint_types,
+                bounds,
+                integer_vars,
+                self.quadratic_objective.clone(),
+            );
+        }
+
         if !integer_vars.is_empty() {
             return self.solve_mip_internal(c, a, b, constraint_types, bounds, integer_vars);
         }
@@ -602,6 +627,160 @@ impl Model {
             )),
             s => Err(classify_status_error(s)
                 .unwrap_or_else(|| ModelError::Internal("unhandled LP status".to_string()))),
+        }
+    }
+
+    fn csc_rows(mat: &CscMatrix) -> Vec<Vec<f64>> {
+        let mut rows = vec![vec![0.0; mat.ncols()]; mat.nrows()];
+        let cp = mat.col_ptr();
+        let ri = mat.row_ind();
+        let va = mat.values();
+        for j in 0..mat.ncols() {
+            for k in cp[j]..cp[j + 1] {
+                rows[ri[k]][j] = va[k];
+            }
+        }
+        rows
+    }
+
+    fn csc_from_rows(rows: &[Vec<f64>], ncols: usize) -> Result<CscMatrix, ModelError> {
+        let mut rr = Vec::new();
+        let mut cc = Vec::new();
+        let mut vv = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            for (j, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    rr.push(i);
+                    cc.push(j);
+                    vv.push(v);
+                }
+            }
+        }
+        CscMatrix::from_triplets(&rr, &cc, &vv, rows.len(), ncols)
+            .map_err(|e| ModelError::Internal(e.to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_qcqp_internal(
+        &self,
+        c: Vec<f64>,
+        a: CscMatrix,
+        b: Vec<f64>,
+        constraint_types: Vec<ConstraintType>,
+        bounds: Vec<(f64, f64)>,
+        integer_vars: Vec<usize>,
+        q_obj: Option<CscMatrix>,
+    ) -> Result<ModelResult, ModelError> {
+        let n = self.variables.len();
+        let arows = Self::csc_rows(&a);
+        let mut g_rows = Vec::new();
+        let mut h_lin = Vec::new();
+        let mut eq_rows = Vec::new();
+        let mut b_eq = Vec::new();
+        for (i, row) in arows.iter().enumerate() {
+            match constraint_types[i] {
+                ConstraintType::Le => {
+                    g_rows.push(row.clone());
+                    h_lin.push(b[i]);
+                }
+                ConstraintType::Ge => {
+                    g_rows.push(row.iter().map(|v| -v).collect());
+                    h_lin.push(-b[i]);
+                }
+                ConstraintType::Eq => {
+                    eq_rows.push(row.clone());
+                    b_eq.push(b[i]);
+                }
+                _ => {
+                    return Err(ModelError::Internal("unknown constraint type".to_string()));
+                }
+            }
+        }
+        for (j, &(lb, ub)) in bounds.iter().enumerate() {
+            if ub.is_finite() {
+                let mut r = vec![0.0; n];
+                r[j] = 1.0;
+                g_rows.push(r);
+                h_lin.push(ub);
+            }
+            if lb.is_finite() {
+                let mut r = vec![0.0; n];
+                r[j] = -1.0;
+                g_rows.push(r);
+                h_lin.push(-lb);
+            }
+        }
+        let mut quad = Vec::new();
+        for (expr, rhs) in &self.quadratic_constraints {
+            let p = quad_to_csc(&expr.quad, n).map_err(ModelError::Internal)?;
+            let mut q = vec![0.0; n];
+            for (&var, &coef) in &expr.linear.coefficients {
+                if var.model_id != self.model_id || var.index >= n {
+                    return Err(ModelError::InvalidInput(
+                        "quadratic constraint contains a variable from another model".to_string(),
+                    ));
+                }
+                q[var.index] += coef;
+            }
+            quad.push(otspot_core::conic::QuadConstraint {
+                p,
+                q,
+                r: expr.linear.constant - rhs,
+            });
+        }
+        let p0 = match q_obj {
+            Some(q) if self.sense == OptimizationSense::Maximize => Some(q.scale_values(-1.0)),
+            other => other,
+        };
+        let qp = otspot_core::conic::QcqpProblem {
+            n,
+            p0,
+            q0: c,
+            quad,
+            g_lin: Self::csc_from_rows(&g_rows, n)?,
+            h_lin,
+            a_eq: Self::csc_from_rows(&eq_rows, n)?,
+            b_eq,
+        };
+        let opts = otspot_core::conic::ConicOptions::default();
+        let (status, raw_obj, solution) = if integer_vars.is_empty() {
+            let r = otspot_core::conic::solve_qcqp(&qp, &opts);
+            (r.status, r.objective, r.x)
+        } else {
+            let lb: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].0).collect();
+            let ub: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].1).collect();
+            let r = otspot_core::conic::solve_miqcp(
+                &qp,
+                &integer_vars,
+                &lb,
+                &ub,
+                &opts,
+                &otspot_core::conic::BbOptions::default(),
+            );
+            (r.status, r.objective, r.x)
+        };
+        match status {
+            SolveStatus::Optimal => {
+                let oriented = if self.sense == OptimizationSense::Maximize {
+                    -raw_obj
+                } else {
+                    raw_obj
+                };
+                Ok(ModelResult {
+                    model_id: self.model_id,
+                    status: SolveStatus::Optimal,
+                    proof: SolutionProof::GlobalOptimal,
+                    objective_value: oriented + self.obj_offset + self.obj_expr_constant,
+                    solution,
+                    dual_solution: None,
+                    reduced_costs: None,
+                    slack: None,
+                    bound_duals: Vec::new(),
+                    stats: otspot_core::problem::SolveStats::default(),
+                })
+            }
+            s => Err(classify_status_error(s)
+                .unwrap_or_else(|| ModelError::Internal("unhandled QCQP status".to_string()))),
         }
     }
 
@@ -2905,5 +3084,38 @@ mod mip_model_tests {
                 "[{label}]: non-finite obj_offset must be rejected at solve, got Ok"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod conic_dsl_tests {
+    use super::*;
+
+    #[test]
+    fn qcqp_disk_constraint_routes_to_conic_solver() {
+        let mut m = Model::new("qcqp-disk");
+        let x = m.add_var("x", 0.0, f64::INFINITY);
+        let y = m.add_var("y", 0.0, f64::INFINITY);
+        m.add_qc_le(x * x + y * y, 1.0);
+        m.maximize(x + y);
+        let res = m.solve().unwrap();
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert!((res.objective_value - 2.0_f64.sqrt()).abs() < 1e-4);
+        assert!((res[x] - 1.0 / 2.0_f64.sqrt()).abs() < 1e-4);
+        assert!((res[y] - 1.0 / 2.0_f64.sqrt()).abs() < 1e-4);
+    }
+
+    #[test]
+    fn miqcp_disk_constraint_routes_to_conic_branch_and_bound() {
+        let mut m = Model::new("miqcp-disk");
+        let x = m.add_int_var("x", 0.0, 2.0);
+        let y = m.add_int_var("y", 0.0, 2.0);
+        m.add_qc_le(x * x + y * y, 2.5);
+        m.maximize(x + y);
+        let res = m.solve().unwrap();
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert!((res.objective_value - 2.0).abs() < 1e-6);
+        assert!((res[x] - 1.0).abs() < 1e-6);
+        assert!((res[y] - 1.0).abs() < 1e-6);
     }
 }
