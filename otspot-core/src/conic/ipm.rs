@@ -320,6 +320,23 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
     }
 
     let objective = dot(c, &x);
+    let (primal_ray, infeas_cert) = match status {
+        SolveStatus::Unbounded => {
+            let nx = norm2(&x);
+            if nx > 0.0 {
+                (Some(x.iter().map(|v| v / nx).collect()), None)
+            } else {
+                (None, None)
+            }
+        }
+        SolveStatus::Infeasible => {
+            let scale = (norm2(&y) + norm2(&z)).max(1.0);
+            let yn: Vec<f64> = y.iter().map(|v| v / scale).collect();
+            let zn: Vec<f64> = z.iter().map(|v| v / scale).collect();
+            (None, Some((yn, zn)))
+        }
+        _ => (None, None),
+    };
     ConicResult {
         status,
         objective,
@@ -329,6 +346,8 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
         s,
         iterations,
         residuals: last,
+        primal_ray,
+        infeas_cert,
     }
 }
 
@@ -383,5 +402,7 @@ fn failed(problem: &ConicProblem, status: SolveStatus) -> ConicResult {
         s: vec![0.0; problem.m()],
         iterations: 0,
         residuals: (0.0, 0.0, 0.0),
+        primal_ray: None,
+        infeas_cert: None,
     }
 }

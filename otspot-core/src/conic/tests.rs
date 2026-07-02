@@ -657,3 +657,49 @@ fn nonconvex_miqcp_integer_bilinear() {
         );
     }
 }
+
+#[test]
+fn unbounded_certificate_is_improving_ray() {
+    // min -x0 s.t. x0 >= 0  => unbounded; ray d has c·d < 0.
+    let g = csc(&[vec![-1.0]], 1, 1);
+    let prob = ConicProblem {
+        c: vec![-1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![0.0],
+        cone: ConeSpec { l: 1, soc: vec![] },
+    };
+    let res = solve_socp(&prob, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Unbounded);
+    let d = res.primal_ray.expect("unbounded must carry a ray");
+    let cd: f64 = prob.c.iter().zip(&d).map(|(a, b)| a * b).sum();
+    assert!(cd < -1e-6, "ray must be improving: c·d={cd}");
+}
+
+#[test]
+fn infeasible_certificate_is_farkas() {
+    // x0 <= -1 and x0 >= 0  => infeasible.  Certificate (y,z): b·y + h·z < 0,
+    // A^T y + G^T z ≈ 0, z >= 0.
+    let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
+    let prob = ConicProblem {
+        c: vec![0.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![-1.0, 0.0],
+        cone: ConeSpec { l: 2, soc: vec![] },
+    };
+    let res = solve_socp(&prob, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Infeasible);
+    let (_y, z) = res
+        .infeas_cert
+        .expect("infeasible must carry a Farkas certificate");
+    // z in orthant dual (>= 0).
+    for &zi in &z {
+        assert!(zi >= -1e-6, "z must lie in K*: {zi}");
+    }
+    // h·z < 0 (b empty here) certifies infeasibility direction.
+    let hz: f64 = prob.h.iter().zip(&z).map(|(a, b)| a * b).sum();
+    assert!(hz < 1e-6, "Farkas value h·z should be <= 0-ish: {hz}");
+}

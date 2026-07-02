@@ -133,6 +133,14 @@ pub struct ConicResult {
     pub iterations: usize,
     /// Final `(primal_res, dual_res, duality_gap)` relative metrics.
     pub residuals: (f64, f64, f64),
+    /// Unboundedness certificate: an improving primal ray `d` with `A d ≈ 0`,
+    /// `-G d ∈ K` (asymptotically) and `c^T d < 0`. `Some` only when
+    /// `status == Unbounded`.
+    pub primal_ray: Option<Vec<f64>>,
+    /// Primal-infeasibility (Farkas) certificate `(y, z)` with
+    /// `A^T y + G^T z ≈ 0`, `z ∈ K^*`, and `b^T y + h^T z < 0`. `Some` only
+    /// when `status == Infeasible`.
+    pub infeas_cert: Option<(Vec<f64>, Vec<f64>)>,
 }
 
 /// Options controlling the conic interior-point solver.
