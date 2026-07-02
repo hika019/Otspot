@@ -52,6 +52,8 @@ pub struct Model {
     variables: Vec<VariableDefinition>,
     constraints: Vec<Constraint>,
     quadratic_constraints: Vec<(QuadExpr, f64)>,
+    /// Second-order cone constraints: (vector affine parts, scalar affine t) meaning ||terms||_2 <= t.
+    soc_constraints: Vec<(Vec<Expression>, Expression)>,
     objective: Option<Expression>,
     sense: OptimizationSense,
     /// Quadratic objective Q matrix for QP problems (None = LP mode).
@@ -90,6 +92,7 @@ impl Model {
             variables: Vec::new(),
             constraints: Vec::new(),
             quadratic_constraints: Vec::new(),
+            soc_constraints: Vec::new(),
             objective: None,
             sense: OptimizationSense::Minimize,
             quadratic_objective: None,
@@ -265,6 +268,17 @@ impl Model {
     /// as `sum(v_i * v_i) <= t * t` when the right-hand side is constant.
     pub fn add_qc_le(&mut self, expr: impl Into<QuadExpr>, rhs: f64) -> &mut Self {
         self.quadratic_constraints.push((expr.into(), rhs));
+        self
+    }
+
+    /// Add a second-order cone constraint `||terms||_2 <= t`.
+    ///
+    /// `terms` are affine expressions forming the cone's vector part and `t` is
+    /// an affine expression bounding its Euclidean norm. Routed to the conic
+    /// solver (or its mixed-integer branch-and-bound when integer variables are
+    /// present). Example: `model.add_soc_le(vec![1.0 * x, 1.0 * y], 1.0 * t)`.
+    pub fn add_soc_le(&mut self, terms: Vec<Expression>, t: Expression) -> &mut Self {
+        self.soc_constraints.push((terms, t));
         self
     }
 
@@ -516,7 +530,7 @@ impl Model {
             .filter(|(_, v)| v.kind != VarKind::Continuous)
             .map(|(i, _)| i)
             .collect();
-        if !self.quadratic_constraints.is_empty() {
+        if !self.quadratic_constraints.is_empty() || !self.soc_constraints.is_empty() {
             return self.solve_qcqp_internal(
                 c,
                 a,
@@ -743,21 +757,67 @@ impl Model {
             b_eq,
         };
         let opts = otspot_core::conic::ConicOptions::default();
-        let (status, raw_obj, solution) = if integer_vars.is_empty() {
-            let r = otspot_core::conic::solve_qcqp(&qp, &opts);
-            (r.status, r.objective, r.x)
+        let raw_of = |x: &[f64]| -> f64 {
+            let xn = &x[..n.min(x.len())];
+            let mut raw = qp.q0.iter().zip(xn).map(|(a, b)| a * b).sum::<f64>();
+            if let Some(p0) = &qp.p0 {
+                let px = p0.mat_vec_mul(xn).unwrap_or_else(|_| vec![0.0; n]);
+                raw += 0.5 * xn.iter().zip(&px).map(|(a, b)| a * b).sum::<f64>();
+            }
+            raw
+        };
+        let (status, raw_obj, solution) = if self.soc_constraints.is_empty() {
+            if integer_vars.is_empty() {
+                let r = otspot_core::conic::solve_qcqp(&qp, &opts);
+                (r.status, r.objective, r.x)
+            } else {
+                let lb: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].0).collect();
+                let ub: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].1).collect();
+                let r = otspot_core::conic::solve_miqcp(
+                    &qp,
+                    &integer_vars,
+                    &lb,
+                    &ub,
+                    &opts,
+                    &otspot_core::conic::BbOptions::default(),
+                );
+                (r.status, r.objective, r.x)
+            }
         } else {
-            let lb: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].0).collect();
-            let ub: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].1).collect();
-            let r = otspot_core::conic::solve_miqcp(
-                &qp,
-                &integer_vars,
-                &lb,
-                &ub,
-                &opts,
-                &otspot_core::conic::BbOptions::default(),
-            );
-            (r.status, r.objective, r.x)
+            let (mut conic, nvar) =
+                otspot_core::conic::to_conic(&qp).map_err(ModelError::Internal)?;
+            self.append_soc(&mut conic, nvar, n)?;
+            if integer_vars.is_empty() {
+                let r = otspot_core::conic::solve_socp(&conic, &opts);
+                let sol = r.x[..n.min(r.x.len())].to_vec();
+                let raw = raw_of(&r.x);
+                (r.status, raw, sol)
+            } else {
+                let lb: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].0).collect();
+                let ub: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].1).collect();
+                let mp = otspot_core::conic::MisocpProblem {
+                    base: conic,
+                    integers: integer_vars.clone(),
+                    int_lb: lb,
+                    int_ub: ub,
+                };
+                let r = otspot_core::conic::solve_misocp(
+                    &mp,
+                    &opts,
+                    &otspot_core::conic::BbOptions::default(),
+                );
+                let sol = if r.x.is_empty() {
+                    Vec::new()
+                } else {
+                    r.x[..n.min(r.x.len())].to_vec()
+                };
+                let raw = if r.x.is_empty() {
+                    f64::NAN
+                } else {
+                    raw_of(&r.x)
+                };
+                (r.status, raw, sol)
+            }
         };
         match status {
             SolveStatus::Optimal => {
@@ -782,6 +842,56 @@ impl Model {
             s => Err(classify_status_error(s)
                 .unwrap_or_else(|| ModelError::Internal("unhandled QCQP status".to_string()))),
         }
+    }
+
+    fn append_soc(
+        &self,
+        conic: &mut otspot_core::conic::ConicProblem,
+        nvar: usize,
+        n: usize,
+    ) -> Result<(), ModelError> {
+        if self.soc_constraints.is_empty() {
+            return Ok(());
+        }
+        let mut rows = Self::csc_rows(&conic.g);
+        let mut h = conic.h.clone();
+        let mut soc = conic.cone.soc.clone();
+        let check = |var: &Variable| -> Result<(), ModelError> {
+            if var.model_id != self.model_id || var.index >= n {
+                return Err(ModelError::InvalidInput(
+                    "SOC constraint references a variable from another model".to_string(),
+                ));
+            }
+            Ok(())
+        };
+        for (terms, t) in &self.soc_constraints {
+            let dim = terms.len() + 1;
+            // s0 = t (scalar bound): s = h - G x  =>  G row = -coeffs(t), h = const(t).
+            let mut r0 = vec![0.0; nvar];
+            for (&var, &coef) in &t.coefficients {
+                check(&var)?;
+                r0[var.index] = -coef;
+            }
+            rows.push(r0);
+            h.push(t.constant);
+            for term in terms {
+                let mut r = vec![0.0; nvar];
+                for (&var, &coef) in &term.coefficients {
+                    check(&var)?;
+                    r[var.index] = -coef;
+                }
+                rows.push(r);
+                h.push(term.constant);
+            }
+            soc.push(dim);
+        }
+        conic.g = Self::csc_from_rows(&rows, nvar)?;
+        conic.h = h;
+        conic.cone = otspot_core::conic::ConeSpec {
+            l: conic.cone.l,
+            soc,
+        };
+        Ok(())
     }
 
     /// Build a `QpProblem` from the model (constraint matrix + maximize Q→-Q
@@ -3090,6 +3200,7 @@ mod mip_model_tests {
 #[cfg(test)]
 mod conic_dsl_tests {
     use super::*;
+    use crate::constraint;
 
     #[test]
     fn qcqp_disk_constraint_routes_to_conic_solver() {
@@ -3103,6 +3214,26 @@ mod conic_dsl_tests {
         assert!((res.objective_value - 2.0_f64.sqrt()).abs() < 1e-4);
         assert!((res[x] - 1.0 / 2.0_f64.sqrt()).abs() < 1e-4);
         assert!((res[y] - 1.0 / 2.0_f64.sqrt()).abs() < 1e-4);
+    }
+
+    #[test]
+    fn soc_norm_min_on_line() {
+        // min t s.t. ||(x,y)|| <= t, x + y >= 2.  Optimum t=sqrt(2) at (1,1).
+        let mut m = Model::new("soc-line");
+        let x = m.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
+        let y = m.add_var("y", f64::NEG_INFINITY, f64::INFINITY);
+        let t = m.add_var("t", 0.0, f64::INFINITY);
+        m.add_constraint(constraint!((x + y) >= 2.0));
+        m.add_soc_le(vec![1.0 * x, 1.0 * y], 1.0 * t);
+        m.minimize(1.0 * t);
+        let res = m.solve().unwrap();
+        assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
+        assert!(
+            (res.objective_value - 2.0_f64.sqrt()).abs() < 1e-4,
+            "obj={}",
+            res.objective_value
+        );
+        assert!((res[x] - 1.0).abs() < 1e-3 && (res[y] - 1.0).abs() < 1e-3);
     }
 
     #[test]

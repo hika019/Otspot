@@ -46,6 +46,64 @@ fn norm2(a: &[f64]) -> f64 {
     dot(a, a).sqrt()
 }
 
+/// Solve the (dense-represented) KKT system, preferring a sparse faer LU and
+/// falling back to the dense partial-pivot LU when the sparse path fails.
+fn kkt_solve(dense: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
+    if let Some(x) = sparse_lu_solve(dense, rhs) {
+        return Some(x);
+    }
+    lu_solve(dense.to_vec(), rhs.to_vec())
+}
+
+/// Sparse LU (faer simplicial backend) for the KKT matrix built from `dense`.
+fn sparse_lu_solve(dense: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::sparse::linalg::lu::{factorize_symbolic_lu, LuSymbolicParams, NumericLu};
+    use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
+    use faer::{Conj, MatMut, Par};
+
+    let n = rhs.len();
+    if n == 0 {
+        return Some(Vec::new());
+    }
+    // Build CSC (column-major, ascending row indices per column).
+    let mut col_ptr = vec![0usize; n + 1];
+    let mut row_ind: Vec<usize> = Vec::new();
+    let mut values: Vec<f64> = Vec::new();
+    for j in 0..n {
+        for (i, row) in dense.iter().enumerate() {
+            let v = row[j];
+            if v != 0.0 {
+                row_ind.push(i);
+                values.push(v);
+            }
+        }
+        col_ptr[j + 1] = row_ind.len();
+    }
+    let a_sym =
+        unsafe { SymbolicSparseColMatRef::<usize>::new_unchecked(n, n, &col_ptr, None, &row_ind) };
+    let symbolic = factorize_symbolic_lu(a_sym, LuSymbolicParams::default()).ok()?;
+    let a_num = SparseColMatRef::<'_, usize, f64>::new(a_sym, &values);
+    let mut numeric = NumericLu::<usize, f64>::new();
+    let req = symbolic.factorize_numeric_lu_scratch::<f64>(Par::Seq, Default::default());
+    let mut mem = MemBuffer::new(req);
+    let stack = MemStack::new(&mut mem);
+    let lu_ref = symbolic
+        .factorize_numeric_lu(&mut numeric, a_num, Par::Seq, stack, Default::default())
+        .ok()?;
+    let mut b = rhs.to_vec();
+    let req2 = symbolic.solve_in_place_scratch::<f64>(1, Par::Seq);
+    let mut mem2 = MemBuffer::new(req2);
+    let stack2 = MemStack::new(&mut mem2);
+    let bmat = MatMut::from_column_major_slice_mut(&mut b, n, 1);
+    lu_ref.solve_in_place_with_conj(Conj::No, bmat, Par::Seq, stack2);
+    if b.iter().all(|v| v.is_finite()) {
+        Some(b)
+    } else {
+        None
+    }
+}
+
 /// Solve a dense linear system `M u = rhs` by LU with partial pivoting.
 fn lu_solve(mut m: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Option<Vec<f64>> {
     let n = rhs.len();
@@ -299,7 +357,7 @@ fn solve_dir(
     for i in 0..p {
         rhs[n + i] = -ry[i];
     }
-    let sol = lu_solve(kkt.to_vec(), rhs).unwrap_or_else(|| vec![0.0; n + p]);
+    let sol = kkt_solve(kkt, &rhs).unwrap_or_else(|| vec![0.0; n + p]);
     let dx = sol[0..n].to_vec();
     let dy = sol[n..n + p].to_vec();
     // dz = winv( winv(G dx + rz) + rc )
