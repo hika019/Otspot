@@ -1,42 +1,39 @@
-# CBLIB SOCP/MISOCP reference objectives
-# Source: CBLIB (https://cblib.zib.de) does not publish reference optimal values.
-# These instances require independent solver verification (e.g., MOSEK, CPLEX).
-# Purpose: Regression detection against future solver runs on these problems.
+# CBLIB SOCP/MISOCP baseline objectives (self-baseline).
+# Source: CBLIB (https://cblib.zib.de) publishes no reference optima; values
+# with source=otspot_self are Otspot's own solutions (regression baseline,
+# NOT independently verified optima).
+# problem_type is the measured parse result (otspot-io::cbf): SOCP/MISOCP for
+# bridged instances, EXP/PSD for cones outside the SOCP bridge's scope.
+# Run conditions: examples/solve_cbf.rs, ConicOptions{tol=1e-6, max_iter=100},
+#   BbOptions{int_tol=1e-6, max_nodes=20000, gap_tol=1e-6}, external timeout
+#   180s/problem, 14GB address-space cap, sequential, release, 2026-07-04.
+# Status values recorded in optimal_obj for unsolved rows:
+#   unsupported         = EXP/PSD cone rejected by the bridge (by design)
+#   oom_abort           = allocation failure in the dense conic-IPM KKT
+#   external_timeout    = killed by the 180s external timeout
+#   infeasible_reported = solver returned Infeasible without a certificate
+#                         (false-infeasible suspect: NaN-diverged root node)
 #
-# Downloaded instances:
-#   SOCP (continuous):
-#     - chainsing-1000-1 (chained singular, academic)
-#     - nql30, nql60, qssp30 (limit analysis / plastic plate)
-#     - 20_0_1_w, 20_0_2_w, 50_0_1_w, 50_0_2_w, 100_0_1_w, 150_0_1_w, 200_0_1_w (portfolio optimization)
-#
-#   MISOCP (mixed-integer):
-#     - 2x3_3bars, 2x4_3bars, 2x5_3bars (topology optimization)
-#     - 2D-TopOpt-Cantilever_60x40_50 (topology optimization)
-#     - sssd-strong-15-4, sssd-strong-20-4 (stochastic service system)
-#     - syn10m, syn15m, syn20m (process network synthesis)
-#     - classical_20_0, classical_30_0 (classical conic programs)
-#
-
 problem_name,optimal_obj,problem_type,source
-chainsing-1000-1,no_ref,SOCP,cblib_no_published_ref
-nql30,no_ref,SOCP,cblib_no_published_ref
-nql60,no_ref,SOCP,cblib_no_published_ref
-qssp30,no_ref,SOCP,cblib_no_published_ref
-20_0_1_w,no_ref,SOCP,cblib_no_published_ref
-20_0_2_w,no_ref,SOCP,cblib_no_published_ref
-50_0_1_w,no_ref,SOCP,cblib_no_published_ref
-50_0_2_w,no_ref,SOCP,cblib_no_published_ref
-100_0_1_w,no_ref,SOCP,cblib_no_published_ref
-150_0_1_w,no_ref,SOCP,cblib_no_published_ref
-200_0_1_w,no_ref,SOCP,cblib_no_published_ref
-2x3_3bars,no_ref,MISOCP,cblib_no_published_ref
-2x4_3bars,no_ref,MISOCP,cblib_no_published_ref
-2x5_3bars,no_ref,MISOCP,cblib_no_published_ref
-2D-TopOpt-Cantilever_60x40_50,no_ref,MISOCP,cblib_no_published_ref
-sssd-strong-15-4,no_ref,MISOCP,cblib_no_published_ref
-sssd-strong-20-4,no_ref,MISOCP,cblib_no_published_ref
-syn10m,no_ref,MISOCP,cblib_no_published_ref
-syn15m,no_ref,MISOCP,cblib_no_published_ref
-syn20m,no_ref,MISOCP,cblib_no_published_ref
-classical_20_0,no_ref,MISOCP,cblib_no_published_ref
-classical_30_0,no_ref,MISOCP,cblib_no_published_ref
+chainsing-1000-1,external_timeout,SOCP,otspot_self
+nql30,external_timeout,SOCP,otspot_self
+nql60,external_timeout,SOCP,otspot_self
+qssp30,external_timeout,SOCP,otspot_self
+20_0_1_w,external_timeout,MISOCP,otspot_self
+20_0_2_w,external_timeout,MISOCP,otspot_self
+50_0_1_w,oom_abort,MISOCP,otspot_self
+50_0_2_w,oom_abort,MISOCP,otspot_self
+100_0_1_w,oom_abort,MISOCP,otspot_self
+150_0_1_w,oom_abort,MISOCP,otspot_self
+200_0_1_w,oom_abort,MISOCP,otspot_self
+2x3_3bars,unsupported,PSD,otspot_self
+2x4_3bars,unsupported,PSD,otspot_self
+2x5_3bars,unsupported,PSD,otspot_self
+2D-TopOpt-Cantilever_60x40_50,oom_abort,MISOCP,otspot_self
+sssd-strong-15-4,infeasible_reported,MISOCP,otspot_self
+sssd-strong-20-4,infeasible_reported,MISOCP,otspot_self
+syn10m,unsupported,EXP,otspot_self
+syn15m,unsupported,EXP,otspot_self
+syn20m,unsupported,EXP,otspot_self
+classical_20_0,-8.2295151489e-2,MISOCP,otspot_self
+classical_30_0,-7.9814493180e-2,MISOCP,otspot_self
