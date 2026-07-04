@@ -1,0 +1,42 @@
+# CBLIB SOCP/MISOCP reference objectives
+# Source: CBLIB (https://cblib.zib.de) does not publish reference optimal values.
+# These instances require independent solver verification (e.g., MOSEK, CPLEX).
+# Purpose: Regression detection against future solver runs on these problems.
+#
+# Downloaded instances:
+#   SOCP (continuous):
+#     - beam7, beam30 (radiotherapy)
+#     - 2013_firL1, 2013_firL2a (FIR filter design)
+#     - 20_0_1_w, 20_0_2_w, 50_0_1_w, 50_0_2_w, 100_0_1_w, 150_0_1_w, 200_0_1_w (portfolio optimization)
+#
+#   MISOCP (mixed-integer):
+#     - 2x3_3bars, 2x4_3bars, 2x5_3bars (topology optimization)
+#     - 2D-TopOpt-Cantilever_60x40_50 (topology optimization)
+#     - sssd-strong-15-4, sssd-strong-20-4 (stochastic service system)
+#     - syn10m, syn15m, syn20m (process network synthesis)
+#     - classical_20_0, classical_30_0 (classical conic programs)
+#
+
+problem_name,optimal_obj,problem_type,source
+beam7,no_ref,SOCP,cblib_no_published_ref
+beam30,no_ref,SOCP,cblib_no_published_ref
+2013_firL1,no_ref,SOCP,cblib_no_published_ref
+2013_firL2a,no_ref,SOCP,cblib_no_published_ref
+20_0_1_w,no_ref,SOCP,cblib_no_published_ref
+20_0_2_w,no_ref,SOCP,cblib_no_published_ref
+50_0_1_w,no_ref,SOCP,cblib_no_published_ref
+50_0_2_w,no_ref,SOCP,cblib_no_published_ref
+100_0_1_w,no_ref,SOCP,cblib_no_published_ref
+150_0_1_w,no_ref,SOCP,cblib_no_published_ref
+200_0_1_w,no_ref,SOCP,cblib_no_published_ref
+2x3_3bars,no_ref,MISOCP,cblib_no_published_ref
+2x4_3bars,no_ref,MISOCP,cblib_no_published_ref
+2x5_3bars,no_ref,MISOCP,cblib_no_published_ref
+2D-TopOpt-Cantilever_60x40_50,no_ref,MISOCP,cblib_no_published_ref
+sssd-strong-15-4,no_ref,MISOCP,cblib_no_published_ref
+sssd-strong-20-4,no_ref,MISOCP,cblib_no_published_ref
+syn10m,no_ref,MISOCP,cblib_no_published_ref
+syn15m,no_ref,MISOCP,cblib_no_published_ref
+syn20m,no_ref,MISOCP,cblib_no_published_ref
+classical_20_0,no_ref,MISOCP,cblib_no_published_ref
+classical_30_0,no_ref,MISOCP,cblib_no_published_ref

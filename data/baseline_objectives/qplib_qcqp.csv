@@ -1,0 +1,21 @@
+# QPLIB QCQP (Quadratically Constrained Quadratic Programming) reference objectives
+# Source: https://qplib.zib.de/QPLIB_XXXX.html (official published optimal values, 2026-07-04)
+# QCQP 対象: CCQ系4問, DCQ系7問, QCQ系6問
+problem_name,optimal_obj,problem_type,objsense,source
+QPLIB_2546,-8668213.40900000,CCQ,minimize,qplib_official
+QPLIB_2981,-8668219.07900000,CCQ,minimize,qplib_official
+QPLIB_3080,-8668219.09500000,CCQ,minimize,qplib_official
+QPLIB_3297,-8668219.09400000,CCQ,minimize,qplib_official
+QPLIB_8585,5.38967212,DCQ,minimize,qplib_official
+QPLIB_8595,10731.25000000,DCQ,minimize,qplib_official
+QPLIB_8605,-20.34056648,DCQ,minimize,qplib_official
+QPLIB_8683,no_ref,DCQ,minimize,qplib_official_no_published_optimum
+QPLIB_8685,100.00000000,DCQ,minimize,qplib_official
+QPLIB_8803,293.87607510,DCQ,minimize,qplib_official
+QPLIB_8810,74653384040.00000000,DCQ,minimize,qplib_official
+QPLIB_1055,-33.03702314,QCQ,minimize,qplib_official
+QPLIB_1143,-57.24667411,QCQ,minimize,qplib_official
+QPLIB_1157,-10.94820362,QCQ,minimize,qplib_official
+QPLIB_1353,-7.71416217,QCQ,minimize,qplib_official
+QPLIB_1423,-14.96746772,QCQ,minimize,qplib_official
+QPLIB_1493,-43.16043152,QCQ,minimize,qplib_official
