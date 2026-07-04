@@ -628,6 +628,75 @@ fn miqp_nonconvex_q_rejected() {
     );
 }
 
+/// min -x, x in {0,1}, s.t. 2x^2 <= 0.5 (as (1/2)x'[4]x <= 0.5).
+///
+/// x=1 violates the quadratic constraint; the answer is x=0, objective 0.
+/// Sentinel: dropping the quadratic-constraint check in `solve_fixed_point`
+/// makes the x=1 leaf evaluate as Optimal(obj=-1) and this test FAILs with
+/// an infeasible incumbent.
+#[test]
+fn miqcp_fixed_point_respects_quadratic_constraint() {
+    use crate::qp::QcqpMatrix;
+    let mut qp = qp_problem(
+        &[0.0],
+        vec![-1.0],
+        &[],
+        &[],
+        &[],
+        1,
+        vec![0.5],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0)],
+    );
+    let mut qc = QcqpMatrix::new(1);
+    qc.triplets.push((0, 0, 4.0));
+    qp.set_quadratic_constraints(vec![qc]).unwrap();
+    let r = solve_miqp(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
+    assert!(
+        matches!(
+            r.status,
+            SolveStatus::Optimal | SolveStatus::NonconvexGlobal
+        ),
+        "got {:?}",
+        r.status
+    );
+    assert!(r.solution[0].abs() < EPS, "x={} must be 0", r.solution[0]);
+    assert!(r.objective.abs() < EPS, "obj={} must be 0", r.objective);
+}
+
+/// A quadratic `>=` (or `=`) constraint makes the feasible region nonconvex
+/// even with a PSD matrix; `is_convex` must reject it at the B&B entry.
+///
+/// Sentinel: restricting `is_convex` to the objective Q only lets these enter
+/// the B&B and return a non-NonConvex status — this test FAILs.
+#[test]
+fn miqcp_nonconvex_quadratic_constraint_rejected() {
+    use crate::qp::QcqpMatrix;
+    for ct in [ConstraintType::Ge, ConstraintType::Eq] {
+        let mut qp = qp_problem(
+            &[2.0],
+            vec![0.0],
+            &[],
+            &[],
+            &[],
+            1,
+            vec![1.0],
+            vec![ct],
+            vec![(0.0, 5.0)],
+        );
+        let mut qc = QcqpMatrix::new(1);
+        qc.triplets.push((0, 0, 2.0));
+        qp.set_quadratic_constraints(vec![qc]).unwrap();
+        let r = solve_miqp(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
+        assert!(
+            matches!(r.status, SolveStatus::NonConvex(_)),
+            "{:?} quadratic constraint must be rejected, got {:?}",
+            ct,
+            r.status
+        );
+    }
+}
+
 #[test]
 fn miqp_no_integer_vars_falls_back_to_qp() {
     // convex QP via MIQP entry with no integer vars must match the direct QP solve.

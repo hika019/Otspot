@@ -129,6 +129,43 @@ fn nonconvex_qcqp_with_unbounded_variable_stays_not_supported() {
     assert_eq!(result.objective, f64::INFINITY);
 }
 
+/// min x  s.t.  (1/2)*(-2e-10)*x^2 <= -0.1,  x in [-2e5, 2e5].
+///
+/// The constraint matrix -2e-10 lies inside the convex bridge's Cholesky
+/// jitter band, so the bridge misclassifies the problem as convex and its
+/// SOCP solve fails numerically (the true feasible set |x| >= sqrt(1e9) is
+/// disconnected). The route must detect the unclean outcome and fall back to
+/// the global solver, which finds x = -2e5, objective -2e5.
+///
+/// Sentinel: reverting the clean-outcome gate (accepting any non-NotSupported
+/// convex-bridge result) makes this FAIL with a MaxIterations/NaN result.
+#[test]
+fn jitter_band_indefinite_qcqp_falls_back_to_global() {
+    let n = 1usize;
+    let q_obj = CscMatrix::new(n, n);
+    let c = vec![1.0];
+    let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+    let b = vec![-0.1];
+    let bounds = vec![(-2e5, 2e5)];
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 0, -2e-10));
+    let mut problem = QpProblem::new(q_obj, c, a, b, bounds, vec![ConstraintType::Le]).unwrap();
+    problem.set_quadratic_constraints(vec![qc]).unwrap();
+    let result = solve_qp(&problem);
+    assert_eq!(result.status, SolveStatus::Optimal, "{:?}", result.status);
+    assert!(
+        (result.objective - (-2e5)).abs() < 1.0,
+        "objective={}",
+        result.objective
+    );
+    assert!(
+        (result.solution[0] - (-2e5)).abs() < 1.0,
+        "x={:?}",
+        result.solution
+    );
+    assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
+}
+
 /// `timeout_secs: Some(0.0)` must trip the conic IPM's deadline check on (at
 /// latest) the first iteration, rather than running to completion or hanging.
 ///
@@ -145,4 +182,23 @@ fn convex_qcqp_propagates_timeout() {
     assert_eq!(result.status, SolveStatus::Timeout, "{:?}", result.status);
     assert!(result.stats.deadline_triggered);
     assert_eq!(result.stats.route, SolveRoute::ConicQcqpConvex);
+}
+
+/// Nonconvex-path timeout propagation: an expired deadline must surface as
+/// `Timeout` from the spatial branch-and-bound (checked per node), not as a
+/// false `Infeasible` or a completed solve.
+///
+/// Sentinel: dropping the deadline check in `nonconvex::global_core` (or the
+/// deadline mapping in `conic_options`) makes this FAIL with `Optimal`.
+#[test]
+fn nonconvex_qcqp_propagates_timeout() {
+    let problem = nonconvex_qcqp_problem(3.0);
+    let opts = SolverOptions {
+        timeout_secs: Some(0.0),
+        ..SolverOptions::default()
+    };
+    let result = solve_qp_with(&problem, &opts);
+    assert_eq!(result.status, SolveStatus::Timeout, "{:?}", result.status);
+    assert!(result.stats.deadline_triggered);
+    assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
 }

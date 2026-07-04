@@ -1383,11 +1383,13 @@ pub(crate) fn integer_mask(num_vars: usize, integer_vars: &[usize]) -> Vec<bool>
     mask
 }
 
-/// A result tagging a non-convex (non-PSD `Q`) MIQP as out of scope.
+/// A result tagging a non-convex MIQP/MIQCP (non-PSD `Q` or nonconvex
+/// quadratic constraint) as out of scope.
 fn nonconvex_result() -> SolverResult {
     SolverResult {
         status: SolveStatus::NonConvex(
-            "convex MIQP only: Q is not positive semidefinite".to_string(),
+            "convex MIQP/MIQCP only: Q is not PSD or a quadratic constraint is nonconvex"
+                .to_string(),
         ),
         objective: f64::INFINITY,
         solution: vec![],

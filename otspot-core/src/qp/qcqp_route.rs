@@ -1,12 +1,18 @@
 //! Routes continuous QCQP (`QpProblem` with non-empty `quadratic_constraints`)
 //! to the conic solver stack.
 //!
-//! Convexity is determined by the conic bridge itself rather than reimplemented
+//! Convexity is screened by the conic bridge itself rather than reimplemented
 //! here: [`conic::solve_qp_problem_as_qcqp`] rejects a problem with
-//! `NotSupported` exactly when it cannot certify convexity (indefinite `P0`/`Pi`
-//! via Cholesky, or a quadratic `>=`/`=` constraint, which this bridge treats as
-//! nonconvex). That signal routes the problem to the spatial (McCormick)
-//! branch-and-bound global solver instead.
+//! `NotSupported` when it detects nonconvexity (indefinite `P0`/`Pi` via
+//! Cholesky, or a quadratic `>=`/`=` constraint). This screen is **not a
+//! convexity proof**: the bridge's Cholesky clamps pivots inside a small
+//! jitter band (meant to absorb QPS 6-digit rounding), so a slightly
+//! indefinite matrix can pass as "convex" and then fail numerically in the
+//! SOCP solve. The route therefore accepts the convex-bridge result only when
+//! it is a clean outcome ([`is_clean_convex_outcome`]); any other failure
+//! falls back to the spatial (McCormick) branch-and-bound global solver,
+//! which is sound for convex problems too. `Timeout` never falls back —
+//! retrying after the deadline would only double the time spent.
 //!
 //! `QpProblem` carries no integrality information (see
 //! [`crate::mip::MiqpProblem`], which layers `integer_vars` on top of a plain
@@ -29,17 +35,43 @@ pub(crate) fn solve_qcqp_via_conic(problem: &QpProblem, options: &SolverOptions)
     let c_opts = conic_options(options, deadline);
 
     let convex = conic::solve_qp_problem_as_qcqp(problem, &c_opts);
-    if !matches!(convex.status, SolveStatus::NotSupported(_)) {
+    if is_clean_convex_outcome(&convex) {
         return qcqp_result_to_solver_result(convex);
     }
 
     let nc_qp = match nonconvex_from_qp_problem(problem) {
         Ok(qp) => qp,
-        Err(e) => return SolverResult::not_supported(e),
+        Err(e) => {
+            // The global fallback needs a finite box. Without one, report the
+            // structural rejection for a bridge-rejected problem; for a bridge
+            // numerical failure, report NumericalError rather than fabricating
+            // a result from the failed convexified solve.
+            return if matches!(convex.status, SolveStatus::NotSupported(_)) {
+                SolverResult::not_supported(e)
+            } else {
+                SolverResult::numerical_error()
+            };
+        }
     };
     let g_opts = global_options(options);
     let global = conic::solve_global_qcqp(&nc_qp, &c_opts, &g_opts);
     global_result_to_solver_result(global)
+}
+
+/// Whether the convex-bridge result can be trusted as-is.
+///
+/// The bridge's Cholesky convexity screen has a jitter band, so a slightly
+/// indefinite problem can be "convexified" and then fail numerically
+/// (`MaxIterations` with non-finite values, `NumericalError`, …). Only a
+/// clean termination is accepted; everything else (including the bridge's
+/// own `NotSupported`) goes to the global solver. `Timeout` counts as clean:
+/// the deadline is spent, so falling back cannot help.
+fn is_clean_convex_outcome(res: &QcqpResult) -> bool {
+    match res.status {
+        SolveStatus::Optimal => res.objective.is_finite() && res.x.iter().all(|v| v.is_finite()),
+        SolveStatus::Infeasible | SolveStatus::Unbounded | SolveStatus::Timeout => true,
+        _ => false,
+    }
 }
 
 /// Resolve `options.timeout_secs` / `options.deadline` into a single deadline,
