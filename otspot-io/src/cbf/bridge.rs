@@ -106,11 +106,11 @@ fn combine_rows(a: &RawRow, wa: f64, b: &RawRow, wb: f64) -> RawRow {
 
 /// Applies the rotated-SOC-to-standard-SOC transform to a block's rows:
 /// `((u+v)/sqrt(2), (u-v)/sqrt(2), w)`, where `u = rows[0]`, `v = rows[1]`,
-/// `w = rows[2..]`.
+/// `w = rows[2..]` (possibly empty).
 fn rotate_soc_block(rows: Vec<RawRow>) -> Vec<RawRow> {
     let mut it = rows.into_iter();
-    let u = it.next().expect("QR block has size >= 3");
-    let v = it.next().expect("QR block has size >= 3");
+    let u = it.next().expect("QR block has size >= 2");
+    let v = it.next().expect("QR block has size >= 2");
     let mut out = vec![
         combine_rows(&u, FRAC_1_SQRT_2, &v, FRAC_1_SQRT_2),
         combine_rows(&u, FRAC_1_SQRT_2, &v, -FRAC_1_SQRT_2),

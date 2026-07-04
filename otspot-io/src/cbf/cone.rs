@@ -3,10 +3,12 @@
 use super::token_stream::TokenStream;
 use super::CbfError;
 
-/// Minimum dimension of a (non-rotated) second-order cone `Q`.
-const SOC_MIN_DIM: usize = 2;
-/// Minimum dimension of a rotated second-order cone `QR`.
-const ROTATED_SOC_MIN_DIM: usize = 3;
+/// Minimum dimension of a (non-rotated) second-order cone `Q`
+/// (CBF spec Appendix A.1: `n >= 1`; `Q^1` degenerates to `t >= 0`).
+const SOC_MIN_DIM: usize = 1;
+/// Minimum dimension of a rotated second-order cone `QR`
+/// (CBF spec Appendix A.1: `n >= 2`; the `w` part may be empty).
+const ROTATED_SOC_MIN_DIM: usize = 2;
 
 /// The cone assigned to a contiguous block of variables or constraint rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::cone::{read_cone_blocks, ConeBlock};
 use super::token_stream::TokenStream;
 use super::CbfError;
@@ -16,7 +18,6 @@ const UNSUPPORTED_SECTIONS: &[&str] = &[
     "DCOORD",
     "POWCONES",
     "POW*CONES",
-    "EXPCONES",
 ];
 
 /// Parsed CBF file content, prior to conversion into a solver-facing problem.
@@ -47,9 +48,12 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<RawCbf, CbfError
     let mut m = 0usize;
     let mut con_blocks: Vec<ConeBlock> = Vec::new();
     let mut obj_a: Vec<(usize, f64)> = Vec::new();
+    let mut obj_a_seen: HashSet<usize> = HashSet::new();
     let mut obj_b = 0.0f64;
     let mut a_coord: Vec<(usize, usize, f64)> = Vec::new();
+    let mut a_seen: HashSet<(usize, usize)> = HashSet::new();
     let mut b_coord: Vec<(usize, f64)> = Vec::new();
+    let mut b_seen: HashSet<usize> = HashSet::new();
 
     while let Some(kw) = ts.next_token() {
         match kw.as_str() {
@@ -98,6 +102,11 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<RawCbf, CbfError
                 for _ in 0..k {
                     let v = ts.read_index_0based(n, "OBJACOORD")?;
                     let val = ts.read_f64()?;
+                    if !obj_a_seen.insert(v) {
+                        return Err(CbfError::ParseError(format!(
+                            "OBJACOORD: duplicate entry for variable {v}"
+                        )));
+                    }
                     obj_a.push((v, val));
                 }
             }
@@ -110,6 +119,11 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<RawCbf, CbfError
                     let row = ts.read_index_0based(m, "ACOORD row")?;
                     let col = ts.read_index_0based(n, "ACOORD var")?;
                     let val = ts.read_f64()?;
+                    if !a_seen.insert((row, col)) {
+                        return Err(CbfError::ParseError(format!(
+                            "ACOORD: duplicate entry at (row {row}, var {col})"
+                        )));
+                    }
                     a_coord.push((row, col, val));
                 }
             }
@@ -118,9 +132,17 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<RawCbf, CbfError
                 for _ in 0..k {
                     let row = ts.read_index_0based(m, "BCOORD row")?;
                     let val = ts.read_f64()?;
+                    if !b_seen.insert(row) {
+                        return Err(CbfError::ParseError(format!(
+                            "BCOORD: duplicate entry for row {row}"
+                        )));
+                    }
                     b_coord.push((row, val));
                 }
             }
+            // The spec permits readers to interpret CHANGE (incremental
+            // problem updates) as end-of-file.
+            "CHANGE" => break,
             kw if UNSUPPORTED_SECTIONS.contains(&kw) => {
                 return Err(CbfError::Unsupported(format!(
                     "CBF section '{kw}' is not supported"
