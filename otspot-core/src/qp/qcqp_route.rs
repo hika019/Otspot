@@ -7,12 +7,13 @@
 //! Cholesky, or a quadratic `>=`/`=` constraint). This screen is **not a
 //! convexity proof**: the bridge's Cholesky clamps pivots inside a small
 //! jitter band (meant to absorb QPS 6-digit rounding), so a slightly
-//! indefinite matrix can pass as "convex" and then fail numerically in the
-//! SOCP solve. The route therefore accepts the convex-bridge result only when
-//! it is a clean outcome ([`is_clean_convex_outcome`]); any other failure
-//! falls back to the spatial (McCormick) branch-and-bound global solver,
-//! which is sound for convex problems too. `Timeout` never falls back —
-//! retrying after the deadline would only double the time spent.
+//! indefinite matrix can pass as "convex" — the bridge reports this via
+//! `QcqpResult::convexity_unproven`. The route accepts the convex-bridge
+//! result only when the reformulation was exact **and** the outcome is clean
+//! ([`is_clean_convex_outcome`]); everything else falls back to the spatial
+//! (McCormick) branch-and-bound global solver, which is sound for convex
+//! problems too. A clamp-free `Timeout` never falls back — retrying after
+//! the deadline would only double the time spent.
 //!
 //! `QpProblem` carries no integrality information (see
 //! [`crate::mip::MiqpProblem`], which layers `integer_vars` on top of a plain
@@ -60,13 +61,19 @@ pub(crate) fn solve_qcqp_via_conic(problem: &QpProblem, options: &SolverOptions)
 
 /// Whether the convex-bridge result can be trusted as-is.
 ///
-/// The bridge's Cholesky convexity screen has a jitter band, so a slightly
-/// indefinite problem can be "convexified" and then fail numerically
-/// (`MaxIterations` with non-finite values, `NumericalError`, …). Only a
-/// clean termination is accepted; everything else (including the bridge's
-/// own `NotSupported`) goes to the global solver. `Timeout` counts as clean:
-/// the deadline is spent, so falling back cannot help.
+/// Two conditions. First, the SOCP reformulation must be exact: when the
+/// bridge's Cholesky clamped a negative jitter-band pivot
+/// (`convexity_unproven`), the solved SOCP only approximates the QCQP, so
+/// **no** status — not even Infeasible/Unbounded/Optimal — carries over to
+/// the original problem; the global solver must decide. Second, the
+/// termination must be clean: numerical failures (`MaxIterations` with
+/// non-finite values, `NumericalError`, …) and the bridge's own
+/// `NotSupported` go to the global solver as well. A clamp-free `Timeout`
+/// counts as clean — the deadline is spent, so falling back cannot help.
 fn is_clean_convex_outcome(res: &QcqpResult) -> bool {
+    if res.convexity_unproven {
+        return false;
+    }
     match res.status {
         SolveStatus::Optimal => res.objective.is_finite() && res.x.iter().all(|v| v.is_finite()),
         SolveStatus::Infeasible | SolveStatus::Unbounded | SolveStatus::Timeout => true,

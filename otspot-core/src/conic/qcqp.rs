@@ -49,9 +49,24 @@ fn dense(a: &CscMatrix) -> Vec<Vec<f64>> {
     a.to_dense_rows()
 }
 
+/// Pivots at or below this are numerically zero (clamped for stability).
+const CHOL_PIVOT_ZERO_TOL: f64 = 1e-14;
+/// Pivots below this are clearly negative: the matrix is not PSD.
+const CHOL_PIVOT_INDEFINITE_TOL: f64 = -1e-9;
+/// Replacement value for clamped pivots.
+const CHOL_PIVOT_CLAMP: f64 = 1e-7;
+
 /// Upper Cholesky factor `R` (`n x n`) with `P = R^T R`, or `None` if not PD.
-fn cholesky_upper(p: &[Vec<f64>], n: usize) -> Option<Vec<Vec<f64>>> {
+///
+/// The boolean is `true` when a **negative** pivot inside the jitter band
+/// `(CHOL_PIVOT_INDEFINITE_TOL, 0)` was clamped: the band absorbs QPS 6-digit
+/// rounding of genuinely PSD matrices, but a slightly indefinite matrix passes
+/// it too, so the factorization no longer proves convexity and `R^T R` may
+/// misrepresent `P`. Zero/tiny-positive pivots (rank-deficient PSD) are also
+/// clamped but do not raise the flag.
+fn cholesky_upper(p: &[Vec<f64>], n: usize) -> Option<(Vec<Vec<f64>>, bool)> {
     let mut l = vec![vec![0.0; n]; n]; // lower
+    let mut negative_pivot_clamped = false;
     for i in 0..n {
         for j in 0..=i {
             let mut sum = p[i][j];
@@ -59,12 +74,15 @@ fn cholesky_upper(p: &[Vec<f64>], n: usize) -> Option<Vec<Vec<f64>>> {
                 sum -= l[i][k] * l[j][k];
             }
             if i == j {
-                if sum <= 1e-14 {
+                if sum <= CHOL_PIVOT_ZERO_TOL {
                     // Allow tiny PSD jitter; hard-fail on clearly negative.
-                    if sum < -1e-9 {
+                    if sum < CHOL_PIVOT_INDEFINITE_TOL {
                         return None;
                     }
-                    l[i][j] = 1e-7;
+                    if sum < 0.0 {
+                        negative_pivot_clamped = true;
+                    }
+                    l[i][j] = CHOL_PIVOT_CLAMP;
                 } else {
                     l[i][j] = sum.sqrt();
                 }
@@ -80,7 +98,7 @@ fn cholesky_upper(p: &[Vec<f64>], n: usize) -> Option<Vec<Vec<f64>>> {
             r[j][i] = l[i][j];
         }
     }
-    Some(r)
+    Some((r, negative_pivot_clamped))
 }
 
 struct Triplets {
@@ -110,7 +128,11 @@ impl Triplets {
 ///
 /// A trailing epigraph variable `t` is appended when the objective is
 /// quadratic; the SOCP variable vector is `[x (n) , t?]`.
-pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize), String> {
+///
+/// The third tuple element is `true` when any Cholesky factorization clamped
+/// a negative jitter-band pivot (see [`cholesky_upper`]): the SOCP is then
+/// only an approximation of the QCQP and convexity is unproven.
+pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize, bool), String> {
     let n = qp.n;
     let has_quad_obj = qp.p0.is_some();
     let nvar = n + if has_quad_obj { 1 } else { 0 };
@@ -193,10 +215,13 @@ pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize), String> {
         soc.push(dim);
     };
 
+    let mut convexity_unproven = false;
+
     // Objective epigraph as first SOC (if quadratic).
     if let Some(p0) = &qp.p0 {
         let p0d = dense(p0);
-        let r0 = cholesky_upper(&p0d, n).ok_or("P0 not PSD (nonconvex)")?;
+        let (r0, clamped) = cholesky_upper(&p0d, n).ok_or("P0 not PSD (nonconvex)")?;
+        convexity_unproven |= clamped;
         append_quad(
             &mut gt,
             &mut h,
@@ -211,8 +236,9 @@ pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize), String> {
     // Quadratic constraints.
     for (ci, qc) in qp.quad.iter().enumerate() {
         let pd = dense(&qc.p);
-        let rr =
+        let (rr, clamped) =
             cholesky_upper(&pd, n).ok_or_else(|| format!("P{} not PSD (nonconvex)", ci + 1))?;
+        convexity_unproven |= clamped;
         append_quad(
             &mut gt,
             &mut h,
@@ -237,7 +263,7 @@ pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize), String> {
         h,
         cone,
     };
-    Ok((prob, nvar))
+    Ok((prob, nvar, convexity_unproven))
 }
 
 /// Result of a QCQP solve, with `x` restricted to the original variables.
@@ -251,11 +277,15 @@ pub struct QcqpResult {
     pub x: Vec<f64>,
     /// Iterations.
     pub iterations: usize,
+    /// A Cholesky negative-pivot clamp occurred during the SOCP reformulation:
+    /// the solved SOCP only approximates the QCQP and the result (whatever the
+    /// status) does not certify anything about the original problem.
+    pub convexity_unproven: bool,
 }
 
 /// Solve a convex QCQP by reformulating to an SOCP.
 pub fn solve_qcqp(qp: &QcqpProblem, opts: &ConicOptions) -> QcqpResult {
-    let (conic, _nvar) = match to_conic(qp) {
+    let (conic, _nvar, convexity_unproven) = match to_conic(qp) {
         Ok(v) => v,
         Err(e) => {
             return QcqpResult {
@@ -263,6 +293,7 @@ pub fn solve_qcqp(qp: &QcqpProblem, opts: &ConicOptions) -> QcqpResult {
                 objective: f64::NAN,
                 x: vec![0.0; qp.n],
                 iterations: 0,
+                convexity_unproven: true,
             }
         }
     };
@@ -275,6 +306,7 @@ pub fn solve_qcqp(qp: &QcqpProblem, opts: &ConicOptions) -> QcqpResult {
         objective,
         x,
         iterations: res.iterations,
+        convexity_unproven,
     }
 }
 
@@ -427,6 +459,7 @@ pub fn solve_qp_problem_as_qcqp(src: &QpProblem, opts: &ConicOptions) -> QcqpRes
             objective: f64::NAN,
             x: vec![0.0; src.num_vars],
             iterations: 0,
+            convexity_unproven: true,
         },
     }
 }

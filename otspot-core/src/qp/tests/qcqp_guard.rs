@@ -166,6 +166,39 @@ fn jitter_band_indefinite_qcqp_falls_back_to_global() {
     assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
 }
 
+/// min x  s.t.  (1/2)*(-2e-10)*x^2 <= 1 (inactive),  x in [-1, 1].
+///
+/// The jitter-band matrix is clamped to a PSD approximation under which the
+/// SOCP solves cleanly to Optimal (same answer here, x = -1) — but the clamp
+/// means nothing about the original problem is proven, so the route must go
+/// global regardless of the clean status. This closes the false-Infeasible
+/// window: a clamped reformulation could equally produce a certified-looking
+/// Infeasible/Unbounded for the wrong problem.
+///
+/// Sentinel: dropping the `convexity_unproven` check from
+/// `is_clean_convex_outcome` makes this FAIL with route=ConicQcqpConvex.
+#[test]
+fn clamped_cholesky_forces_global_route_even_on_clean_status() {
+    let n = 1usize;
+    let q_obj = CscMatrix::new(n, n);
+    let c = vec![1.0];
+    let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+    let b = vec![1.0];
+    let bounds = vec![(-1.0, 1.0)];
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 0, -2e-10));
+    let mut problem = QpProblem::new(q_obj, c, a, b, bounds, vec![ConstraintType::Le]).unwrap();
+    problem.set_quadratic_constraints(vec![qc]).unwrap();
+    let result = solve_qp(&problem);
+    assert_eq!(result.status, SolveStatus::Optimal, "{:?}", result.status);
+    assert!(
+        (result.objective - (-1.0)).abs() < 1e-4,
+        "objective={}",
+        result.objective
+    );
+    assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
+}
+
 /// `timeout_secs: Some(0.0)` must trip the conic IPM's deadline check on (at
 /// latest) the first iteration, rather than running to completion or hanging.
 ///

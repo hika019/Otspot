@@ -784,7 +784,7 @@ impl Model {
                 (r.status, r.objective, r.x)
             }
         } else {
-            let (mut conic, nvar) =
+            let (mut conic, nvar, _convexity_unproven) =
                 otspot_core::conic::to_conic(&qp).map_err(ModelError::Internal)?;
             self.append_soc(&mut conic, nvar, n)?;
             if integer_vars.is_empty() {
