@@ -237,7 +237,7 @@ pub fn solve_miqcp(
     opts: &ConicOptions,
     bb: &BbOptions,
 ) -> MisocpResult {
-    let (base, _nvar) = match to_conic(qp) {
+    let (base, _nvar, _convexity_unproven) = match to_conic(qp) {
         Ok(v) => v,
         Err(e) => {
             return MisocpResult {

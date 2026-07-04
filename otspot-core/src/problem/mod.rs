@@ -46,6 +46,10 @@ pub enum SolveRoute {
     LpForwardedFromQp,
     /// QP solved via IPM (Q≠0).
     QpIpm,
+    /// Convex QCQP solved via the conic (SOCP) bridge.
+    ConicQcqpConvex,
+    /// Nonconvex QCQP solved via spatial (McCormick) branch-and-bound.
+    ConicQcqpNonconvex,
 }
 
 /// Per-solve routing and warm-start statistics (race-free, per-result).

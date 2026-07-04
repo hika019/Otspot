@@ -88,16 +88,7 @@ impl Default for GlobalOptions {
 }
 
 fn dense(a: &CscMatrix) -> Vec<Vec<f64>> {
-    let mut d = vec![vec![0.0; a.ncols()]; a.nrows()];
-    let cp = a.col_ptr();
-    let ri = a.row_ind();
-    let va = a.values();
-    for j in 0..a.ncols() {
-        for k in cp[j]..cp[j + 1] {
-            d[ri[k]][j] = va[k];
-        }
-    }
-    d
+    a.to_dense_rows()
 }
 
 /// Collect the symmetric index pairs `(i,j)` with `i<=j` that appear with a
@@ -140,11 +131,6 @@ fn collect_pairs(qp: &NonconvexQcqp) -> Vec<(usize, usize)> {
 fn quad_val(p: &CscMatrix, x: &[f64]) -> f64 {
     let px = p.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; x.len()]);
     0.5 * x.iter().zip(&px).map(|(a, b)| a * b).sum::<f64>()
-}
-
-struct Relax {
-    prob: ConicProblem,
-    npair: usize,
 }
 
 struct RelaxResult {
@@ -207,10 +193,9 @@ fn solve_relax_lp(prob: &ConicProblem) -> RelaxResult {
 fn build_relax(
     qp: &NonconvexQcqp,
     pairs: &[(usize, usize)],
-    pair_idx: &std::collections::HashMap<(usize, usize), usize>,
     lb: &[f64],
     ub: &[f64],
-) -> Relax {
+) -> ConicProblem {
     let n = qp.n;
     let npair = pairs.len();
     let nv = n + npair;
@@ -219,7 +204,7 @@ fn build_relax(
     c[..n].copy_from_slice(&qp.q0);
     if let Some(p0) = &qp.p0 {
         let d = dense(p0);
-        add_quad_coeffs(&d, n, pairs, pair_idx, &mut c);
+        add_quad_coeffs(&d, n, pairs, &mut c);
     }
 
     // equalities on x (padded).
@@ -247,7 +232,7 @@ fn build_relax(
             row[j] += v;
         }
         let d = dense(&qc.p);
-        add_quad_coeffs(&d, n, pairs, pair_idx, &mut row);
+        add_quad_coeffs(&d, n, pairs, &mut row);
         rows.push(row);
         h.push(-qc.r);
     }
@@ -341,25 +326,18 @@ fn build_relax(
         }
     }
     let g = CscMatrix::from_triplets(&gt.0, &gt.1, &gt.2, m, nv).unwrap();
-    let prob = ConicProblem {
+    ConicProblem {
         c,
         a,
         b: qp.b_eq.clone(),
         g,
         h,
         cone: ConeSpec { l: m, soc: vec![] },
-    };
-    Relax { prob, npair }
+    }
 }
 
 /// Add `(1/2) x^T P x` coefficients onto a linear row over `[x, w]`.
-fn add_quad_coeffs(
-    d: &[Vec<f64>],
-    n: usize,
-    pairs: &[(usize, usize)],
-    pair_idx: &std::collections::HashMap<(usize, usize), usize>,
-    row: &mut [f64],
-) {
+fn add_quad_coeffs(d: &[Vec<f64>], n: usize, pairs: &[(usize, usize)], row: &mut [f64]) {
     for (pi, &(i, j)) in pairs.iter().enumerate() {
         let wj = n + pi;
         let coeff = if i == j {
@@ -371,7 +349,6 @@ fn add_quad_coeffs(
         if coeff != 0.0 {
             row[wj] += coeff;
         }
-        let _ = pair_idx;
     }
 }
 
@@ -470,19 +447,16 @@ fn all_integral(x: &[f64], integers: &[usize], tol: f64) -> bool {
 fn global_core(
     qp: &NonconvexQcqp,
     integers: &[usize],
-    _opts: &ConicOptions,
+    opts: &ConicOptions,
     g: &GlobalOptions,
 ) -> GlobalResult {
     let pairs = collect_pairs(qp);
-    let mut pair_idx = std::collections::HashMap::new();
-    for (pi, &pr) in pairs.iter().enumerate() {
-        pair_idx.insert(pr, pi);
-    }
     let mut incumbent = f64::INFINITY;
     let mut inc_x: Vec<f64> = Vec::new();
     let mut nodes = 0usize;
     let mut best_bound = f64::NEG_INFINITY;
     let mut limited = false;
+    let mut timed_out = false;
 
     let mut stack = vec![(qp.lb.clone(), qp.ub.clone())];
     let mut frontier_min = f64::INFINITY;
@@ -505,13 +479,17 @@ fn global_core(
     };
 
     while let Some((lb, ub)) = stack.pop() {
+        if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            timed_out = true;
+            break;
+        }
         if nodes >= g.max_nodes {
             limited = true;
             break;
         }
         nodes += 1;
-        let relax = build_relax(qp, &pairs, &pair_idx, &lb, &ub);
-        let res = solve_relax_lp(&relax.prob);
+        let relax = build_relax(qp, &pairs, &lb, &ub);
+        let res = solve_relax_lp(&relax);
         if res.status != SolveStatus::Optimal {
             continue;
         }
@@ -521,7 +499,6 @@ fn global_core(
         }
         frontier_min = frontier_min.min(lower);
         let x = res.x[..qp.n].to_vec();
-        let _ = relax.npair;
 
         accept(&x, &mut incumbent, &mut inc_x, g.feas_tol);
 
@@ -600,8 +577,19 @@ fn global_core(
 
     best_bound = best_bound.max(frontier_min);
     if inc_x.is_empty() {
+        // No incumbent: only a proven-Infeasible certificate if the search
+        // exhausted the full tree. A node-limited or timed-out search with an
+        // empty stack remainder has NOT proven infeasibility — it merely
+        // hasn't found a feasible point yet.
+        let status = if timed_out {
+            SolveStatus::Timeout
+        } else if limited {
+            SolveStatus::MaxIterations
+        } else {
+            SolveStatus::Infeasible
+        };
         return GlobalResult {
-            status: SolveStatus::Infeasible,
+            status,
             objective: f64::INFINITY,
             x: vec![],
             nodes,
@@ -610,7 +598,9 @@ fn global_core(
     }
     let gap = (incumbent - best_bound).abs();
     GlobalResult {
-        status: if limited {
+        status: if timed_out {
+            SolveStatus::Timeout
+        } else if limited {
             SolveStatus::MaxIterations
         } else {
             SolveStatus::Optimal

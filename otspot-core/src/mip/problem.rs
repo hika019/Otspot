@@ -194,11 +194,30 @@ impl MiqpProblem {
         self.qp.num_vars
     }
 
-    /// Whether the objective is convex (`Q` positive semidefinite). The QP
-    /// relaxation is a valid lower bound only when this holds; a non-convex MIQP
-    /// is out of scope.
+    /// Whether the continuous relaxation is convex: `Q` positive semidefinite
+    /// **and** every quadratic constraint convex (`<=` with PSD matrix, `>=`
+    /// with NSD matrix; a quadratic equality is always nonconvex). The QP
+    /// relaxation is a valid lower bound only when this holds; a non-convex
+    /// MIQP/MIQCP is out of scope.
     pub fn is_convex(&self) -> bool {
-        is_q_psd_by_cholesky(&self.qp.q)
+        if !is_q_psd_by_cholesky(&self.qp.q) {
+            return false;
+        }
+        self.qp
+            .quadratic_constraints
+            .iter()
+            .zip(&self.qp.constraint_types)
+            .all(|(qc, &ct)| {
+                if qc.nnz() == 0 {
+                    return true;
+                }
+                let p = crate::conic::qcqp_matrix_to_csc(qc);
+                match ct {
+                    ConstraintType::Le => is_q_psd_by_cholesky(&p),
+                    ConstraintType::Ge => is_q_psd_by_cholesky(&p.scale_values(-1.0)),
+                    ConstraintType::Eq => false,
+                }
+            })
     }
 }
 
@@ -225,11 +244,20 @@ impl Relaxation for MiqpProblem {
     }
 }
 
+/// `1/2 x'Q_k x` for one QCQP constraint's symmetrized COO triplets.
+fn qcqp_quad_term(qc: &crate::qp::QcqpMatrix, x: &[f64]) -> f64 {
+    0.5 * qc
+        .triplets
+        .iter()
+        .map(|&(i, j, v)| v * x[i] * x[j])
+        .sum::<f64>()
+}
+
 /// Solve the relaxation when **every** variable is fixed to a point (zero-width
 /// box). The QP IPM cannot (no interior), so evaluate the single candidate `x`
-/// directly: check linear-constraint feasibility, then return its exact objective
-/// `1/2 x'Qx + c'x + offset`. Returns `None` when any variable is still free
-/// (the IPM handles those, including partially-fixed boxes).
+/// directly: check constraint feasibility (including any quadratic terms), then
+/// return its exact objective `1/2 x'Qx + c'x + offset`. Returns `None` when any
+/// variable is still free (the IPM handles those, including partially-fixed boxes).
 fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResult> {
     // INT_ROUND_TOL: a fixed variable has width 0; this small tolerance guards float round-off.
     if !bounds.iter().all(|&(l, u)| u - l <= INT_ROUND_TOL) {
@@ -246,7 +274,20 @@ fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResu
             Ok(v) => v,
             Err(_) => return Some(SolverResult::numerical_error()),
         };
-        for ((&lhs_k, &ct), &b_k) in lhs.iter().zip(&qp.constraint_types).zip(&qp.b) {
+        let has_qc = !qp.quadratic_constraints.is_empty();
+        for (k, ((&lin_k, &ct), &b_k)) in lhs
+            .iter()
+            .zip(&qp.constraint_types)
+            .zip(&qp.b)
+            .enumerate()
+        {
+            // Full QCQP row k: 1/2 x'Q_k x + a_k'x {<=,=,>=} b_k.
+            let lhs_k = lin_k
+                + if has_qc {
+                    qcqp_quad_term(&qp.quadratic_constraints[k], &x)
+                } else {
+                    0.0
+                };
             let feasible = match ct {
                 ConstraintType::Le => lhs_k <= b_k + FIXED_POINT_FEAS_TOL,
                 ConstraintType::Ge => lhs_k >= b_k - FIXED_POINT_FEAS_TOL,

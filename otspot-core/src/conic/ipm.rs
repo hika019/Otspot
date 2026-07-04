@@ -1,6 +1,8 @@
 //! Primal--dual interior-point method (Nesterov--Todd scaling, Mehrotra
 //! predictor--corrector) for the standard SOCP.
 
+use std::time::Instant;
+
 use super::cone::{self, Blocks};
 use super::{ConicOptions, ConicProblem, ConicResult};
 use crate::problem::SolveStatus;
@@ -178,6 +180,11 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
     let mut last = (0.0, 0.0, 0.0);
 
     for it in 0..opts.max_iter {
+        if opts.deadline.is_some_and(|d| Instant::now() >= d) {
+            status = SolveStatus::Timeout;
+            iterations = it;
+            break;
+        }
         iterations = it + 1;
         // residuals
         let aty = matvec_t(&ad, &y, n);
