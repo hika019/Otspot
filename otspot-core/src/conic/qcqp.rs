@@ -46,16 +46,7 @@ pub struct QcqpProblem {
 }
 
 fn dense(a: &CscMatrix) -> Vec<Vec<f64>> {
-    let mut d = vec![vec![0.0; a.ncols()]; a.nrows()];
-    let cp = a.col_ptr();
-    let ri = a.row_ind();
-    let va = a.values();
-    for j in 0..a.ncols() {
-        for k in cp[j]..cp[j + 1] {
-            d[ri[k]][j] = va[k];
-        }
-    }
-    d
+    a.to_dense_rows()
 }
 
 /// Upper Cholesky factor `R` (`n x n`) with `P = R^T R`, or `None` if not PD.
@@ -306,7 +297,7 @@ fn qcqp_objective(qp: &QcqpProblem, x: &[f64]) -> f64 {
 use crate::problem::ConstraintType;
 use crate::qp::{QcqpMatrix, QpProblem};
 
-fn csc_from_rows(rows: &[Vec<f64>], ncols: usize) -> CscMatrix {
+pub(crate) fn csc_from_rows(rows: &[Vec<f64>], ncols: usize) -> CscMatrix {
     let mut rr = Vec::new();
     let mut cc = Vec::new();
     let mut vv = Vec::new();
@@ -322,7 +313,7 @@ fn csc_from_rows(rows: &[Vec<f64>], ncols: usize) -> CscMatrix {
     CscMatrix::from_triplets(&rr, &cc, &vv, rows.len(), ncols).expect("row-built CSC is valid")
 }
 
-fn qcqp_matrix_to_csc(q: &QcqpMatrix) -> CscMatrix {
+pub(crate) fn qcqp_matrix_to_csc(q: &QcqpMatrix) -> CscMatrix {
     let mut r = Vec::with_capacity(q.triplets.len());
     let mut c = Vec::with_capacity(q.triplets.len());
     let mut v = Vec::with_capacity(q.triplets.len());

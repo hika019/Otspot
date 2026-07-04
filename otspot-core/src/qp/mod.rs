@@ -11,6 +11,7 @@ pub(crate) mod lp_dispatch;
 pub mod multistart;
 pub(crate) mod postsolve;
 mod problem;
+pub(crate) mod qcqp_route;
 pub use global::{solve_qp_global, solve_qp_global_with_stats, GlobalStats};
 #[doc(hidden)]
 /// Returns `true` when an LP of size `(n, m)` will be routed via IPM-first
@@ -150,12 +151,15 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
 
 /// Q=0 forwards to the LP entry (kept for backward compat — callers
 /// should prefer `crate::lp::solve_lp_with` directly); Q≠0 goes to IPPMM.
+///
+/// QCQP (non-empty `quadratic_constraints`) routes to the conic bridge —
+/// see [`qcqp_route::solve_qcqp_via_conic`]. `QpProblem` never carries
+/// integrality information, so this dispatch only ever sees continuous
+/// problems; mixed-integer QCQP is out of scope here.
 fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     use crate::problem::{SolveRoute, SolveStatus};
     if problem.has_qcqp_constraints() {
-        return SolverResult::not_supported(
-            "QCQP (quadratic constraints) is not yet supported; only QP/LP problems are accepted",
-        );
+        return qcqp_route::solve_qcqp_via_conic(problem, options);
     }
     if problem.is_zero_q() {
         return solve_as_lp(problem, options);

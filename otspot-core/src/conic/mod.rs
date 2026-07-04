@@ -31,6 +31,7 @@ pub use qcqp::{
     qcqp_from_qp_problem, solve_qcqp, solve_qp_problem_as_qcqp, to_conic, QcqpProblem, QcqpResult,
     QuadConstraint,
 };
+pub(crate) use qcqp::{csc_from_rows, qcqp_matrix_to_csc};
 
 use crate::problem::SolveStatus;
 use crate::sparse::CscMatrix;
@@ -152,6 +153,10 @@ pub struct ConicOptions {
     pub max_iter: usize,
     /// Fraction-to-boundary step damping (`(0,1)`).
     pub step_frac: f64,
+    /// Wall-clock deadline. Checked once per interior-point iteration
+    /// (`ipm::solve`) and once per branch-and-bound node (`nonconvex::global_core`);
+    /// `None` disables the check (bounded only by `max_iter` / `max_nodes`).
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl Default for ConicOptions {
@@ -160,6 +165,7 @@ impl Default for ConicOptions {
             tol: 1e-9,
             max_iter: 100,
             step_frac: 0.99,
+            deadline: None,
         }
     }
 }
