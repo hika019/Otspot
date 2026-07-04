@@ -14,12 +14,13 @@ OUT_DIR="${1:-data/cblib_socp}"
 mkdir -p "$OUT_DIR"
 
 # SOCP instances (continuous, 11 problems)
-# Source: beam (radiotherapy), FIR filter design, portfolio optimization, classical problems
+# Source: chained singular (academic), limit analysis (nql/qssp), portfolio optimization
+# サイズ実測 (cblib index) で gz < 1MB を確認済。展開後 50MB 以下。
 SOCP_INSTANCES=(
-  "beam7.cbf.gz"
-  "beam30.cbf.gz"
-  "2013_firL1.cbf.gz"
-  "2013_firL2a.cbf.gz"
+  "chainsing-1000-1.cbf.gz"
+  "nql30.cbf.gz"
+  "nql60.cbf.gz"
+  "qssp30.cbf.gz"
   "20_0_1_w.cbf.gz"
   "20_0_2_w.cbf.gz"
   "50_0_1_w.cbf.gz"
