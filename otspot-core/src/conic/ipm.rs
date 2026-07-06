@@ -49,7 +49,8 @@ fn norm2(a: &[f64]) -> f64 {
 }
 
 /// Solve the (dense-represented) KKT system, preferring a sparse faer LU and
-/// falling back to the dense partial-pivot LU when the sparse path fails.
+/// falling back to the dense partial-pivot LU when the sparse path fails or
+/// declines (see [`sparse_lu_solve`]).
 fn kkt_solve(dense: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
     if let Some(x) = sparse_lu_solve(dense, rhs) {
         return Some(x);
@@ -57,7 +58,25 @@ fn kkt_solve(dense: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
     lu_solve(dense.to_vec(), rhs.to_vec())
 }
 
+/// Below this fill fraction, a COLAMD-style fill-reducing column permutation
+/// still has real sparsity to exploit. At or above it there is essentially
+/// nothing left to reduce, so the reordering cannot pay for itself in speed
+/// -- yet it still picks a pivot sequence chosen for fill, not for numerical
+/// stability, which can differ from the reference dense partial-pivot LU by
+/// enough to matter. The KKT matrix here is `[[H, A^T], [A, -reg*I]]` with
+/// `H = B^T B` (`B = W^{-1} G`): a Nesterov--Todd-scaled second-order-cone
+/// block mixes every coordinate of `G` through `W^{-1}`, so `H` is generally
+/// a fully dense Gram matrix even when `G` itself is sparse (e.g. the convex
+/// QCQP-to-SOCP bridge in `qcqp.rs`, whose KKT system is 100% dense for
+/// every problem size). Measured against `bench_conic_suite`: every non-
+/// trivial conic case there is either fully dense (0% headroom for a
+/// permutation) or diagonal (<=20% density); 50% cleanly separates the two.
+const KKT_SPARSE_DENSITY_CEILING: f64 = 0.5;
+
 /// Sparse LU (faer simplicial backend) for the KKT matrix built from `dense`.
+/// Returns `None` -- falling back to the reference dense LU in [`kkt_solve`]
+/// -- both on solver failure and when the matrix has no exploitable
+/// sparsity to begin with (see [`KKT_SPARSE_DENSITY_CEILING`]).
 fn sparse_lu_solve(dense: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
     use faer::dyn_stack::{MemBuffer, MemStack};
     use faer::sparse::linalg::lu::{factorize_symbolic_lu, LuSymbolicParams, NumericLu};
@@ -81,6 +100,9 @@ fn sparse_lu_solve(dense: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
             }
         }
         col_ptr[j + 1] = row_ind.len();
+    }
+    if row_ind.len() as f64 > KKT_SPARSE_DENSITY_CEILING * (n * n) as f64 {
+        return None;
     }
     let a_sym =
         unsafe { SymbolicSparseColMatRef::<usize>::new_unchecked(n, n, &col_ptr, None, &row_ind) };
@@ -504,5 +526,89 @@ fn failed(problem: &ConicProblem, status: SolveStatus) -> ConicResult {
         residuals: (0.0, 0.0, 0.0),
         primal_ray: None,
         infeas_cert: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{kkt_solve, lu_solve, sparse_lu_solve, KKT_SPARSE_DENSITY_CEILING};
+
+    /// Diagonally dominant, nonsingular `n x n` matrix with exactly `nnz`
+    /// nonzeros (diagonal first, then off-diagonal fill row by row).
+    fn dd_matrix(n: usize, nnz: usize) -> Vec<Vec<f64>> {
+        assert!(nnz >= n && nnz <= n * n);
+        let mut m = vec![vec![0.0; n]; n];
+        for (i, row) in m.iter_mut().enumerate() {
+            row[i] = 10.0;
+        }
+        let mut placed = n;
+        'fill: for i in 0..n {
+            for j in 0..n {
+                if i != j {
+                    if placed == nnz {
+                        break 'fill;
+                    }
+                    m[i][j] = 0.1 + (((i * n + j) % 7) as f64) * 0.01;
+                    placed += 1;
+                }
+            }
+        }
+        assert_eq!(placed, nnz);
+        m
+    }
+
+    fn residual_norm(m: &[Vec<f64>], sol: &[f64], rhs: &[f64]) -> f64 {
+        m.iter()
+            .zip(rhs)
+            .map(|(row, &b)| {
+                let ax: f64 = row.iter().zip(sol).map(|(a, x)| a * x).sum();
+                (ax - b).powi(2)
+            })
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    #[test]
+    fn sparse_lu_solves_below_density_ceiling() {
+        let n = 10;
+        let nnz = ((KKT_SPARSE_DENSITY_CEILING * (n * n) as f64) as usize) - 10; // 40%
+        let m = dd_matrix(n, nnz);
+        let rhs: Vec<f64> = (0..n).map(|i| 1.0 + i as f64).collect();
+        let sol = sparse_lu_solve(&m, &rhs).expect("below ceiling must stay on the sparse path");
+        assert!(residual_norm(&m, &sol, &rhs) < 1e-10);
+        let dense = lu_solve(m.clone(), rhs.clone()).unwrap();
+        let diff: f64 = sol
+            .iter()
+            .zip(&dense)
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!(diff < 1e-10, "sparse and dense LU must agree, diff={diff:e}");
+    }
+
+    #[test]
+    fn sparse_lu_kept_at_exact_density_ceiling() {
+        let n = 10;
+        let nnz = (KKT_SPARSE_DENSITY_CEILING * (n * n) as f64) as usize; // exactly 50%
+        let m = dd_matrix(n, nnz);
+        let rhs: Vec<f64> = (0..n).map(|i| 1.0 + i as f64).collect();
+        // The gate is strict (`>`): exactly at the ceiling stays sparse.
+        let sol = sparse_lu_solve(&m, &rhs).expect("exact ceiling must stay on the sparse path");
+        assert!(residual_norm(&m, &sol, &rhs) < 1e-10);
+    }
+
+    #[test]
+    fn sparse_lu_declines_above_density_ceiling() {
+        let n = 10;
+        let nnz = ((KKT_SPARSE_DENSITY_CEILING * (n * n) as f64) as usize) + 10; // 60%
+        let m = dd_matrix(n, nnz);
+        let rhs: Vec<f64> = (0..n).map(|i| 1.0 + i as f64).collect();
+        assert!(
+            sparse_lu_solve(&m, &rhs).is_none(),
+            "above the ceiling the sparse path must decline"
+        );
+        // kkt_solve must still solve via the dense fallback.
+        let sol = kkt_solve(&m, &rhs).expect("dense fallback must solve");
+        assert!(residual_norm(&m, &sol, &rhs) < 1e-10);
     }
 }

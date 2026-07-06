@@ -185,6 +185,108 @@ fn convex_qp_box_matches_closed_form() {
     }
 }
 
+/// The `box_diag_{n}` QCQP family from `bench_conic_suite`: diagonal box QP
+/// with a closed-form optimum. Returns the problem and the analytic optimal
+/// objective.
+fn box_diag_qcqp(n: usize) -> (QcqpProblem, f64) {
+    let mut rng = Lcg((n as u64) * 7919 + 3);
+    let mut prows = vec![vec![0.0; n]; n];
+    let mut q = vec![0.0; n];
+    let mut expected = 0.0;
+    for j in 0..n {
+        let pj = rng.next_f(0.5, 3.0);
+        let xj = rng.next_f(1.0, 4.0);
+        prows[j][j] = pj;
+        q[j] = -pj * xj;
+        expected += 0.5 * pj * xj * xj + q[j] * xj;
+    }
+    let mut grows = Vec::new();
+    let mut h = Vec::new();
+    for j in 0..n {
+        let mut r = vec![0.0; n];
+        r[j] = 1.0;
+        grows.push(r);
+        h.push(10.0);
+        let mut r2 = vec![0.0; n];
+        r2[j] = -1.0;
+        grows.push(r2);
+        h.push(0.0);
+    }
+    let qp = QcqpProblem {
+        n,
+        p0: Some(csc(&prows, n, n)),
+        q0: q,
+        quad: vec![],
+        g_lin: csc(&grows, grows.len(), n),
+        h_lin: h,
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+    };
+    (qp, expected)
+}
+
+/// Sentinel for the dense-KKT sparse-LU regression: this exact case
+/// (`box_diag_32` in `bench_conic_suite`) converged with the dense LU but hit
+/// catastrophic cancellation near mu -> 0 (NumericalError) when the
+/// fill-reducing sparse LU ran on the fully dense QCQP-bridge KKT matrix.
+/// `bench_conic_suite` is `#[ignore]`d and only runs in the non-gating heavy
+/// CI job, so this extraction keeps the density gate in `ipm::sparse_lu_solve`
+/// guarded by the default CI profile.
+#[test]
+fn qcqp_box_diag_n32_stays_optimal() {
+    let (qp, expected) = box_diag_qcqp(32);
+    assert!(
+        (expected - (-197.143_159_117_050_7)).abs() < 1e-9,
+        "generator drift: expected objective changed to {expected}"
+    );
+    let res = solve_qcqp(&qp, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "res={res:?}");
+    assert!(
+        (res.objective - expected).abs() < 1e-3,
+        "obj {} vs closed-form {expected}",
+        res.objective
+    );
+}
+
+/// Reproduces the measurement backing `ipm::KKT_SPARSE_DENSITY_CEILING`: the
+/// QCQP-to-SOCP bridge yields a fully dense KKT Gram block. At the IPM's
+/// initial iterate (`s = z = e`) the NT scaling is the identity, so the
+/// pattern of `H = B^T B` equals that of `G^T G`; the SOC epigraph row
+/// carries the full `q0` vector, whose outer product alone fills every entry.
+/// Runtime NT scaling only mixes further, so density 1.0 here is a lower
+/// bound for every iteration.
+#[test]
+fn qcqp_bridge_kkt_gram_is_fully_dense() {
+    for n in [3usize, 8, 16, 32] {
+        let (qp, _) = box_diag_qcqp(n);
+        let (conic, nvar, _) = to_conic(&qp).unwrap();
+        let mut gd = vec![vec![0.0; nvar]; conic.h.len()];
+        let cp = conic.g.col_ptr();
+        let ri = conic.g.row_ind();
+        let va = conic.g.values();
+        for j in 0..nvar {
+            for k in cp[j]..cp[j + 1] {
+                gd[ri[k]][j] = va[k];
+            }
+        }
+        let mut nnz = 0usize;
+        for i in 0..nvar {
+            for j in 0..nvar {
+                let hij: f64 = gd.iter().map(|row| row[i] * row[j]).sum();
+                if hij != 0.0 {
+                    nnz += 1;
+                }
+            }
+        }
+        assert_eq!(
+            nnz,
+            nvar * nvar,
+            "n={n}: G^T G expected fully dense, got {nnz}/{}",
+            nvar * nvar
+        );
+    }
+}
+
 #[test]
 fn convex_qcqp_ball_constraint() {
     // min -x0 - x1  s.t.  x0^2 + x1^2 <= 1.  Optimum at (1/sqrt2, 1/sqrt2), obj = -sqrt2.
@@ -391,39 +493,7 @@ fn bench_conic_suite() {
 
     // ---- QCQP: diagonal box QP, closed-form optimum. ----
     for &n in &[3usize, 8, 16, 32] {
-        let mut rng = Lcg((n as u64) * 7919 + 3);
-        let mut prows = vec![vec![0.0; n]; n];
-        let mut q = vec![0.0; n];
-        let mut expected = 0.0;
-        for j in 0..n {
-            let pj = rng.next_f(0.5, 3.0);
-            let xj = rng.next_f(1.0, 4.0);
-            prows[j][j] = pj;
-            q[j] = -pj * xj;
-            expected += 0.5 * pj * xj * xj + q[j] * xj;
-        }
-        let mut grows = Vec::new();
-        let mut h = Vec::new();
-        for j in 0..n {
-            let mut r = vec![0.0; n];
-            r[j] = 1.0;
-            grows.push(r);
-            h.push(10.0);
-            let mut r2 = vec![0.0; n];
-            r2[j] = -1.0;
-            grows.push(r2);
-            h.push(0.0);
-        }
-        let qp = QcqpProblem {
-            n,
-            p0: Some(csc(&prows, n, n)),
-            q0: q.clone(),
-            quad: vec![],
-            g_lin: csc(&grows, grows.len(), n),
-            h_lin: h,
-            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
-            b_eq: vec![],
-        };
+        let (qp, expected) = box_diag_qcqp(n);
         let t0 = Instant::now();
         let res = solve_qcqp(&qp, &ConicOptions::default());
         let us = t0.elapsed().as_micros();
