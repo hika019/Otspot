@@ -7,25 +7,27 @@ use super::ConeSpec;
 pub(super) struct Blocks {
     pub l: usize,
     pub soc: Vec<usize>,
+    offs: Vec<usize>,
 }
 
 impl Blocks {
     pub fn new(cone: &ConeSpec) -> Self {
+        let mut offs = Vec::with_capacity(cone.soc.len());
+        let mut o = cone.l;
+        for &d in &cone.soc {
+            offs.push(o);
+            o += d;
+        }
         Blocks {
             l: cone.l,
             soc: cone.soc.clone(),
+            offs,
         }
     }
 
     /// Start offsets of each second-order cone within `[l..m)`.
-    pub fn soc_offsets(&self) -> Vec<usize> {
-        let mut offs = Vec::with_capacity(self.soc.len());
-        let mut o = self.l;
-        for &d in &self.soc {
-            offs.push(o);
-            o += d;
-        }
-        offs
+    pub fn soc_offsets(&self) -> &[usize] {
+        &self.offs
     }
 
     pub fn dim(&self) -> usize {
@@ -39,7 +41,7 @@ pub(super) fn identity(blk: &Blocks) -> Vec<f64> {
     for v in e.iter_mut().take(blk.l) {
         *v = 1.0;
     }
-    for &off in &blk.soc_offsets() {
+    for &off in blk.soc_offsets() {
         e[off] = 1.0;
     }
     e
@@ -175,24 +177,66 @@ fn smallest_positive_root(a: f64, b: f64, c: f64) -> Option<f64> {
     best
 }
 
-/// Nesterov--Todd scaling: block-diagonal symmetric matrices `w` and `winv`
-/// (`m x m`, stored row-major) with `w z = winv s = lambda`.
+/// Nesterov--Todd scaling operators `w` and `winv` with `w z = winv s =
+/// lambda`. Stored per-block (an orthant diagonal plus one dense `d_i x d_i`
+/// matrix per second-order cone, row-major) rather than as a naive `m x m`
+/// embedding: for the CBLIB conic benchmarks driving this module the SOC
+/// blocks are small (single digits to low tens) while `m` can be in the tens
+/// of thousands, so the block-local form is `O(l + sum d_i^2)` instead of
+/// `O(m^2)`.
 pub(super) struct Scaling {
-    pub w: Vec<Vec<f64>>,
-    pub winv: Vec<Vec<f64>>,
+    l_w: Vec<f64>,
+    l_winv: Vec<f64>,
+    /// `soc_w[bi]` / `soc_winv[bi]`: `d_i x d_i` row-major.
+    soc_w: Vec<Vec<f64>>,
+    soc_winv: Vec<Vec<f64>>,
+}
+
+impl Scaling {
+    pub(super) fn apply_w(&self, blk: &Blocks, v: &[f64]) -> Vec<f64> {
+        apply_blocks(blk, &self.l_w, &self.soc_w, v)
+    }
+
+    pub(super) fn apply_winv(&self, blk: &Blocks, v: &[f64]) -> Vec<f64> {
+        apply_blocks(blk, &self.l_winv, &self.soc_winv, v)
+    }
+}
+
+/// Applies a block-diagonal scaling operator (orthant diagonal `l_diag` plus
+/// dense `d_i x d_i` SOC blocks) to `v`. `O(l + sum d_i^2)`.
+fn apply_blocks(blk: &Blocks, l_diag: &[f64], soc_blocks: &[Vec<f64>], v: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0; blk.dim()];
+    for i in 0..blk.l {
+        out[i] = l_diag[i] * v[i];
+    }
+    let offs = blk.soc_offsets();
+    for (bi, &off) in offs.iter().enumerate() {
+        let d = blk.soc[bi];
+        let block = &soc_blocks[bi];
+        for r in 0..d {
+            let row = &block[r * d..r * d + d];
+            let mut acc = 0.0;
+            for (c, &a) in row.iter().enumerate() {
+                acc += a * v[off + c];
+            }
+            out[off + r] = acc;
+        }
+    }
+    out
 }
 
 pub(super) fn nt_scaling(blk: &Blocks, s: &[f64], z: &[f64]) -> Scaling {
-    let m = blk.dim();
-    let mut w = vec![vec![0.0; m]; m];
-    let mut winv = vec![vec![0.0; m]; m];
+    let mut l_w = vec![0.0; blk.l];
+    let mut l_winv = vec![0.0; blk.l];
     // Orthant: diagonal.
     for i in 0..blk.l {
         let wi = (s[i] / z[i]).sqrt();
-        w[i][i] = wi;
-        winv[i][i] = 1.0 / wi;
+        l_w[i] = wi;
+        l_winv[i] = 1.0 / wi;
     }
     let offs = blk.soc_offsets();
+    let mut soc_w = Vec::with_capacity(blk.soc.len());
+    let mut soc_winv = Vec::with_capacity(blk.soc.len());
     for (bi, &off) in offs.iter().enumerate() {
         let d = blk.soc[bi];
         let sb = &s[off..off + d];
@@ -216,6 +260,8 @@ pub(super) fn nt_scaling(blk: &Blocks, s: &[f64], z: &[f64]) -> Scaling {
         // What = [[w0, w1^T],[w1, I + w1 w1^T/(1+w0)]].
         let w0 = wbar[0];
         let denom = 1.0 + w0;
+        let mut w_block = vec![0.0; d * d];
+        let mut winv_block = vec![0.0; d * d];
         for r in 0..d {
             for col in 0..d {
                 let whatv;
@@ -229,37 +275,28 @@ pub(super) fn nt_scaling(blk: &Blocks, s: &[f64], z: &[f64]) -> Scaling {
                     let id = if r == col { 1.0 } else { 0.0 };
                     whatv = id + wbar[r] * wbar[col] / denom;
                 }
-                w[off + r][off + col] = eta * whatv;
+                w_block[r * d + col] = eta * whatv;
                 // Whatinv = J What J: negate the (0,k) and (k,0) blocks.
                 let mut whativ = whatv;
                 if (r == 0) ^ (col == 0) {
                     whativ = -whatv;
                 }
-                winv[off + r][off + col] = whativ / eta;
+                winv_block[r * d + col] = whativ / eta;
             }
         }
+        soc_w.push(w_block);
+        soc_winv.push(winv_block);
     }
-    Scaling { w, winv }
+    Scaling {
+        l_w,
+        l_winv,
+        soc_w,
+        soc_winv,
+    }
 }
 
 /// Jordan determinant `w0^2 - ||w1||^2`.
 fn jdet(v: &[f64]) -> f64 {
     let tail: f64 = v[1..].iter().map(|a| a * a).sum();
     v[0] * v[0] - tail
-}
-
-/// Apply a block-diagonal dense matrix to a vector.
-pub(super) fn mat_apply(mat: &[Vec<f64>], v: &[f64]) -> Vec<f64> {
-    let m = v.len();
-    let mut out = vec![0.0; m];
-    for (i, row) in mat.iter().enumerate() {
-        let mut acc = 0.0;
-        for (j, &a) in row.iter().enumerate() {
-            if a != 0.0 {
-                acc += a * v[j];
-            }
-        }
-        out[i] = acc;
-    }
-    out
 }

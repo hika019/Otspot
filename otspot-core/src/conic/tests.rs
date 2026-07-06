@@ -703,3 +703,165 @@ fn infeasible_certificate_is_farkas() {
     let hz: f64 = prob.h.iter().zip(&z).map(|(a, b)| a * b).sum();
     assert!(hz < 1e-6, "Farkas value h·z should be <= 0-ish: {hz}");
 }
+
+#[test]
+fn nt_scaling_block_diagonal_invariants() {
+    // Independent recomputation of the Nesterov--Todd scaling invariants for
+    // the block-diagonal `Scaling` representation: `W z = Winv s = lambda`,
+    // `W` and `Winv` are mutual inverses, and `s = W^2 z` (equivalently
+    // `z = Winv^2 s`). Exercises the orthant part and two differently-sized
+    // SOC blocks so both the diagonal and dense-block code paths are
+    // checked.
+    use super::cone::{self, Blocks};
+
+    let cone_spec = ConeSpec {
+        l: 2,
+        soc: vec![3, 4],
+    };
+    let blk = Blocks::new(&cone_spec);
+    // Strictly interior points: orthant coordinates > 0, SOC blocks with
+    // `s[0] > ||s[1:]||` (and likewise for z).
+    let s = vec![2.0, 5.0, 3.0, 0.5, 0.4, 4.0, 1.0, 0.5, 0.3];
+    let z = vec![1.0, 3.0, 1.0, 0.2, 0.1, 2.0, 0.3, 0.2, 0.1];
+    assert_eq!(s.len(), blk.dim());
+    assert_eq!(z.len(), blk.dim());
+
+    let sc = cone::nt_scaling(&blk, &s, &z);
+
+    // W z == Winv s == lambda.
+    let wz = sc.apply_w(&blk, &z);
+    let winv_s = sc.apply_winv(&blk, &s);
+    for i in 0..blk.dim() {
+        assert!(
+            (wz[i] - winv_s[i]).abs() < 1e-9,
+            "W z != Winv s at {i}: {} vs {}",
+            wz[i],
+            winv_s[i]
+        );
+    }
+
+    // W and Winv are mutual inverses on arbitrary vectors.
+    let probe = vec![1.0, -2.0, 0.5, 3.0, -1.0, 2.0, -0.5, 1.5, -2.5];
+    let roundtrip_1 = sc.apply_w(&blk, &sc.apply_winv(&blk, &probe));
+    let roundtrip_2 = sc.apply_winv(&blk, &sc.apply_w(&blk, &probe));
+    for i in 0..blk.dim() {
+        assert!(
+            (roundtrip_1[i] - probe[i]).abs() < 1e-8,
+            "W(Winv v) != v at {i}"
+        );
+        assert!(
+            (roundtrip_2[i] - probe[i]).abs() < 1e-8,
+            "Winv(W v) != v at {i}"
+        );
+    }
+
+    // s == W^2 z: applying the linear operator `W` twice is `W^2` exactly.
+    let w2z = sc.apply_w(&blk, &sc.apply_w(&blk, &z));
+    for i in 0..blk.dim() {
+        assert!(
+            (w2z[i] - s[i]).abs() < 1e-8,
+            "W^2 z != s at {i}: {} vs {}",
+            w2z[i],
+            s[i]
+        );
+    }
+
+    // z == Winv^2 s, the complementary identity.
+    let winv2s = sc.apply_winv(&blk, &sc.apply_winv(&blk, &s));
+    for i in 0..blk.dim() {
+        assert!(
+            (winv2s[i] - z[i]).abs() < 1e-8,
+            "Winv^2 s != z at {i}: {} vs {}",
+            winv2s[i],
+            z[i]
+        );
+    }
+}
+
+/// Checks the NT-scaling invariants `W z == Winv s`, `s == W^2 z`, and
+/// `z == Winv^2 s` for a given cone configuration and interior pair.
+fn assert_nt_invariants(cone_spec: &ConeSpec, s: &[f64], z: &[f64]) {
+    use super::cone::{self, Blocks};
+
+    let blk = Blocks::new(cone_spec);
+    assert_eq!(s.len(), blk.dim());
+    assert_eq!(z.len(), blk.dim());
+    let sc = cone::nt_scaling(&blk, s, z);
+    let wz = sc.apply_w(&blk, z);
+    let winv_s = sc.apply_winv(&blk, s);
+    let w2z = sc.apply_w(&blk, &wz);
+    let winv2s = sc.apply_winv(&blk, &winv_s);
+    for i in 0..blk.dim() {
+        assert!(
+            (wz[i] - winv_s[i]).abs() < 1e-9,
+            "W z != Winv s at {i}: {} vs {}",
+            wz[i],
+            winv_s[i]
+        );
+        assert!(
+            (w2z[i] - s[i]).abs() < 1e-8,
+            "W^2 z != s at {i}: {} vs {}",
+            w2z[i],
+            s[i]
+        );
+        assert!(
+            (winv2s[i] - z[i]).abs() < 1e-8,
+            "Winv^2 s != z at {i}: {} vs {}",
+            winv2s[i],
+            z[i]
+        );
+    }
+}
+
+#[test]
+fn nt_scaling_invariants_edge_configs() {
+    // Orthant-only: no SOC blocks, purely diagonal scaling.
+    assert_nt_invariants(
+        &ConeSpec { l: 3, soc: vec![] },
+        &[2.0, 0.5, 7.0],
+        &[1.0, 4.0, 0.25],
+    );
+    // SOC-only: no orthant part.
+    assert_nt_invariants(
+        &ConeSpec { l: 0, soc: vec![3] },
+        &[3.0, 1.0, 0.5],
+        &[2.0, 0.4, 0.3],
+    );
+    // dim=1 SOC blocks: Q_1 = R_+, degenerate tail-free case.
+    assert_nt_invariants(
+        &ConeSpec { l: 0, soc: vec![1, 1] },
+        &[4.0, 0.5],
+        &[1.0, 2.0],
+    );
+    // Mixed with a dim=1 SOC between larger blocks.
+    assert_nt_invariants(
+        &ConeSpec {
+            l: 1,
+            soc: vec![2, 1, 3],
+        },
+        &[3.0, 2.0, 1.0, 5.0, 2.5, 0.5, 1.0],
+        &[0.5, 1.5, 0.5, 0.25, 1.0, 0.2, 0.3],
+    );
+    // Empty cone (m = 0): all operators act on the empty vector.
+    assert_nt_invariants(&ConeSpec { l: 0, soc: vec![] }, &[], &[]);
+}
+
+#[test]
+fn empty_cone_equality_only_socp() {
+    // m = 0: purely equality-constrained problem passes through the conic
+    // IPM with every cone-block loop empty.
+    // min x0 + x1 s.t. x0 = 3, x1 = 4.
+    let prob = ConicProblem {
+        c: vec![1.0, 1.0],
+        a: CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap(),
+        b: vec![3.0, 4.0],
+        g: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+        h: vec![],
+        cone: ConeSpec { l: 0, soc: vec![] },
+    };
+    let res = solve_socp(&prob, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "res={res:?}");
+    assert!((res.objective - 7.0).abs() < 1e-6, "obj={}", res.objective);
+    assert!((res.x[0] - 3.0).abs() < 1e-6);
+    assert!((res.x[1] - 4.0).abs() < 1e-6);
+}

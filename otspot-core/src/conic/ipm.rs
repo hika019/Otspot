@@ -223,20 +223,20 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
 
         // NT scaling.
         let sc = cone::nt_scaling(&blk, &s, &z);
-        let lambda = cone::mat_apply(&sc.winv, &s);
+        let lambda = sc.apply_winv(&blk, &s);
 
-        // B = winv * G (m x n), H = B^T B (n x n).
+        // B = winv * G (m x n), H = B^T B (n x n). Built column-by-column so
+        // the block-diagonal `winv` is never materialised as an `m x m`
+        // matrix.
         let mut bmat = vec![vec![0.0; n]; m];
-        for (i, brow) in bmat.iter_mut().enumerate() {
-            let wrow = &sc.winv[i];
-            for (j, bij) in brow.iter_mut().enumerate() {
-                let mut acc = 0.0;
-                for (k, &wk) in wrow.iter().enumerate() {
-                    if wk != 0.0 {
-                        acc += wk * gd[k][j];
-                    }
-                }
-                *bij = acc;
+        let mut gcol = vec![0.0; m];
+        for j in 0..n {
+            for (k, row) in gd.iter().enumerate() {
+                gcol[k] = row[j];
+            }
+            let bcol = sc.apply_winv(&blk, &gcol);
+            for i in 0..m {
+                bmat[i][j] = bcol[i];
             }
         }
         let mut hmat = vec![vec![0.0; n]; n];
@@ -273,13 +273,12 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
             kkt[n + q][n + q] = -reg;
         }
 
-        let winv_rz = cone::mat_apply(&sc.winv, &rz);
+        let winv_rz = sc.apply_winv(&blk, &rz);
 
         // ---- affine direction (r_c = -lambda) ----
         let rc_aff: Vec<f64> = lambda.iter().map(|v| -v).collect();
-        let (_dx_a, _dy_a, dz_a, ds_a) = solve_dir(
-            &kkt, &bmat, &sc, &gd, &rx, &ry, &rz, &winv_rz, &rc_aff, n, p, m,
-        );
+        let (_dx_a, _dy_a, dz_a, ds_a) =
+            solve_dir(&kkt, &bmat, &sc, &blk, &gd, &rx, &ry, &rz, &winv_rz, &rc_aff);
 
         // affine step length
         let a_s = cone::max_step(&blk, &s, &ds_a, 1e16);
@@ -295,8 +294,8 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
         let sigma = if mu > 0.0 { (mu_aff / mu).powi(3) } else { 0.0 };
 
         // ---- corrector ----
-        let dsw = cone::mat_apply(&sc.winv, &ds_a); // W^{-1} ds
-        let dzw = cone::mat_apply(&sc.w, &dz_a); // W dz
+        let dsw = sc.apply_winv(&blk, &ds_a); // W^{-1} ds
+        let dzw = sc.apply_w(&blk, &dz_a); // W dz
         let corr = cone::jprod(&blk, &dsw, &dzw);
         let ll = cone::jprod(&blk, &lambda, &lambda);
         let target: Vec<f64> = (0..m)
@@ -304,7 +303,7 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
             .collect();
         let rc = cone::jdiv(&blk, &lambda, &target);
         let (dx, dy, dz, ds) =
-            solve_dir(&kkt, &bmat, &sc, &gd, &rx, &ry, &rz, &winv_rz, &rc, n, p, m);
+            solve_dir(&kkt, &bmat, &sc, &blk, &gd, &rx, &ry, &rz, &winv_rz, &rc);
 
         // combined step length
         let a_s = cone::max_step(&blk, &s, &ds, 1e16);
@@ -363,16 +362,15 @@ fn solve_dir(
     kkt: &[Vec<f64>],
     bmat: &[Vec<f64>],
     sc: &cone::Scaling,
+    blk: &Blocks,
     gd: &[Vec<f64>],
     rx: &[f64],
     ry: &[f64],
     rz: &[f64],
     winv_rz: &[f64],
     rc: &[f64],
-    n: usize,
-    p: usize,
-    m: usize,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let (n, p, m) = (rx.len(), ry.len(), rz.len());
     // rhs_x = -rx - B^T (winv*rz + rc)
     let mut t: Vec<f64> = (0..m).map(|i| winv_rz[i] + rc[i]).collect();
     let bt_t = matvec_t(bmat, &t, n);
@@ -391,9 +389,9 @@ fn solve_dir(
     for i in 0..m {
         t[i] = gdx[i] + rz[i];
     }
-    let w1 = cone::mat_apply(&sc.winv, &t);
+    let w1 = sc.apply_winv(blk, &t);
     let inner: Vec<f64> = (0..m).map(|i| w1[i] + rc[i]).collect();
-    let dz = cone::mat_apply(&sc.winv, &inner);
+    let dz = sc.apply_winv(blk, &inner);
     // ds = -rz - G dx
     let ds: Vec<f64> = (0..m).map(|i| -rz[i] - gdx[i]).collect();
     (dx, dy, dz, ds)
