@@ -12,7 +12,9 @@ reports/
 /tmp
 /logs
 Highs.log
-/.claude
+/.claude/*
+!/.claude/skills/
+!/.claude/settings.json
 dashboard.md
 .worktrees/
 .codex-worktrees/
