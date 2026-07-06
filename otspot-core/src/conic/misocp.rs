@@ -23,9 +23,14 @@ pub struct MisocpProblem {
 }
 
 /// Result of a mixed-integer conic solve.
+///
+/// `status` distinguishes a proven conclusion from an inconclusive search —
+/// see [`solve_misocp`] for the full state table (no incumbent × {proven,
+/// node-limited, timed out, numerically failed} and incumbent × {proven,
+/// node-limited/failed, timed out}).
 #[derive(Debug, Clone)]
 pub struct MisocpResult {
-    /// Status (`Optimal`, `Infeasible`, or `MaxIterations` when node-limited).
+    /// Solve status; see the type-level doc for the full state table.
     pub status: SolveStatus,
     /// Best objective found.
     pub objective: f64,
@@ -44,6 +49,12 @@ pub struct BbOptions {
     pub max_nodes: usize,
     /// Optimality gap tolerance for pruning.
     pub gap_tol: f64,
+    /// Wall-clock deadline for the branch-and-bound loop, checked once per
+    /// node before the relaxation is solved. `None` disables the check
+    /// (bounded only by `max_nodes`). Independent of [`ConicOptions::deadline`],
+    /// which bounds each node's own interior-point iterations; callers should
+    /// normally set both to the same instant.
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl Default for BbOptions {
@@ -52,6 +63,7 @@ impl Default for BbOptions {
             int_tol: 1e-6,
             max_nodes: 20_000,
             gap_tol: 1e-6,
+            deadline: None,
         }
     }
 }
@@ -69,8 +81,11 @@ fn dense(a: &CscMatrix) -> Vec<Vec<f64>> {
     d
 }
 
-/// Build a relaxation with per-node integer bounds `[lb_j, ub_j]` appended as
-/// orthant rows (kept contiguous before the SOC blocks).
+/// Build a relaxation with per-node integer bounds `[lb_j, ub_j]`. Strict
+/// bounds are appended as orthant rows (kept contiguous before the SOC
+/// blocks); a fixed variable (`lb_j == ub_j`) becomes an equality row
+/// `x_j = lb_j` instead — the row pair `x_j <= v`, `-x_j <= -v` has no
+/// strictly feasible slack, which stalls the interior-point method.
 fn build_relaxation(
     base: &ConicProblem,
     lb: &[f64],
@@ -87,8 +102,19 @@ fn build_relaxation(
         rows.push(gd[i].clone());
         h.push(base.h[i]);
     }
-    // Bound rows: x_j <= ub  and  -x_j <= -lb.
+    let ad = dense(&base.a);
+    let mut eq_rows: Vec<Vec<f64>> = ad.to_vec();
+    let mut b = base.b.clone();
     for (k, &j) in integers.iter().enumerate() {
+        if lb[k] == ub[k] {
+            // Fixed by branching: x_j = lb_k as an equality row.
+            let mut r = vec![0.0; n];
+            r[j] = 1.0;
+            eq_rows.push(r);
+            b.push(lb[k]);
+            continue;
+        }
+        // Bound rows: x_j <= ub  and  -x_j <= -lb.
         let mut r = vec![0.0; n];
         r[j] = 1.0;
         rows.push(r);
@@ -103,25 +129,26 @@ fn build_relaxation(
         rows.push(gd[i].clone());
         h.push(base.h[i]);
     }
-    let m = rows.len();
-    let mut ri = Vec::new();
-    let mut ci = Vec::new();
-    let mut vi = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
-        for (j, &v) in row.iter().enumerate() {
-            if v != 0.0 {
-                ri.push(i);
-                ci.push(j);
-                vi.push(v);
+    let to_csc = |rows: &[Vec<f64>]| {
+        let mut ri = Vec::new();
+        let mut ci = Vec::new();
+        let mut vi = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            for (j, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    ri.push(i);
+                    ci.push(j);
+                    vi.push(v);
+                }
             }
         }
-    }
-    let g = CscMatrix::from_triplets(&ri, &ci, &vi, m, n).unwrap();
+        CscMatrix::from_triplets(&ri, &ci, &vi, rows.len(), n).unwrap()
+    };
     ConicProblem {
         c: base.c.clone(),
-        a: base.a.clone(),
-        b: base.b.clone(),
-        g,
+        a: to_csc(&eq_rows),
+        b,
+        g: to_csc(&rows),
         h,
         cone: ConeSpec {
             l: new_l,
@@ -132,16 +159,41 @@ fn build_relaxation(
 
 /// Solve a mixed-integer SOCP by branch-and-bound (depth-first, best-bound
 /// pruning). Minimises `c^T x`.
+///
+/// Node relaxation outcomes are classified before pruning, never collapsed
+/// into a single "prune" bucket: `Infeasible` prunes the subtree only when
+/// backed by a Farkas certificate (`infeas_cert`); `Unbounded` propagates
+/// immediately only when backed by a verified improving ray (`primal_ray`;
+/// a restricted relaxation can only be unbounded if the root is too);
+/// anything else (`NumericalError`, an unproven `Infeasible` / `Unbounded`,
+/// `MaxIterations`, `NotSupported`, …) is a **numerical failure** — the node
+/// is pruned (we cannot branch on an untrustworthy point) but counted, so an
+/// empty search never gets promoted to a false proof of infeasibility.
+/// `Timeout` on a node stops the whole search (the deadline is exhausted, so
+/// further nodes would also time out).
+///
+/// Final status (no incumbent found): `Timeout` > `MaxIterations`
+/// (node-limited) > `NumericalError` (some node failed numerically) >
+/// `Infeasible` (search fully exhausted with every leaf certified infeasible
+/// or bound-pruned). Final status (incumbent found): `Timeout` > `Optimal`
+/// requires the search to be fully exhausted with **no** numerical failures;
+/// otherwise `SuboptimalSolution` (mirrors `mip::solve_miqp`'s convention).
 pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -> MisocpResult {
     let mut incumbent_obj = f64::INFINITY;
     let mut incumbent_x: Vec<f64> = Vec::new();
     let mut nodes = 0usize;
     let mut node_limited = false;
+    let mut timed_out = false;
+    let mut numerical_failures = 0usize;
 
     // Stack of (lb, ub) per integer.
     let mut stack: Vec<(Vec<f64>, Vec<f64>)> = vec![(prob.int_lb.clone(), prob.int_ub.clone())];
 
     while let Some((lb, ub)) = stack.pop() {
+        if bb.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            timed_out = true;
+            break;
+        }
         if nodes >= bb.max_nodes {
             node_limited = true;
             break;
@@ -151,7 +203,9 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         let res = solve_socp(&relax, opts);
         match res.status {
             SolveStatus::Optimal => {}
-            SolveStatus::Unbounded => {
+            SolveStatus::Unbounded if res.primal_ray.is_some() => {
+                // Verified improving ray: a restricted relaxation can only be
+                // unbounded if the root is too.
                 return MisocpResult {
                     status: SolveStatus::Unbounded,
                     objective: f64::NEG_INFINITY,
@@ -159,7 +213,18 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
                     nodes,
                 };
             }
-            _ => continue, // infeasible / numerical: prune
+            SolveStatus::Infeasible if res.infeas_cert.is_some() => continue, // proven: prune
+            SolveStatus::Timeout => {
+                timed_out = true;
+                break;
+            }
+            _ => {
+                // Unproven Infeasible, NumericalError, MaxIterations, NotSupported, …:
+                // no certified conclusion. Prune (can't branch on an untrustworthy
+                // point) but flag the search as inconclusive.
+                numerical_failures += 1;
+                continue;
+            }
         }
         // Bound pruning.
         if res.objective >= incumbent_obj - bb.gap_tol {
@@ -206,19 +271,33 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         }
     }
 
+    let proven = !timed_out && !node_limited && numerical_failures == 0;
+
     if incumbent_x.is_empty() {
+        let status = if timed_out {
+            SolveStatus::Timeout
+        } else if node_limited {
+            SolveStatus::MaxIterations
+        } else if numerical_failures > 0 {
+            SolveStatus::NumericalError
+        } else {
+            debug_assert!(proven);
+            SolveStatus::Infeasible
+        };
         return MisocpResult {
-            status: SolveStatus::Infeasible,
+            status,
             objective: f64::INFINITY,
             x: vec![],
             nodes,
         };
     }
     MisocpResult {
-        status: if node_limited {
-            SolveStatus::MaxIterations
-        } else {
+        status: if proven {
             SolveStatus::Optimal
+        } else if timed_out {
+            SolveStatus::Timeout
+        } else {
+            SolveStatus::SuboptimalSolution
         },
         objective: incumbent_obj,
         x: incumbent_x,

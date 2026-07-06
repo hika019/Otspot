@@ -704,6 +704,448 @@ fn infeasible_certificate_is_farkas() {
     assert!(hz < 1e-6, "Farkas value h·z should be <= 0-ish: {hz}");
 }
 
+// ---------------------------------------------------------------------------
+// MISOCP branch-and-bound status classification sentinels.
+//
+// These pin the state table of `solve_misocp`: an inconclusive search (node
+// numerical failures, node limit, deadline) must never be promoted to a
+// proven `Infeasible` / `Optimal`.
+// ---------------------------------------------------------------------------
+
+/// `min x` s.t. `x >= 1/2`, integer `x ∈ [0, 2]`. The root relaxation is
+/// fractional (x = 1/2); the down child (x fixed to 0) is infeasible and the
+/// up child yields the integer optimum x = 1.
+fn half_int_lp() -> MisocpProblem {
+    let g = csc(&[vec![-1.0]], 1, 1);
+    let base = ConicProblem {
+        c: vec![1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![-0.5],
+        cone: ConeSpec { l: 1, soc: vec![] },
+    };
+    MisocpProblem {
+        base,
+        integers: vec![0],
+        int_lb: vec![0.0],
+        int_ub: vec![2.0],
+    }
+}
+
+/// `max x0 + x1` s.t. `||(x0, x1)|| <= sqrt(2.5)`, integers in `[0, 2]^2`
+/// (same instance as `misocp_ball_integer_optimum`; integer optimum (1, 1)).
+fn ball_int_misocp() -> MisocpProblem {
+    let r = 2.5_f64.sqrt();
+    let g = csc(&[vec![0.0, 0.0], vec![-1.0, 0.0], vec![0.0, -1.0]], 3, 2);
+    let base = ConicProblem {
+        c: vec![-1.0, -1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+        b: vec![],
+        g,
+        h: vec![r, 0.0, 0.0],
+        cone: ConeSpec { l: 0, soc: vec![3] },
+    };
+    MisocpProblem {
+        base,
+        integers: vec![0, 1],
+        int_lb: vec![0.0, 0.0],
+        int_ub: vec![2.0, 2.0],
+    }
+}
+
+/// `x0 <= -1` and `x0 >= 0` (proven infeasible) with one integer variable.
+fn infeasible_int_lp() -> MisocpProblem {
+    let g = csc(&[vec![1.0, 0.0], vec![-1.0, 0.0]], 2, 2);
+    let base = ConicProblem {
+        c: vec![0.0, 0.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+        b: vec![],
+        g,
+        h: vec![-1.0, 0.0],
+        cone: ConeSpec { l: 2, soc: vec![] },
+    };
+    MisocpProblem {
+        base,
+        integers: vec![1],
+        int_lb: vec![0.0],
+        int_ub: vec![5.0],
+    }
+}
+
+#[test]
+fn misocp_unresolved_nodes_do_not_prove_infeasibility() {
+    // max_iter = 0 makes every node relaxation return MaxIterations without a
+    // certificate: nothing was proven, so the empty search must report
+    // NumericalError, never a false Infeasible (the pre-fix behaviour).
+    let opts = ConicOptions {
+        max_iter: 0,
+        ..ConicOptions::default()
+    };
+    let res = solve_misocp(&half_int_lp(), &opts, &BbOptions::default());
+    assert_eq!(res.status, SolveStatus::NumericalError, "{res:?}");
+    assert!(res.x.is_empty());
+}
+
+#[test]
+fn misocp_certified_infeasible_returns_infeasible() {
+    // Every leaf is pruned by a Farkas certificate: Infeasible is proven.
+    let res = solve_misocp(
+        &infeasible_int_lp(),
+        &ConicOptions::default(),
+        &BbOptions::default(),
+    );
+    assert_eq!(res.status, SolveStatus::Infeasible, "{res:?}");
+    assert!(res.x.is_empty());
+}
+
+#[test]
+fn misocp_exhaustive_search_without_failures_is_optimal() {
+    // Incumbent + fully exhausted search + zero node failures => Optimal.
+    let res = solve_misocp(
+        &half_int_lp(),
+        &ConicOptions::default(),
+        &BbOptions::default(),
+    );
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!((res.objective - 1.0).abs() < 1e-6, "obj={}", res.objective);
+    assert!((res.x[0] - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn misocp_node_limit_with_incumbent_is_suboptimal() {
+    // Node order: root (fractional), then the up child (integer incumbent
+    // x = 1); the down child is still pending when max_nodes = 2 hits, so the
+    // incumbent is not proven optimal.
+    let bb = BbOptions {
+        max_nodes: 2,
+        ..BbOptions::default()
+    };
+    let res = solve_misocp(&half_int_lp(), &ConicOptions::default(), &bb);
+    assert_eq!(res.status, SolveStatus::SuboptimalSolution, "{res:?}");
+    assert!((res.x[0] - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn misocp_node_limit_without_incumbent_is_max_iterations() {
+    // max_nodes = 0 explores nothing; even on an infeasible instance the
+    // search proved nothing, so it must report MaxIterations, never a false
+    // Infeasible (the pre-fix behaviour).
+    let bb = BbOptions {
+        max_nodes: 0,
+        ..BbOptions::default()
+    };
+    let res = solve_misocp(&infeasible_int_lp(), &ConicOptions::default(), &bb);
+    assert_eq!(res.status, SolveStatus::MaxIterations, "{res:?}");
+    assert_eq!(res.nodes, 0);
+    assert!(res.x.is_empty());
+}
+
+/// Node iteration budget for `misocp_incumbent_with_failed_node_is_suboptimal`,
+/// calibrated on `ball_int_misocp`: every feasible node relaxation converges
+/// within 9 IPM iterations while the infeasible up child (x0 fixed at 2)
+/// needs 16 to form its Farkas certificate. Any value in `9..=15` makes that
+/// one node fail without a certificate while the incumbent is still found.
+const BALL_NODE_FAILURE_ITER_BUDGET: usize = 12;
+
+#[test]
+fn misocp_incumbent_with_failed_node_is_suboptimal() {
+    // Incumbent found, but one node relaxation failed without a certificate:
+    // the search is not exhaustive, so Optimal must not be claimed.
+    let opts = ConicOptions {
+        max_iter: BALL_NODE_FAILURE_ITER_BUDGET,
+        ..ConicOptions::default()
+    };
+    let res = solve_misocp(&ball_int_misocp(), &opts, &BbOptions::default());
+    assert_eq!(res.status, SolveStatus::SuboptimalSolution, "{res:?}");
+    assert!(
+        (res.objective - (-2.0)).abs() < 1e-4,
+        "obj={}",
+        res.objective
+    );
+}
+
+#[test]
+fn misocp_expired_deadline_returns_timeout() {
+    // A deadline that has already passed stops the search before any node:
+    // Timeout, no incumbent, and definitely not Infeasible.
+    let bb = BbOptions {
+        deadline: Some(std::time::Instant::now()),
+        ..BbOptions::default()
+    };
+    let res = solve_misocp(&half_int_lp(), &ConicOptions::default(), &bb);
+    assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
+    assert_eq!(res.nodes, 0);
+    assert!(res.x.is_empty());
+}
+
+#[test]
+fn misocp_mid_search_deadline_keeps_incumbent() {
+    // Wider instance (37 nodes): max x0+x1+x2 in a ball of r^2 = 30, integers
+    // in [0, 5]^3. Deadline at half the measured full runtime T. Timing
+    // margins (measured, same-process warm run): the incumbent lands by node
+    // 2 of 37 (~T/18), so missing it needs a ~9x mid-test slowdown of the
+    // second run relative to the first; finishing the whole search before T/2
+    // needs the second run to be 2x faster than the just-completed identical
+    // warm run. 45/45 trials landed mid-search (nodes 15..28).
+    let n = 3usize;
+    let r2 = 30.0_f64;
+    let mut grows = vec![vec![0.0; n]];
+    let mut h = vec![r2.sqrt()];
+    for j in 0..n {
+        let mut row = vec![0.0; n];
+        row[j] = -1.0;
+        grows.push(row);
+        h.push(0.0);
+    }
+    let g = csc(&grows, n + 1, n);
+    let base = ConicProblem {
+        c: vec![-1.0; n],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b: vec![],
+        g,
+        h,
+        cone: ConeSpec {
+            l: 0,
+            soc: vec![n + 1],
+        },
+    };
+    let prob = MisocpProblem {
+        base,
+        integers: vec![0, 1, 2],
+        int_lb: vec![0.0; n],
+        int_ub: vec![5.0; n],
+    };
+    let t0 = std::time::Instant::now();
+    let full = solve_misocp(&prob, &ConicOptions::default(), &BbOptions::default());
+    let full_time = t0.elapsed();
+    assert!(!full.x.is_empty(), "calibration run must find an incumbent");
+    let bb = BbOptions {
+        deadline: Some(std::time::Instant::now() + full_time / 2),
+        ..BbOptions::default()
+    };
+    let res = solve_misocp(&prob, &ConicOptions::default(), &bb);
+    assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
+    assert!(!res.x.is_empty(), "incumbent must be preserved on timeout");
+    assert!(res.nodes < full.nodes, "deadline must actually cut the search");
+}
+
+// ---------------------------------------------------------------------------
+// IPM Farkas-certificate sentinels for degenerate (fixed-variable) nodes.
+// ---------------------------------------------------------------------------
+
+/// Verify a Farkas certificate `(y, z)`: `z ∈ K*`, `A^T y + G^T z ≈ 0`, and
+/// `b·y + h·z < 0`.
+fn assert_farkas(prob: &ConicProblem, y: &[f64], z: &[f64]) {
+    let tol = 1e-6;
+    for (i, &zi) in z.iter().enumerate().take(prob.cone.l) {
+        assert!(zi >= -tol, "z[{i}] = {zi} must lie in K*");
+    }
+    let mut off = prob.cone.l;
+    for &d in &prob.cone.soc {
+        let nr = z[off + 1..off + d]
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            .sqrt();
+        assert!(z[off] >= nr - tol, "SOC block at {off} not in K*");
+        off += d;
+    }
+    let mut ray = vec![0.0; prob.n()];
+    let at = prob.a.transpose();
+    let gt = prob.g.transpose();
+    let aty = at.mat_vec_mul(y).unwrap();
+    let gtz = gt.mat_vec_mul(z).unwrap();
+    for i in 0..prob.n() {
+        ray[i] = aty[i] + gtz[i];
+    }
+    let res = ray.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(res < tol, "A^T y + G^T z must vanish, got {res}");
+    let val = prob.b.iter().zip(y).map(|(a, b)| a * b).sum::<f64>()
+        + prob.h.iter().zip(z).map(|(a, b)| a * b).sum::<f64>();
+    assert!(val < -tol, "b·y + h·z must be negative, got {val}");
+}
+
+#[test]
+fn socp_degenerate_fixed_var_infeasible_gets_certificate() {
+    // B&B down-child shape: x fixed to 0 by branching bounds while the base
+    // problem requires x >= 1/2. Before the per-iteration certificate check
+    // the IPM diverged to non-finite iterates and reported MaxIterations /
+    // NumericalError, so branch-and-bound could not prune this node soundly.
+    let g = csc(&[vec![-1.0], vec![1.0], vec![-1.0]], 3, 1);
+    let prob = ConicProblem {
+        c: vec![1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![-0.5, 0.0, 0.0],
+        cone: ConeSpec { l: 3, soc: vec![] },
+    };
+    let res = solve_socp(&prob, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Infeasible, "{res:?}");
+    let (y, z) = res.infeas_cert.expect("must carry a Farkas certificate");
+    assert_farkas(&prob, &y, &z);
+}
+
+#[test]
+fn socp_fixed_var_soc_infeasible_gets_certificate() {
+    // B&B up-child shape: x0 fixed to 2 by branching bounds while the SOC
+    // ball only allows x0 <= sqrt(2.5). Same failure mode as above but with
+    // the conflict inside the SOC block.
+    let r = 2.5_f64.sqrt();
+    let rows = vec![
+        vec![1.0, 0.0],
+        vec![-1.0, 0.0],
+        vec![0.0, 1.0],
+        vec![0.0, -1.0],
+        vec![0.0, 0.0],
+        vec![-1.0, 0.0],
+        vec![0.0, -1.0],
+    ];
+    let h = vec![2.0, -2.0, 2.0, 0.0, r, 0.0, 0.0];
+    let g = csc(&rows, 7, 2);
+    let prob = ConicProblem {
+        c: vec![-1.0, -1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+        b: vec![],
+        g,
+        h,
+        cone: ConeSpec { l: 4, soc: vec![3] },
+    };
+    let res = solve_socp(&prob, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Infeasible, "{res:?}");
+    let (y, z) = res.infeas_cert.expect("must carry a Farkas certificate");
+    assert_farkas(&prob, &y, &z);
+}
+
+#[test]
+fn cone_membership_check_covers_all_branches() {
+    let blk = super::cone::Blocks::new(&ConeSpec { l: 2, soc: vec![3] });
+    let tol = 1e-9;
+    // Interior point: inside.
+    assert!(super::cone::in_cone(&blk, &[1.0, 2.0, 2.0, 1.0, 1.0], tol));
+    // Orthant violation.
+    assert!(!super::cone::in_cone(&blk, &[-1.0, 2.0, 2.0, 1.0, 1.0], tol));
+    // SOC violation (head < ||rest||).
+    assert!(!super::cone::in_cone(&blk, &[1.0, 2.0, 1.0, 1.0, 1.0], tol));
+    // Boundary within tolerance: accepted.
+    assert!(super::cone::in_cone(
+        &blk,
+        &[0.0, 0.0, 1.0, 1.0, 0.0],
+        tol
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Scale-invariance sentinels for the certificate checks. The Farkas /
+// improving-ray tests must be immune to problem data scale: a large bound V
+// must neither fake a certificate (false Infeasible / Unbounded) nor mask a
+// genuine one.
+// ---------------------------------------------------------------------------
+
+/// `min -x` s.t. `0 <= x <= v` (optimal x = v, objective -v).
+fn box_lp(v: f64) -> ConicProblem {
+    let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
+    ConicProblem {
+        c: vec![-1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![v, 0.0],
+        cone: ConeSpec { l: 2, soc: vec![] },
+    }
+}
+
+#[test]
+fn socp_large_bound_box_scale_sweep_is_optimal() {
+    for v in [1e6f64, 1e9, 1e10] {
+        let res = solve_socp(&box_lp(v), &ConicOptions::default());
+        assert_eq!(res.status, SolveStatus::Optimal, "V={v:e}: {res:?}");
+        assert!(
+            (res.objective + v).abs() <= 1e-6 * v,
+            "V={v:e}: obj={}",
+            res.objective
+        );
+    }
+}
+
+#[test]
+fn socp_extreme_scale_never_falsely_conclusive() {
+    // At V >= 1e12 the dense IPM stalls short of the 1e-9 relative tolerance
+    // (measured: objective approaches -V monotonically, MaxIterations). The
+    // stall is honest; what must never happen is a fake proof: the old
+    // magnitude heuristics (cx < -1e11 && ||x|| > 1e8) declared these
+    // trivially bounded boxes Unbounded.
+    for v in [1e12f64, 1e14] {
+        let res = solve_socp(&box_lp(v), &ConicOptions::default());
+        assert_ne!(res.status, SolveStatus::Unbounded, "V={v:e}: {res:?}");
+        assert_ne!(res.status, SolveStatus::Infeasible, "V={v:e}: {res:?}");
+        assert!(res.primal_ray.is_none(), "V={v:e}: unproven ray");
+        assert!(res.infeas_cert.is_none(), "V={v:e}: unproven cert");
+    }
+}
+
+#[test]
+fn misocp_fixed_integer_at_large_scale_solves() {
+    // Feasible root with the integer fixed at 1e10 by its bounds. The fixed
+    // pair used to be encoded as `x <= v`, `-x <= -v` orthant rows whose
+    // empty slack interior stalled the IPM, and the scale-dependent Farkas
+    // ratio then promoted the stall to a false Infeasible.
+    let v = 1e10f64;
+    let g = csc(&[vec![1.0]], 1, 1);
+    let base = ConicProblem {
+        c: vec![1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![2.0 * v],
+        cone: ConeSpec { l: 1, soc: vec![] },
+    };
+    let mp = MisocpProblem {
+        base,
+        integers: vec![0],
+        int_lb: vec![v],
+        int_ub: vec![v],
+    };
+    let res = solve_misocp(&mp, &ConicOptions::default(), &BbOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!(
+        (res.x[0] - v).abs() <= 1e-6 * v,
+        "x={} want {v:e}",
+        res.x[0]
+    );
+}
+
+#[test]
+fn socp_large_scale_true_infeasible_gets_certificate() {
+    // Reverse-direction sentinel: tightening the Farkas verification must not
+    // blind it. `x <= V` vs `x >= V + margin` at V = 1e10, with the margin at
+    // 1e-6 relative (well above the 1e-9 verification tolerance) and at 1e0
+    // relative.
+    let v = 1e10f64;
+    for margin in [1e-6 * v, v] {
+        let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
+        let prob = ConicProblem {
+            c: vec![0.0],
+            a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b: vec![],
+            g,
+            h: vec![v, -(v + margin)],
+            cone: ConeSpec { l: 2, soc: vec![] },
+        };
+        let res = solve_socp(&prob, &ConicOptions::default());
+        assert_eq!(
+            res.status,
+            SolveStatus::Infeasible,
+            "margin={margin:e}: {res:?}"
+        );
+        let (y, z) = res
+            .infeas_cert
+            .expect("true infeasibility must carry a certificate");
+        assert_farkas(&prob, &y, &z);
+    }
+}
+
 #[test]
 fn nt_scaling_block_diagonal_invariants() {
     // Independent recomputation of the Nesterov--Todd scaling invariants for

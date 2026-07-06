@@ -147,7 +147,16 @@ fn lu_solve(mut m: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Option<Vec<f64>> {
         }
         u[i] = acc / m[i][i];
     }
-    Some(u)
+    // A pivot just above the `1e-14` threshold can still be small enough that
+    // back-substitution overflows to `NaN`/`Inf` on a near-singular system.
+    // Same convention as `sparse_lu_solve`: only return a solution that is
+    // actually usable, so `kkt_solve`'s caller falls back to a no-progress
+    // (zero) direction instead of silently propagating garbage.
+    if u.iter().all(|v| v.is_finite()) {
+        Some(u)
+    } else {
+        None
+    }
 }
 
 pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
@@ -178,6 +187,11 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
     let mut status = SolveStatus::MaxIterations;
     let mut iterations = 0;
     let mut last = (0.0, 0.0, 0.0);
+    // Machine-verified certificates; set only by the certificate branches
+    // below, so downstream consumers (B&B pruning) can distinguish a proven
+    // Infeasible / Unbounded from an unverified status.
+    let mut verified_infeas_cert: Option<(Vec<f64>, Vec<f64>)> = None;
+    let mut verified_primal_ray: Option<Vec<f64>> = None;
 
     for it in 0..opts.max_iter {
         if opts.deadline.is_some_and(|d| Instant::now() >= d) {
@@ -210,15 +224,94 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
             status = SolveStatus::Optimal;
             break;
         }
-        // Divergence-based infeasibility / unboundedness heuristics.
-        let dual_obj = -by - hz;
-        if pres < 1e-7 && cx < -1e11 && norm2(&x) > 1e8 {
-            status = SolveStatus::Unbounded;
-            break;
+        // Certificate-based early termination. Both tests are checked every
+        // iteration (degenerate relaxations, e.g. B&B children with a
+        // variable fixed by branching, diverge to non-finite iterates before
+        // any magnitude threshold could fire) and both are scale-invariant:
+        // each residual / value is measured against the magnitude sum of its
+        // own terms, so neither the data scale nor the iterate scale can
+        // fake a certificate. Using the same `opts.tol` on both sides makes
+        // them complementary — a near-ray on a *feasible* degenerate problem
+        // (e.g. a bound pair `x <= V`, `-x <= -V`) has relative ray residual
+        // equal to its relative certificate value, so it can never pass the
+        // "ray holds to tol" and "value negative beyond tol" gates together.
+        //
+        // Primal infeasibility (Farkas): z ∈ K*, A^T y + G^T z ≈ 0 and
+        // b·y + h·z < 0.
+        let farkas_val = -(by + hz);
+        if farkas_val > 0.0 {
+            let val_mag: f64 = bvec.iter().zip(&y).map(|(a, b)| (a * b).abs()).sum::<f64>()
+                + hvec.iter().zip(&z).map(|(a, b)| (a * b).abs()).sum::<f64>();
+            let ray_res = (0..n)
+                .map(|i| (aty[i] + gtz[i]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let ray_mag = {
+                let mut acc = vec![0.0; n];
+                for (i, row) in ad.iter().enumerate() {
+                    let yi = y[i].abs();
+                    for (j, &a) in row.iter().enumerate() {
+                        acc[j] += a.abs() * yi;
+                    }
+                }
+                for (k, row) in gd.iter().enumerate() {
+                    let zk = z[k].abs();
+                    for (j, &g) in row.iter().enumerate() {
+                        acc[j] += g.abs() * zk;
+                    }
+                }
+                norm2(&acc)
+            };
+            let zn = norm2(&z);
+            if farkas_val >= opts.tol * val_mag && ray_res <= opts.tol * ray_mag && zn > 0.0 {
+                let zs: Vec<f64> = z.iter().map(|v| v / zn).collect();
+                if cone::in_cone(&blk, &zs, opts.tol) {
+                    let scale = (norm2(&y) + zn).max(1.0);
+                    verified_infeas_cert = Some((
+                        y.iter().map(|v| v / scale).collect(),
+                        z.iter().map(|v| v / scale).collect(),
+                    ));
+                    status = SolveStatus::Infeasible;
+                    break;
+                }
+            }
         }
-        if dres < 1e-7 && dual_obj > 1e11 && (norm2(&y) + norm2(&z)) > 1e8 {
-            status = SolveStatus::Infeasible;
-            break;
+        // Dual infeasibility / primal unboundedness (improving ray): d = x
+        // with A d ≈ 0, -G d ∈ K and c·d < 0 proves the objective is
+        // unbounded below along d.
+        let descent = -cx;
+        if descent > 0.0 {
+            let c_mag: f64 = c.iter().zip(&x).map(|(a, b)| (a * b).abs()).sum();
+            let ax_res = norm2(&ax);
+            let ax_mag = {
+                let mut acc = 0.0;
+                for row in &ad {
+                    let t: f64 = row.iter().zip(&x).map(|(a, b)| (a * b).abs()).sum();
+                    acc += t * t;
+                }
+                acc.sqrt()
+            };
+            let g_mag = {
+                let mut acc = 0.0;
+                for row in &gd {
+                    let t: f64 = row.iter().zip(&x).map(|(g, b)| (g * b).abs()).sum();
+                    acc += t * t;
+                }
+                acc.sqrt()
+            };
+            let xn = norm2(&x);
+            if descent >= opts.tol * c_mag && ax_res <= opts.tol * ax_mag && xn > 0.0 {
+                let recession: Vec<f64> = if g_mag > 0.0 {
+                    gx.iter().map(|v| -v / g_mag).collect()
+                } else {
+                    gx.iter().map(|v| -v).collect()
+                };
+                if cone::in_cone(&blk, &recession, opts.tol) {
+                    verified_primal_ray = Some(x.iter().map(|v| v / xn).collect());
+                    status = SolveStatus::Unbounded;
+                    break;
+                }
+            }
         }
 
         // NT scaling.
@@ -323,26 +416,28 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
             z[i] += alpha * dz[i];
             s[i] += alpha * ds[i];
         }
+        // A near-singular KKT solve (e.g. from a degenerate or infeasible
+        // relaxation) can silently return a non-finite direction even though
+        // `alpha` itself computes to a finite, positive value: `cone::max_step`
+        // only inspects the cone-membership boundary of `s`/`z`, not whether
+        // `dx`/`dz`/`ds` themselves are NaN/Inf. Without this guard, a single
+        // corrupted iterate propagates through every subsequent residual/
+        // divergence check — all of which are false on NaN — so the loop
+        // silently burns through `max_iter` and reports `MaxIterations`
+        // instead of the true `NumericalError`, hiding the failure from
+        // callers (e.g. MISOCP branch-and-bound) that rely on the status to
+        // distinguish a proven conclusion from an untrustworthy point.
+        if !x.iter().all(|v| v.is_finite())
+            || !z.iter().all(|v| v.is_finite())
+            || !s.iter().all(|v| v.is_finite())
+            || !y.iter().all(|v| v.is_finite())
+        {
+            status = SolveStatus::NumericalError;
+            break;
+        }
     }
 
     let objective = dot(c, &x);
-    let (primal_ray, infeas_cert) = match status {
-        SolveStatus::Unbounded => {
-            let nx = norm2(&x);
-            if nx > 0.0 {
-                (Some(x.iter().map(|v| v / nx).collect()), None)
-            } else {
-                (None, None)
-            }
-        }
-        SolveStatus::Infeasible => {
-            let scale = (norm2(&y) + norm2(&z)).max(1.0);
-            let yn: Vec<f64> = y.iter().map(|v| v / scale).collect();
-            let zn: Vec<f64> = z.iter().map(|v| v / scale).collect();
-            (None, Some((yn, zn)))
-        }
-        _ => (None, None),
-    };
     ConicResult {
         status,
         objective,
@@ -352,8 +447,8 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
         s,
         iterations,
         residuals: last,
-        primal_ray,
-        infeas_cert,
+        primal_ray: verified_primal_ray,
+        infeas_cert: verified_infeas_cert,
     }
 }
 

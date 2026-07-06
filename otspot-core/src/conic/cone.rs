@@ -35,6 +35,24 @@ impl Blocks {
     }
 }
 
+/// Approximate membership `v ∈ K` (self-dual, so also `v ∈ K*`): orthant
+/// components `>= -tol` and each SOC block `v0 >= ||v_rest|| - tol`.
+pub(super) fn in_cone(blk: &Blocks, v: &[f64], tol: f64) -> bool {
+    if v[..blk.l].iter().any(|&vi| vi < -tol) {
+        return false;
+    }
+    let mut off = blk.l;
+    for &d in &blk.soc {
+        let rest = &v[off + 1..off + d];
+        let nr = rest.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if v[off] < nr - tol {
+            return false;
+        }
+        off += d;
+    }
+    true
+}
+
 /// Cone identity `e` (ones on the orthant, `(1,0,...,0)` per SOC).
 pub(super) fn identity(blk: &Blocks) -> Vec<f64> {
     let mut e = vec![0.0; blk.dim()];

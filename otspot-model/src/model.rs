@@ -756,7 +756,17 @@ impl Model {
             a_eq: Self::csc_from_rows(&eq_rows, n)?,
             b_eq,
         };
-        let opts = otspot_core::conic::ConicOptions::default();
+        let deadline = self
+            .timeout_secs
+            .map(|t| std::time::Instant::now() + std::time::Duration::from_secs_f64(t));
+        let opts = otspot_core::conic::ConicOptions {
+            deadline,
+            ..otspot_core::conic::ConicOptions::default()
+        };
+        let bb_opts = otspot_core::conic::BbOptions {
+            deadline,
+            ..otspot_core::conic::BbOptions::default()
+        };
         let raw_of = |x: &[f64]| -> f64 {
             let xn = &x[..n.min(x.len())];
             let mut raw = qp.q0.iter().zip(xn).map(|(a, b)| a * b).sum::<f64>();
@@ -779,7 +789,7 @@ impl Model {
                     &lb,
                     &ub,
                     &opts,
-                    &otspot_core::conic::BbOptions::default(),
+                    &bb_opts,
                 );
                 (r.status, r.objective, r.x)
             }
@@ -801,11 +811,7 @@ impl Model {
                     int_lb: lb,
                     int_ub: ub,
                 };
-                let r = otspot_core::conic::solve_misocp(
-                    &mp,
-                    &opts,
-                    &otspot_core::conic::BbOptions::default(),
-                );
+                let r = otspot_core::conic::solve_misocp(&mp, &opts, &bb_opts);
                 let sol = if r.x.is_empty() {
                     Vec::new()
                 } else {
@@ -819,25 +825,42 @@ impl Model {
                 (r.status, raw, sol)
             }
         };
-        match status {
-            SolveStatus::Optimal => {
+        // MIQCP/MISOCP のB&B経路のみ, 打ち切り時も検証済みincumbent (整数実行可能解)
+        // を返す (solve_mip_internal と同じ規約)。連続QCQP/SOCPのTimeout点は
+        // IPMの未収束反復点であり実行可能性が未証明のため、この扱いはB&B経路限定。
+        let is_bb_path = !integer_vars.is_empty();
+        let build_ok = |status: SolveStatus, raw_obj: f64, solution: Vec<f64>| ModelResult {
+            model_id: self.model_id,
+            proof: SolutionProof::from_status(&status),
+            status,
+            objective_value: {
                 let oriented = if self.sense == OptimizationSense::Maximize {
                     -raw_obj
                 } else {
                     raw_obj
                 };
-                Ok(ModelResult {
-                    model_id: self.model_id,
-                    status: SolveStatus::Optimal,
-                    proof: SolutionProof::GlobalOptimal,
-                    objective_value: oriented + self.obj_offset + self.obj_expr_constant,
-                    solution,
-                    dual_solution: None,
-                    reduced_costs: None,
-                    slack: None,
-                    bound_duals: Vec::new(),
-                    stats: otspot_core::problem::SolveStats::default(),
-                })
+                oriented + self.obj_offset + self.obj_expr_constant
+            },
+            solution,
+            dual_solution: None,
+            reduced_costs: None,
+            slack: None,
+            bound_duals: Vec::new(),
+            stats: otspot_core::problem::SolveStats::default(),
+        };
+        match status {
+            SolveStatus::Optimal => Ok(build_ok(SolveStatus::Optimal, raw_obj, solution)),
+            SolveStatus::Timeout if is_bb_path && !solution.is_empty() => {
+                Ok(build_ok(SolveStatus::Timeout, raw_obj, solution))
+            }
+            SolveStatus::Timeout => Err(ModelError::Timeout),
+            s @ (SolveStatus::SuboptimalSolution | SolveStatus::MaxIterations)
+                if is_bb_path && !solution.is_empty() =>
+            {
+                Ok(build_ok(s, raw_obj, solution))
+            }
+            SolveStatus::SuboptimalSolution | SolveStatus::MaxIterations if is_bb_path => {
+                Err(ModelError::SolveError(SolveError::MaxIterations))
             }
             s => Err(classify_status_error(s)
                 .unwrap_or_else(|| ModelError::Internal("unhandled QCQP status".to_string()))),
@@ -3248,5 +3271,46 @@ mod conic_dsl_tests {
         assert!((res.objective_value - 2.0).abs() < 1e-6);
         assert!((res[x] - 1.0).abs() < 1e-6);
         assert!((res[y] - 1.0).abs() < 1e-6);
+    }
+
+    // set_timeout must reach the conic solve paths (ConicOptions::deadline +
+    // BbOptions::deadline). A zero timeout expires before the first IPM
+    // iteration / B&B node, so an unwired path would instead solve to
+    // Optimal — each test fails if its deadline plumbing is dropped.
+
+    #[test]
+    fn miqcp_zero_timeout_returns_timeout_error() {
+        let mut m = Model::new("miqcp-timeout");
+        let x = m.add_int_var("x", 0.0, 2.0);
+        let y = m.add_int_var("y", 0.0, 2.0);
+        m.add_qc_le(x * x + y * y, 2.5);
+        m.maximize(x + y);
+        m.set_timeout(0.0);
+        assert!(matches!(m.solve(), Err(ModelError::Timeout)));
+    }
+
+    #[test]
+    fn misocp_zero_timeout_returns_timeout_error() {
+        let mut m = Model::new("misocp-timeout");
+        let x = m.add_int_var("x", 0.0, 2.0);
+        let y = m.add_int_var("y", 0.0, 2.0);
+        let t = m.add_var("t", 0.0, 10.0);
+        m.add_soc_le(vec![1.0 * x, 1.0 * y], 1.0 * t);
+        m.minimize(1.0 * t - x - y);
+        m.set_timeout(0.0);
+        assert!(matches!(m.solve(), Err(ModelError::Timeout)));
+    }
+
+    #[test]
+    fn socp_zero_timeout_returns_timeout_error() {
+        let mut m = Model::new("socp-timeout");
+        let x = m.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
+        let y = m.add_var("y", f64::NEG_INFINITY, f64::INFINITY);
+        let t = m.add_var("t", 0.0, f64::INFINITY);
+        m.add_constraint(constraint!((x + y) >= 2.0));
+        m.add_soc_le(vec![1.0 * x, 1.0 * y], 1.0 * t);
+        m.minimize(1.0 * t);
+        m.set_timeout(0.0);
+        assert!(matches!(m.solve(), Err(ModelError::Timeout)));
     }
 }
