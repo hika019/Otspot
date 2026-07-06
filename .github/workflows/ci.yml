@@ -54,7 +54,8 @@ jobs:
       - uses: taiki-e/install-action@nextest
       # default profile = ignore以外の全テスト (lib + bin + test、 旧 tier-2 promote 含む)
       # --no-fail-fast: 1 件目の fail で打ち切らず全 fail を surface
-      - run: cargo nextest run --release --features parallel --no-fail-fast
+      # --test-threads 3: CI は 3 固定 (ローカルは nextest.toml default の 6)
+      - run: cargo nextest run --release --features parallel --no-fail-fast --test-threads 3
 
   clippy:
     name: clippy

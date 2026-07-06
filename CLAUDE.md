@@ -22,7 +22,7 @@
 - コミットメッセージは日本語 (conventional prefix 可)。コミット前に `git status` で stage 内容を確認し、意図した成果物だけを stage する (`git add -A` を無確認で使わない。target/ 等の生成物を含めない)。
 - 1 branch = 1-2 commit が理想。3+ になったらマージ前に branch 内で squash を検討する (branch 内のみ。main 上の履歴改変は禁止)。
 - subagent は git worktree を使用。worktree/branch の削除前に `git status --untracked-files=all` で未コミット成果物を確認し、価値あるものは退避してから消す。
-- push 前ゲート: clippy / `cargo check --all-targets` / ci.yml の非テストゲート (docs, todo-budget, file-size)。integrate へのマージ前: full-suite `cargo nextest run --release --test-threads 3` (+ heavy 相当 `--profile heavy --run-ignored all`)。マージ後にも full-suite。
+- push 前ゲート: clippy / `cargo check --all-targets` / ci.yml の非テストゲート (docs, todo-budget, file-size)。integrate へのマージ前: full-suite `cargo nextest run --release --test-threads 6` (+ heavy 相当 `--profile heavy --run-ignored all`)。マージ後にも full-suite。
 - 1 task を複数 Phase に分割した場合は中間ブランチを作り、各 Phase をそこへマージし、完了後に integrate へ。Phase のマージも前後で full-suite を実施する。
 
 # 実装
@@ -40,7 +40,7 @@
 - 既存テストのアサーション/ロジックは変更しない。挙動変更が必要な場合は旧テストの削除 + 新テストの追加として表現する (追加 or 削除のみ)。
 - 実装を正とせず、独立オラクル (手計算/別ソルバ/独立再計算) で期待値を作る。可能な限り全分岐、複数データパターン。
 - 修正には sentinel test を付ける: 修正を revert すると fail することを確認済みであること。
-- 1 テストの実行時間は3分以内。nextest を使用し --test-threads 3 を指定。
+- 1 テストの実行時間は3分以内。nextest を使用する。スレッド数はローカル 6 / GitHub Actions 3 (nextest.toml default が 6、CI は workflow で 3 を明示)。
 
 # ベンチ / 性能
 - 基準: timeout=1000s (再現短縮時 400s 可)、eps=1e-6 (任意で 1e-4/1e-8)。jobs=6。suite は順次実行。`./scripts/` の既存スクリプトを使う。手順と退化検出 → skill bench。

@@ -148,7 +148,7 @@ done
 ## Tests
 
 ```bash
-cargo nextest run --release --test-threads 3          # full suite (requires data/)
+cargo nextest run --release --test-threads 6          # full suite (requires data/)
 cargo nextest run --release --profile lib-only       # lib + bin tests (kind=lib + kind=bin), no integration data needed
 cargo test --doc --release
 ```

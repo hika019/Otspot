@@ -146,7 +146,7 @@ done
 ## テスト
 
 ```bash
-cargo nextest run --release --test-threads 3          # 全スイート (data/ 必須)
+cargo nextest run --release --test-threads 6          # 全スイート (data/ 必須)
 cargo nextest run --release --profile lib-only       # lib + bin テスト (kind=lib + kind=bin)、統合データ不要
 cargo test --doc --release
 ```

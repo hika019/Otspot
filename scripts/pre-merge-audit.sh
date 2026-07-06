@@ -21,7 +21,7 @@ fi
 # 2. build + test + clippy + file size
 cargo build --release
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo nextest run --release --test-threads 3
+cargo nextest run --release --test-threads 6
 cargo test --doc
 bash scripts/check_file_size.sh
 python3 tests/test_check_data_coverage.py
