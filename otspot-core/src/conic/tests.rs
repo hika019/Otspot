@@ -1377,3 +1377,742 @@ fn empty_cone_equality_only_socp() {
     assert!((res.x[0] - 3.0).abs() < 1e-6);
     assert!((res.x[1] - 4.0).abs() < 1e-6);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1 (conic-oom): sparse QCQP->SOCP bridge equivalence + nnz sentinels.
+//
+// `to_conic` and `qcqp_from_qp_problem` build the SOCP from sparse `CscMatrix`
+// inputs directly (no `Vec<Vec<f64>>` densification). The tests below check
+// this two ways: (1) small-scale numerical equivalence against an
+// independently hand-built dense reconstruction (not calling any of
+// `sparse_cholesky_lower` / `widen_cols` / `append_quad`), and (2) a
+// large-scale nnz sentinel that catches a regression back to O(n^2)
+// construction.
+// ---------------------------------------------------------------------------
+
+/// Independent dense Cholesky oracle (natural order; does NOT call
+/// `sparse_cholesky_lower`): a textbook Cholesky-Banachiewicz factorization
+/// with the same pivot contract documented on `to_conic` — pivots in
+/// `(-1e-9, 1e-14]` clamp to `1e-7` (flagging `clamped` only if negative),
+/// pivots below `-1e-9` reject the matrix as not PSD.
+fn oracle_cholesky_upper(p: &[Vec<f64>], n: usize) -> Option<(Vec<Vec<f64>>, bool)> {
+    const ZERO_TOL: f64 = 1e-14;
+    const INDEFINITE_TOL: f64 = -1e-9;
+    const CLAMP: f64 = 1e-7;
+    let mut l = vec![vec![0.0; n]; n];
+    let mut clamped = false;
+    for i in 0..n {
+        for j in 0..=i {
+            let mut sum = p[i][j];
+            for k in 0..j {
+                sum -= l[i][k] * l[j][k];
+            }
+            if i == j {
+                if sum <= ZERO_TOL {
+                    if sum < INDEFINITE_TOL {
+                        return None;
+                    }
+                    if sum < 0.0 {
+                        clamped = true;
+                    }
+                    l[i][j] = CLAMP;
+                } else {
+                    l[i][j] = sum.sqrt();
+                }
+            } else {
+                l[i][j] = sum / l[j][j];
+            }
+        }
+    }
+    let mut r = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            r[j][i] = l[i][j];
+        }
+    }
+    Some((r, clamped))
+}
+
+/// Independent SOC-embedding of one quadratic term, per the formula
+/// documented on `to_conic`: `(1/2) x^T P x + q^T x + r <= 0` (or the
+/// objective epigraph when `qt_coef = Some(t index)`) becomes `n+2` conic
+/// rows: `[a+b; sqrt2 * R x; a-b]` with `P = R^T R`, `b = 1`.
+fn oracle_quad_block(
+    p: &[Vec<f64>],
+    q: &[f64],
+    r: f64,
+    qt_coef: Option<usize>,
+    n: usize,
+    nvar: usize,
+) -> Option<(Vec<Vec<f64>>, Vec<f64>, bool)> {
+    let (rmat, clamped) = oracle_cholesky_upper(p, n)?;
+    let mut rows = Vec::with_capacity(n + 2);
+    let mut h = Vec::with_capacity(n + 2);
+
+    let mut s0 = vec![0.0; nvar];
+    s0[..n].copy_from_slice(q);
+    if let Some(tj) = qt_coef {
+        s0[tj] = -1.0;
+    }
+    rows.push(s0);
+    h.push(1.0 - r);
+
+    let s2 = std::f64::consts::SQRT_2;
+    for i in 0..n {
+        let mut row = vec![0.0; nvar];
+        for (j, cell) in row.iter_mut().enumerate().take(n) {
+            *cell = -s2 * rmat[i][j];
+        }
+        rows.push(row);
+        h.push(0.0);
+    }
+
+    let mut slast = vec![0.0; nvar];
+    slast[..n].copy_from_slice(q);
+    if let Some(tj) = qt_coef {
+        slast[tj] = -1.0;
+    }
+    rows.push(slast);
+    h.push(-r - 1.0);
+
+    Some((rows, h, clamped))
+}
+
+/// Independent (hand-built) dense reconstruction of the expected SOCP for a
+/// small QCQP, for element-wise comparison against `to_conic`'s sparse
+/// construction. `None` when a quadratic matrix is genuinely indefinite
+/// (mirrors `to_conic`'s own rejection).
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
+fn oracle_to_conic(
+    n: usize,
+    p0: Option<&[Vec<f64>]>,
+    q0: &[f64],
+    quad: &[(Vec<Vec<f64>>, Vec<f64>, f64)],
+    g_lin: &[Vec<f64>],
+    h_lin: &[f64],
+    a_eq: &[Vec<f64>],
+    b_eq: &[f64],
+) -> Option<(
+    Vec<Vec<f64>>,
+    Vec<f64>,
+    Vec<f64>,
+    Vec<Vec<f64>>,
+    Vec<f64>,
+    usize,
+    Vec<usize>,
+    bool,
+)> {
+    let has_quad_obj = p0.is_some();
+    let nvar = n + if has_quad_obj { 1 } else { 0 };
+    let mut c = vec![0.0; nvar];
+    if has_quad_obj {
+        c[n] = 1.0;
+    } else {
+        c[..n].copy_from_slice(q0);
+    }
+    let mut a_dense = vec![vec![0.0; nvar]; a_eq.len()];
+    for (i, row) in a_eq.iter().enumerate() {
+        a_dense[i][..n].copy_from_slice(row);
+    }
+    let mut g_rows: Vec<Vec<f64>> = Vec::new();
+    let mut h: Vec<f64> = Vec::new();
+    for (i, row) in g_lin.iter().enumerate() {
+        let mut r = vec![0.0; nvar];
+        r[..n].copy_from_slice(row);
+        g_rows.push(r);
+        h.push(h_lin[i]);
+    }
+    let ml = g_lin.len();
+    let mut soc = Vec::new();
+    let mut convexity_unproven = false;
+
+    if let Some(p0d) = p0 {
+        let (rows, hh, clamped) = oracle_quad_block(p0d, q0, 0.0, Some(n), n, nvar)?;
+        convexity_unproven |= clamped;
+        soc.push(rows.len());
+        g_rows.extend(rows);
+        h.extend(hh);
+    }
+    for (p, q, r) in quad {
+        let (rows, hh, clamped) = oracle_quad_block(p, q, *r, None, n, nvar)?;
+        convexity_unproven |= clamped;
+        soc.push(rows.len());
+        g_rows.extend(rows);
+        h.extend(hh);
+    }
+
+    Some((g_rows, h, c, a_dense, b_eq.to_vec(), ml, soc, convexity_unproven))
+}
+
+fn assert_dense_close(actual: &[Vec<f64>], expected: &[Vec<f64>], tol: f64, label: &str) {
+    assert_eq!(actual.len(), expected.len(), "{label}: row count");
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(a.len(), e.len(), "{label}: row {i} col count");
+        for (j, (&av, &ev)) in a.iter().zip(e).enumerate() {
+            assert!(
+                (av - ev).abs() < tol,
+                "{label}: [{i}][{j}] actual={av} expected={ev}"
+            );
+        }
+    }
+}
+
+/// `to_conic`'s sparse construction must produce a `ConicProblem` numerically
+/// equivalent to an independently hand-built dense reconstruction, across
+/// diagonal P, dense (non-diagonal) P, a rank-deficient PSD P, a jitter-band
+/// pivot (clamped, not rejected), a clearly indefinite P (rejected), plus
+/// linear inequalities/equalities/bounds.
+#[test]
+fn to_conic_matches_hand_built_dense_oracle() {
+    struct Case {
+        name: &'static str,
+        n: usize,
+        p0: Option<Vec<Vec<f64>>>,
+        q0: Vec<f64>,
+        quad: Vec<(Vec<Vec<f64>>, Vec<f64>, f64)>,
+        g_lin: Vec<Vec<f64>>,
+        h_lin: Vec<f64>,
+        a_eq: Vec<Vec<f64>>,
+        b_eq: Vec<f64>,
+        expect_rejected: bool,
+    }
+
+    let mut cases = Vec::new();
+
+    // Diagonal P0, box bounds as inequalities, one equality.
+    cases.push(Case {
+        name: "diagonal_p0_box_and_equality",
+        n: 5,
+        p0: Some({
+            let mut m = vec![vec![0.0; 5]; 5];
+            for (j, row) in m.iter_mut().enumerate() {
+                row[j] = 1.0 + j as f64;
+            }
+            m
+        }),
+        q0: vec![-1.0, 2.0, -0.5, 0.3, 1.5],
+        quad: vec![],
+        g_lin: (0..5)
+            .flat_map(|j| {
+                let mut up = vec![0.0; 5];
+                up[j] = 1.0;
+                let mut down = vec![0.0; 5];
+                down[j] = -1.0;
+                vec![up, down]
+            })
+            .collect(),
+        h_lin: (0..5).flat_map(|_| vec![10.0, 0.0]).collect(),
+        a_eq: vec![vec![1.0, 1.0, 1.0, 1.0, 1.0]],
+        b_eq: vec![3.0],
+        expect_rejected: false,
+    });
+
+    // Non-diagonal SPD P0 (M^T M + eps I) with a diagonal quadratic constraint.
+    {
+        let n = 6usize;
+        let mut rng = Lcg(4242);
+        let mut mm = vec![vec![0.0; n]; n];
+        for row in mm.iter_mut() {
+            for v in row.iter_mut() {
+                *v = rng.next_f(-1.0, 1.0);
+            }
+        }
+        let mut p0 = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for row in mm.iter() {
+                    s += row[i] * row[j];
+                }
+                p0[i][j] = s;
+            }
+            p0[i][i] += 0.5; // ensure strictly PD
+        }
+        let mut qc_p = vec![vec![0.0; n]; n];
+        for (j, row) in qc_p.iter_mut().enumerate() {
+            row[j] = 0.2 + j as f64 * 0.1;
+        }
+        cases.push(Case {
+            name: "dense_p0_plus_diag_quad_constraint",
+            n,
+            p0: Some(p0),
+            q0: (0..n).map(|j| 0.1 * j as f64 - 0.3).collect(),
+            quad: vec![(qc_p, vec![0.1; n], -2.0)],
+            g_lin: (0..n)
+                .map(|j| {
+                    let mut r = vec![0.0; n];
+                    r[j] = 1.0;
+                    r
+                })
+                .collect(),
+            h_lin: vec![5.0; n],
+            a_eq: vec![],
+            b_eq: vec![],
+            expect_rejected: false,
+        });
+    }
+
+    // Linear objective only (p0 = None) + rank-deficient PSD quadratic
+    // constraint (a rank-1 outer product v v^T has a zero eigenvalue).
+    {
+        let n = 4usize;
+        let v = [1.0, -2.0, 0.5, 3.0];
+        let mut p = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                p[i][j] = v[i] * v[j];
+            }
+        }
+        cases.push(Case {
+            name: "linear_objective_rank_deficient_quad_constraint",
+            n,
+            p0: None,
+            q0: vec![1.0, -1.0, 0.5, 0.0],
+            quad: vec![(p, vec![0.0; n], -3.0)],
+            g_lin: vec![],
+            h_lin: vec![],
+            a_eq: vec![],
+            b_eq: vec![],
+            expect_rejected: false,
+        });
+    }
+
+    // Diagonal P0 with a tiny negative jitter pivot: must clamp, not reject.
+    cases.push(Case {
+        name: "jitter_band_clamped_diagonal",
+        n: 4,
+        p0: Some({
+            let mut m = vec![vec![0.0; 4]; 4];
+            m[0][0] = 1.0;
+            m[1][1] = -1e-10; // inside (-1e-9, 1e-14]
+            m[2][2] = 2.0;
+            m[3][3] = 0.5;
+            m
+        }),
+        q0: vec![1.0, 1.0, 1.0, 1.0],
+        quad: vec![],
+        g_lin: vec![],
+        h_lin: vec![],
+        a_eq: vec![],
+        b_eq: vec![],
+        expect_rejected: false,
+    });
+
+    // Diagonal P0 clearly indefinite: must be rejected (nonconvex).
+    cases.push(Case {
+        name: "clearly_indefinite_rejected",
+        n: 3,
+        p0: Some({
+            let mut m = vec![vec![0.0; 3]; 3];
+            m[0][0] = 1.0;
+            m[1][1] = -1.0; // well below -1e-9
+            m[2][2] = 2.0;
+            m
+        }),
+        q0: vec![0.0, 0.0, 0.0],
+        quad: vec![],
+        g_lin: vec![],
+        h_lin: vec![],
+        a_eq: vec![],
+        b_eq: vec![],
+        expect_rejected: true,
+    });
+
+    for case in &cases {
+        let n = case.n;
+        let oracle = oracle_to_conic(
+            n,
+            case.p0.as_deref(),
+            &case.q0,
+            &case.quad,
+            &case.g_lin,
+            &case.h_lin,
+            &case.a_eq,
+            &case.b_eq,
+        );
+
+        let p0_csc = case.p0.as_ref().map(|m| csc(m, n, n));
+        let quad_csc: Vec<QuadConstraint> = case
+            .quad
+            .iter()
+            .map(|(p, q, r)| QuadConstraint {
+                p: csc(p, n, n),
+                q: q.clone(),
+                r: *r,
+            })
+            .collect();
+        let qp = QcqpProblem {
+            n,
+            p0: p0_csc,
+            q0: case.q0.clone(),
+            quad: quad_csc,
+            g_lin: csc(&case.g_lin, case.g_lin.len(), n),
+            h_lin: case.h_lin.clone(),
+            a_eq: csc(&case.a_eq, case.a_eq.len(), n),
+            b_eq: case.b_eq.clone(),
+        };
+
+        let actual = to_conic(&qp);
+
+        if case.expect_rejected {
+            assert!(oracle.is_none(), "{}: oracle should also reject", case.name);
+            assert!(
+                actual.is_err(),
+                "{}: to_conic should reject indefinite P",
+                case.name
+            );
+            continue;
+        }
+
+        let (og, oh, oc, oa, ob, oml, osoc, oclamp) =
+            oracle.unwrap_or_else(|| panic!("{}: oracle unexpectedly rejected", case.name));
+        let (conic, nvar, clamped) =
+            actual.unwrap_or_else(|e| panic!("{}: to_conic rejected: {e}", case.name));
+
+        assert_eq!(nvar, oc.len(), "{}: nvar", case.name);
+        assert_eq!(clamped, oclamp, "{}: convexity_unproven", case.name);
+        assert_eq!(conic.cone.l, oml, "{}: cone.l", case.name);
+        assert_eq!(conic.cone.soc, osoc, "{}: cone.soc", case.name);
+
+        const TOL: f64 = 1e-8;
+        assert_eq!(conic.c.len(), oc.len(), "{}: c length", case.name);
+        for (j, (&av, &ev)) in conic.c.iter().zip(&oc).enumerate() {
+            assert!((av - ev).abs() < TOL, "{}: c[{j}] {av} vs {ev}", case.name);
+        }
+        assert_dense_close(
+            &conic.a.to_dense_rows(),
+            &oa,
+            TOL,
+            &format!("{}: A", case.name),
+        );
+        assert_eq!(conic.b.len(), ob.len(), "{}: b length", case.name);
+        for (j, (&av, &ev)) in conic.b.iter().zip(&ob).enumerate() {
+            assert!((av - ev).abs() < TOL, "{}: b[{j}] {av} vs {ev}", case.name);
+        }
+        assert_dense_close(
+            &conic.g.to_dense_rows(),
+            &og,
+            TOL,
+            &format!("{}: G", case.name),
+        );
+        assert_eq!(conic.h.len(), oh.len(), "{}: h length", case.name);
+        for (j, (&av, &ev)) in conic.h.iter().zip(&oh).enumerate() {
+            assert!((av - ev).abs() < TOL, "{}: h[{j}] {av} vs {ev}", case.name);
+        }
+    }
+}
+
+/// Randomized broad-coverage companion to `to_conic_matches_hand_built_dense_oracle`:
+/// several seeds x {diagonal, dense-SPD} P0 x several `n`, checked the same way.
+#[test]
+fn to_conic_matches_dense_oracle_randomized() {
+    const TOL: f64 = 1e-7;
+    for &n in &[5usize, 15, 30] {
+        for seed in 0..4u64 {
+            let mut rng = Lcg(seed.wrapping_mul(104_729).wrapping_add(n as u64));
+            let diagonal = seed % 2 == 0;
+            let mut p0 = vec![vec![0.0; n]; n];
+            if diagonal {
+                for (j, row) in p0.iter_mut().enumerate() {
+                    row[j] = rng.next_f(0.5, 3.0);
+                }
+            } else {
+                let mut mm = vec![vec![0.0; n]; n];
+                for row in mm.iter_mut() {
+                    for v in row.iter_mut() {
+                        *v = rng.next_f(-1.0, 1.0);
+                    }
+                }
+                for i in 0..n {
+                    for j in 0..n {
+                        let mut s = 0.0;
+                        for row in mm.iter() {
+                            s += row[i] * row[j];
+                        }
+                        p0[i][j] = s;
+                    }
+                    p0[i][i] += 0.5;
+                }
+            }
+            let q0: Vec<f64> = (0..n).map(|_| rng.next_f(-2.0, 2.0)).collect();
+            let mut g_lin = Vec::new();
+            let mut h_lin = Vec::new();
+            for j in 0..n {
+                let mut up = vec![0.0; n];
+                up[j] = 1.0;
+                g_lin.push(up);
+                h_lin.push(8.0);
+                let mut down = vec![0.0; n];
+                down[j] = -1.0;
+                g_lin.push(down);
+                h_lin.push(8.0);
+            }
+            let a_eq = vec![(0..n).map(|_| rng.next_f(-1.0, 1.0)).collect::<Vec<f64>>()];
+            let b_eq = vec![rng.next_f(-1.0, 1.0)];
+
+            let oracle = oracle_to_conic(n, Some(&p0), &q0, &[], &g_lin, &h_lin, &a_eq, &b_eq)
+                .expect("oracle: constructed P0 is PSD by design");
+            let qp = QcqpProblem {
+                n,
+                p0: Some(csc(&p0, n, n)),
+                q0: q0.clone(),
+                quad: vec![],
+                g_lin: csc(&g_lin, g_lin.len(), n),
+                h_lin: h_lin.clone(),
+                a_eq: csc(&a_eq, a_eq.len(), n),
+                b_eq: b_eq.clone(),
+            };
+            let (conic, nvar, clamped) = to_conic(&qp)
+                .unwrap_or_else(|e| panic!("n={n} seed={seed} diag={diagonal}: {e}"));
+            let (og, oh, oc, oa, ob, oml, osoc, oclamp) = oracle;
+
+            let label = format!("n={n} seed={seed} diag={diagonal}");
+            assert_eq!(nvar, oc.len(), "{label}: nvar");
+            assert!(!clamped && !oclamp, "{label}: unexpected clamp");
+            assert_eq!(conic.cone.l, oml, "{label}: cone.l");
+            assert_eq!(conic.cone.soc, osoc, "{label}: cone.soc");
+            for (j, (&av, &ev)) in conic.c.iter().zip(&oc).enumerate() {
+                assert!((av - ev).abs() < TOL, "{label}: c[{j}]");
+            }
+            assert_dense_close(&conic.a.to_dense_rows(), &oa, TOL, &format!("{label}: A"));
+            for (j, (&av, &ev)) in conic.b.iter().zip(&ob).enumerate() {
+                assert!((av - ev).abs() < TOL, "{label}: b[{j}]");
+            }
+            assert_dense_close(&conic.g.to_dense_rows(), &og, TOL, &format!("{label}: G"));
+            for (j, (&av, &ev)) in conic.h.iter().zip(&oh).enumerate() {
+                assert!((av - ev).abs() < TOL, "{label}: h[{j}]");
+            }
+        }
+    }
+}
+
+/// `qcqp_from_qp_problem`'s row transcription (Le/Ge/Eq split, `>=`
+/// sign-flip, bounds-to-inequalities, quadratic-constraint extraction) must
+/// match a hand-built expectation. Independent of `to_conic`'s SOC embedding
+/// (no quadratic objective/constraint Cholesky is exercised here beyond a
+/// trivial diagonal extraction).
+#[test]
+fn qcqp_from_qp_problem_matches_hand_built_split() {
+    use crate::problem::ConstraintType;
+    use crate::qp::{QcqpMatrix, QpProblem};
+
+    let n = 3usize;
+    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[2.0, 4.0, 6.0], n, n).unwrap();
+    let c = vec![1.0, -1.0, 0.5];
+    // Row 0 (Le): x0 + x1 <= 5
+    // Row 1 (Ge): x1 - x2 >= -2   =>  sign-flipped: -x1 + x2 <= 2
+    // Row 2 (Eq): x0 + x2 = 1
+    // Row 3 (Le, quadratic): (1/2)*2*x0^2 + x0 <= 3
+    let a = CscMatrix::from_triplets(
+        &[0, 0, 1, 1, 2, 2, 3],
+        &[0, 1, 1, 2, 0, 2, 0],
+        &[1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0],
+        4,
+        n,
+    )
+    .unwrap();
+    let b = vec![5.0, -2.0, 1.0, 3.0];
+    let bounds = vec![(0.0, 10.0), (f64::NEG_INFINITY, 4.0), (-1.0, f64::INFINITY)];
+    let ctypes = vec![
+        ConstraintType::Le,
+        ConstraintType::Ge,
+        ConstraintType::Eq,
+        ConstraintType::Le,
+    ];
+    let mut problem = QpProblem::new(q, c.clone(), a, b, bounds, ctypes).unwrap();
+    let mut qc3 = QcqpMatrix::new(n);
+    qc3.triplets.push((0, 0, 2.0));
+    problem
+        .set_quadratic_constraints(vec![
+            QcqpMatrix::new(n),
+            QcqpMatrix::new(n),
+            QcqpMatrix::new(n),
+            qc3,
+        ])
+        .unwrap();
+
+    let qp = qcqp_from_qp_problem(&problem).unwrap();
+
+    // Quadratic constraint: row 3 extracted, r = -3.0, q = [1,0,0].
+    assert_eq!(qp.quad.len(), 1);
+    assert_eq!(qp.quad[0].r, -3.0);
+    assert_eq!(qp.quad[0].q, vec![1.0, 0.0, 0.0]);
+    assert_eq!(
+        qp.quad[0].p.to_dense_rows(),
+        vec![
+            vec![2.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+        ]
+    );
+
+    // Linear rows, per-variable bound order (upper then lower, j=0..n):
+    // row 0 (Le, unchanged), row 1 (Ge, sign-flipped), x0<=10, -x0<=0 (x0>=0),
+    // x1<=4 (x1 has no finite lower bound), -x2<=1 (x2>=-1, no finite upper).
+    let expected_g_rows = vec![
+        vec![1.0, 1.0, 0.0],
+        vec![0.0, -1.0, 1.0],
+        vec![1.0, 0.0, 0.0],
+        vec![-1.0, 0.0, 0.0],
+        vec![0.0, 1.0, 0.0],
+        vec![0.0, 0.0, -1.0],
+    ];
+    let expected_h = vec![5.0, 2.0, 10.0, 0.0, 4.0, 1.0];
+    assert_eq!(qp.g_lin.to_dense_rows(), expected_g_rows);
+    assert_eq!(qp.h_lin, expected_h);
+
+    assert_eq!(qp.a_eq.to_dense_rows(), vec![vec![1.0, 0.0, 1.0]]);
+    assert_eq!(qp.b_eq, vec![1.0]);
+
+    assert_eq!(
+        qp.p0.unwrap().to_dense_rows(),
+        vec![
+            vec![2.0, 0.0, 0.0],
+            vec![0.0, 4.0, 0.0],
+            vec![0.0, 0.0, 6.0],
+        ]
+    );
+    assert_eq!(qp.q0, c);
+}
+
+/// Sentinel: `to_conic`'s sparse construction must stay near-linear in time
+/// and (final) nnz for a large diagonal-`P0` QCQP — the QPLIB DCQ shape
+/// (diagonal objective) that drove the bridge OOM.
+///
+/// Note on the metric: `Triplets::push` drops exact zeros, so the *final*
+/// `G.nnz()` is small either way here — a diagonal Cholesky factor has no
+/// off-diagonal fill whether it is computed sparsely or via a dense
+/// intermediate. What actually blew up was the *transient* O(n^2)/O(n^3)
+/// memory and time of `dense(p0)` + the dense `cholesky_upper` triple loop
+/// (which processes every `(i,j,k)` pivot triple regardless of sparsity).
+/// `CONSTRUCTION_TIME_BUDGET` therefore does the real work: measured fixed-
+/// code time at `N` is low single-digit ms; the dense `O(n^3)` Cholesky it
+/// replaces measures ~2-4s at this `N` (confirmed by reverting and
+/// re-running, see the task report), so the budget below fails clearly on
+/// revert with over an order of magnitude of margin in both directions.
+/// `SPARSE_NNZ_FACTOR` is kept as a basic sanity bound on the output shape.
+#[test]
+fn to_conic_sparse_construction_is_near_linear_nnz() {
+    const N: usize = 5000;
+    const SPARSE_NNZ_FACTOR: usize = 20;
+    /// Generous vs. the fixed code's measured ~low-tens-of-ms at `N`; far
+    /// below the ~13s the O(n^3) dense Cholesky it replaces measures here.
+    const CONSTRUCTION_TIME_BUDGET_SECS: f64 = 3.0;
+
+    let mut rng = Lcg(90210);
+    let mut p0_r = Vec::with_capacity(N);
+    let mut p0_c = Vec::with_capacity(N);
+    let mut p0_v = Vec::with_capacity(N);
+    for j in 0..N {
+        p0_r.push(j);
+        p0_c.push(j);
+        p0_v.push(rng.next_f(0.5, 3.0));
+    }
+    let p0 = CscMatrix::from_triplets(&p0_r, &p0_c, &p0_v, N, N).unwrap();
+    let q0: Vec<f64> = (0..N).map(|_| rng.next_f(-2.0, 2.0)).collect();
+
+    let mut gl_r = Vec::with_capacity(2 * N);
+    let mut gl_c = Vec::with_capacity(2 * N);
+    let mut gl_v = Vec::with_capacity(2 * N);
+    let mut h_lin = Vec::with_capacity(2 * N);
+    for j in 0..N {
+        gl_r.push(2 * j);
+        gl_c.push(j);
+        gl_v.push(1.0);
+        h_lin.push(10.0);
+        gl_r.push(2 * j + 1);
+        gl_c.push(j);
+        gl_v.push(-1.0);
+        h_lin.push(0.0);
+    }
+    let g_lin = CscMatrix::from_triplets(&gl_r, &gl_c, &gl_v, 2 * N, N).unwrap();
+
+    let qp = QcqpProblem {
+        n: N,
+        p0: Some(p0),
+        q0,
+        quad: vec![],
+        g_lin,
+        h_lin,
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, N).unwrap(),
+        b_eq: vec![],
+    };
+
+    let input_nnz = qp.p0.as_ref().unwrap().nnz() + qp.g_lin.nnz();
+    let t0 = std::time::Instant::now();
+    let (conic, _nvar, _clamped) = to_conic(&qp).expect("diagonal PSD P0 must not be rejected");
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    assert!(
+        elapsed < CONSTRUCTION_TIME_BUDGET_SECS,
+        "to_conic took {elapsed:.3}s (budget {CONSTRUCTION_TIME_BUDGET_SECS}s) — \
+         construction is no longer O(nnz)"
+    );
+    assert!(
+        conic.g.nnz() < SPARSE_NNZ_FACTOR * input_nnz,
+        "G nnz={} exceeds {SPARSE_NNZ_FACTOR}x input nnz={input_nnz}",
+        conic.g.nnz()
+    );
+}
+
+/// Sentinel (full pipeline): `QpProblem -> qcqp_from_qp_problem -> to_conic`
+/// must stay fast (and near-linear in final nnz) end-to-end for a large
+/// sparse DCQ-shaped QP (diagonal `Q`, sparse `A`) — the exact QPLIB_8683
+/// shape (diagonal `P`, large `A`) that OOM-killed the solver via the
+/// unconditional `dense(&src.a)` in `qcqp_from_qp_problem` this replaces.
+///
+/// As in `to_conic_sparse_construction_is_near_linear_nnz`, the *final* nnz
+/// is a weak metric here (zero-filtering keeps it small either way); the
+/// time budget is what actually catches a regression back to `dense(&src.a)`
+/// (`ad[k].clone()` per constraint row, O(n^2) time+memory) and the dense
+/// `cholesky_upper` `to_conic` chains into afterward (O(n^3)).
+#[test]
+fn qp_problem_bridge_sparse_construction_is_near_linear_nnz() {
+    use crate::problem::ConstraintType;
+    use crate::qp::QpProblem;
+
+    const N: usize = 5000;
+    const SPARSE_NNZ_FACTOR: usize = 20;
+    /// Generous vs. the fixed pipeline's measured ~low-tens-of-ms at `N`;
+    /// far below the dense `ad[k].clone()` + `cholesky_upper` pipeline this
+    /// replaces (dominated by the O(n^3) Cholesky, ~13s at this `N`).
+    const PIPELINE_TIME_BUDGET_SECS: f64 = 3.0;
+
+    let mut rng = Lcg(24601);
+    let mut q_v = Vec::with_capacity(N);
+    for _ in 0..N {
+        q_v.push(rng.next_f(0.5, 3.0));
+    }
+    let idx: Vec<usize> = (0..N).collect();
+    let q = CscMatrix::from_triplets(&idx, &idx, &q_v, N, N).unwrap();
+    let c: Vec<f64> = (0..N).map(|_| rng.next_f(-2.0, 2.0)).collect();
+    // A: one row per variable, x_j <= bound (sparse, nnz(A) = N).
+    let a = CscMatrix::from_triplets(&idx, &idx, &vec![1.0; N], N, N).unwrap();
+    let b: Vec<f64> = (0..N).map(|_| rng.next_f(1.0, 10.0)).collect();
+    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); N];
+    let ctypes = vec![ConstraintType::Le; N];
+    let problem = QpProblem::new(q, c, a, b, bounds, ctypes).unwrap();
+
+    let input_nnz = problem.q.nnz() + problem.a.nnz();
+    let t0 = std::time::Instant::now();
+    let qp = qcqp_from_qp_problem(&problem).expect("diagonal PSD Q must not be rejected");
+    let (conic, _nvar, _clamped) = to_conic(&qp).expect("diagonal PSD P0 must not be rejected");
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    assert!(
+        elapsed < PIPELINE_TIME_BUDGET_SECS,
+        "qcqp_from_qp_problem + to_conic took {elapsed:.3}s \
+         (budget {PIPELINE_TIME_BUDGET_SECS}s) — bridge is no longer O(nnz)"
+    );
+    assert!(
+        qp.g_lin.nnz() < SPARSE_NNZ_FACTOR * input_nnz,
+        "g_lin nnz={} exceeds {SPARSE_NNZ_FACTOR}x input nnz={input_nnz}",
+        qp.g_lin.nnz()
+    );
+    assert!(
+        conic.g.nnz() < SPARSE_NNZ_FACTOR * input_nnz,
+        "G nnz={} exceeds {SPARSE_NNZ_FACTOR}x input nnz={input_nnz}",
+        conic.g.nnz()
+    );
+}

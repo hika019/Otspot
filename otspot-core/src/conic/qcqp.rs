@@ -45,8 +45,22 @@ pub struct QcqpProblem {
     pub b_eq: Vec<f64>,
 }
 
-fn dense(a: &CscMatrix) -> Vec<Vec<f64>> {
-    a.to_dense_rows()
+/// Widens `m` to `new_ncols` columns by appending all-zero columns.
+///
+/// `O(ncols)`: reuses `m`'s row/value storage as-is rather than rebuilding via
+/// triplets, since the appended columns contribute no entries.
+fn widen_cols(m: &CscMatrix, new_ncols: usize) -> CscMatrix {
+    debug_assert!(new_ncols >= m.ncols());
+    let mut col_ptr = m.col_ptr().to_vec();
+    let nnz = *col_ptr.last().expect("col_ptr always has ncols+1 >= 1 entries");
+    col_ptr.resize(new_ncols + 1, nnz);
+    CscMatrix {
+        col_ptr,
+        row_ind: m.row_ind().to_vec(),
+        values: m.values().to_vec(),
+        nrows: m.nrows(),
+        ncols: new_ncols,
+    }
 }
 
 /// Pivots at or below this are numerically zero (clamped for stability).
@@ -56,49 +70,102 @@ const CHOL_PIVOT_INDEFINITE_TOL: f64 = -1e-9;
 /// Replacement value for clamped pivots.
 const CHOL_PIVOT_CLAMP: f64 = 1e-7;
 
-/// Upper Cholesky factor `R` (`n x n`) with `P = R^T R`, or `None` if not PD.
+/// Sparse left-looking Cholesky of a PSD-with-jitter matrix `p` (`n x n`,
+/// both triangles stored, as `QcqpProblem::p0`/`QuadConstraint::p` are).
 ///
-/// The boolean is `true` when a **negative** pivot inside the jitter band
-/// `(CHOL_PIVOT_INDEFINITE_TOL, 0)` was clamped: the band absorbs QPS 6-digit
-/// rounding of genuinely PSD matrices, but a slightly indefinite matrix passes
-/// it too, so the factorization no longer proves convexity and `R^T R` may
-/// misrepresent `P`. Zero/tiny-positive pivots (rank-deficient PSD) are also
-/// clamped but do not raise the flag.
-fn cholesky_upper(p: &[Vec<f64>], n: usize) -> Option<(Vec<Vec<f64>>, bool)> {
-    let mut l = vec![vec![0.0; n]; n]; // lower
-    let mut negative_pivot_clamped = false;
-    for i in 0..n {
-        for j in 0..=i {
-            let mut sum = p[i][j];
-            for k in 0..j {
-                sum -= l[i][k] * l[j][k];
-            }
-            if i == j {
-                if sum <= CHOL_PIVOT_ZERO_TOL {
-                    // Allow tiny PSD jitter; hard-fail on clearly negative.
-                    if sum < CHOL_PIVOT_INDEFINITE_TOL {
-                        return None;
-                    }
-                    if sum < 0.0 {
-                        negative_pivot_clamped = true;
-                    }
-                    l[i][j] = CHOL_PIVOT_CLAMP;
-                } else {
-                    l[i][j] = sum.sqrt();
+/// Returns column `j` of the lower factor `L` (`p = L L^T`) as `(row, value)`
+/// pairs with `row >= j`, for every `j`. Time and memory are `O(nnz(L))`
+/// rather than the `O(n^2)` of a dense factorization: `L` stays as sparse as
+/// `p` itself when no fill-in occurs (e.g. `nnz(L) = O(n)` for diagonal `p`,
+/// the case that drove the QPLIB DCQ bridge OOM this replaces).
+///
+/// Pivot handling matches the dense Cholesky it replaces: a pivot in
+/// `(CHOL_PIVOT_INDEFINITE_TOL, CHOL_PIVOT_ZERO_TOL]` is clamped to
+/// `CHOL_PIVOT_CLAMP` (the returned bool is `true` only when that pivot was
+/// negative); a pivot below `CHOL_PIVOT_INDEFINITE_TOL` rejects `p` as not
+/// PSD (`Err`).
+/// Columns of a sparse lower-triangular Cholesky factor: `column[j]` holds the
+/// `(row, value)` entries of `L`'s column `j`, `row >= j`.
+type SparseCholCols = Vec<Vec<(usize, f64)>>;
+
+fn sparse_cholesky_lower(p: &CscMatrix, n: usize) -> Result<(SparseCholCols, bool), ()> {
+    let mut l_cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    let mut row_to_cols: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut clamped = false;
+
+    // Reused sparse accumulator for the column currently being eliminated:
+    // `acc[r]` holds the running value for row `r >= j`; `touched` lists the
+    // rows to reset to 0.0 before the next column (avoids an O(n) clear).
+    let mut acc = vec![0.0f64; n];
+    let mut touched: Vec<usize> = Vec::new();
+    let mut touched_mark = vec![false; n];
+
+    for j in 0..n {
+        for &r in &touched {
+            acc[r] = 0.0;
+            touched_mark[r] = false;
+        }
+        touched.clear();
+
+        let (rows, vals) = p.get_column(j).map_err(|_| ())?;
+        for (&r, &v) in rows.iter().zip(vals) {
+            if r >= j {
+                if !touched_mark[r] {
+                    touched_mark[r] = true;
+                    touched.push(r);
                 }
-            } else {
-                l[i][j] = sum / l[j][j];
+                acc[r] += v;
             }
         }
-    }
-    // R = L^T
-    let mut r = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        for j in 0..n {
-            r[j][i] = l[i][j];
+
+        // Subtract L[:,k] * L[j,k] for every earlier column k<j with a
+        // nonzero at row j — `row_to_cols[j]` was populated when those
+        // columns were finalized, in ascending k order.
+        for &k in &row_to_cols[j] {
+            let ljk = l_cols[k]
+                .iter()
+                .find(|&&(r, _)| r == j)
+                .map(|&(_, v)| v)
+                .expect("row_to_cols[j] only lists columns with a stored L[j,k]");
+            for &(r, v) in &l_cols[k] {
+                if r >= j {
+                    if !touched_mark[r] {
+                        touched_mark[r] = true;
+                        touched.push(r);
+                    }
+                    acc[r] -= v * ljk;
+                }
+            }
         }
+
+        let pivot = acc[j];
+        let ljj = if pivot <= CHOL_PIVOT_ZERO_TOL {
+            if pivot < CHOL_PIVOT_INDEFINITE_TOL {
+                return Err(());
+            }
+            if pivot < 0.0 {
+                clamped = true;
+            }
+            CHOL_PIVOT_CLAMP
+        } else {
+            pivot.sqrt()
+        };
+
+        let mut col_j = Vec::with_capacity(touched.len());
+        col_j.push((j, ljj));
+        for &r in &touched {
+            if r > j {
+                let val = acc[r] / ljj;
+                if val != 0.0 {
+                    col_j.push((r, val));
+                    row_to_cols[r].push(j);
+                }
+            }
+        }
+        l_cols[j] = col_j;
     }
-    Some((r, negative_pivot_clamped))
+
+    Ok((l_cols, clamped))
 }
 
 struct Triplets {
@@ -130,8 +197,8 @@ impl Triplets {
 /// quadratic; the SOCP variable vector is `[x (n) , t?]`.
 ///
 /// The third tuple element is `true` when any Cholesky factorization clamped
-/// a negative jitter-band pivot (see [`cholesky_upper`]): the SOCP is then
-/// only an approximation of the QCQP and convexity is unproven.
+/// a negative jitter-band pivot (see [`sparse_cholesky_lower`]): the SOCP is
+/// then only an approximation of the QCQP and convexity is unproven.
 pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize, bool), String> {
     let n = qp.n;
     let has_quad_obj = qp.p0.is_some();
@@ -145,41 +212,47 @@ pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize, bool), String>
         c[..n].copy_from_slice(&qp.q0);
     }
 
-    // Equalities: A_eq padded to nvar columns.
-    let ae = dense(&qp.a_eq);
-    let p_eq = qp.b_eq.len();
-    let mut at = Triplets::new();
-    for (i, row) in ae.iter().enumerate() {
-        for (j, &v) in row.iter().enumerate() {
-            at.push(i, j, v);
-        }
-    }
-    let a = CscMatrix::from_triplets(&at.rows, &at.cols, &at.vals, p_eq, nvar)
-        .map_err(|e| format!("A build: {e:?}"))?;
+    // Equalities: A_eq padded to nvar columns. No extra rows, so widening the
+    // column count reuses `a_eq`'s storage directly (O(nnz), no triplet pass).
+    debug_assert_eq!(
+        qp.a_eq.nrows(),
+        qp.b_eq.len(),
+        "QcqpProblem invariant: a_eq row count must match b_eq length"
+    );
+    let a = widen_cols(&qp.a_eq, nvar);
 
     // Conic rows: orthant (linear inequalities) then SOC blocks.
-    let gl = dense(&qp.g_lin);
     let ml = qp.h_lin.len();
+    debug_assert_eq!(
+        qp.g_lin.nrows(),
+        ml,
+        "QcqpProblem invariant: g_lin row count must match h_lin length"
+    );
     let mut gt = Triplets::new();
-    let mut h: Vec<f64> = Vec::new();
-    // Orthant: Gl x + s = hl, s >= 0.
-    for (i, row) in gl.iter().enumerate() {
-        for (j, &v) in row.iter().enumerate() {
-            gt.push(i, j, v);
+    let mut h: Vec<f64> = Vec::with_capacity(ml);
+    // Orthant: Gl x + s = hl, s >= 0. Transcribed directly from g_lin's own
+    // sparse storage (its row space already matches rows 0..ml of G).
+    for j in 0..n {
+        for idx in qp.g_lin.col_ptr()[j]..qp.g_lin.col_ptr()[j + 1] {
+            gt.push(qp.g_lin.row_ind()[idx], j, qp.g_lin.values()[idx]);
         }
-        h.push(qp.h_lin[i]);
     }
+    h.extend_from_slice(&qp.h_lin);
     let mut row_off = ml;
     let mut soc: Vec<usize> = Vec::new();
 
     // Helper to append a convex quadratic "(1/2)xtPx + q^T x + r <= 0" as SOC.
     // With P = R^T R, u = R x:  ||u||^2 <= 2 a b, a = -(q^T x + r), b = 1.
     // SOC block s = [a+b; sqrt2 u; a-b], dim = k+2 (k = n rows of R).
+    //
+    // `l_cols` is the sparse Cholesky factor of P (`l_cols[i]` = column `i` of
+    // `L`, entries `(row, val)` with `row >= i`); since `R = L^T`, row `i` of
+    // `R` is exactly column `i` of `L`, so only its nonzero entries are pushed.
     let append_quad = |gt: &mut Triplets,
                        h: &mut Vec<f64>,
                        row_off: &mut usize,
                        soc: &mut Vec<usize>,
-                       rmat: &[Vec<f64>],
+                       l_cols: &[Vec<(usize, f64)>],
                        q: &[f64],
                        qt_coef: Option<usize>,
                        r: f64| {
@@ -197,9 +270,9 @@ pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize, bool), String>
         h.push(1.0 - r);
         // s_{1..k} = sqrt2 * R x  => G row = -sqrt2 R, h = 0
         let s2 = std::f64::consts::SQRT_2;
-        for (ri, rrow) in rmat.iter().enumerate() {
-            for (j, &rv) in rrow.iter().enumerate() {
-                gt.push(base + 1 + ri, j, -s2 * rv);
+        for (i, col) in l_cols.iter().enumerate() {
+            for &(row, val) in col {
+                gt.push(base + 1 + i, row, -s2 * val);
             }
             h.push(0.0);
         }
@@ -219,15 +292,14 @@ pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize, bool), String>
 
     // Objective epigraph as first SOC (if quadratic).
     if let Some(p0) = &qp.p0 {
-        let p0d = dense(p0);
-        let (r0, clamped) = cholesky_upper(&p0d, n).ok_or("P0 not PSD (nonconvex)")?;
+        let (l0, clamped) = sparse_cholesky_lower(p0, n).map_err(|_| "P0 not PSD (nonconvex)")?;
         convexity_unproven |= clamped;
         append_quad(
             &mut gt,
             &mut h,
             &mut row_off,
             &mut soc,
-            &r0,
+            &l0,
             &qp.q0,
             Some(n),
             0.0,
@@ -235,16 +307,15 @@ pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize, bool), String>
     }
     // Quadratic constraints.
     for (ci, qc) in qp.quad.iter().enumerate() {
-        let pd = dense(&qc.p);
-        let (rr, clamped) =
-            cholesky_upper(&pd, n).ok_or_else(|| format!("P{} not PSD (nonconvex)", ci + 1))?;
+        let (lk, clamped) = sparse_cholesky_lower(&qc.p, n)
+            .map_err(|_| format!("P{} not PSD (nonconvex)", ci + 1))?;
         convexity_unproven |= clamped;
         append_quad(
             &mut gt,
             &mut h,
             &mut row_off,
             &mut soc,
-            &rr,
+            &lk,
             &qc.q,
             None,
             qc.r,
@@ -329,22 +400,6 @@ fn qcqp_objective(qp: &QcqpProblem, x: &[f64]) -> f64 {
 use crate::problem::ConstraintType;
 use crate::qp::{QcqpMatrix, QpProblem};
 
-pub(crate) fn csc_from_rows(rows: &[Vec<f64>], ncols: usize) -> CscMatrix {
-    let mut rr = Vec::new();
-    let mut cc = Vec::new();
-    let mut vv = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
-        for (j, &v) in row.iter().enumerate() {
-            if v != 0.0 {
-                rr.push(i);
-                cc.push(j);
-                vv.push(v);
-            }
-        }
-    }
-    CscMatrix::from_triplets(&rr, &cc, &vv, rows.len(), ncols).expect("row-built CSC is valid")
-}
-
 pub(crate) fn qcqp_matrix_to_csc(q: &QcqpMatrix) -> CscMatrix {
     let mut r = Vec::with_capacity(q.triplets.len());
     let mut c = Vec::with_capacity(q.triplets.len());
@@ -368,12 +423,17 @@ pub(crate) fn qcqp_matrix_to_csc(q: &QcqpMatrix) -> CscMatrix {
 /// equality/greater-than set is generally nonconvex.
 pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
     let n = src.num_vars;
-    let ad = dense(&src.a);
-    let mut gl_rows: Vec<Vec<f64>> = Vec::new();
+    // Row-major view of A (O(nnz)): column k of `a_rows` is row k of `src.a`,
+    // giving sparse per-constraint access without ever densifying A (O(m*n)
+    // for the QPLIB DCQ problems that drove this bridge's OOM).
+    let a_rows = src.a.transpose();
+    let mut gl = Triplets::new();
     let mut hl: Vec<f64> = Vec::new();
-    let mut ae_rows: Vec<Vec<f64>> = Vec::new();
+    let mut ae = Triplets::new();
     let mut be: Vec<f64> = Vec::new();
     let mut quad = Vec::new();
+    let mut gl_count = 0usize;
+    let mut ae_count = 0usize;
 
     let has_qc = !src.quadratic_constraints.is_empty();
     for k in 0..src.num_constraints {
@@ -382,24 +442,30 @@ pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
         } else {
             None
         };
-        let row = ad[k].clone();
+        let (row_idx, row_val) = a_rows
+            .get_column(k)
+            .map_err(|e| format!("A row {k}: {e:?}"))?;
         match src.constraint_types[k] {
             ConstraintType::Le => {
                 if let Some(qc) = qmat {
                     if qc.nnz() > 0 {
+                        let mut row = vec![0.0; n];
+                        for (&j, &v) in row_idx.iter().zip(row_val) {
+                            row[j] = v;
+                        }
                         quad.push(QuadConstraint {
                             p: qcqp_matrix_to_csc(qc),
                             q: row,
                             r: -src.b[k],
                         });
-                    } else {
-                        gl_rows.push(row);
-                        hl.push(src.b[k]);
+                        continue;
                     }
-                } else {
-                    gl_rows.push(row);
-                    hl.push(src.b[k]);
                 }
+                for (&j, &v) in row_idx.iter().zip(row_val) {
+                    gl.push(gl_count, j, v);
+                }
+                hl.push(src.b[k]);
+                gl_count += 1;
             }
             ConstraintType::Ge => {
                 if qmat.is_some_and(|qc| qc.nnz() > 0) {
@@ -407,15 +473,21 @@ pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
                         "quadratic >= constraints are nonconvex for the convex QCQP bridge".into(),
                     );
                 }
-                gl_rows.push(row.iter().map(|v| -v).collect());
+                for (&j, &v) in row_idx.iter().zip(row_val) {
+                    gl.push(gl_count, j, -v);
+                }
                 hl.push(-src.b[k]);
+                gl_count += 1;
             }
             ConstraintType::Eq => {
                 if qmat.is_some_and(|qc| qc.nnz() > 0) {
                     return Err("quadratic equality constraints are not supported by the convex QCQP bridge".into());
                 }
-                ae_rows.push(row);
+                for (&j, &v) in row_idx.iter().zip(row_val) {
+                    ae.push(ae_count, j, v);
+                }
                 be.push(src.b[k]);
+                ae_count += 1;
             }
         }
     }
@@ -423,21 +495,21 @@ pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
     for j in 0..n {
         let (lb, ub) = src.bounds[j];
         if ub.is_finite() {
-            let mut r = vec![0.0; n];
-            r[j] = 1.0;
-            gl_rows.push(r);
+            gl.push(gl_count, j, 1.0);
             hl.push(ub);
+            gl_count += 1;
         }
         if lb.is_finite() {
-            let mut r = vec![0.0; n];
-            r[j] = -1.0;
-            gl_rows.push(r);
+            gl.push(gl_count, j, -1.0);
             hl.push(-lb);
+            gl_count += 1;
         }
     }
 
-    let g_lin = csc_from_rows(&gl_rows, n);
-    let a_eq = csc_from_rows(&ae_rows, n);
+    let g_lin = CscMatrix::from_triplets(&gl.rows, &gl.cols, &gl.vals, gl_count, n)
+        .map_err(|e| format!("G_lin build: {e:?}"))?;
+    let a_eq = CscMatrix::from_triplets(&ae.rows, &ae.cols, &ae.vals, ae_count, n)
+        .map_err(|e| format!("A_eq build: {e:?}"))?;
     Ok(QcqpProblem {
         n,
         p0: Some(src.q.clone()),

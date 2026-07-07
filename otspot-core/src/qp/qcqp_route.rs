@@ -28,6 +28,7 @@ use crate::conic::{
 };
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolveRoute, SolveStatus, SolverResult};
+use crate::sparse::CscMatrix;
 
 use super::QpProblem;
 
@@ -183,66 +184,110 @@ fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
         ub.push(u);
     }
 
-    let ad = src.a.to_dense_rows();
-    let mut gl_rows: Vec<Vec<f64>> = Vec::new();
+    // Row-major view of A (O(nnz)): column k of `a_rows` is row k of `src.a`,
+    // giving sparse per-constraint access without densifying A.
+    let a_rows = src.a.transpose();
+    let mut gl_r: Vec<usize> = Vec::new();
+    let mut gl_c: Vec<usize> = Vec::new();
+    let mut gl_v: Vec<f64> = Vec::new();
     let mut hl: Vec<f64> = Vec::new();
-    let mut ae_rows: Vec<Vec<f64>> = Vec::new();
+    let mut ae_r: Vec<usize> = Vec::new();
+    let mut ae_c: Vec<usize> = Vec::new();
+    let mut ae_v: Vec<f64> = Vec::new();
     let mut be: Vec<f64> = Vec::new();
     let mut quad: Vec<GQuadConstraint> = Vec::new();
+    let mut gl_count = 0usize;
+    let mut ae_count = 0usize;
 
     let has_qc = !src.quadratic_constraints.is_empty();
     for k in 0..src.num_constraints {
         let qmat = has_qc
             .then(|| &src.quadratic_constraints[k])
             .filter(|qc| qc.nnz() > 0);
-        let row = ad[k].clone();
+        let (row_idx, row_val) = a_rows
+            .get_column(k)
+            .map_err(|e| format!("A row {k}: {e:?}"))?;
         match src.constraint_types[k] {
             ConstraintType::Le => match qmat {
-                Some(qc) => quad.push(GQuadConstraint {
-                    p: qcqp_matrix_to_csc(qc),
-                    q: row,
-                    r: -src.b[k],
-                }),
+                Some(qc) => {
+                    let mut row = vec![0.0; n];
+                    for (&j, &v) in row_idx.iter().zip(row_val) {
+                        row[j] = v;
+                    }
+                    quad.push(GQuadConstraint {
+                        p: qcqp_matrix_to_csc(qc),
+                        q: row,
+                        r: -src.b[k],
+                    });
+                }
                 None => {
-                    gl_rows.push(row);
+                    for (&j, &v) in row_idx.iter().zip(row_val) {
+                        gl_r.push(gl_count);
+                        gl_c.push(j);
+                        gl_v.push(v);
+                    }
                     hl.push(src.b[k]);
+                    gl_count += 1;
                 }
             },
             ConstraintType::Ge => match qmat {
-                Some(qc) => quad.push(GQuadConstraint {
-                    p: qcqp_matrix_to_csc(qc).scale_values(-1.0),
-                    q: row.iter().map(|v| -v).collect(),
-                    r: src.b[k],
-                }),
-                None => {
-                    gl_rows.push(row.iter().map(|v| -v).collect());
-                    hl.push(-src.b[k]);
-                }
-            },
-            ConstraintType::Eq => match qmat {
                 Some(qc) => {
-                    let p = qcqp_matrix_to_csc(qc);
+                    let mut row = vec![0.0; n];
+                    for (&j, &v) in row_idx.iter().zip(row_val) {
+                        row[j] = -v;
+                    }
                     quad.push(GQuadConstraint {
-                        p: p.clone(),
-                        q: row.clone(),
-                        r: -src.b[k],
-                    });
-                    quad.push(GQuadConstraint {
-                        p: p.scale_values(-1.0),
-                        q: row.iter().map(|v| -v).collect(),
+                        p: qcqp_matrix_to_csc(qc).scale_values(-1.0),
+                        q: row,
                         r: src.b[k],
                     });
                 }
                 None => {
-                    ae_rows.push(row);
+                    for (&j, &v) in row_idx.iter().zip(row_val) {
+                        gl_r.push(gl_count);
+                        gl_c.push(j);
+                        gl_v.push(-v);
+                    }
+                    hl.push(-src.b[k]);
+                    gl_count += 1;
+                }
+            },
+            ConstraintType::Eq => match qmat {
+                Some(qc) => {
+                    let mut row = vec![0.0; n];
+                    for (&j, &v) in row_idx.iter().zip(row_val) {
+                        row[j] = v;
+                    }
+                    let row_neg: Vec<f64> = row.iter().map(|v| -v).collect();
+                    let p = qcqp_matrix_to_csc(qc);
+                    quad.push(GQuadConstraint {
+                        p: p.clone(),
+                        q: row,
+                        r: -src.b[k],
+                    });
+                    quad.push(GQuadConstraint {
+                        p: p.scale_values(-1.0),
+                        q: row_neg,
+                        r: src.b[k],
+                    });
+                }
+                None => {
+                    for (&j, &v) in row_idx.iter().zip(row_val) {
+                        ae_r.push(ae_count);
+                        ae_c.push(j);
+                        ae_v.push(v);
+                    }
                     be.push(src.b[k]);
+                    ae_count += 1;
                 }
             },
         }
     }
 
-    let g_lin = conic::csc_from_rows(&gl_rows, n);
-    let a_eq = conic::csc_from_rows(&ae_rows, n);
+    let g_lin = CscMatrix::from_triplets(&gl_r, &gl_c, &gl_v, gl_count, n)
+        .map_err(|e| format!("G_lin build: {e:?}"))?;
+    let a_eq = CscMatrix::from_triplets(&ae_r, &ae_c, &ae_v, ae_count, n)
+        .map_err(|e| format!("A_eq build: {e:?}"))?;
     let p0 = (!src.is_zero_q()).then(|| src.q.clone());
     Ok(NonconvexQcqp {
         n,
@@ -256,4 +301,149 @@ fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
         lb,
         ub,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::qp::QcqpMatrix;
+    use crate::sparse::CscMatrix;
+
+    /// `nonconvex_from_qp_problem`'s constraint transcription must match a
+    /// hand-built expectation, element-wise (independent oracle: every
+    /// expected matrix/vector below is written out literally from the
+    /// documented rules, not recomputed through any bridge code):
+    /// - linear Le rows copied as-is into `g_lin`;
+    /// - linear Ge rows sign-flipped (`-row <= -b`);
+    /// - linear Eq rows into `a_eq`/`b_eq`;
+    /// - quadratic Le kept as `(P, q, -b)`;
+    /// - quadratic Ge sign-flipped to `(-P, -q, b)`;
+    /// - quadratic Eq split into the two-sided pair `(P, q, -b)` then
+    ///   `(-P, -q, b)`;
+    /// - finite variable bounds copied verbatim into `lb`/`ub` (not turned
+    ///   into `g_lin` rows — the McCormick box carries them).
+    #[test]
+    fn nonconvex_from_qp_problem_matches_hand_built_split() {
+        let n = 3usize;
+        let q_obj =
+            CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[2.0, 4.0, 6.0], n, n).unwrap();
+        let c = vec![1.0, -1.0, 0.5];
+        // Row 0 (Le, linear):  x0 + x1 <= 5
+        // Row 1 (Ge, linear):  x1 - x2 >= -2   => flipped: -x1 + x2 <= 2
+        // Row 2 (Eq, linear):  x0 + x2 = 1
+        // Row 3 (Le, quad):    (1/2)*2*x0^2 + x0 <= 3
+        // Row 4 (Ge, quad):    (1/2)*2*x1^2 + x1 + x2 >= 4
+        // Row 5 (Eq, quad):    x0*x1 + x0 - x2 = 0.5
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 4, 4, 5, 5],
+            &[0, 1, 1, 2, 0, 2, 0, 1, 2, 0, 2],
+            &[1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0],
+            6,
+            n,
+        )
+        .unwrap();
+        let b = vec![5.0, -2.0, 1.0, 3.0, 4.0, 0.5];
+        let bounds = vec![(-1.0, 2.0), (0.0, 3.0), (-2.0, 5.0)];
+        let ctypes = vec![
+            ConstraintType::Le,
+            ConstraintType::Ge,
+            ConstraintType::Eq,
+            ConstraintType::Le,
+            ConstraintType::Ge,
+            ConstraintType::Eq,
+        ];
+        let mut problem = QpProblem::new(q_obj, c.clone(), a, b, bounds, ctypes).unwrap();
+        let mut qc3 = QcqpMatrix::new(n);
+        qc3.triplets.push((0, 0, 2.0));
+        let mut qc4 = QcqpMatrix::new(n);
+        qc4.triplets.push((1, 1, 2.0));
+        let mut qc5 = QcqpMatrix::new(n);
+        qc5.triplets.push((0, 1, 1.0));
+        qc5.triplets.push((1, 0, 1.0));
+        problem
+            .set_quadratic_constraints(vec![
+                QcqpMatrix::new(n),
+                QcqpMatrix::new(n),
+                QcqpMatrix::new(n),
+                qc3,
+                qc4,
+                qc5,
+            ])
+            .unwrap();
+
+        let nc = nonconvex_from_qp_problem(&problem).unwrap();
+
+        assert_eq!(nc.n, n);
+        assert_eq!(nc.lb, vec![-1.0, 0.0, -2.0]);
+        assert_eq!(nc.ub, vec![2.0, 3.0, 5.0]);
+
+        // Linear split: Le row as-is, Ge row sign-flipped; bounds do NOT
+        // appear as g_lin rows.
+        assert_eq!(
+            nc.g_lin.to_dense_rows(),
+            vec![vec![1.0, 1.0, 0.0], vec![0.0, -1.0, 1.0]]
+        );
+        assert_eq!(nc.h_lin, vec![5.0, 2.0]);
+        assert_eq!(nc.a_eq.to_dense_rows(), vec![vec![1.0, 0.0, 1.0]]);
+        assert_eq!(nc.b_eq, vec![1.0]);
+
+        // Quadratic split: Le (row 3), Ge sign-flipped (row 4), then the Eq
+        // (row 5) two-sided pair in (P, q, -b), (-P, -q, b) order.
+        assert_eq!(nc.quad.len(), 4);
+
+        assert_eq!(
+            nc.quad[0].p.to_dense_rows(),
+            vec![
+                vec![2.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+            ]
+        );
+        assert_eq!(nc.quad[0].q, vec![1.0, 0.0, 0.0]);
+        assert_eq!(nc.quad[0].r, -3.0);
+
+        assert_eq!(
+            nc.quad[1].p.to_dense_rows(),
+            vec![
+                vec![0.0, 0.0, 0.0],
+                vec![0.0, -2.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+            ]
+        );
+        assert_eq!(nc.quad[1].q, vec![0.0, -1.0, -1.0]);
+        assert_eq!(nc.quad[1].r, 4.0);
+
+        assert_eq!(
+            nc.quad[2].p.to_dense_rows(),
+            vec![
+                vec![0.0, 1.0, 0.0],
+                vec![1.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+            ]
+        );
+        assert_eq!(nc.quad[2].q, vec![1.0, 0.0, -1.0]);
+        assert_eq!(nc.quad[2].r, -0.5);
+
+        assert_eq!(
+            nc.quad[3].p.to_dense_rows(),
+            vec![
+                vec![0.0, -1.0, 0.0],
+                vec![-1.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+            ]
+        );
+        assert_eq!(nc.quad[3].q, vec![-1.0, 0.0, 1.0]);
+        assert_eq!(nc.quad[3].r, 0.5);
+
+        // Objective carries over: non-zero Q -> Some(P0), q0 = c.
+        assert_eq!(
+            nc.p0.unwrap().to_dense_rows(),
+            vec![
+                vec![2.0, 0.0, 0.0],
+                vec![0.0, 4.0, 0.0],
+                vec![0.0, 0.0, 6.0],
+            ]
+        );
+        assert_eq!(nc.q0, c);
+    }
 }

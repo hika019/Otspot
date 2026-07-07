@@ -31,7 +31,7 @@ pub use qcqp::{
     qcqp_from_qp_problem, solve_qcqp, solve_qp_problem_as_qcqp, to_conic, QcqpProblem, QcqpResult,
     QuadConstraint,
 };
-pub(crate) use qcqp::{csc_from_rows, qcqp_matrix_to_csc};
+pub(crate) use qcqp::qcqp_matrix_to_csc;
 
 use crate::problem::SolveStatus;
 use crate::sparse::CscMatrix;
