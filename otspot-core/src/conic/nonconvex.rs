@@ -45,10 +45,17 @@ pub struct NonconvexQcqp {
 }
 
 /// Result of global QCQP optimisation.
+///
+/// With an incumbent, `status` is `Timeout` (deadline hit), `MaxIterations`
+/// (node-limited), `Optimal` (search exhausted, no node relaxation failed,
+/// and `gap <= gap_tol` — a certificate), or `SuboptimalSolution` (search
+/// exhausted but some relaxation failed without a certificate, or the proven
+/// gap exceeds `gap_tol`). Without an incumbent: `Timeout` > `MaxIterations`
+/// > `NumericalError` (some region was never certified empty) > `Infeasible`
+/// (every region proven empty — only then is infeasibility a certificate).
 #[derive(Debug, Clone)]
 pub struct GlobalResult {
-    /// Status: `Optimal` (proven within gap), `MaxIterations` (node-limited with
-    /// an incumbent), or `Infeasible`.
+    /// Termination status (see struct docs for the exact classification).
     pub status: SolveStatus,
     /// Best (incumbent) objective.
     pub objective: f64,
@@ -56,7 +63,11 @@ pub struct GlobalResult {
     pub x: Vec<f64>,
     /// Nodes processed.
     pub nodes: usize,
-    /// Optimality gap `incumbent - best_bound` at termination.
+    /// Optimality gap `incumbent - lower_bound` at termination, where
+    /// `lower_bound` is the proven global lower bound: the minimum over
+    /// terminal regions of their relaxation bounds and over unresolved
+    /// regions (open stack nodes, failed relaxations) of their inherited
+    /// parent bounds (`-inf` when the root itself is unresolved).
     pub gap: f64,
 }
 
@@ -139,10 +150,33 @@ struct RelaxResult {
     x: Vec<f64>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Fault injection for `solve_relax_lp` (test-only). Each relaxation solve
+    /// pops the front entry: `Some(status)` short-circuits the LP and returns
+    /// that status (no solution); `None` (or an exhausted queue) solves
+    /// normally. `thread_local` so parallel tests cannot corrupt each other's
+    /// plan (same rationale as `simplex::primal::PIVOT_OUT_BTRAN_COUNT`).
+    static RELAX_STATUS_PLAN: std::cell::RefCell<std::collections::VecDeque<Option<SolveStatus>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
 /// McCormick relaxations are pure LPs. Use the mature simplex LP path rather
 /// than the generic conic IPM, which is intentionally small and aimed at SOC
-/// blocks.
-fn solve_relax_lp(prob: &ConicProblem) -> RelaxResult {
+/// blocks. The caller's wall-clock deadline is forwarded so a single node LP
+/// cannot run past the B&B budget.
+fn solve_relax_lp(prob: &ConicProblem, deadline: Option<std::time::Instant>) -> RelaxResult {
+    #[cfg(test)]
+    if let Some(status) = RELAX_STATUS_PLAN
+        .with(|p| p.borrow_mut().pop_front())
+        .flatten()
+    {
+        return RelaxResult {
+            status,
+            objective: f64::NAN,
+            x: vec![],
+        };
+    }
     let n = prob.n();
     let gd = dense(&prob.g);
     let ad = dense(&prob.a);
@@ -181,7 +215,9 @@ fn solve_relax_lp(prob: &ConicProblem) -> RelaxResult {
         None,
     )
     .unwrap();
-    let res = crate::lp::solve_lp_with(&lp, &crate::options::SolverOptions::default());
+    let mut lp_opts = crate::options::SolverOptions::default();
+    lp_opts.deadline = deadline;
+    let res = crate::lp::solve_lp_with(&lp, &lp_opts);
     RelaxResult {
         status: res.status,
         objective: res.objective,
@@ -255,11 +291,26 @@ fn build_relax(
         rows.push(r2);
         h.push(-lb[j]);
     }
-    // McCormick envelopes for each pair.
+    // McCormick envelopes for each pair, plus the interval of `w = x_i x_j`
+    // over the box as explicit rows. For off-diagonal pairs the four envelope
+    // rows are the convex hull of the bilinear graph, so the interval is
+    // implied; for diagonal pairs (`w = x_k^2`) the two endpoint tangents do
+    // NOT imply the interval lower bound (e.g. on `[-1, 1]` they only give
+    // `w >= 2|x| - 1`, which dips to `-1` at `x = 0` instead of `0`), so the
+    // relaxation of `x^2` terms is needlessly loose without it.
     for (pi, &(i, j)) in pairs.iter().enumerate() {
         let wj = n + pi;
         let (xl_i, xu_i) = (lb[i], ub[i]);
         let (xl_j, xu_j) = (lb[j], ub[j]);
+        let (w_lo, w_hi) = w_interval(xl_i, xu_i, xl_j, xu_j, i == j);
+        let mut r_hi = vec![0.0; nv];
+        r_hi[wj] = 1.0;
+        rows.push(r_hi);
+        h.push(w_hi);
+        let mut r_lo = vec![0.0; nv];
+        r_lo[wj] = -1.0;
+        rows.push(r_lo);
+        h.push(-w_lo);
         // w >= xl_i x_j + xl_j x_i - xl_i xl_j  =>  -w + xl_j x_i + xl_i x_j <= xl_i xl_j
         push_mc(
             &mut rows,
@@ -333,6 +384,27 @@ fn build_relax(
         g,
         h,
         cone: ConeSpec { l: m, soc: vec![] },
+    }
+}
+
+/// Range of `w = x_i x_j` over the box `[xl_i, xu_i] x [xl_j, xu_j]`
+/// (`diag`: the pair is `x_k^2`, whose range must include 0 when the box
+/// straddles the origin and is bounded below by the smaller squared endpoint
+/// otherwise — never by a corner product alone).
+fn w_interval(xl_i: f64, xu_i: f64, xl_j: f64, xu_j: f64, diag: bool) -> (f64, f64) {
+    if diag {
+        let (a, b) = (xl_i * xl_i, xu_i * xu_i);
+        let lo = if xl_i <= 0.0 && xu_i >= 0.0 {
+            0.0
+        } else {
+            a.min(b)
+        };
+        (lo, a.max(b))
+    } else {
+        let corners = [xl_i * xl_j, xl_i * xu_j, xu_i * xl_j, xu_i * xu_j];
+        let lo = corners.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hi = corners.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        (lo, hi)
     }
 }
 
@@ -444,6 +516,12 @@ fn all_integral(x: &[f64], integers: &[usize], tol: f64) -> bool {
     integers.iter().all(|&k| frac_dist(x[k]) <= tol)
 }
 
+/// Absolute floating-point slack on the exhausted-search gap certificate:
+/// nodes are bound-pruned at `lower >= incumbent - gap_tol`, so an exhausted
+/// clean search proves `gap <= gap_tol` exactly in real arithmetic; the slack
+/// only absorbs rounding in those comparisons (scaled by `1 + |incumbent|`).
+const GAP_CERT_SLACK: f64 = 1e-12;
+
 fn global_core(
     qp: &NonconvexQcqp,
     integers: &[usize],
@@ -454,12 +532,17 @@ fn global_core(
     let mut incumbent = f64::INFINITY;
     let mut inc_x: Vec<f64> = Vec::new();
     let mut nodes = 0usize;
-    let mut best_bound = f64::NEG_INFINITY;
     let mut limited = false;
     let mut timed_out = false;
+    let mut numerical_failures = 0usize;
+    // Proven global lower bound: min over resolved terminal regions of their
+    // relaxation bounds (`+inf` = every region proven empty so far). Regions
+    // left unresolved (break, failed relaxation) contribute their inherited
+    // parent bound instead. Stack entries carry that inherited bound
+    // (`-inf` at the root).
+    let mut lower_bound = f64::INFINITY;
 
-    let mut stack = vec![(qp.lb.clone(), qp.ub.clone())];
-    let mut frontier_min = f64::INFINITY;
+    let mut stack = vec![(qp.lb.clone(), qp.ub.clone(), f64::NEG_INFINITY)];
 
     let accept = |x: &[f64], incumbent: &mut f64, inc_x: &mut Vec<f64>, tol: f64| {
         if feasible(qp, x, tol) && all_integral(x, integers, g.int_tol) {
@@ -478,29 +561,54 @@ fn global_core(
         }
     };
 
-    while let Some((lb, ub)) = stack.pop() {
+    while let Some((lb, ub, inherited)) = stack.pop() {
         if opts
             .deadline
             .is_some_and(|d| std::time::Instant::now() >= d)
         {
             timed_out = true;
+            lower_bound = lower_bound.min(inherited);
             break;
         }
         if nodes >= g.max_nodes {
             limited = true;
+            lower_bound = lower_bound.min(inherited);
             break;
         }
         nodes += 1;
         let relax = build_relax(qp, &pairs, &lb, &ub);
-        let res = solve_relax_lp(&relax);
-        if res.status != SolveStatus::Optimal {
-            continue;
+        let res = solve_relax_lp(&relax, opts.deadline);
+        match res.status {
+            SolveStatus::Optimal => {}
+            // Empty relaxation => the region holds no feasible point: a
+            // certified fathom (no bound contribution; the region's "bound"
+            // is +inf).
+            SolveStatus::Infeasible => continue,
+            SolveStatus::Timeout => {
+                timed_out = true;
+                lower_bound = lower_bound.min(inherited);
+                break;
+            }
+            // NumericalError, MaxIterations, SuboptimalSolution, Unbounded
+            // (the lifted polytope is a bounded box, so an "unbounded" LP is
+            // a numerical artefact), …: nothing was proven about the region.
+            // Prune it — there is no trustworthy point to branch on — but
+            // record the failure so the search never claims a certificate,
+            // and keep the region's inherited bound in the global bound.
+            _ => {
+                numerical_failures += 1;
+                lower_bound = lower_bound.min(inherited);
+                continue;
+            }
         }
-        let lower = res.objective;
+        // A child region is contained in its parent, so its true minimum is
+        // never below the parent's proven bound; `max` keeps the inherited
+        // bound when the child LP value dips below it numerically.
+        let lower = res.objective.max(inherited);
         if lower >= incumbent - g.gap_tol {
-            continue; // bound prune
+            lower_bound = lower_bound.min(lower);
+            continue; // bound prune (certified: region cannot beat incumbent by > gap_tol)
         }
-        frontier_min = frontier_min.min(lower);
         let x = res.x[..qp.n].to_vec();
 
         accept(&x, &mut incumbent, &mut inc_x, g.feas_tol);
@@ -518,19 +626,22 @@ fn global_core(
         if let Some(k) = int_branch {
             let fl = x[k].floor();
             let ce = x[k].ceil();
+            // Children cover every integer point of the region, so the
+            // region's bound lives on in their inherited bounds; a skipped
+            // side holds no integer point (certified empty).
             // down: ub_k = floor
             if fl >= lb[k] - 1e-9 {
                 let lb_d = lb.clone();
                 let mut ub_d = ub.clone();
                 ub_d[k] = fl;
-                stack.push((lb_d, ub_d));
+                stack.push((lb_d, ub_d, lower));
             }
             // up: lb_k = ceil
             if ce <= ub[k] + 1e-9 {
                 let mut lb_u = lb.clone();
                 let ub_u = ub.clone();
                 lb_u[k] = ce;
-                stack.push((lb_u, ub_u));
+                stack.push((lb_u, ub_u, lower));
             }
             continue;
         }
@@ -552,10 +663,14 @@ fn global_core(
         }
 
         if worst_gap <= g.bilinear_tol {
+            // Leaf: the relaxation is tight, so `lower` is (numerically) the
+            // region's true minimum and stands as its terminal bound.
             accept(&x, &mut incumbent, &mut inc_x, g.feas_tol * 100.0);
+            lower_bound = lower_bound.min(lower);
             continue;
         }
 
+        let mut pushed = false;
         if let Some(k) = branch_var {
             let mid = x[k].clamp(lb[k], ub[k]);
             let split = if (mid - lb[k]).abs() < 1e-9 || (ub[k] - mid).abs() < 1e-9 {
@@ -570,24 +685,39 @@ fn global_core(
             let ub2 = ub.clone();
             lb2[k] = split;
             if ub1[k] - lb1[k] > 1e-9 {
-                stack.push((lb1, ub1));
+                stack.push((lb1, ub1, lower));
+                pushed = true;
             }
             if ub2[k] - lb2[k] > 1e-9 {
-                stack.push((lb2, ub2));
+                stack.push((lb2, ub2, lower));
+                pushed = true;
             }
+        }
+        if !pushed {
+            // Box too thin to split further: terminal with the (possibly
+            // loose) relaxation bound.
+            lower_bound = lower_bound.min(lower);
         }
     }
 
-    best_bound = best_bound.max(frontier_min);
+    // Regions still open when the search stopped keep their inherited bounds.
+    for (_, _, inherited) in &stack {
+        lower_bound = lower_bound.min(*inherited);
+    }
+
     if inc_x.is_empty() {
-        // No incumbent: only a proven-Infeasible certificate if the search
-        // exhausted the full tree. A node-limited or timed-out search with an
-        // empty stack remainder has NOT proven infeasibility — it merely
-        // hasn't found a feasible point yet.
+        // No incumbent: `Infeasible` is a certificate, so it requires a fully
+        // exhausted search in which every region was proven empty. A
+        // timed-out / node-limited search proved nothing; neither did one
+        // with failed relaxations or with uncertified terminal regions
+        // (finite `lower_bound` = some region had a valid relaxation but no
+        // feasible point was recovered from it).
         let status = if timed_out {
             SolveStatus::Timeout
         } else if limited {
             SolveStatus::MaxIterations
+        } else if numerical_failures > 0 || lower_bound < f64::INFINITY {
+            SolveStatus::NumericalError
         } else {
             SolveStatus::Infeasible
         };
@@ -599,18 +729,176 @@ fn global_core(
             gap: f64::INFINITY,
         };
     }
-    let gap = (incumbent - best_bound).abs();
+    let gap = (incumbent - lower_bound).max(0.0);
+    let certified = !timed_out
+        && !limited
+        && numerical_failures == 0
+        && gap <= g.gap_tol + GAP_CERT_SLACK * (1.0 + incumbent.abs());
     GlobalResult {
         status: if timed_out {
             SolveStatus::Timeout
         } else if limited {
             SolveStatus::MaxIterations
-        } else {
+        } else if certified {
             SolveStatus::Optimal
+        } else {
+            SolveStatus::SuboptimalSolution
         },
         objective: incumbent,
         x: inc_x,
         nodes,
         gap,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    /// Queue `plan` as the per-node relaxation-status fault plan, run `f`, then
+    /// clear it (so a panic inside `f` cannot leak state into other tests).
+    fn with_relax_plan<R>(plan: Vec<Option<SolveStatus>>, f: impl FnOnce() -> R) -> R {
+        RELAX_STATUS_PLAN.with(|p| *p.borrow_mut() = VecDeque::from(plan));
+        let out = f();
+        RELAX_STATUS_PLAN.with(|p| p.borrow_mut().clear());
+        out
+    }
+
+    /// `min x0 + x1  s.t.  x0*x1 >= 1,  x in [0.1,3]^2` (optimum 2 at (1,1)).
+    /// Requires deep spatial branching (~99 nodes), so a fault injected past
+    /// the incumbent node still leaves plenty of the tree unresolved.
+    fn hyperbola() -> NonconvexQcqp {
+        let n = 2usize;
+        // (1/2) x^T P x with P = [[0,-1],[-1,0]] = -x0*x1; constraint -x0*x1 + 1 <= 0.
+        let p = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[-1.0, -1.0], n, n).unwrap();
+        NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0, 1.0],
+            quad: vec![GQuadConstraint {
+                p,
+                q: vec![0.0, 0.0],
+                r: 1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.1, 0.1],
+            ub: vec![3.0, 3.0],
+        }
+    }
+
+    /// `min x0^2  over  x0 in [-1,1]`, expressed for the spatial solver.
+    /// Objective `p0 = [[2]]` gives `(1/2)*2*x^2 = w`, so the relaxation
+    /// minimises `w` directly — a value oracle independent of which x-vertex
+    /// the LP lands on.
+    fn min_sq() -> NonconvexQcqp {
+        let n = 1usize;
+        let p = CscMatrix::from_triplets(&[0], &[0], &[2.0], n, n).unwrap();
+        NonconvexQcqp {
+            n,
+            p0: Some(p),
+            q0: vec![0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![-1.0],
+            ub: vec![1.0],
+        }
+    }
+
+    /// #30 sentinel. The McCormick relaxation of `w = x0^2` over `[-1,1]`
+    /// bounds `w` below by the two endpoint tangents (`w >= 2x-1`, `w >= -2x-1`),
+    /// which meet at `-1` at `x = 0`. The explicit `w`-interval row adds the
+    /// true bound `w >= 0`. Hand oracle: `x^2 >= 0`, so the tight relaxation
+    /// minimum of `w` is exactly 0. Reverting the `w`-box rows drops it to -1.
+    #[test]
+    fn mccormick_w_box_bounds_diagonal_square_below() {
+        let qp = min_sq();
+        let pairs = collect_pairs(&qp);
+        assert_eq!(pairs, vec![(0, 0)]);
+        let relax = build_relax(&qp, &pairs, &qp.lb, &qp.ub);
+        let res = solve_relax_lp(&relax, None);
+        assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
+        assert!(
+            res.objective.abs() < 1e-7,
+            "relaxed min w must be 0 (true x^2 >= 0), got {}",
+            res.objective
+        );
+    }
+
+    /// #18 sentinel. `solve_relax_lp` must forward the caller's deadline to the
+    /// LP path; an already-expired deadline therefore stops the LP with
+    /// `Timeout`. Reverting to `SolverOptions::default()` (no deadline) solves
+    /// the relaxation to `Optimal`, ignoring the timeout.
+    #[test]
+    fn relaxation_lp_honors_expired_deadline() {
+        let qp = hyperbola();
+        let pairs = collect_pairs(&qp);
+        let relax = build_relax(&qp, &pairs, &qp.lb, &qp.ub);
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let res = solve_relax_lp(&relax, Some(past));
+        assert_eq!(
+            res.status,
+            SolveStatus::Timeout,
+            "expired deadline must abort the node LP, got {:?}",
+            res.status
+        );
+    }
+
+    /// #19 sentinel. A failed root relaxation (no certificate) leaves the whole
+    /// feasible region unexplored: the search must report `NumericalError`, not
+    /// a false `Infeasible`. Reverting to the blanket `continue` (no failure
+    /// tracking) falls through to the empty-incumbent `Infeasible` branch.
+    #[test]
+    fn failed_root_relaxation_is_not_false_infeasible() {
+        let qp = hyperbola();
+        let res = with_relax_plan(vec![Some(SolveStatus::NumericalError)], || {
+            solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default())
+        });
+        assert_eq!(res.status, SolveStatus::NumericalError, "{res:?}");
+        assert!(res.x.is_empty());
+    }
+
+    /// #20 sentinel. An exhausted search with an incumbent but a node relaxation
+    /// that failed without a certificate is not a global-optimality proof: it
+    /// must report `SuboptimalSolution`, never `Optimal`. Node 81 (well past the
+    /// incumbent node, well before the ~99-node exhaustion) is forced to fail.
+    /// Reverting the failure tracking + gap-gated status makes it claim
+    /// `Optimal` (status was hardcoded to `Optimal` whenever an incumbent
+    /// existed and the search was not node/time limited).
+    #[test]
+    fn incumbent_with_failed_node_is_not_optimal() {
+        let qp = hyperbola();
+        let mut plan = vec![None; 80];
+        plan.extend(std::iter::repeat_n(Some(SolveStatus::NumericalError), 512));
+        let res = with_relax_plan(plan, || {
+            solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default())
+        });
+        assert_eq!(res.status, SolveStatus::SuboptimalSolution, "{res:?}");
+        assert!(
+            (res.objective - 2.0).abs() < 5e-3,
+            "incumbent must survive, got {}",
+            res.objective
+        );
+    }
+
+    /// #20 positive control. A clean, fully exhausted search proves global
+    /// optimality: `Optimal` with a certified near-zero gap.
+    #[test]
+    fn exhausted_clean_search_certifies_optimal_with_zero_gap() {
+        let qp = hyperbola();
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!((res.objective - 2.0).abs() < 5e-3, "obj={}", res.objective);
+        assert!(
+            res.gap <= GlobalOptions::default().gap_tol + 1e-9,
+            "gap must be within tol, got {}",
+            res.gap
+        );
     }
 }
