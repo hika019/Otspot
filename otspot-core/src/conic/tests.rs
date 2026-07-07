@@ -3192,7 +3192,11 @@ fn soc_border_threshold_crossover() {
         let n = d;
         let idx: Vec<usize> = (0..n).collect();
         let g = CscMatrix::from_triplets(&idx, &idx, &vec![-1.0; n], n, n).unwrap();
-        let a = csc(&[[1.0].iter().cloned().chain(vec![0.0; n - 1]).collect()], 1, n);
+        let a = csc(
+            &[[1.0].iter().cloned().chain(vec![0.0; n - 1]).collect()],
+            1,
+            n,
+        );
         let mut c = vec![0.0; n];
         c[1] = -1.0;
         let prob = ConicProblem {
@@ -3272,7 +3276,11 @@ fn qcqp_bridge_huge_diag_smoke() {
     );
     assert_eq!(r.status, SolveStatus::Optimal);
     let rel = (r.objective - expected).abs() / expected.abs().max(1.0);
-    assert!(rel < 1e-4, "obj={} expected={expected} rel={rel:e}", r.objective);
+    assert!(
+        rel < 1e-4,
+        "obj={} expected={expected} rel={rel:e}",
+        r.objective
+    );
 }
 
 /// `O(d)` fill fence for the border representation at the `L`-factor level:
@@ -3319,9 +3327,15 @@ fn conic_border_l_fill_stays_linear() {
 
     let mut caches = kkt::build_kkt_caches(&a, &g, &blk, n, p, None);
     let probe_rhs = kkt::build_rhs(&sc, &blk, n, p, m, &rx, &ry, &rz, &rc);
-    let factor =
-        kkt::factorize_with_retry(&mut caches, &sc, &blk, &probe_rhs, None, &KktConfig::default())
-            .expect("factorize failed");
+    let factor = kkt::factorize_with_retry(
+        &mut caches,
+        &sc,
+        &blk,
+        &probe_rhs,
+        None,
+        &KktConfig::default(),
+    )
+    .expect("factorize failed");
     let nnz_l = factor
         .nnz_l()
         .expect("huge single SOC must factor on the direct LDL path");

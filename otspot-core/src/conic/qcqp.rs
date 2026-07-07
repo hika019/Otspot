@@ -52,7 +52,9 @@ pub struct QcqpProblem {
 fn widen_cols(m: &CscMatrix, new_ncols: usize) -> CscMatrix {
     debug_assert!(new_ncols >= m.ncols());
     let mut col_ptr = m.col_ptr().to_vec();
-    let nnz = *col_ptr.last().expect("col_ptr always has ncols+1 >= 1 entries");
+    let nnz = *col_ptr
+        .last()
+        .expect("col_ptr always has ncols+1 >= 1 entries");
     col_ptr.resize(new_ncols + 1, nnz);
     CscMatrix {
         col_ptr,

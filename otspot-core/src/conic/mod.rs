@@ -1,18 +1,13 @@
-//! Conic optimization: second-order cone programming (SOCP) and quadratically
-//! constrained programs (QCQP), plus their mixed-integer variants.
-//!
-//! Standard primal form solved by [`solve_socp`]:
+//! Conic optimization (SOCP/QCQP, incl. mixed-integer). Standard primal
+//! form solved by [`solve_socp`]:
 //!
 //! ```text
 //! minimize    c^T x
 //! subject to  A x = b            (equalities)
 //!             G x + s = h,  s in K
 //! ```
-//!
-//! with cone `K = R_+^l  x  Q_{m_1} x ... x Q_{m_k}` where each second-order
-//! cone is `Q_m = { (t, u) in R x R^{m-1} : ||u||_2 <= t }`. The rows of `G`
-//! (and entries of `h`, `s`) are ordered: the `l` nonnegative-orthant rows
-//! first, then each second-order-cone block in `cone.soc` order.
+//! Cone `K = R_+^l x Q_{m_1} x ... x Q_{m_k}` (`Q_m = { (t,u): ||u||_2 <=
+//! t }`); rows ordered `l` orthant rows then each SOC block (`cone.soc`).
 
 mod cone;
 mod ipm;
@@ -37,8 +32,7 @@ pub use qcqp::{
 use crate::problem::SolveStatus;
 use crate::sparse::CscMatrix;
 
-/// Cone specification: a nonnegative orthant of dimension `l` followed by
-/// second-order cones with the dimensions listed in `soc`.
+/// Cone specification: nonnegative orthant of dimension `l`, then SOCs with dims in `soc`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConeSpec {
     /// Dimension of the leading nonnegative orthant `R_+^l`.
@@ -135,13 +129,11 @@ pub struct ConicResult {
     pub iterations: usize,
     /// Final `(primal_res, dual_res, duality_gap)` relative metrics.
     pub residuals: (f64, f64, f64),
-    /// Unboundedness certificate: an improving primal ray `d` with `A d ≈ 0`,
-    /// `-G d ∈ K` (asymptotically) and `c^T d < 0`. `Some` only when
-    /// `status == Unbounded`.
+    /// Unboundedness certificate: improving ray `d` with `A d ≈ 0`, `-G d ∈
+    /// K` (asymptotically), `c^T d < 0`. `Some` only when `status == Unbounded`.
     pub primal_ray: Option<Vec<f64>>,
-    /// Primal-infeasibility (Farkas) certificate `(y, z)` with
-    /// `A^T y + G^T z ≈ 0`, `z ∈ K^*`, and `b^T y + h^T z < 0`. `Some` only
-    /// when `status == Infeasible`.
+    /// Farkas infeasibility certificate `(y,z)`: `A^T y + G^T z ≈ 0`, `z ∈
+    /// K^*`, `b^T y + h^T z < 0`. `Some` only when `status == Infeasible`.
     pub infeas_cert: Option<(Vec<f64>, Vec<f64>)>,
 }
 
@@ -154,9 +146,7 @@ pub struct ConicOptions {
     pub max_iter: usize,
     /// Fraction-to-boundary step damping (`(0,1)`).
     pub step_frac: f64,
-    /// Wall-clock deadline. Checked once per interior-point iteration
-    /// (`ipm::solve`) and once per branch-and-bound node (`nonconvex::global_core`);
-    /// `None` disables the check (bounded only by `max_iter` / `max_nodes`).
+    /// Wall-clock deadline, checked once per IPM iteration or B&B node; `None` disables it.
     pub deadline: Option<std::time::Instant>,
 }
 

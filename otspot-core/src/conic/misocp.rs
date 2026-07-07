@@ -160,24 +160,19 @@ fn build_relaxation(
 /// Solve a mixed-integer SOCP by branch-and-bound (depth-first, best-bound
 /// pruning). Minimises `c^T x`.
 ///
-/// Node relaxation outcomes are classified before pruning, never collapsed
-/// into a single "prune" bucket: `Infeasible` prunes the subtree only when
-/// backed by a Farkas certificate (`infeas_cert`); `Unbounded` propagates
-/// immediately only when backed by a verified improving ray (`primal_ray`;
-/// a restricted relaxation can only be unbounded if the root is too);
-/// anything else (`NumericalError`, an unproven `Infeasible` / `Unbounded`,
-/// `MaxIterations`, `NotSupported`, …) is a **numerical failure** — the node
-/// is pruned (we cannot branch on an untrustworthy point) but counted, so an
-/// empty search never gets promoted to a false proof of infeasibility.
-/// `Timeout` on a node stops the whole search (the deadline is exhausted, so
-/// further nodes would also time out).
+/// Node outcomes are classified, not collapsed into one "prune" bucket:
+/// `Infeasible` prunes only with a Farkas certificate (`infeas_cert`);
+/// `Unbounded` propagates only with a verified improving ray
+/// (`primal_ray` -- a restricted relaxation can only be unbounded if the
+/// root is too); anything else (`NumericalError`, an unproven
+/// `Infeasible`/`Unbounded`, `MaxIterations`, `NotSupported`) is a
+/// **numerical failure**, pruned but counted so an empty search never
+/// proves false infeasibility. `Timeout` on a node stops the whole search.
 ///
-/// Final status (no incumbent found): `Timeout` > `MaxIterations`
-/// (node-limited) > `NumericalError` (some node failed numerically) >
-/// `Infeasible` (search fully exhausted with every leaf certified infeasible
-/// or bound-pruned). Final status (incumbent found): `Timeout` > `Optimal`
-/// requires the search to be fully exhausted with **no** numerical failures;
-/// otherwise `SuboptimalSolution` (mirrors `mip::solve_miqp`'s convention).
+/// Final status without an incumbent: `Timeout` > `MaxIterations` >
+/// `NumericalError` > `Infeasible` (every leaf infeasible or pruned).
+/// With an incumbent: `Timeout` > `Optimal` (full exhaustion, **no**
+/// numerical failures) > `SuboptimalSolution` (mirrors `mip::solve_miqp`).
 pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -> MisocpResult {
     let mut incumbent_obj = f64::INFINITY;
     let mut incumbent_x: Vec<f64> = Vec::new();

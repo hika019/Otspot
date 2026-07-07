@@ -1,7 +1,5 @@
-//! Sparse augmented KKT system for the conic interior-point method.
-//!
-//! Newton system for one predictor/corrector step, unknowns ordered
-//! `(dx, dy, dz)` (sizes `n, p, m`):
+//! Sparse augmented KKT system for the conic interior-point method: the
+//! Newton system per predictor/corrector step, unknowns `(dx, dy, dz)`:
 //!
 //! ```text
 //! [ delta_p I    A^T        G^T   ] [dx]   [ -rx          ]
@@ -9,39 +7,14 @@
 //! [   G           0        -W^2   ] [dz]   [ -rz - W*rc   ]
 //! ```
 //!
-//! This is exactly the classical 2-group quasidefinite augmented system
-//! (`x` primal-like, `(y,z)` dual-like, matching
-//! `qp::ipm_core::kkt::build_augmented_system`'s convention: the lone
-//! "primal" block gets `+delta`, every "dual" block gets `-delta`) with `Q =
-//! 0` (conic has no quadratic objective term at this layer -- QCQP quadratic
-//! terms are bridged into extra SOC blocks upstream) and the QP's diagonal
-//! `Sigma` generalised to the block-diagonal NT-scaling operator `W^2` (dense
-//! per SOC block, diagonal for the orthant). `W^2` is always strictly
-//! positive by construction (`s`, `z` are kept in the strict cone interior),
-//! so unlike `Sigma` it needs no floor for quasidefiniteness and is left
-//! fully unregularized (see `KktSkeleton::materialize`): the extremely tiny
-//! `W^2` entries of a conflicting orthant/SOC pair on an infeasible problem
-//! are exactly the sensitivity a correct Newton direction needs to keep
-//! amplifying `z` toward a Farkas ray, and any artificial floor destroys it.
-//! When `s`/`z` are extreme enough that the true value underflows even
-//! `faer`'s own internal LDL clamp, `factorize_with_retry` escalates through
-//! symmetric diagonal equilibration, DD-LDL, and finally MINRES on the raw
-//! (unfactored) matrix -- see that function's doc comment for the full
-//! probe -> retry -> equilibrate -> DD -> MINRES ladder.
-//!
-//! Second-order cones at or above `cone::SOC_BORDER_MIN_DIM` replace their
-//! dense `W^2` block with an `O(d)` rank-1 border (Phase 3b,
-//! `cone::visit_border_pattern`): two auxiliary variables per cone, solved
-//! alongside `(dx,dy,dz)` and discarded (`solve_dir`). Column layout
-//! `[dx, aux_u | dy, dz, aux_v]` (rationale: `cone::Blocks`); `n_top = n +
-//! blk.n_border()` is the PD group for the MINRES preconditioner.
-//!
-//! Derivation of the `dz` row's RHS (`-rz - W*rc`): the linearised
-//! complementarity condition in scaled space is `W^{-1} ds + W dz = rc`
-//! (arrow-form, matches the existing `jdiv`/`jprod` convention), and the
-//! conic residual is `ds = -rz - G dx`. Substituting: `W^2 dz - G dx = rz +
-//! W rc`, i.e. `-W^2 dz + G dx = -rz - W rc` -- the `dz` row above. `ds` is
-//! then recovered as `-rz - G dx` after solving.
+//! Regularization signs (`+delta_p`/`-delta_d`) follow
+//! `qp::ipm_core::kkt::build_augmented_system`. Quasidefinite system with
+//! `Q = 0` (QCQP quadratics bridge into SOC blocks upstream) and `Sigma`
+//! generalised to the block-diagonal NT operator `W^2`, left fully
+//! unregularized (see `KktSkeleton::materialize` for why). SOCs at or above
+//! `cone::SOC_BORDER_MIN_DIM` replace `W^2` with an `O(d)` rank-1
+//! border (`cone::visit_border_pattern`); see [`build_rhs`] for the RHS
+//! derivation.
 
 use super::cone::{self, Blocks, Scaling};
 use crate::linalg::amd::amd_with_deadline;
@@ -498,19 +471,16 @@ pub(super) fn build_kkt_caches(
 /// A correctness requirement, not an optimization: faer's AMD declares any
 /// node of degree `> 10*sqrt(total)` a "dense node" and defers all such
 /// nodes past every sparse node. `aux_u`'s column is dense in its cone's
-/// `d` rows, so once `d` crosses that threshold AMD reshuffles the relative
-/// elimination order of the `dx`/`dz` groups it couples -- measured
-/// (`n=m=d`, `p=1`): the healthy `dx`-before-`dz` order flips from 202/202
-/// pairs to 0/202 exactly at `d=202`, degrading Newton directions from
-/// `~2e-6` relative error (vs the dense-Schur oracle) to `O(1)` garbage
-/// failing the health probe at every regularization rung. Pinning the aux
-/// columns last processes the exact `[dx, dy, dz]` core first and applies
-/// the rank-1 corrections as final Schur updates -- textbook
-/// bordered-system elimination. Fill cost: `O(d)` per aux column in `L`
-/// (`conic_border_l_fill_stays_linear` measures `4.0*d` at `d=100,000`).
-/// Sentinel: `conic_kkt_direction_matches_dense_schur_oracle`'s
-/// `single_large_soc_border` case (`d=300 > 10*sqrt(603)~245`) fails if
-/// this pinning is reverted to plain whole-matrix AMD (verified).
+/// `d` rows, so past that threshold AMD reshuffles the `dx`/`dz`
+/// elimination order it couples -- measured (`n=m=d`, `p=1`): the healthy
+/// `dx`-before-`dz` order flips from 202/202 to 0/202 at `d=202`, degrading
+/// Newton directions to `O(1)` garbage failing the health probe. Pinning
+/// the aux columns last processes `[dx, dy, dz]` first and applies the
+/// rank-1 corrections as final Schur updates -- textbook bordered-system
+/// elimination, `O(d)` fill per aux column (`conic_border_l_fill_stays_
+/// linear` measures `4.0*d` at `d=100,000`). Sentinel (verified by revert):
+/// `conic_kkt_direction_matches_dense_schur_oracle` case
+/// `single_large_soc_border` (d=300, past the cutoff) fails without pinning.
 fn amd_pinned_aux(base: &KktSkeleton, deadline: Option<Instant>) -> Vec<usize> {
     let total = base.total();
     if base.n_border == 0 {
@@ -639,21 +609,18 @@ pub(super) fn factorize_with_retry(
     // DD-LDL (TwoFloat, ~106-bit) escalation. The f64 ladder above only grows
     // `delta` on the `dx`/`dy` diagonals -- irrelevant when the true
     // ill-conditioning lives in `W^2` (deliberately unregularized, see the
-    // module doc comment), e.g. a conflicting orthant/SOC pair on an
-    // infeasible problem where `s_i` has shrunk enough that `f64`'s ~16
-    // digits can no longer resolve `W^2_ii` accurately against the rest of
-    // the (much larger) matrix. Still health-probed: `ldl_dd` shares the
-    // same fixed sign-aware clamp thresholds as the f64 path
-    // (`crate::linalg::ldl_dd`'s `EPSILON`/`DELTA`, matching
-    // `crate::linalg::ldl`'s), so once `W^2_ii` underflows that shared
-    // threshold, extra mantissa bits alone do not recover it -- confirmed by
-    // measurement (`socp_degenerate_fixed_var_infeasible_gets_certificate`
-    // reproduces the exact same premature plateau under DD as under f64).
-    // Materialized at REG_DELTA_INIT, not the ladder's final `delta`: a
-    // larger `dx`/`dy` regularization buys nothing at this rung (see the
-    // last-resort comment below) and would only perturb the system away from
-    // the exact one; likewise MINRES below must see the least-regularized
-    // matrix for its "exact stored entries" property to mean anything.
+    // module doc), e.g. a conflicting orthant/SOC pair where `s_i` has
+    // shrunk enough that `f64`'s ~16 digits can no longer resolve `W^2_ii`
+    // against the rest of the matrix. Still health-probed against the same
+    // clamp thresholds as the f64 path (`crate::linalg::ldl_dd`'s
+    // `EPSILON`/`DELTA`), so once `W^2_ii` underflows that shared
+    // threshold, extra mantissa bits alone do not recover it (confirmed:
+    // `socp_degenerate_fixed_var_infeasible_gets_certificate` shows the
+    // same premature plateau under DD as under f64). Materialized at
+    // REG_DELTA_INIT, not the ladder's final `delta`: a larger `dx`/`dy`
+    // regularization buys nothing here (see the last-resort comment
+    // below) and would only perturb the system away from the exact one
+    // MINRES needs.
     let unpermuted = caches
         .base
         .materialize(sc, blk, REG_DELTA_INIT, REG_DELTA_INIT);
@@ -737,23 +704,20 @@ pub(super) fn factorize_with_retry(
 }
 
 /// Jacobi (symmetric diagonal) equilibration escalation rung. `faer`'s LDL
-/// clamps any pivot below a *fixed* magnitude regardless of the rest of the
-/// matrix (see the module doc comment); a conflicting orthant/SOC pair's
-/// `W^2_ii` can underflow that fixed threshold while other rows stay at a
-/// completely different scale (`dx`'s `delta_p`, or another `W^2_jj` still
-/// `O(1)`). Rescaling `K -> D K D` with `D_i = 1/sqrt(|K_ii|)` (applied to
-/// *every* row, not just the tiny ones) normalises every diagonal to exactly
-/// `+-1`, so no diagonal is ever "small" relative to `faer`'s fixed
-/// threshold regardless of the original dynamic range -- the tiny original
-/// value survives instead as a (large but finite) off-diagonal magnitude,
-/// which the clamp does not touch. Solving `(D K D) x' = D rhs` then
-/// recovering `x = D x'` ([`ConicFactor::equilibrated`]) is an exact
-/// reformulation, not an approximation -- unlike DD/MINRES, which do not
-/// resolve this (measured: both hit the identical premature plateau as
-/// plain `f64`, see
+/// clamps any pivot below a *fixed* magnitude regardless of the rest of
+/// the matrix (see the module doc); a conflicting orthant/SOC pair's
+/// `W^2_ii` can underflow that threshold while other rows stay `O(1)`.
+/// Rescaling `K -> D K D` with `D_i = 1/sqrt(|K_ii|)` (applied to every
+/// row) normalises every diagonal to exactly `+-1`, so no diagonal is
+/// ever "small" relative to the fixed clamp regardless of the original
+/// dynamic range -- the tiny value survives instead as a large but
+/// finite off-diagonal, which the clamp does not touch. Solving `(D K
+/// D) x' = D rhs` then recovering `x = D x'`
+/// ([`ConicFactor::equilibrated`]) is exact, not approximate -- unlike
+/// DD/MINRES, which hit the identical premature plateau (measured:
 /// `socp_degenerate_fixed_var_infeasible_gets_certificate`). Reuses
-/// `caches.perm`/`caches.symbolic`: equilibration only rescales values, the
-/// sparsity pattern is unchanged.
+/// `caches.perm`/`caches.symbolic`: equilibration only rescales values,
+/// the sparsity pattern is unchanged.
 fn try_equilibrated(
     caches: &KktCaches,
     sc: &Scaling,
@@ -938,15 +902,18 @@ fn probe_kkt_health(f: &KktFactor, mat: &CscMatrix, rhs: &[f64]) -> bool {
 }
 
 /// Builds the augmented-system RHS `(-rx, 0, -ry, -rz - W*rc, 0)` (column
-/// layout `[dx, aux_u, dy, dz, aux_v]`, see the module doc comment) for a
-/// given complementarity target `rc` (`-lambda` for the affine direction,
-/// `jdiv(lambda, target)` for the corrector; see the module doc comment for
-/// the RHS derivation). Shared by [`solve_dir`] (the real solve) and
-/// [`factorize_with_retry`]'s sanity probe, so the probe exercises the exact
-/// system the outer solver depends on rather than a synthetic stand-in. Both
-/// auxiliary (border) row ranges are always zero: they are not physical
-/// unknowns, just a device for keeping `-W^2` sparse (see
-/// `cone::visit_border_pattern`), so they carry no forcing term.
+/// layout `[dx, aux_u, dy, dz, aux_v]`) for a given complementarity target
+/// `rc` (`-lambda` for the affine direction, `jdiv(lambda, target)` for the
+/// corrector). Derivation of the `dz` row: scaled complementarity is
+/// `W^{-1} ds + W dz = rc` (arrow-form, matching `jdiv`/`jprod`), and the
+/// conic residual is `ds = -rz - G dx`; substituting gives `-W^2 dz + G dx
+/// = -rz - W rc`, i.e. the RHS above (`ds` is recovered as `-rz - G dx`
+/// after solving). Shared by [`solve_dir`] (the real solve) and
+/// [`factorize_with_retry`]'s sanity probe, so the probe exercises the
+/// exact system the outer solver depends on. Both auxiliary (border) row
+/// ranges are always zero: they are not physical unknowns, just a device
+/// for keeping `-W^2` sparse (see `cone::visit_border_pattern`), so they
+/// carry no forcing term.
 pub(super) fn build_rhs(
     sc: &Scaling,
     blk: &Blocks,

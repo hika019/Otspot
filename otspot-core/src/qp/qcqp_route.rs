@@ -1,24 +1,19 @@
 //! Routes continuous QCQP (`QpProblem` with non-empty `quadratic_constraints`)
 //! to the conic solver stack.
 //!
-//! Convexity is screened by the conic bridge itself rather than reimplemented
-//! here: [`conic::solve_qp_problem_as_qcqp`] rejects a problem with
-//! `NotSupported` when it detects nonconvexity (indefinite `P0`/`Pi` via
-//! Cholesky, or a quadratic `>=`/`=` constraint). This screen is **not a
-//! convexity proof**: the bridge's Cholesky clamps pivots inside a small
-//! jitter band (meant to absorb QPS 6-digit rounding), so a slightly
-//! indefinite matrix can pass as "convex" — the bridge reports this via
-//! `QcqpResult::convexity_unproven`. The route accepts the convex-bridge
-//! result only when the reformulation was exact **and** the outcome is clean
-//! ([`is_clean_convex_outcome`]); everything else falls back to the spatial
-//! (McCormick) branch-and-bound global solver, which is sound for convex
-//! problems too. A clamp-free `Timeout` never falls back — retrying after
-//! the deadline would only double the time spent.
-//!
-//! `QpProblem` carries no integrality information (see
-//! [`crate::mip::MiqpProblem`], which layers `integer_vars` on top of a plain
-//! `QpProblem`/`LpProblem` instead of adding a field to them) — so this module
-//! only ever sees continuous problems.
+//! Convexity is screened by the conic bridge itself, not reimplemented
+//! here: [`conic::solve_qp_problem_as_qcqp`] rejects nonconvex problems
+//! (`NotSupported`, via Cholesky on `P0`/`Pi` or a quadratic `>=`/`=`
+//! constraint). This is **not a convexity proof**: the bridge's Cholesky
+//! clamps pivots in a small jitter band, so a slightly indefinite matrix
+//! can pass as "convex" (reported via `QcqpResult::convexity_unproven`).
+//! The route accepts the convex-bridge result only when exact **and**
+//! clean ([`is_clean_convex_outcome`]); everything else falls back to
+//! the spatial (McCormick) branch-and-bound solver (sound for convex
+//! too); a clamp-free `Timeout` never falls back (retrying past the
+//! deadline doubles the time spent). `QpProblem` itself carries no
+//! integrality info ([`crate::mip::MiqpProblem`] layers `integer_vars`
+//! on top instead), so this module only ever sees continuous problems.
 
 use std::time::Instant;
 

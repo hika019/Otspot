@@ -783,14 +783,8 @@ impl Model {
             } else {
                 let lb: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].0).collect();
                 let ub: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].1).collect();
-                let r = otspot_core::conic::solve_miqcp(
-                    &qp,
-                    &integer_vars,
-                    &lb,
-                    &ub,
-                    &opts,
-                    &bb_opts,
-                );
+                let r =
+                    otspot_core::conic::solve_miqcp(&qp, &integer_vars, &lb, &ub, &opts, &bb_opts);
                 (r.status, r.objective, r.x)
             }
         } else {

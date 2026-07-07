@@ -275,11 +275,8 @@ fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResu
             Err(_) => return Some(SolverResult::numerical_error()),
         };
         let has_qc = !qp.quadratic_constraints.is_empty();
-        for (k, ((&lin_k, &ct), &b_k)) in lhs
-            .iter()
-            .zip(&qp.constraint_types)
-            .zip(&qp.b)
-            .enumerate()
+        for (k, ((&lin_k, &ct), &b_k)) in
+            lhs.iter().zip(&qp.constraint_types).zip(&qp.b).enumerate()
         {
             // Full QCQP row k: 1/2 x'Q_k x + a_k'x {<=,=,>=} b_k.
             let lhs_k = lin_k

@@ -479,7 +479,10 @@ fn global_core(
     };
 
     while let Some((lb, ub)) = stack.pop() {
-        if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        if opts
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
             timed_out = true;
             break;
         }
