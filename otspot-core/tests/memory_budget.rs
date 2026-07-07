@@ -353,25 +353,31 @@ fn qp_ipm_route_peak_within_budget() {
 
 use otspot_core::conic::{solve_socp, ConeSpec, ConicOptions, ConicProblem};
 
-/// `conic::ipm::solve` densifies `A` and `G` (and the KKT system) up front
-/// regardless of sparsity (see `csc_to_dense` calls at the top of `solve`),
-/// so this route is currently O((n+m)^2) by construction, not O(nnz) — that
-/// densification is a separate, already-tracked issue (the sparse-KKT
-/// alternative diverges at small n per commit 09dba4cf), not something this
-/// fence should paper over. `NUM_BLOCKS` is deliberately small: this is a
-/// regression fence pinned to the *current* dense behavior (catch further
-/// blow-ups, e.g. an accidental extra dense copy per iteration), not an
-/// O(nnz) fence like the LP/QP routes above.
-const NUM_BLOCKS: usize = 800;
+/// `conic::ipm::solve` (Phase 3a, conic-oom) solves a sparse augmented
+/// quasidefinite KKT system (`conic::kkt`) built directly from `A`/`G`'s CSC
+/// storage -- no dense `A`, `G`, or KKT matrix of any size is ever
+/// materialized (unlike the pre-Phase-3a `csc_to_dense`-based path this
+/// fence originally pinned, which was O((n+m)^2) by construction). `m` many
+/// small independent SOC blocks contribute `O(sum d_i^2)` fill to the KKT's
+/// `W^2` block, which for `NUM_BLOCKS` blocks of fixed dimension is `O(n)`
+/// overall, so `NUM_BLOCKS` can now be scaled up (unlike the old dense
+/// fence's deliberately-small size) to make this a genuine O(nnz) fence.
+const NUM_BLOCKS: usize = 10_000;
 const CONIC_N: usize = 3 * NUM_BLOCKS;
 
-/// Measured peak (release, `cargo nextest run --release`, this machine):
-/// 226.2 MB at n=2400 (already three-digit MB at this small n — direct
-/// evidence the dense path would reach GB scale by n in the low 10^4s, per
-/// the module doc comment). Budget = measured x3 margin. Because the path is
-/// already dense this is a regression fence against *further* densification
-/// (e.g. a redundant dense copy per IPM iteration), not an O(nnz) proof.
-const CONIC_PEAK_BUDGET_BYTES: usize = 680 * 1024 * 1024;
+/// Measured peak (release, `cargo test --release --test memory_budget
+/// conic_socp_route_peak_within_budget -- --nocapture`, this machine):
+/// 27.6 MB at n=30000, m=30000, p=10000. Budget = measured x3 margin
+/// (CLAUDE.md convention). This *is* now an O(nnz) fence: Phase 3a
+/// (conic-oom) replaced the dense `A`/`G`/KKT densification this fence used
+/// to pin (`csc_to_dense` calls, now removed) with the sparse augmented
+/// quasidefinite system in `conic::kkt` (no dense intermediate of any size
+/// anywhere in the solve path). A dense-KKT fallback at this scale would
+/// need `(n+p+m)^2 * 8` bytes = `(70000)^2 * 8` ~= 39.2 GB -- physically
+/// unrunnable on ordinary CI hardware, so this fence cannot be verified by
+/// literally reverting and re-running (see `INJECT_QUADRATIC_BLOWUP` for the
+/// revert-detection mechanism used instead, verified below).
+const CONIC_PEAK_BUDGET_BYTES: usize = 83 * 1024 * 1024;
 
 /// `NUM_BLOCKS` independent 3-dim SOC blocks: cone `x0 >= sqrt(x1^2+x2^2)`
 /// via `G = -I`, `h = 0` (so `s = x`). Equality `x0_b = 1` fixes the cone
@@ -419,12 +425,12 @@ fn build_many_soc_socp(num_blocks: usize) -> (ConicProblem, f64) {
     (problem, -(num_blocks as f64))
 }
 
-/// Peak allocation fence for the conic SOCP path — a small-n regression
-/// fence, not an O(nnz) fence (see `NUM_BLOCKS` doc comment).
+/// Peak allocation fence for the conic SOCP path (see `NUM_BLOCKS` doc
+/// comment: an O(nnz) fence as of Phase 3a / conic-oom).
 ///
 /// **No-op failure guarantee**: flipping `INJECT_QUADRATIC_BLOWUP` to `true`
-/// makes this FAIL (verified manually: peak jumps to 1360.5 MB against the
-/// 680 MB budget).
+/// makes this FAIL (verified manually: peak jumps to 166.9 MB against the
+/// 83.0 MB budget).
 #[test]
 fn conic_socp_route_peak_within_budget() {
     let _serial = lock_measurement();
@@ -457,5 +463,104 @@ fn conic_socp_route_peak_within_budget() {
         "conic SOCP route peak {:.1} MB exceeds {:.1} MB budget (n={CONIC_N}, {NUM_BLOCKS} blocks)",
         peak as f64 / 1_048_576.0,
         CONIC_PEAK_BUDGET_BYTES as f64 / 1_048_576.0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Conic SOCP route: one huge second-order cone (Phase 3b rank-1 border)
+// ---------------------------------------------------------------------------
+
+/// Single-SOC dimension for the border-representation fence. Matches the
+/// QPLIB DCQ shape (the QCQP->SOCP bridge emits one SOC of dimension `n+2`
+/// per quadratic term; QPLIB_8585 has `n = 99,999`). Any dimension at or
+/// above `conic::cone::SOC_BORDER_MIN_DIM` takes the same `O(d)` border
+/// path; this size makes the O(d^2) alternative unambiguous: a dense
+/// `d x d` `W^2` block would need `d^2 * 8` bytes = 80 GB.
+const HUGE_SOC_D: usize = 100_000;
+
+/// Measured peak (release, `cargo test --release --test memory_budget
+/// conic_single_huge_soc_peak_within_budget -- --nocapture`, this machine):
+/// 78.4 MB at `d = 100,000` (Optimal, 7 iterations). Budget = measured x3
+/// margin (CLAUDE.md convention), rounded to 240 MB. Linear in `d` by
+/// construction: the KKT skeleton stores `O(d)` entries for the cone (a
+/// diagonal, one dense border column of length `d`, one single-entry
+/// column, two corners) instead of the dense representation's `d(d+1)/2`,
+/// and the aux columns are pinned after AMD so `L`'s fill stays `O(nnz)`
+/// (`kkt::amd_pinned_aux`). The dense alternative's *first* allocation
+/// alone (`d(d+1)/2 * 8` = 40 GB) exceeds this budget by ~170x, so any
+/// regression to it fails instantly (in practice it aborts the process on
+/// the allocation itself -- observed during development when
+/// `w2_values_col_major`'s capacity still counted border cones).
+const HUGE_SOC_PEAK_BUDGET_BYTES: usize = 240 * 1024 * 1024;
+
+/// `min -x1` s.t. `x0 = 1`, `x in Q_d` via `G = -I`, `h = 0`. Hand-provable
+/// optimum: `x1 = 1` on the cone boundary, objective `-1` (same family as
+/// `build_many_soc_socp`, one giant block instead of many small ones).
+fn build_single_huge_soc_socp(d: usize) -> (ConicProblem, f64) {
+    let n = d;
+    let idx: Vec<usize> = (0..n).collect();
+    let g = CscMatrix::from_triplets(&idx, &idx, &vec![-1.0; n], n, n).expect("huge SOC G");
+    let h = vec![0.0; n];
+    let mut c = vec![0.0; n];
+    c[1] = -1.0;
+    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).expect("huge SOC A");
+    let b = vec![1.0];
+    let problem = ConicProblem {
+        c,
+        a,
+        b,
+        g,
+        h,
+        cone: ConeSpec { l: 0, soc: vec![d] },
+    };
+    (problem, -1.0)
+}
+
+/// Peak allocation fence for a single `d = 100,000` second-order cone
+/// through the real `solve_socp` entry point -- the Phase 3b
+/// rank-1-border KKT representation (`cone::visit_border_pattern`) is the
+/// only reason this can run at all: the pre-3b dense `W^2` block for this
+/// cone alone would be an 80 GB allocation (see `HUGE_SOC_D`).
+///
+/// **No-op failure guarantee**: flipping `INJECT_QUADRATIC_BLOWUP` to `true`
+/// makes this FAIL (verified manually, same mechanism as the other three
+/// routes); independently, lowering `cone::SOC_BORDER_MIN_DIM`'s routing
+/// (reverting `visit_w2_pattern`'s border skip) reintroduces the literal
+/// `d(d+1)/2`-entry skeleton, which at this `d` aborts on allocation long
+/// before the budget assert -- both failure modes are loud.
+#[test]
+fn conic_single_huge_soc_peak_within_budget() {
+    let _serial = lock_measurement();
+    let (problem, expected_obj) = build_single_huge_soc_socp(HUGE_SOC_D);
+
+    reset_peak();
+    let r = solve_socp(&problem, &ConicOptions::default());
+    maybe_inject_dense_blowup(HUGE_SOC_PEAK_BUDGET_BYTES);
+    let peak = peak_bytes();
+    eprintln!(
+        "conic_huge_soc peak={peak} bytes ({:.2} MB), status={:?}, iters={}",
+        peak as f64 / 1_048_576.0,
+        r.status,
+        r.iterations
+    );
+
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "huge single-SOC route: expected Optimal"
+    );
+    let rel_err = (r.objective - expected_obj).abs() / expected_obj.abs().max(1.0);
+    assert!(
+        rel_err < 1e-4,
+        "huge single-SOC route: obj={:.6e} expected={:.6e} rel_err={:.3e}",
+        r.objective,
+        expected_obj,
+        rel_err
+    );
+    assert!(
+        peak <= HUGE_SOC_PEAK_BUDGET_BYTES,
+        "huge single-SOC route peak {:.1} MB exceeds {:.1} MB budget (d={HUGE_SOC_D})",
+        peak as f64 / 1_048_576.0,
+        HUGE_SOC_PEAK_BUDGET_BYTES as f64 / 1_048_576.0
     );
 }

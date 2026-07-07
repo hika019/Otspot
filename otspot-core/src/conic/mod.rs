@@ -16,6 +16,7 @@
 
 mod cone;
 mod ipm;
+mod kkt;
 mod misocp;
 mod nonconvex;
 mod qcqp;
@@ -27,11 +28,11 @@ pub use nonconvex::{
     solve_global_miqcp, solve_global_qcqp, GQuadConstraint, GlobalOptions, GlobalResult,
     NonconvexQcqp,
 };
+pub(crate) use qcqp::qcqp_matrix_to_csc;
 pub use qcqp::{
     qcqp_from_qp_problem, solve_qcqp, solve_qp_problem_as_qcqp, to_conic, QcqpProblem, QcqpResult,
     QuadConstraint,
 };
-pub(crate) use qcqp::qcqp_matrix_to_csc;
 
 use crate::problem::SolveStatus;
 use crate::sparse::CscMatrix;

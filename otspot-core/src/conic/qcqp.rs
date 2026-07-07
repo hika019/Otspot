@@ -197,7 +197,7 @@ impl Triplets {
 /// quadratic; the SOCP variable vector is `[x (n) , t?]`.
 ///
 /// The third tuple element is `true` when any Cholesky factorization clamped
-/// a negative jitter-band pivot (see [`sparse_cholesky_lower`]): the SOCP is
+/// a negative jitter-band pivot (see `sparse_cholesky_lower`): the SOCP is
 /// then only an approximation of the QCQP and convexity is unproven.
 pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize, bool), String> {
     let n = qp.n;

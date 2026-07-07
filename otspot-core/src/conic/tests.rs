@@ -225,13 +225,16 @@ fn box_diag_qcqp(n: usize) -> (QcqpProblem, f64) {
     (qp, expected)
 }
 
-/// Sentinel for the dense-KKT sparse-LU regression: this exact case
-/// (`box_diag_32` in `bench_conic_suite`) converged with the dense LU but hit
-/// catastrophic cancellation near mu -> 0 (NumericalError) when the
-/// fill-reducing sparse LU ran on the fully dense QCQP-bridge KKT matrix.
-/// `bench_conic_suite` is `#[ignore]`d and only runs in the non-gating heavy
-/// CI job, so this extraction keeps the density gate in `ipm::sparse_lu_solve`
-/// guarded by the default CI profile.
+/// Sentinel for `conic::ipm`'s KKT solve path: this exact case
+/// (`box_diag_32` in `bench_conic_suite`) originally converged with a dense
+/// KKT + dense LU but hit catastrophic cancellation near mu -> 0
+/// (NumericalError) when a fill-reducing sparse LU ran on the fully dense
+/// QCQP-bridge KKT matrix (the 55eb7243-class regression); Phase 3a
+/// (conic-oom) replaced both with the sparse augmented quasidefinite system
+/// in `conic::kkt` (probe -> retry -> equilibration -> DD -> MINRES ladder,
+/// no dense KKT anywhere). `bench_conic_suite` is `#[ignore]`d and only runs
+/// in the non-gating heavy CI job, so this extraction keeps this numerical
+/// stress case guarded by the default CI profile.
 #[test]
 fn qcqp_box_diag_n32_stays_optimal() {
     let (qp, expected) = box_diag_qcqp(32);
@@ -248,13 +251,17 @@ fn qcqp_box_diag_n32_stays_optimal() {
     );
 }
 
-/// Reproduces the measurement backing `ipm::KKT_SPARSE_DENSITY_CEILING`: the
-/// QCQP-to-SOCP bridge yields a fully dense KKT Gram block. At the IPM's
-/// initial iterate (`s = z = e`) the NT scaling is the identity, so the
-/// pattern of `H = B^T B` equals that of `G^T G`; the SOC epigraph row
-/// carries the full `q0` vector, whose outer product alone fills every entry.
-/// Runtime NT scaling only mixes further, so density 1.0 here is a lower
-/// bound for every iteration.
+/// The QCQP-to-SOCP bridge emits one large SOC block per quadratic term
+/// (the objective's epigraph here), so its would-be Schur-complement Gram
+/// block `H = G^T W^{-2} G` is fully dense: at the IPM's initial iterate
+/// (`s = z = e`, NT scaling = identity) the pattern of `H` equals that of
+/// `G^T G`, and the SOC epigraph row carries the full `q0` vector, whose
+/// outer product alone fills every entry. Runtime NT scaling only mixes
+/// further, so density 1.0 here is a lower bound for every iteration. This
+/// is exactly the "single huge SOC" case Phase 3a (conic-oom)'s sparse
+/// augmented `W^2` block representation leaves dense (`d x d` per block,
+/// `d = nvar` here) rather than optimizing -- see `conic::kkt`'s module doc
+/// comment and Phase 3b.
 #[test]
 fn qcqp_bridge_kkt_gram_is_fully_dense() {
     for n in [3usize, 8, 16, 32] {
@@ -997,7 +1004,10 @@ fn misocp_mid_search_deadline_keeps_incumbent() {
     let res = solve_misocp(&prob, &ConicOptions::default(), &bb);
     assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
     assert!(!res.x.is_empty(), "incumbent must be preserved on timeout");
-    assert!(res.nodes < full.nodes, "deadline must actually cut the search");
+    assert!(
+        res.nodes < full.nodes,
+        "deadline must actually cut the search"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,15 +1105,15 @@ fn cone_membership_check_covers_all_branches() {
     // Interior point: inside.
     assert!(super::cone::in_cone(&blk, &[1.0, 2.0, 2.0, 1.0, 1.0], tol));
     // Orthant violation.
-    assert!(!super::cone::in_cone(&blk, &[-1.0, 2.0, 2.0, 1.0, 1.0], tol));
+    assert!(!super::cone::in_cone(
+        &blk,
+        &[-1.0, 2.0, 2.0, 1.0, 1.0],
+        tol
+    ));
     // SOC violation (head < ||rest||).
     assert!(!super::cone::in_cone(&blk, &[1.0, 2.0, 1.0, 1.0, 1.0], tol));
     // Boundary within tolerance: accepted.
-    assert!(super::cone::in_cone(
-        &blk,
-        &[0.0, 0.0, 1.0, 1.0, 0.0],
-        tol
-    ));
+    assert!(super::cone::in_cone(&blk, &[0.0, 0.0, 1.0, 1.0, 0.0], tol));
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,7 +1351,10 @@ fn nt_scaling_invariants_edge_configs() {
     );
     // dim=1 SOC blocks: Q_1 = R_+, degenerate tail-free case.
     assert_nt_invariants(
-        &ConeSpec { l: 0, soc: vec![1, 1] },
+        &ConeSpec {
+            l: 0,
+            soc: vec![1, 1],
+        },
         &[4.0, 0.5],
         &[1.0, 2.0],
     );
@@ -1483,8 +1496,7 @@ fn nt_scaling_soc_matches_independent_dense_oracle() {
                 let winv_oracle = dense_matvec(&winv_dense, d, &v);
                 let winv_impl = sc.apply_winv(&blk, &v);
                 for i in 0..d {
-                    let rel =
-                        (winv_impl[i] - winv_oracle[i]).abs() / winv_oracle[i].abs().max(1.0);
+                    let rel = (winv_impl[i] - winv_oracle[i]).abs() / winv_oracle[i].abs().max(1.0);
                     assert!(
                         rel < 1e-10,
                         "d={d} seed={seed}: Winv mismatch at {i}: impl={} oracle={}",
@@ -1555,6 +1567,91 @@ fn nt_scaling_soc_w_squared_matches_quadratic_representation() {
                         "d={d} seed={seed}: W^2 v != P(w) v at {i}: {} vs {}",
                         w2v[i],
                         pw_v[i]
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Independent-oracle check of the Phase 3b rank-1-border expansion
+/// (derivation in `cone::Scaling::border_values`): `-W^2 = -eta^2 I -
+/// u u^T + v v^T` (`u = sqrt(2) wbar`, `v = sqrt(2) e0`). Builds the KKT
+/// `(dz,dz)` block's `(d+2)`-dim border-augmented form
+/// `[[-eta^2 I, b_u, b_v], [b_u^T, +1, 0], [b_v^T, 0, -1]]`
+/// (`b_u = eta*sqrt(2)*wbar`, `b_v = eta*sqrt(2)*e0`) from scratch,
+/// Schur-eliminates the 2x2 corner (its own inverse, no solver needed),
+/// and compares to `-1` times an independently recomputed dense `W^2`
+/// closed form (not via `cone::w2_values_col_major`).
+///
+/// Deliberately bypasses the `SOC_BORDER_MIN_DIM` routing and all
+/// production border-assembly code: this is a pure algebra check at small
+/// `d`; `conic_kkt_direction_matches_dense_schur_oracle`'s
+/// `single_large_soc_border` case exercises the production assembly.
+#[test]
+fn soc_border_expansion_matches_dense_w2() {
+    for &d in &[1usize, 2, 3, 5, 20] {
+        for seed in [101u64, 202, 303] {
+            let mut rng = Lcg(seed * 7919 + d as u64);
+            let s = random_interior_soc_point(&mut rng, d);
+            let z = random_interior_soc_point(&mut rng, d);
+
+            let jdet = |v: &[f64]| v[0] * v[0] - v[1..].iter().map(|a| a * a).sum::<f64>();
+            let ss = jdet(&s);
+            let zz = jdet(&z);
+            let sbar: Vec<f64> = s.iter().map(|v| v / ss.sqrt()).collect();
+            let zbar: Vec<f64> = z.iter().map(|v| v / zz.sqrt()).collect();
+            let dot: f64 = sbar.iter().zip(&zbar).map(|(a, b)| a * b).sum();
+            let gamma = ((1.0 + dot) / 2.0).sqrt();
+            let mut wbar = vec![0.0; d];
+            wbar[0] = (sbar[0] + zbar[0]) / (2.0 * gamma);
+            for k in 1..d {
+                wbar[k] = (sbar[k] - zbar[k]) / (2.0 * gamma);
+            }
+            let eta = (ss / zz).powf(0.25);
+            let w: Vec<f64> = wbar.iter().map(|v| v * eta).collect();
+            let det_w = jdet(&w);
+
+            // Dense W^2, independent closed form.
+            let mut w2_dense = vec![vec![0.0; d]; d];
+            for i in 0..d {
+                for j in 0..d {
+                    let j_ij = if i != j {
+                        0.0
+                    } else if i == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    w2_dense[i][j] = 2.0 * w[i] * w[j] - det_w * j_ij;
+                }
+            }
+
+            // Border-augmented reconstruction of `-W^2` (the actual KKT
+            // `(dz,dz)` block, matching `kkt::build_skeleton`'s raw diagonal
+            // `-eta^2` plus Schur-eliminating the 2x2 `diag(c_u=+1,c_v=-1)`
+            // corner): `A - b_u b_u^T / c_u - b_v b_v^T / c_v`
+            //         `= -eta^2 I - b_u b_u^T + b_v b_v^T`.
+            let sqrt2 = std::f64::consts::SQRT_2;
+            let b_u: Vec<f64> = wbar.iter().map(|v| eta * sqrt2 * v).collect();
+            let mut b_v = vec![0.0; d];
+            b_v[0] = eta * sqrt2;
+            let mut recon = vec![vec![0.0; d]; d];
+            for i in 0..d {
+                recon[i][i] = -eta * eta;
+                for j in 0..d {
+                    recon[i][j] -= b_u[i] * b_u[j];
+                    recon[i][j] += b_v[i] * b_v[j];
+                }
+            }
+
+            for i in 0..d {
+                for j in 0..d {
+                    let (a, b) = (recon[i][j], -w2_dense[i][j]);
+                    let err = (a - b).abs();
+                    assert!(
+                        err < 1e-12,
+                        "d={d} seed={seed} ({i},{j}): border(-W^2)={a} dense(-W^2)={b} err={err:e}"
                     );
                 }
             }
@@ -1834,7 +1931,16 @@ fn oracle_to_conic(
         h.extend(hh);
     }
 
-    Some((g_rows, h, c, a_dense, b_eq.to_vec(), ml, soc, convexity_unproven))
+    Some((
+        g_rows,
+        h,
+        c,
+        a_dense,
+        b_eq.to_vec(),
+        ml,
+        soc,
+        convexity_unproven,
+    ))
 }
 
 fn assert_dense_close(actual: &[Vec<f64>], expected: &[Vec<f64>], tol: f64, label: &str) {
@@ -2155,8 +2261,8 @@ fn to_conic_matches_dense_oracle_randomized() {
                 a_eq: csc(&a_eq, a_eq.len(), n),
                 b_eq: b_eq.clone(),
             };
-            let (conic, nvar, clamped) = to_conic(&qp)
-                .unwrap_or_else(|e| panic!("n={n} seed={seed} diag={diagonal}: {e}"));
+            let (conic, nvar, clamped) =
+                to_conic(&qp).unwrap_or_else(|e| panic!("n={n} seed={seed} diag={diagonal}: {e}"));
             let (og, oh, oc, oa, ob, oml, osoc, oclamp) = oracle;
 
             let label = format!("n={n} seed={seed} diag={diagonal}");
@@ -2407,4 +2513,920 @@ fn qp_problem_bridge_sparse_construction_is_near_linear_nnz() {
         "G nnz={} exceeds {SPARSE_NNZ_FACTOR}x input nnz={input_nnz}",
         conic.g.nnz()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3a (conic-oom): sparse augmented KKT (`conic::kkt`) vs an independent
+// dense Schur-complement oracle, written fresh here (not sharing code with
+// `conic::kkt` or the removed pre-Phase-3a dense implementation).
+// ---------------------------------------------------------------------------
+
+/// Regularization used by [`oracle_solve_dir_dense_schur`]'s dense KKT.
+/// Matches `conic::kkt`'s `REG_DELTA_INIT` -- both are the *initial* static
+/// regularization, and every problem below is well-conditioned enough that
+/// neither side's retry ladder ever needs to grow it (checked by the
+/// equivalence assertions themselves: a mismatched regularization would show
+/// up as a `dx`/`dy` discrepancy above the tolerance).
+const ORACLE_REG_DELTA: f64 = 1e-10;
+
+/// Partial-pivot Gaussian elimination, for use as an independent solver
+/// oracle. Deliberately not shared with any production code path.
+fn oracle_gauss_solve(mut m: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Vec<f64> {
+    let n = rhs.len();
+    for col in 0..n {
+        let mut piv = col;
+        let mut best = m[col][col].abs();
+        for r in (col + 1)..n {
+            let v = m[r][col].abs();
+            if v > best {
+                best = v;
+                piv = r;
+            }
+        }
+        if piv != col {
+            m.swap(col, piv);
+            rhs.swap(col, piv);
+        }
+        let d = m[col][col];
+        for r in (col + 1)..n {
+            let f = m[r][col] / d;
+            if f != 0.0 {
+                for c in col..n {
+                    m[r][c] -= f * m[col][c];
+                }
+                rhs[r] -= f * rhs[col];
+            }
+        }
+    }
+    let mut u = vec![0.0; n];
+    for i in (0..n).rev() {
+        let mut acc = rhs[i];
+        for j in (i + 1)..n {
+            acc -= m[i][j] * u[j];
+        }
+        u[i] = acc / m[i][i];
+    }
+    u
+}
+
+/// Dense Schur-complement Newton-direction oracle for one predictor/corrector
+/// step: forms `B = W^{-1} G`, `H = B^T B` explicitly (dense), assembles the
+/// classical 2-block quasidefinite KKT `[[H+deltaI, A^T],[A,-deltaI]]`, and
+/// solves it by Gaussian elimination -- textbook Schur-complement elimination
+/// of `dz`, independent of `conic::kkt`'s sparse augmented (unreduced) system
+/// under test. `rc` is the complementarity target (`-lambda` for the affine
+/// direction, `jdiv(lambda, target)` for the corrector).
+#[allow(clippy::too_many_arguments)]
+fn oracle_solve_dir_dense_schur(
+    a: &CscMatrix,
+    g: &CscMatrix,
+    sc: &super::cone::Scaling,
+    blk: &super::cone::Blocks,
+    rx: &[f64],
+    ry: &[f64],
+    rz: &[f64],
+    rc: &[f64],
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let n = g.ncols();
+    let p = a.nrows();
+    let m = g.nrows();
+    let ad = a.to_dense_rows();
+    let gd = g.to_dense_rows();
+
+    // B = W^{-1} G (dense, m x n), built column-by-column.
+    let mut bmat = vec![vec![0.0; n]; m];
+    for j in 0..n {
+        let col: Vec<f64> = (0..m).map(|i| gd[i][j]).collect();
+        let bcol = sc.apply_winv(blk, &col);
+        for i in 0..m {
+            bmat[i][j] = bcol[i];
+        }
+    }
+    // H = B^T B (dense, n x n) + regularization.
+    let mut h = vec![vec![0.0; n]; n];
+    for r in 0..m {
+        for i in 0..n {
+            let bi = bmat[r][i];
+            if bi != 0.0 {
+                for j in 0..n {
+                    h[i][j] += bi * bmat[r][j];
+                }
+            }
+        }
+    }
+    for (i, row) in h.iter_mut().enumerate() {
+        row[i] += ORACLE_REG_DELTA;
+    }
+
+    let winv_rz = sc.apply_winv(blk, rz);
+    let mut t: Vec<f64> = (0..m).map(|i| winv_rz[i] + rc[i]).collect();
+    let mut bt_t = vec![0.0; n];
+    for r in 0..m {
+        let tr = t[r];
+        if tr != 0.0 {
+            for j in 0..n {
+                bt_t[j] += bmat[r][j] * tr;
+            }
+        }
+    }
+
+    let total = n + p;
+    let mut kkt = vec![vec![0.0; total]; total];
+    for i in 0..n {
+        for j in 0..n {
+            kkt[i][j] = h[i][j];
+        }
+    }
+    for q in 0..p {
+        for i in 0..n {
+            kkt[i][n + q] = ad[q][i];
+            kkt[n + q][i] = ad[q][i];
+        }
+        kkt[n + q][n + q] = -ORACLE_REG_DELTA;
+    }
+    let mut rhs = vec![0.0; total];
+    for i in 0..n {
+        rhs[i] = -rx[i] - bt_t[i];
+    }
+    for i in 0..p {
+        rhs[n + i] = -ry[i];
+    }
+
+    let sol = oracle_gauss_solve(kkt, rhs);
+    let dx = sol[0..n].to_vec();
+    let dy = sol[n..total].to_vec();
+
+    let gdx: Vec<f64> = (0..m)
+        .map(|i| gd[i].iter().zip(&dx).map(|(a, b)| a * b).sum())
+        .collect();
+    for i in 0..m {
+        t[i] = gdx[i] + rz[i];
+    }
+    let w1 = sc.apply_winv(blk, &t);
+    let inner: Vec<f64> = (0..m).map(|i| w1[i] + rc[i]).collect();
+    let dz = sc.apply_winv(blk, &inner);
+    let ds: Vec<f64> = (0..m).map(|i| -rz[i] - gdx[i]).collect();
+    (dx, dy, dz, ds)
+}
+
+/// Mixed absolute/relative comparison: the `max(|old|, 1)` denominator means
+/// components with `|old| <= 1` are held to *absolute* error `TOL` and larger
+/// components to relative error `TOL`. Intentional -- the test problems'
+/// direction components are `O(1)`-normalized by construction, and a pure
+/// relative check would spuriously fail on near-zero components where both
+/// solvers agree to machine precision in absolute terms.
+#[allow(clippy::too_many_arguments)]
+fn assert_dir_close(
+    case: &str,
+    phase: &str,
+    dx_new: &[f64],
+    dx_old: &[f64],
+    dy_new: &[f64],
+    dy_old: &[f64],
+    dz_new: &[f64],
+    dz_old: &[f64],
+    ds_new: &[f64],
+    ds_old: &[f64],
+) {
+    // 1e-5, not 1e-8: a single LDL solve (fixed AMD pivot order, no dynamic
+    // pivoting) is measurably less accurate than partial-pivot Gaussian
+    // elimination on some well-scaled-but-not-perfectly-conditioned cases
+    // (observed up to ~2e-6 relative on `mixed_l2_soc3_soc2_p1`) -- expected
+    // given the two use structurally different elimination strategies, not a
+    // bug (a real algebra mismatch would show as an O(1) discrepancy, not
+    // this). `conic_solve_matches_dense_schur_oracle_full_solve` below
+    // checks that this per-step slack does not compound: full
+    // multi-iteration solves still agree to `rel < 1e-8` in the final
+    // iterate, since the outer IPM converges to the same KKT system
+    // regardless of single-step precision.
+    const TOL: f64 = 1e-5;
+    let check = |label: &str, new: &[f64], old: &[f64]| {
+        for (i, (&a, &b)) in new.iter().zip(old).enumerate() {
+            let rel = (a - b).abs() / b.abs().max(1.0);
+            assert!(
+                rel < TOL,
+                "{case} {phase} {label}[{i}]: new={a} old={b} rel={rel:e}"
+            );
+        }
+    };
+    check("dx", dx_new, dx_old);
+    check("dy", dy_new, dy_old);
+    check("dz", dz_new, dz_old);
+    check("ds", ds_new, ds_old);
+}
+
+/// Newton-direction equivalence (affine and corrector) between the sparse
+/// augmented KKT system (`conic::kkt::solve_dir`) and the independent dense
+/// Schur-complement oracle above, across hand-built problems spanning
+/// orthant-only, single-SOC, mixed orthant+multi-SOC, and randomized
+/// orthant+multi-SOC structures. Evaluated at an arbitrary strictly-interior
+/// `(x, y, s, z)` (not necessarily near-optimal): the equivalence being
+/// tested is purely about the linear solve, which holds at any interior
+/// point.
+#[test]
+fn conic_kkt_direction_matches_dense_schur_oracle() {
+    use super::cone::{self, Blocks};
+    use super::kkt;
+    use crate::linalg::kkt_solver::KktConfig;
+
+    struct Case {
+        name: &'static str,
+        a: CscMatrix,
+        g: CscMatrix,
+        cone: ConeSpec,
+        x: Vec<f64>,
+        y: Vec<f64>,
+        s: Vec<f64>,
+        z: Vec<f64>,
+    }
+
+    let mut cases = vec![
+        Case {
+            name: "orthant_p1",
+            a: csc(&[vec![1.0, 1.0]], 1, 2),
+            g: csc(&[vec![-1.0, 0.0], vec![0.0, -1.0]], 2, 2),
+            cone: ConeSpec { l: 2, soc: vec![] },
+            x: vec![0.3, 0.4],
+            y: vec![0.1],
+            s: vec![0.5, 0.6],
+            z: vec![0.8, 0.7],
+        },
+        Case {
+            name: "single_soc_p0",
+            a: CscMatrix::from_triplets(&[], &[], &[], 0, 3).unwrap(),
+            g: csc(
+                &[
+                    vec![-1.0, 0.0, 0.0],
+                    vec![0.0, -1.0, 0.0],
+                    vec![0.0, 0.0, -1.0],
+                ],
+                3,
+                3,
+            ),
+            cone: ConeSpec { l: 0, soc: vec![3] },
+            x: vec![0.2, 0.1, -0.05],
+            y: vec![],
+            s: vec![1.0, 0.2, -0.1],
+            z: vec![1.2, -0.3, 0.15],
+        },
+        Case {
+            name: "mixed_l2_soc3_soc2_p1",
+            a: csc(&[vec![1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]], 1, 7),
+            g: csc(
+                &[
+                    vec![-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    vec![0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    vec![0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0],
+                    vec![0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0],
+                    vec![0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0],
+                    vec![0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0],
+                    vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0],
+                ],
+                7,
+                7,
+            ),
+            cone: ConeSpec {
+                l: 2,
+                soc: vec![3, 2],
+            },
+            x: vec![0.3, -0.2, 0.15, 0.1, -0.05, 0.4, 0.2],
+            y: vec![0.05],
+            s: vec![0.5, 0.6, 1.0, 0.2, -0.1, 1.0, 0.3],
+            z: vec![0.4, 0.3, 1.3, -0.2, 0.15, 1.1, -0.25],
+        },
+    ];
+
+    // Randomized orthant(l=2) + SOC(3,2) problems, G = -I, one equality row.
+    for seed in [11u64, 22, 33] {
+        let mut rng = Lcg(seed);
+        let l = 2usize;
+        let soc_dims = [3usize, 2usize];
+        let m = l + soc_dims.iter().sum::<usize>();
+        let n = m;
+        let p = 1usize;
+
+        let idx: Vec<usize> = (0..n).collect();
+        let g = CscMatrix::from_triplets(&idx, &idx, &vec![-1.0; n], m, n).unwrap();
+        let mut a_row = vec![0.0; n];
+        a_row[0] = 1.0;
+        a_row[n - 1] = 1.0;
+        let a = csc(&[a_row], p, n);
+
+        let x: Vec<f64> = (0..n).map(|_| rng.next_f(-0.5, 0.5)).collect();
+        let y: Vec<f64> = (0..p).map(|_| rng.next_f(-0.5, 0.5)).collect();
+        let mut s = vec![0.0; m];
+        let mut z = vec![0.0; m];
+        for si in s.iter_mut().take(l) {
+            *si = rng.next_f(0.3, 2.0);
+        }
+        for zi in z.iter_mut().take(l) {
+            *zi = rng.next_f(0.3, 2.0);
+        }
+        let mut off = l;
+        for &d in &soc_dims {
+            let sb = random_interior_soc_point(&mut rng, d);
+            let zb = random_interior_soc_point(&mut rng, d);
+            s[off..off + d].copy_from_slice(&sb);
+            z[off..off + d].copy_from_slice(&zb);
+            off += d;
+        }
+
+        cases.push(Case {
+            name: "random_mixed",
+            a,
+            g,
+            cone: ConeSpec {
+                l,
+                soc: soc_dims.to_vec(),
+            },
+            x,
+            y,
+            s,
+            z,
+        });
+    }
+
+    // Randomized single large SOC (d=300 > cone::SOC_BORDER_MIN_DIM=256) to
+    // exercise the Phase 3b rank-1-border KKT representation end-to-end:
+    // `Blocks`' threshold routing, `visit_border_pattern`/`border_values`,
+    // `kkt::build_skeleton`'s auxiliary-variable assembly, AMD ordering, and
+    // LDL factorization. `oracle_solve_dir_dense_schur` never materializes
+    // `W^2` (only `apply_winv`/`apply_w`), so it is blind to which KKT
+    // representation produced `sc` -- this is a genuine end-to-end
+    // equivalence check, not a re-test of the algebra (that is
+    // `soc_border_expansion_matches_dense_w2`, in isolation at small `d`).
+    for seed in [44u64, 55] {
+        let mut rng = Lcg(seed);
+        let d = 300usize;
+        let l = 0usize;
+        let m = d;
+        let n = m;
+        let p = 1usize;
+
+        let idx: Vec<usize> = (0..n).collect();
+        let g = CscMatrix::from_triplets(&idx, &idx, &vec![-1.0; n], m, n).unwrap();
+        let mut a_row = vec![0.0; n];
+        a_row[0] = 1.0;
+        a_row[n - 1] = 1.0;
+        let a = csc(&[a_row], p, n);
+
+        let x: Vec<f64> = (0..n).map(|_| rng.next_f(-0.5, 0.5)).collect();
+        let y: Vec<f64> = (0..p).map(|_| rng.next_f(-0.5, 0.5)).collect();
+        let s = random_interior_soc_point(&mut rng, d);
+        let z = random_interior_soc_point(&mut rng, d);
+
+        cases.push(Case {
+            name: "single_large_soc_border",
+            a,
+            g,
+            cone: ConeSpec { l, soc: vec![d] },
+            x,
+            y,
+            s,
+            z,
+        });
+    }
+
+    for case in &cases {
+        let blk = Blocks::new(&case.cone);
+        let n = case.g.ncols();
+        let p = case.a.nrows();
+        let m = case.g.nrows();
+
+        let aty = kkt::spmtv(&case.a, &case.y);
+        let gtz = kkt::spmtv(&case.g, &case.z);
+        let rx: Vec<f64> = (0..n).map(|i| aty[i] + gtz[i]).collect();
+        let ax = kkt::spmv(&case.a, &case.x);
+        let ry: Vec<f64> = ax;
+        let gx = kkt::spmv(&case.g, &case.x);
+        let rz: Vec<f64> = (0..m).map(|i| gx[i] + case.s[i]).collect();
+
+        let sc = cone::nt_scaling(&blk, &case.s, &case.z);
+        let lambda = sc.apply_winv(&blk, &case.s);
+
+        let mut caches = kkt::build_kkt_caches(&case.a, &case.g, &blk, n, p, None);
+        let cfg = KktConfig::default();
+
+        // Affine direction (rc = -lambda).
+        let rc_aff: Vec<f64> = lambda.iter().map(|v| -v).collect();
+        let probe_rhs = kkt::build_rhs(&sc, &blk, n, p, m, &rx, &ry, &rz, &rc_aff);
+        let factor = kkt::factorize_with_retry(&mut caches, &sc, &blk, &probe_rhs, None, &cfg)
+            .unwrap_or_else(|| panic!("{}: affine factorize failed", case.name));
+        let (dx_a, dy_a, dz_a, ds_a) =
+            kkt::solve_dir(&factor, &case.g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc_aff);
+        let (dx_a_o, dy_a_o, dz_a_o, ds_a_o) =
+            oracle_solve_dir_dense_schur(&case.a, &case.g, &sc, &blk, &rx, &ry, &rz, &rc_aff);
+        assert_dir_close(
+            case.name, "affine", &dx_a, &dx_a_o, &dy_a, &dy_a_o, &dz_a, &dz_a_o, &ds_a, &ds_a_o,
+        );
+
+        // Corrector direction: a plausible sigma*mu target using the
+        // affine direction just computed, exercising jprod/jdiv the same
+        // way `conic::ipm::solve` does.
+        let e = cone::identity(&blk);
+        let mu = 0.3_f64;
+        let sigma = 0.4_f64;
+        let dsw = sc.apply_winv(&blk, &ds_a);
+        let dzw = sc.apply_w(&blk, &dz_a);
+        let corr = cone::jprod(&blk, &dsw, &dzw);
+        let ll = cone::jprod(&blk, &lambda, &lambda);
+        let target: Vec<f64> = (0..m)
+            .map(|i| sigma * mu * e[i] - ll[i] - corr[i])
+            .collect();
+        let rc = cone::jdiv(&blk, &lambda, &target);
+        let probe_rhs2 = kkt::build_rhs(&sc, &blk, n, p, m, &rx, &ry, &rz, &rc);
+        let factor2 = kkt::factorize_with_retry(&mut caches, &sc, &blk, &probe_rhs2, None, &cfg)
+            .unwrap_or_else(|| panic!("{}: corrector factorize failed", case.name));
+        let (dx_c, dy_c, dz_c, ds_c) =
+            kkt::solve_dir(&factor2, &case.g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc);
+        let (dx_c_o, dy_c_o, dz_c_o, ds_c_o) =
+            oracle_solve_dir_dense_schur(&case.a, &case.g, &sc, &blk, &rx, &ry, &rz, &rc);
+        assert_dir_close(
+            case.name,
+            "corrector",
+            &dx_c,
+            &dx_c_o,
+            &dy_c,
+            &dy_c_o,
+            &dz_c,
+            &dz_c_o,
+            &ds_c,
+            &ds_c_o,
+        );
+    }
+}
+
+/// A from-scratch reference IPM (predictor-corrector, same NT scaling / step
+/// control / convergence criteria as `conic::ipm::solve`) that uses
+/// [`oracle_solve_dir_dense_schur`] for every Newton solve instead of
+/// `conic::kkt`. Only handles the "converges to Optimal" path (the problems
+/// below are feasible and bounded); no certificate detection, since that
+/// machinery is unchanged by Phase 3a and already covered elsewhere in this
+/// file.
+fn reference_ipm_solve(
+    problem: &ConicProblem,
+    opts: &ConicOptions,
+) -> (Vec<f64>, f64, bool, usize) {
+    use super::cone::{self, Blocks};
+
+    let blk = Blocks::new(&problem.cone);
+    let n = problem.n();
+    let p = problem.p();
+    let m = problem.m();
+    let nu = problem.cone.degree().max(1) as f64;
+    let c = &problem.c;
+    let bvec = &problem.b;
+    let hvec = &problem.h;
+    let nb = 1.0 + bvec.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let nc = 1.0 + c.iter().map(|v| v * v).sum::<f64>().sqrt();
+
+    let e = cone::identity(&blk);
+    let mut x = vec![0.0; n];
+    let mut y = vec![0.0; p];
+    let mut z = e.clone();
+    let mut s = e.clone();
+    let mut converged = false;
+    let mut iters = 0;
+
+    for it in 0..opts.max_iter {
+        iters = it + 1;
+        let ad = problem.a.to_dense_rows();
+        let gd = problem.g.to_dense_rows();
+        let aty: Vec<f64> = (0..n)
+            .map(|j| (0..p).map(|i| ad[i][j] * y[i]).sum::<f64>())
+            .collect();
+        let gtz: Vec<f64> = (0..n)
+            .map(|j| (0..m).map(|i| gd[i][j] * z[i]).sum::<f64>())
+            .collect();
+        let rx: Vec<f64> = (0..n).map(|i| c[i] + aty[i] + gtz[i]).collect();
+        let ax: Vec<f64> = (0..p)
+            .map(|i| (0..n).map(|j| ad[i][j] * x[j]).sum::<f64>())
+            .collect();
+        let ry: Vec<f64> = (0..p).map(|i| ax[i] - bvec[i]).collect();
+        let gx: Vec<f64> = (0..m)
+            .map(|i| (0..n).map(|j| gd[i][j] * x[j]).sum::<f64>())
+            .collect();
+        let rz: Vec<f64> = (0..m).map(|i| gx[i] + s[i] - hvec[i]).collect();
+
+        let sz: f64 = s.iter().zip(&z).map(|(a, b)| a * b).sum();
+        let mu = sz / nu;
+        let cx: f64 = c.iter().zip(&x).map(|(a, b)| a * b).sum();
+        let pres = ry.iter().map(|v| v * v).sum::<f64>().sqrt() / nb;
+        let dres = rx.iter().map(|v| v * v).sum::<f64>().sqrt() / nc;
+        let gap = sz / (1.0 + cx.abs());
+        if pres < opts.tol && dres < opts.tol && gap < opts.tol {
+            converged = true;
+            break;
+        }
+
+        let sc = cone::nt_scaling(&blk, &s, &z);
+        let lambda = sc.apply_winv(&blk, &s);
+
+        let rc_aff: Vec<f64> = lambda.iter().map(|v| -v).collect();
+        let (_dx_a, _dy_a, dz_a, ds_a) =
+            oracle_solve_dir_dense_schur(&problem.a, &problem.g, &sc, &blk, &rx, &ry, &rz, &rc_aff);
+        let a_s = cone::max_step(&blk, &s, &ds_a, 1e16);
+        let a_z = cone::max_step(&blk, &z, &dz_a, 1e16);
+        let alpha_aff = a_s.min(a_z).min(1.0);
+        let s_aff: Vec<f64> = (0..m).map(|i| s[i] + alpha_aff * ds_a[i]).collect();
+        let z_aff: Vec<f64> = (0..m).map(|i| z[i] + alpha_aff * dz_a[i]).collect();
+        let mu_aff: f64 = s_aff.iter().zip(&z_aff).map(|(a, b)| a * b).sum::<f64>() / nu;
+        let sigma = if mu > 0.0 { (mu_aff / mu).powi(3) } else { 0.0 };
+
+        let dsw = sc.apply_winv(&blk, &ds_a);
+        let dzw = sc.apply_w(&blk, &dz_a);
+        let corr = cone::jprod(&blk, &dsw, &dzw);
+        let ll = cone::jprod(&blk, &lambda, &lambda);
+        let target: Vec<f64> = (0..m)
+            .map(|i| sigma * mu * e[i] - ll[i] - corr[i])
+            .collect();
+        let rc = cone::jdiv(&blk, &lambda, &target);
+        let (dx, dy, dz, ds) =
+            oracle_solve_dir_dense_schur(&problem.a, &problem.g, &sc, &blk, &rx, &ry, &rz, &rc);
+
+        let a_s = cone::max_step(&blk, &s, &ds, 1e16);
+        let a_z = cone::max_step(&blk, &z, &dz, 1e16);
+        let alpha = (opts.step_frac * a_s.min(a_z)).min(1.0);
+        if !alpha.is_finite() || alpha <= 0.0 {
+            break;
+        }
+        for i in 0..n {
+            x[i] += alpha * dx[i];
+        }
+        for i in 0..p {
+            y[i] += alpha * dy[i];
+        }
+        for i in 0..m {
+            z[i] += alpha * dz[i];
+            s[i] += alpha * ds[i];
+        }
+    }
+
+    let objective: f64 = c.iter().zip(&x).map(|(a, b)| a * b).sum();
+    (x, objective, converged, iters)
+}
+
+/// Full-solve equivalence between `solve_socp` (sparse augmented KKT) and
+/// the from-scratch [`reference_ipm_solve`] (dense Schur-complement oracle,
+/// same outer predictor-corrector loop): `(x, obj, converged, iters)` must
+/// match to `rel < 1e-6` on well-conditioned, feasible-and-bounded problems.
+/// A looser tolerance than the single-step direction check above since this
+/// compounds many Newton steps.
+#[test]
+fn conic_solve_matches_dense_schur_oracle_full_solve() {
+    let opts = ConicOptions::default();
+
+    let mut problems: Vec<(&'static str, ConicProblem)> = vec![
+        (
+            "tiny_socp",
+            ConicProblem {
+                c: vec![1.0, 0.0],
+                a: csc(&[vec![0.0, 1.0]], 1, 2),
+                b: vec![1.0],
+                g: csc(&[vec![-1.0, 0.0], vec![0.0, -1.0]], 2, 2),
+                h: vec![0.0, 0.0],
+                cone: ConeSpec { l: 0, soc: vec![2] },
+            },
+        ),
+        (
+            "orthant_box",
+            ConicProblem {
+                c: vec![1.0, 2.0],
+                a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+                b: vec![],
+                g: csc(
+                    &[
+                        vec![-1.0, 0.0],
+                        vec![1.0, 0.0],
+                        vec![0.0, -1.0],
+                        vec![0.0, 1.0],
+                    ],
+                    4,
+                    2,
+                ),
+                h: vec![0.0, 3.0, 0.0, 3.0],
+                cone: ConeSpec { l: 4, soc: vec![] },
+            },
+        ),
+    ];
+
+    for seed in [7u64, 8] {
+        let mut rng = Lcg(seed * 131 + 17);
+        let n = 3usize;
+        let m = n;
+        let idx: Vec<usize> = (0..n).collect();
+        let g = CscMatrix::from_triplets(&idx, &idx, &vec![-1.0; n], m, n).unwrap();
+        let h = vec![0.0; m];
+        let c: Vec<f64> = (0..n).map(|_| rng.next_f(-1.0, 1.0)).collect();
+        let a = csc(&[vec![1.0, 0.0, 1.0]], 1, n);
+        let b = vec![rng.next_f(1.0, 3.0)];
+        problems.push((
+            "random_soc3",
+            ConicProblem {
+                c,
+                a,
+                b,
+                g,
+                h,
+                cone: ConeSpec { l: 0, soc: vec![3] },
+            },
+        ));
+    }
+
+    for (name, problem) in &problems {
+        let res = solve_socp(problem, &opts);
+        let (x_ref, obj_ref, converged_ref, iters_ref) = reference_ipm_solve(problem, &opts);
+
+        assert_eq!(
+            res.status == SolveStatus::Optimal,
+            converged_ref,
+            "{name}: convergence mismatch, new={:?} old_converged={converged_ref}",
+            res.status
+        );
+        if converged_ref {
+            let obj_scale = obj_ref.abs().max(1.0);
+            assert!(
+                (res.objective - obj_ref).abs() / obj_scale < 1e-8,
+                "{name}: objective mismatch new={} old={}",
+                res.objective,
+                obj_ref
+            );
+            for (i, (&xn, &xo)) in res.x.iter().zip(&x_ref).enumerate() {
+                let rel = (xn - xo).abs() / xo.abs().max(1.0);
+                assert!(rel < 1e-8, "{name}: x[{i}] new={xn} old={xo} rel={rel:e}");
+            }
+            assert!(
+                res.iterations.abs_diff(iters_ref) <= 2,
+                "{name}: iteration count diverged new={} old={iters_ref}",
+                res.iterations
+            );
+        }
+    }
+}
+
+/// Calibration for `cone::SOC_BORDER_MIN_DIM` (run manually:
+/// `cargo test --release -p otspot-core --lib soc_border_threshold_crossover
+/// -- --ignored --nocapture`). Times a full `solve_socp` on a single-SOC
+/// ball problem (`min -x1` s.t. `x0 = 1`, `x in Q_d`; optimum `-1`) across
+/// the threshold: dimensions strictly below `SOC_BORDER_MIN_DIM` take the
+/// dense `O(d^2)` path, the rest take the `O(d)` border path, so wall-clock
+/// continuity across the boundary (border at `d = MIN_DIM` no slower than
+/// dense at `d = MIN_DIM - 1`) confirms the threshold sits at or above the
+/// crossover. Also asserts every run reaches Optimal at the right objective,
+/// so a calibration run doubles as a correctness sweep.
+#[test]
+#[ignore = "calibration: run with --ignored --nocapture to re-measure SOC_BORDER_MIN_DIM"]
+#[allow(clippy::print_stderr)] // calibration output is the point of this test
+fn soc_border_threshold_crossover() {
+    use super::cone::SOC_BORDER_MIN_DIM;
+    let dims = [
+        SOC_BORDER_MIN_DIM / 4,
+        SOC_BORDER_MIN_DIM / 2,
+        SOC_BORDER_MIN_DIM - 1,
+        SOC_BORDER_MIN_DIM,
+        2 * SOC_BORDER_MIN_DIM,
+        4 * SOC_BORDER_MIN_DIM,
+        16 * SOC_BORDER_MIN_DIM,
+    ];
+    for &d in &dims {
+        let n = d;
+        let idx: Vec<usize> = (0..n).collect();
+        let g = CscMatrix::from_triplets(&idx, &idx, &vec![-1.0; n], n, n).unwrap();
+        let a = csc(&[[1.0].iter().cloned().chain(vec![0.0; n - 1]).collect()], 1, n);
+        let mut c = vec![0.0; n];
+        c[1] = -1.0;
+        let prob = ConicProblem {
+            c,
+            a,
+            b: vec![1.0],
+            g,
+            h: vec![0.0; n],
+            cone: ConeSpec { l: 0, soc: vec![d] },
+        };
+        let t0 = std::time::Instant::now();
+        let r = solve_socp(&prob, &ConicOptions::default());
+        let dt = t0.elapsed().as_secs_f64();
+        assert_eq!(r.status, SolveStatus::Optimal, "d={d}");
+        assert!(
+            (r.objective + 1.0).abs() < 1e-6,
+            "d={d} obj={}",
+            r.objective
+        );
+        let path = if d >= SOC_BORDER_MIN_DIM {
+            "border"
+        } else {
+            "dense"
+        };
+        eprintln!(
+            "d={d:6} path={path:6} iters={:3} time={dt:.4}s",
+            r.iterations
+        );
+    }
+}
+
+/// QPLIB_8585-shaped convex QCQP smoke through the *real* bridge
+/// (`solve_qcqp` -> `to_conic` -> border-path conic KKT): `n = 99,999`,
+/// diagonal objective `P0 = diag(4e-5)` (8585's objective scale), one
+/// full-support ball constraint -- the bridge emits two SOCs of dimension
+/// `n+2 = 100,001`. Closed form by symmetry (`x_i = t`, ball active):
+/// `t = sqrt(2/n)`, `obj = 4e-5 - sqrt(2/n)`. (The actual QPLIB_8585 cannot
+/// exercise this path: its quadratic *equality* constraints route it to the
+/// nonconvex spatial B&B, which rejects its infinite bounds before any
+/// conic bridge runs. This synthetic twin keeps the scale/structure while
+/// staying convex.)
+///
+/// Measured (release, this machine): Optimal in 9 iterations, 0.70s,
+/// ~172 MB cgroup peak RSS -- default-tier viable only because of the
+/// border representation (the pre-3b dense `W^2` for one of these cones
+/// alone would be an 80 GB allocation).
+#[test]
+#[allow(clippy::print_stderr)] // reports the measured iters/time for the doc comment
+fn qcqp_bridge_huge_diag_smoke() {
+    const N: usize = 99_999;
+    const P0_DIAG: f64 = 4e-5;
+    let idx: Vec<usize> = (0..N).collect();
+    let p0 = CscMatrix::from_triplets(&idx, &idx, &vec![P0_DIAG; N], N, N).unwrap();
+    let ball_p = CscMatrix::from_triplets(&idx, &idx, &vec![1.0; N], N, N).unwrap();
+    let prob = QcqpProblem {
+        n: N,
+        p0: Some(p0),
+        q0: vec![-1.0 / N as f64; N],
+        quad: vec![QuadConstraint {
+            p: ball_p,
+            q: vec![0.0; N],
+            r: -1.0,
+        }],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, N).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, N).unwrap(),
+        b_eq: vec![],
+    };
+    let t0 = std::time::Instant::now();
+    let r = solve_qcqp(&prob, &ConicOptions::default());
+    let dt = t0.elapsed().as_secs_f64();
+    let t = (2.0 / N as f64).sqrt();
+    let expected = 0.5 * P0_DIAG * 2.0 - t; // (1/2) t^2 P0 n - (1/n) t n, with (n t^2)/2 = 1
+    eprintln!(
+        "huge bridge smoke: status={:?} obj={:.9} expected={:.9} iters={} time={dt:.2}s",
+        r.status, r.objective, expected, r.iterations
+    );
+    assert_eq!(r.status, SolveStatus::Optimal);
+    let rel = (r.objective - expected).abs() / expected.abs().max(1.0);
+    assert!(rel < 1e-4, "obj={} expected={expected} rel={rel:e}", r.objective);
+}
+
+/// `O(d)` fill fence for the border representation at the `L`-factor level:
+/// factorizes one Newton system for a single `d = 100,000` SOC and asserts
+/// `nnz(L)` stays linear in `d`. With the aux columns pinned to the tail of
+/// the AMD order (`kkt::amd_pinned_aux`), each dense border column
+/// contributes `O(d)` entries to `L` and nothing else fills, so `nnz(L)` is
+/// a small multiple of `d` (measured: `nnz(L) = 400,008 = 4.00 * d` for
+/// this problem; a dense `W^2` block would force
+/// `nnz(L) >= d(d+1)/2 = 5.0e9`). The `8 * d` budget gives 2x headroom
+/// over the measured value while sitting 4 orders of magnitude below the
+/// dense regression.
+#[test]
+#[allow(clippy::print_stderr)] // reports the measured nnz(L) for the doc comment
+fn conic_border_l_fill_stays_linear() {
+    use super::cone::{self, Blocks};
+    use super::kkt;
+    use crate::linalg::kkt_solver::KktConfig;
+
+    const D: usize = 100_000;
+    let n = D;
+    let p = 1usize;
+    let m = D;
+    let mut rng = Lcg(4242);
+    let idx: Vec<usize> = (0..n).collect();
+    let g = CscMatrix::from_triplets(&idx, &idx, &vec![-1.0; n], m, n).unwrap();
+    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], p, n).unwrap();
+    let s = random_interior_soc_point(&mut rng, D);
+    let z = random_interior_soc_point(&mut rng, D);
+    let x = vec![0.0; n];
+    let y = vec![0.0; p];
+    let cone_spec = ConeSpec { l: 0, soc: vec![D] };
+    let blk = Blocks::new(&cone_spec);
+
+    let aty = kkt::spmtv(&a, &y);
+    let gtz = kkt::spmtv(&g, &z);
+    let rx: Vec<f64> = (0..n).map(|i| aty[i] + gtz[i]).collect();
+    let ry = kkt::spmv(&a, &x);
+    let gx = kkt::spmv(&g, &x);
+    let rz: Vec<f64> = (0..m).map(|i| gx[i] + s[i]).collect();
+    let sc = cone::nt_scaling(&blk, &s, &z);
+    let lambda = sc.apply_winv(&blk, &s);
+    let rc: Vec<f64> = lambda.iter().map(|v| -v).collect();
+
+    let mut caches = kkt::build_kkt_caches(&a, &g, &blk, n, p, None);
+    let probe_rhs = kkt::build_rhs(&sc, &blk, n, p, m, &rx, &ry, &rz, &rc);
+    let factor =
+        kkt::factorize_with_retry(&mut caches, &sc, &blk, &probe_rhs, None, &KktConfig::default())
+            .expect("factorize failed");
+    let nnz_l = factor
+        .nnz_l()
+        .expect("huge single SOC must factor on the direct LDL path");
+    eprintln!("d={D} nnz_l={nnz_l} ({:.2} * d)", nnz_l as f64 / D as f64);
+    assert!(
+        nnz_l <= 8 * D,
+        "border L fill nnz_l={nnz_l} exceeds 8*d={} -- aux tail pinning or \
+         border sparsity regressed",
+        8 * D
+    );
+}
+
+/// Direct dense/border equivalence at the exact `SOC_BORDER_MIN_DIM`
+/// boundary: the minimal dimension pair `(MIN_DIM - 1, MIN_DIM)` -- one
+/// cone on each side of the threshold -- gets its production Newton
+/// directions (affine, via the full `build_kkt_caches` ->
+/// `factorize_with_retry` -> `solve_dir` pipeline) compared against the
+/// same independent dense-Schur oracle on the same problem structure and
+/// seed. Both representations are exact, so the two dimensions must agree
+/// with the oracle equally well; a routing or assembly bug that is
+/// threshold-dependent (e.g. an off-by-one in `Blocks::new`'s `d >=
+/// SOC_BORDER_MIN_DIM`, or border-only slot corruption) shows up as the
+/// border side diverging while the dense side stays clean. Routing itself
+/// is asserted (`n_border()` 0 vs 1) so the test fails loudly if a
+/// threshold change stops it from actually straddling the boundary.
+#[test]
+fn conic_kkt_threshold_boundary_direction_equivalence() {
+    use super::cone::{self, Blocks, SOC_BORDER_MIN_DIM};
+    use super::kkt;
+    use crate::linalg::kkt_solver::KktConfig;
+
+    for (d, expect_border) in [(SOC_BORDER_MIN_DIM - 1, false), (SOC_BORDER_MIN_DIM, true)] {
+        let mut rng = Lcg(4455);
+        let l = 0usize;
+        let m = d;
+        let n = m;
+        let p = 1usize;
+
+        let idx: Vec<usize> = (0..n).collect();
+        let g = CscMatrix::from_triplets(&idx, &idx, &vec![-1.0; n], m, n).unwrap();
+        let mut a_row = vec![0.0; n];
+        a_row[0] = 1.0;
+        a_row[n - 1] = 1.0;
+        let a = csc(&[a_row], p, n);
+
+        let x: Vec<f64> = (0..n).map(|_| rng.next_f(-0.5, 0.5)).collect();
+        let y: Vec<f64> = (0..p).map(|_| rng.next_f(-0.5, 0.5)).collect();
+        let s = random_interior_soc_point(&mut rng, d);
+        let z = random_interior_soc_point(&mut rng, d);
+
+        let cone_spec = ConeSpec { l, soc: vec![d] };
+        let blk = Blocks::new(&cone_spec);
+        assert_eq!(
+            blk.n_border() == 1,
+            expect_border,
+            "d={d}: expected border routing {expect_border}, got n_border={}",
+            blk.n_border()
+        );
+
+        let aty = kkt::spmtv(&a, &y);
+        let gtz = kkt::spmtv(&g, &z);
+        let rx: Vec<f64> = (0..n).map(|i| aty[i] + gtz[i]).collect();
+        let ry = kkt::spmv(&a, &x);
+        let gx = kkt::spmv(&g, &x);
+        let rz: Vec<f64> = (0..m).map(|i| gx[i] + s[i]).collect();
+
+        let sc = cone::nt_scaling(&blk, &s, &z);
+        let lambda = sc.apply_winv(&blk, &s);
+        let rc_aff: Vec<f64> = lambda.iter().map(|v| -v).collect();
+
+        let mut caches = kkt::build_kkt_caches(&a, &g, &blk, n, p, None);
+        let probe_rhs = kkt::build_rhs(&sc, &blk, n, p, m, &rx, &ry, &rz, &rc_aff);
+        let factor = kkt::factorize_with_retry(
+            &mut caches,
+            &sc,
+            &blk,
+            &probe_rhs,
+            None,
+            &KktConfig::default(),
+        )
+        .unwrap_or_else(|| panic!("d={d}: factorize failed"));
+        let (dx, dy, dz, ds) =
+            kkt::solve_dir(&factor, &g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc_aff);
+        let (dx_o, dy_o, dz_o, ds_o) =
+            oracle_solve_dir_dense_schur(&a, &g, &sc, &blk, &rx, &ry, &rz, &rc_aff);
+        // 1e-4, not `assert_dir_close`'s 1e-5: at `d ~ 256` the oracle's
+        // partial-pivot Gaussian elimination and the production LDL each
+        // accumulate ~d times more rounding than on that helper's O(10)-dim
+        // cases (measured: up to ~1.6e-5 on the *dense* path, which Phase 3b
+        // does not touch), while the bug class this test guards --
+        // threshold-dependent routing/assembly errors -- shows up as O(1)
+        // divergence on exactly one side of the boundary.
+        const TOL: f64 = 1e-4;
+        let check = |label: &str, new_v: &[f64], old_v: &[f64]| {
+            for (i, (&a_, &b_)) in new_v.iter().zip(old_v).enumerate() {
+                let rel = (a_ - b_).abs() / b_.abs().max(1.0);
+                assert!(
+                    rel < TOL,
+                    "d={d} border={expect_border} {label}[{i}]: new={a_} old={b_} rel={rel:e}"
+                );
+            }
+        };
+        check("dx", &dx, &dx_o);
+        check("dy", &dy, &dy_o);
+        check("dz", &dz, &dz_o);
+        check("ds", &ds, &ds_o);
+    }
 }
