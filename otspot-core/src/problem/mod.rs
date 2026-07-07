@@ -61,10 +61,13 @@ pub enum SolveRoute {
 pub struct SolveStats {
     /// Route taken for this solve.
     pub route: SolveRoute,
-    /// Whether the solver stopped because the deadline (timeout_secs / deadline) was reached.
+    /// Whether the solver stopped because the deadline (timeout_secs / deadline)
+    /// was reached or the cancel flag fired.
     ///
-    /// `true` iff `result.status == SolveStatus::Timeout`. Deterministic sentinel for
-    /// deadline-enforcement tests: assert this field instead of measuring wall time.
+    /// `true` iff `result.status == SolveStatus::Timeout` AND the stop condition
+    /// was actually external (deadline expired / cancelled) — an internal stall
+    /// bail never sets this. Deterministic sentinel for deadline-enforcement
+    /// tests: assert this field instead of measuring wall time.
     pub deadline_triggered: bool,
     /// Whether the postsolve saddle-point Krylov IR was skipped because the solution
     /// already met the user tolerance (`kkt_already_pass`). Deterministic sentinel for

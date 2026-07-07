@@ -21,7 +21,8 @@ pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResu
         result.objective += problem.obj_offset;
     }
     result.stats.route = SolveRoute::LpDirect;
-    result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
+    result.stats.deadline_triggered =
+        matches!(result.status, SolveStatus::Timeout) && options.external_stop_requested();
     result
 }
 
@@ -38,7 +39,8 @@ pub(crate) fn solve_lp_forwarded_from_qp(
         result.objective += problem.obj_offset;
     }
     result.stats.route = SolveRoute::LpForwardedFromQp;
-    result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
+    result.stats.deadline_triggered =
+        matches!(result.status, SolveStatus::Timeout) && options.external_stop_requested();
     result
 }
 

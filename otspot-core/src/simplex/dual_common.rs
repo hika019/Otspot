@@ -198,10 +198,20 @@ pub(super) fn outcome_to_result(
                 }
             }
         }
-        SimplexOutcome::Timeout(obj) => {
+        outcome @ (SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_)) => {
+            let (obj, external_stop) = match outcome {
+                SimplexOutcome::Timeout(obj) => (obj, true),
+                SimplexOutcome::Stalled(obj) => (obj, false),
+                _ => unreachable!(),
+            };
             let solution = extract_solution(sf, basis, x_b, col_scale);
+            let status = if external_stop {
+                SolveStatus::Timeout
+            } else {
+                super::stall_status(!solution.is_empty())
+            };
             SolverResult {
-                status: SolveStatus::Timeout,
+                status,
                 objective: obj + sf.obj_offset,
                 solution,
                 dual_solution: vec![],
@@ -216,7 +226,7 @@ pub(super) fn outcome_to_result(
 }
 
 /// Verify an LP `Unbounded` exit against a re-derived recession ray (symmetric
-/// to the Phase-I Farkas gate: unverified ray ⇒ honest Timeout).
+/// to the Phase-I Farkas gate: unverified ray ⇒ honest Stalled).
 ///
 /// Eta drift can falsely read `B⁻¹a_q ≤ 0`; this rebuilds a clean LU and
 /// confirms column `q < n_enter` is improving (`r_q < −dual_tol`) AND unbounded:

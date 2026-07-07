@@ -12,7 +12,7 @@
 //! `StandardForm` (UB-row-expanded) so existing solver paths can run on
 //! it unchanged — this is the equivalence the sentinel locks in.
 
-use crate::problem::{ConstraintType, LpProblem, SolverResult};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 
@@ -49,19 +49,61 @@ pub(crate) enum SimplexOutcome {
     /// Optimal objective and dual vector.
     Optimal(f64, Vec<f64>),
     Unbounded,
-    /// Objective at termination.
+    /// Objective at termination. External stop: wall-clock deadline expired,
+    /// cancel flag fired, or a timed sub-step (LU refactor) hit the deadline.
     Timeout(f64),
+    /// Objective at termination. Iteration progress exhausted with budget
+    /// remaining and no certificate: cycling/plateau bail, unverifiable
+    /// unbounded ray, or a dual-feasible point whose fresh `x_B = B⁻¹b`
+    /// violates primal feasibility. Callers must not report this as
+    /// [`crate::problem::SolveStatus::Timeout`]; use [`stall_status`].
+    Stalled(f64),
     /// Triggers IPM fallback at the caller.
     SingularBasis,
 }
 
-pub(crate) fn timeout_result_with_incumbent(
+/// User-facing status for a [`SimplexOutcome::Stalled`] bail: an incumbent
+/// solution is an unproven answer (`SuboptimalSolution`); without one the only
+/// honest claim is that iteration progress was exhausted (`MaxIterations`).
+pub(crate) fn stall_status(has_incumbent: bool) -> SolveStatus {
+    if has_incumbent {
+        SolveStatus::SuboptimalSolution
+    } else {
+        SolveStatus::MaxIterations
+    }
+}
+
+/// Status for a non-Optimal stop classified by the actual stop condition:
+/// `Timeout` only when [`external_stop_requested`], otherwise [`stall_status`].
+pub(crate) fn stop_status(
+    has_incumbent: bool,
+    options: &crate::options::SolverOptions,
+) -> SolveStatus {
+    if external_stop_requested(options) {
+        SolveStatus::Timeout
+    } else {
+        stall_status(has_incumbent)
+    }
+}
+
+/// See [`crate::options::SolverOptions::external_stop_requested`].
+pub(crate) fn external_stop_requested(options: &crate::options::SolverOptions) -> bool {
+    options.external_stop_requested()
+}
+
+/// Incumbent-carrying result for a non-Optimal stop. Status is classified by
+/// the actual stop condition: `Timeout` only when the deadline expired or the
+/// cancel flag fired; otherwise the stop was an internal stall and the honest
+/// status is [`stall_status`] (`SuboptimalSolution` with an incumbent,
+/// `MaxIterations` without).
+pub(crate) fn stop_result_with_incumbent(
     sf: &StandardForm,
     problem: &LpProblem,
     basis: &[usize],
     x_b: &[f64],
     col_scale: &[f64],
     iter: usize,
+    options: &crate::options::SolverOptions,
 ) -> SolverResult {
     let solution = extract_solution(sf, basis, x_b, col_scale);
     // `extract_solution` already un-shifts to original variables, so `c·solution`
@@ -73,11 +115,17 @@ pub(crate) fn timeout_result_with_incumbent(
         .zip(solution.iter())
         .map(|(&ci, &xi)| ci * xi)
         .sum::<f64>();
+    let status = if external_stop_requested(options) {
+        SolveStatus::Timeout
+    } else {
+        stall_status(!solution.is_empty())
+    };
     SolverResult {
+        status,
         objective,
         solution,
         iterations: iter,
-        ..SolverResult::timeout()
+        ..Default::default()
     }
 }
 

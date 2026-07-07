@@ -280,7 +280,8 @@ fn solve_reduced_lp_from_qp(
         );
         lifted.stats = raw.stats.clone();
         lifted.stats.route = SolveRoute::LpForwardedFromQp;
-        lifted.stats.deadline_triggered = matches!(lifted.status, SolveStatus::Timeout);
+        lifted.stats.deadline_triggered =
+            matches!(lifted.status, SolveStatus::Timeout) && options.external_stop_requested();
         lifted = guard_lp_optimal(lifted, original_lp);
         let postsolve_us = t_postsolve.elapsed().as_micros() as u64;
         lifted.timing_breakdown = Some(crate::problem::TimingBreakdown {
@@ -414,7 +415,9 @@ fn solve_lp_with_ipm_backend(lp: &LpProblem, options: &SolverOptions) -> SolverR
     let mut result = ipm_solver::solve_ipm(&qp, &ipm_opts);
     result.stats.route = SolveRoute::LpForwardedFromQp;
     result.stats.lp_ipm_path = true;
-    result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
+    // Classified against the core deadline this IPM actually ran under.
+    result.stats.deadline_triggered =
+        matches!(result.status, SolveStatus::Timeout) && ipm_opts.external_stop_requested();
     result.reduced_costs.clear();
 
     if matches!(

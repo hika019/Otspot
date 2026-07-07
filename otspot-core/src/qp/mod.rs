@@ -166,7 +166,8 @@ fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     }
     let mut result = ipm_solver::solve_ipm(problem, options);
     result.stats.route = SolveRoute::QpIpm;
-    result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
+    result.stats.deadline_triggered =
+        matches!(result.status, SolveStatus::Timeout) && options.external_stop_requested();
     result
 }
 

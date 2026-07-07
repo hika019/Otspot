@@ -610,6 +610,20 @@ impl Default for SolverOptions {
 }
 
 impl SolverOptions {
+    /// Whether the caller-visible stop condition is external: the wall-clock
+    /// deadline expired or the cancel flag fired. Distinguishes an honest
+    /// `Timeout` from an internal stall (`SuboptimalSolution`/`MaxIterations`).
+    /// Sound at result assembly: a deadline-triggered bail implies `now >= d`
+    /// (monotonic), while a stall bail normally leaves budget on the clock.
+    pub(crate) fn external_stop_requested(&self) -> bool {
+        self.deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+            || self
+                .cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     /// Effective IPM eps: derived from `tolerance` if set, otherwise `ipm.eps`.
     pub fn ipm_eps(&self) -> f64 {
         match self.tolerance {
