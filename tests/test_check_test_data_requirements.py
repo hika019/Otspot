@@ -98,6 +98,53 @@ def test_absolute_path_string_is_not_a_requirement():
     assert "qplib-nonconvex" not in out
 
 
+def test_crate_relative_literal_is_detected():
+    """`.join("../data/cblib_socp")` (crate-relative, cbf_cblib_integration.rs
+    style) must be resolved — the old regex missed it because of the `../`."""
+    src = (
+        'fn cblib_dir() -> PathBuf {\n'
+        '    Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/cblib_socp")\n'
+        '}\n'
+    )
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), src)
+        code, out = _run(repo)
+    # cblib_socp is graceful-skip → warn, but it MUST be seen (not silently dropped).
+    assert "data/cblib_socp" in out, f"crate-relative ref not detected:\n{out}"
+    assert code == 0, f"cblib_socp is skip-tolerant, expected exit 0:\n{out}"
+
+
+def test_const_join_helper_is_detected():
+    """`const SUB = "lp_problems"; fn data_dir(s){..join("../data").join(s)}
+    data_dir(SUB)` (presolve_correctness_sweep.rs style) must resolve to
+    data/lp_problems.  This is the P1 regression: the pure-regex extractor
+    could not see it, so drift in this dataset went undetected."""
+    src = (
+        'const LP_SUBDIR: &str = "lp_problems";\n'
+        'fn data_root() -> PathBuf {\n'
+        '    Path::new(env!("CARGO_MANIFEST_DIR")).join("../data")\n'
+        '}\n'
+        'fn data_dir(sub: &str) -> PathBuf { data_root().join(sub) }\n'
+        'fn run() { let d = std::fs::read_dir(data_dir(LP_SUBDIR)).unwrap(); }\n'
+    )
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), src)
+        # data/lp_problems absent → must be a HARD failure (not skip-tolerant).
+        code, out = _run(repo)
+    assert "data/lp_problems" in out, f"const-join helper not resolved:\n{out}"
+    assert code == 1, f"Expected exit 1 (hard missing lp_problems):\n{out}"
+
+
+def test_metadata_substring_is_not_a_requirement():
+    """A literal like "metadata/foo" must not be misread as a data/ ref."""
+    src = 'const M: &str = "metadata/foo";\n'
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), src)
+        code, out = _run(repo)
+    assert code == 0, f"Expected exit 0, got {code}.\nOutput:\n{out}"
+    assert "metadata" not in out
+
+
 if __name__ == "__main__":
     tests = [
         test_file_requirement_present_ok,
@@ -106,6 +153,9 @@ if __name__ == "__main__":
         test_dir_requirement_absent_fails,
         test_graceful_skip_dataset_warns_only,
         test_absolute_path_string_is_not_a_requirement,
+        test_crate_relative_literal_is_detected,
+        test_const_join_helper_is_detected,
+        test_metadata_substring_is_not_a_requirement,
     ]
     failed = 0
     for t in tests:

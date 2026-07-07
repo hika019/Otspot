@@ -52,6 +52,22 @@ OUTPUT_DIR="${1:-$SOLVER_DIR/data/lp_problems_hard}"
 PLATO_BASE="https://plato.asu.edu/ftp/lptestset"
 EMPS="${EMPS_BIN:-/tmp/emps}"
 
+# curl resilience: neos.QPS がCI must-pass ゲートの前提になったため、単一
+# ミラー (plato.asu.edu) の一時不通で heavy job 全体が赤にならないよう retry
+# する (ensure_emps.sh と同じ方針)。
+CURL_RETRY="${CURL_RETRY:-5}"
+CURL_RETRY_DELAY="${CURL_RETRY_DELAY:-3}"
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-20}"
+CURL_MAX_TIME="${CURL_MAX_TIME:-180}"
+CURL_OPTS=(
+  -L -s -f
+  --retry "$CURL_RETRY"
+  --retry-delay "$CURL_RETRY_DELAY"
+  --retry-connrefused
+  --connect-timeout "$CURL_CONNECT_TIMEOUT"
+  --max-time "$CURL_MAX_TIME"
+)
+
 # emps バイナリ確認
 if [ ! -x "$EMPS" ]; then
     echo "ERROR: emps binary not found at $EMPS" >&2
@@ -113,7 +129,7 @@ download_bz2_emps() {
     TMP_BZ2=$(mktemp)
     TMP_RAW=$(mktemp)
 
-    if ! curl -L -s -f "$url" -o "$TMP_BZ2" 2>/dev/null; then
+    if ! curl "${CURL_OPTS[@]}" "$url" -o "$TMP_BZ2" 2>/dev/null; then
         echo "FAIL (download): $name  ($url)" >&2
         rm -f "$TMP_BZ2" "$TMP_RAW"
         FAIL=$((FAIL + 1))
@@ -162,7 +178,7 @@ download_bz2_mps() {
     local TMP_BZ2
     TMP_BZ2=$(mktemp)
 
-    if ! curl -L -s -f "$url" -o "$TMP_BZ2" 2>/dev/null; then
+    if ! curl "${CURL_OPTS[@]}" "$url" -o "$TMP_BZ2" 2>/dev/null; then
         echo "FAIL (download): $name  ($url)" >&2
         rm -f "$TMP_BZ2"
         FAIL=$((FAIL + 1))
@@ -306,3 +322,12 @@ echo "  ベンチ実行: SOLVER_DIR=. bash scripts/bench_parallel.sh \\" >&2
 echo "    --data-dir data/lp_problems_hard \\" >&2
 echo "    --timeout 1000 --eps 1e-6 --jobs 6 \\" >&2
 echo "    --output /tmp/hard_bench.txt" >&2
+
+# LP_HARD_ONLY で明示的に絞った instance が1件でも取得失敗したら non-zero で
+# 終了する (CI の must-pass 前提データが欠けた状態を download step で即座に
+# 検出させる)。unfiltered な full-suite 取得は既存どおり partial 許容 (dead
+# mirror で全体を落とさない) — full-suite の欠落は呼び出し側の --check が扱う。
+if [ "${#ONLY_SET[@]}" -gt 0 ] && [ "$FAIL" -gt 0 ]; then
+    echo "[lp_hard_download] FAILED: LP_HARD_ONLY 指定の $FAIL 件が取得失敗" >&2
+    exit 1
+fi
