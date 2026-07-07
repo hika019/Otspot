@@ -639,7 +639,7 @@ BCOORD
 
 #[test]
 fn duplicate_objacoord_entry_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -656,12 +656,13 @@ OBJACOORD
 0 2.0
 0 3.0
 ",
+        "OBJACOORD: duplicate entry for variable 0",
     );
 }
 
 #[test]
 fn duplicate_acoord_entry_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -682,12 +683,13 @@ ACOORD
 0 0 2.0
 0 0 3.0
 ",
+        "ACOORD: duplicate entry at (row 0, var 0)",
     );
 }
 
 #[test]
 fn duplicate_bcoord_entry_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -708,6 +710,7 @@ BCOORD
 0 2.0
 0 3.0
 ",
+        "BCOORD: duplicate entry for row 0",
     );
 }
 
@@ -779,23 +782,39 @@ NOT_A_KEYWORD
 // Error branches.
 // ---------------------------------------------------------------------
 
-fn expect_parse_error(cbf: &str) {
+/// Asserts that `cbf` fails with `CbfError::ParseError` whose message
+/// contains `needle`, pinning down *why* the parse failed (not merely
+/// that it failed) so a regression producing an unrelated parse error
+/// still fails the test.
+fn assert_parse_error_contains(cbf: &str, needle: &str) {
     match parse_cbf_str(cbf) {
-        Err(CbfError::ParseError(_)) => {}
+        Err(CbfError::ParseError(msg)) => {
+            assert!(
+                msg.contains(needle),
+                "ParseError message should mention {needle:?}, got {msg:?}"
+            );
+        }
         other => panic!("expected ParseError, got {other:?}"),
     }
 }
 
-fn expect_unsupported(cbf: &str) {
+/// Asserts that `cbf` fails with `CbfError::Unsupported` whose message
+/// contains `needle`, pinning down *why* the section/token is rejected.
+fn assert_unsupported_contains(cbf: &str, needle: &str) {
     match parse_cbf_str(cbf) {
-        Err(CbfError::Unsupported(_)) => {}
+        Err(CbfError::Unsupported(msg)) => {
+            assert!(
+                msg.contains(needle),
+                "Unsupported message should mention {needle:?}, got {msg:?}"
+            );
+        }
         other => panic!("expected Unsupported, got {other:?}"),
     }
 }
 
 #[test]
 fn missing_ver_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 OBJSENSE
 MIN
@@ -804,12 +823,13 @@ VAR
 1 1
 F 1
 ",
+        "missing VER section",
     );
 }
 
 #[test]
 fn missing_objsense_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -818,12 +838,13 @@ VAR
 1 1
 F 1
 ",
+        "missing OBJSENSE section",
     );
 }
 
 #[test]
 fn missing_var_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -831,12 +852,13 @@ VER
 OBJSENSE
 MIN
 ",
+        "missing VAR section",
     );
 }
 
 #[test]
 fn bad_objsense_token_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -848,12 +870,13 @@ VAR
 1 1
 F 1
 ",
+        "OBJSENSE: expected MIN or MAX, got 'FOO'",
     );
 }
 
 #[test]
 fn unsupported_ver_is_error() {
-    expect_unsupported(
+    assert_unsupported_contains(
         "\
 VER
 99
@@ -865,12 +888,13 @@ VAR
 1 1
 F 1
 ",
+        "CBF VER 99 is not supported",
     );
 }
 
 #[test]
 fn psdvar_section_is_unsupported_error() {
-    expect_unsupported(
+    assert_unsupported_contains(
         "\
 VER
 3
@@ -886,12 +910,13 @@ PSDVAR
 1
 2
 ",
+        "CBF section 'PSDVAR' is not supported",
     );
 }
 
 #[test]
 fn psdcon_section_is_unsupported_error() {
-    expect_unsupported(
+    assert_unsupported_contains(
         "\
 VER
 3
@@ -907,12 +932,13 @@ PSDCON
 1
 2
 ",
+        "CBF section 'PSDCON' is not supported",
     );
 }
 
 #[test]
 fn objfcoord_section_is_unsupported_error() {
-    expect_unsupported(
+    assert_unsupported_contains(
         "\
 VER
 3
@@ -928,12 +954,13 @@ OBJFCOORD
 1
 0 0 0 1.0
 ",
+        "CBF section 'OBJFCOORD' is not supported",
     );
 }
 
 #[test]
 fn unsupported_cone_token_exp_is_error() {
-    expect_unsupported(
+    assert_unsupported_contains(
         "\
 VER
 3
@@ -945,12 +972,13 @@ VAR
 3 1
 EXP 3
 ",
+        "cone type 'EXP' is not supported",
     );
 }
 
 #[test]
 fn q_cone_size_zero_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -962,12 +990,13 @@ VAR
 0 1
 Q 0
 ",
+        "Q cone size 0 < 1",
     );
 }
 
 #[test]
 fn qr_cone_size_one_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -979,12 +1008,13 @@ VAR
 1 1
 QR 1
 ",
+        "QR cone size 1 < 2",
     );
 }
 
 #[test]
 fn cone_block_size_sum_mismatch_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -996,12 +1026,13 @@ VAR
 5 1
 F 3
 ",
+        "cone block sizes sum to 3, expected 5",
     );
 }
 
 #[test]
 fn acoord_row_out_of_range_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -1021,12 +1052,13 @@ ACOORD
 1
 5 0 1.0
 ",
+        "ACOORD row: index 5 out of range (expected 0..1)",
     );
 }
 
 #[test]
 fn objacoord_var_out_of_range_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -1042,12 +1074,13 @@ OBJACOORD
 1
 5 1.0
 ",
+        "OBJACOORD: index 5 out of range (expected 0..1)",
     );
 }
 
 #[test]
 fn non_finite_float_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -1067,12 +1100,13 @@ BCOORD
 1
 0 NaN
 ",
+        "expected finite float, got 'NaN'",
     );
 }
 
 #[test]
 fn unknown_section_keyword_is_error() {
-    expect_parse_error(
+    assert_parse_error_contains(
         "\
 VER
 3
@@ -1086,5 +1120,6 @@ F 1
 
 FOO
 ",
+        "unknown CBF section keyword 'FOO'",
     );
 }
