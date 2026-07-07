@@ -80,10 +80,21 @@ threads-required = "num-cpus"
 # slow-timeout.  Serialize so at most one runs at a time.
 [test-groups]
 qplib-memory-heavy = { max-threads = 1 }
+memory-budget = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = "test(qplib::tests::test_parse_existing_qplib_files_regression) + test(qplib::tests::test_memory_sentinel_no_double_hashmap_qplib8500) + test(qplib::tests::test_parse_sweep_no_memory_accumulation) + test(qplib::tests::test_memory_probe_large_dcl_files) + test(qplib::tests::test_memory_sentinel_qplib8683_qcqp) + test(qplib::tests::test_qcqp_sparse_init_memory_bounded)"
 test-group = "qplib-memory-heavy"
+
+# memory_budget.rs (otspot-core/tests): the three route tests peak
+# ~300 MB / ~820 MB / ~230 MB each (~1.4 GB combined; more before the assert
+# fires if a regression inflates one of them). Serialize to avoid RSS
+# stacking — same rationale as qplib-memory-heavy above. Measurement
+# correctness does not depend on this: each test holds an in-binary Mutex
+# for its measure window (see the file's module doc comment).
+[[profile.default.overrides]]
+filter = "test(lp_route_peak_within_budget) + test(qp_ipm_route_peak_within_budget) + test(conic_socp_route_peak_within_budget)"
+test-group = "memory-budget"
 
 # Heavy/nightly profile: runs ALL tests including #[ignore]d heavy ones.
 #
@@ -152,3 +163,8 @@ threads-required = "num-cpus"
 [[profile.heavy.overrides]]
 filter = "test(lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent)"
 threads-required = "num-cpus"
+
+# memory_budget.rs: default profile と同じ直列化 (合計 ~1.4 GB の RSS 圧迫防止)。
+[[profile.heavy.overrides]]
+filter = "test(lp_route_peak_within_budget) + test(qp_ipm_route_peak_within_budget) + test(conic_socp_route_peak_within_budget)"
+test-group = "memory-budget"
