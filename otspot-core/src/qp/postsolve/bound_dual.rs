@@ -28,6 +28,17 @@ pub(crate) fn remap_bound_duals_to_orig(
         .iter()
         .filter(|(lb, _)| lb.is_finite())
         .count();
+    let n_ub_reduced = reduced_bounds
+        .iter()
+        .filter(|(_, ub)| ub.is_finite())
+        .count();
+    if !reduced_bound_duals.is_empty() {
+        assert_eq!(
+            reduced_bound_duals.len(),
+            n_lb_reduced + n_ub_reduced,
+            "reduced bound_duals length must match reduced finite bounds"
+        );
+    }
     let n_reduced = reduced_bounds.len();
 
     let mut lb_bd_idx: Vec<Option<usize>> = vec![None; n_reduced];
@@ -244,6 +255,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "reduced bound_duals length must match reduced finite bounds")]
+    fn remap_bound_duals_rejects_short_reduced_duals() {
+        let pres = make_presolve_result(
+            2,
+            vec![Some(0), Some(1)],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+        );
+        let orig_bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)];
+        let _ = remap_bound_duals_to_orig(&pres, &orig_bounds, &[1.0]);
     }
 
     /// project_duals: Le over-shoot を 0 に clamp / Eq pass-through / lb-only から y を引上げ。

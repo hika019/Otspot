@@ -395,20 +395,22 @@ pub fn run_postsolve(
 
     for (j, &maybe_jj) in presolve_result.col_map.iter().enumerate() {
         if let Some(jj) = maybe_jj {
-            if jj < result.solution.len() {
-                solution[j] = result.solution[jj];
+            if jj >= result.solution.len() {
+                return malformed_postsolve_result();
             }
+            solution[j] = result.solution[jj];
         }
     }
     for (i, &maybe_ii) in presolve_result.row_map.iter().enumerate() {
         if let Some(ii) = maybe_ii {
-            if ii < result.dual_solution.len() {
-                dual_solution[i] = if input_dual_is_ipm {
-                    -result.dual_solution[ii]
-                } else {
-                    result.dual_solution[ii]
-                };
+            if ii >= result.dual_solution.len() {
+                return malformed_postsolve_result();
             }
+            dual_solution[i] = if input_dual_is_ipm {
+                -result.dual_solution[ii]
+            } else {
+                result.dual_solution[ii]
+            };
         }
     }
 
@@ -632,6 +634,15 @@ pub fn run_postsolve(
         warm_start_basis,
         iterations: result.iterations,
         postsolve_dfeas: Some(postsolve_dfeas_recomputed),
+        ..Default::default()
+    }
+}
+
+fn malformed_postsolve_result() -> SolverResult {
+    SolverResult {
+        status: SolveStatus::NumericalError,
+        objective: f64::INFINITY,
+        solution: vec![],
         ..Default::default()
     }
 }
@@ -1329,5 +1340,54 @@ mod recover_removed_row_dual_tests {
             (y - 1.0).abs() < 1e-6,
             "Eq binding dual should be 1, got {y}"
         );
+    }
+
+    #[test]
+    fn run_postsolve_rejects_short_reduced_solution() {
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0, 0.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let pres = PresolveResult::no_reduction(&lp);
+        let reduced = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0],
+            dual_solution: vec![0.0],
+            ..Default::default()
+        };
+        let out = run_postsolve(&reduced, &pres, &lp, None, false);
+        assert_eq!(out.status, SolveStatus::NumericalError);
+        assert!(out.solution.is_empty());
+    }
+
+    #[test]
+    fn run_postsolve_rejects_short_reduced_dual() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let pres = PresolveResult::no_reduction(&lp);
+        let reduced = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0],
+            dual_solution: vec![],
+            reduced_costs: vec![0.0],
+            ..Default::default()
+        };
+        let out = run_postsolve(&reduced, &pres, &lp, None, false);
+        assert_eq!(out.status, SolveStatus::NumericalError);
+        assert!(out.solution.is_empty());
     }
 }

@@ -212,12 +212,24 @@ pub(crate) fn prove_optimal_lp(
         (result.dual_solution.clone(), result.bound_duals.clone())
     } else {
         // Simplex path: negate ALL dual variables and convert rc→z.
+        if result.reduced_costs.len() != n {
+            return Err(NotProven {
+                stationarity_rel: f64::NAN,
+                primal_residual_rel: f64::NAN,
+                bound_violation: f64::NAN,
+                complementarity_rel: f64::NAN,
+                dual_sign_violation: f64::NAN,
+                duality_gap_rel: f64::NAN,
+                tol,
+                failing_conditions: vec!["input_dimensions"],
+            });
+        }
         let y_prove: Vec<f64> = result.dual_solution.iter().map(|&v| -v).collect();
         let rc = &result.reduced_costs;
         let mut z_lb = Vec::new();
         let mut z_ub = Vec::new();
         for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
-            let rc_j = rc.get(j).copied().unwrap_or(0.0);
+            let rc_j = rc[j];
             if lb.is_finite() {
                 z_lb.push(rc_j.max(0.0));
             }
@@ -871,6 +883,38 @@ mod tests {
             cert.is_ok(),
             "correct simplex result must pass: {:?}",
             cert.err()
+        );
+    }
+
+    #[test]
+    fn prove_optimal_lp_short_reduced_costs_is_not_proven() {
+        // Non-empty reduced_costs selects the simplex certificate path.  A
+        // vector shorter than num_vars must not be padded with zero, because
+        // that can fabricate missing bound duals and falsely mint a certificate.
+        let a =
+            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0_f64, 0.0], 1, 2).unwrap();
+        let lp2 = LpProblem::new_general(
+            vec![-1.0_f64, 0.0],
+            a,
+            vec![1.0_f64],
+            vec![ConstraintType::Le],
+            vec![(0.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let result2 = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: -1.0,
+            solution: vec![1.0, 0.0],
+            dual_solution: vec![-1.0],
+            reduced_costs: vec![0.0], // BUG: missing rc for variable 1
+            slack: vec![0.0],
+            ..Default::default()
+        };
+        let cert = prove_optimal_lp(&lp2, &result2, 1e-6);
+        assert!(
+            cert.is_err(),
+            "short reduced_costs must fail instead of being zero-padded"
         );
     }
 
