@@ -22,7 +22,7 @@ use crate::variable::{VarKind, Variable};
 use crate::variable::VariableDefinition;
 
 use otspot_core::options::Tolerance;
-use otspot_core::problem::{ConstraintType, LpProblem, SolveStatus};
+use otspot_core::problem::{ConstraintType, LpProblem, SolveRoute, SolveStats, SolveStatus};
 use otspot_core::sparse::CscMatrix;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -511,7 +511,7 @@ impl Model {
                 num_constraints,
                 num_vars,
             )
-            .map_err(|e| ModelError::Internal(e.to_string()))?
+            .map_err(map_matrix_build_err)?
         };
 
         // --- Variable bounds ---
@@ -670,8 +670,7 @@ impl Model {
                 }
             }
         }
-        CscMatrix::from_triplets(&rr, &cc, &vv, rows.len(), ncols)
-            .map_err(|e| ModelError::Internal(e.to_string()))
+        CscMatrix::from_triplets(&rr, &cc, &vv, rows.len(), ncols).map_err(map_matrix_build_err)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -686,20 +685,29 @@ impl Model {
         q_obj: Option<CscMatrix>,
     ) -> Result<ModelResult, ModelError> {
         let n = self.variables.len();
+        // The conic bridge bypasses the LP/QP constructors, so their finite /
+        // same-model input validation is re-established here (foreign variables,
+        // NaN/Inf constraint data, NaN/Inf quadratic + SOC coefficients).
+        self.validate_conic_inputs(&a, &b)?;
+
         let arows = Self::csc_rows(&a);
-        let mut g_rows = Vec::new();
-        let mut h_lin = Vec::new();
+        // Linear inequality / equality rows from the model constraints only.
+        // Variable bounds are handled separately below: as extra `g` rows for
+        // the convex conic bridge (which has no lb/ub fields), and as the
+        // McCormick box (`lb`/`ub`) for the nonconvex spatial fallback.
+        let mut lin_g_rows = Vec::new();
+        let mut lin_h = Vec::new();
         let mut eq_rows = Vec::new();
         let mut b_eq = Vec::new();
         for (i, row) in arows.iter().enumerate() {
             match constraint_types[i] {
                 ConstraintType::Le => {
-                    g_rows.push(row.clone());
-                    h_lin.push(b[i]);
+                    lin_g_rows.push(row.clone());
+                    lin_h.push(b[i]);
                 }
                 ConstraintType::Ge => {
-                    g_rows.push(row.iter().map(|v| -v).collect());
-                    h_lin.push(-b[i]);
+                    lin_g_rows.push(row.iter().map(|v| -v).collect());
+                    lin_h.push(-b[i]);
                 }
                 ConstraintType::Eq => {
                     eq_rows.push(row.clone());
@@ -710,6 +718,8 @@ impl Model {
                 }
             }
         }
+        let mut g_rows = lin_g_rows.clone();
+        let mut h_lin = lin_h.clone();
         for (j, &(lb, ub)) in bounds.iter().enumerate() {
             if ub.is_finite() {
                 let mut r = vec![0.0; n];
@@ -724,16 +734,12 @@ impl Model {
                 h_lin.push(-lb);
             }
         }
+        // Quadratic constraints (validated finite / same-model above).
         let mut quad = Vec::new();
         for (expr, rhs) in &self.quadratic_constraints {
-            let p = quad_to_csc(&expr.quad, n).map_err(ModelError::Internal)?;
+            let p = quad_to_csc(&expr.quad, n).map_err(ModelError::InvalidInput)?;
             let mut q = vec![0.0; n];
             for (&var, &coef) in &expr.linear.coefficients {
-                if var.model_id != self.model_id || var.index >= n {
-                    return Err(ModelError::InvalidInput(
-                        "quadratic constraint contains a variable from another model".to_string(),
-                    ));
-                }
                 q[var.index] += coef;
             }
             quad.push(otspot_core::conic::QuadConstraint {
@@ -748,24 +754,86 @@ impl Model {
         };
         let qp = otspot_core::conic::QcqpProblem {
             n,
-            p0,
-            q0: c,
-            quad,
+            p0: p0.clone(),
+            q0: c.clone(),
+            quad: quad.clone(),
             g_lin: Self::csc_from_rows(&g_rows, n)?,
             h_lin,
             a_eq: Self::csc_from_rows(&eq_rows, n)?,
-            b_eq,
+            b_eq: b_eq.clone(),
         };
         let deadline = self
             .timeout_secs
             .map(|t| std::time::Instant::now() + std::time::Duration::from_secs_f64(t));
+        // Honor `set_tolerance` on the conic path (mirrors LP/QP/MIP paths):
+        // map the model tolerance preset to the IPM eps used by the whole stack.
+        let tol = {
+            let mut so = otspot_core::options::SolverOptions::default();
+            so.tolerance = self.tolerance;
+            so.ipm_eps()
+        };
         let opts = otspot_core::conic::ConicOptions {
+            tol,
             deadline,
             ..otspot_core::conic::ConicOptions::default()
         };
         let bb_opts = otspot_core::conic::BbOptions {
             deadline,
             ..otspot_core::conic::BbOptions::default()
+        };
+        let global_opts = otspot_core::conic::GlobalOptions {
+            gap_tol: tol,
+            feas_tol: tol,
+            ..otspot_core::conic::GlobalOptions::default()
+        };
+        // Build the nonconvex spatial-B&B problem (needs a finite McCormick box).
+        // Bounds go into `lb`/`ub`, not `g_lin` — hence the constraint-only rows.
+        let build_nonconvex = || -> Result<otspot_core::conic::NonconvexQcqp, ()> {
+            let mut lb = Vec::with_capacity(n);
+            let mut ub = Vec::with_capacity(n);
+            for &(l, u) in &bounds {
+                if !l.is_finite() || !u.is_finite() {
+                    return Err(());
+                }
+                lb.push(l);
+                ub.push(u);
+            }
+            let g_quad = quad
+                .iter()
+                .map(|qc| otspot_core::conic::GQuadConstraint {
+                    p: qc.p.clone(),
+                    q: qc.q.clone(),
+                    r: qc.r,
+                })
+                .collect();
+            Ok(otspot_core::conic::NonconvexQcqp {
+                n,
+                p0: p0.clone(),
+                q0: c.clone(),
+                quad: g_quad,
+                g_lin: Self::csc_from_rows(&lin_g_rows, n).map_err(|_| ())?,
+                h_lin: lin_h.clone(),
+                a_eq: Self::csc_from_rows(&eq_rows, n).map_err(|_| ())?,
+                b_eq: b_eq.clone(),
+                lb,
+                ub,
+            })
+        };
+        // Whether the convex-bridge result can be trusted as-is (mirrors
+        // `otspot_core::qp::qcqp_route::is_clean_convex_outcome`): a clamped
+        // (`convexity_unproven`) reformulation or a numerical failure must defer
+        // to the spatial global solver; a clamp-free Timeout counts as clean.
+        let is_clean_convex = |r: &otspot_core::conic::QcqpResult| -> bool {
+            if r.convexity_unproven {
+                return false;
+            }
+            match r.status {
+                SolveStatus::Optimal => {
+                    r.objective.is_finite() && r.x.iter().all(|v| v.is_finite())
+                }
+                SolveStatus::Infeasible | SolveStatus::Unbounded | SolveStatus::Timeout => true,
+                _ => false,
+            }
         };
         let raw_of = |x: &[f64]| -> f64 {
             let xn = &x[..n.min(x.len())];
@@ -776,27 +844,73 @@ impl Model {
             }
             raw
         };
-        let (status, raw_obj, solution) = if self.soc_constraints.is_empty() {
+        let (status, raw_obj, solution, route) = if self.soc_constraints.is_empty() {
             if integer_vars.is_empty() {
-                let r = otspot_core::conic::solve_qcqp(&qp, &opts);
-                (r.status, r.objective, r.x)
+                // Continuous QCQP: try the convex SOCP bridge, and defer to the
+                // spatial (McCormick) global solver when the reformulation is
+                // clamped or fails — matching `qp::qcqp_route` so the Model API
+                // never presents an approximation as a proven optimum.
+                let convex = otspot_core::conic::solve_qcqp(&qp, &opts);
+                if is_clean_convex(&convex) {
+                    (
+                        convex.status,
+                        convex.objective,
+                        convex.x,
+                        SolveRoute::ConicQcqpConvex,
+                    )
+                } else {
+                    match build_nonconvex() {
+                        Ok(nc) => {
+                            let g = otspot_core::conic::solve_global_qcqp(
+                                &nc,
+                                &opts,
+                                &global_opts,
+                            );
+                            (g.status, g.objective, g.x, SolveRoute::ConicQcqpNonconvex)
+                        }
+                        // The global fallback needs a finite box. Without one,
+                        // surface the structural rejection for a bridge-rejected
+                        // problem; otherwise the bridge's numerical failure.
+                        Err(()) => {
+                            return match convex.status {
+                                SolveStatus::NotSupported(m) => {
+                                    Err(ModelError::NotSupported(m))
+                                }
+                                _ => Err(ModelError::SolveError(SolveError::NumericalError)),
+                            };
+                        }
+                    }
+                }
             } else {
+                self.ensure_finite_integer_bounds(&integer_vars, &bounds)?;
                 let lb: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].0).collect();
                 let ub: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].1).collect();
                 let r =
                     otspot_core::conic::solve_miqcp(&qp, &integer_vars, &lb, &ub, &opts, &bb_opts);
-                (r.status, r.objective, r.x)
+                (r.status, r.objective, r.x, SolveRoute::ConicQcqpConvex)
             }
         } else {
-            let (mut conic, nvar, _convexity_unproven) =
+            let (mut conic, nvar, convexity_unproven) =
                 otspot_core::conic::to_conic(&qp).map_err(ModelError::Internal)?;
+            // With SOC constraints present, the spatial global solver (which
+            // only models quadratic + linear rows) cannot represent the problem,
+            // so a clamped reformulation has no sound fallback. Refuse rather
+            // than report the approximate SOCP solve as a proven optimum.
+            if convexity_unproven {
+                return Err(ModelError::NotSupported(
+                    "SOC-constrained QCQP has an indefinite (Cholesky jitter-band) \
+                     quadratic; no sound convex or spatial reformulation is available"
+                        .to_string(),
+                ));
+            }
             self.append_soc(&mut conic, nvar, n)?;
             if integer_vars.is_empty() {
                 let r = otspot_core::conic::solve_socp(&conic, &opts);
                 let sol = r.x[..n.min(r.x.len())].to_vec();
                 let raw = raw_of(&r.x);
-                (r.status, raw, sol)
+                (r.status, raw, sol, SolveRoute::ConicQcqpConvex)
             } else {
+                self.ensure_finite_integer_bounds(&integer_vars, &bounds)?;
                 let lb: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].0).collect();
                 let ub: Vec<f64> = integer_vars.iter().map(|&j| bounds[j].1).collect();
                 let mp = otspot_core::conic::MisocpProblem {
@@ -816,49 +930,170 @@ impl Model {
                 } else {
                     raw_of(&r.x)
                 };
-                (r.status, raw, sol)
+                (r.status, raw, sol, SolveRoute::ConicQcqpConvex)
             }
         };
-        // MIQCP/MISOCP のB&B経路のみ, 打ち切り時も検証済みincumbent (整数実行可能解)
-        // を返す (solve_mip_internal と同じ規約)。連続QCQP/SOCPのTimeout点は
-        // IPMの未収束反復点であり実行可能性が未証明のため、この扱いはB&B経路限定。
-        let is_bb_path = !integer_vars.is_empty();
-        let build_ok = |status: SolveStatus, raw_obj: f64, solution: Vec<f64>| ModelResult {
-            model_id: self.model_id,
-            proof: SolutionProof::from_status(&status),
-            status,
-            objective_value: {
-                let oriented = if self.sense == OptimizationSense::Maximize {
-                    -raw_obj
-                } else {
-                    raw_obj
-                };
-                oriented + self.obj_offset + self.obj_expr_constant
-            },
-            solution,
-            dual_solution: None,
-            reduced_costs: None,
-            slack: None,
-            bound_duals: Vec::new(),
-            stats: otspot_core::problem::SolveStats::default(),
+        // A verified incumbent may be returned on a truncated search: the MI
+        // conic B&B (`solve_miqcp`/`solve_misocp`) and the spatial global solver
+        // both return feasible incumbents. A continuous convex SOCP Timeout /
+        // MaxIterations point, by contrast, is an unconverged IPM iterate with
+        // unproven feasibility, so it is surfaced as an error.
+        let has_incumbent = !integer_vars.is_empty() || route == SolveRoute::ConicQcqpNonconvex;
+        let deadline_triggered = status == SolveStatus::Timeout;
+        let build_ok = |status: SolveStatus, raw_obj: f64, solution: Vec<f64>| {
+            let mut stats = SolveStats::default();
+            stats.route = route;
+            stats.deadline_triggered = deadline_triggered;
+            ModelResult {
+                model_id: self.model_id,
+                proof: SolutionProof::from_status(&status),
+                status,
+                objective_value: {
+                    let oriented = if self.sense == OptimizationSense::Maximize {
+                        -raw_obj
+                    } else {
+                        raw_obj
+                    };
+                    oriented + self.obj_offset + self.obj_expr_constant
+                },
+                solution,
+                dual_solution: None,
+                reduced_costs: None,
+                slack: None,
+                bound_duals: Vec::new(),
+                stats,
+            }
         };
         match status {
-            SolveStatus::Optimal => Ok(build_ok(SolveStatus::Optimal, raw_obj, solution)),
-            SolveStatus::Timeout if is_bb_path && !solution.is_empty() => {
+            SolveStatus::Optimal | SolveStatus::NonconvexGlobal => {
+                Ok(build_ok(status, raw_obj, solution))
+            }
+            SolveStatus::Timeout if has_incumbent && !solution.is_empty() => {
                 Ok(build_ok(SolveStatus::Timeout, raw_obj, solution))
             }
             SolveStatus::Timeout => Err(ModelError::Timeout),
-            s @ (SolveStatus::SuboptimalSolution | SolveStatus::MaxIterations)
-                if is_bb_path && !solution.is_empty() =>
+            s @ (SolveStatus::SuboptimalSolution
+            | SolveStatus::MaxIterations
+            | SolveStatus::NonconvexLocal)
+                if has_incumbent && !solution.is_empty() =>
             {
                 Ok(build_ok(s, raw_obj, solution))
             }
-            SolveStatus::SuboptimalSolution | SolveStatus::MaxIterations if is_bb_path => {
+            SolveStatus::SuboptimalSolution | SolveStatus::MaxIterations => {
                 Err(ModelError::SolveError(SolveError::MaxIterations))
             }
             s => Err(classify_status_error(s)
                 .unwrap_or_else(|| ModelError::Internal("unhandled QCQP status".to_string()))),
         }
+    }
+
+    /// Reject integer variables with non-finite bounds on the conic B&B paths.
+    ///
+    /// The MISOCP/MIQCP branch-and-bound bounds its search with the integer
+    /// variable box; an infinite bound would feed NaN/Inf cone data into the
+    /// relaxation. Mirrors the finite-bound requirement the CBF bridge enforces.
+    fn ensure_finite_integer_bounds(
+        &self,
+        integer_vars: &[usize],
+        bounds: &[(f64, f64)],
+    ) -> Result<(), ModelError> {
+        for &j in integer_vars {
+            let (lb, ub) = bounds[j];
+            if !lb.is_finite() || !ub.is_finite() {
+                return Err(ModelError::NotSupported(format!(
+                    "integer variable {j} requires finite bounds for conic \
+                     branch-and-bound, got ({lb}, {ub})"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-establish the finite / same-model input validation the LP/QP problem
+    /// constructors perform, for the conic (QCQP/SOCP) DSL paths that bypass them.
+    ///
+    /// Non-finite user data and foreign-model variables are `InvalidInput`
+    /// (matching the LP/QP Model paths), surfaced here before any cone data
+    /// reaches the interior-point method.
+    fn validate_conic_inputs(&self, a: &CscMatrix, b: &[f64]) -> Result<(), ModelError> {
+        let n = self.variables.len();
+        for (i, &v) in b.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(ModelError::InvalidInput(format!(
+                    "constraint {i}: non-finite right-hand side {v}"
+                )));
+            }
+        }
+        for &v in a.values() {
+            if !v.is_finite() {
+                return Err(ModelError::InvalidInput(format!(
+                    "constraint matrix: non-finite coefficient {v}"
+                )));
+            }
+        }
+        let check_affine = |e: &Expression, what: &dyn fmt::Display| -> Result<(), ModelError> {
+            if !e.constant.is_finite() {
+                return Err(ModelError::InvalidInput(format!(
+                    "{what}: non-finite constant {}",
+                    e.constant
+                )));
+            }
+            for (&var, &coef) in &e.coefficients {
+                if var.model_id != self.model_id {
+                    return Err(ModelError::InvalidInput(format!(
+                        "{what}: variable {} belongs to model {}, not this model ({})",
+                        var.index, var.model_id, self.model_id
+                    )));
+                }
+                if var.index >= n {
+                    return Err(ModelError::InvalidInput(format!(
+                        "{what}: variable index {} out of range ({n} variables)",
+                        var.index
+                    )));
+                }
+                if !coef.is_finite() {
+                    return Err(ModelError::InvalidInput(format!(
+                        "{what}: non-finite coefficient {coef} for variable {}",
+                        var.index
+                    )));
+                }
+            }
+            Ok(())
+        };
+        for (idx, (expr, rhs)) in self.quadratic_constraints.iter().enumerate() {
+            if !rhs.is_finite() {
+                return Err(ModelError::InvalidInput(format!(
+                    "quadratic constraint {idx}: non-finite right-hand side {rhs}"
+                )));
+            }
+            check_affine(&expr.linear, &format!("quadratic constraint {idx} linear part"))?;
+            for (&(va, vb), &coef) in &expr.quad {
+                if va.model_id != self.model_id || vb.model_id != self.model_id {
+                    return Err(ModelError::InvalidInput(format!(
+                        "quadratic constraint {idx}: quad term ({}, {}) belongs to another model",
+                        va.index, vb.index
+                    )));
+                }
+                if va.index >= n || vb.index >= n {
+                    return Err(ModelError::InvalidInput(format!(
+                        "quadratic constraint {idx}: quad term ({}, {}) out of range ({n} variables)",
+                        va.index, vb.index
+                    )));
+                }
+                if !coef.is_finite() {
+                    return Err(ModelError::InvalidInput(format!(
+                        "quadratic constraint {idx}: non-finite quad coefficient {coef}"
+                    )));
+                }
+            }
+        }
+        for (idx, (terms, t)) in self.soc_constraints.iter().enumerate() {
+            check_affine(t, &format!("SOC constraint {idx} bound"))?;
+            for (ti, term) in terms.iter().enumerate() {
+                check_affine(term, &format!("SOC constraint {idx} term {ti}"))?;
+            }
+        }
+        Ok(())
     }
 
     fn append_soc(
@@ -960,7 +1195,7 @@ impl Model {
             CscMatrix::new(0, num_vars)
         } else {
             CscMatrix::from_triplets(&qp_trip_rows, &qp_trip_cols, &qp_trip_vals, m_qp, num_vars)
-                .map_err(|e| ModelError::Internal(e.to_string()))?
+                .map_err(map_matrix_build_err)?
         };
 
         let mut qp_problem = QpProblem::new(qp_q, c, qp_a, qp_b, bounds, qp_constraint_types)
@@ -1252,6 +1487,17 @@ fn validate_timeout(secs: f64) -> Result<(), ModelError> {
         Err(ModelError::InvalidInput(format!(
             "timeout must be finite and non-negative, got {secs}"
         )))
+    }
+}
+
+/// Map a `CscMatrix::from_triplets` failure on a user-coefficient matrix to a
+/// `ModelError`. Non-finite coefficients are user input → `InvalidInput`
+/// (consistent with the LP/QP constructors); structural failures stay `Internal`.
+fn map_matrix_build_err(e: otspot_core::error::SolverError) -> ModelError {
+    use otspot_core::error::SolverError;
+    match e {
+        SolverError::NonFiniteCoefficient { .. } => ModelError::InvalidInput(e.to_string()),
+        _ => ModelError::Internal(e.to_string()),
     }
 }
 
