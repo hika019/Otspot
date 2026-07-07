@@ -6,12 +6,26 @@ where an external solver reaches a conclusive result but Otspot does not.
 Otspot result formats (produced by existing scripts, not by this tool):
   - `bench_parallel.sh` text output (LP/QP/QPLIB suites): a
     "=== 問題別詳細 ===" section with lines
-    `name  n  m  status  time  note...`.
+    `name  n  m  status  time  note...`, plus 2-space-indented fallback
+    entries `  name.ext  EXTERNAL_TIMEOUT (...)` / `  name.ext  ERROR ...`
+    appended when a worker group was killed externally or crashed before
+    producing per-problem lines (bench_parallel.sh:290).
   - `examples/solve_cbf.rs` CSV output (cblib_socp):
-    `problem,status,objective,iterations,time_sec`.
+    `problem,status,objective,iterations,time_sec` with `SolveStatus`
+    Display vocabulary (Optimal / Infeasible / Unbounded / Timeout /
+    NumericalError / MaxIterations / Unsupported / ...).
 
-This tool auto-detects which of the two by file extension/content and
-normalizes both to {name: {status, time}}.
+Status semantics differ between the two formats:
+  - bench_parallel statuses are *verified* (obj checked against baseline):
+    PASS / PASS:Infeasible / PASS:Unbounded / CHECKED[no_ref] count as PASS.
+  - solve_cbf statuses are raw solver claims. `Optimal` counts as PASS
+    (objective printed, comparable). `Infeasible`/`Unbounded` are conclusive
+    *claims with no baseline cross-check* (data/baseline_objectives/
+    cblib_socp.csv is self-referential, source=otspot_self, so it cannot
+    independently verify them); they are flagged in the
+    `otspot_unverified_claim` column instead of being counted as PASS, and
+    they suppress `other_solver_wins` when the external solver reached the
+    *same* conclusion (agreement between the two is not a win).
 
 Usage:
   compare.py --otspot PATH --highs CSV [--scip CSV] [--out CSV]
@@ -21,8 +35,23 @@ import csv
 import re
 import sys
 
+# bench_parallel.sh detail-line statuses that mean "Otspot solved and the
+# result was verified against the suite baseline".
 OTSPOT_PASS = {"PASS", "PASS:Infeasible", "PASS:Unbounded", "CHECKED[no_ref]"}
+
+# solve_cbf.rs (SolveStatus Display) vocabulary.
+CBF_PASS = {"Optimal"}
+CBF_UNVERIFIED_CONCLUSIVE = {"Infeasible", "Unbounded"}
+
 SOLVER_PASS = {"Optimal", "optimal", "Infeasible", "infeasible", "Unbounded", "unbounded"}
+
+# Normalized conclusion labels, used to detect agreement between an
+# unverified Otspot claim and the external solver's conclusion.
+_CONCLUSION = {
+    "Optimal": "optimal", "optimal": "optimal",
+    "Infeasible": "infeasible", "infeasible": "infeasible",
+    "Unbounded": "unbounded", "unbounded": "unbounded",
+}
 
 # Mirrors lp_vs_highs.sh's KNOWN_STATUSES so bench_parallel.sh's free-text
 # note field (which may itself contain spaces) doesn't get misparsed as
@@ -34,14 +63,43 @@ KNOWN_STATUSES = {
     "PFEAS_FAIL", "DFEAS_FAIL", "FAIL", "FAIL:Unknown", "FAIL:NumericalError",
 }
 
+# Statuses of bench_parallel.sh fallback entries (`  name.ext STATUS note...`,
+# 2-space indent, no n/m/time columns) appended when a worker group was
+# killed by the external timeout or crashed without per-problem output.
+INDENTED_FALLBACK_STATUSES = {"EXTERNAL_TIMEOUT", "ERROR"}
+
+
+def _strip_ext(name: str) -> str:
+    return name.rsplit(".", 1)[0] if "." in name else name
+
 
 def parse_bench_parallel_txt(path: str) -> dict:
     results = {}
     with open(path) as f:
         for line in f:
-            if not line or not line[0].strip() or line[0] in "=[ -":
+            stripped = line.strip()
+            if not stripped:
                 continue
-            parts = line.split()
+            parts = stripped.split()
+            # Indented fallback entries: `  name.ext  EXTERNAL_TIMEOUT (...)`
+            # or `  name.ext  ERROR worker_exit=N`. The summary counter line
+            # `    EXTERNAL_TIMEOUT: 1` is excluded because its first token
+            # ends with a colon.
+            if (
+                line[0] == " "
+                and len(parts) >= 2
+                and parts[1] in INDENTED_FALLBACK_STATUSES
+                and not parts[0].endswith(":")
+            ):
+                results[_strip_ext(parts[0])] = {
+                    "status": parts[1],
+                    "time": None,
+                    "objective": "",
+                    "format": "bench_parallel",
+                }
+                continue
+            if line[0] in "=[ -" or not line[0].strip():
+                continue
             if len(parts) < 5:
                 continue
             name, status = parts[0], parts[3]
@@ -57,6 +115,7 @@ def parse_bench_parallel_txt(path: str) -> dict:
                 "status": status,
                 "time": time_val,
                 "objective": m.group(1) if m else "",
+                "format": "bench_parallel",
             }
     return results
 
@@ -66,12 +125,15 @@ def parse_solve_cbf_csv(path: str) -> dict:
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
             name = row.get("problem")
-            if not name:
+            # Concatenated runs repeat the header line mid-file
+            # (observed in bench_results/cblib_20260707_postfix).
+            if not name or name == "problem":
                 continue
             results[name] = {
                 "status": row.get("status", ""),
                 "time": _to_float(row.get("time_sec")),
                 "objective": row.get("objective", ""),
+                "format": "solve_cbf",
             }
     return results
 
@@ -82,7 +144,7 @@ def parse_solver_csv(path: str) -> dict:
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
             name = row.get("problem")
-            if not name:
+            if not name or name == "problem":
                 continue
             results[name] = {
                 "status": row.get("status", ""),
@@ -105,6 +167,67 @@ def parse_otspot(path: str) -> dict:
     return parse_bench_parallel_txt(path)
 
 
+def otspot_pass(entry: dict) -> bool:
+    status = entry.get("status", "")
+    if entry.get("format") == "solve_cbf":
+        return status in CBF_PASS
+    return status in OTSPOT_PASS
+
+
+def otspot_unverified_claim(entry: dict) -> bool:
+    return (
+        entry.get("format") == "solve_cbf"
+        and entry.get("status", "") in CBF_UNVERIFIED_CONCLUSIVE
+    )
+
+
+def build_rows(otspot: dict, highs: dict, scip: dict) -> list:
+    """Merges the three result maps into comparison rows.
+
+    `notes` documents the SCIP fairness caveat (heuristics disabled on
+    nonlinear models — AVX-less CPU workaround, see README.md) on every row
+    that carries a SCIP result, so the caveat travels with the CSV.
+    """
+    names = sorted(set(otspot) | set(highs) | set(scip))
+    rows = []
+    for name in names:
+        o = otspot.get(name, {})
+        h = highs.get(name, {})
+        s = scip.get(name, {})
+        o_status = o.get("status", "MISSING")
+        h_status = h.get("status", "MISSING")
+        s_status = s.get("status", "MISSING")
+        o_pass = otspot_pass(o) if name in otspot else False
+        o_unverified = otspot_unverified_claim(o)
+        h_pass = h_status in SOLVER_PASS
+        s_pass = s_status in SOLVER_PASS
+
+        # An external solver "wins" when it reaches a conclusive result and
+        # Otspot does not. An unverified Otspot claim (cbf Infeasible/
+        # Unbounded) does not count as PASS, but when the external solver
+        # reached the *same* conclusion the two agree — not a win.
+        o_claim = _CONCLUSION.get(o_status) if o_unverified else None
+        h_wins = h_pass and _CONCLUSION.get(h_status) != o_claim
+        s_wins = s_pass and _CONCLUSION.get(s_status) != o_claim
+        other_wins = (not o_pass) and (h_wins or s_wins) and (name in otspot)
+
+        rows.append({
+            "problem": name,
+            "otspot_status": o_status,
+            "otspot_time": o.get("time", ""),
+            "otspot_unverified_claim": o_unverified,
+            "highs_status": h_status,
+            "highs_time": h.get("time", ""),
+            "highs_obj": h.get("objective", ""),
+            "scip_status": s_status,
+            "scip_time": s.get("time", ""),
+            "scip_obj": s.get("objective", ""),
+            "other_solver_wins": other_wins,
+            "notes": "scip_heuristics_off_on_nonlinear" if name in scip else "",
+        })
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--otspot", required=True, help="Otspot's own result file (.txt from bench_parallel.sh or .csv from solve_cbf)")
@@ -117,38 +240,10 @@ def main():
     highs = parse_solver_csv(args.highs) if args.highs else {}
     scip = parse_solver_csv(args.scip) if args.scip else {}
 
-    names = sorted(set(otspot) | set(highs) | set(scip))
-    if not names:
+    rows = build_rows(otspot, highs, scip)
+    if not rows:
         print("[compare] no problems found in any input", file=sys.stderr)
         sys.exit(1)
-
-    rows = []
-    frontier = []  # other-solver-can, otspot-cannot
-    for name in names:
-        o = otspot.get(name, {})
-        h = highs.get(name, {})
-        s = scip.get(name, {})
-        o_status = o.get("status", "MISSING")
-        h_status = h.get("status", "MISSING")
-        s_status = s.get("status", "MISSING")
-        o_pass = o_status in OTSPOT_PASS
-        h_pass = h_status in SOLVER_PASS
-        s_pass = s_status in SOLVER_PASS
-        other_wins = (not o_pass) and (h_pass or s_pass) and (name in otspot)
-        rows.append({
-            "problem": name,
-            "otspot_status": o_status,
-            "otspot_time": o.get("time", ""),
-            "highs_status": h_status,
-            "highs_time": h.get("time", ""),
-            "highs_obj": h.get("objective", ""),
-            "scip_status": s_status,
-            "scip_time": s.get("time", ""),
-            "scip_obj": s.get("objective", ""),
-            "other_solver_wins": other_wins,
-        })
-        if other_wins:
-            frontier.append(name)
 
     out_path = args.out or "compare.csv"
     with open(out_path, "w", newline="") as f:
@@ -156,8 +251,13 @@ def main():
         w.writeheader()
         w.writerows(rows)
 
+    frontier = [r["problem"] for r in rows if r["other_solver_wins"]]
+    n_nonpass = sum(
+        1 for r in rows
+        if r["problem"] in otspot and not otspot_pass(otspot[r["problem"]])
+    )
     print(f"[compare] {len(rows)} problems -> {out_path}")
-    print(f"[compare] otspot non-PASS: {sum(1 for r in rows if not (otspot.get(r['problem'], {}).get('status') in OTSPOT_PASS))}")
+    print(f"[compare] otspot non-PASS: {n_nonpass}")
     print(f"[compare] frontier (other-solver-can, otspot-cannot): {len(frontier)}")
     for name in frontier:
         print(f"[compare]   {name}")

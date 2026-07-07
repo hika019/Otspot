@@ -27,11 +27,20 @@ if [[ ${#FILES[@]} -eq 0 ]]; then
 fi
 mapfile -t SORTED < <(printf '%s\n' "${FILES[@]}" | sort)
 
+# GNU timeout exit code when the limit fires (`man timeout`); any other
+# non-zero exit is a solver-process crash (e.g. 132=SIGILL, 139=SIGSEGV).
+GNU_TIMEOUT_EXIT=124
+
 echo "[run_scip] data=$DATA_DIR problems=${#SORTED[@]} timeout=${TIMEOUT}s -> $OUT_CSV"
 for f in "${SORTED[@]}"; do
     name="$(basename "${f%.*}")"
-    row="$(timeout "${HARD_TIMEOUT}" python3 "$SCRIPT_DIR/solve_one_scip.py" "$f" --timeout "$TIMEOUT" 2>>"$LOG_FILE")" \
-        || row="${name},TIMEOUT_HARD,,${TIMEOUT}"
+    rc=0
+    row="$(timeout "${HARD_TIMEOUT}" python3 "$SCRIPT_DIR/solve_one_scip.py" "$f" --timeout "$TIMEOUT" 2>>"$LOG_FILE")" || rc=$?
+    if [[ $rc -eq $GNU_TIMEOUT_EXIT ]]; then
+        row="${name},TIMEOUT_HARD,,${TIMEOUT}"
+    elif [[ $rc -ne 0 ]]; then
+        row="${name},CRASH(exit=${rc}),,"
+    fi
     echo "$row" >> "$OUT_CSV"
     echo "[run_scip] $row"
 done

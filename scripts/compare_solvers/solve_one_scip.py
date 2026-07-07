@@ -150,12 +150,14 @@ def solve_mps_family(path: str, timeout: float):
     return status, obj, elapsed
 
 
-def solve_qplib(path: str, timeout: float):
-    dump_path = dump_problem(path)
-    try:
-        d = read_qp_dump(dump_path)
-    finally:
-        os.unlink(dump_path)
+def solve_qp_dump(d, timeout: float):
+    """Solves an already-parsed QpDump; returns (status, objective, time).
+
+    The epigraph variable / linear objective covers only the `1/2 x'Qx + c'x`
+    part; the QPLIB constant term `d.obj_offset` must be added back to the
+    reported objective (HiGHS handles this via `lp.offset_`; the CBF path
+    does the same in `solve_cbf`).
+    """
     m, has_nonlinear = build_scip_from_qp_dump(d)
     m.setParam("limits/time", float(timeout))
     if has_nonlinear:
@@ -167,8 +169,17 @@ def solve_qplib(path: str, timeout: float):
     m.optimize()
     elapsed = time.time() - start
     status = status_name(m)
-    obj = m.getObjVal() if m.getNSols() > 0 else None
+    obj = m.getObjVal() + d.obj_offset if m.getNSols() > 0 else None
     return status, obj, elapsed
+
+
+def solve_qplib(path: str, timeout: float):
+    dump_path = dump_problem(path)
+    try:
+        d = read_qp_dump(dump_path)
+    finally:
+        os.unlink(dump_path)
+    return solve_qp_dump(d, timeout)
 
 
 def solve_cbf(path: str, timeout: float):
@@ -192,11 +203,53 @@ def solve_cbf(path: str, timeout: float):
     return status, obj, elapsed
 
 
+def self_test() -> int:
+    """Regression test for the obj_offset propagation (independent oracle).
+
+    Hand-computed QP: min 0.5·2.5·x² − 5x + q0,  q0 = 100, x ∈ [0, 10].
+    Stationary point x* = 5/2.5 = 2, quadratic part = 5 − 10 = −5,
+    true optimum = −5 + 100 = 95.0.
+
+    Sentinel: dropping `+ d.obj_offset` in solve_qp_dump reports −5.0 → FAIL.
+    """
+    from common import QpDump
+
+    d = QpDump(
+        n=1,
+        m=0,
+        obj_offset=100.0,
+        bounds=[(0.0, 10.0)],
+        c=[-5.0],
+        q=[(0, 0, 2.5)],
+        a=[],
+        b=[],
+        ctypes=[],
+    )
+    status, obj, _elapsed = solve_qp_dump(d, timeout=30.0)
+    expected = 95.0
+    ok = status == "optimal" and obj is not None and abs(obj - expected) < 1e-5
+    print(
+        f"[self-test] status={status} obj={obj} expected={expected} -> "
+        f"{'PASS' if ok else 'FAIL'}"
+    )
+    return 0 if ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("path")
+    ap.add_argument("path", nargs="?")
     ap.add_argument("--timeout", type=float, default=1000.0)
+    ap.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the built-in obj_offset regression test and exit",
+    )
     args = ap.parse_args()
+
+    if args.self_test:
+        sys.exit(self_test())
+    if args.path is None:
+        ap.error("path is required unless --self-test is given")
 
     name = os.path.splitext(os.path.basename(args.path))[0]
     kind = classify(args.path)

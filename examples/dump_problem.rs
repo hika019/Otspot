@@ -55,7 +55,7 @@
 
 use std::env;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufWriter, Write};
 use std::path::Path;
 
 use otspot::io::cbf::{parse_cbf, CbfProblem};
@@ -73,6 +73,51 @@ fn write_csc_triplets(w: &mut impl Write, m: &CscMatrix) {
     for j in 0..m.ncols() {
         for k in col_ptr[j]..col_ptr[j + 1] {
             writeln!(w, "{} {} {:.17e}", row_ind[k], j, values[k]).unwrap();
+        }
+    }
+}
+
+/// Rejects QPLIB files declaring `maximize` before parsing.
+///
+/// `otspot-io`'s QPLIB parser silently negates `Q`, `c` and the objective
+/// constant on `maximize` and returns an equivalent *minimize* problem —
+/// the sense is not recorded in the returned `QpProblem`, so a dump of such
+/// a file would make external solvers report a sign-flipped objective with
+/// no way to flip it back. All current `data/` QPLIB files are `minimize`;
+/// this guard turns a silent future error into a loud one. (The CBF path is
+/// unaffected: `CbfProblem` keeps its `maximize` flag and the dump carries
+/// it.)
+///
+/// The sense is the third field of a QPLIB file, one field per line, with
+/// `#` starting a comment.
+fn reject_qplib_maximize(path: &Path) {
+    let file = File::open(path).unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
+    let sense = std::io::BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| {
+            let field = line.split('#').next().unwrap_or("").trim().to_string();
+            (!field.is_empty()).then_some(field)
+        })
+        .nth(2);
+    match sense.as_deref() {
+        Some(s) if s.eq_ignore_ascii_case("minimize") => {}
+        Some(s) if s.eq_ignore_ascii_case("maximize") => {
+            eprintln!(
+                "qplib maximize not supported by this dump: {} — otspot-io \
+                 negates the objective on parse and the sense would be lost \
+                 (external solvers would report a sign-flipped objective)",
+                path.display()
+            );
+            std::process::exit(1);
+        }
+        other => {
+            eprintln!(
+                "qplib sense field missing or unrecognized in {}: {:?}",
+                path.display(),
+                other
+            );
+            std::process::exit(1);
         }
     }
 }
@@ -186,6 +231,10 @@ fn main() {
     let file = File::create(out_path)
         .unwrap_or_else(|e| panic!("cannot create {}: {e}", out_path.display()));
     let mut w = BufWriter::new(file);
+
+    if ext == "qplib" {
+        reject_qplib_maximize(in_path);
+    }
 
     match ext.as_str() {
         "qplib" => match parse_qplib(in_path) {
