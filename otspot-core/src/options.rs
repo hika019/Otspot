@@ -621,6 +621,24 @@ impl SolverOptions {
         }
     }
 
+    /// LP solution-acceptance tolerance for relative primal residuals in
+    /// postsolve retry/demotion gates.
+    ///
+    /// `primal_tol` defaults to `PIVOT_TOL` (1e-8), an *internal* simplex
+    /// feasibility tolerance. The accuracy the caller asked for is `ipm_eps()`
+    /// (default 1e-6, follows `tolerance` when set). Accepting a returned
+    /// solution must never be stricter than the requested accuracy: gating at
+    /// PIVOT_TOL misclassifies solves whose achievable original-space residual
+    /// sits between PIVOT_TOL and eps (greenbea: ~1.2e-7 on every route).
+    pub(crate) fn lp_accept_primal_tol(&self) -> f64 {
+        self.primal_tol.max(self.ipm_eps())
+    }
+
+    /// Dual counterpart of [`Self::lp_accept_primal_tol`] for `postsolve_dfeas`.
+    pub(crate) fn lp_accept_dual_tol(&self) -> f64 {
+        self.dual_tol.max(self.ipm_eps())
+    }
+
     /// Validate all option fields.
     ///
     /// Returns the first `Err` encountered, in field declaration order.

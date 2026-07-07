@@ -21,9 +21,9 @@ use std::path::Path;
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
-use otspot::problem::ConstraintType;
+use otspot::problem::{ConstraintType, LpProblem};
 use otspot::qp::QpProblem;
-use otspot::{solve_qp_with, SolveStatus};
+use otspot::{solve_qp_with, solve_with, SolveStatus};
 
 /// Quiet single-thread convergence (harris bench, 1000s 逐次, obj_err 0.000%):
 /// cre-b 242s / ken-13 187s / d6cube 150s / pilot 90s. 180s sat below
@@ -36,7 +36,7 @@ const BUDGET_SECS: f64 = 360.0;
 /// The generated block LP has a known optimum and should solve far below it.
 const SYNTH_BUDGET_SECS: f64 = 1000.0;
 const ROUTE_SENTINEL_BUDGET_SECS: f64 = 1000.0;
-const REL_TOL: f64 = 5e-3; // 0.5 % of truth – tighter than bench eps=1e-6.
+const REL_TOL: f64 = 5e-3; // 0.5 % of truth — objective-level sanity bound, far looser than solve eps=1e-6.
 
 struct Case {
     name: &'static str,
@@ -174,27 +174,106 @@ macro_rules! real_netlib_bounded_eq_ub_route_test {
     };
 }
 
-real_netlib_bounded_eq_ub_route_test!(lp_route_dfl001_uses_bounded_eq_ub, "dfl001");
-real_netlib_bounded_eq_ub_route_test!(lp_route_ken18_uses_bounded_eq_ub, "ken-18");
+// pds-20 (m=33874, n=105728) fails the wide-LP IPM aspect gate
+// (n·10 = 1,057,280 > m·22 = 745,228), so the bounded Eq+UB simplex route
+// remains the intended path and this pin stays valid.
 real_netlib_bounded_eq_ub_route_test!(lp_route_pds20_uses_bounded_eq_ub, "pds-20");
 
+/// dfl001 (m=6071, n=12230) and ken-18 (m=105127, n=154699) satisfy the
+/// wide-LP IPM dispatch gate (`should_try_lp_ipm`: n ≥ m, n·10 ≤ m·22,
+/// n+m ≥ 10000, nnz ≥ 10000) since 3c25e880, which routes them to the LP-IPM
+/// backend by design. The former bounded-Eq+UB route pins were stale: dfl001
+/// failed outright, and ken-18 only stayed green because the pre-6762737c
+/// PIVOT_TOL retry gate re-solved via simplex and set the flag as a side
+/// effect. Pin the intended route AND the outcome: IPM dispatch is chosen and
+/// certifies Optimal at the Netlib truth (solo: dfl001 ~344s / 119 iters,
+/// ken-18 ~63s / 62 iters).
+fn assert_real_netlib_uses_ipm_dispatch(name: &str, truth: f64) {
+    let Some(qp) = load_qp(name) else {
+        panic!("{name}: data/lp_problems/{name}.QPS missing");
+    };
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(ROUTE_SENTINEL_BUDGET_SECS);
+    opts.known_optimal_obj = Some(truth);
+    let r = solve_qp_with(&qp, &opts);
+    assert!(
+        r.stats.lp_ipm_path,
+        "{name}: wide-LP IPM dispatch not used; status={:?} iters={}",
+        r.status, r.iterations
+    );
+    assert!(
+        matches!(r.status, SolveStatus::Optimal),
+        "{name}: IPM dispatch must certify Optimal; got {:?} obj={:.6e}",
+        r.status,
+        r.objective
+    );
+    let err = rel_err(r.objective, truth);
+    assert!(
+        err <= REL_TOL,
+        "{name}: obj={:.6e} truth={:.6e} rel_err={:.2e} > {REL_TOL:.0e}",
+        r.objective,
+        truth,
+        err
+    );
+}
+
+macro_rules! real_netlib_ipm_route_test {
+    ($test_name:ident, $case_name:literal) => {
+        #[test]
+        #[ignore = "heavy: wide-LP IPM dispatch route sentinel"]
+        fn $test_name() {
+            let case = REAL_CASES
+                .iter()
+                .find(|case| case.name == $case_name)
+                .expect("case must exist");
+            assert_real_netlib_uses_ipm_dispatch(case.name, case.truth);
+        }
+    };
+}
+
+real_netlib_ipm_route_test!(lp_route_dfl001_uses_ipm_dispatch, "dfl001");
+real_netlib_ipm_route_test!(lp_route_ken18_uses_ipm_dispatch, "ken-18");
+
+/// Main-era expanded-UB pricing solved ken-13 in about 62,928 pivots; the
+/// regressed compact Eq+UB pricing took about 145,525. 100k is deliberately
+/// between those regimes, with wide headroom over main but below the
+/// regression, so the sentinel catches pricing-efficiency loss without
+/// pinning an exact machine-dependent count.
+const KEN13_PIVOT_BUDGET: usize = 100_000;
+
+/// Pricing-efficiency sentinel for the bounded Eq+UB simplex path (d7a0bb4f).
+///
+/// ken-13 (Eq-only, finite UBs) exercised this path through `solve_qp_with`
+/// until 3c25e880 routed it to the wide-LP IPM backend (n=42659 ≥ m=28632,
+/// n·10 = 426,590 ≤ m·22 = 629,904), where `bounded_eq_ub_path` is false by
+/// design and `iterations` counts IPM steps, not pivots — the former QP-entry
+/// pin became unsatisfiable. Pin the simplex backend directly through the LP
+/// entry (`solve_with` = `lp::solve_lp_with`), which has no IPM dispatch, so
+/// the pricing regression this guards stays measurable on the path that still
+/// serves non-IPM LPs (e.g. pds-20).
 #[test]
-#[ignore = "heavy: bounded Eq+UB pricing efficiency sentinel"]
-fn lp_bounded_eq_ub_ken13_iteration_efficiency() {
+#[ignore = "heavy: bounded Eq+UB pricing efficiency sentinel (simplex LP entry)"]
+fn lp_bounded_eq_ub_ken13_pricing_efficiency_via_lp_entry() {
     let case = REAL_CASES
         .iter()
         .find(|case| case.name == "ken-13")
         .expect("case must exist");
-    let path_str = format!("data/lp_problems/{}.QPS", case.name);
-    let path = Path::new(&path_str);
-    if !path.exists() {
-        panic!("{}: {} missing", case.name, path_str);
+    let Some(qp) = load_qp(case.name) else {
+        panic!("{}: data/lp_problems/{}.QPS missing", case.name, case.name);
     };
-    let qp = parse_qps(path).expect("ken-13 QPS must parse");
+    let lp = LpProblem::new_general(
+        qp.c.clone(),
+        qp.a.clone(),
+        qp.b.clone(),
+        qp.constraint_types.clone(),
+        qp.bounds.clone(),
+        None,
+    )
+    .expect("ken-13 LpProblem");
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(ROUTE_SENTINEL_BUDGET_SECS);
     opts.known_optimal_obj = Some(case.truth);
-    let r = solve_qp_with(&qp, &opts);
+    let r = solve_with(&lp, &opts);
     eprintln!(
         "ken-13 bounded Eq+UB efficiency: status={:?} obj={:.6e} iterations={} bounded_eq_ub={}",
         r.status, r.objective, r.iterations, r.stats.bounded_eq_ub_path
@@ -210,14 +289,9 @@ fn lp_bounded_eq_ub_ken13_iteration_efficiency() {
         rel_err(r.objective, case.truth),
         r.stats.bounded_eq_ub_path
     );
-    // Main-era expanded-UB path solved ken-13 in about 62,928 pivots; the
-    // regressed compact Eq+UB path took about 145,525. 100k is deliberately
-    // between those regimes, with wide headroom over main but below the
-    // regression, so this catches pricing-efficiency loss without pinning an
-    // exact machine-dependent count.
     assert!(
-        r.iterations < 100_000,
-        "ken-13 bounded Eq+UB iterations regressed: got {}, expected < 100000",
+        r.iterations < KEN13_PIVOT_BUDGET,
+        "ken-13 bounded Eq+UB iterations regressed: got {}, expected < {KEN13_PIVOT_BUDGET}",
         r.iterations
     );
 }

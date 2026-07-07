@@ -4,6 +4,15 @@ name: CI (heavy)
 # トリガ (user policy 3b97a37):
 #   1. 全 branch push で auto-run (cron 廃止、push 必ず走らせる)
 #   2. workflow_dispatch (Actions tab "Run workflow" ボタン)
+#
+# 構成: must-pass / perf-open の2段。
+#   - must-pass: heavy sentinel の regression gate。fail でジョブが赤になる。
+#     (旧構成の全 step continue-on-error は、informational 枠に本物の
+#     regression が混ざっても検知できず、greenbea 偽降格 regression
+#     (daf7ab54 起源、6762737c で修正) を素通しした。)
+#   - perf-open: 意図的に赤を許容する既知未達成 perf 目標 (ignore reason
+#     "perf-open" のテスト)。informational 継続。目標達成で緑になったら
+#     must-pass へ移す (下の除外リストと ignore annotation の両方を更新)。
 on:
   workflow_dispatch:
   push:
@@ -17,8 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # rust-toolchain + nextest install を Download 前に配置: Download が
-      # netlib intermittent で fail しても `if: always()` の test step が
-      # `nextest 不在` で死なないようにする。
+      # netlib intermittent で fail しても後続 test step が `nextest 不在`
+      # で死なないようにする。
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
@@ -38,20 +47,29 @@ jobs:
         run: bash scripts/ensure_emps.sh
       - name: Download CI subset
         run: bash scripts/download_all_bench_data.sh --ci-subset
-      - name: Run heavy (broken/flaky/permanent surveillance) tests
-        # Informational surveillance: ignored/heavy tests are not required to pass on CI.
-        # Non-ignored tests are gated by ci.yml; keep surfacing all ignored results here.
-        continue-on-error: true
+      - name: Run heavy must-pass sentinels (gating)
+        # perf-open を除く heavy 全件 (収束 sentinel 含む)。fail = regression
+        # としてジョブを赤にする。除外リストは
+        # `grep -rn '"perf-open' tests/` の該当テスト名と同期させること。
         run: |
           cargo nextest run --release --features parallel --profile heavy \
-            --run-ignored all --no-fail-fast --test-threads 3
-      - name: Run heavy convergence sentinels (surveillance)
-        # Informational surveillance for convergence sentinels; results are surfaced but non-gating.
-        # budget/tol は diag_lp_simplex_stall_sentinel.rs 参照。
-        # if: always() — setup failure 後も収束結果を surface する。
+            --run-ignored all --no-fail-fast --test-threads 3 \
+            -E 'not (test(=d6cube_postsolve_under_1s) + test(=greenbea_postsolve_under_5s) + test(=diag_osa60_must_reach_known_objective))'
+      - name: Run heavy perf-open targets (informational)
+        # 既知未達成 or margin が machine 依存の perf 目標:
+        #   - d6cube_postsolve_under_1s: 60s で Optimal 未達 (収束は
+        #     lp_simplex_stall_d6cube_converges が must-pass で追跡)
+        #   - greenbea_postsolve_under_5s: 6762737c 以降ローカル緑 (postsolve
+        #     3.12s < 5s cap) だが CI runner 速度差で cap を超えうる。GH で
+        #     緑を観測したら must-pass へ昇格する。
+        #   - diag_osa60_must_reach_known_objective: default path が 60s で
+        #     Optimal を証明できない (#88/#89)。correctness は
+        #     diag_osa60_is_feasible_and_honest が must-pass で追跡。
+        # 赤 = 目標未達の継続観測であり regression ではないため非ゲート。
+        # if: always() — must-pass が赤でも perf-open の現状を surface する。
         if: always()
         continue-on-error: true
         run: |
-          cargo nextest run --release --profile heavy --run-ignored all --no-fail-fast \
-            -E 'test(=lp_simplex_stall_cre_b_converges) | test(=lp_simplex_stall_d6cube_converges) | test(=lp_simplex_stall_pilot_converges)' \
-            --test-threads 3
+          cargo nextest run --release --features parallel --profile heavy \
+            --run-ignored all --no-fail-fast --test-threads 3 \
+            -E 'test(=d6cube_postsolve_under_1s) + test(=greenbea_postsolve_under_5s) + test(=diag_osa60_must_reach_known_objective)'

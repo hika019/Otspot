@@ -56,12 +56,13 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
 /// converges to 4.044e6. So the test FAILS at HEAD with 60 s budget and
 /// would PASS once `pivot_out_degenerate_artificials` is sped up.
 #[test]
-#[ignore = "permanent ignore — asserts Optimal, but the default (presolve) path does not \
-            certify Optimal at 60s: it returns SuboptimalSolution, or Timeout with a \
-            reduced-space solution leak (#37). The objective IS reached — presolve=false \
-            yields the exact optimum (rel ~8e-10) in ~33s; see diag_osa60_is_feasible_and_honest. \
-            The prior 'obj err 5.2%' note was stale. Un-ignore once the presolve path certifies \
-            Optimal; fix tracked in #88/#89"]
+#[ignore = "perf-open/heavy: open perf target 'default (presolve) path certifies Optimal at \
+            60s'. Measured at HEAD: Timeout obj=inf sol_len=0 iters=5434 (presolve 1.1s + \
+            solve 58.9s); historically also SuboptimalSolution or Timeout with a \
+            reduced-space solution leak (#37). The objective IS reachable — presolve=false \
+            yields the exact optimum (rel ~8e-10) in ~33s; correctness is gated by \
+            diag_osa60_is_feasible_and_honest. Fix tracked in #88/#89. This name must stay \
+            in the perf-open filter of test-heavy.yml; move to must-pass once green"]
 fn diag_osa60_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/osa-60.QPS");
     assert!(

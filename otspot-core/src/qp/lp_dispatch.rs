@@ -308,7 +308,7 @@ fn solve_reduced_lp_from_qp(
                     postsolve_us,
                     ..Default::default()
                 });
-                if lp_original_primal_bad(&fallback, original_lp, options.primal_tol) {
+                if lp_original_primal_bad(&fallback, original_lp, options.lp_accept_primal_tol()) {
                     fallback.status = SolveStatus::SuboptimalSolution;
                 }
                 return fallback;
@@ -686,9 +686,12 @@ fn postsolved_lp_needs_direct_retry(
         return false;
     }
     let (postsolve_pfeas, postsolve_bfeas) = lp_original_primal_residuals(result, original_lp);
-    result.postsolve_dfeas.is_some_and(|d| d > options.dual_tol)
-        || postsolve_pfeas > options.primal_tol
-        || postsolve_bfeas > options.primal_tol
+    let accept_primal = options.lp_accept_primal_tol();
+    result
+        .postsolve_dfeas
+        .is_some_and(|d| d > options.lp_accept_dual_tol())
+        || postsolve_pfeas > accept_primal
+        || postsolve_bfeas > accept_primal
         || result.status == SolveStatus::SuboptimalSolution
 }
 
@@ -940,8 +943,17 @@ mod tests {
         .unwrap()
     }
 
+    /// Retry/demotion gate must key on the *requested* accuracy (`ipm_eps()`),
+    /// never on the internal simplex `primal_tol` (PIVOT_TOL=1e-8) alone.
+    ///
+    /// greenbea regression pin: its achievable original-space relative primal
+    /// residual is ~1.2e-7 on every route (presolve on/off alike), so gating at
+    /// PIVOT_TOL demoted a solution matching the known optimum to rel_err 2e-12.
+    /// The gate still fires when the violation exceeds the requested eps
+    /// (daf7ab54's purpose: never label an unproven solution Optimal), and it
+    /// follows an explicitly tightened `tolerance` request.
     #[test]
-    fn postsolved_lp_retry_gate_uses_original_primal_tolerance() {
+    fn postsolved_lp_retry_gate_keys_on_requested_accuracy() {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let lp = LpProblem::new_general(
             vec![0.0],
@@ -952,25 +964,44 @@ mod tests {
             None,
         )
         .unwrap();
-        let result = SolverResult {
+        let result_between_pivot_and_eps = SolverResult {
             status: SolveStatus::Optimal,
             solution: vec![1.0 + 5.0e-8],
             objective: 0.0,
             ..Default::default()
         };
-        let loose = SolverOptions {
-            primal_tol: 1.0e-6,
-            dual_tol: 1.0e-6,
+        let result_above_eps = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0 + 5.0e-6],
+            objective: 0.0,
             ..Default::default()
         };
-        let tight = SolverOptions {
-            primal_tol: 1.0e-8,
-            dual_tol: 1.0e-8,
+        let defaults = SolverOptions::default();
+        let tight_request = SolverOptions {
+            tolerance: Some(crate::options::Tolerance::Custom(1.0e-8)),
             ..Default::default()
         };
 
-        assert!(!postsolved_lp_needs_direct_retry(&result, &lp, &loose));
-        assert!(postsolved_lp_needs_direct_retry(&result, &lp, &tight));
+        // violation 5e-8 < eps(1e-6): accepted under default request even though
+        // it exceeds PIVOT_TOL (the greenbea case).
+        assert!(!postsolved_lp_needs_direct_retry(
+            &result_between_pivot_and_eps,
+            &lp,
+            &defaults
+        ));
+        // Same solution under an explicit eps=1e-8 request: gate fires.
+        assert!(postsolved_lp_needs_direct_retry(
+            &result_between_pivot_and_eps,
+            &lp,
+            &tight_request
+        ));
+        // violation 5e-6 > eps(1e-6): gate fires under defaults (unproven
+        // solutions must not pass as Optimal).
+        assert!(postsolved_lp_needs_direct_retry(
+            &result_above_eps,
+            &lp,
+            &defaults
+        ));
     }
 
     /// 2 solve を独立実行し、それぞれの route stats が独立していることを確認。

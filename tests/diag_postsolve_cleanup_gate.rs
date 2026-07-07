@@ -78,11 +78,13 @@ fn d6cube_postsolve_under_1s() {
 /// greenbea's cleanup_pert returned Inf after ~20 s; the 4× cap on its
 /// deadline bounds postsolve well under what it used to consume.
 ///
-/// tier-2: greenbea は simplex 一本化後 60s で Optimal に達しない (Phase2 worklist)。
-/// 未収束だと postsolve に到達せず gate が vacuous になるため default から外す。
-/// 収束自体は lp_simplex_stall_greenbea_converges が追跡。
+/// 6762737c (postsolve 受入ゲートの ipm_eps 基準化) 以降 greenbea は 60s 内に
+/// Optimal へ達し gate は vacuous でなくなった (実測 wall=5.3s)。収束自体は
+/// lp_simplex_stall_greenbea_converges が追跡。default から外すのは実行時間のみが理由。
 #[test]
-#[ignore = "perf-open/heavy: greenbea does not converge within 60s; postsolve gate is vacuous; run via --profile heavy"]
+#[ignore = "perf-open/heavy: gate passes locally since 6762737c (Optimal wall=5.3s, postsolve=3.12s \
+            of the 5s cap) but the margin is machine-dependent — a ~1.6x slower CI runner exceeds \
+            the cap without any regression. Promote to must-pass after a green GH Actions observation"]
 fn greenbea_postsolve_under_5s() {
     let prob = load("data/lp_problems/greenbea.QPS");
     let (_status, _wall, postsolve_s) = solve(&prob, 60.0);
