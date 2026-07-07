@@ -519,6 +519,55 @@ ENDATA
         );
     }
 
+    #[test]
+    fn test_qps_bounds_invalid_numeric_value_is_error() {
+        let qps =
+            "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nBOUNDS\n LO BND x1 not_a_number\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid BOUNDS value"),
+            "invalid BOUNDS value must not default silently, got {err:?}"
+        );
+    }
+
+    /// Fixed-format BOUNDS: MPS field values may contain internal spaces (FORPLAN
+    /// column "A   22 1", bound set "BND-1"). `split_whitespace` over-splits such a
+    /// line into 5+ tokens, so the parser must fall back to fixed-column extraction
+    /// (col 14..22, value 24..36) rather than rejecting it as "extra tokens".
+    #[test]
+    fn test_qps_bounds_fixed_format_spaced_names() {
+        // Build lines with fields at exact MPS byte offsets so the spaced column
+        // name "AB CD" round-trips through fixed-column extraction.
+        fn put(line: &mut Vec<u8>, at: usize, s: &str) {
+            if line.len() < at + s.len() {
+                line.resize(at + s.len(), b' ');
+            }
+            line[at..at + s.len()].copy_from_slice(s.as_bytes());
+        }
+        // COLUMNS: col[4..], row1[14..], val1[24..].
+        let mut col = vec![b' '; 4];
+        put(&mut col, 4, "AB CD");
+        put(&mut col, 14, "obj");
+        put(&mut col, 24, "1.0");
+        // BOUNDS: type[1..], bndname[4..], col[14..], val[24..].
+        let mut bnd = vec![b' '; 1];
+        put(&mut bnd, 1, "UP");
+        put(&mut bnd, 4, "BND");
+        put(&mut bnd, 14, "AB CD");
+        put(&mut bnd, 24, "2640.");
+        let qps = format!(
+            "NAME          FIXED\nROWS\n N  obj\nCOLUMNS\n{}\nRHS\nBOUNDS\n{}\nENDATA\n",
+            String::from_utf8(col).unwrap(),
+            String::from_utf8(bnd).unwrap(),
+        );
+        let prob = parse_qps_str(&qps).expect("fixed-format spaced BOUNDS must parse");
+        assert_eq!(prob.num_vars, 1);
+        assert_eq!(
+            prob.bounds[0].1, 2640.0,
+            "UP bound value must be read from fixed columns"
+        );
+    }
+
     /// Duplicate (col, row) entries in COLUMNS must accumulate (sum), not error.
     /// QPS inherits MPS spec: repeated entries are summed via CscMatrix triplet merge.
     #[test]
@@ -541,6 +590,16 @@ ENDATA
         assert!(
             parse_qps_str(qps).is_err(),
             "NaN in constraint RHS must error"
+        );
+    }
+
+    #[test]
+    fn test_qps_rhs_odd_trailing_token_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0 c2\nQUADOBJ\n    x1 x1 1.0\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("Odd trailing token"),
+            "odd RHS token must be rejected, got {err:?}"
         );
     }
 

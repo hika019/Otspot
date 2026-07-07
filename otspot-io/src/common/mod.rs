@@ -120,6 +120,12 @@ pub(crate) fn parse_mps_free_pairs(
         pairs.push((name, value));
         i += 2;
     }
+    if i < parts.len() {
+        return Err(format!(
+            "line {}: Odd trailing token '{}' in {} (name without a value)",
+            line_num, parts[i], section
+        ));
+    }
     Ok(pairs)
 }
 

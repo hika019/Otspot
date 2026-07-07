@@ -387,46 +387,66 @@ impl QpsParser {
                 });
             }
         };
-        if parts.len() >= 5 {
-            let col_name = mps_field(line, 14, 22).to_string();
-            let value = {
-                let v = mps_field(line, 24, 36);
-                if v.is_empty() {
-                    None
-                } else {
-                    let parsed = v.parse::<f64>().ok();
-                    if let Some(val) = parsed {
-                        if !val.is_finite() {
-                            return Err(QpsError::ParseError {
-                                line: line_num,
-                                message: format!("Non-finite BOUNDS value for col='{}'", col_name),
-                            });
-                        }
-                    }
-                    parsed
-                }
-            };
-            self.bounds.push((bound_type, col_name, value));
-            return Ok(());
-        }
         let value_taking = !matches!(
             bound_type,
             BoundType::FR | BoundType::MI | BoundType::PL | BoundType::BV
         );
+        // Fixed-format MPS field values may contain internal spaces (e.g. FORPLAN
+        // column "A   22 1" / bound set "BND-1"), so `split_whitespace` over-splits
+        // and yields 5+ tokens for a single (col, value) entry. Fall back to
+        // fixed-column extraction: col at 14..22, value at 24..36.
+        if parts.len() >= 5 {
+            let col_name = mps_field(line, 14, 22).to_string();
+            if col_name.is_empty() {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: "BOUNDS line: empty column name in fixed-format field 14..22"
+                        .to_string(),
+                });
+            }
+            let raw = mps_field(line, 24, 36);
+            let value = if raw.is_empty() {
+                None
+            } else {
+                let parsed = raw.parse::<f64>().map_err(|_| QpsError::ParseError {
+                    line: line_num,
+                    message: format!("Invalid BOUNDS value for col='{}': {}", col_name, raw),
+                })?;
+                if !parsed.is_finite() {
+                    return Err(QpsError::ParseError {
+                        line: line_num,
+                        message: format!("Non-finite BOUNDS value for col='{}'", col_name),
+                    });
+                }
+                Some(parsed)
+            };
+            if value_taking && value.is_none() {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: format!(
+                        "BOUNDS type {} requires a value for col='{}'",
+                        parts[0], col_name
+                    ),
+                });
+            }
+            self.bounds.push((bound_type, col_name, value));
+            return Ok(());
+        }
         let (col_name, value) = if !value_taking {
             (parts[2].to_string(), None)
         } else if parts.len() >= 4 {
             let raw = parts[3];
-            let parsed = raw.parse::<f64>().ok();
-            if let Some(val) = parsed {
-                if !val.is_finite() {
-                    return Err(QpsError::ParseError {
-                        line: line_num,
-                        message: format!("Non-finite BOUNDS value for col='{}'", parts[2]),
-                    });
-                }
+            let parsed = raw.parse::<f64>().map_err(|_| QpsError::ParseError {
+                line: line_num,
+                message: format!("Invalid BOUNDS value for col='{}': {}", parts[2], raw),
+            })?;
+            if !parsed.is_finite() {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: format!("Non-finite BOUNDS value for col='{}'", parts[2]),
+                });
             }
-            (parts[2].to_string(), parsed)
+            (parts[2].to_string(), Some(parsed))
         } else if let Ok(v) = parts[2].parse::<f64>() {
             if !v.is_finite() {
                 return Err(QpsError::ParseError {
