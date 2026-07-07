@@ -235,3 +235,68 @@ fn nonconvex_qcqp_propagates_timeout() {
     assert!(result.stats.deadline_triggered);
     assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
 }
+
+/// memo#31 (P1): the QCQP conic route must include `QpProblem::obj_offset`
+/// in the reported objective, like every LP/QP route (QPLIB QCQP `q0` flows
+/// through this field).
+///
+/// Sentinel: dropping the offset addition in `solve_qcqp_via_conic` makes
+/// this FAIL (objective would be -sqrt(2), not 42.5 - sqrt(2)).
+#[test]
+fn convex_qcqp_objective_includes_obj_offset() {
+    let mut problem = convex_qcqp_problem();
+    problem.obj_offset = 42.5;
+    let result = solve_qp(&problem);
+    assert_eq!(result.status, SolveStatus::Optimal, "{:?}", result.status);
+    let expect = 42.5 - 2.0_f64.sqrt();
+    assert!(
+        (result.objective - expect).abs() < 1e-4,
+        "objective={} expected {expect}",
+        result.objective
+    );
+    assert_eq!(result.stats.route, SolveRoute::ConicQcqpConvex);
+}
+
+/// memo#31, nonconvex fallback path: the spatial global route must also
+/// include `obj_offset`.
+#[test]
+fn nonconvex_qcqp_objective_includes_obj_offset() {
+    let mut problem = nonconvex_qcqp_problem(3.0);
+    problem.obj_offset = -7.25;
+    let result = solve_qp(&problem);
+    assert_eq!(result.status, SolveStatus::Optimal, "{:?}", result.status);
+    let expect = 2.0 - 7.25;
+    assert!(
+        (result.objective - expect).abs() < 5e-3,
+        "objective={} expected {expect}",
+        result.objective
+    );
+    assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
+}
+
+/// Codex finding (qcqp_route.rs:115): the McCormick fallback must honor
+/// `options.global_optimization` (node budget / gap), not silently use
+/// `GlobalOptions::default()` (max_nodes = 50_000).
+///
+/// Sentinel: with `max_nodes = 1` the search is node-limited after the root,
+/// so the status must be `MaxIterations`; reverting to the hardcoded default
+/// makes this FAIL with `Optimal`.
+#[test]
+fn nonconvex_qcqp_honors_global_optimization_node_budget() {
+    let problem = nonconvex_qcqp_problem(3.0);
+    let opts = SolverOptions {
+        global_optimization: Some(crate::options::GlobalOptimizationConfig {
+            max_nodes: 1,
+            ..Default::default()
+        }),
+        ..SolverOptions::default()
+    };
+    let result = solve_qp_with(&problem, &opts);
+    assert_eq!(
+        result.status,
+        SolveStatus::MaxIterations,
+        "{:?}",
+        result.status
+    );
+    assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
+}

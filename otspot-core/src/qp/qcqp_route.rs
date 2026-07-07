@@ -33,7 +33,7 @@ pub(crate) fn solve_qcqp_via_conic(problem: &QpProblem, options: &SolverOptions)
 
     let convex = conic::solve_qp_problem_as_qcqp(problem, &c_opts);
     if is_clean_convex_outcome(&convex) {
-        return qcqp_result_to_solver_result(convex);
+        return qcqp_result_to_solver_result(convex, problem.obj_offset);
     }
 
     let nc_qp = match nonconvex_from_qp_problem(problem) {
@@ -52,7 +52,7 @@ pub(crate) fn solve_qcqp_via_conic(problem: &QpProblem, options: &SolverOptions)
     };
     let g_opts = global_options(options);
     let global = conic::solve_global_qcqp(&nc_qp, &c_opts, &g_opts);
-    global_result_to_solver_result(global)
+    global_result_to_solver_result(global, problem.obj_offset)
 }
 
 /// Whether the convex-bridge result can be trusted as-is.
@@ -109,14 +109,22 @@ fn conic_options(options: &SolverOptions, deadline: Option<Instant>) -> ConicOpt
 
 fn global_options(options: &SolverOptions) -> GlobalOptions {
     let eps = options.ipm_eps();
-    GlobalOptions {
+    let mut g = GlobalOptions {
         gap_tol: eps,
         feas_tol: eps,
         ..GlobalOptions::default()
+    };
+    // Honor a caller-supplied global-optimization budget (node limit / gap):
+    // a smaller `max_nodes` or looser gap must bound the spatial B&B, matching
+    // the QP global route (`qp::global`).
+    if let Some(cfg) = options.global_optimization.as_ref() {
+        g.max_nodes = cfg.max_nodes;
+        g.gap_tol = cfg.gap_tol;
     }
+    g
 }
 
-fn qcqp_result_to_solver_result(res: QcqpResult) -> SolverResult {
+fn qcqp_result_to_solver_result(res: QcqpResult, obj_offset: f64) -> SolverResult {
     match res.status {
         SolveStatus::Infeasible => return SolverResult::infeasible(),
         SolveStatus::Unbounded => return SolverResult::unbounded(),
@@ -127,7 +135,7 @@ fn qcqp_result_to_solver_result(res: QcqpResult) -> SolverResult {
     let deadline_triggered = res.status == SolveStatus::Timeout;
     let mut result = SolverResult {
         status: res.status,
-        objective: res.objective,
+        objective: res.objective + obj_offset,
         solution: res.x,
         iterations: res.iterations,
         ..SolverResult::default()
@@ -137,14 +145,14 @@ fn qcqp_result_to_solver_result(res: QcqpResult) -> SolverResult {
     result
 }
 
-fn global_result_to_solver_result(res: GlobalResult) -> SolverResult {
+fn global_result_to_solver_result(res: GlobalResult, obj_offset: f64) -> SolverResult {
     if res.status == SolveStatus::Infeasible {
         return SolverResult::infeasible();
     }
     let deadline_triggered = res.status == SolveStatus::Timeout;
     let mut result = SolverResult {
         status: res.status,
-        objective: res.objective,
+        objective: res.objective + obj_offset,
         solution: res.x,
         iterations: res.nodes,
         ..SolverResult::default()
