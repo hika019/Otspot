@@ -492,7 +492,7 @@ fn verify_phase1_feasibility(
         ) {
             SimplexOutcome::Optimal(_, _) => {}
             SimplexOutcome::Unbounded => break,
-            outcome @ (SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_)) => {
+            SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_) => {
                 let mut y_check = vec![0.0f64; m];
                 if reconcile_final_basis_state(
                     a_ext,
@@ -514,13 +514,9 @@ fn verify_phase1_feasibility(
                 }
                 // No feasible point: Timeout only for an external stop; a
                 // cycling/plateau bail with budget left is MaxIterations.
-                let status = if matches!(outcome, SimplexOutcome::Timeout(_)) {
-                    SolveStatus::Timeout
-                } else {
-                    stall_status(false)
-                };
+                // Clock-recheck, not variant trust.
                 return Err(SolverResult {
-                    status,
+                    status: super::stop_status(false, options),
                     objective: f64::INFINITY,
                     iterations: *total_iters,
                     ..Default::default()
@@ -717,12 +713,7 @@ fn finalize_phase2(
             iterations: *total_iters,
             ..Default::default()
         },
-        outcome @ (SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_)) => {
-            let (obj, external_stop) = match outcome {
-                SimplexOutcome::Timeout(obj) => (obj, true),
-                SimplexOutcome::Stalled(obj) => (obj, false),
-                _ => unreachable!(),
-            };
+        SimplexOutcome::Timeout(obj) | SimplexOutcome::Stalled(obj) => {
             let solution = extract_timeout_solution_reconciled(
                 sf,
                 a,
@@ -734,11 +725,8 @@ fn finalize_phase2(
                 options.max_etas,
                 options.deadline,
             );
-            let status = if external_stop {
-                SolveStatus::Timeout
-            } else {
-                stall_status(!solution.is_empty())
-            };
+            // Clock-recheck, not variant trust (see dual_common::outcome_to_result).
+            let status = super::stop_status(!solution.is_empty(), options);
             SolverResult {
                 status,
                 objective: obj + sf.obj_offset,
@@ -893,22 +881,14 @@ pub(crate) fn two_phase_simplex(
             let farkas = extract_farkas_certificate(&a_ext, &b, &basis, m, sf.n_total, options);
             phase1_infeasibility_verdict(farkas, total_iters, options)
         }
-        outcome @ (SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_)) => {
-            let (obj1, external_stop) = match outcome {
-                SimplexOutcome::Timeout(obj1) => (obj1, true),
-                SimplexOutcome::Stalled(obj1) => (obj1, false),
-                _ => unreachable!(),
-            };
+        SimplexOutcome::Timeout(obj1) | SimplexOutcome::Stalled(obj1) => {
             trace_stage(format_args!(
-                "phase1 timeout/stall iters={total_iters} obj={obj1:.9e} external_stop={external_stop}"
+                "phase1 timeout/stall iters={total_iters} obj={obj1:.9e}"
             ));
             // No feasible point recovered: Timeout only for an external stop; a
             // cycling/plateau bail with budget left is MaxIterations.
-            let bail_status = if external_stop {
-                SolveStatus::Timeout
-            } else {
-                stall_status(false)
-            };
+            // Clock-recheck, not variant trust (see dual_common::outcome_to_result).
+            let bail_status = super::stop_status(false, options);
             if obj1 > PIVOT_TOL {
                 return SolverResult {
                     status: bail_status,

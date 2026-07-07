@@ -152,6 +152,7 @@ pub(super) fn outcome_to_result(
     col_scale: &[f64],
     row_scale: &[f64],
     dual_unbounded_is_infeasible: bool,
+    options: &crate::options::SolverOptions,
 ) -> SolverResult {
     match outcome {
         SimplexOutcome::Optimal(obj, y) => {
@@ -198,18 +199,13 @@ pub(super) fn outcome_to_result(
                 }
             }
         }
-        outcome @ (SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_)) => {
-            let (obj, external_stop) = match outcome {
-                SimplexOutcome::Timeout(obj) => (obj, true),
-                SimplexOutcome::Stalled(obj) => (obj, false),
-                _ => unreachable!(),
-            };
+        SimplexOutcome::Timeout(obj) | SimplexOutcome::Stalled(obj) => {
+            // Clock-recheck, not variant trust: `external_stop_requested` is
+            // monotonic, so a genuine deadline/cancel stop still classifies as
+            // Timeout; any internal dead-end that minted `Timeout` (or a future
+            // unswept mint) is honestly downgraded to a stall status.
             let solution = extract_solution(sf, basis, x_b, col_scale);
-            let status = if external_stop {
-                SolveStatus::Timeout
-            } else {
-                super::stall_status(!solution.is_empty())
-            };
+            let status = super::stop_status(!solution.is_empty(), options);
             SolverResult {
                 status,
                 objective: obj + sf.obj_offset,
@@ -391,6 +387,84 @@ mod tests {
     use super::*;
     use crate::basis::LuBasis;
     use crate::sparse::CscMatrix;
+
+    /// P2 pin: user-facing classification must clock-recheck, never trust the
+    /// `SimplexOutcome` variant. A `Timeout(_)` outcome reaching
+    /// `outcome_to_result` with budget untouched (unswept internal dead-end
+    /// mint, e.g. an exotic refactor failure) must NOT surface as
+    /// `SolveStatus::Timeout`; with an incumbent it is `SuboptimalSolution`.
+    /// `external_stop_requested` is monotonic, so a genuine deadline stop
+    /// still classifies as Timeout (second assert).
+    ///
+    /// no-op proof: reverting `outcome_to_result` to variant-trust
+    /// (`Timeout(obj) => status: SolveStatus::Timeout`) fails the first assert.
+    #[test]
+    fn outcome_to_result_clock_rechecks_timeout_variant() {
+        use crate::problem::{LpProblem, SolveStatus};
+        use crate::simplex::build_standard_form;
+
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new(vec![1.0, 1.0], a, vec![4.0]).unwrap();
+        let sf = build_standard_form(&lp);
+        let basis = sf.initial_basis.clone();
+        let x_b = sf.b.clone();
+        let col_scale = vec![1.0; sf.n_total];
+        let row_scale = vec![1.0; sf.m];
+
+        let fresh = crate::options::SolverOptions::default();
+        let r = outcome_to_result(
+            SimplexOutcome::Timeout(0.0),
+            &sf,
+            &lp,
+            &basis,
+            &x_b,
+            &col_scale,
+            &row_scale,
+            false,
+            &fresh,
+        );
+        assert_eq!(
+            r.status,
+            SolveStatus::SuboptimalSolution,
+            "Timeout variant with budget left must clock-recheck to a stall status"
+        );
+
+        let expired = crate::options::SolverOptions {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+            ..Default::default()
+        };
+        let r = outcome_to_result(
+            SimplexOutcome::Timeout(0.0),
+            &sf,
+            &lp,
+            &basis,
+            &x_b,
+            &col_scale,
+            &row_scale,
+            false,
+            &expired,
+        );
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "expired deadline stays Timeout"
+        );
+
+        // Stalled variant with an expired clock is honestly Timeout as well
+        // (the stop the caller observes IS the budget).
+        let r = outcome_to_result(
+            SimplexOutcome::Stalled(0.0),
+            &sf,
+            &lp,
+            &basis,
+            &x_b,
+            &col_scale,
+            &row_scale,
+            false,
+            &expired,
+        );
+        assert_eq!(r.status, SolveStatus::Timeout);
+    }
 
     /// A = [I_m | extras]. Extra column (m + k) is a single +2.0 at row (k mod m)
     /// so r_{m+k} = c_{m+k} − 2·c[k mod m] under the identity basis.

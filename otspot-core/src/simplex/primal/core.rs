@@ -437,6 +437,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                         }
                         continue;
                     } else {
+                        // refactor_failed && !singular ⇔ refactor_timed hit the
+                        // deadline (basis/mod.rs) — an external stop, hence Timeout.
                         let obj: f64 = basic_obj(c, basis, x_b);
                         return SimplexOutcome::Timeout(obj);
                     }
@@ -635,6 +637,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 }
                 continue;
             } else {
+                // refactor_failed && !singular ⇔ deadline during refactor_timed
+                // (basis/mod.rs) — an external stop, hence Timeout.
                 let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }

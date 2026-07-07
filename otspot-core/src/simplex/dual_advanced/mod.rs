@@ -361,6 +361,7 @@ pub(crate) fn solve_dual_advanced(
 
                         let mut result = outcome_to_result(
                             outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale, true,
+                            options,
                         );
                         result.iterations = total_iters;
                         return result;
@@ -388,7 +389,10 @@ pub(crate) fn solve_dual_advanced(
     // verifiable Farkas ray.
     let primal_result = super::dual::two_phase_dual_simplex(sf, problem, options);
     match primal_result.status {
-        SolveStatus::Timeout if primal_result.solution.is_empty() => {
+        // No incumbent from the primal path: try Big-M. MaxIterations is the
+        // internal-stall analogue of the old empty-Timeout (stalls minted
+        // Timeout before the Stalled split) — the retry policy must not narrow.
+        SolveStatus::Timeout | SolveStatus::MaxIterations if primal_result.solution.is_empty() => {
             let bigm_result =
                 phase1::big_m_cold_start(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
             if bigm_result.status == SolveStatus::Timeout {

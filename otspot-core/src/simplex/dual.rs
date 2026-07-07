@@ -69,7 +69,7 @@ pub(crate) fn two_phase_dual_simplex(
                     );
 
                     let mut result = outcome_to_result(
-                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale, true,
+                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale, true, options,
                     );
                     result.iterations = total_iters;
                     return result;
@@ -191,6 +191,7 @@ fn cold_start_dual(
         col_scale,
         row_scale,
         false,
+        options,
     );
     result.iterations = total_iters;
     result

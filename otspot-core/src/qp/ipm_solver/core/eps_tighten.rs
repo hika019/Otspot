@@ -8,9 +8,11 @@ use crate::presolve::QpPresolveResult;
 /// Compute `eps_scaled = opts.ipm.eps * sigma_total` and return a clone of `opts` with
 /// `ipm.eps = eps_scaled` and `tolerance = None`.
 ///
-/// Uses `opts.ipm.eps` directly (not `opts.ipm_eps()`): when the attempt loop sets
-/// `Tolerance::Custom(user_eps)` and `ipm.eps = user_eps/tighten`, calling `ipm_eps()`
-/// would return `user_eps`, silently bypassing the tighten factor.
+/// Uses `opts.ipm.eps` directly (not `opts.ipm_eps()`). The attempt loop now
+/// clears `tolerance` up-front and carries the tightened inner target in
+/// `ipm.eps` alone; reading `ipm.eps` keeps this correct even for callers that
+/// still pass a set `tolerance` (defense in depth — a set `Tolerance::Custom`
+/// would make `ipm_eps()` return the user eps and bypass the tighten factor).
 pub(super) fn tighten_ipm_eps_for_presolve_scale(
     opts: &SolverOptions,
     presolve_result: &QpPresolveResult,
@@ -50,8 +52,10 @@ pub(super) fn tighten_ipm_eps_for_presolve_scale(
     let sigma_total = primal_row_scale_min.min(dual_col_scale_min);
     if sigma_total < 1.0 && sigma_total > 0.0 {
         let mut tightened = opts.clone();
-        // Use opts.ipm.eps directly: the retry loop sets this to user_eps/tighten.
-        // opts.ipm_eps() would return user_eps from Tolerance::Custom, bypassing tightening.
+        // Use opts.ipm.eps directly: the attempt loop carries the tightened
+        // inner target here (tolerance is cleared up-front in
+        // solve_ipm_with_runner; ipm_eps() would bypass the tighten factor if
+        // a caller-set Tolerance::Custom ever leaked this far).
         let eps_orig = opts.ipm.eps;
         let eps_scaled = (eps_orig * sigma_total).max(IPM_EPS_NOISE_FLOOR);
         tightened.tolerance = None;
@@ -96,8 +100,10 @@ mod eps_tighten_tests {
         pre
     }
 
-    /// With Tolerance::Custom(user_eps) set, ipm_eps() returns user_eps (bypasses ipm.eps).
-    /// The fix uses opts.ipm.eps directly, preserving the attempt-loop tighten factor.
+    /// Defense-in-depth pin: even if a set Tolerance::Custom(user_eps) leaks
+    /// into this function (the attempt loop normally clears it up-front),
+    /// ipm_eps() would return user_eps and bypass ipm.eps. The fix reads
+    /// opts.ipm.eps directly, preserving the attempt-loop tighten factor.
     /// Reverting to ipm_eps() would produce an output 1000x looser; this test FAILS then.
     #[test]
     fn custom_tolerance_does_not_bypass_attempt_tighten() {

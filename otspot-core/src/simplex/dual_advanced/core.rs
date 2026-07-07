@@ -516,10 +516,12 @@ pub(crate) fn dual_simplex_core_advanced(
 
         let (entering_col, theta) = match ratio_pick {
             None => {
-                // rejected_entering が active → 全候補を除外した状態; fallback なし
+                // rejected_entering が active → 全候補を除外した状態; fallback なし。
+                // deadline とは無関係の内部 dead-end なので Stalled (budget 残で
+                // Timeout を自称しない)。
                 if rejected_entering.iter().any(|&v| v) {
                     let obj: f64 = basic_obj(c, basis, x_b);
-                    return SimplexOutcome::Timeout(obj);
+                    return SimplexOutcome::Stalled(obj);
                 }
                 // 候補なしは dual-unbounded の証明候補だが、Bland 長走では
                 // eta/rc drift が全候補を負 ratio 側へ押し出すことがある。
@@ -893,7 +895,7 @@ mod tests {
     /// flag (always yields), the no-yield run stops at the same ~2·k_trigger
     /// point ⇒ `iters_noyield ≈ iters_yield` ⇒ the `>` assertion fails.
     #[test]
-    fn yield_on_stall_gated_by_caller_flag() {
+    fn yield_on_stall_returns_stalled_and_is_caller_gated() {
         use super::super::super::pricing::DualLeavingStrategy;
 
         struct AlwaysStallLeaving;
