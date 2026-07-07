@@ -158,6 +158,11 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
 /// problems; mixed-integer QCQP is out of scope here.
 fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     use crate::problem::{SolveRoute, SolveStatus};
+    // Materialize timeout_secs → deadline HERE so the deadline_triggered clock
+    // check below sees the deadline the solve ran against (all three branches
+    // resolve timeout_secs to the same derived deadline internally).
+    let materialized = options.materialize_deadline();
+    let options = materialized.as_ref().unwrap_or(options);
     if problem.has_qcqp_constraints() {
         return qcqp_route::solve_qcqp_via_conic(problem, options);
     }

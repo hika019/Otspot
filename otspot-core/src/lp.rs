@@ -13,6 +13,11 @@ use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
 /// Returns [`SolveStatus::NumericalError`] if `options` fails validation;
 /// validation is performed by the underlying `simplex::solve_with`.
 pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+    // Materialize timeout_secs → deadline HERE so the deadline_triggered clock
+    // check below sees the same deadline the solve actually ran against
+    // (a raw timeout_secs-only option set is clock-blind at this layer).
+    let materialized = options.materialize_deadline();
+    let options = materialized.as_ref().unwrap_or(options);
     let mut result = crate::simplex::solve_with(problem, options);
     if matches!(
         result.status,
@@ -31,6 +36,8 @@ pub(crate) fn solve_lp_forwarded_from_qp(
     problem: &LpProblem,
     options: &SolverOptions,
 ) -> SolverResult {
+    let materialized = options.materialize_deadline();
+    let options = materialized.as_ref().unwrap_or(options);
     let mut result = crate::simplex::solve_with(problem, options);
     if matches!(
         result.status,

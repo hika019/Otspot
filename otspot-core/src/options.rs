@@ -610,6 +610,34 @@ impl Default for SolverOptions {
 }
 
 impl SolverOptions {
+    /// Materialize `timeout_secs` into an absolute `deadline` (clearing
+    /// `timeout_secs`), returning `None` when nothing needs converting.
+    ///
+    /// Entry wrappers that stamp `stats.deadline_triggered` must do this
+    /// BEFORE solving and evaluate [`Self::external_stop_requested`] on the
+    /// materialized options: the raw caller options may carry only
+    /// `timeout_secs` (deadline = None), for which the clock check is blind
+    /// even though the inner layers time out against the derived deadline
+    /// (timeout_secs=0.0 must report deadline_triggered=true).
+    pub(crate) fn materialize_deadline(&self) -> Option<SolverOptions> {
+        if self.deadline.is_none() {
+            if let Some(secs) = self.timeout_secs {
+                // Invalid values (negative / non-finite) are left for
+                // `validate()` downstream; converting them here would panic in
+                // Duration::from_secs_f64 before validation can reject them.
+                if !secs.is_finite() || secs < 0.0 {
+                    return None;
+                }
+                let mut o = self.clone();
+                o.deadline =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(secs));
+                o.timeout_secs = None;
+                return Some(o);
+            }
+        }
+        None
+    }
+
     /// Whether the caller-visible stop condition is external: the wall-clock
     /// deadline expired or the cancel flag fired. Distinguishes an honest
     /// `Timeout` from an internal stall (`SuboptimalSolution`/`MaxIterations`).
