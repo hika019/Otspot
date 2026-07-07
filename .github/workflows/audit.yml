@@ -19,6 +19,8 @@ jobs:
       - run: cargo audit
       - name: data coverage sentinel
         run: python3 tests/test_check_data_coverage.py
+      - name: test data requirements sentinel
+        run: python3 tests/test_check_test_data_requirements.py
       - name: ISO 25010 quality matrix sentinel
         run: python3 tests/test_iso_25010_quality_matrix.py
 

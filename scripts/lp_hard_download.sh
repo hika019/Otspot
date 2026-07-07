@@ -30,6 +30,11 @@
 #   bash scripts/lp_hard_download.sh [出力ディレクトリ]
 #   デフォルト出力先: data/lp_problems_hard/
 #
+#   LP_HARD_ONLY="name1 name2" bash scripts/lp_hard_download.sh
+#     指定した instance 名 (拡張子なし、例: "neos") のみ取得する。未設定/空なら全件
+#     (デフォルトの local full run 挙動は変えない)。CI で全53件は不要な特定 test
+#     のみが要求するデータを取りに行く用途 (例: test-heavy.yml の neos.QPS)。
+#
 # 依存:
 #   - curl
 #   - bunzip2
@@ -61,8 +66,26 @@ FAIL=0
 SKIP=0
 FAIL_NAMES=()
 
+# LP_HARD_ONLY (space区切り) が設定されていれば、その instance 名だけを対象にする。
+declare -A ONLY_SET=()
+if [ -n "${LP_HARD_ONLY:-}" ]; then
+    for _n in $LP_HARD_ONLY; do
+        ONLY_SET["$_n"]=1
+    done
+fi
+
+# instance が対象かどうか (LP_HARD_ONLY 未設定なら常に true)
+wanted() {
+    local name="$1"
+    [ ${#ONLY_SET[@]} -eq 0 ] && return 0
+    [ -n "${ONLY_SET[$name]:-}" ]
+}
+
 echo "=== LP Hard Problem Download ===" >&2
 echo "Output: $OUTPUT_DIR" >&2
+if [ ${#ONLY_SET[@]} -gt 0 ]; then
+    echo "Filter (LP_HARD_ONLY): ${!ONLY_SET[*]}" >&2
+fi
 echo "" >&2
 
 # ----------------------------------------------------------------
@@ -75,6 +98,10 @@ download_bz2_emps() {
     local name="$1"
     local url="$2"
     local OUT="$OUTPUT_DIR/${name}.QPS"
+
+    if ! wanted "$name"; then
+        return 0
+    fi
 
     if [ -f "$OUT" ]; then
         echo "EXISTS: $name" >&2
@@ -121,6 +148,10 @@ download_bz2_mps() {
     local name="$1"
     local url="$2"
     local OUT="$OUTPUT_DIR/${name}.QPS"
+
+    if ! wanted "$name"; then
+        return 0
+    fi
 
     if [ -f "$OUT" ]; then
         echo "EXISTS: $name" >&2
