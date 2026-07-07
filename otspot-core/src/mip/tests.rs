@@ -2686,13 +2686,13 @@ fn rc_fixing_multiple_vars_selective_fixing() {
     assert_eq!(bounds[3], (0.0, 1.0), "x3 unchanged (rc == gap, strict)");
 }
 
-/// Out-of-bounds variable index is silently skipped (no panic).
+/// Out-of-bounds variable index is rejected instead of silently disabling fixing.
 #[test]
-fn rc_fixing_out_of_bounds_index_ignored() {
+#[should_panic(expected = "integer variable index 5 out of range for 1 variables")]
+fn rc_fixing_out_of_bounds_index_rejected() {
     let res = lp_result_with_rc(0.0, vec![0.0], vec![10.0]);
     let mut bounds = vec![(0.0_f64, 1.0_f64)];
-    let count = reduced_cost_fixing(&res, 3.0, &mut bounds, &[5]);
-    assert_eq!(count, 0, "out-of-bounds index must be skipped silently");
+    let _ = reduced_cost_fixing(&res, 3.0, &mut bounds, &[5]);
 }
 
 /// Non-integer lower bound is rounded up to ceil(lb) before fixing.
@@ -3380,4 +3380,42 @@ fn symmetry_breaking_reduces_nodes_and_preserves_optimum() {
         s_off.nodes_processed,
         s_on.nodes_processed
     );
+}
+
+#[test]
+#[should_panic(expected = "integer variable index 2 out of range for 2 variables")]
+fn integer_mask_rejects_out_of_range_index() {
+    let _ = super::integer_mask(2, &[0, 2]);
+}
+
+#[test]
+#[should_panic(expected = "integer variable index 2 out of range for solution length 2")]
+fn round_integers_rejects_out_of_range_index() {
+    let _ = super::round_integers(vec![0.1, 1.9], &[0, 2]);
+}
+
+#[test]
+#[should_panic(expected = "reduced-cost fixing requires one reduced cost per variable")]
+fn reduced_cost_fixing_rejects_short_reduced_costs() {
+    let r = SolverResult {
+        objective: 0.0,
+        solution: vec![0.0, 0.0],
+        reduced_costs: vec![1.0],
+        ..Default::default()
+    };
+    let mut bounds = vec![(0.0, 1.0), (0.0, 1.0)];
+    let _ = super::reduced_cost_fixing(&r, 1.0, &mut bounds, &[0]);
+}
+
+#[test]
+#[should_panic(expected = "reduced-cost fixing requires one solution value per variable")]
+fn reduced_cost_fixing_rejects_short_solution() {
+    let r = SolverResult {
+        objective: 0.0,
+        solution: vec![0.0],
+        reduced_costs: vec![1.0, 1.0],
+        ..Default::default()
+    };
+    let mut bounds = vec![(0.0, 1.0), (0.0, 1.0)];
+    let _ = super::reduced_cost_fixing(&r, 1.0, &mut bounds, &[0]);
 }

@@ -104,6 +104,11 @@ pub(super) fn generate_flow_cover_cuts(
     integer_mask: &[bool],
     x_star: &[f64],
 ) -> Vec<CutRow> {
+    assert_eq!(
+        x_star.len(),
+        lp.num_vars,
+        "flow-cover separation requires one LP value per variable"
+    );
     let frac_tol = feas_rel_tol();
     let rows = row_lists(&lp.a, lp.num_constraints);
     let vubs = detect_vubs(lp, integer_mask, &rows);
@@ -164,8 +169,8 @@ fn separate_flow_cover(
     // ones whose cover membership yields violation.
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by(|&i, &j| {
-        let xi = x_star.get(items[i].x).copied().unwrap_or(0.0);
-        let xj = x_star.get(items[j].x).copied().unwrap_or(0.0);
+        let xi = x_star[items[i].x];
+        let xj = x_star[items[j].x];
         xj.total_cmp(&xi)
     });
 

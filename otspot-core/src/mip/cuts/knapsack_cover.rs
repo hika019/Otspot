@@ -88,6 +88,11 @@ pub(super) fn generate_lifted_knapsack_cover_cuts(
     integer_mask: &[bool],
     x_star: &[f64],
 ) -> Vec<CutRow> {
+    assert_eq!(
+        x_star.len(),
+        lp.num_vars,
+        "knapsack-cover separation requires one LP value per variable"
+    );
     let frac_tol = feas_rel_tol();
     let rows = row_lists(&lp.a, lp.num_constraints);
     let mut cuts = Vec::new();
@@ -135,8 +140,8 @@ fn separate_lifted_cover(
     // Greedy cover by LP value descending (small 1−x* first ⇒ most violated).
     let mut order: Vec<usize> = (0..row.len()).collect();
     order.sort_by(|&i, &j| {
-        let xi = x_star.get(row[i].0).copied().unwrap_or(0.0);
-        let xj = x_star.get(row[j].0).copied().unwrap_or(0.0);
+        let xi = x_star[row[i].0];
+        let xj = x_star[row[j].0];
         xj.total_cmp(&xi)
     });
 
