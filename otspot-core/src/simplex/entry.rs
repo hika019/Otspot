@@ -20,6 +20,14 @@ thread_local! {
     static INJECT_REDUCED_TIMEOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+// Test-only capture of the internal simplex tolerances actually used by
+// solve_with, so a sentinel can prove `tolerance` no longer overrides them.
+#[cfg(test)]
+thread_local! {
+    static CAPTURE_EFFECTIVE_SIMPLEX_TOLS: std::cell::Cell<Option<(f64, f64)>> =
+        const { std::cell::Cell::new(None) };
+}
+
 // Test-only hook: stamps a recognizable marker (`bounded_eq_ub_path = true`)
 // onto the reduced solve's stats so sentinels can prove the solve metadata
 // survives postsolve lifting / the Timeout early-return, independent of which
@@ -52,16 +60,16 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
     if options.validate().is_err() {
         return SolverResult::numerical_error();
     }
-    let mut opts_with_tolerance;
-    let options = if options.tolerance.is_some() {
-        opts_with_tolerance = options.clone();
-        let eps = opts_with_tolerance.ipm_eps();
-        opts_with_tolerance.primal_tol = eps;
-        opts_with_tolerance.dual_tol = eps;
-        &opts_with_tolerance
-    } else {
-        options
-    };
+    // The requested accuracy (`tolerance`) governs solution ACCEPTANCE via
+    // `lp_accept_{primal,dual}_tol()` (= max(*_tol, ipm_eps())); it must never
+    // override the simplex's INTERNAL numerical tolerances. daf7ab54 set
+    // `primal_tol = dual_tol = ipm_eps()` here, loosening the ratio-test
+    // feasibility band and the Phase II fresh-x_B check from PIVOT_TOL (1e-8)
+    // to the user eps (1e-6): the pivot trajectory drifts, terminates at a
+    // vertex with bound violation ~1e-5 > primal_tol, and the honest
+    // non-Optimal bail fires (80bau3b PASS→stall, pilot PASS→stall).
+    #[cfg(test)]
+    CAPTURE_EFFECTIVE_SIMPLEX_TOLS.with(|c| c.set(Some((options.primal_tol, options.dual_tol))));
     // timeout_secs → deadline (mirrors qp_solve_impl).
     let mut opts_with_deadline;
     let options = if let (Some(secs), true) = (options.timeout_secs, options.deadline.is_none()) {
@@ -1383,6 +1391,45 @@ mod tests {
         assert!(
             result.timing_breakdown.is_some(),
             "timing_breakdown must be Some when presolve itself detects Infeasible (H observability)"
+        );
+    }
+
+    /// A caller-set `tolerance` (requested ACCEPTANCE accuracy) must not
+    /// override the simplex's INTERNAL numerical tolerances: loosening
+    /// `primal_tol` from PIVOT_TOL (1e-8) to eps (1e-6) widens the ratio-test
+    /// feasibility band, drifts the pivot trajectory, and turns clean solves
+    /// into stall bails (80bau3b/pilot PASS→TIMEOUT regression, daf7ab54).
+    /// Acceptance keying on `tolerance` is preserved separately by
+    /// `lp_accept_{primal,dual}_tol()`.
+    ///
+    /// Sentinel: re-adding the `primal_tol = dual_tol = ipm_eps()` override in
+    /// `solve_with` makes the captured tolerances equal 1e-3 → fail.
+    #[test]
+    fn tolerance_does_not_override_internal_simplex_tols() {
+        use crate::options::Tolerance;
+        use crate::tolerances::PIVOT_TOL;
+        let lp = make_partial_reducible_lp();
+        CAPTURE_EFFECTIVE_SIMPLEX_TOLS.with(|c| c.set(None));
+        let r = solve_with(
+            &lp,
+            &SolverOptions {
+                tolerance: Some(Tolerance::Custom(1.0e-3)),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, SolveStatus::Optimal);
+        let (primal_tol, dual_tol) = CAPTURE_EFFECTIVE_SIMPLEX_TOLS
+            .with(|c| c.get())
+            .expect("solve_with must stamp the capture hook");
+        assert_eq!(
+            primal_tol, PIVOT_TOL,
+            "internal primal_tol must stay at its default (PIVOT_TOL), \
+             not follow tolerance=Custom(1e-3)"
+        );
+        assert_eq!(
+            dual_tol, PIVOT_TOL,
+            "internal dual_tol must stay at its default (PIVOT_TOL), \
+             not follow tolerance=Custom(1e-3)"
         );
     }
 
