@@ -196,51 +196,83 @@ fn smallest_positive_root(a: f64, b: f64, c: f64) -> Option<f64> {
 }
 
 /// Nesterov--Todd scaling operators `w` and `winv` with `w z = winv s =
-/// lambda`. Stored per-block (an orthant diagonal plus one dense `d_i x d_i`
-/// matrix per second-order cone, row-major) rather than as a naive `m x m`
-/// embedding: for the CBLIB conic benchmarks driving this module the SOC
-/// blocks are small (single digits to low tens) while `m` can be in the tens
-/// of thousands, so the block-local form is `O(l + sum d_i^2)` instead of
-/// `O(m^2)`.
+/// lambda`. Stored per-block: an orthant diagonal (`O(l)`) plus, per
+/// second-order cone, a single normalised NT point `wbar` (length `d_i`) and
+/// scale `eta` (`O(d_i)`) rather than a materialised `d_i x d_i` matrix.
+///
+/// `What` (the `eta=1` scaling matrix) has the closed form
+/// `[[w0, w1^T],[w1, I + w1 w1^T/(1+w0)]]` (`w0 = wbar[0]`, `w1 = wbar[1..]`),
+/// i.e. `Arrow'(wbar) + w1 w1^T/(1+w0)` where `Arrow'(wbar)` has corner `w0`,
+/// first row/col `w1`, and plain `I` on the remaining diagonal (unlike the
+/// Jordan-product arrow matrix in [`jdiv`], whose tail diagonal is `l0 I`).
+/// This decomposes any mat-vec into one dot product and one rank-one update,
+/// `O(d_i)` instead of `O(d_i^2)`. `What^{-1} = J What J` (`J` flips the tail
+/// sign) reuses the same `wbar`/`eta`: `J` negates `Arrow'`'s off-diagonal
+/// (the `w0`-linked cross terms) but leaves the rank-one term untouched
+/// (`(J w1)(J w1)^T = w1 w1^T`), so both directions come from one array. This
+/// is what makes a single huge SOC block (the QCQP->SOCP bridge emits one
+/// block of dimension `n+2` per quadratic term) `O(d)` instead of `O(d^2)`,
+/// which otherwise OOMs well before the IPM's own dense-KKT step for large
+/// `n` (tracked separately).
 pub(super) struct Scaling {
     l_w: Vec<f64>,
     l_winv: Vec<f64>,
-    /// `soc_w[bi]` / `soc_winv[bi]`: `d_i x d_i` row-major.
-    soc_w: Vec<Vec<f64>>,
-    soc_winv: Vec<Vec<f64>>,
+    soc: Vec<SocScale>,
+}
+
+/// One second-order-cone NT factor: `eta` and the normalised point `wbar`
+/// (`wbar[0]` is `w0`, `wbar[1..]` is `w1`). See [`Scaling`] for the
+/// `O(d)` mat-vec this supports.
+struct SocScale {
+    eta: f64,
+    wbar: Vec<f64>,
 }
 
 impl Scaling {
     pub(super) fn apply_w(&self, blk: &Blocks, v: &[f64]) -> Vec<f64> {
-        apply_blocks(blk, &self.l_w, &self.soc_w, v)
+        self.apply(blk, v, false)
     }
 
     pub(super) fn apply_winv(&self, blk: &Blocks, v: &[f64]) -> Vec<f64> {
-        apply_blocks(blk, &self.l_winv, &self.soc_winv, v)
+        self.apply(blk, v, true)
+    }
+
+    /// `O(l + sum d_i)`: diagonal orthant scaling plus one arrow + rank-one
+    /// SOC mat-vec per block.
+    fn apply(&self, blk: &Blocks, v: &[f64], inverse: bool) -> Vec<f64> {
+        let mut out = vec![0.0; blk.dim()];
+        let l_diag = if inverse { &self.l_winv } else { &self.l_w };
+        for i in 0..blk.l {
+            out[i] = l_diag[i] * v[i];
+        }
+        let offs = blk.soc_offsets();
+        for (bi, &off) in offs.iter().enumerate() {
+            let d = blk.soc[bi];
+            let v0 = v[off];
+            let v1 = &v[off + 1..off + d];
+            let out1 = &mut out[off + 1..off + d];
+            let out0 = apply_soc(&self.soc[bi], v0, v1, inverse, out1);
+            out[off] = out0;
+        }
+        out
     }
 }
 
-/// Applies a block-diagonal scaling operator (orthant diagonal `l_diag` plus
-/// dense `d_i x d_i` SOC blocks) to `v`. `O(l + sum d_i^2)`.
-fn apply_blocks(blk: &Blocks, l_diag: &[f64], soc_blocks: &[Vec<f64>], v: &[f64]) -> Vec<f64> {
-    let mut out = vec![0.0; blk.dim()];
-    for i in 0..blk.l {
-        out[i] = l_diag[i] * v[i];
+/// Applies `What` (`inverse=false`) or `What^{-1}` (`inverse=true`), scaled by
+/// `eta`/`1/eta`, to `(v0, v1)` and writes the tail into `out1`. Returns the
+/// leading component. `O(d)`. See [`Scaling`] for the derivation.
+fn apply_soc(soc: &SocScale, v0: f64, v1: &[f64], inverse: bool, out1: &mut [f64]) -> f64 {
+    let w0 = soc.wbar[0];
+    let w1 = &soc.wbar[1..];
+    let denom = 1.0 + w0;
+    let dot: f64 = w1.iter().zip(v1.iter()).map(|(a, b)| a * b).sum();
+    let sign = if inverse { -1.0 } else { 1.0 };
+    let scale = if inverse { 1.0 / soc.eta } else { soc.eta };
+    let corr = dot / denom;
+    for k in 0..v1.len() {
+        out1[k] = (sign * w1[k] * v0 + v1[k] + w1[k] * corr) * scale;
     }
-    let offs = blk.soc_offsets();
-    for (bi, &off) in offs.iter().enumerate() {
-        let d = blk.soc[bi];
-        let block = &soc_blocks[bi];
-        for r in 0..d {
-            let row = &block[r * d..r * d + d];
-            let mut acc = 0.0;
-            for (c, &a) in row.iter().enumerate() {
-                acc += a * v[off + c];
-            }
-            out[off + r] = acc;
-        }
-    }
-    out
+    (w0 * v0 + sign * dot) * scale
 }
 
 pub(super) fn nt_scaling(blk: &Blocks, s: &[f64], z: &[f64]) -> Scaling {
@@ -253,8 +285,7 @@ pub(super) fn nt_scaling(blk: &Blocks, s: &[f64], z: &[f64]) -> Scaling {
         l_winv[i] = 1.0 / wi;
     }
     let offs = blk.soc_offsets();
-    let mut soc_w = Vec::with_capacity(blk.soc.len());
-    let mut soc_winv = Vec::with_capacity(blk.soc.len());
+    let mut soc = Vec::with_capacity(blk.soc.len());
     for (bi, &off) in offs.iter().enumerate() {
         let d = blk.soc[bi];
         let sb = &s[off..off + d];
@@ -275,42 +306,9 @@ pub(super) fn nt_scaling(blk: &Blocks, s: &[f64], z: &[f64]) -> Scaling {
             wbar[k] = (sbar[k] - zbar[k]) / (2.0 * gamma);
         }
         let eta = (ss / zz).powf(0.25);
-        // What = [[w0, w1^T],[w1, I + w1 w1^T/(1+w0)]].
-        let w0 = wbar[0];
-        let denom = 1.0 + w0;
-        let mut w_block = vec![0.0; d * d];
-        let mut winv_block = vec![0.0; d * d];
-        for r in 0..d {
-            for col in 0..d {
-                let whatv;
-                if r == 0 && col == 0 {
-                    whatv = w0;
-                } else if r == 0 {
-                    whatv = wbar[col];
-                } else if col == 0 {
-                    whatv = wbar[r];
-                } else {
-                    let id = if r == col { 1.0 } else { 0.0 };
-                    whatv = id + wbar[r] * wbar[col] / denom;
-                }
-                w_block[r * d + col] = eta * whatv;
-                // Whatinv = J What J: negate the (0,k) and (k,0) blocks.
-                let mut whativ = whatv;
-                if (r == 0) ^ (col == 0) {
-                    whativ = -whatv;
-                }
-                winv_block[r * d + col] = whativ / eta;
-            }
-        }
-        soc_w.push(w_block);
-        soc_winv.push(winv_block);
+        soc.push(SocScale { eta, wbar });
     }
-    Scaling {
-        l_w,
-        l_winv,
-        soc_w,
-        soc_winv,
-    }
+    Scaling { l_w, l_winv, soc }
 }
 
 /// Jordan determinant `w0^2 - ||w1||^2`.

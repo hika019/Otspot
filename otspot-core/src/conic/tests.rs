@@ -1358,6 +1358,298 @@ fn nt_scaling_invariants_edge_configs() {
     assert_nt_invariants(&ConeSpec { l: 0, soc: vec![] }, &[], &[]);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2 (conic-oom): NT scaling `O(d)` arrow+rank-one representation.
+//
+// `cone::Scaling`'s SOC blocks used to materialise a dense `d x d` matrix per
+// block (`w_block`/`winv_block`); for a single huge SOC block (the QCQP->SOCP
+// bridge emits one of dimension `n+2` per quadratic term) that is `O(d^2)`
+// memory, which OOMs long before the IPM's own dense-KKT assembly for `n` in
+// the low 1e5s. The tests below check the `O(d)` arrow+rank-one replacement
+// two ways: (1) numerical equivalence against dense matrices built fresh from
+// the NT-scaling closed form (not calling into `cone::nt_scaling`'s
+// internals) across several dimensions and random seeds, cross-checked a
+// second way via the (structurally different) Jordan quadratic-
+// representation formula; and (2) a large-`d` time-budget sentinel that
+// catches a regression back to the dense representation.
+// ---------------------------------------------------------------------------
+
+/// Random strictly-interior second-order-cone point of dimension `d`:
+/// `v[1..]` uniform in `[-1, 1]`, `v[0] = ||v[1..]|| + margin` with
+/// `margin >= 0.3`, so `jdet(v) = v0^2 - ||v1||^2 > 0` with comfortable
+/// headroom from the boundary for every `d` (including `d=1`, where the tail
+/// is empty and `v[0]` is just the margin).
+fn random_interior_soc_point(rng: &mut Lcg, d: usize) -> Vec<f64> {
+    let mut v = vec![0.0; d];
+    let mut norm_sq = 0.0;
+    for k in 1..d {
+        v[k] = rng.next_f(-1.0, 1.0);
+        norm_sq += v[k] * v[k];
+    }
+    let margin = rng.next_f(0.3, 1.5);
+    v[0] = norm_sq.sqrt() + margin;
+    v
+}
+
+/// Independent dense-matrix reconstruction of the second-order-cone NT
+/// scaling operator from the NT-scaling closed form (Nesterov & Todd 1997;
+/// see also Alizadeh & Goldfarb, "Second-order cone programming", 2003,
+/// Sec. 4), written fresh here -- it does not call `cone::nt_scaling` --  as
+/// a numerical cross-check for the `O(d)` `apply_soc` implementation.
+/// `jdet(v) = v0^2 - ||v1||^2`; `sbar = s/sqrt(jdet(s))`,
+/// `zbar = z/sqrt(jdet(z))`; `gamma = sqrt((1+<sbar,zbar>)/2)`;
+/// `wbar = (sbar + J zbar)/(2 gamma)` (`J` flips the tail sign);
+/// `eta = (jdet(s)/jdet(z))^(1/4)`. The scaling matrix is `W = eta * What`,
+/// `What = [[w0, w1^T],[w1, I + w1 w1^T/(1+w0)]]` (`w0 = wbar[0]`,
+/// `w1 = wbar[1..]`); `Winv = J What J / eta`. Returns `(w, winv)`, both
+/// row-major `d x d`.
+fn oracle_nt_dense(s: &[f64], z: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let d = s.len();
+    let jdet = |v: &[f64]| v[0] * v[0] - v[1..].iter().map(|a| a * a).sum::<f64>();
+    let ss = jdet(s);
+    let zz = jdet(z);
+    let sbar: Vec<f64> = s.iter().map(|v| v / ss.sqrt()).collect();
+    let zbar: Vec<f64> = z.iter().map(|v| v / zz.sqrt()).collect();
+    let dot: f64 = sbar.iter().zip(&zbar).map(|(a, b)| a * b).sum();
+    let gamma = ((1.0 + dot) / 2.0).sqrt();
+    let mut wbar = vec![0.0; d];
+    wbar[0] = (sbar[0] + zbar[0]) / (2.0 * gamma);
+    for k in 1..d {
+        wbar[k] = (sbar[k] - zbar[k]) / (2.0 * gamma);
+    }
+    let eta = (ss / zz).powf(0.25);
+    let w0 = wbar[0];
+    let denom = 1.0 + w0;
+    let mut w = vec![0.0; d * d];
+    let mut winv = vec![0.0; d * d];
+    for r in 0..d {
+        for c in 0..d {
+            let what = if r == 0 && c == 0 {
+                w0
+            } else if r == 0 {
+                wbar[c]
+            } else if c == 0 {
+                wbar[r]
+            } else {
+                (if r == c { 1.0 } else { 0.0 }) + wbar[r] * wbar[c] / denom
+            };
+            w[r * d + c] = eta * what;
+            let flip = (r == 0) ^ (c == 0);
+            winv[r * d + c] = (if flip { -what } else { what }) / eta;
+        }
+    }
+    (w, winv)
+}
+
+fn dense_matvec(mat: &[f64], d: usize, v: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0; d];
+    for (r, out_r) in out.iter_mut().enumerate() {
+        let row = &mat[r * d..r * d + d];
+        *out_r = row.iter().zip(v).map(|(a, b)| a * b).sum();
+    }
+    out
+}
+
+#[test]
+fn nt_scaling_soc_matches_independent_dense_oracle() {
+    use super::cone::{self, Blocks};
+    for &d in &[1usize, 2, 3, 5, 20, 50] {
+        for seed in [1u64, 2, 3, 4, 5] {
+            let mut rng = Lcg(seed * 1000 + d as u64);
+            let s = random_interior_soc_point(&mut rng, d);
+            let z = random_interior_soc_point(&mut rng, d);
+            let (w_dense, winv_dense) = oracle_nt_dense(&s, &z);
+
+            let cone_spec = ConeSpec { l: 0, soc: vec![d] };
+            let blk = Blocks::new(&cone_spec);
+            let sc = cone::nt_scaling(&blk, &s, &z);
+
+            for probe_seed in [11u64, 12, 13] {
+                let mut prng = Lcg(probe_seed * 100 + d as u64 + seed);
+                let v: Vec<f64> = (0..d).map(|_| prng.next_f(-2.0, 2.0)).collect();
+
+                let w_oracle = dense_matvec(&w_dense, d, &v);
+                let w_impl = sc.apply_w(&blk, &v);
+                for i in 0..d {
+                    let rel = (w_impl[i] - w_oracle[i]).abs() / w_oracle[i].abs().max(1.0);
+                    assert!(
+                        rel < 1e-10,
+                        "d={d} seed={seed}: W mismatch at {i}: impl={} oracle={}",
+                        w_impl[i],
+                        w_oracle[i]
+                    );
+                }
+
+                let winv_oracle = dense_matvec(&winv_dense, d, &v);
+                let winv_impl = sc.apply_winv(&blk, &v);
+                for i in 0..d {
+                    let rel =
+                        (winv_impl[i] - winv_oracle[i]).abs() / winv_oracle[i].abs().max(1.0);
+                    assert!(
+                        rel < 1e-10,
+                        "d={d} seed={seed}: Winv mismatch at {i}: impl={} oracle={}",
+                        winv_impl[i],
+                        winv_oracle[i]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn nt_scaling_soc_w_squared_matches_quadratic_representation() {
+    // Cross-check via a structurally different closed form: the Jordan-
+    // algebra quadratic representation `P(w) x = 2<w,x> w - det(w) J x`
+    // (Faraut & Koranyi, "Analysis on Symmetric Cones", 1994; or Alizadeh &
+    // Goldfarb 2003 Sec. 2) satisfies `W^2 = P(w)` for the NT scaling
+    // operator `W`, where `w = eta * wbar` is the *unnormalised* NT scaling
+    // point. Unlike `oracle_nt_dense` (which shares the arrow+rank-one
+    // `What` closed form with the implementation, just as a dense oracle
+    // matrix), `P(w)`'s "2<w,x> w - det(w) J x" form has no arrow/rank-one
+    // structure in common with `apply_soc` at all, so this catches sign or
+    // index bugs that the same-formula oracle above would not.
+    use super::cone::{self, Blocks};
+    for &d in &[1usize, 2, 3, 5, 20, 50] {
+        for seed in [7u64, 8, 9] {
+            let mut rng = Lcg(seed * 5000 + d as u64);
+            let s = random_interior_soc_point(&mut rng, d);
+            let z = random_interior_soc_point(&mut rng, d);
+
+            let jdet = |v: &[f64]| v[0] * v[0] - v[1..].iter().map(|a| a * a).sum::<f64>();
+            let ss = jdet(&s);
+            let zz = jdet(&z);
+            let sbar: Vec<f64> = s.iter().map(|v| v / ss.sqrt()).collect();
+            let zbar: Vec<f64> = z.iter().map(|v| v / zz.sqrt()).collect();
+            let dot: f64 = sbar.iter().zip(&zbar).map(|(a, b)| a * b).sum();
+            let gamma = ((1.0 + dot) / 2.0).sqrt();
+            let mut wbar = vec![0.0; d];
+            wbar[0] = (sbar[0] + zbar[0]) / (2.0 * gamma);
+            for k in 1..d {
+                wbar[k] = (sbar[k] - zbar[k]) / (2.0 * gamma);
+            }
+            let eta = (ss / zz).powf(0.25);
+            let w: Vec<f64> = wbar.iter().map(|x| x * eta).collect();
+            let det_w = jdet(&w);
+
+            let cone_spec = ConeSpec { l: 0, soc: vec![d] };
+            let blk = Blocks::new(&cone_spec);
+            let sc = cone::nt_scaling(&blk, &s, &z);
+
+            for probe_seed in [21u64, 22] {
+                let mut prng = Lcg(probe_seed * 100 + d as u64 + seed);
+                let v: Vec<f64> = (0..d).map(|_| prng.next_f(-2.0, 2.0)).collect();
+
+                let wv: f64 = w.iter().zip(&v).map(|(a, b)| a * b).sum();
+                let mut jv = v.clone();
+                for jv_k in jv.iter_mut().skip(1) {
+                    *jv_k = -*jv_k;
+                }
+                let pw_v: Vec<f64> = (0..d).map(|i| 2.0 * wv * w[i] - det_w * jv[i]).collect();
+
+                let w2v = sc.apply_w(&blk, &sc.apply_w(&blk, &v));
+                for i in 0..d {
+                    let rel = (w2v[i] - pw_v[i]).abs() / pw_v[i].abs().max(1.0);
+                    assert!(
+                        rel < 1e-8,
+                        "d={d} seed={seed}: W^2 v != P(w) v at {i}: {} vs {}",
+                        w2v[i],
+                        pw_v[i]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn nt_scaling_soc_w_is_self_adjoint() {
+    // NT scaling operators must be symmetric: `<W u, v> == <u, W v>` for all
+    // `u, v` (likewise `Winv`). Checked via random probes rather than by
+    // asserting on a materialised matrix, since the point of the `O(d)`
+    // representation is that no dense matrix is ever built.
+    use super::cone::{self, Blocks};
+    for &d in &[1usize, 2, 3, 5, 20, 50] {
+        let mut rng = Lcg(31 + d as u64);
+        let s = random_interior_soc_point(&mut rng, d);
+        let z = random_interior_soc_point(&mut rng, d);
+        let cone_spec = ConeSpec { l: 0, soc: vec![d] };
+        let blk = Blocks::new(&cone_spec);
+        let sc = cone::nt_scaling(&blk, &s, &z);
+
+        let u: Vec<f64> = (0..d).map(|_| rng.next_f(-2.0, 2.0)).collect();
+        let v: Vec<f64> = (0..d).map(|_| rng.next_f(-2.0, 2.0)).collect();
+
+        let wu = sc.apply_w(&blk, &u);
+        let wv = sc.apply_w(&blk, &v);
+        let lhs: f64 = wu.iter().zip(&v).map(|(a, b)| a * b).sum();
+        let rhs: f64 = u.iter().zip(&wv).map(|(a, b)| a * b).sum();
+        assert!(
+            (lhs - rhs).abs() < 1e-9 * lhs.abs().max(rhs.abs()).max(1.0),
+            "d={d}: <Wu,v> != <u,Wv>: {lhs} vs {rhs}"
+        );
+
+        let winv_u = sc.apply_winv(&blk, &u);
+        let winv_v = sc.apply_winv(&blk, &v);
+        let lhs2: f64 = winv_u.iter().zip(&v).map(|(a, b)| a * b).sum();
+        let rhs2: f64 = u.iter().zip(&winv_v).map(|(a, b)| a * b).sum();
+        assert!(
+            (lhs2 - rhs2).abs() < 1e-9 * lhs2.abs().max(rhs2.abs()).max(1.0),
+            "d={d}: <Winv u,v> != <u,Winv v>: {lhs2} vs {rhs2}"
+        );
+    }
+}
+
+/// Sentinel: NT scaling construction + application for a single huge SOC
+/// block must stay `O(d)` in time (and therefore memory: `cone::Scaling`
+/// never allocates a `d x d` buffer). This is the scale that historically
+/// OOM'd: the QCQP->SOCP bridge emits one SOC block of dimension `n+2` per
+/// quadratic term (Phase 1, `conic/qcqp.rs`), so `n` in the low 1e5s produces
+/// a single SOC block near this size. The old dense `w_block`/`winv_block`
+/// representation would need `2 * D^2 * 8` bytes here (~160 GB) -- too large
+/// to actually execute, so this sentinel's revert-check was done at a
+/// reduced `d` instead of by reverting and running this exact test (see the
+/// task report for the measured old-vs-new timing at that reduced `d`).
+#[test]
+fn nt_scaling_huge_single_soc_block_stays_linear_time() {
+    const D: usize = 100_000;
+    /// Measured (this machine, `cargo nextest run --release`):
+    /// `nt_scaling` + one `apply_w` + `apply_winv` round trip ~1.6ms total.
+    /// Budget below is a ~60x margin over that; the O(d^2) dense path this
+    /// replaces cannot even be run to completion at `D` (see doc comment).
+    const TIME_BUDGET_SECS: f64 = 0.1;
+
+    use super::cone::{self, Blocks};
+    let mut rng = Lcg(424_242);
+    let s = random_interior_soc_point(&mut rng, D);
+    let z = random_interior_soc_point(&mut rng, D);
+    let cone_spec = ConeSpec { l: 0, soc: vec![D] };
+    let blk = Blocks::new(&cone_spec);
+    let v: Vec<f64> = (0..D).map(|i| ((i % 7) as f64) - 3.0).collect();
+
+    let t0 = std::time::Instant::now();
+    let sc = cone::nt_scaling(&blk, &s, &z);
+    let w_v = sc.apply_w(&blk, &v);
+    let winv_v = sc.apply_winv(&blk, &w_v);
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    assert!(
+        elapsed < TIME_BUDGET_SECS,
+        "nt_scaling + apply_w + apply_winv at d={D} took {elapsed:.3}s \
+         (budget {TIME_BUDGET_SECS}s) -- SOC NT scaling is no longer O(d)"
+    );
+    // Winv(W v) round-trips to v (also uses the result, so the computation
+    // cannot be folded away).
+    for i in 0..D {
+        assert!(
+            (winv_v[i] - v[i]).abs() < 1e-6 * v[i].abs().max(1.0),
+            "round-trip mismatch at {i}: {} vs {}",
+            winv_v[i],
+            v[i]
+        );
+    }
+}
+
 #[test]
 fn empty_cone_equality_only_socp() {
     // m = 0: purely equality-constrained problem passes through the conic
