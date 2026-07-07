@@ -714,6 +714,151 @@ BCOORD
     );
 }
 
+#[test]
+fn duplicate_int_entry_is_error() {
+    assert_parse_error_contains(
+        "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+2 1
+F 2
+
+INT
+2
+0
+0
+
+OBJACOORD
+1
+0 1.0
+",
+        "INT: duplicate entry for variable 0",
+    );
+}
+
+#[test]
+fn duplicate_objbcoord_section_is_error() {
+    assert_parse_error_contains(
+        "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+1 1
+F 1
+
+OBJBCOORD
+10.0
+
+OBJBCOORD
+20.0
+",
+        "duplicate OBJBCOORD",
+    );
+}
+
+// ---------------------------------------------------------------------
+// Duplicate top-level sections are a spec violation -> ParseError.
+// ---------------------------------------------------------------------
+
+#[test]
+fn duplicate_ver_section_is_error() {
+    assert_parse_error_contains(
+        "\
+VER
+3
+
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+1 1
+F 1
+",
+        "duplicate VER section",
+    );
+}
+
+#[test]
+fn duplicate_objsense_section_is_error() {
+    assert_parse_error_contains(
+        "\
+VER
+3
+
+OBJSENSE
+MIN
+
+OBJSENSE
+MIN
+
+VAR
+1 1
+F 1
+",
+        "duplicate OBJSENSE section",
+    );
+}
+
+#[test]
+fn duplicate_var_section_is_error() {
+    assert_parse_error_contains(
+        "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+1 1
+F 1
+
+VAR
+1 1
+F 1
+",
+        "duplicate VAR section",
+    );
+}
+
+#[test]
+fn duplicate_con_section_is_error() {
+    assert_parse_error_contains(
+        "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+1 1
+F 1
+
+CON
+1 1
+L+ 1
+
+CON
+1 1
+L+ 1
+",
+        "duplicate CON section",
+    );
+}
+
 // ---------------------------------------------------------------------
 // Comments / blank lines.
 // ---------------------------------------------------------------------

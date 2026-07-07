@@ -1317,4 +1317,203 @@ minimize
             prob.a.values()[col0]
         );
     }
+
+    // -----------------------------------------------------------------------
+    // PR#25 review: OBJSENSE / objective-type / inf_val validation.
+    // -----------------------------------------------------------------------
+
+    /// Sentinel: an unrecognized OBJSENSE token must be a `ParseError`, not
+    /// silently treated as `minimize`.
+    ///
+    /// **No-op failure guarantee**: reverting to
+    /// `matches!(objsense.as_str(), "maximize" | "max")` (unknown => minimize)
+    /// makes this parse succeed as a minimize problem instead of erroring.
+    #[test]
+    fn test_qplib_unknown_objsense_is_error() {
+        let qplib = "\
+BAD_OBJSENSE
+LCL
+sideways
+1
+1
+0
+0.0
+0
+0.0
+1
+1 1 1.0
+1.0e308
+-1.0e308
+0
+1.0
+0
+0.0
+0
+1.0e308
+0
+";
+        let err = parse_qplib_str(qplib).expect_err("unknown OBJSENSE token must error");
+        assert!(
+            matches!(err, QplibError::ParseError(_)),
+            "expected ParseError, got {:?}",
+            err
+        );
+    }
+
+    /// `minimize`/`min` and `maximize`/`max` are all accepted (case-insensitive
+    /// via the existing `.to_lowercase()`), matching the pre-existing "max"
+    /// abbreviation support.
+    #[test]
+    fn test_qplib_objsense_min_abbreviation_accepted() {
+        let qplib = "\
+MIN_ABBREV
+LCL
+min
+1
+1
+0
+0.0
+0
+0.0
+1
+1 1 1.0
+1.0e308
+-1.0e308
+0
+1.0
+0
+0.0
+0
+1.0e308
+0
+";
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
+        assert_eq!(prob.num_vars, 1);
+    }
+
+    /// Sentinel: an unrecognized objective-type character (position 0 of the
+    /// 3-char problem type) must be `UnsupportedType`, matching the existing
+    /// var_char/con_char validation style.
+    ///
+    /// **No-op failure guarantee**: reverting to `let _obj_char = ...;`
+    /// (discarding the char without validation) makes this parse succeed.
+    #[test]
+    fn test_qplib_unknown_objective_type_char_is_unsupported() {
+        let qplib = "\
+BAD_OBJ_TYPE
+XCL
+";
+        assert!(matches!(
+            parse_qplib_str(qplib),
+            Err(QplibError::UnsupportedType(_))
+        ));
+    }
+
+    /// All four QPLIB objective-type characters (L/D/C/Q per Furini et al.
+    /// 2019 §3.3 PROBTYPE) must be accepted. L/C/Q are already exercised by
+    /// other fixtures in this module (LCL/QCL/CBL); D (diagonal convex
+    /// quadratic) is not, so it is covered explicitly here.
+    #[test]
+    fn test_qplib_diagonal_objective_type_d_accepted() {
+        let qplib = "\
+DIAG_OBJ
+DCL
+minimize
+2
+1
+2
+1 1 1.0
+2 2 1.0
+0.0
+0
+0.0
+2
+1 1 1.0
+1 2 1.0
+1.79769313486232E+308
+1.0
+0
+1.0
+0
+0.0
+0
+1.79769313486232E+308
+0
+";
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
+        assert_eq!(prob.num_vars, 2);
+        assert_eq!(prob.q.nnz(), 2);
+    }
+
+    /// Sentinel: `inf_val <= 0` must be a `ParseError`. Without the guard,
+    /// `is_pos_inf`/`is_neg_inf` divide-by-zero-scale semantics classify any
+    /// finite bound (here `[-100, 100]`) as `(-inf, inf)`, silently dropping
+    /// the constraint's bounds.
+    ///
+    /// **No-op failure guarantee**: removing the `inf_val <= 0.0` guard makes
+    /// this parse succeed with `prob.num_constraints == 0` instead of erroring.
+    #[test]
+    fn test_qplib_non_positive_inf_val_is_error() {
+        let qplib = "\
+BAD_INF
+LCL
+minimize
+1
+1
+0
+0.0
+0
+0.0
+1
+1 1 1.0
+0.0
+-100.0
+0
+100.0
+0
+0.0
+0
+1.0e308
+0
+";
+        let err = parse_qplib_str(qplib).expect_err("inf_val<=0 must produce ParseError");
+        assert!(
+            matches!(err, QplibError::ParseError(_)),
+            "expected ParseError, got {:?}",
+            err
+        );
+    }
+
+    /// Sentinel: a negative `inf_val` must also be rejected (not just zero).
+    #[test]
+    fn test_qplib_negative_inf_val_is_error() {
+        let qplib = "\
+BAD_INF_NEG
+LCL
+minimize
+1
+1
+0
+0.0
+0
+0.0
+1
+1 1 1.0
+-1.0e308
+-100.0
+0
+100.0
+0
+0.0
+0
+1.0e308
+0
+";
+        let err = parse_qplib_str(qplib).expect_err("negative inf_val must produce ParseError");
+        assert!(
+            matches!(err, QplibError::ParseError(_)),
+            "expected ParseError, got {:?}",
+            err
+        );
+    }
 }

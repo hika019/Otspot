@@ -31,9 +31,22 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         )));
     }
     let type_bytes = prob_type.as_bytes();
-    let _obj_char = type_bytes[0] as char;
+    let obj_char = type_bytes[0] as char;
     let var_char = type_bytes[1] as char;
     let con_char = type_bytes[2] as char;
+
+    // QPLIB objective type: L (linear), D (diagonal convex/concave quadratic),
+    // C (convex/concave quadratic), Q (indefinite quadratic). Source:
+    // qplib.zib.de PROBTYPE definition (Furini et al. 2019, §3.3).
+    match obj_char {
+        'L' | 'D' | 'C' | 'Q' => {}
+        c => {
+            return Err(QplibError::UnsupportedType(format!(
+                "Objective type '{}' not supported (only L/D/C/Q supported). Type={}",
+                c, prob_type
+            )));
+        }
+    }
 
     let var_binary = var_char == 'B';
     let var_integer = var_char == 'I';
@@ -58,7 +71,16 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
     }
 
     let objsense = ts.read_string()?.to_lowercase();
-    let maximize = matches!(objsense.as_str(), "maximize" | "max");
+    let maximize = match objsense.as_str() {
+        "minimize" | "min" => false,
+        "maximize" | "max" => true,
+        other => {
+            return Err(QplibError::ParseError(format!(
+                "OBJSENSE must be 'minimize'/'min' or 'maximize'/'max', got '{}'",
+                other
+            )));
+        }
+    };
 
     let n = ts.read_usize()?;
     let m = match con_char {
@@ -146,8 +168,19 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         }
     }
 
-    // Infinity value
+    // Infinity value. Must be strictly positive (rejects zero, negative, and
+    // NaN, all of which corrupt the `is_pos_inf`/`is_neg_inf` scale below).
+    // `+inf` itself is a legitimate declared-infinity sentinel: many QPLIB
+    // files (and this module's own fixtures) write DBL_MAX with fewer than
+    // 17 significant digits (e.g. `1.79769313486232E+308`), which overflows
+    // to `f64::INFINITY` on parse; that must continue to parse successfully.
     let inf_val = ts.read_f64()?;
+    if inf_val.is_nan() || inf_val <= 0.0 {
+        return Err(QplibError::ParseError(format!(
+            "inf_val must be positive, got {}",
+            inf_val
+        )));
+    }
     let is_pos_inf = |x: f64| x >= inf_val * QPLIB_INF_REL_TOL;
     let is_neg_inf = |x: f64| x <= -inf_val * QPLIB_INF_REL_TOL;
 

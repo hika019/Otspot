@@ -288,6 +288,12 @@ impl MpsParser {
             }
         })?;
         for (name, value) in pairs {
+            if self.rhs.contains_key(&name) {
+                return Err(MpsError::ParseError {
+                    line: line_num,
+                    message: format!("RHS: duplicate entry for row '{}'", name),
+                });
+            }
             self.rhs.insert(name, value);
         }
         Ok(())
@@ -308,6 +314,12 @@ impl MpsParser {
             }
         })?;
         for (name, value) in pairs {
+            if self.ranges.contains_key(&name) {
+                return Err(MpsError::ParseError {
+                    line: line_num,
+                    message: format!("RANGES: duplicate entry for row '{}'", name),
+                });
+            }
             self.ranges.insert(name, value);
         }
         Ok(())

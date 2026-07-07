@@ -772,4 +772,57 @@ ENDATA
         // G row RHS 2.0 is negated to -2.0; E row RHS 1.0 is unchanged.
         assert_eq!(qp.b, vec![-2.0, 1.0], "b: G-row negated, E-row unchanged");
     }
+
+    // -----------------------------------------------------------------------
+    // PR#25 review horizontal expansion: RHS/RANGES duplicate-row detection.
+    //
+    // Unlike COLUMNS (which accumulates duplicate (row,col) entries by design,
+    // see `test_parse_qps_accumulates_duplicate_objective_entries`), RHS and
+    // RANGES hold exactly one scalar per row; a repeated row name is
+    // ambiguous input that was previously silently resolved via last-write-wins.
+    // -----------------------------------------------------------------------
+
+    /// Sentinel: the same row name appearing twice in RHS (multi-pair line)
+    /// must be a `ParseError`, not silently overwritten.
+    ///
+    /// **No-op failure guarantee**: reverting to plain `self.rhs.insert(name, value)`
+    /// makes this parse succeed with `prob.b[0] == 20.0` (last-write-wins) instead of erroring.
+    #[test]
+    fn test_qps_duplicate_rhs_row_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    rhs  c1  10.0\n    rhs  c1  20.0\nENDATA\n";
+        let err = parse_qps_str(qps).expect_err("duplicate RHS row must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RHS") && msg.contains("duplicate"),
+            "error should mention RHS duplicate, got: {msg}"
+        );
+    }
+
+    /// Sentinel: the 2-field shorthand RHS path must also reject a row that
+    /// was already set via the named multi-pair path.
+    #[test]
+    fn test_qps_duplicate_rhs_row_shorthand_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  c1  10.0\n    c1  20.0\nENDATA\n";
+        let err = parse_qps_str(qps).expect_err("duplicate RHS row (shorthand) must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RHS") && msg.contains("duplicate"),
+            "error should mention RHS duplicate, got: {msg}"
+        );
+    }
+
+    /// Sentinel: the same row name appearing twice in RANGES must be a `ParseError`.
+    ///
+    /// **No-op failure guarantee**: reverting to plain `self.ranges.insert(name, value)`
+    /// makes this parse succeed (silently keeping the last RANGES value) instead of erroring.
+    #[test]
+    fn test_qps_duplicate_ranges_row_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    rhs  c1  10.0\nRANGES\n    rng  c1  2.0\n    rng  c1  4.0\nENDATA\n";
+        let err = parse_qps_str(qps).expect_err("duplicate RANGES row must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RANGES") && msg.contains("duplicate"),
+            "error should mention RANGES duplicate, got: {msg}"
+        );
+    }
 }
