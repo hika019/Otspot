@@ -46,13 +46,15 @@ pub struct NonconvexQcqp {
 
 /// Result of global QCQP optimisation.
 ///
-/// With an incumbent, `status` is `Timeout` (deadline hit), `MaxIterations`
-/// (node-limited), `Optimal` (search exhausted, no node relaxation failed,
-/// and `gap <= gap_tol` — a certificate), or `SuboptimalSolution` (search
-/// exhausted but some relaxation failed without a certificate, or the proven
-/// gap exceeds `gap_tol`). Without an incumbent: `Timeout` > `MaxIterations`
-/// > `NumericalError` (some region was never certified empty) > `Infeasible`
-/// (every region proven empty — only then is infeasibility a certificate).
+/// With an incumbent, `status` is `Timeout` (deadline hit), `Optimal` (search
+/// exhausted, no node relaxation failed, and `gap <= gap_tol` — a certificate),
+/// or `SuboptimalSolution` (node-limited, or exhausted but some relaxation
+/// failed without a certificate, or the proven gap exceeds `gap_tol`).
+///
+/// Without an incumbent the status is the first applicable of `Timeout`,
+/// `MaxIterations`, `NumericalError` (some region was never certified empty),
+/// `Infeasible` (every region proven empty — only then is infeasibility a
+/// certificate).
 #[derive(Debug, Clone)]
 pub struct GlobalResult {
     /// Termination status (see struct docs for the exact classification).
@@ -215,8 +217,10 @@ fn solve_relax_lp(prob: &ConicProblem, deadline: Option<std::time::Instant>) -> 
         None,
     )
     .unwrap();
-    let mut lp_opts = crate::options::SolverOptions::default();
-    lp_opts.deadline = deadline;
+    let lp_opts = crate::options::SolverOptions {
+        deadline,
+        ..Default::default()
+    };
     let res = crate::lp::solve_lp_with(&lp, &lp_opts);
     RelaxResult {
         status: res.status,
@@ -735,10 +739,12 @@ fn global_core(
         && numerical_failures == 0
         && gap <= g.gap_tol + GAP_CERT_SLACK * (1.0 + incumbent.abs());
     GlobalResult {
+        // With an incumbent, a node/gap-limited search is `SuboptimalSolution`
+        // (the incumbent is valid but unproven), matching `misocp::solve_misocp`
+        // and `mip::solve_miqp`. `MaxIterations` is reserved for the
+        // no-incumbent node-limited case above.
         status: if timed_out {
             SolveStatus::Timeout
-        } else if limited {
-            SolveStatus::MaxIterations
         } else if certified {
             SolveStatus::Optimal
         } else {
@@ -883,6 +889,28 @@ mod tests {
         assert!(
             (res.objective - 2.0).abs() < 5e-3,
             "incumbent must survive, got {}",
+            res.objective
+        );
+    }
+
+    /// P2 contract. A node-limited search that already holds an incumbent is
+    /// `SuboptimalSolution` (valid but unproven), never `Optimal` and never
+    /// `MaxIterations` (that is reserved for the incumbent-less case). This
+    /// matches `misocp::solve_misocp` / `mip::solve_miqp`. `max_nodes = 80`
+    /// stops between the incumbent node (~60) and full exhaustion (~99).
+    #[test]
+    fn node_limited_with_incumbent_is_suboptimal() {
+        let qp = hyperbola();
+        let g = GlobalOptions {
+            max_nodes: 80,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g);
+        assert_eq!(res.status, SolveStatus::SuboptimalSolution, "{res:?}");
+        assert_eq!(res.nodes, 80, "must stop at the node limit");
+        assert!(
+            (res.objective - 2.0).abs() < 5e-3,
+            "incumbent must be present, got {}",
             res.objective
         );
     }
