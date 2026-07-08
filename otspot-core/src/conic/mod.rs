@@ -196,8 +196,8 @@ impl ConicOptions {
 
 /// Solve a second-order cone program in standard form.
 ///
-/// Equilibrates the data first (cone-block-respecting Ruiz scaling, see
-/// [`equil`]) so the IPM sees well-conditioned magnitudes, then maps the
+/// Equilibrates the data first (cone-block-respecting Ruiz scaling) so the
+/// IPM sees well-conditioned magnitudes, then maps the
 /// solution/duals/certificates back to `problem`'s original space. Exact up
 /// to rounding — changes neither optimum nor feasible set (issue #9b).
 pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
