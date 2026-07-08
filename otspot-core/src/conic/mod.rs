@@ -84,10 +84,16 @@ impl ConicProblem {
         self.h.len()
     }
 
-    /// Validate dimensional consistency.
+    /// Validate dimensional consistency and finiteness.
+    ///
+    /// Column counts are checked unconditionally (not just when `p() > 0` /
+    /// rows exist): a `CscMatrix` still declares its column count with zero
+    /// rows, and a mismatched `A` there previously slipped through to a
+    /// `debug_assert_eq!` panic deeper in the KKT solve the first time a
+    /// non-empty `A`/`G` used it (PR #25 review #36).
     pub fn validate(&self) -> Result<(), String> {
-        if self.a.ncols() != self.n() && self.p() > 0 {
-            return Err("A has wrong column count".into());
+        if self.a.ncols() != self.n() {
+            return Err("A column count != n".into());
         }
         if self.g.ncols() != self.n() {
             return Err("G column count != n".into());
@@ -106,8 +112,21 @@ impl ConicProblem {
                 return Err("second-order cone dim must be >= 1".into());
             }
         }
+        find_non_finite("c", &self.c)?;
+        find_non_finite("b", &self.b)?;
+        find_non_finite("h", &self.h)?;
+        find_non_finite("A", self.a.values())?;
+        find_non_finite("G", self.g.values())?;
         Ok(())
     }
+}
+
+/// Returns `Err` naming the first non-finite (NaN/±inf) entry of `xs`, if any.
+fn find_non_finite(field: &str, xs: &[f64]) -> Result<(), String> {
+    if let Some((i, v)) = xs.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(format!("{field}[{i}] is not finite: {v}"));
+    }
+    Ok(())
 }
 
 /// Result of a conic solve.
@@ -161,7 +180,46 @@ impl Default for ConicOptions {
     }
 }
 
+impl ConicOptions {
+    /// Validate option ranges the IPM assumes but never checks itself.
+    ///
+    /// `max_iter == 0` is deliberately **not** rejected: it is a legitimate
+    /// (if extreme) budget, used by tests to force an immediate
+    /// `MaxIterations` without a certificate (see
+    /// `misocp_unresolved_nodes_do_not_prove_infeasibility`).
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.tol.is_finite() || self.tol <= 0.0 {
+            return Err(format!("tol must be finite and > 0, got {}", self.tol));
+        }
+        if !self.step_frac.is_finite() || self.step_frac <= 0.0 || self.step_frac >= 1.0 {
+            return Err(format!(
+                "step_frac must be finite and in (0, 1), got {}",
+                self.step_frac
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Solve a second-order cone program in standard form.
 pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
-    ipm::solve(problem, opts)
+    let mut res = ipm::solve(problem, opts);
+    // Canonicalize the reported objective by status (PR #25 review #40): only
+    // `Optimal` certifies `c^T x` as the problem's objective. `ipm::solve`
+    // always sets `objective = dot(c, &x)` from whatever iterate it stopped
+    // at -- for every other status that's just the in-progress IPM iterate
+    // when the loop broke (an infeasibility/unboundedness certificate can
+    // fire on the very first iteration, before `x` has moved off its `0`
+    // initializer, as in the review's repro, or many iterations in), not a
+    // value callers (e.g. `examples/solve_cbf`'s CSV output) should treat as
+    // a baseline. `NotSupported` already carries `f64::NAN` from
+    // `ipm::solve`'s `failed()` helper (a validate()-time rejection, before
+    // any iterate exists) and is left untouched.
+    res.objective = match res.status {
+        SolveStatus::Optimal => res.objective,
+        SolveStatus::Unbounded => f64::NEG_INFINITY,
+        SolveStatus::NotSupported(_) => res.objective,
+        _ => f64::INFINITY,
+    };
+    res
 }

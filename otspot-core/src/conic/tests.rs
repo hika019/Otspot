@@ -3444,3 +3444,325 @@ fn conic_kkt_threshold_boundary_direction_equivalence() {
         check("ds", &ds, &ds_o);
     }
 }
+
+// ---------------------------------------------------------------------------
+// PR #25 review: public-API input validation (conic entry points).
+// ---------------------------------------------------------------------------
+
+/// A trivially feasible 1-variable box SOCP (`0 <= x0 <= 1`), used as the
+/// dimensionally-consistent base for the finite-data validation sentinels
+/// below (only individual entries are corrupted per case).
+fn valid_box_socp() -> ConicProblem {
+    let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
+    ConicProblem {
+        c: vec![1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![1.0, 0.0],
+        cone: ConeSpec { l: 2, soc: vec![] },
+    }
+}
+
+#[test]
+fn conic_problem_validate_rejects_non_finite_c_b_h_and_matrix_values() {
+    // #16: `validate()` previously checked only dimensions, so NaN/Inf in c,
+    // b, h, or the A/G matrix values passed straight through to the IPM,
+    // which reported an opaque `NumericalError` instead of classifying the
+    // input itself as invalid.
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut p = valid_box_socp();
+        p.c[0] = bad;
+        assert!(p.validate().is_err(), "c={bad}");
+
+        let mut p = valid_box_socp();
+        p.h[0] = bad;
+        assert!(p.validate().is_err(), "h={bad}");
+
+        // `CscMatrix::from_triplets` already rejects non-finite entries at
+        // construction (its own, separate finite-data guard), so reach the
+        // stored `values` directly (same-crate `pub(crate)` field) to
+        // exercise `validate()`'s check independent of that upstream one.
+        let mut p = valid_box_socp();
+        p.g.values[0] = bad;
+        assert!(p.validate().is_err(), "G={bad}");
+
+        let mut p = valid_box_socp();
+        p.a = csc(&[vec![1.0]], 1, 1);
+        p.b = vec![0.0];
+        p.a.values[0] = bad;
+        assert!(p.validate().is_err(), "A={bad}");
+
+        let mut p = valid_box_socp();
+        p.a = csc(&[vec![1.0]], 1, 1);
+        p.b = vec![bad];
+        assert!(p.validate().is_err(), "b={bad}");
+    }
+    assert!(
+        valid_box_socp().validate().is_ok(),
+        "sentinel base must be valid"
+    );
+}
+
+#[test]
+fn solve_socp_reports_not_supported_for_non_finite_input_instead_of_numerical_error() {
+    // Sentinel: routes the #16 fix through `solve_socp` end-to-end. Before
+    // the fix this reached the IPM and surfaced as `NumericalError` (a
+    // solver-side failure classification), not `NotSupported` (invalid
+    // input); reverting the `validate()` finite-data checks makes this fail.
+    let mut p = valid_box_socp();
+    p.c[0] = f64::NAN;
+    let res = solve_socp(&p, &ConicOptions::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "{:?}",
+        res.status
+    );
+}
+
+#[test]
+fn conic_problem_validate_rejects_wrong_a_ncols_even_when_p_is_zero() {
+    // #36 (confirmed repro): `A.ncols() != n` was only checked when
+    // `p() > 0`, so a 0-row `A` with the wrong column count passed
+    // `validate()` and later hit `kkt.rs`'s `debug_assert_eq!(a.ncols(), n)`
+    // panic inside `solve_socp`. Exact repro from the review: `c.len()=2`,
+    // `A` is `0x0`, `b=[]`.
+    let g = csc(&[vec![1.0, 0.0], vec![0.0, 1.0]], 2, 2);
+    let prob = ConicProblem {
+        c: vec![1.0, 1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 0).unwrap(),
+        b: vec![],
+        g,
+        h: vec![1.0, 1.0],
+        cone: ConeSpec { l: 2, soc: vec![] },
+    };
+    assert!(prob.validate().is_err(), "0x0 A with n=2 must be rejected");
+    // End-to-end: must classify as NotSupported, not panic.
+    let res = solve_socp(&prob, &ConicOptions::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "{:?}",
+        res.status
+    );
+}
+
+#[test]
+fn conic_options_validate_rejects_bad_tol_and_step_frac() {
+    // #17: negative/zero/NaN tol and step_frac outside (0,1) previously ran
+    // straight into the IPM (e.g. `step_frac <= 0` degenerates to a
+    // non-positive step length, caught deep inside the iteration loop as a
+    // confusing `NumericalError` rather than classified as invalid input up
+    // front).
+    for bad_tol in [0.0, -1.0, f64::NAN, f64::NEG_INFINITY] {
+        let opts = ConicOptions {
+            tol: bad_tol,
+            ..ConicOptions::default()
+        };
+        assert!(opts.validate().is_err(), "tol={bad_tol}");
+    }
+    for bad_sf in [0.0, -0.1, 1.0, 1.5, f64::NAN] {
+        let opts = ConicOptions {
+            step_frac: bad_sf,
+            ..ConicOptions::default()
+        };
+        assert!(opts.validate().is_err(), "step_frac={bad_sf}");
+    }
+    // max_iter = 0 is a legitimate extreme budget (forces immediate
+    // MaxIterations without a certificate; see
+    // `misocp_unresolved_nodes_do_not_prove_infeasibility`), not invalid input.
+    let opts = ConicOptions {
+        max_iter: 0,
+        ..ConicOptions::default()
+    };
+    assert!(opts.validate().is_ok(), "max_iter=0 must stay legal");
+    assert!(ConicOptions::default().validate().is_ok());
+}
+
+#[test]
+fn solve_socp_reports_not_supported_for_invalid_options() {
+    let opts = ConicOptions {
+        step_frac: 0.0,
+        ..ConicOptions::default()
+    };
+    let res = solve_socp(&valid_box_socp(), &opts);
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "{:?}",
+        res.status
+    );
+}
+
+#[test]
+fn solve_socp_canonicalizes_non_optimal_objective() {
+    // #40 (confirmed repro): `ipm::solve` always set `objective = c^T x` from
+    // whatever iterate it stopped at, so an Infeasible/Unbounded result
+    // carried a meaningless number (the review's repro: an infeasible `x<=0,
+    // x>=1` SOCP reported `objective=0.0`). Non-`Optimal` statuses must
+    // report the canonical sentinel used across the rest of the codebase
+    // (`SolverResult::infeasible`/`unbounded`: `+inf` / `-inf`).
+    let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
+    let infeasible = ConicProblem {
+        c: vec![0.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![-1.0, 0.0], // x0 <= -1 and x0 >= 0.
+        cone: ConeSpec { l: 2, soc: vec![] },
+    };
+    let res = solve_socp(&infeasible, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Infeasible, "{res:?}");
+    assert_eq!(res.objective, f64::INFINITY, "obj={}", res.objective);
+
+    let g = csc(&[vec![-1.0]], 1, 1);
+    let unbounded = ConicProblem {
+        c: vec![-1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![0.0], // x0 >= 0, min -x0 => unbounded below.
+        cone: ConeSpec { l: 1, soc: vec![] },
+    };
+    let res = solve_socp(&unbounded, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Unbounded, "{res:?}");
+    assert_eq!(res.objective, f64::NEG_INFINITY, "obj={}", res.objective);
+}
+
+fn valid_int_lp() -> MisocpProblem {
+    let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
+    let base = ConicProblem {
+        c: vec![1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![5.0, 0.0],
+        cone: ConeSpec { l: 2, soc: vec![] },
+    };
+    MisocpProblem {
+        base,
+        integers: vec![0],
+        int_lb: vec![0.0],
+        int_ub: vec![5.0],
+    }
+}
+
+#[test]
+fn misocp_problem_validate_rejects_int_bound_length_mismatch() {
+    // #38 (confirmed repro): `int_lb`/`int_ub` shorter than `integers`
+    // previously indexed out of bounds inside `build_relaxation` at the first
+    // B&B node. Exact repro: `integers=[0]`, `int_lb=[]`, `int_ub=[]`.
+    let mut p = valid_int_lp();
+    p.int_lb = vec![];
+    p.int_ub = vec![];
+    assert!(p.validate().is_err());
+    let res = solve_misocp(&p, &ConicOptions::default(), &BbOptions::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "{:?}",
+        res.status
+    );
+}
+
+#[test]
+fn misocp_problem_validate_rejects_out_of_range_integer_index() {
+    // #39 (confirmed repro): an integer index >= n previously indexed
+    // `base.a/g` columns out of bounds inside `build_relaxation`. Exact
+    // repro shape: `n=1`, `integers=[2]`.
+    let mut p = valid_int_lp();
+    p.integers = vec![2];
+    assert!(p.validate().is_err());
+    let res = solve_misocp(&p, &ConicOptions::default(), &BbOptions::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "{:?}",
+        res.status
+    );
+}
+
+#[test]
+fn miqcp_quadratic_objective_recomputes_true_objective_not_epigraph() {
+    // #29: the MISOCP branch used to report the conic relaxation's raw
+    // `objective` (the epigraph variable `t` bounding the quadratic
+    // objective), while `solve_qcqp` (continuous path) and the model-layer
+    // continuous+SOC branch both independently recompute the objective from
+    // `x`. `to_conic`'s Cholesky clamps a near-zero *negative* pivot to a
+    // fixed positive replacement (see its module doc), so `t` reflects that
+    // clamped curvature, not the caller's literal `P0` -- a gap that is
+    // negligible near the origin but grows with `x`'s magnitude.
+    //
+    // P0 = diag(1.0, -1e-10, 2.0, 0.5): entry (1,1) sits in the clamped jitter
+    // band (matches `to_conic_matches_hand_built_dense_oracle`'s
+    // `jitter_band_clamped_diagonal` case, which confirms `to_conic` clamps
+    // rather than rejects it, to `CHOL_PIVOT_CLAMP = 1e-7` as an *L* entry --
+    // i.e. an effective curvature of `(1e-7)^2 = 1e-14`, not `-1e-10`). Only
+    // `x1` has a linear reward (`q0[1] = -1`), so the relaxation pushes it to
+    // its upper bound; at `x1 ~ 1e6` the clamped-vs-literal curvature gap
+    // (`0.5 * (1e-14 - (-1e-10)) * x1^2 ~ 50`) is orders of magnitude past
+    // any IPM/B&B numerical tolerance, while `x1` itself still safely stays
+    // within the solver's demonstrated well-conditioned range (large-scale
+    // box sentinels elsewhere in this file exercise up to `1e10`-`1e14`).
+    //
+    // `int_tol` is loosened to comfortably exceed the IPM's own
+    // boundary-approach slack at this scale (an interior-point iterate never
+    // sits exactly on a box constraint): this test's contract is the
+    // objective recompute, not the B&B integrality tolerance, which other
+    // tests already cover at ordinary scale.
+    let n = 4;
+    let p0 = csc(
+        &[
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, -1e-10, 0.0, 0.0],
+            vec![0.0, 0.0, 2.0, 0.0],
+            vec![0.0, 0.0, 0.0, 0.5],
+        ],
+        n,
+        n,
+    );
+    let qp = QcqpProblem {
+        n,
+        p0: Some(p0),
+        q0: vec![0.0, -1.0, 0.0, 0.0],
+        quad: vec![],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+    };
+    let ub1 = 1e6;
+    let bb = BbOptions {
+        int_tol: 0.5,
+        ..BbOptions::default()
+    };
+    let res = solve_miqcp(
+        &qp,
+        &[0, 1, 2, 3],
+        &[0.0, 0.0, 0.0, 0.0],
+        &[5.0, ub1, 5.0, 5.0],
+        &ConicOptions::default(),
+        &bb,
+    );
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!((res.x[1] - ub1).abs() < 10.0, "x1={}", res.x[1]);
+    // x0/x2/x3 have zero linear reward and strictly positive curvature, so
+    // their true optimum is 0; the IPM's own convergence slack (dominated by
+    // the problem's x1 ~ 1e6 scale) keeps them within ~0.01 of it, not exact.
+    assert!(
+        res.x[0].abs() < 0.1 && res.x[2].abs() < 0.1 && res.x[3].abs() < 0.1,
+        "x={:?}",
+        res.x
+    );
+    // True objective from the caller's literal (unclamped) P0/q0 evaluated at
+    // the returned `x`, computed independently of both `to_conic` and
+    // `solve_miqcp`.
+    let p0_diag = [1.0, -1e-10, 2.0, 0.5];
+    let q0 = [0.0, -1.0, 0.0, 0.0];
+    let true_obj: f64 = (0..n)
+        .map(|i| q0[i] * res.x[i] + 0.5 * p0_diag[i] * res.x[i] * res.x[i])
+        .sum();
+    assert!(
+        (res.objective - true_obj).abs() < 1.0,
+        "objective must be recomputed from x with the literal P0, not the \
+         conic epigraph variable (which bounds the clamped curvature): \
+         got {}, want {true_obj}",
+        res.objective
+    );
+}
