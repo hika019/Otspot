@@ -714,3 +714,153 @@ fn conic_misocp_route_peak_within_budget() {
         1 + 3 * MISOCP_NUM_BLOCKS
     );
 }
+
+// ---------------------------------------------------------------------------
+// Nonconvex QCQP route: spatial branch-and-bound over a diagonal Hessian
+// ---------------------------------------------------------------------------
+
+use otspot_core::conic::{solve_global_qcqp, GlobalOptions, NonconvexQcqp};
+
+/// `collect_pairs` used to allocate a `vec![false; n*n]` bitset once per
+/// solve, and `build_relax` used to densify `p0`/`a_eq`/`qc.p`/`g_lin` to
+/// `Vec<Vec<f64>>` on *every* branch-and-bound node (`O(n * (n +
+/// pairs.len()))` per node). Matches the QPLIB DCQ scale class (n up to
+/// ~1e5) at a size where the dense reference (`n^2 * 8` bytes per matrix,
+/// ~288 MB at this `n`) is still measurable without aborting the process --
+/// same `n` as the MISOCP fence above, for a direct before/after comparison.
+const NCQCQP_N: usize = 6_001;
+
+/// Measured peak (release, `cargo test --release --test memory_budget
+/// conic_nonconvex_route_peak_within_budget -- --nocapture`, this machine):
+/// 31.0 MB at `n = 6001`, 1 B&B node (root only). Budget = measured x3
+/// margin (CLAUDE.md convention), rounded up.
+///
+/// **No-op failure guarantee, verified two ways**: (1) `INJECT_QUADRATIC_BLOWUP`
+/// (below) makes this FAIL; (2) reverting `collect_pairs`/`solve_relax_lp`/
+/// `build_relax` to their pre-fix dense form was done manually during
+/// development (`git stash` the sparse rewrite, keep this test) and run
+/// under `systemd-run --user --scope -p MemoryMax=8G`: it was OOM-killed
+/// within a minute (journal: "A process of this unit has been killed by the
+/// OOM killer") -- `p0`/`a_eq`/`g_lin` densify to `6001 x 6001` (~288 MB
+/// each), and `solve_relax_lp`'s own dense pass over the *built* relaxation
+/// (`m x nv` ~= 54000 x 12000) is ~5 GB by itself, dwarfing this budget by
+/// construction rather than by a measurable finite peak.
+const NCQCQP_PEAK_BUDGET_BYTES: usize = 96 * 1024 * 1024;
+
+/// Diagonal strictly-convex objective `sum x_i^2` (`p0` diagonal, `nnz =
+/// n`), an equality chain pinning every `x_i` to `0` (`x_0 = 0`, then `x_i -
+/// x_{i-1} = 0` for `i >= 1`, `nnz(a_eq) = O(n)`), and a redundant banded
+/// inequality `x_i + x_{i+1} <= 10` (`nnz(g_lin) = O(n)`), over box `[-1,
+/// 1]^n`. The chain makes `x = 0` the *only* feasible point regardless of
+/// the objective; at `x = 0` every diagonal McCormick pair's explicit
+/// `w`-interval lower bound is `0` (the box straddles `0`) and the strictly
+/// positive objective coefficient on `w_i` drives it to that bound exactly,
+/// so the root relaxation is already tight -- hand-provable optimum `0` at
+/// `x = 0`, zero spatial branching (a single node).
+fn build_diag_nonconvex_qcqp(n: usize) -> (NonconvexQcqp, f64) {
+    let mut p0_r = Vec::with_capacity(n);
+    let mut p0_c = Vec::with_capacity(n);
+    let mut p0_v = Vec::with_capacity(n);
+    for i in 0..n {
+        p0_r.push(i);
+        p0_c.push(i);
+        p0_v.push(2.0); // 0.5 * 2 * x_i^2 = x_i^2
+    }
+    let p0 = CscMatrix::from_triplets(&p0_r, &p0_c, &p0_v, n, n).expect("diag P0");
+
+    let mut ae_r = vec![0usize];
+    let mut ae_c = vec![0usize];
+    let mut ae_v = vec![1.0];
+    for i in 1..n {
+        ae_r.push(i);
+        ae_c.push(i);
+        ae_v.push(1.0);
+        ae_r.push(i);
+        ae_c.push(i - 1);
+        ae_v.push(-1.0);
+    }
+    let a_eq = CscMatrix::from_triplets(&ae_r, &ae_c, &ae_v, n, n).expect("chain A_eq");
+    let b_eq = vec![0.0; n];
+
+    let mut gl_r = Vec::with_capacity(2 * (n - 1));
+    let mut gl_c = Vec::with_capacity(2 * (n - 1));
+    let mut gl_v = Vec::with_capacity(2 * (n - 1));
+    for i in 0..n - 1 {
+        gl_r.push(i);
+        gl_c.push(i);
+        gl_v.push(1.0);
+        gl_r.push(i);
+        gl_c.push(i + 1);
+        gl_v.push(1.0);
+    }
+    let g_lin = CscMatrix::from_triplets(&gl_r, &gl_c, &gl_v, n - 1, n).expect("banded G_lin");
+    let h_lin = vec![10.0; n - 1];
+
+    let qp = NonconvexQcqp {
+        n,
+        p0: Some(p0),
+        q0: vec![0.0; n],
+        quad: vec![],
+        g_lin,
+        h_lin,
+        a_eq,
+        b_eq,
+        lb: vec![-1.0; n],
+        ub: vec![1.0; n],
+    };
+    (qp, 0.0)
+}
+
+/// Peak allocation fence for the nonconvex spatial-B&B QCQP path
+/// (`otspot_core::conic::nonconvex`): both `collect_pairs` and the per-node
+/// `build_relax` must stay `O(nnz)`, not `O(n^2)` / `O(n * (n + pairs))`.
+///
+/// **No-op failure guarantee**: flipping `INJECT_QUADRATIC_BLOWUP` to `true`
+/// makes this FAIL (same mechanism as the other routes; sized to `2x` this
+/// route's budget).
+#[test]
+fn conic_nonconvex_route_peak_within_budget() {
+    let _serial = lock_measurement();
+    let (qp, expected_obj) = build_diag_nonconvex_qcqp(NCQCQP_N);
+
+    reset_peak();
+    let r = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    maybe_inject_dense_blowup(NCQCQP_PEAK_BUDGET_BYTES);
+    let peak = peak_bytes();
+    eprintln!(
+        "nonconvex_route peak={peak} bytes ({:.2} MB), nodes={}",
+        peak as f64 / 1_048_576.0,
+        r.nodes
+    );
+
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "nonconvex QCQP route: expected Optimal"
+    );
+    assert_eq!(
+        r.nodes, 1,
+        "nonconvex QCQP route: root relaxation must already be tight (no spatial branching)"
+    );
+    let rel_err = (r.objective - expected_obj).abs() / expected_obj.abs().max(1.0);
+    assert!(
+        rel_err < 1e-6,
+        "nonconvex QCQP route: obj={:.6e} expected={:.6e} rel_err={:.3e}",
+        r.objective,
+        expected_obj,
+        rel_err
+    );
+    for (idx, &xi) in r.x.iter().enumerate() {
+        assert!(
+            xi.abs() < 1e-6,
+            "nonconvex QCQP route: x[{idx}]={xi} want 0"
+        );
+    }
+    assert!(
+        peak <= NCQCQP_PEAK_BUDGET_BYTES,
+        "nonconvex QCQP route peak {:.1} MB exceeds {:.1} MB budget (n={NCQCQP_N}) — \
+         check for an unconditional dense expansion in collect_pairs/build_relax",
+        peak as f64 / 1_048_576.0,
+        NCQCQP_PEAK_BUDGET_BYTES as f64 / 1_048_576.0
+    );
+}

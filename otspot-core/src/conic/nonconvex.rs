@@ -100,44 +100,45 @@ impl Default for GlobalOptions {
     }
 }
 
-fn dense(a: &CscMatrix) -> Vec<Vec<f64>> {
-    a.to_dense_rows()
+/// `p`'s entry at `(row, col)`, or `0.0` if not stored explicitly:
+/// `O(log deg(col))` via binary search on the column's sorted row indices.
+/// Reads both triangular halves of a symmetric quadratic matrix without ever
+/// materializing it as a dense `n x n` array (`to_dense_rows` was 10 GB at
+/// `n = 100_000` and was rebuilt on every branch-and-bound node).
+fn get_entry(p: &CscMatrix, row: usize, col: usize) -> f64 {
+    let cp = p.col_ptr();
+    let start = cp[col];
+    let end = cp[col + 1];
+    p.row_ind()[start..end]
+        .binary_search(&row)
+        .map(|pos| p.values()[start + pos])
+        .unwrap_or(0.0)
 }
 
 /// Collect the symmetric index pairs `(i,j)` with `i<=j` that appear with a
-/// nonzero coefficient in any quadratic matrix.
+/// nonzero coefficient in any quadratic matrix, scanning each matrix's own
+/// CSC nonzeros directly (`O(nnz(P))` total, ascending by construction)
+/// instead of a dense `n x n` bitset (`vec![false; n*n]` is 10 GB at
+/// `n = 100_000`).
 fn collect_pairs(qp: &NonconvexQcqp) -> Vec<(usize, usize)> {
-    let n = qp.n;
-    let mut seen = vec![false; n * n];
-    let mark = |i: usize, j: usize, seen: &mut Vec<bool>| {
-        let (a, b) = if i <= j { (i, j) } else { (j, i) };
-        seen[a * n + b] = true;
-    };
-    let scan = |p: &CscMatrix, seen: &mut Vec<bool>| {
-        let d = dense(p);
-        for i in 0..n {
-            for j in 0..n {
-                if d[i][j] != 0.0 {
-                    mark(i, j, seen);
-                }
+    let mut seen: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
+    let mut mark_matrix = |p: &CscMatrix| {
+        let cp = p.col_ptr();
+        let ri = p.row_ind();
+        for j in 0..p.ncols() {
+            for k in cp[j]..cp[j + 1] {
+                let i = ri[k];
+                seen.insert(if i <= j { (i, j) } else { (j, i) });
             }
         }
     };
     if let Some(p0) = &qp.p0 {
-        scan(p0, &mut seen);
+        mark_matrix(p0);
     }
     for qc in &qp.quad {
-        scan(&qc.p, &mut seen);
+        mark_matrix(&qc.p);
     }
-    let mut pairs = Vec::new();
-    for i in 0..n {
-        for j in i..n {
-            if seen[i * n + j] {
-                pairs.push((i, j));
-            }
-        }
-    }
-    pairs
+    seen.into_iter().collect()
 }
 
 /// `0.5 * x^T P x`.
@@ -167,6 +168,12 @@ thread_local! {
 /// than the generic conic IPM, which is intentionally small and aimed at SOC
 /// blocks. The caller's wall-clock deadline is forwarded so a single node LP
 /// cannot run past the B&B budget.
+///
+/// Builds the combined equality+inequality matrix directly from `prob.a`/
+/// `prob.g`'s own CSC nonzeros (`O(nnz(a) + nnz(g))`) instead of densifying
+/// both to `Vec<Vec<f64>>` first -- `prob` is the per-node relaxation, so a
+/// dense pass here repeated the same `O(n * m)` blowup `build_relax` is
+/// fixed to avoid.
 fn solve_relax_lp(prob: &ConicProblem, deadline: Option<std::time::Instant>) -> RelaxResult {
     #[cfg(test)]
     if let Some(status) = RELAX_STATUS_PLAN
@@ -180,34 +187,38 @@ fn solve_relax_lp(prob: &ConicProblem, deadline: Option<std::time::Instant>) -> 
         };
     }
     let n = prob.n();
-    let gd = dense(&prob.g);
-    let ad = dense(&prob.a);
-    let mut rows = Vec::with_capacity(prob.p() + prob.m());
-    let mut rhs = Vec::with_capacity(prob.p() + prob.m());
-    let mut ctypes = Vec::with_capacity(prob.p() + prob.m());
-    for (i, row) in ad.iter().enumerate() {
-        rows.push(row.clone());
-        rhs.push(prob.b[i]);
-        ctypes.push(ConstraintType::Eq);
-    }
-    for (i, row) in gd.iter().enumerate() {
-        rows.push(row.clone());
-        rhs.push(prob.h[i]);
-        ctypes.push(ConstraintType::Le);
-    }
-    let mut rr = Vec::new();
-    let mut cc = Vec::new();
-    let mut vv = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
-        for (j, &v) in row.iter().enumerate() {
-            if v != 0.0 {
-                rr.push(i);
-                cc.push(j);
-                vv.push(v);
-            }
+    let peq = prob.p();
+    let mrows = prob.m();
+    let mut rr = Vec::with_capacity(prob.a.nnz() + prob.g.nnz());
+    let mut cc = Vec::with_capacity(prob.a.nnz() + prob.g.nnz());
+    let mut vv = Vec::with_capacity(prob.a.nnz() + prob.g.nnz());
+    let acp = prob.a.col_ptr();
+    let ari = prob.a.row_ind();
+    let ava = prob.a.values();
+    for j in 0..n {
+        for k in acp[j]..acp[j + 1] {
+            rr.push(ari[k]);
+            cc.push(j);
+            vv.push(ava[k]);
         }
     }
-    let a = CscMatrix::from_triplets(&rr, &cc, &vv, rows.len(), n).unwrap();
+    let gcp = prob.g.col_ptr();
+    let gri = prob.g.row_ind();
+    let gva = prob.g.values();
+    for j in 0..n {
+        for k in gcp[j]..gcp[j + 1] {
+            rr.push(peq + gri[k]);
+            cc.push(j);
+            vv.push(gva[k]);
+        }
+    }
+    let mut rhs = Vec::with_capacity(peq + mrows);
+    let mut ctypes = Vec::with_capacity(peq + mrows);
+    rhs.extend_from_slice(&prob.b);
+    ctypes.extend(std::iter::repeat_n(ConstraintType::Eq, peq));
+    rhs.extend_from_slice(&prob.h);
+    ctypes.extend(std::iter::repeat_n(ConstraintType::Le, mrows));
+    let a = CscMatrix::from_triplets(&rr, &cc, &vv, peq + mrows, n).unwrap();
     let lp = LpProblem::new_general(
         prob.c.clone(),
         a,
@@ -229,72 +240,173 @@ fn solve_relax_lp(prob: &ConicProblem, deadline: Option<std::time::Instant>) -> 
     }
 }
 
-/// Build the McCormick LP relaxation for the current box `[lb, ub]`.
-fn build_relax(
-    qp: &NonconvexQcqp,
-    pairs: &[(usize, usize)],
-    lb: &[f64],
-    ub: &[f64],
-) -> ConicProblem {
+/// Portions of the McCormick relaxation LP that do not depend on the current
+/// box `[lb, ub]`: the objective, the equality matrix, and the rows coming
+/// from the quadratic constraints and the original linear inequalities.
+/// Building these once (before the branch-and-bound loop) instead of inside
+/// `build_relax` turns the per-node rebuild into an `O(nnz)` clone of this
+/// struct plus `O(n + pairs.len())` new box/McCormick rows, instead of
+/// re-deriving everything from a dense `n x n` pass at every node.
+struct StaticRelax {
+    n: usize,
+    pairs: Vec<(usize, usize)>,
+    /// Objective coefficients over `[x, w]` (length `n + pairs.len()`).
+    c: Vec<f64>,
+    /// Equality matrix over `[x, w]` (`b.len() x (n + pairs.len())`).
+    a: CscMatrix,
+    b: Vec<f64>,
+    /// Fixed inequality-row triplets over `[x, w]`: quadratic constraints
+    /// followed by the original linear inequalities `Gl x <= hl`.
+    fixed_ri: Vec<usize>,
+    fixed_ci: Vec<usize>,
+    fixed_vi: Vec<f64>,
+    fixed_h: Vec<f64>,
+}
+
+/// `(pair_index, coeff)` for each McCormick pair with a nonzero `(1/2) x^T P
+/// x` coefficient in `p`. Mirrors the pre-fix dense formula exactly
+/// (`coeff = 0.5*d[i][i]` on the diagonal, `0.5*(d[i][j]+d[j][i])`
+/// off-diagonal): `get_entry` replaces `d[i][j]` with an `O(log deg)` sparse
+/// lookup, so the arithmetic (and its rounding) is bit-for-bit identical to
+/// the dense reference.
+fn quad_pair_coeffs(p: &CscMatrix, pairs: &[(usize, usize)]) -> Vec<(usize, f64)> {
+    let mut out = Vec::new();
+    for (pi, &(i, j)) in pairs.iter().enumerate() {
+        let coeff = if i == j {
+            0.5 * get_entry(p, i, i)
+        } else {
+            0.5 * (get_entry(p, i, j) + get_entry(p, j, i))
+        };
+        if coeff != 0.0 {
+            out.push((pi, coeff));
+        }
+    }
+    out
+}
+
+/// Precompute the node-invariant part of the relaxation once per solve (see
+/// `StaticRelax`'s doc).
+fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
     let n = qp.n;
+    let pairs = collect_pairs(qp);
     let npair = pairs.len();
     let nv = n + npair;
-    // objective coefficients on [x, w].
+
     let mut c = vec![0.0; nv];
     c[..n].copy_from_slice(&qp.q0);
     if let Some(p0) = &qp.p0 {
-        let d = dense(p0);
-        add_quad_coeffs(&d, n, pairs, &mut c);
+        for (pi, coeff) in quad_pair_coeffs(p0, &pairs) {
+            c[n + pi] += coeff;
+        }
     }
 
-    // equalities on x (padded).
-    let ae = dense(&qp.a_eq);
     let peq = qp.b_eq.len();
-    let mut at = (Vec::new(), Vec::new(), Vec::new());
-    for (i, row) in ae.iter().enumerate() {
-        for (j, &v) in row.iter().enumerate() {
+    let acp = qp.a_eq.col_ptr();
+    let ari = qp.a_eq.row_ind();
+    let ava = qp.a_eq.values();
+    let mut a_ri = Vec::with_capacity(qp.a_eq.nnz());
+    let mut a_ci = Vec::with_capacity(qp.a_eq.nnz());
+    let mut a_vi = Vec::with_capacity(qp.a_eq.nnz());
+    for j in 0..n {
+        for k in acp[j]..acp[j + 1] {
+            a_ri.push(ari[k]);
+            a_ci.push(j);
+            a_vi.push(ava[k]);
+        }
+    }
+    let a = CscMatrix::from_triplets(&a_ri, &a_ci, &a_vi, peq, nv).unwrap();
+
+    // quadratic constraints -> linear rows in [x, w].
+    let mut fixed_ri = Vec::new();
+    let mut fixed_ci = Vec::new();
+    let mut fixed_vi = Vec::new();
+    let mut fixed_h = Vec::new();
+    for (row, qc) in qp.quad.iter().enumerate() {
+        for (j, &v) in qc.q.iter().enumerate() {
             if v != 0.0 {
-                at.0.push(i);
-                at.1.push(j);
-                at.2.push(v);
+                fixed_ri.push(row);
+                fixed_ci.push(j);
+                fixed_vi.push(v);
             }
         }
-    }
-    let a = CscMatrix::from_triplets(&at.0, &at.1, &at.2, peq, nv).unwrap();
-
-    let mut rows: Vec<Vec<f64>> = Vec::new();
-    let mut h: Vec<f64> = Vec::new();
-
-    // quadratic constraints -> linear in [x, w].
-    for qc in &qp.quad {
-        let mut row = vec![0.0; nv];
-        for (j, &v) in qc.q.iter().enumerate() {
-            row[j] += v;
+        for (pi, coeff) in quad_pair_coeffs(&qc.p, &pairs) {
+            fixed_ri.push(row);
+            fixed_ci.push(n + pi);
+            fixed_vi.push(coeff);
         }
-        let d = dense(&qc.p);
-        add_quad_coeffs(&d, n, pairs, &mut row);
-        rows.push(row);
-        h.push(-qc.r);
+        fixed_h.push(-qc.r);
     }
     // original linear inequalities Gl x <= hl.
-    let gl = dense(&qp.g_lin);
-    for (i, row) in gl.iter().enumerate() {
-        let mut r = vec![0.0; nv];
-        r[..n].copy_from_slice(row);
-        rows.push(r);
-        h.push(qp.h_lin[i]);
-    }
-    // variable box.
+    let row_base = qp.quad.len();
+    let gcp = qp.g_lin.col_ptr();
+    let gri = qp.g_lin.row_ind();
+    let gva = qp.g_lin.values();
     for j in 0..n {
-        let mut r = vec![0.0; nv];
-        r[j] = 1.0;
-        rows.push(r);
-        h.push(ub[j]);
-        let mut r2 = vec![0.0; nv];
-        r2[j] = -1.0;
-        rows.push(r2);
-        h.push(-lb[j]);
+        for k in gcp[j]..gcp[j + 1] {
+            fixed_ri.push(row_base + gri[k]);
+            fixed_ci.push(j);
+            fixed_vi.push(gva[k]);
+        }
     }
+    fixed_h.extend_from_slice(&qp.h_lin);
+
+    StaticRelax {
+        n,
+        pairs,
+        c,
+        a,
+        b: qp.b_eq.clone(),
+        fixed_ri,
+        fixed_ci,
+        fixed_vi,
+        fixed_h,
+    }
+}
+
+/// Build the McCormick LP relaxation for the current box `[lb, ub]`.
+///
+/// Only the box rows (`2n`) and the McCormick envelope rows (`6` per pair)
+/// depend on the box; everything else is `static_` (see its doc), so this
+/// clones the precomputed fixed part (`O(nnz)`) and appends the per-node
+/// rows directly as triplets, instead of re-deriving the whole relaxation
+/// from a dense `n x n` pass at every branch-and-bound node (`O(n * (n +
+/// pairs.len()))` per node -- the dominant B&B memory cost on large QCQPs).
+fn build_relax(static_: &StaticRelax, lb: &[f64], ub: &[f64]) -> ConicProblem {
+    let n = static_.n;
+    let pairs = &static_.pairs;
+    let npair = pairs.len();
+    let nv = n + npair;
+    let m_fixed = static_.fixed_h.len();
+    let m = m_fixed + 2 * n + 6 * npair;
+
+    let mut ri = static_.fixed_ri.clone();
+    let mut ci = static_.fixed_ci.clone();
+    let mut vi = static_.fixed_vi.clone();
+    let mut h = static_.fixed_h.clone();
+    let box_rows = 2 * n;
+    let mc_rows = 6 * npair;
+    // 2 single-entry rows + 4 push_mc rows (always 3 triplets each) per pair.
+    let mc_nnz = 2 * npair + 12 * npair;
+    ri.reserve(box_rows + mc_nnz);
+    ci.reserve(box_rows + mc_nnz);
+    vi.reserve(box_rows + mc_nnz);
+    h.reserve(box_rows + mc_rows);
+
+    // variable box.
+    let mut row = m_fixed;
+    for j in 0..n {
+        ri.push(row);
+        ci.push(j);
+        vi.push(1.0);
+        h.push(ub[j]);
+        row += 1;
+        ri.push(row);
+        ci.push(j);
+        vi.push(-1.0);
+        h.push(-lb[j]);
+        row += 1;
+    }
+
     // McCormick envelopes for each pair, plus the interval of `w = x_i x_j`
     // over the box as explicit rows. For off-diagonal pairs the four envelope
     // rows are the convex hull of the bilinear graph, so the interval is
@@ -307,19 +419,25 @@ fn build_relax(
         let (xl_i, xu_i) = (lb[i], ub[i]);
         let (xl_j, xu_j) = (lb[j], ub[j]);
         let (w_lo, w_hi) = w_interval(xl_i, xu_i, xl_j, xu_j, i == j);
-        let mut r_hi = vec![0.0; nv];
-        r_hi[wj] = 1.0;
-        rows.push(r_hi);
+
+        ri.push(row);
+        ci.push(wj);
+        vi.push(1.0);
         h.push(w_hi);
-        let mut r_lo = vec![0.0; nv];
-        r_lo[wj] = -1.0;
-        rows.push(r_lo);
+        row += 1;
+        ri.push(row);
+        ci.push(wj);
+        vi.push(-1.0);
         h.push(-w_lo);
+        row += 1;
+
         // w >= xl_i x_j + xl_j x_i - xl_i xl_j  =>  -w + xl_j x_i + xl_i x_j <= xl_i xl_j
         push_mc(
-            &mut rows,
+            &mut ri,
+            &mut ci,
+            &mut vi,
             &mut h,
-            nv,
+            &mut row,
             wj,
             i,
             j,
@@ -330,9 +448,11 @@ fn build_relax(
         );
         // w >= xu_i x_j + xu_j x_i - xu_i xu_j
         push_mc(
-            &mut rows,
+            &mut ri,
+            &mut ci,
+            &mut vi,
             &mut h,
-            nv,
+            &mut row,
             wj,
             i,
             j,
@@ -343,9 +463,11 @@ fn build_relax(
         );
         // w <= xl_i x_j + xu_j x_i - xl_i xu_j  =>  w - xu_j x_i - xl_i x_j <= -xl_i xu_j
         push_mc(
-            &mut rows,
+            &mut ri,
+            &mut ci,
+            &mut vi,
             &mut h,
-            nv,
+            &mut row,
             wj,
             i,
             j,
@@ -356,9 +478,11 @@ fn build_relax(
         );
         // w <= xu_i x_j + xl_j x_i - xu_i xl_j
         push_mc(
-            &mut rows,
+            &mut ri,
+            &mut ci,
+            &mut vi,
             &mut h,
-            nv,
+            &mut row,
             wj,
             i,
             j,
@@ -368,23 +492,13 @@ fn build_relax(
             -xu_i * xl_j,
         );
     }
+    assert_eq!(row, m, "relaxation row-count invariant");
 
-    let m = rows.len();
-    let mut gt = (Vec::new(), Vec::new(), Vec::new());
-    for (ri, row) in rows.iter().enumerate() {
-        for (ci, &v) in row.iter().enumerate() {
-            if v != 0.0 {
-                gt.0.push(ri);
-                gt.1.push(ci);
-                gt.2.push(v);
-            }
-        }
-    }
-    let g = CscMatrix::from_triplets(&gt.0, &gt.1, &gt.2, m, nv).unwrap();
+    let g = CscMatrix::from_triplets(&ri, &ci, &vi, m, nv).unwrap();
     ConicProblem {
-        c,
-        a,
-        b: qp.b_eq.clone(),
+        c: static_.c.clone(),
+        a: static_.a.clone(),
+        b: static_.b.clone(),
         g,
         h,
         cone: ConeSpec { l: m, soc: vec![] },
@@ -412,27 +526,18 @@ fn w_interval(xl_i: f64, xu_i: f64, xl_j: f64, xu_j: f64, diag: bool) -> (f64, f
     }
 }
 
-/// Add `(1/2) x^T P x` coefficients onto a linear row over `[x, w]`.
-fn add_quad_coeffs(d: &[Vec<f64>], n: usize, pairs: &[(usize, usize)], row: &mut [f64]) {
-    for (pi, &(i, j)) in pairs.iter().enumerate() {
-        let wj = n + pi;
-        let coeff = if i == j {
-            0.5 * d[i][i]
-        } else {
-            // symmetric: P_ij + P_ji = 2 P_ij, times 1/2 => P_ij (use both).
-            0.5 * (d[i][j] + d[j][i])
-        };
-        if coeff != 0.0 {
-            row[wj] += coeff;
-        }
-    }
-}
-
+/// Push one McCormick facet row as triplets (`row` is the running row
+/// counter, incremented on return). Duplicate `(row, col)` triplets are
+/// summed by `CscMatrix::from_triplets`, so pushing `xi_coef` and `xj_coef`
+/// as two separate triplets at the same column when `i == j` reproduces the
+/// dense reference's `r[i] += xi_coef; r[i] += xj_coef;` exactly.
 #[allow(clippy::too_many_arguments)]
 fn push_mc(
-    rows: &mut Vec<Vec<f64>>,
+    ri: &mut Vec<usize>,
+    ci: &mut Vec<usize>,
+    vi: &mut Vec<f64>,
     h: &mut Vec<f64>,
-    nv: usize,
+    row: &mut usize,
     wj: usize,
     i: usize,
     j: usize,
@@ -441,19 +546,29 @@ fn push_mc(
     xj_coef: f64,
     rhs: f64,
 ) {
-    let mut r = vec![0.0; nv];
-    r[wj] += wcoef;
-    r[i] += xi_coef;
+    ri.push(*row);
+    ci.push(wj);
+    vi.push(wcoef);
+    ri.push(*row);
+    ci.push(i);
+    vi.push(xi_coef);
     if i != j {
-        r[j] += xj_coef;
+        ri.push(*row);
+        ci.push(j);
+        vi.push(xj_coef);
     } else {
         // For i==j both x-coefficients apply to the same variable.
-        r[i] += xj_coef;
+        ri.push(*row);
+        ci.push(i);
+        vi.push(xj_coef);
     }
-    rows.push(r);
     h.push(rhs);
+    *row += 1;
 }
 
+/// Feasibility check against the caller's literal `NonconvexQcqp` data.
+/// `g_lin`/`a_eq`'s dot products with `x` are computed via `mat_vec_mul`
+/// (`O(nnz)`) rather than by densifying either matrix first.
 fn feasible(qp: &NonconvexQcqp, x: &[f64], tol: f64) -> bool {
     for (k, &lbv) in qp.lb.iter().enumerate() {
         if x[k] < lbv - tol || x[k] > qp.ub[k] + tol {
@@ -466,16 +581,20 @@ fn feasible(qp: &NonconvexQcqp, x: &[f64], tol: f64) -> bool {
             return false;
         }
     }
-    let gl = dense(&qp.g_lin);
-    for (i, row) in gl.iter().enumerate() {
-        let v: f64 = row.iter().zip(x).map(|(a, b)| a * b).sum();
+    let gv = qp
+        .g_lin
+        .mat_vec_mul(x)
+        .unwrap_or_else(|_| vec![0.0; qp.h_lin.len()]);
+    for (i, &v) in gv.iter().enumerate() {
         if v > qp.h_lin[i] + tol {
             return false;
         }
     }
-    let ae = dense(&qp.a_eq);
-    for (i, row) in ae.iter().enumerate() {
-        let v: f64 = row.iter().zip(x).map(|(a, b)| a * b).sum();
+    let av = qp
+        .a_eq
+        .mat_vec_mul(x)
+        .unwrap_or_else(|_| vec![0.0; qp.b_eq.len()]);
+    for (i, &v) in av.iter().enumerate() {
         if (v - qp.b_eq[i]).abs() > tol {
             return false;
         }
@@ -532,7 +651,7 @@ fn global_core(
     opts: &ConicOptions,
     g: &GlobalOptions,
 ) -> GlobalResult {
-    let pairs = collect_pairs(qp);
+    let static_ = build_static(qp);
     let mut incumbent = f64::INFINITY;
     let mut inc_x: Vec<f64> = Vec::new();
     let mut nodes = 0usize;
@@ -580,7 +699,7 @@ fn global_core(
             break;
         }
         nodes += 1;
-        let relax = build_relax(qp, &pairs, &lb, &ub);
+        let relax = build_relax(&static_, &lb, &ub);
         let res = solve_relax_lp(&relax, opts.deadline);
         match res.status {
             SolveStatus::Optimal => {}
@@ -653,7 +772,7 @@ fn global_core(
         // (2) spatial branching on the worst McCormick term gap.
         let mut worst_gap = 0.0;
         let mut branch_var = None;
-        for (pi, &(i, j)) in pairs.iter().enumerate() {
+        for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
             let wv = res.x[qp.n + pi];
             let gap = (wv - x[i] * x[j]).abs();
             if gap > worst_gap {
@@ -825,9 +944,9 @@ mod tests {
     #[test]
     fn mccormick_w_box_bounds_diagonal_square_below() {
         let qp = min_sq();
-        let pairs = collect_pairs(&qp);
-        assert_eq!(pairs, vec![(0, 0)]);
-        let relax = build_relax(&qp, &pairs, &qp.lb, &qp.ub);
+        let static_ = build_static(&qp);
+        assert_eq!(static_.pairs, vec![(0, 0)]);
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let res = solve_relax_lp(&relax, None);
         assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
         assert!(
@@ -844,8 +963,8 @@ mod tests {
     #[test]
     fn relaxation_lp_honors_expired_deadline() {
         let qp = hyperbola();
-        let pairs = collect_pairs(&qp);
-        let relax = build_relax(&qp, &pairs, &qp.lb, &qp.ub);
+        let static_ = build_static(&qp);
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
         let res = solve_relax_lp(&relax, Some(past));
         assert_eq!(
@@ -928,5 +1047,393 @@ mod tests {
             "gap must be within tol, got {}",
             res.gap
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Independent oracle: the pre-fix dense implementation, kept
+    // self-contained here purely as a reference for
+    // `sparse_relax_matches_dense_reference` below. Production code must
+    // never call these again.
+    // -----------------------------------------------------------------
+
+    fn reference_dense(a: &CscMatrix) -> Vec<Vec<f64>> {
+        a.to_dense_rows()
+    }
+
+    fn reference_collect_pairs(qp: &NonconvexQcqp) -> Vec<(usize, usize)> {
+        let n = qp.n;
+        let mut seen = vec![false; n * n];
+        let mark = |i: usize, j: usize, seen: &mut Vec<bool>| {
+            let (a, b) = if i <= j { (i, j) } else { (j, i) };
+            seen[a * n + b] = true;
+        };
+        let scan = |p: &CscMatrix, seen: &mut Vec<bool>| {
+            let d = reference_dense(p);
+            for i in 0..n {
+                for j in 0..n {
+                    if d[i][j] != 0.0 {
+                        mark(i, j, seen);
+                    }
+                }
+            }
+        };
+        if let Some(p0) = &qp.p0 {
+            scan(p0, &mut seen);
+        }
+        for qc in &qp.quad {
+            scan(&qc.p, &mut seen);
+        }
+        let mut pairs = Vec::new();
+        for i in 0..n {
+            for j in i..n {
+                if seen[i * n + j] {
+                    pairs.push((i, j));
+                }
+            }
+        }
+        pairs
+    }
+
+    fn reference_add_quad_coeffs(
+        d: &[Vec<f64>],
+        n: usize,
+        pairs: &[(usize, usize)],
+        row: &mut [f64],
+    ) {
+        for (pi, &(i, j)) in pairs.iter().enumerate() {
+            let wj = n + pi;
+            let coeff = if i == j {
+                0.5 * d[i][i]
+            } else {
+                0.5 * (d[i][j] + d[j][i])
+            };
+            if coeff != 0.0 {
+                row[wj] += coeff;
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reference_push_mc(
+        rows: &mut Vec<Vec<f64>>,
+        h: &mut Vec<f64>,
+        nv: usize,
+        wj: usize,
+        i: usize,
+        j: usize,
+        wcoef: f64,
+        xi_coef: f64,
+        xj_coef: f64,
+        rhs: f64,
+    ) {
+        let mut r = vec![0.0; nv];
+        r[wj] += wcoef;
+        r[i] += xi_coef;
+        if i != j {
+            r[j] += xj_coef;
+        } else {
+            r[i] += xj_coef;
+        }
+        rows.push(r);
+        h.push(rhs);
+    }
+
+    fn reference_build_relax(
+        qp: &NonconvexQcqp,
+        pairs: &[(usize, usize)],
+        lb: &[f64],
+        ub: &[f64],
+    ) -> ConicProblem {
+        let n = qp.n;
+        let npair = pairs.len();
+        let nv = n + npair;
+        let mut c = vec![0.0; nv];
+        c[..n].copy_from_slice(&qp.q0);
+        if let Some(p0) = &qp.p0 {
+            let d = reference_dense(p0);
+            reference_add_quad_coeffs(&d, n, pairs, &mut c);
+        }
+
+        let ae = reference_dense(&qp.a_eq);
+        let peq = qp.b_eq.len();
+        let mut at = (Vec::new(), Vec::new(), Vec::new());
+        for (i, row) in ae.iter().enumerate() {
+            for (j, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    at.0.push(i);
+                    at.1.push(j);
+                    at.2.push(v);
+                }
+            }
+        }
+        let a = CscMatrix::from_triplets(&at.0, &at.1, &at.2, peq, nv).unwrap();
+
+        let mut rows: Vec<Vec<f64>> = Vec::new();
+        let mut h: Vec<f64> = Vec::new();
+
+        for qc in &qp.quad {
+            let mut row = vec![0.0; nv];
+            for (j, &v) in qc.q.iter().enumerate() {
+                row[j] += v;
+            }
+            let d = reference_dense(&qc.p);
+            reference_add_quad_coeffs(&d, n, pairs, &mut row);
+            rows.push(row);
+            h.push(-qc.r);
+        }
+        let gl = reference_dense(&qp.g_lin);
+        for (i, row) in gl.iter().enumerate() {
+            let mut r = vec![0.0; nv];
+            r[..n].copy_from_slice(row);
+            rows.push(r);
+            h.push(qp.h_lin[i]);
+        }
+        for j in 0..n {
+            let mut r = vec![0.0; nv];
+            r[j] = 1.0;
+            rows.push(r);
+            h.push(ub[j]);
+            let mut r2 = vec![0.0; nv];
+            r2[j] = -1.0;
+            rows.push(r2);
+            h.push(-lb[j]);
+        }
+        for (pi, &(i, j)) in pairs.iter().enumerate() {
+            let wj = n + pi;
+            let (xl_i, xu_i) = (lb[i], ub[i]);
+            let (xl_j, xu_j) = (lb[j], ub[j]);
+            let (w_lo, w_hi) = w_interval(xl_i, xu_i, xl_j, xu_j, i == j);
+            let mut r_hi = vec![0.0; nv];
+            r_hi[wj] = 1.0;
+            rows.push(r_hi);
+            h.push(w_hi);
+            let mut r_lo = vec![0.0; nv];
+            r_lo[wj] = -1.0;
+            rows.push(r_lo);
+            h.push(-w_lo);
+            reference_push_mc(
+                &mut rows,
+                &mut h,
+                nv,
+                wj,
+                i,
+                j,
+                -1.0,
+                xl_j,
+                xl_i,
+                xl_i * xl_j,
+            );
+            reference_push_mc(
+                &mut rows,
+                &mut h,
+                nv,
+                wj,
+                i,
+                j,
+                -1.0,
+                xu_j,
+                xu_i,
+                xu_i * xu_j,
+            );
+            reference_push_mc(
+                &mut rows,
+                &mut h,
+                nv,
+                wj,
+                i,
+                j,
+                1.0,
+                -xu_j,
+                -xl_i,
+                -xl_i * xu_j,
+            );
+            reference_push_mc(
+                &mut rows,
+                &mut h,
+                nv,
+                wj,
+                i,
+                j,
+                1.0,
+                -xl_j,
+                -xu_i,
+                -xu_i * xl_j,
+            );
+        }
+
+        let m = rows.len();
+        let mut gt = (Vec::new(), Vec::new(), Vec::new());
+        for (ri, row) in rows.iter().enumerate() {
+            for (ci, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    gt.0.push(ri);
+                    gt.1.push(ci);
+                    gt.2.push(v);
+                }
+            }
+        }
+        let g = CscMatrix::from_triplets(&gt.0, &gt.1, &gt.2, m, nv).unwrap();
+        ConicProblem {
+            c,
+            a,
+            b: qp.b_eq.clone(),
+            g,
+            h,
+            cone: ConeSpec { l: m, soc: vec![] },
+        }
+    }
+
+    fn assert_csc_eq(a: &CscMatrix, b: &CscMatrix, label: &str) {
+        assert_eq!(a.nrows(), b.nrows(), "{label}: nrows");
+        assert_eq!(a.ncols(), b.ncols(), "{label}: ncols");
+        assert_eq!(a.col_ptr(), b.col_ptr(), "{label}: col_ptr");
+        assert_eq!(a.row_ind(), b.row_ind(), "{label}: row_ind");
+        assert_eq!(a.values(), b.values(), "{label}: values");
+    }
+
+    fn assert_relax_eq(sparse: &ConicProblem, reference: &ConicProblem, label: &str) {
+        assert_eq!(sparse.c, reference.c, "{label}: c");
+        assert_eq!(sparse.b, reference.b, "{label}: b");
+        assert_eq!(sparse.h, reference.h, "{label}: h");
+        assert_eq!(sparse.cone.l, reference.cone.l, "{label}: cone.l");
+        assert_eq!(sparse.cone.soc, reference.cone.soc, "{label}: cone.soc");
+        assert_csc_eq(&sparse.a, &reference.a, &format!("{label}: a"));
+        assert_csc_eq(&sparse.g, &reference.g, &format!("{label}: g"));
+    }
+
+    fn csc(rows: &[Vec<f64>], nrows: usize, ncols: usize) -> CscMatrix {
+        let mut ri = Vec::new();
+        let mut ci = Vec::new();
+        let mut vi = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            for (j, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    ri.push(i);
+                    ci.push(j);
+                    vi.push(v);
+                }
+            }
+        }
+        CscMatrix::from_triplets(&ri, &ci, &vi, nrows, ncols).unwrap()
+    }
+
+    /// Sentinel (independent-oracle equivalence): the sparse `build_static` +
+    /// `build_relax` must construct byte-for-byte the same relaxation as the
+    /// pre-fix dense reference above, across a spread of objective/constraint
+    /// shapes (diagonal-only, off-diagonal, asymmetric-storage quadratic
+    /// matrices, straddling/non-straddling boxes, existing equalities/
+    /// inequalities, and a narrowed mid-branch-and-bound box). Reintroducing
+    /// a row/column indexing mistake in the sparse rewrite changes `c`/`a`/
+    /// `g`/`h` here and fails this test without needing a full LP solve.
+    #[test]
+    fn sparse_relax_matches_dense_reference() {
+        struct Case {
+            name: &'static str,
+            qp: NonconvexQcqp,
+            lb: Vec<f64>,
+            ub: Vec<f64>,
+        }
+
+        let n2 = 2usize;
+        let diag_only = NonconvexQcqp {
+            n: n2,
+            p0: Some(csc(&[vec![4.0, 0.0], vec![0.0, 0.5]], n2, n2)),
+            q0: vec![0.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n2).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n2).unwrap(),
+            b_eq: vec![],
+            lb: vec![-1.0, -2.0],
+            ub: vec![1.0, 2.0],
+        };
+
+        let n3 = 3usize;
+        // p0: (0,0)=4, (0,1)=(1,0)=1 (symmetric), (2,2)=0.5.
+        let p0 = csc(
+            &[
+                vec![4.0, 1.0, 0.0],
+                vec![1.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.5],
+            ],
+            n3,
+            n3,
+        );
+        // qc1.p: ONLY (0,2)=2.0 stored (no mirrored (2,0)) -- asymmetric
+        // storage, exercising `get_entry`'s missing-mirror default of 0.
+        let qc1_p = CscMatrix::from_triplets(&[0], &[2], &[2.0], n3, n3).unwrap();
+        // qc2.p: (1,1)=2.0 (diag), (1,2)=(2,1)=-1.0 (symmetric off-diag).
+        let qc2_p =
+            CscMatrix::from_triplets(&[1, 1, 2], &[1, 2, 1], &[2.0, -1.0, -1.0], n3, n3).unwrap();
+        let g_lin = csc(&[vec![1.0, 1.0, 0.0], vec![0.0, 1.0, 1.0]], 2, n3);
+        let a_eq = csc(&[vec![1.0, 0.0, 1.0]], 1, n3);
+        let mixed = NonconvexQcqp {
+            n: n3,
+            p0: Some(p0),
+            q0: vec![0.1, -0.2, 0.0],
+            quad: vec![
+                GQuadConstraint {
+                    p: qc1_p,
+                    q: vec![0.5, 0.0, 0.0],
+                    r: -3.0,
+                },
+                GQuadConstraint {
+                    p: qc2_p,
+                    q: vec![0.0, 1.0, 0.5],
+                    r: 1.0,
+                },
+            ],
+            g_lin,
+            h_lin: vec![5.0, 4.0],
+            a_eq,
+            b_eq: vec![2.0],
+            // variable 2's box [1,5] does not straddle 0 (diag non-straddling
+            // branch of `w_interval`); variables 0/1 do straddle.
+            lb: vec![-2.0, -1.0, 1.0],
+            ub: vec![3.0, 4.0, 5.0],
+        };
+
+        let hb = hyperbola();
+        let cases = vec![
+            Case {
+                name: "diagonal_only_straddling_box",
+                qp: diag_only.clone(),
+                lb: diag_only.lb.clone(),
+                ub: diag_only.ub.clone(),
+            },
+            Case {
+                name: "off_diagonal_bilinear_constraint",
+                qp: hb.clone(),
+                lb: hb.lb.clone(),
+                ub: hb.ub.clone(),
+            },
+            Case {
+                name: "off_diagonal_narrowed_box_mid_bnb",
+                qp: hb.clone(),
+                lb: vec![0.5, 0.2],
+                ub: vec![2.0, 1.5],
+            },
+            Case {
+                name: "mixed_asymmetric_p0_qc_glin_aeq",
+                qp: mixed.clone(),
+                lb: mixed.lb.clone(),
+                ub: mixed.ub.clone(),
+            },
+            Case {
+                name: "mixed_narrowed_box_mid_bnb",
+                qp: mixed.clone(),
+                lb: vec![-0.5, 1.0, 2.0],
+                ub: vec![1.0, 3.0, 4.0],
+            },
+        ];
+
+        for case in &cases {
+            let static_ = build_static(&case.qp);
+            let sparse = build_relax(&static_, &case.lb, &case.ub);
+            let ref_pairs = reference_collect_pairs(&case.qp);
+            assert_eq!(static_.pairs, ref_pairs, "{}: pairs", case.name);
+            let reference = reference_build_relax(&case.qp, &ref_pairs, &case.lb, &case.ub);
+            assert_relax_eq(&sparse, &reference, case.name);
+        }
     }
 }
