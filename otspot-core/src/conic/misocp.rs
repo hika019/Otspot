@@ -3,8 +3,9 @@
 //! Branching adds integer variable bounds as nonnegative-orthant rows to the
 //! relaxation `G x + s = h`, then re-solves with the SOCP interior-point method.
 
+use super::equil::Equilibrator;
 use super::qcqp::{to_conic, QcqpProblem};
-use super::{solve_socp, ConeSpec, ConicOptions, ConicProblem};
+use super::{ipm, ConeSpec, ConicOptions, ConicProblem};
 use crate::problem::SolveStatus;
 use crate::sparse::CscMatrix;
 
@@ -285,7 +286,18 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
     let mut timed_out = false;
     let mut numerical_failures = 0usize;
 
-    // Stack of (lb, ub) per integer.
+    // Equilibrate `base` once for the whole tree (issue #9b) instead of
+    // per-node: every node shares the same column scale `d`, so a node's
+    // bound/fixing rows are built directly in scaled space (`lb/d[j]`,
+    // `ub/d[j]`) via the unmodified `build_relaxation`, and the O(sweeps *
+    // nnz) Ruiz cost is paid once, not once per (potentially thousands of)
+    // B&B nodes.
+    let equil = Equilibrator::compute(&prob.base);
+    let scaled_base = equil.scale_problem(&prob.base);
+
+    // Stack of (lb, ub) per integer, kept in *original* units (integrality
+    // and fractional branching are properties of `x_j`, not the scaled
+    // `x_j / d[j]`).
     let mut stack: Vec<(Vec<f64>, Vec<f64>)> = vec![(prob.int_lb.clone(), prob.int_ub.clone())];
 
     while let Some((lb, ub)) = stack.pop() {
@@ -304,8 +316,30 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
             break;
         }
         nodes += 1;
-        let relax = build_relaxation(&prob.base, &lb, &ub, &prob.integers);
-        let res = solve_socp(&relax, opts);
+        let lb_scaled: Vec<f64> = prob
+            .integers
+            .iter()
+            .zip(&lb)
+            .map(|(&j, &v)| v / equil.d[j])
+            .collect();
+        let ub_scaled: Vec<f64> = prob
+            .integers
+            .iter()
+            .zip(&ub)
+            .map(|(&j, &v)| v / equil.d[j])
+            .collect();
+        let relax = build_relaxation(&scaled_base, &lb_scaled, &ub_scaled, &prob.integers);
+        // Internal call (bypasses `solve_socp`): no re-equilibration per
+        // node, and `y`/`z`/`s` stay in scaled space since this loop only
+        // ever reads `primal_ray`/`infeas_cert`'s *presence* (a proof of the
+        // relaxation's infeasibility/unboundedness, true regardless of the
+        // reparametrization -- feasibility is scale-invariant), never a
+        // certificate's numeric value.
+        let mut res = ipm::solve(&relax, opts);
+        for (xi, &dj) in res.x.iter_mut().zip(&equil.d) {
+            *xi *= dj;
+        }
+        res.objective = prob.base.c.iter().zip(&res.x).map(|(a, b)| a * b).sum();
         match res.status {
             SolveStatus::Optimal => {}
             SolveStatus::Unbounded if res.primal_ray.is_some() => {

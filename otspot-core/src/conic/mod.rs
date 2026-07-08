@@ -4,6 +4,7 @@
 //! — rows ordered `l` orthant rows then each SOC block (`cone.soc`).
 
 mod cone;
+mod equil;
 mod ipm;
 mod kkt;
 mod misocp;
@@ -194,8 +195,31 @@ impl ConicOptions {
 }
 
 /// Solve a second-order cone program in standard form.
+///
+/// Internally equilibrates the data first (cone-block-respecting Ruiz
+/// scaling, see [`equil`]) so the IPM sees well-conditioned magnitudes, then
+/// maps the solution/duals/certificates back to `problem`'s original space
+/// (issue #9b: without this, CBLIB instances with several-orders-of-
+/// magnitude coefficient spread across an SOC block diverge numerically).
+/// The equilibration is exact up to floating-point rounding: it changes
+/// neither the optimum nor the feasible set, only the data scale the IPM
+/// operates on.
 pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
-    let mut res = ipm::solve(problem, opts);
+    // Validate before equilibrating: the row/col sweeps index `problem.a`/
+    // `problem.g` assuming `validate()`'s shape invariants already hold
+    // (`a.ncols() == n`, etc.), so an invalid problem must be rejected here,
+    // not after Ruiz sweeps run over mismatched shapes. Mirrors `ipm::solve`'s
+    // own guard (kept, unmodified, as the second line of defense).
+    if let Err(e) = problem.validate() {
+        return invalid_result(problem, SolveStatus::NotSupported(e));
+    }
+    if let Err(e) = opts.validate() {
+        return invalid_result(problem, SolveStatus::NotSupported(e));
+    }
+    let eq = equil::Equilibrator::compute(problem);
+    let scaled = eq.scale_problem(problem);
+    let res = ipm::solve(&scaled, opts);
+    let mut res = eq.unscale_result(problem, opts.tol, res);
     // Canonicalize only statuses whose `x` is not a usable iterate (PR #25
     // review #40): `Infeasible` -> `+inf`, `Unbounded` -> `-inf`. Inconclusive
     // statuses keep `dot(c, x)` of the real iterate in `res.x`; `NotSupported`
@@ -206,4 +230,23 @@ pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
         _ => res.objective,
     };
     res
+}
+
+/// `ConicResult` for a problem/options pair that failed validation, before
+/// any solve is attempted. Mirrors `ipm::solve`'s own `failed()` (private to
+/// that module) so `solve_socp` can reject invalid shapes up front, ahead of
+/// equilibration's row/col sweeps.
+fn invalid_result(problem: &ConicProblem, status: SolveStatus) -> ConicResult {
+    ConicResult {
+        status,
+        objective: f64::NAN,
+        x: vec![0.0; problem.n()],
+        y: vec![0.0; problem.p()],
+        z: vec![0.0; problem.m()],
+        s: vec![0.0; problem.m()],
+        iterations: 0,
+        residuals: (0.0, 0.0, 0.0),
+        primal_ray: None,
+        infeas_cert: None,
+    }
 }

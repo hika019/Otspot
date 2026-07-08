@@ -136,3 +136,54 @@ fn classical_20_0_root_relaxation_is_feasible() {
     );
     assert_conic_feasible("classical_20_0 root", &problem.base, &res.x);
 }
+
+/// Equilibration sentinel on real ill-scaled data (issue #9b). The
+/// `sssd-strong-15-4` continuous root relaxation carries a several-orders-of-
+/// magnitude coefficient spread across its 12 dim-3 SOC blocks; without the
+/// cone-block-respecting equilibration in `conic::equil` (which `solve_socp`
+/// applies before the IPM), the Mehrotra step collapses from iteration 0 and
+/// the solve returns `NumericalError` at iter 1 with `obj = +inf` (the exact
+/// pre-fix behaviour recorded in `data/baseline_objectives`:
+/// `sssd-strong-15-4 = NumericalError`). With equilibration it converges to
+/// the Clarabel reference optimum ~2.3604e5. Reverting the `equil` wiring in
+/// `solve_socp` (calling `ipm::solve` on the raw problem) makes this fail with
+/// a non-`Optimal` status.
+///
+/// Reference (independent oracle): Clarabel reports 2.3604e5 for this
+/// relaxation; the assertion band is 1% relative, far wider than the 0.02%
+/// agreement actually observed, so it fences the divergence regression
+/// without pinning the last digits of a large-scale IPM solve.
+const SSSD_STRONG_15_4_CLARABEL_OBJ: f64 = 2.3604e5;
+
+#[test]
+fn sssd_strong_15_4_root_relaxation_recovers_optimum_via_equilibration() {
+    let path = cblib_path("sssd-strong-15-4.cbf");
+    if !path.exists() {
+        eprintln!("[cbf-feasibility] skip: data missing: {}", path.display());
+        return;
+    }
+    let cbf = parse_cbf(&path).expect("parse sssd-strong-15-4.cbf");
+    let CbfProblem::Misocp { problem, .. } = cbf else {
+        panic!("sssd-strong-15-4.cbf: expected a MISOCP");
+    };
+    let opts = ConicOptions {
+        tol: TOL,
+        ..ConicOptions::default()
+    };
+    let res = solve_socp(&problem.base, &opts);
+    assert_eq!(
+        res.status,
+        SolveStatus::Optimal,
+        "sssd-strong-15-4 root: status {:?} (equilibration should prevent the \
+         pre-fix NumericalError divergence)",
+        res.status
+    );
+    assert_conic_feasible("sssd-strong-15-4 root", &problem.base, &res.x);
+    let rel =
+        (res.objective - SSSD_STRONG_15_4_CLARABEL_OBJ).abs() / SSSD_STRONG_15_4_CLARABEL_OBJ.abs();
+    assert!(
+        rel < 1e-2,
+        "sssd-strong-15-4 root obj {} not within 1% of Clarabel {SSSD_STRONG_15_4_CLARABEL_OBJ}",
+        res.objective
+    );
+}
