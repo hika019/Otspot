@@ -3508,6 +3508,232 @@ fn to_conic_rank_deficient_fill_factors_exactly() {
             vec![0.0, -1.0],
         ],
         4,
+        n,
+    );
+    let qp = QcqpProblem {
+        n,
+        p0: Some(p0),
+        q0: vec![-1.0, -1.0],
+        quad: vec![],
+        g_lin,
+        h_lin: vec![2.0, 0.0, 2.0, 0.0],
+        a_eq: empty_mat(0, n),
+        b_eq: vec![],
+    };
+    let (conic, nvar, unproven) = to_conic(&qp).expect("rank-deficient PSD accepted");
+    assert!(!unproven, "exact factorization must not flag unproven");
+    assert_eq!(nvar, 3);
+    let gd = conic.g.to_dense_rows();
+    // SOC block rows 4..8: [s0; sqrt2 R x (2 rows); s_last].
+    let s2 = std::f64::consts::SQRT_2;
+    let expect_r0 = [-s2, -s2, 0.0]; // -sqrt2 * R row0 = -sqrt2*[1,1]
+    for (j, &e) in expect_r0.iter().enumerate() {
+        assert!(
+            (gd[5][j] - e).abs() < 1e-12,
+            "R row0 col{j}: {} vs {e}",
+            gd[5][j]
+        );
+    }
+    for (j, &v) in gd[6].iter().enumerate() {
+        assert_eq!(v, 0.0, "zero-pivot R row1 col{j} must be exactly zero, got {v}");
+    }
+    let res = solve_qcqp(&qp, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "res={res:?}");
+    assert!(
+        (res.objective - (-0.5)).abs() < 1e-5,
+        "closed-form objective -0.5, got {}",
+        res.objective
+    );
+}
+
+/// memo#37 (P1) / memo#24 (P2): public `QcqpProblem` with inconsistent
+/// dimensions must be rejected as an error, not panic (q0 too short) and not
+/// silently drop the quadratic objective (`qcqp_objective`'s zeroed
+/// `mat_vec_mul` fallback for a mis-sized `p0`).
+#[test]
+fn qcqp_dimension_mismatches_rejected_without_panic() {
+    let n = 2;
+    let base = QcqpProblem {
+        n,
+        p0: None,
+        q0: vec![1.0, 1.0],
+        quad: vec![],
+        g_lin: csc(&[vec![1.0, 1.0]], 1, n),
+        h_lin: vec![1.0],
+        a_eq: empty_mat(0, n),
+        b_eq: vec![],
+    };
+    let cases: Vec<(&str, QcqpProblem)> = vec![
+        ("q0_short", {
+            let mut q = base.clone();
+            q.q0 = vec![1.0];
+            q
+        }),
+        ("q0_long", {
+            let mut q = base.clone();
+            q.q0 = vec![1.0; 3];
+            q
+        }),
+        ("p0_oversized", {
+            let mut q = base.clone();
+            q.p0 = Some(csc(
+                &[
+                    vec![1.0, 0.0, 0.0],
+                    vec![0.0, 1.0, 0.0],
+                    vec![0.0, 0.0, 1.0],
+                ],
+                3,
+                3,
+            ));
+            q
+        }),
+        ("p0_undersized", {
+            let mut q = base.clone();
+            q.p0 = Some(csc(&[vec![1.0]], 1, 1));
+            q
+        }),
+        ("quad_p_wrong", {
+            let mut q = base.clone();
+            q.quad = vec![QuadConstraint {
+                p: csc(&[vec![1.0]], 1, 1),
+                q: vec![0.0; n],
+                r: 0.0,
+            }];
+            q
+        }),
+        ("quad_q_short", {
+            let mut q = base.clone();
+            q.quad = vec![QuadConstraint {
+                p: csc(&[vec![1.0, 0.0], vec![0.0, 1.0]], n, n),
+                q: vec![0.0],
+                r: 0.0,
+            }];
+            q
+        }),
+        ("g_lin_rows_mismatch", {
+            let mut q = base.clone();
+            q.h_lin = vec![1.0, 2.0];
+            q
+        }),
+        ("g_lin_cols_mismatch", {
+            let mut q = base.clone();
+            q.g_lin = csc(&[vec![1.0]], 1, 1);
+            q
+        }),
+        ("a_eq_rows_mismatch", {
+            let mut q = base.clone();
+            q.b_eq = vec![1.0];
+            q
+        }),
+        ("a_eq_cols_mismatch", {
+            let mut q = base.clone();
+            q.a_eq = csc(&[vec![1.0, 1.0, 1.0]], 1, 3);
+            q.b_eq = vec![1.0];
+            q
+        }),
+    ];
+    for (name, qp) in &cases {
+        assert!(
+            to_conic(qp).is_err(),
+            "{name}: to_conic must reject the dimension mismatch"
+        );
+        let res = solve_qcqp(qp, &ConicOptions::default());
+        assert!(
+            matches!(res.status, SolveStatus::NotSupported(_)),
+            "{name}: solve_qcqp must return NotSupported, got {:?}",
+            res.status
+        );
+    }
+}
+
+/// memo#32 (P1): a `QpProblem` with structurally zero `Q` is a *linear*
+/// objective; the bridge must not wrap it in a quadratic epigraph (which,
+/// combined with pivot handling, perturbs the objective).
+#[test]
+fn zero_q_qp_problem_bridges_to_linear_objective() {
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let n = 1;
+    let q_obj = CscMatrix::new(n, n);
+    let a = empty_mat(1, n);
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 0, 2.0)); // (1/2)*2*x^2 = x^2 <= 1
+    let mut src = QpProblem::new(
+        q_obj,
+        vec![-1.0],
+        a,
+        vec![1.0],
+        vec![(0.0, 2.0)],
+        vec![ConstraintType::Le],
+    )
+    .unwrap();
+    src.set_quadratic_constraints(vec![qc]).unwrap();
+
+    let qp = qcqp_from_qp_problem(&src).expect("bridge accepts convex QCQP");
+    assert!(
+        qp.p0.is_none(),
+        "zero-Q objective must stay linear (no epigraph reformulation)"
+    );
+    let (_, nvar, unproven) = to_conic(&qp).unwrap();
+    assert_eq!(nvar, n, "no epigraph variable for a linear objective");
+    assert!(!unproven);
+    let res = solve_qcqp(&qp, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "res={res:?}");
+    assert!(
+        (res.objective - (-1.0)).abs() < 1e-5,
+        "min -x s.t. x^2<=1, 0<=x<=2 has optimum -1, got {}",
+        res.objective
+    );
+}
+
+/// memo#23 (P2): a fixed variable bound (`lb == ub`) must bridge to an
+/// equality row, matching the MISOCP path — the pair `x <= v`, `-x <= -v`
+/// has no strictly feasible slack for the interior-point method.
+#[test]
+fn fixed_variable_bound_bridges_to_equality_row() {
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let n = 2;
+    let q_obj = CscMatrix::new(n, n);
+    let a = empty_mat(1, n);
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 0, 2.0));
+    qc.triplets.push((1, 1, 2.0)); // x0^2 + x1^2 <= 4
+    let mut src = QpProblem::new(
+        q_obj,
+        vec![-1.0, 0.0],
+        a,
+        vec![4.0],
+        vec![(0.0, 5.0), (1.5, 1.5)],
+        vec![ConstraintType::Le],
+    )
+    .unwrap();
+    src.set_quadratic_constraints(vec![qc]).unwrap();
+
+    let qp = qcqp_from_qp_problem(&src).expect("bridge accepts convex QCQP");
+    assert_eq!(qp.b_eq, vec![1.5], "fixed bound must become an equality rhs");
+    assert_eq!(
+        qp.a_eq.to_dense_rows(),
+        vec![vec![0.0, 1.0]],
+        "fixed bound must become an equality row"
+    );
+    assert_eq!(
+        qp.h_lin,
+        vec![5.0, 0.0],
+        "only the free variable keeps inequality bound rows"
+    );
+    // Behavior: max x0 on the circle with x1 fixed at 1.5:
+    // x0* = sqrt(4 - 2.25) = sqrt(1.75), objective -sqrt(1.75).
+    let res = solve_qcqp(&qp, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "res={res:?}");
+    let expect = -(1.75f64).sqrt();
+    assert!(
+        (res.objective - expect).abs() < 1e-5,
+        "closed-form {expect}, got {}",
+        res.objective
+    );
+    assert!((res.x[1] - 1.5).abs() < 1e-6, "x1 fixed at 1.5: {:?}", res.x);
+}
+
+// ---------------------------------------------------------------------------
 // PR #25 review: public-API input validation (conic entry points).
 // ---------------------------------------------------------------------------
 
@@ -3844,225 +4070,6 @@ fn miqcp_quadratic_objective_recomputes_true_objective_not_epigraph() {
     let qp = QcqpProblem {
         n,
         p0: Some(p0),
-        q0: vec![-1.0, -1.0],
-        quad: vec![],
-        g_lin,
-        h_lin: vec![2.0, 0.0, 2.0, 0.0],
-        a_eq: empty_mat(0, n),
-        b_eq: vec![],
-    };
-    let (conic, nvar, unproven) = to_conic(&qp).expect("rank-deficient PSD accepted");
-    assert!(!unproven, "exact factorization must not flag unproven");
-    assert_eq!(nvar, 3);
-    let gd = conic.g.to_dense_rows();
-    // SOC block rows 4..8: [s0; sqrt2 R x (2 rows); s_last].
-    let s2 = std::f64::consts::SQRT_2;
-    let expect_r0 = [-s2, -s2, 0.0]; // -sqrt2 * R row0 = -sqrt2*[1,1]
-    for (j, &e) in expect_r0.iter().enumerate() {
-        assert!(
-            (gd[5][j] - e).abs() < 1e-12,
-            "R row0 col{j}: {} vs {e}",
-            gd[5][j]
-        );
-    }
-    for (j, &v) in gd[6].iter().enumerate() {
-        assert_eq!(v, 0.0, "zero-pivot R row1 col{j} must be exactly zero, got {v}");
-    }
-    let res = solve_qcqp(&qp, &ConicOptions::default());
-    assert_eq!(res.status, SolveStatus::Optimal, "res={res:?}");
-    assert!(
-        (res.objective - (-0.5)).abs() < 1e-5,
-        "closed-form objective -0.5, got {}",
-        res.objective
-    );
-}
-
-/// memo#37 (P1) / memo#24 (P2): public `QcqpProblem` with inconsistent
-/// dimensions must be rejected as an error, not panic (q0 too short) and not
-/// silently drop the quadratic objective (`qcqp_objective`'s zeroed
-/// `mat_vec_mul` fallback for a mis-sized `p0`).
-#[test]
-fn qcqp_dimension_mismatches_rejected_without_panic() {
-    let n = 2;
-    let base = QcqpProblem {
-        n,
-        p0: None,
-        q0: vec![1.0, 1.0],
-        quad: vec![],
-        g_lin: csc(&[vec![1.0, 1.0]], 1, n),
-        h_lin: vec![1.0],
-        a_eq: empty_mat(0, n),
-        b_eq: vec![],
-    };
-    let cases: Vec<(&str, QcqpProblem)> = vec![
-        ("q0_short", {
-            let mut q = base.clone();
-            q.q0 = vec![1.0];
-            q
-        }),
-        ("q0_long", {
-            let mut q = base.clone();
-            q.q0 = vec![1.0; 3];
-            q
-        }),
-        ("p0_oversized", {
-            let mut q = base.clone();
-            q.p0 = Some(csc(
-                &[
-                    vec![1.0, 0.0, 0.0],
-                    vec![0.0, 1.0, 0.0],
-                    vec![0.0, 0.0, 1.0],
-                ],
-                3,
-                3,
-            ));
-            q
-        }),
-        ("p0_undersized", {
-            let mut q = base.clone();
-            q.p0 = Some(csc(&[vec![1.0]], 1, 1));
-            q
-        }),
-        ("quad_p_wrong", {
-            let mut q = base.clone();
-            q.quad = vec![QuadConstraint {
-                p: csc(&[vec![1.0]], 1, 1),
-                q: vec![0.0; n],
-                r: 0.0,
-            }];
-            q
-        }),
-        ("quad_q_short", {
-            let mut q = base.clone();
-            q.quad = vec![QuadConstraint {
-                p: csc(&[vec![1.0, 0.0], vec![0.0, 1.0]], n, n),
-                q: vec![0.0],
-                r: 0.0,
-            }];
-            q
-        }),
-        ("g_lin_rows_mismatch", {
-            let mut q = base.clone();
-            q.h_lin = vec![1.0, 2.0];
-            q
-        }),
-        ("g_lin_cols_mismatch", {
-            let mut q = base.clone();
-            q.g_lin = csc(&[vec![1.0]], 1, 1);
-            q
-        }),
-        ("a_eq_rows_mismatch", {
-            let mut q = base.clone();
-            q.b_eq = vec![1.0];
-            q
-        }),
-        ("a_eq_cols_mismatch", {
-            let mut q = base.clone();
-            q.a_eq = csc(&[vec![1.0, 1.0, 1.0]], 1, 3);
-            q.b_eq = vec![1.0];
-            q
-        }),
-    ];
-    for (name, qp) in &cases {
-        assert!(
-            to_conic(qp).is_err(),
-            "{name}: to_conic must reject the dimension mismatch"
-        );
-        let res = solve_qcqp(qp, &ConicOptions::default());
-        assert!(
-            matches!(res.status, SolveStatus::NotSupported(_)),
-            "{name}: solve_qcqp must return NotSupported, got {:?}",
-            res.status
-        );
-    }
-}
-
-/// memo#32 (P1): a `QpProblem` with structurally zero `Q` is a *linear*
-/// objective; the bridge must not wrap it in a quadratic epigraph (which,
-/// combined with pivot handling, perturbs the objective).
-#[test]
-fn zero_q_qp_problem_bridges_to_linear_objective() {
-    use crate::qp::{QcqpMatrix, QpProblem};
-    let n = 1;
-    let q_obj = CscMatrix::new(n, n);
-    let a = empty_mat(1, n);
-    let mut qc = QcqpMatrix::new(n);
-    qc.triplets.push((0, 0, 2.0)); // (1/2)*2*x^2 = x^2 <= 1
-    let mut src = QpProblem::new(
-        q_obj,
-        vec![-1.0],
-        a,
-        vec![1.0],
-        vec![(0.0, 2.0)],
-        vec![ConstraintType::Le],
-    )
-    .unwrap();
-    src.set_quadratic_constraints(vec![qc]).unwrap();
-
-    let qp = qcqp_from_qp_problem(&src).expect("bridge accepts convex QCQP");
-    assert!(
-        qp.p0.is_none(),
-        "zero-Q objective must stay linear (no epigraph reformulation)"
-    );
-    let (_, nvar, unproven) = to_conic(&qp).unwrap();
-    assert_eq!(nvar, n, "no epigraph variable for a linear objective");
-    assert!(!unproven);
-    let res = solve_qcqp(&qp, &ConicOptions::default());
-    assert_eq!(res.status, SolveStatus::Optimal, "res={res:?}");
-    assert!(
-        (res.objective - (-1.0)).abs() < 1e-5,
-        "min -x s.t. x^2<=1, 0<=x<=2 has optimum -1, got {}",
-        res.objective
-    );
-}
-
-/// memo#23 (P2): a fixed variable bound (`lb == ub`) must bridge to an
-/// equality row, matching the MISOCP path — the pair `x <= v`, `-x <= -v`
-/// has no strictly feasible slack for the interior-point method.
-#[test]
-fn fixed_variable_bound_bridges_to_equality_row() {
-    use crate::qp::{QcqpMatrix, QpProblem};
-    let n = 2;
-    let q_obj = CscMatrix::new(n, n);
-    let a = empty_mat(1, n);
-    let mut qc = QcqpMatrix::new(n);
-    qc.triplets.push((0, 0, 2.0));
-    qc.triplets.push((1, 1, 2.0)); // x0^2 + x1^2 <= 4
-    let mut src = QpProblem::new(
-        q_obj,
-        vec![-1.0, 0.0],
-        a,
-        vec![4.0],
-        vec![(0.0, 5.0), (1.5, 1.5)],
-        vec![ConstraintType::Le],
-    )
-    .unwrap();
-    src.set_quadratic_constraints(vec![qc]).unwrap();
-
-    let qp = qcqp_from_qp_problem(&src).expect("bridge accepts convex QCQP");
-    assert_eq!(qp.b_eq, vec![1.5], "fixed bound must become an equality rhs");
-    assert_eq!(
-        qp.a_eq.to_dense_rows(),
-        vec![vec![0.0, 1.0]],
-        "fixed bound must become an equality row"
-    );
-    assert_eq!(
-        qp.h_lin,
-        vec![5.0, 0.0],
-        "only the free variable keeps inequality bound rows"
-    );
-    // Behavior: max x0 on the circle with x1 fixed at 1.5:
-    // x0* = sqrt(4 - 2.25) = sqrt(1.75), objective -sqrt(1.75).
-    let res = solve_qcqp(&qp, &ConicOptions::default());
-    assert_eq!(res.status, SolveStatus::Optimal, "res={res:?}");
-    let expect = -(1.75f64).sqrt();
-    assert!(
-        (res.objective - expect).abs() < 1e-5,
-        "closed-form {expect}, got {}",
-        res.objective
-    );
-    assert!((res.x[1] - 1.5).abs() < 1e-6, "x1 fixed at 1.5: {:?}", res.x);
-}
         q0: vec![0.0, -1.0, 0.0, 0.0],
         quad: vec![],
         g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
