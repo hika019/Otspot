@@ -159,6 +159,12 @@ fn global_result_to_solver_result(res: GlobalResult, obj_offset: f64) -> SolverR
     if res.status == SolveStatus::Infeasible {
         return SolverResult::infeasible();
     }
+    // The spatial B&B reports `NumericalError` only when no incumbent was
+    // established (objective is a bare `+inf` sentinel, not a real `c^T x`),
+    // so canonicalize it rather than adding the offset to infinity.
+    if res.status == SolveStatus::NumericalError {
+        return SolverResult::numerical_error();
+    }
     let deadline_triggered = res.status == SolveStatus::Timeout;
     let mut result = SolverResult {
         status: res.status,
