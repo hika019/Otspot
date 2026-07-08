@@ -30,6 +30,11 @@
 #   bash scripts/lp_hard_download.sh [出力ディレクトリ]
 #   デフォルト出力先: data/lp_problems_hard/
 #
+#   LP_HARD_ONLY="name1 name2" bash scripts/lp_hard_download.sh
+#     指定した instance 名 (拡張子なし、例: "neos") のみ取得する。未設定/空なら全件
+#     (デフォルトの local full run 挙動は変えない)。CI で全53件は不要な特定 test
+#     のみが要求するデータを取りに行く用途 (例: test-heavy.yml の neos.QPS)。
+#
 # 依存:
 #   - curl
 #   - bunzip2
@@ -47,6 +52,22 @@ OUTPUT_DIR="${1:-$SOLVER_DIR/data/lp_problems_hard}"
 PLATO_BASE="https://plato.asu.edu/ftp/lptestset"
 EMPS="${EMPS_BIN:-/tmp/emps}"
 
+# curl resilience: neos.QPS がCI must-pass ゲートの前提になったため、単一
+# ミラー (plato.asu.edu) の一時不通で heavy job 全体が赤にならないよう retry
+# する (ensure_emps.sh と同じ方針)。
+CURL_RETRY="${CURL_RETRY:-5}"
+CURL_RETRY_DELAY="${CURL_RETRY_DELAY:-3}"
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-20}"
+CURL_MAX_TIME="${CURL_MAX_TIME:-180}"
+CURL_OPTS=(
+  -L -s -f
+  --retry "$CURL_RETRY"
+  --retry-delay "$CURL_RETRY_DELAY"
+  --retry-connrefused
+  --connect-timeout "$CURL_CONNECT_TIMEOUT"
+  --max-time "$CURL_MAX_TIME"
+)
+
 # emps バイナリ確認
 if [ ! -x "$EMPS" ]; then
     echo "ERROR: emps binary not found at $EMPS" >&2
@@ -61,8 +82,26 @@ FAIL=0
 SKIP=0
 FAIL_NAMES=()
 
+# LP_HARD_ONLY (space区切り) が設定されていれば、その instance 名だけを対象にする。
+declare -A ONLY_SET=()
+if [ -n "${LP_HARD_ONLY:-}" ]; then
+    for _n in $LP_HARD_ONLY; do
+        ONLY_SET["$_n"]=1
+    done
+fi
+
+# instance が対象かどうか (LP_HARD_ONLY 未設定なら常に true)
+wanted() {
+    local name="$1"
+    [ ${#ONLY_SET[@]} -eq 0 ] && return 0
+    [ -n "${ONLY_SET[$name]:-}" ]
+}
+
 echo "=== LP Hard Problem Download ===" >&2
 echo "Output: $OUTPUT_DIR" >&2
+if [ ${#ONLY_SET[@]} -gt 0 ]; then
+    echo "Filter (LP_HARD_ONLY): ${!ONLY_SET[*]}" >&2
+fi
 echo "" >&2
 
 # ----------------------------------------------------------------
@@ -76,6 +115,10 @@ download_bz2_emps() {
     local url="$2"
     local OUT="$OUTPUT_DIR/${name}.QPS"
 
+    if ! wanted "$name"; then
+        return 0
+    fi
+
     if [ -f "$OUT" ]; then
         echo "EXISTS: $name" >&2
         SKIP=$((SKIP + 1))
@@ -86,7 +129,7 @@ download_bz2_emps() {
     TMP_BZ2=$(mktemp)
     TMP_RAW=$(mktemp)
 
-    if ! curl -L -s -f "$url" -o "$TMP_BZ2" 2>/dev/null; then
+    if ! curl "${CURL_OPTS[@]}" "$url" -o "$TMP_BZ2" 2>/dev/null; then
         echo "FAIL (download): $name  ($url)" >&2
         rm -f "$TMP_BZ2" "$TMP_RAW"
         FAIL=$((FAIL + 1))
@@ -122,6 +165,10 @@ download_bz2_mps() {
     local url="$2"
     local OUT="$OUTPUT_DIR/${name}.QPS"
 
+    if ! wanted "$name"; then
+        return 0
+    fi
+
     if [ -f "$OUT" ]; then
         echo "EXISTS: $name" >&2
         SKIP=$((SKIP + 1))
@@ -131,7 +178,7 @@ download_bz2_mps() {
     local TMP_BZ2
     TMP_BZ2=$(mktemp)
 
-    if ! curl -L -s -f "$url" -o "$TMP_BZ2" 2>/dev/null; then
+    if ! curl "${CURL_OPTS[@]}" "$url" -o "$TMP_BZ2" 2>/dev/null; then
         echo "FAIL (download): $name  ($url)" >&2
         rm -f "$TMP_BZ2"
         FAIL=$((FAIL + 1))
@@ -275,3 +322,12 @@ echo "  ベンチ実行: SOLVER_DIR=. bash scripts/bench_parallel.sh \\" >&2
 echo "    --data-dir data/lp_problems_hard \\" >&2
 echo "    --timeout 1000 --eps 1e-6 --jobs 6 \\" >&2
 echo "    --output /tmp/hard_bench.txt" >&2
+
+# LP_HARD_ONLY で明示的に絞った instance が1件でも取得失敗したら non-zero で
+# 終了する (CI の must-pass 前提データが欠けた状態を download step で即座に
+# 検出させる)。unfiltered な full-suite 取得は既存どおり partial 許容 (dead
+# mirror で全体を落とさない) — full-suite の欠落は呼び出し側の --check が扱う。
+if [ "${#ONLY_SET[@]}" -gt 0 ] && [ "$FAIL" -gt 0 ]; then
+    echo "[lp_hard_download] FAILED: LP_HARD_ONLY 指定の $FAIL 件が取得失敗" >&2
+    exit 1
+fi
