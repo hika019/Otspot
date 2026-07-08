@@ -34,10 +34,12 @@ thread_local! {
 #[cfg(test)]
 const REDUCED_TIMEOUT_QP_INJECT_ITERS: usize = 6271;
 
-fn timeout_result_lp_dispatch() -> SolverResult {
+fn timeout_result_lp_dispatch(options: &SolverOptions) -> SolverResult {
     let mut r = SolverResult::timeout();
     r.stats.route = SolveRoute::LpForwardedFromQp;
-    r.stats.deadline_triggered = true;
+    // Independent clock check, not an alias of the status: the huge-wide-LP
+    // predictive guard calls this without the deadline having expired.
+    r.stats.deadline_triggered = options.external_stop_requested();
     r
 }
 
@@ -119,7 +121,7 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
             Ok(_) => {
                 let presolve_us = t_presolve.elapsed().as_micros() as u64;
                 if options.deadline.is_some_and(|d| Instant::now() >= d) {
-                    let mut timeout = timeout_result_lp_dispatch();
+                    let mut timeout = timeout_result_lp_dispatch(options);
                     timeout.timing_breakdown = Some(crate::problem::TimingBreakdown {
                         presolve_us,
                         solve_us: 0,
@@ -151,7 +153,7 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
     }
 
     if options.deadline.is_some_and(|d| Instant::now() >= d) {
-        return timeout_result_lp_dispatch();
+        return timeout_result_lp_dispatch(options);
     }
 
     solve_unpresolved_lp_from_qp(&lp, problem, options)
@@ -267,6 +269,8 @@ fn solve_reduced_lp_from_qp(
                 ..Default::default()
             };
             timeout.stats.route = SolveRoute::LpForwardedFromQp;
+            // Guarded by `deadline_expired` above (incl. the test hook's
+            // simulated expiry), so `true` is the clock-checked value here.
             timeout.stats.deadline_triggered = true;
             return timeout;
         }
@@ -280,7 +284,8 @@ fn solve_reduced_lp_from_qp(
         );
         lifted.stats = raw.stats.clone();
         lifted.stats.route = SolveRoute::LpForwardedFromQp;
-        lifted.stats.deadline_triggered = matches!(lifted.status, SolveStatus::Timeout);
+        lifted.stats.deadline_triggered =
+            matches!(lifted.status, SolveStatus::Timeout) && options.external_stop_requested();
         lifted = guard_lp_optimal(lifted, original_lp);
         let postsolve_us = t_postsolve.elapsed().as_micros() as u64;
         lifted.timing_breakdown = Some(crate::problem::TimingBreakdown {
@@ -332,7 +337,7 @@ fn solve_lp_backend_no_presolve_with_gate(
     options: &SolverOptions,
 ) -> SolverResult {
     if huge_wide_lp_timeout_guard(lp) && options.deadline.is_some() {
-        return timeout_result_lp_dispatch();
+        return timeout_result_lp_dispatch(options);
     }
     let mut result = if should_try_lp_ipm(gate_lp, options) {
         let ipm = solve_lp_with_ipm_backend(lp, options);
@@ -414,7 +419,9 @@ fn solve_lp_with_ipm_backend(lp: &LpProblem, options: &SolverOptions) -> SolverR
     let mut result = ipm_solver::solve_ipm(&qp, &ipm_opts);
     result.stats.route = SolveRoute::LpForwardedFromQp;
     result.stats.lp_ipm_path = true;
-    result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
+    // Classified against the core deadline this IPM actually ran under.
+    result.stats.deadline_triggered =
+        matches!(result.status, SolveStatus::Timeout) && ipm_opts.external_stop_requested();
     result.reduced_costs.clear();
 
     if matches!(

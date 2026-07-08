@@ -652,16 +652,17 @@ pub(crate) fn big_m_cold_start(
                 r.iterations = total_iters;
                 return r;
             }
-            return super::super::timeout_result_with_incumbent(
+            return super::super::stop_result_with_incumbent(
                 sf,
                 problem,
                 &basis_aug,
                 &x_b,
                 col_scale,
                 total_iters,
+                options,
             );
         }
-        SimplexOutcome::Timeout(_) => {
+        SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_) => {
             // Farkas証明書が得られた場合のみ Infeasible を返す。
             // 得られない場合は、yield_on_stall=false で Phase I を再実行し
             // 真の終端 (Optimal / Unbounded) を得る。これにより cplex2 クラスの
@@ -702,23 +703,25 @@ pub(crate) fn big_m_cold_start(
                             r.iterations = total_iters;
                             return r;
                         }
-                        return super::super::timeout_result_with_incumbent(
+                        return super::super::stop_result_with_incumbent(
                             sf,
                             problem,
                             &basis_aug,
                             &x_b,
                             col_scale,
                             total_iters,
+                            options,
                         );
                     }
-                    SimplexOutcome::Timeout(_) => {
-                        return super::super::timeout_result_with_incumbent(
+                    SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_) => {
+                        return super::super::stop_result_with_incumbent(
                             sf,
                             problem,
                             &basis_aug,
                             &x_b,
                             col_scale,
                             total_iters,
+                            options,
                         );
                     }
                     SimplexOutcome::SingularBasis => return SolverResult::numerical_error(),
@@ -749,13 +752,14 @@ pub(crate) fn big_m_cold_start(
                     }
                 }
             } else {
-                return super::super::timeout_result_with_incumbent(
+                return super::super::stop_result_with_incumbent(
                     sf,
                     problem,
                     &basis_aug,
                     &x_b,
                     col_scale,
                     total_iters,
+                    options,
                 );
             }
         }
@@ -850,13 +854,14 @@ pub(crate) fn big_m_cold_start(
                         r.iterations = total_iters;
                         return r;
                     }
-                    return super::super::timeout_result_with_incumbent(
+                    return super::super::stop_result_with_incumbent(
                         sf,
                         problem,
                         &basis_aug,
                         &x_b,
                         col_scale,
                         total_iters,
+                        options,
                     );
                 }
             }
@@ -917,24 +922,28 @@ pub(crate) fn big_m_cold_start(
                     ..Default::default()
                 }
             } else {
-                super::super::timeout_result_with_incumbent(
+                super::super::stop_result_with_incumbent(
                     sf,
                     problem,
                     &basis_aug,
                     &x_b,
                     col_scale,
                     total_iters,
+                    options,
                 )
             }
         }
-        SimplexOutcome::Timeout(_) => super::super::timeout_result_with_incumbent(
-            sf,
-            problem,
-            &basis_aug,
-            &x_b,
-            col_scale,
-            total_iters,
-        ),
+        SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_) => {
+            super::super::stop_result_with_incumbent(
+                sf,
+                problem,
+                &basis_aug,
+                &x_b,
+                col_scale,
+                total_iters,
+                options,
+            )
+        }
         SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
     }
 }

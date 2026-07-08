@@ -435,6 +435,15 @@ fn solve_ipm_with_runner(
     }
     let total_deadline = opts.deadline;
     let user_eps = opts.ipm_eps();
+    // The requested accuracy is captured in `user_eps`; from here on `opts` is
+    // the *inner* option set. A still-set `tolerance` would make every
+    // downstream `ipm_eps()` (IPPMM convergence target, Ruiz eps adjustment)
+    // return `user_eps` and silently bypass the attempt loop's
+    // `opts.ipm.eps = user_eps / tighten` inner-target tightening — the IPM
+    // then stops at user_eps aggregate accuracy, prove_optimal fails on the
+    // stricter component-wise check, and postsolve refine burns the whole
+    // budget grinding an under-converged iterate (POWELL20: 0.5s → 1000s).
+    opts.tolerance = None;
 
     // presolve hot loop は deadline を見る (qp_transforms/driver.rs) が、巨大問題では
     // presolve だけで deadline 予算を食い切り IPM が走れなくなる。この上限は
@@ -608,7 +617,6 @@ fn solve_ipm_with_runner(
             opts.timeout_secs = None;
             opts.ipm.max_iter = per_attempt_cap;
             opts.use_ruiz_scaling = use_ruiz_fb;
-            opts.tolerance = None;
             // Tighten the inner target like the main attempt loop: the IPM stops on
             // the scale-aggregated complementarity, but prove_optimal accepts on the
             // stricter component-wise complementarity. Solving only to user_eps leaves
@@ -1962,6 +1970,61 @@ mod tests {
         assert_eq!(
             user_eps, 1e-6,
             "runner must receive the external user eps, not the tightened attempt eps"
+        );
+    }
+
+    /// A caller-set `Tolerance::Custom` must not leak into the inner attempt
+    /// options: the inner IPPMM convergence check reads `options.ipm_eps()`
+    /// (ippmm/iter.rs), which returns the Custom value when `tolerance` is set
+    /// and silently bypasses the attempt loop's `opts.ipm.eps = user_eps /
+    /// tighten` inner-target tightening. The IPM then stops at user_eps
+    /// aggregate accuracy and postsolve refine burns the remaining budget
+    /// (POWELL20 0.5s → 1000s post_refine regression, daf7ab54).
+    ///
+    /// Sentinel: reverting the `opts.tolerance = None` clear in
+    /// `solve_ipm_with_runner` makes the runner-observed `ipm_eps()` equal the
+    /// user eps (untightened) and `tolerance` non-None → both asserts fail.
+    #[test]
+    fn attempt_loop_clears_tolerance_so_inner_eps_is_tightened() {
+        use std::cell::Cell;
+        thread_local! {
+            static SEEN_TOLERANCE_SET: Cell<bool> = const { Cell::new(true) };
+            static SEEN_EFFECTIVE_EPS: Cell<f64> = const { Cell::new(f64::NAN) };
+        }
+
+        fn mock_runner(
+            _: &QpProblem,
+            _: &QpPresolveResult,
+            options: &SolverOptions,
+            _: f64,
+        ) -> IpmOutcome {
+            SEEN_TOLERANCE_SET.with(|c| c.set(options.tolerance.is_some()));
+            SEEN_EFFECTIVE_EPS.with(|c| c.set(options.ipm_eps()));
+            IpmOutcome::empty()
+        }
+
+        let prob = make_simple_eq_qp();
+        let mut opts = SolverOptions {
+            tolerance: Some(crate::options::Tolerance::Custom(1e-6)),
+            presolve: false,
+            ..SolverOptions::default()
+        };
+        opts.ipm.eps = 1e-6;
+        opts.ipm.max_iter = 1;
+        SEEN_TOLERANCE_SET.with(|c| c.set(true));
+        SEEN_EFFECTIVE_EPS.with(|c| c.set(f64::NAN));
+
+        let _ = solve_ipm_with_runner(&prob, &opts, mock_runner);
+
+        assert!(
+            !SEEN_TOLERANCE_SET.with(|c| c.get()),
+            "inner attempt options must have tolerance cleared"
+        );
+        let effective = SEEN_EFFECTIVE_EPS.with(|c| c.get());
+        assert!(
+            effective < 1e-6,
+            "runner-observed ipm_eps() must be the tightened inner target, \
+             not the Custom user eps; got {effective:e}"
         );
     }
 

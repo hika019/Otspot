@@ -124,6 +124,9 @@ fn qcqp_result_to_solver_result(res: QcqpResult) -> SolverResult {
         SolveStatus::NotSupported(msg) => return SolverResult::not_supported(msg),
         _ => {}
     }
+    // status エイリアスのまま残置: この変換層は SolverOptions を持たず実クロック
+    // 判定ができない (conic 経路の Timeout は deadline ゲート mint のため実害なし。
+    // options を通す場合は conic 側 API 変更が必要 — P3)。
     let deadline_triggered = res.status == SolveStatus::Timeout;
     let mut result = SolverResult {
         status: res.status,

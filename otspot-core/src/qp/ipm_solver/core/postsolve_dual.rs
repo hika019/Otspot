@@ -11,8 +11,15 @@ use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid::bound_contrib;
 use crate::qp::problem::QpProblem;
 
-const POST_LSQ_PROGRESS_EPS: f64 = 1e-12;
-const STAGE0_PROGRESS_EPS: f64 = 1e-12;
+use super::post_processing::refit_progress_stalled;
+
+/// postsolve dual-LSQ / Stage 0 反復の stall 判定。refit/IRLS と同一の
+/// 相対+絶対 gate (`refit_progress_stalled`) を共有する: 絶対 floor (1e-12)
+/// 単独では大残差 regime で drop≈1e-11 を「進捗あり」と誤判定し、deadline
+/// まで無駄反復する (0204d515 と同型の欠陥。dfl001 post_recovery=81–91s)。
+fn recovery_progress_stalled(prev_kkt: f64, current_kkt: f64) -> bool {
+    refit_progress_stalled(prev_kkt, current_kkt)
+}
 
 /// 元空間 dual 一括復元: postsolve_qp_with_dual_recovery は col_first 停留性のみで
 /// y[row] を復元するため、関与 fixed col の停留性が z で吸収されない。ここで
@@ -75,7 +82,7 @@ pub(super) fn refine_postsolve_dual_lsq(
             &final_sol.dual_solution,
             &final_sol.bound_duals,
         );
-        if cur + POST_LSQ_PROGRESS_EPS >= prev {
+        if recovery_progress_stalled(prev, cur) {
             *final_sol = best_sol;
             return;
         }
@@ -154,11 +161,53 @@ pub(super) fn refine_postsolve_recovery(
             &final_sol.dual_solution,
             &final_sol.bound_duals,
         );
-        if cur_kkt + STAGE0_PROGRESS_EPS >= prev_kkt {
+        if recovery_progress_stalled(prev_kkt, cur_kkt) {
             *final_sol = best_sol;
             return;
         }
         prev_kkt = cur_kkt;
         best_sol = final_sol.clone();
+    }
+}
+
+#[cfg(test)]
+mod recovery_stall_gate_tests {
+    //! Sentinels for the postsolve dual-LSQ / Stage 0 stall gate.
+    //!
+    //! The gate must be the shared relative+absolute `refit_progress_stalled`,
+    //! not the pre-fix absolute floor (`cur + 1e-12 >= prev`): at a large
+    //! residual (~0.1) f64 rounding noise produces per-pass drops ≈1e-11 that
+    //! the absolute floor misreads as progress, looping until the deadline
+    //! (dfl001: post_recovery 81–91s of a 1000s budget; same defect class as
+    //! the refit/IRLS gate fixed in 0204d515).
+
+    use super::recovery_progress_stalled;
+
+    /// no-op proof: reverting `recovery_progress_stalled` to the absolute
+    /// floor (`cur + 1e-12 >= prev`) classifies the 1e-11 micro-drop as
+    /// progress → this assertion fails.
+    #[test]
+    fn micro_drop_at_large_residual_is_stall() {
+        let prev = 1.0e-1;
+        let cur = prev - 1.0e-11;
+        assert!(
+            recovery_progress_stalled(prev, cur),
+            "drop 1e-11 at residual 0.1 is f64 noise, not progress"
+        );
+    }
+
+    /// Genuine (even slow linear) convergence must NOT be classified as stall:
+    /// a relative drop of 1e-4 per pass is orders above the 1e-8 stall bar.
+    #[test]
+    fn real_progress_is_not_stall() {
+        let prev = 1.0e-1;
+        assert!(!recovery_progress_stalled(prev, prev * (1.0 - 1.0e-4)));
+        assert!(!recovery_progress_stalled(prev, 5.0e-2));
+    }
+
+    /// Near-zero regime keeps the absolute floor: sub-1e-12 wiggle terminates.
+    #[test]
+    fn near_zero_noise_is_stall() {
+        assert!(recovery_progress_stalled(1.0e-13, 9.0e-14));
     }
 }

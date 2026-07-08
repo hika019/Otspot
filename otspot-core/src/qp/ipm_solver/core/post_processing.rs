@@ -35,7 +35,7 @@ const KKT_SKIP_MARGIN: f64 = 100.0;
 /// refit/IRLS の進捗 stall 判定。`prev_kkt`/`current_kkt` は revert guard により
 /// `current_kkt <= prev_kkt`。改善 drop が「相対 (`REFIT_REL_STALL · prev_kkt`)」と
 /// 「絶対 floor (`REFIT_PROGRESS_EPS`)」の大きい方を下回ったら stall とみなす。
-fn refit_progress_stalled(prev_kkt: f64, current_kkt: f64) -> bool {
+pub(super) fn refit_progress_stalled(prev_kkt: f64, current_kkt: f64) -> bool {
     let threshold = (REFIT_REL_STALL * prev_kkt).max(REFIT_PROGRESS_EPS);
     current_kkt + threshold >= prev_kkt
 }

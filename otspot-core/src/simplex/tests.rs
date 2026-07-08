@@ -21,7 +21,7 @@ fn make_lp(
 }
 
 #[test]
-fn test_timeout_result_with_incumbent_uses_original_objective() {
+fn test_stop_result_with_incumbent_uses_original_objective() {
     let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
     let lp = LpProblem::new_general(
         vec![3.0, 1.0],
@@ -37,9 +37,17 @@ fn test_timeout_result_with_incumbent_uses_original_objective() {
     let x_b = sf.b.clone();
     let col_scale = vec![1.0; sf.n_total];
 
-    let result = timeout_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale, 42);
+    let opts_expired = SolverOptions {
+        deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+        ..SolverOptions::default()
+    };
+    let result = stop_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale, 42, &opts_expired);
 
-    assert_eq!(result.status, SolveStatus::Timeout);
+    assert_eq!(
+        result.status,
+        SolveStatus::Timeout,
+        "expired deadline ⇒ external stop ⇒ Timeout"
+    );
     assert_eq!(
         result.iterations, 42,
         "iter arg は SolverResult.iterations へ反映"
@@ -57,6 +65,117 @@ fn test_timeout_result_with_incumbent_uses_original_objective() {
     );
 }
 
+/// Sentinel for the honest-stop classification: with budget untouched (no
+/// deadline, no cancel) an incumbent-carrying stop is an internal stall and
+/// must be `SuboptimalSolution`, never a self-declared `Timeout`.
+///
+/// no-op proof: reverting `stop_result_with_incumbent` to unconditional
+/// `SolveStatus::Timeout` (the pre-fix `timeout_result_with_incumbent`
+/// behaviour, 80bau3b-class "TIMEOUT at 4.5s of a 1000s budget") fails this.
+#[test]
+fn test_stop_result_with_incumbent_stall_is_suboptimal() {
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+    let lp = LpProblem::new_general(
+        vec![3.0, 1.0],
+        a,
+        vec![1.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+        None,
+    )
+    .unwrap();
+    let sf = build_standard_form(&lp);
+    let basis = sf.initial_basis.clone();
+    let x_b = sf.b.clone();
+    let col_scale = vec![1.0; sf.n_total];
+
+    let opts = SolverOptions::default();
+    let result = stop_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale, 9, &opts);
+    assert_eq!(
+        result.status,
+        SolveStatus::SuboptimalSolution,
+        "budget left + incumbent ⇒ internal stall ⇒ SuboptimalSolution, got {:?}",
+        result.status
+    );
+    assert!(!result.solution.is_empty());
+
+    // Future deadline (budget genuinely remaining) must classify the same.
+    let opts_future = SolverOptions {
+        deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(3600)),
+        ..SolverOptions::default()
+    };
+    let result = stop_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale, 9, &opts_future);
+    assert_eq!(result.status, SolveStatus::SuboptimalSolution);
+}
+
+/// `stall_status`: incumbent ⇒ SuboptimalSolution, none ⇒ MaxIterations.
+/// `stop_status`: external stop overrides to Timeout.
+#[test]
+fn test_stall_and_stop_status_mapping() {
+    assert_eq!(stall_status(true), SolveStatus::SuboptimalSolution);
+    assert_eq!(stall_status(false), SolveStatus::MaxIterations);
+
+    let fresh = SolverOptions::default();
+    assert_eq!(stop_status(true, &fresh), SolveStatus::SuboptimalSolution);
+    assert_eq!(stop_status(false, &fresh), SolveStatus::MaxIterations);
+
+    let expired = SolverOptions {
+        deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+        ..SolverOptions::default()
+    };
+    assert_eq!(stop_status(true, &expired), SolveStatus::Timeout);
+    assert_eq!(stop_status(false, &expired), SolveStatus::Timeout);
+
+    let cancelled = SolverOptions {
+        cancel_flag: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        ))),
+        ..SolverOptions::default()
+    };
+    assert_eq!(stop_status(true, &cancelled), SolveStatus::Timeout);
+}
+
+/// Phase II core: pricing declares dual-feasibility but the fresh `x_B = B⁻¹b`
+/// violates primal feasibility ⇒ the bail must be `Stalled` (internal, budget
+/// left), never `Timeout`. c = 0 makes every reduced cost 0 (no entering
+/// column on iteration 1); b = -1 makes the sole basic variable negative.
+///
+/// no-op proof: reverting the `min_basic < -primal_tol` bail in
+/// `primal/core.rs` to `SimplexOutcome::Timeout` fails the `matches!`.
+#[test]
+fn test_phase2_infeasible_vertex_bail_is_stalled() {
+    use crate::simplex::pricing::DantzigPricing;
+    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let c = vec![0.0];
+    let b = vec![-1.0];
+    let mut x_b = vec![-1.0];
+    let mut basis = vec![0usize];
+    let mut pricing = DantzigPricing;
+    let opts = SolverOptions::default();
+    let mut iters = 0usize;
+    let outcome = revised_simplex_core(
+        &a,
+        &mut x_b,
+        &c,
+        &b,
+        &mut basis,
+        1,
+        1,
+        1,
+        &mut pricing,
+        &opts,
+        &mut iters,
+        false, // Phase II: enable_phase1_cycling_bail = false arms the min_basic check
+        None,
+        false,
+        None,
+    );
+    assert!(
+        matches!(outcome, SimplexOutcome::Stalled(_)),
+        "primal-infeasible dual-feasible vertex with budget left must be Stalled, got {outcome:?}"
+    );
+}
+
 /// Sentinel: a SHIFTED LP (lb ≠ 0 ⇒ obj_offset ≠ 0) must NOT double-count the
 /// shift constant. `extract_solution` already un-shifts, so `c·solution` is the
 /// complete original objective; adding `sf.obj_offset` on top double-counts
@@ -68,7 +187,7 @@ fn test_timeout_result_with_incumbent_uses_original_objective() {
 /// no-op proof: re-adding `+ sf.obj_offset` makes the reported objective 12,
 /// failing the `c·solution` equality.
 #[test]
-fn test_timeout_result_with_incumbent_no_double_count_on_shifted_lp() {
+fn test_stop_result_with_incumbent_no_double_count_on_shifted_lp() {
     let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
     let lp = LpProblem::new_general(
         vec![3.0, 1.0],
@@ -89,7 +208,11 @@ fn test_timeout_result_with_incumbent_no_double_count_on_shifted_lp() {
     let x_b = sf.b.clone();
     let col_scale = vec![1.0; sf.n_total];
 
-    let result = timeout_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale, 7);
+    let opts_expired = SolverOptions {
+        deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+        ..SolverOptions::default()
+    };
+    let result = stop_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale, 7, &opts_expired);
 
     let expected_obj =
         lp.c.iter()
