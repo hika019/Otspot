@@ -284,7 +284,9 @@ fn test_qplib_maximize_sign_flip() {
     // subsequent field by one. The parser's old (unvalidated) `inf_val` read
     // silently absorbed the resulting misalignment — the shifted `inf_val`
     // ended up `0.0` — and produced an accidentally-degenerate but non-erroring
-    // parse (var bounds silently fixed at `[0, 0]`). The new `inf_val > 0`
+    // parse: with `inf_val` shifted to `0.0`, the `[0, 0]` raw default bounds
+    // both overflow the `>= 0` infinity threshold and collapse back to
+    // `(-inf, inf)`. The new `inf_val > 0`
     // validation (this PR) correctly rejects that. Fixed to the same
     // known-good field layout as `test_parse_qplib_unconstrained`.
     let min_input = "\
