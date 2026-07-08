@@ -563,6 +563,52 @@ minimize
         assert_eq!(miqp.qp.q.nnz(), 2);
     }
 
+    /// memo#33 (P1): a binary/integer QPLIB with a *linear* objective
+    /// (`nqobj = 0`) but non-empty **quadratic constraints** (`con_char = 'Q'`)
+    /// must become a `Miqp` that keeps the quadratic constraints — not a `Milp`
+    /// that silently drops them. Independent oracle: the file below has one
+    /// binary variable, linear objective `min x1`, and the single quadratic
+    /// constraint `x1^2 <= 0`; only `Miqp` can carry that constraint.
+    #[test]
+    fn test_parse_qplib_binary_linear_obj_quad_constraint_to_miqp() {
+        let qplib = "\
+LBQ_test
+LBQ
+minimize
+1
+1
+0
+1.0
+0
+0.0
+1
+1 1 1 2.0
+0
+1E+30
+-1E+30
+0
+0.0
+0
+";
+        let parsed = parse_qplib_str(qplib).unwrap();
+        let miqp = match parsed {
+            QplibProblem::Miqp(m) => m,
+            other => panic!("expected Miqp (quadratic constraints present), got {:?}", other),
+        };
+        assert_eq!(miqp.qp.num_vars, 1);
+        assert_eq!(miqp.integer_vars, vec![0]);
+        assert_eq!(miqp.qp.q.nnz(), 0, "objective Q is zero (linear objective)");
+        assert_eq!(
+            miqp.qp.quadratic_constraints.len(),
+            1,
+            "the quadratic constraint must be preserved"
+        );
+        assert!(
+            miqp.qp.quadratic_constraints[0].nnz() > 0,
+            "constraint x1^2 must not be dropped"
+        );
+    }
+
     #[test]
     fn test_parse_qplib_mixed_integer_unsupported() {
         let qplib = "\
