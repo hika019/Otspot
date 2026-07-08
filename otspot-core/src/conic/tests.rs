@@ -3535,7 +3535,10 @@ fn to_conic_rank_deficient_fill_factors_exactly() {
         );
     }
     for (j, &v) in gd[6].iter().enumerate() {
-        assert_eq!(v, 0.0, "zero-pivot R row1 col{j} must be exactly zero, got {v}");
+        assert_eq!(
+            v, 0.0,
+            "zero-pivot R row1 col{j} must be exactly zero, got {v}"
+        );
     }
     let res = solve_qcqp(&qp, &ConicOptions::default());
     assert_eq!(res.status, SolveStatus::Optimal, "res={res:?}");
@@ -3709,7 +3712,11 @@ fn fixed_variable_bound_bridges_to_equality_row() {
     src.set_quadratic_constraints(vec![qc]).unwrap();
 
     let qp = qcqp_from_qp_problem(&src).expect("bridge accepts convex QCQP");
-    assert_eq!(qp.b_eq, vec![1.5], "fixed bound must become an equality rhs");
+    assert_eq!(
+        qp.b_eq,
+        vec![1.5],
+        "fixed bound must become an equality rhs"
+    );
     assert_eq!(
         qp.a_eq.to_dense_rows(),
         vec![vec![0.0, 1.0]],
@@ -3730,7 +3737,11 @@ fn fixed_variable_bound_bridges_to_equality_row() {
         "closed-form {expect}, got {}",
         res.objective
     );
-    assert!((res.x[1] - 1.5).abs() < 1e-6, "x1 fixed at 1.5: {:?}", res.x);
+    assert!(
+        (res.x[1] - 1.5).abs() < 1e-6,
+        "x1 fixed at 1.5: {:?}",
+        res.x
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -4030,32 +4041,16 @@ fn misocp_problem_validate_rejects_out_of_range_integer_index() {
 
 #[test]
 fn miqcp_quadratic_objective_recomputes_true_objective_not_epigraph() {
-    // #29: the MISOCP branch used to report the conic relaxation's raw
-    // `objective` (the epigraph variable `t` bounding the quadratic
-    // objective), while `solve_qcqp` (continuous path) and the model-layer
-    // continuous+SOC branch both independently recompute the objective from
-    // `x`. `to_conic`'s Cholesky clamps a near-zero *negative* pivot to a
-    // fixed positive replacement (see its module doc), so `t` reflects that
-    // clamped curvature, not the caller's literal `P0` -- a gap that is
-    // negligible near the origin but grows with `x`'s magnitude.
-    //
-    // P0 = diag(1.0, -1e-10, 2.0, 0.5): entry (1,1) sits in the clamped jitter
-    // band (matches `to_conic_matches_hand_built_dense_oracle`'s
-    // `jitter_band_clamped_diagonal` case, which confirms `to_conic` clamps
-    // rather than rejects it, to `CHOL_PIVOT_CLAMP = 1e-7` as an *L* entry --
-    // i.e. an effective curvature of `(1e-7)^2 = 1e-14`, not `-1e-10`). Only
-    // `x1` has a linear reward (`q0[1] = -1`), so the relaxation pushes it to
-    // its upper bound; at `x1 ~ 1e6` the clamped-vs-literal curvature gap
-    // (`0.5 * (1e-14 - (-1e-10)) * x1^2 ~ 50`) is orders of magnitude past
-    // any IPM/B&B numerical tolerance, while `x1` itself still safely stays
-    // within the solver's demonstrated well-conditioned range (large-scale
-    // box sentinels elsewhere in this file exercise up to `1e10`-`1e14`).
-    //
-    // `int_tol` is loosened to comfortably exceed the IPM's own
-    // boundary-approach slack at this scale (an interior-point iterate never
-    // sits exactly on a box constraint): this test's contract is the
-    // objective recompute, not the B&B integrality tolerance, which other
-    // tests already cover at ordinary scale.
+    // #29: the MISOCP branch must recompute the objective from `x` (as the
+    // continuous `solve_qcqp` and model-layer paths do), not report the conic
+    // relaxation's raw epigraph value `t`. `to_conic`'s Cholesky reshapes the
+    // near-zero jitter-band entry (1,1) of `P0 = diag(1, -1e-10, 2, 0.5)`, so
+    // `t` diverges from the literal `P0` curvature by a gap that grows with
+    // `x`. Only `x1` has a linear reward (`q0[1] = -1`), pushing it to its
+    // bound; at `x1 ~ 1e6` that gap dwarfs any IPM/B&B tolerance while `x1`
+    // stays in the well-conditioned range (box sentinels here reach 1e10-1e14).
+    // `int_tol` is loosened past the IPM's boundary-approach slack at this
+    // scale — the contract under test is the recompute, not integrality.
     let n = 4;
     let p0 = csc(
         &[

@@ -331,11 +331,7 @@ fn nonconvex_qc_solved_via_global_fallback() {
         "global optimum should be 1.0, got {}",
         r.objective_value
     );
-    assert!(
-        (r[x] - 1.0).abs() < 1e-3,
-        "x* should be 1.0, got {}",
-        r[x]
-    );
+    assert!((r[x] - 1.0).abs() < 1e-3, "x* should be 1.0, got {}", r[x]);
     assert_eq!(
         r.stats.route,
         SolveRoute::ConicQcqpNonconvex,

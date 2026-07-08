@@ -1,13 +1,7 @@
-//! Conic optimization (SOCP/QCQP, incl. mixed-integer). Standard primal
-//! form solved by [`solve_socp`]:
-//!
-//! ```text
-//! minimize    c^T x
-//! subject to  A x = b            (equalities)
-//!             G x + s = h,  s in K
-//! ```
-//! Cone `K = R_+^l x Q_{m_1} x ... x Q_{m_k}` (`Q_m = { (t,u): ||u||_2 <=
-//! t }`); rows ordered `l` orthant rows then each SOC block (`cone.soc`).
+//! Conic optimization (SOCP/QCQP, incl. mixed-integer). [`solve_socp`] solves
+//! the standard primal form `min c^T x  s.t.  A x = b,  G x + s = h, s in K`,
+//! with cone `K = R_+^l x Q_{m_1} x ... x Q_{m_k}` (`Q_m = {(t,u): ||u|| <= t}`)
+//! — rows ordered `l` orthant rows then each SOC block (`cone.soc`).
 
 mod cone;
 mod ipm;
@@ -86,11 +80,9 @@ impl ConicProblem {
 
     /// Validate dimensional consistency and finiteness.
     ///
-    /// Column counts are checked unconditionally (not just when `p() > 0` /
-    /// rows exist): a `CscMatrix` still declares its column count with zero
-    /// rows, and a mismatched `A` there previously slipped through to a
-    /// `debug_assert_eq!` panic deeper in the KKT solve the first time a
-    /// non-empty `A`/`G` used it (PR #25 review #36).
+    /// Column counts are checked unconditionally even with zero rows (a
+    /// mismatched `A` there previously reached a `debug_assert_eq!` panic
+    /// deeper in the KKT solve; PR #25 review #36).
     pub fn validate(&self) -> Result<(), String> {
         if self.a.ncols() != self.n() {
             return Err("A column count != n".into());
@@ -204,24 +196,10 @@ impl ConicOptions {
 /// Solve a second-order cone program in standard form.
 pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     let mut res = ipm::solve(problem, opts);
-    // Canonicalize the reported objective only for the two statuses whose
-    // returned `x` is *not* a usable iterate (PR #25 review #40). `ipm::solve`
-    // always sets `objective = dot(c, &x)`, but:
-    //   - `Infeasible`: a Farkas certificate fired; `x` never left its `0`
-    //     initializer (the review's repro reported a spurious `objective=0.0`
-    //     for an infeasible SOCP). No feasible point exists -> `+inf`, the
-    //     bare no-incumbent sentinel used across the codebase
-    //     (`SolverResult::infeasible`).
-    //   - `Unbounded`: an improving ray was verified -> `-inf`
-    //     (`SolverResult::unbounded`).
-    // Every *inconclusive* status (`MaxIterations`, `Timeout`,
-    // `NumericalError`) keeps `res.objective` = `dot(c, x)` of the real (if
-    // unconverged) iterate that is *also* returned in `res.x`: overwriting it
-    // with `+inf` would contradict that iterate and erase convergence-tracking
-    // information, exactly what `simplex::timeout_result_with_incumbent`
-    // preserves (`+inf` is reserved there for the *bare, incumbent-less*
-    // timeout). `NotSupported` already carries `f64::NAN` from `ipm::solve`'s
-    // `failed()` helper (rejected before any iterate exists) and is untouched.
+    // Canonicalize only statuses whose `x` is not a usable iterate (PR #25
+    // review #40): `Infeasible` -> `+inf`, `Unbounded` -> `-inf`. Inconclusive
+    // statuses keep `dot(c, x)` of the real iterate in `res.x`; `NotSupported`
+    // keeps its `NaN`.
     res.objective = match res.status {
         SolveStatus::Infeasible => f64::INFINITY,
         SolveStatus::Unbounded => f64::NEG_INFINITY,

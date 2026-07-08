@@ -593,7 +593,10 @@ minimize
         let parsed = parse_qplib_str(qplib).unwrap();
         let miqp = match parsed {
             QplibProblem::Miqp(m) => m,
-            other => panic!("expected Miqp (quadratic constraints present), got {:?}", other),
+            other => panic!(
+                "expected Miqp (quadratic constraints present), got {:?}",
+                other
+            ),
         };
         assert_eq!(miqp.qp.num_vars, 1);
         assert_eq!(miqp.integer_vars, vec![0]);

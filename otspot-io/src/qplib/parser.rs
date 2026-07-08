@@ -363,10 +363,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         // A zero objective Q with quadratic *constraints* is still a QCQP:
         // route it to Miqp (which carries `quadratic_constraints`) rather than
         // Milp, which would silently drop them.
-        let has_quad_constraints = prob
-            .quadratic_constraints
-            .iter()
-            .any(|qc| qc.nnz() > 0);
+        let has_quad_constraints = prob.quadratic_constraints.iter().any(|qc| qc.nnz() > 0);
         if prob.q.nnz() == 0 && !has_quad_constraints {
             let mut lp = LpProblem::new_general(
                 prob.c,

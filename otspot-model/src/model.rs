@@ -861,11 +861,7 @@ impl Model {
                 } else {
                     match build_nonconvex() {
                         Ok(nc) => {
-                            let g = otspot_core::conic::solve_global_qcqp(
-                                &nc,
-                                &opts,
-                                &global_opts,
-                            );
+                            let g = otspot_core::conic::solve_global_qcqp(&nc, &opts, &global_opts);
                             (g.status, g.objective, g.x, SolveRoute::ConicQcqpNonconvex)
                         }
                         // The global fallback needs a finite box. Without one,
@@ -873,9 +869,7 @@ impl Model {
                         // problem; otherwise the bridge's numerical failure.
                         Err(()) => {
                             return match convex.status {
-                                SolveStatus::NotSupported(m) => {
-                                    Err(ModelError::NotSupported(m))
-                                }
+                                SolveStatus::NotSupported(m) => Err(ModelError::NotSupported(m)),
                                 _ => Err(ModelError::SolveError(SolveError::NumericalError)),
                             };
                         }
@@ -1072,7 +1066,10 @@ impl Model {
                     "quadratic constraint {idx}: non-finite right-hand side {rhs}"
                 )));
             }
-            check_affine(&expr.linear, &format!("quadratic constraint {idx} linear part"))?;
+            check_affine(
+                &expr.linear,
+                &format!("quadratic constraint {idx} linear part"),
+            )?;
             for (&(va, vb), &coef) in &expr.quad {
                 if va.model_id != self.model_id || vb.model_id != self.model_id {
                     return Err(ModelError::InvalidInput(format!(

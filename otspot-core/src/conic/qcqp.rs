@@ -81,13 +81,11 @@ const CHOL_PIVOT_INDEFINITE_TOL: f64 = -1e-9;
 /// `p` itself when no fill-in occurs (e.g. `nnz(L) = O(n)` for diagonal `p`,
 /// the case that drove the QPLIB DCQ bridge OOM this replaces).
 ///
-/// Pivot handling: a pivot in `[0, CHOL_PIVOT_ZERO_TOL]` is a rank-deficient
-/// PSD direction — its factor column is set to zero exactly (the matching SOC
-/// row vanishes, preserving any unbounded direction), and the returned bool
-/// stays `false`. A pivot in `(CHOL_PIVOT_INDEFINITE_TOL, 0)` is treated the
-/// same way (zero column) but sets the bool to `true`: PSD cannot be proven
-/// in the jitter band, so the reformulation is only an approximation. A pivot
-/// below `CHOL_PIVOT_INDEFINITE_TOL` rejects `p` as not PSD (`Err`).
+/// Pivot handling: `[0, CHOL_PIVOT_ZERO_TOL]` is rank-deficient PSD — factor
+/// column set to zero exactly (matching SOC row vanishes, preserving any
+/// unbounded direction), bool stays `false`. `(CHOL_PIVOT_INDEFINITE_TOL, 0)`
+/// is handled the same but sets bool `true` (PSD unprovable in the jitter
+/// band; reformulation only approximate). Below it: not PSD (`Err`).
 /// Columns of a sparse lower-triangular Cholesky factor: `column[j]` holds the
 /// `(row, value)` entries of `L`'s column `j`, `row >= j`.
 type SparseCholCols = Vec<Vec<(usize, f64)>>;
