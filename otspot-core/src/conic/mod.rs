@@ -196,20 +196,14 @@ impl ConicOptions {
 
 /// Solve a second-order cone program in standard form.
 ///
-/// Internally equilibrates the data first (cone-block-respecting Ruiz
-/// scaling, see [`equil`]) so the IPM sees well-conditioned magnitudes, then
-/// maps the solution/duals/certificates back to `problem`'s original space
-/// (issue #9b: without this, CBLIB instances with several-orders-of-
-/// magnitude coefficient spread across an SOC block diverge numerically).
-/// The equilibration is exact up to floating-point rounding: it changes
-/// neither the optimum nor the feasible set, only the data scale the IPM
-/// operates on.
+/// Equilibrates the data first (cone-block-respecting Ruiz scaling, see
+/// [`equil`]) so the IPM sees well-conditioned magnitudes, then maps the
+/// solution/duals/certificates back to `problem`'s original space. Exact up
+/// to rounding — changes neither optimum nor feasible set (issue #9b).
 pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
-    // Validate before equilibrating: the row/col sweeps index `problem.a`/
-    // `problem.g` assuming `validate()`'s shape invariants already hold
-    // (`a.ncols() == n`, etc.), so an invalid problem must be rejected here,
-    // not after Ruiz sweeps run over mismatched shapes. Mirrors `ipm::solve`'s
-    // own guard (kept, unmodified, as the second line of defense).
+    // Validate before equilibrating: the Ruiz sweeps assume `validate()`'s
+    // shape invariants, so reject an invalid problem here (ipm::solve keeps
+    // its own guard as second line of defense).
     if let Err(e) = problem.validate() {
         return invalid_result(problem, SolveStatus::NotSupported(e));
     }

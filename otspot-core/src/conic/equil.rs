@@ -1,36 +1,19 @@
 //! Cone-block-respecting Ruiz-style equilibration for [`ConicProblem`].
 //!
-//! Iteratively rescales the rows of `A`/`G`, the columns (shared across `A`,
-//! `G`, `c`), and the objective, giving `min c'^T x'  s.t.  A' x' = b',
-//! G' x' + s' = h',  s' in K` the *same* optimum and status as the original
-//! problem (`x = D x'`, see [`Equilibrator::unscale_result`]) but far
-//! better-conditioned coefficient magnitudes.
+//! Iteratively rescales `A`/`G` rows, the shared columns, and the objective,
+//! giving the scaled problem the same optimum/status (`x = D x'`, see
+//! [`Equilibrator::unscale_result`]) but far better-conditioned magnitudes.
+//! Cone membership is preserved because each SOC block uses a single positive
+//! row scalar (`e_g` block-constant, checked by
+//! `equil_soc_block_scale_is_constant`; `s in K <=> alpha s in K`); orthant
+//! and equality rows scale independently.
 //!
-//! Cone membership is preserved exactly because every second-order-cone
-//! block is scaled by a single positive row scalar shared across the whole
-//! block (`e_g` constant on each block, checked by
-//! `equil_soc_block_scale_is_constant`): `s in K <=> (alpha s) in K` for any
-//! `alpha > 0`, both for the orthant (componentwise) and for an SOC
-//! (`||u|| <= t <=> ||alpha u|| <= alpha t`). Orthant rows and equality rows
-//! scale independently per row; only SOC blocks are constrained to one
-//! scalar per block.
-//!
-//! Motivation (issue #9b): CBLIB `*_w` / `sssd-strong` instances carry
-//! coefficient dynamic ranges of several orders of magnitude across SOC
-//! blocks (physically-scaled units bridged directly into the cone data).
-//! Without equilibration, the Mehrotra corrector's fraction-to-boundary step
-//! collapses geometrically on a single orthant row from iteration 0, `mu`
-//! diverges over ~12 orders of magnitude, and the KKT solve loses all
-//! accuracy (`NumericalError`/`MaxIterations`). Equilibrating first (this
-//! module) fixes this without any change to `ipm.rs` itself: it only
-//! balances the *data*, never the algorithm.
-//!
-//! Ref: D. Ruiz, "A scaling algorithm to equilibrate both rows and columns
-//! norms in matrices", ENSEEIHT-IRIT 2001 (same reference as
-//! `linalg::ruiz::RuizScaler`, which this mirrors for the QP case; that
-//! scaler cannot be reused here because a conic problem has two row-blocks
-//! (`A`, `G`) sharing one column scaling, and `G`'s rows are constrained to
-//! be block-constant across each SOC).
+//! Motivation (#9b): CBLIB `*_w`/`sssd-strong` carry multi-order coefficient
+//! ranges across SOC blocks; unequilibrated, the Mehrotra step collapses from
+//! iteration 0 and `mu` diverges (`NumericalError`). Balancing the *data*
+//! first fixes this with no change to `ipm.rs`. Mirrors `linalg::ruiz` (QP),
+//! which can't be reused: conic has two row-blocks sharing one column scaling
+//! and `G`'s rows are block-constant per SOC. Ref: Ruiz, ENSEEIHT-IRIT 2001.
 
 use super::cone::Blocks;
 use super::kkt;
