@@ -391,6 +391,8 @@ pub fn run_postsolve(
 
     let mut solution = vec![0.0f64; n];
     let mut dual_solution = vec![0.0f64; m];
+    let dual_required =
+        matches!(result.status, SolveStatus::Optimal) || !result.dual_solution.is_empty();
     let input_dual_is_ipm = result.reduced_costs.is_empty() && !result.dual_solution.is_empty();
 
     for (j, &maybe_jj) in presolve_result.col_map.iter().enumerate() {
@@ -403,6 +405,9 @@ pub fn run_postsolve(
     }
     for (i, &maybe_ii) in presolve_result.row_map.iter().enumerate() {
         if let Some(ii) = maybe_ii {
+            if !dual_required {
+                continue;
+            }
             if ii >= result.dual_solution.len() {
                 return malformed_postsolve_result();
             }
@@ -1389,5 +1394,35 @@ mod recover_removed_row_dual_tests {
         let out = run_postsolve(&reduced, &pres, &lp, None, false);
         assert_eq!(out.status, SolveStatus::NumericalError);
         assert!(out.solution.is_empty());
+    }
+
+    #[test]
+    fn run_postsolve_preserves_timeout_incumbent_without_dual() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let pres = PresolveResult::no_reduction(&lp);
+        let reduced = SolverResult {
+            status: SolveStatus::Timeout,
+            objective: 0.5,
+            solution: vec![0.5],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            ..Default::default()
+        };
+        let out = run_postsolve(&reduced, &pres, &lp, None, false);
+        assert_eq!(
+            out.status,
+            SolveStatus::Timeout,
+            "timeout incumbent without dual must not be remapped to NumericalError"
+        );
+        assert_eq!(out.solution, vec![0.5]);
     }
 }

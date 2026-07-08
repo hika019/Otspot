@@ -410,13 +410,17 @@ impl QpsParser {
             BoundType::FR | BoundType::MI | BoundType::PL | BoundType::BV
         );
         let fixed_col_name = mps_field(line, 14, 22).to_string();
-        let looks_fixed_bounds = !fixed_col_name.is_empty()
-            && (parts.len() >= 5 || (!value_taking && parts.len() > 3));
         // Fixed-format MPS field values may contain internal spaces (e.g. FORPLAN
         // column "A   22 1" / bound set "BND-1"), so `split_whitespace` over-splits
-        // spaced names. Fall back to fixed-column extraction whenever a plausible
-        // fixed col field exists, including no-value types (`BV`, `FR`, `MI`,
-        // `PL`) where a spaced column name may yield only four whitespace tokens.
+        // spaced names into extra tokens. The *only* case where free-format
+        // tokenization cannot recover the column name is when the fixed name field
+        // (bytes 14..22) itself contains internal whitespace — use that as the
+        // sole evidence for the fixed fallback. This distinguishes a genuine
+        // spaced-name record (`BV BND-1     EF GH`) from a malformed free-format
+        // record with a stray extra token (`BV BND x1 extra`), which must be
+        // rejected by the extra-token checks below rather than silently rebound
+        // to whatever bytes 14..22 happen to contain.
+        let looks_fixed_bounds = fixed_col_name.contains(char::is_whitespace);
         if looks_fixed_bounds {
             let col_name = fixed_col_name;
             let raw = mps_field(line, 24, 36);
@@ -819,7 +823,7 @@ impl QpsParser {
 
 fn qps_free_pairs_have_odd_trailing_name(parts: &[&str]) -> bool {
     parts.len() > 2
-        && parts.len() % 2 == 0
+        && parts.len().is_multiple_of(2)
         && (2..parts.len() - 1)
             .step_by(2)
             .all(|i| parts[i].parse::<f64>().is_ok())
