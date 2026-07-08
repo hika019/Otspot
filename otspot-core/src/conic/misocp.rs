@@ -184,7 +184,7 @@ fn build_relaxation(
         h[g_row] = -lb[k];
         g_row += 1;
     }
-    debug_assert_eq!(g_row, new_l);
+    assert_eq!(g_row, new_l);
     let g = CscMatrix::from_triplets(&g_ri, &g_ci, &g_vi, new_m, n).unwrap();
 
     // A: existing equality rows keep their row index; each fixed integer
@@ -219,7 +219,7 @@ fn build_relaxation(
         b.push(lb[k]);
         a_row += 1;
     }
-    debug_assert_eq!(a_row, new_p);
+    assert_eq!(a_row, new_p);
     let a = CscMatrix::from_triplets(&a_ri, &a_ci, &a_vi, new_p, n).unwrap();
 
     ConicProblem {
