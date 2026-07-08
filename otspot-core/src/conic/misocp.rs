@@ -22,6 +22,49 @@ pub struct MisocpProblem {
     pub int_ub: Vec<f64>,
 }
 
+impl MisocpProblem {
+    /// Validate `base` plus the integer branching data's consistency against
+    /// it: `build_relaxation` indexes `int_lb`/`int_ub` by position and `base`
+    /// by `integers[k]` with no bounds checks of its own, so a length
+    /// mismatch or an out-of-range index previously indexed out of bounds and
+    /// panicked (PR #25 review #38, #39) instead of failing as an ordinary
+    /// invalid-input `NotSupported`.
+    pub fn validate(&self) -> Result<(), String> {
+        self.base.validate()?;
+        if self.int_lb.len() != self.integers.len() {
+            return Err(format!(
+                "int_lb length {} != integers length {}",
+                self.int_lb.len(),
+                self.integers.len()
+            ));
+        }
+        if self.int_ub.len() != self.integers.len() {
+            return Err(format!(
+                "int_ub length {} != integers length {}",
+                self.int_ub.len(),
+                self.integers.len()
+            ));
+        }
+        let n = self.base.n();
+        for (k, &j) in self.integers.iter().enumerate() {
+            if j >= n {
+                return Err(format!("integers[{k}] = {j} out of range (n = {n})"));
+            }
+        }
+        for (k, &v) in self.int_lb.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(format!("int_lb[{k}] is not finite: {v}"));
+            }
+        }
+        for (k, &v) in self.int_ub.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(format!("int_ub[{k}] is not finite: {v}"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Result of a mixed-integer conic solve.
 ///
 /// `status` distinguishes a proven conclusion from an inconclusive search —
@@ -174,6 +217,14 @@ fn build_relaxation(
 /// With an incumbent: `Timeout` > `Optimal` (full exhaustion, **no**
 /// numerical failures) > `SuboptimalSolution` (mirrors `mip::solve_miqp`).
 pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -> MisocpResult {
+    if let Err(e) = prob.validate().and_then(|()| opts.validate()) {
+        return MisocpResult {
+            status: SolveStatus::NotSupported(e),
+            objective: f64::NAN,
+            x: vec![],
+            nodes: 0,
+        };
+    }
     let mut incumbent_obj = f64::INFINITY;
     let mut incumbent_x: Vec<f64> = Vec::new();
     let mut nodes = 0usize;
@@ -333,5 +384,31 @@ pub fn solve_miqcp(
     if res.x.len() > qp.n {
         res.x.truncate(qp.n);
     }
+    // Recompute the true QCQP objective from `x` rather than trusting the
+    // conic relaxation's `objective` (PR #25 review #29): when the objective
+    // is quadratic, `to_conic` minimizes an epigraph variable `t` bounding
+    // `(1/2) x^T P0 x + q0^T x` via an SOC built from `P0`'s Cholesky factor.
+    // That factor clamps any near-zero negative pivot to a fixed positive
+    // value (see `to_conic`'s doc), so `t` reflects the *clamped* curvature,
+    // not the caller's literal `P0`, whenever `to_conic` returned
+    // `convexity_unproven`. `solve_qcqp` (the continuous-QCQP entry point)
+    // already recomputes from `x` for exactly this reason; mirroring that
+    // here keeps the MISOCP and continuous/MIQCP-objective conventions
+    // aligned instead of the MISOCP path silently trusting an unproven bound.
+    if !res.x.is_empty() {
+        res.objective = qcqp_true_objective(qp, &res.x);
+    }
     res
+}
+
+/// Independent recomputation of `(1/2) x^T P0 x + q0^T x` from the caller's
+/// literal `QcqpProblem` data (not the conic epigraph variable -- see
+/// `solve_miqcp`).
+fn qcqp_true_objective(qp: &QcqpProblem, x: &[f64]) -> f64 {
+    let mut obj: f64 = qp.q0.iter().zip(x).map(|(q, xi)| q * xi).sum();
+    if let Some(p0) = &qp.p0 {
+        let px = p0.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; qp.n]);
+        obj += 0.5 * x.iter().zip(&px).map(|(xi, pxi)| xi * pxi).sum::<f64>();
+    }
+    obj
 }

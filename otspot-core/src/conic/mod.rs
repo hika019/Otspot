@@ -84,10 +84,16 @@ impl ConicProblem {
         self.h.len()
     }
 
-    /// Validate dimensional consistency.
+    /// Validate dimensional consistency and finiteness.
+    ///
+    /// Column counts are checked unconditionally (not just when `p() > 0` /
+    /// rows exist): a `CscMatrix` still declares its column count with zero
+    /// rows, and a mismatched `A` there previously slipped through to a
+    /// `debug_assert_eq!` panic deeper in the KKT solve the first time a
+    /// non-empty `A`/`G` used it (PR #25 review #36).
     pub fn validate(&self) -> Result<(), String> {
-        if self.a.ncols() != self.n() && self.p() > 0 {
-            return Err("A has wrong column count".into());
+        if self.a.ncols() != self.n() {
+            return Err("A column count != n".into());
         }
         if self.g.ncols() != self.n() {
             return Err("G column count != n".into());
@@ -106,8 +112,21 @@ impl ConicProblem {
                 return Err("second-order cone dim must be >= 1".into());
             }
         }
+        find_non_finite("c", &self.c)?;
+        find_non_finite("b", &self.b)?;
+        find_non_finite("h", &self.h)?;
+        find_non_finite("A", self.a.values())?;
+        find_non_finite("G", self.g.values())?;
         Ok(())
     }
+}
+
+/// Returns `Err` naming the first non-finite (NaN/±inf) entry of `xs`, if any.
+fn find_non_finite(field: &str, xs: &[f64]) -> Result<(), String> {
+    if let Some((i, v)) = xs.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(format!("{field}[{i}] is not finite: {v}"));
+    }
+    Ok(())
 }
 
 /// Result of a conic solve.
@@ -161,7 +180,52 @@ impl Default for ConicOptions {
     }
 }
 
+impl ConicOptions {
+    /// Validate option ranges the IPM assumes but never checks itself.
+    ///
+    /// `max_iter == 0` is deliberately **not** rejected: it is a legitimate
+    /// (if extreme) budget, used by tests to force an immediate
+    /// `MaxIterations` without a certificate (see
+    /// `misocp_unresolved_nodes_do_not_prove_infeasibility`).
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.tol.is_finite() || self.tol <= 0.0 {
+            return Err(format!("tol must be finite and > 0, got {}", self.tol));
+        }
+        if !self.step_frac.is_finite() || self.step_frac <= 0.0 || self.step_frac >= 1.0 {
+            return Err(format!(
+                "step_frac must be finite and in (0, 1), got {}",
+                self.step_frac
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Solve a second-order cone program in standard form.
 pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
-    ipm::solve(problem, opts)
+    let mut res = ipm::solve(problem, opts);
+    // Canonicalize the reported objective only for the two statuses whose
+    // returned `x` is *not* a usable iterate (PR #25 review #40). `ipm::solve`
+    // always sets `objective = dot(c, &x)`, but:
+    //   - `Infeasible`: a Farkas certificate fired; `x` never left its `0`
+    //     initializer (the review's repro reported a spurious `objective=0.0`
+    //     for an infeasible SOCP). No feasible point exists -> `+inf`, the
+    //     bare no-incumbent sentinel used across the codebase
+    //     (`SolverResult::infeasible`).
+    //   - `Unbounded`: an improving ray was verified -> `-inf`
+    //     (`SolverResult::unbounded`).
+    // Every *inconclusive* status (`MaxIterations`, `Timeout`,
+    // `NumericalError`) keeps `res.objective` = `dot(c, x)` of the real (if
+    // unconverged) iterate that is *also* returned in `res.x`: overwriting it
+    // with `+inf` would contradict that iterate and erase convergence-tracking
+    // information, exactly what `simplex::timeout_result_with_incumbent`
+    // preserves (`+inf` is reserved there for the *bare, incumbent-less*
+    // timeout). `NotSupported` already carries `f64::NAN` from `ipm::solve`'s
+    // `failed()` helper (rejected before any iterate exists) and is untouched.
+    res.objective = match res.status {
+        SolveStatus::Infeasible => f64::INFINITY,
+        SolveStatus::Unbounded => f64::NEG_INFINITY,
+        _ => res.objective,
+    };
+    res
 }

@@ -3,10 +3,14 @@
 //!
 //! Run: `cargo run --release --example solve_cbf -- <file-or-dir.cbf> [...]`
 //!
-//! `otspot_core::conic::{ConicOptions,BbOptions}` expose iteration/node
-//! limits but no wall-clock deadline, so this runner applies none either.
-//! To bound wall-clock time per problem, wrap each *file* invocation in an
-//! external timeout, e.g.:
+//! `otspot_core::conic::{ConicOptions,BbOptions}` both carry a `deadline:
+//! Option<Instant>` (checked once per IPM iteration / B&B node), but this
+//! runner leaves it `None` and does not set one per file: a single
+//! `Instant::now() + per_file_budget` deadline shared across an entire
+//! directory's worth of files would apply to only the first file, and a
+//! fresh deadline per file needs a per-file loop restructure this bench
+//! runner doesn't do. Until that lands, bound wall-clock time per problem by
+//! wrapping each *file* invocation in an external timeout instead, e.g.:
 //!
 //! ```sh
 //! for f in data/cblib_socp/*.cbf; do
