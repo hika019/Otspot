@@ -25,6 +25,9 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
     if let Err(e) = problem.validate() {
         return failed(problem, SolveStatus::NotSupported(e));
     }
+    if let Err(e) = opts.validate() {
+        return failed(problem, SolveStatus::NotSupported(e));
+    }
     let blk = Blocks::new(&problem.cone);
     let n = problem.n();
     let p = problem.p();

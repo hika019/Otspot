@@ -65,12 +65,12 @@ fn widen_cols(m: &CscMatrix, new_ncols: usize) -> CscMatrix {
     }
 }
 
-/// Pivots at or below this are numerically zero (clamped for stability).
+/// Pivots at or below this are numerically zero (a rank-deficient PSD
+/// direction): the factor column is dropped to zero rather than clamped, so
+/// no artificial curvature enters the SOCP.
 const CHOL_PIVOT_ZERO_TOL: f64 = 1e-14;
 /// Pivots below this are clearly negative: the matrix is not PSD.
 const CHOL_PIVOT_INDEFINITE_TOL: f64 = -1e-9;
-/// Replacement value for clamped pivots.
-const CHOL_PIVOT_CLAMP: f64 = 1e-7;
 
 /// Sparse left-looking Cholesky of a PSD-with-jitter matrix `p` (`n x n`,
 /// both triangles stored, as `QcqpProblem::p0`/`QuadConstraint::p` are).
@@ -81,11 +81,13 @@ const CHOL_PIVOT_CLAMP: f64 = 1e-7;
 /// `p` itself when no fill-in occurs (e.g. `nnz(L) = O(n)` for diagonal `p`,
 /// the case that drove the QPLIB DCQ bridge OOM this replaces).
 ///
-/// Pivot handling matches the dense Cholesky it replaces: a pivot in
-/// `(CHOL_PIVOT_INDEFINITE_TOL, CHOL_PIVOT_ZERO_TOL]` is clamped to
-/// `CHOL_PIVOT_CLAMP` (the returned bool is `true` only when that pivot was
-/// negative); a pivot below `CHOL_PIVOT_INDEFINITE_TOL` rejects `p` as not
-/// PSD (`Err`).
+/// Pivot handling: a pivot in `[0, CHOL_PIVOT_ZERO_TOL]` is a rank-deficient
+/// PSD direction — its factor column is set to zero exactly (the matching SOC
+/// row vanishes, preserving any unbounded direction), and the returned bool
+/// stays `false`. A pivot in `(CHOL_PIVOT_INDEFINITE_TOL, 0)` is treated the
+/// same way (zero column) but sets the bool to `true`: PSD cannot be proven
+/// in the jitter band, so the reformulation is only an approximation. A pivot
+/// below `CHOL_PIVOT_INDEFINITE_TOL` rejects `p` as not PSD (`Err`).
 /// Columns of a sparse lower-triangular Cholesky factor: `column[j]` holds the
 /// `(row, value)` entries of `L`'s column `j`, `row >= j`.
 type SparseCholCols = Vec<Vec<(usize, f64)>>;
@@ -148,19 +150,25 @@ fn sparse_cholesky_lower(p: &CscMatrix, n: usize) -> Result<(SparseCholCols, boo
             if pivot < 0.0 {
                 clamped = true;
             }
-            CHOL_PIVOT_CLAMP
+            // Rank-deficient PSD direction: drop the whole factor column to
+            // zero. For an exact zero pivot the Schur complement below is also
+            // zero, so this is exact; it removes the SOC row instead of adding
+            // ~sqrt(pivot) curvature that would bound an unbounded direction.
+            0.0
         } else {
             pivot.sqrt()
         };
 
         let mut col_j = Vec::with_capacity(touched.len());
         col_j.push((j, ljj));
-        for &r in &touched {
-            if r > j {
-                let val = acc[r] / ljj;
-                if val != 0.0 {
-                    col_j.push((r, val));
-                    row_to_cols[r].push(j);
+        if ljj != 0.0 {
+            for &r in &touched {
+                if r > j {
+                    let val = acc[r] / ljj;
+                    if val != 0.0 {
+                        col_j.push((r, val));
+                        row_to_cols[r].push(j);
+                    }
                 }
             }
         }
@@ -193,6 +201,60 @@ impl Triplets {
     }
 }
 
+/// Reject a [`QcqpProblem`] whose public fields disagree on the variable
+/// count `n`. `QcqpProblem` is a public struct with no constructor, so callers
+/// can build a mis-sized instance; without this check `to_conic` would panic
+/// (`copy_from_slice`, indexing) or silently drop a mis-sized objective matrix
+/// via `qcqp_objective`'s fallback.
+fn validate_dims(qp: &QcqpProblem) -> Result<(), String> {
+    let n = qp.n;
+    if qp.q0.len() != n {
+        return Err(format!("q0 length {} != n {}", qp.q0.len(), n));
+    }
+    if let Some(p0) = &qp.p0 {
+        if p0.nrows() != n || p0.ncols() != n {
+            return Err(format!(
+                "P0 is {}x{}, expected {n}x{n}",
+                p0.nrows(),
+                p0.ncols()
+            ));
+        }
+    }
+    for (i, qc) in qp.quad.iter().enumerate() {
+        if qc.p.nrows() != n || qc.p.ncols() != n {
+            return Err(format!(
+                "quad[{i}].p is {}x{}, expected {n}x{n}",
+                qc.p.nrows(),
+                qc.p.ncols()
+            ));
+        }
+        if qc.q.len() != n {
+            return Err(format!("quad[{i}].q length {} != n {n}", qc.q.len()));
+        }
+    }
+    if qp.g_lin.ncols() != n {
+        return Err(format!("g_lin has {} cols, expected {n}", qp.g_lin.ncols()));
+    }
+    if qp.g_lin.nrows() != qp.h_lin.len() {
+        return Err(format!(
+            "g_lin has {} rows but h_lin has {}",
+            qp.g_lin.nrows(),
+            qp.h_lin.len()
+        ));
+    }
+    if qp.a_eq.ncols() != n {
+        return Err(format!("a_eq has {} cols, expected {n}", qp.a_eq.ncols()));
+    }
+    if qp.a_eq.nrows() != qp.b_eq.len() {
+        return Err(format!(
+            "a_eq has {} rows but b_eq has {}",
+            qp.a_eq.nrows(),
+            qp.b_eq.len()
+        ));
+    }
+    Ok(())
+}
+
 /// Convert this convex QCQP into an equivalent standard-form SOCP.
 ///
 /// A trailing epigraph variable `t` is appended when the objective is
@@ -202,6 +264,7 @@ impl Triplets {
 /// a negative jitter-band pivot (see `sparse_cholesky_lower`): the SOCP is
 /// then only an approximation of the QCQP and convexity is unproven.
 pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize, bool), String> {
+    validate_dims(qp)?;
     let n = qp.n;
     let has_quad_obj = qp.p0.is_some();
     let nvar = n + if has_quad_obj { 1 } else { 0 };
@@ -216,20 +279,10 @@ pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize, bool), String>
 
     // Equalities: A_eq padded to nvar columns. No extra rows, so widening the
     // column count reuses `a_eq`'s storage directly (O(nnz), no triplet pass).
-    debug_assert_eq!(
-        qp.a_eq.nrows(),
-        qp.b_eq.len(),
-        "QcqpProblem invariant: a_eq row count must match b_eq length"
-    );
     let a = widen_cols(&qp.a_eq, nvar);
 
     // Conic rows: orthant (linear inequalities) then SOC blocks.
     let ml = qp.h_lin.len();
-    debug_assert_eq!(
-        qp.g_lin.nrows(),
-        ml,
-        "QcqpProblem invariant: g_lin row count must match h_lin length"
-    );
     let mut gt = Triplets::new();
     let mut h: Vec<f64> = Vec::with_capacity(ml);
     // Orthant: Gl x + s = hl, s >= 0. Transcribed directly from g_lin's own
@@ -493,9 +546,18 @@ pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
             }
         }
     }
-    // Variable bounds as linear inequalities.
+    // Variable bounds. A fixed bound (`lb == ub`) becomes an equality row
+    // `x_j = lb`: the inequality pair `x_j <= ub`, `-x_j <= -lb` has no
+    // strictly feasible slack, which stalls the interior-point method (the
+    // MISOCP path special-cases fixed bounds for the same reason).
     for j in 0..n {
         let (lb, ub) = src.bounds[j];
+        if lb.is_finite() && ub.is_finite() && lb == ub {
+            ae.push(ae_count, j, 1.0);
+            be.push(lb);
+            ae_count += 1;
+            continue;
+        }
         if ub.is_finite() {
             gl.push(gl_count, j, 1.0);
             hl.push(ub);
@@ -514,7 +576,10 @@ pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
         .map_err(|e| format!("A_eq build: {e:?}"))?;
     Ok(QcqpProblem {
         n,
-        p0: Some(src.q.clone()),
+        // A structurally zero objective matrix is a *linear* objective: keep
+        // `p0 = None` so `to_conic` skips the quadratic epigraph reformulation
+        // (an epigraph plus pivot handling would perturb the linear optimum).
+        p0: (!src.is_zero_q()).then(|| src.q.clone()),
         q0: src.c.clone(),
         quad,
         g_lin,

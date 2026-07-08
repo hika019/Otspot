@@ -33,7 +33,7 @@ pub(crate) fn solve_qcqp_via_conic(problem: &QpProblem, options: &SolverOptions)
 
     let convex = conic::solve_qp_problem_as_qcqp(problem, &c_opts);
     if is_clean_convex_outcome(&convex) {
-        return qcqp_result_to_solver_result(convex);
+        return qcqp_result_to_solver_result(convex, problem.obj_offset);
     }
 
     let nc_qp = match nonconvex_from_qp_problem(problem) {
@@ -52,7 +52,7 @@ pub(crate) fn solve_qcqp_via_conic(problem: &QpProblem, options: &SolverOptions)
     };
     let g_opts = global_options(options);
     let global = conic::solve_global_qcqp(&nc_qp, &c_opts, &g_opts);
-    global_result_to_solver_result(global)
+    global_result_to_solver_result(global, problem.obj_offset)
 }
 
 /// Whether the convex-bridge result can be trusted as-is.
@@ -109,14 +109,29 @@ fn conic_options(options: &SolverOptions, deadline: Option<Instant>) -> ConicOpt
 
 fn global_options(options: &SolverOptions) -> GlobalOptions {
     let eps = options.ipm_eps();
-    GlobalOptions {
+    let mut g = GlobalOptions {
         gap_tol: eps,
         feas_tol: eps,
         ..GlobalOptions::default()
+    };
+    // Honor a caller-supplied global-optimization budget (node limit / gap):
+    // a smaller `max_nodes` or looser gap must bound the spatial B&B, matching
+    // the QP global route (`qp::global`).
+    if let Some(cfg) = options.global_optimization.as_ref() {
+        g.max_nodes = cfg.max_nodes;
+        // `cfg.gap_tol` is the user's target accuracy for the whole global
+        // solve; `GlobalOptimizationConfig` carries no separate feasibility
+        // field. Align both the optimality gap and the incumbent feasibility
+        // resolution to it so they never sit at inconsistent scales — passing
+        // a `cfg` (even the default) must not leave `gap_tol` looser than
+        // `feas_tol`. Without a `cfg`, both stay at the IPM accuracy `eps`.
+        g.gap_tol = cfg.gap_tol;
+        g.feas_tol = cfg.gap_tol;
     }
+    g
 }
 
-fn qcqp_result_to_solver_result(res: QcqpResult) -> SolverResult {
+fn qcqp_result_to_solver_result(res: QcqpResult, obj_offset: f64) -> SolverResult {
     match res.status {
         SolveStatus::Infeasible => return SolverResult::infeasible(),
         SolveStatus::Unbounded => return SolverResult::unbounded(),
@@ -130,7 +145,7 @@ fn qcqp_result_to_solver_result(res: QcqpResult) -> SolverResult {
     let deadline_triggered = res.status == SolveStatus::Timeout;
     let mut result = SolverResult {
         status: res.status,
-        objective: res.objective,
+        objective: res.objective + obj_offset,
         solution: res.x,
         iterations: res.iterations,
         ..SolverResult::default()
@@ -140,14 +155,20 @@ fn qcqp_result_to_solver_result(res: QcqpResult) -> SolverResult {
     result
 }
 
-fn global_result_to_solver_result(res: GlobalResult) -> SolverResult {
+fn global_result_to_solver_result(res: GlobalResult, obj_offset: f64) -> SolverResult {
     if res.status == SolveStatus::Infeasible {
         return SolverResult::infeasible();
+    }
+    // The spatial B&B reports `NumericalError` only when no incumbent was
+    // established (objective is a bare `+inf` sentinel, not a real `c^T x`),
+    // so canonicalize it rather than adding the offset to infinity.
+    if res.status == SolveStatus::NumericalError {
+        return SolverResult::numerical_error();
     }
     let deadline_triggered = res.status == SolveStatus::Timeout;
     let mut result = SolverResult {
         status: res.status,
-        objective: res.objective,
+        objective: res.objective + obj_offset,
         solution: res.x,
         iterations: res.nodes,
         ..SolverResult::default()
@@ -304,8 +325,53 @@ fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::{GlobalOptimizationConfig, Tolerance};
     use crate::qp::QcqpMatrix;
     use crate::sparse::CscMatrix;
+
+    /// P3-1: the spatial-B&B optimality gap and incumbent feasibility
+    /// resolution must stay at one coherent scale.
+    ///
+    /// Without a `global_optimization` config both track the IPM accuracy
+    /// `eps`; with one, both track `cfg.gap_tol` (which carries no separate
+    /// feasibility field). Independent oracle: the expected tolerances are the
+    /// documented inputs (`ipm_eps()` / `cfg.gap_tol`), not recomputed through
+    /// `global_options`.
+    ///
+    /// Sentinel: dropping the `g.feas_tol = cfg.gap_tol` alignment makes the
+    /// `cfg` branch FAIL (feas_tol would stay at `eps` while gap_tol moved to
+    /// `cfg.gap_tol`, i.e. the two diverge).
+    #[test]
+    fn global_options_gap_and_feas_stay_consistent() {
+        // No cfg: both = eps (here the Fast tolerance, distinct from the
+        // GlobalOptimizationConfig default gap so the two sources can't alias).
+        let base = SolverOptions {
+            tolerance: Some(Tolerance::Fast),
+            ..SolverOptions::default()
+        };
+        let eps = base.ipm_eps();
+        let g = global_options(&base);
+        assert_eq!(g.gap_tol, eps, "no cfg: gap_tol tracks eps");
+        assert_eq!(g.feas_tol, eps, "no cfg: feas_tol tracks eps");
+        assert_eq!(g.gap_tol, g.feas_tol, "no cfg: gap/feas consistent");
+
+        // With cfg (default gap_tol, deliberately != eps): both track cfg.gap_tol.
+        let cfg = GlobalOptimizationConfig::default();
+        assert_ne!(
+            cfg.gap_tol, eps,
+            "test premise: cfg default gap must differ from eps"
+        );
+        let with_cfg = SolverOptions {
+            tolerance: Some(Tolerance::Fast),
+            global_optimization: Some(cfg.clone()),
+            ..SolverOptions::default()
+        };
+        let gc = global_options(&with_cfg);
+        assert_eq!(gc.gap_tol, cfg.gap_tol, "cfg: gap_tol tracks cfg.gap_tol");
+        assert_eq!(gc.feas_tol, cfg.gap_tol, "cfg: feas_tol tracks cfg.gap_tol");
+        assert_eq!(gc.gap_tol, gc.feas_tol, "cfg: gap/feas consistent");
+        assert_eq!(gc.max_nodes, cfg.max_nodes, "cfg: node budget honored");
+    }
 
     /// `nonconvex_from_qp_problem`'s constraint transcription must match a
     /// hand-built expectation, element-wise (independent oracle: every

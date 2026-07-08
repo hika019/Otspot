@@ -283,6 +283,12 @@ impl QpsParser {
                     message: format!("Non-finite RHS value for row='{}'", row_name),
                 });
             }
+            if self.rhs.contains_key(&row_name) {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: format!("RHS: duplicate entry for row '{}'", row_name),
+                });
+            }
             self.rhs.insert(row_name, value);
             return Ok(());
         }
@@ -311,6 +317,12 @@ impl QpsParser {
             message: msg,
         })?;
         for (name, value) in pairs {
+            if self.rhs.contains_key(&name) {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: format!("RHS: duplicate entry for row '{}'", name),
+                });
+            }
             self.rhs.insert(name, value);
         }
         Ok(())
@@ -335,6 +347,12 @@ impl QpsParser {
                 return Err(QpsError::ParseError {
                     line: line_num,
                     message: format!("Non-finite RANGES value for row='{}'", row_name),
+                });
+            }
+            if self.ranges.contains_key(&row_name) {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: format!("RANGES: duplicate entry for row '{}'", row_name),
                 });
             }
             self.ranges.insert(row_name, value);
@@ -362,6 +380,12 @@ impl QpsParser {
             message: msg,
         })?;
         for (name, value) in pairs {
+            if self.ranges.contains_key(&name) {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: format!("RANGES: duplicate entry for row '{}'", name),
+                });
+            }
             self.ranges.insert(name, value);
         }
         Ok(())
