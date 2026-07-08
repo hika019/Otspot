@@ -530,6 +530,16 @@ ENDATA
         );
     }
 
+    #[test]
+    fn test_qps_bounds_value_on_value_less_type_is_error() {
+        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nBOUNDS\n FR BND x1 0.0\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("does not take a value"),
+            "free-format FR with a value must be rejected, got {err:?}"
+        );
+    }
+
     /// Fixed-format BOUNDS: MPS field values may contain internal spaces (FORPLAN
     /// column "A   22 1", bound set "BND-1"). `split_whitespace` over-splits such a
     /// line into 5+ tokens, so the parser must fall back to fixed-column extraction
@@ -549,22 +559,37 @@ ENDATA
         put(&mut col, 4, "AB CD");
         put(&mut col, 14, "obj");
         put(&mut col, 24, "1.0");
+        let mut col_bv = vec![b' '; 4];
+        put(&mut col_bv, 4, "EF GH");
+        put(&mut col_bv, 14, "obj");
+        put(&mut col_bv, 24, "2.0");
         // BOUNDS: type[1..], bndname[4..], col[14..], val[24..].
         let mut bnd = vec![b' '; 1];
         put(&mut bnd, 1, "UP");
         put(&mut bnd, 4, "BND");
         put(&mut bnd, 14, "AB CD");
         put(&mut bnd, 24, "2640.");
+        let mut bnd_bv = vec![b' '; 1];
+        put(&mut bnd_bv, 1, "BV");
+        put(&mut bnd_bv, 4, "BND");
+        put(&mut bnd_bv, 14, "EF GH");
         let qps = format!(
-            "NAME          FIXED\nROWS\n N  obj\nCOLUMNS\n{}\nRHS\nBOUNDS\n{}\nENDATA\n",
+            "NAME          FIXED\nROWS\n N  obj\nCOLUMNS\n{}\n{}\nRHS\nBOUNDS\n{}\n{}\nENDATA\n",
             String::from_utf8(col).unwrap(),
+            String::from_utf8(col_bv).unwrap(),
             String::from_utf8(bnd).unwrap(),
+            String::from_utf8(bnd_bv).unwrap(),
         );
         let prob = parse_qps_str(&qps).expect("fixed-format spaced BOUNDS must parse");
-        assert_eq!(prob.num_vars, 1);
+        assert_eq!(prob.num_vars, 2);
         assert_eq!(
             prob.bounds[0].1, 2640.0,
             "UP bound value must be read from fixed columns"
+        );
+        assert_eq!(
+            prob.bounds[1],
+            (0.0, 1.0),
+            "BV bound without a value must keep the full fixed-format spaced name"
         );
     }
 
@@ -600,6 +625,16 @@ ENDATA
         assert!(
             err.to_string().contains("Odd trailing token"),
             "odd RHS token must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_qps_ranges_odd_trailing_token_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nRANGES\n    rng c1 1.0 c2\nQUADOBJ\n    x1 x1 1.0\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("Odd trailing token"),
+            "odd RANGES token must be rejected, got {err:?}"
         );
     }
 

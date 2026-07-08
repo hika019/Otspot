@@ -284,6 +284,15 @@ impl QpsParser {
             return Ok(());
         }
         let force_fixed = mps_field(line, 4, 12).is_empty() && !mps_field(line, 14, 22).is_empty();
+        if !force_fixed && qps_free_pairs_have_odd_trailing_name(&parts) {
+            return Err(QpsError::ParseError {
+                line: line_num,
+                message: format!(
+                    "Odd trailing token '{}' in RHS (row name without a value)",
+                    parts[parts.len() - 1]
+                ),
+            });
+        }
         let is_free = if force_fixed {
             false
         } else {
@@ -336,6 +345,15 @@ impl QpsParser {
             }
             self.ranges.insert(row_name, value);
             return Ok(());
+        }
+        if qps_free_pairs_have_odd_trailing_name(&parts) {
+            return Err(QpsError::ParseError {
+                line: line_num,
+                message: format!(
+                    "Odd trailing token '{}' in RANGES (row name without a value)",
+                    parts[parts.len() - 1]
+                ),
+            });
         }
         let is_free = {
             let mut ok = true;
@@ -391,19 +409,16 @@ impl QpsParser {
             bound_type,
             BoundType::FR | BoundType::MI | BoundType::PL | BoundType::BV
         );
+        let fixed_col_name = mps_field(line, 14, 22).to_string();
+        let looks_fixed_bounds = !fixed_col_name.is_empty()
+            && (parts.len() >= 5 || (!value_taking && parts.len() > 3));
         // Fixed-format MPS field values may contain internal spaces (e.g. FORPLAN
         // column "A   22 1" / bound set "BND-1"), so `split_whitespace` over-splits
-        // and yields 5+ tokens for a single (col, value) entry. Fall back to
-        // fixed-column extraction: col at 14..22, value at 24..36.
-        if parts.len() >= 5 {
-            let col_name = mps_field(line, 14, 22).to_string();
-            if col_name.is_empty() {
-                return Err(QpsError::ParseError {
-                    line: line_num,
-                    message: "BOUNDS line: empty column name in fixed-format field 14..22"
-                        .to_string(),
-                });
-            }
+        // spaced names. Fall back to fixed-column extraction whenever a plausible
+        // fixed col field exists, including no-value types (`BV`, `FR`, `MI`,
+        // `PL`) where a spaced column name may yield only four whitespace tokens.
+        if looks_fixed_bounds {
+            let col_name = fixed_col_name;
             let raw = mps_field(line, 24, 36);
             let value = if raw.is_empty() {
                 None
@@ -431,6 +446,24 @@ impl QpsParser {
             }
             self.bounds.push((bound_type, col_name, value));
             return Ok(());
+        }
+        if !value_taking && parts.len() > 3 {
+            return Err(QpsError::ParseError {
+                line: line_num,
+                message: format!(
+                    "BOUNDS type {} does not take a value for col='{}'",
+                    parts[0], parts[2]
+                ),
+            });
+        }
+        if value_taking && parts.len() > 4 {
+            return Err(QpsError::ParseError {
+                line: line_num,
+                message: format!(
+                    "BOUNDS type {} takes exactly one value for col='{}'",
+                    parts[0], parts[2]
+                ),
+            });
         }
         let (col_name, value) = if !value_taking {
             (parts[2].to_string(), None)
@@ -782,6 +815,14 @@ impl QpsParser {
         prob.obj_offset = obj_offset;
         Ok(prob)
     }
+}
+
+fn qps_free_pairs_have_odd_trailing_name(parts: &[&str]) -> bool {
+    parts.len() > 2
+        && parts.len() % 2 == 0
+        && (2..parts.len() - 1)
+            .step_by(2)
+            .all(|i| parts[i].parse::<f64>().is_ok())
 }
 
 // ── Public entry points ───────────────────────────────────────────────────────
