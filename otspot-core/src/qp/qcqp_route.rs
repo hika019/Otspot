@@ -119,7 +119,14 @@ fn global_options(options: &SolverOptions) -> GlobalOptions {
     // the QP global route (`qp::global`).
     if let Some(cfg) = options.global_optimization.as_ref() {
         g.max_nodes = cfg.max_nodes;
+        // `cfg.gap_tol` is the user's target accuracy for the whole global
+        // solve; `GlobalOptimizationConfig` carries no separate feasibility
+        // field. Align both the optimality gap and the incumbent feasibility
+        // resolution to it so they never sit at inconsistent scales — passing
+        // a `cfg` (even the default) must not leave `gap_tol` looser than
+        // `feas_tol`. Without a `cfg`, both stay at the IPM accuracy `eps`.
         g.gap_tol = cfg.gap_tol;
+        g.feas_tol = cfg.gap_tol;
     }
     g
 }
@@ -309,8 +316,53 @@ fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::{GlobalOptimizationConfig, Tolerance};
     use crate::qp::QcqpMatrix;
     use crate::sparse::CscMatrix;
+
+    /// P3-1: the spatial-B&B optimality gap and incumbent feasibility
+    /// resolution must stay at one coherent scale.
+    ///
+    /// Without a `global_optimization` config both track the IPM accuracy
+    /// `eps`; with one, both track `cfg.gap_tol` (which carries no separate
+    /// feasibility field). Independent oracle: the expected tolerances are the
+    /// documented inputs (`ipm_eps()` / `cfg.gap_tol`), not recomputed through
+    /// `global_options`.
+    ///
+    /// Sentinel: dropping the `g.feas_tol = cfg.gap_tol` alignment makes the
+    /// `cfg` branch FAIL (feas_tol would stay at `eps` while gap_tol moved to
+    /// `cfg.gap_tol`, i.e. the two diverge).
+    #[test]
+    fn global_options_gap_and_feas_stay_consistent() {
+        // No cfg: both = eps (here the Fast tolerance, distinct from the
+        // GlobalOptimizationConfig default gap so the two sources can't alias).
+        let base = SolverOptions {
+            tolerance: Some(Tolerance::Fast),
+            ..SolverOptions::default()
+        };
+        let eps = base.ipm_eps();
+        let g = global_options(&base);
+        assert_eq!(g.gap_tol, eps, "no cfg: gap_tol tracks eps");
+        assert_eq!(g.feas_tol, eps, "no cfg: feas_tol tracks eps");
+        assert_eq!(g.gap_tol, g.feas_tol, "no cfg: gap/feas consistent");
+
+        // With cfg (default gap_tol, deliberately != eps): both track cfg.gap_tol.
+        let cfg = GlobalOptimizationConfig::default();
+        assert_ne!(
+            cfg.gap_tol, eps,
+            "test premise: cfg default gap must differ from eps"
+        );
+        let with_cfg = SolverOptions {
+            tolerance: Some(Tolerance::Fast),
+            global_optimization: Some(cfg.clone()),
+            ..SolverOptions::default()
+        };
+        let gc = global_options(&with_cfg);
+        assert_eq!(gc.gap_tol, cfg.gap_tol, "cfg: gap_tol tracks cfg.gap_tol");
+        assert_eq!(gc.feas_tol, cfg.gap_tol, "cfg: feas_tol tracks cfg.gap_tol");
+        assert_eq!(gc.gap_tol, gc.feas_tol, "cfg: gap/feas consistent");
+        assert_eq!(gc.max_nodes, cfg.max_nodes, "cfg: node budget honored");
+    }
 
     /// `nonconvex_from_qp_problem`'s constraint transcription must match a
     /// hand-built expectation, element-wise (independent oracle: every
