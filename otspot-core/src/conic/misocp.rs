@@ -111,6 +111,24 @@ impl Default for BbOptions {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of `solve_misocp`'s mid-loop deadline check
+    /// (test-only, mirrors `nonconvex::RELAX_STATUS_PLAN`'s fault-injection
+    /// pattern). `Some(n)` deterministically forces the deadline branch to
+    /// fire once `nodes >= n`, regardless of `BbOptions::deadline` or
+    /// wall-clock jitter; `None` (the default) leaves the real deadline check
+    /// as the sole trigger. B&B is single-threaded and depends only on
+    /// `prob`/`opts` (not on `bb.deadline`, which the node relaxations never
+    /// see), so two runs with identical `prob`/`opts` visit the exact same
+    /// node sequence -- this lets a test reproduce "deadline hit mid-search,
+    /// incumbent kept" deterministically instead of racing a wall clock
+    /// against CPU/OS jitter (see `misocp_mid_search_deadline_keeps_incumbent`).
+    /// `thread_local` so parallel tests cannot corrupt each other's setting.
+    pub(super) static DEADLINE_AFTER_NODE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Build a relaxation with per-node integer bounds `[lb_j, ub_j]`. Strict
 /// bounds are appended as orthant rows (kept contiguous before the SOC
 /// blocks); a fixed variable (`lb_j == ub_j`) becomes an equality row
@@ -271,7 +289,13 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
     let mut stack: Vec<(Vec<f64>, Vec<f64>)> = vec![(prob.int_lb.clone(), prob.int_ub.clone())];
 
     while let Some((lb, ub)) = stack.pop() {
-        if bb.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        let deadline_hit = bb.deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        // Test-only: force the same branch deterministically at a chosen
+        // node count instead of a wall-clock instant (see `DEADLINE_AFTER_NODE`).
+        #[cfg(test)]
+        let deadline_hit =
+            deadline_hit || DEADLINE_AFTER_NODE.with(|c| c.get().is_some_and(|n| nodes >= n));
+        if deadline_hit {
             timed_out = true;
             break;
         }
