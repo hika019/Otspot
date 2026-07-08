@@ -959,12 +959,20 @@ fn misocp_expired_deadline_returns_timeout() {
 #[test]
 fn misocp_mid_search_deadline_keeps_incumbent() {
     // Wider instance (37 nodes): max x0+x1+x2 in a ball of r^2 = 30, integers
-    // in [0, 5]^3. Deadline at half the measured full runtime T. Timing
-    // margins (measured, same-process warm run): the incumbent lands by node
-    // 2 of 37 (~T/18), so missing it needs a ~9x mid-test slowdown of the
-    // second run relative to the first; finishing the whole search before T/2
-    // needs the second run to be 2x faster than the just-completed identical
-    // warm run. 45/45 trials landed mid-search (nodes 15..28).
+    // in [0, 5]^3; the incumbent lands by node 2 of 37.
+    //
+    // The mid-search deadline is injected by node count via
+    // `misocp::DEADLINE_AFTER_NODE` instead of a wall-clock `Instant`: B&B is
+    // single-threaded and its node sequence depends only on `prob`/`opts` (a
+    // node relaxation solve never sees `BbOptions::deadline`), so re-running
+    // the identical problem/options visits the exact same nodes in the exact
+    // same order. Forcing the deadline branch at a fixed node count therefore
+    // reproduces "deadline hit mid-search, incumbent kept" with zero timing
+    // dependence. The previous wall-clock version (deadline = measured
+    // full-run time / 2) flaked under competing CPU load: base bab20de8 was
+    // observed to fail 2/10 runs under load, because the second (deadline)
+    // run's per-node cost relative to the first (calibration) run's is not
+    // guaranteed under OS/CPU jitter.
     let n = 3usize;
     let r2 = 30.0_f64;
     let mut grows = vec![vec![0.0; n]];
@@ -993,17 +1001,24 @@ fn misocp_mid_search_deadline_keeps_incumbent() {
         int_lb: vec![0.0; n],
         int_ub: vec![5.0; n],
     };
-    let t0 = std::time::Instant::now();
     let full = solve_misocp(&prob, &ConicOptions::default(), &BbOptions::default());
-    let full_time = t0.elapsed();
     assert!(!full.x.is_empty(), "calibration run must find an incumbent");
-    let bb = BbOptions {
-        deadline: Some(std::time::Instant::now() + full_time / 2),
-        ..BbOptions::default()
-    };
-    let res = solve_misocp(&prob, &ConicOptions::default(), &bb);
+    assert!(
+        full.nodes >= 4,
+        "instance too small to test a mid-search cut: {full:?}"
+    );
+    // Cut after the incumbent lands (node 2) but well before exhaustion
+    // (node full.nodes), so the injected deadline lands mid-search.
+    let cut = full.nodes / 2;
+    misocp::DEADLINE_AFTER_NODE.with(|c| c.set(Some(cut)));
+    let res = solve_misocp(&prob, &ConicOptions::default(), &BbOptions::default());
+    misocp::DEADLINE_AFTER_NODE.with(|c| c.set(None));
     assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
     assert!(!res.x.is_empty(), "incumbent must be preserved on timeout");
+    assert_eq!(
+        res.nodes, cut,
+        "deadline hook must cut exactly at the injected node count"
+    );
     assert!(
         res.nodes < full.nodes,
         "deadline must actually cut the search"
