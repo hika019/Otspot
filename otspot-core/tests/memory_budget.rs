@@ -564,3 +564,153 @@ fn conic_single_huge_soc_peak_within_budget() {
         HUGE_SOC_PEAK_BUDGET_BYTES as f64 / 1_048_576.0
     );
 }
+
+// ---------------------------------------------------------------------------
+// MISOCP route: branch-and-bound over many independent SOC blocks
+// ---------------------------------------------------------------------------
+
+use otspot_core::{solve_misocp, BbOptions, MisocpProblem};
+
+/// Padding SOC blocks (dim 3 each), decoupled from the branching subproblem
+/// (disjoint rows/columns): `n = 1 (branching var) + 3 * MISOCP_NUM_BLOCKS`,
+/// a few-thousand-dimension MISOCP with `nnz = O(n)`.
+const MISOCP_NUM_BLOCKS: usize = 2_000;
+
+/// `build_relaxation` (`otspot_core::conic::misocp`) used to densify `base.g`
+/// and `base.a` to `Vec<Vec<f64>>` on *every* branch-and-bound node,
+/// regardless of how few integer variables were actually being branched on:
+/// `O(n*m)` per node, repeated at every node. That is the class this fences.
+///
+/// Measured peak (release, `cargo test --release --test memory_budget
+/// conic_misocp_route_peak_within_budget -- --nocapture`, this machine):
+/// 5.95 MB at `n = 6001`, 3 B&B nodes (root + down + up, matching
+/// `misocp_exhaustive_search_without_failures_is_optimal`'s node trace).
+/// Budget = measured x3 margin (CLAUDE.md convention), rounded up.
+///
+/// **No-op failure guarantee, verified two ways**: (1) `INJECT_QUADRATIC_BLOWUP`
+/// (below) makes this FAIL; (2) unlike the conic SOCP fences above, literally
+/// reverting `build_relaxation` to its pre-fix `Vec<Vec<f64>>`-densifying
+/// form is runnable at this `n` and was done manually during development:
+/// peak jumped to 733.9 MB (vs. this budget's 18.0 MB, and the fixed
+/// implementation's own 5.95 MB) -- the pre-fix code densifies `base.g` and
+/// `base.a` (each `n x m = 6001 x 6001`, `~288 MB` undropped at once) on
+/// every one of the 3 nodes, since every node rebuilds the whole relaxation
+/// regardless of how few integer variables are actually being branched on.
+const MISOCP_PEAK_BUDGET_BYTES: usize = 18 * 1024 * 1024;
+
+/// `min x + sum_b(-x1_b)` s.t. `x >= 0.5`, integer `x in [0, 2]`, over `n`
+/// independent SOC blocks `b`: `x0_b` fixed to `1` by an equality row, cone
+/// `x0_b >= sqrt(x1_b^2 + x2_b^2)`. The branching subproblem is exactly
+/// `conic::tests::half_int_lp` (root relaxation fractional at `x = 0.5`; the
+/// down child `x <= 0` conflicts with `x >= 0.5` and is Farkas-infeasible;
+/// the up child `x >= 1` gives the integer optimum `x = 1`) -- already
+/// proven correct by `misocp_exhaustive_search_without_failures_is_optimal`.
+/// The blocks share no row or column with `x`, so by separability the
+/// overall optimum is the sum of the two independent subproblems' optima:
+/// `1 - num_blocks` (each block's hand-provable optimum is `-1`, same
+/// argument as `build_many_soc_socp` above).
+fn build_misocp_with_many_blocks(num_blocks: usize) -> (MisocpProblem, f64) {
+    let n = 1 + 3 * num_blocks;
+    let m = 1 + 3 * num_blocks;
+
+    // l=1 row: -x <= -0.5  (x >= 0.5), column 0 is the branching variable.
+    let mut g_rows = vec![0usize];
+    let mut g_cols = vec![0usize];
+    let mut g_vals = vec![-1.0];
+    let mut h = vec![-0.5];
+    for b in 0..num_blocks {
+        let base_col = 1 + 3 * b;
+        for k in 0..3 {
+            g_rows.push(1 + 3 * b + k);
+            g_cols.push(base_col + k);
+            g_vals.push(-1.0);
+            h.push(0.0);
+        }
+    }
+    let g = CscMatrix::from_triplets(&g_rows, &g_cols, &g_vals, m, n).expect("misocp G");
+
+    let mut c = vec![0.0; n];
+    c[0] = 1.0;
+    let mut a_rows = Vec::with_capacity(num_blocks);
+    let mut a_cols = Vec::with_capacity(num_blocks);
+    let mut a_vals = Vec::with_capacity(num_blocks);
+    for b in 0..num_blocks {
+        let base_col = 1 + 3 * b;
+        c[base_col + 1] = -1.0;
+        a_rows.push(b);
+        a_cols.push(base_col);
+        a_vals.push(1.0);
+    }
+    let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, num_blocks, n).expect("misocp A");
+    let b_vec = vec![1.0; num_blocks];
+
+    let base = ConicProblem {
+        c,
+        a,
+        b: b_vec,
+        g,
+        h,
+        cone: ConeSpec {
+            l: 1,
+            soc: vec![3; num_blocks],
+        },
+    };
+    let prob = MisocpProblem {
+        base,
+        integers: vec![0],
+        int_lb: vec![0.0],
+        int_ub: vec![2.0],
+    };
+    (prob, 1.0 - num_blocks as f64)
+}
+
+/// Peak allocation fence for the MISOCP branch-and-bound path
+/// (`otspot_core::conic::misocp::build_relaxation`): the relaxation rebuilt
+/// at every node must stay `O(nnz)`, not `O(n*m)`.
+///
+/// **No-op failure guarantee**: flipping `INJECT_QUADRATIC_BLOWUP` to `true`
+/// makes this FAIL (same mechanism as the other three routes; sized to `2x`
+/// this route's budget).
+#[test]
+fn conic_misocp_route_peak_within_budget() {
+    let _serial = lock_measurement();
+    let (problem, expected_obj) = build_misocp_with_many_blocks(MISOCP_NUM_BLOCKS);
+
+    reset_peak();
+    let r = solve_misocp(&problem, &ConicOptions::default(), &BbOptions::default());
+    maybe_inject_dense_blowup(MISOCP_PEAK_BUDGET_BYTES);
+    let peak = peak_bytes();
+    eprintln!(
+        "misocp_route peak={peak} bytes ({:.2} MB), nodes={}",
+        peak as f64 / 1_048_576.0,
+        r.nodes
+    );
+
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "MISOCP route: expected Optimal"
+    );
+    assert_eq!(r.nodes, 3, "MISOCP route: expected root + down + up nodes");
+    let rel_err = (r.objective - expected_obj).abs() / expected_obj.abs().max(1.0);
+    assert!(
+        rel_err < 1e-4,
+        "MISOCP route: obj={:.6e} expected={:.6e} rel_err={:.3e}",
+        r.objective,
+        expected_obj,
+        rel_err
+    );
+    assert!(
+        (r.x[0] - 1.0).abs() < 1e-6,
+        "MISOCP route: branching var x[0]={} want 1.0",
+        r.x[0]
+    );
+    assert!(
+        peak <= MISOCP_PEAK_BUDGET_BYTES,
+        "MISOCP route peak {:.1} MB exceeds {:.1} MB budget (n={}, {MISOCP_NUM_BLOCKS} blocks) — \
+         check for an unconditional dense expansion in build_relaxation",
+        peak as f64 / 1_048_576.0,
+        MISOCP_PEAK_BUDGET_BYTES as f64 / 1_048_576.0,
+        1 + 3 * MISOCP_NUM_BLOCKS
+    );
+}
