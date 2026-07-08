@@ -3597,9 +3597,11 @@ fn solve_socp_canonicalizes_non_optimal_objective() {
     // #40 (confirmed repro): `ipm::solve` always set `objective = c^T x` from
     // whatever iterate it stopped at, so an Infeasible/Unbounded result
     // carried a meaningless number (the review's repro: an infeasible `x<=0,
-    // x>=1` SOCP reported `objective=0.0`). Non-`Optimal` statuses must
-    // report the canonical sentinel used across the rest of the codebase
-    // (`SolverResult::infeasible`/`unbounded`: `+inf` / `-inf`).
+    // x>=1` SOCP reported `objective=0.0`). Only the two conclusive
+    // no-usable-iterate statuses are canonicalized to the sentinels used
+    // across the codebase (`SolverResult::infeasible`/`unbounded`: `+inf` /
+    // `-inf`); inconclusive statuses keep their real iterate value -- see
+    // `solve_socp_preserves_real_iterate_objective_when_inconclusive`.
     let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
     let infeasible = ConicProblem {
         c: vec![0.0],
@@ -3625,6 +3627,66 @@ fn solve_socp_canonicalizes_non_optimal_objective() {
     let res = solve_socp(&unbounded, &ConicOptions::default());
     assert_eq!(res.status, SolveStatus::Unbounded, "{res:?}");
     assert_eq!(res.objective, f64::NEG_INFINITY, "obj={}", res.objective);
+}
+
+#[test]
+fn solve_socp_preserves_real_iterate_objective_when_inconclusive() {
+    // #40 follow-up (P1): the objective canonicalization must fire ONLY for
+    // the conclusive no-usable-iterate statuses (Infeasible/Unbounded). An
+    // inconclusive status (MaxIterations here; Timeout/NumericalError share
+    // the arm) returns a genuine, still-improving iterate in `res.x` whose
+    // `dot(c, x)` is the convergence-tracking value callers rely on; clobbering
+    // it to `+inf` (as an over-broad `_ => f64::INFINITY` arm did) both
+    // contradicts `res.x` and erases that tracking, violating the codebase
+    // convention (`simplex::timeout_result_with_incumbent` keeps the real
+    // `c·x`; `+inf` is reserved for the *incumbent-less* bare timeout).
+    //
+    // `min c^T x` over the unit ball `||x|| <= 1` (optimum `-||c||`, reached
+    // only in the interior limit) with `max_iter = 3`: the IPM is still
+    // strictly improving and nowhere near the 1e-9 tolerance, so it stops at
+    // MaxIterations with `x` moved well off its `0` initializer.
+    let n = 5usize;
+    let c = vec![0.7, -1.3, 0.4, 1.1, -0.6];
+    let mut grows = vec![vec![0.0; n]]; // row 0: radius bound t = 1.
+    let mut h = vec![1.0];
+    for j in 0..n {
+        let mut r = vec![0.0; n];
+        r[j] = -1.0; // s_{1+j} = x_j.
+        grows.push(r);
+        h.push(0.0);
+    }
+    let prob = ConicProblem {
+        c: c.clone(),
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b: vec![],
+        g: csc(&grows, n + 1, n),
+        h,
+        cone: ConeSpec {
+            l: 0,
+            soc: vec![n + 1],
+        },
+    };
+    let opts = ConicOptions {
+        max_iter: 3,
+        ..ConicOptions::default()
+    };
+    let res = solve_socp(&prob, &opts);
+    assert_eq!(res.status, SolveStatus::MaxIterations, "{res:?}");
+    // The reported objective must equal `dot(c, res.x)` of the returned
+    // iterate -- finite, and strictly better than the `x = 0` start (0.0),
+    // never the `+inf` the buggy blanket arm produced.
+    let recomputed: f64 = c.iter().zip(&res.x).map(|(a, b)| a * b).sum();
+    assert!(res.objective.is_finite(), "obj={}", res.objective);
+    assert_eq!(
+        res.objective, recomputed,
+        "objective must stay dot(c, x) of the returned iterate"
+    );
+    assert!(
+        res.objective < -1e-6,
+        "iterate must have improved past x=0 (obj={}); a spurious +inf/0 \
+         would mean the real iterate value was discarded",
+        res.objective
+    );
 }
 
 fn valid_int_lp() -> MisocpProblem {

@@ -204,22 +204,28 @@ impl ConicOptions {
 /// Solve a second-order cone program in standard form.
 pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     let mut res = ipm::solve(problem, opts);
-    // Canonicalize the reported objective by status (PR #25 review #40): only
-    // `Optimal` certifies `c^T x` as the problem's objective. `ipm::solve`
-    // always sets `objective = dot(c, &x)` from whatever iterate it stopped
-    // at -- for every other status that's just the in-progress IPM iterate
-    // when the loop broke (an infeasibility/unboundedness certificate can
-    // fire on the very first iteration, before `x` has moved off its `0`
-    // initializer, as in the review's repro, or many iterations in), not a
-    // value callers (e.g. `examples/solve_cbf`'s CSV output) should treat as
-    // a baseline. `NotSupported` already carries `f64::NAN` from
-    // `ipm::solve`'s `failed()` helper (a validate()-time rejection, before
-    // any iterate exists) and is left untouched.
+    // Canonicalize the reported objective only for the two statuses whose
+    // returned `x` is *not* a usable iterate (PR #25 review #40). `ipm::solve`
+    // always sets `objective = dot(c, &x)`, but:
+    //   - `Infeasible`: a Farkas certificate fired; `x` never left its `0`
+    //     initializer (the review's repro reported a spurious `objective=0.0`
+    //     for an infeasible SOCP). No feasible point exists -> `+inf`, the
+    //     bare no-incumbent sentinel used across the codebase
+    //     (`SolverResult::infeasible`).
+    //   - `Unbounded`: an improving ray was verified -> `-inf`
+    //     (`SolverResult::unbounded`).
+    // Every *inconclusive* status (`MaxIterations`, `Timeout`,
+    // `NumericalError`) keeps `res.objective` = `dot(c, x)` of the real (if
+    // unconverged) iterate that is *also* returned in `res.x`: overwriting it
+    // with `+inf` would contradict that iterate and erase convergence-tracking
+    // information, exactly what `simplex::timeout_result_with_incumbent`
+    // preserves (`+inf` is reserved there for the *bare, incumbent-less*
+    // timeout). `NotSupported` already carries `f64::NAN` from `ipm::solve`'s
+    // `failed()` helper (rejected before any iterate exists) and is untouched.
     res.objective = match res.status {
-        SolveStatus::Optimal => res.objective,
+        SolveStatus::Infeasible => f64::INFINITY,
         SolveStatus::Unbounded => f64::NEG_INFINITY,
-        SolveStatus::NotSupported(_) => res.objective,
-        _ => f64::INFINITY,
+        _ => res.objective,
     };
     res
 }
