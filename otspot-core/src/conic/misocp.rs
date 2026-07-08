@@ -111,24 +111,19 @@ impl Default for BbOptions {
     }
 }
 
-fn dense(a: &CscMatrix) -> Vec<Vec<f64>> {
-    let mut d = vec![vec![0.0; a.ncols()]; a.nrows()];
-    let cp = a.col_ptr();
-    let ri = a.row_ind();
-    let va = a.values();
-    for j in 0..a.ncols() {
-        for k in cp[j]..cp[j + 1] {
-            d[ri[k]][j] = va[k];
-        }
-    }
-    d
-}
-
 /// Build a relaxation with per-node integer bounds `[lb_j, ub_j]`. Strict
 /// bounds are appended as orthant rows (kept contiguous before the SOC
 /// blocks); a fixed variable (`lb_j == ub_j`) becomes an equality row
 /// `x_j = lb_j` instead — the row pair `x_j <= v`, `-x_j <= -v` has no
 /// strictly feasible slack, which stalls the interior-point method.
+///
+/// Constructs the new `G`/`A` directly from `base`'s CSC nonzeros
+/// (`O(nnz(base.g) + nnz(base.a) + border rows)`) instead of densifying
+/// `base` to `Vec<Vec<f64>>` and re-extracting the nonzeros — every
+/// branch-and-bound node calls this, so an `O(n*m)` dense pass here repeats
+/// at every node and dominates B&B memory on any large MISOCP regardless of
+/// how few integer variables are actually being branched on (see
+/// `otspot-core/tests/memory_budget.rs`'s MISOCP route fence).
 fn build_relaxation(
     base: &ConicProblem,
     lb: &[f64],
@@ -136,62 +131,102 @@ fn build_relaxation(
     integers: &[usize],
 ) -> ConicProblem {
     let n = base.n();
-    let gd = dense(&base.g);
     let l = base.cone.l;
-    // Existing orthant rows [0..l), SOC rows [l..m).
-    let mut rows: Vec<Vec<f64>> = Vec::new();
-    let mut h: Vec<f64> = Vec::new();
-    for i in 0..l {
-        rows.push(gd[i].clone());
-        h.push(base.h[i]);
+    let m = base.m();
+
+    let mut n_free_borders = 0usize;
+    let mut n_fixed = 0usize;
+    for (k, _) in integers.iter().enumerate() {
+        if lb[k] == ub[k] {
+            n_fixed += 1;
+        } else {
+            n_free_borders += 1;
+        }
     }
-    let ad = dense(&base.a);
-    let mut eq_rows: Vec<Vec<f64>> = ad.to_vec();
-    let mut b = base.b.clone();
+    let new_l = l + 2 * n_free_borders;
+    let new_m = new_l + (m - l);
+
+    // G: orthant rows [0, l) keep their row index; SOC rows [l, m) shift by
+    // the number of inserted border rows; the border rows fill [l, new_l).
+    let g_nnz = base.g.nnz();
+    let mut g_ri = Vec::with_capacity(g_nnz + 2 * n_free_borders);
+    let mut g_ci = Vec::with_capacity(g_nnz + 2 * n_free_borders);
+    let mut g_vi = Vec::with_capacity(g_nnz + 2 * n_free_borders);
+    let cp = base.g.col_ptr();
+    let ri = base.g.row_ind();
+    let va = base.g.values();
+    for j in 0..n {
+        for k in cp[j]..cp[j + 1] {
+            let i = ri[k];
+            let shifted = if i < l { i } else { i + (new_l - l) };
+            g_ri.push(shifted);
+            g_ci.push(j);
+            g_vi.push(va[k]);
+        }
+    }
+    let mut h = vec![0.0; new_m];
+    h[..l].copy_from_slice(&base.h[..l]);
+    h[new_l..new_m].copy_from_slice(&base.h[l..m]);
+    let mut g_row = l;
     for (k, &j) in integers.iter().enumerate() {
         if lb[k] == ub[k] {
-            // Fixed by branching: x_j = lb_k as an equality row.
-            let mut r = vec![0.0; n];
-            r[j] = 1.0;
-            eq_rows.push(r);
-            b.push(lb[k]);
             continue;
         }
         // Bound rows: x_j <= ub  and  -x_j <= -lb.
-        let mut r = vec![0.0; n];
-        r[j] = 1.0;
-        rows.push(r);
-        h.push(ub[k]);
-        let mut r2 = vec![0.0; n];
-        r2[j] = -1.0;
-        rows.push(r2);
-        h.push(-lb[k]);
+        g_ri.push(g_row);
+        g_ci.push(j);
+        g_vi.push(1.0);
+        h[g_row] = ub[k];
+        g_row += 1;
+        g_ri.push(g_row);
+        g_ci.push(j);
+        g_vi.push(-1.0);
+        h[g_row] = -lb[k];
+        g_row += 1;
     }
-    let new_l = rows.len();
-    for i in l..base.m() {
-        rows.push(gd[i].clone());
-        h.push(base.h[i]);
-    }
-    let to_csc = |rows: &[Vec<f64>]| {
-        let mut ri = Vec::new();
-        let mut ci = Vec::new();
-        let mut vi = Vec::new();
-        for (i, row) in rows.iter().enumerate() {
-            for (j, &v) in row.iter().enumerate() {
-                if v != 0.0 {
-                    ri.push(i);
-                    ci.push(j);
-                    vi.push(v);
-                }
-            }
+    debug_assert_eq!(g_row, new_l);
+    let g = CscMatrix::from_triplets(&g_ri, &g_ci, &g_vi, new_m, n).unwrap();
+
+    // A: existing equality rows keep their row index; each fixed integer
+    // appends one equality row `x_j = lb_k`.
+    let p = base.p();
+    let new_p = p + n_fixed;
+    let a_nnz = base.a.nnz();
+    let mut a_ri = Vec::with_capacity(a_nnz + n_fixed);
+    let mut a_ci = Vec::with_capacity(a_nnz + n_fixed);
+    let mut a_vi = Vec::with_capacity(a_nnz + n_fixed);
+    let acp = base.a.col_ptr();
+    let ari = base.a.row_ind();
+    let ava = base.a.values();
+    for j in 0..n {
+        for k in acp[j]..acp[j + 1] {
+            a_ri.push(ari[k]);
+            a_ci.push(j);
+            a_vi.push(ava[k]);
         }
-        CscMatrix::from_triplets(&ri, &ci, &vi, rows.len(), n).unwrap()
-    };
+    }
+    let mut b = base.b.clone();
+    b.reserve(n_fixed);
+    let mut a_row = p;
+    for (k, &j) in integers.iter().enumerate() {
+        if lb[k] != ub[k] {
+            continue;
+        }
+        // Fixed by branching: x_j = lb_k as an equality row.
+        a_ri.push(a_row);
+        a_ci.push(j);
+        a_vi.push(1.0);
+        b.push(lb[k]);
+        a_row += 1;
+    }
+    debug_assert_eq!(a_row, new_p);
+    let a = CscMatrix::from_triplets(&a_ri, &a_ci, &a_vi, new_p, n).unwrap();
+
     ConicProblem {
         c: base.c.clone(),
-        a: to_csc(&eq_rows),
+        a,
         b,
-        g: to_csc(&rows),
+        g,
         h,
         cone: ConeSpec {
             l: new_l,
@@ -411,4 +446,248 @@ fn qcqp_true_objective(qp: &QcqpProblem, x: &[f64]) -> f64 {
         obj += 0.5 * x.iter().zip(&px).map(|(xi, pxi)| xi * pxi).sum::<f64>();
     }
     obj
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pre-fix reference: densify `base.g`/`base.a` to `Vec<Vec<f64>>`, build
+    /// the bound/fixing rows as dense row vectors, then re-extract nonzeros
+    /// into a fresh `CscMatrix`. This is the exact algorithm `build_relaxation`
+    /// used before the sparse rewrite (O(n*m) per B&B node); it is kept here,
+    /// self-contained, purely as an independent oracle for
+    /// `build_relaxation_matches_dense_reference` below -- production code
+    /// must never call this again.
+    fn reference_dense_build_relaxation(
+        base: &ConicProblem,
+        lb: &[f64],
+        ub: &[f64],
+        integers: &[usize],
+    ) -> ConicProblem {
+        fn dense(a: &CscMatrix) -> Vec<Vec<f64>> {
+            let mut d = vec![vec![0.0; a.ncols()]; a.nrows()];
+            let cp = a.col_ptr();
+            let ri = a.row_ind();
+            let va = a.values();
+            for j in 0..a.ncols() {
+                for k in cp[j]..cp[j + 1] {
+                    d[ri[k]][j] = va[k];
+                }
+            }
+            d
+        }
+
+        let n = base.n();
+        let gd = dense(&base.g);
+        let l = base.cone.l;
+        let mut rows: Vec<Vec<f64>> = Vec::new();
+        let mut h: Vec<f64> = Vec::new();
+        for i in 0..l {
+            rows.push(gd[i].clone());
+            h.push(base.h[i]);
+        }
+        let ad = dense(&base.a);
+        let mut eq_rows: Vec<Vec<f64>> = ad.to_vec();
+        let mut b = base.b.clone();
+        for (k, &j) in integers.iter().enumerate() {
+            if lb[k] == ub[k] {
+                let mut r = vec![0.0; n];
+                r[j] = 1.0;
+                eq_rows.push(r);
+                b.push(lb[k]);
+                continue;
+            }
+            let mut r = vec![0.0; n];
+            r[j] = 1.0;
+            rows.push(r);
+            h.push(ub[k]);
+            let mut r2 = vec![0.0; n];
+            r2[j] = -1.0;
+            rows.push(r2);
+            h.push(-lb[k]);
+        }
+        let new_l = rows.len();
+        for i in l..base.m() {
+            rows.push(gd[i].clone());
+            h.push(base.h[i]);
+        }
+        let to_csc = |rows: &[Vec<f64>]| {
+            let mut ri = Vec::new();
+            let mut ci = Vec::new();
+            let mut vi = Vec::new();
+            for (i, row) in rows.iter().enumerate() {
+                for (j, &v) in row.iter().enumerate() {
+                    if v != 0.0 {
+                        ri.push(i);
+                        ci.push(j);
+                        vi.push(v);
+                    }
+                }
+            }
+            CscMatrix::from_triplets(&ri, &ci, &vi, rows.len(), n).unwrap()
+        };
+        ConicProblem {
+            c: base.c.clone(),
+            a: to_csc(&eq_rows),
+            b,
+            g: to_csc(&rows),
+            h,
+            cone: ConeSpec {
+                l: new_l,
+                soc: base.cone.soc.clone(),
+            },
+        }
+    }
+
+    fn assert_csc_eq(a: &CscMatrix, b: &CscMatrix, label: &str) {
+        assert_eq!(a.nrows(), b.nrows(), "{label}: nrows");
+        assert_eq!(a.ncols(), b.ncols(), "{label}: ncols");
+        assert_eq!(a.col_ptr(), b.col_ptr(), "{label}: col_ptr");
+        assert_eq!(a.row_ind(), b.row_ind(), "{label}: row_ind");
+        assert_eq!(a.values(), b.values(), "{label}: values");
+    }
+
+    fn assert_relaxation_eq(sparse: &ConicProblem, reference: &ConicProblem, label: &str) {
+        assert_eq!(sparse.c, reference.c, "{label}: c");
+        assert_eq!(sparse.b, reference.b, "{label}: b");
+        assert_eq!(sparse.h, reference.h, "{label}: h");
+        assert_eq!(sparse.cone.l, reference.cone.l, "{label}: cone.l");
+        assert_eq!(sparse.cone.soc, reference.cone.soc, "{label}: cone.soc");
+        assert_csc_eq(&sparse.a, &reference.a, &format!("{label}: a"));
+        assert_csc_eq(&sparse.g, &reference.g, &format!("{label}: g"));
+    }
+
+    fn csc(rows: &[Vec<f64>], nrows: usize, ncols: usize) -> CscMatrix {
+        let mut ri = Vec::new();
+        let mut ci = Vec::new();
+        let mut vi = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            for (j, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    ri.push(i);
+                    ci.push(j);
+                    vi.push(v);
+                }
+            }
+        }
+        CscMatrix::from_triplets(&ri, &ci, &vi, nrows, ncols).unwrap()
+    }
+
+    /// Sentinel (independent-oracle equivalence): the sparse `build_relaxation`
+    /// must construct byte-for-byte the same `ConicProblem` as the pre-fix
+    /// dense reference, across a spread of `(l, soc, p)` shapes and
+    /// free/fixed/mixed branching patterns. Reintroducing any row-index or
+    /// column-index mistake in the sparse rewrite (e.g. forgetting to shift
+    /// the SOC block by the number of inserted border rows) changes `g`/`a`'s
+    /// nonzero pattern here and fails this test without needing a full SOCP
+    /// solve.
+    #[test]
+    fn build_relaxation_matches_dense_reference() {
+        struct Case {
+            name: &'static str,
+            base: ConicProblem,
+            lb: Vec<f64>,
+            ub: Vec<f64>,
+            integers: Vec<usize>,
+        }
+        let cases = vec![
+            Case {
+                name: "no_integers",
+                base: ConicProblem {
+                    c: vec![1.0, -1.0],
+                    a: csc(&[vec![1.0, 1.0]], 1, 2),
+                    b: vec![2.0],
+                    g: csc(&[vec![0.0, 0.0], vec![-1.0, 0.0], vec![0.0, -1.0]], 3, 2),
+                    h: vec![1.0, 0.0, 0.0],
+                    cone: ConeSpec { l: 0, soc: vec![3] },
+                },
+                lb: vec![],
+                ub: vec![],
+                integers: vec![],
+            },
+            Case {
+                name: "free_borders_only_l_zero",
+                base: ConicProblem {
+                    c: vec![-1.0, -1.0],
+                    a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+                    b: vec![],
+                    g: csc(&[vec![0.0, 0.0], vec![-1.0, 0.0], vec![0.0, -1.0]], 3, 2),
+                    h: vec![2.0, 0.0, 0.0],
+                    cone: ConeSpec { l: 0, soc: vec![3] },
+                },
+                lb: vec![0.0, 0.0],
+                ub: vec![2.0, 2.0],
+                integers: vec![0, 1],
+            },
+            Case {
+                name: "free_borders_with_existing_l",
+                base: ConicProblem {
+                    c: vec![1.0, 0.5, -2.0],
+                    a: csc(&[vec![1.0, 1.0, 1.0]], 1, 3),
+                    b: vec![3.0],
+                    g: csc(
+                        &[
+                            vec![1.0, 0.0, 0.0],
+                            vec![0.0, 0.0, 0.0],
+                            vec![-1.0, 0.0, 0.0],
+                            vec![0.0, -1.0, 0.0],
+                        ],
+                        4,
+                        3,
+                    ),
+                    h: vec![5.0, 1.0, 0.0, 0.0],
+                    cone: ConeSpec { l: 1, soc: vec![3] },
+                },
+                lb: vec![0.0, -1.0],
+                ub: vec![4.0, 4.0],
+                integers: vec![0, 2],
+            },
+            Case {
+                name: "fixed_only",
+                base: ConicProblem {
+                    c: vec![1.0],
+                    a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+                    b: vec![],
+                    g: csc(&[vec![1.0]], 1, 1),
+                    h: vec![2.0e10],
+                    cone: ConeSpec { l: 1, soc: vec![] },
+                },
+                lb: vec![1.0e10],
+                ub: vec![1.0e10],
+                integers: vec![0],
+            },
+            Case {
+                name: "mixed_fixed_and_free_with_prior_equalities",
+                base: ConicProblem {
+                    c: vec![1.0, 2.0, 3.0, 4.0],
+                    a: csc(&[vec![1.0, 0.0, 1.0, 0.0], vec![0.0, 1.0, 0.0, 1.0]], 2, 4),
+                    b: vec![1.0, 2.0],
+                    g: csc(
+                        &[
+                            vec![1.0, 0.0, 0.0, 0.0],
+                            vec![0.0, 0.0, 0.0, 0.0],
+                            vec![-1.0, 0.0, 0.0, 0.0],
+                            vec![0.0, -1.0, 0.0, 0.0],
+                            vec![0.0, 0.0, -1.0, 0.0],
+                        ],
+                        5,
+                        4,
+                    ),
+                    h: vec![10.0, 0.0, 0.0, 0.0, 0.0],
+                    cone: ConeSpec { l: 1, soc: vec![4] },
+                },
+                lb: vec![0.0, 3.0, -5.0],
+                ub: vec![7.0, 3.0, 5.0],
+                integers: vec![0, 1, 3],
+            },
+        ];
+
+        for case in &cases {
+            let sparse = build_relaxation(&case.base, &case.lb, &case.ub, &case.integers);
+            let reference =
+                reference_dense_build_relaxation(&case.base, &case.lb, &case.ub, &case.integers);
+            assert_relaxation_eq(&sparse, &reference, case.name);
+        }
+    }
 }
