@@ -450,15 +450,24 @@ fn miqcp_finite_integer_bounds_still_solve() {
 }
 
 // ---------------------------------------------------------------------------
-// #27 (adjacent): continuous conic MaxIterations must not become Internal
+// #10 sentinel: an unachievable tolerance must actually reach the conic IPM and
+// prevent a false Optimal, surfacing instead as a clean SolveError (not Internal).
+//
+// Discrimination: this guards the tolerance-plumbing fix (#10). Reverting it
+// (leaving the conic tol hardcoded at the 1e-9 default) makes `Custom(1e-300)`
+// a no-op, so the IPM converges and returns Ok(Optimal) — failing this test.
+//
+// Note: it does NOT exercise the `MaxIterations => Err(MaxIterations)` arm of
+// `solve_qcqp_internal`. On the continuous conic path a tolerance stall never
+// returns `SolveStatus::MaxIterations`: the IPM's NaN guard (conic/ipm.rs)
+// reclassifies a degraded finite iterate as `NumericalError`, and `MaxIterations`
+// survives only as the loop's default status (ipm.rs:47), which is not producible
+// through the Model API. That arm is therefore defensive (see the code comment).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn socp_iteration_cap_is_max_iterations_not_internal() {
-    // An impossibly tight Custom tolerance exhausts the conic iteration cap.
-    // The continuous SOCP path must classify that as MaxIterations (or a
-    // NumericalError from IPM breakdown) — never Internal.
-    let mut m = Model::new("socp_maxiter");
+fn unachievable_tolerance_reaches_conic_ipm_and_is_clean_error_not_optimal() {
+    let mut m = Model::new("socp_tol_reaches_ipm");
     let x = m.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
     let y = m.add_var("y", f64::NEG_INFINITY, f64::INFINITY);
     let t = m.add_var("t", 0.0, f64::INFINITY);
@@ -468,10 +477,15 @@ fn socp_iteration_cap_is_max_iterations_not_internal() {
     m.set_tolerance(Tolerance::Custom(1e-300));
     let result = m.solve();
     match result {
-        Err(ModelError::SolveError(SolveError::MaxIterations))
-        | Err(ModelError::SolveError(SolveError::NumericalError)) => {}
+        // The reachable outcome is NumericalError (IPM breakdown at 1e-300);
+        // MaxIterations is accepted too as a valid clean SolveError.
+        Err(ModelError::SolveError(SolveError::NumericalError))
+        | Err(ModelError::SolveError(SolveError::MaxIterations)) => {}
+        // Ok(Optimal) here means set_tolerance did not reach the conic IPM (#10
+        // regression); Internal means the status was misclassified as a bug.
         other => panic!(
-            "iteration-capped continuous SOCP must be MaxIterations/NumericalError, got {other:?}"
+            "unachievable tolerance must reach the conic IPM and yield a clean \
+             SolveError, never Ok(Optimal)/Internal, got {other:?}"
         ),
     }
 }

@@ -979,6 +979,12 @@ impl Model {
             {
                 Ok(build_ok(s, raw_obj, solution))
             }
+            // Defensive: on the continuous convex conic path a tolerance/iteration
+            // stall surfaces as `NumericalError` (the conic IPM's NaN guard) rather
+            // than `MaxIterations`; `MaxIterations` here is only the IPM loop's
+            // default status (conic/ipm.rs) and is not producible via the Model
+            // API. This arm keeps such a status a clean `SolveError` instead of
+            // falling through to the `Internal("unhandled")` classification below.
             SolveStatus::SuboptimalSolution | SolveStatus::MaxIterations => {
                 Err(ModelError::SolveError(SolveError::MaxIterations))
             }
