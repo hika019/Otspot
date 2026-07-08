@@ -118,6 +118,10 @@ minimize
             q_nnz: 3, // diagonal: 3 entries
         },
         // 2 vars, unconstrained (QCN) with full 2×2 Q
+        //
+        // PR#25 review fix: same missing-`n_con_lin_terms`-field bug as
+        // `test_qplib_maximize_sign_flip` (see comment there); fixed to the
+        // same known-good QCN field layout.
         Case {
             label: "qcn_2v_unc",
             input: "\
@@ -133,17 +137,15 @@ minimize
 0.0
 0
 0.0
+0
+1.79769313486232E+308
+0.0
+0
+0.0
+0
 -1.79769313486232E+308
 0
 1.79769313486232E+308
-0
-0.0
-0
-0.0
-0
-0.0
-0
-0
 0
 ",
             num_vars: 2,
@@ -275,6 +277,18 @@ fn test_qplib_constraint_type_expansion() {
 #[test]
 fn test_qplib_maximize_sign_flip() {
     // minimize 1/2*x^2 + x  vs  maximize 1/2*x^2 + x (→ negate c and Q)
+    //
+    // PR#25 review fix: this fixture previously omitted the `n_con_lin_terms`
+    // field (required for con_char 'N', same as 'L'/'Q'; see
+    // `test_parse_qplib_unconstrained` in `src/qplib/mod.rs`), shifting every
+    // subsequent field by one. The parser's old (unvalidated) `inf_val` read
+    // silently absorbed the resulting misalignment — the shifted `inf_val`
+    // ended up `0.0` — and produced an accidentally-degenerate but non-erroring
+    // parse: with `inf_val` shifted to `0.0`, the `[0, 0]` raw default bounds
+    // both overflow the `>= 0` infinity threshold and collapse back to
+    // `(-inf, inf)`. The new `inf_val > 0`
+    // validation (this PR) correctly rejects that. Fixed to the same
+    // known-good field layout as `test_parse_qplib_unconstrained`.
     let min_input = "\
 MAX_TEST
 QCN
@@ -286,17 +300,15 @@ minimize
 1.0
 0
 0.0
+0
+1.79769313486232E+308
+0.0
+0
+0.0
+0
 -1.79769313486232E+308
 0
 1.79769313486232E+308
-0
-0.0
-0
-0.0
-0
-0.0
-0
-0
 0
 ";
     let max_input = "\
@@ -310,17 +322,15 @@ maximize
 1.0
 0
 0.0
+0
+1.79769313486232E+308
+0.0
+0
+0.0
+0
 -1.79769313486232E+308
 0
 1.79769313486232E+308
-0
-0.0
-0
-0.0
-0
-0.0
-0
-0
 0
 ";
     let p_min = unwrap_qp(parse_qplib_str(min_input).unwrap());

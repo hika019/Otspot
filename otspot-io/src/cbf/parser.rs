@@ -45,11 +45,14 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<RawCbf, CbfError
     let mut var_blocks: Vec<ConeBlock> = Vec::new();
     let mut var_seen = false;
     let mut integers: Vec<usize> = Vec::new();
+    let mut int_seen: HashSet<usize> = HashSet::new();
     let mut m = 0usize;
     let mut con_blocks: Vec<ConeBlock> = Vec::new();
+    let mut con_seen = false;
     let mut obj_a: Vec<(usize, f64)> = Vec::new();
     let mut obj_a_seen: HashSet<usize> = HashSet::new();
     let mut obj_b = 0.0f64;
+    let mut obj_b_seen = false;
     let mut a_coord: Vec<(usize, usize, f64)> = Vec::new();
     let mut a_seen: HashSet<(usize, usize)> = HashSet::new();
     let mut b_coord: Vec<(usize, f64)> = Vec::new();
@@ -58,6 +61,9 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<RawCbf, CbfError
     while let Some(kw) = ts.next_token() {
         match kw.as_str() {
             "VER" => {
+                if version.is_some() {
+                    return Err(CbfError::ParseError("duplicate VER section".into()));
+                }
                 let raw = ts.read_usize()?;
                 let v = u32::try_from(raw)
                     .map_err(|_| CbfError::ParseError(format!("VER {raw} out of range")))?;
@@ -69,6 +75,9 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<RawCbf, CbfError
                 version = Some(v);
             }
             "OBJSENSE" => {
+                if maximize.is_some() {
+                    return Err(CbfError::ParseError("duplicate OBJSENSE section".into()));
+                }
                 let s = ts.read_string()?;
                 maximize = Some(match s.as_str() {
                     "MIN" => false,
@@ -81,6 +90,9 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<RawCbf, CbfError
                 });
             }
             "VAR" => {
+                if var_seen {
+                    return Err(CbfError::ParseError("duplicate VAR section".into()));
+                }
                 let (total, blocks) = read_cone_blocks(&mut ts)?;
                 n = total;
                 var_blocks = blocks;
@@ -89,13 +101,23 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<RawCbf, CbfError
             "INT" => {
                 let k = ts.read_usize()?;
                 for _ in 0..k {
-                    integers.push(ts.read_index_0based(n, "INT")?);
+                    let idx = ts.read_index_0based(n, "INT")?;
+                    if !int_seen.insert(idx) {
+                        return Err(CbfError::ParseError(format!(
+                            "INT: duplicate entry for variable {idx}"
+                        )));
+                    }
+                    integers.push(idx);
                 }
             }
             "CON" => {
+                if con_seen {
+                    return Err(CbfError::ParseError("duplicate CON section".into()));
+                }
                 let (total, blocks) = read_cone_blocks(&mut ts)?;
                 m = total;
                 con_blocks = blocks;
+                con_seen = true;
             }
             "OBJACOORD" => {
                 let k = ts.read_usize()?;
@@ -111,7 +133,11 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<RawCbf, CbfError
                 }
             }
             "OBJBCOORD" => {
+                if obj_b_seen {
+                    return Err(CbfError::ParseError("duplicate OBJBCOORD section".into()));
+                }
                 obj_b = ts.read_f64()?;
+                obj_b_seen = true;
             }
             "ACOORD" => {
                 let k = ts.read_usize()?;

@@ -1328,4 +1328,44 @@ ENDATA
         assert!((col1[&1] - 2.0).abs() < 1e-12, "A[ge1,x2]=2.0");
         assert!((col1[&2] - 1.0).abs() < 1e-12, "A[eq1,x2]=1.0");
     }
+
+    // -----------------------------------------------------------------------
+    // PR#25 review horizontal expansion: RHS/RANGES duplicate-row detection.
+    //
+    // Unlike COLUMNS (which accumulates duplicate (row,col) entries by design,
+    // see `test_parse_mps_accumulates_duplicate_objective_entries`), RHS and
+    // RANGES hold exactly one scalar per row; a repeated row name is
+    // ambiguous input that was previously silently resolved via last-write-wins.
+    // -----------------------------------------------------------------------
+
+    /// Sentinel: the same row name appearing twice in RHS (across lines or on
+    /// one multi-pair line) must be a `ParseError`, not silently overwritten.
+    ///
+    /// **No-op failure guarantee**: reverting to plain `self.rhs.insert(name, value)`
+    /// makes this parse succeed with `lp.b[0] == 20.0` (last-write-wins) instead of erroring.
+    #[test]
+    fn test_mps_duplicate_rhs_row_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\n    rhs c1 20.0\nENDATA\n";
+        let err = parse_mps(mps).expect_err("duplicate RHS row must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RHS") && msg.contains("duplicate"),
+            "error should mention RHS duplicate, got: {msg}"
+        );
+    }
+
+    /// Sentinel: the same row name appearing twice in RANGES must be a `ParseError`.
+    ///
+    /// **No-op failure guarantee**: reverting to plain `self.ranges.insert(name, value)`
+    /// makes this parse succeed (silently keeping the last RANGES value) instead of erroring.
+    #[test]
+    fn test_mps_duplicate_ranges_row_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nRANGES\n    rng c1 2.0\n    rng c1 4.0\nENDATA\n";
+        let err = parse_mps(mps).expect_err("duplicate RANGES row must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RANGES") && msg.contains("duplicate"),
+            "error should mention RANGES duplicate, got: {msg}"
+        );
+    }
 }
