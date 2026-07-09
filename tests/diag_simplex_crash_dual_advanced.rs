@@ -11,8 +11,8 @@
 //! crash は primal.rs 既存配線で発動するため、ここでは「dual_advanced 入口に
 //! 新規追加した crash 経路が退化を生まない」ことの regression sentinel に集中。
 //!
-//! no-op proof: `LP_CRASH_DUAL_ADV_DISABLE` 環境変数は #101 audit A2 で env-var 全廃に
-//! 伴い撤去済。crash の on/off は `use_lp_crash_basis` option 経由のみ。
+//! no-op proof: `LP_CRASH_DUAL_ADV_DISABLE` 環境変数は env-var 全廃に伴い撤去済。
+//! crash の on/off は `use_lp_crash_basis` option 経由のみ。
 
 use otspot::options::{SimplexMethod, SolverOptions};
 use otspot::problem::{ConstraintType, LpProblem, SolveStatus};

@@ -236,7 +236,7 @@ fn nonconvex_qcqp_propagates_timeout() {
     assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
 }
 
-/// memo#31 (P1): the QCQP conic route must include `QpProblem::obj_offset`
+/// the QCQP conic route must include `QpProblem::obj_offset`
 /// in the reported objective, like every LP/QP route (QPLIB QCQP `q0` flows
 /// through this field).
 ///
@@ -257,7 +257,7 @@ fn convex_qcqp_objective_includes_obj_offset() {
     assert_eq!(result.stats.route, SolveRoute::ConicQcqpConvex);
 }
 
-/// memo#31, nonconvex fallback path: the spatial global route must also
+/// nonconvex fallback path: the spatial global route must also
 /// include `obj_offset`.
 #[test]
 fn nonconvex_qcqp_objective_includes_obj_offset() {

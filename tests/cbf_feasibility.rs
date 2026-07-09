@@ -137,7 +137,7 @@ fn classical_20_0_root_relaxation_is_feasible() {
     assert_conic_feasible("classical_20_0 root", &problem.base, &res.x);
 }
 
-/// Equilibration sentinel on real ill-scaled data (issue #9b). The
+/// Equilibration sentinel on real ill-scaled data. The
 /// `sssd-strong-15-4` continuous root relaxation carries a several-orders-of-
 /// magnitude coefficient spread across its 12 dim-3 SOC blocks; without the
 /// cone-block-respecting equilibration in `conic::equil` (which `solve_socp`

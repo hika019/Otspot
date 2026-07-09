@@ -71,8 +71,11 @@ pub(super) fn try_bounded(
                 let x_b = x_b_sv.to_dense();
                 // Bounded path warm-start: has_lb_violation 時は cold-start fallback。
                 // Reason: bounded_core::iterate の BFRT は lower-bound 列のみ選択、
-                // sign flip equivalent なし → lb_violation は repair 不可、cycle→timeout (codex review #175)。
-                // 真因対処は #190 (WarmStartBasis.at_upper field 追加 + bounded core repair algorithm)。
+                // sign flip equivalent なし → lb_violation は repair 不可、cycle→timeout
+                // (見つかったのは過去のレビューパス)。真因対処 (`WarmStartBasis` に
+                // `at_upper` field を追加 + bounded core repair algorithm) は未実装で、
+                // 追跡先も存在しない (この repo に GitHub issue はゼロ件)。それまでは
+                // この cold-start fallback が正。
                 //
                 // Also fall through when the warm basis is dual-infeasible under
                 // the new cost vector c: the dual simplex would exit immediately as

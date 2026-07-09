@@ -1,4 +1,4 @@
-//! Task #29 凸 QP mini-corpus — **bug class: scaling / ill-conditioned Q**
+//! 凸 QP mini-corpus — **bug class: scaling / ill-conditioned Q**
 //!
 //! ## 対象 bug class
 //!

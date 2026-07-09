@@ -1,4 +1,4 @@
-//! MILP branch-and-bound tests (#14 Phase 1).
+//! MILP branch-and-bound tests.
 //!
 //! Multiple data patterns per CLAUDE.md: trivial integer root, fractional root
 //! requiring branching, infeasible, unbounded, binary knapsack, and the
@@ -728,7 +728,7 @@ fn miqp_boxonly_offdiag_no_overprune_sentinel() {
     // The QP IPM stalls on this box-only off-diagonal QP and returns SuboptimalSolution
     // with an objective ABOVE the true relaxation minimum. If the driver used that
     // suboptimal primal objective as a *lower* bound it would over-prune the node
-    // holding (2,2) and return −11 (silent-wrong, #17). The true integer optimum is
+    // holding (2,2) and return −11 (silent-wrong). The true integer optimum is
     // −12 @ (2,2). Load-bearing sentinel: reverting "trust Optimal relaxations only as
     // bounds" returns −11 here and FAILS this test.
     let q = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1.0, 1.0, 2.0], 2, 2)

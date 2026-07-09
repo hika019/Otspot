@@ -13,10 +13,10 @@ use crate::tolerances::DROP_TOL;
 /// `|A[row, col]| < SINGULARITY_TOL` で dual recovery を skip (`y_new = target /
 /// a_row_col` 発散防止)。matrix 構築時 drop 閾値と一致。
 ///
-/// 撤退知見 (audit#123、commit 0f343f1): row-relative pivot tol (LAPACK xGECON 形式)
-/// は qplib_9002 で false-positive Optimal を mint (`||x||_inf=7.9e9`、KKT 発散)。
-/// pivot accept 後に KKT 残差を re-validate する経路 (iterative refinement) を
-/// 追加してから再評価。
+/// 撤退知見: row-relative pivot tol (LAPACK xGECON 形式) は qplib_9002 で
+/// false-positive Optimal を mint した (`||x||_inf=7.9e9`、KKT 発散)。導入した
+/// commit は削除済みブランチ上にあり、ハッシュでの追跡は不可能。pivot accept 後に
+/// KKT 残差を re-validate する経路 (iterative refinement) を追加してから再評価。
 const SINGULARITY_TOL: f64 = DROP_TOL;
 
 /// 縮約後の解を元 QP 問題の解空間に復元する。

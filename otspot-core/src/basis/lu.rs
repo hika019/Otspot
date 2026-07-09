@@ -506,7 +506,7 @@ mod tests {
     }
 
     /// 構造的特異 (空行を持つ) 基底で symbolic factorize が panic しないことを
-    /// 守る load-bearing sentinel (#42)。`LuSymbolicParams::default()` (AUTO) では
+    /// 守る load-bearing sentinel。`LuSymbolicParams::default()` (AUTO) では
     /// faer 0.24.0 の supernodal/simplicial 自動判定が usize underflow を起こし
     /// debug で panic する。`FORCE_SIMPLICIAL` 強制でこれを根絶し、構造的特異な
     /// 基底は SingularBasis として返ることを検査する。

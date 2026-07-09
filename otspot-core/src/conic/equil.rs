@@ -8,7 +8,7 @@
 //! `equil_soc_block_scale_is_constant`; `s in K <=> alpha s in K`); orthant
 //! and equality rows scale independently.
 //!
-//! Motivation (#9b): CBLIB `*_w`/`sssd-strong` carry multi-order coefficient
+//! Motivation: CBLIB `*_w`/`sssd-strong` carry multi-order coefficient
 //! ranges across SOC blocks; unequilibrated, the Mehrotra step collapses from
 //! iteration 0 and `mu` diverges (`NumericalError`). Balancing the *data*
 //! first fixes this with no change to `ipm.rs`. Mirrors `linalg::ruiz` (QP),
@@ -650,7 +650,7 @@ mod tests {
         }
     }
 
-    /// Sentinel (root-cause reproduction, #9b): a badly-scaled *change of
+    /// Sentinel (root-cause reproduction): a badly-scaled *change of
     /// variables* `x = T x_tilde` (`T` diagonal, spread `1e-5..1e5`, the same
     /// "several orders of magnitude across the SOC block" pathology as the
     /// CBLIB `*_w` instances) on an otherwise trivial dim-3 SOC problem with

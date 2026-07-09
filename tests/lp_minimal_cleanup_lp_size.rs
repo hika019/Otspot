@@ -1,5 +1,5 @@
-//! Task #17 mini-corpus — **bug class 4**: cleanup LP の巨大化と deadline 不継承
-//! (Task #3 / ken-18 真因対処済)。
+//! mini-corpus — **bug class 4**: cleanup LP の巨大化と deadline 不継承
+//! (ken-18 で見つかった真因は対処済)。
 //!
 //! ## 構造的特徴
 //!

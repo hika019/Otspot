@@ -1,6 +1,6 @@
 name: CI (heavy)
 
-# tier-2 sentinel gate (#97 で #[ignore = "tier-2"] 化した 20 test を復活させる).
+# tier-2 sentinel gate (#[ignore = "tier-2"] 化した 20 test を復活させる).
 # トリガ (user policy 3b97a37):
 #   1. 全 branch push で auto-run (cron 廃止、push 必ず走らせる)
 #   2. workflow_dispatch (Actions tab "Run workflow" ボタン)
@@ -9,7 +9,7 @@ name: CI (heavy)
 #   - must-pass: heavy sentinel の regression gate。fail でジョブが赤になる。
 #     (旧構成の全 step continue-on-error は、informational 枠に本物の
 #     regression が混ざっても検知できず、greenbea 偽降格 regression
-#     (daf7ab54 起源、6762737c で修正) を素通しした。)
+#     (daf7ab54 起源、b43b0a42 で修正) を素通しした。)
 #   - perf-open: 意図的に赤を許容する既知未達成 perf 目標 (ignore reason
 #     "perf-open" のテスト)。informational 継続。目標達成で緑になったら
 #     must-pass へ移す (下の除外リストと ignore annotation の両方を更新)。
@@ -36,7 +36,7 @@ jobs:
         with:
           path: data/
           # v2: heavy 専用データ (lp_problems_hard/neos.QPS, osqp_bench_illscaled)
-          # を追加した (PR #25 CI fix)。旧 v1 の shape と異なるため bump。
+          # を追加した。旧 v1 の shape と異なるため bump。
           # restore-keys の prefix match で v1 からの fallback restore は維持。
           key: bench-data-v2
           restore-keys: |
@@ -85,7 +85,7 @@ jobs:
             python3 scripts/gen_osqp_bench_illscaled.py
           fi
       - name: Verify test data requirements (alignment gate)
-        # PR #25 issue #4: 「--run-ignored all を must-pass にする」と「CI が
+        # 「--run-ignored all を must-pass にする」と「CI が
         # 用意するデータ集合」は別の場所で管理されており、黙って乖離する
         # (data-requiring な #[ignore] テストは data 欠落で panic する設計)。
         # このゲートはテスト源泉が参照する data/ パスを全数チェックし、欠落を
@@ -105,7 +105,9 @@ jobs:
         #   - d6cube_postsolve_under_1s: 60s で Optimal 未達 (収束は
         #     lp_simplex_stall_d6cube_converges が must-pass で追跡)
         #   - diag_osa60_must_reach_known_objective: default path が 60s で
-        #     Optimal を証明できない (#88/#89)。correctness は
+        #     Optimal を証明できない。fix (pivot_out_degenerate_artificials
+        #     の高速化) は未実装で追跡先の issue も存在しない (この repo に
+        #     GitHub issue はゼロ件)。correctness は
         #     diag_osa60_is_feasible_and_honest が must-pass で追跡。
         # 赤 = 目標未達の継続観測であり regression ではないため非ゲート。
         # if: always() — must-pass が赤でも perf-open の現状を surface する。

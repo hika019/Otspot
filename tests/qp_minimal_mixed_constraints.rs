@@ -1,4 +1,4 @@
-//! Task #29 凸 QP mini-corpus — **bug class: mixed Eq/Le/Ge + obj_offset**
+//! 凸 QP mini-corpus — **bug class: mixed Eq/Le/Ge + obj_offset**
 //!
 //! ## 対象 bug class
 //!

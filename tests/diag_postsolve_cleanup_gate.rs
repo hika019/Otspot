@@ -78,7 +78,7 @@ fn d6cube_postsolve_under_1s() {
 /// greenbea's cleanup_pert returned Inf after ~20 s; the 4× cap on its
 /// deadline bounds postsolve well under what it used to consume.
 ///
-/// 6762737c (postsolve 受入ゲートの ipm_eps 基準化) 以降 greenbea は 60s 内に
+/// b43b0a42 (postsolve 受入ゲートの ipm_eps 基準化) 以降 greenbea は 60s 内に
 /// Optimal へ達し gate は vacuous でなくなった。収束自体は
 /// lp_simplex_stall_greenbea_converges が追跡。
 ///
@@ -86,13 +86,12 @@ fn d6cube_postsolve_under_1s() {
 /// GH Actions observation") has been met. The only assert here is
 /// `postsolve_s < 5.0`; each CI PASS therefore confirms postsolve stayed under
 /// the 5s cap. Confirmed PASS on 7 heavy CI runs since b43b0a42 (the
-/// postsolve-gate eps-alignment fix in this branch's actual history; a
-/// previously cited hash, 6762737c, is not an ancestor of this branch and did
-/// not land here) on integrate/repo-audit-fixes (run IDs: 29009210239,
-/// 28993562011, 28937563078, 28928204239, 28914605970, 28914404571,
-/// 28853711546). CI logs surface only the nextest wall time on PASS, not the
-/// asserted postsolve_s; locally measured postsolve_s = 3.10s / 3.11s across
-/// 2 local runs, comfortably inside the cap.
+/// postsolve-gate eps-alignment fix in this branch's actual history) on
+/// integrate/repo-audit-fixes (run IDs: 29009210239, 28993562011,
+/// 28937563078, 28928204239, 28914605970, 28914404571, 28853711546). CI logs
+/// surface only the nextest wall time on PASS, not the asserted postsolve_s;
+/// locally measured postsolve_s = 3.10s / 3.11s across 2 local runs,
+/// comfortably inside the cap.
 #[test]
 fn greenbea_postsolve_under_5s() {
     let prob = load("data/lp_problems/greenbea.QPS");

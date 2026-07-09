@@ -83,7 +83,7 @@ impl ConicProblem {
     ///
     /// Column counts are checked unconditionally even with zero rows (a
     /// mismatched `A` there previously reached a `debug_assert_eq!` panic
-    /// deeper in the KKT solve; PR #25 review #36).
+    /// deeper in the KKT solve).
     pub fn validate(&self) -> Result<(), String> {
         if self.a.ncols() != self.n() {
             return Err("A column count != n".into());
@@ -199,7 +199,7 @@ impl ConicOptions {
 /// Equilibrates the data first (cone-block-respecting Ruiz scaling) so the
 /// IPM sees well-conditioned magnitudes, then maps the
 /// solution/duals/certificates back to `problem`'s original space. Exact up
-/// to rounding — changes neither optimum nor feasible set (issue #9b).
+/// to rounding — changes neither optimum nor feasible set.
 pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     // Validate before equilibrating: the Ruiz sweeps assume `validate()`'s
     // shape invariants, so reject an invalid problem here (ipm::solve keeps
@@ -214,8 +214,8 @@ pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     let scaled = eq.scale_problem(problem);
     let res = ipm::solve(&scaled, opts);
     let mut res = eq.unscale_result(problem, opts.tol, res);
-    // Canonicalize only statuses whose `x` is not a usable iterate (PR #25
-    // review #40): `Infeasible` -> `+inf`, `Unbounded` -> `-inf`. Inconclusive
+    // Canonicalize only statuses whose `x` is not a usable iterate:
+    // `Infeasible` -> `+inf`, `Unbounded` -> `-inf`. Inconclusive
     // statuses keep `dot(c, x)` of the real iterate in `res.x`; `NotSupported`
     // keeps its `NaN`.
     res.objective = match res.status {

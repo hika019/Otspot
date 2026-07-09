@@ -595,7 +595,7 @@ fn diag_modszk1_primal_baseline() {
     let result = otspot::qp::solve_qp_with(&prob, &opts);
     let elapsed = t0.elapsed().as_secs_f64();
     println!(
-        "modszk1 Primal (a8faac6 state): status={:?} obj={:.6e} t={:.2}s",
+        "modszk1 Primal: status={:?} obj={:.6e} t={:.2}s",
         result.status, result.objective, elapsed
     );
     if result.status == SolveStatus::Optimal {

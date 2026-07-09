@@ -1,4 +1,4 @@
-//! Brute-force ground-truth correctness tests for MILP B&B (#14/#16).
+//! Brute-force ground-truth correctness tests for MILP B&B.
 //!
 //! These tests do not hardcode optima: they enumerate every integer point of a
 //! small bounded program to compute the *true* optimum, then assert `solve_milp`

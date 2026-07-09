@@ -42,7 +42,7 @@ use std::time::Instant;
 const TIMEOUT_HONOR_RATIO_MIN: f64 = 0.90;
 
 /// neos.QPS budget。20s で `solve_dual_advanced` の primal+big_m 経路を踏ませる
-/// (#48 bench で 1000s → wall 750.432s の 0.75 比率が観測された問題)。
+/// (元は timeout=1000s bench で wall 750.432s の 0.75 比率が観測された問題)。
 /// 3 分上限内 (CLAUDE.md) かつ parse (0.5s) + solve (20s) で実時間 < 25s。
 const NEOS_BUDGET_SEC: f64 = 20.0;
 

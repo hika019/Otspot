@@ -391,7 +391,7 @@ pub(crate) fn compute_lsq_dual_y(
     // Complementary slackness: rows whose primal is strictly non-binding (slack
     // > COMP_SLACK_REL_TOL relative to the row magnitudes) must have y_i = 0.
     // Without this clamp LSQ is free to assign sign-feasible but
-    // slackness-violating duals — the same drift root #45 fixed for
+    // slackness-violating duals — the same drift root fixed for
     // `recover_removed_row_dual`. Overwrite (rather than skip) any existing
     // `fixed_y[i]` so LSQ cannot resurrect a non-zero dual on a non-binding row.
     let mut ax = vec![0.0_f64; m];

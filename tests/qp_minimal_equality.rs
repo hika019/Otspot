@@ -1,4 +1,4 @@
-//! Task #29 凸 QP mini-corpus — **bug class: equality-only constraints**
+//! 凸 QP mini-corpus — **bug class: equality-only constraints**
 //!
 //! ## 対象 bug class
 //!

@@ -49,8 +49,8 @@
 //!     + prop_lp_micro_n1 (24) + prop_convex_qp_micro_n1 (24)
 //!     + prop_nonconvex_constrained (16)
 //!
-//! 合計 512 ケース。`3dcaf8a` commit msg に記された "440" は誤記、実数は当初 384、
-//! shape gap 補完後 512 (両方とも 440 ではない)。
+//! 合計 512 ケース (当初 384、shape gap 補完後 512)。過去の commit msg に
+//! 記された "440" という数字は誤記。
 
 use otspot::options::{GlobalOptimizationConfig, SolverOptions};
 use otspot::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
@@ -67,7 +67,7 @@ const EPS_KKT: f64 = 1e-4;
 /// stationarity が O(1e-4) drift する分を吸収。WARN-only に逃げないため必ず assert。
 const EPS_KKT_NONCONVEX_LOCAL: f64 = 1e-3;
 /// 非凸 QP Optimal-claim 状態の閾値。元 1.5 は EmptyCol skip 由来の bd 復元 drift
-/// を許容するための緩い値で、#92 (linear-only var skip 厳格化) 後は本来 1e-3 級まで
+/// を許容するための緩い値で、linear-only var skip 厳格化後は本来 1e-3 級まで
 /// 締まるはずだが、その他の non-PSD Q dual 復元 drift も残るため 1.0 まで段階的に
 /// 下げる。proptest 1000 case で max KKT ≈ 0.68 を実測 (1e-3 まで締めるのは別 task)。
 const EPS_KKT_NONCONVEX_GLOBAL: f64 = 1.0;

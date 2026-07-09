@@ -1,4 +1,4 @@
-//! Task #17 mini-corpus — **bug class 1 & 2** の構造的最小再現。
+//! mini-corpus — **bug class 1 & 2** の構造的最小再現。
 //!
 //! ## 対象 bug class
 //!
@@ -9,7 +9,7 @@
 //!   - 大問題対応: perold col 229 (c[j]=0, row 84 のみに entry、interior)。
 //!   - 旧バグ: cleanup LP の Phase I slack 最小化が「y_i = 0 解」を選んだ
 //!     ために rc[j] = -y_i 規模の dual infeasibility を出していた。
-//!   - 本 fix (66857c1): 3-way (y_loop / y_gs / y_cl) bound-aware dfeas 比較。
+//!   - 本 fix: 3-way (y_loop / y_gs / y_cl) bound-aware dfeas 比較。
 //!
 //! **(2) cleanup LP tie-break / 非一意 dual で誤った最適解採用**
 //!   - 削除行が 2 個以上 + 削除行間で y のスケールが連立して
@@ -21,7 +21,8 @@
 //! ## このファイルのテスト方針
 //!
 //! - HEAD では全 GREEN。
-//! - 旧 commit (e61f27b 直後) では複数が FAIL。bisect で fix の真因が確定。
+//! - 旧 commit (fix 直前、hash は squash/rebase で追跡不能) では複数が FAIL。
+//!   bisect で fix の真因が確定。
 //! - 各 test は LP を Model API (`Model::add_var` + `add_constraint`) で組み、
 //!   presolve=true (本 fix 経路) で primal feasibility / dual feasibility /
 //!   目的関数値の三本柱を assert。LP path で拡張済の
@@ -236,7 +237,7 @@ fn assert_kkt_optimal(data: &LpData<'_>, expected_obj: f64) {
 /// 最小化はタイブレークで別の y を選びうる。
 ///
 /// **元 bug**: `perold` col 229 (c[j]=0, row 84 のみ、interior)。
-/// HEAD `4a1e305` で df_rel_bound ≈ 0.99、fix (66857c1 + 3-way 比較) で <1e-10。
+/// 修正前は df_rel_bound ≈ 0.99、fix (3-way 比較) で <1e-10。
 ///
 /// **構成**: 4 var, 3 row。SingletonRow が x0 を即時 fix し、x0 の y_0 復元が
 /// rc[x0]=0 (interior 扱い、bounds 広い) で一意決定されるパターン。
@@ -404,9 +405,9 @@ fn bug2b_two_deleted_rows_bound_active_col() {
 }
 
 /// **構造的特徴**: LinearSubstitution (free 変数置換) + SingletonRow の混在。
-/// 旧バグ (e61f27b): LinearSubstitution の y_piv 復元は追加されたが
+/// 旧バグ: LinearSubstitution の y_piv 復元は追加されたが
 /// SingletonRow / RedundantConstraint との連立整合性が保証されていなかった。
-/// 本 fix (66857c1) で 3-way 比較に統一。
+/// 本 fix で 3-way 比較に統一。
 #[test]
 fn bug2c_linear_substitution_plus_singleton() {
     // min x0 + x1 + x2 + x3

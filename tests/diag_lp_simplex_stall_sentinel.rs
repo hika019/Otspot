@@ -1,7 +1,7 @@
-//! Sentinel for #33: large LP must converge through `solve_qp_with` (the
+//! Sentinel: large LP must converge through `solve_qp_with` (the
 //! public LP entry point used by bench) — now via simplex alone.
 //!
-//! LP は IPM を撤廃し simplex 一本化した (#19/#22)。本 sentinel は「以前 IPM が
+//! LP は IPM を撤廃し simplex 一本化した。本 sentinel は「以前 IPM が
 //! 隠していた大規模 LP の収束を、simplex 単独で達成できるか」を検証する
 //! Phase2 worklist そのもの。複数パターンのデータを用意 (CLAUDE.md):
 //!  * 6 real Netlib LPs (ken-13 / ken-18 / cre-b / d6cube / pilot / greenbea) – each
@@ -30,7 +30,7 @@ use otspot::{solve_qp_with, solve_with, SolveStatus};
 /// cre-b/ken-13 even when quiet and failed under --test-threads 3 contention (cre-b 8.8%,
 /// ken-13 17.6% —未収束 timing artifact). 360s covers the slowest quiet case (cre-b 242s)
 /// with margin. These 4 run in a dedicated `--test-threads 1` heavy step for fair timing
-/// (see test-heavy.yml). REL_TOL stays 5e-3. ken-18 is excluded (真の非収束, #23).
+/// (see test-heavy.yml). REL_TOL stays 5e-3. ken-18 is excluded (真の非収束).
 const BUDGET_SECS: f64 = 360.0;
 /// Budget for the synthetic case follows the large-LP bench baseline.
 /// The generated block LP has a known optimum and should solve far below it.
@@ -183,7 +183,7 @@ real_netlib_bounded_eq_ub_route_test!(lp_route_pds20_uses_bounded_eq_ub, "pds-20
 /// wide-LP IPM dispatch gate (`should_try_lp_ipm`: n ≥ m, n·10 ≤ m·22,
 /// n+m ≥ 10000, nnz ≥ 10000) since 3c25e880, which routes them to the LP-IPM
 /// backend by design. The former bounded-Eq+UB route pins were stale: dfl001
-/// failed outright, and ken-18 only stayed green because the pre-6762737c
+/// failed outright, and ken-18 only stayed green because the pre-b43b0a42
 /// PIVOT_TOL retry gate re-solved via simplex and set the flag as a side
 /// effect. Pin the intended route AND the outcome: IPM dispatch is chosen and
 /// certifies Optimal at the Netlib truth (solo: dfl001 ~344s / 119 iters,

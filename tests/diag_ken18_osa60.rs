@@ -1,17 +1,20 @@
 //! TDD diagnostic tests for two LP bench regressions:
 //!
-//! - **osa-60** (Task #4): solver returns Optimal/Timeout with `obj=0` while the
+//! - **osa-60**: solver returns Optimal/Timeout with `obj=0` while the
 //!   known optimum is `4.0440725e+06`. Verified root cause:
 //!   `simplex::primal::pivot_out_degenerate_artificials` consumes the entire
 //!   solve budget (O(n_artificial × n_total) FTRAN) before Phase 2 can iterate.
+//!   Still open (see `diag_osa60_must_reach_known_objective`'s ignore reason).
 //!
-//! - **ken-18** (Task #3): solver wall-time vastly exceeds its internal deadline
+//! - **ken-18**: solver wall-time vastly exceeded its internal deadline
 //!   (~3× overrun in single-job repro; >external `gtimeout` in concurrent bench
 //!   → SIGKILL = "異常終了"). Verified root cause:
-//!   `presolve::postsolve::build_and_solve_cleanup_lp` constructs a massive
-//!   second LP (m≈96k, n≈322k) whose 5 s timeout is set via `timeout_secs`
+//!   `presolve::postsolve::build_and_solve_cleanup_lp` constructed a massive
+//!   second LP (m≈96k, n≈322k) whose 5 s timeout was set via `timeout_secs`
 //!   but never converted to a `deadline`, so the long Ruiz/standard-form
-//!   construction never checks it.
+//!   construction never checked it. Fixed — see
+//!   `diag_ken18_must_respect_internal_deadline`'s ignore reason for the
+//!   current measured wall time.
 //!
 //! Both tests are `#[ignore]` because their failing wall-time is on the order
 //! of 60-180s — too long for default `cargo test`.
@@ -37,7 +40,7 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
     .unwrap()
 }
 
-/// Task #4 (osa-60): solver must report a meaningful objective, not 0.
+/// osa-60: solver must report a meaningful objective, not 0.
 ///
 /// Known optimum: 4.0440725e+06 (netlib_lp.csv).
 ///
@@ -59,9 +62,11 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
 #[ignore = "perf-open/heavy: open perf target 'default (presolve) path certifies Optimal at \
             60s'. Measured at HEAD: Timeout obj=inf sol_len=0 iters=5434 (presolve 1.1s + \
             solve 58.9s); historically also SuboptimalSolution or Timeout with a \
-            reduced-space solution leak (#37). The objective IS reachable — presolve=false \
+            reduced-space solution leak. The objective IS reachable — presolve=false \
             yields the exact optimum (rel ~8e-10) in ~33s; correctness is gated by \
-            diag_osa60_is_feasible_and_honest. Fix tracked in #88/#89. This name must stay \
+            diag_osa60_is_feasible_and_honest. The fix (speeding up \
+            pivot_out_degenerate_artificials) is unimplemented and untracked — no such \
+            GitHub issue exists in this repo. This name must stay \
             in the perf-open filter of test-heavy.yml; move to must-pass once green"]
 fn diag_osa60_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/osa-60.QPS");
@@ -326,13 +331,13 @@ fn diag_osa60_is_feasible_and_honest() {
     }
 }
 
-/// Task #3 (ken-18): solver wall-time must respect the internal deadline.
+/// ken-18: solver wall-time must respect the internal deadline.
 ///
-/// We do not require ken-18 to *solve* (it's a very large LP and is the next
-/// task after the abnormal-exit bug is fixed). The defect under test is the
-/// **deadline contract**: a 30 s internal timeout must not produce 100s+ of
-/// wall time spent in postsolve `build_and_solve_cleanup_lp`, which is what
-/// drives the bench's gtimeout SIGKILL ("異常終了") under concurrent jobs.
+/// We do not require ken-18 to *solve* (it's a very large LP). The defect
+/// under test is the **deadline contract**: a 30 s internal timeout must not
+/// produce 100s+ of wall time spent in postsolve `build_and_solve_cleanup_lp`,
+/// which is what drove the bench's gtimeout SIGKILL ("異常終了") under
+/// concurrent jobs.
 ///
 /// Observation budget: deadline + 30 s slack (matches the bench's 300 s slack
 /// design at a smaller scale).
@@ -341,8 +346,10 @@ fn diag_osa60_is_feasible_and_honest() {
 /// are all printed so we can tell whether overrun is in presolve, simplex,
 /// or postsolve.
 ///
-/// At HEAD this FAILS: empirically wall ≈ 365 s for a 120 s internal
-/// budget. Scaled to 30 s internal it lands well past the 60 s slack ceiling.
+/// Originally this FAILED: empirically wall ≈ 365 s for a 120 s internal
+/// budget. Fixed (the 5 s cleanup-LP timeout is now converted to a
+/// `deadline`); re-measured 2026-07-10 at wall=30.626s for the 30s+30s
+/// contract below — see the `#[ignore]` reason for the 2026-06-14 figure.
 #[test]
 #[ignore = "heavy/timing: measured 30.02s Timeout within 30s+30s wall contract (2026-06-14), \
             but >30s default budget; run explicitly"]

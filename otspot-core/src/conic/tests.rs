@@ -969,10 +969,10 @@ fn misocp_mid_search_deadline_keeps_incumbent() {
     // same order. Forcing the deadline branch at a fixed node count therefore
     // reproduces "deadline hit mid-search, incumbent kept" with zero timing
     // dependence. The previous wall-clock version (deadline = measured
-    // full-run time / 2) flaked under competing CPU load: base bab20de8 was
-    // observed to fail 2/10 runs under load, because the second (deadline)
-    // run's per-node cost relative to the first (calibration) run's is not
-    // guaranteed under OS/CPU jitter.
+    // full-run time / 2) flaked under competing CPU load: observed to fail
+    // 2/10 runs under load, because the second (deadline) run's per-node cost
+    // relative to the first (calibration) run's is not guaranteed under
+    // OS/CPU jitter.
     let n = 3usize;
     let r2 = 30.0_f64;
     let mut grows = vec![vec![0.0; n]];
@@ -3466,14 +3466,14 @@ fn conic_kkt_threshold_boundary_direction_equivalence() {
 }
 
 // ---------------------------------------------------------------------------
-// PR#25 review findings: QCQP bridge repros (memo #22/#23/#24/#32/#37).
+// QCQP bridge repros.
 // ---------------------------------------------------------------------------
 
 fn empty_mat(nrows: usize, ncols: usize) -> CscMatrix {
     CscMatrix::from_triplets(&[], &[], &[], nrows, ncols).unwrap()
 }
 
-/// memo#22 (P1): a rank-deficient PSD quadratic constraint must keep the
+/// a rank-deficient PSD quadratic constraint must keep the
 /// untouched direction unbounded. `min x0  s.t.  x1^2 <= 1, x0 <= 0` is
 /// unbounded below; a clamped zero pivot instead adds ~1e-14*x0^2 curvature
 /// to the constraint, bounding x0 at ~ -1.4e7 and reporting a clean Optimal.
@@ -3504,7 +3504,7 @@ fn rank_deficient_quad_constraint_keeps_unbounded_direction() {
     assert_eq!(res.status, SolveStatus::Unbounded, "res={res:?}");
 }
 
-/// memo#22 equivalence: a rank-deficient PSD matrix with off-diagonal fill,
+/// Equivalence: a rank-deficient PSD matrix with off-diagonal fill,
 /// `P = [[1,1],[1,1]] = L L^T` with `L = [[1,0],[1,0]]` (second pivot exactly
 /// zero), must factor exactly: the zero-pivot column of `L` is all-zero, so
 /// the corresponding SOC row vanishes and no curvature is invented.
@@ -3564,7 +3564,7 @@ fn to_conic_rank_deficient_fill_factors_exactly() {
     );
 }
 
-/// memo#37 (P1) / memo#24 (P2): public `QcqpProblem` with inconsistent
+/// public `QcqpProblem` with inconsistent
 /// dimensions must be rejected as an error, not panic (q0 too short) and not
 /// silently drop the quadratic objective (`qcqp_objective`'s zeroed
 /// `mat_vec_mul` fallback for a mis-sized `p0`).
@@ -3664,7 +3664,7 @@ fn qcqp_dimension_mismatches_rejected_without_panic() {
     }
 }
 
-/// memo#32 (P1): a `QpProblem` with structurally zero `Q` is a *linear*
+/// A `QpProblem` with structurally zero `Q` is a *linear*
 /// objective; the bridge must not wrap it in a quadratic epigraph (which,
 /// combined with pivot handling, perturbs the objective).
 #[test]
@@ -3703,7 +3703,7 @@ fn zero_q_qp_problem_bridges_to_linear_objective() {
     );
 }
 
-/// memo#23 (P2): a fixed variable bound (`lb == ub`) must bridge to an
+/// A fixed variable bound (`lb == ub`) must bridge to an
 /// equality row, matching the MISOCP path — the pair `x <= v`, `-x <= -v`
 /// has no strictly feasible slack for the interior-point method.
 #[test]
@@ -3760,7 +3760,7 @@ fn fixed_variable_bound_bridges_to_equality_row() {
 }
 
 // ---------------------------------------------------------------------------
-// PR #25 review: public-API input validation (conic entry points).
+// Public-API input validation (conic entry points).
 // ---------------------------------------------------------------------------
 
 /// A trivially feasible 1-variable box SOCP (`0 <= x0 <= 1`), used as the
@@ -3780,7 +3780,7 @@ fn valid_box_socp() -> ConicProblem {
 
 #[test]
 fn conic_problem_validate_rejects_non_finite_c_b_h_and_matrix_values() {
-    // #16: `validate()` previously checked only dimensions, so NaN/Inf in c,
+    // `validate()` previously checked only dimensions, so NaN/Inf in c,
     // b, h, or the A/G matrix values passed straight through to the IPM,
     // which reported an opaque `NumericalError` instead of classifying the
     // input itself as invalid.
@@ -3820,7 +3820,7 @@ fn conic_problem_validate_rejects_non_finite_c_b_h_and_matrix_values() {
 
 #[test]
 fn solve_socp_reports_not_supported_for_non_finite_input_instead_of_numerical_error() {
-    // Sentinel: routes the #16 fix through `solve_socp` end-to-end. Before
+    // Sentinel: routes the finite-data-validation fix through `solve_socp` end-to-end. Before
     // the fix this reached the IPM and surfaced as `NumericalError` (a
     // solver-side failure classification), not `NotSupported` (invalid
     // input); reverting the `validate()` finite-data checks makes this fail.
@@ -3836,11 +3836,10 @@ fn solve_socp_reports_not_supported_for_non_finite_input_instead_of_numerical_er
 
 #[test]
 fn conic_problem_validate_rejects_wrong_a_ncols_even_when_p_is_zero() {
-    // #36 (confirmed repro): `A.ncols() != n` was only checked when
+    // Confirmed repro: `A.ncols() != n` was only checked when
     // `p() > 0`, so a 0-row `A` with the wrong column count passed
     // `validate()` and later hit `kkt.rs`'s `debug_assert_eq!(a.ncols(), n)`
-    // panic inside `solve_socp`. Exact repro from the review: `c.len()=2`,
-    // `A` is `0x0`, `b=[]`.
+    // panic inside `solve_socp`. Exact repro: `c.len()=2`, `A` is `0x0`, `b=[]`.
     let g = csc(&[vec![1.0, 0.0], vec![0.0, 1.0]], 2, 2);
     let prob = ConicProblem {
         c: vec![1.0, 1.0],
@@ -3862,7 +3861,7 @@ fn conic_problem_validate_rejects_wrong_a_ncols_even_when_p_is_zero() {
 
 #[test]
 fn conic_options_validate_rejects_bad_tol_and_step_frac() {
-    // #17: negative/zero/NaN tol and step_frac outside (0,1) previously ran
+    // Negative/zero/NaN tol and step_frac outside (0,1) previously ran
     // straight into the IPM (e.g. `step_frac <= 0` degenerates to a
     // non-positive step length, caught deep inside the iteration loop as a
     // confusing `NumericalError` rather than classified as invalid input up
@@ -3908,9 +3907,9 @@ fn solve_socp_reports_not_supported_for_invalid_options() {
 
 #[test]
 fn solve_socp_canonicalizes_non_optimal_objective() {
-    // #40 (confirmed repro): `ipm::solve` always set `objective = c^T x` from
+    // Confirmed repro: `ipm::solve` always set `objective = c^T x` from
     // whatever iterate it stopped at, so an Infeasible/Unbounded result
-    // carried a meaningless number (the review's repro: an infeasible `x<=0,
+    // carried a meaningless number (repro: an infeasible `x<=0,
     // x>=1` SOCP reported `objective=0.0`). Only the two conclusive
     // no-usable-iterate statuses are canonicalized to the sentinels used
     // across the codebase (`SolverResult::infeasible`/`unbounded`: `+inf` /
@@ -3945,7 +3944,7 @@ fn solve_socp_canonicalizes_non_optimal_objective() {
 
 #[test]
 fn solve_socp_preserves_real_iterate_objective_when_inconclusive() {
-    // #40 follow-up (P1): the objective canonicalization must fire ONLY for
+    // Follow-up: the objective canonicalization must fire ONLY for
     // the conclusive no-usable-iterate statuses (Infeasible/Unbounded). An
     // inconclusive status (MaxIterations here; Timeout/NumericalError share
     // the arm) returns a genuine, still-improving iterate in `res.x` whose
@@ -4023,7 +4022,7 @@ fn valid_int_lp() -> MisocpProblem {
 
 #[test]
 fn misocp_problem_validate_rejects_int_bound_length_mismatch() {
-    // #38 (confirmed repro): `int_lb`/`int_ub` shorter than `integers`
+    // Confirmed repro: `int_lb`/`int_ub` shorter than `integers`
     // previously indexed out of bounds inside `build_relaxation` at the first
     // B&B node. Exact repro: `integers=[0]`, `int_lb=[]`, `int_ub=[]`.
     let mut p = valid_int_lp();
@@ -4040,7 +4039,7 @@ fn misocp_problem_validate_rejects_int_bound_length_mismatch() {
 
 #[test]
 fn misocp_problem_validate_rejects_out_of_range_integer_index() {
-    // #39 (confirmed repro): an integer index >= n previously indexed
+    // Confirmed repro: an integer index >= n previously indexed
     // `base.a/g` columns out of bounds inside `build_relaxation`. Exact
     // repro shape: `n=1`, `integers=[2]`.
     let mut p = valid_int_lp();
@@ -4056,7 +4055,7 @@ fn misocp_problem_validate_rejects_out_of_range_integer_index() {
 
 #[test]
 fn miqcp_quadratic_objective_recomputes_true_objective_not_epigraph() {
-    // #29: the MISOCP branch must recompute the objective from `x` (as the
+    // The MISOCP branch must recompute the objective from `x` (as the
     // continuous `solve_qcqp` and model-layer paths do), not report the conic
     // relaxation's raw epigraph value `t`. `to_conic`'s Cholesky reshapes the
     // near-zero jitter-band entry (1,1) of `P0 = diag(1, -1e-10, 2, 0.5)`, so

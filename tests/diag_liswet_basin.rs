@@ -359,9 +359,11 @@ fn diagnose(name: &str) {
     );
 }
 
-/// ~180s under CPU contention; tracked in task #88 (LISWET deep dive).
+/// ~180s under CPU contention; a deeper root-cause dive into the LISWET
+/// timeout was proposed as follow-up work but no such tracked item exists in
+/// this repo (zero GitHub issues; `gh issue view` 404s for any number).
 #[test]
-#[ignore = "heavy: ~180s CPU contention timeout (2026-05-30 lead-verify で再現)、deep dive は #88 LISWET track"]
+#[ignore = "heavy: ~180s CPU contention timeout (2026-05-30 lead-verify で再現)、LISWET timeout の deep dive は未着手 (追跡先なし)"]
 fn diag_liswet_basin_9_12() {
     diagnose("LISWET9");
     diagnose("LISWET12");

@@ -936,7 +936,7 @@ mod tests {
         }
     }
 
-    /// #30 sentinel. The McCormick relaxation of `w = x0^2` over `[-1,1]`
+    /// Sentinel. The McCormick relaxation of `w = x0^2` over `[-1,1]`
     /// bounds `w` below by the two endpoint tangents (`w >= 2x-1`, `w >= -2x-1`),
     /// which meet at `-1` at `x = 0`. The explicit `w`-interval row adds the
     /// true bound `w >= 0`. Hand oracle: `x^2 >= 0`, so the tight relaxation
@@ -956,7 +956,7 @@ mod tests {
         );
     }
 
-    /// #18 sentinel. `solve_relax_lp` must forward the caller's deadline to the
+    /// Sentinel. `solve_relax_lp` must forward the caller's deadline to the
     /// LP path; an already-expired deadline therefore stops the LP with
     /// `Timeout`. Reverting to `SolverOptions::default()` (no deadline) solves
     /// the relaxation to `Optimal`, ignoring the timeout.
@@ -975,7 +975,7 @@ mod tests {
         );
     }
 
-    /// #19 sentinel. A failed root relaxation (no certificate) leaves the whole
+    /// Sentinel. A failed root relaxation (no certificate) leaves the whole
     /// feasible region unexplored: the search must report `NumericalError`, not
     /// a false `Infeasible`. Reverting to the blanket `continue` (no failure
     /// tracking) falls through to the empty-incumbent `Infeasible` branch.
@@ -989,7 +989,7 @@ mod tests {
         assert!(res.x.is_empty());
     }
 
-    /// #20 sentinel. An exhausted search with an incumbent but a node relaxation
+    /// Sentinel. An exhausted search with an incumbent but a node relaxation
     /// that failed without a certificate is not a global-optimality proof: it
     /// must report `SuboptimalSolution`, never `Optimal`. Node 81 (well past the
     /// incumbent node, well before the ~99-node exhaustion) is forced to fail.
@@ -1034,7 +1034,7 @@ mod tests {
         );
     }
 
-    /// #20 positive control. A clean, fully exhausted search proves global
+    /// Positive control (companion to the sentinel above). A clean, fully exhausted search proves global
     /// optimality: `Optimal` with a certified near-zero gap.
     #[test]
     fn exhausted_clean_search_certifies_optimal_with_zero_gap() {

@@ -1,8 +1,8 @@
-//! #92 真因 sentinel: EmptyCol skip 厳格化 (linear-only var を stationarity から外さない)。
+//! 真因 sentinel: EmptyCol skip 厳格化 (linear-only var を stationarity から外さない)。
 //!
 //! 旧 heuristic `A.col_ptr[j+1] - col_ptr[j] == 0` は presolve 用 (bd=0 慣例) だが、
 //! **非凸 QP の linear-only var** (A 空 / Q 列 non-zero / c≠0) に誤発火し、stationarity が
-//! 常に 0 と評価され outer guard が効かず bd が往復消滅していた (#55 audit)。
+//! 常に 0 と評価され outer guard が効かず bd が往復消滅していた (audit で発見)。
 //!
 //! 本 file は 4 パターン (CLAUDE.md「複数パターンのデータを用意」) で
 //! 修正が真因に効くこと + 既存挙動を退化させないことを検証する。
@@ -11,7 +11,7 @@ use super::super::*;
 use crate::problem::{ConstraintType, SolveStatus};
 use crate::sparse::CscMatrix;
 
-/// Pattern A (#55 audit fixture): A 空 + Q diag=(0, -2)、c=(1, 3)、box [-2, 2]^2。
+/// Pattern A (audit fixture): A 空 + Q diag=(0, -2)、c=(1, 3)、box [-2, 2]^2。
 /// 期待: x=(-2, -2)、bd=[1, 7, 0, 0]、status=LocallyOptimal、KKT≈0。
 ///
 /// 旧 logic では x[0] (linear-only: A col 空 / Q col 空 / c=1) と x[1] (linear-only:
@@ -133,7 +133,7 @@ fn test_emptycol_skip_strict_truly_empty_col_preserved() {
     // x[0] は任意 (c=0 / Q=0 / A=0)、status が Optimal で十分。
 }
 
-/// Pattern D (control): #55 fixture に Le 制約を 1 本足すと linear-only var でなくなり、
+/// Pattern D (control): Pattern A の fixture に Le 制約を 1 本足すと linear-only var でなくなり、
 /// 旧経路でも bd[0]=1 が復元できる挙動を維持していることを確認 (退化テスト)。
 #[test]
 fn test_emptycol_skip_strict_with_active_constraint_unchanged() {
@@ -159,7 +159,7 @@ fn test_emptycol_skip_strict_with_active_constraint_unchanged() {
         "got {:?}",
         result.status
     );
-    // 解は #55 と同じく x=(-2, -2)、bd[0]=1。
+    // 解は Pattern A と同じく x=(-2, -2)、bd[0]=1。
     assert!((result.solution[0] - (-2.0)).abs() < 1e-5);
     assert!((result.solution[1] - (-2.0)).abs() < 1e-5);
     let bd = &result.bound_duals;

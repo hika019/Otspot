@@ -50,7 +50,7 @@ fn max_primal_violation(lp: &LpProblem, bounds: &[(f64, f64)], x: &[f64]) -> f64
     v_max
 }
 
-/// Task #26 / #31: cycle.QPS must reach the known optimum, not NumericalError.
+/// cycle.QPS must reach the known optimum, not NumericalError.
 #[test]
 fn diag_cycle_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/cycle.QPS");
@@ -126,8 +126,10 @@ fn diag_cycle_must_reach_known_objective() {
 /// feasible** (max primal violation ≤ tol, recomputed independently in original
 /// space) and whose objective matches the known optimum. This is the coverage
 /// that the feasibility-preserving ratio test + honest backstop must satisfy:
-/// no false-feasible / false-Optimal claim. Survives #31 (promotion to Optimal
-/// keeps both asserts true).
+/// no false-feasible / false-Optimal claim. Both asserts stay true whether
+/// `solve_with` returns `Optimal` or `SuboptimalSolution`, which is why this
+/// companion survived the crossover-certification improvement that later made
+/// `Optimal` the deterministic outcome (see `diag_cycle_must_reach_known_objective`).
 ///
 /// tier-2 (~100s): cycle's postsolve dual crossover storm dominates wall time.
 #[test]
@@ -161,7 +163,9 @@ fn diag_cycle_is_feasible_and_near_optimal() {
     const FEAS_TOL: f64 = 1.0e-6;
 
     // Feasible-terminal status (not a false Infeasible/Unbounded/NumericalError).
-    // Optimal is allowed so the test survives a future #31 promotion.
+    // Optimal is allowed (and, as of the crossover-certification fix, is what
+    // `solve_with` now deterministically returns) so this stays passing
+    // alongside `diag_cycle_must_reach_known_objective`'s strict Optimal assert.
     assert!(
         matches!(
             r.status,
