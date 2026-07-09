@@ -932,9 +932,11 @@ fn qp_problem_objective(src: &QpProblem, x: &[f64]) -> f64 {
     obj
 }
 
-/// Solve a convex QCQP represented by [`QpProblem`] through the conic
-/// bridge, via [`qp_problem_to_conic`]'s direct `O(nnz)` construction (see
-/// its docs for why this bypasses `qcqp_from_qp_problem` + `to_conic`).
+/// Solve a convex QCQP represented by [`QpProblem`] through the conic bridge.
+///
+/// Each quadratic constraint's SOC block is built directly from its own sparse
+/// triplets, so peak memory tracks the problem's total `nnz` rather than
+/// `n * m` over `m` constraints of `n` variables.
 pub fn solve_qp_problem_as_qcqp(src: &QpProblem, opts: &ConicOptions) -> QcqpResult {
     let (conic, _nvar, convexity_unproven) = match qp_problem_to_conic(src) {
         Ok(v) => v,
