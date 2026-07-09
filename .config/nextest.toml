@@ -86,22 +86,16 @@ memory-budget = { max-threads = 1 }
 filter = "test(qplib::tests::test_parse_existing_qplib_files_regression) + test(qplib::tests::test_memory_sentinel_no_double_hashmap_qplib8500) + test(qplib::tests::test_parse_sweep_no_memory_accumulation) + test(qplib::tests::test_memory_probe_large_dcl_files) + test(qplib::tests::test_memory_sentinel_qplib8683_qcqp) + test(qplib::tests::test_qcqp_sparse_init_memory_bounded)"
 test-group = "qplib-memory-heavy"
 
-# memory_budget.rs (otspot-core/tests): the four route tests peak
-# ~300 MB / ~820 MB / ~30 MB / ~80 MB each (~1.2 GB combined; more before the assert
-# fires if a regression inflates one of them). Serialize to avoid RSS
-# stacking — same rationale as qplib-memory-heavy above. Measurement
-# correctness does not depend on this: each test holds an in-binary Mutex
-# for its measure window (see the file's module doc comment).
+# memory_budget.rs (otspot-core/tests + otspot-model/tests): every peak-allocation
+# fence, serialized. Budgets sum to ~4.4 GB, and a regression allocates its way to
+# the ceiling *before* the post-solve assert fires, so concurrent fences can exhaust
+# RAM and take the whole test run (or its cgroup) down with an OOM kill.
+# Matched by binary, not by test name: a name list silently omits fences added later
+# — it had already drifted to 4 of 7. Measurement correctness does not depend on this
+# grouping: each test holds an in-binary Mutex for its measure window (see the file's
+# module doc comment).
 [[profile.default.overrides]]
-filter = "test(lp_route_peak_within_budget) + test(qp_ipm_route_peak_within_budget) + test(conic_socp_route_peak_within_budget) + test(conic_single_huge_soc_peak_within_budget)"
-test-group = "memory-budget"
-
-# memory_budget.rs (otspot-model/tests): Model DSL conic-bridge fence
-# (~12 MB peak, well under budget). Grouped with the otspot-core memory
-# fences above for consistency, not because it individually risks RSS
-# stacking.
-[[profile.default.overrides]]
-filter = "test(model_conic_bridge_peak_within_budget)"
+filter = "binary(memory_budget)"
 test-group = "memory-budget"
 
 # Heavy/nightly profile: runs ALL tests including #[ignore]d heavy ones.
@@ -181,11 +175,3 @@ filter = "test(=lp_route_dfl001_uses_ipm_dispatch) + test(=lp_route_ken18_uses_i
 slow-timeout = { period = "300s", terminate-after = 4 }
 threads-required = "num-cpus"
 
-# memory_budget.rs: default profile と同じ直列化 (合計 ~1.4 GB の RSS 圧迫防止)。
-[[profile.heavy.overrides]]
-filter = "test(lp_route_peak_within_budget) + test(qp_ipm_route_peak_within_budget) + test(conic_socp_route_peak_within_budget) + test(conic_single_huge_soc_peak_within_budget)"
-test-group = "memory-budget"
-
-[[profile.heavy.overrides]]
-filter = "test(model_conic_bridge_peak_within_budget)"
-test-group = "memory-budget"
