@@ -644,35 +644,268 @@ impl Model {
         }
     }
 
-    fn csc_rows(mat: &CscMatrix) -> Vec<Vec<f64>> {
-        let mut rows = vec![vec![0.0; mat.ncols()]; mat.nrows()];
+    /// Extracts `mat`'s stored `(row, col, value)` triplets directly from its
+    /// CSC storage, `O(nnz)`. Never densifies: a per-row dense scan (the
+    /// conic bridge's historical approach) costs `O(nrows * ncols)` even when
+    /// `mat` is sparse; this walks only the entries `mat` actually stores.
+    fn csc_triplets(mat: &CscMatrix) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+        let nnz = mat.nnz();
+        let mut rows = Vec::with_capacity(nnz);
+        let mut cols = Vec::with_capacity(nnz);
+        let mut vals = Vec::with_capacity(nnz);
         let cp = mat.col_ptr();
         let ri = mat.row_ind();
         let va = mat.values();
         for j in 0..mat.ncols() {
             for k in cp[j]..cp[j + 1] {
-                rows[ri[k]][j] = va[k];
+                rows.push(ri[k]);
+                cols.push(j);
+                vals.push(va[k]);
             }
         }
-        rows
+        (rows, cols, vals)
     }
 
-    fn csc_from_rows(rows: &[Vec<f64>], ncols: usize) -> Result<CscMatrix, ModelError> {
-        let mut rr = Vec::new();
-        let mut cc = Vec::new();
-        let mut vv = Vec::new();
-        for (i, row) in rows.iter().enumerate() {
-            for (j, &v) in row.iter().enumerate() {
-                if v != 0.0 {
-                    rr.push(i);
-                    cc.push(j);
-                    vv.push(v);
+    /// Vertically stacks `top` above `bottom` (same column count) in
+    /// `O(nnz(top) + nnz(bottom))`: re-triplets both and shifts `bottom`'s row
+    /// indices, without ever materializing a dense stacked-row buffer.
+    fn vstack_csc(top: &CscMatrix, bottom: &CscMatrix) -> Result<CscMatrix, ModelError> {
+        debug_assert_eq!(top.ncols(), bottom.ncols());
+        let (mut rows, mut cols, mut vals) = Self::csc_triplets(top);
+        let (brows, bcols, bvals) = Self::csc_triplets(bottom);
+        let row_offset = top.nrows();
+        rows.extend(brows.into_iter().map(|r| r + row_offset));
+        cols.extend(bcols);
+        vals.extend(bvals);
+        CscMatrix::from_triplets(
+            &rows,
+            &cols,
+            &vals,
+            top.nrows() + bottom.nrows(),
+            top.ncols(),
+        )
+        .map_err(map_matrix_build_err)
+    }
+
+    /// Splits `a`'s rows by `constraint_types` into a linear-inequality matrix
+    /// (`Le` rows unchanged, `Ge` rows sign-flipped to `<=`) and a
+    /// linear-equality matrix, without densifying: reads each row of `a`
+    /// through one transpose (`a_t`'s column `i` == `a`'s row `i`), so this is
+    /// `O(nnz(a))` regardless of `n` (the conic bridge's historical dense
+    /// per-row scan was `O(nrows(a) * n)`).
+    fn split_linear_rows(
+        a: &CscMatrix,
+        constraint_types: &[ConstraintType],
+        b: &[f64],
+        n: usize,
+    ) -> Result<(CscMatrix, Vec<f64>, CscMatrix, Vec<f64>), ModelError> {
+        let a_t = a.transpose();
+        let mut ineq_r = Vec::new();
+        let mut ineq_c = Vec::new();
+        let mut ineq_v = Vec::new();
+        let mut ineq_h = Vec::new();
+        let mut eq_r = Vec::new();
+        let mut eq_c = Vec::new();
+        let mut eq_v = Vec::new();
+        let mut b_eq = Vec::new();
+        for i in 0..a.nrows() {
+            let (idx, val) = a_t
+                .get_column(i)
+                .expect("row i is within a_t's column range 0..a.nrows()");
+            match constraint_types[i] {
+                ConstraintType::Le => {
+                    let row = ineq_h.len();
+                    for (&j, &v) in idx.iter().zip(val) {
+                        ineq_r.push(row);
+                        ineq_c.push(j);
+                        ineq_v.push(v);
+                    }
+                    ineq_h.push(b[i]);
+                }
+                ConstraintType::Ge => {
+                    let row = ineq_h.len();
+                    for (&j, &v) in idx.iter().zip(val) {
+                        ineq_r.push(row);
+                        ineq_c.push(j);
+                        ineq_v.push(-v);
+                    }
+                    ineq_h.push(-b[i]);
+                }
+                ConstraintType::Eq => {
+                    let row = b_eq.len();
+                    for (&j, &v) in idx.iter().zip(val) {
+                        eq_r.push(row);
+                        eq_c.push(j);
+                        eq_v.push(v);
+                    }
+                    b_eq.push(b[i]);
+                }
+                _ => {
+                    return Err(ModelError::Internal("unknown constraint type".to_string()));
                 }
             }
         }
-        CscMatrix::from_triplets(&rr, &cc, &vv, rows.len(), ncols).map_err(map_matrix_build_err)
+        let ineq = CscMatrix::from_triplets(&ineq_r, &ineq_c, &ineq_v, ineq_h.len(), n)
+            .map_err(map_matrix_build_err)?;
+        let eq = CscMatrix::from_triplets(&eq_r, &eq_c, &eq_v, b_eq.len(), n)
+            .map_err(map_matrix_build_err)?;
+        Ok((ineq, ineq_h, eq, b_eq))
     }
 
+    /// Builds one inequality row per finite variable bound (`x_j <= ub` as
+    /// `x_j <= ub`, `x_j >= lb` as `-x_j <= -lb`). Each row has exactly one
+    /// nonzero, so this is `O(number of finite bounds)`, never `O(n^2)`.
+    fn bounds_to_ineq_rows(
+        bounds: &[(f64, f64)],
+        n: usize,
+    ) -> Result<(CscMatrix, Vec<f64>), ModelError> {
+        let mut r = Vec::new();
+        let mut c = Vec::new();
+        let mut v = Vec::new();
+        let mut h = Vec::new();
+        for (j, &(lb, ub)) in bounds.iter().enumerate() {
+            if ub.is_finite() {
+                r.push(h.len());
+                c.push(j);
+                v.push(1.0);
+                h.push(ub);
+            }
+            if lb.is_finite() {
+                r.push(h.len());
+                c.push(j);
+                v.push(-1.0);
+                h.push(-lb);
+            }
+        }
+        let mat = CscMatrix::from_triplets(&r, &c, &v, h.len(), n).map_err(map_matrix_build_err)?;
+        Ok((mat, h))
+    }
+}
+
+#[cfg(test)]
+mod conic_bridge_sparse_builder_tests {
+    use super::*;
+
+    /// Independent oracle: manually enumerated `(row, col, value)` triplets
+    /// for a hand-built 3x4 matrix, compared (as an order-independent set)
+    /// against `Model::csc_triplets`'s output.
+    #[test]
+    fn csc_triplets_matches_hand_built_entries() {
+        // row0: [2, 0, -1, 0], row1: [0, 5, 0, 0], row2: [3, 0, 0, 7]
+        let rows = [0usize, 0, 1, 2, 2];
+        let cols = [0usize, 2, 1, 0, 3];
+        let vals = [2.0, -1.0, 5.0, 3.0, 7.0];
+        let mat = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 4).unwrap();
+
+        let (r, c, v) = Model::csc_triplets(&mat);
+        let mut got: Vec<(usize, usize, i64)> = r
+            .into_iter()
+            .zip(c)
+            .zip(v)
+            .map(|((row, col), val)| (row, col, (val * 1000.0).round() as i64))
+            .collect();
+        got.sort();
+        let mut expected: Vec<(usize, usize, i64)> = rows
+            .iter()
+            .zip(cols.iter())
+            .zip(vals.iter())
+            .map(|((&row, &col), &val)| (row, col, (val * 1000.0).round() as i64))
+            .collect();
+        expected.sort();
+        assert_eq!(
+            got, expected,
+            "csc_triplets must recover exactly mat's stored entries"
+        );
+    }
+
+    /// Independent oracle: vertically stacking a 2x3 and a 3x3 hand-built
+    /// matrix must equal a single hand-built matrix with the bottom's rows
+    /// shifted by 2 — checked via `to_dense_rows` (fine for this tiny test
+    /// matrix per its own doc comment).
+    #[test]
+    fn vstack_csc_matches_hand_computed_stack() {
+        let top = CscMatrix::from_triplets(&[0, 1], &[0, 2], &[1.0, 2.0], 2, 3).unwrap();
+        let bottom =
+            CscMatrix::from_triplets(&[0, 1, 2], &[1, 0, 2], &[3.0, 4.0, 5.0], 3, 3).unwrap();
+
+        let stacked = Model::vstack_csc(&top, &bottom).unwrap();
+        let expected = CscMatrix::from_triplets(
+            &[0, 1, 2, 3, 4],
+            &[0, 2, 1, 0, 2],
+            &[1.0, 2.0, 3.0, 4.0, 5.0],
+            5,
+            3,
+        )
+        .unwrap();
+        assert_eq!(stacked.to_dense_rows(), expected.to_dense_rows());
+    }
+
+    /// Independent oracle: hand-flip `Ge` rows' sign and bucket by
+    /// constraint type, compare against `Model::split_linear_rows`'s output.
+    #[test]
+    fn split_linear_rows_matches_hand_computed_sign_flip_and_bucketing() {
+        // r0=[1,0,2] Le, r1=[0,3,0] Ge, r2=[1,1,1] Eq, r3=[0,0,4] Le
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 2, 2, 2, 3],
+            &[0, 2, 1, 0, 1, 2, 2],
+            &[1.0, 2.0, 3.0, 1.0, 1.0, 1.0, 4.0],
+            4,
+            3,
+        )
+        .unwrap();
+        let types = vec![
+            ConstraintType::Le,
+            ConstraintType::Ge,
+            ConstraintType::Eq,
+            ConstraintType::Le,
+        ];
+        let b = vec![5.0, 6.0, 7.0, 8.0];
+
+        let (ineq, ineq_h, eq, b_eq) = Model::split_linear_rows(&a, &types, &b, 3).unwrap();
+
+        assert_eq!(
+            ineq.to_dense_rows(),
+            vec![
+                vec![1.0, 0.0, 2.0],
+                vec![0.0, -3.0, 0.0],
+                vec![0.0, 0.0, 4.0]
+            ],
+            "Le rows unchanged, Ge row sign-flipped, Eq row excluded"
+        );
+        assert_eq!(ineq_h, vec![5.0, -6.0, 8.0]);
+        assert_eq!(
+            eq.to_dense_rows(),
+            vec![vec![1.0, 1.0, 1.0]],
+            "only the Eq row lands in the equality matrix"
+        );
+        assert_eq!(b_eq, vec![7.0]);
+    }
+
+    /// Independent oracle: hand-computed unit rows for a mix of two-sided,
+    /// one-sided (each direction), and unbounded variables.
+    #[test]
+    fn bounds_to_ineq_rows_matches_hand_computed_unit_rows() {
+        let bounds = vec![
+            (1.0, 5.0),                         // both finite
+            (f64::NEG_INFINITY, 3.0),           // ub only
+            (2.0, f64::INFINITY),               // lb only
+            (f64::NEG_INFINITY, f64::INFINITY), // neither -> no rows
+        ];
+        let (mat, h) = Model::bounds_to_ineq_rows(&bounds, 4).unwrap();
+        assert_eq!(
+            mat.to_dense_rows(),
+            vec![
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![-1.0, 0.0, 0.0, 0.0],
+                vec![0.0, 1.0, 0.0, 0.0],
+                vec![0.0, 0.0, -1.0, 0.0],
+            ]
+        );
+        assert_eq!(h, vec![5.0, -1.0, 3.0, -2.0]);
+    }
+}
+
+impl Model {
     #[allow(clippy::too_many_arguments)]
     fn solve_qcqp_internal(
         &self,
@@ -690,50 +923,16 @@ impl Model {
         // NaN/Inf constraint data, NaN/Inf quadratic + SOC coefficients).
         self.validate_conic_inputs(&a, &b)?;
 
-        let arows = Self::csc_rows(&a);
         // Linear inequality / equality rows from the model constraints only.
         // Variable bounds are handled separately below: as extra `g` rows for
         // the convex conic bridge (which has no lb/ub fields), and as the
         // McCormick box (`lb`/`ub`) for the nonconvex spatial fallback.
-        let mut lin_g_rows = Vec::new();
-        let mut lin_h = Vec::new();
-        let mut eq_rows = Vec::new();
-        let mut b_eq = Vec::new();
-        for (i, row) in arows.iter().enumerate() {
-            match constraint_types[i] {
-                ConstraintType::Le => {
-                    lin_g_rows.push(row.clone());
-                    lin_h.push(b[i]);
-                }
-                ConstraintType::Ge => {
-                    lin_g_rows.push(row.iter().map(|v| -v).collect());
-                    lin_h.push(-b[i]);
-                }
-                ConstraintType::Eq => {
-                    eq_rows.push(row.clone());
-                    b_eq.push(b[i]);
-                }
-                _ => {
-                    return Err(ModelError::Internal("unknown constraint type".to_string()));
-                }
-            }
-        }
-        let mut g_rows = lin_g_rows.clone();
+        // Both splits stay `O(nnz)`: no dense `n`-wide row is ever built.
+        let (lin_g, lin_h, eq, b_eq) = Self::split_linear_rows(&a, &constraint_types, &b, n)?;
+        let (bounds_mat, bounds_h) = Self::bounds_to_ineq_rows(&bounds, n)?;
+        let g_lin_with_bounds = Self::vstack_csc(&lin_g, &bounds_mat)?;
         let mut h_lin = lin_h.clone();
-        for (j, &(lb, ub)) in bounds.iter().enumerate() {
-            if ub.is_finite() {
-                let mut r = vec![0.0; n];
-                r[j] = 1.0;
-                g_rows.push(r);
-                h_lin.push(ub);
-            }
-            if lb.is_finite() {
-                let mut r = vec![0.0; n];
-                r[j] = -1.0;
-                g_rows.push(r);
-                h_lin.push(-lb);
-            }
-        }
+        h_lin.extend(bounds_h);
         // Quadratic constraints (validated finite / same-model above).
         let mut quad = Vec::new();
         for (expr, rhs) in &self.quadratic_constraints {
@@ -757,9 +956,9 @@ impl Model {
             p0: p0.clone(),
             q0: c.clone(),
             quad: quad.clone(),
-            g_lin: Self::csc_from_rows(&g_rows, n)?,
+            g_lin: g_lin_with_bounds,
             h_lin,
-            a_eq: Self::csc_from_rows(&eq_rows, n)?,
+            a_eq: eq.clone(),
             b_eq: b_eq.clone(),
         };
         let deadline = self
@@ -811,9 +1010,9 @@ impl Model {
                 p0: p0.clone(),
                 q0: c.clone(),
                 quad: g_quad,
-                g_lin: Self::csc_from_rows(&lin_g_rows, n).map_err(|_| ())?,
+                g_lin: lin_g.clone(),
                 h_lin: lin_h.clone(),
-                a_eq: Self::csc_from_rows(&eq_rows, n).map_err(|_| ())?,
+                a_eq: eq.clone(),
                 b_eq: b_eq.clone(),
                 lb,
                 ub,
@@ -1108,9 +1307,6 @@ impl Model {
         if self.soc_constraints.is_empty() {
             return Ok(());
         }
-        let mut rows = Self::csc_rows(&conic.g);
-        let mut h = conic.h.clone();
-        let mut soc = conic.cone.soc.clone();
         let check = |var: &Variable| -> Result<(), ModelError> {
             if var.model_id != self.model_id || var.index >= n {
                 return Err(ModelError::InvalidInput(
@@ -1119,29 +1315,41 @@ impl Model {
             }
             Ok(())
         };
+        // New SOC rows only: each row's nonzeros come straight from a
+        // constraint term's (already-sparse) coefficient map, so no `nvar`-
+        // wide dense row is ever built here.
+        let mut r = Vec::new();
+        let mut c = Vec::new();
+        let mut v = Vec::new();
+        let mut new_h = Vec::new();
+        let mut soc = conic.cone.soc.clone();
         for (terms, t) in &self.soc_constraints {
             let dim = terms.len() + 1;
             // s0 = t (scalar bound): s = h - G x  =>  G row = -coeffs(t), h = const(t).
-            let mut r0 = vec![0.0; nvar];
+            let row = new_h.len();
             for (&var, &coef) in &t.coefficients {
                 check(&var)?;
-                r0[var.index] = -coef;
+                r.push(row);
+                c.push(var.index);
+                v.push(-coef);
             }
-            rows.push(r0);
-            h.push(t.constant);
+            new_h.push(t.constant);
             for term in terms {
-                let mut r = vec![0.0; nvar];
+                let row = new_h.len();
                 for (&var, &coef) in &term.coefficients {
                     check(&var)?;
-                    r[var.index] = -coef;
+                    r.push(row);
+                    c.push(var.index);
+                    v.push(-coef);
                 }
-                rows.push(r);
-                h.push(term.constant);
+                new_h.push(term.constant);
             }
             soc.push(dim);
         }
-        conic.g = Self::csc_from_rows(&rows, nvar)?;
-        conic.h = h;
+        let new_rows = CscMatrix::from_triplets(&r, &c, &v, new_h.len(), nvar)
+            .map_err(map_matrix_build_err)?;
+        conic.g = Self::vstack_csc(&conic.g, &new_rows)?;
+        conic.h.extend(new_h);
         conic.cone = otspot_core::conic::ConeSpec {
             l: conic.cone.l,
             soc,
@@ -3490,6 +3698,39 @@ mod conic_dsl_tests {
         let y = m.add_var("y", f64::NEG_INFINITY, f64::INFINITY);
         let t = m.add_var("t", 0.0, f64::INFINITY);
         m.add_constraint(constraint!((x + y) >= 2.0));
+        m.add_soc_le(vec![1.0 * x, 1.0 * y], 1.0 * t);
+        m.minimize(1.0 * t);
+        let res = m.solve().unwrap();
+        assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
+        assert!(
+            (res.objective_value - 2.0_f64.sqrt()).abs() < 1e-4,
+            "obj={}",
+            res.objective_value
+        );
+        assert!((res[x] - 1.0).abs() < 1e-3 && (res[y] - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn soc_with_all_linear_constraint_kinds_and_finite_bounds() {
+        // Same closed-form optimum as `soc_norm_min_on_line` (t=sqrt(2) at
+        // (1,1)), but with an `Eq` row (x=y), a slack `Le` row, and finite
+        // bounds on every variable added alongside the `Ge`/SOC rows — this
+        // exercises `split_linear_rows`'s Le/Ge/Eq bucketing and
+        // `bounds_to_ineq_rows` together with `append_soc` in one solve, not
+        // just each in isolation.
+        //
+        // Independent oracle: `Eq` forces x=y; `Ge` (x+y>=2) then forces
+        // x=y>=1; minimizing t=||(x,y)||=sqrt(2)*x is smallest at x=y=1
+        // (the `Ge` row's boundary), giving t=sqrt(2). The `Le` row
+        // (x-2y<=50) and all three bounds are slack there (1-2=-1<=50;
+        // x,y=1 in [-100,100]; t=sqrt(2) in [0,100]).
+        let mut m = Model::new("soc-all-linear-kinds");
+        let x = m.add_var("x", -100.0, 100.0);
+        let y = m.add_var("y", -100.0, 100.0);
+        let t = m.add_var("t", 0.0, 100.0);
+        m.add_constraint(constraint!((x - y) == 0.0));
+        m.add_constraint(constraint!((x + y) >= 2.0));
+        m.add_constraint(constraint!((x - 2.0 * y) <= 50.0));
         m.add_soc_le(vec![1.0 * x, 1.0 * y], 1.0 * t);
         m.minimize(1.0 * t);
         let res = m.solve().unwrap();
