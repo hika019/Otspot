@@ -40,6 +40,7 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
 
     let nb = 1.0 + norm2(bvec);
     let nc = 1.0 + norm2(c);
+    let nh = 1.0 + norm2(hvec);
 
     let e = cone::identity(&blk);
     let mut x = vec![0.0; n];
@@ -58,6 +59,23 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
 
     let mut kkt_caches = kkt::build_kkt_caches(&problem.a, &problem.g, &blk, n, p, opts.deadline);
     let kkt_cfg = KktConfig::default();
+
+    if let Some((sx, sy, sz, ss)) = starting_point(
+        problem,
+        &blk,
+        n,
+        p,
+        m,
+        &e,
+        &mut kkt_caches,
+        &kkt_cfg,
+        opts.deadline,
+    ) {
+        x = sx;
+        y = sy;
+        z = sz;
+        s = ss;
+    }
 
     for it in 0..opts.max_iter {
         if opts.deadline.is_some_and(|d| Instant::now() >= d) {
@@ -81,7 +99,15 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
         let by = dot(bvec, &y);
         let hz = dot(hvec, &z);
 
-        let pres = norm2(&ry) / nb;
+        // Primal feasibility spans both the equality residual (`ry = Ax - b`)
+        // and the conic residual (`rz = Gx + s - h`, `s in K`). The conic term
+        // is load-bearing for soundness: with `ds` recovered from scaled
+        // complementarity (see `kkt::solve_dir`) `s` no longer tracks `h - Gx`
+        // implicitly, so an infeasible point can reach small gap/dres while
+        // `rz` stays `O(1)` -- omitting `rz` here would report such a point as
+        // Optimal (false optimal on an infeasible relaxation, breaking B&B
+        // pruning; cf. `socp_degenerate_fixed_var_infeasible_gets_certificate`).
+        let pres = (norm2(&ry) / nb).max(norm2(&rz) / nh);
         let dres = norm2(&rx) / nc;
         let gap = sz / (1.0 + cx.abs());
         last = (pres, dres, gap);
@@ -265,6 +291,113 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
         primal_ray: verified_primal_ray,
         infeas_cert: verified_infeas_cert,
     }
+}
+
+/// Signed distance of `v` from the interior of `K` (positive outside, negative
+/// strictly inside): `max(-v_i)` over orthant rows, `||v_1|| - v_0` per SOC.
+fn cone_distance(blk: &Blocks, v: &[f64]) -> f64 {
+    let mut d = f64::NEG_INFINITY;
+    for &vi in &v[..blk.l] {
+        if -vi > d {
+            d = -vi;
+        }
+    }
+    for (bi, &off) in blk.soc_offsets().iter().enumerate() {
+        let dim = blk.soc[bi];
+        let nrm = v[off + 1..off + dim]
+            .iter()
+            .map(|a| a * a)
+            .sum::<f64>()
+            .sqrt();
+        let gap = nrm - v[off];
+        if gap > d {
+            d = gap;
+        }
+    }
+    d
+}
+
+/// Pushes `v` strictly into `K` along the cone identity `e` (CVXOPT/Mehrotra
+/// heuristic): if `v` is on or outside the boundary (`cone_distance >= 0`),
+/// shift by `(1 + distance) e`, which lands `v` exactly one unit inside. A
+/// vector already interior at the data's own scale is left untouched, so the
+/// shifted point inherits the problem's natural magnitude.
+fn shift_into_cone(blk: &Blocks, v: &mut [f64], e: &[f64]) {
+    let dist = cone_distance(blk, v);
+    if dist >= 0.0 {
+        let shift = 1.0 + dist;
+        for (vi, &ei) in v.iter_mut().zip(e) {
+            *vi += shift * ei;
+        }
+    }
+}
+
+/// Data-driven primal--dual starting point (Mehrotra/CVXOPT). Solves the two
+/// unit-scaled (`W = I`) KKT systems
+/// `K [x;y;z] = [0;b;h]` (primal, giving `s = h - G x`) and
+/// `K [x;y;z] = [-c;0;0]` (dual, giving the dual slack `z`),
+/// then shifts `s` and `z` into the cone interior with [`shift_into_cone`]. The
+/// resulting iterate carries the problem's natural scale, so the
+/// fraction-to-boundary rule no longer clamps the first steps to `~1e-3` (the
+/// naive `s = z = e` start does exactly that when the equilibrated RHS is
+/// `O(100)`, since equilibration deliberately does not normalise `b`/`h`; see
+/// `equil`). Returns `None` (fall back to `s = z = e`) if the unit-scaled
+/// factorization fails or produces a non-finite iterate.
+/// Primal--dual starting iterate `(x, y, z, s)` from [`starting_point`].
+type StartingPoint = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+
+#[allow(clippy::too_many_arguments)]
+fn starting_point(
+    problem: &ConicProblem,
+    blk: &Blocks,
+    n: usize,
+    p: usize,
+    m: usize,
+    e: &[f64],
+    caches: &mut kkt::KktCaches,
+    kkt_cfg: &KktConfig,
+    deadline: Option<Instant>,
+) -> Option<StartingPoint> {
+    let sc = cone::nt_scaling(blk, e, e); // s = z = e => W = I
+    let n_e = n + blk.n_border();
+    let total = n_e + p + m + blk.n_border();
+
+    // Primal RHS (0, b, h); reused as the health-probe RHS for the factor.
+    let mut rhs_primal = vec![0.0; total];
+    rhs_primal[n_e..n_e + p].copy_from_slice(&problem.b);
+    rhs_primal[n_e + p..n_e + p + m].copy_from_slice(&problem.h);
+
+    let factor = kkt::factorize_with_retry(caches, &sc, blk, &rhs_primal, deadline, kkt_cfg)?;
+
+    let mut sol = vec![0.0; total];
+    factor.solve(&rhs_primal, &mut sol);
+    let x0 = sol[0..n].to_vec();
+    // Row `G x - z = h` (W = I) gives `z = G x - h`, so the primal slack that
+    // zeroes `rz = G x + s - h` is `s = h - G x = -z`.
+    let mut s0: Vec<f64> = sol[n_e + p..n_e + p + m].iter().map(|v| -v).collect();
+
+    let mut rhs_dual = vec![0.0; total];
+    for (dst, &ci) in rhs_dual[..n].iter_mut().zip(&problem.c) {
+        *dst = -ci;
+    }
+    factor.solve(&rhs_dual, &mut sol);
+    let y0 = sol[n_e..n_e + p].to_vec();
+    // Row `c + A^T y + G^T z = 0` makes the `dz` component the dual slack `z`.
+    let mut z0 = sol[n_e + p..n_e + p + m].to_vec();
+
+    let finite = x0
+        .iter()
+        .chain(&s0)
+        .chain(&z0)
+        .chain(&y0)
+        .all(|v| v.is_finite());
+    if !finite {
+        return None;
+    }
+
+    shift_into_cone(blk, &mut s0, e);
+    shift_into_cone(blk, &mut z0, e);
+    Some((x0, y0, z0, s0))
 }
 
 fn failed(problem: &ConicProblem, status: SolveStatus) -> ConicResult {
