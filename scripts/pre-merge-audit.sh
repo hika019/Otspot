@@ -27,13 +27,17 @@ cargo nextest run --release --test-threads 6
 cargo test --doc
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 bash scripts/check_file_size.sh
-TODO_COUNT=$(grep -rE 'TODO|FIXME|XXX|HACK' \
-  otspot-core/src otspot-io/src otspot-model/src otspot-dev/src src 2>/dev/null | wc -l)
+# grep exits 1 on zero matches, which is the passing state here; `|| true`
+# keeps `set -e -o pipefail` from aborting the audit exactly when it succeeds.
+TODO_COUNT=$(grep -rEc 'TODO|FIXME|XXX|HACK' \
+  otspot-core/src otspot-io/src otspot-model/src otspot-dev/src src 2>/dev/null \
+  | awk -F: '{n += $NF} END {print n + 0}' || true)
 if [ "$TODO_COUNT" -gt 0 ]; then
   echo "ERROR: TODO/FIXME/XXX/HACK count $TODO_COUNT > 0" >&2
   exit 1
 fi
 python3 tests/test_check_data_coverage.py
+python3 tests/test_check_test_data_requirements.py
 python3 tests/test_iso_25010_quality_matrix.py
 
 # 1b. merge gate regression scan

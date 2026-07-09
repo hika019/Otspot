@@ -605,22 +605,16 @@ fn touched_vars(triplets: &[(usize, usize, f64)]) -> Vec<usize> {
 /// implicit `n_global x n_global` space, doing all work over just the
 /// touched variables: `O(nnz)` time and memory instead of `O(n_global)`.
 ///
-/// Exact, not an approximation: every row/column outside `triplets`' support
-/// is identically zero in `P`, so restricting elimination to the induced
-/// principal submatrix on the touched set (index-compressed but
-/// order-preserving) reproduces the full-space `sparse_cholesky_lower`
-/// factor exactly, with every other row of `L` being the zero vector, which
-/// this never materializes. This is what keeps `qp_problem_to_conic`
-/// `O(nnz)` per constraint regardless of the problem's global variable
-/// count (`qcqp_matrix_to_csc` still returns a full `n x n` `CscMatrix` for
-/// `QuadConstraint`/`GQuadConstraint`'s cross-crate contract, but nothing
-/// downstream of *this* function ever walks that shape).
+/// Exact, not an approximation: rows and columns outside `triplets`' support
+/// are identically zero, so eliminating only the induced principal submatrix
+/// (index-compressed, order-preserving) reproduces the full-space
+/// `sparse_cholesky_lower` factor, whose every other row is the zero vector.
 ///
-/// Returns `(l_cols, clamped)`: `l_cols[i]` is column `i` of the touched
-/// submatrix's lower factor `L`, as `(global_row, value)` pairs, with any
-/// identically-zero column dropped entirely (dropping a zero row from `R`
-/// changes neither `||Rx||^2` nor the feasible set); `clamped` matches
-/// `sparse_cholesky_lower`'s jitter-clamp contract.
+/// Returns `(l_cols, clamped)`: `l_cols[i]` is column `i` of that submatrix's
+/// lower factor `L` as `(global_row, value)` pairs, with identically-zero
+/// columns dropped (a zero row of `R` changes neither `||Rx||^2` nor the
+/// feasible set); `clamped` matches `sparse_cholesky_lower`'s jitter-clamp
+/// contract.
 fn touched_cholesky(triplets: &[(usize, usize, f64)]) -> Result<(SparseCholCols, bool), ()> {
     let nz: Vec<(usize, usize, f64)> = triplets
         .iter()
@@ -733,21 +727,16 @@ fn append_quad_compact(
 /// Convert a `QpProblem` (QPLIB QCQP form) directly into an SOCP, without
 /// materializing an intermediate `QcqpProblem`/`Vec<QuadConstraint>`.
 ///
-/// `qcqp_from_qp_problem` followed by `to_conic` is `O(n)` per quadratic
-/// constraint just to *store* each one: `QuadConstraint::p`'s CSC `col_ptr`
-/// and `QuadConstraint::q`'s dense `Vec<f64>` are both sized to the *global*
-/// variable count `n` (that struct's shape is a public cross-crate contract
-/// via `otspot-model`, so it cannot shrink to a constraint's own touched-
-/// variable count) — `O(n * m)` aggregate, held live simultaneously for all
-/// `m` constraints, regardless of how sparse each one is. QPLIB_8585 has
-/// `n=99999`, `m=49999` quadratic constraints of `nnz=1` each: `O(n*m)` is
-/// tens of GB before any SOCP solving starts, vs. `O(nnz) = O(m)` here.
+/// `qcqp_from_qp_problem` + `to_conic` costs `O(n)` per quadratic constraint
+/// just to *store* it: `QuadConstraint::p`'s CSC `col_ptr` and `q`'s dense
+/// `Vec<f64>` are sized to the global variable count `n` — a public
+/// cross-crate contract via `otspot-model`, so neither can shrink to the
+/// constraint's own touched-variable count. All `m` are held live at once, so
+/// QPLIB_8585 (`n=99999`, `m=49999`, `nnz=1` each) needs tens of GB before any
+/// solving starts, versus `O(nnz) = O(m)` here.
 ///
-/// This function builds each constraint's SOC block directly from its own
-/// sparse `QcqpMatrix::triplets` and the row's sparse linear coefficients
-/// (`touched_cholesky` / `append_quad_compact`), one constraint at a time,
-/// so peak memory tracks the problem's total nnz, not `n * m`.
-///
+/// This builds each constraint's SOC block from its own sparse
+/// `QcqpMatrix::triplets` and sparse linear coefficients, one at a time.
 /// Semantics mirror `qcqp_from_qp_problem` + `to_conic` exactly: same row
 /// transcription (`Le` kept, `Ge` sign-flipped, `Eq`/quadratic-`Ge`/
 /// quadratic-`Eq` rejected, finite bounds as inequality rows, a fixed bound
