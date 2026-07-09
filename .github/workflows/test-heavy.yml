@@ -99,22 +99,22 @@ jobs:
         run: |
           cargo nextest run --release --features parallel --profile heavy \
             --run-ignored all --no-fail-fast --test-threads 3 \
-            -E 'not (test(=d6cube_postsolve_under_1s) + test(=greenbea_postsolve_under_5s) + test(=diag_osa60_must_reach_known_objective))'
+            -E 'not (test(=d6cube_postsolve_under_1s) + test(=diag_osa60_must_reach_known_objective))'
       - name: Run heavy perf-open targets (informational)
         # 既知未達成 or margin が machine 依存の perf 目標:
         #   - d6cube_postsolve_under_1s: 60s で Optimal 未達 (収束は
         #     lp_simplex_stall_d6cube_converges が must-pass で追跡)
-        #   - greenbea_postsolve_under_5s: 6762737c 以降ローカル緑 (postsolve
-        #     3.12s < 5s cap) だが CI runner 速度差で cap を超えうる。GH で
-        #     緑を観測したら must-pass へ昇格する。
         #   - diag_osa60_must_reach_known_objective: default path が 60s で
         #     Optimal を証明できない (#88/#89)。correctness は
         #     diag_osa60_is_feasible_and_honest が must-pass で追跡。
         # 赤 = 目標未達の継続観測であり regression ではないため非ゲート。
         # if: always() — must-pass が赤でも perf-open の現状を surface する。
+        #
+        # greenbea_postsolve_under_5s は 2026-07-09 に must-pass へ昇格 (7/7
+        # 緑観測、tests/diag_postsolve_cleanup_gate.rs 参照)。この段からは除去。
         if: always()
         continue-on-error: true
         run: |
           cargo nextest run --release --features parallel --profile heavy \
             --run-ignored all --no-fail-fast --test-threads 3 \
-            -E 'test(=d6cube_postsolve_under_1s) + test(=greenbea_postsolve_under_5s) + test(=diag_osa60_must_reach_known_objective)'
+            -E 'test(=d6cube_postsolve_under_1s) + test(=diag_osa60_must_reach_known_objective)'

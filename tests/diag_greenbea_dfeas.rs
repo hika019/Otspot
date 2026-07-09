@@ -124,11 +124,13 @@ fn run_once_with_timeout(
 }
 
 /// Primary regression: presolve=on (default), must converge to dfeas_rel ≤ eps.
-/// Measured 2026-06-14 on this worktree: 30.426s, Optimal, dfeas_rel=4.20e-11.
-/// This is correct but just over the default-test budget, so keep it in heavy.
-/// 系統的真因深掘りは #97 (env-sensitive test 群)。
+/// Measured 2026-06-14 on this worktree: 30.426s (just over the then default
+/// budget, so kept in heavy). Re-measured 2026-07-09 after the greenbea
+/// postsolve-gate fix (b43b0a42): 5.318s, Optimal, dfeas_rel=2.149e-11 — well
+/// inside the default-test budget. env-sensitive test 群の系統的真因深掘りは
+/// 追跡先として "#97" と記されていたが、該当 GitHub issue は存在しない
+/// (`gh issue view 97` 404; この repo に issue はゼロ件)。
 #[test]
-#[ignore = "heavy/env-sensitive: currently correct but ~30.4s (>30s default); run under heavy profile"]
 fn diag_greenbea_dfeas_full_green() {
     let (status, _elapsed, obj_rel_err, dfeas_rel, _timing) =
         run_once_with_timeout("presolve_on", true, 120.0);
