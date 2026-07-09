@@ -864,3 +864,129 @@ fn conic_nonconvex_route_peak_within_budget() {
         NCQCQP_PEAK_BUDGET_BYTES as f64 / 1_048_576.0
     );
 }
+
+// ---------------------------------------------------------------------------
+// Convex QCQP conic bridge: many independent sparse quadratic constraints
+// (Task #15, QPLIB_8585 shape)
+// ---------------------------------------------------------------------------
+
+use otspot_core::conic::solve_qp_problem_as_qcqp;
+use otspot_core::qp::QcqpMatrix;
+
+/// Variables: `QCQP_N`. Quadratic constraints: `QCQP_N / 2`, one per
+/// variable in the upper half, `nnz = 1` each (single diagonal term, no
+/// shared variables between constraints) -- matches QPLIB_8585 exactly
+/// (`n = 99999`, `49999` quadratic constraints, `nnz = 1` each).
+const QCQP_N: usize = 100_000;
+const QCQP_M: usize = QCQP_N / 2;
+
+/// `qcqp_from_qp_problem` (the pre-fix pipeline, still used by the general
+/// `QcqpProblem` API for hand-built problems) stores each constraint as a
+/// `QuadConstraint` with a full `n x n` `CscMatrix` (`col_ptr` alone is
+/// `(n+1) * 8` bytes) and a dense `Vec<f64>` linear term (`n * 8` bytes) --
+/// both independent of the constraint's own `nnz = 1`, held live for all `M`
+/// constraints simultaneously (`to_conic` consumes the whole
+/// `Vec<QuadConstraint>` after `qcqp_from_qp_problem` returns it). At this
+/// scale that is `M * (n+1) * 8 + M * n * 8` ~= 80 GB before any SOCP
+/// solving starts -- not runnable in-process on ordinary hardware. Manually
+/// confirmed at a reduced scale (`n=20_000`, `m=10_000`, release, under
+/// `systemd-run --user --scope -p MemoryMax=14G`): the pre-fix
+/// `qcqp_from_qp_problem` + `solve_qcqp` path (this fence's
+/// `solve_qp_problem_as_qcqp` reverted to call it) is OOM-killed (journal:
+/// "A process of this unit has been killed by the OOM killer") well before
+/// completing; `qp_problem_to_conic` (the fix) solves the *same* problem in
+/// well under a second. `INJECT_QUADRATIC_BLOWUP` below is the always-on
+/// mechanism (same as the other fences in this file) confirming the
+/// tracking + assertion would catch a regression back to that shape.
+///
+/// Measured peak (release, `cargo nextest run --release --test memory_budget
+/// qcqp_bridge_many_sparse_quad_constraints_peak_within_budget -- --nocapture`,
+/// this machine): 154.2 MB at n=100000, m=50000 (Optimal, 7 iterations).
+/// Budget = measured x3 margin (CLAUDE.md convention), rounded up.
+const QCQP_PEAK_BUDGET_BYTES: usize = 480 * 1024 * 1024;
+
+/// `min sum_j -x_j` over `n = QCQP_N` variables: the lower half `[0, n/2)`
+/// is boxed to `[0, 1]` (no quadratic constraint, so `c_j = -1` drives it to
+/// its upper bound `1`); the upper half `[n/2, n)` is unbounded by box but
+/// has one quadratic constraint each, `(1/2)*2*x_j^2 - 1 <= 0` i.e. `x_j^2
+/// <= 1`, with linear part `0` (the constraints' `A` rows are empty).
+/// Hand-provable optimum: `x_j = 1` for every `j` (box boundary for the
+/// lower half, quadratic boundary for the upper half, `c_j = -1` pushing
+/// both the same direction), objective `= -n`.
+fn build_many_sparse_quad_constraints(n: usize) -> (QpProblem, f64) {
+    let m = n / 2;
+    let q_obj = CscMatrix::from_triplets(&[], &[], &[], n, n).expect("zero Q");
+    let c = vec![-1.0; n];
+    let a = CscMatrix::from_triplets(&[], &[], &[], m, n)
+        .expect("zero A: every quadratic constraint's row has no linear term");
+    let b = vec![1.0; m];
+    let mut bounds = vec![(0.0, 1.0); n];
+    for bound in bounds.iter_mut().take(n).skip(n / 2) {
+        *bound = (f64::NEG_INFINITY, f64::INFINITY);
+    }
+    let ctypes = vec![ConstraintType::Le; m];
+    let mut problem = QpProblem::new(q_obj, c, a, b, bounds, ctypes).expect("problem shape");
+
+    let mut quad = Vec::with_capacity(m);
+    for k in 0..m {
+        let mut qc = QcqpMatrix::new(n);
+        qc.triplets.push((n / 2 + k, n / 2 + k, 2.0)); // (1/2)*2*x^2 <= 1 => x^2 <= 1
+        quad.push(qc);
+    }
+    problem
+        .set_quadratic_constraints(quad)
+        .expect("quadratic constraints");
+
+    (problem, -(n as f64))
+}
+
+/// Peak allocation fence for the convex QCQP conic bridge
+/// (`solve_qp_problem_as_qcqp` / `qp_problem_to_conic`): must stay `O(nnz)`
+/// per quadratic constraint, not `O(n)` (i.e. not `O(n*m)` aggregate).
+///
+/// **No-op failure guarantee**: flipping `INJECT_QUADRATIC_BLOWUP` to `true`
+/// makes this FAIL (same mechanism as the other routes; sized to `2x` this
+/// route's budget). See `QCQP_PEAK_BUDGET_BYTES`'s doc comment for the
+/// separate manual revert-and-rerun confirmation (OOM-killed at reduced
+/// scale) that motivated this fence.
+#[test]
+fn qcqp_bridge_many_sparse_quad_constraints_peak_within_budget() {
+    let _serial = lock_measurement();
+    let (qp, expected_obj) = build_many_sparse_quad_constraints(QCQP_N);
+
+    reset_peak();
+    let r = solve_qp_problem_as_qcqp(&qp, &ConicOptions::default());
+    maybe_inject_dense_blowup(QCQP_PEAK_BUDGET_BYTES);
+    let peak = peak_bytes();
+    eprintln!(
+        "qcqp_bridge peak={peak} bytes ({:.2} MB), status={:?}, iters={}",
+        peak as f64 / 1_048_576.0,
+        r.status,
+        r.iterations
+    );
+
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "QCQP bridge: expected Optimal"
+    );
+    let rel_err = (r.objective - expected_obj).abs() / expected_obj.abs().max(1.0);
+    assert!(
+        rel_err < 1e-4,
+        "QCQP bridge: obj={:.6e} expected={:.6e} rel_err={:.3e}",
+        r.objective,
+        expected_obj,
+        rel_err
+    );
+    for (j, &xj) in r.x.iter().enumerate() {
+        assert!((xj - 1.0).abs() < 1e-4, "x[{j}]={xj} want 1.0");
+    }
+    assert!(
+        peak <= QCQP_PEAK_BUDGET_BYTES,
+        "QCQP bridge peak {:.1} MB exceeds {:.1} MB budget (n={QCQP_N}, {QCQP_M} quadratic \
+         constraints) — check for an O(n) per-constraint materialization in the \
+         solve_qp_problem_as_qcqp path",
+        peak as f64 / 1_048_576.0,
+        QCQP_PEAK_BUDGET_BYTES as f64 / 1_048_576.0
+    );
+}

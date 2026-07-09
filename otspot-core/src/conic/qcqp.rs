@@ -587,16 +587,375 @@ pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
     })
 }
 
-/// Solve a convex QCQP represented by [`QpProblem`] through the conic bridge.
+/// Distinct global variable indices touched by `triplets` (both row and
+/// col), sorted ascending and deduplicated: `O(nnz log nnz)`.
+fn touched_vars(triplets: &[(usize, usize, f64)]) -> Vec<usize> {
+    let mut vars: Vec<usize> = Vec::with_capacity(2 * triplets.len());
+    for &(r, c, _) in triplets {
+        vars.push(r);
+        vars.push(c);
+    }
+    vars.sort_unstable();
+    vars.dedup();
+    vars
+}
+
+/// Sparse Cholesky of a PSD-with-jitter matrix given as symmetric COO
+/// `triplets` (both triangles stored, `QcqpMatrix`'s convention) over an
+/// implicit `n_global x n_global` space, doing all work over just the
+/// touched variables: `O(nnz)` time and memory instead of `O(n_global)`.
+///
+/// Exact, not an approximation: every row/column outside `triplets`' support
+/// is identically zero in `P`, so restricting elimination to the induced
+/// principal submatrix on the touched set (index-compressed but
+/// order-preserving) reproduces the full-space `sparse_cholesky_lower`
+/// factor exactly, with every other row of `L` being the zero vector, which
+/// this never materializes. This is what keeps `qp_problem_to_conic`
+/// `O(nnz)` per constraint regardless of the problem's global variable
+/// count (`qcqp_matrix_to_csc` still returns a full `n x n` `CscMatrix` for
+/// `QuadConstraint`/`GQuadConstraint`'s cross-crate contract, but nothing
+/// downstream of *this* function ever walks that shape).
+///
+/// Returns `(l_cols, clamped)`: `l_cols[i]` is column `i` of the touched
+/// submatrix's lower factor `L`, as `(global_row, value)` pairs, with any
+/// identically-zero column dropped entirely (dropping a zero row from `R`
+/// changes neither `||Rx||^2` nor the feasible set); `clamped` matches
+/// `sparse_cholesky_lower`'s jitter-clamp contract.
+fn touched_cholesky(triplets: &[(usize, usize, f64)]) -> Result<(SparseCholCols, bool), ()> {
+    let nz: Vec<(usize, usize, f64)> = triplets
+        .iter()
+        .copied()
+        .filter(|&(_, _, v)| v != 0.0)
+        .collect();
+    let local_to_global = touched_vars(&nz);
+    let k = local_to_global.len();
+    let mut local_rows = Vec::with_capacity(nz.len());
+    let mut local_cols = Vec::with_capacity(nz.len());
+    let mut vals = Vec::with_capacity(nz.len());
+    for &(r, c, v) in &nz {
+        let lr = local_to_global
+            .binary_search(&r)
+            .expect("touched_vars collects every triplet row");
+        let lc = local_to_global
+            .binary_search(&c)
+            .expect("touched_vars collects every triplet col");
+        local_rows.push(lr);
+        local_cols.push(lc);
+        vals.push(v);
+    }
+    let local_p =
+        CscMatrix::from_triplets(&local_rows, &local_cols, &vals, k, k).map_err(|_| ())?;
+    let (l_local, clamped) = sparse_cholesky_lower(&local_p, k)?;
+    let l_global: SparseCholCols = l_local
+        .into_iter()
+        .filter(|col| col.iter().any(|&(_, v)| v != 0.0))
+        .map(|col| {
+            col.into_iter()
+                .filter(|&(_, v)| v != 0.0)
+                .map(|(local_row, val)| (local_to_global[local_row], val))
+                .collect()
+        })
+        .collect();
+    Ok((l_global, clamped))
+}
+
+/// Extracts `(row, col, val)` triplets from a `CscMatrix`: `O(ncols + nnz)`
+/// time (must visit every column-pointer slot to know which are empty), but
+/// only `O(nnz)` output. Used for the objective Hessian `src.q`, a single
+/// per-problem matrix whose own `O(n)` `col_ptr` is paid once — unlike the
+/// per-constraint case `qp_problem_to_conic` otherwise avoids entirely.
+fn csc_to_triplets(m: &CscMatrix) -> Vec<(usize, usize, f64)> {
+    let mut t = Vec::with_capacity(m.nnz());
+    for j in 0..m.ncols() {
+        let (rows, vals) = m.get_column(j).expect("j < ncols by loop bound");
+        for (&r, &v) in rows.iter().zip(vals) {
+            t.push((r, j, v));
+        }
+    }
+    t
+}
+
+/// Dense linear-term vector to sparse `(index, value)` pairs, dropping
+/// zeros.
+fn sparse_nz(v: &[f64]) -> Vec<(usize, f64)> {
+    v.iter()
+        .enumerate()
+        .filter(|&(_, &x)| x != 0.0)
+        .map(|(j, &x)| (j, x))
+        .collect()
+}
+
+/// Appends a convex quadratic `(1/2) x^T P x + q^T x + r <= 0` (the
+/// objective epigraph when `qt_coef` is `Some`) as one SOC block, from a
+/// *compact* Cholesky factor (`touched_cholesky`'s output: `l_cols.len()`
+/// tracks the constraint's own touched-variable rank, not the problem's
+/// global variable count) and a sparse linear term. Same embedding formula
+/// as `to_conic`'s `append_quad`: `s = [a+b; sqrt2 * R x; a-b]`, `dim =
+/// l_cols.len() + 2`.
+fn append_quad_compact(
+    gt: &mut Triplets,
+    h: &mut Vec<f64>,
+    row_off: &mut usize,
+    soc: &mut Vec<usize>,
+    l_cols: &[Vec<(usize, f64)>],
+    q_nz: &[(usize, f64)],
+    qt_coef: Option<usize>,
+    r: f64,
+) {
+    let k = l_cols.len();
+    let dim = k + 2;
+    let base = *row_off;
+    for &(j, qv) in q_nz {
+        gt.push(base, j, qv);
+    }
+    if let Some(tj) = qt_coef {
+        gt.push(base, tj, -1.0);
+    }
+    h.push(1.0 - r);
+    let s2 = std::f64::consts::SQRT_2;
+    for (i, col) in l_cols.iter().enumerate() {
+        for &(row, val) in col {
+            gt.push(base + 1 + i, row, -s2 * val);
+        }
+        h.push(0.0);
+    }
+    for &(j, qv) in q_nz {
+        gt.push(base + 1 + k, j, qv);
+    }
+    if let Some(tj) = qt_coef {
+        gt.push(base + 1 + k, tj, -1.0);
+    }
+    h.push(-r - 1.0);
+    *row_off += dim;
+    soc.push(dim);
+}
+
+/// Convert a `QpProblem` (QPLIB QCQP form) directly into an SOCP, without
+/// materializing an intermediate `QcqpProblem`/`Vec<QuadConstraint>`.
+///
+/// `qcqp_from_qp_problem` followed by `to_conic` is `O(n)` per quadratic
+/// constraint just to *store* each one: `QuadConstraint::p`'s CSC `col_ptr`
+/// and `QuadConstraint::q`'s dense `Vec<f64>` are both sized to the *global*
+/// variable count `n` (that struct's shape is a public cross-crate contract
+/// via `otspot-model`, so it cannot shrink to a constraint's own touched-
+/// variable count) — `O(n * m)` aggregate, held live simultaneously for all
+/// `m` constraints, regardless of how sparse each one is. QPLIB_8585 has
+/// `n=99999`, `m=49999` quadratic constraints of `nnz=1` each: `O(n*m)` is
+/// tens of GB before any SOCP solving starts, vs. `O(nnz) = O(m)` here.
+///
+/// This function builds each constraint's SOC block directly from its own
+/// sparse `QcqpMatrix::triplets` and the row's sparse linear coefficients
+/// (`touched_cholesky` / `append_quad_compact`), one constraint at a time,
+/// so peak memory tracks the problem's total nnz, not `n * m`.
+///
+/// Semantics mirror `qcqp_from_qp_problem` + `to_conic` exactly: same row
+/// transcription (`Le` kept, `Ge` sign-flipped, `Eq`/quadratic-`Ge`/
+/// quadratic-`Eq` rejected, finite bounds as inequality rows, a fixed bound
+/// as an equality row), same SOC embedding formula, same error messages.
+pub(crate) fn qp_problem_to_conic(src: &QpProblem) -> Result<(ConicProblem, usize, bool), String> {
+    let n = src.num_vars;
+    let has_quad_obj = !src.is_zero_q();
+    let nvar = n + if has_quad_obj { 1 } else { 0 };
+
+    let mut c = vec![0.0; nvar];
+    if has_quad_obj {
+        c[n] = 1.0;
+    } else {
+        c[..n].copy_from_slice(&src.c);
+    }
+
+    let a_rows = src.a.transpose();
+    // `gt`/`h` accumulate the orthant rows first (indices 0..ml), then the
+    // SOC block rows are appended directly after — no intermediate `g_lin`
+    // `CscMatrix` is built or re-scanned.
+    let mut gt = Triplets::new();
+    let mut h: Vec<f64> = Vec::new();
+    let mut ae = Triplets::new();
+    let mut be: Vec<f64> = Vec::new();
+    let mut gl_count = 0usize;
+    let mut ae_count = 0usize;
+
+    struct StagedQuad<'a> {
+        triplets: &'a [(usize, usize, f64)],
+        q_nz: Vec<(usize, f64)>,
+        r: f64,
+    }
+    let mut staged: Vec<StagedQuad> = Vec::new();
+
+    let has_qc = !src.quadratic_constraints.is_empty();
+    for k in 0..src.num_constraints {
+        let qmat = has_qc
+            .then(|| &src.quadratic_constraints[k])
+            .filter(|qc| qc.nnz() > 0);
+        let (row_idx, row_val) = a_rows
+            .get_column(k)
+            .map_err(|e| format!("A row {k}: {e:?}"))?;
+        match src.constraint_types[k] {
+            ConstraintType::Le => {
+                if let Some(qc) = qmat {
+                    let q_nz: Vec<(usize, f64)> =
+                        row_idx.iter().zip(row_val).map(|(&j, &v)| (j, v)).collect();
+                    staged.push(StagedQuad {
+                        triplets: &qc.triplets,
+                        q_nz,
+                        r: -src.b[k],
+                    });
+                    continue;
+                }
+                for (&j, &v) in row_idx.iter().zip(row_val) {
+                    gt.push(gl_count, j, v);
+                }
+                h.push(src.b[k]);
+                gl_count += 1;
+            }
+            ConstraintType::Ge => {
+                if qmat.is_some_and(|qc| qc.nnz() > 0) {
+                    return Err(
+                        "quadratic >= constraints are nonconvex for the convex QCQP bridge".into(),
+                    );
+                }
+                for (&j, &v) in row_idx.iter().zip(row_val) {
+                    gt.push(gl_count, j, -v);
+                }
+                h.push(-src.b[k]);
+                gl_count += 1;
+            }
+            ConstraintType::Eq => {
+                if qmat.is_some_and(|qc| qc.nnz() > 0) {
+                    return Err("quadratic equality constraints are not supported by the convex QCQP bridge".into());
+                }
+                for (&j, &v) in row_idx.iter().zip(row_val) {
+                    ae.push(ae_count, j, v);
+                }
+                be.push(src.b[k]);
+                ae_count += 1;
+            }
+        }
+    }
+    for j in 0..n {
+        let (lb, ub) = src.bounds[j];
+        if lb.is_finite() && ub.is_finite() && lb == ub {
+            ae.push(ae_count, j, 1.0);
+            be.push(lb);
+            ae_count += 1;
+            continue;
+        }
+        if ub.is_finite() {
+            gt.push(gl_count, j, 1.0);
+            h.push(ub);
+            gl_count += 1;
+        }
+        if lb.is_finite() {
+            gt.push(gl_count, j, -1.0);
+            h.push(-lb);
+            gl_count += 1;
+        }
+    }
+
+    let a_eq_narrow = CscMatrix::from_triplets(&ae.rows, &ae.cols, &ae.vals, ae_count, n)
+        .map_err(|e| format!("A_eq build: {e:?}"))?;
+    let a = widen_cols(&a_eq_narrow, nvar);
+
+    let ml = gl_count;
+    let mut row_off = ml;
+    let mut soc: Vec<usize> = Vec::new();
+    let mut convexity_unproven = false;
+
+    if has_quad_obj {
+        let p0_triplets = csc_to_triplets(&src.q);
+        let (l0, clamped) =
+            touched_cholesky(&p0_triplets).map_err(|_| "P0 not PSD (nonconvex)".to_string())?;
+        convexity_unproven |= clamped;
+        let q0_nz = sparse_nz(&src.c);
+        append_quad_compact(
+            &mut gt,
+            &mut h,
+            &mut row_off,
+            &mut soc,
+            &l0,
+            &q0_nz,
+            Some(n),
+            0.0,
+        );
+    }
+    for (ci, sq) in staged.iter().enumerate() {
+        let (lk, clamped) = touched_cholesky(sq.triplets)
+            .map_err(|_| format!("P{} not PSD (nonconvex)", ci + 1))?;
+        convexity_unproven |= clamped;
+        append_quad_compact(
+            &mut gt,
+            &mut h,
+            &mut row_off,
+            &mut soc,
+            &lk,
+            &sq.q_nz,
+            None,
+            sq.r,
+        );
+    }
+
+    let m = h.len();
+    let g = CscMatrix::from_triplets(&gt.rows, &gt.cols, &gt.vals, m, nvar)
+        .map_err(|e| format!("G build: {e:?}"))?;
+    let cone = ConeSpec { l: ml, soc };
+    let prob = ConicProblem {
+        c,
+        a,
+        b: be,
+        g,
+        h,
+        cone,
+    };
+    Ok((prob, nvar, convexity_unproven))
+}
+
+/// Recomputes `1/2 x^T Q x + c^T x` for a [`QpProblem`] at a candidate `x`
+/// (mirrors `qcqp_objective`, but reads `src.q`/`src.c` directly rather than
+/// a `QcqpProblem`'s `p0`/`q0` — used by `solve_qp_problem_as_qcqp` since it
+/// no longer builds a `QcqpProblem` intermediate).
+fn qp_problem_objective(src: &QpProblem, x: &[f64]) -> f64 {
+    let mut obj = 0.0;
+    for (j, &cv) in src.c.iter().enumerate() {
+        obj += cv * x[j];
+    }
+    if !src.is_zero_q() {
+        let px = src
+            .q
+            .mat_vec_mul(x)
+            .unwrap_or_else(|_| vec![0.0; src.num_vars]);
+        let mut xpx = 0.0;
+        for j in 0..src.num_vars {
+            xpx += x[j] * px[j];
+        }
+        obj += 0.5 * xpx;
+    }
+    obj
+}
+
+/// Solve a convex QCQP represented by [`QpProblem`] through the conic
+/// bridge, via [`qp_problem_to_conic`]'s direct `O(nnz)` construction (see
+/// its docs for why this bypasses `qcqp_from_qp_problem` + `to_conic`).
 pub fn solve_qp_problem_as_qcqp(src: &QpProblem, opts: &ConicOptions) -> QcqpResult {
-    match qcqp_from_qp_problem(src) {
-        Ok(qp) => solve_qcqp(&qp, opts),
-        Err(e) => QcqpResult {
-            status: SolveStatus::NotSupported(e),
-            objective: f64::NAN,
-            x: vec![0.0; src.num_vars],
-            iterations: 0,
-            convexity_unproven: true,
-        },
+    let (conic, _nvar, convexity_unproven) = match qp_problem_to_conic(src) {
+        Ok(v) => v,
+        Err(e) => {
+            return QcqpResult {
+                status: SolveStatus::NotSupported(e),
+                objective: f64::NAN,
+                x: vec![0.0; src.num_vars],
+                iterations: 0,
+                convexity_unproven: true,
+            }
+        }
+    };
+    let res: ConicResult = solve_socp(&conic, opts);
+    let x = res.x[..src.num_vars].to_vec();
+    let objective = qp_problem_objective(src, &x);
+    QcqpResult {
+        status: res.status,
+        objective,
+        x,
+        iterations: res.iterations,
+        convexity_unproven,
     }
 }
