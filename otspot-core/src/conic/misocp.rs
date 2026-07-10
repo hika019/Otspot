@@ -130,6 +130,24 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Per-node relaxation-status fault injection (test-only, mirrors
+    /// `nonconvex::RELAX_STATUS_PLAN`). Each visited node pops the front entry:
+    /// `Some(status)` overrides the node relaxation's status and drops any
+    /// certificate, so a plan entry of `Some(NumericalError)` deterministically
+    /// makes that one node fail *without* a certificate (the `_ =>` arm counts
+    /// it as a `numerical_failure`) regardless of the IPM's iteration numerics;
+    /// `None` (or an exhausted queue) leaves the real solve untouched. This
+    /// reproduces "an incumbent exists but one node failed inconclusively, so
+    /// the search is not exhaustive" without calibrating a fragile per-node
+    /// iteration budget. `thread_local` so parallel tests cannot corrupt each
+    /// other's plan.
+    pub(super) static NODE_STATUS_PLAN:
+        std::cell::RefCell<std::collections::VecDeque<Option<SolveStatus>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
 /// Build a relaxation with per-node integer bounds `[lb_j, ub_j]`. Strict
 /// bounds are appended as orthant rows (kept contiguous before the SOC
 /// blocks); a fixed variable (`lb_j == ub_j`) becomes an equality row
@@ -336,6 +354,14 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         // reparametrization -- feasibility is scale-invariant), never a
         // certificate's numeric value.
         let mut res = ipm::solve(&relax, opts);
+        // Test-only: force this node's status (dropping certificates) to inject
+        // a deterministic, non-certificate node failure (see `NODE_STATUS_PLAN`).
+        #[cfg(test)]
+        if let Some(forced) = NODE_STATUS_PLAN.with(|p| p.borrow_mut().pop_front()).flatten() {
+            res.status = forced;
+            res.infeas_cert = None;
+            res.primal_ray = None;
+        }
         for (xi, &dj) in res.x.iter_mut().zip(&equil.d) {
             *xi *= dj;
         }

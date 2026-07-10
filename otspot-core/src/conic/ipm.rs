@@ -21,6 +21,37 @@ fn norm2(a: &[f64]) -> f64 {
     dot(a, a).sqrt()
 }
 
+/// Mehrotra's centering coefficient for the starting-point balancing shift
+/// (Nocedal & Wright, *Numerical Optimization*, 2nd ed., eq. 14.39b).
+const MEHROTRA_CENTERING: f64 = 0.5;
+
+/// A cone block that is on or outside its boundary is pushed this far past it,
+/// one unit inside along the cone identity (CVXOPT `conelp`: `a = 1 + ts`;
+/// ECOS `bring2cone`: `alpha += 1`).
+const CONE_INTERIOR_OFFSET: f64 = 1.0;
+
+/// Mehrotra centering correction of the primal--dual starting iterate (Nocedal
+/// & Wright, *Numerical Optimization*, eq. 14.39a/b). `s` and `z` come from two
+/// independent KKT solves, so their complementarity is uneven across cones;
+/// shifting each along the cone identity `e` by
+/// `MEHROTRA_CENTERING * (s.z) / trace` equalises it and centers the start.
+/// `e.s`, `e.z` are the cone traces of `s`, `z`.
+fn balance_start(e: &[f64], s: &mut [f64], z: &mut [f64]) {
+    let sz = dot(s, z);
+    let tr_s = dot(e, s);
+    let tr_z = dot(e, z);
+    if sz > 0.0 && tr_s > 0.0 && tr_z > 0.0 {
+        let ds = MEHROTRA_CENTERING * sz / tr_z;
+        let dz = MEHROTRA_CENTERING * sz / tr_s;
+        for (si, &ei) in s.iter_mut().zip(e) {
+            *si += ds * ei;
+        }
+        for (zi, &ei) in z.iter_mut().zip(e) {
+            *zi += dz * ei;
+        }
+    }
+}
+
 pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     if let Err(e) = problem.validate() {
         return failed(problem, SolveStatus::NotSupported(e));
@@ -40,6 +71,7 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
 
     let nb = 1.0 + norm2(bvec);
     let nc = 1.0 + norm2(c);
+    let nh = 1.0 + norm2(hvec);
 
     let e = cone::identity(&blk);
     let mut x = vec![0.0; n];
@@ -58,6 +90,23 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
 
     let mut kkt_caches = kkt::build_kkt_caches(&problem.a, &problem.g, &blk, n, p, opts.deadline);
     let kkt_cfg = KktConfig::default();
+
+    if let Some((sx, sy, sz, ss)) = starting_point(
+        problem,
+        &blk,
+        n,
+        p,
+        m,
+        &e,
+        &mut kkt_caches,
+        &kkt_cfg,
+        opts.deadline,
+    ) {
+        x = sx;
+        y = sy;
+        z = sz;
+        s = ss;
+    }
 
     for it in 0..opts.max_iter {
         if opts.deadline.is_some_and(|d| Instant::now() >= d) {
@@ -81,7 +130,15 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
         let by = dot(bvec, &y);
         let hz = dot(hvec, &z);
 
-        let pres = norm2(&ry) / nb;
+        // Primal feasibility spans both the equality residual (`ry = Ax - b`)
+        // and the conic residual (`rz = Gx + s - h`, `s in K`). The conic term
+        // is load-bearing for soundness: with `ds` recovered from scaled
+        // complementarity (see `kkt::solve_dir`) `s` no longer tracks `h - Gx`
+        // implicitly, so an infeasible point can reach small gap/dres while
+        // `rz` stays `O(1)` -- omitting `rz` here would report such a point as
+        // Optimal (false optimal on an infeasible relaxation, breaking B&B
+        // pruning; cf. `socp_degenerate_fixed_var_infeasible_gets_certificate`).
+        let pres = (norm2(&ry) / nb).max(norm2(&rz) / nh);
         let dres = norm2(&rx) / nc;
         let gap = sz / (1.0 + cx.abs());
         last = (pres, dres, gap);
@@ -206,9 +263,7 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
         let dzw = sc.apply_w(&blk, &dz_a); // W dz
         let corr = cone::jprod(&blk, &dsw, &dzw);
         let ll = cone::jprod(&blk, &lambda, &lambda);
-        let target: Vec<f64> = (0..m)
-            .map(|i| sigma * mu * e[i] - ll[i] - corr[i])
-            .collect();
+        let target: Vec<f64> = (0..m).map(|i| sigma * mu * e[i] - ll[i] - corr[i]).collect();
         let rc = cone::jdiv(&blk, &lambda, &target);
         let (dx, dy, dz, ds) =
             kkt::solve_dir(&factor, &problem.g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc);
@@ -267,6 +322,118 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
     }
 }
 
+/// Pushes `v` into the interior of `K` along the cone identity `e`
+/// (CVXOPT/Mehrotra heuristic): a block on or outside its boundary is shifted
+/// one unit past it, an interior block is left untouched. Each **SOC block**
+/// uses its own boundary distance rather than one global maximum, so bringing a
+/// single violated block into the cone does not inject an `O(sqrt(#blocks))`
+/// primal residual across the other blocks. The orthant is shifted as a single
+/// block by its own `max(-v_i)`, matching ECOS/CVXOPT.
+fn shift_into_cone(blk: &Blocks, v: &mut [f64]) {
+    // Orthant block: one distance `max(-v_i)`; shift all rows if any is on or
+    // outside the boundary.
+    let mut d_orth = f64::NEG_INFINITY;
+    for &vi in &v[..blk.l] {
+        if -vi > d_orth {
+            d_orth = -vi;
+        }
+    }
+    if d_orth >= 0.0 {
+        let shift = CONE_INTERIOR_OFFSET + d_orth;
+        for vi in &mut v[..blk.l] {
+            *vi += shift;
+        }
+    }
+    // Each SOC block by its own boundary distance `||v_1|| - v_0`.
+    for (bi, &off) in blk.soc_offsets().iter().enumerate() {
+        let dim = blk.soc[bi];
+        let nrm = v[off + 1..off + dim]
+            .iter()
+            .map(|a| a * a)
+            .sum::<f64>()
+            .sqrt();
+        let dist = nrm - v[off];
+        if dist >= 0.0 {
+            v[off] += CONE_INTERIOR_OFFSET + dist;
+        }
+    }
+}
+
+/// Data-driven primal--dual starting point (Mehrotra/CVXOPT). Solves the two
+/// unit-scaled (`W = I`) KKT systems
+/// `K [x;y;z] = [0;b;h]` (primal, giving `s = h - G x`) and
+/// `K [x;y;z] = [-c;0;0]` (dual, giving the dual slack `z`),
+/// then shifts `s` and `z` into the cone interior with [`shift_into_cone`]. The
+/// resulting iterate carries the problem's natural scale, so the
+/// fraction-to-boundary rule no longer clamps the first steps to `~1e-3` (the
+/// naive `s = z = e` start does exactly that when the equilibrated RHS is
+/// `O(100)`, since equilibration deliberately does not normalise `b`/`h`; see
+/// `equil`). Returns `None` (fall back to `s = z = e`) if the unit-scaled
+/// factorization fails or produces a non-finite iterate.
+/// Primal--dual starting iterate `(x, y, z, s)` from [`starting_point`].
+type StartingPoint = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+
+#[allow(clippy::too_many_arguments)]
+fn starting_point(
+    problem: &ConicProblem,
+    blk: &Blocks,
+    n: usize,
+    p: usize,
+    m: usize,
+    e: &[f64],
+    caches: &mut kkt::KktCaches,
+    kkt_cfg: &KktConfig,
+    deadline: Option<Instant>,
+) -> Option<StartingPoint> {
+    let sc = cone::nt_scaling(blk, e, e); // s = z = e => W = I
+    let n_e = n + blk.n_border();
+    let total = n_e + p + m + blk.n_border();
+
+    // Primal RHS (0, b, h); reused as the health-probe RHS for the factor.
+    let mut rhs_primal = vec![0.0; total];
+    rhs_primal[n_e..n_e + p].copy_from_slice(&problem.b);
+    rhs_primal[n_e + p..n_e + p + m].copy_from_slice(&problem.h);
+
+    let factor = kkt::factorize_with_retry(caches, &sc, blk, &rhs_primal, deadline, kkt_cfg)?;
+
+    let mut sol = vec![0.0; total];
+    factor.solve(&rhs_primal, &mut sol);
+    let x0 = sol[0..n].to_vec();
+    // Row `G x - z = h` (W = I) gives `z = G x - h`, so the primal slack that
+    // zeroes `rz = G x + s - h` is `s = h - G x = -z`.
+    let mut s0: Vec<f64> = sol[n_e + p..n_e + p + m].iter().map(|v| -v).collect();
+
+    let mut rhs_dual = vec![0.0; total];
+    for (dst, &ci) in rhs_dual[..n].iter_mut().zip(&problem.c) {
+        *dst = -ci;
+    }
+    factor.solve(&rhs_dual, &mut sol);
+    let y0 = sol[n_e..n_e + p].to_vec();
+    // Row `c + A^T y + G^T z = 0` makes the `dz` component the dual slack `z`.
+    let mut z0 = sol[n_e + p..n_e + p + m].to_vec();
+
+    let finite = x0
+        .iter()
+        .chain(&s0)
+        .chain(&z0)
+        .chain(&y0)
+        .all(|v| v.is_finite());
+    if !finite {
+        return None;
+    }
+
+    shift_into_cone(blk, &mut s0);
+    shift_into_cone(blk, &mut z0);
+    balance_start(e, &mut s0, &mut z0);
+    // Re-check: the shift and balancing scale by `s.z / trace`, which could in
+    // principle overflow on pathological data; fall back to `s = z = e` rather
+    // than seed the solve with a non-finite iterate.
+    if !s0.iter().chain(&z0).all(|v| v.is_finite()) {
+        return None;
+    }
+    Some((x0, y0, z0, s0))
+}
+
 fn failed(problem: &ConicProblem, status: SolveStatus) -> ConicResult {
     ConicResult {
         status,
@@ -279,5 +446,143 @@ fn failed(problem: &ConicProblem, status: SolveStatus) -> ConicResult {
         residuals: (0.0, 0.0, 0.0),
         primal_ray: None,
         infeas_cert: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conic::ConeSpec;
+
+    /// Per-block shift: a violated orthant row must not perturb strictly
+    /// interior SOC blocks. Under a global `max`-distance shift each interior
+    /// SOC head would be inflated by `1 + 0.5 = 1.5` (to `3.5`), so the head
+    /// assertions below fail.
+    #[test]
+    fn shift_into_cone_is_per_block_not_global() {
+        let cone = ConeSpec {
+            l: 1,
+            soc: vec![3, 3],
+        };
+        let blk = Blocks::new(&cone);
+        // layout: [orthant | soc0(head, tail, tail) | soc1(head, tail, tail)].
+        // Orthant row violated by 0.5 (v0 = -0.5); both SOC blocks strictly
+        // interior (head 2 > ||tail|| = 0).
+        let mut v = vec![-0.5, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+        shift_into_cone(&blk, &mut v);
+
+        // Orthant shifted by 1 + 0.5 into +1.0 (one unit inside).
+        assert!(
+            (v[0] - 1.0).abs() < 1e-12,
+            "orthant row must land 1.0 inside, got {}",
+            v[0]
+        );
+        // Interior SOC heads must be untouched by the orthant's distance.
+        assert!(
+            (v[1] - 2.0).abs() < 1e-12,
+            "interior SOC block 0 head must be untouched (global shift?), got {}",
+            v[1]
+        );
+        assert!(
+            (v[4] - 2.0).abs() < 1e-12,
+            "interior SOC block 1 head must be untouched (global shift?), got {}",
+            v[4]
+        );
+        // Tails never move.
+        assert_eq!(&v[2..4], &[0.0, 0.0]);
+        assert_eq!(&v[5..7], &[0.0, 0.0]);
+    }
+
+    /// A genuinely-outside SOC block is still pushed one unit inside, by its own
+    /// distance, independent of the other blocks.
+    #[test]
+    fn shift_into_cone_pushes_each_outside_soc_by_its_own_distance() {
+        let cone = ConeSpec {
+            l: 0,
+            soc: vec![3, 3],
+        };
+        let blk = Blocks::new(&cone);
+        // Block 0 outside by ||(3,4)|| - 0 = 5; block 1 interior (head 10).
+        let mut v = vec![0.0, 3.0, 4.0, 10.0, 1.0, 0.0];
+        shift_into_cone(&blk, &mut v);
+        // Block 0 head: 0 + (1 + 5) = 6, so head - ||tail|| = 6 - 5 = 1 inside.
+        assert!((v[0] - 6.0).abs() < 1e-12, "block 0 head {}", v[0]);
+        // Block 1 already interior (10 - 1 = 9 > 0): untouched.
+        assert!((v[3] - 10.0).abs() < 1e-12, "block 1 head {}", v[3]);
+    }
+
+    /// Sentinel for the Mehrotra complementarity balancing ([`balance_start`]).
+    /// An imbalanced start (per-row products `s_i z_i = [1, 100]`) must be
+    /// equalised so the complementarity spread shrinks. Expected post-balance
+    /// values are hand-derived (independent oracle) from the 1992 formula.
+    ///
+    /// Reverting `balance_start` to a no-op leaves `s = [1, 1]`, `z = [1, 100]`,
+    /// so both the exact-value and the spread assertions below fail.
+    #[test]
+    fn balance_start_evens_out_complementarity() {
+        let e = [1.0, 1.0]; // pure orthant identity
+        let mut s = [1.0, 1.0];
+        let mut z = [1.0, 100.0];
+        // Before: products [1, 100], min/max spread = 0.01.
+        balance_start(&e, &mut s, &mut z);
+        // Independent hand calculation: sz = 101, e.s = 2, e.z = 101,
+        //   ds = 0.5*101/101 = 0.5   => s = [1.5, 1.5]
+        //   dz = 0.5*101/2  = 25.25  => z = [26.25, 125.25].
+        assert!(
+            (s[0] - 1.5).abs() < 1e-12 && (s[1] - 1.5).abs() < 1e-12,
+            "s={s:?}"
+        );
+        assert!(
+            (z[0] - 26.25).abs() < 1e-12 && (z[1] - 125.25).abs() < 1e-12,
+            "z={z:?}"
+        );
+        // Products [39.375, 187.875]: spread lifted from 0.01 to ~0.21.
+        let (p0, p1) = (s[0] * z[0], s[1] * z[1]);
+        let spread = p0.min(p1) / p0.max(p1);
+        assert!(
+            spread > 0.2,
+            "balanced complementarity spread {spread} not > 0.2 (unbalanced start was 0.01)"
+        );
+    }
+
+    /// SOC-block balancing: the cone identity `e = (1, 0, ..., 0)` per SOC, so
+    /// balancing moves only the block *heads*, leaving the tails untouched --
+    /// the behaviour that is load-bearing on `qssp30`. Two dim-3 blocks with
+    /// non-zero tails and imbalanced block complementarity `[10, 100]`.
+    #[test]
+    fn balance_start_shifts_soc_head_only_and_evens_complementarity() {
+        let blk = Blocks::new(&ConeSpec {
+            l: 0,
+            soc: vec![3, 3],
+        });
+        let e = cone::identity(&blk); // (1,0,0, 1,0,0)
+        let mut s = vec![5.0, 1.0, 0.0, 5.0, 1.0, 0.0];
+        let mut z = vec![2.0, 0.0, 0.0, 20.0, 0.0, 0.0];
+        // Per-block complementarity `s_blk . z_blk` = [10, 100], spread 0.1.
+        let bdot = |s: &[f64], z: &[f64], o: usize| s[o] * z[o] + s[o + 1] * z[o + 1] + s[o + 2] * z[o + 2];
+        let spread_before = {
+            let (a, b) = (bdot(&s, &z, 0), bdot(&s, &z, 3));
+            a.min(b) / a.max(b)
+        };
+        balance_start(&e, &mut s, &mut z);
+        // First-principles: only the heads (the support of `e`) move.
+        assert_eq!(&s[1..3], &[1.0, 0.0], "s block0 tail moved: {s:?}");
+        assert_eq!(&s[4..6], &[1.0, 0.0], "s block1 tail moved: {s:?}");
+        assert_eq!(&z[1..3], &[0.0, 0.0], "z block0 tail moved: {z:?}");
+        assert_eq!(&z[4..6], &[0.0, 0.0], "z block1 tail moved: {z:?}");
+        // Independent hand calculation: s.z = 110, e.s = 10, e.z = 22,
+        //   ds = 0.5*110/22 = 2.5  => s heads 5 -> 7.5
+        //   dz = 0.5*110/10 = 5.5  => z heads 2 -> 7.5, 20 -> 25.5.
+        assert!((s[0] - 7.5).abs() < 1e-12 && (s[3] - 7.5).abs() < 1e-12, "s heads {s:?}");
+        assert!((z[0] - 7.5).abs() < 1e-12 && (z[3] - 25.5).abs() < 1e-12, "z heads {z:?}");
+        // First-principles: centering lifts the block complementarity spread.
+        let spread_after = {
+            let (a, b) = (bdot(&s, &z, 0), bdot(&s, &z, 3));
+            a.min(b) / a.max(b)
+        };
+        assert!(
+            spread_after > spread_before && spread_after > 0.25,
+            "spread {spread_after} did not rise from {spread_before}"
+        );
     }
 }

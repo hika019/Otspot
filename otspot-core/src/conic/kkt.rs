@@ -907,8 +907,9 @@ fn probe_kkt_health(f: &KktFactor, mat: &CscMatrix, rhs: &[f64]) -> bool {
 /// corrector). Derivation of the `dz` row: scaled complementarity is
 /// `W^{-1} ds + W dz = rc` (arrow-form, matching `jdiv`/`jprod`), and the
 /// conic residual is `ds = -rz - G dx`; substituting gives `-W^2 dz + G dx
-/// = -rz - W rc`, i.e. the RHS above (`ds` is recovered as `-rz - G dx`
-/// after solving). Shared by [`solve_dir`] (the real solve) and
+/// = -rz - W rc`, i.e. the RHS above (`ds` is recovered from the scaled
+/// complementarity as `W (rc - W dz)`, see [`solve_dir`]). Shared by
+/// [`solve_dir`] (the real solve) and
 /// [`factorize_with_retry`]'s sanity probe, so the probe exercises the
 /// exact system the outer solver depends on. Both auxiliary (border) row
 /// ranges are always zero: they are not physical unknowns, just a device
@@ -941,11 +942,16 @@ pub(super) fn build_rhs(
     rhs
 }
 
-/// Solves the augmented system for one predictor/corrector direction and
-/// recovers `ds = -rz - G dx`. The border representation's auxiliary
-/// unknowns (`aux_u` at `sol[n..n_e]`, `aux_v` at `sol[n_e+p+m..]`, see
-/// `cone::visit_border_pattern`) are solved for along with `dx`/`dy`/`dz` but
-/// discarded here -- they have no meaning outside the linear solve.
+/// Solves the augmented system for one predictor/corrector direction. The
+/// border auxiliary unknowns (`aux_u` at `sol[n..n_e]`, `aux_v` at
+/// `sol[n_e+p+m..]`, see `cone::visit_border_pattern`) are solved alongside
+/// `dx`/`dy`/`dz` but discarded -- meaningless outside the linear solve.
+///
+/// `ds` is recovered per cone type: the primal-residual form `ds = -rz - G dx`
+/// and the scaled-complementarity form `ds = W (rc - W dz)` (from
+/// `W^{-1} ds + W dz = rc`) agree at the exact solution but differ by the solve
+/// residual, and each is unstable in a different regime (detailed at the two
+/// branches below).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn solve_dir(
     factor: &ConicFactor,
@@ -969,8 +975,29 @@ pub(super) fn solve_dir(
     let dy = sol[n_e..n_e + p].to_vec();
     let dz = sol[n_e + p..n_e + p + m].to_vec();
 
-    let gdx = spmv(g, &dx);
-    let ds: Vec<f64> = (0..m).map(|i| -rz[i] - gdx[i]).collect();
+    // Orthant rows: scaled-complementarity form. The primal form sign-flips
+    // when a bound's slack collapses (`W^2 = s/z -> 0`, as at the CBLIB `*_w`
+    // permanently-active bounds): `rz` and `G dx` are then same-order but their
+    // true difference sits below the solve's error floor (primal-form `*_w`
+    // still hit `MaxIterations` even from the data-scaled start).
+    let w_dz = sc.apply_w(blk, &dz);
+    let scaled_residual: Vec<f64> = rc
+        .iter()
+        .zip(&w_dz)
+        .map(|(rc_i, wdz_i)| rc_i - wdz_i)
+        .collect();
+    let mut ds = sc.apply_w(blk, &scaled_residual);
+    // SOC rows: primal-residual form, contracting `rz` exactly
+    // (`rz_new = (1 - alpha) rz`). The complementarity form applies the dense
+    // `W` twice per block, amplifying the solve residual with dimension --
+    // measured to diverge on the border-represented `d ~ 1e5` cone whose `dz`
+    // is itself exact (`conic_kkt_direction_matches_dense_schur_oracle`).
+    if blk.l < m {
+        let gdx = spmv(g, &dx);
+        for i in blk.l..m {
+            ds[i] = -rz[i] - gdx[i];
+        }
+    }
     (dx, dy, dz, ds)
 }
 

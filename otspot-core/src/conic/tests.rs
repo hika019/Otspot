@@ -810,27 +810,6 @@ fn half_int_lp() -> MisocpProblem {
     }
 }
 
-/// `max x0 + x1` s.t. `||(x0, x1)|| <= sqrt(2.5)`, integers in `[0, 2]^2`
-/// (same instance as `misocp_ball_integer_optimum`; integer optimum (1, 1)).
-fn ball_int_misocp() -> MisocpProblem {
-    let r = 2.5_f64.sqrt();
-    let g = csc(&[vec![0.0, 0.0], vec![-1.0, 0.0], vec![0.0, -1.0]], 3, 2);
-    let base = ConicProblem {
-        c: vec![-1.0, -1.0],
-        a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
-        b: vec![],
-        g,
-        h: vec![r, 0.0, 0.0],
-        cone: ConeSpec { l: 0, soc: vec![3] },
-    };
-    MisocpProblem {
-        base,
-        integers: vec![0, 1],
-        int_lb: vec![0.0, 0.0],
-        int_ub: vec![2.0, 2.0],
-    }
-}
-
 /// `x0 <= -1` and `x0 >= 0` (proven infeasible) with one integer variable.
 fn infeasible_int_lp() -> MisocpProblem {
     let g = csc(&[vec![1.0, 0.0], vec![-1.0, 0.0]], 2, 2);
@@ -918,28 +897,35 @@ fn misocp_node_limit_without_incumbent_is_max_iterations() {
     assert!(res.x.is_empty());
 }
 
-/// Node iteration budget for `misocp_incumbent_with_failed_node_is_suboptimal`,
-/// calibrated on `ball_int_misocp`: every feasible node relaxation converges
-/// within 9 IPM iterations while the infeasible up child (x0 fixed at 2)
-/// needs 16 to form its Farkas certificate. Any value in `9..=15` makes that
-/// one node fail without a certificate while the incumbent is still found.
-const BALL_NODE_FAILURE_ITER_BUDGET: usize = 12;
+/// Queue `plan` as `misocp`'s per-node relaxation-status fault plan, run `f`,
+/// then clear it (so a panic inside `f` cannot leak state into other tests).
+/// Mirrors `nonconvex::tests::with_relax_plan`.
+fn with_node_plan<R>(plan: Vec<Option<SolveStatus>>, f: impl FnOnce() -> R) -> R {
+    misocp::NODE_STATUS_PLAN.with(|p| *p.borrow_mut() = std::collections::VecDeque::from(plan));
+    let out = f();
+    misocp::NODE_STATUS_PLAN.with(|p| p.borrow_mut().clear());
+    out
+}
 
 #[test]
 fn misocp_incumbent_with_failed_node_is_suboptimal() {
     // Incumbent found, but one node relaxation failed without a certificate:
     // the search is not exhaustive, so Optimal must not be claimed.
-    let opts = ConicOptions {
-        max_iter: BALL_NODE_FAILURE_ITER_BUDGET,
-        ..ConicOptions::default()
-    };
-    let res = solve_misocp(&ball_int_misocp(), &opts, &BbOptions::default());
+    //
+    // `half_int_lp` visits three nodes deterministically (down pushed before up,
+    // LIFO): node 1 root (x0 = 0.5, fractional), node 2 up child (integer
+    // incumbent x0 = 1, obj = 1), node 3 down child (normally Farkas-pruned).
+    // The plan forces node 3 to fail *without* a certificate -- a deterministic
+    // node failure that does not depend on any per-node iteration count -- so
+    // `numerical_failures > 0` while the node-2 incumbent stands.
+    let plan = vec![None, None, Some(SolveStatus::NumericalError)];
+    let res = with_node_plan(plan, || {
+        solve_misocp(&half_int_lp(), &ConicOptions::default(), &BbOptions::default())
+    });
     assert_eq!(res.status, SolveStatus::SuboptimalSolution, "{res:?}");
-    assert!(
-        (res.objective - (-2.0)).abs() < 1e-4,
-        "obj={}",
-        res.objective
-    );
+    assert_eq!(res.nodes, 3, "all three nodes must be visited");
+    assert!((res.objective - 1.0).abs() < 1e-6, "obj={}", res.objective);
+    assert!((res.x[0] - 1.0).abs() < 1e-6, "x0={}", res.x[0]);
 }
 
 #[test]
