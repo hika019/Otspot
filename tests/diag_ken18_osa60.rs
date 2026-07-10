@@ -1,10 +1,19 @@
 //! TDD diagnostic tests for two LP bench regressions:
 //!
-//! - **osa-60**: solver returns Optimal/Timeout with `obj=0` while the
-//!   known optimum is `4.0440725e+06`. Verified root cause:
-//!   `simplex::primal::pivot_out_degenerate_artificials` consumes the entire
-//!   solve budget (O(n_artificial × n_total) FTRAN) before Phase 2 can iterate.
-//!   Still open (see `diag_osa60_must_reach_known_objective`'s ignore reason).
+//! - **osa-60**: with presolve (the default) the solver timed out at 60 s while
+//!   presolve=false solved in ~23 s. Verified root cause (measured, not the
+//!   earlier `pivot_out_degenerate_artificials` guess, which is disproven —
+//!   Phase I completes cleanly, degenerate-pivot fraction ≈ 0.003): presolve's
+//!   activity bound-tightening gives every one of the 232 965 reduced variables
+//!   a finite upper bound, and `build_standard_form` materializes each finite
+//!   upper bound as an explicit constraint row, exploding the standard-form row
+//!   count 10 280 → 243 174 (~24×). The primal simplex's per-iteration linear
+//!   algebra scales with that row count, so each pivot ran ~2.6× slower on the
+//!   same monotonically-converging ~5 400-iteration trajectory and the deadline
+//!   fired ~0.2 % short of the optimum. Fixed: presolve now drops the redundant
+//!   implied bounds it added on originally-unbounded variables before emitting
+//!   the reduced problem, so the standard form no longer grows a row per column —
+//!   see `presolve::transforms::bounds::revert_redundant_added_bounds`.
 //!
 //! - **ken-18**: solver wall-time vastly exceeded its internal deadline
 //!   (~3× overrun in single-job repro; >external `gtimeout` in concurrent bench
@@ -16,9 +25,11 @@
 //!   `diag_ken18_must_respect_internal_deadline`'s ignore reason for the
 //!   current measured wall time.
 //!
-//! Both tests are `#[ignore]` because their failing wall-time is on the order
-//! of 60-180s — too long for default `cargo test`.
-//! Run with: `cargo nextest run --run-ignored only --test diag_ken18_osa60`.
+//! `diag_osa60_must_reach_known_objective` now runs in the default profile
+//! (~34 s solve, its own thread budget) as the osa-60 perf sentinel. The ken-18
+//! deadline test stays `#[ignore]` (its 30 s internal budget exceeds the default
+//! per-test wall); run it with
+//! `cargo nextest run --run-ignored all --test diag_ken18_osa60`.
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
@@ -51,23 +62,17 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
 ///   (H2) Phase 2 ran but state was clobbered to 0 on return.
 ///   (H3) presolve early-exit returned Optimal trivially.
 ///
-/// At HEAD this asserts:
+/// This asserts:
 ///   - status is Optimal (after qps_benchmark Timeout→Optimal remap rule)
 ///   - reported objective relative error vs known < 5 %
 ///
-/// Empirically the solver returns `obj=0`/`Timeout` at 60 s; with 90 s it
-/// converges to 4.044e6. So the test FAILS at HEAD with 60 s budget and
-/// would PASS once `pivot_out_degenerate_artificials` is sped up.
+/// Measured after the presolve fix: the default (presolve) path certifies
+/// Optimal in ~21 s (well inside the 60 s budget), reported obj 4.0440725e6
+/// vs known 4.0440725e6 (rel ≈ 8e-10). Before the fix it timed out at 60 s
+/// (see the module doc for the root cause). Reverting the redundant-bound
+/// reversion (`presolve::transforms::bounds::revert_redundant_added_bounds`)
+/// restores the timeout, so this test is the perf sentinel.
 #[test]
-#[ignore = "perf-open/heavy: open perf target 'default (presolve) path certifies Optimal at \
-            60s'. Measured at HEAD: Timeout obj=inf sol_len=0 iters=5434 (presolve 1.1s + \
-            solve 58.9s); historically also SuboptimalSolution or Timeout with a \
-            reduced-space solution leak. The objective IS reachable — presolve=false \
-            yields the exact optimum (rel ~8e-10) in ~33s; correctness is gated by \
-            diag_osa60_is_feasible_and_honest. The fix (speeding up \
-            pivot_out_degenerate_artificials) is unimplemented and untracked — no such \
-            GitHub issue exists in this repo. This name must stay \
-            in the perf-open filter of test-heavy.yml; move to must-pass once green"]
 fn diag_osa60_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/osa-60.QPS");
     assert!(

@@ -128,6 +128,11 @@ pub fn run_presolve_with_flags(
         }
     }
 
+    // Drop bound-tightening's redundant implied bounds before emitting, so the
+    // simplex standard form does not materialize a UB row for every variable a
+    // retained constraint row already bounds.
+    super::bounds::revert_redundant_added_bounds(&mut st);
+
     build_reduced_result(problem, st, n, m)
 }
 

@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2678 testcases, 27 ignored
+# totals: 2682 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -698,6 +698,10 @@ otspot-core	presolve::transforms::tests::test_step7_free_var_fillin_must_not_blo
 otspot-core	presolve::transforms::tests_per_step::add_to_entry_updates_prunes_and_keeps_row_col_in_sync	active
 otspot-core	presolve::transforms::tests_per_step::fill_in_budget_allows_dense_pivot_with_few_targets	active
 otspot-core	presolve::transforms::tests_per_step::fill_in_budget_blocks_high_fill	active
+otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_keeps_ub_no_retained_row_implies	active
+otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_restores_infinite_lb_but_keeps_original	active
+otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_restores_infinite_ub_but_keeps_original	active
+otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_skips_fixed_variable	active
 otspot-core	presolve::transforms::tests_per_step::step1_detects_lb_gt_ub	active
 otspot-core	presolve::transforms::tests_per_step::step1_fixed_negative_value_updates_b_and_offset	active
 otspot-core	presolve::transforms::tests_per_step::step2_singleton_ge_infeasible	active
@@ -2217,7 +2221,7 @@ otspot::diag_ipm_solver_via_io_canonical	test_v2_hs21	active
 otspot::diag_ken18_osa60	diag_deadline_small_lp	active
 otspot::diag_ken18_osa60	diag_ken18_must_respect_internal_deadline	ignored
 otspot::diag_ken18_osa60	diag_osa60_is_feasible_and_honest	active
-otspot::diag_ken18_osa60	diag_osa60_must_reach_known_objective	ignored
+otspot::diag_ken18_osa60	diag_osa60_must_reach_known_objective	active
 otspot::diag_kkt_proptest	ci_nonconvex_constrained_nonconvex_local_has_consistent_kkt	active
 otspot::diag_kkt_proptest	prop_convex_qp_kkt_invariants	active
 otspot::diag_kkt_proptest	prop_convex_qp_kkt_invariants_medium	active
