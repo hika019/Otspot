@@ -23,6 +23,11 @@ jobs:
         run: python3 tests/test_check_test_data_requirements.py
       - name: ISO 25010 quality matrix sentinel
         run: python3 tests/test_iso_25010_quality_matrix.py
+      # Hermetic gate-logic sentinel (no cargo). The real inventory gate
+      # runs in ci.yml's test-integration job, where the test binaries are
+      # already built; running it here would force a cold release build.
+      - name: test inventory gate unit tests
+        run: python3 tests/test_check_new_ignore_attrs.py
 
   comment-hygiene:
     name: comment-hygiene

@@ -56,6 +56,15 @@ jobs:
       # --no-fail-fast: 1 件目の fail で打ち切らず全 fail を surface
       # --test-threads 3: CI は 3 固定 (ローカルは nextest.toml default の 6)
       - run: cargo nextest run --release --features parallel --no-fail-fast --test-threads 3
+      # Silent test-disable / delete gate. Warm: the release+parallel test
+      # binaries are already built by the run step above, so `nextest list`
+      # is a sub-second no-rebuild step. `if: success()`: on a build error the
+      # gate would re-hit the same compile failure and emit a duplicate red;
+      # test failures are surfaced by the run step, and inventory drift is
+      # reported once the build is green.
+      - name: Test inventory gate
+        if: success()
+        run: python3 scripts/lib/check_new_ignore_attrs.py
 
   clippy:
     name: clippy
