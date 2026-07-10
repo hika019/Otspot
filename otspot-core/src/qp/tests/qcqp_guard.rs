@@ -300,3 +300,57 @@ fn nonconvex_qcqp_honors_global_optimization_node_budget() {
     );
     assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
 }
+
+/// PR #25 review: `SolverOptions::cancel_flag` must stop the QCQP route the
+/// same way the LP/QP routes honor it (`SolverOptions::external_stop_requested`),
+/// not only `timeout_secs`/`deadline`.
+///
+/// Convex path: `ConicOptions::cancel_flag` is checked every IPM iteration
+/// (`ConicOptions::stop_requested`, mirrored from `SolverOptions`'s own
+/// convention).
+///
+/// Sentinel: dropping `cancel_flag` from `conic_options()` (or from
+/// `ConicOptions::stop_requested`/its use in `conic::ipm::solve`) makes this
+/// FAIL with `Optimal` (the toy convex QCQP solves in well under the
+/// flag-check window, so nothing else would stop it).
+#[test]
+fn convex_qcqp_honors_preset_cancel_flag() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    let problem = convex_qcqp_problem();
+    let cancel = Arc::new(AtomicBool::new(true));
+    let opts = SolverOptions {
+        cancel_flag: Some(Arc::clone(&cancel)),
+        ..SolverOptions::default()
+    };
+    let result = solve_qp_with(&problem, &opts);
+    assert_eq!(result.status, SolveStatus::Timeout, "{:?}", result.status);
+    assert!(result.stats.deadline_triggered);
+    assert_eq!(result.stats.route, SolveRoute::ConicQcqpConvex);
+}
+
+/// Nonconvex fallback path: the McCormick spatial B&B
+/// (`nonconvex::global_core`) only checks `ConicOptions::deadline`, not the
+/// cancel flag, so `solve_qcqp_via_conic` must stop before launching it when
+/// the flag is already set, rather than silently running the fallback to
+/// completion.
+///
+/// Sentinel: dropping the `external_stop_requested` check before the global
+/// fallback in `solve_qcqp_via_conic` makes this FAIL with `Optimal`
+/// (objective 2.0 — the McCormick B&B has no deadline here and never sees
+/// the cancel flag, so it runs to the true global optimum).
+#[test]
+fn nonconvex_qcqp_honors_preset_cancel_flag() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    let problem = nonconvex_qcqp_problem(3.0);
+    let cancel = Arc::new(AtomicBool::new(true));
+    let opts = SolverOptions {
+        cancel_flag: Some(Arc::clone(&cancel)),
+        ..SolverOptions::default()
+    };
+    let result = solve_qp_with(&problem, &opts);
+    assert_eq!(result.status, SolveStatus::Timeout, "{:?}", result.status);
+    assert!(result.stats.deadline_triggered);
+    assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
+}

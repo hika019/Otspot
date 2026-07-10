@@ -28,12 +28,35 @@ use crate::sparse::CscMatrix;
 use super::QpProblem;
 
 pub(crate) fn solve_qcqp_via_conic(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    // Central structural check before any indexing: `solve_qp_problem_as_qcqp`
+    // (the convex bridge) and `nonconvex_from_qp_problem` (the fallback) both
+    // index `quadratic_constraints[k]`; a non-empty vector shorter than
+    // `num_constraints` (direct public-field assignment, bypassing the setter)
+    // would panic inside `solve_qp_with`. Return a solver error instead.
+    if let Err(e) = problem.validate() {
+        return SolverResult::not_supported(e.to_string());
+    }
+
     let deadline = resolve_deadline(options);
     let c_opts = conic_options(options, deadline);
 
+    // The convex-bridge conic IPM checks `options.cancel_flag` every
+    // iteration via `ConicOptions::cancel_flag`/`stop_requested` (same
+    // convention as the LP/QP routes' `external_stop_requested`), so a flag
+    // already set or fired during that attempt surfaces as `Timeout` from
+    // `convex` below without any extra handling here.
     let convex = conic::solve_qp_problem_as_qcqp(problem, &c_opts);
     if is_clean_convex_outcome(&convex) {
         return qcqp_result_to_solver_result(convex, problem.obj_offset);
+    }
+
+    // The McCormick spatial B&B (`nonconvex::global_core`) only checks
+    // `ConicOptions::deadline`, not the cancel flag, so a flag fired here
+    // (already set, or set during the convex-bridge attempt above) must stop
+    // the route before launching that fallback rather than being silently
+    // ignored by it.
+    if options.external_stop_requested() {
+        return qcqp_stop_result(SolveRoute::ConicQcqpNonconvex);
     }
 
     let nc_qp = match nonconvex_from_qp_problem(problem) {
@@ -103,8 +126,21 @@ fn conic_options(options: &SolverOptions, deadline: Option<Instant>) -> ConicOpt
         tol: options.ipm_eps(),
         max_iter,
         deadline,
+        // Same cancellation object as the LP/QP routes: the conic IPM loop
+        // checks it alongside `deadline` (`ConicOptions::stop_requested`).
+        cancel_flag: options.cancel_flag.clone(),
         ..default
     }
+}
+
+/// Timeout result for a QCQP solve stopped by an already-fired external stop
+/// condition (deadline expired / cancel flag set), before or between the
+/// convex-bridge and McCormick-fallback phases had a chance to run.
+fn qcqp_stop_result(route: SolveRoute) -> SolverResult {
+    let mut result = SolverResult::timeout();
+    result.stats.route = route;
+    result.stats.deadline_triggered = true;
+    result
 }
 
 fn global_options(options: &SolverOptions) -> GlobalOptions {
@@ -119,14 +155,19 @@ fn global_options(options: &SolverOptions) -> GlobalOptions {
     // the QP global route (`qp::global`).
     if let Some(cfg) = options.global_optimization.as_ref() {
         g.max_nodes = cfg.max_nodes;
-        // `cfg.gap_tol` is the user's target accuracy for the whole global
-        // solve; `GlobalOptimizationConfig` carries no separate feasibility
-        // field. Align both the optimality gap and the incumbent feasibility
-        // resolution to it so they never sit at inconsistent scales — passing
-        // a `cfg` (even the default) must not leave `gap_tol` looser than
-        // `feas_tol`. Without a `cfg`, both stay at the IPM accuracy `eps`.
+        // `cfg.gap_tol` is the user's *optimality* search budget (how much
+        // provable sub-optimality the B&B may stop at) — a different axis
+        // from `feas_tol` (how far the reported incumbent may violate the
+        // original quadratic/linear constraints, `nonconvex::feasible`'s
+        // accept-time check). Loosening the former must never loosen the
+        // latter: `feas_tol` keeps tracking the solver's own accuracy
+        // request (`eps`), with or without `cfg`, so an incumbent's reported
+        // constraint violation stays bounded by the requested feasibility
+        // tolerance instead of by whatever optimality gap the caller
+        // accepted (PR #25 review: with `cfg` this used to alias
+        // `feas_tol = cfg.gap_tol`, e.g. the default `1e-3`, letting a point
+        // violating a quadratic constraint by ~1e-3 be reported `Optimal`).
         g.gap_tol = cfg.gap_tol;
-        g.feas_tol = cfg.gap_tol;
     }
     g
 }
@@ -190,6 +231,12 @@ fn global_result_to_solver_result(res: GlobalResult, obj_offset: f64) -> SolverR
 /// a finite box to build valid envelopes and to terminate spatial branching.
 fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
     let n = src.num_vars;
+    // Central structural check (`QpProblem::validate`): the loop below indexes
+    // `quadratic_constraints[k]` for every `k < num_constraints`, so a
+    // non-empty vector shorter than `num_constraints` (possible via direct
+    // public-field assignment) would panic. `validate` is the single source of
+    // this invariant, shared with the setter and the other solve entries.
+    src.validate().map_err(|e| e.to_string())?;
     let mut lb = Vec::with_capacity(n);
     let mut ub = Vec::with_capacity(n);
     for (j, &(l, u)) in src.bounds.iter().enumerate() {
@@ -326,23 +373,31 @@ fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
 mod tests {
     use super::*;
     use crate::options::{GlobalOptimizationConfig, Tolerance};
-    use crate::qp::QcqpMatrix;
+    use crate::qp::{solve_qp_with, QcqpMatrix};
     use crate::sparse::CscMatrix;
 
-    /// P3-1: the spatial-B&B optimality gap and incumbent feasibility
-    /// resolution must stay at one coherent scale.
-    ///
-    /// Without a `global_optimization` config both track the IPM accuracy
-    /// `eps`; with one, both track `cfg.gap_tol` (which carries no separate
-    /// feasibility field). Independent oracle: the expected tolerances are the
-    /// documented inputs (`ipm_eps()` / `cfg.gap_tol`), not recomputed through
+    /// PR #25 review ("Keep gap tolerance out of feasibility checks"): the
+    /// optimality-gap search budget (`cfg.gap_tol`) and the incumbent
+    /// feasibility resolution (`feas_tol`, used by `nonconvex::feasible` to
+    /// accept a candidate against the *original* quadratic/linear
+    /// constraints) are different axes and must not be aliased. `gap_tol`
+    /// tracks `cfg.gap_tol` when a config is supplied; `feas_tol` always
+    /// tracks the solver's own accuracy request (`eps`), with or without a
+    /// config. Independent oracle: expected tolerances are the documented
+    /// inputs (`ipm_eps()` / `cfg.gap_tol`), not recomputed through
     /// `global_options`.
     ///
-    /// Sentinel: dropping the `g.feas_tol = cfg.gap_tol` alignment makes the
-    /// `cfg` branch FAIL (feas_tol would stay at `eps` while gap_tol moved to
-    /// `cfg.gap_tol`, i.e. the two diverge).
+    /// Replaces the prior `global_options_gap_and_feas_stay_consistent` test,
+    /// which asserted the buggy aliasing (`feas_tol == cfg.gap_tol`) as
+    /// intended behavior; see `global_options_feas_tol_does_not_relax_with_cfg`
+    /// for the soundness demonstration (a genuinely infeasible point reported
+    /// `Optimal` under the old aliasing).
+    ///
+    /// Sentinel: reintroducing `g.feas_tol = cfg.gap_tol` in the `cfg` branch
+    /// makes the `with_cfg` assertions FAIL (feas_tol would equal
+    /// `cfg.gap_tol` instead of staying at `eps`).
     #[test]
-    fn global_options_gap_and_feas_stay_consistent() {
+    fn global_options_feas_tol_always_tracks_eps() {
         // No cfg: both = eps (here the Fast tolerance, distinct from the
         // GlobalOptimizationConfig default gap so the two sources can't alias).
         let base = SolverOptions {
@@ -353,9 +408,9 @@ mod tests {
         let g = global_options(&base);
         assert_eq!(g.gap_tol, eps, "no cfg: gap_tol tracks eps");
         assert_eq!(g.feas_tol, eps, "no cfg: feas_tol tracks eps");
-        assert_eq!(g.gap_tol, g.feas_tol, "no cfg: gap/feas consistent");
 
-        // With cfg (default gap_tol, deliberately != eps): both track cfg.gap_tol.
+        // With cfg (default gap_tol, deliberately != eps): gap_tol follows
+        // cfg, feas_tol must NOT follow it — it stays at eps regardless.
         let cfg = GlobalOptimizationConfig::default();
         assert_ne!(
             cfg.gap_tol, eps,
@@ -368,9 +423,73 @@ mod tests {
         };
         let gc = global_options(&with_cfg);
         assert_eq!(gc.gap_tol, cfg.gap_tol, "cfg: gap_tol tracks cfg.gap_tol");
-        assert_eq!(gc.feas_tol, cfg.gap_tol, "cfg: feas_tol tracks cfg.gap_tol");
-        assert_eq!(gc.gap_tol, gc.feas_tol, "cfg: gap/feas consistent");
+        assert_eq!(
+            gc.feas_tol, eps,
+            "cfg: feas_tol must stay at eps, not cfg.gap_tol"
+        );
+        assert_ne!(
+            gc.feas_tol, cfg.gap_tol,
+            "cfg: feas_tol must not alias the optimality-gap budget"
+        );
         assert_eq!(gc.max_nodes, cfg.max_nodes, "cfg: node budget honored");
+    }
+
+    /// Soundness demonstration for the same review finding, end to end
+    /// through `solve_qp_with` (not just the `global_options` mapping):
+    /// `min x0+x1  s.t.  x0*x1 >= 1,  x in [0.1,5]^2` has true optimum 2.0 at
+    /// (1,1). With the default `global_optimization` config
+    /// (`gap_tol = 1e-3`), the McCormick spatial B&B accepts the first
+    /// incumbent whose relaxation vertex clears `feasible(x, feas_tol)`; if
+    /// `feas_tol` aliases `cfg.gap_tol` (the pre-fix bug), that incumbent's
+    /// *true* constraint residual can sit as loose as `~gap_tol` while still
+    /// being reported `Optimal`.
+    ///
+    /// Independent oracle: the true violation is recomputed directly from
+    /// the reported `x` against the original constraint (`1 - x0*x1`), not
+    /// through any tolerance the route itself used.
+    ///
+    /// Confirmed repro before the fix: `status=Optimal`,
+    /// `x=[0.99957, 0.99954]`, true violation `≈ 8.9e-4` (i.e. `x0*x1 ≈
+    /// 0.9991 < 1`, violating the constraint by nearly the whole `1e-3` gap
+    /// budget) with `ipm_eps()` several orders tighter.
+    ///
+    /// Sentinel: reintroducing `g.feas_tol = cfg.gap_tol` makes this FAIL —
+    /// the true violation reverts to `~1e-3`-scale, far above the
+    /// `1e-4` gate below.
+    #[test]
+    fn global_options_feas_tol_does_not_relax_with_cfg() {
+        let n = 2usize;
+        let q_obj = CscMatrix::new(n, n);
+        let c = vec![1.0, 1.0];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(0.1, 5.0), (0.1, 5.0)];
+        let mut qc = QcqpMatrix::new(n);
+        qc.triplets.push((0, 1, 1.0));
+        qc.triplets.push((1, 0, 1.0));
+        let mut problem = QpProblem::new(q_obj, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap();
+        problem.set_quadratic_constraints(vec![qc]).unwrap();
+
+        let opts = SolverOptions {
+            global_optimization: Some(GlobalOptimizationConfig::default()),
+            ..SolverOptions::default()
+        };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "{:?}", result.status);
+        assert_eq!(result.solution.len(), 2);
+        let true_violation = 1.0 - result.solution[0] * result.solution[1];
+        assert!(
+            true_violation < 1e-4,
+            "reported Optimal point must respect the requested feasibility \
+             tolerance, not the (1e-3) optimality-gap budget: x={:?}, \
+             true_violation={true_violation}",
+            result.solution
+        );
+        assert!(
+            (result.objective - 2.0).abs() < 1e-3,
+            "objective must still be near the true optimum 2.0: {}",
+            result.objective
+        );
     }
 
     /// `nonconvex_from_qp_problem`'s constraint transcription must match a
@@ -509,5 +628,71 @@ mod tests {
             ]
         );
         assert_eq!(nc.q0, c);
+    }
+
+    /// PR #25 review horizontal spread ("Validate QCQP vector length before
+    /// indexing", raised on `conic::qcqp` and applied there): the same
+    /// public-field hazard exists here. `QpProblem::quadratic_constraints` is
+    /// public, so a caller can assign a non-empty vector shorter than
+    /// `num_constraints`, bypassing `set_quadratic_constraints`. Before this
+    /// guard `nonconvex_from_qp_problem` indexed `quadratic_constraints[k]`
+    /// for every `k < num_constraints` and panicked with "index out of bounds"
+    /// (confirmed repro: len 1, index 1 at qcqp_route.rs:256).
+    ///
+    /// Independent oracle: the setter's own documented invariant ("length
+    /// must be 0 or num_constraints") — the guard returns `Err`, never panics.
+    ///
+    /// Sentinel: removing the length check makes this panic (index out of
+    /// bounds) instead of returning `Err`, so the `is_err()` assertion is
+    /// unreachable and the test aborts.
+    #[test]
+    fn nonconvex_from_qp_problem_rejects_short_quadratic_constraints() {
+        let n = 2usize;
+        let q_obj = CscMatrix::new(n, n);
+        let c = vec![1.0, 1.0];
+        // 2 linear constraints.
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, n).unwrap();
+        let b = vec![5.0, 5.0];
+        let bounds = vec![(0.0, 3.0), (0.0, 3.0)];
+        let ctypes = vec![ConstraintType::Le, ConstraintType::Le];
+        let mut problem = QpProblem::new(q_obj, c, a, b, bounds, ctypes).unwrap();
+        // Assign a SHORT vec (len 1 < num_constraints 2) directly to the
+        // public field, bypassing set_quadratic_constraints' length check.
+        problem.quadratic_constraints = vec![QcqpMatrix::new(n)];
+
+        let r = nonconvex_from_qp_problem(&problem);
+        assert!(
+            r.is_err(),
+            "short quadratic_constraints must return Err, not panic: {r:?}"
+        );
+        let msg = r.unwrap_err();
+        assert!(
+            msg.contains("quadratic_constraints length must be 0 or 2, got 1"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    /// Companion: a LONGER-than-num_constraints vector must also be rejected
+    /// (the setter invariant is exact equality, not just a lower bound).
+    #[test]
+    fn nonconvex_from_qp_problem_rejects_long_quadratic_constraints() {
+        let n = 2usize;
+        let q_obj = CscMatrix::new(n, n);
+        let c = vec![1.0, 1.0];
+        // 1 linear constraint.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap();
+        let b = vec![5.0];
+        let bounds = vec![(0.0, 3.0), (0.0, 3.0)];
+        let ctypes = vec![ConstraintType::Le];
+        let mut problem = QpProblem::new(q_obj, c, a, b, bounds, ctypes).unwrap();
+        // len 2 > num_constraints 1.
+        problem.quadratic_constraints = vec![QcqpMatrix::new(n), QcqpMatrix::new(n)];
+
+        let r = nonconvex_from_qp_problem(&problem);
+        assert!(
+            r.is_err(),
+            "long quadratic_constraints must return Err: {r:?}"
+        );
+        assert!(r.unwrap_err().contains("must be 0 or 1, got 2"));
     }
 }

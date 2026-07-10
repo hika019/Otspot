@@ -109,7 +109,7 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
     }
 
     for it in 0..opts.max_iter {
-        if opts.deadline.is_some_and(|d| Instant::now() >= d) {
+        if opts.stop_requested() {
             status = SolveStatus::Timeout;
             iterations = it;
             break;
@@ -233,7 +233,7 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
         ) {
             Some(f) => f,
             None => {
-                status = if opts.deadline.is_some_and(|d| Instant::now() >= d) {
+                status = if opts.stop_requested() {
                     SolveStatus::Timeout
                 } else {
                     SolveStatus::NumericalError

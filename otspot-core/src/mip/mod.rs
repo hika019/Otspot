@@ -370,6 +370,14 @@ pub fn solve_miqp_with_stats(
     if options.validate().is_err() {
         return (SolverResult::numerical_error(), MipStats::default());
     }
+    // Central structural check: `solve_fixed_point` (the all-integer-fixed
+    // B&B leaf) indexes `quadratic_constraints[k]` for `k < num_constraints`,
+    // so a non-empty vector shorter than `num_constraints` (direct
+    // public-field assignment on `problem.qp`, bypassing the setter) would
+    // panic. `QpProblem::validate` is the shared source of this invariant.
+    if problem.qp.validate().is_err() {
+        return (SolverResult::numerical_error(), MipStats::default());
+    }
     if !problem.is_convex() {
         return (nonconvex_result(), MipStats::default());
     }

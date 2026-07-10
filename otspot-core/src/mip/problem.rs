@@ -646,4 +646,53 @@ mod tests {
             "n=1001 indefinite Q must be detected as non-PSD"
         );
     }
+
+    /// PR #25 review horizontal spread ("Validate QCQP vector length before
+    /// indexing"), third site: `solve_fixed_point` indexes
+    /// `quadratic_constraints[k]` for `k < num_constraints` at the
+    /// all-integer-fixed B&B leaf (`mip/problem.rs:284`). `QpProblem::
+    /// quadratic_constraints` is public, so a caller can assign a non-empty
+    /// vector shorter than `num_constraints`, bypassing
+    /// `set_quadratic_constraints`. Before the central `QpProblem::validate`
+    /// guard at the `solve_miqp` entry, branching to a fixed leaf panicked
+    /// with "index out of bounds" (confirmed repro: len 1, num_constraints 2,
+    /// panic at mip/problem.rs:284).
+    ///
+    /// Independent oracle: the setter's documented invariant ("length must be
+    /// 0 or num_constraints"); the entry returns `NumericalError`, never
+    /// panics.
+    ///
+    /// Sentinel: removing the `problem.qp.validate()` check in
+    /// `solve_miqp_with_stats` makes this panic (index out of bounds) at the
+    /// fixed leaf instead of returning `NumericalError`.
+    #[test]
+    fn solve_miqp_rejects_short_quadratic_constraints_without_panicking() {
+        use crate::options::{MipConfig, SolverOptions};
+        use crate::qp::QcqpMatrix;
+
+        let n = 1usize;
+        // PSD objective so is_convex passes and the search proceeds to B&B.
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], n, n).unwrap();
+        // 2 linear Le rows (x <= 5, x <= 5): num_constraints = 2.
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, n).unwrap();
+        let b = vec![5.0, 5.0];
+        // Integer variable in [0, 1] so B&B branches to an all-fixed leaf.
+        let bounds = vec![(0.0, 1.0)];
+        let ctypes = vec![ConstraintType::Le, ConstraintType::Le];
+        let mut qp = QpProblem::new(q, vec![0.0], a, b, bounds, ctypes).unwrap();
+        // SHORT non-empty quad vec (len 1 < num_constraints 2), assigned
+        // directly to the public field, bypassing set_quadratic_constraints.
+        let mut qc0 = QcqpMatrix::new(n);
+        qc0.triplets.push((0, 0, 2.0));
+        qp.quadratic_constraints = vec![qc0];
+
+        let miqp = MiqpProblem::new(qp, vec![0]).unwrap();
+        let r = crate::mip::solve_miqp(&miqp, &SolverOptions::default(), &MipConfig::default());
+        assert_eq!(
+            r.status,
+            SolveStatus::NumericalError,
+            "malformed MIQP must return NumericalError, not panic: {:?}",
+            r.status
+        );
+    }
 }

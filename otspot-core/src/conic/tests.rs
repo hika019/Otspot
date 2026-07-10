@@ -4980,3 +4980,96 @@ fn qp_problem_to_conic_still_rejects_indefinite_quadratic_ge_row() {
         res.status
     );
 }
+
+/// PR #25 review: `solve_socp` must check the stop condition (deadline /
+/// cancel flag) BEFORE paying for Ruiz equilibration and the KKT symbolic
+/// factorization inside `ipm::solve`, not only inside the IPM iteration loop
+/// after that up-front work has already run.
+///
+/// A 2M-variable orthant problem makes the up-front cost measurable without
+/// relying on IPM iterations (`n == 0` short-circuits `Equilibrator::compute`,
+/// so this needs a real, nonzero-`n` problem). Confirmed repro before the fix
+/// in `solve_socp`: this measured ~2.4s wall-clock despite the deadline
+/// having already expired one second before the call. The threshold below
+/// (500ms) leaves a >4x margin over that confirmed-buggy measurement while
+/// staying far above the fixed path's expected sub-millisecond cost
+/// (`problem.validate()` + `opts.stop_requested()`, both O(n)/O(1), no Ruiz
+/// sweep and no KKT ordering).
+///
+/// Sentinel: reverting the `opts.stop_requested()` check in `solve_socp` (or
+/// moving it after `equil::Equilibrator::compute`) makes this FAIL by wall
+/// clock (multi-second, not under 500ms).
+#[test]
+fn solve_socp_checks_deadline_before_equilibration() {
+    let n = 2_000_000usize;
+    let rows: Vec<usize> = (0..n).collect();
+    let cols: Vec<usize> = (0..n).collect();
+    let vals: Vec<f64> = vec![-1.0; n];
+    let g = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+    let h = vec![1.0; n];
+    let c = vec![1.0; n];
+    let problem = ConicProblem {
+        c,
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b: vec![],
+        g,
+        h,
+        cone: ConeSpec { l: n, soc: vec![] },
+    };
+    // Already expired: one second in the past.
+    let opts = ConicOptions {
+        deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+        ..ConicOptions::default()
+    };
+    let start = std::time::Instant::now();
+    let res = solve_socp(&problem, &opts);
+    let elapsed = start.elapsed();
+    assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
+    assert_eq!(res.iterations, 0);
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "expired-deadline solve must bail before equilibration/KKT-ordering, \
+         took {elapsed:?} (buggy pre-fix baseline: ~2.4s)"
+    );
+}
+
+/// Same stop condition, driven by `cancel_flag` instead of `deadline` — the
+/// two are checked together by `ConicOptions::stop_requested`, and a preset
+/// cancel flag must get the same pre-equilibration short-circuit.
+///
+/// Sentinel: dropping `cancel_flag` from `ConicOptions::stop_requested` (or
+/// from `solve_socp`'s check) makes this FAIL by wall clock, same as
+/// `solve_socp_checks_deadline_before_equilibration`.
+#[test]
+fn solve_socp_checks_cancel_flag_before_equilibration() {
+    let n = 2_000_000usize;
+    let rows: Vec<usize> = (0..n).collect();
+    let cols: Vec<usize> = (0..n).collect();
+    let vals: Vec<f64> = vec![-1.0; n];
+    let g = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+    let h = vec![1.0; n];
+    let c = vec![1.0; n];
+    let problem = ConicProblem {
+        c,
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b: vec![],
+        g,
+        h,
+        cone: ConeSpec { l: n, soc: vec![] },
+    };
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let opts = ConicOptions {
+        cancel_flag: Some(cancel),
+        ..ConicOptions::default()
+    };
+    let start = std::time::Instant::now();
+    let res = solve_socp(&problem, &opts);
+    let elapsed = start.elapsed();
+    assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
+    assert_eq!(res.iterations, 0);
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "preset cancel_flag solve must bail before equilibration/KKT-ordering, \
+         took {elapsed:?}"
+    );
+}

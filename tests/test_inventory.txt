@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2665 testcases, 27 ignored
+# totals: 2678 testcases, 27 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -125,6 +125,8 @@ otspot-core	conic::tests::socp_fixed_var_soc_infeasible_gets_certificate	active
 otspot-core	conic::tests::socp_large_bound_box_scale_sweep_is_optimal	active
 otspot-core	conic::tests::socp_large_scale_true_infeasible_gets_certificate	active
 otspot-core	conic::tests::solve_socp_canonicalizes_non_optimal_objective	active
+otspot-core	conic::tests::solve_socp_checks_cancel_flag_before_equilibration	active
+otspot-core	conic::tests::solve_socp_checks_deadline_before_equilibration	active
 otspot-core	conic::tests::solve_socp_preserves_real_iterate_objective_when_inconclusive	active
 otspot-core	conic::tests::solve_socp_reports_not_supported_for_invalid_options	active
 otspot-core	conic::tests::solve_socp_reports_not_supported_for_non_finite_input_instead_of_numerical_error	active
@@ -417,6 +419,7 @@ otspot-core	mip::problem::tests::new_sorts_and_dedups_integer_vars	active
 otspot-core	mip::problem::tests::psd_diagonal_q_is_convex	active
 otspot-core	mip::problem::tests::psd_with_off_diagonal_detected	active
 otspot-core	mip::problem::tests::skip_node_presolve_unconditional	active
+otspot-core	mip::problem::tests::solve_miqp_rejects_short_quadratic_constraints_without_panicking	active
 otspot-core	mip::problem::tests::zero_q_is_convex	active
 otspot-core	mip::queue::tests::best_lower_bound_excludes_dive_stack	active
 otspot-core	mip::queue::tests::best_lower_bound_tracks_top	active
@@ -1123,8 +1126,13 @@ otspot-core	qp::problem::tests::set_quadratic_constraints_triplet_col_oob_reject
 otspot-core	qp::problem::tests::set_quadratic_constraints_triplet_row_oob_rejected	active
 otspot-core	qp::problem::tests::set_quadratic_constraints_valid_accepted	active
 otspot-core	qp::problem::tests::valid_qp_accepted	active
-otspot-core	qp::qcqp_route::tests::global_options_gap_and_feas_stay_consistent	active
+otspot-core	qp::problem::tests::validate_catches_nonfinite_and_dim_from_direct_assignment	active
+otspot-core	qp::problem::tests::validate_matches_setter_length_invariant	active
+otspot-core	qp::qcqp_route::tests::global_options_feas_tol_always_tracks_eps	active
+otspot-core	qp::qcqp_route::tests::global_options_feas_tol_does_not_relax_with_cfg	active
 otspot-core	qp::qcqp_route::tests::nonconvex_from_qp_problem_matches_hand_built_split	active
+otspot-core	qp::qcqp_route::tests::nonconvex_from_qp_problem_rejects_long_quadratic_constraints	active
+otspot-core	qp::qcqp_route::tests::nonconvex_from_qp_problem_rejects_short_quadratic_constraints	active
 otspot-core	qp::tests::api::test_a2t03_qp_no_deadline_converges	active
 otspot-core	qp::tests::api::test_a3c01_cancel_flag_concurrent_returns_timeout	active
 otspot-core	qp::tests::api::test_a3c02_cancel_flag_preset_qp_returns_timeout	active
@@ -1219,12 +1227,14 @@ otspot-core	qp::tests::psd_nonconvex::test_qp_psd_large_diagonal_positive	active
 otspot-core	qp::tests::psd_nonconvex::test_qp_psd_semidefinite_q	active
 otspot-core	qp::tests::psd_nonconvex::test_solve_status_display_nonconvex	active
 otspot-core	qp::tests::qcqp_guard::clamped_cholesky_forces_global_route_even_on_clean_status	active
+otspot-core	qp::tests::qcqp_guard::convex_qcqp_honors_preset_cancel_flag	active
 otspot-core	qp::tests::qcqp_guard::convex_qcqp_objective_includes_obj_offset	active
 otspot-core	qp::tests::qcqp_guard::convex_qcqp_propagates_timeout	active
 otspot-core	qp::tests::qcqp_guard::convex_qcqp_routes_to_conic_bridge	active
 otspot-core	qp::tests::qcqp_guard::empty_qcqp_matrices_not_rejected	active
 otspot-core	qp::tests::qcqp_guard::jitter_band_indefinite_qcqp_falls_back_to_global	active
 otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_honors_global_optimization_node_budget	active
+otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_honors_preset_cancel_flag	active
 otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_objective_includes_obj_offset	active
 otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_propagates_timeout	active
 otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_routes_to_global_branch_and_bound	active
@@ -1766,7 +1776,10 @@ otspot-io	cbf::tests::maximize_negates_objective_and_true_objective_recovers_val
 otspot-io	cbf::tests::missing_objsense_is_error	active
 otspot-io	cbf::tests::missing_var_is_error	active
 otspot-io	cbf::tests::missing_ver_is_error	active
+otspot-io	cbf::tests::non_finite_acoord_is_error	active
 otspot-io	cbf::tests::non_finite_float_is_error	active
+otspot-io	cbf::tests::non_finite_objacoord_is_error	active
+otspot-io	cbf::tests::non_finite_objbcoord_is_error	active
 otspot-io	cbf::tests::objacoord_var_out_of_range_is_error	active
 otspot-io	cbf::tests::objfcoord_section_is_unsupported_error	active
 otspot-io	cbf::tests::psdcon_section_is_unsupported_error	active
