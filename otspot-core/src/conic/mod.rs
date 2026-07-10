@@ -160,6 +160,12 @@ pub struct ConicOptions {
     pub step_frac: f64,
     /// Wall-clock deadline, checked once per IPM iteration or B&B node; `None` disables it.
     pub deadline: Option<std::time::Instant>,
+    /// Shared cancellation flag mirroring `SolverOptions::cancel_flag`. The
+    /// IPM iteration loop checks this alongside `deadline` (see
+    /// [`Self::stop_requested`]) so a flag fired from another thread stops a
+    /// solve already in flight, not only one that starts after the flag is
+    /// already set. `None` disables it (default).
+    pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for ConicOptions {
@@ -169,6 +175,7 @@ impl Default for ConicOptions {
             max_iter: 100,
             step_frac: 0.99,
             deadline: None,
+            cancel_flag: None,
         }
     }
 }
@@ -192,6 +199,18 @@ impl ConicOptions {
         }
         Ok(())
     }
+
+    /// Whether an external stop condition fired: wall-clock deadline expired
+    /// or the cancel flag was set. Mirrors
+    /// `SolverOptions::external_stop_requested` for the conic IPM loop.
+    pub(crate) fn stop_requested(&self) -> bool {
+        self.deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+            || self
+                .cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 /// Solve a second-order cone program in standard form.
@@ -209,6 +228,15 @@ pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     }
     if let Err(e) = opts.validate() {
         return invalid_result(problem, SolveStatus::NotSupported(e));
+    }
+    // Check the stop condition before paying for equilibration (`O(EQUIL_SWEEPS
+    // * nnz)` Ruiz sweeps) and `ipm::solve`'s KKT symbolic factorization: an
+    // already-expired deadline or a preset cancel flag must return `Timeout`
+    // immediately, not after that up-front work runs on data nobody will use
+    // (PR #25 review: on a 2M-variable orthant problem this up-front work
+    // alone measured multi-second wall time before this check existed).
+    if opts.stop_requested() {
+        return invalid_result(problem, SolveStatus::Timeout);
     }
     let eq = equil::Equilibrator::compute(problem);
     let scaled = eq.scale_problem(problem);
