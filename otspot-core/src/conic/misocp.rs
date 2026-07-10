@@ -112,6 +112,32 @@ impl Default for BbOptions {
     }
 }
 
+impl BbOptions {
+    /// Validate option ranges the branch-and-bound loop assumes but never
+    /// checks itself (PR #25 review, "Reject NaN integrality tolerances
+    /// before branching"). A non-finite `int_tol` (in particular `NaN`)
+    /// makes every `dist > worst` fractional-vs-integer comparison in
+    /// `solve_misocp` silently `false` (`NaN` comparisons are never `true`),
+    /// so the search never finds a branching variable and accepts *any*
+    /// relaxation point -- however fractional -- as a proven integer-feasible
+    /// incumbent.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.int_tol.is_finite() || self.int_tol < 0.0 {
+            return Err(format!(
+                "int_tol must be finite and >= 0, got {}",
+                self.int_tol
+            ));
+        }
+        if !self.gap_tol.is_finite() || self.gap_tol < 0.0 {
+            return Err(format!(
+                "gap_tol must be finite and >= 0, got {}",
+                self.gap_tol
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// Test-only override of `solve_misocp`'s mid-loop deadline check
@@ -286,9 +312,10 @@ fn build_relaxation(
 ///
 /// Node outcomes are classified, not collapsed into one "prune" bucket:
 /// `Infeasible` prunes only with a Farkas certificate (`infeas_cert`);
-/// `Unbounded` propagates only with a verified improving ray
-/// (`primal_ray` -- a restricted relaxation can only be unbounded if the
-/// root is too); anything else (`NumericalError`, an unproven
+/// `Unbounded` with a verified improving ray (`primal_ray`) propagates only
+/// once every integer variable is already fixed in this node (otherwise the
+/// ray says nothing about integer-feasibility and the node is bisected
+/// further instead); anything else (`NumericalError`, an unproven
 /// `Infeasible`/`Unbounded`, `MaxIterations`, `NotSupported`) is a
 /// **numerical failure**, pruned but counted so an empty search never
 /// proves false infeasibility. `Timeout` on a node stops the whole search.
@@ -298,7 +325,11 @@ fn build_relaxation(
 /// With an incumbent: `Timeout` > `Optimal` (full exhaustion, **no**
 /// numerical failures) > `SuboptimalSolution` (mirrors `mip::solve_miqp`).
 pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -> MisocpResult {
-    if let Err(e) = prob.validate().and_then(|()| opts.validate()) {
+    if let Err(e) = prob
+        .validate()
+        .and_then(|()| opts.validate())
+        .and_then(|()| bb.validate())
+    {
         return MisocpResult {
             status: SolveStatus::NotSupported(e),
             objective: f64::NAN,
@@ -381,8 +412,40 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         match res.status {
             SolveStatus::Optimal => {}
             SolveStatus::Unbounded if res.primal_ray.is_some() => {
-                // Verified improving ray: a restricted relaxation can only be
-                // unbounded if the root is too.
+                // A verified ray only certifies that the *relaxation*'s
+                // recession cone contains a `c^T d < 0` direction `d`; `d`'s
+                // component on every integer variable is forced to ~0 by the
+                // node's own box/fixing rows (both bound rows, or the fixing
+                // equality, appear in every node), so the ray extends *any*
+                // feasible point of this node's polytope to -infinity. But
+                // that says nothing about whether the polytope actually
+                // contains an integer-feasible point: an equality elsewhere
+                // in the model can pin an "integer" variable to a fractional
+                // value, making every integer combination infeasible while
+                // the (integrality-blind) relaxation is still unbounded.
+                // Only once every integer variable is already fixed
+                // (`lb[k] == ub[k]`) does *any* feasible point of the node
+                // automatically carry integer values, so only then does the
+                // ray certify the mixed-integer problem unbounded. Otherwise
+                // bisect the widest remaining free integer and keep
+                // searching -- this always terminates (finite `int_lb`/
+                // `int_ub`, enforced by `validate`) and falls through to the
+                // ordinary `Infeasible` conclusion if every resulting leaf
+                // turns out empty.
+                if let Some(k) = (0..lb.len()).find(|&k| lb[k] != ub[k]) {
+                    let mid = ((lb[k] + ub[k]) / 2.0).floor();
+                    let mut ub_d = ub.clone();
+                    ub_d[k] = mid;
+                    if lb[k] <= ub_d[k] + 1e-9 {
+                        stack.push((lb.clone(), ub_d));
+                    }
+                    let mut lb_u = lb.clone();
+                    lb_u[k] = mid + 1.0;
+                    if lb_u[k] <= ub[k] + 1e-9 {
+                        stack.push((lb_u, ub.clone()));
+                    }
+                    continue;
+                }
                 return MisocpResult {
                     status: SolveStatus::Unbounded,
                     objective: f64::NEG_INFINITY,
