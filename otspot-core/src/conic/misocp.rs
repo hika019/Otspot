@@ -28,7 +28,8 @@ impl MisocpProblem {
     /// it: `build_relaxation` indexes `int_lb`/`int_ub` by position and `base`
     /// by `integers[k]` with no bounds checks of its own, so a length
     /// mismatch or an out-of-range index previously indexed out of bounds and
-    /// panicked instead of failing as an ordinary invalid-input `NotSupported`.
+    /// panicked (PR #25 review 38, 39) instead of failing as an ordinary
+    /// invalid-input `NotSupported`.
     pub fn validate(&self) -> Result<(), String> {
         self.base.validate()?;
         if self.int_lb.len() != self.integers.len() {
@@ -477,7 +478,7 @@ pub fn solve_miqcp(
         res.x.truncate(qp.n);
     }
     // Recompute the true QCQP objective from `x` rather than trusting the
-    // conic relaxation's `objective`: when the objective
+    // conic relaxation's `objective` (PR #25 review 29): when the objective
     // is quadratic, `to_conic` minimizes an epigraph variable `t` bounding
     // `(1/2) x^T P0 x + q0^T x` via an SOC built from `P0`'s Cholesky factor.
     // That factor clamps any near-zero negative pivot to a fixed positive

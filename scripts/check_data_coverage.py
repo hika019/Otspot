@@ -32,7 +32,7 @@ Policies (fact-based, updated 2026-05-30):
   Minimum tracked fixtures (#17):
     Small QP/LP fixture files (< 50KB) can be tracked in git under
     tests/fixtures/ (or tests/data/). These bypass the data/ download
-    requirement for unit tests. Implementation: task #17.
+    requirement for unit tests. Implementation: task 17.
     Candidates: QPLIB_8495, AUG2D (Maros), afiro (Netlib LP).
 
   osqp_bench optional rows (SS_*):

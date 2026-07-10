@@ -480,7 +480,7 @@ ENDATA
         );
     }
 
-    // ── Sentinel tests: parser strictness (A/B/C) ─────────────────────────────
+    // ── Sentinel tests: audit 141 parser strictness (A/B/C) ───────────────────
 
     fn minimal_qps_with_columns(col_section: &str) -> String {
         format!(
@@ -774,7 +774,7 @@ ENDATA
     }
 
     // -----------------------------------------------------------------------
-    // Horizontal expansion: RHS/RANGES duplicate-row detection.
+    // PR #25 review horizontal expansion: RHS/RANGES duplicate-row detection.
     //
     // Unlike COLUMNS (which accumulates duplicate (row,col) entries by design,
     // see `test_parse_qps_accumulates_duplicate_objective_entries`), RHS and

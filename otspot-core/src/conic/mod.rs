@@ -83,7 +83,7 @@ impl ConicProblem {
     ///
     /// Column counts are checked unconditionally even with zero rows (a
     /// mismatched `A` there previously reached a `debug_assert_eq!` panic
-    /// deeper in the KKT solve).
+    /// deeper in the KKT solve; PR #25 review 36).
     pub fn validate(&self) -> Result<(), String> {
         if self.a.ncols() != self.n() {
             return Err("A column count != n".into());
@@ -214,10 +214,10 @@ pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     let scaled = eq.scale_problem(problem);
     let res = ipm::solve(&scaled, opts);
     let mut res = eq.unscale_result(problem, opts.tol, res);
-    // Canonicalize only statuses whose `x` is not a usable iterate:
-    // `Infeasible` -> `+inf`, `Unbounded` -> `-inf`. Inconclusive
-    // statuses keep `dot(c, x)` of the real iterate in `res.x`; `NotSupported`
-    // keeps its `NaN`.
+    // Canonicalize only statuses whose `x` is not a usable iterate
+    // (PR #25 review 40): `Infeasible` -> `+inf`, `Unbounded` -> `-inf`.
+    // Inconclusive statuses keep `dot(c, x)` of the real iterate in `res.x`;
+    // `NotSupported` keeps its `NaN`.
     res.objective = match res.status {
         SolveStatus::Infeasible => f64::INFINITY,
         SolveStatus::Unbounded => f64::NEG_INFINITY,

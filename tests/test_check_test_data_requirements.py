@@ -1,6 +1,6 @@
 """Sentinel tests for scripts/check_test_data_requirements.py.
 
-Covers the core branches of the heavy-data alignment guard (PR #25 issue #4):
+Covers the core branches of the heavy-data alignment guard (PR #25 review item 4):
   1. file requirement + file present            → ok (exit 0)
   2. file requirement + file absent             → FAIL (exit 1)
   3. dir requirement + dir present & non-empty  → ok (exit 0)

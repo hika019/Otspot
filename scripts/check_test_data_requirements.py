@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify that every data/ path referenced by test code exists on disk.
 
-Purpose (PR #25 issue #4): test-heavy.yml runs `--run-ignored all` as a
+Purpose (PR #25 review item 4): test-heavy.yml runs `--run-ignored all` as a
 must-pass gate, and data-requiring tests panic on missing data by design
 (no silent skip).  The set of data CI provides and the set of data tests
 require are maintained in different places (workflow steps vs test sources)

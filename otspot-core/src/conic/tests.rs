@@ -3466,14 +3466,14 @@ fn conic_kkt_threshold_boundary_direction_equivalence() {
 }
 
 // ---------------------------------------------------------------------------
-// QCQP bridge repros.
+// PR #25 review findings: QCQP bridge repros (memo 22/23/24/32/37).
 // ---------------------------------------------------------------------------
 
 fn empty_mat(nrows: usize, ncols: usize) -> CscMatrix {
     CscMatrix::from_triplets(&[], &[], &[], nrows, ncols).unwrap()
 }
 
-/// a rank-deficient PSD quadratic constraint must keep the
+/// memo 22 (P1): a rank-deficient PSD quadratic constraint must keep the
 /// untouched direction unbounded. `min x0  s.t.  x1^2 <= 1, x0 <= 0` is
 /// unbounded below; a clamped zero pivot instead adds ~1e-14*x0^2 curvature
 /// to the constraint, bounding x0 at ~ -1.4e7 and reporting a clean Optimal.
@@ -3504,7 +3504,7 @@ fn rank_deficient_quad_constraint_keeps_unbounded_direction() {
     assert_eq!(res.status, SolveStatus::Unbounded, "res={res:?}");
 }
 
-/// Equivalence: a rank-deficient PSD matrix with off-diagonal fill,
+/// memo 22 equivalence: a rank-deficient PSD matrix with off-diagonal fill,
 /// `P = [[1,1],[1,1]] = L L^T` with `L = [[1,0],[1,0]]` (second pivot exactly
 /// zero), must factor exactly: the zero-pivot column of `L` is all-zero, so
 /// the corresponding SOC row vanishes and no curvature is invented.
@@ -3564,7 +3564,7 @@ fn to_conic_rank_deficient_fill_factors_exactly() {
     );
 }
 
-/// public `QcqpProblem` with inconsistent
+/// memo 37 (P1) / memo 24 (P2): public `QcqpProblem` with inconsistent
 /// dimensions must be rejected as an error, not panic (q0 too short) and not
 /// silently drop the quadratic objective (`qcqp_objective`'s zeroed
 /// `mat_vec_mul` fallback for a mis-sized `p0`).
@@ -3664,7 +3664,7 @@ fn qcqp_dimension_mismatches_rejected_without_panic() {
     }
 }
 
-/// A `QpProblem` with structurally zero `Q` is a *linear*
+/// memo 32 (P1): a `QpProblem` with structurally zero `Q` is a *linear*
 /// objective; the bridge must not wrap it in a quadratic epigraph (which,
 /// combined with pivot handling, perturbs the objective).
 #[test]
@@ -3703,7 +3703,7 @@ fn zero_q_qp_problem_bridges_to_linear_objective() {
     );
 }
 
-/// A fixed variable bound (`lb == ub`) must bridge to an
+/// memo 23 (P2): a fixed variable bound (`lb == ub`) must bridge to an
 /// equality row, matching the MISOCP path — the pair `x <= v`, `-x <= -v`
 /// has no strictly feasible slack for the interior-point method.
 #[test]
@@ -3760,7 +3760,7 @@ fn fixed_variable_bound_bridges_to_equality_row() {
 }
 
 // ---------------------------------------------------------------------------
-// Public-API input validation (conic entry points).
+// PR #25 review: public-API input validation (conic entry points).
 // ---------------------------------------------------------------------------
 
 /// A trivially feasible 1-variable box SOCP (`0 <= x0 <= 1`), used as the
@@ -3944,7 +3944,7 @@ fn solve_socp_canonicalizes_non_optimal_objective() {
 
 #[test]
 fn solve_socp_preserves_real_iterate_objective_when_inconclusive() {
-    // Follow-up: the objective canonicalization must fire ONLY for
+    // review 40 follow-up (P1): the objective canonicalization must fire ONLY for
     // the conclusive no-usable-iterate statuses (Infeasible/Unbounded). An
     // inconclusive status (MaxIterations here; Timeout/NumericalError share
     // the arm) returns a genuine, still-improving iterate in `res.x` whose

@@ -36,7 +36,7 @@ jobs:
         with:
           path: data/
           # v2: heavy 専用データ (lp_problems_hard/neos.QPS, osqp_bench_illscaled)
-          # を追加した。旧 v1 の shape と異なるため bump。
+          # を追加した (PR #25 CI fix)。旧 v1 の shape と異なるため bump。
           # restore-keys の prefix match で v1 からの fallback restore は維持。
           key: bench-data-v2
           restore-keys: |
@@ -85,7 +85,7 @@ jobs:
             python3 scripts/gen_osqp_bench_illscaled.py
           fi
       - name: Verify test data requirements (alignment gate)
-        # 「--run-ignored all を must-pass にする」と「CI が
+        # PR #25 の指摘 4: 「--run-ignored all を must-pass にする」と「CI が
         # 用意するデータ集合」は別の場所で管理されており、黙って乖離する
         # (data-requiring な #[ignore] テストは data 欠落で panic する設計)。
         # このゲートはテスト源泉が参照する data/ パスを全数チェックし、欠落を
