@@ -1,4 +1,4 @@
-//! Multi-start (#5 Phase 2) sentinel: cold solve だけでは抜けられない saddle/中心
+//! Multi-start (Phase 2) sentinel: cold solve だけでは抜けられない saddle/中心
 //! を random restart で escape できることを実証。
 //!
 //! 真因 (sentinel が必要な理由):
@@ -282,7 +282,9 @@ fn api_model_set_threads_propagates_to_qp_solve() {
     m.minimize(0.5 * x * x + 0.5 * y * y + 1.0 * x);
     m.set_threads(4);
     // QP solve が成功する (= threads=4 が QP path に valid に伝播、SolverOptions 壊れない)
-    // 現状 threads は単発 QP solve では no-op (#31 完了まで)、伝播 path のみ確認
+    // 現状 threads は単発 (non-multistart) QP solve では no-op。multistart 経由の
+    // 並列化に threads を使わせる改善は未着手で、追跡先の issue も存在しない
+    // (この repo に GitHub issue はゼロ件)。ここでは伝播 path のみ確認する。
     let _r = m.solve().expect("QP solve should succeed with threads=4");
 }
 

@@ -563,7 +563,7 @@ minimize
         assert_eq!(miqp.qp.q.nnz(), 2);
     }
 
-    /// memo#33 (P1): a binary/integer QPLIB with a *linear* objective
+    /// memo 33 (P1): a binary/integer QPLIB with a *linear* objective
     /// (`nqobj = 0`) but non-empty **quadratic constraints** (`con_char = 'Q'`)
     /// must become a `Miqp` that keeps the quadratic constraints — not a `Milp`
     /// that silently drops them. Independent oracle: the file below has one
@@ -1368,7 +1368,7 @@ minimize
     }
 
     // -----------------------------------------------------------------------
-    // PR#25 review: OBJSENSE / objective-type / inf_val validation.
+    // PR #25 review: OBJSENSE / objective-type / inf_val validation.
     // -----------------------------------------------------------------------
 
     /// Sentinel: an unrecognized OBJSENSE token must be a `ParseError`, not

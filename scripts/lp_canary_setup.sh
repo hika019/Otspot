@@ -19,7 +19,7 @@
 #     share1b/2b, scagr7, recipe, stocfor1, boeing2, brandy, agg
 #   - 中規模 (4 問): scfxm1, etamacro, capri, wood1p
 #   - 構造的 bug class (5 問): perold (postsolve y), d6cube/cycle (退化),
-#     greenbea (#14 dual-only), pds-10 (1000s class 代表)
+#     greenbea (dual-only), pds-10 (1000s class 代表)
 #   - 等式・不等式 cold-start (2 問): klein1, klein2 (infeasible)
 #
 # 計 27 問 (28 行目はヘッダ)。timeout=60s, eps=1e-6 で合計 5 分以内に収まる

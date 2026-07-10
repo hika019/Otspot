@@ -200,7 +200,7 @@ fn check_postsolve_dual_feasibility(
             ));
         }
     }
-    // bound 考慮版を主判定にする (c69959d 以降の bench と同等)。
+    // bound 考慮版を主判定にする (現行 bench と同等)。
     if df_rel_bound > eps_dual {
         return Err(format!("{} | df_rel_bound > eps={}", summary, eps_dual));
     }

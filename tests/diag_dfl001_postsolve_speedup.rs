@@ -1,6 +1,6 @@
-//! SPEED #4-fix: dfl001 で cleanup 改善ゼロ時に LSQ skip → postsolve 高速化
+//! dfl001 で cleanup 改善ゼロ時に LSQ skip → postsolve 高速化 (fixed)
 //!
-//! 観測 (dfl001-probe #38): postsolve 2.9-4.5s の 98% が `compute_lsq_dual_y`。
+//! 観測: postsolve 2.9-4.5s の 98% が `compute_lsq_dual_y`。
 //! cleanup_nopert / cleanup_pert が `cheap_min` を改善できていないのに LSQ が
 //! budget を全消費していた。cleanup stagnant 時の LSQ skip が効いていれば
 //! postsolve は 1s 未満に収まる。

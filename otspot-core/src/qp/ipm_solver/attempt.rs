@@ -932,7 +932,7 @@ mod tests {
         );
     }
 
-    /// Case D fixture (#15 P2 root): 1 strictly-convex var + 1 LP-style isolated
+    /// Case D fixture: 1 strictly-convex var + 1 LP-style isolated
     /// EmptyCol whose bound-dual recovery the masked postsolve guard reverts.
     ///
     /// min 0.5·x0² + x1  s.t. x0∈[−10,10], x1∈[0,5], NO linear constraints.

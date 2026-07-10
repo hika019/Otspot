@@ -128,7 +128,7 @@ fn diag_etamacro_dfeas_regression() {
     );
     assert!(
         dfeas_rel <= eps,
-        "etamacro: dfeas_rel {:.3e} > eps {:.1e} (regression — baseline 8804da8 PASS)",
+        "etamacro: dfeas_rel {:.3e} > eps {:.1e} (regression — this PASSED at the fix baseline)",
         dfeas_rel,
         eps
     );

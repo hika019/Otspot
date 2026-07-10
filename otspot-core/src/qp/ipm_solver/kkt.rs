@@ -413,7 +413,7 @@ mod tests {
         assert!(r.abs() < 1e-15, "got r={:.3e}", r);
     }
 
-    /// #112 真因 sentinel: QGFRDXPN-like 26 eliminated var (mask=true / A 非空 / Q 空 / c≠0)
+    /// 真因 sentinel: QGFRDXPN-like 26 eliminated var (mask=true / A 非空 / Q 空 / c≠0)
     /// は Path B narrow で skip されず stationarity に出る。
     /// 旧 effc242 (Q 条件なし) では skip され r≈0 となり refine 進捗 oracle 退化した。
     #[test]
@@ -440,7 +440,7 @@ mod tests {
         );
     }
 
-    /// control sentinel: #55 linear-only var (A 空 / Q 非空 / mask=true) も Path B narrow で
+    /// control sentinel: linear-only var (A 空 / Q 非空 / mask=true) も Path B narrow で
     /// skip されず stationarity 露出を維持する。Q 空条件単独だと skip してしまうのを防ぐ。
     #[test]
     fn kkt_residual_rel_linear_only_var_not_skipped_with_mask() {
@@ -511,7 +511,7 @@ mod tests {
     }
 
     /// mask 未供給 (= IPM 経路) の場合: A 空 / Q 非空 の linear-only var は skip されず
-    /// stationarity に出る。これが #55 真因 (旧 A-only heuristic はこの r を隠していた)。
+    /// stationarity に出る。これが真因 (旧 A-only heuristic はこの r を隠していた)。
     #[test]
     fn kkt_residual_rel_no_mask_exposes_linear_only_var() {
         // n=1, A 空, Q diag=(-2), c=1, bounds=(-2, 2)

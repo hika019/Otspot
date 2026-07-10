@@ -156,8 +156,8 @@ fn lp_coverage_screen_sample_fast() {
 
 /// `cycle` LP convergence sentinel (`Optimal` pinned). Previously gated
 /// behind two claims that no longer hold: an assumed ~19-20s runtime, and an
-/// "Optimal 未証明" concern tracked as "open #31" — no such GitHub issue was
-/// ever created (`gh issue view 31` 404s; this repo has zero GitHub issues).
+/// "Optimal 未証明" concern once noted as open issue 31 — no such GitHub issue
+/// was ever created (`gh issue view 31` 404s; this repo has zero GitHub issues).
 /// Measured PASS across 5 independent runs (2026-07-09, local + heavy CI):
 /// 4.25-9.59s, rel_err ~1e-12 — well under the 30s internal timeout below
 /// and the default profile's per-test budget. Renamed from

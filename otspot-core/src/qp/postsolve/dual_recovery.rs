@@ -432,7 +432,7 @@ pub(crate) fn collect_dual_recovery_free_columns(
 
 #[cfg(test)]
 mod free_columns_tests {
-    //! #92 F2: collect_dual_recovery_free_columns の skip 規約を
+    //! collect_dual_recovery_free_columns の skip 規約を
     //! 旧 A-only から `eliminated_cols` mask に揃えた sentinel。
     //! 旧 logic で A 空列が常に skip された結果、linear-only var が dual-only IR の
     //! free_idx 抽出から漏れ refine 経路で stationarity が改善されなかった。

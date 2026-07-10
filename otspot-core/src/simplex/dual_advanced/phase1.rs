@@ -979,7 +979,7 @@ mod tests {
         assert_kkt_optimal(&lp, 3.0, "big_m_phase1_feasible_eq");
     }
 
-    /// P2-#2 (codex completeness edge): a feasible Eq system whose Big-M Phase I
+    /// Codex completeness edge: a feasible Eq system whose Big-M Phase I
     /// needs an lb-repair on an artificial-leaving row — which the anti-cycling
     /// guard (`basis[r] < n_enter`, kept to stop sierra's 478-pivot chase)
     /// suppresses, so Big-M abandons it *when the crash basis is disabled*. The

@@ -793,7 +793,7 @@ mod warm_basis_recovery_tests {
         let lp = lp_dual_fixed();
         // Self-warm round-trip (same LP twice) — the simplest sanity.
         assert_warm_round_trip(&lp, &lp, "dual_fixed/self");
-        // Cross-warm with RHS change matching the #65 regression scenario.
+        // Cross-warm with RHS change matching the original regression scenario.
         let mut lp2 = lp_dual_fixed();
         lp2.b = vec![5.0, 3.0, 3.0];
         assert_warm_round_trip(&lp, &lp2, "dual_fixed/rhs_change");
@@ -830,10 +830,10 @@ mod warm_basis_recovery_tests {
     /// dual-fixed warm-start round-trip even when the new RHS is feasible
     /// (because subsequent `solve_with(lp2, warm=None, presolve=false)` would
     /// be a cold dual that this fixture is fine with, BUT the upstream
-    /// assertion `result.warm_start_basis.is_some()` in #65 still trips).
+    /// assertion `result.warm_start_basis.is_some()` still trips).
     #[test]
     fn noop_proof_returns_none_fails_round_trip() {
-        // Reproduces the original #65 FAIL state: presolve reduces, postsolve
+        // Reproduces the original FAIL state: presolve reduces, postsolve
         // (in this synthetic call) returns None → assertion catches the lost
         // warm-start. We don't have a runtime toggle for the recovery path —
         // instead we directly invoke the recovery function with an empty
@@ -845,7 +845,7 @@ mod warm_basis_recovery_tests {
         assert!(
             recovered.is_some(),
             "recover_warm_start_basis must produce a basis for dual-fixed LP \
-             (no-op would return None and re-introduce #65)",
+             (no-op would return None and re-introduce the lost warm-start bug)",
         );
         let basis = recovered.unwrap().basis;
         let sf = build_standard_form(&lp);

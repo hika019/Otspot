@@ -342,7 +342,7 @@ mod tests {
         }
     }
 
-    /// #92 F2 sentinel: empty A col + 未消去 var の DD guard 新旧 drift。
+    /// sentinel: empty A col + 未消去 var の DD guard 新旧 drift。
     /// 旧 A-only skip では row 0 除外で `y_new` 採用、新 logic は guard 不通過で
     /// `y=-3` 保持。skip 条件を `col_ptr[j+1]-col_ptr[j]==0` に revert すると
     /// assert "should keep y=-3" が FAIL する (実機検証済の no-op proof)。
@@ -379,7 +379,7 @@ mod tests {
         );
     }
 
-    /// #92 F2 補完: eliminated=true を渡すと skip が復活し、y_new が採用される。
+    /// 補完: eliminated=true を渡すと skip が復活し、y_new が採用される。
     /// 上の sentinel と同 fixture で mask だけ変えて挙動が割れることを確認する。
     #[test]
     fn refine_dual_lsq_skips_when_marked_eliminated() {

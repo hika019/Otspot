@@ -1041,7 +1041,7 @@ mod tests {
         }
     }
 
-    /// #202 sentinel: `set_initial_gamma` must be invoked exactly once
+    /// sentinel: `set_initial_gamma` must be invoked exactly once
     /// (cold-start). The per-refactor m-BTRAN re-init was redundant — the
     /// rank-1 update is exact (Forrest-Goldfarb 1992) and `after_refactor`
     /// handles CEILING-flagged drift via identity reset.

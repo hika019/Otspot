@@ -1,7 +1,7 @@
 # compare_solvers — HiGHS / SCIP per-problem comparison harness
 
-Task #10 の基盤。Otspot が非 PASS の問題を HiGHS / SCIP が解けるかを
-per-problem で突合し、「他ソルバ可・Otspot 不可」のフロンティアを確定する。
+Otspot が非 PASS の問題を HiGHS / SCIP が解けるかを
+per-problem で突合し、「他ソルバ可・Otspot 不可」のフロンティアを確定する基盤。
 
 ## 使い方
 

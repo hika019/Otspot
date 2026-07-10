@@ -1,4 +1,4 @@
-//! Independent convex-MIQP correctness checks (#17 review).
+//! Independent convex-MIQP correctness checks.
 //!
 //! Complements the diagonal-Q brute-force tests by covering **off-diagonal PSD Q**
 //! (full quadratic form), maximize (concave→convex / convex→reject), binary, and a
@@ -223,7 +223,7 @@ fn offdiag_psd_bruteforce_cases() {
 /// Adding ANY linear constraint, or a diagonal Q, makes the QP converge and the bug
 /// disappears — which is why the diagonal-Q fuzz never caught it.
 ///
-/// Un-ignored (#17 fix): the driver now trusts only Optimal relaxation objectives as
+/// Un-ignored (fixed): the driver now trusts only Optimal relaxation objectives as
 /// lower bounds and bisects integer boxes when the QP relaxation stalls, so the search
 /// reaches the true integer optimum via exact fixed-point leaves instead of over-pruning.
 #[test]
@@ -472,7 +472,7 @@ fn binary_miqp_bruteforce() {
     );
 }
 
-/// Point 3 (#17 fix): mixed integer + CONTINUOUS where the continuous relaxation
+/// Point 3 (fixed): mixed integer + CONTINUOUS where the continuous relaxation
 /// stalls must NOT be reported as a false `Optimal`. Here x is integer [0,2] and
 /// (y,z) are continuous with an off-diagonal coupling Q-block whose box-only sub-QP
 /// stalls (same pathology as the P1). After x is fixed the continuous region cannot

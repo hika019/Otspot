@@ -275,9 +275,9 @@ fn test_qp_mixed_ge_le_presolve_ruiz_regression() {
     );
 }
 
-// ─── #39 repro: 全列 EmptyCol / presolve 完全求解 ────────────────────────────
+// ─── repro: 全列 EmptyCol / presolve 完全求解 ────────────────────────────
 
-/// Pattern A (#39 repro): Q=diag(1,1), c=0, A=0, bounds fixed (lb==ub).
+/// Pattern A: Q=diag(1,1), c=0, A=0, bounds fixed (lb==ub).
 /// step1_fix_var removes ALL vars → n_reduced=0 → expect Optimal.
 #[test]
 fn repro_39_a_fixed_bounds_c0() {
@@ -308,7 +308,7 @@ fn repro_39_a_fixed_bounds_c0() {
     assert_close(r.solution[1], 3.0, 1e-4, "repro_39_a x[1]");
 }
 
-/// Pattern B (#39 repro): Q=diag(1,1), c=(1,-1), A=0, bounds fixed.
+/// Pattern B: Q=diag(1,1), c=(1,-1), A=0, bounds fixed.
 /// Optimal: x=(2,3), obj = 0.5*(4+9) + (2-3) = 6.5 - 1 = 5.5.
 #[test]
 fn repro_39_b_fixed_bounds_c_nonzero() {
@@ -338,7 +338,7 @@ fn repro_39_b_fixed_bounds_c_nonzero() {
     assert_close(r.solution[1], 3.0, 1e-4, "repro_39_b x[1]");
 }
 
-/// Pattern C (#39 repro): Q=0, c=(-1,0), A=0, x[0] unbounded above.
+/// Pattern C: Q=0, c=(-1,0), A=0, x[0] unbounded above.
 /// Expect Unbounded (step4_empty detects c<0 && ub=+inf).
 #[test]
 fn repro_39_c_all_empty_col_unbounded() {

@@ -138,7 +138,7 @@ fn bound_absorb_at_ub() {
 
 /// interior-skip 分岐: orig (0, 100)、presolve で両 bound タイト化 → fixed at 50
 /// (orig 内部)。BoundAbsorb は対象外 (None)、rc は raw `c − A^T y` のまま。
-/// #56 効果 (bandm/beaconfd 等で BoundAbsorb 無効化) を unit test 化したもの。
+/// bandm/beaconfd 等で BoundAbsorb を無効化した効果を unit test 化したもの。
 ///
 /// 2 列 (c=+, c=−) を同時に interior-fix させ、誤クランプを両方向で検出する:
 /// `max(rc,0)` (誤 AtLb) は負側 col の rc を 0 に書き換え、`min(rc,0)` (誤 AtUb)

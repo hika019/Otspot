@@ -867,7 +867,7 @@ fn conic_nonconvex_route_peak_within_budget() {
 
 // ---------------------------------------------------------------------------
 // Convex QCQP conic bridge: many independent sparse quadratic constraints
-// (Task #15, QPLIB_8585 shape)
+// (QPLIB_8585 shape)
 // ---------------------------------------------------------------------------
 
 use otspot_core::conic::solve_qp_problem_as_qcqp;

@@ -895,7 +895,7 @@ mod tests {
     /// LP: min -3x0 - x1, x0+x1≤4, x0≤3, x1≤2, x0,x1 ≥ 0.
     /// Cold optimal: x0=3, x1=1, obj=-10. Warm basis = {x0, x1, s2}.
     /// Perturb b=[1,3,2]: B⁻¹·[1,3,2] = [3, -2, 4] → lb-violation at x1.
-    /// After guard removal (#175) the dual simplex repairs x1 and converges
+    /// After guard removal the dual simplex repairs x1 and converges
     /// to the perturbed-LP optimal x0=1, x1=0, obj=-3.
     ///
     /// If `has_lb_violation` were re-added to the legacy path, the warm

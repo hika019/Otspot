@@ -1,6 +1,7 @@
 //! 診断: afiro で y (dual_solution) の偏りを観測する
 //!
-//! 事実: e61f27b 以降 afiro (32x27) で DFEAS_FAIL。a1d42b1 では PASS。
+//! 事実: ある時点以降 afiro (32x27) で DFEAS_FAIL。その直前の commit では PASS
+//! (bisect 元の commit hash は squash/rebase で追跡不能)。
 //! presolve OFF と ON で y を比較し、どちらが偏るかを切り分ける。
 
 use otspot::io::qps::parse_qps;
@@ -255,7 +256,7 @@ fn test_afiro_presolve_on_dual_feasibility_and_kkt() {
     check_lp_dual_kkt("data/lp_problems/afiro.QPS");
 }
 
-/// #15-P2 safety sentinel: the QP cert EmptyCol mask (eliminated_cols at
+/// Safety sentinel: the QP cert EmptyCol mask (eliminated_cols at
 /// attempt.rs) must never hide an AFIRO stationarity violation.
 ///
 /// The `kkt_residual_rel` skip is narrow: it fires only for columns that are

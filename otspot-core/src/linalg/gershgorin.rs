@@ -310,7 +310,7 @@ mod tests {
     /// 機械検証する。`feedback_sentinel_must_fail_under_noop` 準拠。
     #[test]
     fn no_op_proof_mixed_asymmetric_canonicalize_required() {
-        // 旧 impl 相当 (#66 fix 後の has_upper && has_lower → 1/2 補正) を inline 再現。
+        // 旧 impl 相当 (fix 後の has_upper && has_lower → 1/2 補正) を inline 再現。
         fn legacy_has_upper_lower_half(q: &CscMatrix) -> f64 {
             let n = q.nrows;
             if n == 0 {

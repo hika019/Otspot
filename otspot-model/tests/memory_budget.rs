@@ -7,7 +7,7 @@
 //! re-triplet'd into a `CscMatrix`. For a model with `O(n)` sparse
 //! constraints this is an `O(n * rows)` allocation instead of `O(nnz)` — the
 //! same bug class as the QPLIB conic-bridge OOM (`otspot-core/tests/
-//! memory_budget.rs`) and the nonconvex QCQP B&B fix (Task #8), just one
+//! memory_budget.rs`) and the nonconvex QCQP B&B fix, just one
 //! layer up in the Model DSL.
 //!
 //! This fence builds a synthetic sparse conic Model through the public

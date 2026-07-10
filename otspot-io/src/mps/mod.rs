@@ -968,7 +968,7 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
         );
     }
 
-    // ── Sentinel tests: audit#141 parser strictness (A/B/C) ──────────────────
+    // ── Sentinel tests: audit 141 parser strictness (A/B/C) ───────────────────
 
     /// A: COLUMNS line with only 2 fields must be an error, not a silent skip.
     #[test]
@@ -1330,7 +1330,7 @@ ENDATA
     }
 
     // -----------------------------------------------------------------------
-    // PR#25 review horizontal expansion: RHS/RANGES duplicate-row detection.
+    // PR #25 review horizontal expansion: RHS/RANGES duplicate-row detection.
     //
     // Unlike COLUMNS (which accumulates duplicate (row,col) entries by design,
     // see `test_parse_mps_accumulates_duplicate_objective_entries`), RHS and
