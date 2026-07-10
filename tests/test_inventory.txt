@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2653 testcases, 27 ignored
+# totals: 2655 testcases, 27 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -2079,6 +2079,8 @@ otspot-model::qcqp_dsl_validation	qc_nan_constant_rejected	active
 otspot-model::qcqp_dsl_validation	qc_nan_linear_coefficient_rejected	active
 otspot-model::qcqp_dsl_validation	qc_nan_quad_coefficient_rejected_as_invalid_input	active
 otspot-model::qcqp_dsl_validation	qc_non_finite_rhs_rejected	active
+otspot-model::qcqp_dsl_validation	soc_foreign_bound_var_rejected	active
+otspot-model::qcqp_dsl_validation	soc_foreign_term_var_rejected	active
 otspot-model::qcqp_dsl_validation	soc_inf_bound_coefficient_rejected	active
 otspot-model::qcqp_dsl_validation	soc_nan_bound_constant_rejected	active
 otspot-model::qcqp_dsl_validation	soc_nan_term_coefficient_rejected	active
