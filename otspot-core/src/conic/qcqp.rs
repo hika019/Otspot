@@ -65,12 +65,74 @@ fn widen_cols(m: &CscMatrix, new_ncols: usize) -> CscMatrix {
     }
 }
 
-/// Pivots at or below this are numerically zero (a rank-deficient PSD
-/// direction): the factor column is dropped to zero rather than clamped, so
-/// no artificial curvature enters the SOCP.
-const CHOL_PIVOT_ZERO_TOL: f64 = 1e-14;
-/// Pivots below this are clearly negative: the matrix is not PSD.
-const CHOL_PIVOT_INDEFINITE_TOL: f64 = -1e-9;
+/// Safety factor multiplying the `n · f64::EPSILON` Cholesky backward-error
+/// growth bound, used to build every scale-relative pivot/residual tolerance
+/// below.
+///
+/// # Why the tolerances must be scale-relative
+///
+/// The pivot and off-diagonal residual tested at column `j` are the
+/// *post-elimination* quantities `acc[j] = M[j][j] - Σ_{k<j} L[j][k]^2` and
+/// `acc[r] = M[r][j] - Σ_{k<j} L[r][k] L[j][k]`, not the raw input entries.
+/// Their floating-point rounding floor scales with `‖M‖`, so an *absolute*
+/// tolerance (the earlier `1e-9`) falsely rejects a genuine PSD matrix once
+/// `‖M‖ · eps` exceeds it: e.g. a rank-1 `v v^T` with `‖v‖ ~ 1e7` has
+/// `‖M‖ ~ 1e14` and a pure-rounding Schur residual `~ 1e-2`, seven orders
+/// above `1e-9`, yet is (to double precision) exactly PSD.
+///
+/// # The bound (Higham, *ASNA* 2nd ed., Thm 10.3–10.4)
+///
+/// The computed Cholesky factor satisfies `L̂ L̂ᵀ = M + ΔM` with
+/// `|ΔM[r][j]| <= γ_{j} · Σ_{k<j} |L̂[r][k]| |L̂[j][k]|`, where
+/// `γ_k = k·u / (1 - k·u)` and `u = f64::EPSILON / 2` is the unit roundoff.
+/// At a zero pivot the exact residual is zero, so `acc[r]` *is* this error.
+/// Cauchy–Schwarz plus `Σ_{k<j} L̂[·][k]^2 <= M[·][·] = orig_diag[·]` give
+/// ```text
+/// |acc[r]| <= γ_j · sqrt(orig_diag[r] · orig_diag[j])
+///          <= n · f64::EPSILON · sqrt(orig_diag[r] · orig_diag[j]),
+/// ```
+/// using `γ_j <= γ_n <= 2·n·u = n · f64::EPSILON` (valid for `n·u <= 1/2`,
+/// i.e. all representable `n`). The diagonal case `r = j` gives the pivot
+/// floor `n · f64::EPSILON · orig_diag[j]`. The `n` factor is exactly the
+/// elimination-depth error propagation (`γ_n`); it is not a fudge factor.
+///
+/// This is a *tolerance design*, not a proof of correctness: the intermediate
+/// step `Σ_{k<j} L̂[·][k]^2 <= orig_diag[·]` holds in exact arithmetic but in
+/// floating point can be exceeded by a `(1 + O(eps))` factor, and Higham's
+/// `γ` bound is itself worst-case. `CHOL_ROUNDING_REL_FACTOR` is the
+/// engineering headroom absorbing both (plus the `γ_{n+1}` vs `γ_n` slack and
+/// non-adversarial accumulation). Its exact value is not delicate: rounding
+/// residuals sit at `~ n·eps·sqrt(...)` while a genuine indefiniteness signal
+/// is `~ O(1)·sqrt(...)`, ~15 orders larger, so any factor in `[1, 1e6]`
+/// separates them. `8` leaves comfortable margin on both sides (measured:
+/// the `v v^T` rounding residual `1.56e-2` vs tolerance `0.59`, a 37×
+/// margin; a `det = -0.01` indefinite residual `0.1` vs tolerance `5e-15`).
+///
+/// Degenerate case: when a zero-pivot column also has `orig_diag[j] = 0` (a
+/// structurally zero diagonal, e.g. `[[0,1],[1,0]]`), the off-diagonal
+/// tolerance `sqrt(orig_diag[j]·orig_diag[r]) = 0`, so the test degenerates
+/// to an *exact* `acc[r] != 0` rejection. That is correct, not a gap: for a
+/// PSD matrix `M[j][j] = 0` forces row `j ≡ 0` exactly, so the true rounding
+/// floor there really is zero and any nonzero residual is genuine
+/// indefiniteness.
+const CHOL_ROUNDING_REL_FACTOR: f64 = 8.0;
+/// Absolute floor for the "treat a positive pivot as an exact zero and drop
+/// the factor column" (rank-deficiency) decision, used when the column's
+/// original diagonal is `~0` so the relative floor `n·eps·orig_diag[j]`
+/// vanishes. Preserves the small-scale exact-drop behavior (`diag(1,0)`,
+/// zero matrix) that `20a0d960` relies on to keep unbounded directions free.
+const CHOL_PIVOT_ZERO_ABS_FLOOR: f64 = 1e-14;
+/// Absolute floor for the "pivot is genuinely negative → not PSD" rejection,
+/// used when the column's original diagonal is `~0`. Preserves the
+/// small-scale jitter band: an `O(1)` matrix with a `-1e-10` diagonal entry
+/// is accepted (clamped), not rejected. At large scale the relative floor
+/// `n·eps·orig_diag[j]` dominates this constant, so it never causes the
+/// scale-driven false rejection that motivated relativizing.
+const CHOL_PIVOT_INDEFINITE_ABS_FLOOR: f64 = 1e-9;
+
+/// Columns of a sparse lower-triangular Cholesky factor: `column[j]` holds the
+/// `(row, value)` entries of `L`'s column `j`, `row >= j`.
+type SparseCholCols = Vec<Vec<(usize, f64)>>;
 
 /// Sparse left-looking Cholesky of a PSD-with-jitter matrix `p` (`n x n`,
 /// both triangles stored, as `QcqpProblem::p0`/`QuadConstraint::p` are).
@@ -81,19 +143,45 @@ const CHOL_PIVOT_INDEFINITE_TOL: f64 = -1e-9;
 /// `p` itself when no fill-in occurs (e.g. `nnz(L) = O(n)` for diagonal `p`,
 /// the case that drove the QPLIB DCQ bridge OOM this replaces).
 ///
-/// Pivot handling: `[0, CHOL_PIVOT_ZERO_TOL]` is rank-deficient PSD — factor
-/// column set to zero exactly (matching SOC row vanishes, preserving any
-/// unbounded direction), bool stays `false`. `(CHOL_PIVOT_INDEFINITE_TOL, 0)`
-/// is handled the same but sets bool `true` (PSD unprovable in the jitter
-/// band; reformulation only approximate). Below it: not PSD (`Err`).
-/// Columns of a sparse lower-triangular Cholesky factor: `column[j]` holds the
-/// `(row, value)` entries of `L`'s column `j`, `row >= j`.
-type SparseCholCols = Vec<Vec<(usize, f64)>>;
-
+/// Pivot handling (all tolerances scale-relative — see
+/// `CHOL_ROUNDING_REL_FACTOR`). Let `noise_j = CHOL_ROUNDING_REL_FACTOR ·
+/// n · eps · orig_diag[j]` be the rounding floor of the post-elimination
+/// pivot at column `j`.
+/// - `pivot < -max(CHOL_PIVOT_INDEFINITE_ABS_FLOOR, noise_j)`: the pivot is
+///   negative beyond rounding — not PSD (`Err`).
+/// - `pivot <= max(CHOL_PIVOT_ZERO_ABS_FLOOR, noise_j)`: rank-deficient PSD
+///   *iff* every off-diagonal residual `acc[r]` (r > j) is within
+///   `CHOL_ROUNDING_REL_FACTOR · n · eps · sqrt(orig_diag[j]·orig_diag[r])`
+///   of zero; then the factor column is set to zero exactly (matching SOC
+///   row vanishes, preserving any unbounded direction). A residual beyond
+///   that bound makes the `{j,r}` 2x2 principal minor certifiably negative
+///   (`M[j][j] ≈ 0 ⟹ minor = -M[r][j]^2 < 0`), so the matrix is rejected
+///   (`Err`) no matter how small the pivot is.
+/// - otherwise `pivot.sqrt()`.
+///
+/// The returned bool (`convexity_unproven`) is `true` only when a pivot was
+/// negative beyond the rounding floor but within the jitter band
+/// (`pivot < -noise_j`, i.e. genuine small-scale indefiniteness clamped to
+/// zero); within-rounding residuals and non-negative pivots are treated as
+/// PSD-to-precision and leave it `false`.
 fn sparse_cholesky_lower(p: &CscMatrix, n: usize) -> Result<(SparseCholCols, bool), ()> {
     let mut l_cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     let mut row_to_cols: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut clamped = false;
+
+    // Original diagonal of `p` (both triangles stored, so column `j`'s stored
+    // entry at row `j` is `M[j][j]`; duplicate triplets accumulate, matching
+    // how `acc` sums the raw column below). Sets the scale of every rounding
+    // tolerance (see `CHOL_ROUNDING_REL_FACTOR`).
+    let mut orig_diag = vec![0.0f64; n];
+    for j in 0..n {
+        let (rows, vals) = p.get_column(j).map_err(|_| ())?;
+        for (&r, &v) in rows.iter().zip(vals) {
+            if r == j {
+                orig_diag[j] += v;
+            }
+        }
+    }
 
     // Reused sparse accumulator for the column currently being eliminated:
     // `acc[r]` holds the running value for row `r >= j`; `touched` lists the
@@ -141,17 +229,46 @@ fn sparse_cholesky_lower(p: &CscMatrix, n: usize) -> Result<(SparseCholCols, boo
         }
 
         let pivot = acc[j];
-        let ljj = if pivot <= CHOL_PIVOT_ZERO_TOL {
-            if pivot < CHOL_PIVOT_INDEFINITE_TOL {
+        // Rounding floor of the post-elimination pivot at column `j`; scales
+        // with the original diagonal so the decision tracks the matrix's true
+        // (relative) definiteness rather than the factorization's absolute
+        // rounding cancellation (see `CHOL_ROUNDING_REL_FACTOR`).
+        let od_j = orig_diag[j].max(0.0);
+        let noise_j = CHOL_ROUNDING_REL_FACTOR * (n as f64) * f64::EPSILON * od_j;
+        let zero_tol = noise_j.max(CHOL_PIVOT_ZERO_ABS_FLOOR);
+        let indef_tol = noise_j.max(CHOL_PIVOT_INDEFINITE_ABS_FLOOR);
+        let ljj = if pivot <= zero_tol {
+            if pivot < -indef_tol {
                 return Err(());
             }
-            if pivot < 0.0 {
+            // A zero/jitter-band pivot only certifies a rank-deficient PSD
+            // direction if the off-diagonal entries sharing this column are
+            // also within rounding of zero: for PSD `M`, `M[j][j] = 0` forces
+            // `M[r][j] = 0`, so a residual beyond its own rounding floor
+            // `n·eps·sqrt(orig_diag[j]·orig_diag[r])` proves indefiniteness
+            // rather than noise. Reject rather than silently drop a genuinely
+            // nonzero Schur-complement entry.
+            for &r in &touched {
+                if r > j {
+                    let offdiag_tol = CHOL_ROUNDING_REL_FACTOR
+                        * (n as f64)
+                        * f64::EPSILON
+                        * (od_j * orig_diag[r].max(0.0)).sqrt();
+                    if acc[r].abs() > offdiag_tol {
+                        return Err(());
+                    }
+                }
+            }
+            // Accepted as rank-deficient PSD (within rounding): drop the whole
+            // factor column to zero, removing the SOC row instead of adding
+            // ~sqrt(pivot) curvature that would bound an unbounded direction.
+            // Flag as approximate (unproven) only when the pivot is negative
+            // beyond the rounding floor — a genuine (if tiny) indefiniteness
+            // clamped to zero. A non-negative pivot or a within-rounding
+            // residual is PSD-to-precision and leaves the flag clear.
+            if pivot < -noise_j {
                 clamped = true;
             }
-            // Rank-deficient PSD direction: drop the whole factor column to
-            // zero. For an exact zero pivot the Schur complement below is also
-            // zero, so this is exact; it removes the SOC row instead of adding
-            // ~sqrt(pivot) curvature that would bound an unbounded direction.
             0.0
         } else {
             pivot.sqrt()
@@ -259,8 +376,9 @@ fn validate_dims(qp: &QcqpProblem) -> Result<(), String> {
 /// quadratic; the SOCP variable vector is `[x (n) , t?]`.
 ///
 /// The third tuple element is `true` when any Cholesky factorization clamped
-/// a negative jitter-band pivot (see `sparse_cholesky_lower`): the SOCP is
-/// then only an approximation of the QCQP and convexity is unproven.
+/// a negative jitter-band pivot to zero (a genuine small-scale indefiniteness
+/// within the rounding floor — see `sparse_cholesky_lower`): the SOCP is then
+/// only an approximation of the QCQP and convexity is unproven.
 pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize, bool), String> {
     validate_dims(qp)?;
     let n = qp.n;
@@ -401,9 +519,11 @@ pub struct QcqpResult {
     pub x: Vec<f64>,
     /// Iterations.
     pub iterations: usize,
-    /// A Cholesky negative-pivot clamp occurred during the SOCP reformulation:
-    /// the solved SOCP only approximates the QCQP and the result (whatever the
-    /// status) does not certify anything about the original problem.
+    /// A Cholesky negative jitter-band pivot was clamped to zero during the
+    /// SOCP reformulation (genuine small-scale indefiniteness within the
+    /// rounding floor): the solved SOCP only approximates the QCQP and the
+    /// result (whatever the status) does not certify anything about the
+    /// original problem.
     pub convexity_unproven: bool,
 }
 

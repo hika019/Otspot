@@ -3554,6 +3554,457 @@ fn to_conic_rank_deficient_fill_factors_exactly() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// PR #25 review (P1): `sparse_cholesky_lower` dropped the whole Schur-
+// complement row below a zero/jitter-band pivot unconditionally, even when
+// that row's off-diagonal entries were *not* zero. For a symmetric matrix,
+// a zero pivot `M[j][j] = 0` forces `M[r][j] = 0` for every `r` (the 2x2
+// principal minor `M[j][j]*M[r][r] - M[r][j]^2` degenerates to `-M[r][j]^2`,
+// which is PSD-compatible only at `M[r][j] = 0`); dropping a genuinely
+// nonzero `M[r][j]` instead of rejecting the matrix turned a nonconvex QCQP
+// into a "certified convex" SOCP over a different (unconstrained-in-that-
+// direction) feasible region.
+//
+// The tests below exercise both call sites of the shared pivot logic:
+// `to_conic` (`sparse_cholesky_lower`, dense-per-problem CSC input) and
+// `solve_qp_problem_as_qcqp` (`touched_cholesky`, sparse per-constraint
+// triplets). Every expected outcome is derived independently (determinant
+// sign / eigenvalues of small hand-written matrices, or a closed-form
+// optimum), never from the implementation under test.
+// ---------------------------------------------------------------------------
+
+/// `Q = [[0,1],[1,0]]` is indefinite: `det(Q) = 0*0 - 1*1 = -1 < 0`, and a
+/// symmetric matrix with a negative determinant has an odd number of
+/// negative eigenvalues, so it cannot be PSD. `to_conic` must reject it via
+/// the quadratic-constraint Cholesky (`sparse_cholesky_lower`), not silently
+/// factor it as if the off-diagonal 1 were zero.
+#[test]
+fn qcqp_indefinite_offdiagonal_rejected_via_to_conic() {
+    let n = 2;
+    let p = csc(&[vec![0.0, 1.0], vec![1.0, 0.0]], n, n);
+    let qp = QcqpProblem {
+        n,
+        p0: None,
+        q0: vec![0.0, 0.0],
+        quad: vec![QuadConstraint {
+            p,
+            q: vec![0.0; n],
+            r: -1.0,
+        }],
+        g_lin: empty_mat(0, n),
+        h_lin: vec![],
+        a_eq: empty_mat(0, n),
+        b_eq: vec![],
+    };
+    let err = to_conic(&qp).expect_err("indefinite Q=[[0,1],[1,0]] must be rejected");
+    assert!(
+        err.contains("not PSD"),
+        "expected a not-PSD rejection, got: {err}"
+    );
+}
+
+/// Same `Q = [[0,1],[1,0]]` matrix, through the *other* Cholesky call site:
+/// `solve_qp_problem_as_qcqp` -> `qp_problem_to_conic` -> `touched_cholesky`.
+/// This is the lead's exact reproduction: `2*x0*x1 <= 1` reported
+/// `status=Optimal objective=2.05e-15 convexity_unproven=false` before the
+/// fix (the SOC row for the cross term vanished, leaving an unconstrained
+/// problem trivially solved at the origin). It must now be rejected.
+#[test]
+fn qcqp_indefinite_offdiagonal_rejected_via_touched_cholesky() {
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let n = 2;
+    let q_obj = CscMatrix::new(n, n);
+    let c = vec![0.0, 0.0];
+    let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+    let b = vec![1.0]; // (1/2) x^T Q x <= 1  =>  x0*x1 <= 1
+    let bounds = vec![(-10.0, 10.0); n];
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 1, 1.0));
+    qc.triplets.push((1, 0, 1.0));
+    let mut qp = QpProblem::new(q_obj, c, a, b, bounds, vec![ConstraintType::Le]).unwrap();
+    qp.set_quadratic_constraints(vec![qc]).unwrap();
+
+    let res = solve_qp_problem_as_qcqp(&qp, &ConicOptions::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "nonconvex constraint must not be certified as a solved convex SOCP, got {res:?}"
+    );
+}
+
+/// `Q = diag(1, 0)` is a genuine rank-deficient PSD matrix (eigenvalues `1`
+/// and `0`, both `>= 0`): the zero pivot at column 1 has no off-diagonal
+/// entries at all (structurally absent, not just numerically small), so it
+/// must still factor exactly and pass, unaffected by the new off-diagonal
+/// check. Exercises `sparse_cholesky_lower` via `to_conic`.
+#[test]
+fn qcqp_true_rank_deficient_diag_still_accepted_via_to_conic() {
+    let n = 2;
+    let p = csc(&[vec![1.0, 0.0], vec![0.0, 0.0]], n, n);
+    let qp = QcqpProblem {
+        n,
+        p0: None,
+        q0: vec![0.0, 0.0],
+        quad: vec![QuadConstraint {
+            p,
+            q: vec![0.0; n],
+            r: -1.0,
+        }],
+        g_lin: empty_mat(0, n),
+        h_lin: vec![],
+        a_eq: empty_mat(0, n),
+        b_eq: vec![],
+    };
+    let (conic, _nvar, unproven) = to_conic(&qp).expect("diag(1,0) is PSD, must be accepted");
+    assert!(
+        !unproven,
+        "exact rank-deficient factorization must not flag unproven"
+    );
+    // SOC block rows are [s0; sqrt2 * R x (2 rows); s_last] starting at row 0
+    // (no linear inequalities here); R row1 (the zero-pivot column) must be
+    // exactly the zero vector.
+    let gd = conic.g.to_dense_rows();
+    assert_eq!(gd[1], vec![-std::f64::consts::SQRT_2, 0.0], "R row0");
+    assert_eq!(
+        gd[2],
+        vec![0.0, 0.0],
+        "R row1 (zero pivot) must vanish exactly"
+    );
+}
+
+/// `Q = diag(1, 0)` through `touched_cholesky` (`solve_qp_problem_as_qcqp`):
+/// same independent PSD justification as the `to_conic` case above.
+#[test]
+fn qcqp_true_rank_deficient_diag_still_accepted_via_touched_cholesky() {
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let n = 2;
+    let q_obj = CscMatrix::new(n, n);
+    let c = vec![0.0, 0.0];
+    let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+    let b = vec![1.0];
+    let bounds = vec![(-10.0, 10.0); n];
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 0, 1.0));
+    let mut qp = QpProblem::new(q_obj, c, a, b, bounds, vec![ConstraintType::Le]).unwrap();
+    qp.set_quadratic_constraints(vec![qc]).unwrap();
+
+    let res = solve_qp_problem_as_qcqp(&qp, &ConicOptions::default());
+    assert!(
+        !matches!(res.status, SolveStatus::NotSupported(_)),
+        "genuine rank-deficient PSD must not be rejected, got {res:?}"
+    );
+    assert!(
+        !res.convexity_unproven,
+        "exact factorization must not flag unproven"
+    );
+}
+
+/// The all-zero matrix (`n=1` and `n=2`) is trivially PSD (both eigenvalues
+/// 0): every pivot is exactly zero with no off-diagonal entries at all, so
+/// it must be accepted with `convexity_unproven = false`.
+#[test]
+fn qcqp_zero_quadratic_matrix_accepted() {
+    for n in [1usize, 2] {
+        let p = csc(&vec![vec![0.0; n]; n], n, n);
+        let qp = QcqpProblem {
+            n,
+            p0: None,
+            q0: vec![0.0; n],
+            quad: vec![QuadConstraint {
+                p,
+                q: vec![0.0; n],
+                r: -1.0,
+            }],
+            g_lin: empty_mat(0, n),
+            h_lin: vec![],
+            a_eq: empty_mat(0, n),
+            b_eq: vec![],
+        };
+        let (_, _, unproven) =
+            to_conic(&qp).unwrap_or_else(|e| panic!("n={n}: zero matrix is PSD, rejected: {e}"));
+        assert!(!unproven, "n={n}: zero matrix must not flag unproven");
+    }
+}
+
+/// Helper: wrap a symmetric matrix `rows` as a single `<= r` quadratic
+/// constraint over `n` variables (no objective / linear rows).
+fn quad_only_qcqp(rows: &[Vec<f64>], n: usize, r: f64) -> QcqpProblem {
+    QcqpProblem {
+        n,
+        p0: None,
+        q0: vec![0.0; n],
+        quad: vec![QuadConstraint {
+            p: csc(rows, n, n),
+            q: vec![0.0; n],
+            r,
+        }],
+        g_lin: empty_mat(0, n),
+        h_lin: vec![],
+        a_eq: empty_mat(0, n),
+        b_eq: vec![],
+    }
+}
+
+/// Helper: build the rank-1 outer product `v v^T` as a dense matrix.
+fn outer(v: &[f64]) -> Vec<Vec<f64>> {
+    let n = v.len();
+    (0..n)
+        .map(|i| (0..n).map(|j| v[i] * v[j]).collect())
+        .collect()
+}
+
+/// PR #25 review (new P1): the off-diagonal / pivot tolerances must be
+/// *scale-relative*, not the earlier absolute `1e-9`. A rank-1 `v v^T` is
+/// PSD at every scale (independent oracle: `x^T (v v^T) x = (v.x)^2 >= 0`,
+/// and being rank 1 with `n >= 2` its smallest eigenvalue is exactly 0), so
+/// it must be accepted regardless of `‖v‖`. The measured pure-rounding Schur
+/// residual grows like `‖M‖·eps` (e.g. `1.56e-2` at `‖v‖~1e7`), so the old
+/// absolute `1e-9` threshold falsely rejected the large-scale members.
+///
+/// Both the raw `v v^T` (residual usually exactly 0) and the lead's
+/// `[s, 1.3s, 0.7s]` variant (nonzero `~1.56e-2` rounding residual) are
+/// covered, across scales spanning `‖M‖ ~ 1e0 … 1e28`.
+///
+/// Sentinel: reverting the tolerances to absolute `1e-9` makes every
+/// `s >= ~1e3` case FAIL (`to_conic` returns `Err`/`NotSupported`).
+#[test]
+fn qcqp_rank_one_psd_accepted_at_every_scale() {
+    // Exercises both Cholesky call sites; residual is exactly 0 or pure
+    // rounding, so a correct scale-relative factor keeps `unproven` clear.
+    for &s in &[1.0f64, 1e3, 1e7, 1.1e7, 1e10, 1e14] {
+        for v in [
+            vec![s, s, 0.5 * s],       // integer-ratio: products often exact
+            vec![s, 1.3 * s, 0.7 * s], // lead's variant: nonzero rounding residual
+        ] {
+            let n = v.len();
+            let m = outer(&v);
+            let qp = quad_only_qcqp(&m, n, -1.0);
+            let (_, _, unproven) = to_conic(&qp)
+                .unwrap_or_else(|e| panic!("v v^T is rank-1 PSD (s={s}), rejected: {e}"));
+            assert!(
+                !unproven,
+                "s={s}: within-rounding rank-1 PSD must not flag convexity_unproven"
+            );
+
+            // Same matrix via the sparse per-constraint path.
+            use crate::qp::{QcqpMatrix, QpProblem};
+            let q_obj = CscMatrix::new(n, n);
+            let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+            let bounds = vec![(-1e15, 1e15); n];
+            let mut qc = QcqpMatrix::new(n);
+            for (i, row) in m.iter().enumerate() {
+                for (j, &val) in row.iter().enumerate() {
+                    if val != 0.0 {
+                        qc.triplets.push((i, j, val));
+                    }
+                }
+            }
+            let mut qp2 = QpProblem::new(
+                q_obj,
+                vec![0.0; n],
+                a,
+                vec![1.0],
+                bounds,
+                vec![ConstraintType::Le],
+            )
+            .unwrap();
+            qp2.set_quadratic_constraints(vec![qc]).unwrap();
+            let res = solve_qp_problem_as_qcqp(&qp2, &ConicOptions::default());
+            assert!(
+                !matches!(res.status, SolveStatus::NotSupported(_)),
+                "s={s}: rank-1 PSD must not be rejected via touched_cholesky, got {res:?}"
+            );
+            assert!(
+                !res.convexity_unproven,
+                "s={s}: must not flag convexity_unproven"
+            );
+        }
+    }
+}
+
+/// Companion to the scale sweep with irrational ratios (`v = [s, s·π,
+/// s·e]`): still exactly rank-1 PSD (`λ_min = 0`), so accepted. The reviewer
+/// noted this matrix has a *larger* absolute `λ_min` magnitude (`~ -0.18` at
+/// `s = 1.1e7`) than some rejected ones, underscoring that accept/reject must
+/// track the *relative* definiteness (`λ_min / ‖M‖ ≈ -eps`), not an absolute
+/// residual size.
+#[test]
+fn qcqp_rank_one_psd_irrational_ratios_accepted() {
+    let s = 1.1e7;
+    let v = [s, s * std::f64::consts::PI, s * std::f64::consts::E];
+    let m = outer(&v);
+    let qp = quad_only_qcqp(&m, 3, -1.0);
+    let (_, _, unproven) = to_conic(&qp).expect("v v^T with irrational ratios is rank-1 PSD");
+    assert!(!unproven, "rank-1 PSD must not flag convexity_unproven");
+}
+
+/// A *relatively* indefinite matrix must be rejected at every scale: scaling
+/// a matrix by `c > 0` scales all eigenvalues by `c`, so it cannot change the
+/// sign of `λ_min`. Independent oracle: `det([[0,b],[b,0]]) = -b^2 < 0` for
+/// any `b != 0`, and a symmetric matrix with negative determinant has an odd
+/// number of negative eigenvalues, so it is not PSD — at any `b`.
+///
+/// This is the counterpart to `qcqp_rank_one_psd_accepted_at_every_scale`:
+/// together they show the decision follows relative definiteness, rejecting
+/// `[[0,1e-10],[1e-10,0]]` (`λ_min = -1e-10 = -‖M‖`, relatively as indefinite
+/// as `[[0,1],[1,0]]`) precisely because the residual `1e-10` vastly exceeds
+/// its rounding floor `‖M‖·eps ~ 1e-26`.
+#[test]
+fn qcqp_relatively_indefinite_rejected_at_every_scale() {
+    for &b in &[1.0f64, 1e6, 1e-10] {
+        let m = vec![vec![0.0, b], vec![b, 0.0]];
+        let qp = quad_only_qcqp(&m, 2, -1.0);
+        assert!(
+            to_conic(&qp).is_err(),
+            "b={b}: det = -b^2 < 0, not PSD, must be rejected at every scale"
+        );
+    }
+}
+
+/// 3x3 case where the zero pivot appears only after a Schur-complement
+/// update (not on the raw input diagonal): `P = v v^T` with `v = (1, 1,
+/// 0.5)`. Independent oracle: any outer product `v v^T` is PSD, since
+/// `x^T (v v^T) x = (v.x)^2 >= 0` for every `x` -- no eigen-decomposition
+/// needed. Column 0 eliminates to pivot `1`; column 1's Schur complement
+/// (`P[1][1] - L[1][0]^2 = 1 - 1 = 0`, using exact binary fractions so this
+/// is exact, not approximate) is the zero pivot under test, with the
+/// *raw* `P[2][1] = 0.5` off-diagonal reducing to exactly `0` only after the
+/// Schur update (`0.5 - L[2][0]*L[1][0] = 0.5 - 0.5*1 = 0`).
+#[test]
+fn qcqp_schur_complement_zero_pivot_rank_one_accepted() {
+    let n = 3;
+    let v = [1.0, 1.0, 0.5];
+    let mut rows = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            rows[i][j] = v[i] * v[j];
+        }
+    }
+
+    // Via `to_conic` (`sparse_cholesky_lower`).
+    let p = csc(&rows, n, n);
+    let qp = QcqpProblem {
+        n,
+        p0: None,
+        q0: vec![0.0; n],
+        quad: vec![QuadConstraint {
+            p,
+            q: vec![0.0; n],
+            r: -1.0,
+        }],
+        g_lin: empty_mat(0, n),
+        h_lin: vec![],
+        a_eq: empty_mat(0, n),
+        b_eq: vec![],
+    };
+    let (_, _, unproven) = to_conic(&qp).expect("v v^T is PSD by construction, must be accepted");
+    assert!(
+        !unproven,
+        "exact Schur-complement zero pivot must not flag unproven"
+    );
+
+    // Via `solve_qp_problem_as_qcqp` (`touched_cholesky`), with a closed-form
+    // optimum as the independent oracle: minimize `v.x` subject to
+    // `(1/2)(v.x)^2 <= 1` (i.e. `(v.x)^2 <= 2`) and finite box bounds.
+    // `v.x` ranges freely down to `-sqrt(2)` (attainable since `x = -sqrt(2)
+    // * v / ||v||^2` has each coordinate well within `[-5,5]`), so the
+    // optimal objective is `-sqrt(2)`.
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let q_obj = CscMatrix::new(n, n);
+    let c = v.to_vec();
+    let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+    let b = vec![1.0];
+    let bounds = vec![(-5.0, 5.0); n];
+    let mut qc = QcqpMatrix::new(n);
+    for i in 0..n {
+        for j in 0..n {
+            if rows[i][j] != 0.0 {
+                qc.triplets.push((i, j, rows[i][j]));
+            }
+        }
+    }
+    let mut qp2 = QpProblem::new(q_obj, c, a, b, bounds, vec![ConstraintType::Le]).unwrap();
+    qp2.set_quadratic_constraints(vec![qc]).unwrap();
+    let res = solve_qp_problem_as_qcqp(&qp2, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "res={res:?}");
+    assert!(
+        !res.convexity_unproven,
+        "exact factorization must not flag unproven"
+    );
+    assert!(
+        (res.objective - (-2.0_f64.sqrt())).abs() < 1e-5,
+        "closed-form optimum -sqrt(2), got {}",
+        res.objective
+    );
+}
+
+/// 3x3 case where the *same* elimination pattern as
+/// `qcqp_schur_complement_zero_pivot_rank_one_accepted` produces a nonzero
+/// Schur-complement residual instead of an exact zero: `P[1][2] = 0.6`
+/// instead of `0.5` (everything else unchanged). Independent oracle:
+/// `det(P) = 1*(1*0.25 - 0.6*0.6) - 1*(1*0.25 - 0.6*0.5) + 0.5*(1*0.6 -
+/// 1*0.5) = 1*(-0.11) - 1*(-0.05) + 0.5*(0.1) = -0.11 + 0.05 + 0.05 = -0.01
+/// < 0`. A symmetric matrix with a strictly negative determinant has an odd
+/// number of negative eigenvalues and cannot be PSD, independent of any
+/// leading-principal-minor argument. Must be rejected through both call
+/// sites.
+#[test]
+fn qcqp_schur_complement_zero_pivot_indefinite_rejected() {
+    let n = 3;
+    let rows: Vec<Vec<f64>> = vec![
+        vec![1.0, 1.0, 0.5],
+        vec![1.0, 1.0, 0.6],
+        vec![0.5, 0.6, 0.25],
+    ];
+
+    // Sanity-check the independent oracle's determinant claim itself, so a
+    // typo in the hand computation above cannot silently invalidate the test.
+    let det: f64 = rows[0][0] * (rows[1][1] * rows[2][2] - rows[1][2] * rows[2][1])
+        - rows[0][1] * (rows[1][0] * rows[2][2] - rows[1][2] * rows[2][0])
+        + rows[0][2] * (rows[1][0] * rows[2][1] - rows[1][1] * rows[2][0]);
+    assert!((det - (-0.01)).abs() < 1e-12, "det(P) recompute: {det}");
+
+    // Via `to_conic` (`sparse_cholesky_lower`).
+    let p = csc(&rows, n, n);
+    let qp = QcqpProblem {
+        n,
+        p0: None,
+        q0: vec![0.0; n],
+        quad: vec![QuadConstraint {
+            p,
+            q: vec![0.0; n],
+            r: -1.0,
+        }],
+        g_lin: empty_mat(0, n),
+        h_lin: vec![],
+        a_eq: empty_mat(0, n),
+        b_eq: vec![],
+    };
+    to_conic(&qp).expect_err("det(P) = -0.01 < 0: P cannot be PSD, must be rejected");
+
+    // Via `solve_qp_problem_as_qcqp` (`touched_cholesky`).
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let q_obj = CscMatrix::new(n, n);
+    let c = vec![0.0; n];
+    let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+    let b = vec![1.0];
+    let bounds = vec![(-5.0, 5.0); n];
+    let mut qc = QcqpMatrix::new(n);
+    for i in 0..n {
+        for j in 0..n {
+            if rows[i][j] != 0.0 {
+                qc.triplets.push((i, j, rows[i][j]));
+            }
+        }
+    }
+    let mut qp2 = QpProblem::new(q_obj, c, a, b, bounds, vec![ConstraintType::Le]).unwrap();
+    qp2.set_quadratic_constraints(vec![qc]).unwrap();
+    let res = solve_qp_problem_as_qcqp(&qp2, &ConicOptions::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "det(P) < 0: nonconvex constraint must not be certified solved, got {res:?}"
+    );
+}
+
 /// memo 37 (P1) / memo 24 (P2): public `QcqpProblem` with inconsistent
 /// dimensions must be rejected as an error, not panic (q0 too short) and not
 /// silently drop the quadratic objective (`qcqp_objective`'s zeroed
@@ -4043,75 +4494,145 @@ fn misocp_problem_validate_rejects_out_of_range_integer_index() {
     );
 }
 
+/// The MISOCP branch recomputes the objective from `x` (as the continuous
+/// `solve_qcqp` and model-layer paths do) rather than reporting the conic
+/// relaxation's raw epigraph value `t`: `to_conic` minimizes `t` subject to
+/// `t >= (1/2) x^T P0 x + q0^T x`, and B&B stores the incumbent's *conic*
+/// objective `c^T x_conic = t` (`misocp.rs`). The interior-point method
+/// approaches that epigraph inequality from above and stops a *positive*
+/// slack short of tight (`t = f(x) + O(tol · ‖R x‖)`), so
+/// `res.objective` (= `t`) differs from `(1/2) x^T P0 x + q0^T x` at the
+/// returned `x`. The recompute line replaces `t` with the exact value read
+/// back from the caller's `P0`/`q0`.
+///
+/// Note (measured, not assumed): a node-limited / timed-out incumbent does
+/// **not** widen this gap — B&B returns the incumbent's own (tight-from-above)
+/// `t`, never a looser dual bound, so the slack is purely the interior-point
+/// epigraph gap and is largest, and cleanest, on a directly-`Optimal` solve.
+/// A larger-magnitude objective would grow the absolute slack but the conic
+/// IPM `NumericalError`s well before it becomes visually dramatic, so this
+/// uses a small, well-conditioned instance and a tight assertion instead.
+///
+/// Construction: `min x0^2 + x1^2 - 4·x1` (`P0 = 2I` PSD, `q0 = [0, -4]`)
+/// over integer `x in [0,5]^2`. The continuous optimum `x1 = 2` is already
+/// integer, so the incumbent is `x ≈ (0, 2)`, `f = 4 - 8 = -4`; because that
+/// is also the *unconstrained* minimum of `x1^2 - 4·x1`, `f` is stationary
+/// there, so the recompute stays within `~1e-12` of `-4` even at a loose
+/// solve tolerance. Independent oracle: `x0^2 + x1^2 - 4·x1` by hand at the
+/// returned `x` (not via `qcqp_true_objective`). With the pinned `tol = 1e-6`
+/// the epigraph slack is `~tol` (measured `t - f ≈ 5.3e-8`), so the `< 1e-12`
+/// assertion sits ~4 orders below the loose `t` (which it FAILS) and ~3
+/// orders above the exact recompute's float rounding `~1e-15` (which it
+/// PASSES) — a wide, non-knife-edge window, decoupled from the default solve
+/// tolerance.
+///
+/// Sentinel (measured): deleting `res.objective = qcqp_true_objective(qp,
+/// &res.x)` in `solve_miqcp` makes this FAIL (`res.objective` becomes the
+/// loose `t`).
 #[test]
-fn miqcp_quadratic_objective_recomputes_true_objective_not_epigraph() {
-    // The MISOCP branch must recompute the objective from `x` (as the
-    // continuous `solve_qcqp` and model-layer paths do), not report the conic
-    // relaxation's raw epigraph value `t`. `to_conic`'s Cholesky reshapes the
-    // near-zero jitter-band entry (1,1) of `P0 = diag(1, -1e-10, 2, 0.5)`, so
-    // `t` diverges from the literal `P0` curvature by a gap that grows with
-    // `x`. Only `x1` has a linear reward (`q0[1] = -1`), pushing it to its
-    // bound; at `x1 ~ 1e6` that gap dwarfs any IPM/B&B tolerance while `x1`
-    // stays in the well-conditioned range (box sentinels here reach 1e10-1e14).
-    // `int_tol` is loosened past the IPM's boundary-approach slack at this
-    // scale — the contract under test is the recompute, not integrality.
-    let n = 4;
-    let p0 = csc(
-        &[
-            vec![1.0, 0.0, 0.0, 0.0],
-            vec![0.0, -1e-10, 0.0, 0.0],
-            vec![0.0, 0.0, 2.0, 0.0],
-            vec![0.0, 0.0, 0.0, 0.5],
-        ],
-        n,
-        n,
-    );
+fn miqcp_objective_recomputed_from_x_not_epigraph_bound() {
+    let n = 2;
+    let p0 = csc(&[vec![2.0, 0.0], vec![0.0, 2.0]], n, n);
     let qp = QcqpProblem {
         n,
         p0: Some(p0),
-        q0: vec![0.0, -1.0, 0.0, 0.0],
+        q0: vec![0.0, -4.0],
         quad: vec![],
         g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
         h_lin: vec![],
         a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
         b_eq: vec![],
     };
-    let ub1 = 1e6;
-    let bb = BbOptions {
-        int_tol: 0.5,
-        ..BbOptions::default()
+    // Pin a deliberately loose conic tolerance rather than
+    // `ConicOptions::default()`: `x` is fixed to the integer optimum `(0, 2)`
+    // so the recompute is the exact `-4` regardless of `tol`, but the *failing*
+    // side (the epigraph slack `t - f ~ tol` that appears if the recompute is
+    // removed) scales with `tol`. Reading the default would make this sentinel
+    // silently lose its teeth if that default were ever tightened below the
+    // `1e-12` assertion window; `1e-6` keeps the slack ~6 orders above it.
+    let opts = ConicOptions {
+        tol: 1e-6,
+        ..ConicOptions::default()
     };
     let res = solve_miqcp(
         &qp,
-        &[0, 1, 2, 3],
-        &[0.0, 0.0, 0.0, 0.0],
-        &[5.0, ub1, 5.0, 5.0],
-        &ConicOptions::default(),
-        &bb,
+        &[0, 1],
+        &[0.0, 0.0],
+        &[5.0, 5.0],
+        &opts,
+        &BbOptions::default(),
     );
     assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
-    assert!((res.x[1] - ub1).abs() < 10.0, "x1={}", res.x[1]);
-    // x0/x2/x3 have zero linear reward and strictly positive curvature, so
-    // their true optimum is 0; the IPM's own convergence slack (dominated by
-    // the problem's x1 ~ 1e6 scale) keeps them within ~0.01 of it, not exact.
+    // Independent hand oracle: (1/2) x^T (2I) x + q0^T x = x0^2 + x1^2 - 4*x1,
+    // written out directly rather than through `qcqp_true_objective`.
+    let hand = res.x[0] * res.x[0] + res.x[1] * res.x[1] - 4.0 * res.x[1];
     assert!(
-        res.x[0].abs() < 0.1 && res.x[2].abs() < 0.1 && res.x[3].abs() < 0.1,
-        "x={:?}",
+        (res.objective - hand).abs() < 1e-12,
+        "objective must be the exact literal recompute at x ({hand}), not the \
+         epigraph bound t (loose by ~tol); got {} (gap {:.3e})",
+        res.objective,
+        res.objective - hand
+    );
+    // Sanity: the incumbent is the expected integer optimum x ≈ (0, 2), f = -4.
+    assert!(
+        (res.x[0]).abs() < 1e-3 && (res.x[1] - 2.0).abs() < 1e-3,
+        "incumbent x = {:?}, want ~(0, 2)",
         res.x
     );
-    // True objective from the caller's literal (unclamped) P0/q0 evaluated at
-    // the returned `x`, computed independently of both `to_conic` and
-    // `solve_miqcp`.
-    let p0_diag = [1.0, -1e-10, 2.0, 0.5];
-    let q0 = [0.0, -1.0, 0.0, 0.0];
-    let true_obj: f64 = (0..n)
-        .map(|i| q0[i] * res.x[i] + 0.5 * p0_diag[i] * res.x[i] * res.x[i])
-        .sum();
     assert!(
-        (res.objective - true_obj).abs() < 1.0,
-        "objective must be recomputed from x with the literal P0, not the \
-         conic epigraph variable (which bounds the clamped curvature): \
-         got {}, want {true_obj}",
+        (res.objective - (-4.0)).abs() < 1e-6,
+        "true optimum -4, got {}",
         res.objective
+    );
+}
+
+/// PR #25 review (P2): `solve_miqcp` must refuse a MIQCP whose conic
+/// reformulation is only approximate (`convexity_unproven`). A jitter-band
+/// indefinite quadratic constraint `[[-2e-10]]` (`det < 0`, but within the
+/// pivot rounding floor so `to_conic` clamps it rather than rejecting) would
+/// otherwise be relaxed in branch-and-bound with no flag, so every node's
+/// dual bound — hence every prune — is unsound. The fix propagates the flag
+/// and returns `NotSupported`, mirroring the SOC-constrained Model path and
+/// the continuous route's `is_clean_convex_outcome` gate.
+///
+/// Sentinel: dropping the `convexity_unproven` refusal in `solve_miqcp` makes
+/// this FAIL (the clamped relaxation solves to a spurious `Optimal`).
+#[test]
+fn miqcp_convexity_unproven_is_refused() {
+    let n = 1;
+    // Confirm to_conic actually clamps this (the test's premise): a genuine
+    // rejection (Err) would exercise a different path.
+    let jitter = csc(&[vec![-2e-10]], n, n);
+    let probe = QcqpProblem {
+        n,
+        p0: None,
+        q0: vec![-1.0],
+        quad: vec![QuadConstraint {
+            p: jitter.clone(),
+            q: vec![0.0],
+            r: -1.0,
+        }],
+        g_lin: empty_mat(0, n),
+        h_lin: vec![],
+        a_eq: empty_mat(0, n),
+        b_eq: vec![],
+    };
+    let (_, _, unproven) = to_conic(&probe).expect("jitter-band -2e-10 is clamped, not rejected");
+    assert!(
+        unproven,
+        "test premise: to_conic must report convexity_unproven"
+    );
+
+    let res = solve_miqcp(
+        &probe,
+        &[0],
+        &[0.0],
+        &[3.0],
+        &ConicOptions::default(),
+        &BbOptions::default(),
+    );
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "an unproven-convexity MIQCP must not be certified solved by B&B, got {res:?}"
     );
 }
