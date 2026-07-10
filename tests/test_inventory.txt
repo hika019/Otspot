@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2655 testcases, 27 ignored
+# totals: 2665 testcases, 27 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -40,8 +40,10 @@ otspot-core	conic::ipm::tests::shift_into_cone_is_per_block_not_global	active
 otspot-core	conic::ipm::tests::shift_into_cone_pushes_each_outside_soc_by_its_own_distance	active
 otspot-core	conic::kkt::tests::equilibrate_guards_zero_and_subnormal_diagonals	active
 otspot-core	conic::misocp::tests::build_relaxation_matches_dense_reference	active
+otspot-core	conic::nonconvex::tests::accept_honors_caller_tolerance_after_rounding_not_a_fixed_floor	active
 otspot-core	conic::nonconvex::tests::exhausted_clean_search_certifies_optimal_with_zero_gap	active
 otspot-core	conic::nonconvex::tests::failed_root_relaxation_is_not_false_infeasible	active
+otspot-core	conic::nonconvex::tests::global_miqcp_nan_int_tol_is_rejected_not_silently_broken	active
 otspot-core	conic::nonconvex::tests::incumbent_with_failed_node_is_not_optimal	active
 otspot-core	conic::nonconvex::tests::mccormick_w_box_bounds_diagonal_square_below	active
 otspot-core	conic::nonconvex::tests::node_limited_with_incumbent_is_suboptimal	active
@@ -73,10 +75,12 @@ otspot-core	conic::tests::misocp_expired_deadline_returns_timeout	active
 otspot-core	conic::tests::misocp_fixed_integer_at_large_scale_solves	active
 otspot-core	conic::tests::misocp_incumbent_with_failed_node_is_suboptimal	active
 otspot-core	conic::tests::misocp_mid_search_deadline_keeps_incumbent	active
+otspot-core	conic::tests::misocp_nan_int_tol_is_rejected_not_silently_accepted	active
 otspot-core	conic::tests::misocp_node_limit_with_incumbent_is_suboptimal	active
 otspot-core	conic::tests::misocp_node_limit_without_incumbent_is_max_iterations	active
 otspot-core	conic::tests::misocp_problem_validate_rejects_int_bound_length_mismatch	active
 otspot-core	conic::tests::misocp_problem_validate_rejects_out_of_range_integer_index	active
+otspot-core	conic::tests::misocp_unbounded_relaxation_before_integer_fixing_does_not_certify_unbounded	active
 otspot-core	conic::tests::misocp_unresolved_nodes_do_not_prove_infeasibility	active
 otspot-core	conic::tests::nonconvex_bilinear_box_global_min	active
 otspot-core	conic::tests::nonconvex_concave_max_box	active
@@ -93,6 +97,8 @@ otspot-core	conic::tests::qcqp_bridge_huge_diag_smoke	active
 otspot-core	conic::tests::qcqp_bridge_kkt_gram_is_fully_dense	active
 otspot-core	conic::tests::qcqp_dimension_mismatches_rejected_without_panic	active
 otspot-core	conic::tests::qcqp_from_qp_problem_matches_hand_built_split	active
+otspot-core	conic::tests::qcqp_from_qp_problem_rejects_short_quadratic_constraints_vec	active
+otspot-core	conic::tests::qcqp_from_qp_problem_sign_flips_convex_quadratic_ge_row	active
 otspot-core	conic::tests::qcqp_indefinite_offdiagonal_rejected_via_to_conic	active
 otspot-core	conic::tests::qcqp_indefinite_offdiagonal_rejected_via_touched_cholesky	active
 otspot-core	conic::tests::qcqp_rank_one_psd_accepted_at_every_scale	active
@@ -106,6 +112,10 @@ otspot-core	conic::tests::qcqp_zero_quadratic_matrix_accepted	active
 otspot-core	conic::tests::qp_problem_bridge_rejects_quadratic_ge	active
 otspot-core	conic::tests::qp_problem_bridge_solves_convex_qcqp_constraint	active
 otspot-core	conic::tests::qp_problem_bridge_sparse_construction_is_near_linear_nnz	active
+otspot-core	conic::tests::qp_problem_to_conic_bridges_fixed_bound_to_equality_row	active
+otspot-core	conic::tests::qp_problem_to_conic_rejects_short_quadratic_constraints_vec	active
+otspot-core	conic::tests::qp_problem_to_conic_sign_flips_convex_quadratic_ge_row	active
+otspot-core	conic::tests::qp_problem_to_conic_still_rejects_indefinite_quadratic_ge_row	active
 otspot-core	conic::tests::rank_deficient_quad_constraint_keeps_unbounded_direction	active
 otspot-core	conic::tests::soc_border_expansion_matches_dense_w2	active
 otspot-core	conic::tests::soc_border_threshold_crossover	ignored

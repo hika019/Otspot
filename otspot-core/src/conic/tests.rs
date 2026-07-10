@@ -1015,6 +1015,81 @@ fn misocp_mid_search_deadline_keeps_incumbent() {
     );
 }
 
+/// PR #25 review (misocp.rs, "Don't certify MISOCP unbounded from fractional
+/// relaxations"): an unbounded *relaxation* only proves the mixed-integer
+/// problem unbounded once every integer variable is already fixed in that
+/// node -- otherwise the ray says nothing about integer-feasibility.
+///
+/// `x0` is declared integer in `{0, 1}` but pinned to `0.5` by two opposing
+/// base-problem orthant rows (`x0 <= 0.5`, `-x0 <= -0.5`) unrelated to
+/// branching, so no integer value of `x0` is ever feasible; `x1` is free
+/// with objective `-x1` (one active row `x1 >= 0`, exactly `unbounded_lp_
+/// detected`'s shape), so the *relaxation* (which does not enforce
+/// integrality) is genuinely unbounded along `x1` at the root. Independent
+/// oracle: since `x0 = 0.5` has no integer solution, the true mixed-integer
+/// problem has an empty feasible set, so the correct status is `Infeasible`,
+/// never `Unbounded`.
+///
+/// (Pinning `x0` via an `A`-equality row instead of two `G` rows also proves
+/// the point mathematically, but empirically stalls the IPM at `MaxIterations`
+/// for unrelated numerical reasons well before any certificate forms --
+/// verified by direct `solve_socp` probing during development -- so this test
+/// uses the `G`-only construction, which reaches a clean verified ray in 5
+/// iterations.)
+///
+/// Sentinel: reverting to an unconditional `SolveStatus::Unbounded` return on
+/// the root's verified ray (the pre-fix behaviour) makes this FAIL with
+/// `Unbounded` instead of `Infeasible`.
+#[test]
+fn misocp_unbounded_relaxation_before_integer_fixing_does_not_certify_unbounded() {
+    let n = 2usize;
+    let base = ConicProblem {
+        c: vec![0.0, -1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b: vec![],
+        g: csc(&[vec![1.0, 0.0], vec![-1.0, 0.0], vec![0.0, -1.0]], 3, n),
+        h: vec![0.5, -0.5, 0.0],
+        cone: ConeSpec { l: 3, soc: vec![] },
+    };
+    let prob = MisocpProblem {
+        base,
+        integers: vec![0],
+        int_lb: vec![0.0],
+        int_ub: vec![1.0],
+    };
+    let res = solve_misocp(&prob, &ConicOptions::default(), &BbOptions::default());
+    assert_eq!(res.status, SolveStatus::Infeasible, "{res:?}");
+    assert!(res.x.is_empty());
+}
+
+/// PR #25 review (misocp.rs, "Reject NaN integrality tolerances before
+/// branching"): `int_tol = NaN` must be rejected up front, not silently
+/// break the fractional-vs-integer comparisons in the B&B loop.
+///
+/// `half_int_lp` (`min x` s.t. `x >= 1/2`, integer `x` in `[0, 2]`) has root
+/// relaxation `x = 0.5` (fractional) and true integer optimum `x = 1`. With
+/// `int_tol = NaN`, `worst = bb.int_tol` starts at `NaN` and every
+/// `dist > worst` comparison is `false` (NaN comparisons are never `true`),
+/// so `branch` never gets set and the fractional root is silently accepted
+/// as if integer-feasible.
+///
+/// Sentinel: dropping the `bb.validate()` call in `solve_misocp` makes this
+/// FAIL with `MisocpResult { status: Optimal, x: [0.5], .. }` (a fractional
+/// point certified as the integer optimum), instead of `NotSupported`.
+#[test]
+fn misocp_nan_int_tol_is_rejected_not_silently_accepted() {
+    let bb = BbOptions {
+        int_tol: f64::NAN,
+        ..BbOptions::default()
+    };
+    let res = solve_misocp(&half_int_lp(), &ConicOptions::default(), &bb);
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "NaN int_tol must be rejected, got {res:?}"
+    );
+    assert!(res.x.is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // IPM Farkas-certificate sentinels for degenerate (fixed-variable) nodes.
 // ---------------------------------------------------------------------------
@@ -4200,6 +4275,61 @@ fn fixed_variable_bound_bridges_to_equality_row() {
     );
 }
 
+/// Same fixed-bound scenario as `fixed_variable_bound_bridges_to_equality_row`,
+/// but through the actual *production* bridge (`qp_problem_to_conic`, called
+/// by `solve_qp_problem_as_qcqp`/`solve_qp`) rather than the reference
+/// `qcqp_from_qp_problem` + `to_conic` pipeline: this closes a coverage gap
+/// where the production path had the same fixed-bound-to-equality fix but no
+/// dedicated sentinel of its own.
+#[test]
+fn qp_problem_to_conic_bridges_fixed_bound_to_equality_row() {
+    use crate::conic::qcqp::qp_problem_to_conic;
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let n = 2;
+    let q_obj = CscMatrix::new(n, n);
+    let a = empty_mat(1, n);
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 0, 2.0));
+    qc.triplets.push((1, 1, 2.0)); // x0^2 + x1^2 <= 4
+    let mut src = QpProblem::new(
+        q_obj,
+        vec![-1.0, 0.0],
+        a,
+        vec![4.0],
+        vec![(0.0, 5.0), (1.5, 1.5)],
+        vec![ConstraintType::Le],
+    )
+    .unwrap();
+    src.set_quadratic_constraints(vec![qc]).unwrap();
+
+    let (conic, _nvar, clamped) = qp_problem_to_conic(&src).expect("bridge accepts convex QCQP");
+    assert!(!clamped, "P is exactly PSD, no jitter clamp expected");
+    assert_eq!(
+        conic.b,
+        vec![1.5],
+        "fixed bound must become an equality rhs"
+    );
+    assert_eq!(
+        conic.a.to_dense_rows(),
+        vec![vec![0.0, 1.0]],
+        "fixed bound must become an equality row"
+    );
+
+    let res = solve_qp_problem_as_qcqp(&src, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "res={res:?}");
+    let expect = -(1.75f64).sqrt();
+    assert!(
+        (res.objective - expect).abs() < 1e-5,
+        "closed-form {expect}, got {}",
+        res.objective
+    );
+    assert!(
+        (res.x[1] - 1.5).abs() < 1e-6,
+        "x1 fixed at 1.5: {:?}",
+        res.x
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PR #25 review: public-API input validation (conic entry points).
 // ---------------------------------------------------------------------------
@@ -4634,5 +4764,219 @@ fn miqcp_convexity_unproven_is_refused() {
     assert!(
         matches!(res.status, SolveStatus::NotSupported(_)),
         "an unproven-convexity MIQCP must not be certified solved by B&B, got {res:?}"
+    );
+}
+
+/// PR #25 review (qcqp.rs, "Validate QCQP vector length before indexing"):
+/// `QpProblem::quadratic_constraints` is a public field, so a caller can
+/// bypass `set_quadratic_constraints`'s "0 or num_constraints" length
+/// invariant by assigning it directly (as the guard test
+/// `empty_qcqp_matrices_not_rejected`'s pattern in `qp::tests::qcqp_guard`
+/// already does for a *different* purpose). With a non-empty vector shorter
+/// than `num_constraints`, both `qcqp_from_qp_problem` and the production
+/// `qp_problem_to_conic` used to index `[k]` for every `k < num_constraints`
+/// unconditionally and panic; they must instead return `Err`/`NotSupported`.
+#[test]
+fn qcqp_from_qp_problem_rejects_short_quadratic_constraints_vec() {
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let n = 2;
+    let q_obj = CscMatrix::new(n, n);
+    let a = csc(&[vec![1.0, 0.0], vec![0.0, 1.0]], 2, n);
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 0, 2.0));
+    let mut src = QpProblem::new(
+        q_obj,
+        vec![-1.0, 0.0],
+        a,
+        vec![4.0, 4.0],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+        vec![ConstraintType::Le, ConstraintType::Le],
+    )
+    .unwrap();
+    // Bypass `set_quadratic_constraints`: 1 entry for 2 constraints.
+    src.quadratic_constraints = vec![qc];
+
+    let err = qcqp_from_qp_problem(&src)
+        .expect_err("a quadratic_constraints vector shorter than num_constraints must be rejected");
+    assert!(
+        err.contains("quadratic_constraints"),
+        "error should name the offending field: {err}"
+    );
+}
+
+/// Same scenario through the production bridge (`qp_problem_to_conic`,
+/// called by `solve_qp_problem_as_qcqp`) rather than the reference
+/// `qcqp_from_qp_problem` pipeline: the review's panic was originally
+/// observed reaching all the way through `solve_qp_with`, and this is the
+/// path it actually takes.
+///
+/// (Routing this same short-vector problem through the top-level `solve_qp`
+/// dispatcher instead of `solve_qp_problem_as_qcqp` directly rediscovers the
+/// identical unchecked `src.quadratic_constraints[k]` index in
+/// `qp::qcqp_route::nonconvex_from_qp_problem` -- the nonconvex fallback
+/// this convex bridge's `NotSupported` result routes into. That fallback
+/// function lives outside `otspot-core/src/conic/` and belongs to a
+/// different PR #25 review item on `qcqp_route.rs`; flagged to the lead
+/// rather than fixed here to avoid a concurrent-edit conflict with that
+/// item's own subagent.)
+#[test]
+fn qp_problem_to_conic_rejects_short_quadratic_constraints_vec() {
+    use crate::conic::qcqp::qp_problem_to_conic;
+    use crate::conic::{solve_qp_problem_as_qcqp, ConicOptions};
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let n = 2;
+    let q_obj = CscMatrix::new(n, n);
+    let a = csc(&[vec![1.0, 0.0], vec![0.0, 1.0]], 2, n);
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 0, 2.0));
+    let mut src = QpProblem::new(
+        q_obj,
+        vec![-1.0, 0.0],
+        a,
+        vec![4.0, 4.0],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+        vec![ConstraintType::Le, ConstraintType::Le],
+    )
+    .unwrap();
+    src.quadratic_constraints = vec![qc];
+
+    let err = qp_problem_to_conic(&src)
+        .expect_err("a quadratic_constraints vector shorter than num_constraints must be rejected");
+    assert!(
+        err.contains("quadratic_constraints"),
+        "error should name the offending field: {err}"
+    );
+
+    let res = solve_qp_problem_as_qcqp(&src, &ConicOptions::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "expected NotSupported, got {:?}",
+        res.status
+    );
+}
+
+/// PR #25 review (qcqp.rs, "Sign-flip convex quadratic `>=` rows"):
+/// `min -x  s.t.  -x^2 >= -1` (i.e. `x^2 <= 1`), `x` otherwise **unbounded**.
+///
+/// `Q = [[-2]]` is negative-semidefinite, so this `>=` row's superlevel set
+/// (`-x^2 >= -1`) is convex -- the sign-flipped matrix `-Q = [[2]]` is PSD.
+/// Before the fix, `qcqp_from_qp_problem`/`qp_problem_to_conic` rejected
+/// every quadratic `>=` row outright regardless of sign, forcing a fallback
+/// to the McCormick global solver -- which itself requires finite variable
+/// bounds and therefore *also* rejects this problem (`x` is unbounded here
+/// on purpose, to make that fallback fail and isolate the convex bridge).
+///
+/// Independent oracle: `x^2 <= 1` bounds `x` to `[-1, 1]`; minimizing `-x`
+/// over that interval gives `x* = 1`, objective `-1`.
+///
+/// Sentinel: reverting the `Ge` branch to unconditionally reject any
+/// quadratic row (the pre-fix behaviour) makes this FAIL with
+/// `NotSupported`.
+#[test]
+fn qp_problem_to_conic_sign_flips_convex_quadratic_ge_row() {
+    use crate::conic::{solve_qp_problem_as_qcqp, ConicOptions};
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let n = 1;
+    let q_obj = CscMatrix::new(n, n);
+    let a = csc(&[vec![0.0]], 1, n);
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 0, -2.0)); // Q = [[-2]]: (1/2)x^T Q x = -x^2.
+    let mut src = QpProblem::new(
+        q_obj,
+        vec![-1.0], // minimize -x
+        a,
+        vec![-1.0], // -x^2 >= -1
+        vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        vec![ConstraintType::Ge],
+    )
+    .unwrap();
+    src.set_quadratic_constraints(vec![qc]).unwrap();
+
+    let res = solve_qp_problem_as_qcqp(&src, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!(
+        (res.objective - (-1.0)).abs() < 1e-5,
+        "objective={} want -1",
+        res.objective
+    );
+    assert!((res.x[0] - 1.0).abs() < 1e-5, "x={:?} want [1.0]", res.x);
+}
+
+/// Same scenario through the reference `qcqp_from_qp_problem` + `to_conic`
+/// pipeline, and directly inspecting the sign-flipped matrix/rhs (not just
+/// the solved objective): `(1/2)x^T Q x + a^T x >= b <=> (1/2)x^T(-Q)x +
+/// (-a)^T x + b <= 0`, so `P = -Q = [[2]]`, `q = -a = [0]`, `r = b = -1`.
+#[test]
+fn qcqp_from_qp_problem_sign_flips_convex_quadratic_ge_row() {
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let n = 1;
+    let q_obj = CscMatrix::new(n, n);
+    let a = csc(&[vec![0.0]], 1, n);
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 0, -2.0));
+    let mut src = QpProblem::new(
+        q_obj,
+        vec![-1.0],
+        a,
+        vec![-1.0],
+        vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        vec![ConstraintType::Ge],
+    )
+    .unwrap();
+    src.set_quadratic_constraints(vec![qc]).unwrap();
+
+    let qp = qcqp_from_qp_problem(&src).expect("convex Ge row must be accepted, not rejected");
+    assert_eq!(qp.quad.len(), 1);
+    assert_eq!(
+        qp.quad[0].p.to_dense_rows(),
+        vec![vec![2.0]],
+        "sign-flipped P must be -Q = [[2]]"
+    );
+    assert_eq!(qp.quad[0].q, vec![0.0]);
+    assert_eq!(qp.quad[0].r, -1.0, "r must equal src.b[k]");
+
+    let res = solve_qcqp(&qp, &ConicOptions::default());
+    assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+    assert!(
+        (res.objective - (-1.0)).abs() < 1e-5,
+        "objective={}",
+        res.objective
+    );
+    assert!((res.x[0] - 1.0).abs() < 1e-5, "x={:?}", res.x);
+}
+
+/// A genuinely nonconvex quadratic `>=` row (`Q` indefinite, not just
+/// negative) must still be rejected by the convex bridge, not accepted via
+/// the new sign-flip path: `x0*x1 >= 1` has `Q = [[0,1],[1,0]]`
+/// (eigenvalues `+-1`, indefinite), and so does `-Q` -- sign-flipping
+/// doesn't launder indefiniteness into PSD-ness. This guards the exact
+/// failure mode the fix must avoid (treating nonconvex as convex).
+#[test]
+fn qp_problem_to_conic_still_rejects_indefinite_quadratic_ge_row() {
+    use crate::conic::{solve_qp_problem_as_qcqp, ConicOptions};
+    use crate::qp::{QcqpMatrix, QpProblem};
+    let n = 2;
+    let q_obj = CscMatrix::new(n, n);
+    let a = csc(&[vec![0.0, 0.0]], 1, n);
+    let mut qc = QcqpMatrix::new(n);
+    qc.triplets.push((0, 1, 1.0));
+    qc.triplets.push((1, 0, 1.0)); // Q = [[0,1],[1,0]]: (1/2)x^TQx = x0*x1.
+    let mut src = QpProblem::new(
+        q_obj,
+        vec![1.0, 1.0],
+        a,
+        vec![1.0],
+        vec![(0.1, 3.0), (0.1, 3.0)],
+        vec![ConstraintType::Ge],
+    )
+    .unwrap();
+    src.set_quadratic_constraints(vec![qc]).unwrap();
+
+    let res = solve_qp_problem_as_qcqp(&src, &ConicOptions::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "an indefinite quadratic >= row must still be rejected by the convex \
+         bridge, got {:?}",
+        res.status
     );
 }

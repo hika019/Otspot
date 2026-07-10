@@ -591,11 +591,27 @@ pub(crate) fn qcqp_matrix_to_csc(q: &QcqpMatrix) -> CscMatrix {
 /// conic [`QcqpProblem`]. Linear constraints are split into `<=` and `=`, `>=`
 /// rows are sign-flipped, and finite variable bounds become linear inequalities.
 ///
-/// Quadratic constraints must be of `<=` type for this convex conic bridge.
-/// Equal/greater quadratic constraints are rejected because a PSD quadratic
-/// equality/greater-than set is generally nonconvex.
+/// A quadratic `>=` row is sign-flipped into the equivalent `<=` form (`P ->
+/// -P`) exactly like a linear one; whether that is actually convex is left to
+/// `to_conic`'s per-constraint Cholesky (accepts `-P` PSD, rejects it
+/// indefinite as `NotSupported`, same as any other quadratic `<=` row) rather
+/// than assumed nonconvex up front. Quadratic equality constraints are still
+/// rejected: a PSD quadratic equality set is generally nonconvex.
 pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
     let n = src.num_vars;
+    // `QpProblem::quadratic_constraints` is a public field (PR #25 review):
+    // `set_quadratic_constraints` enforces "empty or num_constraints", but a
+    // caller can still assign the field directly and violate it, and the loop
+    // below indexes `[k]` for every `k < num_constraints` unconditionally.
+    if !src.quadratic_constraints.is_empty()
+        && src.quadratic_constraints.len() != src.num_constraints
+    {
+        return Err(format!(
+            "quadratic_constraints length must be 0 or {}, got {}",
+            src.num_constraints,
+            src.quadratic_constraints.len()
+        ));
+    }
     // Row-major view of A (O(nnz)): column k of `a_rows` is row k of `src.a`,
     // giving sparse per-constraint access without ever densifying A (O(m*n)
     // for the QPLIB DCQ problems that drove this bridge's OOM).
@@ -641,10 +657,24 @@ pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
                 gl_count += 1;
             }
             ConstraintType::Ge => {
-                if qmat.is_some_and(|qc| qc.nnz() > 0) {
-                    return Err(
-                        "quadratic >= constraints are nonconvex for the convex QCQP bridge".into(),
-                    );
+                if let Some(qc) = qmat {
+                    if qc.nnz() > 0 {
+                        // (1/2)x^T Q x + a^T x >= b  <=>  (1/2)x^T(-Q)x + (-a)^T x + b <= 0.
+                        // Whether `-Q` is actually PSD (so this row's
+                        // superlevel set is convex) is left to `to_conic`'s
+                        // per-constraint Cholesky, exactly like any other
+                        // quadratic `<=` row.
+                        let mut row = vec![0.0; n];
+                        for (&j, &v) in row_idx.iter().zip(row_val) {
+                            row[j] = -v;
+                        }
+                        quad.push(QuadConstraint {
+                            p: qcqp_matrix_to_csc(qc).scale_values(-1.0),
+                            q: row,
+                            r: src.b[k],
+                        });
+                        continue;
+                    }
                 }
                 for (&j, &v) in row_idx.iter().zip(row_val) {
                     gl.push(gl_count, j, -v);
@@ -858,11 +888,26 @@ fn append_quad_compact(
 /// This builds each constraint's SOC block from its own sparse
 /// `QcqpMatrix::triplets` and sparse linear coefficients, one at a time.
 /// Semantics mirror `qcqp_from_qp_problem` + `to_conic` exactly: same row
-/// transcription (`Le` kept, `Ge` sign-flipped, `Eq`/quadratic-`Ge`/
-/// quadratic-`Eq` rejected, finite bounds as inequality rows, a fixed bound
-/// as an equality row), same SOC embedding formula, same error messages.
+/// transcription (`Le` kept, `Ge` sign-flipped -- including a quadratic `Ge`
+/// row's matrix, screened for convexity by `touched_cholesky` like any other
+/// quadratic row -- `Eq`/quadratic-`Eq` rejected, finite bounds as inequality
+/// rows, a fixed bound as an equality row), same SOC embedding formula, same
+/// error messages.
 pub(crate) fn qp_problem_to_conic(src: &QpProblem) -> Result<(ConicProblem, usize, bool), String> {
     let n = src.num_vars;
+    // `QpProblem::quadratic_constraints` is a public field (PR #25 review):
+    // `set_quadratic_constraints` enforces "empty or num_constraints", but a
+    // caller can still assign the field directly and violate it, and the loop
+    // below indexes `[k]` for every `k < num_constraints` unconditionally.
+    if !src.quadratic_constraints.is_empty()
+        && src.quadratic_constraints.len() != src.num_constraints
+    {
+        return Err(format!(
+            "quadratic_constraints length must be 0 or {}, got {}",
+            src.num_constraints,
+            src.quadratic_constraints.len()
+        ));
+    }
     let has_quad_obj = !src.is_zero_q();
     let nvar = n + if has_quad_obj { 1 } else { 0 };
 
@@ -885,7 +930,7 @@ pub(crate) fn qp_problem_to_conic(src: &QpProblem) -> Result<(ConicProblem, usiz
     let mut ae_count = 0usize;
 
     struct StagedQuad<'a> {
-        triplets: &'a [(usize, usize, f64)],
+        triplets: std::borrow::Cow<'a, [(usize, usize, f64)]>,
         q_nz: Vec<(usize, f64)>,
         r: f64,
     }
@@ -905,7 +950,7 @@ pub(crate) fn qp_problem_to_conic(src: &QpProblem) -> Result<(ConicProblem, usiz
                     let q_nz: Vec<(usize, f64)> =
                         row_idx.iter().zip(row_val).map(|(&j, &v)| (j, v)).collect();
                     staged.push(StagedQuad {
-                        triplets: &qc.triplets,
+                        triplets: std::borrow::Cow::Borrowed(&qc.triplets),
                         q_nz,
                         r: -src.b[k],
                     });
@@ -918,10 +963,25 @@ pub(crate) fn qp_problem_to_conic(src: &QpProblem) -> Result<(ConicProblem, usiz
                 gl_count += 1;
             }
             ConstraintType::Ge => {
-                if qmat.is_some_and(|qc| qc.nnz() > 0) {
-                    return Err(
-                        "quadratic >= constraints are nonconvex for the convex QCQP bridge".into(),
-                    );
+                if let Some(qc) = qmat {
+                    // (1/2)x^T Q x + a^T x >= b  <=>  (1/2)x^T(-Q)x + (-a)^T x + b <= 0.
+                    // `touched_cholesky` below screens `-Q` for PSD-ness
+                    // exactly like any other quadratic `<=` row; an
+                    // indefinite `-Q` still rejects with the same
+                    // "not PSD (nonconvex)" error as before.
+                    let q_nz: Vec<(usize, f64)> = row_idx
+                        .iter()
+                        .zip(row_val)
+                        .map(|(&j, &v)| (j, -v))
+                        .collect();
+                    let neg_triplets: Vec<(usize, usize, f64)> =
+                        qc.triplets.iter().map(|&(r, c, v)| (r, c, -v)).collect();
+                    staged.push(StagedQuad {
+                        triplets: std::borrow::Cow::Owned(neg_triplets),
+                        q_nz,
+                        r: src.b[k],
+                    });
+                    continue;
                 }
                 for (&j, &v) in row_idx.iter().zip(row_val) {
                     gt.push(gl_count, j, -v);
@@ -988,7 +1048,7 @@ pub(crate) fn qp_problem_to_conic(src: &QpProblem) -> Result<(ConicProblem, usiz
         );
     }
     for (ci, sq) in staged.iter().enumerate() {
-        let (lk, clamped) = touched_cholesky(sq.triplets)
+        let (lk, clamped) = touched_cholesky(sq.triplets.as_ref())
             .map_err(|_| format!("P{} not PSD (nonconvex)", ci + 1))?;
         convexity_unproven |= clamped;
         append_quad_compact(

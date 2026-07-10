@@ -100,6 +100,44 @@ impl Default for GlobalOptions {
     }
 }
 
+impl GlobalOptions {
+    /// Validate option ranges `global_core` assumes but never checks itself
+    /// (same pattern as `misocp::BbOptions::validate`, PR #25 review "Reject
+    /// NaN integrality tolerances before branching"). A non-finite `int_tol`
+    /// makes every `frac_dist(..) <= tol` / `d > worst_if` comparison
+    /// silently `false`, so `all_integral` never accepts a point (every
+    /// incumbent is rejected) while `int_branch`-finding never fires either
+    /// (no variable is ever picked to branch on) -- the search then runs dry
+    /// without ever finding the true integer optimum.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.gap_tol.is_finite() || self.gap_tol < 0.0 {
+            return Err(format!(
+                "gap_tol must be finite and >= 0, got {}",
+                self.gap_tol
+            ));
+        }
+        if !self.bilinear_tol.is_finite() || self.bilinear_tol < 0.0 {
+            return Err(format!(
+                "bilinear_tol must be finite and >= 0, got {}",
+                self.bilinear_tol
+            ));
+        }
+        if !self.feas_tol.is_finite() || self.feas_tol < 0.0 {
+            return Err(format!(
+                "feas_tol must be finite and >= 0, got {}",
+                self.feas_tol
+            ));
+        }
+        if !self.int_tol.is_finite() || self.int_tol < 0.0 {
+            return Err(format!(
+                "int_tol must be finite and >= 0, got {}",
+                self.int_tol
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// `p`'s entry at `(row, col)`, or `0.0` if not stored explicitly:
 /// `O(log deg(col))` via binary search on the column's sorted row indices.
 /// Reads both triangular halves of a symmetric quadratic matrix without ever
@@ -645,12 +683,53 @@ fn all_integral(x: &[f64], integers: &[usize], tol: f64) -> bool {
 /// only absorbs rounding in those comparisons (scaled by `1 + |incumbent|`).
 const GAP_CERT_SLACK: f64 = 1e-12;
 
+/// Accepts `x` as a new incumbent if, after rounding its integer components
+/// to `xr`, it is still feasible at the caller's own `tol` -- never a looser
+/// hardcoded floor. Rounding moves an integer coordinate by up to `int_tol`,
+/// which can push a tight/equality row's residual up by the same amount; a
+/// caller requesting a tighter `tol` than that floor (e.g. IPM `eps = 1e-8`)
+/// must have the rounded point re-checked at `tol`, not silently waved
+/// through at `1e-6` (PR #25 review, nonconvex.rs).
+fn accept(
+    qp: &NonconvexQcqp,
+    integers: &[usize],
+    int_tol: f64,
+    x: &[f64],
+    incumbent: &mut f64,
+    inc_x: &mut Vec<f64>,
+    tol: f64,
+) {
+    if feasible(qp, x, tol) && all_integral(x, integers, int_tol) {
+        // Round integers for a clean reported solution.
+        let mut xr = x.to_vec();
+        for &k in integers {
+            xr[k] = xr[k].round();
+        }
+        if feasible(qp, &xr, tol) {
+            let ov = objective(qp, &xr);
+            if ov < *incumbent {
+                *incumbent = ov;
+                *inc_x = xr;
+            }
+        }
+    }
+}
+
 fn global_core(
     qp: &NonconvexQcqp,
     integers: &[usize],
     opts: &ConicOptions,
     g: &GlobalOptions,
 ) -> GlobalResult {
+    if let Err(e) = g.validate() {
+        return GlobalResult {
+            status: SolveStatus::NotSupported(e),
+            objective: f64::NAN,
+            x: vec![],
+            nodes: 0,
+            gap: f64::INFINITY,
+        };
+    }
     let static_ = build_static(qp);
     let mut incumbent = f64::INFINITY;
     let mut inc_x: Vec<f64> = Vec::new();
@@ -666,23 +745,6 @@ fn global_core(
     let mut lower_bound = f64::INFINITY;
 
     let mut stack = vec![(qp.lb.clone(), qp.ub.clone(), f64::NEG_INFINITY)];
-
-    let accept = |x: &[f64], incumbent: &mut f64, inc_x: &mut Vec<f64>, tol: f64| {
-        if feasible(qp, x, tol) && all_integral(x, integers, g.int_tol) {
-            // Round integers for a clean reported solution.
-            let mut xr = x.to_vec();
-            for &k in integers {
-                xr[k] = xr[k].round();
-            }
-            if feasible(qp, &xr, tol.max(1e-6)) {
-                let ov = objective(qp, &xr);
-                if ov < *incumbent {
-                    *incumbent = ov;
-                    *inc_x = xr;
-                }
-            }
-        }
-    };
 
     while let Some((lb, ub, inherited)) = stack.pop() {
         if opts
@@ -734,7 +796,15 @@ fn global_core(
         }
         let x = res.x[..qp.n].to_vec();
 
-        accept(&x, &mut incumbent, &mut inc_x, g.feas_tol);
+        accept(
+            qp,
+            integers,
+            g.int_tol,
+            &x,
+            &mut incumbent,
+            &mut inc_x,
+            g.feas_tol,
+        );
 
         // (1) integer branching first: pick the most fractional integer var.
         let mut int_branch = None;
@@ -788,7 +858,15 @@ fn global_core(
         if worst_gap <= g.bilinear_tol {
             // Leaf: the relaxation is tight, so `lower` is (numerically) the
             // region's true minimum and stands as its terminal bound.
-            accept(&x, &mut incumbent, &mut inc_x, g.feas_tol * 100.0);
+            accept(
+                qp,
+                integers,
+                g.int_tol,
+                &x,
+                &mut incumbent,
+                &mut inc_x,
+                g.feas_tol * 100.0,
+            );
             lower_bound = lower_bound.min(lower);
             continue;
         }
@@ -888,6 +966,93 @@ mod tests {
         let out = f();
         RELAX_STATUS_PLAN.with(|p| p.borrow_mut().clear());
         out
+    }
+
+    /// PR #25 review (nonconvex.rs, "Honor feasibility tolerance after
+    /// integer rounding"): `accept`'s post-rounding feasibility recheck must
+    /// use the caller's own `tol`, not a hardcoded `1e-6` floor.
+    ///
+    /// `x0` is an "integer" variable pinned by an equality to `5 + 3e-7`: it
+    /// is within `int_tol = 1e-6` of the integer 5 (so the pre-round
+    /// `all_integral` gate passes), but rounding to `5.0` leaves an equality
+    /// residual of `3e-7` -- inside a hardcoded `1e-6` floor but outside a
+    /// caller-requested `tol = 1e-8`. The independent oracle here is exact
+    /// arithmetic on the single equality row: no integer satisfies
+    /// `x0 = 5 + 3e-7` to `1e-8`, so `xr = [5.0]` must be rejected and the
+    /// incumbent must stay untouched.
+    ///
+    /// Sentinel: restoring the old `tol.max(1e-6)` floor inside `accept`
+    /// makes this FAIL (incumbent becomes `5.0`, `inc_x = [5.0]`).
+    #[test]
+    fn accept_honors_caller_tolerance_after_rounding_not_a_fixed_floor() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap(),
+            b_eq: vec![5.0 + 3e-7],
+            lb: vec![0.0],
+            ub: vec![10.0],
+        };
+        let x = vec![5.0 + 3e-7];
+        let mut incumbent = f64::INFINITY;
+        let mut inc_x: Vec<f64> = Vec::new();
+        accept(&qp, &[0], 1e-6, &x, &mut incumbent, &mut inc_x, 1e-8);
+        assert!(
+            incumbent.is_infinite() && inc_x.is_empty(),
+            "rounding x0 to 5.0 leaves a 3e-7 equality residual, which must \
+             fail the caller's tol=1e-8 rather than a hardcoded 1e-6 floor: \
+             incumbent={incumbent}, inc_x={inc_x:?}"
+        );
+    }
+
+    /// PR #25 review pattern applied here too ("Reject NaN integrality
+    /// tolerances before branching", originally flagged on
+    /// `misocp::BbOptions`): `GlobalOptions::int_tol = NaN` must be rejected
+    /// up front. Every `frac_dist(..) <= tol` / `d > worst_if` comparison
+    /// against a `NaN` tolerance is silently `false`, so `all_integral` never
+    /// accepts any point (blocking every incumbent) while the fractional-
+    /// variable finder never picks a branch variable either -- the search
+    /// runs dry without ever reaching the true integer optimum.
+    ///
+    /// `min x0*x1` s.t. `x0, x1` integer in `[-2, 2]` has global optimum `-4`
+    /// at `(-2, 2)`/`(2, -2)` (mirrors `nonconvex_miqcp_integer_bilinear` in
+    /// `conic::tests`); with `int_tol = NaN` a sound search must reject the
+    /// options rather than silently report an incumbent-less failure.
+    ///
+    /// Sentinel: dropping the `g.validate()` call in `global_core` makes this
+    /// FAIL with `NumericalError` (the search finds no incumbent) instead of
+    /// `NotSupported`.
+    #[test]
+    fn global_miqcp_nan_int_tol_is_rejected_not_silently_broken() {
+        let n = 2usize;
+        let p = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[1.0, 1.0], n, n).unwrap();
+        let qp = NonconvexQcqp {
+            n,
+            p0: Some(p),
+            q0: vec![0.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![-2.0, -2.0],
+            ub: vec![2.0, 2.0],
+        };
+        let g = GlobalOptions {
+            int_tol: f64::NAN,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_miqcp(&qp, &[0, 1], &ConicOptions::default(), &g);
+        assert!(
+            matches!(res.status, SolveStatus::NotSupported(_)),
+            "NaN int_tol must be rejected, got {res:?}"
+        );
+        assert!(res.x.is_empty());
     }
 
     /// `min x0 + x1  s.t.  x0*x1 >= 1,  x in [0.1,3]^2` (optimum 2 at (1,1)).
