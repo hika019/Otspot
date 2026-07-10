@@ -275,6 +275,15 @@ fn build_relaxation(
 /// Solve a mixed-integer SOCP by branch-and-bound (depth-first, best-bound
 /// pruning). Minimises `c^T x`.
 ///
+/// Convexity caveat: [`MisocpProblem`] carries no `convexity_unproven` flag,
+/// so this entry point cannot itself detect a base problem whose SOC blocks
+/// came from a clamped (only-approximate) QCQP Cholesky. Both current callers
+/// gate that upstream — [`solve_miqcp`] refuses a `convexity_unproven`
+/// `to_conic` result, and the Model layer refuses a clamped SOC-constrained
+/// QCQP before building the `MisocpProblem` — but a future direct caller must
+/// perform the same check itself (threading the flag onto `MisocpProblem` is
+/// left to a separate task).
+///
 /// Node outcomes are classified, not collapsed into one "prune" bucket:
 /// `Infeasible` prunes only with a Farkas certificate (`infeas_cert`);
 /// `Unbounded` propagates only with a verified improving ray
@@ -484,7 +493,7 @@ pub fn solve_miqcp(
     opts: &ConicOptions,
     bb: &BbOptions,
 ) -> MisocpResult {
-    let (base, _nvar, _convexity_unproven) = match to_conic(qp) {
+    let (base, _nvar, convexity_unproven) = match to_conic(qp) {
         Ok(v) => v,
         Err(e) => {
             return MisocpResult {
@@ -495,6 +504,28 @@ pub fn solve_miqcp(
             }
         }
     };
+    // Branch-and-bound soundness requires every node's conic relaxation to be
+    // a *valid* relaxation of the QCQP: bounds and pruning all rest on it. When
+    // `to_conic` clamped a negative jitter-band pivot (`convexity_unproven`),
+    // the reformulation is only approximate, so every node's dual bound is
+    // untrustworthy and no prune/incumbent-bound is sound. There is no
+    // mixed-integer spatial fallback wired here, so refuse rather than certify
+    // an unproven bound — matching the continuous route's
+    // `is_clean_convex_outcome` gate and the SOC-constrained Model path, both
+    // of which reject `convexity_unproven` for the same reason.
+    if convexity_unproven {
+        return MisocpResult {
+            status: SolveStatus::NotSupported(
+                "MIQCP has an indefinite (Cholesky jitter-band) quadratic; the \
+                 conic relaxation is only approximate, so branch-and-bound bounds \
+                 are not sound"
+                    .to_string(),
+            ),
+            objective: f64::NAN,
+            x: vec![],
+            nodes: 0,
+        };
+    }
     let mp = MisocpProblem {
         base,
         integers: integers.to_vec(),
@@ -509,14 +540,13 @@ pub fn solve_miqcp(
     // Recompute the true QCQP objective from `x` rather than trusting the
     // conic relaxation's `objective` (PR #25 review 29): when the objective
     // is quadratic, `to_conic` minimizes an epigraph variable `t` bounding
-    // `(1/2) x^T P0 x + q0^T x` via an SOC built from `P0`'s Cholesky factor.
-    // That factor clamps any near-zero negative pivot to a fixed positive
-    // value (see `to_conic`'s doc), so `t` reflects the *clamped* curvature,
-    // not the caller's literal `P0`, whenever `to_conic` returned
-    // `convexity_unproven`. `solve_qcqp` (the continuous-QCQP entry point)
-    // already recomputes from `x` for exactly this reason; mirroring that
-    // here keeps the MISOCP and continuous/MIQCP-objective conventions
-    // aligned instead of the MISOCP path silently trusting an unproven bound.
+    // `(1/2) x^T P0 x + q0^T x`, and the reported conic objective is that `t`,
+    // not the caller's literal `P0`/`q0` evaluated at `x`. On a node-limited
+    // or timed-out incumbent the two can differ, so recomputing from `x` — as
+    // the continuous `solve_qcqp` entry point already does — keeps the MISOCP
+    // and continuous/MIQCP-objective conventions aligned. (Clamped/`unproven`
+    // reformulations are refused above, so `t` here is always an exact-PSD
+    // epigraph bound rather than a clamped-curvature one.)
     if !res.x.is_empty() {
         res.objective = qcqp_true_objective(qp, &res.x);
     }
