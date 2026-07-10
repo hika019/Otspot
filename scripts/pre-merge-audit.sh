@@ -21,7 +21,10 @@ fi
 # 2. build + test + clippy + file size
 cargo build --release
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo nextest run --release --test-threads 6
+# --features parallel: 目録ゲート (下の test inventory gate) と release ビルドを
+# 共有し、concurrent.rs の並列テストを目録に含めるため。この feature は非-parallel
+# の上位集合 (テストは減らない) なので full-suite を弱めない。
+cargo nextest run --release --features parallel --test-threads 6
 # `cargo test --doc` runs doctests; it does not lint intra-doc links. The
 # rustdoc gate below is a separate check and CI runs both (ci.yml `docs` job).
 cargo test --doc
@@ -39,14 +42,24 @@ fi
 python3 tests/test_check_data_coverage.py
 python3 tests/test_check_test_data_requirements.py
 python3 tests/test_iso_25010_quality_matrix.py
+python3 tests/test_check_new_ignore_attrs.py
 
-# 1b. merge gate regression scan
+# 1b. test inventory gate (silent test disable / delete)
+# cargo nextest list を ground truth に、コミット済み目録 tests/test_inventory.txt
+# との乖離を検出する。上の full-suite で release バイナリは概ね built (この gate は
+# parallel feature 込みで list するので otspot-core の部分再ビルドが入りうる)。
 echo
-echo "=== merge gate regression scan ==="
-if git diff main..HEAD --unified=0 -- '*.rs' | grep -E '^\+.*#\[ignore' >/tmp/pre_merge_added_ignore.txt; then
-  cat /tmp/pre_merge_added_ignore.txt >&2
-  echo "::error::新規 #[ignore] は merge gate で禁止。heavy 隔離が必要なら test-heavy.yml 側の明示 gate と一緒に追加すること" >&2
+echo "=== test inventory gate ==="
+set +e
+python3 scripts/lib/check_new_ignore_attrs.py
+inv_rc=$?
+set -e
+if [ "$inv_rc" -eq 1 ]; then
+  echo "::error::テスト目録が cargo nextest list と乖離 (テストの ignore 化 / 追加 / 削除)。意図的なら python3 scripts/lib/check_new_ignore_attrs.py --update で再生成し diff をコミットせよ" >&2
   exit 1
+elif [ "$inv_rc" -ne 0 ]; then
+  echo "::error::check_new_ignore_attrs.py が異常終了 (exit $inv_rc): nextest 不在 or ビルド失敗。上記メッセージ参照" >&2
+  exit "$inv_rc"
 fi
 if git diff main..HEAD --unified=0 -- .github scripts 'otspot-dev/src/bin/*.rs' | grep -E '^\+.*PASS\[no_ref\]' >/tmp/pre_merge_pass_noref.txt; then
   cat /tmp/pre_merge_pass_noref.txt >&2
