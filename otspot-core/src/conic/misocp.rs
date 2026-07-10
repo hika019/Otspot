@@ -357,7 +357,10 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         // Test-only: force this node's status (dropping certificates) to inject
         // a deterministic, non-certificate node failure (see `NODE_STATUS_PLAN`).
         #[cfg(test)]
-        if let Some(forced) = NODE_STATUS_PLAN.with(|p| p.borrow_mut().pop_front()).flatten() {
+        if let Some(forced) = NODE_STATUS_PLAN
+            .with(|p| p.borrow_mut().pop_front())
+            .flatten()
+        {
             res.status = forced;
             res.infeas_cert = None;
             res.primal_ray = None;

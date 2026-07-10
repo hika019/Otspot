@@ -263,7 +263,9 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
         let dzw = sc.apply_w(&blk, &dz_a); // W dz
         let corr = cone::jprod(&blk, &dsw, &dzw);
         let ll = cone::jprod(&blk, &lambda, &lambda);
-        let target: Vec<f64> = (0..m).map(|i| sigma * mu * e[i] - ll[i] - corr[i]).collect();
+        let target: Vec<f64> = (0..m)
+            .map(|i| sigma * mu * e[i] - ll[i] - corr[i])
+            .collect();
         let rc = cone::jdiv(&blk, &lambda, &target);
         let (dx, dy, dz, ds) =
             kkt::solve_dir(&factor, &problem.g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc);
@@ -559,7 +561,9 @@ mod tests {
         let mut s = vec![5.0, 1.0, 0.0, 5.0, 1.0, 0.0];
         let mut z = vec![2.0, 0.0, 0.0, 20.0, 0.0, 0.0];
         // Per-block complementarity `s_blk . z_blk` = [10, 100], spread 0.1.
-        let bdot = |s: &[f64], z: &[f64], o: usize| s[o] * z[o] + s[o + 1] * z[o + 1] + s[o + 2] * z[o + 2];
+        let bdot = |s: &[f64], z: &[f64], o: usize| {
+            s[o] * z[o] + s[o + 1] * z[o + 1] + s[o + 2] * z[o + 2]
+        };
         let spread_before = {
             let (a, b) = (bdot(&s, &z, 0), bdot(&s, &z, 3));
             a.min(b) / a.max(b)
@@ -573,8 +577,14 @@ mod tests {
         // Independent hand calculation: s.z = 110, e.s = 10, e.z = 22,
         //   ds = 0.5*110/22 = 2.5  => s heads 5 -> 7.5
         //   dz = 0.5*110/10 = 5.5  => z heads 2 -> 7.5, 20 -> 25.5.
-        assert!((s[0] - 7.5).abs() < 1e-12 && (s[3] - 7.5).abs() < 1e-12, "s heads {s:?}");
-        assert!((z[0] - 7.5).abs() < 1e-12 && (z[3] - 25.5).abs() < 1e-12, "z heads {z:?}");
+        assert!(
+            (s[0] - 7.5).abs() < 1e-12 && (s[3] - 7.5).abs() < 1e-12,
+            "s heads {s:?}"
+        );
+        assert!(
+            (z[0] - 7.5).abs() < 1e-12 && (z[3] - 25.5).abs() < 1e-12,
+            "z heads {z:?}"
+        );
         // First-principles: centering lifts the block complementarity spread.
         let spread_after = {
             let (a, b) = (bdot(&s, &z, 0), bdot(&s, &z, 3));

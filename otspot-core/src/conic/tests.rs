@@ -920,7 +920,11 @@ fn misocp_incumbent_with_failed_node_is_suboptimal() {
     // `numerical_failures > 0` while the node-2 incumbent stands.
     let plan = vec![None, None, Some(SolveStatus::NumericalError)];
     let res = with_node_plan(plan, || {
-        solve_misocp(&half_int_lp(), &ConicOptions::default(), &BbOptions::default())
+        solve_misocp(
+            &half_int_lp(),
+            &ConicOptions::default(),
+            &BbOptions::default(),
+        )
     });
     assert_eq!(res.status, SolveStatus::SuboptimalSolution, "{res:?}");
     assert_eq!(res.nodes, 3, "all three nodes must be visited");
