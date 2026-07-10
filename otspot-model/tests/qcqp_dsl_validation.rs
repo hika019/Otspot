@@ -237,6 +237,44 @@ fn soc_inf_bound_coefficient_rejected() {
     );
 }
 
+// PR #25 review 40 asked whether add_soc_le has the same foreign-model-variable
+// hole as add_qc_le's quad term did. `append_soc`'s `check` closure and
+// `validate_conic_inputs`'s `check_affine` both already gate on `model_id` for
+// every SOC term and the bound expression; these two tests close the missing
+// coverage for that existing check (same index in the foreign model as a
+// local variable would have, so a missing check would silently reuse it).
+#[test]
+fn soc_foreign_term_var_rejected() {
+    let mut m1 = Model::new("soc_foreign_term_m1");
+    let t = m1.add_var("t", 0.0, 5.0);
+    let mut m2 = Model::new("soc_foreign_term_m2");
+    let y = m2.add_var("y", -5.0, 5.0); // index 0, same as t in m1
+
+    m1.add_soc_le(vec![1.0 * y], 1.0 * t);
+    m1.minimize(1.0 * t);
+    let result = m1.solve();
+    assert!(
+        matches!(result, Err(ModelError::InvalidInput(_))),
+        "foreign var in SOC term must give InvalidInput, got {result:?}"
+    );
+}
+
+#[test]
+fn soc_foreign_bound_var_rejected() {
+    let mut m1 = Model::new("soc_foreign_bound_m1");
+    let x = m1.add_var("x", 0.0, 5.0);
+    let mut m2 = Model::new("soc_foreign_bound_m2");
+    let s = m2.add_var("s", 0.0, 5.0); // index 0, same as x in m1
+
+    m1.add_soc_le(vec![1.0 * x], 1.0 * s);
+    m1.minimize(1.0 * x);
+    let result = m1.solve();
+    assert!(
+        matches!(result, Err(ModelError::InvalidInput(_))),
+        "foreign var in SOC bound must give InvalidInput, got {result:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #10: set_tolerance must reach the conic solver
 // ---------------------------------------------------------------------------
