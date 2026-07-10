@@ -74,6 +74,15 @@ threads-required = "num-cpus"
 filter = "test(warm_start_30pct_speedup_smoke)"
 threads-required = "num-cpus"
 
+# osa-60 perf sentinel solves against a 60s internal deadline in ~20.7s single-job
+# (margin ~2.9x / ~39s absolute). Serialise it: threads-required caps nextest's own
+# thread pool but NOT other host processes, so the ~39s cushion — far thicker than
+# greenbea's ~6s, which still flaked 1.04x under contention — is the real guard. If a
+# future change shrinks it, revisit the deadline/budget rather than loosening asserts.
+[[profile.default.overrides]]
+filter = "test(diag_osa60_must_reach_known_objective)"
+threads-required = "num-cpus"
+
 # Memory-heavy qplib parse tests peak 100-800 MB each (QPLIB_8500 = 100 MB,
 # QPLIB_8683 = ~50 MB post-fix, QPLIB_8547/9008 DCL = ~700 MB).
 # Running them concurrently stacks memory and can thrash (swap=0) or trip
