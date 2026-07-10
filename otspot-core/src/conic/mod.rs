@@ -240,7 +240,7 @@ pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     }
     let eq = equil::Equilibrator::compute(problem);
     let scaled = eq.scale_problem(problem);
-    let res = ipm::solve(&scaled, opts);
+    let res = ipm::solve(&scaled, opts, true);
     let mut res = eq.unscale_result(problem, opts.tol, res);
     // Canonicalize only statuses whose `x` is not a usable iterate
     // (PR #25 review 40): `Infeasible` -> `+inf`, `Unbounded` -> `-inf`.
