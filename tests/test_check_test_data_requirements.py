@@ -79,6 +79,113 @@ def test_dir_requirement_absent_fails():
     assert "data/lp_problems" in out
 
 
+# ---------------------------------------------------------------------
+# PR #25 review ("Check formatted data files instead of only their
+# directory"): a `format!("data/<dir>/{name}.QPS", name)` file-path helper
+# called with literal names (`netlib_lp_extra.rs`, `diag_liswet_basin.rs`,
+# `qp_clarabel_extra_assertions.rs`, `diag_lp_simplex_stall_sentinel.rs`,
+# `clarabel_cross_check.rs`, `israel_objective_mismatch.rs`,
+# `diag_bounded_grow_feasibility.rs` style) must resolve to the *exact* file
+# each call site needs, not just its containing directory.
+# ---------------------------------------------------------------------
+
+_FORMAT_HELPER_SRC = (
+    'fn solve_and_check(name: &str, expected_obj: f64, max_secs: u64) {\n'
+    '    let path_str = format!("data/lp_problems/{}.QPS", name);\n'
+    '    let path = std::path::Path::new(&path_str);\n'
+    '    assert!(path.exists());\n'
+    '}\n'
+    '\n'
+    '#[test]\n'
+    'fn t() {\n'
+    '    solve_and_check("afiro", 464.75, 30);\n'
+    '}\n'
+)
+
+
+def test_format_helper_named_file_present_ok():
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), _FORMAT_HELPER_SRC)
+        d = repo / "data" / "lp_problems"
+        d.mkdir(parents=True)
+        (d / "afiro.QPS").write_text("NAME AFIRO\n")
+        code, out = _run(repo)
+    assert code == 0, f"Expected exit 0, got {code}.\nOutput:\n{out}"
+    assert "FAIL" not in out
+
+
+def test_format_helper_named_file_absent_fails_even_if_dir_nonempty():
+    """Confirmed repro of the reviewed bug: the directory is non-empty (a
+    *different* file is present), which the pre-fix directory-only check
+    would have accepted; the specific file the call site needs is missing
+    and must be a hard failure."""
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), _FORMAT_HELPER_SRC)
+        d = repo / "data" / "lp_problems"
+        d.mkdir(parents=True)
+        (d / "some_other_problem.QPS").write_text("NAME OTHER\n")
+        code, out = _run(repo)
+    assert code == 1, f"Expected exit 1, got {code}.\nOutput:\n{out}"
+    assert "data/lp_problems/afiro.QPS" in out, (
+        f"must name the specific missing file, not just the directory:\n{out}"
+    )
+
+
+def test_format_helper_positional_and_inline_placeholder_both_detected():
+    """Both `format!("...{}...", name)` (positional) and
+    `format!("...{name}...")` (inline capture) must resolve."""
+    src = (
+        'fn parse(name: &str) -> Option<()> {\n'
+        '    let path = format!("data/lp_problems/{name}.QPS");\n'
+        '    None\n'
+        '}\n'
+        '\n'
+        '#[test]\n'
+        'fn t() {\n'
+        '    parse("neos");\n'
+        '}\n'
+    )
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), src)
+        code, out = _run(repo)
+    assert code == 1, f"Expected exit 1, got {code}.\nOutput:\n{out}"
+    assert "data/lp_problems/neos.QPS" in out
+
+
+def test_format_helper_for_loop_array_is_detected():
+    """`for name in ["a", "b"] { helper(name) }` (conic_qps_integration.rs
+    style: literal names passed via a loop variable, not a direct literal
+    call-site argument) must resolve each array element to a file."""
+    src = (
+        'fn try_load(name: &str) -> Option<()> {\n'
+        '    let p = format!("data/maros_meszaros/{name}");\n'
+        '    None\n'
+        '}\n'
+        '\n'
+        '#[test]\n'
+        'fn t() {\n'
+        '    for name in ["HS21.QPS", "TAME.QPS"] {\n'
+        '        let _ = try_load(name);\n'
+        '    }\n'
+        '}\n'
+    )
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), src)
+        d = repo / "data" / "maros_meszaros"
+        d.mkdir(parents=True)
+        (d / "HS21.QPS").write_text("NAME HS21\n")
+        # TAME.QPS deliberately absent.
+        code, out = _run(repo)
+    assert code == 1, f"Expected exit 1, got {code}.\nOutput:\n{out}"
+    fail_lines = [line for line in out.splitlines() if "[FAIL]" in line]
+    assert not any("HS21.QPS" in line for line in fail_lines), (
+        f"HS21.QPS is present and must not be reported missing:\n{out}"
+    )
+    assert any("TAME.QPS" in line for line in fail_lines), (
+        f"TAME.QPS is absent and must be reported missing:\n{out}"
+    )
+
+
 def test_graceful_skip_dataset_warns_only():
     src = 'const P: &str = "data/cblib_socp/classical_20_0.cbf";\n'
     with tempfile.TemporaryDirectory() as td:
@@ -151,6 +258,10 @@ if __name__ == "__main__":
         test_file_requirement_absent_fails,
         test_dir_requirement_present_ok,
         test_dir_requirement_absent_fails,
+        test_format_helper_named_file_present_ok,
+        test_format_helper_named_file_absent_fails_even_if_dir_nonempty,
+        test_format_helper_positional_and_inline_placeholder_both_detected,
+        test_format_helper_for_loop_array_is_detected,
         test_graceful_skip_dataset_warns_only,
         test_absolute_path_string_is_not_a_requirement,
         test_crate_relative_literal_is_detected,

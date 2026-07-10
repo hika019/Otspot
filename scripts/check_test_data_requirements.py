@@ -86,8 +86,13 @@ DATA_FILE_EXTS = {
 # lookbehind rejects a preceding word char so "metadata/x" does NOT match, and
 # rejects a preceding `/` so absolute "/data/..." (CSV-routing fixtures in
 # otspot-dev/src/bench_utils.rs) is not treated as a requirement.  The subpath
-# stops at the first non-path char, so a `format!` placeholder truncates to the
-# containing directory: "data/lp_problems/{}.QPS" → data/lp_problems.
+# stops at the first non-path char, so a bare `format!` placeholder still
+# truncates to the containing directory here: "data/lp_problems/{}.QPS" →
+# data/lp_problems.  That truncation alone under-checks (a directory
+# non-empty of *some* file passes even if the specific named file the test
+# actually opens is missing) -- see `_format_file_helpers` below, which
+# resolves the placeholder against literal call-site names to add the
+# precise file requirement alongside this directory one.
 DATA_SEG_RE = re.compile(
     r'(?<![A-Za-z0-9_/])(?:\.\./)*data/([A-Za-z0-9_][A-Za-z0-9_./-]*)')
 
@@ -100,6 +105,31 @@ CONST_RE = re.compile(r'const\s+(\w+)\s*:\s*&(?:\'\w+\s+)?str\s*=\s*"([^"]*)"')
 
 # String literal (single-line) for scanning literal values.
 STRING_LIT_RE = re.compile(r'"([^"\n]*)"')
+
+# `format!("data/<dir>/{param}<suffix>")` (inline capture) or
+# `format!("data/<dir>/{}<suffix>", param)` (positional) inside a fn body:
+# `<dir>` (group 1, may be empty) is the literal prefix after `data/`,
+# `<param>` is either the inline name (group 2) or the trailing positional
+# argument (group 4), and `<suffix>` (group 3) is the literal tail up to the
+# closing quote (typically the file extension).  Only ever resolved against
+# a name that is one of the *enclosing function's own parameters* --
+# `_format_file_helpers` below -- so this identifies per-item file-path
+# helpers like `fn solve_and_check(name: &str, ...) { let p =
+# format!("data/lp_problems/{}.QPS", name); ... }`.
+FORMAT_FILE_RE = re.compile(
+    r'format!\(\s*"(?:\.\./)*data/([A-Za-z0-9_./-]*)\{(\w*)\}([A-Za-z0-9_./-]*)"'
+    r'(?:\s*,\s*(\w+)\s*[,)])?'
+)
+
+# Literal call-site argument: `helper_name("literal", ...)`.
+def _literal_call_re(fn_name: str) -> re.Pattern[str]:
+    return re.compile(rf'\b{re.escape(fn_name)}\s*\(\s*"([^"]*)"')
+
+
+# `for IDENT in ["lit1", "lit2", ...] { ... }` -- captures the loop variable
+# and the bracketed literal list; callers scan the loop body (up to the
+# matching brace) for a call to a format-helper keyed on IDENT.
+FOR_ARRAY_RE = re.compile(r'for\s+(\w+)\s+in\s+\[([^\]]*)\]\s*\{')
 
 
 def rust_sources(root: Path) -> list[Path]:
@@ -206,6 +236,64 @@ def _data_helpers(bodies: list[tuple[str, list[str], str]]) -> set[str]:
     return parametric
 
 
+def _format_file_helpers(bodies: list[tuple[str, list[str], str]]) -> dict[str, tuple[str, str]]:
+    """Names of fns whose body builds a `data/<dir>/{param}<suffix>` (or
+    `{}<suffix>`, param) path from one of the fn's own parameters --
+    `{name: (prefix, suffix)}` so a literal call-site argument `X` resolves
+    to the concrete file requirement `data/<prefix><X><suffix>`.
+
+    Matches the review's exact repro shape: `fn solve_and_check(name: &str,
+    ...) { let p = format!("data/lp_problems/{}.QPS", name); ... }` called
+    elsewhere in the file as `solve_and_check("afiro", ...)`.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    for name, params, body in bodies:
+        m = FORMAT_FILE_RE.search(body)
+        if not m:
+            continue
+        prefix, inline_param, suffix, positional_arg = m.groups()
+        param = inline_param or positional_arg
+        if not param or param not in params:
+            continue
+        out[name] = (prefix, suffix)
+    return out
+
+
+def _format_helper_file_requirements(text: str) -> set[str]:
+    """Resolve `_format_file_helpers` call sites to concrete file
+    requirements: both a direct literal argument (`helper("afiro", ...)`)
+    and a `for name in ["a", "b"] { ... helper(name) ... }` loop body whose
+    loop variable is passed straight through."""
+    reqs: set[str] = set()
+    helpers = _format_file_helpers(_fn_bodies(text))
+    for h, (prefix, suffix) in helpers.items():
+        for call in _literal_call_re(h).finditer(text):
+            r = _norm(f"{prefix}{call.group(1)}{suffix}")
+            if r:
+                reqs.add(r)
+        for loop_m in FOR_ARRAY_RE.finditer(text):
+            loop_var, array_body = loop_m.group(1), loop_m.group(2)
+            brace = loop_m.end() - 1
+            depth = 0
+            j = brace
+            while j < len(text):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            loop_body = text[brace:j + 1]
+            if not re.search(rf'\b{re.escape(h)}\s*\(\s*{re.escape(loop_var)}\b', loop_body):
+                continue
+            for lit_m in STRING_LIT_RE.finditer(array_body):
+                r = _norm(f"{prefix}{lit_m.group(1)}{suffix}")
+                if r:
+                    reqs.add(r)
+    return reqs
+
+
 def _file_requirements(text: str) -> set[str]:
     """All `data/<...>` requirements resolvable within a single source file."""
     reqs: set[str] = set()
@@ -245,6 +333,11 @@ def _file_requirements(text: str) -> set[str]:
             r = _norm(sub)
             if r:
                 reqs.add(r)
+
+    # (d) format!("data/<dir>/{param}<suffix>") file-path helpers, resolved
+    # against literal call-site names -- adds the *file* requirement the (a)
+    # truncation above under-checks (directory-only) for this exact shape.
+    reqs |= _format_helper_file_requirements(text)
     return reqs
 
 

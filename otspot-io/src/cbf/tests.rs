@@ -1268,3 +1268,96 @@ FOO
         "unknown CBF section keyword 'FOO'",
     );
 }
+
+/// PR #25 review ("Reject non-finite CBF objective constants"): named
+/// `OBJBCOORD` specifically. `non_finite_float_is_error` above already
+/// covers `BCOORD`; this pins down the exact field the review named (a
+/// non-finite objective constant flowing into `CbfProblem::true_objective`
+/// unrejected).
+///
+/// Live/stale finding: already stale — `TokenStream::read_f64` (the single
+/// float-parsing call site shared by every numeric CBF field: `OBJACOORD`,
+/// `OBJBCOORD`, `ACOORD`, `BCOORD`, confirmed by grep) has rejected
+/// non-finite values since the CBF reader's introducing commit (`c99a4af8`,
+/// `git log -S "expected finite float"` shows exactly one hit, no
+/// regression/refix cycle). This test exists because that stale finding had
+/// no sentinel naming `OBJBCOORD` directly before now.
+#[test]
+fn non_finite_objbcoord_is_error() {
+    for bad in ["NaN", "inf", "-inf", "Infinity"] {
+        let cbf = format!(
+            "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+1 1
+F 1
+
+OBJBCOORD
+{bad}
+"
+        );
+        assert_parse_error_contains(&cbf, "expected finite float");
+    }
+}
+
+/// Same horizontal check for `OBJACOORD` (objective linear coefficients) —
+/// shares `read_f64` with `OBJBCOORD`/`ACOORD`/`BCOORD`, so this closes the
+/// same gap for the remaining numeric field not yet named by a dedicated
+/// test.
+#[test]
+fn non_finite_objacoord_is_error() {
+    for bad in ["NaN", "inf", "-inf"] {
+        let cbf = format!(
+            "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+1 1
+F 1
+
+OBJACOORD
+1
+0 {bad}
+"
+        );
+        assert_parse_error_contains(&cbf, "expected finite float");
+    }
+}
+
+/// Same horizontal check for `ACOORD` (constraint matrix entries).
+#[test]
+fn non_finite_acoord_is_error() {
+    for bad in ["NaN", "inf", "-inf"] {
+        let cbf = format!(
+            "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+1 1
+F 1
+
+CON
+1 1
+L+ 1
+
+ACOORD
+1
+0 0 {bad}
+"
+        );
+        assert_parse_error_contains(&cbf, "expected finite float");
+    }
+}
