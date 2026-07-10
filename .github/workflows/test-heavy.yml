@@ -99,11 +99,9 @@ jobs:
         run: |
           cargo nextest run --release --features parallel --profile heavy \
             --run-ignored all --no-fail-fast --test-threads 3 \
-            -E 'not (test(=d6cube_postsolve_under_1s) + test(=diag_osa60_must_reach_known_objective))'
+            -E 'not test(=diag_osa60_must_reach_known_objective)'
       - name: Run heavy perf-open targets (informational)
         # 既知未達成 or margin が machine 依存の perf 目標:
-        #   - d6cube_postsolve_under_1s: 60s で Optimal 未達 (収束は
-        #     lp_simplex_stall_d6cube_converges が must-pass で追跡)
         #   - diag_osa60_must_reach_known_objective: default path が 60s で
         #     Optimal を証明できない (#88/#89)。correctness は
         #     diag_osa60_is_feasible_and_honest が must-pass で追跡。
@@ -112,9 +110,18 @@ jobs:
         #
         # greenbea_postsolve_under_5s は 2026-07-09 に must-pass へ昇格 (7/7
         # 緑観測、tests/diag_postsolve_cleanup_gate.rs 参照)。この段からは除去。
+        #
+        # d6cube_postsolve_under_1s は 2026-07-10 に廃止。60s の budget では
+        # d6cube が Optimal に到達できず「postsolve < 1s」の assert が一度も
+        # 評価されない vacuous gate だったための perf-open 指定だった (これは
+        # perf 目標未達ではなく単なる予算不足)。新テスト
+        # d6cube_optimal_and_postsolve_fast_tier2
+        # (tests/diag_d6cube_perf.rs, ignore reason "heavy/tier2") は 400s
+        # budget で Optimal に到達したうえで postsolve gate を評価するため
+        # vacuous ではなくなり、must-pass 側へ統合した。
         if: always()
         continue-on-error: true
         run: |
           cargo nextest run --release --features parallel --profile heavy \
             --run-ignored all --no-fail-fast --test-threads 3 \
-            -E 'test(=d6cube_postsolve_under_1s) + test(=diag_osa60_must_reach_known_objective)'
+            -E 'test(=diag_osa60_must_reach_known_objective)'
