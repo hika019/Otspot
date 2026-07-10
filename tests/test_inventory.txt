@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2682 testcases, 26 ignored
+# totals: 2683 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -67,6 +67,7 @@ otspot-core	conic::tests::infeasible_lp_detected	active
 otspot-core	conic::tests::lp_as_socp_matches_simplex	active
 otspot-core	conic::tests::miqcp_convexity_unproven_is_refused	active
 otspot-core	conic::tests::miqcp_integer_ball_matches_enumeration	active
+otspot-core	conic::tests::miqcp_integer_ball_node_relaxation_reaches_optimal	active
 otspot-core	conic::tests::miqcp_objective_recomputed_from_x_not_epigraph_bound	active
 otspot-core	conic::tests::misocp_ball_integer_optimum	active
 otspot-core	conic::tests::misocp_certified_infeasible_returns_infeasible	active

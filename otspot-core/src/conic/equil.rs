@@ -630,7 +630,7 @@ mod tests {
             cone: ConeSpec { l: 0, soc: vec![2] },
         };
         let opts = ConicOptions::default();
-        let raw = super::super::ipm::solve(&prob, &opts);
+        let raw = super::super::ipm::solve(&prob, &opts, true);
         let scaled_path = super::super::solve_socp(&prob, &opts);
         assert_eq!(raw.status, SolveStatus::Optimal, "{raw:?}");
         assert_eq!(scaled_path.status, SolveStatus::Optimal, "{scaled_path:?}");
@@ -705,7 +705,7 @@ mod tests {
         let opts = ConicOptions::default();
         let known_obj = 5.0;
 
-        let raw = super::super::ipm::solve(&badly_scaled, &opts);
+        let raw = super::super::ipm::solve(&badly_scaled, &opts, true);
         let raw_ok = raw.status == SolveStatus::Optimal
             && (raw.objective - known_obj).abs() < 1e-2 * known_obj;
         assert!(

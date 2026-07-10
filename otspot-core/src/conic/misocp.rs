@@ -393,7 +393,13 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         // relaxation's infeasibility/unboundedness, true regardless of the
         // reparametrization -- feasibility is scale-invariant), never a
         // certificate's numeric value.
-        let mut res = ipm::solve(&relax, opts);
+        // A branch-and-bound relaxation node is a tightly-bounded, low-degree
+        // subproblem: the Mehrotra starting-point balancing that helps the
+        // high-degree continuous root SOCP instead overshoots here and stalls
+        // the last iterations at the precision floor (see `ipm::starting_point`),
+        // so the node is solved from the plain data-driven start (`balance =
+        // false`).
+        let mut res = ipm::solve(&relax, opts, false);
         // Test-only: force this node's status (dropping certificates) to inject
         // a deterministic, non-certificate node failure (see `NODE_STATUS_PLAN`).
         #[cfg(test)]

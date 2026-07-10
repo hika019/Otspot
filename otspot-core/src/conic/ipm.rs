@@ -52,7 +52,10 @@ fn balance_start(e: &[f64], s: &mut [f64], z: &mut [f64]) {
     }
 }
 
-pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
+/// Solves the conic problem. `balance` enables the Mehrotra starting-point
+/// complementarity balancing (see [`starting_point`]); root solves pass `true`,
+/// branch-and-bound relaxation nodes pass `false`.
+pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) -> ConicResult {
     if let Err(e) = problem.validate() {
         return failed(problem, SolveStatus::NotSupported(e));
     }
@@ -101,6 +104,7 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult 
         &mut kkt_caches,
         &kkt_cfg,
         opts.deadline,
+        balance,
     ) {
         x = sx;
         y = sy;
@@ -386,6 +390,7 @@ fn starting_point(
     caches: &mut kkt::KktCaches,
     kkt_cfg: &KktConfig,
     deadline: Option<Instant>,
+    balance: bool,
 ) -> Option<StartingPoint> {
     let sc = cone::nt_scaling(blk, e, e); // s = z = e => W = I
     let n_e = n + blk.n_border();
@@ -426,7 +431,20 @@ fn starting_point(
 
     shift_into_cone(blk, &mut s0);
     shift_into_cone(blk, &mut z0);
-    balance_start(e, &mut s0, &mut z0);
+    // Mehrotra complementarity balancing lifts the starting `mu` (`s.z`) by
+    // roughly a factor of two while equalising complementarity across cones. On
+    // a high-degree continuous root SOCP whose relative gap `mu*nu/(1+|c'x|)`
+    // must reach `~1e-12` for `nu` in the thousands (e.g. cblib `qssp30`), that
+    // extra headroom is what lets the last iterations cross `tol`. On a
+    // tightly-bounded, low-degree branch-and-bound relaxation node the same
+    // lift instead overshoots, so the iterate stalls one part in `~1e-9` short
+    // of `tol` at the precision floor and breaks down. `balance` is therefore
+    // requested only by the root solves (`solve_socp`/`solve_qcqp`), not by the
+    // MISOCP/MIQCP node relaxations, which already converge from the plain
+    // data-driven start.
+    if balance {
+        balance_start(e, &mut s0, &mut z0);
+    }
     // Re-check: the shift and balancing scale by `s.z / trace`, which could in
     // principle overflow on pathological data; fall back to `s = z = e` rather
     // than seed the solve with a non-finite iterate.

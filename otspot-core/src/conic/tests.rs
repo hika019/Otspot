@@ -5073,3 +5073,66 @@ fn solve_socp_checks_cancel_flag_before_equilibration() {
          took {elapsed:?}"
     );
 }
+
+/// Regression sentinel for the MIQCP branch-and-bound node relaxation. The
+/// integer ball `x0^2 + x1^2 <= r2`, `x_i in {0..k}`, minimising `-x0 - 2 x1`,
+/// has its optimum on a doubly-active vertex (SOC boundary *and* a box bound),
+/// so one B&B node's SOCP relaxation sits at the tol=1e-9 precision floor.
+///
+/// The Mehrotra starting-point balancing (`ipm::balance_start`) roughly doubles
+/// the starting `mu`; on this low-degree, tightly-bounded relaxation node that
+/// overshoots and stalls the last iterations one part in `~1e-9` short of `tol`,
+/// returning `NumericalError` for the node and hence `SuboptimalSolution` for
+/// the whole MIQCP (measured before the fix: `SuboptimalSolution`, obj -7 vs the
+/// true -8). Passing `balance = false` for the B&B node solve (the fix) lets the
+/// node converge cleanly. Reverting that (`ipm::solve(&relax, opts, true)` in
+/// `misocp::solve_misocp`) turns the `r2 = 13` case below back into
+/// `SuboptimalSolution`, failing this test. The optimum -8 at `(2, 3)` is an
+/// independent oracle (brute-force enumeration below), not the solver.
+///
+/// This is the default-profile guard for a regression that previously only the
+/// `#[ignore]`d `bench_conic_suite` caught.
+#[test]
+fn miqcp_integer_ball_node_relaxation_reaches_optimal() {
+    for &(r2, k) in &[(5.0f64, 3i64), (8.0, 3), (13.0, 4)] {
+        let n = 2usize;
+        let p = csc(&[vec![2.0, 0.0], vec![0.0, 2.0]], 2, 2);
+        let qp = QcqpProblem {
+            n,
+            p0: None,
+            q0: vec![-1.0, -2.0],
+            quad: vec![QuadConstraint {
+                p,
+                q: vec![0.0, 0.0],
+                r: -r2,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+        };
+        // Independent oracle: brute-force the best integer point in the ball.
+        let mut best = f64::INFINITY;
+        for x0 in 0..=k {
+            for x1 in 0..=k {
+                if (x0 * x0 + x1 * x1) as f64 <= r2 {
+                    best = best.min(-(x0 as f64) - 2.0 * (x1 as f64));
+                }
+            }
+        }
+        let res = solve_miqcp(
+            &qp,
+            &[0, 1],
+            &[0.0, 0.0],
+            &[k as f64, k as f64],
+            &ConicOptions::default(),
+            &BbOptions::default(),
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "miqcp r2={r2}");
+        assert!(
+            (res.objective - best).abs() < 1e-3,
+            "miqcp r2={r2}: obj {} != brute {best}",
+            res.objective
+        );
+    }
+}
