@@ -162,7 +162,7 @@ pub struct ConicOptions {
     pub deadline: Option<std::time::Instant>,
     /// Shared cancellation flag mirroring `SolverOptions::cancel_flag`. The
     /// IPM iteration loop checks this alongside `deadline` (see
-    /// [`Self::stop_requested`]) so a flag fired from another thread stops a
+    /// `stop_requested`) so a flag fired from another thread stops a
     /// solve already in flight, not only one that starts after the flag is
     /// already set. `None` disables it (default).
     pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
