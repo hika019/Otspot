@@ -116,7 +116,7 @@ Solve-rate benchmark on standard public sets via the `otspot-dev` benchmark harn
 
 | Problem type | Set | # | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
-| Feasible LP | Netlib | 109 | 108 optimal, 1 suboptimal | 108 optimal, 1 suboptimal |
+| Feasible LP | Netlib | 109 | 109 optimal | 108 optimal, 1 suboptimal |
 | Convex QP | Maros–Mészáros | 138 | 121 optimal, 12 suboptimal, 1 mismatch, 4 no-ref | 93 optimal, 42 suboptimal, 1 timeout, 2 no-ref |
 | MILP | MIPLIB 2017 small | 20 | 5 optimal, 15 timeout, 0 error | 5 optimal, 15 timeout, 0 error |
 | Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
@@ -124,7 +124,7 @@ Solve-rate benchmark on standard public sets via the `otspot-dev` benchmark harn
 
 **Optimal** = verified against known objective (proof-carrying KKT). `timeout = 1000s`, `jobs = 6`.
 
-LP: @1e-6 is 108/109 optimal, 0 timeout; the sole miss is `cycle` (SuboptimalSolution). @1e-8 is 108/109 optimal, 0 timeout; the sole miss is `greenbea` (SuboptimalSolution after failing the stricter primal proof gate).
+LP: @1e-6 is 109/109 optimal, 0 timeout. @1e-8 is 108/109 optimal, 0 timeout; the sole miss is `greenbea` (SuboptimalSolution after failing the stricter primal proof gate).
 
 QP: @1e-6 is 121/138 optimal, 0 timeout. Misses are 12 SuboptimalSolution, 1 OBJ_MISMATCH (`LISWET7`), and 4 solved-but-unverified cases with no published reference. @1e-8 is 93/138 optimal, with 42 SuboptimalSolution, 1 TIMEOUT (`POWELL20`), and 2 solved-but-unverified cases.
 

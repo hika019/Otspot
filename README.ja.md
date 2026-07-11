@@ -114,7 +114,7 @@ let result = solve(&prob);
 
 | 問題種別 | セット | 問題数 | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
-| 実行可能 LP | Netlib | 109 | 最適解 108、SuboptimalSolution 1 | 最適解 108、SuboptimalSolution 1 |
+| 実行可能 LP | Netlib | 109 | 最適解 109 | 最適解 108、SuboptimalSolution 1 |
 | 凸 QP | Maros–Mészáros | 138 | 最適解 121、SuboptimalSolution 12、OBJ_MISMATCH 1、参照値なし 4 | 最適解 93、SuboptimalSolution 42、TIMEOUT 1、参照値なし 2 |
 | MILP | MIPLIB 2017 small | 20 | 最適解 5、TIMEOUT 15、ERROR 0 | 最適解 5、TIMEOUT 15、ERROR 0 |
 | 実行不可能 LP | Netlib | 29 | 正答 29 | 正答 29 |
@@ -122,7 +122,7 @@ let result = solve(&prob);
 
 **最適解** = 既知最適値と照合済み（proof-carrying KKT）。`timeout = 1000s`、`jobs = 6` で計測。
 
-LP: @1e-6 は 108/109 最適解、timeout 0。ミスは `cycle` (SuboptimalSolution)。@1e-8 は 108/109 最適解、timeout 0。ミスは `greenbea`（より厳しい primal 証明ゲートで SuboptimalSolution）。
+LP: @1e-6 は 109/109 最適解、timeout 0。@1e-8 は 108/109 最適解、timeout 0。ミスは `greenbea`（より厳しい primal 証明ゲートで SuboptimalSolution）。
 
 QP: @1e-6 は 121/138 最適解、timeout 0。ミスは SuboptimalSolution 12 件、OBJ_MISMATCH 1 件 (`LISWET7`)、公開参照値なしの検査済み 4 件。@1e-8 は 93/138 最適解、SuboptimalSolution 42 件、TIMEOUT 1 件 (`POWELL20`)、公開参照値なしの検査済み 2 件。
 

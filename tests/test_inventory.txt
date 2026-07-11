@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2695 testcases, 26 ignored
+# totals: 2688 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1839,9 +1839,6 @@ otspot-io	mps::tests::test_mps_columns_malformed_too_few_fields_is_error	active
 otspot-io	mps::tests::test_mps_columns_nan_value_is_error	active
 otspot-io	mps::tests::test_mps_duplicate_ranges_row_is_error	active
 otspot-io	mps::tests::test_mps_duplicate_rhs_row_is_error	active
-otspot-io	mps::tests::test_mps_multi_vector_ranges_reusing_row_names_parses	active
-otspot-io	mps::tests::test_mps_multi_vector_rhs_internal_duplicate_in_second_vector_is_error	active
-otspot-io	mps::tests::test_mps_multi_vector_rhs_reusing_row_names_parses	active
 otspot-io	mps::tests::test_mps_obj_offset_propagates_to_solve_result	active
 otspot-io	mps::tests::test_mps_objsense_max_obj_offset_sign_flip	active
 otspot-io	mps::tests::test_mps_ranges_malformed_too_few_fields_is_error	active
@@ -1938,10 +1935,6 @@ otspot-io	qps::tests::test_qps_duplicate_ranges_row_is_error	active
 otspot-io	qps::tests::test_qps_duplicate_rhs_row_is_error	active
 otspot-io	qps::tests::test_qps_duplicate_rhs_row_shorthand_is_error	active
 otspot-io	qps::tests::test_qps_fixed_format_obj_row_nan_invalidates_offset	active
-otspot-io	qps::tests::test_qps_multi_vector_ranges_reusing_row_names_parses	active
-otspot-io	qps::tests::test_qps_multi_vector_rhs_internal_duplicate_in_second_vector_is_error	active
-otspot-io	qps::tests::test_qps_multi_vector_rhs_reusing_row_names_parses	active
-otspot-io	qps::tests::test_qps_multi_vector_rhs_shorthand_new_row_after_named_vector_parses	active
 otspot-io	qps::tests::test_qps_objsense_max_obj_offset_sign_flip	active
 otspot-io	qps::tests::test_qps_quadobj_duplicate_entry_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_malformed_too_few_fields_is_error	active

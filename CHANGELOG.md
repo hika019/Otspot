@@ -4,6 +4,16 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+conic/QCQP の正当性修正と SOCP IPM の収束改善、大規模 LP の presolve 性能改善。
+
+- 非凸 QCQP が凸 SOCP として誤って「証明付き Optimal」と報告される問題を修正: Cholesky がゼロピボット列の非ゼロ off-diagonal を捨てて不定値を PSD と誤判定していた。PSD 判定の許容をスケール相対化
+- QCQP の McCormick global fallback で実行可能性許容が最適性ギャップ許容と混同され、制約に違反する点を `Optimal` と報告する問題を修正
+- SOCP IPM にデータ駆動の初期点と Mehrotra 相補均衡化を導入し CBLIB conic 問題の収束を改善。B&B 緩和ノードでは均衡化を無効化して MIQCP の退化を回避
+- presolve が冗長な含意上界を大量に生成して標準形の行数を爆発させ、大規模 LP を大幅に遅くする問題を修正
+- 公開 `QpProblem` フィールドへ不整合な二次制約を代入した際の添字範囲外パニックを、中央検証で防止
+- Model DSL の tolerance 伝播、他モデル変数の混入検出、CBF の非有限定数拒否を修正
+- ベンチマーク: LP @1e-6 109/109 optimal・@1e-8 108/109、QP Maros 121/138 @1e-6・93/138 @1e-8、MILP 5/20 optimal + 15 TIMEOUT
+
 ## [0.7.0] - 2026-06-29
 
 MIP のカット・分岐強化、LP 感度分析の追加、QP/LP の正当性修正。
