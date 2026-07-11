@@ -279,6 +279,10 @@ pub fn qplib_qcqp_csv_path(root: &Path) -> PathBuf {
     root.join("data/baseline_objectives/qplib_qcqp.csv")
 }
 
+/// A benchmark baseline: per-problem reference objectives paired with the
+/// expected terminal status parsed from the same rows.
+type Baselines = (HashMap<String, f64>, HashMap<String, ExpectedStatus>);
+
 /// Baseline objectives/statuses for a `bench_qplib` run: `detect_csv_path`'s
 /// resolution (respecting `override_path`, e.g. a `--known-optimal` CLI
 /// flag) merged with `qplib_qcqp_csv_path`'s QCQP-specific entries.
@@ -288,18 +292,60 @@ pub fn qplib_qcqp_csv_path(root: &Path) -> PathBuf {
 /// `detect_csv_path` could resolve to, so there is no double-counting risk,
 /// and skipping the merge on an explicit override would silently reopen the
 /// `CHECKED[no_ref]` gap for that invocation.
-pub fn load_qplib_baselines(
-    data_dir: &str,
-    override_path: Option<&str>,
-    root: &Path,
-) -> (HashMap<String, f64>, HashMap<String, ExpectedStatus>) {
+///
+/// Panics (with the offending problem ID) if the two files share any problem
+/// ID: the whole point of keeping `qplib_qcqp.csv` separate is that its
+/// officially-published values must not be silently overwritten by — nor
+/// silently overwrite — `qplib.csv`'s self-measured ones. A shared ID is a
+/// data-authoring error that must fail loudly rather than resolve by
+/// insertion order.
+pub fn load_qplib_baselines(data_dir: &str, override_path: Option<&str>, root: &Path) -> Baselines {
     let csv = detect_csv_path(data_dir, override_path, root);
-    let mut objectives = load_baseline_objectives(&csv).unwrap_or_default();
-    let mut statuses = load_expected_statuses(&csv);
+    let base_obj = load_baseline_objectives(&csv).unwrap_or_default();
+    let base_stat = load_expected_statuses(&csv);
     let qcqp_csv = qplib_qcqp_csv_path(root);
-    objectives.extend(load_baseline_objectives(&qcqp_csv).unwrap_or_default());
-    statuses.extend(load_expected_statuses(&qcqp_csv));
-    (objectives, statuses)
+    let extra_obj = load_baseline_objectives(&qcqp_csv).unwrap_or_default();
+    let extra_stat = load_expected_statuses(&qcqp_csv);
+    merge_qplib_baselines(base_obj, base_stat, extra_obj, extra_stat).unwrap_or_else(|dup| {
+        panic!(
+            "qplib.csv ({}) and qplib_qcqp.csv ({}) share problem ID(s) [{}]; \
+             the QCQP baseline is kept separate precisely so its published values \
+             neither overwrite nor are overwritten by qplib.csv's self-measured ones — \
+             remove the duplicate from one file",
+            csv.display(),
+            qcqp_csv.display(),
+            dup.join(", "),
+        )
+    })
+}
+
+/// Merge `extra` baseline objectives/statuses into `base`, erroring with the
+/// sorted list of shared problem IDs if the two carry any ID in common.
+///
+/// The check spans both the objective map (numeric rows) and the status map
+/// (`INFEASIBLE`/`UNBOUNDED` sentinel rows), so a collision on either surface
+/// is caught. On success the merged `(objectives, statuses)` pair is returned;
+/// on collision no merge is performed.
+fn merge_qplib_baselines(
+    mut base_obj: HashMap<String, f64>,
+    mut base_stat: HashMap<String, ExpectedStatus>,
+    extra_obj: HashMap<String, f64>,
+    extra_stat: HashMap<String, ExpectedStatus>,
+) -> Result<Baselines, Vec<String>> {
+    let mut dups: Vec<String> = extra_obj
+        .keys()
+        .filter(|k| base_obj.contains_key(*k))
+        .chain(extra_stat.keys().filter(|k| base_stat.contains_key(*k)))
+        .cloned()
+        .collect();
+    if !dups.is_empty() {
+        dups.sort();
+        dups.dedup();
+        return Err(dups);
+    }
+    base_obj.extend(extra_obj);
+    base_stat.extend(extra_stat);
+    Ok((base_obj, base_stat))
 }
 
 /// Load objective baseline CSV.
@@ -971,18 +1017,90 @@ mod tests {
     }
 
     /// Companion fact-check for the sentinel above: `qplib.csv` and
-    /// `qplib_qcqp.csv` must not already share `QPLIB_2546` through some
-    /// other path (which would make the merge test above pass vacuously
-    /// even without the fix).
+    /// `qplib_qcqp.csv` must not share *any* problem ID (not just
+    /// `QPLIB_2546`), across both the objective and the status surface —
+    /// a shared ID would make the merge ambiguous (whose value wins?) and
+    /// is exactly what `merge_qplib_baselines` now rejects. Checked against
+    /// the real checked-in CSVs so a future data edit that introduces an
+    /// overlap trips here.
     #[test]
     fn test_qplib_csv_and_qcqp_csv_have_disjoint_ids() {
         let root = workspace_root();
         let qplib_csv = super::detect_csv_path("data/qplib", None, &root);
-        let qplib_only = load_baseline_objectives(&qplib_csv).expect("qplib.csv must parse");
+        let qcqp_csv = qplib_qcqp_csv_path(&root);
+
+        let base_obj = load_baseline_objectives(&qplib_csv).expect("qplib.csv must parse");
+        let base_stat = load_expected_statuses(&qplib_csv);
+        let extra_obj = load_baseline_objectives(&qcqp_csv).expect("qplib_qcqp.csv must parse");
+        let extra_stat = load_expected_statuses(&qcqp_csv);
+
+        // Union of IDs on each side, so an overlap on either surface counts.
+        let base_ids: std::collections::HashSet<&String> =
+            base_obj.keys().chain(base_stat.keys()).collect();
+        let shared: Vec<&String> = extra_obj
+            .keys()
+            .chain(extra_stat.keys())
+            .filter(|k| base_ids.contains(*k))
+            .collect();
         assert!(
-            !qplib_only.contains_key("QPLIB_2546"),
-            "premise violated: QPLIB_2546 must NOT already be in qplib.csv"
+            shared.is_empty(),
+            "qplib.csv and qplib_qcqp.csv must have disjoint problem IDs, shared: {shared:?}"
         );
+    }
+
+    /// Sentinel for `merge_qplib_baselines`'s collision guard: a synthetic
+    /// base + extra that share a problem ID must error with that ID, not
+    /// merge by insertion order.
+    ///
+    /// Reverting the guard (letting `base.extend(extra)` run unconditionally)
+    /// makes this FAIL — the call would return `Ok` and silently keep the
+    /// extra value.
+    #[test]
+    fn test_merge_qplib_baselines_rejects_shared_id() {
+        let mut base_obj = HashMap::new();
+        base_obj.insert("QPLIB_SHARED".to_string(), 1.0);
+        base_obj.insert("QPLIB_ONLY_BASE".to_string(), 2.0);
+        let base_stat: HashMap<String, ExpectedStatus> = base_obj
+            .keys()
+            .map(|k| (k.clone(), ExpectedStatus::Optimal))
+            .collect();
+
+        let mut extra_obj = HashMap::new();
+        extra_obj.insert("QPLIB_SHARED".to_string(), 99.0); // collides with base
+        extra_obj.insert("QPLIB_ONLY_EXTRA".to_string(), 3.0);
+        let extra_stat: HashMap<String, ExpectedStatus> = extra_obj
+            .keys()
+            .map(|k| (k.clone(), ExpectedStatus::Optimal))
+            .collect();
+
+        let err = super::merge_qplib_baselines(base_obj, base_stat, extra_obj, extra_stat)
+            .expect_err("shared problem ID must be rejected, not merged");
+        assert_eq!(
+            err,
+            vec!["QPLIB_SHARED".to_string()],
+            "collision list must name exactly the shared ID"
+        );
+    }
+
+    /// Companion: a disjoint synthetic base + extra must merge cleanly,
+    /// carrying every ID from both sides through.
+    #[test]
+    fn test_merge_qplib_baselines_merges_disjoint() {
+        let mut base_obj = HashMap::new();
+        base_obj.insert("QPLIB_ONLY_BASE".to_string(), 2.0);
+        let base_stat: HashMap<String, ExpectedStatus> =
+            [("QPLIB_ONLY_BASE".to_string(), ExpectedStatus::Optimal)].into();
+
+        let mut extra_obj = HashMap::new();
+        extra_obj.insert("QPLIB_ONLY_EXTRA".to_string(), 3.0);
+        let extra_stat: HashMap<String, ExpectedStatus> =
+            [("QPLIB_ONLY_EXTRA".to_string(), ExpectedStatus::Optimal)].into();
+
+        let (obj, stat) = super::merge_qplib_baselines(base_obj, base_stat, extra_obj, extra_stat)
+            .expect("disjoint inputs must merge");
+        assert_eq!(obj.get("QPLIB_ONLY_BASE"), Some(&2.0));
+        assert_eq!(obj.get("QPLIB_ONLY_EXTRA"), Some(&3.0));
+        assert_eq!(stat.len(), 2);
     }
 
     /// `--known-optimal` override path must still get the qcqp merge (not

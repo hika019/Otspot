@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2683 testcases, 26 ignored
+# totals: 2695 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1735,8 +1735,13 @@ otspot-dev	bench_utils::tests::test_dfeas_lp_path_ignores_short_dual_no_panic	ac
 otspot-dev	bench_utils::tests::test_load_expected_statuses_case_insensitive	active
 otspot-dev	bench_utils::tests::test_load_expected_statuses_infeasible	active
 otspot-dev	bench_utils::tests::test_load_expected_statuses_skips_comments_and_header	active
+otspot-dev	bench_utils::tests::test_load_qplib_baselines_merges_qcqp_csv	active
+otspot-dev	bench_utils::tests::test_load_qplib_baselines_merges_qcqp_csv_with_override	active
+otspot-dev	bench_utils::tests::test_merge_qplib_baselines_merges_disjoint	active
+otspot-dev	bench_utils::tests::test_merge_qplib_baselines_rejects_shared_id	active
 otspot-dev	bench_utils::tests::test_pfeas_normalized_eq_both_directions	active
 otspot-dev	bench_utils::tests::test_pfeas_normalized_ge	active
+otspot-dev	bench_utils::tests::test_qplib_csv_and_qcqp_csv_have_disjoint_ids	active
 otspot-dev::bin/bench_qplib	unsupported_classify_tests::binary_var_message_is_integer_category	active
 otspot-dev::bin/bench_qplib	unsupported_classify_tests::constraint_type_message_is_qcqp_category	active
 otspot-dev::bin/bench_qplib	unsupported_classify_tests::unknown_message_is_other	active
@@ -1834,6 +1839,9 @@ otspot-io	mps::tests::test_mps_columns_malformed_too_few_fields_is_error	active
 otspot-io	mps::tests::test_mps_columns_nan_value_is_error	active
 otspot-io	mps::tests::test_mps_duplicate_ranges_row_is_error	active
 otspot-io	mps::tests::test_mps_duplicate_rhs_row_is_error	active
+otspot-io	mps::tests::test_mps_multi_vector_ranges_reusing_row_names_parses	active
+otspot-io	mps::tests::test_mps_multi_vector_rhs_internal_duplicate_in_second_vector_is_error	active
+otspot-io	mps::tests::test_mps_multi_vector_rhs_reusing_row_names_parses	active
 otspot-io	mps::tests::test_mps_obj_offset_propagates_to_solve_result	active
 otspot-io	mps::tests::test_mps_objsense_max_obj_offset_sign_flip	active
 otspot-io	mps::tests::test_mps_ranges_malformed_too_few_fields_is_error	active
@@ -1930,6 +1938,10 @@ otspot-io	qps::tests::test_qps_duplicate_ranges_row_is_error	active
 otspot-io	qps::tests::test_qps_duplicate_rhs_row_is_error	active
 otspot-io	qps::tests::test_qps_duplicate_rhs_row_shorthand_is_error	active
 otspot-io	qps::tests::test_qps_fixed_format_obj_row_nan_invalidates_offset	active
+otspot-io	qps::tests::test_qps_multi_vector_ranges_reusing_row_names_parses	active
+otspot-io	qps::tests::test_qps_multi_vector_rhs_internal_duplicate_in_second_vector_is_error	active
+otspot-io	qps::tests::test_qps_multi_vector_rhs_reusing_row_names_parses	active
+otspot-io	qps::tests::test_qps_multi_vector_rhs_shorthand_new_row_after_named_vector_parses	active
 otspot-io	qps::tests::test_qps_objsense_max_obj_offset_sign_flip	active
 otspot-io	qps::tests::test_qps_quadobj_duplicate_entry_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_malformed_too_few_fields_is_error	active
