@@ -3,9 +3,15 @@
 //!
 //! Run: `cargo run --release --example solve_cbf -- [--eps <value>] <file-or-dir.cbf> [...]`
 //!
-//! `--eps <value>` overrides the convergence tolerance for the whole run
-//! (default [`DEFAULT_BENCH_TOL`], `1e-6`); e.g. `--eps 1e-8` for a tighter
-//! pass over the same CBLIB set.
+//! `--eps <value>` overrides, for the whole run, both the SOCP interior-point
+//! convergence tolerance ([`ConicOptions::tol`]) and the MISOCP
+//! branch-and-bound optimality-gap tolerance ([`BbOptions::gap_tol`]); default
+//! [`DEFAULT_BENCH_TOL`], `1e-6`; e.g. `--eps 1e-8` for a tighter pass over the
+//! same CBLIB set. It deliberately does *not* touch the integrality tolerance
+//! ([`BbOptions::int_tol`], fixed at its `1e-6` default): that governs when a
+//! fractional value counts as integer, which is unrelated to solve accuracy —
+//! slaving it to eps would accept fractional incumbents at loose eps and
+//! over-branch legitimate nodes at tight eps.
 //!
 //! `otspot_core::conic::{ConicOptions,BbOptions}` both carry a `deadline:
 //! Option<Instant>` (checked once per IPM iteration / B&B node), but this
@@ -75,9 +81,12 @@ fn csv_field(s: &str) -> String {
 /// Pulls a `--eps <value>` flag out of the raw CLI args, returning the
 /// resolved tolerance (default [`DEFAULT_BENCH_TOL`] if absent) and the
 /// remaining args unchanged and in order (the `.cbf` file/directory
-/// positionals `collect_cbf_files` expects). Exits the process with a
-/// stderr message and status 2 if `--eps` is given without a value or with
-/// a value that does not parse as `f64`.
+/// positionals `collect_cbf_files` expects). The resolved value feeds both
+/// [`ConicOptions::tol`] and [`BbOptions::gap_tol`]; it does not affect the
+/// integrality tolerance. Exits the process with a stderr message and status
+/// 2 if `--eps` is given without a value, with a value that does not parse as
+/// `f64`, or with a value outside the sane tolerance range `(0, 1)` (which
+/// also rejects `nan`, `inf`, and the finite fat-finger `1e8`).
 fn parse_eps_flag(args: Vec<String>) -> (f64, Vec<String>) {
     let mut eps = DEFAULT_BENCH_TOL;
     let mut rest = Vec::with_capacity(args.len());
@@ -92,6 +101,10 @@ fn parse_eps_flag(args: Vec<String>) -> (f64, Vec<String>) {
                 eprintln!("invalid --eps value {value:?}: {e}");
                 std::process::exit(2);
             });
+            if !eps.is_finite() || eps <= 0.0 || eps >= 1.0 {
+                eprintln!("--eps must be a finite tolerance in (0, 1), got: {value}");
+                std::process::exit(2);
+            }
         } else {
             rest.push(arg);
         }
@@ -117,7 +130,6 @@ fn main() {
         ..ConicOptions::default()
     };
     let bb_opts = BbOptions {
-        int_tol: eps,
         gap_tol: eps,
         ..BbOptions::default()
     };
