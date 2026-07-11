@@ -261,6 +261,47 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
     PathBuf::from("data/baseline_objectives").join(csv_name)
 }
 
+/// Path to the QCQP-specific QPLIB baseline (`qplib_qcqp.csv`).
+///
+/// `data/qplib` (and `data/qplib_unsupported`) physically mix CCQ/DCQ/QCQ
+/// (quadratic-constraint) instances in among the DCL/QCL ones that
+/// `detect_csv_path` resolves to `qplib.csv`; that file never lists the
+/// QCQP IDs (`qplib_qcqp.csv` was added separately, PR #25), so a bare
+/// `detect_csv_path` lookup leaves every QCQP-route result with no
+/// reference to check against (`CHECKED[no_ref]`, an obj-regression blind
+/// spot). Callers merge this file's entries into whatever `detect_csv_path`
+/// resolved rather than replacing it: kept as a separate file (not merged
+/// into `qplib.csv` on disk) because the two have different provenance —
+/// `qplib.csv`'s own header states its values are self-measured, not
+/// externally verified, while `qplib_qcqp.csv` carries officially published
+/// QPLIB optimal values.
+pub fn qplib_qcqp_csv_path(root: &Path) -> PathBuf {
+    root.join("data/baseline_objectives/qplib_qcqp.csv")
+}
+
+/// Baseline objectives/statuses for a `bench_qplib` run: `detect_csv_path`'s
+/// resolution (respecting `override_path`, e.g. a `--known-optimal` CLI
+/// flag) merged with `qplib_qcqp_csv_path`'s QCQP-specific entries.
+///
+/// The merge is unconditional -- it runs whether or not `override_path` was
+/// given -- because `qplib_qcqp.csv` is a distinct file from anything
+/// `detect_csv_path` could resolve to, so there is no double-counting risk,
+/// and skipping the merge on an explicit override would silently reopen the
+/// `CHECKED[no_ref]` gap for that invocation.
+pub fn load_qplib_baselines(
+    data_dir: &str,
+    override_path: Option<&str>,
+    root: &Path,
+) -> (HashMap<String, f64>, HashMap<String, ExpectedStatus>) {
+    let csv = detect_csv_path(data_dir, override_path, root);
+    let mut objectives = load_baseline_objectives(&csv).unwrap_or_default();
+    let mut statuses = load_expected_statuses(&csv);
+    let qcqp_csv = qplib_qcqp_csv_path(root);
+    objectives.extend(load_baseline_objectives(&qcqp_csv).unwrap_or_default());
+    statuses.extend(load_expected_statuses(&qcqp_csv));
+    (objectives, statuses)
+}
+
 /// Load objective baseline CSV.
 ///
 /// Returns an error when the file cannot be read. Callers that need a
@@ -871,6 +912,95 @@ mod tests {
         assert!(
             abs.is_finite() && rel.is_finite(),
             "LP path must ignore a short dual and return finite, got ({abs}, {rel})"
+        );
+    }
+
+    /// Real workspace root, exercising the actual checked-in
+    /// `data/baseline_objectives/qplib.csv` + `qplib_qcqp.csv` (no synthetic
+    /// stand-ins): `load_qplib_baselines` must return both DCL/QCL problems
+    /// from `qplib.csv` *and* the CCQ/DCQ/QCQ problems that live only in
+    /// `qplib_qcqp.csv` (PR #25 review "Wire QCQP baselines into benchmark
+    /// selection").
+    ///
+    /// `QPLIB_2546` (CCQ, `data/qplib`) is the finding's own example; its
+    /// expected objective is read directly from `qplib_qcqp.csv` here (an
+    /// independent read, not the production loader) and compared literally.
+    ///
+    /// Sentinel: reverting `load_qplib_baselines` to a bare `detect_csv_path`
+    /// lookup (dropping the `qplib_qcqp_csv_path` merge) makes this FAIL --
+    /// `QPLIB_2546` would be absent from the returned map.
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn test_load_qplib_baselines_merges_qcqp_csv() {
+        let root = workspace_root();
+        let (objectives, _statuses) = load_qplib_baselines("data/qplib", None, &root);
+
+        // Present only in qplib_qcqp.csv (not qplib.csv, confirmed separately
+        // by test_qplib_csv_and_qcqp_csv_have_disjoint_ids below).
+        let qcqp_csv = qplib_qcqp_csv_path(&root);
+        let qcqp_only = load_baseline_objectives(&qcqp_csv).expect("qplib_qcqp.csv must parse");
+        assert!(
+            qcqp_only.contains_key("QPLIB_2546"),
+            "test premise: QPLIB_2546 must be in qplib_qcqp.csv"
+        );
+        assert_eq!(
+            objectives.get("QPLIB_2546"),
+            qcqp_only.get("QPLIB_2546"),
+            "load_qplib_baselines must carry QPLIB_2546's objective through \
+             from qplib_qcqp.csv: {objectives:?}"
+        );
+
+        // Present only in qplib.csv (DCL problem, no quadratic constraints).
+        let qplib_csv = super::detect_csv_path("data/qplib", None, &root);
+        let qplib_only = load_baseline_objectives(&qplib_csv).expect("qplib.csv must parse");
+        assert!(
+            qplib_only.contains_key("QPLIB_10034"),
+            "test premise: QPLIB_10034 must be in qplib.csv"
+        );
+        assert_eq!(
+            objectives.get("QPLIB_10034"),
+            qplib_only.get("QPLIB_10034"),
+            "load_qplib_baselines must still carry qplib.csv's own entries: {objectives:?}"
+        );
+    }
+
+    /// Companion fact-check for the sentinel above: `qplib.csv` and
+    /// `qplib_qcqp.csv` must not already share `QPLIB_2546` through some
+    /// other path (which would make the merge test above pass vacuously
+    /// even without the fix).
+    #[test]
+    fn test_qplib_csv_and_qcqp_csv_have_disjoint_ids() {
+        let root = workspace_root();
+        let qplib_csv = super::detect_csv_path("data/qplib", None, &root);
+        let qplib_only = load_baseline_objectives(&qplib_csv).expect("qplib.csv must parse");
+        assert!(
+            !qplib_only.contains_key("QPLIB_2546"),
+            "premise violated: QPLIB_2546 must NOT already be in qplib.csv"
+        );
+    }
+
+    /// `--known-optimal` override path must still get the qcqp merge (not
+    /// just the auto-detected default): `bench_parallel.sh` always passes an
+    /// explicit override for `data/qplib`, so the merge cannot be
+    /// conditional on `override_path.is_none()`.
+    #[test]
+    fn test_load_qplib_baselines_merges_qcqp_csv_with_override() {
+        let root = workspace_root();
+        let override_csv = super::detect_csv_path("data/qplib", None, &root);
+        let (objectives, _) = load_qplib_baselines(
+            "data/qplib",
+            Some(override_csv.to_str().expect("utf8 path")),
+            &root,
+        );
+        assert!(
+            objectives.contains_key("QPLIB_2546"),
+            "override path must still merge in qplib_qcqp.csv: {objectives:?}"
         );
     }
 }

@@ -21,9 +21,8 @@ use otspot_core::presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
 use otspot_core::problem::SolveStatus;
 use otspot_core::qp::{solve_qp_global, solve_qp_with};
 use otspot_dev::bench_utils::{
-    check_baseline_objective, compute_gap_to_global, compute_qp_kkt_max, detect_csv_path,
-    load_baseline_objectives, load_expected_statuses, parse_qplib_outcome, ExpectedStatus,
-    ObjCheckResult, ParseQplibOutcome,
+    check_baseline_objective, compute_gap_to_global, compute_qp_kkt_max, load_qplib_baselines,
+    parse_qplib_outcome, ExpectedStatus, ObjCheckResult, ParseQplibOutcome,
 };
 
 /// QP 元空間 KKT 残差の PASS 閾値 (Ruiz 振幅 100 級まで許容、`diag_nonconvex_kkt::EPS_KKT` 整合)。
@@ -177,11 +176,12 @@ fn main() {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default()
         };
-        let csv = detect_csv_path(&data_dir, baseline_override.as_deref(), &root);
-        (
-            load_baseline_objectives(&csv).unwrap_or_default(),
-            load_expected_statuses(&csv),
-        )
+        // qplib_qcqp.csv covers the CCQ/DCQ/QCQ instances mixed into this same
+        // data dir alongside the DCL/QCL ones `detect_csv_path` resolves;
+        // `load_qplib_baselines` merges it in unconditionally, so QCQP-route
+        // regressions gate instead of falling through as CHECKED[no_ref]
+        // (PR #25 review).
+        load_qplib_baselines(&data_dir, baseline_override.as_deref(), &root)
     };
     eprintln!(
         "Baseline objectives loaded: {} problems",

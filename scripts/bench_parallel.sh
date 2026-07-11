@@ -78,6 +78,8 @@ elif echo "$DATA_DIR_LOWER" | grep -qE "qplib[_-]nonconvex[_-]official"; then
 elif echo "$DATA_DIR_LOWER" | grep -qE "qplib[_-]nonconvex"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib_nonconvex_synthetic.csv"
 elif echo "$DATA_DIR_LOWER" | grep -q "qplib"; then
+  # bench_qplib はこの --known-optimal に加え qplib_qcqp.csv (CCQ/DCQ/QCQ 系)
+  # を常に自前でマージする (otspot_dev::bench_utils::qplib_qcqp_csv_path)。
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "osqp[_-]?bench"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/osqp_bench.csv"
