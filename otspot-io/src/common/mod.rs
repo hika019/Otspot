@@ -133,8 +133,11 @@ pub(crate) type VectorPairsResult = Result<(Option<String>, Vec<(String, f64)>),
 /// Disambiguation checks `parts[0]` against the rows declared in the
 /// already-parsed ROWS section: a real row name means there is no vector
 /// name and every token pairs up from index 0; otherwise `parts[0]` is the
-/// vector name and pairing starts at index 1. (A vector name colliding with
-/// an actual row name would defeat this — vanishingly unlikely in practice.)
+/// vector name and pairing starts at index 1.
+///
+/// RHS/RANGES/BOUNDS are parsed purely by whitespace tokenization, so strict
+/// fixed-column MPS files that rely on byte offsets (e.g. names containing
+/// embedded spaces) are NOT supported — only whitespace-separated files.
 pub(crate) fn parse_vector_pairs(
     parts: &[&str],
     rows: &[(String, RowType)],
@@ -143,6 +146,10 @@ pub(crate) fn parse_vector_pairs(
     section: &str,
     allow_nonfinite_for_row: Option<&str>,
 ) -> VectorPairsResult {
+    // A standard-form line whose vector name equals a declared row name is not
+    // disambiguable (MPS keeps row and vector namespaces separate); it is read
+    // as shorthand, yielding an odd token count that the parity check below
+    // rejects with a hard error — intentional fail-safe over a silent mis-parse.
     let has_vector_name = !parts.is_empty() && !row_index.contains(rows, parts[0]);
     let (vector_name, pair_tokens): (Option<String>, &[&str]) = if has_vector_name {
         (Some(parts[0].to_string()), &parts[1..])
@@ -184,12 +191,11 @@ pub(crate) fn parse_vector_pairs(
 /// section (RHS or RANGES), and which vector's values are actually applied.
 ///
 /// The MPS/QPS standard allows a section to carry multiple named vectors,
-/// each free to reuse the same row names (a second `RHS2` vector may
-/// legitimately repeat a row already given a value under `RHS1`). Only the
-/// FIRST vector encountered is applied to the caller's value map (GLPK/CPLEX
-/// convention: take the first vector, ignore the rest); later vectors are
-/// still checked for duplicates so malformed input isn't silently accepted
-/// just because its value will be discarded.
+/// each free to reuse the same row names. Only the FIRST vector encountered
+/// is applied to the caller's value map (GLPK/CPLEX convention: take the
+/// first vector, ignore the rest); a row appearing ONLY in a later vector is
+/// therefore dropped (its value is never taken). Later vectors are still
+/// checked for duplicates so malformed input isn't silently accepted.
 ///
 /// A line that omits its vector name (the shorthand form recognized by
 /// `parse_vector_pairs`) is attributed to whichever vector identity is
