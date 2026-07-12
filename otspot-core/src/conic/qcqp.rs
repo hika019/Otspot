@@ -527,8 +527,36 @@ pub struct QcqpResult {
     pub convexity_unproven: bool,
 }
 
+/// `QcqpResult` for a solve that never ran because `opts.stop_requested()`
+/// (deadline expired / cancel flag set) already fired, before this
+/// convex-bridge attempt could even start. `convexity_unproven` is `false`:
+/// that field specifically flags a Cholesky pivot clamp (see
+/// `QcqpResult::convexity_unproven`'s doc), which cannot have happened when
+/// `to_conic` never ran, and callers (`qp::qcqp_route::is_clean_convex_outcome`,
+/// `model::Model::solve_qcqp_internal`'s `is_clean_convex`) already treat
+/// *any* clean (non-unproven) `Timeout` from this attempt as reportable via
+/// the convex-bridge route, independent of when the deadline/cancel fired
+/// during it -- matching a stop that fires deep inside `to_conic`/`solve_socp`
+/// instead of before either ran.
+fn stopped_qcqp_result(n: usize) -> QcqpResult {
+    QcqpResult {
+        status: SolveStatus::Timeout,
+        objective: f64::NAN,
+        x: vec![0.0; n],
+        iterations: 0,
+        convexity_unproven: false,
+    }
+}
+
 /// Solve a convex QCQP by reformulating to an SOCP.
 pub fn solve_qcqp(qp: &QcqpProblem, opts: &ConicOptions) -> QcqpResult {
+    // Check before paying for `to_conic` (sparse Cholesky + cone build): an
+    // already-expired deadline or preset cancel flag must return `Timeout`
+    // immediately rather than after that work runs on data nobody will use
+    // (mirrors `solve_socp`'s own up-front check, PR #25 review INLINE-N).
+    if opts.stop_requested() {
+        return stopped_qcqp_result(qp.n);
+    }
     let (conic, _nvar, convexity_unproven) = match to_conic(qp) {
         Ok(v) => v,
         Err(e) => {
@@ -1107,6 +1135,13 @@ fn qp_problem_objective(src: &QpProblem, x: &[f64]) -> f64 {
 /// triplets, so peak memory tracks the problem's total `nnz` rather than
 /// `n * m` over `m` constraints of `n` variables.
 pub fn solve_qp_problem_as_qcqp(src: &QpProblem, opts: &ConicOptions) -> QcqpResult {
+    // Same up-front stop check as `solve_qcqp` (PR #25 review INLINE-N): this
+    // is the sibling entry point `qp::qcqp_route::solve_qcqp_via_conic`'s
+    // convex-bridge attempt calls into, and it runs `qp_problem_to_conic`
+    // (the same sparse-Cholesky-and-cone-build cost) unconditionally too.
+    if opts.stop_requested() {
+        return stopped_qcqp_result(src.num_vars);
+    }
     let (conic, _nvar, convexity_unproven) = match qp_problem_to_conic(src) {
         Ok(v) => v,
         Err(e) => {
