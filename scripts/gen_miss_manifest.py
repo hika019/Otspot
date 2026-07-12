@@ -12,14 +12,15 @@ manifest of non-PASS benchmark cases.  Each miss is classified by root cause:
   residual_drift      — Optimal claimed but primal/dual residuals exceed eps
   suboptimal          — MaxIterations or SuboptimalSolution
   numerical           — NumericalError, parse failure, or unknown error
-  skip_nonconvex      — problem outside scope (SKIP / NONCONVEX)
+  skip_nonconvex      — problem outside scope (SKIP / NONCONVEX / NONCONVEX_LOCAL
+                        / NONCONVEX_GLOBAL / NOT_SUPPORTED)
   unchecked_reference — feasible result without an external/baseline reference
 
 Usage:
   python scripts/gen_miss_manifest.py LOGFILE [LOGFILE ...]
       [--out DIR]      output directory (default: reports/)
       [--format json|csv|both]
-      [--include-skip] include SKIP/NONCONVEX entries
+      [--include-skip] include SKIP/NONCONVEX/NOT_SUPPORTED entries
 
 Output (gitignored under reports/):
   reports/miss_manifest_YYYYMMDD_HHMMSS.json
@@ -40,7 +41,9 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 PASS_STATUSES = frozenset({"PASS", "PASS:Infeasible", "PASS:Unbounded"})
-SKIP_STATUSES = frozenset({"SKIP", "NONCONVEX"})
+SKIP_STATUSES = frozenset(
+    {"SKIP", "NONCONVEX", "NONCONVEX_LOCAL", "NONCONVEX_GLOBAL", "NOT_SUPPORTED"}
+)
 
 
 def classify(status: str) -> str:
@@ -79,7 +82,9 @@ def classify(status: str) -> str:
 # The format is: {:<20} {:>6} {:>6} {:>15} {:>10.3} {}
 _STATUS_PAT = (
     r"PASS(?::Infeasible|:Unbounded)?|CHECKED\[no_ref\]"
-    r"|TIMEOUT|EXTERNAL_TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL"
+    r"|TIMEOUT|EXTERNAL_TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR"
+    r"|NONCONVEX_LOCAL|NONCONVEX_GLOBAL|NONCONVEX|SUBOPTIMAL"
+    r"|NOT_SUPPORTED"
     r"|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL"
     r"|FAIL(?::[A-Za-z]+)?"
 )
