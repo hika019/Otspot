@@ -1,7 +1,17 @@
 //! CBLIB SOCP/MISOCP bench runner: solves `.cbf` files and prints one CSV
 //! row per problem (`problem,status,objective,iterations,time_sec`).
 //!
-//! Run: `cargo run --release --example solve_cbf -- <file-or-dir.cbf> [...]`
+//! Run: `cargo run --release --example solve_cbf -- [--eps <value>] <file-or-dir.cbf> [...]`
+//!
+//! `--eps <value>` overrides, for the whole run, both the SOCP interior-point
+//! convergence tolerance ([`ConicOptions::tol`]) and the MISOCP
+//! branch-and-bound optimality-gap tolerance ([`BbOptions::gap_tol`]); default
+//! [`DEFAULT_BENCH_TOL`], `1e-6`; e.g. `--eps 1e-8` for a tighter pass over the
+//! same CBLIB set. It deliberately does *not* touch the integrality tolerance
+//! ([`BbOptions::int_tol`], fixed at its `1e-6` default): that governs when a
+//! fractional value counts as integer, which is unrelated to solve accuracy —
+//! slaving it to eps would accept fractional incumbents at loose eps and
+//! over-branch legitimate nodes at tight eps.
 //!
 //! `otspot_core::conic::{ConicOptions,BbOptions}` both carry a `deadline:
 //! Option<Instant>` (checked once per IPM iteration / B&B node), but this
@@ -33,8 +43,10 @@ use std::time::Instant;
 use otspot_core::conic::{solve_misocp, solve_socp, BbOptions, ConicOptions};
 use otspot_io::cbf::{parse_cbf, CbfError, CbfProblem};
 
-/// Convergence tolerance for this bench run (task requirement: eps ~= 1e-6).
-const BENCH_TOL: f64 = 1e-6;
+/// Default convergence tolerance for this bench run (task requirement: eps
+/// ~= 1e-6), used when `--eps` is not given. Overridable at runtime via
+/// `--eps <value>` (see [`parse_eps_flag`]).
+const DEFAULT_BENCH_TOL: f64 = 1e-6;
 
 /// Collects `.cbf` files from a mix of file and directory arguments,
 /// expanding directories (non-recursively) and sorting their contents for a
@@ -66,10 +78,45 @@ fn csv_field(s: &str) -> String {
     s.replace(',', ";").replace('\n', " ")
 }
 
+/// Pulls a `--eps <value>` flag out of the raw CLI args, returning the
+/// resolved tolerance (default [`DEFAULT_BENCH_TOL`] if absent) and the
+/// remaining args unchanged and in order (the `.cbf` file/directory
+/// positionals `collect_cbf_files` expects). The resolved value feeds both
+/// [`ConicOptions::tol`] and [`BbOptions::gap_tol`]; it does not affect the
+/// integrality tolerance. Exits the process with a stderr message and status
+/// 2 if `--eps` is given without a value, with a value that does not parse as
+/// `f64`, or with a value outside the sane tolerance range `(0, 1)` (which
+/// also rejects `nan`, `inf`, and the finite fat-finger `1e8`).
+fn parse_eps_flag(args: Vec<String>) -> (f64, Vec<String>) {
+    let mut eps = DEFAULT_BENCH_TOL;
+    let mut rest = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--eps" {
+            let value = iter.next().unwrap_or_else(|| {
+                eprintln!("--eps requires a value, e.g. --eps 1e-8");
+                std::process::exit(2);
+            });
+            eps = value.parse::<f64>().unwrap_or_else(|e| {
+                eprintln!("invalid --eps value {value:?}: {e}");
+                std::process::exit(2);
+            });
+            if !eps.is_finite() || eps <= 0.0 || eps >= 1.0 {
+                eprintln!("--eps must be a finite tolerance in (0, 1), got: {value}");
+                std::process::exit(2);
+            }
+        } else {
+            rest.push(arg);
+        }
+    }
+    (eps, rest)
+}
+
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let raw_args: Vec<String> = env::args().skip(1).collect();
+    let (eps, args) = parse_eps_flag(raw_args);
     if args.is_empty() {
-        eprintln!("usage: solve_cbf <file-or-dir.cbf> [file-or-dir.cbf ...]");
+        eprintln!("usage: solve_cbf [--eps <value>] <file-or-dir.cbf> [file-or-dir.cbf ...]");
         std::process::exit(2);
     }
     let files = collect_cbf_files(&args);
@@ -79,10 +126,13 @@ fn main() {
     }
 
     let conic_opts = ConicOptions {
-        tol: BENCH_TOL,
+        tol: eps,
         ..ConicOptions::default()
     };
-    let bb_opts = BbOptions::default();
+    let bb_opts = BbOptions {
+        gap_tol: eps,
+        ..BbOptions::default()
+    };
 
     println!("problem,status,objective,iterations,time_sec");
     for path in &files {
