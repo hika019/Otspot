@@ -753,17 +753,34 @@ impl Model {
     }
 
     /// Builds one inequality row per finite variable bound (`x_j <= ub` as
-    /// `x_j <= ub`, `x_j >= lb` as `-x_j <= -lb`). Each row has exactly one
-    /// nonzero, so this is `O(number of finite bounds)`, never `O(n^2)`.
-    fn bounds_to_ineq_rows(
+    /// `x_j <= ub`, `x_j >= lb` as `-x_j <= -lb`), except a fixed variable
+    /// (`lb == ub`) which becomes a single equality row `x_j = lb` instead of
+    /// that inequality pair: the pair has no strictly feasible slack (`x_j <=
+    /// ub` and `-x_j <= -lb` both bind at once), which stalls the conic
+    /// interior-point method (`conic::qcqp::qp_problem_to_conic` special-cases
+    /// the analogous case for the same reason; PR #25 review INLINE-B). Each
+    /// row has exactly one nonzero, so this is `O(number of finite bounds)`,
+    /// never `O(n^2)`.
+    fn bounds_to_rows(
         bounds: &[(f64, f64)],
         n: usize,
-    ) -> Result<(CscMatrix, Vec<f64>), ModelError> {
+    ) -> Result<(CscMatrix, Vec<f64>, CscMatrix, Vec<f64>), ModelError> {
         let mut r = Vec::new();
         let mut c = Vec::new();
         let mut v = Vec::new();
         let mut h = Vec::new();
+        let mut eq_r = Vec::new();
+        let mut eq_c = Vec::new();
+        let mut eq_v = Vec::new();
+        let mut eq_h = Vec::new();
         for (j, &(lb, ub)) in bounds.iter().enumerate() {
+            if lb.is_finite() && ub.is_finite() && lb == ub {
+                eq_r.push(eq_h.len());
+                eq_c.push(j);
+                eq_v.push(1.0);
+                eq_h.push(lb);
+                continue;
+            }
             if ub.is_finite() {
                 r.push(h.len());
                 c.push(j);
@@ -778,7 +795,9 @@ impl Model {
             }
         }
         let mat = CscMatrix::from_triplets(&r, &c, &v, h.len(), n).map_err(map_matrix_build_err)?;
-        Ok((mat, h))
+        let eq_mat = CscMatrix::from_triplets(&eq_r, &eq_c, &eq_v, eq_h.len(), n)
+            .map_err(map_matrix_build_err)?;
+        Ok((mat, h, eq_mat, eq_h))
     }
 }
 
@@ -881,27 +900,40 @@ mod conic_bridge_sparse_builder_tests {
         assert_eq!(b_eq, vec![7.0]);
     }
 
-    /// Independent oracle: hand-computed unit rows for a mix of two-sided,
-    /// one-sided (each direction), and unbounded variables.
+    /// Independent oracle: hand-computed unit rows for a mix of two-sided
+    /// (unequal), one-sided (each direction), unbounded, and fixed
+    /// (`lb == ub`) variables. The fixed variable (index 4) must produce
+    /// exactly one equality row `x_4 = 4` and *no* inequality rows -- the
+    /// pre-fix behavior emitted `x_4 <= 4` and `-x_4 <= -4` instead, an
+    /// inequality pair with no strictly feasible slack that stalls the conic
+    /// interior-point method (PR #25 review INLINE-B).
     #[test]
-    fn bounds_to_ineq_rows_matches_hand_computed_unit_rows() {
+    fn bounds_to_rows_matches_hand_computed_unit_rows() {
         let bounds = vec![
-            (1.0, 5.0),                         // both finite
+            (1.0, 5.0),                         // both finite, unequal
             (f64::NEG_INFINITY, 3.0),           // ub only
             (2.0, f64::INFINITY),               // lb only
             (f64::NEG_INFINITY, f64::INFINITY), // neither -> no rows
+            (4.0, 4.0),                         // fixed -> one equality row
         ];
-        let (mat, h) = Model::bounds_to_ineq_rows(&bounds, 4).unwrap();
+        let (mat, h, eq_mat, eq_h) = Model::bounds_to_rows(&bounds, 5).unwrap();
         assert_eq!(
             mat.to_dense_rows(),
             vec![
-                vec![1.0, 0.0, 0.0, 0.0],
-                vec![-1.0, 0.0, 0.0, 0.0],
-                vec![0.0, 1.0, 0.0, 0.0],
-                vec![0.0, 0.0, -1.0, 0.0],
-            ]
+                vec![1.0, 0.0, 0.0, 0.0, 0.0],
+                vec![-1.0, 0.0, 0.0, 0.0, 0.0],
+                vec![0.0, 1.0, 0.0, 0.0, 0.0],
+                vec![0.0, 0.0, -1.0, 0.0, 0.0],
+            ],
+            "the fixed variable (index 4) must contribute no inequality rows"
         );
         assert_eq!(h, vec![5.0, -1.0, 3.0, -2.0]);
+        assert_eq!(
+            eq_mat.to_dense_rows(),
+            vec![vec![0.0, 0.0, 0.0, 0.0, 1.0]],
+            "the fixed variable must contribute exactly one equality row"
+        );
+        assert_eq!(eq_h, vec![4.0]);
     }
 }
 
@@ -929,10 +961,19 @@ impl Model {
         // McCormick box (`lb`/`ub`) for the nonconvex spatial fallback.
         // Both splits stay `O(nnz)`: no dense `n`-wide row is ever built.
         let (lin_g, lin_h, eq, b_eq) = Self::split_linear_rows(&a, &constraint_types, &b, n)?;
-        let (bounds_mat, bounds_h) = Self::bounds_to_ineq_rows(&bounds, n)?;
+        let (bounds_mat, bounds_h, bounds_eq_mat, bounds_eq_h) = Self::bounds_to_rows(&bounds, n)?;
         let g_lin_with_bounds = Self::vstack_csc(&lin_g, &bounds_mat)?;
         let mut h_lin = lin_h.clone();
         h_lin.extend(bounds_h);
+        // A fixed variable's equality row goes into the convex-bridge `qp`
+        // below (`eq_with_bounds`/`b_eq_with_bounds`), not into `eq`/`b_eq`
+        // themselves: the McCormick fallback's `NonconvexQcqp` (built later
+        // from `eq`/`b_eq` unchanged) already represents every bound via its
+        // own `lb`/`ub` fields, so folding it in there too would duplicate
+        // the constraint on that path.
+        let eq_with_bounds = Self::vstack_csc(&eq, &bounds_eq_mat)?;
+        let mut b_eq_with_bounds = b_eq.clone();
+        b_eq_with_bounds.extend(bounds_eq_h);
         // Quadratic constraints (validated finite / same-model above).
         let mut quad = Vec::new();
         for (expr, rhs) in &self.quadratic_constraints {
@@ -958,8 +999,8 @@ impl Model {
             quad: quad.clone(),
             g_lin: g_lin_with_bounds,
             h_lin,
-            a_eq: eq.clone(),
-            b_eq: b_eq.clone(),
+            a_eq: eq_with_bounds,
+            b_eq: b_eq_with_bounds,
         };
         let deadline = self
             .timeout_secs
@@ -3690,6 +3731,38 @@ mod conic_dsl_tests {
         assert!((res[y] - 1.0 / 2.0_f64.sqrt()).abs() < 1e-4);
     }
 
+    /// A fixed variable (`lb == ub`) in a QCQP model must bridge to a single
+    /// equality row, not an inequality pair with no strictly feasible slack
+    /// (PR #25 review INLINE-B): `x`'s bound used to bridge to `x <= 2` and
+    /// `-x <= -2` simultaneously binding, a degenerate encoding documented
+    /// (here and at the analogous already-fixed `qp_problem_to_conic` site)
+    /// as a conic interior-point stall risk. The row-encoding regression
+    /// itself is sentineled at the unit level by
+    /// `bounds_to_rows_matches_hand_computed_unit_rows` (fails on revert);
+    /// this end-to-end companion confirms the fixed-encoding model still
+    /// solves to the correct closed-form optimum.
+    ///
+    /// Independent oracle: `x` fixed at 2 forces `x^2 = 4`, so `x^2 + y^2 <=
+    /// 8` becomes `y^2 <= 4`, i.e. `y <= 2` (`y >= 0` from its own bound);
+    /// maximizing `y` peaks at the constraint boundary `y = 2`.
+    #[test]
+    fn fixed_var_qcqp_bridges_to_equality_row_not_infeasible_ineq_pair() {
+        let mut m = Model::new("fixed-var-qcqp");
+        let x = m.add_var("x", 2.0, 2.0);
+        let y = m.add_var("y", 0.0, 10.0);
+        m.add_qc_le(x * x + y * y, 8.0);
+        m.maximize(1.0 * y);
+        let res = m.solve().unwrap();
+        assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
+        assert!(
+            (res.objective_value - 2.0).abs() < 1e-4,
+            "obj={}",
+            res.objective_value
+        );
+        assert!((res[x] - 2.0).abs() < 1e-4);
+        assert!((res[y] - 2.0).abs() < 1e-3);
+    }
+
     #[test]
     fn soc_norm_min_on_line() {
         // min t s.t. ||(x,y)|| <= t, x + y >= 2.  Optimum t=sqrt(2) at (1,1).
@@ -3716,7 +3789,7 @@ mod conic_dsl_tests {
         // (1,1)), but with an `Eq` row (x=y), a slack `Le` row, and finite
         // bounds on every variable added alongside the `Ge`/SOC rows — this
         // exercises `split_linear_rows`'s Le/Ge/Eq bucketing and
-        // `bounds_to_ineq_rows` together with `append_soc` in one solve, not
+        // `bounds_to_rows` together with `append_soc` in one solve, not
         // just each in isolation.
         //
         // Independent oracle: `Eq` forces x=y; `Ge` (x+y>=2) then forces
