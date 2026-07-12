@@ -568,6 +568,8 @@ fn main() {
     let mut n_max_iter = 0usize;
     let mut n_nonconvex = 0usize;
     let mut n_suboptimal = 0usize;
+    // solve_qp_with が out-of-scope と正しく declined したケース (n_fail とは別 bucket)。
+    let mut n_not_supported = 0usize;
 
     let solver_label = if dual_advanced_mode {
         "DualAdvanced (LP) + IPPMM (QP)"
@@ -944,6 +946,13 @@ fn main() {
                     format!("[{}] Q not PSD", method_label),
                 )
             }
+            SolveStatus::NotSupported(ref msg) => {
+                n_not_supported += 1;
+                (
+                    "NOT_SUPPORTED".to_string(),
+                    format!("[{}] {}", method_label, msg),
+                )
+            }
             _ => {
                 n_fail += 1;
                 ("FAIL:Unknown".to_string(), format!("[{}]", method_label))
@@ -975,6 +984,7 @@ fn main() {
     println!("  MAXITER:           {}", n_max_iter);
     println!("  TIMEOUT:           {}", n_timeout);
     println!("  NONCONVEX:         {}", n_nonconvex);
+    println!("  NOT_SUPPORTED:     {}", n_not_supported);
     println!("  FAIL:              {}", n_fail);
     println!("  ERROR:             {}", n_error);
     println!(
@@ -991,6 +1001,7 @@ fn main() {
             + n_suboptimal
             + n_timeout
             + n_nonconvex
+            + n_not_supported
             + n_error
     );
 }

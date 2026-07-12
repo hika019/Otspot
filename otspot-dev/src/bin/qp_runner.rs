@@ -206,6 +206,7 @@ fn main() {
         SolveStatus::SuboptimalSolution => "SuboptimalSolution",
         SolveStatus::Timeout => "Timeout",
         SolveStatus::NumericalError => "NumericalError",
+        SolveStatus::NotSupported(_) => "NotSupported",
         _ => "Unknown",
     };
 

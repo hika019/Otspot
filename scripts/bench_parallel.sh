@@ -358,6 +358,7 @@ TOTAL_OBJ_MISMATCH=0
 TOTAL_KKT_FAIL=0
 TOTAL_NONCONVEX=0
 TOTAL_SUBOPTIMAL=0
+TOTAL_NOT_SUPPORTED=0
 
 # 問題別詳細行の収集（PARSE/SOLVE/=>行を除く、問題名+STATUS行のみ）
 PROBLEM_DETAIL_FILE="$TMPDIR_BASE/problem_details.txt"
@@ -412,6 +413,7 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   kkt_fail=$(grep -E "^\s+KKT_FAIL:" "$LOG" | awk '{print $2}' | head -1)
   nonconvex=$(grep -E "^\s+NONCONVEX:" "$LOG" | awk '{print $2}' | head -1)
   suboptimal=$(grep -E "^\s+SUBOPTIMAL:" "$LOG" | awk '{print $2}' | head -1)
+  not_supported=$(grep -E "^\s+NOT_SUPPORTED:" "$LOG" | awk '{print $2}' | head -1)
 
   TOTAL_PASS=$(( TOTAL_PASS + ${pass:-0} ))
   TOTAL_TIMEOUT=$(( TOTAL_TIMEOUT + ${timeout:-0} ))
@@ -430,6 +432,7 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   TOTAL_KKT_FAIL=$(( TOTAL_KKT_FAIL + ${kkt_fail:-0} ))
   TOTAL_NONCONVEX=$(( TOTAL_NONCONVEX + ${nonconvex:-0} ))
   TOTAL_SUBOPTIMAL=$(( TOTAL_SUBOPTIMAL + ${suboptimal:-0} ))
+  TOTAL_NOT_SUPPORTED=$(( TOTAL_NOT_SUPPORTED + ${not_supported:-0} ))
 
   # 問題別詳細行抽出:
   # - bench binary 出力: `NAME ROWS COLS STATUS TIME ...` (NAME が非空白先頭)
@@ -440,7 +443,7 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
     # Summary block lines: 2 field, field1 ends with ":", field2 is integer
     NF == 2 && $1 ~ /:$/ && $2 ~ /^-?[0-9]+$/ { next }
     # Detail rows: contain a known STATUS token
-    /(^|[[:space:]])(PASS(:Infeasible|:Unbounded)?|CHECKED\[no_ref\]|TIMEOUT|EXTERNAL_TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL|FAIL(:[A-Za-z]+)?)([[:space:]]|$)/ { print }
+    /(^|[[:space:]])(PASS(:Infeasible|:Unbounded)?|CHECKED\[no_ref\]|TIMEOUT|EXTERNAL_TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL|NOT_SUPPORTED|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL|FAIL(:[A-Za-z]+)?)([[:space:]]|$)/ { print }
   ' "$LOG" >> "$PROBLEM_DETAIL_FILE"
 done
 
@@ -473,6 +476,7 @@ done
   printf "  KKT_FAIL:          %d\n" "$TOTAL_KKT_FAIL"
   printf "  NONCONVEX:         %d\n" "$TOTAL_NONCONVEX"
   printf "  SUBOPTIMAL:        %d\n" "$TOTAL_SUBOPTIMAL"
+  printf "  NOT_SUPPORTED:     %d\n" "$TOTAL_NOT_SUPPORTED"
   printf "  MAXITER:           %d\n" "$TOTAL_MAXITER"
   printf "  ERROR:             %d\n" "$TOTAL_ERROR"
   printf "  SKIP:              %d\n" "$TOTAL_SKIP"
@@ -500,6 +504,7 @@ done
             || s == "TIMEOUT" || s == "EXTERNAL_TIMEOUT" \
             || s == "MAXITER" || s == "ERROR" || s == "SKIP" \
             || s == "PARSE_ERR" || s == "NONCONVEX" || s == "SUBOPTIMAL" \
+            || s == "NOT_SUPPORTED" \
             || s == "KKT_FAIL" || s == "OBJ_MISMATCH" \
             || s == "PFEAS_FAIL" || s == "DFEAS_FAIL" \
             || s ~ /^FAIL(:[A-Za-z]+)?$/
@@ -559,7 +564,7 @@ done
 CATEGORY_SUM=$(( TOTAL_PASS + TOTAL_CHECKED_NO_REF + TOTAL_PASS_INFEASIBLE + TOTAL_PASS_UNBOUNDED + \
   TOTAL_TIMEOUT + TOTAL_EXTERNAL_TIMEOUT + TOTAL_FAIL + \
   TOTAL_DFEAS_FAIL + TOTAL_PFEAS_FAIL + TOTAL_OBJ_MISMATCH + TOTAL_KKT_FAIL + TOTAL_NONCONVEX + \
-  TOTAL_SUBOPTIMAL + TOTAL_MAXITER + TOTAL_ERROR + TOTAL_SKIP ))
+  TOTAL_SUBOPTIMAL + TOTAL_NOT_SUPPORTED + TOTAL_MAXITER + TOTAL_ERROR + TOTAL_SKIP ))
 if [[ "$CATEGORY_SUM" != "$TOTAL_PROBLEMS" ]]; then
   echo "エラー: カテゴリ合算($CATEGORY_SUM) ≠ TOTAL($TOTAL_PROBLEMS)" >&2
   exit 1

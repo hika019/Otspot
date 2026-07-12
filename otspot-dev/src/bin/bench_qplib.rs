@@ -251,6 +251,11 @@ fn main() {
     let mut n_nonconvex = 0usize;
     let mut n_nonconvex_local = 0usize;
     let mut n_nonconvex_global = 0usize;
+    // solve_qp_with/solve_qp_global が out-of-scope と判断し正当に declined したケース
+    // (例: 非凸QCQPで有限境界を要求するが変数が (-inf, inf))。
+    // n_fail に混ぜない: これは solver の誤りではなく正しい scope 判定なので、
+    // n_skip (parse 時点の SKIP) とも区別する専用 bucket とする。
+    let mut n_not_supported = 0usize;
     // Phase 1A: status=Optimal だが元空間 KKT 残差 >= KKT_FAIL_EPS の解。
     // 非凸 QP で false-positive Optimal を obj-only judge が見逃す穴を埋める。
     let mut n_kkt_fail = 0usize;
@@ -580,6 +585,13 @@ fn main() {
                     ),
                 )
             }
+            SolveStatus::NotSupported(ref msg) => {
+                n_not_supported += 1;
+                (
+                    "NOT_SUPPORTED".to_string(),
+                    format!("[{}] {}", method_label, msg),
+                )
+            }
             _ => {
                 n_fail += 1;
                 ("FAIL:Unknown".to_string(), format!("[{}]", method_label))
@@ -626,6 +638,9 @@ fn main() {
     println!("    SKIP:integer:    {}", n_skip_integer);
     println!("    SKIP:qcqp:       {}", n_skip_qcqp);
     println!("    SKIP:other:      {}", n_skip_other);
+    // solve 時点の out-of-scope declined (SolveStatus::NotSupported)。SKIP (parse時点)
+    // とは別 bucket: parser は通過したが solver が対応外と正しく判定したケース。
+    println!("  NOT_SUPPORTED:     {}", n_not_supported);
     println!(
         "  TOTAL:             {}",
         n_pass
@@ -643,5 +658,6 @@ fn main() {
             + n_max_iter
             + n_error
             + n_skip
+            + n_not_supported
     );
 }
