@@ -10,7 +10,8 @@ use super::types::{
     integer_marker_kind, BoundType, IntegerMarker, Section, INTEGER_DEFAULT_UPPER_BINARY,
 };
 use crate::common::{
-    is_fixed_width_format, parse_mps_free_pairs, parse_objsense_value, RowType, SectionState,
+    is_fixed_width_format, parse_objsense_value, parse_vector_pairs, RowNameIndex, RowType,
+    SectionState, VectorSectionState,
 };
 
 pub(super) struct MpsParser {
@@ -19,6 +20,9 @@ pub(super) struct MpsParser {
     columns: Vec<(String, String, f64)>,
     rhs: HashMap<String, f64>,
     ranges: HashMap<String, f64>,
+    rhs_vectors: VectorSectionState,
+    ranges_vectors: VectorSectionState,
+    row_index: RowNameIndex,
     bounds: Vec<(BoundType, String, Option<f64>)>,
     obj_row: Option<String>,
     integer_cols: HashSet<String>,
@@ -34,6 +38,9 @@ impl MpsParser {
             columns: Vec::new(),
             rhs: HashMap::new(),
             ranges: HashMap::new(),
+            rhs_vectors: VectorSectionState::new(),
+            ranges_vectors: VectorSectionState::new(),
+            row_index: RowNameIndex::new(),
             bounds: Vec::new(),
             obj_row: None,
             integer_cols: HashSet::new(),
@@ -273,86 +280,82 @@ impl MpsParser {
 
     fn parse_rhs_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
+        if parts.len() < 2 {
             return Err(MpsError::ParseError {
                 line: line_num,
-                message: "RHS line requires at least 3 fields (rhs_name row value)".to_string(),
+                message: "RHS line requires at least 2 fields (row value)".to_string(),
             });
         }
         // Pass None: non-finite values are rejected for all rows including the N-row.
         // The obj_offset (N-row RHS) is extracted in build_lp_problem after all sections parse.
-        let pairs = parse_mps_free_pairs(&parts, line_num, "RHS", None).map_err(|msg| {
-            MpsError::ParseError {
-                line: line_num,
-                message: msg,
-            }
+        let (vector_name, pairs) = parse_vector_pairs(
+            &parts,
+            &self.rows,
+            &mut self.row_index,
+            line_num,
+            "RHS",
+            None,
+        )
+        .map_err(|msg| MpsError::ParseError {
+            line: line_num,
+            message: msg,
         })?;
+        let resolved_vector = self.rhs_vectors.resolve_vector_name(vector_name.as_deref());
         for (name, value) in pairs {
-            if self.rhs.contains_key(&name) {
-                return Err(MpsError::ParseError {
+            self.rhs_vectors
+                .record(&mut self.rhs, "RHS", &resolved_vector, name, value)
+                .map_err(|message| MpsError::ParseError {
                     line: line_num,
-                    message: format!("RHS: duplicate entry for row '{}'", name),
-                });
-            }
-            self.rhs.insert(name, value);
+                    message,
+                })?;
         }
         Ok(())
     }
 
     fn parse_ranges_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
+        if parts.len() < 2 {
             return Err(MpsError::ParseError {
                 line: line_num,
-                message: "RANGES line requires at least 3 fields (rhs_name row value)".to_string(),
+                message: "RANGES line requires at least 2 fields (row value)".to_string(),
             });
         }
-        let pairs = parse_mps_free_pairs(&parts, line_num, "RANGES", None).map_err(|msg| {
-            MpsError::ParseError {
-                line: line_num,
-                message: msg,
-            }
+        let (vector_name, pairs) = parse_vector_pairs(
+            &parts,
+            &self.rows,
+            &mut self.row_index,
+            line_num,
+            "RANGES",
+            None,
+        )
+        .map_err(|msg| MpsError::ParseError {
+            line: line_num,
+            message: msg,
         })?;
+        let resolved_vector = self
+            .ranges_vectors
+            .resolve_vector_name(vector_name.as_deref());
         for (name, value) in pairs {
-            if self.ranges.contains_key(&name) {
-                return Err(MpsError::ParseError {
+            self.ranges_vectors
+                .record(&mut self.ranges, "RANGES", &resolved_vector, name, value)
+                .map_err(|message| MpsError::ParseError {
                     line: line_num,
-                    message: format!("RANGES: duplicate entry for row '{}'", name),
-                });
-            }
-            self.ranges.insert(name, value);
+                    message,
+                })?;
         }
         Ok(())
     }
 
     fn parse_bounds_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
+        if parts.len() < 2 {
             return Err(MpsError::ParseError {
                 line: line_num,
-                message: "BOUNDS line requires at least 3 fields (type name col)".to_string(),
+                message: "BOUNDS line requires at least 2 fields (type col)".to_string(),
             });
         }
 
         let bound_type_str = parts[0];
-        let _bound_name = parts[1];
-        let col_name = parts[2].to_string();
-        let value = if parts.len() >= 4 {
-            let v = parts[3].parse::<f64>().map_err(|_| MpsError::ParseError {
-                line: line_num,
-                message: format!("Invalid numeric value: {}", parts[3]),
-            })?;
-            if !v.is_finite() {
-                return Err(MpsError::ParseError {
-                    line: line_num,
-                    message: format!("Non-finite BOUNDS value for col='{}'", col_name),
-                });
-            }
-            Some(v)
-        } else {
-            None
-        };
-
         let bound_type = match bound_type_str {
             "LO" => BoundType::LO,
             "UP" => BoundType::UP,
@@ -370,6 +373,46 @@ impl MpsParser {
             bound_type,
             BoundType::LO | BoundType::UP | BoundType::FX | BoundType::LI | BoundType::UI
         );
+
+        // The bound-set-name field (standard form: `TYPE BNDNAME COL [VALUE]`)
+        // is commonly omitted (shorthand: `TYPE COL [VALUE]`). Token count
+        // alone disambiguates: a value-taking type's line has exactly 3
+        // (shorthand) or 4 (standard) tokens; a non-value type's line has
+        // exactly 2 (shorthand) or 3 (standard).
+        let min_standard_len = if value_required { 4 } else { 3 };
+        let has_bound_name = parts.len() >= min_standard_len;
+        let col_idx = if has_bound_name { 2 } else { 1 };
+        if parts.len() <= col_idx {
+            return Err(MpsError::ParseError {
+                line: line_num,
+                message: "BOUNDS line missing column name".to_string(),
+            });
+        }
+        let col_name = parts[col_idx].to_string();
+
+        let value = if value_required {
+            let val_idx = col_idx + 1;
+            if parts.len() <= val_idx {
+                None
+            } else {
+                let v = parts[val_idx]
+                    .parse::<f64>()
+                    .map_err(|_| MpsError::ParseError {
+                        line: line_num,
+                        message: format!("Invalid numeric value: {}", parts[val_idx]),
+                    })?;
+                if !v.is_finite() {
+                    return Err(MpsError::ParseError {
+                        line: line_num,
+                        message: format!("Non-finite BOUNDS value for col='{}'", col_name),
+                    });
+                }
+                Some(v)
+            }
+        } else {
+            None
+        };
+
         if value_required && value.is_none() {
             return Err(MpsError::ParseError {
                 line: line_num,
