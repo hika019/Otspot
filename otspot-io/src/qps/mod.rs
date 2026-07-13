@@ -563,6 +563,10 @@ ENDATA
         put(&mut col_bv, 4, "EF GH");
         put(&mut col_bv, 14, "obj");
         put(&mut col_bv, 24, "2.0");
+        let mut col_bnd_spaced = vec![b' '; 4];
+        put(&mut col_bnd_spaced, 4, "IJ");
+        put(&mut col_bnd_spaced, 14, "obj");
+        put(&mut col_bnd_spaced, 24, "3.0");
         // BOUNDS: type[1..], bndname[4..], col[14..], val[24..].
         let mut bnd = vec![b' '; 1];
         put(&mut bnd, 1, "UP");
@@ -573,15 +577,21 @@ ENDATA
         put(&mut bnd_bv, 1, "BV");
         put(&mut bnd_bv, 4, "BND");
         put(&mut bnd_bv, 14, "EF GH");
+        let mut bnd_name_spaced = vec![b' '; 1];
+        put(&mut bnd_name_spaced, 1, "BV");
+        put(&mut bnd_name_spaced, 4, "B ND");
+        put(&mut bnd_name_spaced, 14, "IJ");
         let qps = format!(
-            "NAME          FIXED\nROWS\n N  obj\nCOLUMNS\n{}\n{}\nRHS\nBOUNDS\n{}\n{}\nENDATA\n",
+            "NAME          FIXED\nROWS\n N  obj\nCOLUMNS\n{}\n{}\n{}\nRHS\nBOUNDS\n{}\n{}\n{}\nENDATA\n",
             String::from_utf8(col).unwrap(),
             String::from_utf8(col_bv).unwrap(),
+            String::from_utf8(col_bnd_spaced).unwrap(),
             String::from_utf8(bnd).unwrap(),
             String::from_utf8(bnd_bv).unwrap(),
+            String::from_utf8(bnd_name_spaced).unwrap(),
         );
         let prob = parse_qps_str(&qps).expect("fixed-format spaced BOUNDS must parse");
-        assert_eq!(prob.num_vars, 2);
+        assert_eq!(prob.num_vars, 3);
         assert_eq!(
             prob.bounds[0].1, 2640.0,
             "UP bound value must be read from fixed columns"
@@ -591,6 +601,50 @@ ENDATA
             (0.0, 1.0),
             "BV bound without a value must keep the full fixed-format spaced name"
         );
+        assert_eq!(
+            prob.bounds[2],
+            (0.0, 1.0),
+            "spaced fixed-format bound-set names must not block no-value bounds"
+        );
+    }
+
+    #[test]
+    fn test_qps_bounds_free_extra_token_not_fixed_fallback() {
+        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nBOUNDS\n BV BND x1 extra\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("does not take a value"),
+            "malformed free-format BV must not be parsed via fixed fallback, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_qps_rhs_fixed_format_numeric_spaced_row_name() {
+        fn put(line: &mut Vec<u8>, at: usize, s: &str) {
+            if line.len() < at + s.len() {
+                line.resize(at + s.len(), b' ');
+            }
+            line[at..at + s.len()].copy_from_slice(s.as_bytes());
+        }
+        let mut row = vec![b' '; 1];
+        put(&mut row, 1, "L");
+        put(&mut row, 4, "C 1");
+        let mut col = vec![b' '; 4];
+        put(&mut col, 4, "X1");
+        put(&mut col, 14, "obj");
+        put(&mut col, 24, "1.0");
+        let mut rhs = vec![b' '; 4];
+        put(&mut rhs, 4, "rhs");
+        put(&mut rhs, 14, "C 1");
+        put(&mut rhs, 24, "10.0");
+        let qps = format!(
+            "NAME          FIXRHS\nROWS\n N  obj\n{}\nCOLUMNS\n{}\nRHS\n{}\nENDATA\n",
+            String::from_utf8(row).unwrap(),
+            String::from_utf8(col).unwrap(),
+            String::from_utf8(rhs).unwrap(),
+        );
+        let prob = parse_qps_str(&qps).expect("fixed RHS with numeric spaced row must parse");
+        assert_eq!(prob.b, vec![10.0]);
     }
 
     /// Duplicate (col, row) entries in COLUMNS must accumulate (sum), not error.
