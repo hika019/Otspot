@@ -5136,3 +5136,197 @@ fn miqcp_integer_ball_node_relaxation_reaches_optimal() {
         );
     }
 }
+
+/// PR #25 review #27: the conic/QCQP path capped IPM iterations at the conic
+/// default (`100`) with no user override, while the QP path runs bounded
+/// only by the wall-clock deadline (`IpmOptions::max_iter` defaults to
+/// `usize::MAX`). A conic solve legitimately needing more than 100
+/// iterations -- here, throttled via `step_frac` far below its `0.99`
+/// default, a real (if conservative) user setting, not a contrived edge
+/// case -- was silently truncated to `MaxIterations` where an identical QP
+/// would have kept going.
+#[test]
+fn conic_default_max_iter_no_longer_caps_a_slow_but_convergent_solve() {
+    // min -x0 - x1 s.t. x0^2 + x1^2 <= 1. Optimum at (1/sqrt2, 1/sqrt2), obj = -sqrt2
+    // (same closed-form problem as `convex_qcqp_ball_constraint`).
+    let p = csc(&[vec![2.0, 0.0], vec![0.0, 2.0]], 2, 2);
+    let qp = QcqpProblem {
+        n: 2,
+        p0: None,
+        q0: vec![-1.0, -1.0],
+        quad: vec![QuadConstraint {
+            p,
+            q: vec![0.0, 0.0],
+            r: -1.0,
+        }],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+        b_eq: vec![],
+    };
+
+    // First, prove this solve genuinely needs more than 100 iterations at
+    // this `step_frac`: explicitly capped at the old default, it must NOT
+    // reach `Optimal`.
+    let capped = ConicOptions {
+        step_frac: 0.1,
+        max_iter: 100,
+        ..ConicOptions::default()
+    };
+    let res_capped = solve_qcqp(&qp, &capped);
+    assert_eq!(
+        res_capped.status,
+        SolveStatus::MaxIterations,
+        "{res_capped:?}"
+    );
+    assert_eq!(res_capped.iterations, 100);
+
+    // Today's actual default (no `max_iter` override at all) must not
+    // inherit that 100-iteration cap: it should converge instead.
+    let today = ConicOptions {
+        step_frac: 0.1,
+        ..ConicOptions::default()
+    };
+    let res_today = solve_qcqp(&qp, &today);
+    assert_eq!(res_today.status, SolveStatus::Optimal, "{res_today:?}");
+    assert!(
+        res_today.iterations > 100,
+        "expected >100 iterations at step_frac=0.1, got {}",
+        res_today.iterations
+    );
+    let want = -(2.0_f64).sqrt();
+    assert!(
+        (res_today.objective - want).abs() < 1e-6,
+        "obj={}",
+        res_today.objective
+    );
+}
+
+/// PR #25 review INLINE-N: `solve_qcqp` called `to_conic` (sparse Cholesky +
+/// cone build) unconditionally before checking `opts.stop_requested()`; the
+/// `stop_requested` guard only protected `solve_socp`'s equilibration/IPM
+/// afterward. An already-expired deadline must return `Timeout` promptly,
+/// without paying for that up-front work -- proven here by timing an
+/// unguarded `to_conic` call against the guarded `solve_qcqp` call on the
+/// same (dense, `to_conic`-costly) problem.
+#[test]
+fn solve_qcqp_with_expired_deadline_skips_to_conic_cost() {
+    let n = 400usize;
+    let mut rng = Lcg(12345);
+    let mut a = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            a[i][j] = rng.next_f(-1.0, 1.0);
+        }
+    }
+    // P = A^T A + n*I: dense, symmetric, positive definite -- `to_conic`'s
+    // sparse Cholesky sees full fill-in, giving it real (tens-of-ms) cost.
+    let mut rows = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut s = 0.0;
+            for k in 0..n {
+                s += a[k][i] * a[k][j];
+            }
+            rows[i][j] = s;
+        }
+        rows[i][i] += n as f64;
+    }
+    let p = csc(&rows, n, n);
+    let qp = QcqpProblem {
+        n,
+        p0: Some(p),
+        q0: vec![0.0; n],
+        quad: vec![],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+    };
+
+    let t_unguarded = std::time::Instant::now();
+    let _ = to_conic(&qp);
+    let unguarded = t_unguarded.elapsed();
+
+    let opts = ConicOptions {
+        deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+        ..ConicOptions::default()
+    };
+    let t_guarded = std::time::Instant::now();
+    let res = solve_qcqp(&qp, &opts);
+    let guarded = t_guarded.elapsed();
+
+    assert_eq!(res.status, SolveStatus::Timeout, "{:?}", res.status);
+    assert_eq!(res.iterations, 0);
+    assert!(res.x.iter().all(|&v| v == 0.0));
+    // `false`: `convexity_unproven` flags a Cholesky pivot clamp, which
+    // cannot have happened when `to_conic` never ran.
+    assert!(!res.convexity_unproven);
+    assert!(
+        guarded < unguarded / 4,
+        "guarded solve ({guarded:?}) should skip to_conic's cost ({unguarded:?} unguarded), \
+         not pay for it and then hit the stop check inside `solve_socp`"
+    );
+}
+
+/// Same INLINE-N pattern applied to `solve_qp_problem_as_qcqp` (the sibling
+/// entry point `qp::qcqp_route::solve_qcqp_via_conic`'s convex-bridge attempt
+/// calls into): it ran `qp_problem_to_conic` -- the same sparse-Cholesky
+/// cost, here for the quadratic *objective*'s epigraph reformulation --
+/// unconditionally before checking `opts.stop_requested()`.
+#[test]
+fn solve_qp_problem_as_qcqp_with_expired_deadline_skips_conic_build_cost() {
+    use crate::qp::QpProblem;
+
+    let n = 400usize;
+    let mut rng = Lcg(54321);
+    let mut a_rand = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            a_rand[i][j] = rng.next_f(-1.0, 1.0);
+        }
+    }
+    // Dense PSD quadratic objective Q = A^T A + n*I, no quadratic constraints:
+    // `qp_problem_to_conic` still epigraph-reformulates it via sparse
+    // Cholesky (`has_quad_obj` in `qp_problem_to_conic`), so this is costly
+    // the same way a dense `p0` is for `to_conic`.
+    let mut rows = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut s = 0.0;
+            for k in 0..n {
+                s += a_rand[k][i] * a_rand[k][j];
+            }
+            rows[i][j] = s;
+        }
+        rows[i][i] += n as f64;
+    }
+    let q_obj = csc(&rows, n, n);
+    let c = vec![0.0; n];
+    let a = CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap();
+    let b = vec![];
+    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
+    let src = QpProblem::new(q_obj, c, a, b, bounds, vec![]).unwrap();
+
+    let t_unguarded = std::time::Instant::now();
+    let _ = crate::conic::qcqp::qp_problem_to_conic(&src);
+    let unguarded = t_unguarded.elapsed();
+
+    let opts = ConicOptions {
+        deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+        ..ConicOptions::default()
+    };
+    let t_guarded = std::time::Instant::now();
+    let res = solve_qp_problem_as_qcqp(&src, &opts);
+    let guarded = t_guarded.elapsed();
+
+    assert_eq!(res.status, SolveStatus::Timeout, "{:?}", res.status);
+    assert_eq!(res.iterations, 0);
+    // See `solve_qcqp_with_expired_deadline_skips_to_conic_cost`.
+    assert!(!res.convexity_unproven);
+    assert!(
+        guarded < unguarded / 4,
+        "guarded solve ({guarded:?}) should skip qp_problem_to_conic's cost \
+         ({unguarded:?} unguarded)"
+    );
+}

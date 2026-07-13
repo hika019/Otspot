@@ -149,12 +149,31 @@ pub struct ConicResult {
     pub infeas_cert: Option<(Vec<f64>, Vec<f64>)>,
 }
 
+/// Default IPM iteration budget for a from-scratch conic solve (PR #25 review
+/// #27). The conic IPM is a single Mehrotra predictor-corrector attempt with
+/// no equivalent to the QP path's multi-attempt retry loop: when the caller
+/// leaves `IpmOptions::max_iter` at its `usize::MAX` default,
+/// `qp::ipm_solver::attempt` runs up to ~10 restart attempts (different Ruiz/
+/// tightening combinations) each capped at `MAX_ITER_PER_ATTEMPT = 500`
+/// iterations — a ~5,000-iteration practical ceiling, with the wall-clock
+/// deadline as the actual guard for hard problems. The old default of `100`
+/// was far below that ceiling: a hard QCQP/SOCP needing more than 100
+/// iterations hit `MaxIterations` here while the identical problem solved
+/// through the QP path kept going. This matches that practical ceiling
+/// instead, so the conic IPM gets comparable room to converge while
+/// `stop_requested` (checked every iteration, see
+/// `ConicOptions::stop_requested`) stays the primary guard and this remains
+/// only a finite safety net when no deadline is set.
+pub const DEFAULT_CONIC_MAX_ITER: usize = 5_000;
+
 /// Options controlling the conic interior-point solver.
 #[derive(Debug, Clone)]
 pub struct ConicOptions {
     /// Convergence tolerance on relative primal/dual residual and gap.
     pub tol: f64,
-    /// Maximum interior-point iterations.
+    /// Maximum interior-point iterations. Default: [`DEFAULT_CONIC_MAX_ITER`]
+    /// -- the wall-clock `deadline`/`cancel_flag` (checked every iteration via
+    /// `stop_requested`) is the primary guard for a hard problem, not this cap.
     pub max_iter: usize,
     /// Fraction-to-boundary step damping (`(0,1)`).
     pub step_frac: f64,
@@ -172,7 +191,7 @@ impl Default for ConicOptions {
     fn default() -> Self {
         Self {
             tol: 1e-9,
-            max_iter: 100,
+            max_iter: DEFAULT_CONIC_MAX_ITER,
             step_frac: 0.99,
             deadline: None,
             cancel_flag: None,

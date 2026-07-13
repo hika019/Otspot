@@ -44,6 +44,87 @@ pub struct NonconvexQcqp {
     pub ub: Vec<f64>,
 }
 
+impl NonconvexQcqp {
+    /// Validate dimensional consistency and bound finiteness that
+    /// `build_static`/`global_core` assume but never check themselves: a
+    /// mismatched `q0`/`lb`/`ub`/`p0`/`quad[..]` dimension previously slice-
+    /// copied or indexed out of bounds and panicked instead of failing as an
+    /// ordinary invalid-input error (mirrors `ConicProblem::validate` /
+    /// `MisocpProblem::validate`, PR #25 review INLINE-S).
+    pub fn validate(&self) -> Result<(), String> {
+        let n = self.n;
+        if self.q0.len() != n {
+            return Err(format!("q0 length {} != n {n}", self.q0.len()));
+        }
+        if self.lb.len() != n {
+            return Err(format!("lb length {} != n {n}", self.lb.len()));
+        }
+        if self.ub.len() != n {
+            return Err(format!("ub length {} != n {n}", self.ub.len()));
+        }
+        if let Some(p0) = &self.p0 {
+            if p0.nrows() != n || p0.ncols() != n {
+                return Err(format!(
+                    "p0 shape ({}, {}) != (n, n) = ({n}, {n})",
+                    p0.nrows(),
+                    p0.ncols()
+                ));
+            }
+        }
+        for (k, qc) in self.quad.iter().enumerate() {
+            if qc.p.nrows() != n || qc.p.ncols() != n {
+                return Err(format!(
+                    "quad[{k}].p shape ({}, {}) != (n, n) = ({n}, {n})",
+                    qc.p.nrows(),
+                    qc.p.ncols()
+                ));
+            }
+            if qc.q.len() != n {
+                return Err(format!("quad[{k}].q length {} != n {n}", qc.q.len()));
+            }
+        }
+        if self.g_lin.ncols() != n {
+            return Err(format!(
+                "g_lin column count {} != n {n}",
+                self.g_lin.ncols()
+            ));
+        }
+        if self.g_lin.nrows() != self.h_lin.len() {
+            return Err(format!(
+                "g_lin row count {} != h_lin length {}",
+                self.g_lin.nrows(),
+                self.h_lin.len()
+            ));
+        }
+        if self.a_eq.ncols() != n {
+            return Err(format!("a_eq column count {} != n {n}", self.a_eq.ncols()));
+        }
+        if self.a_eq.nrows() != self.b_eq.len() {
+            return Err(format!(
+                "a_eq row count {} != b_eq length {}",
+                self.a_eq.nrows(),
+                self.b_eq.len()
+            ));
+        }
+        for (k, &v) in self.lb.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(format!("lb[{k}] is not finite: {v}"));
+            }
+        }
+        for (k, &v) in self.ub.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(format!("ub[{k}] is not finite: {v}"));
+            }
+        }
+        for (k, (&l, &u)) in self.lb.iter().zip(&self.ub).enumerate() {
+            if l > u {
+                return Err(format!("lb[{k}] = {l} > ub[{k}] = {u}"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Result of global QCQP optimisation.
 ///
 /// With an incumbent, `status` is `Timeout` (deadline hit), `Optimal` (search
@@ -721,7 +802,7 @@ fn global_core(
     opts: &ConicOptions,
     g: &GlobalOptions,
 ) -> GlobalResult {
-    if let Err(e) = g.validate() {
+    if let Err(e) = qp.validate().and_then(|()| g.validate()) {
         return GlobalResult {
             status: SolveStatus::NotSupported(e),
             objective: f64::NAN,
@@ -747,10 +828,14 @@ fn global_core(
     let mut stack = vec![(qp.lb.clone(), qp.ub.clone(), f64::NEG_INFINITY)];
 
     while let Some((lb, ub, inherited)) = stack.pop() {
-        if opts
-            .deadline
-            .is_some_and(|d| std::time::Instant::now() >= d)
-        {
+        // `stop_requested` covers both the wall-clock deadline and the
+        // shared cancel flag (`ConicOptions::cancel_flag`); a deadline-only
+        // check here left a cancel fired mid-search unhonored until the
+        // search happened to exhaust itself or hit `max_nodes` (PR #25
+        // review INLINE-D) -- the pre-launch guard in `qcqp_route.rs` only
+        // covers a flag already set before this loop starts, not one set
+        // while it runs.
+        if opts.stop_requested() {
             timed_out = true;
             lower_bound = lower_bound.min(inherited);
             break;
@@ -857,7 +942,11 @@ fn global_core(
 
         if worst_gap <= g.bilinear_tol {
             // Leaf: the relaxation is tight, so `lower` is (numerically) the
-            // region's true minimum and stands as its terminal bound.
+            // region's true minimum and stands as its terminal bound. Uses
+            // the caller's own `feas_tol`, unchanged -- same as the per-node
+            // `accept` above; an unexplained `* 100.0` here previously let a
+            // leaf point violating a constraint by up to 100x the requested
+            // tolerance be reported as feasible (PR #25 review INLINE-Q).
             accept(
                 qp,
                 integers,
@@ -865,7 +954,7 @@ fn global_core(
                 &x,
                 &mut incumbent,
                 &mut inc_x,
-                g.feas_tol * 100.0,
+                g.feas_tol,
             );
             lower_bound = lower_bound.min(lower);
             continue;
@@ -1010,6 +1099,52 @@ mod tests {
         );
     }
 
+    /// PR #25 review INLINE-Q: the leaf `accept` call in `global_core`
+    /// (`worst_gap <= g.bilinear_tol`) passed `g.feas_tol * 100.0` instead of
+    /// `g.feas_tol`, 100x looser than the per-node `accept` call just above
+    /// it and than the caller's requested tolerance.
+    ///
+    /// `x0` is a single integer variable pinned by an equality to `5 +
+    /// 5e-5`: `int_tol = 1e-3` accepts it as "integral" (no integer branch
+    /// fires), and with zero bilinear pairs (`quad`/`p0` both empty) every
+    /// node is immediately a spatial leaf, so `global_core` reaches the leaf
+    /// `accept` call at the root. Rounding to `5.0` leaves a `5e-5` equality
+    /// residual: 50x `feas_tol = 1e-6` (inside the old `100x` leaf
+    /// loosening, which would have accepted it) but outside `feas_tol`
+    /// itself (which must reject it).
+    ///
+    /// Sentinel: restoring the leaf's `g.feas_tol * 100.0` makes this FAIL
+    /// (the point is accepted, `res.x = [5.0]`, `res.status = Optimal`).
+    #[test]
+    fn leaf_accept_no_longer_loosens_feas_tol_by_100x() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap(),
+            b_eq: vec![5.0 + 5e-5],
+            lb: vec![0.0],
+            ub: vec![10.0],
+        };
+        let g = GlobalOptions {
+            feas_tol: 1e-6,
+            int_tol: 1e-3,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_miqcp(&qp, &[0], &ConicOptions::default(), &g);
+        assert!(
+            res.x.is_empty(),
+            "a leaf point violating the equality by 5e-5 (50x feas_tol=1e-6, \
+             inside the old 100x-loosened leaf tolerance of 1e-4) must not \
+             be accepted as feasible: {res:?}"
+        );
+        assert_eq!(res.status, SolveStatus::NumericalError, "{res:?}");
+    }
+
     /// PR #25 review pattern applied here too ("Reject NaN integrality
     /// tolerances before branching", originally flagged on
     /// `misocp::BbOptions`): `GlobalOptions::int_tol = NaN` must be rejected
@@ -1051,6 +1186,128 @@ mod tests {
         assert!(
             matches!(res.status, SolveStatus::NotSupported(_)),
             "NaN int_tol must be rejected, got {res:?}"
+        );
+        assert!(res.x.is_empty());
+    }
+
+    /// PR #25 review INLINE-S: `NonconvexQcqp` had no `validate()`, so
+    /// `build_static`'s unchecked `c[..n].copy_from_slice(&qp.q0)` (and the
+    /// analogous `lb`/`ub`/`p0`/`quad[..]` dimension assumptions) panicked on
+    /// a mismatched public struct instead of failing cleanly. Every branch
+    /// independently exercised against a minimally-valid `n = 2` baseline.
+    #[test]
+    fn validate_rejects_every_mismatched_dimension() {
+        let base = || NonconvexQcqp {
+            n: 2,
+            p0: None,
+            q0: vec![0.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0, 0.0],
+            ub: vec![1.0, 1.0],
+        };
+        assert!(base().validate().is_ok(), "baseline must be valid");
+
+        let mut bad = base();
+        bad.q0 = vec![0.0];
+        assert!(bad.validate().is_err(), "short q0 must be rejected");
+
+        let mut bad = base();
+        bad.lb = vec![0.0];
+        assert!(bad.validate().is_err(), "short lb must be rejected");
+
+        let mut bad = base();
+        bad.ub = vec![1.0];
+        assert!(bad.validate().is_err(), "short ub must be rejected");
+
+        let mut bad = base();
+        bad.p0 = Some(CscMatrix::from_triplets(&[], &[], &[], 3, 3).unwrap());
+        assert!(bad.validate().is_err(), "mis-shaped p0 must be rejected");
+
+        let mut bad = base();
+        bad.quad = vec![GQuadConstraint {
+            p: CscMatrix::from_triplets(&[], &[], &[], 3, 3).unwrap(),
+            q: vec![0.0, 0.0],
+            r: 0.0,
+        }];
+        assert!(
+            bad.validate().is_err(),
+            "mis-shaped quad[].p must be rejected"
+        );
+
+        let mut bad = base();
+        bad.quad = vec![GQuadConstraint {
+            p: CscMatrix::from_triplets(&[], &[], &[], 2, 2).unwrap(),
+            q: vec![0.0],
+            r: 0.0,
+        }];
+        assert!(bad.validate().is_err(), "short quad[].q must be rejected");
+
+        let mut bad = base();
+        bad.g_lin = CscMatrix::from_triplets(&[], &[], &[], 0, 3).unwrap();
+        assert!(bad.validate().is_err(), "mis-shaped g_lin must be rejected");
+
+        let mut bad = base();
+        bad.g_lin = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 2).unwrap();
+        assert!(
+            bad.validate().is_err(),
+            "g_lin row count without matching h_lin must be rejected"
+        );
+
+        let mut bad = base();
+        bad.a_eq = CscMatrix::from_triplets(&[], &[], &[], 0, 3).unwrap();
+        assert!(bad.validate().is_err(), "mis-shaped a_eq must be rejected");
+
+        let mut bad = base();
+        bad.a_eq = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 2).unwrap();
+        assert!(
+            bad.validate().is_err(),
+            "a_eq row count without matching b_eq must be rejected"
+        );
+
+        let mut bad = base();
+        bad.lb = vec![f64::NAN, 0.0];
+        assert!(bad.validate().is_err(), "non-finite lb must be rejected");
+
+        let mut bad = base();
+        bad.ub = vec![f64::INFINITY, 1.0];
+        assert!(bad.validate().is_err(), "non-finite ub must be rejected");
+
+        let mut bad = base();
+        bad.lb = vec![5.0, 0.0];
+        bad.ub = vec![1.0, 1.0];
+        assert!(bad.validate().is_err(), "lb > ub must be rejected");
+    }
+
+    /// Companion to `validate_rejects_every_mismatched_dimension`: the public
+    /// entry path (`global_core`, reached via `solve_global_qcqp`/
+    /// `solve_global_miqcp`) must surface a mismatched `NonconvexQcqp` as a
+    /// clean `NotSupported` result, not panic. Pre-fix, `q0` shorter than `n`
+    /// panicked inside `build_static`'s `copy_from_slice`.
+    ///
+    /// Sentinel: dropping the `qp.validate()` call in `global_core` makes
+    /// this FAIL by panicking (not by a different `status`).
+    #[test]
+    fn mismatched_dims_returns_not_supported_not_a_panic() {
+        let qp = NonconvexQcqp {
+            n: 2,
+            p0: None,
+            q0: vec![0.0], // one short of n=2
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0, 0.0],
+            ub: vec![1.0, 1.0],
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+        assert!(
+            matches!(res.status, SolveStatus::NotSupported(_)),
+            "mismatched q0 length must be a clean NotSupported, got {res:?}"
         );
         assert!(res.x.is_empty());
     }
@@ -1197,6 +1454,28 @@ mod tests {
             "incumbent must be present, got {}",
             res.objective
         );
+    }
+
+    /// PR #25 review INLINE-D: the B&B loop only checked `opts.deadline`,
+    /// never `stop_requested()` (deadline *or* `cancel_flag`), so a cancel
+    /// fired mid-search went unhonored until node/deadline exhaustion -- the
+    /// pre-launch guard in `qp::qcqp_route::solve_qcqp_via_conic` only covers
+    /// a flag already set *before* this loop starts, not one checked inside
+    /// it. With `deadline: None` and the flag already set, `hyperbola`'s full
+    /// ~99-node search (see `exhausted_clean_search_certifies_optimal_with_zero_gap`,
+    /// same `qp`/`GlobalOptions::default()`) must stop at the very first
+    /// iteration instead of running to completion.
+    #[test]
+    fn cancel_flag_is_honored_inside_the_bnb_loop() {
+        let qp = hyperbola();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let opts = ConicOptions {
+            cancel_flag: Some(cancel),
+            ..ConicOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default());
+        assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
+        assert_eq!(res.nodes, 0, "must stop before processing any node");
     }
 
     /// Positive control (companion to the sentinel above). A clean, fully exhausted search proves global

@@ -217,14 +217,31 @@ fn convex_qcqp_propagates_timeout() {
     assert_eq!(result.stats.route, SolveRoute::ConicQcqpConvex);
 }
 
-/// Nonconvex-path timeout propagation: an expired deadline must surface as
-/// `Timeout` from the spatial branch-and-bound (checked per node), not as a
-/// false `Infeasible` or a completed solve.
+/// Timeout propagation on a nonconvex QCQP: `timeout_secs: Some(0.0)`
+/// (already expired before the route starts) must surface as `Timeout`, not
+/// as a false `Infeasible` or a completed solve.
 ///
-/// Sentinel: dropping the deadline check in `nonconvex::global_core` (or the
-/// deadline mapping in `conic_options`) makes this FAIL with `Optimal`.
+/// The `status == Timeout` property is guarded twice over and holds
+/// independently of the INLINE-N precheck: even without that precheck, the
+/// step-3 backstop in `solve_qcqp_via_conic` (`options.external_stop_requested()`,
+/// qcqp_route.rs) still stops the route before the McCormick B&B is launched.
+/// So the McCormick fallback never runs to completion here regardless.
+///
+/// What the INLINE-N precheck changes is only the reported *route label*:
+/// with it, `solve_qp_problem_as_qcqp` returns `Timeout` before paying for
+/// `qp_problem_to_conic`, and `is_clean_convex_outcome` accepts that clean
+/// `Timeout` directly, so the route is `ConicQcqpConvex`. Without the
+/// precheck, the step-3 backstop still returns `Timeout` but tags it
+/// `ConicQcqpNonconvex`. This test's revert-sentinel for the precheck
+/// therefore fires on the *route-label* assertion below (Convex vs
+/// Nonconvex), NOT on the `status` assertion (which passes either way).
+///
+/// Supersedes the old `nonconvex_qcqp_propagates_timeout`, which asserted
+/// `SolveRoute::ConicQcqpNonconvex` here -- correct only when `to_conic`
+/// always ran first to determine convexity before any stop check (pre PR #25
+/// review INLINE-N).
 #[test]
-fn nonconvex_qcqp_propagates_timeout() {
+fn nonconvex_qcqp_preset_deadline_stops_via_convex_bridge_precheck() {
     let problem = nonconvex_qcqp_problem(3.0);
     let opts = SolverOptions {
         timeout_secs: Some(0.0),
@@ -233,7 +250,7 @@ fn nonconvex_qcqp_propagates_timeout() {
     let result = solve_qp_with(&problem, &opts);
     assert_eq!(result.status, SolveStatus::Timeout, "{:?}", result.status);
     assert!(result.stats.deadline_triggered);
-    assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
+    assert_eq!(result.stats.route, SolveRoute::ConicQcqpConvex);
 }
 
 /// memo 31 (P1): the QCQP conic route must include `QpProblem::obj_offset`
@@ -329,18 +346,30 @@ fn convex_qcqp_honors_preset_cancel_flag() {
     assert_eq!(result.stats.route, SolveRoute::ConicQcqpConvex);
 }
 
-/// Nonconvex fallback path: the McCormick spatial B&B
-/// (`nonconvex::global_core`) only checks `ConicOptions::deadline`, not the
-/// cancel flag, so `solve_qcqp_via_conic` must stop before launching it when
-/// the flag is already set, rather than silently running the fallback to
-/// completion.
+/// A preset `cancel_flag` on a nonconvex QCQP must stop the route with
+/// `Timeout`, never a completed solve. As in the deadline case
+/// (`nonconvex_qcqp_preset_deadline_stops_via_convex_bridge_precheck`), the
+/// `status == Timeout` property is guarded independently of the INLINE-N
+/// precheck: the step-3 backstop in `solve_qcqp_via_conic`
+/// (`options.external_stop_requested()`, which reads `options.cancel_flag`
+/// directly) stops the route before the McCormick B&B is launched, so the
+/// fallback never runs to completion regardless of the precheck.
 ///
-/// Sentinel: dropping the `external_stop_requested` check before the global
-/// fallback in `solve_qcqp_via_conic` makes this FAIL with `Optimal`
-/// (objective 2.0 — the McCormick B&B has no deadline here and never sees
-/// the cancel flag, so it runs to the true global optimum).
+/// The INLINE-N precheck changes only the reported *route label*: with it,
+/// the convex-bridge attempt returns a clean `Timeout` that
+/// `is_clean_convex_outcome` accepts, tagging the result `ConicQcqpConvex`;
+/// without it, the step-3 backstop still returns `Timeout` but tags it
+/// `ConicQcqpNonconvex`. This test's precheck revert-sentinel therefore fires
+/// on the *route-label* assertion below, NOT on the `status` assertion
+/// (verified: reverting the precheck flips the route to `ConicQcqpNonconvex`
+/// while `status` stays `Timeout`).
+///
+/// Supersedes the old `nonconvex_qcqp_honors_preset_cancel_flag`, which
+/// asserted `SolveRoute::ConicQcqpNonconvex` here -- correct only when
+/// `qp_problem_to_conic` always ran first to determine convexity before any
+/// stop check (pre PR #25 review INLINE-N).
 #[test]
-fn nonconvex_qcqp_honors_preset_cancel_flag() {
+fn nonconvex_qcqp_preset_cancel_flag_stops_via_convex_bridge_precheck() {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     let problem = nonconvex_qcqp_problem(3.0);
@@ -352,5 +381,5 @@ fn nonconvex_qcqp_honors_preset_cancel_flag() {
     let result = solve_qp_with(&problem, &opts);
     assert_eq!(result.status, SolveStatus::Timeout, "{:?}", result.status);
     assert!(result.stats.deadline_triggered);
-    assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
+    assert_eq!(result.stats.route, SolveRoute::ConicQcqpConvex);
 }
