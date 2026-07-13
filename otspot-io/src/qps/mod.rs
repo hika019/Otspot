@@ -825,4 +825,126 @@ ENDATA
             "error should mention RANGES duplicate, got: {msg}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Task #9: vector-name-omitted (shorthand) RHS/RANGES/BOUNDS + multi-vector
+    // RHS/RANGES support.
+    // -----------------------------------------------------------------------
+
+    /// Sentinel: a 2-pair-per-line RHS with the vector name omitted, using
+    /// numeric row names ("1", "2") that also look like plausible values —
+    /// the exact shape that historically broke `blend.QPS`: a naive parser
+    /// skips `parts[0]` as if it were a vector name, then mispairs
+    /// `(parts[1], parts[2])` = `("10.0", 2.0)`, silently discarding row
+    /// "1"'s value and fabricating a bogus entry for a nonexistent row.
+    ///
+    /// **No-op failure guarantee**: reverting `parse_rhs_line` to the old
+    /// `force_fixed`/`is_free` dispatch onto `parse_mps_free_pairs` (always
+    /// skip `parts[0]`) makes `prob.b` become `[0.0, 20.0]` instead of
+    /// `[10.0, 20.0]` (row "1"'s RHS silently lost) — verified by temporarily
+    /// reverting during development.
+    #[test]
+    fn test_qps_rhs_shorthand_two_pairs_numeric_row_names() {
+        let qps = "NAME\nROWS\n N  obj\n L  1\n L  2\nCOLUMNS\n    x1  obj  1.0  1  1.0\n    x2  obj  1.0  2  1.0\nRHS\n    1  10.0  2  20.0\nENDATA\n";
+        let prob = parse_qps_str(qps).expect("shorthand 2-pair RHS must parse");
+        assert_eq!(prob.b, vec![10.0, 20.0], "both RHS values must survive");
+    }
+
+    /// Sentinel: `blend_shorthand.mps` — a real, live `emps`-decoded Netlib
+    /// LP "blend" — parsed through the QPS reader (as `data/lp_problems/*.QPS`
+    /// netlib fixtures are in this codebase), matching the documented Netlib
+    /// optimum. Its RHS section has numeric row names ("65".."72"), no vector
+    /// name, 2 pairs packed per line: this is the historical trigger where an
+    /// earlier multi-vector RHS attempt misread the shape and produced a
+    /// wrong (previously reported as ~0) objective.
+    ///
+    /// **No-op failure guarantee**: reverting the shorthand disambiguation
+    /// drops all but 2 of the 8 RHS rows and the solved objective becomes
+    /// wrong — verified by temporarily reverting.
+    #[test]
+    fn test_qps_blend_shorthand_rhs_matches_known_optimal() {
+        use otspot_core::qp::solve_qp;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/netlib/blend_shorthand.mps");
+        let prob = parse_qps(&path).expect("blend_shorthand.mps must parse via QPS reader");
+        assert_eq!(prob.num_constraints, 74, "43 E-rows + 31 L-rows, no N-row");
+        assert!(prob.is_zero_q(), "blend is a pure LP (no QUADOBJ section)");
+
+        let nonzero_count = prob.b.iter().filter(|&&v| v != 0.0).count();
+        assert_eq!(
+            nonzero_count, 8,
+            "exactly 8 RHS rows are nonzero in blend; got {nonzero_count} (silent data loss?)"
+        );
+
+        let result = solve_qp(&prob);
+        assert!(
+            (result.objective - (-30.812149846)).abs() < 1e-6,
+            "blend_shorthand objective must match Netlib optimal -30.812149846, got {}",
+            result.objective
+        );
+    }
+
+    /// Sentinel (INLINE-P / PR #25 review finding): two distinct NAMED RHS
+    /// vectors legitimately reusing the same row must parse successfully,
+    /// applying only the first vector's value (GLPK/CPLEX "first vector
+    /// wins" convention) — not be rejected as a row-only duplicate.
+    ///
+    /// **No-op failure guarantee**: reverting the `(vector, row)`-keyed
+    /// `VectorSectionState::record` to a plain
+    /// `if self.rhs.contains_key(&name) { error }` row-only duplicate check
+    /// makes this a `ParseError` instead of `Ok` — verified by temporarily
+    /// reverting.
+    #[test]
+    fn test_qps_rhs_multiple_named_vectors_first_wins() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    RHS1  c1  10.0\n    RHS2  c1  20.0\nENDATA\n";
+        let prob = parse_qps_str(qps).expect("distinct named RHS vectors reusing a row must parse");
+        assert_eq!(prob.b, vec![10.0], "first vector (RHS1) must win, not RHS2");
+    }
+
+    /// Sentinel (multi-vector RANGES): analogous to the RHS case above.
+    ///
+    /// Oracle: `c1` is an `L` row (b=10.0). RANGES expansion for `L` splits
+    /// into `Le rhs=b` and `Ge rhs=b-|range|`, and the QPS builder then
+    /// uniformly negates `Ge` rows to `Le` (see `dt_qps_ge_eq_row_types`) —
+    /// so with RNG1's range=2.0 winning, the second row's rhs is
+    /// `-(b-|range|) = -(10.0-2.0) = -8.0`.
+    #[test]
+    fn test_qps_ranges_multiple_named_vectors_first_wins() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    rhs  c1  10.0\nRANGES\n    RNG1  c1  2.0\n    RNG2  c1  4.0\nENDATA\n";
+        let prob =
+            parse_qps_str(qps).expect("distinct named RANGES vectors reusing a row must parse");
+        assert_eq!(prob.num_constraints, 2);
+        assert_eq!(prob.b[0], 10.0);
+        assert_eq!(
+            prob.b[1], -8.0,
+            "RANGES value must come from RNG1 (2.0), not RNG2 (4.0)"
+        );
+    }
+
+    /// Sentinel: BOUNDS bound-set-name omitted for the non-value-taking
+    /// 2-token shorthand (`TYPE COL`, e.g. `FR x1`) — previously rejected
+    /// outright by the `parts.len() < 3` guard even though the value-taking
+    /// 3-token shorthand (`TYPE COL VALUE`) already worked.
+    ///
+    /// **No-op failure guarantee**: reverting the `parts.len() < 2` guard
+    /// and the `!value_taking` branch's length check makes this a
+    /// `ParseError` (too few fields) instead of `Ok` — verified by
+    /// temporarily reverting.
+    #[test]
+    fn test_qps_bounds_shorthand_non_value_taking_2token() {
+        let qps =
+            "NAME\nROWS\n N  obj\nCOLUMNS\n    x1  obj  1.0\n    x2  obj  1.0\nRHS\nBOUNDS\n FR  x1\n UP  x2  42.0\nENDATA\n";
+        let prob = parse_qps_str(qps).expect("BOUNDS shorthand (no bound name) must parse");
+        assert_eq!(
+            prob.bounds[0],
+            (f64::NEG_INFINITY, f64::INFINITY),
+            "FR x1 (shorthand, 2-token)"
+        );
+        assert_eq!(
+            prob.bounds[1],
+            (0.0, 42.0),
+            "UP x2 42.0 (shorthand, 3-token)"
+        );
+    }
 }

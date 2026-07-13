@@ -1368,4 +1368,154 @@ ENDATA
             "error should mention RANGES duplicate, got: {msg}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Task #9: vector-name-omitted (shorthand) RHS/RANGES/BOUNDS + multi-vector
+    // RHS/RANGES support.
+    // -----------------------------------------------------------------------
+
+    /// Sentinel: a 2-pair-per-line RHS with the vector name omitted, using
+    /// numeric row names ("1", "2") that also look like plausible values —
+    /// this is the exact shape that historically broke: a naive parser skips
+    /// `parts[0]` as if it were a vector name, then mispairs
+    /// `(parts[1], parts[2])` = `("10.0", 2.0)`, both silently discarding row
+    /// "1"'s value and fabricating a bogus entry for a nonexistent row "10.0".
+    ///
+    /// **No-op failure guarantee**: reverting `parse_rhs_line` to the old
+    /// unconditional `parse_mps_free_pairs` (always skip `parts[0]`) makes
+    /// `lp.b` become `[0.0, 2.0]` instead of `[10.0, 20.0]` (row "1"'s RHS
+    /// silently lost) — verified by temporarily reverting during development.
+    #[test]
+    fn test_mps_rhs_shorthand_two_pairs_numeric_row_names() {
+        let mps = "NAME\nROWS\n N obj\n L 1\n L 2\nCOLUMNS\n    x1 obj 1.0 1 1.0\n    x2 obj 1.0 2 1.0\nRHS\n    1  10.0  2  20.0\nENDATA\n";
+        let lp = parse_mps(mps).expect("shorthand 2-pair RHS must parse");
+        assert_eq!(lp.b, vec![10.0, 20.0], "both RHS values must survive");
+    }
+
+    /// Sentinel: `blend_shorthand.mps` is a real, live `emps`-decoded Netlib
+    /// LP "blend" RHS section — numeric row names ("65".."72"), no vector
+    /// name, 2 pairs packed per line. This is the historical trigger: an
+    /// earlier attempt at multi-vector RHS support misread this shape and
+    /// silently dropped all but the first row's value, corrupting `b` and
+    /// the solved objective. Both the direct RHS values and the solved
+    /// objective (matching Netlib's published optimum, also recorded in
+    /// `data/baseline_objectives/netlib_lp.csv` as `blend,-3.0812149846e+01`)
+    /// serve as independent oracles here.
+    ///
+    /// **No-op failure guarantee**: reverting the shorthand disambiguation
+    /// makes only 2 of the 8 RHS rows survive (rows "65"/"66" from the first
+    /// line, whichever vector identity gets established first) and the
+    /// solved objective becomes wrong — verified by temporarily reverting.
+    #[test]
+    fn test_mps_blend_shorthand_rhs_matches_known_optimal() {
+        use otspot_core::solve;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/netlib/blend_shorthand.mps");
+        let lp = parse_mps_file(&path).expect("blend_shorthand.mps must parse");
+        assert_eq!(lp.num_constraints, 74, "43 E-rows + 31 L-rows, no N-row");
+
+        // Independent oracle #1: the 8 RHS entries, hand-read off the fixture
+        // file's `RHS` section, at their 0-indexed ROWS-declaration position
+        // (rows "1".."74" declared in order, row "N" is 65th..72nd => index 64..71).
+        let expected_rhs: [(usize, f64); 8] = [
+            (64, 23.26),
+            (65, 5.25),
+            (66, 26.32),
+            (67, 21.05),
+            (68, 13.45),
+            (69, 2.58),
+            (70, 10.0),
+            (71, 10.0),
+        ];
+        for &(idx, val) in &expected_rhs {
+            assert!(
+                (lp.b[idx] - val).abs() < 1e-9,
+                "b[{idx}] must be {val}, got {}",
+                lp.b[idx]
+            );
+        }
+        let nonzero_count = lp.b.iter().filter(|&&v| v != 0.0).count();
+        assert_eq!(
+            nonzero_count, 8,
+            "exactly 8 RHS rows are nonzero in blend; got {nonzero_count} (silent data loss?)"
+        );
+
+        // Independent oracle #2: Netlib's published optimal objective.
+        let result = solve(&lp);
+        assert!(
+            (result.objective - (-30.812149846)).abs() < 1e-6,
+            "blend_shorthand objective must match Netlib optimal -30.812149846, got {}",
+            result.objective
+        );
+    }
+
+    /// Sentinel (multi-vector RHS, INLINE-P / PR #25 review finding): two
+    /// distinct NAMED RHS vectors legitimately reusing the same row must
+    /// parse successfully, applying only the first vector's value
+    /// (GLPK/CPLEX "first vector wins" convention) — not be rejected as a
+    /// row-only duplicate.
+    ///
+    /// **No-op failure guarantee**: reverting to a plain
+    /// `if self.rhs.contains_key(&name) { error }` row-only duplicate check
+    /// (ignoring vector identity) makes this a `ParseError` instead of
+    /// `Ok` — verified by temporarily reverting.
+    #[test]
+    fn test_mps_rhs_multiple_named_vectors_first_wins() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    RHS1  c1  10.0\n    RHS2  c1  20.0\nENDATA\n";
+        let lp = parse_mps(mps).expect("distinct named RHS vectors reusing a row must parse");
+        assert_eq!(lp.b, vec![10.0], "first vector (RHS1) must win, not RHS2");
+    }
+
+    /// Sentinel (multi-vector RANGES): analogous to the RHS case above.
+    #[test]
+    fn test_mps_ranges_multiple_named_vectors_first_wins() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nRANGES\n    RNG1  c1  2.0\n    RNG2  c1  4.0\nENDATA\n";
+        let lp = parse_mps(mps).expect("distinct named RANGES vectors reusing a row must parse");
+        // RNG1=2.0 applied (b0-|2|..b0): Le row c1, b=10.0, range=2.0 → [8.0, 10.0].
+        assert_eq!(lp.num_constraints, 2);
+        assert_eq!(lp.b[0], 10.0);
+        assert_eq!(
+            lp.b[1], 8.0,
+            "RANGES value must come from RNG1 (2.0), not RNG2 (4.0)"
+        );
+    }
+
+    /// Sentinel: RANGES vector name still correctly detected when the same
+    /// section also carries a genuine shorthand line (no vector name) —
+    /// covers the `resolve_vector_name` attribution path for RANGES too.
+    #[test]
+    fn test_mps_ranges_shorthand_two_pairs_numeric_row_names() {
+        let mps = "NAME\nROWS\n N obj\n E 1\n E 2\nCOLUMNS\n    x1 obj 1.0 1 1.0\n    x2 obj 1.0 2 1.0\nRHS\n    1 7.0 2 7.0\nRANGES\n    1  2.0  2  3.0\nENDATA\n";
+        let lp = parse_mps(mps).expect("shorthand 2-pair RANGES must parse");
+        assert_eq!(
+            lp.num_constraints, 4,
+            "2 base rows + 2 RANGES-expansion rows"
+        );
+        // E row (r>=0): [b, b+|r|]; stored as Le=b+|r| plus a Ge=b extra row.
+        assert_eq!(lp.b[0], 9.0, "row 1: Le upper = 7.0+2.0");
+        assert_eq!(lp.b[1], 10.0, "row 2: Le upper = 7.0+3.0");
+        assert_eq!(lp.b[2], 7.0, "row 1: Ge lower = 7.0");
+        assert_eq!(lp.b[3], 7.0, "row 2: Ge lower = 7.0");
+    }
+
+    /// Sentinel: BOUNDS bound-set-name omitted (shorthand `TYPE COL [VALUE]`)
+    /// must parse for both value-taking (`UP`) and non-value-taking (`FR`)
+    /// types, mirroring the MPS module's now-consistent RHS/RANGES handling.
+    ///
+    /// **No-op failure guarantee**: reverting `parse_bounds_line` to always
+    /// assume a bound name is present (`parts[1]` discarded, `parts[2]` =
+    /// column) makes this a `ParseError` (too few fields) instead of `Ok` —
+    /// verified by temporarily reverting.
+    #[test]
+    fn test_mps_bounds_shorthand_no_bound_name() {
+        let mps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\n    x2 obj 1.0\nRHS\nBOUNDS\n UP x1 42.0\n FR x2\nENDATA\n";
+        let lp = parse_mps(mps).expect("BOUNDS shorthand (no bound name) must parse");
+        assert_eq!(lp.bounds[0], (0.0, 42.0), "UP x1 42.0 (shorthand)");
+        assert_eq!(
+            lp.bounds[1],
+            (f64::NEG_INFINITY, f64::INFINITY),
+            "FR x2 (shorthand)"
+        );
+    }
 }
