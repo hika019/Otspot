@@ -755,12 +755,17 @@ impl Model {
     /// Builds one inequality row per finite variable bound (`x_j <= ub` as
     /// `x_j <= ub`, `x_j >= lb` as `-x_j <= -lb`), except a fixed variable
     /// (`lb == ub`) which becomes a single equality row `x_j = lb` instead of
-    /// that inequality pair: the pair has no strictly feasible slack (`x_j <=
-    /// ub` and `-x_j <= -lb` both bind at once), which stalls the conic
-    /// interior-point method (`conic::qcqp::qp_problem_to_conic` special-cases
-    /// the analogous case for the same reason; PR #25 review INLINE-B). Each
-    /// row has exactly one nonzero, so this is `O(number of finite bounds)`,
-    /// never `O(n^2)`.
+    /// that inequality pair. The equality row is the structurally correct
+    /// encoding for a fixed variable and matches the sibling bridge
+    /// `conic::qcqp::qp_problem_to_conic`, which already special-cases
+    /// `lb == ub` this way (PR #25 review INLINE-B: a consistency fix that
+    /// brings this DSL builder in line with the core bridge). The inequality
+    /// pair `x_j <= ub`, `-x_j <= -lb` has no strictly feasible slack (both
+    /// bind at once), which is the interior-point degeneracy the equality
+    /// encoding avoids in principle -- though the conic IPM solves the
+    /// two-row encoding fine on the small cases tested, so this is not
+    /// motivated by an observed stall. Each row has exactly one nonzero, so
+    /// this is `O(number of finite bounds)`, never `O(n^2)`.
     fn bounds_to_rows(
         bounds: &[(f64, f64)],
         n: usize,
@@ -904,9 +909,10 @@ mod conic_bridge_sparse_builder_tests {
     /// (unequal), one-sided (each direction), unbounded, and fixed
     /// (`lb == ub`) variables. The fixed variable (index 4) must produce
     /// exactly one equality row `x_4 = 4` and *no* inequality rows -- the
-    /// pre-fix behavior emitted `x_4 <= 4` and `-x_4 <= -4` instead, an
-    /// inequality pair with no strictly feasible slack that stalls the conic
-    /// interior-point method (PR #25 review INLINE-B).
+    /// pre-fix behavior emitted `x_4 <= 4` and `-x_4 <= -4` instead. The
+    /// equality row is the structurally correct encoding, matching the
+    /// sibling bridge `conic::qcqp::qp_problem_to_conic` (PR #25 review
+    /// INLINE-B, a consistency fix).
     #[test]
     fn bounds_to_rows_matches_hand_computed_unit_rows() {
         let bounds = vec![
@@ -3731,16 +3737,17 @@ mod conic_dsl_tests {
         assert!((res[y] - 1.0 / 2.0_f64.sqrt()).abs() < 1e-4);
     }
 
-    /// A fixed variable (`lb == ub`) in a QCQP model must bridge to a single
-    /// equality row, not an inequality pair with no strictly feasible slack
-    /// (PR #25 review INLINE-B): `x`'s bound used to bridge to `x <= 2` and
-    /// `-x <= -2` simultaneously binding, a degenerate encoding documented
-    /// (here and at the analogous already-fixed `qp_problem_to_conic` site)
-    /// as a conic interior-point stall risk. The row-encoding regression
-    /// itself is sentineled at the unit level by
+    /// A fixed variable (`lb == ub`) in a QCQP model bridges to a single
+    /// equality row -- the structurally correct encoding, matching the
+    /// sibling `qp_problem_to_conic` (PR #25 review INLINE-B). The old
+    /// two-inequality encoding (`x <= 2` and `-x <= -2` simultaneously
+    /// binding) is degenerate in principle, but the conic IPM solves it fine
+    /// here, so this end-to-end test does NOT fail on revert -- it is a
+    /// correctness companion, not the INLINE-B sentinel. The row-encoding
+    /// change itself is sentineled at the unit level by
     /// `bounds_to_rows_matches_hand_computed_unit_rows` (fails on revert);
-    /// this end-to-end companion confirms the fixed-encoding model still
-    /// solves to the correct closed-form optimum.
+    /// this test only confirms the equality-encoded model still solves to the
+    /// correct closed-form optimum.
     ///
     /// Independent oracle: `x` fixed at 2 forces `x^2 = 4`, so `x^2 + y^2 <=
     /// 8` becomes `y^2 <= 4`, i.e. `y <= 2` (`y >= 0` from its own bound);
