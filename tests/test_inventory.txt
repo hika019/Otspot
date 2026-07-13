@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2688 testcases, 26 ignored
+# totals: 2721 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -41,17 +41,22 @@ otspot-core	conic::ipm::tests::shift_into_cone_pushes_each_outside_soc_by_its_ow
 otspot-core	conic::kkt::tests::equilibrate_guards_zero_and_subnormal_diagonals	active
 otspot-core	conic::misocp::tests::build_relaxation_matches_dense_reference	active
 otspot-core	conic::nonconvex::tests::accept_honors_caller_tolerance_after_rounding_not_a_fixed_floor	active
+otspot-core	conic::nonconvex::tests::cancel_flag_is_honored_inside_the_bnb_loop	active
 otspot-core	conic::nonconvex::tests::exhausted_clean_search_certifies_optimal_with_zero_gap	active
 otspot-core	conic::nonconvex::tests::failed_root_relaxation_is_not_false_infeasible	active
 otspot-core	conic::nonconvex::tests::global_miqcp_nan_int_tol_is_rejected_not_silently_broken	active
 otspot-core	conic::nonconvex::tests::incumbent_with_failed_node_is_not_optimal	active
+otspot-core	conic::nonconvex::tests::leaf_accept_no_longer_loosens_feas_tol_by_100x	active
 otspot-core	conic::nonconvex::tests::mccormick_w_box_bounds_diagonal_square_below	active
+otspot-core	conic::nonconvex::tests::mismatched_dims_returns_not_supported_not_a_panic	active
 otspot-core	conic::nonconvex::tests::node_limited_with_incumbent_is_suboptimal	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_expired_deadline	active
 otspot-core	conic::nonconvex::tests::sparse_relax_matches_dense_reference	active
+otspot-core	conic::nonconvex::tests::validate_rejects_every_mismatched_dimension	active
 otspot-core	conic::tests::bench_conic_suite	ignored
 otspot-core	conic::tests::cone_membership_check_covers_all_branches	active
 otspot-core	conic::tests::conic_border_l_fill_stays_linear	active
+otspot-core	conic::tests::conic_default_max_iter_no_longer_caps_a_slow_but_convergent_solve	active
 otspot-core	conic::tests::conic_kkt_direction_matches_dense_schur_oracle	active
 otspot-core	conic::tests::conic_kkt_threshold_boundary_direction_equivalence	active
 otspot-core	conic::tests::conic_options_validate_rejects_bad_tol_and_step_frac	active
@@ -125,6 +130,8 @@ otspot-core	conic::tests::socp_extreme_scale_never_falsely_conclusive	active
 otspot-core	conic::tests::socp_fixed_var_soc_infeasible_gets_certificate	active
 otspot-core	conic::tests::socp_large_bound_box_scale_sweep_is_optimal	active
 otspot-core	conic::tests::socp_large_scale_true_infeasible_gets_certificate	active
+otspot-core	conic::tests::solve_qcqp_with_expired_deadline_skips_to_conic_cost	active
+otspot-core	conic::tests::solve_qp_problem_as_qcqp_with_expired_deadline_skips_conic_build_cost	active
 otspot-core	conic::tests::solve_socp_canonicalizes_non_optimal_objective	active
 otspot-core	conic::tests::solve_socp_checks_cancel_flag_before_equilibration	active
 otspot-core	conic::tests::solve_socp_checks_deadline_before_equilibration	active
@@ -1239,9 +1246,9 @@ otspot-core	qp::tests::qcqp_guard::convex_qcqp_routes_to_conic_bridge	active
 otspot-core	qp::tests::qcqp_guard::empty_qcqp_matrices_not_rejected	active
 otspot-core	qp::tests::qcqp_guard::jitter_band_indefinite_qcqp_falls_back_to_global	active
 otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_honors_global_optimization_node_budget	active
-otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_honors_preset_cancel_flag	active
 otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_objective_includes_obj_offset	active
-otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_propagates_timeout	active
+otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_preset_cancel_flag_stops_via_convex_bridge_precheck	active
+otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_preset_deadline_stops_via_convex_bridge_precheck	active
 otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_routes_to_global_branch_and_bound	active
 otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_with_unbounded_variable_stays_not_supported	active
 otspot-core	qp::tests::qcqp_guard::plain_qp_not_rejected	active
@@ -1813,10 +1820,6 @@ otspot-io	mps::tests::test_columns_free_format_misclassified_as_fixed	active
 otspot-io	mps::tests::test_columns_wide_padding_solves	active
 otspot-io	mps::tests::test_integer_marker_kind_intorg_intend	active
 otspot-io	mps::tests::test_integer_marker_kind_non_marker	active
-otspot-io	mps::tests::test_is_fixed_width_free_format	active
-otspot-io	mps::tests::test_is_fixed_width_short_line	active
-otspot-io	mps::tests::test_is_fixed_width_typical_fixed	active
-otspot-io	mps::tests::test_is_fixed_width_with_tab	active
 otspot-io	mps::tests::test_milp_bv_bound_marks_integer	active
 otspot-io	mps::tests::test_milp_closed_intorg_following_cols_continuous	active
 otspot-io	mps::tests::test_milp_fixed_format_marker	active
@@ -1832,24 +1835,41 @@ otspot-io	mps::tests::test_milp_solve_bound_conventions	active
 otspot-io	mps::tests::test_milp_solve_ui_bound	active
 otspot-io	mps::tests::test_milp_ui_bound_marks_integer	active
 otspot-io	mps::tests::test_milp_unclosed_intorg_errors	active
+otspot-io	mps::tests::test_mps_blend_shorthand_rhs_matches_known_optimal	active
 otspot-io	mps::tests::test_mps_bounds_malformed_too_few_fields_is_error	active
 otspot-io	mps::tests::test_mps_bounds_nan_value_is_error	active
+otspot-io	mps::tests::test_mps_bounds_shorthand_no_bound_name	active
 otspot-io	mps::tests::test_mps_columns_inf_value_is_error	active
 otspot-io	mps::tests::test_mps_columns_malformed_too_few_fields_is_error	active
 otspot-io	mps::tests::test_mps_columns_nan_value_is_error	active
 otspot-io	mps::tests::test_mps_duplicate_ranges_row_is_error	active
 otspot-io	mps::tests::test_mps_duplicate_rhs_row_is_error	active
+otspot-io	mps::tests::test_mps_duplicate_row_name_is_error	active
+otspot-io	mps::tests::test_mps_error_comes_from_the_reading_that_got_further	active
+otspot-io	mps::tests::test_mps_extra_free_row_is_not_a_constraint	active
+otspot-io	mps::tests::test_mps_fixed_columns_embedded_space_row_name	active
+otspot-io	mps::tests::test_mps_fixed_columns_ignores_comment_and_sequence_fields	active
+otspot-io	mps::tests::test_mps_fixed_grid_rejects_content_outside_the_fields	active
+otspot-io	mps::tests::test_mps_long_name_is_not_truncated_into_a_false_match	active
+otspot-io	mps::tests::test_mps_named_vector_after_unnamed_entries_is_error	active
 otspot-io	mps::tests::test_mps_obj_offset_propagates_to_solve_result	active
+otspot-io	mps::tests::test_mps_objsense_inline_and_spelled_out	active
 otspot-io	mps::tests::test_mps_objsense_max_obj_offset_sign_flip	active
+otspot-io	mps::tests::test_mps_ranges_expansion_follows_declaration_order	active
 otspot-io	mps::tests::test_mps_ranges_malformed_too_few_fields_is_error	active
+otspot-io	mps::tests::test_mps_ranges_multiple_named_vectors_first_wins	active
+otspot-io	mps::tests::test_mps_ranges_shorthand_two_pairs_numeric_row_names	active
 otspot-io	mps::tests::test_mps_reader_crlf_equivalence	active
 otspot-io	mps::tests::test_mps_reader_fixture_afiro	active
+otspot-io	mps::tests::test_mps_reader_pulls_lines_lazily_not_all_upfront	active
 otspot-io	mps::tests::test_mps_reader_round_trip	active
-otspot-io	mps::tests::test_mps_reader_streaming_sentinel	active
 otspot-io	mps::tests::test_mps_rhs_malformed_too_few_fields_is_error	active
+otspot-io	mps::tests::test_mps_rhs_multiple_named_vectors_first_wins	active
 otspot-io	mps::tests::test_mps_rhs_n_row_finite_propagates_to_obj_offset	active
 otspot-io	mps::tests::test_mps_rhs_n_row_nan_is_error	active
 otspot-io	mps::tests::test_mps_rhs_nan_value_is_error	active
+otspot-io	mps::tests::test_mps_rhs_shorthand_two_pairs_numeric_row_names	active
+otspot-io	mps::tests::test_mps_undefined_row_reference_is_error	active
 otspot-io	mps::tests::test_parse_bounds_fr	active
 otspot-io	mps::tests::test_parse_bounds_fx	active
 otspot-io	mps::tests::test_parse_bounds_lo_up	active
@@ -1927,27 +1947,39 @@ otspot-io	qps::tests::test_parse_qps_eq_constraint	active
 otspot-io	qps::tests::test_parse_qps_no_quadobj	active
 otspot-io	qps::tests::test_parse_qps_obj_offset	active
 otspot-io	qps::tests::test_parse_qps_simple	active
+otspot-io	qps::tests::test_qps_blend_shorthand_rhs_matches_known_optimal	active
 otspot-io	qps::tests::test_qps_bounds_malformed_too_few_fields_is_error	active
+otspot-io	qps::tests::test_qps_bounds_shorthand_non_value_taking_2token	active
+otspot-io	qps::tests::test_qps_column_named_marker_is_not_a_marker_line	active
 otspot-io	qps::tests::test_qps_columns_inf_value_is_error	active
 otspot-io	qps::tests::test_qps_columns_malformed_too_few_fields_is_error	active
 otspot-io	qps::tests::test_qps_columns_nan_value_is_error	active
 otspot-io	qps::tests::test_qps_duplicate_ranges_row_is_error	active
 otspot-io	qps::tests::test_qps_duplicate_rhs_row_is_error	active
 otspot-io	qps::tests::test_qps_duplicate_rhs_row_shorthand_is_error	active
+otspot-io	qps::tests::test_qps_fixed_columns_embedded_space_row_name_in_columns	active
 otspot-io	qps::tests::test_qps_fixed_format_obj_row_nan_invalidates_offset	active
+otspot-io	qps::tests::test_qps_forplan_style_rhs_ranges_fixed_columns	active
+otspot-io	qps::tests::test_qps_free_format_single_space_row_names	active
+otspot-io	qps::tests::test_qps_long_name_truncation_and_duplicate_rows_are_errors	active
+otspot-io	qps::tests::test_qps_objsense_inline_and_spelled_out	active
 otspot-io	qps::tests::test_qps_objsense_max_obj_offset_sign_flip	active
 otspot-io	qps::tests::test_qps_quadobj_duplicate_entry_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_malformed_too_few_fields_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_nan_value_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_symmetric_duplicate_is_error	active
+otspot-io	qps::tests::test_qps_ranges_multiple_named_vectors_first_wins	active
 otspot-io	qps::tests::test_qps_reader_crlf_equivalence	active
 otspot-io	qps::tests::test_qps_reader_fixture_tame	active
+otspot-io	qps::tests::test_qps_reader_pulls_lines_lazily_not_all_upfront	active
 otspot-io	qps::tests::test_qps_reader_round_trip	active
-otspot-io	qps::tests::test_qps_reader_streaming_sentinel	active
 otspot-io	qps::tests::test_qps_rhs_inf_constraint_row_3field_is_error	active
+otspot-io	qps::tests::test_qps_rhs_multiple_named_vectors_first_wins	active
 otspot-io	qps::tests::test_qps_rhs_nan_constraint_row_3field_is_error	active
 otspot-io	qps::tests::test_qps_rhs_nan_constraint_row_is_error	active
 otspot-io	qps::tests::test_qps_rhs_nan_named_overwrite_is_error	active
+otspot-io	qps::tests::test_qps_rhs_shorthand_two_pairs_numeric_row_names	active
+otspot-io	qps::tests::test_qps_undefined_row_reference_is_error	active
 otspot-io	qps::tests::test_quadobj_symmetry	active
 otspot-io	qps::tests::test_sentinel_qps_bounds_fx_missing_value_is_error	active
 otspot-io	qps::tests::test_sentinel_qps_bounds_lo_missing_value_is_error	active
@@ -1977,10 +2009,11 @@ otspot-io::qps_fixture	test_qps_constraint_types	active
 otspot-io::qps_fixture	test_qps_lp_only_patterns	active
 otspot-io::qps_fixture	test_qps_obj_offset_patterns	active
 otspot-io::qps_fixture	test_qps_quadobj_patterns	active
-otspot-model	model::conic_bridge_sparse_builder_tests::bounds_to_ineq_rows_matches_hand_computed_unit_rows	active
+otspot-model	model::conic_bridge_sparse_builder_tests::bounds_to_rows_matches_hand_computed_unit_rows	active
 otspot-model	model::conic_bridge_sparse_builder_tests::csc_triplets_matches_hand_built_entries	active
 otspot-model	model::conic_bridge_sparse_builder_tests::split_linear_rows_matches_hand_computed_sign_flip_and_bucketing	active
 otspot-model	model::conic_bridge_sparse_builder_tests::vstack_csc_matches_hand_computed_stack	active
+otspot-model	model::conic_dsl_tests::fixed_var_qcqp_bridges_to_equality_row_not_infeasible_ineq_pair	active
 otspot-model	model::conic_dsl_tests::miqcp_disk_constraint_routes_to_conic_branch_and_bound	active
 otspot-model	model::conic_dsl_tests::miqcp_zero_timeout_returns_timeout_error	active
 otspot-model	model::conic_dsl_tests::misocp_zero_timeout_returns_timeout_error	active

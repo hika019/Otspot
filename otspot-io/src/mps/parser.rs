@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::BufRead;
+use std::io::{BufRead, Seek};
 
 pub use otspot_core::error::MpsError;
 use otspot_core::mip::MilpProblem;
@@ -10,13 +10,19 @@ use super::types::{
     integer_marker_kind, BoundType, IntegerMarker, Section, INTEGER_DEFAULT_UPPER_BINARY,
 };
 use crate::common::{
-    is_fixed_width_format, parse_objsense_value, parse_vector_pairs, RowNameIndex, RowType,
-    SectionState, VectorSectionState,
+    parse_bounds_entry, parse_columns_entry, parse_objsense_value, parse_row_decl,
+    parse_vector_entry, parse_with_format_fallback, Format, LineSource, ReaderSource, RowNameIndex,
+    RowType, SectionState, VectorSectionState,
 };
 
 pub(super) struct MpsParser {
+    format: Format,
+    /// Line reached by this reading; reported alongside a failure so the caller
+    /// can tell which of the two format readings engaged with more of the file.
+    progress: usize,
     problem_name: Option<String>,
     rows: Vec<(String, RowType)>,
+    row_names: HashSet<String>,
     columns: Vec<(String, String, f64)>,
     rhs: HashMap<String, f64>,
     ranges: HashMap<String, f64>,
@@ -31,10 +37,13 @@ pub(super) struct MpsParser {
 }
 
 impl MpsParser {
-    pub(super) fn new() -> Self {
+    fn new(format: Format) -> Self {
         Self {
+            format,
+            progress: 0,
             problem_name: None,
             rows: Vec::new(),
+            row_names: HashSet::new(),
             columns: Vec::new(),
             rhs: HashMap::new(),
             ranges: HashMap::new(),
@@ -49,21 +58,16 @@ impl MpsParser {
         }
     }
 
-    /// Reads an MPS stream line-by-line; returns LP relaxation and integer var indices.
-    pub(super) fn parse_reader<R: BufRead>(
-        &mut self,
-        reader: R,
-    ) -> Result<(LpProblem, Vec<usize>), MpsError> {
+    /// Reads an MPS source under one fixed layout; returns the LP relaxation
+    /// and the integer variable indices.
+    fn run<S: LineSource>(&mut self, source: &S) -> Result<(LpProblem, Vec<usize>), MpsError> {
         let mut state = SectionState::new(Section::None);
-        let mut line_num = 0;
 
-        for line_result in reader.lines() {
-            let line = line_result.map_err(MpsError::IoError)?;
-            line_num += 1;
+        source.visit_lines(MpsError::IoError, |line_num, line| {
+            self.progress = line_num;
             let trimmed = line.trim();
-
             if trimmed.is_empty() || trimmed.starts_with('*') {
-                continue;
+                return Ok(true);
             }
 
             if !line.starts_with(' ') && !line.starts_with('\t') {
@@ -71,42 +75,36 @@ impl MpsParser {
                     if self.in_integer_marker && section != Section::Columns {
                         return Err(MpsError::UnclosedIntegerMarker);
                     }
-                    let should_break = state.advance(
+                    let should_stop = state.advance(
                         section,
                         Section::Name,
                         Section::EndData,
                         MpsError::DuplicateSection,
                     )?;
-                    if section == Section::Name && trimmed.len() > 4 {
-                        let name_part = trimmed[4..].trim();
-                        if !name_part.is_empty() {
-                            self.problem_name = Some(name_part.to_string());
-                        }
-                    }
-                    if should_break {
-                        break;
-                    }
-                    continue;
+                    self.parse_section_header(section, trimmed, line_num)?;
+                    return Ok(!should_stop);
                 }
             }
 
+            let tokens: Vec<&str> = line.split_whitespace().collect();
             match state.current {
                 Section::None => {
                     return Err(MpsError::ParseError {
                         line: line_num,
                         message: "Line appears before any section header".to_string(),
-                    });
+                    })
                 }
                 Section::Name => {}
-                Section::ObjSense => self.parse_objsense_line(&line, line_num)?,
-                Section::Rows => self.parse_rows_line(&line, line_num)?,
-                Section::Columns => self.parse_columns_line(&line, line_num)?,
-                Section::Rhs => self.parse_rhs_line(&line, line_num)?,
-                Section::Ranges => self.parse_ranges_line(&line, line_num)?,
-                Section::Bounds => self.parse_bounds_line(&line, line_num)?,
-                Section::EndData => break,
+                Section::ObjSense => self.parse_objsense_line(line, line_num)?,
+                Section::Rows => self.parse_rows_line(line, &tokens, line_num)?,
+                Section::Columns => self.parse_columns_line(line, &tokens, line_num)?,
+                Section::Rhs => self.parse_vector_line(line, &tokens, line_num, "RHS")?,
+                Section::Ranges => self.parse_vector_line(line, &tokens, line_num, "RANGES")?,
+                Section::Bounds => self.parse_bounds_line(line, &tokens, line_num)?,
+                Section::EndData => return Ok(false),
             }
-        }
+            Ok(true)
+        })?;
 
         state.require(
             &[
@@ -117,193 +115,156 @@ impl MpsParser {
             MpsError::MissingSection,
         )?;
 
+        self.validate_references()?;
         self.build_lp_problem()
     }
 
-    fn parse_objsense_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
-        self.maximize = parse_objsense_value(line).map_err(|msg| MpsError::ParseError {
+    /// Handles data carried on the section header line itself.
+    ///
+    /// `NAME` puts the problem name there, and `OBJSENSE` may put its value
+    /// there (`OBJSENSE  MAX`) instead of on the following line — a legal form
+    /// that both HiGHS and SCIP accept. Ignoring it would silently minimize a
+    /// problem that asked to be maximized.
+    fn parse_section_header(
+        &mut self,
+        section: Section,
+        trimmed: &str,
+        line_num: usize,
+    ) -> Result<(), MpsError> {
+        let keyword_len = match section {
+            Section::Name => "NAME".len(),
+            Section::ObjSense => "OBJSENSE".len(),
+            _ => return Ok(()),
+        };
+        let Some(rest) = trimmed.get(keyword_len..).map(str::trim) else {
+            return Ok(());
+        };
+        if rest.is_empty() {
+            return Ok(());
+        }
+        match section {
+            Section::Name => self.problem_name = Some(rest.to_string()),
+            Section::ObjSense => self.parse_objsense_line(rest, line_num)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn parse_objsense_line(&mut self, value: &str, line_num: usize) -> Result<(), MpsError> {
+        self.maximize = parse_objsense_value(value).map_err(|message| MpsError::ParseError {
             line: line_num,
-            message: msg,
+            message,
         })?;
         Ok(())
     }
 
-    fn parse_rows_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
+    fn parse_rows_line(
+        &mut self,
+        line: &str,
+        tokens: &[&str],
+        line_num: usize,
+    ) -> Result<(), MpsError> {
+        let (type_str, row_name) =
+            parse_row_decl(line, tokens, self.format, line_num).map_err(|message| {
+                MpsError::ParseError {
+                    line: line_num,
+                    message,
+                }
+            })?;
+
+        if type_str.len() != 1 {
             return Err(MpsError::ParseError {
                 line: line_num,
-                message: "ROWS line must have at least 2 fields".to_string(),
+                message: format!("Row type must be single character, got '{}'", type_str),
             });
         }
-
-        let row_type_str = parts[0];
-        let row_name = parts[1].to_string();
-
-        if row_type_str.len() != 1 {
-            return Err(MpsError::ParseError {
-                line: line_num,
-                message: format!("Row type must be single character, got '{}'", row_type_str),
-            });
-        }
-
-        let row_type_char = row_type_str.chars().next().unwrap();
-        let row_type = match row_type_char {
+        let type_char = type_str.chars().next().expect("len == 1 checked above");
+        let row_type = match type_char.to_ascii_uppercase() {
             'N' => RowType::N,
             'L' => RowType::L,
             'G' => RowType::G,
             'E' => RowType::E,
-            _ => return Err(MpsError::InvalidRowType(row_type_char)),
+            _ => return Err(MpsError::InvalidRowType(type_char)),
         };
 
+        // Two rows sharing a name would make every reference to it ambiguous and
+        // silently resolve to whichever landed in the index last.
+        if !self.row_names.insert(row_name.clone()) {
+            return Err(MpsError::ParseError {
+                line: line_num,
+                message: format!("ROWS: duplicate row name '{}'", row_name),
+            });
+        }
         if matches!(row_type, RowType::N) && self.obj_row.is_none() {
             self.obj_row = Some(row_name.clone());
         }
-
         self.rows.push((row_name, row_type));
         Ok(())
     }
 
-    fn parse_columns_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
+    fn parse_columns_line(
+        &mut self,
+        line: &str,
+        tokens: &[&str],
+        line_num: usize,
+    ) -> Result<(), MpsError> {
         if let Some(kind) = integer_marker_kind(line) {
             self.in_integer_marker = matches!(kind, IntegerMarker::Start);
             return Ok(());
         }
 
-        if is_fixed_width_format(line) {
-            self.parse_columns_fixed(line, line_num)
-        } else {
-            self.parse_columns_free(line, line_num)
-        }
-    }
-
-    fn parse_columns_fixed(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
-        let col_name = line.get(4..12).unwrap_or("").trim().to_string();
-        let row_name1 = line.get(14..22).unwrap_or("").trim().to_string();
-        let value1_str = line.get(24..36).unwrap_or("").trim();
-
-        // Fall back to free-format when fixed positions don't parse cleanly (e.g.
-        // MIPLIB files where short col names push the row name past column 22).
-        if col_name.is_empty() || row_name1.is_empty() || value1_str.parse::<f64>().is_err() {
-            return self.parse_columns_free(line, line_num);
-        }
-        if self.in_integer_marker {
-            self.integer_cols.insert(col_name.clone());
-        }
-
-        let value1 = value1_str
-            .parse::<f64>()
-            .expect("value1_str parseable (checked above)");
-        if !value1.is_finite() {
-            return Err(MpsError::ParseError {
-                line: line_num,
-                message: format!(
-                    "Non-finite COLUMNS value for col='{}' row='{}'",
-                    col_name, row_name1
-                ),
-            });
-        }
-        self.columns.push((col_name.clone(), row_name1, value1));
-
-        if line.len() >= 50 {
-            let row_name2 = line.get(39..47).unwrap_or("").trim().to_string();
-            let value2_str = line.get(49..61).unwrap_or("").trim();
-
-            if !row_name2.is_empty() && !value2_str.is_empty() {
-                let value2 = value2_str
-                    .parse::<f64>()
-                    .map_err(|_| MpsError::ParseError {
-                        line: line_num,
-                        message: format!("Invalid numeric value: {}", value2_str),
-                    })?;
-                if !value2.is_finite() {
-                    return Err(MpsError::ParseError {
-                        line: line_num,
-                        message: format!(
-                            "Non-finite COLUMNS value for col='{}' row='{}'",
-                            col_name, row_name2
-                        ),
-                    });
+        let (col_name, pairs) =
+            parse_columns_entry(line, tokens, self.format, line_num).map_err(|message| {
+                MpsError::ParseError {
+                    line: line_num,
+                    message,
                 }
-                self.columns.push((col_name.clone(), row_name2, value2));
-            }
-        }
+            })?;
 
-        Ok(())
-    }
-
-    fn parse_columns_free(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
-            return Err(MpsError::ParseError {
-                line: line_num,
-                message: "COLUMNS line requires at least 3 fields (col row value)".to_string(),
-            });
-        }
-
-        let col_name = parts[0].to_string();
         if self.in_integer_marker {
             self.integer_cols.insert(col_name.clone());
         }
-
-        for i in (1..parts.len()).step_by(2) {
-            if i + 1 >= parts.len() {
-                return Err(MpsError::ParseError {
-                    line: line_num,
-                    message: format!(
-                        "odd trailing token '{}' in COLUMNS (row name without a value)",
-                        parts[i]
-                    ),
-                });
-            }
-            let row_name = parts[i].to_string();
-            let value = parts[i + 1]
-                .parse::<f64>()
-                .map_err(|_| MpsError::ParseError {
-                    line: line_num,
-                    message: format!("Invalid numeric value: {}", parts[i + 1]),
-                })?;
-            if !value.is_finite() {
-                return Err(MpsError::ParseError {
-                    line: line_num,
-                    message: format!(
-                        "Non-finite COLUMNS value for col='{}' row='{}'",
-                        col_name, row_name
-                    ),
-                });
-            }
+        for (row_name, value) in pairs {
             self.columns.push((col_name.clone(), row_name, value));
         }
-
         Ok(())
     }
 
-    fn parse_rhs_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
-            return Err(MpsError::ParseError {
-                line: line_num,
-                message: "RHS line requires at least 2 fields (row value)".to_string(),
-            });
-        }
-        // Pass None: non-finite values are rejected for all rows including the N-row.
-        // The obj_offset (N-row RHS) is extracted in build_lp_problem after all sections parse.
-        let (vector_name, pairs) = parse_vector_pairs(
-            &parts,
+    /// RHS and RANGES share one grammar; they differ only in the map they fill.
+    ///
+    /// A non-finite value is rejected for every row including the N-row: the
+    /// objective offset (N-row RHS) is extracted in `build_lp_problem` once all
+    /// sections are parsed.
+    fn parse_vector_line(
+        &mut self,
+        line: &str,
+        tokens: &[&str],
+        line_num: usize,
+        section: &str,
+    ) -> Result<(), MpsError> {
+        let (vector_name, pairs) = parse_vector_entry(
+            line,
+            tokens,
+            self.format,
             &self.rows,
             &mut self.row_index,
             line_num,
-            "RHS",
+            section,
             None,
         )
-        .map_err(|msg| MpsError::ParseError {
+        .map_err(|message| MpsError::ParseError {
             line: line_num,
-            message: msg,
+            message,
         })?;
-        let resolved_vector = self.rhs_vectors.resolve_vector_name(vector_name.as_deref());
-        for (name, value) in pairs {
-            self.rhs_vectors
-                .record(&mut self.rhs, "RHS", &resolved_vector, name, value)
+
+        let (state, target) = if section == "RHS" {
+            (&mut self.rhs_vectors, &mut self.rhs)
+        } else {
+            (&mut self.ranges_vectors, &mut self.ranges)
+        };
+        for (row_name, value) in pairs {
+            state
+                .record(target, section, vector_name.as_deref(), row_name, value)
                 .map_err(|message| MpsError::ParseError {
                     line: line_num,
                     message,
@@ -312,51 +273,19 @@ impl MpsParser {
         Ok(())
     }
 
-    fn parse_ranges_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
+    fn parse_bounds_line(
+        &mut self,
+        line: &str,
+        tokens: &[&str],
+        line_num: usize,
+    ) -> Result<(), MpsError> {
+        if tokens.is_empty() {
             return Err(MpsError::ParseError {
                 line: line_num,
-                message: "RANGES line requires at least 2 fields (row value)".to_string(),
+                message: "BOUNDS line is empty".to_string(),
             });
         }
-        let (vector_name, pairs) = parse_vector_pairs(
-            &parts,
-            &self.rows,
-            &mut self.row_index,
-            line_num,
-            "RANGES",
-            None,
-        )
-        .map_err(|msg| MpsError::ParseError {
-            line: line_num,
-            message: msg,
-        })?;
-        let resolved_vector = self
-            .ranges_vectors
-            .resolve_vector_name(vector_name.as_deref());
-        for (name, value) in pairs {
-            self.ranges_vectors
-                .record(&mut self.ranges, "RANGES", &resolved_vector, name, value)
-                .map_err(|message| MpsError::ParseError {
-                    line: line_num,
-                    message,
-                })?;
-        }
-        Ok(())
-    }
-
-    fn parse_bounds_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
-            return Err(MpsError::ParseError {
-                line: line_num,
-                message: "BOUNDS line requires at least 2 fields (type col)".to_string(),
-            });
-        }
-
-        let bound_type_str = parts[0];
-        let bound_type = match bound_type_str {
+        let bound_type = match tokens[0].to_uppercase().as_str() {
             "LO" => BoundType::LO,
             "UP" => BoundType::UP,
             "FX" => BoundType::FX,
@@ -366,156 +295,156 @@ impl MpsParser {
             "PL" => BoundType::PL,
             "LI" => BoundType::LI,
             "UI" => BoundType::UI,
-            _ => return Err(MpsError::InvalidBoundType(bound_type_str.to_string())),
+            _ => return Err(MpsError::InvalidBoundType(tokens[0].to_string())),
         };
-
         let value_required = matches!(
             bound_type,
             BoundType::LO | BoundType::UP | BoundType::FX | BoundType::LI | BoundType::UI
         );
 
-        // The bound-set-name field (standard form: `TYPE BNDNAME COL [VALUE]`)
-        // is commonly omitted (shorthand: `TYPE COL [VALUE]`). Token count
-        // alone disambiguates: a value-taking type's line has exactly 3
-        // (shorthand) or 4 (standard) tokens; a non-value type's line has
-        // exactly 2 (shorthand) or 3 (standard).
-        let min_standard_len = if value_required { 4 } else { 3 };
-        let has_bound_name = parts.len() >= min_standard_len;
-        let col_idx = if has_bound_name { 2 } else { 1 };
-        if parts.len() <= col_idx {
-            return Err(MpsError::ParseError {
-                line: line_num,
-                message: "BOUNDS line missing column name".to_string(),
-            });
-        }
-        let col_name = parts[col_idx].to_string();
-
-        let value = if value_required {
-            let val_idx = col_idx + 1;
-            if parts.len() <= val_idx {
-                None
-            } else {
-                let v = parts[val_idx]
-                    .parse::<f64>()
-                    .map_err(|_| MpsError::ParseError {
-                        line: line_num,
-                        message: format!("Invalid numeric value: {}", parts[val_idx]),
-                    })?;
-                if !v.is_finite() {
-                    return Err(MpsError::ParseError {
-                        line: line_num,
-                        message: format!("Non-finite BOUNDS value for col='{}'", col_name),
-                    });
-                }
-                Some(v)
-            }
-        } else {
-            None
-        };
-
-        if value_required && value.is_none() {
-            return Err(MpsError::ParseError {
-                line: line_num,
-                message: format!(
-                    "BOUNDS type {} requires a value for col='{}'",
-                    bound_type_str, col_name
-                ),
-            });
-        }
+        let (col_name, value) =
+            parse_bounds_entry(line, tokens, self.format, line_num, value_required).map_err(
+                |message| MpsError::ParseError {
+                    line: line_num,
+                    message,
+                },
+            )?;
 
         if matches!(bound_type, BoundType::BV | BoundType::LI | BoundType::UI) {
             self.integer_cols.insert(col_name.clone());
         }
-
         self.bounds.push((bound_type, col_name, value));
         Ok(())
     }
 
+    /// Every row/column name referenced by COLUMNS / RHS / RANGES / BOUNDS must
+    /// have been declared. Dropping an unknown name silently is how a misread
+    /// layout used to go unnoticed: reading a fixed-column line as free format
+    /// invents names that match nothing, and discarding them quietly corrupts
+    /// the model. Erroring out is also what lets the caller detect a wrong
+    /// layout guess and retry the file as fixed-column.
+    fn validate_references(&self) -> Result<(), MpsError> {
+        let declared_cols: HashSet<&str> =
+            self.columns.iter().map(|(c, _, _)| c.as_str()).collect();
+
+        for row_name in self
+            .columns
+            .iter()
+            .map(|(_, row, _)| row)
+            .chain(self.rhs.keys())
+            .chain(self.ranges.keys())
+        {
+            if !self.row_names.contains(row_name.as_str()) {
+                return Err(MpsError::UndefinedReference {
+                    kind: "row".to_string(),
+                    name: row_name.clone(),
+                });
+            }
+        }
+        for (_, col_name, _) in &self.bounds {
+            if !declared_cols.contains(col_name.as_str()) {
+                return Err(MpsError::UndefinedReference {
+                    kind: "column".to_string(),
+                    name: col_name.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn build_lp_problem(&self) -> Result<(LpProblem, Vec<usize>), MpsError> {
-        let mut row_map = HashMap::new();
+        // Only constraint rows get an index. N rows (the objective and any
+        // further free row) are declared but never become constraints, so
+        // giving them a `row_map` slot would desynchronise the row indices from
+        // `constraint_types` / `rhs_vec`.
+        let mut row_map: HashMap<&str, usize> = HashMap::new();
         let mut constraint_types = Vec::new();
         let mut rhs_vec = Vec::new();
-
         for (row_name, row_type) in &self.rows {
-            if Some(row_name) == self.obj_row.as_ref() {
+            if !row_type.is_constraint() {
                 continue;
             }
-
-            let idx = row_map.len();
-            row_map.insert(row_name.clone(), idx);
-
-            let constraint_type = match row_type {
+            row_map.insert(row_name.as_str(), row_map.len());
+            constraint_types.push(match row_type {
                 RowType::L => ConstraintType::Le,
                 RowType::G => ConstraintType::Ge,
                 RowType::E => ConstraintType::Eq,
-                RowType::N => continue,
-            };
-            constraint_types.push(constraint_type);
-
-            let rhs_val = self.rhs.get(row_name).copied().unwrap_or(0.0);
-            rhs_vec.push(rhs_val);
+                RowType::N => unreachable!("N rows are skipped above"),
+            });
+            rhs_vec.push(self.rhs.get(row_name).copied().unwrap_or(0.0));
         }
-
         let base_num_constraints = row_map.len();
 
-        // RANGES: expand interval constraints to Le + Ge pairs (IBM MPS convention).
+        // RANGES: expand interval constraints to Le + Ge pairs (IBM convention).
         //   L: b - |r| <= Ax <= b
         //   G: b <= Ax <= b + |r|
         //   E (r>=0): b <= Ax <= b + |r|
         //   E (r<0):  b - |r| <= Ax <= b
-        let mut range_extra_rows: Vec<(String, usize, f64)> = Vec::new();
-        for (row_name, range_val) in &self.ranges {
-            if let Some(&idx) = row_map.get(row_name) {
-                let b = rhs_vec[idx];
-                let abs_r = range_val.abs();
-
-                let (lower, upper) = match constraint_types[idx] {
-                    ConstraintType::Le => (b - abs_r, b),
-                    ConstraintType::Ge => (b, b + abs_r),
-                    ConstraintType::Eq => {
-                        if *range_val >= 0.0 {
-                            (b, b + abs_r)
-                        } else {
-                            (b - abs_r, b)
-                        }
-                    }
-                    _ => continue,
-                };
-
-                constraint_types[idx] = ConstraintType::Le;
-                rhs_vec[idx] = upper;
-                range_extra_rows.push((row_name.clone(), idx, lower));
-            }
-        }
-
-        let mut range_row_map: HashMap<String, usize> = HashMap::new();
-        for (row_name, _orig_idx, lower_bound) in &range_extra_rows {
-            let new_idx = base_num_constraints + range_row_map.len();
-            range_row_map.insert(row_name.clone(), new_idx);
-            constraint_types.push(ConstraintType::Ge);
-            rhs_vec.push(*lower_bound);
-        }
-
-        let num_constraints = base_num_constraints + range_row_map.len();
-
-        let mut col_map = HashMap::new();
-        for (col_name, _, _) in &self.columns {
-            if !col_map.contains_key(col_name) {
-                let idx = col_map.len();
-                col_map.insert(col_name.clone(), idx);
-            }
-        }
-
-        let num_vars = col_map.len();
-
-        let mut c = vec![0.0; num_vars];
-        if let Some(obj_row_name) = &self.obj_row {
-            for (col_name, row_name, value) in &self.columns {
-                if row_name == obj_row_name {
-                    if let Some(&col_idx) = col_map.get(col_name) {
-                        c[col_idx] += *value;
+        //
+        // Walk the rows in declaration order, not `self.ranges` (a HashMap):
+        // iterating the map would order the appended rows by hash, making the
+        // constraint indices — and therefore the built matrix — differ between
+        // runs of the same input.
+        let mut range_row_map: HashMap<&str, usize> = HashMap::new();
+        let mut range_lowers: Vec<f64> = Vec::new();
+        for (row_name, _) in &self.rows {
+            let Some(&range_val) = self.ranges.get(row_name) else {
+                continue;
+            };
+            // A RANGES entry on a declared free (N) row has no constraint to
+            // widen; the standard ignores it.
+            let Some(&idx) = row_map.get(row_name.as_str()) else {
+                continue;
+            };
+            let b = rhs_vec[idx];
+            let abs_r = range_val.abs();
+            let (lower, upper) = match constraint_types[idx] {
+                ConstraintType::Le => (b - abs_r, b),
+                ConstraintType::Ge => (b, b + abs_r),
+                ConstraintType::Eq => {
+                    if range_val >= 0.0 {
+                        (b, b + abs_r)
+                    } else {
+                        (b - abs_r, b)
                     }
                 }
+                _ => continue,
+            };
+            constraint_types[idx] = ConstraintType::Le;
+            rhs_vec[idx] = upper;
+            range_row_map.insert(row_name.as_str(), base_num_constraints + range_lowers.len());
+            range_lowers.push(lower);
+        }
+        for lower in &range_lowers {
+            constraint_types.push(ConstraintType::Ge);
+            rhs_vec.push(*lower);
+        }
+        let num_constraints = base_num_constraints + range_lowers.len();
+
+        let mut col_map: HashMap<&str, usize> = HashMap::new();
+        for (col_name, _, _) in &self.columns {
+            let next = col_map.len();
+            col_map.entry(col_name.as_str()).or_insert(next);
+        }
+        let num_vars = col_map.len();
+
+        let obj_row = self.obj_row.as_deref();
+        let mut c = vec![0.0; num_vars];
+        let mut triplets = Vec::new();
+        for (col_name, row_name, value) in &self.columns {
+            let col_idx = col_map[col_name.as_str()];
+            if Some(row_name.as_str()) == obj_row {
+                c[col_idx] += *value;
+                continue;
+            }
+            // Declared free (N) rows other than the objective carry no
+            // constraint; the standard ignores their coefficients.
+            let Some(&row_idx) = row_map.get(row_name.as_str()) else {
+                continue;
+            };
+            triplets.push((row_idx, col_idx, *value));
+            if let Some(&range_row_idx) = range_row_map.get(row_name.as_str()) {
+                triplets.push((range_row_idx, col_idx, *value));
             }
         }
         // Normalize MAX → MIN by negating the objective.
@@ -525,50 +454,23 @@ impl MpsParser {
             }
         }
 
-        // Extract objective constant (N-row RHS); sign-flip mirrors the MAX→MIN transform above.
-        // `raw` is finite by construction: every value inserted into `self.rhs` is validated
-        // as a finite f64 at parse time (see `parse_rhs_section`).
-        let obj_offset = if let Some(obj_row_name) = &self.obj_row {
-            let raw = self.rhs.get(obj_row_name.as_str()).copied().unwrap_or(0.0);
-            if self.maximize {
-                -raw
-            } else {
-                raw
+        // Objective constant (N-row RHS); the sign flip mirrors MAX → MIN above.
+        // Finiteness is guaranteed at parse time.
+        let obj_offset = match obj_row {
+            Some(name) => {
+                let raw = self.rhs.get(name).copied().unwrap_or(0.0);
+                if self.maximize {
+                    -raw
+                } else {
+                    raw
+                }
             }
-        } else {
-            0.0
+            None => 0.0,
         };
-
-        let mut triplets = Vec::new();
-        for (col_name, row_name, value) in &self.columns {
-            if Some(row_name) == self.obj_row.as_ref() {
-                continue;
-            }
-
-            let col_idx = col_map
-                .get(col_name)
-                .ok_or_else(|| MpsError::UndefinedReference {
-                    kind: "column".to_string(),
-                    name: col_name.clone(),
-                })?;
-            let row_idx = row_map
-                .get(row_name)
-                .ok_or_else(|| MpsError::UndefinedReference {
-                    kind: "row".to_string(),
-                    name: row_name.clone(),
-                })?;
-
-            triplets.push((*row_idx, *col_idx, *value));
-
-            if let Some(&range_row_idx) = range_row_map.get(row_name) {
-                triplets.push((range_row_idx, *col_idx, *value));
-            }
-        }
 
         let rows: Vec<usize> = triplets.iter().map(|&(r, _, _)| r).collect();
         let cols: Vec<usize> = triplets.iter().map(|&(_, c, _)| c).collect();
         let vals: Vec<f64> = triplets.iter().map(|&(_, _, v)| v).collect();
-
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, num_constraints, num_vars).map_err(
             |e| MpsError::ParseError {
                 line: 0,
@@ -578,38 +480,34 @@ impl MpsParser {
 
         let mut bounds = vec![(0.0, f64::INFINITY); num_vars];
         for (bound_type, col_name, value) in &self.bounds {
-            let col_idx = col_map
-                .get(col_name)
-                .ok_or_else(|| MpsError::UndefinedReference {
-                    kind: "column".to_string(),
-                    name: col_name.clone(),
-                })?;
-
+            let col_idx = col_map[col_name.as_str()];
             match bound_type {
-                BoundType::LO => bounds[*col_idx].0 = value.unwrap_or(0.0),
-                BoundType::UP => bounds[*col_idx].1 = value.unwrap_or(f64::INFINITY),
+                BoundType::LO => bounds[col_idx].0 = value.unwrap_or(0.0),
+                BoundType::UP => bounds[col_idx].1 = value.unwrap_or(f64::INFINITY),
                 BoundType::FX => {
                     let val = value.unwrap_or(0.0);
-                    bounds[*col_idx] = (val, val);
+                    bounds[col_idx] = (val, val);
                 }
-                BoundType::FR => bounds[*col_idx] = (f64::NEG_INFINITY, f64::INFINITY),
-                BoundType::MI => bounds[*col_idx].0 = f64::NEG_INFINITY,
-                BoundType::BV => bounds[*col_idx] = (0.0, 1.0),
-                BoundType::PL => bounds[*col_idx].1 = f64::INFINITY,
-                BoundType::LI => bounds[*col_idx].0 = value.unwrap_or(0.0),
-                BoundType::UI => bounds[*col_idx].1 = value.unwrap_or(f64::INFINITY),
+                BoundType::FR => bounds[col_idx] = (f64::NEG_INFINITY, f64::INFINITY),
+                BoundType::MI => bounds[col_idx].0 = f64::NEG_INFINITY,
+                BoundType::BV => bounds[col_idx] = (0.0, 1.0),
+                BoundType::PL => bounds[col_idx].1 = f64::INFINITY,
+                BoundType::LI => bounds[col_idx].0 = value.unwrap_or(0.0),
+                BoundType::UI => bounds[col_idx].1 = value.unwrap_or(f64::INFINITY),
             }
         }
 
-        // Integer variables without any explicit BOUNDS entry default to binary [0,1]
-        // (classical OSL/CPLEX/HiGHS convention).
-        let explicitly_bounded: HashSet<&String> =
-            self.bounds.iter().map(|(_, name, _)| name).collect();
-
+        // Integer variables with no explicit BOUNDS entry default to binary
+        // [0, 1] (classical OSL/CPLEX/HiGHS convention).
+        let explicitly_bounded: HashSet<&str> = self
+            .bounds
+            .iter()
+            .map(|(_, name, _)| name.as_str())
+            .collect();
         let mut integer_vars: Vec<usize> = Vec::with_capacity(self.integer_cols.len());
         for col_name in &self.integer_cols {
-            if let Some(&col_idx) = col_map.get(col_name) {
-                if !explicitly_bounded.contains(col_name) {
+            if let Some(&col_idx) = col_map.get(col_name.as_str()) {
+                if !explicitly_bounded.contains(col_name.as_str()) {
                     bounds[col_idx].1 = INTEGER_DEFAULT_UPPER_BINARY;
                 }
                 integer_vars.push(col_idx);
@@ -630,24 +528,43 @@ impl MpsParser {
             message: e.to_string(),
         })?;
         lp.obj_offset = obj_offset;
-
         Ok((lp, integer_vars))
     }
 }
 
-// ── Public entry points (used by mps/mod.rs) ─────────────────────────────────
+/// Parse `source`, retrying as fixed-column MPS if the free-format read fails.
+fn parse_source<S: LineSource>(source: &S) -> Result<(LpProblem, Vec<usize>), MpsError> {
+    parse_with_format_fallback(source, |source, format| {
+        let mut parser = MpsParser::new(format);
+        parser.run(source).map_err(|e| (e, parser.progress))
+    })
+}
 
-pub fn parse_mps_reader<R: BufRead>(reader: R) -> Result<LpProblem, MpsError> {
-    let mut parser = MpsParser::new();
-    let (lp, _integer_vars) = parser.parse_reader(reader)?;
+pub(super) fn parse_lp_source<S: LineSource>(source: &S) -> Result<LpProblem, MpsError> {
+    let (lp, _integer_vars) = parse_source(source)?;
     Ok(lp)
 }
 
-pub fn parse_milp_reader<R: BufRead>(reader: R) -> Result<MilpProblem, MpsError> {
-    let mut parser = MpsParser::new();
-    let (lp, integer_vars) = parser.parse_reader(reader)?;
+pub(super) fn parse_milp_source<S: LineSource>(source: &S) -> Result<MilpProblem, MpsError> {
+    let (lp, integer_vars) = parse_source(source)?;
     MilpProblem::new(lp, integer_vars).map_err(|e| MpsError::ParseError {
         line: 0,
         message: e.to_string(),
     })
+}
+
+// ── Public entry points (used by mps/mod.rs) ─────────────────────────────────
+
+/// Parse an MPS stream, returning an LP relaxation.
+///
+/// The reader must be seekable: a file that turns out to be fixed-column is
+/// re-read from the start, and rewinding is what lets that happen without
+/// holding the input in memory.
+pub fn parse_mps_reader<R: BufRead + Seek>(reader: R) -> Result<LpProblem, MpsError> {
+    parse_lp_source(&ReaderSource::new(reader))
+}
+
+/// Parse an MPS stream, returning a `MilpProblem`. See [`parse_mps_reader`].
+pub fn parse_milp_reader<R: BufRead + Seek>(reader: R) -> Result<MilpProblem, MpsError> {
+    parse_milp_source(&ReaderSource::new(reader))
 }

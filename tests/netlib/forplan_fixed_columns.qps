@@ -1,0 +1,16 @@
+NAME          FIXEDCOL
+ROWS
+ N  obj
+ L  LC123
+ L  BR   1 1
+ G  LTSYCT
+COLUMNS
+    X1        obj               -1.0   LC123              1.0
+    X2        obj               -1.0   LC123              1.0
+    X2        LTSYCT             1.0
+RHS
+    RHS 1     LC123              10.   BR   1 1            6.
+    RHS 1     LTSYCT              2.
+RANGES
+    RNG 1     LTSYCT              5.
+ENDATA

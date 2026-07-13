@@ -4,8 +4,10 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-conic/QCQP の正当性修正と SOCP IPM の収束改善、大規模 LP の presolve 性能改善。
+conic/QCQP の正当性修正と SOCP IPM の収束改善、大規模 LP の presolve 性能改善、MPS/QPS パーサの形式判定の作り直し。
 
+- BREAKING: `mps::parse_mps_reader` / `mps::parse_milp_reader` / `qps::parse_qps_reader` の型境界を `R: BufRead` から `R: BufRead + Seek` に変更。固定桁 MPS と判明したファイルは先頭から読み直す必要があり、`Seek` はそれを全行バッファ無しで行うための条件 (MPS は GiB 級になりうるため入力の全行保持は不可)。`File` / `Cursor` は `Seek` 済みでそのまま渡せる。stdin やパイプなど seek 不可の入力は、呼び出し側で `Cursor::new(buf)` に読み切ってから渡す
+- MPS/QPS の形式判定を行単位のヒューリスティクスからファイル単位の決定に作り直し、固定桁 MPS (名前に空白を含む Netlib forplan 等) の誤読と、未宣言の行名/列名の黙殺 (silent data loss) を修正。ROWS の行名重複、`OBJSENSE` のヘッダ行記法・`MAXIMIZE`/`MINIMIZE` 綴り、コメント欄 (62-72 桁) とシーケンス番号欄 (73-80 桁) も正しく扱う
 - 非凸 QCQP が凸 SOCP として誤って「証明付き Optimal」と報告される問題を修正: Cholesky がゼロピボット列の非ゼロ off-diagonal を捨てて不定値を PSD と誤判定していた。PSD 判定の許容をスケール相対化
 - QCQP の McCormick global fallback で実行可能性許容が最適性ギャップ許容と混同され、制約に違反する点を `Optimal` と報告する問題を修正
 - SOCP IPM にデータ駆動の初期点と Mehrotra 相補均衡化を導入し CBLIB conic 問題の収束を改善。B&B 緩和ノードでは均衡化を無効化して MIQCP の退化を回避
