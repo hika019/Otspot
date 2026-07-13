@@ -1,8 +1,3 @@
-/// Re-export from `crate::common` so that tests in `mps::mod` can access it
-/// via `types::is_fixed_width_format`.
-#[cfg(test)]
-pub(super) use crate::common::is_fixed_width_format;
-
 /// Default upper bound for integer variables that appear only inside an
 /// INTORG/INTEND marker block and have no explicit BOUNDS entry.
 ///
@@ -10,31 +5,9 @@ pub(super) use crate::common::is_fixed_width_format;
 /// variables are treated as binary [0, 1].
 pub(super) const INTEGER_DEFAULT_UPPER_BINARY: f64 = 1.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum IntegerMarker {
-    Start,
-    End,
-}
-
-/// Returns `Some(kind)` when `line` contains both a `'MARKER'` token and an
-/// `INTORG`/`INTEND` token (quotes stripped, case-insensitive).
-pub(super) fn integer_marker_kind(line: &str) -> Option<IntegerMarker> {
-    let mut has_marker = false;
-    let mut kind = None;
-    for tok in line.split_whitespace() {
-        match tok.trim_matches('\'').to_uppercase().as_str() {
-            "MARKER" => has_marker = true,
-            "INTORG" => kind = Some(IntegerMarker::Start),
-            "INTEND" => kind = Some(IntegerMarker::End),
-            _ => {}
-        }
-    }
-    if has_marker {
-        kind
-    } else {
-        None
-    }
-}
+/// Marker detection lives in `crate::common` so the MPS and QPS parsers agree on
+/// what a marker line is; re-exported here for `mps`'s own use.
+pub(super) use crate::common::{integer_marker_kind, IntegerMarker};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum BoundType {
