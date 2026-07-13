@@ -647,6 +647,43 @@ ENDATA
         assert_eq!(prob.b, vec![10.0]);
     }
 
+    #[test]
+    fn test_qps_ranges_fixed_format_numeric_spaced_row_name() {
+        fn put(line: &mut Vec<u8>, at: usize, s: &str) {
+            if line.len() < at + s.len() {
+                line.resize(at + s.len(), b' ');
+            }
+            line[at..at + s.len()].copy_from_slice(s.as_bytes());
+        }
+        let mut row = vec![b' '; 1];
+        put(&mut row, 1, "L");
+        put(&mut row, 4, "C 1");
+        let mut col = vec![b' '; 4];
+        put(&mut col, 4, "X1");
+        put(&mut col, 14, "obj");
+        put(&mut col, 24, "1.0");
+        let mut rhs = vec![b' '; 4];
+        put(&mut rhs, 4, "rhs");
+        put(&mut rhs, 14, "C 1");
+        put(&mut rhs, 24, "10.0");
+        let mut ranges = vec![b' '; 4];
+        put(&mut ranges, 4, "rng");
+        put(&mut ranges, 14, "C 1");
+        put(&mut ranges, 24, "5.0");
+        let qps = format!(
+            "NAME          FIXRNG\nROWS\n N  obj\n{}\nCOLUMNS\n{}\nRHS\n{}\nRANGES\n{}\nENDATA\n",
+            String::from_utf8(row).unwrap(),
+            String::from_utf8(col).unwrap(),
+            String::from_utf8(rhs).unwrap(),
+            String::from_utf8(ranges).unwrap(),
+        );
+        let prob = parse_qps_str(&qps).expect("fixed RANGES with numeric spaced row must parse");
+        // The Le row "C 1" (b=10) with a range of 5 expands to an upper+lower pair,
+        // proving the fixed-format RANGES record parsed instead of being rejected.
+        assert_eq!(prob.b.len(), 2, "range row should expand to upper+lower constraints");
+        assert!((prob.b[0] - 10.0).abs() < 1e-12, "original RHS preserved, got {:?}", prob.b);
+    }
+
     /// Duplicate (col, row) entries in COLUMNS must accumulate (sum), not error.
     /// QPS inherits MPS spec: repeated entries are summed via CscMatrix triplet merge.
     #[test]

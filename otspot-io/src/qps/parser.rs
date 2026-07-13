@@ -339,7 +339,10 @@ impl QpsParser {
             self.ranges.insert(row_name, value);
             return Ok(());
         }
-        if !qps_fixed_pair_layout(line) && qps_free_pairs_have_odd_trailing_name(&parts) {
+        let force_fixed = (mps_field(line, 4, 12).is_empty()
+            && !mps_field(line, 14, 22).is_empty())
+            || qps_fixed_pair_layout(line);
+        if !force_fixed && qps_free_pairs_have_odd_trailing_name(&parts) {
             return Err(QpsError::ParseError {
                 line: line_num,
                 message: format!(
@@ -348,7 +351,9 @@ impl QpsParser {
                 ),
             });
         }
-        let is_free = {
+        let is_free = if force_fixed {
+            false
+        } else {
             let mut ok = true;
             let mut vi = 2usize;
             while vi < parts.len() {
