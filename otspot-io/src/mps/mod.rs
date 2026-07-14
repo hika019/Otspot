@@ -158,6 +158,26 @@ ENDATA
     }
 
     #[test]
+    fn test_rhs_odd_trailing_token_has_name_without_value_error() {
+        let mps = r"NAME odd_rhs
+ROWS
+ N obj
+ L c1
+COLUMNS
+    x1 obj 1.0 c1 1.0
+RHS
+    rhs c1 10.0 c2
+ENDATA
+";
+        let err = parse_mps(mps).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("has a name without a matching value"),
+            "odd RHS token must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
     fn test_parse_bounds_lo_up() {
         let mps = r"NAME bounds1
 ROWS
@@ -228,6 +248,60 @@ ENDATA
 ";
         let lp = parse_mps(mps).unwrap();
         assert_eq!(lp.bounds, vec![(f64::NEG_INFINITY, f64::INFINITY)]);
+    }
+
+    /// Sentinel: `MI` takes no value; a trailing token past the column name
+    /// (`MI BND x1 5.0`) must be a hard error, not a silently discarded value.
+    /// Confirmed to fail without the check in `parse_bounds_entry`
+    /// (`otspot-io/src/common/mod.rs`): the free-format branch used to derive
+    /// `raw` purely from `value_required`, so it never looked at — let alone
+    /// rejected — a token sitting past the column name for a non-value type.
+    #[test]
+    fn test_mps_bounds_mi_surplus_value_token_is_error() {
+        let mps = r"NAME bounds_mi_surplus
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+RHS
+    rhs  c1  10.0
+BOUNDS
+ MI BND  x1  5.0
+ENDATA
+";
+        let err = parse_mps(mps).unwrap_err();
+        assert!(
+            err.to_string().contains("does not take a value"),
+            "MI with a surplus token must be rejected, got {err:?}"
+        );
+    }
+
+    /// Sentinel: `UP` takes exactly one value; a second trailing token past
+    /// the value (`UP BND x1 5.0 10.0`) must be a hard error, not a silently
+    /// discarded value. Confirmed to fail without the check in
+    /// `parse_bounds_entry` (`otspot-io/src/common/mod.rs`): the free-format
+    /// branch used to read only `tokens[value_idx]`, so any token past it was
+    /// silently dropped.
+    #[test]
+    fn test_mps_bounds_up_surplus_value_token_is_error() {
+        let mps = r"NAME bounds_up_surplus
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+RHS
+    rhs  c1  10.0
+BOUNDS
+ UP BND  x1  5.0  10.0
+ENDATA
+";
+        let err = parse_mps(mps).unwrap_err();
+        assert!(
+            err.to_string().contains("takes exactly one value"),
+            "UP with a surplus value token must be rejected, got {err:?}"
+        );
     }
 
     #[test]
@@ -2090,6 +2164,71 @@ ENDATA
         let lp =
             parse_mps(mps).expect("standard fixed-column BOUNDS (with bound-set name) must parse");
         assert_eq!(lp.bounds[0], (0.0, 5.0), "UP BND 'X 1' 5.0 (standard form)");
+    }
+
+    /// Sentinel (review finding): a grid-aligned fixed-column BOUNDS line with
+    /// a second numeric value in field 5 (`UP BND X 1 5.0 <field 5>10.0`) must
+    /// be a hard error, not silently accepted with the field 5 content
+    /// dropped. This is the case the free-format surplus-token check
+    /// (`test_mps_bounds_up_surplus_value_token_is_error`) does *not* cover:
+    /// that test's line is not column-aligned, so free format alone rejects
+    /// it; a grid-aligned line with the same surplus instead re-parses
+    /// successfully under the fixed-format fallback unless the fixed-format
+    /// reading independently checks fields 5/6.
+    ///
+    /// **No-op failure guarantee**: reverting the field 5/6 check in
+    /// `parse_bounds_entry` (`otspot-io/src/common/mod.rs`) makes this
+    /// return `Ok` with `bounds[0] == (0.0, 5.0)` — the `10.0` silently
+    /// dropped — instead of `Err`; verified by temporarily reverting.
+    #[test]
+    fn test_mps_bounds_fixed_grid_aligned_field5_surplus_value_is_error() {
+        let mps = concat!(
+            "NAME          BNDFIX\n",
+            "ROWS\n",
+            " N  COST\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    X 1       COST      1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    RHS       LIM 1     10.0\n",
+            "BOUNDS\n",
+            " UP BND       X 1       5.0            10.0\n",
+            "ENDATA\n",
+        );
+        let err = parse_mps(mps).unwrap_err();
+        assert!(
+            err.to_string().contains("field 5"),
+            "grid-aligned BOUNDS with a surplus value in field 5 must be rejected, got {err:?}"
+        );
+    }
+
+    /// Sentinel (review finding): same as above but with non-numeric junk in
+    /// field 5, confirming the check rejects *any* content there, not just
+    /// content that happens to parse as a number.
+    ///
+    /// **No-op failure guarantee**: reverting the field 5/6 check makes this
+    /// return `Ok` with `bounds[0] == (0.0, 5.0)` — the `JUNK` silently
+    /// dropped — instead of `Err`; verified by temporarily reverting.
+    #[test]
+    fn test_mps_bounds_fixed_grid_aligned_field5_junk_is_error() {
+        let mps = concat!(
+            "NAME          BNDFIX\n",
+            "ROWS\n",
+            " N  COST\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    X 1       COST      1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    RHS       LIM 1     10.0\n",
+            "BOUNDS\n",
+            " UP BND       X 1       5.0            JUNK\n",
+            "ENDATA\n",
+        );
+        let err = parse_mps(mps).unwrap_err();
+        assert!(
+            err.to_string().contains("field 5"),
+            "grid-aligned BOUNDS with junk content in field 5 must be rejected, got {err:?}"
+        );
     }
 
     /// Sentinel: a fixed-column RHS line with the vector name omitted, where

@@ -845,6 +845,260 @@ ENDATA
         );
     }
 
+    #[test]
+    fn test_qps_bounds_invalid_numeric_value_is_error() {
+        let qps =
+            "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nBOUNDS\n LO BND x1 not_a_number\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid BOUNDS value"),
+            "invalid BOUNDS value must not default silently, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_qps_bounds_value_on_value_less_type_is_error() {
+        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nBOUNDS\n FR BND x1 0.0\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("does not take a value"),
+            "free-format FR with a value must be rejected, got {err:?}"
+        );
+    }
+
+    /// Sentinel: `UP` takes exactly one value; a second trailing token past
+    /// the value (`UP BND x1 5.0 10.0`) must be a hard error, not a silently
+    /// discarded value. Confirmed to fail without the check in
+    /// `parse_bounds_entry` (`otspot-io/src/common/mod.rs`): the free-format
+    /// branch used to read only `tokens[value_idx]`, so any token past it was
+    /// silently dropped.
+    #[test]
+    fn test_qps_bounds_up_surplus_value_token_is_error() {
+        let qps =
+            "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nBOUNDS\n UP BND x1 5.0 10.0\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("takes exactly one value"),
+            "UP with a surplus value token must be rejected, got {err:?}"
+        );
+    }
+
+    /// Fixed-format BOUNDS: MPS field values may contain internal spaces (FORPLAN
+    /// column "A   22 1", bound set "BND-1"). `split_whitespace` over-splits such a
+    /// line into 5+ tokens, so the parser must fall back to fixed-column extraction
+    /// (col 14..22, value 24..36) rather than rejecting it as "extra tokens".
+    #[test]
+    fn test_qps_bounds_fixed_format_spaced_names() {
+        // Build lines with fields at exact MPS byte offsets so the spaced column
+        // name "AB CD" round-trips through fixed-column extraction.
+        fn put(line: &mut Vec<u8>, at: usize, s: &str) {
+            if line.len() < at + s.len() {
+                line.resize(at + s.len(), b' ');
+            }
+            line[at..at + s.len()].copy_from_slice(s.as_bytes());
+        }
+        // COLUMNS: col[4..], row1[14..], val1[24..].
+        let mut col = vec![b' '; 4];
+        put(&mut col, 4, "AB CD");
+        put(&mut col, 14, "obj");
+        put(&mut col, 24, "1.0");
+        let mut col_bv = vec![b' '; 4];
+        put(&mut col_bv, 4, "EF GH");
+        put(&mut col_bv, 14, "obj");
+        put(&mut col_bv, 24, "2.0");
+        let mut col_bnd_spaced = vec![b' '; 4];
+        put(&mut col_bnd_spaced, 4, "IJ");
+        put(&mut col_bnd_spaced, 14, "obj");
+        put(&mut col_bnd_spaced, 24, "3.0");
+        // BOUNDS: type[1..], bndname[4..], col[14..], val[24..].
+        let mut bnd = vec![b' '; 1];
+        put(&mut bnd, 1, "UP");
+        put(&mut bnd, 4, "BND");
+        put(&mut bnd, 14, "AB CD");
+        put(&mut bnd, 24, "2640.");
+        let mut bnd_bv = vec![b' '; 1];
+        put(&mut bnd_bv, 1, "BV");
+        put(&mut bnd_bv, 4, "BND");
+        put(&mut bnd_bv, 14, "EF GH");
+        let mut bnd_name_spaced = vec![b' '; 1];
+        put(&mut bnd_name_spaced, 1, "BV");
+        put(&mut bnd_name_spaced, 4, "B ND");
+        put(&mut bnd_name_spaced, 14, "IJ");
+        let qps = format!(
+            "NAME          FIXED\nROWS\n N  obj\nCOLUMNS\n{}\n{}\n{}\nRHS\nBOUNDS\n{}\n{}\n{}\nENDATA\n",
+            String::from_utf8(col).unwrap(),
+            String::from_utf8(col_bv).unwrap(),
+            String::from_utf8(col_bnd_spaced).unwrap(),
+            String::from_utf8(bnd).unwrap(),
+            String::from_utf8(bnd_bv).unwrap(),
+            String::from_utf8(bnd_name_spaced).unwrap(),
+        );
+        let prob = parse_qps_str(&qps).expect("fixed-format spaced BOUNDS must parse");
+        assert_eq!(prob.num_vars, 3);
+        assert_eq!(
+            prob.bounds[0].1, 2640.0,
+            "UP bound value must be read from fixed columns"
+        );
+        assert_eq!(
+            prob.bounds[1],
+            (0.0, 1.0),
+            "BV bound without a value must keep the full fixed-format spaced name"
+        );
+        assert_eq!(
+            prob.bounds[2],
+            (0.0, 1.0),
+            "spaced fixed-format bound-set names must not block no-value bounds"
+        );
+    }
+
+    #[test]
+    fn test_qps_bounds_free_extra_token_not_fixed_fallback() {
+        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nBOUNDS\n BV BND x1 extra\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("does not take a value"),
+            "malformed free-format BV must not be parsed via fixed fallback, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_qps_rhs_fixed_format_numeric_spaced_row_name() {
+        fn put(line: &mut Vec<u8>, at: usize, s: &str) {
+            if line.len() < at + s.len() {
+                line.resize(at + s.len(), b' ');
+            }
+            line[at..at + s.len()].copy_from_slice(s.as_bytes());
+        }
+        let mut row = vec![b' '; 1];
+        put(&mut row, 1, "L");
+        put(&mut row, 4, "C 1");
+        let mut col = vec![b' '; 4];
+        put(&mut col, 4, "X1");
+        put(&mut col, 14, "obj");
+        put(&mut col, 24, "1.0");
+        let mut rhs = vec![b' '; 4];
+        put(&mut rhs, 4, "rhs");
+        put(&mut rhs, 14, "C 1");
+        put(&mut rhs, 24, "10.0");
+        let qps = format!(
+            "NAME          FIXRHS\nROWS\n N  obj\n{}\nCOLUMNS\n{}\nRHS\n{}\nENDATA\n",
+            String::from_utf8(row).unwrap(),
+            String::from_utf8(col).unwrap(),
+            String::from_utf8(rhs).unwrap(),
+        );
+        let prob = parse_qps_str(&qps).expect("fixed RHS with numeric spaced row must parse");
+        assert_eq!(prob.b, vec![10.0]);
+    }
+
+    #[test]
+    fn test_qps_ranges_fixed_format_numeric_spaced_row_name() {
+        fn put(line: &mut Vec<u8>, at: usize, s: &str) {
+            if line.len() < at + s.len() {
+                line.resize(at + s.len(), b' ');
+            }
+            line[at..at + s.len()].copy_from_slice(s.as_bytes());
+        }
+        let mut row = vec![b' '; 1];
+        put(&mut row, 1, "L");
+        put(&mut row, 4, "C 1");
+        let mut col = vec![b' '; 4];
+        put(&mut col, 4, "X1");
+        put(&mut col, 14, "obj");
+        put(&mut col, 24, "1.0");
+        let mut rhs = vec![b' '; 4];
+        put(&mut rhs, 4, "rhs");
+        put(&mut rhs, 14, "C 1");
+        put(&mut rhs, 24, "10.0");
+        let mut ranges = vec![b' '; 4];
+        put(&mut ranges, 4, "rng");
+        put(&mut ranges, 14, "C 1");
+        put(&mut ranges, 24, "5.0");
+        let qps = format!(
+            "NAME          FIXRNG\nROWS\n N  obj\n{}\nCOLUMNS\n{}\nRHS\n{}\nRANGES\n{}\nENDATA\n",
+            String::from_utf8(row).unwrap(),
+            String::from_utf8(col).unwrap(),
+            String::from_utf8(rhs).unwrap(),
+            String::from_utf8(ranges).unwrap(),
+        );
+        let prob = parse_qps_str(&qps).expect("fixed RANGES with numeric spaced row must parse");
+        // The Le row "C 1" (b=10) with a range of 5 expands to an upper+lower pair,
+        // proving the fixed-format RANGES record parsed instead of being rejected.
+        assert_eq!(
+            prob.b.len(),
+            2,
+            "range row should expand to upper+lower constraints"
+        );
+        assert!(
+            (prob.b[0] - 10.0).abs() < 1e-12,
+            "original RHS preserved, got {:?}",
+            prob.b
+        );
+    }
+
+    #[test]
+    fn test_qps_rhs_fixed_format_second_pair_spaced_row_name() {
+        fn put(line: &mut Vec<u8>, at: usize, s: &str) {
+            if line.len() < at + s.len() {
+                line.resize(at + s.len(), b' ');
+            }
+            line[at..at + s.len()].copy_from_slice(s.as_bytes());
+        }
+        let mut row0 = vec![b' '; 1];
+        put(&mut row0, 1, "L");
+        put(&mut row0, 4, "R0");
+        let mut row1 = vec![b' '; 1];
+        put(&mut row1, 1, "L");
+        put(&mut row1, 4, "C 1");
+        let mut col = vec![b' '; 4];
+        put(&mut col, 4, "X1");
+        put(&mut col, 14, "obj");
+        put(&mut col, 24, "1.0");
+        let mut rhs = vec![b' '; 4];
+        put(&mut rhs, 4, "rhs");
+        put(&mut rhs, 14, "R0");
+        put(&mut rhs, 24, "1.0");
+        put(&mut rhs, 39, "C 1");
+        put(&mut rhs, 49, "10.0");
+        let qps = format!(
+            "NAME          FIX2ND\nROWS\n N  obj\n{}\n{}\nCOLUMNS\n{}\nRHS\n{}\nENDATA\n",
+            String::from_utf8(row0).unwrap(),
+            String::from_utf8(row1).unwrap(),
+            String::from_utf8(col).unwrap(),
+            String::from_utf8(rhs).unwrap(),
+        );
+        let prob = parse_qps_str(&qps).expect("fixed RHS second pair with spaced row must parse");
+        assert_eq!(prob.b, vec![1.0, 10.0]);
+    }
+
+    #[test]
+    fn test_qps_rhs_fixed_format_spaced_set_name_numeric_row() {
+        fn put(line: &mut Vec<u8>, at: usize, s: &str) {
+            if line.len() < at + s.len() {
+                line.resize(at + s.len(), b' ');
+            }
+            line[at..at + s.len()].copy_from_slice(s.as_bytes());
+        }
+        let mut row = vec![b' '; 1];
+        put(&mut row, 1, "L");
+        put(&mut row, 4, "1");
+        let mut col = vec![b' '; 4];
+        put(&mut col, 4, "X1");
+        put(&mut col, 14, "obj");
+        put(&mut col, 24, "1.0");
+        let mut rhs = vec![b' '; 4];
+        put(&mut rhs, 4, "R HS");
+        put(&mut rhs, 14, "1");
+        put(&mut rhs, 24, "10.0");
+        let qps = format!(
+            "NAME          FIXSET\nROWS\n N  obj\n{}\nCOLUMNS\n{}\nRHS\n{}\nENDATA\n",
+            String::from_utf8(row).unwrap(),
+            String::from_utf8(col).unwrap(),
+            String::from_utf8(rhs).unwrap(),
+        );
+        let prob = parse_qps_str(&qps).expect("fixed RHS with spaced set name must parse");
+        assert_eq!(prob.b, vec![10.0]);
+    }
+
     /// Duplicate (col, row) entries in COLUMNS must accumulate (sum), not error.
     /// QPS inherits MPS spec: repeated entries are summed via CscMatrix triplet merge.
     #[test]
@@ -867,6 +1121,28 @@ ENDATA
         assert!(
             parse_qps_str(qps).is_err(),
             "NaN in constraint RHS must error"
+        );
+    }
+
+    #[test]
+    fn test_qps_rhs_odd_trailing_token_has_name_without_value_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0 c2\nQUADOBJ\n    x1 x1 1.0\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("has a name without a matching value"),
+            "odd RHS token must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_qps_ranges_odd_trailing_token_has_name_without_value_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nRANGES\n    rng c1 1.0 c2\nQUADOBJ\n    x1 x1 1.0\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("has a name without a matching value"),
+            "odd RANGES token must be rejected, got {err:?}"
         );
     }
 
@@ -1380,6 +1656,71 @@ ENDATA
             prob.bounds[0],
             (0.0, 5.0),
             "UP BND 'X 1' 5.0 (standard form)"
+        );
+    }
+
+    /// Sentinel (review finding): a grid-aligned fixed-column BOUNDS line with
+    /// a second numeric value in field 5 (`UP BND X 1 5.0 <field 5>10.0`) must
+    /// be a hard error, not silently accepted with the field 5 content
+    /// dropped. This is the case the free-format surplus-token check
+    /// (`test_qps_bounds_up_surplus_value_token_is_error`) does *not* cover:
+    /// that test's line is not column-aligned, so free format alone rejects
+    /// it; a grid-aligned line with the same surplus instead re-parses
+    /// successfully under the fixed-format fallback unless the fixed-format
+    /// reading independently checks fields 5/6.
+    ///
+    /// **No-op failure guarantee**: reverting the field 5/6 check in
+    /// `parse_bounds_entry` (`otspot-io/src/common/mod.rs`) makes this
+    /// return `Ok` with `bounds[0] == (0.0, 5.0)` — the `10.0` silently
+    /// dropped — instead of `Err`; verified by temporarily reverting.
+    #[test]
+    fn test_qps_bounds_fixed_grid_aligned_field5_surplus_value_is_error() {
+        let qps = concat!(
+            "NAME          BNDFIX\n",
+            "ROWS\n",
+            " N  COST\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    X 1       COST      1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    RHS       LIM 1     10.0\n",
+            "BOUNDS\n",
+            " UP BND       X 1       5.0            10.0\n",
+            "ENDATA\n",
+        );
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("field 5"),
+            "grid-aligned BOUNDS with a surplus value in field 5 must be rejected, got {err:?}"
+        );
+    }
+
+    /// Sentinel (review finding): same as above but with non-numeric junk in
+    /// field 5, confirming the check rejects *any* content there, not just
+    /// content that happens to parse as a number.
+    ///
+    /// **No-op failure guarantee**: reverting the field 5/6 check makes this
+    /// return `Ok` with `bounds[0] == (0.0, 5.0)` — the `JUNK` silently
+    /// dropped — instead of `Err`; verified by temporarily reverting.
+    #[test]
+    fn test_qps_bounds_fixed_grid_aligned_field5_junk_is_error() {
+        let qps = concat!(
+            "NAME          BNDFIX\n",
+            "ROWS\n",
+            " N  COST\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    X 1       COST      1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    RHS       LIM 1     10.0\n",
+            "BOUNDS\n",
+            " UP BND       X 1       5.0            JUNK\n",
+            "ENDATA\n",
+        );
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("field 5"),
+            "grid-aligned BOUNDS with junk content in field 5 must be rejected, got {err:?}"
         );
     }
 

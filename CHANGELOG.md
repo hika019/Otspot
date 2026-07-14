@@ -8,6 +8,7 @@ conic/QCQP の正当性修正と SOCP IPM の収束改善、大規模 LP の pre
 
 - BREAKING: `mps::parse_mps_reader` / `mps::parse_milp_reader` / `qps::parse_qps_reader` の型境界を `R: BufRead` から `R: BufRead + Seek` に変更。固定桁 MPS と判明したファイルは先頭から読み直す必要があり、`Seek` はそれを全行バッファ無しで行うための条件 (MPS は GiB 級になりうるため入力の全行保持は不可)。`File` / `Cursor` は `Seek` 済みでそのまま渡せる。stdin やパイプなど seek 不可の入力は、呼び出し側で `Cursor::new(buf)` に読み切ってから渡す
 - MPS/QPS の形式判定を行単位のヒューリスティクスからファイル単位の決定に作り直し、固定桁 MPS (名前に空白を含む Netlib forplan 等) の誤読と、未宣言の行名/列名の黙殺 (silent data loss) を修正。ROWS の行名重複、`OBJSENSE` のヘッダ行記法・`MAXIMIZE`/`MINIMIZE` 綴り、コメント欄 (62-72 桁) とシーケンス番号欄 (73-80 桁) も正しく扱う
+- BREAKING: BOUNDS で値を取る型 (`UP`/`LO`/`FX`/`UI`/`LI`) の余剰トークン (`UP BND x1 5.0 10.0` 等) を reject するようにした (MPS/QPS 共通)。v0.7.1 の MPS 自由形式リーダはこれを黙殺しており (QPS は元から reject していた)、MPS 利用者にとっては従来 `Ok` だった入力が `Err` になりうる非互換な挙動変更。固定桁形式でも field 5/6 (BOUNDS が定義しない領域) の内容を reject するよう追加した — 自由形式側の reject だけでは、grid に整列した (=現実の MPS の大多数を占める) ファイルは format fallback で固定桁として再読され、その黙殺により `Ok` に戻ってしまい実効性がなかった。field 4 は `FR`/`MI`/`BV`/`PL` の冗長な値欄として引き続き許容する (`leo1`/`leo2`)
 - 非凸 QCQP が凸 SOCP として誤って「証明付き Optimal」と報告される問題を修正: Cholesky がゼロピボット列の非ゼロ off-diagonal を捨てて不定値を PSD と誤判定していた。PSD 判定の許容をスケール相対化
 - QCQP の McCormick global fallback で実行可能性許容が最適性ギャップ許容と混同され、制約に違反する点を `Optimal` と報告する問題を修正
 - SOCP IPM にデータ駆動の初期点と Mehrotra 相補均衡化を導入し CBLIB conic 問題の収束を改善。B&B 緩和ノードでは均衡化を無効化して MIQCP の退化を回避
@@ -15,6 +16,20 @@ conic/QCQP の正当性修正と SOCP IPM の収束改善、大規模 LP の pre
 - 公開 `QpProblem` フィールドへ不整合な二次制約を代入した際の添字範囲外パニックを、中央検証で防止
 - Model DSL の tolerance 伝播、他モデル変数の混入検出、CBF の非有限定数拒否を修正
 - ベンチマーク: LP @1e-6 109/109 optimal・@1e-8 108/109、QP Maros 121/138 @1e-6・93/138 @1e-8、MILP 5/20 optimal + 15 TIMEOUT
+
+## [0.7.1] - 2026-07-14
+
+v0.7.0 向けのパッチリリース相当。公開APIの型・シグネチャ変更なし。
+
+- Model API: LP 最大化で `dual_solution` / `reduced_costs` が内部最小化の符号のまま返る問題を修正
+- Model API: `var_name()` に別モデルの変数や範囲外 index が渡された場合、誤った名前を返さず明示的に panic するよう修正
+- Model API: QP 双対ベクトル長や MIP 解ベクトルの不整合を prefix 切り詰め・丸めで隠さずエラー化
+- IO: MPS/QPS の RHS/RANGES 値ペア末尾欠落や BOUNDS の不正数値をエラー化しつつ、FORPLAN など固定幅MPSの空白入り名前は正しく受理
+- IO: QPS の固定幅/自由形式の判定を列整合ベースに厳密化し、空白入りの列名・bound-set 名・数値を含む行名（例 `A   22 1`, `B ND`, `C 1`）を BOUNDS/RHS/RANGES で正しく復元しつつ、自由形式の余分トークンは誤検出せず拒否（RHS/RANGES の第2ペアや空白入り set-name も含む）
+- Core: LP 証明、postsolve、感度分析、MIP カット生成、reduced-cost fixing、QP bound dual / duality gap で欠損ベクトルを 0 埋め・skip せず拒否
+- Core: キャンセル済み QP で空解を KKT 評価に渡して panic する経路を修正
+- Core: presolve 済み LP のキャンセル/Timeout で双対が空でも `Timeout` を保持し、`NumericalError` に誤変換しない
+- Dependencies: `crossbeam-epoch` を 0.9.20 に更新し、RUSTSEC-2026-0204 を解消
 
 ## [0.7.0] - 2026-06-29
 

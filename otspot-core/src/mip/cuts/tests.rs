@@ -1734,3 +1734,28 @@ fn tree_cuts_preserve_optimum_sweep() {
         "in-tree separation must fire on the sweep (else the soundness check is vacuous)"
     );
 }
+
+#[test]
+#[should_panic(expected = "cover separation requires one LP value per variable")]
+fn cover_cuts_reject_short_lp_solution_vector() {
+    let p = lp(
+        vec![0.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![1.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 1.0)],
+    );
+    let integer_mask = vec![true, true];
+    let _ = generate_cover_cuts(&p, &integer_mask, &[0.5]);
+}
+
+#[test]
+#[should_panic(
+    expected = "cut violation evaluation requires matching cut and LP solution dimensions"
+)]
+fn finalize_cut_rejects_dimension_mismatch() {
+    let _ = finalize_cut(vec![1.0, -1.0], 0.0, &[0.5], 1e-9);
+}
