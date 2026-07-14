@@ -158,6 +158,26 @@ ENDATA
     }
 
     #[test]
+    fn test_rhs_odd_trailing_token_has_name_without_value_error() {
+        let mps = r"NAME odd_rhs
+ROWS
+ N obj
+ L c1
+COLUMNS
+    x1 obj 1.0 c1 1.0
+RHS
+    rhs c1 10.0 c2
+ENDATA
+";
+        let err = parse_mps(mps).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("has a name without a matching value"),
+            "odd RHS token must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
     fn test_parse_bounds_lo_up() {
         let mps = r"NAME bounds1
 ROWS
@@ -228,6 +248,33 @@ ENDATA
 ";
         let lp = parse_mps(mps).unwrap();
         assert_eq!(lp.bounds, vec![(f64::NEG_INFINITY, f64::INFINITY)]);
+    }
+
+    /// Sentinel: `MI` takes no value; a trailing token past the column name
+    /// (`MI BND x1 5.0`) must be a hard error, not a silently discarded value.
+    /// Confirmed to fail without the check in `parse_bounds_entry`
+    /// (`otspot-io/src/common/mod.rs`): the free-format branch used to derive
+    /// `raw` purely from `value_required`, so it never looked at — let alone
+    /// rejected — a token sitting past the column name for a non-value type.
+    #[test]
+    fn test_mps_bounds_mi_surplus_value_token_is_error() {
+        let mps = r"NAME bounds_mi_surplus
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+RHS
+    rhs  c1  10.0
+BOUNDS
+ MI BND  x1  5.0
+ENDATA
+";
+        let err = parse_mps(mps).unwrap_err();
+        assert!(
+            err.to_string().contains("does not take a value"),
+            "MI with a surplus token must be rejected, got {err:?}"
+        );
     }
 
     #[test]

@@ -145,6 +145,25 @@ fn run_ipm_with(
         );
     }
     let postsolve_map_us = t_postsolve_map.elapsed().as_micros() as u64;
+    if final_sol.solution.len() != orig_problem.num_vars {
+        return IpmOutcome {
+            solution: Vec::new(),
+            dual_solution: Vec::new(),
+            bound_duals: Vec::new(),
+            objective: f64::INFINITY,
+            iterations: result.iterations,
+            kkt_residual_rel: f64::INFINITY,
+            primal_residual_rel: f64::INFINITY,
+            bound_violation: f64::INFINITY,
+            complementarity_residual_rel: f64::INFINITY,
+            duality_gap_rel: f64::INFINITY,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: result.timing_breakdown,
+        };
+    }
 
     // bounds clip (Ruiz unscale 増幅由来の微小違反補正)
     for (xi, &(lb, ub)) in final_sol

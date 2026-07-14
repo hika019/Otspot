@@ -613,6 +613,12 @@ pub(crate) fn parse_vector_entry(
 /// disambiguates: a value-taking type has 3 (shorthand) or 4 (standard)
 /// tokens, a non-value type 2 or 3.
 ///
+/// A non-value type (`value_required = false`, e.g. `FR`/`MI`/`BV`/`PL`) with
+/// a trailing token past the column name (`FR BND x1 0.0`) is a hard error,
+/// not a silently discarded value: a stray numeric token there is far more
+/// likely to be a typo'd bound value than an intentional no-op, and silently
+/// dropping it would read a different model than the file states.
+///
 /// Fixed format has no token count to read, so standard reading (field 3 =
 /// column, field 4 = value) is tried first. It is rejected — and field 2 is
 /// reread as the column instead, the bound-set name being omitted — only when
@@ -645,6 +651,13 @@ pub(crate) fn parse_bounds_entry(
                 ));
             }
             let value_idx = col_idx + 1;
+            if !value_required && tokens.len() > value_idx {
+                return Err(format!(
+                    "line {}: BOUNDS entry for col='{}' does not take a value, got trailing \
+                     token '{}'",
+                    line_num, tokens[col_idx], tokens[value_idx]
+                ));
+            }
             let raw = if value_required && tokens.len() > value_idx {
                 Some(tokens[value_idx].to_string())
             } else {
