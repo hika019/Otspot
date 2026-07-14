@@ -156,6 +156,28 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// RAII guard resetting `DEADLINE_AFTER_NODE` back to `None` on drop,
+/// including on unwind (mirrors `ipm::ForceTimeoutGuard`; same manual-reset-
+/// leaks-on-panic risk, since both are a `set(Some(..))` .. `set(None)` pair
+/// bracketing a `solve_misocp` call in a test).
+#[cfg(test)]
+pub(super) struct DeadlineAfterNodeGuard;
+
+#[cfg(test)]
+impl DeadlineAfterNodeGuard {
+    pub(super) fn new(after_node: usize) -> Self {
+        DEADLINE_AFTER_NODE.with(|c| c.set(Some(after_node)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for DeadlineAfterNodeGuard {
+    fn drop(&mut self) {
+        DEADLINE_AFTER_NODE.with(|c| c.set(None));
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// Per-node relaxation-status fault injection (test-only, mirrors
@@ -628,7 +650,15 @@ pub fn solve_miqcp(
 fn qcqp_true_objective(qp: &QcqpProblem, x: &[f64]) -> f64 {
     let mut obj: f64 = qp.q0.iter().zip(x).map(|(q, xi)| q * xi).sum();
     if let Some(p0) = &qp.p0 {
-        let px = p0.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; qp.n]);
+        let px = p0.mat_vec_mul(x).expect(
+            "p0.ncols() == x.len() == qp.n: guaranteed by to_conic's validate_dims, \
+             which solve_miqcp() always runs, giving p0.ncols() == qp.n. \
+             solve_misocp's x is always either empty or >= qp.n long (the SOCP \
+             relaxation retains at least the qp.n original columns); the \
+             is_empty() guard at the call site (solve_miqcp) skips the empty \
+             case, and its conditional truncate (only fires when len > qp.n) \
+             brings any longer x down to exactly qp.n",
+        );
         obj += 0.5 * x.iter().zip(&px).map(|(xi, pxi)| xi * pxi).sum::<f64>();
     }
     obj
@@ -637,6 +667,28 @@ fn qcqp_true_objective(qp: &QcqpProblem, x: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `p0` is 3x3 but `qp.n`/`x.len()` is 2, bypassing `to_conic`'s
+    /// `validate_dims`. Must panic, not silently zero-fill; reverting to the
+    /// old zero-fill-on-Err fallback makes this FAIL.
+    #[test]
+    #[should_panic(expected = "p0.ncols() == x.len() == qp.n")]
+    fn qcqp_true_objective_panics_on_dimension_mismatch() {
+        let qp = QcqpProblem {
+            n: 2,
+            p0: Some(
+                CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap(),
+            ),
+            q0: vec![0.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::new(0, 2),
+            h_lin: vec![],
+            a_eq: CscMatrix::new(0, 2),
+            b_eq: vec![],
+        };
+        let x = vec![1.0, 2.0];
+        let _ = qcqp_true_objective(&qp, &x);
+    }
 
     /// Pre-fix reference: densify `base.g`/`base.a` to `Vec<Vec<f64>>`, build
     /// the bound/fixing rows as dense row vectors, then re-extract nonzeros

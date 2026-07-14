@@ -1000,9 +1000,9 @@ fn misocp_mid_search_deadline_keeps_incumbent() {
     // Cut after the incumbent lands (node 2) but well before exhaustion
     // (node full.nodes), so the injected deadline lands mid-search.
     let cut = full.nodes / 2;
-    misocp::DEADLINE_AFTER_NODE.with(|c| c.set(Some(cut)));
+    let _guard = misocp::DeadlineAfterNodeGuard::new(cut);
     let res = solve_misocp(&prob, &ConicOptions::default(), &BbOptions::default());
-    misocp::DEADLINE_AFTER_NODE.with(|c| c.set(None));
+    drop(_guard);
     assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
     assert!(!res.x.is_empty(), "incumbent must be preserved on timeout");
     assert_eq!(
@@ -5072,6 +5072,311 @@ fn solve_socp_checks_cancel_flag_before_equilibration() {
         "preset cancel_flag solve must bail before equilibration/KKT-ordering, \
          took {elapsed:?}"
     );
+}
+
+/// P2-3 (review of cc8d0069): pins the invariant several `expect()`s in
+/// `qcqp.rs`/`model.rs`/`misocp.rs` lean on but that nothing in the repo
+/// tested before this: `solve_socp`'s `x` always comes back at length
+/// `problem.n()`, on *every* status, not just `Optimal` -- the trade cc8d0069
+/// made (panic on dimension mismatch instead of silently zero-filling) is
+/// only sound as long as this holds, and none of the 12 `should_panic`
+/// sentinels added in cc8d0069 exercise `solve_socp` itself. These four tests
+/// cover the two distinct `ConicResult`-construction sites reachable from
+/// `solve_socp`: `mod.rs`'s `invalid_result` (validate failure, and the
+/// pre-equilibration `stop_requested()` short-circuit) and `ipm.rs`'s own
+/// unified post-loop return (a genuine `Infeasible` certificate, and a
+/// genuine mid-loop `Timeout`) -- two tests per site. `ipm::solve`'s *other*
+/// `ConicResult` site, its private `failed()` helper, is unreachable from
+/// `solve_socp`: `mod.rs` already runs the same validate/`stop_requested()`
+/// checks and returns through its own `invalid_result` first, so
+/// `ipm::solve`'s own checks always pass by the time it is reached this way.
+mod solve_socp_x_length_invariant {
+    use super::*;
+
+    #[test]
+    fn not_supported_keeps_x_len_eq_n() {
+        // `a`'s column count (2) disagrees with `c`'s length (3): `validate()`
+        // rejects before any solve, returning through `invalid_result`.
+        let n = 3usize;
+        let prob = ConicProblem {
+            c: vec![1.0; n],
+            a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            b: vec![],
+            g: CscMatrix::new(0, n),
+            h: vec![],
+            cone: ConeSpec { l: 0, soc: vec![] },
+        };
+        let res = solve_socp(&prob, &ConicOptions::default());
+        assert!(
+            matches!(res.status, SolveStatus::NotSupported(_)),
+            "{res:?}"
+        );
+        // Independent oracle: the literal `n = 3` the fixture was built with,
+        // not `prob.n()` (which is just `c.len()` -- the same accessor
+        // `invalid_result` itself uses to size `x`, so comparing against it
+        // would not catch a bug shared by both sides).
+        assert_eq!(res.x.len(), 3);
+    }
+
+    #[test]
+    fn infeasible_keeps_x_len_eq_n() {
+        // x0 <= -1 and x0 >= 0: infeasible (same construction as
+        // `infeasible_lp_detected`), proven by the main loop's Farkas branch.
+        let n = 1usize;
+        let g = csc(&[vec![1.0], vec![-1.0]], 2, n);
+        let prob = ConicProblem {
+            c: vec![0.0],
+            a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b: vec![],
+            g,
+            h: vec![-1.0, 0.0],
+            cone: ConeSpec { l: 2, soc: vec![] },
+        };
+        let res = solve_socp(&prob, &ConicOptions::default());
+        assert_eq!(res.status, SolveStatus::Infeasible, "{res:?}");
+        // Independent oracle: literal `n = 1`, see the comment in
+        // `not_supported_keeps_x_len_eq_n` above.
+        assert_eq!(res.x.len(), 1);
+    }
+
+    #[test]
+    fn stop_requested_pre_check_keeps_x_len_eq_n() {
+        // Deadline already expired: `solve_socp`'s own pre-equilibration
+        // `stop_requested()` gate (mod.rs, ahead of `ipm::solve`) returns
+        // through `invalid_result` without ever entering the IPM loop.
+        let n = 2usize;
+        let g = csc(&[vec![-1.0, 0.0], vec![0.0, -1.0]], 2, n);
+        let a = csc(&[vec![0.0, 1.0]], 1, n);
+        let prob = ConicProblem {
+            c: vec![1.0, 0.0],
+            a,
+            b: vec![1.0],
+            g,
+            h: vec![0.0, 0.0],
+            cone: ConeSpec { l: 0, soc: vec![2] },
+        };
+        let opts = ConicOptions {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+            ..ConicOptions::default()
+        };
+        let res = solve_socp(&prob, &opts);
+        assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
+        assert_eq!(
+            res.iterations, 0,
+            "the pre-check path never enters the IPM loop"
+        );
+        // Independent oracle: literal `n = 2`, see the comment in
+        // `not_supported_keeps_x_len_eq_n` above.
+        assert_eq!(res.x.len(), 2);
+    }
+
+    /// Genuine mid-loop `Timeout`, distinct from the pre-check above: the real
+    /// deadline/cancel_flag are both `None`, so `solve_socp`'s own
+    /// `stop_requested()` gate lets the solve through into `ipm::solve`'s
+    /// loop, which runs at least one real Newton step before
+    /// `FORCE_TIMEOUT_AFTER_ITER` trips the loop's own per-iteration check --
+    /// proving `x` still comes out at length `n` from that return path
+    /// (`ipm.rs`'s final `ConicResult { ..., x, ... }` construction, not
+    /// `invalid_result`/`failed`).
+    #[test]
+    fn mid_loop_timeout_keeps_x_len_eq_n() {
+        let n = 2usize;
+        let g = csc(&[vec![-1.0, 0.0], vec![0.0, -1.0]], 2, n);
+        let a = csc(&[vec![0.0, 1.0]], 1, n);
+        let prob = ConicProblem {
+            c: vec![1.0, 0.0],
+            a,
+            b: vec![1.0],
+            g,
+            h: vec![0.0, 0.0],
+            cone: ConeSpec { l: 0, soc: vec![2] },
+        };
+        let _guard = ipm::ForceTimeoutGuard::new(1);
+        let res = solve_socp(&prob, &ConicOptions::default());
+        drop(_guard);
+        assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
+        assert!(
+            res.iterations >= 1,
+            "must have run at least one real IPM iteration before timing out: {res:?}"
+        );
+        // Independent oracle: literal `n = 2`, see the comment in
+        // `not_supported_keeps_x_len_eq_n` above.
+        assert_eq!(res.x.len(), 2);
+    }
+}
+
+/// P2-3 (review of 7ccbb7d1, follow-up to cc8d0069's P2-3): pins the length
+/// invariant `truncate_conic_solution`'s callers lean on for `solve_misocp`
+/// specifically -- weaker than `solve_socp`'s "always `x.len() == n`,
+/// whatever the status" above: `solve_misocp`'s `x` is either empty (callers
+/// must check `is_empty()` separately -- `model.rs`'s conic-QCQP MISOCP
+/// branch does `if r.x.is_empty() { Vec::new() } else {
+/// truncate_conic_solution(&r.x, n) }`) or exactly `prob.base.n()` long,
+/// never something shorter in between (which would make
+/// `truncate_conic_solution`'s slice panic instead of silently truncating).
+/// misocp.rs has exactly five `x: vec![]` construction sites: `solve_misocp`'s
+/// own validate failure, its no-fully-fixed-integer Unbounded-ray return, and
+/// its no-incumbent return (shared by Timeout/MaxIterations/NumericalError/
+/// Infeasible); `solve_miqcp`'s `to_conic`-failure and `convexity_unproven`
+/// returns. One test per site keeps `x` empty; a final test pins the other
+/// half of the invariant, a genuine incumbent's `x.len() == n`.
+mod solve_misocp_x_length_invariant {
+    use super::*;
+
+    #[test]
+    fn own_validate_failure_keeps_x_empty() {
+        // `int_lb.len()` (0) != `integers.len()` (1): `solve_misocp`'s own
+        // `validate()` gate rejects before any node is visited, returning
+        // through misocp.rs's first `x: vec![]` site.
+        let base = ConicProblem {
+            c: vec![0.0],
+            a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b: vec![],
+            g: empty_mat(0, 1),
+            h: vec![],
+            cone: ConeSpec { l: 0, soc: vec![] },
+        };
+        let prob = MisocpProblem {
+            base,
+            integers: vec![0],
+            int_lb: vec![],
+            int_ub: vec![0.0],
+        };
+        let res = solve_misocp(&prob, &ConicOptions::default(), &BbOptions::default());
+        assert!(
+            matches!(res.status, SolveStatus::NotSupported(_)),
+            "{res:?}"
+        );
+        assert!(res.x.is_empty());
+    }
+
+    #[test]
+    fn unbounded_ray_with_all_integers_already_fixed_keeps_x_empty() {
+        // Column 0: `min -x0 s.t. x0 >= 0` (`unbounded_lp_detected`'s proven
+        // shape) -- unbounded below. Column 1 is declared integer but its
+        // domain is already a single point at the root (`int_lb == int_ub ==
+        // 0`, referenced by no row), so `build_relaxation` adds zero rows for
+        // it and the root node's own `find(|&k| lb[k] != ub[k])` finds
+        // nothing: the verified ray certifies the mixed-integer problem
+        // unbounded immediately, through misocp.rs's second `x: vec![]` site,
+        // without ever bisecting.
+        let n = 2usize;
+        let base = ConicProblem {
+            c: vec![-1.0, 0.0],
+            a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b: vec![],
+            g: csc(&[vec![-1.0, 0.0]], 1, n),
+            h: vec![0.0],
+            cone: ConeSpec { l: 1, soc: vec![] },
+        };
+        let prob = MisocpProblem {
+            base,
+            integers: vec![1],
+            int_lb: vec![0.0],
+            int_ub: vec![0.0],
+        };
+        let res = solve_misocp(&prob, &ConicOptions::default(), &BbOptions::default());
+        assert_eq!(res.status, SolveStatus::Unbounded, "{res:?}");
+        assert!(res.x.is_empty());
+    }
+
+    #[test]
+    fn no_incumbent_search_keeps_x_empty() {
+        // Every leaf pruned by a Farkas certificate: proven `Infeasible`
+        // with no incumbent ever found, through misocp.rs's third
+        // `x: vec![]` site (shared by the Timeout/MaxIterations/
+        // NumericalError/Infeasible no-incumbent outcomes).
+        let res = solve_misocp(
+            &infeasible_int_lp(),
+            &ConicOptions::default(),
+            &BbOptions::default(),
+        );
+        assert_eq!(res.status, SolveStatus::Infeasible, "{res:?}");
+        assert!(res.x.is_empty());
+    }
+
+    #[test]
+    fn miqcp_to_conic_failure_keeps_x_empty() {
+        // `q0.len()` (0) != `n` (1): `to_conic`'s own `validate_dims` rejects
+        // before any relaxation is built, through misocp.rs's fourth
+        // `x: vec![]` site (`solve_miqcp`'s `to_conic` `Err` branch).
+        let qp = QcqpProblem {
+            n: 1,
+            p0: None,
+            q0: vec![],
+            quad: vec![],
+            g_lin: empty_mat(0, 1),
+            h_lin: vec![],
+            a_eq: empty_mat(0, 1),
+            b_eq: vec![],
+        };
+        let res = solve_miqcp(
+            &qp,
+            &[0],
+            &[0.0],
+            &[1.0],
+            &ConicOptions::default(),
+            &BbOptions::default(),
+        );
+        assert!(
+            matches!(res.status, SolveStatus::NotSupported(_)),
+            "{res:?}"
+        );
+        assert!(res.x.is_empty());
+    }
+
+    #[test]
+    fn miqcp_convexity_unproven_keeps_x_empty() {
+        // Jitter-band indefinite quadratic (same fixture as
+        // `miqcp_convexity_unproven_is_refused`): `to_conic` clamps rather
+        // than rejects, so `solve_miqcp`'s own `convexity_unproven` refusal
+        // fires, through misocp.rs's fifth `x: vec![]` site.
+        let n = 1;
+        let jitter = csc(&[vec![-2e-10]], n, n);
+        let qp = QcqpProblem {
+            n,
+            p0: None,
+            q0: vec![-1.0],
+            quad: vec![QuadConstraint {
+                p: jitter,
+                q: vec![0.0],
+                r: -1.0,
+            }],
+            g_lin: empty_mat(0, n),
+            h_lin: vec![],
+            a_eq: empty_mat(0, n),
+            b_eq: vec![],
+        };
+        let res = solve_miqcp(
+            &qp,
+            &[0],
+            &[0.0],
+            &[3.0],
+            &ConicOptions::default(),
+            &BbOptions::default(),
+        );
+        assert!(
+            matches!(res.status, SolveStatus::NotSupported(_)),
+            "{res:?}"
+        );
+        assert!(res.x.is_empty());
+    }
+
+    #[test]
+    fn genuine_incumbent_keeps_x_len_eq_n() {
+        // `half_int_lp`: root fractional, up-child integer incumbent x = 1,
+        // fully exhausted search => Optimal with a non-empty x. Independent
+        // oracle: compares against the literal `n = 1` the fixture was built
+        // with, not `prob.base.n()` (which would just mirror the same
+        // accessor `MisocpResult`'s own construction leans on).
+        let res = solve_misocp(
+            &half_int_lp(),
+            &ConicOptions::default(),
+            &BbOptions::default(),
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert_eq!(res.x.len(), 1);
+    }
 }
 
 /// Regression sentinel for the MIQCP branch-and-bound node relaxation. The

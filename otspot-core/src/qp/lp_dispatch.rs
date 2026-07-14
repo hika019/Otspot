@@ -612,8 +612,36 @@ fn best_lp_reduced_costs_from_dual(
     })
 }
 
+/// Bound-activity KKT violation, relative scale. Used by
+/// `best_lp_reduced_costs_from_dual` to pick between its `rc_minus`/`rc_plus`
+/// sign conventions.
+///
+/// Trusts `x.len() == rc.len() == problem.num_vars` instead of truncating to
+/// the shortest slice: both call sites pass `solution` and `problem.c.clone()`
+/// after `best_lp_reduced_costs_from_dual` has already checked
+/// `solution.len() == problem.num_vars` at its own top, and `problem.c.len()
+/// == problem.num_vars` is `LpProblem`'s own invariant (`LpProblem::new`/
+/// `new_general`'s dimension validation; struct-literal construction bypasses
+/// this -- all fields are `pub` -- but no production `LpProblem` in this repo
+/// is built that way, only tests). Silently clamping `n` to the shortest
+/// input here previously under-reported violations -- `x.len() == 0` reported
+/// zero, i.e. falsely "clean" -- the same silent-false-clean shape as the
+/// `mat_vec_mul` zero-fill fallback this branch replaced elsewhere.
 fn lp_reduced_cost_bound_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -> f64 {
-    let n = problem.num_vars.min(x.len()).min(rc.len());
+    let n = problem.num_vars;
+    assert_eq!(
+        x.len(),
+        n,
+        "lp_reduced_cost_bound_violation: x.len()={} != problem.num_vars={n}; \
+         caller must guarantee this via LpProblem's own dimension invariant",
+        x.len()
+    );
+    assert_eq!(
+        rc.len(),
+        n,
+        "lp_reduced_cost_bound_violation: rc.len()={} != problem.num_vars={n}",
+        rc.len()
+    );
     let mut max_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = problem.bounds[j];
@@ -637,8 +665,38 @@ fn lp_reduced_cost_bound_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -
     max_rel
 }
 
+/// Bound-activity KKT violation, absolute scale. Used by
+/// `certify_lp_ipm_with_crossover` to decide whether the IPM's own dual
+/// solution certifies as an optimal simplex payload without a crossover.
+///
+/// Trusts `x.len() == rc.len() == problem.num_vars`. Its one call site
+/// (`certify_lp_ipm_with_crossover`) only reaches this after: the function's
+/// own top-of-body guard `result.solution.len() == lp.num_vars`, whose
+/// `solution` flows unchanged through `result.clone()` and `guard_lp_optimal`
+/// into `certified.solution`; and the outer `result.dual_solution.len() ==
+/// lp.num_constraints` guard, re-checked by `convert_prove_dual_to_simplex_payload`
+/// before it calls `fill_lp_reduced_costs_from_dual` -> `best_lp_reduced_costs_from_dual`,
+/// whose `rc_minus`/`rc_plus` inherit `num_vars` length from `LpProblem`'s own
+/// invariant (see `lp_reduced_cost_bound_violation` above for that chain).
+/// `certified.status` is `Optimal` throughout this call (set before
+/// `convert_prove_dual_to_simplex_payload` runs, untouched by it), so
+/// `fill_lp_reduced_costs_from_dual`'s status gate never takes the
+/// early-return branch that would otherwise leave `reduced_costs` empty.
 fn lp_reduced_cost_kkt_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -> f64 {
-    let n = problem.num_vars.min(x.len()).min(rc.len());
+    let n = problem.num_vars;
+    assert_eq!(
+        x.len(),
+        n,
+        "lp_reduced_cost_kkt_violation: x.len()={} != problem.num_vars={n}; \
+         caller must guarantee this via LpProblem's own dimension invariant",
+        x.len()
+    );
+    assert_eq!(
+        rc.len(),
+        n,
+        "lp_reduced_cost_kkt_violation: rc.len()={} != problem.num_vars={n}",
+        rc.len()
+    );
     let mut max_abs = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = problem.bounds[j];

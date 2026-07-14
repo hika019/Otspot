@@ -262,7 +262,11 @@ fn collect_pairs(qp: &NonconvexQcqp) -> Vec<(usize, usize)> {
 
 /// `0.5 * x^T P x`.
 fn quad_val(p: &CscMatrix, x: &[f64]) -> f64 {
-    let px = p.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; x.len()]);
+    let px = p.mat_vec_mul(x).expect(
+        "p.ncols() == x.len(): p is qp.p0/quad[k].p (n,n), validated by \
+             NonconvexQcqp::validate() at global_core entry; x is always qp.n \
+             long (res.x[..qp.n] truncation in global_core)",
+    );
     0.5 * x.iter().zip(&px).map(|(a, b)| a * b).sum::<f64>()
 }
 
@@ -700,19 +704,19 @@ fn feasible(qp: &NonconvexQcqp, x: &[f64], tol: f64) -> bool {
             return false;
         }
     }
-    let gv = qp
-        .g_lin
-        .mat_vec_mul(x)
-        .unwrap_or_else(|_| vec![0.0; qp.h_lin.len()]);
+    let gv = qp.g_lin.mat_vec_mul(x).expect(
+        "g_lin.ncols() == x.len() == n: guaranteed by NonconvexQcqp::validate() \
+         at global_core entry (nonconvex.rs); x is always qp.n long",
+    );
     for (i, &v) in gv.iter().enumerate() {
         if v > qp.h_lin[i] + tol {
             return false;
         }
     }
-    let av = qp
-        .a_eq
-        .mat_vec_mul(x)
-        .unwrap_or_else(|_| vec![0.0; qp.b_eq.len()]);
+    let av = qp.a_eq.mat_vec_mul(x).expect(
+        "a_eq.ncols() == x.len() == n: guaranteed by NonconvexQcqp::validate() \
+         at global_core entry (nonconvex.rs); x is always qp.n long",
+    );
     for (i, &v) in av.iter().enumerate() {
         if (v - qp.b_eq[i]).abs() > tol {
             return false;
@@ -1097,6 +1101,62 @@ mod tests {
              fail the caller's tol=1e-8 rather than a hardcoded 1e-6 floor: \
              incumbent={incumbent}, inc_x={inc_x:?}"
         );
+    }
+
+    /// `p` is 3x3 but `x` has 2 entries. Must panic, not silently zero-fill;
+    /// reverting `quad_val` to the old zero-fill-on-Err fallback makes this
+    /// FAIL (silently returns `0.0` instead).
+    #[test]
+    #[should_panic(expected = "p.ncols() == x.len()")]
+    fn quad_val_panics_on_dimension_mismatch() {
+        let p = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap();
+        let x = vec![1.0, 2.0];
+        let _ = quad_val(&p, &x);
+    }
+
+    /// `g_lin` is built with 3 columns while `qp.n`/`x.len()` is 2, bypassing
+    /// `NonconvexQcqp::validate()`. Must panic, not silently zero-fill;
+    /// reverting to the old zero-fill-on-Err fallback makes this FAIL.
+    #[test]
+    #[should_panic(expected = "g_lin.ncols() == x.len() == n")]
+    fn feasible_panics_on_g_lin_dimension_mismatch() {
+        let n = 2usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![0.0; n],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 3).unwrap(), // wrong: n=2, cols=3
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0; n],
+            ub: vec![1.0; n],
+        };
+        let x = vec![0.5, 0.5];
+        let _ = feasible(&qp, &x, 1e-6);
+    }
+
+    /// Same rationale as `feasible_panics_on_g_lin_dimension_mismatch`, for
+    /// the equality branch (reached after `g_lin` passes).
+    #[test]
+    #[should_panic(expected = "a_eq.ncols() == x.len() == n")]
+    fn feasible_panics_on_a_eq_dimension_mismatch() {
+        let n = 2usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![0.0; n],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 3).unwrap(), // wrong: n=2, cols=3
+            b_eq: vec![],
+            lb: vec![0.0; n],
+            ub: vec![1.0; n],
+        };
+        let x = vec![0.5, 0.5];
+        let _ = feasible(&qp, &x, 1e-6);
     }
 
     /// PR #25 review INLINE-Q: the leaf `accept` call in `global_core`

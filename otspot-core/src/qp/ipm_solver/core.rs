@@ -329,24 +329,7 @@ fn run_ipm_with(
     let dual_gap = compute_duality_gap_rel(orig_problem, &final_sol);
 
     // Invariant: 報告 objective は返却 x で計算。post-processing 後の整合性を保証。
-    let objective_recomputed = {
-        let qx = orig_problem
-            .q
-            .mat_vec_mul(&final_sol.solution)
-            .unwrap_or_else(|_| vec![0.0; orig_problem.num_vars]);
-        let xqx: f64 = qx
-            .iter()
-            .zip(final_sol.solution.iter())
-            .map(|(&q, &x)| q * x)
-            .sum();
-        let cx: f64 = orig_problem
-            .c
-            .iter()
-            .zip(final_sol.solution.iter())
-            .map(|(&c, &x)| c * x)
-            .sum();
-        0.5 * xqx + cx + orig_problem.obj_offset
-    };
+    let objective_recomputed = recompute_objective(orig_problem, &final_sol.solution);
     // IPM inner solver が収集した KKT timing に postsolve timing を合算。
     let ipm_base = result.timing_breakdown.unwrap_or_default();
     let postsolve_total_us = postsolve_map_us
@@ -385,6 +368,56 @@ fn run_ipm_with(
 
 fn should_run_krylov_ir(ipm_made_progress: bool, kkt_pass_after_refine: bool) -> bool {
     ipm_made_progress && !kkt_pass_after_refine
+}
+
+/// Recomputes `0.5 x^T Q x + c^T x + obj_offset` from the returned solution
+/// `x`, so the reported objective stays consistent with post-processing
+/// (bound clip, dual refit, Krylov IR, ...) rather than trusting the IPM
+/// inner solver's own last-iterate objective.
+fn recompute_objective(orig_problem: &QpProblem, solution: &[f64]) -> f64 {
+    let qx = orig_problem.q.mat_vec_mul(solution).expect(
+        "q.ncols() == solution.len() == num_vars: QpProblem::new() enforces \
+         q.ncols() == num_vars (struct-literal construction bypasses this -- \
+         all QpProblem fields are pub); callers must guard solution.len() == \
+         num_vars before calling recompute_objective",
+    );
+    let xqx: f64 = qx.iter().zip(solution.iter()).map(|(&q, &x)| q * x).sum();
+    let cx: f64 = orig_problem
+        .c
+        .iter()
+        .zip(solution.iter())
+        .map(|(&c, &x)| c * x)
+        .sum();
+    0.5 * xqx + cx + orig_problem.obj_offset
+}
+
+#[cfg(test)]
+mod recompute_objective_tests {
+    use super::recompute_objective;
+    use crate::qp::problem::QpProblem;
+    use crate::sparse::CscMatrix;
+
+    /// Constructed via struct literal (bypassing `QpProblem::new()`'s
+    /// dimension check, all fields `pub`): `q` is 3x3 but `solution` has 2
+    /// entries. Must panic, not silently zero-fill.
+    #[test]
+    #[should_panic(expected = "q.ncols() == solution.len() == num_vars")]
+    fn recompute_objective_panics_on_dimension_mismatch() {
+        let problem = QpProblem {
+            q: CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap(),
+            c: vec![0.0, 0.0],
+            a: CscMatrix::new(0, 2),
+            b: vec![],
+            bounds: vec![(0.0, 1.0); 2],
+            num_vars: 2,
+            num_constraints: 0,
+            constraint_types: vec![],
+            quadratic_constraints: vec![],
+            obj_offset: 0.0,
+        };
+        let solution = vec![1.0, 2.0];
+        let _ = recompute_objective(&problem, &solution);
+    }
 }
 
 #[cfg(test)]

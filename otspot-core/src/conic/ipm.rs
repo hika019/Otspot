@@ -13,6 +13,45 @@ use super::{ConicOptions, ConicProblem, ConicResult};
 use crate::linalg::kkt_solver::KktConfig;
 use crate::problem::SolveStatus;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of `solve`'s per-iteration deadline check (mirrors
+    /// `misocp::DEADLINE_AFTER_NODE`'s fault-injection pattern). `Some(n)`
+    /// deterministically forces the `Timeout` branch to fire once `it >= n`,
+    /// regardless of `ConicOptions::deadline`/`cancel_flag` or wall-clock
+    /// jitter; `None` (the default) leaves the real stop check as the sole
+    /// trigger. This reproduces "the IPM loop was genuinely entered, ran a
+    /// real Newton step (or several), and *then* hit Timeout" -- distinct
+    /// from `solve_socp`'s pre-equilibration `stop_requested()` short-circuit
+    /// -- without racing a wall clock against CPU/OS jitter. `thread_local`
+    /// so parallel tests cannot corrupt each other's setting.
+    pub(super) static FORCE_TIMEOUT_AFTER_ITER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// RAII guard resetting `FORCE_TIMEOUT_AFTER_ITER` back to `None` on drop,
+/// including on unwind. A bare `.with(|c| c.set(None))` placed after the call
+/// under test never runs if `solve` (or an assertion on its result) panics
+/// first, leaking the override into whichever test nextest's thread pool
+/// schedules next on the same worker thread.
+#[cfg(test)]
+pub(super) struct ForceTimeoutGuard;
+
+#[cfg(test)]
+impl ForceTimeoutGuard {
+    pub(super) fn new(after_iter: usize) -> Self {
+        FORCE_TIMEOUT_AFTER_ITER.with(|c| c.set(Some(after_iter)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForceTimeoutGuard {
+    fn drop(&mut self) {
+        FORCE_TIMEOUT_AFTER_ITER.with(|c| c.set(None));
+    }
+}
+
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
@@ -113,7 +152,13 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) 
     }
 
     for it in 0..opts.max_iter {
-        if opts.stop_requested() {
+        let stop_hit = opts.stop_requested();
+        // Test-only: force this iteration's deadline check regardless of the
+        // real deadline/cancel flag (see `FORCE_TIMEOUT_AFTER_ITER`).
+        #[cfg(test)]
+        let stop_hit =
+            stop_hit || FORCE_TIMEOUT_AFTER_ITER.with(|c| c.get().is_some_and(|n| it >= n));
+        if stop_hit {
             status = SolveStatus::Timeout;
             iterations = it;
             break;
