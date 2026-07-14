@@ -609,26 +609,19 @@ pub(crate) fn parse_vector_entry(
 /// caller (its enum differs between MPS and QPS).
 ///
 /// The bound-set-name field (standard: `TYPE BNDNAME COL [VALUE]`) is commonly
-/// omitted (shorthand: `TYPE COL [VALUE]`). In free format the token count
-/// disambiguates: a value-taking type has 3 (shorthand) or 4 (standard)
-/// tokens, a non-value type 2 or 3.
+/// omitted (shorthand: `TYPE COL [VALUE]`). Free format disambiguates by token
+/// count; fixed format tries standard reading (field 3 = column, field 4 =
+/// value) and rereads field 2 as the column only when standard reading cannot
+/// be well-formed — which is what keeps the two readings from both claiming
+/// data.
 ///
-/// A non-value type (`value_required = false`, e.g. `FR`/`MI`/`BV`/`PL`) with
-/// a trailing token past the column name (`FR BND x1 0.0`) is a hard error,
-/// not a silently discarded value: a stray numeric token there is far more
-/// likely to be a typo'd bound value than an intentional no-op, and silently
-/// dropping it would read a different model than the file states.
-///
-/// Fixed format has no token count to read, so standard reading (field 3 =
-/// column, field 4 = value) is tried first. It is rejected — and field 2 is
-/// reread as the column instead, the bound-set name being omitted — only when
-/// it could not possibly be well-formed: field 3 is blank, or `value_required`
-/// and field 4 is blank. In the shorthand reading the value is wherever
-/// standard reading left it unclaimed: field 3 when the whole line shifted
-/// one field left (field 4 is then unused), otherwise still field 4 (a
-/// column-only shift). Standard reading failing is exactly what guarantees
-/// field 4 is blank whenever field 3 turns out to hold the value instead, so
-/// there is no case where both fields hold data and the shift is ambiguous.
+/// Surplus input is rejected, but each format needs its own check. Free format
+/// has no positional fields, so any token past the slot a type can use is
+/// invalid. That alone is not enough: `parse_with_format_fallback` re-reads the
+/// file as fixed format, where a surplus token on a grid-aligned line lands in
+/// field 5/6 — undefined for BOUNDS, unlike RHS/RANGES which use them for a
+/// second pair — so those are rejected too. Field 4 is not: real files pad it
+/// with a redundant `0.0`/`1.0` for `FR`/`MI`/`BV`/`PL` (`leo1`/`leo2`).
 pub(crate) fn parse_bounds_entry(
     line: &str,
     tokens: &[&str],
@@ -658,6 +651,12 @@ pub(crate) fn parse_bounds_entry(
                     line_num, tokens[col_idx], tokens[value_idx]
                 ));
             }
+            if value_required && tokens.len() > value_idx + 1 {
+                return Err(format!(
+                    "line {}: BOUNDS type {} takes exactly one value for col='{}'",
+                    line_num, tokens[0], tokens[col_idx]
+                ));
+            }
             let raw = if value_required && tokens.len() > value_idx {
                 Some(tokens[value_idx].to_string())
             } else {
@@ -670,6 +669,20 @@ pub(crate) fn parse_bounds_entry(
             let bndname_field = fixed.field(FIELD_2)?;
             let standard_col = fixed.field(FIELD_3)?;
             let standard_value = fixed.field(FIELD_4)?;
+            let field_5 = fixed.field(FIELD_5)?;
+            let field_6 = fixed.field(FIELD_6)?;
+            let trailing = if !field_5.is_empty() {
+                field_5
+            } else {
+                field_6
+            };
+            if !trailing.is_empty() {
+                return Err(format!(
+                    "line {}: BOUNDS line has unexpected content '{}' in field 5/6; BOUNDS \
+                     defines only fields 1-4 (type, bound-set name, column, value)",
+                    line_num, trailing
+                ));
+            }
             let standard_ok =
                 !standard_col.is_empty() && (!value_required || !standard_value.is_empty());
 

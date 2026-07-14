@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2721 testcases, 26 ignored
+# totals: 2783 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -313,6 +313,7 @@ otspot-core	mip::cuts::tests::clique_cut_validity_brute_force	active
 otspot-core	mip::cuts::tests::cover_cut_generated_and_cuts_lp_opt	active
 otspot-core	mip::cuts::tests::cover_cut_validity_brute_force	active
 otspot-core	mip::cuts::tests::cover_cuts_preserve_optimum	active
+otspot-core	mip::cuts::tests::cover_cuts_reject_short_lp_solution_vector	active
 otspot-core	mip::cuts::tests::cut_validity_brute_force	active
 otspot-core	mip::cuts::tests::cut_validity_fuzz_lcg	active
 otspot-core	mip::cuts::tests::cut_validity_mixed_le_ge	active
@@ -326,6 +327,7 @@ otspot-core	mip::cuts::tests::cuts_on_root_lp_bound_valid_and_optimum_correct	ac
 otspot-core	mip::cuts::tests::cuts_preserve_optimum	active
 otspot-core	mip::cuts::tests::cuts_preserve_optimum_multi_ge	active
 otspot-core	mip::cuts::tests::cuts_tighten_lp_bound_without_crossing_integer_optimum	active
+otspot-core	mip::cuts::tests::finalize_cut_rejects_dimension_mismatch	active
 otspot-core	mip::cuts::tests::implied_bound_cut_ge_row_validity	active
 otspot-core	mip::cuts::tests::implied_bound_cut_validity_brute_force	active
 otspot-core	mip::cuts::tests::le_revalidation_detects_infeasible_le_cut	active
@@ -465,6 +467,7 @@ otspot-core	mip::tests::fp_timeout_does_not_exceed_user_limit	active
 otspot-core	mip::tests::hybrid_node_selection_correctness_3var_knapsack	active
 otspot-core	mip::tests::integer_infeasible_between_consecutive_integers	active
 otspot-core	mip::tests::integer_mask_marks_only_integer_vars	active
+otspot-core	mip::tests::integer_mask_rejects_out_of_range_index	active
 otspot-core	mip::tests::invalid_options_rejected_at_milp_entry	active
 otspot-core	mip::tests::invalid_options_rejected_at_miqp_entry	active
 otspot-core	mip::tests::knapsack_truncated_has_no_bound_gap_cert	active
@@ -502,17 +505,20 @@ otspot-core	mip::tests::rc_fixing_no_fix_for_interior_value	active
 otspot-core	mip::tests::rc_fixing_no_fix_when_gap_nonpositive	active
 otspot-core	mip::tests::rc_fixing_no_fix_when_rc_equals_gap	active
 otspot-core	mip::tests::rc_fixing_no_fix_when_rc_less_than_gap	active
-otspot-core	mip::tests::rc_fixing_out_of_bounds_index_ignored	active
+otspot-core	mip::tests::rc_fixing_out_of_bounds_index_rejected	active
 otspot-core	mip::tests::rc_fixing_rounds_noninteger_lower_bound_to_ceil	active
 otspot-core	mip::tests::rc_fixing_rounds_noninteger_upper_bound_to_floor	active
 otspot-core	mip::tests::rc_fixing_skips_already_fixed_variable	active
 otspot-core	mip::tests::rc_fixing_skips_empty_integer_range	active
+otspot-core	mip::tests::reduced_cost_fixing_rejects_short_reduced_costs	active
+otspot-core	mip::tests::reduced_cost_fixing_rejects_short_solution	active
 otspot-core	mip::tests::rens_first_incumbent_failure_waits_for_regular_cadence	active
 otspot-core	mip::tests::rens_first_incumbent_success_switches_to_regular_cadence	active
 otspot-core	mip::tests::rens_with_incumbent_waits_for_regular_interval	active
 otspot-core	mip::tests::rins_disabled_still_optimal	active
 otspot-core	mip::tests::rins_stats_improvements_le_calls	active
 otspot-core	mip::tests::rins_stats_zero_for_single_node_problem	active
+otspot-core	mip::tests::round_integers_rejects_out_of_range_index	active
 otspot-core	mip::tests::scaling_retry_does_not_run_after_deadline_expired	active
 otspot-core	mip::tests::solve_miqp_rejects_indefinite_n1001	active
 otspot-core	mip::tests::stats_bounds_bytes_scales_with_num_vars	active
@@ -580,6 +586,9 @@ otspot-core	presolve::postsolve::recover_removed_row_dual_tests::binding_ge_row_
 otspot-core	presolve::postsolve::recover_removed_row_dual_tests::binding_le_row_returns_nonzero_dual	active
 otspot-core	presolve::postsolve::recover_removed_row_dual_tests::nonbinding_ge_row_returns_zero	active
 otspot-core	presolve::postsolve::recover_removed_row_dual_tests::nonbinding_le_row_returns_zero	active
+otspot-core	presolve::postsolve::recover_removed_row_dual_tests::run_postsolve_preserves_timeout_incumbent_without_dual	active
+otspot-core	presolve::postsolve::recover_removed_row_dual_tests::run_postsolve_rejects_short_reduced_dual	active
+otspot-core	presolve::postsolve::recover_removed_row_dual_tests::run_postsolve_rejects_short_reduced_solution	active
 otspot-core	presolve::postsolve::warm_basis_recovery_tests::default_skips_warm_basis_recovery	active
 otspot-core	presolve::postsolve::warm_basis_recovery_tests::non_reducible_basis_independent_of_recovery_flag	active
 otspot-core	presolve::postsolve::warm_basis_recovery_tests::noop_proof_returns_none_fails_round_trip	active
@@ -594,6 +603,8 @@ otspot-core	presolve::qp_phase2::tests::test_constraint_precond_scales_large_row
 otspot-core	presolve::qp_phase2::tests::test_equality_constraint_qr_redundant_removal	active
 otspot-core	presolve::qp_phase2::tests::test_near_zero_q_removal_removes_small_offdiag	active
 otspot-core	presolve::qp_phase2::tests::test_run_qp_presolve_phase2_no_crash	active
+otspot-core	presolve::qp_postsolve::shape_tests::postsolve_qp_rejects_short_reduced_costs	active
+otspot-core	presolve::qp_postsolve::shape_tests::postsolve_qp_rejects_short_reduced_solution	active
 otspot-core	presolve::qp_postsolve::tests::test_compute_qx_at_symmetric_q	active
 otspot-core	presolve::qp_postsolve::tests::test_postsolve_dual_recovery_ill_scaled	active
 otspot-core	presolve::qp_postsolve::tests::test_postsolve_dual_row_map	active
@@ -802,6 +813,7 @@ otspot-core	qp::certificate::tests::prove_optimal_lp_active_lower_bound_cert	act
 otspot-core	qp::certificate::tests::prove_optimal_lp_correct_simplex_path_passes	active
 otspot-core	qp::certificate::tests::prove_optimal_lp_ipm_all_free_passes	active
 otspot-core	qp::certificate::tests::prove_optimal_lp_path_bound_cross_table	active
+otspot-core	qp::certificate::tests::prove_optimal_lp_short_reduced_costs_is_not_proven	active
 otspot-core	qp::certificate::tests::prove_optimal_lp_wrong_sign_dual_fails	active
 otspot-core	qp::certificate::tests::prove_optimal_nan_in_each_condition_is_rejected	active
 otspot-core	qp::certificate::tests::prove_optimal_negative_gap_bug_reproduction	active
@@ -988,7 +1000,10 @@ otspot-core	qp::ipm_solver::attempt::tests::test_q_diagonal_scaling_skips_non_di
 otspot-core	qp::ipm_solver::attempt::tests::test_q_diagonal_scaling_skips_uniform_diagonal	active
 otspot-core	qp::ipm_solver::attempt::tests::test_q_diagonal_scaling_unscale_roundtrip	active
 otspot-core	qp::ipm_solver::attempt::tests::try_q_diagonal_scaling_gate1_local_scale_sentinel	active
+otspot-core	qp::ipm_solver::attempt::tests::unscale_q_diagonal_rejects_short_bound_duals	active
 otspot-core	qp::ipm_solver::attempt::tests::unscale_q_diagonal_reverses_x_and_bound_duals	active
+otspot-core	qp::ipm_solver::core::duality_gap::tests::duality_gap_rejects_missing_row_dual	active
+otspot-core	qp::ipm_solver::core::duality_gap::tests::duality_gap_rejects_short_bound_duals	active
 otspot-core	qp::ipm_solver::core::eps_tighten::eps_tighten_tests::custom_tolerance_does_not_bypass_attempt_tighten	active
 otspot-core	qp::ipm_solver::core::eps_tighten::eps_tighten_tests::no_custom_tolerance_unchanged	active
 otspot-core	qp::ipm_solver::core::extended_ir_postsolve_path_tests::extended_ir_postsolve_path_does_not_hide_wrong_sign_dual_from_prove_optimal	active
@@ -1089,6 +1104,7 @@ otspot-core	qp::multistart::tests::threadpool_fallback_result_matches_serial	act
 otspot-core	qp::multistart::tests::threads_actually_parallel_and_within_limit	active
 otspot-core	qp::multistart::tests::threads_eq_1_is_serial	active
 otspot-core	qp::postsolve::bound_dual::tests::project_duals_from_singleton_columns_table_driven	active
+otspot-core	qp::postsolve::bound_dual::tests::remap_bound_duals_rejects_short_reduced_duals	active
 otspot-core	qp::postsolve::bound_dual::tests::remap_bound_duals_to_orig_layouts_table_driven	active
 otspot-core	qp::postsolve::bound_dual::tests::zero_inactive_inequality_duals_table_driven	active
 otspot-core	qp::postsolve::dual_recovery::free_columns_tests::at_bound_var_skipped_regardless_of_mask	active
@@ -1284,6 +1300,7 @@ otspot-core	sensitivity::tests::bounded_lp_all_interior_ub_slacks_basic	active
 otspot-core	sensitivity::tests::bounded_lp_var_basic_at_ub_has_sensitivity	active
 otspot-core	sensitivity::tests::bounded_lp_with_var_at_ub_has_sensitivity	active
 otspot-core	sensitivity::tests::fixed_variable_obj_ranging_is_unbounded	active
+otspot-core	sensitivity::tests::sensitivity_rejects_malformed_solution_or_reduced_costs	active
 otspot-core	sensitivity::tests::test_2x2_obj_ranging	active
 otspot-core	sensitivity::tests::test_2x2_rhs_ranging	active
 otspot-core	sensitivity::tests::test_3x3_optimal_solution	active
@@ -1836,9 +1853,19 @@ otspot-io	mps::tests::test_milp_solve_ui_bound	active
 otspot-io	mps::tests::test_milp_ui_bound_marks_integer	active
 otspot-io	mps::tests::test_milp_unclosed_intorg_errors	active
 otspot-io	mps::tests::test_mps_blend_shorthand_rhs_matches_known_optimal	active
+otspot-io	mps::tests::test_mps_bounds_fixed_bound_set_name_collides_with_declared_column_name	active
+otspot-io	mps::tests::test_mps_bounds_fixed_bound_set_name_collides_with_declared_column_name_non_value_type	active
+otspot-io	mps::tests::test_mps_bounds_fixed_grid_aligned_field5_junk_is_error	active
+otspot-io	mps::tests::test_mps_bounds_fixed_grid_aligned_field5_surplus_value_is_error	active
+otspot-io	mps::tests::test_mps_bounds_fixed_shorthand_non_value_type_no_bound_name	active
+otspot-io	mps::tests::test_mps_bounds_fixed_shorthand_uniform_shift	active
+otspot-io	mps::tests::test_mps_bounds_fixed_shorthand_value_stays_in_field4	active
+otspot-io	mps::tests::test_mps_bounds_fixed_standard_form_not_misread_as_shorthand	active
 otspot-io	mps::tests::test_mps_bounds_malformed_too_few_fields_is_error	active
+otspot-io	mps::tests::test_mps_bounds_mi_surplus_value_token_is_error	active
 otspot-io	mps::tests::test_mps_bounds_nan_value_is_error	active
 otspot-io	mps::tests::test_mps_bounds_shorthand_no_bound_name	active
+otspot-io	mps::tests::test_mps_bounds_up_surplus_value_token_is_error	active
 otspot-io	mps::tests::test_mps_columns_inf_value_is_error	active
 otspot-io	mps::tests::test_mps_columns_malformed_too_few_fields_is_error	active
 otspot-io	mps::tests::test_mps_columns_nan_value_is_error	active
@@ -1856,6 +1883,9 @@ otspot-io	mps::tests::test_mps_obj_offset_propagates_to_solve_result	active
 otspot-io	mps::tests::test_mps_objsense_inline_and_spelled_out	active
 otspot-io	mps::tests::test_mps_objsense_max_obj_offset_sign_flip	active
 otspot-io	mps::tests::test_mps_ranges_expansion_follows_declaration_order	active
+otspot-io	mps::tests::test_mps_ranges_fixed_shorthand_trailing_field6_is_error	active
+otspot-io	mps::tests::test_mps_ranges_fixed_shorthand_vector_name_omitted	active
+otspot-io	mps::tests::test_mps_ranges_fixed_vector_name_collides_with_declared_row_name	active
 otspot-io	mps::tests::test_mps_ranges_malformed_too_few_fields_is_error	active
 otspot-io	mps::tests::test_mps_ranges_multiple_named_vectors_first_wins	active
 otspot-io	mps::tests::test_mps_ranges_shorthand_two_pairs_numeric_row_names	active
@@ -1863,6 +1893,9 @@ otspot-io	mps::tests::test_mps_reader_crlf_equivalence	active
 otspot-io	mps::tests::test_mps_reader_fixture_afiro	active
 otspot-io	mps::tests::test_mps_reader_pulls_lines_lazily_not_all_upfront	active
 otspot-io	mps::tests::test_mps_reader_round_trip	active
+otspot-io	mps::tests::test_mps_rhs_fixed_neither_reading_parses_reports_standard_diagnostic	active
+otspot-io	mps::tests::test_mps_rhs_fixed_shorthand_vector_name_omitted	active
+otspot-io	mps::tests::test_mps_rhs_fixed_vector_name_collides_with_declared_row_name	active
 otspot-io	mps::tests::test_mps_rhs_malformed_too_few_fields_is_error	active
 otspot-io	mps::tests::test_mps_rhs_multiple_named_vectors_first_wins	active
 otspot-io	mps::tests::test_mps_rhs_n_row_finite_propagates_to_obj_offset	active
@@ -1890,6 +1923,7 @@ otspot-io	mps::tests::test_range_eq_positive	active
 otspot-io	mps::tests::test_range_ge_basic	active
 otspot-io	mps::tests::test_range_le_basic	active
 otspot-io	mps::tests::test_range_solve_simple	active
+otspot-io	mps::tests::test_rhs_odd_trailing_token_has_name_without_value_error	active
 otspot-io	mps::tests::test_sentinel_mps_bounds_fx_missing_value_is_error	active
 otspot-io	mps::tests::test_sentinel_mps_bounds_lo_missing_value_is_error	active
 otspot-io	mps::tests::test_sentinel_mps_bounds_ui_missing_value_is_error	active
@@ -1948,8 +1982,21 @@ otspot-io	qps::tests::test_parse_qps_no_quadobj	active
 otspot-io	qps::tests::test_parse_qps_obj_offset	active
 otspot-io	qps::tests::test_parse_qps_simple	active
 otspot-io	qps::tests::test_qps_blend_shorthand_rhs_matches_known_optimal	active
+otspot-io	qps::tests::test_qps_bounds_fixed_bound_set_name_collides_with_declared_column_name	active
+otspot-io	qps::tests::test_qps_bounds_fixed_bound_set_name_collides_with_declared_column_name_non_value_type	active
+otspot-io	qps::tests::test_qps_bounds_fixed_format_spaced_names	active
+otspot-io	qps::tests::test_qps_bounds_fixed_grid_aligned_field5_junk_is_error	active
+otspot-io	qps::tests::test_qps_bounds_fixed_grid_aligned_field5_surplus_value_is_error	active
+otspot-io	qps::tests::test_qps_bounds_fixed_shorthand_non_value_type_no_bound_name	active
+otspot-io	qps::tests::test_qps_bounds_fixed_shorthand_uniform_shift	active
+otspot-io	qps::tests::test_qps_bounds_fixed_shorthand_value_stays_in_field4	active
+otspot-io	qps::tests::test_qps_bounds_fixed_standard_form_not_misread_as_shorthand	active
+otspot-io	qps::tests::test_qps_bounds_free_extra_token_not_fixed_fallback	active
+otspot-io	qps::tests::test_qps_bounds_invalid_numeric_value_is_error	active
 otspot-io	qps::tests::test_qps_bounds_malformed_too_few_fields_is_error	active
 otspot-io	qps::tests::test_qps_bounds_shorthand_non_value_taking_2token	active
+otspot-io	qps::tests::test_qps_bounds_up_surplus_value_token_is_error	active
+otspot-io	qps::tests::test_qps_bounds_value_on_value_less_type_is_error	active
 otspot-io	qps::tests::test_qps_column_named_marker_is_not_a_marker_line	active
 otspot-io	qps::tests::test_qps_columns_inf_value_is_error	active
 otspot-io	qps::tests::test_qps_columns_malformed_too_few_fields_is_error	active
@@ -1968,16 +2015,28 @@ otspot-io	qps::tests::test_qps_quadobj_duplicate_entry_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_malformed_too_few_fields_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_nan_value_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_symmetric_duplicate_is_error	active
+otspot-io	qps::tests::test_qps_ranges_fixed_format_numeric_spaced_row_name	active
+otspot-io	qps::tests::test_qps_ranges_fixed_shorthand_trailing_field6_is_error	active
+otspot-io	qps::tests::test_qps_ranges_fixed_shorthand_vector_name_omitted	active
+otspot-io	qps::tests::test_qps_ranges_fixed_vector_name_collides_with_declared_row_name	active
 otspot-io	qps::tests::test_qps_ranges_multiple_named_vectors_first_wins	active
+otspot-io	qps::tests::test_qps_ranges_odd_trailing_token_has_name_without_value_error	active
 otspot-io	qps::tests::test_qps_reader_crlf_equivalence	active
 otspot-io	qps::tests::test_qps_reader_fixture_tame	active
 otspot-io	qps::tests::test_qps_reader_pulls_lines_lazily_not_all_upfront	active
 otspot-io	qps::tests::test_qps_reader_round_trip	active
+otspot-io	qps::tests::test_qps_rhs_fixed_format_numeric_spaced_row_name	active
+otspot-io	qps::tests::test_qps_rhs_fixed_format_second_pair_spaced_row_name	active
+otspot-io	qps::tests::test_qps_rhs_fixed_format_spaced_set_name_numeric_row	active
+otspot-io	qps::tests::test_qps_rhs_fixed_neither_reading_parses_reports_standard_diagnostic	active
+otspot-io	qps::tests::test_qps_rhs_fixed_shorthand_vector_name_omitted	active
+otspot-io	qps::tests::test_qps_rhs_fixed_vector_name_collides_with_declared_row_name	active
 otspot-io	qps::tests::test_qps_rhs_inf_constraint_row_3field_is_error	active
 otspot-io	qps::tests::test_qps_rhs_multiple_named_vectors_first_wins	active
 otspot-io	qps::tests::test_qps_rhs_nan_constraint_row_3field_is_error	active
 otspot-io	qps::tests::test_qps_rhs_nan_constraint_row_is_error	active
 otspot-io	qps::tests::test_qps_rhs_nan_named_overwrite_is_error	active
+otspot-io	qps::tests::test_qps_rhs_odd_trailing_token_has_name_without_value_error	active
 otspot-io	qps::tests::test_qps_rhs_shorthand_two_pairs_numeric_row_names	active
 otspot-io	qps::tests::test_qps_undefined_row_reference_is_error	active
 otspot-io	qps::tests::test_quadobj_symmetry	active
@@ -2057,13 +2116,16 @@ otspot-model	model::tests::add_int_var_lb_gt_ub_defers_error_to_solve	active
 otspot-model	model::tests::add_var_lb_gt_ub_defers_error_to_solve	active
 otspot-model	model::tests::add_var_nan_bounds_defers_error_to_solve	active
 otspot-model	model::tests::classify_status_error_typed_variants	active
+otspot-model	model::tests::mip_solution_normalization_rejects_invalid_solver_output	active
 otspot-model	model::tests::miqp_nonconvex_q_returns_nonconvex_error	active
 otspot-model	model::tests::model_result_clone	active
+otspot-model	model::tests::qp_dual_length_mismatch_is_internal_error_not_prefix_truncation	active
 otspot-model	model::tests::set_timeout_invalid_defers_error	active
 otspot-model	model::tests::solution_proof_mapping_preserves_unproven_statuses	active
 otspot-model	model::tests::test_basic_lp_3var_3con	active
 otspot-model	model::tests::test_equality_constraint	active
 otspot-model	model::tests::test_infeasible	active
+otspot-model	model::tests::test_lp_maximize_dual_and_reduced_costs_are_oriented_to_user_problem	active
 otspot-model	model::tests::test_maximize	active
 otspot-model	model::tests::test_model_eq_dual_solution	active
 otspot-model	model::tests::test_model_lp_equality	active
@@ -2090,10 +2152,10 @@ otspot-model	model::tests::try_value_valid_returns_ok	active
 otspot-model	model::tests::try_var_name_err_cross_model	active
 otspot-model	model::tests::try_var_name_err_index_out_of_range	active
 otspot-model	model::tests::try_var_name_ok_same_model	active
-otspot-model	model::tests::var_name_cross_model_in_range_silently_returns_wrong_data	active
-otspot-model	model::tests::var_name_cross_model_out_of_range_panics	active
+otspot-model	model::tests::var_name_cross_model_in_range_panics	active
 otspot-model	model::tests::var_name_is_retained	active
 otspot-model	model::tests::var_name_regression_unchecked_still_works	active
+otspot-model	model::tests::var_name_same_model_out_of_range_panics	active
 otspot-model	quad_expr::tests::test_add_quadexprs	active
 otspot-model	quad_expr::tests::test_cancelled_quad_routes_to_lp	active
 otspot-model	quad_expr::tests::test_cancelled_quad_term_is_linear	active
