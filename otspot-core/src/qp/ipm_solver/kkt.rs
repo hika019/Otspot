@@ -127,7 +127,12 @@ pub fn complementarity_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z:
     };
     let cx: f64 = prob.c.iter().zip(x.iter()).map(|(&c, &xi)| c * xi).sum();
     let xqx: f64 = {
-        let qx = prob.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; x.len()]);
+        let qx = prob.q.mat_vec_mul(x).expect(
+            "q.ncols() == x.len() == num_vars: QpProblem::new() enforces \
+             q.ncols() == num_vars (struct-literal construction bypasses this -- \
+             all QpProblem fields are pub); callers guard x.len() == num_vars \
+             before building ProblemView",
+        );
         qx.iter().zip(x.iter()).map(|(&q, &xi)| q * xi).sum()
     };
     let scale = 1.0 + yb.abs() + yax.abs() + zx.abs() + cx.abs() + (0.5 * xqx).abs();
@@ -272,6 +277,23 @@ mod tests {
             constraint_types: cts,
             eliminated_cols: mask,
         }
+    }
+
+    /// `q` is 3x3 but `x` has 2 entries. Must panic, not silently zero-fill.
+    #[test]
+    #[should_panic(expected = "q.ncols() == x.len() == num_vars")]
+    fn complementarity_residual_rel_panics_on_dimension_mismatch() {
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap();
+        let a = CscMatrix::new(0, 2);
+        let c = vec![0.0, 0.0];
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(0.0, 1.0), (0.0, 1.0)];
+        let cts: Vec<ConstraintType> = vec![];
+        let view = build_view(&q, &a, &c, &b, &bounds, &cts);
+        let x = vec![0.5, 0.5];
+        let y: Vec<f64> = vec![];
+        let z: Vec<f64> = vec![];
+        let _ = complementarity_residual_rel(&view, &x, &y, &z);
     }
 
     /// f64 で消える 1.0 residual を DD が拾うこと。

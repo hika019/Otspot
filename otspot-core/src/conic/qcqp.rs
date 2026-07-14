@@ -588,7 +588,10 @@ fn qcqp_objective(qp: &QcqpProblem, x: &[f64]) -> f64 {
         obj += qv * x[j];
     }
     if let Some(p0) = &qp.p0 {
-        let px = p0.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; qp.n]);
+        let px = p0.mat_vec_mul(x).expect(
+            "p0.ncols() == x.len() == qp.n: guaranteed by to_conic's validate_dims, \
+             which solve_qcqp() always runs before qcqp_objective(); x is res.x[..qp.n]",
+        );
         let mut xpx = 0.0;
         for j in 0..qp.n {
             xpx += x[j] * px[j];
@@ -1116,10 +1119,11 @@ fn qp_problem_objective(src: &QpProblem, x: &[f64]) -> f64 {
         obj += cv * x[j];
     }
     if !src.is_zero_q() {
-        let px = src
-            .q
-            .mat_vec_mul(x)
-            .unwrap_or_else(|_| vec![0.0; src.num_vars]);
+        let px = src.q.mat_vec_mul(x).expect(
+            "q.ncols() == x.len() == src.num_vars: QpProblem::new() enforces \
+             q.ncols() == num_vars (struct-literal construction bypasses this -- \
+             all QpProblem fields are pub); x is res.x[..src.num_vars]",
+        );
         let mut xpx = 0.0;
         for j in 0..src.num_vars {
             xpx += x[j] * px[j];
@@ -1163,5 +1167,54 @@ pub fn solve_qp_problem_as_qcqp(src: &QpProblem, opts: &ConicOptions) -> QcqpRes
         x,
         iterations: res.iterations,
         convexity_unproven,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `p0` is 3x3 but `qp.n`/`x.len()` is 2, bypassing `to_conic`'s
+    /// `validate_dims`. Must panic, not silently zero-fill; reverting to the
+    /// old zero-fill-on-Err fallback makes this FAIL.
+    #[test]
+    #[should_panic(expected = "p0.ncols() == x.len() == qp.n")]
+    fn qcqp_objective_panics_on_dimension_mismatch() {
+        let qp = QcqpProblem {
+            n: 2,
+            p0: Some(
+                CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap(),
+            ),
+            q0: vec![0.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::new(0, 2),
+            h_lin: vec![],
+            a_eq: CscMatrix::new(0, 2),
+            b_eq: vec![],
+        };
+        let x = vec![1.0, 2.0];
+        let _ = qcqp_objective(&qp, &x);
+    }
+
+    /// Constructed via struct literal (bypassing `QpProblem::new()`'s
+    /// dimension check, all fields `pub`): `q` is 3x3 but `num_vars`/`x.len()`
+    /// is 2. Must panic, not silently zero-fill.
+    #[test]
+    #[should_panic(expected = "q.ncols() == x.len() == src.num_vars")]
+    fn qp_problem_objective_panics_on_dimension_mismatch() {
+        let src = crate::qp::QpProblem {
+            q: CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap(),
+            c: vec![0.0, 0.0],
+            a: CscMatrix::new(0, 2),
+            b: vec![],
+            bounds: vec![(0.0, 1.0); 2],
+            num_vars: 2,
+            num_constraints: 0,
+            constraint_types: vec![],
+            quadratic_constraints: vec![],
+            obj_offset: 0.0,
+        };
+        let x = vec![1.0, 2.0];
+        let _ = qp_problem_objective(&src, &x);
     }
 }

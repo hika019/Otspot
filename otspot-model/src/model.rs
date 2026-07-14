@@ -958,6 +958,115 @@ mod conic_bridge_sparse_builder_tests {
     }
 }
 
+/// Slices a conic solve's `x` down to the model's first `n` original columns,
+/// dropping any trailing SOC/epigraph columns `to_conic`/`append_soc` added.
+///
+/// Trusts, rather than re-guards, `x.len() >= n`: both `solve_socp` and a
+/// non-empty `solve_misocp` result always return exactly `conic.n() = nvar`
+/// columns (`nvar >= n`, since `to_conic` only ever appends columns to the
+/// model's own `n`) -- `solve_socp` never returns a shorter or empty `x` for
+/// any status, and `solve_misocp`'s only shorter-than-`n` case is the empty
+/// no-incumbent one, which callers must check for separately (`solve_misocp`
+/// can genuinely return `x: vec![]`, unlike `solve_socp`). Checking that
+/// emptiness case at every call site and then defensively re-clamping the
+/// length here duplicated the same guarantee two different ways: whichever
+/// one drifted first (e.g. a caller forgetting the emptiness check) would
+/// have silently produced a truncated, wrong-length slice instead of failing
+/// loudly.
+fn truncate_conic_solution(x: &[f64], n: usize) -> &[f64] {
+    // `assert!`, not `debug_assert!`: this crate's `[profile.release]` does
+    // not turn on `debug-assertions`, and the gated full-suite always runs
+    // `--release` (CLAUDE.md), so a `debug_assert!` here would never fire in
+    // the builds that matter -- the diagnostic message would be unreachable
+    // exactly when it is needed. `&x[..n]`'s own bounds check still panics in
+    // every profile regardless, so this only affects whether the panic
+    // carries this function's context or just the slice's generic message.
+    assert!(
+        x.len() >= n,
+        "conic solve returned x of length {} < model n={n}; solve_socp and a \
+         non-empty solve_misocp result are expected to always return >= n \
+         columns -- caller must have skipped the required emptiness check",
+        x.len()
+    );
+    &x[..n]
+}
+
+/// Recomputes `q0^T x + 0.5 x^T P0 x` from the caller's literal `QcqpProblem`
+/// data at a candidate `x` (mirrors `otspot_core`'s own `qcqp_objective` /
+/// `qcqp_true_objective`), truncating `x` to `qp.n` first since callers pass
+/// the full conic solution vector (which may carry extra SOC/epigraph
+/// columns beyond `qp.n`).
+fn qcqp_model_raw_objective(qp: &otspot_core::conic::QcqpProblem, x: &[f64]) -> f64 {
+    let n = qp.n;
+    let xn = truncate_conic_solution(x, n);
+    let mut raw = qp.q0.iter().zip(xn).map(|(a, b)| a * b).sum::<f64>();
+    if let Some(p0) = &qp.p0 {
+        let px = p0.mat_vec_mul(xn).expect(
+            "p0.ncols() == xn.len() == n: p0.ncols() == n is guaranteed by \
+             to_conic(&qp)'s validate_dims (run before qcqp_model_raw_objective \
+             is ever called); xn.len() == n comes from truncate_conic_solution, \
+             whose doc comment covers x.len() >= n",
+        );
+        raw += 0.5 * xn.iter().zip(&px).map(|(a, b)| a * b).sum::<f64>();
+    }
+    raw
+}
+
+#[cfg(test)]
+mod qcqp_model_raw_objective_tests {
+    use super::qcqp_model_raw_objective;
+    use otspot_core::conic::QcqpProblem;
+    use otspot_core::sparse::CscMatrix;
+
+    /// `p0` is 3x3 but `qp.n` is 2, bypassing `to_conic`'s `validate_dims`.
+    /// Must panic, not silently zero-fill.
+    #[test]
+    #[should_panic(expected = "p0.ncols() == xn.len() == n")]
+    fn panics_on_dimension_mismatch() {
+        let qp = QcqpProblem {
+            n: 2,
+            p0: Some(
+                CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap(),
+            ),
+            q0: vec![0.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::new(0, 2),
+            h_lin: vec![],
+            a_eq: CscMatrix::new(0, 2),
+            b_eq: vec![],
+        };
+        let x = vec![1.0, 2.0];
+        let _ = qcqp_model_raw_objective(&qp, &x);
+    }
+}
+
+#[cfg(test)]
+mod truncate_conic_solution_tests {
+    use super::truncate_conic_solution;
+
+    #[test]
+    fn truncates_extra_soc_epigraph_columns() {
+        let x = vec![1.0, 2.0, 3.0, 4.0];
+        assert_eq!(truncate_conic_solution(&x, 2), &[1.0, 2.0]);
+    }
+
+    /// `x` shorter than `n` violates the invariant `truncate_conic_solution`'s
+    /// callers must uphold (either `solve_socp`'s `x`, which is always >= n,
+    /// or a `solve_misocp` result already checked non-empty). Must panic --
+    /// via the leading `assert!`, unconditionally in every build profile (the
+    /// trailing `&x[..n]` slice bounds check would also panic here, but only
+    /// with the less specific "range end index" message) -- rather than
+    /// silently handing back a shorter-than-n slice the old `n.min(x.len())`
+    /// truncation would have produced. Reverting to that old defensive-
+    /// truncate pattern makes this FAIL (no panic).
+    #[test]
+    #[should_panic(expected = "conic solve returned x of length 2 < model n=3")]
+    fn panics_when_shorter_than_n() {
+        let x = vec![1.0, 2.0];
+        let _ = truncate_conic_solution(&x, 3);
+    }
+}
+
 impl Model {
     #[allow(clippy::too_many_arguments)]
     fn solve_qcqp_internal(
@@ -1096,15 +1205,6 @@ impl Model {
                 _ => false,
             }
         };
-        let raw_of = |x: &[f64]| -> f64 {
-            let xn = &x[..n.min(x.len())];
-            let mut raw = qp.q0.iter().zip(xn).map(|(a, b)| a * b).sum::<f64>();
-            if let Some(p0) = &qp.p0 {
-                let px = p0.mat_vec_mul(xn).unwrap_or_else(|_| vec![0.0; n]);
-                raw += 0.5 * xn.iter().zip(&px).map(|(a, b)| a * b).sum::<f64>();
-            }
-            raw
-        };
         let (status, raw_obj, solution, route) = if self.soc_constraints.is_empty() {
             if integer_vars.is_empty() {
                 // Continuous QCQP: try the convex SOCP bridge, and defer to the
@@ -1161,8 +1261,8 @@ impl Model {
             self.append_soc(&mut conic, nvar, n)?;
             if integer_vars.is_empty() {
                 let r = otspot_core::conic::solve_socp(&conic, &opts);
-                let sol = r.x[..n.min(r.x.len())].to_vec();
-                let raw = raw_of(&r.x);
+                let sol = truncate_conic_solution(&r.x, n).to_vec();
+                let raw = qcqp_model_raw_objective(&qp, &r.x);
                 (r.status, raw, sol, SolveRoute::ConicQcqpConvex)
             } else {
                 self.ensure_finite_integer_bounds(&integer_vars, &bounds)?;
@@ -1178,12 +1278,12 @@ impl Model {
                 let sol = if r.x.is_empty() {
                     Vec::new()
                 } else {
-                    r.x[..n.min(r.x.len())].to_vec()
+                    truncate_conic_solution(&r.x, n).to_vec()
                 };
                 let raw = if r.x.is_empty() {
                     f64::NAN
                 } else {
-                    raw_of(&r.x)
+                    qcqp_model_raw_objective(&qp, &r.x)
                 };
                 (r.status, raw, sol, SolveRoute::ConicQcqpConvex)
             }

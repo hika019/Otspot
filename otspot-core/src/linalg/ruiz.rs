@@ -56,11 +56,27 @@ impl RuizScaler {
                         }
                     }
                 }
-                // b を行ノルムに追加
-                for i in 0..m.min(b.len()) {
-                    let b_val = (self.e[i] * b[i]).abs();
-                    if b_val > row_norms[i] {
-                        row_norms[i] = b_val;
+                // b を行ノルムに追加。`b` は opt-out (空スライス = rhs を
+                // スケーリングに含めない) か、フル長 (`b.len() == m`) のどちらか
+                // という契約 -- 全 production 呼び出し元 (`finalize.rs`,
+                // `qp/ipm_core/scaling.rs`) は現状すべて `&[]` を渡し opt-out
+                // している。中途半端な長さの `b` を `m.min(b.len())` で黙って
+                // 切り詰めると一部の行だけ rhs を無視してスケーリング品質が
+                // 静かに劣化するので、opt-out でも フル長でもない長さは
+                // 呼び出し側の不変条件違反として panic させる。
+                if !b.is_empty() {
+                    assert_eq!(
+                        b.len(),
+                        m,
+                        "compute_with_rhs: b.len()={} must be 0 (opt-out of \
+                         rhs-aware scaling) or == a.nrows()={m}",
+                        b.len()
+                    );
+                    for i in 0..m {
+                        let b_val = (self.e[i] * b[i]).abs();
+                        if b_val > row_norms[i] {
+                            row_norms[i] = b_val;
+                        }
                     }
                 }
                 for i in 0..m {
