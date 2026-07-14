@@ -398,15 +398,30 @@ fn unscale_q_diagonal(result: &mut SolverResult, col_scales: &[f64], orig_proble
     }
     // y は scaling 不変。bound_duals layout = [y_lb 群; y_ub 群]。
     if !result.bound_duals.is_empty() {
+        let expected_bound_duals = orig_problem
+            .bounds
+            .iter()
+            .filter(|&&(lb, _)| lb.is_finite())
+            .count()
+            + orig_problem
+                .bounds
+                .iter()
+                .filter(|&&(_, ub)| ub.is_finite())
+                .count();
+        assert_eq!(
+            result.bound_duals.len(),
+            expected_bound_duals,
+            "Q diagonal unscale requires one bound dual per finite bound"
+        );
         let mut idx = 0_usize;
         for (j, &(lb, _)) in orig_problem.bounds.iter().enumerate() {
-            if lb.is_finite() && idx < result.bound_duals.len() {
+            if lb.is_finite() {
                 result.bound_duals[idx] /= col_scales[j];
                 idx += 1;
             }
         }
         for (j, &(_, ub)) in orig_problem.bounds.iter().enumerate() {
-            if ub.is_finite() && idx < result.bound_duals.len() {
+            if ub.is_finite() {
                 result.bound_duals[idx] /= col_scales[j];
                 idx += 1;
             }
@@ -816,6 +831,26 @@ mod tests {
             postsolve_krylov_ir_skipped: false,
             timing: None,
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "Q diagonal unscale requires one bound dual per finite bound")]
+    fn unscale_q_diagonal_rejects_short_bound_duals() {
+        let qp = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, 1.0)],
+            vec![],
+        )
+        .unwrap();
+        let mut result = SolverResult {
+            solution: vec![0.0],
+            bound_duals: vec![0.0], // box variable requires lb and ub slots
+            ..Default::default()
+        };
+        unscale_q_diagonal(&mut result, &[2.0], &qp);
     }
 
     fn runner_infeasible_then_fallback_suboptimal(

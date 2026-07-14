@@ -192,11 +192,18 @@ impl Model {
     /// Return the name of a variable as given to [`add_var`](Self::add_var).
     ///
     /// # Panics
-    /// Panics if `var.index` is out of range. Passing a `Variable` from a
-    /// different model is **unchecked** and may index into unrelated data.
-    /// Use [`try_var_name`](Self::try_var_name) for a checked variant.
+    /// Panics if `var` belongs to a different model or if `var.index` is out of
+    /// range. Use [`try_var_name`](Self::try_var_name) for a non-panicking
+    /// checked variant.
     pub fn var_name(&self, var: Variable) -> &str {
-        &self.variables[var.index].name
+        assert_eq!(
+            var.model_id, self.model_id,
+            "variable belongs to a different model"
+        );
+        self.variables
+            .get(var.index)
+            .map(|v| v.name.as_str())
+            .expect("variable index out of range")
     }
 
     /// Return the name of a variable, returning an error instead of panicking.
@@ -533,16 +540,24 @@ impl Model {
 
         // SolverResult の dual/rc/slack は extract_dual_info によって
         // 元の制約空間 (Eq/Ge/Le) と変数空間 (bounds 込み) で復元済み。
+        let orient_dual_like = |mut values: Vec<f64>| {
+            if self.sense == OptimizationSense::Maximize {
+                for v in &mut values {
+                    *v = -*v;
+                }
+            }
+            values
+        };
         let lp_extras = |sr: &otspot_core::problem::SolverResult| {
             let dual = if sr.dual_solution.is_empty() {
                 None
             } else {
-                Some(sr.dual_solution.clone())
+                Some(orient_dual_like(sr.dual_solution.clone()))
             };
             let rc = if sr.reduced_costs.is_empty() {
                 None
             } else {
-                Some(sr.reduced_costs.clone())
+                Some(orient_dual_like(sr.reduced_costs.clone()))
             };
             let slack = if sr.slack.is_empty() {
                 None
@@ -573,7 +588,7 @@ impl Model {
                 dual_solution: dual,
                 reduced_costs: rc,
                 slack,
-                bound_duals: sr.bound_duals,
+                bound_duals: orient_dual_like(sr.bound_duals),
                 stats: sr.stats,
             }
         };
@@ -687,18 +702,6 @@ impl Model {
         let qp_result = otspot_core::qp::solve_qp_with(&qp_problem, &opts);
         let qp_stats = qp_result.stats.clone();
 
-        // dual_solution: Le=そのまま / Ge=符号反転済み / Eq=μ1-μ2 折り畳み済み。
-        let fold_dual = |sol: &[f64]| -> Option<Vec<f64>> {
-            if sol.len() == num_model_constraints {
-                Some(sol.to_vec())
-            } else if !sol.is_empty() && num_model_constraints > 0 {
-                let take = num_model_constraints.min(sol.len());
-                Some(sol[..take].to_vec())
-            } else {
-                None
-            }
-        };
-
         let signed_obj = |raw: f64| -> f64 {
             let oriented = if self.sense == OptimizationSense::Maximize {
                 -raw
@@ -729,22 +732,27 @@ impl Model {
         };
 
         match qp_result.status {
-            SolveStatus::Optimal => Ok(build_ok(
-                SolveStatus::Optimal,
-                qp_result.objective,
-                qp_result.solution,
-                fold_dual(&qp_result.dual_solution),
-                qp_result.bound_duals,
-            )),
+            SolveStatus::Optimal => {
+                let dual = validate_qp_dual_len(&qp_result.dual_solution, num_model_constraints)?;
+                Ok(build_ok(
+                    SolveStatus::Optimal,
+                    qp_result.objective,
+                    qp_result.solution,
+                    dual,
+                    qp_result.bound_duals,
+                ))
+            }
             SolveStatus::MaxIterations => {
                 if qp_result.solution.is_empty() {
                     Err(ModelError::SolveError(SolveError::MaxIterations))
                 } else {
+                    let dual =
+                        validate_qp_dual_len(&qp_result.dual_solution, num_model_constraints)?;
                     Ok(build_ok(
                         SolveStatus::MaxIterations,
                         qp_result.objective,
                         qp_result.solution,
-                        fold_dual(&qp_result.dual_solution),
+                        dual,
                         qp_result.bound_duals,
                     ))
                 }
@@ -754,11 +762,13 @@ impl Model {
                 if qp_result.solution.is_empty() {
                     Err(ModelError::Timeout)
                 } else {
+                    let dual =
+                        validate_qp_dual_len(&qp_result.dual_solution, num_model_constraints)?;
                     Ok(build_ok(
                         SolveStatus::SuboptimalSolution,
                         qp_result.objective,
                         qp_result.solution,
-                        fold_dual(&qp_result.dual_solution),
+                        dual,
                         qp_result.bound_duals,
                     ))
                 }
@@ -768,13 +778,16 @@ impl Model {
             // Model API では caller が status で品質を判断する。NonconvexGlobal は global 証明済。
             status @ (SolveStatus::LocallyOptimal
             | SolveStatus::NonconvexLocal
-            | SolveStatus::NonconvexGlobal) => Ok(build_ok(
-                status,
-                qp_result.objective,
-                qp_result.solution,
-                fold_dual(&qp_result.dual_solution),
-                qp_result.bound_duals,
-            )),
+            | SolveStatus::NonconvexGlobal) => {
+                let dual = validate_qp_dual_len(&qp_result.dual_solution, num_model_constraints)?;
+                Ok(build_ok(
+                    status,
+                    qp_result.objective,
+                    qp_result.solution,
+                    dual,
+                    qp_result.bound_duals,
+                ))
+            }
             s => Err(classify_status_error(s)
                 .unwrap_or_else(|| ModelError::Internal("unhandled QP status".to_string()))),
         }
@@ -843,48 +856,45 @@ impl Model {
             oriented + self.obj_offset + self.obj_expr_constant
         };
 
-        // 整数変数成分を厳密整数に丸める (relaxation 解の 1e-6 級 noise を除去)。
-        let round_integers = |mut sol: Vec<f64>| -> Vec<f64> {
-            for &j in integer_vars {
-                if j < sol.len() {
-                    sol[j] = sol[j].round();
-                }
-            }
-            sol
-        };
-
         let mip_model_id = self.model_id;
-        let build_ok = |sr: otspot_core::problem::SolverResult| {
+        let build_ok =
+            |sr: otspot_core::problem::SolverResult| -> Result<ModelResult, ModelError> {
             let status = sr.status.clone();
-            ModelResult {
+            let solution = normalize_mip_solution(
+                sr.solution,
+                integer_vars,
+                self.variables.len(),
+                otspot_core::options::DEFAULT_INTEGER_FEAS_TOL,
+            )?;
+            Ok(ModelResult {
                 model_id: mip_model_id,
                 status: status.clone(),
                 proof: SolutionProof::from_status(&status),
                 objective_value: signed_obj(sr.objective),
-                solution: round_integers(sr.solution),
+                solution,
                 dual_solution: None,
                 reduced_costs: None,
                 slack: None,
                 bound_duals: vec![],
                 stats: sr.stats,
-            }
+            })
         };
 
         match result.status {
-            SolveStatus::Optimal => Ok(build_ok(result)),
+            SolveStatus::Optimal => build_ok(result),
             SolveStatus::Timeout => {
                 // 打ち切りでも incumbent (整数実行可能解) があれば解を返す。
                 if result.solution.is_empty() {
                     Err(ModelError::Timeout)
                 } else {
-                    Ok(build_ok(result))
+                    build_ok(result)
                 }
             }
             SolveStatus::SuboptimalSolution | SolveStatus::MaxIterations => {
                 if result.solution.is_empty() {
                     Err(ModelError::SolveError(SolveError::MaxIterations))
                 } else {
-                    Ok(build_ok(result))
+                    build_ok(result)
                 }
             }
             SolveStatus::LocallyOptimal
@@ -937,6 +947,62 @@ fn classify_status_error(status: SolveStatus) -> Option<ModelError> {
         // variant surfaces as `Err`, never a silent success / false Optimal.
         _ => None,
     }
+}
+
+fn validate_qp_dual_len(
+    sol: &[f64],
+    num_model_constraints: usize,
+) -> Result<Option<Vec<f64>>, ModelError> {
+    if sol.is_empty() {
+        return Ok(None);
+    }
+    if sol.len() == num_model_constraints {
+        return Ok(Some(sol.to_vec()));
+    }
+    Err(ModelError::Internal(format!(
+        "QP solver returned dual_solution length {}, expected {}",
+        sol.len(),
+        num_model_constraints
+    )))
+}
+
+fn normalize_mip_solution(
+    mut sol: Vec<f64>,
+    integer_vars: &[usize],
+    expected_len: usize,
+    integer_feas_tol: f64,
+) -> Result<Vec<f64>, ModelError> {
+    if sol.len() != expected_len {
+        return Err(ModelError::Internal(format!(
+            "MIP solver returned solution length {}, expected {}",
+            sol.len(),
+            expected_len
+        )));
+    }
+    for &j in integer_vars {
+        let Some(xj) = sol.get_mut(j) else {
+            return Err(ModelError::Internal(format!(
+                "MIP integer variable index {} out of range for solution length {}",
+                j,
+                sol.len()
+            )));
+        };
+        if !xj.is_finite() {
+            return Err(ModelError::Internal(format!(
+                "MIP solver returned non-finite integer solution at index {}: {}",
+                j, *xj
+            )));
+        }
+        let rounded = xj.round();
+        if (*xj - rounded).abs() > integer_feas_tol {
+            return Err(ModelError::Internal(format!(
+                "MIP solver returned non-integer value at index {}: {}",
+                j, *xj
+            )));
+        }
+        *xj = rounded;
+    }
+    Ok(sol)
 }
 
 fn validate_timeout(secs: f64) -> Result<(), ModelError> {
@@ -1231,7 +1297,10 @@ impl std::error::Error for ModelError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_status_error, Model, ModelError, SolutionProof, SolveError};
+    use super::{
+        classify_status_error, normalize_mip_solution, validate_qp_dual_len, Model, ModelError,
+        SolutionProof, SolveError,
+    };
     use crate::variable::Variable;
     use otspot_core::problem::SolveStatus;
 
@@ -1436,6 +1505,36 @@ mod tests {
             "expected obj=7, got {}",
             result.objective()
         );
+    }
+
+    #[test]
+    fn test_lp_maximize_dual_and_reduced_costs_are_oriented_to_user_problem() {
+        // max x + y  s.t. x <= 4, 0 <= y <= 0.
+        //
+        // The LP path solves the internally negated minimization problem.  The
+        // returned dual-like quantities must be mapped back to the user's
+        // maximization problem instead of leaking the internal minimization
+        // signs.  Before the fix this returned dual=-1 and rc_y=-1.
+        let mut model = Model::new("max_dual_orientation");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, 0.0);
+        model.add_constraint((x + 0.0).leq(4.0));
+        model.maximize(x + y);
+
+        let result = model.solve().unwrap();
+        assert_close(result[x], 4.0, "x");
+        assert_close(result[y], 0.0, "y");
+        assert_close(result.objective(), 4.0, "obj");
+
+        let dual = result.dual_solution.expect("LP duals should be available");
+        assert_eq!(dual.len(), 1);
+        assert_close(dual[0], 1.0, "maximize Le-row shadow price");
+
+        let rc = result
+            .reduced_costs
+            .expect("LP reduced costs should be available");
+        assert_eq!(rc.len(), 2);
+        assert_close(rc[1], 1.0, "maximize fixed-column reduced cost");
     }
 
     #[test]
@@ -1742,6 +1841,61 @@ mod tests {
                 err
             );
         }
+    }
+
+    #[test]
+    fn qp_dual_length_mismatch_is_internal_error_not_prefix_truncation() {
+        assert_eq!(
+            validate_qp_dual_len(&[], 2).unwrap(),
+            None,
+            "empty solver dual means unavailable dual"
+        );
+        assert_eq!(
+            validate_qp_dual_len(&[1.0, 2.0], 2).unwrap(),
+            Some(vec![1.0, 2.0])
+        );
+
+        let too_long = validate_qp_dual_len(&[1.0, 2.0, 3.0], 2).unwrap_err();
+        assert!(
+            matches!(too_long, ModelError::Internal(_)),
+            "unexpected dual length must surface as Internal, got {too_long:?}"
+        );
+
+        let nonempty_for_zero_rows = validate_qp_dual_len(&[1.0], 0).unwrap_err();
+        assert!(
+            matches!(nonempty_for_zero_rows, ModelError::Internal(_)),
+            "non-empty dual for zero model constraints must error, got {nonempty_for_zero_rows:?}"
+        );
+    }
+
+    #[test]
+    fn mip_solution_normalization_rejects_invalid_solver_output() {
+        let ok = normalize_mip_solution(vec![0.9999998, 2.5], &[0], 2, 1e-6).unwrap();
+        assert_eq!(ok, vec![1.0, 2.5]);
+
+        let short = normalize_mip_solution(vec![1.0], &[0], 2, 1e-6).unwrap_err();
+        assert!(
+            matches!(short, ModelError::Internal(_)),
+            "solution length mismatch must error, got {short:?}"
+        );
+
+        let bad_index = normalize_mip_solution(vec![1.0], &[1], 1, 1e-6).unwrap_err();
+        assert!(
+            matches!(bad_index, ModelError::Internal(_)),
+            "integer index outside solution must error, got {bad_index:?}"
+        );
+
+        let nonfinite = normalize_mip_solution(vec![f64::NAN], &[0], 1, 1e-6).unwrap_err();
+        assert!(
+            matches!(nonfinite, ModelError::Internal(_)),
+            "non-finite integer value must error, got {nonfinite:?}"
+        );
+
+        let fractional = normalize_mip_solution(vec![0.9], &[0], 1, 1e-6).unwrap_err();
+        assert!(
+            matches!(fractional, ModelError::Internal(_)),
+            "large fractional integer value must not be rounded away, got {fractional:?}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2076,54 +2230,35 @@ mod tests {
         }
     }
 
-    // P2-1: var_name is unchecked — cross-model behavior depends on whether the
-    // foreign Variable's index is in-range for the receiver model.
-    //
-    // Case A: index in-range → silently returns the *wrong* model's variable name.
-    // Case B: index out-of-range → panics (Rust slice bounds check).
-    //
-    // These tests document the hazard warned about in the var_name docstring:
-    // "unchecked and may index into unrelated data".
+    // P2-1: var_name must reject cross-model variables instead of reading a
+    // same-index slot from the receiver model. Returning unrelated data here
+    // hides a caller bug; panic makes the invalid value visible.
 
     #[test]
-    fn var_name_cross_model_in_range_silently_returns_wrong_data() {
+    #[should_panic(expected = "variable belongs to a different model")]
+    fn var_name_cross_model_in_range_panics() {
         // Both models have exactly one variable (index=0).
-        // model_a's var has index=0 with the same integer position as model_b's var.
-        // var_name doesn't check model_id, so it reads model_b's slot — wrong data.
         let mut model_a = Model::new("a");
         let x_a = model_a.add_var("x_in_a", 0.0, 1.0); // index=0
 
         let mut model_b = Model::new("b");
         let _y_b = model_b.add_var("y_in_b", 0.0, 1.0); // index=0
 
-        // var_name is unchecked: x_a.index=0 is in-range for model_b,
-        // so it returns model_b's variable name — NOT "x_in_a".
-        let returned = model_b.var_name(x_a);
-        assert_ne!(
-            returned, "x_in_a",
-            "unchecked: cross-model var_name returns unrelated data"
-        );
-        assert_eq!(
-            returned, "y_in_b",
-            "unchecked: returns model_b's var at the same index"
-        );
+        let _ = model_b.var_name(x_a);
     }
 
-    // Case B: cross-model var whose index is out-of-range for the receiver panics.
-    // Sentinel: using .get() in var_name instead of direct indexing would remove
-    // the panic, causing this #[should_panic] test to FAIL.
+    // Case B: same-model var whose index is out-of-range for the receiver
+    // panics with an explicit message rather than relying on a slice panic.
     #[test]
-    #[should_panic(expected = "index out of bounds")]
-    fn var_name_cross_model_out_of_range_panics() {
-        let mut model_a = Model::new("a_2var");
-        let _x0 = model_a.add_var("x0", 0.0, 1.0); // index=0
-        let x1 = model_a.add_var("x1", 0.0, 1.0); // index=1
+    #[should_panic(expected = "variable index out of range")]
+    fn var_name_same_model_out_of_range_panics() {
+        let model = Model::new("empty");
+        let forged = Variable {
+            index: 0,
+            model_id: model.model_id,
+        };
 
-        // model_b has only 1 variable (len=1). x1.index=1 is out of range → panic.
-        let mut model_b = Model::new("b_1var");
-        let _y_b = model_b.add_var("y_in_b", 0.0, 1.0);
-
-        let _ = model_b.var_name(x1);
+        let _ = model.var_name(forged);
     }
 
     // -----------------------------------------------------------------------

@@ -283,7 +283,9 @@ impl QpsParser {
             self.rhs.insert(row_name, value);
             return Ok(());
         }
-        let force_fixed = mps_field(line, 4, 12).is_empty() && !mps_field(line, 14, 22).is_empty();
+        let force_fixed = (mps_field(line, 4, 12).is_empty()
+            && !mps_field(line, 14, 22).is_empty())
+            || qps_fixed_pair_layout(line);
         let is_free = if force_fixed {
             false
         } else {
@@ -337,7 +339,21 @@ impl QpsParser {
             self.ranges.insert(row_name, value);
             return Ok(());
         }
-        let is_free = {
+        let force_fixed = (mps_field(line, 4, 12).is_empty()
+            && !mps_field(line, 14, 22).is_empty())
+            || qps_fixed_pair_layout(line);
+        if !force_fixed && qps_free_pairs_have_odd_trailing_name(&parts) {
+            return Err(QpsError::ParseError {
+                line: line_num,
+                message: format!(
+                    "Odd trailing token '{}' in RANGES (row name without a value)",
+                    parts[parts.len() - 1]
+                ),
+            });
+        }
+        let is_free = if force_fixed {
+            false
+        } else {
             let mut ok = true;
             let mut vi = 2usize;
             while vi < parts.len() {
@@ -387,46 +403,81 @@ impl QpsParser {
                 });
             }
         };
-        if parts.len() >= 5 {
-            let col_name = mps_field(line, 14, 22).to_string();
-            let value = {
-                let v = mps_field(line, 24, 36);
-                if v.is_empty() {
-                    None
-                } else {
-                    let parsed = v.parse::<f64>().ok();
-                    if let Some(val) = parsed {
-                        if !val.is_finite() {
-                            return Err(QpsError::ParseError {
-                                line: line_num,
-                                message: format!("Non-finite BOUNDS value for col='{}'", col_name),
-                            });
-                        }
-                    }
-                    parsed
-                }
-            };
-            self.bounds.push((bound_type, col_name, value));
-            return Ok(());
-        }
         let value_taking = !matches!(
             bound_type,
             BoundType::FR | BoundType::MI | BoundType::PL | BoundType::BV
         );
+        let fixed_col_name = mps_field(line, 14, 22).to_string();
+        // Fixed-format MPS field values may contain internal spaces (e.g. FORPLAN
+        // column "A   22 1" / bound set "BND-1"), so `split_whitespace` over-splits
+        // spaced names into extra tokens. Use fixed-layout separators as evidence
+        // (the two spaces between fields 2 and 3, and when present fields 3 and 4)
+        // rather than token count alone; otherwise malformed free-format records
+        // like `BV BND x1 extra` can be rebound to arbitrary bytes 14..22.
+        let looks_fixed_bounds = qps_fixed_bounds_layout(line, value_taking);
+        if looks_fixed_bounds {
+            let col_name = fixed_col_name;
+            let raw = mps_field(line, 24, 36);
+            let value = if raw.is_empty() {
+                None
+            } else {
+                let parsed = raw.parse::<f64>().map_err(|_| QpsError::ParseError {
+                    line: line_num,
+                    message: format!("Invalid BOUNDS value for col='{}': {}", col_name, raw),
+                })?;
+                if !parsed.is_finite() {
+                    return Err(QpsError::ParseError {
+                        line: line_num,
+                        message: format!("Non-finite BOUNDS value for col='{}'", col_name),
+                    });
+                }
+                Some(parsed)
+            };
+            if value_taking && value.is_none() {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: format!(
+                        "BOUNDS type {} requires a value for col='{}'",
+                        parts[0], col_name
+                    ),
+                });
+            }
+            self.bounds.push((bound_type, col_name, value));
+            return Ok(());
+        }
+        if !value_taking && parts.len() > 3 {
+            return Err(QpsError::ParseError {
+                line: line_num,
+                message: format!(
+                    "BOUNDS type {} does not take a value for col='{}'",
+                    parts[0], parts[2]
+                ),
+            });
+        }
+        if value_taking && parts.len() > 4 {
+            return Err(QpsError::ParseError {
+                line: line_num,
+                message: format!(
+                    "BOUNDS type {} takes exactly one value for col='{}'",
+                    parts[0], parts[2]
+                ),
+            });
+        }
         let (col_name, value) = if !value_taking {
             (parts[2].to_string(), None)
         } else if parts.len() >= 4 {
             let raw = parts[3];
-            let parsed = raw.parse::<f64>().ok();
-            if let Some(val) = parsed {
-                if !val.is_finite() {
-                    return Err(QpsError::ParseError {
-                        line: line_num,
-                        message: format!("Non-finite BOUNDS value for col='{}'", parts[2]),
-                    });
-                }
+            let parsed = raw.parse::<f64>().map_err(|_| QpsError::ParseError {
+                line: line_num,
+                message: format!("Invalid BOUNDS value for col='{}': {}", parts[2], raw),
+            })?;
+            if !parsed.is_finite() {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: format!("Non-finite BOUNDS value for col='{}'", parts[2]),
+                });
             }
-            (parts[2].to_string(), parsed)
+            (parts[2].to_string(), Some(parsed))
         } else if let Ok(v) = parts[2].parse::<f64>() {
             if !v.is_finite() {
                 return Err(QpsError::ParseError {
@@ -761,6 +812,67 @@ impl QpsParser {
         })?;
         prob.obj_offset = obj_offset;
         Ok(prob)
+    }
+}
+
+fn qps_free_pairs_have_odd_trailing_name(parts: &[&str]) -> bool {
+    parts.len() > 2
+        && parts.len().is_multiple_of(2)
+        && (2..parts.len() - 1)
+            .step_by(2)
+            .all(|i| parts[i].parse::<f64>().is_ok())
+}
+
+fn ascii_ws_at(line: &str, idx: usize) -> bool {
+    line.as_bytes().get(idx).is_some_and(u8::is_ascii_whitespace)
+}
+
+fn ascii_ws_range(line: &str, start: usize, end: usize) -> bool {
+    (start..end).all(|i| ascii_ws_at(line, i))
+}
+
+fn has_internal_whitespace(s: &str) -> bool {
+    let trimmed = s.trim();
+    !trimmed.is_empty() && trimmed.chars().any(char::is_whitespace)
+}
+
+fn qps_fixed_pair_layout(line: &str) -> bool {
+    let first_pair_ok = !mps_field(line, 14, 22).is_empty()
+        && mps_field(line, 24, 36).parse::<f64>().is_ok()
+        && ascii_ws_range(line, 12, 14)
+        && ascii_ws_range(line, 22, 24);
+    if !first_pair_ok {
+        return false;
+    }
+    let set_spaced = has_internal_whitespace(mps_field(line, 4, 12));
+    let row1_spaced = has_internal_whitespace(mps_field(line, 14, 22));
+    let row2_spaced = has_internal_whitespace(mps_field(line, 39, 47))
+        && mps_field(line, 49, 61).parse::<f64>().is_ok()
+        && ascii_ws_range(line, 47, 49);
+    set_spaced || row1_spaced || row2_spaced
+}
+
+fn qps_fixed_bounds_layout(line: &str, value_taking: bool) -> bool {
+    // Every genuine fixed record has the type at cols 1..3, bound-set at 4..12,
+    // column at 14..22, and (for value-taking types) the value at 24..36, with
+    // whitespace field separators. The distinguishing evidence against a
+    // free-format line that merely has extra spaces is either a value that sits
+    // exactly in the fixed value field (value-taking) or genuine internal
+    // whitespace inside a fixed name field that split_whitespace over-fragmented
+    // (value-less spaced names).
+    if mps_field(line, 1, 3).is_empty()
+        || mps_field(line, 4, 12).is_empty()
+        || mps_field(line, 14, 22).is_empty()
+        || !ascii_ws_range(line, 12, 14)
+    {
+        return false;
+    }
+    if value_taking {
+        mps_field(line, 24, 36).parse::<f64>().is_ok() && ascii_ws_range(line, 22, 24)
+    } else {
+        mps_field(line, 24, 36).is_empty()
+            && (has_internal_whitespace(mps_field(line, 4, 12))
+                || has_internal_whitespace(mps_field(line, 14, 22)))
     }
 }
 

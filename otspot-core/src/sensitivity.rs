@@ -124,6 +124,9 @@ pub fn compute_sensitivity(
     let n_total = sf.n_total;
     let m_orig = problem.num_constraints;
     let n_orig = problem.num_vars;
+    if result.solution.len() != n_orig || result.reduced_costs.len() != n_orig {
+        return None;
+    }
 
     // The default bounded path returns a basis over BoundedStandardForm rows;
     // translate it into this UB-row-expanded form (no-op when already legacy).
@@ -305,8 +308,8 @@ pub fn compute_sensitivity(
                 // directions.
                 (0.0, 0.0)
             } else {
-                let rc = result.reduced_costs.get(j).copied().unwrap_or(0.0);
-                let x_j = result.solution.get(j).copied().unwrap_or(lb);
+            let rc = result.reduced_costs[j];
+            let x_j = result.solution[j];
                 let lb_dist = (x_j - lb).abs();
                 let ub_dist = if ub.is_finite() {
                     (ub - x_j).abs()
@@ -889,5 +892,27 @@ mod tests {
             .expect("basic-at-upper degenerate basis must still yield sensitivity");
         assert_eq!(sens.rhs_ranges.len(), 2);
         assert_eq!(sens.obj_ranges.len(), 2);
+    }
+
+    #[test]
+    fn sensitivity_rejects_malformed_solution_or_reduced_costs() {
+        let lp = make_2x2_lp();
+        let result = solve_no_presolve(&lp);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(compute_sensitivity(&lp, &result).is_some());
+
+        let mut short_solution = result.clone();
+        short_solution.solution.pop();
+        assert!(
+            compute_sensitivity(&lp, &short_solution).is_none(),
+            "short solution must not be padded while computing sensitivity ranges"
+        );
+
+        let mut short_rc = result;
+        short_rc.reduced_costs.pop();
+        assert!(
+            compute_sensitivity(&lp, &short_rc).is_none(),
+            "short reduced_costs must not be treated as zero"
+        );
     }
 }

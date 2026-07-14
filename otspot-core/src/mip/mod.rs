@@ -1379,9 +1379,13 @@ fn finalize_no_incumbent(
 pub(crate) fn integer_mask(num_vars: usize, integer_vars: &[usize]) -> Vec<bool> {
     let mut mask = vec![false; num_vars];
     for &j in integer_vars {
-        if j < num_vars {
-            mask[j] = true;
-        }
+        assert!(
+            j < num_vars,
+            "integer variable index {} out of range for {} variables",
+            j,
+            num_vars
+        );
+        mask[j] = true;
     }
     mask
 }
@@ -1401,9 +1405,13 @@ fn nonconvex_result() -> SolverResult {
 /// Round the integer components of `sol` to exact integers (relaxation noise removal).
 fn round_integers(mut sol: Vec<f64>, integer_vars: &[usize]) -> Vec<f64> {
     for &j in integer_vars {
-        if j < sol.len() {
-            sol[j] = sol[j].round();
-        }
+        assert!(
+            j < sol.len(),
+            "integer variable index {} out of range for solution length {}",
+            j,
+            sol.len()
+        );
+        sol[j] = sol[j].round();
     }
     sol
 }
@@ -1461,6 +1469,16 @@ pub(crate) fn reduced_cost_fixing(
     if lp_result.reduced_costs.is_empty() || lp_result.solution.is_empty() {
         return 0;
     }
+    assert_eq!(
+        lp_result.reduced_costs.len(),
+        node_bounds.len(),
+        "reduced-cost fixing requires one reduced cost per variable"
+    );
+    assert_eq!(
+        lp_result.solution.len(),
+        node_bounds.len(),
+        "reduced-cost fixing requires one solution value per variable"
+    );
     let gap = incumbent_obj - lp_result.objective;
     if gap <= 0.0 {
         return 0;
@@ -1469,9 +1487,12 @@ pub(crate) fn reduced_cost_fixing(
     let x = &lp_result.solution;
     let mut count = 0usize;
     for &j in integer_vars {
-        if j >= node_bounds.len() || j >= rc.len() || j >= x.len() {
-            continue;
-        }
+        assert!(
+            j < node_bounds.len(),
+            "integer variable index {} out of range for {} variables",
+            j,
+            node_bounds.len()
+        );
         let (lb, ub) = node_bounds[j];
         if (lb - ub).abs() < BOUND_AT_TOL {
             continue; // already fixed

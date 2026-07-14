@@ -4,6 +4,20 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-14
+
+v0.7.0 向けのパッチリリース相当。公開APIの型・シグネチャ変更なし。
+
+- Model API: LP 最大化で `dual_solution` / `reduced_costs` が内部最小化の符号のまま返る問題を修正
+- Model API: `var_name()` に別モデルの変数や範囲外 index が渡された場合、誤った名前を返さず明示的に panic するよう修正
+- Model API: QP 双対ベクトル長や MIP 解ベクトルの不整合を prefix 切り詰め・丸めで隠さずエラー化
+- IO: MPS/QPS の RHS/RANGES 値ペア末尾欠落や BOUNDS の不正数値をエラー化しつつ、FORPLAN など固定幅MPSの空白入り名前は正しく受理
+- IO: QPS の固定幅/自由形式の判定を列整合ベースに厳密化し、空白入りの列名・bound-set 名・数値を含む行名（例 `A   22 1`, `B ND`, `C 1`）を BOUNDS/RHS/RANGES で正しく復元しつつ、自由形式の余分トークンは誤検出せず拒否（RHS/RANGES の第2ペアや空白入り set-name も含む）
+- Core: LP 証明、postsolve、感度分析、MIP カット生成、reduced-cost fixing、QP bound dual / duality gap で欠損ベクトルを 0 埋め・skip せず拒否
+- Core: キャンセル済み QP で空解を KKT 評価に渡して panic する経路を修正
+- Core: presolve 済み LP のキャンセル/Timeout で双対が空でも `Timeout` を保持し、`NumericalError` に誤変換しない
+- Dependencies: `crossbeam-epoch` を 0.9.20 に更新し、RUSTSEC-2026-0204 を解消
+
 ## [0.7.0] - 2026-06-29
 
 MIP のカット・分岐強化、LP 感度分析の追加、QP/LP の正当性修正。

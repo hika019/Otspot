@@ -4,7 +4,7 @@
 //! `QpPostsolveStack` を逆順（LIFO）に適用する。
 
 use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
-use crate::problem::SolverResult;
+use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::QpProblem;
 use crate::tolerances::DROP_TOL;
 
@@ -39,9 +39,10 @@ pub fn postsolve_qp(
 
     for (j, &maybe_jj) in presolve_result.col_map.iter().enumerate() {
         if let Some(jj) = maybe_jj {
-            if jj < reduced_sol.solution.len() {
-                solution[j] = reduced_sol.solution[jj];
+            if jj >= reduced_sol.solution.len() {
+                return malformed_postsolve_result();
             }
+            solution[j] = reduced_sol.solution[jj];
         }
     }
 
@@ -68,11 +69,12 @@ pub fn postsolve_qp(
             // LargeCoeffRowScale の双対逆変換:
             // スケール σ_i で縮約後制約を A[i]*σ_i, b[i]*σ_i と変換したため、
             // y_orig[i] = σ_i * y_scaled[i]
-            QpPostsolveStep::LargeCoeffRowScale { row_scales } => {
+    QpPostsolveStep::LargeCoeffRowScale { row_scales } => {
+                if !reduced_dual.is_empty() && row_scales.len() != reduced_dual.len() {
+                    return malformed_postsolve_result();
+                }
                 for (i, y) in reduced_dual.iter_mut().enumerate() {
-                    if i < row_scales.len() {
-                        *y *= row_scales[i];
-                    }
+                    *y *= row_scales[i];
                 }
             }
         }
@@ -82,9 +84,10 @@ pub fn postsolve_qp(
     let mut dual_solution = vec![0.0f64; m];
     for (i, &maybe_ii) in presolve_result.row_map.iter().enumerate() {
         if let Some(ii) = maybe_ii {
-            if ii < reduced_dual.len() {
-                dual_solution[i] = reduced_dual[ii];
+            if ii >= reduced_dual.len() {
+                return malformed_postsolve_result();
             }
+            dual_solution[i] = reduced_dual[ii];
         }
     }
 
@@ -99,9 +102,10 @@ pub fn postsolve_qp(
         let mut rc = vec![0.0f64; n];
         for (j, &maybe_jj) in presolve_result.col_map.iter().enumerate() {
             if let Some(jj) = maybe_jj {
-                if jj < reduced_sol.reduced_costs.len() {
-                    rc[j] = reduced_sol.reduced_costs[jj];
+                if jj >= reduced_sol.reduced_costs.len() {
+                    return malformed_postsolve_result();
                 }
+                rc[j] = reduced_sol.reduced_costs[jj];
             }
         }
         rc
@@ -132,6 +136,66 @@ pub fn postsolve_qp(
         stats: reduced_sol.stats.clone(),
         bound_gap_cert: None,
         opt_cert: None,
+    }
+}
+
+fn malformed_postsolve_result() -> SolverResult {
+    SolverResult {
+        status: SolveStatus::NumericalError,
+        objective: f64::INFINITY,
+        solution: vec![],
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use crate::problem::ConstraintType;
+    use crate::qp::QpProblem;
+    use crate::sparse::CscMatrix;
+
+    fn two_var_qp() -> QpProblem {
+        QpProblem::new(
+            CscMatrix::new(2, 2),
+            vec![0.0, 0.0],
+            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap(),
+            vec![1.0],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn postsolve_qp_rejects_short_reduced_solution() {
+        let qp = two_var_qp();
+        let pres = QpPresolveResult::no_reduction(&qp);
+        let reduced = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0],
+            dual_solution: vec![0.0],
+            ..Default::default()
+        };
+        let out = postsolve_qp(&pres, &reduced);
+        assert_eq!(out.status, SolveStatus::NumericalError);
+        assert!(out.solution.is_empty());
+    }
+
+    #[test]
+    fn postsolve_qp_rejects_short_reduced_costs() {
+        let qp = two_var_qp();
+        let pres = QpPresolveResult::no_reduction(&qp);
+        let reduced = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0, 0.0],
+            dual_solution: vec![0.0],
+            reduced_costs: vec![0.0],
+            ..Default::default()
+        };
+        let out = postsolve_qp(&pres, &reduced);
+        assert_eq!(out.status, SolveStatus::NumericalError);
+        assert!(out.solution.is_empty());
     }
 }
 

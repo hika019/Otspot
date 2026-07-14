@@ -153,6 +153,25 @@ ENDATA
     }
 
     #[test]
+    fn test_rhs_odd_trailing_token_is_error() {
+        let mps = r"NAME odd_rhs
+ROWS
+ N obj
+ L c1
+COLUMNS
+    x1 obj 1.0 c1 1.0
+RHS
+    rhs c1 10.0 c2
+ENDATA
+";
+        let err = parse_mps(mps).unwrap_err();
+        assert!(
+            err.to_string().contains("Odd trailing token"),
+            "odd RHS token must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
     fn test_parse_bounds_lo_up() {
         let mps = r"NAME bounds1
 ROWS

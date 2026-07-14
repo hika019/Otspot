@@ -11,6 +11,9 @@ pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult
     if result.solution.len() != n {
         return f64::INFINITY;
     }
+    if problem.a.nrows > 0 && result.dual_solution.len() != problem.a.nrows {
+        return f64::INFINITY;
+    }
     let x = &result.solution;
     let qx = match problem.q.mat_vec_mul(x) {
         Ok(v) => v,
@@ -56,11 +59,17 @@ pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult
                 ub_idx += 1;
             }
         } else {
-            if lb_finite && lb_idx < result.bound_duals.len() {
+            if lb_finite {
+                if lb_idx >= result.bound_duals.len() {
+                    return f64::INFINITY;
+                }
                 bnd_term += lb * result.bound_duals[lb_idx];
                 lb_idx += 1;
             }
-            if ub_finite && ub_idx < result.bound_duals.len() {
+            if ub_finite {
+                if ub_idx >= result.bound_duals.len() {
+                    return f64::INFINITY;
+                }
                 bnd_term -= ub * result.bound_duals[ub_idx];
                 ub_idx += 1;
             }
@@ -73,5 +82,61 @@ pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult
         gap_abs / denom
     } else {
         f64::INFINITY
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::problem::ConstraintType;
+    use crate::sparse::CscMatrix;
+
+    fn one_var_box_qp() -> QpProblem {
+        QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, 1.0)],
+            vec![],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn duality_gap_rejects_short_bound_duals() {
+        let qp = one_var_box_qp();
+        let r = SolverResult {
+            solution: vec![0.0],
+            bound_duals: vec![0.0], // box variable needs lb and ub slots
+            ..Default::default()
+        };
+        assert!(
+            compute_duality_gap_rel(&qp, &r).is_infinite(),
+            "missing bound-dual slot must not be ignored in duality gap"
+        );
+    }
+
+    #[test]
+    fn duality_gap_rejects_missing_row_dual() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let qp = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            a,
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        let r = SolverResult {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            ..Default::default()
+        };
+        assert!(
+            compute_duality_gap_rel(&qp, &r).is_infinite(),
+            "missing row dual must not be treated as zero"
+        );
     }
 }

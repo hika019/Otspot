@@ -262,6 +262,11 @@ fn generate_round(
     basis: &[usize],
     kind: CutKind,
 ) -> Vec<CutRow> {
+    assert_eq!(
+        x_star.len(),
+        lp.num_vars,
+        "cut separation requires one LP value per variable"
+    );
     let sf = build_standard_form(lp);
     if basis.len() != sf.m {
         return Vec::new();
@@ -464,6 +469,11 @@ fn column_dot(a: &CscMatrix, j: usize, rho: &[f64]) -> f64 {
 }
 
 fn finalize_cut(g: Vec<f64>, rhs: f64, x_star: &[f64], frac_tol: f64) -> Option<CutRow> {
+    assert_eq!(
+        g.len(),
+        x_star.len(),
+        "cut violation evaluation requires matching cut and LP solution dimensions"
+    );
     if !rhs.is_finite() || g.iter().any(|v| !v.is_finite()) {
         return None;
     }
@@ -724,6 +734,11 @@ fn generate_cover_cuts(
     integer_mask: &[bool],
     x_star: &[f64],
 ) -> Vec<CutRow> {
+    assert_eq!(
+        x_star.len(),
+        lp.num_vars,
+        "cover separation requires one LP value per variable"
+    );
     let frac_tol = feas_rel_tol();
     let rows = row_lists(&lp.a, lp.num_constraints);
     let mut cuts = Vec::new();
@@ -807,6 +822,11 @@ fn generate_clique_cuts(
     integer_mask: &[bool],
     x_star: &[f64],
 ) -> Vec<CutRow> {
+    assert_eq!(
+        x_star.len(),
+        lp.num_vars,
+        "clique separation requires one LP value per variable"
+    );
     let frac_tol = feas_rel_tol();
     let rows = row_lists(&lp.a, lp.num_constraints);
     let n = lp.num_vars;
@@ -862,7 +882,7 @@ fn generate_clique_cuts(
         if !is_binary(seed, integer_mask, &lp.bounds) {
             continue;
         }
-        let x_seed = if seed < x_star.len() { x_star[seed] } else { continue };
+        let x_seed = x_star[seed];
         if x_seed <= frac_tol {
             continue; // seed is at zero, no incentive to include
         }
@@ -875,8 +895,8 @@ fn generate_clique_cuts(
         // Candidate: neighbours of seed, sorted by x_star descending (greedy).
         let mut candidates: Vec<usize> = conflicts[seed].clone();
         candidates.sort_by(|&a, &b| {
-            let xa = if a < x_star.len() { x_star[a] } else { 0.0 };
-            let xb = if b < x_star.len() { x_star[b] } else { 0.0 };
+            let xa = x_star[a];
+            let xb = x_star[b];
             xb.total_cmp(&xa)
         });
         for cand in candidates {
@@ -931,6 +951,11 @@ fn generate_implied_bound_cuts(
     integer_mask: &[bool],
     x_star: &[f64],
 ) -> Vec<CutRow> {
+    assert_eq!(
+        x_star.len(),
+        lp.num_vars,
+        "implied-bound separation requires one LP value per variable"
+    );
     use crate::tolerances::INT_ROUND_TOL;
     let frac_tol = feas_rel_tol();
     let rows = row_lists(&lp.a, lp.num_constraints);
