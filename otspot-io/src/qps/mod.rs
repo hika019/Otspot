@@ -684,6 +684,70 @@ ENDATA
         assert!((prob.b[0] - 10.0).abs() < 1e-12, "original RHS preserved, got {:?}", prob.b);
     }
 
+    #[test]
+    fn test_qps_rhs_fixed_format_second_pair_spaced_row_name() {
+        fn put(line: &mut Vec<u8>, at: usize, s: &str) {
+            if line.len() < at + s.len() {
+                line.resize(at + s.len(), b' ');
+            }
+            line[at..at + s.len()].copy_from_slice(s.as_bytes());
+        }
+        let mut row0 = vec![b' '; 1];
+        put(&mut row0, 1, "L");
+        put(&mut row0, 4, "R0");
+        let mut row1 = vec![b' '; 1];
+        put(&mut row1, 1, "L");
+        put(&mut row1, 4, "C 1");
+        let mut col = vec![b' '; 4];
+        put(&mut col, 4, "X1");
+        put(&mut col, 14, "obj");
+        put(&mut col, 24, "1.0");
+        let mut rhs = vec![b' '; 4];
+        put(&mut rhs, 4, "rhs");
+        put(&mut rhs, 14, "R0");
+        put(&mut rhs, 24, "1.0");
+        put(&mut rhs, 39, "C 1");
+        put(&mut rhs, 49, "10.0");
+        let qps = format!(
+            "NAME          FIX2ND\nROWS\n N  obj\n{}\n{}\nCOLUMNS\n{}\nRHS\n{}\nENDATA\n",
+            String::from_utf8(row0).unwrap(),
+            String::from_utf8(row1).unwrap(),
+            String::from_utf8(col).unwrap(),
+            String::from_utf8(rhs).unwrap(),
+        );
+        let prob = parse_qps_str(&qps).expect("fixed RHS second pair with spaced row must parse");
+        assert_eq!(prob.b, vec![1.0, 10.0]);
+    }
+
+    #[test]
+    fn test_qps_rhs_fixed_format_spaced_set_name_numeric_row() {
+        fn put(line: &mut Vec<u8>, at: usize, s: &str) {
+            if line.len() < at + s.len() {
+                line.resize(at + s.len(), b' ');
+            }
+            line[at..at + s.len()].copy_from_slice(s.as_bytes());
+        }
+        let mut row = vec![b' '; 1];
+        put(&mut row, 1, "L");
+        put(&mut row, 4, "1");
+        let mut col = vec![b' '; 4];
+        put(&mut col, 4, "X1");
+        put(&mut col, 14, "obj");
+        put(&mut col, 24, "1.0");
+        let mut rhs = vec![b' '; 4];
+        put(&mut rhs, 4, "R HS");
+        put(&mut rhs, 14, "1");
+        put(&mut rhs, 24, "10.0");
+        let qps = format!(
+            "NAME          FIXSET\nROWS\n N  obj\n{}\nCOLUMNS\n{}\nRHS\n{}\nENDATA\n",
+            String::from_utf8(row).unwrap(),
+            String::from_utf8(col).unwrap(),
+            String::from_utf8(rhs).unwrap(),
+        );
+        let prob = parse_qps_str(&qps).expect("fixed RHS with spaced set name must parse");
+        assert_eq!(prob.b, vec![10.0]);
+    }
+
     /// Duplicate (col, row) entries in COLUMNS must accumulate (sum), not error.
     /// QPS inherits MPS spec: repeated entries are summed via CscMatrix triplet merge.
     #[test]

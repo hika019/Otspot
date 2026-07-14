@@ -837,10 +837,19 @@ fn has_internal_whitespace(s: &str) -> bool {
 }
 
 fn qps_fixed_pair_layout(line: &str) -> bool {
-    has_internal_whitespace(mps_field(line, 14, 22))
+    let first_pair_ok = !mps_field(line, 14, 22).is_empty()
         && mps_field(line, 24, 36).parse::<f64>().is_ok()
         && ascii_ws_range(line, 12, 14)
-        && ascii_ws_range(line, 22, 24)
+        && ascii_ws_range(line, 22, 24);
+    if !first_pair_ok {
+        return false;
+    }
+    let set_spaced = has_internal_whitespace(mps_field(line, 4, 12));
+    let row1_spaced = has_internal_whitespace(mps_field(line, 14, 22));
+    let row2_spaced = has_internal_whitespace(mps_field(line, 39, 47))
+        && mps_field(line, 49, 61).parse::<f64>().is_ok()
+        && ascii_ws_range(line, 47, 49);
+    set_spaced || row1_spaced || row2_spaced
 }
 
 fn qps_fixed_bounds_layout(line: &str, value_taking: bool) -> bool {
