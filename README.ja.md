@@ -117,16 +117,47 @@ let result = solve(&prob);
 | 実行可能 LP | Netlib | 109 | 最適解 109 | 最適解 108、SuboptimalSolution 1 |
 | 凸 QP | Maros–Mészáros | 138 | 最適解 121、SuboptimalSolution 12、OBJ_MISMATCH 1、参照値なし 4 | 最適解 93、SuboptimalSolution 42、TIMEOUT 1、参照値なし 2 |
 | MILP | MIPLIB 2017 small | 20 | 最適解 5、TIMEOUT 15、ERROR 0 | 最適解 5、TIMEOUT 15、ERROR 0 |
+| SOCP | Mittelmann Large-SOCP | 18 | Optimal 4 @1000s（3600s で 6）、他 TIMEOUT、OOM 1 | n/a（1e-6 のみ） |
 | 実行不可能 LP | Netlib | 29 | 正答 29 | 正答 29 |
 | 非有界 LP | 合成 | 12 | 正答 12 | 正答 12 |
 
-**最適解** = 既知最適値と照合済み（proof-carrying KKT）。`timeout = 1000s`、`jobs = 6` で計測。
+**最適解** = 既知最適値と照合済み（proof-carrying KKT）。LP/QP/MILP 行は `timeout = 1000s`、`jobs = 6`。SOCP 行は Mittelmann ベンチに合わせ `jobs = 1`（逐次。大規模問題は 1 問あたり最大 ~18 GB RSS）で計測し、timeout は下記の SOCP 注記に従う。
 
 LP: @1e-6 は 109/109 最適解、timeout 0。@1e-8 は 108/109 最適解、timeout 0。ミスは `greenbea`（より厳しい primal 証明ゲートで SuboptimalSolution）。
 
 QP: @1e-6 は 121/138 最適解、timeout 0。ミスは SuboptimalSolution 12 件、OBJ_MISMATCH 1 件 (`LISWET7`)、公開参照値なしの検査済み 4 件。@1e-8 は 93/138 最適解、SuboptimalSolution 42 件、TIMEOUT 1 件 (`POWELL20`)、公開参照値なしの検査済み 2 件。
 
 MILP: @1e-6 / @1e-8 とも 5/20 最適解（`flugpl`、`gr4x6`、`gt2`、`khb05250`、`p0201`）。どちらも `TOTAL` 内に TIMEOUT 15 件、ERROR 0 件を計上する。`noswot` と `timtab1` は tree-cut separation の panic ではなく TIMEOUT になる。
+
+SOCP: Otspot を Hans Mittelmann の [Large Second-Order Cone benchmark](https://plato.asu.edu/ftp/socp.html)（CBLIB 18 問、2026-06-29 版）で計測する。同ページには MOSEK/ECOS/KNITRO/COPT/cuOpt の公開実行時間（timeout 1 時間）が併載されている。これは従来の恣意的な 22 問 self-baseline を置き換えるもので、下表の商用/OSS 時間は Otspot 自身の値ではなく*外部の物差し*である。**Otspot の時間はメモリ制約のある 19 GB QEMU VM（8 vCPU）での計測であり、Mittelmann の Intel i7-11700K / 64 GB ではない**。したがって絶対秒数は方向性の目安であり、`firL2Linfalph`（1.22 億 nonzeros、入力 2.76 GB）がここで 18 GB 上限に達して OOM するのは 64 GB のメモリ余裕がないためである。Otspot の `Optimal` は 1e-6 での proof-carrying KKT 収束を指す。CBLIB/Mittelmann は目的値を公表しないため、これらは商用解との数値照合はしていない。
+
+Otspot は **標準 1000s では 4/18** を解く。ベンチの 3600s 上限に延長すると `firL2L1alph`（1064s）と `firL2Linfeps`（1841s）が加わり **6/18** となる（他の timeout 問題は 3600s まで網羅的には再測していないため、真の 3600s 到達数はさらに多い可能性がある）。最も近い OSS SOCP ソルバである ECOS は 11/18 を解く。商用の MOSEK / COPT は 18 問すべてを解き、Mittelmann の公開 shifted geometric mean は 1.35 / 約 1（最速ソルバを 1 とする無次元の正規化値、彼のハードウェア。各問の生の秒数は下表）。
+
+実行時間（秒。Otspot は実測、MOSEK/ECOS/COPT は Mittelmann の公開値。`f` = そのソルバが失敗、`nnz` = 非ゼロ要素数）:
+
+| 問題 | nnz | Otspot | MOSEK | ECOS | COPT |
+|---|---:|---|---:|---:|---:|
+| chainsing-50000-1 | 0.9M | **6** | 3 | f | 3 |
+| chainsing-50000-2 | 0.75M | **8** | 4 | f | 3 |
+| chainsing-50000-3 | 0.6M | **6** | 3 | f | 2 |
+| beam7 | 15M | 481 | 17 | 206 | 18 |
+| firL2L1alph | 10M | 1064 | 6 | 202 | 5 |
+| firL2Linfeps | 19M | 1841 | 25 | 687 | 14 |
+| firL1Linfeps | 9.9M | timeout (>3600s) | 26 | 2531 | 13 |
+| firL1 | 40M | timeout (>1000s) | 16 | 1305 | 9 |
+| firL1Linfalph | 80M | timeout (>1000s) | 56 | 2847 | 23 |
+| firL2L1eps | 40M | timeout (>1000s) | 14 | 797 | 9 |
+| firL2a | 50M | timeout (>1000s) | 3 | 945 | 4 |
+| firLinf | 80M | timeout (>1000s) | 95 | 3479 | 27 |
+| wbNRL | 39M | timeout (>1000s) | 9 | 1333 | 7 |
+| dsNRL | 67M | timeout (>1000s) | 56 | f | 27 |
+| beam30 | 64M | timeout (>1000s) | 99 | 2465 | 84 |
+| db-joint-soerensen | 6M | timeout (>1000s) | 29 | f | 46 |
+| db-plate-yield-line | 1.5M | timeout (>1000s) | 6 | f | 5 |
+| firL2Linfalph | 122M | OOM (>18 GB) | 27 | f | 25 |
+| **solved** | | **6/18** | 18/18 | 11/18 | 18/18 |
+
+Otspot が勝つ点: `chainsing-50000` 3 問（5 万回転錐、約 100 万 nonzeros）を 6〜8s で解く一方、ECOS は 3 問とも失敗する（MOSEK/COPT は約 3s）。Otspot が負ける点: 大規模で密なヤコビアンを持つ `fir`/`db` 系（1000 万〜1.22 億 nonzeros）は timeout するかメモリを使い果たす—MOSEK/COPT が数秒、ECOS（解ける 11 問）が数分で片付ける規模に、Otspot の錐 IPM はまだスケールしない。Otspot は発展途上の OSS SOCP ソルバであり、構造的に疎な錐問題では競争力があるが、大規模で密な問題ではまだ及ばない。（ソルバは錐種 `F`/`L±`/`L=`/`Q`/`QR` と分枝限定による MISOCP にも対応する。`EXP` と PSD 錐は非対応として拒否する。）
 
 再現（データは gitignored、[ベンチマークデータ](#ベンチマークデータ)参照）:
 
@@ -141,6 +172,26 @@ for eps in 1e-6 1e-8; do
   bash scripts/bench_parallel.sh --data-dir data/miplib_small --eps "$eps" --jobs 6 \
        --timeout 1000 --output "/tmp/miplib_small_${eps}.txt"  # ERROR / 外部timeout がある場合は非ゼロ終了
 done
+```
+
+SOCP には専用の `bench_parallel.sh` ハーネスがまだない（同スクリプトは `.mps`/`.qps`/`.qplib` のみ対応）。`solve_cbf` example を外部 timeout で直接実行し、問題ごとに結果ファイルへ出力する。**必ず逐次実行する（jobs=1）**—大規模な `fir` 系は 1 問あたり最大 ~18 GB RSS を要するため、並列実行すると集団でメモリを使い果たし abort する。`timeout` の終了コードは直接取得する（`solve_cbf` を `grep` にパイプしてから `$?` を読むと、パイプの `$?` は grep の終了コードになり 124 の timeout を取りこぼす）:
+
+```bash
+cargo build --release --example solve_cbf
+out=/tmp/socp18; mkdir -p "$out"
+# Mittelmann Large-SOCP 18。CBLIB のダウンロード名は問題ごとに異なる（多くは
+# 2013_<name> だが beam7/beam30/chainsing-* は 2013_ 接頭辞なし）—
+# plato.asu.edu/ftp/socp.html に従って調整する。
+for n in beam7 beam30 chainsing-50000-1 chainsing-50000-2 chainsing-50000-3 \
+         db-joint-soerensen db-plate-yield-line dsNRL firL1 firL1Linfalph \
+         firL1Linfeps firL2L1alph firL2L1eps firL2Linfalph firL2Linfeps \
+         firL2a firLinf wbNRL; do
+  f="data/cblib/$n.cbf"
+  timeout 3600 ./target/release/examples/solve_cbf --eps 1e-6 "$f" > "$out/$n.csv" 2>/dev/null
+  rc=$?   # パイプなし: 124 = timeout、137/134 = OOM、0 = CSV の status を参照
+  [ "$rc" = 124 ] && echo "$n,Timeout,,,3600.0" >> "$out/$n.csv"
+done
+grep -hv '^problem,' "$out"/*.csv   # 問題ごとの status,objective,iters,time
 ```
 
 ## テスト
