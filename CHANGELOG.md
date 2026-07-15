@@ -4,6 +4,8 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-16
+
 conic/QCQP の正当性修正と SOCP IPM の収束改善、大規模 LP の presolve 性能改善、MPS/QPS パーサの形式判定の作り直し。
 
 - BREAKING: `mps::parse_mps_reader` / `mps::parse_milp_reader` / `qps::parse_qps_reader` の型境界を `R: BufRead` から `R: BufRead + Seek` に変更。固定桁 MPS と判明したファイルは先頭から読み直す必要があり、`Seek` はそれを全行バッファ無しで行うための条件 (MPS は GiB 級になりうるため入力の全行保持は不可)。`File` / `Cursor` は `Seek` 済みでそのまま渡せる。stdin やパイプなど seek 不可の入力は、呼び出し側で `Cursor::new(buf)` に読み切ってから渡す
@@ -14,8 +16,9 @@ conic/QCQP の正当性修正と SOCP IPM の収束改善、大規模 LP の pre
 - SOCP IPM にデータ駆動の初期点と Mehrotra 相補均衡化を導入し CBLIB conic 問題の収束を改善。B&B 緩和ノードでは均衡化を無効化して MIQCP の退化を回避
 - presolve が冗長な含意上界を大量に生成して標準形の行数を爆発させ、大規模 LP を大幅に遅くする問題を修正
 - 公開 `QpProblem` フィールドへ不整合な二次制約を代入した際の添字範囲外パニックを、中央検証で防止
+- conic/QP の残差・目的値・実行可能性判定で、次元不一致を 0 ベクトルに化けさせて処理を続行する経路 (最悪ケースで実行不能点を `Optimal` と誤報告しうる) を排除し、不変条件を明示的な検証に置き換え
 - Model DSL の tolerance 伝播、他モデル変数の混入検出、CBF の非有限定数拒否を修正
-- ベンチマーク: LP @1e-6 109/109 optimal・@1e-8 108/109、QP Maros 121/138 @1e-6・93/138 @1e-8、MILP 5/20 optimal + 15 TIMEOUT
+- ベンチマーク: LP @1e-6 109/109 optimal・@1e-8 108/109、QP Maros 121/138 @1e-6・93/138 @1e-8、MILP 5/20 optimal + 15 TIMEOUT、SOCP は Mittelmann Large-SOCP 18問で他ソルバ (MOSEK/ECOS/COPT) と比較し 4/18 @1000s (6/18 @3600s)
 
 ## [0.7.1] - 2026-07-14
 
