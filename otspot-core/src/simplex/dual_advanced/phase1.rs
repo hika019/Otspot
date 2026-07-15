@@ -1,50 +1,24 @@
-//! Big-M Phase I cold-start (Dual Phase I + Primal Phase II + Big-M penalty)
+//! Big-M Phase I cold-start (Dual Phase I + Primal Phase II + Big-M penalty)。
 //!
-//! ## 解決する問題
-//!
-//! Ge / Eq 制約を含む LP の cold-start で、既存
-//! `super::super::dual::two_phase_dual_simplex::cold_start_dual` は
+//! Ge/Eq 制約を含む LP の cold-start で、既存 `cold_start_dual` は
 //! `sf.num_artificial > 0` 時 Primal Phase I (人工変数 sum 最小化) に
-//! フォールバックする。klein3 等 degenerate infeasible LP では cycling して
-//! `iters=0 TIMEOUT` する。
+//! フォールバックし、klein3 等 degenerate infeasible LP で cycling して
+//! `iters=0 TIMEOUT` する。Dual Phase I と Primal Phase II の組み合わせで回避する:
+//! 1. 人工変数列 a_i (係数 1) を `needs_artificial` な各行に追加 (B = I_aug)。
+//! 2. Big-M 摂動コスト `c_aug[a_i] = big_m`、元変数 `c_aug[j] = c[j] +
+//!    max(0, big_m·Σ_{i∈art} a[i,j] - c[j])`。初期 basis
+//!    (y_init = big_m·indicator) で全 reduced cost r_j ≥ 0 (双対実行可能)。
+//! 3. Phase I (Dual Simplex, Harris ratio test): b ≥ 0 で初期から主実行可能
+//!    なので通常 0 反復。役割は Phase II の safe な warm start 用の双対基底構成。
+//!    `Unbounded` → Infeasible。
+//! 4. Phase II (Primal Simplex, SteepestEdgePricing): 元コスト [c | 0] で実行し、
+//!    人工変数も pricing 対象にして basis から追い出す (Phase I 摂動も相殺)。
+//! 5. 終了判定: Phase I `Unbounded` → Infeasible; Phase II 後に人工変数が
+//!    値 > primal_tol で残存 → infeasible; `Optimal` かつ人工変数 = 0 → 最適;
+//!    `Unbounded` → 非有界; その他 Timeout/SingularBasis は通常処理。
 //!
-//! ## アルゴリズム (Dual Phase I + Primal Phase II + Big-M)
-//!
-//! 2-phase Big-M (Dual Phase I + Primal Phase II)。Dual と Primal を組み合わせる
-//! ことで klein3 級 degenerate infeasible LP の cycling を回避する:
-//!
-//! 1. 人工変数列 a_i (係数 1) を `needs_artificial` な各行 i に追加し、
-//!    B = I_aug を構成する。
-//! 2. Big-M 摂動コスト構築:
-//!    - 人工変数: `c_aug[a_i] = big_m`
-//!    - 元変数 j: `c_aug[j] = c[j] + delta_j`、
-//!      `delta_j = max(0, big_m * Σ_{i: needs_art} a[i, j] - c[j])`
-//!      これにより初期 basis (B=I_aug, y_init = c_B = big_m * indicator) で
-//!      全 reduced cost r_j ≥ 0 が成立 (双対実行可能)。
-//! 3. **Phase I (Dual Simplex, Harris ratio test 装備の `dual_simplex_core_advanced`)**:
-//!    x_B ≥ 0 のまま (b ≥ 0 で初期から主実行可能) なので Phase I は通常 0 反復
-//!    で即終了する。役割は「双対基底を構成し、後続 Phase II で safe な warm
-//!    start を提供する」こと。Unbounded を返したら Infeasible。
-//! 4. **Phase II (Primal Simplex, SteepestEdgePricing)**:
-//!    元コスト c_phase2 = [c | 0; n_art] で `revised_simplex_core` を実行。
-//!    人工変数も pricing 対象 (n_price = n_aug) にして basis から積極的に追い出す。
-//!    元 c で Phase I の摂動を消す効果も持つ。
-//! 5. 終了判定:
-//!    - Phase I `Unbounded` → 双対非有界 → Infeasible
-//!    - Phase II 完了後、人工変数が basis に残って値 > primal_tol → 元 LP infeasible
-//!    - Phase II `Optimal` で人工変数値 = 0 → 元 LP 最適
-//!    - Phase II `Unbounded` → 元 LP 非有界
-//!    - Timeout / SingularBasis → 通常処理
-//!
-//! ## M の動的算出
-//!
-//! Ruiz スケーリング後の c, b から:
-//! ```text
-//! big_m = max(||c||_∞ * BIG_M_COST_MULT,
-//!             ||b||_∞ * BIG_M_COST_MULT,
-//!             BIG_M_FLOOR)
-//! ```
-//! いずれも問題スケールから派生する算式 (固定マジック値ではない)。
+//! `big_m = max(‖c‖_∞·BIG_M_COST_MULT, ‖b‖_∞·BIG_M_COST_MULT, BIG_M_FLOOR)`
+//! (Ruiz スケール後の c, b から。問題スケール由来で固定マジック値ではない)。
 
 use super::super::crash;
 use super::super::pricing::{DualLeavingStrategy, SteepestEdgePricing};
@@ -1611,19 +1585,14 @@ mod tests {
     #[test]
     fn crash_lu_failure_falls_back_to_identity() {
         let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // 3 Eq 行 × 4 列。col 0,1,2 が rank-2 (col 0 = col 1) の singleton 群:
-        // - row 0: x0 = 1
-        // - row 1: x1 = 1 (x0 と同値 → x0 - x1 = 0 を要求)
-        // - row 2: x2 + 0.01*x3 = 1
-        // crash は singleton 候補で col 0, 1, 2 を pick → basis = [0, 1, 2]
-        // しかし col 0/1 は同一の sparsity と (row 0/1, val 1.0) を持つため、
-        // 副次的 row 2 で同じ col 2 が独立 → LU は通る (singular でない)。
-        //
-        // 実際に singular にするには A 全体で rank 落ちが要る。代わりに以下:
-        // - col 0: row 0, val=1; row 1, val=1 (col 0 が row 0 と row 1 両方に entry)
-        // - col 1: row 0, val=1; row 1, val=1 (col 1 = col 0)
-        // - col 2: row 2, val=1
-        // crash は col 0 で row 0, col 1 で row 1, col 2 で row 2 を pick →
+        // 3 Eq 行 × 4 列。col 0,1,2 を singleton で pick すると basis=[0,1,2]
+        // だが col 0/1 が同一 sparsity でも row 2 の col 2 が独立で LU は通る
+        // (singular にならない)。実際に singular にするには A 全体で rank 落ち
+        // が要る。以下の構成を使う:
+        // - col 0: row 0 val=1; row 1 val=1
+        // - col 1: row 0 val=1; row 1 val=1 (col 1 = col 0)
+        // - col 2: row 2 val=1
+        // crash は col 0→row 0, col 1→row 1, col 2→row 2 を pick →
         // B = [[1,1,0],[1,1,0],[0,0,1]] singular。
         let a = CscMatrix::from_triplets(
             &[0, 1, 0, 1, 2],

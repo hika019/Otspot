@@ -15,12 +15,11 @@
 //! invents the rows `BR` and `1`. Only a whole-file decision, backed by hard
 //! errors on undeclared names, rejects that reading.
 //!
-//! Both readings are strict, because the fallback must not become a second way
-//! to misread a file: the fixed-column reader requires the line to lie on the
-//! grid (see `FIXED_GUTTERS`), so a free-format file with names longer than 8
-//! bytes cannot be silently re-read as fixed-column with every name truncated.
-//! Columns 62 and beyond are the comment and sequence-number fields, which the
-//! standard ignores and this reader discards before looking at the grid.
+//! Both readings are strict, so the fallback cannot become a second way to
+//! misread a file: the fixed-column reader requires the line to lie on the grid
+//! (see `FIXED_GUTTERS`), so a free-format file with names longer than 8 bytes
+//! is not silently re-read as fixed-column with every name truncated. Columns
+//! 62+ (comment / sequence-number fields) are discarded before grid checks.
 
 /// Parse an OBJSENSE value; returns `true` for MAX, `false` for MIN.
 ///
@@ -525,18 +524,16 @@ pub(crate) type VectorEntry = Result<(Option<String>, Vec<(String, f64)>), Strin
 /// name means the vector name was omitted and pairing starts at index 0.
 ///
 /// Fixed format cannot use that check: a declared row name is legal (if
-/// unusual) as the vector name too, e.g. an RHS vector conventionally named
-/// `RHS` next to a row that happens to be named `RHS`. Standard reading
-/// (vector name in field 2, pairs in fields 3-4 and 5-6) is tried first
-/// instead. Only when it reads no pair at all — field 4 or field 6 left
-/// holding a value with no name, or vice versa, which is exactly what happens
-/// when a writer put the first row name in field 2 and shifted both pairs one
-/// field left — is field 2 reread as that row name, with the pairs occupying
-/// fields 2-3 and 4-5 and field 6 unused. A well-formed shorthand line always
-/// fails the standard reading this way (its field 6 is never used, so the
-/// second pair's value always comes up empty there), so the two readings
-/// never both succeed: there is no case where this order of preference
-/// silently picks the wrong one.
+/// unusual) as the vector name too (e.g. an RHS vector named `RHS` next to a
+/// row also named `RHS`). Standard reading (vector name in field 2, pairs in
+/// fields 3-4 and 5-6) is tried first; only when it reads no pair at all —
+/// field 4 or 6 holding a value with no name, exactly what happens when a
+/// writer put the first row name in field 2 and shifted both pairs one field
+/// left — is field 2 reread as that row name (pairs then in fields 2-3, 4-5,
+/// field 6 unused). A well-formed shorthand line always fails the standard
+/// reading this way (its field 6 is never used, so the second pair's value
+/// comes up empty), so the two readings never both succeed: there is no case
+/// where this order of preference silently picks the wrong one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_vector_entry(
     line: &str,

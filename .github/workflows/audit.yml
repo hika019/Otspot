@@ -38,8 +38,12 @@ jobs:
         run: bash scripts/lib/check_memo_grep.sh
       - name: Comment block size check
         run: bash scripts/check_comment_block_size.sh
+      - name: Comment block size gate self-test
+        run: bash scripts/test_comment_block_size.sh
       - name: Comment ratio check
         run: bash scripts/check_comment_ratio.sh
+      - name: Comment ratio gate self-test
+        run: bash scripts/test_comment_ratio.sh
       - name: Dead issue-ref check
         run: python3 scripts/lib/check_dead_issue_refs.py
       - name: Dead issue-ref gate self-test

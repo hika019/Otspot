@@ -162,19 +162,16 @@ impl KktSkeleton {
         debug_assert_eq!(w2vals.len(), self.w2_slots.len());
         // `W^2` is left fully unregularized: unlike the QP `Sigma` block
         // (genuinely zero for an inactive inequality, hence its `-delta_d`
-        // floor), `W^2` is always strictly positive by construction (`s`,
-        // `z` stay in the strict cone interior via fraction-to-boundary), so
-        // no floor is needed for quasidefiniteness -- and adding one, even
-        // one deliberately smaller than `faer`'s own internal clamp
-        // (`crate::linalg::ldl`'s `LDLT_REG_EPSILON`/`LDLT_REG_DELTA`), only
-        // ever hurts: a conflicting orthant/SOC pair's `W^2_ii = s_i/z_i`
-        // needs to keep shrinking without a floor for the Newton direction
-        // to keep amplifying `z_i` toward a Farkas ray (measured: a fixed
-        // floor here reproduces the pre-fix plateau in
-        // `socp_degenerate_fixed_var_infeasible_gets_certificate`). When the
-        // true value underflows `faer`'s own clamp threshold, the MINRES
-        // escalation in `factorize_with_retry` (which factors the raw
-        // matrix, not an LDL of it) picks up the slack.
+        // floor), `W^2` is always strictly positive by construction (`s`, `z`
+        // stay in the strict cone interior via fraction-to-boundary), so no
+        // floor is needed for quasidefiniteness — and adding one (even below
+        // `faer`'s clamp `crate::linalg::ldl`'s `LDLT_REG_EPSILON`/`_DELTA`)
+        // only hurts: a conflicting orthant/SOC pair's `W^2_ii = s_i/z_i` must
+        // keep shrinking unfloored for the Newton direction to amplify `z_i`
+        // toward a Farkas ray (measured: a fixed floor reproduces the pre-fix
+        // plateau in `socp_degenerate_fixed_var_infeasible_gets_certificate`).
+        // When the true value underflows that clamp, the MINRES escalation in
+        // `factorize_with_retry` (raw-matrix factor) picks up the slack.
         for (k, &slot) in self.w2_slots.iter().enumerate() {
             values[slot] = -w2vals[k];
         }
@@ -607,20 +604,17 @@ pub(super) fn factorize_with_retry(
     caches.hint = EscalationHint::Ladder(REG_CEILING);
 
     // DD-LDL (TwoFloat, ~106-bit) escalation. The f64 ladder above only grows
-    // `delta` on the `dx`/`dy` diagonals -- irrelevant when the true
-    // ill-conditioning lives in `W^2` (deliberately unregularized, see the
-    // module doc), e.g. a conflicting orthant/SOC pair where `s_i` has
-    // shrunk enough that `f64`'s ~16 digits can no longer resolve `W^2_ii`
-    // against the rest of the matrix. Still health-probed against the same
-    // clamp thresholds as the f64 path (`crate::linalg::ldl_dd`'s
-    // `EPSILON`/`DELTA`), so once `W^2_ii` underflows that shared
-    // threshold, extra mantissa bits alone do not recover it (confirmed:
-    // `socp_degenerate_fixed_var_infeasible_gets_certificate` shows the
-    // same premature plateau under DD as under f64). Materialized at
-    // REG_DELTA_INIT, not the ladder's final `delta`: a larger `dx`/`dy`
-    // regularization buys nothing here (see the last-resort comment
-    // below) and would only perturb the system away from the exact one
-    // MINRES needs.
+    // `delta` on the `dx`/`dy` diagonals — irrelevant when the true ill-
+    // conditioning lives in `W^2` (deliberately unregularized, see module doc),
+    // e.g. a conflicting orthant/SOC pair where `s_i` has shrunk enough that
+    // f64's ~16 digits can no longer resolve `W^2_ii`. Still health-probed
+    // against the same clamp thresholds as the f64 path (`crate::linalg::
+    // ldl_dd`'s `EPSILON`/`DELTA`), so once `W^2_ii` underflows that shared
+    // threshold extra mantissa bits alone cannot recover it (confirmed:
+    // `socp_degenerate_fixed_var_infeasible_gets_certificate` plateaus the same
+    // under DD as f64). Materialized at REG_DELTA_INIT, not the ladder's final
+    // `delta`: a larger `dx`/`dy` regularization buys nothing (see last-resort
+    // comment below) and would only perturb the system MINRES needs exact.
     let unpermuted = caches
         .base
         .materialize(sc, blk, REG_DELTA_INIT, REG_DELTA_INIT);

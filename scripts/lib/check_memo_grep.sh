@@ -1,5 +1,5 @@
 #!/bin/bash
-# Production memo-comment grep gate (CLAUDE.md L46 「コードにメモ書きコメント禁止」).
+# Production memo-comment grep gate (CLAUDE.md, "実装" section 「メモ書き・作業ログ的コメントは書かない」).
 # Run from repo root. Exits 1 on hit, 0 on clean.
 # Single source of truth for `.github/workflows/audit.yml` と
 # `scripts/pre-merge-audit.sh` (二重実装防止).
@@ -12,7 +12,7 @@ HITS=$(grep -rnE '(TODO|FIXME|XXX|HACK|todo!\()' \
   || true)
 
 if [ -n "$HITS" ]; then
-  echo "::error::Production code must not contain TODO/FIXME/XXX/HACK/todo!() (CLAUDE.md L46)"
+  echo "::error::Production code must not contain TODO/FIXME/XXX/HACK/todo!() (CLAUDE.md \"実装\" section)"
   echo "$HITS"
   exit 1
 fi

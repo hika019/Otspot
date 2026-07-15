@@ -87,7 +87,7 @@ else
   echo "(cargo-public-api 未 install、CI で確認)"
 fi
 
-# 5. コメント品質 (CLAUDE.md L45-46)
+# 5. コメント品質 (CLAUDE.md, "実装" section)
 # diff scope ではなく full-scan を使用: gate を後付けする以前の commit に
 # 違反が残存しうるため (このゲート設置時点で複数 file が threshold 超過、PR 段階
 # で trim 議論)。main に違反が確定混入した場合は ALLOWLIST 追加 or
@@ -96,7 +96,9 @@ echo
 echo "=== comment quality ==="
 bash scripts/lib/check_memo_grep.sh
 bash scripts/check_comment_block_size.sh
+bash scripts/test_comment_block_size.sh
 bash scripts/check_comment_ratio.sh
+bash scripts/test_comment_ratio.sh
 python3 scripts/lib/check_dead_issue_refs.py
 python3 tests/test_check_dead_issue_refs.py
 

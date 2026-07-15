@@ -175,9 +175,13 @@ jobs:
         run: |
           COUNT=$(grep -rE 'TODO|FIXME|XXX|HACK' otspot-core/src otspot-io/src otspot-model/src otspot-dev/src src 2>/dev/null | wc -l)
           echo "todo_count=$COUNT"
-          # CLAUDE.md L37「コードにメモ書きコメント禁止」を CI で enforce。
+          # CLAUDE.md「実装」section「メモ書き・作業ログ的コメントは書かない」を CI で
+          # enforce。scripts/lib/check_memo_grep.sh と似ているが scope が異なる意図的な
+          # 別実装: このジョブは top-level src/ も含め todo!() マクロは対象外、
+          # check_memo_grep.sh は production (otspot-*/src, tests/*.rs 除く) 限定で
+          # todo!() も検出する (comment-hygiene ジョブ用)。
           # TODO/FIXME = 未完成 marker = push 時点で意図的不具合、1 件でも混入で fail。
           if [ "$COUNT" -gt 0 ]; then
-            echo "::error::TODO/FIXME/XXX/HACK count $COUNT > 0 — CLAUDE.md L37 違反 (メモ書きコメント禁止)"
+            echo "::error::TODO/FIXME/XXX/HACK count $COUNT > 0 — CLAUDE.md「実装」section 違反 (メモ書きコメント禁止)"
             exit 1
           fi

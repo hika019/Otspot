@@ -196,17 +196,15 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) 
             status = SolveStatus::Optimal;
             break;
         }
-        // Certificate-based early termination. Both tests are checked every
-        // iteration (degenerate relaxations, e.g. B&B children with a
-        // variable fixed by branching, diverge to non-finite iterates before
-        // any magnitude threshold could fire) and both are scale-invariant:
-        // each residual / value is measured against the magnitude sum of its
-        // own terms, so neither the data scale nor the iterate scale can
-        // fake a certificate. Using the same `opts.tol` on both sides makes
-        // them complementary — a near-ray on a *feasible* degenerate problem
-        // (e.g. a bound pair `x <= V`, `-x <= -V`) has relative ray residual
-        // equal to its relative certificate value, so it can never pass the
-        // "ray holds to tol" and "value negative beyond tol" gates together.
+        // Certificate-based early termination, checked every iteration
+        // (degenerate relaxations — e.g. B&B children with a branched-fixed
+        // variable — diverge to non-finite iterates before any magnitude
+        // threshold fires). Both tests are scale-invariant: each residual /
+        // value is measured against the magnitude sum of its own terms, so
+        // neither data nor iterate scale can fake a certificate. The shared
+        // `opts.tol` makes them complementary — a near-ray on a feasible
+        // degenerate bound pair (`x <= V`, `-x <= -V`) has ray residual equal
+        // to its certificate value, so it never passes both gates at once.
         //
         // Primal infeasibility (Farkas): z ∈ K*, A^T y + G^T z ≈ 0 and
         // b·y + h·z < 0.

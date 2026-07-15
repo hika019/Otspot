@@ -1469,7 +1469,7 @@ ENDATA
     }
 
     // -----------------------------------------------------------------------
-    // Task #9: vector-name-omitted (shorthand) RHS/RANGES/BOUNDS + multi-vector
+    // vector-name-omitted (shorthand) RHS/RANGES/BOUNDS + multi-vector
     // RHS/RANGES support.
     // -----------------------------------------------------------------------
 
@@ -1595,10 +1595,9 @@ ENDATA
     ///
     /// Independent oracle: hand-solved LP. `min -x1-x2` s.t. `x1+x2 <= 10`
     /// (LC123), `x1 <= 6` (`BR   1 1`), `0 <= x2 <= 2` (BOUNDS), `x1 >= 0`.
-    /// The optimum is `x1=6, x2=2` → objective `-8.0`. The value discriminates
-    /// each failure mode: dropping the `BR   1 1` COLUMNS coefficient frees
-    /// `x1` to reach 8 (objective `-10`), and dropping its RHS pins `x1` to 0
-    /// (objective `-2`).
+    /// The optimum is `x1=6, x2=2` → objective `-8.0`, which discriminates each
+    /// failure mode: dropping the `BR   1 1` COLUMNS coefficient frees `x1` to
+    /// 8 (objective `-10`), dropping its RHS pins `x1` to 0 (objective `-2`).
     ///
     /// **No-op failure guarantee**: with the per-line format heuristics
     /// restored, the free-format read of the RHS line succeeds and `b` becomes

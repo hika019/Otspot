@@ -323,14 +323,11 @@ fn build_relaxation(
 /// Solve a mixed-integer SOCP by branch-and-bound (depth-first, best-bound
 /// pruning). Minimises `c^T x`.
 ///
-/// Convexity caveat: [`MisocpProblem`] carries no `convexity_unproven` flag,
-/// so this entry point cannot itself detect a base problem whose SOC blocks
-/// came from a clamped (only-approximate) QCQP Cholesky. Both current callers
-/// gate that upstream — [`solve_miqcp`] refuses a `convexity_unproven`
-/// `to_conic` result, and the Model layer refuses a clamped SOC-constrained
-/// QCQP before building the `MisocpProblem` — but a future direct caller must
-/// perform the same check itself (threading the flag onto `MisocpProblem` is
-/// left to a separate task).
+/// Convexity caveat: [`MisocpProblem`] carries no `convexity_unproven` flag, so
+/// this entry point cannot detect a base problem whose SOC blocks came from a
+/// clamped (only-approximate) QCQP Cholesky. Both callers gate that upstream
+/// ([`solve_miqcp`] and the Model layer refuse a clamped result before building
+/// the `MisocpProblem`); a future direct caller must perform the same check.
 ///
 /// Node outcomes are classified, not collapsed into one "prune" bucket:
 /// `Infeasible` prunes only with a Farkas certificate (`infeas_cert`);
@@ -343,9 +340,8 @@ fn build_relaxation(
 /// proves false infeasibility. `Timeout` on a node stops the whole search.
 ///
 /// Final status without an incumbent: `Timeout` > `MaxIterations` >
-/// `NumericalError` > `Infeasible` (every leaf infeasible or pruned).
-/// With an incumbent: `Timeout` > `Optimal` (full exhaustion, **no**
-/// numerical failures) > `SuboptimalSolution` (mirrors `mip::solve_miqp`).
+/// `NumericalError` > `Infeasible`. With an incumbent: `Timeout` > `Optimal`
+/// (full exhaustion, no numerical failures) > `SuboptimalSolution`.
 pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -> MisocpResult {
     if let Err(e) = prob
         .validate()
@@ -440,26 +436,18 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         match res.status {
             SolveStatus::Optimal => {}
             SolveStatus::Unbounded if res.primal_ray.is_some() => {
-                // A verified ray only certifies that the *relaxation*'s
-                // recession cone contains a `c^T d < 0` direction `d`; `d`'s
-                // component on every integer variable is forced to ~0 by the
-                // node's own box/fixing rows (both bound rows, or the fixing
-                // equality, appear in every node), so the ray extends *any*
-                // feasible point of this node's polytope to -infinity. But
-                // that says nothing about whether the polytope actually
-                // contains an integer-feasible point: an equality elsewhere
-                // in the model can pin an "integer" variable to a fractional
-                // value, making every integer combination infeasible while
-                // the (integrality-blind) relaxation is still unbounded.
-                // Only once every integer variable is already fixed
-                // (`lb[k] == ub[k]`) does *any* feasible point of the node
-                // automatically carry integer values, so only then does the
-                // ray certify the mixed-integer problem unbounded. Otherwise
-                // bisect the widest remaining free integer and keep
-                // searching -- this always terminates (finite `int_lb`/
-                // `int_ub`, enforced by `validate`) and falls through to the
-                // ordinary `Infeasible` conclusion if every resulting leaf
-                // turns out empty.
+                // A verified ray only certifies the *relaxation*'s recession
+                // cone holds a `c^T d < 0` direction `d` whose component on every
+                // integer variable is ~0 (node box/fixing rows), so it extends
+                // any feasible node point to -infinity — but says nothing about
+                // whether the node's polytope holds an integer-feasible point:
+                // an equality elsewhere can pin an "integer" variable to a
+                // fractional value while the integrality-blind relaxation stays
+                // unbounded. Only once every integer variable is fixed
+                // (`lb[k] == ub[k]`) does any feasible node point carry integer
+                // values, certifying the MI problem unbounded. Otherwise bisect
+                // the widest free integer (finite `int_lb`/`int_ub` via
+                // `validate`, terminating) and fall to `Infeasible` if leaves empty.
                 if let Some(k) = (0..lb.len()).find(|&k| lb[k] != ub[k]) {
                     let mid = ((lb[k] + ub[k]) / 2.0).floor();
                     let mut ub_d = ub.clone();
