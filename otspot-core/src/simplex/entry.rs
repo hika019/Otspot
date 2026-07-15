@@ -1270,18 +1270,14 @@ mod tests {
         );
     }
 
-    // min -x1-x2-x3  s.t.  x0=5 (Eq singleton),
-    //   x1-x2<=1, x2-x3<=1, x3-x1<=1
-    //
+    // min -x1-x2-x3  s.t.  x0=5 (Eq singleton), x1-x2<=1, x2-x3<=1, x3-x1<=1.
     // After presolve removes x0 (was_reduced=true), the reduced problem is
-    // min -(x1+x2+x3) with the three Le constraints.  Direction d=(1,1,1)
-    // satisfies all constraints (each difference stays constant), c^T d = -3 < 0
-    // → UNBOUNDED.  Presolve cannot detect this: x1,x2,x3 appear in active
-    // rows (step3b does not fire) and bounds propagation gives no finite upper
-    // bounds (ub_finite=false for all three constraints, step4 stays inactive,
-    // step5 gives no tightening).
-    //
-    // Before the fix: run_postsolve was called, producing solution=[5,0,0,0] with
+    // min -(x1+x2+x3) with the three Le constraints. Direction d=(1,1,1)
+    // satisfies all (each difference stays constant), c^T d = -3 < 0 → UNBOUNDED.
+    // Presolve cannot detect this: x1,x2,x3 appear in active rows (step3b does
+    // not fire) and bounds propagation gives no finite upper bounds
+    // (ub_finite=false for all three, step4/step5 inactive).
+    // Before the fix: run_postsolve produced solution=[5,0,0,0] with
     // status=Unbounded (spurious x0=5 from SingletonRow).
     // After the fix: early return with solution=[] before run_postsolve.
     fn make_presolve_reduced_unbounded_lp() -> LpProblem {

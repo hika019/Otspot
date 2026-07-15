@@ -949,20 +949,16 @@ fn misocp_expired_deadline_returns_timeout() {
 #[test]
 fn misocp_mid_search_deadline_keeps_incumbent() {
     // Wider instance (37 nodes): max x0+x1+x2 in a ball of r^2 = 30, integers
-    // in [0, 5]^3; the incumbent lands by node 2 of 37.
-    //
-    // The mid-search deadline is injected by node count via
-    // `misocp::DEADLINE_AFTER_NODE` instead of a wall-clock `Instant`: B&B is
-    // single-threaded and its node sequence depends only on `prob`/`opts` (a
-    // node relaxation solve never sees `BbOptions::deadline`), so re-running
-    // the identical problem/options visits the exact same nodes in the exact
-    // same order. Forcing the deadline branch at a fixed node count therefore
-    // reproduces "deadline hit mid-search, incumbent kept" with zero timing
-    // dependence. The previous wall-clock version (deadline = measured
-    // full-run time / 2) flaked under competing CPU load: observed to fail
-    // 2/10 runs under load, because the second (deadline) run's per-node cost
-    // relative to the first (calibration) run's is not guaranteed under
-    // OS/CPU jitter.
+    // in [0, 5]^3; the incumbent lands by node 2 of 37. The mid-search
+    // deadline is injected by node count via `misocp::DEADLINE_AFTER_NODE`, not
+    // a wall-clock `Instant`: B&B is single-threaded and its node sequence
+    // depends only on `prob`/`opts` (a node relaxation never sees the
+    // deadline), so re-running visits the same nodes in the same order.
+    // Forcing the deadline at a fixed node count reproduces "deadline hit mid-
+    // search, incumbent kept" with zero timing dependence. The previous wall-
+    // clock version (deadline = full-run time / 2) flaked under competing CPU
+    // load (2/10 runs), because the deadline run's per-node cost relative to
+    // the calibration run's is not guaranteed under OS/CPU jitter.
     let n = 3usize;
     let r2 = 30.0_f64;
     let mut grows = vec![vec![0.0; n]];
@@ -1020,22 +1016,18 @@ fn misocp_mid_search_deadline_keeps_incumbent() {
 /// problem unbounded once every integer variable is already fixed in that
 /// node -- otherwise the ray says nothing about integer-feasibility.
 ///
-/// `x0` is declared integer in `{0, 1}` but pinned to `0.5` by two opposing
-/// base-problem orthant rows (`x0 <= 0.5`, `-x0 <= -0.5`) unrelated to
-/// branching, so no integer value of `x0` is ever feasible; `x1` is free
-/// with objective `-x1` (one active row `x1 >= 0`, exactly `unbounded_lp_
-/// detected`'s shape), so the *relaxation* (which does not enforce
-/// integrality) is genuinely unbounded along `x1` at the root. Independent
-/// oracle: since `x0 = 0.5` has no integer solution, the true mixed-integer
-/// problem has an empty feasible set, so the correct status is `Infeasible`,
-/// never `Unbounded`.
+/// `x0` is integer in `{0,1}` but pinned to `0.5` by two opposing base-problem
+/// orthant rows (`x0 <= 0.5`, `-x0 <= -0.5`) unrelated to branching, so no
+/// integer `x0` is feasible; `x1` is free with objective `-x1` (one active row
+/// `x1 >= 0`, exactly `unbounded_lp_detected`'s shape), so the *relaxation*
+/// (ignoring integrality) is genuinely unbounded along `x1` at the root.
+/// Independent oracle: `x0 = 0.5` has no integer solution, so the true problem
+/// has an empty feasible set — correct status `Infeasible`, never `Unbounded`.
 ///
 /// (Pinning `x0` via an `A`-equality row instead of two `G` rows also proves
-/// the point mathematically, but empirically stalls the IPM at `MaxIterations`
-/// for unrelated numerical reasons well before any certificate forms --
-/// verified by direct `solve_socp` probing during development -- so this test
-/// uses the `G`-only construction, which reaches a clean verified ray in 5
-/// iterations.)
+/// the point, but empirically stalls the IPM at `MaxIterations` before any
+/// certificate forms, so the `G`-only construction is used — it reaches a
+/// clean verified ray in 5 iterations.)
 ///
 /// Sentinel: reverting to an unconditional `SolveStatus::Unbounded` return on
 /// the root's verified ray (the pre-fix behaviour) makes this FAIL with
@@ -1455,16 +1447,13 @@ fn nt_scaling_invariants_edge_configs() {
 // Phase 2 (conic-oom): NT scaling `O(d)` arrow+rank-one representation.
 //
 // `cone::Scaling`'s SOC blocks used to materialise a dense `d x d` matrix per
-// block (`w_block`/`winv_block`); for a single huge SOC block (the QCQP->SOCP
-// bridge emits one of dimension `n+2` per quadratic term) that is `O(d^2)`
-// memory, which OOMs long before the IPM's own dense-KKT assembly for `n` in
-// the low 1e5s. The tests below check the `O(d)` arrow+rank-one replacement
-// two ways: (1) numerical equivalence against dense matrices built fresh from
-// the NT-scaling closed form (not calling into `cone::nt_scaling`'s
-// internals) across several dimensions and random seeds, cross-checked a
-// second way via the (structurally different) Jordan quadratic-
-// representation formula; and (2) a large-`d` time-budget sentinel that
-// catches a regression back to the dense representation.
+// block; for one huge SOC block (the QCQP->SOCP bridge emits one of dimension
+// `n+2` per quadratic term) that is `O(d^2)` memory, OOMing before the IPM's
+// own dense-KKT assembly. The tests below check the `O(d)` arrow+rank-one
+// replacement two ways: (1) numerical equivalence vs dense matrices from the
+// NT-scaling closed form across dimensions/seeds, cross-checked via the Jordan
+// quadratic-representation formula; (2) a large-`d` time-budget sentinel
+// catching a regression to the dense representation.
 // ---------------------------------------------------------------------------
 
 /// Random strictly-interior second-order-cone point of dimension `d`:
@@ -3630,22 +3619,16 @@ fn to_conic_rank_deficient_fill_factors_exactly() {
 }
 
 // ---------------------------------------------------------------------------
-// PR #25 review (P1): `sparse_cholesky_lower` dropped the whole Schur-
-// complement row below a zero/jitter-band pivot unconditionally, even when
-// that row's off-diagonal entries were *not* zero. For a symmetric matrix,
-// a zero pivot `M[j][j] = 0` forces `M[r][j] = 0` for every `r` (the 2x2
-// principal minor `M[j][j]*M[r][r] - M[r][j]^2` degenerates to `-M[r][j]^2`,
-// which is PSD-compatible only at `M[r][j] = 0`); dropping a genuinely
-// nonzero `M[r][j]` instead of rejecting the matrix turned a nonconvex QCQP
-// into a "certified convex" SOCP over a different (unconstrained-in-that-
-// direction) feasible region.
-//
-// The tests below exercise both call sites of the shared pivot logic:
-// `to_conic` (`sparse_cholesky_lower`, dense-per-problem CSC input) and
-// `solve_qp_problem_as_qcqp` (`touched_cholesky`, sparse per-constraint
-// triplets). Every expected outcome is derived independently (determinant
-// sign / eigenvalues of small hand-written matrices, or a closed-form
-// optimum), never from the implementation under test.
+// PR #25 review (P1): `sparse_cholesky_lower` dropped the whole Schur-complement
+// row below a zero/jitter-band pivot unconditionally, even when that row's
+// off-diagonal entries were *not* zero. For a symmetric matrix a zero pivot
+// `M[j][j] = 0` forces `M[r][j] = 0` for every `r` (2x2 minor degenerates to
+// `-M[r][j]^2`, PSD only at `M[r][j] = 0`); dropping a nonzero `M[r][j]` instead
+// of rejecting turned a nonconvex QCQP into a "certified convex" SOCP over a
+// different feasible region. The tests exercise both call sites — `to_conic`
+// (`sparse_cholesky_lower`) and `solve_qp_problem_as_qcqp` (`touched_cholesky`)
+// — with every expected outcome derived independently (determinant sign /
+// eigenvalues, or a closed-form optimum), never from the impl under test.
 // ---------------------------------------------------------------------------
 
 /// `Q = [[0,1],[1,0]]` is indefinite: `det(Q) = 0*0 - 1*1 = -1 < 0`, and a
@@ -4515,20 +4498,17 @@ fn solve_socp_canonicalizes_non_optimal_objective() {
 
 #[test]
 fn solve_socp_preserves_real_iterate_objective_when_inconclusive() {
-    // review 40 follow-up (P1): the objective canonicalization must fire ONLY for
+    // review 40 follow-up (P1): objective canonicalization must fire ONLY for
     // the conclusive no-usable-iterate statuses (Infeasible/Unbounded). An
-    // inconclusive status (MaxIterations here; Timeout/NumericalError share
-    // the arm) returns a genuine, still-improving iterate in `res.x` whose
-    // `dot(c, x)` is the convergence-tracking value callers rely on; clobbering
-    // it to `+inf` (as an over-broad `_ => f64::INFINITY` arm did) both
-    // contradicts `res.x` and erases that tracking, violating the codebase
-    // convention (`simplex::timeout_result_with_incumbent` keeps the real
-    // `c·x`; `+inf` is reserved for the *incumbent-less* bare timeout).
-    //
-    // `min c^T x` over the unit ball `||x|| <= 1` (optimum `-||c||`, reached
-    // only in the interior limit) with `max_iter = 3`: the IPM is still
-    // strictly improving and nowhere near the 1e-9 tolerance, so it stops at
-    // MaxIterations with `x` moved well off its `0` initializer.
+    // inconclusive status (MaxIterations here; Timeout/NumericalError share the
+    // arm) returns a still-improving iterate in `res.x` whose `dot(c, x)` is
+    // the convergence-tracking value callers rely on; clobbering it to `+inf`
+    // (as an over-broad `_ => f64::INFINITY` arm did) contradicts `res.x` and
+    // erases that tracking (`simplex::timeout_result_with_incumbent` keeps the
+    // real `c·x`; `+inf` is reserved for the incumbent-less bare timeout).
+    // `min c^T x` over the unit ball `||x|| <= 1` (optimum `-||c||`) with
+    // `max_iter = 3`: the IPM is still strictly improving, nowhere near the
+    // 1e-9 tolerance, so it stops at MaxIterations with `x` well off its `0`.
     let n = 5usize;
     let c = vec![0.7, -1.3, 0.4, 1.1, -0.6];
     let mut grows = vec![vec![0.0; n]]; // row 0: radius bound t = 1.
@@ -4624,41 +4604,28 @@ fn misocp_problem_validate_rejects_out_of_range_integer_index() {
     );
 }
 
-/// The MISOCP branch recomputes the objective from `x` (as the continuous
-/// `solve_qcqp` and model-layer paths do) rather than reporting the conic
-/// relaxation's raw epigraph value `t`: `to_conic` minimizes `t` subject to
-/// `t >= (1/2) x^T P0 x + q0^T x`, and B&B stores the incumbent's *conic*
-/// objective `c^T x_conic = t` (`misocp.rs`). The interior-point method
-/// approaches that epigraph inequality from above and stops a *positive*
-/// slack short of tight (`t = f(x) + O(tol · ‖R x‖)`), so
-/// `res.objective` (= `t`) differs from `(1/2) x^T P0 x + q0^T x` at the
-/// returned `x`. The recompute line replaces `t` with the exact value read
-/// back from the caller's `P0`/`q0`.
+/// The MISOCP branch recomputes the objective from `x` (like the continuous
+/// `solve_qcqp` and model-layer paths) rather than reporting the conic
+/// relaxation's raw epigraph value `t`: `to_conic` minimizes `t` s.t.
+/// `t >= (1/2) x^T P0 x + q0^T x`, and B&B stores the incumbent's conic
+/// objective `c^T x_conic = t`. The IPM approaches that epigraph inequality
+/// from above and stops a *positive* slack short of tight
+/// (`t = f(x) + O(tol·‖R x‖)`), so `res.objective` (= `t`) differs from
+/// `(1/2) x^T P0 x + q0^T x` at the returned `x`; the recompute replaces `t`
+/// with the exact value from the caller's `P0`/`q0`.
 ///
-/// Note (measured, not assumed): a node-limited / timed-out incumbent does
-/// **not** widen this gap — B&B returns the incumbent's own (tight-from-above)
-/// `t`, never a looser dual bound, so the slack is purely the interior-point
-/// epigraph gap and is largest, and cleanest, on a directly-`Optimal` solve.
-/// A larger-magnitude objective would grow the absolute slack but the conic
-/// IPM `NumericalError`s well before it becomes visually dramatic, so this
-/// uses a small, well-conditioned instance and a tight assertion instead.
-///
-/// Construction: `min x0^2 + x1^2 - 4·x1` (`P0 = 2I` PSD, `q0 = [0, -4]`)
-/// over integer `x in [0,5]^2`. The continuous optimum `x1 = 2` is already
-/// integer, so the incumbent is `x ≈ (0, 2)`, `f = 4 - 8 = -4`; because that
-/// is also the *unconstrained* minimum of `x1^2 - 4·x1`, `f` is stationary
-/// there, so the recompute stays within `~1e-12` of `-4` even at a loose
-/// solve tolerance. Independent oracle: `x0^2 + x1^2 - 4·x1` by hand at the
-/// returned `x` (not via `qcqp_true_objective`). With the pinned `tol = 1e-6`
-/// the epigraph slack is `~tol` (measured `t - f ≈ 5.3e-8`), so the `< 1e-12`
-/// assertion sits ~4 orders below the loose `t` (which it FAILS) and ~3
-/// orders above the exact recompute's float rounding `~1e-15` (which it
-/// PASSES) — a wide, non-knife-edge window, decoupled from the default solve
-/// tolerance.
+/// Construction: `min x0^2 + x1^2 - 4·x1` (`P0 = 2I` PSD, `q0 = [0,-4]`) over
+/// integer `x in [0,5]^2`. Continuous optimum `x1 = 2` is integer, so the
+/// incumbent is `x ≈ (0,2)`, `f = -4`; it is also the unconstrained minimum of
+/// `x1^2 - 4·x1`, so `f` is stationary and the recompute stays within `~1e-12`
+/// of `-4` even at loose tolerance. Independent oracle: `x0^2 + x1^2 - 4·x1` by
+/// hand (not via `qcqp_true_objective`). At `tol = 1e-6` the epigraph slack is
+/// `~tol` (measured `t - f ≈ 5.3e-8`), so `< 1e-12` sits ~4 orders below loose
+/// `t` (FAILS) and ~3 above the recompute's `~1e-15` rounding (PASSES) — a
+/// wide, non-knife-edge window.
 ///
 /// Sentinel (measured): deleting `res.objective = qcqp_true_objective(qp,
-/// &res.x)` in `solve_miqcp` makes this FAIL (`res.objective` becomes the
-/// loose `t`).
+/// &res.x)` in `solve_miqcp` makes this FAIL (`res.objective` = loose `t`).
 #[test]
 fn miqcp_objective_recomputed_from_x_not_epigraph_bound() {
     let n = 2;
@@ -5442,7 +5409,7 @@ fn miqcp_integer_ball_node_relaxation_reaches_optimal() {
     }
 }
 
-/// PR #25 review #27: the conic/QCQP path capped IPM iterations at the conic
+/// PR #25 review 27: the conic/QCQP path capped IPM iterations at the conic
 /// default (`100`) with no user override, while the QP path runs bounded
 /// only by the wall-clock deadline (`IpmOptions::max_iter` defaults to
 /// `usize::MAX`). A conic solve legitimately needing more than 100

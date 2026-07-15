@@ -556,20 +556,15 @@ mod tests {
     #[test]
     fn dual_fixing_eq_blocks() {
         // 3-var Eq so Step 2 (singleton-Eq) and Step 6 (doubleton-Eq) cannot
-        // fire — the only way x,y,z survive presolve correctly is the Step 11
+        // fire — x,y,z survive presolve correctly only via the Step 11
         // Eq-disqualifies-dual-fixing arm (transforms_dup.rs:290-294).
-        //
-        //   min  x + y + z
-        //   s.t. 2x + 3y + 4z = 7   (Eq, 3 active vars)
-        //        x, y, z ∈ [0, 5]
-        //
-        // c≥0 everywhere ⇒ if Eq were ignored, Step 11 sees no
-        // disqualifying row and fixes each var to lb=0. The next Step 1 then
-        // produces b_eq = 7 − 0 = 7 on an empty Eq row ⇒ Infeasible.
-        //
+        //   min x + y + z   s.t.  2x + 3y + 4z = 7 (Eq),  x,y,z ∈ [0,5]
+        // c≥0 everywhere ⇒ if Eq were ignored, Step 11 sees no disqualifying
+        // row and fixes each var to lb=0; the next Step 1 then produces
+        // b_eq = 7 − 0 = 7 on an empty Eq row ⇒ Infeasible.
         // No-op proof (verified 2026-05-19): commenting out the body of the
-        // `ConstraintType::Eq` arm in `step11_dual_fixing` flips this test
-        // from PASS to FAIL (Err(Infeasible) at unwrap on line below).
+        // `ConstraintType::Eq` arm in `step11_dual_fixing` flips this test from
+        // PASS to FAIL (Err(Infeasible) at unwrap on line below).
         let lp = make_lp(
             vec![1.0, 1.0, 1.0],
             &[0, 0, 0],

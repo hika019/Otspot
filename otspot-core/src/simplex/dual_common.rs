@@ -281,19 +281,17 @@ pub(super) fn lp_unbounded_ray_verified(
         };
         basis_mgr.ftran(&mut d_sv);
         // A recession ray needs every basic structural/slack component ≤ 0
-        // (increasing x_q from lb=0 with ub=∞ never drives a basic variable below
-        // its lower bound). The floor is machine-noise scale (`EPSILON·max(1,‖d‖∞)`),
-        // matching the simplex's own last-chance ratio test: any *real* positive
-        // pivot — even one below `PIVOT_TOL` (0 < d_i < 1e-8) — is a genuine leaving
-        // row, so the direction is bounded, NOT a ray. Using `PIVOT_TOL` here instead
-        // would re-admit those small-positive pivots and leak a false-Unbounded.
-        //
-        // Basic artificials (basis[i] ≥ n_enter) need the stricter |d_i| ≤ floor:
-        // d_i < 0 there *increases* the artificial off 0, so the direction stays
-        // feasible only in the augmented system, not the original LP — it is not a
-        // recession ray. Allowing it re-admits a false-Unbounded whenever a
-        // degenerate artificial lingers in the Phase-II basis (the symptom this gate
-        // exists to prevent).
+        // (increasing x_q from lb=0, ub=∞ never drives a basic var below its lb).
+        // The floor is machine-noise scale (`EPSILON·max(1,‖d‖∞)`), matching the
+        // simplex's last-chance ratio test: any *real* positive pivot — even
+        // below `PIVOT_TOL` (0 < d_i < 1e-8) — is a genuine leaving row, so the
+        // direction is bounded, NOT a ray. `PIVOT_TOL` here would re-admit those
+        // and leak a false-Unbounded. Basic artificials (basis[i] ≥ n_enter) need
+        // the stricter |d_i| ≤ floor: d_i < 0 there *increases* the artificial
+        // off 0, feasible only in the augmented system, not the original LP — not
+        // a recession ray. Allowing it leaks a false-Unbounded whenever a
+        // degenerate artificial lingers in the Phase-II basis (the symptom this
+        // gate prevents).
         let d = d_sv.to_dense();
         let scale = d.iter().map(|v| v.abs()).fold(1.0_f64, f64::max);
         let ray_floor = f64::EPSILON * scale;

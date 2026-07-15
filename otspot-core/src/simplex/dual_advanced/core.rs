@@ -425,19 +425,16 @@ pub(crate) fn dual_simplex_core_advanced(
         }
 
         // 3d': lb-violation direction correction.
-        //
-        // When x_b[r] < 0 (lb violation) the entering variable must increase x_b[r],
-        // i.e. select trow[j] < 0. Sign-flip trow to reuse the ub-repair ratio test;
-        // rc and the leaving r-value are also flipped (3i).
-        //
-        // Artificial-leaving guard (basis[r] >= n_enter): flipping drives the artificial
-        // value toward 0 without evicting it, producing a 478-pivot cycle (sierra).
-        // Artificials leave in the standard direction; re-entry is blocked by n_enter
-        // so they exit monotonically.
-        //
-        // Suppressing lb-repair on an artificial-leaving row may cause bare Big-M to
-        // abandon some feasible Eq cases; the primal fallback recovers (verified Optimal).
-        // See `big_m_phase1_artificial_lb_repair_edge_*`.
+        // When x_b[r] < 0 (lb violation) the entering variable must increase
+        // x_b[r], i.e. select trow[j] < 0. Sign-flip trow to reuse the ub-repair
+        // ratio test; rc and the leaving r-value are also flipped (3i).
+        // Artificial-leaving guard (basis[r] >= n_enter): flipping drives the
+        // artificial value toward 0 without evicting it, producing a 478-pivot
+        // cycle (sierra). Artificials leave in the standard direction; re-entry
+        // is blocked by n_enter so they exit monotonically.
+        // Suppressing lb-repair on an artificial-leaving row may cause bare
+        // Big-M to abandon some feasible Eq cases; the primal fallback recovers
+        // (verified Optimal). See `big_m_phase1_artificial_lb_repair_edge_*`.
         let mut lb_violation =
             x_b[leaving_row] < 0.0 && leaving.allows_lb_repair() && basis[leaving_row] < n_enter;
         let artificial_lb_violation =

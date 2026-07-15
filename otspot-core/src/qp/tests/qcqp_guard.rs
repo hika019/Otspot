@@ -237,9 +237,8 @@ fn convex_qcqp_propagates_timeout() {
 /// Nonconvex), NOT on the `status` assertion (which passes either way).
 ///
 /// Supersedes the old `nonconvex_qcqp_propagates_timeout`, which asserted
-/// `SolveRoute::ConicQcqpNonconvex` here -- correct only when `to_conic`
-/// always ran first to determine convexity before any stop check (pre PR #25
-/// review INLINE-N).
+/// `ConicQcqpNonconvex` here -- correct only when `to_conic` always ran first
+/// to determine convexity before any stop check (pre PR #25 review INLINE-N).
 #[test]
 fn nonconvex_qcqp_preset_deadline_stops_via_convex_bridge_precheck() {
     let problem = nonconvex_qcqp_problem(3.0);

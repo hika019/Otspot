@@ -222,21 +222,16 @@ pub fn compute_sensitivity(
     }
 
     // ── Objective ranging ─────────────────────────────────────────────────────
-    //
-    // Changing c_j by δ changes c_sf[col] by sign_j * δ (where sign_j is the
-    // coefficient from orig_var_info[j].new_vars[.].1, ±1).
-    //
-    // For basic variable j at basis row p, the new reduced cost of any non-basic k is:
-    //   c̄_sf_new[k] = c̄_sf[k] + δ * C_k
-    //   C_k = direct_k - sign_j * (π_p^T a_sf_k)
-    //
-    // where π_p = B^{-T} e_p  and  direct_k is sign_k if k is another split
-    // column of the same free variable j (else 0).  Optimality c̄_sf_new[k] ≥ 0:
+    // Changing c_j by δ changes c_sf[col] by sign_j·δ (sign_j = ±1 from
+    // orig_var_info[j].new_vars[.].1). For basic j at basis row p, the new
+    // reduced cost of non-basic k is `c̄_sf_new[k] = c̄_sf[k] + δ·C_k`,
+    // `C_k = direct_k - sign_j·(π_p^T a_sf_k)`, where `π_p = B^{-T} e_p` and
+    // `direct_k` is `sign_k` if k is another split column of free var j (else 0).
+    // Optimality `c̄_sf_new[k] ≥ 0` gives:
     //   Δ_up   = min { c̄_sf[k] / (-C_k) : C_k < 0, k non-basic }
     //   Δ_down = min { c̄_sf[k] /   C_k  : C_k > 0, k non-basic }
-    //
-    // For a non-basic variable the original-space reduced cost rc[j] gives the
-    // range directly (no BTRAN required).
+    // For a non-basic j the original-space reduced cost rc[j] gives the range
+    // directly (no BTRAN required).
 
     let mut obj_ranges = Vec::with_capacity(n_orig);
 

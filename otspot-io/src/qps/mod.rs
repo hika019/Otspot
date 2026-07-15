@@ -614,30 +614,27 @@ ENDATA\n";
     }
 
     /// Sentinel (P0 regression, `forplan.QPS`): strict fixed-column MPS/QPS
-    /// RHS/RANGES with embedded spaces in the vector name (`"RHS 1"`,
-    /// `"RNG 1"`) and in a row name (`"BR   1 1"`) must parse via the
-    /// whole-file fixed-column reader, not whitespace tokenization. Fixture mirrors
-    /// `data/lp_problems/forplan.QPS`'s actual RHS/RANGES lines byte-for-byte
-    /// (same row names `LC123`/`BR   1 1`/`LTSYCT`, same vector names
-    /// `RHS 1`/`RNG 1`, same field columns 4/12/14/22/24/36/39/47/49/61).
+    /// RHS/RANGES with embedded spaces in the vector name (`"RHS 1"`, `"RNG 1"`)
+    /// and a row name (`"BR   1 1"`) must parse via the whole-file fixed-column
+    /// reader, not whitespace tokenization. Fixture mirrors
+    /// `data/lp_problems/forplan.QPS`'s RHS/RANGES lines byte-for-byte (same row
+    /// names, vector names, and field columns 4/12/14/22/24/36/39/47/49/61).
     ///
     /// Independent oracle #1: `prob.b`, hand-read off the fixture — LC123=10
     /// (Le), `BR   1 1`=6 (Le, unused by any column, must still parse to the
     /// right value), LTSYCT range-expanded to `[2, 7]` (RANGES `LTSYCT 5`) →
     /// Le rhs=7 then Le rhs=-2 (the G→Le sign flip for the lower bound).
     ///
-    /// Independent oracle #2: hand-solved LP. `BR   1 1` has no COLUMNS
-    /// entries (it exists purely to exercise the embedded-space RHS row
-    /// name), so it is a slack `0<=6` row that never binds; feasibility is
-    /// driven only by `x1+x2<=10` (LC123) and `2<=x2<=7` (LTSYCT range),
-    /// with default `x1,x2>=0`. `min -x1-x2` (= `max x1+x2`) is optimized at
-    /// any point with `x1+x2=10`, `0<=x1`, `2<=x2<=7` (e.g. x1=6,x2=4),
-    /// giving objective `-10.0`.
+    /// Independent oracle #2: hand-solved LP. `BR   1 1` has no COLUMNS entries
+    /// (it exists purely to exercise the embedded-space RHS row name), so it is
+    /// a slack `0<=6` row that never binds; feasibility is driven only by
+    /// `x1+x2<=10` (LC123) and `2<=x2<=7` (LTSYCT range), default `x1,x2>=0`.
+    /// `min -x1-x2` is optimized anywhere with `x1+x2=10`, `2<=x2<=7`
+    /// (e.g. x1=6,x2=4), objective `-10.0`.
     ///
     /// **No-op failure guarantee**: reverting the fixed-column fallback in
-    /// `common::parse_vector_pairs` (back to whitespace-only tokenization)
-    /// makes this fixture fail to parse with `ParseError` ("row name has no
-    /// matching value") — verified by temporarily reverting the fix.
+    /// `common::parse_vector_pairs` (to whitespace-only tokenization) makes this
+    /// fixture fail to parse (`ParseError`, "row name has no matching value").
     #[test]
     fn test_qps_forplan_style_rhs_ranges_fixed_columns() {
         use otspot_core::problem::LpProblem;
@@ -1429,7 +1426,7 @@ ENDATA
     }
 
     // -----------------------------------------------------------------------
-    // Task #9: vector-name-omitted (shorthand) RHS/RANGES/BOUNDS + multi-vector
+    // vector-name-omitted (shorthand) RHS/RANGES/BOUNDS + multi-vector
     // RHS/RANGES support.
     // -----------------------------------------------------------------------
 

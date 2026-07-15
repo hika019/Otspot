@@ -773,20 +773,15 @@ mod roundtrip_kkt {
 // -----------------------------------------------------------
 // Step 7 free-variable substitution fill-in cascade (cont1/4/11 hang repro)
 // -----------------------------------------------------------
-//
 // REGRESSION GUARD — currently EXPECTED TO FAIL.
 //
-// `step7_free_var_substitution` hangs on cont* (measured 2026-06-01: burns full
-// 30s deadline after only 5708/~40k eliminations; `fill_in_exceeds_budget` never
-// fired because its budget scales with the current row count, so an already-dense
-// column is allowed to densify further).
-//
-// This synthetic reproduces the cascade at small scale: hub vars a_0..a_N chained
-// by shared pivot rows; eliminating a_0 densifies all R load rows repeatedly.
-// Cost grows super-linearly in R (measured: doubling R ≈ 3.5× time).
-//
-// EXPECTED AFTER FIX: must finish under MAX_PRESOLVE_SECS (~2.6s release → FAILS).
-// SAFETY_DEADLINE is a non-hang guard; assertion is on wall-clock.
+// `step7_free_var_substitution` hangs on cont* (measured 2026-06-01: burns the
+// full 30s deadline after only 5708/~40k eliminations; `fill_in_exceeds_budget`
+// never fires because its budget scales with the current row count, letting an
+// already-dense column densify further). This synthetic reproduces the cascade
+// small-scale: hub vars a_0..a_N chained by shared pivot rows; eliminating a_0
+// densifies all R load rows, cost super-linear in R (doubling R ≈ 3.5× time).
+// EXPECTED AFTER FIX: finishes under MAX_PRESOLVE_SECS (~2.6s release → FAILS).
 #[test]
 fn test_step7_free_var_fillin_must_not_blow_up() {
     use std::time::{Duration, Instant};
