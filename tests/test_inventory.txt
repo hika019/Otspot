@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2783 testcases, 26 ignored
+# totals: 2807 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -40,19 +40,25 @@ otspot-core	conic::ipm::tests::shift_into_cone_is_per_block_not_global	active
 otspot-core	conic::ipm::tests::shift_into_cone_pushes_each_outside_soc_by_its_own_distance	active
 otspot-core	conic::kkt::tests::equilibrate_guards_zero_and_subnormal_diagonals	active
 otspot-core	conic::misocp::tests::build_relaxation_matches_dense_reference	active
+otspot-core	conic::misocp::tests::qcqp_true_objective_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::accept_honors_caller_tolerance_after_rounding_not_a_fixed_floor	active
 otspot-core	conic::nonconvex::tests::cancel_flag_is_honored_inside_the_bnb_loop	active
 otspot-core	conic::nonconvex::tests::exhausted_clean_search_certifies_optimal_with_zero_gap	active
 otspot-core	conic::nonconvex::tests::failed_root_relaxation_is_not_false_infeasible	active
+otspot-core	conic::nonconvex::tests::feasible_panics_on_a_eq_dimension_mismatch	active
+otspot-core	conic::nonconvex::tests::feasible_panics_on_g_lin_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::global_miqcp_nan_int_tol_is_rejected_not_silently_broken	active
 otspot-core	conic::nonconvex::tests::incumbent_with_failed_node_is_not_optimal	active
 otspot-core	conic::nonconvex::tests::leaf_accept_no_longer_loosens_feas_tol_by_100x	active
 otspot-core	conic::nonconvex::tests::mccormick_w_box_bounds_diagonal_square_below	active
 otspot-core	conic::nonconvex::tests::mismatched_dims_returns_not_supported_not_a_panic	active
 otspot-core	conic::nonconvex::tests::node_limited_with_incumbent_is_suboptimal	active
+otspot-core	conic::nonconvex::tests::quad_val_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_expired_deadline	active
 otspot-core	conic::nonconvex::tests::sparse_relax_matches_dense_reference	active
 otspot-core	conic::nonconvex::tests::validate_rejects_every_mismatched_dimension	active
+otspot-core	conic::qcqp::tests::qcqp_objective_panics_on_dimension_mismatch	active
+otspot-core	conic::qcqp::tests::qp_problem_objective_panics_on_dimension_mismatch	active
 otspot-core	conic::tests::bench_conic_suite	ignored
 otspot-core	conic::tests::cone_membership_check_covers_all_branches	active
 otspot-core	conic::tests::conic_border_l_fill_stays_linear	active
@@ -130,6 +136,12 @@ otspot-core	conic::tests::socp_extreme_scale_never_falsely_conclusive	active
 otspot-core	conic::tests::socp_fixed_var_soc_infeasible_gets_certificate	active
 otspot-core	conic::tests::socp_large_bound_box_scale_sweep_is_optimal	active
 otspot-core	conic::tests::socp_large_scale_true_infeasible_gets_certificate	active
+otspot-core	conic::tests::solve_misocp_x_length_invariant::genuine_incumbent_keeps_x_len_eq_n	active
+otspot-core	conic::tests::solve_misocp_x_length_invariant::miqcp_convexity_unproven_keeps_x_empty	active
+otspot-core	conic::tests::solve_misocp_x_length_invariant::miqcp_to_conic_failure_keeps_x_empty	active
+otspot-core	conic::tests::solve_misocp_x_length_invariant::no_incumbent_search_keeps_x_empty	active
+otspot-core	conic::tests::solve_misocp_x_length_invariant::own_validate_failure_keeps_x_empty	active
+otspot-core	conic::tests::solve_misocp_x_length_invariant::unbounded_ray_with_all_integers_already_fixed_keeps_x_empty	active
 otspot-core	conic::tests::solve_qcqp_with_expired_deadline_skips_to_conic_cost	active
 otspot-core	conic::tests::solve_qp_problem_as_qcqp_with_expired_deadline_skips_conic_build_cost	active
 otspot-core	conic::tests::solve_socp_canonicalizes_non_optimal_objective	active
@@ -138,6 +150,10 @@ otspot-core	conic::tests::solve_socp_checks_deadline_before_equilibration	active
 otspot-core	conic::tests::solve_socp_preserves_real_iterate_objective_when_inconclusive	active
 otspot-core	conic::tests::solve_socp_reports_not_supported_for_invalid_options	active
 otspot-core	conic::tests::solve_socp_reports_not_supported_for_non_finite_input_instead_of_numerical_error	active
+otspot-core	conic::tests::solve_socp_x_length_invariant::infeasible_keeps_x_len_eq_n	active
+otspot-core	conic::tests::solve_socp_x_length_invariant::mid_loop_timeout_keeps_x_len_eq_n	active
+otspot-core	conic::tests::solve_socp_x_length_invariant::not_supported_keeps_x_len_eq_n	active
+otspot-core	conic::tests::solve_socp_x_length_invariant::stop_requested_pre_check_keeps_x_len_eq_n	active
 otspot-core	conic::tests::tiny_socp_hand_optimum	active
 otspot-core	conic::tests::to_conic_matches_dense_oracle_randomized	active
 otspot-core	conic::tests::to_conic_matches_hand_built_dense_oracle	active
@@ -1026,8 +1042,10 @@ otspot-core	qp::ipm_solver::core::postsolve_dual::recovery_stall_gate_tests::mic
 otspot-core	qp::ipm_solver::core::postsolve_dual::recovery_stall_gate_tests::near_zero_noise_is_stall	active
 otspot-core	qp::ipm_solver::core::postsolve_dual::recovery_stall_gate_tests::real_progress_is_not_stall	active
 otspot-core	qp::ipm_solver::core::postsolve_krylov_gate_tests::krylov_gate_uses_post_refine_pass_state	active
+otspot-core	qp::ipm_solver::core::recompute_objective_tests::recompute_objective_panics_on_dimension_mismatch	active
 otspot-core	qp::ipm_solver::kkt::tests::bound_violation_nan_x_returns_infinity	active
 otspot-core	qp::ipm_solver::kkt::tests::complementarity_componentwise_rel_maps_fixed_omitted_bound_duals	active
+otspot-core	qp::ipm_solver::kkt::tests::complementarity_residual_rel_panics_on_dimension_mismatch	active
 otspot-core	qp::ipm_solver::kkt::tests::complementarity_residual_rel_rejects_malformed_bound_duals_before_scaling	active
 otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_excludes_fx_and_empty_col	active
 otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_linear_only_var_not_skipped_with_mask	active
@@ -1070,6 +1088,9 @@ otspot-core	qp::kkt_resid::tests::dual_sign_z_ub_positive_no_violation	active
 otspot-core	qp::kkt_resid::tests::f64_comp_ineq_products_skip_eq	active
 otspot-core	qp::kkt_resid::tests::f64_constraint_violations_le_ge_eq	active
 otspot-core	qp::kkt_resid::tests::f64_constraint_violations_no_negative	active
+otspot-core	qp::kkt_resid::tests::f64_impl_aty_panics_on_dimension_mismatch	active
+otspot-core	qp::kkt_resid::tests::f64_impl_ax_panics_on_dimension_mismatch	active
+otspot-core	qp::kkt_resid::tests::f64_impl_qx_panics_on_dimension_mismatch	active
 otspot-core	qp::lp_dispatch::tests::cty_slack_within_noise_separates_real_slack_from_roundoff	active
 otspot-core	qp::lp_dispatch::tests::farkas_certifies_genuine_infeasible	active
 otspot-core	qp::lp_dispatch::tests::farkas_false_on_empty_constraints	active
@@ -2112,6 +2133,7 @@ otspot-model	model::mip_model_tests::test_quad_state_invariants_transition_table
 otspot-model	model::mip_model_tests::test_quad_state_solve_outcome_table	active
 otspot-model	model::mip_model_tests::test_reminimize_constant_not_double_counted	active
 otspot-model	model::mip_model_tests::test_sentinel_obj_offset_non_finite_rejected	active
+otspot-model	model::qcqp_model_raw_objective_tests::panics_on_dimension_mismatch	active
 otspot-model	model::tests::add_int_var_lb_gt_ub_defers_error_to_solve	active
 otspot-model	model::tests::add_var_lb_gt_ub_defers_error_to_solve	active
 otspot-model	model::tests::add_var_nan_bounds_defers_error_to_solve	active
@@ -2156,6 +2178,8 @@ otspot-model	model::tests::var_name_cross_model_in_range_panics	active
 otspot-model	model::tests::var_name_is_retained	active
 otspot-model	model::tests::var_name_regression_unchecked_still_works	active
 otspot-model	model::tests::var_name_same_model_out_of_range_panics	active
+otspot-model	model::truncate_conic_solution_tests::panics_when_shorter_than_n	active
+otspot-model	model::truncate_conic_solution_tests::truncates_extra_soc_epigraph_columns	active
 otspot-model	quad_expr::tests::test_add_quadexprs	active
 otspot-model	quad_expr::tests::test_cancelled_quad_routes_to_lp	active
 otspot-model	quad_expr::tests::test_cancelled_quad_term_is_linear	active
