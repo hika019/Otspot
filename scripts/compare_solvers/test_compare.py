@@ -49,6 +49,17 @@ problem,status,objective,iterations,time_sec
 syn10m,Unbounded,,2,0.900
 """
 
+# bench_qplib.rs (NONCONVEX_LOCAL/NONCONVEX_GLOBAL, bench_qplib.rs:571/581)
+# and qps_benchmark.rs (NOT_SUPPORTED, qps_benchmark.rs:952) detail lines,
+# same `{name:<24} {n:>6} {m:>6} {status:>15} {time:>10.3} {note}` layout as
+# BENCH_PARALLEL_FIXTURE.
+NONCONVEX_AND_UNSUPPORTED_FIXTURE = """\
+=== 問題別詳細 ===
+QPLIB_1111                   10      2 NONCONVEX_LOCAL      0.100 [ipm] obj=1.000000e0 kkt=1.0e-7 gap=1.0e-4
+QPLIB_2222                   10      2 NONCONVEX_GLOBAL      0.200 [bb] obj=2.000000e0 kkt=1.0e-7 gap=0.0e0
+QPLIB_3333                   10      2   NOT_SUPPORTED      0.050 [ipm] unsupported cone type
+"""
+
 
 def _write(content: str, suffix: str) -> str:
     fd, path = tempfile.mkstemp(suffix=suffix)
@@ -91,6 +102,59 @@ class TestBenchParallelParser(unittest.TestCase):
         """`    EXTERNAL_TIMEOUT: 1` is a Summary counter, not a problem."""
         self.assertNotIn("EXTERNAL_TIMEOUT", self.parsed)
         self.assertNotIn("EXTERNAL_TIMEOUT:", self.parsed)
+
+
+class TestNonconvexAndUnsupportedStatuses(unittest.TestCase):
+    """P2 sentinel: NONCONVEX_LOCAL/NONCONVEX_GLOBAL (bench_qplib.rs) and
+    NOT_SUPPORTED (qps_benchmark.rs) detail lines must not be dropped by
+    KNOWN_STATUSES, or the problem silently disappears from otspot_pass
+    triage (an external-solver win goes undetected). Reverting the
+    KNOWN_STATUSES additions makes these lines fail the whitelist check and
+    the problems vanish from the parsed map."""
+
+    def setUp(self):
+        self.path = _write(NONCONVEX_AND_UNSUPPORTED_FIXTURE, ".txt")
+        self.parsed = parse_bench_parallel_txt(self.path)
+
+    def tearDown(self):
+        os.unlink(self.path)
+
+    def test_nonconvex_local_not_dropped(self):
+        self.assertIn("QPLIB_1111", self.parsed)
+        self.assertEqual(self.parsed["QPLIB_1111"]["status"], "NONCONVEX_LOCAL")
+
+    def test_nonconvex_global_not_dropped(self):
+        self.assertIn("QPLIB_2222", self.parsed)
+        self.assertEqual(self.parsed["QPLIB_2222"]["status"], "NONCONVEX_GLOBAL")
+
+    def test_not_supported_not_dropped(self):
+        self.assertIn("QPLIB_3333", self.parsed)
+        self.assertEqual(self.parsed["QPLIB_3333"]["status"], "NOT_SUPPORTED")
+
+    def test_external_optimal_over_these_statuses_is_a_win(self):
+        """End-to-end sentinel for the actual harm Codex flagged: build_rows
+        computes `other_solver_wins = (not o_pass) and (h_wins or s_wins)
+        and (name in otspot)` (compare.py). Before the whitelist fix these
+        detail lines were dropped from the parsed map, `name in otspot` was
+        False, and other_solver_wins was forced False — hiding every
+        externally-solvable NONCONVEX_LOCAL / NONCONVEX_GLOBAL /
+        NOT_SUPPORTED problem from triage. Removing the three statuses from
+        KNOWN_STATUSES flips these asserts back to False."""
+        highs_path = _solver_csv([
+            ("QPLIB_1111", "optimal", "1.0e0", "3.0"),
+            ("QPLIB_2222", "optimal", "2.0e0", "3.0"),
+            ("QPLIB_3333", "optimal", "3.0e0", "3.0"),
+        ])
+        try:
+            highs = parse_solver_csv(highs_path)
+        finally:
+            os.unlink(highs_path)
+        rows = {r["problem"]: r for r in build_rows(self.parsed, highs, {})}
+        for name in ("QPLIB_1111", "QPLIB_2222", "QPLIB_3333"):
+            self.assertTrue(
+                rows[name]["other_solver_wins"],
+                f"{name}: externally solved, otspot non-PASS -> must be a win",
+            )
 
 
 class TestSolveCbfParser(unittest.TestCase):

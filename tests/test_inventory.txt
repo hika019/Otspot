@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2807 testcases, 26 ignored
+# totals: 2820 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1777,15 +1777,24 @@ otspot-dev	bench_utils::tests::test_dfeas_bound_hit_relative_structural	active
 otspot-dev	bench_utils::tests::test_dfeas_componentwise_matches_orig_lp_path	active
 otspot-dev	bench_utils::tests::test_dfeas_dual_length_guard_scoped_to_kkt_path	active
 otspot-dev	bench_utils::tests::test_dfeas_lp_path_ignores_short_dual_no_panic	active
+otspot-dev	bench_utils::tests::test_is_kkt_violation_thresholds	active
+otspot-dev	bench_utils::tests::test_kkt_gated_label_demotes_all_solution_claiming_labels	active
 otspot-dev	bench_utils::tests::test_load_expected_statuses_case_insensitive	active
 otspot-dev	bench_utils::tests::test_load_expected_statuses_infeasible	active
 otspot-dev	bench_utils::tests::test_load_expected_statuses_skips_comments_and_header	active
 otspot-dev	bench_utils::tests::test_load_qplib_baselines_merges_qcqp_csv	active
 otspot-dev	bench_utils::tests::test_load_qplib_baselines_merges_qcqp_csv_with_override	active
+otspot-dev	bench_utils::tests::test_merge_qplib_baselines_catches_infeasible_vs_numeric_collision_reversed	active
+otspot-dev	bench_utils::tests::test_merge_qplib_baselines_catches_numeric_vs_infeasible_collision	active
 otspot-dev	bench_utils::tests::test_merge_qplib_baselines_merges_disjoint	active
 otspot-dev	bench_utils::tests::test_merge_qplib_baselines_rejects_shared_id	active
 otspot-dev	bench_utils::tests::test_pfeas_normalized_eq_both_directions	active
 otspot-dev	bench_utils::tests::test_pfeas_normalized_ge	active
+otspot-dev	bench_utils::tests::test_qcqp_pfeas_max_eq_violation_and_feasible	active
+otspot-dev	bench_utils::tests::test_qcqp_pfeas_max_ge_violation_and_feasible	active
+otspot-dev	bench_utils::tests::test_qcqp_pfeas_max_le_violation_and_feasible	active
+otspot-dev	bench_utils::tests::test_qcqp_pfeas_max_pure_qp_is_zero	active
+otspot-dev	bench_utils::tests::test_qcqp_pfeas_max_rejects_bypassed_length_mismatch	active
 otspot-dev	bench_utils::tests::test_qplib_csv_and_qcqp_csv_have_disjoint_ids	active
 otspot-dev::bin/bench_qplib	unsupported_classify_tests::binary_var_message_is_integer_category	active
 otspot-dev::bin/bench_qplib	unsupported_classify_tests::constraint_type_message_is_qcqp_category	active
@@ -1909,6 +1918,7 @@ otspot-io	mps::tests::test_mps_ranges_fixed_shorthand_vector_name_omitted	active
 otspot-io	mps::tests::test_mps_ranges_fixed_vector_name_collides_with_declared_row_name	active
 otspot-io	mps::tests::test_mps_ranges_malformed_too_few_fields_is_error	active
 otspot-io	mps::tests::test_mps_ranges_multiple_named_vectors_first_wins	active
+otspot-io	mps::tests::test_mps_ranges_second_vector_undefined_row_is_error	active
 otspot-io	mps::tests::test_mps_ranges_shorthand_two_pairs_numeric_row_names	active
 otspot-io	mps::tests::test_mps_reader_crlf_equivalence	active
 otspot-io	mps::tests::test_mps_reader_fixture_afiro	active
@@ -1922,6 +1932,7 @@ otspot-io	mps::tests::test_mps_rhs_multiple_named_vectors_first_wins	active
 otspot-io	mps::tests::test_mps_rhs_n_row_finite_propagates_to_obj_offset	active
 otspot-io	mps::tests::test_mps_rhs_n_row_nan_is_error	active
 otspot-io	mps::tests::test_mps_rhs_nan_value_is_error	active
+otspot-io	mps::tests::test_mps_rhs_second_vector_undefined_row_is_error	active
 otspot-io	mps::tests::test_mps_rhs_shorthand_two_pairs_numeric_row_names	active
 otspot-io	mps::tests::test_mps_undefined_row_reference_is_error	active
 otspot-io	mps::tests::test_parse_bounds_fr	active
@@ -2042,6 +2053,7 @@ otspot-io	qps::tests::test_qps_ranges_fixed_shorthand_vector_name_omitted	active
 otspot-io	qps::tests::test_qps_ranges_fixed_vector_name_collides_with_declared_row_name	active
 otspot-io	qps::tests::test_qps_ranges_multiple_named_vectors_first_wins	active
 otspot-io	qps::tests::test_qps_ranges_odd_trailing_token_has_name_without_value_error	active
+otspot-io	qps::tests::test_qps_ranges_second_vector_undefined_row_is_error	active
 otspot-io	qps::tests::test_qps_reader_crlf_equivalence	active
 otspot-io	qps::tests::test_qps_reader_fixture_tame	active
 otspot-io	qps::tests::test_qps_reader_pulls_lines_lazily_not_all_upfront	active
@@ -2058,6 +2070,7 @@ otspot-io	qps::tests::test_qps_rhs_nan_constraint_row_3field_is_error	active
 otspot-io	qps::tests::test_qps_rhs_nan_constraint_row_is_error	active
 otspot-io	qps::tests::test_qps_rhs_nan_named_overwrite_is_error	active
 otspot-io	qps::tests::test_qps_rhs_odd_trailing_token_has_name_without_value_error	active
+otspot-io	qps::tests::test_qps_rhs_second_vector_undefined_row_is_error	active
 otspot-io	qps::tests::test_qps_rhs_shorthand_two_pairs_numeric_row_names	active
 otspot-io	qps::tests::test_qps_undefined_row_reference_is_error	active
 otspot-io	qps::tests::test_quadobj_symmetry	active

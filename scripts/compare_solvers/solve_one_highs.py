@@ -12,6 +12,7 @@ Usage: solve_one_highs.py <path> [--timeout SEC]
 """
 import argparse
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -105,8 +106,7 @@ def solve_mps_family(path: str, timeout: float):
     try:
         # HiGHS dispatches purely on filename suffix; copy to a `.mps` name
         # regardless of the source suffix's case (`.QPS`/`.qps`/`.mps`).
-        with open(path, "rb") as src, open(tmp_mps, "wb") as dst:
-            dst.write(src.read())
+        shutil.copyfile(path, tmp_mps)
         h = highspy.Highs()
         h.setOptionValue("output_flag", False)
         h.setOptionValue("time_limit", float(timeout))
