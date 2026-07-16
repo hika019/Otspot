@@ -873,6 +873,18 @@ impl VectorSectionState {
         Self::default()
     }
 
+    /// Row names referenced by *any* vector this section has seen, including
+    /// ones discarded because they weren't the first vector.
+    ///
+    /// `record` only writes a discarded vector's entries into `seen`, never
+    /// into `target` (the RHS/RANGES map `validate_references` otherwise
+    /// checks) — a row name that appears solely in a later vector would
+    /// therefore never reach a "row not declared" check, letting a typo'd row
+    /// name in a discarded vector slip past strict-reference validation.
+    pub(crate) fn referenced_rows(&self) -> impl Iterator<Item = &str> {
+        self.seen.iter().map(|(_, row)| row.as_str())
+    }
+
     /// Records `row_name -> value` into `target` (only when the entry belongs to
     /// the first vector this section opened). Returns an error when
     /// `(vector, row)` repeats, or when a named entry follows unnamed ones.

@@ -321,14 +321,16 @@ impl QpsParser {
         for row_name in self
             .columns
             .iter()
-            .map(|(_, row, _)| row)
-            .chain(self.rhs.keys())
-            .chain(self.ranges.keys())
+            .map(|(_, row, _)| row.as_str())
+            .chain(self.rhs.keys().map(String::as_str))
+            .chain(self.ranges.keys().map(String::as_str))
+            .chain(self.rhs_vectors.referenced_rows())
+            .chain(self.ranges_vectors.referenced_rows())
         {
-            if !self.row_names.contains(row_name.as_str()) {
+            if !self.row_names.contains(row_name) {
                 return Err(QpsError::UndefinedReference {
                     kind: "row".to_string(),
-                    name: row_name.clone(),
+                    name: row_name.to_string(),
                 });
             }
         }

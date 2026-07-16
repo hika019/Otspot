@@ -1521,6 +1521,44 @@ ENDATA
         );
     }
 
+    /// PR #25 review (Codex): a row name that appears only in a *discarded*
+    /// (non-first) RHS vector must still be checked against ROWS. `record`
+    /// only writes a discarded vector's entries into `seen`, not into
+    /// `target` (the map `validate_references` used to check alone), so an
+    /// undeclared row confined to RHS2 used to slip past strict-reference
+    /// validation entirely.
+    ///
+    /// Sentinel: reverting `validate_references` to check only
+    /// `self.rhs.keys()` (dropping the `rhs_vectors.referenced_rows()` chain)
+    /// makes this `Ok` instead of `Err` — verified by temporarily reverting.
+    #[test]
+    fn test_qps_rhs_second_vector_undefined_row_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    RHS1  c1  10.0\n    RHS2  ghost  20.0\nENDATA\n";
+        let err = parse_qps_str(qps)
+            .expect_err("RHS2 (discarded) referencing an undeclared row must error");
+        assert!(
+            matches!(err, QpsError::UndefinedReference { ref kind, ref name } if kind == "row" && name == "ghost"),
+            "expected UndefinedReference{{kind: row, name: ghost}}, got {err:?}"
+        );
+    }
+
+    /// Analogous to the RHS case above, for RANGES: an undeclared row
+    /// confined to the discarded second RANGES vector must still error.
+    ///
+    /// Sentinel: reverting `validate_references`' `ranges_vectors
+    /// .referenced_rows()` chain makes this `Ok` instead of `Err` — verified
+    /// by temporarily reverting.
+    #[test]
+    fn test_qps_ranges_second_vector_undefined_row_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    rhs  c1  10.0\nRANGES\n    RNG1  c1  2.0\n    RNG2  ghost  4.0\nENDATA\n";
+        let err = parse_qps_str(qps)
+            .expect_err("RANGES2 (discarded) referencing an undeclared row must error");
+        assert!(
+            matches!(err, QpsError::UndefinedReference { ref kind, ref name } if kind == "row" && name == "ghost"),
+            "expected UndefinedReference{{kind: row, name: ghost}}, got {err:?}"
+        );
+    }
+
     /// Sentinel: BOUNDS bound-set-name omitted for the non-value-taking
     /// 2-token shorthand (`TYPE COL`, e.g. `FR x1`) — previously rejected
     /// outright by the `parts.len() < 3` guard even though the value-taking

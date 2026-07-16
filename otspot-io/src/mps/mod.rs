@@ -1580,6 +1580,40 @@ ENDATA
         );
     }
 
+    /// PR #25 review (Codex): a row name that appears only in a *discarded*
+    /// (non-first) RHS vector must still be checked against ROWS. `record`
+    /// only writes a discarded vector's entries into `seen`, not into
+    /// `target` (the map `validate_references` used to check alone), so an
+    /// undeclared row confined to RHS2 used to slip past strict-reference
+    /// validation entirely.
+    ///
+    /// Sentinel: reverting `validate_references` to check only
+    /// `self.rhs.keys()` (dropping the `rhs_vectors.referenced_rows()` chain)
+    /// makes this `Ok` instead of `Err` — verified by temporarily reverting.
+    #[test]
+    fn test_mps_rhs_second_vector_undefined_row_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    RHS1  c1  10.0\n    RHS2  ghost  20.0\nENDATA\n";
+        let err =
+            parse_mps(mps).expect_err("RHS2 (discarded) referencing an undeclared row must error");
+        assert!(
+            matches!(err, MpsError::UndefinedReference { ref kind, ref name } if kind == "row" && name == "ghost"),
+            "expected UndefinedReference{{kind: row, name: ghost}}, got {err:?}"
+        );
+    }
+
+    /// Analogous to the RHS case above, for RANGES: an undeclared row
+    /// confined to the discarded second RANGES vector must still error.
+    #[test]
+    fn test_mps_ranges_second_vector_undefined_row_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nRANGES\n    RNG1  c1  2.0\n    RNG2  ghost  4.0\nENDATA\n";
+        let err = parse_mps(mps)
+            .expect_err("RANGES2 (discarded) referencing an undeclared row must error");
+        assert!(
+            matches!(err, MpsError::UndefinedReference { ref kind, ref name } if kind == "row" && name == "ghost"),
+            "expected UndefinedReference{{kind: row, name: ghost}}, got {err:?}"
+        );
+    }
+
     /// A strict fixed-column MPS whose ROWS / COLUMNS / RHS all use a row name
     /// containing embedded spaces (`"BR   1 1"`, the shape real Netlib
     /// `forplan` uses), with a **single-token** RHS vector name (`RHS`).
