@@ -125,6 +125,92 @@ pub fn compute_qp_kkt_max(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) ->
     max_resid
 }
 
+/// QCQP quadratic-constraint primal feasibility max-violation.
+///
+/// For each constraint `k` with a non-empty `quadratic_constraints[k]`,
+/// evaluates the full row `1/2 x'Q_k x + (Ax)_k {<=,=,>=} b_k`
+/// (`QpProblem`'s documented QCQP row semantics) and returns the max
+/// relative violation, scaled `1 + |lhs_k| + |b_k|` (matches
+/// `compute_qp_kkt_max`'s `primal_feas_max` convention). Constraints with an
+/// empty `QcqpMatrix` (pure-linear rows in an otherwise-QCQP problem) are
+/// skipped here — `primal_feas_max`/`compute_qp_kkt_max` already cover the
+/// linear-only rows via `Ax`.
+///
+/// Stationarity of the quadratic-constraint multipliers is out of scope:
+/// this checks primal feasibility only, mirroring `primal_feas_max`'s role
+/// for the linear rows.
+///
+/// Returns `0.0` for a pure QP/LP (`quadratic_constraints` empty), and
+/// `f64::INFINITY` if `x` has the wrong length, non-finite entries, or the
+/// problem's `quadratic_constraints` invariant is broken (defensive: the
+/// field is public and callers can bypass `set_quadratic_constraints`).
+pub fn qcqp_pfeas_max(prob: &QpProblem, x: &[f64]) -> f64 {
+    if prob.quadratic_constraints.is_empty() {
+        return 0.0;
+    }
+    if prob.validate().is_err() {
+        return f64::INFINITY;
+    }
+    let n = prob.num_vars;
+    if x.len() != n || x.iter().any(|v| !v.is_finite()) {
+        return f64::INFINITY;
+    }
+    let ax = match prob.a.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return f64::INFINITY,
+    };
+    let mut max_v = 0.0_f64;
+    #[allow(unreachable_patterns)]
+    for (k, qc) in prob.quadratic_constraints.iter().enumerate() {
+        if qc.nnz() == 0 {
+            continue;
+        }
+        let quad: f64 = 0.5
+            * qc.triplets
+                .iter()
+                .map(|&(i, j, v)| v * x[i] * x[j])
+                .sum::<f64>();
+        let lhs = ax[k] + quad;
+        let b_k = prob.b[k];
+        if !lhs.is_finite() || !b_k.is_finite() {
+            return f64::INFINITY;
+        }
+        let viol = match prob.constraint_types[k] {
+            ConstraintType::Le => (lhs - b_k).max(0.0),
+            ConstraintType::Ge => (b_k - lhs).max(0.0),
+            ConstraintType::Eq => (lhs - b_k).abs(),
+            _ => continue,
+        };
+        let scale = 1.0 + lhs.abs() + b_k.abs();
+        max_v = max_v.max(viol / scale);
+    }
+    max_v
+}
+
+/// Whether a measured original-space residual disqualifies a claimed
+/// solution: non-finite or `>= eps`. `None` (nothing was measurable — e.g.
+/// no/short solution vector) never disqualifies; those arms carry their own
+/// diagnostics instead.
+pub fn is_kkt_violation(kkt_max: Option<f64>, eps: f64) -> bool {
+    kkt_max.is_some_and(|v| !v.is_finite() || v >= eps)
+}
+
+/// Final bench verdict label after the KKT/QCQP-pfeas gate, shared by every
+/// solution-claiming arm of `bench_qplib` (Optimal / SuboptimalSolution /
+/// NonconvexLocal / NonconvexGlobal): a claimed solution whose measured
+/// residual violates ([`is_kkt_violation`]) is a false positive whatever
+/// label the solver put on it, so the tentative label demotes to `KKT_FAIL`.
+/// Keeping the decision here (one pure function) stops the gate from being
+/// re-implemented per match arm in the bench binary, where the
+/// Nonconvex*/Suboptimal arms previously skipped it.
+pub fn kkt_gated_label(tentative: &'static str, kkt_max: Option<f64>, eps: f64) -> &'static str {
+    if is_kkt_violation(kkt_max, eps) {
+        "KKT_FAIL"
+    } else {
+        tentative
+    }
+}
+
 /// `|obj − global_ref| / (1 + |global_ref|)`. Returns `None` if either is non-finite.
 pub fn compute_gap_to_global(obj: f64, global_ref: f64) -> Option<f64> {
     if !obj.is_finite() || !global_ref.is_finite() {
@@ -1120,5 +1206,163 @@ mod tests {
             objectives.contains_key("QPLIB_2546"),
             "override path must still merge in qplib_qcqp.csv: {objectives:?}"
         );
+    }
+
+    // --- qcqp_pfeas_max ---
+
+    use otspot_core::qp::QcqpMatrix;
+
+    /// `1/2 x'Qx` diagonal `diag(2,2)` gives `x'Qx = x1^2 + x2^2` exactly —
+    /// the independent hand-computed oracle used by every case below.
+    fn make_qcqp(ct: ConstraintType, b: f64) -> QpProblem {
+        let q = CscMatrix::new(2, 2);
+        let a = CscMatrix::new(1, 2);
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let mut prob = QpProblem::new(q, vec![0.0, 0.0], a, vec![b], bounds, vec![ct]).unwrap();
+        let mut qc = QcqpMatrix::new(2);
+        qc.triplets = vec![(0, 0, 2.0), (1, 1, 2.0)];
+        prob.set_quadratic_constraints(vec![qc]).unwrap();
+        prob
+    }
+
+    #[test]
+    fn test_qcqp_pfeas_max_le_violation_and_feasible() {
+        // x1^2 + x2^2 <= 1.
+        let prob = make_qcqp(ConstraintType::Le, 1.0);
+        assert!(
+            qcqp_pfeas_max(&prob, &[0.0, 0.0]) < 1e-9,
+            "origin satisfies x1^2+x2^2<=1"
+        );
+        // Oracle: quad=0.5*(2*4+2*4)=8, lhs=8, viol=(8-1)=7, scale=1+8+1=10 -> 0.7.
+        let v = qcqp_pfeas_max(&prob, &[2.0, 2.0]);
+        assert!((v - 0.7).abs() < 1e-9, "expected 0.7, got {v}");
+    }
+
+    #[test]
+    fn test_qcqp_pfeas_max_ge_violation_and_feasible() {
+        // x1^2 + x2^2 >= 1.
+        let prob = make_qcqp(ConstraintType::Ge, 1.0);
+        assert!(
+            qcqp_pfeas_max(&prob, &[2.0, 0.0]) < 1e-9,
+            "quad=4 >= 1 is feasible"
+        );
+        // Oracle: quad=0, lhs=0, viol=(1-0)=1, scale=1+0+1=2 -> 0.5.
+        let v = qcqp_pfeas_max(&prob, &[0.0, 0.0]);
+        assert!((v - 0.5).abs() < 1e-9, "expected 0.5, got {v}");
+    }
+
+    #[test]
+    fn test_qcqp_pfeas_max_eq_violation_and_feasible() {
+        // x1^2 + x2^2 == 1.
+        let prob = make_qcqp(ConstraintType::Eq, 1.0);
+        assert!(
+            qcqp_pfeas_max(&prob, &[1.0, 0.0]) < 1e-9,
+            "quad=1 satisfies the equality exactly"
+        );
+        // Oracle: quad=0, lhs=0, viol=|0-1|=1, scale=1+0+1=2 -> 0.5.
+        let v = qcqp_pfeas_max(&prob, &[0.0, 0.0]);
+        assert!((v - 0.5).abs() < 1e-9, "expected 0.5, got {v}");
+    }
+
+    #[test]
+    fn test_qcqp_pfeas_max_pure_qp_is_zero() {
+        let q = CscMatrix::new(2, 2);
+        let a = CscMatrix::new(1, 2);
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let prob = QpProblem::new(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![1.0],
+            bounds,
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        assert_eq!(qcqp_pfeas_max(&prob, &[1e6, -1e6]), 0.0);
+    }
+
+    /// `quadratic_constraints` is a public field (bypass hazard shared with
+    /// `conic::qcqp`/`qp::qcqp_route`/`mip::problem`, see `QpProblem::validate`
+    /// doc): a length mismatch from direct assignment must degrade to
+    /// `INFINITY`, not index-panic.
+    #[test]
+    fn test_qcqp_pfeas_max_rejects_bypassed_length_mismatch() {
+        let mut prob = make_qcqp(ConstraintType::Le, 1.0);
+        let extra = QcqpMatrix::new(2);
+        prob.quadratic_constraints.push(extra); // len=2 but num_constraints=1
+        assert_eq!(qcqp_pfeas_max(&prob, &[0.0, 0.0]), f64::INFINITY);
+    }
+
+    // --- KKT gate (is_kkt_violation / kkt_gated_label) ---
+
+    #[test]
+    fn test_is_kkt_violation_thresholds() {
+        assert!(!is_kkt_violation(None, 1e-4));
+        assert!(!is_kkt_violation(Some(9.9e-5), 1e-4));
+        assert!(is_kkt_violation(Some(1e-4), 1e-4), "boundary is >= eps");
+        assert!(is_kkt_violation(Some(1e-3), 1e-4));
+        assert!(is_kkt_violation(Some(f64::NAN), 1e-4));
+        assert!(is_kkt_violation(Some(f64::INFINITY), 1e-4));
+    }
+
+    /// P1 sentinel (review follow-up): the KKT gate must demote *every*
+    /// solution-claiming label, not just Optimal/PASS — a constraint-violating
+    /// solution reported as NONCONVEX_LOCAL / NONCONVEX_GLOBAL / SUBOPTIMAL is
+    /// the exact false-positive path the review flagged.
+    ///
+    /// Reverting `kkt_gated_label` to a `tentative` pass-through (the
+    /// pre-fix per-arm behaviour) makes the KKT_FAIL asserts fail.
+    #[test]
+    fn test_kkt_gated_label_demotes_all_solution_claiming_labels() {
+        for label in ["NONCONVEX_LOCAL", "NONCONVEX_GLOBAL", "SUBOPTIMAL"] {
+            assert_eq!(kkt_gated_label(label, Some(1e-3), 1e-4), "KKT_FAIL");
+            assert_eq!(kkt_gated_label(label, Some(f64::NAN), 1e-4), "KKT_FAIL");
+            assert_eq!(kkt_gated_label(label, Some(1e-5), 1e-4), label);
+            assert_eq!(kkt_gated_label(label, None, 1e-4), label);
+        }
+    }
+
+    // --- merge_qplib_baselines: Codex P2 claim (numeric vs INFEASIBLE-sentinel
+    // collision on the same ID across the two baseline files) ---
+
+    /// P2 sentinel: same problem ID numeric in `base` (qplib.csv-shaped) and
+    /// `INFEASIBLE` sentinel in `extra` (qplib_qcqp.csv-shaped). Goes through
+    /// the real loaders (not hand-built maps): `load_expected_statuses` maps
+    /// *every* numeric row to `ExpectedStatus::Optimal` too, so `base_stat`
+    /// already carries the ID and the status-map half of
+    /// `merge_qplib_baselines`'s collision check (bench_utils.rs `dups`) is a
+    /// superset check across both baseline surfaces, not just the objective
+    /// map. Must return `Err` — if this FAILS, the Codex claim is correct and
+    /// the dedup logic needs an objective/status key union fix.
+    #[test]
+    fn test_merge_qplib_baselines_catches_numeric_vs_infeasible_collision() {
+        let base_csv = write_tmp_csv("problem_name,optimal_obj\nQPLIB_DUP,1.5\n");
+        let extra_csv = write_tmp_csv("problem_name,optimal_obj\nQPLIB_DUP,INFEASIBLE\n");
+
+        let base_obj = load_baseline_objectives(&base_csv).unwrap();
+        let base_stat = load_expected_statuses(&base_csv);
+        let extra_obj = load_baseline_objectives(&extra_csv).unwrap();
+        let extra_stat = load_expected_statuses(&extra_csv);
+
+        let err = super::merge_qplib_baselines(base_obj, base_stat, extra_obj, extra_stat)
+            .expect_err("numeric-vs-INFEASIBLE collision on the same ID must be rejected");
+        assert_eq!(err, vec!["QPLIB_DUP".to_string()]);
+    }
+
+    /// Companion, reversed roles: `INFEASIBLE` sentinel in `base`, numeric in
+    /// `extra`. Same superset-check argument applies symmetrically.
+    #[test]
+    fn test_merge_qplib_baselines_catches_infeasible_vs_numeric_collision_reversed() {
+        let base_csv = write_tmp_csv("problem_name,optimal_obj\nQPLIB_DUP2,INFEASIBLE\n");
+        let extra_csv = write_tmp_csv("problem_name,optimal_obj\nQPLIB_DUP2,2.5\n");
+
+        let base_obj = load_baseline_objectives(&base_csv).unwrap();
+        let base_stat = load_expected_statuses(&base_csv);
+        let extra_obj = load_baseline_objectives(&extra_csv).unwrap();
+        let extra_stat = load_expected_statuses(&extra_csv);
+
+        let err = super::merge_qplib_baselines(base_obj, base_stat, extra_obj, extra_stat)
+            .expect_err("INFEASIBLE-vs-numeric collision (reversed) must be rejected");
+        assert_eq!(err, vec!["QPLIB_DUP2".to_string()]);
     }
 }

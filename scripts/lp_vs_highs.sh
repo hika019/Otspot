@@ -281,7 +281,8 @@ with open(baseline_csv) as f:
 KNOWN_STATUSES = {
     'PASS', 'CHECKED[no_ref]', 'PASS:Infeasible', 'PASS:Unbounded',
     'TIMEOUT', 'MAXITER', 'ERROR', 'SKIP', 'PARSE_ERR',
-    'NONCONVEX', 'SUBOPTIMAL', 'KKT_FAIL', 'OBJ_MISMATCH',
+    'NONCONVEX', 'NONCONVEX_LOCAL', 'NONCONVEX_GLOBAL', 'NOT_SUPPORTED',
+    'SUBOPTIMAL', 'KKT_FAIL', 'OBJ_MISMATCH',
     'PFEAS_FAIL', 'DFEAS_FAIL', 'FAIL', 'FAIL:NumericalError', 'FAIL:Unknown',
 }
 
