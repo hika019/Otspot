@@ -167,12 +167,7 @@ fn solve_unpresolved_lp_from_qp(
     // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
     // QpProblem.obj_offset を別経路で加算する。
     let mut result = solve_lp_backend_no_presolve(lp, options);
-    if matches!(
-        result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
-    ) {
-        result.objective += problem.obj_offset;
-    }
+    add_qp_obj_offset(&mut result, problem.obj_offset);
     fill_lp_reduced_costs_from_dual(&mut result, lp);
     result
 }
@@ -231,12 +226,16 @@ fn solve_reduced_lp_from_qp(
         return fallback;
     }
 
+    // Stalled / MaxIterations も postsolve で元空間へ lift する: reduced 空間の
+    // solution をそのまま返すと SolverResult の「solution は元空間 or 空」契約を破る。
     if matches!(
         raw.status,
         SolveStatus::Optimal
             | SolveStatus::LocallyOptimal
             | SolveStatus::SuboptimalSolution
             | SolveStatus::Timeout
+            | SolveStatus::Stalled
+            | SolveStatus::MaxIterations
     ) && (!raw.solution.is_empty() || reduced_lp.num_vars == 0)
     {
         let deadline_expired = options.deadline.is_some_and(|d| Instant::now() >= d);
@@ -341,10 +340,16 @@ fn solve_lp_backend_no_presolve_with_gate(
     }
     let mut result = if should_try_lp_ipm(gate_lp, options) {
         let ipm = solve_lp_with_ipm_backend(lp, options);
+        // Stalled / MaxIterations もここで受理する: crossover 済みの非収束 iterate を
+        // 捨てて巨大 LP を simplex でフル再解するより、honest な status で返す方が
+        // 予算を守れる (simplex fallback は NumericalError 等の解なし時のみ)。
         if ipm.status == SolveStatus::Optimal
             || matches!(
                 ipm.status,
-                SolveStatus::Timeout | SolveStatus::SuboptimalSolution
+                SolveStatus::Timeout
+                    | SolveStatus::SuboptimalSolution
+                    | SolveStatus::Stalled
+                    | SolveStatus::MaxIterations
             )
             || options.deadline.is_some_and(|d| Instant::now() >= d)
             || matches!(ipm.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
@@ -424,9 +429,16 @@ fn solve_lp_with_ipm_backend(lp: &LpProblem, options: &SolverOptions) -> SolverR
         matches!(result.status, SolveStatus::Timeout) && ipm_opts.external_stop_requested();
     result.reduced_costs.clear();
 
+    // 非収束 iterate (Stalled / MaxIterations) も crossover に渡す: crossover は
+    // guard_lp_optimal の証明書を通った場合のみ Optimal を mint し、失敗時は元の
+    // status を保持するため、ここで品質を先取り判定する必要はない。
     if matches!(
         result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+        SolveStatus::Optimal
+            | SolveStatus::SuboptimalSolution
+            | SolveStatus::Timeout
+            | SolveStatus::Stalled
+            | SolveStatus::MaxIterations
     ) {
         let t_crossover = Instant::now();
         result = certify_lp_ipm_with_crossover(result, lp, options.deadline);
@@ -528,12 +540,16 @@ fn solve_original_lp_direct_retry(lp: &LpProblem, options: &SolverOptions) -> So
 }
 
 fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
+    // Stalled / MaxIterations の objective は診断値だが、offset を欠くと bench の
+    // gap 診断が原点ずれするため solution を持つ status には一律加算する。
     if matches!(
         result.status,
         SolveStatus::Optimal
             | SolveStatus::LocallyOptimal
             | SolveStatus::SuboptimalSolution
             | SolveStatus::Timeout
+            | SolveStatus::Stalled
+            | SolveStatus::MaxIterations
     ) {
         result.objective += qp_obj_offset;
     }
@@ -746,7 +762,10 @@ fn postsolved_lp_needs_direct_retry(
 ) -> bool {
     if !matches!(
         result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+        SolveStatus::Optimal
+            | SolveStatus::SuboptimalSolution
+            | SolveStatus::Stalled
+            | SolveStatus::MaxIterations
     ) {
         return false;
     }
@@ -757,7 +776,7 @@ fn postsolved_lp_needs_direct_retry(
         .is_some_and(|d| d > options.lp_accept_dual_tol())
         || postsolve_pfeas > accept_primal
         || postsolve_bfeas > accept_primal
-        || result.status == SolveStatus::SuboptimalSolution
+        || !matches!(result.status, SolveStatus::Optimal)
 }
 
 /// LP→IPM 呼び出し時に presolve を無効化したオプションを生成 (Farkas cert 検証専用)。
@@ -1067,6 +1086,52 @@ mod tests {
             &lp,
             &defaults
         ));
+    }
+
+    /// P2-1: MaxIterations must be gated symmetrically with Stalled — both are
+    /// non-converged diagnostic iterates from the same LP-IPM inner loop, so
+    /// the original-problem direct-retry rescue must fire for either.
+    ///
+    /// Sentinel: dropping `SolveStatus::MaxIterations` from the initial
+    /// `matches!` gate makes this FAIL (function returns `false` before even
+    /// checking residuals, exactly like the pre-fix behavior).
+    #[test]
+    fn postsolved_lp_retry_gate_treats_max_iterations_like_stalled() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        // Diagnostic iterate, well within tolerance on residuals — the gate must
+        // still fire because MaxIterations never claims Optimal (mirrors the
+        // Stalled arm's `!matches!(status, Optimal)` catch-all clause).
+        let max_iter_result = SolverResult {
+            status: SolveStatus::MaxIterations,
+            solution: vec![1.0],
+            objective: 0.0,
+            ..Default::default()
+        };
+        let stalled_result = SolverResult {
+            status: SolveStatus::Stalled,
+            solution: vec![1.0],
+            objective: 0.0,
+            ..Default::default()
+        };
+        let defaults = SolverOptions::default();
+        assert!(
+            postsolved_lp_needs_direct_retry(&max_iter_result, &lp, &defaults),
+            "MaxIterations must trigger direct retry symmetrically with Stalled"
+        );
+        assert!(
+            postsolved_lp_needs_direct_retry(&max_iter_result, &lp, &defaults)
+                == postsolved_lp_needs_direct_retry(&stalled_result, &lp, &defaults),
+            "MaxIterations and Stalled must be gated identically for equal residuals"
+        );
     }
 
     /// 2 solve を独立実行し、それぞれの route stats が独立していることを確認。

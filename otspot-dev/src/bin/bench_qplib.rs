@@ -246,6 +246,8 @@ fn main() {
     let mut n_error = 0usize;
     let mut n_timeout = 0usize;
     let mut n_max_iter = 0usize;
+    let mut n_stalled = 0usize;
+    let mut n_feasible_point = 0usize;
     let mut n_suboptimal = 0usize;
     let mut n_skip = 0usize;
     // SKIP 内訳 (CLAUDE.md L46: 推論排除、parse 由来 message を category 化).
@@ -525,6 +527,41 @@ fn main() {
                     ),
                 )
             }
+            // Stalled は解を主張しない (診断 iterate のみ) ため KKT gate 対象外。
+            SolveStatus::Stalled => {
+                n_stalled += 1;
+                let extra = if result.solution.len() == prob.num_vars {
+                    let x_inf = result.solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+                    format!("obj={:.6e} x_inf={:.2e}", result.objective, x_inf)
+                } else {
+                    "obj=NA".to_string()
+                };
+                (
+                    "STALLED".to_string(),
+                    format!(
+                        "[{}] iters={} {} {}",
+                        method_label, result.iterations, extra, resid_str
+                    ),
+                )
+            }
+            // FeasiblePoint: solve_qp_global (--global) の incumbent が feasibility
+            // 検証のみ通過 (品質ゲート未通過)。有効な上界 obj は持つが最適性・KKT の
+            // 主張はしないため Stalled 同様 KKT gate 対象外。
+            SolveStatus::FeasiblePoint => {
+                n_feasible_point += 1;
+                let extra = if result.solution.len() == prob.num_vars {
+                    format!("obj={:.6e}", result.objective)
+                } else {
+                    "obj=NA".to_string()
+                };
+                (
+                    "FEASIBLE_POINT".to_string(),
+                    format!(
+                        "[{}] iters={} {} {} {}",
+                        method_label, result.iterations, extra, resid_str, gap_str
+                    ),
+                )
+            }
             SolveStatus::SuboptimalSolution => {
                 let label = kkt_gated_label("SUBOPTIMAL", kkt_max, KKT_FAIL_EPS);
                 if label == "KKT_FAIL" {
@@ -657,6 +694,8 @@ fn main() {
     println!("  NONCONVEX_GLOBAL:  {}", n_nonconvex_global);
     println!("  SUBOPTIMAL:        {}", n_suboptimal);
     println!("  MAXITER:           {}", n_max_iter);
+    println!("  STALLED:           {}", n_stalled);
+    println!("  FEASIBLE_POINT:    {}", n_feasible_point);
     println!("  ERROR:             {}", n_error);
     println!("  SKIP:              {}", n_skip);
     // SKIP 内訳を fact 出力 (parse error message 由来、推論排除).
@@ -681,6 +720,8 @@ fn main() {
             + n_nonconvex_global
             + n_suboptimal
             + n_max_iter
+            + n_stalled
+            + n_feasible_point
             + n_error
             + n_skip
             + n_not_supported

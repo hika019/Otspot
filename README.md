@@ -117,17 +117,20 @@ Solve-rate benchmark on standard public sets via the `otspot-dev` benchmark harn
 | Problem type | Set | # | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
 | Feasible LP | Netlib | 109 | 109 optimal | 108 optimal, 1 suboptimal |
-| Convex QP | Maros–Mészáros | 138 | 121 optimal, 12 suboptimal, 1 mismatch, 4 no-ref | 93 optimal, 42 suboptimal, 1 timeout, 2 no-ref |
+| Convex QP | Maros–Mészáros | 138 | 121 optimal, 1 suboptimal, 9 stalled, 2 maxiter, 1 mismatch, 4 no-ref | 93 optimal, 42 suboptimal, 1 timeout, 2 no-ref |
+| QCQP | QPLIB | 41 | 11 optimal, 3 suboptimal, 8 stalled, 3 timeout, 11 not-supported, 5 skip | 8 optimal, 4 suboptimal, 9 stalled, 4 timeout, 11 not-supported, 5 skip |
 | MILP | MIPLIB 2017 small | 20 | 5 optimal, 15 timeout, 0 error | 5 optimal, 15 timeout, 0 error |
 | SOCP | Mittelmann Large-SOCP | 18 | 4 optimal @1000s (6 @3600s), rest timeout, 1 OOM | n/a (1e-6 only) |
 | Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
-**Optimal** = verified against known objective (proof-carrying KKT). LP/QP/MILP rows: `timeout = 1000s`, `jobs = 6`. The SOCP row follows Mittelmann's benchmark instead — `jobs = 1` (sequential; large instances need up to ~18 GB RSS each) with per-problem timeouts noted below; see the SOCP notes for its distinct methodology.
+**Optimal** = verified against known objective (proof-carrying KKT). **Stalled** = the IPM made no further progress before its iteration/time budget and reports no solution claim (an honest non-convergent status; earlier taxonomy versions folded this into `SuboptimalSolution`). LP/QP/QCQP/MILP rows: `timeout = 1000s`, `jobs = 6`. The SOCP row follows Mittelmann's benchmark instead — `jobs = 1` (sequential; large instances need up to ~18 GB RSS each) with per-problem timeouts noted below; see the SOCP notes for its distinct methodology.
 
-LP: @1e-6 is 109/109 optimal, 0 timeout. @1e-8 is 108/109 optimal, 0 timeout; the sole miss is `greenbea` (SuboptimalSolution after failing the stricter primal proof gate).
+LP: @1e-6 is 109/109 optimal, 0 timeout. @1e-8 is 108/109 optimal, 0 timeout; the sole miss is `greenbea` (SuboptimalSolution after failing the stricter primal proof gate) — this column predates the taxonomy split above and has not been re-measured.
 
-QP: @1e-6 is 121/138 optimal, 0 timeout. Misses are 12 SuboptimalSolution, 1 OBJ_MISMATCH (`LISWET7`), and 4 solved-but-unverified cases with no published reference. @1e-8 is 93/138 optimal, with 42 SuboptimalSolution, 1 TIMEOUT (`POWELL20`), and 2 solved-but-unverified cases.
+QP: @1e-6 is 121/138 optimal, 0 timeout. Misses are 1 SuboptimalSolution (`UBH1`), 9 Stalled (non-converged, no solution claimed), 2 MaxIterations, 1 OBJ_MISMATCH (`LISWET7`), and 4 solved-but-unverified cases with no published reference. @1e-8 is 93/138 optimal, with 42 SuboptimalSolution, 1 TIMEOUT (`POWELL20`), and 2 solved-but-unverified cases (this column predates the taxonomy split above and has not been re-measured).
+
+QCQP (QPLIB, single-shot IPM via `bench_qplib` — this suite run does not exercise the `--global` spatial B&B path): @1e-6 is 11/41 optimal, 3 TIMEOUT. Non-passing cases are 3 SuboptimalSolution, 8 Stalled (non-converged IPM iterate, no solution claimed — the honest replacement for what the pre-refactor taxonomy folded into SuboptimalSolution), 11 NOT_SUPPORTED (the non-convex McCormick relaxation requires finite bounds on every variable; these instances have an unbounded one), and 5 SKIP (parse-time out of scope: integer variables or unsupported constraint types). @1e-8 is 8/41 optimal, with 4 SuboptimalSolution and 9 Stalled (4 TIMEOUT; NOT_SUPPORTED/SKIP are eps-independent, unchanged). Loosening to @1e-4 recovers more: 15/41 optimal, 2 SuboptimalSolution, 5 Stalled, 3 TIMEOUT.
 
 MILP: @1e-6 and @1e-8 both prove 5/20 optimal (`flugpl`, `gr4x6`, `gt2`, `khb05250`, `p0201`). Both runs report 15 TIMEOUT and 0 ERROR inside `TOTAL`; `noswot` and `timtab1` now time out instead of panicking in tree-cut separation.
 
@@ -171,6 +174,8 @@ for eps in 1e-6 1e-8; do
        --timeout 1000 --output "/tmp/lp_unbounded_${eps}.txt"
   bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps "$eps" --jobs 6 \
        --timeout 1000 --output "/tmp/qp_maros_${eps}.txt"
+  bash scripts/bench_parallel.sh --data-dir data/qplib --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/qplib_${eps}.txt"
   bash scripts/bench_parallel.sh --data-dir data/miplib_small --eps "$eps" --jobs 6 \
        --timeout 1000 --output "/tmp/miplib_small_${eps}.txt"  # exits non-zero on ERROR/external timeout
 done

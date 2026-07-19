@@ -10,7 +10,7 @@ manifest of non-PASS benchmark cases.  Each miss is classified by root cause:
                         Optimal was expected)
   objective_mismatch  — Optimal claimed but objective differs from baseline
   residual_drift      — Optimal claimed but primal/dual residuals exceed eps
-  suboptimal          — MaxIterations or SuboptimalSolution
+  suboptimal          — MaxIterations / Stalled / SuboptimalSolution / FeasiblePoint
   numerical           — NumericalError, parse failure, or unknown error
   skip_nonconvex      — problem outside scope (SKIP / NONCONVEX / NONCONVEX_LOCAL
                         / NONCONVEX_GLOBAL / NOT_SUPPORTED)
@@ -57,7 +57,7 @@ def classify(status: str) -> str:
         return "timeout"
     if status == "EXTERNAL_TIMEOUT":
         return "external_timeout"
-    if status == "MAXITER":
+    if status in ("MAXITER", "STALLED", "FEASIBLE_POINT"):
         return "suboptimal"
     if status == "SUBOPTIMAL":
         return "suboptimal"
@@ -83,7 +83,7 @@ def classify(status: str) -> str:
 _STATUS_PAT = (
     r"PASS(?::Infeasible|:Unbounded)?|CHECKED\[no_ref\]"
     r"|TIMEOUT|EXTERNAL_TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR"
-    r"|NONCONVEX_LOCAL|NONCONVEX_GLOBAL|NONCONVEX|SUBOPTIMAL"
+    r"|NONCONVEX_LOCAL|NONCONVEX_GLOBAL|NONCONVEX|SUBOPTIMAL|STALLED|FEASIBLE_POINT"
     r"|NOT_SUPPORTED"
     r"|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL"
     r"|FAIL(?::[A-Za-z]+)?"

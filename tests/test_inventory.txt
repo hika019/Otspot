@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2820 testcases, 26 ignored
+# totals: 2825 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -391,6 +391,9 @@ otspot-core	mip::heuristics::rins::tests::rins_run_path_passes_recursive_sub_mip
 otspot-core	mip::heuristics::rins::tests::rins_skips_on_expired_deadline	active
 otspot-core	mip::heuristics::rins::tests::rins_skips_when_no_agreement	active
 otspot-core	mip::heuristics::rins::tests::rins_sub_mip_disables_recursive_primal_heuristics	active
+otspot-core	mip::heuristics::tests::claimed_status_objective_is_recomputed_for_original	active
+otspot-core	mip::heuristics::tests::claimed_statuses_are_still_feasibility_gated	active
+otspot-core	mip::heuristics::tests::nonclaiming_statuses_are_rejected_even_when_feasible	active
 otspot-core	mip::heuristics::tests::timeout_sub_mip_result_is_usable_when_solution_is_original_feasible	active
 otspot-core	mip::heuristics::tests::timeout_sub_mip_result_recomputes_stale_objective	active
 otspot-core	mip::heuristics::tests::timeout_sub_mip_result_rejects_empty_solution	active
@@ -840,7 +843,7 @@ otspot-core	qp::certificate::tests::prove_optimal_z_length_table_box_constraint	
 otspot-core	qp::global::bound::tests::bilinear_off_diagonal_handled	active
 otspot-core	qp::global::bound::tests::concave_diag_qp_interval_min_at_corner	active
 otspot-core	qp::global::bound::tests::convex_diag_qp_interval_matches_box_min	active
-otspot-core	qp::global::bound::tests::feasibility_classifier_covers_finite_obj_statuses	active
+otspot-core	qp::global::bound::tests::feasibility_classifier_accepts_only_verified_statuses	active
 otspot-core	qp::global::bound::tests::infinite_bound_returns_unbounded_interval	active
 otspot-core	qp::global::bound::tests::linear_objective_contributes	active
 otspot-core	qp::global::bound::tests::product_interval_general	active
@@ -899,6 +902,8 @@ otspot-core	qp::global::tests::convex_q_yields_optimal_not_nonconvex_global	acti
 otspot-core	qp::global::tests::depth_exceeded_lb_folds_into_remaining_lb_blocks_false_cert	active
 otspot-core	qp::global::tests::finalize_proven_dual_gate_table	active
 otspot-core	qp::global::tests::finalize_proven_empty_col_not_false_demoted	active
+otspot-core	qp::global::tests::finalize_proven_kkt_fail_on_feasibility_only_incumbent_yields_feasible_point	active
+otspot-core	qp::global::tests::finalize_unproven_feasibility_only_incumbent_yields_feasible_point	active
 otspot-core	qp::global::tests::indefinite_q_proven_yields_nonconvex_global	active
 otspot-core	qp::global::tests::indefinite_q_unproven_yields_nonconvex_local	active
 otspot-core	qp::global::tests::invalid_options_rejected_at_global_entry	active
@@ -907,6 +912,7 @@ otspot-core	qp::global::tests::is_polish_suboptimal_acceptable_rejects_mismatche
 otspot-core	qp::global::tests::is_polish_suboptimal_acceptable_rejects_mismatched_dimensions	active
 otspot-core	qp::global::tests::is_polish_suboptimal_acceptable_rejects_wrong_sign_duals	active
 otspot-core	qp::global::tests::is_q_indefinite_distinguishes_psd_and_indefinite	active
+otspot-core	qp::global::tests::node_discard_is_conclusive_only_for_infeasible	active
 otspot-core	qp::global::tests::polish_acceptance_rejects_unconverged_status	active
 otspot-core	qp::global::tests::polish_acceptance_rejects_worse_obj	active
 otspot-core	qp::global::tests::proptest_seed_a46bde58_kkt_regression	active
@@ -915,6 +921,7 @@ otspot-core	qp::global::tests::qp_global_proven_nonconvex_has_bound_gap_cert	act
 otspot-core	qp::global::tests::qp_global_unproven_has_no_bound_gap_cert	active
 otspot-core	qp::global::tests::solve_qp_global_cold_vs_global_separation	active
 otspot-core	qp::global::tests::solve_qp_global_finds_corner_minimum_concave_1d	active
+otspot-core	qp::global::tests::unusable_node_can_be_non_infeasible_with_large_primal_residual	active
 otspot-core	qp::global::tree::tests::best_lower_bound_matches_top	active
 otspot-core	qp::global::tree::tests::pop_returns_smallest_lower_bound_first	active
 otspot-core	qp::global::tree::tests::pushed_popped_counters_track	active
@@ -948,11 +955,10 @@ otspot-core	qp::ipm_core::kkt::tests::test_compute_inertia_correction_zero_matri
 otspot-core	qp::ipm_core::kkt::tests::test_norm_inf_basic	active
 otspot-core	qp::ipm_core::kkt::tests::test_spmv_basic	active
 otspot-core	qp::ipm_core::kkt::tests::test_update_augmented_values_matches_build	active
-otspot-core	qp::ipm_core::scaling::tests::check_dfeas_status_relative_complementarity_agrees_with_ipm_kkt	active
-otspot-core	qp::ipm_core::scaling::tests::check_dfeas_status_relative_detects_nonzero_complementarity	active
-otspot-core	qp::ipm_core::scaling::tests::check_dfeas_status_relative_rejects_malformed_bound_duals_before_scaling	active
 otspot-core	qp::ipm_core::scaling::tests::compute_amplification_includes_dual_side	active
 otspot-core	qp::ipm_core::scaling::tests::compute_amplification_primal_dominant	active
+otspot-core	qp::ipm_core::scaling::tests::unscale_is_pure_and_status_preserving	active
+otspot-core	qp::ipm_core::scaling::tests::unscale_passes_through_empty_solution	active
 otspot-core	qp::ipm_core::solver_loop::tests::schur_solve_honors_expired_deadline	active
 otspot-core	qp::ipm_core::solver_loop::tests::test_compute_sigma_vec_eq_row_is_zero	active
 otspot-core	qp::ipm_core::solver_loop::tests::test_gondzio_schur_stop_additive_sentinel	active
@@ -965,26 +971,18 @@ otspot-core	qp::ipm_core::tests::test_a5s02_post_verify_no_false_optimal	active
 otspot-core	qp::ipm_core::tests::test_adjusted_eps_less_than_user_eps	active
 otspot-core	qp::ipm_core::tests::test_compute_amplification_calculation	active
 otspot-core	qp::ipm_core::tests::test_ipm_basic_2d	active
-otspot-core	qp::ipm_core::tests::test_ipm_bfeas_violation_detected	active
-otspot-core	qp::ipm_core::tests::test_ipm_bfeas_within_bounds_preserved	active
 otspot-core	qp::ipm_core::tests::test_ipm_bound_duals_box_constrained	active
 otspot-core	qp::ipm_core::tests::test_ipm_bound_duals_lb_only_active	active
 otspot-core	qp::ipm_core::tests::test_ipm_bound_duals_ub_only_active	active
 otspot-core	qp::ipm_core::tests::test_ipm_box_constrained	active
-otspot-core	qp::ipm_core::tests::test_ipm_dfeas_violation_detected	active
-otspot-core	qp::ipm_core::tests::test_ipm_dfeas_within_tolerance_preserved	active
 otspot-core	qp::ipm_core::tests::test_ipm_empty_constraints	active
 otspot-core	qp::ipm_core::tests::test_ipm_equality_constraint	active
 otspot-core	qp::ipm_core::tests::test_ipm_ge_defensive	active
 otspot-core	qp::ipm_core::tests::test_ipm_portfolio	active
-otspot-core	qp::ipm_core::tests::test_ipm_post_unscaling_false_optimal_detection	active
-otspot-core	qp::ipm_core::tests::test_ipm_post_unscaling_genuine_optimal_preserved	active
 otspot-core	qp::ipm_core::tests::test_ipm_post_verify_timeout_stays_within_budget	active
 otspot-core	qp::ipm_core::tests::test_ipm_ruiz_scaling_consistency	active
 otspot-core	qp::ipm_core::tests::test_ipm_timeout	active
 otspot-core	qp::ipm_core::tests::test_ipm_unconstrained	active
-otspot-core	qp::ipm_core::tests::test_post_verify_row_norm_accepts_exact_solution	active
-otspot-core	qp::ipm_core::tests::test_post_verify_row_norm_rejects_small_row_violation	active
 otspot-core	qp::ipm_solver::attempt::tests::attempt_acceptance_requires_prove_optimal_dual_sign	active
 otspot-core	qp::ipm_solver::attempt::tests::attempt_acceptance_requires_prove_optimal_gap	active
 otspot-core	qp::ipm_solver::attempt::tests::attempt_loop_clears_tolerance_so_inner_eps_is_tightened	active
@@ -992,6 +990,8 @@ otspot-core	qp::ipm_solver::attempt::tests::attempt_loop_does_not_stop_on_satisf
 otspot-core	qp::ipm_solver::attempt::tests::attempt_loop_keeps_finite_retry_over_infeasibility_status	active
 otspot-core	qp::ipm_solver::attempt::tests::candidate_order_prefers_certificate_then_objective	active
 otspot-core	qp::ipm_solver::attempt::tests::candidate_order_preserves_structural_status_over_unproven_iterate	active
+otspot-core	qp::ipm_solver::attempt::tests::converged_termination_does_not_break_early::converged_termination_runs_full_ladder	active
+otspot-core	qp::ipm_solver::attempt::tests::dual_lane_true_stall_breaks_at_third_occurrence::dual_lane_true_stall_breaks_at_expected_call_count	active
 otspot-core	qp::ipm_solver::attempt::tests::empty_col_mask_noop_proof_in_finalize	active
 otspot-core	qp::ipm_solver::attempt::tests::empty_col_qp_solves_optimal_not_false_demoted	active
 otspot-core	qp::ipm_solver::attempt::tests::fallback_runner_receives_user_eps_after_tolerance_clear	active
@@ -1002,12 +1002,17 @@ otspot-core	qp::ipm_solver::attempt::tests::guard_qp_optimal_catches_catastrophi
 otspot-core	qp::ipm_solver::attempt::tests::guard_qp_optimal_no_op_proof	active
 otspot-core	qp::ipm_solver::attempt::tests::guard_qp_optimal_passthrough_non_optimal	active
 otspot-core	qp::ipm_solver::attempt::tests::guard_qp_optimal_passthrough_valid	active
+otspot-core	qp::ipm_solver::attempt::tests::identical_attempt_early_break::identical_consecutive_attempts_break_early	active
 otspot-core	qp::ipm_solver::attempt::tests::ipm_finalize_outcome_reduced_costs_empty	active
 otspot-core	qp::ipm_solver::attempt::tests::iter_guard_charges_per_attempt_cap_on_failed_attempt	active
 otspot-core	qp::ipm_solver::attempt::tests::mask_does_not_hide_nonempty_col_false_optimal	active
 otspot-core	qp::ipm_solver::attempt::tests::no_presolve_fallback_does_not_replace_better_objective_incumbent	active
 otspot-core	qp::ipm_solver::attempt::tests::no_presolve_fallback_does_not_replace_structural_infeasible	active
+otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::accuracy_floor_termination_reports_stalled	active
+otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::iteration_budget_termination_reports_max_iterations	active
+otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::stall_termination_reports_stalled_not_suboptimal	active
 otspot-core	qp::ipm_solver::attempt::tests::q_diagonal_scaled_runner_receives_user_eps	active
+otspot-core	qp::ipm_solver::attempt::tests::ruiz_flip_pair_does_not_false_trigger_stall::ruiz_flip_pair_does_not_false_trigger_stall_break	active
 otspot-core	qp::ipm_solver::attempt::tests::runner_receives_user_eps_separate_from_attempt_eps	active
 otspot-core	qp::ipm_solver::attempt::tests::schur_hint_is_reset_before_fallback	active
 otspot-core	qp::ipm_solver::attempt::tests::solve_runner_extended_ir_still_demotes_dual_sign_invalid_postsolve_outcome	active
@@ -1016,6 +1021,8 @@ otspot-core	qp::ipm_solver::attempt::tests::test_q_diagonal_scaling_skips_non_di
 otspot-core	qp::ipm_solver::attempt::tests::test_q_diagonal_scaling_skips_uniform_diagonal	active
 otspot-core	qp::ipm_solver::attempt::tests::test_q_diagonal_scaling_unscale_roundtrip	active
 otspot-core	qp::ipm_solver::attempt::tests::try_q_diagonal_scaling_gate1_local_scale_sentinel	active
+otspot-core	qp::ipm_solver::attempt::tests::two_consecutive_match_then_diverge_does_not_break::two_consecutive_match_then_diverge_runs_full_ladder	active
+otspot-core	qp::ipm_solver::attempt::tests::unreachable_eps_reports_stalled_via_public_api	active
 otspot-core	qp::ipm_solver::attempt::tests::unscale_q_diagonal_rejects_short_bound_duals	active
 otspot-core	qp::ipm_solver::attempt::tests::unscale_q_diagonal_reverses_x_and_bound_duals	active
 otspot-core	qp::ipm_solver::core::duality_gap::tests::duality_gap_rejects_missing_row_dual	active
@@ -1103,6 +1110,7 @@ otspot-core	qp::lp_dispatch::tests::lp_ipm_core_deadline_reserves_crossover_budg
 otspot-core	qp::lp_dispatch::tests::lp_ipm_gate_targets_dfl_ken_shape_without_pds_pilot	active
 otspot-core	qp::lp_dispatch::tests::parallel_solve_stats_independent	active
 otspot-core	qp::lp_dispatch::tests::postsolved_lp_retry_gate_keys_on_requested_accuracy	active
+otspot-core	qp::lp_dispatch::tests::postsolved_lp_retry_gate_treats_max_iterations_like_stalled	active
 otspot-core	qp::lp_dispatch::tests::presolve_timeout_solution_never_leaks_reduced_space_in_qp_path	active
 otspot-core	qp::lp_dispatch::tests::qp_zero_path_expired_deadline_after_presolve_returns_timeout	active
 otspot-core	qp::lp_dispatch::tests::qp_zero_path_nonreducing_presolve_keeps_outer_presolve_timing	active
@@ -1307,14 +1315,11 @@ otspot-core	qp::tests::smoke::test_qp_timing_breakdown_fields_populated	active
 otspot-core	qp::tests::smoke::test_qp_unconstrained	active
 otspot-core	qp::tests::smoke::test_timeout_returns_timeout_status	active
 otspot-core	qp::tests::smoke::test_warm_start_consistency	active
-otspot-core	qp::tests::status_dfeas::test_dfeas_bad_solution_downgraded	active
-otspot-core	qp::tests::status_dfeas::test_dfeas_cancellation_pattern	active
 otspot-core	qp::tests::status_dfeas::test_dfeas_optimal_preserved	active
 otspot-core	qp::tests::status_dfeas::test_dfeas_relative_threshold_large_kkt	active
 otspot-core	qp::tests::status_dfeas::test_dfeas_scale_invariant	active
-otspot-core	qp::tests::status_dfeas::test_max_iterations_to_timeout_mapping	active
+otspot-core	qp::tests::status_dfeas::test_max_iter_exhaustion_reports_honest_status	active
 otspot-core	qp::tests::status_dfeas::test_qp_all_vars_fixed	active
-otspot-core	qp::tests::status_dfeas::test_suboptimal_to_optimal_mapping	active
 otspot-core	qp::tests::validate_wiring::invalid_options_rejected_at_qp_entry	active
 otspot-core	qp::tests::validate_wiring::invalid_options_rejected_at_qp_entry_lp_path	active
 otspot-core	sensitivity::tests::bounded_lp_all_interior_ub_slacks_basic	active
@@ -2167,11 +2172,11 @@ otspot-model	model::tests::test_model_lp_equality	active
 otspot-model	model::tests::test_model_qp_basic	active
 otspot-model	model::tests::test_model_qp_box_bounds	active
 otspot-model	model::tests::test_model_qp_equality	active
-otspot-model	model::tests::test_model_qp_feasible_unproven_proof	active
 otspot-model	model::tests::test_model_qp_ge_constraint	active
 otspot-model	model::tests::test_model_qp_locally_optimal_proof	active
 otspot-model	model::tests::test_model_qp_maximize	active
 otspot-model	model::tests::test_model_qp_timeout	active
+otspot-model	model::tests::test_model_qp_unreachable_tolerance_errs_stalled	active
 otspot-model	model::tests::test_no_objective_error	active
 otspot-model	model::tests::test_result_index_and_value_agree	active
 otspot-model	model::tests::test_unbounded	active

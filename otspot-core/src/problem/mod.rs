@@ -100,10 +100,38 @@ pub enum SolveStatus {
     Infeasible,
     /// 問題が非有界（unbounded）
     Unbounded,
-    /// 反復回数上限に到達した（最適性未確認）
+    /// 反復回数上限に到達した（要求精度 eps 未達、解品質の主張なし）。
+    ///
+    /// `solution` フィールドは best-so-far の診断用 iterate であり、有効解ではない。
     MaxIterations,
-    /// 解は見つかったが精度基準未達（偽Optimal検出: スケール解除後の残差超過）
+    /// 検証済みの解 (要求精度 eps を満たす feasible な点) だが、最適性証明なし。
+    ///
+    /// QP/IPM: 全 KKT 残差が user_eps を満たすが `prove_optimal` の証明書
+    /// (dual_sign / duality_gap 含む) が完成しなかった。MIP/B&B: 整数実行可能な
+    /// incumbent があるが gap 証明が未達。「解として使えるが Optimal を名乗れない」
+    /// 状態のみがこの status を持つ。非収束 iterate は [`SolveStatus::Stalled`] /
+    /// [`SolveStatus::MaxIterations`] であり、この status を名乗らない。
+    ///
+    /// 既知の例外: LP simplex 経路には未整理の mint が残る
+    /// (`simplex/standard_form.rs` の stall incumbent、`simplex/entry.rs` の
+    /// postsolve 品質降格)。これらは上記の eps 検証を経ておらず、LP 側 taxonomy
+    /// の整理は別 task。上記の保証は QP/IPM 経路と MIP incumbent に対するもの。
     SuboptimalSolution,
+    /// ソルバーが時限・反復予算の枯渇によらず前進不能になり、要求精度 eps 未達の
+    /// まま内部打ち切りした（解品質の主張なし）。
+    ///
+    /// IPM では α-stall / 残差停滞 / 方向発散からの best-so-far 復帰 / スケーリング
+    /// 起因の精度床がここに入る。`solution` フィールドは best-so-far の診断用
+    /// iterate であり、有効解ではない。
+    Stalled,
+    /// 実行可能性のみ検証済みの点 (目的値は有効な上界)。最適性・KKT 品質の主張なし。
+    ///
+    /// 非凸 B&B (`solve_qp_global`) が、品質ゲート (Optimal/LocallyOptimal/
+    /// SuboptimalSolution) を通っていない incumbent — feasibility の点検証のみ
+    /// 通過した診断 iterate 由来 — を返すときの status。eps 検証済み KKT 点である
+    /// [`SolveStatus::SuboptimalSolution`] とも、有効解を持たない
+    /// [`SolveStatus::Stalled`] とも区別される。
+    FeasiblePoint,
     /// タイムアウト（timeout_secs を超過した）
     Timeout,
     /// 数値エラー（LDL分解失敗等、問題が数値的に解けない）
@@ -137,6 +165,8 @@ impl fmt::Display for SolveStatus {
             SolveStatus::Unbounded => write!(f, "Unbounded"),
             SolveStatus::MaxIterations => write!(f, "MaxIterations"),
             SolveStatus::SuboptimalSolution => write!(f, "SuboptimalSolution"),
+            SolveStatus::Stalled => write!(f, "Stalled"),
+            SolveStatus::FeasiblePoint => write!(f, "FeasiblePoint"),
             SolveStatus::Timeout => write!(f, "Timeout"),
             SolveStatus::NumericalError => write!(f, "NumericalError"),
             SolveStatus::NonConvex(msg) => write!(f, "NonConvex({})", msg),
@@ -182,10 +212,17 @@ pub struct SolverResult {
     pub bound_duals: Vec<f64>,
     /// 反復回数（WSR実績回数）
     pub iterations: usize,
-    /// 最終反復の残差実値 (pfeas, dfeas, duality_gap)。Optimal/MaxIterations時のみ Some。
+    /// 元空間で独立再計算した最終残差 (pfeas_rel, dfeas_rel, duality_gap_rel) を
+    /// 保持する想定のフィールド。
+    ///
+    /// 現状 (v0.7.2 時点) はどの経路もこの値を設定しない — 常に `None`。
+    /// postsolve (`qp_postsolve.rs`) は upstream の値をそのまま伝播するのみで、
+    /// その upstream (`finalize_outcome`, `qp/ipm_solver/attempt.rs`) 自体が
+    /// `..Default::default()` で構築するため未設定のまま。「eps を緩めれば
+    /// 解けるケースの発見」用の診断値として機能させるには実装が必要 (未着手)。
     pub final_residuals: Option<(f64, f64, f64)>,
     /// 相対双対ギャップ (|p_obj - d_obj| / max(|p|,|d|,1))。
-    /// IPPMM 内部の best-so-far に紐づく値。unscale_ipm_result の Suboptimal→Optimal 昇格ゲート用。
+    /// IPPMM 内部の best-so-far に紐づく診断値。
     /// None = 未計測（LP simplex 等 gap を持たない経路）。
     pub duality_gap_rel: Option<f64>,
     /// 各 phase の所要時間 (LP simplex 経路のみ、None なら未計測)。

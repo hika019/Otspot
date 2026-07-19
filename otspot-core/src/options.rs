@@ -640,7 +640,7 @@ impl SolverOptions {
 
     /// Whether the caller-visible stop condition is external: the wall-clock
     /// deadline expired or the cancel flag fired. Distinguishes an honest
-    /// `Timeout` from an internal stall (`SuboptimalSolution`/`MaxIterations`).
+    /// `Timeout` from an internal stop (`Stalled`/`MaxIterations`).
     /// Sound at result assembly: a deadline-triggered bail implies `now >= d`
     /// (monotonic), while a stall bail normally leaves budget on the clock.
     pub(crate) fn external_stop_requested(&self) -> bool {

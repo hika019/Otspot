@@ -4,7 +4,7 @@
 
 use crate::mip::{MilpProblem, MipConfig};
 use crate::options::SolverOptions;
-use crate::problem::{SolveStatus, SolverResult};
+use crate::problem::SolverResult;
 use std::time::Instant;
 
 /// Run RINS every this many B&B nodes.
@@ -83,15 +83,7 @@ pub(crate) fn run_rins(
     sub_opts.threads = 1;
 
     let result = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
-    if matches!(
-        result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution
-    ) && !result.solution.is_empty()
-    {
-        Some(result)
-    } else {
-        None
-    }
+    super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol)
 }
 
 fn remaining_budget(deadline: &Option<Instant>) -> f64 {
