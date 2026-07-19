@@ -3491,3 +3491,67 @@ fn reduced_cost_fixing_rejects_short_solution() {
     let mut bounds = vec![(0.0, 1.0), (0.0, 1.0)];
     let _ = super::reduced_cost_fixing(&r, 1.0, &mut bounds, &[0]);
 }
+
+// ---------------------------------------------------------------------------
+// Codex review R3 horizontal expansion (nonconvex.rs:763, "integer index not
+// validated") -- `MilpProblem`/`MiqpProblem` are public with a `pub
+// integer_vars` field; `new()` validates it, but a struct literal (or a
+// post-construction mutation) bypasses that. `solve_milp`/`solve_miqp` must
+// re-check it themselves, the same defense `MisocpProblem`/`NonconvexQcqp`
+// already have for their own integer-index inputs.
+// ---------------------------------------------------------------------------
+
+/// Sentinel: dropping `validate_integer_vars` from `solve_milp_with_stats`
+/// makes this FAIL by panicking (`integer_mask`'s `assert!`) instead of
+/// returning `NotSupported`.
+#[test]
+fn solve_milp_rejects_out_of_range_integer_var() {
+    let lp = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
+    let problem = MilpProblem {
+        lp,
+        integer_vars: vec![1], // num_vars == 1, so index 1 is out of range.
+    };
+    let res = solve_milp(&problem, &opts(), &MipConfig::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "out-of-range integer_vars index must be rejected, got {:?}",
+        res.status
+    );
+}
+
+/// Sentinel: dropping `validate_integer_vars` from `solve_miqp_with_stats`
+/// makes this FAIL by panicking (`integer_mask`'s `assert!`) instead of
+/// returning `NotSupported`.
+#[test]
+fn solve_miqp_rejects_out_of_range_integer_var() {
+    let qp = qp_problem(
+        &[1.0],
+        vec![0.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
+    let problem = MiqpProblem {
+        qp,
+        integer_vars: vec![1], // num_vars == 1, so index 1 is out of range.
+    };
+    let res = solve_miqp(&problem, &opts(), &MipConfig::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "out-of-range integer_vars index must be rejected, got {:?}",
+        res.status
+    );
+}

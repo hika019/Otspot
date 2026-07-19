@@ -515,6 +515,42 @@ ENDATA\n";
         );
     }
 
+    /// `test_qps_column_named_marker_is_not_a_marker_line` above never puts an
+    /// `INTORG`/`INTEND` token on the same line as a column named `MARKER`, so
+    /// it passes even against the pre-fix whole-line token scan (that scan
+    /// only misfires when *both* a `MARKER` token and an `INTORG`/`INTEND`
+    /// token appear on one line, regardless of position). This test supplies
+    /// exactly that: column `MARKER`, row `INTORG`, coefficient `1.0`
+    /// (`MARKER INTORG 1.0`, the QPS twin of the MPS collision fixed in
+    /// `otspot-io/src/mps/mod.rs`'s `test_marker_column_row_name_collision_keeps_coefficient`).
+    ///
+    /// **No-op failure guarantee**: reverting `integer_marker_kind` to the
+    /// whole-line token scan makes this FAIL -- the `MARKER INTORG 1.0` line
+    /// is misdetected as a directive and silently skipped (QPS drops marker
+    /// lines outright, tracking no integrality), so `MARKER`'s coefficient on
+    /// row `INTORG` never reaches `prob.a` and `av[1]` comes back `0.0`
+    /// instead of `1.0` -- verified by temporarily reverting.
+    #[test]
+    fn test_qps_marker_column_row_name_collision_keeps_coefficient() {
+        let qps = concat!(
+            "NAME\nROWS\n N obj\n L c1\n L INTORG\n",
+            "COLUMNS\n",
+            "    MARKER    obj      1.0\n",
+            "    MARKER    INTORG   1.0\n",
+            "    x1        obj      1.0  c1  1.0\n",
+            "RHS\n    rhs c1 10.0\n    rhs INTORG 5.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps).expect("column MARKER / row INTORG must parse as data");
+        assert_eq!((prob.num_vars, prob.num_constraints), (2, 2));
+        // Column order: MARKER (0), x1 (1); row order: c1 (0), INTORG (1).
+        let av = prob.a.mat_vec_mul(&[1.0, 0.0]).unwrap();
+        assert_eq!(
+            av[1], 1.0,
+            "MARKER's coefficient on row INTORG must survive parsing, got {av:?}"
+        );
+    }
+
     /// The QPS twin of the MPS truncation/duplicate-name guards: a name that
     /// overflows the fixed 8-byte field must not be clipped into a false match,
     /// and two rows may not share a name.

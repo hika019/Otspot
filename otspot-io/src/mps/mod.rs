@@ -545,6 +545,23 @@ ENDATA
         assert_eq!(integer_marker_kind("    INTORG  obj  1.0"), None);
     }
 
+    /// Codex review R3 (common/mod.rs:386, "MARKER token over-matching"): a
+    /// legitimate free-format COLUMNS row for a column named `MARKER`
+    /// referencing a row named `INTORG` has the same three tokens as a
+    /// directive but in the wrong slots -- the marker's own name is field 1,
+    /// so `MARKER` never belongs in field 2 for a real directive. Scanning
+    /// every token for `MARKER`/`INTORG` regardless of position (pre-fix)
+    /// misreads this as `IntegerMarker::Start`.
+    ///
+    /// Sentinel: reverting to the whole-line token scan makes this FAIL with
+    /// `Some(IntegerMarker::Start)` instead of `None`.
+    #[test]
+    fn test_integer_marker_kind_column_row_name_collision_is_not_a_marker() {
+        use types::integer_marker_kind;
+        assert_eq!(integer_marker_kind("MARKER INTORG 1"), None);
+        assert_eq!(integer_marker_kind("    MARKER  INTORG  1.0"), None);
+    }
+
     #[test]
     fn test_milp_marker_no_bounds_is_binary() {
         let mps = r"NAME milp
@@ -562,6 +579,40 @@ ENDATA
         let milp = parse_milp(mps).unwrap();
         assert_eq!(milp.integer_vars, vec![0]);
         assert_eq!(milp.lp.bounds, vec![(0.0, 1.0)]);
+    }
+
+    /// Codex review R3 (common/mod.rs:386): a column literally named `MARKER`
+    /// with a coefficient on a row literally named `INTORG` must parse as an
+    /// ordinary coefficient, not be swallowed as a directive.
+    ///
+    /// Sentinel: reverting `integer_marker_kind` to the whole-line token scan
+    /// makes this FAIL -- the `MARKER INTORG 1.0` line is consumed as a
+    /// (spurious) `INTORG` marker, so `MARKER`'s coefficient on row `INTORG`
+    /// is silently dropped and `av[1]` comes back `0.0` instead of `1.0`.
+    #[test]
+    fn test_marker_column_row_name_collision_keeps_coefficient() {
+        let mps = r"NAME marker_collision
+ROWS
+ N  obj
+ L  c1
+ L  INTORG
+COLUMNS
+    MARKER  obj  1.0
+    MARKER  INTORG  1.0
+    x1  obj  1.0  c1  1.0
+RHS
+    rhs  c1  10.0
+    rhs  INTORG  5.0
+ENDATA
+";
+        let lp = parse_mps(mps).unwrap();
+        assert_eq!((lp.num_vars, lp.num_constraints), (2, 2));
+        // Column order: MARKER (0), x1 (1); row order: c1 (0), INTORG (1).
+        let av = lp.a.mat_vec_mul(&[1.0, 0.0]).unwrap();
+        assert_eq!(
+            av[1], 1.0,
+            "MARKER's coefficient on row INTORG must survive parsing, got {av:?}"
+        );
     }
 
     #[test]

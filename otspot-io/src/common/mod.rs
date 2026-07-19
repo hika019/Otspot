@@ -370,27 +370,35 @@ pub(crate) enum IntegerMarker {
     End,
 }
 
-/// Returns `Some(kind)` when `line` carries both a `'MARKER'` token and an
-/// `INTORG`/`INTEND` token (quotes stripped, case-insensitive).
+/// Returns `Some(kind)` when `line` is a marker record: exactly three
+/// whitespace-separated fields, `<name> MARKER INTORG|INTEND` (quotes on the
+/// second/third fields optional, case-insensitive), matching the MPS marker
+/// record's fixed field layout (an arbitrary marker name, then the literal
+/// `'MARKER'`, then `'INTORG'`/`'INTEND'`).
 ///
-/// Both tokens are required. Keying off `'MARKER'` alone would silently discard
-/// a COLUMNS line for a column legitimately *named* `MARKER`, losing its
-/// coefficients — the same class of silent drop this module exists to prevent.
+/// The keyword's *position* is required, not just its presence: scanning
+/// every token for `MARKER`/`INTORG`/`INTEND` anywhere on the line (the prior
+/// implementation) misreads a legitimate free-format COLUMNS row for a column
+/// named `MARKER` referencing a row named `INTORG` (`MARKER INTORG 1`) as a
+/// directive, silently discarding that coefficient — the same class of silent
+/// drop this module exists to prevent. A real marker's own name is field 1,
+/// so `MARKER` in that slot (this collision's field 2) never satisfies the
+/// field-2-must-be-`MARKER` check below.
 pub(crate) fn integer_marker_kind(line: &str) -> Option<IntegerMarker> {
-    let mut has_marker = false;
-    let mut kind = None;
-    for tok in line.split_whitespace() {
-        match tok.trim_matches('\'').to_uppercase().as_str() {
-            "MARKER" => has_marker = true,
-            "INTORG" => kind = Some(IntegerMarker::Start),
-            "INTEND" => kind = Some(IntegerMarker::End),
-            _ => {}
-        }
+    let mut tokens = line.split_whitespace();
+    let _name = tokens.next()?;
+    let marker_tok = tokens.next()?;
+    let kind_tok = tokens.next()?;
+    if tokens.next().is_some() {
+        return None;
     }
-    if has_marker {
-        kind
-    } else {
-        None
+    if marker_tok.trim_matches('\'').to_uppercase() != "MARKER" {
+        return None;
+    }
+    match kind_tok.trim_matches('\'').to_uppercase().as_str() {
+        "INTORG" => Some(IntegerMarker::Start),
+        "INTEND" => Some(IntegerMarker::End),
+        _ => None,
     }
 }
 
