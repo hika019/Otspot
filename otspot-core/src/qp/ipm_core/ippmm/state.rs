@@ -54,6 +54,14 @@ pub(super) const DIRECTION_BLOWUP_THRESHOLD: f64 = 1e30;
 /// false-positive 緩衝のための連続 infeasible 検出回数。
 pub(super) const MIN_CONSECUTIVE_INFEAS: usize = 3;
 
+/// infeasibility 検出器を不信任にする best_score / eps 比。
+///
+/// best-so-far がこの倍率以内まで収束している iterate を持つ場合、Newton 方向の
+/// Farkas-like 近似 (PMM floor 由来の false-positive がある) より iterate 側を
+/// 信用し、Infeasible ではなく Stalled + best-so-far で返す。10 は「eps に 1 桁
+/// 以内まで迫った iterate は infeasible な問題では現れない」という経験則。
+pub(super) const INFEAS_DETECTOR_DISTRUST_SCORE: f64 = 10.0;
+
 /// fraction-to-boundary を補う trust-region cap (alpha·|dv|_inf ≤ cap·max(|v|_inf,1))。
 pub(super) const STEP_REL_CAP: f64 = 1e3;
 

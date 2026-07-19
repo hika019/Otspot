@@ -115,17 +115,20 @@ let result = solve(&prob);
 | 問題種別 | セット | 問題数 | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
 | 実行可能 LP | Netlib | 109 | 最適解 109 | 最適解 108、SuboptimalSolution 1 |
-| 凸 QP | Maros–Mészáros | 138 | 最適解 121、SuboptimalSolution 12、OBJ_MISMATCH 1、参照値なし 4 | 最適解 93、SuboptimalSolution 42、TIMEOUT 1、参照値なし 2 |
+| 凸 QP | Maros–Mészáros | 138 | 最適解 121、SuboptimalSolution 1、Stalled 9、MaxIterations 2、OBJ_MISMATCH 1、参照値なし 4 | 最適解 93、SuboptimalSolution 42、TIMEOUT 1、参照値なし 2 |
+| QCQP | QPLIB | 41 | 最適解 11、SuboptimalSolution 3、Stalled 8、TIMEOUT 3、NOT_SUPPORTED 11、SKIP 5 | 最適解 8、SuboptimalSolution 4、Stalled 9、TIMEOUT 4、NOT_SUPPORTED 11、SKIP 5 |
 | MILP | MIPLIB 2017 small | 20 | 最適解 5、TIMEOUT 15、ERROR 0 | 最適解 5、TIMEOUT 15、ERROR 0 |
 | SOCP | Mittelmann Large-SOCP | 18 | Optimal 4 @1000s（3600s で 6）、他 TIMEOUT、OOM 1 | n/a（1e-6 のみ） |
 | 実行不可能 LP | Netlib | 29 | 正答 29 | 正答 29 |
 | 非有界 LP | 合成 | 12 | 正答 12 | 正答 12 |
 
-**最適解** = 既知最適値と照合済み（proof-carrying KKT）。LP/QP/MILP 行は `timeout = 1000s`、`jobs = 6`。SOCP 行は Mittelmann ベンチに合わせ `jobs = 1`（逐次。大規模問題は 1 問あたり最大 ~18 GB RSS）で計測し、timeout は下記の SOCP 注記に従う。
+**最適解** = 既知最適値と照合済み（proof-carrying KKT）。**Stalled** = 反復・時間予算内でこれ以上進展せず、解を主張しない誠実な非収束 status（旧 taxonomy では SuboptimalSolution に丸められていた）。LP/QP/QCQP/MILP 行は `timeout = 1000s`、`jobs = 6`。SOCP 行は Mittelmann ベンチに合わせ `jobs = 1`（逐次。大規模問題は 1 問あたり最大 ~18 GB RSS）で計測し、timeout は下記の SOCP 注記に従う。
 
-LP: @1e-6 は 109/109 最適解、timeout 0。@1e-8 は 108/109 最適解、timeout 0。ミスは `greenbea`（より厳しい primal 証明ゲートで SuboptimalSolution）。
+LP: @1e-6 は 109/109 最適解、timeout 0。@1e-8 は 108/109 最適解、timeout 0。ミスは `greenbea`（より厳しい primal 証明ゲートで SuboptimalSolution）——この列は上記 taxonomy 分割より前の計測で、今回は再測定していない。
 
-QP: @1e-6 は 121/138 最適解、timeout 0。ミスは SuboptimalSolution 12 件、OBJ_MISMATCH 1 件 (`LISWET7`)、公開参照値なしの検査済み 4 件。@1e-8 は 93/138 最適解、SuboptimalSolution 42 件、TIMEOUT 1 件 (`POWELL20`)、公開参照値なしの検査済み 2 件。
+QP: @1e-6 は 121/138 最適解、timeout 0。ミスは SuboptimalSolution 1 件 (`UBH1`)、Stalled 9 件（非収束で解を主張しない）、MaxIterations 2 件、OBJ_MISMATCH 1 件 (`LISWET7`)、公開参照値なしの検査済み 4 件。@1e-8 は 93/138 最適解、SuboptimalSolution 42 件、TIMEOUT 1 件 (`POWELL20`)、公開参照値なしの検査済み 2 件（この列は上記 taxonomy 分割より前の計測で、今回は再測定していない）。
+
+QCQP（QPLIB、`bench_qplib` による単発 IPM — 本ベンチは `--global` の空間 B&B 経路を使わない）: @1e-6 は 11/41 最適解、TIMEOUT 3 件。非該当の内訳は SuboptimalSolution 3 件、Stalled 8 件（非収束の IPM iterate、解を主張しない — 旧 taxonomy が SuboptimalSolution へ丸めていたものの誠実な置き換え）、NOT_SUPPORTED 11 件（非凸 McCormick 緩和は全変数の有限境界を要求するが、これらの問題には非有界な変数がある）、SKIP 5 件（parse 時点の対象外: 整数変数または非対応の制約型）。@1e-8 は 8/41 最適解、SuboptimalSolution 4 件、Stalled 9 件（TIMEOUT 4 件。NOT_SUPPORTED/SKIP は eps に依存しないため不変）。@1e-4 まで緩めると 15/41 最適解、SuboptimalSolution 2 件、Stalled 5 件、TIMEOUT 3 件まで回復する。
 
 MILP: @1e-6 / @1e-8 とも 5/20 最適解（`flugpl`、`gr4x6`、`gt2`、`khb05250`、`p0201`）。どちらも `TOTAL` 内に TIMEOUT 15 件、ERROR 0 件を計上する。`noswot` と `timtab1` は tree-cut separation の panic ではなく TIMEOUT になる。
 
@@ -169,6 +172,8 @@ for eps in 1e-6 1e-8; do
        --timeout 1000 --output "/tmp/lp_unbounded_${eps}.txt"
   bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps "$eps" --jobs 6 \
        --timeout 1000 --output "/tmp/qp_maros_${eps}.txt"
+  bash scripts/bench_parallel.sh --data-dir data/qplib --eps "$eps" --jobs 6 \
+       --timeout 1000 --output "/tmp/qplib_${eps}.txt"
   bash scripts/bench_parallel.sh --data-dir data/miplib_small --eps "$eps" --jobs 6 \
        --timeout 1000 --output "/tmp/miplib_small_${eps}.txt"  # ERROR / 外部timeout がある場合は非ゼロ終了
 done

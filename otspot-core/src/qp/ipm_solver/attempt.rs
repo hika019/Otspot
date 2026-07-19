@@ -8,7 +8,7 @@ use crate::ScopedDisable;
 
 use super::core::run_ipm_with_user_eps;
 use super::kkt::{bound_violation, kkt_residual_rel, primal_residual_rel};
-use super::outcome::{IpmOutcome, ProblemView};
+use super::outcome::{IpmOutcome, IpmTermination, ProblemView};
 use crate::options::SolverOptions;
 use crate::presolve::QpPresolveResult;
 use crate::presolve::{
@@ -129,6 +129,18 @@ const MAX_ITER_PER_ATTEMPT: usize = 500;
 /// re-solve from scratch economically.
 const NO_PRESOLVE_FALLBACK_LIMIT: usize = 10_000;
 
+/// 同一 lane (use_ruiz) 内で bit 同一の outcome がこの回数連続したら決定的 stall
+/// と断定し、残り attempt を打ち切る。
+///
+/// 根拠 (dfl001 netlib LP, 実測 trace): lane=true は tighten=100→1000 で 2 連続
+/// bit 同一 (iter=115 のまま) だったが、tighten=10000 の 3 投目で iter=136 に
+/// 変化し脱出できた。2 連続で打ち切ると、この 3 投目や反対 lane
+/// (false,10000→Stalled iter=211) が best 候補になる機会を失い、crossover が
+/// 完遂できず Optimal→Stalled に退化する (旧: PASS 365s → 退化後: STALLED 137s)。
+/// QPLIB_0018 のような真の決定論的 stall は全 attempt が同一のため 3 連続でも
+/// 検出・打ち切り可能 (実測: 3 attempt で break、旧 2 attempt から微増)。
+const CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK: usize = 3;
+
 type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions, f64) -> IpmOutcome;
 
 /// tighten = ceil_pow10(user_eps / 1e-8) ∈ [1, 1000]。上限 1000 は IPM floor 制約。
@@ -208,6 +220,41 @@ fn outcome_is_better_candidate(
         std::cmp::Ordering::Less => true,
         std::cmp::Ordering::Greater => false,
         std::cmp::Ordering::Equal => candidate.objective.total_cmp(&incumbent.objective).is_lt(),
+    }
+}
+
+/// 2 連続 attempt が bit 同一の iterate で終わったか (決定的 stall の検出)。
+///
+/// tighten だけが違う attempt は、stall が inner eps に依存しない位置で起きると
+/// 完全に同じ軌道をなぞる (QPLIB_0018: 6 attempt 全てが iter 61 で同一 stall)。
+/// bit 同一なら以降の attempt も同じ結果にしかならないため打ち切る。
+fn attempts_bitwise_identical(prev: &AttemptFingerprint, outcome: &IpmOutcome) -> bool {
+    prev.iterations == outcome.iterations
+        && prev.objective_bits == outcome.objective.to_bits()
+        && slices_bitwise_equal(&prev.solution, &outcome.solution)
+        && slices_bitwise_equal(&prev.dual_solution, &outcome.dual_solution)
+}
+
+fn slices_bitwise_equal(a: &[f64], b: &[f64]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
+/// 直前 attempt の同一性判定に必要な最小コピー。
+struct AttemptFingerprint {
+    iterations: usize,
+    objective_bits: u64,
+    solution: Vec<f64>,
+    dual_solution: Vec<f64>,
+}
+
+impl AttemptFingerprint {
+    fn of(outcome: &IpmOutcome) -> Self {
+        Self {
+            iterations: outcome.iterations,
+            objective_bits: outcome.objective.to_bits(),
+            solution: outcome.solution.clone(),
+            dual_solution: outcome.dual_solution.clone(),
+        }
     }
 }
 
@@ -521,6 +568,16 @@ fn solve_ipm_with_runner(
     // presolve Ruiz 済なら IPM 側で重ね掛けしない (二重 scale で誤収束する)。
     let presolve_did_ruiz = presolve_result.ruiz_scaler.is_some();
     let mut best: Option<IpmOutcome> = None;
+    // use_ruiz ごとに直前 fingerprint を保持 (index: false=0, true=1)。attempts 列は
+    // [(true,t),(false,t),(true,10t),(false,10t),...] と tighten 固定・use_ruiz 反転の
+    // ペアを含むため、lane を跨いだ比較 (Ruiz flip のみのペア) は「tighten を変えても
+    // 変化なし」の証拠にならない。同じ lane 内で tighten が異なる直前 attempt とのみ
+    // 比較する。
+    let mut prev_by_ruiz: [Option<(f64, AttemptFingerprint)>; 2] = [None, None];
+    // 同一 lane 内で連続 bit 同一だった run の長さ (直近 attempt を含む)。tighten が
+    // 変わって bit が変化したら 1 にリセットする。break は
+    // CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK に到達したときのみ。
+    let mut run_len_by_ruiz: [usize; 2] = [0, 0];
 
     let user_max_iter = options.ipm.max_iter;
     let mut iter_used: usize = 0;
@@ -596,12 +653,38 @@ fn solve_ipm_with_runner(
             best = Some(outcome);
             break;
         }
+        // 同一 lane (use_ruiz) 内で tighten を変えても bit 同一な run が
+        // CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK 回続いたら残り attempt をスキップ
+        // (決定的 stall)。2 連続だけでは早計 (dfl001: tighten=100→1000 で 2 連続
+        // 同一でも 3 投目の tighten=10000 で iter が変化し脱出できた)。
+        // termination==Converged (scaled 空間では収束したが元空間 eps に届かない
+        // 精度床) は「inner eps を変えれば結果も変わる」が定義そのものなので run を
+        // リセットし打ち切り対象から外す — tighten ladder はその救済機構。
+        let lane = usize::from(use_ruiz);
+        let is_converged = outcome.termination == IpmTermination::Converged;
+        let bit_matches_prev = !is_converged
+            && prev_by_ruiz[lane]
+                .as_ref()
+                .is_some_and(|(prev_tighten, prev)| {
+                    *prev_tighten != tighten && attempts_bitwise_identical(prev, &outcome)
+                });
+        run_len_by_ruiz[lane] = if is_converged {
+            0
+        } else if bit_matches_prev {
+            run_len_by_ruiz[lane] + 1
+        } else {
+            1
+        };
+        prev_by_ruiz[lane] = Some((tighten, AttemptFingerprint::of(&outcome)));
         match &best {
             None => best = Some(outcome),
             Some(prev) if outcome_is_better_candidate(&outcome, prev, &view, user_eps) => {
                 best = Some(outcome);
             }
             _ => {}
+        }
+        if run_len_by_ruiz[lane] >= CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK {
+            break;
         }
     }
 
@@ -678,11 +761,17 @@ fn solve_ipm_with_runner(
     (r, eliminated_cols)
 }
 
-/// IpmOutcome → SolverResult: eps 達成→Optimal、外部停止→Timeout、内部停止→Suboptimal、解無し→NumericalError。
+/// IpmOutcome → SolverResult。解品質を主張する status (Optimal / LocallyOptimal /
+/// SuboptimalSolution) は品質ゲートを通った iterate のみが名乗る:
 ///
-/// eps 達成時は `prove_optimal` で KKT + dual_sign を再検証する。`satisfies_eps` は dual_sign
-/// チェックを含まないため、prove_optimal が唯一の Optimal mint 関数として機能する。
-/// `prove_optimal` が `Err(NotProven)` を返す場合は SuboptimalSolution に降格する。
+/// - `satisfies_eps(user_eps)` + `prove_optimal` Ok → Optimal / LocallyOptimal
+///   (prove_optimal が唯一の Optimal mint 関数)
+/// - `satisfies_eps(user_eps)` + `prove_optimal` Err → SuboptimalSolution
+///   (eps 品質は検証済み、証明書 (dual_sign / gap ≤ user_eps) のみ未達)
+/// - eps 未達 + 外部停止 → Timeout
+/// - eps 未達 + 内部停止 → 終端条件どおり Stalled (停滞 / 精度床) または
+///   MaxIterations (予算枯渇)。解品質は主張しない (solution は診断用 iterate)。
+/// - 解無し → NumericalError (外部停止なら Timeout)
 ///
 /// ## Gap 基準の意図的な厳格化
 ///
@@ -770,12 +859,20 @@ fn finalize_outcome(
             }
         } else {
             // KKT または dual_sign が tol 超 → Optimal を主張しない。
+            // satisfies_eps 済みなので「検証済み解 + 証明書なし」= SuboptimalSolution。
             SolveStatus::SuboptimalSolution
         }
     } else if timed_out {
         SolveStatus::Timeout
     } else {
-        SolveStatus::SuboptimalSolution
+        // eps 未達の非 timeout 終端。解品質を主張する status は使わず、
+        // 内部終端条件をそのまま報告する。Converged (scaled 空間では収束したが
+        // 元空間 user_eps に届かない精度床) は前進不能の一形態として Stalled。
+        match outcome.termination {
+            IpmTermination::IterationLimit => SolveStatus::MaxIterations,
+            IpmTermination::Deadline => SolveStatus::Timeout,
+            IpmTermination::Stalled | IpmTermination::Converged => SolveStatus::Stalled,
+        }
     };
 
     debug_assert_eq!(
@@ -838,6 +935,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         }
     }
 
@@ -886,6 +984,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         }
     }
 
@@ -915,6 +1014,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         }
     }
 
@@ -941,6 +1041,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         }
     }
 
@@ -1041,6 +1142,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         };
         assert!(
             outcome.satisfies_eps(1e-6),
@@ -1104,6 +1206,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         };
         assert!(
             outcome.satisfies_eps(1e-6),
@@ -1151,6 +1254,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         };
         assert!(
             outcome.satisfies_eps(1e-6),
@@ -1188,6 +1292,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         }
     }
 
@@ -1252,6 +1357,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         };
         let mut better_cert = incumbent.clone();
         better_cert.objective = 1.0e9;
@@ -1307,6 +1413,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         };
 
         assert!(
@@ -1496,6 +1603,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         };
         // mask=true on the A-non-empty col: narrow condition (a_empty) is false → not skipped.
         let mask = vec![true];
@@ -1785,6 +1893,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         };
 
         assert!(
@@ -1839,6 +1948,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         };
 
         assert!(outcome.satisfies_eps(user_eps));
@@ -1877,6 +1987,7 @@ mod tests {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Converged,
         };
         let result = finalize_outcome(outcome, 1e-6, 1, None, false, &view);
         assert_eq!(
@@ -2099,6 +2210,7 @@ mod tests {
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
+                termination: IpmTermination::Converged,
             }
         }
 
@@ -2234,6 +2346,7 @@ mod tests {
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
+                termination: IpmTermination::Converged,
             }
         }
 
@@ -2270,5 +2383,469 @@ mod tests {
             FALLBACK_SCHUR_HINT_IS_NONE.with(|c| c.get()),
             "opts.schur_hint must be None when the no-presolve fallback runner is called"
         );
+    }
+    /// 非収束 iterate をどう作っても SuboptimalSolution を名乗れないことの sentinel 群。
+    ///
+    /// 旧 finalize (`!satisfies_eps && !timed_out → SuboptimalSolution`) を revert
+    /// すると 3 テストとも SuboptimalSolution が返り FAIL する。
+    mod nonconverged_finalize_sentinels {
+        use super::*;
+        use crate::problem::SolveStatus;
+        use crate::qp::ipm_solver::outcome::IpmTermination;
+
+        /// kkt_max = 1.0 の完全非収束 iterate (QPLIB stall の縮小再現)。
+        fn nonconverged_outcome(termination: IpmTermination) -> IpmOutcome {
+            IpmOutcome {
+                solution: vec![0.0],
+                dual_solution: vec![0.0],
+                bound_duals: vec![0.0],
+                objective: 0.0,
+                iterations: 61,
+                kkt_residual_rel: 1.0,
+                primal_residual_rel: 1.0,
+                bound_violation: 0.0,
+                complementarity_residual_rel: 1.0,
+                duality_gap_rel: 1.0,
+                numerical_failure: false,
+                infeasibility_status: None,
+                is_locally_optimal: false,
+                postsolve_krylov_ir_skipped: false,
+                timing: None,
+                termination,
+            }
+        }
+
+        #[test]
+        fn stall_termination_reports_stalled_not_suboptimal() {
+            let prob = make_simple_eq_qp();
+            let view = ProblemView::from_problem(&prob);
+            let r = finalize_outcome(
+                nonconverged_outcome(IpmTermination::Stalled),
+                1e-6,
+                1,
+                None,
+                false,
+                &view,
+            );
+            assert_eq!(r.status, SolveStatus::Stalled, "got {:?}", r.status);
+            assert!(!r.solution.is_empty(), "診断 iterate は保持される");
+        }
+
+        #[test]
+        fn iteration_budget_termination_reports_max_iterations() {
+            let prob = make_simple_eq_qp();
+            let view = ProblemView::from_problem(&prob);
+            let r = finalize_outcome(
+                nonconverged_outcome(IpmTermination::IterationLimit),
+                1e-6,
+                1,
+                None,
+                false,
+                &view,
+            );
+            assert_eq!(r.status, SolveStatus::MaxIterations, "got {:?}", r.status);
+        }
+
+        /// scaled 空間で収束したが元空間 user_eps に届かない精度床 → Stalled。
+        #[test]
+        fn accuracy_floor_termination_reports_stalled() {
+            let prob = make_simple_eq_qp();
+            let view = ProblemView::from_problem(&prob);
+            let r = finalize_outcome(
+                nonconverged_outcome(IpmTermination::Converged),
+                1e-6,
+                1,
+                None,
+                false,
+                &view,
+            );
+            assert_eq!(r.status, SolveStatus::Stalled, "got {:?}", r.status);
+        }
+    }
+
+    /// 公開 API 経由の sentinel: 到達不能 eps では IPM は有限残差まで収束するが
+    /// satisfies_eps は常に false → 解品質を主張する status を返してはならない。
+    /// 旧 finalize (:778) を revert すると SuboptimalSolution が返り FAIL する。
+    #[test]
+    fn unreachable_eps_reports_stalled_via_public_api() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![-1.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        let mut opts = SolverOptions::default();
+        opts.ipm.eps = 1e-200;
+        let r = solve_ipm(&prob, &opts);
+        assert_eq!(
+            r.status,
+            crate::problem::SolveStatus::Stalled,
+            "unreachable eps must not mint a solution-claiming status, got {:?}",
+            r.status
+        );
+        assert!(!r.solution.is_empty(), "診断 iterate は保持される");
+    }
+
+    /// attempt loop の同一 outcome 早期打ち切り sentinel。
+    ///
+    /// runner が毎回 bit 同一の非収束 outcome を返す構成 (真の決定的 stall) では、
+    /// attempt list (この構成で 4 attempt) を CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK
+    /// (=3) attempt で打ち切る。dfl001 退化 (2 連続で打ち切ると 3 投目で脱出できる
+    /// ケースを取り逃す) を受けて 2→3 に変更した。早期打ち切りを完全に revert すると
+    /// 4 回呼ばれてこのテストが FAIL する。
+    mod identical_attempt_early_break {
+        use super::*;
+        use crate::problem::SolveStatus;
+        use crate::qp::ipm_solver::outcome::IpmTermination;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static IDENTICAL_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        fn runner_identical_stall(
+            _problem: &QpProblem,
+            _presolve: &QpPresolveResult,
+            _options: &SolverOptions,
+            _user_eps: f64,
+        ) -> IpmOutcome {
+            IDENTICAL_CALLS.fetch_add(1, Ordering::SeqCst);
+            IpmOutcome {
+                solution: vec![0.25],
+                dual_solution: vec![0.5],
+                bound_duals: vec![0.0],
+                objective: 0.25,
+                iterations: 61,
+                kkt_residual_rel: 1.0,
+                primal_residual_rel: 1.0,
+                bound_violation: 0.0,
+                complementarity_residual_rel: 1.0,
+                duality_gap_rel: 1.0,
+                numerical_failure: false,
+                infeasibility_status: None,
+                is_locally_optimal: false,
+                postsolve_krylov_ir_skipped: false,
+                timing: None,
+                termination: IpmTermination::Stalled,
+            }
+        }
+
+        #[test]
+        fn identical_consecutive_attempts_break_early() {
+            let prob = make_simple_eq_qp();
+            // presolve/Ruiz 無効 → attempts = [(false, 100), (false, 1000),
+            // (false, 10), (false, 1)] の 4 attempt 構成、fallback loop なし。
+            let mut opts = SolverOptions {
+                presolve: false,
+                use_ruiz_scaling: false,
+                ..Default::default()
+            };
+            opts.ipm.eps = 1e-6;
+
+            IDENTICAL_CALLS.store(0, Ordering::SeqCst);
+            let (result, _) = solve_ipm_with_runner(&prob, &opts, runner_identical_stall);
+            let calls = IDENTICAL_CALLS.load(Ordering::SeqCst);
+            assert_eq!(
+                calls, 3,
+                "bit 同一 stall は 3 連続 (CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK) で \
+                 打ち切るべき (2 連続打ち切りに戻すと 2、早期打ち切り自体を revert すると 4)"
+            );
+            assert_eq!(
+                result.status,
+                SolveStatus::Stalled,
+                "got {:?}",
+                result.status
+            );
+        }
+    }
+
+    /// P3-2 sentinel (dual-lane 正方向): Ruiz 有効 (2 lane 交互) の attempts 列でも
+    /// 「全 attempt が真に bit 同一の決定論的 stall」なら early-break が実際に
+    /// 発火することを検証する。`identical_attempt_early_break` は no-Ruiz
+    /// (単一 lane) 構成のみをカバーしており、dual-lane 構成での正方向 (打ち切る
+    /// べきときに打ち切る) を検証する sentinel が欠けていた。
+    ///
+    /// 期待値の導出 (attempts 列構造 + CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK=3
+    /// から独立に計算): presolve 無効 + use_ruiz_scaling=true, eps=1e-6 →
+    /// base_tighten=100 → attempts = [(true,100),(false,100),(true,1000),
+    /// (false,1000),(true,10000),(false,10000),(true,10),(false,10),(true,1),
+    /// (false,1)] (10 要素、lane が true/false と交互)。runner が入力に関わらず
+    /// 常に同一 bit を返す (真の決定論的 stall) とき、lane=true の出現順は
+    /// 全体 call 番号 1,3,5,... (1-indexed) = 1st,2nd,3rd,... occurrence。
+    /// run_len[true] は 1st occurrence で 1、2nd occurrence (call#3) で 2、
+    /// 3rd occurrence (call#5) で 3 となり閾値に到達 → call#5 (0-indexed idx4,
+    /// (true,10000)) で break。break までに実行された call 数は 1,2,3,4,5 の
+    /// 5 回 (idx0..idx4)。revert (early-break 完全削除) すると 10 回全走し FAIL。
+    mod dual_lane_true_stall_breaks_at_third_occurrence {
+        use super::*;
+        use crate::qp::ipm_solver::outcome::IpmTermination;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        fn runner_always_identical(
+            _problem: &QpProblem,
+            _presolve: &QpPresolveResult,
+            _options: &SolverOptions,
+            _user_eps: f64,
+        ) -> IpmOutcome {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            IpmOutcome {
+                solution: vec![0.42],
+                dual_solution: vec![0.7],
+                bound_duals: vec![0.0],
+                objective: 0.42,
+                iterations: 61,
+                kkt_residual_rel: 1.0,
+                primal_residual_rel: 1.0,
+                bound_violation: 0.0,
+                complementarity_residual_rel: 1.0,
+                duality_gap_rel: 1.0,
+                numerical_failure: false,
+                infeasibility_status: None,
+                is_locally_optimal: false,
+                postsolve_krylov_ir_skipped: false,
+                timing: None,
+                termination: IpmTermination::Stalled,
+            }
+        }
+
+        #[test]
+        fn dual_lane_true_stall_breaks_at_expected_call_count() {
+            let prob = make_simple_eq_qp();
+            let mut opts = SolverOptions {
+                presolve: false,
+                use_ruiz_scaling: true,
+                ..Default::default()
+            };
+            opts.ipm.eps = 1e-6;
+
+            CALLS.store(0, Ordering::SeqCst);
+            let (result, _) = solve_ipm_with_runner(&prob, &opts, runner_always_identical);
+            let calls = CALLS.load(Ordering::SeqCst);
+            assert_eq!(
+                calls, 5,
+                "真の決定論的 stall (dual-lane) は lane=true の 3rd occurrence \
+                 (全体 5 call 目) で打ち切るべき, got {calls}"
+            );
+            assert_eq!(
+                result.status,
+                SolveStatus::Stalled,
+                "got {:?}",
+                result.status
+            );
+        }
+    }
+
+    /// P1-2 sentinel: Ruiz on/off だけが違う「tighten 同一」ペア (attempts 列先頭
+    /// [(true,t),(false,t)]) が bit 同一でも、それは「Ruiz が no-op」なだけで
+    /// tighten を上げても改善しないという証拠ではない。tighten ladder を丸ごと
+    /// skip してはいけない。
+    ///
+    /// runner は options.ipm.eps (= tighten の写像) だけに依存する値を返す (Ruiz
+    /// on/off を無視) — Ruiz が完全に no-op な問題を模擬する。lane 分離を revert
+    /// すると (true,100) vs (false,100) が誤って「同一」判定され 2 attempt で
+    /// 打ち切られる。
+    mod ruiz_flip_pair_does_not_false_trigger_stall {
+        use super::*;
+        use crate::qp::ipm_solver::outcome::IpmTermination;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        fn runner_tighten_keyed(
+            _problem: &QpProblem,
+            _presolve: &QpPresolveResult,
+            options: &SolverOptions,
+            _user_eps: f64,
+        ) -> IpmOutcome {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            IpmOutcome {
+                solution: vec![options.ipm.eps],
+                dual_solution: vec![0.5],
+                bound_duals: vec![0.0],
+                objective: options.ipm.eps,
+                iterations: 61,
+                kkt_residual_rel: 1.0,
+                primal_residual_rel: 1.0,
+                bound_violation: 0.0,
+                complementarity_residual_rel: 1.0,
+                duality_gap_rel: 1.0,
+                numerical_failure: false,
+                infeasibility_status: None,
+                is_locally_optimal: false,
+                postsolve_krylov_ir_skipped: false,
+                timing: None,
+                termination: IpmTermination::Stalled,
+            }
+        }
+
+        #[test]
+        fn ruiz_flip_pair_does_not_false_trigger_stall_break() {
+            let prob = make_simple_eq_qp();
+            // presolve 無効 + use_ruiz_scaling=true → attempts = [(true,100),
+            // (false,100),(true,1000),(false,1000),(true,10000),(false,10000),
+            // (true,10),(false,10),(true,1),(false,1)] の 10 attempt 構成
+            // (eps=1e-6 → base_tighten=100)。
+            let mut opts = SolverOptions {
+                presolve: false,
+                use_ruiz_scaling: true,
+                ..Default::default()
+            };
+            opts.ipm.eps = 1e-6;
+
+            CALLS.store(0, Ordering::SeqCst);
+            let _ = solve_ipm_with_runner(&prob, &opts, runner_tighten_keyed);
+            let calls = CALLS.load(Ordering::SeqCst);
+            assert_eq!(
+                calls, 10,
+                "Ruiz on/off だけが違う同一 tighten ペアで誤って打ち切ってはいけない \
+                 (tighten ladder 全 10 attempt を尽くすべき), got {calls}"
+            );
+        }
+    }
+
+    /// P1-2 追加 sentinel (dfl001 退化の再現): 同一 lane 内で 2 連続 bit 一致した
+    /// 後、3 投目で bit が変わる合成ケースでは打ち切ってはいけない (全 attempt を
+    /// 尽くすべき)。
+    ///
+    /// 実測 trace (dfl001, netlib LP): lane=true は tighten=100→1000 で 2 連続
+    /// bit 同一 (iter=115) だったが、tighten=10000 の 3 投目で iter=136 に変化し
+    /// 脱出できた。2 連続で打ち切ると、この 3 投目や反対 lane の attempt
+    /// (best 候補になり得た) を試す機会を失い、Optimal→Stalled に退化する。
+    ///
+    /// runner は tighten∈{100,1000} で同一 bit、tighten∈{10000,10,1} でそれぞれ
+    /// 異なる bit を返す (Ruiz on/off に依存しない — 両 lane で同じパターン)。
+    /// これにより両 lane とも run_len は最大 2 までしか伸びず、3 に到達しない。
+    mod two_consecutive_match_then_diverge_does_not_break {
+        use super::*;
+        use crate::qp::ipm_solver::outcome::IpmTermination;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        const USER_EPS: f64 = 1e-6;
+        // tighten=100,1000 それぞれの inner eps。両者は同一 bit を返す (2 連続一致)。
+        const EPS_TIGHTEN_100: f64 = USER_EPS / 100.0;
+        const EPS_TIGHTEN_1000: f64 = USER_EPS / 1000.0;
+
+        fn runner_two_match_then_diverge(
+            _problem: &QpProblem,
+            _presolve: &QpPresolveResult,
+            options: &SolverOptions,
+            _user_eps: f64,
+        ) -> IpmOutcome {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            // tighten=100 と tighten=1000 は同一の診断値 (iter=115 相当) を返す。
+            // それ以外 (10000, 10, 1) は options.ipm.eps ごとに異なる値を返す
+            // (dfl001 の 3 投目で iter が変化した挙動を模擬)。
+            let probe = if options.ipm.eps == EPS_TIGHTEN_100 || options.ipm.eps == EPS_TIGHTEN_1000
+            {
+                115.0
+            } else {
+                options.ipm.eps
+            };
+            IpmOutcome {
+                solution: vec![probe],
+                dual_solution: vec![0.5],
+                bound_duals: vec![0.0],
+                objective: probe,
+                iterations: 61,
+                kkt_residual_rel: 1.0,
+                primal_residual_rel: 1.0,
+                bound_violation: 0.0,
+                complementarity_residual_rel: 1.0,
+                duality_gap_rel: 1.0,
+                numerical_failure: false,
+                infeasibility_status: None,
+                is_locally_optimal: false,
+                postsolve_krylov_ir_skipped: false,
+                timing: None,
+                termination: IpmTermination::Stalled,
+            }
+        }
+
+        #[test]
+        fn two_consecutive_match_then_diverge_runs_full_ladder() {
+            let prob = make_simple_eq_qp();
+            // presolve 無効 + use_ruiz_scaling=true → attempts = [(true,100),
+            // (false,100),(true,1000),(false,1000),(true,10000),(false,10000),
+            // (true,10),(false,10),(true,1),(false,1)] の 10 attempt 構成。
+            let mut opts = SolverOptions {
+                presolve: false,
+                use_ruiz_scaling: true,
+                ..Default::default()
+            };
+            opts.ipm.eps = USER_EPS;
+
+            CALLS.store(0, Ordering::SeqCst);
+            let _ = solve_ipm_with_runner(&prob, &opts, runner_two_match_then_diverge);
+            let calls = CALLS.load(Ordering::SeqCst);
+            assert_eq!(
+                calls, 10,
+                "同一 lane 2 連続一致は決定的 stall の証拠にならない (3 投目で \
+                 bit が変わりうる) — tighten ladder 全 10 attempt を尽くすべき, got {calls}"
+            );
+        }
+    }
+
+    /// P1-2 sentinel: termination==Converged (scaled 空間では収束したが元空間 eps
+    /// に届かない精度床) は、tighten を変えても bit 同一の outcome を返しうるが、
+    /// それは決定的 stall ではない (定義上 inner eps が変われば結果も変わるはずの
+    /// ケース) ため打ち切ってはいけない。
+    mod converged_termination_does_not_break_early {
+        use super::*;
+        use crate::qp::ipm_solver::outcome::IpmTermination;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        fn runner_static_converged(
+            _problem: &QpProblem,
+            _presolve: &QpPresolveResult,
+            _options: &SolverOptions,
+            _user_eps: f64,
+        ) -> IpmOutcome {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            IpmOutcome {
+                solution: vec![0.25],
+                dual_solution: vec![0.5],
+                bound_duals: vec![0.0],
+                objective: 0.25,
+                iterations: 61,
+                kkt_residual_rel: 1.0,
+                primal_residual_rel: 1.0,
+                bound_violation: 0.0,
+                complementarity_residual_rel: 1.0,
+                duality_gap_rel: 1.0,
+                numerical_failure: false,
+                infeasibility_status: None,
+                is_locally_optimal: false,
+                postsolve_krylov_ir_skipped: false,
+                timing: None,
+                termination: IpmTermination::Converged,
+            }
+        }
+
+        #[test]
+        fn converged_termination_runs_full_ladder() {
+            let prob = make_simple_eq_qp();
+            let mut opts = SolverOptions {
+                presolve: false,
+                use_ruiz_scaling: true,
+                ..Default::default()
+            };
+            opts.ipm.eps = 1e-6;
+
+            CALLS.store(0, Ordering::SeqCst);
+            let _ = solve_ipm_with_runner(&prob, &opts, runner_static_converged);
+            let calls = CALLS.load(Ordering::SeqCst);
+            assert_eq!(
+                calls, 10,
+                "termination=Converged (精度床) は bit 同一でも打ち切ってはいけない \
+                 (tighten ladder 全 10 attempt を尽くすべき), got {calls}"
+            );
+        }
     }
 }

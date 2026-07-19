@@ -203,6 +203,7 @@ fn main() {
         SolveStatus::Infeasible => "Infeasible",
         SolveStatus::Unbounded => "Unbounded",
         SolveStatus::MaxIterations => "MaxIterations",
+        SolveStatus::Stalled => "Stalled",
         SolveStatus::SuboptimalSolution => "SuboptimalSolution",
         SolveStatus::Timeout => "Timeout",
         SolveStatus::NumericalError => "NumericalError",

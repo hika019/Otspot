@@ -11,7 +11,7 @@ use super::kkt::{
     bound_violation, complementarity_componentwise_rel, complementarity_residual_rel,
     kkt_residual_rel, primal_residual_rel,
 };
-use super::outcome::{IpmOutcome, ProblemView};
+use super::outcome::{IpmOutcome, IpmTermination, ProblemView};
 use crate::options::SolverOptions;
 use crate::presolve::{postsolve_qp_with_dual_recovery, QpPresolveResult};
 use crate::problem::{SolveStatus, TimingBreakdown};
@@ -98,6 +98,16 @@ fn run_ipm_with(
         result.status = SolveStatus::Optimal;
     }
 
+    // 内部 IPM の終端条件を status から写像する (以後 status は後処理用に書き換わる)。
+    // Infeasible/Unbounded/NonConvex は上で return 済み、NumericalError は下の
+    // invalid 分岐が拾うため、ここに来る status は収束 / stall / 予算枯渇 / deadline。
+    let termination = match result.status {
+        SolveStatus::Optimal => IpmTermination::Converged,
+        SolveStatus::MaxIterations => IpmTermination::IterationLimit,
+        SolveStatus::Timeout => IpmTermination::Deadline,
+        _ => IpmTermination::Stalled,
+    };
+
     // n_reduced==0: presolve が全変数を除去した場合。solve_unconstrained は
     // solution=vec![] を返すが、これは正常 (postsolve が元空間を復元する)。
     // is_empty() / any(!finite()) を n_reduced>0 の場合のみ適用する。
@@ -121,6 +131,7 @@ fn run_ipm_with(
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: result.timing_breakdown,
+            termination,
         };
     }
 
@@ -162,6 +173,7 @@ fn run_ipm_with(
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: result.timing_breakdown,
+            termination,
         };
     }
 
@@ -363,6 +375,7 @@ fn run_ipm_with(
         is_locally_optimal,
         postsolve_krylov_ir_skipped: krylov_ir_skipped,
         timing: Some(combined_timing),
+        termination,
     }
 }
 

@@ -7,6 +7,11 @@ use crate::mip::{branch::is_integer_feasible, integer_mask, MilpProblem, MipConf
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolveStatus, SolverResult};
 
+/// sub-MIP の結果を元問題の incumbent 候補へ昇格できるか判定する品質ゲート。
+///
+/// status を信用せず、どの status でも元問題での整数実行可能性を独立検証し、
+/// objective も元問題で再計算する。解を主張しない status (Stalled /
+/// MaxIterations / NumericalError 等) の iterate は候補にしない。
 pub(crate) fn usable_sub_mip_result_for_original(
     problem: &MilpProblem,
     mut result: SolverResult,
@@ -15,16 +20,17 @@ pub(crate) fn usable_sub_mip_result_for_original(
     if result.solution.is_empty() {
         return None;
     }
-    match result.status {
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution => Some(result),
-        SolveStatus::Timeout
-            if is_original_mip_feasible(problem, &result.solution, integer_feas_tol) =>
-        {
-            result.objective = original_mip_objective(problem, &result.solution)?;
-            Some(result)
-        }
-        _ => None,
+    if !matches!(
+        result.status,
+        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+    ) {
+        return None;
     }
+    if !is_original_mip_feasible(problem, &result.solution, integer_feas_tol) {
+        return None;
+    }
+    result.objective = original_mip_objective(problem, &result.solution)?;
+    Some(result)
 }
 
 fn is_original_mip_feasible(problem: &MilpProblem, x: &[f64], tol: f64) -> bool {
@@ -234,5 +240,62 @@ mod tests {
             1e-9,
         )
         .is_none());
+    }
+
+    /// Sentinel: status を信用しない品質ゲート。Optimal / SuboptimalSolution を
+    /// 名乗っていても元問題で infeasible な解は incumbent 候補にしない。
+    /// 旧実装 (Optimal | SuboptimalSolution => Some(result) の無検査通過) に
+    /// revert するとこのテストが FAIL する。
+    #[test]
+    fn claimed_statuses_are_still_feasibility_gated() {
+        let problem = one_binary_problem();
+        for status in [SolveStatus::Optimal, SolveStatus::SuboptimalSolution] {
+            // x=2.0 は bounds (0,1) と x<=1 の両方に違反。
+            assert!(
+                usable_sub_mip_result_for_original(
+                    &problem,
+                    result(status.clone(), vec![2.0]),
+                    1e-9,
+                )
+                .is_none(),
+                "{status:?} claiming an original-infeasible solution must be rejected"
+            );
+        }
+    }
+
+    /// 解を主張しない status (Stalled / MaxIterations) は feasible な iterate を
+    /// 持っていても incumbent 候補にならない。
+    #[test]
+    fn nonclaiming_statuses_are_rejected_even_when_feasible() {
+        let problem = one_binary_problem();
+        for status in [SolveStatus::Stalled, SolveStatus::MaxIterations] {
+            assert!(
+                usable_sub_mip_result_for_original(
+                    &problem,
+                    result(status.clone(), vec![1.0]),
+                    1e-9,
+                )
+                .is_none(),
+                "{status:?} must not become an incumbent"
+            );
+        }
+    }
+
+    /// Optimal の objective も元問題で再計算される (obj_offset=3, c=[2], x=1 → 5)。
+    #[test]
+    fn claimed_status_objective_is_recomputed_for_original() {
+        let problem = one_binary_problem();
+        let accepted = usable_sub_mip_result_for_original(
+            &problem,
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: -1.0e100,
+                solution: vec![1.0],
+                ..SolverResult::default()
+            },
+            1e-9,
+        )
+        .expect("feasible Optimal must be kept");
+        assert_eq!(accepted.objective, 5.0);
     }
 }

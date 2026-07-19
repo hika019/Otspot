@@ -545,7 +545,11 @@ fn solve_relaxation_with_scaling_retry<R: Relaxation>(
 fn needs_scaled_retry(res: &SolverResult) -> bool {
     matches!(
         res.status,
-        SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::SuboptimalSolution
+        SolveStatus::Timeout
+            | SolveStatus::NumericalError
+            | SolveStatus::SuboptimalSolution
+            | SolveStatus::Stalled
+            | SolveStatus::MaxIterations
     )
 }
 

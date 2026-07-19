@@ -566,6 +566,7 @@ fn main() {
     let mut n_error = 0usize;
     let mut n_timeout = 0usize;
     let mut n_max_iter = 0usize;
+    let mut n_stalled = 0usize;
     let mut n_nonconvex = 0usize;
     let mut n_suboptimal = 0usize;
     // solve_qp_with が out-of-scope と正しく declined したケース (n_fail とは別 bucket)。
@@ -873,6 +874,23 @@ fn main() {
                     ),
                 )
             }
+            // Stalled は解を主張しない (診断 iterate のみ)。
+            SolveStatus::Stalled => {
+                n_stalled += 1;
+                let obj_str = if result.solution.len() == prob.num_vars {
+                    let pfn = compute_pfeas_normalized(&prob, &result.solution);
+                    format!("obj={:.3e} pfn={:.1e}", result.objective, pfn)
+                } else {
+                    "obj=NA".to_string()
+                };
+                (
+                    "STALLED".to_string(),
+                    format!(
+                        "[{}] iters={} {} {}",
+                        method_label, result.iterations, obj_str, resid_str
+                    ),
+                )
+            }
             SolveStatus::SuboptimalSolution => {
                 n_suboptimal += 1;
                 let obj_str = if result.solution.is_empty() {
@@ -982,6 +1000,7 @@ fn main() {
     println!("  SUBOPTIMAL:        {}", n_suboptimal);
     println!("  OBJ_MISMATCH:      {}", n_obj_mismatch);
     println!("  MAXITER:           {}", n_max_iter);
+    println!("  STALLED:           {}", n_stalled);
     println!("  TIMEOUT:           {}", n_timeout);
     println!("  NONCONVEX:         {}", n_nonconvex);
     println!("  NOT_SUPPORTED:     {}", n_not_supported);
@@ -998,6 +1017,7 @@ fn main() {
             + n_obj_mismatch
             + n_fail
             + n_max_iter
+            + n_stalled
             + n_suboptimal
             + n_timeout
             + n_nonconvex

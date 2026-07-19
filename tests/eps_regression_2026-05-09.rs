@@ -83,6 +83,16 @@ fn qpcboei2_pfeas_componentwise_at_loose_eps_1e4() {
     );
 }
 
+/// status 誠実化 (fix/suboptimal-status-honesty) 後: QPCBOEI2 は eps=1e-6 で品質
+/// ゲート (prove_optimal) 未達のため現状 `Stalled` を honest に返す (診断 iterate
+/// のみ、解の主張なし)。旧 taxonomy はこれを「eps-primal-feasible だから usable」
+/// として `SuboptimalSolution` に丸めていたが、それは quality gate を経ない詐称
+/// だった。本テストが 2026-05-09 に守っていた品質保証 — componentwise primal
+/// feasibility (`pfeas_normalized`) が status に関わらず user_eps を満たすこと —
+/// は診断 iterate 自体の性質として不変のはずなので、pfn の閾値検証だけを行う。
+/// status を固定 assert しないのは、将来ソルバが改善し QPCBOEI2 が真に品質ゲートを
+/// 通って `Optimal` になった場合に、それを退化と誤検知しないため
+/// (`qpcboei2_pfeas_componentwise_at_tight_eps_1e8` と同型)。
 #[test]
 fn qpcboei2_pfeas_componentwise_at_default_eps_1e6() {
     let path = maros_path("QPCBOEI2.QPS");
@@ -97,21 +107,14 @@ fn qpcboei2_pfeas_componentwise_at_default_eps_1e6() {
     assert_eq!(
         result.solution.len(),
         prob.num_vars,
-        "QPCBOEI2 eps=1e-6 must return an original-space incumbent"
-    );
-    assert!(
-        matches!(
-            result.status,
-            SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::SuboptimalSolution
-        ),
-        "QPCBOEI2 eps=1e-6 expected a usable incumbent, got {:?} pfn={:.3e}",
-        result.status,
-        pfn
+        "QPCBOEI2 eps=1e-6 must return an original-space diagnostic iterate"
     );
     assert!(
         pfn < 1e-6,
-        "QPCBOEI2 eps=1e-6 pfn={:.3e} must be < 1e-6 (componentwise relative)",
-        pfn
+        "QPCBOEI2 eps=1e-6 pfn={:.3e} must be < 1e-6 (componentwise relative), \
+         status={:?} — this is the 2026-05-09 fix's regression guard",
+        pfn,
+        result.status
     );
 }
 

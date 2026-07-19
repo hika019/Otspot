@@ -10,11 +10,6 @@ use crate::options::SolverOptions;
 use crate::problem::SolverResult;
 use crate::qp::problem::QpProblem;
 
-#[cfg(test)]
-pub(crate) use scaling::check_dfeas_status;
-#[cfg(test)]
-pub(crate) use scaling::check_dfeas_status_relative;
-
 /// fraction-to-boundary τ。
 pub(crate) const TAU: f64 = 0.995;
 
@@ -43,9 +38,7 @@ pub fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> SolverRes
 
 #[cfg(test)]
 mod tests {
-    use super::scaling::{
-        compute_amplification, post_verify_solution, unscale_ipm_result, EPS_FLOOR,
-    };
+    use super::scaling::{compute_amplification, EPS_FLOOR};
     use super::*;
     use crate::linalg::ruiz::RuizScaler;
     use crate::options::SolverOptions;
@@ -194,179 +187,6 @@ mod tests {
             "got {:?}",
             result.status
         );
-    }
-
-    /// scaled 空間で Optimal でも元空間 pfeas 違反なら降格すべき。
-    #[test]
-    fn test_ipm_post_unscaling_false_optimal_detection() {
-        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
-        let c_vec = vec![0.0];
-        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-        let b = vec![0.5];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
-
-        let mut scaler = RuizScaler::new(1, 1);
-        scaler.d = vec![2.0];
-        scaler.e = vec![1.0];
-        scaler.c = 1.0;
-
-        let mock_result = SolverResult {
-            status: SolveStatus::Optimal,
-            solution: vec![1.0],
-            dual_solution: vec![0.0],
-            objective: 1.0,
-            ..SolverResult::default()
-        };
-
-        let eps = 1e-6_f64;
-        let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
-
-        assert_ne!(
-            result.status,
-            SolveStatus::Optimal,
-            "got {:?}",
-            result.status
-        );
-        assert_eq!(result.status, SolveStatus::SuboptimalSolution);
-        close(result.solution[0], 2.0, "x[0] unscaled");
-    }
-
-    #[test]
-    fn test_ipm_post_unscaling_genuine_optimal_preserved() {
-        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
-        let c_vec = vec![0.0];
-        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-        let b = vec![1.0];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
-
-        let scaler = RuizScaler::new(1, 1);
-
-        let mock_result = SolverResult {
-            status: SolveStatus::Optimal,
-            solution: vec![0.0],
-            dual_solution: vec![0.0],
-            objective: 0.0,
-            ..SolverResult::default()
-        };
-
-        let eps = 1e-6_f64;
-        let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
-
-        assert_eq!(result.status, SolveStatus::Optimal);
-    }
-
-    #[test]
-    fn test_ipm_bfeas_violation_detected() {
-        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
-        let c_vec = vec![0.0];
-        let a = CscMatrix::new(0, 1);
-        let b = vec![];
-        let bounds = vec![(0.0_f64, 0.5_f64)];
-        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
-
-        let scaler = RuizScaler::new(1, 0);
-
-        let mock_result = SolverResult {
-            status: SolveStatus::Optimal,
-            solution: vec![1.0],
-            dual_solution: vec![],
-            objective: 1.0,
-            ..SolverResult::default()
-        };
-
-        let eps = 1e-6_f64;
-        let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
-
-        assert_ne!(
-            result.status,
-            SolveStatus::Optimal,
-            "got {:?}",
-            result.status
-        );
-        assert_eq!(result.status, SolveStatus::SuboptimalSolution);
-    }
-
-    #[test]
-    fn test_ipm_bfeas_within_bounds_preserved() {
-        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
-        let c_vec = vec![0.0];
-        let a = CscMatrix::new(0, 1);
-        let b = vec![];
-        let bounds = vec![(-1.0_f64, 1.0_f64)];
-        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
-
-        let scaler = RuizScaler::new(1, 0);
-
-        let mock_result = SolverResult {
-            status: SolveStatus::Optimal,
-            solution: vec![0.0],
-            dual_solution: vec![],
-            objective: 0.0,
-            ..SolverResult::default()
-        };
-
-        let eps = 1e-6_f64;
-        let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
-
-        assert_eq!(result.status, SolveStatus::Optimal);
-    }
-
-    #[test]
-    fn test_ipm_dfeas_violation_detected() {
-        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
-        let c_vec = vec![1.0];
-        let a = CscMatrix::new(0, 1);
-        let b = vec![];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
-
-        let scaler = RuizScaler::new(1, 0);
-
-        let mock_result = SolverResult {
-            status: SolveStatus::Optimal,
-            solution: vec![10.0],
-            dual_solution: vec![],
-            objective: 110.0,
-            ..SolverResult::default()
-        };
-
-        let eps = 1e-6_f64;
-        let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
-
-        assert_ne!(
-            result.status,
-            SolveStatus::Optimal,
-            "got {:?}",
-            result.status
-        );
-        assert_eq!(result.status, SolveStatus::SuboptimalSolution);
-    }
-
-    #[test]
-    fn test_ipm_dfeas_within_tolerance_preserved() {
-        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
-        let c_vec = vec![1.0];
-        let a = CscMatrix::new(0, 1);
-        let b = vec![];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
-
-        let scaler = RuizScaler::new(1, 0);
-
-        let mock_result = SolverResult {
-            status: SolveStatus::Optimal,
-            solution: vec![-0.5],
-            dual_solution: vec![],
-            objective: -0.25,
-            ..SolverResult::default()
-        };
-
-        let eps = 1e-6_f64;
-        let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
-
-        assert_eq!(result.status, SolveStatus::Optimal);
     }
 
     #[test]
@@ -585,7 +405,9 @@ mod tests {
         assert!((result_ruiz.solution[1] - result_no_ruiz.solution[1]).abs() < 1e-4);
     }
 
-    /// SuboptimalSolution は外部 API から返ってはならない。
+    /// この良条件凸 QP は証明書付き Optimal まで収束するべきで、eps 検証済みだが
+    /// 証明書なしの SuboptimalSolution に留まってはならない (SuboptimalSolution
+    /// 自体は現行 taxonomy で正当な外部 API 戻り値であり、一般に禁止ではない)。
     #[test]
     fn test_a5s02_post_verify_no_false_optimal() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -601,82 +423,6 @@ mod tests {
         let result = crate::qp::solve_qp_with(&problem, &opts);
         assert_ne!(result.status, SolveStatus::SuboptimalSolution);
         assert_eq!(result.status, SolveStatus::Optimal);
-    }
-
-    /// 行ノルム正規化: 大係数行に支配されず、小係数行の微小違反を検出する。
-    #[test]
-    fn test_post_verify_row_norm_rejects_small_row_violation() {
-        use crate::problem::ConstraintType;
-
-        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-        let c = vec![0.0, 0.0];
-        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1e6_f64, 1.0], 2, 2).unwrap();
-        let b = vec![1e6_f64, 1.0];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(
-            q,
-            c,
-            a,
-            b,
-            bounds,
-            vec![ConstraintType::Eq, ConstraintType::Eq],
-        )
-        .unwrap();
-
-        let delta = 1e-5_f64;
-        let mock_result = SolverResult {
-            status: SolveStatus::SuboptimalSolution,
-            solution: vec![1.0, 1.0 + delta],
-            dual_solution: vec![0.0, 0.0],
-            ..SolverResult::default()
-        };
-
-        let eps = 1e-6_f64;
-        let result = post_verify_solution(mock_result, &problem, eps);
-
-        assert_eq!(
-            result.status,
-            SolveStatus::SuboptimalSolution,
-            "got {:?}",
-            result.status
-        );
-    }
-
-    #[test]
-    fn test_post_verify_row_norm_accepts_exact_solution() {
-        use crate::problem::ConstraintType;
-
-        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-        let c = vec![0.0, 0.0];
-        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1e6_f64, 1.0], 2, 2).unwrap();
-        let b = vec![1e6_f64, 1.0];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(
-            q,
-            c,
-            a,
-            b,
-            bounds,
-            vec![ConstraintType::Eq, ConstraintType::Eq],
-        )
-        .unwrap();
-
-        let mock_result = SolverResult {
-            status: SolveStatus::SuboptimalSolution,
-            solution: vec![1.0, 1.0],
-            dual_solution: vec![-2e-6_f64, -2.0],
-            ..SolverResult::default()
-        };
-
-        let eps = 1e-6_f64;
-        let result = post_verify_solution(mock_result, &problem, eps);
-
-        assert_eq!(
-            result.status,
-            SolveStatus::Optimal,
-            "got {:?}",
-            result.status
-        );
     }
 
     /// Ge制約付き QP の wall-clock ガード。

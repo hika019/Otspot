@@ -32,7 +32,7 @@ timeout          : 1000s
   TOTAL:   3
 
 === 問題別詳細 ===
-QPLIB_0018                   50      1      SUBOPTIMAL      0.648 [ipm] iters=139 obj=-1.259197e1 x_inf=3.14e-1
+QPLIB_0018                   50      1         STALLED      0.648 [ipm] iters=139 obj=-1.259197e1 x_inf=3.14e-1
 QPLIB_8495                27543   8000            PASS      4.420 [ipm] obj=4.285750e4 obj_err=0.000%
   QPLIB_9999.qplib  EXTERNAL_TIMEOUT (external_timeout=6300s, solver internal timeout 未機能)
     EXTERNAL_TIMEOUT: 1
@@ -84,7 +84,7 @@ class TestBenchParallelParser(unittest.TestCase):
         os.unlink(self.path)
 
     def test_detail_lines_parsed(self):
-        self.assertEqual(self.parsed["QPLIB_0018"]["status"], "SUBOPTIMAL")
+        self.assertEqual(self.parsed["QPLIB_0018"]["status"], "STALLED")
         self.assertEqual(self.parsed["QPLIB_8495"]["status"], "PASS")
         self.assertAlmostEqual(self.parsed["QPLIB_8495"]["time"], 4.420)
 

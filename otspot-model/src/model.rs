@@ -634,13 +634,9 @@ impl Model {
 
         match solver_result.status {
             SolveStatus::Optimal => Ok(build_ok(solver_result)),
-            SolveStatus::MaxIterations => {
-                if solver_result.solution.is_empty() {
-                    Err(ModelError::SolveError(SolveError::MaxIterations))
-                } else {
-                    Ok(build_ok(solver_result))
-                }
-            }
+            // simplex の MaxIterations は解なし (incumbent ありの stall は
+            // SuboptimalSolution)。診断 iterate を有効解として返さない。
+            SolveStatus::MaxIterations => Err(ModelError::SolveError(SolveError::MaxIterations)),
             SolveStatus::SuboptimalSolution => {
                 if solver_result.solution.is_empty() {
                     Err(ModelError::Timeout)
@@ -1641,23 +1637,12 @@ impl Model {
                     qp_result.bound_duals,
                 ))
             }
-            SolveStatus::MaxIterations => {
-                if qp_result.solution.is_empty() {
-                    Err(ModelError::SolveError(SolveError::MaxIterations))
-                } else {
-                    let dual =
-                        validate_qp_dual_len(&qp_result.dual_solution, num_model_constraints)?;
-                    Ok(build_ok(
-                        SolveStatus::MaxIterations,
-                        qp_result.objective,
-                        qp_result.solution,
-                        dual,
-                        qp_result.bound_duals,
-                    ))
-                }
-            }
+            // 反復予算枯渇: solution は未検証の診断 iterate であり有効解ではない。
+            SolveStatus::MaxIterations => Err(ModelError::SolveError(SolveError::MaxIterations)),
             SolveStatus::SuboptimalSolution => {
-                // apply_api_boundary_conversion が通常 Optimal/Timeout に変換済み。予備パス。
+                // 現行 taxonomy では SuboptimalSolution は常に非空 solution を伴う
+                // (QP: finalize_outcome、LP: stall_status の mint 条件)。
+                // 空 solution 分岐は防御的フォールバック。
                 if qp_result.solution.is_empty() {
                     Err(ModelError::Timeout)
                 } else {
@@ -1788,13 +1773,15 @@ impl Model {
                     build_ok(result)
                 }
             }
-            SolveStatus::SuboptimalSolution | SolveStatus::MaxIterations => {
+            SolveStatus::SuboptimalSolution => {
                 if result.solution.is_empty() {
                     Err(ModelError::SolveError(SolveError::MaxIterations))
                 } else {
                     build_ok(result)
                 }
             }
+            // B&B の MaxIterations は incumbent なしの node 予算枯渇 (解なし)。
+            SolveStatus::MaxIterations => Err(ModelError::SolveError(SolveError::MaxIterations)),
             SolveStatus::LocallyOptimal
             | SolveStatus::NonconvexLocal
             | SolveStatus::NonconvexGlobal => Err(ModelError::Internal(
@@ -1826,6 +1813,9 @@ fn classify_status_error(status: SolveStatus) -> Option<ModelError> {
         SolveStatus::Infeasible => Some(ModelError::SolveError(SolveError::Infeasible)),
         SolveStatus::Unbounded => Some(ModelError::SolveError(SolveError::Unbounded)),
         SolveStatus::NumericalError => Some(ModelError::SolveError(SolveError::NumericalError)),
+        // Stalled は「解品質の主張なし」の内部打ち切り。診断 iterate は core の
+        // SolverResult に残るが、Model API では有効解なしとして一律 Err にする。
+        SolveStatus::Stalled => Some(ModelError::SolveError(SolveError::Stalled)),
         SolveStatus::NonConvex(msg) => Some(ModelError::NonConvex(msg)),
         SolveStatus::NotSupported(msg) => Some(ModelError::NotSupported(msg)),
         // Ok-capable or context-dependent statuses: returned as `None` so the
@@ -1996,6 +1986,7 @@ impl SolutionProof {
             SolveStatus::Infeasible
             | SolveStatus::Unbounded
             | SolveStatus::NumericalError
+            | SolveStatus::Stalled
             | SolveStatus::NonConvex(_)
             | SolveStatus::NotSupported(_) => {
                 debug_assert!(
@@ -2018,9 +2009,11 @@ pub struct ModelResult {
     /// Solver termination status associated with this returned solution.
     ///
     /// Only success-domain variants occur here (`Optimal`, `LocallyOptimal`,
-    /// `NonconvexLocal`, `NonconvexGlobal`, `MaxIterations`, `SuboptimalSolution`,
-    /// `Timeout`); error variants surface as [`ModelError`] instead. Match on
-    /// [`ModelResult::proof`] for the optimality guarantee.
+    /// `NonconvexLocal`, `NonconvexGlobal`, `SuboptimalSolution`, `Timeout`, and
+    /// `MaxIterations` on the conic incumbent path); statuses without a usable
+    /// solution (`Stalled`, iterate-less `MaxIterations`, ...) surface as
+    /// [`ModelError`] instead. Match on [`ModelResult::proof`] for the
+    /// optimality guarantee.
     pub status: SolveStatus,
     /// Optimality proof quality for this returned solution.
     pub proof: SolutionProof,
@@ -2143,6 +2136,8 @@ pub enum SolveError {
     Unbounded,
     /// Solver reached the iteration cap before converging (no usable solution).
     MaxIterations,
+    /// Solver stalled before reaching the requested accuracy (no usable solution).
+    Stalled,
     /// Solver aborted due to numerical breakdown (no usable solution).
     NumericalError,
 }
@@ -2154,6 +2149,9 @@ impl fmt::Display for SolveError {
             SolveError::Unbounded => write!(f, "Problem is unbounded"),
             SolveError::MaxIterations => {
                 write!(f, "Max iterations reached without optimal solution")
+            }
+            SolveError::Stalled => {
+                write!(f, "Solver stalled before reaching the requested accuracy")
             }
             SolveError::NumericalError => write!(f, "Numerical breakdown during solve"),
         }
@@ -2663,15 +2661,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // FeasibleUnproven proof: impossibly-tight tolerance forces SuboptimalSolution
-    // on a convex QP that the IPM solves to finite residuals (table-driven).
+    // 到達不能な精度 (Custom(1e-200)) は「検証済み解」を偽装できない: IPM は
+    // 有限残差まで収束するが satisfies_eps(1e-200) は常に false → Stalled →
+    // Model API は Err(SolveError::Stalled) を返す (table-driven)。
     //
-    // Sentinel: replacing from_status with a no-op returning GlobalOptimal
-    // causes the assert_eq!(proof, FeasibleUnproven) to FAIL.
+    // Sentinel: finalize_outcome の非収束→SuboptimalSolution 変換 (旧 attempt.rs)
+    // を復活させると Ok(FeasibleUnproven) になりこのテストが FAIL する。
     // -----------------------------------------------------------------------
     #[test]
     #[allow(clippy::type_complexity)]
-    fn test_model_qp_feasible_unproven_proof() {
+    fn test_model_qp_unreachable_tolerance_errs_stalled() {
         use otspot_core::options::Tolerance;
 
         // (name, q_diag, (lb,ub), c)
@@ -2696,29 +2695,20 @@ mod tests {
                 (q_diag[0] / 2.0) * x * x + (q_diag[1] / 2.0) * y * y + c[0] * x + c[1] * y,
             );
             // Impossibly tight tolerance: IPM finds a finite-residual solution
-            // but satisfies_eps(1e-200) is always false → SuboptimalSolution.
+            // but satisfies_eps(1e-200) is always false → Stalled → Err.
             model.set_tolerance(Tolerance::Custom(1e-200));
 
             let result = model.solve();
             match result {
-                Ok(r) => {
-                    assert_eq!(
-                        r.proof,
-                        SolutionProof::FeasibleUnproven,
-                        "[{name}] expected FeasibleUnproven proof, got {:?} (status={:?})",
-                        r.proof,
-                        r.status
-                    );
-                    assert!(
-                        !r.has_global_optimality_proof(),
-                        "[{name}] has_global_optimality_proof must be false for FeasibleUnproven"
-                    );
-                    assert!(
-                        !r.solution.is_empty(),
-                        "[{name}] solution must be non-empty"
-                    );
-                }
-                Err(e) => panic!("[{name}] unexpected Err: {e:?}"),
+                Ok(r) => panic!(
+                    "[{name}] unreachable tolerance must not produce a claimed solution, \
+                     got Ok(status={:?}, proof={:?})",
+                    r.status, r.proof
+                ),
+                Err(e) => assert!(
+                    matches!(e, ModelError::SolveError(SolveError::Stalled)),
+                    "[{name}] expected SolveError::Stalled, got {e:?}"
+                ),
             }
         }
     }
