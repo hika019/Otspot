@@ -320,6 +320,51 @@ fn build_relaxation(
     }
 }
 
+/// How a node's integer bounds relate to a verified improving ray on its
+/// relaxation, decided purely from `(lb, ub)` — no solver call needed, which
+/// keeps this independently unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum RayVerdict {
+    /// Every integer is fixed (`lb[k] == ub[k]`) *to an integer value*
+    /// (within `int_tol` of a whole number): the ray certifies the
+    /// mixed-integer problem unbounded.
+    Unbounded,
+    /// Integer `k` is fixed (`lb[k] == ub[k]`) at a non-integer value: the
+    /// equality this pins in `build_relaxation` admits no integer point at
+    /// all, regardless of the ray, so the node is infeasible.
+    FixedNonInteger,
+    /// Integer `k` is still free (`lb[k] != ub[k]`): the ray says nothing
+    /// about its integrality, so it must be bisected before any conclusion.
+    Bisect(usize),
+}
+
+/// Classify a node against a verified improving ray on its relaxation.
+///
+/// `lb[k] == ub[k]` alone is not proof that node point `k` carries an
+/// integer value: `MisocpProblem` is public with no constructor, so a caller
+/// can hand `solve_misocp` a root `int_lb[k] == int_ub[k] == 0.5` directly
+/// (branching itself never produces a fractional fixed bound — every
+/// bisection bound in `solve_misocp` is a `floor`/`ceil`, always
+/// integer-valued), and the "fixed" value must still be checked for
+/// integrality itself (Codex review R3, "fractional fixed integer from a
+/// fake Unbounded proof").
+pub(super) fn classify_ray_node(lb: &[f64], ub: &[f64], int_tol: f64) -> RayVerdict {
+    let fixed_at_non_integer = (0..lb.len()).any(|k| {
+        if lb[k] != ub[k] {
+            return false;
+        }
+        let frac = lb[k] - lb[k].floor();
+        frac.min(1.0 - frac) > int_tol
+    });
+    if fixed_at_non_integer {
+        return RayVerdict::FixedNonInteger;
+    }
+    match (0..lb.len()).find(|&k| lb[k] != ub[k]) {
+        Some(k) => RayVerdict::Bisect(k),
+        None => RayVerdict::Unbounded,
+    }
+}
+
 /// Solve a mixed-integer SOCP by branch-and-bound (depth-first, best-bound
 /// pruning). Minimises `c^T x`.
 ///
@@ -332,9 +377,12 @@ fn build_relaxation(
 /// Node outcomes are classified, not collapsed into one "prune" bucket:
 /// `Infeasible` prunes only with a Farkas certificate (`infeas_cert`);
 /// `Unbounded` with a verified improving ray (`primal_ray`) propagates only
-/// once every integer variable is already fixed in this node (otherwise the
-/// ray says nothing about integer-feasibility and the node is bisected
-/// further instead); anything else (`NumericalError`, an unproven
+/// once every integer variable is already fixed *to an integer value* in this
+/// node (otherwise the ray says nothing about integer-feasibility and the
+/// node is bisected further instead; a fixing at a non-integer value — only
+/// reachable from a caller-supplied root `int_lb`/`int_ub`, since branching
+/// itself always fixes at integers — has no integer point at all and prunes
+/// as infeasible); anything else (`NumericalError`, an unproven
 /// `Infeasible`/`Unbounded`, `MaxIterations`, `NotSupported`) is a
 /// **numerical failure**, pruned but counted so an empty search never
 /// proves false infeasibility. `Timeout` on a node stops the whole search.
@@ -443,31 +491,40 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
                 // whether the node's polytope holds an integer-feasible point:
                 // an equality elsewhere can pin an "integer" variable to a
                 // fractional value while the integrality-blind relaxation stays
-                // unbounded. Only once every integer variable is fixed
-                // (`lb[k] == ub[k]`) does any feasible node point carry integer
-                // values, certifying the MI problem unbounded. Otherwise bisect
-                // the widest free integer (finite `int_lb`/`int_ub` via
-                // `validate`, terminating) and fall to `Infeasible` if leaves empty.
-                if let Some(k) = (0..lb.len()).find(|&k| lb[k] != ub[k]) {
-                    let mid = ((lb[k] + ub[k]) / 2.0).floor();
-                    let mut ub_d = ub.clone();
-                    ub_d[k] = mid;
-                    if lb[k] <= ub_d[k] + 1e-9 {
-                        stack.push((lb.clone(), ub_d));
+                // unbounded. `classify_ray_node` (see its own docs) resolves
+                // this: it certifies unbounded only once every integer is fixed
+                // to an actual integer value, prunes a node fixed at a
+                // non-integer value as infeasible, and otherwise names the
+                // first free integer (by index, not fractional width) to
+                // bisect -- any ray at all already certifies the relaxation's
+                // objective is unbounded, so there is no "widest" gap to
+                // prioritize the way there is for a genuine fractional-point
+                // Optimal node below.
+                match classify_ray_node(&lb, &ub, bb.int_tol) {
+                    RayVerdict::Unbounded => {
+                        return MisocpResult {
+                            status: SolveStatus::Unbounded,
+                            objective: f64::NEG_INFINITY,
+                            x: vec![],
+                            nodes,
+                        };
                     }
-                    let mut lb_u = lb.clone();
-                    lb_u[k] = mid + 1.0;
-                    if lb_u[k] <= ub[k] + 1e-9 {
-                        stack.push((lb_u, ub.clone()));
+                    RayVerdict::FixedNonInteger => continue, // proven: no integer point here
+                    RayVerdict::Bisect(k) => {
+                        let mid = ((lb[k] + ub[k]) / 2.0).floor();
+                        let mut ub_d = ub.clone();
+                        ub_d[k] = mid;
+                        if lb[k] <= ub_d[k] + 1e-9 {
+                            stack.push((lb.clone(), ub_d));
+                        }
+                        let mut lb_u = lb.clone();
+                        lb_u[k] = mid + 1.0;
+                        if lb_u[k] <= ub[k] + 1e-9 {
+                            stack.push((lb_u, ub.clone()));
+                        }
+                        continue;
                     }
-                    continue;
                 }
-                return MisocpResult {
-                    status: SolveStatus::Unbounded,
-                    objective: f64::NEG_INFINITY,
-                    x: vec![],
-                    nodes,
-                };
             }
             SolveStatus::Infeasible if res.infeas_cert.is_some() => continue, // proven: prune
             SolveStatus::Timeout => {
@@ -655,6 +712,83 @@ fn qcqp_true_objective(qp: &QcqpProblem, x: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Independent oracle for `classify_ray_node`: every case hand-verified
+    /// against the doc's own definition (fixed = `lb[k] == ub[k]`; fixed to an
+    /// integer = additionally within `int_tol` of a whole number).
+    ///
+    /// Getting a clean `Unbounded`-with-certified-ray relaxation out of the
+    /// real IPM for a node fixed at a *non-integer* value via an equality row
+    /// turns out to be numerically unreliable in isolation (confirmed by
+    /// direct experiment: the same tiny unbounded-LP-plus-equality-fix shape
+    /// that reaches a clean ray at `lb == ub == 0.0` in 2 iterations instead
+    /// hits `NumericalError` at `lb == ub == {0.3, 0.5, 1.0, -0.5}` after 156
+    /// -- an orthogonal solver-numerics limitation, not this classification
+    /// logic), so the fix is verified here directly against its true units
+    /// (`lb`/`ub`/`int_tol`) rather than by fishing for solver conditions
+    /// that reach it. `unbounded_ray_with_all_integers_already_fixed_keeps_x_empty`
+    /// (conic/tests.rs) is the wiring/integration check for the `Unbounded`
+    /// verdict on the one case the IPM does reach cleanly (fixed at `0.0`).
+    #[test]
+    fn classify_ray_node_cases() {
+        // No integers at all: trivially all fixed (vacuous), unbounded.
+        assert_eq!(classify_ray_node(&[], &[], 1e-6), RayVerdict::Unbounded);
+        // Single integer, free: must bisect it.
+        assert_eq!(
+            classify_ray_node(&[0.0], &[1.0], 1e-6),
+            RayVerdict::Bisect(0)
+        );
+        // Single integer, fixed at an integer value: certified unbounded.
+        assert_eq!(
+            classify_ray_node(&[3.0], &[3.0], 1e-6),
+            RayVerdict::Unbounded
+        );
+        assert_eq!(
+            classify_ray_node(&[0.0], &[0.0], 1e-6),
+            RayVerdict::Unbounded
+        );
+        assert_eq!(
+            classify_ray_node(&[-2.0], &[-2.0], 1e-6),
+            RayVerdict::Unbounded
+        );
+        // Single integer, fixed at a non-integer value: no integer point
+        // exists in this node regardless of the ray -- this is the exact bug
+        // (Codex review R3, misocp.rs:451): the pre-fix `lb[k] != ub[k]`-only
+        // check would find nothing here and fall through to `Unbounded`.
+        assert_eq!(
+            classify_ray_node(&[0.5], &[0.5], 1e-6),
+            RayVerdict::FixedNonInteger
+        );
+        assert_eq!(
+            classify_ray_node(&[-1.25], &[-1.25], 1e-6),
+            RayVerdict::FixedNonInteger
+        );
+        // Within `int_tol` of an integer counts as fixed-to-integer, not
+        // fixed-non-integer (matches the tolerance semantics used by the
+        // "most fractional" branch-selection loop elsewhere in this file).
+        assert_eq!(
+            classify_ray_node(&[2.0 + 1e-9], &[2.0 + 1e-9], 1e-6),
+            RayVerdict::Unbounded
+        );
+        // Multiple integers: an earlier properly-fixed-integer index does not
+        // mask a later free index.
+        assert_eq!(
+            classify_ray_node(&[1.0, 0.0], &[1.0, 5.0], 1e-6),
+            RayVerdict::Bisect(1)
+        );
+        // Multiple integers: a fixed-non-integer anywhere takes priority over
+        // bisecting a different free integer -- the node has no integer point
+        // at all once any coordinate is pinned off-lattice, so there is
+        // nothing bisecting the free one could recover.
+        assert_eq!(
+            classify_ray_node(&[1.0, 0.5], &[1.0, 0.5], 1e-6),
+            RayVerdict::FixedNonInteger
+        );
+        assert_eq!(
+            classify_ray_node(&[0.5, 0.0], &[0.5, 3.0], 1e-6),
+            RayVerdict::FixedNonInteger
+        );
+    }
 
     /// `p0` is 3x3 but `qp.n`/`x.len()` is 2, bypassing `to_conic`'s
     /// `validate_dims`. Must panic, not silently zero-fill; reverting to the

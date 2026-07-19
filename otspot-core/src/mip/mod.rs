@@ -257,6 +257,12 @@ pub fn solve_milp_with_stats(
     if options.validate().is_err() {
         return (SolverResult::numerical_error(), MipStats::default());
     }
+    if let Err(e) = validate_integer_vars(&problem.integer_vars, problem.lp.num_vars) {
+        return (
+            SolverResult::not_supported(e.to_string()),
+            MipStats::default(),
+        );
+    }
     // Establish a shared deadline before FP so that FP and B&B draw from the same
     // budget.  Without this, each LP in FP gets a fresh `timeout_secs` window and
     // `solve_mip_core` resets the clock again — allowing up to (MAX_FP_ITER + 1)×
@@ -377,6 +383,12 @@ pub fn solve_miqp_with_stats(
     // panic. `QpProblem::validate` is the shared source of this invariant.
     if problem.qp.validate().is_err() {
         return (SolverResult::numerical_error(), MipStats::default());
+    }
+    if let Err(e) = validate_integer_vars(&problem.integer_vars, problem.qp.num_vars) {
+        return (
+            SolverResult::not_supported(e.to_string()),
+            MipStats::default(),
+        );
     }
     if !problem.is_convex() {
         return (nonconvex_result(), MipStats::default());
@@ -1382,6 +1394,24 @@ fn finalize_no_incumbent(
     } else {
         no_solution_result(SolveStatus::MaxIterations)
     }
+}
+
+/// Reject an `integer_vars` index out of range for `num_vars` before it
+/// reaches `integer_mask`'s `assert!`.
+///
+/// `MilpProblem`/`MiqpProblem` are public structs with a `pub integer_vars`
+/// field: `new()` validates it via `normalize_integer_vars`, but a caller can
+/// build the struct with a literal (bypassing `new()` entirely, all fields
+/// `pub`) or mutate `integer_vars` afterward, so `solve_milp`/`solve_miqp`
+/// must re-check it themselves at the solve entry rather than trust
+/// construction-time validation -- the same defense already applied to
+/// `MisocpProblem::integers` and `NonconvexQcqp`'s `integers` parameter
+/// (Codex review R3 horizontal expansion, nonconvex.rs:763).
+fn validate_integer_vars(integer_vars: &[usize], num_vars: usize) -> Result<(), MipProblemError> {
+    if let Some(&j) = integer_vars.iter().find(|&&j| j >= num_vars) {
+        return Err(MipProblemError::InvalidIntegerVar { index: j, num_vars });
+    }
+    Ok(())
 }
 
 /// Boolean mask of length `num_vars`; `true` where the variable is integral.

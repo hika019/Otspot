@@ -735,6 +735,155 @@ fn nonconvex_miqcp_integer_bilinear() {
     }
 }
 
+/// Codex review R3 (nonconvex.rs:58, "NonconvexQcqp numeric finiteness
+/// validation missing"): `NonconvexQcqp::validate` checked dimensions and
+/// `lb`/`ub` finiteness but not the objective/constraint data itself.
+/// `q0`/`quad[].q`/`quad[].r`/RHS/matrix-coefficient NaN or inf is
+/// dimensionally valid, so none of the existing checks catch it, and it
+/// flows straight into `build_static`'s node relaxations (`solve_relax_lp`'s
+/// `LpProblem::new_general(..).unwrap()`).
+///
+/// Sentinel: reverting the finiteness checks in `NonconvexQcqp::validate`
+/// makes this FAIL by panicking (`LpProblem::new_general` rejects the NaN
+/// with `NonFiniteCoefficient` and `solve_relax_lp`'s `.unwrap()` propagates
+/// it as a panic) instead of returning `NotSupported`.
+#[test]
+fn nonconvex_qcqp_rejects_non_finite_q0() {
+    use super::nonconvex::*;
+    let n = 1usize;
+    let qp = NonconvexQcqp {
+        n,
+        p0: None,
+        q0: vec![f64::NAN],
+        quad: vec![],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+        lb: vec![0.0],
+        ub: vec![1.0],
+    };
+    let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "NaN q0 must be rejected, got {res:?}"
+    );
+    assert!(res.x.is_empty());
+}
+
+/// Codex review R3 (nonconvex.rs:58): non-finite `quad[].r` (the quadratic
+/// constraint's constant term) is dimension-invisible too and must be
+/// rejected the same way as `q0`.
+///
+/// Sentinel: reverting the `quad[k].r` finiteness check makes this FAIL --
+/// `r` reaches `build_relax`'s `h.push(1.0 - r)` as NaN/inf, then
+/// `solve_relax_lp`'s `.unwrap()` panics on the resulting non-finite `h`.
+#[test]
+fn nonconvex_qcqp_rejects_non_finite_quad_constant() {
+    use super::nonconvex::*;
+    let n = 1usize;
+    let p = csc(&[vec![1.0]], 1, 1);
+    let qp = NonconvexQcqp {
+        n,
+        p0: None,
+        q0: vec![0.0],
+        quad: vec![GQuadConstraint {
+            p,
+            q: vec![0.0],
+            r: f64::INFINITY,
+        }],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+        lb: vec![0.0],
+        ub: vec![1.0],
+    };
+    let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "infinite quad[].r must be rejected, got {res:?}"
+    );
+    assert!(res.x.is_empty());
+}
+
+/// Codex review R3 (nonconvex.rs:809, "solve_global_qcqp does not call
+/// opts.validate()"): asymmetric with `solve_misocp`, which validates `prob`,
+/// `opts`, and `bb` before touching the search. A NaN `tol` (or any other
+/// invalid `ConicOptions`) previously reached the search unrejected.
+///
+/// Sentinel: dropping `opts.validate()` from `global_core`'s validation chain
+/// makes this FAIL -- with no error to reject on, the search runs to
+/// completion (`opts.tol` is unused by the LP-relaxation node solve) and
+/// returns `Optimal`, not `NotSupported`.
+#[test]
+fn nonconvex_global_qcqp_rejects_invalid_conic_options() {
+    use super::nonconvex::*;
+    let n = 1usize;
+    let p = csc(&[vec![-2.0]], 1, 1);
+    let qp = NonconvexQcqp {
+        n,
+        p0: Some(p),
+        q0: vec![0.0],
+        quad: vec![],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+        lb: vec![0.0],
+        ub: vec![1.0],
+    };
+    let bad_opts = ConicOptions {
+        tol: f64::NAN,
+        ..ConicOptions::default()
+    };
+    let res = solve_global_qcqp(&qp, &bad_opts, &GlobalOptions::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "NaN ConicOptions::tol must be rejected, got {res:?}"
+    );
+    assert!(res.x.is_empty());
+}
+
+/// Codex review R3 (nonconvex.rs:763, "solve_global_miqcp integer index not
+/// validated"): `integers` is a bare `&[usize]`, not a validated struct
+/// field, so an out-of-range index previously reached `global_core`'s
+/// per-node fractional-branching scan (`x[k]` for `k` in `integers`) and
+/// panicked on the first root-node relaxation.
+///
+/// Sentinel: dropping the `validate_integers` call from `global_core`'s
+/// validation chain makes this FAIL by panicking (index out of bounds
+/// indexing `x[k]`, `x.len() == qp.n == 1`) instead of returning
+/// `NotSupported`.
+#[test]
+fn nonconvex_miqcp_rejects_out_of_range_integer_index() {
+    use super::nonconvex::*;
+    let n = 1usize;
+    let qp = NonconvexQcqp {
+        n,
+        p0: None,
+        q0: vec![1.0],
+        quad: vec![],
+        g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        h_lin: vec![],
+        a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b_eq: vec![],
+        lb: vec![0.0],
+        ub: vec![1.0],
+    };
+    let res = solve_global_miqcp(
+        &qp,
+        &[1], // qp.n == 1, so index 1 is out of range.
+        &ConicOptions::default(),
+        &GlobalOptions::default(),
+    );
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "out-of-range integer index must be rejected, got {res:?}"
+    );
+    assert!(res.x.is_empty());
+}
+
 #[test]
 fn unbounded_certificate_is_improving_ray() {
     // min -x0 s.t. x0 >= 0  => unbounded; ray d has c·d < 0.

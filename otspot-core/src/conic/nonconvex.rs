@@ -121,6 +121,29 @@ impl NonconvexQcqp {
                 return Err(format!("lb[{k}] = {l} > ub[{k}] = {u}"));
             }
         }
+        // Numeric finiteness of the objective/constraint data itself: `build_static`
+        // and `build_relax` copy every one of these fields straight into the node
+        // relaxations `global_core` solves via `solve_relax_lp`, whose
+        // `LpProblem::new_general` call is `.unwrap()`-ed on the assumption its own
+        // finiteness check never fires -- a NaN/inf here (dimensionally valid, so
+        // none of the checks above catch it) reaches that `.unwrap()` and panics
+        // instead of failing as an ordinary invalid-input error (Codex review R3,
+        // nonconvex.rs:58).
+        super::find_non_finite("q0", &self.q0)?;
+        if let Some(p0) = &self.p0 {
+            super::find_non_finite("p0", p0.values())?;
+        }
+        for (k, qc) in self.quad.iter().enumerate() {
+            super::find_non_finite(&format!("quad[{k}].p"), qc.p.values())?;
+            super::find_non_finite(&format!("quad[{k}].q"), &qc.q)?;
+            if !qc.r.is_finite() {
+                return Err(format!("quad[{k}].r is not finite: {}", qc.r));
+            }
+        }
+        super::find_non_finite("g_lin", self.g_lin.values())?;
+        super::find_non_finite("h_lin", &self.h_lin)?;
+        super::find_non_finite("a_eq", self.a_eq.values())?;
+        super::find_non_finite("b_eq", &self.b_eq)?;
         Ok(())
     }
 }
@@ -800,13 +823,35 @@ fn accept(
     }
 }
 
+/// Reject an out-of-range `integers` index before the search tree is built.
+///
+/// `solve_global_miqcp` takes `integers` as a bare `&[usize]`, not a field on
+/// a validated struct, so nothing else ever checks it against `qp.n`: the
+/// first root-node relaxation indexes `x[k]` for every `k` in `integers`
+/// (`global_core`'s per-node fractional-branching scan), so `k >= qp.n`
+/// panics on the very first node rather than failing as an ordinary
+/// invalid-input error (Codex review R3, nonconvex.rs:763).
+fn validate_integers(n: usize, integers: &[usize]) -> Result<(), String> {
+    for (k, &j) in integers.iter().enumerate() {
+        if j >= n {
+            return Err(format!("integers[{k}] = {j} out of range (n = {n})"));
+        }
+    }
+    Ok(())
+}
+
 fn global_core(
     qp: &NonconvexQcqp,
     integers: &[usize],
     opts: &ConicOptions,
     g: &GlobalOptions,
 ) -> GlobalResult {
-    if let Err(e) = qp.validate().and_then(|()| g.validate()) {
+    if let Err(e) = qp
+        .validate()
+        .and_then(|()| opts.validate())
+        .and_then(|()| g.validate())
+        .and_then(|()| validate_integers(qp.n, integers))
+    {
         return GlobalResult {
             status: SolveStatus::NotSupported(e),
             objective: f64::NAN,

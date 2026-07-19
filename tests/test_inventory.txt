@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2825 testcases, 26 ignored
+# totals: 2835 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -40,6 +40,7 @@ otspot-core	conic::ipm::tests::shift_into_cone_is_per_block_not_global	active
 otspot-core	conic::ipm::tests::shift_into_cone_pushes_each_outside_soc_by_its_own_distance	active
 otspot-core	conic::kkt::tests::equilibrate_guards_zero_and_subnormal_diagonals	active
 otspot-core	conic::misocp::tests::build_relaxation_matches_dense_reference	active
+otspot-core	conic::misocp::tests::classify_ray_node_cases	active
 otspot-core	conic::misocp::tests::qcqp_true_objective_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::accept_honors_caller_tolerance_after_rounding_not_a_fixed_floor	active
 otspot-core	conic::nonconvex::tests::cancel_flag_is_honored_inside_the_bnb_loop	active
@@ -97,7 +98,11 @@ otspot-core	conic::tests::misocp_unresolved_nodes_do_not_prove_infeasibility	act
 otspot-core	conic::tests::nonconvex_bilinear_box_global_min	active
 otspot-core	conic::tests::nonconvex_concave_max_box	active
 otspot-core	conic::tests::nonconvex_constraint_hyperbola	active
+otspot-core	conic::tests::nonconvex_global_qcqp_rejects_invalid_conic_options	active
 otspot-core	conic::tests::nonconvex_miqcp_integer_bilinear	active
+otspot-core	conic::tests::nonconvex_miqcp_rejects_out_of_range_integer_index	active
+otspot-core	conic::tests::nonconvex_qcqp_rejects_non_finite_q0	active
+otspot-core	conic::tests::nonconvex_qcqp_rejects_non_finite_quad_constant	active
 otspot-core	conic::tests::nt_scaling_block_diagonal_invariants	active
 otspot-core	conic::tests::nt_scaling_huge_single_soc_block_stays_linear_time	active
 otspot-core	conic::tests::nt_scaling_invariants_edge_configs	active
@@ -539,7 +544,9 @@ otspot-core	mip::tests::rins_stats_improvements_le_calls	active
 otspot-core	mip::tests::rins_stats_zero_for_single_node_problem	active
 otspot-core	mip::tests::round_integers_rejects_out_of_range_index	active
 otspot-core	mip::tests::scaling_retry_does_not_run_after_deadline_expired	active
+otspot-core	mip::tests::solve_milp_rejects_out_of_range_integer_var	active
 otspot-core	mip::tests::solve_miqp_rejects_indefinite_n1001	active
+otspot-core	mip::tests::solve_miqp_rejects_out_of_range_integer_var	active
 otspot-core	mip::tests::stats_bounds_bytes_scales_with_num_vars	active
 otspot-core	mip::tests::stats_timing_infeasible_ms_from_lp	active
 otspot-core	mip::tests::stats_timing_populated_for_milp_bt_then_branch	active
@@ -1870,8 +1877,10 @@ otspot-io	mps::tests::dt_mps_2var_le_ge_eq_matrix_structure	active
 otspot-io	mps::tests::ep_mps_all_row_types	active
 otspot-io	mps::tests::test_columns_free_format_misclassified_as_fixed	active
 otspot-io	mps::tests::test_columns_wide_padding_solves	active
+otspot-io	mps::tests::test_integer_marker_kind_column_row_name_collision_is_not_a_marker	active
 otspot-io	mps::tests::test_integer_marker_kind_intorg_intend	active
 otspot-io	mps::tests::test_integer_marker_kind_non_marker	active
+otspot-io	mps::tests::test_marker_column_row_name_collision_keeps_coefficient	active
 otspot-io	mps::tests::test_milp_bv_bound_marks_integer	active
 otspot-io	mps::tests::test_milp_closed_intorg_following_cols_continuous	active
 otspot-io	mps::tests::test_milp_fixed_format_marker	active
@@ -2046,6 +2055,7 @@ otspot-io	qps::tests::test_qps_fixed_format_obj_row_nan_invalidates_offset	activ
 otspot-io	qps::tests::test_qps_forplan_style_rhs_ranges_fixed_columns	active
 otspot-io	qps::tests::test_qps_free_format_single_space_row_names	active
 otspot-io	qps::tests::test_qps_long_name_truncation_and_duplicate_rows_are_errors	active
+otspot-io	qps::tests::test_qps_marker_column_row_name_collision_keeps_coefficient	active
 otspot-io	qps::tests::test_qps_objsense_inline_and_spelled_out	active
 otspot-io	qps::tests::test_qps_objsense_max_obj_offset_sign_flip	active
 otspot-io	qps::tests::test_qps_quadobj_duplicate_entry_is_error	active
