@@ -814,9 +814,7 @@ fn symmetric_csc_triplets(m: &CscMatrix) -> Vec<(usize, usize, f64)> {
 
     let mut pairs: BTreeMap<(usize, usize), (Option<f64>, Option<f64>)> = BTreeMap::new();
     for (r, c, v) in csc_to_triplets(m) {
-        if r == c {
-            pairs.entry((r, c)).or_default().0 = Some(v);
-        } else if r < c {
+        if r <= c {
             pairs.entry((r, c)).or_default().0 = Some(v);
         } else {
             pairs.entry((c, r)).or_default().1 = Some(v);

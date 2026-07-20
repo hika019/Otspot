@@ -563,36 +563,33 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
                 branch = Some((k, v));
             }
         }
-        match branch {
-            None => {
-                let mut rounded = res.x.clone();
-                for &j in &prob.integers {
-                    rounded[j] = rounded[j].round();
-                }
-                if conic_feasible(&prob.base, &rounded, opts.tol) {
-                    let objective = prob.base.c.iter().zip(&rounded).map(|(a, b)| a * b).sum();
-                    if objective < incumbent_obj {
-                        incumbent_obj = objective;
-                        incumbent_x = rounded;
-                    }
-                    continue;
-                }
-                // The tolerance-near relaxation point is not feasible after
-                // rounding. Keep searching instead of accepting it or losing
-                // this region.
-                let (k, &j) = prob
-                    .integers
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, &a), (_, &b)| {
-                        let da = (res.x[a] - res.x[a].round()).abs();
-                        let db = (res.x[b] - res.x[b].round()).abs();
-                        da.total_cmp(&db)
-                    })
-                    .expect("an unrounded MISOCP candidate has an integer variable");
-                branch = Some((k, res.x[j]));
+        if branch.is_none() {
+            let mut rounded = res.x.clone();
+            for &j in &prob.integers {
+                rounded[j] = rounded[j].round();
             }
-            Some(_) => {}
+            if conic_feasible(&prob.base, &rounded, opts.tol) {
+                let objective = prob.base.c.iter().zip(&rounded).map(|(a, b)| a * b).sum();
+                if objective < incumbent_obj {
+                    incumbent_obj = objective;
+                    incumbent_x = rounded;
+                }
+                continue;
+            }
+            // The tolerance-near relaxation point is not feasible after
+            // rounding. Keep searching instead of accepting it or losing
+            // this region.
+            let (k, &j) = prob
+                .integers
+                .iter()
+                .enumerate()
+                .max_by(|(_, &a), (_, &b)| {
+                    let da = (res.x[a] - res.x[a].round()).abs();
+                    let db = (res.x[b] - res.x[b].round()).abs();
+                    da.total_cmp(&db)
+                })
+                .expect("an unrounded MISOCP candidate has an integer variable");
+            branch = Some((k, res.x[j]));
         }
         if let Some((k, v)) = branch {
             let fl = v.floor();
