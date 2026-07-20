@@ -327,7 +327,11 @@ fn build_relaxation(
 pub(super) enum RayVerdict {
     /// Every integer is fixed (`lb[k] == ub[k]`) *to an integer value*
     /// (within `int_tol` of a whole number): the ray certifies the
-    /// mixed-integer problem unbounded.
+    /// mixed-integer problem unbounded. The fixing rows `build_relaxation`
+    /// emits force the ray's component on every integer to ~0, so following
+    /// it from a feasible node point drives `c^T x` to -infinity while each
+    /// integer keeps its (integral) fixed value — the ray stays inside the
+    /// mixed-integer feasible set, not just the relaxation's.
     Unbounded,
     /// Integer `k` is fixed (`lb[k] == ub[k]`) at a non-integer value: the
     /// equality this pins in `build_relaxation` admits no integer point at
