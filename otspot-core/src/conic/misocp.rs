@@ -335,6 +335,9 @@ pub(super) enum RayVerdict {
     FixedNonInteger,
     /// Integer `k` is still free (`lb[k] != ub[k]`): the ray says nothing
     /// about its integrality, so it must be bisected before any conclusion.
+    /// `k` is the first free integer by index — unlike the fractional-point
+    /// `Optimal` case there is no "widest gap" to prioritize, since any ray
+    /// already certifies the relaxation's objective unbounded.
     Bisect(usize),
 }
 
@@ -484,22 +487,11 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         match res.status {
             SolveStatus::Optimal => {}
             SolveStatus::Unbounded if res.primal_ray.is_some() => {
-                // A verified ray only certifies the *relaxation*'s recession
-                // cone holds a `c^T d < 0` direction `d` whose component on every
-                // integer variable is ~0 (node box/fixing rows), so it extends
-                // any feasible node point to -infinity — but says nothing about
-                // whether the node's polytope holds an integer-feasible point:
-                // an equality elsewhere can pin an "integer" variable to a
-                // fractional value while the integrality-blind relaxation stays
-                // unbounded. `classify_ray_node` (see its own docs) resolves
-                // this: it certifies unbounded only once every integer is fixed
-                // to an actual integer value, prunes a node fixed at a
-                // non-integer value as infeasible, and otherwise names the
-                // first free integer (by index, not fractional width) to
-                // bisect -- any ray at all already certifies the relaxation's
-                // objective is unbounded, so there is no "widest" gap to
-                // prioritize the way there is for a genuine fractional-point
-                // Optimal node below.
+                // A verified ray certifies the *relaxation* unbounded, not the
+                // mixed-integer problem: an equality elsewhere can pin an
+                // "integer" variable to a fractional value while the
+                // integrality-blind relaxation stays unbounded. `RayVerdict`
+                // resolves which of the three cases this node is.
                 match classify_ray_node(&lb, &ub, bb.int_tol) {
                     RayVerdict::Unbounded => {
                         return MisocpResult {
