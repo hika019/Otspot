@@ -1096,6 +1096,50 @@ fn misocp_expired_deadline_returns_timeout() {
 }
 
 #[test]
+fn misocp_preset_cancel_returns_before_first_node() {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let opts = ConicOptions {
+        cancel_flag: Some(cancel),
+        ..ConicOptions::default()
+    };
+    let res = solve_misocp(&half_int_lp(), &opts, &BbOptions::default());
+    assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
+    assert_eq!(res.nodes, 0);
+}
+
+#[test]
+fn misocp_rounds_and_rechecks_integer_incumbent() {
+    // The relaxation optimum is x=0.9999995, within int_tol of 1, but the
+    // rounded point violates x<=0.9999995. The only integer-feasible point is
+    // x=0, so the near-integer relaxation must be branched rather than
+    // reported as the optimum.
+    let base = ConicProblem {
+        c: vec![-1.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g: CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, 1).unwrap(),
+        h: vec![0.999_999_5, 0.0],
+        cone: ConeSpec { l: 2, soc: vec![] },
+    };
+    let prob = MisocpProblem {
+        base,
+        integers: vec![0],
+        int_lb: vec![0.0],
+        int_ub: vec![1.0],
+    };
+    let res = solve_misocp(&prob, &ConicOptions::default(), &BbOptions::default());
+    assert!(
+        matches!(
+            res.status,
+            SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+        ),
+        "{res:?}"
+    );
+    assert_eq!(res.x, vec![0.0]);
+    assert_eq!(res.objective, 0.0);
+}
+
+#[test]
 fn misocp_mid_search_deadline_keeps_incumbent() {
     // Wider instance (37 nodes): max x0+x1+x2 in a ball of r^2 = 30, integers
     // in [0, 5]^3; the incumbent lands by node 2 of 37. The mid-search

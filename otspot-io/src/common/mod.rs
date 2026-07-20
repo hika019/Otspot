@@ -739,10 +739,12 @@ pub(crate) fn parse_quadobj_entry(
 ) -> Result<(String, String, f64), String> {
     let (col1, col2, raw) = match format {
         Format::Free => {
-            if tokens.len() < FREE_QUADOBJ_TOKENS {
+            if tokens.len() != FREE_QUADOBJ_TOKENS {
                 return Err(format!(
-                    "line {}: QUADOBJ line requires {} fields (col1 col2 value)",
-                    line_num, FREE_QUADOBJ_TOKENS
+                    "line {}: QUADOBJ line requires exactly {} fields (col1 col2 value), got {}",
+                    line_num,
+                    FREE_QUADOBJ_TOKENS,
+                    tokens.len()
                 ));
             }
             (
@@ -753,6 +755,15 @@ pub(crate) fn parse_quadobj_entry(
         }
         Format::Fixed => {
             let fixed = fixed_line(line, line_num, "QUADOBJ", false)?;
+            let trailing = [fixed.field(FIELD_5)?, fixed.field(FIELD_6)?]
+                .into_iter()
+                .find(|field| !field.is_empty());
+            if let Some(field) = trailing {
+                return Err(format!(
+                    "line {}: QUADOBJ line has unexpected trailing field '{}'",
+                    line_num, field
+                ));
+            }
             (
                 fixed.field(FIELD_2)?.to_string(),
                 fixed.field(FIELD_3)?.to_string(),

@@ -289,20 +289,48 @@ impl QpProblem {
         Ok(())
     }
 
-    /// Central structural check for a `QpProblem`, run at every solve entry
-    /// before the `quadratic_constraints` vector is indexed.
-    ///
-    /// `quadratic_constraints` is a public field, so a caller can assign it
-    /// directly and bypass [`Self::set_quadratic_constraints`]' invariant. The
-    /// conic bridge (`conic::qcqp`), the continuous QCQP route
-    /// (`qp::qcqp_route::nonconvex_from_qp_problem`) and the MIP fixed-point
-    /// leaf (`mip::problem::solve_fixed_point`) all index
-    /// `quadratic_constraints[k]` for `k < num_constraints`; a non-empty
-    /// vector shorter than `num_constraints` would otherwise panic with
-    /// "index out of bounds" instead of returning a solver error. Validating
-    /// here — one check reused by every entry — keeps that invariant from
-    /// drifting across consumers.
+    /// Recheck constructor invariants after possible direct mutation of the
+    /// public fields.
     pub fn validate(&self) -> Result<(), QpProblemError> {
+        if self.c.len() != self.num_vars
+            || self.q.nrows() != self.num_vars
+            || self.q.ncols() != self.num_vars
+            || self.bounds.len() != self.num_vars
+        {
+            return Err(QpProblemError::DimensionMismatch(
+                "Q, c, and bounds must match num_vars".into(),
+            ));
+        }
+        if self.b.len() != self.num_constraints
+            || self.a.nrows() != self.num_constraints
+            || self.a.ncols() != self.num_vars
+            || self.constraint_types.len() != self.num_constraints
+        {
+            return Err(QpProblemError::DimensionMismatch(
+                "A, b, and constraint_types must match problem dimensions".into(),
+            ));
+        }
+        for (field, values) in [
+            ("c", self.c.as_slice()),
+            ("b", self.b.as_slice()),
+            ("Q", self.q.values()),
+            ("A", self.a.values()),
+        ] {
+            if let Some(index) = values.iter().position(|v| !v.is_finite()) {
+                return Err(QpProblemError::NonFiniteCoefficient { field, index });
+            }
+        }
+        if !self.obj_offset.is_finite() {
+            return Err(QpProblemError::NonFiniteCoefficient {
+                field: "obj_offset",
+                index: 0,
+            });
+        }
+        for (index, &(lb, ub)) in self.bounds.iter().enumerate() {
+            if !is_valid_bound_pair(lb, ub) {
+                return Err(QpProblemError::InvalidBounds { index, lb, ub });
+            }
+        }
         Self::check_quadratic_constraints(
             &self.quadratic_constraints,
             self.num_constraints,

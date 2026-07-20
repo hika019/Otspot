@@ -5,7 +5,7 @@
 
 use super::equil::Equilibrator;
 use super::qcqp::{to_conic, QcqpProblem};
-use super::{ipm, ConeSpec, ConicOptions, ConicProblem};
+use super::{cone, ipm, ConeSpec, ConicOptions, ConicProblem};
 use crate::problem::SolveStatus;
 use crate::sparse::CscMatrix;
 
@@ -410,6 +410,18 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
             nodes: 0,
         };
     }
+    if opts.stop_requested()
+        || bb
+            .deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+    {
+        return MisocpResult {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            x: vec![],
+            nodes: 0,
+        };
+    }
     let mut incumbent_obj = f64::INFINITY;
     let mut incumbent_x: Vec<f64> = Vec::new();
     let mut nodes = 0usize;
@@ -553,29 +565,51 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         }
         match branch {
             None => {
-                // Integer-feasible: accept.
-                if res.objective < incumbent_obj {
-                    incumbent_obj = res.objective;
-                    incumbent_x = res.x.clone();
+                let mut rounded = res.x.clone();
+                for &j in &prob.integers {
+                    rounded[j] = rounded[j].round();
                 }
+                if conic_feasible(&prob.base, &rounded, opts.tol) {
+                    let objective = prob.base.c.iter().zip(&rounded).map(|(a, b)| a * b).sum();
+                    if objective < incumbent_obj {
+                        incumbent_obj = objective;
+                        incumbent_x = rounded;
+                    }
+                    continue;
+                }
+                // The tolerance-near relaxation point is not feasible after
+                // rounding. Keep searching instead of accepting it or losing
+                // this region.
+                let (k, &j) = prob
+                    .integers
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, &a), (_, &b)| {
+                        let da = (res.x[a] - res.x[a].round()).abs();
+                        let db = (res.x[b] - res.x[b].round()).abs();
+                        da.total_cmp(&db)
+                    })
+                    .expect("an unrounded MISOCP candidate has an integer variable");
+                branch = Some((k, res.x[j]));
             }
-            Some((k, v)) => {
-                let fl = v.floor();
-                let ce = v.ceil();
-                // Down child: ub_k = floor(v).
-                let lb_d = lb.clone();
-                let mut ub_d = ub.clone();
-                ub_d[k] = fl;
-                if lb_d[k] <= ub_d[k] + 1e-9 {
-                    stack.push((lb_d, ub_d));
-                }
-                // Up child: lb_k = ceil(v).
-                let mut lb_u = lb.clone();
-                let ub_u = ub.clone();
-                lb_u[k] = ce;
-                if lb_u[k] <= ub_u[k] + 1e-9 {
-                    stack.push((lb_u, ub_u));
-                }
+            Some(_) => {}
+        }
+        if let Some((k, v)) = branch {
+            let fl = v.floor();
+            let ce = v.ceil();
+            // Down child: ub_k = floor(v).
+            let lb_d = lb.clone();
+            let mut ub_d = ub.clone();
+            ub_d[k] = fl;
+            if lb_d[k] <= ub_d[k] + 1e-9 {
+                stack.push((lb_d, ub_d));
+            }
+            // Up child: lb_k = ceil(v).
+            let mut lb_u = lb.clone();
+            let ub_u = ub.clone();
+            lb_u[k] = ce;
+            if lb_u[k] <= ub_u[k] + 1e-9 {
+                stack.push((lb_u, ub_u));
             }
         }
     }
@@ -612,6 +646,31 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         x: incumbent_x,
         nodes,
     }
+}
+
+fn conic_feasible(problem: &ConicProblem, x: &[f64], tol: f64) -> bool {
+    let ax = problem
+        .a
+        .mat_vec_mul(x)
+        .expect("MisocpProblem::validate checked A dimensions");
+    if ax
+        .iter()
+        .zip(&problem.b)
+        .any(|(&lhs, &rhs)| (lhs - rhs).abs() > tol)
+    {
+        return false;
+    }
+    let gx = problem
+        .g
+        .mat_vec_mul(x)
+        .expect("MisocpProblem::validate checked G dimensions");
+    let slack: Vec<f64> = problem
+        .h
+        .iter()
+        .zip(gx)
+        .map(|(&rhs, lhs)| rhs - lhs)
+        .collect();
+    cone::in_cone(&cone::Blocks::new(&problem.cone), &slack, tol)
 }
 
 /// Solve a mixed-integer QCQP: reformulate to a conic problem and run the

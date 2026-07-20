@@ -28,15 +28,6 @@ use crate::sparse::CscMatrix;
 use super::QpProblem;
 
 pub(crate) fn solve_qcqp_via_conic(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    // Central structural check before any indexing: `solve_qp_problem_as_qcqp`
-    // (the convex bridge) and `nonconvex_from_qp_problem` (the fallback) both
-    // index `quadratic_constraints[k]`; a non-empty vector shorter than
-    // `num_constraints` (direct public-field assignment, bypassing the setter)
-    // would panic inside `solve_qp_with`. Return a solver error instead.
-    if let Err(e) = problem.validate() {
-        return SolverResult::not_supported(e.to_string());
-    }
-
     let deadline = resolve_deadline(options);
     let c_opts = conic_options(options, deadline);
 
@@ -231,11 +222,6 @@ fn global_result_to_solver_result(res: GlobalResult, obj_offset: f64) -> SolverR
 /// a finite box to build valid envelopes and to terminate spatial branching.
 fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
     let n = src.num_vars;
-    // Central structural check (`QpProblem::validate`): the loop below indexes
-    // `quadratic_constraints[k]` for every `k < num_constraints`, so a
-    // non-empty vector shorter than `num_constraints` (possible via direct
-    // public-field assignment) would panic. `validate` is the single source of
-    // this invariant, shared with the setter and the other solve entries.
     src.validate().map_err(|e| e.to_string())?;
     let mut lb = Vec::with_capacity(n);
     let mut ub = Vec::with_capacity(n);

@@ -1417,6 +1417,45 @@ mod tests {
         assert!(res.x.is_empty());
     }
 
+    #[test]
+    fn public_entry_rejects_non_finite_data_and_integer_indices() {
+        let base = || NonconvexQcqp {
+            n: 1,
+            p0: None,
+            q0: vec![0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0],
+            ub: vec![1.0],
+        };
+        let mut non_finite = base();
+        non_finite.q0[0] = f64::NAN;
+        let res = solve_global_qcqp(
+            &non_finite,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+        );
+        assert!(
+            matches!(res.status, SolveStatus::NotSupported(_)),
+            "{res:?}"
+        );
+
+        let res = solve_global_miqcp(
+            &base(),
+            &[1],
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+        );
+        assert!(
+            matches!(res.status, SolveStatus::NotSupported(_)),
+            "{res:?}"
+        );
+        assert_eq!(res.nodes, 0);
+    }
+
     /// `min x0 + x1  s.t.  x0*x1 >= 1,  x in [0.1,3]^2` (optimum 2 at (1,1)).
     /// Requires deep spatial branching (~99 nodes), so a fault injected past
     /// the incumbent node still leaves plenty of the tree unresolved.

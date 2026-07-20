@@ -418,10 +418,12 @@ fn merge_qplib_baselines(
     extra_obj: HashMap<String, f64>,
     extra_stat: HashMap<String, ExpectedStatus>,
 ) -> Result<Baselines, Vec<String>> {
+    let base_ids: std::collections::HashSet<&String> =
+        base_obj.keys().chain(base_stat.keys()).collect();
     let mut dups: Vec<String> = extra_obj
         .keys()
-        .filter(|k| base_obj.contains_key(*k))
-        .chain(extra_stat.keys().filter(|k| base_stat.contains_key(*k)))
+        .chain(extra_stat.keys())
+        .filter(|id| base_ids.contains(*id))
         .cloned()
         .collect();
     if !dups.is_empty() {

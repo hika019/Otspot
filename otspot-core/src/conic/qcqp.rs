@@ -598,20 +598,8 @@ pub(crate) fn qcqp_matrix_to_csc(q: &QcqpMatrix) -> CscMatrix {
 /// than assumed nonconvex up front. Quadratic equality constraints are still
 /// rejected: a PSD quadratic equality set is generally nonconvex.
 pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
+    src.validate().map_err(|e| e.to_string())?;
     let n = src.num_vars;
-    // `QpProblem::quadratic_constraints` is a public field (PR #25 review):
-    // `set_quadratic_constraints` enforces "empty or num_constraints", but a
-    // caller can still assign the field directly and violate it, and the loop
-    // below indexes `[k]` for every `k < num_constraints` unconditionally.
-    if !src.quadratic_constraints.is_empty()
-        && src.quadratic_constraints.len() != src.num_constraints
-    {
-        return Err(format!(
-            "quadratic_constraints length must be 0 or {}, got {}",
-            src.num_constraints,
-            src.quadratic_constraints.len()
-        ));
-    }
     // Row-major view of A (O(nnz)): column k of `a_rows` is row k of `src.a`,
     // giving sparse per-constraint access without ever densifying A (O(m*n)
     // for the QPLIB DCQ problems that drove this bridge's OOM).
@@ -819,6 +807,36 @@ fn csc_to_triplets(m: &CscMatrix) -> Vec<(usize, usize, f64)> {
     t
 }
 
+/// Expand the triangular Hessian convention used by `QpProblem` into the
+/// explicitly symmetric storage expected by the QCQP Cholesky bridge.
+fn symmetric_csc_triplets(m: &CscMatrix) -> Vec<(usize, usize, f64)> {
+    use std::collections::BTreeMap;
+
+    let mut pairs: BTreeMap<(usize, usize), (Option<f64>, Option<f64>)> = BTreeMap::new();
+    for (r, c, v) in csc_to_triplets(m) {
+        if r == c {
+            pairs.entry((r, c)).or_default().0 = Some(v);
+        } else if r < c {
+            pairs.entry((r, c)).or_default().0 = Some(v);
+        } else {
+            pairs.entry((c, r)).or_default().1 = Some(v);
+        }
+    }
+    let mut out = Vec::with_capacity(pairs.len() * 2);
+    for ((i, j), (upper, lower)) in pairs {
+        let v = match (upper, lower) {
+            (Some(a), Some(b)) if i != j => 0.5 * (a + b),
+            (Some(a), _) | (_, Some(a)) => a,
+            _ => continue,
+        };
+        out.push((i, j, v));
+        if i != j {
+            out.push((j, i, v));
+        }
+    }
+    out
+}
+
 /// Dense linear-term vector to sparse `(index, value)` pairs, dropping
 /// zeros.
 fn sparse_nz(v: &[f64]) -> Vec<(usize, f64)> {
@@ -894,20 +912,8 @@ fn append_quad_compact(
 /// rows, a fixed bound as an equality row), same SOC embedding formula, same
 /// error messages.
 pub(crate) fn qp_problem_to_conic(src: &QpProblem) -> Result<(ConicProblem, usize, bool), String> {
+    src.validate().map_err(|e| e.to_string())?;
     let n = src.num_vars;
-    // `QpProblem::quadratic_constraints` is a public field (PR #25 review):
-    // `set_quadratic_constraints` enforces "empty or num_constraints", but a
-    // caller can still assign the field directly and violate it, and the loop
-    // below indexes `[k]` for every `k < num_constraints` unconditionally.
-    if !src.quadratic_constraints.is_empty()
-        && src.quadratic_constraints.len() != src.num_constraints
-    {
-        return Err(format!(
-            "quadratic_constraints length must be 0 or {}, got {}",
-            src.num_constraints,
-            src.quadratic_constraints.len()
-        ));
-    }
     let has_quad_obj = !src.is_zero_q();
     let nvar = n + if has_quad_obj { 1 } else { 0 };
 
@@ -1031,7 +1037,7 @@ pub(crate) fn qp_problem_to_conic(src: &QpProblem) -> Result<(ConicProblem, usiz
     let mut convexity_unproven = false;
 
     if has_quad_obj {
-        let p0_triplets = csc_to_triplets(&src.q);
+        let p0_triplets = symmetric_csc_triplets(&src.q);
         let (l0, clamped) =
             touched_cholesky(&p0_triplets).map_err(|_| "P0 not PSD (nonconvex)".to_string())?;
         convexity_unproven |= clamped;
@@ -1083,21 +1089,11 @@ pub(crate) fn qp_problem_to_conic(src: &QpProblem) -> Result<(ConicProblem, usiz
 /// a `QcqpProblem`'s `p0`/`q0` — used by `solve_qp_problem_as_qcqp` since it
 /// no longer builds a `QcqpProblem` intermediate).
 fn qp_problem_objective(src: &QpProblem, x: &[f64]) -> f64 {
-    let mut obj = 0.0;
-    for (j, &cv) in src.c.iter().enumerate() {
-        obj += cv * x[j];
-    }
+    let mut obj: f64 = src.c.iter().zip(x).map(|(&c, &xj)| c * xj).sum();
     if !src.is_zero_q() {
-        let px = src.q.mat_vec_mul(x).expect(
-            "q.ncols() == x.len() == src.num_vars: QpProblem::new() enforces \
-             q.ncols() == num_vars (struct-literal construction bypasses this -- \
-             all QpProblem fields are pub); x is res.x[..src.num_vars]",
-        );
-        let mut xpx = 0.0;
-        for j in 0..src.num_vars {
-            xpx += x[j] * px[j];
+        for (row, col, value) in symmetric_csc_triplets(&src.q) {
+            obj += 0.5 * value * x[row] * x[col];
         }
-        obj += 0.5 * xpx;
     }
     obj
 }
@@ -1143,12 +1139,8 @@ pub fn solve_qp_problem_as_qcqp(src: &QpProblem, opts: &ConicOptions) -> QcqpRes
 mod tests {
     use super::*;
 
-    /// `p0` is 3x3 but `qp.n`/`x.len()` is 2, bypassing `to_conic`'s
-    /// `validate_dims`. Must panic, not silently zero-fill; reverting to the
-    /// old zero-fill-on-Err fallback makes this FAIL.
     #[test]
-    #[should_panic(expected = "p0.ncols() == x.len() == qp.n")]
-    fn qcqp_objective_panics_on_dimension_mismatch() {
+    fn qcqp_rejects_objective_dimension_mismatch() {
         let qp = QcqpProblem {
             n: 2,
             p0: Some(
@@ -1161,16 +1153,12 @@ mod tests {
             a_eq: CscMatrix::new(0, 2),
             b_eq: vec![],
         };
-        let x = vec![1.0, 2.0];
-        let _ = qcqp_objective(&qp, &x);
+        let result = solve_qcqp(&qp, &ConicOptions::default());
+        assert!(matches!(result.status, SolveStatus::NotSupported(_)));
     }
 
-    /// Constructed via struct literal (bypassing `QpProblem::new()`'s
-    /// dimension check, all fields `pub`): `q` is 3x3 but `num_vars`/`x.len()`
-    /// is 2. Must panic, not silently zero-fill.
     #[test]
-    #[should_panic(expected = "q.ncols() == x.len() == src.num_vars")]
-    fn qp_problem_objective_panics_on_dimension_mismatch() {
+    fn qp_bridge_rejects_base_dimension_mismatch() {
         let src = crate::qp::QpProblem {
             q: CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap(),
             c: vec![0.0, 0.0],
@@ -1183,7 +1171,33 @@ mod tests {
             quadratic_constraints: vec![],
             obj_offset: 0.0,
         };
-        let x = vec![1.0, 2.0];
-        let _ = qp_problem_objective(&src, &x);
+        let result = solve_qp_problem_as_qcqp(&src, &ConicOptions::default());
+        assert!(matches!(result.status, SolveStatus::NotSupported(_)));
+    }
+
+    #[test]
+    fn qp_objective_upper_triangle_is_symmetrized_for_cholesky() {
+        let q = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, 2.0], 2, 2).unwrap();
+        let triplets = symmetric_csc_triplets(&q);
+        assert!(triplets.contains(&(0, 1, 1.0)));
+        assert!(triplets.contains(&(1, 0, 1.0)));
+
+        let (l, clamped) = touched_cholesky(&triplets).expect("matrix is positive definite");
+        assert!(!clamped);
+        assert!(l
+            .iter()
+            .flatten()
+            .any(|&(row, value)| row == 1 && value != 0.0));
+
+        let src = crate::qp::QpProblem::new(
+            q,
+            vec![0.0; 2],
+            CscMatrix::new(0, 2),
+            vec![],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(qp_problem_objective(&src, &[1.0, 1.0]), 3.0);
     }
 }

@@ -868,6 +868,22 @@ ENDATA
         );
     }
 
+    #[test]
+    fn test_qps_quadobj_surplus_fields_are_errors() {
+        for entry in [
+            " x1 x2 2.0 extra",
+            "    x1        x2        2.0             extra",
+        ] {
+            let qps = format!(
+                "NAME\nROWS\n N obj\nCOLUMNS\n x1 obj 1.0\n x2 obj 1.0\nQUADOBJ\n{entry}\nENDATA\n"
+            );
+            assert!(
+                parse_qps_str(&qps).is_err(),
+                "surplus QUADOBJ field: {entry}"
+            );
+        }
+    }
+
     /// A: BOUNDS line with only 2 fields must be an error, not a silent skip.
     #[test]
     fn test_qps_bounds_malformed_too_few_fields_is_error() {
