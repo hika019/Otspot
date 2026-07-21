@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2835 testcases, 26 ignored
+# totals: 2840 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -54,12 +54,14 @@ otspot-core	conic::nonconvex::tests::leaf_accept_no_longer_loosens_feas_tol_by_1
 otspot-core	conic::nonconvex::tests::mccormick_w_box_bounds_diagonal_square_below	active
 otspot-core	conic::nonconvex::tests::mismatched_dims_returns_not_supported_not_a_panic	active
 otspot-core	conic::nonconvex::tests::node_limited_with_incumbent_is_suboptimal	active
+otspot-core	conic::nonconvex::tests::public_entry_rejects_non_finite_data_and_integer_indices	active
 otspot-core	conic::nonconvex::tests::quad_val_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_expired_deadline	active
 otspot-core	conic::nonconvex::tests::sparse_relax_matches_dense_reference	active
 otspot-core	conic::nonconvex::tests::validate_rejects_every_mismatched_dimension	active
-otspot-core	conic::qcqp::tests::qcqp_objective_panics_on_dimension_mismatch	active
-otspot-core	conic::qcqp::tests::qp_problem_objective_panics_on_dimension_mismatch	active
+otspot-core	conic::qcqp::tests::qcqp_rejects_objective_dimension_mismatch	active
+otspot-core	conic::qcqp::tests::qp_bridge_rejects_base_dimension_mismatch	active
+otspot-core	conic::qcqp::tests::qp_objective_upper_triangle_is_symmetrized_for_cholesky	active
 otspot-core	conic::tests::bench_conic_suite	ignored
 otspot-core	conic::tests::cone_membership_check_covers_all_branches	active
 otspot-core	conic::tests::conic_border_l_fill_stays_linear	active
@@ -91,8 +93,10 @@ otspot-core	conic::tests::misocp_mid_search_deadline_keeps_incumbent	active
 otspot-core	conic::tests::misocp_nan_int_tol_is_rejected_not_silently_accepted	active
 otspot-core	conic::tests::misocp_node_limit_with_incumbent_is_suboptimal	active
 otspot-core	conic::tests::misocp_node_limit_without_incumbent_is_max_iterations	active
+otspot-core	conic::tests::misocp_preset_cancel_returns_before_first_node	active
 otspot-core	conic::tests::misocp_problem_validate_rejects_int_bound_length_mismatch	active
 otspot-core	conic::tests::misocp_problem_validate_rejects_out_of_range_integer_index	active
+otspot-core	conic::tests::misocp_rounds_and_rechecks_integer_incumbent	active
 otspot-core	conic::tests::misocp_unbounded_relaxation_before_integer_fixing_does_not_certify_unbounded	active
 otspot-core	conic::tests::misocp_unresolved_nodes_do_not_prove_infeasibility	active
 otspot-core	conic::tests::nonconvex_bilinear_box_global_min	active
@@ -2061,6 +2065,7 @@ otspot-io	qps::tests::test_qps_objsense_max_obj_offset_sign_flip	active
 otspot-io	qps::tests::test_qps_quadobj_duplicate_entry_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_malformed_too_few_fields_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_nan_value_is_error	active
+otspot-io	qps::tests::test_qps_quadobj_surplus_fields_are_errors	active
 otspot-io	qps::tests::test_qps_quadobj_symmetric_duplicate_is_error	active
 otspot-io	qps::tests::test_qps_ranges_fixed_format_numeric_spaced_row_name	active
 otspot-io	qps::tests::test_qps_ranges_fixed_shorthand_trailing_field6_is_error	active
