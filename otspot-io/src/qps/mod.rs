@@ -59,15 +59,16 @@ impl From<std::io::Error> for QpsError {
 
 /// Parse a QPS file from `path`.
 ///
-/// Uses streaming I/O — peak memory proportional to the longest line.
+/// Streams the file; a file that turns out to be fixed-column is streamed a
+/// second time rather than buffered, so peak memory stays proportional to the
+/// parsed model rather than the file.
 pub fn parse_qps(path: &Path) -> Result<QpProblem, QpsError> {
-    let file = std::fs::File::open(path)?;
-    parse_qps_reader(std::io::BufReader::new(file))
+    parser::parse_qps_source(&crate::common::FileSource(path.to_path_buf()))
 }
 
 /// Parse a QPS string.
 pub fn parse_qps_str(input: &str) -> Result<QpProblem, QpsError> {
-    parse_qps_reader(std::io::Cursor::new(input.as_bytes()))
+    parser::parse_qps_source(&crate::common::TextSource(input))
 }
 
 #[cfg(test)]
@@ -229,15 +230,13 @@ ENDATA
         assert!(matches!(result, Err(QpsError::InvalidObjectiveOffset(_))));
     }
 
-    /// QPS fixed-format (`force_fixed` path) での N 行 RHS NaN が `InvalidObjectiveOffset` を返すことを sentinel 化。
-    /// `obj_row.as_deref()` を `None` に置換すると obj 行 NaN が ParseError 化 →
-    /// `InvalidObjectiveOffset` でなくなる → assertion 失敗 (no-op fail 設計)。
+    /// 目的行 (N 行) の RHS が NaN のとき `InvalidObjectiveOffset` を返すことを sentinel 化。
+    /// `parse_vector_line` の `allow_nonfinite_for_row` を `None` に置換すると
+    /// obj 行 NaN が ParseError 化 → `InvalidObjectiveOffset` でなくなる → assertion 失敗。
     ///
-    /// RHS 行: pos 4-11 空 + pos 14-21 "obj" で `force_fixed=true` → `parse_mps_fixed_pairs` 経由。
+    /// RHS 行はベクトル名を省略した shorthand (obj/c1 とも宣言済み行名)。
     #[test]
     fn test_qps_fixed_format_obj_row_nan_invalidates_offset() {
-        // Fixed-format RHS line: pos 0-13 spaces, pos 14-16 "obj", pos 24-26 "NaN",
-        // pos 39-40 "c1", pos 49-51 "1.0". mps_field(line,4,12)="" → force_fixed=true.
         let qps = concat!(
             "NAME          FIXFMT_NAN\n",
             "ROWS\n N  obj\n L  c1\n",
@@ -407,6 +406,331 @@ ENDATA\n";
         assert!(!got.q.values().is_empty());
     }
 
+    /// A fixed-column QPS COLUMNS entry whose ROW name contains embedded spaces
+    /// must keep its coefficient. The old QPS `is_free` heuristic tokenized
+    /// `    X2        BR   1 1         1.0` into `[X2, BR, 1, 1, 1.0]`, whose
+    /// value slots (`1`, `1.0`) both parse as floats, so it read the line as
+    /// free format and dropped the 1.0 into invented rows — a silent loss of a
+    /// matrix coefficient with `Ok` returned.
+    ///
+    /// Independent oracle: hand-solved LP. `min -x1-x2` s.t. `x1+x2 <= 10`
+    /// (LC123), `x1 <= 6` (`BR   1 1`), `0 <= x2 <= 2` (BOUNDS). Optimum
+    /// `x1=6, x2=2` → objective `-8.0`; losing the `BR   1 1` coefficient would
+    /// free `x1` to 8 and give `-10.0`.
+    ///
+    /// **No-op failure guarantee**: with the per-line `is_free` heuristic
+    /// restored, the coefficient is dropped and the objective becomes -10.0 —
+    /// verified by temporarily reverting.
+    #[test]
+    fn test_qps_fixed_columns_embedded_space_row_name_in_columns() {
+        use otspot_core::problem::LpProblem;
+        use otspot_core::solve;
+
+        let qps = concat!(
+            "NAME          FIXEDCOL\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  LC123\n",
+            " L  BR   1 1\n",
+            "COLUMNS\n",
+            "    X1        obj               -1.0   LC123              1.0\n",
+            "    X1        BR   1 1           1.0\n",
+            "    X2        obj               -1.0   LC123              1.0\n",
+            "RHS\n",
+            "    RHS       LC123              10.   BR   1 1            6.\n",
+            "BOUNDS\n",
+            " UP BND       X2                 2.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps).expect("fixed-column QPS with embedded-space row must parse");
+        assert_eq!(prob.b, vec![10.0, 6.0], "'BR   1 1' must keep its RHS 6.0");
+
+        let lp = LpProblem::new_general(
+            prob.c.clone(),
+            prob.a.clone(),
+            prob.b.clone(),
+            prob.constraint_types.clone(),
+            prob.bounds.clone(),
+            None,
+        )
+        .expect("LP construction");
+        let result = solve(&lp);
+        assert!(
+            (result.objective - (-8.0)).abs() < 1e-6,
+            "hand-solved optimum is -8.0; -10.0 means the COLUMNS coefficient on \
+             'BR   1 1' was silently dropped. got {}",
+            result.objective
+        );
+    }
+
+    /// A free-format QPS separated by single spaces must read its row names from
+    /// the tokens, not from fixed byte offsets. The old QPS ROWS parser preferred
+    /// the fixed byte field at columns 5-12, so ` N obj` yielded the row name `bj` and ` L c1`
+    /// yielded `1` — the objective row and every constraint silently misnamed,
+    /// leaving `c` and `b` all-zero while still returning `Ok`.
+    ///
+    /// **No-op failure guarantee**: restoring the fixed-field-first ROWS read
+    /// makes `c` and `b` both `[0.0]` — verified by temporarily reverting.
+    #[test]
+    fn test_qps_free_format_single_space_row_names() {
+        let qps =
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n x1 obj 1.0 c1 1.0\nRHS\n rhs c1 10.0\nENDATA\n";
+        let prob = parse_qps_str(qps).expect("single-space free-format QPS must parse");
+        assert_eq!(prob.num_vars, 1, "x1");
+        assert_eq!(prob.num_constraints, 1, "c1");
+        assert_eq!(prob.c, vec![1.0], "objective row must be 'obj', not 'bj'");
+        assert_eq!(prob.b, vec![10.0], "constraint row must be 'c1', not '1'");
+    }
+
+    /// An integer-marker line is recognized only when it carries BOTH a
+    /// `'MARKER'` token and an `INTORG`/`INTEND` token. Keying off `'MARKER'`
+    /// alone would skip a COLUMNS line for a column legitimately *named*
+    /// `MARKER`, silently dropping its coefficients.
+    ///
+    /// **No-op failure guarantee**: relaxing the rule to "any token equals
+    /// MARKER" drops the column entirely (`num_vars` becomes 0) — verified by
+    /// temporarily reverting.
+    #[test]
+    fn test_qps_column_named_marker_is_not_a_marker_line() {
+        let qps = concat!(
+            "NAME\nROWS\n N obj\n L c1\n",
+            "COLUMNS\n",
+            "    MARKER    obj  1.0  c1  1.0\n",
+            "    MARKER2                 'MARKER'                 'INTORG'\n",
+            "    x2        obj  1.0  c1  1.0\n",
+            "    MARKER3                 'MARKER'                 'INTEND'\n",
+            "RHS\n    rhs c1 10.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps).expect("a column named MARKER must parse");
+        assert_eq!(
+            prob.num_vars, 2,
+            "the column named MARKER and x2 both survive; only the two real \
+             'MARKER'/'INTORG'|'INTEND' lines are skipped"
+        );
+        assert_eq!(
+            prob.c,
+            vec![1.0, 1.0],
+            "both columns keep their objective coefficient"
+        );
+    }
+
+    /// `test_qps_column_named_marker_is_not_a_marker_line` above never puts an
+    /// `INTORG`/`INTEND` token on the same line as a column named `MARKER`, so
+    /// it passes even against the pre-fix whole-line token scan (that scan
+    /// only misfires when *both* a `MARKER` token and an `INTORG`/`INTEND`
+    /// token appear on one line, regardless of position). This test supplies
+    /// exactly that: column `MARKER`, row `INTORG`, coefficient `1.0`
+    /// (`MARKER INTORG 1.0`, the QPS twin of the MPS collision fixed in
+    /// `otspot-io/src/mps/mod.rs`'s `test_marker_column_row_name_collision_keeps_coefficient`).
+    ///
+    /// **No-op failure guarantee**: reverting `integer_marker_kind` to the
+    /// whole-line token scan makes this FAIL -- the `MARKER INTORG 1.0` line
+    /// is misdetected as a directive and silently skipped (QPS drops marker
+    /// lines outright, tracking no integrality), so `MARKER`'s coefficient on
+    /// row `INTORG` never reaches `prob.a` and `av[1]` comes back `0.0`
+    /// instead of `1.0` -- verified by temporarily reverting.
+    #[test]
+    fn test_qps_marker_column_row_name_collision_keeps_coefficient() {
+        let qps = concat!(
+            "NAME\nROWS\n N obj\n L c1\n L INTORG\n",
+            "COLUMNS\n",
+            "    MARKER    obj      1.0\n",
+            "    MARKER    INTORG   1.0\n",
+            "    x1        obj      1.0  c1  1.0\n",
+            "RHS\n    rhs c1 10.0\n    rhs INTORG 5.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps).expect("column MARKER / row INTORG must parse as data");
+        assert_eq!((prob.num_vars, prob.num_constraints), (2, 2));
+        // Column order: MARKER (0), x1 (1); row order: c1 (0), INTORG (1).
+        let av = prob.a.mat_vec_mul(&[1.0, 0.0]).unwrap();
+        assert_eq!(
+            av[1], 1.0,
+            "MARKER's coefficient on row INTORG must survive parsing, got {av:?}"
+        );
+    }
+
+    /// The QPS twin of the MPS truncation/duplicate-name guards: a name that
+    /// overflows the fixed 8-byte field must not be clipped into a false match,
+    /// and two rows may not share a name.
+    ///
+    /// **No-op failure guarantee**: making the fixed-column grid check accept an
+    /// overflowing name, or dropping the `row_names` duplicate check, makes
+    /// these parse succeed — verified by temporarily reverting.
+    #[test]
+    fn test_qps_long_name_truncation_and_duplicate_rows_are_errors() {
+        let typo = concat!(
+            "NAME\nROWS\n N obj\n L ROWLONGNAME1\n",
+            "COLUMNS\n x1 obj 1.0 ROWLONGN 1.0\n",
+            "RHS\n rhs ROWLONGN 4.0\nENDATA\n",
+        );
+        assert!(
+            parse_qps_str(typo).is_err(),
+            "'ROWLONGN' must not resolve against the truncated 'ROWLONGNAME1'"
+        );
+
+        // The discriminating case: a genuinely fixed-column file (its free
+        // reading dies on the embedded-space row name) whose other row name
+        // overflows the 8-byte field. Truncating would clip it to `TOOLONGN`
+        // and parse the file as if it were valid fixed-column MPS.
+        let overflowing = concat!(
+            "NAME          FIXEDCOL\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  BR   1 1\n",
+            " L  TOOLONGNAME\n",
+            "COLUMNS\n",
+            "    X1        BR   1 1           1.0\n",
+            "RHS\n",
+            "    RHS       BR   1 1            6.\n",
+            "ENDATA\n",
+        );
+        assert!(
+            parse_qps_str(overflowing).is_err(),
+            "a name overflowing the fixed 8-byte field must error, not be truncated"
+        );
+
+        let dup = concat!(
+            "NAME\nROWS\n N obj\n L c1\n L c1\n",
+            "COLUMNS\n x1 obj 1.0 c1 1.0\n",
+            "RHS\n rhs c1 1.0\nENDATA\n",
+        );
+        let err = parse_qps_str(dup).expect_err("a duplicate row name must error");
+        assert!(
+            format!("{err}").contains("duplicate row name"),
+            "got: {err}"
+        );
+    }
+
+    /// `OBJSENSE  MAX` on the header line, and the spelled-out `MAXIMIZE`, must
+    /// both be honoured; dropping them silently minimizes a maximization.
+    ///
+    /// **No-op failure guarantee**: ignoring the header's trailing value leaves
+    /// `c = [1.0]` instead of `[-1.0]` — verified by temporarily reverting.
+    #[test]
+    fn test_qps_objsense_inline_and_spelled_out() {
+        let body = "ROWS\n N obj\n L c1\nCOLUMNS\n x1 obj 1.0 c1 1.0\nRHS\n rhs c1 10.0\nENDATA\n";
+
+        let inline = format!("NAME\nOBJSENSE  MAX\n{body}");
+        let prob = parse_qps_str(&inline).expect("OBJSENSE on the header line must be honoured");
+        assert_eq!(prob.c, vec![-1.0], "MAX is normalized to MIN by negating c");
+
+        let spelled = format!("NAME\nOBJSENSE\n    MAXIMIZE\n{body}");
+        let prob = parse_qps_str(&spelled).expect("the spelled-out MAXIMIZE must be accepted");
+        assert_eq!(prob.c, vec![-1.0]);
+
+        let minimize = format!("NAME\nOBJSENSE\n    MINIMIZE\n{body}");
+        let prob = parse_qps_str(&minimize).expect("the spelled-out MINIMIZE must be accepted");
+        assert_eq!(prob.c, vec![1.0]);
+    }
+
+    /// A COLUMNS/RHS reference to a row that ROWS never declared must be a hard
+    /// error, not a silent drop — both correct in itself and the signal the
+    /// whole-file format decision relies on.
+    ///
+    /// **No-op failure guarantee**: restoring the `if let Some(indices) = ..`
+    /// silent skip in `build_qp_problem` makes both parses succeed — verified
+    /// by temporarily reverting.
+    #[test]
+    fn test_qps_undefined_row_reference_is_error() {
+        let via_columns =
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 typo_row 1.0\nRHS\n    rhs c1 1.0\nENDATA\n";
+        assert!(
+            parse_qps_str(via_columns).is_err(),
+            "COLUMNS entry for an undeclared row must error"
+        );
+
+        let via_rhs =
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs typo_row 1.0\nENDATA\n";
+        assert!(
+            parse_qps_str(via_rhs).is_err(),
+            "RHS entry for an undeclared row must error"
+        );
+    }
+
+    /// Sentinel (P0 regression, `forplan.QPS`): strict fixed-column MPS/QPS
+    /// RHS/RANGES with embedded spaces in the vector name (`"RHS 1"`, `"RNG 1"`)
+    /// and a row name (`"BR   1 1"`) must parse via the whole-file fixed-column
+    /// reader, not whitespace tokenization. Fixture mirrors
+    /// `data/lp_problems/forplan.QPS`'s RHS/RANGES lines byte-for-byte (same row
+    /// names, vector names, and field columns 4/12/14/22/24/36/39/47/49/61).
+    ///
+    /// Independent oracle #1: `prob.b`, hand-read off the fixture — LC123=10
+    /// (Le), `BR   1 1`=6 (Le, unused by any column, must still parse to the
+    /// right value), LTSYCT range-expanded to `[2, 7]` (RANGES `LTSYCT 5`) →
+    /// Le rhs=7 then Le rhs=-2 (the G→Le sign flip for the lower bound).
+    ///
+    /// Independent oracle #2: hand-solved LP. `BR   1 1` has no COLUMNS entries
+    /// (it exists purely to exercise the embedded-space RHS row name), so it is
+    /// a slack `0<=6` row that never binds; feasibility is driven only by
+    /// `x1+x2<=10` (LC123) and `2<=x2<=7` (LTSYCT range), default `x1,x2>=0`.
+    /// `min -x1-x2` is optimized anywhere with `x1+x2=10`, `2<=x2<=7`
+    /// (e.g. x1=6,x2=4), objective `-10.0`.
+    ///
+    /// **No-op failure guarantee**: reverting the fixed-column fallback in
+    /// `common::parse_vector_pairs` (to whitespace-only tokenization) makes this
+    /// fixture fail to parse (`ParseError`, "row name has no matching value").
+    #[test]
+    fn test_qps_forplan_style_rhs_ranges_fixed_columns() {
+        use otspot_core::problem::LpProblem;
+        use otspot_core::solve;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/netlib/forplan_fixed_columns.qps");
+        let prob = parse_qps(&path).expect("forplan-style fixed-column RHS/RANGES must parse");
+
+        assert_eq!(prob.num_vars, 2, "X1, X2");
+        assert_eq!(
+            prob.b.len(),
+            4,
+            "LC123, BR   1 1, LTSYCT(range upper), LTSYCT(range lower)"
+        );
+        assert!(
+            (prob.b[0] - 10.0).abs() < 1e-12,
+            "LC123 rhs must be 10 (fixed-column field3), got {}",
+            prob.b[0]
+        );
+        assert!(
+            (prob.b[1] - 6.0).abs() < 1e-12,
+            "'BR   1 1' (embedded-space row name) rhs must be 6 (fixed-column field5), got {}",
+            prob.b[1]
+        );
+        assert!(
+            (prob.b[2] - 7.0).abs() < 1e-12,
+            "LTSYCT range-expanded upper bound must be 7 (rhs=2 + range=5), got {}",
+            prob.b[2]
+        );
+        assert!(
+            (prob.b[3] - (-2.0)).abs() < 1e-12,
+            "LTSYCT range-expanded lower bound must be -2 (G-row sign flip of rhs=2), got {}",
+            prob.b[3]
+        );
+        assert!(
+            prob.constraint_types
+                .iter()
+                .all(|&ct| ct == ConstraintType::Le),
+            "QPS RANGES/G-row expansion always yields Le rows, got {:?}",
+            prob.constraint_types
+        );
+
+        let lp = LpProblem::new_general(
+            prob.c.clone(),
+            prob.a.clone(),
+            prob.b.clone(),
+            prob.constraint_types.clone(),
+            prob.bounds.clone(),
+            None,
+        )
+        .expect("fixture LP construction failed");
+        let result = solve(&lp);
+        assert!(
+            (result.objective - (-10.0)).abs() < 1e-6,
+            "hand-solved optimum is -10.0 (x1+x2=10 maximized under x1<=... /x2 in [2,7]), got {}",
+            result.objective
+        );
+    }
+
     /// Sentinel: OBJSENSE MAX with an N-row RHS must negate the offset.
     ///
     /// **No-op failure guarantee**: removing the `if self.maximize { -raw }` sign-flip
@@ -434,20 +758,40 @@ ENDATA
         );
     }
 
-    use std::io::{self, Read};
+    use std::io::{self, Read, Seek};
 
-    struct LineCountingReader<R: std::io::BufRead> {
-        inner: R,
-        pub line_call_count: std::rc::Rc<std::cell::Cell<usize>>,
+    /// A seekable reader that counts how many lines it has been asked for.
+    struct LineCountingReader {
+        inner: io::Cursor<Vec<u8>>,
+        line_call_count: std::rc::Rc<std::cell::Cell<usize>>,
     }
 
-    impl<R: std::io::BufRead> Read for LineCountingReader<R> {
+    impl LineCountingReader {
+        fn new(text: &str) -> (Self, std::rc::Rc<std::cell::Cell<usize>>) {
+            let counter = std::rc::Rc::new(std::cell::Cell::new(0usize));
+            (
+                Self {
+                    inner: io::Cursor::new(text.as_bytes().to_vec()),
+                    line_call_count: counter.clone(),
+                },
+                counter,
+            )
+        }
+    }
+
+    impl Read for LineCountingReader {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             self.inner.read(buf)
         }
     }
 
-    impl<R: std::io::BufRead> std::io::BufRead for LineCountingReader<R> {
+    impl Seek for LineCountingReader {
+        fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    impl io::BufRead for LineCountingReader {
         fn fill_buf(&mut self) -> io::Result<&[u8]> {
             self.inner.fill_buf()
         }
@@ -463,24 +807,39 @@ ENDATA
         }
     }
 
+    /// The QPS reader entry point must **stream** — see the MPS twin of this
+    /// test for the full rationale. An input that fails on line 3 of many
+    /// thousands separates a lazy pull from a reader drained up front; counting
+    /// `read_line` calls on a successful parse cannot.
+    ///
+    /// **No-op failure guarantee**: restoring the `Vec<String>` buffering in
+    /// `LineSource::from_reader` makes the count jump from single digits to the
+    /// full line count — verified by temporarily reverting.
     #[test]
-    fn test_qps_reader_streaming_sentinel() {
-        let counter = std::rc::Rc::new(std::cell::Cell::new(0usize));
-        let reader = LineCountingReader {
-            inner: std::io::Cursor::new(STREAM_QPS.as_bytes()),
-            line_call_count: counter.clone(),
-        };
-        let prob = parse_qps_reader(reader).expect("parse must succeed");
-        assert_eq!(prob.num_vars, 2);
-        let expected_lines = STREAM_QPS.lines().count();
+    fn test_qps_reader_pulls_lines_lazily_not_all_upfront() {
+        use std::fmt::Write as _;
+
+        const PADDING_LINES: usize = 3000;
+        const MAX_LINES_A_STREAMING_PARSER_PULLS: usize = 50;
+
+        let mut qps = String::from("NAME\nROWS\n Z\n");
+        for i in 0..PADDING_LINES {
+            writeln!(qps, "* filler line {i}").expect("write to String");
+        }
+        qps.push_str("ENDATA\n");
+        let total_lines = qps.lines().count();
+
+        let (reader, counter) = LineCountingReader::new(&qps);
+        parse_qps_reader(reader).expect_err("a ROWS line with no row name must fail");
         assert!(
-            counter.get() >= expected_lines,
-            "streaming must call read_line at least {expected_lines} times, got {}",
+            counter.get() <= MAX_LINES_A_STREAMING_PARSER_PULLS,
+            "parser must pull lines lazily and stop at the failing line 3; it pulled {} of \
+             {total_lines} lines, which means the reader was drained up front",
             counter.get()
         );
     }
 
-    // ── Sentinel tests: audit#141 parser strictness (A/B/C) ──────────────────
+    // ── Sentinel tests: audit 141 parser strictness (A/B/C) ───────────────────
 
     fn minimal_qps_with_columns(col_section: &str) -> String {
         format!(
@@ -507,6 +866,22 @@ ENDATA
             parse_qps_str(qps).is_err(),
             "< 3 fields in QUADOBJ must error"
         );
+    }
+
+    #[test]
+    fn test_qps_quadobj_surplus_fields_are_errors() {
+        for entry in [
+            " x1 x2 2.0 extra",
+            "    x1        x2        2.0             extra",
+        ] {
+            let qps = format!(
+                "NAME\nROWS\n N obj\nCOLUMNS\n x1 obj 1.0\n x2 obj 1.0\nQUADOBJ\n{entry}\nENDATA\n"
+            );
+            assert!(
+                parse_qps_str(&qps).is_err(),
+                "surplus QUADOBJ field: {entry}"
+            );
+        }
     }
 
     /// A: BOUNDS line with only 2 fields must be an error, not a silent skip.
@@ -537,6 +912,23 @@ ENDATA
         assert!(
             err.to_string().contains("does not take a value"),
             "free-format FR with a value must be rejected, got {err:?}"
+        );
+    }
+
+    /// Sentinel: `UP` takes exactly one value; a second trailing token past
+    /// the value (`UP BND x1 5.0 10.0`) must be a hard error, not a silently
+    /// discarded value. Confirmed to fail without the check in
+    /// `parse_bounds_entry` (`otspot-io/src/common/mod.rs`): the free-format
+    /// branch used to read only `tokens[value_idx]`, so any token past it was
+    /// silently dropped.
+    #[test]
+    fn test_qps_bounds_up_surplus_value_token_is_error() {
+        let qps =
+            "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nBOUNDS\n UP BND x1 5.0 10.0\nENDATA\n";
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("takes exactly one value"),
+            "UP with a surplus value token must be rejected, got {err:?}"
         );
     }
 
@@ -680,8 +1072,16 @@ ENDATA
         let prob = parse_qps_str(&qps).expect("fixed RANGES with numeric spaced row must parse");
         // The Le row "C 1" (b=10) with a range of 5 expands to an upper+lower pair,
         // proving the fixed-format RANGES record parsed instead of being rejected.
-        assert_eq!(prob.b.len(), 2, "range row should expand to upper+lower constraints");
-        assert!((prob.b[0] - 10.0).abs() < 1e-12, "original RHS preserved, got {:?}", prob.b);
+        assert_eq!(
+            prob.b.len(),
+            2,
+            "range row should expand to upper+lower constraints"
+        );
+        assert!(
+            (prob.b[0] - 10.0).abs() < 1e-12,
+            "original RHS preserved, got {:?}",
+            prob.b
+        );
     }
 
     #[test]
@@ -774,21 +1174,23 @@ ENDATA
     }
 
     #[test]
-    fn test_qps_rhs_odd_trailing_token_is_error() {
+    fn test_qps_rhs_odd_trailing_token_has_name_without_value_error() {
         let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0 c2\nQUADOBJ\n    x1 x1 1.0\nENDATA\n";
         let err = parse_qps_str(qps).unwrap_err();
         assert!(
-            err.to_string().contains("Odd trailing token"),
+            err.to_string()
+                .contains("has a name without a matching value"),
             "odd RHS token must be rejected, got {err:?}"
         );
     }
 
     #[test]
-    fn test_qps_ranges_odd_trailing_token_is_error() {
+    fn test_qps_ranges_odd_trailing_token_has_name_without_value_error() {
         let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nRANGES\n    rng c1 1.0 c2\nQUADOBJ\n    x1 x1 1.0\nENDATA\n";
         let err = parse_qps_str(qps).unwrap_err();
         assert!(
-            err.to_string().contains("Odd trailing token"),
+            err.to_string()
+                .contains("has a name without a matching value"),
             "odd RANGES token must be rejected, got {err:?}"
         );
     }
@@ -889,7 +1291,8 @@ ENDATA
     /// Sentinel: reverting to `continue` → Ok instead of Err.
     #[test]
     fn test_sentinel_qps_quadobj_undefined_column_is_error() {
-        let qps = "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nRHS\nQUADOBJ\n    x1 ghost 2.0\nENDATA\n";
+        let qps =
+            "NAME\nROWS\n N obj\nCOLUMNS\n    x1 obj 1.0\nRHS\nQUADOBJ\n    x1 ghost 2.0\nENDATA\n";
         assert!(
             parse_qps_str(qps).is_err(),
             "QUADOBJ referencing undefined column must error, not be silently ignored"
@@ -921,7 +1324,8 @@ ENDATA
     /// Sentinel: reverting trailing-token check → Ok instead of Err.
     #[test]
     fn test_sentinel_qps_columns_trailing_row_no_value_is_error() {
-        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0 obj\nRHS\n    rhs c1 5.0\nENDATA\n";
+        let qps =
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0 obj\nRHS\n    rhs c1 5.0\nENDATA\n";
         assert!(
             parse_qps_str(qps).is_err(),
             "trailing row name without a value in COLUMNS must error"
@@ -960,11 +1364,7 @@ ENDATA
         assert_eq!(qp.num_constraints, 1, "num_constraints");
         assert_eq!(qp.c, vec![-1.0, -2.0], "linear objective c");
         assert_eq!(qp.b, vec![5.0], "RHS");
-        assert_eq!(
-            qp.constraint_types,
-            vec![ConstraintType::Le],
-            "L row → Le"
-        );
+        assert_eq!(qp.constraint_types, vec![ConstraintType::Le], "L row → Le");
         // Q[0,0] = 2.0
         let (rows0, vals0) = qp.q.get_column(0).expect("Q col 0 must exist");
         let q00 = rows0
@@ -1022,5 +1422,684 @@ ENDATA
         );
         // G row RHS 2.0 is negated to -2.0; E row RHS 1.0 is unchanged.
         assert_eq!(qp.b, vec![-2.0, 1.0], "b: G-row negated, E-row unchanged");
+    }
+
+    // -----------------------------------------------------------------------
+    // PR #25 review horizontal expansion: RHS/RANGES duplicate-row detection.
+    //
+    // Unlike COLUMNS (which accumulates duplicate (row,col) entries by design,
+    // see `test_parse_qps_accumulates_duplicate_objective_entries`), RHS and
+    // RANGES hold exactly one scalar per row; a repeated row name is
+    // ambiguous input that was previously silently resolved via last-write-wins.
+    // -----------------------------------------------------------------------
+
+    /// Sentinel: the same row name appearing twice in RHS (multi-pair line)
+    /// must be a `ParseError`, not silently overwritten.
+    ///
+    /// **No-op failure guarantee**: reverting to plain `self.rhs.insert(name, value)`
+    /// makes this parse succeed with `prob.b[0] == 20.0` (last-write-wins) instead of erroring.
+    #[test]
+    fn test_qps_duplicate_rhs_row_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    rhs  c1  10.0\n    rhs  c1  20.0\nENDATA\n";
+        let err = parse_qps_str(qps).expect_err("duplicate RHS row must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RHS") && msg.contains("duplicate"),
+            "error should mention RHS duplicate, got: {msg}"
+        );
+    }
+
+    /// Sentinel: the 2-field shorthand RHS path must also reject a row that
+    /// was already set via the named multi-pair path.
+    #[test]
+    fn test_qps_duplicate_rhs_row_shorthand_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  c1  10.0\n    c1  20.0\nENDATA\n";
+        let err = parse_qps_str(qps).expect_err("duplicate RHS row (shorthand) must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RHS") && msg.contains("duplicate"),
+            "error should mention RHS duplicate, got: {msg}"
+        );
+    }
+
+    /// Sentinel: the same row name appearing twice in RANGES must be a `ParseError`.
+    ///
+    /// **No-op failure guarantee**: reverting to plain `self.ranges.insert(name, value)`
+    /// makes this parse succeed (silently keeping the last RANGES value) instead of erroring.
+    #[test]
+    fn test_qps_duplicate_ranges_row_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    rhs  c1  10.0\nRANGES\n    rng  c1  2.0\n    rng  c1  4.0\nENDATA\n";
+        let err = parse_qps_str(qps).expect_err("duplicate RANGES row must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RANGES") && msg.contains("duplicate"),
+            "error should mention RANGES duplicate, got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // vector-name-omitted (shorthand) RHS/RANGES/BOUNDS + multi-vector
+    // RHS/RANGES support.
+    // -----------------------------------------------------------------------
+
+    /// Sentinel: a 2-pair-per-line RHS with the vector name omitted, using
+    /// numeric row names ("1", "2") that also look like plausible values —
+    /// the exact shape that historically broke `blend.QPS`: a naive parser
+    /// skips `parts[0]` as if it were a vector name, then mispairs
+    /// `(parts[1], parts[2])` = `("10.0", 2.0)`, silently discarding row
+    /// "1"'s value and fabricating a bogus entry for a nonexistent row.
+    ///
+    /// **No-op failure guarantee**: dropping the shorthand disambiguation in
+    /// `common::parse_vector_entry` (always treating the first token as a
+    /// vector name) makes `prob.b` become `[0.0, 20.0]` instead of
+    /// `[10.0, 20.0]` (row "1"'s RHS silently lost) — verified by temporarily
+    /// reverting during development.
+    #[test]
+    fn test_qps_rhs_shorthand_two_pairs_numeric_row_names() {
+        let qps = "NAME\nROWS\n N  obj\n L  1\n L  2\nCOLUMNS\n    x1  obj  1.0  1  1.0\n    x2  obj  1.0  2  1.0\nRHS\n    1  10.0  2  20.0\nENDATA\n";
+        let prob = parse_qps_str(qps).expect("shorthand 2-pair RHS must parse");
+        assert_eq!(prob.b, vec![10.0, 20.0], "both RHS values must survive");
+    }
+
+    /// Sentinel: `blend_shorthand.mps` — a real, live `emps`-decoded Netlib
+    /// LP "blend" — parsed through the QPS reader (as `data/lp_problems/*.QPS`
+    /// netlib fixtures are in this codebase), matching the documented Netlib
+    /// optimum. Its RHS section has numeric row names ("65".."72"), no vector
+    /// name, 2 pairs packed per line: this is the historical trigger where an
+    /// earlier multi-vector RHS attempt misread the shape and produced a
+    /// wrong (previously reported as ~0) objective.
+    ///
+    /// **No-op failure guarantee**: reverting the shorthand disambiguation
+    /// drops all but 2 of the 8 RHS rows and the solved objective becomes
+    /// wrong — verified by temporarily reverting.
+    #[test]
+    fn test_qps_blend_shorthand_rhs_matches_known_optimal() {
+        use otspot_core::qp::solve_qp;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/netlib/blend_shorthand.mps");
+        let prob = parse_qps(&path).expect("blend_shorthand.mps must parse via QPS reader");
+        assert_eq!(prob.num_constraints, 74, "43 E-rows + 31 L-rows, no N-row");
+        assert!(prob.is_zero_q(), "blend is a pure LP (no QUADOBJ section)");
+
+        let nonzero_count = prob.b.iter().filter(|&&v| v != 0.0).count();
+        assert_eq!(
+            nonzero_count, 8,
+            "exactly 8 RHS rows are nonzero in blend; got {nonzero_count} (silent data loss?)"
+        );
+
+        let result = solve_qp(&prob);
+        assert!(
+            (result.objective - (-30.812149846)).abs() < 1e-6,
+            "blend_shorthand objective must match Netlib optimal -30.812149846, got {}",
+            result.objective
+        );
+    }
+
+    /// Sentinel (INLINE-P / PR #25 review finding): two distinct NAMED RHS
+    /// vectors legitimately reusing the same row must parse successfully,
+    /// applying only the first vector's value (GLPK/CPLEX "first vector
+    /// wins" convention) — not be rejected as a row-only duplicate.
+    ///
+    /// **No-op failure guarantee**: reverting the `(vector, row)`-keyed
+    /// `VectorSectionState::record` to a plain
+    /// `if self.rhs.contains_key(&name) { error }` row-only duplicate check
+    /// makes this a `ParseError` instead of `Ok` — verified by temporarily
+    /// reverting.
+    #[test]
+    fn test_qps_rhs_multiple_named_vectors_first_wins() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    RHS1  c1  10.0\n    RHS2  c1  20.0\nENDATA\n";
+        let prob = parse_qps_str(qps).expect("distinct named RHS vectors reusing a row must parse");
+        assert_eq!(prob.b, vec![10.0], "first vector (RHS1) must win, not RHS2");
+    }
+
+    /// Sentinel (multi-vector RANGES): analogous to the RHS case above.
+    ///
+    /// Oracle: `c1` is an `L` row (b=10.0). RANGES expansion for `L` splits
+    /// into `Le rhs=b` and `Ge rhs=b-|range|`, and the QPS builder then
+    /// uniformly negates `Ge` rows to `Le` (see `dt_qps_ge_eq_row_types`) —
+    /// so with RNG1's range=2.0 winning, the second row's rhs is
+    /// `-(b-|range|) = -(10.0-2.0) = -8.0`.
+    #[test]
+    fn test_qps_ranges_multiple_named_vectors_first_wins() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    rhs  c1  10.0\nRANGES\n    RNG1  c1  2.0\n    RNG2  c1  4.0\nENDATA\n";
+        let prob =
+            parse_qps_str(qps).expect("distinct named RANGES vectors reusing a row must parse");
+        assert_eq!(prob.num_constraints, 2);
+        assert_eq!(prob.b[0], 10.0);
+        assert_eq!(
+            prob.b[1], -8.0,
+            "RANGES value must come from RNG1 (2.0), not RNG2 (4.0)"
+        );
+    }
+
+    /// PR #25 review (Codex): a row name that appears only in a *discarded*
+    /// (non-first) RHS vector must still be checked against ROWS. `record`
+    /// only writes a discarded vector's entries into `seen`, not into
+    /// `target` (the map `validate_references` used to check alone), so an
+    /// undeclared row confined to RHS2 used to slip past strict-reference
+    /// validation entirely.
+    ///
+    /// Sentinel: reverting `validate_references` to check only
+    /// `self.rhs.keys()` (dropping the `rhs_vectors.referenced_rows()` chain)
+    /// makes this `Ok` instead of `Err` — verified by temporarily reverting.
+    #[test]
+    fn test_qps_rhs_second_vector_undefined_row_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    RHS1  c1  10.0\n    RHS2  ghost  20.0\nENDATA\n";
+        let err = parse_qps_str(qps)
+            .expect_err("RHS2 (discarded) referencing an undeclared row must error");
+        assert!(
+            matches!(err, QpsError::UndefinedReference { ref kind, ref name } if kind == "row" && name == "ghost"),
+            "expected UndefinedReference{{kind: row, name: ghost}}, got {err:?}"
+        );
+    }
+
+    /// Analogous to the RHS case above, for RANGES: an undeclared row
+    /// confined to the discarded second RANGES vector must still error.
+    ///
+    /// Sentinel: reverting `validate_references`' `ranges_vectors
+    /// .referenced_rows()` chain makes this `Ok` instead of `Err` — verified
+    /// by temporarily reverting.
+    #[test]
+    fn test_qps_ranges_second_vector_undefined_row_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\nRHS\n    rhs  c1  10.0\nRANGES\n    RNG1  c1  2.0\n    RNG2  ghost  4.0\nENDATA\n";
+        let err = parse_qps_str(qps)
+            .expect_err("RANGES2 (discarded) referencing an undeclared row must error");
+        assert!(
+            matches!(err, QpsError::UndefinedReference { ref kind, ref name } if kind == "row" && name == "ghost"),
+            "expected UndefinedReference{{kind: row, name: ghost}}, got {err:?}"
+        );
+    }
+
+    /// Sentinel: BOUNDS bound-set-name omitted for the non-value-taking
+    /// 2-token shorthand (`TYPE COL`, e.g. `FR x1`) — previously rejected
+    /// outright by the `parts.len() < 3` guard even though the value-taking
+    /// 3-token shorthand (`TYPE COL VALUE`) already worked.
+    ///
+    /// **No-op failure guarantee**: reverting the `parts.len() < 2` guard
+    /// and the `!value_taking` branch's length check makes this a
+    /// `ParseError` (too few fields) instead of `Ok` — verified by
+    /// temporarily reverting.
+    #[test]
+    fn test_qps_bounds_shorthand_non_value_taking_2token() {
+        let qps =
+            "NAME\nROWS\n N  obj\nCOLUMNS\n    x1  obj  1.0\n    x2  obj  1.0\nRHS\nBOUNDS\n FR  x1\n UP  x2  42.0\nENDATA\n";
+        let prob = parse_qps_str(qps).expect("BOUNDS shorthand (no bound name) must parse");
+        assert_eq!(
+            prob.bounds[0],
+            (f64::NEG_INFINITY, f64::INFINITY),
+            "FR x1 (shorthand, 2-token)"
+        );
+        assert_eq!(
+            prob.bounds[1],
+            (0.0, 42.0),
+            "UP x2 42.0 (shorthand, 3-token)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fixed-column shorthand (review finding, P2): the free-format shorthand
+    // tests above check declared names to spot an omitted vector/bound-set
+    // name; the fixed-column reader did not, and unconditionally read
+    // BOUNDS' column from field 3 and RHS/RANGES' vector name from field 2.
+    // A fixed-column file whose BOUNDS section omits the bound-set name
+    // therefore hard-errored with "BOUNDS line missing column name" instead
+    // of parsing. See the MPS-module twins of these tests for the byte-level
+    // layout rationale.
+    // -----------------------------------------------------------------------
+
+    /// Sentinel: fixed-column BOUNDS shorthand, column in field 2 and value
+    /// staying in field 4 (field 3 blank) — the shape reported against
+    /// `otspot_io::mps::parse_mps` and shared by the QPS reader via
+    /// `common::parse_bounds_entry`.
+    ///
+    /// **No-op failure guarantee**: reverting `parse_bounds_entry`'s Fixed arm
+    /// to always read the column from field 3 makes this `Err("BOUNDS line
+    /// missing column name")` instead of `Ok` — verified by temporarily
+    /// reverting.
+    #[test]
+    fn test_qps_bounds_fixed_shorthand_value_stays_in_field4() {
+        let qps = concat!(
+            "NAME          BNDFIX\n",
+            "ROWS\n",
+            " N  COST\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    X 1       COST      1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    RHS       LIM 1     10.0\n",
+            "BOUNDS\n",
+            " UP X 1                 5.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps)
+            .expect("fixed-column BOUNDS shorthand (col in field 2, value in field 4) must parse");
+        assert_eq!(
+            prob.bounds[0],
+            (0.0, 5.0),
+            "UP 'X 1' 5.0 (field-2 shorthand)"
+        );
+    }
+
+    /// Sentinel: fixed-column BOUNDS shorthand where the whole line shifts
+    /// one field left — column in field 2, value in field 3, field 4 blank.
+    ///
+    /// **No-op failure guarantee**: reverting the field-2/field-3 declared-name
+    /// check makes this read field 3 (`"3.0"`) as the column name, which is
+    /// undeclared, so `parse_qps_str` returns `Err` (`UndefinedReference`)
+    /// instead of `Ok` — verified by temporarily reverting.
+    #[test]
+    fn test_qps_bounds_fixed_shorthand_uniform_shift() {
+        let qps = concat!(
+            "NAME          BNDFIX\n",
+            "ROWS\n",
+            " N  COST\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    X 1       COST      1.0            LIM 1     1.0\n",
+            "    X2        COST      1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    RHS       LIM 1     10.0\n",
+            "BOUNDS\n",
+            " UP X 1                 5.0\n",
+            " UP X2        3.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps)
+            .expect("fixed-column BOUNDS shorthand (col in field 2, value in field 3) must parse");
+        assert_eq!(
+            prob.bounds[0],
+            (0.0, 5.0),
+            "UP 'X 1' 5.0 (field-2/field-4 shorthand)"
+        );
+        assert_eq!(
+            prob.bounds[1],
+            (0.0, 3.0),
+            "UP X2 3.0 (field-2/field-3 shorthand)"
+        );
+    }
+
+    /// Sentinel: a fixed-column BOUNDS line in the genuine standard form
+    /// (bound-set name present in field 2, column in field 3) must still be
+    /// read as standard, not misdetected as shorthand.
+    #[test]
+    fn test_qps_bounds_fixed_standard_form_not_misread_as_shorthand() {
+        let qps = concat!(
+            "NAME          BNDFIX\n",
+            "ROWS\n",
+            " N  COST\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    X 1       COST      1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    RHS       LIM 1     10.0\n",
+            "BOUNDS\n",
+            " UP BND       X 1       5.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps)
+            .expect("standard fixed-column BOUNDS (with bound-set name) must parse");
+        assert_eq!(
+            prob.bounds[0],
+            (0.0, 5.0),
+            "UP BND 'X 1' 5.0 (standard form)"
+        );
+    }
+
+    /// Sentinel (review finding): a grid-aligned fixed-column BOUNDS line with
+    /// a second numeric value in field 5 (`UP BND X 1 5.0 <field 5>10.0`) must
+    /// be a hard error, not silently accepted with the field 5 content
+    /// dropped. This is the case the free-format surplus-token check
+    /// (`test_qps_bounds_up_surplus_value_token_is_error`) does *not* cover:
+    /// that test's line is not column-aligned, so free format alone rejects
+    /// it; a grid-aligned line with the same surplus instead re-parses
+    /// successfully under the fixed-format fallback unless the fixed-format
+    /// reading independently checks fields 5/6.
+    ///
+    /// **No-op failure guarantee**: reverting the field 5/6 check in
+    /// `parse_bounds_entry` (`otspot-io/src/common/mod.rs`) makes this
+    /// return `Ok` with `bounds[0] == (0.0, 5.0)` — the `10.0` silently
+    /// dropped — instead of `Err`; verified by temporarily reverting.
+    #[test]
+    fn test_qps_bounds_fixed_grid_aligned_field5_surplus_value_is_error() {
+        let qps = concat!(
+            "NAME          BNDFIX\n",
+            "ROWS\n",
+            " N  COST\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    X 1       COST      1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    RHS       LIM 1     10.0\n",
+            "BOUNDS\n",
+            " UP BND       X 1       5.0            10.0\n",
+            "ENDATA\n",
+        );
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("field 5"),
+            "grid-aligned BOUNDS with a surplus value in field 5 must be rejected, got {err:?}"
+        );
+    }
+
+    /// Sentinel (review finding): same as above but with non-numeric junk in
+    /// field 5, confirming the check rejects *any* content there, not just
+    /// content that happens to parse as a number.
+    ///
+    /// **No-op failure guarantee**: reverting the field 5/6 check makes this
+    /// return `Ok` with `bounds[0] == (0.0, 5.0)` — the `JUNK` silently
+    /// dropped — instead of `Err`; verified by temporarily reverting.
+    #[test]
+    fn test_qps_bounds_fixed_grid_aligned_field5_junk_is_error() {
+        let qps = concat!(
+            "NAME          BNDFIX\n",
+            "ROWS\n",
+            " N  COST\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    X 1       COST      1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    RHS       LIM 1     10.0\n",
+            "BOUNDS\n",
+            " UP BND       X 1       5.0            JUNK\n",
+            "ENDATA\n",
+        );
+        let err = parse_qps_str(qps).unwrap_err();
+        assert!(
+            err.to_string().contains("field 5"),
+            "grid-aligned BOUNDS with junk content in field 5 must be rejected, got {err:?}"
+        );
+    }
+
+    /// Sentinel: fixed-column RHS with the vector name omitted, first row
+    /// name landing in field 2 instead of field 3, shifting both (row,
+    /// value) pairs one field left: fields 2/3 carry the first pair, 4/5
+    /// the second, field 6 unused.
+    ///
+    /// **No-op failure guarantee**: reverting `parse_vector_entry`'s Fixed arm
+    /// to always read the vector name from field 2 and pairs from
+    /// (field 3, field 4) / (field 5, field 6) reads field 2 ("BR   1 1") as
+    /// the vector name and field 3 ("6.") as a row name with no declared row
+    /// of that name, so `parse_qps_str` returns `Err` (`UndefinedReference`)
+    /// instead of `Ok` — verified by temporarily reverting.
+    #[test]
+    fn test_qps_rhs_fixed_shorthand_vector_name_omitted() {
+        let qps = concat!(
+            "NAME          RHSFIX\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  BR   1 1\n",
+            " L  R2\n",
+            "COLUMNS\n",
+            "    X1        obj       -1.0           BR   1 1  1.0\n",
+            "    X1        R2        1.0\n",
+            "RHS\n",
+            "    BR   1 1  6.        R2             3.\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps)
+            .expect("fixed-column RHS with the vector name omitted (field-2 shorthand) must parse");
+        assert_eq!(prob.num_constraints, 2, "'BR   1 1' and 'R2'");
+        assert_eq!(
+            prob.b,
+            vec![6.0, 3.0],
+            "both RHS values must survive the field-2 shorthand read"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Redesign (review finding, P1): mirrors the MPS module's tests — see
+    // `otspot_io::mps::tests` for the rationale. `parse_vector_entry` /
+    // `parse_bounds_entry` are shared by both formats via `common`.
+    // -----------------------------------------------------------------------
+
+    /// Sentinel (P1 regression): a fixed-column RHS line in genuine standard
+    /// form must parse even though a declared row is also named `RHS`.
+    ///
+    /// **No-op failure guarantee**: reverting to the name-membership check
+    /// misreads field 2 ("RHS") as the first row name and field 3 ("LIM 1")
+    /// as its value, which fails to parse as a number — `parse_qps_str`
+    /// returns `Err("Invalid RHS value 'LIM 1'")` instead of `Ok` — verified
+    /// by temporarily reverting.
+    #[test]
+    fn test_qps_rhs_fixed_vector_name_collides_with_declared_row_name() {
+        let qps = concat!(
+            "NAME          COLLIDE\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  LIM 1\n",
+            " L  RHS\n",
+            "COLUMNS\n",
+            "    X1        obj       1.0            LIM 1     1.0\n",
+            "    X1        RHS       1.0\n",
+            "RHS\n",
+            "    RHS       LIM 1     10.0           RHS       4.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps).expect(
+            "standard fixed-column RHS must parse even when the vector name collides with a \
+             declared row name",
+        );
+        assert_eq!(prob.num_constraints, 2, "'LIM 1' and 'RHS'");
+        assert_eq!(
+            prob.b,
+            vec![10.0, 4.0],
+            "RHS vector 'RHS': LIM 1 -> 10.0, row 'RHS' -> 4.0 (both L rows, no sign flip)"
+        );
+    }
+
+    /// Sentinel (P1 regression): a fixed-column RANGES line in genuine
+    /// standard form must parse even though a declared row is also named
+    /// `RNG`.
+    #[test]
+    fn test_qps_ranges_fixed_vector_name_collides_with_declared_row_name() {
+        let qps = concat!(
+            "NAME          COLLIDR\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  LIM 1\n",
+            " L  RNG\n",
+            "COLUMNS\n",
+            "    X1        obj       1.0            LIM 1     1.0\n",
+            "    X1        RNG       1.0\n",
+            "RHS\n",
+            "    R         LIM 1     10.0           RNG       4.0\n",
+            "RANGES\n",
+            "    RNG       LIM 1     2.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps).expect(
+            "standard fixed-column RANGES must parse even when the vector name collides with a \
+             declared row name",
+        );
+        // RANGES 'RNG' applies range 2.0 to row 'LIM 1' (L, rhs=10.0): base Le
+        // part keeps rhs=10.0; the split-off Ge part (lower=10.0-2.0=8.0) is
+        // normalized to Le by negating both sides, giving rhs=-8.0. Row 'RNG'
+        // (L, rhs=4.0) carries no RANGES entry, so it passes through as-is.
+        assert_eq!(
+            prob.num_constraints, 3,
+            "'LIM 1' + 'RNG' + LIM 1's split-off row"
+        );
+        assert_eq!(prob.b, vec![10.0, 4.0, -8.0]);
+    }
+
+    /// Sentinel (P1 regression): a fixed-column BOUNDS line in genuine
+    /// standard form must parse even when the bound-set name collides with a
+    /// declared column name (`BND` is both the bound-set name and a real
+    /// column here).
+    #[test]
+    fn test_qps_bounds_fixed_bound_set_name_collides_with_declared_column_name() {
+        let qps = concat!(
+            "NAME          COLLIDB\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    BND       obj       1.0            LIM 1     1.0\n",
+            "    X1        obj       1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    R         LIM 1     10.0\n",
+            "BOUNDS\n",
+            " UP BND       X1        5.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps).expect(
+            "standard fixed-column BOUNDS must parse even when the bound-set name collides with \
+             a declared column name",
+        );
+        assert_eq!(
+            prob.bounds[0],
+            (0.0, f64::INFINITY),
+            "'BND' column itself is untouched by its own name appearing as a bound-set name"
+        );
+        assert_eq!(prob.bounds[1], (0.0, 5.0), "UP 'X1' 5.0 (standard form)");
+    }
+
+    /// Sentinel (P1 regression): same bound-set/column-name collision as
+    /// above, but with a non-value-taking bound type (`FR`).
+    #[test]
+    fn test_qps_bounds_fixed_bound_set_name_collides_with_declared_column_name_non_value_type() {
+        let qps = concat!(
+            "NAME          COLLIDF\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    BND       obj       1.0            LIM 1     1.0\n",
+            "    X1        obj       1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    R         LIM 1     10.0\n",
+            "BOUNDS\n",
+            " FR BND       X1\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps).expect(
+            "standard fixed-column FR BOUNDS must parse even when the bound-set name collides \
+             with a declared column name",
+        );
+        assert_eq!(
+            prob.bounds[0],
+            (0.0, f64::INFINITY),
+            "'BND' column untouched"
+        );
+        assert_eq!(
+            prob.bounds[1],
+            (f64::NEG_INFINITY, f64::INFINITY),
+            "FR 'X1' (standard form)"
+        );
+    }
+
+    /// Sentinel: fixed-column RANGES with the vector name omitted (no test
+    /// previously covered this — only the RHS analogue did).
+    #[test]
+    fn test_qps_ranges_fixed_shorthand_vector_name_omitted() {
+        let qps = concat!(
+            "NAME          RNGFIX\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  BR   1 1\n",
+            " L  R2\n",
+            "COLUMNS\n",
+            "    X1        obj       -1.0           BR   1 1  1.0\n",
+            "    X1        R2        1.0\n",
+            "RHS\n",
+            "    RHS       BR   1 1  10.0           R2        20.0\n",
+            "RANGES\n",
+            "    BR   1 1  2.        R2             4.\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps).expect(
+            "fixed-column RANGES with the vector name omitted (field-2 shorthand) must parse",
+        );
+        // 'BR   1 1' (L, rhs=10.0, range=2.0): Le part rhs=10.0; split-off Ge
+        // part (lower=8.0) normalized to Le gives rhs=-8.0.
+        // 'R2' (L, rhs=20.0, range=4.0): Le part rhs=20.0; split-off part
+        // (lower=16.0) normalized to Le gives rhs=-16.0.
+        assert_eq!(prob.num_constraints, 4);
+        assert_eq!(prob.b, vec![10.0, 20.0, -8.0, -16.0]);
+    }
+
+    /// Sentinel: a fixed-column RANGES line where field 2 must be reread as a
+    /// row name, but the shorthand reading then leaves stray content in
+    /// field 6 — neither reading is valid, so this must hard-error.
+    #[test]
+    fn test_qps_ranges_fixed_shorthand_trailing_field6_is_error() {
+        let qps = concat!(
+            "NAME          RNGTRL\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  BR   1 1\n",
+            " L  R2\n",
+            "COLUMNS\n",
+            "    X1        obj       -1.0           BR   1 1  1.0\n",
+            "    X1        R2        1.0\n",
+            "RHS\n",
+            "    RHS       BR   1 1  10.0           R2        20.0\n",
+            "RANGES\n",
+            "    BR   1 1  2.        R2             4.        9.9\n",
+            "ENDATA\n",
+        );
+        let err = parse_qps_str(qps).expect_err("stray content in field 6 must be a hard error");
+        let message = format!("{}", err);
+        assert!(
+            message.contains("field 6 must be blank"),
+            "unexpected error message: {}",
+            message
+        );
+    }
+
+    /// Sentinel: a fixed-column BOUNDS line for a non-value-taking type
+    /// (`FR`) with the bound-set name omitted and the column shifted into
+    /// field 2, leaving field 3 and field 4 both blank.
+    #[test]
+    fn test_qps_bounds_fixed_shorthand_non_value_type_no_bound_name() {
+        let qps = concat!(
+            "NAME          SHORTFR\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  LIM 1\n",
+            "COLUMNS\n",
+            "    X 1       obj       1.0            LIM 1     1.0\n",
+            "RHS\n",
+            "    R         LIM 1     10.0\n",
+            "BOUNDS\n",
+            " FR X 1\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps)
+            .expect("fixed-column FR shorthand (bound-set name omitted, no value) must parse");
+        assert_eq!(
+            prob.bounds[0],
+            (f64::NEG_INFINITY, f64::INFINITY),
+            "FR 'X 1' (shorthand, no bound-set name, no value)"
+        );
+    }
+
+    /// Sentinel: an RHS line where neither the standard nor the shorthand
+    /// reading is parseable must hard-error with the standard reading's
+    /// diagnostic (the presumptive layout).
+    #[test]
+    fn test_qps_rhs_fixed_neither_reading_parses_reports_standard_diagnostic() {
+        let qps = concat!(
+            "NAME          RHSBAD\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  BR   1 1\n",
+            " L  R2\n",
+            "COLUMNS\n",
+            "    X1        obj       -1.0           BR   1 1  1.0\n",
+            "    X1        R2        1.0\n",
+            "RHS\n",
+            "    RHS1      BR   1 1\n",
+            "ENDATA\n",
+        );
+        let err =
+            parse_qps_str(qps).expect_err("a line valid under neither reading must hard-error");
+        let message = format!("{}", err);
+        assert!(
+            message.contains("has no matching value"),
+            "expected the standard reading's diagnostic (missing value), got: {}",
+            message
+        );
     }
 }

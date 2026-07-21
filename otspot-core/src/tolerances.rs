@@ -109,7 +109,7 @@ pub const Q_DIAG_RANGE_TRIGGER: f64 = 1e6;
 /// sparsity before IPM solve. Uses an absolute (not scale-relative) threshold
 /// because empirical evidence shows that a purely relative threshold can leave
 /// entries that change IPM trajectory and cause spurious Optimal convergence
-/// (e.g. QPLIB_9002, 2026-05-30 audit#123).
+/// (e.g. QPLIB_9002, measured 2026-05-30).
 pub const Q_OFFDIAG_ABS: f64 = 1e-10;
 
 /// Relative tolerance for Q off-diagonal near-zero detection in `is_diagonal_q`

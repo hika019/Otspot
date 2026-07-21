@@ -126,13 +126,17 @@ fn status_rank(s: &SolveStatus) -> u8 {
         LocallyOptimal => 1,
         NonconvexLocal => 1,
         SuboptimalSolution => 2,
-        MaxIterations => 3,
-        Timeout => 4,
-        NumericalError => 5,
-        NonConvex(_) => 6,
-        Unbounded => 7,
-        Infeasible => 8,
-        NotSupported(_) => 9,
+        // feasibility のみ検証済み (最適性・KKT 品質の主張なし)。SuboptimalSolution
+        // (eps 検証済み KKT 点) より弱く、診断 iterate しか持たない下位群より強い。
+        FeasiblePoint => 3,
+        // 非収束の内部終端は品質同格 (どちらも診断 iterate のみ)。
+        MaxIterations | Stalled => 4,
+        Timeout => 5,
+        NumericalError => 6,
+        NonConvex(_) => 7,
+        Unbounded => 8,
+        Infeasible => 9,
+        NotSupported(_) => 10,
     }
 }
 

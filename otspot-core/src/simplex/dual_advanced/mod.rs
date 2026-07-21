@@ -67,7 +67,9 @@ pub(crate) fn fallback_profile_delta(
         phase1_bound_violation: after
             .phase1_bound_violation
             .saturating_sub(before.phase1_bound_violation),
-        crash_infeasible: after.crash_infeasible.saturating_sub(before.crash_infeasible),
+        crash_infeasible: after
+            .crash_infeasible
+            .saturating_sub(before.crash_infeasible),
     }
 }
 
@@ -359,6 +361,7 @@ pub(crate) fn solve_dual_advanced(
 
                         let mut result = outcome_to_result(
                             outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale, true,
+                            options,
                         );
                         result.iterations = total_iters;
                         return result;
@@ -386,7 +389,10 @@ pub(crate) fn solve_dual_advanced(
     // verifiable Farkas ray.
     let primal_result = super::dual::two_phase_dual_simplex(sf, problem, options);
     match primal_result.status {
-        SolveStatus::Timeout if primal_result.solution.is_empty() => {
+        // No incumbent from the primal path: try Big-M. MaxIterations is the
+        // internal-stall analogue of the old empty-Timeout (stalls minted
+        // Timeout before the Stalled split) — the retry policy must not narrow.
+        SolveStatus::Timeout | SolveStatus::MaxIterations if primal_result.solution.is_empty() => {
             let bigm_result =
                 phase1::big_m_cold_start(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
             if bigm_result.status == SolveStatus::Timeout {
@@ -441,11 +447,10 @@ fn bounded_dispatch_disabled() -> bool {
     }
 }
 
-use dispatch::{try_bounded, try_bounded_phase1_eq};
 #[cfg(test)]
 use dispatch::diag_basis_initial_x_b;
+use dispatch::{try_bounded, try_bounded_phase1_eq};
 use pipeline::cold_start_advanced;
-
 
 // ── Wiring sentinels ──────────────────────────────────────────────────────────
 
@@ -676,7 +681,12 @@ mod tests {
         .unwrap();
         let sf = build_standard_form(&lp);
         let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
-        assert_eq!(r.status, SolveStatus::Optimal, "Ge+UB status: {:?}", r.status);
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "Ge+UB status: {:?}",
+            r.status
+        );
         assert!(
             (r.objective - 3.0).abs() < 1e-6,
             "Ge+UB obj={} expected 3",
@@ -849,7 +859,12 @@ mod tests {
         .unwrap();
         let sf = build_standard_form(&lp);
         let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
-        assert_eq!(r.status, SolveStatus::Optimal, "Ge dual status: {:?}", r.status);
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "Ge dual status: {:?}",
+            r.status
+        );
         assert!(
             (r.objective - 3.0).abs() < 1e-6,
             "Ge dual obj={:.6e} expected 3",
@@ -880,7 +895,7 @@ mod tests {
     /// LP: min -3x0 - x1, x0+x1≤4, x0≤3, x1≤2, x0,x1 ≥ 0.
     /// Cold optimal: x0=3, x1=1, obj=-10. Warm basis = {x0, x1, s2}.
     /// Perturb b=[1,3,2]: B⁻¹·[1,3,2] = [3, -2, 4] → lb-violation at x1.
-    /// After guard removal (#175) the dual simplex repairs x1 and converges
+    /// After guard removal the dual simplex repairs x1 and converges
     /// to the perturbed-LP optimal x0=1, x1=0, obj=-3.
     ///
     /// If `has_lb_violation` were re-added to the legacy path, the warm
@@ -1417,14 +1432,8 @@ mod tests {
     /// (frac₁ ≈ 0.618 ≠ 0).
     fn lp_degenerate_2eq() -> LpProblem {
         use crate::sparse::CscMatrix;
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 1, 2],
-            &[1.0, 1.0, 1.0, 1.0],
-            2,
-            3,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 1, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3)
+            .unwrap();
         LpProblem::new_general(
             vec![1.0, 1.0, 1.0],
             a,
@@ -1469,7 +1478,11 @@ mod tests {
             r_off.objective
         );
         assert_eq!(r_off.solution.len(), 3);
-        assert!((r_off.solution[1] - 1.0).abs() < OBJ_TOL, "OFF: x1={:.6e}", r_off.solution[1]);
+        assert!(
+            (r_off.solution[1] - 1.0).abs() < OBJ_TOL,
+            "OFF: x1={:.6e}",
+            r_off.solution[1]
+        );
 
         for &mag in &[1e-7_f64, 1e-2_f64] {
             let _g = crate::ScopedDisable::new(

@@ -35,7 +35,7 @@ const KKT_SKIP_MARGIN: f64 = 100.0;
 /// refit/IRLS の進捗 stall 判定。`prev_kkt`/`current_kkt` は revert guard により
 /// `current_kkt <= prev_kkt`。改善 drop が「相対 (`REFIT_REL_STALL · prev_kkt`)」と
 /// 「絶対 floor (`REFIT_PROGRESS_EPS`)」の大きい方を下回ったら stall とみなす。
-fn refit_progress_stalled(prev_kkt: f64, current_kkt: f64) -> bool {
+pub(super) fn refit_progress_stalled(prev_kkt: f64, current_kkt: f64) -> bool {
     let threshold = (REFIT_REL_STALL * prev_kkt).max(REFIT_PROGRESS_EPS);
     current_kkt + threshold >= prev_kkt
 }
@@ -280,7 +280,9 @@ pub(super) fn refine_post_processing(
             }
         } else {
             *final_sol = pre_dual_step;
-            diag.note(&format!("irls-loop break: no progress at iter {irls_iters}"));
+            diag.note(&format!(
+                "irls-loop break: no progress at iter {irls_iters}"
+            ));
             break;
         }
 
@@ -329,7 +331,10 @@ impl DiagPostsolve {
     #[allow(clippy::print_stderr)] // env-gated diagnostic trace
     fn trajectory(&self, tag: &str, iter: usize, prev: f64, cur: f64) {
         if self.on && (iter <= 5 || iter.is_multiple_of(50)) {
-            eprintln!("[diag {tag}] iter={iter} kkt {prev:.6e} -> {cur:.6e} (drop={:.3e})", prev - cur);
+            eprintln!(
+                "[diag {tag}] iter={iter} kkt {prev:.6e} -> {cur:.6e} (drop={:.3e})",
+                prev - cur
+            );
         }
     }
     #[allow(clippy::print_stderr)] // env-gated diagnostic trace
@@ -1108,13 +1113,12 @@ mod stall_gate_tests {
         opts.ipm.eps = 1e-6;
 
         let view = build_view(&prob, &[]);
-        let kkt_before = kkt_residual_rel(
-            &view,
-            &sol.solution,
-            &sol.dual_solution,
-            &sol.bound_duals,
+        let kkt_before =
+            kkt_residual_rel(&view, &sol.solution, &sol.dual_solution, &sol.bound_duals);
+        assert!(
+            kkt_before > 1e-3,
+            "fixture must start with a real dual residual"
         );
-        assert!(kkt_before > 1e-3, "fixture must start with a real dual residual");
 
         let kkt_after = refine_post_processing(&prob, &mut sol, &[], &opts, false);
 

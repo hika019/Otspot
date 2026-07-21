@@ -278,7 +278,7 @@ assert_eq "$MIP_TOTAL_LINE" "1" "MIP per-file 外部timeoutを TOTAL に計上"
 echo "=== Test 4: per-category aggregation (KKT_FAIL counter + CATEGORY_SUM 整合性) ==="
 # 目的: bench_qplib.rs に新 STATUS が追加された際、bench_parallel.sh の
 # Summary printer / CATEGORY_SUM 整合性 check に集計漏れが起きないことを検知する。
-# 過去 #114 で KKT_FAIL が aggregator に未配線で fence post bench 集計から漏れた。
+# 過去に KKT_FAIL が aggregator に未配線で fence post bench 集計から漏れた。
 #
 # 合成 fixture (per-file synthetic Summary; 1 file = 1 group, jobs=3 で 3 group):
 #   p1.qps → PASS=3, TOTAL=3

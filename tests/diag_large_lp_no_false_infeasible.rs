@@ -1,4 +1,4 @@
-//! Large feasible LP — false-Infeasible regression guard (#36/#37/#43).
+//! Large feasible LP — false-Infeasible regression guard.
 //!
 //! Big-M Phase I once declared Infeasible whenever an artificial stayed in the
 //! basis after a Timeout/Optimal exit (`any_nonzero` short-circuit). That is
@@ -9,14 +9,15 @@
 //!
 //! ## Routing note
 //!
-//! LP は IPM を撤廃し simplex 一本化した (#19/#22)。全 LP が simplex (Big-M
+//! LP は IPM を撤廃し simplex 一本化した。全 LP が simplex (Big-M
 //! Phase I) を通るため、feasible LP がここで false-Infeasible にならないことを
 //! `assert_not_infeasible` で検証する。これらは load-bearing: Big-M の
-//! Timeout-arm を `any_artificial_left && farkas` から `|| farkas` (a7b95ad の
-//! band-aid) に戻すと pilot/dfl001 が false-Infeasible に倒れて fail する。
+//! Timeout-arm を `any_artificial_left && farkas` から `|| farkas` (旧 band-aid、
+//! 導入 commit は特定不能) に戻すと pilot/dfl001 が false-Infeasible に倒れて
+//! fail する。
 //!
 //! 旧 Optimal-arm (`any_artificial_in_basis && farkas`) には available data で
-//! 到達する test がない。#36 rework での Optimal-arm `any_nonzero` 短絡除去は
+//! 到達する test がない。Optimal-arm `any_nonzero` 短絡除去は
 //! (a) monotone-safety (Farkas 条件は `any_nonzero || farkas` の真部分集合なので
 //! Infeasible 判定は減るのみ) と (b) infeasible-29 bench の bit-identical で検証
 //! 済み — 直接 sentinel ではない。
@@ -57,7 +58,7 @@ fn assert_not_infeasible(path_str: &str, timeout_sec: f64) {
     assert!(
         !matches!(status, SolveStatus::Infeasible),
         "{} returned Infeasible — feasible LP must never be certified infeasible \
-         without a Farkas certificate (#37/#43 false-Infeasible bug)",
+         without a Farkas certificate (false-Infeasible bug)",
         path_str
     );
 }
@@ -104,7 +105,7 @@ fn ken18_no_false_infeasible() {
 // Stronger no-op: reverting the entire Infeasible arm to `_ => primal_result` makes
 // pilot87 presolve=false return Infeasible (the original bug), which fails the assert.
 
-/// LOAD-BEARING: pilot87 presolve=false must not be false-Infeasible (#58).
+/// LOAD-BEARING: pilot87 presolve=false must not be false-Infeasible.
 ///
 /// pilot87 (322 artificials: 89 Ge + 233 Eq) with presolve=false routes through
 /// primal Phase I (~68s, feasible LP with cycling) → false Infeasible. The fix:
@@ -132,13 +133,13 @@ fn pilot87_presolve_false_not_infeasible() {
     assert!(
         !matches!(r.status, SolveStatus::Infeasible),
         "pilot87 presolve=false returned Infeasible — feasible LP must never be \
-         certified infeasible without a Farkas certificate (#58 false-Infeasible bug)"
+         certified infeasible without a Farkas certificate (false-Infeasible bug)"
     );
 }
 
 // ── Spot-check: infeasible LPs that regressed to Timeout in the naive fix ────
 //
-// galenet/ex72a/forest6 are Netlib infeasible LPs. main (before #58) returned
+// galenet/ex72a/forest6 are Netlib infeasible LPs. main (before the fix) returned
 // Infeasible(iters=0) instantly via primal Phase I. The first fix attempt
 // (unconditional Big-M) degraded them to Timeout. The Farkas-gated fix preserves
 // them at Infeasible by trusting the primal Phase I Farkas certificate directly.

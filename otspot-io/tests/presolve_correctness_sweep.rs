@@ -153,7 +153,11 @@ fn presolve_invariance_full_sweep() {
         .expect("read lp_problems")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("qps")))
+        .filter(|p| {
+            p.extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case("qps"))
+        })
         .collect();
     files.sort();
 
@@ -164,7 +168,11 @@ fn presolve_invariance_full_sweep() {
     let mut known_mismatch: Vec<String> = Vec::new();
 
     for path in &files {
-        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
         if STEP7_HANGERS.contains(&name.as_str()) {
             eprintln!("[{name}] SKIP (step7 hang) — invariance unverified");
             n_skip_hang += 1;
@@ -211,7 +219,10 @@ fn presolve_invariance_full_sweep() {
     for d in &divergences {
         eprintln!("  {d}");
     }
-    eprintln!("\n--- ON vs known-optimal mismatch ({}) ---", known_mismatch.len());
+    eprintln!(
+        "\n--- ON vs known-optimal mismatch ({}) ---",
+        known_mismatch.len()
+    );
     for d in &known_mismatch {
         eprintln!("  {d}");
     }
@@ -229,14 +240,22 @@ fn presolve_infeasible_sweep() {
         .expect("read infeas dir")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("qps")))
+        .filter(|p| {
+            p.extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case("qps"))
+        })
         .collect();
     files.sort();
 
     let mut both_infeas = Vec::new();
     let mut disagree = Vec::new();
     for path in &files {
-        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
         let prob = parse_qps(path).expect("parse");
         let on = solve(&prob, true, timeout);
         let off = solve(&prob, false, timeout);
@@ -291,7 +310,8 @@ fn presolve_not_worsens_80bau3b_grow15() {
         assert!(
             (r.on.objective - r.off.objective).abs() / scale < 1e-4,
             "{name}: objective diverged ON={:.6e} OFF={:.6e}",
-            r.on.objective, r.off.objective
+            r.on.objective,
+            r.off.objective
         );
 
         // OFF is within solver tolerance (known primal two-phase residual).
@@ -310,12 +330,14 @@ fn presolve_not_worsens_80bau3b_grow15() {
         assert!(
             r.on_bf <= r.off_bf + LP_CERT_TOL,
             "{name}: presolve worsened bound feasibility ON={:.2e} OFF={:.2e}",
-            r.on_bf, r.off_bf
+            r.on_bf,
+            r.off_bf
         );
         assert!(
             r.on_pf <= r.off_pf + LP_CERT_TOL,
             "{name}: presolve worsened primal feasibility ON={:.2e} OFF={:.2e}",
-            r.on_pf, r.off_pf
+            r.on_pf,
+            r.off_pf
         );
     }
 }
@@ -342,12 +364,16 @@ fn presolve_invariance_curated_clean() {
         assert!(
             (r.on.objective - r.off.objective).abs() / scale < 1e-6,
             "{name}: presolve changed objective ON={:.6e} OFF={:.6e}",
-            r.on.objective, r.off.objective
+            r.on.objective,
+            r.off.objective
         );
         assert!(
             (r.on_pf - r.off_pf).abs() < 1e-7 && (r.on_bf - r.off_bf).abs() < 1e-7,
             "{name}: presolve changed feasibility ON(pf={:.2e},bf={:.2e}) OFF(pf={:.2e},bf={:.2e})",
-            r.on_pf, r.on_bf, r.off_pf, r.off_bf
+            r.on_pf,
+            r.on_bf,
+            r.off_pf,
+            r.off_bf
         );
         if let Some(&k) = known.get(name) {
             let kref = k + prob.obj_offset;
@@ -355,10 +381,14 @@ fn presolve_invariance_curated_clean() {
             assert!(
                 (r.on.objective - kref).abs() / s < 1e-4,
                 "{name}: ON obj {:.6e} != known {:.6e}",
-                r.on.objective, kref
+                r.on.objective,
+                kref
             );
         }
         checked += 1;
     }
-    assert!(checked >= 4, "curated clean invariance must check >=4 problems, got {checked}");
+    assert!(
+        checked >= 4,
+        "curated clean invariance must check >=4 problems, got {checked}"
+    );
 }

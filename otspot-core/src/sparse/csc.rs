@@ -73,6 +73,20 @@ impl CscMatrix {
         self.ncols
     }
 
+    /// 行優先の密行列 (`Vec<Vec<f64>>`, `nrows` 行 × `ncols` 列) に展開する。
+    ///
+    /// 小規模な行列 (conic bridge の QCQP/SOCP 変換など、O(n²) メモリが許容できる
+    /// サイズ) 向け。大規模疎行列には使わないこと。
+    pub fn to_dense_rows(&self) -> Vec<Vec<f64>> {
+        let mut d = vec![vec![0.0; self.ncols]; self.nrows];
+        for j in 0..self.ncols {
+            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
+                d[self.row_ind[k]][j] = self.values[k];
+            }
+        }
+        d
+    }
+
     /// 各行の∞ノルム（行ごとの最大絶対値）を一括計算する: O(nnz)
     ///
     /// CSC格式では行方向アクセスが非効率だが、全非ゼロ要素を1回走査して

@@ -79,10 +79,11 @@ where
         SimplexOutcome::Unbounded => {
             return None;
         }
-        SimplexOutcome::Timeout(_) => {
+        SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_) => {
             let solution = extract_solution_bounded(bsf, &state, col_scale);
+            let status = super::super::stop_status(!solution.is_empty(), options);
             return Some(mark_eq_ub_path(SolverResult {
-                status: SolveStatus::Timeout,
+                status,
                 objective: bsf.obj_offset,
                 solution,
                 iterations: iters,
@@ -204,10 +205,11 @@ where
             iterations: iters,
             ..Default::default()
         })),
-        SimplexOutcome::Timeout(obj) => {
+        SimplexOutcome::Timeout(obj) | SimplexOutcome::Stalled(obj) => {
             let solution = extract_solution_bounded(bsf, &state, col_scale);
+            let status = super::super::stop_status(!solution.is_empty(), options);
             Some(mark_eq_ub_path(SolverResult {
-                status: SolveStatus::Timeout,
+                status,
                 objective: obj + bsf.obj_offset,
                 solution,
                 iterations: iters,
@@ -293,11 +295,13 @@ pub(super) fn finish_bounded(
                 row_scale,
                 problem,
                 *total_iters,
+                options,
             ))
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_bounded_phase2(
     out: SimplexOutcome,
     state: BoundedDualState,
@@ -306,6 +310,7 @@ fn finish_bounded_phase2(
     row_scale: &[f64],
     problem: &LpProblem,
     total_iters: usize,
+    options: &SolverOptions,
 ) -> SolverResult {
     match out {
         SimplexOutcome::Optimal(obj, y) => {
@@ -338,10 +343,11 @@ fn finish_bounded_phase2(
             warm_start_basis: None,
             ..Default::default()
         },
-        SimplexOutcome::Timeout(obj) => {
+        SimplexOutcome::Timeout(obj) | SimplexOutcome::Stalled(obj) => {
             let solution = extract_solution_bounded(bsf, &state, col_scale);
+            let status = super::super::stop_status(!solution.is_empty(), options);
             SolverResult {
-                status: SolveStatus::Timeout,
+                status,
                 objective: obj + bsf.obj_offset,
                 solution,
                 dual_solution: vec![],
@@ -406,14 +412,15 @@ pub(super) fn cold_start_advanced(
                 ..Default::default()
             };
         }
-        SimplexOutcome::Timeout(_) => {
-            return super::super::timeout_result_with_incumbent(
+        SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_) => {
+            return super::super::stop_result_with_incumbent(
                 sf,
                 problem,
                 &basis,
                 &x_b,
                 col_scale,
                 total_iters,
+                options,
             );
         }
         SimplexOutcome::SingularBasis => {
@@ -474,10 +481,11 @@ pub(super) fn cold_start_advanced(
             warm_start_basis: None,
             ..Default::default()
         },
-        SimplexOutcome::Timeout(obj) => {
+        SimplexOutcome::Timeout(obj) | SimplexOutcome::Stalled(obj) => {
             let solution = extract_solution(sf, &basis, &x_b, col_scale);
+            let status = super::super::stop_status(!solution.is_empty(), options);
             SolverResult {
-                status: SolveStatus::Timeout,
+                status,
                 objective: obj + sf.obj_offset,
                 solution,
                 dual_solution: vec![],

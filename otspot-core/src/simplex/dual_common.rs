@@ -152,6 +152,7 @@ pub(super) fn outcome_to_result(
     col_scale: &[f64],
     row_scale: &[f64],
     dual_unbounded_is_infeasible: bool,
+    options: &crate::options::SolverOptions,
 ) -> SolverResult {
     match outcome {
         SimplexOutcome::Optimal(obj, y) => {
@@ -198,10 +199,15 @@ pub(super) fn outcome_to_result(
                 }
             }
         }
-        SimplexOutcome::Timeout(obj) => {
+        SimplexOutcome::Timeout(obj) | SimplexOutcome::Stalled(obj) => {
+            // Clock-recheck, not variant trust: `external_stop_requested` is
+            // monotonic, so a genuine deadline/cancel stop still classifies as
+            // Timeout; any internal dead-end that minted `Timeout` (or a future
+            // unswept mint) is honestly downgraded to a stall status.
             let solution = extract_solution(sf, basis, x_b, col_scale);
+            let status = super::stop_status(!solution.is_empty(), options);
             SolverResult {
-                status: SolveStatus::Timeout,
+                status,
                 objective: obj + sf.obj_offset,
                 solution,
                 dual_solution: vec![],
@@ -216,7 +222,7 @@ pub(super) fn outcome_to_result(
 }
 
 /// Verify an LP `Unbounded` exit against a re-derived recession ray (symmetric
-/// to the Phase-I Farkas gate: unverified ray ⇒ honest Timeout).
+/// to the Phase-I Farkas gate: unverified ray ⇒ honest Stalled).
 ///
 /// Eta drift can falsely read `B⁻¹a_q ≤ 0`; this rebuilds a clean LU and
 /// confirms column `q < n_enter` is improving (`r_q < −dual_tol`) AND unbounded:
@@ -275,19 +281,17 @@ pub(super) fn lp_unbounded_ray_verified(
         };
         basis_mgr.ftran(&mut d_sv);
         // A recession ray needs every basic structural/slack component ≤ 0
-        // (increasing x_q from lb=0 with ub=∞ never drives a basic variable below
-        // its lower bound). The floor is machine-noise scale (`EPSILON·max(1,‖d‖∞)`),
-        // matching the simplex's own last-chance ratio test: any *real* positive
-        // pivot — even one below `PIVOT_TOL` (0 < d_i < 1e-8) — is a genuine leaving
-        // row, so the direction is bounded, NOT a ray. Using `PIVOT_TOL` here instead
-        // would re-admit those small-positive pivots and leak a false-Unbounded.
-        //
-        // Basic artificials (basis[i] ≥ n_enter) need the stricter |d_i| ≤ floor:
-        // d_i < 0 there *increases* the artificial off 0, so the direction stays
-        // feasible only in the augmented system, not the original LP — it is not a
-        // recession ray. Allowing it re-admits a false-Unbounded whenever a
-        // degenerate artificial lingers in the Phase-II basis (the symptom this gate
-        // exists to prevent).
+        // (increasing x_q from lb=0, ub=∞ never drives a basic var below its lb).
+        // The floor is machine-noise scale (`EPSILON·max(1,‖d‖∞)`), matching the
+        // simplex's last-chance ratio test: any *real* positive pivot — even
+        // below `PIVOT_TOL` (0 < d_i < 1e-8) — is a genuine leaving row, so the
+        // direction is bounded, NOT a ray. `PIVOT_TOL` here would re-admit those
+        // and leak a false-Unbounded. Basic artificials (basis[i] ≥ n_enter) need
+        // the stricter |d_i| ≤ floor: d_i < 0 there *increases* the artificial
+        // off 0, feasible only in the augmented system, not the original LP — not
+        // a recession ray. Allowing it leaks a false-Unbounded whenever a
+        // degenerate artificial lingers in the Phase-II basis (the symptom this
+        // gate prevents).
         let d = d_sv.to_dense();
         let scale = d.iter().map(|v| v.abs()).fold(1.0_f64, f64::max);
         let ray_floor = f64::EPSILON * scale;
@@ -381,6 +385,84 @@ mod tests {
     use super::*;
     use crate::basis::LuBasis;
     use crate::sparse::CscMatrix;
+
+    /// P2 pin: user-facing classification must clock-recheck, never trust the
+    /// `SimplexOutcome` variant. A `Timeout(_)` outcome reaching
+    /// `outcome_to_result` with budget untouched (unswept internal dead-end
+    /// mint, e.g. an exotic refactor failure) must NOT surface as
+    /// `SolveStatus::Timeout`; with an incumbent it is `SuboptimalSolution`.
+    /// `external_stop_requested` is monotonic, so a genuine deadline stop
+    /// still classifies as Timeout (second assert).
+    ///
+    /// no-op proof: reverting `outcome_to_result` to variant-trust
+    /// (`Timeout(obj) => status: SolveStatus::Timeout`) fails the first assert.
+    #[test]
+    fn outcome_to_result_clock_rechecks_timeout_variant() {
+        use crate::problem::{LpProblem, SolveStatus};
+        use crate::simplex::build_standard_form;
+
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new(vec![1.0, 1.0], a, vec![4.0]).unwrap();
+        let sf = build_standard_form(&lp);
+        let basis = sf.initial_basis.clone();
+        let x_b = sf.b.clone();
+        let col_scale = vec![1.0; sf.n_total];
+        let row_scale = vec![1.0; sf.m];
+
+        let fresh = crate::options::SolverOptions::default();
+        let r = outcome_to_result(
+            SimplexOutcome::Timeout(0.0),
+            &sf,
+            &lp,
+            &basis,
+            &x_b,
+            &col_scale,
+            &row_scale,
+            false,
+            &fresh,
+        );
+        assert_eq!(
+            r.status,
+            SolveStatus::SuboptimalSolution,
+            "Timeout variant with budget left must clock-recheck to a stall status"
+        );
+
+        let expired = crate::options::SolverOptions {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+            ..Default::default()
+        };
+        let r = outcome_to_result(
+            SimplexOutcome::Timeout(0.0),
+            &sf,
+            &lp,
+            &basis,
+            &x_b,
+            &col_scale,
+            &row_scale,
+            false,
+            &expired,
+        );
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "expired deadline stays Timeout"
+        );
+
+        // Stalled variant with an expired clock is honestly Timeout as well
+        // (the stop the caller observes IS the budget).
+        let r = outcome_to_result(
+            SimplexOutcome::Stalled(0.0),
+            &sf,
+            &lp,
+            &basis,
+            &x_b,
+            &col_scale,
+            &row_scale,
+            false,
+            &expired,
+        );
+        assert_eq!(r.status, SolveStatus::Timeout);
+    }
 
     /// A = [I_m | extras]. Extra column (m + k) is a single +2.0 at row (k mod m)
     /// so r_{m+k} = c_{m+k} − 2·c[k mod m] under the identity basis.
@@ -760,8 +842,7 @@ mod tests {
         );
 
         // CONCERN B verification: bounded direction with 0 < pivot < PIVOT_TOL must NOT verify.
-        let a_smallpiv =
-            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[5e-9, 1.0], 1, 2).unwrap();
+        let a_smallpiv = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[5e-9, 1.0], 1, 2).unwrap();
         assert!(
             !lp_unbounded_ray_verified(&a_smallpiv, &[1], &[-1.0, 0.0], 1, 2, 2, &opts),
             "CONCERN B: a small positive pivot (0<d<PIVOT_TOL) is a leaving row ⇒ bounded, not a ray"

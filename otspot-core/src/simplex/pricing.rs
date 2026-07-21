@@ -378,7 +378,10 @@ mod tests {
         let basis_id = make_identity_basis_2x2();
         pricing.update_weights(&basis_id, 2, 3, 1, &eta);
 
-        assert_eq!(pricing.weights[3], 1.0, "small pivot: weight must remain 1.0");
+        assert_eq!(
+            pricing.weights[3], 1.0,
+            "small pivot: weight must remain 1.0"
+        );
         assert!(
             (pricing.weights[0] - 3.0).abs() < 1e-15,
             "γ[0] must stay at 3.0 (no global reset), got {:.6}",

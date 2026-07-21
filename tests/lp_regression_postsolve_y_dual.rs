@@ -200,7 +200,7 @@ fn check_postsolve_dual_feasibility(
             ));
         }
     }
-    // bound 考慮版を主判定にする (c69959d 以降の bench と同等)。
+    // bound 考慮版を主判定にする (現行 bench と同等)。
     if df_rel_bound > eps_dual {
         return Err(format!("{} | df_rel_bound > eps={}", summary, eps_dual));
     }
@@ -329,12 +329,12 @@ fn cre_b_postsolve_dual_feasibility() {
 }
 
 /// greenbea: IPM-pathological LP (5405 vars × 2392 rows、IPM_BUDGET_FRACTION=0.5)。
-/// Measured 2026-06-14 on this worktree: ~30.6s and converges with
-/// df_rel_bound=4.20e-11. Still over the default-test budget, so default 除外。
-/// regression sentinel として heavy profile 実行で機能 (`cargo nextest run --run-ignored only`)。
-/// #91 で v0.2.0→HEAD のコード regression なしを実証済。
+/// Measured 2026-06-14 on this worktree: ~30.6s, over the then default-test
+/// budget. Re-measured 2026-07-09 after the greenbea postsolve-gate fix
+/// (b43b0a42): 5.327s, df_rel_bound=2.15e-11 — well inside the default
+/// budget, so promoted to run by default.
+/// v0.2.0→HEAD のコード regression なしを実証済。
 #[test]
-#[ignore = "heavy: greenbea dual-feas sentinel is correct but ~30.6s (>30s default); --run-ignored only"]
 fn greenbea_postsolve_dual_feasibility() {
     let r = check_postsolve_dual_feasibility(
         "data/lp_problems/greenbea.QPS",

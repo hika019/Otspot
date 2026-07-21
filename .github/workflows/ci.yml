@@ -54,7 +54,17 @@ jobs:
       - uses: taiki-e/install-action@nextest
       # default profile = ignore以外の全テスト (lib + bin + test、 旧 tier-2 promote 含む)
       # --no-fail-fast: 1 件目の fail で打ち切らず全 fail を surface
-      - run: cargo nextest run --release --features parallel --no-fail-fast
+      # --test-threads 3: CI は 3 固定 (ローカルは nextest.toml default の 6)
+      - run: cargo nextest run --release --features parallel --no-fail-fast --test-threads 3
+      # Silent test-disable / delete gate. Warm: the release+parallel test
+      # binaries are already built by the run step above, so `nextest list`
+      # is a sub-second no-rebuild step. `if: success()`: on a build error the
+      # gate would re-hit the same compile failure and emit a duplicate red;
+      # test failures are surfaced by the run step, and inventory drift is
+      # reported once the build is green.
+      - name: Test inventory gate
+        if: success()
+        run: python3 scripts/lib/check_new_ignore_attrs.py
 
   clippy:
     name: clippy
@@ -66,6 +76,16 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
 
   docs:
     name: docs
@@ -155,9 +175,13 @@ jobs:
         run: |
           COUNT=$(grep -rE 'TODO|FIXME|XXX|HACK' otspot-core/src otspot-io/src otspot-model/src otspot-dev/src src 2>/dev/null | wc -l)
           echo "todo_count=$COUNT"
-          # CLAUDE.md L37「コードにメモ書きコメント禁止」を CI で enforce。
+          # CLAUDE.md「実装」section「メモ書き・作業ログ的コメントは書かない」を CI で
+          # enforce。scripts/lib/check_memo_grep.sh と似ているが scope が異なる意図的な
+          # 別実装: このジョブは top-level src/ も含め todo!() マクロは対象外、
+          # check_memo_grep.sh は production (otspot-*/src, tests/*.rs 除く) 限定で
+          # todo!() も検出する (comment-hygiene ジョブ用)。
           # TODO/FIXME = 未完成 marker = push 時点で意図的不具合、1 件でも混入で fail。
           if [ "$COUNT" -gt 0 ]; then
-            echo "::error::TODO/FIXME/XXX/HACK count $COUNT > 0 — CLAUDE.md L37 違反 (メモ書きコメント禁止)"
+            echo "::error::TODO/FIXME/XXX/HACK count $COUNT > 0 — CLAUDE.md「実装」section 違反 (メモ書きコメント禁止)"
             exit 1
           fi

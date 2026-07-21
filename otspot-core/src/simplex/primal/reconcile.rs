@@ -1,5 +1,7 @@
 //! Basis reconciliation, crash, feasibility check, and solution extraction.
 
+use super::super::dual_common::compute_dual_vars_into;
+use super::StandardForm;
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem};
@@ -7,8 +9,6 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{feas_rel_tol, PIVOT_STABILITY_THRESHOLD, PIVOT_TOL};
 #[cfg(test)]
 use std::sync::atomic::Ordering;
-use super::super::dual_common::compute_dual_vars_into;
-use super::StandardForm;
 
 /// Maximum partial-revert rounds after crash basis construction.
 /// Each round restores artificial columns for rows with negative x_b and
@@ -344,29 +344,33 @@ pub(crate) fn pivot_out_degenerate_artificials(
             #[cfg(test)]
             super::PIVOT_OUT_BATCH_LU_COUNT.with(|c| c.set(c.get() + 1));
 
-            let committed = if LuBasis::new_timed(a_ext, &trial_basis, options.max_etas, options.deadline).is_ok() {
-                // Full slice is non-singular: commit all.
-                slice.len()
-            } else {
-                // Binary-search for maximum non-singular prefix in [0, slice.len()-1].
-                // Invariant: lo = largest confirmed-valid prefix length (0 = always valid).
-                let mut lo = 0usize;
-                let mut hi = slice.len().saturating_sub(1);
-                while lo < hi {
-                    let mid = lo + (hi - lo).div_ceil(2); // ceiling midpoint ensures progress
-                    let mut t = basis.to_vec();
-                    for &(r, j) in &slice[..mid] {
-                        t[r] = j;
+            let committed =
+                if LuBasis::new_timed(a_ext, &trial_basis, options.max_etas, options.deadline)
+                    .is_ok()
+                {
+                    // Full slice is non-singular: commit all.
+                    slice.len()
+                } else {
+                    // Binary-search for maximum non-singular prefix in [0, slice.len()-1].
+                    // Invariant: lo = largest confirmed-valid prefix length (0 = always valid).
+                    let mut lo = 0usize;
+                    let mut hi = slice.len().saturating_sub(1);
+                    while lo < hi {
+                        let mid = lo + (hi - lo).div_ceil(2); // ceiling midpoint ensures progress
+                        let mut t = basis.to_vec();
+                        for &(r, j) in &slice[..mid] {
+                            t[r] = j;
+                        }
+                        if LuBasis::new_timed(a_ext, &t, options.max_etas, options.deadline).is_ok()
+                        {
+                            lo = mid;
+                        } else {
+                            hi = mid - 1;
+                        }
                     }
-                    if LuBasis::new_timed(a_ext, &t, options.max_etas, options.deadline).is_ok() {
-                        lo = mid;
-                    } else {
-                        hi = mid - 1;
-                    }
-                }
 
-                lo
-            };
+                    lo
+                };
 
             if committed == 0 {
                 // No progress in this iteration: all remaining candidate columns are
@@ -417,12 +421,8 @@ pub(crate) fn pivot_out_degenerate_artificials(
                     }
                 }
                 b_lu.ftran_dense(&mut col_dense);
-                let max_abs = col_dense
-                    .iter()
-                    .map(|v| v.abs())
-                    .fold(0.0_f64, f64::max);
-                if max_abs <= PIVOT_TOL
-                    || col_dense[r].abs() < PIVOT_STABILITY_THRESHOLD * max_abs
+                let max_abs = col_dense.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                if max_abs <= PIVOT_TOL || col_dense[r].abs() < PIVOT_STABILITY_THRESHOLD * max_abs
                 {
                     stable = false;
                     break;

@@ -1,6 +1,5 @@
 //! Primal simplex phases for bounded standard form.
 
-use crate::linalg::timeout::deadline_reached;
 use super::extract::bounded_obj;
 use super::iterate::ftran_column;
 use super::leaving::{
@@ -10,6 +9,7 @@ use super::pricing::{partial_price_entering, PartialPrice};
 use super::BoundedDualState;
 use crate::basis::{BasisManager, LuBasis};
 use crate::error::SolverError;
+use crate::linalg::timeout::deadline_reached;
 use crate::options::SolverOptions;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
@@ -332,7 +332,11 @@ pub(crate) fn phase2_primal_bounded(
         state.basis[r] = q;
 
         let alpha_sv = if primal_alpha_sv_disabled() {
-            SparseVec { indices: vec![], values: vec![], len: m }
+            SparseVec {
+                indices: vec![],
+                values: vec![],
+                len: m,
+            }
         } else {
             SparseVec::from_dense(&alpha)
         };
@@ -599,7 +603,11 @@ pub(super) fn primal_simplex_aug(
         state.basis[r] = q;
 
         let alpha_sv = if primal_alpha_sv_disabled() {
-            SparseVec { indices: vec![], values: vec![], len: m }
+            SparseVec {
+                indices: vec![],
+                values: vec![],
+                len: m,
+            }
         } else {
             SparseVec::from_dense(&alpha)
         };
@@ -610,9 +618,7 @@ pub(super) fn primal_simplex_aug(
             let pivot = alpha[r];
             if pivot.abs() > PIVOT_TOL {
                 let cap = CAP_MULT_OF_M * (m as f64).max(1.0);
-                let new_weight = (norm_sq / (pivot * pivot))
-                    .min(cap)
-                    .max(GAMMA_FLOOR);
+                let new_weight = (norm_sq / (pivot * pivot)).min(cap).max(GAMMA_FLOOR);
                 devex_weights[leaving_col] = devex_weights[leaving_col].max(new_weight);
                 gamma_leaving = devex_weights[leaving_col];
             }

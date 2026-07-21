@@ -246,7 +246,14 @@ pub mod f64_impl {
 
     /// Q·x (per-row sum). Q は IPM 規約に従い完全対称 CSC (上下三角両方格納) 前提。
     pub fn qx(q: &CscMatrix, x: &[f64]) -> Vec<f64> {
-        q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; q.nrows])
+        q.mat_vec_mul(x).expect(
+            "q.ncols() == x.len(): q/x come from the same QpProblem, and \
+             QpProblem::new() enforces q.ncols() == num_vars (struct-literal \
+             construction bypasses this -- all QpProblem fields are pub); \
+             bench/dev helper (otspot-dev's compute_qp_kkt_max guards x.len() == \
+             num_vars before calling this) -- the solver's own hot path uses \
+             dd_impl::qx instead",
+        )
     }
 
     /// A^T·y (per-column sum), output 長 `n = a.ncols`。`y` が空 / `A` が 0 行なら zero。
@@ -254,9 +261,17 @@ pub mod f64_impl {
         if a.nrows == 0 || y.is_empty() {
             return vec![0.0; n];
         }
-        a.transpose()
-            .mat_vec_mul(y)
-            .unwrap_or_else(|_| vec![0.0; n])
+        a.transpose().mat_vec_mul(y).expect(
+            "a.nrows() == y.len(): a/y come from the same QpProblem, and \
+             QpProblem::new() enforces a.nrows() == num_constraints \
+             (struct-literal construction bypasses this -- all QpProblem fields \
+             are pub). Reaching this line already implies a.nrows() > 0 and \
+             !y.is_empty() -- this function's own early return above handles \
+             both of those cases, not the caller. bench/dev helper \
+             otspot-dev's compute_qp_kkt_max then guards the one remaining \
+             case, y.len() != a.nrows() when both are non-trivial, before \
+             calling in; the solver's own hot path uses dd_impl::aty instead",
+        )
     }
 
     /// A·x (per-row sum). `A` が 0 行なら空 Vec。
@@ -264,7 +279,25 @@ pub mod f64_impl {
         if a.nrows == 0 {
             return Vec::new();
         }
-        a.mat_vec_mul(x).unwrap_or_else(|_| Vec::new())
+        a.mat_vec_mul(x).expect(
+            "a.ncols() == x.len(): ax is generic over the caller's A/x, so the \
+             guarantee comes from each call site, not from this function. \
+             primal_residual_rel's three production callers: \
+             lp_dispatch.rs::lp_original_primal_residuals and \
+             simplex/entry.rs::lp_primal_residuals both guard \
+             result.solution.len() == problem.num_vars before calling in, \
+             relying on LpProblem::new_general() to enforce a.ncols() == \
+             num_vars (struct-literal construction bypasses this -- all \
+             LpProblem fields are pub, same caveat as QpProblem below); \
+             otspot-dev's bench_utils.rs::compute_pfeas_normalized instead \
+             guards solution.len() == prob.num_vars and prob.a.ncols() == \
+             prob.num_vars directly at the call site, so it does not depend \
+             on that invariant at all. ax is also called directly on QP data \
+             (otspot-dev's compute_qp_kkt_max, which guards x.len() == \
+             num_vars the same way; QpProblem::new() enforces a.ncols() == \
+             num_vars there, likewise bypassable via struct-literal \
+             construction)",
+        )
     }
 
     /// 制約タイプ別 per-row primal 違反 (`max(0, Ax−b)` Le / `max(0, b−Ax)` Ge / `|Ax−b|` Eq)。
@@ -440,6 +473,30 @@ pub mod dd_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "q.ncols() == x.len()")]
+    fn f64_impl_qx_panics_on_dimension_mismatch() {
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap();
+        let x = vec![1.0, 2.0];
+        let _ = f64_impl::qx(&q, &x);
+    }
+
+    #[test]
+    #[should_panic(expected = "a.nrows() == y.len()")]
+    fn f64_impl_aty_panics_on_dimension_mismatch() {
+        let a = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap();
+        let y = vec![1.0, 2.0]; // wrong: a.nrows() == 3, y.len() == 2
+        let _ = f64_impl::aty(&a, &y, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "a.ncols() == x.len()")]
+    fn f64_impl_ax_panics_on_dimension_mismatch() {
+        let a = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap();
+        let x = vec![1.0, 2.0]; // wrong: a.ncols() == 3, x.len() == 2
+        let _ = f64_impl::ax(&a, &x);
+    }
 
     #[test]
     fn bound_contrib_empty_bd_yields_zero() {
@@ -869,9 +926,9 @@ mod tests {
     #[test]
     fn bound_contrib_at_var_agrees_with_bound_contrib_full_layout_fixed_var() {
         let bounds = vec![
-            (0.0_f64, 5.0_f64),              // lb+ub finite (box)
-            (3.0_f64, 3.0_f64),              // fixed (lb==ub)
-            (2.0_f64, f64::INFINITY),        // lb-only
+            (0.0_f64, 5.0_f64),       // lb+ub finite (box)
+            (3.0_f64, 3.0_f64),       // fixed (lb==ub)
+            (2.0_f64, f64::INFINITY), // lb-only
         ];
         // full layout: lb-half=[j0=1.5, j1_fx=0, j2=2.0], ub-half=[j0=3.0, j1_fx=0]
         let bd = vec![1.5_f64, 0.0, 2.0, 3.0, 0.0];

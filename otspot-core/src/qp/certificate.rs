@@ -36,20 +36,16 @@ pub fn prove_optimal<'a>(
     tol: f64,
 ) -> Result<OptimalCertificate, NotProven> {
     // ── dimension guard (single chokepoint) ──────────────────────────────────
-    // Validate ProblemView internal consistency and input sizes before any
-    // residual computation. Mismatched slices cause index-out-of-bounds panics
-    // inside the residual helpers:
-    //   - `dd_impl::aty` accesses `y[row]` for row in a.row_ind → panics if y too short
-    //   - `dd_impl::ax` accesses `x[col]` for col in 0..a.ncols → panics if x too short
-    //
-    // Authoritative dimension sources:
-    //   num_vars        = view.bounds.len()        (the problem's variable count)
-    //   num_constraints = view.a.nrows             (number of rows in A)
-    //   expected_z_len  = n_lb_finite + n_ub_finite (z layout: lb-half then ub-half)
-    //
-    // Sentinel: removing this guard causes the short-slice test cases below to panic
-    // (index out of bounds) instead of returning Err — the test framework records
-    // that as a panic failure, not a normal assertion failure.
+    // Validate ProblemView consistency and input sizes before any residual
+    // computation; mismatched slices panic (index-out-of-bounds) in the helpers
+    // (`dd_impl::aty` reads `y[row]` over a.row_ind; `dd_impl::ax` reads `x[col]`
+    // over 0..a.ncols). Authoritative dimension sources:
+    //   num_vars        = view.bounds.len()
+    //   num_constraints = view.a.nrows
+    //   expected_z_len  = n_lb_finite + n_ub_finite (z: lb-half then ub-half)
+    // Sentinel: removing this guard makes the short-slice test cases below panic
+    // (index out of bounds) instead of returning Err — recorded as a panic
+    // failure, not an assertion failure.
     let num_vars = view.bounds.len();
     let num_constraints = view.a.nrows;
     let n_lb = view
@@ -891,8 +887,7 @@ mod tests {
         // Non-empty reduced_costs selects the simplex certificate path.  A
         // vector shorter than num_vars must not be padded with zero, because
         // that can fabricate missing bound duals and falsely mint a certificate.
-        let a =
-            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0_f64, 0.0], 1, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0_f64, 0.0], 1, 2).unwrap();
         let lp2 = LpProblem::new_general(
             vec![-1.0_f64, 0.0],
             a,

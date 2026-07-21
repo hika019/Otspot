@@ -4,11 +4,11 @@ pub(crate) mod crash;
 pub mod dual;
 pub mod dual_advanced;
 mod dual_common;
-mod trace;
 mod entry;
 pub mod pricing;
 pub(crate) mod primal;
 mod standard_form;
+mod trace;
 
 #[cfg(test)]
 pub(crate) use entry::solve;
@@ -32,7 +32,8 @@ pub(crate) use standard_form::{
     build_bounded_standard_form_with_deadline, scale_upper_bounds, BoundedStandardForm,
 };
 pub(crate) use standard_form::{
-    extract_dual_info, timeout_result_with_incumbent, SimplexOutcome, StandardForm,
+    external_stop_requested, extract_dual_info, stall_status, stop_result_with_incumbent,
+    stop_status, SimplexOutcome, StandardForm,
 };
 
 /// Returns `true` when any basic variable value violates its lower bound.

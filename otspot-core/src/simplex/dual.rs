@@ -8,7 +8,7 @@ use super::dual_common::{
 };
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving, SteepestEdgePricing};
 use super::trace::IterTrace;
-use super::{timeout_result_with_incumbent, SimplexOutcome, StandardForm};
+use super::{stop_result_with_incumbent, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::presolve::LpEquilibration;
@@ -69,7 +69,7 @@ pub(crate) fn two_phase_dual_simplex(
                     );
 
                     let mut result = outcome_to_result(
-                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale, true,
+                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale, true, options,
                     );
                     result.iterations = total_iters;
                     return result;
@@ -134,14 +134,15 @@ fn cold_start_dual(
                 ..Default::default()
             };
         }
-        SimplexOutcome::Timeout(_) => {
-            return timeout_result_with_incumbent(
+        SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_) => {
+            return stop_result_with_incumbent(
                 sf,
                 problem,
                 &basis,
                 &x_b,
                 col_scale,
                 total_iters,
+                options,
             );
         }
         SimplexOutcome::SingularBasis => {
@@ -171,12 +172,12 @@ fn cold_start_dual(
 
     // Gate a Phase II `Unbounded` on a re-derived recession ray (same verified
     // gate as the Big-M path). An eta-drift false-Unbounded becomes an honest
-    // Timeout instead of a wrong verdict (pilot-ja reaches here via the Big-M →
+    // Stalled instead of a wrong verdict (pilot-ja reaches here via the Big-M →
     // dual-fallback handoff).
     let phase2_outcome = if matches!(phase2_outcome, SimplexOutcome::Unbounded)
         && !lp_unbounded_ray_verified(a, &basis, c, m, sf.n_total, sf.n_total, options)
     {
-        SimplexOutcome::Timeout(basic_obj(c, &basis, &x_b))
+        SimplexOutcome::Stalled(basic_obj(c, &basis, &x_b))
     } else {
         phase2_outcome
     };
@@ -190,6 +191,7 @@ fn cold_start_dual(
         col_scale,
         row_scale,
         false,
+        options,
     );
     result.iterations = total_iters;
     result

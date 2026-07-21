@@ -13,10 +13,10 @@ use crate::tolerances::DROP_TOL;
 /// `|A[row, col]| < SINGULARITY_TOL` で dual recovery を skip (`y_new = target /
 /// a_row_col` 発散防止)。matrix 構築時 drop 閾値と一致。
 ///
-/// 撤退知見 (audit#123、commit 0f343f1): row-relative pivot tol (LAPACK xGECON 形式)
-/// は qplib_9002 で false-positive Optimal を mint (`||x||_inf=7.9e9`、KKT 発散)。
-/// pivot accept 後に KKT 残差を re-validate する経路 (iterative refinement) を
-/// 追加してから再評価。
+/// 撤退知見: row-relative pivot tol (LAPACK xGECON 形式) は qplib_9002 で
+/// false-positive Optimal を mint した (`||x||_inf=7.9e9`、KKT 発散)。導入した
+/// commit は削除済みブランチ上にあり、ハッシュでの追跡は不可能。pivot accept 後に
+/// KKT 残差を re-validate する経路 (iterative refinement) を追加してから再評価。
 const SINGULARITY_TOL: f64 = DROP_TOL;
 
 /// 縮約後の解を元 QP 問題の解空間に復元する。
@@ -69,7 +69,7 @@ pub fn postsolve_qp(
             // LargeCoeffRowScale の双対逆変換:
             // スケール σ_i で縮約後制約を A[i]*σ_i, b[i]*σ_i と変換したため、
             // y_orig[i] = σ_i * y_scaled[i]
-    QpPostsolveStep::LargeCoeffRowScale { row_scales } => {
+            QpPostsolveStep::LargeCoeffRowScale { row_scales } => {
                 if !reduced_dual.is_empty() && row_scales.len() != reduced_dual.len() {
                     return malformed_postsolve_result();
                 }
@@ -796,8 +796,7 @@ mod tests {
             sol.dual_solution[0]
         );
         assert_eq!(
-            sol.dual_solution[0],
-            0.0,
+            sol.dual_solution[0], 0.0,
             "Le dual must clamp to 0 when KKT gives -2 (sentinel fires if Fix 1 reverted)"
         );
     }
@@ -834,8 +833,7 @@ mod tests {
             sol.dual_solution[0]
         );
         assert_eq!(
-            sol.dual_solution[0],
-            0.0,
+            sol.dual_solution[0], 0.0,
             "Ge dual must clamp to 0 when KKT gives +2 (sentinel fires if Fix 1 reverted)"
         );
     }

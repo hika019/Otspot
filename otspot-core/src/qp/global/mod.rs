@@ -31,7 +31,10 @@ use crate::qp::kkt_resid::dual_sign_violation as kkt_dual_sign_violation;
 use crate::qp::problem::QpProblem;
 use std::time::{Duration, Instant};
 
-use bound::{interval_quadratic_bounds, is_feasible_result, solve_local_upper_bound};
+use bound::{
+    interval_quadratic_bounds, is_feasible_result, is_verified_feasible_point,
+    solve_local_upper_bound,
+};
 use bound_alpha_bb::{alpha_bb_lower_bound, gershgorin_alpha};
 use bound_mccormick::mccormick_lower_bound;
 use branch::{select_branching_variable, split_node};
@@ -116,11 +119,15 @@ pub fn solve_qp_global_with_stats(
 
     let mut stats = GlobalStats::default();
 
-    // 1. root local solve (= 初期 incumbent 候補)
+    // 1. root local solve (= 初期 incumbent 候補)。上界 incumbent は「feasible な
+    // 点の目的値」で健全なので、非収束 status (Stalled 等) でも点そのものが
+    // feasible と検証できれば採用する (status は信用しない)。
     let root_solve = solve_local_upper_bound(problem, &root_bounds, &shared_opts, None);
-    if !is_feasible_result(&root_solve.status) {
-        // root が解けない (Infeasible / NumericalError / Unbounded / NonConvex / Timeout)
-        // → そのまま伝播。
+    let root_usable = is_feasible_result(&root_solve.status)
+        || is_verified_feasible_point(problem, &root_solve.solution, shared_opts.ipm_eps());
+    if !root_usable {
+        // root が使えない (Infeasible / NumericalError / Unbounded / NonConvex /
+        // Timeout / infeasible な診断 iterate) → そのまま伝播。
         return (root_solve, stats);
     }
 
@@ -190,10 +197,12 @@ pub fn solve_qp_global_with_stats(
         }
     }
 
-    let mut max_depth_breached = false;
-    // 深さ上限で破棄した node の node_lb の min を保持する。これが未探索領域の下界に
+    // 深さ上限超過、または local solve が unusable (Infeasible 以外) で discard した
+    // node があるか。どちらも未探索領域を残すため queue 空だけでは完全探索と言えない。
+    let mut search_incomplete = false;
+    // 上記で discard した node の node_lb の min を保持する。これが未探索領域の下界に
     // なるため remaining_lb に畳み込む必要がある。
-    let mut depth_discard_lb: f64 = f64::INFINITY;
+    let mut discard_lb: f64 = f64::INFINITY;
 
     while let Some(node) = tree.pop() {
         if deadline_reached(deadline) {
@@ -235,9 +244,15 @@ pub fn solve_qp_global_with_stats(
 
         let res =
             solve_local_upper_bound(problem, &node.var_bounds, &shared_opts, node.warm.as_ref());
-        if !is_feasible_result(&res.status) {
-            // この box は infeasible / numerical issue → discard (上の region は
-            // 他 branch に任せる; 下界 ≥ 0 補正は Phase 4 で α-BB と併せて検討)。
+        let res_usable = is_feasible_result(&res.status)
+            || is_verified_feasible_point(problem, &res.solution, user_eps);
+        if !res_usable {
+            if !node_discard_is_conclusive(&res.status) {
+                // 「box に解があるか不明」なだけで空の証明ではないため、node_lb を
+                // discard_lb に畳み込み未探索領域として残す (完全探索を偽装しない)。
+                search_incomplete = true;
+                discard_lb = discard_lb.min(node_lb);
+            }
             continue;
         }
 
@@ -250,9 +265,9 @@ pub fn solve_qp_global_with_stats(
         // 分枝
         if node.depth + 1 > cfg.max_depth {
             // 深さ上限超過 → 子を展開しない = unproven region 残存。
-            // この node の lb を depth_discard_lb に畳み込む (remaining_lb に反映する)。
-            max_depth_breached = true;
-            depth_discard_lb = depth_discard_lb.min(node_lb);
+            // この node の lb を discard_lb に畳み込む (remaining_lb に反映する)。
+            search_incomplete = true;
+            discard_lb = discard_lb.min(node_lb);
             continue;
         }
         if let Some(j) = select_branching_variable(&node, &res.solution) {
@@ -268,20 +283,21 @@ pub fn solve_qp_global_with_stats(
     state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
 
     // 終了条件分岐:
-    // - queue 空 AND max_depth 未超過 AND deadline/max_nodes 未到達 → proven
+    // - queue 空 AND max_depth 未超過 AND discard なし AND deadline/max_nodes 未到達 → proven
     // - それ以外 → 未証明 (incumbent あれば LocallyOptimal)
     let halted_early = !tree.is_empty()
-        || max_depth_breached
+        || search_incomplete
         || deadline_reached(deadline)
         || stats.nodes_processed >= cfg.max_nodes;
 
     let result = if halted_early {
-        // 未探索領域の下界: queue に残った node の最小 lb と、深さ上限で破棄した
-        // node の lb の両方を考慮する。どちらの領域も「未証明」であるため min を取る。
+        // 未探索領域の下界: queue に残った node の最小 lb と、深さ上限/discard で
+        // 破棄した node の lb の両方を考慮する。どちらの領域も「未証明」であるため
+        // min を取る。
         let remaining_lb = tree
             .best_lower_bound()
             .unwrap_or(f64::INFINITY)
-            .min(depth_discard_lb);
+            .min(discard_lb);
         let proven = within_gap(state.incumbent_obj, remaining_lb, cfg.gap_tol);
         let inc_obj = state.incumbent_obj;
         if proven {
@@ -302,6 +318,17 @@ pub fn solve_qp_global_with_stats(
         state.finalize_proven(problem, inc_obj, q_indefinite, cfg.gap_tol, user_eps)
     };
     (result, stats)
+}
+
+/// unusable node (`!res_usable`) の discard が「完全探索」扱いにできるか。
+///
+/// `Infeasible` は A x <= b (+ box) の実行不可能証明 (Q に依存しない線形可否判定) で
+/// あり、この box には本当に解が存在しない — node_lb を畳み込む必要はない。
+/// それ以外 (`NumericalError`/`Timeout`/`NonConvex`/未検証 iterate の `Stalled`・
+/// `MaxIterations`) は「box に解があるか不明」なだけで空の証明ではないため
+/// `false` を返し、呼び出し側に node_lb の畳み込みを要求する。
+fn node_discard_is_conclusive(status: &SolveStatus) -> bool {
+    matches!(status, SolveStatus::Infeasible)
 }
 
 /// Q が indefinite (= 少なくとも 1 つの負固有値が Gershgorin で証明可能) か。
@@ -336,9 +363,14 @@ fn compute_node_lower_bound(
         return (lb, None);
     }
     if use_alpha_bb {
-        if let Some((ab_lb, ab_warm)) =
-            alpha_bb_lower_bound(problem, bounds, alpha, base_opts, deadline, alpha_bb_warm_in)
-        {
+        if let Some((ab_lb, ab_warm)) = alpha_bb_lower_bound(
+            problem,
+            bounds,
+            alpha,
+            base_opts,
+            deadline,
+            alpha_bb_warm_in,
+        ) {
             lb = lb.max(ab_lb);
             ab_warm_out = ab_warm;
         }
@@ -491,7 +523,10 @@ fn is_polish_kkt_recovery(
     gap_tol: f64,
     user_eps: f64,
 ) -> bool {
-    if !matches!(polished.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
+    if !matches!(
+        polished.status,
+        SolveStatus::Optimal | SolveStatus::LocallyOptimal
+    ) {
         return false;
     }
     if !polished.objective.is_finite() {
@@ -623,22 +658,19 @@ impl SearchState {
         opts.timeout_secs = None;
         let user_eps = base_opts.ipm_eps();
         let polished = crate::qp::solve_qp_with(problem, &opts);
-        if is_polish_acceptable(&polished.status, polished.objective, self.incumbent_obj, gap_tol)
-            || is_polish_suboptimal_acceptable(
-                &polished,
-                problem,
-                self.incumbent_obj,
-                gap_tol,
-                user_eps,
-            )
-            || (relax_for_nonconvex
-                && is_polish_kkt_recovery(
-                    &polished,
-                    problem,
-                    self.incumbent_obj,
-                    gap_tol,
-                    user_eps,
-                ))
+        if is_polish_acceptable(
+            &polished.status,
+            polished.objective,
+            self.incumbent_obj,
+            gap_tol,
+        ) || is_polish_suboptimal_acceptable(
+            &polished,
+            problem,
+            self.incumbent_obj,
+            gap_tol,
+            user_eps,
+        ) || (relax_for_nonconvex
+            && is_polish_kkt_recovery(&polished, problem, self.incumbent_obj, gap_tol, user_eps))
         {
             self.update_incumbent(&polished);
         }
@@ -648,8 +680,12 @@ impl SearchState {
     ///
     /// B&B bound-gap closure だけでなく `prove_optimal` による全 KKT 条件
     /// (stationarity / primal_feasibility / bound_feasibility / complementarity /
-    /// dual_sign / duality_gap) を検証する。検証に失敗した場合は
-    /// LocallyOptimal / NonconvexLocal へ降格し証明書は付与しない。
+    /// dual_sign / duality_gap) を検証する。検証に失敗した場合、incumbent が
+    /// 品質ゲート (`is_feasible_result`) を通っていれば LocallyOptimal /
+    /// NonconvexLocal へ降格、通っていなければ (Stalled/MaxIterations 由来の
+    /// feasibility-only 点) `FeasiblePoint` を set する。いずれも証明書は付与しない。
+    /// (`finalize_unproven` と対称の品質ゲート — gap が閉じたかどうかは incumbent
+    /// 自体の検証状態を変えない。)
     ///
     /// ## sentinel (no-op-fail)
     /// このメソッドの `prove_optimal` 呼び出しを除去すると、
@@ -708,7 +744,10 @@ impl SearchState {
                 );
             }
             Err(not_proven) => {
-                self.incumbent_result.status = if q_indefinite {
+                self.incumbent_result.status = if !is_feasible_result(&self.incumbent_result.status)
+                {
+                    SolveStatus::FeasiblePoint
+                } else if q_indefinite {
                     SolveStatus::NonconvexLocal
                 } else {
                     SolveStatus::LocallyOptimal
@@ -723,7 +762,12 @@ impl SearchState {
         self.incumbent_result
     }
 
-    /// Q が indefinite なら `NonconvexLocal`、convex なら `LocallyOptimal` を set。
+    /// incumbent が品質ゲート (`is_feasible_result`: Optimal/LocallyOptimal/
+    /// SuboptimalSolution) を通っていれば、Q が indefinite なら `NonconvexLocal`、
+    /// convex なら `LocallyOptimal` を set。品質ゲートを通っていない incumbent
+    /// (= `is_verified_feasible_point` の feasibility 検証のみで採用された
+    /// Stalled/MaxIterations 由来の点) には最適性・KKT 品質を主張できないため
+    /// `FeasiblePoint` を set する。
     /// (= IPM 単発 inertia 補正 `LocallyOptimal` と BB 打切 `NonconvexLocal` を分離)
     fn finalize_unproven(
         mut self,
@@ -733,7 +777,9 @@ impl SearchState {
         cfg: &GlobalOptimizationConfig,
         q_indefinite: bool,
     ) -> SolverResult {
-        self.incumbent_result.status = if q_indefinite {
+        self.incumbent_result.status = if !is_feasible_result(&self.incumbent_result.status) {
+            SolveStatus::FeasiblePoint
+        } else if q_indefinite {
             SolveStatus::NonconvexLocal
         } else {
             SolveStatus::LocallyOptimal
@@ -1703,6 +1749,134 @@ mod tests {
         assert!(r.opt_cert.is_some(), "NonconvexGlobal must carry opt_cert");
     }
 
+    /// Sentinel (P2-4): `finalize_unproven` の incumbent が品質ゲート
+    /// (`is_feasible_result`) を通っていない (= Stalled/MaxIterations 由来の
+    /// feasibility-only 点) 場合、LocallyOptimal/NonconvexLocal ではなく
+    /// `FeasiblePoint` を返さなければならない。品質ゲートを通った incumbent は
+    /// 従来通り LocallyOptimal/NonconvexLocal を維持する。
+    #[test]
+    fn finalize_unproven_feasibility_only_incumbent_yields_feasible_point() {
+        let cfg = GlobalOptimizationConfig::default();
+
+        for status in [SolveStatus::Stalled, SolveStatus::MaxIterations] {
+            for q_indefinite in [false, true] {
+                let unverified = SolverResult {
+                    status: status.clone(),
+                    objective: 3.0,
+                    solution: vec![0.5_f64],
+                    ..Default::default()
+                };
+                let r =
+                    SearchState::new(unverified).finalize_unproven(0.0, 1, 0, &cfg, q_indefinite);
+                assert_eq!(
+                    r.status,
+                    SolveStatus::FeasiblePoint,
+                    "{status:?} incumbent (q_indefinite={q_indefinite}) never passed a \
+                     quality gate; must not claim LocallyOptimal/NonconvexLocal, got {:?}",
+                    r.status,
+                );
+            }
+        }
+
+        // 対照: 品質ゲートを通った incumbent (SuboptimalSolution = eps 検証済み) は
+        // 従来通り LocallyOptimal/NonconvexLocal のまま。
+        for (q_indefinite, expected) in [
+            (false, SolveStatus::LocallyOptimal),
+            (true, SolveStatus::NonconvexLocal),
+        ] {
+            let verified = SolverResult {
+                status: SolveStatus::SuboptimalSolution,
+                objective: 3.0,
+                solution: vec![0.5_f64],
+                ..Default::default()
+            };
+            let r = SearchState::new(verified).finalize_unproven(0.0, 1, 0, &cfg, q_indefinite);
+            assert_eq!(
+                r.status, expected,
+                "quality-gated incumbent must keep claiming {expected:?}, got {:?}",
+                r.status,
+            );
+        }
+    }
+
+    /// Sentinel (P1-a, `finalize_unproven` と対称): `finalize_proven` の
+    /// `Err(not_proven)` 分岐 (gap は閉じたが KKT 証明に失敗) が、品質ゲート
+    /// (`is_feasible_result`) を通っていない incumbent (Stalled/MaxIterations 由来の
+    /// feasibility-only 点) にも LocallyOptimal/NonconvexLocal を mint していた。
+    /// gap closure は incumbent の検証状態を変えないため `FeasiblePoint` を返す
+    /// べき。品質ゲートを通った incumbent (`finalize_proven_dual_gate_table` の
+    /// bad-dual 行) は従来通り LocallyOptimal/NonconvexLocal のまま。
+    #[test]
+    fn finalize_proven_kkt_fail_on_feasibility_only_incumbent_yields_feasible_point() {
+        let q_conv = CscMatrix::from_triplets(&[0], &[0], &[2.0_f64], 1, 1).unwrap();
+        let a_empty = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        let p_convex = QpProblem::new_all_le(
+            q_conv,
+            vec![0.0_f64],
+            a_empty.clone(),
+            vec![],
+            vec![(-1.0_f64, 1.0_f64)],
+        )
+        .unwrap();
+        let q_indef = CscMatrix::from_triplets(&[0], &[0], &[-2.0_f64], 1, 1).unwrap();
+        let p_indef = QpProblem::new_all_le(
+            q_indef,
+            vec![0.0_f64],
+            a_empty,
+            vec![],
+            vec![(-1.0_f64, 1.0_f64)],
+        )
+        .unwrap();
+
+        let user_eps = 1e-6_f64;
+        let gap_tol = 1e-6_f64;
+        // wrong-sign z_ub (-100) → dual_sign 違反 → prove_optimal は必ず Err。
+        let bad_dual = vec![100.0_f64, -100.0_f64];
+
+        for status in [SolveStatus::Stalled, SolveStatus::MaxIterations] {
+            let unverified_conv = SolverResult {
+                status: status.clone(),
+                objective: 0.0,
+                solution: vec![0.0_f64],
+                dual_solution: vec![],
+                bound_duals: bad_dual.clone(),
+                duality_gap_rel: Some(0.5),
+                ..Default::default()
+            };
+            let r = SearchState::new(unverified_conv)
+                .finalize_proven(&p_convex, 0.0, false, gap_tol, user_eps);
+            assert_eq!(
+                r.status,
+                SolveStatus::FeasiblePoint,
+                "{status:?} incumbent (convex, KKT-fail) must not claim LocallyOptimal, got {:?}",
+                r.status,
+            );
+            assert!(
+                r.bound_gap_cert.is_none(),
+                "FeasiblePoint must have no BoundGapCertificate"
+            );
+            assert!(r.opt_cert.is_none(), "FeasiblePoint must have no opt_cert");
+
+            let unverified_indef = SolverResult {
+                status: status.clone(),
+                objective: 0.0,
+                solution: vec![0.0_f64],
+                dual_solution: vec![],
+                bound_duals: bad_dual.clone(),
+                duality_gap_rel: Some(0.5),
+                ..Default::default()
+            };
+            let r = SearchState::new(unverified_indef)
+                .finalize_proven(&p_indef, 0.0, true, gap_tol, user_eps);
+            assert_eq!(
+                r.status,
+                SolveStatus::FeasiblePoint,
+                "{status:?} incumbent (indefinite, KKT-fail) must not claim NonconvexLocal, got {:?}",
+                r.status,
+            );
+        }
+    }
+
     /// Regression: proptest seed a46bde58 — PD Q (Gershgorin false positive) must satisfy KKT.
     ///
     /// The a46bde58 problem has a truly PD Q (Cholesky succeeds) but Gershgorin reports
@@ -1750,7 +1924,10 @@ mod tests {
         let res = solve_qp_global(&problem, &o, &cfg);
 
         assert!(
-            matches!(res.status, SolveStatus::NonconvexLocal | SolveStatus::NonconvexGlobal),
+            matches!(
+                res.status,
+                SolveStatus::NonconvexLocal | SolveStatus::NonconvexGlobal
+            ),
             "expected NonconvexLocal/NonconvexGlobal, got {:?}",
             res.status
         );
@@ -1765,12 +1942,7 @@ mod tests {
             constraint_types: &problem.constraint_types,
             eliminated_cols: &elim,
         };
-        let comp = kkt_comp_residual(
-            &view,
-            &res.solution,
-            &res.dual_solution,
-            &res.bound_duals,
-        );
+        let comp = kkt_comp_residual(&view, &res.solution, &res.dual_solution, &res.bound_duals);
         let stat = kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals);
         let pf = kkt_primal_residual(&view, &res.solution);
         assert!(
@@ -1780,6 +1952,92 @@ mod tests {
             res.status,
             stat,
             pf,
+        );
+    }
+
+    /// Sentinel: `node_discard_is_conclusive` は `Infeasible` (線形制約の厳密な
+    /// 実行不可能証明) のみ `true` を返す。それ以外の unusable status (診断
+    /// iterate しか持たない Stalled/MaxIterations、外的停止の Timeout、
+    /// solver 内部破綻の NumericalError、box 情報だけでは判定できない Unbounded/
+    /// NonConvex) は「box に解があるか不明」なだけなので `false` (= node_lb を
+    /// 畳み込む必要あり) を返す。独立オラクル: Infeasible だけが Q に依存しない
+    /// 線形実行可能性の厳密判定であり、他は全て探索・数値の都合による打ち切り。
+    #[test]
+    fn node_discard_is_conclusive_only_for_infeasible() {
+        assert!(node_discard_is_conclusive(&SolveStatus::Infeasible));
+        for s in [
+            SolveStatus::MaxIterations,
+            SolveStatus::Stalled,
+            SolveStatus::Timeout,
+            SolveStatus::NumericalError,
+            SolveStatus::Unbounded,
+            SolveStatus::NonConvex("x".into()),
+        ] {
+            assert!(
+                !node_discard_is_conclusive(&s),
+                "{s:?} must require folding node_lb (not a conclusive infeasibility proof)"
+            );
+        }
+    }
+
+    /// P1-1 の前提となる実測: 実行可能領域を持つ box でも `solve_local_upper_bound`
+    /// は非収束 iterate (primal_residual_rel が user_eps を大きく超える) を返しうる
+    /// (status=MaxIterations、Infeasible ではない)。この box は本当は解を持つため
+    /// (n=40 中 39 変数は自由、target はその box 内で到達可能な値を選定)、旧実装が
+    /// これを無音 discard していたら偽の「完全探索」を生みうる、という P1-1 の
+    /// 前提が絵空事でないことを示す。
+    #[test]
+    fn unusable_node_can_be_non_infeasible_with_large_primal_residual() {
+        let n = 40usize;
+        let mut qi = vec![];
+        let mut qj = vec![];
+        let mut qv = vec![];
+        for i in 0..n {
+            let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+            qi.push(i);
+            qj.push(i);
+            qv.push(sign * (1.0 + ((i * 37 + 11) % 997) as f64 * 1e3));
+        }
+        let q = CscMatrix::from_triplets(&qi, &qj, &qv, n, n).unwrap();
+        let c = vec![0.0; n];
+        let a_cols: Vec<usize> = (0..n).collect();
+        let a_rows = vec![0usize; n];
+        let a_vals: Vec<f64> = (0..n).map(|i| 1.0 + ((i * 53 + 7) % 11) as f64).collect();
+        let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, 1, n).unwrap();
+        // target は box [-10,10]^n 内で achievable (max |Ax| ~ sum(a_vals)*10 > 2000)
+        // かつ naive start x0=0 からは大きく外れる (feasible だが到達に反復を要する)。
+        let target: f64 = -2000.0;
+        let bounds = vec![(-10.0, 10.0); n];
+        let p = QpProblem::new(
+            q,
+            c,
+            a,
+            vec![target],
+            bounds,
+            vec![crate::problem::ConstraintType::Eq],
+        )
+        .unwrap();
+        let mut o = SolverOptions::default();
+        o.ipm.max_iter = 30;
+        o.timeout_secs = Some(15.0);
+        let res = solve_local_upper_bound(&p, &p.bounds.clone(), &o, None);
+        assert_eq!(
+            res.status,
+            SolveStatus::MaxIterations,
+            "expected a genuine non-convergent terminal status, got {:?}",
+            res.status
+        );
+        assert_ne!(
+            res.status,
+            SolveStatus::Infeasible,
+            "this box is feasible; a real solver must not report Infeasible here"
+        );
+        let view = ProblemView::from_problem(&p);
+        let pf_rel = crate::qp::ipm_solver::kkt::primal_residual_rel(&view, &res.solution);
+        assert!(
+            pf_rel > 1e-3,
+            "expected large primal residual demonstrating a genuinely unusable \
+             (not just borderline) iterate, got pf_rel={pf_rel:.3e}"
         );
     }
 }

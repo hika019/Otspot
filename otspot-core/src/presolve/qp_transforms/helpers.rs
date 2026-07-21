@@ -244,7 +244,7 @@ pub(super) fn apply_large_coeff_rescaling(a: &mut CscMatrix, b: &mut [f64], n: u
 ///
 /// In non-test builds this always returns `false`. Tests inject the mask via
 /// [`with_skip_steps`] so parallel tests stay isolated (the previous
-/// `QP_PRESOLVE_SKIP` env-var hook was process-global and caused #183 flake).
+/// `QP_PRESOLVE_SKIP` env-var hook was process-global and caused test flake).
 pub(super) fn skip_step(n: usize) -> bool {
     #[cfg(test)]
     {

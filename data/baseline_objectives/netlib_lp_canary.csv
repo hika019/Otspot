@@ -1,4 +1,4 @@
-# Netlib LP canary subset baseline (Task #18)
+# Netlib LP canary subset baseline (Task 18)
 # Source: union of netlib_lp.csv (Optimal) + netlib_lp_infeas.csv (INFEASIBLE)
 # 用途: scripts/run_lp_bench.sh --suite canary が参照する known-optimal 表。
 #       canary は standard / infeas を跨ぐ 28 問の代表セットなので、

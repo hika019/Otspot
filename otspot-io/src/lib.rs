@@ -1,6 +1,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 //! File I/O for the otspot solver — MPS, QPS, and QPLIB format parsers.
 
+pub mod cbf;
 pub mod mps;
 pub mod qplib;
 pub mod qps;

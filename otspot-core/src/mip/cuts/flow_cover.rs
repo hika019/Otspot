@@ -333,9 +333,7 @@ mod tests {
                     for y2 in 0..=1 {
                         let x = [x1 as f64, x2 as f64, y1 as f64, y2 as f64];
                         let ax = milp.lp.a.mat_vec_mul(&x).unwrap();
-                        let feas = ax[0] <= 3.0 + 1e-9
-                            && ax[1] <= 1e-9
-                            && ax[2] <= 1e-9;
+                        let feas = ax[0] <= 3.0 + 1e-9 && ax[1] <= 1e-9 && ax[2] <= 1e-9;
                         if !feas {
                             continue;
                         }
@@ -375,6 +373,10 @@ mod tests {
         let mask = crate::mip::integer_mask(4, &[0, 1, 2, 3]);
         let x_star = lp_root(&lp).solution;
         let cuts = generate_flow_cover_cuts(&lp, &mask, &x_star);
-        assert!(cuts.is_empty(), "no cover ⇒ no flow-cover cut, got {}", cuts.len());
+        assert!(
+            cuts.is_empty(),
+            "no cover ⇒ no flow-cover cut, got {}",
+            cuts.len()
+        );
     }
 }

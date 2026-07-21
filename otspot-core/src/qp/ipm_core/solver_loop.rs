@@ -1049,7 +1049,10 @@ mod tests {
             &mut dy_live,
             Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
         );
-        assert!(dx_live[0].abs() > 1e-12, "live deadline should solve: dx={dx_live:?}");
+        assert!(
+            dx_live[0].abs() > 1e-12,
+            "live deadline should solve: dx={dx_live:?}"
+        );
 
         // sentinel: expired deadline must force zeroed directions.
         let mut dx_expired = vec![3.0];
@@ -1100,7 +1103,7 @@ mod tests {
         assert!((y[1] - 1.1).abs() < 1e-12);
     }
 
-    /// Regression sentinel for audit#166 P1-A: Schur gondzio path used multiplicative stop
+    /// Regression sentinel for audit 166 P1-A: Schur gondzio path used multiplicative stop
     /// condition (`alpha_new <= alpha_prev * threshold`) instead of the correct additive form
     /// (`alpha_new < alpha_prev + threshold`).
     ///

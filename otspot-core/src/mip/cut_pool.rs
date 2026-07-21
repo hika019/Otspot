@@ -43,12 +43,7 @@ pub(crate) struct Cut {
 impl Cut {
     /// Signed violation by `x_star`: positive ⇒ the point breaks the cut.
     fn violation(&self, x_star: &[f64]) -> f64 {
-        let lhs: f64 = self
-            .coeffs
-            .iter()
-            .zip(x_star)
-            .map(|(&g, &x)| g * x)
-            .sum();
+        let lhs: f64 = self.coeffs.iter().zip(x_star).map(|(&g, &x)| g * x).sum();
         match self.sense {
             ConstraintType::Ge => self.rhs - lhs,
             ConstraintType::Le => lhs - self.rhs,
@@ -104,9 +99,10 @@ impl CutPool {
             if cut.violation(x_star) <= VIOLATION_TOL {
                 continue;
             }
-            let parallel = self.cuts.iter().any(|pc| {
-                cosine(&pc.cut.coeffs, pc.norm, &cut.coeffs, norm) > MAX_PARALLEL_COSINE
-            });
+            let parallel = self
+                .cuts
+                .iter()
+                .any(|pc| cosine(&pc.cut.coeffs, pc.norm, &cut.coeffs, norm) > MAX_PARALLEL_COSINE);
             if parallel {
                 continue;
             }

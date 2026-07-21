@@ -257,6 +257,12 @@ pub fn solve_milp_with_stats(
     if options.validate().is_err() {
         return (SolverResult::numerical_error(), MipStats::default());
     }
+    if let Err(e) = validate_integer_vars(&problem.integer_vars, problem.lp.num_vars) {
+        return (
+            SolverResult::not_supported(e.to_string()),
+            MipStats::default(),
+        );
+    }
     // Establish a shared deadline before FP so that FP and B&B draw from the same
     // budget.  Without this, each LP in FP gets a fresh `timeout_secs` window and
     // `solve_mip_core` resets the clock again — allowing up to (MAX_FP_ITER + 1)×
@@ -369,6 +375,20 @@ pub fn solve_miqp_with_stats(
 ) -> (SolverResult, MipStats) {
     if options.validate().is_err() {
         return (SolverResult::numerical_error(), MipStats::default());
+    }
+    // Central structural check: `solve_fixed_point` (the all-integer-fixed
+    // B&B leaf) indexes `quadratic_constraints[k]` for `k < num_constraints`,
+    // so a non-empty vector shorter than `num_constraints` (direct
+    // public-field assignment on `problem.qp`, bypassing the setter) would
+    // panic. `QpProblem::validate` is the shared source of this invariant.
+    if problem.qp.validate().is_err() {
+        return (SolverResult::numerical_error(), MipStats::default());
+    }
+    if let Err(e) = validate_integer_vars(&problem.integer_vars, problem.qp.num_vars) {
+        return (
+            SolverResult::not_supported(e.to_string()),
+            MipStats::default(),
+        );
     }
     if !problem.is_convex() {
         return (nonconvex_result(), MipStats::default());
@@ -537,7 +557,11 @@ fn solve_relaxation_with_scaling_retry<R: Relaxation>(
 fn needs_scaled_retry(res: &SolverResult) -> bool {
     matches!(
         res.status,
-        SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::SuboptimalSolution
+        SolveStatus::Timeout
+            | SolveStatus::NumericalError
+            | SolveStatus::SuboptimalSolution
+            | SolveStatus::Stalled
+            | SolveStatus::MaxIterations
     )
 }
 
@@ -806,10 +830,7 @@ fn solve_mip_core<R: Relaxation>(
         }
 
         // --- In-tree cut separation (gated; MILP overrides, MIQP no-op) ---
-        if cfg.tree_cuts
-            && matches!(res.status, SolveStatus::Optimal)
-            && !res.solution.is_empty()
-        {
+        if cfg.tree_cuts && matches!(res.status, SolveStatus::Optimal) && !res.solution.is_empty() {
             if let Some(improved) = problem.separate_tree_cuts(
                 solve_bounds,
                 &res,
@@ -1375,6 +1396,24 @@ fn finalize_no_incumbent(
     }
 }
 
+/// Reject an `integer_vars` index out of range for `num_vars` before it
+/// reaches `integer_mask`'s `assert!`.
+///
+/// `MilpProblem`/`MiqpProblem` are public structs with a `pub integer_vars`
+/// field: `new()` validates it via `normalize_integer_vars`, but a caller can
+/// build the struct with a literal (bypassing `new()` entirely, all fields
+/// `pub`) or mutate `integer_vars` afterward, so `solve_milp`/`solve_miqp`
+/// must re-check it themselves at the solve entry rather than trust
+/// construction-time validation -- the same defense already applied to
+/// `MisocpProblem::integers` and `NonconvexQcqp`'s `integers` parameter
+/// (Codex review R3 horizontal expansion, nonconvex.rs:763).
+fn validate_integer_vars(integer_vars: &[usize], num_vars: usize) -> Result<(), MipProblemError> {
+    if let Some(&j) = integer_vars.iter().find(|&&j| j >= num_vars) {
+        return Err(MipProblemError::InvalidIntegerVar { index: j, num_vars });
+    }
+    Ok(())
+}
+
 /// Boolean mask of length `num_vars`; `true` where the variable is integral.
 pub(crate) fn integer_mask(num_vars: usize, integer_vars: &[usize]) -> Vec<bool> {
     let mut mask = vec![false; num_vars];
@@ -1390,11 +1429,13 @@ pub(crate) fn integer_mask(num_vars: usize, integer_vars: &[usize]) -> Vec<bool>
     mask
 }
 
-/// A result tagging a non-convex (non-PSD `Q`) MIQP as out of scope.
+/// A result tagging a non-convex MIQP/MIQCP (non-PSD `Q` or nonconvex
+/// quadratic constraint) as out of scope.
 fn nonconvex_result() -> SolverResult {
     SolverResult {
         status: SolveStatus::NonConvex(
-            "convex MIQP only: Q is not positive semidefinite".to_string(),
+            "convex MIQP/MIQCP only: Q is not PSD or a quadratic constraint is nonconvex"
+                .to_string(),
         ),
         objective: f64::INFINITY,
         solution: vec![],

@@ -241,18 +241,32 @@ impl QpProblem {
         &mut self,
         qcs: Vec<QcqpMatrix>,
     ) -> Result<(), QpProblemError> {
-        if !qcs.is_empty() && qcs.len() != self.num_constraints {
+        Self::check_quadratic_constraints(&qcs, self.num_constraints, self.num_vars)?;
+        self.quadratic_constraints = qcs;
+        Ok(())
+    }
+
+    /// The invariant `set_quadratic_constraints` enforces, factored out so
+    /// [`Self::validate`] can re-check it against the (public) field after
+    /// direct assignment. Length must be 0 or `num_constraints`; every matrix
+    /// must be `num_vars`-sized with finite, in-range triplets.
+    fn check_quadratic_constraints(
+        qcs: &[QcqpMatrix],
+        num_constraints: usize,
+        num_vars: usize,
+    ) -> Result<(), QpProblemError> {
+        if !qcs.is_empty() && qcs.len() != num_constraints {
             return Err(QpProblemError::DimensionMismatch(format!(
                 "quadratic_constraints length must be 0 or {}, got {}",
-                self.num_constraints,
+                num_constraints,
                 qcs.len()
             )));
         }
         for (k, qc) in qcs.iter().enumerate() {
-            if qc.n != self.num_vars {
+            if qc.n != num_vars {
                 return Err(QpProblemError::DimensionMismatch(format!(
                     "quadratic_constraints[{}].n must be {}, got {}",
-                    k, self.num_vars, qc.n
+                    k, num_vars, qc.n
                 )));
             }
             for &(row, col, v) in &qc.triplets {
@@ -272,8 +286,56 @@ impl QpProblem {
                 }
             }
         }
-        self.quadratic_constraints = qcs;
         Ok(())
+    }
+
+    /// Recheck constructor invariants after possible direct mutation of the
+    /// public fields.
+    pub fn validate(&self) -> Result<(), QpProblemError> {
+        if self.c.len() != self.num_vars
+            || self.q.nrows() != self.num_vars
+            || self.q.ncols() != self.num_vars
+            || self.bounds.len() != self.num_vars
+        {
+            return Err(QpProblemError::DimensionMismatch(
+                "Q, c, and bounds must match num_vars".into(),
+            ));
+        }
+        if self.b.len() != self.num_constraints
+            || self.a.nrows() != self.num_constraints
+            || self.a.ncols() != self.num_vars
+            || self.constraint_types.len() != self.num_constraints
+        {
+            return Err(QpProblemError::DimensionMismatch(
+                "A, b, and constraint_types must match problem dimensions".into(),
+            ));
+        }
+        for (field, values) in [
+            ("c", self.c.as_slice()),
+            ("b", self.b.as_slice()),
+            ("Q", self.q.values()),
+            ("A", self.a.values()),
+        ] {
+            if let Some(index) = values.iter().position(|v| !v.is_finite()) {
+                return Err(QpProblemError::NonFiniteCoefficient { field, index });
+            }
+        }
+        if !self.obj_offset.is_finite() {
+            return Err(QpProblemError::NonFiniteCoefficient {
+                field: "obj_offset",
+                index: 0,
+            });
+        }
+        for (index, &(lb, ub)) in self.bounds.iter().enumerate() {
+            if !is_valid_bound_pair(lb, ub) {
+                return Err(QpProblemError::InvalidBounds { index, lb, ub });
+            }
+        }
+        Self::check_quadratic_constraints(
+            &self.quadratic_constraints,
+            self.num_constraints,
+            self.num_vars,
+        )
     }
 
     /// Q が対角行列かどうかを検査する
@@ -620,6 +682,98 @@ mod tests {
         let ct = vec![ConstraintType::Le];
         let res = QpProblem::new(q, c, a, b, bounds, ct);
         assert!(matches!(res, Err(QpProblemError::DimensionMismatch(_))));
+    }
+
+    // --- validate (central structural check) ---
+
+    /// PR #25 review horizontal spread: `QpProblem::validate` re-checks the
+    /// `quadratic_constraints` invariant that `set_quadratic_constraints`
+    /// enforces, catching a short/long non-empty vector assigned directly to
+    /// the public field (bypassing the setter). This is the single source of
+    /// the invariant, shared by the setter and every solve entry
+    /// (`qcqp_route`, `mip`).
+    ///
+    /// Independent oracle: the documented invariant "length 0 or
+    /// num_constraints"; an empty vector and an exact-length valid vector both
+    /// pass, a short and a long non-empty vector both return
+    /// `DimensionMismatch`.
+    #[test]
+    fn validate_matches_setter_length_invariant() {
+        // num_constraints = 1.
+        let mut prob = make_qp(
+            vec![1.0, 2.0],
+            vec![5.0],
+            vec![],
+            vec![1.0, 1.0],
+            vec![(0.0, f64::INFINITY); 2],
+        )
+        .unwrap();
+
+        // Empty (pure QP): valid.
+        assert!(prob.validate().is_ok(), "empty quad vec must validate");
+
+        // Exact length 1: valid (assigned via the setter, which validates).
+        prob.set_quadratic_constraints(vec![QcqpMatrix::new(2)])
+            .unwrap();
+        assert!(prob.validate().is_ok(), "length == num_constraints valid");
+
+        // Direct field assignment of a LONG vec (len 2 > num_constraints 1):
+        // the setter is bypassed, so only validate() catches it.
+        prob.quadratic_constraints = vec![QcqpMatrix::new(2), QcqpMatrix::new(2)];
+        assert!(
+            matches!(prob.validate(), Err(QpProblemError::DimensionMismatch(_))),
+            "long quad vec must fail validate"
+        );
+
+        // Direct field assignment of a SHORT non-empty vec would need
+        // num_constraints >= 2; build a 2-constraint problem for that case.
+        let mut prob2 = make_qp(
+            vec![1.0, 2.0],
+            vec![5.0, 5.0],
+            vec![],
+            vec![1.0, 1.0],
+            vec![(0.0, f64::INFINITY); 2],
+        )
+        .unwrap();
+        assert_eq!(prob2.num_constraints, 2);
+        prob2.quadratic_constraints = vec![QcqpMatrix::new(2)]; // len 1 < 2
+        assert!(
+            matches!(prob2.validate(), Err(QpProblemError::DimensionMismatch(_))),
+            "short quad vec must fail validate"
+        );
+    }
+
+    /// `validate` also inherits the per-matrix checks the setter runs (n
+    /// mismatch, non-finite, out-of-range triplets) via the shared
+    /// `check_quadratic_constraints`.
+    #[test]
+    fn validate_catches_nonfinite_and_dim_from_direct_assignment() {
+        let mut prob = make_qp(
+            vec![1.0, 2.0],
+            vec![5.0],
+            vec![],
+            vec![1.0, 1.0],
+            vec![(0.0, f64::INFINITY); 2],
+        )
+        .unwrap();
+        // Non-finite triplet, direct assignment (len matches num_constraints).
+        let mut qc = QcqpMatrix::new(2);
+        qc.triplets.push((0, 0, f64::NAN));
+        prob.quadratic_constraints = vec![qc];
+        assert!(
+            matches!(
+                prob.validate(),
+                Err(QpProblemError::NonFiniteCoefficient { .. })
+            ),
+            "non-finite triplet must fail validate"
+        );
+
+        // Wrong matrix dimension (n=3 for a 2-var problem).
+        prob.quadratic_constraints = vec![QcqpMatrix::new(3)];
+        assert!(
+            matches!(prob.validate(), Err(QpProblemError::DimensionMismatch(_))),
+            "wrong matrix n must fail validate"
+        );
     }
 
     // --- set_quadratic_constraints ---

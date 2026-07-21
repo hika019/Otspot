@@ -1,4 +1,4 @@
-//! Task #29 凸 QP mini-corpus — **bug class: scaling / ill-conditioned Q**
+//! 凸 QP mini-corpus — **bug class: scaling / ill-conditioned Q**
 //!
 //! ## 対象 bug class
 //!
@@ -128,31 +128,38 @@ fn scl2_large_linear_term_c() {
 /// **is_zero_q (qp/problem.rs FX_TOL=1e-12)**: 1e-10 > 1e-12 ⇒ Q 非ゼロ扱い、IPM へ。
 /// **解析解**: ∇f=0 ⇒ 1e-10 * x = 1 ⇒ x=1e10 (interior, bound 余裕)。
 ///   obj = 0.5 * 1e-10 * 1e20 - 1e10 = 0.5e10 - 1e10 = -0.5e10。
-/// **狙い**: Q 非ゼロだが小さい場合に LP fallback されない、かつ KKT で正しい x。
+/// **狙い**: Q 非ゼロだが小さい場合に LP fallback されない、かつ iterate が正しい x。
+///
+/// 10 桁の condition number により IPM は eps=1e-6 の成分相対 KKT を証明できず
+/// (kkt_rel ~1e-4 の精度床)、status は解品質を主張しない `Stalled` になる。
+/// core API は診断 iterate を返すため、x/obj の regression 検出力は維持する。
+/// (旧 test は同じ iterate を `SuboptimalSolution` として Model API 経由で
+/// 受領していた — status 誠実化に伴い core API 検証へ移行。)
 #[test]
 fn scl3_nearly_zero_q_above_threshold() {
-    let mut model = Model::new("scl3");
-    model.set_timeout(MINI_TIMEOUT_SECS);
-    let x = model.add_var("x", 0.0, 1e15);
-    // Q[0][0]=1e-10: (1e-10/2)*x*x
-    model.minimize((1e-10_f64 / 2.0) * x * x + (-1.0) * x);
+    let q = CscMatrix::from_triplets(&[0], &[0], &[1e-10], 1, 1).unwrap();
+    let a = CscMatrix::new(0, 1);
+    let problem =
+        QpProblem::new_all_le(q, vec![-1.0], a, vec![], vec![(0.0_f64, 1e15_f64)]).unwrap();
 
-    let result = model.solve().expect("scl3: solve (Q small but ≠ 0)");
-    // x=1e10 を許容 rel < 1e-3
-    let rel = (result[x] - 1e10).abs() / 1e10;
+    let result = solve_qp_with(&problem, &solver_opts());
     assert!(
-        rel < 1e-3,
-        "scl3: x≈1e10, got {} (rel={:.3e})",
-        result[x],
-        rel
+        matches!(
+            result.status,
+            SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Stalled
+        ),
+        "scl3: LP fallback や error に落ちてはいけない, got {:?}",
+        result.status
     );
-    // obj 計算誤差は |x|^2 * Q オーダーで桁落ち。EPS_OBJ_REL より緩めて 1e-4。
+    let x = result.solution[0];
+    let rel = (x - 1e10).abs() / 1e10;
+    assert!(rel < 1e-3, "scl3: x≈1e10, got {x} (rel={rel:.3e})");
     let exp_obj = -0.5e10;
-    let obj_rel = (result.objective_value - exp_obj).abs() / exp_obj.abs();
+    let obj_rel = (result.objective - exp_obj).abs() / exp_obj.abs();
     assert!(
         obj_rel < 1e-4,
         "scl3: obj={:.6e} expected={:.6e} (rel={:.3e})",
-        result.objective_value,
+        result.objective,
         exp_obj,
         obj_rel
     );

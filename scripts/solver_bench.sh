@@ -99,7 +99,7 @@ if [[ "$bin" == "milp_solve" ]]; then
   n_pass=0; n_checked_noref=0; n_pass_infeasible=0; n_pass_unbounded=0
   n_timeout=0; n_external_timeout=0; n_fail=0; n_maxiter=0; n_error=0; n_skip=0
   n_dfeas_fail=0; n_pfeas_fail=0; n_obj_mismatch=0; n_kkt_fail=0
-  n_nonconvex=0; n_suboptimal=0; n_total=0
+  n_nonconvex=0; n_suboptimal=0; n_stalled=0; n_total=0
 
   printf "\n%-20s %8s %8s %20s %12s %s\n" "NAME" "N_CONS" "N_VARS" "STATUS" "TIME_S" "NOTE"
   printf '%0.s-' {1..80}; echo
@@ -218,6 +218,10 @@ if [[ "$bin" == "milp_solve" ]]; then
         bench_status="MAXITER"
         n_maxiter=$(( n_maxiter + 1 ))
         ;;
+      Stalled)
+        bench_status="STALLED"; note="obj=${obj_str}"
+        n_stalled=$(( n_stalled + 1 ))
+        ;;
       SuboptimalSolution)
         bench_status="SUBOPTIMAL"; note="obj=${obj_str}"
         n_suboptimal=$(( n_suboptimal + 1 ))
@@ -257,6 +261,7 @@ if [[ "$bin" == "milp_solve" ]]; then
   printf "  SUBOPTIMAL:        %d\n" "$n_suboptimal"
   printf "  OBJ_MISMATCH:      %d\n" "$n_obj_mismatch"
   printf "  MAXITER:           %d\n" "$n_maxiter"
+  printf "  STALLED:           %d\n" "$n_stalled"
   printf "  TIMEOUT:           %d\n" "$n_timeout"
   printf "  EXTERNAL_TIMEOUT:  %d\n" "$n_external_timeout"
   printf "  NONCONVEX:         %d\n" "$n_nonconvex"

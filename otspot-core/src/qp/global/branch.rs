@@ -64,12 +64,15 @@ fn alpha_bb_warm_for_child(
     child_bounds: &[(f64, f64)],
 ) -> Option<QpWarmStart> {
     warm.and_then(|ws| {
-        let within = ws
-            .x
-            .iter()
-            .zip(child_bounds.iter())
-            .all(|(&xi, &(lb, ub))| xi >= lb - 1e-8 && xi <= ub + 1e-8);
-        if within { Some(ws.clone()) } else { None }
+        let within =
+            ws.x.iter()
+                .zip(child_bounds.iter())
+                .all(|(&xi, &(lb, ub))| xi >= lb - 1e-8 && xi <= ub + 1e-8);
+        if within {
+            Some(ws.clone())
+        } else {
+            None
+        }
     })
 }
 

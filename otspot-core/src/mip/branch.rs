@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn default_branching_is_reliability() {
-        // Restored in b95b038: MostFractional caused khb05250 3.4x / p0201 2.6x
+        // Restored in 6d1cc7b5: MostFractional caused khb05250 3.4x / p0201 2.6x
         // regressions; Reliability (reduced params) is overall superior.
         assert_eq!(MipBranching::default(), MipBranching::Reliability);
     }

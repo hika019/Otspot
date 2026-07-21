@@ -18,12 +18,12 @@ use super::super::trace::IterTrace;
 use super::super::SimplexOutcome;
 use super::ratio_test::{bland_ratio_test, HarrisRatioTest, RatioTestStrategy};
 use crate::basis::{BasisManager, LuBasis};
+use crate::linalg::timeout::deadline_reached;
 use crate::options::SolverOptions;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use crate::linalg::timeout::deadline_reached;
 
 /// Lex 摂動 (bland_mode 起動時): reduced_costs (non-basic) と x_b に
 /// `eps·(1+i/n)·scale` を加算し ratio test の tie を解消、Bland's rule の有限終了
@@ -226,7 +226,7 @@ fn compute_reduced_costs_timed(
 ///   monotone (each Priority-2 pivot replaces an artificial with a structural
 ///   column) and forbids the degenerate artificial↔artificial swap cycle
 ///   (nug08-3rd). Callers without artificials pass `n_enter = n_price`.
-/// - `yield_on_stall`: when true, a Bland-mode no-progress stall returns `Timeout`
+/// - `yield_on_stall`: when true, a Bland-mode no-progress stall returns `Stalled`
 ///   so the caller can hand off to an alternative method. ONLY the Big-M Phase I
 ///   caller passes `true` — its Priority-2 artificial-removal is a non-standard
 ///   leaving rule for which Bland gives no finite-termination guarantee, and it
@@ -425,19 +425,16 @@ pub(crate) fn dual_simplex_core_advanced(
         }
 
         // 3d': lb-violation direction correction.
-        //
-        // When x_b[r] < 0 (lb violation) the entering variable must increase x_b[r],
-        // i.e. select trow[j] < 0. Sign-flip trow to reuse the ub-repair ratio test;
-        // rc and the leaving r-value are also flipped (3i).
-        //
-        // Artificial-leaving guard (basis[r] >= n_enter): flipping drives the artificial
-        // value toward 0 without evicting it, producing a 478-pivot cycle (sierra).
-        // Artificials leave in the standard direction; re-entry is blocked by n_enter
-        // so they exit monotonically.
-        //
-        // Suppressing lb-repair on an artificial-leaving row may cause bare Big-M to
-        // abandon some feasible Eq cases; the primal fallback recovers (verified Optimal).
-        // See `big_m_phase1_artificial_lb_repair_edge_*`.
+        // When x_b[r] < 0 (lb violation) the entering variable must increase
+        // x_b[r], i.e. select trow[j] < 0. Sign-flip trow to reuse the ub-repair
+        // ratio test; rc and the leaving r-value are also flipped (3i).
+        // Artificial-leaving guard (basis[r] >= n_enter): flipping drives the
+        // artificial value toward 0 without evicting it, producing a 478-pivot
+        // cycle (sierra). Artificials leave in the standard direction; re-entry
+        // is blocked by n_enter so they exit monotonically.
+        // Suppressing lb-repair on an artificial-leaving row may cause bare
+        // Big-M to abandon some feasible Eq cases; the primal fallback recovers
+        // (verified Optimal). See `big_m_phase1_artificial_lb_repair_edge_*`.
         let mut lb_violation =
             x_b[leaving_row] < 0.0 && leaving.allows_lb_repair() && basis[leaving_row] < n_enter;
         let artificial_lb_violation =
@@ -451,8 +448,13 @@ pub(crate) fn dual_simplex_core_advanced(
         // 3e: ratio test → entering_col, theta
         // bland_mode では pure Bland (min ratio + smallest idx tiebreak)。
         let (mut candidate_indices, mut candidate_ratios, mut ratio_pick) = if bland_mode {
-            let (indices, ratios) =
-                collect_bland_ratio_candidates(&trow, &reduced_costs, price_excluded, n_enter, PIVOT_TOL);
+            let (indices, ratios) = collect_bland_ratio_candidates(
+                &trow,
+                &reduced_costs,
+                price_excluded,
+                n_enter,
+                PIVOT_TOL,
+            );
             let pick = bland_ratio_test(&trow, &reduced_costs, price_excluded, n_enter, PIVOT_TOL);
             (indices, ratios, pick)
         } else {
@@ -511,10 +513,12 @@ pub(crate) fn dual_simplex_core_advanced(
 
         let (entering_col, theta) = match ratio_pick {
             None => {
-                // rejected_entering が active → 全候補を除外した状態; fallback なし
+                // rejected_entering が active → 全候補を除外した状態; fallback なし。
+                // deadline とは無関係の内部 dead-end なので Stalled (budget 残で
+                // Timeout を自称しない)。
                 if rejected_entering.iter().any(|&v| v) {
                     let obj: f64 = basic_obj(c, basis, x_b);
-                    return SimplexOutcome::Timeout(obj);
+                    return SimplexOutcome::Stalled(obj);
                 }
                 // 候補なしは dual-unbounded の証明候補だが、Bland 長走では
                 // eta/rc drift が全候補を負 ratio 側へ押し出すことがある。
@@ -731,7 +735,7 @@ pub(crate) fn dual_simplex_core_advanced(
                 if bland_mode {
                     if yield_on_stall {
                         let obj: f64 = basic_obj(c, basis, x_b);
-                        return SimplexOutcome::Timeout(obj);
+                        return SimplexOutcome::Stalled(obj);
                     }
                     // Standard caller: keep iterating; classical Bland terminates.
                     iters_since_progress = 0;
@@ -739,8 +743,7 @@ pub(crate) fn dual_simplex_core_advanced(
                     bland_mode = true;
                     iters_since_progress = 0;
                     // 初回エントリ: rc と x_b の両方を摂動する。
-                    let stats =
-                        apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, true);
+                    let stats = apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, true);
                     if let Some(t) = trace.as_mut() {
                         t.log_lex_perturbation(stats.delta, stats.effect);
                     }
@@ -846,7 +849,17 @@ mod tests {
             let mut leaving = MostInfeasibleLeaving;
             let mut iters = 0usize;
             dual_simplex_core_advanced(
-                &a, &mut x_b, &c, &mut basis, 1, 4, n_enter, false, &opts, &mut leaving, &mut iters,
+                &a,
+                &mut x_b,
+                &c,
+                &mut basis,
+                1,
+                4,
+                n_enter,
+                false,
+                &opts,
+                &mut leaving,
+                &mut iters,
             )
         };
 
@@ -861,23 +874,25 @@ mod tests {
         );
     }
 
-    /// LOAD-BEARING sentinel: the stall→Timeout yield must fire ONLY when the
-    /// caller opts in (`yield_on_stall = true`, i.e. Big-M, which has a fallback).
+    /// LOAD-BEARING sentinel: the stall yield must fire ONLY when the caller
+    /// opts in (`yield_on_stall = true`, i.e. Big-M, which has a fallback).
     /// A standard caller (`false`) must keep iterating — classical Bland
     /// terminates and there is no fallback, so yielding would turn a solvable LP
-    /// into a spurious Timeout (codex concern A).
+    /// into a spurious stop (codex concern A).
     ///
     /// `AlwaysStallLeaving` forces an endless degenerate pivot loop with a
     /// constant progress metric, so the core enters bland_mode and never makes
     /// progress. With a short deadline:
-    ///   - yield_on_stall=true  → Timeout at the stall (~2·k_trigger iters).
-    ///   - yield_on_stall=false → Timeout only at the deadline (far more iters).
+    ///   - yield_on_stall=true  → `Stalled` at the stall (~2·k_trigger iters).
+    ///   - yield_on_stall=false → `Timeout` only at the deadline (far more iters).
     ///
-    /// no-op proof: if the yield ignores the flag (always yields), the no-yield
-    /// run stops at the same ~2·k_trigger point ⇒ `iters_noyield ≈ iters_yield`
-    /// ⇒ the `>` assertion fails.
+    /// The variant split doubles as the honesty sentinel: a stall-yield with
+    /// budget left must NOT claim `Timeout` (reverting the `Stalled` mint fails
+    /// the first `matches!`). no-op proof for the flag: if the yield ignores the
+    /// flag (always yields), the no-yield run stops at the same ~2·k_trigger
+    /// point ⇒ `iters_noyield ≈ iters_yield` ⇒ the `>` assertion fails.
     #[test]
-    fn yield_on_stall_gated_by_caller_flag() {
+    fn yield_on_stall_returns_stalled_and_is_caller_gated() {
         use super::super::super::pricing::DualLeavingStrategy;
 
         struct AlwaysStallLeaving;
@@ -915,7 +930,16 @@ mod tests {
             let mut leaving = AlwaysStallLeaving;
             let mut iters = 0usize;
             let out = dual_simplex_core_advanced(
-                &a, &mut x_b, &c, &mut basis, 1, 3, 3, yield_on_stall, &opts, &mut leaving,
+                &a,
+                &mut x_b,
+                &c,
+                &mut basis,
+                1,
+                3,
+                3,
+                yield_on_stall,
+                &opts,
+                &mut leaving,
                 &mut iters,
             );
             (out, iters)
@@ -924,8 +948,8 @@ mod tests {
         let (out_yield, iters_yield) = run(true);
         let (out_noyield, iters_noyield) = run(false);
         assert!(
-            matches!(out_yield, SimplexOutcome::Timeout(_)),
-            "yield path must Timeout (stall-yield)"
+            matches!(out_yield, SimplexOutcome::Stalled(_)),
+            "yield path must return Stalled (internal stall, budget left)"
         );
         assert!(
             matches!(out_noyield, SimplexOutcome::Timeout(_)),
@@ -1014,7 +1038,7 @@ mod tests {
         }
     }
 
-    /// #202 sentinel: `set_initial_gamma` must be invoked exactly once
+    /// sentinel: `set_initial_gamma` must be invoked exactly once
     /// (cold-start). The per-refactor m-BTRAN re-init was redundant — the
     /// rank-1 update is exact (Forrest-Goldfarb 1992) and `after_refactor`
     /// handles CEILING-flagged drift via identity reset.
@@ -1143,9 +1167,19 @@ mod tests {
         let before = CORE_RC_DEADLINE_CHECK_COUNT.with(|c| c.get());
         let deadline_far = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
         let rc_opt = compute_reduced_costs_timed(
-            &a, &c, &mut basis_mgr, &is_basic, n_synthetic, m, &basis, deadline_far,
+            &a,
+            &c,
+            &mut basis_mgr,
+            &is_basic,
+            n_synthetic,
+            m,
+            &basis,
+            deadline_far,
         );
-        assert!(rc_opt.is_some(), "RC compute must succeed (deadline is far)");
+        assert!(
+            rc_opt.is_some(),
+            "RC compute must succeed (deadline is far)"
+        );
         let rc = rc_opt.unwrap();
 
         let after = CORE_RC_DEADLINE_CHECK_COUNT.with(|c| c.get());
@@ -1324,7 +1358,10 @@ mod tests {
 
             let make_warm_opts = |pricing: DualPricing, basis: Vec<usize>| SolverOptions {
                 dual_pricing: pricing,
-                warm_start: Some(WarmStartBasis { basis, x_b: Vec::new() }),
+                warm_start: Some(WarmStartBasis {
+                    basis,
+                    x_b: Vec::new(),
+                }),
                 ..SolverOptions::default()
             };
 

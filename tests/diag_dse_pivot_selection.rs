@@ -105,7 +105,7 @@ fn make_lp_from_qp(qp: &QpProblem) -> LpProblem {
 /// caused `solve_dual_advanced` to dispatch to the bounded path
 /// (`try_bounded` → `phase2_primal_bounded`), which uses `SteepestEdgePricing`
 /// (primal) and ignores `options.dual_pricing`. DSE vs MI distinction was lost
-/// → iter counts identical → wins = 0 (#175 P1).
+/// → iter counts identical → wins = 0.
 ///
 /// Fix: bounds are `(0, +∞)` (no finite UBs), so the bounded-path gate
 /// (`problem.bounds.iter().any(ub.is_finite())`) is `false` and the legacy

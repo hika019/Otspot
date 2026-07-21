@@ -94,7 +94,11 @@ fn structural_zero_q_routes_to_lp() {
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
-    assert_eq!(result.status, SolveStatus::Optimal, "LP (Q=0) must be Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "LP (Q=0) must be Optimal"
+    );
     assert_eq!(
         result.stats.route,
         SolveRoute::LpForwardedFromQp,

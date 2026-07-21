@@ -4,6 +4,8 @@
 //! gate され、perturbation variant の deadline は plain variant の 4× に制限される。
 //! 本 test は simplex postsolve 経路の wall-clock threshold を pin する。
 //! (LP は IPM を撤廃し simplex 一本化したため、全 LP が simplex postsolve を通る。)
+//! d6cube の同種 gate は `diag_d6cube_perf.rs` の
+//! `d6cube_optimal_and_postsolve_fast_tier2` に統合済み。
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
@@ -52,37 +54,24 @@ fn wood1p_postsolve_under_2s() {
     );
 }
 
-/// d6cube's postsolve used to swallow 15 s on a cleanup LP that returned Inf.
-/// The cheap recovery already gives machine-zero dfeas.
-///
-/// tier-2: d6cube は simplex 一本化後 60s で Optimal に達しない (Phase2 worklist)。
-/// 未収束だと postsolve に到達せず gate が vacuous になるため default から外す。
-/// 収束自体は lp_simplex_stall_d6cube_converges が追跡。
-#[test]
-#[ignore = "perf-open/heavy: 60s run currently times out before postsolve; requires Optimal before checking <1s gate"]
-fn d6cube_postsolve_under_1s() {
-    let prob = load("data/lp_problems/d6cube.QPS");
-    let (status, _wall, postsolve_s) = solve(&prob, 60.0);
-    assert!(
-        matches!(status, SolveStatus::Optimal),
-        "d6cube must reach Optimal before postsolve gate is meaningful; got {:?}",
-        status
-    );
-    assert!(
-        postsolve_s < 1.0,
-        "d6cube postsolve {:.2}s exceeded 1s — cleanup-LP gate likely regressed",
-        postsolve_s
-    );
-}
-
 /// greenbea's cleanup_pert returned Inf after ~20 s; the 4× cap on its
 /// deadline bounds postsolve well under what it used to consume.
 ///
-/// tier-2: greenbea は simplex 一本化後 60s で Optimal に達しない (Phase2 worklist)。
-/// 未収束だと postsolve に到達せず gate が vacuous になるため default から外す。
-/// 収束自体は lp_simplex_stall_greenbea_converges が追跡。
+/// b43b0a42 (postsolve 受入ゲートの ipm_eps 基準化) 以降 greenbea は 60s 内に
+/// Optimal へ達し gate は vacuous でなくなった。収束自体は
+/// lp_simplex_stall_greenbea_converges が追跡。
+///
+/// Promoted to must-pass 2026-07-09: the stated promotion criterion ("a green
+/// GH Actions observation") has been met. The only assert here is
+/// `postsolve_s < 5.0`; each CI PASS therefore confirms postsolve stayed under
+/// the 5s cap. Confirmed PASS on 7 heavy CI runs since b43b0a42 (the
+/// postsolve-gate eps-alignment fix in this branch's actual history) on
+/// integrate/repo-audit-fixes (run IDs: 29009210239, 28993562011,
+/// 28937563078, 28928204239, 28914605970, 28914404571, 28853711546). CI logs
+/// surface only the nextest wall time on PASS, not the asserted postsolve_s;
+/// locally measured postsolve_s = 3.10s / 3.11s across 2 local runs,
+/// comfortably inside the cap.
 #[test]
-#[ignore = "perf-open/heavy: greenbea does not converge within 60s; postsolve gate is vacuous; run via --profile heavy"]
 fn greenbea_postsolve_under_5s() {
     let prob = load("data/lp_problems/greenbea.QPS");
     let (_status, _wall, postsolve_s) = solve(&prob, 60.0);

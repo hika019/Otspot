@@ -1,9 +1,18 @@
 name: CI (heavy)
 
-# tier-2 sentinel gate (#97 で #[ignore = "tier-2"] 化した 20 test を復活させる).
+# tier-2 sentinel gate (#[ignore = "tier-2"] 化した 20 test を復活させる).
 # トリガ (user policy 3b97a37):
 #   1. 全 branch push で auto-run (cron 廃止、push 必ず走らせる)
 #   2. workflow_dispatch (Actions tab "Run workflow" ボタン)
+#
+# 構成: must-pass / perf-open の2段。
+#   - must-pass: heavy sentinel の regression gate。fail でジョブが赤になる。
+#     (旧構成の全 step continue-on-error は、informational 枠に本物の
+#     regression が混ざっても検知できず、greenbea 偽降格 regression
+#     (daf7ab54 起源、b43b0a42 で修正) を素通しした。)
+#   - perf-open: 意図的に赤を許容する既知未達成 perf 目標 (ignore reason
+#     "perf-open" のテスト)。informational 継続。目標達成で緑になったら
+#     must-pass へ移す (下の除外リストと ignore annotation の両方を更新)。
 on:
   workflow_dispatch:
   push:
@@ -17,8 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # rust-toolchain + nextest install を Download 前に配置: Download が
-      # netlib intermittent で fail しても `if: always()` の test step が
-      # `nextest 不在` で死なないようにする。
+      # netlib intermittent で fail しても後続 test step が `nextest 不在`
+      # で死なないようにする。
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
@@ -26,7 +35,10 @@ jobs:
         id: cache
         with:
           path: data/
-          key: bench-data-v1
+          # v2: heavy 専用データ (lp_problems_hard/neos.QPS, osqp_bench_illscaled)
+          # を追加した (PR #25 CI fix)。旧 v1 の shape と異なるため bump。
+          # restore-keys の prefix match で v1 からの fallback restore は維持。
+          key: bench-data-v2
           restore-keys: |
             bench-data-
       - name: Restore git-tracked baselines (cache 上書き対策)
@@ -38,20 +50,52 @@ jobs:
         run: bash scripts/ensure_emps.sh
       - name: Download CI subset
         run: bash scripts/download_all_bench_data.sh --ci-subset
-      - name: Run heavy (broken/flaky/permanent surveillance) tests
-        # Informational surveillance: ignored/heavy tests are not required to pass on CI.
-        # Non-ignored tests are gated by ci.yml; keep surfacing all ignored results here.
-        continue-on-error: true
+      - name: Download lp_problems_hard subset (neos.QPS, tier-2 sentinel data)
+        # diag_timeout_user_specified::timeout_honored_on_neos_bigm_cold_start が
+        # data/lp_problems_hard/neos.QPS を要求する (#[ignore] だが heavy が
+        # --run-ignored all で実走、data 欠落は panic — CLAUDE.md 方針で silent skip
+        # にしない)。lp_problems_hard 全53件は他 heavy test が要求しないため
+        # LP_HARD_ONLY で neos だけに絞り、CI 帯域/時間を節約する。
+        # ensure_emps.sh: lp_hard_download.sh は emps 不在で即 exit 1 するが、
+        # 上の emps build step は cache-hit 時に skip されるためここで確保する
+        # (vendored ソースから build、冪等、ネットワーク不要)。
+        run: |
+          if [ -f data/lp_problems_hard/neos.QPS ]; then
+            echo "[skip] data/lp_problems_hard/neos.QPS already present"
+          else
+            bash scripts/ensure_emps.sh
+            LP_HARD_ONLY="neos" bash scripts/lp_hard_download.sh
+          fi
+      - name: Generate osqp_bench_illscaled (IS_LASSO_300, tier-2 sentinel data)
+        # diag_qp_deadline_lasso::qp_is_lasso_300_real_data_honors_deadline が
+        # data/osqp_bench_illscaled/IS_LASSO_300_S33_E5.qps を要求する。
+        # download_all_bench_data.sh の run_or_skip と同じ規約: cache hit で
+        # 既に 126 件揃っていれば再生成しない。生成器は問題定義を
+        # tmp/external/osqp_benchmarks から import する。cache hit 時は
+        # "Download CI subset" 内の setup_extra_benches.sh が skip され
+        # clone されないため、ここで明示的に確保する。
+        run: |
+          n=$(ls data/osqp_bench_illscaled 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$n" -ge 126 ]; then
+            echo "[skip] data/osqp_bench_illscaled already populated ($n/126)"
+          else
+            if [ ! -d tmp/external/osqp_benchmarks/.git ]; then
+              git clone --depth 1 https://github.com/osqp/osqp_benchmarks.git tmp/external/osqp_benchmarks
+            fi
+            python3 scripts/gen_osqp_bench_illscaled.py
+          fi
+      - name: Verify test data requirements (alignment gate)
+        # PR #25 の指摘 4: 「--run-ignored all を must-pass にする」と「CI が
+        # 用意するデータ集合」は別の場所で管理されており、黙って乖離する
+        # (data-requiring な #[ignore] テストは data 欠落で panic する設計)。
+        # このゲートはテスト源泉が参照する data/ パスを全数チェックし、欠落を
+        # nextest 実行前に読みやすく fail させる。graceful-skip 系
+        # (cblib_socp 等) は warning として可視化される。
+        run: python3 scripts/check_test_data_requirements.py
+      - name: Run heavy must-pass sentinels (gating)
+        # heavy 全件 (収束 sentinel 含む)。fail = regression としてジョブを赤にする。
+        # perf-open 除外リストは現在空 (最後の対象 diag_osa60_must_reach_known_objective
+        # は 2026-07-11 に default must-pass へ昇格、UB 行膨張 dispatch fix)。
         run: |
           cargo nextest run --release --features parallel --profile heavy \
             --run-ignored all --no-fail-fast --test-threads 3
-      - name: Run heavy convergence sentinels (surveillance)
-        # Informational surveillance for convergence sentinels; results are surfaced but non-gating.
-        # budget/tol は diag_lp_simplex_stall_sentinel.rs 参照。
-        # if: always() — setup failure 後も収束結果を surface する。
-        if: always()
-        continue-on-error: true
-        run: |
-          cargo nextest run --release --profile heavy --run-ignored all --no-fail-fast \
-            -E 'test(=lp_simplex_stall_cre_b_converges) | test(=lp_simplex_stall_d6cube_converges) | test(=lp_simplex_stall_pilot_converges)' \
-            --test-threads 3

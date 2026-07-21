@@ -35,7 +35,7 @@ fn load_lp(path: &str) -> LpProblem {
 
 /// pilot-ja under presolve must certify Optimal with a dual-feasible dual.
 ///
-/// tier-2 (Mac ~12s); heavy profile (#97).
+/// Runs in the default profile (~12s on Mac); not gated behind heavy.
 #[test]
 fn pilot_ja_postsolve_dual_is_feasible() {
     let prob = load_lp("data/lp_problems/pilot-ja.QPS");

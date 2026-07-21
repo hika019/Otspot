@@ -20,6 +20,23 @@ thread_local! {
     static INJECT_REDUCED_TIMEOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+// Test-only capture of the internal simplex tolerances actually used by
+// solve_with, so a sentinel can prove `tolerance` no longer overrides them.
+#[cfg(test)]
+thread_local! {
+    static CAPTURE_EFFECTIVE_SIMPLEX_TOLS: std::cell::Cell<Option<(f64, f64)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+// Test-only hook: stamps a recognizable marker (`bounded_eq_ub_path = true`)
+// onto the reduced solve's stats so sentinels can prove the solve metadata
+// survives postsolve lifting / the Timeout early-return, independent of which
+// simplex pipeline the reduced problem happens to take.
+#[cfg(test)]
+thread_local! {
+    static MARK_REDUCED_SOLVE_STATS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Iteration count the test hook stamps onto the injected reduced-space Timeout,
 /// so a sentinel can assert the early-return carries `iterations` through. A 0
 /// here would re-introduce the `iters=0` reporting artifact.
@@ -43,16 +60,16 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
     if options.validate().is_err() {
         return SolverResult::numerical_error();
     }
-    let mut opts_with_tolerance;
-    let options = if options.tolerance.is_some() {
-        opts_with_tolerance = options.clone();
-        let eps = opts_with_tolerance.ipm_eps();
-        opts_with_tolerance.primal_tol = eps;
-        opts_with_tolerance.dual_tol = eps;
-        &opts_with_tolerance
-    } else {
-        options
-    };
+    // The requested accuracy (`tolerance`) governs solution ACCEPTANCE via
+    // `lp_accept_{primal,dual}_tol()` (= max(*_tol, ipm_eps())); it must never
+    // override the simplex's INTERNAL numerical tolerances. daf7ab54 set
+    // `primal_tol = dual_tol = ipm_eps()` here, loosening the ratio-test
+    // feasibility band and the Phase II fresh-x_B check from PIVOT_TOL (1e-8)
+    // to the user eps (1e-6): the pivot trajectory drifts, terminates at a
+    // vertex with bound violation ~1e-5 > primal_tol, and the honest
+    // non-Optimal bail fires (80bau3b PASS→stall, pilot PASS→stall).
+    #[cfg(test)]
+    CAPTURE_EFFECTIVE_SIMPLEX_TOLS.with(|c| c.set(Some((options.primal_tol, options.dual_tol))));
     // timeout_secs → deadline (mirrors qp_solve_impl).
     let mut opts_with_deadline;
     let options = if let (Some(secs), true) = (options.timeout_secs, options.deadline.is_none()) {
@@ -133,14 +150,22 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 } else {
                     raw
                 };
+                // Test hook: stamp a stats marker on the reduced solve result.
+                #[cfg(test)]
+                let raw = if MARK_REDUCED_SOLVE_STATS.with(|v| v.get()) {
+                    let mut marked = raw;
+                    marked.stats.bounded_eq_ub_path = true;
+                    marked
+                } else {
+                    raw
+                };
                 let deadline_expired = eff_opts
                     .deadline
                     .is_some_and(|d| std::time::Instant::now() >= d);
                 // In tests the hook also bypasses the wall-clock deadline check so
                 // the sentinel doesn't depend on timing.
                 #[cfg(test)]
-                let deadline_expired =
-                    deadline_expired || INJECT_REDUCED_TIMEOUT.with(|v| v.get());
+                let deadline_expired = deadline_expired || INJECT_REDUCED_TIMEOUT.with(|v| v.get());
                 if raw.status == SolveStatus::Timeout && deadline_expired {
                     // The reduced solve timed out and the deadline is exhausted.
                     // `raw.solution` is in the *reduced* variable space — propagating
@@ -159,6 +184,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                         slack: vec![],
                         warm_start_basis: None,
                         iterations: raw.iterations,
+                        stats: raw.stats.clone(),
                         timing_breakdown: Some(crate::problem::TimingBreakdown {
                             presolve_us,
                             solve_us,
@@ -195,10 +221,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 // be called: it would fill solution/dual vectors from the postsolve stack
                 // (e.g. SingletonRow fixed values), producing a spurious non-empty
                 // solution with Infeasible/Unbounded status.
-                if matches!(
-                    raw.status,
-                    SolveStatus::Infeasible | SolveStatus::Unbounded
-                ) {
+                if matches!(raw.status, SolveStatus::Infeasible | SolveStatus::Unbounded) {
                     let objective = if raw.status == SolveStatus::Infeasible {
                         f64::INFINITY
                     } else {
@@ -228,6 +251,10 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     eff_opts.deadline,
                     options.recover_warm_start_basis,
                 );
+                // Postsolve lifts the solution to original space but says nothing
+                // about how the reduced problem was solved; keep the solve metadata
+                // (bounded_eq_ub_path etc.), mirroring lp_dispatch's lifted.stats.
+                res.stats = raw.stats.clone();
                 res = guard_lp_optimal(res, problem);
                 let postsolve_us = t_solve_done.elapsed().as_micros() as u64;
                 res.timing_breakdown = Some(crate::problem::TimingBreakdown {
@@ -240,9 +267,12 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 // reduced solution did not reconstruct a valid original-space answer.
                 // The original LP solves cleanly, so re-attempt on the remaining deadline.
                 let (postsolve_pfeas, postsolve_bfeas) = lp_primal_residuals(problem, &res);
-                let postsolve_bad = res.postsolve_dfeas.is_some_and(|d| d > options.dual_tol)
-                    || postsolve_pfeas > options.primal_tol
-                    || postsolve_bfeas > options.primal_tol
+                let accept_primal = options.lp_accept_primal_tol();
+                let postsolve_bad = res
+                    .postsolve_dfeas
+                    .is_some_and(|d| d > options.lp_accept_dual_tol())
+                    || postsolve_pfeas > accept_primal
+                    || postsolve_bfeas > accept_primal
                     || res.status == SolveStatus::SuboptimalSolution;
                 if matches!(
                     res.status,
@@ -265,8 +295,8 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                         let (alt_pfeas, alt_bfeas) = lp_primal_residuals(problem, &alt);
                         if alt.status == SolveStatus::Optimal
                             && alt.postsolve_dfeas.is_none()
-                            && alt_pfeas <= options.primal_tol
-                            && alt_bfeas <= options.primal_tol
+                            && alt_pfeas <= accept_primal
+                            && alt_bfeas <= accept_primal
                             && alt.objective.is_finite()
                         {
                             // Preserve the original presolve/postsolve times: both phases
@@ -1078,7 +1108,10 @@ mod tests {
 
         let pr = crate::presolve::run_presolve(&lp, None)
             .expect("make_partial_reducible_lp must not be Infeasible/Unbounded at presolve");
-        assert!(pr.was_reduced, "make_partial_reducible_lp must produce was_reduced=true");
+        assert!(
+            pr.was_reduced,
+            "make_partial_reducible_lp must produce was_reduced=true"
+        );
         let reduced_n = pr.reduced_problem.num_vars;
         assert!(
             reduced_n > 0 && reduced_n < orig_n,
@@ -1086,7 +1119,13 @@ mod tests {
         );
 
         // 1. Optimal path (no deadline): solution must be in original space.
-        let r = solve_with(&lp, &SolverOptions { presolve: true, ..Default::default() });
+        let r = solve_with(
+            &lp,
+            &SolverOptions {
+                presolve: true,
+                ..Default::default()
+            },
+        );
         assert_eq!(r.status, SolveStatus::Optimal);
         assert_eq!(
             r.solution.len(),
@@ -1100,10 +1139,20 @@ mod tests {
         // Pre-fix: early-return returned raw → solution.len() == reduced_n (< orig_n) → FAIL.
         // Post-fix: early-return returns vec![] → solution.len() == 0 → PASS.
         INJECT_REDUCED_TIMEOUT.with(|v| v.set(true));
-        let r = solve_with(&lp, &SolverOptions { presolve: true, ..Default::default() });
+        let r = solve_with(
+            &lp,
+            &SolverOptions {
+                presolve: true,
+                ..Default::default()
+            },
+        );
         INJECT_REDUCED_TIMEOUT.with(|v| v.set(false));
         let n = r.solution.len();
-        assert_eq!(r.status, SolveStatus::Timeout, "injected path must return Timeout");
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "injected path must return Timeout"
+        );
         assert!(
             n == 0 || n == orig_n,
             "injected Timeout: solution.len()={n} must be 0 or {orig_n} (orig), \
@@ -1121,9 +1170,19 @@ mod tests {
     fn reduced_timeout_preserves_iteration_count() {
         let lp = make_partial_reducible_lp();
         INJECT_REDUCED_TIMEOUT.with(|v| v.set(true));
-        let r = solve_with(&lp, &SolverOptions { presolve: true, ..Default::default() });
+        let r = solve_with(
+            &lp,
+            &SolverOptions {
+                presolve: true,
+                ..Default::default()
+            },
+        );
         INJECT_REDUCED_TIMEOUT.with(|v| v.set(false));
-        assert_eq!(r.status, SolveStatus::Timeout, "injected path must return Timeout");
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "injected path must return Timeout"
+        );
         assert_eq!(
             r.iterations, REDUCED_TIMEOUT_INJECT_ITERS,
             "reduced-space Timeout early-return must carry raw.iterations ({}); \
@@ -1196,7 +1255,10 @@ mod tests {
             result.dual_solution.is_empty(),
             "Infeasible result must have empty dual_solution"
         );
-        assert!(result.slack.is_empty(), "Infeasible result must have empty slack");
+        assert!(
+            result.slack.is_empty(),
+            "Infeasible result must have empty slack"
+        );
         assert_eq!(
             result.objective,
             f64::INFINITY,
@@ -1208,18 +1270,14 @@ mod tests {
         );
     }
 
-    // min -x1-x2-x3  s.t.  x0=5 (Eq singleton),
-    //   x1-x2<=1, x2-x3<=1, x3-x1<=1
-    //
+    // min -x1-x2-x3  s.t.  x0=5 (Eq singleton), x1-x2<=1, x2-x3<=1, x3-x1<=1.
     // After presolve removes x0 (was_reduced=true), the reduced problem is
-    // min -(x1+x2+x3) with the three Le constraints.  Direction d=(1,1,1)
-    // satisfies all constraints (each difference stays constant), c^T d = -3 < 0
-    // → UNBOUNDED.  Presolve cannot detect this: x1,x2,x3 appear in active
-    // rows (step3b does not fire) and bounds propagation gives no finite upper
-    // bounds (ub_finite=false for all three constraints, step4 stays inactive,
-    // step5 gives no tightening).
-    //
-    // Before the fix: run_postsolve was called, producing solution=[5,0,0,0] with
+    // min -(x1+x2+x3) with the three Le constraints. Direction d=(1,1,1)
+    // satisfies all (each difference stays constant), c^T d = -3 < 0 → UNBOUNDED.
+    // Presolve cannot detect this: x1,x2,x3 appear in active rows (step3b does
+    // not fire) and bounds propagation gives no finite upper bounds
+    // (ub_finite=false for all three, step4/step5 inactive).
+    // Before the fix: run_postsolve produced solution=[5,0,0,0] with
     // status=Unbounded (spurious x0=5 from SingletonRow).
     // After the fix: early return with solution=[] before run_postsolve.
     fn make_presolve_reduced_unbounded_lp() -> LpProblem {
@@ -1286,7 +1344,10 @@ mod tests {
             result.dual_solution.is_empty(),
             "Unbounded result must have empty dual_solution"
         );
-        assert!(result.slack.is_empty(), "Unbounded result must have empty slack");
+        assert!(
+            result.slack.is_empty(),
+            "Unbounded result must have empty slack"
+        );
         assert_eq!(
             result.objective,
             f64::NEG_INFINITY,
@@ -1326,6 +1387,103 @@ mod tests {
         assert!(
             result.timing_breakdown.is_some(),
             "timing_breakdown must be Some when presolve itself detects Infeasible (H observability)"
+        );
+    }
+
+    /// A caller-set `tolerance` (requested ACCEPTANCE accuracy) must not
+    /// override the simplex's INTERNAL numerical tolerances: loosening
+    /// `primal_tol` from PIVOT_TOL (1e-8) to eps (1e-6) widens the ratio-test
+    /// feasibility band, drifts the pivot trajectory, and turns clean solves
+    /// into stall bails (80bau3b/pilot PASS→TIMEOUT regression, daf7ab54).
+    /// Acceptance keying on `tolerance` is preserved separately by
+    /// `lp_accept_{primal,dual}_tol()`.
+    ///
+    /// Sentinel: re-adding the `primal_tol = dual_tol = ipm_eps()` override in
+    /// `solve_with` makes the captured tolerances equal 1e-3 → fail.
+    #[test]
+    fn tolerance_does_not_override_internal_simplex_tols() {
+        use crate::options::Tolerance;
+        use crate::tolerances::PIVOT_TOL;
+        let lp = make_partial_reducible_lp();
+        CAPTURE_EFFECTIVE_SIMPLEX_TOLS.with(|c| c.set(None));
+        let r = solve_with(
+            &lp,
+            &SolverOptions {
+                tolerance: Some(Tolerance::Custom(1.0e-3)),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, SolveStatus::Optimal);
+        let (primal_tol, dual_tol) = CAPTURE_EFFECTIVE_SIMPLEX_TOLS
+            .with(|c| c.get())
+            .expect("solve_with must stamp the capture hook");
+        assert_eq!(
+            primal_tol, PIVOT_TOL,
+            "internal primal_tol must stay at its default (PIVOT_TOL), \
+             not follow tolerance=Custom(1e-3)"
+        );
+        assert_eq!(
+            dual_tol, PIVOT_TOL,
+            "internal dual_tol must stay at its default (PIVOT_TOL), \
+             not follow tolerance=Custom(1e-3)"
+        );
+    }
+
+    /// Presolve-reduced solves must keep the reduced solve's metadata: postsolve
+    /// lifts the solution to original space but `SolveStats` (`bounded_eq_ub_path`
+    /// etc.) describes how the reduced problem was solved. `lp_dispatch` already
+    /// propagates via `lifted.stats = raw.stats.clone()`; this pins the same
+    /// contract for the entry.rs presolve path.
+    ///
+    /// `MARK_REDUCED_SOLVE_STATS` stamps the marker on the reduced solve result
+    /// deterministically (no dependence on which simplex pipeline the reduced
+    /// problem takes).
+    ///
+    /// Sentinel: reverting the `res.stats = raw.stats.clone()` propagation after
+    /// `run_postsolve` loses the marker and fails this test.
+    #[test]
+    fn presolve_path_propagates_reduced_solve_stats() {
+        let lp = make_partial_reducible_lp();
+        MARK_REDUCED_SOLVE_STATS.with(|v| v.set(true));
+        let r = solve_with(
+            &lp,
+            &SolverOptions {
+                presolve: true,
+                ..Default::default()
+            },
+        );
+        MARK_REDUCED_SOLVE_STATS.with(|v| v.set(false));
+        assert_eq!(r.status, SolveStatus::Optimal);
+        assert!(
+            r.stats.bounded_eq_ub_path,
+            "reduced-solve stats must survive postsolve lifting (res.stats = raw.stats)"
+        );
+    }
+
+    /// The reduced-space Timeout early-return must carry the reduced solve's
+    /// stats for the same reason it carries `iterations`: both are
+    /// space-independent metadata of the solve that actually ran.
+    ///
+    /// Sentinel: reverting `stats: raw.stats.clone()` in the Timeout
+    /// early-return loses the marker and fails this test.
+    #[test]
+    fn reduced_timeout_early_return_preserves_stats() {
+        let lp = make_partial_reducible_lp();
+        INJECT_REDUCED_TIMEOUT.with(|v| v.set(true));
+        MARK_REDUCED_SOLVE_STATS.with(|v| v.set(true));
+        let r = solve_with(
+            &lp,
+            &SolverOptions {
+                presolve: true,
+                ..Default::default()
+            },
+        );
+        INJECT_REDUCED_TIMEOUT.with(|v| v.set(false));
+        MARK_REDUCED_SOLVE_STATS.with(|v| v.set(false));
+        assert_eq!(r.status, SolveStatus::Timeout);
+        assert!(
+            r.stats.bounded_eq_ub_path,
+            "reduced-space Timeout early-return must carry raw.stats"
         );
     }
 }

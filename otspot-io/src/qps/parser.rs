@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::BufRead;
+use std::io::{BufRead, Seek};
 
 use otspot_core::problem::ConstraintType;
 use otspot_core::qp::QpProblem;
@@ -7,29 +7,47 @@ use otspot_core::sparse::CscMatrix;
 
 use super::types::{BoundType, Section};
 use super::QpsError;
-use crate::common::{mps_field, parse_mps_fixed_pairs, parse_mps_free_pairs, parse_objsense_value, RowType, SectionState};
+use crate::common::{
+    integer_marker_kind, parse_bounds_entry, parse_columns_entry, parse_objsense_value,
+    parse_quadobj_entry, parse_row_decl, parse_vector_entry, parse_with_format_fallback, Format,
+    LineSource, ReaderSource, RowNameIndex, RowType, SectionState, VectorSectionState,
+};
 
 pub(super) struct QpsParser {
+    format: Format,
+    /// Line reached by this reading; reported alongside a failure so the caller
+    /// can tell which of the two format readings engaged with more of the file.
+    progress: usize,
     rows: Vec<(String, RowType)>,
+    row_names: HashSet<String>,
     columns: Vec<(String, String, f64)>,
     rhs: HashMap<String, f64>,
     ranges: HashMap<String, f64>,
+    rhs_vectors: VectorSectionState,
+    ranges_vectors: VectorSectionState,
+    row_index: RowNameIndex,
     bounds: Vec<(BoundType, String, Option<f64>)>,
     /// QUADOBJ entries: (col1, col2, value) in upper-triangular order.
     quadobj: Vec<(String, String, f64)>,
-    /// Tracks normalized (min, max) key pairs seen in QUADOBJ to detect symmetric duplicates.
+    /// Normalized (min, max) key pairs seen in QUADOBJ, to detect symmetric duplicates.
     quadobj_seen: HashSet<(String, String)>,
     obj_row: Option<String>,
     maximize: bool,
 }
 
 impl QpsParser {
-    pub(super) fn new() -> Self {
+    fn new(format: Format) -> Self {
         Self {
+            format,
+            progress: 0,
             rows: Vec::new(),
+            row_names: HashSet::new(),
             columns: Vec::new(),
             rhs: HashMap::new(),
             ranges: HashMap::new(),
+            rhs_vectors: VectorSectionState::new(),
+            ranges_vectors: VectorSectionState::new(),
+            row_index: RowNameIndex::new(),
             bounds: Vec::new(),
             quadobj: Vec::new(),
             quadobj_seen: HashSet::new(),
@@ -38,51 +56,55 @@ impl QpsParser {
         }
     }
 
-    pub(super) fn parse_reader<R: BufRead>(&mut self, reader: R) -> Result<QpProblem, QpsError> {
+    fn run<S: LineSource>(&mut self, source: &S) -> Result<QpProblem, QpsError> {
         let mut state = SectionState::new(Section::None);
-        let mut line_num = 0;
 
-        for line_result in reader.lines() {
-            let line = line_result.map_err(QpsError::IoError)?;
-            line_num += 1;
+        source.visit_lines(QpsError::IoError, |line_num, line| {
+            self.progress = line_num;
             let trimmed = line.trim();
-
             if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('$') {
-                continue;
+                return Ok(true);
             }
 
             if !line.starts_with(' ') && !line.starts_with('\t') {
-                if let Some(section) = Section::from_line(trimmed) {
-                    let should_break = state.advance(
-                        section,
-                        Section::Name,
-                        Section::EndData,
-                        QpsError::DuplicateSection,
-                    )?;
-                    if should_break {
-                        break;
-                    }
-                    continue;
-                } else {
+                let Some(section) = Section::from_line(trimmed) else {
                     return Err(QpsError::ParseError {
                         line: line_num,
                         message: format!("Unrecognized section header: '{}'", trimmed),
                     });
+                };
+                let should_stop = state.advance(
+                    section,
+                    Section::Name,
+                    Section::EndData,
+                    QpsError::DuplicateSection,
+                )?;
+                // `OBJSENSE  MAX` on the header line is legal; ignoring the value
+                // would silently minimize a problem that asked to be maximized.
+                if section == Section::ObjSense {
+                    if let Some(rest) = trimmed.get("OBJSENSE".len()..).map(str::trim) {
+                        if !rest.is_empty() {
+                            self.parse_objsense_line(rest, line_num)?;
+                        }
+                    }
                 }
+                return Ok(!should_stop);
             }
 
+            let tokens: Vec<&str> = line.split_whitespace().collect();
             match state.current {
-                Section::ObjSense => self.parse_objsense_line(&line, line_num)?,
-                Section::Rows => self.parse_rows_line(&line, line_num)?,
-                Section::Columns => self.parse_columns_line(&line, line_num)?,
-                Section::Rhs => self.parse_rhs_line(&line, line_num)?,
-                Section::Ranges => self.parse_ranges_line(&line, line_num)?,
-                Section::Bounds => self.parse_bounds_line(&line, line_num)?,
-                Section::Quadobj => self.parse_quadobj_line(&line, line_num)?,
-                Section::EndData => break,
+                Section::ObjSense => self.parse_objsense_line(line, line_num)?,
+                Section::Rows => self.parse_rows_line(line, &tokens, line_num)?,
+                Section::Columns => self.parse_columns_line(line, &tokens, line_num)?,
+                Section::Rhs => self.parse_vector_line(line, &tokens, line_num, "RHS")?,
+                Section::Ranges => self.parse_vector_line(line, &tokens, line_num, "RANGES")?,
+                Section::Bounds => self.parse_bounds_line(line, &tokens, line_num)?,
+                Section::Quadobj => self.parse_quadobj_line(line, &tokens, line_num)?,
+                Section::EndData => return Ok(false),
                 Section::None | Section::Name => {}
             }
-        }
+            Ok(true)
+        })?;
 
         state.require(
             &[
@@ -93,51 +115,51 @@ impl QpsParser {
             QpsError::MissingSection,
         )?;
 
+        self.validate_references()?;
         self.build_qp_problem()
     }
 
-    fn parse_objsense_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
-        self.maximize = parse_objsense_value(line).map_err(|msg| QpsError::ParseError {
+    fn parse_objsense_line(&mut self, value: &str, line_num: usize) -> Result<(), QpsError> {
+        self.maximize = parse_objsense_value(value).map_err(|message| QpsError::ParseError {
             line: line_num,
-            message: msg,
+            message,
         })?;
         Ok(())
     }
 
-    fn parse_rows_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
-        let mut parts = line.split_whitespace();
-        let type_str = match parts.next() {
-            Some(s) => s,
-            None => return Ok(()),
-        };
-        let row_type = match type_str {
-            "N" | "n" => RowType::N,
-            "L" | "l" => RowType::L,
-            "G" | "g" => RowType::G,
-            "E" | "e" => RowType::E,
+    fn parse_rows_line(
+        &mut self,
+        line: &str,
+        tokens: &[&str],
+        line_num: usize,
+    ) -> Result<(), QpsError> {
+        let (type_str, row_name) =
+            parse_row_decl(line, tokens, self.format, line_num).map_err(|message| {
+                QpsError::ParseError {
+                    line: line_num,
+                    message,
+                }
+            })?;
+        let row_type = match type_str.to_uppercase().as_str() {
+            "N" => RowType::N,
+            "L" => RowType::L,
+            "G" => RowType::G,
+            "E" => RowType::E,
             _ => {
                 return Err(QpsError::ParseError {
                     line: line_num,
                     message: format!("Unknown row type: {}", type_str),
-                });
+                })
             }
         };
-        let row_name = {
-            let fw = mps_field(line, 4, 12);
-            if !fw.is_empty() {
-                fw.to_string()
-            } else {
-                match parts.next() {
-                    Some(s) => s.to_string(),
-                    None => {
-                        return Err(QpsError::ParseError {
-                            line: line_num,
-                            message: "ROWS line missing row name".to_string(),
-                        });
-                    }
-                }
-            }
-        };
+        // Two rows sharing a name would make every reference to it ambiguous and
+        // silently resolve to whichever landed in the index last.
+        if !self.row_names.insert(row_name.clone()) {
+            return Err(QpsError::ParseError {
+                line: line_num,
+                message: format!("ROWS: duplicate row name '{}'", row_name),
+            });
+        }
         if matches!(row_type, RowType::N) && self.obj_row.is_none() {
             self.obj_row = Some(row_name.clone());
         }
@@ -145,250 +167,90 @@ impl QpsParser {
         Ok(())
     }
 
-    fn parse_columns_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
-            return Err(QpsError::ParseError {
-                line: line_num,
-                message: "COLUMNS line requires at least 3 fields (col row value)".to_string(),
-            });
-        }
-        if parts[1] == "'MARKER'" {
+    fn parse_columns_line(
+        &mut self,
+        line: &str,
+        tokens: &[&str],
+        line_num: usize,
+    ) -> Result<(), QpsError> {
+        // QPS keeps no integrality; a marker line declares no coefficients, so skip it.
+        if integer_marker_kind(line).is_some() {
             return Ok(());
         }
-
-        let is_free = {
-            let mut ok = true;
-            let mut vi = 2usize;
-            while vi < parts.len() {
-                if parts[vi].parse::<f64>().is_err() {
-                    ok = false;
-                    break;
-                }
-                vi += 2;
-            }
-            ok
-        };
-        if !is_free {
-            let col_name = mps_field(line, 4, 12).to_string();
-            if col_name.is_empty() {
-                return Err(QpsError::ParseError {
+        let (col_name, pairs) =
+            parse_columns_entry(line, tokens, self.format, line_num).map_err(|message| {
+                QpsError::ParseError {
                     line: line_num,
-                    message: "COLUMNS fixed-format line missing column name at field 2".to_string(),
-                });
-            }
-            let field3 = mps_field(line, 14, 22);
-            if field3 == "'MARKER'" {
-                return Ok(());
-            }
-            let row_name1 = field3.to_string();
-            if !row_name1.is_empty() {
-                let val_str1 = mps_field(line, 24, 36);
-                if !val_str1.is_empty() {
-                    let value1 = val_str1.parse::<f64>().map_err(|_| QpsError::ParseError {
-                        line: line_num,
-                        message: format!("Invalid value: {}", val_str1),
-                    })?;
-                    if !value1.is_finite() {
-                        return Err(QpsError::ParseError {
-                            line: line_num,
-                            message: format!(
-                                "Non-finite COLUMNS value for col='{}' row='{}'",
-                                col_name, row_name1
-                            ),
-                        });
-                    }
-                    self.columns.push((col_name.clone(), row_name1, value1));
+                    message,
                 }
-            }
-            let row_name2 = mps_field(line, 39, 47).to_string();
-            if !row_name2.is_empty() {
-                let val_str2 = mps_field(line, 49, 61);
-                if !val_str2.is_empty() {
-                    let value2 = val_str2.parse::<f64>().map_err(|_| QpsError::ParseError {
-                        line: line_num,
-                        message: format!("Invalid value: {}", val_str2),
-                    })?;
-                    if !value2.is_finite() {
-                        return Err(QpsError::ParseError {
-                            line: line_num,
-                            message: format!(
-                                "Non-finite COLUMNS value for col='{}' row='{}'",
-                                col_name, row_name2
-                            ),
-                        });
-                    }
-                    self.columns.push((col_name, row_name2, value2));
-                }
-            }
-            return Ok(());
-        }
-
-        let col_name = parts[0].to_string();
-        let mut i = 1;
-        while i + 1 < parts.len() {
-            let row_name = parts[i].to_string();
-            let value = parts[i + 1]
-                .parse::<f64>()
-                .map_err(|_| QpsError::ParseError {
-                    line: line_num,
-                    message: format!("Invalid value: {}", parts[i + 1]),
-                })?;
-            if !value.is_finite() {
-                return Err(QpsError::ParseError {
-                    line: line_num,
-                    message: format!(
-                        "Non-finite COLUMNS value for col='{}' row='{}'",
-                        col_name, row_name
-                    ),
-                });
-            }
+            })?;
+        for (row_name, value) in pairs {
             self.columns.push((col_name.clone(), row_name, value));
-            i += 2;
-        }
-        if i < parts.len() {
-            return Err(QpsError::ParseError {
-                line: line_num,
-                message: format!(
-                    "odd trailing token '{}' in COLUMNS (row name without a value)",
-                    parts[i]
-                ),
-            });
         }
         Ok(())
     }
 
-    fn parse_rhs_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
-            return Err(QpsError::ParseError {
-                line: line_num,
-                message: "RHS line requires at least 2 fields".to_string(),
-            });
-        }
-        // 2-field shorthand: (row_name, value) without a preceding rhs_section_name.
-        if parts.len() == 2 {
-            let row_name = parts[0].to_string();
-            let value = parts[1].parse::<f64>().map_err(|_| QpsError::ParseError {
-                line: line_num,
-                message: format!("Invalid value: {}", parts[1]),
-            })?;
-            let is_obj_row = self.obj_row.as_deref() == Some(row_name.as_str());
-            if !is_obj_row && !value.is_finite() {
-                return Err(QpsError::ParseError {
-                    line: line_num,
-                    message: format!("Non-finite RHS value for row='{}'", row_name),
-                });
-            }
-            self.rhs.insert(row_name, value);
-            return Ok(());
-        }
-        let force_fixed = (mps_field(line, 4, 12).is_empty()
-            && !mps_field(line, 14, 22).is_empty())
-            || qps_fixed_pair_layout(line);
-        let is_free = if force_fixed {
-            false
+    /// RHS and RANGES share one grammar; they differ only in the map they fill.
+    ///
+    /// A non-finite RHS on the objective row is tolerated here and rejected in
+    /// `build_qp_problem` as `InvalidObjectiveOffset`; RANGES has no objective
+    /// entry, so it exempts nothing.
+    fn parse_vector_line(
+        &mut self,
+        line: &str,
+        tokens: &[&str],
+        line_num: usize,
+        section: &str,
+    ) -> Result<(), QpsError> {
+        let allow_nonfinite_for_row = if section == "RHS" {
+            self.obj_row.clone()
         } else {
-            let mut ok = true;
-            let mut vi = 2usize;
-            while vi < parts.len() {
-                if parts[vi].parse::<f64>().is_err() {
-                    ok = false;
-                    break;
-                }
-                vi += 2;
-            }
-            ok
+            None
         };
-        let pairs = if is_free {
-            parse_mps_free_pairs(&parts, line_num, "RHS", self.obj_row.as_deref())
-        } else {
-            parse_mps_fixed_pairs(line, line_num, "RHS", self.obj_row.as_deref())
-        }
-        .map_err(|msg| QpsError::ParseError {
+        let (vector_name, pairs) = parse_vector_entry(
+            line,
+            tokens,
+            self.format,
+            &self.rows,
+            &mut self.row_index,
+            line_num,
+            section,
+            allow_nonfinite_for_row.as_deref(),
+        )
+        .map_err(|message| QpsError::ParseError {
             line: line_num,
-            message: msg,
+            message,
         })?;
-        for (name, value) in pairs {
-            self.rhs.insert(name, value);
-        }
-        Ok(())
-    }
 
-    fn parse_ranges_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
-            return Err(QpsError::ParseError {
-                line: line_num,
-                message: "RANGES line requires at least 2 fields".to_string(),
-            });
-        }
-        // 2-field shorthand: (row_name, value) without a preceding rhs_section_name.
-        if parts.len() == 2 {
-            let row_name = parts[0].to_string();
-            let value = parts[1].parse::<f64>().map_err(|_| QpsError::ParseError {
-                line: line_num,
-                message: format!("Invalid value: {}", parts[1]),
-            })?;
-            if !value.is_finite() {
-                return Err(QpsError::ParseError {
-                    line: line_num,
-                    message: format!("Non-finite RANGES value for row='{}'", row_name),
-                });
-            }
-            self.ranges.insert(row_name, value);
-            return Ok(());
-        }
-        let force_fixed = (mps_field(line, 4, 12).is_empty()
-            && !mps_field(line, 14, 22).is_empty())
-            || qps_fixed_pair_layout(line);
-        if !force_fixed && qps_free_pairs_have_odd_trailing_name(&parts) {
-            return Err(QpsError::ParseError {
-                line: line_num,
-                message: format!(
-                    "Odd trailing token '{}' in RANGES (row name without a value)",
-                    parts[parts.len() - 1]
-                ),
-            });
-        }
-        let is_free = if force_fixed {
-            false
+        let (state, target) = if section == "RHS" {
+            (&mut self.rhs_vectors, &mut self.rhs)
         } else {
-            let mut ok = true;
-            let mut vi = 2usize;
-            while vi < parts.len() {
-                if parts[vi].parse::<f64>().is_err() {
-                    ok = false;
-                    break;
-                }
-                vi += 2;
-            }
-            ok
+            (&mut self.ranges_vectors, &mut self.ranges)
         };
-        let pairs = if is_free {
-            parse_mps_free_pairs(&parts, line_num, "RANGES", None)
-        } else {
-            parse_mps_fixed_pairs(line, line_num, "RANGES", None)
-        }
-        .map_err(|msg| QpsError::ParseError {
-            line: line_num,
-            message: msg,
-        })?;
-        for (name, value) in pairs {
-            self.ranges.insert(name, value);
+        for (row_name, value) in pairs {
+            state
+                .record(target, section, vector_name.as_deref(), row_name, value)
+                .map_err(|message| QpsError::ParseError {
+                    line: line_num,
+                    message,
+                })?;
         }
         Ok(())
     }
 
-    fn parse_bounds_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
+    fn parse_bounds_line(
+        &mut self,
+        line: &str,
+        tokens: &[&str],
+        line_num: usize,
+    ) -> Result<(), QpsError> {
+        if tokens.is_empty() {
             return Err(QpsError::ParseError {
                 line: line_num,
-                message: "BOUNDS line requires at least 3 fields (type name col)".to_string(),
+                message: "BOUNDS line is empty".to_string(),
             });
         }
-        let bound_type = match parts[0] {
+        let bound_type = match tokens[0].to_uppercase().as_str() {
             "LO" => BoundType::LO,
             "UP" => BoundType::UP,
             "FX" => BoundType::FX,
@@ -399,143 +261,42 @@ impl QpsParser {
             _ => {
                 return Err(QpsError::ParseError {
                     line: line_num,
-                    message: format!("Unknown bound type: {}", parts[0]),
-                });
+                    message: format!("Unknown bound type: {}", tokens[0]),
+                })
             }
         };
-        let value_taking = !matches!(
-            bound_type,
-            BoundType::FR | BoundType::MI | BoundType::PL | BoundType::BV
-        );
-        let fixed_col_name = mps_field(line, 14, 22).to_string();
-        // Fixed-format MPS field values may contain internal spaces (e.g. FORPLAN
-        // column "A   22 1" / bound set "BND-1"), so `split_whitespace` over-splits
-        // spaced names into extra tokens. Use fixed-layout separators as evidence
-        // (the two spaces between fields 2 and 3, and when present fields 3 and 4)
-        // rather than token count alone; otherwise malformed free-format records
-        // like `BV BND x1 extra` can be rebound to arbitrary bytes 14..22.
-        let looks_fixed_bounds = qps_fixed_bounds_layout(line, value_taking);
-        if looks_fixed_bounds {
-            let col_name = fixed_col_name;
-            let raw = mps_field(line, 24, 36);
-            let value = if raw.is_empty() {
-                None
-            } else {
-                let parsed = raw.parse::<f64>().map_err(|_| QpsError::ParseError {
+        let value_required = matches!(bound_type, BoundType::LO | BoundType::UP | BoundType::FX);
+
+        let (col_name, value) =
+            parse_bounds_entry(line, tokens, self.format, line_num, value_required).map_err(
+                |message| QpsError::ParseError {
                     line: line_num,
-                    message: format!("Invalid BOUNDS value for col='{}': {}", col_name, raw),
-                })?;
-                if !parsed.is_finite() {
-                    return Err(QpsError::ParseError {
-                        line: line_num,
-                        message: format!("Non-finite BOUNDS value for col='{}'", col_name),
-                    });
-                }
-                Some(parsed)
-            };
-            if value_taking && value.is_none() {
-                return Err(QpsError::ParseError {
-                    line: line_num,
-                    message: format!(
-                        "BOUNDS type {} requires a value for col='{}'",
-                        parts[0], col_name
-                    ),
-                });
-            }
-            self.bounds.push((bound_type, col_name, value));
-            return Ok(());
-        }
-        if !value_taking && parts.len() > 3 {
-            return Err(QpsError::ParseError {
-                line: line_num,
-                message: format!(
-                    "BOUNDS type {} does not take a value for col='{}'",
-                    parts[0], parts[2]
-                ),
-            });
-        }
-        if value_taking && parts.len() > 4 {
-            return Err(QpsError::ParseError {
-                line: line_num,
-                message: format!(
-                    "BOUNDS type {} takes exactly one value for col='{}'",
-                    parts[0], parts[2]
-                ),
-            });
-        }
-        let (col_name, value) = if !value_taking {
-            (parts[2].to_string(), None)
-        } else if parts.len() >= 4 {
-            let raw = parts[3];
-            let parsed = raw.parse::<f64>().map_err(|_| QpsError::ParseError {
-                line: line_num,
-                message: format!("Invalid BOUNDS value for col='{}': {}", parts[2], raw),
-            })?;
-            if !parsed.is_finite() {
-                return Err(QpsError::ParseError {
-                    line: line_num,
-                    message: format!("Non-finite BOUNDS value for col='{}'", parts[2]),
-                });
-            }
-            (parts[2].to_string(), Some(parsed))
-        } else if let Ok(v) = parts[2].parse::<f64>() {
-            if !v.is_finite() {
-                return Err(QpsError::ParseError {
-                    line: line_num,
-                    message: format!("Non-finite BOUNDS value for col='{}'", parts[1]),
-                });
-            }
-            (parts[1].to_string(), Some(v))
-        } else {
-            if value_taking {
-                return Err(QpsError::ParseError {
-                    line: line_num,
-                    message: format!(
-                        "BOUNDS type {} requires a value but none provided for col='{}'",
-                        parts[0], parts[2]
-                    ),
-                });
-            }
-            (parts[2].to_string(), None)
-        };
+                    message,
+                },
+            )?;
         self.bounds.push((bound_type, col_name, value));
         Ok(())
     }
 
-    fn parse_quadobj_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
-            return Err(QpsError::ParseError {
+    fn parse_quadobj_line(
+        &mut self,
+        line: &str,
+        tokens: &[&str],
+        line_num: usize,
+    ) -> Result<(), QpsError> {
+        let (col1, col2, value) = parse_quadobj_entry(line, tokens, self.format, line_num)
+            .map_err(|message| QpsError::ParseError {
                 line: line_num,
-                message: "QUADOBJ line requires at least 3 fields (col1 col2 value)".to_string(),
-            });
-        }
-        let (col1, col2, val_str) = if parts.len() == 3 {
-            (parts[0], parts[1], parts[2])
-        } else {
-            (
-                mps_field(line, 4, 12),
-                mps_field(line, 14, 22),
-                mps_field(line, 24, 36),
-            )
-        };
-        let value = val_str.parse::<f64>().map_err(|_| QpsError::ParseError {
-            line: line_num,
-            message: format!("Invalid QUADOBJ value: {}", val_str),
-        })?;
-        if !value.is_finite() {
-            return Err(QpsError::ParseError {
-                line: line_num,
-                message: format!("Non-finite QUADOBJ value for ({}, {})", col1, col2),
-            });
-        }
-        // Reject duplicate entries in QUADOBJ using a lexicographically normalized key.
-        // This catches both (x1,x2) and (x2,x1) as duplicates, since both represent
-        // the same upper-triangular Q entry after symmetrization.
+                message,
+            })?;
+
+        // Reject duplicates using a lexicographically normalized key: both
+        // (x1,x2) and (x2,x1) denote the same upper-triangular Q entry after
+        // symmetrization.
         let key = if col1 <= col2 {
-            (col1.to_string(), col2.to_string())
+            (col1.clone(), col2.clone())
         } else {
-            (col2.to_string(), col1.to_string())
+            (col2.clone(), col1.clone())
         };
         if !self.quadobj_seen.insert(key) {
             return Err(QpsError::ParseError {
@@ -543,183 +304,181 @@ impl QpsParser {
                 message: format!("Duplicate QUADOBJ entry: ({}, {})", col1, col2),
             });
         }
-        self.quadobj
-            .push((col1.to_string(), col2.to_string(), value));
+        self.quadobj.push((col1, col2, value));
+        Ok(())
+    }
+
+    /// Every row/column name referenced by COLUMNS / RHS / RANGES / BOUNDS /
+    /// QUADOBJ must have been declared. Dropping an unknown name silently is
+    /// how a misread layout used to go unnoticed: reading a fixed-column line
+    /// as free format invents names that match nothing, and discarding them
+    /// quietly corrupts the model. Erroring out is also what lets the caller
+    /// detect a wrong layout guess and retry the file as fixed-column.
+    fn validate_references(&self) -> Result<(), QpsError> {
+        let declared_cols: HashSet<&str> =
+            self.columns.iter().map(|(c, _, _)| c.as_str()).collect();
+
+        for row_name in self
+            .columns
+            .iter()
+            .map(|(_, row, _)| row.as_str())
+            .chain(self.rhs.keys().map(String::as_str))
+            .chain(self.ranges.keys().map(String::as_str))
+            .chain(self.rhs_vectors.referenced_rows())
+            .chain(self.ranges_vectors.referenced_rows())
+        {
+            if !self.row_names.contains(row_name) {
+                return Err(QpsError::UndefinedReference {
+                    kind: "row".to_string(),
+                    name: row_name.to_string(),
+                });
+            }
+        }
+        for col_name in self
+            .bounds
+            .iter()
+            .map(|(_, col, _)| col)
+            .chain(self.quadobj.iter().flat_map(|(c1, c2, _)| [c1, c2]))
+        {
+            if !declared_cols.contains(col_name.as_str()) {
+                return Err(QpsError::UndefinedReference {
+                    kind: "column".to_string(),
+                    name: col_name.clone(),
+                });
+            }
+        }
         Ok(())
     }
 
     fn build_qp_problem(&self) -> Result<QpProblem, QpsError> {
-        let mut col_map: HashMap<String, usize> = HashMap::new();
+        let mut col_map: HashMap<&str, usize> = HashMap::new();
         for (col_name, _, _) in &self.columns {
-            if !col_map.contains_key(col_name) {
-                let idx = col_map.len();
-                col_map.insert(col_name.clone(), idx);
-            }
+            let next = col_map.len();
+            col_map.entry(col_name.as_str()).or_insert(next);
         }
         let n = col_map.len();
+        let obj_row = self.obj_row.as_deref();
 
         let mut c = vec![0.0; n];
-        if let Some(obj_row_name) = &self.obj_row {
-            for (col_name, row_name, value) in &self.columns {
-                if row_name == obj_row_name {
-                    if let Some(&col_idx) = col_map.get(col_name) {
-                        c[col_idx] += *value;
-                    }
-                }
+        for (col_name, row_name, value) in &self.columns {
+            if Some(row_name.as_str()) == obj_row {
+                c[col_map[col_name.as_str()]] += *value;
             }
         }
 
-        let obj_row = self.obj_row.as_deref().unwrap_or("");
-
-        struct ConstraintRow {
-            name: String,
+        // Constraint rows in declaration order; N rows (objective and any other
+        // free row) never become constraints.
+        struct ConstraintRow<'a> {
+            name: &'a str,
             rtype: RowType,
             rhs: f64,
         }
-        let mut constraint_rows: Vec<ConstraintRow> = Vec::new();
+        let mut constraint_rows: Vec<ConstraintRow<'_>> = Vec::new();
         for (row_name, row_type) in &self.rows {
-            if row_name == obj_row {
+            if !row_type.is_constraint() {
                 continue;
             }
-            if matches!(row_type, RowType::N) {
-                continue;
-            }
-            let rhs = self.rhs.get(row_name).copied().unwrap_or(0.0);
             constraint_rows.push(ConstraintRow {
-                name: row_name.clone(),
+                name: row_name.as_str(),
                 rtype: *row_type,
-                rhs,
+                rhs: self.rhs.get(row_name).copied().unwrap_or(0.0),
             });
         }
 
-        let mut range_extra: Vec<(String, ConstraintRow)> = Vec::new();
-        let mut base_rows: Vec<ConstraintRow> = Vec::new();
+        // RANGES splits a row into its Le and Ge halves.
+        let mut base_rows: Vec<ConstraintRow<'_>> = Vec::new();
+        let mut range_extra: Vec<ConstraintRow<'_>> = Vec::new();
         for row in constraint_rows {
-            if let Some(&range_val) = self.ranges.get(&row.name) {
-                let b = row.rhs;
-                let abs_r = range_val.abs();
-                let (le_rhs, ge_rhs) = match row.rtype {
-                    RowType::L => (b, b - abs_r),
-                    RowType::G => (b + abs_r, b),
-                    RowType::E => {
-                        if range_val >= 0.0 {
-                            (b + abs_r, b)
-                        } else {
-                            (b, b - abs_r)
-                        }
-                    }
-                    RowType::N => unreachable!(),
-                };
-                base_rows.push(ConstraintRow {
-                    name: row.name.clone(),
-                    rtype: RowType::L,
-                    rhs: le_rhs,
-                });
-                range_extra.push((
-                    row.name.clone(),
-                    ConstraintRow {
-                        name: row.name.clone(),
-                        rtype: RowType::G,
-                        rhs: ge_rhs,
-                    },
-                ));
-            } else {
+            let Some(&range_val) = self.ranges.get(row.name) else {
                 base_rows.push(row);
-            }
+                continue;
+            };
+            let b = row.rhs;
+            let abs_r = range_val.abs();
+            let (le_rhs, ge_rhs) = match row.rtype {
+                RowType::L => (b, b - abs_r),
+                RowType::G => (b + abs_r, b),
+                RowType::E => {
+                    if range_val >= 0.0 {
+                        (b + abs_r, b)
+                    } else {
+                        (b, b - abs_r)
+                    }
+                }
+                RowType::N => unreachable!("N rows are not constraint rows"),
+            };
+            base_rows.push(ConstraintRow {
+                name: row.name,
+                rtype: RowType::L,
+                rhs: le_rhs,
+            });
+            range_extra.push(ConstraintRow {
+                name: row.name,
+                rtype: RowType::G,
+                rhs: ge_rhs,
+            });
         }
-        for (_, row) in range_extra {
-            base_rows.push(row);
-        }
+        base_rows.extend(range_extra);
 
-        struct AugRow {
-            name: String,
+        // Normalize to `Ax <= b` / `Ax = b` by flipping the sign of G rows.
+        struct AugRow<'a> {
+            name: &'a str,
             sign: f64,
             rhs: f64,
         }
-        let mut aug_rows: Vec<AugRow> = Vec::new();
+        let mut aug_rows: Vec<AugRow<'_>> = Vec::new();
         let mut constraint_types: Vec<ConstraintType> = Vec::new();
         for row in base_rows {
-            match row.rtype {
-                RowType::L => {
-                    aug_rows.push(AugRow {
-                        name: row.name,
-                        sign: 1.0,
-                        rhs: row.rhs,
-                    });
-                    constraint_types.push(ConstraintType::Le);
-                }
-                RowType::G => {
-                    aug_rows.push(AugRow {
-                        name: row.name,
-                        sign: -1.0,
-                        rhs: -row.rhs,
-                    });
-                    constraint_types.push(ConstraintType::Le);
-                }
-                RowType::E => {
-                    aug_rows.push(AugRow {
-                        name: row.name,
-                        sign: 1.0,
-                        rhs: row.rhs,
-                    });
-                    constraint_types.push(ConstraintType::Eq);
-                }
-                RowType::N => {}
-            }
+            let (sign, rhs, ctype) = match row.rtype {
+                RowType::L => (1.0, row.rhs, ConstraintType::Le),
+                RowType::G => (-1.0, -row.rhs, ConstraintType::Le),
+                RowType::E => (1.0, row.rhs, ConstraintType::Eq),
+                RowType::N => unreachable!("N rows are not constraint rows"),
+            };
+            aug_rows.push(AugRow {
+                name: row.name,
+                sign,
+                rhs,
+            });
+            constraint_types.push(ctype);
         }
-
         let m = aug_rows.len();
 
-        let mut row_name_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut row_name_to_indices: HashMap<&str, Vec<usize>> = HashMap::new();
         for (i, ar) in aug_rows.iter().enumerate() {
-            row_name_to_indices
-                .entry(ar.name.clone())
-                .or_default()
-                .push(i);
+            row_name_to_indices.entry(ar.name).or_default().push(i);
         }
 
         let mut a_rows: Vec<usize> = Vec::new();
         let mut a_cols: Vec<usize> = Vec::new();
         let mut a_vals: Vec<f64> = Vec::new();
-
         for (col_name, row_name, value) in &self.columns {
-            if row_name == obj_row {
+            if Some(row_name.as_str()) == obj_row {
                 continue;
             }
-            let col_idx = match col_map.get(col_name) {
-                Some(&idx) => idx,
-                None => continue,
+            let col_idx = col_map[col_name.as_str()];
+            // Declared free (N) rows other than the objective carry no
+            // constraint; the standard ignores their coefficients.
+            let Some(indices) = row_name_to_indices.get(row_name.as_str()) else {
+                continue;
             };
-            if let Some(indices) = row_name_to_indices.get(row_name) {
-                for &aug_idx in indices {
-                    let sign = aug_rows[aug_idx].sign;
-                    a_rows.push(aug_idx);
-                    a_cols.push(col_idx);
-                    a_vals.push(sign * value);
-                }
+            for &aug_idx in indices {
+                a_rows.push(aug_idx);
+                a_cols.push(col_idx);
+                a_vals.push(aug_rows[aug_idx].sign * value);
             }
         }
-
         let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m, n).map_err(|e| {
             QpsError::ParseError {
                 line: 0,
                 message: format!("Failed to build A matrix: {}", e),
             }
         })?;
-
         let b: Vec<f64> = aug_rows.iter().map(|r| r.rhs).collect();
 
         let mut bounds = vec![(0.0_f64, f64::INFINITY); n];
         for (bound_type, col_name, value) in &self.bounds {
-            let col_idx = match col_map.get(col_name) {
-                Some(&idx) => idx,
-                None => {
-                    return Err(QpsError::UndefinedReference {
-                        kind: "column".to_string(),
-                        name: col_name.clone(),
-                    })
-                }
-            };
+            let col_idx = col_map[col_name.as_str()];
             match bound_type {
                 BoundType::LO => bounds[col_idx].0 = value.unwrap_or(0.0),
                 BoundType::UP => bounds[col_idx].1 = value.unwrap_or(f64::INFINITY),
@@ -734,30 +493,13 @@ impl QpsParser {
             }
         }
 
-        // QUADOBJ: upper-triangular → symmetrize
+        // QUADOBJ is upper-triangular; symmetrize.
         let mut q_rows: Vec<usize> = Vec::new();
         let mut q_cols: Vec<usize> = Vec::new();
         let mut q_vals: Vec<f64> = Vec::new();
-
         for (col1, col2, value) in &self.quadobj {
-            let i = match col_map.get(col1) {
-                Some(&idx) => idx,
-                None => {
-                    return Err(QpsError::UndefinedReference {
-                        kind: "column".to_string(),
-                        name: col1.clone(),
-                    })
-                }
-            };
-            let j = match col_map.get(col2) {
-                Some(&idx) => idx,
-                None => {
-                    return Err(QpsError::UndefinedReference {
-                        kind: "column".to_string(),
-                        name: col2.clone(),
-                    })
-                }
-            };
+            let i = col_map[col1.as_str()];
+            let j = col_map[col2.as_str()];
             q_rows.push(i);
             q_cols.push(j);
             q_vals.push(*value);
@@ -768,7 +510,7 @@ impl QpsParser {
             }
         }
 
-        // Normalize MAX → MIN by negating objective (c and Q).
+        // Normalize MAX → MIN by negating the objective (c and Q).
         if self.maximize {
             for v in &mut c {
                 *v = -*v;
@@ -789,9 +531,9 @@ impl QpsParser {
             })?
         };
 
-        let obj_offset = match &self.obj_row {
-            Some(obj_row_name) => {
-                let raw = self.rhs.get(obj_row_name).copied().unwrap_or(0.0);
+        let obj_offset = match obj_row {
+            Some(name) => {
+                let raw = self.rhs.get(name).copied().unwrap_or(0.0);
                 if self.maximize {
                     -raw
                 } else {
@@ -815,70 +557,21 @@ impl QpsParser {
     }
 }
 
-fn qps_free_pairs_have_odd_trailing_name(parts: &[&str]) -> bool {
-    parts.len() > 2
-        && parts.len().is_multiple_of(2)
-        && (2..parts.len() - 1)
-            .step_by(2)
-            .all(|i| parts[i].parse::<f64>().is_ok())
-}
-
-fn ascii_ws_at(line: &str, idx: usize) -> bool {
-    line.as_bytes().get(idx).is_some_and(u8::is_ascii_whitespace)
-}
-
-fn ascii_ws_range(line: &str, start: usize, end: usize) -> bool {
-    (start..end).all(|i| ascii_ws_at(line, i))
-}
-
-fn has_internal_whitespace(s: &str) -> bool {
-    let trimmed = s.trim();
-    !trimmed.is_empty() && trimmed.chars().any(char::is_whitespace)
-}
-
-fn qps_fixed_pair_layout(line: &str) -> bool {
-    let first_pair_ok = !mps_field(line, 14, 22).is_empty()
-        && mps_field(line, 24, 36).parse::<f64>().is_ok()
-        && ascii_ws_range(line, 12, 14)
-        && ascii_ws_range(line, 22, 24);
-    if !first_pair_ok {
-        return false;
-    }
-    let set_spaced = has_internal_whitespace(mps_field(line, 4, 12));
-    let row1_spaced = has_internal_whitespace(mps_field(line, 14, 22));
-    let row2_spaced = has_internal_whitespace(mps_field(line, 39, 47))
-        && mps_field(line, 49, 61).parse::<f64>().is_ok()
-        && ascii_ws_range(line, 47, 49);
-    set_spaced || row1_spaced || row2_spaced
-}
-
-fn qps_fixed_bounds_layout(line: &str, value_taking: bool) -> bool {
-    // Every genuine fixed record has the type at cols 1..3, bound-set at 4..12,
-    // column at 14..22, and (for value-taking types) the value at 24..36, with
-    // whitespace field separators. The distinguishing evidence against a
-    // free-format line that merely has extra spaces is either a value that sits
-    // exactly in the fixed value field (value-taking) or genuine internal
-    // whitespace inside a fixed name field that split_whitespace over-fragmented
-    // (value-less spaced names).
-    if mps_field(line, 1, 3).is_empty()
-        || mps_field(line, 4, 12).is_empty()
-        || mps_field(line, 14, 22).is_empty()
-        || !ascii_ws_range(line, 12, 14)
-    {
-        return false;
-    }
-    if value_taking {
-        mps_field(line, 24, 36).parse::<f64>().is_ok() && ascii_ws_range(line, 22, 24)
-    } else {
-        mps_field(line, 24, 36).is_empty()
-            && (has_internal_whitespace(mps_field(line, 4, 12))
-                || has_internal_whitespace(mps_field(line, 14, 22)))
-    }
+/// Parse `source`, retrying as fixed-column MPS if the free-format read fails.
+pub(super) fn parse_qps_source<S: LineSource>(source: &S) -> Result<QpProblem, QpsError> {
+    parse_with_format_fallback(source, |source, format| {
+        let mut parser = QpsParser::new(format);
+        parser.run(source).map_err(|e| (e, parser.progress))
+    })
 }
 
 // ── Public entry points ───────────────────────────────────────────────────────
 
-pub fn parse_qps_reader<R: BufRead>(reader: R) -> Result<QpProblem, QpsError> {
-    let mut parser = QpsParser::new();
-    parser.parse_reader(reader)
+/// Parse a QPS stream.
+///
+/// The reader must be seekable: a file that turns out to be fixed-column is
+/// re-read from the start, and rewinding is what lets that happen without
+/// holding the input in memory.
+pub fn parse_qps_reader<R: BufRead + Seek>(reader: R) -> Result<QpProblem, QpsError> {
+    parse_qps_source(&ReaderSource::new(reader))
 }

@@ -1,4 +1,4 @@
-//! MILP branch-and-bound tests (#14 Phase 1).
+//! MILP branch-and-bound tests.
 //!
 //! Multiple data patterns per CLAUDE.md: trivial integer root, fractional root
 //! requiring branching, infeasible, unbounded, binary knapsack, and the
@@ -628,6 +628,75 @@ fn miqp_nonconvex_q_rejected() {
     );
 }
 
+/// min -x, x in {0,1}, s.t. 2x^2 <= 0.5 (as (1/2)x'[4]x <= 0.5).
+///
+/// x=1 violates the quadratic constraint; the answer is x=0, objective 0.
+/// Sentinel: dropping the quadratic-constraint check in `solve_fixed_point`
+/// makes the x=1 leaf evaluate as Optimal(obj=-1) and this test FAILs with
+/// an infeasible incumbent.
+#[test]
+fn miqcp_fixed_point_respects_quadratic_constraint() {
+    use crate::qp::QcqpMatrix;
+    let mut qp = qp_problem(
+        &[0.0],
+        vec![-1.0],
+        &[],
+        &[],
+        &[],
+        1,
+        vec![0.5],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0)],
+    );
+    let mut qc = QcqpMatrix::new(1);
+    qc.triplets.push((0, 0, 4.0));
+    qp.set_quadratic_constraints(vec![qc]).unwrap();
+    let r = solve_miqp(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
+    assert!(
+        matches!(
+            r.status,
+            SolveStatus::Optimal | SolveStatus::NonconvexGlobal
+        ),
+        "got {:?}",
+        r.status
+    );
+    assert!(r.solution[0].abs() < EPS, "x={} must be 0", r.solution[0]);
+    assert!(r.objective.abs() < EPS, "obj={} must be 0", r.objective);
+}
+
+/// A quadratic `>=` (or `=`) constraint makes the feasible region nonconvex
+/// even with a PSD matrix; `is_convex` must reject it at the B&B entry.
+///
+/// Sentinel: restricting `is_convex` to the objective Q only lets these enter
+/// the B&B and return a non-NonConvex status — this test FAILs.
+#[test]
+fn miqcp_nonconvex_quadratic_constraint_rejected() {
+    use crate::qp::QcqpMatrix;
+    for ct in [ConstraintType::Ge, ConstraintType::Eq] {
+        let mut qp = qp_problem(
+            &[2.0],
+            vec![0.0],
+            &[],
+            &[],
+            &[],
+            1,
+            vec![1.0],
+            vec![ct],
+            vec![(0.0, 5.0)],
+        );
+        let mut qc = QcqpMatrix::new(1);
+        qc.triplets.push((0, 0, 2.0));
+        qp.set_quadratic_constraints(vec![qc]).unwrap();
+        let r = solve_miqp(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
+        assert!(
+            matches!(r.status, SolveStatus::NonConvex(_)),
+            "{:?} quadratic constraint must be rejected, got {:?}",
+            ct,
+            r.status
+        );
+    }
+}
+
 #[test]
 fn miqp_no_integer_vars_falls_back_to_qp() {
     // convex QP via MIQP entry with no integer vars must match the direct QP solve.
@@ -659,7 +728,7 @@ fn miqp_boxonly_offdiag_no_overprune_sentinel() {
     // The QP IPM stalls on this box-only off-diagonal QP and returns SuboptimalSolution
     // with an objective ABOVE the true relaxation minimum. If the driver used that
     // suboptimal primal objective as a *lower* bound it would over-prune the node
-    // holding (2,2) and return −11 (silent-wrong, #17). The true integer optimum is
+    // holding (2,2) and return −11 (silent-wrong). The true integer optimum is
     // −12 @ (2,2). Load-bearing sentinel: reverting "trust Optimal relaxations only as
     // bounds" returns −11 here and FAILS this test.
     let q = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1.0, 1.0, 2.0], 2, 2)
@@ -2288,7 +2357,10 @@ fn hybrid_node_selection_correctness_3var_knapsack() {
         vec![ConstraintType::Le],
         vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)],
     );
-    let cfg = MipConfig { cuts: false, ..MipConfig::default() };
+    let cfg = MipConfig {
+        cuts: false,
+        ..MipConfig::default()
+    };
     let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1, 2]), &opts(), &cfg);
     assert_eq!(r.status, SolveStatus::Optimal, "got {:?}", r.status);
     assert!(
@@ -3418,4 +3490,68 @@ fn reduced_cost_fixing_rejects_short_solution() {
     };
     let mut bounds = vec![(0.0, 1.0), (0.0, 1.0)];
     let _ = super::reduced_cost_fixing(&r, 1.0, &mut bounds, &[0]);
+}
+
+// ---------------------------------------------------------------------------
+// Codex review R3 horizontal expansion (nonconvex.rs:763, "integer index not
+// validated") -- `MilpProblem`/`MiqpProblem` are public with a `pub
+// integer_vars` field; `new()` validates it, but a struct literal (or a
+// post-construction mutation) bypasses that. `solve_milp`/`solve_miqp` must
+// re-check it themselves, the same defense `MisocpProblem`/`NonconvexQcqp`
+// already have for their own integer-index inputs.
+// ---------------------------------------------------------------------------
+
+/// Sentinel: dropping `validate_integer_vars` from `solve_milp_with_stats`
+/// makes this FAIL by panicking (`integer_mask`'s `assert!`) instead of
+/// returning `NotSupported`.
+#[test]
+fn solve_milp_rejects_out_of_range_integer_var() {
+    let lp = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
+    let problem = MilpProblem {
+        lp,
+        integer_vars: vec![1], // num_vars == 1, so index 1 is out of range.
+    };
+    let res = solve_milp(&problem, &opts(), &MipConfig::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "out-of-range integer_vars index must be rejected, got {:?}",
+        res.status
+    );
+}
+
+/// Sentinel: dropping `validate_integer_vars` from `solve_miqp_with_stats`
+/// makes this FAIL by panicking (`integer_mask`'s `assert!`) instead of
+/// returning `NotSupported`.
+#[test]
+fn solve_miqp_rejects_out_of_range_integer_var() {
+    let qp = qp_problem(
+        &[1.0],
+        vec![0.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
+    let problem = MiqpProblem {
+        qp,
+        integer_vars: vec![1], // num_vars == 1, so index 1 is out of range.
+    };
+    let res = solve_miqp(&problem, &opts(), &MipConfig::default());
+    assert!(
+        matches!(res.status, SolveStatus::NotSupported(_)),
+        "out-of-range integer_vars index must be rejected, got {:?}",
+        res.status
+    );
 }

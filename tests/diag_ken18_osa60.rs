@@ -1,21 +1,35 @@
 //! TDD diagnostic tests for two LP bench regressions:
 //!
-//! - **osa-60** (Task #4): solver returns Optimal/Timeout with `obj=0` while the
-//!   known optimum is `4.0440725e+06`. Verified root cause:
-//!   `simplex::primal::pivot_out_degenerate_artificials` consumes the entire
-//!   solve budget (O(n_artificial × n_total) FTRAN) before Phase 2 can iterate.
+//! - **osa-60**: with presolve (the default) the solver timed out at 60 s while
+//!   presolve=false solved in ~23 s. Verified root cause (measured, not the
+//!   earlier `pivot_out_degenerate_artificials` guess, which is disproven —
+//!   Phase I completes cleanly, degenerate-pivot fraction ≈ 0.003): presolve's
+//!   activity bound-tightening gives every one of the 232 965 reduced variables
+//!   a finite upper bound, and `build_standard_form` materializes each finite
+//!   upper bound as an explicit constraint row, exploding the standard-form row
+//!   count 10 280 → 243 174 (~24×). The primal simplex's per-iteration linear
+//!   algebra scales with that row count, so each pivot ran ~2.6× slower on the
+//!   same monotonically-converging ~5 400-iteration trajectory and the deadline
+//!   fired ~0.2 % short of the optimum. Fixed: presolve now drops the redundant
+//!   implied bounds it added on originally-unbounded variables before emitting
+//!   the reduced problem, so the standard form no longer grows a row per column —
+//!   see `presolve::transforms::bounds::revert_redundant_added_bounds`.
 //!
-//! - **ken-18** (Task #3): solver wall-time vastly exceeds its internal deadline
+//! - **ken-18**: solver wall-time vastly exceeded its internal deadline
 //!   (~3× overrun in single-job repro; >external `gtimeout` in concurrent bench
 //!   → SIGKILL = "異常終了"). Verified root cause:
-//!   `presolve::postsolve::build_and_solve_cleanup_lp` constructs a massive
-//!   second LP (m≈96k, n≈322k) whose 5 s timeout is set via `timeout_secs`
+//!   `presolve::postsolve::build_and_solve_cleanup_lp` constructed a massive
+//!   second LP (m≈96k, n≈322k) whose 5 s timeout was set via `timeout_secs`
 //!   but never converted to a `deadline`, so the long Ruiz/standard-form
-//!   construction never checks it.
+//!   construction never checked it. Fixed — see
+//!   `diag_ken18_must_respect_internal_deadline`'s ignore reason for the
+//!   current measured wall time.
 //!
-//! Both tests are `#[ignore]` because their failing wall-time is on the order
-//! of 60-180s — too long for default `cargo test`.
-//! Run with: `cargo nextest run --run-ignored only --test diag_ken18_osa60`.
+//! `diag_osa60_must_reach_known_objective` now runs in the default profile
+//! (~34 s solve, its own thread budget) as the osa-60 perf sentinel. The ken-18
+//! deadline test stays `#[ignore]` (its 30 s internal budget exceeds the default
+//! per-test wall); run it with
+//! `cargo nextest run --run-ignored all --test diag_ken18_osa60`.
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
@@ -37,7 +51,7 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
     .unwrap()
 }
 
-/// Task #4 (osa-60): solver must report a meaningful objective, not 0.
+/// osa-60: solver must report a meaningful objective, not 0.
 ///
 /// Known optimum: 4.0440725e+06 (netlib_lp.csv).
 ///
@@ -48,20 +62,17 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
 ///   (H2) Phase 2 ran but state was clobbered to 0 on return.
 ///   (H3) presolve early-exit returned Optimal trivially.
 ///
-/// At HEAD this asserts:
+/// This asserts:
 ///   - status is Optimal (after qps_benchmark Timeout→Optimal remap rule)
 ///   - reported objective relative error vs known < 5 %
 ///
-/// Empirically the solver returns `obj=0`/`Timeout` at 60 s; with 90 s it
-/// converges to 4.044e6. So the test FAILS at HEAD with 60 s budget and
-/// would PASS once `pivot_out_degenerate_artificials` is sped up.
+/// Measured after the presolve fix: the default (presolve) path certifies
+/// Optimal in ~21 s (well inside the 60 s budget), reported obj 4.0440725e6
+/// vs known 4.0440725e6 (rel ≈ 8e-10). Before the fix it timed out at 60 s
+/// (see the module doc for the root cause). Reverting the redundant-bound
+/// reversion (`presolve::transforms::bounds::revert_redundant_added_bounds`)
+/// restores the timeout, so this test is the perf sentinel.
 #[test]
-#[ignore = "permanent ignore — asserts Optimal, but the default (presolve) path does not \
-            certify Optimal at 60s: it returns SuboptimalSolution, or Timeout with a \
-            reduced-space solution leak (#37). The objective IS reached — presolve=false \
-            yields the exact optimum (rel ~8e-10) in ~33s; see diag_osa60_is_feasible_and_honest. \
-            The prior 'obj err 5.2%' note was stale. Un-ignore once the presolve path certifies \
-            Optimal; fix tracked in #88/#89"]
 fn diag_osa60_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/osa-60.QPS");
     assert!(
@@ -145,8 +156,16 @@ fn osa60_max_primal_infeasibility(lp: &LpProblem, x: &[f64]) -> (f64, f64) {
     let mut max_bound = 0.0_f64;
     for (&xj, &(lo, hi)) in x.iter().zip(lp.bounds.iter()) {
         let span = hi.abs().max(lo.abs()).max(1.0);
-        let below = if lo.is_finite() { (lo - xj).max(0.0) / span } else { 0.0 };
-        let above = if hi.is_finite() { (xj - hi).max(0.0) / span } else { 0.0 };
+        let below = if lo.is_finite() {
+            (lo - xj).max(0.0) / span
+        } else {
+            0.0
+        };
+        let above = if hi.is_finite() {
+            (xj - hi).max(0.0) / span
+        } else {
+            0.0
+        };
         max_bound = max_bound.max(below).max(above);
     }
     let ax = lp.a.mat_vec_mul(x).expect("Ax");
@@ -221,13 +240,12 @@ fn diag_osa60_is_feasible_and_honest() {
     const OBJ_SELF_TOL: f64 = 1e-9;
     const FEAS_TOL: f64 = 1e-6;
 
-    let recomputed_obj = lp
-        .c
-        .iter()
-        .zip(r.solution.iter())
-        .map(|(&c, &x)| c * x)
-        .sum::<f64>()
-        + lp.obj_offset;
+    let recomputed_obj =
+        lp.c.iter()
+            .zip(r.solution.iter())
+            .map(|(&c, &x)| c * x)
+            .sum::<f64>()
+            + lp.obj_offset;
     let obj_vs_known = (r.objective - KNOWN_OBJ).abs() / KNOWN_OBJ.abs();
     let denom = r.objective.abs().max(recomputed_obj.abs()).max(1.0);
     let obj_self_rel = (r.objective - recomputed_obj).abs() / denom;
@@ -318,13 +336,13 @@ fn diag_osa60_is_feasible_and_honest() {
     }
 }
 
-/// Task #3 (ken-18): solver wall-time must respect the internal deadline.
+/// ken-18: solver wall-time must respect the internal deadline.
 ///
-/// We do not require ken-18 to *solve* (it's a very large LP and is the next
-/// task after the abnormal-exit bug is fixed). The defect under test is the
-/// **deadline contract**: a 30 s internal timeout must not produce 100s+ of
-/// wall time spent in postsolve `build_and_solve_cleanup_lp`, which is what
-/// drives the bench's gtimeout SIGKILL ("異常終了") under concurrent jobs.
+/// We do not require ken-18 to *solve* (it's a very large LP). The defect
+/// under test is the **deadline contract**: a 30 s internal timeout must not
+/// produce 100s+ of wall time spent in postsolve `build_and_solve_cleanup_lp`,
+/// which is what drove the bench's gtimeout SIGKILL ("異常終了") under
+/// concurrent jobs.
 ///
 /// Observation budget: deadline + 30 s slack (matches the bench's 300 s slack
 /// design at a smaller scale).
@@ -333,8 +351,10 @@ fn diag_osa60_is_feasible_and_honest() {
 /// are all printed so we can tell whether overrun is in presolve, simplex,
 /// or postsolve.
 ///
-/// At HEAD this FAILS: empirically wall ≈ 365 s for a 120 s internal
-/// budget. Scaled to 30 s internal it lands well past the 60 s slack ceiling.
+/// Originally this FAILED: empirically wall ≈ 365 s for a 120 s internal
+/// budget. Fixed (the 5 s cleanup-LP timeout is now converted to a
+/// `deadline`); re-measured 2026-07-10 at wall=30.626s for the 30s+30s
+/// contract below — see the `#[ignore]` reason for the 2026-06-14 figure.
 #[test]
 #[ignore = "heavy/timing: measured 30.02s Timeout within 30s+30s wall contract (2026-06-14), \
             but >30s default budget; run explicitly"]

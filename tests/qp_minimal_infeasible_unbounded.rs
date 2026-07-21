@@ -1,4 +1,4 @@
-//! Task #29 凸 QP mini-corpus — **bug class: infeasible / unbounded 検出**
+//! 凸 QP mini-corpus — **bug class: infeasible / unbounded 検出**
 //!
 //! ## 対象 bug class
 //!
@@ -47,8 +47,8 @@ fn solver_opts() -> SolverOptions {
 /// **構造**: min 1/2 x^2  s.t. 5 <= x <= 3 (空集合).
 /// **狙い**: bound 矛盾 (lb > ub) を Model API で入力エラーとして即拒否。
 ///
-/// `add_var` (#8) が lb > ub を検出して `invalid_inputs` に記録し、`solve()` は
-/// `ModelError::InvalidInput` を返す。低レベル `QpProblem::new` (#7) も同矛盾を
+/// `add_var` が lb > ub を検出して `invalid_inputs` に記録し、`solve()` は
+/// `ModelError::InvalidInput` を返す。低レベル `QpProblem::new` も同矛盾を
 /// `InvalidBounds` で拒否するが、Model 経路ではそこへ到達する前に弾かれる。
 #[test]
 fn inf1_bound_lb_gt_ub_infeasible() {

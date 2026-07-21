@@ -272,11 +272,7 @@ fn aug3d_baseline_matches_qps_kkt_solution() {
     let qps_path = Path::new(manifest)
         .join("tests/fixtures/maros_meszaros")
         .join("AUG3D.QPS");
-    assert!(
-        qps_path.exists(),
-        "{} not found",
-        qps_path.display()
-    );
+    assert!(qps_path.exists(), "{} not found", qps_path.display());
     let baseline_path = Path::new(manifest)
         .join("data/baseline_objectives")
         .join("maros_meszaros.csv");
@@ -285,7 +281,11 @@ fn aug3d_baseline_matches_qps_kkt_solution() {
         let csv_expected = *baselines
             .get(name)
             .unwrap_or_else(|| panic!("{name} baseline exists"));
-        assert_obj_close(csv_expected, expected, &format!("{name} CSV baseline objective"));
+        assert_obj_close(
+            csv_expected,
+            expected,
+            &format!("{name} CSV baseline objective"),
+        );
     }
 
     let prob = parse_qps(&qps_path).expect("parse AUG3D");

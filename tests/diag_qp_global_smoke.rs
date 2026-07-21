@@ -1,4 +1,4 @@
-//! Phase 3 spatial Branch-and-Bound sentinel (#6 非凸 QP 大域最適化)。
+//! Phase 3 spatial Branch-and-Bound sentinel (非凸 QP 大域最適化)。
 //!
 //! ## 真因 (sentinel が必要な理由)
 //! 非凸 QP では IPM (inertia 補正付き) は cold init から「最寄り KKT 点」へしか

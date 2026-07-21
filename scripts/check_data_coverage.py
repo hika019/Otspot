@@ -32,7 +32,7 @@ Policies (fact-based, updated 2026-05-30):
   Minimum tracked fixtures (#17):
     Small QP/LP fixture files (< 50KB) can be tracked in git under
     tests/fixtures/ (or tests/data/). These bypass the data/ download
-    requirement for unit tests. Implementation: task #17.
+    requirement for unit tests. Implementation: task 17.
     Candidates: QPLIB_8495, AUG2D (Maros), afiro (Netlib LP).
 
   osqp_bench optional rows (SS_*):
@@ -60,6 +60,11 @@ class Dataset(NamedTuple):
     csv_path: str | None
     exts: list[str] | None
     origin: str
+    # Additional baseline CSV merged into csv_path's rows before coverage is
+    # computed (same data_dir, disjoint problem IDs, different provenance —
+    # kept as a separate file on disk rather than merged, mirroring
+    # bench_utils::qplib_qcqp_csv_path on the Rust side).
+    extra_csv_path: str | None = None
 
 
 # origin: "official" | "official_gen" | "synthetic"
@@ -67,8 +72,13 @@ DATASETS: list[Dataset] = [
     # QP official
     Dataset("maros_meszaros", "data/baseline_objectives/maros_meszaros.csv",
             [".QPS"], "official"),
+    # qplib_qcqp.csv covers the CCQ/DCQ/QCQ (quadratic-constraint) instances
+    # physically mixed into data/qplib alongside the DCL/QCL ones qplib.csv
+    # covers; without merging it in here, those files show up as `no_ref`
+    # instead of being coverage-tracked (PR #25 review).
     Dataset("qplib", "data/baseline_objectives/qplib.csv",
-            [".qplib"], "official"),
+            [".qplib"], "official",
+            extra_csv_path="data/baseline_objectives/qplib_qcqp.csv"),
     Dataset("qplib_nonconvex_official", "data/baseline_objectives/qplib_nonconvex_official.csv",
             [".qplib"], "official"),
     # QP official-derived (generated from official problem definitions)
@@ -167,6 +177,7 @@ def main() -> int:
     for ds in DATASETS:
         data_dir = root / "data" / ds.name
         csv_path = root / ds.csv_path if ds.csv_path else None
+        extra_csv_path = root / ds.extra_csv_path if ds.extra_csv_path else None
 
         if not data_dir.is_dir():
             rows.append({
@@ -183,6 +194,8 @@ def main() -> int:
 
         all_files = data_files(data_dir, ds.exts)
         csv_row_list = read_csv_rows(csv_path) if csv_path else []
+        if extra_csv_path:
+            csv_row_list = csv_row_list + read_csv_rows(extra_csv_path)
         csv_all_names = {name for name, _ in csv_row_list}
         csv_required = {name for name, opt in csv_row_list if not opt}
         csv_optional = {name for name, opt in csv_row_list if opt}

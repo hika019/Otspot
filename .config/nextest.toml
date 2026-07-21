@@ -1,7 +1,8 @@
 [profile.default]
 # doctest は nextest 非対応 → `cargo test --doc` で別途実行。
-# test-threads=3: CLAUDE.md 準拠 (num-cpus は機種依存で非決定的)。
-test-threads = 3
+# ローカル開発は 6 スレッド、GitHub Actions は 3 (ユーザ指示 2026-07-06)。
+# CI は ci.yml/test-heavy.yml が --test-threads 3 を明示指定して override する。
+test-threads = 6
 # slow-timeout.period 60s, terminate-after 5 → 300s で kill。
 # tier-2 sentinel (pilot87 ~142s, ken18 ~62s 等) を default で実走させるため
 # CLAUDE.md L33 3min cap を超えるが、tier-2 個別 override で 60s/180s に戻す道もある。
@@ -62,7 +63,7 @@ threads-required = "num-cpus"
 
 # cycle.QPS promoted into default integration includes two long solver-budget
 # guards (120s / 250s). They keep the data-missing panic semantics, but should
-# not contend with other CPU-bound integration tests under default test-threads=3.
+# not contend with other CPU-bound integration tests under the default thread pool.
 [[profile.default.overrides]]
 filter = "test(diag_cycle_must_reach_known_objective) + test(diag_cycle_is_feasible_and_near_optimal)"
 threads-required = "num-cpus"
@@ -73,21 +74,43 @@ threads-required = "num-cpus"
 filter = "test(warm_start_30pct_speedup_smoke)"
 threads-required = "num-cpus"
 
+# osa-60 perf sentinel solves against a 60s internal deadline in ~20.7s single-job
+# (margin ~2.9x / ~39s absolute). Serialise it: threads-required caps nextest's own
+# thread pool but NOT other host processes, so the ~39s cushion — far thicker than
+# greenbea's ~6s, which still flaked 1.04x under contention — is the real guard. If a
+# future change shrinks it, revisit the deadline/budget rather than loosening asserts.
+[[profile.default.overrides]]
+filter = "test(diag_osa60_must_reach_known_objective)"
+threads-required = "num-cpus"
+
 # Memory-heavy qplib parse tests peak 100-800 MB each (QPLIB_8500 = 100 MB,
 # QPLIB_8683 = ~50 MB post-fix, QPLIB_8547/9008 DCL = ~700 MB).
 # Running them concurrently stacks memory and can thrash (swap=0) or trip
 # slow-timeout.  Serialize so at most one runs at a time.
 [test-groups]
 qplib-memory-heavy = { max-threads = 1 }
+memory-budget = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = "test(qplib::tests::test_parse_existing_qplib_files_regression) + test(qplib::tests::test_memory_sentinel_no_double_hashmap_qplib8500) + test(qplib::tests::test_parse_sweep_no_memory_accumulation) + test(qplib::tests::test_memory_probe_large_dcl_files) + test(qplib::tests::test_memory_sentinel_qplib8683_qcqp) + test(qplib::tests::test_qcqp_sparse_init_memory_bounded)"
 test-group = "qplib-memory-heavy"
 
+# memory_budget.rs (otspot-core/tests + otspot-model/tests): every peak-allocation
+# fence, serialized. Budgets sum to ~4.4 GB, and a regression allocates its way to
+# the ceiling *before* the post-solve assert fires, so concurrent fences can exhaust
+# RAM and take the whole test run (or its cgroup) down with an OOM kill.
+# Matched by binary, not by test name: a name list silently omits fences added later
+# — it had already drifted to 4 of 7. Measurement correctness does not depend on this
+# grouping: each test holds an in-binary Mutex for its measure window (see the file's
+# module doc comment).
+[[profile.default.overrides]]
+filter = "binary(memory_budget)"
+test-group = "memory-budget"
+
 # Heavy/nightly profile: runs ALL tests including #[ignore]d heavy ones.
 #
 # Usage:
-#   cargo nextest run --workspace --profile heavy --run-ignored all --test-threads 3
+#   cargo nextest run --workspace --profile heavy --run-ignored all
 #
 # run-ignored は nextest profile キーとして無効 (unknown key warning が出る)。
 # #[ignore] テストを含めるには CLI フラグ `--run-ignored all` を必ず付けること。
@@ -106,7 +129,7 @@ test-group = "qplib-memory-heavy"
 # liswet9 complementarity (~16s), kkt_repro_50 (~16s), klein3 (~12-14s),
 # dfl001 forced simplex (~30s), prop_nonconvex_constrained (~29s).
 [profile.heavy]
-test-threads = 3
+test-threads = 6
 slow-timeout = { period = "300s", terminate-after = 2 }
 
 # lp_coverage_screen: 90 LP screen ~5–6 min — raise kill ceiling to 12 min.
@@ -147,7 +170,17 @@ filter = "test(greenbea_postsolve_under_5s)"
 threads-required = "num-cpus"
 
 # lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent: default profile と同様に
-# CPU 専有で fair timing にする (heavy --test-threads 3 での他の heavy test との contention 対策)。
+# CPU 専有で fair timing にする (heavy の他テストとの contention 対策)。
 [[profile.heavy.overrides]]
 filter = "test(lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent)"
 threads-required = "num-cpus"
+
+# Netlib route/pricing sentinels: 内部 solver budget 1000s に対し heavy 既定の
+# kill (300s×2=600s) が先に発火する契約矛盾を解消する。実測 solo: dfl001 344s /
+# ken-18 63s / ken-13 simplex 直行 131s。CI 3-thread 相当 (~2.5x) で dfl001
+# ≈ 860s < budget 1000s < kill 1200s (300s×4)。CPU 専有で fair timing。
+[[profile.heavy.overrides]]
+filter = "test(=lp_route_dfl001_uses_ipm_dispatch) + test(=lp_route_ken18_uses_ipm_dispatch) + test(=lp_route_pds20_uses_bounded_eq_ub) + test(=lp_bounded_eq_ub_ken13_pricing_efficiency_via_lp_entry)"
+slow-timeout = { period = "300s", terminate-after = 4 }
+threads-required = "num-cpus"
+

@@ -185,7 +185,9 @@ pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut [f64]) {
 
 pub(crate) fn make_solve_scratch(lu: &LuFactorization) -> MemBuffer {
     let req_f = lu.symbolic.solve_in_place_scratch::<f64>(1, Par::Seq);
-    let req_b = lu.symbolic.solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
+    let req_b = lu
+        .symbolic
+        .solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
     MemBuffer::new(StackReq::any_of(&[req_f, req_b]))
 }
 
@@ -201,7 +203,9 @@ pub(crate) fn solve_ftran_cached(lu: &LuFactorization, rhs: &mut [f64], scratch:
 }
 
 pub(crate) fn solve_btran_cached(lu: &LuFactorization, rhs: &mut [f64], scratch: &mut MemBuffer) {
-    let req = lu.symbolic.solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
+    let req = lu
+        .symbolic
+        .solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
     if scratch.len() < req.size_bytes() {
         *scratch = MemBuffer::new(req);
     }
@@ -502,7 +506,7 @@ mod tests {
     }
 
     /// 構造的特異 (空行を持つ) 基底で symbolic factorize が panic しないことを
-    /// 守る load-bearing sentinel (#42)。`LuSymbolicParams::default()` (AUTO) では
+    /// 守る load-bearing sentinel。`LuSymbolicParams::default()` (AUTO) では
     /// faer 0.24.0 の supernodal/simplicial 自動判定が usize underflow を起こし
     /// debug で panic する。`FORCE_SIMPLICIAL` 強制でこれを根絶し、構造的特異な
     /// 基底は SingularBasis として返ることを検査する。

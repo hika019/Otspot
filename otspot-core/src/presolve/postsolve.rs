@@ -6,10 +6,10 @@ use crate::options::WarmStartBasis;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::simplex::build_standard_form;
 use crate::simplex::crash::compute_crash_basis;
-use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
-use std::time::Instant;
 #[cfg(test)]
 use crate::sparse::CscMatrix;
+use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
+use std::time::Instant;
 
 /// Relative tolerance below which a standard-form column is treated as at-bound
 /// (non-basic candidate) when synthesising the postsolved warm-start basis.
@@ -19,7 +19,6 @@ const WARM_BASIS_BUILD_TOL: f64 = 1e-9;
 /// if its absolute value exceeds this fraction of the column maximum. Prevents tiny
 /// pivots that would inflate the basis matrix condition number.
 const MARKOWITZ_PIVOT_RATIO: f64 = 0.1;
-
 
 // Test-only, in-order trace of which dual-recovery passes `run_postsolve`
 // executed. Lets sentinels assert that the crossover pass runs first and can
@@ -44,7 +43,6 @@ fn trace_pass(_: &'static str) {}
 fn drain_postsolve_pass_trace() -> Vec<&'static str> {
     POSTSOLVE_PASS_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()))
 }
-
 
 /// Relative tolerance for treating `x[j]` as active at a bound or for detecting fixed variables.
 ///
@@ -216,7 +214,6 @@ fn recover_removed_row_dual(
     let row_entries = collect_row_entries(orig_problem, i);
     stationarity_dual(orig_problem, i, &row_entries, solution, dual_solution)
 }
-
 
 /// Synthesise an original-LP standard-form basis from the postsolved primal solution.
 ///
@@ -474,10 +471,14 @@ pub fn run_postsolve(
                     let mut y_i = (c_orig - sum_ay) / coeff;
                     match orig_problem.constraint_types[*orig_row] {
                         crate::problem::ConstraintType::Le => {
-                            if y_i > 0.0 { y_i = 0.0; }
+                            if y_i > 0.0 {
+                                y_i = 0.0;
+                            }
                         }
                         crate::problem::ConstraintType::Ge => {
-                            if y_i < 0.0 { y_i = 0.0; }
+                            if y_i < 0.0 {
+                                y_i = 0.0;
+                            }
                         }
                         crate::problem::ConstraintType::Eq => {}
                     }
@@ -495,8 +496,13 @@ pub fn run_postsolve(
                 // Forcing rows are always binding (activity at contributing bounds exactly
                 // matches RHS). Use the presolve-time snapshot to bypass is_row_nonbinding,
                 // which would compute Ax with partially restored variables under LIFO replay.
-                dual_solution[*orig_row] =
-                    stationarity_dual(orig_problem, *orig_row, row_orig_entries, &solution, &dual_solution);
+                dual_solution[*orig_row] = stationarity_dual(
+                    orig_problem,
+                    *orig_row,
+                    row_orig_entries,
+                    &solution,
+                    &dual_solution,
+                );
             }
             PostsolveStep::LinearSubstitution {
                 orig_col,
@@ -652,7 +658,6 @@ fn malformed_postsolve_result() -> SolverResult {
     }
 }
 
-
 #[cfg(test)]
 mod warm_basis_recovery_tests {
     //! `recover_warm_start_basis` sentinels.
@@ -804,7 +809,7 @@ mod warm_basis_recovery_tests {
         let lp = lp_dual_fixed();
         // Self-warm round-trip (same LP twice) — the simplest sanity.
         assert_warm_round_trip(&lp, &lp, "dual_fixed/self");
-        // Cross-warm with RHS change matching the #65 regression scenario.
+        // Cross-warm with RHS change matching the original regression scenario.
         let mut lp2 = lp_dual_fixed();
         lp2.b = vec![5.0, 3.0, 3.0];
         assert_warm_round_trip(&lp, &lp2, "dual_fixed/rhs_change");
@@ -841,10 +846,10 @@ mod warm_basis_recovery_tests {
     /// dual-fixed warm-start round-trip even when the new RHS is feasible
     /// (because subsequent `solve_with(lp2, warm=None, presolve=false)` would
     /// be a cold dual that this fixture is fine with, BUT the upstream
-    /// assertion `result.warm_start_basis.is_some()` in #65 still trips).
+    /// assertion `result.warm_start_basis.is_some()` still trips).
     #[test]
     fn noop_proof_returns_none_fails_round_trip() {
-        // Reproduces the original #65 FAIL state: presolve reduces, postsolve
+        // Reproduces the original FAIL state: presolve reduces, postsolve
         // (in this synthetic call) returns None → assertion catches the lost
         // warm-start. We don't have a runtime toggle for the recovery path —
         // instead we directly invoke the recovery function with an empty
@@ -856,7 +861,7 @@ mod warm_basis_recovery_tests {
         assert!(
             recovered.is_some(),
             "recover_warm_start_basis must produce a basis for dual-fixed LP \
-             (no-op would return None and re-introduce #65)",
+             (no-op would return None and re-introduce the lost warm-start bug)",
         );
         let basis = recovered.unwrap().basis;
         let sf = build_standard_form(&lp);
@@ -1225,7 +1230,6 @@ mod crossover_first_tests {
             "non-Optimal status must not run crossover; trace={trace:?}"
         );
     }
-
 }
 
 #[cfg(test)]
@@ -1272,10 +1276,7 @@ mod recover_removed_row_dual_tests {
         let solution = vec![2.0];
         let dual_solution = vec![0.0];
         let y = recover_removed_row_dual(&lp, 0, &solution, &dual_solution);
-        assert!(
-            y.abs() < 1e-10,
-            "non-binding Le dual should be 0, got {y}"
-        );
+        assert!(y.abs() < 1e-10, "non-binding Le dual should be 0, got {y}");
     }
 
     /// Binding Ge row: min x  s.t.  x >= 2,  x in [0, inf).
@@ -1318,10 +1319,7 @@ mod recover_removed_row_dual_tests {
         let solution = vec![0.0];
         let dual_solution = vec![0.0];
         let y = recover_removed_row_dual(&lp, 0, &solution, &dual_solution);
-        assert!(
-            y.abs() < 1e-10,
-            "non-binding Ge dual should be 0, got {y}"
-        );
+        assert!(y.abs() < 1e-10, "non-binding Ge dual should be 0, got {y}");
     }
 
     /// Binding Eq row: min x  s.t.  x = 3,  x in [0, inf).

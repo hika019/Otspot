@@ -5,7 +5,7 @@
 //! MILP-vs-HiGHS comparison harness.
 //!
 //! Usage:
-//!   `cargo run --release --bin milp_solve -- <file.mps> [--timeout <secs>] [--eps <tol>] [--no-cuts] [--cut-rounds N]`
+//!   `cargo run --release --bin milp_solve -- <file.mps> [--timeout <secs>] [--eps <tol>] [--cuts|--no-cuts] [--cut-rounds N] [--symmetry|--no-symmetry]`
 
 use mimalloc::MiMalloc;
 #[global_allocator]
@@ -60,6 +60,7 @@ fn main() -> ExitCode {
     println!("n_vars: {n_vars}");
     println!("n_cons: {n_cons}");
     println!("n_int: {n_int}");
+    println!("symmetry: {}", cfg.symmetry);
     println!("status: {:?}", res.status);
     if res.objective.is_finite() {
         println!("objective: {:.9}", res.objective);
@@ -143,6 +144,7 @@ struct CliArgs {
     eps: f64,
     cuts: bool,
     cut_rounds: usize,
+    symmetry: Option<bool>,
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> {
@@ -151,6 +153,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String>
     let mut eps = 1e-6_f64;
     let mut cuts = true;
     let mut cut_rounds = 0usize;
+    let mut symmetry: Option<bool> = None;
     let args: Vec<String> = args.into_iter().collect();
     let mut i = 0;
     while i < args.len() {
@@ -173,13 +176,15 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String>
                 cut_rounds = value.parse().expect("--cut-rounds value");
                 cuts = true;
             }
+            "--symmetry" => symmetry = Some(true),
+            "--no-symmetry" => symmetry = Some(false),
             other => path = Some(other.to_string()),
         }
         i += 1;
     }
 
     let path = path.ok_or_else(|| {
-        "usage: milp_solve <file.mps> [--timeout <secs>] [--eps <tol>] [--no-cuts] [--cut-rounds N]".to_string()
+        "usage: milp_solve <file.mps> [--timeout <secs>] [--eps <tol>] [--cuts|--no-cuts] [--cut-rounds N] [--symmetry|--no-symmetry]".to_string()
     })?;
     Ok(CliArgs {
         path,
@@ -187,6 +192,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String>
         eps,
         cuts,
         cut_rounds,
+        symmetry,
     })
 }
 
@@ -195,6 +201,9 @@ fn mip_config_from_cli(cli: &CliArgs) -> MipConfig {
     cfg.gap_tol = cli.eps;
     cfg.integer_feas_tol = cli.eps;
     configure_cuts(&mut cfg, cli.cuts, cli.cut_rounds);
+    if let Some(symmetry) = cli.symmetry {
+        cfg.symmetry = symmetry;
+    }
     cfg
 }
 
@@ -229,6 +238,30 @@ mod tests {
 
         assert!(!cfg.cuts);
         assert!(!cfg.tree_cuts);
+    }
+
+    #[test]
+    fn symmetry_defaults_to_config_default_when_unset() {
+        let cli = parse_args(["tiny.mps".to_string()]).unwrap();
+        assert_eq!(cli.symmetry, None);
+        let cfg = mip_config_from_cli(&cli);
+        assert_eq!(cfg.symmetry, MipConfig::default().symmetry);
+    }
+
+    #[test]
+    fn symmetry_cli_overrides_default_both_ways() {
+        let off = parse_args(["tiny.mps".to_string(), "--no-symmetry".to_string()]).unwrap();
+        assert_eq!(off.symmetry, Some(false));
+        assert!(!mip_config_from_cli(&off).symmetry);
+
+        let on = parse_args([
+            "tiny.mps".to_string(),
+            "--no-symmetry".to_string(),
+            "--symmetry".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(on.symmetry, Some(true));
+        assert!(mip_config_from_cli(&on).symmetry);
     }
 
     #[test]

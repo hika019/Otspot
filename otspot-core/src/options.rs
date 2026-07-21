@@ -205,7 +205,7 @@ pub const DEFAULT_MIP_CUTS: bool = true;
 /// Root cut-round count used when `max_cut_rounds == 0`.
 pub const DEFAULT_MAX_CUT_ROUNDS: usize = 5;
 /// Default static symmetry-breaking state.
-pub const DEFAULT_MIP_SYMMETRY: bool = false;
+pub const DEFAULT_MIP_SYMMETRY: bool = true;
 /// Default in-tree cut separation state.
 pub const DEFAULT_MIP_TREE_CUTS: bool = true;
 
@@ -240,7 +240,7 @@ pub struct MipConfig {
     /// Break structural symmetry by adding static lex-leader ordering rows for
     /// orbits of interchangeable binary variables (identical objective and
     /// constraint columns). Preserves at least one optimal representative per
-    /// orbit, so the optimum is unchanged while the tree shrinks. Default OFF
+    /// orbit, so the optimum is unchanged while the tree shrinks. Default ON
     /// (see [`DEFAULT_MIP_SYMMETRY`]).
     pub symmetry: bool,
     /// Enable the RENS (Relaxation Enforced Neighborhood Search) heuristic.
@@ -610,6 +610,48 @@ impl Default for SolverOptions {
 }
 
 impl SolverOptions {
+    /// Materialize `timeout_secs` into an absolute `deadline` (clearing
+    /// `timeout_secs`), returning `None` when nothing needs converting.
+    ///
+    /// Entry wrappers that stamp `stats.deadline_triggered` must do this
+    /// BEFORE solving and evaluate [`Self::external_stop_requested`] on the
+    /// materialized options: the raw caller options may carry only
+    /// `timeout_secs` (deadline = None), for which the clock check is blind
+    /// even though the inner layers time out against the derived deadline
+    /// (timeout_secs=0.0 must report deadline_triggered=true).
+    pub(crate) fn materialize_deadline(&self) -> Option<SolverOptions> {
+        if self.deadline.is_none() {
+            if let Some(secs) = self.timeout_secs {
+                // Invalid values (negative / non-finite) are left for
+                // `validate()` downstream; converting them here would panic in
+                // Duration::from_secs_f64 before validation can reject them.
+                if !secs.is_finite() || secs < 0.0 {
+                    return None;
+                }
+                let mut o = self.clone();
+                o.deadline =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(secs));
+                o.timeout_secs = None;
+                return Some(o);
+            }
+        }
+        None
+    }
+
+    /// Whether the caller-visible stop condition is external: the wall-clock
+    /// deadline expired or the cancel flag fired. Distinguishes an honest
+    /// `Timeout` from an internal stop (`Stalled`/`MaxIterations`).
+    /// Sound at result assembly: a deadline-triggered bail implies `now >= d`
+    /// (monotonic), while a stall bail normally leaves budget on the clock.
+    pub(crate) fn external_stop_requested(&self) -> bool {
+        self.deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+            || self
+                .cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     /// Effective IPM eps: derived from `tolerance` if set, otherwise `ipm.eps`.
     pub fn ipm_eps(&self) -> f64 {
         match self.tolerance {
@@ -619,6 +661,24 @@ impl SolverOptions {
             Some(Tolerance::Custom(v)) => v,
             None => self.ipm.eps,
         }
+    }
+
+    /// LP solution-acceptance tolerance for relative primal residuals in
+    /// postsolve retry/demotion gates.
+    ///
+    /// `primal_tol` defaults to `PIVOT_TOL` (1e-8), an *internal* simplex
+    /// feasibility tolerance. The accuracy the caller asked for is `ipm_eps()`
+    /// (default 1e-6, follows `tolerance` when set). Accepting a returned
+    /// solution must never be stricter than the requested accuracy: gating at
+    /// PIVOT_TOL misclassifies solves whose achievable original-space residual
+    /// sits between PIVOT_TOL and eps (greenbea: ~1.2e-7 on every route).
+    pub(crate) fn lp_accept_primal_tol(&self) -> f64 {
+        self.primal_tol.max(self.ipm_eps())
+    }
+
+    /// Dual counterpart of [`Self::lp_accept_primal_tol`] for `postsolve_dfeas`.
+    pub(crate) fn lp_accept_dual_tol(&self) -> f64 {
+        self.dual_tol.max(self.ipm_eps())
     }
 
     /// Validate all option fields.

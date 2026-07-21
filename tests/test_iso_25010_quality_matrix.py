@@ -1,3 +1,4 @@
+import json
 import re
 import shlex
 import subprocess
@@ -97,39 +98,70 @@ def _nextest_list_command(command):
     return list_args
 
 
-def _listed_test_count(command):
+def _parse_nextest_list_json(stdout):
+    stdout = stdout.strip()
+    if not stdout:
+        return []
+    try:
+        payloads = [json.loads(stdout)]
+    except json.JSONDecodeError:
+        payloads = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+
+    tests = []
+    for payload in payloads:
+        for suite in payload.get("rust-suites", {}).values():
+            tests.extend(suite.get("testcases", {}).keys())
+    return tests
+
+
+def _parse_nextest_list_human(stdout):
+    tests = []
+    for raw_line in stdout.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped == "(no tests)":
+            continue
+        if not raw_line[:1].isspace():
+            continue
+        if stripped.startswith(("bin: ", "cwd: ", "build platform: ")):
+            continue
+        if stripped.endswith(" (skipped)"):
+            stripped = stripped[: -len(" (skipped)")]
+        tests.append(stripped)
+    return tests
+
+
+def _list_nextest_tests(command):
+    base_args = _nextest_list_command(command)
+    try:
+        result = subprocess.run(
+            [*base_args, "--message-format", "json"],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        return _parse_nextest_list_json(result.stdout)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr or ""
+        if "--message-format" not in stderr:
+            raise
+
     result = subprocess.run(
-        _nextest_list_command(command),
+        [*base_args, "--message-format", "human"],
         cwd=ROOT,
         check=True,
         text=True,
         capture_output=True,
     )
-    return len(_parse_nextest_list_tests(result.stdout))
+    return _parse_nextest_list_human(result.stdout)
+
+
+def _listed_test_count(command):
+    return len(_list_nextest_tests(command))
 
 
 def _listed_tests(command):
-    result = subprocess.run(
-        _nextest_list_command(command),
-        cwd=ROOT,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    return _parse_nextest_list_tests(result.stdout)
-
-
-def _parse_nextest_list_tests(output):
-    tests = []
-    for line in output.splitlines():
-        name = line.strip()
-        if not name or name.startswith("package:") or name.endswith(":"):
-            continue
-        if line[:1].isspace():
-            tests.append(name)
-        elif " " in name and "::" in name.split()[0]:
-            tests.append(name)
-    return tests
+    return _list_nextest_tests(command)
 
 
 def _documented_nextest_selector_commands(text):
@@ -178,23 +210,46 @@ def test_iso_25010_matrix_keeps_gates_actionable():
     assert "cargo clippy" in text
 
 
-def test_nextest_list_parser_counts_root_level_tests_without_counting_headers():
-    sample = """
-package: otspot-dev
-diag_lp_simplex_stall_sentinel:
-    detects_stall_at_root
-    honors_timeout_budget
-    simplex::phase_one_recovers
-otspot::diag_lp_simplex_stall_sentinel root_level_from_full_output
+def test_nextest_json_listing_parser_counts_root_level_names():
+    stdout = """
+{
+  "test-count": 3,
+  "rust-suites": {
+    "otspot::api_correctness": {
+      "testcases": {
+        "smoke_test": {"ignored": false},
+        "module::nested_case": {"ignored": false}
+      }
+    },
+    "otspot::solver_wide_api_contract": {
+      "testcases": {"contract_case": {"ignored": false}}
+    }
+  }
+}
 """
-    expected = [
-        "detects_stall_at_root",
-        "honors_timeout_budget",
-        "simplex::phase_one_recovers",
-        "otspot::diag_lp_simplex_stall_sentinel root_level_from_full_output",
+    assert _parse_nextest_list_json(stdout) == [
+        "smoke_test",
+        "module::nested_case",
+        "contract_case",
     ]
-    assert _parse_nextest_list_tests(sample) == expected
-    assert len(_parse_nextest_list_tests(sample)) == 4
+
+
+def test_nextest_human_listing_parser_ignores_headers_and_keeps_root_level_names():
+    stdout = """
+nextest-runner:
+    smoke_test
+    module::nested_case
+nextest-runner::integration:
+    basic::test_list_tests
+nextest-runner::bin/passthrough:
+    (no tests)
+"""
+    assert _parse_nextest_list_human(stdout) == [
+        "smoke_test",
+        "module::nested_case",
+        "basic::test_list_tests",
+    ]
+
 
 def test_iso_25010_nextest_release_gate_selectors_are_nonempty():
     text = MATRIX.read_text(encoding="utf-8")
@@ -243,7 +298,8 @@ if __name__ == "__main__":
     test_iso_25010_matrix_covers_product_quality_characteristics()
     test_iso_25010_matrix_references_existing_repo_gates()
     test_iso_25010_matrix_keeps_gates_actionable()
-    test_nextest_list_parser_counts_root_level_tests_without_counting_headers()
+    test_nextest_json_listing_parser_counts_root_level_names()
+    test_nextest_human_listing_parser_ignores_headers_and_keeps_root_level_names()
     test_iso_25010_nextest_release_gate_selectors_are_nonempty()
     test_iso_25010_expected_gate_selector_expressions_match_documented_rows_exactly()
     test_iso_25010_expected_binary_gate_selectors_are_documented_and_nonempty()

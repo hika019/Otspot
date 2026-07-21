@@ -49,8 +49,7 @@ pub(super) fn step2b_forcing_row(
             ConstraintType::Le => lb_fin && row_lb >= rhs - ZERO_TOL,
             ConstraintType::Ge => ub_fin && row_ub <= rhs + ZERO_TOL,
             ConstraintType::Eq => {
-                (lb_fin && row_lb >= rhs - ZERO_TOL)
-                    || (ub_fin && row_ub <= rhs + ZERO_TOL)
+                (lb_fin && row_lb >= rhs - ZERO_TOL) || (ub_fin && row_ub <= rhs + ZERO_TOL)
             }
         };
 
@@ -71,9 +70,17 @@ pub(super) fn step2b_forcing_row(
         let all_finite = active.iter().all(|&(j, a_ij)| {
             let (lb_j, ub_j) = st.bounds[j];
             if force_to_min {
-                if a_ij > 0.0 { lb_j.is_finite() } else { ub_j.is_finite() }
+                if a_ij > 0.0 {
+                    lb_j.is_finite()
+                } else {
+                    ub_j.is_finite()
+                }
             } else {
-                if a_ij > 0.0 { ub_j.is_finite() } else { lb_j.is_finite() }
+                if a_ij > 0.0 {
+                    ub_j.is_finite()
+                } else {
+                    lb_j.is_finite()
+                }
             }
         });
         if !all_finite {
@@ -86,9 +93,17 @@ pub(super) fn step2b_forcing_row(
             .map(|&(j, a_ij)| {
                 let (lb_j, ub_j) = st.bounds[j];
                 let value = if force_to_min {
-                    if a_ij > 0.0 { lb_j } else { ub_j }
+                    if a_ij > 0.0 {
+                        lb_j
+                    } else {
+                        ub_j
+                    }
                 } else {
-                    if a_ij > 0.0 { ub_j } else { lb_j }
+                    if a_ij > 0.0 {
+                        ub_j
+                    } else {
+                        lb_j
+                    }
                 };
                 (j, value, lb_j, ub_j)
             })

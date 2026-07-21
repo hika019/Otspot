@@ -378,7 +378,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 if !enable_phase1_cycling_bail {
                     let min_basic = x_b.iter().copied().fold(f64::INFINITY, f64::min);
                     if min_basic < -options.primal_tol {
-                        return SimplexOutcome::Timeout(obj);
+                        return SimplexOutcome::Stalled(obj);
                     }
                 }
                 return SimplexOutcome::Optimal(obj, y_dense.clone());
@@ -437,6 +437,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                         }
                         continue;
                     } else {
+                        // refactor_failed && !singular ⇔ refactor_timed hit the
+                        // deadline (basis/mod.rs) — an external stop, hence Timeout.
                         let obj: f64 = basic_obj(c, basis, x_b);
                         return SimplexOutcome::Timeout(obj);
                     }
@@ -635,6 +637,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 }
                 continue;
             } else {
+                // refactor_failed && !singular ⇔ deadline during refactor_timed
+                // (basis/mod.rs) — an external stop, hence Timeout.
                 let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }
@@ -674,7 +678,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             && iters_since_obj_progress >= obj_bail_trigger
             && iters_since_step_progress >= step_bail_trigger
         {
-            return SimplexOutcome::Timeout(current_obj);
+            return SimplexOutcome::Stalled(current_obj);
         }
     }
 

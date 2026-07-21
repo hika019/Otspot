@@ -2,6 +2,24 @@
 
 use crate::sparse::CscMatrix;
 
+/// 内部 IPM がどの終端条件で停止したか。
+///
+/// `finalize_outcome` が「eps 未達かつ非 timeout」の outcome へ正直な status を
+/// 割り当てるための事実情報。解品質は常に `satisfies_eps` + `prove_optimal` で
+/// 独立判定するため、この enum は品質を主張しない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpmTermination {
+    /// 内部 (scaled 空間) の収束判定を満たして停止した。元空間の user_eps を
+    /// 満たすかは別判定 (満たさない場合は精度床 = Stalled として報告する)。
+    Converged,
+    /// α-stall / 残差停滞 / 方向発散からの best-so-far 復帰で停止した。
+    Stalled,
+    /// 反復予算 (`ipm.max_iter`) を使い切って停止した。
+    IterationLimit,
+    /// deadline / cancel を検知して停止した。
+    Deadline,
+}
+
 /// 残差ベース収束判定を `satisfies_eps` に集約。Infeasible / Unbounded のみ
 /// `infeasibility_status` で保持し、finalize で Timeout に丸めない。
 #[derive(Clone, Debug)]
@@ -33,6 +51,9 @@ pub struct IpmOutcome {
     pub postsolve_krylov_ir_skipped: bool,
     /// IPM + postsolve stage 別計測。常時収集 (instrumentation only)。
     pub timing: Option<crate::problem::TimingBreakdown>,
+    /// 内部 IPM の終端条件。`solution` が非空の通常経路でのみ意味を持つ
+    /// (empty / numerical_failure / infeasibility は finalize が先に分岐する)。
+    pub termination: IpmTermination,
 }
 
 impl IpmOutcome {
@@ -53,6 +74,7 @@ impl IpmOutcome {
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
+            termination: IpmTermination::Deadline,
         }
     }
 

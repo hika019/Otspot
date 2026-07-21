@@ -125,6 +125,92 @@ pub fn compute_qp_kkt_max(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) ->
     max_resid
 }
 
+/// QCQP quadratic-constraint primal feasibility max-violation.
+///
+/// For each constraint `k` with a non-empty `quadratic_constraints[k]`,
+/// evaluates the full row `1/2 x'Q_k x + (Ax)_k {<=,=,>=} b_k`
+/// (`QpProblem`'s documented QCQP row semantics) and returns the max
+/// relative violation, scaled `1 + |lhs_k| + |b_k|` (matches
+/// `compute_qp_kkt_max`'s `primal_feas_max` convention). Constraints with an
+/// empty `QcqpMatrix` (pure-linear rows in an otherwise-QCQP problem) are
+/// skipped here — `primal_feas_max`/`compute_qp_kkt_max` already cover the
+/// linear-only rows via `Ax`.
+///
+/// Stationarity of the quadratic-constraint multipliers is out of scope:
+/// this checks primal feasibility only, mirroring `primal_feas_max`'s role
+/// for the linear rows.
+///
+/// Returns `0.0` for a pure QP/LP (`quadratic_constraints` empty), and
+/// `f64::INFINITY` if `x` has the wrong length, non-finite entries, or the
+/// problem's `quadratic_constraints` invariant is broken (defensive: the
+/// field is public and callers can bypass `set_quadratic_constraints`).
+pub fn qcqp_pfeas_max(prob: &QpProblem, x: &[f64]) -> f64 {
+    if prob.quadratic_constraints.is_empty() {
+        return 0.0;
+    }
+    if prob.validate().is_err() {
+        return f64::INFINITY;
+    }
+    let n = prob.num_vars;
+    if x.len() != n || x.iter().any(|v| !v.is_finite()) {
+        return f64::INFINITY;
+    }
+    let ax = match prob.a.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return f64::INFINITY,
+    };
+    let mut max_v = 0.0_f64;
+    #[allow(unreachable_patterns)]
+    for (k, qc) in prob.quadratic_constraints.iter().enumerate() {
+        if qc.nnz() == 0 {
+            continue;
+        }
+        let quad: f64 = 0.5
+            * qc.triplets
+                .iter()
+                .map(|&(i, j, v)| v * x[i] * x[j])
+                .sum::<f64>();
+        let lhs = ax[k] + quad;
+        let b_k = prob.b[k];
+        if !lhs.is_finite() || !b_k.is_finite() {
+            return f64::INFINITY;
+        }
+        let viol = match prob.constraint_types[k] {
+            ConstraintType::Le => (lhs - b_k).max(0.0),
+            ConstraintType::Ge => (b_k - lhs).max(0.0),
+            ConstraintType::Eq => (lhs - b_k).abs(),
+            _ => continue,
+        };
+        let scale = 1.0 + lhs.abs() + b_k.abs();
+        max_v = max_v.max(viol / scale);
+    }
+    max_v
+}
+
+/// Whether a measured original-space residual disqualifies a claimed
+/// solution: non-finite or `>= eps`. `None` (nothing was measurable — e.g.
+/// no/short solution vector) never disqualifies; those arms carry their own
+/// diagnostics instead.
+pub fn is_kkt_violation(kkt_max: Option<f64>, eps: f64) -> bool {
+    kkt_max.is_some_and(|v| !v.is_finite() || v >= eps)
+}
+
+/// Final bench verdict label after the KKT/QCQP-pfeas gate, shared by every
+/// solution-claiming arm of `bench_qplib` (Optimal / SuboptimalSolution /
+/// NonconvexLocal / NonconvexGlobal): a claimed solution whose measured
+/// residual violates ([`is_kkt_violation`]) is a false positive whatever
+/// label the solver put on it, so the tentative label demotes to `KKT_FAIL`.
+/// Keeping the decision here (one pure function) stops the gate from being
+/// re-implemented per match arm in the bench binary, where the
+/// Nonconvex*/Suboptimal arms previously skipped it.
+pub fn kkt_gated_label(tentative: &'static str, kkt_max: Option<f64>, eps: f64) -> &'static str {
+    if is_kkt_violation(kkt_max, eps) {
+        "KKT_FAIL"
+    } else {
+        tentative
+    }
+}
+
 /// `|obj − global_ref| / (1 + |global_ref|)`. Returns `None` if either is non-finite.
 pub fn compute_gap_to_global(obj: f64, global_ref: f64) -> Option<f64> {
     if !obj.is_finite() || !global_ref.is_finite() {
@@ -259,6 +345,95 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
         return candidate;
     }
     PathBuf::from("data/baseline_objectives").join(csv_name)
+}
+
+/// Path to the QCQP-specific QPLIB baseline (`qplib_qcqp.csv`).
+///
+/// `data/qplib` (and `data/qplib_unsupported`) physically mix CCQ/DCQ/QCQ
+/// (quadratic-constraint) instances in among the DCL/QCL ones that
+/// `detect_csv_path` resolves to `qplib.csv`; that file never lists the
+/// QCQP IDs (`qplib_qcqp.csv` was added separately, PR #25), so a bare
+/// `detect_csv_path` lookup leaves every QCQP-route result with no
+/// reference to check against (`CHECKED[no_ref]`, an obj-regression blind
+/// spot). Callers merge this file's entries into whatever `detect_csv_path`
+/// resolved rather than replacing it: kept as a separate file (not merged
+/// into `qplib.csv` on disk) because the two have different provenance —
+/// `qplib.csv`'s own header states its values are self-measured, not
+/// externally verified, while `qplib_qcqp.csv` carries officially published
+/// QPLIB optimal values.
+pub fn qplib_qcqp_csv_path(root: &Path) -> PathBuf {
+    root.join("data/baseline_objectives/qplib_qcqp.csv")
+}
+
+/// A benchmark baseline: per-problem reference objectives paired with the
+/// expected terminal status parsed from the same rows.
+type Baselines = (HashMap<String, f64>, HashMap<String, ExpectedStatus>);
+
+/// Baseline objectives/statuses for a `bench_qplib` run: `detect_csv_path`'s
+/// resolution (respecting `override_path`, e.g. a `--known-optimal` CLI
+/// flag) merged with `qplib_qcqp_csv_path`'s QCQP-specific entries.
+///
+/// The merge is unconditional -- it runs whether or not `override_path` was
+/// given -- because `qplib_qcqp.csv` is a distinct file from anything
+/// `detect_csv_path` could resolve to, so there is no double-counting risk,
+/// and skipping the merge on an explicit override would silently reopen the
+/// `CHECKED[no_ref]` gap for that invocation.
+///
+/// Panics (with the offending problem ID) if the two files share any problem
+/// ID: the whole point of keeping `qplib_qcqp.csv` separate is that its
+/// officially-published values must not be silently overwritten by — nor
+/// silently overwrite — `qplib.csv`'s self-measured ones. A shared ID is a
+/// data-authoring error that must fail loudly rather than resolve by
+/// insertion order.
+pub fn load_qplib_baselines(data_dir: &str, override_path: Option<&str>, root: &Path) -> Baselines {
+    let csv = detect_csv_path(data_dir, override_path, root);
+    let base_obj = load_baseline_objectives(&csv).unwrap_or_default();
+    let base_stat = load_expected_statuses(&csv);
+    let qcqp_csv = qplib_qcqp_csv_path(root);
+    let extra_obj = load_baseline_objectives(&qcqp_csv).unwrap_or_default();
+    let extra_stat = load_expected_statuses(&qcqp_csv);
+    merge_qplib_baselines(base_obj, base_stat, extra_obj, extra_stat).unwrap_or_else(|dup| {
+        panic!(
+            "qplib.csv ({}) and qplib_qcqp.csv ({}) share problem ID(s) [{}]; \
+             the QCQP baseline is kept separate precisely so its published values \
+             neither overwrite nor are overwritten by qplib.csv's self-measured ones — \
+             remove the duplicate from one file",
+            csv.display(),
+            qcqp_csv.display(),
+            dup.join(", "),
+        )
+    })
+}
+
+/// Merge `extra` baseline objectives/statuses into `base`, erroring with the
+/// sorted list of shared problem IDs if the two carry any ID in common.
+///
+/// The check spans both the objective map (numeric rows) and the status map
+/// (`INFEASIBLE`/`UNBOUNDED` sentinel rows), so a collision on either surface
+/// is caught. On success the merged `(objectives, statuses)` pair is returned;
+/// on collision no merge is performed.
+fn merge_qplib_baselines(
+    mut base_obj: HashMap<String, f64>,
+    mut base_stat: HashMap<String, ExpectedStatus>,
+    extra_obj: HashMap<String, f64>,
+    extra_stat: HashMap<String, ExpectedStatus>,
+) -> Result<Baselines, Vec<String>> {
+    let base_ids: std::collections::HashSet<&String> =
+        base_obj.keys().chain(base_stat.keys()).collect();
+    let mut dups: Vec<String> = extra_obj
+        .keys()
+        .chain(extra_stat.keys())
+        .filter(|id| base_ids.contains(*id))
+        .cloned()
+        .collect();
+    if !dups.is_empty() {
+        dups.sort();
+        dups.dedup();
+        return Err(dups);
+    }
+    base_obj.extend(extra_obj);
+    base_stat.extend(extra_stat);
+    Ok((base_obj, base_stat))
 }
 
 /// Load objective baseline CSV.
@@ -872,5 +1047,324 @@ mod tests {
             abs.is_finite() && rel.is_finite(),
             "LP path must ignore a short dual and return finite, got ({abs}, {rel})"
         );
+    }
+
+    /// Real workspace root, exercising the actual checked-in
+    /// `data/baseline_objectives/qplib.csv` + `qplib_qcqp.csv` (no synthetic
+    /// stand-ins): `load_qplib_baselines` must return both DCL/QCL problems
+    /// from `qplib.csv` *and* the CCQ/DCQ/QCQ problems that live only in
+    /// `qplib_qcqp.csv` (PR #25 review "Wire QCQP baselines into benchmark
+    /// selection").
+    ///
+    /// `QPLIB_2546` (CCQ, `data/qplib`) is the finding's own example; its
+    /// expected objective is read directly from `qplib_qcqp.csv` here (an
+    /// independent read, not the production loader) and compared literally.
+    ///
+    /// Sentinel: reverting `load_qplib_baselines` to a bare `detect_csv_path`
+    /// lookup (dropping the `qplib_qcqp_csv_path` merge) makes this FAIL --
+    /// `QPLIB_2546` would be absent from the returned map.
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn test_load_qplib_baselines_merges_qcqp_csv() {
+        let root = workspace_root();
+        let (objectives, _statuses) = load_qplib_baselines("data/qplib", None, &root);
+
+        // Present only in qplib_qcqp.csv (not qplib.csv, confirmed separately
+        // by test_qplib_csv_and_qcqp_csv_have_disjoint_ids below).
+        let qcqp_csv = qplib_qcqp_csv_path(&root);
+        let qcqp_only = load_baseline_objectives(&qcqp_csv).expect("qplib_qcqp.csv must parse");
+        assert!(
+            qcqp_only.contains_key("QPLIB_2546"),
+            "test premise: QPLIB_2546 must be in qplib_qcqp.csv"
+        );
+        assert_eq!(
+            objectives.get("QPLIB_2546"),
+            qcqp_only.get("QPLIB_2546"),
+            "load_qplib_baselines must carry QPLIB_2546's objective through \
+             from qplib_qcqp.csv: {objectives:?}"
+        );
+
+        // Present only in qplib.csv (DCL problem, no quadratic constraints).
+        let qplib_csv = super::detect_csv_path("data/qplib", None, &root);
+        let qplib_only = load_baseline_objectives(&qplib_csv).expect("qplib.csv must parse");
+        assert!(
+            qplib_only.contains_key("QPLIB_10034"),
+            "test premise: QPLIB_10034 must be in qplib.csv"
+        );
+        assert_eq!(
+            objectives.get("QPLIB_10034"),
+            qplib_only.get("QPLIB_10034"),
+            "load_qplib_baselines must still carry qplib.csv's own entries: {objectives:?}"
+        );
+    }
+
+    /// Companion fact-check for the sentinel above: `qplib.csv` and
+    /// `qplib_qcqp.csv` must not share *any* problem ID (not just
+    /// `QPLIB_2546`), across both the objective and the status surface —
+    /// a shared ID would make the merge ambiguous (whose value wins?) and
+    /// is exactly what `merge_qplib_baselines` now rejects. Checked against
+    /// the real checked-in CSVs so a future data edit that introduces an
+    /// overlap trips here.
+    #[test]
+    fn test_qplib_csv_and_qcqp_csv_have_disjoint_ids() {
+        let root = workspace_root();
+        let qplib_csv = super::detect_csv_path("data/qplib", None, &root);
+        let qcqp_csv = qplib_qcqp_csv_path(&root);
+
+        let base_obj = load_baseline_objectives(&qplib_csv).expect("qplib.csv must parse");
+        let base_stat = load_expected_statuses(&qplib_csv);
+        let extra_obj = load_baseline_objectives(&qcqp_csv).expect("qplib_qcqp.csv must parse");
+        let extra_stat = load_expected_statuses(&qcqp_csv);
+
+        // Union of IDs on each side, so an overlap on either surface counts.
+        let base_ids: std::collections::HashSet<&String> =
+            base_obj.keys().chain(base_stat.keys()).collect();
+        let shared: Vec<&String> = extra_obj
+            .keys()
+            .chain(extra_stat.keys())
+            .filter(|k| base_ids.contains(*k))
+            .collect();
+        assert!(
+            shared.is_empty(),
+            "qplib.csv and qplib_qcqp.csv must have disjoint problem IDs, shared: {shared:?}"
+        );
+    }
+
+    /// Sentinel for `merge_qplib_baselines`'s collision guard: a synthetic
+    /// base + extra that share a problem ID must error with that ID, not
+    /// merge by insertion order.
+    ///
+    /// Reverting the guard (letting `base.extend(extra)` run unconditionally)
+    /// makes this FAIL — the call would return `Ok` and silently keep the
+    /// extra value.
+    #[test]
+    fn test_merge_qplib_baselines_rejects_shared_id() {
+        let mut base_obj = HashMap::new();
+        base_obj.insert("QPLIB_SHARED".to_string(), 1.0);
+        base_obj.insert("QPLIB_ONLY_BASE".to_string(), 2.0);
+        let base_stat: HashMap<String, ExpectedStatus> = base_obj
+            .keys()
+            .map(|k| (k.clone(), ExpectedStatus::Optimal))
+            .collect();
+
+        let mut extra_obj = HashMap::new();
+        extra_obj.insert("QPLIB_SHARED".to_string(), 99.0); // collides with base
+        extra_obj.insert("QPLIB_ONLY_EXTRA".to_string(), 3.0);
+        let extra_stat: HashMap<String, ExpectedStatus> = extra_obj
+            .keys()
+            .map(|k| (k.clone(), ExpectedStatus::Optimal))
+            .collect();
+
+        let err = super::merge_qplib_baselines(base_obj, base_stat, extra_obj, extra_stat)
+            .expect_err("shared problem ID must be rejected, not merged");
+        assert_eq!(
+            err,
+            vec!["QPLIB_SHARED".to_string()],
+            "collision list must name exactly the shared ID"
+        );
+    }
+
+    /// Companion: a disjoint synthetic base + extra must merge cleanly,
+    /// carrying every ID from both sides through.
+    #[test]
+    fn test_merge_qplib_baselines_merges_disjoint() {
+        let mut base_obj = HashMap::new();
+        base_obj.insert("QPLIB_ONLY_BASE".to_string(), 2.0);
+        let base_stat: HashMap<String, ExpectedStatus> =
+            [("QPLIB_ONLY_BASE".to_string(), ExpectedStatus::Optimal)].into();
+
+        let mut extra_obj = HashMap::new();
+        extra_obj.insert("QPLIB_ONLY_EXTRA".to_string(), 3.0);
+        let extra_stat: HashMap<String, ExpectedStatus> =
+            [("QPLIB_ONLY_EXTRA".to_string(), ExpectedStatus::Optimal)].into();
+
+        let (obj, stat) = super::merge_qplib_baselines(base_obj, base_stat, extra_obj, extra_stat)
+            .expect("disjoint inputs must merge");
+        assert_eq!(obj.get("QPLIB_ONLY_BASE"), Some(&2.0));
+        assert_eq!(obj.get("QPLIB_ONLY_EXTRA"), Some(&3.0));
+        assert_eq!(stat.len(), 2);
+    }
+
+    /// `--known-optimal` override path must still get the qcqp merge (not
+    /// just the auto-detected default): `bench_parallel.sh` always passes an
+    /// explicit override for `data/qplib`, so the merge cannot be
+    /// conditional on `override_path.is_none()`.
+    #[test]
+    fn test_load_qplib_baselines_merges_qcqp_csv_with_override() {
+        let root = workspace_root();
+        let override_csv = super::detect_csv_path("data/qplib", None, &root);
+        let (objectives, _) = load_qplib_baselines(
+            "data/qplib",
+            Some(override_csv.to_str().expect("utf8 path")),
+            &root,
+        );
+        assert!(
+            objectives.contains_key("QPLIB_2546"),
+            "override path must still merge in qplib_qcqp.csv: {objectives:?}"
+        );
+    }
+
+    // --- qcqp_pfeas_max ---
+
+    use otspot_core::qp::QcqpMatrix;
+
+    /// `1/2 x'Qx` diagonal `diag(2,2)` gives `x'Qx = x1^2 + x2^2` exactly —
+    /// the independent hand-computed oracle used by every case below.
+    fn make_qcqp(ct: ConstraintType, b: f64) -> QpProblem {
+        let q = CscMatrix::new(2, 2);
+        let a = CscMatrix::new(1, 2);
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let mut prob = QpProblem::new(q, vec![0.0, 0.0], a, vec![b], bounds, vec![ct]).unwrap();
+        let mut qc = QcqpMatrix::new(2);
+        qc.triplets = vec![(0, 0, 2.0), (1, 1, 2.0)];
+        prob.set_quadratic_constraints(vec![qc]).unwrap();
+        prob
+    }
+
+    #[test]
+    fn test_qcqp_pfeas_max_le_violation_and_feasible() {
+        // x1^2 + x2^2 <= 1.
+        let prob = make_qcqp(ConstraintType::Le, 1.0);
+        assert!(
+            qcqp_pfeas_max(&prob, &[0.0, 0.0]) < 1e-9,
+            "origin satisfies x1^2+x2^2<=1"
+        );
+        // Oracle: quad=0.5*(2*4+2*4)=8, lhs=8, viol=(8-1)=7, scale=1+8+1=10 -> 0.7.
+        let v = qcqp_pfeas_max(&prob, &[2.0, 2.0]);
+        assert!((v - 0.7).abs() < 1e-9, "expected 0.7, got {v}");
+    }
+
+    #[test]
+    fn test_qcqp_pfeas_max_ge_violation_and_feasible() {
+        // x1^2 + x2^2 >= 1.
+        let prob = make_qcqp(ConstraintType::Ge, 1.0);
+        assert!(
+            qcqp_pfeas_max(&prob, &[2.0, 0.0]) < 1e-9,
+            "quad=4 >= 1 is feasible"
+        );
+        // Oracle: quad=0, lhs=0, viol=(1-0)=1, scale=1+0+1=2 -> 0.5.
+        let v = qcqp_pfeas_max(&prob, &[0.0, 0.0]);
+        assert!((v - 0.5).abs() < 1e-9, "expected 0.5, got {v}");
+    }
+
+    #[test]
+    fn test_qcqp_pfeas_max_eq_violation_and_feasible() {
+        // x1^2 + x2^2 == 1.
+        let prob = make_qcqp(ConstraintType::Eq, 1.0);
+        assert!(
+            qcqp_pfeas_max(&prob, &[1.0, 0.0]) < 1e-9,
+            "quad=1 satisfies the equality exactly"
+        );
+        // Oracle: quad=0, lhs=0, viol=|0-1|=1, scale=1+0+1=2 -> 0.5.
+        let v = qcqp_pfeas_max(&prob, &[0.0, 0.0]);
+        assert!((v - 0.5).abs() < 1e-9, "expected 0.5, got {v}");
+    }
+
+    #[test]
+    fn test_qcqp_pfeas_max_pure_qp_is_zero() {
+        let q = CscMatrix::new(2, 2);
+        let a = CscMatrix::new(1, 2);
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let prob = QpProblem::new(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![1.0],
+            bounds,
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        assert_eq!(qcqp_pfeas_max(&prob, &[1e6, -1e6]), 0.0);
+    }
+
+    /// `quadratic_constraints` is a public field (bypass hazard shared with
+    /// `conic::qcqp`/`qp::qcqp_route`/`mip::problem`, see `QpProblem::validate`
+    /// doc): a length mismatch from direct assignment must degrade to
+    /// `INFINITY`, not index-panic.
+    #[test]
+    fn test_qcqp_pfeas_max_rejects_bypassed_length_mismatch() {
+        let mut prob = make_qcqp(ConstraintType::Le, 1.0);
+        let extra = QcqpMatrix::new(2);
+        prob.quadratic_constraints.push(extra); // len=2 but num_constraints=1
+        assert_eq!(qcqp_pfeas_max(&prob, &[0.0, 0.0]), f64::INFINITY);
+    }
+
+    // --- KKT gate (is_kkt_violation / kkt_gated_label) ---
+
+    #[test]
+    fn test_is_kkt_violation_thresholds() {
+        assert!(!is_kkt_violation(None, 1e-4));
+        assert!(!is_kkt_violation(Some(9.9e-5), 1e-4));
+        assert!(is_kkt_violation(Some(1e-4), 1e-4), "boundary is >= eps");
+        assert!(is_kkt_violation(Some(1e-3), 1e-4));
+        assert!(is_kkt_violation(Some(f64::NAN), 1e-4));
+        assert!(is_kkt_violation(Some(f64::INFINITY), 1e-4));
+    }
+
+    /// P1 sentinel (review follow-up): the KKT gate must demote *every*
+    /// solution-claiming label, not just Optimal/PASS — a constraint-violating
+    /// solution reported as NONCONVEX_LOCAL / NONCONVEX_GLOBAL / SUBOPTIMAL is
+    /// the exact false-positive path the review flagged.
+    ///
+    /// Reverting `kkt_gated_label` to a `tentative` pass-through (the
+    /// pre-fix per-arm behaviour) makes the KKT_FAIL asserts fail.
+    #[test]
+    fn test_kkt_gated_label_demotes_all_solution_claiming_labels() {
+        for label in ["NONCONVEX_LOCAL", "NONCONVEX_GLOBAL", "SUBOPTIMAL"] {
+            assert_eq!(kkt_gated_label(label, Some(1e-3), 1e-4), "KKT_FAIL");
+            assert_eq!(kkt_gated_label(label, Some(f64::NAN), 1e-4), "KKT_FAIL");
+            assert_eq!(kkt_gated_label(label, Some(1e-5), 1e-4), label);
+            assert_eq!(kkt_gated_label(label, None, 1e-4), label);
+        }
+    }
+
+    // --- merge_qplib_baselines: Codex P2 claim (numeric vs INFEASIBLE-sentinel
+    // collision on the same ID across the two baseline files) ---
+
+    /// P2 sentinel: same problem ID numeric in `base` (qplib.csv-shaped) and
+    /// `INFEASIBLE` sentinel in `extra` (qplib_qcqp.csv-shaped). Goes through
+    /// the real loaders (not hand-built maps): `load_expected_statuses` maps
+    /// *every* numeric row to `ExpectedStatus::Optimal` too, so `base_stat`
+    /// already carries the ID and the status-map half of
+    /// `merge_qplib_baselines`'s collision check (bench_utils.rs `dups`) is a
+    /// superset check across both baseline surfaces, not just the objective
+    /// map. Must return `Err` — if this FAILS, the Codex claim is correct and
+    /// the dedup logic needs an objective/status key union fix.
+    #[test]
+    fn test_merge_qplib_baselines_catches_numeric_vs_infeasible_collision() {
+        let base_csv = write_tmp_csv("problem_name,optimal_obj\nQPLIB_DUP,1.5\n");
+        let extra_csv = write_tmp_csv("problem_name,optimal_obj\nQPLIB_DUP,INFEASIBLE\n");
+
+        let base_obj = load_baseline_objectives(&base_csv).unwrap();
+        let base_stat = load_expected_statuses(&base_csv);
+        let extra_obj = load_baseline_objectives(&extra_csv).unwrap();
+        let extra_stat = load_expected_statuses(&extra_csv);
+
+        let err = super::merge_qplib_baselines(base_obj, base_stat, extra_obj, extra_stat)
+            .expect_err("numeric-vs-INFEASIBLE collision on the same ID must be rejected");
+        assert_eq!(err, vec!["QPLIB_DUP".to_string()]);
+    }
+
+    /// Companion, reversed roles: `INFEASIBLE` sentinel in `base`, numeric in
+    /// `extra`. Same superset-check argument applies symmetrically.
+    #[test]
+    fn test_merge_qplib_baselines_catches_infeasible_vs_numeric_collision_reversed() {
+        let base_csv = write_tmp_csv("problem_name,optimal_obj\nQPLIB_DUP2,INFEASIBLE\n");
+        let extra_csv = write_tmp_csv("problem_name,optimal_obj\nQPLIB_DUP2,2.5\n");
+
+        let base_obj = load_baseline_objectives(&base_csv).unwrap();
+        let base_stat = load_expected_statuses(&base_csv);
+        let extra_obj = load_baseline_objectives(&extra_csv).unwrap();
+        let extra_stat = load_expected_statuses(&extra_csv);
+
+        let err = super::merge_qplib_baselines(base_obj, base_stat, extra_obj, extra_stat)
+            .expect_err("INFEASIBLE-vs-numeric collision (reversed) must be rejected");
+        assert_eq!(err, vec!["QPLIB_DUP2".to_string()]);
     }
 }

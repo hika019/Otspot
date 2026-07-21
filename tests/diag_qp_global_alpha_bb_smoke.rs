@@ -1,4 +1,4 @@
-//! Phase 4 α-BB lower bound 統合の sentinel (#7 非凸 QP 大域最適化)。
+//! Phase 4 α-BB lower bound 統合の sentinel (非凸 QP 大域最適化)。
 //!
 //! ## なぜ別 sentinel が必要か
 //! Phase 3 sentinel (diag_qp_global_smoke.rs) は interval lb で proof 可能な 7 fixture

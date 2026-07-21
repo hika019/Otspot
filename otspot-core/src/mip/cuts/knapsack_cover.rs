@@ -178,7 +178,10 @@ fn separate_lifted_cover(
     let mut coeff: Vec<(usize, i64)> = cover.iter().map(|&i| (row[i].0, 1)).collect();
     let mut lift_set: Vec<KItem> = cover
         .iter()
-        .map(|&i| KItem { weight: row[i].1, coeff: 1 })
+        .map(|&i| KItem {
+            weight: row[i].1,
+            coeff: 1,
+        })
         .collect();
 
     // Sequential up-lifting of non-cover variables, largest weight first.
@@ -196,7 +199,10 @@ fn separate_lifted_cover(
         let alpha = (beta_0 - z).max(0);
         if alpha > 0 {
             coeff.push((var, alpha));
-            lift_set.push(KItem { weight, coeff: alpha });
+            lift_set.push(KItem {
+                weight,
+                coeff: alpha,
+            });
         }
     }
 
@@ -221,13 +227,20 @@ fn separate_lifted_cover(
 /// Exhaustively verify the lifted inequality `Σ β_j x_j ≤ β_0` over `{0,1}` on the
 /// cut support: every support assignment satisfying the knapsack row must satisfy
 /// the cut. Variables outside the support are 0 (their worst case for the cut).
-fn lifted_cover_is_valid(row: &[(usize, f64)], b: f64, coeff: &[(usize, i64)], beta_0: i64) -> bool {
+fn lifted_cover_is_valid(
+    row: &[(usize, f64)],
+    b: f64,
+    coeff: &[(usize, i64)],
+    beta_0: i64,
+) -> bool {
     if coeff.len() > KNAPSACK_VALIDITY_BRUTE_FORCE_LIMIT {
         return true; // rely on the exact-lifting structural argument
     }
     // Weight of each support variable in the knapsack row.
     let weight_of = |var: usize| -> f64 {
-        row.iter().find(|&&(j, _)| j == var).map_or(0.0, |&(_, w)| w)
+        row.iter()
+            .find(|&&(j, _)| j == var)
+            .map_or(0.0, |&(_, w)| w)
     };
     let n = coeff.len();
     for mask in 0u64..(1u64 << n) {
@@ -329,10 +342,22 @@ mod tests {
     #[test]
     fn knapsack_dp_matches_bruteforce() {
         let items = vec![
-            KItem { weight: 3.0, coeff: 1 },
-            KItem { weight: 3.0, coeff: 1 },
-            KItem { weight: 3.0, coeff: 1 },
-            KItem { weight: 4.0, coeff: 2 },
+            KItem {
+                weight: 3.0,
+                coeff: 1,
+            },
+            KItem {
+                weight: 3.0,
+                coeff: 1,
+            },
+            KItem {
+                weight: 3.0,
+                coeff: 1,
+            },
+            KItem {
+                weight: 4.0,
+                coeff: 2,
+            },
         ];
         for cap_i in 0..=14 {
             let cap = cap_i as f64;

@@ -133,7 +133,11 @@ mod ratio_test_feasibility_tests {
         let step = x_b[leaving] / d[leaving];
         let mut min_v = f64::INFINITY;
         for i in 0..x_b.len() {
-            let v = if i == leaving { step } else { x_b[i] - d[i] * step };
+            let v = if i == leaving {
+                step
+            } else {
+                x_b[i] - d[i] * step
+            };
             if v < min_v {
                 min_v = v;
             }
@@ -194,9 +198,16 @@ mod ratio_test_feasibility_tests {
         let feas_tol = PIVOT_TOL;
         let floor = PIVOT_TOL;
 
-        let leaving =
-            select_leaving_feasibility_preserving(&x_b, &d, &basis, x_b.len(), floor, feas_tol, None)
-                .expect("eligible leaving row exists");
+        let leaving = select_leaving_feasibility_preserving(
+            &x_b,
+            &d,
+            &basis,
+            x_b.len(),
+            floor,
+            feas_tol,
+            None,
+        )
+        .expect("eligible leaving row exists");
         assert_eq!(
             leaving, 0,
             "helper must pick the true-min-ratio row 0, not the far row 1"
@@ -335,6 +346,9 @@ mod ratio_test_feasibility_tests {
             PIVOT_TOL,
             None,
         );
-        assert!(leaving.is_none(), "no positive direction ⇒ unbounded ⇒ None");
+        assert!(
+            leaving.is_none(),
+            "no positive direction ⇒ unbounded ⇒ None"
+        );
     }
 }

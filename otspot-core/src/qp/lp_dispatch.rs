@@ -10,11 +10,11 @@ use super::certificate::guard_lp_optimal;
 use super::ipm_solver;
 use crate::options::SolverOptions;
 use crate::presolve;
-use crate::qp::ipm_solver::kkt::bound_violation;
-use crate::qp::kkt_resid::f64_impl::primal_residual_rel;
 #[cfg(test)]
 use crate::problem::ConstraintType;
 use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
+use crate::qp::ipm_solver::kkt::bound_violation;
+use crate::qp::kkt_resid::f64_impl::primal_residual_rel;
 use crate::sparse::CscMatrix;
 #[cfg(test)]
 use crate::tolerances::any_nonfinite;
@@ -34,10 +34,12 @@ thread_local! {
 #[cfg(test)]
 const REDUCED_TIMEOUT_QP_INJECT_ITERS: usize = 6271;
 
-fn timeout_result_lp_dispatch() -> SolverResult {
+fn timeout_result_lp_dispatch(options: &SolverOptions) -> SolverResult {
     let mut r = SolverResult::timeout();
     r.stats.route = SolveRoute::LpForwardedFromQp;
-    r.stats.deadline_triggered = true;
+    // Independent clock check, not an alias of the status: the huge-wide-LP
+    // predictive guard calls this without the deadline having expired.
+    r.stats.deadline_triggered = options.external_stop_requested();
     r
 }
 
@@ -119,7 +121,7 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
             Ok(_) => {
                 let presolve_us = t_presolve.elapsed().as_micros() as u64;
                 if options.deadline.is_some_and(|d| Instant::now() >= d) {
-                    let mut timeout = timeout_result_lp_dispatch();
+                    let mut timeout = timeout_result_lp_dispatch(options);
                     timeout.timing_breakdown = Some(crate::problem::TimingBreakdown {
                         presolve_us,
                         solve_us: 0,
@@ -151,7 +153,7 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
     }
 
     if options.deadline.is_some_and(|d| Instant::now() >= d) {
-        return timeout_result_lp_dispatch();
+        return timeout_result_lp_dispatch(options);
     }
 
     solve_unpresolved_lp_from_qp(&lp, problem, options)
@@ -165,12 +167,7 @@ fn solve_unpresolved_lp_from_qp(
     // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
     // QpProblem.obj_offset を別経路で加算する。
     let mut result = solve_lp_backend_no_presolve(lp, options);
-    if matches!(
-        result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
-    ) {
-        result.objective += problem.obj_offset;
-    }
+    add_qp_obj_offset(&mut result, problem.obj_offset);
     fill_lp_reduced_costs_from_dual(&mut result, lp);
     result
 }
@@ -229,12 +226,16 @@ fn solve_reduced_lp_from_qp(
         return fallback;
     }
 
+    // Stalled / MaxIterations も postsolve で元空間へ lift する: reduced 空間の
+    // solution をそのまま返すと SolverResult の「solution は元空間 or 空」契約を破る。
     if matches!(
         raw.status,
         SolveStatus::Optimal
             | SolveStatus::LocallyOptimal
             | SolveStatus::SuboptimalSolution
             | SolveStatus::Timeout
+            | SolveStatus::Stalled
+            | SolveStatus::MaxIterations
     ) && (!raw.solution.is_empty() || reduced_lp.num_vars == 0)
     {
         let deadline_expired = options.deadline.is_some_and(|d| Instant::now() >= d);
@@ -267,6 +268,8 @@ fn solve_reduced_lp_from_qp(
                 ..Default::default()
             };
             timeout.stats.route = SolveRoute::LpForwardedFromQp;
+            // Guarded by `deadline_expired` above (incl. the test hook's
+            // simulated expiry), so `true` is the clock-checked value here.
             timeout.stats.deadline_triggered = true;
             return timeout;
         }
@@ -280,7 +283,8 @@ fn solve_reduced_lp_from_qp(
         );
         lifted.stats = raw.stats.clone();
         lifted.stats.route = SolveRoute::LpForwardedFromQp;
-        lifted.stats.deadline_triggered = matches!(lifted.status, SolveStatus::Timeout);
+        lifted.stats.deadline_triggered =
+            matches!(lifted.status, SolveStatus::Timeout) && options.external_stop_requested();
         lifted = guard_lp_optimal(lifted, original_lp);
         let postsolve_us = t_postsolve.elapsed().as_micros() as u64;
         lifted.timing_breakdown = Some(crate::problem::TimingBreakdown {
@@ -308,7 +312,7 @@ fn solve_reduced_lp_from_qp(
                     postsolve_us,
                     ..Default::default()
                 });
-                if lp_original_primal_bad(&fallback, original_lp, options.primal_tol) {
+                if lp_original_primal_bad(&fallback, original_lp, options.lp_accept_primal_tol()) {
                     fallback.status = SolveStatus::SuboptimalSolution;
                 }
                 return fallback;
@@ -332,14 +336,20 @@ fn solve_lp_backend_no_presolve_with_gate(
     options: &SolverOptions,
 ) -> SolverResult {
     if huge_wide_lp_timeout_guard(lp) && options.deadline.is_some() {
-        return timeout_result_lp_dispatch();
+        return timeout_result_lp_dispatch(options);
     }
     let mut result = if should_try_lp_ipm(gate_lp, options) {
         let ipm = solve_lp_with_ipm_backend(lp, options);
+        // Stalled / MaxIterations もここで受理する: crossover 済みの非収束 iterate を
+        // 捨てて巨大 LP を simplex でフル再解するより、honest な status で返す方が
+        // 予算を守れる (simplex fallback は NumericalError 等の解なし時のみ)。
         if ipm.status == SolveStatus::Optimal
             || matches!(
                 ipm.status,
-                SolveStatus::Timeout | SolveStatus::SuboptimalSolution
+                SolveStatus::Timeout
+                    | SolveStatus::SuboptimalSolution
+                    | SolveStatus::Stalled
+                    | SolveStatus::MaxIterations
             )
             || options.deadline.is_some_and(|d| Instant::now() >= d)
             || matches!(ipm.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
@@ -366,7 +376,10 @@ fn should_try_lp_ipm(lp: &LpProblem, options: &SolverOptions) -> bool {
     if lp.num_constraints == 0 || lp.num_vars < lp.num_constraints {
         return false;
     }
-    if lp.num_vars.saturating_mul(LP_IPM_ASPECT_RATIO_MAX_DEN) > lp.num_constraints.saturating_mul(LP_IPM_ASPECT_RATIO_MAX_NUM) {
+    if lp.num_vars.saturating_mul(LP_IPM_ASPECT_RATIO_MAX_DEN)
+        > lp.num_constraints
+            .saturating_mul(LP_IPM_ASPECT_RATIO_MAX_NUM)
+    {
         return false;
     }
     if huge_wide_lp_timeout_guard(lp) {
@@ -411,12 +424,21 @@ fn solve_lp_with_ipm_backend(lp: &LpProblem, options: &SolverOptions) -> SolverR
     let mut result = ipm_solver::solve_ipm(&qp, &ipm_opts);
     result.stats.route = SolveRoute::LpForwardedFromQp;
     result.stats.lp_ipm_path = true;
-    result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
+    // Classified against the core deadline this IPM actually ran under.
+    result.stats.deadline_triggered =
+        matches!(result.status, SolveStatus::Timeout) && ipm_opts.external_stop_requested();
     result.reduced_costs.clear();
 
+    // 非収束 iterate (Stalled / MaxIterations) も crossover に渡す: crossover は
+    // guard_lp_optimal の証明書を通った場合のみ Optimal を mint し、失敗時は元の
+    // status を保持するため、ここで品質を先取り判定する必要はない。
     if matches!(
         result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+        SolveStatus::Optimal
+            | SolveStatus::SuboptimalSolution
+            | SolveStatus::Timeout
+            | SolveStatus::Stalled
+            | SolveStatus::MaxIterations
     ) {
         let t_crossover = Instant::now();
         result = certify_lp_ipm_with_crossover(result, lp, options.deadline);
@@ -518,12 +540,16 @@ fn solve_original_lp_direct_retry(lp: &LpProblem, options: &SolverOptions) -> So
 }
 
 fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
+    // Stalled / MaxIterations の objective は診断値だが、offset を欠くと bench の
+    // gap 診断が原点ずれするため solution を持つ status には一律加算する。
     if matches!(
         result.status,
         SolveStatus::Optimal
             | SolveStatus::LocallyOptimal
             | SolveStatus::SuboptimalSolution
             | SolveStatus::Timeout
+            | SolveStatus::Stalled
+            | SolveStatus::MaxIterations
     ) {
         result.objective += qp_obj_offset;
     }
@@ -602,8 +628,36 @@ fn best_lp_reduced_costs_from_dual(
     })
 }
 
+/// Bound-activity KKT violation, relative scale. Used by
+/// `best_lp_reduced_costs_from_dual` to pick between its `rc_minus`/`rc_plus`
+/// sign conventions.
+///
+/// Trusts `x.len() == rc.len() == problem.num_vars` instead of truncating to
+/// the shortest slice: both call sites pass `solution` and `problem.c.clone()`
+/// after `best_lp_reduced_costs_from_dual` has already checked
+/// `solution.len() == problem.num_vars` at its own top, and `problem.c.len()
+/// == problem.num_vars` is `LpProblem`'s own invariant (`LpProblem::new`/
+/// `new_general`'s dimension validation; struct-literal construction bypasses
+/// this -- all fields are `pub` -- but no production `LpProblem` in this repo
+/// is built that way, only tests). Silently clamping `n` to the shortest
+/// input here previously under-reported violations -- `x.len() == 0` reported
+/// zero, i.e. falsely "clean" -- the same silent-false-clean shape as the
+/// `mat_vec_mul` zero-fill fallback this branch replaced elsewhere.
 fn lp_reduced_cost_bound_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -> f64 {
-    let n = problem.num_vars.min(x.len()).min(rc.len());
+    let n = problem.num_vars;
+    assert_eq!(
+        x.len(),
+        n,
+        "lp_reduced_cost_bound_violation: x.len()={} != problem.num_vars={n}; \
+         caller must guarantee this via LpProblem's own dimension invariant",
+        x.len()
+    );
+    assert_eq!(
+        rc.len(),
+        n,
+        "lp_reduced_cost_bound_violation: rc.len()={} != problem.num_vars={n}",
+        rc.len()
+    );
     let mut max_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = problem.bounds[j];
@@ -627,8 +681,38 @@ fn lp_reduced_cost_bound_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -
     max_rel
 }
 
+/// Bound-activity KKT violation, absolute scale. Used by
+/// `certify_lp_ipm_with_crossover` to decide whether the IPM's own dual
+/// solution certifies as an optimal simplex payload without a crossover.
+///
+/// Trusts `x.len() == rc.len() == problem.num_vars`. Its one call site
+/// (`certify_lp_ipm_with_crossover`) only reaches this after: the function's
+/// own top-of-body guard `result.solution.len() == lp.num_vars`, whose
+/// `solution` flows unchanged through `result.clone()` and `guard_lp_optimal`
+/// into `certified.solution`; and the outer `result.dual_solution.len() ==
+/// lp.num_constraints` guard, re-checked by `convert_prove_dual_to_simplex_payload`
+/// before it calls `fill_lp_reduced_costs_from_dual` -> `best_lp_reduced_costs_from_dual`,
+/// whose `rc_minus`/`rc_plus` inherit `num_vars` length from `LpProblem`'s own
+/// invariant (see `lp_reduced_cost_bound_violation` above for that chain).
+/// `certified.status` is `Optimal` throughout this call (set before
+/// `convert_prove_dual_to_simplex_payload` runs, untouched by it), so
+/// `fill_lp_reduced_costs_from_dual`'s status gate never takes the
+/// early-return branch that would otherwise leave `reduced_costs` empty.
 fn lp_reduced_cost_kkt_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -> f64 {
-    let n = problem.num_vars.min(x.len()).min(rc.len());
+    let n = problem.num_vars;
+    assert_eq!(
+        x.len(),
+        n,
+        "lp_reduced_cost_kkt_violation: x.len()={} != problem.num_vars={n}; \
+         caller must guarantee this via LpProblem's own dimension invariant",
+        x.len()
+    );
+    assert_eq!(
+        rc.len(),
+        n,
+        "lp_reduced_cost_kkt_violation: rc.len()={} != problem.num_vars={n}",
+        rc.len()
+    );
     let mut max_abs = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = problem.bounds[j];
@@ -678,15 +762,21 @@ fn postsolved_lp_needs_direct_retry(
 ) -> bool {
     if !matches!(
         result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+        SolveStatus::Optimal
+            | SolveStatus::SuboptimalSolution
+            | SolveStatus::Stalled
+            | SolveStatus::MaxIterations
     ) {
         return false;
     }
     let (postsolve_pfeas, postsolve_bfeas) = lp_original_primal_residuals(result, original_lp);
-    result.postsolve_dfeas.is_some_and(|d| d > options.dual_tol)
-        || postsolve_pfeas > options.primal_tol
-        || postsolve_bfeas > options.primal_tol
-        || result.status == SolveStatus::SuboptimalSolution
+    let accept_primal = options.lp_accept_primal_tol();
+    result
+        .postsolve_dfeas
+        .is_some_and(|d| d > options.lp_accept_dual_tol())
+        || postsolve_pfeas > accept_primal
+        || postsolve_bfeas > accept_primal
+        || !matches!(result.status, SolveStatus::Optimal)
 }
 
 /// LP→IPM 呼び出し時に presolve を無効化したオプションを生成 (Farkas cert 検証専用)。
@@ -937,8 +1027,17 @@ mod tests {
         .unwrap()
     }
 
+    /// Retry/demotion gate must key on the *requested* accuracy (`ipm_eps()`),
+    /// never on the internal simplex `primal_tol` (PIVOT_TOL=1e-8) alone.
+    ///
+    /// greenbea regression pin: its achievable original-space relative primal
+    /// residual is ~1.2e-7 on every route (presolve on/off alike), so gating at
+    /// PIVOT_TOL demoted a solution matching the known optimum to rel_err 2e-12.
+    /// The gate still fires when the violation exceeds the requested eps
+    /// (daf7ab54's purpose: never label an unproven solution Optimal), and it
+    /// follows an explicitly tightened `tolerance` request.
     #[test]
-    fn postsolved_lp_retry_gate_uses_original_primal_tolerance() {
+    fn postsolved_lp_retry_gate_keys_on_requested_accuracy() {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let lp = LpProblem::new_general(
             vec![0.0],
@@ -949,25 +1048,90 @@ mod tests {
             None,
         )
         .unwrap();
-        let result = SolverResult {
+        let result_between_pivot_and_eps = SolverResult {
             status: SolveStatus::Optimal,
             solution: vec![1.0 + 5.0e-8],
             objective: 0.0,
             ..Default::default()
         };
-        let loose = SolverOptions {
-            primal_tol: 1.0e-6,
-            dual_tol: 1.0e-6,
+        let result_above_eps = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0 + 5.0e-6],
+            objective: 0.0,
             ..Default::default()
         };
-        let tight = SolverOptions {
-            primal_tol: 1.0e-8,
-            dual_tol: 1.0e-8,
+        let defaults = SolverOptions::default();
+        let tight_request = SolverOptions {
+            tolerance: Some(crate::options::Tolerance::Custom(1.0e-8)),
             ..Default::default()
         };
 
-        assert!(!postsolved_lp_needs_direct_retry(&result, &lp, &loose));
-        assert!(postsolved_lp_needs_direct_retry(&result, &lp, &tight));
+        // violation 5e-8 < eps(1e-6): accepted under default request even though
+        // it exceeds PIVOT_TOL (the greenbea case).
+        assert!(!postsolved_lp_needs_direct_retry(
+            &result_between_pivot_and_eps,
+            &lp,
+            &defaults
+        ));
+        // Same solution under an explicit eps=1e-8 request: gate fires.
+        assert!(postsolved_lp_needs_direct_retry(
+            &result_between_pivot_and_eps,
+            &lp,
+            &tight_request
+        ));
+        // violation 5e-6 > eps(1e-6): gate fires under defaults (unproven
+        // solutions must not pass as Optimal).
+        assert!(postsolved_lp_needs_direct_retry(
+            &result_above_eps,
+            &lp,
+            &defaults
+        ));
+    }
+
+    /// P2-1: MaxIterations must be gated symmetrically with Stalled — both are
+    /// non-converged diagnostic iterates from the same LP-IPM inner loop, so
+    /// the original-problem direct-retry rescue must fire for either.
+    ///
+    /// Sentinel: dropping `SolveStatus::MaxIterations` from the initial
+    /// `matches!` gate makes this FAIL (function returns `false` before even
+    /// checking residuals, exactly like the pre-fix behavior).
+    #[test]
+    fn postsolved_lp_retry_gate_treats_max_iterations_like_stalled() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        // Diagnostic iterate, well within tolerance on residuals — the gate must
+        // still fire because MaxIterations never claims Optimal (mirrors the
+        // Stalled arm's `!matches!(status, Optimal)` catch-all clause).
+        let max_iter_result = SolverResult {
+            status: SolveStatus::MaxIterations,
+            solution: vec![1.0],
+            objective: 0.0,
+            ..Default::default()
+        };
+        let stalled_result = SolverResult {
+            status: SolveStatus::Stalled,
+            solution: vec![1.0],
+            objective: 0.0,
+            ..Default::default()
+        };
+        let defaults = SolverOptions::default();
+        assert!(
+            postsolved_lp_needs_direct_retry(&max_iter_result, &lp, &defaults),
+            "MaxIterations must trigger direct retry symmetrically with Stalled"
+        );
+        assert!(
+            postsolved_lp_needs_direct_retry(&max_iter_result, &lp, &defaults)
+                == postsolved_lp_needs_direct_retry(&stalled_result, &lp, &defaults),
+            "MaxIterations and Stalled must be gated identically for equal residuals"
+        );
     }
 
     /// 2 solve を独立実行し、それぞれの route stats が独立していることを確認。

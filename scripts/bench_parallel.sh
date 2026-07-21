@@ -78,6 +78,8 @@ elif echo "$DATA_DIR_LOWER" | grep -qE "qplib[_-]nonconvex[_-]official"; then
 elif echo "$DATA_DIR_LOWER" | grep -qE "qplib[_-]nonconvex"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib_nonconvex_synthetic.csv"
 elif echo "$DATA_DIR_LOWER" | grep -q "qplib"; then
+  # bench_qplib はこの --known-optimal に加え qplib_qcqp.csv (CCQ/DCQ/QCQ 系)
+  # を常に自前でマージする (otspot_dev::bench_utils::qplib_qcqp_csv_path)。
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "osqp[_-]?bench"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/osqp_bench.csv"
@@ -355,7 +357,12 @@ TOTAL_PASS_UNBOUNDED=0
 TOTAL_OBJ_MISMATCH=0
 TOTAL_KKT_FAIL=0
 TOTAL_NONCONVEX=0
+TOTAL_NONCONVEX_LOCAL=0
+TOTAL_NONCONVEX_GLOBAL=0
 TOTAL_SUBOPTIMAL=0
+TOTAL_STALLED=0
+TOTAL_FEASIBLE_POINT=0
+TOTAL_NOT_SUPPORTED=0
 
 # 問題別詳細行の収集（PARSE/SOLVE/=>行を除く、問題名+STATUS行のみ）
 PROBLEM_DETAIL_FILE="$TMPDIR_BASE/problem_details.txt"
@@ -408,8 +415,15 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   pass_unbounded=$(grep -E "^\s+PASS:Unbounded:" "$LOG" | awk '{print $2}' | head -1)
   obj_mismatch=$(grep -E "^\s+OBJ_MISMATCH:" "$LOG" | awk '{print $2}' | head -1)
   kkt_fail=$(grep -E "^\s+KKT_FAIL:" "$LOG" | awk '{print $2}' | head -1)
+  # NONCONVEX: の grep は NONCONVEX_LOCAL:/NONCONVEX_GLOBAL: を拾わない
+  # (colon が NONCONVEX 直後に来る行のみ一致。_LOCAL/_GLOBAL は underscore が挟まる)。
   nonconvex=$(grep -E "^\s+NONCONVEX:" "$LOG" | awk '{print $2}' | head -1)
+  nonconvex_local=$(grep -E "^\s+NONCONVEX_LOCAL:" "$LOG" | awk '{print $2}' | head -1)
+  nonconvex_global=$(grep -E "^\s+NONCONVEX_GLOBAL:" "$LOG" | awk '{print $2}' | head -1)
   suboptimal=$(grep -E "^\s+SUBOPTIMAL:" "$LOG" | awk '{print $2}' | head -1)
+  stalled=$(grep -E "^\s+STALLED:" "$LOG" | awk '{print $2}' | head -1)
+  feasible_point=$(grep -E "^\s+FEASIBLE_POINT:" "$LOG" | awk '{print $2}' | head -1)
+  not_supported=$(grep -E "^\s+NOT_SUPPORTED:" "$LOG" | awk '{print $2}' | head -1)
 
   TOTAL_PASS=$(( TOTAL_PASS + ${pass:-0} ))
   TOTAL_TIMEOUT=$(( TOTAL_TIMEOUT + ${timeout:-0} ))
@@ -427,7 +441,12 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   TOTAL_OBJ_MISMATCH=$(( TOTAL_OBJ_MISMATCH + ${obj_mismatch:-0} ))
   TOTAL_KKT_FAIL=$(( TOTAL_KKT_FAIL + ${kkt_fail:-0} ))
   TOTAL_NONCONVEX=$(( TOTAL_NONCONVEX + ${nonconvex:-0} ))
+  TOTAL_NONCONVEX_LOCAL=$(( TOTAL_NONCONVEX_LOCAL + ${nonconvex_local:-0} ))
+  TOTAL_NONCONVEX_GLOBAL=$(( TOTAL_NONCONVEX_GLOBAL + ${nonconvex_global:-0} ))
   TOTAL_SUBOPTIMAL=$(( TOTAL_SUBOPTIMAL + ${suboptimal:-0} ))
+  TOTAL_STALLED=$(( TOTAL_STALLED + ${stalled:-0} ))
+  TOTAL_FEASIBLE_POINT=$(( TOTAL_FEASIBLE_POINT + ${feasible_point:-0} ))
+  TOTAL_NOT_SUPPORTED=$(( TOTAL_NOT_SUPPORTED + ${not_supported:-0} ))
 
   # 問題別詳細行抽出:
   # - bench binary 出力: `NAME ROWS COLS STATUS TIME ...` (NAME が非空白先頭)
@@ -438,7 +457,7 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
     # Summary block lines: 2 field, field1 ends with ":", field2 is integer
     NF == 2 && $1 ~ /:$/ && $2 ~ /^-?[0-9]+$/ { next }
     # Detail rows: contain a known STATUS token
-    /(^|[[:space:]])(PASS(:Infeasible|:Unbounded)?|CHECKED\[no_ref\]|TIMEOUT|EXTERNAL_TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL|FAIL(:[A-Za-z]+)?)([[:space:]]|$)/ { print }
+    /(^|[[:space:]])(PASS(:Infeasible|:Unbounded)?|CHECKED\[no_ref\]|TIMEOUT|EXTERNAL_TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX_LOCAL|NONCONVEX_GLOBAL|NONCONVEX|SUBOPTIMAL|STALLED|FEASIBLE_POINT|NOT_SUPPORTED|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL|FAIL(:[A-Za-z]+)?)([[:space:]]|$)/ { print }
   ' "$LOG" >> "$PROBLEM_DETAIL_FILE"
 done
 
@@ -470,7 +489,12 @@ done
   printf "  OBJ_MISMATCH:      %d\n" "$TOTAL_OBJ_MISMATCH"
   printf "  KKT_FAIL:          %d\n" "$TOTAL_KKT_FAIL"
   printf "  NONCONVEX:         %d\n" "$TOTAL_NONCONVEX"
+  printf "  NONCONVEX_LOCAL:   %d\n" "$TOTAL_NONCONVEX_LOCAL"
+  printf "  NONCONVEX_GLOBAL:  %d\n" "$TOTAL_NONCONVEX_GLOBAL"
   printf "  SUBOPTIMAL:        %d\n" "$TOTAL_SUBOPTIMAL"
+  printf "  STALLED:           %d\n" "$TOTAL_STALLED"
+  printf "  FEASIBLE_POINT:    %d\n" "$TOTAL_FEASIBLE_POINT"
+  printf "  NOT_SUPPORTED:     %d\n" "$TOTAL_NOT_SUPPORTED"
   printf "  MAXITER:           %d\n" "$TOTAL_MAXITER"
   printf "  ERROR:             %d\n" "$TOTAL_ERROR"
   printf "  SKIP:              %d\n" "$TOTAL_SKIP"
@@ -498,6 +522,9 @@ done
             || s == "TIMEOUT" || s == "EXTERNAL_TIMEOUT" \
             || s == "MAXITER" || s == "ERROR" || s == "SKIP" \
             || s == "PARSE_ERR" || s == "NONCONVEX" || s == "SUBOPTIMAL" \
+            || s == "STALLED" || s == "FEASIBLE_POINT" \
+            || s == "NONCONVEX_LOCAL" || s == "NONCONVEX_GLOBAL" \
+            || s == "NOT_SUPPORTED" \
             || s == "KKT_FAIL" || s == "OBJ_MISMATCH" \
             || s == "PFEAS_FAIL" || s == "DFEAS_FAIL" \
             || s ~ /^FAIL(:[A-Za-z]+)?$/
@@ -557,7 +584,8 @@ done
 CATEGORY_SUM=$(( TOTAL_PASS + TOTAL_CHECKED_NO_REF + TOTAL_PASS_INFEASIBLE + TOTAL_PASS_UNBOUNDED + \
   TOTAL_TIMEOUT + TOTAL_EXTERNAL_TIMEOUT + TOTAL_FAIL + \
   TOTAL_DFEAS_FAIL + TOTAL_PFEAS_FAIL + TOTAL_OBJ_MISMATCH + TOTAL_KKT_FAIL + TOTAL_NONCONVEX + \
-  TOTAL_SUBOPTIMAL + TOTAL_MAXITER + TOTAL_ERROR + TOTAL_SKIP ))
+  TOTAL_NONCONVEX_LOCAL + TOTAL_NONCONVEX_GLOBAL + \
+  TOTAL_SUBOPTIMAL + TOTAL_STALLED + TOTAL_FEASIBLE_POINT + TOTAL_NOT_SUPPORTED + TOTAL_MAXITER + TOTAL_ERROR + TOTAL_SKIP ))
 if [[ "$CATEGORY_SUM" != "$TOTAL_PROBLEMS" ]]; then
   echo "エラー: カテゴリ合算($CATEGORY_SUM) ≠ TOTAL($TOTAL_PROBLEMS)" >&2
   exit 1

@@ -160,16 +160,35 @@ pub(crate) fn all_bounds_finite(bounds: &[(f64, f64)]) -> bool {
 }
 
 /// 解 status が incumbent 候補として採用可能か。
-/// Optimal / LocallyOptimal / SuboptimalSolution / MaxIterations は feasible point を持つ。
-/// Infeasible / Unbounded / NumericalError / Timeout / NonConvex は incumbent 候補外。
+/// Optimal / LocallyOptimal は証明済み、SuboptimalSolution は eps 検証済みの
+/// feasible point を持つ。MaxIterations / Stalled は未検証の診断 iterate しか
+/// 持たないため候補外 (未検証 objective で木を prune させない)。未検証 iterate を
+/// 上界 incumbent に使いたい場合は [`is_verified_feasible_point`] で点そのものを
+/// 検証する。Infeasible / Unbounded / NumericalError / Timeout / NonConvex も候補外。
 pub(crate) fn is_feasible_result(status: &SolveStatus) -> bool {
     matches!(
         status,
-        SolveStatus::Optimal
-            | SolveStatus::LocallyOptimal
-            | SolveStatus::SuboptimalSolution
-            | SolveStatus::MaxIterations
+        SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::SuboptimalSolution
     )
+}
+
+/// status を信用せず、点 x そのものの実行可能性 (bounds + 線形制約) を検証する。
+///
+/// B&B の上界 incumbent は「feasible な点の目的値」でありさえすれば健全なので、
+/// Stalled / MaxIterations の診断 iterate でもこの検証を通れば採用できる
+/// (box-only 非凸 QP では IPM の bounds clip 済み iterate が常に通る)。
+/// 下界側 (relaxation の目的値) には使わないこと — そちらは解の最適性が要る。
+pub(crate) fn is_verified_feasible_point(problem: &QpProblem, x: &[f64], eps: f64) -> bool {
+    use crate::qp::ipm_solver::kkt::{bound_violation, primal_residual_rel};
+    use crate::qp::ipm_solver::outcome::ProblemView;
+    if x.len() != problem.num_vars || x.iter().any(|v| !v.is_finite()) {
+        return false;
+    }
+    if bound_violation(&problem.bounds, x) > eps {
+        return false;
+    }
+    let view = ProblemView::from_problem(problem);
+    primal_residual_rel(&view, x) <= eps
 }
 
 #[cfg(test)]
@@ -296,17 +315,20 @@ mod tests {
         assert!(!warm_is_safe_for_box(&warm, &[(-1.0, 0.0), (-1.0, 1.0)]));
     }
 
+    /// Sentinel: 未検証 iterate しか持たない status (MaxIterations / Stalled) を
+    /// incumbent 候補に戻すとこのテストが FAIL する。
     #[test]
-    fn feasibility_classifier_covers_finite_obj_statuses() {
+    fn feasibility_classifier_accepts_only_verified_statuses() {
         for s in [
             SolveStatus::Optimal,
             SolveStatus::LocallyOptimal,
             SolveStatus::SuboptimalSolution,
-            SolveStatus::MaxIterations,
         ] {
             assert!(is_feasible_result(&s), "{s:?} should be feasible");
         }
         for s in [
+            SolveStatus::MaxIterations,
+            SolveStatus::Stalled,
             SolveStatus::Infeasible,
             SolveStatus::Unbounded,
             SolveStatus::NumericalError,

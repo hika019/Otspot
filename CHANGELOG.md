@@ -4,6 +4,29 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-19
+
+conic/QCQP の正当性修正と SOCP IPM の収束改善、大規模 LP の presolve 性能改善、MPS/QPS パーサの形式判定の作り直し、SolveStatus の誠実化。
+
+- BREAKING: `mps::parse_mps_reader` / `mps::parse_milp_reader` / `qps::parse_qps_reader` の型境界を `R: BufRead` から `R: BufRead + Seek` に変更。固定桁 MPS と判明したファイルは先頭から読み直す必要があり、`Seek` はそれを全行バッファ無しで行うための条件 (MPS は GiB 級になりうるため入力の全行保持は不可)。`File` / `Cursor` は `Seek` 済みでそのまま渡せる。stdin やパイプなど seek 不可の入力は、呼び出し側で `Cursor::new(buf)` に読み切ってから渡す
+- MPS/QPS の形式判定を行単位のヒューリスティクスからファイル単位の決定に作り直し、固定桁 MPS (名前に空白を含む Netlib forplan 等) の誤読と、未宣言の行名/列名の黙殺 (silent data loss) を修正。ROWS の行名重複、`OBJSENSE` のヘッダ行記法・`MAXIMIZE`/`MINIMIZE` 綴り、コメント欄 (62-72 桁) とシーケンス番号欄 (73-80 桁) も正しく扱う
+- BREAKING: BOUNDS で値を取る型 (`UP`/`LO`/`FX`/`UI`/`LI`) の余剰トークン (`UP BND x1 5.0 10.0` 等) を reject するようにした (MPS/QPS 共通)。v0.7.1 の MPS 自由形式リーダはこれを黙殺しており (QPS は元から reject していた)、MPS 利用者にとっては従来 `Ok` だった入力が `Err` になりうる非互換な挙動変更。固定桁形式でも field 5/6 (BOUNDS が定義しない領域) の内容を reject するよう追加した — 自由形式側の reject だけでは、grid に整列した (=現実の MPS の大多数を占める) ファイルは format fallback で固定桁として再読され、その黙殺により `Ok` に戻ってしまい実効性がなかった。field 4 は `FR`/`MI`/`BV`/`PL` の冗長な値欄として引き続き許容する (`leo1`/`leo2`)
+- RHS/RANGES セクションで 2 本目以降の vector (仕様上先頭以外は破棄され、値も適用されない) にのみ現れる row 名が、未宣言行の strict-reference 検査を素通りしていた問題を修正 (MPS/QPS 共通)。破棄される vector の参照 row 名も検査対象に含めるよう両パーサに配線し、typo した row 名が黙って無視される経路を封鎖
+- 非凸 QCQP が凸 SOCP として誤って「証明付き Optimal」と報告される問題を修正: Cholesky がゼロピボット列の非ゼロ off-diagonal を捨てて不定値を PSD と誤判定していた。PSD 判定の許容をスケール相対化
+- QCQP の McCormick global fallback で実行可能性許容が最適性ギャップ許容と混同され、制約に違反する点を `Optimal` と報告する問題を修正
+- SOCP IPM にデータ駆動の初期点と Mehrotra 相補均衡化を導入し CBLIB conic 問題の収束を改善。B&B 緩和ノードでは均衡化を無効化して MIQCP の退化を回避
+- presolve が冗長な含意上界を大量に生成して標準形の行数を爆発させ、大規模 LP を大幅に遅くする問題を修正
+- 公開 `QpProblem` フィールドへ不整合な二次制約を代入した際の添字範囲外パニックを、中央検証で防止
+- conic/QP の残差・目的値・実行可能性判定で、次元不一致を 0 ベクトルに化けさせて処理を続行する経路 (最悪ケースで実行不能点を `Optimal` と誤報告しうる) を排除し、不変条件を明示的な検証に置き換え
+- Model DSL の tolerance 伝播、他モデル変数の混入検出、CBF の非有限定数拒否を修正
+- BREAKING: 非収束 iterate が `SuboptimalSolution` を名乗る詐称を廃止し、`SolveStatus` に `Stalled` (前進不能・解の主張なし。精度床も含む) / `FeasiblePoint` (実行可能性のみ点検証済みで最適性は未主張) を導入。`Optimal` の発行元を独立 KKT 再検証 (`prove_optimal`) 一本に統一し、quasi-optimal 昇格と無条件 `Suboptimal` 変換の二重検証層を削除。Model API は `SolveStatus::Stalled` を新設の `SolveError::Stalled` として `Err` にし、`MaxIterations` も incumbent の有無によらず常に `Err` に統一 — 従来 incumbent があれば `Ok` を返していた呼び出し側は挙動が変わる
+- MISOCP の Unbounded 証明で、`lb[k] == ub[k]` (整数変数の固定) だけを「整域固定」の証明として扱っていたため、公開 `MisocpProblem` で整数変数を非整数値 (例: 0.5) に直接固定したノードが「固定済み = 整数値」と誤認され、偽の `Unbounded` を返す問題を修正。固定値自体の整数性も検証し、非整数固定は当該ノードを `Infeasible` として prune する
+- MPS/QPS の `MARKER`/`INTORG`/`INTEND` 判定が行内の全トークンを位置を問わず走査していたため、列名 `MARKER`・行名 `INTORG` のような正当な自由形式係数行 (`MARKER INTORG 1` 等) を integrality marker と誤認し、係数を黙って落とす問題を修正。marker レコードのフィールド位置 (`<name> MARKER INTORG|INTEND` の 3 トークン、2 番目が `MARKER`) を要求するよう厳密化
+- 非凸 QCQP (`NonconvexQcqp`) の公開境界に `q0` / 二次制約の `q`・`r` / 線形 RHS / 行列係数の数値有限性検証を追加。次元は妥当だが NaN/inf を含む入力が、`solve_global_qcqp`/`solve_global_miqcp` の node 緩和 (LP 変換) まで到達して `NumericalError` に化ける、または `.unwrap()` パニックする問題を防止 (凸 QCQP `QcqpProblem` は `solve_socp` の既存検証で同種の入力が transitively 保護されていることを確認し、対応不要と判断)
+- `solve_global_qcqp`/`solve_global_miqcp` が `opts.validate()` を呼ばず `solve_misocp` と非対称だった問題を修正。あわせて `solve_global_miqcp` の `integers` index が未検証で、範囲外指定時に root ノードの緩和処理中に panic していた問題も修正
+- 横展開: `MilpProblem`/`MiqpProblem` の `integer_vars` (公開フィールドで構築後の変更や `new()` を経ない直接構築を防げない) も `solve_milp`/`solve_miqp` の入口で範囲外 index を検証するよう修正。従来は内部 `integer_mask` の `assert!` で panic していた
+- ベンチマーク: LP @1e-6 109/109 optimal・@1e-8 108/109、QP Maros 121/138 @1e-6・93/138 @1e-8、MILP 5/20 optimal + 15 TIMEOUT、SOCP は Mittelmann Large-SOCP 18問で他ソルバ (MOSEK/ECOS/COPT) と比較し 4/18 @1000s (6/18 @3600s)
+
 ## [0.7.1] - 2026-07-14
 
 v0.7.0 向けのパッチリリース相当。公開APIの型・シグネチャ変更なし。

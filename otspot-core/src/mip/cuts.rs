@@ -143,7 +143,11 @@ pub(crate) fn add_root_cuts(
         }
         prev_obj = Some(res.objective);
 
-        let kind = if round_idx % 2 == 0 { CutKind::Gmi } else { CutKind::Mir };
+        let kind = if round_idx % 2 == 0 {
+            CutKind::Gmi
+        } else {
+            CutKind::Mir
+        };
         let cuts = generate_round(&committed, &integer_mask, &res.solution, &ws.basis, kind);
         if cuts.is_empty() {
             break;
@@ -166,8 +170,16 @@ pub(crate) fn add_root_cuts(
         if res.status == SolveStatus::Optimal {
             let budget = max_total_cuts.saturating_sub(total_cuts);
             let mut structural: Vec<CutRow> = Vec::new();
-            structural.extend(generate_cover_cuts(&committed, &integer_mask, &res.solution));
-            structural.extend(generate_clique_cuts(&committed, &integer_mask, &res.solution));
+            structural.extend(generate_cover_cuts(
+                &committed,
+                &integer_mask,
+                &res.solution,
+            ));
+            structural.extend(generate_clique_cuts(
+                &committed,
+                &integer_mask,
+                &res.solution,
+            ));
             structural.extend(generate_implied_bound_cuts(
                 &committed,
                 &integer_mask,
@@ -381,7 +393,17 @@ fn build_cut(
         if gamma <= ZERO_TOL {
             continue;
         }
-        if !accumulate_column(j, gamma, sf, struct_cols, slack_kinds, rows, lp, &mut g, &mut d) {
+        if !accumulate_column(
+            j,
+            gamma,
+            sf,
+            struct_cols,
+            slack_kinds,
+            rows,
+            lp,
+            &mut g,
+            &mut d,
+        ) {
             return None;
         }
     }
@@ -729,11 +751,7 @@ fn is_binary(j: usize, integer_mask: &[bool], bounds: &[(f64, f64)]) -> bool {
 ///
 /// For each Le row whose support is entirely non-negative binary, finds a
 /// minimal cover C (Σ_{j∈C} a_j > b) and emits −Σ_{j∈C} x_j ≥ −(|C|−1).
-fn generate_cover_cuts(
-    lp: &LpProblem,
-    integer_mask: &[bool],
-    x_star: &[f64],
-) -> Vec<CutRow> {
+fn generate_cover_cuts(lp: &LpProblem, integer_mask: &[bool], x_star: &[f64]) -> Vec<CutRow> {
     assert_eq!(
         x_star.len(),
         lp.num_vars,
@@ -787,7 +805,10 @@ fn generate_cover_cuts(
         while k > 0 {
             k -= 1;
             let j = cover[k];
-            let coeff_j = sorted.iter().find(|&&(jj, _)| jj == j).map_or(0.0, |&(_, v)| v);
+            let coeff_j = sorted
+                .iter()
+                .find(|&&(jj, _)| jj == j)
+                .map_or(0.0, |&(_, v)| v);
             if sum - coeff_j > b {
                 sum -= coeff_j;
                 cover.swap_remove(k);
@@ -817,11 +838,7 @@ fn generate_cover_cuts(
 /// from all rows, then for each fractional binary variable greedily extend to a
 /// clique in the conflict graph. Cliques of size ≥ 3 that the LP solution
 /// violates (Σ x_star[j] > 1) are emitted as −Σ_{j∈clique} x_j ≥ −1.
-fn generate_clique_cuts(
-    lp: &LpProblem,
-    integer_mask: &[bool],
-    x_star: &[f64],
-) -> Vec<CutRow> {
+fn generate_clique_cuts(lp: &LpProblem, integer_mask: &[bool], x_star: &[f64]) -> Vec<CutRow> {
     assert_eq!(
         x_star.len(),
         lp.num_vars,
@@ -913,10 +930,9 @@ fn generate_clique_cuts(
         // Deduplicate.
         let mut key_vec = clique.clone();
         key_vec.sort_unstable();
-        let key: u64 = key_vec
-            .iter()
-            .take(5)
-            .fold(0u64, |acc, &j| acc.wrapping_mul(1_000_003).wrapping_add(j as u64 + 1));
+        let key: u64 = key_vec.iter().take(5).fold(0u64, |acc, &j| {
+            acc.wrapping_mul(1_000_003).wrapping_add(j as u64 + 1)
+        });
         if !seen.insert(key) {
             continue;
         }

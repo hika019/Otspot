@@ -292,8 +292,7 @@ fn test_refit_bound_duals_comp_consistent_near_active_assigns_dual() {
     let b = vec![];
     // box-bounded: lb=0, ub=1, x=0.998 (interior by 0.002, rel≈6.7e-4)
     let bounds = vec![(0.0_f64, 1.0_f64)];
-    let problem =
-        QpProblem::new(q, c, a, b, bounds, vec![]).unwrap();
+    let problem = QpProblem::new(q, c, a, b, bounds, vec![]).unwrap();
 
     let mut result = crate::problem::SolverResult {
         status: SolveStatus::Optimal,
@@ -335,8 +334,7 @@ fn test_refit_bound_duals_comp_consistent_far_interior_keeps_zero() {
     let a = CscMatrix::new(0, n);
     let b = vec![];
     let bounds = vec![(0.0_f64, 1.0_f64)];
-    let problem =
-        QpProblem::new(q, c, a, b, bounds, vec![]).unwrap();
+    let problem = QpProblem::new(q, c, a, b, bounds, vec![]).unwrap();
 
     let mut result = crate::problem::SolverResult {
         status: SolveStatus::Optimal,

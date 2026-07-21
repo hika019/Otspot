@@ -1,5 +1,5 @@
 // IPM solver 診断テスト — otspot-io canonical parser 経由
-// (元: otspot-core/src/qp/ipm_solver/mod.rs の inline test、#109 A.1 で移動)
+// (元: otspot-core/src/qp/ipm_solver/mod.rs の inline test を移動したもの)
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

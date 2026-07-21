@@ -1,4 +1,4 @@
-//! Sentinel tests for OBJSENSE support and QPS error-path hardening (#105).
+//! Sentinel tests for OBJSENSE support and QPS error-path hardening.
 //!
 //! Covers:
 //!   A.1 MPS/QPS OBJSENSE MAX — objective is negated to MIN form.

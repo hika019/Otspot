@@ -39,7 +39,7 @@ fn micro_q_qp(qval: f64) -> QpProblem {
 #[test]
 fn micro_q_psd_qp_is_bounded_and_routes_to_ipm() {
     let opts = SolverOptions::default(); // presolve ON: exercises both fixes.
-    // q ∈ (DROP_TOL, 1e-12]: stored, but below the old is_zero_q / ZERO_TOL cutoff.
+                                         // q ∈ (DROP_TOL, 1e-12]: stored, but below the old is_zero_q / ZERO_TOL cutoff.
     for qval in [1e-12, 5e-13, 1e-13, 1e-14] {
         let p = micro_q_qp(qval);
         assert!(
@@ -180,9 +180,16 @@ fn micro_q_finite_bound_not_pinned_to_bound() {
     )
     .unwrap();
 
-    for (label, p) in [("step11 empty-col", empty_col), ("step3 singleton-Le", singleton_le)] {
+    for (label, p) in [
+        ("step11 empty-col", empty_col),
+        ("step3 singleton-Le", singleton_le),
+    ] {
         let r = crate::qp::solve_qp_with(&p, &SolverOptions::default());
-        assert_ne!(r.status, SolveStatus::Unbounded, "{label}: must not be Unbounded");
+        assert_ne!(
+            r.status,
+            SolveStatus::Unbounded,
+            "{label}: must not be Unbounded"
+        );
         // Must be well below 0 (the bound-pinned obj); allow IPM suboptimality.
         assert!(
             r.objective < 0.5 * analytic_obj,

@@ -8,10 +8,10 @@ use super::init::build_initial_point;
 use super::state::{
     alpha_stall_eps_for, PmmState, ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N,
     DELTA_INIT, DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL, GONDZIO_ALPHA_TRIGGER,
-    MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PF_FAR_FROM_TARGET_RATIO, PF_HISTORY_LEN,
-    PF_STUCK_RATIO, PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP,
-    REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
-    RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
+    INFEAS_DETECTOR_DISTRUST_SCORE, MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD,
+    PF_FAR_FROM_TARGET_RATIO, PF_HISTORY_LEN, PF_STUCK_RATIO, PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE,
+    PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP,
+    RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
 };
 use crate::linalg::kkt_solver::{inexact_eta_for_eps, KktConfig};
 use crate::linalg::parallelism::solver_par_from_threads;
@@ -132,11 +132,12 @@ pub(crate) fn solve_ippmm_inner(
     let inexact_eta = inexact_eta_for_eps(eps_orig);
 
     // augmented LDL が memory budget 超過なら Schur (n×n SPD) に切替。
-    let use_schur = options.schur_hint.unwrap_or_else(|| {
-        auto_schur_enabled(problem, &a_ext, m_ext, options, &timeout_ctx, par)
-    });
+    let use_schur = options
+        .schur_hint
+        .unwrap_or_else(|| auto_schur_enabled(problem, &a_ext, m_ext, options, &timeout_ctx, par));
 
-    // 終了条件は Some(Optimal) / Some(Timeout) のみ。MaxIterations 経路は除去。
+    // ループ内 break は Optimal / Timeout / Stalled / NumericalError / Infeasible /
+    // Unbounded を設定する。break せず max_iter を使い切った場合のみ MaxIterations。
     let mut status: Option<SolveStatus> = None;
     let mut iterations_consumed = 0usize;
     let mut final_residuals: Option<(f64, f64, f64)> = None;
@@ -470,22 +471,15 @@ pub(crate) fn solve_ippmm_inner(
             || any_nonfinite(&ds)
             || direction_finite_but_huge
         {
+            // Optimal は収束判定 (nr_p_rel/nr_d_rel/mu/rel_gap) を通った iterate のみが
+            // 名乗る。blow-up からの best-so-far 復帰は品質を主張せず Stalled で返し、
+            // 実際の品質判定は finalize (prove_optimal) に委ねる。
             if best_score.is_finite() {
                 x.copy_from_slice(&best_x);
                 y.copy_from_slice(&best_y);
                 s.copy_from_slice(&best_s);
                 final_residuals = Some(best_residuals);
-                let quality_threshold = 10.0 * eps_orig;
-                let combined_quasi =
-                    best_score < quality_threshold && best_rel_gap.abs() < DUALITY_GAP_TOL;
-                let feasibility_quasi = best_residuals.0 < eps_orig && best_residuals.1 < eps_orig;
-                let is_quasi_optimal = combined_quasi || feasibility_quasi;
-                let exit_status = if is_quasi_optimal {
-                    SolveStatus::Optimal
-                } else {
-                    SolveStatus::SuboptimalSolution
-                };
-                status = Some(exit_status);
+                status = Some(SolveStatus::Stalled);
             } else {
                 status = Some(SolveStatus::NumericalError);
             }
@@ -499,27 +493,18 @@ pub(crate) fn solve_ippmm_inner(
             check_infeasible_or_unbounded(&dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry)
         {
             consecutive_infeas_triggers += 1;
-            let quality_threshold = 10.0 * eps_orig;
-            if best_score.is_finite()
-                && best_score < quality_threshold
-                && best_rel_gap.abs() < DUALITY_GAP_TOL
-            {
-                x.copy_from_slice(&best_x);
-                y.copy_from_slice(&best_y);
-                s.copy_from_slice(&best_s);
-                final_residuals = Some(best_residuals);
-                status = Some(SolveStatus::Optimal);
-                break;
-            }
             // N 連続 fire まで判定保留: PMM floor の false-positive に adaptive reg の猶予を与える。
-            if consecutive_infeas_triggers < MIN_CONSECUTIVE_INFEAS {
-            } else {
-                if best_score < quality_threshold {
+            if consecutive_infeas_triggers >= MIN_CONSECUTIVE_INFEAS {
+                // best が quality 圏内なら検出器を信用せず best-so-far を Stalled で
+                // 返す (Farkas-like 近似の false-positive 対策)。Optimal 昇格はしない:
+                // 品質判定は finalize の prove_optimal 一本。
+                if best_score.is_finite() && best_score < INFEAS_DETECTOR_DISTRUST_SCORE * eps_orig
+                {
                     x.copy_from_slice(&best_x);
                     y.copy_from_slice(&best_y);
                     s.copy_from_slice(&best_s);
                     final_residuals = Some(best_residuals);
-                    status = Some(SolveStatus::SuboptimalSolution);
+                    status = Some(SolveStatus::Stalled);
                     break;
                 }
                 status = Some(infeas_status);
@@ -580,7 +565,7 @@ pub(crate) fn solve_ippmm_inner(
             y.copy_from_slice(&best_y);
             s.copy_from_slice(&best_s);
             final_residuals = Some(best_residuals);
-            status = Some(SolveStatus::SuboptimalSolution);
+            status = Some(SolveStatus::Stalled);
             break;
         }
 
@@ -593,7 +578,7 @@ pub(crate) fn solve_ippmm_inner(
             y.copy_from_slice(&best_y);
             s.copy_from_slice(&best_s);
             final_residuals = Some(best_residuals);
-            status = Some(SolveStatus::SuboptimalSolution);
+            status = Some(SolveStatus::Stalled);
             break;
         }
 
@@ -697,7 +682,8 @@ pub(crate) fn solve_ippmm_inner(
         iterations_consumed = options.ipm.max_iter;
     }
 
-    let status = status.unwrap_or(SolveStatus::Timeout);
+    // break なしのループ終端 = 反復予算枯渇。Timeout に丸めず MaxIterations で報告する。
+    let status = status.unwrap_or(SolveStatus::MaxIterations);
 
     // 素の Timeout 経路は発散 x をそのまま返してしまうので best-so-far で上書き。
     if matches!(status, SolveStatus::Timeout | SolveStatus::MaxIterations) && best_score.is_finite()
@@ -758,7 +744,7 @@ pub(crate) fn solve_ippmm_inner(
 
         iterations: iterations_consumed,
         final_residuals,
-        // best-so-far の rel gap。unscale_ipm_result の昇格ゲート用。
+        // best-so-far の rel gap (診断用)。
         duality_gap_rel: if best_rel_gap.is_finite() {
             Some(best_rel_gap)
         } else {

@@ -37,12 +37,12 @@ pub(crate) use extract::set_at_upper_apply_disabled;
 #[cfg(test)]
 pub(crate) use iterate::set_flip_apply_disabled;
 #[cfg(test)]
-pub(crate) use primal::{set_primal_alpha_sv_disabled, set_primal_force_bland};
-#[cfg(test)]
 pub(crate) use pricing::{
     partial_price_cols_scanned, reset_partial_price_cols_scanned, set_partial_price_chunk_override,
     set_partial_price_single_window, RC_DEADLINE_CHECK_COUNT,
 };
+#[cfg(test)]
+pub(crate) use primal::{set_primal_alpha_sv_disabled, set_primal_force_bland};
 
 use super::super::pricing::DualLeavingStrategy;
 use super::super::standard_form::{BoundedStandardForm, SimplexOutcome};
@@ -51,9 +51,9 @@ use crate::sparse::CscMatrix;
 
 // Re-export items that tests obtain via `use super::*` (previously file-level imports)
 #[cfg(test)]
-use extract::project_reduced_costs_to_active_bounds;
-#[cfg(test)]
 use super::super::dual_common::basic_obj;
+#[cfg(test)]
+use extract::project_reduced_costs_to_active_bounds;
 
 /// Terminal status of the bounded dual simplex iteration.
 ///
@@ -72,7 +72,9 @@ pub(crate) enum BoundedOutcome {
     SingularBasis,
     /// `x_B[r] > u_{basis[r]}` reached without an lb-violation candidate.
     #[allow(dead_code)]
-    UbViolationOutOfScope { row: usize },
+    UbViolationOutOfScope {
+        row: usize,
+    },
 }
 
 /// Internal state of the bounded dual simplex iteration.
@@ -177,7 +179,16 @@ pub(crate) fn bounded_primal_phase1(
     options: &SolverOptions,
     iters: &mut usize,
 ) -> SimplexOutcome {
-    primal::primal_simplex_aug(a_aug, c_aug, ubs_aug, n_struct, state, options, iters, Some(n_struct))
+    primal::primal_simplex_aug(
+        a_aug,
+        c_aug,
+        ubs_aug,
+        n_struct,
+        state,
+        options,
+        iters,
+        Some(n_struct),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -5,8 +5,9 @@
 //! 結果テーブルを stdout に出力する。
 //!
 //! Maros-Meszaros（QPS形式）とは独立した集計。
-//! 対応問題タイプ: *C*（連続変数）かつ L/B/N（線形/境界/無制約）。
-//! 非対応（整数変数・二次制約）は SKIP として記録する。
+//! 対応問題タイプ: *C*（連続変数）かつ L/B/N/Q（線形/境界/無制約/二次制約）。
+//! Q（QCQP）は quadratic_constraints にロードして解く。非対応
+//! （整数変数 B/I 等、および L/B/N/Q 以外の制約型）は SKIP として記録する。
 
 use mimalloc::MiMalloc;
 #[global_allocator]
@@ -21,8 +22,8 @@ use otspot_core::presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
 use otspot_core::problem::SolveStatus;
 use otspot_core::qp::{solve_qp_global, solve_qp_with};
 use otspot_dev::bench_utils::{
-    check_baseline_objective, compute_gap_to_global, compute_qp_kkt_max, detect_csv_path,
-    load_baseline_objectives, load_expected_statuses, parse_qplib_outcome, ExpectedStatus,
+    check_baseline_objective, compute_gap_to_global, compute_qp_kkt_max, is_kkt_violation,
+    kkt_gated_label, load_qplib_baselines, parse_qplib_outcome, qcqp_pfeas_max, ExpectedStatus,
     ObjCheckResult, ParseQplibOutcome,
 };
 
@@ -31,13 +32,15 @@ const KKT_FAIL_EPS: f64 = 1e-4;
 
 /// QPLIB UnsupportedType の category (parse error message 由来).
 ///
-/// 推論ではなく `src/io/qplib.rs::parse_qplib_str` の error message prefix を
-/// 引用判定: ":Variable type" → integer, ":Constraint type" → qcqp, それ以外 → other.
+/// 推論ではなく emit 元の error message prefix を引用判定:
+/// "Variable type" → integer (otspot-io/src/qplib/parser.rs:57 の M/G/S reject と
+/// bench_utils::parse_qplib_outcome の B/I→MIP メッセージの両方)、
+/// "Constraint type" → qcqp (otspot-io/src/qplib/parser.rs:67)、それ以外 → other。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnsupportedCategory {
     /// 変数型が C(continuous) 以外 (B/I/G/S/M)
     Integer,
-    /// 制約型が L/B/N 以外 (主に Q = quadratic constraint)
+    /// 制約型が L/B/N/Q 以外 (Q = QCQP は quadratic_constraints として解くため対象外)
     Qcqp,
     /// 上記外
     Other,
@@ -60,21 +63,24 @@ mod unsupported_classify_tests {
 
     #[test]
     fn variable_type_message_is_integer_category() {
-        // src/io/qplib.rs:115 fmt
-        let m = "Variable type 'I' not supported (only C=continuous supported). Type=QIL";
+        // otspot-io/src/qplib/parser.rs:57 fmt (M/G/S mixed-integer reject)
+        let m = "Variable type 'M' not supported (C/B/I supported; M/G/S mixed-integer unsupported). Type=QML";
         assert_eq!(classify_unsupported(m), UnsupportedCategory::Integer);
     }
 
     #[test]
     fn constraint_type_message_is_qcqp_category() {
-        // src/io/qplib.rs:125 fmt
-        let m = "Constraint type 'Q' not supported (only L/B/N supported). Type=QCQ";
+        // otspot-io/src/qplib/parser.rs:67 fmt ('Q' は QCQP としてロードされるため
+        // このメッセージを出さない; L/B/N/Q 以外の制約型、例 'C'=convex quad が出す)
+        let m = "Constraint type 'C' not supported (only L/B/N/Q supported). Type=QCC";
         assert_eq!(classify_unsupported(m), UnsupportedCategory::Qcqp);
     }
 
     #[test]
     fn binary_var_message_is_integer_category() {
-        let m = "Variable type 'B' not supported (only C=continuous supported). Type=QBL";
+        // bench_utils::parse_qplib_outcome fmt (B/I は parser を通り Milp/Miqp に
+        // route されるため、この bench 向けメッセージが emit 元)
+        let m = "Variable type 'B'/'I' (binary/integer): MIP problem";
         assert_eq!(classify_unsupported(m), UnsupportedCategory::Integer);
     }
 
@@ -177,11 +183,12 @@ fn main() {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default()
         };
-        let csv = detect_csv_path(&data_dir, baseline_override.as_deref(), &root);
-        (
-            load_baseline_objectives(&csv).unwrap_or_default(),
-            load_expected_statuses(&csv),
-        )
+        // qplib_qcqp.csv covers the CCQ/DCQ/QCQ instances mixed into this same
+        // data dir alongside the DCL/QCL ones `detect_csv_path` resolves;
+        // `load_qplib_baselines` merges it in unconditionally, so QCQP-route
+        // regressions gate instead of falling through as CHECKED[no_ref]
+        // (PR #25 review).
+        load_qplib_baselines(&data_dir, baseline_override.as_deref(), &root)
     };
     eprintln!(
         "Baseline objectives loaded: {} problems",
@@ -239,11 +246,13 @@ fn main() {
     let mut n_error = 0usize;
     let mut n_timeout = 0usize;
     let mut n_max_iter = 0usize;
+    let mut n_stalled = 0usize;
+    let mut n_feasible_point = 0usize;
     let mut n_suboptimal = 0usize;
     let mut n_skip = 0usize;
     // SKIP 内訳 (CLAUDE.md L46: 推論排除、parse 由来 message を category 化).
     // - integer: var_char != 'C' (B=binary, I=integer, G=general-int, S=semi-cont, M=mixed)
-    // - qcqp:    con_char != L/B/N (Q=quadratic constraint)
+    // - qcqp:    con_char != L/B/N/Q (Q は quadratic_constraints として解くため SKIP しない)
     // - other:   上記外の Unsupported message (現状 parser 経路では発生しないが保険)
     let mut n_skip_integer = 0usize;
     let mut n_skip_qcqp = 0usize;
@@ -251,6 +260,11 @@ fn main() {
     let mut n_nonconvex = 0usize;
     let mut n_nonconvex_local = 0usize;
     let mut n_nonconvex_global = 0usize;
+    // solve_qp_with/solve_qp_global が out-of-scope と判断し正当に declined したケース
+    // (例: 非凸QCQPで有限境界を要求するが変数が (-inf, inf))。
+    // n_fail に混ぜない: これは solver の誤りではなく正しい scope 判定なので、
+    // n_skip (parse 時点の SKIP) とも区別する専用 bucket とする。
+    let mut n_not_supported = 0usize;
     // Phase 1A: status=Optimal だが元空間 KKT 残差 >= KKT_FAIL_EPS の解。
     // 非凸 QP で false-positive Optimal を obj-only judge が見逃す穴を埋める。
     let mut n_kkt_fail = 0usize;
@@ -275,7 +289,7 @@ fn main() {
             ParseQplibOutcome::Qp(p) => *p,
             ParseQplibOutcome::Unsupported(msg) => {
                 // parse_qplib::UnsupportedType message に基づき category 分類
-                // (src/io/qplib.rs:115 "Variable type '..." / :125 "Constraint type '...")
+                // (emit 元は UnsupportedCategory の doc コメント参照)
                 let category = classify_unsupported(&msg);
                 let status_label = match category {
                     UnsupportedCategory::Integer => "SKIP:integer",
@@ -366,10 +380,14 @@ fn main() {
             otspot_dev::bench_utils::BenchPromotionPolicy::BenchQplib,
         );
 
-        // Optimal/LocallyOptimal/Nonconvex*/Suboptimal で有効解を持つ result に KKT 残差を計測。
-        // 1 つでも違反したら PASS を KKT_FAIL に降格する (obj 一致でも KKT が崩れていれば
-        // false-positive Optimal)。元空間 gap は baseline_objectives の最適値が
-        // 数値であれば算出 (Infeasible/Unbounded sentinel 文字列は除外済)。
+        // Optimal/LocallyOptimal/Nonconvex*/Suboptimal で有効解を持つ result に KKT 残差を計測し、
+        // 違反したら kkt_gated_label でその arm の verdict を KKT_FAIL に降格する
+        // (Optimal だけでなく NONCONVEX_LOCAL/NONCONVEX_GLOBAL/SUBOPTIMAL も対象:
+        // obj や status がそれらしくても制約違反解は false positive)。元空間 gap は
+        // baseline_objectives の最適値が数値であれば算出 (Infeasible/Unbounded sentinel
+        // 文字列は除外済)。QCQP (quadratic_constraints 非空) は compute_qp_kkt_max が
+        // 二次制約を読まないため、qcqp_pfeas_max (二次制約の primal feasibility) を
+        // 同じスカラーに畳み込む。stationarity は対象外 (primal feasibility のみ)。
         let kkt_max = if matches!(
             result.status,
             SolveStatus::Optimal
@@ -379,12 +397,14 @@ fn main() {
                 | SolveStatus::SuboptimalSolution
         ) && result.solution.len() == prob.num_vars
         {
-            Some(compute_qp_kkt_max(
+            let stationarity_max = compute_qp_kkt_max(
                 &prob,
                 &result.solution,
                 &result.dual_solution,
                 &result.bound_duals,
-            ))
+            );
+            let qc_pfeas_max = qcqp_pfeas_max(&prob, &result.solution);
+            Some(stationarity_max.max(qc_pfeas_max))
         } else {
             None
         };
@@ -405,10 +425,7 @@ fn main() {
             SolveStatus::Optimal => {
                 if result.objective.is_finite() {
                     // KKT_FAIL: status=Optimal だが元空間で KKT 違反 → PASS 判定の優先打ち消し。
-                    let kkt_violation = kkt_max
-                        .map(|v| !v.is_finite() || v >= KKT_FAIL_EPS)
-                        .unwrap_or(false);
-                    if kkt_violation {
+                    if is_kkt_violation(kkt_max, KKT_FAIL_EPS) {
                         n_kkt_fail += 1;
                         (
                             "KKT_FAIL".to_string(),
@@ -510,8 +527,48 @@ fn main() {
                     ),
                 )
             }
+            // Stalled は解を主張しない (診断 iterate のみ) ため KKT gate 対象外。
+            SolveStatus::Stalled => {
+                n_stalled += 1;
+                let extra = if result.solution.len() == prob.num_vars {
+                    let x_inf = result.solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+                    format!("obj={:.6e} x_inf={:.2e}", result.objective, x_inf)
+                } else {
+                    "obj=NA".to_string()
+                };
+                (
+                    "STALLED".to_string(),
+                    format!(
+                        "[{}] iters={} {} {}",
+                        method_label, result.iterations, extra, resid_str
+                    ),
+                )
+            }
+            // FeasiblePoint: solve_qp_global (--global) の incumbent が feasibility
+            // 検証のみ通過 (品質ゲート未通過)。有効な上界 obj は持つが最適性・KKT の
+            // 主張はしないため Stalled 同様 KKT gate 対象外。
+            SolveStatus::FeasiblePoint => {
+                n_feasible_point += 1;
+                let extra = if result.solution.len() == prob.num_vars {
+                    format!("obj={:.6e}", result.objective)
+                } else {
+                    "obj=NA".to_string()
+                };
+                (
+                    "FEASIBLE_POINT".to_string(),
+                    format!(
+                        "[{}] iters={} {} {} {}",
+                        method_label, result.iterations, extra, resid_str, gap_str
+                    ),
+                )
+            }
             SolveStatus::SuboptimalSolution => {
-                n_suboptimal += 1;
+                let label = kkt_gated_label("SUBOPTIMAL", kkt_max, KKT_FAIL_EPS);
+                if label == "KKT_FAIL" {
+                    n_kkt_fail += 1;
+                } else {
+                    n_suboptimal += 1;
+                }
                 let extra = if result.solution.is_empty() {
                     "obj=NA solution=EMPTY".to_string()
                 } else if result.solution.len() != prob.num_vars {
@@ -526,7 +583,7 @@ fn main() {
                     format!("obj={:.6e} x_inf={:.2e}", result.objective, x_inf)
                 };
                 (
-                    "SUBOPTIMAL".to_string(),
+                    label.to_string(),
                     format!(
                         "[{}] iters={} {} {} {} {}",
                         method_label, result.iterations, extra, resid_str, kkt_str, gap_str
@@ -561,9 +618,14 @@ fn main() {
             // 単発 IPM 経路 (apply_bench_status_promotion 後) では現状出ない (Optimal 化 or
             // LocallyOptimal で別 arm を通る)。global path 統合時にここに乗る。
             SolveStatus::NonconvexLocal => {
-                n_nonconvex_local += 1;
+                let label = kkt_gated_label("NONCONVEX_LOCAL", kkt_max, KKT_FAIL_EPS);
+                if label == "KKT_FAIL" {
+                    n_kkt_fail += 1;
+                } else {
+                    n_nonconvex_local += 1;
+                }
                 (
-                    "NONCONVEX_LOCAL".to_string(),
+                    label.to_string(),
                     format!(
                         "[{}] obj={:.6e} {} {}",
                         method_label, result.objective, kkt_str, gap_str
@@ -571,13 +633,25 @@ fn main() {
                 )
             }
             SolveStatus::NonconvexGlobal => {
-                n_nonconvex_global += 1;
+                let label = kkt_gated_label("NONCONVEX_GLOBAL", kkt_max, KKT_FAIL_EPS);
+                if label == "KKT_FAIL" {
+                    n_kkt_fail += 1;
+                } else {
+                    n_nonconvex_global += 1;
+                }
                 (
-                    "NONCONVEX_GLOBAL".to_string(),
+                    label.to_string(),
                     format!(
                         "[{}] obj={:.6e} {} {}",
                         method_label, result.objective, kkt_str, gap_str
                     ),
+                )
+            }
+            SolveStatus::NotSupported(ref msg) => {
+                n_not_supported += 1;
+                (
+                    "NOT_SUPPORTED".to_string(),
+                    format!("[{}] {}", method_label, msg),
                 )
             }
             _ => {
@@ -620,12 +694,17 @@ fn main() {
     println!("  NONCONVEX_GLOBAL:  {}", n_nonconvex_global);
     println!("  SUBOPTIMAL:        {}", n_suboptimal);
     println!("  MAXITER:           {}", n_max_iter);
+    println!("  STALLED:           {}", n_stalled);
+    println!("  FEASIBLE_POINT:    {}", n_feasible_point);
     println!("  ERROR:             {}", n_error);
     println!("  SKIP:              {}", n_skip);
     // SKIP 内訳を fact 出力 (parse error message 由来、推論排除).
     println!("    SKIP:integer:    {}", n_skip_integer);
     println!("    SKIP:qcqp:       {}", n_skip_qcqp);
     println!("    SKIP:other:      {}", n_skip_other);
+    // solve 時点の out-of-scope declined (SolveStatus::NotSupported)。SKIP (parse時点)
+    // とは別 bucket: parser は通過したが solver が対応外と正しく判定したケース。
+    println!("  NOT_SUPPORTED:     {}", n_not_supported);
     println!(
         "  TOTAL:             {}",
         n_pass
@@ -641,7 +720,10 @@ fn main() {
             + n_nonconvex_global
             + n_suboptimal
             + n_max_iter
+            + n_stalled
+            + n_feasible_point
             + n_error
             + n_skip
+            + n_not_supported
     );
 }

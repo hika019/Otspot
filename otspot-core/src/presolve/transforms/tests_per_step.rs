@@ -109,6 +109,178 @@ fn step5_le_positive_coeff_tightens_ub() {
     assert!(count_bounds_tightened(&st) >= 1);
 }
 
+/// `revert_redundant_added_bounds` must drop a presolve-added implied ub that a
+/// retained row already forces, while preserving genuine original model bounds.
+///
+/// x + y <= 5 with x in [0, +inf) and y in [0, 2]. step5 derives an implied
+/// ub = 5 for the originally-unbounded x; that bound is redundant (the retained
+/// Le row enforces it), so the reversion must restore x's ub to +inf. y's ub is
+/// an original model bound and must survive.
+///
+/// No-op proof: deleting the reversion leaves x's ub = 5, which the simplex
+/// standard form would materialize as an explicit UB row — the osa-60 row-blowup
+/// this guards against.
+#[test]
+fn revert_redundant_added_bounds_restores_infinite_ub_but_keeps_original() {
+    let mut st = make_state(
+        vec![-1.0, -1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![5.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, f64::INFINITY), (0.0, 2.0)],
+    );
+    let mut fixed = 0usize;
+    step5_bounds_tightening(&mut st, &mut fixed, None).unwrap();
+    assert!(
+        st.bounds[0].1.is_finite(),
+        "precondition: step5 must add a finite implied ub to the unbounded x, got {}",
+        st.bounds[0].1
+    );
+
+    super::bounds::revert_redundant_added_bounds(&mut st);
+
+    assert_eq!(
+        st.bounds[0].1,
+        f64::INFINITY,
+        "redundant implied ub on originally-unbounded x must revert to +inf"
+    );
+    assert_eq!(st.bounds[0].0, 0.0, "x lower bound must be untouched");
+    assert_eq!(
+        st.bounds[1],
+        (0.0, 2.0),
+        "original model ub on y must be preserved, not reverted"
+    );
+}
+
+/// Companion lb-side branch: a presolve-added implied *lower* bound on an
+/// originally `-inf` variable that a retained row forces must revert to `-inf`,
+/// while an original finite lb survives.
+///
+/// x + y >= 3 with x in (-inf, +inf) and y in [0, 5]. step5 derives implied
+/// lb_x = (3 - y_ub)/1 = -2 (independent oracle). The retained Ge row enforces
+/// x >= 3 - y >= 3 - 5 = -2, so that bound is redundant and reverts to -inf.
+///
+/// No-op proof: deleting the lb branch in `revert_redundant_added_bounds` leaves
+/// x's lb at -2, failing the `-inf` assertion.
+#[test]
+fn revert_redundant_added_bounds_restores_infinite_lb_but_keeps_original() {
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        2,
+        vec![3.0],
+        vec![ConstraintType::Ge],
+        vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, 5.0)],
+    );
+    let mut fixed = 0usize;
+    step5_bounds_tightening(&mut st, &mut fixed, None).unwrap();
+    assert!(
+        (st.bounds[0].0 - (-2.0)).abs() < 1e-10,
+        "precondition: step5 must add implied lb = -2 to x, got {}",
+        st.bounds[0].0
+    );
+
+    super::bounds::revert_redundant_added_bounds(&mut st);
+
+    assert_eq!(
+        st.bounds[0].0,
+        f64::NEG_INFINITY,
+        "redundant implied lb on originally-unbounded-below x must revert to -inf"
+    );
+    assert_eq!(
+        st.bounds[0].1,
+        f64::INFINITY,
+        "x upper bound must be untouched"
+    );
+    assert_eq!(
+        st.bounds[1].0, 0.0,
+        "original model lb on y must be preserved"
+    );
+}
+
+/// Safety-valve branch: an added upper bound that *no retained row implies* must
+/// be KEPT. This is load-bearing — reverting it would enlarge the feasible region.
+///
+/// x + y <= 5 (row 0) and x + y >= 0 (row 1), x,y in [0, +inf). step5 derives
+/// ub = 5 for x and y from row 0. Row 0 is then removed (as `step4` does when a
+/// row is redundant *given* the tightened bounds), making x's ub the only thing
+/// enforcing x <= 5. The remaining Ge row implies no finite ub (implied_ub = +inf
+/// > 5), so the reversion must keep x's ub at 5; dropping it would let x → +inf.
+///
+/// No-op proof: making the ub reversion unconditional (removing the
+/// `implied_ub[j] <= ub` guard) reverts x's ub to +inf, failing the assertion —
+/// this is the guard that preserves the feasible region.
+#[test]
+fn revert_redundant_added_bounds_keeps_ub_no_retained_row_implies() {
+    let mut st = make_state(
+        vec![1.0, 1.0],
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 1],
+        &[1.0, 1.0, 1.0, 1.0],
+        2,
+        2,
+        vec![5.0, 0.0],
+        vec![ConstraintType::Le, ConstraintType::Ge],
+        vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+    );
+    let mut fixed = 0usize;
+    step5_bounds_tightening(&mut st, &mut fixed, None).unwrap();
+    assert!(
+        (st.bounds[0].1 - 5.0).abs() < 1e-10,
+        "precondition: step5 must add ub = 5 to x from the Le row, got {}",
+        st.bounds[0].1
+    );
+    // Simulate step4 removing the source row; the added ub is now load-bearing.
+    st.removed_rows[0] = true;
+
+    super::bounds::revert_redundant_added_bounds(&mut st);
+
+    assert_eq!(
+        st.bounds[0].1, 5.0,
+        "an added ub no retained row implies must be KEPT (reverting would unbound x)"
+    );
+}
+
+/// Fixing-skip branch: a variable fixed by tightening (`lb == ub`) must never be
+/// reverted, even when a retained row implies the bound.
+///
+/// x in [0, +inf) with the row x <= 3. x is fixed to [3, 3] (as dual-fixing /
+/// step1 would). The row implies x <= 3, but the `ub - lb <= ZERO_TOL` guard must
+/// skip the fixed box so it survives intact.
+///
+/// No-op proof: removing the fixing skip reverts x's ub to +inf, turning the
+/// fixed [3,3] into [3, +inf) and failing the assertion.
+#[test]
+fn revert_redundant_added_bounds_skips_fixed_variable() {
+    let mut st = make_state(
+        vec![1.0],
+        &[0],
+        &[0],
+        &[1.0],
+        1,
+        1,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, f64::INFINITY)],
+    );
+    st.bounds[0] = (3.0, 3.0);
+
+    super::bounds::revert_redundant_added_bounds(&mut st);
+
+    assert_eq!(
+        st.bounds[0],
+        (3.0, 3.0),
+        "a variable fixed by tightening (lb == ub) must not be reverted"
+    );
+}
+
 #[test]
 fn step5_ge_positive_coeff_tightens_lb() {
     // 2x + y >= 6, x in [0,2], y in [0,5] → rest_ub_x = 5, implied_lb_x = (6-5)/2 = 0.5.
@@ -528,8 +700,16 @@ fn step1_fixed_negative_value_updates_b_and_offset() {
     );
     step1_fixed_variable(&mut st, None).unwrap();
     assert!(st.removed_cols[0], "fixed col must be removed");
-    assert!((st.b[0] - 13.0).abs() < 1e-12, "b0 expected 13, got {}", st.b[0]);
-    assert!((st.b[1] - 32.0).abs() < 1e-12, "b1 expected 32, got {}", st.b[1]);
+    assert!(
+        (st.b[0] - 13.0).abs() < 1e-12,
+        "b0 expected 13, got {}",
+        st.b[0]
+    );
+    assert!(
+        (st.b[1] - 32.0).abs() < 1e-12,
+        "b1 expected 32, got {}",
+        st.b[1]
+    );
     assert!(
         (st.obj_offset - (-6.0)).abs() < 1e-12,
         "offset expected -6, got {}",
@@ -579,15 +759,17 @@ fn step2_singleton_negative_coeff_solves_negative_value() {
     );
     step2_singleton_row(&mut st, None).unwrap();
     assert!(st.removed_cols[0] && st.removed_rows[0]);
-    assert!((st.b[1] - 13.0).abs() < 1e-12, "b1 expected 13, got {}", st.b[1]);
+    assert!(
+        (st.b[1] - 13.0).abs() < 1e-12,
+        "b1 expected 13, got {}",
+        st.b[1]
+    );
     assert!(
         (st.obj_offset - (-3.0)).abs() < 1e-12,
         "offset expected -3, got {}",
         st.obj_offset
     );
 }
-
-
 
 #[test]
 fn step2_singleton_infeasible_out_of_bounds() {
@@ -758,7 +940,10 @@ fn step4_ge_constraint_redundant_when_activity_floor_dominates() {
         vec![(1.0, 5.0), (1.0, 5.0)],
     );
     step4_redundant_constraint(&mut st, None).unwrap();
-    assert!(st.removed_rows[0], "Ge with activity floor >= rhs must be redundant");
+    assert!(
+        st.removed_rows[0],
+        "Ge with activity floor >= rhs must be redundant"
+    );
 }
 
 #[test]
@@ -794,7 +979,10 @@ fn step4_eq_constraint_redundant_when_activity_pins_rhs() {
         vec![(2.0, 2.0), (2.0, 2.0)],
     );
     step4_redundant_constraint(&mut st, None).unwrap();
-    assert!(st.removed_rows[0], "Eq pinned to rhs by fixed vars must be redundant");
+    assert!(
+        st.removed_rows[0],
+        "Eq pinned to rhs by fixed vars must be redundant"
+    );
 }
 
 // -----------------------------------------------------------
@@ -817,9 +1005,15 @@ fn step5_tightening_to_point_increments_new_fixed() {
     );
     let mut fixed = 0usize;
     step5_bounds_tightening(&mut st, &mut fixed, None).unwrap();
-    assert_eq!(fixed, 1, "tightening that pins lb==ub must count as a new fix");
+    assert_eq!(
+        fixed, 1,
+        "tightening that pins lb==ub must count as a new fix"
+    );
     let (lb, ub) = st.bounds[0];
-    assert!(lb.abs() < 1e-12 && ub.abs() < 1e-12, "bounds collapsed to [0,0]");
+    assert!(
+        lb.abs() < 1e-12 && ub.abs() < 1e-12,
+        "bounds collapsed to [0,0]"
+    );
 }
 
 // -----------------------------------------------------------
@@ -847,12 +1041,18 @@ fn step6_opposite_sign_coeffs_tightens_other_bound() {
     let mut subst = 0usize;
     step6_doubleton_equation(&mut st, &mut subst, None).unwrap();
     assert_eq!(subst, 1);
-    assert!(st.removed_cols[0] && st.removed_rows[0], "pivot x0 eliminated");
+    assert!(
+        st.removed_cols[0] && st.removed_rows[0],
+        "pivot x0 eliminated"
+    );
     let (lb1, ub1) = st.bounds[1];
     assert!(lb1.abs() < 1e-12, "x1 lb stays 0, got {lb1}");
     assert!((ub1 - 8.0).abs() < 1e-12, "x1 ub tightened to 8, got {ub1}");
     assert!(count_linear_subst(&st) >= 1);
-    assert!(count_bounds_tightened(&st) >= 1, "ratio<0 must tighten other bound");
+    assert!(
+        count_bounds_tightened(&st) >= 1,
+        "ratio<0 must tighten other bound"
+    );
 }
 
 // -----------------------------------------------------------
@@ -1153,7 +1353,10 @@ fn step2b_forcing_single_var_skip() {
         vec![(0.0, 1.0)],
     );
     step2b_forcing_row(&mut st, None).unwrap();
-    assert!(!st.removed_rows[0], "singleton should not be caught by forcing");
+    assert!(
+        !st.removed_rows[0],
+        "singleton should not be caught by forcing"
+    );
 }
 
 #[test]
@@ -1191,7 +1394,10 @@ fn step2b_forcing_unbounded_var_skip() {
     step2b_forcing_row(&mut st, None).unwrap();
     // lb_fin is false due to y's lower bound being -inf, so activity_range min is not finite.
     // The forcing condition lb_fin && row_lb >= rhs fails.
-    assert!(!st.removed_rows[0], "unbounded contributing bound must skip");
+    assert!(
+        !st.removed_rows[0],
+        "unbounded contributing bound must skip"
+    );
 }
 
 #[test]

@@ -1,50 +1,24 @@
-//! Big-M Phase I cold-start (Dual Phase I + Primal Phase II + Big-M penalty)
+//! Big-M Phase I cold-start (Dual Phase I + Primal Phase II + Big-M penalty)。
 //!
-//! ## 解決する問題
-//!
-//! Ge / Eq 制約を含む LP の cold-start で、既存
-//! `super::super::dual::two_phase_dual_simplex::cold_start_dual` は
+//! Ge/Eq 制約を含む LP の cold-start で、既存 `cold_start_dual` は
 //! `sf.num_artificial > 0` 時 Primal Phase I (人工変数 sum 最小化) に
-//! フォールバックする。klein3 等 degenerate infeasible LP では cycling して
-//! `iters=0 TIMEOUT` する。
+//! フォールバックし、klein3 等 degenerate infeasible LP で cycling して
+//! `iters=0 TIMEOUT` する。Dual Phase I と Primal Phase II の組み合わせで回避する:
+//! 1. 人工変数列 a_i (係数 1) を `needs_artificial` な各行に追加 (B = I_aug)。
+//! 2. Big-M 摂動コスト `c_aug[a_i] = big_m`、元変数 `c_aug[j] = c[j] +
+//!    max(0, big_m·Σ_{i∈art} a[i,j] - c[j])`。初期 basis
+//!    (y_init = big_m·indicator) で全 reduced cost r_j ≥ 0 (双対実行可能)。
+//! 3. Phase I (Dual Simplex, Harris ratio test): b ≥ 0 で初期から主実行可能
+//!    なので通常 0 反復。役割は Phase II の safe な warm start 用の双対基底構成。
+//!    `Unbounded` → Infeasible。
+//! 4. Phase II (Primal Simplex, SteepestEdgePricing): 元コスト [c | 0] で実行し、
+//!    人工変数も pricing 対象にして basis から追い出す (Phase I 摂動も相殺)。
+//! 5. 終了判定: Phase I `Unbounded` → Infeasible; Phase II 後に人工変数が
+//!    値 > primal_tol で残存 → infeasible; `Optimal` かつ人工変数 = 0 → 最適;
+//!    `Unbounded` → 非有界; その他 Timeout/SingularBasis は通常処理。
 //!
-//! ## アルゴリズム (Dual Phase I + Primal Phase II + Big-M)
-//!
-//! 2-phase Big-M (Dual Phase I + Primal Phase II)。Dual と Primal を組み合わせる
-//! ことで klein3 級 degenerate infeasible LP の cycling を回避する:
-//!
-//! 1. 人工変数列 a_i (係数 1) を `needs_artificial` な各行 i に追加し、
-//!    B = I_aug を構成する。
-//! 2. Big-M 摂動コスト構築:
-//!    - 人工変数: `c_aug[a_i] = big_m`
-//!    - 元変数 j: `c_aug[j] = c[j] + delta_j`、
-//!      `delta_j = max(0, big_m * Σ_{i: needs_art} a[i, j] - c[j])`
-//!      これにより初期 basis (B=I_aug, y_init = c_B = big_m * indicator) で
-//!      全 reduced cost r_j ≥ 0 が成立 (双対実行可能)。
-//! 3. **Phase I (Dual Simplex, Harris ratio test 装備の `dual_simplex_core_advanced`)**:
-//!    x_B ≥ 0 のまま (b ≥ 0 で初期から主実行可能) なので Phase I は通常 0 反復
-//!    で即終了する。役割は「双対基底を構成し、後続 Phase II で safe な warm
-//!    start を提供する」こと。Unbounded を返したら Infeasible。
-//! 4. **Phase II (Primal Simplex, SteepestEdgePricing)**:
-//!    元コスト c_phase2 = [c | 0; n_art] で `revised_simplex_core` を実行。
-//!    人工変数も pricing 対象 (n_price = n_aug) にして basis から積極的に追い出す。
-//!    元 c で Phase I の摂動を消す効果も持つ。
-//! 5. 終了判定:
-//!    - Phase I `Unbounded` → 双対非有界 → Infeasible
-//!    - Phase II 完了後、人工変数が basis に残って値 > primal_tol → 元 LP infeasible
-//!    - Phase II `Optimal` で人工変数値 = 0 → 元 LP 最適
-//!    - Phase II `Unbounded` → 元 LP 非有界
-//!    - Timeout / SingularBasis → 通常処理
-//!
-//! ## M の動的算出
-//!
-//! Ruiz スケーリング後の c, b から:
-//! ```text
-//! big_m = max(||c||_∞ * BIG_M_COST_MULT,
-//!             ||b||_∞ * BIG_M_COST_MULT,
-//!             BIG_M_FLOOR)
-//! ```
-//! いずれも問題スケールから派生する算式 (固定マジック値ではない)。
+//! `big_m = max(‖c‖_∞·BIG_M_COST_MULT, ‖b‖_∞·BIG_M_COST_MULT, BIG_M_FLOOR)`
+//! (Ruiz スケール後の c, b から。問題スケール由来で固定マジック値ではない)。
 
 use super::super::crash;
 use super::super::pricing::{DualLeavingStrategy, SteepestEdgePricing};
@@ -55,7 +29,6 @@ use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
-
 
 /// Check one Farkas direction `y` against `{A x = b, x ≥ 0}`.
 ///
@@ -633,7 +606,10 @@ pub(crate) fn big_m_cold_start(
             // ETA 累積誤差で `x_b` が drift しているので fresh FTRAN で再計算 (B⁻¹ b)。
             // ドリフトと数値悪化の両方を排除して soundness を強化 (reviewer P1)。
             let x_b_check: Vec<f64> = match crate::basis::LuBasis::new_timed(
-                &a_aug, &basis_aug, options.max_etas, options.deadline,
+                &a_aug,
+                &basis_aug,
+                options.max_etas,
+                options.deadline,
             ) {
                 Ok(mut bm) => {
                     let mut rhs = b.to_vec();
@@ -643,23 +619,24 @@ pub(crate) fn big_m_cold_start(
                 // factorize 失敗時は drift した x_b にフォールバック (元の動作)。
                 Err(_) => x_b.clone(),
             };
-            let any_positive_art = (0..m)
-                .any(|i| basis_aug[i] >= n_total && x_b_check[i] > options.primal_tol);
+            let any_positive_art =
+                (0..m).any(|i| basis_aug[i] >= n_total && x_b_check[i] > options.primal_tol);
             if any_positive_art {
                 let mut r = SolverResult::infeasible();
                 r.iterations = total_iters;
                 return r;
             }
-            return super::super::timeout_result_with_incumbent(
+            return super::super::stop_result_with_incumbent(
                 sf,
                 problem,
                 &basis_aug,
                 &x_b,
                 col_scale,
                 total_iters,
+                options,
             );
         }
-        SimplexOutcome::Timeout(_) => {
+        SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_) => {
             // Farkas証明書が得られた場合のみ Infeasible を返す。
             // 得られない場合は、yield_on_stall=false で Phase I を再実行し
             // 真の終端 (Optimal / Unbounded) を得る。これにより cplex2 クラスの
@@ -700,20 +677,35 @@ pub(crate) fn big_m_cold_start(
                             r.iterations = total_iters;
                             return r;
                         }
-                        return super::super::timeout_result_with_incumbent(
-                            sf, problem, &basis_aug, &x_b, col_scale, total_iters,
+                        return super::super::stop_result_with_incumbent(
+                            sf,
+                            problem,
+                            &basis_aug,
+                            &x_b,
+                            col_scale,
+                            total_iters,
+                            options,
                         );
                     }
-                    SimplexOutcome::Timeout(_) => {
-                        return super::super::timeout_result_with_incumbent(
-                            sf, problem, &basis_aug, &x_b, col_scale, total_iters,
+                    SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_) => {
+                        return super::super::stop_result_with_incumbent(
+                            sf,
+                            problem,
+                            &basis_aug,
+                            &x_b,
+                            col_scale,
+                            total_iters,
+                            options,
                         );
                     }
                     SimplexOutcome::SingularBasis => return SolverResult::numerical_error(),
                     SimplexOutcome::Optimal(_, _) => {
                         // Phase I 完了: Phase II へ fall-through (下の Optimal 分岐と同一処理)
                         if let Ok(mut bm) = LuBasis::new_timed(
-                            &a_aug, &basis_aug, options.max_etas, options.deadline,
+                            &a_aug,
+                            &basis_aug,
+                            options.max_etas,
+                            options.deadline,
                         ) {
                             let mut rhs = SparseVec::from_dense(b);
                             bm.ftran(&mut rhs);
@@ -734,13 +726,14 @@ pub(crate) fn big_m_cold_start(
                     }
                 }
             } else {
-                return super::super::timeout_result_with_incumbent(
+                return super::super::stop_result_with_incumbent(
                     sf,
                     problem,
                     &basis_aug,
                     &x_b,
                     col_scale,
                     total_iters,
+                    options,
                 );
             }
         }
@@ -835,13 +828,14 @@ pub(crate) fn big_m_cold_start(
                         r.iterations = total_iters;
                         return r;
                     }
-                    return super::super::timeout_result_with_incumbent(
+                    return super::super::stop_result_with_incumbent(
                         sf,
                         problem,
                         &basis_aug,
                         &x_b,
                         col_scale,
                         total_iters,
+                        options,
                     );
                 }
             }
@@ -902,24 +896,28 @@ pub(crate) fn big_m_cold_start(
                     ..Default::default()
                 }
             } else {
-                super::super::timeout_result_with_incumbent(
+                super::super::stop_result_with_incumbent(
                     sf,
                     problem,
                     &basis_aug,
                     &x_b,
                     col_scale,
                     total_iters,
+                    options,
                 )
             }
         }
-        SimplexOutcome::Timeout(_) => super::super::timeout_result_with_incumbent(
-            sf,
-            problem,
-            &basis_aug,
-            &x_b,
-            col_scale,
-            total_iters,
-        ),
+        SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_) => {
+            super::super::stop_result_with_incumbent(
+                sf,
+                problem,
+                &basis_aug,
+                &x_b,
+                col_scale,
+                total_iters,
+                options,
+            )
+        }
         SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
     }
 }
@@ -955,7 +953,7 @@ mod tests {
         assert_kkt_optimal(&lp, 3.0, "big_m_phase1_feasible_eq");
     }
 
-    /// P2-#2 (codex completeness edge): a feasible Eq system whose Big-M Phase I
+    /// Codex completeness edge: a feasible Eq system whose Big-M Phase I
     /// needs an lb-repair on an artificial-leaving row — which the anti-cycling
     /// guard (`basis[r] < n_enter`, kept to stop sierra's 478-pivot chase)
     /// suppresses, so Big-M abandons it *when the crash basis is disabled*. The
@@ -968,14 +966,9 @@ mod tests {
     /// path (default config solves it via crash; see report).
     #[test]
     fn big_m_phase1_artificial_lb_repair_edge_recovers_via_fallback() {
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 0, 1],
-            &[0, 0, 1, 1],
-            &[-2.0, -2.0, 1.0, 2.0],
-            2,
-            2,
-        )
-        .unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[-2.0, -2.0, 1.0, 2.0], 2, 2)
+                .unwrap();
         let lp = LpProblem::new_general(
             vec![1.0, 1.0],
             a,
@@ -1592,19 +1585,14 @@ mod tests {
     #[test]
     fn crash_lu_failure_falls_back_to_identity() {
         let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // 3 Eq 行 × 4 列。col 0,1,2 が rank-2 (col 0 = col 1) の singleton 群:
-        // - row 0: x0 = 1
-        // - row 1: x1 = 1 (x0 と同値 → x0 - x1 = 0 を要求)
-        // - row 2: x2 + 0.01*x3 = 1
-        // crash は singleton 候補で col 0, 1, 2 を pick → basis = [0, 1, 2]
-        // しかし col 0/1 は同一の sparsity と (row 0/1, val 1.0) を持つため、
-        // 副次的 row 2 で同じ col 2 が独立 → LU は通る (singular でない)。
-        //
-        // 実際に singular にするには A 全体で rank 落ちが要る。代わりに以下:
-        // - col 0: row 0, val=1; row 1, val=1 (col 0 が row 0 と row 1 両方に entry)
-        // - col 1: row 0, val=1; row 1, val=1 (col 1 = col 0)
-        // - col 2: row 2, val=1
-        // crash は col 0 で row 0, col 1 で row 1, col 2 で row 2 を pick →
+        // 3 Eq 行 × 4 列。col 0,1,2 を singleton で pick すると basis=[0,1,2]
+        // だが col 0/1 が同一 sparsity でも row 2 の col 2 が独立で LU は通る
+        // (singular にならない)。実際に singular にするには A 全体で rank 落ち
+        // が要る。以下の構成を使う:
+        // - col 0: row 0 val=1; row 1 val=1
+        // - col 1: row 0 val=1; row 1 val=1 (col 1 = col 0)
+        // - col 2: row 2 val=1
+        // crash は col 0→row 0, col 1→row 1, col 2→row 2 を pick →
         // B = [[1,1,0],[1,1,0],[0,0,1]] singular。
         let a = CscMatrix::from_triplets(
             &[0, 1, 0, 1, 2],
@@ -1760,14 +1748,9 @@ mod tests {
         use super::farkas_direction_certified;
 
         // A_aug = [[1,1,0],[-1,0,1]], 2 rows, 3 cols. Col 0 = x0 (original), cols 1,2 = artificials.
-        let a_aug = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 2],
-            &[1.0, 1.0, -1.0, 1.0],
-            2,
-            3,
-        )
-        .unwrap();
+        let a_aug =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 2], &[1.0, 1.0, -1.0, 1.0], 2, 3)
+                .unwrap();
         let b = [1.0_f64, 2.0_f64];
         // y = [1,1] (already BTRAN'd from identity basis).
         let y = [1.0_f64, 1.0];
@@ -1790,8 +1773,7 @@ mod tests {
 
         // A_aug = [[1, 1]], b = [2.0], y = [1.0] (not in row space of A^T).
         // A^T y for j=0: 1*y[0] = 1 > tol (dual_tol * 2 ≈ 2e-7). → NOT certified.
-        let a_aug =
-            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let a_aug = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let b = [2.0_f64];
         let y = [1.0_f64];
         let tol = 1e-6_f64;
@@ -1814,14 +1796,8 @@ mod tests {
     #[test]
     fn big_m_phase1_infeasible_eq_ge_cancellation_class() {
         // x0 + x1 = 3, x0 + x1 >= 5 → infeasible (3 < 5).
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 1.0],
-            2,
-            2,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+            .unwrap();
         let lp = LpProblem::new_general(
             vec![1.0, 1.0],
             a,
@@ -1859,14 +1835,7 @@ mod tests {
         // x0 = 2 (Eq)  →  needs artificial a0
         // -x0 >= 1 (Ge) →  after flip: x0 ≤ -1, needs artificial a1
         // These are contradictory: no x0 >= 0 can satisfy both.
-        let a = CscMatrix::from_triplets(
-            &[0, 1],
-            &[0, 0],
-            &[1.0, -1.0],
-            2,
-            1,
-        )
-        .unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, 1).unwrap();
         let lp = LpProblem::new_general(
             vec![1.0],
             a,
