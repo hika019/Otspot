@@ -4,6 +4,22 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-07-22
+
+KKT 反復解法の失敗伝播と QPLIB 整数フィールドの厳密化を中心とした correctness リリース。
+
+- BREAKING: 公開 `KktFactor::solve` の戻り値を `()` から `Result<(), KktError>` に変更。MINRES の非収束を黙殺して部分 iterate を有効解として扱う経路を廃止し、呼び出し元が失敗を処理できるようにした
+- Conic KKT solve へ deadline を伝播し、期限超過またはキャンセルを `NumericalError` ではなく `Timeout` として分類するよう修正。Direct / DirectDd backend も solve 開始前に期限切れを検出する
+- Conic KKT factorization の最終候補にも健全性検査を適用し、非有限な行列・右辺・残差や許容範囲外の残差を持つ factor を採用しないよう修正
+- Presolve 変換後の縮約問題再構築が失敗した場合、ゼロ行列に置き換えて続行せず、問題と postsolve state を変換前へ戻すよう修正
+- QPLIB の次元・要素数・添字を浮動小数点経由で変換せず、10 進整数として直接検証。小数、負数、NaN、指数表記、`usize` overflow による切り捨て・飽和・後続フィールドの読みずれを拒否し、parse error に token 位置とフィールド文脈を追加
+- QPLIB の問題型ごとの省略 section と必須 tail record を公式構成どおり検証し、コメント、Fortran 指数、reader の遅延 I/O error を正しく扱うよう修正
+- Phase I の実行不能判定を fresh factorization で得た人工変数または検証済み Farkas 証明に限定し、drift した iterate を証明として再利用しないよう修正
+- Simplex の基底更新・pricing・scale 復元で次元や index の不整合を黙って補わず fail-fast とし、BFRT flip と eta 更新を原子的に commit するよう修正
+- `qp_runner` は不正な CLI・入力・非有限係数を stdout の疑似 solve 結果に変換せず、stderr と非ゼロ終了コードで報告するよう修正
+- Q の微小な交差項を絶対値だけで削除する presolve を廃止。McCormick 大域下界では simplex pricing が数値的ゼロと扱う目的項を box 下界へ退避し、広い bounds での不健全な pruning を防止
+- KKT 既定値の恒真な二重検査と、presolve postsolve の重複分岐を削除
+
 ## [0.7.2] - 2026-07-19
 
 conic/QCQP の正当性修正と SOCP IPM の収束改善、大規模 LP の presolve 性能改善、MPS/QPS パーサの形式判定の作り直し、SolveStatus の誠実化。
