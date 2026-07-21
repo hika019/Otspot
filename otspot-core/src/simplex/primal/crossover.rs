@@ -284,9 +284,13 @@ pub(crate) fn crossover_dual_from_primal(
                 }
             }
             if let Some(row) = best_row {
+                match basis_mgr.update(j, row, &d_sv) {
+                    Ok(()) => {}
+                    Err(crate::error::SolverError::SingularBasis { .. }) => return None,
+                    Err(err) => panic!("internal crossover eta invariant violated: {err}"),
+                }
                 is_basic[basis[row]] = false;
                 is_basic[j] = true;
-                basis_mgr.update(j, row, &d_sv);
                 basis[row] = j;
                 seat_pivots += 1;
                 basis_mgr.refactor_if_needed_timed(&a_ext, &basis, deadline);

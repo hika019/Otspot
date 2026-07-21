@@ -6,6 +6,8 @@ mod ratio_test;
 mod reconcile;
 
 pub(crate) use core::revised_simplex_core;
+#[cfg(test)]
+pub(crate) use core::set_eta_update_disabled;
 pub(crate) use crossover::{
     crossover_dual_from_primal, crossover_dual_from_primal_with_dual_warm_start,
 };
@@ -980,6 +982,62 @@ pub(crate) fn test_apply_selective_charnes_perturb(x_b: &mut [f64], m: usize) {
         if v.abs() < step_zero_threshold {
             *v = eps * (i as f64 + 1.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod eta_atomicity_tests {
+    use super::{revised_simplex_core, set_eta_update_disabled};
+    use crate::options::SolverOptions;
+    use crate::simplex::pricing::SteepestEdgePricing;
+    use crate::simplex::SimplexOutcome;
+    use crate::sparse::CscMatrix;
+
+    struct EtaUpdateGuard(bool);
+    impl EtaUpdateGuard {
+        fn disabled() -> Self {
+            Self(set_eta_update_disabled(true))
+        }
+    }
+    impl Drop for EtaUpdateGuard {
+        fn drop(&mut self) {
+            set_eta_update_disabled(self.0);
+        }
+    }
+
+    #[test]
+    fn rejected_eta_leaves_standard_primal_state_unchanged() {
+        // min -x, x + s = 1, initial basis {s}: the first pivot is forced.
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let mut x_b = vec![1.0];
+        let mut basis = vec![1usize];
+        let expected_x_b = x_b.clone();
+        let expected_basis = basis.clone();
+        let mut pricing = SteepestEdgePricing::new(2);
+        let mut iterations = 0;
+        let _guard = EtaUpdateGuard::disabled();
+
+        let outcome = revised_simplex_core(
+            &a,
+            &mut x_b,
+            &[-1.0, 0.0],
+            &[1.0],
+            &mut basis,
+            1,
+            2,
+            2,
+            &mut pricing,
+            &SolverOptions::default(),
+            &mut iterations,
+            false,
+            None,
+            false,
+            None,
+        );
+
+        assert!(matches!(outcome, SimplexOutcome::SingularBasis));
+        assert_eq!(x_b, expected_x_b);
+        assert_eq!(basis, expected_basis);
     }
 }
 

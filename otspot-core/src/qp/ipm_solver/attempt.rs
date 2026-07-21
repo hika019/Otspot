@@ -17,7 +17,11 @@ use crate::presolve::{
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::certificate::prove_optimal;
 use crate::qp::problem::QpProblem;
-use crate::tolerances::{Q_DIAG_RANGE_TRIGGER, Q_OFFDIAG_ABS, Q_OFFDIAG_REL, UNDERFLOW_GUARD};
+use crate::tolerances::{Q_DIAG_RANGE_TRIGGER, Q_OFFDIAG_REL, UNDERFLOW_GUARD};
+
+/// Smallest positive diagonal eligible for optional numerical column scaling.
+/// This gate never removes or changes an input Q coefficient.
+const Q_DIAG_SCALING_MIN: f64 = 1e-10;
 
 /// Residual threshold above which an Optimal/LocallyOptimal QP result is
 /// considered catastrophically corrupt and demoted to NumericalError.
@@ -351,13 +355,13 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
         }
     }
 
-    // Gates 2 & 3: use Q_OFFDIAG_ABS as the absolute floor for diagonal-positive
-    // check. Scaling columns with Q_jj < Q_OFFDIAG_ABS produces extreme scale
+    // Gates 2 & 3: use Q_DIAG_SCALING_MIN as the floor for diagonal-positive
+    // check. Scaling columns with Q_jj < Q_DIAG_SCALING_MIN produces extreme scale
     // factors (1/√Q_jj > 1e5) that destabilise the IPM.
     let mut q_pos_min = f64::INFINITY;
     let mut q_pos_max = 0.0_f64;
     for &v in &q_diag {
-        if v > Q_OFFDIAG_ABS {
+        if v > Q_DIAG_SCALING_MIN {
             q_pos_min = q_pos_min.min(v);
             q_pos_max = q_pos_max.max(v);
         }
@@ -374,7 +378,7 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
     // s_j = 1/√Q_jj (Q_jj=0 の LP-like 列は s_j=1)、Q'_jj = 1。
     let mut col_scales = vec![1.0_f64; n];
     for j in 0..n {
-        if q_diag[j] > Q_OFFDIAG_ABS {
+        if q_diag[j] > Q_DIAG_SCALING_MIN {
             col_scales[j] = 1.0 / q_diag[j].sqrt();
         }
     }
@@ -1625,14 +1629,15 @@ mod tests {
     }
 
     /// Gate 1 sentinel: `try_q_diagonal_scaling` uses local diagonal scale
-    /// `min(|Q_ii|, |Q_jj|)` for each off-diagonal entry, not `Q_OFFDIAG_ABS`.
+    /// `min(|Q_ii|, |Q_jj|)` for each off-diagonal entry, not the unrelated
+    /// diagonal-scaling floor.
     ///
     /// Fixture: Q = diag([1e9, 1e3]) with off-diagonal 5e-10.
     /// - local_scale = min(1e9, 1e3) = 1e3
     /// - offdiag_eps = Q_OFFDIAG_REL × 1e3 = 1e-9
     /// - 5e-10 < 1e-9 → Gate 1 passes; range = 1e6 → Gate 3 passes → Some
     ///
-    /// **Sentinel**: reverting Gate 1 to `offdiag_eps = Q_OFFDIAG_ABS = 1e-10`
+    /// **Sentinel**: replacing Gate 1 with `Q_DIAG_SCALING_MIN = 1e-10`
     /// makes 5e-10 > 1e-10 → Gate 1 fails → None → this test FAILS.
     #[test]
     fn try_q_diagonal_scaling_gate1_local_scale_sentinel() {

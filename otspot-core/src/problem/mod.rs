@@ -212,14 +212,12 @@ pub struct SolverResult {
     pub bound_duals: Vec<f64>,
     /// 反復回数（WSR実績回数）
     pub iterations: usize,
-    /// 元空間で独立再計算した最終残差 (pfeas_rel, dfeas_rel, duality_gap_rel) を
-    /// 保持する想定のフィールド。
-    ///
-    /// 現状 (v0.7.2 時点) はどの経路もこの値を設定しない — 常に `None`。
-    /// postsolve (`qp_postsolve.rs`) は upstream の値をそのまま伝播するのみで、
-    /// その upstream (`finalize_outcome`, `qp/ipm_solver/attempt.rs`) 自体が
-    /// `..Default::default()` で構築するため未設定のまま。「eps を緩めれば
-    /// 解けるケースの発見」用の診断値として機能させるには実装が必要 (未着手)。
+    /// IPPMM が最終的に返す iterate の診断値
+    /// `(primal residual infinity norm, dual residual infinity norm, mu)`。
+    /// 発散や反復上限などで best-so-far iterate を採用した場合は、その iterate
+    /// に対応する値を保持する。Ruiz scaling 経路では scaled 空間の値であり、
+    /// postsolve も座標変換せずそのまま伝播する。IPPMM で残差を計測していない
+    /// 経路では `None`。
     pub final_residuals: Option<(f64, f64, f64)>,
     /// 相対双対ギャップ (|p_obj - d_obj| / max(|p|,|d|,1))。
     /// IPPMM 内部の best-so-far に紐づく診断値。

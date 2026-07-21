@@ -35,19 +35,19 @@ pub(super) fn step7_free_var(
         }
 
         // Only Eq singleton rows are eligible.
-        let singleton_eq_rows: Vec<usize> = (0..m)
-            .filter(|&i| {
+        let singleton_eq_rows: Vec<(usize, f64)> = (0..m)
+            .filter_map(|i| {
                 if ws.removed_rows[i] {
-                    return false;
+                    return None;
                 }
                 if prob.constraint_types[i] != crate::problem::ConstraintType::Eq {
-                    return false;
+                    return None;
                 }
                 let active: Vec<_> = ws.row_entries[i]
                     .iter()
                     .filter(|&&(jj, v)| !ws.removed_cols[jj] && v.abs() > ZERO_TOL)
                     .collect();
-                active.len() == 1 && active[0].0 == j
+                (active.len() == 1 && active[0].0 == j).then_some((i, active[0].1))
             })
             .collect();
 
@@ -55,15 +55,7 @@ pub(super) fn step7_free_var(
             continue;
         }
 
-        let i = singleton_eq_rows[0];
-        let a_ij = ws.row_entries[i]
-            .iter()
-            .find(|&&(jj, _)| jj == j)
-            .map(|&(_, v)| v)
-            .unwrap_or(0.0);
-        if a_ij.abs() < ZERO_TOL {
-            continue;
-        }
+        let (i, a_ij) = singleton_eq_rows[0];
         let val = ws.b[i] / a_ij;
 
         apply_fixed_variable(j, val, prob, ws);

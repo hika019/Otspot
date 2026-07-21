@@ -15,6 +15,27 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{PIVOT_STABILITY_THRESHOLD, PIVOT_TOL};
 use std::sync::atomic::Ordering;
 
+#[cfg(test)]
+thread_local! {
+    static ETA_UPDATE_DISABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_eta_update_disabled(v: bool) -> bool {
+    ETA_UPDATE_DISABLE.with(|c| c.replace(v))
+}
+
+#[cfg(test)]
+fn eta_update_disabled() -> bool {
+    ETA_UPDATE_DISABLE.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn eta_update_disabled() -> bool {
+    false
+}
+
 fn cleanup_trace_enabled() -> bool {
     std::env::var_os("OTSPOT_CLEANUP_TRACE_DETAIL").is_some()
 }
@@ -532,6 +553,24 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             Some(i) => i,
         };
 
+        // Validate and commit the eta before mutating any of the primal state.
+        // A rejected eta must leave x_b, pricing, and basis bookkeeping intact.
+        let pivot_unstable = d[leaving_row].abs() < PIVOT_STABILITY_THRESHOLD * max_d_abs
+            && basis_mgr.eta_count() > 0;
+        if !pivot_unstable {
+            if eta_update_disabled() {
+                d_sv.indices.clear();
+                d_sv.values.clear();
+            }
+            match basis_mgr.update(entering_col, leaving_row, &d_sv) {
+                Ok(()) => {}
+                Err(crate::error::SolverError::SingularBasis { .. }) => {
+                    return SimplexOutcome::SingularBasis;
+                }
+                Err(err) => panic!("internal primal-simplex eta invariant violated: {err}"),
+            }
+        }
+
         let step = x_b[leaving_row] / d[leaving_row];
         for i in 0..m {
             x_b[i] -= d[i] * step;
@@ -601,15 +640,9 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             }
         }
 
-        // Small pivot would blow up the eta inverse-pivot factor; refactor
-        // instead of accumulating another eta.
-        let pivot_unstable = d[leaving_row].abs() < PIVOT_STABILITY_THRESHOLD * max_d_abs
-            && basis_mgr.eta_count() > 0;
-
         if pivot_unstable {
             basis_mgr.force_refactor_timed(a, basis, options.deadline);
         } else {
-            basis_mgr.update(entering_col, leaving_row, &d_sv);
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
         }
 

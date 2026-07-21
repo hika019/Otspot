@@ -212,10 +212,14 @@ fn pivot_out_sequential(
                 len: m,
             };
             basis_mgr.ftran(&mut d_sv);
+            match basis_mgr.update(j, i, &d_sv) {
+                Ok(()) => {}
+                Err(crate::error::SolverError::SingularBasis { .. }) => return,
+                Err(err) => panic!("internal reconciliation eta invariant violated: {err}"),
+            }
             is_basic[basis[i]] = false;
             is_basic[j] = true;
             basis[i] = j;
-            basis_mgr.update(j, i, &d_sv);
             basis_mgr.refactor_if_needed_timed(a_ext, basis, options.deadline);
         }
     }
@@ -558,10 +562,18 @@ pub(crate) fn extract_solution(
     col_scale: &[f64],
 ) -> Vec<f64> {
     use twofloat::TwoFloat;
+    assert!(
+        col_scale.is_empty() || col_scale.len() == sf.n_total,
+        "col_scale must be empty (identity) or match the standard-form column count"
+    );
     let mut x_new = vec![0.0; sf.n_shifted];
     for i in 0..sf.m {
         if basis[i] < sf.n_shifted {
-            let scale = col_scale.get(basis[i]).copied().unwrap_or(1.0);
+            let scale = if col_scale.is_empty() {
+                1.0
+            } else {
+                col_scale[basis[i]]
+            };
             x_new[basis[i]] = x_b[i] * scale;
         }
     }

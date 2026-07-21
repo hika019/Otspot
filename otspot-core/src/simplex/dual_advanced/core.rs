@@ -25,6 +25,52 @@ use crate::tolerances::PIVOT_TOL;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
+#[cfg(test)]
+thread_local! {
+    static ETA_UPDATE_DISABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ETA_UPDATE_INTERNAL_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ETA_REJECT_ATOMIC_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FORCE_DEADLINE_BEFORE_ETA: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DEADLINE_ATOMIC_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reject_eta_for_test(alpha: &mut SparseVec) {
+    if ETA_UPDATE_DISABLE.get() {
+        alpha.indices.clear();
+        alpha.values.clear();
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn reject_eta_for_test(_: &mut SparseVec) {}
+
+fn deadline_before_eta(options: &SolverOptions) -> bool {
+    #[cfg(test)]
+    if FORCE_DEADLINE_BEFORE_ETA.get() {
+        return true;
+    }
+    deadline_reached(options.deadline)
+}
+
+fn update_eta(
+    basis_mgr: &mut LuBasis,
+    entering_col: usize,
+    leaving_row: usize,
+    alpha: &SparseVec,
+) -> Result<(), crate::error::SolverError> {
+    #[cfg(test)]
+    if ETA_UPDATE_INTERNAL_ERROR.get() {
+        return Err(crate::error::SolverError::DimensionMismatch {
+            field: "injected_eta",
+            expected: alpha.len,
+            got: alpha.len.saturating_add(1),
+        });
+    }
+    basis_mgr.update(entering_col, leaving_row, alpha)
+}
+
 /// Lex 摂動 (bland_mode 起動時): reduced_costs (non-basic) と x_b に
 /// `eps·(1+i/n)·scale` を加算し ratio test の tie を解消、Bland's rule の有限終了
 /// を保証する。reduced_costs 摂動が cycle 解消の本体 (klein3 観測 2-cycle 起因)、
@@ -627,6 +673,53 @@ pub(crate) fn dual_simplex_core_advanced(
             sigma_sv.to_dense_into(&mut sigma_dense);
         }
 
+        // Deadline exits are allowed only while the old basis and all derived
+        // state are still coherent. Once the eta commits, this iteration has no
+        // early return until x_B/rc/is_basic/basis bookkeeping is published.
+        #[cfg(test)]
+        let precommit_snapshot = (
+            x_b.to_vec(),
+            reduced_costs.clone(),
+            is_basic.clone(),
+            basis.to_vec(),
+        );
+        if deadline_before_eta(options) {
+            #[cfg(test)]
+            if FORCE_DEADLINE_BEFORE_ETA.get() {
+                assert_eq!(x_b, precommit_snapshot.0);
+                assert_eq!(reduced_costs, precommit_snapshot.1);
+                assert_eq!(is_basic, precommit_snapshot.2);
+                assert_eq!(basis, precommit_snapshot.3);
+                DEADLINE_ATOMIC_COUNT.set(DEADLINE_ATOMIC_COUNT.get().saturating_add(1));
+            }
+            let obj: f64 = basic_obj(c, basis, x_b);
+            return SimplexOutcome::Timeout(obj);
+        }
+
+        #[cfg(test)]
+        let atomic_snapshot = (
+            x_b.to_vec(),
+            reduced_costs.clone(),
+            is_basic.clone(),
+            basis.to_vec(),
+        );
+        reject_eta_for_test(&mut alpha_sv);
+        match update_eta(&mut basis_mgr, entering_col, leaving_row, &alpha_sv) {
+            Ok(()) => {}
+            Err(crate::error::SolverError::SingularBasis { .. }) => {
+                #[cfg(test)]
+                {
+                    assert_eq!(x_b, atomic_snapshot.0);
+                    assert_eq!(reduced_costs, atomic_snapshot.1);
+                    assert_eq!(is_basic, atomic_snapshot.2);
+                    assert_eq!(basis, atomic_snapshot.3);
+                    ETA_REJECT_ATOMIC_COUNT.set(ETA_REJECT_ATOMIC_COUNT.get().saturating_add(1));
+                }
+                return SimplexOutcome::SingularBasis;
+            }
+            Err(err) => panic!("internal advanced-dual eta invariant violated: {err}"),
+        }
+
         // 3h: x_B更新 + 微小値クランプ
         let step = x_b[leaving_row] / pivot_element;
         for i in 0..m {
@@ -643,10 +736,6 @@ pub(crate) fn dual_simplex_core_advanced(
         // r_j_new = r_j - θ * trow[j]（非基底変数全て）
         let leaving_col = basis[leaving_row];
         for j in 0..n_price {
-            if deadline_reached(options.deadline) {
-                let obj: f64 = basic_obj(c, basis, x_b);
-                return SimplexOutcome::Timeout(obj);
-            }
             if !is_basic[j] {
                 reduced_costs[j] -= theta * trow[j];
             }
@@ -667,8 +756,7 @@ pub(crate) fn dual_simplex_core_advanced(
         }
         is_basic[entering_col] = true;
 
-        // 3k: 基底更新（LuBasis::update）
-        basis_mgr.update(entering_col, leaving_row, &alpha_sv);
+        // 3k: LuBasis eta was committed above, before state mutation.
         basis[leaving_row] = entering_col;
         no_candidate_refreshed_basis = None;
         rejected_pivot_basis = None;
@@ -759,6 +847,152 @@ mod tests {
     use super::*;
     use crate::options::SolverOptions;
     use crate::sparse::CscMatrix;
+
+    struct EtaRejectGuard(bool);
+
+    impl EtaRejectGuard {
+        fn new() -> Self {
+            super::ETA_REJECT_ATOMIC_COUNT.set(0);
+            Self(super::ETA_UPDATE_DISABLE.replace(true))
+        }
+    }
+
+    impl Drop for EtaRejectGuard {
+        fn drop(&mut self) {
+            super::ETA_UPDATE_DISABLE.set(self.0);
+        }
+    }
+
+    struct ForcedDeadlineGuard(bool);
+
+    impl ForcedDeadlineGuard {
+        fn new() -> Self {
+            super::DEADLINE_ATOMIC_COUNT.set(0);
+            Self(super::FORCE_DEADLINE_BEFORE_ETA.replace(true))
+        }
+    }
+
+    impl Drop for ForcedDeadlineGuard {
+        fn drop(&mut self) {
+            super::FORCE_DEADLINE_BEFORE_ETA.set(self.0);
+        }
+    }
+
+    struct InternalEtaErrorGuard(bool);
+
+    impl InternalEtaErrorGuard {
+        fn new() -> Self {
+            Self(super::ETA_UPDATE_INTERNAL_ERROR.replace(true))
+        }
+    }
+
+    impl Drop for InternalEtaErrorGuard {
+        fn drop(&mut self) {
+            super::ETA_UPDATE_INTERNAL_ERROR.set(self.0);
+        }
+    }
+
+    fn one_pivot_fixture() -> (CscMatrix, Vec<f64>, Vec<usize>) {
+        (
+            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, -1.0], 1, 2).unwrap(),
+            vec![-1.0],
+            vec![0usize],
+        )
+    }
+
+    #[test]
+    fn rejected_eta_leaves_advanced_dual_state_atomic() {
+        let (a, mut x_b, mut basis) = one_pivot_fixture();
+        let old_x_b = x_b.clone();
+        let old_basis = basis.clone();
+        let mut leaving = MostInfeasibleLeaving;
+        let mut iters = 0;
+        let _guard = EtaRejectGuard::new();
+
+        let outcome = dual_simplex_core_advanced(
+            &a,
+            &mut x_b,
+            &[0.0, 0.0],
+            &mut basis,
+            1,
+            2,
+            2,
+            false,
+            &SolverOptions::default(),
+            &mut leaving,
+            &mut iters,
+        );
+
+        assert!(matches!(outcome, SimplexOutcome::SingularBasis));
+        assert_eq!(x_b, old_x_b);
+        assert_eq!(basis, old_basis);
+        assert_eq!(super::ETA_REJECT_ATOMIC_COUNT.get(), 1);
+    }
+
+    #[test]
+    fn eta_reject_guard_restores_nested_state() {
+        assert!(!super::ETA_UPDATE_DISABLE.get());
+        let outer = EtaRejectGuard::new();
+        {
+            let _inner = EtaRejectGuard::new();
+            assert!(super::ETA_UPDATE_DISABLE.get());
+        }
+        assert!(super::ETA_UPDATE_DISABLE.get());
+        drop(outer);
+        assert!(!super::ETA_UPDATE_DISABLE.get());
+    }
+
+    #[test]
+    fn deadline_before_eta_leaves_advanced_dual_state_atomic() {
+        let (a, mut x_b, mut basis) = one_pivot_fixture();
+        let old_x_b = x_b.clone();
+        let old_basis = basis.clone();
+        let mut leaving = MostInfeasibleLeaving;
+        let mut iters = 0;
+        let _guard = ForcedDeadlineGuard::new();
+
+        let outcome = dual_simplex_core_advanced(
+            &a,
+            &mut x_b,
+            &[0.0, 0.0],
+            &mut basis,
+            1,
+            2,
+            2,
+            false,
+            &SolverOptions::default(),
+            &mut leaving,
+            &mut iters,
+        );
+
+        assert!(matches!(outcome, SimplexOutcome::Timeout(_)));
+        assert_eq!(x_b, old_x_b);
+        assert_eq!(basis, old_basis);
+        assert_eq!(super::DEADLINE_ATOMIC_COUNT.get(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "internal advanced-dual eta invariant violated")]
+    fn internal_eta_error_fails_fast_through_production_handler() {
+        let (a, mut x_b, mut basis) = one_pivot_fixture();
+        let mut leaving = MostInfeasibleLeaving;
+        let mut iters = 0;
+        let _guard = InternalEtaErrorGuard::new();
+
+        let _ = dual_simplex_core_advanced(
+            &a,
+            &mut x_b,
+            &[0.0, 0.0],
+            &mut basis,
+            1,
+            2,
+            2,
+            false,
+            &SolverOptions::default(),
+            &mut leaving,
+            &mut iters,
+        );
+    }
 
     #[test]
     fn basis_cycle_detector_flags_repeated_basis_and_clear_resets() {

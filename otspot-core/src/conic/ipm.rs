@@ -10,7 +10,7 @@ use std::time::Instant;
 use super::cone::{self, Blocks};
 use super::kkt;
 use super::{ConicOptions, ConicProblem, ConicResult};
-use crate::linalg::kkt_solver::KktConfig;
+use crate::linalg::kkt_solver::{KktConfig, KktError};
 use crate::problem::SolveStatus;
 
 #[cfg(test)]
@@ -27,6 +27,20 @@ thread_local! {
     /// so parallel tests cannot corrupt each other's setting.
     pub(super) static FORCE_TIMEOUT_AFTER_ITER: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
+    /// Injects an expired deadline only at the Newton direction solve. Factorization
+    /// and the public pre-check still see the caller's real deadline.
+    static FORCE_EXPIRED_KKT_SOLVE_DEADLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Makes only the optional initializer unavailable. The main IPM loop must
+    /// recover from its canonical central point and still pass normal KKT gates.
+    static FORCE_STARTING_POINT_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn kkt_solve_deadline(opts: &ConicOptions) -> Option<Instant> {
+    #[cfg(test)]
+    if FORCE_EXPIRED_KKT_SOLVE_DEADLINE.get() {
+        return Some(Instant::now() - std::time::Duration::from_secs(1));
+    }
+    opts.deadline
 }
 
 /// RAII guard resetting `FORCE_TIMEOUT_AFTER_ITER` back to `None` on drop,
@@ -35,20 +49,40 @@ thread_local! {
 /// first, leaking the override into whichever test nextest's thread pool
 /// schedules next on the same worker thread.
 #[cfg(test)]
-pub(super) struct ForceTimeoutGuard;
+pub(super) struct ForceTimeoutGuard(Option<usize>);
 
 #[cfg(test)]
 impl ForceTimeoutGuard {
     pub(super) fn new(after_iter: usize) -> Self {
-        FORCE_TIMEOUT_AFTER_ITER.with(|c| c.set(Some(after_iter)));
-        Self
+        Self(FORCE_TIMEOUT_AFTER_ITER.with(|c| c.replace(Some(after_iter))))
     }
 }
 
 #[cfg(test)]
 impl Drop for ForceTimeoutGuard {
     fn drop(&mut self) {
-        FORCE_TIMEOUT_AFTER_ITER.with(|c| c.set(None));
+        FORCE_TIMEOUT_AFTER_ITER.with(|c| c.set(self.0));
+    }
+}
+
+#[cfg(test)]
+struct ForceExpiredKktSolveDeadlineGuard {
+    previous: bool,
+}
+
+#[cfg(test)]
+impl ForceExpiredKktSolveDeadlineGuard {
+    fn new() -> Self {
+        let previous = FORCE_EXPIRED_KKT_SOLVE_DEADLINE.get();
+        FORCE_EXPIRED_KKT_SOLVE_DEADLINE.set(true);
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForceExpiredKktSolveDeadlineGuard {
+    fn drop(&mut self) {
+        FORCE_EXPIRED_KKT_SOLVE_DEADLINE.set(self.previous);
     }
 }
 
@@ -133,6 +167,11 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) 
     let mut kkt_caches = kkt::build_kkt_caches(&problem.a, &problem.g, &blk, n, p, opts.deadline);
     let kkt_cfg = KktConfig::default();
 
+    // `starting_point` is an optional acceleration, not a proof-bearing solve.
+    // If its health-checked factor cannot solve both initializer RHS vectors,
+    // retain the canonical central point above. Every main-loop direction is
+    // independently factorized/solved with error propagation, and termination
+    // still passes the ordinary residual/certificate gates.
     if let Some((sx, sy, sz, ss)) = starting_point(
         problem,
         &blk,
@@ -288,9 +327,27 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) 
                 break;
             }
         };
-        let (_dx_a, _dy_a, dz_a, ds_a) = kkt::solve_dir(
-            &factor, &problem.g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc_aff,
+        let affine = kkt::solve_dir(
+            &factor,
+            &problem.g,
+            &sc,
+            &blk,
+            n,
+            p,
+            m,
+            &rx,
+            &ry,
+            &rz,
+            &rc_aff,
+            kkt_solve_deadline(opts),
         );
+        let (_dx_a, _dy_a, dz_a, ds_a) = match affine {
+            Ok(direction) => direction,
+            Err(err) => {
+                status = kkt_error_status(err, opts);
+                break;
+            }
+        };
 
         // affine step length
         let a_s = cone::max_step(&blk, &s, &ds_a, 1e16);
@@ -314,8 +371,27 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) 
             .map(|i| sigma * mu * e[i] - ll[i] - corr[i])
             .collect();
         let rc = cone::jdiv(&blk, &lambda, &target);
-        let (dx, dy, dz, ds) =
-            kkt::solve_dir(&factor, &problem.g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc);
+        let corrector = kkt::solve_dir(
+            &factor,
+            &problem.g,
+            &sc,
+            &blk,
+            n,
+            p,
+            m,
+            &rx,
+            &ry,
+            &rz,
+            &rc,
+            kkt_solve_deadline(opts),
+        );
+        let (dx, dy, dz, ds) = match corrector {
+            Ok(direction) => direction,
+            Err(err) => {
+                status = kkt_error_status(err, opts);
+                break;
+            }
+        };
 
         // combined step length
         let a_s = cone::max_step(&blk, &s, &ds, 1e16);
@@ -435,6 +511,10 @@ fn starting_point(
     deadline: Option<Instant>,
     balance: bool,
 ) -> Option<StartingPoint> {
+    #[cfg(test)]
+    if FORCE_STARTING_POINT_UNAVAILABLE.get() {
+        return None;
+    }
     let sc = cone::nt_scaling(blk, e, e); // s = z = e => W = I
     let n_e = n + blk.n_border();
     let total = n_e + p + m + blk.n_border();
@@ -447,7 +527,7 @@ fn starting_point(
     let factor = kkt::factorize_with_retry(caches, &sc, blk, &rhs_primal, deadline, kkt_cfg)?;
 
     let mut sol = vec![0.0; total];
-    factor.solve(&rhs_primal, &mut sol);
+    factor.solve(&rhs_primal, &mut sol, deadline).ok()?;
     let x0 = sol[0..n].to_vec();
     // Row `G x - z = h` (W = I) gives `z = G x - h`, so the primal slack that
     // zeroes `rz = G x + s - h` is `s = h - G x = -z`.
@@ -457,7 +537,7 @@ fn starting_point(
     for (dst, &ci) in rhs_dual[..n].iter_mut().zip(&problem.c) {
         *dst = -ci;
     }
-    factor.solve(&rhs_dual, &mut sol);
+    factor.solve(&rhs_dual, &mut sol, deadline).ok()?;
     let y0 = sol[n_e..n_e + p].to_vec();
     // Row `c + A^T y + G^T z = 0` makes the `dz` component the dual slack `z`.
     let mut z0 = sol[n_e + p..n_e + p + m].to_vec();
@@ -497,6 +577,14 @@ fn starting_point(
     Some((x0, y0, z0, s0))
 }
 
+fn kkt_error_status(err: KktError, opts: &ConicOptions) -> SolveStatus {
+    if matches!(err, KktError::DeadlineExceeded) || opts.stop_requested() {
+        SolveStatus::Timeout
+    } else {
+        SolveStatus::NumericalError
+    }
+}
+
 fn failed(problem: &ConicProblem, status: SolveStatus) -> ConicResult {
     ConicResult {
         status,
@@ -515,6 +603,98 @@ fn failed(problem: &ConicProblem, status: SolveStatus) -> ConicResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ForceStartingPointUnavailableGuard(bool);
+
+    impl ForceStartingPointUnavailableGuard {
+        fn new() -> Self {
+            let previous = FORCE_STARTING_POINT_UNAVAILABLE.get();
+            FORCE_STARTING_POINT_UNAVAILABLE.set(true);
+            Self(previous)
+        }
+    }
+
+    impl Drop for ForceStartingPointUnavailableGuard {
+        fn drop(&mut self) {
+            FORCE_STARTING_POINT_UNAVAILABLE.set(self.0);
+        }
+    }
+
+    #[test]
+    fn canonical_fallback_reaches_main_loop_optimality_gates() {
+        use crate::sparse::CscMatrix;
+
+        // min x, x >= 0. The canonical central point is sufficient; the main
+        // loop must establish Optimal rather than treating initializer absence
+        // as either a solution or an unclassified numerical failure.
+        let problem = ConicProblem {
+            c: vec![1.0],
+            a: CscMatrix::new(0, 1),
+            b: vec![],
+            g: CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap(),
+            h: vec![0.0],
+            cone: ConeSpec { l: 1, soc: vec![] },
+        };
+        let _guard = ForceStartingPointUnavailableGuard::new();
+        let result = solve(&problem, &ConicOptions::default(), true);
+
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(result.x[0] >= -1e-7);
+        assert!(result.x[0].abs() <= 1e-5);
+    }
+
+    #[test]
+    fn kkt_deadline_failure_is_timeout() {
+        let opts = ConicOptions::default();
+        assert_eq!(
+            kkt_error_status(KktError::DeadlineExceeded, &opts),
+            SolveStatus::Timeout
+        );
+    }
+
+    #[test]
+    fn cancellation_during_kkt_failure_is_timeout() {
+        let opts = ConicOptions {
+            cancel_flag: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                true,
+            ))),
+            ..ConicOptions::default()
+        };
+        assert_eq!(
+            kkt_error_status(KktError::DidNotConverge, &opts),
+            SolveStatus::Timeout
+        );
+    }
+
+    #[test]
+    fn expired_deadline_at_direction_solve_returns_timeout() {
+        use crate::sparse::CscMatrix;
+
+        let problem = ConicProblem {
+            c: vec![1.0, 0.0],
+            a: CscMatrix::from_triplets(&[0], &[1], &[1.0], 1, 2).unwrap(),
+            b: vec![1.0],
+            g: CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-1.0, -1.0], 2, 2).unwrap(),
+            h: vec![0.0, 0.0],
+            cone: ConeSpec { l: 0, soc: vec![2] },
+        };
+        let _guard = ForceExpiredKktSolveDeadlineGuard::new();
+        let result = solve(&problem, &ConicOptions::default(), true);
+        assert_eq!(result.status, SolveStatus::Timeout);
+    }
+
+    #[test]
+    fn expired_kkt_deadline_guard_restores_nested_state() {
+        assert!(!FORCE_EXPIRED_KKT_SOLVE_DEADLINE.get());
+        let outer = ForceExpiredKktSolveDeadlineGuard::new();
+        {
+            let _inner = ForceExpiredKktSolveDeadlineGuard::new();
+            assert!(FORCE_EXPIRED_KKT_SOLVE_DEADLINE.get());
+        }
+        assert!(FORCE_EXPIRED_KKT_SOLVE_DEADLINE.get());
+        drop(outer);
+        assert!(!FORCE_EXPIRED_KKT_SOLVE_DEADLINE.get());
+    }
     use crate::conic::ConeSpec;
 
     /// Per-block shift: a violated orthant row must not perturb strictly

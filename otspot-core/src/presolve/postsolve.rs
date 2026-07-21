@@ -418,10 +418,8 @@ pub fn run_postsolve(
 
     for step in presolve_result.postsolve_stack.iter().rev() {
         match step {
-            PostsolveStep::FixedVariable { orig_col, value } => {
-                solution[*orig_col] = *value;
-            }
-            PostsolveStep::EmptyColumn { orig_col, value } => {
+            PostsolveStep::FixedVariable { orig_col, value }
+            | PostsolveStep::EmptyColumn { orig_col, value } => {
                 solution[*orig_col] = *value;
             }
             PostsolveStep::EmptyRow { orig_row } => {

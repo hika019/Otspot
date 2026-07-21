@@ -19,7 +19,7 @@
 use super::cone::{self, Blocks, Scaling};
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::kkt_solver::{
-    factorize_kkt_pre_permuted_cached_par, factorize_kkt_with_cached_perm_par, KktConfig,
+    factorize_kkt_pre_permuted_cached_par, factorize_kkt_with_cached_perm_par, KktConfig, KktError,
     KktFactor, KktSolver, PreconditionedMinres,
 };
 use crate::sparse::CscMatrix;
@@ -525,9 +525,8 @@ fn amd_pinned_aux(base: &KktSkeleton, deadline: Option<Instant>) -> Vec<usize> {
 /// [`REG_RETRY_MAX`] times (mirrors
 /// `qp::ipm_core::ippmm::factorize::factorize_kkt_with_retry`'s retry
 /// ladder), then escalating through Jacobi equilibration, DD-LDL, and
-/// MINRES-on-the-raw-matrix, and finally re-using the smallest-regularization
-/// AMD-ordered factorization as a last resort. Returns `None` only on
-/// deadline expiry or total failure of every rung.
+/// MINRES-on-the-raw-matrix. Returns `None` on deadline expiry or when every
+/// health-checked rung fails.
 pub(super) fn factorize_with_retry(
     caches: &mut KktCaches,
     sc: &Scaling,
@@ -573,7 +572,7 @@ pub(super) fn factorize_with_retry(
                 if caches.symbolic.is_none() {
                     caches.symbolic = f.symbolic_arc();
                 }
-                let healthy = f.is_iterative() || probe_kkt_health(&f, &unpermuted, probe_rhs);
+                let healthy = probe_kkt_health(&f, &unpermuted, probe_rhs);
                 if healthy {
                     caches.hint = EscalationHint::Ladder(delta);
                     return Some(ConicFactor::direct(f));
@@ -599,7 +598,7 @@ pub(super) fn factorize_with_retry(
     }
     // Ladder and equilibration both failed: remember the ceiling so the next
     // iteration reaches the deeper rungs after ~2 ladder tries instead of
-    // re-walking every rung. (No hints exist for DD/MINRES/last-resort: the
+    // re-walking every rung. (No hints exist for DD/MINRES: the
     // cheap-and-exact equilibration attempt should always precede them.)
     caches.hint = EscalationHint::Ladder(REG_CEILING);
 
@@ -613,8 +612,8 @@ pub(super) fn factorize_with_retry(
     // threshold extra mantissa bits alone cannot recover it (confirmed:
     // `socp_degenerate_fixed_var_infeasible_gets_certificate` plateaus the same
     // under DD as f64). Materialized at REG_DELTA_INIT, not the ladder's final
-    // `delta`: a larger `dx`/`dy` regularization buys nothing (see last-resort
-    // comment below) and would only perturb the system MINRES needs exact.
+    // `delta`: a larger `dx`/`dy` regularization buys nothing and would only
+    // perturb the system MINRES needs exact.
     let unpermuted = caches
         .base
         .materialize(sc, blk, REG_DELTA_INIT, REG_DELTA_INIT);
@@ -652,6 +651,7 @@ pub(super) fn factorize_with_retry(
     // solve, not the loose inexact-Newton search direction used elsewhere.
     const MINRES_LAST_RESORT_TOL: f64 = 1e-10;
     const MINRES_LAST_RESORT_IR: usize = 2;
+    let minres_matrix = unpermuted.clone();
     let minres = PreconditionedMinres::with_block_diag_inexact(
         unpermuted,
         caches.n_top,
@@ -661,40 +661,12 @@ pub(super) fn factorize_with_retry(
     let mut probe_sol = vec![0.0; caches.base.total()];
     let minres_result = minres.solve(probe_rhs, &mut probe_sol, deadline);
     if minres_result.is_ok() {
-        return Some(ConicFactor::direct(KktFactor::Iterative(minres)));
+        let factor = KktFactor::Iterative(minres);
+        if probe_kkt_health(&factor, &minres_matrix, probe_rhs) {
+            return Some(ConicFactor::direct(factor));
+        }
     }
-
-    // Last resort: re-use the AMD-ordered factorization at the *smallest*
-    // tried regularization (`REG_DELTA_INIT`), accepted despite failing the
-    // health probe. Deliberately not an identity-permutation fallback (as
-    // `qp::ipm_core::ippmm::factorize` uses): AMD's order here eliminates
-    // the `dz` block before `dx` (matches the Schur-complement elimination
-    // direction), whereas an identity order eliminates `dx` first, whose
-    // *own* regularization then bleeds into `dz`'s diagonal via the Schur
-    // update, corrupting exactly the tiny `W^2` entries this whole ladder
-    // exists to protect. A larger `delta` on `dx`/`dy` doesn't change `dz`'s
-    // own diagonal (see the module doc comment), so re-trying with a bigger
-    // regularization buys nothing; the smallest one keeps the AMD-ordered
-    // elimination closest to exact.
-    let unpermuted = caches
-        .base
-        .materialize(sc, blk, REG_DELTA_INIT, REG_DELTA_INIT);
-    let pre_permuted = caches
-        .permuted
-        .materialize(sc, blk, REG_DELTA_INIT, REG_DELTA_INIT);
-    match factorize_kkt_pre_permuted_cached_par(
-        &pre_permuted,
-        &unpermuted,
-        &caches.perm,
-        deadline,
-        kkt_cfg,
-        Some(caches.n_top),
-        caches.symbolic.clone(),
-        faer::Par::Seq,
-    ) {
-        Ok(f) => Some(ConicFactor::direct(f)),
-        Err(_) => None,
-    }
+    None
 }
 
 /// Jacobi (symmetric diagonal) equilibration escalation rung. `faer`'s LDL
@@ -749,7 +721,7 @@ fn try_equilibrated(
         faer::Par::Seq,
     ) {
         let scaled_rhs: Vec<f64> = probe_rhs.iter().zip(&d).map(|(&r, &di)| r * di).collect();
-        let healthy = f.is_iterative() || probe_kkt_health(&f, &scaled, &scaled_rhs);
+        let healthy = probe_kkt_health(&f, &scaled, &scaled_rhs);
         if healthy {
             return Some(ConicFactor::equilibrated(f, d));
         }
@@ -843,16 +815,23 @@ impl ConicFactor {
         }
     }
 
-    pub(super) fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
+    pub(super) fn solve(
+        &self,
+        rhs: &[f64],
+        sol: &mut [f64],
+        deadline: Option<Instant>,
+    ) -> Result<(), KktError> {
         match &self.scale {
-            None => self.factor.solve(rhs, sol),
+            None => self.factor.solve_with_deadline(rhs, sol, deadline),
             Some(d) => {
                 let scaled_rhs: Vec<f64> = rhs.iter().zip(d).map(|(&r, &di)| r * di).collect();
                 let mut scaled_sol = vec![0.0; rhs.len()];
-                self.factor.solve(&scaled_rhs, &mut scaled_sol);
+                self.factor
+                    .solve_with_deadline(&scaled_rhs, &mut scaled_sol, deadline)?;
                 for (o, (&s, &di)) in sol.iter_mut().zip(scaled_sol.iter().zip(d)) {
                     *o = s * di;
                 }
+                Ok(())
             }
         }
     }
@@ -864,12 +843,20 @@ impl ConicFactor {
 /// `qp::ipm_core::ippmm::factorize::probe_ldl_health`.
 fn probe_kkt_health(f: &KktFactor, mat: &CscMatrix, rhs: &[f64]) -> bool {
     let dim = mat.nrows();
+    if rhs.iter().any(|v| !v.is_finite()) || mat.values().iter().any(|v| !v.is_finite()) {
+        return false;
+    }
     let rhs_inf = rhs.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
     if rhs_inf <= 0.0 || !rhs_inf.is_finite() {
         return true;
     }
     let mut sol = vec![0.0_f64; dim];
-    f.solve(rhs, &mut sol);
+    if f.solve(rhs, &mut sol).is_err() {
+        return false;
+    }
+    if sol.iter().any(|v| !v.is_finite()) {
+        return false;
+    }
 
     let mut kx = vec![0.0_f64; dim];
     for col in 0..mat.ncols() {
@@ -884,7 +871,12 @@ fn probe_kkt_health(f: &KktFactor, mat: &CscMatrix, rhs: &[f64]) -> bool {
     }
     let resid_inf = (0..dim)
         .map(|i| (rhs[i] - kx[i]).abs())
-        .fold(0.0_f64, f64::max);
+        .try_fold(0.0_f64, |acc, residual| {
+            residual.is_finite().then(|| acc.max(residual))
+        });
+    let Some(resid_inf) = resid_inf else {
+        return false;
+    };
     let rel_resid = resid_inf / rhs_inf;
     let sol_inf = sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     let amplification = sol_inf / rhs_inf;
@@ -946,6 +938,8 @@ pub(super) fn build_rhs(
 /// `W^{-1} ds + W dz = rc`) agree at the exact solution but differ by the solve
 /// residual, and each is unstable in a different regime (detailed at the two
 /// branches below).
+type SearchDirection = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn solve_dir(
     factor: &ConicFactor,
@@ -959,12 +953,13 @@ pub(super) fn solve_dir(
     ry: &[f64],
     rz: &[f64],
     rc: &[f64],
-) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    deadline: Option<Instant>,
+) -> Result<SearchDirection, KktError> {
     let rhs = build_rhs(sc, blk, n, p, m, rx, ry, rz, rc);
     let n_e = n + blk.n_border();
     let total = n_e + p + m + blk.n_border();
     let mut sol = vec![0.0; total];
-    factor.solve(&rhs, &mut sol);
+    factor.solve(&rhs, &mut sol, deadline)?;
     let dx = sol[0..n].to_vec();
     let dy = sol[n_e..n_e + p].to_vec();
     let dz = sol[n_e + p..n_e + p + m].to_vec();
@@ -992,12 +987,75 @@ pub(super) fn solve_dir(
             ds[i] = -rz[i] - gdx[i];
         }
     }
-    (dx, dy, dz, ds)
+    Ok((dx, dy, dz, ds))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conic::cone::{self, Blocks};
+    use crate::conic::ConeSpec;
+
+    #[test]
+    fn conic_factor_forwards_deadline_to_minres() {
+        let k = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
+        let factor = ConicFactor::direct(KktFactor::Iterative(PreconditionedMinres::new(k)));
+        let past = Instant::now() - std::time::Duration::from_secs(1);
+        let mut sol = vec![0.0; 2];
+        assert!(matches!(
+            factor.solve(&[1.0, 0.0], &mut sol, Some(past)),
+            Err(KktError::DeadlineExceeded)
+        ));
+    }
+
+    /// Sentinel for the terminal factorization contract: every factor returned
+    /// by [`factorize_with_retry`] must have solved the real probe RHS within
+    /// the health bounds.  Here `W^2 = s/z` underflows to zero, so the KKT
+    /// matrix is singular for the non-zero RHS.  Direct LDL can still return a
+    /// pivot-clamped factor, but every health-checked rung and raw MINRES must
+    /// reject it.  The former last-resort path returned that unhealthy factor.
+    #[test]
+    fn factorize_with_retry_rejects_terminal_unhealthy_factor() {
+        let blk = Blocks::new(&ConeSpec { l: 1, soc: vec![] });
+        let sc = cone::nt_scaling(&blk, &[f64::MIN_POSITIVE], &[f64::MAX]);
+        let a = CscMatrix::new(0, 0);
+        let g = CscMatrix::new(1, 0);
+        let mut caches = build_kkt_caches(&a, &g, &blk, 0, 0, None);
+
+        assert!(
+            factorize_with_retry(&mut caches, &sc, &blk, &[1.0], None, &KktConfig::default(),)
+                .is_none(),
+            "a factor that failed the real-RHS health probe must not escape the ladder"
+        );
+    }
+
+    #[test]
+    fn probe_kkt_health_rejects_non_finite_rhs_before_norm_reduction() {
+        let mat = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let factor = KktFactor::Iterative(PreconditionedMinres::new(mat.clone()));
+
+        for rhs in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!probe_kkt_health(&factor, &mat, &[rhs]));
+        }
+    }
+
+    #[test]
+    fn probe_kkt_health_rejects_non_finite_matrix_and_residual() {
+        let solve_mat = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let factor = KktFactor::Iterative(PreconditionedMinres::new(solve_mat));
+        let mut probe_mat = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            probe_mat.values[0] = value;
+            assert!(!probe_kkt_health(&factor, &probe_mat, &[1.0]));
+        }
+
+        probe_mat.values[0] = f64::MAX;
+        assert!(
+            !probe_kkt_health(&factor, &probe_mat, &[2.0]),
+            "finite inputs whose matrix product overflows must yield an unhealthy residual"
+        );
+    }
 
     /// Sentinel for [`equilibrate`]'s zero/subnormal-diagonal guard:
     /// reverting the guard (plain `1/sqrt(|K_ii|)`) makes `d[1]` infinite

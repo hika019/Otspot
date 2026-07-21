@@ -22,11 +22,39 @@ use super::super::bound_flip::{bfrt_select_entering, ColBound};
 #[cfg(test)]
 thread_local! {
     static FLIP_APPLY_DISABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ETA_UPDATE_DISABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FLIP_DELTA_PATH_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
-pub(crate) fn set_flip_apply_disabled(v: bool) {
-    FLIP_APPLY_DISABLE.with(|c| c.set(v));
+pub(crate) fn set_flip_apply_disabled(v: bool) -> bool {
+    FLIP_APPLY_DISABLE.with(|c| c.replace(v))
+}
+
+#[cfg(test)]
+pub(crate) fn set_eta_update_disabled(v: bool) -> bool {
+    ETA_UPDATE_DISABLE.with(|c| c.replace(v))
+}
+
+#[cfg(test)]
+pub(crate) fn reset_flip_delta_path_count() {
+    FLIP_DELTA_PATH_COUNT.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn flip_delta_path_count() -> u64 {
+    FLIP_DELTA_PATH_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn eta_update_disabled() -> bool {
+    ETA_UPDATE_DISABLE.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn eta_update_disabled() -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -46,6 +74,7 @@ struct IterBuffers {
     trow: Vec<f64>,
     alpha: Vec<f64>,
     alpha_flip: Vec<f64>,
+    flip_delta: Vec<f64>,
     sigma: Vec<f64>,
     col_bounds: Vec<ColBound>,
     y: Vec<f64>,
@@ -64,6 +93,7 @@ impl IterBuffers {
             trow: vec![0.0; n_total],
             alpha: vec![0.0; m],
             alpha_flip: vec![0.0; m],
+            flip_delta: vec![0.0; m],
             sigma: vec![0.0; m],
             col_bounds,
             y: vec![0.0; m],
@@ -193,6 +223,7 @@ pub(crate) fn iterate(
     let mut trace = IterTrace::new("bounded-dual");
 
     loop {
+        let iteration_before = state.iterations;
         state.iterations = state.iterations.saturating_add(1);
         let timed_out = deadline_reached(options.deadline);
         let cancelled = options
@@ -329,27 +360,27 @@ pub(crate) fn iterate(
             Some(res) => res,
         };
 
-        // Apply flips: each non-entering bypassed breakpoint switches its
-        // bound. x_B picks up Δx_N[k] · α_k per flip — flip from lb (0) to ub
-        // (u_k) adds +u_k to x_N[k]; ub→lb adds −u_k. x_B := x_B − α_k · Δ.
+        let entering_col = bfrt.entering_col;
+        let theta = bfrt.theta;
+        let entering_at_upper = state.at_upper[entering_col];
+
+        // Compute the complete BFRT RHS adjustment against the old basis,
+        // but keep it local until the entering eta has been accepted.
         let apply_flip = !flip_apply_disabled();
-        for &k in &bfrt.flips {
-            let u_k = ubs[k];
-            debug_assert!(u_k.is_finite(), "BFRT must not return infinite-upper flips");
-            if apply_flip {
+        let has_applied_flips = apply_flip && !bfrt.flips.is_empty();
+        if has_applied_flips {
+            buf.flip_delta.fill(0.0);
+            for &k in &bfrt.flips {
+                let u_k = ubs[k];
+                debug_assert!(u_k.is_finite(), "BFRT must not return infinite-upper flips");
                 ftran_column(a, &mut basis_mgr, k, m, &mut buf.alpha_flip);
                 let direction = if state.at_upper[k] { -1.0 } else { 1.0 };
                 let weight = direction * u_k;
                 for i in 0..m {
-                    state.x_b[i] -= buf.alpha_flip[i] * weight;
+                    buf.flip_delta[i] += buf.alpha_flip[i] * weight;
                 }
             }
-            state.at_upper[k] = !state.at_upper[k];
         }
-
-        let entering_col = bfrt.entering_col;
-        let theta = bfrt.theta;
-        let entering_at_upper = state.at_upper[entering_col];
 
         // FTRAN α_q = B^{-1} a_q.
         ftran_column(a, &mut basis_mgr, entering_col, m, &mut buf.alpha);
@@ -395,6 +426,58 @@ pub(crate) fn iterate(
             continue;
         }
 
+        if deadline_reached(options.deadline) {
+            let obj = bounded_obj(
+                c,
+                &state.basis,
+                &state.x_b,
+                &state.at_upper,
+                &state.is_basic,
+                ubs,
+            );
+            return (BoundedOutcome::Timeout(obj), state);
+        }
+
+        // Validate and commit the LU update before mutating the externally
+        // returned solver state. A rejected eta must leave the whole state at
+        // the last valid basis.
+        let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
+        let mut alpha_sv_for_update = SparseVec {
+            indices: col_rows.to_vec(),
+            values: col_vals.to_vec(),
+            len: m,
+        };
+        basis_mgr.ftran(&mut alpha_sv_for_update);
+        if eta_update_disabled() {
+            alpha_sv_for_update.indices.clear();
+            alpha_sv_for_update.values.clear();
+        }
+        match basis_mgr.update(entering_col, r, &alpha_sv_for_update) {
+            Ok(()) => {}
+            Err(crate::error::SolverError::SingularBasis { .. }) => {
+                state.iterations = iteration_before;
+                return (BoundedOutcome::SingularBasis, state);
+            }
+            Err(err) => panic!("internal bounded-dual eta invariant violated: {err}"),
+        }
+
+        // From the successful LU commit through basis bookkeeping there are
+        // no early returns: publish BFRT flips and the pivot as one coherent
+        // state transition. FTRAN depends only on the unchanged basis, so the
+        // entering column was safely validated before these state mutations.
+        for &k in &bfrt.flips {
+            let u_k = ubs[k];
+            debug_assert!(u_k.is_finite(), "BFRT must not return infinite-upper flips");
+            state.at_upper[k] = !state.at_upper[k];
+        }
+        if has_applied_flips {
+            #[cfg(test)]
+            FLIP_DELTA_PATH_COUNT.with(|c| c.set(c.get().saturating_add(1)));
+            for i in 0..m {
+                state.x_b[i] -= buf.flip_delta[i];
+            }
+        }
+
         // Standard column-swap pivot update of x_B.
         let step = state.x_b[r] / pivot_element;
         for i in 0..m {
@@ -415,17 +498,6 @@ pub(crate) fn iterate(
         // Reduced-cost increment: r_j_new = r_j − θ trow[j] for non-basic j.
         let leaving_col = state.basis[r];
         for j in 0..n_total {
-            if deadline_reached(options.deadline) {
-                let obj = bounded_obj(
-                    c,
-                    &state.basis,
-                    &state.x_b,
-                    &state.at_upper,
-                    &state.is_basic,
-                    ubs,
-                );
-                return (BoundedOutcome::Timeout(obj), state);
-            }
             if !state.is_basic[j] {
                 state.reduced_costs[j] -= theta * buf.trow[j];
             }
@@ -442,16 +514,6 @@ pub(crate) fn iterate(
             state.at_upper[leaving_col] = false;
         }
 
-        // Push the column swap through the LU.
-        let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
-        let alpha_sv = SparseVec {
-            indices: col_rows.to_vec(),
-            values: col_vals.to_vec(),
-            len: m,
-        };
-        let mut alpha_sv_for_update = alpha_sv;
-        basis_mgr.ftran(&mut alpha_sv_for_update);
-        basis_mgr.update(entering_col, r, &alpha_sv_for_update);
         state.basis[r] = entering_col;
 
         leaving.after_pivot(r, &buf.alpha, &buf.sigma, pivot_element);

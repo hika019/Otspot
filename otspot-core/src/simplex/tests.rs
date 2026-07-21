@@ -282,6 +282,20 @@ fn test_extract_solution_uses_dd_for_split_variable_cancellation() {
 }
 
 #[test]
+#[should_panic(expected = "col_scale must be empty (identity) or match")]
+fn extract_solution_rejects_short_nonempty_col_scale() {
+    let lp = LpProblem::new(vec![0.0, 0.0], CscMatrix::new(0, 2), vec![]).unwrap();
+    let sf = build_standard_form(&lp);
+    let _ = extract_solution(&sf, &sf.initial_basis, &sf.b, &[1.0]);
+}
+
+#[test]
+#[should_panic(expected = "col_scale must be empty (identity) or match upper_bounds")]
+fn scale_upper_bounds_rejects_short_nonempty_col_scale() {
+    let _ = scale_upper_bounds(&[1.0, 2.0], &[1.0]);
+}
+
+#[test]
 fn test_basic_2var() {
     let lp = make_lp(
         vec![-1.0, -1.0],

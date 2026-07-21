@@ -36,6 +36,9 @@ fn legacy_basis_from_warm_start(
     solution: &[f64],
     basis: &[usize],
 ) -> Option<Vec<usize>> {
+    if solution.len() != problem.num_vars {
+        return None;
+    }
     if basis.iter().any(|&c| c >= sf.n_total) {
         return None;
     }
@@ -67,8 +70,7 @@ fn legacy_basis_from_warm_start(
         let orig = col_to_orig[j];
         let at_upper = orig != usize::MAX && {
             let (_, ub) = problem.bounds[orig];
-            ub.is_finite()
-                && (ub - solution.get(orig).copied().unwrap_or(0.0)).abs() <= BOUND_ACTIVE_TOL
+            ub.is_finite() && (ub - solution[orig]).abs() <= BOUND_ACTIVE_TOL
         };
         // The structural column j is the UB-row basic only when j is non-basic at
         // its upper bound. If j is already basic (e.g. degenerate basic-at-upper),

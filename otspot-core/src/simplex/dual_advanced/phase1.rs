@@ -30,6 +30,79 @@ use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum FreshFactorFailure {
+    None,
+    Singular,
+    Deadline,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FRESH_FACTOR_FAILURE: std::cell::Cell<FreshFactorFailure> = const {
+        std::cell::Cell::new(FreshFactorFailure::None)
+    };
+    static FORCE_PHASE1_UNBOUNDED: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+fn fresh_positive_artificial(
+    a_aug: &CscMatrix,
+    b: &[f64],
+    basis_aug: &[usize],
+    m: usize,
+    n_total: usize,
+    options: &SolverOptions,
+) -> Result<bool, crate::error::SolverError> {
+    #[cfg(test)]
+    match FRESH_FACTOR_FAILURE.get() {
+        FreshFactorFailure::None => {}
+        FreshFactorFailure::Singular => {
+            return Err(crate::error::SolverError::SingularBasis { step: 0 });
+        }
+        FreshFactorFailure::Deadline => {
+            return Err(crate::error::SolverError::DeadlineExceeded);
+        }
+    }
+
+    let mut bm = LuBasis::new_timed(a_aug, basis_aug, options.max_etas, options.deadline)?;
+    let mut x_b_fresh = b.to_vec();
+    bm.ftran_dense(&mut x_b_fresh);
+    Ok((0..m).any(|i| basis_aug[i] >= n_total && x_b_fresh[i] > options.primal_tol))
+}
+
+#[derive(Debug, PartialEq)]
+enum UnboundedProofRefresh {
+    Infeasible,
+    NoProof,
+    Timeout,
+    NumericalError,
+}
+
+fn classify_unbounded_proof_refresh(
+    refresh: Result<bool, crate::error::SolverError>,
+) -> UnboundedProofRefresh {
+    use crate::error::SolverError;
+
+    match refresh {
+        Ok(true) => UnboundedProofRefresh::Infeasible,
+        Ok(false) => UnboundedProofRefresh::NoProof,
+        Err(SolverError::DeadlineExceeded) => UnboundedProofRefresh::Timeout,
+        Err(SolverError::SingularBasis { .. }) => UnboundedProofRefresh::NumericalError,
+        Err(
+            err @ (SolverError::DimensionMismatch { .. }
+            | SolverError::IndexOutOfBounds { .. }
+            | SolverError::EmptyInput { .. }
+            | SolverError::NonFiniteCoefficient { .. }
+            | SolverError::InvalidBounds { .. }),
+        ) => {
+            panic!("internal invariant violation during Phase I proof refresh: {err}")
+        }
+    }
+}
+
 /// Check one Farkas direction `y` against `{A x = b, x ≥ 0}`.
 ///
 /// Returns `true` iff `b^T y > tol` and `A^T y ≤ tol` for all original columns.
@@ -575,19 +648,27 @@ pub(crate) fn big_m_cold_start(
     // n_enter = n_total: artificials (cols [n_total, n_aug)) may start basic and
     // be driven out, but never re-enter. This makes Priority-2 artificial removal
     // monotone and rules out the degenerate artificial↔artificial swap cycle.
-    let phase1_outcome = dual_simplex_core_advanced(
-        &a_aug,
-        &mut x_b,
-        &c_aug_p1,
-        &mut basis_aug,
-        m,
-        n_aug,
-        n_total,
-        true, // yield_on_stall: Big-M has a primal fallback to hand off to
-        options,
-        &mut leaving,
-        &mut total_iters,
-    );
+    #[cfg(test)]
+    let forced_unbounded = FORCE_PHASE1_UNBOUNDED.get();
+    #[cfg(not(test))]
+    let forced_unbounded = false;
+    let phase1_outcome = if forced_unbounded {
+        SimplexOutcome::Unbounded
+    } else {
+        dual_simplex_core_advanced(
+            &a_aug,
+            &mut x_b,
+            &c_aug_p1,
+            &mut basis_aug,
+            m,
+            n_aug,
+            n_total,
+            true, // yield_on_stall: Big-M has a primal fallback to hand off to
+            options,
+            &mut leaving,
+            &mut total_iters,
+        )
+    };
 
     match phase1_outcome {
         SimplexOutcome::Unbounded => {
@@ -605,26 +686,37 @@ pub(crate) fn big_m_cold_start(
             //
             // ETA 累積誤差で `x_b` が drift しているので fresh FTRAN で再計算 (B⁻¹ b)。
             // ドリフトと数値悪化の両方を排除して soundness を強化 (reviewer P1)。
-            let x_b_check: Vec<f64> = match crate::basis::LuBasis::new_timed(
-                &a_aug,
-                &basis_aug,
-                options.max_etas,
-                options.deadline,
-            ) {
-                Ok(mut bm) => {
-                    let mut rhs = b.to_vec();
-                    bm.ftran_dense(&mut rhs);
-                    rhs
+            let refresh = classify_unbounded_proof_refresh(fresh_positive_artificial(
+                &a_aug, b, &basis_aug, m, n_total, options,
+            ));
+            match refresh {
+                UnboundedProofRefresh::Infeasible => {
+                    let mut r = SolverResult::infeasible();
+                    r.iterations = total_iters;
+                    return r;
                 }
-                // factorize 失敗時は drift した x_b にフォールバック (元の動作)。
-                Err(_) => x_b.clone(),
-            };
-            let any_positive_art =
-                (0..m).any(|i| basis_aug[i] >= n_total && x_b_check[i] > options.primal_tol);
-            if any_positive_art {
-                let mut r = SolverResult::infeasible();
-                r.iterations = total_iters;
-                return r;
+                UnboundedProofRefresh::NoProof => {}
+                UnboundedProofRefresh::Timeout => {
+                    // A failed proof refresh cannot be replaced with the eta-updated
+                    // `x_b`: that iterate is exactly the value whose drift prompted
+                    // this check. Preserve it only as a non-terminal incumbent.
+                    let mut result = super::super::stop_result_with_incumbent(
+                        sf,
+                        problem,
+                        &basis_aug,
+                        &x_b,
+                        col_scale,
+                        total_iters,
+                        options,
+                    );
+                    result.status = SolveStatus::Timeout;
+                    return result;
+                }
+                UnboundedProofRefresh::NumericalError => {
+                    let mut result = SolverResult::numerical_error();
+                    result.iterations = total_iters;
+                    return result;
+                }
             }
             return super::super::stop_result_with_incumbent(
                 sf,
@@ -937,6 +1029,92 @@ mod tests {
     use crate::simplex::solve_with;
     use crate::sparse::CscMatrix;
     use crate::test_kkt::assert_kkt_optimal;
+
+    struct FreshFactorFailureGuard(super::FreshFactorFailure);
+
+    impl FreshFactorFailureGuard {
+        fn set(mode: super::FreshFactorFailure) -> Self {
+            let previous = super::FRESH_FACTOR_FAILURE.get();
+            super::FRESH_FACTOR_FAILURE.set(mode);
+            Self(previous)
+        }
+    }
+
+    impl Drop for FreshFactorFailureGuard {
+        fn drop(&mut self) {
+            super::FRESH_FACTOR_FAILURE.set(self.0);
+        }
+    }
+
+    struct ForcePhase1UnboundedGuard(bool);
+
+    impl ForcePhase1UnboundedGuard {
+        fn set() -> Self {
+            let previous = super::FORCE_PHASE1_UNBOUNDED.get();
+            super::FORCE_PHASE1_UNBOUNDED.set(true);
+            Self(previous)
+        }
+    }
+
+    impl Drop for ForcePhase1UnboundedGuard {
+        fn drop(&mut self) {
+            super::FORCE_PHASE1_UNBOUNDED.set(self.0);
+        }
+    }
+
+    fn phase1_refresh_failure_result(failure: super::FreshFactorFailure) -> SolveStatus {
+        use crate::presolve::LpEquilibration;
+
+        // x = 1 is feasible, while the identity Phase I basis starts with the
+        // artificial basic at stale x_B = 1 > primal_tol. Thus the forced
+        // Unbounded route cannot legitimately obtain a Farkas certificate.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let sf = crate::simplex::build_standard_form(&lp);
+        let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
+        let opts = SolverOptions {
+            use_lp_crash_basis: false,
+            ..Default::default()
+        };
+        let _outcome_guard = ForcePhase1UnboundedGuard::set();
+        let _failure_guard = FreshFactorFailureGuard::set(failure);
+
+        super::big_m_cold_start(&sf, &lp, &opts, &a, &b, &c, &row_scale, &col_scale).status
+    }
+
+    #[test]
+    fn fresh_factor_failure_never_uses_stale_positive_artificial_as_proof() {
+        let status = phase1_refresh_failure_result(super::FreshFactorFailure::Singular);
+        assert_eq!(status, SolveStatus::NumericalError);
+        assert_ne!(status, SolveStatus::Infeasible);
+    }
+
+    #[test]
+    fn fresh_factor_deadline_failure_is_timeout() {
+        let status = phase1_refresh_failure_result(super::FreshFactorFailure::Deadline);
+        assert_eq!(status, SolveStatus::Timeout);
+        assert_ne!(status, SolveStatus::Infeasible);
+    }
+
+    #[test]
+    #[should_panic(expected = "internal invariant violation during Phase I proof refresh")]
+    fn fresh_factor_internal_error_fails_fast() {
+        super::classify_unbounded_proof_refresh(Err(
+            crate::error::SolverError::DimensionMismatch {
+                field: "basis",
+                expected: 1,
+                got: 0,
+            },
+        ));
+    }
 
     #[test]
     fn big_m_phase1_feasible_eq() {

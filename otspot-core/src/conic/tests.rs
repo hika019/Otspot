@@ -3179,8 +3179,10 @@ fn conic_kkt_direction_matches_dense_schur_oracle() {
         let probe_rhs = kkt::build_rhs(&sc, &blk, n, p, m, &rx, &ry, &rz, &rc_aff);
         let factor = kkt::factorize_with_retry(&mut caches, &sc, &blk, &probe_rhs, None, &cfg)
             .unwrap_or_else(|| panic!("{}: affine factorize failed", case.name));
-        let (dx_a, dy_a, dz_a, ds_a) =
-            kkt::solve_dir(&factor, &case.g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc_aff);
+        let (dx_a, dy_a, dz_a, ds_a) = kkt::solve_dir(
+            &factor, &case.g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc_aff, None,
+        )
+        .expect("affine KKT solve failed");
         let (dx_a_o, dy_a_o, dz_a_o, ds_a_o) =
             oracle_solve_dir_dense_schur(&case.a, &case.g, &sc, &blk, &rx, &ry, &rz, &rc_aff);
         assert_dir_close(
@@ -3204,8 +3206,10 @@ fn conic_kkt_direction_matches_dense_schur_oracle() {
         let probe_rhs2 = kkt::build_rhs(&sc, &blk, n, p, m, &rx, &ry, &rz, &rc);
         let factor2 = kkt::factorize_with_retry(&mut caches, &sc, &blk, &probe_rhs2, None, &cfg)
             .unwrap_or_else(|| panic!("{}: corrector factorize failed", case.name));
-        let (dx_c, dy_c, dz_c, ds_c) =
-            kkt::solve_dir(&factor2, &case.g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc);
+        let (dx_c, dy_c, dz_c, ds_c) = kkt::solve_dir(
+            &factor2, &case.g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc, None,
+        )
+        .expect("corrector KKT solve failed");
         let (dx_c_o, dy_c_o, dz_c_o, ds_c_o) =
             oracle_solve_dir_dense_schur(&case.a, &case.g, &sc, &blk, &rx, &ry, &rz, &rc);
         assert_dir_close(
@@ -3684,8 +3688,10 @@ fn conic_kkt_threshold_boundary_direction_equivalence() {
             &KktConfig::default(),
         )
         .unwrap_or_else(|| panic!("d={d}: factorize failed"));
-        let (dx, dy, dz, ds) =
-            kkt::solve_dir(&factor, &g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc_aff);
+        let (dx, dy, dz, ds) = kkt::solve_dir(
+            &factor, &g, &sc, &blk, n, p, m, &rx, &ry, &rz, &rc_aff, None,
+        )
+        .expect("border KKT solve failed");
         let (dx_o, dy_o, dz_o, ds_o) =
             oracle_solve_dir_dense_schur(&a, &g, &sc, &blk, &rx, &ry, &rz, &rc_aff);
         // 1e-4, not `assert_dir_close`'s 1e-5: at `d ~ 256` the oracle's

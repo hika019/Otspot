@@ -35,7 +35,12 @@ pub(crate) trait BasisManager: Send {
     fn btran_dense(&mut self, rhs: &mut [f64]);
 
     /// ピボット後の基底更新: `entering_col` が `leaving_row` を置き換える
-    fn update(&mut self, entering_col: usize, leaving_row: usize, pivot_col: &SparseVec);
+    fn update(
+        &mut self,
+        entering_col: usize,
+        leaving_row: usize,
+        pivot_col: &SparseVec,
+    ) -> Result<(), SolverError>;
 }
 
 /// eta ファイル更新付きの LU 分解ベース基底管理構造体
@@ -181,10 +186,52 @@ impl BasisManager for LuBasis {
         lu::solve_btran_cached(&self.lu, rhs, &mut self.solve_scratch);
     }
 
-    fn update(&mut self, entering_col: usize, leaving_row: usize, pivot_col: &SparseVec) {
+    fn update(
+        &mut self,
+        entering_col: usize,
+        leaving_row: usize,
+        pivot_col: &SparseVec,
+    ) -> Result<(), SolverError> {
+        if leaving_row >= self.basis_indices.len() {
+            return Err(SolverError::IndexOutOfBounds {
+                context: "leaving_row",
+                index: leaving_row,
+                bound: self.basis_indices.len(),
+            });
+        }
+        if pivot_col.len != self.basis_indices.len() {
+            return Err(SolverError::DimensionMismatch {
+                field: "pivot_col",
+                expected: self.basis_indices.len(),
+                got: pivot_col.len,
+            });
+        }
+        if pivot_col.indices.len() != pivot_col.values.len() {
+            return Err(SolverError::DimensionMismatch {
+                field: "pivot_col_values",
+                expected: pivot_col.indices.len(),
+                got: pivot_col.values.len(),
+            });
+        }
+        if let Some(&index) = pivot_col.indices.iter().find(|&&i| i >= pivot_col.len) {
+            return Err(SolverError::IndexOutOfBounds {
+                context: "pivot_col_row",
+                index,
+                bound: pivot_col.len,
+            });
+        }
+        let pivot = pivot_col
+            .indices
+            .binary_search(&leaving_row)
+            .ok()
+            .map(|pos| pivot_col.values[pos])
+            .filter(|p| p.is_finite() && p.abs() > crate::tolerances::PIVOT_TOL)
+            .ok_or(SolverError::SingularBasis { step: leaving_row })?;
+        debug_assert!(pivot.is_finite());
         let eta = eta::add_eta_sparse(pivot_col, leaving_row);
         self.eta_file.etas.push(eta);
         self.basis_indices[leaving_row] = entering_col;
+        Ok(())
     }
 }
 
@@ -246,7 +293,7 @@ mod tests {
         lb.ftran(&mut pivot_sv);
 
         // Step 2: Update basis
-        lb.update(3, 1, &pivot_sv);
+        lb.update(3, 1, &pivot_sv).unwrap();
 
         // New basis = {0, 3, 2} → B_new = [[2,3,0],[1,1,1],[0,2,2]]
         // Verify FTRAN on new basis
@@ -264,6 +311,35 @@ mod tests {
         let b_new = dense_to_csc(&b_new_dense, 3, 3);
         let check = b_new.mat_vec_mul(&x).unwrap();
         assert_vec_near(&check, &rhs_orig, 1e-10);
+    }
+
+    #[test]
+    fn invalid_eta_update_is_rejected_atomically() {
+        let a = dense_to_csc(&[vec![1.0, 0.0], vec![0.0, 1.0]], 2, 2);
+        let basis = vec![0, 1];
+        let mut lb = LuBasis::new(&a, &basis, 50).unwrap();
+
+        for pivot in [
+            SparseVec::from_dense(&[0.0, 1.0]),
+            SparseVec::from_dense(&[f64::NAN, 1.0]),
+            SparseVec::from_dense(&[crate::tolerances::PIVOT_TOL, 1.0]),
+        ] {
+            let before_basis = lb.basis_indices.clone();
+            let before_etas = lb.eta_count();
+            assert!(lb.update(1, 0, &pivot).is_err());
+            assert_eq!(lb.basis_indices, before_basis);
+            assert_eq!(lb.eta_count(), before_etas);
+        }
+
+        let short = SparseVec::from_dense(&[1.0]);
+        let before_basis = lb.basis_indices.clone();
+        let before_etas = lb.eta_count();
+        assert!(matches!(
+            lb.update(1, 0, &short),
+            Err(SolverError::DimensionMismatch { .. })
+        ));
+        assert_eq!(lb.basis_indices, before_basis);
+        assert_eq!(lb.eta_count(), before_etas);
     }
 
     #[test]

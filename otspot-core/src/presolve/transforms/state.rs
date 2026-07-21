@@ -137,7 +137,7 @@ impl PresolveResult {
             col_map: (0..n).map(Some).collect(),
             row_map: (0..m).map(Some).collect(),
             was_reduced: false,
-            obj_offset: 0.0,
+            obj_offset: problem.obj_offset,
         }
     }
 }

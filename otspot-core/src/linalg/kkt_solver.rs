@@ -234,10 +234,6 @@ pub(crate) const MINRES_INEXACT_NEWTON_ETA: f64 = 1e-7;
 /// Default IR rounds for inexact MINRES. 0 because the auto-Schur path
 /// makes the saddle-point conditioning manageable in practice.
 pub(crate) const MINRES_INEXACT_NEWTON_IR_STEPS: usize = 0;
-// Stay within `IpmOptions::validate()` upper bound (10). Trivially true while
-// the default is 0; tripwire if the default is ever raised past 10.
-#[allow(clippy::absurd_extreme_comparisons)]
-const _: () = assert!(MINRES_INEXACT_NEWTON_IR_STEPS <= 10);
 
 /// Default convergence tolerance for non-inexact MINRES constructors.
 /// Tighter than `MINRES_INEXACT_NEWTON_ETA` because there is no outer IPM
@@ -468,27 +464,28 @@ impl KktFactor {
         }
     }
 
-    /// Infallible `K · sol = rhs` solve (mirrors `LdlFactorizationAmd::solve`).
-    ///
-    /// For the iterative (MINRES) backend the error is swallowed and the
-    /// best-effort partial solution is left in `sol`. Callers that need
-    /// honest failure propagation should use [`Self::solve_with_deadline`].
-    pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
-        let _ = self.solve_with_deadline(rhs, sol, None);
+    /// `K · sol = rhs` solve. Iterative failures are returned instead of
+    /// exposing a best-effort MINRES iterate as a valid solution.
+    pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) -> Result<(), KktError> {
+        self.solve_with_deadline(rhs, sol, None)
     }
 
     /// `solve` with a deadline that the iterative backend honours.
     ///
-    /// Returns `Err` when the MINRES backend fails to converge or hits the
-    /// deadline. Direct/DirectDd backends always return `Ok(())`. On error,
-    /// `sol` may contain a partial MINRES iterate — callers that need a clean
-    /// failure state should zero `sol` before re-using it.
+    /// Returns [`KktError::DeadlineExceeded`] before dispatch when `deadline`
+    /// has already expired, including for Direct/DirectDd backends. Once
+    /// dispatched, Direct/DirectDd complete synchronously; MINRES additionally
+    /// observes the deadline while iterating and returns an error on timeout or
+    /// non-convergence. On a MINRES error, `sol` may contain a partial iterate.
     pub fn solve_with_deadline(
         &self,
         rhs: &[f64],
         sol: &mut [f64],
         deadline: Option<Instant>,
     ) -> Result<(), KktError> {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(KktError::DeadlineExceeded);
+        }
         match self {
             KktFactor::Direct(ldl) => {
                 ldl.solve(rhs, sol);
@@ -1086,7 +1083,7 @@ mod tests {
         assert!(!factor.is_iterative());
 
         let mut sol = vec![0.0; 2];
-        factor.solve(&[3.0, 0.0], &mut sol);
+        factor.solve(&[3.0, 0.0], &mut sol).unwrap();
         assert!((sol[0] - 1.0).abs() < 1e-9);
         assert!((sol[1] - 1.0).abs() < 1e-9);
     }
@@ -1115,7 +1112,7 @@ mod tests {
 
         let b = vec![1.0, 2.0, -1.0];
         let mut sol = vec![0.0; 3];
-        factor.solve(&b, &mut sol);
+        factor.solve(&b, &mut sol).unwrap();
         // LDL 直接で解いた解と比較。dispatcher は inexact Newton tol η=0.1 を使うため
         // 厳密一致はしない。η * ||b|| の許容で確認。
         let factor_ldl = crate::linalg::ldl::factorize_quasidefinite_with_amd(&k, None).unwrap();
@@ -1263,7 +1260,7 @@ mod tests {
             "expected DirectDd with dd_ldl=true"
         );
         let mut sol = vec![0.0; 2];
-        factor.solve(&[3.0, 0.0], &mut sol);
+        factor.solve(&[3.0, 0.0], &mut sol).unwrap();
         assert!((sol[0] - 1.0).abs() < 1e-9, "sol[0]={}", sol[0]);
         assert!((sol[1] - 1.0).abs() < 1e-9, "sol[1]={}", sol[1]);
     }
@@ -1301,6 +1298,21 @@ mod tests {
         assert!(
             result.is_err(),
             "MINRES failure must surface as Err; no-op `let _ =` would hide it and return Ok(())"
+        );
+    }
+
+    /// Sentinel: the convenience solve API must not hide an iterative failure.
+    #[test]
+    fn minres_kkt_factor_solve_err_propagates() {
+        let k = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
+        let mut minres = PreconditionedMinres::new(k);
+        minres.max_iter = 0;
+        let factor = KktFactor::Iterative(minres);
+        let rhs = vec![1.0, 0.0];
+        let mut sol = vec![0.0; 2];
+        assert!(
+            factor.solve(&rhs, &mut sol).is_err(),
+            "non-converged MINRES solve must not expose a partial iterate as success"
         );
     }
 }

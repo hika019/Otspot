@@ -89,13 +89,13 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn set_partial_price_chunk_override(v: usize) {
-    PARTIAL_PRICE_CHUNK_OVERRIDE.with(|c| c.set(v));
+pub(crate) fn set_partial_price_chunk_override(v: usize) -> usize {
+    PARTIAL_PRICE_CHUNK_OVERRIDE.with(|c| c.replace(v))
 }
 
 #[cfg(test)]
-pub(crate) fn set_partial_price_single_window(v: bool) {
-    PARTIAL_PRICE_SINGLE_WINDOW.with(|c| c.set(v));
+pub(crate) fn set_partial_price_single_window(v: bool) -> bool {
+    PARTIAL_PRICE_SINGLE_WINDOW.with(|c| c.replace(v))
 }
 
 #[cfg(test)]

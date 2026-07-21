@@ -638,12 +638,20 @@ pub(crate) fn build_bounded_standard_form_with_deadline(
 /// `extract_solution_bounded` continues to use the **original** `bsf.upper_bounds`
 /// (the col_scale factors cancel when recovering non-basic-at-upper values).
 pub(crate) fn scale_upper_bounds(upper_bounds: &[f64], col_scale: &[f64]) -> Vec<f64> {
+    assert!(
+        col_scale.is_empty() || col_scale.len() == upper_bounds.len(),
+        "col_scale must be empty (identity) or match upper_bounds"
+    );
     upper_bounds
         .iter()
         .enumerate()
         .map(|(j, &u)| {
             if u.is_finite() {
-                u / col_scale.get(j).copied().unwrap_or(1.0)
+                u / if col_scale.is_empty() {
+                    1.0
+                } else {
+                    col_scale[j]
+                }
             } else {
                 f64::INFINITY
             }
@@ -770,12 +778,20 @@ pub(crate) fn extract_dual_info(
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let m_orig = problem.num_constraints;
     let n_orig = problem.num_vars;
+    assert!(
+        row_scale.is_empty() || row_scale.len() == sf.m,
+        "row_scale must be empty (identity) or match the standard-form row count"
+    );
 
     // Undo row sign flip and Ruiz row scaling on y_std.
     let mut dual_solution = vec![0.0; m_orig];
     for i in 0..m_orig {
         let sign = if sf.row_negated[i] { -1.0 } else { 1.0 };
-        let rs = row_scale.get(i).copied().unwrap_or(1.0);
+        let rs = if row_scale.is_empty() {
+            1.0
+        } else {
+            row_scale[i]
+        };
         dual_solution[i] = sign * rs * y_std[i];
     }
 

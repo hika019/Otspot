@@ -267,7 +267,9 @@ fn probe_ldl_health(
         return true;
     }
     let mut probe_sol = vec![0.0_f64; probe_dim];
-    f.solve(&probe_rhs, &mut probe_sol);
+    if f.solve(&probe_rhs, &mut probe_sol).is_err() {
+        return false;
+    }
 
     let mut kx = vec![0.0_f64; probe_dim];
     for col in 0..mat_for_factor.ncols {

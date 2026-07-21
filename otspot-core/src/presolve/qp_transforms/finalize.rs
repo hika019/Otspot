@@ -70,8 +70,12 @@ pub(super) fn build_result(
         }
     }
 
-    let a_new = build_reduced_a(prob, &ws, &col_map, &row_map, n, m_new, n_new);
-    let q_new = build_reduced_q(prob, &ws, &col_map, n, n_new);
+    let (Ok(a_new), Ok(q_new)) = (
+        build_reduced_a(prob, &ws, &col_map, &row_map, n, m_new, n_new),
+        build_reduced_q(prob, &ws, &col_map, n, n_new),
+    ) else {
+        return QpPresolveResult::no_reduction(prob);
+    };
 
     let q_linear_adjust = ws.c.clone();
 
@@ -123,7 +127,7 @@ fn build_reduced_a(
     n: usize,
     m_new: usize,
     n_new: usize,
-) -> CscMatrix {
+) -> Result<CscMatrix, crate::error::SolverError> {
     let mut trip_rows: Vec<usize> = Vec::new();
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();
@@ -146,10 +150,9 @@ fn build_reduced_a(
         }
     }
     if trip_rows.is_empty() {
-        CscMatrix::new(m_new, n_new)
+        Ok(CscMatrix::new(m_new, n_new))
     } else {
         CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_new, n_new)
-            .unwrap_or_else(|_| CscMatrix::new(m_new, n_new))
     }
 }
 
@@ -159,7 +162,7 @@ fn build_reduced_q(
     col_map: &[Option<usize>],
     n: usize,
     n_new: usize,
-) -> CscMatrix {
+) -> Result<CscMatrix, crate::error::SolverError> {
     let mut trip_rows: Vec<usize> = Vec::new();
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();
@@ -182,10 +185,9 @@ fn build_reduced_q(
         }
     }
     if trip_rows.is_empty() {
-        CscMatrix::new(n_new, n_new)
+        Ok(CscMatrix::new(n_new, n_new))
     } else {
         CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, n_new, n_new)
-            .unwrap_or_else(|_| CscMatrix::new(n_new, n_new))
     }
 }
 
@@ -213,8 +215,8 @@ fn apply_large_coeff_if_needed(
             reduced.constraint_types.clone(),
         ) {
             *reduced = p;
+            postsolve_stack.push(QpPostsolveStep::LargeCoeffRowScale { row_scales: scales });
         }
-        postsolve_stack.push(QpPostsolveStep::LargeCoeffRowScale { row_scales: scales });
     }
 }
 
@@ -256,6 +258,48 @@ fn maybe_apply_ruiz(
 mod tests {
     use super::*;
     use crate::problem::ConstraintType;
+
+    fn one_by_one_problem() -> QpProblem {
+        QpProblem::new(
+            CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap(),
+            vec![0.0],
+            CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap(),
+            vec![1.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn invalid_a_rebuild_rolls_back_instead_of_substituting_zero_matrix() {
+        let mut prob = one_by_one_problem();
+        prob.a.values[0] = f64::INFINITY;
+        let result = build_result(
+            &prob,
+            &SolverOptions::default(),
+            Workspace::from_problem(&prob),
+        );
+
+        assert!(!result.was_reduced);
+        assert_eq!(result.reduced.a.nnz(), 1);
+        assert!(result.reduced.a.values[0].is_infinite());
+    }
+
+    #[test]
+    fn invalid_q_rebuild_rolls_back_instead_of_substituting_zero_matrix() {
+        let mut prob = one_by_one_problem();
+        prob.q.values[0] = f64::INFINITY;
+        let result = build_result(
+            &prob,
+            &SolverOptions::default(),
+            Workspace::from_problem(&prob),
+        );
+
+        assert!(!result.was_reduced);
+        assert_eq!(result.reduced.q.nnz(), 1);
+        assert!(result.reduced.q.values[0].is_infinite());
+    }
 
     #[test]
     fn large_coeff_rescaling_is_skipped_before_ruiz_without_touching_problem() {
@@ -311,5 +355,25 @@ mod tests {
         assert!(reduced.a.values[0] < 1.0e12);
         assert!(reduced.b[0] < 2.0);
         assert_eq!(stack.steps.len(), 1);
+    }
+
+    #[test]
+    fn failed_large_coeff_model_rebuild_does_not_push_postsolve_step() {
+        let mut reduced = one_by_one_problem();
+        reduced.a.values[0] = 1.0e12;
+        reduced.c[0] = f64::INFINITY;
+        let original_a = reduced.a.clone();
+        let original_b = reduced.b.clone();
+        let opts = SolverOptions {
+            use_ruiz_scaling: false,
+            ..SolverOptions::default()
+        };
+        let mut stack = super::super::state::QpPostsolveStack::new();
+
+        apply_large_coeff_if_needed(&opts, &mut reduced, &mut stack);
+
+        assert_eq!(reduced.a.values, original_a.values);
+        assert_eq!(reduced.b, original_b);
+        assert!(stack.steps.is_empty());
     }
 }

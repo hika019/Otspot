@@ -219,6 +219,39 @@ fn step11_skips_when_q_nonzero() {
 }
 
 // -----------------------------------------------------------
+// step3_singleton_col (QP)
+// -----------------------------------------------------------
+
+#[test]
+fn step3_uses_the_active_coefficient_after_a_zero_duplicate() {
+    let prob = make_qp(
+        &[],
+        &[],
+        &[],
+        1,
+        vec![1.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        vec![6.0],
+        vec![(0.0, f64::INFINITY)],
+        vec![ConstraintType::Le],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    ws.row_entries[0].insert(0, (0, 0.0));
+    expect_ok(step3_singleton_col(&prob, &mut ws, None), "step3 ok");
+    assert!(
+        ws.removed_cols[0],
+        "linear singleton column should be fixed"
+    );
+    assert!(matches!(
+        ws.postsolve_stack.steps.last(),
+        Some(QpPostsolveStep::FixedVar { idx: 0, val }) if val.abs() < 1e-10
+    ));
+}
+
+// -----------------------------------------------------------
 // step7_free_var (QP)
 // -----------------------------------------------------------
 
@@ -242,6 +275,7 @@ fn step7_qp_eliminates_free_var_via_singleton_eq() {
         vec![ConstraintType::Eq, ConstraintType::Le],
     );
     let mut ws = Workspace::from_problem(&prob);
+    ws.row_entries[0].insert(0, (1, 0.0));
     expect_ok(step7_free_var(&prob, &mut ws, None), "step7 ok");
     assert!(ws.removed_cols[1], "free col z should be eliminated");
     assert!(ws.removed_rows[0], "singleton Eq row consumed");
