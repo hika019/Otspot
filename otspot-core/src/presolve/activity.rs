@@ -158,7 +158,12 @@ pub(crate) fn propagate_row_bounds(
             continue;
         }
         let (old_lb, old_ub) = bounds[j];
-        let is_int = int_mask.and_then(|m| m.get(j)).copied().unwrap_or(false);
+        // int_mask.len() == bounds.len() at every call site: mip/presolve.rs
+        // (tighten_bounds_with_probing) and mip/mod.rs (integer_mask()) both build
+        // the mask as vec![false; n] with n == bounds.len(), never accept an
+        // externally-sized mask. j is already unconditionally used as bounds[j]
+        // above, so j < bounds.len() == int_mask.len() when int_mask is Some.
+        let is_int = int_mask.is_some_and(|m| m[j]);
 
         let rest_inf_lb = if e_lb_inf[k] {
             inf_lb_count - 1

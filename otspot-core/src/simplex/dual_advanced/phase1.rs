@@ -313,14 +313,31 @@ struct BigMPhase1State {
 }
 
 /// Helper: A_aug = [A | I_art] for the given `artificial_col_of_row` map.
-/// Returns `None` if `CscMatrix::from_triplets` rejects (duplicate (row, col)).
+///
+/// `CscMatrix::from_triplets` cannot fail here:
+/// - Row/col indices are in-bounds by construction: structural triplets come
+///   from `a.get_column(j)` for `j < n_total` (row < m, col < n_total <= n_aug
+///   since `a` is a valid `m x n_total` matrix), and artificial triplets use
+///   `row = i < m` with `col = artificial_col_of_row[i] >= n_total` (both
+///   callers assign `n_total + <offset>`).
+/// - No duplicate `(row, col)` pair can occur (this function does NOT rely on
+///   `from_triplets`/`build_compressed_format` rejecting or safely merging
+///   duplicates — merging silently sums colliding entries, which would be
+///   silent corruption, not a safe fallback): structural and artificial
+///   triplets occupy disjoint column ranges (`< n_total` vs `>= n_total`);
+///   within the structural group each column of a valid CSC `a` has at most
+///   one entry per row; within the artificial group `artificial_col_of_row`
+///   assigns at most one column per row, so each row contributes at most one
+///   artificial triplet.
+/// - All values are finite: structural values come from `a.values` (already
+///   finite by construction of `a`), artificial values are the literal `1.0`.
 fn build_a_aug(
     a: &CscMatrix,
     artificial_col_of_row: &[Option<usize>],
     m: usize,
     n_total: usize,
     n_aug: usize,
-) -> Option<CscMatrix> {
+) -> CscMatrix {
     let n_art_estimate = n_aug - n_total;
     let mut trip_rows: Vec<usize> = Vec::with_capacity(a.nnz() + n_art_estimate);
     let mut trip_cols: Vec<usize> = Vec::with_capacity(a.nnz() + n_art_estimate);
@@ -343,7 +360,8 @@ fn build_a_aug(
             trip_vals.push(1.0);
         }
     }
-    CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_aug).ok()
+    CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_aug)
+        .expect("in-bounds indices, no duplicate (row, col), all-finite values (see fn doc)")
 }
 
 /// Identity-basis Phase I 状態 (B = I_aug, x_b = b, c_aug は閉式 delta)。
@@ -355,7 +373,7 @@ fn build_identity_phase1_state(
     sf: &StandardForm,
     big_m: f64,
     n_total: usize,
-) -> Option<BigMPhase1State> {
+) -> BigMPhase1State {
     let m = sf.m;
 
     let mut artificial_col_of_row: Vec<Option<usize>> = vec![None; m];
@@ -368,7 +386,7 @@ fn build_identity_phase1_state(
     }
     let n_aug = n_total + n_art;
 
-    let a_aug = build_a_aug(a, &artificial_col_of_row, m, n_total, n_aug)?;
+    let a_aug = build_a_aug(a, &artificial_col_of_row, m, n_total, n_aug);
 
     let mut c_aug_p1 = vec![0.0_f64; n_aug];
     for j in 0..n_total {
@@ -396,14 +414,14 @@ fn build_identity_phase1_state(
 
     let x_b = b.to_vec();
 
-    Some(BigMPhase1State {
+    BigMPhase1State {
         a_aug,
         basis_aug,
         c_aug_p1,
         x_b,
         artificial_col_of_row,
         n_aug,
-    })
+    }
 }
 
 /// `try_build_crash_phase1_state` 内の経路観測点。test sentinel が短絡無し
@@ -421,7 +439,6 @@ mod crash_probe {
         DisabledOption,
         NoArtificial,
         NotReduced,
-        BuildAaugFailed,
         LuFailed,
         XbNegative,
         Adopted(usize),
@@ -503,14 +520,7 @@ fn try_build_crash_phase1_state(
     debug_assert_eq!(art_idx, n_art);
     let n_aug = n_total + n_art;
 
-    let a_aug = match build_a_aug(a, &artificial_col_of_row, m, n_total, n_aug) {
-        Some(a) => a,
-        None => {
-            #[cfg(test)]
-            crash_probe::record(crash_probe::Outcome::BuildAaugFailed);
-            return None;
-        }
-    };
+    let a_aug = build_a_aug(a, &artificial_col_of_row, m, n_total, n_aug);
 
     let mut basis_aug = basis_pre;
     for i in 0..m {
@@ -626,13 +636,7 @@ pub(crate) fn big_m_cold_start(
         mut x_b,
         artificial_col_of_row,
         n_aug,
-    } = match crash_state {
-        Some(s) => s,
-        None => match build_identity_phase1_state(a, b, c, sf, big_m, n_total) {
-            Some(s) => s,
-            None => return SolverResult::numerical_error(),
-        },
-    };
+    } = crash_state.unwrap_or_else(|| build_identity_phase1_state(a, b, c, sf, big_m, n_total));
 
     // === Step 6: Phase I (Dual Simplex with Harris ratio test + Artificial-aware) ===
     //

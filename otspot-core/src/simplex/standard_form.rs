@@ -209,10 +209,9 @@ pub(crate) fn build_standard_form_with_deadline(
         }
         let offset = info.offset;
         if offset.abs() > DROP_TOL {
-            if let Ok((rows, vals)) = problem.a.get_column(j) {
-                for (k, &row) in rows.iter().enumerate() {
-                    b[row] -= vals[k] * offset;
-                }
+            let (rows, vals) = problem.a.column(j);
+            for (k, &row) in rows.iter().enumerate() {
+                b[row] -= vals[k] * offset;
             }
         }
     }
@@ -316,17 +315,16 @@ pub(crate) fn build_standard_form_with_deadline(
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return None;
         }
-        if let Ok((a_rows, a_vals)) = problem.a.get_column(j) {
-            for (k, &row) in a_rows.iter().enumerate() {
-                let val = a_vals[k];
-                let sign = if row_negated[row] { -1.0 } else { 1.0 };
-                for &(new_col, coeff) in &info.new_vars {
-                    let actual_val = sign * val * coeff;
-                    if actual_val.abs() > DROP_TOL {
-                        trip_rows.push(row);
-                        trip_cols.push(new_col);
-                        trip_vals.push(actual_val);
-                    }
+        let (a_rows, a_vals) = problem.a.column(j);
+        for (k, &row) in a_rows.iter().enumerate() {
+            let val = a_vals[k];
+            let sign = if row_negated[row] { -1.0 } else { 1.0 };
+            for &(new_col, coeff) in &info.new_vars {
+                let actual_val = sign * val * coeff;
+                if actual_val.abs() > DROP_TOL {
+                    trip_rows.push(row);
+                    trip_cols.push(new_col);
+                    trip_vals.push(actual_val);
                 }
             }
         }
@@ -483,10 +481,9 @@ pub(crate) fn build_bounded_standard_form_with_deadline(
         }
         let offset = info.offset;
         if offset.abs() > DROP_TOL {
-            if let Ok((rows, vals)) = problem.a.get_column(j) {
-                for (k, &row) in rows.iter().enumerate() {
-                    b[row] -= vals[k] * offset;
-                }
+            let (rows, vals) = problem.a.column(j);
+            for (k, &row) in rows.iter().enumerate() {
+                b[row] -= vals[k] * offset;
             }
         }
     }
@@ -572,17 +569,16 @@ pub(crate) fn build_bounded_standard_form_with_deadline(
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return None;
         }
-        if let Ok((a_rows, a_vals)) = problem.a.get_column(j) {
-            for (k, &row) in a_rows.iter().enumerate() {
-                let val = a_vals[k];
-                let sign = if row_negated[row] { -1.0 } else { 1.0 };
-                for &(new_col, coeff) in &info.new_vars {
-                    let actual_val = sign * val * coeff;
-                    if actual_val.abs() > DROP_TOL {
-                        trip_rows.push(row);
-                        trip_cols.push(new_col);
-                        trip_vals.push(actual_val);
-                    }
+        let (a_rows, a_vals) = problem.a.column(j);
+        for (k, &row) in a_rows.iter().enumerate() {
+            let val = a_vals[k];
+            let sign = if row_negated[row] { -1.0 } else { 1.0 };
+            for &(new_col, coeff) in &info.new_vars {
+                let actual_val = sign * val * coeff;
+                if actual_val.abs() > DROP_TOL {
+                    trip_rows.push(row);
+                    trip_cols.push(new_col);
+                    trip_vals.push(actual_val);
                 }
             }
         }
@@ -797,10 +793,9 @@ pub(crate) fn extract_dual_info(
 
     let mut slack = problem.b.clone();
     for (j, &sol_j) in solution.iter().enumerate().take(n_orig) {
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                slack[row] -= vals[k] * sol_j;
-            }
+        let (rows, vals) = problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            slack[row] -= vals[k] * sol_j;
         }
     }
 
@@ -814,11 +809,10 @@ pub(crate) fn extract_dual_info(
     // The KKT test `c − A^T y − rc = 0` (diag_afiro_y) requires this convention.
     let mut reduced_costs = problem.c.clone();
     for (j, rc_j) in reduced_costs.iter_mut().enumerate().take(n_orig) {
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                if row < m_orig {
-                    *rc_j -= dual_solution[row] * vals[k];
-                }
+        let (rows, vals) = problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            if row < m_orig {
+                *rc_j -= dual_solution[row] * vals[k];
             }
         }
     }

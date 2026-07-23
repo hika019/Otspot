@@ -161,7 +161,6 @@ enum BoundedTerminalReconcile {
     Optimal(f64),
     Timeout(f64),
     BoundViolation,
-    MatrixAccessError,
     SingularBasis,
 }
 
@@ -182,9 +181,7 @@ fn reconcile_bounded_terminal_state(
         if !ub.is_finite() {
             continue;
         }
-        let Ok((rows, vals)) = a.get_column(j) else {
-            return BoundedTerminalReconcile::MatrixAccessError;
-        };
+        let (rows, vals) = a.column(j);
         for (k, &row) in rows.iter().enumerate() {
             rhs[row] -= vals[k] * ub;
         }

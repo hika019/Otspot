@@ -610,9 +610,7 @@ fn best_lp_reduced_costs_from_dual(
     let mut rc_minus = problem.c.clone();
     let mut rc_plus = problem.c.clone();
     for j in 0..problem.num_vars {
-        let Ok((rows, vals)) = problem.a.get_column(j) else {
-            return None;
-        };
+        let (rows, vals) = problem.a.column(j);
         for (k, &row) in rows.iter().enumerate() {
             let term = vals[k] * dual_solution[row];
             rc_minus[j] -= term;

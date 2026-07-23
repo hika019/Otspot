@@ -221,9 +221,7 @@ fn extract_farkas_certificate(
     // Helper: check A^T y <= tol for all original columns.
     let aty_ok = |y: &[f64]| -> bool {
         for j in 0..n_original {
-            let Ok((rows, vals)) = a_ext.get_column(j) else {
-                return false;
-            };
+            let (rows, vals) = a_ext.column(j);
             let aty: f64 = rows.iter().zip(vals.iter()).map(|(&r, &v)| v * y[r]).sum();
             if aty > tol {
                 return false;
@@ -337,12 +335,11 @@ fn objective_from_solution(sf: &StandardForm, problem: &LpProblem, solution: &[f
 
 fn adjust_xb_for_scaled_diag(a: &CscMatrix, basis: &[usize], x_b: &mut [f64], m: usize) {
     for i in 0..m {
-        if let Ok((rows, vals)) = a.get_column(basis[i]) {
-            for (k, &row) in rows.iter().enumerate() {
-                if row == i && vals[k].abs() > SLACK_DIAG_TOL {
-                    x_b[i] /= vals[k];
-                    break;
-                }
+        let (rows, vals) = a.column(basis[i]);
+        for (k, &row) in rows.iter().enumerate() {
+            if row == i && vals[k].abs() > SLACK_DIAG_TOL {
+                x_b[i] /= vals[k];
+                break;
             }
         }
     }
@@ -360,12 +357,11 @@ fn build_phase1_system(
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();
     for j in 0..a.ncols {
-        if let Ok((r, v)) = a.get_column(j) {
-            for (k, &row) in r.iter().enumerate() {
-                trip_rows.push(row);
-                trip_cols.push(j);
-                trip_vals.push(v[k]);
-            }
+        let (r, v) = a.column(j);
+        for (k, &row) in r.iter().enumerate() {
+            trip_rows.push(row);
+            trip_cols.push(j);
+            trip_vals.push(v[k]);
         }
     }
 

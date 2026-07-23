@@ -58,10 +58,9 @@ fn crossover_dual_infeasibility(problem: &LpProblem, x_star: &[f64], y: &[f64]) 
         let at_lb = lb.is_finite() && (x_star[j] - lb).abs() < COMP_SLACK_REL_TOL * (1.0 + lb_s);
         let at_ub = ub.is_finite() && (x_star[j] - ub).abs() < COMP_SLACK_REL_TOL * (1.0 + ub_s);
         let mut rc = problem.c[j];
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                rc -= vals[k] * y[row];
-            }
+        let (rows, vals) = problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            rc -= vals[k] * y[row];
         }
         let viol = if at_lb && !at_ub {
             f64::max(0.0, -rc)
@@ -97,10 +96,9 @@ fn crossover_dual_infeasibility_detail(
         let at_lb = lb.is_finite() && (x_star[j] - lb).abs() < COMP_SLACK_REL_TOL * (1.0 + lb_s);
         let at_ub = ub.is_finite() && (x_star[j] - ub).abs() < COMP_SLACK_REL_TOL * (1.0 + ub_s);
         let mut rc = problem.c[j];
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                rc -= vals[k] * y[row];
-            }
+        let (rows, vals) = problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            rc -= vals[k] * y[row];
         }
         let viol = if at_lb && !at_ub {
             f64::max(0.0, -rc)
@@ -184,18 +182,16 @@ pub(crate) fn crossover_dual_from_primal(
         if x_std[j].abs() < CROSSOVER_ZERO_TOL {
             continue;
         }
-        if let Ok((rows, vals)) = sf.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                row_struct_sum[row] += vals[k] * x_std[j];
-            }
+        let (rows, vals) = sf.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            row_struct_sum[row] += vals[k] * x_std[j];
         }
     }
     for j in n_shifted..n_total {
-        if let Ok((rows, vals)) = sf.a.get_column(j) {
-            if rows.len() == 1 && vals[0].abs() > 0.0 {
-                let i = rows[0];
-                x_std[j] = ((sf.b[i] - row_struct_sum[i]) / vals[0]).max(0.0);
-            }
+        let (rows, vals) = sf.a.column(j);
+        if rows.len() == 1 && vals[0].abs() > 0.0 {
+            let i = rows[0];
+            x_std[j] = ((sf.b[i] - row_struct_sum[i]) / vals[0]).max(0.0);
         }
     }
     trace_crossover(format_args!(
@@ -212,12 +208,11 @@ pub(crate) fn crossover_dual_from_primal(
     let mut tc: Vec<usize> = Vec::new();
     let mut tv: Vec<f64> = Vec::new();
     for j in 0..n_total {
-        if let Ok((rows, vals)) = sf.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                tr.push(row);
-                tc.push(j);
-                tv.push(vals[k]);
-            }
+        let (rows, vals) = sf.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            tr.push(row);
+            tc.push(j);
+            tv.push(vals[k]);
         }
     }
     let mut art = n_total;
@@ -231,7 +226,14 @@ pub(crate) fn crossover_dual_from_primal(
         }
     }
     let n_ext = art;
-    let a_ext = CscMatrix::from_triplets(&tr, &tc, &tv, m, n_ext).ok()?;
+    // tr/tc/tv are always pushed in lockstep triples (length match by construction);
+    // tv entries are either sf.a values (already finite: LpProblem/build_standard_form
+    // validate/preserve finiteness, no new arithmetic here — unlike bound_mccormick's
+    // McCormick coefficient synthesis) or the literal artificial-column 1.0; row
+    // indices come from sf.a (< m) or `i in 0..m`; col indices are `j in 0..n_total`
+    // or `art`, both < n_ext since n_ext is art's final post-loop value.
+    let a_ext = CscMatrix::from_triplets(&tr, &tc, &tv, m, n_ext)
+        .expect("tr/tc/tv are length-matched, finite, and in-bounds by construction");
     trace_crossover(format_args!(
         "a_ext n_ext={} arts={} {:.3}s",
         n_ext,
@@ -265,9 +267,7 @@ pub(crate) fn crossover_dual_from_primal(
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 break;
             }
-            let Ok((col_rows, col_vals)) = a_ext.get_column(j) else {
-                continue;
-            };
+            let (col_rows, col_vals) = a_ext.column(j);
             let mut d_sv = SparseVec {
                 indices: col_rows.to_vec(),
                 values: col_vals.to_vec(),
@@ -569,9 +569,7 @@ pub(crate) fn crossover_dual_from_primal_with_dual_warm_start(
         let y_simplex: Vec<f64> = y_prove.iter().map(|&v| -v).collect();
         let mut rc = problem.c.clone();
         for (j, rc_j) in rc.iter_mut().enumerate().take(problem.num_vars) {
-            let Ok((rows, vals)) = problem.a.get_column(j) else {
-                return None;
-            };
+            let (rows, vals) = problem.a.column(j);
             for (k, &row) in rows.iter().enumerate() {
                 *rc_j -= vals[k] * y_simplex[row];
             }

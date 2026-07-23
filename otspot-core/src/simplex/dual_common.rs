@@ -262,9 +262,7 @@ pub(super) fn lp_unbounded_ray_verified(
         if in_basis[q] {
             continue;
         }
-        let Ok((rows, vals)) = a.get_column(q) else {
-            continue;
-        };
+        let (rows, vals) = a.column(q);
         let rc = c[q]
             - rows
                 .iter()

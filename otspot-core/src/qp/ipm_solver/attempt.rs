@@ -431,7 +431,13 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
         problem.constraint_types.clone(),
     ) {
         Ok(p) => p,
-        Err(_) => return None,
+        Err(err) => {
+            log::warn!(
+                "Q-diagonal scaling produced a non-constructible QpProblem ({err}); \
+                 skipping diagonal scaling"
+            );
+            return None;
+        }
     };
     scaled.obj_offset = problem.obj_offset;
 

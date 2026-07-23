@@ -83,11 +83,10 @@ fn fixed_tol(lb: f64, ub: f64) -> f64 {
 fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> {
     let mut out = Vec::new();
     for j in 0..orig_problem.num_vars {
-        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                if row == i {
-                    out.push((j, vals[k]));
-                }
+        let (rows, vals) = orig_problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            if row == i {
+                out.push((j, vals[k]));
             }
         }
     }
@@ -133,13 +132,12 @@ fn stationarity_dual(
         }
         // Bound on y_i from rc_j = c_j - Σ_{k≠i} A_kj y_k - A_ij y_i.
         let mut rc_at_yi0 = orig_problem.c[j];
-        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                if row == i {
-                    continue;
-                }
-                rc_at_yi0 -= vals[k] * dual_solution[row];
+        let (rows, vals) = orig_problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            if row == i {
+                continue;
             }
+            rc_at_yi0 -= vals[k] * dual_solution[row];
         }
         let x_j = solution[j];
         let (lb_j, ub_j) = orig_problem.bounds[j];
@@ -272,20 +270,18 @@ fn recover_warm_start_basis(orig_problem: &LpProblem, solution: &[f64]) -> Optio
         if x_std[j].abs() < WARM_BASIS_BUILD_TOL {
             continue;
         }
-        if let Ok((rows, vals)) = sf.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                row_struct_sum[row] += vals[k] * x_std[j];
-            }
+        let (rows, vals) = sf.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            row_struct_sum[row] += vals[k] * x_std[j];
         }
     }
     for j in n_shifted..n_total {
-        if let Ok((rows, vals)) = sf.a.get_column(j) {
-            if rows.len() == 1 && vals[0].abs() > 0.0 {
-                let i = rows[0];
-                let coeff = vals[0];
-                let slack = (sf.b[i] - row_struct_sum[i]) / coeff;
-                x_std[j] = slack.max(0.0);
-            }
+        let (rows, vals) = sf.a.column(j);
+        if rows.len() == 1 && vals[0].abs() > 0.0 {
+            let i = rows[0];
+            let coeff = vals[0];
+            let slack = (sf.b[i] - row_struct_sum[i]) / coeff;
+            x_std[j] = slack.max(0.0);
         }
     }
 
@@ -322,42 +318,41 @@ fn recover_warm_start_basis(orig_problem: &LpProblem, solution: &[f64]) -> Optio
     active_struct.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
     for (_xj, j) in active_struct {
-        if let Ok((rows, vals)) = sf.a.get_column(j) {
-            // Pick the candidate row with the largest |a_ij| where the current
-            // basic column is an at-bound slack; Markowitz threshold protects
-            // against tiny pivots that would inflate B's condition number.
-            let mut col_max = 0.0_f64;
-            for &v in vals.iter() {
-                if v.abs() > col_max {
-                    col_max = v.abs();
-                }
+        let (rows, vals) = sf.a.column(j);
+        // Pick the candidate row with the largest |a_ij| where the current
+        // basic column is an at-bound slack; Markowitz threshold protects
+        // against tiny pivots that would inflate B's condition number.
+        let mut col_max = 0.0_f64;
+        for &v in vals.iter() {
+            if v.abs() > col_max {
+                col_max = v.abs();
             }
-            if col_max < WARM_BASIS_BUILD_TOL {
+        }
+        if col_max < WARM_BASIS_BUILD_TOL {
+            continue;
+        }
+        let pivot_min = (MARKOWITZ_PIVOT_RATIO * col_max).max(WARM_BASIS_BUILD_TOL);
+
+        let mut best: Option<(f64, usize)> = None;
+        for (k, &row) in rows.iter().enumerate() {
+            let abs = vals[k].abs();
+            if abs < pivot_min {
                 continue;
             }
-            let pivot_min = (MARKOWITZ_PIVOT_RATIO * col_max).max(WARM_BASIS_BUILD_TOL);
-
-            let mut best: Option<(f64, usize)> = None;
-            for (k, &row) in rows.iter().enumerate() {
-                let abs = vals[k].abs();
-                if abs < pivot_min {
-                    continue;
-                }
-                let cur = basis[row];
-                let cur_is_at_bound_slack = cur >= n_shifted && x_std[cur] <= WARM_BASIS_BUILD_TOL;
-                if !cur_is_at_bound_slack {
-                    continue;
-                }
-                if best.is_none_or(|(b, _)| abs > b) {
-                    best = Some((abs, row));
-                }
+            let cur = basis[row];
+            let cur_is_at_bound_slack = cur >= n_shifted && x_std[cur] <= WARM_BASIS_BUILD_TOL;
+            if !cur_is_at_bound_slack {
+                continue;
             }
-            if let Some((_, row)) = best {
-                let leaving = basis[row];
-                basic_at_row[leaving] = usize::MAX;
-                basis[row] = j;
-                basic_at_row[j] = row;
+            if best.is_none_or(|(b, _)| abs > b) {
+                best = Some((abs, row));
             }
+        }
+        if let Some((_, row)) = best {
+            let leaving = basis[row];
+            basic_at_row[leaving] = usize::MAX;
+            basis[row] = j;
+            basic_at_row[j] = row;
         }
     }
 
@@ -538,10 +533,9 @@ pub fn run_postsolve(
     // Recompute slack on the original problem as `b - Ax`.
     let mut slack = orig_problem.b.clone();
     for (j, &sol_j) in solution.iter().enumerate().take(n) {
-        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                slack[row] -= vals[k] * sol_j;
-            }
+        let (rows, vals) = orig_problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            slack[row] -= vals[k] * sol_j;
         }
     }
 
@@ -563,10 +557,9 @@ pub fn run_postsolve(
             let at_lb = lb_j.is_finite() && (solution[j] - lb_j).abs() < at_lb_tol(lb_j);
             let at_ub = ub_j.is_finite() && (solution[j] - ub_j).abs() < at_ub_tol(ub_j);
             let mut rc = orig_problem.c[j];
-            if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
-                for (k, &row) in rows.iter().enumerate() {
-                    rc -= vals[k] * y[row];
-                }
+            let (rows, vals) = orig_problem.a.column(j);
+            for (k, &row) in rows.iter().enumerate() {
+                rc -= vals[k] * y[row];
             }
             let viol = if at_lb && !at_ub {
                 f64::max(0.0, -rc)
@@ -611,10 +604,9 @@ pub fn run_postsolve(
     //   reduced_cost[j] = c[j] - Σ_i A_ij · y_i.
     let mut reduced_costs = orig_problem.c.clone();
     for (j, rc) in reduced_costs.iter_mut().enumerate().take(n) {
-        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                *rc -= vals[k] * dual_solution[row];
-            }
+        let (rows, vals) = orig_problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            *rc -= vals[k] * dual_solution[row];
         }
     }
     let postsolve_dfeas_recomputed = dfeas_bound(&dual_solution);

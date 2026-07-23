@@ -15,15 +15,16 @@ pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult
         return f64::INFINITY;
     }
     let x = &result.solution;
-    let qx = match problem.q.mat_vec_mul(x) {
-        Ok(v) => v,
-        Err(_) => return f64::INFINITY,
-    };
+    let qx = problem.q.mat_vec_mul(x).expect(
+        "q.ncols() == x.len() == num_vars: QpProblem::new() enforces \
+         q.ncols() == num_vars, and solution.len() == n is checked above",
+    );
     let aty: Vec<f64> = if problem.a.nrows > 0 && !result.dual_solution.is_empty() {
-        match problem.a.transpose().mat_vec_mul(&result.dual_solution) {
-            Ok(v) => v,
-            Err(_) => return f64::INFINITY,
-        }
+        problem.a.transpose().mat_vec_mul(&result.dual_solution).expect(
+            "a.transpose().ncols() == a.nrows() == num_constraints == dual_solution.len(): \
+             QpProblem::new() enforces a.nrows() == num_constraints, and \
+             dual_solution.len() == a.nrows is checked above",
+        )
     } else {
         vec![0.0_f64; n]
     };

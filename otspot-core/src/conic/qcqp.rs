@@ -144,7 +144,7 @@ fn sparse_cholesky_lower(p: &CscMatrix, n: usize) -> Result<(SparseCholCols, boo
     // tolerance (see `CHOL_ROUNDING_REL_FACTOR`).
     let mut orig_diag = vec![0.0f64; n];
     for j in 0..n {
-        let (rows, vals) = p.get_column(j).map_err(|_| ())?;
+        let (rows, vals) = p.column(j);
         for (&r, &v) in rows.iter().zip(vals) {
             if r == j {
                 orig_diag[j] += v;
@@ -166,7 +166,7 @@ fn sparse_cholesky_lower(p: &CscMatrix, n: usize) -> Result<(SparseCholCols, boo
         }
         touched.clear();
 
-        let (rows, vals) = p.get_column(j).map_err(|_| ())?;
+        let (rows, vals) = p.column(j);
         for (&r, &v) in rows.iter().zip(vals) {
             if r >= j {
                 if !touched_mark[r] {

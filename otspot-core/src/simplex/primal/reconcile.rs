@@ -104,10 +104,9 @@ pub(super) fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> boo
     let tol = feas_rel_tol();
     let mut ax = vec![0.0f64; problem.num_constraints];
     for (j, &sj) in solution.iter().enumerate() {
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                ax[row] += vals[k] * sj;
-            }
+        let (rows, vals) = problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            ax[row] += vals[k] * sj;
         }
     }
     let mut violated = false;
@@ -187,25 +186,21 @@ fn pivot_out_sequential(
             if is_basic[j] {
                 continue;
             }
-            if let Ok((rows, vals)) = a_ext.get_column(j) {
-                let mut d_ij = 0.0_f64;
-                for (k, &row) in rows.iter().enumerate() {
-                    if row < m {
-                        d_ij += z_dense[row] * vals[k];
-                    }
+            let (rows, vals) = a_ext.column(j);
+            let mut d_ij = 0.0_f64;
+            for (k, &row) in rows.iter().enumerate() {
+                if row < m {
+                    d_ij += z_dense[row] * vals[k];
                 }
-                let abs_d = d_ij.abs();
-                if abs_d > best_abs {
-                    best_abs = abs_d;
-                    best_j = Some(j);
-                }
+            }
+            let abs_d = d_ij.abs();
+            if abs_d > best_abs {
+                best_abs = abs_d;
+                best_j = Some(j);
             }
         }
         if let Some(j) = best_j {
-            let (col_rows, col_vals) = match a_ext.get_column(j) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
+            let (col_rows, col_vals) = a_ext.column(j);
             let mut d_sv = SparseVec {
                 indices: col_rows.to_vec(),
                 values: col_vals.to_vec(),
@@ -268,13 +263,12 @@ pub(crate) fn pivot_out_degenerate_artificials(
         if is_basic[j] {
             continue;
         }
-        if let Ok((rows, vals)) = a_ext.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                if row < m {
-                    let abs_v = vals[k].abs();
-                    if abs_v >= PIVOT_TOL {
-                        row_candidates[row].push((abs_v, j));
-                    }
+        let (rows, vals) = a_ext.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            if row < m {
+                let abs_v = vals[k].abs();
+                if abs_v >= PIVOT_TOL {
+                    row_candidates[row].push((abs_v, j));
                 }
             }
         }
@@ -417,11 +411,10 @@ pub(crate) fn pivot_out_degenerate_artificials(
                 };
                 let (r, j) = matches[idx];
                 col_dense.iter_mut().for_each(|v| *v = 0.0);
-                if let Ok((rows, vals)) = a_ext.get_column(j) {
-                    for (p, &row) in rows.iter().enumerate() {
-                        if row < m {
-                            col_dense[row] = vals[p];
-                        }
+                let (rows, vals) = a_ext.column(j);
+                for (p, &row) in rows.iter().enumerate() {
+                    if row < m {
+                        col_dense[row] = vals[p];
                     }
                 }
                 b_lu.ftran_dense(&mut col_dense);

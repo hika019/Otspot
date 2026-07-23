@@ -178,10 +178,9 @@ pub fn compute_sensitivity(
             continue;
         }
         let mut ya = 0.0;
-        if let Ok((rows, vals)) = sf.a.get_column(k) {
-            for (idx, &row) in rows.iter().enumerate() {
-                ya += y_sf[row] * vals[idx];
-            }
+        let (rows, vals) = sf.a.column(k);
+        for (idx, &row) in rows.iter().enumerate() {
+            ya += y_sf[row] * vals[idx];
         }
         c_bar[k] = sf.c[k] - ya;
     }
@@ -267,10 +266,9 @@ pub fn compute_sensitivity(
                 }
                 // η_k = π_p^T a_sf_k.
                 let mut eta = 0.0;
-                if let Ok((rows, vals)) = sf.a.get_column(k) {
-                    for (idx, &row) in rows.iter().enumerate() {
-                        eta += buf[row] * vals[idx];
-                    }
+                let (rows, vals) = sf.a.column(k);
+                for (idx, &row) in rows.iter().enumerate() {
+                    eta += buf[row] * vals[idx];
                 }
                 // Direct change in c_sf[k] per unit δ_cj (nonzero only for
                 // a free-variable split where k is the companion column of j).

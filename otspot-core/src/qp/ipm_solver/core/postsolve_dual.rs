@@ -137,7 +137,16 @@ pub(super) fn refine_postsolve_recovery(
                 QpPostsolveStep::SingletonRow { row, col, .. } => (*row, *col),
                 _ => continue,
             };
-            let bc = bc_vec.get(col).copied().unwrap_or(0.0);
+            let bc = *bc_vec.get(col).expect(
+                "col < num_vars: SingletonRow.col is always seeded from 0..prob.num_vars \
+                 (presolve/qp_transforms/{steps_basic,steps_free}.rs) against the single \
+                 QpProblem reference threaded through the whole fixpoint loop \
+                 (driver.rs::run_qp_presolve_phase1), and row_entries is only ever \
+                 populated once in Workspace::from_problem — presolve masks columns via \
+                 removed_cols, it never grows row_entries with foreign indices. \
+                 bound_contrib() always returns len() == bounds.len() == num_vars \
+                 (QpProblem::new enforces bounds.len() == num_vars).",
+            );
             recover_y_for_singleton_row_with_bound(row, col, orig_problem, final_sol, bc);
         }
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);

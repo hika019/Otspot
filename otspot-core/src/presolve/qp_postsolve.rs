@@ -272,9 +272,24 @@ pub(crate) fn recover_y_for_singleton_row_with_bound(
     sol: &mut SolverResult,
     bound_contrib_col: f64,
 ) {
-    if row >= orig.num_constraints || col >= orig.num_vars {
-        return;
-    }
+    // row < orig.num_constraints && col < orig.num_vars always holds: every
+    // production caller passes (row, col) straight from a QpPostsolveStep::
+    // SingletonRow / SingletonIneqToBound, and every push site for those variants
+    // (presolve/qp_transforms/{steps_basic,steps_bounds,steps_free}.rs) loops
+    // `i in 0..prob.num_constraints` / `j in 0..prob.num_vars` on the single
+    // QpProblem reference threaded unchanged through run_qp_presolve_phase1's
+    // whole fixpoint loop (driver.rs) — i.e. `orig` itself.
+    assert!(
+        row < orig.num_constraints && col < orig.num_vars,
+        "recover_y_for_singleton_row_with_bound: row={row}, col={col} out of range \
+         for orig (num_constraints={}, num_vars={})",
+        orig.num_constraints,
+        orig.num_vars
+    );
+    // Unlike (row, col), `sol` and `orig` are independent parameters with no
+    // type-level pairing to the presolve_result the step came from — a caller
+    // could pass a `sol` built against a different problem's constraint count.
+    // Genuine defensive guard against that cross-parameter mismatch; kept.
     if sol.dual_solution.len() != orig.num_constraints {
         return;
     }

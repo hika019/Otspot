@@ -218,7 +218,11 @@ fn build_mccormick_lp(
     let p = pairs.len();
     let total_vars = n + p;
 
-    let q = CscMatrix::from_triplets(&[], &[], &[], total_vars, total_vars).ok()?;
+    // Empty triplet lists can never fail from_triplets: rows/cols/vals are all
+    // len()==0 (no length mismatch), there are no values to fail the finiteness
+    // check, and no indices to fail the bounds check — true for any total_vars.
+    let q = CscMatrix::from_triplets(&[], &[], &[], total_vars, total_vars)
+        .expect("empty triplets are always well-formed for any total_vars");
 
     let mut c = vec![0.0_f64; total_vars];
     c[..n].copy_from_slice(&problem.c);
@@ -269,6 +273,13 @@ fn build_mccormick_lp(
     let mut row = problem.num_constraints;
     if !include_envelope {
         debug_assert_eq!(row, total_rows);
+        // Genuine fallback, not dead: `bounds` already includes w_interval(node_bounds)
+        // products (li*li, li*lj, ...) computed above regardless of include_envelope.
+        // all_bounds_finite (checked by the caller) only requires is_finite(), not a
+        // magnitude bound, so extreme-but-finite node_bounds can make these products
+        // overflow to ±inf, which QpProblem::new legitimately rejects via its b/bounds
+        // finiteness check. The doc comment on this fn already treats `None` here as
+        // an expected "fall back to another lower-bound method" outcome.
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, total_rows, total_vars).ok()?;
         let mut lifted = QpProblem::new(q, c, a, b, bounds, types).ok()?;
         lifted.obj_offset = problem.obj_offset;
@@ -355,6 +366,13 @@ fn build_mccormick_lp(
     }
     debug_assert_eq!(row, total_rows);
 
+    // Genuine fallback, not dead: the envelope rows above push coefficients
+    // (li*lj, li*li, -(li+ui), ...) synthesized from node_bounds. all_bounds_finite
+    // (checked by the caller) only requires is_finite(), not a magnitude bound, so
+    // extreme-but-finite node_bounds can make these products overflow to ±inf, which
+    // from_triplets/QpProblem::new legitimately reject via their vals/b finiteness
+    // checks. The doc comment on this fn already treats `None` here as an expected
+    // "fall back to another lower-bound method" outcome.
     let a = CscMatrix::from_triplets(&rows, &cols, &vals, total_rows, total_vars).ok()?;
 
     let mut lifted = QpProblem::new(q, c, a, b, bounds, types).ok()?;

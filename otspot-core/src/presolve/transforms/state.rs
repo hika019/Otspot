@@ -168,15 +168,14 @@ impl PresolveState {
         let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
         let mut col_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; n];
         for j in 0..n {
-            if let Ok((rows, vals)) = problem.a.get_column(j) {
-                for (k, &row) in rows.iter().enumerate() {
-                    let v = vals[k];
-                    if v.abs() < ZERO_TOL {
-                        continue;
-                    }
-                    row_entries[row].push((j, v));
-                    col_entries[j].push((row, v));
+            let (rows, vals) = problem.a.column(j);
+            for (k, &row) in rows.iter().enumerate() {
+                let v = vals[k];
+                if v.abs() < ZERO_TOL {
+                    continue;
                 }
+                row_entries[row].push((j, v));
+                col_entries[j].push((row, v));
             }
         }
 

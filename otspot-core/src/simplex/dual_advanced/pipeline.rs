@@ -111,8 +111,7 @@ where
                     }
                     return None;
                 }
-                BoundedTerminalReconcile::MatrixAccessError
-                | BoundedTerminalReconcile::SingularBasis => {
+                BoundedTerminalReconcile::SingularBasis => {
                     return Some(mark_eq_ub_path(SolverResult::numerical_error()));
                 }
             };
@@ -171,8 +170,7 @@ where
                         ..Default::default()
                     }));
                 }
-                BoundedTerminalReconcile::MatrixAccessError
-                | BoundedTerminalReconcile::SingularBasis => {
+                BoundedTerminalReconcile::SingularBasis => {
                     return Some(mark_eq_ub_path(SolverResult::numerical_error()));
                 }
             };
@@ -281,8 +279,7 @@ pub(super) fn finish_bounded(
                             let obj = bounded_obj_from_state(c, ubs, &p2_state);
                             SimplexOutcome::Timeout(obj)
                         }
-                        BoundedTerminalReconcile::MatrixAccessError
-                        | BoundedTerminalReconcile::SingularBasis => SimplexOutcome::SingularBasis,
+                        BoundedTerminalReconcile::SingularBasis => SimplexOutcome::SingularBasis,
                     }
                 }
                 other => other,

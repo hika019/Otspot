@@ -70,11 +70,16 @@ pub(crate) fn add_eta(pivot_col: &[f64], leaving_row: usize) -> EtaMatrix {
 }
 
 /// Builds an [`EtaMatrix`] from a sparse pivot column. Avoids dense conversion; output is sorted by index.
-pub(crate) fn add_eta_sparse(pivot_col: &SparseVec, leaving_row: usize) -> EtaMatrix {
-    let pivot_element = match pivot_col.indices.binary_search(&leaving_row) {
-        Ok(pos) => pivot_col.values[pos],
-        Err(_) => 0.0,
-    };
+///
+/// `pivot_element` must be the value of `pivot_col` at `leaving_row`, already located and
+/// validated (finite, non-zero) by the caller — this function does not re-search for it, so a
+/// mismatched `pivot_element` silently corrupts the resulting eta matrix.
+pub(crate) fn add_eta_sparse(
+    pivot_col: &SparseVec,
+    leaving_row: usize,
+    pivot_element: f64,
+) -> EtaMatrix {
+    debug_assert!(pivot_element.is_finite() && pivot_element != 0.0);
     let inv_pivot = 1.0 / pivot_element;
     let mut indices = Vec::new();
     let mut values = Vec::new();
@@ -234,7 +239,7 @@ mod tests {
     #[test]
     fn test_eta_sparse_from_sparse_vec() {
         let sv = SparseVec::from_dense(&[2.0, 1.0, 0.5]);
-        let eta = add_eta_sparse(&sv, 0);
+        let eta = add_eta_sparse(&sv, 0, 2.0);
 
         let val_at = |idx: usize| -> f64 {
             for (k, &i) in eta.indices.iter().enumerate() {
@@ -247,5 +252,34 @@ mod tests {
         assert!((val_at(0) - 0.5).abs() < 1e-10);
         assert!((val_at(1) - (-0.5)).abs() < 1e-10);
         assert!((val_at(2) - (-0.25)).abs() < 1e-10);
+    }
+
+    /// `add_eta_sparse` must use the caller-supplied `pivot_element` verbatim and must not
+    /// re-derive it from `pivot_col` internally. This is the contract that lets the sole caller
+    /// (`basis::LuBasis::update`) reuse its own already-validated pivot lookup instead of
+    /// duplicating a binary search. Passing a `pivot_element` that intentionally diverges from
+    /// `pivot_col`'s stored value at `leaving_row` proves there is no hidden re-derivation: if one
+    /// were reintroduced, this test's expected values (computed from the injected element) would
+    /// no longer match.
+    #[test]
+    fn test_eta_sparse_uses_supplied_pivot_element_verbatim() {
+        let sv = SparseVec::from_dense(&[2.0, 1.0, 0.5]);
+        // Deliberately not 2.0 (the value actually stored at leaving_row=0 in `sv`).
+        let injected_pivot_element = 4.0;
+        let eta = add_eta_sparse(&sv, 0, injected_pivot_element);
+
+        let val_at = |idx: usize| -> f64 {
+            for (k, &i) in eta.indices.iter().enumerate() {
+                if i == idx {
+                    return eta.values[k];
+                }
+            }
+            0.0
+        };
+        // 1/pivot_element and -pivot_col[i]/pivot_element, using the injected 4.0 (not the 2.0
+        // that a re-derivation from `sv` would have produced).
+        assert!((val_at(0) - 0.25).abs() < 1e-10);
+        assert!((val_at(1) - (-0.25)).abs() < 1e-10);
+        assert!((val_at(2) - (-0.125)).abs() < 1e-10);
     }
 }

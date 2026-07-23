@@ -112,19 +112,17 @@ pub(crate) fn extract_dual_info_bounded(
 
     let mut slack = problem.b.clone();
     for (j, &sol_j) in solution.iter().enumerate().take(n_orig) {
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                slack[row] -= vals[k] * sol_j;
-            }
+        let (rows, vals) = problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            slack[row] -= vals[k] * sol_j;
         }
     }
 
     let mut reduced_costs = problem.c.clone();
     for (j, rc_j) in reduced_costs.iter_mut().enumerate().take(n_orig) {
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                *rc_j -= dual_solution[row] * vals[k];
-            }
+        let (rows, vals) = problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            *rc_j -= dual_solution[row] * vals[k];
         }
     }
     project_reduced_costs_to_active_bounds(problem, solution, &mut reduced_costs);

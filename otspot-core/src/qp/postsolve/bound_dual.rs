@@ -124,11 +124,7 @@ pub(crate) fn zero_inactive_inequality_duals(problem: &QpProblem, result: &mut S
     {
         return;
     }
-    let Some((ax, row_abs_activity)) =
-        compute_dual_recovery_row_activity(problem, &result.solution)
-    else {
-        return;
-    };
+    let (ax, row_abs_activity) = compute_dual_recovery_row_activity(problem, &result.solution);
     for i in 0..problem.num_constraints {
         let slack = match problem.constraint_types[i] {
             crate::problem::ConstraintType::Le => problem.b[i] - ax[i],

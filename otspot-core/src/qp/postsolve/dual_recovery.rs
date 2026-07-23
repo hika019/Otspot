@@ -71,10 +71,14 @@ pub(crate) fn row_is_active_for_dual_recovery(
 }
 
 /// A·x と Σ_j |A_ij|·|x_j| を一度の走査で返す。dual recovery で頻繁に必要。
+///
+/// `solution.len() == problem.num_vars` は呼び出し元が保証する不変条件 (寸法不一致は内部の
+/// `mat_vec_mul` expect で panic する)。この関数自体には失敗経路がないため `Option` でなく
+/// 値を直接返す。
 pub(crate) fn compute_dual_recovery_row_activity(
     problem: &QpProblem,
     solution: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+) -> (Vec<f64>, Vec<f64>) {
     let ax = problem
         .a
         .mat_vec_mul(solution)
@@ -90,7 +94,7 @@ pub(crate) fn compute_dual_recovery_row_activity(
             row_abs_activity[row] += problem.a.values[k].abs() * xabs;
         }
     }
-    Some((ax, row_abs_activity))
+    (ax, row_abs_activity)
 }
 
 /// singleton 列 j を持つ行 i の y_i に対する feasible interval [lower, upper] を計算。
@@ -109,7 +113,7 @@ pub(crate) fn compute_dual_recovery_row_bounds(
         .q
         .mat_vec_mul(solution)
         .expect("dim validated upstream");
-    let (ax, row_abs_activity) = compute_dual_recovery_row_activity(problem, solution)?;
+    let (ax, row_abs_activity) = compute_dual_recovery_row_activity(problem, solution);
 
     let mut lower = vec![f64::NEG_INFINITY; m];
     let mut upper = vec![f64::INFINITY; m];

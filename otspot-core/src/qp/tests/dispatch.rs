@@ -153,3 +153,42 @@ fn lp_conversion_error_returns_numerical_error_not_infeasible() {
         result.stats.route
     );
 }
+
+/// Sentinel: a QP with nonzero Q and an empty variable box (lb > ub) must solve
+/// to Infeasible via the IPM path, with presolve either ON or OFF.
+///
+/// This is the crux gap: with presolve OFF the IPM never sees a bound-consistency
+/// check, and its initial point (`(lb+ub)/2`, then bound clamps) assumes `lb <= ub`.
+/// The `first_infeasible_bound` guard in `dispatch_solve_qp` must intercept before
+/// the IPM runs. Reverting the guard does NOT panic — the clamp margins keep the
+/// same sign as the (negative) range, so `clamp` is never handed `min > max` — but
+/// the IPM iterates on the empty box and terminates with a silently WRONG
+/// `SolveStatus::Stalled` (empirically verified). Detecting that wrong status is
+/// exactly what makes this sentinel load-bearing.
+#[test]
+fn qp_ipm_empty_box_lb_gt_ub_is_infeasible() {
+    use crate::options::SolverOptions;
+    // min 1/2 x^2  s.t.  (no constraints),  x ∈ [5, 3]  (empty box). Q≠0 → IPM.
+    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let c = vec![0.0];
+    let a = CscMatrix::new(0, 1);
+    let b = vec![];
+    let bounds = vec![(5.0, 3.0)];
+    let problem = QpProblem::new_all_le(q, c, a, b, bounds)
+        .expect("lb>ub box must be ACCEPTED at construction");
+    assert!(!problem.is_zero_q(), "Q must be nonzero to route to the IPM");
+    for presolve in [true, false] {
+        let opts = SolverOptions {
+            presolve,
+            ..Default::default()
+        };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::Infeasible,
+            "QP-IPM empty box must be Infeasible (presolve={presolve}), got {:?}",
+            result.status
+        );
+        assert_eq!(result.stats.route, SolveRoute::QpIpm);
+    }
+}

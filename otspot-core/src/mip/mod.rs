@@ -519,15 +519,20 @@ fn measure_strong_branch_scores<R: Relaxation>(
             (r_up.objective - parent_obj).max(0.0)
         };
 
-        if let Some(&k) = j_to_k.get(&j) {
-            let f_down = v - v.floor();
-            let f_up = v.ceil() - v;
-            if d_down.is_finite() && f_down > 1e-12 {
-                pc.record_down(k, d_down / f_down);
-            }
-            if d_up.is_finite() && f_up > 1e-12 {
-                pc.record_up(k, d_up / f_up);
-            }
+        // `j` is drawn from `candidates`, which `strong_branch_candidates` builds
+        // by iterating the same `integer_vars` slice that `j_to_k` was built
+        // from (`j_to_k = integer_vars.iter().enumerate().map(|(k, &j)| (j, k))`),
+        // so `j` is always a key of `j_to_k`.
+        let &k = j_to_k
+            .get(&j)
+            .expect("j is drawn from integer_vars, which built j_to_k");
+        let f_down = v - v.floor();
+        let f_up = v.ceil() - v;
+        if d_down.is_finite() && f_down > 1e-12 {
+            pc.record_down(k, d_down / f_down);
+        }
+        if d_up.is_finite() && f_up > 1e-12 {
+            pc.record_up(k, d_up / f_up);
         }
 
         let score = branch::pseudocost_score(d_down, d_up);
@@ -1239,19 +1244,26 @@ fn process_node_outcome<R: Relaxation>(
         // that score() can correctly predict gains at different fractionalities.
         if use_reliability {
             if let Some(jb) = node.branch_var {
-                if let Some(&k) = j_to_k.get(&jb) {
-                    let delta = (res.objective - node.parent_obj).max(0.0);
-                    let v = node.branch_parent_val;
-                    if node.branch_up {
-                        let f_up = v.ceil() - v;
-                        if f_up > 1e-12 {
-                            pc.record_up(k, delta / f_up);
-                        }
-                    } else {
-                        let f_down = v - v.floor();
-                        if f_down > 1e-12 {
-                            pc.record_down(k, delta / f_down);
-                        }
+                // `node.branch_var` is only ever set (via `child_branched`) to the
+                // `jb` returned by `pick_branch_var`, which always returns a `j`
+                // that is a key of `j_to_k` (either from `integer_vars` directly,
+                // via `select_branching_variable_reliability`, or via the
+                // `mask`-gated `select_branching_variable`, where `mask` and
+                // `j_to_k` are built from the same `integer_vars`).
+                let &k = j_to_k
+                    .get(&jb)
+                    .expect("node.branch_var is always a key of j_to_k");
+                let delta = (res.objective - node.parent_obj).max(0.0);
+                let v = node.branch_parent_val;
+                if node.branch_up {
+                    let f_up = v.ceil() - v;
+                    if f_up > 1e-12 {
+                        pc.record_up(k, delta / f_up);
+                    }
+                } else {
+                    let f_down = v - v.floor();
+                    if f_down > 1e-12 {
+                        pc.record_down(k, delta / f_down);
                     }
                 }
             }

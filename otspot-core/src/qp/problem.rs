@@ -565,16 +565,13 @@ mod tests {
         }
     }
 
-    // --- lb > ub ---
+    // --- finite lb > ub is a well-formed but infeasible box: ACCEPTED ---
+    // Rejecting at construction would prevent the solver from ever reporting
+    // Infeasible. Only illegal bound *values* (+inf lb / -inf ub) stay errors.
     #[test]
-    fn lb_gt_ub_rejected() {
-        let cases: Vec<(f64, f64)> = vec![
-            (5.0, 1.0),
-            (1.0, 0.0),
-            (f64::INFINITY, f64::NEG_INFINITY),
-            (0.1, 0.0),
-        ];
-        for (lb, ub) in cases {
+    fn finite_lb_gt_ub_accepted() {
+        let accepted: Vec<(f64, f64)> = vec![(5.0, 1.0), (1.0, 0.0), (0.1, 0.0), (0.0, -1.0)];
+        for (lb, ub) in accepted {
             let res = make_qp(
                 vec![1.0, 2.0],
                 vec![5.0],
@@ -582,11 +579,24 @@ mod tests {
                 vec![1.0, 1.0],
                 vec![(lb, ub), (0.0, f64::INFINITY)],
             );
-            assert!(
-                matches!(res, Err(QpProblemError::InvalidBounds { .. })),
-                "expected InvalidBounds for lb={lb} ub={ub}"
-            );
+            assert!(res.is_ok(), "expected Ok (accept) for lb={lb} ub={ub}");
         }
+    }
+
+    // `(+∞, -∞)` stays rejected: illegal bound values, not a lb>ub case.
+    #[test]
+    fn qp_plus_inf_lb_minus_inf_ub_rejected() {
+        let res = make_qp(
+            vec![1.0, 2.0],
+            vec![5.0],
+            vec![],
+            vec![1.0, 1.0],
+            vec![(f64::INFINITY, f64::NEG_INFINITY), (0.0, f64::INFINITY)],
+        );
+        assert!(
+            matches!(res, Err(QpProblemError::InvalidBounds { index: 0, .. })),
+            "expected InvalidBounds for (+inf,-inf)"
+        );
     }
 
     // --- inf bounds are valid ---

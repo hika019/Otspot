@@ -228,7 +228,7 @@ impl BasisManager for LuBasis {
             .filter(|p| p.is_finite() && p.abs() > crate::tolerances::PIVOT_TOL)
             .ok_or(SolverError::SingularBasis { step: leaving_row })?;
         debug_assert!(pivot.is_finite());
-        let eta = eta::add_eta_sparse(pivot_col, leaving_row);
+        let eta = eta::add_eta_sparse(pivot_col, leaving_row, pivot);
         self.eta_file.etas.push(eta);
         self.basis_indices[leaving_row] = entering_col;
         Ok(())

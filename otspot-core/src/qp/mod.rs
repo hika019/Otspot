@@ -163,6 +163,21 @@ fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     // resolve timeout_secs to the same derived deadline internally).
     let materialized = options.materialize_deadline();
     let options = materialized.as_ref().unwrap_or(options);
+    // Presolve-independent bound-consistency guard: an empty box (lb > ub) is
+    // trivially infeasible and must be reported before any branch, since the QP
+    // IPM initial point assumes lb <= ub (midpoint / clamp) and presolve — the
+    // only other detector — is skipped for large problems or when disabled.
+    if crate::problem::first_infeasible_bound(&problem.bounds).is_some() {
+        let mut result = SolverResult::infeasible();
+        result.stats.route = if problem.has_qcqp_constraints() {
+            SolveRoute::ConicQcqpConvex
+        } else if problem.is_zero_q() {
+            SolveRoute::LpForwardedFromQp
+        } else {
+            SolveRoute::QpIpm
+        };
+        return result;
+    }
     if problem.has_qcqp_constraints() {
         return qcqp_route::solve_qcqp_via_conic(problem, options);
     }
