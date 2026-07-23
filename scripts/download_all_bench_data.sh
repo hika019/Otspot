@@ -98,6 +98,26 @@ run_or_skip() {
   eval "$cmd"
 }
 
+# Force-regenerate deterministic, network-free synthetic data.
+#
+# Unlike run_or_skip (count-based skip), this ALWAYS re-runs the generator and
+# first wipes the target dir. Synthetic QPLIB generators can change their
+# output *format* (e.g. the required starting-point/names tail records) between
+# versions; run_or_skip would then keep a stale, format-incompatible cache
+# (restored via the `bench-data-` restore-keys prefix) because the file count
+# still matches. These generators are fast and need no network, so
+# unconditional regeneration is cheap and keeps the on-disk format in lockstep
+# with the current parser.
+regen() {
+  local dir=$1
+  local cmd=$2
+  if [[ -n "$dir" && "$dir" == data/* ]]; then
+    rm -rf "$dir"
+  fi
+  echo "[regen] $cmd"
+  eval "$cmd"
+}
+
 ensure_emps_for_lp_downloads() {
   case "$MODE" in
     all|lp|ci-subset)
@@ -281,10 +301,10 @@ if [[ "$MODE" == "all" || "$MODE" == "qp" ]]; then
   # gen 系
   run_or_skip data/osqp_bench_extra     238 "python3 scripts/gen_osqp_bench_extra.py"
   run_or_skip data/osqp_bench_illscaled 126 "python3 scripts/gen_osqp_bench_illscaled.py"
-  run_or_skip data/qp_dense_a           8   "python3 scripts/gen_dense_a_qp.py"
-  run_or_skip data/qp_infeasible        12  "python3 scripts/gen_infeasible_qp.py"
-  run_or_skip data/qp_unbounded         9   "python3 scripts/gen_unbounded_qp.py"
-  run_or_skip data/qplib_nonconvex      45  "python3 scripts/gen_nonconvex_qp.py"
+  regen data/qp_dense_a      "python3 scripts/gen_dense_a_qp.py"
+  regen data/qp_infeasible   "python3 scripts/gen_infeasible_qp.py"
+  regen data/qp_unbounded    "python3 scripts/gen_unbounded_qp.py"
+  regen data/qplib_nonconvex "python3 scripts/gen_nonconvex_qp.py"
 
   # Maros-Meszaros / QPLIB: 専用 download script
   run_or_skip data/maros_meszaros            138 "bash scripts/maros_meszaros_download.sh"
@@ -327,8 +347,8 @@ if [[ "$MODE" == "ci-subset" ]]; then
 
   run_or_skip data/osqp_bench            30  "bash scripts/setup_extra_benches.sh --no-suitesparse && python3 scripts/gen_osqp_bench.py"
   run_or_skip data/mpc_qp               64   "python3 scripts/gen_mpc_qp.py"
-  run_or_skip data/qp_dense_a            8   "python3 scripts/gen_dense_a_qp.py"
-  run_or_skip data/qplib_nonconvex      45   "python3 scripts/gen_nonconvex_qp.py"
+  regen data/qp_dense_a      "python3 scripts/gen_dense_a_qp.py"
+  regen data/qplib_nonconvex "python3 scripts/gen_nonconvex_qp.py"
   run_or_skip data/maros_meszaros       138  "bash scripts/maros_meszaros_download.sh"
   run_or_skip data/qplib                41   "bash scripts/qplib_download.sh"
   run_or_skip data/qplib_nonconvex_official 4 "bash scripts/qplib_nonconvex_download.sh"
