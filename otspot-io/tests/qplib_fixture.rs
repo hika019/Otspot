@@ -146,6 +146,7 @@ minimize
 0.0
 0
 0
+0
 ",
             num_vars: 2,
             num_constraints: 0,
@@ -194,6 +195,7 @@ minimize
 0.0
 0
 0.0
+0
 0
 0
 ";
@@ -313,6 +315,7 @@ minimize
 0.0
 0
 0
+0
 ";
     let max_input = "\
 MAX_TEST
@@ -332,6 +335,7 @@ maximize
 0.0
 0
 0.0
+0
 0
 0
 ";

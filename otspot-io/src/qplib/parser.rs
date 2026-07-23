@@ -62,7 +62,10 @@ fn consume_optional_tail(
     ts.finish_record();
     consume_indexed_values(ts, n, "initial primal")?;
 
-    // Table 8 note [2] omits constraint-indexed records for **N and **B.
+    // Table 8 note [2] omits the constraint-dual record for **N and **B
+    // (problems without general constraints have no constraint duals to
+    // report). The constraint-names count record has no such exemption: it
+    // is present for every con type, with count=0 when m=0.
     if has_constraint_sections {
         let value = ts.read_f64()?;
         require_finite(value, "initial constraint dual default", ts.line_number())?;
@@ -79,9 +82,7 @@ fn consume_optional_tail(
     ts.finish_record();
     consume_indexed_values(ts, n, "initial bound dual")?;
     consume_indexed_names(ts, n, "variable name")?;
-    if has_constraint_sections {
-        consume_indexed_names(ts, m, "constraint name")?;
-    }
+    consume_indexed_names(ts, m, "constraint name")?;
 
     match ts.next_token() {
         Some(token) => Err(QplibError::ParseError(format!(
@@ -179,19 +180,51 @@ mod tail_tests {
 
     #[test]
     fn required_records_ignore_plain_line_end_comments() {
-        let input = "plain_comment_fixture descriptive title\nlcb problem type\nminimize objective sense\n1 variables\n0 quadratic terms\n0 objective default\n0 objective exceptions\n0 objective constant\n1e20 infinity marker\n0 lower default\n0 lower exceptions\n1 upper default\n0 upper exceptions\n0 initial primal\n0 primal count\n0 bound dual\n0 bound dual count\n0 variable names\n";
+        let input = "plain_comment_fixture descriptive title\nlcb problem type\nminimize objective sense\n1 variables\n0 quadratic terms\n0 objective default\n0 objective exceptions\n0 objective constant\n1e20 infinity marker\n0 lower default\n0 lower exceptions\n1 upper default\n0 upper exceptions\n0 initial primal\n0 primal count\n0 bound dual\n0 bound dual count\n0 variable names\n0 constraint names\n";
         assert!(parse_token_stream(TokenStream::from_str(input)).is_ok());
     }
 
     #[test]
-    fn full_parser_accepts_official_n_and_b_omissions() {
+    fn full_parser_accepts_official_n_and_b_constraint_dual_omission() {
+        // **N and **B have no general constraints, so the tail's
+        // constraint-dual section is omitted; the constraint-names count
+        // record (final `0`) is still required (con-names are never omitted).
         let n_problem =
-            "official_n\nqcn\nmin\n1\n1\n1 1 2\n0\n0\n0\n1e20\n0\n0\n1\n0\n0\n0\n0\n0\n0\n";
+            "official_n\nqcn\nmin\n1\n1\n1 1 2\n0\n0\n0\n1e20\n0\n0\n1\n0\n0\n0\n0\n0\n0\n0\n";
         assert!(parse_token_stream(TokenStream::from_str(n_problem)).is_ok());
 
         let b_problem =
-            "official_b\nqcb\nmin\n1\n1\n1 1 2\n0\n0\n0\n1e20\n0\n0\n1\n0\n0\n0\n0\n0\n0\n";
+            "official_b\nqcb\nmin\n1\n1\n1 1 2\n0\n0\n0\n1e20\n0\n0\n1\n0\n0\n0\n0\n0\n0\n0\n";
         assert!(parse_token_stream(TokenStream::from_str(b_problem)).is_ok());
+    }
+
+    /// Sentinel for the con=B constraint-names bug: the tail layout mirrors
+    /// the official QPLIB_8991 fixture (con=B, m=0) — starting-point primal
+    /// default+count, bound-dual default+count, variable-names count,
+    /// constraint-names count, with NO constraint-dual section. Before the
+    /// fix, `consume_optional_tail` gated the constraint-names record on
+    /// `has_constraint_sections` (false for con=B) and rejected this input
+    /// with a truncation error.
+    #[test]
+    fn sentinel_con_b_full_official_tail_without_constraint_dual_parses_ok() {
+        let input = "SENTINEL_B\nQCB\nminimize\n2\n1\n1 1 1.0\n0.0\n0\n0.0\n1e20\n0.0\n0\n1.0\n0\n0.0\n0\n0.0\n0\n0\n0\n";
+        assert!(parse_token_stream(TokenStream::from_str(input)).is_ok());
+    }
+
+    /// Negative counterpart of `sentinel_con_b_full_official_tail_without_constraint_dual_parses_ok`:
+    /// the pre-fix "valid" con=B tail was only 5 records (primal
+    /// default+count, bound-dual default+count, variable-names count) and
+    /// omitted the constraint-names count entirely. That layout must now be
+    /// rejected: `consume_optional_tail` unconditionally reads the
+    /// constraint-names count record, so EOF after the 5th record is a
+    /// truncation error, not a valid (empty) file. If the unconditional
+    /// `consume_indexed_names(ts, m, "constraint name")` call were removed,
+    /// this input would incorrectly parse as `Ok(())` (5 tokens fully
+    /// consumed, nothing left to reject).
+    #[test]
+    fn sentinel_pre_fix_five_record_tail_missing_constraint_names_is_rejected() {
+        let input = "0\n0\n0\n0\n0\n";
+        assert!(consume_optional_tail(&mut TokenStream::from_str(input), 1, 0, false).is_err());
     }
 
     #[test]
@@ -211,7 +244,7 @@ mod tail_tests {
     #[test]
     fn full_parser_accepts_official_n_with_zero_q_and_integer_default() {
         let official =
-            "official_zero_q\nQCN\nmin\n1\n0\n1\n0\n0\n1e20\n0\n0\n1\n0\n0\n0\n0\n0\n0\n";
+            "official_zero_q\nQCN\nmin\n1\n0\n1\n0\n0\n1e20\n0\n0\n1\n0\n0\n0\n0\n0\n0\n0\n";
         assert!(parse_token_stream(TokenStream::from_str(official)).is_ok());
     }
 
@@ -231,7 +264,7 @@ mod tail_tests {
 
     #[test]
     fn full_parser_string_and_reader_have_identical_record_semantics() {
-        let input = "parity words\nLCB type\nmin sense\n1 vars\n0 q terms\n0 c\n0 c count\n0 q0\n1e20 inf\n0 lb\n0 lb count\n1 ub\n0 ub count\n0 x\n0 x count\n0 z\n0 z count\n0 names\n";
+        let input = "parity words\nLCB type\nmin sense\n1 vars\n0 q terms\n0 c\n0 c count\n0 q0\n1e20 inf\n0 lb\n0 lb count\n1 ub\n0 ub count\n0 x\n0 x count\n0 z\n0 z count\n0 names\n0 con names\n";
         assert!(parse_token_stream(TokenStream::from_str(input)).is_ok());
         assert!(parse_token_stream(TokenStream::from_reader(io::Cursor::new(
             input.as_bytes().to_vec()
@@ -246,8 +279,11 @@ mod tail_tests {
     }
 
     #[test]
-    fn optional_tail_accepts_official_m_zero_omission() {
-        let official = "0\n0\n0\n0\n0\n";
+    fn optional_tail_accepts_official_m_zero_constraint_dual_omission() {
+        // has_constraint_sections=false → no constraint-dual default/count
+        // records; the trailing `0` is still the required constraint-names
+        // count (m=0 ⇒ must be 0, but the record itself is never omitted).
+        let official = "0\n0\n0\n0\n0\n0\n";
         assert!(consume_optional_tail(&mut TokenStream::from_str(official), 2, 0, false).is_ok());
     }
 

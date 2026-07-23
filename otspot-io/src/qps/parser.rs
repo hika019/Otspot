@@ -479,11 +479,25 @@ impl QpsParser {
         let mut bounds = vec![(0.0_f64, f64::INFINITY); n];
         for (bound_type, col_name, value) in &self.bounds {
             let col_idx = col_map[col_name.as_str()];
+            // LO/UP/FX are value_required at parse time (`parse_bounds_entry`),
+            // so `value` is guaranteed `Some` here. The `ok_or_else` is defense
+            // against that invariant regressing: it must surface as an error,
+            // not silently fabricate 0.0/INFINITY.
+            let require_value = || -> Result<f64, QpsError> {
+                value.ok_or_else(|| QpsError::ParseError {
+                    line: 0,
+                    message: format!(
+                        "BOUNDS: {:?} entry for column '{}' requires a value but none was \
+                         recorded",
+                        bound_type, col_name
+                    ),
+                })
+            };
             match bound_type {
-                BoundType::LO => bounds[col_idx].0 = value.unwrap_or(0.0),
-                BoundType::UP => bounds[col_idx].1 = value.unwrap_or(f64::INFINITY),
+                BoundType::LO => bounds[col_idx].0 = require_value()?,
+                BoundType::UP => bounds[col_idx].1 = require_value()?,
                 BoundType::FX => {
-                    let val = value.unwrap_or(0.0);
+                    let val = require_value()?;
                     bounds[col_idx] = (val, val);
                 }
                 BoundType::FR => bounds[col_idx] = (f64::NEG_INFINITY, f64::INFINITY),
@@ -574,4 +588,55 @@ pub(super) fn parse_qps_source<S: LineSource>(source: &S) -> Result<QpProblem, Q
 /// holding the input in memory.
 pub fn parse_qps_reader<R: BufRead + Seek>(reader: R) -> Result<QpProblem, QpsError> {
     parse_qps_source(&ReaderSource::new(reader))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `parse_bounds_entry` guarantees `value_required` bound types (LO, UP,
+    /// FX) never carry `None` by the time they reach `self.bounds`. This
+    /// bypasses that guard by constructing the parser's internal state
+    /// directly, to prove `build_qp_problem` treats a violation of the
+    /// invariant as a hard error instead of fabricating a bound.
+    fn parser_with_dangling_bound(bound_type: BoundType) -> QpsParser {
+        let mut parser = QpsParser::new(Format::Free);
+        parser.columns.push(("x".to_string(), "obj".to_string(), 1.0));
+        parser.bounds.push((bound_type, "x".to_string(), None));
+        parser
+    }
+
+    #[test]
+    fn build_qp_problem_rejects_missing_value_for_lo_bound() {
+        let parser = parser_with_dangling_bound(BoundType::LO);
+        let err = parser.build_qp_problem().unwrap_err();
+        assert!(matches!(err, QpsError::ParseError { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn build_qp_problem_rejects_missing_value_for_up_bound() {
+        let parser = parser_with_dangling_bound(BoundType::UP);
+        let err = parser.build_qp_problem().unwrap_err();
+        assert!(matches!(err, QpsError::ParseError { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn build_qp_problem_rejects_missing_value_for_fx_bound() {
+        let parser = parser_with_dangling_bound(BoundType::FX);
+        let err = parser.build_qp_problem().unwrap_err();
+        assert!(matches!(err, QpsError::ParseError { .. }), "{err:?}");
+    }
+
+    /// Valueless bound types must still succeed with `value = None`; this is
+    /// their normal, well-formed state, not a violated invariant.
+    #[test]
+    fn build_qp_problem_accepts_valueless_bound_types() {
+        for bound_type in [BoundType::FR, BoundType::MI, BoundType::BV, BoundType::PL] {
+            let parser = parser_with_dangling_bound(bound_type);
+            assert!(
+                parser.build_qp_problem().is_ok(),
+                "valueless bound type {bound_type:?} must not require a value"
+            );
+        }
+    }
 }

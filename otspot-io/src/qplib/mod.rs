@@ -157,6 +157,7 @@ minimize
 0.0
 0
 0
+0
 ";
         let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 2);
@@ -1128,7 +1129,7 @@ minimize
         content.push_str("0.0\n0\n0.0\n");
         content.push_str("1.0e308\n");
         content.push_str("0.0\n0\n1.0\n0\n");
-        content.push_str("0.0\n0\n0.0\n0\n0\n");
+        content.push_str("0.0\n0\n0.0\n0\n0\n0\n");
 
         let result = parse_qplib_str(&content);
         assert!(result.is_ok(), "dense Q parse failed: {:?}", result.err());

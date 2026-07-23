@@ -98,6 +98,20 @@ def write_qplib(prob: QpProblem, out_path: Path) -> None:
     for i, ub in nondefault_ub_var:
         lines.append(f"{i} {ub:.15g}")
 
+    # QPLIB optional tail: starting-point (primal/constraint-dual/bound-dual)
+    # + names sections. All default/empty here. constraint-dual is present
+    # only when the problem has general constraints (con_type in 'L','Q');
+    # the constraint-names count is unconditional (present even for con_type='B').
+    lines.append("0.0")  # default variable primal value in starting point
+    lines.append("0")    # number of non-default variable primal values
+    if prob.con_type in ('L', 'Q'):
+        lines.append("0.0")  # default constraint dual value in starting point
+        lines.append("0")    # number of non-default constraint dual values
+    lines.append("0.0")  # default variable bound dual value in starting point
+    lines.append("0")    # number of non-default variable bound dual values
+    lines.append("0")    # number of non-default variable names
+    lines.append("0")    # number of non-default constraint names
+
     out_path.write_text("\n".join(lines) + "\n")
 
 
