@@ -20,11 +20,15 @@ pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult
          q.ncols() == num_vars, and solution.len() == n is checked above",
     );
     let aty: Vec<f64> = if problem.a.nrows > 0 && !result.dual_solution.is_empty() {
-        problem.a.transpose().mat_vec_mul(&result.dual_solution).expect(
-            "a.transpose().ncols() == a.nrows() == num_constraints == dual_solution.len(): \
+        problem
+            .a
+            .transpose()
+            .mat_vec_mul(&result.dual_solution)
+            .expect(
+                "a.transpose().ncols() == a.nrows() == num_constraints == dual_solution.len(): \
              QpProblem::new() enforces a.nrows() == num_constraints, and \
              dual_solution.len() == a.nrows is checked above",
-        )
+            )
     } else {
         vec![0.0_f64; n]
     };

@@ -596,7 +596,9 @@ mod tests {
     /// invariant as a hard error instead of fabricating a bound.
     fn parser_with_dangling_bound(bound_type: BoundType) -> MpsParser {
         let mut parser = MpsParser::new(Format::Free);
-        parser.columns.push(("x".to_string(), "obj".to_string(), 1.0));
+        parser
+            .columns
+            .push(("x".to_string(), "obj".to_string(), 1.0));
         parser.bounds.push((bound_type, "x".to_string(), None));
         parser
     }

@@ -176,7 +176,10 @@ fn qp_ipm_empty_box_lb_gt_ub_is_infeasible() {
     let bounds = vec![(5.0, 3.0)];
     let problem = QpProblem::new_all_le(q, c, a, b, bounds)
         .expect("lb>ub box must be ACCEPTED at construction");
-    assert!(!problem.is_zero_q(), "Q must be nonzero to route to the IPM");
+    assert!(
+        !problem.is_zero_q(),
+        "Q must be nonzero to route to the IPM"
+    );
     for presolve in [true, false] {
         let opts = SolverOptions {
             presolve,

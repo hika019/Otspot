@@ -140,7 +140,10 @@ fn append_ge_rows_preserves_large_material_bound_gap() {
         (1.0e12 + 1.0, 1.0e12),
         "large material empty box must be preserved, not scaled/snapped away"
     );
-    assert!(out.bounds[0].0 > out.bounds[0].1, "empty box preserved (lb>ub)");
+    assert!(
+        out.bounds[0].0 > out.bounds[0].1,
+        "empty box preserved (lb>ub)"
+    );
 }
 
 #[test]
@@ -158,7 +161,10 @@ fn append_ge_rows_preserves_material_empty_box() {
         (1.0 + ZERO_TOL * 10.0, 1.0),
         "material empty box must be kept verbatim (flows through as Infeasible)"
     );
-    assert!(out.bounds[0].0 > out.bounds[0].1, "empty box preserved (lb>ub)");
+    assert!(
+        out.bounds[0].0 > out.bounds[0].1,
+        "empty box preserved (lb>ub)"
+    );
 }
 
 /// min x+y s.t. 2x+2y>=3, x,y∈[0,3]. Ge constraint ⇒ surplus-slack mapping.

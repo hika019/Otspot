@@ -753,7 +753,7 @@ mod tests {
         assert!(is_valid_bound_pair(f64::NEG_INFINITY, f64::INFINITY));
         // lb>ub with a legal infinite side: -inf..-5 is lb<ub; test 3.0 > -inf side.
         assert!(is_valid_bound_pair(3.0, f64::INFINITY)); // fine
-        // NaN endpoints are invalid.
+                                                          // NaN endpoints are invalid.
         assert!(!is_valid_bound_pair(f64::NAN, 1.0));
         assert!(!is_valid_bound_pair(1.0, f64::NAN));
         assert!(!is_valid_bound_pair(f64::NAN, f64::NAN));
