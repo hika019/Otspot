@@ -39,11 +39,14 @@ fn qps_convex_qp_via_conic_bridge_matches_native_qp() {
             "{name}: conic bridge status {:?}",
             conic.status
         );
-        let rel = (conic.objective - native.objective).abs() / (1.0 + native.objective.abs());
+        // `solve_qp_problem_as_qcqp` reports only 1/2 x^T Q x + c^T x;
+        // the public QP route adds the parsed objective offset afterwards.
+        let conic_objective = conic.objective + qp.obj_offset;
+        let rel = (conic_objective - native.objective).abs() / (1.0 + native.objective.abs());
         assert!(
             rel < 1e-4,
             "{name}: conic {} vs native {} (rel {rel:.2e})",
-            conic.objective,
+            conic_objective,
             native.objective
         );
     }
