@@ -720,9 +720,7 @@ impl Model {
         let mut eq_v = Vec::new();
         let mut b_eq = Vec::new();
         for i in 0..a.nrows() {
-            let (idx, val) = a_t
-                .get_column(i)
-                .expect("row i is within a_t's column range 0..a.nrows()");
+            let (idx, val) = a_t.column(i);
             match constraint_types[i] {
                 ConstraintType::Le => {
                     let row = ineq_h.len();

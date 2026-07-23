@@ -102,7 +102,7 @@ pub(crate) fn break_symmetry(milp: &MilpProblem) -> MilpProblem {
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();
     for col in 0..lp.a.ncols() {
-        let (rs, vs) = lp.a.get_column(col).expect("valid column");
+        let (rs, vs) = lp.a.column(col);
         for (&r, &v) in rs.iter().zip(vs) {
             trip_rows.push(r);
             trip_cols.push(col);
@@ -311,7 +311,7 @@ mod tests {
         let mut cols = Vec::new();
         let mut vals = Vec::new();
         for c in 0..a.ncols() {
-            let (rs, vs) = a.get_column(c).unwrap();
+            let (rs, vs) = a.column(c);
             for (&r, &v) in rs.iter().zip(vs) {
                 if r == target_row {
                     cols.push(c);

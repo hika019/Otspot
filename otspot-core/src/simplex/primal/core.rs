@@ -408,7 +408,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         };
 
         // FTRAN: d = B^{-1} a_entering
-        let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
+        let (col_rows, col_vals) = a.column(entering_col);
         // Save inf-norm of original column for the corruption check below.
         let orig_col_norm = col_vals
             .iter()
@@ -474,7 +474,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                         return SimplexOutcome::Timeout(obj);
                     }
                 }
-                let (cr2, cv2) = a.get_column(entering_col).unwrap();
+                let (cr2, cv2) = a.column(entering_col);
                 d_sv = SparseVec {
                     indices: cr2.to_vec(),
                     values: cv2.to_vec(),
@@ -827,8 +827,16 @@ mod revert_to_snapshot_tests {
         );
         // Transactional: state must be untouched on failure so the caller's
         // basic_obj(c, basis, x_b) for SimplexOutcome::Timeout stays consistent.
-        assert_eq!(basis, vec![0, 1], "basis must be unchanged on revert failure");
-        assert_eq!(x_b, vec![5.0, 7.0], "x_b must be unchanged on revert failure");
+        assert_eq!(
+            basis,
+            vec![0, 1],
+            "basis must be unchanged on revert failure"
+        );
+        assert_eq!(
+            x_b,
+            vec![5.0, 7.0],
+            "x_b must be unchanged on revert failure"
+        );
     }
 
     /// A structurally singular reverted-to basis (duplicate column) must still

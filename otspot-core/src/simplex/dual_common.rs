@@ -69,7 +69,7 @@ pub(super) fn compute_reduced_costs_into(
             rc_out[j] = 0.0;
             continue;
         }
-        let (rows, vals) = a.get_column(j).unwrap();
+        let (rows, vals) = a.column(j);
         let mut ya = 0.0;
         for (k, &row) in rows.iter().enumerate() {
             ya += y_buf[row] * vals[k];
@@ -614,7 +614,7 @@ mod tests {
         let y = compute_dual_vars(&c, &mut bm, &basis, m);
 
         for i in 0..m {
-            let (rs, vs) = a.get_column(basis[i]).unwrap();
+            let (rs, vs) = a.column(basis[i]);
             let mut dot = 0.0;
             for (k, &row) in rs.iter().enumerate() {
                 dot += y[row] * vs[k];

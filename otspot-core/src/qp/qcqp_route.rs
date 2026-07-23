@@ -256,9 +256,7 @@ fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
         let qmat = has_qc
             .then(|| &src.quadratic_constraints[k])
             .filter(|qc| qc.nnz() > 0);
-        let (row_idx, row_val) = a_rows
-            .get_column(k)
-            .map_err(|e| format!("A row {k}: {e:?}"))?;
+        let (row_idx, row_val) = a_rows.column(k);
         match src.constraint_types[k] {
             ConstraintType::Le => match qmat {
                 Some(qc) => {

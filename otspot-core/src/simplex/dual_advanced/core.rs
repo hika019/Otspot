@@ -250,7 +250,7 @@ fn compute_reduced_costs_timed(
             if is_basic[k] {
                 continue;
             }
-            let (rows, vals) = a.get_column(k).unwrap();
+            let (rows, vals) = a.column(k);
             let mut ya = 0.0;
             for (idx, &row) in rows.iter().enumerate() {
                 ya += y[row] * vals[idx];
@@ -462,7 +462,7 @@ pub(crate) fn dual_simplex_core_advanced(
                 trow[j] = 0.0;
                 continue;
             }
-            let (rows, vals) = a.get_column(j).unwrap();
+            let (rows, vals) = a.column(j);
             let mut dot = 0.0;
             for (k, &row) in rows.iter().enumerate() {
                 dot += rho_dense[row] * vals[k];
@@ -613,7 +613,7 @@ pub(crate) fn dual_simplex_core_advanced(
         };
 
         // 3f: FTRAN: α = B^{-1} a_q
-        let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
+        let (col_rows, col_vals) = a.column(entering_col);
         let mut alpha_sv = SparseVec {
             indices: col_rows.to_vec(),
             values: col_vals.to_vec(),

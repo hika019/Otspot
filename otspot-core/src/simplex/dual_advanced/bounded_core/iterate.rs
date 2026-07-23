@@ -320,7 +320,7 @@ pub(crate) fn iterate(
                 buf.trow[j] = 0.0;
                 continue;
             }
-            let (rows, vals) = a.get_column(j).unwrap();
+            let (rows, vals) = a.column(j);
             let mut dot = 0.0;
             for (k, &row) in rows.iter().enumerate() {
                 dot += buf.rho[row] * vals[k];
@@ -441,7 +441,7 @@ pub(crate) fn iterate(
         // Validate and commit the LU update before mutating the externally
         // returned solver state. A rejected eta must leave the whole state at
         // the last valid basis.
-        let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
+        let (col_rows, col_vals) = a.column(entering_col);
         let mut alpha_sv_for_update = SparseVec {
             indices: col_rows.to_vec(),
             values: col_vals.to_vec(),
@@ -585,7 +585,7 @@ pub(super) fn ftran_column(
 ) {
     debug_assert_eq!(out.len(), m);
     out.fill(0.0);
-    let (rows, vals) = a.get_column(col).unwrap();
+    let (rows, vals) = a.column(col);
     for (i, &row) in rows.iter().enumerate() {
         out[row] = vals[i];
     }

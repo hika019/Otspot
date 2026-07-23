@@ -183,7 +183,7 @@ fn compute_reduced_costs_window(
             if is_basic[k] {
                 rc_out[k] = 0.0;
             } else {
-                let (rows, vals) = a.get_column(k).unwrap();
+                let (rows, vals) = a.column(k);
                 let mut ya = 0.0;
                 for (ri, &row) in rows.iter().enumerate() {
                     ya += y[row] * vals[ri];

@@ -118,7 +118,7 @@ fn farkas_direction_certified(
         return false;
     }
     for j in 0..n_total {
-        let (rows, vals) = a_aug.get_column(j).unwrap();
+        let (rows, vals) = a_aug.column(j);
         let aty: f64 = rows.iter().zip(vals.iter()).map(|(&r, &v)| v * y[r]).sum();
         if aty > tol {
             return false;
@@ -316,7 +316,7 @@ struct BigMPhase1State {
 ///
 /// `CscMatrix::from_triplets` cannot fail here:
 /// - Row/col indices are in-bounds by construction: structural triplets come
-///   from `a.get_column(j)` for `j < n_total` (row < m, col < n_total <= n_aug
+///   from `a.column(j)` for `j < n_total` (row < m, col < n_total <= n_aug
 ///   since `a` is a valid `m x n_total` matrix), and artificial triplets use
 ///   `row = i < m` with `col = artificial_col_of_row[i] >= n_total` (both
 ///   callers assign `n_total + <offset>`).
@@ -343,7 +343,7 @@ fn build_a_aug(
     let mut trip_cols: Vec<usize> = Vec::with_capacity(a.nnz() + n_art_estimate);
     let mut trip_vals: Vec<f64> = Vec::with_capacity(a.nnz() + n_art_estimate);
     for j in 0..n_total {
-        let (rows, vals) = a.get_column(j).unwrap();
+        let (rows, vals) = a.column(j);
         for (k, &row) in rows.iter().enumerate() {
             let v = vals[k];
             if v.abs() > DROP_TOL {
@@ -390,7 +390,7 @@ fn build_identity_phase1_state(
 
     let mut c_aug_p1 = vec![0.0_f64; n_aug];
     for j in 0..n_total {
-        let (rows, vals) = a.get_column(j).unwrap();
+        let (rows, vals) = a.column(j);
         let mut sum_art = 0.0_f64;
         for (k, &row) in rows.iter().enumerate() {
             if sf.needs_artificial[row] {
@@ -578,7 +578,7 @@ fn try_build_crash_phase1_state(
             // basic 列: r_j = c[j] - a_j^T y = 0 by construction (B^T y = c_B)
             c_aug_p1[j] = c[j];
         } else {
-            let (rows, vals) = a_aug.get_column(j).unwrap();
+            let (rows, vals) = a_aug.column(j);
             let mut aty = 0.0_f64;
             for (k, &row) in rows.iter().enumerate() {
                 aty += vals[k] * y[row];
