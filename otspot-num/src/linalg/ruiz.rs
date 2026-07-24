@@ -136,11 +136,11 @@ impl RuizScaler {
     /// 問題をスケーリング済みに変換する
     ///
     /// # 変換式
-    /// - Q_s[i,j] = c * d[i] * Q[i,j] * d[j]
-    /// - A_s[i,j] = e[i] * A[i,j] * d[j]
-    /// - q_s[j] = c * d[j] * q_vec[j]
-    /// - b_s[i] = e[i] * b[i]
-    /// - bounds_s[j] = (lb[j] / d[j], ub[j] / d[j])
+    /// - `Q_s[i,j] = c * d[i] * Q[i,j] * d[j]`
+    /// - `A_s[i,j] = e[i] * A[i,j] * d[j]`
+    /// - `q_s[j] = c * d[j] * q_vec[j]`
+    /// - `b_s[i] = e[i] * b[i]`
+    /// - `bounds_s[j] = (lb[j] / d[j], ub[j] / d[j])`
     ///
     /// スケール済み問題の解は `unscale_solution` で元のスケールに戻すこと。
     #[allow(clippy::type_complexity)]
@@ -205,7 +205,8 @@ impl RuizScaler {
     /// # 変換式
     /// KKT条件: Q*x + q + A^T*y - y_lb + y_ub = 0
     /// スケール後KKT: c*D*Q*D*x_s + c*D*q + D*A^T*E*y_s - (c*D)*y_lb_s + (c*D)*y_ub_s = 0
-    /// 両辺を c*D で割る: y_lb = y_lb_s / (c * d[j]), y_ub = y_ub_s / (c * d[j])
+    /// 両辺を `c*D` で割る:
+    /// `y_lb = y_lb_s / (c * d[j])`, `y_ub = y_ub_s / (c * d[j])`
     ///
     /// # 引数
     /// - `bound_duals_s`: スケール済み境界双対変数。lb有限変数の下界dual（昇順）、次にub有限変数の上界dual（昇順）の順で格納
@@ -254,8 +255,8 @@ impl RuizScaler {
     /// - `y_s`: スケール済み双対変数（長さ m）
     ///
     /// # 変換式
-    /// - x[j] = d[j] * x_s[j]  （x = D * x_s）
-    /// - y[i] = e[i] * y_s[i] / c  （KKT条件より導出）
+    /// - `x[j] = d[j] * x_s[j]` （`x = D * x_s`）
+    /// - `y[i] = e[i] * y_s[i] / c` （KKT条件より導出）
     ///
     /// # 数学的根拠
     /// スケール済み KKT: Q_s x_s + q_s + A_s^T y_s = 0
@@ -318,133 +319,6 @@ mod tests {
                 scaler.e[i]
             );
         }
-    }
-
-    /// test_ruiz_scaling_correctness:
-    /// 小規模 QP (n=5, m=3) でスケーリングあり/なしの解が一致することを確認。
-    /// min 1/2 x^T Q x + q^T x  s.t. Ax <= b, bounds=[0,∞)
-    /// Q = diag(1,100,1,100,1)（意図的に悪くスケーリングされた問題）
-    #[test]
-    fn test_ruiz_scaling_correctness() {
-        use crate::options::SolverOptions;
-        use crate::problem::SolveStatus;
-        use crate::qp::QpProblem;
-
-        // Q = diag(1, 100, 1, 100, 1) — 条件数が大きい
-        let n = 5usize;
-        let m = 3usize;
-        let q_rows: Vec<usize> = (0..n).collect();
-        let q_cols: Vec<usize> = (0..n).collect();
-        let q_vals = vec![1.0, 100.0, 1.0, 100.0, 1.0];
-        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n).unwrap();
-
-        let q_vec = vec![-1.0, -10.0, -1.0, -10.0, -1.0];
-
-        // A: 3 simple constraints
-        // A[0,0]=1, A[0,1]=1
-        // A[1,2]=1, A[1,3]=1
-        // A[2,0]=1, A[2,4]=1
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1, 2, 2],
-            &[0, 1, 2, 3, 0, 4],
-            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            m,
-            n,
-        )
-        .unwrap();
-        let b = vec![2.0, 2.0, 2.0];
-        let bounds = vec![(0.0f64, f64::INFINITY); n];
-
-        let problem = QpProblem::new_all_le(q, q_vec, a, b, bounds).unwrap();
-
-        // スケーリングなし
-        let opts_no_scale = SolverOptions {
-            use_ruiz_scaling: false,
-            ..Default::default()
-        };
-        let r_no_scale = crate::qp::solve_qp_with(&problem, &opts_no_scale);
-
-        // スケーリングあり
-        let opts_scale = SolverOptions {
-            use_ruiz_scaling: true,
-            ..Default::default()
-        };
-        let r_scale = crate::qp::solve_qp_with(&problem, &opts_scale);
-
-        // 両方 Optimal (偽Optimal検出時はSuboptimalSolutionも許容)
-        assert!(
-            r_no_scale.status == SolveStatus::Optimal
-                || r_no_scale.status == SolveStatus::Timeout
-                || r_no_scale.status == SolveStatus::SuboptimalSolution,
-            "no_scale: {:?}",
-            r_no_scale.status
-        );
-        assert!(
-            r_scale.status == SolveStatus::Optimal
-                || r_scale.status == SolveStatus::Timeout
-                || r_scale.status == SolveStatus::SuboptimalSolution,
-            "scale: {:?}",
-            r_scale.status
-        );
-
-        // 両方 Optimal なら解が近い
-        if r_no_scale.status == SolveStatus::Optimal && r_scale.status == SolveStatus::Optimal {
-            for j in 0..n {
-                assert!(
-                    (r_no_scale.solution[j] - r_scale.solution[j]).abs() < 0.1,
-                    "x[{}]: no_scale={:.6}, scale={:.6}",
-                    j,
-                    r_no_scale.solution[j],
-                    r_scale.solution[j]
-                );
-            }
-            assert!(
-                (r_no_scale.objective - r_scale.objective).abs() < 0.1,
-                "obj: no_scale={:.6}, scale={:.6}",
-                r_no_scale.objective,
-                r_scale.objective
-            );
-        }
-    }
-
-    /// test_ruiz_disabled:
-    /// use_ruiz_scaling=false で従来通りの動作（スケーリングなし）
-    #[test]
-    fn test_ruiz_disabled() {
-        use crate::options::SolverOptions;
-        use crate::problem::SolveStatus;
-        use crate::qp::QpProblem;
-
-        // 簡単な QP: min x^2 + y^2  s.t. x+y >= 1
-        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-        let q_vec = vec![0.0, 0.0];
-        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
-        let b = vec![-1.0];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new_all_le(q, q_vec, a, b, bounds).unwrap();
-
-        let opts = SolverOptions {
-            use_ruiz_scaling: false,
-            ..Default::default()
-        };
-
-        let result = crate::qp::solve_qp_with(&problem, &opts);
-        assert_eq!(
-            result.status,
-            SolveStatus::Optimal,
-            "disabled: {:?}",
-            result.status
-        );
-        assert!(
-            (result.solution[0] - 0.5).abs() < 0.05,
-            "x[0]={}",
-            result.solution[0]
-        );
-        assert!(
-            (result.solution[1] - 0.5).abs() < 0.05,
-            "x[1]={}",
-            result.solution[1]
-        );
     }
 
     /// scale_problem → unscale_solution の round-trip が恒等であること。

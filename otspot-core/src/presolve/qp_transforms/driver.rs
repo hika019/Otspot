@@ -13,6 +13,8 @@ use super::steps_parallel::step8_parallel_row;
 use super::steps_redundancy::{step12_redundant_final, step5_redundant};
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
+use otspot_num::SolveControl;
+use otspot_presolve::run_fixpoint;
 
 /// Run all Phase-1 QP-presolve transforms: fixed-var / singleton / empty-row-col /
 /// redundant-constraint / parallel-row / bounds-tightening, plus diagonal-Q,
@@ -30,51 +32,30 @@ pub fn run_qp_presolve_phase1(prob: &QpProblem, opts: &SolverOptions) -> QpPreso
 
     let max_iter_pass = opts.presolve_max_pass;
 
-    let mut prev_removed_count = 0usize;
-    for _iter_pass in 0..max_iter_pass {
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            break;
-        }
-        let cur_removed_count = ws.removed_cols.iter().filter(|&&b| b).count()
+    let control = SolveControl {
+        deadline,
+        cancel: opts.cancel_flag.as_deref(),
+    };
+    let result = run_fixpoint(max_iter_pass, control, |_| {
+        let before = ws.removed_cols.iter().filter(|&&b| b).count()
             + ws.removed_rows.iter().filter(|&&b| b).count();
-        if _iter_pass > 0 && cur_removed_count == prev_removed_count {
-            break;
-        }
-        prev_removed_count = cur_removed_count;
-
-        if let Err(r) = step1_fix_var(prob, &mut ws) {
-            return r;
-        }
-        if let Err(r) = step2_singleton_row(prob, &mut ws) {
-            return r;
-        }
-        if let Err(r) = step9_singleton_ineq_to_bound(prob, &mut ws, deadline) {
-            return r;
-        }
-        if let Err(r) = step3_singleton_col(prob, &mut ws, deadline) {
-            return r;
-        }
-        if let Err(r) = step4_empty(prob, &mut ws) {
-            return r;
-        }
-        if let Err(r) = step5_redundant(prob, &mut ws) {
-            return r;
-        }
-        if let Err(r) = step7_free_var(prob, &mut ws, deadline) {
-            return r;
-        }
-        if let Err(r) = step8_parallel_row(prob, &mut ws, deadline) {
-            return r;
-        }
-        if let Err(r) = step10_implied_bounds(prob, &mut ws, deadline) {
-            return r;
-        }
-        if let Err(r) = step11_dual_fixing(prob, &mut ws) {
-            return r;
-        }
-        if let Err(r) = step12_redundant_final(prob, &mut ws) {
-            return r;
-        }
+        step1_fix_var(prob, &mut ws)?;
+        step2_singleton_row(prob, &mut ws)?;
+        step9_singleton_ineq_to_bound(prob, &mut ws, deadline)?;
+        step3_singleton_col(prob, &mut ws, deadline)?;
+        step4_empty(prob, &mut ws)?;
+        step5_redundant(prob, &mut ws)?;
+        step7_free_var(prob, &mut ws, deadline)?;
+        step8_parallel_row(prob, &mut ws, deadline)?;
+        step10_implied_bounds(prob, &mut ws, deadline)?;
+        step11_dual_fixing(prob, &mut ws)?;
+        step12_redundant_final(prob, &mut ws)?;
+        let after = ws.removed_cols.iter().filter(|&&b| b).count()
+            + ws.removed_rows.iter().filter(|&&b| b).count();
+        Ok(after != before)
+    });
+    if let Err(result) = result {
+        return result;
     }
 
     build_result(prob, opts, ws)

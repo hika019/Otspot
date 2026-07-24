@@ -1,5 +1,4 @@
-use crate::error::SolverError;
-use crate::tolerances::DROP_TOL;
+use crate::{SolverError, DROP_TOL};
 
 type CompressedFormat = (Vec<usize>, Vec<usize>, Vec<f64>);
 

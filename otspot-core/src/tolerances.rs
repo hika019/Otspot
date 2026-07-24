@@ -4,7 +4,7 @@
 //! 定数値を変更する場合はこのファイルのみを編集すればよい。
 
 /// 構造的ゼロ判定の閾値（絶対値がこれ以下の値をゼロとみなす）
-pub const ZERO_TOL: f64 = 1e-12;
+pub use otspot_num::ZERO_TOL;
 
 /// シンプレックス法の最適性・実行可能性判定の閾値
 pub const PIVOT_TOL: f64 = 1e-8;
@@ -14,7 +14,7 @@ pub const PIVOT_TOL: f64 = 1e-8;
 pub const REDUCED_COST_ZERO_TOL: f64 = 1e-8;
 
 /// 行列構築時の微小値除去の閾値
-pub const DROP_TOL: f64 = 1e-15;
+pub use otspot_num::DROP_TOL;
 
 /// シンプレックス法のピボット安定性しきい値
 ///

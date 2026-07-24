@@ -11,6 +11,8 @@ use super::state::{PresolveFlags, PresolveResult, PresolveState, PresolveStatus}
 use crate::problem::{ConstraintType, LpProblem};
 use crate::sparse::CscMatrix;
 use crate::tolerances::ZERO_TOL;
+use otspot_num::SolveControl;
+use otspot_presolve::run_fixpoint;
 
 pub fn run_presolve(
     problem: &LpProblem,
@@ -35,97 +37,90 @@ pub fn run_presolve_with_flags(
     let m = problem.num_constraints;
     let mut st = PresolveState::from_problem(problem);
 
-    // Loop until reduction == 0. Each step removes finitely many elements, so this
-    // terminates; the per-step deadline check is the only safety bound.
-    loop {
-        let prev_removed = st.removed_cols.iter().filter(|&&r| r).count()
-            + st.removed_rows.iter().filter(|&&r| r).count();
-        let mut new_fixed_by_step5 = 0usize;
-        let mut new_subst_steps = 0usize;
-
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Ok(PresolveResult::no_reduction(problem));
-        }
-        step1_fixed_variable(&mut st, deadline)?;
-
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Ok(PresolveResult::no_reduction(problem));
-        }
-        step2_singleton_row(&mut st, deadline)?;
-
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Ok(PresolveResult::no_reduction(problem));
-        }
-        step2b_forcing_row(&mut st, deadline)?;
-
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Ok(PresolveResult::no_reduction(problem));
-        }
-        step3a_empty_row(&mut st, deadline)?;
-
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Ok(PresolveResult::no_reduction(problem));
-        }
-        step3b_empty_column(&mut st, deadline)?;
-
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Ok(PresolveResult::no_reduction(problem));
-        }
-        step4_redundant_constraint(&mut st, deadline)?;
-
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Ok(PresolveResult::no_reduction(problem));
-        }
-        step5_bounds_tightening(&mut st, &mut new_fixed_by_step5, deadline)?;
-
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Ok(PresolveResult::no_reduction(problem));
-        }
-        step6_doubleton_equation(&mut st, &mut new_subst_steps, deadline)?;
-
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Ok(PresolveResult::no_reduction(problem));
-        }
-        step7_free_var_substitution(&mut st, &mut new_subst_steps, deadline)?;
-
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Ok(PresolveResult::no_reduction(problem));
-        }
-        step8_free_singleton_col(&mut st, &mut new_subst_steps, deadline)?;
-
-        if flags.enable_parallel_row {
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                return Ok(PresolveResult::no_reduction(problem));
+    // Loop until reduction == 0. Each step removes finitely many elements.
+    // The shared pipeline owns pass-level stop semantics; the macro preserves
+    // the legacy per-transform deadline checks and transactional rollback.
+    let mut interrupted = false;
+    let pipeline = run_fixpoint(
+        usize::MAX,
+        SolveControl {
+            deadline,
+            cancel: None,
+        },
+        |_| {
+            macro_rules! stop_if_interrupted {
+                () => {
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        interrupted = true;
+                        return Ok(false);
+                    }
+                };
             }
-            crate::presolve::transforms_dup::step9_parallel_row(&mut st, deadline)?;
-        }
-        if flags.enable_dup_dom_col {
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                return Ok(PresolveResult::no_reduction(problem));
-            }
-            crate::presolve::transforms_dup::step10_dup_dom_col(
-                &mut st,
-                &mut new_fixed_by_step5,
-                deadline,
-            )?;
-        }
-        if flags.enable_dual_fixing {
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                return Ok(PresolveResult::no_reduction(problem));
-            }
-            crate::presolve::transforms_dup::step11_dual_fixing(
-                &mut st,
-                &mut new_fixed_by_step5,
-                deadline,
-            )?;
-        }
+            let prev_removed = st.removed_cols.iter().filter(|&&r| r).count()
+                + st.removed_rows.iter().filter(|&&r| r).count();
+            let mut new_fixed_by_step5 = 0usize;
+            let mut new_subst_steps = 0usize;
 
-        let curr_removed = st.removed_cols.iter().filter(|&&r| r).count()
-            + st.removed_rows.iter().filter(|&&r| r).count();
-        let reduction = curr_removed - prev_removed;
-        if reduction == 0 && new_fixed_by_step5 == 0 && new_subst_steps == 0 {
-            break;
-        }
+            stop_if_interrupted!();
+            step1_fixed_variable(&mut st, deadline)?;
+
+            stop_if_interrupted!();
+            step2_singleton_row(&mut st, deadline)?;
+
+            stop_if_interrupted!();
+            step2b_forcing_row(&mut st, deadline)?;
+
+            stop_if_interrupted!();
+            step3a_empty_row(&mut st, deadline)?;
+
+            stop_if_interrupted!();
+            step3b_empty_column(&mut st, deadline)?;
+
+            stop_if_interrupted!();
+            step4_redundant_constraint(&mut st, deadline)?;
+
+            stop_if_interrupted!();
+            step5_bounds_tightening(&mut st, &mut new_fixed_by_step5, deadline)?;
+
+            stop_if_interrupted!();
+            step6_doubleton_equation(&mut st, &mut new_subst_steps, deadline)?;
+
+            stop_if_interrupted!();
+            step7_free_var_substitution(&mut st, &mut new_subst_steps, deadline)?;
+
+            stop_if_interrupted!();
+            step8_free_singleton_col(&mut st, &mut new_subst_steps, deadline)?;
+
+            if flags.enable_parallel_row {
+                stop_if_interrupted!();
+                crate::presolve::transforms_dup::step9_parallel_row(&mut st, deadline)?;
+            }
+            if flags.enable_dup_dom_col {
+                stop_if_interrupted!();
+                crate::presolve::transforms_dup::step10_dup_dom_col(
+                    &mut st,
+                    &mut new_fixed_by_step5,
+                    deadline,
+                )?;
+            }
+            if flags.enable_dual_fixing {
+                stop_if_interrupted!();
+                crate::presolve::transforms_dup::step11_dual_fixing(
+                    &mut st,
+                    &mut new_fixed_by_step5,
+                    deadline,
+                )?;
+            }
+
+            let curr_removed = st.removed_cols.iter().filter(|&&r| r).count()
+                + st.removed_rows.iter().filter(|&&r| r).count();
+            let reduction = curr_removed - prev_removed;
+            Ok(reduction != 0 || new_fixed_by_step5 != 0 || new_subst_steps != 0)
+        },
+    );
+    pipeline?;
+    if interrupted {
+        return Ok(PresolveResult::no_reduction(problem));
     }
 
     // Drop bound-tightening's redundant implied bounds before emitting, so the

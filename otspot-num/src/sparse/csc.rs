@@ -1,5 +1,6 @@
 use super::compress::build_compressed_format;
-use crate::error::SolverError;
+use super::view::CscMatrixView;
+use crate::SolverError;
 
 /// 列圧縮形式（CSC: Compressed Sparse Column）の疎行列
 ///
@@ -13,11 +14,43 @@ use crate::error::SolverError;
 /// 各列の行インデックスは昇順にソートされている。
 #[derive(Debug, Clone)]
 pub struct CscMatrix {
-    pub(crate) col_ptr: Vec<usize>,
-    pub(crate) row_ind: Vec<usize>,
-    pub(crate) values: Vec<f64>,
-    pub(crate) nrows: usize,
-    pub(crate) ncols: usize,
+    /// Transitional compatibility field. New code must use [`Self::col_ptr`].
+    #[doc(hidden)]
+    pub col_ptr: Vec<usize>,
+    /// Transitional compatibility field. New code must use [`Self::row_ind`].
+    #[doc(hidden)]
+    pub row_ind: Vec<usize>,
+    /// Transitional compatibility field. New code must use [`Self::values`].
+    #[doc(hidden)]
+    pub values: Vec<f64>,
+    /// Transitional compatibility field. New code must use [`Self::nrows`].
+    #[doc(hidden)]
+    pub nrows: usize,
+    /// Transitional compatibility field. New code must use [`Self::ncols`].
+    #[doc(hidden)]
+    pub ncols: usize,
+}
+
+impl CscMatrixView for CscMatrix {
+    fn nrows(&self) -> usize {
+        self.nrows
+    }
+
+    fn ncols(&self) -> usize {
+        self.ncols
+    }
+
+    fn col_ptr(&self) -> &[usize] {
+        &self.col_ptr
+    }
+
+    fn row_ind(&self) -> &[usize] {
+        &self.row_ind
+    }
+
+    fn values(&self) -> &[f64] {
+        &self.values
+    }
 }
 
 impl CscMatrix {
@@ -52,6 +85,46 @@ impl CscMatrix {
 
     pub fn values(&self) -> &[f64] {
         &self.values
+    }
+
+    /// Mutable view of the stored non-zero values (structure is preserved).
+    ///
+    /// This is the encapsulated path for in-place value scaling; callers must
+    /// not change the length or ordering, only the coefficients.
+    pub fn values_mut(&mut self) -> &mut [f64] {
+        &mut self.values
+    }
+
+    /// Build a matrix from already-validated CSC arrays.
+    ///
+    /// The encapsulated replacement for direct struct-literal construction.
+    /// `debug_assert`s enforce the CSC invariants in test/dev builds; release
+    /// builds trust the caller (matching the previous struct-literal usage).
+    pub fn from_raw_parts(
+        nrows: usize,
+        ncols: usize,
+        col_ptr: Vec<usize>,
+        row_ind: Vec<usize>,
+        values: Vec<f64>,
+    ) -> Self {
+        debug_assert_eq!(col_ptr.len(), ncols + 1, "col_ptr length must be ncols+1");
+        debug_assert_eq!(
+            row_ind.len(),
+            values.len(),
+            "row_ind/values length mismatch"
+        );
+        debug_assert_eq!(
+            col_ptr.last().copied(),
+            Some(values.len()),
+            "col_ptr tail must equal nnz"
+        );
+        Self {
+            col_ptr,
+            row_ind,
+            values,
+            nrows,
+            ncols,
+        }
     }
 
     /// Returns a new matrix with all non-zero values multiplied by `factor`.

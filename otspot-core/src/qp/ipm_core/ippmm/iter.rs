@@ -38,7 +38,11 @@ pub(crate) fn solve_ippmm_inner(
     eps_orig: f64,
 ) -> SolverResult {
     let n = problem.num_vars;
-    let timeout_ctx = TimeoutCtx::from_options(options);
+    let timeout_ctx = TimeoutCtx::new(
+        options.deadline,
+        options.timeout_secs,
+        options.cancel_flag.clone(),
+    );
     let par = solver_par_from_threads(options.threads);
 
     if timeout_ctx.should_stop() {

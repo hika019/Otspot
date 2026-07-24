@@ -47,7 +47,7 @@ impl LdlFactorizationDdAmd {
 
     /// AMD 付き LDL^T x = b を DD 精度で解く。
     ///
-    /// 1. 右辺を AMD 置換 (b_p[k] = rhs[perm[k]])
+    /// 1. 右辺を AMD 置換 (`b_p[k] = rhs[perm[k]]`)
     /// 2. f64 → TwoFloat に持ち上げ
     /// 3. forward solve: L y = b_p (unit diagonal、列走査)
     /// 4. diagonal: y' = y / D
