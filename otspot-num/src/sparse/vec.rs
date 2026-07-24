@@ -1,4 +1,4 @@
-use crate::tolerances::ZERO_TOL;
+use crate::ZERO_TOL;
 
 /// 疎ベクトル（インデックス・値のペアリスト、インデックスで昇順ソート済み）
 ///

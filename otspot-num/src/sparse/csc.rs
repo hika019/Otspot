@@ -1,5 +1,6 @@
 use super::compress::build_compressed_format;
-use crate::error::SolverError;
+use super::view::CscMatrixView;
+use crate::SolverError;
 
 /// 列圧縮形式（CSC: Compressed Sparse Column）の疎行列
 ///
@@ -13,11 +14,43 @@ use crate::error::SolverError;
 /// 各列の行インデックスは昇順にソートされている。
 #[derive(Debug, Clone)]
 pub struct CscMatrix {
-    pub(crate) col_ptr: Vec<usize>,
-    pub(crate) row_ind: Vec<usize>,
-    pub(crate) values: Vec<f64>,
-    pub(crate) nrows: usize,
-    pub(crate) ncols: usize,
+    /// Transitional compatibility field. New code must use [`Self::col_ptr`].
+    #[doc(hidden)]
+    pub col_ptr: Vec<usize>,
+    /// Transitional compatibility field. New code must use [`Self::row_ind`].
+    #[doc(hidden)]
+    pub row_ind: Vec<usize>,
+    /// Transitional compatibility field. New code must use [`Self::values`].
+    #[doc(hidden)]
+    pub values: Vec<f64>,
+    /// Transitional compatibility field. New code must use [`Self::nrows`].
+    #[doc(hidden)]
+    pub nrows: usize,
+    /// Transitional compatibility field. New code must use [`Self::ncols`].
+    #[doc(hidden)]
+    pub ncols: usize,
+}
+
+impl CscMatrixView for CscMatrix {
+    fn nrows(&self) -> usize {
+        self.nrows
+    }
+
+    fn ncols(&self) -> usize {
+        self.ncols
+    }
+
+    fn col_ptr(&self) -> &[usize] {
+        &self.col_ptr
+    }
+
+    fn row_ind(&self) -> &[usize] {
+        &self.row_ind
+    }
+
+    fn values(&self) -> &[f64] {
+        &self.values
+    }
 }
 
 impl CscMatrix {

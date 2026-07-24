@@ -1,7 +1,23 @@
 [workspace]
 resolver = "2"
-members = [".", "otspot-core", "otspot-io", "otspot-model", "otspot-dev"]
-default-members = [".", "otspot-core", "otspot-io", "otspot-model", "otspot-dev"]
+members = [
+    ".",
+    "otspot-core",
+    "otspot-num",
+    "otspot-ir",
+    "otspot-io",
+    "otspot-model",
+    "otspot-dev",
+]
+default-members = [
+    ".",
+    "otspot-core",
+    "otspot-num",
+    "otspot-ir",
+    "otspot-io",
+    "otspot-model",
+    "otspot-dev",
+]
 
 [workspace.package]
 version = "0.7.3"
@@ -12,6 +28,8 @@ homepage = "https://github.com/hika019/otspot"
 
 [workspace.dependencies]
 otspot-core = { path = "otspot-core", version = "0.7.3" }
+otspot-num = { path = "otspot-num", version = "0.7.3" }
+otspot-ir = { path = "otspot-ir", version = "0.7.3" }
 otspot-io = { path = "otspot-io", version = "0.7.3" }
 otspot-model = { path = "otspot-model", version = "0.7.3" }
 
@@ -43,6 +61,8 @@ exclude = [
     "/.dockerignore",
     "/cspell.json",
     "otspot-core",
+    "otspot-num",
+    "otspot-ir",
     "**/tests",
     "**/tests.rs",
     "**/tests_*.rs",
@@ -56,6 +76,8 @@ parallel = ["otspot-core/parallel"]
 
 [dependencies]
 otspot-core = { workspace = true }
+otspot-num = { workspace = true }
+otspot-ir = { workspace = true }
 otspot-io = { workspace = true }
 otspot-model = { workspace = true }
 

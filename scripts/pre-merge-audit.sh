@@ -33,7 +33,7 @@ bash scripts/check_file_size.sh
 # grep exits 1 on zero matches, which is the passing state here; `|| true`
 # keeps `set -e -o pipefail` from aborting the audit exactly when it succeeds.
 TODO_COUNT=$(grep -rEc 'TODO|FIXME|XXX|HACK' \
-  otspot-core/src otspot-io/src otspot-model/src otspot-dev/src src 2>/dev/null \
+  otspot-core/src otspot-num/src otspot-ir/src otspot-io/src otspot-model/src otspot-dev/src src 2>/dev/null \
   | awk -F: '{n += $NF} END {print n + 0}' || true)
 if [ "$TODO_COUNT" -gt 0 ]; then
   echo "ERROR: TODO/FIXME/XXX/HACK count $TODO_COUNT > 0" >&2
@@ -43,6 +43,10 @@ python3 tests/test_check_data_coverage.py
 python3 tests/test_check_test_data_requirements.py
 python3 tests/test_iso_25010_quality_matrix.py
 python3 tests/test_check_new_ignore_attrs.py
+python3 scripts/check_architecture.py
+python3 tests/test_check_architecture.py
+python3 scripts/check_function_size.py
+python3 tests/test_check_function_size.py
 
 # 1b. test inventory gate (silent test disable / delete)
 # cargo nextest list を ground truth に、コミット済み目録 tests/test_inventory.txt
@@ -113,7 +117,7 @@ git diff main..HEAD --unified=2 -- '*.rs' | awk '
   { prev = $0 }
 ' | head -10
 echo "--- 新規 inline numeric literal (production source 内、2桁以上) ---"
-git diff main..HEAD --unified=0 -- 'otspot-core/src/*.rs' 'otspot-io/src/*.rs' 'otspot-model/src/*.rs' | \
+git diff main..HEAD --unified=0 -- 'otspot-core/src/*.rs' 'otspot-num/src/*.rs' 'otspot-ir/src/*.rs' 'otspot-io/src/*.rs' 'otspot-model/src/*.rs' | \
   grep -E '^\+[^+]*\b[0-9]{2,}(_[0-9]+)*(\.[0-9]+)?([eE][+-]?[0-9]+)?\b' | \
   grep -vE 'cfg\(test\)|//|test_' | head -20 || true
 

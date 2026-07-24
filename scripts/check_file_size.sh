@@ -16,7 +16,7 @@ set -eu
 THRESHOLD="${1:-2500}"
 violations=""
 
-for crate_src in src otspot-core/src otspot-io/src otspot-model/src otspot-dev/src; do
+for crate_src in src otspot-core/src otspot-num/src otspot-ir/src otspot-io/src otspot-model/src otspot-dev/src; do
   [ -d "$crate_src" ] || continue
   while IFS= read -r f; do
     # tests.rs は純テストモジュール — CLAUDE.md「テストコードは除く」に該当

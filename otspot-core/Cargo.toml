@@ -16,6 +16,8 @@ parallel = []
 [dependencies]
 faer = "0.24.0"
 log = "0.4"
+otspot-ir.workspace = true
+otspot-num.workspace = true
 rayon = "1"
 twofloat = "0.8"
 

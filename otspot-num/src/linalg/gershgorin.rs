@@ -16,7 +16,7 @@ use std::collections::HashMap;
 /// 戻り値 0 は「Gershgorin が `λ_min ≥ 0` を保証した = 何もシフト不要」を意味する
 /// (Q が真に indefinite でも Gershgorin が保守的に non-negative を返す PSD 偽陽性は
 /// 別途 `is_q_psd_by_cholesky` 等で扱う; 本 helper は素の Gershgorin に専念)。
-pub(crate) fn psd_shift_from_gershgorin(q: &CscMatrix) -> f64 {
+pub fn psd_shift_from_gershgorin(q: &CscMatrix) -> f64 {
     let n = q.nrows;
     if n == 0 {
         return 0.0;

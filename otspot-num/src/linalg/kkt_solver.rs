@@ -7,14 +7,14 @@ use crate::sparse::CscMatrix;
 use std::time::Instant;
 
 /// Default per-factorisation memory budget (4 GiB).
-/// Controlled via [`KktConfig::max_l_nnz`] / [`crate::options::IpmOptions::kkt_memory_budget_bytes`].
+/// Controlled via [`KktConfig::max_l_nnz`] by the caller's solver options.
 pub const DEFAULT_MEMORY_BUDGET_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// LDL の L 値 1 entry あたりのバイト数。f64 = 8B + row index usize = 8B (上限見積り)。
 pub const BYTES_PER_L_ENTRY: usize = 16;
 
 /// Static default memory budget in bytes; used by callers that do not have
-/// [`crate::options::IpmOptions`] in scope (e.g. postsolve LSQ refinement).
+/// solver options in scope (e.g. postsolve LSQ refinement).
 pub fn memory_budget_bytes() -> usize {
     DEFAULT_MEMORY_BUDGET_BYTES
 }
@@ -24,7 +24,7 @@ pub fn max_l_nnz_from_budget() -> usize {
     DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY
 }
 
-/// KKT factorization/MINRES configuration derived from [`crate::options::IpmOptions`].
+/// KKT factorization/MINRES configuration derived from caller-owned options.
 ///
 /// Callers in the IPM path build this from options and pass it down, avoiding
 /// env-var reads in production code.
@@ -865,26 +865,6 @@ mod tests {
         assert_eq!(l, DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY);
     }
 
-    /// IpmOptions::kkt_memory_budget_bytes オプションで budget を制御できること
-    #[test]
-    fn ipm_opts_kkt_budget_controls_max_l_nnz() {
-        use crate::options::IpmOptions;
-        let opts_default = IpmOptions::default();
-        assert_eq!(
-            opts_default.effective_max_l_nnz(),
-            DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY
-        );
-        let opts_small = IpmOptions {
-            kkt_memory_budget_bytes: Some(1600),
-            ..Default::default()
-        };
-        assert_eq!(
-            opts_small.effective_max_l_nnz(),
-            100,
-            "1600 / 16 = 100 entries"
-        );
-    }
-
     /// trait object として `Box<dyn KktSolver>` 経由で動くこと
     /// (将来 dispatcher が DirectLdl と MINRES を同じ Box に詰めるため)
     #[test]
@@ -1224,22 +1204,6 @@ mod tests {
         solver.solve(&[3.0, 0.0], &mut sol, None).unwrap();
         assert!((sol[0] - 1.0).abs() < 1e-9);
         assert!((sol[1] - 1.0).abs() < 1e-9);
-    }
-
-    /// KktConfig::default() matches IpmOptions::default() derived values.
-    #[test]
-    fn kkt_config_default_matches_ipm_options_default() {
-        use crate::options::IpmOptions;
-        let o = IpmOptions::default();
-        let cfg = KktConfig {
-            dd_ldl: o.dd_ldl,
-            minres_ir: o.effective_minres_ir(),
-            max_l_nnz: o.effective_max_l_nnz(),
-        };
-        let dflt = KktConfig::default();
-        assert_eq!(cfg.dd_ldl, dflt.dd_ldl);
-        assert_eq!(cfg.minres_ir, dflt.minres_ir);
-        assert_eq!(cfg.max_l_nnz, dflt.max_l_nnz);
     }
 
     /// dd_ldl=true returns DirectDd on a well-conditioned system.

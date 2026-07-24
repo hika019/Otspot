@@ -72,7 +72,7 @@ while IFS= read -r f; do
     END { flush() }
   ' "$f")
   [ -n "$out" ] && HITS+="$out"$'\n'
-done < <(find otspot-core/src otspot-io/src otspot-model/src otspot-dev/src \
+done < <(find otspot-core/src otspot-num/src otspot-ir/src otspot-io/src otspot-model/src otspot-dev/src \
   -name '*.rs' -type f)
 
 if [ -n "${HITS//[[:space:]]/}" ]; then
