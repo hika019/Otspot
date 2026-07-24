@@ -18,9 +18,9 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use crate::linalg::ldl::factorize_with_par;
-use crate::linalg::parallelism::solver_par_from_threads;
-use crate::sparse::CscMatrix;
+use otspot_core::linalg::ldl::factorize_with_par;
+use otspot_core::linalg::parallelism::solver_par_from_threads;
+use otspot_core::sparse::CscMatrix;
 use std::time::Instant;
 
 /// 上三角 PSD 行列を構築する (dense + diagonally dominant)。
@@ -325,9 +325,9 @@ fn faer_par_threads_sweep_monotone() {
 /// エンコーディング assert で検出される。
 #[test]
 fn ipm_threads_1_par_seq_budget_sentinel() {
-    use crate::options::SolverOptions;
-    use crate::problem::SolveStatus;
-    use crate::qp::{solve_qp_with, QpProblem};
+    use otspot_core::options::SolverOptions;
+    use otspot_core::problem::SolveStatus;
+    use otspot_core::qp::{solve_qp_with, QpProblem};
 
     // 凸 QP (1/2 規約): 1/2 * 2 * x^2 + (-2)*x = x^2 - 2x
     // s.t. 0 ≤ x ≤ 3 → 最適解 x=1, obj=-1
@@ -335,11 +335,9 @@ fn ipm_threads_1_par_seq_budget_sentinel() {
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
     let prob = QpProblem::new(q, vec![-2.0], a, vec![], vec![(0.0_f64, 3.0_f64)], vec![]).unwrap();
 
-    let opts = SolverOptions {
-        threads: 1,
-        presolve: false,
-        ..SolverOptions::default()
-    };
+    let mut opts = SolverOptions::default();
+    opts.threads = 1;
+    opts.presolve = false;
 
     // (1) エンコーディング: threads=1 → Par::Seq (= thread count 1)
     let par = solver_par_from_threads(1);
@@ -387,19 +385,17 @@ fn ipm_threads_1_par_seq_budget_sentinel() {
 /// `par_thread_count == 2` の assert が FAIL する。
 #[test]
 fn ipm_threads_2_par_rayon_budget_sentinel() {
-    use crate::options::SolverOptions;
-    use crate::problem::SolveStatus;
-    use crate::qp::{solve_qp_with, QpProblem};
+    use otspot_core::options::SolverOptions;
+    use otspot_core::problem::SolveStatus;
+    use otspot_core::qp::{solve_qp_with, QpProblem};
 
     let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
     let prob = QpProblem::new(q, vec![-2.0], a, vec![], vec![(0.0_f64, 3.0_f64)], vec![]).unwrap();
 
-    let opts = SolverOptions {
-        threads: 2,
-        presolve: false,
-        ..SolverOptions::default()
-    };
+    let mut opts = SolverOptions::default();
+    opts.threads = 2;
+    opts.presolve = false;
 
     // (1) threads=2 → Par::Rayon(2) (thread count 2)
     let par = solver_par_from_threads(2);

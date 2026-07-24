@@ -1,0 +1,12 @@
+[package]
+name = "otspot-num"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Numerical primitives and backend contracts for Otspot"
+
+[dependencies]
+faer = "0.24.0"
+twofloat = "0.8"

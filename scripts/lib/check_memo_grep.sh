@@ -6,7 +6,7 @@
 set -eo pipefail
 
 HITS=$(grep -rnE '(TODO|FIXME|XXX|HACK|todo!\()' \
-  otspot-core/src otspot-io/src otspot-model/src otspot-dev/src \
+  otspot-core/src otspot-num/src otspot-ir/src otspot-io/src otspot-model/src otspot-dev/src \
   --include='*.rs' 2>/dev/null \
   | grep -vE 'tests/.*\.rs:' \
   || true)

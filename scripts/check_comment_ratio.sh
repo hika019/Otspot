@@ -42,7 +42,7 @@ while IFS= read -r f; do
   if awk -v r="$ratio" -v th="$THRESHOLD_MEMO" 'BEGIN { exit !(r >= th) }'; then
     HITS+="$ratio% note lines  $f"$'\n'
   fi
-done < <(find otspot-core/src otspot-io/src otspot-model/src otspot-dev/src \
+done < <(find otspot-core/src otspot-num/src otspot-ir/src otspot-io/src otspot-model/src otspot-dev/src \
   -name '*.rs' -type f)
 
 if [ -n "${HITS//[[:space:]]/}" ]; then

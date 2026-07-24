@@ -1,0 +1,12 @@
+[package]
+name = "otspot-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Unified optimization problem IR and solver contracts for Otspot"
+
+[dependencies]
+otspot-num.workspace = true
+

@@ -1,0 +1,29 @@
+name: Architecture
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  layer-boundaries:
+    name: layer boundaries and ownership
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check dependency direction, ownership, and facades
+        run: python3 scripts/check_architecture.py
+      - name: Verify architecture gate behavior
+        run: python3 tests/test_check_architecture.py
+
+  decomposition-ratchets:
+    name: module and function decomposition
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check production file size
+        run: bash scripts/check_file_size.sh
+      - name: Check long-function ratchet
+        run: python3 scripts/check_function_size.py
+      - name: Verify long-function gate behavior
+        run: python3 tests/test_check_function_size.py

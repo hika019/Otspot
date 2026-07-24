@@ -57,6 +57,12 @@
 
 pub use otspot_core::*;
 
+/// Canonical optimization problem IR and solver contracts.
+pub use otspot_ir as ir;
+
+/// Solver-independent sparse/KKT numerical contracts.
+pub use otspot_num as num;
+
 /// Algebraic modeling API (Model, Variable, Expression, Constraint, constraint! macro).
 pub use otspot_model::{
     Constraint, ConstraintSense, Expression, Model, ModelError, ModelResult, SolutionProof,

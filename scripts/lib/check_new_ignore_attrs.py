@@ -88,19 +88,6 @@ def tool_versions() -> str:
     return f"nextest={nextest} rustc={rustc}"
 
 
-def host_target() -> str:
-    try:
-        out = subprocess.run(
-            ["rustc", "-vV"], capture_output=True, text=True, check=True
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as e:
-        raise NextestError(f"could not run rustc to determine host target: {e}")
-    for line in out.splitlines():
-        if line.startswith("host: "):
-            return line[len("host: ") :].strip()
-    raise NextestError("rustc -vV did not report a host target")
-
-
 def _nextest_list_output() -> str:
     """Raw stdout of `cargo nextest list` (subprocess seam, mockable)."""
     try:
@@ -156,7 +143,10 @@ def render_inventory(
 
 
 def build_current() -> str:
-    return render_inventory(list_testcases(), host_target(), tool_versions())
+    # The command intentionally uses the current host. The body still detects
+    # cfg-dependent test drift; keeping the label host-neutral makes an
+    # inventory regenerated on macOS comparable with Linux CI.
+    return render_inventory(list_testcases(), "host-default", tool_versions())
 
 
 def _comparable(text: str) -> str:

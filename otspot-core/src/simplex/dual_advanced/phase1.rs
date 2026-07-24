@@ -100,6 +100,7 @@ fn classify_unbounded_proof_refresh(
         ) => {
             panic!("internal invariant violation during Phase I proof refresh: {err}")
         }
+        Err(err) => panic!("unknown solver error during Phase I proof refresh: {err}"),
     }
 }
 
