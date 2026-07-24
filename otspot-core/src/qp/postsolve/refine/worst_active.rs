@@ -39,22 +39,24 @@ pub(crate) fn refine_dual_worst_active_block(
         return;
     }
 
-    let Ok(qx) = problem.q.mat_vec_mul(&result.solution) else {
-        return;
-    };
+    let qx = problem.q.mat_vec_mul(&result.solution).expect(
+        "q.ncols() == solution.len() == num_vars: QpProblem::new() enforces \
+         q.ncols() == num_vars, and solution.len() == n is checked above",
+    );
     let aty = if problem.a.nrows > 0 {
-        match problem.a.transpose().mat_vec_mul(&result.dual_solution) {
-            Ok(v) => v,
-            Err(_) => return,
-        }
+        problem
+            .a
+            .transpose()
+            .mat_vec_mul(&result.dual_solution)
+            .expect(
+                "a.transpose().ncols() == a.nrows() == num_constraints == dual_solution.len(): \
+             QpProblem::new() enforces a.nrows() == num_constraints, and \
+             dual_solution.len() == m is checked above",
+            )
     } else {
         vec![0.0_f64; n]
     };
-    let Some((ax, row_abs_activity)) =
-        compute_dual_recovery_row_activity(problem, &result.solution)
-    else {
-        return;
-    };
+    let (ax, row_abs_activity) = compute_dual_recovery_row_activity(problem, &result.solution);
     let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, &result.bound_duals);
 
     let use_elim_mask = eliminated_cols.len() == n;

@@ -21,6 +21,14 @@ const CG_TOL_SQ: f64 = 1e-20;
 /// size gate 除去で m_sub が大規模化し得るため、暴走 CG を deadline で打ち切る。
 const CG_DEADLINE_CHECK_STRIDE: usize = 64;
 
+fn collect_fixed_duals(fixed_y: Vec<Option<f64>>) -> Vec<f64> {
+    assert!(
+        fixed_y.iter().all(Option::is_some),
+        "all duals must be fixed when there are no free rows"
+    );
+    fixed_y.into_iter().map(Option::unwrap).collect()
+}
+
 /// (A·Aᵀ + ε·I) を p (m_sub 次元) に適用して m_sub 次元ベクトルを返す。
 /// A_sub は CSC 形式 (nrows=m_sub, ncols=n)、reg = ε。
 fn aat_apply(
@@ -437,7 +445,7 @@ pub(crate) fn compute_lsq_dual_y(
     }
     let m_free = free_rows.len();
     if m_free == 0 {
-        return Some(fixed_y.iter().map(|fy| fy.unwrap_or(0.0)).collect());
+        return Some(collect_fixed_duals(fixed_y));
     }
 
     let mut a_free_col_ptr = vec![0usize; n + 1];
@@ -527,6 +535,28 @@ mod comp_slackness_tests {
         };
         compute_lsq_dual_y(problem, &result, None)
             .expect("LSQ should succeed on a tiny well-conditioned fixture")
+    }
+
+    #[test]
+    fn lsq_all_fixed_branch_returns_the_fixed_duals() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let qp = lp_qp(
+            1,
+            1,
+            vec![1.0],
+            a,
+            vec![10.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        );
+
+        assert_eq!(run_lsq(&qp, vec![0.0]), vec![0.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "all duals must be fixed when there are no free rows")]
+    fn all_fixed_collector_rejects_a_missing_dual() {
+        let _ = collect_fixed_duals(vec![Some(1.0), None]);
     }
 
     /// Fixture A: 2 rows, both Le; row 0 binding at the chosen primal, row 1

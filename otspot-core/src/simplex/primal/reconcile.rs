@@ -104,10 +104,9 @@ pub(super) fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> boo
     let tol = feas_rel_tol();
     let mut ax = vec![0.0f64; problem.num_constraints];
     for (j, &sj) in solution.iter().enumerate() {
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                ax[row] += vals[k] * sj;
-            }
+        let (rows, vals) = problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            ax[row] += vals[k] * sj;
         }
     }
     let mut violated = false;
@@ -187,35 +186,35 @@ fn pivot_out_sequential(
             if is_basic[j] {
                 continue;
             }
-            if let Ok((rows, vals)) = a_ext.get_column(j) {
-                let mut d_ij = 0.0_f64;
-                for (k, &row) in rows.iter().enumerate() {
-                    if row < m {
-                        d_ij += z_dense[row] * vals[k];
-                    }
+            let (rows, vals) = a_ext.column(j);
+            let mut d_ij = 0.0_f64;
+            for (k, &row) in rows.iter().enumerate() {
+                if row < m {
+                    d_ij += z_dense[row] * vals[k];
                 }
-                let abs_d = d_ij.abs();
-                if abs_d > best_abs {
-                    best_abs = abs_d;
-                    best_j = Some(j);
-                }
+            }
+            let abs_d = d_ij.abs();
+            if abs_d > best_abs {
+                best_abs = abs_d;
+                best_j = Some(j);
             }
         }
         if let Some(j) = best_j {
-            let (col_rows, col_vals) = match a_ext.get_column(j) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
+            let (col_rows, col_vals) = a_ext.column(j);
             let mut d_sv = SparseVec {
                 indices: col_rows.to_vec(),
                 values: col_vals.to_vec(),
                 len: m,
             };
             basis_mgr.ftran(&mut d_sv);
+            match basis_mgr.update(j, i, &d_sv) {
+                Ok(()) => {}
+                Err(crate::error::SolverError::SingularBasis { .. }) => return,
+                Err(err) => panic!("internal reconciliation eta invariant violated: {err}"),
+            }
             is_basic[basis[i]] = false;
             is_basic[j] = true;
             basis[i] = j;
-            basis_mgr.update(j, i, &d_sv);
             basis_mgr.refactor_if_needed_timed(a_ext, basis, options.deadline);
         }
     }
@@ -264,13 +263,12 @@ pub(crate) fn pivot_out_degenerate_artificials(
         if is_basic[j] {
             continue;
         }
-        if let Ok((rows, vals)) = a_ext.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                if row < m {
-                    let abs_v = vals[k].abs();
-                    if abs_v >= PIVOT_TOL {
-                        row_candidates[row].push((abs_v, j));
-                    }
+        let (rows, vals) = a_ext.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            if row < m {
+                let abs_v = vals[k].abs();
+                if abs_v >= PIVOT_TOL {
+                    row_candidates[row].push((abs_v, j));
                 }
             }
         }
@@ -413,11 +411,10 @@ pub(crate) fn pivot_out_degenerate_artificials(
                 };
                 let (r, j) = matches[idx];
                 col_dense.iter_mut().for_each(|v| *v = 0.0);
-                if let Ok((rows, vals)) = a_ext.get_column(j) {
-                    for (p, &row) in rows.iter().enumerate() {
-                        if row < m {
-                            col_dense[row] = vals[p];
-                        }
+                let (rows, vals) = a_ext.column(j);
+                for (p, &row) in rows.iter().enumerate() {
+                    if row < m {
+                        col_dense[row] = vals[p];
                     }
                 }
                 b_lu.ftran_dense(&mut col_dense);
@@ -558,10 +555,18 @@ pub(crate) fn extract_solution(
     col_scale: &[f64],
 ) -> Vec<f64> {
     use twofloat::TwoFloat;
+    assert!(
+        col_scale.is_empty() || col_scale.len() == sf.n_total,
+        "col_scale must be empty (identity) or match the standard-form column count"
+    );
     let mut x_new = vec![0.0; sf.n_shifted];
     for i in 0..sf.m {
         if basis[i] < sf.n_shifted {
-            let scale = col_scale.get(basis[i]).copied().unwrap_or(1.0);
+            let scale = if col_scale.is_empty() {
+                1.0
+            } else {
+                col_scale[basis[i]]
+            };
             x_new[basis[i]] = x_b[i] * scale;
         }
     }

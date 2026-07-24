@@ -224,6 +224,21 @@ impl CscMatrix {
         Ok((&self.row_ind[start..end], &self.values[start..end]))
     }
 
+    /// Returns `(row_indices, values)` slices for column `j`; both are sorted by row index.
+    ///
+    /// Panics if `j >= ncols`; callers must guarantee a valid column index by construction
+    /// invariant. Use [`Self::get_column`] when `j` is not provably in-bounds.
+    pub fn column(&self, j: usize) -> (&[usize], &[f64]) {
+        assert!(
+            j < self.ncols,
+            "column {j} out of bounds (ncols={})",
+            self.ncols
+        );
+        let start = self.col_ptr[j];
+        let end = self.col_ptr[j + 1];
+        (&self.row_ind[start..end], &self.values[start..end])
+    }
+
     pub fn identity(n: usize) -> Self {
         let col_ptr: Vec<usize> = (0..=n).collect();
         let row_ind: Vec<usize> = (0..n).collect();
@@ -407,6 +422,24 @@ mod tests {
         let mat = CscMatrix::identity(3);
         let result = mat.get_column(3);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_column_matches_get_column_in_bounds() {
+        let mat = CscMatrix::identity(3);
+        for j in 0..3 {
+            let (rows, vals) = mat.column(j);
+            let (exp_rows, exp_vals) = mat.get_column(j).unwrap();
+            assert_eq!(rows, exp_rows);
+            assert_eq!(vals, exp_vals);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "column 3 out of bounds (ncols=3)")]
+    fn test_column_out_of_bounds_panics() {
+        let mat = CscMatrix::identity(3);
+        let _ = mat.column(3);
     }
 
     #[test]

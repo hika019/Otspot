@@ -17,16 +17,27 @@ const INVARIANT_TOL: f64 = 1e-6;
 
 /// RAII guard for the test-only `FLIP_APPLY_DISABLE` hook. Avoids leaking
 /// the disabled state across tests if an assertion unwinds.
-struct FlipApplyGuard;
+struct FlipApplyGuard(bool);
 impl FlipApplyGuard {
     fn disabled() -> Self {
-        set_flip_apply_disabled(true);
-        Self
+        Self(set_flip_apply_disabled(true))
     }
 }
 impl Drop for FlipApplyGuard {
     fn drop(&mut self) {
-        set_flip_apply_disabled(false);
+        set_flip_apply_disabled(self.0);
+    }
+}
+
+struct EtaUpdateGuard(bool);
+impl EtaUpdateGuard {
+    fn disabled() -> Self {
+        Self(set_eta_update_disabled(true))
+    }
+}
+impl Drop for EtaUpdateGuard {
+    fn drop(&mut self) {
+        set_eta_update_disabled(self.0);
     }
 }
 
@@ -387,6 +398,109 @@ fn bfrt_flip_count_positive_when_residual_spans_breakpoints() {
     );
 }
 
+/// Staging all old-basis BFRT column effects before the eta commit is
+/// algebraically identical to applying each flip to x_B immediately.
+#[test]
+fn staged_flip_commit_matches_sequential_flip_algebra() {
+    let initial: [f64; 3] = [7.0, -3.0, 2.5];
+    let flips: [([f64; 3], f64); 2] = [([1.0, -2.0, 0.5], 2.0), ([-3.0, 1.5, 4.0], -0.25)];
+
+    let mut sequential = initial;
+    for (alpha, weight) in flips {
+        for i in 0..initial.len() {
+            sequential[i] -= alpha[i] * weight;
+        }
+    }
+
+    let mut staged_delta = [0.0; 3];
+    for (alpha, weight) in flips {
+        for i in 0..initial.len() {
+            staged_delta[i] += alpha[i] * weight;
+        }
+    }
+    let mut staged = initial;
+    for i in 0..initial.len() {
+        staged[i] -= staged_delta[i];
+    }
+
+    for i in 0..initial.len() {
+        assert!((staged[i] - sequential[i]).abs() < 1e-15);
+    }
+}
+
+/// An ordinary pivot with no finite-upper breakpoint must not touch the
+/// O(m) BFRT delta staging/apply path.
+#[test]
+fn pivot_without_flips_skips_flip_delta_path() {
+    reset_flip_delta_path_count();
+    reset_bfrt_flip_invocations();
+    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let problem = LpProblem::new_general(
+        vec![1.0],
+        a,
+        vec![1.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, f64::INFINITY)],
+        None,
+    )
+    .unwrap();
+    let bsf = build_bounded_standard_form(&problem);
+    let mut initial = BoundedDualState::cold(&bsf, &bsf.b);
+    initial.x_b[0] = -0.5;
+    let initial_basis = initial.basis.clone();
+
+    let (_outcome, final_state) = iterate(
+        initial,
+        &bsf,
+        &bsf.a,
+        &bsf.c,
+        &SolverOptions::default(),
+        &bsf.upper_bounds,
+        &mut MostInfeasibleLeaving,
+    );
+
+    assert_ne!(final_state.basis, initial_basis, "fixture did not pivot");
+    assert_eq!(bfrt_flip_invocations(), 0);
+    assert_eq!(flip_delta_path_count(), 0);
+}
+
+/// A rejected eta after BFRT has selected flips must return before publishing
+/// any candidate flip or pivot state.
+#[test]
+fn rejected_eta_after_bfrt_flip_leaves_state_unchanged() {
+    reset_bfrt_flip_invocations();
+    let fx = fixture_two_rows_three_boxed();
+    let bsf = build_bounded_standard_form(&fx.problem);
+    let mut initial = BoundedDualState::cold(&bsf, &bsf.b);
+    for &(row, mag) in &fx.inject_negative_x_b {
+        initial.x_b[row] = -mag;
+    }
+    let mut expected = initial.clone();
+    // `iterate` initializes reduced costs once before entering the candidate
+    // loop. The rollback boundary is the fully initialized iteration state.
+    expected.reduced_costs.clone_from(&bsf.c);
+    let opts = SolverOptions::default();
+    let _guard = EtaUpdateGuard::disabled();
+    let (outcome, actual) = iterate(
+        initial,
+        &bsf,
+        &bsf.a,
+        &bsf.c,
+        &opts,
+        &bsf.upper_bounds,
+        &mut MostInfeasibleLeaving,
+    );
+
+    assert!(matches!(outcome, BoundedOutcome::SingularBasis));
+    assert!(bfrt_flip_invocations() > 0, "fixture did not exercise BFRT");
+    assert_eq!(actual.basis, expected.basis);
+    assert_eq!(actual.x_b, expected.x_b);
+    assert_eq!(actual.at_upper, expected.at_upper);
+    assert_eq!(actual.is_basic, expected.is_basic);
+    assert_eq!(actual.reduced_costs, expected.reduced_costs);
+    assert_eq!(actual.iterations, expected.iterations);
+}
+
 /// Inject a single lb-violation and verify the loop makes **measurable
 /// progress**: BFRT must be invoked at least once and the invariant must
 /// remain intact (so the loop's pivots/flips are algebraically correct,
@@ -472,16 +586,15 @@ fn ub_violation_returns_specialised_outcome() {
 // ── extract_solution_bounded / extract_dual_info_bounded tests ────────
 
 /// RAII guard for `AT_UPPER_APPLY_DISABLE`.
-struct AtUpperApplyGuard;
+struct AtUpperApplyGuard(bool);
 impl AtUpperApplyGuard {
     fn disabled() -> Self {
-        set_at_upper_apply_disabled(true);
-        Self
+        Self(set_at_upper_apply_disabled(true))
     }
 }
 impl Drop for AtUpperApplyGuard {
     fn drop(&mut self) {
-        set_at_upper_apply_disabled(false);
+        set_at_upper_apply_disabled(self.0);
     }
 }
 
@@ -1446,16 +1559,15 @@ fn rc_timed_deadline_checks_are_chunked_not_per_column() {
 
 /// RAII guard for `PRIMAL_ALPHA_SV_DISABLE`. Restores the flag on drop so
 /// a panicking test cannot leak the disabled state to sibling tests.
-struct PrimalAlphaSvGuard;
+struct PrimalAlphaSvGuard(bool);
 impl PrimalAlphaSvGuard {
     fn disabled() -> Self {
-        set_primal_alpha_sv_disabled(true);
-        Self
+        Self(set_primal_alpha_sv_disabled(true))
     }
 }
 impl Drop for PrimalAlphaSvGuard {
     fn drop(&mut self) {
-        set_primal_alpha_sv_disabled(false);
+        set_primal_alpha_sv_disabled(self.0);
     }
 }
 
@@ -1612,8 +1724,12 @@ fn phase2_primal_bounded_single_ftran_noop_proof() {
     assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
 
     let _guard = PrimalAlphaSvGuard::disabled();
+    let expected_basis = dual_state.basis.clone();
+    let expected_x_b = dual_state.x_b.clone();
+    let expected_at_upper = dual_state.at_upper.clone();
+    let expected_is_basic = dual_state.is_basic.clone();
     let mut iters = 0usize;
-    let (outcome, _) = phase2_primal_bounded(
+    let (outcome, rejected_state) = phase2_primal_bounded(
         &bsf,
         dual_state,
         &bsf.a,
@@ -1622,6 +1738,11 @@ fn phase2_primal_bounded_single_ftran_noop_proof() {
         &mut iters,
         &bsf.upper_bounds,
     );
+    assert!(matches!(&outcome, SimplexOutcome::SingularBasis));
+    assert_eq!(rejected_state.basis, expected_basis);
+    assert_eq!(rejected_state.x_b, expected_x_b);
+    assert_eq!(rejected_state.at_upper, expected_at_upper);
+    assert_eq!(rejected_state.is_basic, expected_is_basic);
     let obj = match outcome {
         SimplexOutcome::Optimal(o, _) => o,
         // Non-optimal outcomes also demonstrate that the corrupt eta broke the solve.
@@ -1716,11 +1837,21 @@ fn primal_simplex_aug_single_ftran_noop_proof() {
     };
     let opts = SolverOptions::default();
     let mut iters = 0usize;
+    let expected_basis = state.basis.clone();
+    let expected_x_b = state.x_b.clone();
+    let expected_at_upper = state.at_upper.clone();
+    let expected_is_basic = state.is_basic.clone();
 
     let _guard = PrimalAlphaSvGuard::disabled();
     let outcome = bounded_primal_phase1(
         &a_aug, &c_p1, &ubs_aug, n_struct, &mut state, &opts, &mut iters,
     );
+
+    assert!(matches!(&outcome, SimplexOutcome::SingularBasis));
+    assert_eq!(state.basis, expected_basis);
+    assert_eq!(state.x_b, expected_x_b);
+    assert_eq!(state.at_upper, expected_at_upper);
+    assert_eq!(state.is_basic, expected_is_basic);
 
     match outcome {
         SimplexOutcome::Optimal(art_sum, _) => {
@@ -1738,16 +1869,15 @@ fn primal_simplex_aug_single_ftran_noop_proof() {
 // ── anti-degeneracy (Bland) sentinels ────────────────────────────────────
 
 /// RAII guard for the test-only `FORCE_BLAND` hook (restores on unwind).
-struct ForceBlandGuard;
+struct ForceBlandGuard(bool);
 impl ForceBlandGuard {
     fn on() -> Self {
-        set_primal_force_bland(true);
-        Self
+        Self(set_primal_force_bland(true))
     }
 }
 impl Drop for ForceBlandGuard {
     fn drop(&mut self) {
-        set_primal_force_bland(false);
+        set_primal_force_bland(self.0);
     }
 }
 
@@ -1914,31 +2044,29 @@ fn bland_entering_returns_smallest_improving_index() {
 
 /// Override `PARTIAL_PRICE_CHUNK` for the lifetime of the guard. Restores the
 /// production constant (override = 0) on drop, even across a panic unwind.
-struct PartialPriceChunkGuard;
+struct PartialPriceChunkGuard(usize);
 impl PartialPriceChunkGuard {
     fn set(chunk: usize) -> Self {
-        set_partial_price_chunk_override(chunk);
-        Self
+        Self(set_partial_price_chunk_override(chunk))
     }
 }
 impl Drop for PartialPriceChunkGuard {
     fn drop(&mut self) {
-        set_partial_price_chunk_override(0);
+        set_partial_price_chunk_override(self.0);
     }
 }
 
 /// Engage the broken single-window mode (declares Optimal after one window
 /// without the full sweep). Restores the correct behaviour on drop.
-struct PartialPriceSingleWindowGuard;
+struct PartialPriceSingleWindowGuard(bool);
 impl PartialPriceSingleWindowGuard {
     fn enabled() -> Self {
-        set_partial_price_single_window(true);
-        Self
+        Self(set_partial_price_single_window(true))
     }
 }
 impl Drop for PartialPriceSingleWindowGuard {
     fn drop(&mut self) {
-        set_partial_price_single_window(false);
+        set_partial_price_single_window(self.0);
     }
 }
 

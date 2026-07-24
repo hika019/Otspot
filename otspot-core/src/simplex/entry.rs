@@ -395,6 +395,14 @@ fn solve_without_presolve_inner(problem: &LpProblem, options: &SolverOptions) ->
     // produces empty boxes (e.g. an integer var pinned between consecutive integers,
     // ⌈lb⌉ > ⌊ub⌋), so the relaxation solver must report Infeasible for them
     // regardless of constraint count. Presolve previously masked this.
+    //
+    // This is a simplex-internal safety net keyed on `primal_tol` (the solver's
+    // feasibility band). The authoritative, problem-level empty-box check lives at
+    // the solve entries (`solve_lp_with` / `dispatch_solve_qp`, keyed on ZERO_TOL,
+    // matching presolve). Full original problems are already caught there; this net
+    // still covers presolve-reduced sub-problems and direct callers. The two never
+    // disagree on reachable inputs: presolve enforces ZERO_TOL, so any reduced box
+    // reaching here is consistent within ZERO_TOL ≤ primal_tol.
     if problem
         .bounds
         .iter()

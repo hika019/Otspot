@@ -35,7 +35,10 @@ use pricing::{compute_reduced_costs_into_timed, DEADLINE_CHECK_INTERVAL};
 #[cfg(test)]
 pub(crate) use extract::set_at_upper_apply_disabled;
 #[cfg(test)]
-pub(crate) use iterate::set_flip_apply_disabled;
+pub(crate) use iterate::{
+    flip_delta_path_count, reset_flip_delta_path_count, set_eta_update_disabled,
+    set_flip_apply_disabled,
+};
 #[cfg(test)]
 pub(crate) use pricing::{
     partial_price_cols_scanned, reset_partial_price_cols_scanned, set_partial_price_chunk_override,
@@ -88,6 +91,7 @@ pub(crate) enum BoundedOutcome {
 ///   value is `0` (lb) or `upper_bounds[j]` (ub).
 /// - `x_b[i] = (B^{-1} (b - sum_{k at_upper non-basic} u_k * a_k))[i]`,
 ///   reflecting the flip-applied effective RHS.
+#[derive(Clone)]
 pub(crate) struct BoundedDualState {
     pub(crate) basis: Vec<usize>,
     pub(crate) at_upper: Vec<bool>,

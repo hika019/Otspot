@@ -6,6 +6,8 @@ mod ratio_test;
 mod reconcile;
 
 pub(crate) use core::revised_simplex_core;
+#[cfg(test)]
+pub(crate) use core::set_eta_update_disabled;
 pub(crate) use crossover::{
     crossover_dual_from_primal, crossover_dual_from_primal_with_dual_warm_start,
 };
@@ -219,9 +221,7 @@ fn extract_farkas_certificate(
     // Helper: check A^T y <= tol for all original columns.
     let aty_ok = |y: &[f64]| -> bool {
         for j in 0..n_original {
-            let Ok((rows, vals)) = a_ext.get_column(j) else {
-                return false;
-            };
+            let (rows, vals) = a_ext.column(j);
             let aty: f64 = rows.iter().zip(vals.iter()).map(|(&r, &v)| v * y[r]).sum();
             if aty > tol {
                 return false;
@@ -335,12 +335,11 @@ fn objective_from_solution(sf: &StandardForm, problem: &LpProblem, solution: &[f
 
 fn adjust_xb_for_scaled_diag(a: &CscMatrix, basis: &[usize], x_b: &mut [f64], m: usize) {
     for i in 0..m {
-        if let Ok((rows, vals)) = a.get_column(basis[i]) {
-            for (k, &row) in rows.iter().enumerate() {
-                if row == i && vals[k].abs() > SLACK_DIAG_TOL {
-                    x_b[i] /= vals[k];
-                    break;
-                }
+        let (rows, vals) = a.column(basis[i]);
+        for (k, &row) in rows.iter().enumerate() {
+            if row == i && vals[k].abs() > SLACK_DIAG_TOL {
+                x_b[i] /= vals[k];
+                break;
             }
         }
     }
@@ -358,12 +357,11 @@ fn build_phase1_system(
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();
     for j in 0..a.ncols {
-        if let Ok((r, v)) = a.get_column(j) {
-            for (k, &row) in r.iter().enumerate() {
-                trip_rows.push(row);
-                trip_cols.push(j);
-                trip_vals.push(v[k]);
-            }
+        let (r, v) = a.column(j);
+        for (k, &row) in r.iter().enumerate() {
+            trip_rows.push(row);
+            trip_cols.push(j);
+            trip_vals.push(v[k]);
         }
     }
 
@@ -980,6 +978,62 @@ pub(crate) fn test_apply_selective_charnes_perturb(x_b: &mut [f64], m: usize) {
         if v.abs() < step_zero_threshold {
             *v = eps * (i as f64 + 1.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod eta_atomicity_tests {
+    use super::{revised_simplex_core, set_eta_update_disabled};
+    use crate::options::SolverOptions;
+    use crate::simplex::pricing::SteepestEdgePricing;
+    use crate::simplex::SimplexOutcome;
+    use crate::sparse::CscMatrix;
+
+    struct EtaUpdateGuard(bool);
+    impl EtaUpdateGuard {
+        fn disabled() -> Self {
+            Self(set_eta_update_disabled(true))
+        }
+    }
+    impl Drop for EtaUpdateGuard {
+        fn drop(&mut self) {
+            set_eta_update_disabled(self.0);
+        }
+    }
+
+    #[test]
+    fn rejected_eta_leaves_standard_primal_state_unchanged() {
+        // min -x, x + s = 1, initial basis {s}: the first pivot is forced.
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let mut x_b = vec![1.0];
+        let mut basis = vec![1usize];
+        let expected_x_b = x_b.clone();
+        let expected_basis = basis.clone();
+        let mut pricing = SteepestEdgePricing::new(2);
+        let mut iterations = 0;
+        let _guard = EtaUpdateGuard::disabled();
+
+        let outcome = revised_simplex_core(
+            &a,
+            &mut x_b,
+            &[-1.0, 0.0],
+            &[1.0],
+            &mut basis,
+            1,
+            2,
+            2,
+            &mut pricing,
+            &SolverOptions::default(),
+            &mut iterations,
+            false,
+            None,
+            false,
+            None,
+        );
+
+        assert!(matches!(outcome, SimplexOutcome::SingularBasis));
+        assert_eq!(x_b, expected_x_b);
+        assert_eq!(basis, expected_basis);
     }
 }
 

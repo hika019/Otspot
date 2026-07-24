@@ -89,13 +89,13 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn set_partial_price_chunk_override(v: usize) {
-    PARTIAL_PRICE_CHUNK_OVERRIDE.with(|c| c.set(v));
+pub(crate) fn set_partial_price_chunk_override(v: usize) -> usize {
+    PARTIAL_PRICE_CHUNK_OVERRIDE.with(|c| c.replace(v))
 }
 
 #[cfg(test)]
-pub(crate) fn set_partial_price_single_window(v: bool) {
-    PARTIAL_PRICE_SINGLE_WINDOW.with(|c| c.set(v));
+pub(crate) fn set_partial_price_single_window(v: bool) -> bool {
+    PARTIAL_PRICE_SINGLE_WINDOW.with(|c| c.replace(v))
 }
 
 #[cfg(test)]
@@ -183,7 +183,7 @@ fn compute_reduced_costs_window(
             if is_basic[k] {
                 rc_out[k] = 0.0;
             } else {
-                let (rows, vals) = a.get_column(k).unwrap();
+                let (rows, vals) = a.column(k);
                 let mut ya = 0.0;
                 for (ri, &row) in rows.iter().enumerate() {
                     ya += y[row] * vals[ri];

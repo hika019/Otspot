@@ -15,13 +15,9 @@ use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolverResult};
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
+use crate::tolerances::REDUCED_COST_ZERO_TOL;
 
 use super::bound::{all_bounds_finite, is_feasible_result};
-
-/// McCormick 包絡を張る bilinear 項として扱う係数の下限。これ未満の係数は
-/// 包絡寄与が無視できるとして pair から除外する (LP/QP dispatch の
-/// `QpProblem::is_zero_q` とは別概念: あちらは構造的ゼロ判定)。
-const Q_ZERO_TOL: f64 = 1e-12;
 
 /// 1 つの off-diag bilinear 項に対する McCormick 不等式数 (LB×2 + UB×2)。
 const MCCORMICK_INEQ_PER_OFF_DIAG: usize = 4;
@@ -66,7 +62,8 @@ fn solve_lifted_lp(
     if pairs.is_empty() {
         return None;
     }
-    let lifted = build_mccormick_lp(problem, node_bounds, &pairs, include_envelope)?;
+    let mut lifted = build_mccormick_lp(problem, node_bounds, &pairs, include_envelope)?;
+    let interval_correction = extract_subpricing_objective_terms(&mut lifted);
     let mut opts = base_opts.clone();
     opts.multistart = None;
     opts.global_optimization = None;
@@ -80,7 +77,21 @@ fn solve_lifted_lp(
     if !is_feasible_result(&res.status) {
         return None;
     }
-    Some(res.objective)
+    Some(res.objective + interval_correction)
+}
+
+/// Move terms invisible to simplex reduced-cost pricing into an independent
+/// box lower bound. Relaxing their correlations can only lower the bound.
+fn extract_subpricing_objective_terms(lifted: &mut QpProblem) -> f64 {
+    let mut correction = lifted.obj_offset;
+    lifted.obj_offset = 0.0;
+    for (coefficient, &(lower, upper)) in lifted.c.iter_mut().zip(&lifted.bounds) {
+        if *coefficient != 0.0 && coefficient.abs() <= REDUCED_COST_ZERO_TOL {
+            correction += (*coefficient * lower).min(*coefficient * upper);
+            *coefficient = 0.0;
+        }
+    }
+    correction
 }
 
 /// 1 unordered pair (i ≤ j) と objective 係数 `0.5 · (Q[i,j] + Q[j,i])` 相当。
@@ -101,7 +112,7 @@ fn collect_bilinear_pairs(q: &CscMatrix) -> Vec<BilinearTerm> {
         for k in q.col_ptr[col]..q.col_ptr[col + 1] {
             let row = q.row_ind[k];
             let v = q.values[k];
-            if v.abs() < Q_ZERO_TOL {
+            if v == 0.0 {
                 continue;
             }
             let key = if row <= col { (row, col) } else { (col, row) };
@@ -109,7 +120,7 @@ fn collect_bilinear_pairs(q: &CscMatrix) -> Vec<BilinearTerm> {
         }
     }
     acc.into_iter()
-        .filter(|(_, c)| c.abs() >= Q_ZERO_TOL)
+        .filter(|(_, c)| *c != 0.0)
         .map(|((i, j), coef)| BilinearTerm { i, j, coef })
         .collect()
 }
@@ -207,7 +218,11 @@ fn build_mccormick_lp(
     let p = pairs.len();
     let total_vars = n + p;
 
-    let q = CscMatrix::from_triplets(&[], &[], &[], total_vars, total_vars).ok()?;
+    // Empty triplet lists can never fail from_triplets: rows/cols/vals are all
+    // len()==0 (no length mismatch), there are no values to fail the finiteness
+    // check, and no indices to fail the bounds check — true for any total_vars.
+    let q = CscMatrix::from_triplets(&[], &[], &[], total_vars, total_vars)
+        .expect("empty triplets are always well-formed for any total_vars");
 
     let mut c = vec![0.0_f64; total_vars];
     c[..n].copy_from_slice(&problem.c);
@@ -258,6 +273,13 @@ fn build_mccormick_lp(
     let mut row = problem.num_constraints;
     if !include_envelope {
         debug_assert_eq!(row, total_rows);
+        // Genuine fallback, not dead: `bounds` already includes w_interval(node_bounds)
+        // products (li*li, li*lj, ...) computed above regardless of include_envelope.
+        // all_bounds_finite (checked by the caller) only requires is_finite(), not a
+        // magnitude bound, so extreme-but-finite node_bounds can make these products
+        // overflow to ±inf, which QpProblem::new legitimately rejects via its b/bounds
+        // finiteness check. The doc comment on this fn already treats `None` here as
+        // an expected "fall back to another lower-bound method" outcome.
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, total_rows, total_vars).ok()?;
         let mut lifted = QpProblem::new(q, c, a, b, bounds, types).ok()?;
         lifted.obj_offset = problem.obj_offset;
@@ -344,6 +366,13 @@ fn build_mccormick_lp(
     }
     debug_assert_eq!(row, total_rows);
 
+    // Genuine fallback, not dead: the envelope rows above push coefficients
+    // (li*lj, li*li, -(li+ui), ...) synthesized from node_bounds. all_bounds_finite
+    // (checked by the caller) only requires is_finite(), not a magnitude bound, so
+    // extreme-but-finite node_bounds can make these products overflow to ±inf, which
+    // from_triplets/QpProblem::new legitimately reject via their vals/b finiteness
+    // checks. The doc comment on this fn already treats `None` here as an expected
+    // "fall back to another lower-bound method" outcome.
     let a = CscMatrix::from_triplets(&rows, &cols, &vals, total_rows, total_vars).ok()?;
 
     let mut lifted = QpProblem::new(q, c, a, b, bounds, types).ok()?;
@@ -610,29 +639,72 @@ mod tests {
         );
     }
 
-    /// Q_ZERO_TOL 境界: 全 entry が threshold 未満なら pairs 空 → None。
-    /// 一方 threshold 直上の entry は採用される (= 境界の側性が明確)。
+    /// 小さい負の bilinear 項でも、対応する box が広ければ目的への寄与は O(1) になる。
+    /// 旧 Q_ZERO_TOL 経路は cross term を落として lb=0 を返し、真値≈-1を上回る。
     #[test]
-    fn mccormick_lb_q_zero_tol_boundary() {
-        // 1) 全 entry < Q_ZERO_TOL: pairs 空 → None
-        let half = Q_ZERO_TOL * 0.5;
-        let q_below = CscMatrix::from_triplets(&[0], &[0], &[half], 1, 1).unwrap();
-        let p_below = build_problem(q_below, vec![0.0], vec![(-1.0, 1.0)]);
-        let opts = SolverOptions::default();
+    fn tiny_negative_bilinear_term_is_required_for_a_valid_lower_bound() {
+        const DIAG_OBJECTIVE: f64 = 1e-12;
+        const CROSS_OBJECTIVE: f64 = -1e-15;
+        const Y_MAX: f64 = 1e15;
+
+        // 0.5*x'Qx = DIAG_OBJECTIVE*x^2 + CROSS_OBJECTIVE*x*y.
+        // Construct stored Q directly because sparse triplet assembly has its
+        // own DROP_TOL, separate from the McCormick collector under test.
+        let q = CscMatrix {
+            nrows: 2,
+            ncols: 2,
+            col_ptr: vec![0, 2, 3],
+            row_ind: vec![0, 1, 0],
+            values: vec![2.0 * DIAG_OBJECTIVE, CROSS_OBJECTIVE, CROSS_OBJECTIVE],
+        };
+        let bounds = vec![(0.0, 1.0), (0.0, Y_MAX)];
+        let problem = build_problem(q, vec![0.0, 0.0], bounds);
+
+        // Independent box oracle: for each y endpoint, enumerate both x
+        // endpoints and the clamped stationary point of the explicit scalar
+        // polynomial. Since the objective is affine in y, this covers the box.
+        let objective = |x: f64, y: f64| DIAG_OBJECTIVE * x * x + CROSS_OBJECTIVE * x * y;
+        let mut true_min = f64::INFINITY;
+        for y in [0.0, Y_MAX] {
+            let stationary = (-CROSS_OBJECTIVE * y / (2.0 * DIAG_OBJECTIVE)).clamp(0.0, 1.0);
+            for x in [0.0, 1.0, stationary] {
+                true_min = true_min.min(objective(x, y));
+            }
+        }
+        let expected = DIAG_OBJECTIVE + CROSS_OBJECTIVE * Y_MAX;
+        assert!((true_min - expected).abs() < 1e-12);
+
+        let lb = mccormick_lower_bound(&problem, &problem.bounds, &SolverOptions::default(), None)
+            .expect("nonzero diagonal keeps the McCormick relaxation active");
         assert!(
-            mccormick_lower_bound(&p_below, &p_below.bounds, &opts, None).is_none(),
-            "Q values below Q_ZERO_TOL must produce empty pairs → None"
+            lb <= true_min + 1e-6,
+            "McCormick lb {lb} must not exceed enumerated true minimum {true_min}"
         );
-        // 2) threshold の 10 倍 (= 明確に live) なら pairs 非空 → Some
-        let live = Q_ZERO_TOL * 10.0;
-        let q_above = CscMatrix::from_triplets(&[0], &[0], &[live], 1, 1).unwrap();
-        let p_above = build_problem(q_above, vec![0.0], vec![(-1.0, 1.0)]);
-        let lb = mccormick_lower_bound(&p_above, &p_above.bounds, &opts, None)
-            .expect("above-threshold Q must yield lb");
         assert!(
-            lb.is_finite(),
-            "above-threshold lb must be finite, got {lb}"
+            (lb - expected).abs() < 1e-4,
+            "tiny cross term must contribute its O(1) box effect: lb={lb}, expected={expected}"
         );
+    }
+
+    #[test]
+    fn subpricing_objective_boundary_and_offset_are_accounted_once() {
+        let below = REDUCED_COST_ZERO_TOL * 0.5;
+        let at = REDUCED_COST_ZERO_TOL;
+        let above = REDUCED_COST_ZERO_TOL * 1.01;
+        let q = CscMatrix::new(3, 3);
+        let mut problem = build_problem(
+            q,
+            vec![below, at, above],
+            vec![(-2.0, 3.0), (-2.0, 3.0), (-2.0, 3.0)],
+        );
+        problem.obj_offset = 7.0;
+
+        let correction = extract_subpricing_objective_terms(&mut problem);
+
+        assert_eq!(problem.c, vec![0.0, 0.0, above]);
+        assert_eq!(problem.obj_offset, 0.0);
+        let expected = 7.0 - 2.0 * below - 2.0 * at;
+        assert!((correction - expected).abs() < 1e-15);
     }
 
     /// 大規模 fixture (n=8): dense bilinear + box bound で BB 経路に乗らず純 lb 評価。

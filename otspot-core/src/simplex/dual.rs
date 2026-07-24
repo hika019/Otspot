@@ -17,6 +17,24 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use std::sync::atomic::Ordering;
 
+#[cfg(test)]
+thread_local! {
+    static ETA_UPDATE_DISABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ETA_REJECT_ATOMIC_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reject_eta_for_test(alpha: &mut SparseVec) {
+    if ETA_UPDATE_DISABLE.get() {
+        alpha.indices.clear();
+        alpha.values.clear();
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn reject_eta_for_test(_: &mut SparseVec) {}
+
 /// Two-phase dual simplex entry point. Warm-start path recomputes x_B from the
 /// supplied basis; cold-start uses cost perturbation to gain dual feasibility,
 /// then runs primal Phase II.
@@ -280,7 +298,7 @@ pub(super) fn dual_simplex_core(
                 trow[j] = 0.0;
                 continue;
             }
-            let (rows, vals) = a.get_column(j).unwrap();
+            let (rows, vals) = a.column(j);
             let mut dot = 0.0;
             for (k, &row) in rows.iter().enumerate() {
                 dot += rho_dense[row] * vals[k];
@@ -295,7 +313,7 @@ pub(super) fn dual_simplex_core(
             };
 
         // FTRAN: α = B^{-1} a_q
-        let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
+        let (col_rows, col_vals) = a.column(entering_col);
         let mut alpha_sv = SparseVec {
             indices: col_rows.to_vec(),
             values: col_vals.to_vec(),
@@ -318,6 +336,33 @@ pub(super) fn dual_simplex_core(
             reduced_costs =
                 compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
             continue;
+        }
+
+        // Commit the eta while every externally observable simplex state still
+        // describes the old basis. A rejected numerical pivot must not publish
+        // a new x_B, reduced-cost vector, or basis-membership map.
+        #[cfg(test)]
+        let atomic_snapshot = (
+            x_b.to_vec(),
+            reduced_costs.clone(),
+            is_basic.clone(),
+            basis.to_vec(),
+        );
+        reject_eta_for_test(&mut alpha_sv);
+        match basis_mgr.update(entering_col, leaving_row, &alpha_sv) {
+            Ok(()) => {}
+            Err(crate::error::SolverError::SingularBasis { .. }) => {
+                #[cfg(test)]
+                {
+                    assert_eq!(x_b, atomic_snapshot.0);
+                    assert_eq!(reduced_costs, atomic_snapshot.1);
+                    assert_eq!(is_basic, atomic_snapshot.2);
+                    assert_eq!(basis, atomic_snapshot.3);
+                    ETA_REJECT_ATOMIC_COUNT.set(ETA_REJECT_ATOMIC_COUNT.get().saturating_add(1));
+                }
+                return SimplexOutcome::SingularBasis;
+            }
+            Err(err) => panic!("internal dual-simplex eta invariant violated: {err}"),
         }
 
         // x_B update; step = x_B[p] / α[p] (negative).
@@ -349,7 +394,6 @@ pub(super) fn dual_simplex_core(
         }
         is_basic[entering_col] = true;
 
-        basis_mgr.update(entering_col, leaving_row, &alpha_sv);
         basis[leaving_row] = entering_col;
 
         if basis_mgr_needs_refactor_approx(_iter) {
@@ -420,6 +464,53 @@ mod tests {
     use crate::sparse::CscMatrix;
     use crate::test_kkt::{assert_kkt_optimal_with, dfeas_rel_bound, pfeas_abs, EPS_KKT};
     use crate::tolerances::PIVOT_TOL;
+
+    struct EtaRejectGuard(bool);
+
+    impl EtaRejectGuard {
+        fn new() -> Self {
+            super::ETA_REJECT_ATOMIC_COUNT.set(0);
+            Self(super::ETA_UPDATE_DISABLE.replace(true))
+        }
+    }
+
+    impl Drop for EtaRejectGuard {
+        fn drop(&mut self) {
+            super::ETA_UPDATE_DISABLE.set(self.0);
+        }
+    }
+
+    #[test]
+    fn rejected_eta_leaves_legacy_dual_state_atomic() {
+        // basis {col 0}, x_B=-1; the legacy ratio convention selects col 1=e
+        // and forces one otherwise-valid dual pivot.
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let mut x_b = vec![-1.0];
+        let mut basis = vec![0usize];
+        let old_x_b = x_b.clone();
+        let old_basis = basis.clone();
+        let mut iters = 0;
+        let _guard = EtaRejectGuard::new();
+
+        let outcome = super::dual_simplex_core(
+            &a,
+            &mut x_b,
+            &[0.0, 0.0],
+            &mut basis,
+            1,
+            2,
+            &SolverOptions::default(),
+            &mut iters,
+        );
+
+        assert!(matches!(
+            outcome,
+            crate::simplex::SimplexOutcome::SingularBasis
+        ));
+        assert_eq!(x_b, old_x_b);
+        assert_eq!(basis, old_basis);
+        assert_eq!(super::ETA_REJECT_ATOMIC_COUNT.get(), 1);
+    }
 
     fn make_lp(
         c: Vec<f64>,

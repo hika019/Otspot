@@ -12,13 +12,33 @@ use crate::sparse::CscMatrix;
 use std::fmt;
 use std::sync::Arc;
 
-/// Returns `true` if `(lb, ub)` is a valid bound pair.
+/// Returns `true` if `(lb, ub)` is a *well-formed* bound pair.
 ///
-/// Valid means: neither endpoint is NaN, `lb <= ub`, `lb < +∞`, and `ub > -∞`.
-/// The last two conditions reject empty intervals that `lb > ub` misses when both
-/// endpoints are the same infinity — e.g., `(+∞, +∞)` or `(-∞, -∞)`.
+/// Valid means: neither endpoint is NaN, `lb < +∞`, and `ub > -∞`.
+/// Note this deliberately does **not** require `lb <= ub`: a finite `lb > ub`
+/// (or `lb > ub` with a legal infinite side) is a well-formed but trivially
+/// infeasible box, which the solver must accept and report as `Infeasible`
+/// rather than reject at construction. The `lb < +∞` / `ub > -∞` conditions
+/// still reject the degenerate empty intervals `(+∞, +∞)` and `(-∞, -∞)`,
+/// where a placeholder infinity is used as an actual bound value.
 pub(crate) fn is_valid_bound_pair(lb: f64, ub: f64) -> bool {
-    !lb.is_nan() && !ub.is_nan() && lb <= ub && lb < f64::INFINITY && ub > f64::NEG_INFINITY
+    !lb.is_nan() && !ub.is_nan() && lb < f64::INFINITY && ub > f64::NEG_INFINITY
+}
+
+/// Returns the index of the first variable whose box is empty (`lb > ub + ZERO_TOL`),
+/// or `None` if every box is consistent.
+///
+/// A well-formed `lb > ub` box is trivially infeasible. This is the single,
+/// presolve-independent bound-consistency check placed at each solve entry so
+/// that INFEASIBLE detection never depends on presolve running or on a
+/// downstream kernel (e.g. the QP IPM initial point, which assumes `lb <= ub`)
+/// behaving on an empty box. The tolerance matches the presolve steps that use
+/// `lb > ub + ZERO_TOL`, so a box with `lb == ub` within `ZERO_TOL` is treated
+/// as a fixed variable, not as infeasible.
+pub(crate) fn first_infeasible_bound(bounds: &[(f64, f64)]) -> Option<usize> {
+    bounds
+        .iter()
+        .position(|&(lb, ub)| lb > ub + crate::tolerances::ZERO_TOL)
 }
 
 /// LP問題における制約条件の種別
@@ -212,14 +232,12 @@ pub struct SolverResult {
     pub bound_duals: Vec<f64>,
     /// 反復回数（WSR実績回数）
     pub iterations: usize,
-    /// 元空間で独立再計算した最終残差 (pfeas_rel, dfeas_rel, duality_gap_rel) を
-    /// 保持する想定のフィールド。
-    ///
-    /// 現状 (v0.7.2 時点) はどの経路もこの値を設定しない — 常に `None`。
-    /// postsolve (`qp_postsolve.rs`) は upstream の値をそのまま伝播するのみで、
-    /// その upstream (`finalize_outcome`, `qp/ipm_solver/attempt.rs`) 自体が
-    /// `..Default::default()` で構築するため未設定のまま。「eps を緩めれば
-    /// 解けるケースの発見」用の診断値として機能させるには実装が必要 (未着手)。
+    /// IPPMM が最終的に返す iterate の診断値
+    /// `(primal residual infinity norm, dual residual infinity norm, mu)`。
+    /// 発散や反復上限などで best-so-far iterate を採用した場合は、その iterate
+    /// に対応する値を保持する。Ruiz scaling 経路では scaled 空間の値であり、
+    /// postsolve も座標変換せずそのまま伝播する。IPPMM で残差を計測していない
+    /// 経路では `None`。
     pub final_residuals: Option<(f64, f64, f64)>,
     /// 相対双対ギャップ (|p_obj - d_obj| / max(|p|,|d|,1))。
     /// IPPMM 内部の best-so-far に紐づく診断値。
@@ -682,26 +700,70 @@ mod tests {
         }
     }
 
+    // A finite `lb > ub` (or `lb > ub` with a legal infinite side) is a
+    // well-formed but trivially infeasible box: it must be ACCEPTED at
+    // construction so the solver can report Infeasible. Only the degenerate
+    // `(+∞, -∞)` pair — rejected because lb=+∞ and ub=-∞ are illegal bound
+    // *values*, not because lb>ub — stays an error.
     #[test]
-    fn lp_lb_gt_ub_rejected() {
-        let cases: Vec<(f64, f64)> = vec![
+    fn lp_finite_lb_gt_ub_accepted() {
+        let accepted: Vec<(f64, f64)> = vec![
             (5.0, 1.0),
             (1.0, 0.0),
-            (f64::INFINITY, f64::NEG_INFINITY),
             (0.1, 0.0),
+            (0.0, -1.0),               // finite lb>ub
+            (f64::NEG_INFINITY, -5.0), // legal: lb=-inf, ub finite (lb<ub, control)
         ];
-        for (lb, ub) in cases {
+        for (lb, ub) in accepted {
             let res = make_lp(
                 vec![1.0, 2.0],
                 vec![5.0],
                 vec![1.0, 1.0],
                 vec![(lb, ub), (0.0, f64::INFINITY)],
             );
-            assert!(
-                matches!(res, Err(SolverError::InvalidBounds { .. })),
-                "expected InvalidBounds for lb={lb} ub={ub}"
-            );
+            assert!(res.is_ok(), "expected Ok (accept) for lb={lb} ub={ub}");
         }
+    }
+
+    // `(+∞, -∞)` is still rejected: illegal bound values, not a lb>ub case.
+    #[test]
+    fn lp_plus_inf_lb_minus_inf_ub_rejected() {
+        let res = make_lp(
+            vec![1.0, 2.0],
+            vec![5.0],
+            vec![1.0, 1.0],
+            vec![(f64::INFINITY, f64::NEG_INFINITY), (0.0, f64::INFINITY)],
+        );
+        assert!(
+            matches!(res, Err(SolverError::InvalidBounds { index: 0, .. })),
+            "expected InvalidBounds for (+inf,-inf)"
+        );
+    }
+
+    // Direct unit test for the shared validator.
+    #[test]
+    fn is_valid_bound_pair_semantics() {
+        // Finite lb>ub is now WELL-FORMED (accepted; infeasible handled downstream).
+        assert!(is_valid_bound_pair(5.0, 1.0));
+        assert!(is_valid_bound_pair(0.1, 0.0));
+        assert!(is_valid_bound_pair(0.0, -1.0));
+        // Legal infinite sides.
+        assert!(is_valid_bound_pair(f64::NEG_INFINITY, 5.0));
+        assert!(is_valid_bound_pair(0.0, f64::INFINITY));
+        assert!(is_valid_bound_pair(f64::NEG_INFINITY, f64::INFINITY));
+        // lb>ub with a legal infinite side: -inf..-5 is lb<ub; test 3.0 > -inf side.
+        assert!(is_valid_bound_pair(3.0, f64::INFINITY)); // fine
+                                                          // NaN endpoints are invalid.
+        assert!(!is_valid_bound_pair(f64::NAN, 1.0));
+        assert!(!is_valid_bound_pair(1.0, f64::NAN));
+        assert!(!is_valid_bound_pair(f64::NAN, f64::NAN));
+        // Degenerate same-infinity empty intervals are invalid (illegal values).
+        assert!(!is_valid_bound_pair(f64::INFINITY, f64::INFINITY));
+        assert!(!is_valid_bound_pair(f64::NEG_INFINITY, f64::NEG_INFINITY));
+        // Lone illegal infinity: lb=+inf or ub=-inf.
+        assert!(!is_valid_bound_pair(f64::INFINITY, 5.0));
+        assert!(!is_valid_bound_pair(0.0, f64::NEG_INFINITY));
+        assert!(!is_valid_bound_pair(f64::INFINITY, f64::NEG_INFINITY));
     }
 
     #[test]

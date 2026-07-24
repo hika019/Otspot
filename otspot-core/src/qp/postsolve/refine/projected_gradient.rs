@@ -33,7 +33,9 @@ pub(crate) fn refine_dual_projected_gradient(
         .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
         .collect();
 
-    let objective = |y: &[f64]| -> Option<(f64, Vec<f64>)> {
+    // y は常に長さ m (project_feasible / caller が保証)、a.transpose().ncols() == a.nrows()
+    // == m なので mat_vec_mul は常に成功する。失敗経路がないため Option でなく値を直接返す。
+    let objective = |y: &[f64]| -> (f64, Vec<f64>) {
         let aty = if problem.a.nrows > 0 {
             problem
                 .a
@@ -49,7 +51,7 @@ pub(crate) fn refine_dual_projected_gradient(
             residual[j] = aty[j] - target[j];
             obj += 0.5 * residual[j] * residual[j];
         }
-        Some((obj, residual))
+        (obj, residual)
     };
 
     let mut proj_lower = vec![f64::NEG_INFINITY; m];
@@ -147,9 +149,7 @@ pub(crate) fn refine_dual_projected_gradient(
 
     let mut y_start = result.dual_solution.clone();
     project_feasible(&mut y_start);
-    let Some((mut obj_curr, mut residual_curr)) = objective(&y_start) else {
-        return;
-    };
+    let (mut obj_curr, mut residual_curr) = objective(&y_start);
     let mut y_curr = y_start;
     let mut y_best = y_curr.clone();
     let mut obj_best = obj_curr;
@@ -167,10 +167,10 @@ pub(crate) fn refine_dual_projected_gradient(
         if obj_curr < obj_converge_thresh {
             break;
         }
-        let grad = match problem.a.mat_vec_mul(&residual_curr) {
-            Ok(v) => v,
-            Err(_) => break,
-        };
+        let grad = problem.a.mat_vec_mul(&residual_curr).expect(
+            "a.ncols() == residual_curr.len() == num_vars: QpProblem::new() enforces \
+             a.ncols() == num_vars, and residual_curr is always sized n by `objective`",
+        );
         let grad_inf = grad.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
         if !grad_inf.is_finite() || grad_inf < PG_GRAD_INF_TOL {
             break;
@@ -179,10 +179,10 @@ pub(crate) fn refine_dual_projected_gradient(
         if !grad_sq.is_finite() || grad_sq < PG_CURV_FLOOR {
             break;
         }
-        let aty_grad = match problem.a.transpose().mat_vec_mul(&grad) {
-            Ok(v) => v,
-            Err(_) => break,
-        };
+        let aty_grad = problem.a.transpose().mat_vec_mul(&grad).expect(
+            "a.transpose().ncols() == a.nrows() == grad.len(): grad is always the output \
+             of a.mat_vec_mul(..), whose length is unconditionally a.nrows()",
+        );
         let curvature = aty_grad.iter().map(|v| v * v).sum::<f64>();
         if !curvature.is_finite() || curvature < PG_CURV_FLOOR {
             break;
@@ -196,9 +196,7 @@ pub(crate) fn refine_dual_projected_gradient(
                 y_try[i] -= step * grad[i];
             }
             project_feasible(&mut y_try);
-            let Some((obj_try, residual_try)) = objective(&y_try) else {
-                continue;
-            };
+            let (obj_try, residual_try) = objective(&y_try);
             if obj_try <= obj_curr + ACCEPT_TOL_REL * (1.0 + obj_curr) {
                 y_curr = y_try;
                 obj_curr = obj_try.min(obj_curr);

@@ -144,7 +144,7 @@ fn sparse_cholesky_lower(p: &CscMatrix, n: usize) -> Result<(SparseCholCols, boo
     // tolerance (see `CHOL_ROUNDING_REL_FACTOR`).
     let mut orig_diag = vec![0.0f64; n];
     for j in 0..n {
-        let (rows, vals) = p.get_column(j).map_err(|_| ())?;
+        let (rows, vals) = p.column(j);
         for (&r, &v) in rows.iter().zip(vals) {
             if r == j {
                 orig_diag[j] += v;
@@ -166,7 +166,7 @@ fn sparse_cholesky_lower(p: &CscMatrix, n: usize) -> Result<(SparseCholCols, boo
         }
         touched.clear();
 
-        let (rows, vals) = p.get_column(j).map_err(|_| ())?;
+        let (rows, vals) = p.column(j);
         for (&r, &v) in rows.iter().zip(vals) {
             if r >= j {
                 if !touched_mark[r] {
@@ -619,9 +619,7 @@ pub fn qcqp_from_qp_problem(src: &QpProblem) -> Result<QcqpProblem, String> {
         } else {
             None
         };
-        let (row_idx, row_val) = a_rows
-            .get_column(k)
-            .map_err(|e| format!("A row {k}: {e:?}"))?;
+        let (row_idx, row_val) = a_rows.column(k);
         match src.constraint_types[k] {
             ConstraintType::Le => {
                 if let Some(qc) = qmat {
@@ -799,7 +797,7 @@ fn touched_cholesky(triplets: &[(usize, usize, f64)]) -> Result<(SparseCholCols,
 fn csc_to_triplets(m: &CscMatrix) -> Vec<(usize, usize, f64)> {
     let mut t = Vec::with_capacity(m.nnz());
     for j in 0..m.ncols() {
-        let (rows, vals) = m.get_column(j).expect("j < ncols by loop bound");
+        let (rows, vals) = m.column(j);
         for (&r, &v) in rows.iter().zip(vals) {
             t.push((r, j, v));
         }
@@ -945,9 +943,7 @@ pub(crate) fn qp_problem_to_conic(src: &QpProblem) -> Result<(ConicProblem, usiz
         let qmat = has_qc
             .then(|| &src.quadratic_constraints[k])
             .filter(|qc| qc.nnz() > 0);
-        let (row_idx, row_val) = a_rows
-            .get_column(k)
-            .map_err(|e| format!("A row {k}: {e:?}"))?;
+        let (row_idx, row_val) = a_rows.column(k);
         match src.constraint_types[k] {
             ConstraintType::Le => {
                 if let Some(qc) = qmat {

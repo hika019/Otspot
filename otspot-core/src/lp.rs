@@ -13,6 +13,14 @@ use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
 /// Returns [`SolveStatus::NumericalError`] if `options` fails validation;
 /// validation is performed by the underlying `simplex::solve_with`.
 pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+    // Presolve-independent bound-consistency guard: an empty box (lb > ub) is
+    // trivially infeasible and is reported here so correctness does not rely on
+    // presolve running or on the simplex-internal empty-box check downstream.
+    if crate::problem::first_infeasible_bound(&problem.bounds).is_some() {
+        let mut result = SolverResult::infeasible();
+        result.stats.route = SolveRoute::LpDirect;
+        return result;
+    }
     // Materialize timeout_secs → deadline HERE so the deadline_triggered clock
     // check below sees the same deadline the solve actually ran against
     // (a raw timeout_secs-only option set is clock-blind at this layer).
@@ -176,6 +184,41 @@ mod tests {
             ..Default::default()
         };
         solve_lp_with(lp, &opts)
+    }
+
+    /// Sentinel: an LP with an empty variable box (lb > ub) must solve to
+    /// Infeasible on the direct LP entry, with presolve either ON or OFF —
+    /// never a construction Err, panic, or false Optimal.
+    ///
+    /// Reverting the `first_infeasible_bound` guard in `solve_lp_with` leaves
+    /// the presolve-ON case still Infeasible (presolve/simplex catch it), so the
+    /// guard's own contribution is exercised by asserting BOTH toggles agree.
+    #[test]
+    fn lp_empty_box_lb_gt_ub_is_infeasible() {
+        // min x  s.t.  x <= 10 (Le),  x ∈ [5, 3]  (empty box)
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![10.0],
+            vec![ConstraintType::Le],
+            vec![(5.0, 3.0)],
+            None,
+        )
+        .expect("lb>ub box must be ACCEPTED at construction");
+        for presolve in [true, false] {
+            let opts = SolverOptions {
+                presolve,
+                ..Default::default()
+            };
+            let res = solve_lp_with(&lp, &opts);
+            assert_eq!(
+                res.status,
+                SolveStatus::Infeasible,
+                "LP empty box must be Infeasible (presolve={presolve}), got {:?}",
+                res.status
+            );
+        }
     }
 
     /// Reported objective must equal `c·x` of the returned solution for an LP

@@ -9,6 +9,10 @@ pub const ZERO_TOL: f64 = 1e-12;
 /// シンプレックス法の最適性・実行可能性判定の閾値
 pub const PIVOT_TOL: f64 = 1e-8;
 
+/// Reduced-cost magnitude at or below which simplex pricing treats an
+/// objective coefficient as numerically zero.
+pub const REDUCED_COST_ZERO_TOL: f64 = 1e-8;
+
 /// 行列構築時の微小値除去の閾値
 pub const DROP_TOL: f64 = 1e-15;
 
@@ -102,15 +106,6 @@ pub const LARGE_A_COEFF_TRIGGER: f64 = 1e6;
 /// Units: dimensionless ratio.
 /// Used in: `qp::ipm_solver::attempt::try_q_diagonal_scaling`.
 pub const Q_DIAG_RANGE_TRIGGER: f64 = 1e6;
-
-/// Absolute drop threshold for Q off-diagonal pruning in `near_zero_q_removal`.
-///
-/// Off-diagonal entries `|Q[i,j]| < Q_OFFDIAG_ABS` are removed to improve
-/// sparsity before IPM solve. Uses an absolute (not scale-relative) threshold
-/// because empirical evidence shows that a purely relative threshold can leave
-/// entries that change IPM trajectory and cause spurious Optimal convergence
-/// (e.g. QPLIB_9002, measured 2026-05-30).
-pub const Q_OFFDIAG_ABS: f64 = 1e-10;
 
 /// Relative tolerance for Q off-diagonal near-zero detection in `is_diagonal_q`
 /// and `try_q_diagonal_scaling`.

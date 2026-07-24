@@ -36,6 +36,9 @@ fn legacy_basis_from_warm_start(
     solution: &[f64],
     basis: &[usize],
 ) -> Option<Vec<usize>> {
+    if solution.len() != problem.num_vars {
+        return None;
+    }
     if basis.iter().any(|&c| c >= sf.n_total) {
         return None;
     }
@@ -67,8 +70,7 @@ fn legacy_basis_from_warm_start(
         let orig = col_to_orig[j];
         let at_upper = orig != usize::MAX && {
             let (_, ub) = problem.bounds[orig];
-            ub.is_finite()
-                && (ub - solution.get(orig).copied().unwrap_or(0.0)).abs() <= BOUND_ACTIVE_TOL
+            ub.is_finite() && (ub - solution[orig]).abs() <= BOUND_ACTIVE_TOL
         };
         // The structural column j is the UB-row basic only when j is non-basic at
         // its upper bound. If j is already basic (e.g. degenerate basic-at-upper),
@@ -176,10 +178,9 @@ pub fn compute_sensitivity(
             continue;
         }
         let mut ya = 0.0;
-        if let Ok((rows, vals)) = sf.a.get_column(k) {
-            for (idx, &row) in rows.iter().enumerate() {
-                ya += y_sf[row] * vals[idx];
-            }
+        let (rows, vals) = sf.a.column(k);
+        for (idx, &row) in rows.iter().enumerate() {
+            ya += y_sf[row] * vals[idx];
         }
         c_bar[k] = sf.c[k] - ya;
     }
@@ -265,10 +266,9 @@ pub fn compute_sensitivity(
                 }
                 // η_k = π_p^T a_sf_k.
                 let mut eta = 0.0;
-                if let Ok((rows, vals)) = sf.a.get_column(k) {
-                    for (idx, &row) in rows.iter().enumerate() {
-                        eta += buf[row] * vals[idx];
-                    }
+                let (rows, vals) = sf.a.column(k);
+                for (idx, &row) in rows.iter().enumerate() {
+                    eta += buf[row] * vals[idx];
                 }
                 // Direct change in c_sf[k] per unit δ_cj (nonzero only for
                 // a free-variable split where k is the companion column of j).

@@ -77,6 +77,24 @@ fn convex_qcqp_routes_to_conic_bridge() {
     assert_eq!(result.stats.route, SolveRoute::ConicQcqpConvex);
 }
 
+/// Sentinel: a QCQP with an empty variable box (lb > ub) must solve to
+/// Infeasible without reaching the conic bridge. The `first_infeasible_bound`
+/// guard in `dispatch_solve_qp` runs before the `has_qcqp_constraints` branch,
+/// so it fires regardless of the conic path's own assumptions. Reverting the
+/// guard would send an empty box into the SOCP/spatial-B&B bridge.
+#[test]
+fn qcqp_empty_box_lb_gt_ub_is_infeasible() {
+    let mut problem = convex_qcqp_problem();
+    problem.bounds[0] = (5.0, 3.0); // empty box on a QCQP variable
+    let result = solve_qp(&problem);
+    assert_eq!(
+        result.status,
+        SolveStatus::Infeasible,
+        "QCQP empty box must be Infeasible, got {:?}",
+        result.status
+    );
+}
+
 /// min x0+x1  s.t.  x0*x1 >= 1,  x in [0.1,3]^2.  Nonconvex (quadratic `>=`)
 /// QCQP; global optimum is 2 at (1,1).
 fn nonconvex_qcqp_problem(x1_ub: f64) -> QpProblem {

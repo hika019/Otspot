@@ -182,7 +182,7 @@ fn build_a_aug_for_eq(
     let mut trip_cols: Vec<usize> = Vec::with_capacity(a_scaled.nnz() + n_art);
     let mut trip_vals: Vec<f64> = Vec::with_capacity(a_scaled.nnz() + n_art);
     for j in 0..n_total {
-        let (rows, vals) = a_scaled.get_column(j).unwrap();
+        let (rows, vals) = a_scaled.column(j);
         for (k, &row) in rows.iter().enumerate() {
             let v = vals[k];
             if v.abs() > DROP_TOL {
@@ -216,7 +216,7 @@ pub(super) fn diag_basis_initial_x_b(a_aug: &CscMatrix, basis: &[usize], b: &[f6
     let m = basis.len();
     let mut x_b = vec![0.0f64; m];
     for i in 0..m {
-        let (rows, vals) = a_aug.get_column(basis[i]).unwrap();
+        let (rows, vals) = a_aug.column(basis[i]);
         let mut diag = 0.0f64;
         for (k, &r) in rows.iter().enumerate() {
             if r == i {

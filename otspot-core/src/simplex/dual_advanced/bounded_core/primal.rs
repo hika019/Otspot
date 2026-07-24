@@ -29,8 +29,8 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn set_primal_force_bland(v: bool) {
-    FORCE_BLAND.with(|c| c.set(v));
+pub(crate) fn set_primal_force_bland(v: bool) -> bool {
+    FORCE_BLAND.with(|c| c.replace(v))
 }
 
 #[cfg(test)]
@@ -50,8 +50,8 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn set_primal_alpha_sv_disabled(v: bool) {
-    PRIMAL_ALPHA_SV_DISABLE.with(|c| c.set(v));
+pub(crate) fn set_primal_alpha_sv_disabled(v: bool) -> bool {
+    PRIMAL_ALPHA_SV_DISABLE.with(|c| c.replace(v))
 }
 
 #[cfg(test)]
@@ -314,6 +314,23 @@ pub(crate) fn phase2_primal_bounded(
 
         let leaving_col = state.basis[r];
 
+        let alpha_sv = if primal_alpha_sv_disabled() {
+            SparseVec {
+                indices: vec![],
+                values: vec![],
+                len: m,
+            }
+        } else {
+            SparseVec::from_dense(&alpha)
+        };
+        match basis_mgr.update(q, r, &alpha_sv) {
+            Ok(()) => {}
+            Err(crate::error::SolverError::SingularBasis { .. }) => {
+                return (SimplexOutcome::SingularBasis, state);
+            }
+            Err(err) => panic!("internal bounded-primal eta invariant violated: {err}"),
+        }
+
         for i in 0..m {
             state.x_b[i] -= alpha[i] * dir * theta;
         }
@@ -330,17 +347,6 @@ pub(crate) fn phase2_primal_bounded(
         state.is_basic[leaving_col] = false;
         state.is_basic[q] = true;
         state.basis[r] = q;
-
-        let alpha_sv = if primal_alpha_sv_disabled() {
-            SparseVec {
-                indices: vec![],
-                values: vec![],
-                len: m,
-            }
-        } else {
-            SparseVec::from_dense(&alpha)
-        };
-        basis_mgr.update(q, r, &alpha_sv);
 
         if basis_mgr.needs_refactor() {
             basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
@@ -586,6 +592,23 @@ pub(super) fn primal_simplex_aug(
         }
         let leaving_col = state.basis[r];
 
+        let alpha_sv = if primal_alpha_sv_disabled() {
+            SparseVec {
+                indices: vec![],
+                values: vec![],
+                len: m,
+            }
+        } else {
+            SparseVec::from_dense(&alpha)
+        };
+        match basis_mgr.update(q, r, &alpha_sv) {
+            Ok(()) => {}
+            Err(crate::error::SolverError::SingularBasis { .. }) => {
+                return SimplexOutcome::SingularBasis;
+            }
+            Err(err) => panic!("internal augmented-primal eta invariant violated: {err}"),
+        }
+
         for i in 0..m {
             state.x_b[i] -= alpha[i] * dir * theta;
         }
@@ -602,15 +625,6 @@ pub(super) fn primal_simplex_aug(
         state.is_basic[q] = true;
         state.basis[r] = q;
 
-        let alpha_sv = if primal_alpha_sv_disabled() {
-            SparseVec {
-                indices: vec![],
-                values: vec![],
-                len: m,
-            }
-        } else {
-            SparseVec::from_dense(&alpha)
-        };
         let norm_sq: f64 = alpha.iter().map(|&v| v * v).sum();
         let mut gamma_leaving = 1.0;
         if leaving_col < n_struct {
@@ -630,8 +644,6 @@ pub(super) fn primal_simplex_aug(
                 1.0
             };
         }
-        basis_mgr.update(q, r, &alpha_sv);
-
         if basis_mgr.needs_refactor() {
             basis_mgr.refactor_if_needed_timed(a_aug, &state.basis, options.deadline);
             if basis_mgr.refactor_failed {

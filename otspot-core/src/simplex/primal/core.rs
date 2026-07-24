@@ -15,6 +15,27 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{PIVOT_STABILITY_THRESHOLD, PIVOT_TOL};
 use std::sync::atomic::Ordering;
 
+#[cfg(test)]
+thread_local! {
+    static ETA_UPDATE_DISABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_eta_update_disabled(v: bool) -> bool {
+    ETA_UPDATE_DISABLE.with(|c| c.replace(v))
+}
+
+#[cfg(test)]
+fn eta_update_disabled() -> bool {
+    ETA_UPDATE_DISABLE.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn eta_update_disabled() -> bool {
+    false
+}
+
 fn cleanup_trace_enabled() -> bool {
     std::env::var_os("OTSPOT_CLEANUP_TRACE_DETAIL").is_some()
 }
@@ -387,7 +408,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         };
 
         // FTRAN: d = B^{-1} a_entering
-        let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
+        let (col_rows, col_vals) = a.column(entering_col);
         // Save inf-norm of original column for the corruption check below.
         let orig_col_norm = col_vals
             .iter()
@@ -423,7 +444,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                             return SimplexOutcome::SingularBasis;
                         }
                         stable_mode = true;
-                        if !revert_to_snapshot(
+                        match revert_to_snapshot(
                             a,
                             basis,
                             x_b,
@@ -433,7 +454,17 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                             &mut basis_mgr,
                             options,
                         ) {
-                            return SimplexOutcome::SingularBasis;
+                            Ok(()) => {}
+                            Err(crate::error::SolverError::SingularBasis { .. }) => {
+                                return SimplexOutcome::SingularBasis;
+                            }
+                            Err(_) => {
+                                // Revert's own refactor hit the deadline (see
+                                // factorize_timed) — an external stop, hence Timeout,
+                                // not a numerical SingularBasis.
+                                let obj: f64 = basic_obj(c, basis, x_b);
+                                return SimplexOutcome::Timeout(obj);
+                            }
                         }
                         continue;
                     } else {
@@ -443,7 +474,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                         return SimplexOutcome::Timeout(obj);
                     }
                 }
-                let (cr2, cv2) = a.get_column(entering_col).unwrap();
+                let (cr2, cv2) = a.column(entering_col);
                 d_sv = SparseVec {
                     indices: cr2.to_vec(),
                     values: cv2.to_vec(),
@@ -532,6 +563,24 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             Some(i) => i,
         };
 
+        // Validate and commit the eta before mutating any of the primal state.
+        // A rejected eta must leave x_b, pricing, and basis bookkeeping intact.
+        let pivot_unstable = d[leaving_row].abs() < PIVOT_STABILITY_THRESHOLD * max_d_abs
+            && basis_mgr.eta_count() > 0;
+        if !pivot_unstable {
+            if eta_update_disabled() {
+                d_sv.indices.clear();
+                d_sv.values.clear();
+            }
+            match basis_mgr.update(entering_col, leaving_row, &d_sv) {
+                Ok(()) => {}
+                Err(crate::error::SolverError::SingularBasis { .. }) => {
+                    return SimplexOutcome::SingularBasis;
+                }
+                Err(err) => panic!("internal primal-simplex eta invariant violated: {err}"),
+            }
+        }
+
         let step = x_b[leaving_row] / d[leaving_row];
         for i in 0..m {
             x_b[i] -= d[i] * step;
@@ -601,15 +650,9 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             }
         }
 
-        // Small pivot would blow up the eta inverse-pivot factor; refactor
-        // instead of accumulating another eta.
-        let pivot_unstable = d[leaving_row].abs() < PIVOT_STABILITY_THRESHOLD * max_d_abs
-            && basis_mgr.eta_count() > 0;
-
         if pivot_unstable {
             basis_mgr.force_refactor_timed(a, basis, options.deadline);
         } else {
-            basis_mgr.update(entering_col, leaving_row, &d_sv);
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
         }
 
@@ -623,7 +666,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 }
 
                 stable_mode = true;
-                if !revert_to_snapshot(
+                match revert_to_snapshot(
                     a,
                     basis,
                     x_b,
@@ -633,7 +676,17 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                     &mut basis_mgr,
                     options,
                 ) {
-                    return SimplexOutcome::SingularBasis;
+                    Ok(()) => {}
+                    Err(crate::error::SolverError::SingularBasis { .. }) => {
+                        return SimplexOutcome::SingularBasis;
+                    }
+                    Err(_) => {
+                        // Revert's own refactor hit the deadline (see
+                        // factorize_timed) — an external stop, hence Timeout,
+                        // not a numerical SingularBasis.
+                        let obj: f64 = basic_obj(c, basis, x_b);
+                        return SimplexOutcome::Timeout(obj);
+                    }
                 }
                 continue;
             } else {
@@ -687,7 +740,16 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
 }
 
 /// Restore `basis_snapshot` and rebuild `x_b = B^{-1} b` from a fresh LU.
-/// `false` ⇒ snapshot factors as singular (treat as fatal SingularBasis).
+///
+/// Transactional: on `Err`, `basis`, `is_basic`, `x_b`, and `basis_mgr` are left
+/// exactly as on entry (the caller's last known consistent iterate), so a failed
+/// revert can still be used to report `basic_obj(c, basis, x_b)`.
+///
+/// The error variant tells the caller WHY the revert failed:
+/// `SolverError::SingularBasis` ⇒ the reverted-to basis is itself numerically
+/// singular (fatal, `SimplexOutcome::SingularBasis`); any other variant (in
+/// practice `SolverError::DeadlineExceeded`, see `factorize_timed`) ⇒ an
+/// external time-budget stop, not a numerical breakdown (`SimplexOutcome::Timeout`).
 fn revert_to_snapshot(
     a: &CscMatrix,
     basis: &mut [usize],
@@ -697,7 +759,16 @@ fn revert_to_snapshot(
     is_basic: &mut [bool],
     basis_mgr: &mut LuBasis,
     options: &SolverOptions,
-) -> bool {
+) -> Result<(), crate::error::SolverError> {
+    let mut mgr = LuBasis::new_timed(a, basis_snapshot, options.max_etas, options.deadline)?;
+    // Recompute x_B; carrying eta drift could leave a slack negative.
+    let mut x_new = b_rhs.to_vec();
+    mgr.ftran_dense(&mut x_new);
+    for v in x_new.iter_mut() {
+        if v.abs() < options.clamp_tol {
+            *v = 0.0;
+        }
+    }
     basis.copy_from_slice(basis_snapshot);
     for v in is_basic.iter_mut() {
         *v = false;
@@ -705,19 +776,139 @@ fn revert_to_snapshot(
     for &col in basis.iter() {
         is_basic[col] = true;
     }
-    match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
-        Ok(mut mgr) => {
-            // Recompute x_B; carrying eta drift could leave a slack negative.
-            x_b.copy_from_slice(b_rhs);
-            mgr.ftran_dense(x_b);
-            for v in x_b.iter_mut() {
-                if v.abs() < options.clamp_tol {
-                    *v = 0.0;
-                }
-            }
-            *basis_mgr = mgr;
-            true
-        }
-        Err(_) => false,
+    x_b.copy_from_slice(&x_new);
+    *basis_mgr = mgr;
+    Ok(())
+}
+
+#[cfg(test)]
+mod revert_to_snapshot_tests {
+    use super::*;
+    use crate::error::SolverError;
+
+    /// 2x2 identity basis: columns {0,1} on rows {0,1}, both non-singular.
+    fn identity_2x2() -> CscMatrix {
+        CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap()
+    }
+
+    /// C.4 sentinel (deterministic half): an already-expired deadline must make
+    /// `revert_to_snapshot` fail with `DeadlineExceeded`, not `SingularBasis` —
+    /// `factorize_timed` checks the deadline before touching the basis values,
+    /// so this is independent of wall-clock races. Reverting the fix (collapsing
+    /// the error back to a lossy `bool`) makes this test fail to compile.
+    #[test]
+    fn test_revert_to_snapshot_expired_deadline_is_not_singular() {
+        let a = identity_2x2();
+        let mut basis = vec![0usize, 1];
+        let mut x_b = vec![5.0, 7.0];
+        let b_rhs = vec![5.0, 7.0];
+        let basis_snapshot = vec![0usize, 1];
+        let mut is_basic = vec![true, true];
+        let mut basis_mgr = LuBasis::new(&a, &basis, 0).unwrap();
+        let opts = SolverOptions {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+            ..SolverOptions::default()
+        };
+
+        let result = revert_to_snapshot(
+            &a,
+            &mut basis,
+            &mut x_b,
+            &b_rhs,
+            &basis_snapshot,
+            &mut is_basic,
+            &mut basis_mgr,
+            &opts,
+        );
+
+        assert!(
+            matches!(result, Err(SolverError::DeadlineExceeded)),
+            "expired deadline must surface as DeadlineExceeded, got {result:?}"
+        );
+        // Transactional: state must be untouched on failure so the caller's
+        // basic_obj(c, basis, x_b) for SimplexOutcome::Timeout stays consistent.
+        assert_eq!(
+            basis,
+            vec![0, 1],
+            "basis must be unchanged on revert failure"
+        );
+        assert_eq!(
+            x_b,
+            vec![5.0, 7.0],
+            "x_b must be unchanged on revert failure"
+        );
+    }
+
+    /// A structurally singular reverted-to basis (duplicate column) must still
+    /// surface as `SingularBasis` when the deadline has not expired — proves
+    /// the fix didn't collapse the distinction the other way.
+    #[test]
+    fn test_revert_to_snapshot_singular_basis_stays_singular() {
+        // Column 0 duplicated across both basis slots ⇒ structurally singular.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 2, 2).unwrap();
+        let good_basis = vec![0usize, 1usize];
+        let mut basis = good_basis.clone();
+        let mut x_b = vec![1.0, 0.0];
+        let b_rhs = vec![1.0, 0.0];
+        let basis_snapshot = vec![0usize, 0usize]; // singular: duplicate column
+        let mut is_basic = vec![true, false];
+        // a has no column-1 entries, so build the manager off a basis that IS
+        // constructible (good_basis) purely to get a valid starting LuBasis.
+        let a_full = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
+        let mut basis_mgr = LuBasis::new(&a_full, &good_basis, 0).unwrap();
+        let opts = SolverOptions {
+            deadline: None,
+            ..SolverOptions::default()
+        };
+
+        let result = revert_to_snapshot(
+            &a,
+            &mut basis,
+            &mut x_b,
+            &b_rhs,
+            &basis_snapshot,
+            &mut is_basic,
+            &mut basis_mgr,
+            &opts,
+        );
+
+        assert!(
+            matches!(result, Err(SolverError::SingularBasis { .. })),
+            "duplicate-column basis_snapshot must surface as SingularBasis, got {result:?}"
+        );
+        assert_eq!(
+            basis, good_basis,
+            "basis must be unchanged on revert failure"
+        );
+    }
+
+    /// Successful revert must adopt basis_snapshot, recompute x_b = B^-1 b, and
+    /// install the fresh LU into basis_mgr.
+    #[test]
+    fn test_revert_to_snapshot_success_updates_state() {
+        let a = identity_2x2();
+        let mut basis = vec![1usize, 0usize]; // deliberately different from snapshot
+        let mut x_b = vec![-1.0, -1.0]; // stale values that must be overwritten
+        let b_rhs = vec![3.0, 4.0];
+        let basis_snapshot = vec![0usize, 1usize];
+        let mut is_basic = vec![true, true];
+        let mut basis_mgr = LuBasis::new(&a, &basis, 0).unwrap();
+        let opts = SolverOptions::default();
+
+        let result = revert_to_snapshot(
+            &a,
+            &mut basis,
+            &mut x_b,
+            &b_rhs,
+            &basis_snapshot,
+            &mut is_basic,
+            &mut basis_mgr,
+            &opts,
+        );
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert_eq!(basis, basis_snapshot);
+        assert_eq!(x_b, vec![3.0, 4.0]); // B = I ⇒ x_b = b_rhs
+        assert!(is_basic[0] && is_basic[1]);
     }
 }

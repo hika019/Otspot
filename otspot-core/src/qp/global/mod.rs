@@ -103,6 +103,13 @@ pub fn solve_qp_global_with_stats(
     if options.validate().is_err() {
         return (SolverResult::numerical_error(), GlobalStats::default());
     }
+    // Presolve-independent bound-consistency guard for this separate public
+    // entry: an empty box (lb > ub) is trivially infeasible and must be reported
+    // before the spatial B&B touches the box (branching / α-BB clamps assume
+    // lb <= ub). Mirrors the guards in `solve_lp_with` / `dispatch_solve_qp`.
+    if crate::problem::first_infeasible_bound(&problem.bounds).is_some() {
+        return (SolverResult::infeasible(), GlobalStats::default());
+    }
     // deadline 計算: options.deadline 優先、無ければ timeout_secs から固定。
     let deadline = options.deadline.or_else(|| {
         options
@@ -834,6 +841,29 @@ mod tests {
             r.objective < -3.99,
             "expected global ≈ -4, got obj={:.4}",
             r.objective
+        );
+    }
+
+    /// Sentinel: the global (nonconvex B&B) public entry must report Infeasible
+    /// for an empty variable box (lb > ub), never a panic or a spurious incumbent
+    /// from the spatial branch/α-BB clamps. The entry's own `first_infeasible_bound`
+    /// guard is first-line; the root local solve routes through the guarded
+    /// `solve_qp_with` as a transitive backup. Reverting the whole fix (the
+    /// `is_valid_bound_pair` relaxation) makes construction reject the box and this
+    /// test's `.expect(...)` panic instead.
+    #[test]
+    fn solve_qp_global_empty_box_lb_gt_ub_is_infeasible() {
+        // f = -x²  on the empty box [5, 3].
+        let q = CscMatrix::from_triplets(&[0], &[0], &[-2.0], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        let p = QpProblem::new_all_le(q, vec![0.0], a, vec![], vec![(5.0, 3.0)])
+            .expect("lb>ub box must be ACCEPTED at construction");
+        let r = solve_qp_global(&p, &opts(5.0), &GlobalOptimizationConfig::default());
+        assert_eq!(
+            r.status,
+            SolveStatus::Infeasible,
+            "global empty box must be Infeasible, got {:?}",
+            r.status
         );
     }
 

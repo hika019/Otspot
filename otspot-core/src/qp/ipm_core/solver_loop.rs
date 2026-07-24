@@ -882,7 +882,7 @@ mod tests {
         let mut sol_aug = vec![0.0_f64; n + m_ext];
         rhs_aug[..n].copy_from_slice(&r_d);
         rhs_aug[n..].copy_from_slice(&r_p_mod);
-        aug_fac.solve(&rhs_aug, &mut sol_aug);
+        aug_fac.solve(&rhs_aug, &mut sol_aug).unwrap();
         let dx_aug = sol_aug[..n].to_vec();
         let dy_aug = sol_aug[n..].to_vec();
 
@@ -977,7 +977,7 @@ mod tests {
         let mut sol_aug = vec![0.0_f64; n + m_ext];
         rhs_aug[..n].copy_from_slice(&r_d);
         rhs_aug[n..].copy_from_slice(&r_p_mod);
-        aug_fac.solve(&rhs_aug, &mut sol_aug);
+        aug_fac.solve(&rhs_aug, &mut sol_aug).unwrap();
         let dx_aug = sol_aug[..n].to_vec();
         let dy_aug = sol_aug[n..].to_vec();
 

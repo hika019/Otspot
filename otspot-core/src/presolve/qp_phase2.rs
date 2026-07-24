@@ -5,7 +5,7 @@ use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
-use crate::tolerances::{DROP_TOL, Q_OFFDIAG_ABS, SCALING_SIGMA_FLOOR, ZERO_TOL};
+use crate::tolerances::{DROP_TOL, SCALING_SIGMA_FLOOR, ZERO_TOL};
 
 /// Minimum ratio of rows to columns for equality-constraint QR elimination.
 /// Elimination cost is O(mn²) and only pays off in strongly over-determined
@@ -201,35 +201,6 @@ fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool]) {
     }
 }
 
-/// Drop Q off-diagonal entries below `Q_OFFDIAG_ABS` to improve sparsity.
-fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
-    let mut new_col_ptr = vec![0usize; n + 1];
-    let mut new_row_ind: Vec<usize> = Vec::new();
-    let mut new_values: Vec<f64> = Vec::new();
-
-    for j in 0..n {
-        let start = q.col_ptr[j];
-        let end = q.col_ptr[j + 1];
-        for k in start..end {
-            let row = q.row_ind[k];
-            let val = q.values[k];
-            if row == j || val.abs() >= Q_OFFDIAG_ABS {
-                new_row_ind.push(row);
-                new_values.push(val);
-            }
-        }
-        new_col_ptr[j + 1] = new_row_ind.len();
-    }
-
-    CscMatrix {
-        nrows: q.nrows,
-        ncols: n,
-        col_ptr: new_col_ptr,
-        row_ind: new_row_ind,
-        values: new_values,
-    }
-}
-
 /// Normalise constraint rows by `σ_i = max|A[i,*]|⁻¹` (capped at `SCALING_SIGMA_FLOOR`).
 /// Improves KKT-matrix conditioning. Returns per-row scales for dual unscaling.
 fn constraint_precond(a: &mut CscMatrix, b: &mut [f64]) -> Vec<f64> {
@@ -304,7 +275,9 @@ pub fn run_qp_presolve_phase2(
         return phase1_result;
     }
 
-    let q_cleaned = near_zero_q_removal(&prob.q, n);
+    // Coefficient magnitude alone cannot make a Q term semantically zero: the
+    // complete objective may simply be expressed in correspondingly small units.
+    let q_preserved = prob.q.clone();
 
     let mut removed_rows_phase2 = vec![false; m];
     equality_constraint_qr(prob, &mut removed_rows_phase2);
@@ -345,8 +318,12 @@ pub fn run_qp_presolve_phase2(
         let a_out = if trip_rows.is_empty() {
             CscMatrix::new(m_new, n)
         } else {
-            CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_new, n)
-                .unwrap_or_else(|_| CscMatrix::new(m_new, n))
+            match CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_new, n) {
+                Ok(a) => a,
+                // Phase 2 is transactional: a failed rebuild must retain the valid
+                // Phase-1 problem, never replace its constraints with a zero matrix.
+                Err(_) => return phase1_result,
+            }
         };
 
         let b_out: Vec<f64> = (0..m)
@@ -370,7 +347,7 @@ pub fn run_qp_presolve_phase2(
     let c_clone = prob.c.clone();
     let bounds_clone = prob.bounds.clone();
     let reduced_new = match QpProblem::new(
-        q_cleaned,
+        q_preserved,
         c_clone,
         a_precond,
         b_precond,
@@ -460,21 +437,6 @@ mod tests {
     }
 
     #[test]
-    fn test_near_zero_q_removal_removes_small_offdiag() {
-        // Q = [[2.0, 1e-15], [1e-15, 2.0]] → 非対角を除去
-        let q = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[2.0, 1e-15, 1e-15, 2.0],
-            2,
-            2,
-        )
-        .unwrap();
-        let q_clean = near_zero_q_removal(&q, 2);
-        assert_eq!(q_clean.values.len(), 2, "off-diag removed");
-    }
-
-    #[test]
     fn test_constraint_precond_scales_large_rows() {
         // A行列の行1の係数が大きい場合にスケールされること
         let n = 2usize;
@@ -559,6 +521,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn failed_constraint_rebuild_keeps_phase1_problem_intact() {
+        let n = 2usize;
+        let m = 5usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0],
+            &[1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0],
+            m,
+            n,
+        )
+        .unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let mut prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            vec![1.0, -1.0, 1.0, -1.0, 5.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+        // Model a finite-input transform overflow after construction. Row 4 is
+        // retained by QR, so rebuilding the reduced A must reject this value.
+        let row4_pos = prob.a.row_ind.iter().position(|&row| row == 4).unwrap();
+        prob.a.values[row4_pos] = f64::INFINITY;
+        let phase1 = QpPresolveResult::no_reduction(&prob);
+
+        let result = run_qp_presolve_phase2(phase1, &SolverOptions::default());
+
+        assert_eq!(result.reduced.num_constraints, m);
+        assert_eq!(result.reduced.a.nnz(), 9);
+        assert!(result.reduced.a.values.iter().any(|v| v.is_infinite()));
+        assert!(!result.was_reduced);
+    }
+
     /// Sentinel: ROW_OVERDETERMINED_RATIO boundary — m = n*2 skips QR (skip path).
     ///
     /// **Sentinel**: changing ROW_OVERDETERMINED_RATIO from 2 to 1 activates QR at m=2n,
@@ -637,28 +634,47 @@ mod tests {
         );
     }
 
-    /// Sentinel: `near_zero_q_removal` uses absolute `Q_OFFDIAG_ABS = 1e-10`.
-    /// Off-diagonal entry 5e-11 < 1e-10 is pruned; no-op (Q_OFFDIAG_ABS=0) leaves it.
-    ///
-    /// **Sentinel**: removing the drop threshold (Q_OFFDIAG_ABS→0) keeps the 5e-11 entry
-    /// → values.len() == 4 (not 2) → this test FAIL.
     #[test]
-    fn near_zero_q_removal_absolute_threshold_sentinel() {
-        // Q = [[1.0, 5e-11], [5e-11, 1.0]]; off-diag 5e-11 < Q_OFFDIAG_ABS=1e-10 → pruned.
-        let q = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1.0, 5e-11, 5e-11, 1.0],
-            2,
-            2,
-        )
-        .unwrap();
-        let q_clean = near_zero_q_removal(&q, 2);
-        assert_eq!(
-            q_clean.values.len(),
-            2,
-            "off-diag 5e-11 should be pruned (Q_OFFDIAG_ABS=1e-10), got {} entries",
-            q_clean.values.len()
-        );
+    fn phase2_preserves_cross_terms_at_every_objective_unit_scale() {
+        // Independent oracle for Q=s*[[2,1],[1,2]], c=s*[-3,0]:
+        // Qx+c=0 gives x=(2,-1), objective=-3s. The cross term determines
+        // both coordinates and is below the former absolute cutoff at s=1e-12.
+        for scale in [1.0, 1e-12] {
+            let q = CscMatrix::from_triplets(
+                &[0, 1, 0, 1],
+                &[0, 0, 1, 1],
+                &[2.0 * scale, scale, scale, 2.0 * scale],
+                2,
+                2,
+            )
+            .unwrap();
+            let prob = QpProblem::new_all_le(
+                q.clone(),
+                vec![-3.0 * scale, 0.0],
+                CscMatrix::new(1, 2),
+                vec![100.0],
+                vec![(-10.0, 10.0); 2],
+            )
+            .unwrap();
+            let phase1 = QpPresolveResult::no_reduction(&prob);
+            let result = run_qp_presolve_phase2(phase1, &SolverOptions::default());
+
+            assert_eq!(result.reduced.q.col_ptr, q.col_ptr);
+            assert_eq!(result.reduced.q.row_ind, q.row_ind);
+            assert_eq!(result.reduced.q.values, q.values);
+            assert_eq!(result.reduced.q.nnz(), 4);
+
+            let x = [2.0, -1.0];
+            let qx = result.reduced.q.mat_vec_mul(&x).unwrap();
+            let objective = 0.5 * x.iter().zip(&qx).map(|(xj, qxj)| xj * qxj).sum::<f64>()
+                + result
+                    .reduced
+                    .c
+                    .iter()
+                    .zip(x)
+                    .map(|(cj, xj)| cj * xj)
+                    .sum::<f64>();
+            assert!((objective - (-3.0 * scale)).abs() <= scale * 1e-12);
+        }
     }
 }

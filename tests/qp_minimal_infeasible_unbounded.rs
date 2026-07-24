@@ -48,8 +48,9 @@ fn solver_opts() -> SolverOptions {
 /// **狙い**: bound 矛盾 (lb > ub) を Model API で入力エラーとして即拒否。
 ///
 /// `add_var` が lb > ub を検出して `invalid_inputs` に記録し、`solve()` は
-/// `ModelError::InvalidInput` を返す。低レベル `QpProblem::new` も同矛盾を
-/// `InvalidBounds` で拒否するが、Model 経路ではそこへ到達する前に弾かれる。
+/// `ModelError::InvalidInput` を返す。低レベル `QpProblem::new` は lb > ub を
+/// well-formed な空箱として受理し solver が Infeasible を返すが、Model API は
+/// 明らかな入力ミスを solve 前に InvalidInput として弾く方針でそこへ到達しない。
 #[test]
 fn inf1_bound_lb_gt_ub_infeasible() {
     let mut model = Model::new("inf1");

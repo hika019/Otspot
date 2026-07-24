@@ -105,11 +105,7 @@ pub(crate) fn try_dual_only_ir(
     };
     let (proj_lower, proj_upper) = (&row_bounds.0, &row_bounds.1);
 
-    let Some((ax, row_abs_activity)) =
-        compute_dual_recovery_row_activity(problem, &result.solution)
-    else {
-        return 0;
-    };
+    let (ax, row_abs_activity) = compute_dual_recovery_row_activity(problem, &result.solution);
     let Some((worst_j, active_rows)) = collect_dual_recovery_cluster_rows(
         problem,
         &free_eval_idx,

@@ -93,7 +93,11 @@ pub(crate) fn run_rens(
 
     let mut sub_lp = problem.lp.clone();
     sub_lp.bounds = sub_bounds;
-    let sub_problem = MilpProblem::new(sub_lp, problem.integer_vars.clone()).ok()?;
+    // MilpProblem::new only rejects an integer-var index >= lp.num_vars;
+    // only `bounds` was mutated above, so `problem.integer_vars` (already valid
+    // for `problem` by construction) remains valid for `sub_lp`.
+    let sub_problem = MilpProblem::new(sub_lp, problem.integer_vars.clone())
+        .expect("bounds-only mutation preserves num_vars; integer_vars already validated");
 
     let mut sub_cfg = cfg.clone();
     sub_cfg.max_nodes = RENS_NODE_LIMIT;

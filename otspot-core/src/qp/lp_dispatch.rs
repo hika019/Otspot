@@ -610,9 +610,7 @@ fn best_lp_reduced_costs_from_dual(
     let mut rc_minus = problem.c.clone();
     let mut rc_plus = problem.c.clone();
     for j in 0..problem.num_vars {
-        let Ok((rows, vals)) = problem.a.get_column(j) else {
-            return None;
-        };
+        let (rows, vals) = problem.a.column(j);
         for (k, &row) in rows.iter().enumerate() {
             let term = vals[k] * dual_solution[row];
             rc_minus[j] -= term;
@@ -810,9 +808,7 @@ fn verified_farkas_timeout_fallback(problem: &QpProblem, options: &SolverOptions
     let mut cols = Vec::new();
     let mut vals = Vec::new();
     for j in 0..problem.num_vars {
-        let Ok((a_rows, a_vals)) = problem.a.get_column(j) else {
-            return false;
-        };
+        let (a_rows, a_vals) = problem.a.column(j);
         for (k, &i) in a_rows.iter().enumerate() {
             for &(cert_col, sign) in &cert_cols_by_row[i] {
                 rows.push(j);
@@ -931,9 +927,7 @@ fn verify_normalized_farkas(
         return false;
     }
     for j in 0..problem.num_vars {
-        let Ok((a_rows, a_vals)) = problem.a.get_column(j) else {
-            return false;
-        };
+        let (a_rows, a_vals) = problem.a.column(j);
         let mut aty = 0.0;
         let mut term_mag = 0.0;
         let mut n_terms = 0usize;

@@ -121,9 +121,12 @@ fn append_ge_rows_snaps_near_empty_integer_bounds_to_integer_point() {
     assert_eq!(out.num_constraints, milp.lp.num_constraints + 1);
 }
 
+// A material empty box (gap > ZERO_TOL) is a well-formed infeasible box: it must
+// be PRESERVED verbatim through cut augmentation (never snapped to a point) so
+// the downstream relaxation solve reports Infeasible. Construction now accepts
+// lb>ub, so `append_ge_rows` builds a valid LP that keeps the empty box.
 #[test]
-#[should_panic(expected = "cut-augmented LP is valid")]
-fn append_ge_rows_does_not_scale_away_large_bound_gap() {
+fn append_ge_rows_preserves_large_material_bound_gap() {
     let mut milp = p_box_le();
     milp.lp.bounds[0] = (1.0e12 + 1.0, 1.0e12);
     let cuts = [CutRow {
@@ -131,12 +134,20 @@ fn append_ge_rows_does_not_scale_away_large_bound_gap() {
         rhs: 0.5,
     }];
 
-    let _ = append_ge_rows(&milp.lp, &cuts);
+    let out = append_ge_rows(&milp.lp, &cuts);
+    assert_eq!(
+        out.bounds[0],
+        (1.0e12 + 1.0, 1.0e12),
+        "large material empty box must be preserved, not scaled/snapped away"
+    );
+    assert!(
+        out.bounds[0].0 > out.bounds[0].1,
+        "empty box preserved (lb>ub)"
+    );
 }
 
 #[test]
-#[should_panic(expected = "cut-augmented LP is valid")]
-fn append_ge_rows_keeps_material_invalid_bounds_as_error() {
+fn append_ge_rows_preserves_material_empty_box() {
     let mut milp = p_box_le();
     milp.lp.bounds[0] = (1.0 + ZERO_TOL * 10.0, 1.0);
     let cuts = [CutRow {
@@ -144,7 +155,16 @@ fn append_ge_rows_keeps_material_invalid_bounds_as_error() {
         rhs: 0.5,
     }];
 
-    let _ = append_ge_rows(&milp.lp, &cuts);
+    let out = append_ge_rows(&milp.lp, &cuts);
+    assert_eq!(
+        out.bounds[0],
+        (1.0 + ZERO_TOL * 10.0, 1.0),
+        "material empty box must be kept verbatim (flows through as Infeasible)"
+    );
+    assert!(
+        out.bounds[0].0 > out.bounds[0].1,
+        "empty box preserved (lb>ub)"
+    );
 }
 
 /// min x+y s.t. 2x+2y>=3, x,y∈[0,3]. Ge constraint ⇒ surplus-slack mapping.

@@ -65,8 +65,11 @@ pub(crate) fn run_rins(
 
     let mut sub_lp = problem.lp.clone();
     sub_lp.bounds = sub_bounds;
-    // integer_vars were already validated on the original; num_vars unchanged.
-    let sub_problem = MilpProblem::new(sub_lp, problem.integer_vars.clone()).ok()?;
+    // MilpProblem::new only rejects an integer-var index >= lp.num_vars;
+    // only `bounds` was mutated above, so `problem.integer_vars` (already valid
+    // for `problem` by construction) remains valid for `sub_lp`.
+    let sub_problem = MilpProblem::new(sub_lp, problem.integer_vars.clone())
+        .expect("bounds-only mutation preserves num_vars; integer_vars already validated");
 
     let sub_cfg = rins_sub_mip_config(cfg);
 

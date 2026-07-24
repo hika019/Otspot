@@ -127,31 +127,24 @@ pub(super) fn step3_singleton_col(
             continue;
         }
 
-        let active_rows: Vec<usize> = (0..m)
-            .filter(|&i| {
-                !ws.removed_rows[i]
-                    && ws.row_entries[i]
-                        .iter()
-                        .any(|&(jj, v)| jj == j && v.abs() > ZERO_TOL)
+        let active_rows: Vec<(usize, f64)> = (0..m)
+            .filter_map(|i| {
+                if ws.removed_rows[i] {
+                    return None;
+                }
+                ws.row_entries[i]
+                    .iter()
+                    .find_map(|&(jj, v)| (jj == j && v.abs() > ZERO_TOL).then_some((i, v)))
             })
             .collect();
 
         if active_rows.len() != 1 {
             continue;
         }
-        let i = active_rows[0];
+        let (i, a_ij) = active_rows[0];
 
         // Only Le rows are safe; Eq/Ge are handled by step 7 or by the solver.
         if prob.constraint_types[i] != crate::problem::ConstraintType::Le {
-            continue;
-        }
-
-        let a_ij = ws.row_entries[i]
-            .iter()
-            .find(|&&(jj, _)| jj == j)
-            .map(|&(_, v)| v)
-            .unwrap_or(0.0);
-        if a_ij.abs() < ZERO_TOL {
             continue;
         }
 

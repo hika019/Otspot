@@ -39,7 +39,7 @@ where
             &problem.bounds,
         );
 
-        if let Ok(mut scaled_problem) = QpProblem::new(
+        match QpProblem::new(
             q_s,
             c_s,
             a_s,
@@ -47,34 +47,43 @@ where
             bounds_s,
             problem.constraint_types.clone(),
         ) {
-            scaled_problem.obj_offset = problem.obj_offset;
-            // unscale 後に元空間 eps を保証するため scaled 空間 eps を amp 倍 tighten。
-            let amplification = compute_amplification(&scaler);
-            let mut adjusted_opts = options.clone();
-            adjusted_opts.ipm.eps = (options.ipm_eps() / amplification).max(EPS_FLOOR);
-            // warm start: user 空間 (x, y) を scaled 空間に変換 (Ruiz: x = D·x_s, y = E·y_s/c)
-            if let Some(ws) = adjusted_opts.warm_start_qp.as_mut() {
-                if ws.x.len() == n && ws.y.len() == m {
-                    for j in 0..n {
-                        ws.x[j] /= scaler.d[j];
-                    }
-                    for i in 0..m {
-                        ws.y[i] = scaler.c * ws.y[i] / scaler.e[i];
-                    }
-                } else {
-                    log::warn!(
-                        "warm_start_qp ignored: ruiz dim mismatch (x: {}/{}, y: {}/{})",
-                        ws.x.len(),
-                        n,
-                        ws.y.len(),
-                        m
-                    );
-                    adjusted_opts.warm_start_qp = None;
-                }
+            Err(err) => {
+                log::warn!(
+                    "Ruiz scaling produced a non-constructible QpProblem ({err}); \
+                     solving unscaled instead"
+                );
             }
+            Ok(mut scaled_problem) => {
+                scaled_problem.obj_offset = problem.obj_offset;
+                // unscale 後に元空間 eps を保証するため scaled 空間 eps を amp 倍 tighten。
+                let amplification = compute_amplification(&scaler);
+                let mut adjusted_opts = options.clone();
+                adjusted_opts.ipm.eps = (options.ipm_eps() / amplification).max(EPS_FLOOR);
+                // warm start: user 空間 (x, y) を scaled 空間に変換 (Ruiz: x = D·x_s, y = E·y_s/c)
+                if let Some(ws) = adjusted_opts.warm_start_qp.as_mut() {
+                    if ws.x.len() == n && ws.y.len() == m {
+                        for j in 0..n {
+                            ws.x[j] /= scaler.d[j];
+                        }
+                        for i in 0..m {
+                            ws.y[i] = scaler.c * ws.y[i] / scaler.e[i];
+                        }
+                    } else {
+                        log::warn!(
+                            "warm_start_qp ignored: ruiz dim mismatch (x: {}/{}, y: {}/{})",
+                            ws.x.len(),
+                            n,
+                            ws.y.len(),
+                            m
+                        );
+                        adjusted_opts.warm_start_qp = None;
+                    }
+                }
 
-            let scaled_result = inner_solver(&scaled_problem, &adjusted_opts, options.ipm_eps());
-            return unscale_ipm_result(scaled_result, &scaler, problem);
+                let scaled_result =
+                    inner_solver(&scaled_problem, &adjusted_opts, options.ipm_eps());
+                return unscale_ipm_result(scaled_result, &scaler, problem);
+            }
         }
     }
 

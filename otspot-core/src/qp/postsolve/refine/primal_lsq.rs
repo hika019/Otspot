@@ -170,10 +170,10 @@ pub(crate) fn refine_primal_lsq(
     }
 
     // 成分相対化での max rel violation で改善判定 (abs では ill-scaled で見逃す)。
-    let ax_new = match problem.a.mat_vec_mul(&x_new) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
+    let ax_new = problem.a.mat_vec_mul(&x_new).expect(
+        "a.ncols() == x_new.len() == num_vars: QpProblem::new() enforces \
+         a.ncols() == num_vars, and x_new is cloned from x (len n, checked above)",
+    );
     let mut max_rel_pre = 0.0_f64;
     let mut max_rel_post = 0.0_f64;
     for i in 0..m {

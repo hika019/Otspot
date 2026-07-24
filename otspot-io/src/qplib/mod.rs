@@ -141,24 +141,16 @@ NO_CON
 QCN
 minimize
 2 # vars
-0 # constraints
 2 # qobj
 1 1 2.0
 2 2 2.0
 0.0 # default b0
 0 # non-default b0
 0.0 # obj constant
-0 # no linear constraints
 1.79769313486232E+308 # infinity
-0.0 # default lhs
-0
-0.0 # default rhs
-0
 -1.79769313486232E+308 # default var lb
 0
 1.79769313486232E+308 # default var ub
-0
-0.0
 0
 0.0
 0
@@ -171,6 +163,33 @@ minimize
         assert_eq!(prob.num_vars, 2);
         assert_eq!(prob.num_constraints, 0);
         assert_eq!(prob.q.nnz(), 2);
+    }
+
+    #[test]
+    fn qplib_fractional_objective_count_is_rejected_in_official_n_layout() {
+        let qplib = "\
+FRACTIONAL_COUNT
+QCN
+minimize
+1
+0
+0.0
+0.5
+0.0
+0
+1.79769313486232E+308
+-1.79769313486232E+308
+0
+1.79769313486232E+308
+0
+";
+        let err = parse_qplib_str(qplib)
+            .expect_err("a fractional entry count must not be truncated to zero");
+        assert!(
+            err.to_string()
+                .contains("number of non-default objective linear terms"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -588,6 +607,14 @@ minimize
 -1E+30
 0
 0.0
+0
+0.0
+0
+0.0
+0
+0.0
+0
+0
 0
 ";
         let parsed = parse_qplib_str(qplib).unwrap();
@@ -1076,6 +1103,7 @@ minimize
             }
         }
         content.push_str("1.0e308\n-1.0e308\n0\n100.0\n0\n0.0\n0\n1.0e308\n0\n");
+        content.push_str("0.0\n0\n0.0\n0\n0.0\n0\n0\n0\n");
         let result = parse_qplib_str(&content);
         assert!(result.is_ok(), "small LP parse failed: {:?}", result.err());
         let prob = unwrap_qp(result.unwrap());
@@ -1101,6 +1129,7 @@ minimize
         content.push_str("0.0\n0\n0.0\n");
         content.push_str("1.0e308\n");
         content.push_str("0.0\n0\n1.0\n0\n");
+        content.push_str("0.0\n0\n0.0\n0\n0\n0\n");
 
         let result = parse_qplib_str(&content);
         assert!(result.is_ok(), "dense Q parse failed: {:?}", result.err());
@@ -1134,6 +1163,7 @@ minimize
         content.push_str(&format!("{nnz}\n"));
         content.push_str(&entry_buf);
         content.push_str("1.0e308\n-1.0e308\n0\n1000.0\n0\n0.0\n0\n1.0e308\n0\n");
+        content.push_str("0.0\n0\n0.0\n0\n0.0\n0\n0\n0\n");
 
         let result = parse_qplib_str(&content);
         assert!(result.is_ok(), "sparse A parse failed: {:?}", result.err());
@@ -1222,6 +1252,14 @@ minimize
 0
 1.0e308
 0
+0.0
+0
+0.0
+0
+0.0
+0
+0
+0
 ";
         let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 1);
@@ -1301,6 +1339,14 @@ maximize
 0
 1.0e308
 0
+0.0
+0
+0.0
+0
+0.0
+0
+0
+0
 ";
         let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 1);
@@ -1350,6 +1396,14 @@ minimize
 0.0
 0
 1.0e308
+0
+0.0
+0
+0.0
+0
+0.0
+0
+0
 0
 ";
         let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
@@ -1435,6 +1489,14 @@ min
 0
 1.0e308
 0
+0.0
+0
+0.0
+0
+0.0
+0
+0
+0
 ";
         let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 1);
@@ -1487,6 +1549,14 @@ minimize
 0.0
 0
 1.79769313486232E+308
+0
+0.0
+0
+0.0
+0
+0.0
+0
+0
 0
 ";
         let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());

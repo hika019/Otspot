@@ -11,8 +11,8 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn set_at_upper_apply_disabled(v: bool) {
-    AT_UPPER_APPLY_DISABLE.with(|c| c.set(v));
+pub(crate) fn set_at_upper_apply_disabled(v: bool) -> bool {
+    AT_UPPER_APPLY_DISABLE.with(|c| c.replace(v))
 }
 
 #[cfg(test)]
@@ -44,12 +44,20 @@ pub(crate) fn extract_solution_bounded(
     col_scale: &[f64],
 ) -> Vec<f64> {
     use twofloat::TwoFloat;
+    assert!(
+        col_scale.is_empty() || col_scale.len() == bsf.n_total,
+        "col_scale must be empty (identity) or match the bounded standard-form column count"
+    );
     let mut x_new = vec![0.0f64; bsf.n_shifted];
 
     for i in 0..bsf.m {
         let j = state.basis[i];
         if j < bsf.n_shifted {
-            let scale = col_scale.get(j).copied().unwrap_or(1.0);
+            let scale = if col_scale.is_empty() {
+                1.0
+            } else {
+                col_scale[j]
+            };
             x_new[j] = state.x_b[i] * scale;
         }
     }
@@ -86,29 +94,35 @@ pub(crate) fn extract_dual_info_bounded(
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let m_orig = bsf.m;
     let n_orig = bsf.n_orig;
+    assert!(
+        row_scale.is_empty() || row_scale.len() == m_orig,
+        "row_scale must be empty (identity) or match the original row count"
+    );
 
     let mut dual_solution = vec![0.0f64; m_orig];
     for i in 0..m_orig {
         let sign = if bsf.row_negated[i] { -1.0 } else { 1.0 };
-        let rs = row_scale.get(i).copied().unwrap_or(1.0);
+        let rs = if row_scale.is_empty() {
+            1.0
+        } else {
+            row_scale[i]
+        };
         dual_solution[i] = sign * rs * y_std[i];
     }
 
     let mut slack = problem.b.clone();
     for (j, &sol_j) in solution.iter().enumerate().take(n_orig) {
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                slack[row] -= vals[k] * sol_j;
-            }
+        let (rows, vals) = problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            slack[row] -= vals[k] * sol_j;
         }
     }
 
     let mut reduced_costs = problem.c.clone();
     for (j, rc_j) in reduced_costs.iter_mut().enumerate().take(n_orig) {
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                *rc_j -= dual_solution[row] * vals[k];
-            }
+        let (rows, vals) = problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            *rc_j -= dual_solution[row] * vals[k];
         }
     }
     project_reduced_costs_to_active_bounds(problem, solution, &mut reduced_costs);

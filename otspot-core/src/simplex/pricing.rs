@@ -5,9 +5,7 @@
 //! - `SteepestEdgePricing`: Devex approximate steepest-edge pricing
 
 use crate::basis::LuBasis;
-use crate::tolerances::PIVOT_TOL;
-
-const EPS: f64 = 1e-8;
+use crate::tolerances::{PIVOT_TOL, REDUCED_COST_ZERO_TOL};
 
 /// Minimum weight floor to keep `sqrt(γ)` safe (prevents div-by-zero in score).
 pub(crate) const GAMMA_FLOOR: f64 = 1e-10;
@@ -33,7 +31,7 @@ pub(crate) trait PricingStrategy {
     /// `eta`         = B⁻¹ * a_entering (FTRAN of entering column, dense).
     fn update_weights(
         &mut self,
-        basis: &LuBasis,
+        _basis: &LuBasis,
         entering: usize,
         leaving: usize,
         leaving_row: usize,
@@ -55,7 +53,7 @@ pub(crate) struct DantzigPricing;
 impl PricingStrategy for DantzigPricing {
     fn select_entering(&self, reduced_costs: &[f64], n_basic: usize) -> Option<usize> {
         let limit = n_basic.min(reduced_costs.len());
-        let mut min_rc = -EPS;
+        let mut min_rc = -REDUCED_COST_ZERO_TOL;
         let mut entering = None;
         for (j, &rc) in reduced_costs.iter().enumerate().take(limit) {
             if rc < min_rc {
@@ -103,13 +101,21 @@ impl SteepestEdgePricing {
 
 impl PricingStrategy for SteepestEdgePricing {
     fn select_entering(&self, reduced_costs: &[f64], n_basic: usize) -> Option<usize> {
-        let limit = n_basic.min(reduced_costs.len());
-        let mut best_score = -EPS;
+        assert!(
+            n_basic <= reduced_costs.len(),
+            "n_basic must not exceed the reduced-cost vector"
+        );
+        assert!(
+            n_basic <= self.weights.len(),
+            "pricing weights must cover every priced column"
+        );
+        let limit = n_basic;
+        let mut best_score = -REDUCED_COST_ZERO_TOL;
         let mut entering = None;
 
         for (j, &rc) in reduced_costs.iter().enumerate().take(limit) {
-            if rc < -EPS {
-                let gamma = self.weights.get(j).copied().unwrap_or(1.0).max(GAMMA_FLOOR);
+            if rc < -REDUCED_COST_ZERO_TOL {
+                let gamma = self.weights[j].max(GAMMA_FLOOR);
                 let score = -rc / gamma.sqrt();
                 if score > best_score {
                     best_score = score;
@@ -138,29 +144,37 @@ impl PricingStrategy for SteepestEdgePricing {
         leaving_row: usize,
         eta: &[f64],
     ) {
-        if leaving < self.weights.len() {
-            let pivot = eta.get(leaving_row).copied().unwrap_or(0.0);
-            if pivot.abs() > PIVOT_TOL {
-                let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
-                let cap = CAP_MULT_OF_M * (eta.len() as f64);
-                let raw = eta_norm_sq / (pivot * pivot);
-                let new_weight = raw.min(cap).max(GAMMA_FLOOR);
-                self.weights[leaving] = self.weights[leaving].max(new_weight);
-            }
+        assert!(
+            entering < self.weights.len(),
+            "entering column must have a pricing weight"
+        );
+        assert!(
+            leaving < self.weights.len(),
+            "leaving column must have a pricing weight"
+        );
+        assert!(
+            leaving_row < eta.len(),
+            "leaving row must be present in eta"
+        );
+        let pivot = eta[leaving_row];
+        assert!(pivot.is_finite(), "pricing pivot must be finite");
+        let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
+        assert!(eta_norm_sq.is_finite(), "pricing eta must be finite");
+        if pivot.abs() > PIVOT_TOL {
+            let cap = CAP_MULT_OF_M * (eta.len() as f64);
+            let raw = eta_norm_sq / (pivot * pivot);
+            let new_weight = raw.min(cap).max(GAMMA_FLOOR);
+            self.weights[leaving] = self.weights[leaving].max(new_weight);
         }
 
-        if entering < self.weights.len() {
+        {
             // After leaving the basis, penalize re-entry: set entering weight
             // to max(1, gamma_leaving / eta_norm_sq) so a column with high
             // leaving weight gets higher entering weight → lower selection score
             // → implicit anti-cycling for recently-left columns (old formula
             // property retained). Columns not recently leaving start at 1.0.
             let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
-            let gamma_leaving = if leaving < self.weights.len() {
-                self.weights[leaving]
-            } else {
-                1.0
-            };
+            let gamma_leaving = self.weights[leaving];
             let new_entering_w = if eta_norm_sq > GAMMA_FLOOR {
                 (gamma_leaving / eta_norm_sq).max(1.0)
             } else {
@@ -315,6 +329,21 @@ mod tests {
         // Index 1: score = 2.0/sqrt(4.0) = 1.0 (tie, first found wins)
         // Index 2: score = 0.5/sqrt(1.0) = 0.5
         assert!(entering == Some(0) || entering == Some(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "pricing weights must cover every priced column")]
+    fn steepest_edge_rejects_short_weights() {
+        let pricing = SteepestEdgePricing::new(1);
+        let _ = pricing.select_entering(&[-1.0, -2.0], 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "leaving row must be present in eta")]
+    fn steepest_edge_rejects_short_eta() {
+        let mut pricing = SteepestEdgePricing::new(4);
+        let basis = make_identity_basis_2x2();
+        pricing.update_weights(&basis, 1, 2, 1, &[1.0]);
     }
 
     #[test]

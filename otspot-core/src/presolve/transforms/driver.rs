@@ -204,19 +204,25 @@ fn build_reduced_result(
     let a_new = if trip_rows.is_empty() {
         CscMatrix::new(m_new, n_new)
     } else {
-        CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_new, n_new)
-            .unwrap_or_else(|_| CscMatrix::new(m_new, n_new))
+        match CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_new, n_new) {
+            Ok(a) => a,
+            // Presolve is optional. If finite input overflowed during a transform,
+            // discard the entire transaction and let the solver use the original LP.
+            Err(_) => return Ok(PresolveResult::no_reduction(problem)),
+        }
     };
 
-    let reduced_problem = LpProblem::new_general(
+    let reduced_problem = match LpProblem::new_general(
         c_new,
         a_new,
         b_new,
         ct_new,
         bounds_new,
         problem.name.clone(),
-    )
-    .expect("presolve: reduced problem construction failed");
+    ) {
+        Ok(reduced) => reduced,
+        Err(_) => return Ok(PresolveResult::no_reduction(problem)),
+    };
 
     Ok(PresolveResult {
         reduced_problem,
@@ -228,4 +234,50 @@ fn build_reduced_result(
         was_reduced,
         obj_offset: st.obj_offset,
     })
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_rebuild_rolls_back_instead_of_substituting_zero_matrix() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let mut problem = LpProblem::new(vec![0.0], a, vec![1.0]).unwrap();
+        problem.obj_offset = 7.25;
+        let mut state = PresolveState::from_problem(&problem);
+        state.col_entries[0][0].1 = f64::INFINITY;
+
+        let result = build_reduced_result(&problem, state, 1, 1).unwrap();
+
+        assert!(!result.was_reduced);
+        assert_eq!(result.reduced_problem.a.nnz(), 1);
+        assert_eq!(result.reduced_problem.a.values, [1.0]);
+        assert!(result.postsolve_stack.is_empty());
+        assert_eq!(result.obj_offset, problem.obj_offset);
+        assert_eq!(result.reduced_problem.obj_offset, problem.obj_offset);
+    }
+
+    #[test]
+    fn invalid_reduced_model_rolls_back_without_leaking_postsolve_state() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let mut problem = LpProblem::new(vec![2.0], a, vec![1.0]).unwrap();
+        problem.obj_offset = -3.5;
+        let mut state = PresolveState::from_problem(&problem);
+        // Matrix reconstruction remains valid; only final model validation fails.
+        state.c[0] = f64::INFINITY;
+        state
+            .postsolve_stack
+            .push(super::super::state::PostsolveStep::BoundsTightened);
+
+        let result = build_reduced_result(&problem, state, 1, 1).unwrap();
+
+        assert!(!result.was_reduced);
+        assert_eq!(result.reduced_problem.c, problem.c);
+        assert_eq!(result.reduced_problem.a.values, problem.a.values);
+        assert_eq!(result.reduced_problem.b, problem.b);
+        assert_eq!(result.obj_offset, problem.obj_offset);
+        assert_eq!(result.reduced_problem.obj_offset, problem.obj_offset);
+        assert!(result.postsolve_stack.is_empty());
+    }
 }

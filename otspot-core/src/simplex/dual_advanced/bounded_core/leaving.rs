@@ -251,7 +251,7 @@ pub(super) fn bland_entering(
         if is_basic[j] {
             continue;
         }
-        let (rows, vals) = a.get_column(j).unwrap();
+        let (rows, vals) = a.column(j);
         let mut rc = c[j];
         for (k, &row) in rows.iter().enumerate() {
             rc -= vals[k] * y[row];

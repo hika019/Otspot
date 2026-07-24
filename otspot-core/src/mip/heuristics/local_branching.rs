@@ -97,8 +97,12 @@ fn local_branching_with_k(
         return None;
     }
 
-    let sub_lp = augment_with_local_branching_cut(&problem.lp, &binaries, x_inc, k)?;
-    let sub_problem = MilpProblem::new(sub_lp, problem.integer_vars.clone()).ok()?;
+    let sub_lp = augment_with_local_branching_cut(&problem.lp, &binaries, x_inc, k);
+    // MilpProblem::new only rejects an integer-var index >= lp.num_vars; the cut
+    // only appends a row, so num_vars is unchanged and `problem.integer_vars`
+    // (already valid for `problem`) remains valid for `sub_lp`.
+    let sub_problem = MilpProblem::new(sub_lp, problem.integer_vars.clone())
+        .expect("row-only augmentation preserves num_vars; integer_vars already validated");
 
     let sub_timeout =
         (remaining_secs * LOCAL_BRANCHING_TIME_FRACTION).min(LOCAL_BRANCHING_MAX_TIME_SECS);
@@ -127,14 +131,20 @@ fn local_branching_with_k(
 
 /// Append the local-branching Hamming-distance row to a copy of `lp`.
 ///
-/// Returns `None` if the constraint matrix cannot be rebuilt (only on a
-/// dimension error, which cannot occur for a well-formed `lp`).
+/// Every row/col index pushed into the rebuilt matrix is bounds-checked by
+/// construction (existing `lp.a` triplets plus `new_row = lp.num_constraints`
+/// and `binaries` indices, which are `< lp.num_vars` because they are drawn
+/// from `problem.integer_vars`, itself validated `< lp.num_vars` by
+/// `MilpProblem::new` on the original problem), and every value is finite
+/// (existing `lp.a` values plus literal `±1.0`). The rebuild therefore cannot
+/// fail for a well-formed `lp`, so this returns the value directly rather
+/// than an `Option`.
 fn augment_with_local_branching_cut(
     lp: &LpProblem,
     binaries: &[usize],
     x_inc: &[f64],
     k: usize,
-) -> Option<LpProblem> {
+) -> LpProblem {
     let new_row = lp.num_constraints;
 
     // Existing nonzeros (CSC → triplets).
@@ -169,8 +179,8 @@ fn augment_with_local_branching_cut(
         }
     }
 
-    let a =
-        CscMatrix::from_triplets(&rows, &cols, &vals, lp.num_constraints + 1, lp.num_vars).ok()?;
+    let a = CscMatrix::from_triplets(&rows, &cols, &vals, lp.num_constraints + 1, lp.num_vars)
+        .expect("all row/col indices in-bounds and all values finite by construction (see fn doc)");
 
     let mut b = lp.b.clone();
     b.push(k as f64 - s1_count as f64);
@@ -185,9 +195,12 @@ fn augment_with_local_branching_cut(
         lp.bounds.clone(),
         lp.name.clone(),
     )
-    .ok()?;
+    .expect(
+        "c/a/b/constraint_types/bounds dimensions and finiteness all carried over from \
+         the already-valid `lp`, plus one finite appended row (see fn doc)",
+    );
     new_lp.obj_offset = lp.obj_offset;
-    Some(new_lp)
+    new_lp
 }
 
 fn remaining_budget(deadline: &Option<Instant>) -> f64 {
@@ -401,7 +414,7 @@ mod tests {
         let problem = binary_knapsack(vec![-1.0, -1.0, -1.0], 3.0);
         let x_inc = vec![1.0, 0.0, 1.0]; // S1 = {0,2}, |S1| = 2
         let k = 2;
-        let lp = augment_with_local_branching_cut(&problem.lp, &[0, 1, 2], &x_inc, k).unwrap();
+        let lp = augment_with_local_branching_cut(&problem.lp, &[0, 1, 2], &x_inc, k);
         assert_eq!(lp.num_constraints, problem.lp.num_constraints + 1);
         let new_row = problem.lp.num_constraints;
         assert!(
