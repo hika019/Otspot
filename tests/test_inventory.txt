@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=x86_64-unknown-linux-gnu
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2904 testcases, 26 ignored
+# totals: 2929 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -11,6 +11,7 @@ otspot-core	basis::eta::tests::test_eta_multiple_updates	active
 otspot-core	basis::eta::tests::test_eta_needs_refactor	active
 otspot-core	basis::eta::tests::test_eta_single_update	active
 otspot-core	basis::eta::tests::test_eta_sparse_from_sparse_vec	active
+otspot-core	basis::eta::tests::test_eta_sparse_uses_supplied_pivot_element_verbatim	active
 otspot-core	basis::lu::tests::test_lu_1x1	active
 otspot-core	basis::lu::tests::test_lu_20x20_sparse	active
 otspot-core	basis::lu::tests::test_lu_3x3	active
@@ -286,6 +287,7 @@ otspot-core	lp::tests::bigm_nonzero_lb_objective_double_count	active
 otspot-core	lp::tests::bounded_nonzero_lb_objective_correct	active
 otspot-core	lp::tests::invalid_options_rejected_at_lp_entry	active
 otspot-core	lp::tests::le_only_nonzero_lb_objective_correct	active
+otspot-core	lp::tests::lp_empty_box_lb_gt_ub_is_infeasible	active
 otspot-core	lp::tests::test_lp_timeout_incumbent_includes_obj_offset	active
 otspot-core	mip::branch::tests::branch_bounds_can_produce_empty_box_for_pruning	active
 otspot-core	mip::branch::tests::branch_bounds_floor_and_ceil	active
@@ -340,8 +342,8 @@ otspot-core	mip::cuts::knapsack_cover::tests::lifted_cover_separates_and_lifts	a
 otspot-core	mip::cuts::knapsack_cover::tests::lifted_cover_skips_oversized_support	active
 otspot-core	mip::cuts::knapsack_cover::tests::lifted_cover_skips_when_dp_value_space_exceeds_cap	active
 otspot-core	mip::cuts::knapsack_cover::tests::lifted_cover_valid_for_all_integer_points	active
-otspot-core	mip::cuts::tests::append_ge_rows_does_not_scale_away_large_bound_gap	active
-otspot-core	mip::cuts::tests::append_ge_rows_keeps_material_invalid_bounds_as_error	active
+otspot-core	mip::cuts::tests::append_ge_rows_preserves_large_material_bound_gap	active
+otspot-core	mip::cuts::tests::append_ge_rows_preserves_material_empty_box	active
 otspot-core	mip::cuts::tests::append_ge_rows_snaps_near_empty_integer_bounds_to_integer_point	active
 otspot-core	mip::cuts::tests::clique_cut_mixed_sign_row_no_false_conflict	active
 otspot-core	mip::cuts::tests::clique_cut_not_generated_without_conflict	active
@@ -739,7 +741,7 @@ otspot-core	presolve::transforms::tests::test_empty_column_min_with_finite_lb	ac
 otspot-core	presolve::transforms::tests::test_empty_column_unbounded	active
 otspot-core	presolve::transforms::tests::test_empty_row_feasible	active
 otspot-core	presolve::transforms::tests::test_empty_row_infeasible	active
-otspot-core	presolve::transforms::tests::test_fixed_infeasible	active
+otspot-core	presolve::transforms::tests::test_fixed_infeasible_accepted_at_construction	active
 otspot-core	presolve::transforms::tests::test_fixed_variable_removal	active
 otspot-core	presolve::transforms::tests::test_forcing_eq_reduces	active
 otspot-core	presolve::transforms::tests::test_forcing_ge_reduces	active
@@ -828,14 +830,16 @@ otspot-core	presolve::transforms_dup::tests::noop_baseline_three_parallel_le_no_
 otspot-core	presolve::transforms_dup::tests::parallel_row_eq_consistent_drops_one	active
 otspot-core	presolve::transforms_dup::tests::parallel_row_eq_inconsistent_is_infeasible	active
 otspot-core	presolve::transforms_dup::tests::parallel_row_le_keeps_tighter	active
+otspot-core	problem::tests::is_valid_bound_pair_semantics	active
 otspot-core	problem::tests::lp_empty_interval_same_inf_rejected	active
+otspot-core	problem::tests::lp_finite_lb_gt_ub_accepted	active
 otspot-core	problem::tests::lp_inf_bounds_accepted	active
-otspot-core	problem::tests::lp_lb_gt_ub_rejected	active
 otspot-core	problem::tests::lp_lone_inf_bound_rejected	active
 otspot-core	problem::tests::lp_nan_in_a_rejected	active
 otspot-core	problem::tests::lp_nan_in_b_rejected	active
 otspot-core	problem::tests::lp_nan_in_bounds_rejected	active
 otspot-core	problem::tests::lp_nan_in_c_rejected	active
+otspot-core	problem::tests::lp_plus_inf_lb_minus_inf_ub_rejected	active
 otspot-core	problem::tests::lp_valid_accepted	active
 otspot-core	problem::tests::lp_valid_bound_variants_accepted	active
 otspot-core	problem::tests::solver_result_default_is_not_success	active
@@ -949,6 +953,7 @@ otspot-core	qp::global::tests::qp_global_proven_convex_has_bound_gap_cert	active
 otspot-core	qp::global::tests::qp_global_proven_nonconvex_has_bound_gap_cert	active
 otspot-core	qp::global::tests::qp_global_unproven_has_no_bound_gap_cert	active
 otspot-core	qp::global::tests::solve_qp_global_cold_vs_global_separation	active
+otspot-core	qp::global::tests::solve_qp_global_empty_box_lb_gt_ub_is_infeasible	active
 otspot-core	qp::global::tests::solve_qp_global_finds_corner_minimum_concave_1d	active
 otspot-core	qp::global::tests::unusable_node_can_be_non_infeasible_with_large_primal_residual	active
 otspot-core	qp::global::tree::tests::best_lower_bound_matches_top	active
@@ -1196,8 +1201,8 @@ otspot-core	qp::postsolve::refine::lsq::tests::refine_dual_lsq_skips_when_marked
 otspot-core	qp::postsolve::refine::worst_active::tests::dense_cluster_cap_rejects_nonlocal_worst_active_blocks	active
 otspot-core	qp::problem::tests::csc_accessor_returns_correct_data	active
 otspot-core	qp::problem::tests::dimension_mismatch_still_caught	active
+otspot-core	qp::problem::tests::finite_lb_gt_ub_accepted	active
 otspot-core	qp::problem::tests::inf_bounds_accepted	active
-otspot-core	qp::problem::tests::lb_gt_ub_rejected	active
 otspot-core	qp::problem::tests::nan_in_a_rejected	active
 otspot-core	qp::problem::tests::nan_in_b_rejected	active
 otspot-core	qp::problem::tests::nan_in_bounds_rejected	active
@@ -1205,6 +1210,7 @@ otspot-core	qp::problem::tests::nan_in_c_rejected	active
 otspot-core	qp::problem::tests::nan_in_q_rejected	active
 otspot-core	qp::problem::tests::qp_empty_interval_same_inf_rejected	active
 otspot-core	qp::problem::tests::qp_lone_inf_bound_rejected	active
+otspot-core	qp::problem::tests::qp_plus_inf_lb_minus_inf_ub_rejected	active
 otspot-core	qp::problem::tests::qp_valid_bound_variants_accepted	active
 otspot-core	qp::problem::tests::set_quadratic_constraints_empty_accepted	active
 otspot-core	qp::problem::tests::set_quadratic_constraints_length_mismatch_rejected	active
@@ -1245,6 +1251,7 @@ otspot-core	qp::tests::concurrent::test_concurrent_unconstrained	active
 otspot-core	qp::tests::dispatch::is_zero_q_structural_empty_returns_true	active
 otspot-core	qp::tests::dispatch::is_zero_q_tiny_nonzero_returns_false	active
 otspot-core	qp::tests::dispatch::lp_conversion_error_returns_numerical_error_not_infeasible	active
+otspot-core	qp::tests::dispatch::qp_ipm_empty_box_lb_gt_ub_is_infeasible	active
 otspot-core	qp::tests::dispatch::structural_zero_q_routes_to_lp	active
 otspot-core	qp::tests::dispatch::tiny_nonzero_q_routes_to_qp_not_lp	active
 otspot-core	qp::tests::dual_recovery::compute_lsq_dual_y_ir_improves_ill_conditioned_problem	active
@@ -1328,6 +1335,7 @@ otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_preset_deadline_stops_via_conv
 otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_routes_to_global_branch_and_bound	active
 otspot-core	qp::tests::qcqp_guard::nonconvex_qcqp_with_unbounded_variable_stays_not_supported	active
 otspot-core	qp::tests::qcqp_guard::plain_qp_not_rejected	active
+otspot-core	qp::tests::qcqp_guard::qcqp_empty_box_lb_gt_ub_is_infeasible	active
 otspot-core	qp::tests::smoke::test_basic_qp_2vars	active
 otspot-core	qp::tests::smoke::test_concurrent_solver_basic	active
 otspot-core	qp::tests::smoke::test_force_ipm_small	active
@@ -1579,6 +1587,9 @@ otspot-core	simplex::pricing::tests::test_dantzig_returns_none_when_optimal	acti
 otspot-core	simplex::pricing::tests::test_dantzig_selects_most_negative	active
 otspot-core	simplex::pricing::tests::test_steepest_edge_prefers_better_score	active
 otspot-core	simplex::pricing::tests::test_steepest_edge_scoring	active
+otspot-core	simplex::primal::core::revert_to_snapshot_tests::test_revert_to_snapshot_expired_deadline_is_not_singular	active
+otspot-core	simplex::primal::core::revert_to_snapshot_tests::test_revert_to_snapshot_singular_basis_stays_singular	active
+otspot-core	simplex::primal::core::revert_to_snapshot_tests::test_revert_to_snapshot_success_updates_state	active
 otspot-core	simplex::primal::crossover::crossover_tests::crossover_degenerate_vertex	active
 otspot-core	simplex::primal::crossover::crossover_tests::crossover_eq_with_free_var	active
 otspot-core	simplex::primal::crossover::crossover_tests::crossover_finite_upper_bound	active
@@ -1679,6 +1690,8 @@ otspot-core	sparse::compress::tests::test_out_of_bounds_minor_returns_error	acti
 otspot-core	sparse::compress::tests::test_single_entry	active
 otspot-core	sparse::compress::tests::test_sort_merge_matches_reference_output	active
 otspot-core	sparse::compress::tests::test_unsorted_input_sorted_output	active
+otspot-core	sparse::csc::tests::test_column_matches_get_column_in_bounds	active
+otspot-core	sparse::csc::tests::test_column_out_of_bounds_panics	active
 otspot-core	sparse::csc::tests::test_empty_matrix	active
 otspot-core	sparse::csc::tests::test_from_triplets_basic	active
 otspot-core	sparse::csc::tests::test_from_triplets_duplicate_entries	active
@@ -1918,6 +1931,12 @@ otspot-io	cbf::tests::unknown_section_keyword_is_error	active
 otspot-io	cbf::tests::unsupported_cone_token_exp_is_error	active
 otspot-io	cbf::tests::unsupported_ver_is_error	active
 otspot-io	cbf::tests::variable_domain_soc_matches_hand_optimum	active
+otspot-io	mps::parser::tests::build_lp_problem_accepts_valueless_bound_types	active
+otspot-io	mps::parser::tests::build_lp_problem_rejects_missing_value_for_fx_bound	active
+otspot-io	mps::parser::tests::build_lp_problem_rejects_missing_value_for_li_bound	active
+otspot-io	mps::parser::tests::build_lp_problem_rejects_missing_value_for_lo_bound	active
+otspot-io	mps::parser::tests::build_lp_problem_rejects_missing_value_for_ui_bound	active
+otspot-io	mps::parser::tests::build_lp_problem_rejects_missing_value_for_up_bound	active
 otspot-io	mps::tests::bva_mps_bounds_fx_fr_lo_up	active
 otspot-io	mps::tests::bva_mps_rhs_zero	active
 otspot-io	mps::tests::dt_mps_2var_le_ge_eq_matrix_structure	active
@@ -2021,7 +2040,7 @@ otspot-io	mps::tests::test_sentinel_mps_bounds_fx_missing_value_is_error	active
 otspot-io	mps::tests::test_sentinel_mps_bounds_lo_missing_value_is_error	active
 otspot-io	mps::tests::test_sentinel_mps_bounds_ui_missing_value_is_error	active
 otspot-io	mps::tests::test_sentinel_mps_columns_trailing_row_no_value_is_error	active
-otspot-io	qplib::parser::tail_tests::full_parser_accepts_official_n_and_b_omissions	active
+otspot-io	qplib::parser::tail_tests::full_parser_accepts_official_n_and_b_constraint_dual_omission	active
 otspot-io	qplib::parser::tail_tests::full_parser_accepts_official_n_with_zero_q_and_integer_default	active
 otspot-io	qplib::parser::tail_tests::full_parser_propagates_io_error_after_the_last_required_record	active
 otspot-io	qplib::parser::tail_tests::full_parser_rejects_missing_or_truncated_required_tail	active
@@ -2029,11 +2048,13 @@ otspot-io	qplib::parser::tail_tests::full_parser_rejects_nonstandard_n_extra_zer
 otspot-io	qplib::parser::tail_tests::full_parser_requires_constraint_tail_sections_for_l_and_q_even_when_m_is_zero	active
 otspot-io	qplib::parser::tail_tests::full_parser_string_and_reader_have_identical_record_semantics	active
 otspot-io	qplib::parser::tail_tests::optional_tail_accepts_comments_names_and_fortran_exponents	active
-otspot-io	qplib::parser::tail_tests::optional_tail_accepts_official_m_zero_omission	active
+otspot-io	qplib::parser::tail_tests::optional_tail_accepts_official_m_zero_constraint_dual_omission	active
 otspot-io	qplib::parser::tail_tests::optional_tail_propagates_sticky_late_io_error	active
 otspot-io	qplib::parser::tail_tests::optional_tail_rejects_nonfinite_values	active
 otspot-io	qplib::parser::tail_tests::optional_tail_rejects_truncation_counts_indices_duplicates_names_and_garbage	active
 otspot-io	qplib::parser::tail_tests::required_records_ignore_plain_line_end_comments	active
+otspot-io	qplib::parser::tail_tests::sentinel_con_b_full_official_tail_without_constraint_dual_parses_ok	active
+otspot-io	qplib::parser::tail_tests::sentinel_pre_fix_five_record_tail_missing_constraint_names_is_rejected	active
 otspot-io	qplib::tests::qplib_fractional_objective_count_is_rejected_in_official_n_layout	active
 otspot-io	qplib::tests::test_memory_probe_large_dcl_files	active
 otspot-io	qplib::tests::test_memory_sentinel_no_double_hashmap_qplib8500	active
@@ -2080,6 +2101,10 @@ otspot-io	qplib::token_stream::tests::read_usize_accepts_explicit_plus_sign	acti
 otspot-io	qplib::token_stream::tests::read_usize_rejects_non_decimal_integer_tokens	active
 otspot-io	qplib::token_stream::tests::read_usize_rejects_plain_decimal_overflow	active
 otspot-io	qplib::token_stream::tests::streamed_integer_error_reports_ordinal_and_context	active
+otspot-io	qps::parser::tests::build_qp_problem_accepts_valueless_bound_types	active
+otspot-io	qps::parser::tests::build_qp_problem_rejects_missing_value_for_fx_bound	active
+otspot-io	qps::parser::tests::build_qp_problem_rejects_missing_value_for_lo_bound	active
+otspot-io	qps::parser::tests::build_qp_problem_rejects_missing_value_for_up_bound	active
 otspot-io	qps::tests::dt_qps_ge_eq_row_types	active
 otspot-io	qps::tests::ep_qps_2var_quadobj_structure	active
 otspot-io	qps::tests::test_e226_obj_offset	active
