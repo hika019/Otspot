@@ -443,7 +443,7 @@ mod free_columns_tests {
     use super::collect_dual_recovery_free_columns;
     use crate::problem::{ConstraintType, SolverResult};
     use crate::qp::problem::QpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn make_problem_with_aempty_col0() -> (QpProblem, SolverResult) {
         // n=2, m=1
@@ -552,7 +552,7 @@ mod sentinel_tests {
     use super::{compute_dual_recovery_row_activity, compute_dual_recovery_row_bounds};
     use crate::problem::ConstraintType;
     use crate::qp::problem::QpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn make_2var_problem() -> QpProblem {
         let q = CscMatrix::new(2, 2);

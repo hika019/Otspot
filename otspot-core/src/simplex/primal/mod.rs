@@ -25,8 +25,8 @@ use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::CscMatrix;
 use crate::tolerances::*;
+use otspot_num::sparse::CscMatrix;
 
 #[allow(clippy::print_stderr)]
 fn trace_stage(message: impl std::fmt::Display) {
@@ -568,7 +568,7 @@ fn transition_to_phase2(
             options.deadline,
         ) {
             Ok(()) => {}
-            Err(crate::error::SolverError::DeadlineExceeded) => {
+            Err(otspot_num::SolverError::DeadlineExceeded) => {
                 trace_stage("phase2 transition reconcile deadline");
                 let solution = extract_timeout_solution_reconciled(
                     sf,
@@ -657,7 +657,7 @@ fn finalize_phase2(
                 options.deadline,
             ) {
                 Ok(()) => {}
-                Err(crate::error::SolverError::DeadlineExceeded) => {
+                Err(otspot_num::SolverError::DeadlineExceeded) => {
                     trace_stage("phase2 final reconcile deadline");
                     let solution = extract_timeout_solution_reconciled(
                         sf,
@@ -987,7 +987,7 @@ mod eta_atomicity_tests {
     use crate::options::SolverOptions;
     use crate::simplex::pricing::SteepestEdgePricing;
     use crate::simplex::SimplexOutcome;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     struct EtaUpdateGuard(bool);
     impl EtaUpdateGuard {
@@ -1049,7 +1049,7 @@ mod farkas_gate_tests {
     use super::{extract_farkas_certificate, phase1_infeasibility_verdict};
     use crate::options::SolverOptions;
     use crate::problem::SolveStatus;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// No-op sentinel: reverting the gate to an unconditional `Infeasible`
     /// return (the pre-fix behaviour) makes this assertion fail.
@@ -1135,8 +1135,8 @@ mod cycle_perturbation_tests {
     use crate::options::{SimplexMethod, SolverOptions};
     use crate::problem::{ConstraintType, LpProblem, SolveStatus};
     use crate::simplex::entry::solve_with;
-    use crate::sparse::CscMatrix;
     use crate::tolerances::PIVOT_TOL;
+    use otspot_num::sparse::CscMatrix;
 
     /// Sentinel (primary, direct): selective perturbation must not modify large x_b.
     ///
@@ -1307,7 +1307,7 @@ mod phase1_artificial_preference_tests {
     use crate::options::{SimplexMethod, SolverOptions};
     use crate::problem::{ConstraintType, LpProblem, SolveStatus};
     use crate::simplex::entry::solve_with;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn primal_opts() -> SolverOptions {
         SolverOptions {

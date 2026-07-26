@@ -1,11 +1,11 @@
 //! IPM/IP-PMM 共通関数。
 
 use super::kkt::{norm_inf, spmv};
-use crate::linalg::ldl;
-use crate::linalg::timeout::TimeoutCtx;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::linalg::ldl;
+use otspot_num::linalg::timeout::TimeoutCtx;
+use otspot_num::sparse::CscMatrix;
 
 /// ステップ方向 (Δx, Δy) から infeasibility / unboundedness を検出する。
 #[allow(clippy::too_many_arguments)]

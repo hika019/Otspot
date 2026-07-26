@@ -4,10 +4,10 @@
 //! `ipm_solver::attempt::finalize_outcome` の `prove_optimal` 一本に集約されている。
 //! ここでは scaled 空間の解を元空間へ写像するだけ。
 
-use crate::linalg::ruiz::RuizScaler;
 use crate::options::SolverOptions;
 use crate::problem::SolverResult;
 use crate::qp::problem::QpProblem;
+use otspot_num::linalg::ruiz::RuizScaler;
 
 /// `user_eps / amplification` の machine-noise floor。
 /// `IPM_EPS_NOISE_FLOOR` (ipm_core/mod.rs) と整合: core.rs の σ-tightening と
@@ -146,8 +146,8 @@ pub(crate) fn unscale_ipm_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linalg::ruiz::RuizScaler;
     use crate::problem::SolveStatus;
+    use otspot_num::linalg::ruiz::RuizScaler;
 
     #[test]
     fn compute_amplification_includes_dual_side() {
@@ -170,8 +170,8 @@ mod tests {
     }
 
     fn one_var_problem() -> QpProblem {
-        let q = crate::sparse::CscMatrix::new(1, 1);
-        let a = crate::sparse::CscMatrix::new(0, 1);
+        let q = otspot_num::sparse::CscMatrix::new(1, 1);
+        let a = otspot_num::sparse::CscMatrix::new(0, 1);
         crate::qp::problem::QpProblem::new_all_le(
             q,
             vec![1.0],

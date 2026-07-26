@@ -9,8 +9,8 @@ use crate::qp::postsolve::dual_recovery::{
 };
 use crate::qp::postsolve::refine::kkt_iterative::refit_bound_duals_kkt;
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
 use crate::tolerances::any_nonfinite;
+use otspot_num::sparse::CscMatrix;
 
 /// G + δ·I regularization: prevents F64 round-off cancellation.
 /// δ × ‖α‖ acts as a floor for the new r_d_free (typically 1e-12 × 1e2 = 1e-10, well below target 1e-6).
@@ -282,7 +282,7 @@ pub(crate) fn try_dual_only_ir(
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
         }
-        let factor = match crate::linalg::ldl::factorize(&gram_csc) {
+        let factor = match otspot_num::linalg::ldl::factorize(&gram_csc) {
             Ok(f) => f,
             Err(_) => break,
         };

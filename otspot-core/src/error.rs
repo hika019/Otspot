@@ -55,6 +55,8 @@ impl From<std::io::Error> for MpsError {
 
 /// Solver-wide error type, physically owned by the numerical foundation.
 ///
-/// Re-exporting the exact type preserves the legacy `otspot_core::SolverError`
-/// API while sparse and factorization code move to `otspot-num`.
+/// This re-export exists solely as a public API surface for downstream crates
+/// (`otspot-io`, `otspot-model`, `otspot-dev`). Code inside `otspot-core`
+/// must depend on `otspot_num::SolverError` directly instead of routing
+/// through this module's re-export or the crate-root alias of it.
 pub use otspot_num::SolverError;

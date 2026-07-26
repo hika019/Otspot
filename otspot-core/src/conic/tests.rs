@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 fn csc(rows: &[Vec<f64>], nrows: usize, ncols: usize) -> CscMatrix {
     let mut r = Vec::new();
@@ -2994,7 +2994,7 @@ fn assert_dir_close(
 fn conic_kkt_direction_matches_dense_schur_oracle() {
     use super::cone::{self, Blocks};
     use super::kkt;
-    use crate::linalg::kkt_solver::KktConfig;
+    use otspot_num::linalg::kkt_solver::KktConfig;
 
     struct Case {
         name: &'static str,
@@ -3569,7 +3569,7 @@ fn qcqp_bridge_huge_diag_smoke() {
 fn conic_border_l_fill_stays_linear() {
     use super::cone::{self, Blocks};
     use super::kkt;
-    use crate::linalg::kkt_solver::KktConfig;
+    use otspot_num::linalg::kkt_solver::KktConfig;
 
     const D: usize = 100_000;
     let n = D;
@@ -3636,7 +3636,7 @@ fn conic_border_l_fill_stays_linear() {
 fn conic_kkt_threshold_boundary_direction_equivalence() {
     use super::cone::{self, Blocks, SOC_BORDER_MIN_DIM};
     use super::kkt;
-    use crate::linalg::kkt_solver::KktConfig;
+    use otspot_num::linalg::kkt_solver::KktConfig;
 
     for (d, expect_border) in [(SOC_BORDER_MIN_DIM - 1, false), (SOC_BORDER_MIN_DIM, true)] {
         let mut rng = Lcg(4455);

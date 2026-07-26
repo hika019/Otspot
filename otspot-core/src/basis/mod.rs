@@ -10,9 +10,9 @@ pub(crate) mod refactor;
 #[cfg(test)]
 pub(crate) mod test_utils;
 
-use crate::error::SolverError;
-use crate::sparse::{CscMatrix, SparseVec};
 use faer::dyn_stack::MemBuffer;
+use otspot_num::sparse::{CscMatrix, SparseVec};
+use otspot_num::SolverError;
 use std::time::Instant;
 
 /// 改訂単体法の基底管理トレイト
@@ -117,7 +117,7 @@ impl LuBasis {
                 self.eta_file.etas.clear();
                 self.basis_indices = basis.to_vec();
             }
-            Err(crate::error::SolverError::SingularBasis { .. }) => {
+            Err(otspot_num::SolverError::SingularBasis { .. }) => {
                 self.singular_basis = true;
                 self.refactor_failed = true;
             }
@@ -147,7 +147,7 @@ impl LuBasis {
                     self.eta_file.etas.clear();
                     self.basis_indices = basis.to_vec();
                 }
-                Err(crate::error::SolverError::SingularBasis { .. }) => {
+                Err(otspot_num::SolverError::SingularBasis { .. }) => {
                     // 特異基底: SingularBasis フラグを立て、呼び出し元が NumericalError を返せるようにする
                     self.singular_basis = true;
                     self.refactor_failed = true;

@@ -1,6 +1,6 @@
 //! 内部 outcome: status mutation を API 境界 1 箇所に集約するための struct。
 
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// 内部 IPM がどの終端条件で停止したか。
 ///

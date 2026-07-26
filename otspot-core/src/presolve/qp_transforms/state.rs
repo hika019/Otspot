@@ -1,7 +1,7 @@
 //! QP presolve types: status enum, postsolve metadata, and the public result struct.
 
-use crate::linalg::ruiz::RuizScaler;
 use crate::qp::QpProblem;
+use otspot_num::linalg::ruiz::RuizScaler;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]

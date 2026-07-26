@@ -17,12 +17,12 @@
 //! derivation.
 
 use super::cone::{self, Blocks, Scaling};
-use crate::linalg::amd::amd_with_deadline;
-use crate::linalg::kkt_solver::{
+use otspot_num::linalg::amd::amd_with_deadline;
+use otspot_num::linalg::kkt_solver::{
     factorize_kkt_pre_permuted_cached_par, factorize_kkt_with_cached_perm_par, KktConfig, KktError,
     KktFactor, KktSolver, PreconditionedMinres,
 };
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -165,7 +165,7 @@ impl KktSkeleton {
         // floor), `W^2` is always strictly positive by construction (`s`, `z`
         // stay in the strict cone interior via fraction-to-boundary), so no
         // floor is needed for quasidefiniteness — and adding one (even below
-        // `faer`'s clamp `crate::linalg::ldl`'s `LDLT_REG_EPSILON`/`_DELTA`)
+        // `faer`'s clamp `otspot_num::linalg::ldl`'s `LDLT_REG_EPSILON`/`_DELTA`)
         // only hurts: a conflicting orthant/SOC pair's `W^2_ii = s_i/z_i` must
         // keep shrinking unfloored for the Newton direction to amplify `z_i`
         // toward a Farkas ray (measured: a fixed floor reproduces the pre-fix
@@ -578,7 +578,7 @@ pub(super) fn factorize_with_retry(
                     return Some(ConicFactor::direct(f));
                 }
             }
-            Err(crate::linalg::kkt_solver::KktError::DeadlineExceeded) => return None,
+            Err(otspot_num::linalg::kkt_solver::KktError::DeadlineExceeded) => return None,
             Err(_) => {}
         }
         let next = (delta * REG_GROWTH).min(REG_CEILING);
@@ -607,7 +607,7 @@ pub(super) fn factorize_with_retry(
     // conditioning lives in `W^2` (deliberately unregularized, see module doc),
     // e.g. a conflicting orthant/SOC pair where `s_i` has shrunk enough that
     // f64's ~16 digits can no longer resolve `W^2_ii`. Still health-probed
-    // against the same clamp thresholds as the f64 path (`crate::linalg::
+    // against the same clamp thresholds as the f64 path (`otspot_num::linalg::
     // ldl_dd`'s `EPSILON`/`DELTA`), so once `W^2_ii` underflows that shared
     // threshold extra mantissa bits alone cannot recover it (confirmed:
     // `socp_degenerate_fixed_var_infeasible_gets_certificate` plateaus the same
@@ -696,7 +696,7 @@ fn try_equilibrated(
         .base
         .materialize(sc, blk, REG_DELTA_INIT, REG_DELTA_INIT);
     let (scaled, d) = equilibrate(&unpermuted);
-    let (perm_col_ptr, perm_row_ind, perm_values) = crate::linalg::amd::permute_sym_upper(
+    let (perm_col_ptr, perm_row_ind, perm_values) = otspot_num::linalg::amd::permute_sym_upper(
         scaled.nrows(),
         scaled.col_ptr(),
         scaled.row_ind(),

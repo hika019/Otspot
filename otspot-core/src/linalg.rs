@@ -1,4 +1,8 @@
 //! Compatibility re-exports for the numerical linear-algebra layer.
+//!
+//! This module exists solely as a public API surface for downstream crates
+//! (`otspot-io`, `otspot-model`, `otspot-dev`). Code inside `otspot-core`
+//! must depend on `otspot_num::linalg` directly rather than `crate::linalg`.
 
 pub use otspot_num::linalg::*;
 

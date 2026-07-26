@@ -555,7 +555,7 @@ fn solve_without_presolve_inner(problem: &LpProblem, options: &SolverOptions) ->
 mod tests {
     use super::*;
     use crate::problem::ConstraintType;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn make_trivial_lp() -> LpProblem {
         // minimize x  s.t.  x <= 5,  x >= 0

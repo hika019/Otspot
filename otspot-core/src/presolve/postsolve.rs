@@ -6,9 +6,9 @@ use crate::options::WarmStartBasis;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::simplex::build_standard_form;
 use crate::simplex::crash::compute_crash_basis;
-#[cfg(test)]
-use crate::sparse::CscMatrix;
 use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
+#[cfg(test)]
+use otspot_num::sparse::CscMatrix;
 use std::time::Instant;
 
 /// Relative tolerance below which a standard-form column is treated as at-bound
@@ -669,7 +669,7 @@ mod warm_basis_recovery_tests {
     use crate::options::{SimplexMethod, SolverOptions};
     use crate::problem::{ConstraintType, LpProblem, SolveStatus};
     use crate::simplex::{build_standard_form, solve, solve_with};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// Default options + `recover_warm_start_basis = true`. The recovery path
     /// is opt-in; sentinels covering the postsolve synthesis must enable it.

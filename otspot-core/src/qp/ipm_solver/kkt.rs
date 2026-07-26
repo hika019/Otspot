@@ -238,7 +238,7 @@ pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
 mod tests {
     use super::*;
     use crate::problem::ConstraintType;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn build_view<'a>(
         q: &'a CscMatrix,

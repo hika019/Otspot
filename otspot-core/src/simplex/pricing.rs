@@ -360,8 +360,8 @@ mod tests {
     }
 
     fn make_identity_basis_2x2() -> crate::basis::LuBasis {
-        let a =
-            crate::sparse::CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
+        let a = otspot_num::sparse::CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2)
+            .unwrap();
         crate::basis::LuBasis::new(&a, &[0, 1], 50).unwrap()
     }
 

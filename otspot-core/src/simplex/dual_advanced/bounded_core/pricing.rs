@@ -2,8 +2,8 @@
 
 use super::super::super::dual_common::compute_dual_vars_into;
 use crate::basis::LuBasis;
-use crate::linalg::timeout::deadline_reached;
-use crate::sparse::CscMatrix;
+use otspot_num::linalg::timeout::deadline_reached;
+use otspot_num::sparse::CscMatrix;
 use std::time::Instant;
 
 /// Deadline check interval for the RC inner loop.

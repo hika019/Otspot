@@ -10,8 +10,8 @@
 //! supernodal 自動選択は採用しない。ETA 機構 (`src/basis/eta.rs`) は LU の上に被せる
 //! 更新層で、本 module の変更とは独立に動作する。
 
-use crate::error::SolverError;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
+use otspot_num::SolverError;
 
 /// (col_ptr, row_ind, values) triple for a reconstructed basis CSC matrix.
 type BasisCscParts = (Vec<usize>, Vec<usize>, Vec<f64>);

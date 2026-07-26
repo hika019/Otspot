@@ -7,7 +7,7 @@ use super::equil::Equilibrator;
 use super::qcqp::{to_conic, QcqpProblem};
 use super::{cone, ipm, ConeSpec, ConicOptions, ConicProblem};
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// A mixed-integer SOCP: a base [`ConicProblem`] plus integrality on selected
 /// variables with explicit (finite) bounds used to bound the search.

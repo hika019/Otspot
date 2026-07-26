@@ -3,9 +3,9 @@
 use super::*;
 use crate::options::{SimplexMethod, SolverOptions};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
-use crate::sparse::CscMatrix;
 use crate::test_kkt::assert_solver_invariants_lp;
 use crate::tolerances::PIVOT_TOL;
+use otspot_num::sparse::CscMatrix;
 
 fn make_lp(
     c: Vec<f64>,

@@ -9,8 +9,8 @@ use crate::qp::postsolve::dual_recovery::{
 };
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
-use crate::sparse::CscMatrix;
 use crate::tolerances::any_nonfinite;
+use otspot_num::sparse::CscMatrix;
 
 /// Maximum dense local normal-equation dimension for worst-active correction.
 ///
@@ -165,7 +165,7 @@ pub(crate) fn refine_dual_worst_active_block(
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return;
         }
-        crate::linalg::ldl::factorize(&row_csc)
+        otspot_num::linalg::ldl::factorize(&row_csc)
             .ok()
             .map(|factor| {
                 let mut sol = vec![0.0_f64; rlen];
@@ -297,7 +297,7 @@ pub(crate) fn refine_dual_worst_active_block(
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return;
     }
-    let Ok(factor) = crate::linalg::ldl::factorize(&gram_csc) else {
+    let Ok(factor) = otspot_num::linalg::ldl::factorize(&gram_csc) else {
         return;
     };
     let mut block_sol = vec![0.0_f64; ulen];

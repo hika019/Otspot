@@ -14,8 +14,8 @@ use std::time::Instant;
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolverResult};
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
 use crate::tolerances::REDUCED_COST_ZERO_TOL;
+use otspot_num::sparse::CscMatrix;
 
 use super::bound::{all_bounds_finite, is_feasible_result};
 

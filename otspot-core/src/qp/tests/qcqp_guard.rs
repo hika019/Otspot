@@ -2,7 +2,7 @@ use super::super::*;
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolveRoute, SolveStatus};
 use crate::qp::problem::QcqpMatrix;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// A plain QP (quadratic_constraints empty) must NOT be rejected.
 #[test]

@@ -9,13 +9,13 @@ use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving};
 use super::{build_bounded_standard_form_with_deadline, BoundedStandardForm};
 use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
-use crate::linalg::timeout::deadline_reached;
 use crate::options::{DualPricing, SolverOptions};
 use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::{CscMatrix, SparseVec};
 use bounded_core::extract::bounded_obj;
 use bounded_core::BoundedDualState;
+use otspot_num::linalg::timeout::deadline_reached;
+use otspot_num::sparse::{CscMatrix, SparseVec};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod bound_flip;
@@ -190,7 +190,7 @@ fn reconcile_bounded_terminal_state(
     let mut basis_mgr =
         match LuBasis::new_timed(a, &state.basis, options.max_etas, options.deadline) {
             Ok(bm) => bm,
-            Err(crate::error::SolverError::DeadlineExceeded) => {
+            Err(otspot_num::SolverError::DeadlineExceeded) => {
                 return BoundedTerminalReconcile::Timeout(bounded_obj_from_state(c, ubs, state));
             }
             Err(_) => return BoundedTerminalReconcile::SingularBasis,
@@ -232,7 +232,7 @@ fn make_leaving_strategy(pricing: DualPricing, m: usize) -> Box<dyn DualLeavingS
 /// Passing a dual-infeasible basis to the dual simplex causes it to exit as
 /// "Optimal" (no lb-violations in x_B) with a wrong objective value.
 fn warm_basis_is_dual_feasible(
-    a: &crate::sparse::CscMatrix,
+    a: &otspot_num::sparse::CscMatrix,
     c: &[f64],
     basis_mgr: &mut LuBasis,
     basis: &[usize],
@@ -464,7 +464,7 @@ mod tests {
     /// min -x0 - x1, x0+x1 ≤ 6, x0-x1 ≤ 2, 0 ≤ x0 ≤ 4, 0 ≤ x1 ≤ 4
     /// Known optimal: x0=4, x1=2, obj=-6.
     fn lp_2x2_boxed() -> LpProblem {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let a =
             CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2)
                 .unwrap();
@@ -485,7 +485,7 @@ mod tests {
     /// After the flip, x0 enters the basis at value 3.
     /// Optimal: x0=3 (basic), x1=2 (non-basic at ub), obj=-3-6=-9.
     fn lp_flip_trigger() -> LpProblem {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         LpProblem::new_general(
             vec![-1.0, -3.0],
@@ -499,7 +499,7 @@ mod tests {
     }
 
     fn lp_no_ub() -> LpProblem {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         LpProblem::new_general(
             vec![1.0, 2.0],
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn bound_violation_timeout_objective_uses_restored_incumbent() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
 
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let b = vec![1.0];
@@ -663,7 +663,7 @@ mod tests {
     /// upstream, but here we assert the raw Optimal value directly).
     #[test]
     fn ge_with_ub_solves_via_bounded_path_with_warm_basis() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         // min x + y  s.t.  x + y >= 3 (Ge),  0 <= x,y <= 4.
         // Optimal: x + y = 3 (any split), obj = 3.
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
@@ -708,7 +708,7 @@ mod tests {
     /// failing the Infeasible assertion.
     #[test]
     fn ge_infeasible_bounded_path_returns_infeasible() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let lp = LpProblem::new_general(
             vec![1.0],
@@ -742,7 +742,7 @@ mod tests {
     /// yielding obj = 0 ≠ -3 and failing the objective assertion.
     #[test]
     fn ge_at_upper_bound_solution_extracted_correctly() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let lp = LpProblem::new_general(
             vec![-1.0],
@@ -791,8 +791,8 @@ mod tests {
     /// status or objective, failing the assertions below.
     #[test]
     fn ge_eq_le_mixed_types_solve_correctly() {
-        use crate::sparse::CscMatrix;
         use crate::test_kkt::assert_solver_invariants_lp;
+        use otspot_num::sparse::CscMatrix;
         // rows=[0,0,1,2,2], cols=[0,1,0,1,2]:
         //   Row 0 (Ge): x + y >= 2
         //   Row 1 (Eq): x     = 1
@@ -842,8 +842,8 @@ mod tests {
     /// both the sign assertion and `assert_solver_invariants_lp` dual-sign check.
     #[test]
     fn ge_dual_sign_nonnegative_in_min_problem() {
-        use crate::sparse::CscMatrix;
         use crate::test_kkt::assert_solver_invariants_lp;
+        use otspot_num::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let lp = LpProblem::new_general(
             vec![1.0, 1.0],
@@ -902,7 +902,7 @@ mod tests {
     /// `tests/diag_dse_pivot_selection.rs`.
     #[test]
     fn legacy_warm_start_lb_violation_repairs_and_converges() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         const OBJ_TOL: f64 = 1e-5;
 
         // No finite UBs → legacy dual path.
@@ -1029,7 +1029,7 @@ mod tests {
     /// returns obj≈0 instead of -3 → assertion fails.
     #[test]
     fn warm_start_dual_infeasible_cost_change_falls_through_to_cold_start() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         const OBJ_TOL: f64 = 1e-6;
 
         // LP1: min x0+x1, x0+x1 ≤ 3, x0,x1 ≥ 0.
@@ -1113,7 +1113,7 @@ mod tests {
     /// Big-M stalls; a strict obj check would catch that.
     #[test]
     fn ge_eq_cold_start_primal_first_dispatch_solves_optimally() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         const OBJ_TOL: f64 = 1e-6;
 
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
@@ -1147,7 +1147,7 @@ mod tests {
     /// with `Optimal` causes this assertion to FAIL.
     #[test]
     fn warm_basis_from_bounded_dispatch_does_not_mask_farkas_infeasibility() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         const OBJ_TOL: f64 = 1e-6;
 
         let make_lp = |b_rhs: f64| {
@@ -1229,7 +1229,7 @@ mod tests {
     /// the finite UB on x0 means the Eq+UB Phase I path is dispatched and the
     /// at-upper state on x0 is exercised end-to-end.
     fn lp_eq_with_finite_ubs() -> LpProblem {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         LpProblem::new_general(
             vec![1.0, 1.0],
@@ -1318,7 +1318,7 @@ mod tests {
     /// reach 10.
     #[test]
     fn eq_ub_phase1_detects_infeasibility() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let lp = LpProblem::new_general(
             vec![1.0, 1.0],
@@ -1345,7 +1345,7 @@ mod tests {
     /// - Mixed Le + Eq with finite UBs
     #[test]
     fn eq_ub_phase1_multi_pattern_correct() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         // Pattern A: Eq + one half-bounded var.
         // min x0 + x1, x0 + x1 = 5, 0 ≤ x0 ≤ 3, 0 ≤ x1 (no ub)
         // Optimal: x0=3 (or any split summing to 5), obj=5.
@@ -1404,7 +1404,7 @@ mod tests {
     /// `[10, 12]`. Returns the raw RHS (fails) if the division is dropped.
     #[test]
     fn diag_basis_initial_x_b_divides_by_diagonal() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 4.0], 2, 2).unwrap();
         let x_b = diag_basis_initial_x_b(&a, &[0, 1], &[10.0, 12.0]);
         assert!(
@@ -1428,7 +1428,7 @@ mod tests {
     /// artificials (crash disabled), so `perturb_x_b_with_mag` affects row 1
     /// (frac₁ ≈ 0.618 ≠ 0).
     fn lp_degenerate_2eq() -> LpProblem {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 1, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3)
             .unwrap();
         LpProblem::new_general(
@@ -1526,7 +1526,7 @@ mod tests {
     /// row 1 shifted by ≈ 0.0247 → `obj ≈ 5.025 ≠ 5`.
     #[test]
     fn perturb_noop_proof_reconcile_removes_perturbation() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         const TRUE_OBJ: f64 = 5.0;
         const OBJ_TOL: f64 = 1e-6;
         const MAG: f64 = 0.01;
@@ -1587,7 +1587,7 @@ mod tests {
     /// `100 x1 ≤ 100` (Le), `0 ≤ x0 ≤ 2`, `0 ≤ x1 ≤ 2`. Optimum: x0=x1=1, obj=-1.
     #[test]
     fn eq_ub_phase1_scaled_le_slack_feasible() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         // row 0 Eq: x0 - x1 = 0 ; row 1 Le: 100 x1 <= 100
         let a =
             CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, -1.0, 100.0], 2, 2).unwrap();
@@ -1643,7 +1643,7 @@ mod tests {
     /// and overshoot its UB, triggering the legacy fall-through.
     #[test]
     fn eq_ub_phase1_bfrt_flip_count_positive() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let lp = LpProblem::new_general(
             vec![-3.0, -1.0],
@@ -1684,7 +1684,7 @@ mod tests {
     // Asserts (a) Eq satisfaction and (b) correct objective.
     #[test]
     fn p1_hypothesis_art_goes_positive_in_phase2() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         // x0 - x1 = 0 (row 0 Eq), x1 <= 3 (row 1 Le)
         let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, -1.0, 1.0], 2, 2).unwrap();
         let lp = LpProblem::new_general(

@@ -12,7 +12,7 @@ use super::{
 use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 use std::sync::atomic::Ordering;
 
 use super::BoundedStandardForm;

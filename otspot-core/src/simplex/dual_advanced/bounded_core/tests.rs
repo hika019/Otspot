@@ -7,8 +7,8 @@ use crate::simplex::dual_advanced::bound_flip::{
 };
 use crate::simplex::pricing::MostInfeasibleLeaving;
 use crate::simplex::standard_form::build_bounded_standard_form;
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
+use otspot_num::sparse::{CscMatrix, SparseVec};
 
 /// Algebraic invariant tolerance — generous because injected warm-start
 /// states walk the loop through many BTRAN/FTRAN rounds where rounding

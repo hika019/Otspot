@@ -116,7 +116,7 @@ fn rins_sub_mip_config(cfg: &MipConfig) -> MipConfig {
 mod tests {
     use super::*;
     use crate::problem::{ConstraintType, LpProblem, SolveStatus};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn two_var_milp(c: [f64; 2], b: f64) -> MilpProblem {
         let n = 2;

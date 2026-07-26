@@ -1,7 +1,7 @@
 //! 線形代数 / 行列ビルダー: A·Aᵀ の上三角 CSC 構築。
 //! refine 系 helper が共通で必要とする小規模 utility のみ置く。
 
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// AAT 対角ε 正則化倍率 (rank-deficient 対策)。f64 eps より十分上、LDL dynamic reg より十分下。
 pub(crate) const AAT_REG_FACTOR: f64 = 1e-12;
@@ -21,7 +21,7 @@ pub(crate) fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<C
     }
     let nnz_upper_bound = (m_u.saturating_mul(m_u + 1) / 2).min(col_pair_sum);
     let bytes_estimate = nnz_upper_bound.saturating_mul(AAT_BUILD_BYTES_PER_ENTRY);
-    if bytes_estimate > crate::linalg::kkt_solver::memory_budget_bytes() as u128 {
+    if bytes_estimate > otspot_num::linalg::kkt_solver::memory_budget_bytes() as u128 {
         return None;
     }
     let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();

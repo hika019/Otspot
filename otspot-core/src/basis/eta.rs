@@ -4,8 +4,8 @@
 //! イータ行列 `E = I + (col - e_r) * e_r^T` の積で `B^{-1}` を逐次更新する。
 //! このモジュールは疎なイータ行列の生成・蓄積・適用（FTRAN/BTRAN）を提供する。
 
-use crate::sparse::SparseVec;
 use crate::tolerances::*;
+use otspot_num::sparse::SparseVec;
 
 /// 単一のイータ行列: `E = I + (col - e_r) * e_r^T`
 ///

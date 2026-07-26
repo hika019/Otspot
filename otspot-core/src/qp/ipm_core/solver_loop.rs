@@ -2,9 +2,9 @@
 
 use super::common::fraction_to_boundary_masked;
 use super::{ALPHA_IMPROVE_THRESHOLD, BETA_GONDZIO, GAMMA_L, GAMMA_U, TAU};
-use crate::linalg::kkt_solver::KktFactor;
-use crate::sparse::CscMatrix;
 use crate::tolerances::any_nonfinite;
+use otspot_num::linalg::kkt_solver::KktFactor;
+use otspot_num::sparse::CscMatrix;
 
 /// f64 IR の反復上限。3 を超えると LDL 精度限界で利得が出ないため。
 pub(crate) const IR_MAX_ITERS: usize = 3;
@@ -818,10 +818,10 @@ mod tests {
     use super::{
         compute_sigma_vec, gondzio_correctors_schur, solve_kkt_via_schur, update_variables,
     };
-    use crate::linalg::amd::amd_with_deadline;
     use crate::qp::ipm_core::kkt::{build_augmented_system, build_schur_system};
     use crate::qp::ipm_core::ALPHA_IMPROVE_THRESHOLD;
-    use crate::sparse::CscMatrix;
+    use otspot_num::linalg::amd::amd_with_deadline;
+    use otspot_num::sparse::CscMatrix;
 
     /// 多制約・等式・不等式混在で σ 幅広い range の下、Schur が augmented と数値一致すること。
     #[test]
@@ -851,8 +851,8 @@ mod tests {
 
         let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let aug_perm = amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, None);
-        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(
-            crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+        let aug_fac = otspot_num::linalg::kkt_solver::KktFactor::Direct(
+            otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
                 &aug_mat,
                 &aug_perm,
                 None,
@@ -864,8 +864,8 @@ mod tests {
 
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let s_perm = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
-        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(
-            crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+        let s_fac = otspot_num::linalg::kkt_solver::KktFactor::Direct(
+            otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
                 &s_mat,
                 &s_perm,
                 None,
@@ -945,8 +945,8 @@ mod tests {
 
         let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let perm: Vec<usize> = (0..aug_mat.nrows).collect();
-        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(
-            crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+        let aug_fac = otspot_num::linalg::kkt_solver::KktFactor::Direct(
+            otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
                 &aug_mat,
                 &perm,
                 None,
@@ -959,8 +959,8 @@ mod tests {
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let s_perm: Vec<usize> =
             amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
-        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(
-            crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+        let s_fac = otspot_num::linalg::kkt_solver::KktFactor::Direct(
+            otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
                 &s_mat,
                 &s_perm,
                 None,
@@ -1028,8 +1028,8 @@ mod tests {
     #[test]
     fn schur_solve_honors_expired_deadline() {
         let s_mat = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-        let s_fac = crate::linalg::kkt_solver::KktFactor::Iterative(
-            crate::linalg::kkt_solver::PreconditionedMinres::new(s_mat),
+        let s_fac = otspot_num::linalg::kkt_solver::KktFactor::Iterative(
+            otspot_num::linalg::kkt_solver::PreconditionedMinres::new(s_mat),
         );
         let a_ext = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let d_inv = vec![1.0];
@@ -1128,8 +1128,8 @@ mod tests {
 
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let s_perm = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
-        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(
-            crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+        let s_fac = otspot_num::linalg::kkt_solver::KktFactor::Direct(
+            otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
                 &s_mat,
                 &s_perm,
                 None,

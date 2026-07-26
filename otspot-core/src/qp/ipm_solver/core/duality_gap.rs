@@ -94,7 +94,7 @@ pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult
 mod tests {
     use super::*;
     use crate::problem::ConstraintType;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn one_var_box_qp() -> QpProblem {
         QpProblem::new(

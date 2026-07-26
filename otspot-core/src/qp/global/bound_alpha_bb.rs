@@ -11,11 +11,11 @@
 
 use std::time::Instant;
 
-use crate::linalg::gershgorin::psd_shift_from_gershgorin;
 use crate::options::SolverOptions;
 use crate::problem::SolverResult;
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::linalg::gershgorin::psd_shift_from_gershgorin;
+use otspot_num::sparse::CscMatrix;
 
 use super::bound::{all_bounds_finite, is_feasible_result};
 
@@ -136,7 +136,7 @@ mod tests {
     use super::*;
     use crate::options::SolverOptions;
     use crate::problem::ConstraintType;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn build_problem(diag: &[f64], c: &[f64], bounds: Vec<(f64, f64)>) -> QpProblem {
         let n = diag.len();

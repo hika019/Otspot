@@ -15,9 +15,9 @@ use crate::problem::ConstraintType;
 use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
 use crate::qp::ipm_solver::kkt::bound_violation;
 use crate::qp::kkt_resid::f64_impl::primal_residual_rel;
-use crate::sparse::CscMatrix;
 #[cfg(test)]
 use crate::tolerances::any_nonfinite;
+use otspot_num::sparse::CscMatrix;
 
 use super::QpProblem;
 
@@ -954,7 +954,7 @@ const LP_IPM_FIRST_N: usize = 3_000;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
     use std::time::Duration;
 
     const NONREDUCING_QP_VARS: usize = 2;

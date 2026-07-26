@@ -6,7 +6,7 @@
 //! cannot pass on an empty implementation).
 
 use crate::problem::{ConstraintType, LpProblem};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 use super::standard_form::{
     build_bounded_standard_form, build_standard_form, wrap_to_legacy, BoundedStandardForm,

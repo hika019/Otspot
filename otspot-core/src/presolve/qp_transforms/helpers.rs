@@ -5,10 +5,10 @@
 use super::state::QpPresolveStatus;
 use super::state::Workspace;
 use crate::qp::QpProblem;
-use crate::sparse::CscMatrix;
 use crate::tolerances::{
     LARGE_A_COEFF_TRIGGER, Q_OFFDIAG_REL, SCALING_SIGMA_FLOOR, UNDERFLOW_GUARD, ZERO_TOL,
 };
+use otspot_num::sparse::CscMatrix;
 
 pub(super) fn q_diagonal(q: &CscMatrix, j: usize) -> f64 {
     let start = q.col_ptr[j];

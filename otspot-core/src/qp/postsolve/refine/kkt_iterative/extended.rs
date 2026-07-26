@@ -80,7 +80,7 @@ fn optimality_worst_residual(
 }
 
 /// Q * x_ext: CSC SpMV with TwoFloat solution vector.
-fn qx_ext(q: &crate::sparse::CscMatrix, x_ext: &[TwoFloat]) -> Vec<TwoFloat> {
+fn qx_ext(q: &otspot_num::sparse::CscMatrix, x_ext: &[TwoFloat]) -> Vec<TwoFloat> {
     let n = q.nrows;
     let mut out = vec![TwoFloat::from(0.0); n];
     for col in 0..q.ncols {
@@ -94,7 +94,7 @@ fn qx_ext(q: &crate::sparse::CscMatrix, x_ext: &[TwoFloat]) -> Vec<TwoFloat> {
 }
 
 /// A^T * y_ext: CSC transpose SpMV with TwoFloat dual vector.
-fn aty_ext(a: &crate::sparse::CscMatrix, y_ext: &[TwoFloat], n: usize) -> Vec<TwoFloat> {
+fn aty_ext(a: &otspot_num::sparse::CscMatrix, y_ext: &[TwoFloat], n: usize) -> Vec<TwoFloat> {
     let mut out = vec![TwoFloat::from(0.0); n];
     if a.nrows == 0 || y_ext.is_empty() {
         return out;
@@ -109,7 +109,7 @@ fn aty_ext(a: &crate::sparse::CscMatrix, y_ext: &[TwoFloat], n: usize) -> Vec<Tw
 }
 
 /// A * x_ext: CSC SpMV with TwoFloat solution vector.
-fn ax_ext(a: &crate::sparse::CscMatrix, x_ext: &[TwoFloat]) -> Vec<TwoFloat> {
+fn ax_ext(a: &otspot_num::sparse::CscMatrix, x_ext: &[TwoFloat]) -> Vec<TwoFloat> {
     if a.nrows == 0 {
         return Vec::new();
     }
@@ -208,13 +208,13 @@ pub(crate) fn refine_kkt_extended_precision(
         let mut dp = DELTA_P;
         let mut dd = DELTA_D;
         let mut cur_k = k_mat.clone();
-        let mut factor_result: Option<crate::linalg::ldl::LdlFactorizationAmd> = None;
+        let mut factor_result: Option<otspot_num::linalg::ldl::LdlFactorizationAmd> = None;
         let mut retries = 0usize;
         loop {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 break;
             }
-            match crate::linalg::ldl::factorize_quasidefinite_with_amd(&cur_k, deadline) {
+            match otspot_num::linalg::ldl::factorize_quasidefinite_with_amd(&cur_k, deadline) {
                 Ok(f) => {
                     factor_result = Some(f);
                     break;
@@ -461,7 +461,7 @@ mod tests {
     use super::*;
     use crate::problem::{ConstraintType, SolverResult};
     use crate::qp::problem::QpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn complementarity(problem: &QpProblem, result: &SolverResult) -> f64 {
         let view = crate::qp::ipm_solver::outcome::ProblemView {

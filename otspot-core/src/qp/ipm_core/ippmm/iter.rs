@@ -13,9 +13,6 @@ use super::state::{
     PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP,
     RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
 };
-use crate::linalg::kkt_solver::{inexact_eta_for_eps, KktConfig};
-use crate::linalg::parallelism::solver_par_from_threads;
-use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::ipm_core::common::{
@@ -30,6 +27,9 @@ use crate::qp::ipm_core::solver_loop::{
 };
 use crate::qp::problem::QpProblem;
 use crate::tolerances::any_nonfinite;
+use otspot_num::linalg::kkt_solver::{inexact_eta_for_eps, KktConfig};
+use otspot_num::linalg::parallelism::solver_par_from_threads;
+use otspot_num::linalg::timeout::TimeoutCtx;
 
 /// IP-PMM 内部ソルバー (Ruiz scaling 後の problem を受け取る)。
 pub(crate) fn solve_ippmm_inner(

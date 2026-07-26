@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::options::SolverOptions;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 #[allow(clippy::too_many_arguments)]
 fn make_qp(

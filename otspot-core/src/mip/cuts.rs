@@ -13,12 +13,12 @@
 //! implied-bound cuts directly from the constraint matrix and LP solution.
 
 use crate::basis::{BasisManager, LuBasis};
-use crate::linalg::timeout::deadline_reached;
 use crate::options::{MipConfig, SimplexMethod, SolverOptions, DEFAULT_MAX_CUT_ROUNDS};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::simplex::{build_standard_form, StandardForm};
-use crate::sparse::CscMatrix;
 use crate::tolerances::{feas_rel_tol, ZERO_TOL};
+use otspot_num::linalg::timeout::deadline_reached;
+use otspot_num::sparse::CscMatrix;
 
 use super::cut_pool::{Cut, CutPool};
 use super::problem::MilpProblem;

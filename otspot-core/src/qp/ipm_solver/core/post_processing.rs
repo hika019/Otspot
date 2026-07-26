@@ -516,7 +516,7 @@ mod gate_predicate_tests {
         complementarity_componentwise_rel, complementarity_residual_rel,
     };
     use crate::qp::problem::QpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// min 0.5·diag·Σx² s.t. Σx = rhs, x free. Solved deterministically.
     fn solved(n: usize, diag: f64, rhs: f64) -> (QpProblem, crate::problem::SolverResult) {
@@ -886,7 +886,7 @@ mod stall_gate_tests {
     use crate::options::SolverOptions;
     use crate::problem::{ConstraintType, SolverResult};
     use crate::qp::problem::QpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// ill-cond regime: KKT pinned at the f64 limit (~0.1), per-iteration drop is
     /// only relative noise (~1e-11 abs, ~1e-10 rel). The relative gate must flag

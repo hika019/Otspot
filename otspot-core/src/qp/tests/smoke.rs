@@ -1,7 +1,7 @@
 use super::super::*;
 use super::{assert_close, EPS};
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// TimingBreakdown の QP IPM/postsolve フィールドが実測値で埋まることを検証。
 ///

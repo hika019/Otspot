@@ -16,7 +16,6 @@ pub(crate) mod node;
 pub(crate) mod pruning;
 pub(crate) mod tree;
 
-use crate::linalg::timeout::deadline_reached;
 use crate::options::{GlobalOptimizationConfig, QpWarmStart, SolverOptions};
 use crate::problem::certificate::BoundGapCertificate;
 use crate::problem::{SolveStatus, SolverResult};
@@ -29,6 +28,7 @@ use crate::qp::ipm_solver::kkt::{
 use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid::dual_sign_violation as kkt_dual_sign_violation;
 use crate::qp::problem::QpProblem;
+use otspot_num::linalg::timeout::deadline_reached;
 use std::time::{Duration, Instant};
 
 use bound::{
@@ -804,8 +804,8 @@ impl SearchState {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
-    use crate::sparse::CscMatrix;
     use crate::test_kkt::assert_solver_invariants_qp;
+    use otspot_num::sparse::CscMatrix;
 
     fn diag_concave_1d(bnd: f64) -> QpProblem {
         // f = -x², box [-bnd, bnd] → global min = -bnd² at corners

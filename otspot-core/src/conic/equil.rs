@@ -421,7 +421,7 @@ pub(super) fn verify_primal_ray(problem: &ConicProblem, d: &[f64], tol: f64) -> 
 mod tests {
     use super::*;
     use crate::conic::{solve_misocp, BbOptions, ConeSpec, ConicOptions, MisocpProblem};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn csc(rows: &[Vec<f64>], nrows: usize, ncols: usize) -> CscMatrix {
         let mut r = Vec::new();

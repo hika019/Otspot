@@ -26,6 +26,7 @@ solver algorithms (`otspot-core`)
 
 - レイヤの依存方向とcanonical型・traitの実装所有権
 - legacy facadeの薄さと旧実装ディレクトリの再導入
+- otspot-core内部コードによる`crate::sparse`/`crate::linalg`/`crate::error::SolverError`/`crate::SolverError`経由の参照（`otspot_num`への直接依存を強制）
 - foundation crateとmodule rootのファイルサイズ
 - 220行超の関数の新規追加、およびbaseline登録済み長大関数の肥大化
 - sparse storage内部fieldへの直接アクセスの増加（既存箇所は減少のみ許可）

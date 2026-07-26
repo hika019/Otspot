@@ -18,8 +18,8 @@
 
 use super::problem::MilpProblem;
 use crate::problem::{ConstraintType, LpProblem};
-use crate::sparse::CscMatrix;
 use crate::tolerances::ZERO_TOL;
+use otspot_num::sparse::CscMatrix;
 use std::collections::HashMap;
 
 /// Canonical key identifying a binary variable's column up to interchange.
@@ -151,7 +151,7 @@ pub(crate) fn break_symmetry(milp: &MilpProblem) -> MilpProblem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// Two identical binary columns with equal objective form one orbit.
     #[test]

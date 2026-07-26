@@ -1,7 +1,7 @@
 //! QP問題のデータ構造定義。
 
 use crate::problem::{is_valid_bound_pair, ConstraintType, SolveStatus};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// Quadratic term storage for a single QCQP constraint.
 ///
@@ -412,7 +412,7 @@ pub use crate::options::QpWarmStart;
 mod tests {
     use super::*;
     use crate::problem::ConstraintType;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn make_qp(
         c: Vec<f64>,
@@ -427,14 +427,14 @@ mod tests {
             CscMatrix::new(n, n)
         } else {
             let idx: Vec<usize> = (0..n).collect();
-            crate::sparse::CscMatrix::from_triplets(&idx, &idx, &q_vals, n, n).unwrap()
+            otspot_num::sparse::CscMatrix::from_triplets(&idx, &idx, &q_vals, n, n).unwrap()
         };
         let a = if a_vals.is_empty() {
             CscMatrix::new(m, n)
         } else {
             let rows = vec![0usize; n];
             let cols: Vec<usize> = (0..n).collect();
-            crate::sparse::CscMatrix::from_triplets(&rows, &cols, &a_vals, m, n).unwrap()
+            otspot_num::sparse::CscMatrix::from_triplets(&rows, &cols, &a_vals, m, n).unwrap()
         };
         let ct = vec![ConstraintType::Le; m];
         QpProblem::new(q, c, a, b, bounds, ct)

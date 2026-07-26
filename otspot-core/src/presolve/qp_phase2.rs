@@ -4,8 +4,8 @@
 use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
-use crate::sparse::CscMatrix;
 use crate::tolerances::{DROP_TOL, SCALING_SIGMA_FLOOR, ZERO_TOL};
+use otspot_num::sparse::CscMatrix;
 
 /// Minimum ratio of rows to columns for equality-constraint QR elimination.
 /// Elimination cost is O(mn²) and only pays off in strongly over-determined
@@ -404,7 +404,7 @@ mod tests {
     use super::*;
     use crate::options::SolverOptions;
     use crate::qp::QpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn make_qp_simple(n: usize, m: usize) -> QpProblem {
         // 対角 Q=2I, c=0, A=I (truncated), b=1, bounds無限

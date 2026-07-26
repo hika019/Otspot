@@ -13,6 +13,12 @@ ALLOWED_INTERNAL_EXTRA = {"otspot-presolve": {"otspot-num"}}
 FOUNDATION_MAX_LINES = 1600
 MODULE_ROOT_MAX_LINES = 200
 LEGACY_FACADE_MAX_LINES = 100
+FACADE_FORBIDDEN_PATHS = (
+    "crate::sparse::",
+    "crate::linalg::",
+    "crate::error::SolverError",
+    "crate::SolverError",
+)
 OWNERS = {
     "pub struct CscMatrix": "otspot-num/src/sparse/csc.rs",
     "pub struct SparseVec": "otspot-num/src/sparse/vec.rs",
@@ -74,6 +80,19 @@ def check(root: Path = ROOT) -> list[str]:
         path = root / relative
         if len(path.read_text().splitlines()) > LEGACY_FACADE_MAX_LINES:
             failures.append(f"legacy facade exceeds {LEGACY_FACADE_MAX_LINES} lines: {relative}")
+
+    # otspot-core internals must depend on otspot-num directly; the legacy
+    # crate::sparse / crate::linalg / crate::error::SolverError paths are a
+    # public facade for downstream crates only, not for internal use.
+    for source in (root / "otspot-core/src").rglob("*.rs"):
+        for lineno, line in enumerate(source.read_text().splitlines(), start=1):
+            code = line.split("//", 1)[0]
+            for forbidden in FACADE_FORBIDDEN_PATHS:
+                if forbidden in code:
+                    failures.append(
+                        f"{source.relative_to(root)}:{lineno} uses legacy facade path "
+                        f"{forbidden!r}; depend on otspot_num directly"
+                    )
 
     # Foundation files and module roots should stay cohesive.
     for crate in ("otspot-num", "otspot-ir", "otspot-presolve"):

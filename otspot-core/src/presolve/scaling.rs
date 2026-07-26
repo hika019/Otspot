@@ -3,8 +3,8 @@
 //! Iteratively scales rows and columns of the constraint matrix so that
 //! the maximum absolute entry in each row/column is close to 1.
 
-use crate::sparse::CscMatrix;
 use crate::tolerances::UNDERFLOW_GUARD;
+use otspot_num::sparse::CscMatrix;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum Ruiz equilibration sweeps for LP presolve.

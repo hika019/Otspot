@@ -40,10 +40,10 @@ pub fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> SolverRes
 mod tests {
     use super::scaling::{compute_amplification, EPS_FLOOR};
     use super::*;
-    use crate::linalg::ruiz::RuizScaler;
     use crate::options::SolverOptions;
     use crate::problem::SolveStatus;
-    use crate::sparse::CscMatrix;
+    use otspot_num::linalg::ruiz::RuizScaler;
+    use otspot_num::sparse::CscMatrix;
 
     const EPS: f64 = 1e-5;
 

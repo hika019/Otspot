@@ -11,7 +11,7 @@
 
 use super::{solve_socp, ConeSpec, ConicOptions, ConicProblem, ConicResult};
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// A convex quadratic constraint `(1/2) x^T P x + q^T x + r <= 0` with `P` PSD.
 #[derive(Debug, Clone)]

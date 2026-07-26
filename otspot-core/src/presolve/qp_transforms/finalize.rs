@@ -3,10 +3,10 @@
 
 use super::helpers::{apply_large_coeff_rescaling, count_block_components, is_diagonal_q};
 use super::state::{QpPostsolveStep, QpPresolveResult, QpPresolveStatus, Workspace};
-use crate::linalg::ruiz::RuizScaler;
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::linalg::ruiz::RuizScaler;
+use otspot_num::sparse::CscMatrix;
 
 pub(super) fn build_result(
     prob: &QpProblem,
@@ -127,7 +127,7 @@ fn build_reduced_a(
     n: usize,
     m_new: usize,
     n_new: usize,
-) -> Result<CscMatrix, crate::error::SolverError> {
+) -> Result<CscMatrix, otspot_num::SolverError> {
     let mut trip_rows: Vec<usize> = Vec::new();
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();
@@ -162,7 +162,7 @@ fn build_reduced_q(
     col_map: &[Option<usize>],
     n: usize,
     n_new: usize,
-) -> Result<CscMatrix, crate::error::SolverError> {
+) -> Result<CscMatrix, otspot_num::SolverError> {
     let mut trip_rows: Vec<usize> = Vec::new();
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();

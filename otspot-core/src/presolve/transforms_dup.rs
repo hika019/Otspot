@@ -392,7 +392,7 @@ mod tests {
     use super::*;
     use crate::presolve::transforms::{run_presolve_with_flags, PresolveFlags};
     use crate::problem::{ConstraintType, LpProblem};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn make_lp(
         c: Vec<f64>,

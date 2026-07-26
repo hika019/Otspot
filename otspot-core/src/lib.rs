@@ -100,7 +100,7 @@ pub use lp::solve_lp_with as solve_with;
 mod tests {
     use super::*;
     use crate::problem::{ConstraintType, SolveStatus};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn make_offset_lp(obj_offset: f64) -> crate::problem::LpProblem {
         // min x  s.t. x <= 5,  x >= 0;  optimal x* = 0, c^T x* = 0

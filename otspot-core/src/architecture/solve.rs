@@ -13,7 +13,7 @@ use crate::mip::{solve_milp, solve_miqp, MilpProblem, MiqpProblem};
 use crate::options::{MipConfig, SolverOptions};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::qp::{solve_qp_with, QcqpMatrix, QpProblem};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 fn status(status: &SolveStatus) -> IrStatus {
     match status {

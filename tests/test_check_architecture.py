@@ -73,6 +73,12 @@ class ArchitectureGateTests(unittest.TestCase):
         (root / "otspot-core/src/architecture/solve.rs").unlink()
         self.assertTrue(any("dispatcher is missing" in x for x in arch.check(root)))
 
+    def test_internal_legacy_facade_path_reference_fails(self):
+        tmp, root = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        (root / "otspot-core/src/solver.rs").write_text("use crate::sparse::CscMatrix;\n")
+        self.assertTrue(any("legacy facade path" in x for x in arch.check(root)))
+
 
 if __name__ == "__main__":
     unittest.main()

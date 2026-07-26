@@ -18,7 +18,7 @@ use crate::conic::{qcqp_matrix_to_csc, ConicProblem, MisocpProblem};
 use crate::mip::{MilpProblem, MiqpProblem};
 use crate::problem::{ConstraintType, LpProblem};
 use crate::qp::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 fn row_bounds(rhs: &[f64], constraint_types: &[ConstraintType]) -> (Vec<f64>, Vec<f64>) {
     let mut lower = Vec::with_capacity(rhs.len());

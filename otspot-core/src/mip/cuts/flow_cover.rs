@@ -266,7 +266,7 @@ fn flow_cover_is_valid(items: &[FlowItem], cover: &[usize], b: f64, lambda: f64)
 mod tests {
     use super::*;
     use crate::mip::problem::MilpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// Fixed-charge single-node flow instance:
     ///   x1 + x2 ≤ 3,  x1 ≤ 2 y1,  x2 ≤ 2 y2,  x integer ∈ [0,2], y ∈ {0,1}.

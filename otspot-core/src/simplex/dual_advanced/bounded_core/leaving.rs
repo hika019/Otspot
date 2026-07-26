@@ -1,7 +1,7 @@
 //! Leaving-variable selection (ratio tests) for bounded primal simplex.
 
-use crate::sparse::CscMatrix;
 use crate::tolerances::PIVOT_TOL;
+use otspot_num::sparse::CscMatrix;
 
 /// Outcome of the bounded (two-sided) ratio test.
 #[cfg_attr(test, derive(Debug))]

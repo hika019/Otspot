@@ -11,7 +11,7 @@ use super::singleton::step2_singleton_row;
 use super::state::{PostsolveStep, PresolveState, PresolveStatus};
 use super::substitution::fill_in_exceeds_budget;
 use crate::problem::{ConstraintType, LpProblem};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 fn make_state(
     c: Vec<f64>,

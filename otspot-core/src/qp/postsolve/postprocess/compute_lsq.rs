@@ -9,8 +9,8 @@ use crate::qp::kkt_resid;
 use crate::qp::linalg::{build_aat_upper_csc, AAT_REG_FACTOR};
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
-use crate::sparse::CscMatrix;
 use crate::tolerances::{any_nonfinite, COMP_SLACK_REL_TOL};
+use otspot_num::sparse::CscMatrix;
 
 /// CG 相対収束判定 (||r||² / ||r0||² < tol)。
 /// √tol = 1e-10 の rel_res で、f64 精度の LSQ 解に十分。
@@ -200,9 +200,9 @@ fn solve_aat_direct_ir(
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return None;
     }
-    let factor = crate::linalg::ldl::factorize_budget(
+    let factor = otspot_num::linalg::ldl::factorize_budget(
         &aat,
-        crate::linalg::kkt_solver::max_l_nnz_from_budget(),
+        otspot_num::linalg::kkt_solver::max_l_nnz_from_budget(),
     )
     .ok()?;
 
@@ -509,7 +509,7 @@ mod comp_slackness_tests {
     //! flips these tests to FAIL (the LSQ y becomes non-zero on the loose row).
     use super::*;
     use crate::problem::{ConstraintType, SolverResult};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// Threshold for declaring "y is zero" — well below COMP_SLACK_REL_TOL.
     const Y_ZERO_TOL: f64 = 1e-9;

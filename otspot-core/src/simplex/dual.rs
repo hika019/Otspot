@@ -13,8 +13,8 @@ use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
+use otspot_num::sparse::{CscMatrix, SparseVec};
 use std::sync::atomic::Ordering;
 
 #[cfg(test)]
@@ -231,7 +231,7 @@ pub(super) fn dual_simplex_core(
 
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
-        Err(crate::error::SolverError::SingularBasis { .. }) => {
+        Err(otspot_num::SolverError::SingularBasis { .. }) => {
             return SimplexOutcome::SingularBasis;
         }
         Err(_) => {
@@ -351,7 +351,7 @@ pub(super) fn dual_simplex_core(
         reject_eta_for_test(&mut alpha_sv);
         match basis_mgr.update(entering_col, leaving_row, &alpha_sv) {
             Ok(()) => {}
-            Err(crate::error::SolverError::SingularBasis { .. }) => {
+            Err(otspot_num::SolverError::SingularBasis { .. }) => {
                 #[cfg(test)]
                 {
                     assert_eq!(x_b, atomic_snapshot.0);
@@ -461,9 +461,9 @@ mod tests {
     use crate::options::{SimplexMethod, SolverOptions};
     use crate::problem::{LpProblem, SolveStatus};
     use crate::simplex::solve_with;
-    use crate::sparse::CscMatrix;
     use crate::test_kkt::{assert_kkt_optimal_with, dfeas_rel_bound, pfeas_abs, EPS_KKT};
     use crate::tolerances::PIVOT_TOL;
+    use otspot_num::sparse::CscMatrix;
 
     struct EtaRejectGuard(bool);
 

@@ -17,7 +17,7 @@ use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::{CscMatrix, SparseVec};
+use otspot_num::sparse::{CscMatrix, SparseVec};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// y = B^{-T} c_B written into the caller's buffer. `y_out.len()` is the basis
@@ -382,7 +382,7 @@ pub(super) fn recompute_gamma_truth(
 mod tests {
     use super::*;
     use crate::basis::LuBasis;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// P2 pin: user-facing classification must clock-recheck, never trust the
     /// `SimplexOutcome` variant. A `Timeout(_)` outcome reaching

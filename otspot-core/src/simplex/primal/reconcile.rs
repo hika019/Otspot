@@ -5,8 +5,8 @@ use super::StandardForm;
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem};
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{feas_rel_tol, PIVOT_STABILITY_THRESHOLD, PIVOT_TOL};
+use otspot_num::sparse::{CscMatrix, SparseVec};
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 
@@ -209,7 +209,7 @@ fn pivot_out_sequential(
             basis_mgr.ftran(&mut d_sv);
             match basis_mgr.update(j, i, &d_sv) {
                 Ok(()) => {}
-                Err(crate::error::SolverError::SingularBasis { .. }) => return,
+                Err(otspot_num::SolverError::SingularBasis { .. }) => return,
                 Err(err) => panic!("internal reconciliation eta invariant violated: {err}"),
             }
             is_basic[basis[i]] = false;
@@ -525,7 +525,7 @@ pub(crate) fn reconcile_final_basis_state(
     y: &mut [f64],
     max_etas: usize,
     deadline: Option<std::time::Instant>,
-) -> Result<(), crate::error::SolverError> {
+) -> Result<(), otspot_num::SolverError> {
     let mut basis_mgr = LuBasis::new_timed(a, basis, max_etas, deadline)?;
 
     x_b.copy_from_slice(b);

@@ -16,7 +16,7 @@ use crate::qp::ipm_solver::kkt::{
 };
 use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid::dual_sign_violation;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// Verify all KKT conditions and mint an [`OptimalCertificate`] if they all pass.
 ///
@@ -303,7 +303,7 @@ mod tests {
     use super::*;
     use crate::problem::ConstraintType;
     use crate::qp::ipm_solver::outcome::ProblemView;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     // Helper: build a ProblemView for a trivial LP.
     fn trivial_view<'a>(

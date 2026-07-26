@@ -13,8 +13,8 @@
 //! it unchanged — this is the equivalence the sentinel locks in.
 
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
-use crate::sparse::CscMatrix;
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
+use otspot_num::sparse::CscMatrix;
 
 use super::primal::extract_solution;
 

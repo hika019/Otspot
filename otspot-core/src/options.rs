@@ -440,14 +440,14 @@ impl IpmOptions {
 
     /// Effective KKT memory budget in bytes: resolves `None` to the built-in default (4 GiB).
     pub(crate) fn effective_kkt_memory_budget_bytes(&self) -> usize {
-        use crate::linalg::kkt_solver::DEFAULT_MEMORY_BUDGET_BYTES;
+        use otspot_num::linalg::kkt_solver::DEFAULT_MEMORY_BUDGET_BYTES;
         self.kkt_memory_budget_bytes
             .unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES)
     }
 
     /// Max L-factor entries from memory budget (budget / bytes-per-entry).
     pub(crate) fn effective_max_l_nnz(&self) -> usize {
-        use crate::linalg::kkt_solver::BYTES_PER_L_ENTRY;
+        use otspot_num::linalg::kkt_solver::BYTES_PER_L_ENTRY;
         self.effective_kkt_memory_budget_bytes() / BYTES_PER_L_ENTRY
     }
 }
@@ -1207,7 +1207,7 @@ mod tests {
 
     #[test]
     fn test_ipm_effective_max_l_nnz_default_and_override() {
-        use crate::linalg::kkt_solver::{BYTES_PER_L_ENTRY, DEFAULT_MEMORY_BUDGET_BYTES};
+        use otspot_num::linalg::kkt_solver::{BYTES_PER_L_ENTRY, DEFAULT_MEMORY_BUDGET_BYTES};
         let o = IpmOptions::default();
         assert_eq!(
             o.effective_kkt_memory_budget_bytes(),
@@ -1240,7 +1240,7 @@ mod tests {
     fn test_presolve_max_pass_controls_iteration_count() {
         use crate::problem::SolveStatus;
         use crate::qp::{solve_qp_with, QpProblem};
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
 
         // Minimal feasible QP: 1 variable, no constraints, x* = 0.
         let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();

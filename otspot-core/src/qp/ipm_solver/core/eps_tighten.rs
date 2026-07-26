@@ -70,12 +70,12 @@ pub(super) fn tighten_ipm_eps_for_presolve_scale(
 #[allow(clippy::field_reassign_with_default)]
 mod eps_tighten_tests {
     use super::*;
-    use crate::linalg::ruiz::RuizScaler;
     use crate::options::{IpmOptions, SolverOptions, Tolerance};
     use crate::presolve::QpPresolveResult;
     use crate::problem::ConstraintType;
     use crate::qp::problem::QpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::linalg::ruiz::RuizScaler;
+    use otspot_num::sparse::CscMatrix;
 
     fn presolve_with_ruiz_e(e_min: f64) -> QpPresolveResult {
         let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();

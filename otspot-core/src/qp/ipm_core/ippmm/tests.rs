@@ -8,7 +8,7 @@ use crate::options::{QpWarmStart, SolverOptions};
 use crate::problem::{ConstraintType, SolveStatus};
 use crate::qp::ipm_core::kkt::build_extended_constraints;
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 const EPS: f64 = 1e-4; // IP-PMM は標準 IPM より tolerance がゆるめでも通ることを確認
 

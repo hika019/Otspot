@@ -21,9 +21,9 @@ pub(crate) fn probe_schur_decision(
     problem: &crate::qp::problem::QpProblem,
     options: &crate::options::SolverOptions,
 ) -> bool {
-    use crate::linalg::parallelism::solver_par_from_threads;
-    use crate::linalg::timeout::TimeoutCtx;
     use crate::qp::ipm_core::kkt::build_extended_constraints;
+    use otspot_num::linalg::parallelism::solver_par_from_threads;
+    use otspot_num::linalg::timeout::TimeoutCtx;
     let timeout_ctx = TimeoutCtx::new(
         options.deadline,
         options.timeout_secs,

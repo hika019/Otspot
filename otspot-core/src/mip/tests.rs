@@ -12,7 +12,7 @@ use super::{
 use crate::options::{MipConfig, SolverOptions};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult, TimingBreakdown};
 use crate::qp::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 const EPS: f64 = 1e-4;
 
@@ -1367,9 +1367,9 @@ fn solve_miqp_rejects_indefinite_n1001() {
 #[test]
 fn invalid_options_rejected_at_miqp_entry() {
     // min 0.5 x^2 s.t. x <= 5, x >= 0, x integer
-    let q = crate::sparse::CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let q = otspot_num::sparse::CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
     let c = vec![0.0];
-    let a = crate::sparse::CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let a = otspot_num::sparse::CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
     let b = vec![5.0];
     let bounds = vec![(0.0, f64::INFINITY)];
     let qp = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();

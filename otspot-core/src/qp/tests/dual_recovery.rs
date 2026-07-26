@@ -1,7 +1,7 @@
 use super::super::*;
 use crate::problem::SolveStatus;
 use crate::qp::postsolve::postprocess::{run_dual_recovery_postprocess, try_dual_only_ir};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 #[test]
 fn test_dual_recovery_postprocess_can_improve_without_dual_ir() {
@@ -183,7 +183,7 @@ fn test_dual_only_ir_weighted_gram_prioritizes_worst_component() {
 /// rank-deficient Q (e e^T) + 多解で duality gap が偽 Optimal を弾く。
 #[test]
 fn test_duality_gap_rejects_rank_deficient_false_optimal() {
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
     let n = 2usize;
     let q = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, 1.0, 1.0], n, n).unwrap();
     let c = vec![-1.0_f64, 0.0];

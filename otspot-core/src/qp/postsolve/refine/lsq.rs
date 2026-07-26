@@ -225,9 +225,9 @@ pub(crate) fn refine_dual_lsq_irls(
             Some(mat) => mat,
             None => break,
         };
-        let factor = match crate::linalg::ldl::factorize_budget(
+        let factor = match otspot_num::linalg::ldl::factorize_budget(
             &aat_w,
-            crate::linalg::kkt_solver::max_l_nnz_from_budget(),
+            otspot_num::linalg::kkt_solver::max_l_nnz_from_budget(),
         ) {
             Ok(f) => f,
             Err(_) => break,
@@ -276,7 +276,7 @@ pub(crate) fn refine_dual_lsq_irls(
 mod tests {
     use super::*;
     use crate::problem::{SolveStatus, SolverResult};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// 複数 well-conditioned 問題で y=0 から LSQ refine が真の解に到達するか。
     /// no-op 化検証: refine_dual_lsq 末尾の `if max_rel_new < max_rel_old { ... }` を

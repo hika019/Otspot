@@ -6,9 +6,9 @@
 pub mod certificate;
 use certificate::{BoundGapCertificate, OptimalCertificate};
 
-use crate::error::SolverError;
 use crate::options::WarmStartBasis;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
+use otspot_num::SolverError;
 use std::fmt;
 use std::sync::Arc;
 
@@ -502,7 +502,7 @@ impl fmt::Display for LpProblem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::SolverError;
+    use otspot_num::SolverError;
 
     #[test]
     fn test_lp_problem_new_valid() {

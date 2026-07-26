@@ -6,7 +6,7 @@
 
 use super::{ConeSpec, ConicOptions, ConicProblem};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// A (possibly nonconvex) quadratic constraint `(1/2) x^T P x + q^T x + r <= 0`.
 #[derive(Debug, Clone)]

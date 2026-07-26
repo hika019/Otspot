@@ -1,16 +1,16 @@
 //! KKT factorization with 3 段防御 (probe-based regularization retry + identity-perm fallback).
 
 use super::state::{LDL_FALLBACK_DELTA_MIN, LDL_REG_CEILING, LDL_REG_GROWTH, LDL_REG_RETRY_MAX};
-use crate::linalg::amd::amd_with_deadline;
-use crate::linalg::kkt_solver::{
+use crate::qp::ipm_core::kkt::{build_schur_system, AugmentedKktCache, PermutedAugmentedKkt};
+use crate::qp::problem::QpProblem;
+use faer::Par;
+use otspot_num::linalg::amd::amd_with_deadline;
+use otspot_num::linalg::kkt_solver::{
     factorize_kkt_pre_permuted_cached_par, factorize_kkt_with_cached_perm_par, KktConfig, KktError,
     KktFactor,
 };
-use crate::linalg::timeout::TimeoutCtx;
-use crate::qp::ipm_core::kkt::{build_schur_system, AugmentedKktCache, PermutedAugmentedKkt};
-use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
-use faer::Par;
+use otspot_num::linalg::timeout::TimeoutCtx;
+use otspot_num::sparse::CscMatrix;
 
 /// 反復間で sparsity 不変な構造を保持する。
 pub(super) struct FactorizeCaches {
@@ -322,7 +322,7 @@ pub(crate) fn auto_schur_enabled(
         &probe_aug.row_ind,
         timeout_ctx.deadline,
     );
-    let probe_result = crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+    let probe_result = otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
         &probe_aug,
         &probe_perm,
         timeout_ctx.deadline,
@@ -331,6 +331,6 @@ pub(crate) fn auto_schur_enabled(
     );
     matches!(
         probe_result,
-        Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. })
+        Err(otspot_num::linalg::ldl::LdlError::WouldExceedBudget { .. })
     )
 }

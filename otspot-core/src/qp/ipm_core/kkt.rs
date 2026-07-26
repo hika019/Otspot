@@ -2,7 +2,7 @@
 
 use crate::problem::ConstraintType;
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 #[inline]
 #[allow(clippy::needless_range_loop)]
@@ -295,10 +295,10 @@ pub(crate) fn compute_inertia_correction(q: &CscMatrix) -> f64 {
     if q.nrows == 0 || q.values.iter().all(|&v| v == 0.0) {
         return 0.0;
     }
-    if crate::linalg::ldl::is_q_psd_by_cholesky(q) {
+    if otspot_num::linalg::ldl::is_q_psd_by_cholesky(q) {
         return 0.0;
     }
-    crate::linalg::gershgorin::psd_shift_from_gershgorin(q)
+    otspot_num::linalg::gershgorin::psd_shift_from_gershgorin(q)
 }
 
 /// `AugmentedKktCache` を構築。Q は上三角全要素格納前提。

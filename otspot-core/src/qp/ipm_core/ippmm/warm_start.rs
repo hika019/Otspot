@@ -3,7 +3,7 @@
 use super::state::{warm_bound_margin, WARM_BOUND_REL_MARGIN, WARM_MU_MIN, WARM_SY_MIN};
 use crate::problem::ConstraintType;
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// warm start から (x, y, s) を初期化し、有効なら μ を返す (none で cold start)。
 ///

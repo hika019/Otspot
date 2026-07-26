@@ -5,13 +5,13 @@
 //! which is strictly stronger: a real-valued implied ub of 3.7 gives only `x ≤ 3`
 //! for an integer variable rather than `x ≤ 3.7`.
 
-use crate::linalg::timeout::deadline_reached;
 use crate::presolve::activity::propagate_row_bounds;
 use crate::problem::ConstraintType;
 #[cfg(test)]
 use crate::problem::LpProblem;
-use crate::sparse::CscMatrix;
 use crate::tolerances::ZERO_TOL;
+use otspot_num::linalg::timeout::deadline_reached;
+use otspot_num::sparse::CscMatrix;
 use std::time::Instant;
 
 /// Maximum number of bound-propagation rounds in the iterative tightening loop.
@@ -378,7 +378,7 @@ pub fn tighten_bounds_with_probing(
 mod tests {
     use super::*;
     use crate::problem::{ConstraintType, LpProblem};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn single_var_lp(a_val: f64, b_val: f64, ct: ConstraintType, domain: (f64, f64)) -> LpProblem {
         let a = CscMatrix::from_triplets(&[0], &[0], &[a_val], 1, 1).unwrap();

@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::problem::{ConstraintType, SolveStatus};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// presolve OFF 基準線。
 #[test]

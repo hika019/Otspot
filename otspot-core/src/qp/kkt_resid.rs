@@ -9,8 +9,8 @@
 //! 分離するほうが drift catch 性が高い)。
 
 use crate::problem::ConstraintType;
-use crate::sparse::CscMatrix;
 use crate::tolerances::{any_nonfinite, FX_TOL};
+use otspot_num::sparse::CscMatrix;
 
 const INVALID_BOUND_DUAL_RESIDUAL: f64 = 1.0e100;
 
@@ -892,7 +892,7 @@ mod tests {
     #[test]
     fn dual_sign_z_ub_observed_positive_at_active_ub() {
         use crate::qp::{solve_qp, QpProblem};
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         // min 1/2*(2)*x^2 + (-20)*x ≡ (x-10)^2 + const, 0 ≤ x ≤ 5
         let q = CscMatrix::from_triplets(&[0usize], &[0usize], &[2.0_f64], 1, 1).unwrap();
         let a = CscMatrix::new(0, 1);
@@ -985,7 +985,7 @@ mod tests {
 
     #[test]
     fn dd_qx_aty_ax_match_f64_on_well_conditioned() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0_f64, 3.0], 2, 2).unwrap();
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0_f64, 2.0], 1, 2).unwrap();
         let x = vec![5.0_f64, 7.0];

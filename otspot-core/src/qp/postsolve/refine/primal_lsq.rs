@@ -81,7 +81,7 @@ pub(crate) fn refine_primal_lsq(
         Some(mat) => mat,
         None => return,
     };
-    let factor = match crate::linalg::ldl::factorize(&aat) {
+    let factor = match otspot_num::linalg::ldl::factorize(&aat) {
         Ok(f) => f,
         Err(_) => return,
     };

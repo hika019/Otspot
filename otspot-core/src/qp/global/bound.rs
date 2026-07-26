@@ -194,7 +194,7 @@ pub(crate) fn is_verified_feasible_point(problem: &QpProblem, x: &[f64], eps: f6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn build_diag_qp(diag: &[f64], c: &[f64], bounds: Vec<(f64, f64)>) -> QpProblem {
         let n = diag.len();

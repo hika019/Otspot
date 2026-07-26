@@ -9,7 +9,7 @@
 //! 同行 entry を持つ他列の count を decrement し singleton chase を誘発する。
 //! 動的 re-prioritization が LTSF の本質 (静的 sort は quasi-triangle で退化)。
 
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// 列内最大 |pivot| に対する相対閾値 (これ未満は不安定 pivot として却下)。
 /// 0.1 は LP solver の一般的な Markowitz threshold (Suhl & Suhl 1990)。
@@ -231,7 +231,7 @@ impl LtsfState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// 単純対角ケース: artif 行が n 個、対角構造列で全行被覆できる。
     #[test]

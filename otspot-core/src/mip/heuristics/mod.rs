@@ -123,7 +123,7 @@ pub(crate) fn take_recorded_sub_mip_configs() -> Vec<MipConfig> {
 mod tests {
     use super::*;
     use crate::problem::LpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn one_binary_problem() -> MilpProblem {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();

@@ -34,7 +34,7 @@ pub use problem::{QcqpMatrix, QpProblem, QpProblemError, QpWarmStart};
 use crate::options::SolverOptions;
 use crate::problem::SolverResult;
 #[cfg(test)]
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// Q (上三角 CSC) が PSD か。n>CHECK_SIZE_LIMIT は O(n³) を避けスキップ (true 返却)。
 /// 対角負値は ‖Q‖_max 相対許容、Cholesky regularization は QPS 6 桁丸めを救う。

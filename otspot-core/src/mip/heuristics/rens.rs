@@ -141,7 +141,7 @@ mod tests {
     use crate::mip::branch::is_integer_feasible;
     use crate::mip::integer_mask;
     use crate::problem::{ConstraintType, LpProblem};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// min c·x  s.t.  x0 + x1 <= b,  x ∈ {0,1}^2.
     fn knap2(c: [f64; 2], b: f64) -> MilpProblem {

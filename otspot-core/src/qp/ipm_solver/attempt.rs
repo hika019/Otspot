@@ -916,7 +916,7 @@ fn finalize_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static GAP_ACCEPTANCE_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -1869,7 +1869,7 @@ mod tests {
     #[test]
     fn finalize_outcome_dual_sign_notproven_demotes_to_suboptimal() {
         use crate::problem::ConstraintType;
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
 
         let q = CscMatrix::new(1, 1);
         let a = CscMatrix::from_triplets(&[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1).unwrap();
@@ -1926,7 +1926,7 @@ mod tests {
     #[test]
     fn finalize_outcome_dual_sign_valid_returns_optimal() {
         use crate::problem::ConstraintType;
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
 
         let q = CscMatrix::new(1, 1);
         let a = CscMatrix::from_triplets(&[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1).unwrap();
@@ -2011,7 +2011,7 @@ mod tests {
     /// x = D·x_s、z_orig = z_s/D の逆変換を直接検証。
     #[test]
     fn unscale_q_diagonal_reverses_x_and_bound_duals() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let n = 3;
         let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 4.0, 9.0], n, n).unwrap();
         let prob = QpProblem::new_all_le(

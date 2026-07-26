@@ -187,13 +187,13 @@ pub(crate) fn refine_kkt_iterative(
         let mut current_delta_p = DELTA_P_DEFAULT;
         let mut current_delta_d = DELTA_D_DEFAULT;
         let mut current_k = k_mat.clone();
-        let mut result_factor: Option<crate::linalg::ldl::LdlFactorizationAmd> = None;
+        let mut result_factor: Option<otspot_num::linalg::ldl::LdlFactorizationAmd> = None;
         let mut retry_count = 0usize;
         loop {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 break;
             }
-            match crate::linalg::ldl::factorize_quasidefinite_with_amd(&current_k, deadline) {
+            match otspot_num::linalg::ldl::factorize_quasidefinite_with_amd(&current_k, deadline) {
                 Ok(f) => {
                     result_factor = Some(f);
                     break;
@@ -546,7 +546,7 @@ mod tests {
     fn saddle_best_snapshot_integration_revert_bug_regression() {
         use crate::problem::{ConstraintType, SolveStatus, SolverResult};
         use crate::qp::problem::QpProblem;
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
 
         // Q = [[1]], A = [[1]], c = [0], b = [1], x ∈ (-∞, ∞)
         let q = CscMatrix::from_triplets(&[0usize], &[0usize], &[1.0_f64], 1, 1).unwrap();

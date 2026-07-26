@@ -5,7 +5,7 @@ use super::{assert_close, EPS};
 #[cfg(feature = "parallel")]
 use crate::problem::SolveStatus;
 #[cfg(feature = "parallel")]
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// Concurrent Eq 制約。
 #[cfg(feature = "parallel")]

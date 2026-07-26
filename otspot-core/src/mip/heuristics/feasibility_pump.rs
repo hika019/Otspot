@@ -11,8 +11,8 @@ use crate::mip::branch::{fractionality, is_integer_feasible};
 use crate::mip::integer_mask;
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
-use crate::sparse::CscMatrix;
 use crate::tolerances::PIVOT_TOL;
+use otspot_num::sparse::CscMatrix;
 
 /// Maximum number of FP projection iterations before giving up.
 const MAX_FP_ITER: usize = 30;
@@ -261,7 +261,7 @@ mod tests {
     use super::*;
     use crate::options::SolverOptions;
     use crate::problem::{ConstraintType, LpProblem};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn opts() -> SolverOptions {
         SolverOptions {

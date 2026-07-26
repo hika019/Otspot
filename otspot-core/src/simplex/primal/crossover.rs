@@ -9,8 +9,8 @@ use super::reconcile::{
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::problem::LpProblem;
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
+use otspot_num::sparse::{CscMatrix, SparseVec};
 
 /// Relative tolerance below which a standard-form column value is treated as
 /// at-bound (zero) when seeding the crossover basis from `x_star`.
@@ -286,7 +286,7 @@ pub(crate) fn crossover_dual_from_primal(
             if let Some(row) = best_row {
                 match basis_mgr.update(j, row, &d_sv) {
                     Ok(()) => {}
-                    Err(crate::error::SolverError::SingularBasis { .. }) => return None,
+                    Err(otspot_num::SolverError::SingularBasis { .. }) => return None,
                     Err(err) => panic!("internal crossover eta invariant violated: {err}"),
                 }
                 is_basic[basis[row]] = false;
@@ -619,7 +619,7 @@ mod crossover_tests {
     //! variables, finite upper bounds, and non-binding Ge rows.
     use super::{crossover_dual_from_primal, crossover_dual_infeasibility};
     use crate::problem::{ConstraintType, LpProblem};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// Tolerance for "dual-feasible & complementary with x*".
     const DF_TOL: f64 = 1e-7;
