@@ -272,13 +272,7 @@ pub(crate) fn try_dual_only_ir(
             }
             col_ptr[j + 1] = row_ind.len();
         }
-        let gram_csc = CscMatrix {
-            col_ptr,
-            row_ind,
-            values,
-            nrows: ulen,
-            ncols: ulen,
-        };
+        let gram_csc = CscMatrix::from_raw_parts(ulen, ulen, col_ptr, row_ind, values);
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
         }

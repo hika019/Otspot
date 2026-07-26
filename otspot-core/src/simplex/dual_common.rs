@@ -272,11 +272,7 @@ pub(super) fn lp_unbounded_ray_verified(
         if rc >= -options.dual_tol {
             continue;
         }
-        let mut d_sv = SparseVec {
-            indices: rows.to_vec(),
-            values: vals.to_vec(),
-            len: m,
-        };
+        let mut d_sv = SparseVec::from_raw_parts(rows.to_vec(), vals.to_vec(), m);
         basis_mgr.ftran(&mut d_sv);
         // A recession ray needs every basic structural/slack component ≤ 0
         // (increasing x_q from lb=0, ub=∞ never drives a basic var below its lb).

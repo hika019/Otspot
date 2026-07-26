@@ -168,13 +168,13 @@ impl AugmentedKktCache {
             values[self.diag_con_slot[k]] = -(sigma_vec[k] + delta_d);
         }
         let total = self.n + self.m_ext;
-        CscMatrix {
-            col_ptr: self.col_ptr.clone(),
-            row_ind: self.row_ind.clone(),
+        CscMatrix::from_raw_parts(
+            total,
+            total,
+            self.col_ptr.clone(),
+            self.row_ind.clone(),
             values,
-            nrows: total,
-            ncols: total,
-        }
+        )
     }
 
     /// AMD 置換を適用した permuted aug_mat キャッシュを生成する。
@@ -278,13 +278,13 @@ impl PermutedAugmentedKkt {
             values[self.diag_con_slot[k]] = -(sigma_vec[k] + delta_d);
         }
         let total = self.n + self.m_ext;
-        CscMatrix {
-            col_ptr: self.col_ptr.clone(),
-            row_ind: self.row_ind.clone(),
+        CscMatrix::from_raw_parts(
+            total,
+            total,
+            self.col_ptr.clone(),
+            self.row_ind.clone(),
             values,
-            nrows: total,
-            ncols: total,
-        }
+        )
     }
 }
 
@@ -511,13 +511,7 @@ pub(crate) fn build_schur_system(
         }
     }
 
-    let s = CscMatrix {
-        col_ptr,
-        row_ind,
-        values,
-        nrows: n,
-        ncols: n,
-    };
+    let s = CscMatrix::from_raw_parts(n, n, col_ptr, row_ind, values);
     (s, d_inv)
 }
 

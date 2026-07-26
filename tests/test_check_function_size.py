@@ -28,6 +28,17 @@ class FunctionSizeTests(unittest.TestCase):
             rows = gate.functions(root)
             self.assertGreater(next(iter(rows.values())), gate.LIMIT)
 
+    def test_otspot_dev_src_is_scanned(self):
+        # otspot-dev/src used to be outside ROOTS, silently hiding oversized
+        # functions (e.g. bin/bench_qplib.rs::main) from the ratchet.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "otspot-dev/src/bin/x.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text("fn main() {\n" + "work();\n" * 230 + "}\n")
+            rows = gate.functions(root)
+            self.assertEqual(list(rows.values()), [232])
+
 
 if __name__ == "__main__":
     unittest.main()

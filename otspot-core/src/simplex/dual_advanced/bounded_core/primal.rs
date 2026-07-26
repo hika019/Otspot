@@ -315,11 +315,7 @@ pub(crate) fn phase2_primal_bounded(
         let leaving_col = state.basis[r];
 
         let alpha_sv = if primal_alpha_sv_disabled() {
-            SparseVec {
-                indices: vec![],
-                values: vec![],
-                len: m,
-            }
+            SparseVec::from_raw_parts(vec![], vec![], m)
         } else {
             SparseVec::from_dense(&alpha)
         };
@@ -593,11 +589,7 @@ pub(super) fn primal_simplex_aug(
         let leaving_col = state.basis[r];
 
         let alpha_sv = if primal_alpha_sv_disabled() {
-            SparseVec {
-                indices: vec![],
-                values: vec![],
-                len: m,
-            }
+            SparseVec::from_raw_parts(vec![], vec![], m)
         } else {
             SparseVec::from_dense(&alpha)
         };

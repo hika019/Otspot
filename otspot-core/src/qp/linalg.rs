@@ -59,11 +59,5 @@ pub(crate) fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<C
             col_ptr[i] = col_ptr[i - 1];
         }
     }
-    Some(CscMatrix {
-        col_ptr,
-        row_ind,
-        values,
-        nrows: m,
-        ncols: m,
-    })
+    Some(CscMatrix::from_raw_parts(m, m, col_ptr, row_ind, values))
 }

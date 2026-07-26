@@ -462,13 +462,8 @@ pub(crate) fn compute_lsq_dual_y(
         }
         a_free_col_ptr[col + 1] = a_free_row_ind.len();
     }
-    let a_free = CscMatrix {
-        col_ptr: a_free_col_ptr,
-        row_ind: a_free_row_ind,
-        values: a_free_values,
-        nrows: m_free,
-        ncols: n,
-    };
+    let a_free =
+        CscMatrix::from_raw_parts(m_free, n, a_free_col_ptr, a_free_row_ind, a_free_values);
 
     let mut target_adj_dd = target_dd.clone();
     for col in 0..n {

@@ -650,13 +650,13 @@ mod tests {
         // 0.5*x'Qx = DIAG_OBJECTIVE*x^2 + CROSS_OBJECTIVE*x*y.
         // Construct stored Q directly because sparse triplet assembly has its
         // own DROP_TOL, separate from the McCormick collector under test.
-        let q = CscMatrix {
-            nrows: 2,
-            ncols: 2,
-            col_ptr: vec![0, 2, 3],
-            row_ind: vec![0, 1, 0],
-            values: vec![2.0 * DIAG_OBJECTIVE, CROSS_OBJECTIVE, CROSS_OBJECTIVE],
-        };
+        let q = CscMatrix::from_raw_parts(
+            2,
+            2,
+            vec![0, 2, 3],
+            vec![0, 1, 0],
+            vec![2.0 * DIAG_OBJECTIVE, CROSS_OBJECTIVE, CROSS_OBJECTIVE],
+        );
         let bounds = vec![(0.0, 1.0), (0.0, Y_MAX)];
         let problem = build_problem(q, vec![0.0, 0.0], bounds);
 

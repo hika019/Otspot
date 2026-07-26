@@ -540,13 +540,13 @@ mod tests {
                 "case {idx}: row {} must be empty for structural singularity",
                 m - 1
             );
-            let a = CscMatrix {
-                col_ptr: col_ptr.to_vec(),
-                row_ind: row_ind.to_vec(),
-                values: vec![1.0; row_ind.len()],
-                nrows: m,
-                ncols: m,
-            };
+            let a = CscMatrix::from_raw_parts(
+                m,
+                m,
+                col_ptr.to_vec(),
+                row_ind.to_vec(),
+                vec![1.0; row_ind.len()],
+            );
             let basis: Vec<usize> = (0..m).collect();
             // 旧 (AUTO) 実装ではこの呼び出しが debug で panic していた。
             let result = LuFactorization::factorize_timed(&a, &basis, None);

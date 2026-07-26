@@ -190,13 +190,13 @@ impl KktSkeleton {
             values[slot] = -delta_d;
         }
         let total = self.total();
-        CscMatrix {
-            col_ptr: self.col_ptr.clone(),
-            row_ind: self.row_ind.clone(),
+        CscMatrix::from_raw_parts(
+            total,
+            total,
+            self.col_ptr.clone(),
+            self.row_ind.clone(),
             values,
-            nrows: total,
-            ncols: total,
-        }
+        )
     }
 
     /// Applies a symmetric permutation to the static skeleton (mirrors
@@ -703,13 +703,13 @@ fn try_equilibrated(
         scaled.values(),
         &caches.perm,
     );
-    let pre_permuted_scaled = CscMatrix {
-        col_ptr: perm_col_ptr,
-        row_ind: perm_row_ind,
-        values: perm_values,
-        nrows: scaled.nrows(),
-        ncols: scaled.ncols(),
-    };
+    let pre_permuted_scaled = CscMatrix::from_raw_parts(
+        scaled.nrows(),
+        scaled.ncols(),
+        perm_col_ptr,
+        perm_row_ind,
+        perm_values,
+    );
     if let Ok(f) = factorize_kkt_pre_permuted_cached_par(
         &pre_permuted_scaled,
         &scaled,
@@ -770,13 +770,8 @@ fn equilibrate(mat: &CscMatrix) -> (CscMatrix, Vec<f64>) {
             values[k] *= d[row] * d[col];
         }
     }
-    let scaled = CscMatrix {
-        col_ptr: mat.col_ptr().to_vec(),
-        row_ind: mat.row_ind().to_vec(),
-        values,
-        nrows: n,
-        ncols: n,
-    };
+    let scaled =
+        CscMatrix::from_raw_parts(n, n, mat.col_ptr().to_vec(), mat.row_ind().to_vec(), values);
     (scaled, d)
 }
 
@@ -1065,13 +1060,13 @@ mod tests {
     fn equilibrate_guards_zero_and_subnormal_diagonals() {
         // Upper-tri 4x4 CSC: diagonals [1e-10, 0.0, 5e-324 (subnormal), 4.0]
         // plus one off-diagonal (row 0, col 3).
-        let mat = CscMatrix {
-            col_ptr: vec![0, 1, 2, 3, 5],
-            row_ind: vec![0, 1, 2, 0, 3],
-            values: vec![1e-10, 0.0, 5e-324, -1.0, 4.0],
-            nrows: 4,
-            ncols: 4,
-        };
+        let mat = CscMatrix::from_raw_parts(
+            4,
+            4,
+            vec![0, 1, 2, 3, 5],
+            vec![0, 1, 2, 0, 3],
+            vec![1e-10, 0.0, 5e-324, -1.0, 4.0],
+        );
         let (scaled, d) = equilibrate(&mat);
         for (i, &di) in d.iter().enumerate() {
             assert!(di.is_finite() && di > 0.0, "d[{i}]={di}");

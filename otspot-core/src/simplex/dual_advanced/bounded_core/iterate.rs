@@ -442,11 +442,8 @@ pub(crate) fn iterate(
         // returned solver state. A rejected eta must leave the whole state at
         // the last valid basis.
         let (col_rows, col_vals) = a.column(entering_col);
-        let mut alpha_sv_for_update = SparseVec {
-            indices: col_rows.to_vec(),
-            values: col_vals.to_vec(),
-            len: m,
-        };
+        let mut alpha_sv_for_update =
+            SparseVec::from_raw_parts(col_rows.to_vec(), col_vals.to_vec(), m);
         basis_mgr.ftran(&mut alpha_sv_for_update);
         if eta_update_disabled() {
             alpha_sv_for_update.indices.clear();

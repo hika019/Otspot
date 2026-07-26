@@ -13,6 +13,34 @@ pub struct SparseVec {
 }
 
 impl SparseVec {
+    /// Builds a vector from already-sorted `(index, value)` arrays (e.g. a CSC
+    /// column extracted via [`crate::sparse::CscMatrix::column`]).
+    ///
+    /// The encapsulated replacement for direct struct-literal construction.
+    /// `debug_assert`s enforce the invariants (matching length, ascending
+    /// sorted indices, all indices in bounds) in test/dev builds; release
+    /// builds trust the caller (matching the previous struct-literal usage).
+    pub fn from_raw_parts(indices: Vec<usize>, values: Vec<f64>, len: usize) -> Self {
+        debug_assert_eq!(
+            indices.len(),
+            values.len(),
+            "indices/values length mismatch"
+        );
+        debug_assert!(
+            indices.windows(2).all(|w| w[0] < w[1]),
+            "indices must be strictly ascending"
+        );
+        debug_assert!(
+            indices.last().is_none_or(|&i| i < len),
+            "index out of bounds for len={len}"
+        );
+        Self {
+            indices,
+            values,
+            len,
+        }
+    }
+
     /// Creates a `SparseVec` from a dense slice, dropping entries with `|v| ≤ ZERO_TOL`.
     pub fn from_dense(dense: &[f64]) -> Self {
         let mut indices = Vec::new();
@@ -63,5 +91,55 @@ mod tests {
 
         let back = sv.to_dense();
         assert_eq!(back, dense);
+    }
+
+    #[test]
+    fn test_from_raw_parts_matches_from_dense() {
+        // Independent oracle: build the same non-trivial vector two ways
+        // (from_dense's own scan vs. the raw-parts constructor with the
+        // already-known sparse pattern) and require identical output.
+        let dense = vec![1.0, 0.0, 0.0, 3.5, 0.0, -2.0];
+        let via_dense = SparseVec::from_dense(&dense);
+        let via_raw = SparseVec::from_raw_parts(vec![0, 3, 5], vec![1.0, 3.5, -2.0], 6);
+        assert_eq!(via_raw.to_dense(), via_dense.to_dense());
+        assert_eq!(via_raw.to_dense(), dense);
+    }
+
+    #[test]
+    fn test_from_raw_parts_empty() {
+        let sv = SparseVec::from_raw_parts(vec![], vec![], 4);
+        assert_eq!(sv.to_dense(), vec![0.0; 4]);
+    }
+
+    /// Sentinel: a length mismatch between `indices` and `values` must be
+    /// rejected. Removing the `debug_assert_eq!` makes this test fail to
+    /// panic (no-op fail) under the default (debug-assertions-on) profile.
+    /// `debug_assert!` compiles out under `--release` (debug-assertions off),
+    /// so the invariant genuinely cannot fire there; gate the test itself on
+    /// `cfg(debug_assertions)` rather than asserting a panic that can't happen.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "indices/values length mismatch")]
+    fn test_sentinel_from_raw_parts_rejects_length_mismatch() {
+        let _ = SparseVec::from_raw_parts(vec![0, 1], vec![1.0], 3);
+    }
+
+    /// Sentinel: unsorted (or duplicate) indices must be rejected — the
+    /// binary-search contract documented on the type requires strictly
+    /// ascending order. debug-assertions-only, see above.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "indices must be strictly ascending")]
+    fn test_sentinel_from_raw_parts_rejects_unsorted_indices() {
+        let _ = SparseVec::from_raw_parts(vec![2, 1], vec![1.0, 2.0], 3);
+    }
+
+    /// Sentinel: an out-of-bounds index (`>= len`) must be rejected.
+    /// debug-assertions-only, see above.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "index out of bounds for len=2")]
+    fn test_sentinel_from_raw_parts_rejects_out_of_bounds_index() {
+        let _ = SparseVec::from_raw_parts(vec![0, 2], vec![1.0, 2.0], 2);
     }
 }

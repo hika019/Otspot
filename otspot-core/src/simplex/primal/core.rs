@@ -414,11 +414,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             .iter()
             .cloned()
             .fold(0.0f64, |acc, v| acc.max(v.abs()));
-        let mut d_sv = SparseVec {
-            indices: col_rows.to_vec(),
-            values: col_vals.to_vec(),
-            len: m,
-        };
+        let mut d_sv = SparseVec::from_raw_parts(col_rows.to_vec(), col_vals.to_vec(), m);
         basis_mgr.ftran(&mut d_sv);
         d_sv.to_dense_into(&mut d_dense);
 
@@ -475,11 +471,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                     }
                 }
                 let (cr2, cv2) = a.column(entering_col);
-                d_sv = SparseVec {
-                    indices: cr2.to_vec(),
-                    values: cv2.to_vec(),
-                    len: m,
-                };
+                d_sv = SparseVec::from_raw_parts(cr2.to_vec(), cv2.to_vec(), m);
                 basis_mgr.ftran(&mut d_sv);
                 d_sv.to_dense_into(&mut d_dense);
                 basis_snapshot.copy_from_slice(basis);

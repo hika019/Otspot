@@ -321,13 +321,7 @@ mod tests {
                 values[s + k] = v;
             }
         }
-        CscMatrix {
-            col_ptr,
-            row_ind,
-            values,
-            nrows: n,
-            ncols: n,
-        }
+        CscMatrix::from_raw_parts(n, n, col_ptr, row_ind, values)
     }
 
     fn residual_inf(full: &[(usize, usize, f64)], x: &[f64], b: &[f64]) -> f64 {

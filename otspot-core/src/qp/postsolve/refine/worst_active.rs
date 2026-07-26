@@ -155,13 +155,7 @@ pub(crate) fn refine_dual_worst_active_block(
             }
             row_col_ptr[j + 1] = row_ind.len();
         }
-        let row_csc = CscMatrix {
-            col_ptr: row_col_ptr,
-            row_ind,
-            values: row_values,
-            nrows: rlen,
-            ncols: rlen,
-        };
+        let row_csc = CscMatrix::from_raw_parts(rlen, rlen, row_col_ptr, row_ind, row_values);
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return;
         }
@@ -287,13 +281,7 @@ pub(crate) fn refine_dual_worst_active_block(
         }
         col_ptr[j + 1] = row_ind.len();
     }
-    let gram_csc = CscMatrix {
-        col_ptr,
-        row_ind,
-        values,
-        nrows: ulen,
-        ncols: ulen,
-    };
+    let gram_csc = CscMatrix::from_raw_parts(ulen, ulen, col_ptr, row_ind, values);
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return;
     }

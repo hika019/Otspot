@@ -1,4 +1,4 @@
-# direct storage-field accesses; counts may decrease but not grow
+# direct storage-field accesses + struct-literal construction; counts may decrease but not grow
 otspot-core/src/basis/eta.rs	3
 otspot-core/src/basis/lu.rs	6
 otspot-core/src/basis/mod.rs	3

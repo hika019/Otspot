@@ -30,7 +30,9 @@ solver algorithms (`otspot-core`) ──→ numerics (`otspot-num`)
 - legacy facadeの薄さと旧実装ディレクトリの再導入
 - otspot-core内部コードによる`crate::sparse`/`crate::linalg`/`crate::error::SolverError`/`crate::SolverError`経由の参照（`otspot_num`への直接依存を強制）
 - foundation crateとmodule rootのファイルサイズ
-- 220行超の関数の新規追加、およびbaseline登録済み長大関数の肥大化
-- sparse storage内部fieldへの直接アクセスの増加（既存箇所は減少のみ許可）
+- 220行超の関数の新規追加、およびbaseline登録済み長大関数の肥大化（`otspot-core`/`otspot-num`/`otspot-io`/`otspot-model`/`otspot-dev`のsrcを走査）
+- `CscMatrix`/`SparseVec`のstorage fieldへの直接アクセス（`.col_ptr`等のdot-access）およびstruct-literal直接構築（`CscMatrix { .. }`）の増加（既存箇所は減少のみ許可、`otspot-core`/`otspot-io`/`otspot-model`/`otspot-dev`のsrcを走査。型定義自身の`otspot-num/src/sparse/`は対象外）
+
+struct-literal検出は行単位の正規表現ヒューリスティックで、`Type` と `{` が別々の物理行に分かれる稀なレイアウトも1行先読みで拾う。ただし網羅的な字句解析ではないため、CIの`cargo fmt --all -- --check`（`Type {`を常に同一行へ連結する）を実質的な前提としている。
 
 ゲート本体にもfixture self-testを設ける。既存長大関数の縮小・分割・削除は許可する。

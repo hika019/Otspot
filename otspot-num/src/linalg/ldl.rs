@@ -619,13 +619,7 @@ pub fn factorize_quasidefinite_with_cached_perm_budget_par(
     let n = mat.nrows;
     let (new_col_ptr, new_row_ind, new_values) =
         permute_sym_upper(n, &mat.col_ptr, &mat.row_ind, &mat.values, perm);
-    let perm_mat = CscMatrix {
-        col_ptr: new_col_ptr,
-        row_ind: new_row_ind,
-        values: new_values,
-        nrows: n,
-        ncols: n,
-    };
+    let perm_mat = CscMatrix::from_raw_parts(n, n, new_col_ptr, new_row_ind, new_values);
     let signs = extract_diagonal_signs(n, &perm_mat.col_ptr, &perm_mat.row_ind, &perm_mat.values);
     let (symbolic, l_values) =
         do_numeric_factorize(&perm_mat, Some(&signs), deadline, max_l_nnz, par)?;
@@ -716,13 +710,7 @@ mod tests {
                 values[start + idx] = val;
             }
         }
-        CscMatrix {
-            col_ptr,
-            row_ind,
-            values,
-            nrows: n,
-            ncols: n,
-        }
+        CscMatrix::from_raw_parts(n, n, col_ptr, row_ind, values)
     }
 
     #[test]

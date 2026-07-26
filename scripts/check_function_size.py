@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "tests/function_size_baseline.txt"
 LIMIT = 220
-ROOTS = ("otspot-core/src", "otspot-num/src", "otspot-io/src", "otspot-model/src")
+ROOTS = ("otspot-core/src", "otspot-num/src", "otspot-io/src", "otspot-model/src", "otspot-dev/src")
 FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_]\w*)")
 
 
