@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2960 testcases, 26 ignored
+# totals: 2971 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -295,12 +295,14 @@ otspot-core	mip::heuristics::feasibility_pump::tests::test_milp_feasibility_pump
 otspot-core	mip::heuristics::local_branching::tests::cut_row_encodes_hamming_distance	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_k_zero_returns_incumbent	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_radius_restricts_neighborhood	active
+otspot-core	mip::heuristics::local_branching::tests::local_branching_reports_sub_mip_nodes_processed	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_accepts_feasible_timeout_incumbent	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_passes_recursive_sub_mip_config	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_skips_on_expired_deadline	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_skips_without_binaries	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_strictly_improves_planted_incumbent	active
 otspot-core	mip::heuristics::rens::tests::rens_neighborhood_is_floor_ceil_only	active
+otspot-core	mip::heuristics::rens::tests::rens_reports_sub_mip_nodes_processed	active
 otspot-core	mip::heuristics::rens::tests::rens_run_path_accepts_feasible_timeout_incumbent	active
 otspot-core	mip::heuristics::rens::tests::rens_run_path_passes_recursive_sub_mip_config	active
 otspot-core	mip::heuristics::rens::tests::rens_skips_integral_lp_point	active
@@ -310,6 +312,7 @@ otspot-core	mip::heuristics::rins::tests::remaining_budget_no_deadline_is_infini
 otspot-core	mip::heuristics::rins::tests::remaining_budget_past_deadline_is_zero	active
 otspot-core	mip::heuristics::rins::tests::rins_disabled_cfg_does_not_break_solve	active
 otspot-core	mip::heuristics::rins::tests::rins_improves_suboptimal_incumbent	active
+otspot-core	mip::heuristics::rins::tests::rins_reports_sub_mip_nodes_processed	active
 otspot-core	mip::heuristics::rins::tests::rins_run_path_passes_recursive_sub_mip_config	active
 otspot-core	mip::heuristics::rins::tests::rins_skips_on_expired_deadline	active
 otspot-core	mip::heuristics::rins::tests::rins_skips_when_no_agreement	active
@@ -1754,9 +1757,15 @@ otspot-dev::bin/bench_qplib	unsupported_classify_tests::binary_var_message_is_in
 otspot-dev::bin/bench_qplib	unsupported_classify_tests::constraint_type_message_is_qcqp_category	active
 otspot-dev::bin/bench_qplib	unsupported_classify_tests::unknown_message_is_other	active
 otspot-dev::bin/bench_qplib	unsupported_classify_tests::variable_type_message_is_integer_category	active
+otspot-dev::bin/milp_solve	tests::all_ablation_flags_combine_independently	active
 otspot-dev::bin/milp_solve	tests::cut_rounds_cli_option_reenables_root_and_tree_cuts	active
+otspot-dev::bin/milp_solve	tests::max_nodes_cli_overrides_default_node_budget	active
 otspot-dev::bin/milp_solve	tests::no_cuts_cli_option_disables_root_and_tree_cuts	active
 otspot-dev::bin/milp_solve	tests::no_cuts_disables_root_and_tree_cuts	active
+otspot-dev::bin/milp_solve	tests::no_local_branching_disables_local_branching_only	active
+otspot-dev::bin/milp_solve	tests::no_rens_disables_rens_only	active
+otspot-dev::bin/milp_solve	tests::no_rins_disables_rins_only	active
+otspot-dev::bin/milp_solve	tests::no_tree_cuts_disables_tree_cuts_only_leaving_root_cuts_on	active
 otspot-dev::bin/milp_solve	tests::symmetry_cli_overrides_default_both_ways	active
 otspot-dev::bin/milp_solve	tests::symmetry_defaults_to_config_default_when_unset	active
 otspot-dev::bin/qp_runner	tests::every_solver_status_has_an_explicit_stable_label	active
@@ -2765,6 +2774,8 @@ otspot::mip_bench_gen_correctness	knapsack_all_int_n10_matches_brute_force_3seed
 otspot::mip_bench_gen_correctness	knapsack_all_int_n6_matches_brute_force_3seeds	active
 otspot::mip_bench_gen_correctness	knapsack_all_int_n8_matches_brute_force_3seeds	active
 otspot::mip_bench_gen_correctness	knapsack_mixed_int_cont_objective_le_all_int_bound	active
+otspot::mip_bnb_attribution	attribution_covers_wall_clock	active
+otspot::mip_bnb_attribution	sub_mip_nodes_total_reflects_heuristic_work	active
 otspot::model_api_correctness	model_constraint_macro_single_variable	active
 otspot::model_api_correctness	model_dual_variables	active
 otspot::model_api_correctness	model_lp_equality_constraint	active

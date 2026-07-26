@@ -26,7 +26,9 @@ const RINS_MIN_REMAINING_SECS: f64 = 1.0;
 ///
 /// Fixes integer variables where `round(x_lp[j]) == round(x_inc[j])`, then
 /// solves the reduced sub-MIP with a short timeout and node limit. Returns an
-/// improved `SolverResult` or `None` when no improvement is found.
+/// improved `SolverResult` (or `None` when no improvement is found) together
+/// with the sub-MIP's `nodes_processed`, reported whenever a sub-MIP solve
+/// was actually attempted (0 when skipped before that point).
 ///
 /// `parent_opts` is cloned and its timeout/deadline overridden so that
 /// tolerance, cancellation flag, and other settings are inherited by the sub-MIP.
@@ -37,10 +39,10 @@ pub(crate) fn run_rins(
     cfg: &MipConfig,
     deadline: &Option<Instant>,
     parent_opts: &SolverOptions,
-) -> Option<SolverResult> {
+) -> (Option<SolverResult>, u64) {
     let remaining_secs = remaining_budget(deadline);
     if remaining_secs < RINS_MIN_REMAINING_SECS {
-        return None;
+        return (None, 0);
     }
 
     let mut sub_bounds = problem.lp.bounds.clone();
@@ -58,7 +60,7 @@ pub(crate) fn run_rins(
     }
 
     if n_fixed == 0 {
-        return None;
+        return (None, 0);
     }
 
     let sub_timeout = (remaining_secs * RINS_TIME_FRACTION).min(RINS_MAX_TIME_SECS);
@@ -85,8 +87,12 @@ pub(crate) fn run_rins(
     sub_opts.recover_warm_start_basis = false;
     sub_opts.threads = 1;
 
-    let result = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
-    super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol)
+    let (result, sub_stats) = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
+    let sub_mip_nodes = sub_stats.nodes_processed as u64;
+    (
+        super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol),
+        sub_mip_nodes,
+    )
 }
 
 fn remaining_budget(deadline: &Option<Instant>) -> f64 {
@@ -149,19 +155,49 @@ mod tests {
         let x_lp = vec![1.4, 1.6];
         let x_inc = vec![1.0, 1.0];
 
-        let result = run_rins(
+        let (result, _sub_mip_nodes) = run_rins(
             &problem,
             &x_lp,
             &x_inc,
             &cfg,
             &None,
             &SolverOptions::default(),
-        )
-        .expect("RINS must return Some when at least one variable is fixed");
+        );
+        let result = result.expect("RINS must return Some when at least one variable is fixed");
         assert!(
             result.objective < -1.9,
             "RINS should improve below -2; got {}",
             result.objective
+        );
+    }
+
+    /// NEW (Phase 0): an attempted RINS sub-MIP solve reports its node count.
+    ///
+    /// Sentinel: a Phase 0 revert (the `run_rins`/`solve_sub_milp` return type
+    /// change stripped back to `Option<SolverResult>`) has no way to expose
+    /// this count, so `sub_mip_nodes_total` would stay 0 — this test would fail.
+    #[test]
+    fn rins_reports_sub_mip_nodes_processed() {
+        let problem = two_var_milp([-1.0, -1.0], 3.0);
+        let cfg = MipConfig::default();
+        let x_lp = vec![1.4, 1.6];
+        let x_inc = vec![1.0, 1.0];
+
+        let (result, sub_mip_nodes) = run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &None,
+            &SolverOptions::default(),
+        );
+        assert!(
+            result.is_some(),
+            "test premise: RINS must attempt a sub-MIP"
+        );
+        assert!(
+            sub_mip_nodes > 0,
+            "an attempted sub-MIP solve must report at least one processed node; got {sub_mip_nodes}"
         );
     }
 
@@ -184,6 +220,7 @@ mod tests {
                 &None,
                 &SolverOptions::default()
             )
+            .0
             .is_none(),
             "RINS must return None when no variable is fixed"
         );
@@ -208,6 +245,7 @@ mod tests {
                 &Some(past),
                 &SolverOptions::default()
             )
+            .0
             .is_none(),
             "RINS must not run when deadline is expired"
         );
@@ -263,7 +301,7 @@ mod tests {
         let x_inc = vec![1.0, 1.0];
 
         super::super::clear_recorded_sub_mip_configs();
-        let result = run_rins(
+        let (result, _sub_mip_nodes) = run_rins(
             &problem,
             &x_lp,
             &x_inc,

@@ -130,9 +130,9 @@ impl Relaxation for MilpProblem {
         cfg: &crate::options::MipConfig,
         deadline: &Option<std::time::Instant>,
         opts: &crate::options::SolverOptions,
-    ) -> Option<crate::problem::SolverResult> {
+    ) -> (Option<crate::problem::SolverResult>, u64) {
         if !cfg.rins_enabled {
-            return None;
+            return (None, 0);
         }
         crate::mip::heuristics::rins::run_rins(self, x_lp, x_inc, cfg, deadline, opts)
     }
@@ -142,9 +142,9 @@ impl Relaxation for MilpProblem {
         cfg: &crate::options::MipConfig,
         deadline: &Option<std::time::Instant>,
         opts: &crate::options::SolverOptions,
-    ) -> Option<crate::problem::SolverResult> {
+    ) -> (Option<crate::problem::SolverResult>, u64) {
         if !cfg.rens_enabled {
-            return None;
+            return (None, 0);
         }
         crate::mip::heuristics::rens::run_rens(self, x_lp, cfg, deadline, opts)
     }
@@ -154,9 +154,9 @@ impl Relaxation for MilpProblem {
         cfg: &crate::options::MipConfig,
         deadline: &Option<std::time::Instant>,
         opts: &crate::options::SolverOptions,
-    ) -> Option<crate::problem::SolverResult> {
+    ) -> (Option<crate::problem::SolverResult>, u64) {
         if !cfg.local_branching_enabled {
-            return None;
+            return (None, 0);
         }
         crate::mip::heuristics::local_branching::run_local_branching(
             self, x_inc, cfg, deadline, opts,

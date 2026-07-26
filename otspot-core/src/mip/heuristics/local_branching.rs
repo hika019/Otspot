@@ -45,16 +45,18 @@ const LOCAL_BRANCHING_MIN_REMAINING_SECS: f64 = 1.0;
 ///
 /// Uses the [`LOCAL_BRANCHING_K`] neighborhood radius and the module budget
 /// constants. Returns a feasible sub-MIP `SolverResult` (which may or may not
-/// improve the incumbent; the caller's incumbent test decides) or `None` when
+/// improve the incumbent; the caller's incumbent test decides), or `None` when
 /// there are no binary variables, the deadline has passed, or the sub-MIP
-/// produced no usable point.
+/// produced no usable point — together with the sub-MIP's `nodes_processed`,
+/// reported whenever a sub-MIP solve was actually attempted (0 when skipped
+/// before that point).
 pub(crate) fn run_local_branching(
     problem: &MilpProblem,
     x_inc: &[f64],
     cfg: &MipConfig,
     deadline: &Option<Instant>,
     parent_opts: &SolverOptions,
-) -> Option<SolverResult> {
+) -> (Option<SolverResult>, u64) {
     local_branching_with_k(
         problem,
         x_inc,
@@ -75,10 +77,10 @@ fn local_branching_with_k(
     cfg: &MipConfig,
     deadline: &Option<Instant>,
     parent_opts: &SolverOptions,
-) -> Option<SolverResult> {
+) -> (Option<SolverResult>, u64) {
     let remaining_secs = remaining_budget(deadline);
     if remaining_secs < LOCAL_BRANCHING_MIN_REMAINING_SECS {
-        return None;
+        return (None, 0);
     }
 
     // Binary variables = integer variables with a [0,1] box.
@@ -94,7 +96,7 @@ fn local_branching_with_k(
         })
         .collect();
     if binaries.is_empty() {
-        return None;
+        return (None, 0);
     }
 
     let sub_lp = augment_with_local_branching_cut(&problem.lp, &binaries, x_inc, k);
@@ -125,8 +127,12 @@ fn local_branching_with_k(
     sub_opts.recover_warm_start_basis = false;
     sub_opts.threads = 1;
 
-    let result = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
-    super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol)
+    let (result, sub_stats) = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
+    let sub_mip_nodes = sub_stats.nodes_processed as u64;
+    (
+        super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol),
+        sub_mip_nodes,
+    )
 }
 
 /// Append the local-branching Hamming-distance row to a copy of `lp`.
@@ -257,8 +263,9 @@ mod tests {
         let x_inc = vec![1.0, 0.0, 0.0];
         let inc_obj = -1.0;
 
-        let res = run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default())
-            .expect("local branching must return a feasible neighborhood solution");
+        let (res, _sub_mip_nodes) =
+            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let res = res.expect("local branching must return a feasible neighborhood solution");
         assert!(
             res.objective < inc_obj - 1e-6,
             "local branching must strictly improve incumbent {inc_obj}; got {}",
@@ -268,6 +275,31 @@ mod tests {
             (res.objective - (-2.0)).abs() < 1e-6,
             "neighborhood optimum is -2; got {}",
             res.objective
+        );
+    }
+
+    /// NEW (Phase 0): an attempted local-branching sub-MIP solve reports its
+    /// node count.
+    ///
+    /// Sentinel: a Phase 0 revert (the `run_local_branching`/`solve_sub_milp`
+    /// return type change stripped back to `Option<SolverResult>`) has no way
+    /// to expose this count, so `sub_mip_nodes_total` would stay 0 — this test
+    /// would fail.
+    #[test]
+    fn local_branching_reports_sub_mip_nodes_processed() {
+        let problem = binary_knapsack(vec![-1.0, -1.0, -1.0], 2.0);
+        let cfg = MipConfig::default();
+        let x_inc = vec![1.0, 0.0, 0.0];
+
+        let (res, sub_mip_nodes) =
+            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        assert!(
+            res.is_some(),
+            "test premise: local branching must attempt a sub-MIP"
+        );
+        assert!(
+            sub_mip_nodes > 0,
+            "an attempted sub-MIP solve must report at least one processed node; got {sub_mip_nodes}"
         );
     }
 
@@ -283,8 +315,10 @@ mod tests {
             ..SolverResult::default()
         });
 
-        let result = run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default())
-            .expect("local branching must keep feasible timeout incumbent from sub-MIP");
+        let (result, _sub_mip_nodes) =
+            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let result =
+            result.expect("local branching must keep feasible timeout incumbent from sub-MIP");
 
         assert_eq!(result.solution, vec![1.0, 1.0, 0.0]);
         assert_eq!(result.objective, -2.0);
@@ -303,9 +337,9 @@ mod tests {
         let cfg = MipConfig::default();
         let x_inc = vec![0.0, 0.0, 0.0];
 
-        let res =
-            local_branching_with_k(&problem, &x_inc, 1, &cfg, &None, &SolverOptions::default())
-                .expect("k=1 neighborhood is feasible (contains the incumbent)");
+        let (res, _sub_mip_nodes) =
+            local_branching_with_k(&problem, &x_inc, 1, &cfg, &None, &SolverOptions::default());
+        let res = res.expect("k=1 neighborhood is feasible (contains the incumbent)");
         assert!(
             (res.objective - (-1.0)).abs() < 1e-6,
             "k=1 caps improvement at one flip (-1), not the global -3; got {}. \
@@ -321,9 +355,9 @@ mod tests {
         let cfg = MipConfig::default();
         let x_inc = vec![1.0, 0.0, 0.0];
 
-        let res =
-            local_branching_with_k(&problem, &x_inc, 0, &cfg, &None, &SolverOptions::default())
-                .expect("k=0 neighborhood still contains the incumbent");
+        let (res, _sub_mip_nodes) =
+            local_branching_with_k(&problem, &x_inc, 0, &cfg, &None, &SolverOptions::default());
+        let res = res.expect("k=0 neighborhood still contains the incumbent");
         assert!(
             (res.objective - (-1.0)).abs() < 1e-6,
             "k=0 must keep the incumbent objective -1; got {}",
@@ -347,7 +381,9 @@ mod tests {
         let problem = MilpProblem::new(lp, vec![0]).unwrap();
         let cfg = MipConfig::default();
         assert!(
-            run_local_branching(&problem, &[3.0], &cfg, &None, &SolverOptions::default()).is_none(),
+            run_local_branching(&problem, &[3.0], &cfg, &None, &SolverOptions::default())
+                .0
+                .is_none(),
             "local branching requires binary variables"
         );
     }
@@ -365,7 +401,8 @@ mod tests {
         let x_inc = vec![1.0, 0.0, 0.0];
 
         super::super::clear_recorded_sub_mip_configs();
-        let result = run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let (result, _sub_mip_nodes) =
+            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
         let configs = super::super::take_recorded_sub_mip_configs();
 
         assert!(
@@ -402,6 +439,7 @@ mod tests {
                 &Some(past),
                 &SolverOptions::default()
             )
+            .0
             .is_none(),
             "local branching must not run after the deadline"
         );

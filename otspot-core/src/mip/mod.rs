@@ -91,7 +91,10 @@ pub(crate) trait Relaxation {
 
     /// Run the RINS heuristic: fix integer variables where the LP relaxation and
     /// the incumbent agree and solve a sub-MIP over the remaining variables.
-    /// Returns `None` for MIQP (default) or when RINS is disabled.
+    /// Returns `(None, 0)` for MIQP (default) or when RINS is disabled/skipped.
+    /// The `u64` is the sub-MIP's `nodes_processed`, reported whenever a
+    /// sub-MIP solve was actually attempted (independent of whether the
+    /// result was usable) so hidden sub-MIP work is never lost.
     fn run_rins(
         &self,
         _x_lp: &[f64],
@@ -99,34 +102,36 @@ pub(crate) trait Relaxation {
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
         _opts: &SolverOptions,
-    ) -> Option<SolverResult> {
-        None
+    ) -> (Option<SolverResult>, u64) {
+        (None, 0)
     }
 
     /// Run the RENS heuristic: round a node LP relaxation by fixing integral
     /// components and restricting fractional ones to `{floor, ceil}`, then solve
-    /// the small sub-MIP. Returns `None` for MIQP (default) or when disabled.
+    /// the small sub-MIP. Returns `(None, 0)` for MIQP (default) or when
+    /// disabled/skipped. See [`Relaxation::run_rins`] for the `u64` meaning.
     fn run_rens(
         &self,
         _x_lp: &[f64],
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
         _opts: &SolverOptions,
-    ) -> Option<SolverResult> {
-        None
+    ) -> (Option<SolverResult>, u64) {
+        (None, 0)
     }
 
     /// Run the local-branching heuristic: add a Hamming-distance ≤ k cut on the
     /// binary variables around the incumbent and solve the neighborhood sub-MIP.
-    /// Returns `None` for MIQP (default) or when disabled.
+    /// Returns `(None, 0)` for MIQP (default) or when disabled/skipped. See
+    /// [`Relaxation::run_rins`] for the `u64` meaning.
     fn run_local_branching(
         &self,
         _x_inc: &[f64],
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
         _opts: &SolverOptions,
-    ) -> Option<SolverResult> {
-        None
+    ) -> (Option<SolverResult>, u64) {
+        (None, 0)
     }
 }
 
@@ -238,6 +243,37 @@ pub struct MipStats {
     /// (accepted) relaxation result. Zero when `tree_cuts` is off or no cut
     /// improved a node bound.
     pub tree_cut_rounds: usize,
+
+    // --- B&B time attribution (wall-clock microseconds) ---
+    // These, together with `lp_solve_us_total` and `node_propagation_us` above,
+    // are meant to add up to (most of) the search wall clock so that "many
+    // nodes" vs. "expensive per-node heuristics/separation" can be told apart
+    // without re-instrumenting. Measurement only: none of these fields change
+    // solver behaviour.
+    /// Wall-clock microseconds spent in in-tree cut separation (`separate_tree_cuts`).
+    pub tree_cut_us: u64,
+    /// Wall-clock microseconds spent in the RINS heuristic, including its sub-MIP solve.
+    pub rins_us: u64,
+    /// Wall-clock microseconds spent in the RENS heuristic, including its sub-MIP solve.
+    pub rens_us: u64,
+    /// Wall-clock microseconds spent in the local-branching heuristic, including its sub-MIP solve.
+    pub local_branching_us: u64,
+    /// Wall-clock microseconds spent selecting the branching variable
+    /// (`pick_branch_var`), including any strong-branching child solves
+    /// (see `strong_branch_us` for that narrower subset).
+    pub branch_select_us: u64,
+    /// Wall-clock microseconds spent checking/learning conflict clauses.
+    pub conflict_us: u64,
+    /// Wall-clock microseconds of B&B loop overhead not attributed to any
+    /// other named bucket (pruning checks, dive bookkeeping, queue
+    /// operations, node cloning). Computed per node as the residual of that
+    /// node's loop-iteration wall time after subtracting every other
+    /// explicitly measured bucket touched during the same iteration.
+    pub node_loop_other_us: u64,
+    /// Cumulative `nodes_processed` reported by RINS/RENS/local-branching
+    /// sub-MIP solves: branch-and-bound work that is invisible in the outer
+    /// `nodes_processed` count.
+    pub sub_mip_nodes_total: u64,
 }
 
 /// Solve a MILP to (relative) ε-optimality via branch-and-bound.
@@ -676,6 +712,13 @@ fn solve_mip_core<R: Relaxation>(
     let root_bounds = problem.root_bounds().to_vec();
 
     while let Some(mut node) = q.pop() {
+        // Snapshot for `node_loop_other_us`: MipStats is Copy, so this is a
+        // cheap per-iteration baseline. Every named bucket below is measured
+        // by Instant and accumulated into `stats`; `flush_loop_other` at each
+        // exit point below charges whatever wall time this iteration spent
+        // outside those buckets to `node_loop_other_us`.
+        let iter_t0 = Instant::now();
+        let iter_before = stats;
         // --- Stop conditions ---
         if deadline_reached(deadline) {
             open_lb = open_lb.min(node.lower_bound);
@@ -684,6 +727,7 @@ fn solve_mip_core<R: Relaxation>(
             if q.is_diving() {
                 q.end_dive();
             }
+            flush_loop_other(&mut stats, iter_t0, iter_before);
             break;
         }
         if stats.nodes_processed >= cfg.max_nodes {
@@ -693,6 +737,7 @@ fn solve_mip_core<R: Relaxation>(
             if q.is_diving() {
                 q.end_dive();
             }
+            flush_loop_other(&mut stats, iter_t0, iter_before);
             break;
         }
 
@@ -718,12 +763,22 @@ fn solve_mip_core<R: Relaxation>(
                 if q.is_diving() {
                     q.end_dive();
                 }
+                flush_loop_other(&mut stats, iter_t0, iter_before);
                 continue;
             }
         }
-        if node.depth > 0 && conflicts.is_conflicted(&node.var_bounds) {
+        let conflict_check_t0 = Instant::now();
+        let node_is_conflicted = node.depth > 0 && conflicts.is_conflicted(&node.var_bounds);
+        stats.conflict_us = stats.conflict_us.saturating_add(
+            conflict_check_t0
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+        );
+        if node_is_conflicted {
             stats.pruned += 1;
             stats.conflict_pruned += 1;
+            flush_loop_other(&mut stats, iter_t0, iter_before);
             continue;
         }
 
@@ -748,6 +803,7 @@ fn solve_mip_core<R: Relaxation>(
                     );
                     stats.pruned += 1;
                     stats.propagation_pruned += 1;
+                    flush_loop_other(&mut stats, iter_t0, iter_before);
                     continue;
                 }
             }
@@ -811,8 +867,14 @@ fn solve_mip_core<R: Relaxation>(
                 if q.is_diving() {
                     q.end_dive();
                 }
+                let learn_t0 = Instant::now();
                 conflicts.learn(&node.var_bounds, &root_bounds);
+                stats.conflict_us =
+                    stats.conflict_us.saturating_add(
+                        learn_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+                    );
                 stats.conflict_clauses_learned = conflicts.len();
+                flush_loop_other(&mut stats, iter_t0, iter_before);
                 continue;
             }
             SolveStatus::Unbounded => {
@@ -820,6 +882,7 @@ fn solve_mip_core<R: Relaxation>(
                 if q.is_diving() {
                     q.end_dive();
                 }
+                flush_loop_other(&mut stats, iter_t0, iter_before);
                 break;
             }
             SolveStatus::Timeout => {
@@ -829,6 +892,7 @@ fn solve_mip_core<R: Relaxation>(
                 if q.is_diving() {
                     q.end_dive();
                 }
+                flush_loop_other(&mut stats, iter_t0, iter_before);
                 break;
             }
             _ => {}
@@ -836,14 +900,19 @@ fn solve_mip_core<R: Relaxation>(
 
         // --- In-tree cut separation (gated; MILP overrides, MIQP no-op) ---
         if cfg.tree_cuts && matches!(res.status, SolveStatus::Optimal) && !res.solution.is_empty() {
-            if let Some(improved) = problem.separate_tree_cuts(
+            let tree_cut_t0 = Instant::now();
+            let separated = problem.separate_tree_cuts(
                 solve_bounds,
                 &res,
                 &mask,
                 &node_options,
                 node.depth,
                 stats.nodes_processed,
-            ) {
+            );
+            stats.tree_cut_us = stats
+                .tree_cut_us
+                .saturating_add(tree_cut_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+            if let Some(improved) = separated {
                 stats.tree_cut_rounds += 1;
                 res = improved;
             }
@@ -872,6 +941,7 @@ fn solve_mip_core<R: Relaxation>(
                 if end_dive && q.is_diving() {
                     q.end_dive();
                 }
+                flush_loop_other(&mut stats, iter_t0, iter_before);
                 continue;
             }
             NodeAction::OpenLb {
@@ -887,6 +957,7 @@ fn solve_mip_core<R: Relaxation>(
                 if end_dive && q.is_diving() {
                     q.end_dive();
                 }
+                flush_loop_other(&mut stats, iter_t0, iter_before);
                 continue;
             }
             NodeAction::PushChildren {
@@ -917,6 +988,7 @@ fn solve_mip_core<R: Relaxation>(
                         q.push(node.child(up, node_lb));
                     }
                 }
+                flush_loop_other(&mut stats, iter_t0, iter_before);
             }
         }
     }
@@ -1048,6 +1120,46 @@ fn accumulate_node_stats(
     }
 }
 
+/// Charge the wall time elapsed since `iter_t0` that is not already
+/// attributed to any other named `MipStats` bucket touched during this B&B
+/// loop iteration to `node_loop_other_us`.
+///
+/// `before` is a per-iteration snapshot (`MipStats` is `Copy`) taken at the
+/// top of the loop; every field compared here is only ever grown via
+/// `saturating_add` within an iteration, so the deltas are non-negative by
+/// construction. This is a "self time" computation (total iteration time
+/// minus the time already booked to named children), not a global residual
+/// against the whole search wall clock, so it stays meaningful even though
+/// several of its subtrahends (tree_cut_us, rins_us, ...) are simultaneously
+/// new Phase 0 counters.
+fn flush_loop_other(stats: &mut MipStats, iter_t0: Instant, before: MipStats) {
+    let iter_us = iter_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+    let relax_delta_us = ((stats.relaxation_time_total_ms - before.relaxation_time_total_ms)
+        * 1_000.0)
+        .max(0.0) as u64;
+    let attributed = stats
+        .node_propagation_us
+        .saturating_sub(before.node_propagation_us)
+        .saturating_add(relax_delta_us)
+        .saturating_add(stats.tree_cut_us.saturating_sub(before.tree_cut_us))
+        .saturating_add(stats.rins_us.saturating_sub(before.rins_us))
+        .saturating_add(stats.rens_us.saturating_sub(before.rens_us))
+        .saturating_add(
+            stats
+                .local_branching_us
+                .saturating_sub(before.local_branching_us),
+        )
+        .saturating_add(
+            stats
+                .branch_select_us
+                .saturating_sub(before.branch_select_us),
+        )
+        .saturating_add(stats.conflict_us.saturating_sub(before.conflict_us));
+    stats.node_loop_other_us = stats
+        .node_loop_other_us
+        .saturating_add(iter_us.saturating_sub(attributed));
+}
+
 /// Select the variable to branch on for an Optimal relaxation solution.
 ///
 /// With `use_reliability`, runs strong-branching trials for candidates with
@@ -1132,7 +1244,13 @@ fn try_rins<R: Relaxation>(
             None => return,
         };
         stats.rins_calls += 1;
-        problem.run_rins(rel_sol, inc_sol, cfg, deadline, opts)
+        let rins_t0 = Instant::now();
+        let (res, sub_mip_nodes) = problem.run_rins(rel_sol, inc_sol, cfg, deadline, opts);
+        stats.rins_us = stats
+            .rins_us
+            .saturating_add(rins_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+        stats.sub_mip_nodes_total = stats.sub_mip_nodes_total.saturating_add(sub_mip_nodes);
+        res
     };
     if let Some(res) = rins_res {
         if state.consider(&res) {
@@ -1175,7 +1293,13 @@ fn try_rens<R: Relaxation>(
         return;
     }
     stats.rens_calls += 1;
-    if let Some(res) = problem.run_rens(rel_sol, cfg, deadline, opts) {
+    let rens_t0 = Instant::now();
+    let (rens_res, sub_mip_nodes) = problem.run_rens(rel_sol, cfg, deadline, opts);
+    stats.rens_us = stats
+        .rens_us
+        .saturating_add(rens_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+    stats.sub_mip_nodes_total = stats.sub_mip_nodes_total.saturating_add(sub_mip_nodes);
+    if let Some(res) = rens_res {
         if state.consider(&res) {
             stats.incumbent_updates += 1;
             stats.rens_improvements += 1;
@@ -1206,7 +1330,13 @@ fn try_local_branching<R: Relaxation>(
             None => return,
         };
         stats.local_branching_calls += 1;
-        problem.run_local_branching(inc_sol, cfg, deadline, opts)
+        let lb_t0 = Instant::now();
+        let (res, sub_mip_nodes) = problem.run_local_branching(inc_sol, cfg, deadline, opts);
+        stats.local_branching_us = stats
+            .local_branching_us
+            .saturating_add(lb_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+        stats.sub_mip_nodes_total = stats.sub_mip_nodes_total.saturating_add(sub_mip_nodes);
+        res
     };
     if let Some(res) = lb_res {
         if state.consider(&res) {
@@ -1314,6 +1444,7 @@ fn process_node_outcome<R: Relaxation>(
         }
 
         // Select branching variable and compute child bounds.
+        let branch_select_t0 = Instant::now();
         let jb = pick_branch_var(
             problem,
             &node.var_bounds,
@@ -1329,6 +1460,12 @@ fn process_node_outcome<R: Relaxation>(
             pc,
             stats,
             use_reliability,
+        );
+        stats.branch_select_us = stats.branch_select_us.saturating_add(
+            branch_select_t0
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
         );
         let (down, up) = branch_bounds(&node.var_bounds, jb, res.solution[jb]);
         let child_ws = res.warm_start_basis.clone();
