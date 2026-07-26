@@ -4,6 +4,14 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+- LP presolveを`SolverOptions::presolve_max_pass`(既定10→**50**、netlib/Maros実測の最大
+  必要パス数9 [mondou2] に約5倍の余裕)で打ち切るよう是正。従来はLP driverだけ
+  `usize::MAX`を渡しており、この設定が事実上無視されていた。上限に到達して打ち切った場合
+  `PresolveResult::pass_limit_hit` / `QpPresolveResult::pass_limit_hit`(新規フィールド)
+  が`true`になり、`log::warn!`でも通知する
+- `presolve_max_pass = 0`を「presolveの反復簡約ループを無効化する」意図された挙動として
+  明文化(LP/QPで一貫)。`presolve = false`(presolve全体の無効化)とは別の契約であり、0
+  でも周辺処理(state構築、QPのfinalize/Ruizスケーリング)は通常どおり動く
 - solver基盤のうちsparse/linalg/KKT backendを`otspot-num`crateへ物理分離。旧公開パスは
   re-exportで維持
 - LP/QP presolveが共有するfixpoint制御(`run_fixpoint`)を`otspot-num`へ共通化。transform

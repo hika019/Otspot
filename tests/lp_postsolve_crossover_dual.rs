@@ -67,7 +67,7 @@ fn pilot_ja_postsolve_dual_is_feasible() {
         "pilot-ja reduced LP must solve before postsolve can be blamed"
     );
 
-    let lifted = presolve::postsolve::run_postsolve(&raw, &presolved, &prob, None, false);
+    let lifted = presolve::postsolve::run_postsolve(&raw, &presolved, &prob, None);
     eprintln!(
         "pilot-ja[postsolve]: status={:?} obj={:.6e} dfeas={:?}",
         lifted.status, lifted.objective, lifted.postsolve_dfeas

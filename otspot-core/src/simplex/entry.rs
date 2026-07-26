@@ -51,6 +51,26 @@ pub(crate) fn solve(problem: &LpProblem) -> SolverResult {
     solve_with(problem, &SolverOptions::default())
 }
 
+/// Bare `SolverResult` for a presolve-detected `Infeasible`/`Unbounded`
+/// short-circuit: no solve was attempted, so every solution vector stays
+/// empty and only `timing_breakdown.presolve_us` is meaningful.
+fn presolve_status_result(status: SolveStatus, objective: f64, presolve_us: u64) -> SolverResult {
+    SolverResult {
+        status,
+        objective,
+        solution: vec![],
+        dual_solution: vec![],
+        reduced_costs: vec![],
+        slack: vec![],
+        warm_start_basis: None,
+        timing_breakdown: Some(crate::problem::TimingBreakdown {
+            presolve_us,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// Solve an LP with the supplied options. When `options.presolve` is set,
 /// presolve runs before the simplex.
 ///
@@ -87,40 +107,26 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
     let mut non_reduced_presolve_us: Option<u64> = None;
 
     if options.presolve {
-        match presolve::run_presolve(problem, options.deadline) {
+        match presolve::run_presolve_with_flags(
+            problem,
+            options.deadline,
+            options.presolve_max_pass,
+            options.cancel_flag.as_deref(),
+            presolve::PresolveFlags::default(),
+        ) {
             Err(presolve::PresolveStatus::Infeasible) => {
-                let presolve_us = prof_t0.elapsed().as_micros() as u64;
-                return SolverResult {
-                    status: SolveStatus::Infeasible,
-                    objective: f64::INFINITY,
-                    solution: vec![],
-                    dual_solution: vec![],
-                    reduced_costs: vec![],
-                    slack: vec![],
-                    warm_start_basis: None,
-                    timing_breakdown: Some(crate::problem::TimingBreakdown {
-                        presolve_us,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                };
+                return presolve_status_result(
+                    SolveStatus::Infeasible,
+                    f64::INFINITY,
+                    prof_t0.elapsed().as_micros() as u64,
+                );
             }
             Err(presolve::PresolveStatus::Unbounded) => {
-                let presolve_us = prof_t0.elapsed().as_micros() as u64;
-                return SolverResult {
-                    status: SolveStatus::Unbounded,
-                    objective: f64::NEG_INFINITY,
-                    solution: vec![],
-                    dual_solution: vec![],
-                    reduced_costs: vec![],
-                    slack: vec![],
-                    warm_start_basis: None,
-                    timing_breakdown: Some(crate::problem::TimingBreakdown {
-                        presolve_us,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                };
+                return presolve_status_result(
+                    SolveStatus::Unbounded,
+                    f64::NEG_INFINITY,
+                    prof_t0.elapsed().as_micros() as u64,
+                );
             }
             Ok(presolve_result) if presolve_result.was_reduced => {
                 // Presolve renumbers variables, so a supplied warm_start is invalidated.
@@ -249,8 +255,8 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     &presolve_result,
                     problem,
                     eff_opts.deadline,
-                    options.recover_warm_start_basis,
                 );
+                crate::simplex::apply_recovered_warm_start_basis(&mut res, problem, options);
                 // Postsolve lifts the solution to original space but says nothing
                 // about how the reduced problem was solved; keep the solve metadata
                 // (bounded_eq_ub_path etc.), mirroring lp_dispatch's lifted.stats.

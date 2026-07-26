@@ -17,6 +17,9 @@ solver algorithms (`otspot-core`) ──→ numerics (`otspot-num`)
   (singleton row、bounds tightening 等) はここに同居し、共有するのはfixpointの
   制御セマンティクスのみ — 住所は `otspot-num` に一本化する。旧 `sparse`/`linalg`
   パスは `otspot-num` の互換re-export。
+  Ruiz均衡化 (`presolve/scaling.rs`、`conic/equil.rs`、`otspot-num/linalg/ruiz.rs`)
+  の sweep ループは対象外: 固定回数上限 + スカラー収束閾値 (`bool` 変化シグナルでは
+  ない) で `run_fixpoint` の契約と形が異なり、統一しない。
 
 未publishの間に本番呼び出しゼロだった統一IR (`otspot-ir`、`solve_ir`アダプタ) は
 撤去済み。presolve orchestration専用crateだった `otspot-presolve` も解体し、

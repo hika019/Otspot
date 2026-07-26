@@ -114,6 +114,8 @@ impl LpEquilibration {
         let mut cur_b = b.to_vec();
         let mut cur_c = c.to_vec();
 
+        // Not unified with `otspot_num::run_fixpoint` (see docs/architecture.md):
+        // scalar convergence threshold, not a bool "changed" signal.
         for _ in 0..LP_RUIZ_MAX_SWEEPS {
             if expired(deadline) {
                 return None;

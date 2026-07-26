@@ -390,6 +390,7 @@ fn fix_to_ub(st: &mut PresolveState, j: usize) -> Result<bool, PresolveStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::DEFAULT_PRESOLVE_MAX_PASS;
     use crate::presolve::transforms::{run_presolve_with_flags, PresolveFlags};
     use crate::problem::{ConstraintType, LpProblem};
     use otspot_num::sparse::CscMatrix;
@@ -423,9 +424,18 @@ mod tests {
             vec![ConstraintType::Eq, ConstraintType::Eq],
             vec![(0.0, 5.0), (0.0, 5.0)],
         );
-        let with_flags = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let with_flags = run_presolve_with_flags(
+            &lp,
+            None,
+            DEFAULT_PRESOLVE_MAX_PASS,
+            None,
+            PresolveFlags::default(),
+        )
+        .unwrap();
         let without = run_presolve_with_flags(
             &lp,
+            None,
+            DEFAULT_PRESOLVE_MAX_PASS,
             None,
             PresolveFlags {
                 enable_parallel_row: false,
@@ -459,7 +469,13 @@ mod tests {
             vec![(0.0, 5.0), (0.0, 5.0)],
         );
         assert!(matches!(
-            run_presolve_with_flags(&lp, None, PresolveFlags::default()),
+            run_presolve_with_flags(
+                &lp,
+                None,
+                DEFAULT_PRESOLVE_MAX_PASS,
+                None,
+                PresolveFlags::default()
+            ),
             Err(PresolveStatus::Infeasible)
         ));
     }
@@ -478,7 +494,14 @@ mod tests {
             vec![ConstraintType::Le, ConstraintType::Le],
             vec![(0.0, 10.0), (0.0, 10.0)],
         );
-        let result = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let result = run_presolve_with_flags(
+            &lp,
+            None,
+            DEFAULT_PRESOLVE_MAX_PASS,
+            None,
+            PresolveFlags::default(),
+        )
+        .unwrap();
         // The looser of the two Le rows must be removed by Step 9.
         // (Step 4 with finite bounds may further compress, but at least one row goes.)
         assert!(
@@ -503,7 +526,14 @@ mod tests {
             vec![ConstraintType::Le],
             vec![(0.0, 5.0), (0.0, 5.0)],
         );
-        let result = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let result = run_presolve_with_flags(
+            &lp,
+            None,
+            DEFAULT_PRESOLVE_MAX_PASS,
+            None,
+            PresolveFlags::default(),
+        )
+        .unwrap();
         assert_eq!(result.reduced_problem.num_vars, 0);
         assert!((result.obj_offset).abs() < 1e-10);
     }
@@ -523,7 +553,14 @@ mod tests {
             vec![ConstraintType::Ge],
             vec![(0.0, 4.0)],
         );
-        let result = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let result = run_presolve_with_flags(
+            &lp,
+            None,
+            DEFAULT_PRESOLVE_MAX_PASS,
+            None,
+            PresolveFlags::default(),
+        )
+        .unwrap();
         assert_eq!(result.reduced_problem.num_vars, 0);
         assert!(
             (result.obj_offset + 4.0).abs() < 1e-10,
@@ -548,7 +585,13 @@ mod tests {
             vec![(f64::NEG_INFINITY, f64::INFINITY)],
         );
         assert!(matches!(
-            run_presolve_with_flags(&lp, None, PresolveFlags::default()),
+            run_presolve_with_flags(
+                &lp,
+                None,
+                DEFAULT_PRESOLVE_MAX_PASS,
+                None,
+                PresolveFlags::default()
+            ),
             Err(PresolveStatus::Unbounded)
         ));
     }
@@ -576,7 +619,14 @@ mod tests {
             vec![ConstraintType::Eq],
             vec![(0.0, 5.0); 3],
         );
-        let result = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let result = run_presolve_with_flags(
+            &lp,
+            None,
+            DEFAULT_PRESOLVE_MAX_PASS,
+            None,
+            PresolveFlags::default(),
+        )
+        .unwrap();
         // All three vars must survive — Step 11 must not collapse them.
         assert_eq!(
             result.reduced_problem.num_vars, 3,
@@ -605,7 +655,14 @@ mod tests {
             vec![ConstraintType::Le],
             vec![(0.0, f64::INFINITY), (0.0, 5.0)],
         );
-        let with_flags = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let with_flags = run_presolve_with_flags(
+            &lp,
+            None,
+            DEFAULT_PRESOLVE_MAX_PASS,
+            None,
+            PresolveFlags::default(),
+        )
+        .unwrap();
         // x_1 (col 1) must be eliminated by dominated-col + Step 1 fix.
         assert!(
             with_flags.col_map[1].is_none(),
@@ -630,11 +687,25 @@ mod tests {
             vec![ConstraintType::Le, ConstraintType::Le],
             vec![(0.0, f64::INFINITY); 3],
         );
-        let off = run_presolve_with_flags(&lp, None, PresolveFlags::all_off()).unwrap();
+        let off = run_presolve_with_flags(
+            &lp,
+            None,
+            DEFAULT_PRESOLVE_MAX_PASS,
+            None,
+            PresolveFlags::all_off(),
+        )
+        .unwrap();
         assert_eq!(off.reduced_problem.num_constraints, 2);
         assert_eq!(off.reduced_problem.num_vars, 3);
 
-        let on = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let on = run_presolve_with_flags(
+            &lp,
+            None,
+            DEFAULT_PRESOLVE_MAX_PASS,
+            None,
+            PresolveFlags::default(),
+        )
+        .unwrap();
         // With Step 11 dual-fixing (c=1>0, all a≥0 in Le ⇒ pos pressure) all
         // vars collapse to lb=0; remaining rows then become empty redundancies.
         assert_eq!(on.reduced_problem.num_vars, 0);

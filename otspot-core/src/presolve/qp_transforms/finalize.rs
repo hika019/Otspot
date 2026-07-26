@@ -12,6 +12,7 @@ pub(super) fn build_result(
     prob: &QpProblem,
     opts: &SolverOptions,
     mut ws: Workspace,
+    pass_limit_hit: bool,
 ) -> QpPresolveResult {
     let n = prob.num_vars;
     let m = prob.num_constraints;
@@ -116,6 +117,7 @@ pub(super) fn build_result(
         is_diagonal_q: detected_diagonal_q,
         block_components: detected_block_components,
         ruiz_scaler: ruiz_scaler_opt,
+        pass_limit_hit,
     }
 }
 
@@ -279,6 +281,7 @@ mod tests {
             &prob,
             &SolverOptions::default(),
             Workspace::from_problem(&prob),
+            false,
         );
 
         assert!(!result.was_reduced);
@@ -294,6 +297,7 @@ mod tests {
             &prob,
             &SolverOptions::default(),
             Workspace::from_problem(&prob),
+            false,
         );
 
         assert!(!result.was_reduced);

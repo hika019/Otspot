@@ -506,7 +506,12 @@ pub struct SolverOptions {
     pub use_lp_crash_basis: bool,
     /// Enable presolve.  Default: `true`.
     pub presolve: bool,
-    /// Maximum fixpoint passes in QP presolve.  Default: `10`.
+    /// Maximum fixpoint passes in LP and QP presolve.  Default: `50`.
+    /// `0` intentionally disables the iterative reduction loop (steps 1..N
+    /// never run) while leaving surrounding presolve machinery (state
+    /// construction, QP's finalize/Ruiz-scaling pass) untouched — a distinct,
+    /// documented contract from `presolve = false`, which skips presolve
+    /// entirely.
     pub presolve_max_pass: usize,
     /// Enable QP presolve phase 2.  Default: `true`.
     pub presolve_phase2: bool,
@@ -563,8 +568,18 @@ const MAX_ETAS_DIVISOR: usize = 50;
 /// Minimum value for `default_max_etas`.
 const MAX_ETAS_FLOOR: usize = 20;
 
-/// Default maximum fixpoint passes for QP presolve.
-pub(crate) const DEFAULT_PRESOLVE_MAX_PASS: usize = 10;
+/// Default maximum fixpoint passes for LP and QP presolve.
+///
+/// Netlib/Maros-Meszaros corpus measurement: the most passes any problem
+/// needed to reach a stable fixpoint was 9 (mondou2). 50 gives ~5x headroom
+/// over that observed maximum; raising the cap is free when a problem
+/// converges early (the fixpoint loop exits as soon as a pass makes no
+/// further change), so this only matters for genuinely slow-converging
+/// inputs, where it now gets the chance to actually reach the fixpoint
+/// instead of being cut off. `PresolveResult::pass_limit_hit` /
+/// `QpPresolveResult::pass_limit_hit` (plus a `log::warn!`) flag it loudly
+/// whenever the cap is still the reason a presolve run stopped.
+pub(crate) const DEFAULT_PRESOLVE_MAX_PASS: usize = 50;
 
 /// Auto-compute `max_etas` from problem size.
 ///

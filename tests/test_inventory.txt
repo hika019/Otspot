@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2941 testcases, 26 ignored
+# totals: 2960 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -350,6 +350,7 @@ otspot-core	mip::presolve::tests::probing_no_integer_vars_propagation_still_runs
 otspot-core	mip::presolve::tests::probing_returns_summary_on_trivial_instance	active
 otspot-core	mip::presolve::tests::probing_skips_non_binary_integer_vars	active
 otspot-core	mip::presolve::tests::probing_tightens_integer_var_via_envelope	active
+otspot-core	mip::presolve::tests::propagation_round_count_matches_hand_derivation	active
 otspot-core	mip::presolve::tests::tolerance_aware_floor_retains_boundary_integer	active
 otspot-core	mip::presolve::tests::two_var_le_tightens_both_ubs	active
 otspot-core	mip::problem::tests::empty_integer_vars_allowed	active
@@ -533,13 +534,6 @@ otspot-core	presolve::postsolve::recover_removed_row_dual_tests::nonbinding_le_r
 otspot-core	presolve::postsolve::recover_removed_row_dual_tests::run_postsolve_preserves_timeout_incumbent_without_dual	active
 otspot-core	presolve::postsolve::recover_removed_row_dual_tests::run_postsolve_rejects_short_reduced_dual	active
 otspot-core	presolve::postsolve::recover_removed_row_dual_tests::run_postsolve_rejects_short_reduced_solution	active
-otspot-core	presolve::postsolve::warm_basis_recovery_tests::default_skips_warm_basis_recovery	active
-otspot-core	presolve::postsolve::warm_basis_recovery_tests::non_reducible_basis_independent_of_recovery_flag	active
-otspot-core	presolve::postsolve::warm_basis_recovery_tests::noop_proof_returns_none_fails_round_trip	active
-otspot-core	presolve::postsolve::warm_basis_recovery_tests::warm_basis_from_dual_fixed_lp	active
-otspot-core	presolve::postsolve::warm_basis_recovery_tests::warm_basis_from_non_reducible_lp	active
-otspot-core	presolve::postsolve::warm_basis_recovery_tests::warm_basis_from_singleton_row_lp	active
-otspot-core	presolve::postsolve::warm_basis_recovery_tests::warm_basis_includes_active_variables	active
 otspot-core	presolve::qp_phase2::tests::equality_constraint_qr_runs_at_boundary_m_eq_2n_plus_1	active
 otspot-core	presolve::qp_phase2::tests::equality_constraint_qr_skip_at_boundary_m_eq_2n	active
 otspot-core	presolve::qp_phase2::tests::failed_constraint_rebuild_keeps_phase1_problem_intact	active
@@ -561,6 +555,9 @@ otspot-core	presolve::qp_postsolve::tests::test_sentinel_c1_boundary_col_needs_b
 otspot-core	presolve::qp_postsolve::tests::test_sentinel_c3_near_singular_pivot_skipped	active
 otspot-core	presolve::qp_postsolve::tests::test_sentinel_ge_singleton_sign_projected	active
 otspot-core	presolve::qp_postsolve::tests::test_sentinel_le_singleton_sign_projected	active
+otspot-core	presolve::qp_transforms::driver::per_step_control_tests::full_pass_duration_is_comfortably_above_the_test_deadline	active
+otspot-core	presolve::qp_transforms::driver::per_step_control_tests::no_interrupt_runs_all_steps_of_one_pass	active
+otspot-core	presolve::qp_transforms::driver::per_step_control_tests::real_deadline_stops_pass_before_all_steps_run_via_run_step	active
 otspot-core	presolve::qp_transforms::finalize::tests::failed_large_coeff_model_rebuild_does_not_push_postsolve_step	active
 otspot-core	presolve::qp_transforms::finalize::tests::invalid_a_rebuild_rolls_back_instead_of_substituting_zero_matrix	active
 otspot-core	presolve::qp_transforms::finalize::tests::invalid_q_rebuild_rolls_back_instead_of_substituting_zero_matrix	active
@@ -576,6 +573,7 @@ otspot-core	presolve::qp_transforms::tests::test_ge_constraint_redundant_removal
 otspot-core	presolve::qp_transforms::tests::test_ge_constraint_singleton_absorbed_by_step9	active
 otspot-core	presolve::qp_transforms::tests::test_kahan_add_eliminates_sequential_accumulation_error	active
 otspot-core	presolve::qp_transforms::tests::test_no_reduction	active
+otspot-core	presolve::qp_transforms::tests::test_presolve_max_pass_0_disables_iterative_loop_but_finalize_still_runs	active
 otspot-core	presolve::qp_transforms::tests_per_step::col_has_structural_q_detects_micro_and_explicit_zero	active
 otspot-core	presolve::qp_transforms::tests_per_step::count_block_components_micro_offdiag_couples_variables	active
 otspot-core	presolve::qp_transforms::tests_per_step::early_check_does_not_flag_bounded_empty_cols	active
@@ -619,6 +617,12 @@ otspot-core	presolve::scaling::tests::test_ruiz_scale_identity	active
 otspot-core	presolve::scaling::tests::test_ruiz_scale_unbalanced	active
 otspot-core	presolve::transforms::driver::failure_tests::invalid_rebuild_rolls_back_instead_of_substituting_zero_matrix	active
 otspot-core	presolve::transforms::driver::failure_tests::invalid_reduced_model_rolls_back_without_leaking_postsolve_state	active
+otspot-core	presolve::transforms::driver::per_step_control_tests::full_pass_duration_is_comfortably_above_the_test_deadline	active
+otspot-core	presolve::transforms::driver::per_step_control_tests::no_interrupt_runs_all_steps_of_one_pass	active
+otspot-core	presolve::transforms::driver::per_step_control_tests::pass_limit_hit_true_when_nonzero_budget_exhausted	active
+otspot-core	presolve::transforms::driver::per_step_control_tests::presolve_max_pass_0_disables_the_iterative_loop	active
+otspot-core	presolve::transforms::driver::per_step_control_tests::presolve_max_pass_1_stops_after_first_pass	active
+otspot-core	presolve::transforms::driver::per_step_control_tests::real_deadline_stops_pass_before_all_steps_run_via_run_step	active
 otspot-core	presolve::transforms::tests::presolve_doubleton_dual_recovery_eq_le	active
 otspot-core	presolve::transforms::tests::presolve_doubleton_eq_basic	active
 otspot-core	presolve::transforms::tests::presolve_doubleton_eq_infeasible	active
@@ -1047,6 +1051,7 @@ otspot-core	qp::lp_dispatch::tests::parallel_solve_stats_independent	active
 otspot-core	qp::lp_dispatch::tests::postsolved_lp_retry_gate_keys_on_requested_accuracy	active
 otspot-core	qp::lp_dispatch::tests::postsolved_lp_retry_gate_treats_max_iterations_like_stalled	active
 otspot-core	qp::lp_dispatch::tests::presolve_timeout_solution_never_leaks_reduced_space_in_qp_path	active
+otspot-core	qp::lp_dispatch::tests::qp_forwarded_to_lp_recovers_warm_start_basis_after_presolve_reduction	active
 otspot-core	qp::lp_dispatch::tests::qp_zero_path_expired_deadline_after_presolve_returns_timeout	active
 otspot-core	qp::lp_dispatch::tests::qp_zero_path_nonreducing_presolve_keeps_outer_presolve_timing	active
 otspot-core	qp::lp_dispatch::tests::qp_zero_path_presolve_reduces_before_ipm_dispatch	active
@@ -1581,6 +1586,17 @@ otspot-core	simplex::tests_bounded_form::wrap_to_legacy_matches_build_standard_f
 otspot-core	simplex::tests_bounded_form::wrap_to_legacy_matches_build_standard_form_mixed	active
 otspot-core	simplex::tests_dual_advanced::test_dual_advanced_warm_start_larger_rhs_nonreducible	active
 otspot-core	simplex::tests_dual_advanced::test_dual_advanced_warm_start_rhs_change_nonreducible	active
+otspot-core	simplex::warm_start::tests::crash_needing_artificial_returns_none	active
+otspot-core	simplex::warm_start::tests::mismatched_solution_length_returns_none	active
+otspot-core	simplex::warm_start::tests::recovers_well_formed_basis_for_trivial_lp	active
+otspot-core	simplex::warm_start::tests::refinement_pivots_active_variable_into_at_bound_slack_row	active
+otspot-core	simplex::warm_start::warm_basis_recovery_tests::default_skips_warm_basis_recovery	active
+otspot-core	simplex::warm_start::warm_basis_recovery_tests::non_reducible_basis_independent_of_recovery_flag	active
+otspot-core	simplex::warm_start::warm_basis_recovery_tests::noop_proof_returns_none_fails_round_trip	active
+otspot-core	simplex::warm_start::warm_basis_recovery_tests::warm_basis_from_dual_fixed_lp	active
+otspot-core	simplex::warm_start::warm_basis_recovery_tests::warm_basis_from_non_reducible_lp	active
+otspot-core	simplex::warm_start::warm_basis_recovery_tests::warm_basis_from_singleton_row_lp	active
+otspot-core	simplex::warm_start::warm_basis_recovery_tests::warm_basis_includes_active_variables	active
 otspot-core	test_kkt::no_op_proof_tests::assert_solver_invariants_lp_panics_on_bound_violation	active
 otspot-core	test_kkt::no_op_proof_tests::assert_solver_invariants_lp_panics_on_dual_sign_violation	active
 otspot-core	test_kkt::no_op_proof_tests::assert_solver_invariants_lp_panics_on_primal_violation	active
@@ -2339,6 +2355,9 @@ otspot-num	linalg::ruiz::tests::dual_residual_unscale_factor_is_c_times_d	active
 otspot-num	linalg::ruiz::tests::scale_unscale_round_trip_identity	active
 otspot-num	linalg::ruiz::tests::test_ruiz_scaler_identity	active
 otspot-num	pipeline::tests::honors_pass_limit	active
+otspot-num	pipeline::tests::run_step_executes_when_not_interrupted	active
+otspot-num	pipeline::tests::run_step_propagates_step_error	active
+otspot-num	pipeline::tests::run_step_skips_without_executing_when_interrupted	active
 otspot-num	pipeline::tests::stops_at_fixpoint	active
 otspot-num	sparse::compress::tests::test_duplicates_accumulated	active
 otspot-num	sparse::compress::tests::test_duplicates_cancel_to_zero_dropped	active

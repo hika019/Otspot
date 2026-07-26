@@ -43,6 +43,8 @@ impl RuizScaler {
         let m = a.nrows;
         const EPS: f64 = 1e-6;
 
+        // Not unified with `run_fixpoint` (see docs/architecture.md): fixed
+        // sweep count derived from f64 precision, not a bool "changed" signal.
         for _iter in 0..RuizScaler::RUIZ_SWEEPS {
             // Step 1: 行ノルム正規化 (b を含む)
             if m > 0 {

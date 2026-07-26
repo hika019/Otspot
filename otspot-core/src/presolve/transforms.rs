@@ -1,6 +1,7 @@
 //! LP presolve: collects 12 reductions and the inverse metadata for postsolve.
 //!
-//! Fixpoint loop over `MAX_PRESOLVE_ITER` passes of:
+//! Fixpoint loop (shared `otspot_num::run_fixpoint`) over up to
+//! `SolverOptions::presolve_max_pass` passes of:
 //! 1. Fixed variable (lb == ub)
 //! 2. Singleton row (Eq / Le / Ge) → variable value or bound tightening
 //!    2b. Forcing row (activity-tight → fix all vars)

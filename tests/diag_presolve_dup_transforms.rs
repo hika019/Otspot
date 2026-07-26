@@ -41,6 +41,13 @@ fn flags_only(parallel: bool, dup: bool, dual: bool) -> PresolveFlags {
     }
 }
 
+/// `DEFAULT_PRESOLVE_MAX_PASS` is `pub(crate)` inside `otspot_core`; read the
+/// same default via the public `SolverOptions` field instead of duplicating
+/// the literal here.
+fn default_max_pass() -> usize {
+    SolverOptions::default().presolve_max_pass
+}
+
 fn solve_and_check(lp: &LpProblem, expected_obj: f64, label: &str) {
     let mut opts = SolverOptions::default();
     opts.presolve = true;
@@ -153,8 +160,22 @@ fn parallel_row_le_multi_pattern_reduces() {
             vec![ConstraintType::Le, ConstraintType::Le],
             vec![(0.0, f64::INFINITY); n],
         );
-        let on = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
-        let off = run_presolve_with_flags(&lp, None, flags_only(false, false, false)).unwrap();
+        let on = run_presolve_with_flags(
+            &lp,
+            None,
+            default_max_pass(),
+            None,
+            PresolveFlags::default(),
+        )
+        .unwrap();
+        let off = run_presolve_with_flags(
+            &lp,
+            None,
+            default_max_pass(),
+            None,
+            flags_only(false, false, false),
+        )
+        .unwrap();
         assert!(
             on.reduced_problem.num_constraints < off.reduced_problem.num_constraints
                 || on.reduced_problem.num_constraints == 0,
@@ -199,7 +220,13 @@ fn parallel_row_eq_inconsistent_infeasible_multi_pattern() {
             vec![ConstraintType::Eq, ConstraintType::Eq],
             vec![(0.0, 10.0); n],
         );
-        let res = run_presolve_with_flags(&lp, None, PresolveFlags::default());
+        let res = run_presolve_with_flags(
+            &lp,
+            None,
+            default_max_pass(),
+            None,
+            PresolveFlags::default(),
+        );
         assert!(
             matches!(res, Err(PresolveStatus::Infeasible)),
             "[idx={}] expected Infeasible, got Err={:?}",
@@ -293,7 +320,14 @@ fn dominated_col_multi_pattern_reduces() {
             vec![ConstraintType::Le; m],
             vec![(0.0, f64::INFINITY), (0.0, 10.0)],
         );
-        let on = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let on = run_presolve_with_flags(
+            &lp,
+            None,
+            default_max_pass(),
+            None,
+            PresolveFlags::default(),
+        )
+        .unwrap();
         // The dominated col (1) must be eliminated.
         // (Dual fixing might ALSO fix col 0 because c_cheap > 0 and all a ≥ 0
         // in Le rows — that's fine: at least col 1 must go.)
@@ -324,7 +358,14 @@ fn dominated_col_unsafe_when_partner_bounded_above() {
         vec![ConstraintType::Le],
         vec![(0.0, 5.0), (0.0, f64::INFINITY)],
     );
-    let only_dup = run_presolve_with_flags(&lp, None, flags_only(false, true, false)).unwrap();
+    let only_dup = run_presolve_with_flags(
+        &lp,
+        None,
+        default_max_pass(),
+        None,
+        flags_only(false, true, false),
+    )
+    .unwrap();
     // Step 10 alone (parallel-row off, dual-fixing off) must not eliminate
     // col 1 because the partner (col 0) cannot absorb extra z.
     assert!(
@@ -420,8 +461,22 @@ fn dual_fixing_pos_cost_multi_pattern() {
             vec![*ct; m],
             vec![(0.0, f64::INFINITY); n],
         );
-        let on = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
-        let off = run_presolve_with_flags(&lp, None, flags_only(false, false, false)).unwrap();
+        let on = run_presolve_with_flags(
+            &lp,
+            None,
+            default_max_pass(),
+            None,
+            PresolveFlags::default(),
+        )
+        .unwrap();
+        let off = run_presolve_with_flags(
+            &lp,
+            None,
+            default_max_pass(),
+            None,
+            flags_only(false, false, false),
+        )
+        .unwrap();
         assert_eq!(
             on.reduced_problem.num_vars, 0,
             "[idx={}] expected all vars dual-fixed (got {} remaining)",
@@ -451,7 +506,14 @@ fn dual_fixing_neg_cost_fixes_to_ub() {
         vec![ConstraintType::Ge],
         vec![(0.0, 5.0)],
     );
-    let on = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+    let on = run_presolve_with_flags(
+        &lp,
+        None,
+        default_max_pass(),
+        None,
+        PresolveFlags::default(),
+    )
+    .unwrap();
     assert_eq!(on.reduced_problem.num_vars, 0);
     assert!((on.obj_offset + 5.0).abs() < 1e-10);
 }
@@ -471,7 +533,13 @@ fn dual_fixing_unbounded_when_no_lb() {
         vec![(f64::NEG_INFINITY, f64::INFINITY)],
     );
     assert!(matches!(
-        run_presolve_with_flags(&lp, None, PresolveFlags::default()),
+        run_presolve_with_flags(
+            &lp,
+            None,
+            default_max_pass(),
+            None,
+            PresolveFlags::default()
+        ),
         Err(PresolveStatus::Unbounded)
     ));
 }
@@ -519,7 +587,14 @@ fn noop_baseline_three_parallel_le_with_pos_cost() {
         vec![ConstraintType::Le, ConstraintType::Le],
         vec![(0.0, f64::INFINITY); 3],
     );
-    let off = run_presolve_with_flags(&lp, None, PresolveFlags::all_off()).unwrap();
+    let off = run_presolve_with_flags(
+        &lp,
+        None,
+        default_max_pass(),
+        None,
+        PresolveFlags::all_off(),
+    )
+    .unwrap();
     assert_eq!(
         off.reduced_problem.num_constraints, 2,
         "no-op baseline must keep both rows"
@@ -529,7 +604,14 @@ fn noop_baseline_three_parallel_le_with_pos_cost() {
         "no-op baseline must keep all vars"
     );
 
-    let on = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+    let on = run_presolve_with_flags(
+        &lp,
+        None,
+        default_max_pass(),
+        None,
+        PresolveFlags::default(),
+    )
+    .unwrap();
     assert_eq!(
         on.reduced_problem.num_vars, 0,
         "with all flags on, dual fixing must zero out vars"
@@ -787,7 +869,14 @@ fn reduction_rate_fact_synthetic_battery() {
         let lp = (case.lp_fn)();
         let m_before = lp.num_constraints;
         let n_before = lp.num_vars;
-        let on = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let on = run_presolve_with_flags(
+            &lp,
+            None,
+            default_max_pass(),
+            None,
+            PresolveFlags::default(),
+        )
+        .unwrap();
         let m_after = on.reduced_problem.num_constraints;
         let n_after = on.reduced_problem.num_vars;
         let row_pct = reduction_pct(m_before, m_after);
@@ -813,7 +902,14 @@ fn reduction_rate_fact_synthetic_battery() {
         );
 
         // Repeat with all new flags off so the delta is attributable.
-        let off = run_presolve_with_flags(&lp, None, PresolveFlags::all_off()).unwrap();
+        let off = run_presolve_with_flags(
+            &lp,
+            None,
+            default_max_pass(),
+            None,
+            PresolveFlags::all_off(),
+        )
+        .unwrap();
         let m_after_off = off.reduced_problem.num_constraints;
         let n_after_off = off.reduced_problem.num_vars;
         let row_pct_off = reduction_pct(m_before, m_after_off);

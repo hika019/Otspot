@@ -71,6 +71,11 @@ pub struct QpPresolveResult {
     /// Number of independent variable blocks (1 = not separable).
     pub block_components: usize,
     pub ruiz_scaler: Option<RuizScaler>,
+    /// `true` when phase-1's fixpoint loop exhausted `presolve_max_pass`
+    /// passes without reaching a stable fixpoint. `reduced` is valid either
+    /// way — this only flags that further passes might have reduced it more.
+    /// Always `false` for phase-2 results (a separate, non-iterative pass).
+    pub pass_limit_hit: bool,
 }
 
 impl QpPresolveResult {
@@ -92,6 +97,7 @@ impl QpPresolveResult {
             is_diagonal_q: false,
             block_components: 1,
             ruiz_scaler: None,
+            pass_limit_hit: false,
         }
     }
 

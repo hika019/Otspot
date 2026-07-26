@@ -69,6 +69,8 @@ impl Equilibrator {
         if n == 0 {
             return eq;
         }
+        // Not unified with `otspot_num::run_fixpoint` (see docs/architecture.md):
+        // fixed sweep count with no early-stop signal to report.
         for _ in 0..EQUIL_SWEEPS {
             eq.row_sweep(problem, &blk);
             eq.col_sweep(problem);

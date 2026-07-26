@@ -10,8 +10,8 @@ use crate::problem::ConstraintType;
 #[cfg(test)]
 use crate::problem::LpProblem;
 use crate::tolerances::ZERO_TOL;
-use otspot_num::linalg::timeout::deadline_reached;
 use otspot_num::sparse::CscMatrix;
+use otspot_num::{run_fixpoint, PipelineStop, SolveControl};
 use std::time::Instant;
 
 /// Maximum number of bound-propagation rounds in the iterative tightening loop.
@@ -117,13 +117,12 @@ pub(crate) fn tighten_bounds_linear(
     let rows = build_rows(n, a, m);
 
     let mut new_bounds = bounds.to_vec();
-    for _ in 0..MAX_PRESOLVE_ROUNDS {
+    run_fixpoint(MAX_PRESOLVE_ROUNDS, SolveControl::default(), |_| {
         let tightened =
-            propagation_pass(&rows, constraint_types, b, &mut new_bounds, integer_mask)?;
-        if tightened == 0 {
-            break;
-        }
-    }
+            propagation_pass(&rows, constraint_types, b, &mut new_bounds, integer_mask).ok_or(())?;
+        Ok::<_, ()>(tightened > 0)
+    })
+    .ok()?;
     Some(new_bounds)
 }
 
@@ -144,17 +143,13 @@ pub(crate) fn tighten_bounds_at_node(
     integer_mask: &[bool],
 ) -> Result<Vec<(f64, f64)>, ()> {
     let mut current = bounds.to_vec();
-    for _ in 0..MAX_PROPAGATION_PASSES {
-        match tighten_bounds_linear(n, a, b, constraint_types, &current, integer_mask) {
-            None => return Err(()),
-            Some(updated) => {
-                if updated == current {
-                    break;
-                }
-                current = updated;
-            }
-        }
-    }
+    run_fixpoint(MAX_PROPAGATION_PASSES, SolveControl::default(), |_| {
+        let updated =
+            tighten_bounds_linear(n, a, b, constraint_types, &current, integer_mask).ok_or(())?;
+        let changed = updated != current;
+        current = updated;
+        Ok::<_, ()>(changed)
+    })?;
     Ok(current)
 }
 
@@ -305,31 +300,33 @@ pub fn tighten_bounds_with_probing(
 
     let mut summary = PresolveSummary::default();
     let mut bounds_vec = bounds.to_vec();
+    let control = SolveControl {
+        deadline,
+        cancel: None,
+    };
 
     // Initial propagation to convergence (only count rounds that tightened something).
-    for _ in 0..MAX_PRESOLVE_ROUNDS {
-        if deadline_reached(deadline) {
-            bounds.copy_from_slice(&bounds_vec);
-            return Some(summary);
+    let stop = run_fixpoint(MAX_PRESOLVE_ROUNDS, control, |_| {
+        let t = propagation_pass(&rows, constraint_types, b, &mut bounds_vec, &integer_mask)
+            .ok_or(())?;
+        if t > 0 {
+            summary.tightened_by_propagation += t;
+            summary.rounds += 1;
         }
-        let t = propagation_pass(&rows, constraint_types, b, &mut bounds_vec, &integer_mask)?;
-        if t == 0 {
-            break;
-        }
-        summary.tightened_by_propagation += t;
-        summary.rounds += 1;
+        Ok::<_, ()>(t > 0)
+    })
+    .ok()?;
+    if stop == PipelineStop::Interrupted {
+        bounds.copy_from_slice(&bounds_vec);
+        return Some(summary);
     }
 
     // Probing loop.
     let mut candidates = binary_var_indices(integer_vars, &bounds_vec);
     candidates.truncate(MAX_PROBE_CANDIDATES);
-    for _ in 0..MAX_PRESOLVE_ROUNDS {
-        if deadline_reached(deadline) {
-            bounds.copy_from_slice(&bounds_vec);
-            return Some(summary);
-        }
+    run_fixpoint(MAX_PRESOLVE_ROUNDS, control, |_| {
         if candidates.is_empty() {
-            break;
+            return Ok::<_, ()>(false);
         }
         let changed = probing_pass(
             &rows,
@@ -338,25 +335,26 @@ pub fn tighten_bounds_with_probing(
             &mut bounds_vec,
             &integer_mask,
             &candidates,
-        )?;
+        )
+        .ok_or(())?;
         summary.tightened_by_probing += changed.len();
 
         if changed.is_empty() {
-            break;
+            return Ok(false);
         }
 
         // Re-propagate after probing fixes.
-        for _ in 0..MAX_PRESOLVE_ROUNDS {
-            if deadline_reached(deadline) {
-                bounds.copy_from_slice(&bounds_vec);
-                return Some(summary);
+        let reprop = run_fixpoint(MAX_PRESOLVE_ROUNDS, control, |_| {
+            let t = propagation_pass(&rows, constraint_types, b, &mut bounds_vec, &integer_mask)
+                .ok_or(())?;
+            if t > 0 {
+                summary.tightened_by_propagation += t;
+                summary.rounds += 1;
             }
-            let t = propagation_pass(&rows, constraint_types, b, &mut bounds_vec, &integer_mask)?;
-            if t == 0 {
-                break;
-            }
-            summary.tightened_by_propagation += t;
-            summary.rounds += 1;
+            Ok::<_, ()>(t > 0)
+        })?;
+        if reprop == PipelineStop::Interrupted {
+            return Ok(false);
         }
 
         // Next round: only re-probe binary vars whose bounds were affected.
@@ -368,7 +366,9 @@ pub fn tighten_bounds_with_probing(
                     && (bounds_vec[k].1 - 1.0).abs() < ZERO_TOL
             })
             .collect();
-    }
+        Ok(true)
+    })
+    .ok()?;
 
     bounds.copy_from_slice(&bounds_vec);
     Some(summary)
@@ -811,6 +811,55 @@ mod tests {
             bounds[1].1
         );
         assert!(summary.tightened_by_probing > 0 || summary.tightened_by_propagation > 0);
+    }
+
+    /// Sentinel for the `run_fixpoint`-unified initial propagation loop
+    /// (Loop C in the fixpoint-unification refactor): exact round count for a
+    /// hand-derived 2-round convergence chain, with no integer vars so the
+    /// probing loop (D/E) stays inert and cannot contribute extra rounds.
+    ///
+    /// Row 0: x0 - x1 ≤ 0.3 (visited first each round).
+    /// Row 1: x1 ≤ 0 (visited second each round).
+    /// Round 1: row 0 uses initial ub(x1)=1 → implied ub(x0)=1.3 (from 10).
+    ///          row 1 tightens ub(x1) 1 → 0.  (2 vars tightened, round counted)
+    /// Round 2: row 0 uses updated ub(x1)=0 → implied ub(x0)=0.3 (from 1.3).
+    ///          row 1: no change.             (1 var tightened, round counted)
+    /// Round 3: no change anywhere → stop without counting a 3rd round.
+    ///
+    /// Sentinel: `summary.rounds` is only incremented when a round actually
+    /// tightened something (`if t > 0`). Removing that guard (incrementing
+    /// unconditionally on every closure invocation) leaves the final bounds
+    /// unchanged but inflates `summary.rounds` to 3 (the no-op Round 3 above
+    /// gets counted too), failing this assertion — verified manually by
+    /// removing the guard and observing the count change from 2 to 3.
+    #[test]
+    fn propagation_round_count_matches_hand_derivation() {
+        let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, -1.0, 1.0], 2, 2).unwrap();
+        let mut bounds = vec![(0.0_f64, 10.0_f64), (0.0, 1.0)];
+        let summary = tighten_bounds_with_probing(
+            &a,
+            &[0.3, 0.0],
+            &[ConstraintType::Le, ConstraintType::Le],
+            &mut bounds,
+            &[],
+            None,
+        )
+        .expect("feasible");
+        assert_eq!(
+            summary.rounds, 2,
+            "hand-derivation requires exactly 2 propagation rounds, got {}",
+            summary.rounds
+        );
+        assert!(
+            (bounds[0].1 - 0.3).abs() < 1e-9,
+            "x0 ub must converge to 0.3, got {}",
+            bounds[0].1
+        );
+        assert!(
+            (bounds[1].1 - 0.0).abs() < 1e-9,
+            "x1 ub must converge to 0.0, got {}",
+            bounds[1].1
+        );
     }
 
     #[test]
