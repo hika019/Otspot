@@ -42,25 +42,25 @@ fn aat_apply(
     // Step 1: atp = Aᵀ·p  (n 次元)
     tmp.iter_mut().for_each(|v| *v = 0.0);
     for col in 0..n {
-        let cs = a_sub.col_ptr[col];
-        let ce = a_sub.col_ptr[col + 1];
+        let cs = a_sub.col_ptr()[col];
+        let ce = a_sub.col_ptr()[col + 1];
         let mut s = 0.0f64;
         for k in cs..ce {
-            s += a_sub.values[k] * p[a_sub.row_ind[k]];
+            s += a_sub.values()[k] * p[a_sub.row_ind()[k]];
         }
         tmp[col] = s;
     }
     // Step 2: ap = A·atp + reg·p  (m_sub 次元)
     let mut ap = vec![0.0f64; m_sub];
     for col in 0..n {
-        let cs = a_sub.col_ptr[col];
-        let ce = a_sub.col_ptr[col + 1];
+        let cs = a_sub.col_ptr()[col];
+        let ce = a_sub.col_ptr()[col + 1];
         let tv = tmp[col];
         if tv == 0.0 {
             continue;
         }
         for k in cs..ce {
-            ap[a_sub.row_ind[k]] += a_sub.values[k] * tv;
+            ap[a_sub.row_ind()[k]] += a_sub.values()[k] * tv;
         }
     }
     for i in 0..m_sub {
@@ -89,14 +89,14 @@ fn solve_aat_cg(
     // RHS b = A_sub · target  (m_sub 次元、DD 精度で計算して f64 に落とす)
     let mut rhs_dd: Vec<TwoFloat> = vec![zero; m_sub];
     for col in 0..n {
-        let cs = a_sub.col_ptr[col];
-        let ce = a_sub.col_ptr[col + 1];
+        let cs = a_sub.col_ptr()[col];
+        let ce = a_sub.col_ptr()[col + 1];
         let tv = target_dd[col];
         let tv_hi = f64::from(tv);
         let tv_lo = f64::from(tv - TwoFloat::from(tv_hi));
         for k in cs..ce {
-            let row = a_sub.row_ind[k];
-            let aval = a_sub.values[k];
+            let row = a_sub.row_ind()[k];
+            let aval = a_sub.values()[k];
             rhs_dd[row] =
                 rhs_dd[row] + TwoFloat::new_mul(aval, tv_hi) + TwoFloat::new_mul(aval, tv_lo);
         }
@@ -106,9 +106,9 @@ fn solve_aat_cg(
     // 正則化: max_diag(A·Aᵀ) = max_i Σ_k A[i,k]²  (O(nnz))
     let mut row_sq = vec![0.0f64; m_sub];
     for col in 0..n {
-        for k in a_sub.col_ptr[col]..a_sub.col_ptr[col + 1] {
-            let r = a_sub.row_ind[k];
-            row_sq[r] += a_sub.values[k] * a_sub.values[k];
+        for k in a_sub.col_ptr()[col]..a_sub.col_ptr()[col + 1] {
+            let r = a_sub.row_ind()[k];
+            row_sq[r] += a_sub.values()[k] * a_sub.values()[k];
         }
     }
     let max_diag = row_sq.iter().cloned().fold(0.0f64, f64::max).max(1.0);
@@ -209,15 +209,15 @@ fn solve_aat_direct_ir(
     let build_rhs = |v_dd: &[TwoFloat]| -> Vec<f64> {
         let mut acc: Vec<TwoFloat> = vec![zero; m_sub];
         for col in 0..n {
-            let cs = a_sub.col_ptr[col];
-            let ce = a_sub.col_ptr[col + 1];
+            let cs = a_sub.col_ptr()[col];
+            let ce = a_sub.col_ptr()[col + 1];
             for k in cs..ce {
-                let row = a_sub.row_ind[k];
+                let row = a_sub.row_ind()[k];
                 let v_f64 = f64::from(v_dd[col]);
                 let lo = v_dd[col] - TwoFloat::from(v_f64);
                 acc[row] = acc[row]
-                    + TwoFloat::new_mul(a_sub.values[k], v_f64)
-                    + TwoFloat::new_mul(a_sub.values[k], f64::from(lo));
+                    + TwoFloat::new_mul(a_sub.values()[k], v_f64)
+                    + TwoFloat::new_mul(a_sub.values()[k], f64::from(lo));
             }
         }
         acc.iter().map(|&v| f64::from(v)).collect()
@@ -240,11 +240,11 @@ fn solve_aat_direct_ir(
         }
         let mut aty_dd: Vec<TwoFloat> = vec![zero; n];
         for col in 0..n {
-            let cs = a_sub.col_ptr[col];
-            let ce = a_sub.col_ptr[col + 1];
+            let cs = a_sub.col_ptr()[col];
+            let ce = a_sub.col_ptr()[col + 1];
             for k in cs..ce {
-                let row = a_sub.row_ind[k];
-                aty_dd[col] += TwoFloat::new_mul(a_sub.values[k], y[row]);
+                let row = a_sub.row_ind()[k];
+                aty_dd[col] += TwoFloat::new_mul(a_sub.values()[k], y[row]);
             }
         }
         let r_dd: Vec<TwoFloat> = (0..n).map(|j| target_dd[j] - aty_dd[j]).collect();
@@ -322,11 +322,11 @@ pub(crate) fn compute_lsq_dual_y(
     let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
     for col in 0..n {
         let xv = x[col];
-        let cs = problem.q.col_ptr[col];
-        let ce = problem.q.col_ptr[col + 1];
+        let cs = problem.q.col_ptr()[col];
+        let ce = problem.q.col_ptr()[col + 1];
         for k in cs..ce {
-            let row = problem.q.row_ind[k];
-            qx_dd[row] += TwoFloat::new_mul(problem.q.values[k], xv);
+            let row = problem.q.row_ind()[k];
+            qx_dd[row] += TwoFloat::new_mul(problem.q.values()[k], xv);
         }
     }
     let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, &result.bound_duals);
@@ -344,13 +344,13 @@ pub(crate) fn compute_lsq_dual_y(
         }
     }
     for j in 0..n {
-        let cs = problem.a.col_ptr[j];
-        let ce = problem.a.col_ptr[j + 1];
+        let cs = problem.a.col_ptr()[j];
+        let ce = problem.a.col_ptr()[j + 1];
         if ce - cs != 1 {
             continue;
         }
-        let row = problem.a.row_ind[cs];
-        let aij = problem.a.values[cs];
+        let row = problem.a.row_ind()[cs];
+        let aij = problem.a.values()[cs];
         if !aij.is_finite() || aij == 0.0 {
             continue;
         }
@@ -404,11 +404,11 @@ pub(crate) fn compute_lsq_dual_y(
     // `fixed_y[i]` so LSQ cannot resurrect a non-zero dual on a non-binding row.
     let mut ax = vec![0.0_f64; m];
     for col in 0..n {
-        let cs = problem.a.col_ptr[col];
-        let ce = problem.a.col_ptr[col + 1];
+        let cs = problem.a.col_ptr()[col];
+        let ce = problem.a.col_ptr()[col + 1];
         let xv = x[col];
         for k in cs..ce {
-            ax[problem.a.row_ind[k]] += problem.a.values[k] * xv;
+            ax[problem.a.row_ind()[k]] += problem.a.values()[k] * xv;
         }
     }
     for i in 0..m {
@@ -452,12 +452,12 @@ pub(crate) fn compute_lsq_dual_y(
     let mut a_free_row_ind: Vec<usize> = Vec::new();
     let mut a_free_values: Vec<f64> = Vec::new();
     for col in 0..n {
-        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            let orig_row = problem.a.row_ind[k];
+        for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+            let orig_row = problem.a.row_ind()[k];
             let local_row = free_row_local[orig_row];
             if local_row != usize::MAX {
                 a_free_row_ind.push(local_row);
-                a_free_values.push(problem.a.values[k]);
+                a_free_values.push(problem.a.values()[k]);
             }
         }
         a_free_col_ptr[col + 1] = a_free_row_ind.len();
@@ -467,11 +467,11 @@ pub(crate) fn compute_lsq_dual_y(
 
     let mut target_adj_dd = target_dd.clone();
     for col in 0..n {
-        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            let orig_row = problem.a.row_ind[k];
+        for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+            let orig_row = problem.a.row_ind()[k];
             if let Some(yfi) = fixed_y[orig_row] {
                 if yfi != 0.0 {
-                    target_adj_dd[col] -= TwoFloat::new_mul(problem.a.values[k], yfi);
+                    target_adj_dd[col] -= TwoFloat::new_mul(problem.a.values()[k], yfi);
                 }
             }
         }

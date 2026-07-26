@@ -81,13 +81,13 @@ fn optimality_worst_residual(
 
 /// Q * x_ext: CSC SpMV with TwoFloat solution vector.
 fn qx_ext(q: &otspot_num::sparse::CscMatrix, x_ext: &[TwoFloat]) -> Vec<TwoFloat> {
-    let n = q.nrows;
+    let n = q.nrows();
     let mut out = vec![TwoFloat::from(0.0); n];
-    for col in 0..q.ncols {
+    for col in 0..q.ncols() {
         let xv = x_ext[col];
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            let row = q.row_ind[k];
-            out[row] += TwoFloat::from(q.values[k]) * xv;
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            let row = q.row_ind()[k];
+            out[row] += TwoFloat::from(q.values()[k]) * xv;
         }
     }
     out
@@ -96,13 +96,13 @@ fn qx_ext(q: &otspot_num::sparse::CscMatrix, x_ext: &[TwoFloat]) -> Vec<TwoFloat
 /// A^T * y_ext: CSC transpose SpMV with TwoFloat dual vector.
 fn aty_ext(a: &otspot_num::sparse::CscMatrix, y_ext: &[TwoFloat], n: usize) -> Vec<TwoFloat> {
     let mut out = vec![TwoFloat::from(0.0); n];
-    if a.nrows == 0 || y_ext.is_empty() {
+    if a.nrows() == 0 || y_ext.is_empty() {
         return out;
     }
-    for col in 0..a.ncols {
-        for k in a.col_ptr[col]..a.col_ptr[col + 1] {
-            let row = a.row_ind[k];
-            out[col] += TwoFloat::from(a.values[k]) * y_ext[row];
+    for col in 0..a.ncols() {
+        for k in a.col_ptr()[col]..a.col_ptr()[col + 1] {
+            let row = a.row_ind()[k];
+            out[col] += TwoFloat::from(a.values()[k]) * y_ext[row];
         }
     }
     out
@@ -110,14 +110,14 @@ fn aty_ext(a: &otspot_num::sparse::CscMatrix, y_ext: &[TwoFloat], n: usize) -> V
 
 /// A * x_ext: CSC SpMV with TwoFloat solution vector.
 fn ax_ext(a: &otspot_num::sparse::CscMatrix, x_ext: &[TwoFloat]) -> Vec<TwoFloat> {
-    if a.nrows == 0 {
+    if a.nrows() == 0 {
         return Vec::new();
     }
-    let mut out = vec![TwoFloat::from(0.0); a.nrows];
-    for col in 0..a.ncols {
+    let mut out = vec![TwoFloat::from(0.0); a.nrows()];
+    for col in 0..a.ncols() {
         let xv = x_ext[col];
-        for k in a.col_ptr[col]..a.col_ptr[col + 1] {
-            out[a.row_ind[k]] += TwoFloat::from(a.values[k]) * xv;
+        for k in a.col_ptr()[col]..a.col_ptr()[col + 1] {
+            out[a.row_ind()[k]] += TwoFloat::from(a.values()[k]) * xv;
         }
     }
     out
@@ -175,11 +175,11 @@ pub(crate) fn refine_kkt_extended_precision(
     {
         let mut k_diag_max = 0.0_f64;
         for j in 0..(n + m) {
-            let cs = k_mat.col_ptr[j];
-            let ce = k_mat.col_ptr[j + 1];
+            let cs = k_mat.col_ptr()[j];
+            let ce = k_mat.col_ptr()[j + 1];
             for k in cs..ce {
-                if k_mat.row_ind[k] == j {
-                    k_diag_max = k_diag_max.max(k_mat.values[k].abs());
+                if k_mat.row_ind()[k] == j {
+                    k_diag_max = k_diag_max.max(k_mat.values()[k].abs());
                     break;
                 }
             }
@@ -193,11 +193,11 @@ pub(crate) fn refine_kkt_extended_precision(
             if !is_active {
                 continue;
             }
-            let col_start = k_mat.col_ptr[j];
-            let col_end = k_mat.col_ptr[j + 1];
+            let col_start = k_mat.col_ptr()[j];
+            let col_end = k_mat.col_ptr()[j + 1];
             for k in col_start..col_end {
-                if k_mat.row_ind[k] == j {
-                    k_mat.values[k] += active_penalty;
+                if k_mat.row_ind()[k] == j {
+                    k_mat.values_mut()[k] += active_penalty;
                     break;
                 }
             }
@@ -235,11 +235,11 @@ pub(crate) fn refine_kkt_extended_precision(
                     );
                     let mut diag_max = 0.0_f64;
                     for j in 0..(n + m) {
-                        let cs = cur_k.col_ptr[j];
-                        let ce = cur_k.col_ptr[j + 1];
+                        let cs = cur_k.col_ptr()[j];
+                        let ce = cur_k.col_ptr()[j + 1];
                         for k in cs..ce {
-                            if cur_k.row_ind[k] == j {
-                                diag_max = diag_max.max(cur_k.values[k].abs());
+                            if cur_k.row_ind()[k] == j {
+                                diag_max = diag_max.max(cur_k.values()[k].abs());
                                 break;
                             }
                         }
@@ -253,11 +253,11 @@ pub(crate) fn refine_kkt_extended_precision(
                         if !is_active {
                             continue;
                         }
-                        let cs = cur_k.col_ptr[j];
-                        let ce = cur_k.col_ptr[j + 1];
+                        let cs = cur_k.col_ptr()[j];
+                        let ce = cur_k.col_ptr()[j + 1];
                         for k in cs..ce {
-                            if cur_k.row_ind[k] == j {
-                                cur_k.values[k] += ap;
+                            if cur_k.row_ind()[k] == j {
+                                cur_k.values_mut()[k] += ap;
                                 break;
                             }
                         }

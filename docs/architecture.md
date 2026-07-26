@@ -31,8 +31,7 @@ solver algorithms (`otspot-core`) ──→ numerics (`otspot-num`)
 - otspot-core内部コードによる`crate::sparse`/`crate::linalg`/`crate::error::SolverError`/`crate::SolverError`経由の参照（`otspot_num`への直接依存を強制）
 - foundation crateとmodule rootのファイルサイズ
 - 220行超の関数の新規追加、およびbaseline登録済み長大関数の肥大化（`otspot-core`/`otspot-num`/`otspot-io`/`otspot-model`/`otspot-dev`のsrcを走査）
-- `CscMatrix`/`SparseVec`のstorage fieldへの直接アクセス（`.col_ptr`等のdot-access）およびstruct-literal直接構築（`CscMatrix { .. }`）の増加（既存箇所は減少のみ許可、`otspot-core`/`otspot-io`/`otspot-model`/`otspot-dev`のsrcを走査。型定義自身の`otspot-num/src/sparse/`は対象外）
-
-struct-literal検出は行単位の正規表現ヒューリスティックで、`Type` と `{` が別々の物理行に分かれる稀なレイアウトも1行先読みで拾う。ただし網羅的な字句解析ではないため、CIの`cargo fmt --all -- --check`（`Type {`を常に同一行へ連結する）を実質的な前提としている。
 
 ゲート本体にもfixture self-testを設ける。既存長大関数の縮小・分割・削除は許可する。
+
+`CscMatrix`/`SparseVec`のstorage field (`col_ptr`/`row_ind`/`values`/`nrows`/`ncols`、`indices`/`len`) は `otspot-num/src/sparse/` 定義側で `pub(crate)` — otspot-core/otspot-io/otspot-model/otspot-dev からの直接dot-accessもstruct-literal構築も、コンパイルエラーとしてRustコンパイラが強制する。旧来はテキストベースの正規表現ratchet (`scripts/check_csc_encapsulation.py`) で「既存箇所は減少のみ許可」を検査していたが、全箇所をアクセサ (`col_ptr()`等) 経由へ移行しフィールドを非公開化したことでratchet自体が不要になり撤去した。

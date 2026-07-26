@@ -684,13 +684,13 @@ pub(crate) fn wrap_to_legacy(bsf: &BoundedStandardForm) -> StandardForm {
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();
 
-    for col in 0..bsf.a.ncols {
-        let start = bsf.a.col_ptr[col];
-        let end = bsf.a.col_ptr[col + 1];
+    for col in 0..bsf.a.ncols() {
+        let start = bsf.a.col_ptr()[col];
+        let end = bsf.a.col_ptr()[col + 1];
         for idx in start..end {
-            trip_rows.push(bsf.a.row_ind[idx]);
+            trip_rows.push(bsf.a.row_ind()[idx]);
             trip_cols.push(col);
-            trip_vals.push(bsf.a.values[idx]);
+            trip_vals.push(bsf.a.values()[idx]);
         }
     }
 

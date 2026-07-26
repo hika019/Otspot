@@ -27,8 +27,8 @@ pub(crate) fn refine_primal_lsq(
     let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
     for col in 0..n {
         let xv = x[col];
-        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            ax_dd[problem.a.row_ind[k]] += TwoFloat::new_mul(problem.a.values[k], xv);
+        for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+            ax_dd[problem.a.row_ind()[k]] += TwoFloat::new_mul(problem.a.values()[k], xv);
         }
     }
     let ax: Vec<f64> = ax_dd.iter().map(|&v| f64::from(v)).collect();
@@ -99,10 +99,10 @@ pub(crate) fn refine_primal_lsq(
         }
         let mut atl_dd: Vec<TwoFloat> = vec![zero_dd; n];
         for j in 0..n {
-            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
-                let i = problem.a.row_ind[k];
+            for k in problem.a.col_ptr()[j]..problem.a.col_ptr()[j + 1] {
+                let i = problem.a.row_ind()[k];
                 if i < m {
-                    atl_dd[j] += TwoFloat::new_mul(problem.a.values[k], lambda[i]);
+                    atl_dd[j] += TwoFloat::new_mul(problem.a.values()[k], lambda[i]);
                 }
             }
         }
@@ -110,12 +110,12 @@ pub(crate) fn refine_primal_lsq(
         for j in 0..n {
             let atl_j_f64 = f64::from(atl_dd[j]);
             let atl_j_lo = atl_dd[j] - TwoFloat::from(atl_j_f64);
-            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
-                let i = problem.a.row_ind[k];
+            for k in problem.a.col_ptr()[j]..problem.a.col_ptr()[j + 1] {
+                let i = problem.a.row_ind()[k];
                 if i < m {
                     r_dd[i] = r_dd[i]
-                        - TwoFloat::new_mul(problem.a.values[k], atl_j_f64)
-                        - TwoFloat::new_mul(problem.a.values[k], f64::from(atl_j_lo));
+                        - TwoFloat::new_mul(problem.a.values()[k], atl_j_f64)
+                        - TwoFloat::new_mul(problem.a.values()[k], f64::from(atl_j_lo));
                 }
             }
         }
@@ -143,12 +143,12 @@ pub(crate) fn refine_primal_lsq(
 
     let mut delta_dd: Vec<TwoFloat> = vec![zero_dd; n];
     for j in 0..n {
-        let s = problem.a.col_ptr[j];
-        let e = problem.a.col_ptr[j + 1];
+        let s = problem.a.col_ptr()[j];
+        let e = problem.a.col_ptr()[j + 1];
         for k in s..e {
-            let i = problem.a.row_ind[k];
+            let i = problem.a.row_ind()[k];
             if i < m {
-                delta_dd[j] += TwoFloat::new_mul(problem.a.values[k], lambda[i]);
+                delta_dd[j] += TwoFloat::new_mul(problem.a.values()[k], lambda[i]);
             }
         }
     }

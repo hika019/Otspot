@@ -47,7 +47,7 @@ pub fn prove_optimal<'a>(
     // (index out of bounds) instead of returning Err — recorded as a panic
     // failure, not an assertion failure.
     let num_vars = view.bounds.len();
-    let num_constraints = view.a.nrows;
+    let num_constraints = view.a.nrows();
     let n_lb = view
         .bounds
         .iter()
@@ -58,9 +58,9 @@ pub fn prove_optimal<'a>(
         .iter()
         .filter(|&&(_, ub)| ub.is_finite())
         .count();
-    let dim_valid = view.q.nrows == num_vars
-        && view.q.ncols == num_vars
-        && view.a.ncols == num_vars
+    let dim_valid = view.q.nrows() == num_vars
+        && view.q.ncols() == num_vars
+        && view.a.ncols() == num_vars
         && view.b.len() == num_constraints
         && view.c.len() == num_vars
         && view.constraint_types.len() == num_constraints

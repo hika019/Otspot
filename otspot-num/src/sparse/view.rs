@@ -17,6 +17,7 @@ pub trait CscMatrixView {
 
     /// Return one valid column.  Out-of-range access is a programming error:
     /// callers with untrusted indices must validate before entering kernels.
+    #[inline]
     fn column(&self, column: usize) -> (&[usize], &[f64]) {
         assert!(
             column < self.ncols(),

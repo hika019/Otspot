@@ -16,7 +16,7 @@ pub(crate) fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<C
     let m_u = m as u128;
     let mut col_pair_sum: u128 = 0;
     for k in 0..n {
-        let c_k = (a.col_ptr[k + 1] - a.col_ptr[k]) as u128;
+        let c_k = (a.col_ptr()[k + 1] - a.col_ptr()[k]) as u128;
         col_pair_sum = col_pair_sum.saturating_add(c_k.saturating_mul(c_k + 1) / 2);
     }
     let nnz_upper_bound = (m_u.saturating_mul(m_u + 1) / 2).min(col_pair_sum);
@@ -26,10 +26,11 @@ pub(crate) fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<C
     }
     let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     for k in 0..n {
-        let start = a.col_ptr[k];
-        let end = a.col_ptr[k + 1];
-        let cols_in_k: Vec<(usize, f64)> =
-            (start..end).map(|p| (a.row_ind[p], a.values[p])).collect();
+        let start = a.col_ptr()[k];
+        let end = a.col_ptr()[k + 1];
+        let cols_in_k: Vec<(usize, f64)> = (start..end)
+            .map(|p| (a.row_ind()[p], a.values()[p]))
+            .collect();
         for (idx_a, &(i, v_i)) in cols_in_k.iter().enumerate() {
             for &(j, v_j) in &cols_in_k[idx_a..] {
                 let (lo, hi) = if i <= j { (i, j) } else { (j, i) };

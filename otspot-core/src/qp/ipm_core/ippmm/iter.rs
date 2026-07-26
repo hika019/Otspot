@@ -102,7 +102,7 @@ pub(crate) fn solve_ippmm_inner(
     let inertia_correction = crate::qp::ipm_core::kkt::compute_inertia_correction(&problem.q);
     let q_is_indefinite = inertia_correction > 0.0;
 
-    let initial_reg_limit = if problem.q.values.iter().all(|&v| v == 0.0) {
+    let initial_reg_limit = if problem.q.values().iter().all(|&v| v == 0.0) {
         REG_LIMIT_INIT_LP
     } else {
         REG_LIMIT_INIT_QP

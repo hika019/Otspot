@@ -111,9 +111,9 @@ pub(super) fn factorize_kkt_with_retry(
         };
         if caches.amd_perm.is_none() {
             caches.amd_perm = Some(amd_with_deadline(
-                mat_for_factor.nrows,
-                &mat_for_factor.col_ptr,
-                &mat_for_factor.row_ind,
+                mat_for_factor.nrows(),
+                mat_for_factor.col_ptr(),
+                mat_for_factor.row_ind(),
                 ctx.timeout_ctx.deadline,
             ));
         }
@@ -204,7 +204,7 @@ pub(super) fn factorize_kkt_with_retry(
         let aug_mat_fb = ctx
             .aug_cache
             .materialize(ctx.sigma_vec, rho_retry, delta_fallback);
-        let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows).collect();
+        let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows()).collect();
         let t_fb = std::time::Instant::now();
         let fb_result = factorize_kkt_with_cached_perm_par(
             &aug_mat_fb,
@@ -251,7 +251,7 @@ fn probe_ldl_health(
     is_eq_ext: &[bool],
     n: usize,
 ) -> bool {
-    let probe_dim = mat_for_factor.nrows;
+    let probe_dim = mat_for_factor.nrows();
     let mut probe_rhs = vec![0.0_f64; probe_dim];
     probe_rhs[..n].copy_from_slice(r_d_pmm);
     // 予測子 RHS 下半分: 不等式行は r_p + s、等式行は r_p。
@@ -272,12 +272,12 @@ fn probe_ldl_health(
     }
 
     let mut kx = vec![0.0_f64; probe_dim];
-    for col in 0..mat_for_factor.ncols {
-        let cs = mat_for_factor.col_ptr[col];
-        let ce = mat_for_factor.col_ptr[col + 1];
+    for col in 0..mat_for_factor.ncols() {
+        let cs = mat_for_factor.col_ptr()[col];
+        let ce = mat_for_factor.col_ptr()[col + 1];
         for ptr in cs..ce {
-            let row = mat_for_factor.row_ind[ptr];
-            let val = mat_for_factor.values[ptr];
+            let row = mat_for_factor.row_ind()[ptr];
+            let val = mat_for_factor.values()[ptr];
             kx[row] += val * probe_sol[col];
             if row != col {
                 kx[col] += val * probe_sol[row];
@@ -317,9 +317,9 @@ pub(crate) fn auto_schur_enabled(
     let probe_rho = options.ipm.delta_min;
     let probe_aug = build_augmented_system(&problem.q, a_ext, &probe_sigma, probe_rho, probe_rho);
     let probe_perm = amd_with_deadline(
-        probe_aug.nrows,
-        &probe_aug.col_ptr,
-        &probe_aug.row_ind,
+        probe_aug.nrows(),
+        probe_aug.col_ptr(),
+        probe_aug.row_ind(),
         timeout_ctx.deadline,
     );
     let probe_result = otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(

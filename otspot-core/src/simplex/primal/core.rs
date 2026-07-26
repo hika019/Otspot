@@ -561,8 +561,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             && basis_mgr.eta_count() > 0;
         if !pivot_unstable {
             if eta_update_disabled() {
-                d_sv.indices.clear();
-                d_sv.values.clear();
+                d_sv.clear();
             }
             match basis_mgr.update(entering_col, leaving_row, &d_sv) {
                 Ok(()) => {}

@@ -131,11 +131,11 @@ impl Workspace {
 
         let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
         for j in 0..n {
-            let start = prob.a.col_ptr[j];
-            let end = prob.a.col_ptr[j + 1];
+            let start = prob.a.col_ptr()[j];
+            let end = prob.a.col_ptr()[j + 1];
             for idx in start..end {
-                let row = prob.a.row_ind[idx];
-                row_entries[row].push((j, prob.a.values[idx]));
+                let row = prob.a.row_ind()[idx];
+                row_entries[row].push((j, prob.a.values()[idx]));
             }
         }
 

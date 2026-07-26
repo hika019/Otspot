@@ -26,8 +26,8 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
     let aty_dd = dd_impl::aty(prob.a, y, n);
     let bound_contrib = kkt_resid::bound_contrib(prob.bounds, z);
     let use_elim_mask = prob.eliminated_cols.len() == n;
-    let a_col_count = prob.a.col_ptr.len().saturating_sub(1);
-    let q_col_count = prob.q.col_ptr.len().saturating_sub(1);
+    let a_col_count = prob.a.col_ptr().len().saturating_sub(1);
+    let q_col_count = prob.q.col_ptr().len().saturating_sub(1);
     let mut max_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = prob.bounds[j];
@@ -35,8 +35,8 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
             continue;
         }
         if use_elim_mask && prob.eliminated_cols[j] {
-            let a_empty = j >= a_col_count || prob.a.col_ptr[j + 1] == prob.a.col_ptr[j];
-            let q_empty = j >= q_col_count || prob.q.col_ptr[j + 1] == prob.q.col_ptr[j];
+            let a_empty = j >= a_col_count || prob.a.col_ptr()[j + 1] == prob.a.col_ptr()[j];
+            let q_empty = j >= q_col_count || prob.q.col_ptr()[j + 1] == prob.q.col_ptr()[j];
             if a_empty && q_empty {
                 continue;
             }
@@ -57,7 +57,7 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
 
 /// 成分相対化 primal 残差。A·x は cancellation 対策で DD 積算。
 pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
-    if prob.a.nrows == 0 {
+    if prob.a.nrows() == 0 {
         return 0.0;
     }
     let ax_dd = dd_impl::ax(prob.a, x);

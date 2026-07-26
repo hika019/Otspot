@@ -199,32 +199,32 @@ impl BasisManager for LuBasis {
                 bound: self.basis_indices.len(),
             });
         }
-        if pivot_col.len != self.basis_indices.len() {
+        if pivot_col.dim() != self.basis_indices.len() {
             return Err(SolverError::DimensionMismatch {
                 field: "pivot_col",
                 expected: self.basis_indices.len(),
-                got: pivot_col.len,
+                got: pivot_col.dim(),
             });
         }
-        if pivot_col.indices.len() != pivot_col.values.len() {
+        if pivot_col.indices().len() != pivot_col.values().len() {
             return Err(SolverError::DimensionMismatch {
                 field: "pivot_col_values",
-                expected: pivot_col.indices.len(),
-                got: pivot_col.values.len(),
+                expected: pivot_col.indices().len(),
+                got: pivot_col.values().len(),
             });
         }
-        if let Some(&index) = pivot_col.indices.iter().find(|&&i| i >= pivot_col.len) {
+        if let Some(&index) = pivot_col.indices().iter().find(|&&i| i >= pivot_col.dim()) {
             return Err(SolverError::IndexOutOfBounds {
                 context: "pivot_col_row",
                 index,
-                bound: pivot_col.len,
+                bound: pivot_col.dim(),
             });
         }
         let pivot = pivot_col
-            .indices
+            .indices()
             .binary_search(&leaving_row)
             .ok()
-            .map(|pos| pivot_col.values[pos])
+            .map(|pos| pivot_col.values()[pos])
             .filter(|p| p.is_finite() && p.abs() > crate::tolerances::PIVOT_TOL)
             .ok_or(SolverError::SingularBasis { step: leaving_row })?;
         debug_assert!(pivot.is_finite());

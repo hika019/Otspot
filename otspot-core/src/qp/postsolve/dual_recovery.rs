@@ -89,9 +89,9 @@ pub(crate) fn compute_dual_recovery_row_activity(
         if xabs == 0.0 {
             continue;
         }
-        for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
-            let row = problem.a.row_ind[k];
-            row_abs_activity[row] += problem.a.values[k].abs() * xabs;
+        for k in problem.a.col_ptr()[j]..problem.a.col_ptr()[j + 1] {
+            let row = problem.a.row_ind()[k];
+            row_abs_activity[row] += problem.a.values()[k].abs() * xabs;
         }
     }
     (ax, row_abs_activity)
@@ -140,14 +140,14 @@ pub(crate) fn compute_dual_recovery_row_bounds(
     }
 
     for j in 0..n {
-        let cs = problem.a.col_ptr[j];
-        let ce = problem.a.col_ptr[j + 1];
+        let cs = problem.a.col_ptr()[j];
+        let ce = problem.a.col_ptr()[j + 1];
         if ce - cs != 1 {
             continue;
         }
 
-        let row = problem.a.row_ind[cs];
-        let aij = problem.a.values[cs];
+        let row = problem.a.row_ind()[cs];
+        let aij = problem.a.values()[cs];
         if !aij.is_finite() || aij == 0.0 {
             continue;
         }
@@ -222,8 +222,8 @@ pub(crate) fn collect_dual_recovery_cluster_rows(
     let mut in_cluster = vec![false; m];
     let mut rows = Vec::new();
     let push_active_rows = |col: usize, in_cluster: &mut [bool], rows: &mut Vec<usize>| {
-        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            let row = problem.a.row_ind[k];
+        for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+            let row = problem.a.row_ind()[k];
             if !row_is_active_for_dual_recovery(
                 problem,
                 row,
@@ -252,8 +252,8 @@ pub(crate) fn collect_dual_recovery_cluster_rows(
                 break;
             }
             let col = candidate_cols[pos];
-            let touches_cluster = (problem.a.col_ptr[col]..problem.a.col_ptr[col + 1])
-                .any(|k| in_cluster[problem.a.row_ind[k]]);
+            let touches_cluster = (problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1])
+                .any(|k| in_cluster[problem.a.row_ind()[k]]);
             if !touches_cluster {
                 continue;
             }

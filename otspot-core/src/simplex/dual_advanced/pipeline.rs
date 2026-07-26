@@ -44,7 +44,7 @@ where
     }
 
     let (a_aug, art_col_of_row, mut ubs_aug, basis, is_basic, mut x_b) = state_factory();
-    let n_aug = a_aug.ncols;
+    let n_aug = a_aug.ncols();
     maybe_perturb_initial_xb(&mut x_b);
     let mut state = BoundedDualState {
         basis,

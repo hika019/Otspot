@@ -4547,17 +4547,19 @@ fn conic_problem_validate_rejects_non_finite_c_b_h_and_matrix_values() {
         assert!(p.validate().is_err(), "h={bad}");
 
         // `CscMatrix::from_triplets` already rejects non-finite entries at
-        // construction (its own, separate finite-data guard), so reach the
-        // stored `values` directly (same-crate `pub(crate)` field) to
-        // exercise `validate()`'s check independent of that upstream one.
+        // construction (its own, separate finite-data guard), so mutate an
+        // already-built matrix via `values_mut()` (otspot-num's encapsulated
+        // accessor — the field itself is `pub(crate)` to otspot-num, not
+        // reachable from here) to exercise `validate()`'s check independent
+        // of that upstream one.
         let mut p = valid_box_socp();
-        p.g.values[0] = bad;
+        p.g.values_mut()[0] = bad;
         assert!(p.validate().is_err(), "G={bad}");
 
         let mut p = valid_box_socp();
         p.a = csc(&[vec![1.0]], 1, 1);
         p.b = vec![0.0];
-        p.a.values[0] = bad;
+        p.a.values_mut()[0] = bad;
         assert!(p.validate().is_err(), "A={bad}");
 
         let mut p = valid_box_socp();

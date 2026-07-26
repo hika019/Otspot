@@ -40,13 +40,13 @@ use otspot_num::sparse::CscMatrix;
 /// 対角負値は ‖Q‖_max 相対許容、Cholesky regularization は QPS 6 桁丸めを救う。
 #[cfg(test)]
 pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
-    let n = q.nrows;
+    let n = q.nrows();
     if n == 0 {
         return true;
     }
 
     let mut q_abs_max = 0.0_f64;
-    for &v in q.values.iter() {
+    for &v in q.values().iter() {
         let a = v.abs();
         if a > q_abs_max {
             q_abs_max = a;
@@ -56,8 +56,8 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
     const QPS_NEG_TOL_RATIO: f64 = 1e-6;
     let neg_tol = (q_abs_max * QPS_NEG_TOL_RATIO).max(1e-12);
     for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            if q.row_ind[k] == col && q.values[k] < -neg_tol {
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            if q.row_ind()[k] == col && q.values()[k] < -neg_tol {
                 return false;
             }
         }
@@ -73,10 +73,10 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
 
     let mut a = vec![0.0f64; n * n];
     for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            let row = q.row_ind[k];
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            let row = q.row_ind()[k];
             if row <= col {
-                let v = q.values[k];
+                let v = q.values()[k];
                 a[row * n + col] = v;
                 if row != col {
                     a[col * n + row] = v;

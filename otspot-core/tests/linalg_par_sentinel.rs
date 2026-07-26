@@ -62,7 +62,7 @@ const DIAG_BIAS_FLOOR: f64 = 1.0;
 const SOLVE_AGREEMENT_TOL: f64 = 1e-6;
 
 fn measure_factorize_solve(mat: &CscMatrix, rhs: &[f64], par: faer::Par) -> (f64, Vec<f64>) {
-    let n = mat.nrows;
+    let n = mat.nrows();
     let t0 = Instant::now();
     let factor = factorize_with_par(mat, par).expect("factorize_with_par failed");
     let mut sol = vec![0.0_f64; n];

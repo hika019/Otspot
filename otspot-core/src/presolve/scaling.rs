@@ -104,8 +104,8 @@ impl LpEquilibration {
             deadline.is_some_and(|d| std::time::Instant::now() >= d)
         }
 
-        let m = matrix.nrows;
-        let n = matrix.ncols;
+        let m = matrix.nrows();
+        let n = matrix.ncols();
 
         let mut cumul_row = vec![1.0f64; m];
         let mut cumul_col = vec![1.0f64; n];
@@ -120,12 +120,12 @@ impl LpEquilibration {
             }
             // Compute row maximums (iterate over all non-zeros)
             let mut row_max = vec![0.0f64; m];
-            for k in 0..a.row_ind.len() {
+            for k in 0..a.row_ind().len() {
                 if expired(deadline) {
                     return None;
                 }
-                let row = a.row_ind[k];
-                let v = a.values[k].abs();
+                let row = a.row_ind()[k];
+                let v = a.values()[k].abs();
                 if v > row_max[row] {
                     row_max[row] = v;
                 }
@@ -137,13 +137,13 @@ impl LpEquilibration {
                 if expired(deadline) {
                     return None;
                 }
-                let start = a.col_ptr[j];
-                let end = a.col_ptr[j + 1];
+                let start = a.col_ptr()[j];
+                let end = a.col_ptr()[j + 1];
                 for k in start..end {
                     if expired(deadline) {
                         return None;
                     }
-                    let v = a.values[k].abs();
+                    let v = a.values()[k].abs();
                     if v > *col_max_j {
                         *col_max_j = v;
                     }
@@ -184,14 +184,14 @@ impl LpEquilibration {
                 if expired(deadline) {
                     return None;
                 }
-                let start = a.col_ptr[j];
-                let end = a.col_ptr[j + 1];
+                let start = a.col_ptr()[j];
+                let end = a.col_ptr()[j + 1];
                 for k in start..end {
                     if expired(deadline) {
                         return None;
                     }
-                    let row = a.row_ind[k];
-                    a.values[k] *= row_factor[row] * cf;
+                    let row = a.row_ind()[k];
+                    a.values_mut()[k] *= row_factor[row] * cf;
                 }
             }
 
@@ -281,11 +281,11 @@ mod tests {
         let (scaled_a, _, _, _, _) = LpEquilibration::scale(&a, &b, &c);
 
         // After scaling, all entries should be close to 1 in magnitude
-        for k in 0..scaled_a.values.len() {
+        for k in 0..scaled_a.values().len() {
             assert!(
-                scaled_a.values[k].abs() < 2.0,
+                scaled_a.values()[k].abs() < 2.0,
                 "Entry {} too large after scaling",
-                scaled_a.values[k]
+                scaled_a.values()[k]
             );
         }
     }

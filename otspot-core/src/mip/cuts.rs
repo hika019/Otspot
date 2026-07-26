@@ -601,7 +601,7 @@ fn classify_slack_cols(lp: &LpProblem, sf: &StandardForm) -> Vec<Option<SlackKin
 
 fn row_lists(a: &CscMatrix, num_rows: usize) -> Vec<Vec<(usize, f64)>> {
     let mut rows = vec![Vec::new(); num_rows];
-    for c in 0..a.ncols {
+    for c in 0..a.ncols() {
         let (rs, vs) = a.column(c);
         for (&r, &v) in rs.iter().zip(vs) {
             rows[r].push((c, v));
@@ -627,7 +627,7 @@ fn append_ge_rows_with_integer_mask(
     let mut trip_rows: Vec<usize> = Vec::new();
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();
-    for c in 0..lp.a.ncols {
+    for c in 0..lp.a.ncols() {
         let (rs, vs) = lp.a.column(c);
         for (&r, &v) in rs.iter().zip(vs) {
             trip_rows.push(r);
@@ -712,7 +712,7 @@ fn convert_cuts_to_le_with_integer_mask(
     let mut trip_rows: Vec<usize> = Vec::new();
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();
-    for c in 0..lp.a.ncols {
+    for c in 0..lp.a.ncols() {
         let (rs, vs) = lp.a.column(c);
         for (&r, &v) in rs.iter().zip(vs) {
             trip_rows.push(r);

@@ -11,7 +11,7 @@ pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult
     if result.solution.len() != n {
         return f64::INFINITY;
     }
-    if problem.a.nrows > 0 && result.dual_solution.len() != problem.a.nrows {
+    if problem.a.nrows() > 0 && result.dual_solution.len() != problem.a.nrows() {
         return f64::INFINITY;
     }
     let x = &result.solution;
@@ -19,7 +19,7 @@ pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult
         "q.ncols() == x.len() == num_vars: QpProblem::new() enforces \
          q.ncols() == num_vars, and solution.len() == n is checked above",
     );
-    let aty: Vec<f64> = if problem.a.nrows > 0 && !result.dual_solution.is_empty() {
+    let aty: Vec<f64> = if problem.a.nrows() > 0 && !result.dual_solution.is_empty() {
         problem
             .a
             .transpose()
@@ -27,7 +27,7 @@ pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult
             .expect(
                 "a.transpose().ncols() == a.nrows() == num_constraints == dual_solution.len(): \
              QpProblem::new() enforces a.nrows() == num_constraints, and \
-             dual_solution.len() == a.nrows is checked above",
+             dual_solution.len() == a.nrows() is checked above",
             )
     } else {
         vec![0.0_f64; n]

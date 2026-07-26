@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2935 testcases, 26 ignored
+# totals: 2938 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -2353,6 +2353,7 @@ otspot-num	sparse::compress::tests::test_unsorted_input_sorted_output	active
 otspot-num	sparse::csc::tests::test_column_matches_get_column_in_bounds	active
 otspot-num	sparse::csc::tests::test_column_out_of_bounds_panics	active
 otspot-num	sparse::csc::tests::test_empty_matrix	active
+otspot-num	sparse::csc::tests::test_from_raw_parts_accepts_well_formed_matrix	active
 otspot-num	sparse::csc::tests::test_from_triplets_basic	active
 otspot-num	sparse::csc::tests::test_from_triplets_duplicate_entries	active
 otspot-num	sparse::csc::tests::test_from_triplets_mismatched_lengths	active
@@ -2363,8 +2364,10 @@ otspot-num	sparse::csc::tests::test_mat_vec_mul	active
 otspot-num	sparse::csc::tests::test_mat_vec_mul_dimension_mismatch	active
 otspot-num	sparse::csc::tests::test_sentinel_triplet_non_finite_rejected	active
 otspot-num	sparse::csc::tests::test_transpose	active
+otspot-num	sparse::vec::tests::test_accessors_match_dense_expansion	active
 otspot-num	sparse::vec::tests::test_from_raw_parts_empty	active
 otspot-num	sparse::vec::tests::test_from_raw_parts_matches_from_dense	active
+otspot-num	sparse::vec::tests::test_sentinel_clear_empties_entries_keeps_dim	active
 otspot-num	sparse::vec::tests::test_sparse_vec_from_dense_to_dense	active
 otspot-num	sparse::view::tests::rejects_unsorted_or_duplicate_rows	active
 otspot-num	sparse::view::tests::validates_canonical_csc	active

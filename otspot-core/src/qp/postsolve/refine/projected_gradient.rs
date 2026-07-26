@@ -23,8 +23,8 @@ pub(crate) fn refine_dual_projected_gradient(
     let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
     for col in 0..n {
         let xv = result.solution[col];
-        for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            qx_dd[problem.q.row_ind[k]] += TwoFloat::new_mul(problem.q.values[k], xv);
+        for k in problem.q.col_ptr()[col]..problem.q.col_ptr()[col + 1] {
+            qx_dd[problem.q.row_ind()[k]] += TwoFloat::new_mul(problem.q.values()[k], xv);
         }
     }
     let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
@@ -36,7 +36,7 @@ pub(crate) fn refine_dual_projected_gradient(
     // y は常に長さ m (project_feasible / caller が保証)、a.transpose().ncols() == a.nrows()
     // == m なので mat_vec_mul は常に成功する。失敗経路がないため Option でなく値を直接返す。
     let objective = |y: &[f64]| -> (f64, Vec<f64>) {
-        let aty = if problem.a.nrows > 0 {
+        let aty = if problem.a.nrows() > 0 {
             problem
                 .a
                 .transpose()
@@ -64,13 +64,13 @@ pub(crate) fn refine_dual_projected_gradient(
         }
     }
     for j in 0..n {
-        let cs = problem.a.col_ptr[j];
-        let ce = problem.a.col_ptr[j + 1];
+        let cs = problem.a.col_ptr()[j];
+        let ce = problem.a.col_ptr()[j + 1];
         if ce - cs != 1 {
             continue;
         }
-        let row = problem.a.row_ind[cs];
-        let aij = problem.a.values[cs];
+        let row = problem.a.row_ind()[cs];
+        let aij = problem.a.values()[cs];
         if !aij.is_finite() || aij == 0.0 {
             continue;
         }

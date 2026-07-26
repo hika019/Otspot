@@ -70,9 +70,9 @@ pub(crate) fn interval_quadratic_bounds(problem: &QpProblem, bounds: &[(f64, f64
     // 正しい 0.5 x'Qx 値域になる。
     for col in 0..n {
         let (a_c, b_c) = bounds[col];
-        for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            let row = problem.q.row_ind[k];
-            let v = problem.q.values[k];
+        for k in problem.q.col_ptr()[col]..problem.q.col_ptr()[col + 1] {
+            let row = problem.q.row_ind()[k];
+            let v = problem.q.values()[k];
             let coeff = 0.5 * v;
             if row == col {
                 let (x2_min, x2_max) = square_interval(a_c, b_c);

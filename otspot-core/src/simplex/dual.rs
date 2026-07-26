@@ -26,8 +26,7 @@ thread_local! {
 #[cfg(test)]
 fn reject_eta_for_test(alpha: &mut SparseVec) {
     if ETA_UPDATE_DISABLE.get() {
-        alpha.indices.clear();
-        alpha.values.clear();
+        alpha.clear();
     }
 }
 

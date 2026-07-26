@@ -149,7 +149,7 @@ pub(crate) fn crossover_dual_from_primal(
         m,
         n_orig,
         n_total,
-        sf.a.values.len()
+        sf.a.values().len()
     ));
 
     let options = SolverOptions {
@@ -272,8 +272,8 @@ pub(crate) fn crossover_dual_from_primal(
             basis_mgr.ftran(&mut d_sv);
             let mut best_row: Option<usize> = None;
             let mut best_abs = PIVOT_TOL;
-            for (k, &row) in d_sv.indices.iter().enumerate() {
-                let abs = d_sv.values[k].abs();
+            for (k, &row) in d_sv.indices().iter().enumerate() {
+                let abs = d_sv.values()[k].abs();
                 if abs > best_abs && removable(basis[row]) {
                     best_abs = abs;
                     best_row = Some(row);

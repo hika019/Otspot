@@ -64,9 +64,9 @@ fn canonicalize_tightened_bounds(lb: f64, ub: f64, is_integer: bool) -> Option<(
 fn build_rows(n: usize, a: &CscMatrix, m: usize) -> Vec<Vec<(usize, f64)>> {
     let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
     for j in 0..n {
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let row = a.row_ind[k];
-            let val = a.values[k];
+        for k in a.col_ptr()[j]..a.col_ptr()[j + 1] {
+            let row = a.row_ind()[k];
+            let val = a.values()[k];
             if val.abs() >= ZERO_TOL {
                 rows[row].push((j, val));
             }

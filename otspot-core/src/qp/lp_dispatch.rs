@@ -386,7 +386,7 @@ fn should_try_lp_ipm(lp: &LpProblem, options: &SolverOptions) -> bool {
         return false;
     }
     lp.num_vars.saturating_add(lp.num_constraints) >= LP_IPM_MIN_DIMENSION
-        && lp.a.values.len() >= LP_IPM_MIN_DIMENSION
+        && lp.a.values().len() >= LP_IPM_MIN_DIMENSION
 }
 
 const HUGE_WIDE_LP_MIN_VARS: usize = 300_000;

@@ -91,11 +91,11 @@ pub(crate) fn add_eta_sparse(
     }
 
     // Other non-zero entries: -pivot_col[i] / pivot_element
-    for (k, &idx) in pivot_col.indices.iter().enumerate() {
+    for (k, &idx) in pivot_col.indices().iter().enumerate() {
         if idx == leaving_row {
             continue;
         }
-        let val = -pivot_col.values[k] / pivot_element;
+        let val = -pivot_col.values()[k] / pivot_element;
         if val.abs() > ZERO_TOL {
             indices.push(idx);
             values.push(val);

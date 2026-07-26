@@ -43,7 +43,7 @@ pub(crate) fn refine_dual_worst_active_block(
         "q.ncols() == solution.len() == num_vars: QpProblem::new() enforces \
          q.ncols() == num_vars, and solution.len() == n is checked above",
     );
-    let aty = if problem.a.nrows > 0 {
+    let aty = if problem.a.nrows() > 0 {
         problem
             .a
             .transpose()
@@ -81,8 +81,8 @@ pub(crate) fn refine_dual_worst_active_block(
         return;
     };
     let mut rows = Vec::new();
-    for k in problem.a.col_ptr[worst_j]..problem.a.col_ptr[worst_j + 1] {
-        let row = problem.a.row_ind[k];
+    for k in problem.a.col_ptr()[worst_j]..problem.a.col_ptr()[worst_j + 1] {
+        let row = problem.a.row_ind()[k];
         if row_is_active_for_dual_recovery(
             problem,
             row,
@@ -116,11 +116,11 @@ pub(crate) fn refine_dual_worst_active_block(
         current_local_residual[col] = residual;
         let mut col_vec = vec![0.0_f64; rlen];
         let mut touches = false;
-        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            let row = problem.a.row_ind[k];
+        for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+            let row = problem.a.row_ind()[k];
             let pos = row_pos[row];
             if pos != usize::MAX {
-                col_vec[pos] = problem.a.values[k];
+                col_vec[pos] = problem.a.values()[k];
                 touches = true;
             }
         }
@@ -172,11 +172,11 @@ pub(crate) fn refine_dual_worst_active_block(
     if let Some(ref delta_row) = row_only_sol {
         for col in 0..n {
             let mut delta = 0.0_f64;
-            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-                let row = problem.a.row_ind[k];
+            for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+                let row = problem.a.row_ind()[k];
                 let pos = row_pos[row];
                 if pos != usize::MAX {
-                    delta += problem.a.values[k] * delta_row[pos];
+                    delta += problem.a.values()[k] * delta_row[pos];
                 }
             }
             provisional_residual[col] += delta;
@@ -186,8 +186,8 @@ pub(crate) fn refine_dual_worst_active_block(
     let mut cols = Vec::new();
     for col in 0..n {
         let mut touches = false;
-        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            if row_pos[problem.a.row_ind[k]] != usize::MAX {
+        for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+            if row_pos[problem.a.row_ind()[k]] != usize::MAX {
                 touches = true;
                 break;
             }
@@ -223,11 +223,11 @@ pub(crate) fn refine_dual_worst_active_block(
     let mut local_aty = vec![0.0_f64; cols.len()];
     let mut local_bound_contrib = vec![0.0_f64; cols.len()];
     for (ci, &col) in cols.iter().enumerate() {
-        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            let row = problem.a.row_ind[k];
+        for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+            let row = problem.a.row_ind()[k];
             let pos = row_pos[row];
             if pos != usize::MAX {
-                local_aty[ci] += problem.a.values[k] * result.dual_solution[row];
+                local_aty[ci] += problem.a.values()[k] * result.dual_solution[row];
             }
         }
         let bpos = bound_pos_of_var[col];
@@ -242,11 +242,11 @@ pub(crate) fn refine_dual_worst_active_block(
     for &col in &cols {
         let residual = qx[col] + problem.c[col] + aty[col] + bound_contrib[col];
         let mut col_vec = vec![0.0_f64; ulen];
-        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            let row = problem.a.row_ind[k];
+        for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+            let row = problem.a.row_ind()[k];
             let pos = row_pos[row];
             if pos != usize::MAX {
-                col_vec[pos] = problem.a.values[k];
+                col_vec[pos] = problem.a.values()[k];
             }
         }
         let bpos = bound_pos_of_var[col];

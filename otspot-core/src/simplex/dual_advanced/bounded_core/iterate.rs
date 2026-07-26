@@ -446,8 +446,7 @@ pub(crate) fn iterate(
             SparseVec::from_raw_parts(col_rows.to_vec(), col_vals.to_vec(), m);
         basis_mgr.ftran(&mut alpha_sv_for_update);
         if eta_update_disabled() {
-            alpha_sv_for_update.indices.clear();
-            alpha_sv_for_update.values.clear();
+            alpha_sv_for_update.clear();
         }
         match basis_mgr.update(entering_col, r, &alpha_sv_for_update) {
             Ok(()) => {}

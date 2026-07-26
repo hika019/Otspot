@@ -247,7 +247,7 @@ mod failure_tests {
 
         assert!(!result.was_reduced);
         assert_eq!(result.reduced_problem.a.nnz(), 1);
-        assert_eq!(result.reduced_problem.a.values, [1.0]);
+        assert_eq!(result.reduced_problem.a.values(), [1.0]);
         assert!(result.postsolve_stack.is_empty());
         assert_eq!(result.obj_offset, problem.obj_offset);
         assert_eq!(result.reduced_problem.obj_offset, problem.obj_offset);
@@ -269,7 +269,7 @@ mod failure_tests {
 
         assert!(!result.was_reduced);
         assert_eq!(result.reduced_problem.c, problem.c);
-        assert_eq!(result.reduced_problem.a.values, problem.a.values);
+        assert_eq!(result.reduced_problem.a.values(), problem.a.values());
         assert_eq!(result.reduced_problem.b, problem.b);
         assert_eq!(result.obj_offset, problem.obj_offset);
         assert_eq!(result.reduced_problem.obj_offset, problem.obj_offset);

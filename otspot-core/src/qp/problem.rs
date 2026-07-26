@@ -122,16 +122,22 @@ impl QpProblem {
     ) -> Result<Self, QpProblemError> {
         let n = c.len();
         let m = b.len();
-        if q.nrows != n || q.ncols != n {
+        if q.nrows() != n || q.ncols() != n {
             return Err(QpProblemError::DimensionMismatch(format!(
                 "Q must be {}x{}, got {}x{}",
-                n, n, q.nrows, q.ncols
+                n,
+                n,
+                q.nrows(),
+                q.ncols()
             )));
         }
-        if a.nrows != m || a.ncols != n {
+        if a.nrows() != m || a.ncols() != n {
             return Err(QpProblemError::DimensionMismatch(format!(
                 "A must be {}x{}, got {}x{}",
-                m, n, a.nrows, a.ncols
+                m,
+                n,
+                a.nrows(),
+                a.ncols()
             )));
         }
         if bounds.len() != n {
@@ -164,7 +170,7 @@ impl QpProblem {
                 });
             }
         }
-        for (i, &v) in q.values.iter().enumerate() {
+        for (i, &v) in q.values().iter().enumerate() {
             if !v.is_finite() {
                 return Err(QpProblemError::NonFiniteCoefficient {
                     field: "Q",
@@ -172,7 +178,7 @@ impl QpProblem {
                 });
             }
         }
-        for (i, &v) in a.values.iter().enumerate() {
+        for (i, &v) in a.values().iter().enumerate() {
             if !v.is_finite() {
                 return Err(QpProblemError::NonFiniteCoefficient {
                     field: "A",
@@ -220,7 +226,7 @@ impl QpProblem {
     /// 閾値判定 (例 `|v| < 1e-12`) は微小 Q QP を LP 化して status を変える
     /// (例 bounded QP → false-Unbounded)。dispatch は status を変えてはならない。
     pub fn is_zero_q(&self) -> bool {
-        self.q.values.iter().all(|&v| v == 0.0)
+        self.q.values().iter().all(|&v| v == 0.0)
     }
 
     /// Returns `true` if the problem has at least one constraint with a non-zero quadratic term.
@@ -341,11 +347,11 @@ impl QpProblem {
     /// Q が対角行列かどうかを検査する
     pub fn is_diagonal_q(&self) -> bool {
         for col in 0..self.num_vars {
-            let start = self.q.col_ptr[col];
-            let end = self.q.col_ptr[col + 1];
+            let start = self.q.col_ptr()[col];
+            let end = self.q.col_ptr()[col + 1];
             for k in start..end {
-                let row = self.q.row_ind[k];
-                if row != col && self.q.values[k].abs() > 1e-12 {
+                let row = self.q.row_ind()[k];
+                if row != col && self.q.values()[k].abs() > 1e-12 {
                     return false;
                 }
             }
@@ -505,7 +511,7 @@ mod tests {
         let bad_vals = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
         for bad in bad_vals {
             let mut q = CscMatrix::from_triplets(&[0], &[0], &[1.0], n, n).unwrap();
-            q.values[0] = bad; // inject bad value directly
+            q.values_mut()[0] = bad; // inject bad value directly
             let a = CscMatrix::new(1, n);
             let c = vec![1.0, 2.0];
             let b = vec![5.0];
@@ -530,7 +536,7 @@ mod tests {
         for bad in bad_vals {
             let q = CscMatrix::new(n, n);
             let mut a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap();
-            a.values[0] = bad; // inject bad value directly
+            a.values_mut()[0] = bad; // inject bad value directly
             let c = vec![1.0, 2.0];
             let b = vec![5.0];
             let bounds = vec![(0.0, f64::INFINITY); n];

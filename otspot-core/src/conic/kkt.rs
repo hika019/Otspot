@@ -1041,11 +1041,11 @@ mod tests {
         let mut probe_mat = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
 
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            probe_mat.values[0] = value;
+            probe_mat.values_mut()[0] = value;
             assert!(!probe_kkt_health(&factor, &probe_mat, &[1.0]));
         }
 
-        probe_mat.values[0] = f64::MAX;
+        probe_mat.values_mut()[0] = f64::MAX;
         assert!(
             !probe_kkt_health(&factor, &probe_mat, &[2.0]),
             "finite inputs whose matrix product overflows must yield an unhealthy residual"

@@ -37,8 +37,7 @@ thread_local! {
 #[cfg(test)]
 fn reject_eta_for_test(alpha: &mut SparseVec) {
     if ETA_UPDATE_DISABLE.get() {
-        alpha.indices.clear();
-        alpha.values.clear();
+        alpha.clear();
     }
 }
 
@@ -64,8 +63,8 @@ fn update_eta(
     if ETA_UPDATE_INTERNAL_ERROR.get() {
         return Err(otspot_num::SolverError::DimensionMismatch {
             field: "injected_eta",
-            expected: alpha.len,
-            got: alpha.len.saturating_add(1),
+            expected: alpha.dim(),
+            got: alpha.dim().saturating_add(1),
         });
     }
     basis_mgr.update(entering_col, leaving_row, alpha)

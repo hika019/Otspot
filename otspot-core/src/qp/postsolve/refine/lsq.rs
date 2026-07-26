@@ -32,21 +32,21 @@ pub(crate) fn refine_dual_lsq(
     let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
     for col in 0..n {
         let xv = result.solution[col];
-        let cs = problem.q.col_ptr[col];
-        let ce = problem.q.col_ptr[col + 1];
+        let cs = problem.q.col_ptr()[col];
+        let ce = problem.q.col_ptr()[col + 1];
         for k in cs..ce {
-            let row = problem.q.row_ind[k];
-            qx_dd[row] += TwoFloat::new_mul(problem.q.values[k], xv);
+            let row = problem.q.row_ind()[k];
+            qx_dd[row] += TwoFloat::new_mul(problem.q.values()[k], xv);
         }
     }
     let aty_dd = |y: &[f64]| -> Vec<TwoFloat> {
         let mut acc: Vec<TwoFloat> = vec![zero_dd; n];
         for col in 0..n {
-            let cs = problem.a.col_ptr[col];
-            let ce = problem.a.col_ptr[col + 1];
+            let cs = problem.a.col_ptr()[col];
+            let ce = problem.a.col_ptr()[col + 1];
             for k in cs..ce {
-                let row = problem.a.row_ind[k];
-                acc[col] += TwoFloat::new_mul(problem.a.values[k], y[row]);
+                let row = problem.a.row_ind()[k];
+                acc[col] += TwoFloat::new_mul(problem.a.values()[k], y[row]);
             }
         }
         acc
@@ -122,8 +122,8 @@ pub(crate) fn refine_dual_lsq_irls(
     let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
     for col in 0..n {
         let xv = result.solution[col];
-        for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            qx_dd[problem.q.row_ind[k]] += TwoFloat::new_mul(problem.q.values[k], xv);
+        for k in problem.q.col_ptr()[col]..problem.q.col_ptr()[col + 1] {
+            qx_dd[problem.q.row_ind()[k]] += TwoFloat::new_mul(problem.q.values()[k], xv);
         }
     }
     let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
@@ -146,9 +146,9 @@ pub(crate) fn refine_dual_lsq_irls(
     let compute_aty = |y: &[f64]| -> Vec<f64> {
         let mut acc: Vec<TwoFloat> = vec![zero_dd; n];
         for col in 0..n {
-            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-                let row = problem.a.row_ind[k];
-                acc[col] += TwoFloat::new_mul(problem.a.values[k], y[row]);
+            for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+                let row = problem.a.row_ind()[k];
+                acc[col] += TwoFloat::new_mul(problem.a.values()[k], y[row]);
             }
         }
         acc.iter().map(|&v| f64::from(v)).collect()
@@ -214,10 +214,10 @@ pub(crate) fn refine_dual_lsq_irls(
             if (s - 1.0).abs() < 1e-15 {
                 continue;
             }
-            let cs = a_scaled.col_ptr[k];
-            let ce = a_scaled.col_ptr[k + 1];
+            let cs = a_scaled.col_ptr()[k];
+            let ce = a_scaled.col_ptr()[k + 1];
             for idx in cs..ce {
-                a_scaled.values[idx] *= s;
+                a_scaled.values_mut()[idx] *= s;
             }
         }
 
@@ -236,9 +236,9 @@ pub(crate) fn refine_dual_lsq_irls(
         let mut rhs_dd: Vec<TwoFloat> = vec![zero_dd; m];
         for col in 0..n {
             let wt = weights[col] * target[col];
-            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-                let row = problem.a.row_ind[k];
-                rhs_dd[row] += TwoFloat::new_mul(problem.a.values[k], wt);
+            for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+                let row = problem.a.row_ind()[k];
+                rhs_dd[row] += TwoFloat::new_mul(problem.a.values()[k], wt);
             }
         }
         let rhs: Vec<f64> = rhs_dd.iter().map(|&v| f64::from(v)).collect();

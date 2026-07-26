@@ -28,8 +28,8 @@ pub(crate) fn solve_with_iterative_refinement(
     // total = n + m_ext で確保するため sol.len() がそのまま拡大系の次元)。
     let aug_dim = sol.len();
     debug_assert_eq!(rhs.len(), aug_dim);
-    debug_assert_eq!(aug_mat.nrows, aug_dim);
-    debug_assert_eq!(aug_mat.ncols, aug_dim);
+    debug_assert_eq!(aug_mat.nrows(), aug_dim);
+    debug_assert_eq!(aug_mat.ncols(), aug_dim);
 
     // Primary solve: zero sol on MINRES error to prevent NaN; IPM continues with
     // degraded steps until residual stall or max_iter.
@@ -72,10 +72,10 @@ pub(crate) fn solve_with_iterative_refinement(
         for v in kx.iter_mut() {
             *v = 0.0;
         }
-        for col in 0..aug_mat.ncols {
-            for ptr in aug_mat.col_ptr[col]..aug_mat.col_ptr[col + 1] {
-                let row = aug_mat.row_ind[ptr];
-                let val = aug_mat.values[ptr];
+        for col in 0..aug_mat.ncols() {
+            for ptr in aug_mat.col_ptr()[col]..aug_mat.col_ptr()[col + 1] {
+                let row = aug_mat.row_ind()[ptr];
+                let val = aug_mat.values()[ptr];
                 kx[row] += val * sol[col];
                 if row != col {
                     kx[col] += val * sol[row];
@@ -199,12 +199,12 @@ pub(crate) fn solve_kkt_via_schur(
     let zero_dd = TwoFloat::from(0.0);
     let mut a_dx_dd: Vec<TwoFloat> = vec![zero_dd; m_ext];
     for col in 0..n {
-        let cs = a_ext.col_ptr[col];
-        let ce = a_ext.col_ptr[col + 1];
+        let cs = a_ext.col_ptr()[col];
+        let ce = a_ext.col_ptr()[col + 1];
         let dx_col = dx_out[col];
         for k in cs..ce {
-            let row = a_ext.row_ind[k];
-            let v = a_ext.values[k];
+            let row = a_ext.row_ind()[k];
+            let v = a_ext.values()[k];
             a_dx_dd[row] += TwoFloat::new_mul(v, dx_col);
         }
     }
@@ -850,7 +850,8 @@ mod tests {
         let delta_d = 0.02_f64;
 
         let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
-        let aug_perm = amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, None);
+        let aug_perm =
+            amd_with_deadline(aug_mat.nrows(), aug_mat.col_ptr(), aug_mat.row_ind(), None);
         let aug_fac = otspot_num::linalg::kkt_solver::KktFactor::Direct(
             otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
                 &aug_mat,
@@ -863,7 +864,7 @@ mod tests {
         );
 
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
-        let s_perm = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
+        let s_perm = amd_with_deadline(s_mat.nrows(), s_mat.col_ptr(), s_mat.row_ind(), None);
         let s_fac = otspot_num::linalg::kkt_solver::KktFactor::Direct(
             otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
                 &s_mat,
@@ -944,7 +945,7 @@ mod tests {
         let delta_d = 0.05_f64;
 
         let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
-        let perm: Vec<usize> = (0..aug_mat.nrows).collect();
+        let perm: Vec<usize> = (0..aug_mat.nrows()).collect();
         let aug_fac = otspot_num::linalg::kkt_solver::KktFactor::Direct(
             otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
                 &aug_mat,
@@ -958,7 +959,7 @@ mod tests {
 
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let s_perm: Vec<usize> =
-            amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
+            amd_with_deadline(s_mat.nrows(), s_mat.col_ptr(), s_mat.row_ind(), None);
         let s_fac = otspot_num::linalg::kkt_solver::KktFactor::Direct(
             otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
                 &s_mat,
@@ -1127,7 +1128,7 @@ mod tests {
         let delta_d = 0.05_f64;
 
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
-        let s_perm = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
+        let s_perm = amd_with_deadline(s_mat.nrows(), s_mat.col_ptr(), s_mat.row_ind(), None);
         let s_fac = otspot_num::linalg::kkt_solver::KktFactor::Direct(
             otspot_num::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
                 &s_mat,

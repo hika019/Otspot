@@ -135,20 +135,20 @@ fn build_basis_csc(a: &CscMatrix, basis: &[usize], m: usize) -> Result<BasisCscP
     let mut tmp: Vec<(usize, f64)> = Vec::new();
 
     for (j, &col_idx) in basis.iter().enumerate() {
-        if col_idx >= a.ncols {
+        if col_idx >= a.ncols() {
             return Err(SolverError::IndexOutOfBounds {
                 context: "basis_column",
                 index: col_idx,
-                bound: a.ncols,
+                bound: a.ncols(),
             });
         }
-        let start = a.col_ptr[col_idx];
-        let end = a.col_ptr[col_idx + 1];
+        let start = a.col_ptr()[col_idx];
+        let end = a.col_ptr()[col_idx + 1];
         tmp.clear();
         for k in start..end {
-            let row = a.row_ind[k];
+            let row = a.row_ind()[k];
             if row < m {
-                tmp.push((row, a.values[k]));
+                tmp.push((row, a.values()[k]));
             }
         }
         tmp.sort_by_key(|&(r, _)| r);

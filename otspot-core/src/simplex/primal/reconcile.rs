@@ -247,7 +247,7 @@ pub(crate) fn pivot_out_degenerate_artificials(
         .collect();
 
     // Build is_basic mask for the current basis.
-    let mut is_basic = vec![false; a_ext.ncols];
+    let mut is_basic = vec![false; a_ext.ncols()];
     for &col in basis.iter() {
         is_basic[col] = true;
     }
@@ -431,7 +431,7 @@ pub(crate) fn pivot_out_degenerate_artificials(
             #[cfg(test)]
             super::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.with(|c| c.set(c.get() + 1));
             if let Some(mut b_lu) = b_before_opt {
-                let mut seq_is_basic = vec![false; a_ext.ncols];
+                let mut seq_is_basic = vec![false; a_ext.ncols()];
                 for &col in basis.iter() {
                     seq_is_basic[col] = true;
                 }
@@ -479,7 +479,7 @@ pub(crate) fn pivot_out_degenerate_artificials(
                 if let Ok(mut basis_mgr) =
                     LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline)
                 {
-                    let mut seq_is_basic = vec![false; a_ext.ncols];
+                    let mut seq_is_basic = vec![false; a_ext.ncols()];
                     for &col in basis.iter() {
                         seq_is_basic[col] = true;
                     }

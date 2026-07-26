@@ -221,14 +221,14 @@ impl Equilibrator {
         for col in 0..n {
             for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
                 let row = problem.a.row_ind()[k];
-                a.values[k] = self.e_a[row] * problem.a.values()[k] * self.d[col];
+                a.values_mut()[k] = self.e_a[row] * problem.a.values()[k] * self.d[col];
             }
         }
         let mut g = problem.g.clone();
         for col in 0..n {
             for k in problem.g.col_ptr()[col]..problem.g.col_ptr()[col + 1] {
                 let row = problem.g.row_ind()[k];
-                g.values[k] = self.e_g[row] * problem.g.values()[k] * self.d[col];
+                g.values_mut()[k] = self.e_g[row] * problem.g.values()[k] * self.d[col];
             }
         }
         let b: Vec<f64> = problem
@@ -689,7 +689,7 @@ mod tests {
             let mut out = m.clone();
             for col in 0..m.ncols() {
                 for k in m.col_ptr()[col]..m.col_ptr()[col + 1] {
-                    out.values[k] = m.values()[k] * t[col];
+                    out.values_mut()[k] = m.values()[k] * t[col];
                 }
             }
             out

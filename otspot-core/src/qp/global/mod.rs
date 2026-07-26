@@ -432,12 +432,12 @@ fn is_polish_acceptable(
 /// of the same problem (B&B only changes bounds, never Q or A).
 fn structural_empty_col_mask(problem: &QpProblem) -> Vec<bool> {
     let n = problem.num_vars;
-    let a_ncols = problem.a.col_ptr.len().saturating_sub(1);
-    let q_ncols = problem.q.col_ptr.len().saturating_sub(1);
+    let a_ncols = problem.a.col_ptr().len().saturating_sub(1);
+    let q_ncols = problem.q.col_ptr().len().saturating_sub(1);
     (0..n)
         .map(|j| {
-            let a_empty = j >= a_ncols || problem.a.col_ptr[j + 1] == problem.a.col_ptr[j];
-            let q_empty = j >= q_ncols || problem.q.col_ptr[j + 1] == problem.q.col_ptr[j];
+            let a_empty = j >= a_ncols || problem.a.col_ptr()[j + 1] == problem.a.col_ptr()[j];
+            let q_empty = j >= q_ncols || problem.q.col_ptr()[j + 1] == problem.q.col_ptr()[j];
             a_empty && q_empty
         })
         .collect()

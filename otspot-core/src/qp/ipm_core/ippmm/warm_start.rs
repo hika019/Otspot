@@ -72,8 +72,8 @@ pub(super) fn apply_qp_warm_start(
     // 自然な slack s = b_ext − A_ext·x (ineq は WARM_SY_MIN で boundary 退避)。
     let mut ax = vec![0.0_f64; m_ext];
     for col in 0..n {
-        for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
-            ax[a_ext.row_ind[k]] += a_ext.values[k] * x[col];
+        for k in a_ext.col_ptr()[col]..a_ext.col_ptr()[col + 1] {
+            ax[a_ext.row_ind()[k]] += a_ext.values()[k] * x[col];
         }
     }
     for i in 0..m_ext {

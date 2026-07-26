@@ -356,7 +356,7 @@ fn build_phase1_system(
     let mut trip_rows: Vec<usize> = Vec::new();
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();
-    for j in 0..a.ncols {
+    for j in 0..a.ncols() {
         let (r, v) = a.column(j);
         for (k, &row) in r.iter().enumerate() {
             trip_rows.push(row);
@@ -623,7 +623,7 @@ fn finalize_phase2(
     total_iters: &mut usize,
 ) -> SolverResult {
     let m = sf.m;
-    let n_cols = a.ncols;
+    let n_cols = a.ncols();
     let mut pricing = SteepestEdgePricing::new(n_cols);
     let outcome = revised_simplex_core(
         a,

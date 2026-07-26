@@ -11,11 +11,11 @@ use crate::tolerances::{
 use otspot_num::sparse::CscMatrix;
 
 pub(super) fn q_diagonal(q: &CscMatrix, j: usize) -> f64 {
-    let start = q.col_ptr[j];
-    let end = q.col_ptr[j + 1];
+    let start = q.col_ptr()[j];
+    let end = q.col_ptr()[j + 1];
     for k in start..end {
-        if q.row_ind[k] == j {
-            return q.values[k];
+        if q.row_ind()[k] == j {
+            return q.values()[k];
         }
     }
     0.0
@@ -30,7 +30,7 @@ pub(super) fn q_diagonal(q: &CscMatrix, j: usize) -> f64 {
 /// 時に落とすため、stored 値は構造的非ゼロである。全 step がこの単一述語を共有し、
 /// 横展開漏れ (閾値ドリフト) を構造的に封じる。
 pub(super) fn col_has_structural_q(q: &CscMatrix, j: usize) -> bool {
-    (q.col_ptr[j]..q.col_ptr[j + 1]).any(|k| q.values[k] != 0.0)
+    (q.col_ptr()[j]..q.col_ptr()[j + 1]).any(|k| q.values()[k] != 0.0)
 }
 
 /// Kahan-compensated `*sum += delta` to keep presolve-induced rounding noise
@@ -58,23 +58,23 @@ pub(super) fn apply_fixed_variable(j: usize, val: f64, prob: &QpProblem, ws: &mu
     kahan_add(&mut ws.obj_offset, &mut ws.obj_offset_comp, ws.c[j] * val);
 
     // c[k] += Q[k,j]·val for k ≠ j (symmetric Q stored in full).
-    let start = prob.q.col_ptr[j];
-    let end = prob.q.col_ptr[j + 1];
+    let start = prob.q.col_ptr()[j];
+    let end = prob.q.col_ptr()[j + 1];
     for idx in start..end {
-        let k = prob.q.row_ind[idx];
+        let k = prob.q.row_ind()[idx];
         if k != j && k < n && !ws.removed_cols[k] {
-            let delta = prob.q.values[idx] * val;
+            let delta = prob.q.values()[idx] * val;
             kahan_add(&mut ws.c[k], &mut ws.c_comp[k], delta);
         }
     }
 
     // b[i] -= A[i,j]·val on every active row.
-    let col_start = prob.a.col_ptr[j];
-    let col_end = prob.a.col_ptr[j + 1];
+    let col_start = prob.a.col_ptr()[j];
+    let col_end = prob.a.col_ptr()[j + 1];
     for idx in col_start..col_end {
-        let row = prob.a.row_ind[idx];
+        let row = prob.a.row_ind()[idx];
         if row < m && !ws.removed_rows[row] {
-            let delta = -prob.a.values[idx] * val;
+            let delta = -prob.a.values()[idx] * val;
             kahan_add(&mut ws.b[row], &mut ws.b_comp[row], delta);
         }
     }
@@ -128,26 +128,26 @@ pub(super) fn count_block_components(q: &CscMatrix, a: &CscMatrix, n: usize) -> 
     }
 
     for j in 0..n {
-        let start = q.col_ptr[j];
-        let end = q.col_ptr[j + 1];
+        let start = q.col_ptr()[j];
+        let end = q.col_ptr()[j + 1];
         for k in start..end {
-            let row = q.row_ind[k];
+            let row = q.row_ind()[k];
             // 構造的非ゼロ pattern で連結成分を数える (doc 通り)。微小 off-diag Q を
             // 閾値で「結合なし」と誤分類しないよう構造的ゼロ判定に統一。
-            if row < n && row != j && q.values[k] != 0.0 {
+            if row < n && row != j && q.values()[k] != 0.0 {
                 union(&mut parent, j, row);
             }
         }
     }
 
-    let m = a.nrows;
+    let m = a.nrows();
     let mut row_vars: Vec<Vec<usize>> = vec![vec![]; m];
-    for j in 0..n.min(a.ncols) {
-        let start = a.col_ptr[j];
-        let end = a.col_ptr[j + 1];
+    for j in 0..n.min(a.ncols()) {
+        let start = a.col_ptr()[j];
+        let end = a.col_ptr()[j + 1];
         for k in start..end {
-            let row = a.row_ind[k];
-            if row < m && a.values[k].abs() > ZERO_TOL {
+            let row = a.row_ind()[k];
+            if row < m && a.values()[k].abs() > ZERO_TOL {
                 row_vars[row].push(j);
             }
         }
@@ -172,14 +172,14 @@ pub(super) fn count_block_components(q: &CscMatrix, a: &CscMatrix, n: usize) -> 
 ///
 /// Threshold: `eps_q = Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD`.
 pub(super) fn is_diagonal_q(q: &CscMatrix, n: usize) -> bool {
-    let q_abs_max = q.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+    let q_abs_max = q.values().iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
     let eps_q = Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD;
     for j in 0..n {
-        let start = q.col_ptr[j];
-        let end = q.col_ptr[j + 1];
+        let start = q.col_ptr()[j];
+        let end = q.col_ptr()[j + 1];
         for k in start..end {
-            let row = q.row_ind[k];
-            if row != j && q.values[k].abs() > eps_q {
+            let row = q.row_ind()[k];
+            if row != j && q.values()[k].abs() > eps_q {
                 return false;
             }
         }
@@ -191,19 +191,19 @@ pub(super) fn is_diagonal_q(q: &CscMatrix, n: usize) -> bool {
 /// `σ_i = 1/√(max|A[i,*]|)` (capped at `SCALING_SIGMA_FLOOR`) so subsequent Ruiz / IPM is
 /// well-conditioned. Returns the per-row scales for dual unscaling.
 pub(super) fn apply_large_coeff_rescaling(a: &mut CscMatrix, b: &mut [f64], n: usize) -> Vec<f64> {
-    let m = a.nrows;
-    let has_large = a.values.iter().any(|&v| v.abs() > LARGE_A_COEFF_TRIGGER);
+    let m = a.nrows();
+    let has_large = a.values().iter().any(|&v| v.abs() > LARGE_A_COEFF_TRIGGER);
     if !has_large {
         return vec![1.0; m];
     }
 
     let mut row_max = vec![0.0f64; m];
-    for col in 0..n.min(a.ncols) {
-        let start = a.col_ptr[col];
-        let end = a.col_ptr[col + 1];
+    for col in 0..n.min(a.ncols()) {
+        let start = a.col_ptr()[col];
+        let end = a.col_ptr()[col + 1];
         for k in start..end {
-            let row = a.row_ind[k];
-            let v = a.values[k].abs();
+            let row = a.row_ind()[k];
+            let v = a.values()[k].abs();
             if v > row_max[row] {
                 row_max[row] = v;
             }
@@ -223,12 +223,12 @@ pub(super) fn apply_large_coeff_rescaling(a: &mut CscMatrix, b: &mut [f64], n: u
         })
         .collect();
 
-    for col in 0..n.min(a.ncols) {
-        let start = a.col_ptr[col];
-        let end = a.col_ptr[col + 1];
+    for col in 0..n.min(a.ncols()) {
+        let start = a.col_ptr()[col];
+        let end = a.col_ptr()[col + 1];
         for k in start..end {
-            let row = a.row_ind[k];
-            a.values[k] *= row_scales[row];
+            let row = a.row_ind()[k];
+            a.values_mut()[k] *= row_scales[row];
         }
     }
 

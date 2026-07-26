@@ -66,6 +66,21 @@ jobs:
         if: success()
         run: python3 scripts/lib/check_new_ignore_attrs.py
 
+  test-num-debug:
+    name: Tests (otspot-num, debug assertions)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      # test-lib/test-integration は共に --release: debug_assert! ベースの
+      # sentinel (CscMatrix::from_raw_parts / SparseVec::from_raw_parts の
+      # 構造検証など) は debug-assertions が off の release では一度も走らず
+      # CI で退化を検出できない。debug profile (既定で debug-assertions on)
+      # で otspot-num を軽量に実行し、それらを実際に踏む。
+      - run: cargo nextest run -p otspot-num --no-fail-fast
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest

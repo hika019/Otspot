@@ -136,17 +136,17 @@ fn build_reduced_a(
             continue;
         }
         let jj = col_map[j].unwrap();
-        let start = prob.a.col_ptr[j];
-        let end = prob.a.col_ptr[j + 1];
+        let start = prob.a.col_ptr()[j];
+        let end = prob.a.col_ptr()[j + 1];
         for k in start..end {
-            let row = prob.a.row_ind[k];
+            let row = prob.a.row_ind()[k];
             if ws.removed_rows[row] {
                 continue;
             }
             let ii = row_map[row].unwrap();
             trip_rows.push(ii);
             trip_cols.push(jj);
-            trip_vals.push(prob.a.values[k]);
+            trip_vals.push(prob.a.values()[k]);
         }
     }
     if trip_rows.is_empty() {
@@ -171,17 +171,17 @@ fn build_reduced_q(
             continue;
         }
         let jj = col_map[j].unwrap();
-        let start = prob.q.col_ptr[j];
-        let end = prob.q.col_ptr[j + 1];
+        let start = prob.q.col_ptr()[j];
+        let end = prob.q.col_ptr()[j + 1];
         for k in start..end {
-            let row = prob.q.row_ind[k];
+            let row = prob.q.row_ind()[k];
             if ws.removed_cols[row] {
                 continue;
             }
             let ii = col_map[row].unwrap();
             trip_rows.push(ii);
             trip_cols.push(jj);
-            trip_vals.push(prob.q.values[k]);
+            trip_vals.push(prob.q.values()[k]);
         }
     }
     if trip_rows.is_empty() {
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn invalid_a_rebuild_rolls_back_instead_of_substituting_zero_matrix() {
         let mut prob = one_by_one_problem();
-        prob.a.values[0] = f64::INFINITY;
+        prob.a.values_mut()[0] = f64::INFINITY;
         let result = build_result(
             &prob,
             &SolverOptions::default(),
@@ -283,13 +283,13 @@ mod tests {
 
         assert!(!result.was_reduced);
         assert_eq!(result.reduced.a.nnz(), 1);
-        assert!(result.reduced.a.values[0].is_infinite());
+        assert!(result.reduced.a.values()[0].is_infinite());
     }
 
     #[test]
     fn invalid_q_rebuild_rolls_back_instead_of_substituting_zero_matrix() {
         let mut prob = one_by_one_problem();
-        prob.q.values[0] = f64::INFINITY;
+        prob.q.values_mut()[0] = f64::INFINITY;
         let result = build_result(
             &prob,
             &SolverOptions::default(),
@@ -298,7 +298,7 @@ mod tests {
 
         assert!(!result.was_reduced);
         assert_eq!(result.reduced.q.nnz(), 1);
-        assert!(result.reduced.q.values[0].is_infinite());
+        assert!(result.reduced.q.values()[0].is_infinite());
     }
 
     #[test]
@@ -324,9 +324,9 @@ mod tests {
 
         apply_large_coeff_if_needed(&opts, &mut reduced, &mut stack);
 
-        assert_eq!(reduced.a.values, original_a.values);
-        assert_eq!(reduced.a.col_ptr, original_a.col_ptr);
-        assert_eq!(reduced.a.row_ind, original_a.row_ind);
+        assert_eq!(reduced.a.values(), original_a.values());
+        assert_eq!(reduced.a.col_ptr(), original_a.col_ptr());
+        assert_eq!(reduced.a.row_ind(), original_a.row_ind());
         assert_eq!(reduced.b, original_b);
         assert!(stack.steps.is_empty());
     }
@@ -352,7 +352,7 @@ mod tests {
 
         apply_large_coeff_if_needed(&opts, &mut reduced, &mut stack);
 
-        assert!(reduced.a.values[0] < 1.0e12);
+        assert!(reduced.a.values()[0] < 1.0e12);
         assert!(reduced.b[0] < 2.0);
         assert_eq!(stack.steps.len(), 1);
     }
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn failed_large_coeff_model_rebuild_does_not_push_postsolve_step() {
         let mut reduced = one_by_one_problem();
-        reduced.a.values[0] = 1.0e12;
+        reduced.a.values_mut()[0] = 1.0e12;
         reduced.c[0] = f64::INFINITY;
         let original_a = reduced.a.clone();
         let original_b = reduced.b.clone();
@@ -372,7 +372,7 @@ mod tests {
 
         apply_large_coeff_if_needed(&opts, &mut reduced, &mut stack);
 
-        assert_eq!(reduced.a.values, original_a.values);
+        assert_eq!(reduced.a.values(), original_a.values());
         assert_eq!(reduced.b, original_b);
         assert!(stack.steps.is_empty());
     }

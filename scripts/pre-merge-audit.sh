@@ -47,8 +47,6 @@ python3 scripts/check_architecture.py
 python3 tests/test_check_architecture.py
 python3 scripts/check_function_size.py
 python3 tests/test_check_function_size.py
-python3 scripts/check_csc_encapsulation.py
-python3 tests/test_check_csc_encapsulation.py
 
 # 1b. test inventory gate (silent test disable / delete)
 # cargo nextest list を ground truth に、コミット済み目録 tests/test_inventory.txt

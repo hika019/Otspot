@@ -149,11 +149,11 @@ pub(crate) fn refine_kkt_iterative(
     {
         let mut k_diag_max = 0.0_f64;
         for j in 0..(n + m) {
-            let cs = k_mat.col_ptr[j];
-            let ce = k_mat.col_ptr[j + 1];
+            let cs = k_mat.col_ptr()[j];
+            let ce = k_mat.col_ptr()[j + 1];
             for k in cs..ce {
-                if k_mat.row_ind[k] == j {
-                    k_diag_max = k_diag_max.max(k_mat.values[k].abs());
+                if k_mat.row_ind()[k] == j {
+                    k_diag_max = k_diag_max.max(k_mat.values()[k].abs());
                     break;
                 }
             }
@@ -167,11 +167,11 @@ pub(crate) fn refine_kkt_iterative(
             if !is_active {
                 continue;
             }
-            let col_start = k_mat.col_ptr[j];
-            let col_end = k_mat.col_ptr[j + 1];
+            let col_start = k_mat.col_ptr()[j];
+            let col_end = k_mat.col_ptr()[j + 1];
             for k in col_start..col_end {
-                if k_mat.row_ind[k] == j {
-                    k_mat.values[k] += active_penalty;
+                if k_mat.row_ind()[k] == j {
+                    k_mat.values_mut()[k] += active_penalty;
                     break;
                 }
             }
@@ -214,11 +214,12 @@ pub(crate) fn refine_kkt_iterative(
                     );
                     let mut k_diag_max_retry = 0.0_f64;
                     for j in 0..(n + m) {
-                        let cs = current_k.col_ptr[j];
-                        let ce = current_k.col_ptr[j + 1];
+                        let cs = current_k.col_ptr()[j];
+                        let ce = current_k.col_ptr()[j + 1];
                         for k in cs..ce {
-                            if current_k.row_ind[k] == j {
-                                k_diag_max_retry = k_diag_max_retry.max(current_k.values[k].abs());
+                            if current_k.row_ind()[k] == j {
+                                k_diag_max_retry =
+                                    k_diag_max_retry.max(current_k.values()[k].abs());
                                 break;
                             }
                         }
@@ -233,11 +234,11 @@ pub(crate) fn refine_kkt_iterative(
                         if !is_active {
                             continue;
                         }
-                        let cs = current_k.col_ptr[j];
-                        let ce = current_k.col_ptr[j + 1];
+                        let cs = current_k.col_ptr()[j];
+                        let ce = current_k.col_ptr()[j + 1];
                         for k in cs..ce {
-                            if current_k.row_ind[k] == j {
-                                current_k.values[k] += active_penalty_retry;
+                            if current_k.row_ind()[k] == j {
+                                current_k.values_mut()[k] += active_penalty_retry;
                                 break;
                             }
                         }
@@ -277,21 +278,21 @@ pub(crate) fn refine_kkt_iterative(
         let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
         for j in 0..n {
             let xv = x[j];
-            let cs = problem.q.col_ptr[j];
-            let ce = problem.q.col_ptr[j + 1];
+            let cs = problem.q.col_ptr()[j];
+            let ce = problem.q.col_ptr()[j + 1];
             for k in cs..ce {
-                let row = problem.q.row_ind[k];
-                let v = problem.q.values[k];
+                let row = problem.q.row_ind()[k];
+                let v = problem.q.values()[k];
                 qx_dd[row] += TwoFloat::new_mul(v, xv);
             }
         }
         let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
         for col in 0..n {
-            let cs = problem.a.col_ptr[col];
-            let ce = problem.a.col_ptr[col + 1];
+            let cs = problem.a.col_ptr()[col];
+            let ce = problem.a.col_ptr()[col + 1];
             for k in cs..ce {
-                let row = problem.a.row_ind[k];
-                let v = problem.a.values[k];
+                let row = problem.a.row_ind()[k];
+                let v = problem.a.values()[k];
                 aty_dd[col] += TwoFloat::new_mul(v, y[row]);
             }
         }
@@ -307,11 +308,11 @@ pub(crate) fn refine_kkt_iterative(
         }
         let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
         for col in 0..n {
-            let cs = problem.a.col_ptr[col];
-            let ce = problem.a.col_ptr[col + 1];
+            let cs = problem.a.col_ptr()[col];
+            let ce = problem.a.col_ptr()[col + 1];
             for k in cs..ce {
-                let row = problem.a.row_ind[k];
-                let v = problem.a.values[k];
+                let row = problem.a.row_ind()[k];
+                let v = problem.a.values()[k];
                 ax_dd[row] += TwoFloat::new_mul(v, x[col]);
             }
         }

@@ -108,10 +108,10 @@ struct BilinearTerm {
 /// 分かれて格納されるが、ここでまとめることで storage 規約に依存しない係数を得る。
 fn collect_bilinear_pairs(q: &CscMatrix) -> Vec<BilinearTerm> {
     let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();
-    for col in 0..q.ncols {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            let row = q.row_ind[k];
-            let v = q.values[k];
+    for col in 0..q.ncols() {
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            let row = q.row_ind()[k];
+            let v = q.values()[k];
             if v == 0.0 {
                 continue;
             }
@@ -253,7 +253,7 @@ fn build_mccormick_lp(
     };
     let total_rows = problem.num_constraints + extra_rows;
 
-    let nnz_estimate = problem.a.values.len() + extra_rows * 3;
+    let nnz_estimate = problem.a.values().len() + extra_rows * 3;
     let mut rows: Vec<usize> = Vec::with_capacity(nnz_estimate);
     let mut cols: Vec<usize> = Vec::with_capacity(nnz_estimate);
     let mut vals: Vec<f64> = Vec::with_capacity(nnz_estimate);
@@ -261,10 +261,10 @@ fn build_mccormick_lp(
     let mut types: Vec<ConstraintType> = Vec::with_capacity(total_rows);
 
     for col in 0..n {
-        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            rows.push(problem.a.row_ind[k]);
+        for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+            rows.push(problem.a.row_ind()[k]);
             cols.push(col);
-            vals.push(problem.a.values[k]);
+            vals.push(problem.a.values()[k]);
         }
     }
     b.extend_from_slice(&problem.b);

@@ -9,8 +9,13 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - LP/QP presolveが共有するfixpoint制御(`run_fixpoint`)を`otspot-num`へ共通化。transform
   数学はドメインcrate (`otspot-core`) に残す設計とし、本番呼び出しゼロだった統一問題IR層
   (専用production dispatcher含む) と、それ専用だったpresolve orchestration crateは撤去
-- architecture依存・実装所有権・legacy facade・ファイル/関数肥大化・sparse内部field
-  accessを検査するGitHub Actions gateとself-testを追加
+- architecture依存・実装所有権・legacy facade・ファイル/関数肥大化を検査するGitHub
+  Actions gateとself-testを追加
+- `CscMatrix`/`SparseVec`のstorage fieldへの直接dot-accessをotspot-core/otspot-io/
+  otspot-model/otspot-dev全箇所でアクセサ (`col_ptr()`等) 経由へ移行し、フィールドを
+  `pub(crate)`化。従来はテキストベースのGitHub Actions gate (ratchet) で直接access
+  の増加のみ検出していたが、全箇所移行によりコンパイラ強制へ切り替え、gateとbaseline
+  は撤去。`CscMatrix::from_raw_parts`の構造検証も`SparseVec`側と同水準へ強化
 
 ## [0.7.3] - 2026-07-22
 

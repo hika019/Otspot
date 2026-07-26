@@ -27,13 +27,3 @@ jobs:
         run: python3 scripts/check_function_size.py
       - name: Verify long-function gate behavior
         run: python3 tests/test_check_function_size.py
-
-  encapsulation-ratchet:
-    name: sparse storage encapsulation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Check direct storage-field access ratchet
-        run: python3 scripts/check_csc_encapsulation.py
-      - name: Verify encapsulation gate behavior
-        run: python3 tests/test_check_csc_encapsulation.py

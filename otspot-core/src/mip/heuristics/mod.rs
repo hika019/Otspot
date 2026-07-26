@@ -44,7 +44,7 @@ fn is_original_mip_feasible(problem: &MilpProblem, x: &[f64], tol: f64) -> bool 
     }
     let activity = problem.lp.a.mat_vec_mul(x).expect(
         "x.len() == problem.lp.num_vars is checked above, and LpProblem::new_general \
-         enforces problem.lp.a.ncols == problem.lp.num_vars",
+         enforces problem.lp.a.ncols() == problem.lp.num_vars",
     );
     for ((&lhs, &rhs), sense) in activity
         .iter()

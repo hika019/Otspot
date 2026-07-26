@@ -24,11 +24,11 @@ fn vec_close(a: &[f64], b: &[f64], eps: f64) -> bool {
 }
 
 fn csc_close(a: &CscMatrix, b: &CscMatrix, eps: f64) -> bool {
-    a.nrows == b.nrows
-        && a.ncols == b.ncols
-        && a.col_ptr == b.col_ptr
-        && a.row_ind == b.row_ind
-        && vec_close(&a.values, &b.values, eps)
+    a.nrows() == b.nrows()
+        && a.ncols() == b.ncols()
+        && a.col_ptr() == b.col_ptr()
+        && a.row_ind() == b.row_ind()
+        && vec_close(a.values(), b.values(), eps)
 }
 
 fn assert_structurally_equivalent(left: &StandardForm, right: &StandardForm) {
