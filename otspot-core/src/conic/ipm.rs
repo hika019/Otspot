@@ -10,8 +10,8 @@ use std::time::Instant;
 use super::cone::{self, Blocks};
 use super::kkt;
 use super::{ConicOptions, ConicProblem, ConicResult};
-use crate::linalg::kkt_solver::{KktConfig, KktError};
 use crate::problem::SolveStatus;
+use otspot_num::linalg::kkt_solver::{KktConfig, KktError};
 
 #[cfg(test)]
 thread_local! {
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn canonical_fallback_reaches_main_loop_optimality_gates() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
 
         // min x, x >= 0. The canonical central point is sufficient; the main
         // loop must establish Optimal rather than treating initializer absence
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn expired_deadline_at_direction_solve_returns_timeout() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
 
         let problem = ConicProblem {
             c: vec![1.0, 0.0],

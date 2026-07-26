@@ -86,6 +86,12 @@ pub struct PresolveResult {
     pub row_map: Vec<Option<usize>>,
     pub was_reduced: bool,
     pub obj_offset: f64,
+    /// `true` when the fixpoint loop exhausted `presolve_max_pass` passes
+    /// without reaching a stable fixpoint (i.e. the last pass still changed
+    /// something). The emitted `reduced_problem` is valid either way — this
+    /// only flags that further passes might have reduced it more. A
+    /// `log::warn!` is emitted alongside this at the point of detection.
+    pub pass_limit_hit: bool,
 }
 
 #[non_exhaustive]
@@ -138,6 +144,7 @@ impl PresolveResult {
             row_map: (0..m).map(Some).collect(),
             was_reduced: false,
             obj_offset: problem.obj_offset,
+            pass_limit_hit: false,
         }
     }
 }

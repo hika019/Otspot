@@ -1,4 +1,4 @@
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// row_infinity_norms 基本。
 #[test]

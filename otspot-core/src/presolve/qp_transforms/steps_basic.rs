@@ -25,11 +25,11 @@ pub(super) fn step1_fix_var(prob: &QpProblem, ws: &mut Workspace) -> Result<(), 
             // tightly-bounded variable instead.
             const LARGE_B_THRESHOLD: f64 = 1e5;
             let max_b_change: f64 = {
-                let col_start = prob.a.col_ptr[j];
-                let col_end = prob.a.col_ptr[j + 1];
+                let col_start = prob.a.col_ptr()[j];
+                let col_end = prob.a.col_ptr()[j + 1];
                 (col_start..col_end)
-                    .filter(|&k| !ws.removed_rows[prob.a.row_ind[k]])
-                    .map(|k| (prob.a.values[k] * val).abs())
+                    .filter(|&k| !ws.removed_rows[prob.a.row_ind()[k]])
+                    .map(|k| (prob.a.values()[k] * val).abs())
                     .fold(0.0f64, f64::max)
             };
             if max_b_change > LARGE_B_THRESHOLD {
@@ -223,12 +223,12 @@ pub(super) fn step4_empty(prob: &QpProblem, ws: &mut Workspace) -> Result<(), Qp
             continue;
         }
         let a_nnz = {
-            let start = prob.a.col_ptr[j];
-            let end = prob.a.col_ptr[j + 1];
+            let start = prob.a.col_ptr()[j];
+            let end = prob.a.col_ptr()[j + 1];
             (start..end)
                 .filter(|&k| {
-                    let row = prob.a.row_ind[k];
-                    !ws.removed_rows[row] && prob.a.values[k].abs() > ZERO_TOL
+                    let row = prob.a.row_ind()[k];
+                    !ws.removed_rows[row] && prob.a.values()[k].abs() > ZERO_TOL
                 })
                 .count()
         };

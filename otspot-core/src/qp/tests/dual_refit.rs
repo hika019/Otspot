@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// REFIT-T1: lb 活性 + c>0 で y_lb = c を復元。
 #[test]

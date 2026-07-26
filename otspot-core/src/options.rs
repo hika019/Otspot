@@ -440,14 +440,14 @@ impl IpmOptions {
 
     /// Effective KKT memory budget in bytes: resolves `None` to the built-in default (4 GiB).
     pub(crate) fn effective_kkt_memory_budget_bytes(&self) -> usize {
-        use crate::linalg::kkt_solver::DEFAULT_MEMORY_BUDGET_BYTES;
+        use otspot_num::linalg::kkt_solver::DEFAULT_MEMORY_BUDGET_BYTES;
         self.kkt_memory_budget_bytes
             .unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES)
     }
 
     /// Max L-factor entries from memory budget (budget / bytes-per-entry).
     pub(crate) fn effective_max_l_nnz(&self) -> usize {
-        use crate::linalg::kkt_solver::BYTES_PER_L_ENTRY;
+        use otspot_num::linalg::kkt_solver::BYTES_PER_L_ENTRY;
         self.effective_kkt_memory_budget_bytes() / BYTES_PER_L_ENTRY
     }
 }
@@ -506,7 +506,12 @@ pub struct SolverOptions {
     pub use_lp_crash_basis: bool,
     /// Enable presolve.  Default: `true`.
     pub presolve: bool,
-    /// Maximum fixpoint passes in QP presolve.  Default: `10`.
+    /// Maximum fixpoint passes in LP and QP presolve.  Default: `50`.
+    /// `0` intentionally disables the iterative reduction loop (steps 1..N
+    /// never run) while leaving surrounding presolve machinery (state
+    /// construction, QP's finalize/Ruiz-scaling pass) untouched — a distinct,
+    /// documented contract from `presolve = false`, which skips presolve
+    /// entirely.
     pub presolve_max_pass: usize,
     /// Enable QP presolve phase 2.  Default: `true`.
     pub presolve_phase2: bool,
@@ -563,8 +568,18 @@ const MAX_ETAS_DIVISOR: usize = 50;
 /// Minimum value for `default_max_etas`.
 const MAX_ETAS_FLOOR: usize = 20;
 
-/// Default maximum fixpoint passes for QP presolve.
-pub(crate) const DEFAULT_PRESOLVE_MAX_PASS: usize = 10;
+/// Default maximum fixpoint passes for LP and QP presolve.
+///
+/// Netlib/Maros-Meszaros corpus measurement: the most passes any problem
+/// needed to reach a stable fixpoint was 9 (mondou2). 50 gives ~5x headroom
+/// over that observed maximum; raising the cap is free when a problem
+/// converges early (the fixpoint loop exits as soon as a pass makes no
+/// further change), so this only matters for genuinely slow-converging
+/// inputs, where it now gets the chance to actually reach the fixpoint
+/// instead of being cut off. `PresolveResult::pass_limit_hit` /
+/// `QpPresolveResult::pass_limit_hit` (plus a `log::warn!`) flag it loudly
+/// whenever the cap is still the reason a presolve run stopped.
+pub(crate) const DEFAULT_PRESOLVE_MAX_PASS: usize = 50;
 
 /// Auto-compute `max_etas` from problem size.
 ///
@@ -1207,7 +1222,7 @@ mod tests {
 
     #[test]
     fn test_ipm_effective_max_l_nnz_default_and_override() {
-        use crate::linalg::kkt_solver::{BYTES_PER_L_ENTRY, DEFAULT_MEMORY_BUDGET_BYTES};
+        use otspot_num::linalg::kkt_solver::{BYTES_PER_L_ENTRY, DEFAULT_MEMORY_BUDGET_BYTES};
         let o = IpmOptions::default();
         assert_eq!(
             o.effective_kkt_memory_budget_bytes(),
@@ -1240,7 +1255,7 @@ mod tests {
     fn test_presolve_max_pass_controls_iteration_count() {
         use crate::problem::SolveStatus;
         use crate::qp::{solve_qp_with, QpProblem};
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
 
         // Minimal feasible QP: 1 variable, no constraints, x* = 0.
         let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();

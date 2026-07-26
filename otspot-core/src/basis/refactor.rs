@@ -4,8 +4,8 @@
 //! 基底行列を最初から LU 分解し直す機能を提供する。
 
 use super::lu::LuFactorization;
-use crate::error::SolverError;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
+use otspot_num::SolverError;
 use std::time::Instant;
 
 /// deadline 付き基底行列再因子分解

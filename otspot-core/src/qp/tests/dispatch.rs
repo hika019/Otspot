@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::problem::{SolveRoute, SolveStatus};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 // ── Bug B: is_zero_q must use structural (nnz == 0) check, not numerical threshold ──
 

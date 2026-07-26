@@ -1017,6 +1017,7 @@ dependencies = [
  "otspot-dev",
  "otspot-io",
  "otspot-model",
+ "otspot-num",
  "proptest",
  "twofloat",
 ]
@@ -1027,7 +1028,7 @@ version = "0.7.3"
 dependencies = [
  "faer",
  "log",
- "otspot-model",
+ "otspot-num",
  "rayon",
  "twofloat",
 ]
@@ -1056,6 +1057,14 @@ name = "otspot-model"
 version = "0.7.3"
 dependencies = [
  "otspot-core",
+]
+
+[[package]]
+name = "otspot-num"
+version = "0.7.3"
+dependencies = [
+ "faer",
+ "twofloat",
 ]
 
 [[package]]

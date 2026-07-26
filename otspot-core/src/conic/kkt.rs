@@ -17,12 +17,12 @@
 //! derivation.
 
 use super::cone::{self, Blocks, Scaling};
-use crate::linalg::amd::amd_with_deadline;
-use crate::linalg::kkt_solver::{
+use otspot_num::linalg::amd::amd_with_deadline;
+use otspot_num::linalg::kkt_solver::{
     factorize_kkt_pre_permuted_cached_par, factorize_kkt_with_cached_perm_par, KktConfig, KktError,
     KktFactor, KktSolver, PreconditionedMinres,
 };
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -165,7 +165,7 @@ impl KktSkeleton {
         // floor), `W^2` is always strictly positive by construction (`s`, `z`
         // stay in the strict cone interior via fraction-to-boundary), so no
         // floor is needed for quasidefiniteness — and adding one (even below
-        // `faer`'s clamp `crate::linalg::ldl`'s `LDLT_REG_EPSILON`/`_DELTA`)
+        // `faer`'s clamp `otspot_num::linalg::ldl`'s `LDLT_REG_EPSILON`/`_DELTA`)
         // only hurts: a conflicting orthant/SOC pair's `W^2_ii = s_i/z_i` must
         // keep shrinking unfloored for the Newton direction to amplify `z_i`
         // toward a Farkas ray (measured: a fixed floor reproduces the pre-fix
@@ -190,13 +190,13 @@ impl KktSkeleton {
             values[slot] = -delta_d;
         }
         let total = self.total();
-        CscMatrix {
-            col_ptr: self.col_ptr.clone(),
-            row_ind: self.row_ind.clone(),
+        CscMatrix::from_raw_parts(
+            total,
+            total,
+            self.col_ptr.clone(),
+            self.row_ind.clone(),
             values,
-            nrows: total,
-            ncols: total,
-        }
+        )
     }
 
     /// Applies a symmetric permutation to the static skeleton (mirrors
@@ -578,7 +578,7 @@ pub(super) fn factorize_with_retry(
                     return Some(ConicFactor::direct(f));
                 }
             }
-            Err(crate::linalg::kkt_solver::KktError::DeadlineExceeded) => return None,
+            Err(otspot_num::linalg::kkt_solver::KktError::DeadlineExceeded) => return None,
             Err(_) => {}
         }
         let next = (delta * REG_GROWTH).min(REG_CEILING);
@@ -607,7 +607,7 @@ pub(super) fn factorize_with_retry(
     // conditioning lives in `W^2` (deliberately unregularized, see module doc),
     // e.g. a conflicting orthant/SOC pair where `s_i` has shrunk enough that
     // f64's ~16 digits can no longer resolve `W^2_ii`. Still health-probed
-    // against the same clamp thresholds as the f64 path (`crate::linalg::
+    // against the same clamp thresholds as the f64 path (`otspot_num::linalg::
     // ldl_dd`'s `EPSILON`/`DELTA`), so once `W^2_ii` underflows that shared
     // threshold extra mantissa bits alone cannot recover it (confirmed:
     // `socp_degenerate_fixed_var_infeasible_gets_certificate` plateaus the same
@@ -696,20 +696,20 @@ fn try_equilibrated(
         .base
         .materialize(sc, blk, REG_DELTA_INIT, REG_DELTA_INIT);
     let (scaled, d) = equilibrate(&unpermuted);
-    let (perm_col_ptr, perm_row_ind, perm_values) = crate::linalg::amd::permute_sym_upper(
+    let (perm_col_ptr, perm_row_ind, perm_values) = otspot_num::linalg::amd::permute_sym_upper(
         scaled.nrows(),
         scaled.col_ptr(),
         scaled.row_ind(),
         scaled.values(),
         &caches.perm,
     );
-    let pre_permuted_scaled = CscMatrix {
-        col_ptr: perm_col_ptr,
-        row_ind: perm_row_ind,
-        values: perm_values,
-        nrows: scaled.nrows(),
-        ncols: scaled.ncols(),
-    };
+    let pre_permuted_scaled = CscMatrix::from_raw_parts(
+        scaled.nrows(),
+        scaled.ncols(),
+        perm_col_ptr,
+        perm_row_ind,
+        perm_values,
+    );
     if let Ok(f) = factorize_kkt_pre_permuted_cached_par(
         &pre_permuted_scaled,
         &scaled,
@@ -770,13 +770,8 @@ fn equilibrate(mat: &CscMatrix) -> (CscMatrix, Vec<f64>) {
             values[k] *= d[row] * d[col];
         }
     }
-    let scaled = CscMatrix {
-        col_ptr: mat.col_ptr().to_vec(),
-        row_ind: mat.row_ind().to_vec(),
-        values,
-        nrows: n,
-        ncols: n,
-    };
+    let scaled =
+        CscMatrix::from_raw_parts(n, n, mat.col_ptr().to_vec(), mat.row_ind().to_vec(), values);
     (scaled, d)
 }
 
@@ -1046,11 +1041,11 @@ mod tests {
         let mut probe_mat = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
 
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            probe_mat.values[0] = value;
+            probe_mat.values_mut()[0] = value;
             assert!(!probe_kkt_health(&factor, &probe_mat, &[1.0]));
         }
 
-        probe_mat.values[0] = f64::MAX;
+        probe_mat.values_mut()[0] = f64::MAX;
         assert!(
             !probe_kkt_health(&factor, &probe_mat, &[2.0]),
             "finite inputs whose matrix product overflows must yield an unhealthy residual"
@@ -1065,13 +1060,13 @@ mod tests {
     fn equilibrate_guards_zero_and_subnormal_diagonals() {
         // Upper-tri 4x4 CSC: diagonals [1e-10, 0.0, 5e-324 (subnormal), 4.0]
         // plus one off-diagonal (row 0, col 3).
-        let mat = CscMatrix {
-            col_ptr: vec![0, 1, 2, 3, 5],
-            row_ind: vec![0, 1, 2, 0, 3],
-            values: vec![1e-10, 0.0, 5e-324, -1.0, 4.0],
-            nrows: 4,
-            ncols: 4,
-        };
+        let mat = CscMatrix::from_raw_parts(
+            4,
+            4,
+            vec![0, 1, 2, 3, 5],
+            vec![0, 1, 2, 0, 3],
+            vec![1e-10, 0.0, 5e-324, -1.0, 4.0],
+        );
         let (scaled, d) = equilibrate(&mat);
         for (i, &di) in d.iter().enumerate() {
             assert!(di.is_finite() && di > 0.0, "d[{i}]={di}");

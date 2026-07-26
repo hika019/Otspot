@@ -1,8 +1,8 @@
 use super::*;
 use crate::options::{SimplexMethod, SolverOptions};
 use crate::problem::{LpProblem, SolveStatus};
-use crate::sparse::CscMatrix;
 use crate::test_kkt::assert_solver_invariants_lp;
+use otspot_num::sparse::CscMatrix;
 
 fn make_lp(
     c: Vec<f64>,

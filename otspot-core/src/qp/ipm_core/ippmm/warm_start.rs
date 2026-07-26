@@ -3,7 +3,7 @@
 use super::state::{warm_bound_margin, WARM_BOUND_REL_MARGIN, WARM_MU_MIN, WARM_SY_MIN};
 use crate::problem::ConstraintType;
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// warm start から (x, y, s) を初期化し、有効なら μ を返す (none で cold start)。
 ///
@@ -72,8 +72,8 @@ pub(super) fn apply_qp_warm_start(
     // 自然な slack s = b_ext − A_ext·x (ineq は WARM_SY_MIN で boundary 退避)。
     let mut ax = vec![0.0_f64; m_ext];
     for col in 0..n {
-        for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
-            ax[a_ext.row_ind[k]] += a_ext.values[k] * x[col];
+        for k in a_ext.col_ptr()[col]..a_ext.col_ptr()[col + 1] {
+            ax[a_ext.row_ind()[k]] += a_ext.values()[k] * x[col];
         }
     }
     for i in 0..m_ext {

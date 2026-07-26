@@ -408,7 +408,7 @@ fn recompute_objective(orig_problem: &QpProblem, solution: &[f64]) -> f64 {
 mod recompute_objective_tests {
     use super::recompute_objective;
     use crate::qp::problem::QpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// Constructed via struct literal (bypassing `QpProblem::new()`'s
     /// dimension check, all fields `pub`): `q` is 3x3 but `solution` has 2
@@ -465,7 +465,7 @@ mod extended_ir_postsolve_path_tests {
     use crate::qp::ipm_solver::outcome::ProblemView;
     use crate::qp::kkt_resid::dual_sign_violation;
     use crate::qp::problem::QpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn stationarity_requires_wrong_sign_le_inner(
         _problem: &QpProblem,

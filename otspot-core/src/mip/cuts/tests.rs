@@ -13,7 +13,7 @@
 use super::*;
 use crate::options::{MipConfig, SolverOptions};
 use crate::problem::ConstraintType;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 fn lp(
     c: Vec<f64>,

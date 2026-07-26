@@ -15,9 +15,9 @@ use crate::problem::ConstraintType;
 use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
 use crate::qp::ipm_solver::kkt::bound_violation;
 use crate::qp::kkt_resid::f64_impl::primal_residual_rel;
-use crate::sparse::CscMatrix;
 #[cfg(test)]
 use crate::tolerances::any_nonfinite;
+use otspot_num::sparse::CscMatrix;
 
 use super::QpProblem;
 
@@ -85,7 +85,13 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
 
     if options.presolve {
         let t_presolve = Instant::now();
-        match presolve::run_presolve(&lp, options.deadline) {
+        match presolve::run_presolve_with_flags(
+            &lp,
+            options.deadline,
+            options.presolve_max_pass,
+            options.cancel_flag.as_deref(),
+            presolve::PresolveFlags::default(),
+        ) {
             Err(presolve::PresolveStatus::Infeasible) => {
                 let mut result = SolverResult::infeasible();
                 result.timing_breakdown = Some(crate::problem::TimingBreakdown {
@@ -279,8 +285,8 @@ fn solve_reduced_lp_from_qp(
             &presolve_result,
             original_lp,
             options.deadline,
-            options.recover_warm_start_basis,
         );
+        crate::simplex::apply_recovered_warm_start_basis(&mut lifted, original_lp, options);
         lifted.stats = raw.stats.clone();
         lifted.stats.route = SolveRoute::LpForwardedFromQp;
         lifted.stats.deadline_triggered =
@@ -386,7 +392,7 @@ fn should_try_lp_ipm(lp: &LpProblem, options: &SolverOptions) -> bool {
         return false;
     }
     lp.num_vars.saturating_add(lp.num_constraints) >= LP_IPM_MIN_DIMENSION
-        && lp.a.values.len() >= LP_IPM_MIN_DIMENSION
+        && lp.a.values().len() >= LP_IPM_MIN_DIMENSION
 }
 
 const HUGE_WIDE_LP_MIN_VARS: usize = 300_000;
@@ -954,7 +960,7 @@ const LP_IPM_FIRST_N: usize = 3_000;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
     use std::time::Duration;
 
     const NONREDUCING_QP_VARS: usize = 2;
@@ -1241,6 +1247,68 @@ mod tests {
         assert!(
             (result.objective - no_presolve_result.objective).abs() < NONREDUCING_QP_OBJ_TOL,
             "presolve timing fix must not change the numerical objective"
+        );
+    }
+
+    /// `apply_recovered_warm_start_basis` is reachable on the QP→LP forwarding
+    /// path (`SolveRoute::LpForwardedFromQp`), not just the direct LP entry
+    /// (`simplex::entry::solve_with`) already covered by
+    /// `presolve::postsolve::warm_basis_recovery_tests`.
+    ///
+    /// Dual-fixing (Step 11) collapses both vars to their lower bound (c>0,
+    /// all-Le with a≥0 ⇒ pos pressure): the reduced LP has 0 vars, so the
+    /// *reduced*-space simplex solve returns `warm_start_basis=None` (n==0
+    /// short-circuit) and only the postsolve-side synthesis
+    /// (`crate::simplex::recover_warm_start_basis` on the *original*-space
+    /// solution) can produce a basis — exactly the path this dispatcher must
+    /// wire up after `run_postsolve`.
+    ///
+    /// Mutation-fail (verified manually, see commit message): removing the
+    /// `crate::simplex::apply_recovered_warm_start_basis(&mut lifted, ...)`
+    /// call from `solve_reduced_lp_from_qp` makes `warm_start_basis` stay
+    /// `None` and this test fails, with the rest of the QP/LP test suite
+    /// still green (proving no other test exercised this path).
+    #[test]
+    fn qp_forwarded_to_lp_recovers_warm_start_basis_after_presolve_reduction() {
+        use crate::options::SolverOptions;
+        use crate::problem::{SolveRoute, SolveStatus};
+
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 2], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 3, 2)
+            .unwrap();
+        let problem = QpProblem::new(
+            CscMatrix::new(2, 2),
+            vec![1.0, 1.0],
+            a,
+            vec![6.0, 4.0, 4.0],
+            vec![(0.0, f64::INFINITY); 2],
+            vec![ConstraintType::Le; 3],
+        )
+        .unwrap();
+
+        let lp = lp_from_qp_fixture(&problem);
+        let presolve_result = crate::presolve::run_presolve(&lp, None)
+            .expect("dual-fixed fixture must not terminate in presolve");
+        assert!(
+            presolve_result.was_reduced,
+            "fixture must exercise the reducing presolve path (dual-fixing both vars)"
+        );
+        assert_eq!(
+            presolve_result.reduced_problem.num_vars, 0,
+            "both vars must collapse to their lower bound"
+        );
+
+        let opts = SolverOptions {
+            recover_warm_start_basis: true,
+            ..SolverOptions::default()
+        };
+        let result = solve_as_lp(&problem, &opts);
+
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert_eq!(result.stats.route, SolveRoute::LpForwardedFromQp);
+        assert!(
+            result.warm_start_basis.is_some(),
+            "postsolve-side warm_start_basis synthesis must run on the \
+             QP-forwarded-to-LP path, not just the direct LP entry"
         );
     }
 

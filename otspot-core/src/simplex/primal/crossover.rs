@@ -9,8 +9,8 @@ use super::reconcile::{
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::problem::LpProblem;
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
+use otspot_num::sparse::{CscMatrix, SparseVec};
 
 /// Relative tolerance below which a standard-form column value is treated as
 /// at-bound (zero) when seeding the crossover basis from `x_star`.
@@ -149,7 +149,7 @@ pub(crate) fn crossover_dual_from_primal(
         m,
         n_orig,
         n_total,
-        sf.a.values.len()
+        sf.a.values().len()
     ));
 
     let options = SolverOptions {
@@ -268,16 +268,12 @@ pub(crate) fn crossover_dual_from_primal(
                 break;
             }
             let (col_rows, col_vals) = a_ext.column(j);
-            let mut d_sv = SparseVec {
-                indices: col_rows.to_vec(),
-                values: col_vals.to_vec(),
-                len: m,
-            };
+            let mut d_sv = SparseVec::from_raw_parts(col_rows.to_vec(), col_vals.to_vec(), m);
             basis_mgr.ftran(&mut d_sv);
             let mut best_row: Option<usize> = None;
             let mut best_abs = PIVOT_TOL;
-            for (k, &row) in d_sv.indices.iter().enumerate() {
-                let abs = d_sv.values[k].abs();
+            for (k, &row) in d_sv.indices().iter().enumerate() {
+                let abs = d_sv.values()[k].abs();
                 if abs > best_abs && removable(basis[row]) {
                     best_abs = abs;
                     best_row = Some(row);
@@ -286,7 +282,7 @@ pub(crate) fn crossover_dual_from_primal(
             if let Some(row) = best_row {
                 match basis_mgr.update(j, row, &d_sv) {
                     Ok(()) => {}
-                    Err(crate::error::SolverError::SingularBasis { .. }) => return None,
+                    Err(otspot_num::SolverError::SingularBasis { .. }) => return None,
                     Err(err) => panic!("internal crossover eta invariant violated: {err}"),
                 }
                 is_basic[basis[row]] = false;
@@ -619,7 +615,7 @@ mod crossover_tests {
     //! variables, finite upper bounds, and non-binding Ge rows.
     use super::{crossover_dual_from_primal, crossover_dual_infeasibility};
     use crate::problem::{ConstraintType, LpProblem};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// Tolerance for "dual-feasible & complementary with x*".
     const DF_TOL: f64 = 1e-7;

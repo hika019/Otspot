@@ -1,5 +1,6 @@
 use super::compress::build_compressed_format;
-use crate::error::SolverError;
+use super::view::CscMatrixView;
+use crate::SolverError;
 
 /// 列圧縮形式（CSC: Compressed Sparse Column）の疎行列
 ///
@@ -20,6 +21,33 @@ pub struct CscMatrix {
     pub(crate) ncols: usize,
 }
 
+impl CscMatrixView for CscMatrix {
+    #[inline]
+    fn nrows(&self) -> usize {
+        self.nrows
+    }
+
+    #[inline]
+    fn ncols(&self) -> usize {
+        self.ncols
+    }
+
+    #[inline]
+    fn col_ptr(&self) -> &[usize] {
+        &self.col_ptr
+    }
+
+    #[inline]
+    fn row_ind(&self) -> &[usize] {
+        &self.row_ind
+    }
+
+    #[inline]
+    fn values(&self) -> &[f64] {
+        &self.values
+    }
+}
+
 impl CscMatrix {
     /// 空の CSC 行列を生成する
     ///
@@ -38,20 +66,84 @@ impl CscMatrix {
         }
     }
 
+    #[inline]
     pub fn nnz(&self) -> usize {
         self.values.len()
     }
 
+    #[inline]
     pub fn col_ptr(&self) -> &[usize] {
         &self.col_ptr
     }
 
+    #[inline]
     pub fn row_ind(&self) -> &[usize] {
         &self.row_ind
     }
 
+    #[inline]
     pub fn values(&self) -> &[f64] {
         &self.values
+    }
+
+    /// Mutable view of the stored non-zero values (structure is preserved).
+    ///
+    /// This is the encapsulated path for in-place value scaling; callers must
+    /// not change the length or ordering, only the coefficients.
+    #[inline]
+    pub fn values_mut(&mut self) -> &mut [f64] {
+        &mut self.values
+    }
+
+    /// Build a matrix from already-validated CSC arrays.
+    ///
+    /// The encapsulated replacement for direct struct-literal construction.
+    /// `debug_assert`s enforce the CSC invariants in test/dev builds; release
+    /// builds trust the caller (matching the previous struct-literal usage).
+    pub fn from_raw_parts(
+        nrows: usize,
+        ncols: usize,
+        col_ptr: Vec<usize>,
+        row_ind: Vec<usize>,
+        values: Vec<f64>,
+    ) -> Self {
+        debug_assert_eq!(col_ptr.len(), ncols + 1, "col_ptr length must be ncols+1");
+        debug_assert_eq!(
+            row_ind.len(),
+            values.len(),
+            "row_ind/values length mismatch"
+        );
+        debug_assert_eq!(
+            col_ptr.first().copied(),
+            Some(0),
+            "col_ptr head must be zero"
+        );
+        debug_assert_eq!(
+            col_ptr.last().copied(),
+            Some(values.len()),
+            "col_ptr tail must equal nnz"
+        );
+        debug_assert!(
+            col_ptr.windows(2).all(|w| w[0] <= w[1]),
+            "col_ptr must be monotone non-decreasing"
+        );
+        debug_assert!(
+            col_ptr
+                .windows(2)
+                .all(|w| { row_ind[w[0]..w[1]].windows(2).all(|rows| rows[0] < rows[1]) }),
+            "row indices within each column must be strictly ascending"
+        );
+        debug_assert!(
+            row_ind.iter().all(|&r| r < nrows),
+            "row index out of bounds for nrows={nrows}"
+        );
+        Self {
+            col_ptr,
+            row_ind,
+            values,
+            nrows,
+            ncols,
+        }
     }
 
     /// Returns a new matrix with all non-zero values multiplied by `factor`.
@@ -65,10 +157,12 @@ impl CscMatrix {
         }
     }
 
+    #[inline]
     pub fn nrows(&self) -> usize {
         self.nrows
     }
 
+    #[inline]
     pub fn ncols(&self) -> usize {
         self.ncols
     }
@@ -211,6 +305,7 @@ impl CscMatrix {
     }
 
     /// Returns `(row_indices, values)` slices for column `j`; both are sorted by row index.
+    #[inline]
     pub fn get_column(&self, j: usize) -> Result<(&[usize], &[f64]), SolverError> {
         if j >= self.ncols {
             return Err(SolverError::IndexOutOfBounds {
@@ -228,6 +323,7 @@ impl CscMatrix {
     ///
     /// Panics if `j >= ncols`; callers must guarantee a valid column index by construction
     /// invariant. Use [`Self::get_column`] when `j` is not provably in-bounds.
+    #[inline]
     pub fn column(&self, j: usize) -> (&[usize], &[f64]) {
         assert!(
             j < self.ncols,
@@ -472,5 +568,79 @@ mod tests {
         // Finite values still accepted.
         let r = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1);
         assert!(r.is_ok(), "finite value must still be accepted");
+    }
+
+    /// Sentinel: `col_ptr` length must be `ncols + 1`. debug-assertions-only
+    /// (see `SparseVec::from_raw_parts` sentinels for why `debug_assert!`
+    /// invariants can't be tested under `--release`).
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "col_ptr length must be ncols+1")]
+    fn test_sentinel_from_raw_parts_rejects_wrong_col_ptr_length() {
+        let _ = CscMatrix::from_raw_parts(1, 2, vec![0, 1], vec![0], vec![1.0]);
+    }
+
+    /// Sentinel: `col_ptr` must start at zero.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "col_ptr head must be zero")]
+    fn test_sentinel_from_raw_parts_rejects_nonzero_col_ptr_head() {
+        let _ = CscMatrix::from_raw_parts(1, 1, vec![1, 1], vec![], vec![]);
+    }
+
+    /// Sentinel: `col_ptr` tail must equal `nnz` (`values.len()`).
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "col_ptr tail must equal nnz")]
+    fn test_sentinel_from_raw_parts_rejects_wrong_col_ptr_tail() {
+        let _ = CscMatrix::from_raw_parts(1, 1, vec![0, 2], vec![0], vec![1.0]);
+    }
+
+    /// Sentinel: `row_ind`/`values` length mismatch must be rejected.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "row_ind/values length mismatch")]
+    fn test_sentinel_from_raw_parts_rejects_row_values_length_mismatch() {
+        let _ = CscMatrix::from_raw_parts(1, 1, vec![0, 2], vec![0, 0], vec![1.0]);
+    }
+
+    /// Sentinel: `col_ptr` must be monotone non-decreasing (a decreasing
+    /// entry would mean a column claims a negative nnz count).
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "col_ptr must be monotone non-decreasing")]
+    fn test_sentinel_from_raw_parts_rejects_non_monotone_col_ptr() {
+        // ncols=3 so col_ptr has a genuine middle entry (length ncols+1=4);
+        // head=0 and tail=2=nnz are both satisfied, isolating the dip at
+        // index 1->2 (2 -> 1) as the only violated invariant.
+        let _ = CscMatrix::from_raw_parts(2, 3, vec![0, 2, 1, 2], vec![0, 1], vec![1.0, 2.0]);
+    }
+
+    /// Sentinel: row indices within a single column must be strictly
+    /// ascending (the `column()`/`get_column()` contract assumes this).
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "row indices within each column must be strictly ascending")]
+    fn test_sentinel_from_raw_parts_rejects_unsorted_rows_within_column() {
+        let _ = CscMatrix::from_raw_parts(2, 1, vec![0, 2], vec![1, 0], vec![1.0, 2.0]);
+    }
+
+    /// Sentinel: an out-of-bounds row index (`>= nrows`) must be rejected.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "row index out of bounds for nrows=2")]
+    fn test_sentinel_from_raw_parts_rejects_out_of_bounds_row() {
+        let _ = CscMatrix::from_raw_parts(2, 1, vec![0, 1], vec![2], vec![1.0]);
+    }
+
+    /// A well-formed matrix must still construct cleanly (positive control:
+    /// proves the sentinels above are exercising `from_raw_parts`, not some
+    /// unconditional panic).
+    #[test]
+    fn test_from_raw_parts_accepts_well_formed_matrix() {
+        let m = CscMatrix::from_raw_parts(3, 2, vec![0, 2, 3], vec![0, 2, 1], vec![1.0, 2.0, 3.0]);
+        assert_eq!(m.nrows(), 3);
+        assert_eq!(m.ncols(), 2);
+        assert_eq!(m.nnz(), 3);
     }
 }

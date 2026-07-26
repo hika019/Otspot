@@ -83,6 +83,17 @@ threads-required = "num-cpus"
 filter = "test(diag_osa60_must_reach_known_objective)"
 threads-required = "num-cpus"
 
+# LP/QP presolve driver per-step control real-deadline sentinels
+# (presolve::transforms::driver / presolve::qp_transforms::driver
+# per_step_control_tests): margin is ~4-5x (deadline vs. full pass
+# duration), but under full-suite CPU contention (test-threads=6, many
+# concurrent CPU-bound tests) the mid-pass deadline can still fire before
+# `run_fixpoint` even enters pass 0 (observed FAIL: executed=0). Serialise
+# so the wall-clock margin reflects the algorithm, not scheduling noise.
+[[profile.default.overrides]]
+filter = "test(real_deadline_stops_pass_before_all_steps_run_via_run_step) + test(full_pass_duration_is_comfortably_above_the_test_deadline)"
+threads-required = "num-cpus"
+
 # Memory-heavy qplib parse tests peak 100-800 MB each (QPLIB_8500 = 100 MB,
 # QPLIB_8683 = ~50 MB post-fix, QPLIB_8547/9008 DCL = ~700 MB).
 # Running them concurrently stacks memory and can thrash (swap=0) or trip

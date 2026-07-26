@@ -10,8 +10,8 @@
 //! supernodal 自動選択は採用しない。ETA 機構 (`src/basis/eta.rs`) は LU の上に被せる
 //! 更新層で、本 module の変更とは独立に動作する。
 
-use crate::error::SolverError;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
+use otspot_num::SolverError;
 
 /// (col_ptr, row_ind, values) triple for a reconstructed basis CSC matrix.
 type BasisCscParts = (Vec<usize>, Vec<usize>, Vec<f64>);
@@ -135,20 +135,20 @@ fn build_basis_csc(a: &CscMatrix, basis: &[usize], m: usize) -> Result<BasisCscP
     let mut tmp: Vec<(usize, f64)> = Vec::new();
 
     for (j, &col_idx) in basis.iter().enumerate() {
-        if col_idx >= a.ncols {
+        if col_idx >= a.ncols() {
             return Err(SolverError::IndexOutOfBounds {
                 context: "basis_column",
                 index: col_idx,
-                bound: a.ncols,
+                bound: a.ncols(),
             });
         }
-        let start = a.col_ptr[col_idx];
-        let end = a.col_ptr[col_idx + 1];
+        let start = a.col_ptr()[col_idx];
+        let end = a.col_ptr()[col_idx + 1];
         tmp.clear();
         for k in start..end {
-            let row = a.row_ind[k];
+            let row = a.row_ind()[k];
             if row < m {
-                tmp.push((row, a.values[k]));
+                tmp.push((row, a.values()[k]));
             }
         }
         tmp.sort_by_key(|&(r, _)| r);
@@ -540,13 +540,13 @@ mod tests {
                 "case {idx}: row {} must be empty for structural singularity",
                 m - 1
             );
-            let a = CscMatrix {
-                col_ptr: col_ptr.to_vec(),
-                row_ind: row_ind.to_vec(),
-                values: vec![1.0; row_ind.len()],
-                nrows: m,
-                ncols: m,
-            };
+            let a = CscMatrix::from_raw_parts(
+                m,
+                m,
+                col_ptr.to_vec(),
+                row_ind.to_vec(),
+                vec![1.0; row_ind.len()],
+            );
             let basis: Vec<usize> = (0..m).collect();
             // 旧 (AUTO) 実装ではこの呼び出しが debug で panic していた。
             let result = LuFactorization::factorize_timed(&a, &basis, None);

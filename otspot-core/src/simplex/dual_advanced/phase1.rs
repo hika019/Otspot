@@ -27,8 +27,8 @@ use super::core::dual_simplex_core_advanced;
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
+use otspot_num::sparse::{CscMatrix, SparseVec};
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
@@ -55,15 +55,15 @@ fn fresh_positive_artificial(
     m: usize,
     n_total: usize,
     options: &SolverOptions,
-) -> Result<bool, crate::error::SolverError> {
+) -> Result<bool, otspot_num::SolverError> {
     #[cfg(test)]
     match FRESH_FACTOR_FAILURE.get() {
         FreshFactorFailure::None => {}
         FreshFactorFailure::Singular => {
-            return Err(crate::error::SolverError::SingularBasis { step: 0 });
+            return Err(otspot_num::SolverError::SingularBasis { step: 0 });
         }
         FreshFactorFailure::Deadline => {
-            return Err(crate::error::SolverError::DeadlineExceeded);
+            return Err(otspot_num::SolverError::DeadlineExceeded);
         }
     }
 
@@ -82,9 +82,9 @@ enum UnboundedProofRefresh {
 }
 
 fn classify_unbounded_proof_refresh(
-    refresh: Result<bool, crate::error::SolverError>,
+    refresh: Result<bool, otspot_num::SolverError>,
 ) -> UnboundedProofRefresh {
-    use crate::error::SolverError;
+    use otspot_num::SolverError;
 
     match refresh {
         Ok(true) => UnboundedProofRefresh::Infeasible,
@@ -100,6 +100,7 @@ fn classify_unbounded_proof_refresh(
         ) => {
             panic!("internal invariant violation during Phase I proof refresh: {err}")
         }
+        Err(err) => panic!("unknown solver error during Phase I proof refresh: {err}"),
     }
 }
 
@@ -1031,8 +1032,8 @@ mod tests {
     use crate::options::SolverOptions;
     use crate::problem::{ConstraintType, LpProblem, SolveStatus};
     use crate::simplex::solve_with;
-    use crate::sparse::CscMatrix;
     use crate::test_kkt::assert_kkt_optimal;
+    use otspot_num::sparse::CscMatrix;
 
     struct FreshFactorFailureGuard(super::FreshFactorFailure);
 
@@ -1111,13 +1112,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "internal invariant violation during Phase I proof refresh")]
     fn fresh_factor_internal_error_fails_fast() {
-        super::classify_unbounded_proof_refresh(Err(
-            crate::error::SolverError::DimensionMismatch {
-                field: "basis",
-                expected: 1,
-                got: 0,
-            },
-        ));
+        super::classify_unbounded_proof_refresh(Err(otspot_num::SolverError::DimensionMismatch {
+            field: "basis",
+            expected: 1,
+            got: 0,
+        }));
     }
 
     #[test]

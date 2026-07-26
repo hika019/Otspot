@@ -5,8 +5,8 @@ use super::StandardForm;
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem};
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{feas_rel_tol, PIVOT_STABILITY_THRESHOLD, PIVOT_TOL};
+use otspot_num::sparse::{CscMatrix, SparseVec};
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 
@@ -201,15 +201,11 @@ fn pivot_out_sequential(
         }
         if let Some(j) = best_j {
             let (col_rows, col_vals) = a_ext.column(j);
-            let mut d_sv = SparseVec {
-                indices: col_rows.to_vec(),
-                values: col_vals.to_vec(),
-                len: m,
-            };
+            let mut d_sv = SparseVec::from_raw_parts(col_rows.to_vec(), col_vals.to_vec(), m);
             basis_mgr.ftran(&mut d_sv);
             match basis_mgr.update(j, i, &d_sv) {
                 Ok(()) => {}
-                Err(crate::error::SolverError::SingularBasis { .. }) => return,
+                Err(otspot_num::SolverError::SingularBasis { .. }) => return,
                 Err(err) => panic!("internal reconciliation eta invariant violated: {err}"),
             }
             is_basic[basis[i]] = false;
@@ -251,7 +247,7 @@ pub(crate) fn pivot_out_degenerate_artificials(
         .collect();
 
     // Build is_basic mask for the current basis.
-    let mut is_basic = vec![false; a_ext.ncols];
+    let mut is_basic = vec![false; a_ext.ncols()];
     for &col in basis.iter() {
         is_basic[col] = true;
     }
@@ -435,7 +431,7 @@ pub(crate) fn pivot_out_degenerate_artificials(
             #[cfg(test)]
             super::PIVOT_OUT_SEQUENTIAL_FALLBACK_COUNT.with(|c| c.set(c.get() + 1));
             if let Some(mut b_lu) = b_before_opt {
-                let mut seq_is_basic = vec![false; a_ext.ncols];
+                let mut seq_is_basic = vec![false; a_ext.ncols()];
                 for &col in basis.iter() {
                     seq_is_basic[col] = true;
                 }
@@ -483,7 +479,7 @@ pub(crate) fn pivot_out_degenerate_artificials(
                 if let Ok(mut basis_mgr) =
                     LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline)
                 {
-                    let mut seq_is_basic = vec![false; a_ext.ncols];
+                    let mut seq_is_basic = vec![false; a_ext.ncols()];
                     for &col in basis.iter() {
                         seq_is_basic[col] = true;
                     }
@@ -525,7 +521,7 @@ pub(crate) fn reconcile_final_basis_state(
     y: &mut [f64],
     max_etas: usize,
     deadline: Option<std::time::Instant>,
-) -> Result<(), crate::error::SolverError> {
+) -> Result<(), otspot_num::SolverError> {
     let mut basis_mgr = LuBasis::new_timed(a, basis, max_etas, deadline)?;
 
     x_b.copy_from_slice(b);

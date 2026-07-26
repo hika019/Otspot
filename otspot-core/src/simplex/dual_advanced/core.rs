@@ -18,10 +18,10 @@ use super::super::trace::IterTrace;
 use super::super::SimplexOutcome;
 use super::ratio_test::{bland_ratio_test, HarrisRatioTest, RatioTestStrategy};
 use crate::basis::{BasisManager, LuBasis};
-use crate::linalg::timeout::deadline_reached;
 use crate::options::SolverOptions;
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
+use otspot_num::linalg::timeout::deadline_reached;
+use otspot_num::sparse::{CscMatrix, SparseVec};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
@@ -37,8 +37,7 @@ thread_local! {
 #[cfg(test)]
 fn reject_eta_for_test(alpha: &mut SparseVec) {
     if ETA_UPDATE_DISABLE.get() {
-        alpha.indices.clear();
-        alpha.values.clear();
+        alpha.clear();
     }
 }
 
@@ -59,13 +58,13 @@ fn update_eta(
     entering_col: usize,
     leaving_row: usize,
     alpha: &SparseVec,
-) -> Result<(), crate::error::SolverError> {
+) -> Result<(), otspot_num::SolverError> {
     #[cfg(test)]
     if ETA_UPDATE_INTERNAL_ERROR.get() {
-        return Err(crate::error::SolverError::DimensionMismatch {
+        return Err(otspot_num::SolverError::DimensionMismatch {
             field: "injected_eta",
-            expected: alpha.len,
-            got: alpha.len.saturating_add(1),
+            expected: alpha.dim(),
+            got: alpha.dim().saturating_add(1),
         });
     }
     basis_mgr.update(entering_col, leaving_row, alpha)
@@ -297,7 +296,7 @@ pub(crate) fn dual_simplex_core_advanced(
     // Step 1: LuBasis初期化
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
-        Err(crate::error::SolverError::SingularBasis { .. }) => {
+        Err(otspot_num::SolverError::SingularBasis { .. }) => {
             return SimplexOutcome::SingularBasis;
         }
         Err(_) => {
@@ -614,11 +613,7 @@ pub(crate) fn dual_simplex_core_advanced(
 
         // 3f: FTRAN: α = B^{-1} a_q
         let (col_rows, col_vals) = a.column(entering_col);
-        let mut alpha_sv = SparseVec {
-            indices: col_rows.to_vec(),
-            values: col_vals.to_vec(),
-            len: m,
-        };
+        let mut alpha_sv = SparseVec::from_raw_parts(col_rows.to_vec(), col_vals.to_vec(), m);
         basis_mgr.ftran(&mut alpha_sv);
         alpha_sv.to_dense_into(&mut alpha_dense);
 
@@ -706,7 +701,7 @@ pub(crate) fn dual_simplex_core_advanced(
         reject_eta_for_test(&mut alpha_sv);
         match update_eta(&mut basis_mgr, entering_col, leaving_row, &alpha_sv) {
             Ok(()) => {}
-            Err(crate::error::SolverError::SingularBasis { .. }) => {
+            Err(otspot_num::SolverError::SingularBasis { .. }) => {
                 #[cfg(test)]
                 {
                     assert_eq!(x_b, atomic_snapshot.0);
@@ -846,7 +841,7 @@ mod tests {
     use super::super::super::pricing::MostInfeasibleLeaving;
     use super::*;
     use crate::options::SolverOptions;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     struct EtaRejectGuard(bool);
 

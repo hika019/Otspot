@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// solve_as_lp が NumericalError を返さないこと。
 #[test]

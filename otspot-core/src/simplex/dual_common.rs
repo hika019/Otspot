@@ -17,7 +17,7 @@ use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::{CscMatrix, SparseVec};
+use otspot_num::sparse::{CscMatrix, SparseVec};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// y = B^{-T} c_B written into the caller's buffer. `y_out.len()` is the basis
@@ -272,11 +272,7 @@ pub(super) fn lp_unbounded_ray_verified(
         if rc >= -options.dual_tol {
             continue;
         }
-        let mut d_sv = SparseVec {
-            indices: rows.to_vec(),
-            values: vals.to_vec(),
-            len: m,
-        };
+        let mut d_sv = SparseVec::from_raw_parts(rows.to_vec(), vals.to_vec(), m);
         basis_mgr.ftran(&mut d_sv);
         // A recession ray needs every basic structural/slack component ≤ 0
         // (increasing x_q from lb=0, ub=∞ never drives a basic var below its lb).
@@ -382,7 +378,7 @@ pub(super) fn recompute_gamma_truth(
 mod tests {
     use super::*;
     use crate::basis::LuBasis;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// P2 pin: user-facing classification must clock-recheck, never trust the
     /// `SimplexOutcome` variant. A `Timeout(_)` outcome reaching

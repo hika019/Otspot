@@ -4,21 +4,56 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+- LP presolveを`SolverOptions::presolve_max_pass`(既定10→**50**、netlib/Maros実測の最大
+  必要パス数9 [mondou2] に約5倍の余裕)で打ち切るよう是正。従来はLP driverだけ
+  `usize::MAX`を渡しており、この設定が事実上無視されていた。上限に到達して打ち切った場合
+  `PresolveResult::pass_limit_hit` / `QpPresolveResult::pass_limit_hit`(新規フィールド)
+  が`true`になり、`log::warn!`でも通知する
+- `presolve_max_pass = 0`を「presolveの反復簡約ループを無効化する」意図された挙動として
+  明文化(LP/QPで一貫)。`presolve = false`(presolve全体の無効化)とは別の契約であり、0
+  でも周辺処理(state構築、QPのfinalize/Ruizスケーリング)は通常どおり動く
+- solver基盤のうちsparse/linalg/KKT backendを`otspot-num`crateへ物理分離。旧公開パスは
+  re-exportで維持
+- LP/QP presolveが共有するfixpoint制御(`run_fixpoint`)を`otspot-num`へ共通化。transform
+  数学はドメインcrate (`otspot-core`) に残す設計とし、本番呼び出しゼロだった統一問題IR層
+  (専用production dispatcher含む) と、それ専用だったpresolve orchestration crateは撤去
+- architecture依存・実装所有権・legacy facade・ファイル/関数肥大化を検査するGitHub
+  Actions gateとself-testを追加
+- `CscMatrix`/`SparseVec`のstorage fieldへの直接dot-accessをotspot-core/otspot-io/
+  otspot-model/otspot-dev全箇所でアクセサ (`col_ptr()`等) 経由へ移行し、フィールドを
+  `pub(crate)`化。従来はテキストベースのGitHub Actions gate (ratchet) で直接access
+  の増加のみ検出していたが、全箇所移行によりコンパイラ強制へ切り替え、gateとbaseline
+  は撤去。`CscMatrix::from_raw_parts`の構造検証も`SparseVec`側と同水準へ強化
+- otspot-core内の紛らわしい命名・責務を是正 (公開APIパスへの影響なし)。QP専用の
+  A·Aᵀ構築 (`qp/linalg.rs`、facadeの`linalg.rs`と紛らわしい命名衝突) を`qp/aat.rs`
+  へ、presolve Step 9-11 (parallel row / duplicate-dominated column / dual fixing)
+  の独立実装 (`presolve/transforms_dup.rs`、「重複コピー」と誤読されやすい名前
+  だった) を`presolve/transforms_dominance.rs`へ改名。`error.rs`が担っていた
+  `MpsError`実装 (otspot-core所有のI/Oエラー型) と`SolverError`re-export (facade)
+  の二重責務を分離し、`MpsError`の実装を新設の`mps_error.rs`へ移動 (`error.rs`は
+  両者を再輸出するだけのfacadeへ)。`otspot_core::error::MpsError`/
+  `otspot_core::MpsError`/`otspot_core::error::SolverError`/
+  `otspot_core::SolverError`の公開パスはすべて維持
+- otspot-core (foundation crate) のテストが上位層のotspot-modelへ
+  dev-depend back するレイヤリング違反を解消 (Cargoはこの構成自体を
+  コンパイル不能な循環としては禁止していないが、otspot-coreのテスト
+  ビルドにotspot-model以下の依存が無用に引き込まれていた)。Model式APIを
+  使うhard-dataセンチネルテスト (SciPy oracle) は本質的にModel APIの
+  実行系テストであり、otspot-core単体のテストではなかったため、
+  `otspot-core/tests/blackbox_lp.rs` / `blackbox_qp.rs`からワークスペース
+  rootの`tests/model_api_lp_sentinels.rs` / `tests/model_api_qp_sentinels.rs`
+  (otspot-core/otspot-model双方に依存できるfacade crate側)へ移動し、
+  `otspot-core/Cargo.toml`の`otspot-model` dev-dependencyを削除
+
 ## [0.7.3] - 2026-07-22
 
 KKT 反復解法の失敗伝播と QPLIB 整数フィールドの厳密化を中心とした correctness リリース。
 
-- BREAKING: 公開 `KktFactor::solve` の戻り値を `()` から `Result<(), KktError>` に変更。MINRES の非収束を黙殺して部分 iterate を有効解として扱う経路を廃止し、呼び出し元が失敗を処理できるようにした
-- Conic KKT solve へ deadline を伝播し、期限超過またはキャンセルを `NumericalError` ではなく `Timeout` として分類するよう修正。Direct / DirectDd backend も solve 開始前に期限切れを検出する
-- Conic KKT factorization の最終候補にも健全性検査を適用し、非有限な行列・右辺・残差や許容範囲外の残差を持つ factor を採用しないよう修正
-- Presolve 変換後の縮約問題再構築が失敗した場合、ゼロ行列に置き換えて続行せず、問題と postsolve state を変換前へ戻すよう修正
-- QPLIB の次元・要素数・添字を浮動小数点経由で変換せず、10 進整数として直接検証。小数、負数、NaN、指数表記、`usize` overflow による切り捨て・飽和・後続フィールドの読みずれを拒否し、parse error に token 位置とフィールド文脈を追加
-- QPLIB の問題型ごとの省略 section と必須 tail record を公式構成どおり検証し、コメント、Fortran 指数、reader の遅延 I/O error を正しく扱うよう修正
-- Phase I の実行不能判定を fresh factorization で得た人工変数または検証済み Farkas 証明に限定し、drift した iterate を証明として再利用しないよう修正
-- Simplex の基底更新・pricing・scale 復元で次元や index の不整合を黙って補わず fail-fast とし、BFRT flip と eta 更新を原子的に commit するよう修正
-- `qp_runner` は不正な CLI・入力・非有限係数を stdout の疑似 solve 結果に変換せず、stderr と非ゼロ終了コードで報告するよう修正
-- Q の微小な交差項を絶対値だけで削除する presolve を廃止。McCormick 大域下界では simplex pricing が数値的ゼロと扱う目的項を box 下界へ退避し、広い bounds での不健全な pruning を防止
-- KKT 既定値の恒真な二重検査と、presolve postsolve の重複分岐を削除
+- BREAKING: `KktFactor::solve` を `Result<(), KktError>` 化し、MINRES 非収束・deadline・cancelを呼び出し元へ伝播。KKT factorの非有限値・残差健全性検査も追加
+- QPLIB の整数フィールド、問題型別section、必須tail、コメント・Fortran指数・遅延I/O errorを厳密に検証し、切り捨てや後続フィールドの読みずれを防止
+- Phase I の実行不能判定をfresh factorizationまたは検証済みFarkas証明に限定し、Simplexの次元/index不整合をfail-fast化。BFRT flipとeta更新も原子的に適用
+- Presolve再構築失敗時のrollback、Q交差項の不健全な削除、McCormick下界の目的項欠落を修正し、誤継続・誤pruningを防止
+- `qp_runner` の不正入力をstderrと非ゼロ終了コードで報告し、KKT/presolve postsolveの重複分岐を整理
 
 ## [0.7.2] - 2026-07-19
 

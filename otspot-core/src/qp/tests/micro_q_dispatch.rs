@@ -13,7 +13,7 @@
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolveRoute, SolveStatus};
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// min 1/2 q x²  −  x   s.t. x ≥ 0  (no linear constraints).
 /// Analytic optimum: x = 1/q, obj = −1/(2q). Bounded for any q > 0.

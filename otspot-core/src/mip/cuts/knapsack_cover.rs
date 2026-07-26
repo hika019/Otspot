@@ -263,7 +263,7 @@ fn lifted_cover_is_valid(
 mod tests {
     use super::*;
     use crate::mip::problem::MilpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// Knapsack `4x1 + 3x2 + 3x3 + 3x4 ≤ 8`, all binary, max Σ x.
     /// Minimal cover {2,3,4} (9>8) ⇒ base x2+x3+x4 ≤ 2; up-lifting x1 (weight 4)
@@ -410,7 +410,7 @@ mod tests {
         let rows = vec![0usize; n];
         let cols: Vec<usize> = (0..n).collect();
         let vals = vec![1.0; n];
-        let a = crate::sparse::CscMatrix::from_triplets(&rows, &cols, &vals, 1, n).unwrap();
+        let a = otspot_num::sparse::CscMatrix::from_triplets(&rows, &cols, &vals, 1, n).unwrap();
         let lp = LpProblem::new_general(
             vec![-1.0; n],
             a,
@@ -457,7 +457,7 @@ mod tests {
             vals.push(b);
         }
 
-        let a = crate::sparse::CscMatrix::from_triplets(&rows, &cols, &vals, 1, n).unwrap();
+        let a = otspot_num::sparse::CscMatrix::from_triplets(&rows, &cols, &vals, 1, n).unwrap();
         let lp = LpProblem::new_general(
             vec![-1.0; n],
             a,

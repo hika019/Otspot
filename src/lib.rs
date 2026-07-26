@@ -57,6 +57,9 @@
 
 pub use otspot_core::*;
 
+/// Solver-independent sparse/KKT numerical contracts.
+pub use otspot_num as num;
+
 /// Algebraic modeling API (Model, Variable, Expression, Constraint, constraint! macro).
 pub use otspot_model::{
     Constraint, ConstraintSense, Expression, Model, ModelError, ModelResult, SolutionProof,

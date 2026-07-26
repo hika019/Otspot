@@ -144,7 +144,7 @@ mod tests {
     use super::*;
     use crate::presolve::QpPresolveResult;
     use crate::problem::{ConstraintType, SolveStatus};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn make_presolve_result(
         orig_n: usize,

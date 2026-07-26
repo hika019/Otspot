@@ -4,8 +4,8 @@
 use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
-use crate::sparse::CscMatrix;
 use crate::tolerances::{DROP_TOL, SCALING_SIGMA_FLOOR, ZERO_TOL};
+use otspot_num::sparse::CscMatrix;
 
 /// Minimum ratio of rows to columns for equality-constraint QR elimination.
 /// Elimination cost is O(mn²) and only pays off in strongly over-determined
@@ -54,17 +54,17 @@ fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool]) {
     // Restrict pair detection to Le rows; pairing Eq/Ge rows with Le would corrupt the problem.
     let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
     for j in 0..n {
-        let start = prob.a.col_ptr[j];
-        let end = prob.a.col_ptr[j + 1];
+        let start = prob.a.col_ptr()[j];
+        let end = prob.a.col_ptr()[j + 1];
         for k in start..end {
-            let row = prob.a.row_ind[k];
+            let row = prob.a.row_ind()[k];
             if !removed_rows[row]
                 && matches!(
                     prob.constraint_types[row],
                     crate::problem::ConstraintType::Le
                 )
             {
-                row_entries[row].push((j, prob.a.values[k]));
+                row_entries[row].push((j, prob.a.values()[k]));
             }
         }
     }
@@ -204,16 +204,16 @@ fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool]) {
 /// Normalise constraint rows by `σ_i = max|A[i,*]|⁻¹` (capped at `SCALING_SIGMA_FLOOR`).
 /// Improves KKT-matrix conditioning. Returns per-row scales for dual unscaling.
 fn constraint_precond(a: &mut CscMatrix, b: &mut [f64]) -> Vec<f64> {
-    let m = a.nrows;
-    let n = a.ncols;
+    let m = a.nrows();
+    let n = a.ncols();
 
     let mut row_max = vec![0.0f64; m];
     for col in 0..n {
-        let start = a.col_ptr[col];
-        let end = a.col_ptr[col + 1];
+        let start = a.col_ptr()[col];
+        let end = a.col_ptr()[col + 1];
         for k in start..end {
-            let row = a.row_ind[k];
-            let v = a.values[k].abs();
+            let row = a.row_ind()[k];
+            let v = a.values()[k].abs();
             if v > row_max[row] {
                 row_max[row] = v;
             }
@@ -239,11 +239,11 @@ fn constraint_precond(a: &mut CscMatrix, b: &mut [f64]) -> Vec<f64> {
     }
 
     for col in 0..n {
-        let start = a.col_ptr[col];
-        let end = a.col_ptr[col + 1];
+        let start = a.col_ptr()[col];
+        let end = a.col_ptr()[col + 1];
         for k in start..end {
-            let row = a.row_ind[k];
-            a.values[k] *= sigmas[row];
+            let row = a.row_ind()[k];
+            a.values_mut()[k] *= sigmas[row];
         }
     }
 
@@ -304,14 +304,14 @@ pub fn run_qp_presolve_phase2(
         let mut trip_cols: Vec<usize> = Vec::new();
         let mut trip_vals: Vec<f64> = Vec::new();
         for j in 0..n {
-            let start = prob.a.col_ptr[j];
-            let end = prob.a.col_ptr[j + 1];
+            let start = prob.a.col_ptr()[j];
+            let end = prob.a.col_ptr()[j + 1];
             for k in start..end {
-                let row = prob.a.row_ind[k];
+                let row = prob.a.row_ind()[k];
                 if let Some(ii) = new_row_map[row] {
                     trip_rows.push(ii);
                     trip_cols.push(j);
-                    trip_vals.push(prob.a.values[k]);
+                    trip_vals.push(prob.a.values()[k]);
                 }
             }
         }
@@ -404,7 +404,7 @@ mod tests {
     use super::*;
     use crate::options::SolverOptions;
     use crate::qp::QpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn make_qp_simple(n: usize, m: usize) -> QpProblem {
         // 対角 Q=2I, c=0, A=I (truncated), b=1, bounds無限
@@ -544,15 +544,15 @@ mod tests {
         .unwrap();
         // Model a finite-input transform overflow after construction. Row 4 is
         // retained by QR, so rebuilding the reduced A must reject this value.
-        let row4_pos = prob.a.row_ind.iter().position(|&row| row == 4).unwrap();
-        prob.a.values[row4_pos] = f64::INFINITY;
+        let row4_pos = prob.a.row_ind().iter().position(|&row| row == 4).unwrap();
+        prob.a.values_mut()[row4_pos] = f64::INFINITY;
         let phase1 = QpPresolveResult::no_reduction(&prob);
 
         let result = run_qp_presolve_phase2(phase1, &SolverOptions::default());
 
         assert_eq!(result.reduced.num_constraints, m);
         assert_eq!(result.reduced.a.nnz(), 9);
-        assert!(result.reduced.a.values.iter().any(|v| v.is_infinite()));
+        assert!(result.reduced.a.values().iter().any(|v| v.is_infinite()));
         assert!(!result.was_reduced);
     }
 
@@ -659,9 +659,9 @@ mod tests {
             let phase1 = QpPresolveResult::no_reduction(&prob);
             let result = run_qp_presolve_phase2(phase1, &SolverOptions::default());
 
-            assert_eq!(result.reduced.q.col_ptr, q.col_ptr);
-            assert_eq!(result.reduced.q.row_ind, q.row_ind);
-            assert_eq!(result.reduced.q.values, q.values);
+            assert_eq!(result.reduced.q.col_ptr(), q.col_ptr());
+            assert_eq!(result.reduced.q.row_ind(), q.row_ind());
+            assert_eq!(result.reduced.q.values(), q.values());
             assert_eq!(result.reduced.q.nnz(), 4);
 
             let x = [2.0, -1.0];

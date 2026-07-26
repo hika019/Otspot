@@ -9,8 +9,8 @@ use crate::qp::postsolve::dual_recovery::{
 };
 use crate::qp::postsolve::refine::kkt_iterative::refit_bound_duals_kkt;
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
 use crate::tolerances::any_nonfinite;
+use otspot_num::sparse::CscMatrix;
 
 /// G + δ·I regularization: prevents F64 round-off cancellation.
 /// δ × ‖α‖ acts as a floor for the new r_d_free (typically 1e-12 × 1e2 = 1e-10, well below target 1e-6).
@@ -70,15 +70,15 @@ pub(crate) fn try_dual_only_ir(
     for (fi, &j) in free_eval_idx.iter().enumerate() {
         // r_d_free 用に Q x も加算する必要 (Q≠0 の QP で正確性必須)
         let mut qx = TwoFloat::from(0.0);
-        for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
-            let row = problem.q.row_ind[k];
-            qx += TwoFloat::new_mul(problem.q.values[k], result.solution[row]);
+        for k in problem.q.col_ptr()[j]..problem.q.col_ptr()[j + 1] {
+            let row = problem.q.row_ind()[k];
+            qx += TwoFloat::new_mul(problem.q.values()[k], result.solution[row]);
         }
         let qx_f = f64::from(qx);
         let mut aty = TwoFloat::from(0.0);
-        for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
-            let r = problem.a.row_ind[k];
-            aty += TwoFloat::new_mul(problem.a.values[k], result.dual_solution[r]);
+        for k in problem.a.col_ptr()[j]..problem.a.col_ptr()[j + 1] {
+            let r = problem.a.row_ind()[k];
+            aty += TwoFloat::new_mul(problem.a.values()[k], result.dual_solution[r]);
         }
         let aty_f = f64::from(aty);
         let bc = bc_eval[j];
@@ -116,8 +116,8 @@ pub(crate) fn try_dual_only_ir(
         return 0;
     };
     let mut seed_rows = Vec::new();
-    for k in problem.a.col_ptr[worst_j]..problem.a.col_ptr[worst_j + 1] {
-        let row = problem.a.row_ind[k];
+    for k in problem.a.col_ptr()[worst_j]..problem.a.col_ptr()[worst_j + 1] {
+        let row = problem.a.row_ind()[k];
         if row_is_active_for_dual_recovery(
             problem,
             row,
@@ -143,8 +143,8 @@ pub(crate) fn try_dual_only_ir(
 
     let mut free_idx = Vec::new();
     for &j in &free_eval_idx {
-        let touches_cluster = (problem.a.col_ptr[j]..problem.a.col_ptr[j + 1])
-            .any(|k| active_row_pos[problem.a.row_ind[k]] != usize::MAX);
+        let touches_cluster = (problem.a.col_ptr()[j]..problem.a.col_ptr()[j + 1])
+            .any(|k| active_row_pos[problem.a.row_ind()[k]] != usize::MAX);
         if touches_cluster {
             free_idx.push(j);
         }
@@ -160,8 +160,8 @@ pub(crate) fn try_dual_only_ir(
         }
         free_idx.clear();
         for &j in &free_eval_idx {
-            let touches_cluster = (problem.a.col_ptr[j]..problem.a.col_ptr[j + 1])
-                .any(|k| active_row_pos[problem.a.row_ind[k]] != usize::MAX);
+            let touches_cluster = (problem.a.col_ptr()[j]..problem.a.col_ptr()[j + 1])
+                .any(|k| active_row_pos[problem.a.row_ind()[k]] != usize::MAX);
             if touches_cluster {
                 free_idx.push(j);
             }
@@ -225,12 +225,12 @@ pub(crate) fn try_dual_only_ir(
             // 1/scale[j]^2 で重み付けし min Σ (r_d[j]/scale[j])² を解く
             // (重み無しの abs LS は componentwise max を悪化させる)。
             let mut qx_j = 0.0_f64;
-            for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
-                qx_j += problem.q.values[k] * tmp.solution[problem.q.row_ind[k]];
+            for k in problem.q.col_ptr()[j]..problem.q.col_ptr()[j + 1] {
+                qx_j += problem.q.values()[k] * tmp.solution[problem.q.row_ind()[k]];
             }
             let mut aty_j = 0.0_f64;
-            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
-                aty_j += problem.a.values[k] * f64::from(y_dd[problem.a.row_ind[k]]);
+            for k in problem.a.col_ptr()[j]..problem.a.col_ptr()[j + 1] {
+                aty_j += problem.a.values()[k] * f64::from(y_dd[problem.a.row_ind()[k]]);
             }
             let bc_j = bc_tmp[j];
             let scale_j =
@@ -238,11 +238,11 @@ pub(crate) fn try_dual_only_ir(
             let inv_scale2 = 1.0 / (scale_j * scale_j);
 
             let mut col_vec = vec![0.0_f64; ulen];
-            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
-                let r = problem.a.row_ind[k];
+            for k in problem.a.col_ptr()[j]..problem.a.col_ptr()[j + 1] {
+                let r = problem.a.row_ind()[k];
                 let pos = active_row_pos[r];
                 if pos != usize::MAX {
-                    col_vec[pos] = problem.a.values[k];
+                    col_vec[pos] = problem.a.values()[k];
                 }
             }
             let bpos = bound_pos_of_var[j];
@@ -272,17 +272,11 @@ pub(crate) fn try_dual_only_ir(
             }
             col_ptr[j + 1] = row_ind.len();
         }
-        let gram_csc = CscMatrix {
-            col_ptr,
-            row_ind,
-            values,
-            nrows: ulen,
-            ncols: ulen,
-        };
+        let gram_csc = CscMatrix::from_raw_parts(ulen, ulen, col_ptr, row_ind, values);
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
         }
-        let factor = match crate::linalg::ldl::factorize(&gram_csc) {
+        let factor = match otspot_num::linalg::ldl::factorize(&gram_csc) {
             Ok(f) => f,
             Err(_) => break,
         };
@@ -340,14 +334,14 @@ pub(crate) fn try_dual_only_ir(
             let bc_new = bound_contrib(&problem.bounds, &bound_duals_new);
             for &j in &free_eval_idx {
                 let mut qx = TwoFloat::from(0.0);
-                for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
-                    let row = problem.q.row_ind[k];
-                    qx += TwoFloat::new_mul(problem.q.values[k], tmp.solution[row]);
+                for k in problem.q.col_ptr()[j]..problem.q.col_ptr()[j + 1] {
+                    let row = problem.q.row_ind()[k];
+                    qx += TwoFloat::new_mul(problem.q.values()[k], tmp.solution[row]);
                 }
                 let mut aty = TwoFloat::from(0.0);
-                for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
-                    let r = problem.a.row_ind[k];
-                    aty += y_dd_new[r] * problem.a.values[k];
+                for k in problem.a.col_ptr()[j]..problem.a.col_ptr()[j + 1] {
+                    let r = problem.a.row_ind()[k];
+                    aty += y_dd_new[r] * problem.a.values()[k];
                 }
                 let bc = bc_new[j];
                 let r_d = f64::from(qx + TwoFloat::from(problem.c[j]) + aty + TwoFloat::from(bc));

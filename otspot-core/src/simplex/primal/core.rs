@@ -11,8 +11,8 @@ use super::ratio_test::select_leaving_feasibility_preserving;
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::qp::certificate::LP_CERT_TOL;
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{PIVOT_STABILITY_THRESHOLD, PIVOT_TOL};
+use otspot_num::sparse::{CscMatrix, SparseVec};
 use std::sync::atomic::Ordering;
 
 #[cfg(test)]
@@ -134,7 +134,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let max_iter = usize::MAX; // timeout is the real guard
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
-        Err(crate::error::SolverError::SingularBasis { .. }) => {
+        Err(otspot_num::SolverError::SingularBasis { .. }) => {
             return SimplexOutcome::SingularBasis;
         }
         Err(_) => {
@@ -414,11 +414,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             .iter()
             .cloned()
             .fold(0.0f64, |acc, v| acc.max(v.abs()));
-        let mut d_sv = SparseVec {
-            indices: col_rows.to_vec(),
-            values: col_vals.to_vec(),
-            len: m,
-        };
+        let mut d_sv = SparseVec::from_raw_parts(col_rows.to_vec(), col_vals.to_vec(), m);
         basis_mgr.ftran(&mut d_sv);
         d_sv.to_dense_into(&mut d_dense);
 
@@ -455,7 +451,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                             options,
                         ) {
                             Ok(()) => {}
-                            Err(crate::error::SolverError::SingularBasis { .. }) => {
+                            Err(otspot_num::SolverError::SingularBasis { .. }) => {
                                 return SimplexOutcome::SingularBasis;
                             }
                             Err(_) => {
@@ -475,11 +471,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                     }
                 }
                 let (cr2, cv2) = a.column(entering_col);
-                d_sv = SparseVec {
-                    indices: cr2.to_vec(),
-                    values: cv2.to_vec(),
-                    len: m,
-                };
+                d_sv = SparseVec::from_raw_parts(cr2.to_vec(), cv2.to_vec(), m);
                 basis_mgr.ftran(&mut d_sv);
                 d_sv.to_dense_into(&mut d_dense);
                 basis_snapshot.copy_from_slice(basis);
@@ -569,12 +561,11 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             && basis_mgr.eta_count() > 0;
         if !pivot_unstable {
             if eta_update_disabled() {
-                d_sv.indices.clear();
-                d_sv.values.clear();
+                d_sv.clear();
             }
             match basis_mgr.update(entering_col, leaving_row, &d_sv) {
                 Ok(()) => {}
-                Err(crate::error::SolverError::SingularBasis { .. }) => {
+                Err(otspot_num::SolverError::SingularBasis { .. }) => {
                     return SimplexOutcome::SingularBasis;
                 }
                 Err(err) => panic!("internal primal-simplex eta invariant violated: {err}"),
@@ -677,7 +668,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                     options,
                 ) {
                     Ok(()) => {}
-                    Err(crate::error::SolverError::SingularBasis { .. }) => {
+                    Err(otspot_num::SolverError::SingularBasis { .. }) => {
                         return SimplexOutcome::SingularBasis;
                     }
                     Err(_) => {
@@ -759,7 +750,7 @@ fn revert_to_snapshot(
     is_basic: &mut [bool],
     basis_mgr: &mut LuBasis,
     options: &SolverOptions,
-) -> Result<(), crate::error::SolverError> {
+) -> Result<(), otspot_num::SolverError> {
     let mut mgr = LuBasis::new_timed(a, basis_snapshot, options.max_etas, options.deadline)?;
     // Recompute x_B; carrying eta drift could leave a slack negative.
     let mut x_new = b_rhs.to_vec();
@@ -784,7 +775,7 @@ fn revert_to_snapshot(
 #[cfg(test)]
 mod revert_to_snapshot_tests {
     use super::*;
-    use crate::error::SolverError;
+    use otspot_num::SolverError;
 
     /// 2x2 identity basis: columns {0,1} on rows {0,1}, both non-singular.
     fn identity_2x2() -> CscMatrix {

@@ -16,7 +16,7 @@ use crate::options::SolverOptions;
 use crate::presolve::qp_transforms::run_qp_presolve_phase1;
 use crate::problem::ConstraintType;
 use crate::qp::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 #[allow(clippy::too_many_arguments)]
 fn make_qp(

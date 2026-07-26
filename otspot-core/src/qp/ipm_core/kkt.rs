@@ -2,16 +2,16 @@
 
 use crate::problem::ConstraintType;
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 #[inline]
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn spmv(a: &CscMatrix, x: &[f64], out: &mut [f64]) {
     out.iter_mut().for_each(|v| *v = 0.0);
-    for col in 0..a.ncols {
+    for col in 0..a.ncols() {
         let xv = x[col];
-        for k in a.col_ptr[col]..a.col_ptr[col + 1] {
-            out[a.row_ind[k]] += a.values[k] * xv;
+        for k in a.col_ptr()[col]..a.col_ptr()[col + 1] {
+            out[a.row_ind()[k]] += a.values()[k] * xv;
         }
     }
 }
@@ -20,10 +20,10 @@ pub(crate) fn spmv(a: &CscMatrix, x: &[f64], out: &mut [f64]) {
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn spmtv(a: &CscMatrix, v: &[f64], out: &mut [f64]) {
     out.iter_mut().for_each(|o| *o = 0.0);
-    for col in 0..a.ncols {
+    for col in 0..a.ncols() {
         let mut s = 0.0;
-        for k in a.col_ptr[col]..a.col_ptr[col + 1] {
-            s += a.values[k] * v[a.row_ind[k]];
+        for k in a.col_ptr()[col]..a.col_ptr()[col + 1] {
+            s += a.values()[k] * v[a.row_ind()[k]];
         }
         out[col] = s;
     }
@@ -61,8 +61,8 @@ pub(crate) fn build_extended_constraints(
     let mut is_eq_ext = Vec::with_capacity(m_ext);
 
     for col in 0..n {
-        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            let row = problem.a.row_ind[k];
+        for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+            let row = problem.a.row_ind()[k];
             let sign = if problem.constraint_types[row] == ConstraintType::Ge {
                 -1.0
             } else {
@@ -70,7 +70,7 @@ pub(crate) fn build_extended_constraints(
             };
             rows.push(row);
             cols.push(col);
-            vals.push(problem.a.values[k] * sign);
+            vals.push(problem.a.values()[k] * sign);
         }
     }
     for i in 0..m {
@@ -168,13 +168,13 @@ impl AugmentedKktCache {
             values[self.diag_con_slot[k]] = -(sigma_vec[k] + delta_d);
         }
         let total = self.n + self.m_ext;
-        CscMatrix {
-            col_ptr: self.col_ptr.clone(),
-            row_ind: self.row_ind.clone(),
+        CscMatrix::from_raw_parts(
+            total,
+            total,
+            self.col_ptr.clone(),
+            self.row_ind.clone(),
             values,
-            nrows: total,
-            ncols: total,
-        }
+        )
     }
 
     /// AMD 置換を適用した permuted aug_mat キャッシュを生成する。
@@ -278,13 +278,13 @@ impl PermutedAugmentedKkt {
             values[self.diag_con_slot[k]] = -(sigma_vec[k] + delta_d);
         }
         let total = self.n + self.m_ext;
-        CscMatrix {
-            col_ptr: self.col_ptr.clone(),
-            row_ind: self.row_ind.clone(),
+        CscMatrix::from_raw_parts(
+            total,
+            total,
+            self.col_ptr.clone(),
+            self.row_ind.clone(),
             values,
-            nrows: total,
-            ncols: total,
-        }
+        )
     }
 }
 
@@ -292,20 +292,20 @@ impl PermutedAugmentedKkt {
 /// まず LLT で PSD 判定 (Gershgorin の保守誤判定を回避)、indefinite なら共通 helper
 /// `linalg::gershgorin::psd_shift_from_gershgorin` で δ_ic = max(0, max_j(R_j − Q[j,j])) を返す。
 pub(crate) fn compute_inertia_correction(q: &CscMatrix) -> f64 {
-    if q.nrows == 0 || q.values.iter().all(|&v| v == 0.0) {
+    if q.nrows() == 0 || q.values().iter().all(|&v| v == 0.0) {
         return 0.0;
     }
-    if crate::linalg::ldl::is_q_psd_by_cholesky(q) {
+    if otspot_num::linalg::ldl::is_q_psd_by_cholesky(q) {
         return 0.0;
     }
-    crate::linalg::gershgorin::psd_shift_from_gershgorin(q)
+    otspot_num::linalg::gershgorin::psd_shift_from_gershgorin(q)
 }
 
 /// `AugmentedKktCache` を構築。Q は上三角全要素格納前提。
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn build_augmented_cache(q: &CscMatrix, a_ext: &CscMatrix) -> AugmentedKktCache {
-    let n = q.nrows;
-    let m_ext = a_ext.nrows;
+    let n = q.nrows();
+    let m_ext = a_ext.nrows();
     let total = n + m_ext;
 
     let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); total];
@@ -313,10 +313,10 @@ pub(crate) fn build_augmented_cache(q: &CscMatrix, a_ext: &CscMatrix) -> Augment
 
     // Part 1: Q 上三角 (row <= col、Q が完全格納でも上三角だけ取る)
     for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            let row = q.row_ind[k];
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            let row = q.row_ind()[k];
             if row <= col {
-                col_entries[col].push((row, q.values[k]));
+                col_entries[col].push((row, q.values()[k]));
                 if row == col {
                     diag_var_present[col] = true;
                 }
@@ -332,9 +332,9 @@ pub(crate) fn build_augmented_cache(q: &CscMatrix, a_ext: &CscMatrix) -> Augment
 
     // Part 2: A_ext^T (右上ブロック、row=j ∈ 0..n, col=n+k)
     for j in 0..n {
-        for idx in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
-            let k = a_ext.row_ind[idx];
-            col_entries[n + k].push((j, a_ext.values[idx]));
+        for idx in a_ext.col_ptr()[j]..a_ext.col_ptr()[j + 1] {
+            let k = a_ext.row_ind()[idx];
+            col_entries[n + k].push((j, a_ext.values()[idx]));
         }
     }
 
@@ -395,8 +395,8 @@ pub(crate) fn build_augmented_system(
     delta_p: f64,
     delta_d: f64,
 ) -> CscMatrix {
-    let n = q.nrows;
-    let m_ext = a_ext.nrows;
+    let n = q.nrows();
+    let m_ext = a_ext.nrows();
     let total = n + m_ext;
 
     let mut rows: Vec<usize> = Vec::new();
@@ -405,10 +405,10 @@ pub(crate) fn build_augmented_system(
 
     let mut diag_added = vec![false; n];
     for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            let row = q.row_ind[k];
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            let row = q.row_ind()[k];
             if row <= col {
-                let v = q.values[k] + if row == col { delta_p } else { 0.0 };
+                let v = q.values()[k] + if row == col { delta_p } else { 0.0 };
                 rows.push(row);
                 cols.push(col);
                 vals.push(v);
@@ -427,9 +427,9 @@ pub(crate) fn build_augmented_system(
     }
 
     for j in 0..n {
-        for idx in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
-            let k = a_ext.row_ind[idx];
-            let v = a_ext.values[idx];
+        for idx in a_ext.col_ptr()[j]..a_ext.col_ptr()[j + 1] {
+            let k = a_ext.row_ind()[idx];
+            let v = a_ext.values()[idx];
             rows.push(j);
             cols.push(n + k);
             vals.push(v);
@@ -460,8 +460,8 @@ pub(crate) fn build_schur_system(
 ) -> (CscMatrix, Vec<f64>) {
     use std::collections::BTreeMap;
 
-    let n = q.nrows;
-    let m_ext = a_ext.nrows;
+    let n = q.nrows();
+    let m_ext = a_ext.nrows();
 
     let d_inv: Vec<f64> = sigma_vec.iter().map(|&s| 1.0 / (s + delta_d)).collect();
 
@@ -470,10 +470,10 @@ pub(crate) fn build_schur_system(
     let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();
 
     for k in 0..m_ext {
-        let start = a_t.col_ptr[k];
-        let end = a_t.col_ptr[k + 1];
+        let start = a_t.col_ptr()[k];
+        let end = a_t.col_ptr()[k + 1];
         let row_entries: Vec<(usize, f64)> = (start..end)
-            .map(|p| (a_t.row_ind[p], a_t.values[p]))
+            .map(|p| (a_t.row_ind()[p], a_t.values()[p]))
             .collect();
         let dk = d_inv[k];
         for (idx_a, &(i, v_i)) in row_entries.iter().enumerate() {
@@ -485,10 +485,10 @@ pub(crate) fn build_schur_system(
     }
 
     for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            let row = q.row_ind[k];
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            let row = q.row_ind()[k];
             if row <= col {
-                *acc.entry((col, row)).or_insert(0.0) += q.values[k];
+                *acc.entry((col, row)).or_insert(0.0) += q.values()[k];
             }
         }
     }
@@ -511,13 +511,7 @@ pub(crate) fn build_schur_system(
         }
     }
 
-    let s = CscMatrix {
-        col_ptr,
-        row_ind,
-        values,
-        nrows: n,
-        ncols: n,
-    };
+    let s = CscMatrix::from_raw_parts(n, n, col_ptr, row_ind, values);
     (s, d_inv)
 }
 
@@ -533,7 +527,7 @@ pub(crate) struct KktCache {
 
 #[cfg(test)]
 pub(crate) fn collect_part1_diag_indices(aug_mat: &CscMatrix, n: usize) -> Vec<usize> {
-    (0..n).map(|i| aug_mat.col_ptr[i + 1] - 1).collect()
+    (0..n).map(|i| aug_mat.col_ptr()[i + 1] - 1).collect()
 }
 
 #[cfg(test)]
@@ -542,16 +536,18 @@ pub(crate) fn collect_part3_diag_indices(
     n: usize,
     m_ext: usize,
 ) -> Vec<usize> {
-    (0..m_ext).map(|k| aug_mat.col_ptr[n + k + 1] - 1).collect()
+    (0..m_ext)
+        .map(|k| aug_mat.col_ptr()[n + k + 1] - 1)
+        .collect()
 }
 
 #[cfg(test)]
 pub(crate) fn collect_q_diag_base(q: &CscMatrix, n: usize) -> Vec<f64> {
     let mut base = vec![0.0f64; n];
     for (col, val) in base.iter_mut().enumerate().take(n) {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            if q.row_ind[k] == col {
-                *val = q.values[k];
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            if q.row_ind()[k] == col {
+                *val = q.values()[k];
                 break;
             }
         }
@@ -568,10 +564,10 @@ pub(crate) fn update_augmented_values(
 ) {
     for &i in &cache.part1_updated_idx {
         let idx = cache.part1_diag_idx[i];
-        cache.mat.values[idx] = cache.q_diag_base[i] + delta_p;
+        cache.mat.values_mut()[idx] = cache.q_diag_base[i] + delta_p;
     }
     for (k, &idx) in cache.part3_diag_idx.iter().enumerate() {
-        cache.mat.values[idx] = -(sigma_vec[k] + delta_d);
+        cache.mat.values_mut()[idx] = -(sigma_vec[k] + delta_d);
     }
 }
 
@@ -698,10 +694,10 @@ mod tests {
         let diag_idx = collect_part1_diag_indices(&aug, n);
         for i in 0..n {
             let idx = diag_idx[i];
-            assert_eq!(aug.row_ind[idx], i);
+            assert_eq!(aug.row_ind()[idx], i);
         }
-        assert!((aug.values[diag_idx[0]] - 2.1).abs() < 1e-14);
-        assert!((aug.values[diag_idx[1]] - 3.1).abs() < 1e-14);
+        assert!((aug.values()[diag_idx[0]] - 2.1).abs() < 1e-14);
+        assert!((aug.values()[diag_idx[1]] - 3.1).abs() < 1e-14);
     }
 
     #[test]
@@ -720,10 +716,10 @@ mod tests {
         let diag_idx = collect_part3_diag_indices(&aug, n, m_ext);
         for k in 0..m_ext {
             let idx = diag_idx[k];
-            assert_eq!(aug.row_ind[idx], n + k);
+            assert_eq!(aug.row_ind()[idx], n + k);
         }
-        assert!((aug.values[diag_idx[0]] - (-0.55)).abs() < 1e-14);
-        assert!((aug.values[diag_idx[1]] - (-0.85)).abs() < 1e-14);
+        assert!((aug.values()[diag_idx[0]] - (-0.55)).abs() < 1e-14);
+        assert!((aug.values()[diag_idx[1]] - (-0.85)).abs() < 1e-14);
     }
 
     #[test]
@@ -758,8 +754,8 @@ mod tests {
         assert_eq!(m_orig, 1);
         assert_eq!(n_lb, 2);
         assert_eq!(m_ext, 3);
-        assert_eq!(a_ext.nrows, 3);
-        assert_eq!(a_ext.ncols, 2);
+        assert_eq!(a_ext.nrows(), 3);
+        assert_eq!(a_ext.ncols(), 2);
         assert_eq!(b_ext.len(), 3);
         assert_eq!(is_eq_ext, vec![false, false, false]);
     }
@@ -795,12 +791,12 @@ mod tests {
 
         let aug_ref = build_augmented_system(&q, &a_ext, &sigma2, dp2, dd2);
 
-        assert_eq!(cache.mat.values.len(), aug_ref.values.len());
+        assert_eq!(cache.mat.values().len(), aug_ref.values().len());
         for (i, (&got, &expected)) in cache
             .mat
-            .values
+            .values()
             .iter()
-            .zip(aug_ref.values.iter())
+            .zip(aug_ref.values().iter())
             .enumerate()
         {
             assert!(
@@ -831,9 +827,9 @@ mod tests {
         assert_eq!(b_ext, vec![-0.0, 5.0, 10.0]);
 
         let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m_ext];
-        for col in 0..a_ext.ncols {
-            for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
-                row_entries[a_ext.row_ind[k]].push((col, a_ext.values[k]));
+        for col in 0..a_ext.ncols() {
+            for k in a_ext.col_ptr()[col]..a_ext.col_ptr()[col + 1] {
+                row_entries[a_ext.row_ind()[k]].push((col, a_ext.values()[k]));
             }
         }
         assert_eq!(row_entries[0], vec![(0, -1.0)]);

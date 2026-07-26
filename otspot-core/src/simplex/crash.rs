@@ -9,7 +9,7 @@
 //! 同行 entry を持つ他列の count を decrement し singleton chase を誘発する。
 //! 動的 re-prioritization が LTSF の本質 (静的 sort は quasi-triangle で退化)。
 
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// 列内最大 |pivot| に対する相対閾値 (これ未満は不安定 pivot として却下)。
 /// 0.1 は LP solver の一般的な Markowitz threshold (Suhl & Suhl 1990)。
@@ -42,7 +42,7 @@ pub(crate) fn compute_crash_basis(
     let mut basis = initial_basis_in.to_vec();
     let mut needs_artificial = needs_artificial_in.to_vec();
     let mut row_covered: Vec<bool> = needs_artificial.iter().map(|&v| !v).collect();
-    let mut col_used: Vec<bool> = vec![false; a.ncols];
+    let mut col_used: Vec<bool> = vec![false; a.ncols()];
 
     for (i, &covered) in row_covered.iter().enumerate() {
         if covered {
@@ -58,10 +58,10 @@ pub(crate) fn compute_crash_basis(
     let mut state = LtsfState::new(a, n_shifted, &row_covered, &col_used);
 
     while let Some(j) = state.pop_min_active_column() {
-        let (cs, ce) = (a.col_ptr[j], a.col_ptr[j + 1]);
+        let (cs, ce) = (a.col_ptr()[j], a.col_ptr()[j + 1]);
         let mut col_max_abs = 0.0_f64;
         for k in cs..ce {
-            let v = a.values[k].abs();
+            let v = a.values()[k].abs();
             if v > col_max_abs {
                 col_max_abs = v;
             }
@@ -74,11 +74,11 @@ pub(crate) fn compute_crash_basis(
         let mut best_row: Option<usize> = None;
         let mut best_abs = 0.0_f64;
         for k in cs..ce {
-            let row = a.row_ind[k];
+            let row = a.row_ind()[k];
             if row_covered[row] {
                 continue;
             }
-            let val = a.values[k];
+            let val = a.values()[k];
             let abs = val.abs();
             if abs < pivot_min {
                 continue;
@@ -124,7 +124,7 @@ struct LtsfState {
 
 impl LtsfState {
     fn new(a: &CscMatrix, n_shifted: usize, row_covered: &[bool], col_used: &[bool]) -> Self {
-        let m = a.nrows;
+        let m = a.nrows();
         let mut col_active = vec![0usize; n_shifted];
         let mut max_k = 0usize;
         for j in 0..n_shifted {
@@ -132,8 +132,8 @@ impl LtsfState {
                 continue;
             }
             let mut cnt = 0usize;
-            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-                if !row_covered[a.row_ind[k]] {
+            for k in a.col_ptr()[j]..a.col_ptr()[j + 1] {
+                if !row_covered[a.row_ind()[k]] {
                     cnt += 1;
                 }
             }
@@ -155,8 +155,8 @@ impl LtsfState {
 
         let mut row_count = vec![0usize; m];
         for j in 0..n_shifted {
-            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-                row_count[a.row_ind[k]] += 1;
+            for k in a.col_ptr()[j]..a.col_ptr()[j + 1] {
+                row_count[a.row_ind()[k]] += 1;
             }
         }
         let mut row_ptr = vec![0usize; m + 1];
@@ -166,8 +166,8 @@ impl LtsfState {
         let mut row_cols = vec![0usize; row_ptr[m]];
         let mut pos = row_ptr.clone();
         for j in 0..n_shifted {
-            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-                let r = a.row_ind[k];
+            for k in a.col_ptr()[j]..a.col_ptr()[j + 1] {
+                let r = a.row_ind()[k];
                 row_cols[pos[r]] = j;
                 pos[r] += 1;
             }
@@ -231,7 +231,7 @@ impl LtsfState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// 単純対角ケース: artif 行が n 個、対角構造列で全行被覆できる。
     #[test]

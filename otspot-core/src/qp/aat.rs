@@ -1,7 +1,7 @@
-//! 線形代数 / 行列ビルダー: A·Aᵀ の上三角 CSC 構築。
-//! refine 系 helper が共通で必要とする小規模 utility のみ置く。
+//! A·Aᵀ (上三角 CSC) ビルダー。QP refine 系 helper 専用。
+//! `crate::linalg` (otspot_num facade) とは無関係の QP 内部実装。
 
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// AAT 対角ε 正則化倍率 (rank-deficient 対策)。f64 eps より十分上、LDL dynamic reg より十分下。
 pub(crate) const AAT_REG_FACTOR: f64 = 1e-12;
@@ -16,20 +16,21 @@ pub(crate) fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<C
     let m_u = m as u128;
     let mut col_pair_sum: u128 = 0;
     for k in 0..n {
-        let c_k = (a.col_ptr[k + 1] - a.col_ptr[k]) as u128;
+        let c_k = (a.col_ptr()[k + 1] - a.col_ptr()[k]) as u128;
         col_pair_sum = col_pair_sum.saturating_add(c_k.saturating_mul(c_k + 1) / 2);
     }
     let nnz_upper_bound = (m_u.saturating_mul(m_u + 1) / 2).min(col_pair_sum);
     let bytes_estimate = nnz_upper_bound.saturating_mul(AAT_BUILD_BYTES_PER_ENTRY);
-    if bytes_estimate > crate::linalg::kkt_solver::memory_budget_bytes() as u128 {
+    if bytes_estimate > otspot_num::linalg::kkt_solver::memory_budget_bytes() as u128 {
         return None;
     }
     let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     for k in 0..n {
-        let start = a.col_ptr[k];
-        let end = a.col_ptr[k + 1];
-        let cols_in_k: Vec<(usize, f64)> =
-            (start..end).map(|p| (a.row_ind[p], a.values[p])).collect();
+        let start = a.col_ptr()[k];
+        let end = a.col_ptr()[k + 1];
+        let cols_in_k: Vec<(usize, f64)> = (start..end)
+            .map(|p| (a.row_ind()[p], a.values()[p]))
+            .collect();
         for (idx_a, &(i, v_i)) in cols_in_k.iter().enumerate() {
             for &(j, v_j) in &cols_in_k[idx_a..] {
                 let (lo, hi) = if i <= j { (i, j) } else { (j, i) };
@@ -59,11 +60,5 @@ pub(crate) fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<C
             col_ptr[i] = col_ptr[i - 1];
         }
     }
-    Some(CscMatrix {
-        col_ptr,
-        row_ind,
-        values,
-        nrows: m,
-        ncols: m,
-    })
+    Some(CscMatrix::from_raw_parts(m, m, col_ptr, row_ind, values))
 }

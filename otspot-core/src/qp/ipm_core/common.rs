@@ -1,11 +1,11 @@
 //! IPM/IP-PMM 共通関数。
 
 use super::kkt::{norm_inf, spmv};
-use crate::linalg::ldl;
-use crate::linalg::timeout::TimeoutCtx;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::linalg::ldl;
+use otspot_num::linalg::timeout::TimeoutCtx;
+use otspot_num::sparse::CscMatrix;
 
 /// ステップ方向 (Δx, Δy) から infeasibility / unboundedness を検出する。
 #[allow(clippy::too_many_arguments)]
@@ -36,10 +36,10 @@ pub(crate) fn check_infeasible_or_unbounded(
             let norm_dy = norm_dy_inf;
             let mut at_dy = vec![0.0f64; n];
             for (j, at_dy_j) in at_dy.iter_mut().enumerate() {
-                for ptr in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
-                    let row = a_ext.row_ind[ptr];
+                for ptr in a_ext.col_ptr()[j]..a_ext.col_ptr()[j + 1] {
+                    let row = a_ext.row_ind()[ptr];
                     if row < m_orig {
-                        *at_dy_j += a_ext.values[ptr] * dy_orig[row];
+                        *at_dy_j += a_ext.values()[ptr] * dy_orig[row];
                     }
                 }
             }
@@ -66,7 +66,7 @@ pub(crate) fn check_infeasible_or_unbounded(
     }
     let norm_dx = norm_dx_inf;
 
-    let is_lp = problem.q.values.iter().all(|&v| v == 0.0);
+    let is_lp = problem.q.values().iter().all(|&v| v == 0.0);
     let cond_obj = if is_lp {
         let c_dx: f64 = problem
             .c
@@ -97,10 +97,10 @@ pub(crate) fn check_infeasible_or_unbounded(
     if m_orig > 0 {
         let mut a_dx = vec![0.0f64; m_orig];
         for (j, &dxj) in dx.iter().enumerate() {
-            for ptr in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
-                let row = a_ext.row_ind[ptr];
+            for ptr in a_ext.col_ptr()[j]..a_ext.col_ptr()[j + 1] {
+                let row = a_ext.row_ind()[ptr];
                 if row < m_orig {
-                    a_dx[row] += a_ext.values[ptr] * dxj;
+                    a_dx[row] += a_ext.values()[ptr] * dxj;
                 }
             }
         }
@@ -162,12 +162,12 @@ pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx)
     let mut diag_added = vec![false; n];
 
     for col in 0..n {
-        for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            let row = problem.q.row_ind[k];
+        for k in problem.q.col_ptr()[col]..problem.q.col_ptr()[col + 1] {
+            let row = problem.q.row_ind()[k];
             if row <= col {
                 triplet_rows.push(row);
                 triplet_cols.push(col);
-                let v = problem.q.values[k] + if row == col { delta_p } else { 0.0 };
+                let v = problem.q.values()[k] + if row == col { delta_p } else { 0.0 };
                 triplet_vals.push(v);
                 if row == col {
                     diag_added[col] = true;

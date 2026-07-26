@@ -2,8 +2,8 @@
 //!
 //! `lu.rs` と `mod.rs` のテスト双方で使用するヘルパー関数を一元化する。
 
-use crate::sparse::CscMatrix;
 use crate::tolerances::DROP_TOL;
+use otspot_num::sparse::CscMatrix;
 
 /// 二つのスライスが許容誤差 `tol` 以内で一致するかを検証する。
 pub fn assert_vec_near(a: &[f64], b: &[f64], tol: f64) {

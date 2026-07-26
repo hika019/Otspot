@@ -336,7 +336,7 @@ mod tests {
     use crate::options::SolverOptions;
     use crate::problem::{ConstraintType, SolveStatus};
     use crate::solve_lp_with;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// Solve with presolve disabled to guarantee a warm_start_basis in the result.
     fn solve_no_presolve(problem: &LpProblem) -> SolverResult {

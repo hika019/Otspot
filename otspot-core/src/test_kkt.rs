@@ -11,7 +11,7 @@ use crate::problem::{ConstraintType, LpProblem, SolveStatus};
 use crate::qp::kkt_resid::f64_impl;
 use crate::qp::QpProblem;
 use crate::simplex::solve_with;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// KKT residual tolerance shared with bench (`eps=1e-6`, CLAUDE.md L42).
 pub const EPS_KKT: f64 = 1e-6;
@@ -270,7 +270,7 @@ pub fn assert_solver_invariants_qp(result: &crate::problem::SolverResult, qp: &Q
 mod no_op_proof_tests {
     use super::*;
     use crate::problem::{SolveStatus, SolverResult};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// No-op proof: `assert_solver_invariants_lp` has load-bearing body.
     ///

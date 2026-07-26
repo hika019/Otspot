@@ -327,11 +327,11 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
 
     let mut q_diag = vec![0.0_f64; n];
     for col in 0..n {
-        let cs = problem.q.col_ptr[col];
-        let ce = problem.q.col_ptr[col + 1];
+        let cs = problem.q.col_ptr()[col];
+        let ce = problem.q.col_ptr()[col + 1];
         for k in cs..ce {
-            if problem.q.row_ind[k] == col {
-                q_diag[col] = problem.q.values[k];
+            if problem.q.row_ind()[k] == col {
+                q_diag[col] = problem.q.values()[k];
             }
         }
     }
@@ -341,14 +341,14 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
     // cannot accept an off-diagonal that would be amplified by column scaling
     // (s_j = 1/√Q_jj amplifies Q_ij by 1/√(Q_ii·Q_jj)).
     for col in 0..n {
-        let cs = problem.q.col_ptr[col];
-        let ce = problem.q.col_ptr[col + 1];
+        let cs = problem.q.col_ptr()[col];
+        let ce = problem.q.col_ptr()[col + 1];
         for k in cs..ce {
-            let row = problem.q.row_ind[k];
+            let row = problem.q.row_ind()[k];
             if row != col {
                 let local_scale = q_diag[row].abs().min(q_diag[col].abs());
                 let offdiag_eps = Q_OFFDIAG_REL * local_scale + UNDERFLOW_GUARD;
-                if problem.q.values[k].abs() > offdiag_eps {
+                if problem.q.values()[k].abs() > offdiag_eps {
                     return None;
                 }
             }
@@ -385,22 +385,22 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
 
     let mut q_s = problem.q.clone();
     for col in 0..n {
-        let cs = q_s.col_ptr[col];
-        let ce = q_s.col_ptr[col + 1];
+        let cs = q_s.col_ptr()[col];
+        let ce = q_s.col_ptr()[col + 1];
         for k in cs..ce {
-            let row = q_s.row_ind[k];
-            q_s.values[k] *= col_scales[row] * col_scales[col];
+            let row = q_s.row_ind()[k];
+            q_s.values_mut()[k] *= col_scales[row] * col_scales[col];
         }
     }
 
     // A' = A D (column-scale)
     let mut a_s = problem.a.clone();
     for col in 0..n {
-        let cs = a_s.col_ptr[col];
-        let ce = a_s.col_ptr[col + 1];
+        let cs = a_s.col_ptr()[col];
+        let ce = a_s.col_ptr()[col + 1];
         let s = col_scales[col];
         for k in cs..ce {
-            a_s.values[k] *= s;
+            a_s.values_mut()[k] *= s;
         }
     }
 
@@ -916,7 +916,7 @@ fn finalize_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static GAP_ACCEPTANCE_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -1707,12 +1707,12 @@ mod tests {
             try_q_diagonal_scaling(&prob).expect("ill-cond diag Q must trigger");
         let q_s = &scaled.q;
         for col in 0..2 {
-            for k in q_s.col_ptr[col]..q_s.col_ptr[col + 1] {
-                if q_s.row_ind[k] == col {
+            for k in q_s.col_ptr()[col]..q_s.col_ptr()[col + 1] {
+                if q_s.row_ind()[k] == col {
                     assert!(
-                        (q_s.values[k] - 1.0).abs() < 1e-12,
+                        (q_s.values()[k] - 1.0).abs() < 1e-12,
                         "got {} at col {}",
-                        q_s.values[k],
+                        q_s.values()[k],
                         col
                     );
                 }
@@ -1869,7 +1869,7 @@ mod tests {
     #[test]
     fn finalize_outcome_dual_sign_notproven_demotes_to_suboptimal() {
         use crate::problem::ConstraintType;
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
 
         let q = CscMatrix::new(1, 1);
         let a = CscMatrix::from_triplets(&[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1).unwrap();
@@ -1926,7 +1926,7 @@ mod tests {
     #[test]
     fn finalize_outcome_dual_sign_valid_returns_optimal() {
         use crate::problem::ConstraintType;
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
 
         let q = CscMatrix::new(1, 1);
         let a = CscMatrix::from_triplets(&[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1).unwrap();
@@ -2011,7 +2011,7 @@ mod tests {
     /// x = D·x_s、z_orig = z_s/D の逆変換を直接検証。
     #[test]
     fn unscale_q_diagonal_reverses_x_and_bound_duals() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let n = 3;
         let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 4.0, 9.0], n, n).unwrap();
         let prob = QpProblem::new_all_le(

@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::options::SolverOptions;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 #[allow(clippy::too_many_arguments)]
 fn make_qp(
@@ -337,3 +337,54 @@ fn test_apply_fixed_variable_kahan_accumulation_matches_dd() {
     let _ = result;
 }
 use crate::qp::QpProblem;
+
+/// Sentinel: `presolve_max_pass = 0` disables QP phase-1's iterative loop
+/// too (consistent with the LP driver's `presolve_max_pass_0_disables_the_iterative_loop`),
+/// while the surrounding finalize pass (matrix rebuild) still runs.
+///
+/// Revert-fails: an implementation that ran at least one pass unconditionally
+/// (ignoring `max_iter_pass == 0`) would fix `y=1` away, flipping `was_reduced`
+/// to `true` and `reduced.num_vars` to 1.
+#[test]
+fn test_presolve_max_pass_0_disables_iterative_loop_but_finalize_still_runs() {
+    let prob = make_qp(
+        &[0, 1],
+        &[0, 1],
+        &[2.0, 2.0],
+        2,
+        vec![0.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.0],
+        vec![(0.0, 2.0), (1.0, 1.0)], // y is fixed at 1
+    );
+
+    let opts0 = SolverOptions {
+        presolve_max_pass: 0,
+        ..SolverOptions::default()
+    };
+    let disabled = run_qp_presolve_phase1(&prob, &opts0);
+    assert!(
+        !disabled.was_reduced,
+        "presolve_max_pass=0 must not fix the y=1 variable away"
+    );
+    assert_eq!(disabled.reduced.num_vars, 2, "both vars must survive");
+    assert!(
+        !disabled.pass_limit_hit,
+        "max_iter_pass=0 is a deliberate disable, not an exhausted budget; \
+         pass_limit_hit must stay false"
+    );
+
+    let opts1 = SolverOptions {
+        presolve_max_pass: 1,
+        ..SolverOptions::default()
+    };
+    let enabled = run_qp_presolve_phase1(&prob, &opts1);
+    assert!(
+        enabled.was_reduced,
+        "presolve_max_pass=1 must still fix y=1 and reduce the problem"
+    );
+    assert_eq!(enabled.reduced.num_vars, 1, "y=1 fixed → 1 var remaining");
+}

@@ -9,11 +9,11 @@ use super::{
     CRASH_INFEASIBLE_FALLBACKS,
 };
 use crate::basis::{BasisManager, LuBasis};
-use crate::linalg::timeout::deadline_reached;
 use crate::presolve::{LpEquilibration, LpScalingResult};
 use crate::problem::{LpProblem, SolverResult};
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::DROP_TOL;
+use otspot_num::linalg::timeout::deadline_reached;
+use otspot_num::sparse::{CscMatrix, SparseVec};
 use std::sync::atomic::Ordering;
 
 use super::super::{scale_upper_bounds, BoundedStandardForm};

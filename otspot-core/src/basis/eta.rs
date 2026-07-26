@@ -4,8 +4,8 @@
 //! イータ行列 `E = I + (col - e_r) * e_r^T` の積で `B^{-1}` を逐次更新する。
 //! このモジュールは疎なイータ行列の生成・蓄積・適用（FTRAN/BTRAN）を提供する。
 
-use crate::sparse::SparseVec;
 use crate::tolerances::*;
+use otspot_num::sparse::SparseVec;
 
 /// 単一のイータ行列: `E = I + (col - e_r) * e_r^T`
 ///
@@ -91,11 +91,11 @@ pub(crate) fn add_eta_sparse(
     }
 
     // Other non-zero entries: -pivot_col[i] / pivot_element
-    for (k, &idx) in pivot_col.indices.iter().enumerate() {
+    for (k, &idx) in pivot_col.indices().iter().enumerate() {
         if idx == leaving_row {
             continue;
         }
-        let val = -pivot_col.values[k] / pivot_element;
+        let val = -pivot_col.values()[k] / pivot_element;
         if val.abs() > ZERO_TOL {
             indices.push(idx);
             values.push(val);

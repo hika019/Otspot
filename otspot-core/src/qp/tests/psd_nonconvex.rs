@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// 不定 Q (対角負値) → 慣性修正 IPM で NonConvex を返さないこと。
 #[test]

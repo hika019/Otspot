@@ -1,8 +1,8 @@
 use super::super::*;
 use super::{assert_close, EPS};
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
 use crate::test_kkt::assert_solver_invariants_qp;
+use otspot_num::sparse::CscMatrix;
 
 /// 大行ノルム制約での Ruiz scaling 耐性 (元空間で pfeas 評価)。
 #[test]

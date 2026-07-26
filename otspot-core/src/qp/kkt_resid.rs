@@ -9,8 +9,8 @@
 //! 分離するほうが drift catch 性が高い)。
 
 use crate::problem::ConstraintType;
-use crate::sparse::CscMatrix;
 use crate::tolerances::{any_nonfinite, FX_TOL};
+use otspot_num::sparse::CscMatrix;
 
 const INVALID_BOUND_DUAL_RESIDUAL: f64 = 1.0e100;
 
@@ -258,7 +258,7 @@ pub mod f64_impl {
 
     /// A^T·y (per-column sum), output 長 `n = a.ncols`。`y` が空 / `A` が 0 行なら zero。
     pub fn aty(a: &CscMatrix, y: &[f64], n: usize) -> Vec<f64> {
-        if a.nrows == 0 || y.is_empty() {
+        if a.nrows() == 0 || y.is_empty() {
             return vec![0.0; n];
         }
         a.transpose().mat_vec_mul(y).expect(
@@ -276,7 +276,7 @@ pub mod f64_impl {
 
     /// A·x (per-row sum). `A` が 0 行なら空 Vec。
     pub fn ax(a: &CscMatrix, x: &[f64]) -> Vec<f64> {
-        if a.nrows == 0 {
+        if a.nrows() == 0 {
             return Vec::new();
         }
         a.mat_vec_mul(x).expect(
@@ -379,14 +379,14 @@ pub mod dd_impl {
 
     /// Q·x DD per-row sum.
     pub fn qx(q: &CscMatrix, x: &[f64]) -> Vec<TwoFloat> {
-        let n = q.nrows;
+        let n = q.nrows();
         let zero = TwoFloat::from(0.0);
         let mut out: Vec<TwoFloat> = vec![zero; n];
-        for col in 0..q.ncols {
+        for col in 0..q.ncols() {
             let xv = x[col];
-            for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-                let row = q.row_ind[k];
-                out[row] += TwoFloat::new_mul(q.values[k], xv);
+            for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+                let row = q.row_ind()[k];
+                out[row] += TwoFloat::new_mul(q.values()[k], xv);
             }
         }
         out
@@ -395,14 +395,14 @@ pub mod dd_impl {
     /// A^T·y DD per-column sum.
     pub fn aty(a: &CscMatrix, y: &[f64], n: usize) -> Vec<TwoFloat> {
         let zero = TwoFloat::from(0.0);
-        if a.nrows == 0 || y.is_empty() {
+        if a.nrows() == 0 || y.is_empty() {
             return vec![zero; n];
         }
         let mut out: Vec<TwoFloat> = vec![zero; n];
-        for col in 0..a.ncols {
-            for k in a.col_ptr[col]..a.col_ptr[col + 1] {
-                let row = a.row_ind[k];
-                out[col] += TwoFloat::new_mul(a.values[k], y[row]);
+        for col in 0..a.ncols() {
+            for k in a.col_ptr()[col]..a.col_ptr()[col + 1] {
+                let row = a.row_ind()[k];
+                out[col] += TwoFloat::new_mul(a.values()[k], y[row]);
             }
         }
         out
@@ -410,15 +410,15 @@ pub mod dd_impl {
 
     /// A·x DD per-row sum.
     pub fn ax(a: &CscMatrix, x: &[f64]) -> Vec<TwoFloat> {
-        if a.nrows == 0 {
+        if a.nrows() == 0 {
             return Vec::new();
         }
         let zero = TwoFloat::from(0.0);
-        let mut out: Vec<TwoFloat> = vec![zero; a.nrows];
-        for col in 0..a.ncols {
+        let mut out: Vec<TwoFloat> = vec![zero; a.nrows()];
+        for col in 0..a.ncols() {
             let xv = x[col];
-            for k in a.col_ptr[col]..a.col_ptr[col + 1] {
-                out[a.row_ind[k]] += TwoFloat::new_mul(a.values[k], xv);
+            for k in a.col_ptr()[col]..a.col_ptr()[col + 1] {
+                out[a.row_ind()[k]] += TwoFloat::new_mul(a.values()[k], xv);
             }
         }
         out
@@ -892,7 +892,7 @@ mod tests {
     #[test]
     fn dual_sign_z_ub_observed_positive_at_active_ub() {
         use crate::qp::{solve_qp, QpProblem};
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         // min 1/2*(2)*x^2 + (-20)*x ≡ (x-10)^2 + const, 0 ≤ x ≤ 5
         let q = CscMatrix::from_triplets(&[0usize], &[0usize], &[2.0_f64], 1, 1).unwrap();
         let a = CscMatrix::new(0, 1);
@@ -985,7 +985,7 @@ mod tests {
 
     #[test]
     fn dd_qx_aty_ax_match_f64_on_well_conditioned() {
-        use crate::sparse::CscMatrix;
+        use otspot_num::sparse::CscMatrix;
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0_f64, 3.0], 2, 2).unwrap();
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0_f64, 2.0], 1, 2).unwrap();
         let x = vec![5.0_f64, 7.0];

@@ -12,7 +12,7 @@ use super::{
 use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 use std::sync::atomic::Ordering;
 
 use super::BoundedStandardForm;
@@ -44,7 +44,7 @@ where
     }
 
     let (a_aug, art_col_of_row, mut ubs_aug, basis, is_basic, mut x_b) = state_factory();
-    let n_aug = a_aug.ncols;
+    let n_aug = a_aug.ncols();
     maybe_perturb_initial_xb(&mut x_b);
     let mut state = BoundedDualState {
         basis,

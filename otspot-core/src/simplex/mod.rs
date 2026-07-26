@@ -9,6 +9,7 @@ pub mod pricing;
 pub(crate) mod primal;
 mod standard_form;
 mod trace;
+pub(crate) mod warm_start;
 
 #[cfg(test)]
 pub(crate) use entry::solve;
@@ -35,6 +36,7 @@ pub(crate) use standard_form::{
     external_stop_requested, extract_dual_info, stall_status, stop_result_with_incumbent,
     stop_status, SimplexOutcome, StandardForm,
 };
+pub(crate) use warm_start::apply_recovered_warm_start_basis;
 
 /// Returns `true` when any basic variable value violates its lower bound.
 /// Triggers cold-start fallback in the warm-start path.

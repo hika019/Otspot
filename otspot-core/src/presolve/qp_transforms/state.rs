@@ -1,7 +1,7 @@
 //! QP presolve types: status enum, postsolve metadata, and the public result struct.
 
-use crate::linalg::ruiz::RuizScaler;
 use crate::qp::QpProblem;
+use otspot_num::linalg::ruiz::RuizScaler;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +71,11 @@ pub struct QpPresolveResult {
     /// Number of independent variable blocks (1 = not separable).
     pub block_components: usize,
     pub ruiz_scaler: Option<RuizScaler>,
+    /// `true` when phase-1's fixpoint loop exhausted `presolve_max_pass`
+    /// passes without reaching a stable fixpoint. `reduced` is valid either
+    /// way — this only flags that further passes might have reduced it more.
+    /// Always `false` for phase-2 results (a separate, non-iterative pass).
+    pub pass_limit_hit: bool,
 }
 
 impl QpPresolveResult {
@@ -92,6 +97,7 @@ impl QpPresolveResult {
             is_diagonal_q: false,
             block_components: 1,
             ruiz_scaler: None,
+            pass_limit_hit: false,
         }
     }
 
@@ -131,11 +137,11 @@ impl Workspace {
 
         let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
         for j in 0..n {
-            let start = prob.a.col_ptr[j];
-            let end = prob.a.col_ptr[j + 1];
+            let start = prob.a.col_ptr()[j];
+            let end = prob.a.col_ptr()[j + 1];
             for idx in start..end {
-                let row = prob.a.row_ind[idx];
-                row_entries[row].push((j, prob.a.values[idx]));
+                let row = prob.a.row_ind()[idx];
+                row_entries[row].push((j, prob.a.values()[idx]));
             }
         }
 

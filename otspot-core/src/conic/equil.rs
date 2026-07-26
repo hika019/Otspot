@@ -69,6 +69,8 @@ impl Equilibrator {
         if n == 0 {
             return eq;
         }
+        // Not unified with `otspot_num::run_fixpoint` (see docs/architecture.md):
+        // fixed sweep count with no early-stop signal to report.
         for _ in 0..EQUIL_SWEEPS {
             eq.row_sweep(problem, &blk);
             eq.col_sweep(problem);
@@ -221,14 +223,14 @@ impl Equilibrator {
         for col in 0..n {
             for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
                 let row = problem.a.row_ind()[k];
-                a.values[k] = self.e_a[row] * problem.a.values()[k] * self.d[col];
+                a.values_mut()[k] = self.e_a[row] * problem.a.values()[k] * self.d[col];
             }
         }
         let mut g = problem.g.clone();
         for col in 0..n {
             for k in problem.g.col_ptr()[col]..problem.g.col_ptr()[col + 1] {
                 let row = problem.g.row_ind()[k];
-                g.values[k] = self.e_g[row] * problem.g.values()[k] * self.d[col];
+                g.values_mut()[k] = self.e_g[row] * problem.g.values()[k] * self.d[col];
             }
         }
         let b: Vec<f64> = problem
@@ -421,7 +423,7 @@ pub(super) fn verify_primal_ray(problem: &ConicProblem, d: &[f64], tol: f64) -> 
 mod tests {
     use super::*;
     use crate::conic::{solve_misocp, BbOptions, ConeSpec, ConicOptions, MisocpProblem};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn csc(rows: &[Vec<f64>], nrows: usize, ncols: usize) -> CscMatrix {
         let mut r = Vec::new();
@@ -689,7 +691,7 @@ mod tests {
             let mut out = m.clone();
             for col in 0..m.ncols() {
                 for k in m.col_ptr()[col]..m.col_ptr()[col + 1] {
-                    out.values[k] = m.values()[k] * t[col];
+                    out.values_mut()[k] = m.values()[k] * t[col];
                 }
             }
             out

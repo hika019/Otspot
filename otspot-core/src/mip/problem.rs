@@ -8,11 +8,11 @@
 //! mechanism the spatial QP B&B already uses for box subproblems.
 
 use super::Relaxation;
-use crate::linalg::ldl::is_q_psd_by_cholesky;
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::qp::QpProblem;
 use crate::tolerances::{FIXED_POINT_FEAS_TOL, INT_ROUND_TOL};
+use otspot_num::linalg::ldl::is_q_psd_by_cholesky;
 
 /// Construction error for [`MilpProblem`] / [`MiqpProblem`].
 #[non_exhaustive]
@@ -101,7 +101,7 @@ impl Relaxation for MilpProblem {
     fn propagation_data(
         &self,
     ) -> Option<(
-        &crate::sparse::CscMatrix,
+        &otspot_num::sparse::CscMatrix,
         &[f64],
         &[crate::problem::ConstraintType],
     )> {
@@ -315,7 +315,7 @@ fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResu
 mod tests {
     use super::*;
     use crate::problem::ConstraintType;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn lp_2var() -> LpProblem {
         // trivial 2-var LP, bounds [0,5]^2, one <= constraint

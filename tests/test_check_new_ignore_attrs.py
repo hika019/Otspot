@@ -26,7 +26,7 @@ assert _spec.loader is not None
 sys.modules["check_new_ignore_attrs"] = gate
 _spec.loader.exec_module(gate)
 
-TARGET = "x86_64-unknown-linux-gnu"
+TARGET = "host-default"
 VERSIONS = "nextest=0.9.137 rustc=1.95.0"
 # (binary-id, test-name, ignored)
 BASE_ROWS = [
@@ -39,7 +39,6 @@ BASE_ROWS = [
 # Real implementations captured before any test stubs a seam, so each test
 # starts from a pristine module regardless of run order.
 _REAL = {
-    "host_target": gate.host_target,
     "tool_versions": gate.tool_versions,
     "list_testcases": gate.list_testcases,
     "_nextest_list_output": gate._nextest_list_output,
@@ -48,7 +47,6 @@ _REAL = {
 
 
 def _reset():
-    gate.host_target = _REAL["host_target"]
     gate.tool_versions = _REAL["tool_versions"]
     gate.list_testcases = _REAL["list_testcases"]
     gate._nextest_list_output = _REAL["_nextest_list_output"]
@@ -68,7 +66,6 @@ def _install(rows):
     # Drive the REAL list_testcases via the subprocess seam (canned JSON), so
     # the drift tests also exercise JSON parsing and sorting.
     _reset()
-    gate.host_target = lambda: TARGET
     gate.tool_versions = lambda: VERSIONS
     gate._nextest_list_output = lambda: _nextest_json(rows)
 

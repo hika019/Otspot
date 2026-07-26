@@ -6,9 +6,9 @@
 pub mod certificate;
 use certificate::{BoundGapCertificate, OptimalCertificate};
 
-use crate::error::SolverError;
 use crate::options::WarmStartBasis;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
+use otspot_num::SolverError;
 use std::fmt;
 use std::sync::Arc;
 
@@ -417,17 +417,17 @@ impl LpProblem {
         name: Option<String>,
     ) -> Result<Self, SolverError> {
         // Validate dimensions
-        if c.len() != a.ncols {
+        if c.len() != a.ncols() {
             return Err(SolverError::DimensionMismatch {
                 field: "c",
-                expected: a.ncols,
+                expected: a.ncols(),
                 got: c.len(),
             });
         }
-        if b.len() != a.nrows {
+        if b.len() != a.nrows() {
             return Err(SolverError::DimensionMismatch {
                 field: "b",
-                expected: a.nrows,
+                expected: a.nrows(),
                 got: b.len(),
             });
         }
@@ -461,7 +461,7 @@ impl LpProblem {
                 });
             }
         }
-        for (i, &v) in a.values.iter().enumerate() {
+        for (i, &v) in a.values().iter().enumerate() {
             if !v.is_finite() {
                 return Err(SolverError::NonFiniteCoefficient {
                     field: "A",
@@ -502,7 +502,7 @@ impl fmt::Display for LpProblem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::SolverError;
+    use otspot_num::SolverError;
 
     #[test]
     fn test_lp_problem_new_valid() {
@@ -664,7 +664,7 @@ mod tests {
         for bad in bad_vals {
             // from_triplets drops NaN via DROP_TOL; inject bad value directly.
             let mut a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap();
-            a.values[0] = bad;
+            a.values_mut()[0] = bad;
             let res = LpProblem::new_general(
                 vec![1.0, 2.0],
                 a,

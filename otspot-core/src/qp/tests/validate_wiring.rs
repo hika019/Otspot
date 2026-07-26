@@ -7,7 +7,7 @@
 use super::super::*;
 use crate::options::{IpmOptions, SolverOptions, Tolerance};
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 fn make_trivial_qp() -> QpProblem {
     // min 0.5 x^2  s.t. x <= 5,  x >= 0

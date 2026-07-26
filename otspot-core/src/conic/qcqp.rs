@@ -11,7 +11,7 @@
 
 use super::{solve_socp, ConeSpec, ConicOptions, ConicProblem, ConicResult};
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// A convex quadratic constraint `(1/2) x^T P x + q^T x + r <= 0` with `P` PSD.
 #[derive(Debug, Clone)]
@@ -56,13 +56,13 @@ fn widen_cols(m: &CscMatrix, new_ncols: usize) -> CscMatrix {
         .last()
         .expect("col_ptr always has ncols+1 >= 1 entries");
     col_ptr.resize(new_ncols + 1, nnz);
-    CscMatrix {
+    CscMatrix::from_raw_parts(
+        m.nrows(),
+        new_ncols,
         col_ptr,
-        row_ind: m.row_ind().to_vec(),
-        values: m.values().to_vec(),
-        nrows: m.nrows(),
-        ncols: new_ncols,
-    }
+        m.row_ind().to_vec(),
+        m.values().to_vec(),
+    )
 }
 
 /// Safety factor on the `n · f64::EPSILON` Cholesky backward-error bound, used

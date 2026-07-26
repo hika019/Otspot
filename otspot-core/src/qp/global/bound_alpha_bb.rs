@@ -11,11 +11,11 @@
 
 use std::time::Instant;
 
-use crate::linalg::gershgorin::psd_shift_from_gershgorin;
 use crate::options::SolverOptions;
 use crate::problem::SolverResult;
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_num::linalg::gershgorin::psd_shift_from_gershgorin;
+use otspot_num::sparse::CscMatrix;
 
 use super::bound::{all_bounds_finite, is_feasible_result};
 
@@ -33,16 +33,16 @@ pub(crate) fn gershgorin_alpha(q: &CscMatrix) -> f64 {
 /// `from_triplets` の重複 entry sum 仕様 (csc.rs::test_from_triplets_duplicate_entries)
 /// を利用して既存 entry と新 diag 寄与を統合する。
 fn add_scalar_to_diagonal(q: &CscMatrix, value: f64) -> CscMatrix {
-    let n = q.nrows;
-    debug_assert_eq!(q.nrows, q.ncols, "Q must be square");
-    let mut rows = Vec::with_capacity(q.values.len() + n);
-    let mut cols = Vec::with_capacity(q.values.len() + n);
-    let mut vals = Vec::with_capacity(q.values.len() + n);
+    let n = q.nrows();
+    debug_assert_eq!(q.nrows(), q.ncols(), "Q must be square");
+    let mut rows = Vec::with_capacity(q.values().len() + n);
+    let mut cols = Vec::with_capacity(q.values().len() + n);
+    let mut vals = Vec::with_capacity(q.values().len() + n);
     for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            rows.push(q.row_ind[k]);
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            rows.push(q.row_ind()[k]);
             cols.push(col);
-            vals.push(q.values[k]);
+            vals.push(q.values()[k]);
         }
         rows.push(col);
         cols.push(col);
@@ -136,7 +136,7 @@ mod tests {
     use super::*;
     use crate::options::SolverOptions;
     use crate::problem::ConstraintType;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn build_problem(diag: &[f64], c: &[f64], bounds: Vec<(f64, f64)>) -> QpProblem {
         let n = diag.len();

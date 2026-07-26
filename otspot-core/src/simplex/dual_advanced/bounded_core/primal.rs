@@ -8,11 +8,11 @@ use super::leaving::{
 use super::pricing::{partial_price_entering, PartialPrice};
 use super::BoundedDualState;
 use crate::basis::{BasisManager, LuBasis};
-use crate::error::SolverError;
-use crate::linalg::timeout::deadline_reached;
 use crate::options::SolverOptions;
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
+use otspot_num::linalg::timeout::deadline_reached;
+use otspot_num::sparse::{CscMatrix, SparseVec};
+use otspot_num::SolverError;
 use std::sync::atomic::Ordering;
 
 use super::super::super::dual_common::{
@@ -315,17 +315,13 @@ pub(crate) fn phase2_primal_bounded(
         let leaving_col = state.basis[r];
 
         let alpha_sv = if primal_alpha_sv_disabled() {
-            SparseVec {
-                indices: vec![],
-                values: vec![],
-                len: m,
-            }
+            SparseVec::from_raw_parts(vec![], vec![], m)
         } else {
             SparseVec::from_dense(&alpha)
         };
         match basis_mgr.update(q, r, &alpha_sv) {
             Ok(()) => {}
-            Err(crate::error::SolverError::SingularBasis { .. }) => {
+            Err(otspot_num::SolverError::SingularBasis { .. }) => {
                 return (SimplexOutcome::SingularBasis, state);
             }
             Err(err) => panic!("internal bounded-primal eta invariant violated: {err}"),
@@ -593,17 +589,13 @@ pub(super) fn primal_simplex_aug(
         let leaving_col = state.basis[r];
 
         let alpha_sv = if primal_alpha_sv_disabled() {
-            SparseVec {
-                indices: vec![],
-                values: vec![],
-                len: m,
-            }
+            SparseVec::from_raw_parts(vec![], vec![], m)
         } else {
             SparseVec::from_dense(&alpha)
         };
         match basis_mgr.update(q, r, &alpha_sv) {
             Ok(()) => {}
-            Err(crate::error::SolverError::SingularBasis { .. }) => {
+            Err(otspot_num::SolverError::SingularBasis { .. }) => {
                 return SimplexOutcome::SingularBasis;
             }
             Err(err) => panic!("internal augmented-primal eta invariant violated: {err}"),

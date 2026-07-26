@@ -7,8 +7,8 @@ use crate::simplex::dual_advanced::bound_flip::{
 };
 use crate::simplex::pricing::MostInfeasibleLeaving;
 use crate::simplex::standard_form::build_bounded_standard_form;
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
+use otspot_num::sparse::{CscMatrix, SparseVec};
 
 /// Algebraic invariant tolerance — generous because injected warm-start
 /// states walk the loop through many BTRAN/FTRAN rounds where rounding
@@ -1608,11 +1608,7 @@ fn primal_ftran_alpha_sv_numerical_equiv() {
 
         // Sparse alpha via the old code path (raw column → ftran).
         let (cr, cv) = a.get_column(col).unwrap();
-        let mut alpha_sv_old = SparseVec {
-            indices: cr.to_vec(),
-            values: cv.to_vec(),
-            len: m,
-        };
+        let mut alpha_sv_old = SparseVec::from_raw_parts(cr.to_vec(), cv.to_vec(), m);
         basis_mgr.ftran(&mut alpha_sv_old);
 
         // New code path: from_dense.
@@ -1632,11 +1628,7 @@ fn primal_ftran_alpha_sv_numerical_equiv() {
 
         // Algebraic no-op proof: a zero sparse vector must differ from the
         // correct FTRAN result, proving `from_dense` is non-trivially correct.
-        let zero_sv = SparseVec {
-            indices: vec![],
-            values: vec![],
-            len: m,
-        };
+        let zero_sv = SparseVec::from_raw_parts(vec![], vec![], m);
         let d_zero = zero_sv.to_dense();
         let max_diff: f64 = (0..m)
             .map(|i| (d_old[i] - d_zero[i]).abs())

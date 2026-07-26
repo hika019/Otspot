@@ -189,12 +189,12 @@ pub(super) fn step11_dual_fixing(
             continue;
         }
         let a_nnz = {
-            let start = prob.a.col_ptr[j];
-            let end = prob.a.col_ptr[j + 1];
+            let start = prob.a.col_ptr()[j];
+            let end = prob.a.col_ptr()[j + 1];
             (start..end)
                 .filter(|&k| {
-                    let row = prob.a.row_ind[k];
-                    !ws.removed_rows[row] && prob.a.values[k].abs() > ZERO_TOL
+                    let row = prob.a.row_ind()[k];
+                    !ws.removed_rows[row] && prob.a.values()[k].abs() > ZERO_TOL
                 })
                 .count()
         };

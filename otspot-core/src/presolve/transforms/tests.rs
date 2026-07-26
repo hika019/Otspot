@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::problem::{ConstraintType, LpProblem};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 #[allow(clippy::too_many_arguments)]
 fn make_lp_general(

@@ -23,7 +23,7 @@ use crate::conic::{
 };
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolveRoute, SolveStatus, SolverResult};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 use super::QpProblem;
 
@@ -358,7 +358,7 @@ mod tests {
     use super::*;
     use crate::options::{GlobalOptimizationConfig, Tolerance};
     use crate::qp::{solve_qp_with, QcqpMatrix};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// PR #25 review ("Keep gap tolerance out of feasibility checks"): the
     /// optimality-gap search budget (`cfg.gap_tol`) and the incumbent

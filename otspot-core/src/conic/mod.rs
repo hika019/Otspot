@@ -25,7 +25,7 @@ pub use qcqp::{
 };
 
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// Cone specification: nonnegative orthant of dimension `l`, then SOCs with dims in `soc`.
 #[derive(Debug, Clone, Default, PartialEq)]

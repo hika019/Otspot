@@ -13,8 +13,8 @@ use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
+use otspot_num::sparse::{CscMatrix, SparseVec};
 use std::sync::atomic::Ordering;
 
 #[cfg(test)]
@@ -26,8 +26,7 @@ thread_local! {
 #[cfg(test)]
 fn reject_eta_for_test(alpha: &mut SparseVec) {
     if ETA_UPDATE_DISABLE.get() {
-        alpha.indices.clear();
-        alpha.values.clear();
+        alpha.clear();
     }
 }
 
@@ -231,7 +230,7 @@ pub(super) fn dual_simplex_core(
 
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
-        Err(crate::error::SolverError::SingularBasis { .. }) => {
+        Err(otspot_num::SolverError::SingularBasis { .. }) => {
             return SimplexOutcome::SingularBasis;
         }
         Err(_) => {
@@ -314,11 +313,7 @@ pub(super) fn dual_simplex_core(
 
         // FTRAN: α = B^{-1} a_q
         let (col_rows, col_vals) = a.column(entering_col);
-        let mut alpha_sv = SparseVec {
-            indices: col_rows.to_vec(),
-            values: col_vals.to_vec(),
-            len: m,
-        };
+        let mut alpha_sv = SparseVec::from_raw_parts(col_rows.to_vec(), col_vals.to_vec(), m);
         basis_mgr.ftran(&mut alpha_sv);
         alpha_sv.to_dense_into(&mut alpha_dense);
 
@@ -351,7 +346,7 @@ pub(super) fn dual_simplex_core(
         reject_eta_for_test(&mut alpha_sv);
         match basis_mgr.update(entering_col, leaving_row, &alpha_sv) {
             Ok(()) => {}
-            Err(crate::error::SolverError::SingularBasis { .. }) => {
+            Err(otspot_num::SolverError::SingularBasis { .. }) => {
                 #[cfg(test)]
                 {
                     assert_eq!(x_b, atomic_snapshot.0);
@@ -461,9 +456,9 @@ mod tests {
     use crate::options::{SimplexMethod, SolverOptions};
     use crate::problem::{LpProblem, SolveStatus};
     use crate::simplex::solve_with;
-    use crate::sparse::CscMatrix;
     use crate::test_kkt::{assert_kkt_optimal_with, dfeas_rel_bound, pfeas_abs, EPS_KKT};
     use crate::tolerances::PIVOT_TOL;
+    use otspot_num::sparse::CscMatrix;
 
     struct EtaRejectGuard(bool);
 

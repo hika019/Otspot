@@ -330,7 +330,7 @@ pub(crate) fn solve_qp_multistart_with_hooks(
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]

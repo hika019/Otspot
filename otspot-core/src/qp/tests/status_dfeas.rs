@@ -1,7 +1,7 @@
 use super::super::*;
 use super::{assert_close, EPS};
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// 全変数固定退化ケース (presolve=false で本体検証)。
 #[test]

@@ -9,7 +9,7 @@
 
 use super::super::*;
 use crate::problem::{ConstraintType, SolveStatus};
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// Pattern A (audit fixture): A 空 + Q diag=(0, -2)、c=(1, 3)、box [-2, 2]^2。
 /// 期待: x=(-2, -2)、bd=[1, 7, 0, 0]、status=LocallyOptimal、KKT≈0。

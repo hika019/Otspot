@@ -18,12 +18,12 @@ pub(crate) mod symmetry;
 
 pub use problem::{MilpProblem, MipProblemError, MiqpProblem};
 
-use crate::linalg::timeout::deadline_reached;
 use crate::options::{MipBranching, MipConfig, SolverOptions, WarmStartBasis};
 use crate::problem::certificate::BoundGapCertificate;
 use crate::problem::{ConstraintType, SolveStatus, SolverResult, TimingBreakdown};
 use crate::qp::global::pruning::{should_prune, within_gap};
-use crate::sparse::CscMatrix;
+use otspot_num::linalg::timeout::deadline_reached;
+use otspot_num::sparse::CscMatrix;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 

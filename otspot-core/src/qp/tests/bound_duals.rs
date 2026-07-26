@@ -1,7 +1,7 @@
 use super::super::*;
 use crate::problem::SolveStatus;
-use crate::sparse::CscMatrix;
 use crate::test_kkt::assert_solver_invariants_qp;
+use otspot_num::sparse::CscMatrix;
 
 /// BD-T1: baseline (presolve OFF, 全変数 box) → bound_duals.len()=4。
 #[test]

@@ -1,6 +1,7 @@
 //! LP presolve: collects 12 reductions and the inverse metadata for postsolve.
 //!
-//! Fixpoint loop over `MAX_PRESOLVE_ITER` passes of:
+//! Fixpoint loop (shared `otspot_num::run_fixpoint`) over up to
+//! `SolverOptions::presolve_max_pass` passes of:
 //! 1. Fixed variable (lb == ub)
 //! 2. Singleton row (Eq / Le / Ge) → variable value or bound tightening
 //!    2b. Forcing row (activity-tight → fix all vars)
@@ -10,7 +11,7 @@
 //! 6. Doubleton Eq (R6)
 //! 7. Free-variable substitution (R15)
 //! 8. Free singleton column (R5)
-//!    9–11 live in `transforms_dup.rs` (parallel row / dup-dom col / dual fixing).
+//!    9–11 live in `transforms_dominance.rs` (parallel row / dup-dom col / dual fixing).
 
 mod bounds;
 mod doubleton;

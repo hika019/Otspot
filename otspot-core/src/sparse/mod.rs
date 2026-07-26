@@ -1,11 +1,7 @@
-//! 疎行列・疎ベクトル演算モジュール
+//! Compatibility re-exports for the numerical sparse layer.
 //!
-//! CSC形式の疎行列・疎ベクトルを提供する。
+//! This module exists solely as a public API surface for downstream crates
+//! (`otspot-io`, `otspot-model`, `otspot-dev`). Code inside `otspot-core`
+//! must depend on `otspot_num::sparse` directly rather than `crate::sparse`.
 
-mod compress;
-mod csc;
-mod vec;
-
-// Public re-exports
-pub use csc::CscMatrix;
-pub use vec::SparseVec;
+pub use otspot_num::sparse::{CscMatrix, SparseVec};

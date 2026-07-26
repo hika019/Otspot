@@ -4,10 +4,10 @@ use super::extract::bounded_obj;
 use super::pricing::compute_reduced_costs_into_timed;
 use super::{BoundedDualState, BoundedOutcome};
 use crate::basis::{BasisManager, LuBasis};
-use crate::linalg::timeout::deadline_reached;
 use crate::options::SolverOptions;
-use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
+use otspot_num::linalg::timeout::deadline_reached;
+use otspot_num::sparse::{CscMatrix, SparseVec};
 use std::sync::atomic::Ordering;
 
 use super::super::super::dual_common::{
@@ -128,7 +128,7 @@ pub(crate) fn iterate(
     let mut basis_mgr =
         match LuBasis::new_timed(a, &state.basis, options.max_etas, options.deadline) {
             Ok(bm) => bm,
-            Err(crate::error::SolverError::SingularBasis { .. }) => {
+            Err(otspot_num::SolverError::SingularBasis { .. }) => {
                 return (BoundedOutcome::SingularBasis, state);
             }
             Err(_) => {
@@ -442,19 +442,15 @@ pub(crate) fn iterate(
         // returned solver state. A rejected eta must leave the whole state at
         // the last valid basis.
         let (col_rows, col_vals) = a.column(entering_col);
-        let mut alpha_sv_for_update = SparseVec {
-            indices: col_rows.to_vec(),
-            values: col_vals.to_vec(),
-            len: m,
-        };
+        let mut alpha_sv_for_update =
+            SparseVec::from_raw_parts(col_rows.to_vec(), col_vals.to_vec(), m);
         basis_mgr.ftran(&mut alpha_sv_for_update);
         if eta_update_disabled() {
-            alpha_sv_for_update.indices.clear();
-            alpha_sv_for_update.values.clear();
+            alpha_sv_for_update.clear();
         }
         match basis_mgr.update(entering_col, r, &alpha_sv_for_update) {
             Ok(()) => {}
-            Err(crate::error::SolverError::SingularBasis { .. }) => {
+            Err(otspot_num::SolverError::SingularBasis { .. }) => {
                 state.iterations = iteration_before;
                 return (BoundedOutcome::SingularBasis, state);
             }

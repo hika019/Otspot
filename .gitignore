@@ -1,4 +1,5 @@
 /target
+/target-main-bench/
 /data/*
 !/data/baseline_objectives/
 /data/baseline_objectives/*

@@ -127,9 +127,9 @@ impl LdlFactorizationAmd {
 
     /// AMD 付き LDL^T x = b を解く。
     ///
-    /// 1. 右辺を前方置換: b_p[k] = rhs[perm[k]]
-    /// 2. (PAP^T) x_p = b_p を faer で解く（simplicial/supernodal は AUTO 選択）
-    /// 3. 解を逆置換: sol[perm[k]] = x_p[k]
+    /// 1. 右辺を前方置換: `b_p[k] = rhs[perm[k]]`
+    /// 2. `(PAP^T) x_p = b_p` を faer で解く（simplicial/supernodal は AUTO 選択）
+    /// 3. 解を逆置換: `sol[perm[k]] = x_p[k]`
     pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
         let n = self.n;
         let b_p = permute_vec(rhs, &self.perm);
@@ -567,10 +567,7 @@ pub fn factorize_budget(mat: &CscMatrix, max_l_nnz: usize) -> Result<LdlFactoriz
 
 /// `factorize` の per-call parallelism 指定版。
 /// `par == Par::Seq` で既存挙動と完全互換。
-pub(crate) fn factorize_with_par(
-    mat: &CscMatrix,
-    par: faer::Par,
-) -> Result<LdlFactorization, LdlError> {
+pub fn factorize_with_par(mat: &CscMatrix, par: faer::Par) -> Result<LdlFactorization, LdlError> {
     let n = mat.nrows;
     let (symbolic, l_values) = do_numeric_factorize(mat, None, None, None, par)?;
     Ok(LdlFactorization {
@@ -622,13 +619,7 @@ pub fn factorize_quasidefinite_with_cached_perm_budget_par(
     let n = mat.nrows;
     let (new_col_ptr, new_row_ind, new_values) =
         permute_sym_upper(n, &mat.col_ptr, &mat.row_ind, &mat.values, perm);
-    let perm_mat = CscMatrix {
-        col_ptr: new_col_ptr,
-        row_ind: new_row_ind,
-        values: new_values,
-        nrows: n,
-        ncols: n,
-    };
+    let perm_mat = CscMatrix::from_raw_parts(n, n, new_col_ptr, new_row_ind, new_values);
     let signs = extract_diagonal_signs(n, &perm_mat.col_ptr, &perm_mat.row_ind, &perm_mat.values);
     let (symbolic, l_values) =
         do_numeric_factorize(&perm_mat, Some(&signs), deadline, max_l_nnz, par)?;
@@ -719,13 +710,7 @@ mod tests {
                 values[start + idx] = val;
             }
         }
-        CscMatrix {
-            col_ptr,
-            row_ind,
-            values,
-            nrows: n,
-            ncols: n,
-        }
+        CscMatrix::from_raw_parts(n, n, col_ptr, row_ind, values)
     }
 
     #[test]

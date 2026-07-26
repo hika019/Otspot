@@ -50,7 +50,7 @@ pub(crate) use primal::{set_primal_alpha_sv_disabled, set_primal_force_bland};
 use super::super::pricing::DualLeavingStrategy;
 use super::super::standard_form::{BoundedStandardForm, SimplexOutcome};
 use crate::options::SolverOptions;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 // Re-export items that tests obtain via `use super::*` (previously file-level imports)
 #[cfg(test)]

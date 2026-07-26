@@ -16,7 +16,7 @@ use crate::qp::ipm_solver::kkt::{
 };
 use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid::dual_sign_violation;
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// Verify all KKT conditions and mint an [`OptimalCertificate`] if they all pass.
 ///
@@ -47,7 +47,7 @@ pub fn prove_optimal<'a>(
     // (index out of bounds) instead of returning Err — recorded as a panic
     // failure, not an assertion failure.
     let num_vars = view.bounds.len();
-    let num_constraints = view.a.nrows;
+    let num_constraints = view.a.nrows();
     let n_lb = view
         .bounds
         .iter()
@@ -58,9 +58,9 @@ pub fn prove_optimal<'a>(
         .iter()
         .filter(|&&(_, ub)| ub.is_finite())
         .count();
-    let dim_valid = view.q.nrows == num_vars
-        && view.q.ncols == num_vars
-        && view.a.ncols == num_vars
+    let dim_valid = view.q.nrows() == num_vars
+        && view.q.ncols() == num_vars
+        && view.a.ncols() == num_vars
         && view.b.len() == num_constraints
         && view.c.len() == num_vars
         && view.constraint_types.len() == num_constraints
@@ -303,7 +303,7 @@ mod tests {
     use super::*;
     use crate::problem::ConstraintType;
     use crate::qp::ipm_solver::outcome::ProblemView;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     // Helper: build a ProblemView for a trivial LP.
     fn trivial_view<'a>(

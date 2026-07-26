@@ -2,15 +2,15 @@
 
 use super::state::{warm_bound_margin, WARM_BOUND_REL_MARGIN};
 use super::warm_start::apply_qp_warm_start;
-use crate::linalg::amd::amd_with_deadline;
-use crate::linalg::kkt_solver::{factorize_kkt_with_cached_perm_par, KktConfig};
-use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::qp::ipm_core::kkt::build_augmented_system;
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
 use crate::tolerances::UNDERFLOW_GUARD;
 use faer::Par;
+use otspot_num::linalg::amd::amd_with_deadline;
+use otspot_num::linalg::kkt_solver::{factorize_kkt_with_cached_perm_par, KktConfig};
+use otspot_num::linalg::timeout::TimeoutCtx;
+use otspot_num::sparse::CscMatrix;
 
 pub(super) struct InitialPoint {
     pub(super) x: Vec<f64>,
@@ -59,8 +59,8 @@ pub(super) fn build_initial_point(
     let mut ax0 = vec![0.0f64; m_ext];
     #[allow(clippy::needless_range_loop)]
     for col in 0..n {
-        for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
-            ax0[a_ext.row_ind[k]] += a_ext.values[k] * x0[col];
+        for k in a_ext.col_ptr()[col]..a_ext.col_ptr()[col + 1] {
+            ax0[a_ext.row_ind()[k]] += a_ext.values()[k] * x0[col];
         }
     }
     let s0: Vec<f64> = b_ext
@@ -146,9 +146,9 @@ fn mehrotra_cold_init(
         let sigma_zero = vec![0.0_f64; m_ext];
         let k_init = build_augmented_system(&q_zero, a_ext, &sigma_zero, 1.0, 1.0);
         let perm_init = amd_with_deadline(
-            k_init.nrows,
-            &k_init.col_ptr,
-            &k_init.row_ind,
+            k_init.nrows(),
+            k_init.col_ptr(),
+            k_init.row_ind(),
             timeout_ctx.deadline,
         );
         if let Ok(fac_init) = factorize_kkt_with_cached_perm_par(
@@ -193,8 +193,8 @@ fn mehrotra_cold_init(
 
     let mut ax_new = vec![0.0_f64; m_ext];
     for col in 0..n {
-        for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
-            ax_new[a_ext.row_ind[k]] += a_ext.values[k] * x[col];
+        for k in a_ext.col_ptr()[col]..a_ext.col_ptr()[col + 1] {
+            ax_new[a_ext.row_ind()[k]] += a_ext.values()[k] * x[col];
         }
     }
     let s_hat: Vec<f64> = b_ext

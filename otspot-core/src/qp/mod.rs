@@ -1,12 +1,12 @@
 //! QP ソルバー: min 1/2 x'Qx + c'x  s.t. Ax (≤|=|≥) b, lb ≤ x ≤ ub
 //! (OSQP/qpOASES 標準の「1/2 あり」規約)
 
+pub(crate) mod aat;
 pub mod certificate;
 pub mod global;
 pub(crate) mod ipm_core;
 pub mod ipm_solver;
 pub mod kkt_resid;
-pub(crate) mod linalg;
 pub(crate) mod lp_dispatch;
 pub mod multistart;
 pub(crate) mod postsolve;
@@ -34,19 +34,19 @@ pub use problem::{QcqpMatrix, QpProblem, QpProblemError, QpWarmStart};
 use crate::options::SolverOptions;
 use crate::problem::SolverResult;
 #[cfg(test)]
-use crate::sparse::CscMatrix;
+use otspot_num::sparse::CscMatrix;
 
 /// Q (上三角 CSC) が PSD か。n>CHECK_SIZE_LIMIT は O(n³) を避けスキップ (true 返却)。
 /// 対角負値は ‖Q‖_max 相対許容、Cholesky regularization は QPS 6 桁丸めを救う。
 #[cfg(test)]
 pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
-    let n = q.nrows;
+    let n = q.nrows();
     if n == 0 {
         return true;
     }
 
     let mut q_abs_max = 0.0_f64;
-    for &v in q.values.iter() {
+    for &v in q.values().iter() {
         let a = v.abs();
         if a > q_abs_max {
             q_abs_max = a;
@@ -56,8 +56,8 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
     const QPS_NEG_TOL_RATIO: f64 = 1e-6;
     let neg_tol = (q_abs_max * QPS_NEG_TOL_RATIO).max(1e-12);
     for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            if q.row_ind[k] == col && q.values[k] < -neg_tol {
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            if q.row_ind()[k] == col && q.values()[k] < -neg_tol {
                 return false;
             }
         }
@@ -73,10 +73,10 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
 
     let mut a = vec![0.0f64; n * n];
     for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            let row = q.row_ind[k];
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            let row = q.row_ind()[k];
             if row <= col {
-                let v = q.values[k];
+                let v = q.values()[k];
                 a[row * n + col] = v;
                 if row != col {
                     a[col * n + row] = v;

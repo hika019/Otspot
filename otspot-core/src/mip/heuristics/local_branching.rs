@@ -18,8 +18,8 @@
 use crate::mip::{MilpProblem, MipConfig};
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolverResult};
-use crate::sparse::CscMatrix;
 use crate::tolerances::INT_ROUND_TOL;
+use otspot_num::sparse::CscMatrix;
 use std::time::Instant;
 
 /// Run local branching every this many B&B nodes.
@@ -221,7 +221,7 @@ fn remaining_budget(deadline: &Option<Instant>) -> f64 {
 mod tests {
     use super::*;
     use crate::problem::ConstraintType;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// min c·x  s.t.  Σx <= b,  x ∈ {0,1}^n.
     fn binary_knapsack(c: Vec<f64>, b: f64) -> MilpProblem {

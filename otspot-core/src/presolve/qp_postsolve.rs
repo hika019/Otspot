@@ -153,7 +153,7 @@ mod shape_tests {
     use super::*;
     use crate::problem::ConstraintType;
     use crate::qp::QpProblem;
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     fn two_var_qp() -> QpProblem {
         QpProblem::new(
@@ -295,11 +295,10 @@ pub(crate) fn recover_y_for_singleton_row_with_bound(
     }
     // A[row, col] を取得 (CSC: col を走査して row を探す)
     let mut a_row_col = 0.0_f64;
-    let s = orig.a.col_ptr[col];
-    let e = orig.a.col_ptr[col + 1];
-    for k in s..e {
-        if orig.a.row_ind[k] == row {
-            a_row_col = orig.a.values[k];
+    let (a_rows, a_values) = orig.a.column(col);
+    for (&candidate_row, &value) in a_rows.iter().zip(a_values) {
+        if candidate_row == row {
+            a_row_col = value;
             break;
         }
     }
@@ -312,12 +311,11 @@ pub(crate) fn recover_y_for_singleton_row_with_bound(
     use twofloat::TwoFloat;
     let qx_col = compute_qx_at(&orig.q, &sol.solution, col);
     let mut aty_others_dd = TwoFloat::from(0.0);
-    for k in s..e {
-        let r = orig.a.row_ind[k];
+    for (&r, &value) in a_rows.iter().zip(a_values) {
         if r == row {
             continue;
         }
-        aty_others_dd += TwoFloat::new_mul(orig.a.values[k], sol.dual_solution[r]);
+        aty_others_dd += TwoFloat::new_mul(value, sol.dual_solution[r]);
     }
     let aty_col_others = f64::from(aty_others_dd);
 
@@ -348,14 +346,12 @@ pub(crate) fn recover_y_for_singleton_row_with_bound(
 ///
 /// ill-conditioned 問題で f64 sum のキャンセル誤差が recover_y の精度を支配する事象を
 /// 防ぐため、和は DD (TwoFloat) で行う。
-fn compute_qx_at(q: &crate::sparse::CscMatrix, x: &[f64], col: usize) -> f64 {
+fn compute_qx_at(q: &otspot_num::sparse::CscMatrix, x: &[f64], col: usize) -> f64 {
     use twofloat::TwoFloat;
     let mut sum = TwoFloat::from(0.0);
-    let s = q.col_ptr[col];
-    let e = q.col_ptr[col + 1];
-    for ptr in s..e {
-        let k = q.row_ind[ptr];
-        sum += TwoFloat::new_mul(q.values[ptr], x[k]);
+    let (rows, values) = q.column(col);
+    for (&row, &value) in rows.iter().zip(values) {
+        sum += TwoFloat::new_mul(value, x[row]);
     }
     f64::from(sum)
 }
@@ -367,7 +363,7 @@ mod tests {
     use crate::presolve::qp_transforms::run_qp_presolve_phase1;
     use crate::problem::SolveStatus;
     use crate::qp::{solve_qp_with, QpProblem};
-    use crate::sparse::CscMatrix;
+    use otspot_num::sparse::CscMatrix;
 
     /// 固定変数の postsolve: 縮約後解に postsolve を適用し元変数空間に戻る
     #[test]
