@@ -1,12 +1,12 @@
 //! QP ソルバー: min 1/2 x'Qx + c'x  s.t. Ax (≤|=|≥) b, lb ≤ x ≤ ub
 //! (OSQP/qpOASES 標準の「1/2 あり」規約)
 
+pub(crate) mod aat;
 pub mod certificate;
 pub mod global;
 pub(crate) mod ipm_core;
 pub mod ipm_solver;
 pub mod kkt_resid;
-pub(crate) mod linalg;
 pub(crate) mod lp_dispatch;
 pub mod multistart;
 pub(crate) mod postsolve;

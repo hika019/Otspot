@@ -11,6 +11,7 @@
 //! 完全な主双対情報出力に対応する。
 
 pub mod error;
+mod mps_error;
 pub use error::MpsError;
 pub use error::SolverError;
 pub(crate) mod basis;

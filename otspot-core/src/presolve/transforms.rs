@@ -11,7 +11,7 @@
 //! 6. Doubleton Eq (R6)
 //! 7. Free-variable substitution (R15)
 //! 8. Free singleton column (R5)
-//!    9–11 live in `transforms_dup.rs` (parallel row / dup-dom col / dual fixing).
+//!    9–11 live in `transforms_dominance.rs` (parallel row / dup-dom col / dual fixing).
 
 mod bounds;
 mod doubleton;

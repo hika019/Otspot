@@ -4,8 +4,8 @@
 //!   DD 残差で改善した場合のみ採用 (退行防止)。
 //! - `refine_dual_lsq_irls`: IRLS で componentwise rel を最小化 (L∞ 漸近)。
 
+use crate::qp::aat::build_aat_upper_csc;
 use crate::qp::kkt_resid;
-use crate::qp::linalg::build_aat_upper_csc;
 use crate::qp::postsolve::postprocess::compute_lsq_dual_y;
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;

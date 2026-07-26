@@ -1028,7 +1028,6 @@ version = "0.7.3"
 dependencies = [
  "faer",
  "log",
- "otspot-model",
  "otspot-num",
  "rayon",
  "twofloat",

@@ -600,7 +600,7 @@ mod tests {
     fn dual_fixing_eq_blocks() {
         // 3-var Eq so Step 2 (singleton-Eq) and Step 6 (doubleton-Eq) cannot
         // fire — x,y,z survive presolve correctly only via the Step 11
-        // Eq-disqualifies-dual-fixing arm (transforms_dup.rs:290-294).
+        // Eq-disqualifies-dual-fixing arm (transforms_dominance.rs:290-294).
         //   min x + y + z   s.t.  2x + 3y + 4z = 7 (Eq),  x,y,z ∈ [0,5]
         // c≥0 everywhere ⇒ if Eq were ignored, Step 11 sees no disqualifying
         // row and fixes each var to lb=0; the next Step 1 then produces

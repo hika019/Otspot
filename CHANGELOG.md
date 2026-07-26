@@ -24,6 +24,26 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
   `pub(crate)`化。従来はテキストベースのGitHub Actions gate (ratchet) で直接access
   の増加のみ検出していたが、全箇所移行によりコンパイラ強制へ切り替え、gateとbaseline
   は撤去。`CscMatrix::from_raw_parts`の構造検証も`SparseVec`側と同水準へ強化
+- otspot-core内の紛らわしい命名・責務を是正 (公開APIパスへの影響なし)。QP専用の
+  A·Aᵀ構築 (`qp/linalg.rs`、facadeの`linalg.rs`と紛らわしい命名衝突) を`qp/aat.rs`
+  へ、presolve Step 9-11 (parallel row / duplicate-dominated column / dual fixing)
+  の独立実装 (`presolve/transforms_dup.rs`、「重複コピー」と誤読されやすい名前
+  だった) を`presolve/transforms_dominance.rs`へ改名。`error.rs`が担っていた
+  `MpsError`実装 (otspot-core所有のI/Oエラー型) と`SolverError`re-export (facade)
+  の二重責務を分離し、`MpsError`の実装を新設の`mps_error.rs`へ移動 (`error.rs`は
+  両者を再輸出するだけのfacadeへ)。`otspot_core::error::MpsError`/
+  `otspot_core::MpsError`/`otspot_core::error::SolverError`/
+  `otspot_core::SolverError`の公開パスはすべて維持
+- otspot-core (foundation crate) のテストが上位層のotspot-modelへ
+  dev-depend back するレイヤリング違反を解消 (Cargoはこの構成自体を
+  コンパイル不能な循環としては禁止していないが、otspot-coreのテスト
+  ビルドにotspot-model以下の依存が無用に引き込まれていた)。Model式APIを
+  使うhard-dataセンチネルテスト (SciPy oracle) は本質的にModel APIの
+  実行系テストであり、otspot-core単体のテストではなかったため、
+  `otspot-core/tests/blackbox_lp.rs` / `blackbox_qp.rs`からワークスペース
+  rootの`tests/model_api_lp_sentinels.rs` / `tests/model_api_qp_sentinels.rs`
+  (otspot-core/otspot-model双方に依存できるfacade crate側)へ移動し、
+  `otspot-core/Cargo.toml`の`otspot-model` dev-dependencyを削除
 
 ## [0.7.3] - 2026-07-22
 

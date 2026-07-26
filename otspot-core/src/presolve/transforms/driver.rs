@@ -115,19 +115,19 @@ pub fn run_presolve_with_flags(
         ));
 
         if flags.enable_parallel_row {
-            run_or_stop!(crate::presolve::transforms_dup::step9_parallel_row(
+            run_or_stop!(crate::presolve::transforms_dominance::step9_parallel_row(
                 &mut st, deadline
             ));
         }
         if flags.enable_dup_dom_col {
-            run_or_stop!(crate::presolve::transforms_dup::step10_dup_dom_col(
+            run_or_stop!(crate::presolve::transforms_dominance::step10_dup_dom_col(
                 &mut st,
                 &mut new_fixed_by_step5,
                 deadline
             ));
         }
         if flags.enable_dual_fixing {
-            run_or_stop!(crate::presolve::transforms_dup::step11_dual_fixing(
+            run_or_stop!(crate::presolve::transforms_dominance::step11_dual_fixing(
                 &mut st,
                 &mut new_fixed_by_step5,
                 deadline

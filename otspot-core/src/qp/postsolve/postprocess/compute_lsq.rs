@@ -5,8 +5,8 @@
 //! Falls back to direct LDL+IR only when CG returns NaN/Inf.
 //! Unconverged best-effort solutions are refined downstream by `refine_dual_lsq`.
 
+use crate::qp::aat::{build_aat_upper_csc, AAT_REG_FACTOR};
 use crate::qp::kkt_resid;
-use crate::qp::linalg::{build_aat_upper_csc, AAT_REG_FACTOR};
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
 use crate::tolerances::{any_nonfinite, COMP_SLACK_REL_TOL};

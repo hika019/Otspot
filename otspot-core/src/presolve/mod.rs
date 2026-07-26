@@ -5,7 +5,7 @@ pub mod qp_postsolve;
 pub mod qp_transforms;
 pub mod scaling;
 pub mod transforms;
-pub mod transforms_dup;
+pub mod transforms_dominance;
 
 pub use qp_phase2::run_qp_presolve_phase2;
 pub use qp_postsolve::postsolve_qp_with_dual_recovery;

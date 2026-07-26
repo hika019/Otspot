@@ -1,5 +1,5 @@
-//! 線形代数 / 行列ビルダー: A·Aᵀ の上三角 CSC 構築。
-//! refine 系 helper が共通で必要とする小規模 utility のみ置く。
+//! A·Aᵀ (上三角 CSC) ビルダー。QP refine 系 helper 専用。
+//! `crate::linalg` (otspot_num facade) とは無関係の QP 内部実装。
 
 use otspot_num::sparse::CscMatrix;
 

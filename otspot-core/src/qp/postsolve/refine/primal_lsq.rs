@@ -1,7 +1,7 @@
 //! borderline pf を violating 制約方向に最小ノルム射影で押し込む。
 //! (A·A^T) λ = v_active を LDL + DD-IR で解き δ = A^T λ、pf 改善時のみ採用。
 
-use crate::qp::linalg::build_aat_upper_csc;
+use crate::qp::aat::build_aat_upper_csc;
 use crate::qp::problem::QpProblem;
 use crate::tolerances::any_nonfinite;
 
