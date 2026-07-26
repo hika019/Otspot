@@ -3,7 +3,7 @@ pub(crate) mod local_branching;
 pub(crate) mod rens;
 pub(crate) mod rins;
 
-use crate::mip::{branch::is_integer_feasible, integer_mask, MilpProblem, MipConfig};
+use crate::mip::{branch::is_integer_feasible, integer_mask, MilpProblem, MipConfig, MipStats};
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolveStatus, SolverResult};
 
@@ -79,8 +79,8 @@ pub(crate) fn solve_sub_milp(
     problem: &MilpProblem,
     options: &SolverOptions,
     cfg: &MipConfig,
-) -> SolverResult {
-    crate::mip::solve_milp(problem, options, cfg)
+) -> (SolverResult, MipStats) {
+    crate::mip::solve_milp_with_stats(problem, options, cfg)
 }
 
 #[cfg(test)]
@@ -96,12 +96,12 @@ pub(crate) fn solve_sub_milp(
     problem: &MilpProblem,
     options: &SolverOptions,
     cfg: &MipConfig,
-) -> SolverResult {
+) -> (SolverResult, MipStats) {
     SUB_MIP_CONFIGS.with(|configs| configs.borrow_mut().push(cfg.clone()));
     if let Some(result) = NEXT_SUB_MIP_RESULT.with(|result| result.borrow_mut().take()) {
-        return result;
+        return (result, MipStats::default());
     }
-    crate::mip::solve_milp(problem, options, cfg)
+    crate::mip::solve_milp_with_stats(problem, options, cfg)
 }
 
 #[cfg(test)]

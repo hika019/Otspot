@@ -39,8 +39,10 @@ const RENS_MIN_REMAINING_SECS: f64 = 1.0;
 /// - otherwise restrict it to the closed box `[floor(x_lp[j]), ceil(x_lp[j])]`.
 ///
 /// The reduced sub-MIP is solved with a short timeout and node limit. Returns a
-/// feasible `SolverResult` or `None` when the LP point is already integral
-/// (nothing to enforce) or the sub-MIP finds no feasible point.
+/// feasible `SolverResult` (or `None` when the LP point is already integral —
+/// nothing to enforce — or the sub-MIP finds no feasible point) together with
+/// the sub-MIP's `nodes_processed`, reported whenever a sub-MIP solve was
+/// actually attempted (0 when skipped before that point).
 ///
 /// `parent_opts` is cloned and its timeout/deadline overridden so tolerance,
 /// cancellation flag, and other settings are inherited by the sub-MIP.
@@ -50,10 +52,10 @@ pub(crate) fn run_rens(
     cfg: &MipConfig,
     deadline: &Option<Instant>,
     parent_opts: &SolverOptions,
-) -> Option<SolverResult> {
+) -> (Option<SolverResult>, u64) {
     let remaining_secs = remaining_budget(deadline);
     if remaining_secs < RENS_MIN_REMAINING_SECS {
-        return None;
+        return (None, 0);
     }
 
     let mut sub_bounds = problem.lp.bounds.clone();
@@ -68,7 +70,7 @@ pub(crate) fn run_rens(
             // Already integral: fix to the integer, intersecting the original box.
             let (lb, ub) = problem.lp.bounds[j];
             if rounded < lb || rounded > ub {
-                return None;
+                return (None, 0);
             }
             sub_bounds[j] = (rounded, rounded);
         } else {
@@ -76,7 +78,7 @@ pub(crate) fn run_rens(
             let lo = v.floor().max(problem.lp.bounds[j].0);
             let hi = v.ceil().min(problem.lp.bounds[j].1);
             if lo > hi {
-                return None;
+                return (None, 0);
             }
             sub_bounds[j] = (lo, hi);
             n_fractional += 1;
@@ -86,7 +88,7 @@ pub(crate) fn run_rens(
     // No fractional integer var ⇒ the LP point is already integer-feasible and
     // is returned directly by the caller; RENS would add nothing.
     if n_fractional == 0 {
-        return None;
+        return (None, 0);
     }
 
     let sub_timeout = (remaining_secs * RENS_TIME_FRACTION).min(RENS_MAX_TIME_SECS);
@@ -117,8 +119,12 @@ pub(crate) fn run_rens(
     sub_opts.recover_warm_start_basis = false;
     sub_opts.threads = 1;
 
-    let result = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
-    super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol)
+    let (result, sub_stats) = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
+    let sub_mip_nodes = sub_stats.nodes_processed as u64;
+    (
+        super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol),
+        sub_mip_nodes,
+    )
 }
 
 fn remaining_budget(deadline: &Option<Instant>) -> f64 {
@@ -181,8 +187,9 @@ mod tests {
             "test premise: x_lp must be fractional"
         );
 
-        let res = run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default())
-            .expect("RENS must produce a feasible incumbent from a fractional LP point");
+        let (res, _sub_mip_nodes) =
+            run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
+        let res = res.expect("RENS must produce a feasible incumbent from a fractional LP point");
         assert!(
             is_integer_feasible(&res.solution, &mask, cfg.integer_feas_tol),
             "RENS solution must be integer-feasible: {:?}",
@@ -192,6 +199,26 @@ mod tests {
             (res.objective - (-1.0)).abs() < 1e-6,
             "RENS optimum over {{0,1}}^2 with x0+x1<=1 is -1; got {}",
             res.objective
+        );
+    }
+
+    /// NEW (Phase 0): an attempted RENS sub-MIP solve reports its node count.
+    ///
+    /// Sentinel: a Phase 0 revert (the `run_rens`/`solve_sub_milp` return type
+    /// change stripped back to `Option<SolverResult>`) has no way to expose
+    /// this count, so `sub_mip_nodes_total` would stay 0 — this test would fail.
+    #[test]
+    fn rens_reports_sub_mip_nodes_processed() {
+        let problem = knap2([-1.0, -1.0], 1.0);
+        let cfg = MipConfig::default();
+        let x_lp = vec![0.5, 0.5];
+
+        let (res, sub_mip_nodes) =
+            run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
+        assert!(res.is_some(), "test premise: RENS must attempt a sub-MIP");
+        assert!(
+            sub_mip_nodes > 0,
+            "an attempted sub-MIP solve must report at least one processed node; got {sub_mip_nodes}"
         );
     }
 
@@ -207,8 +234,9 @@ mod tests {
             ..SolverResult::default()
         });
 
-        let result = run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default())
-            .expect("RENS must keep feasible timeout incumbent from sub-MIP");
+        let (result, _sub_mip_nodes) =
+            run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
+        let result = result.expect("RENS must keep feasible timeout incumbent from sub-MIP");
 
         assert_eq!(result.solution, vec![1.0, 0.0]);
         assert_eq!(result.objective, -1.0);
@@ -225,7 +253,9 @@ mod tests {
         let cfg = MipConfig::default();
         let x_lp = vec![0.0, 1.0];
         assert!(
-            run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default()).is_none(),
+            run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default())
+                .0
+                .is_none(),
             "RENS must skip an already-integral LP point"
         );
     }
@@ -251,8 +281,9 @@ mod tests {
         let cfg = MipConfig::default();
         let x_lp = vec![0.4, 0.4];
 
-        let res = run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default())
-            .expect("fractional LP point → RENS Some");
+        let (res, _sub_mip_nodes) =
+            run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
+        let res = res.expect("fractional LP point → RENS Some");
         assert!(
             (res.objective - (-2.0)).abs() < 1e-6,
             "RENS over {{0,1}}^2 optimum is -2 (not -6); got {}",
@@ -273,7 +304,8 @@ mod tests {
         let x_lp = vec![0.5, 0.5];
 
         super::super::clear_recorded_sub_mip_configs();
-        let result = run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
+        let (result, _sub_mip_nodes) =
+            run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
         let configs = super::super::take_recorded_sub_mip_configs();
 
         assert!(
@@ -310,6 +342,7 @@ mod tests {
                 &Some(past),
                 &SolverOptions::default()
             )
+            .0
             .is_none(),
             "RENS must not run after the deadline"
         );

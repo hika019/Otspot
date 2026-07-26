@@ -3074,9 +3074,9 @@ impl super::Relaxation for RensScheduleMock {
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
         _opts: &SolverOptions,
-    ) -> Option<SolverResult> {
+    ) -> (Option<SolverResult>, u64) {
         self.calls.set(self.calls.get() + 1);
-        self.responses.borrow_mut().remove(0)
+        (self.responses.borrow_mut().remove(0), 0)
     }
 }
 
