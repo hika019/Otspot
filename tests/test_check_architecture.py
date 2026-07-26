@@ -15,8 +15,6 @@ class ArchitectureGateTests(unittest.TestCase):
         root = Path(tmp.name)
         for crate, deps in {
             "otspot-num": "",
-            "otspot-ir": 'otspot-num = { path = "../otspot-num" }',
-            "otspot-presolve": 'otspot-num = { path = "../otspot-num" }',
             "otspot-core": "",
         }.items():
             (root / crate / "src").mkdir(parents=True)
@@ -26,20 +24,14 @@ class ArchitectureGateTests(unittest.TestCase):
             "otspot-num/src/sparse/vec.rs": "pub struct SparseVec;",
             "otspot-num/src/sparse/view.rs": "pub trait CscMatrixView {}",
             "otspot-num/src/kkt.rs": "pub trait KktBackend {}",
-            "otspot-ir/src/problem.rs": "pub struct OptimizationProblem;",
-            "otspot-ir/src/solver.rs": "pub trait Solver {}",
         }
         for name, text in owners.items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
         (root / "otspot-num/src/lib.rs").write_text("")
-        (root / "otspot-ir/src/lib.rs").write_text("")
-        (root / "otspot-presolve/src/lib.rs").write_text("")
         (root / "otspot-core/src/linalg.rs").write_text("pub use otspot_num::linalg::*;")
-        (root / "otspot-core/src/lib.rs").write_text("pub use architecture::solve_ir;")
-        (root / "otspot-core/src/architecture").mkdir()
-        (root / "otspot-core/src/architecture/solve.rs").write_text("pub fn solve_ir() {}")
+        (root / "otspot-core/src/lib.rs").write_text("")
         (root / "otspot-core/src/sparse").mkdir()
         (root / "otspot-core/src/sparse/mod.rs").write_text("pub use otspot_num::sparse::*;")
         return tmp, root
@@ -66,12 +58,6 @@ class ArchitectureGateTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         (root / "otspot-core/src/linalg").mkdir()
         self.assertTrue(any("legacy implementation" in x for x in arch.check(root)))
-
-    def test_missing_ir_dispatch_fails(self):
-        tmp, root = self.fixture()
-        self.addCleanup(tmp.cleanup)
-        (root / "otspot-core/src/architecture/solve.rs").unlink()
-        self.assertTrue(any("dispatcher is missing" in x for x in arch.check(root)))
 
     def test_internal_legacy_facade_path_reference_fails(self):
         tmp, root = self.fixture()

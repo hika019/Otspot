@@ -12,10 +12,12 @@
 pub mod error;
 pub mod kkt;
 pub mod linalg;
+pub mod pipeline;
 pub mod sparse;
 
 pub use error::{NumericError, SolverError};
 pub use kkt::{KktBackend, LinearSolveFactor, SolveControl};
+pub use pipeline::{run_fixpoint, PipelineStop};
 pub use sparse::{validate_csc, CscMatrixView};
 
 /// Structural-zero tolerance shared by sparse vector construction.

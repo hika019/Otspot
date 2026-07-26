@@ -1016,10 +1016,8 @@ dependencies = [
  "otspot-core",
  "otspot-dev",
  "otspot-io",
- "otspot-ir",
  "otspot-model",
  "otspot-num",
- "otspot-presolve",
  "proptest",
  "twofloat",
 ]
@@ -1030,10 +1028,8 @@ version = "0.7.3"
 dependencies = [
  "faer",
  "log",
- "otspot-ir",
  "otspot-model",
  "otspot-num",
- "otspot-presolve",
  "rayon",
  "twofloat",
 ]
@@ -1058,13 +1054,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "otspot-ir"
-version = "0.7.3"
-dependencies = [
- "otspot-num",
-]
-
-[[package]]
 name = "otspot-model"
 version = "0.7.3"
 dependencies = [
@@ -1077,13 +1066,6 @@ version = "0.7.3"
 dependencies = [
  "faer",
  "twofloat",
-]
-
-[[package]]
-name = "otspot-presolve"
-version = "0.7.3"
-dependencies = [
- "otspot-num",
 ]
 
 [[package]]

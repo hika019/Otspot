@@ -8,8 +8,7 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOWED_INTERNAL = {"otspot-num": set(), "otspot-ir": {"otspot-num"}}
-ALLOWED_INTERNAL_EXTRA = {"otspot-presolve": {"otspot-num"}}
+ALLOWED_INTERNAL = {"otspot-num": set()}
 FOUNDATION_MAX_LINES = 1600
 MODULE_ROOT_MAX_LINES = 200
 LEGACY_FACADE_MAX_LINES = 100
@@ -24,8 +23,6 @@ OWNERS = {
     "pub struct SparseVec": "otspot-num/src/sparse/vec.rs",
     "pub trait CscMatrixView": "otspot-num/src/sparse/view.rs",
     "pub trait KktBackend": "otspot-num/src/kkt.rs",
-    "pub struct OptimizationProblem": "otspot-ir/src/problem.rs",
-    "pub trait Solver": "otspot-ir/src/solver.rs",
 }
 
 
@@ -36,12 +33,12 @@ def _internal_dependencies(root: Path, crate: str) -> set[str]:
 
 def check(root: Path = ROOT) -> list[str]:
     failures: list[str] = []
-    for crate, allowed in {**ALLOWED_INTERNAL, **ALLOWED_INTERNAL_EXTRA}.items():
+    for crate, allowed in ALLOWED_INTERNAL.items():
         forbidden = _internal_dependencies(root, crate) - allowed
         if forbidden:
             failures.append(f"{crate} forbidden dependencies: {', '.join(sorted(forbidden))}")
 
-    for crate in {**ALLOWED_INTERNAL, **ALLOWED_INTERNAL_EXTRA}:
+    for crate in ALLOWED_INTERNAL:
         for source in (root / crate / "src").rglob("*.rs"):
             for line in source.read_text().splitlines():
                 code = line.split("//", 1)[0]
@@ -51,7 +48,6 @@ def check(root: Path = ROOT) -> list[str]:
 
     # Implementation ownership: canonical primitives must have one physical home.
     sources = list((root / "otspot-num/src").rglob("*.rs"))
-    sources += list((root / "otspot-ir/src").rglob("*.rs"))
     sources += list((root / "otspot-core/src").rglob("*.rs"))
     for declaration, owner in OWNERS.items():
         found = [
@@ -61,15 +57,6 @@ def check(root: Path = ROOT) -> list[str]:
         ]
         if found != [owner]:
             failures.append(f"{declaration} owner must be {owner}; found {found}")
-
-    # Canonical IR must remain connected to a production solve entry, rather
-    # than degrading into adapter-only dead architecture.
-    core_lib = (root / "otspot-core/src/lib.rs").read_text()
-    ir_dispatch = root / "otspot-core/src/architecture/solve.rs"
-    if "pub use architecture::solve_ir;" not in core_lib:
-        failures.append("otspot-core must publicly re-export architecture::solve_ir")
-    if not ir_dispatch.exists() or "pub fn solve_ir(" not in ir_dispatch.read_text():
-        failures.append("canonical IR production dispatcher is missing")
 
     # Legacy namespaces must remain thin compatibility facades.
     forbidden_dirs = [root / "otspot-core/src/linalg", root / "otspot-core/src/sparse/csc.rs"]
@@ -95,7 +82,7 @@ def check(root: Path = ROOT) -> list[str]:
                     )
 
     # Foundation files and module roots should stay cohesive.
-    for crate in ("otspot-num", "otspot-ir", "otspot-presolve"):
+    for crate in ("otspot-num",):
         for path in (root / crate / "src").rglob("*.rs"):
             lines = len(path.read_text().splitlines())
             limit = MODULE_ROOT_MAX_LINES if path.name in {"lib.rs", "mod.rs"} else FOUNDATION_MAX_LINES

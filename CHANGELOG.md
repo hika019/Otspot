@@ -4,8 +4,11 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-- solver基盤を`otspot-num`（sparse/linalg/KKT backend）、`otspot-ir`（統一問題表現と
-  `solve_ir`）、`otspot-presolve`（LP/QP共通pipeline）へ分離。旧公開パスはre-exportで維持
+- solver基盤のうちsparse/linalg/KKT backendを`otspot-num`crateへ物理分離。旧公開パスは
+  re-exportで維持
+- LP/QP presolveが共有するfixpoint制御(`run_fixpoint`)を`otspot-num`へ共通化。transform
+  数学はドメインcrate (`otspot-core`) に残す設計とし、本番呼び出しゼロだった統一問題IR層
+  (専用production dispatcher含む) と、それ専用だったpresolve orchestration crateは撤去
 - architecture依存・実装所有権・legacy facade・ファイル/関数肥大化・sparse内部field
   accessを検査するGitHub Actions gateとself-testを追加
 

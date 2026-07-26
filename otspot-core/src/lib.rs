@@ -13,12 +13,6 @@
 pub mod error;
 pub use error::MpsError;
 pub use error::SolverError;
-/// Transitional adapters into the redesigned layered architecture.
-///
-/// New integrations should target `otspot-ir` directly.  This module lets the
-/// legacy problem types participate while their implementations are migrated.
-pub mod architecture;
-pub use architecture::solve_ir;
 pub(crate) mod basis;
 pub mod options;
 #[doc(hidden)]

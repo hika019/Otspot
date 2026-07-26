@@ -1,15 +1,11 @@
 # cargo nextest test inventory -- do NOT edit by hand.
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
-# tools: nextest=0.9.129 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 2942 testcases, 26 ignored
+# tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
+# totals: 2933 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
-otspot-core	architecture::tests::conic_and_misocp_adapters_share_the_same_problem_type	active
-otspot-core	architecture::tests::lp_adapter_preserves_rows_bounds_and_offset	active
-otspot-core	architecture::tests::qcqp_adapter_overlays_quadratic_term_on_existing_linear_row	active
-otspot-core	architecture::tests::qp_adapter_classifies_integrality_without_new_problem_types	active
 otspot-core	basis::eta::tests::test_eta_btran	active
 otspot-core	basis::eta::tests::test_eta_multiple_updates	active
 otspot-core	basis::eta::tests::test_eta_needs_refactor	active
@@ -1689,11 +1685,6 @@ otspot-core::blackbox_qp	pw_qp_le_fixed_min_unit	active
 otspot-core::blackbox_qp	pw_qp_le_lbonly_min_unit_nondeg	active
 otspot-core::blackbox_qp	st_qp_ge_feasible_to_infeasible	active
 otspot-core::blackbox_qp	st_qp_le_inactive_to_active	active
-otspot-core::ir_dispatch_equivalence	ir_infeasible_lp_is_reported	active
-otspot-core::ir_dispatch_equivalence	ir_lp_matches_native_lp	active
-otspot-core::ir_dispatch_equivalence	ir_milp_matches_native_milp	active
-otspot-core::ir_dispatch_equivalence	ir_qp_matches_native_qp	active
-otspot-core::ir_dispatch_equivalence	ir_socp_matches_native_socp	active
 otspot-core::linalg_par_sentinel	faer_par_speedup_arrowhead_pd	active
 otspot-core::linalg_par_sentinel	faer_par_speedup_supernodal_dense	active
 otspot-core::linalg_par_sentinel	faer_par_table_driven_size_sweep	active
@@ -2347,6 +2338,8 @@ otspot-num	linalg::parallelism::tests::threads_zero_yields_seq	active
 otspot-num	linalg::ruiz::tests::dual_residual_unscale_factor_is_c_times_d	active
 otspot-num	linalg::ruiz::tests::scale_unscale_round_trip_identity	active
 otspot-num	linalg::ruiz::tests::test_ruiz_scaler_identity	active
+otspot-num	pipeline::tests::honors_pass_limit	active
+otspot-num	pipeline::tests::stops_at_fixpoint	active
 otspot-num	sparse::compress::tests::test_duplicates_accumulated	active
 otspot-num	sparse::compress::tests::test_duplicates_cancel_to_zero_dropped	active
 otspot-num	sparse::compress::tests::test_empty	active
@@ -2373,8 +2366,6 @@ otspot-num	sparse::csc::tests::test_transpose	active
 otspot-num	sparse::vec::tests::test_sparse_vec_from_dense_to_dense	active
 otspot-num	sparse::view::tests::rejects_unsorted_or_duplicate_rows	active
 otspot-num	sparse::view::tests::validates_canonical_csc	active
-otspot-presolve	tests::honors_pass_limit	active
-otspot-presolve	tests::stops_at_fixpoint	active
 otspot::api_correctness	dual_lp_ge_constraint	active
 otspot::api_correctness	dual_lp_two_constraints	active
 otspot::api_correctness	dual_qp_eq_constrained	active

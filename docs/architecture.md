@@ -5,20 +5,22 @@ Otspot は下向きの依存関係を持つレイヤ構成へ移行している�
 ```text
 facade / model / I/O
         ↓
-solver algorithms (`otspot-core`)
-   ├──→ canonical IR (`otspot-ir`) ──→ numerics (`otspot-num`)
-   └──→ presolve pipeline (`otspot-presolve`) ──┘
+solver algorithms (`otspot-core`) ──→ numerics (`otspot-num`)
 ```
 
 ## レイヤ
 
 - `otspot-num`: sparse storage、AMD、LDL/DD-LDL、MINRES、Ruiz、KKT backend、
-  timeout/cancellation。問題型には依存しない。
-- `otspot-ir`: LP/QP/QCQP/SOCP と整数派生を表す `OptimizationProblem`、
-  `SolveContext`、`SolveOutcome`、`Solver`。
-- `otspot-presolve`: LP/QPで共有するfixpoint、pass-limit、deadline/cancel制御。
-- `otspot-core`: simplex/IPM/MIP/conic と旧公開API。旧 `sparse`/`linalg` パスは
-  `otspot-num` の互換re-export。`solve_ir`でcanonical IRをproduction solverへ配線。
+  fixpoint制御 (`run_fixpoint`/`PipelineStop`)、timeout/cancellation。問題型には
+  依存しない。
+- `otspot-core`: simplex/IPM/MIP/conic と旧公開API。presolveのtransform数学
+  (singleton row、bounds tightening 等) はここに同居し、共有するのはfixpointの
+  制御セマンティクスのみ — 住所は `otspot-num` に一本化する。旧 `sparse`/`linalg`
+  パスは `otspot-num` の互換re-export。
+
+未publishの間に本番呼び出しゼロだった統一IR (`otspot-ir`、`solve_ir`アダプタ) は
+撤去済み。presolve orchestration専用crateだった `otspot-presolve` も解体し、
+共有制御ロジックのみ `otspot-num` へ移設した。
 
 ## 機械ゲート
 

@@ -1,9 +1,10 @@
-//! Shared presolve orchestration.
+//! Shared fixpoint control for presolve drivers.
 //!
-//! Transform mathematics stays in the LP/QP domain crates; this crate owns the
-//! common fixpoint, pass-limit, deadline, and cancellation semantics.
+//! LP and QP presolve each own their transform mathematics in `otspot-core`
+//! (the domain crate); this module owns only the control semantics they
+//! share: run passes until stable, interrupted, or the pass limit is hit.
 
-use otspot_num::SolveControl;
+use crate::kkt::SolveControl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineStop {

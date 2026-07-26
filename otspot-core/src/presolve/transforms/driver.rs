@@ -10,9 +10,9 @@ use super::singleton::step2_singleton_row;
 use super::state::{PresolveFlags, PresolveResult, PresolveState, PresolveStatus};
 use crate::problem::{ConstraintType, LpProblem};
 use crate::tolerances::ZERO_TOL;
+use otspot_num::run_fixpoint;
 use otspot_num::sparse::CscMatrix;
 use otspot_num::SolveControl;
-use otspot_presolve::run_fixpoint;
 
 pub fn run_presolve(
     problem: &LpProblem,

@@ -57,13 +57,8 @@
 
 pub use otspot_core::*;
 
-/// Canonical optimization problem IR and solver contracts.
-pub use otspot_ir as ir;
-
 /// Solver-independent sparse/KKT numerical contracts.
 pub use otspot_num as num;
-/// Shared presolve pipeline contracts.
-pub use otspot_presolve as presolve_pipeline;
 
 /// Algebraic modeling API (Model, Variable, Expression, Constraint, constraint! macro).
 pub use otspot_model::{

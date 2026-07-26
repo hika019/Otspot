@@ -13,8 +13,8 @@ use super::steps_parallel::step8_parallel_row;
 use super::steps_redundancy::{step12_redundant_final, step5_redundant};
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
+use otspot_num::run_fixpoint;
 use otspot_num::SolveControl;
-use otspot_presolve::run_fixpoint;
 
 /// Run all Phase-1 QP-presolve transforms: fixed-var / singleton / empty-row-col /
 /// redundant-constraint / parallel-row / bounds-tightening, plus diagonal-Q,

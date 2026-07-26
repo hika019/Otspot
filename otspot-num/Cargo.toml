@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Numerical primitives and backend contracts for Otspot"
+description = "Numerical primitives, pipeline control, and backend contracts for Otspot"
 
 [dependencies]
 faer = "0.24.0"
