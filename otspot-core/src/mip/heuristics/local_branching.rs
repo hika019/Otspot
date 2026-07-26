@@ -114,6 +114,14 @@ fn local_branching_with_k(
     sub_cfg.rins_enabled = false;
     sub_cfg.rens_enabled = false;
     sub_cfg.local_branching_enabled = false;
+    // The sub-MIP searches a Hamming-ball neighborhood already restricted by
+    // the local-branching cut; recursive tree-cut separation and
+    // symmetry-breaking pay the parent search's per-node overhead again for
+    // no corresponding tree-size benefit here (Phase 1a: freed time is
+    // reallocated to the parent tree search via `MipEffortBudget`, see
+    // `mip/effort.rs`).
+    sub_cfg.tree_cuts = false;
+    sub_cfg.symmetry = false;
 
     let mut sub_opts = parent_opts.clone();
     sub_opts.timeout_secs = Some(sub_timeout);
@@ -385,6 +393,45 @@ mod tests {
                 .0
                 .is_none(),
             "local branching requires binary variables"
+        );
+    }
+
+    /// NEW (Phase 1a): the disabled tree-cuts/symmetry flags reach the
+    /// recursive sub-MIP solve.
+    ///
+    /// Sentinel: removing `sub_cfg.tree_cuts = false` or
+    /// `sub_cfg.symmetry = false` from `local_branching_with_k` fails this
+    /// test via the recorded sub-MIP config.
+    #[test]
+    fn local_branching_run_path_disables_tree_cuts_and_symmetry_recursively() {
+        let problem = binary_knapsack(vec![-1.0, -1.0, -1.0], 2.0);
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            tree_cuts: true,
+            symmetry: true,
+            ..MipConfig::default()
+        };
+        let x_inc = vec![1.0, 0.0, 0.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes) =
+            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: local branching must call the recursive sub-MIP"
+        );
+        assert_eq!(
+            configs.len(),
+            1,
+            "local branching run path must solve exactly one sub-MIP"
+        );
+        let sub_cfg = &configs[0];
+        assert!(!sub_cfg.tree_cuts, "recursive tree cuts must be disabled");
+        assert!(
+            !sub_cfg.symmetry,
+            "recursive symmetry breaking must be disabled"
         );
     }
 

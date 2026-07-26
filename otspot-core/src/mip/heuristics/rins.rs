@@ -115,6 +115,14 @@ fn rins_sub_mip_config(cfg: &MipConfig) -> MipConfig {
     sub_cfg.rins_enabled = false;
     sub_cfg.rens_enabled = false;
     sub_cfg.local_branching_enabled = false;
+    // The sub-MIP searches a neighborhood RINS already restricted sharply
+    // (variables fixed by LP/incumbent agreement); recursive tree-cut
+    // separation and symmetry-breaking pay the parent search's per-node
+    // overhead again for a search space that is already small, so both are
+    // pure overhead here (Phase 1a: freed time is reallocated to the parent
+    // tree search via `MipEffortBudget`, see `mip/effort.rs`).
+    sub_cfg.tree_cuts = false;
+    sub_cfg.symmetry = false;
     sub_cfg
 }
 
@@ -285,6 +293,78 @@ mod tests {
         assert!(!sub_cfg.rins_enabled);
         assert!(!sub_cfg.rens_enabled);
         assert!(!sub_cfg.local_branching_enabled);
+    }
+
+    /// NEW (Phase 1a): the sub-MIP config disables recursive tree-cut
+    /// separation and symmetry-breaking, not just the three recursive
+    /// heuristic flags.
+    ///
+    /// Sentinel: removing either `sub_cfg.tree_cuts = false` or
+    /// `sub_cfg.symmetry = false` from `rins_sub_mip_config` fails this test.
+    #[test]
+    fn rins_sub_mip_disables_tree_cuts_and_symmetry() {
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            tree_cuts: true,
+            symmetry: true,
+            ..MipConfig::default()
+        };
+
+        let sub_cfg = rins_sub_mip_config(&cfg);
+        assert!(
+            !sub_cfg.tree_cuts,
+            "RINS sub-MIP must disable in-tree cut separation"
+        );
+        assert!(
+            !sub_cfg.symmetry,
+            "RINS sub-MIP must disable symmetry breaking"
+        );
+    }
+
+    /// NEW (Phase 1a): the disabled tree-cuts/symmetry flags actually reach
+    /// the recursive sub-MIP solve, not just the config-builder unit above.
+    ///
+    /// Sentinel: removing either flag from `rins_sub_mip_config` fails this
+    /// test via the recorded sub-MIP config (same recording hook as the
+    /// pre-existing `rins_run_path_passes_recursive_sub_mip_config`).
+    #[test]
+    fn rins_run_path_disables_tree_cuts_and_symmetry_recursively() {
+        let problem = two_var_milp([-1.0, -1.0], 3.0);
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            tree_cuts: true,
+            symmetry: true,
+            ..MipConfig::default()
+        };
+        let x_lp = vec![1.4, 1.6];
+        let x_inc = vec![1.0, 1.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes) = run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &None,
+            &SolverOptions::default(),
+        );
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: RINS must call the recursive sub-MIP"
+        );
+        assert_eq!(
+            configs.len(),
+            1,
+            "RINS run path must solve exactly one sub-MIP"
+        );
+        let sub_cfg = &configs[0];
+        assert!(!sub_cfg.tree_cuts, "recursive tree cuts must be disabled");
+        assert!(
+            !sub_cfg.symmetry,
+            "recursive symmetry breaking must be disabled"
+        );
     }
 
     #[test]
