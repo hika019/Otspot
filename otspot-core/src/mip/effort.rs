@@ -1,83 +1,29 @@
 //! Deterministic per-solve simplex-iteration-share budget for optional B&B
-//! work (Phase 1c; replaces Phase 1b's wall-clock `MipEffortBudget`).
+//! work (Phase 1c; replaces Phase 1b's wall-clock `MipEffortBudget`, which
+//! made B&B trajectories timing-dependent — `gt2` spread from 100 to 3000+
+//! nodes across repeats instead of a fixed 280-node trajectory). Simplex
+//! iterations are reproducible for a fixed input, so gating optional work
+//! (heuristics / in-tree separation / strong branching) on a share of
+//! [`total_simplex_iters`] keeps the search deterministic; a gate is checked
+//! only before a unit of work starts, never mid-solve.
 //!
-//! Phase 1b gated optional work (primal heuristics / in-tree separation /
-//! strong branching) on elapsed wall-clock time. That made the B&B
-//! trajectory itself timing-dependent: identical deterministic input could
-//! explore a different number of nodes on different runs (observed directly:
-//! main solved `gt2` to the same fixed 280-node trajectory 3/3 consecutive
-//! runs, but the Phase 1b branch spread from 100 to 3000+ nodes across
-//! repeats on the same machine). Simplex iteration counts are reproducible
-//! for a fixed input and fixed algorithm path, so using them as the budget's
-//! "clock" instead of `Instant` makes the whole B&B search deterministic
-//! again while keeping the same throttling intent.
+//! **Known gaps:** (P2-B) a sub-MIP's own feasibility-pump iterations are not
+//! threaded into `MipStats`, so its recursive `total_simplex_iters`
+//! undercounts by that amount (deferred: touches 8+ call sites for a
+//! return-type change). (P2-C) the shares below were ported from Phase 0's
+//! wall-clock percentages, not independently re-derived from iteration-rate
+//! data; per-iteration cost differs by component (a separation cut LP
+//! re-solves the full node relaxation from a cold basis, while RINS/RENS/
+//! local-branching sub-MIPs search a small restricted neighborhood) — a real
+//! bias, confirmed by `mas76` regressing to TIMEOUT under Phase 1d despite
+//! its iteration share being respected (follow-up task, not fixed here).
 //!
-//! Each gate compares a component's cumulative simplex iterations against a
-//! share of [`total_simplex_iters`] — the iteration count spent anywhere in
-//! this B&B search so far (ordinary node relaxations, strong branching,
-//! heuristics including most of their sub-MIPs' own recursive cost — see the
-//! feasibility-pump gap below — and in-tree separation). The check happens
-//! once per would-be invocation, before that unit of work starts; an
-//! in-progress sub-MIP solve or separation round always finishes once
-//! started (Phase 1b's wall-clock `*_us` counters stay on `MipStats` as pure
-//! measurement).
-//!
-//! **Known measurement gap (P2-B):** every MILP solve — including a RINS/
-//! RENS/local-branching sub-MIP's recursive call — unconditionally runs its
-//! own feasibility pump before branch-and-bound starts (`solve_milp_with_stats`).
-//! That pump's own LP solves are timed into `fp_us` but their simplex
-//! iterations are not threaded into `MipStats` at all, so a sub-MIP's
-//! recursive `total_simplex_iters` (what `run_rins`/`run_rens`/
-//! `run_local_branching` report back as `rins_iters`/etc.) *undercounts* by
-//! whatever its own feasibility pump spent. Plumbing this through was judged
-//! more invasive than it looks (`run_feasibility_pump` returns early from two
-//! call sites, each via a second LP solve in `repair_with_fixed_integers`,
-//! and 8 existing call sites — mostly tests — would need updating for a
-//! `(SolverResult, iterations)` return), so it is documented here rather than
-//! implemented. Root-level (non-recursive) `fp_us` is similarly not part of
-//! the top-level `total_simplex_iters` computation used for gating a solve's
-//! *own* node loop, only for sub-MIPs feeding their parent.
-//!
-//! **Known approximation (P2-C):** the shares below were ported directly from
-//! Phase 0's wall-clock-measured percentages, not independently re-derived
-//! from iteration-rate data. A simplex iteration does not cost the same
-//! wall-clock time in every component — a RINS/RENS/local-branching sub-MIP's
-//! LP solves run over a deliberately small, already-restricted neighborhood
-//! (cheap per iteration), while an in-tree separation cut LP re-solves the
-//! *full* node relaxation from a cold basis each round (expensive per
-//! iteration) — so porting a wall-clock share directly to an iteration share
-//! carries a bias in an unknown direction per component. This has not been
-//! corrected: the Phase 1c/1d re-bench (8/20 MIPLIB-small PASS, zero
-//! regressions against the Phase 0 baseline) empirically validates that the
-//! current thresholds are functional, so independently re-deriving them from
-//! iteration-rate data is deferred rather than spurring an untested change.
-//!
-//! Shares (Phase 0 MIPLIB-small attribution + iteration-rate comparison
-//! against HiGHS on the same instances):
-//! - RENS/RINS/local-branching: 0.05 each. Phase 1b pooled these at 0.15
-//!   combined behind a single gate; because they are tried in a fixed order
-//!   (RENS, then RINS, then local branching) within that shared pool, the
-//!   first one due could spend the whole 0.15 before the other two ever got
-//!   a turn. Splitting into three independent 0.05 shares against the same
-//!   [`total_simplex_iters`] denominator gives each heuristic its own
-//!   guaranteed slice regardless of try-order, while 0.05×3=0.15 keeps the
-//!   same combined ceiling Phase 1b used. Phase 0's TIMEOUT-problem median
-//!   combined heuristic share was 66% of wall time with zero of them
-//!   converging in that state; HiGHS solves the same instances at
-//!   1,574-6,329 nodes/s, which only leaves room for a low heuristic share.
-//! - In-tree GMI/MIR separation: 0.15. Phase 0: `enlight_hard` spent 90% and
-//!   `timtab1` 87% of wall time in `separate_tree_cuts`, both TIMEOUT with
-//!   no bound progress; the Phase 1c re-bench separately found `dcmulti`
-//!   spending 45% (one round's cut LP alone ran 27s) — the per-attempt
-//!   iteration cap in `cuts::separate_tree_cuts` (see [`separation_iter_budget`])
-//!   addresses that single-call case; this share addresses the aggregate.
-//! - Strong branching: 0.10. Phase 0: `p0201` was a lone outlier at 34% of
-//!   wall time (suite median 0.06%), so this share only clips that outlier
-//!   and is a no-op for essentially every other problem.
-//!
-//! Combined: 0.05×3 + 0.15 + 0.10 = 0.40, so the node loop itself (LP
-//! solves, propagation, bookkeeping) structurally keeps at least 60% of the
-//! iteration budget.
+//! Shares: RENS/RINS/local-branching 0.05 each (split from Phase 1b's pooled
+//! 0.15 so a fixed try-order can't let one heuristic spend the whole pool);
+//! separation 0.15 (Phase 0: `enlight_hard`/`timtab1` spent 87-90% of wall
+//! time there with no bound progress); strong branching 0.10 (Phase 0:
+//! `p0201` was a 34%-of-wall-time outlier). Combined 0.40 — the node loop
+//! keeps >= 60% of the iteration budget structurally.
 
 use super::MipStats;
 

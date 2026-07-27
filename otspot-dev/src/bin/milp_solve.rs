@@ -12,7 +12,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use otspot_core::options::{MipConfig, SolverOptions, Tolerance};
-use otspot_core::solve_milp_with_stats;
+use otspot_core::{solve_milp_with_stats, MipStats};
 use otspot_io::mps::parse_milp_file;
 use std::path::Path;
 use std::process::ExitCode;
@@ -152,32 +152,23 @@ fn main() -> ExitCode {
         "node_loop_other_us_pct_wall: {:.2}",
         pct_of_wall(stats.node_loop_other_us, wall_us)
     );
-    let attribution_covered_us = stats
-        .lp_solve_us_total
-        .saturating_add(stats.node_propagation_us)
-        .saturating_add(stats.tree_cut_us)
-        .saturating_add(stats.rins_us)
-        .saturating_add(stats.rens_us)
-        .saturating_add(stats.local_branching_us)
-        .saturating_add(stats.branch_select_us)
-        .saturating_add(stats.conflict_us)
-        .saturating_add(stats.node_loop_other_us);
+    let attribution_covered_us = loop_attribution_covered_us(&stats);
     println!("attribution_covered_us: {attribution_covered_us}");
     println!(
         "attribution_covered_pct_wall: {:.2}",
         pct_of_wall(attribution_covered_us, wall_us)
     );
-    // Root-inclusive variant (P2-4): folds in root-level fp_us/root_cut_us,
-    // which the loop-only attribution_covered_us above omits by design (it
-    // only covers the B&B loop itself). See
-    // tests/mip_bnb_attribution.rs's attribution_covers_loop_wall_clock vs.
+    // Root-inclusive variant (P2-4): folds in root-level fp_us/root_cut_us/
+    // root_probing_us/root_symmetry_us (Codex review), which the loop-only
+    // attribution_covered_us above omits by design (it only covers the B&B
+    // loop itself). See tests/mip_bnb_attribution.rs's
+    // attribution_covers_loop_wall_clock vs.
     // attribution_covers_wall_clock_including_root_overhead for why both
     // views matter: once heuristics/separation are throttled the loop can
     // become fast enough that root-level presolve/FP/cut time is no longer
     // a negligible fraction of total wall clock.
-    let attribution_covered_us_root_inclusive = attribution_covered_us
-        .saturating_add(stats.fp_us)
-        .saturating_add(stats.root_cut_us);
+    let attribution_covered_us_root_inclusive =
+        root_inclusive_attribution_covered_us(attribution_covered_us, &stats);
     println!("attribution_covered_us_root_inclusive: {attribution_covered_us_root_inclusive}");
     println!(
         "attribution_covered_pct_wall_root_inclusive: {:.2}",
@@ -192,6 +183,8 @@ fn main() -> ExitCode {
         println!("lp_scale_calls_desc: {}", stats.lp_scale_calls_desc);
         println!("fp_us: {}", stats.fp_us);
         println!("root_cut_us: {}", stats.root_cut_us);
+        println!("root_probing_us: {}", stats.root_probing_us);
+        println!("root_symmetry_us: {}", stats.root_symmetry_us);
         println!("strong_branch_calls: {}", stats.strong_branch_calls);
         println!(
             "strong_branch_candidates: {}",
@@ -233,6 +226,37 @@ fn pct_of_wall(part_us: u64, wall_us: f64) -> f64 {
     } else {
         0.0
     }
+}
+
+/// Wall-clock microseconds covered by named B&B-loop attribution buckets
+/// (Codex review, P2: `lp_presolve_us_total`/`lp_postsolve_us_total` were
+/// previously omitted, undercounting whenever LP presolve/postsolve took
+/// non-negligible per-node time).
+fn loop_attribution_covered_us(stats: &MipStats) -> u64 {
+    stats
+        .lp_presolve_us_total
+        .saturating_add(stats.lp_solve_us_total)
+        .saturating_add(stats.lp_postsolve_us_total)
+        .saturating_add(stats.node_propagation_us)
+        .saturating_add(stats.tree_cut_us)
+        .saturating_add(stats.rins_us)
+        .saturating_add(stats.rens_us)
+        .saturating_add(stats.local_branching_us)
+        .saturating_add(stats.branch_select_us)
+        .saturating_add(stats.conflict_us)
+        .saturating_add(stats.node_loop_other_us)
+}
+
+/// [`loop_attribution_covered_us`] plus root-level setup time (feasibility
+/// pump, root cuts, root bound-tightening probing, static symmetry
+/// breaking — the latter two added per Codex review, P2), which the
+/// loop-only figure omits by design.
+fn root_inclusive_attribution_covered_us(loop_covered_us: u64, stats: &MipStats) -> u64 {
+    loop_covered_us
+        .saturating_add(stats.fp_us)
+        .saturating_add(stats.root_cut_us)
+        .saturating_add(stats.root_probing_us)
+        .saturating_add(stats.root_symmetry_us)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -384,6 +408,47 @@ mod tests {
         assert!(!cfg.cuts);
         assert!(!cfg.tree_cuts);
         assert_eq!(cfg.max_cut_rounds, 0);
+    }
+
+    /// Codex review (P2): `lp_presolve_us_total`/`lp_postsolve_us_total` must
+    /// be part of the loop-attribution coverage sum, not just
+    /// `lp_solve_us_total` — omitting them undercounts wall clock whenever
+    /// per-node LP presolve/postsolve takes non-negligible time.
+    ///
+    /// Sentinel: removing either ``
+    /// or `.saturating_add(stats.lp_postsolve_us_total)` from
+    /// `loop_attribution_covered_us` makes this FAIL.
+    #[test]
+    fn loop_attribution_includes_lp_presolve_and_postsolve() {
+        let mut stats = MipStats::default();
+        stats.lp_presolve_us_total = 100;
+        stats.lp_solve_us_total = 200;
+        stats.lp_postsolve_us_total = 300;
+        stats.node_propagation_us = 10;
+        stats.tree_cut_us = 20;
+        stats.rins_us = 30;
+        stats.rens_us = 40;
+        stats.local_branching_us = 50;
+        stats.branch_select_us = 60;
+        stats.conflict_us = 70;
+        stats.node_loop_other_us = 80;
+        assert_eq!(loop_attribution_covered_us(&stats), 960);
+    }
+
+    /// Codex review (P2): `root_probing_us`/`root_symmetry_us` must be part
+    /// of the root-inclusive coverage sum, not just `fp_us`/`root_cut_us`.
+    ///
+    /// Sentinel: removing either `.saturating_add(stats.root_probing_us)` or
+    /// `.saturating_add(stats.root_symmetry_us)` from
+    /// `root_inclusive_attribution_covered_us` makes this FAIL.
+    #[test]
+    fn root_inclusive_attribution_includes_probing_and_symmetry() {
+        let mut stats = MipStats::default();
+        stats.fp_us = 1;
+        stats.root_cut_us = 2;
+        stats.root_probing_us = 3;
+        stats.root_symmetry_us = 4;
+        assert_eq!(root_inclusive_attribution_covered_us(1000, &stats), 1010);
     }
 
     #[test]

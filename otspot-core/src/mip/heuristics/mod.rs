@@ -6,62 +6,49 @@ pub(crate) mod rins;
 use crate::mip::{branch::is_integer_feasible, integer_mask, MilpProblem, MipConfig, MipStats};
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolveStatus, SolverResult};
+use std::time::{Duration, Instant};
+
+/// Effective wall-clock deadline for a sub-MIP call: whichever is sooner of
+/// the parent's own deadline (if any) and `now + max_time_secs`, the fixed
+/// per-call cap (`RINS_MAX_TIME_SECS` / `RENS_MAX_TIME_SECS` /
+/// `LOCAL_BRANCHING_MAX_TIME_SECS`). Without this, setting only
+/// `sub_opts.timeout_secs = Some(max_time_secs)` (with `sub_opts.deadline =
+/// None`) computes a fresh deadline purely from `max_time_secs`, ignoring how
+/// little of the parent's own budget remains, so the sub-MIP could run up to
+/// `max_time_secs` past the user's requested overall timeout (Codex review,
+/// P1). Reusing this narrows determinism only at the very end of a search —
+/// when the parent deadline is the binding term, the cutoff is wall-clock
+/// (hence timing-jitter) dependent again, same as before Phase 1d — but that
+/// window is at most `max_time_secs` wide, at the tail of an already-timed-out
+/// solve.
+pub(crate) fn sub_mip_deadline(parent_deadline: &Option<Instant>, max_time_secs: f64) -> Instant {
+    let capped = Instant::now() + Duration::from_secs_f64(max_time_secs);
+    match parent_deadline {
+        Some(d) => (*d).min(capped),
+        None => capped,
+    }
+}
 
 /// Deterministic node-relaxation LP-iteration cap shared by the RINS, RENS,
 /// and local-branching sub-MIP configs (Phase 1d, P1-B).
 ///
-/// Each heuristic's sub-MIP previously stopped via whichever of its node
-/// limit (`RINS_NODE_LIMIT` / `RENS_NODE_LIMIT` / `LOCAL_BRANCHING_NODE_LIMIT`)
-/// or fixed wall-clock timeout (all `10.0s`) came first, on the assumption
-/// that the node limit binds first in practice and the wall-clock cap is
-/// mostly a dormant safety valve. That assumption does not hold for every
-/// instance: `milp_solve` on `khb05250.mps --timeout 300` (Phase 1d
-/// determinism re-check) measured local branching's single call actually
-/// hitting the wall-clock cap on every repeat — `local_branching_us` pegged
-/// at `10_000_164`/`10_000_227`/`10_000_192` µs, essentially exactly `10.0s`,
-/// with only ~1_086-1_088 total sub-MIP nodes processed across all of that
-/// run's RINS+RENS+local-branching calls combined (nowhere near the 1_000-
-/// 2_000 node limits) — and a wall-clock cap's cutoff point is inherently
-/// timing-jitter dependent: 6 repeats of the same command gave `nodes_processed
-/// ∈ {3344, 3344, 3344, 3344, 3344, 2952}` for the parent search.
+/// Each heuristic's fixed 10.0s wall-clock sub-MIP timeout was assumed to be
+/// a dormant safety valve behind its node limit, but on `khb05250.mps
+/// --timeout 300` it was the actual binding stop on every repeat (~10.000s),
+/// and a wall-clock cutoff is inherently timing-jitter dependent (6 repeats
+/// gave `nodes_processed` of 3344 five times, 2952 once).
 ///
-/// This constant restores a fully deterministic stop for that case while
-/// leaving genuinely-converging calls untouched. Calibration (Phase 1d,
-/// same `milp_solve` runs, using each heuristic's `*_iters` counter — the
-/// sub-MIP's own recursive `mip::effort::total_simplex_iters`, see
-/// `run_rins`/`run_rens`/`run_local_branching`): local branching's call on
-/// `khb05250` reached `local_branching_iters = 595_689` at the 10.0s
-/// wall-clock cutoff; on `gt2.mps --timeout 60` (a call that legitimately
-/// converges well under the wall cap, at 6.16s wall time) the same counter
-/// reached `386_937`.
-///
-/// Note this counter is `total_simplex_iters` (`lp_iters_total +
-/// strong_branch_iters`, the sub-MIP's other components being structurally
-/// zero — recursive RINS/RENS/local-branching/tree-cuts are all disabled on
-/// every sub-MIP config below), not the plain `lp_iters_total` that
-/// [`crate::options::MipConfig::max_lp_iters`] is actually compared against
-/// in `solve_mip_core`. The two measurements above are therefore upper
-/// bounds on the sub-MIP's real `lp_iters_total` at each reference point, not
-/// exact values. This does not weaken the derivation: `may_run_strong_branch`
-/// caps `strong_branch_iters < STRONG_BRANCH_ITER_SHARE (0.10) *
-/// total_simplex_iters`, so `lp_iters_total > 0.90 * total_simplex_iters`
-/// always holds. That gives `khb05250`'s real `lp_iters_total` at the old
-/// wall-clock cutoff a floor of `0.90 * 595_689 ≈ 536_120` — already above
-/// `480_000` — and `gt2`'s real `lp_iters_total` a ceiling of exactly
-/// `386_937` (the measured total is itself the ceiling) — already below
-/// `480_000`. So `480_000` sits strictly between the two real-`lp_iters_total`
-/// ranges regardless of exactly how each sub-MIP split its budget between
-/// node relaxations and strong branching, not merely between the two
-/// aggregate measurements. `480_000` itself is the geometric mean of the two
-/// aggregate measurements (`sqrt(386_937 * 595_689) ≈ 480_098`, rounded) —
-/// simpler to justify than picking a value from within the derived
-/// real-`lp_iters_total` bounds directly, and the bounds above confirm that
-/// choice still lands in the valid range. The `10.0s` wall-clock timeout
-/// constants remain on each heuristic as a final safety valve for
-/// pathologically slow per-iteration LP solves (e.g. a `pk1`-class instance
-/// where a single simplex iteration itself takes seconds); with this cap in
-/// place they are expected to stay dormant for the wide majority of sub-MIP
-/// calls.
+/// Calibration: `khb05250`'s local-branching call reached
+/// `total_simplex_iters = 595_689` at the old 10.0s cutoff; `gt2`'s
+/// (legitimately converging at 6.16s) reached `386_937`. `480_000` is their
+/// geometric mean. This constant is checked against `lp_iters_total` alone,
+/// not the `total_simplex_iters` aggregate above — but `may_run_strong_branch`
+/// bounds `strong_branch_iters < 0.10 * total_simplex_iters`, so
+/// `lp_iters_total > 0.90 * total_simplex_iters` always holds, giving
+/// `khb05250` a floor of `~536_120` (above `480_000`) and `gt2` a ceiling of
+/// `386_937` (below it) — `480_000` separates the two regardless of the
+/// aggregation gap. The 10.0s wall-clock caps remain as a safety valve for
+/// pathologically slow per-iteration LP solves.
 pub(crate) const SUB_MIP_MAX_LP_ITERS: u64 = 480_000;
 
 /// sub-MIP の結果を元問題の incumbent 候補へ昇格できるか判定する品質ゲート。
@@ -144,6 +131,8 @@ pub(crate) fn solve_sub_milp(
 thread_local! {
     static SUB_MIP_CONFIGS: std::cell::RefCell<Vec<MipConfig>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static SUB_MIP_DEADLINES: std::cell::RefCell<Vec<Option<Instant>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     static NEXT_SUB_MIP_RESULT: std::cell::RefCell<Option<SolverResult>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -155,6 +144,7 @@ pub(crate) fn solve_sub_milp(
     cfg: &MipConfig,
 ) -> (SolverResult, MipStats) {
     SUB_MIP_CONFIGS.with(|configs| configs.borrow_mut().push(cfg.clone()));
+    SUB_MIP_DEADLINES.with(|deadlines| deadlines.borrow_mut().push(options.deadline));
     if let Some(result) = NEXT_SUB_MIP_RESULT.with(|result| result.borrow_mut().take()) {
         return (result, MipStats::default());
     }
@@ -164,6 +154,7 @@ pub(crate) fn solve_sub_milp(
 #[cfg(test)]
 pub(crate) fn clear_recorded_sub_mip_configs() {
     SUB_MIP_CONFIGS.with(|configs| configs.borrow_mut().clear());
+    SUB_MIP_DEADLINES.with(|deadlines| deadlines.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -174,6 +165,11 @@ pub(crate) fn set_next_sub_mip_result(result: SolverResult) {
 #[cfg(test)]
 pub(crate) fn take_recorded_sub_mip_configs() -> Vec<MipConfig> {
     SUB_MIP_CONFIGS.with(|configs| std::mem::take(&mut *configs.borrow_mut()))
+}
+
+#[cfg(test)]
+pub(crate) fn take_recorded_sub_mip_deadlines() -> Vec<Option<Instant>> {
+    SUB_MIP_DEADLINES.with(|deadlines| std::mem::take(&mut *deadlines.borrow_mut()))
 }
 
 #[cfg(test)]

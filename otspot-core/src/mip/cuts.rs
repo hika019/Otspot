@@ -1083,30 +1083,20 @@ fn tree_cut_node_selected(depth: usize, node_index: usize) -> bool {
 /// cut-tightened result when its bound improves by at least
 /// [`MIN_TREE_CUT_GAIN_REL`], else `None`.
 ///
-/// **Soundness (node-local).** GMI/MIR cuts derive from the node tableau and bake
-/// in branching-tightened bounds, so each cut is valid only inside this node's
-/// subtree and may remove integer points feasible elsewhere. [`CutPool`] is
-/// therefore created fresh per call, dedups/orthogonalises only within this
-/// node's rounds, and appends rows solely to this node's re-solve. No cut is
-/// stored across nodes or propagated to children; B&B receives only this node's
-/// tightened bound/solution, which remains a valid lower bound for the subtree.
+/// **Soundness (node-local).** Cuts derive from the node tableau and bake in
+/// branching-tightened bounds, so they are valid only inside this node's
+/// subtree. [`CutPool`] is created fresh per call and never stored across
+/// nodes or propagated to children — B&B receives only this node's tightened
+/// bound/solution, a valid lower bound for the subtree.
 ///
-/// `node_lp` is the original relaxation with node bounds applied. The loop
-/// mirrors root [`add_root_cuts`] while staying node-local: re-solve → generate
-/// → pool-filter → append (Ge) → re-solve, stopping when the bound stalls.
-///
-/// `max_iters` bounds the simplex iterations this attempt may spend (see
-/// `effort::separation_iter_budget`), checked at round boundaries: the
-/// underlying LP solves have no intra-solve iteration limit (only a
-/// wall-clock deadline), so one abnormally expensive single solve within a
-/// round cannot be interrupted, but the round loop stops starting *further*
-/// rounds once the running total reaches the cap. Returns the total simplex
-/// iterations actually spent across all rounds alongside the optional
-/// tightened result, so the caller can charge the gate even on a dry
-/// attempt. The `bool` is whether this call passed the node-selection
-/// interval and actually attempted separation (P3-B: kept independent of the
-/// iteration count, which can legitimately be 0 for a real attempt whose LP
-/// solves all happen to need zero simplex iterations).
+/// Mirrors root [`add_root_cuts`] but node-local: re-solve → generate →
+/// pool-filter → append (Ge) → re-solve, stopping when the bound stalls.
+/// `max_iters` bounds simplex iterations across rounds (see
+/// `effort::separation_iter_budget`), checked at round boundaries only (LP
+/// solves have no intra-solve iteration limit). Returns the iterations
+/// actually spent plus whether this call passed the node-selection interval
+/// and attempted separation (independent of the iteration count, which can
+/// legitimately be 0 for a real attempt).
 pub(crate) fn separate_tree_cuts(
     node_lp: &LpProblem,
     integer_mask: &[bool],

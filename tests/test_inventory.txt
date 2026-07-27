@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3012 testcases, 26 ignored
+# totals: 3019 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -315,6 +315,7 @@ otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_pa
 otspot-core	mip::heuristics::local_branching::tests::local_branching_skips_on_expired_deadline	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_skips_without_binaries	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_strictly_improves_planted_incumbent	active
+otspot-core	mip::heuristics::local_branching::tests::local_branching_sub_mip_deadline_is_min_of_parent_and_fixed_cap	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_sub_mip_sets_deterministic_lp_iters_cap	active
 otspot-core	mip::heuristics::rens::tests::rens_neighborhood_is_floor_ceil_only	active
 otspot-core	mip::heuristics::rens::tests::rens_reports_sub_mip_iters_processed	active
@@ -325,6 +326,7 @@ otspot-core	mip::heuristics::rens::tests::rens_run_path_disables_tree_cuts_and_s
 otspot-core	mip::heuristics::rens::tests::rens_run_path_passes_recursive_sub_mip_config	active
 otspot-core	mip::heuristics::rens::tests::rens_skips_integral_lp_point	active
 otspot-core	mip::heuristics::rens::tests::rens_skips_on_expired_deadline	active
+otspot-core	mip::heuristics::rens::tests::rens_sub_mip_deadline_is_min_of_parent_and_fixed_cap	active
 otspot-core	mip::heuristics::rens::tests::rens_sub_mip_sets_deterministic_lp_iters_cap	active
 otspot-core	mip::heuristics::rens::tests::rens_yields_incumbent_root_lp_lacks	active
 otspot-core	mip::heuristics::rins::tests::remaining_budget_no_deadline_is_infinity	active
@@ -338,6 +340,7 @@ otspot-core	mip::heuristics::rins::tests::rins_run_path_disables_tree_cuts_and_s
 otspot-core	mip::heuristics::rins::tests::rins_run_path_passes_recursive_sub_mip_config	active
 otspot-core	mip::heuristics::rins::tests::rins_skips_on_expired_deadline	active
 otspot-core	mip::heuristics::rins::tests::rins_skips_when_no_agreement	active
+otspot-core	mip::heuristics::rins::tests::rins_sub_mip_deadline_is_min_of_parent_and_fixed_cap	active
 otspot-core	mip::heuristics::rins::tests::rins_sub_mip_disables_recursive_primal_heuristics	active
 otspot-core	mip::heuristics::rins::tests::rins_sub_mip_disables_root_cuts	active
 otspot-core	mip::heuristics::rins::tests::rins_sub_mip_disables_tree_cuts_and_symmetry	active
@@ -492,10 +495,12 @@ otspot-core	mip::tests::rens_with_incumbent_waits_for_regular_interval	active
 otspot-core	mip::tests::rins_disabled_still_optimal	active
 otspot-core	mip::tests::rins_stats_improvements_le_calls	active
 otspot-core	mip::tests::rins_stats_zero_for_single_node_problem	active
+otspot-core	mip::tests::root_probing_and_symmetry_time_are_recorded	active
 otspot-core	mip::tests::round_integers_rejects_out_of_range_index	active
 otspot-core	mip::tests::scaling_retry_does_not_run_after_deadline_expired	active
 otspot-core	mip::tests::scaling_retry_sums_iterations_from_both_attempts	active
 otspot-core	mip::tests::separation_dry_streak_is_tracked_and_reset	active
+otspot-core	mip::tests::separation_dry_streak_periodic_reset_runs_even_on_infeasible_boundary_node	active
 otspot-core	mip::tests::separation_dry_streak_resets_periodically	active
 otspot-core	mip::tests::separation_iter_share_is_enforced	active
 otspot-core	mip::tests::solve_milp_rejects_out_of_range_integer_var	active
@@ -1795,6 +1800,7 @@ otspot-dev::bin/bench_qplib	unsupported_classify_tests::variable_type_message_is
 otspot-dev::bin/milp_solve	tests::all_ablation_flags_combine_independently	active
 otspot-dev::bin/milp_solve	tests::cut_rounds_cli_option_reenables_root_and_tree_cuts	active
 otspot-dev::bin/milp_solve	tests::invalid_numeric_flag_values_return_err_not_panic	active
+otspot-dev::bin/milp_solve	tests::loop_attribution_includes_lp_presolve_and_postsolve	active
 otspot-dev::bin/milp_solve	tests::max_nodes_cli_overrides_default_node_budget	active
 otspot-dev::bin/milp_solve	tests::no_cuts_cli_option_disables_root_and_tree_cuts	active
 otspot-dev::bin/milp_solve	tests::no_cuts_disables_root_and_tree_cuts	active
@@ -1802,6 +1808,7 @@ otspot-dev::bin/milp_solve	tests::no_local_branching_disables_local_branching_on
 otspot-dev::bin/milp_solve	tests::no_rens_disables_rens_only	active
 otspot-dev::bin/milp_solve	tests::no_rins_disables_rins_only	active
 otspot-dev::bin/milp_solve	tests::no_tree_cuts_disables_tree_cuts_only_leaving_root_cuts_on	active
+otspot-dev::bin/milp_solve	tests::root_inclusive_attribution_includes_probing_and_symmetry	active
 otspot-dev::bin/milp_solve	tests::symmetry_cli_overrides_default_both_ways	active
 otspot-dev::bin/milp_solve	tests::symmetry_defaults_to_config_default_when_unset	active
 otspot-dev::bin/qp_runner	tests::every_solver_status_has_an_explicit_stable_label	active

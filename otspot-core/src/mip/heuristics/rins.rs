@@ -88,8 +88,8 @@ pub(crate) fn run_rins(
     let sub_cfg = rins_sub_mip_config(cfg);
 
     let mut sub_opts = parent_opts.clone();
-    sub_opts.timeout_secs = Some(sub_timeout);
-    sub_opts.deadline = None;
+    sub_opts.deadline = Some(super::sub_mip_deadline(deadline, sub_timeout));
+    sub_opts.timeout_secs = None;
     sub_opts.warm_start = None;
     sub_opts.warm_start_qp = None;
     sub_opts.warm_start_lp = None;
@@ -427,6 +427,68 @@ mod tests {
         assert!(
             !sub_cfg.symmetry,
             "recursive symmetry breaking must be disabled"
+        );
+    }
+
+    /// Codex review (P1): the sub-MIP's `SolverOptions::deadline` must be
+    /// `min(parent deadline, RINS_MAX_TIME_SECS)`, not always
+    /// `now + RINS_MAX_TIME_SECS` regardless of how little of the parent's
+    /// own budget remains — the latter let the sub-MIP run up to
+    /// `RINS_MAX_TIME_SECS` past the user's requested overall timeout.
+    ///
+    /// Sentinel: reverting to `sub_opts.deadline = None` (with only
+    /// `sub_opts.timeout_secs = Some(sub_timeout)`) fails the near-deadline
+    /// case here, since the recorded deadline would then be `None`.
+    #[test]
+    fn rins_sub_mip_deadline_is_min_of_parent_and_fixed_cap() {
+        let problem = two_var_milp([-1.0, -1.0], 3.0);
+        let cfg = MipConfig::default();
+        let x_lp = vec![1.4, 1.6];
+        let x_inc = vec![1.0, 1.0];
+
+        // Far parent deadline: the fixed RINS_MAX_TIME_SECS cap must win.
+        super::super::clear_recorded_sub_mip_configs();
+        let before = Instant::now();
+        let far_parent_deadline = before + std::time::Duration::from_secs(1000);
+        run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &Some(far_parent_deadline),
+            &SolverOptions::default(),
+        );
+        let deadlines = super::super::take_recorded_sub_mip_deadlines();
+        assert_eq!(deadlines.len(), 1, "test premise: exactly one sub-MIP call");
+        let recorded = deadlines[0].expect("sub-MIP deadline must be set");
+        assert!(
+            recorded < before + std::time::Duration::from_secs(20),
+            "far parent deadline must not override the fixed RINS_MAX_TIME_SECS cap"
+        );
+
+        // Near parent deadline (< RINS_MAX_TIME_SECS away, > RINS_MIN_REMAINING_SECS):
+        // the parent deadline must win over the fixed cap.
+        super::super::clear_recorded_sub_mip_configs();
+        let before = Instant::now();
+        let near_parent_deadline = before + std::time::Duration::from_secs(2);
+        run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &Some(near_parent_deadline),
+            &SolverOptions::default(),
+        );
+        let deadlines = super::super::take_recorded_sub_mip_deadlines();
+        assert_eq!(deadlines.len(), 1, "test premise: exactly one sub-MIP call");
+        let recorded = deadlines[0].expect("sub-MIP deadline must be set");
+        assert!(
+            recorded <= near_parent_deadline + std::time::Duration::from_millis(50),
+            "sub-MIP deadline must not exceed the near parent deadline"
+        );
+        assert!(
+            recorded < before + std::time::Duration::from_secs(9),
+            "near parent deadline must win over the fixed RINS_MAX_TIME_SECS cap"
         );
     }
 

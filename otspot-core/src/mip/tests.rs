@@ -1346,6 +1346,36 @@ fn stats_timing_root_only_for_trivial_integer_root() {
     );
 }
 
+/// Codex review (P2): root-level presolve probing
+/// (`presolve::tighten_bounds_with_probing`) and static symmetry breaking
+/// (`symmetry::break_symmetry`) run unconditionally in `solve_milp_with_stats`'s
+/// root setup, but their wall-clock time was either measured and discarded
+/// (presolve) or never measured at all (symmetry) instead of being threaded
+/// into `MipStats` — so `attribution_covered_us_root_inclusive` in
+/// `milp_solve` silently undercounted whenever either took non-negligible
+/// time.
+///
+/// Sentinel: removing `stats.root_probing_us = presolve_us;` or
+/// `stats.root_symmetry_us = symmetry_us;` from `solve_milp_with_stats`'s
+/// root setup makes the corresponding assertion FAIL (stays at the `0`
+/// default).
+#[test]
+fn root_probing_and_symmetry_time_are_recorded() {
+    let lp = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
+    let (_, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert!(stats.root_probing_us > 0, "root_probing_us must be >0");
+    assert!(stats.root_symmetry_us > 0, "root_symmetry_us must be >0");
+}
+
 #[test]
 fn stats_timing_populated_for_miqp_with_branching() {
     // Same 2-var convex MIQP as miqp_fractional_root_branches_to_integer_optimum.
@@ -3708,28 +3738,17 @@ fn solve_milp_rejects_out_of_range_integer_var() {
 // mip::effort wiring tests (Phase 1c: deterministic simplex-iteration gates)
 // ---------------------------------------------------------------------------
 //
-// These test the `effort::may_run_*` gate at each call site directly (via
-// the internal `try_rins` / `may_separate_tree_cuts` / `pick_branch_var`
-// entry points, with a controlled `MipStats`) rather than through an
-// organic, timing-driven kernel solve.
-//
-// This whole block REPLACES Phase 1b's version outright (not just extends
-// it): Phase 1c changed what the gate is computed from (deterministic
-// simplex iterations, not elapsed wall-clock time via a backdated
-// `MipEffortBudget::new_at`), and split the pooled `HEURISTIC_TIME_SHARE`
-// into three independent per-heuristic shares (see
-// `heuristic_shares_are_independent_per_heuristic` below) — the Phase 1b
-// tests exercised APIs that no longer exist. An organic (kernel-driven)
-// version of the heuristic/separation tests was also tried, in
-// `tests/mip_bnb_attribution.rs`, and measured unreliable: RINS/RENS/
-// local-branching sub-MIP timeouts are sized from the *overall remaining
-// deadline* (capped at an absolute 10s/call), not from the effort budget's
-// remaining share, so a single call approved while `total_simplex_iters` was
-// still small could push the measured share for a small/fast instance to
-// ~79% of wall clock — *above* that same instance's fully-*ungated* baseline
-// of ~50%. That is a real, separate design gap (reported upstream), not a
-// reason to distrust the deterministic gate itself, which is what these
-// tests verify directly instead.
+// Tests the `effort::may_run_*` gates directly (via `try_rins` /
+// `may_separate_tree_cuts` / `pick_branch_var`, with a controlled
+// `MipStats`) rather than through an organic, timing-driven kernel solve.
+// Replaces Phase 1b's wall-clock version outright — that API no longer
+// exists. An organic (kernel-driven) version was also tried in
+// `tests/mip_bnb_attribution.rs` but was unreliable: sub-MIP timeouts are
+// sized from the remaining deadline (capped at 10s/call), not the effort
+// budget's remaining share, so one early call could push a small instance's
+// measured share to ~79% of wall clock — above its ungated ~50% baseline.
+// That is a separate, reported design gap, not a reason to distrust the
+// gate this block verifies directly.
 
 /// SENTINEL: `try_rins` does not call `run_rins` when RINS's own cumulative
 /// simplex iterations already meet or exceed `RINS_ITER_SHARE` of
@@ -3993,6 +4012,109 @@ fn separation_dry_streak_resets_periodically() {
         stats.tree_cut_dry_streak,
         super::effort::SEPARATION_DRY_STREAK_LIMIT,
         "streak must NOT reset off the interval"
+    );
+}
+
+/// Codex review (P2): the periodic reset must fire for every processed node,
+/// including one whose relaxation is Infeasible/Unbounded/Timeout — those
+/// statuses skip `maybe_apply_tree_cut_separation` entirely, so a reset check
+/// reachable only from inside that function would miss the boundary node,
+/// pushing the reset a full `SEPARATION_DRY_STREAK_RESET_NODE_INTERVAL` late.
+///
+/// Drives a real `solve_mip_core` run with `max_nodes` set to exactly
+/// `SEPARATION_DRY_STREAK_RESET_NODE_INTERVAL` so the search halts right
+/// after that boundary node. The mock always returns a fractional (never
+/// integer-feasible, so no incumbent ever forms to reset the streak via a
+/// different path) relaxation except at that exact call count, where it
+/// returns `Infeasible`; its `separate_tree_cuts` override always reports a
+/// real, unaccepted attempt, so the streak quickly climbs to and pins at
+/// `SEPARATION_DRY_STREAK_LIMIT` well before the boundary.
+///
+/// Sentinel: moving the `maybe_reset_separation_dry_streak` call back inside
+/// `maybe_apply_tree_cut_separation` (the pre-fix call site) makes the final
+/// assertion FAIL (`tree_cut_dry_streak` stays at the limit instead of 0).
+#[test]
+fn separation_dry_streak_periodic_reset_runs_even_on_infeasible_boundary_node() {
+    use std::cell::Cell;
+
+    struct SeparationBoundaryMock {
+        bounds: Vec<(f64, f64)>,
+        ints: Vec<usize>,
+        calls: Cell<usize>,
+        infeasible_at_call: usize,
+    }
+
+    impl super::Relaxation for SeparationBoundaryMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.ints
+        }
+        fn solve(&self, bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            let call = self.calls.get() + 1;
+            self.calls.set(call);
+            if call == self.infeasible_at_call {
+                return SolverResult::infeasible();
+            }
+            let (lo, hi) = bounds[0];
+            let x = lo + (hi - lo) * 0.5 + 0.3;
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: -1.0,
+                solution: vec![x],
+                iterations: 1,
+                ..Default::default()
+            }
+        }
+        fn skip_node_presolve(&self) -> bool {
+            true
+        }
+        fn separate_tree_cuts(
+            &self,
+            _bounds: &[(f64, f64)],
+            _res: &SolverResult,
+            _mask: &[bool],
+            _options: &SolverOptions,
+            _depth: usize,
+            _node_index: usize,
+            _max_iters: u64,
+        ) -> (Option<SolverResult>, u64, bool) {
+            (None, 0, true)
+        }
+    }
+
+    let interval = super::effort::SEPARATION_DRY_STREAK_RESET_NODE_INTERVAL;
+    let mock = SeparationBoundaryMock {
+        bounds: vec![(0.0, 1_099_511_627_776.0)], // 2^40
+        ints: vec![0],
+        calls: Cell::new(0),
+        infeasible_at_call: interval,
+    };
+    let cfg = MipConfig {
+        max_nodes: interval,
+        max_depth: 20,
+        branching: crate::options::MipBranching::MostFractional,
+        cuts: false,
+        symmetry: false,
+        rins_enabled: false,
+        rens_enabled: false,
+        local_branching_enabled: false,
+        ..MipConfig::default()
+    };
+    let (_, stats) = super::solve_mip_with_stats(&mock, &opts(), &cfg);
+
+    assert_eq!(
+        stats.nodes_processed, interval,
+        "test premise: the search must process exactly through the boundary node"
+    );
+    assert_eq!(
+        stats.tree_cut_dry_streak, 0,
+        "the periodic reset must fire for the boundary node even though its \
+         relaxation was Infeasible"
     );
 }
 
