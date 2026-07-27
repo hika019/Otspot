@@ -1048,6 +1048,111 @@ fn branching_strategy_controls_strong_branch_stats() {
     );
 }
 
+/// `MipConfig::max_lp_iters` (Phase 1d, P1-B) is a deterministic sub-MIP stop
+/// condition — set on RINS/RENS/local-branching sub-MIP configs so their
+/// termination point depends only on simplex-iteration count, not wall-clock
+/// timing. This exercises the check in isolation via a mock relaxation whose
+/// root bounds are wide enough (`2^40`) that no leaf (integer-feasible point)
+/// is ever reached within the small node budget below, so no incumbent forms
+/// and `should_prune` never engages — isolating the `max_lp_iters` stop from
+/// every other stop/pruning path. Each mocked relaxation solve reports a
+/// fixed `ITERS_PER_CALL` iteration cost, making the exact stopping node count
+/// (`LP_ITERS_CAP / ITERS_PER_CALL`) independently computable without
+/// depending on real simplex behavior.
+///
+/// `max_nodes` is set to 10_000 — far larger than the 6 nodes the iteration
+/// cap must stop at — so a passing test proves the iteration cap is what
+/// actually fired, not the node cap.
+///
+/// Sentinel: removing the `cfg.max_lp_iters` stop-condition check from
+/// `solve_mip_core`'s node loop leaves `max_nodes` (10_000) as the only
+/// limiter, so `nodes_processed` would run far past `expected_nodes` — FAILS.
+#[test]
+fn max_lp_iters_deterministically_stops_before_max_nodes() {
+    use std::cell::Cell;
+
+    struct WideBisectionMock {
+        bounds: Vec<(f64, f64)>,
+        ints: Vec<usize>,
+        calls: Cell<usize>,
+    }
+
+    const ITERS_PER_CALL: usize = 5;
+
+    impl WideBisectionMock {
+        fn new() -> Self {
+            Self {
+                bounds: vec![(0.0, 1_099_511_627_776.0)], // 2^40
+                ints: vec![0],
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl super::Relaxation for WideBisectionMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.ints
+        }
+        fn solve(&self, bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            self.calls.set(self.calls.get() + 1);
+            let (lo, hi) = bounds[0];
+            // Offset midpoint: strictly fractional regardless of (hi - lo)
+            // parity, and both branch children keep roughly half the
+            // parent's width (no immediate width-0 leaf), as long as
+            // hi - lo is large relative to the offset — true throughout this
+            // test's shallow (6-node) exploration window from a 2^40 start.
+            let x = lo + (hi - lo) * 0.5 + 0.3;
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: -1.0,
+                solution: vec![x],
+                iterations: ITERS_PER_CALL,
+                ..Default::default()
+            }
+        }
+        fn skip_node_presolve(&self) -> bool {
+            true
+        }
+    }
+
+    const LP_ITERS_CAP: u64 = 30;
+    let cfg = MipConfig {
+        max_nodes: 10_000,
+        max_lp_iters: Some(LP_ITERS_CAP),
+        branching: crate::options::MipBranching::MostFractional,
+        cuts: false,
+        tree_cuts: false,
+        symmetry: false,
+        rins_enabled: false,
+        rens_enabled: false,
+        local_branching_enabled: false,
+        ..MipConfig::default()
+    };
+    let mock = WideBisectionMock::new();
+    let (result, stats) = super::solve_mip_with_stats(&mock, &opts(), &cfg);
+
+    let expected_nodes = (LP_ITERS_CAP / ITERS_PER_CALL as u64) as usize;
+    assert_eq!(
+        stats.nodes_processed, expected_nodes,
+        "max_lp_iters must stop the search exactly after LP_ITERS_CAP / \
+         ITERS_PER_CALL processed nodes, well before max_nodes=10_000 is \
+         anywhere close to relevant"
+    );
+    assert_eq!(stats.lp_iters_total, LP_ITERS_CAP);
+    assert_eq!(
+        result.status,
+        SolveStatus::Timeout,
+        "max_lp_iters truncation must be treated identically to deadline \
+         expiry (Timeout), not a node-limit-style MaxIterations"
+    );
+}
+
 #[test]
 fn scaling_retry_does_not_run_after_deadline_expired() {
     use std::cell::Cell;
@@ -1095,6 +1200,77 @@ fn scaling_retry_does_not_run_after_deadline_expired() {
         mock.calls.get(),
         1,
         "expired deadline must not trigger retry"
+    );
+}
+
+/// SENTINEL (P3-F): when a scaling retry actually happens, the returned
+/// `iterations` sums BOTH attempts' simplex iterations, not just the
+/// retry's — otherwise the unscaled first attempt's iterations are silently
+/// dropped from `effort::total_simplex_iters` and every gate built on it.
+///
+/// Sentinel: removing `retry.iterations = retry.iterations.saturating_add(res.iterations);`
+/// from `solve_relaxation_with_scaling_retry` makes the last assertion FAIL
+/// (would report 3, the retry alone, instead of 10).
+#[test]
+fn scaling_retry_sums_iterations_from_both_attempts() {
+    use std::cell::Cell;
+
+    struct IterSumMock {
+        calls: Cell<usize>,
+    }
+
+    impl super::Relaxation for IterSumMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &[(0.0, 1.0)]
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &[0]
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            if !opts.use_ruiz_scaling {
+                SolverResult {
+                    status: SolveStatus::Stalled,
+                    iterations: 7,
+                    solution: vec![0.5],
+                    ..Default::default()
+                }
+            } else {
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 1.0,
+                    iterations: 3,
+                    solution: vec![1.0],
+                    ..Default::default()
+                }
+            }
+        }
+    }
+
+    let problem = IterSumMock {
+        calls: Cell::new(0),
+    };
+    let fast = SolverOptions {
+        use_ruiz_scaling: false,
+        ..SolverOptions::default()
+    };
+    let retry = SolverOptions {
+        use_ruiz_scaling: true,
+        ..SolverOptions::default()
+    };
+    let res = super::solve_relaxation_with_scaling_retry(&problem, &[(0.0, 1.0)], &fast, &retry);
+    assert_eq!(
+        problem.calls.get(),
+        2,
+        "test premise: Stalled on the fast attempt must trigger a scaled retry"
+    );
+    assert_eq!(
+        res.iterations, 10,
+        "retry's reported iterations must sum both attempts (7 + 3)"
     );
 }
 
@@ -3074,9 +3250,9 @@ impl super::Relaxation for RensScheduleMock {
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
         _opts: &SolverOptions,
-    ) -> (Option<SolverResult>, u64) {
+    ) -> (Option<SolverResult>, u64, u64) {
         self.calls.set(self.calls.get() + 1);
-        (self.responses.borrow_mut().remove(0), 0)
+        (self.responses.borrow_mut().remove(0), 0, 0)
     }
 }
 
@@ -3525,6 +3701,520 @@ fn solve_milp_rejects_out_of_range_integer_var() {
         matches!(res.status, SolveStatus::NotSupported(_)),
         "out-of-range integer_vars index must be rejected, got {:?}",
         res.status
+    );
+}
+
+// ---------------------------------------------------------------------------
+// mip::effort wiring tests (Phase 1c: deterministic simplex-iteration gates)
+// ---------------------------------------------------------------------------
+//
+// These test the `effort::may_run_*` gate at each call site directly (via
+// the internal `try_rins` / `may_separate_tree_cuts` / `pick_branch_var`
+// entry points, with a controlled `MipStats`) rather than through an
+// organic, timing-driven kernel solve.
+//
+// This whole block REPLACES Phase 1b's version outright (not just extends
+// it): Phase 1c changed what the gate is computed from (deterministic
+// simplex iterations, not elapsed wall-clock time via a backdated
+// `MipEffortBudget::new_at`), and split the pooled `HEURISTIC_TIME_SHARE`
+// into three independent per-heuristic shares (see
+// `heuristic_shares_are_independent_per_heuristic` below) — the Phase 1b
+// tests exercised APIs that no longer exist. An organic (kernel-driven)
+// version of the heuristic/separation tests was also tried, in
+// `tests/mip_bnb_attribution.rs`, and measured unreliable: RINS/RENS/
+// local-branching sub-MIP timeouts are sized from the *overall remaining
+// deadline* (capped at an absolute 10s/call), not from the effort budget's
+// remaining share, so a single call approved while `total_simplex_iters` was
+// still small could push the measured share for a small/fast instance to
+// ~79% of wall clock — *above* that same instance's fully-*ungated* baseline
+// of ~50%. That is a real, separate design gap (reported upstream), not a
+// reason to distrust the deterministic gate itself, which is what these
+// tests verify directly instead.
+
+/// SENTINEL: `try_rins` does not call `run_rins` when RINS's own cumulative
+/// simplex iterations already meet or exceed `RINS_ITER_SHARE` of
+/// `total_simplex_iters`, and does call it otherwise.
+///
+/// Sentinel: removing `!effort::may_run_rins(stats)` from `try_rins`'s guard
+/// makes the first assertion FAIL (`calls` becomes 1 instead of 0) —
+/// confirmed by temporarily removing it and rerunning.
+#[test]
+fn heuristic_iter_share_is_enforced() {
+    use std::cell::Cell;
+
+    struct RinsGateMock {
+        calls: Cell<usize>,
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+    }
+
+    impl RinsGateMock {
+        fn new() -> Self {
+            Self {
+                calls: Cell::new(0),
+                root_bounds: [(0.0, 1.0)],
+                int_vars: [0],
+            }
+        }
+    }
+
+    impl super::Relaxation for RinsGateMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            unreachable!("heuristic-share gate sentinel should not solve node relaxations")
+        }
+        fn run_rins(
+            &self,
+            _x_lp: &[f64],
+            _x_inc: &[f64],
+            _cfg: &MipConfig,
+            _deadline: &Option<std::time::Instant>,
+            _opts: &SolverOptions,
+        ) -> (Option<SolverResult>, u64, u64) {
+            self.calls.set(self.calls.get() + 1);
+            (None, 1, 1)
+        }
+    }
+
+    let problem = RinsGateMock::new();
+    let cfg = MipConfig::default();
+    let mut state = super::MipState::new();
+    let incumbent = SolverResult {
+        status: SolveStatus::Optimal,
+        objective: -1.0,
+        solution: vec![1.0],
+        ..SolverResult::default()
+    };
+    assert!(
+        state.consider(&incumbent),
+        "test premise: incumbent must be seeded"
+    );
+    let node_count = super::heuristics::rins::RINS_INTERVAL;
+
+    // Over-share: RINS's own cumulative iterations already at its 0.05 share
+    // of a 1_000_000-iteration total (lp_iters_total = 1_000_000 - 50_000
+    // since total_simplex_iters includes rins_iters itself).
+    let mut stats_over = super::MipStats {
+        nodes_processed: node_count,
+        lp_iters_total: 950_000,
+        rins_iters: 50_000,
+        ..Default::default()
+    };
+    super::try_rins(
+        &problem,
+        &mut stats_over,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        0,
+        "over-share RINS iteration budget must block RINS"
+    );
+
+    // Under-share: RINS has spent nothing yet.
+    let mut stats_under = super::MipStats {
+        nodes_processed: node_count,
+        lp_iters_total: 1_000_000,
+        rins_iters: 0,
+        ..Default::default()
+    };
+    super::try_rins(
+        &problem,
+        &mut stats_under,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "under-share RINS iteration budget must allow RINS"
+    );
+}
+
+/// SENTINEL (P2-3): RENS/RINS/local-branching each have an *independent*
+/// 0.05 iteration share, not a pooled 0.15 that a fixed try-order (RENS,
+/// then RINS, then local branching) could let the first-due heuristic
+/// exhaust before the other two ever get a turn.
+///
+/// `rins_iters` alone (160_000) already exceeds what Phase 1b's *pooled*
+/// 0.15 share of the same 1_000_000 total would have allowed (150_000) — a
+/// pooled check would therefore also block RENS/local-branching here, since
+/// it summed all three against one shared threshold. The independent shares
+/// must not: RENS and local-branching have spent nothing of their own, so
+/// they stay allowed regardless of what RINS alone has spent.
+#[test]
+fn heuristic_shares_are_independent_per_heuristic() {
+    let stats = super::MipStats {
+        lp_iters_total: 1_000_000,
+        rins_iters: 160_000,
+        rens_iters: 0,
+        local_branching_iters: 0,
+        ..Default::default()
+    };
+    assert!(
+        !super::effort::may_run_rins(&stats),
+        "test premise: RINS itself must be over its own 0.05 share"
+    );
+    assert!(
+        super::effort::may_run_rens(&stats),
+        "RENS must stay allowed even though RINS alone already exceeds the old pooled 0.15 share"
+    );
+    assert!(
+        super::effort::may_run_local_branching(&stats),
+        "local branching must stay allowed even though RINS alone already exceeds the old pooled 0.15 share"
+    );
+}
+
+/// SENTINEL: `may_separate_tree_cuts` gates in-tree GMI/MIR separation on
+/// both `cfg.tree_cuts` and `effort::may_run_separation`.
+///
+/// Sentinel: removing `effort::may_run_separation(stats)` from
+/// `may_separate_tree_cuts` makes the first assertion FAIL — confirmed by
+/// temporarily removing it and rerunning.
+#[test]
+fn separation_iter_share_is_enforced() {
+    let cfg = MipConfig {
+        tree_cuts: true,
+        ..MipConfig::default()
+    };
+
+    // lp_iters_total = 1_000_000 - 150_000 since total_simplex_iters
+    // includes tree_cut_iters itself.
+    let stats_over = super::MipStats {
+        lp_iters_total: 850_000,
+        tree_cut_iters: 150_000,
+        ..Default::default()
+    };
+    assert!(
+        !super::may_separate_tree_cuts(&cfg, &stats_over),
+        "over-share separation budget must block in-tree cut separation"
+    );
+
+    let stats_under = super::MipStats {
+        lp_iters_total: 1_000_000,
+        tree_cut_iters: 0,
+        ..Default::default()
+    };
+    assert!(
+        super::may_separate_tree_cuts(&cfg, &stats_under),
+        "under-share separation budget must allow in-tree cut separation"
+    );
+
+    let cfg_disabled = MipConfig {
+        tree_cuts: false,
+        ..MipConfig::default()
+    };
+    assert!(
+        !super::may_separate_tree_cuts(&cfg_disabled, &stats_under),
+        "tree_cuts=false must block separation regardless of the effort budget"
+    );
+}
+
+/// SENTINEL (P2-5): `record_separation_attempt` tracks and resets
+/// `tree_cut_dry_streak` correctly, and `may_separate_tree_cuts` disables
+/// separation once the streak reaches `SEPARATION_DRY_STREAK_LIMIT` even
+/// with ample remaining iteration share.
+///
+/// Sentinel: removing the `!attempted` early return makes a
+/// node-selection-skipped call (`attempted = false`) count as dry, which
+/// would make the third assertion FAIL (streak would already be 1, not 0,
+/// after a single skipped call); removing the streak-limit check from
+/// `effort::may_run_separation` makes the last assertion FAIL.
+#[test]
+fn separation_dry_streak_is_tracked_and_reset() {
+    let mut stats = super::MipStats::default();
+
+    // A node-selection-skipped call (attempted = false) must not count.
+    super::record_separation_attempt(&mut stats, false, false);
+    assert_eq!(stats.tree_cut_dry_streak, 0);
+
+    // Real dry attempts increment the streak.
+    for expected in 1..=super::effort::SEPARATION_DRY_STREAK_LIMIT {
+        super::record_separation_attempt(&mut stats, true, false);
+        assert_eq!(stats.tree_cut_dry_streak, expected);
+    }
+    let cfg = MipConfig {
+        tree_cuts: true,
+        ..MipConfig::default()
+    };
+    stats.lp_iters_total = 1_000_000; // ample remaining iteration share
+    assert!(
+        !super::may_separate_tree_cuts(&cfg, &stats),
+        "dry-streak limit must block separation even with ample iteration budget"
+    );
+
+    // An accepted attempt resets the streak.
+    super::record_separation_attempt(&mut stats, true, true);
+    assert_eq!(stats.tree_cut_dry_streak, 0);
+    assert!(
+        super::may_separate_tree_cuts(&cfg, &stats),
+        "a reset streak must allow separation again"
+    );
+}
+
+/// SENTINEL (P3-A): `maybe_reset_separation_dry_streak` resets the streak
+/// exactly at multiples of `SEPARATION_DRY_STREAK_RESET_NODE_INTERVAL`, and
+/// leaves it untouched off that interval.
+///
+/// Sentinel: removing the periodic reset from the B&B loop (or this helper)
+/// makes the first assertion FAIL (streak would stay at the limit forever).
+#[test]
+fn separation_dry_streak_resets_periodically() {
+    let mut stats = super::MipStats {
+        tree_cut_dry_streak: super::effort::SEPARATION_DRY_STREAK_LIMIT,
+        nodes_processed: super::effort::SEPARATION_DRY_STREAK_RESET_NODE_INTERVAL,
+        ..Default::default()
+    };
+    super::maybe_reset_separation_dry_streak(&mut stats);
+    assert_eq!(
+        stats.tree_cut_dry_streak, 0,
+        "streak must reset exactly at the reset interval"
+    );
+
+    stats.tree_cut_dry_streak = super::effort::SEPARATION_DRY_STREAK_LIMIT;
+    stats.nodes_processed += 1;
+    super::maybe_reset_separation_dry_streak(&mut stats);
+    assert_eq!(
+        stats.tree_cut_dry_streak,
+        super::effort::SEPARATION_DRY_STREAK_LIMIT,
+        "streak must NOT reset off the interval"
+    );
+}
+
+/// SENTINEL (P3-A): an incumbent improvement found by RINS resets the
+/// separation dry streak (not just RINS's own improvement counters) — the
+/// same one-line reset is also added at the RENS/local-branching/
+/// integer-feasible-leaf incumbent-update sites in `process_node_outcome`,
+/// which this test does not re-verify individually since they follow the
+/// identical pattern.
+///
+/// Sentinel: removing `stats.tree_cut_dry_streak = 0;` from `try_rins`'s
+/// incumbent-improvement branch makes the last assertion FAIL.
+#[test]
+fn try_rins_incumbent_improvement_resets_separation_dry_streak() {
+    struct ImprovingRinsMock {
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+    }
+    impl super::Relaxation for ImprovingRinsMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            unreachable!("this sentinel should not solve node relaxations")
+        }
+        fn run_rins(
+            &self,
+            _x_lp: &[f64],
+            _x_inc: &[f64],
+            _cfg: &MipConfig,
+            _deadline: &Option<std::time::Instant>,
+            _opts: &SolverOptions,
+        ) -> (Option<SolverResult>, u64, u64) {
+            (
+                Some(SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: -5.0,
+                    solution: vec![1.0],
+                    ..SolverResult::default()
+                }),
+                1,
+                1,
+            )
+        }
+    }
+
+    let problem = ImprovingRinsMock {
+        root_bounds: [(0.0, 1.0)],
+        int_vars: [0],
+    };
+    let cfg = MipConfig::default();
+    let mut state = super::MipState::new();
+    let incumbent = SolverResult {
+        status: SolveStatus::Optimal,
+        objective: -1.0,
+        solution: vec![0.0],
+        ..SolverResult::default()
+    };
+    assert!(
+        state.consider(&incumbent),
+        "test premise: incumbent must be seeded"
+    );
+
+    let mut stats = super::MipStats {
+        nodes_processed: super::heuristics::rins::RINS_INTERVAL,
+        tree_cut_dry_streak: 3,
+        ..Default::default()
+    };
+    super::try_rins(
+        &problem,
+        &mut stats,
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    assert_eq!(
+        stats.rins_improvements, 1,
+        "test premise: RINS must have improved the incumbent"
+    );
+    assert_eq!(
+        stats.tree_cut_dry_streak, 0,
+        "an incumbent improvement via RINS must reset the separation dry streak"
+    );
+}
+
+/// SENTINEL: `pick_branch_var`'s reliability path does not launch
+/// strong-branching child LP solves when its own cumulative simplex
+/// iterations already meet or exceed `STRONG_BRANCH_ITER_SHARE` of
+/// `total_simplex_iters`, and does launch them (down+up for the one
+/// unreliable fractional candidate) otherwise; either way it still returns a
+/// valid branching variable (fallback to plain reliability/pseudocost
+/// selection when strong branching is skipped).
+///
+/// Sentinel: removing `effort::may_run_strong_branch(stats)` from
+/// `pick_branch_var`'s guard makes the first assertion FAIL (`solve_calls`
+/// becomes 2 instead of 0) — confirmed by temporarily removing it and
+/// rerunning.
+#[test]
+fn strong_branch_iter_share_is_enforced() {
+    use std::cell::Cell;
+    use std::collections::HashMap;
+
+    struct StrongBranchGateMock {
+        solve_calls: Cell<usize>,
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+    }
+
+    impl super::Relaxation for StrongBranchGateMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            self.solve_calls.set(self.solve_calls.get() + 1);
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: 0.0,
+                solution: vec![0.0],
+                ..SolverResult::default()
+            }
+        }
+    }
+
+    let problem = StrongBranchGateMock {
+        solve_calls: Cell::new(0),
+        root_bounds: [(0.0, 5.0)],
+        int_vars: [0],
+    };
+    let cfg = MipConfig {
+        branching: crate::options::MipBranching::Reliability,
+        ..MipConfig::default()
+    };
+    let node_bounds = [(0.0, 5.0)];
+    let mask = [true];
+    let integer_vars = [0usize];
+    let j_to_k: HashMap<usize, usize> = HashMap::from([(0usize, 0usize)]);
+    let sol = [0.5];
+
+    // Over-share: strong branching's own cumulative iterations already at
+    // its 0.10 share of a 1_000_000-iteration total (lp_iters_total =
+    // 1_000_000 - 100_000 since total_simplex_iters includes
+    // strong_branch_iters itself); selection still succeeds via the
+    // reliability/pseudocost fallback (no candidate has observations either
+    // way).
+    let mut stats_over = super::MipStats {
+        lp_iters_total: 900_000,
+        strong_branch_iters: 100_000,
+        ..Default::default()
+    };
+    let mut pc_over = super::PseudocostState::new(1);
+    let jb_over = super::pick_branch_var(
+        &problem,
+        &node_bounds,
+        &sol,
+        0.0,
+        &mask,
+        &integer_vars,
+        &j_to_k,
+        &opts(),
+        &cfg,
+        &None,
+        None,
+        &mut pc_over,
+        &mut stats_over,
+        true,
+    );
+    assert_eq!(
+        jb_over, 0,
+        "the single fractional variable must be selected"
+    );
+    assert_eq!(
+        problem.solve_calls.get(),
+        0,
+        "over-share strong-branch iteration budget must block child LP solves"
+    );
+
+    // Under-share: strong branching must run both child solves for the one
+    // unreliable fractional candidate.
+    let mut stats_under = super::MipStats {
+        lp_iters_total: 1_000_000,
+        strong_branch_iters: 0,
+        ..Default::default()
+    };
+    let mut pc_under = super::PseudocostState::new(1);
+    let jb_under = super::pick_branch_var(
+        &problem,
+        &node_bounds,
+        &sol,
+        0.0,
+        &mask,
+        &integer_vars,
+        &j_to_k,
+        &opts(),
+        &cfg,
+        &None,
+        None,
+        &mut pc_under,
+        &mut stats_under,
+        true,
+    );
+    assert_eq!(
+        jb_under, 0,
+        "the single fractional variable must be selected"
+    );
+    assert_eq!(
+        problem.solve_calls.get(),
+        2,
+        "under-share strong-branch iteration budget must run the candidate's down+up child solves"
     );
 }
 

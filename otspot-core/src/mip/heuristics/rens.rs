@@ -22,10 +22,16 @@ pub(crate) const RENS_INTERVAL_WITH_INCUMBENT: usize = 200;
 /// Node limit for the RENS sub-MIP.
 const RENS_NODE_LIMIT: usize = 2_000;
 
-/// Fraction of remaining wall-clock budget given to the sub-MIP.
-const RENS_TIME_FRACTION: f64 = 0.10;
-
-/// Absolute upper bound on sub-MIP wall time (seconds).
+/// Fixed sub-MIP wall-clock timeout (seconds).
+///
+/// Phase 1c/1d (P1-A): previously scaled as `(remaining_secs * 0.10).min(10.0)`;
+/// see `rins::RINS_MAX_TIME_SECS` for why this was changed to a fixed value
+/// (a wall-clock-scaled sub-MIP budget makes the returned incumbent, and
+/// hence the parent search's trajectory, run-timing dependent). Phase 1d
+/// (P1-B): `sub_cfg.max_lp_iters` (see `heuristics::SUB_MIP_MAX_LP_ITERS`) is
+/// now the primary, deterministic stop; this wall-clock cap is expected to
+/// stay dormant for the wide majority of calls and fire only as a final
+/// safety valve against pathologically slow per-iteration LP solves.
 const RENS_MAX_TIME_SECS: f64 = 10.0;
 
 /// Minimum remaining budget below which RENS is skipped.
@@ -41,8 +47,9 @@ const RENS_MIN_REMAINING_SECS: f64 = 1.0;
 /// The reduced sub-MIP is solved with a short timeout and node limit. Returns a
 /// feasible `SolverResult` (or `None` when the LP point is already integral —
 /// nothing to enforce — or the sub-MIP finds no feasible point) together with
-/// the sub-MIP's `nodes_processed`, reported whenever a sub-MIP solve was
-/// actually attempted (0 when skipped before that point).
+/// the sub-MIP's `nodes_processed` and its own recursive `total_simplex_iters`
+/// (see `effort`), both reported whenever a sub-MIP solve was actually
+/// attempted (0 when skipped before that point).
 ///
 /// `parent_opts` is cloned and its timeout/deadline overridden so tolerance,
 /// cancellation flag, and other settings are inherited by the sub-MIP.
@@ -52,10 +59,10 @@ pub(crate) fn run_rens(
     cfg: &MipConfig,
     deadline: &Option<Instant>,
     parent_opts: &SolverOptions,
-) -> (Option<SolverResult>, u64) {
+) -> (Option<SolverResult>, u64, u64) {
     let remaining_secs = remaining_budget(deadline);
     if remaining_secs < RENS_MIN_REMAINING_SECS {
-        return (None, 0);
+        return (None, 0, 0);
     }
 
     let mut sub_bounds = problem.lp.bounds.clone();
@@ -70,7 +77,7 @@ pub(crate) fn run_rens(
             // Already integral: fix to the integer, intersecting the original box.
             let (lb, ub) = problem.lp.bounds[j];
             if rounded < lb || rounded > ub {
-                return (None, 0);
+                return (None, 0, 0);
             }
             sub_bounds[j] = (rounded, rounded);
         } else {
@@ -78,7 +85,7 @@ pub(crate) fn run_rens(
             let lo = v.floor().max(problem.lp.bounds[j].0);
             let hi = v.ceil().min(problem.lp.bounds[j].1);
             if lo > hi {
-                return (None, 0);
+                return (None, 0, 0);
             }
             sub_bounds[j] = (lo, hi);
             n_fractional += 1;
@@ -88,10 +95,10 @@ pub(crate) fn run_rens(
     // No fractional integer var ⇒ the LP point is already integer-feasible and
     // is returned directly by the caller; RENS would add nothing.
     if n_fractional == 0 {
-        return (None, 0);
+        return (None, 0, 0);
     }
 
-    let sub_timeout = (remaining_secs * RENS_TIME_FRACTION).min(RENS_MAX_TIME_SECS);
+    let sub_timeout = RENS_MAX_TIME_SECS;
 
     let mut sub_lp = problem.lp.clone();
     sub_lp.bounds = sub_bounds;
@@ -103,9 +110,19 @@ pub(crate) fn run_rens(
 
     let mut sub_cfg = cfg.clone();
     sub_cfg.max_nodes = RENS_NODE_LIMIT;
+    sub_cfg.max_lp_iters = Some(super::SUB_MIP_MAX_LP_ITERS);
     sub_cfg.rins_enabled = false;
     sub_cfg.rens_enabled = false;
     sub_cfg.local_branching_enabled = false;
+    // The sub-MIP searches a {floor, ceil} box around the LP point, already
+    // a tiny neighborhood; recursive tree-cut separation, symmetry-breaking,
+    // and root cut generation pay the parent search's per-node/per-root
+    // overhead again for no corresponding benefit here (Phase 1a/1c: freed
+    // iteration budget is reallocated to the parent tree search via
+    // `mip::effort`).
+    sub_cfg.tree_cuts = false;
+    sub_cfg.symmetry = false;
+    sub_cfg.cuts = false;
 
     let mut sub_opts = parent_opts.clone();
     sub_opts.timeout_secs = Some(sub_timeout);
@@ -121,9 +138,11 @@ pub(crate) fn run_rens(
 
     let (result, sub_stats) = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
     let sub_mip_nodes = sub_stats.nodes_processed as u64;
+    let sub_mip_iters = crate::mip::effort::total_simplex_iters(&sub_stats);
     (
         super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol),
         sub_mip_nodes,
+        sub_mip_iters,
     )
 }
 
@@ -187,7 +206,7 @@ mod tests {
             "test premise: x_lp must be fractional"
         );
 
-        let (res, _sub_mip_nodes) =
+        let (res, _sub_mip_nodes, _sub_mip_iters) =
             run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
         let res = res.expect("RENS must produce a feasible incumbent from a fractional LP point");
         assert!(
@@ -213,12 +232,34 @@ mod tests {
         let cfg = MipConfig::default();
         let x_lp = vec![0.5, 0.5];
 
-        let (res, sub_mip_nodes) =
+        let (res, sub_mip_nodes, _sub_mip_iters) =
             run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
         assert!(res.is_some(), "test premise: RENS must attempt a sub-MIP");
         assert!(
             sub_mip_nodes > 0,
             "an attempted sub-MIP solve must report at least one processed node; got {sub_mip_nodes}"
+        );
+    }
+
+    /// NEW (Phase 1c): an attempted RENS sub-MIP solve also reports its own
+    /// recursive `total_simplex_iters` (the unit `effort::may_run_rens` gates
+    /// on), not just its node count.
+    ///
+    /// Sentinel: a Phase 1c revert (the `run_rens` return type stripped back
+    /// to `(Option<SolverResult>, u64)`) has no way to expose this count, so
+    /// `rens_iters` would stay 0 — this test would fail.
+    #[test]
+    fn rens_reports_sub_mip_iters_processed() {
+        let problem = knap2([-1.0, -1.0], 1.0);
+        let cfg = MipConfig::default();
+        let x_lp = vec![0.5, 0.5];
+
+        let (res, _sub_mip_nodes, sub_mip_iters) =
+            run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
+        assert!(res.is_some(), "test premise: RENS must attempt a sub-MIP");
+        assert!(
+            sub_mip_iters > 0,
+            "an attempted sub-MIP solve must report at least one simplex iteration; got {sub_mip_iters}"
         );
     }
 
@@ -234,7 +275,7 @@ mod tests {
             ..SolverResult::default()
         });
 
-        let (result, _sub_mip_nodes) =
+        let (result, _sub_mip_nodes, _sub_mip_iters) =
             run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
         let result = result.expect("RENS must keep feasible timeout incumbent from sub-MIP");
 
@@ -281,13 +322,87 @@ mod tests {
         let cfg = MipConfig::default();
         let x_lp = vec![0.4, 0.4];
 
-        let (res, _sub_mip_nodes) =
+        let (res, _sub_mip_nodes, _sub_mip_iters) =
             run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
         let res = res.expect("fractional LP point → RENS Some");
         assert!(
             (res.objective - (-2.0)).abs() < 1e-6,
             "RENS over {{0,1}}^2 optimum is -2 (not -6); got {}",
             res.objective
+        );
+    }
+
+    /// NEW (Phase 1a): the disabled tree-cuts/symmetry flags reach the
+    /// recursive sub-MIP solve.
+    ///
+    /// Sentinel: removing `sub_cfg.tree_cuts = false` or
+    /// `sub_cfg.symmetry = false` from `run_rens` fails this test via the
+    /// recorded sub-MIP config.
+    #[test]
+    fn rens_run_path_disables_tree_cuts_and_symmetry_recursively() {
+        let problem = knap2([-1.0, -1.0], 1.0);
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            tree_cuts: true,
+            symmetry: true,
+            ..MipConfig::default()
+        };
+        let x_lp = vec![0.5, 0.5];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes, _sub_mip_iters) =
+            run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: RENS must call the recursive sub-MIP"
+        );
+        assert_eq!(
+            configs.len(),
+            1,
+            "RENS run path must solve exactly one sub-MIP"
+        );
+        let sub_cfg = &configs[0];
+        assert!(!sub_cfg.tree_cuts, "recursive tree cuts must be disabled");
+        assert!(
+            !sub_cfg.symmetry,
+            "recursive symmetry breaking must be disabled"
+        );
+    }
+
+    /// NEW (Phase 1c/P2-1): the sub-MIP config also disables root cut
+    /// generation, reaching the recursive sub-MIP solve.
+    ///
+    /// Sentinel: removing `sub_cfg.cuts = false` from `run_rens` fails this
+    /// test via the recorded sub-MIP config.
+    #[test]
+    fn rens_run_path_disables_root_cuts_recursively() {
+        let problem = knap2([-1.0, -1.0], 1.0);
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            cuts: true,
+            ..MipConfig::default()
+        };
+        let x_lp = vec![0.5, 0.5];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes, _sub_mip_iters) =
+            run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: RENS must call the recursive sub-MIP"
+        );
+        assert_eq!(
+            configs.len(),
+            1,
+            "RENS run path must solve exactly one sub-MIP"
+        );
+        assert!(
+            !configs[0].cuts,
+            "recursive root cut generation must be disabled"
         );
     }
 
@@ -304,7 +419,7 @@ mod tests {
         let x_lp = vec![0.5, 0.5];
 
         super::super::clear_recorded_sub_mip_configs();
-        let (result, _sub_mip_nodes) =
+        let (result, _sub_mip_nodes, _sub_mip_iters) =
             run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
         let configs = super::super::take_recorded_sub_mip_configs();
 
@@ -324,6 +439,33 @@ mod tests {
         assert!(
             !sub_cfg.local_branching_enabled,
             "recursive local branching must be disabled"
+        );
+    }
+
+    /// Phase 1d (P1-B): the RENS sub-MIP config carries the deterministic
+    /// `max_lp_iters` cap, not just the node limit.
+    ///
+    /// Sentinel: removing `sub_cfg.max_lp_iters = ...` from `run_rens`'s
+    /// sub-MIP config construction fails this test.
+    #[test]
+    fn rens_sub_mip_sets_deterministic_lp_iters_cap() {
+        let problem = knap2([-1.0, -1.0], 1.0);
+        let cfg = MipConfig::default();
+        let x_lp = vec![0.5, 0.5];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes, _sub_mip_iters) =
+            run_rens(&problem, &x_lp, &cfg, &None, &SolverOptions::default());
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: RENS must call the recursive sub-MIP"
+        );
+        assert_eq!(configs.len(), 1);
+        assert_eq!(
+            configs[0].max_lp_iters,
+            Some(crate::mip::heuristics::SUB_MIP_MAX_LP_ITERS)
         );
     }
 

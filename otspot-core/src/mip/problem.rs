@@ -115,13 +115,14 @@ impl Relaxation for MilpProblem {
         opts: &SolverOptions,
         depth: usize,
         node_index: usize,
-    ) -> Option<SolverResult> {
+        max_iters: u64,
+    ) -> (Option<SolverResult>, u64, bool) {
         // Node LP = the original relaxation with this node's bounds. Separation
         // is node-local: cuts are valid only in this subtree and are never reused
         // elsewhere; see `cuts::separate_tree_cuts`.
         let mut node_lp = self.lp.clone();
         node_lp.bounds = bounds.to_vec();
-        super::cuts::separate_tree_cuts(&node_lp, mask, opts, res, depth, node_index)
+        super::cuts::separate_tree_cuts(&node_lp, mask, opts, res, depth, node_index, max_iters)
     }
     fn run_rins(
         &self,
@@ -130,9 +131,9 @@ impl Relaxation for MilpProblem {
         cfg: &crate::options::MipConfig,
         deadline: &Option<std::time::Instant>,
         opts: &crate::options::SolverOptions,
-    ) -> (Option<crate::problem::SolverResult>, u64) {
+    ) -> (Option<crate::problem::SolverResult>, u64, u64) {
         if !cfg.rins_enabled {
-            return (None, 0);
+            return (None, 0, 0);
         }
         crate::mip::heuristics::rins::run_rins(self, x_lp, x_inc, cfg, deadline, opts)
     }
@@ -142,9 +143,9 @@ impl Relaxation for MilpProblem {
         cfg: &crate::options::MipConfig,
         deadline: &Option<std::time::Instant>,
         opts: &crate::options::SolverOptions,
-    ) -> (Option<crate::problem::SolverResult>, u64) {
+    ) -> (Option<crate::problem::SolverResult>, u64, u64) {
         if !cfg.rens_enabled {
-            return (None, 0);
+            return (None, 0, 0);
         }
         crate::mip::heuristics::rens::run_rens(self, x_lp, cfg, deadline, opts)
     }
@@ -154,9 +155,9 @@ impl Relaxation for MilpProblem {
         cfg: &crate::options::MipConfig,
         deadline: &Option<std::time::Instant>,
         opts: &crate::options::SolverOptions,
-    ) -> (Option<crate::problem::SolverResult>, u64) {
+    ) -> (Option<crate::problem::SolverResult>, u64, u64) {
         if !cfg.local_branching_enabled {
-            return (None, 0);
+            return (None, 0, 0);
         }
         crate::mip::heuristics::local_branching::run_local_branching(
             self, x_inc, cfg, deadline, opts,

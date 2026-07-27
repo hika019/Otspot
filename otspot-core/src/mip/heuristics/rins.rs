@@ -13,10 +13,21 @@ pub(crate) const RINS_INTERVAL: usize = 100;
 /// Node limit for the RINS sub-MIP.
 const RINS_NODE_LIMIT: usize = 1_000;
 
-/// Fraction of remaining wall-clock budget given to the sub-MIP.
-const RINS_TIME_FRACTION: f64 = 0.10;
-
-/// Absolute upper bound on sub-MIP wall time (seconds).
+/// Fixed sub-MIP wall-clock timeout (seconds).
+///
+/// Phase 1c/1d (P1-A): previously scaled as `(remaining_secs * 0.10).min(10.0)`,
+/// making the sub-MIP's own budget a continuous function of wall-clock time —
+/// the sub-MIP's explored node count, the incumbent it returns, and hence the
+/// parent search's iteration counters and gate decisions all became run-timing
+/// dependent (confirmed by direct repro: `gt2` diverged onto genuinely
+/// different B&B trajectories, not just cut off at different points, across
+/// repeated runs at `--timeout 60`). A fixed timeout removes the *scaling*
+/// dependency, but Phase 1d (P1-B) found this fixed cap can still itself be
+/// the actively binding, timing-jitter-dependent stop for some instances (see
+/// `heuristics::SUB_MIP_MAX_LP_ITERS`) — `sub_cfg.max_lp_iters` is now the
+/// primary, deterministic stop; this wall-clock cap is expected to stay
+/// dormant for the wide majority of calls and fire only as a final safety
+/// valve against pathologically slow per-iteration LP solves.
 const RINS_MAX_TIME_SECS: f64 = 10.0;
 
 /// Minimum remaining budget below which RINS is skipped.
@@ -27,8 +38,9 @@ const RINS_MIN_REMAINING_SECS: f64 = 1.0;
 /// Fixes integer variables where `round(x_lp[j]) == round(x_inc[j])`, then
 /// solves the reduced sub-MIP with a short timeout and node limit. Returns an
 /// improved `SolverResult` (or `None` when no improvement is found) together
-/// with the sub-MIP's `nodes_processed`, reported whenever a sub-MIP solve
-/// was actually attempted (0 when skipped before that point).
+/// with the sub-MIP's `nodes_processed` and its own recursive
+/// `total_simplex_iters` (see `effort`), both reported whenever a sub-MIP
+/// solve was actually attempted (0 when skipped before that point).
 ///
 /// `parent_opts` is cloned and its timeout/deadline overridden so that
 /// tolerance, cancellation flag, and other settings are inherited by the sub-MIP.
@@ -39,10 +51,10 @@ pub(crate) fn run_rins(
     cfg: &MipConfig,
     deadline: &Option<Instant>,
     parent_opts: &SolverOptions,
-) -> (Option<SolverResult>, u64) {
+) -> (Option<SolverResult>, u64, u64) {
     let remaining_secs = remaining_budget(deadline);
     if remaining_secs < RINS_MIN_REMAINING_SECS {
-        return (None, 0);
+        return (None, 0, 0);
     }
 
     let mut sub_bounds = problem.lp.bounds.clone();
@@ -60,10 +72,10 @@ pub(crate) fn run_rins(
     }
 
     if n_fixed == 0 {
-        return (None, 0);
+        return (None, 0, 0);
     }
 
-    let sub_timeout = (remaining_secs * RINS_TIME_FRACTION).min(RINS_MAX_TIME_SECS);
+    let sub_timeout = RINS_MAX_TIME_SECS;
 
     let mut sub_lp = problem.lp.clone();
     sub_lp.bounds = sub_bounds;
@@ -89,9 +101,11 @@ pub(crate) fn run_rins(
 
     let (result, sub_stats) = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
     let sub_mip_nodes = sub_stats.nodes_processed as u64;
+    let sub_mip_iters = crate::mip::effort::total_simplex_iters(&sub_stats);
     (
         super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol),
         sub_mip_nodes,
+        sub_mip_iters,
     )
 }
 
@@ -112,9 +126,20 @@ fn remaining_budget(deadline: &Option<Instant>) -> f64 {
 fn rins_sub_mip_config(cfg: &MipConfig) -> MipConfig {
     let mut sub_cfg = cfg.clone();
     sub_cfg.max_nodes = RINS_NODE_LIMIT;
+    sub_cfg.max_lp_iters = Some(super::SUB_MIP_MAX_LP_ITERS);
     sub_cfg.rins_enabled = false;
     sub_cfg.rens_enabled = false;
     sub_cfg.local_branching_enabled = false;
+    // The sub-MIP searches a neighborhood RINS already restricted sharply
+    // (variables fixed by LP/incumbent agreement); recursive tree-cut
+    // separation, symmetry-breaking, and root cut generation pay the parent
+    // search's per-node/per-root overhead again for a search space that is
+    // already small, so all three are pure overhead here (Phase 1a/1c:
+    // freed iteration budget is reallocated to the parent tree search via
+    // `mip::effort`).
+    sub_cfg.tree_cuts = false;
+    sub_cfg.symmetry = false;
+    sub_cfg.cuts = false;
     sub_cfg
 }
 
@@ -155,7 +180,7 @@ mod tests {
         let x_lp = vec![1.4, 1.6];
         let x_inc = vec![1.0, 1.0];
 
-        let (result, _sub_mip_nodes) = run_rins(
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_rins(
             &problem,
             &x_lp,
             &x_inc,
@@ -183,7 +208,7 @@ mod tests {
         let x_lp = vec![1.4, 1.6];
         let x_inc = vec![1.0, 1.0];
 
-        let (result, sub_mip_nodes) = run_rins(
+        let (result, sub_mip_nodes, _sub_mip_iters) = run_rins(
             &problem,
             &x_lp,
             &x_inc,
@@ -198,6 +223,38 @@ mod tests {
         assert!(
             sub_mip_nodes > 0,
             "an attempted sub-MIP solve must report at least one processed node; got {sub_mip_nodes}"
+        );
+    }
+
+    /// NEW (Phase 1c): an attempted RINS sub-MIP solve also reports its own
+    /// recursive `total_simplex_iters` (the unit `effort::may_run_rins` gates
+    /// on), not just its node count.
+    ///
+    /// Sentinel: a Phase 1c revert (the `run_rins` return type stripped back
+    /// to `(Option<SolverResult>, u64)`) has no way to expose this count, so
+    /// `rins_iters` would stay 0 — this test would fail.
+    #[test]
+    fn rins_reports_sub_mip_iters_processed() {
+        let problem = two_var_milp([-1.0, -1.0], 3.0);
+        let cfg = MipConfig::default();
+        let x_lp = vec![1.4, 1.6];
+        let x_inc = vec![1.0, 1.0];
+
+        let (result, _sub_mip_nodes, sub_mip_iters) = run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &None,
+            &SolverOptions::default(),
+        );
+        assert!(
+            result.is_some(),
+            "test premise: RINS must attempt a sub-MIP"
+        );
+        assert!(
+            sub_mip_iters > 0,
+            "an attempted sub-MIP solve must report at least one simplex iteration; got {sub_mip_iters}"
         );
     }
 
@@ -287,6 +344,155 @@ mod tests {
         assert!(!sub_cfg.local_branching_enabled);
     }
 
+    /// Phase 1d (P1-B): the RINS sub-MIP config carries the deterministic
+    /// `max_lp_iters` cap, not just the node limit.
+    ///
+    /// Sentinel: removing `sub_cfg.max_lp_iters = ...` from
+    /// `rins_sub_mip_config` fails this test.
+    #[test]
+    fn rins_sub_mip_sets_deterministic_lp_iters_cap() {
+        let sub_cfg = rins_sub_mip_config(&MipConfig::default());
+        assert_eq!(
+            sub_cfg.max_lp_iters,
+            Some(crate::mip::heuristics::SUB_MIP_MAX_LP_ITERS)
+        );
+    }
+
+    /// NEW (Phase 1a): the sub-MIP config disables recursive tree-cut
+    /// separation and symmetry-breaking, not just the three recursive
+    /// heuristic flags.
+    ///
+    /// Sentinel: removing either `sub_cfg.tree_cuts = false` or
+    /// `sub_cfg.symmetry = false` from `rins_sub_mip_config` fails this test.
+    #[test]
+    fn rins_sub_mip_disables_tree_cuts_and_symmetry() {
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            tree_cuts: true,
+            symmetry: true,
+            ..MipConfig::default()
+        };
+
+        let sub_cfg = rins_sub_mip_config(&cfg);
+        assert!(
+            !sub_cfg.tree_cuts,
+            "RINS sub-MIP must disable in-tree cut separation"
+        );
+        assert!(
+            !sub_cfg.symmetry,
+            "RINS sub-MIP must disable symmetry breaking"
+        );
+    }
+
+    /// NEW (Phase 1a): the disabled tree-cuts/symmetry flags actually reach
+    /// the recursive sub-MIP solve, not just the config-builder unit above.
+    ///
+    /// Sentinel: removing either flag from `rins_sub_mip_config` fails this
+    /// test via the recorded sub-MIP config (same recording hook as the
+    /// pre-existing `rins_run_path_passes_recursive_sub_mip_config`).
+    #[test]
+    fn rins_run_path_disables_tree_cuts_and_symmetry_recursively() {
+        let problem = two_var_milp([-1.0, -1.0], 3.0);
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            tree_cuts: true,
+            symmetry: true,
+            ..MipConfig::default()
+        };
+        let x_lp = vec![1.4, 1.6];
+        let x_inc = vec![1.0, 1.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &None,
+            &SolverOptions::default(),
+        );
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: RINS must call the recursive sub-MIP"
+        );
+        assert_eq!(
+            configs.len(),
+            1,
+            "RINS run path must solve exactly one sub-MIP"
+        );
+        let sub_cfg = &configs[0];
+        assert!(!sub_cfg.tree_cuts, "recursive tree cuts must be disabled");
+        assert!(
+            !sub_cfg.symmetry,
+            "recursive symmetry breaking must be disabled"
+        );
+    }
+
+    /// NEW (Phase 1c/P2-1): the sub-MIP config also disables root cut
+    /// generation (`cuts`) — `add_root_cuts` runs a full `CUT_TIME_FRACTION`
+    /// pass before the sub-MIP's own B&B even starts, which is pure overhead
+    /// against a neighborhood already restricted by RINS's variable fixing.
+    ///
+    /// Sentinel: removing `sub_cfg.cuts = false` from `rins_sub_mip_config`
+    /// fails this test.
+    #[test]
+    fn rins_sub_mip_disables_root_cuts() {
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            cuts: true,
+            ..MipConfig::default()
+        };
+        let sub_cfg = rins_sub_mip_config(&cfg);
+        assert!(
+            !sub_cfg.cuts,
+            "RINS sub-MIP must disable root cut generation"
+        );
+    }
+
+    /// NEW (Phase 1c/P2-1): the disabled `cuts` flag actually reaches the
+    /// recursive sub-MIP solve.
+    ///
+    /// Sentinel: removing `sub_cfg.cuts = false` from `rins_sub_mip_config`
+    /// fails this test via the recorded sub-MIP config.
+    #[test]
+    fn rins_run_path_disables_root_cuts_recursively() {
+        let problem = two_var_milp([-1.0, -1.0], 3.0);
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            cuts: true,
+            ..MipConfig::default()
+        };
+        let x_lp = vec![1.4, 1.6];
+        let x_inc = vec![1.0, 1.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &None,
+            &SolverOptions::default(),
+        );
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: RINS must call the recursive sub-MIP"
+        );
+        assert_eq!(
+            configs.len(),
+            1,
+            "RINS run path must solve exactly one sub-MIP"
+        );
+        assert!(
+            !configs[0].cuts,
+            "recursive root cut generation must be disabled"
+        );
+    }
+
     #[test]
     fn rins_run_path_passes_recursive_sub_mip_config() {
         let problem = two_var_milp([-1.0, -1.0], 3.0);
@@ -301,7 +507,7 @@ mod tests {
         let x_inc = vec![1.0, 1.0];
 
         super::super::clear_recorded_sub_mip_configs();
-        let (result, _sub_mip_nodes) = run_rins(
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_rins(
             &problem,
             &x_lp,
             &x_inc,
