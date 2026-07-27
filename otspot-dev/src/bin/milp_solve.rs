@@ -91,6 +91,12 @@ fn main() -> ExitCode {
         stats.local_branching_improvements
     );
     println!("tree_cut_rounds: {}", stats.tree_cut_rounds);
+    println!("lp_iters_total: {}", stats.lp_iters_total);
+    println!("strong_branch_iters: {}", stats.strong_branch_iters);
+    println!("rins_iters: {}", stats.rins_iters);
+    println!("rens_iters: {}", stats.rens_iters);
+    println!("local_branching_iters: {}", stats.local_branching_iters);
+    println!("tree_cut_iters: {}", stats.tree_cut_iters);
     println!("lp_presolve_us: {}", stats.lp_presolve_us_total);
     println!("lp_solve_us: {}", stats.lp_solve_us_total);
     println!("lp_postsolve_us: {}", stats.lp_postsolve_us_total);
@@ -160,6 +166,22 @@ fn main() -> ExitCode {
     println!(
         "attribution_covered_pct_wall: {:.2}",
         pct_of_wall(attribution_covered_us, wall_us)
+    );
+    // Root-inclusive variant (P2-4): folds in root-level fp_us/root_cut_us,
+    // which the loop-only attribution_covered_us above omits by design (it
+    // only covers the B&B loop itself). See
+    // tests/mip_bnb_attribution.rs's attribution_covers_loop_wall_clock vs.
+    // attribution_covers_wall_clock_including_root_overhead for why both
+    // views matter: once heuristics/separation are throttled the loop can
+    // become fast enough that root-level presolve/FP/cut time is no longer
+    // a negligible fraction of total wall clock.
+    let attribution_covered_us_root_inclusive = attribution_covered_us
+        .saturating_add(stats.fp_us)
+        .saturating_add(stats.root_cut_us);
+    println!("attribution_covered_us_root_inclusive: {attribution_covered_us_root_inclusive}");
+    println!(
+        "attribution_covered_pct_wall_root_inclusive: {:.2}",
+        pct_of_wall(attribution_covered_us_root_inclusive, wall_us)
     );
     if profile {
         println!("lp_solve_us_root: {}", stats.lp_solve_us_root);
@@ -252,19 +274,25 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String>
             "--timeout" => {
                 i += 1;
                 let value = args.get(i).ok_or("error: --timeout requires a value")?;
-                timeout_secs = value.parse().expect("--timeout value");
+                timeout_secs = value
+                    .parse()
+                    .map_err(|_| format!("error: invalid --timeout value: {value}"))?;
             }
             "--eps" => {
                 i += 1;
                 let value = args.get(i).ok_or("error: --eps requires a value")?;
-                eps = value.parse().expect("--eps value");
+                eps = value
+                    .parse()
+                    .map_err(|_| format!("error: invalid --eps value: {value}"))?;
             }
             "--cuts" => cuts = true,
             "--no-cuts" => cuts = false,
             "--cut-rounds" => {
                 i += 1;
                 let value = args.get(i).ok_or("error: --cut-rounds requires a value")?;
-                cut_rounds = value.parse().expect("--cut-rounds value");
+                cut_rounds = value
+                    .parse()
+                    .map_err(|_| format!("error: invalid --cut-rounds value: {value}"))?;
                 cuts = true;
             }
             "--symmetry" => symmetry = Some(true),
@@ -276,7 +304,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String>
             "--max-nodes" => {
                 i += 1;
                 let value = args.get(i).ok_or("error: --max-nodes requires a value")?;
-                max_nodes = Some(value.parse().expect("--max-nodes value"));
+                max_nodes = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("error: invalid --max-nodes value: {value}"))?,
+                );
             }
             other => path = Some(other.to_string()),
         }
@@ -490,5 +522,28 @@ mod tests {
         .unwrap();
         assert_eq!(cli.max_nodes, Some(42));
         assert_eq!(mip_config_from_cli(&cli).max_nodes, 42);
+    }
+
+    /// NEW (P3-6): a non-numeric flag value returns a `Result::Err` (a
+    /// process exit code from `main`'s `Err(message) => ... ExitCode::from(2)`
+    /// path), not a panic.
+    ///
+    /// Sentinel: reverting any of these `.map_err(...)?` conversions back to
+    /// `.expect(...)` makes `parse_args` panic instead of returning `Err`,
+    /// failing this test (a panicked test shows as FAILED, not as an `Err`
+    /// result to match against).
+    #[test]
+    fn invalid_numeric_flag_values_return_err_not_panic() {
+        for flag in ["--timeout", "--eps", "--cut-rounds", "--max-nodes"] {
+            let result = parse_args([
+                "tiny.mps".to_string(),
+                flag.to_string(),
+                "not-a-number".to_string(),
+            ]);
+            assert!(
+                result.is_err(),
+                "{flag} with a non-numeric value must return Err, not panic; got {result:?}"
+            );
+        }
     }
 }

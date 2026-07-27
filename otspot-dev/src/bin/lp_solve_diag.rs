@@ -26,11 +26,31 @@ fn main() -> ExitCode {
         match args[i].as_str() {
             "--timeout" => {
                 i += 1;
-                timeout_secs = args[i].parse().expect("--timeout value");
+                let Some(value) = args.get(i) else {
+                    eprintln!("error: --timeout requires a value");
+                    return ExitCode::from(2);
+                };
+                match value.parse() {
+                    Ok(v) => timeout_secs = v,
+                    Err(_) => {
+                        eprintln!("error: invalid --timeout value: {value}");
+                        return ExitCode::from(2);
+                    }
+                }
             }
             "--eps" => {
                 i += 1;
-                eps = args[i].parse().expect("--eps value");
+                let Some(value) = args.get(i) else {
+                    eprintln!("error: --eps requires a value");
+                    return ExitCode::from(2);
+                };
+                match value.parse() {
+                    Ok(v) => eps = v,
+                    Err(_) => {
+                        eprintln!("error: invalid --eps value: {value}");
+                        return ExitCode::from(2);
+                    }
+                }
             }
             other => path = Some(other.to_string()),
         }

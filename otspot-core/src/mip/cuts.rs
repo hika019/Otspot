@@ -1094,6 +1094,19 @@ fn tree_cut_node_selected(depth: usize, node_index: usize) -> bool {
 /// `node_lp` is the original relaxation with node bounds applied. The loop
 /// mirrors root [`add_root_cuts`] while staying node-local: re-solve → generate
 /// → pool-filter → append (Ge) → re-solve, stopping when the bound stalls.
+///
+/// `max_iters` bounds the simplex iterations this attempt may spend (see
+/// `effort::separation_iter_budget`), checked at round boundaries: the
+/// underlying LP solves have no intra-solve iteration limit (only a
+/// wall-clock deadline), so one abnormally expensive single solve within a
+/// round cannot be interrupted, but the round loop stops starting *further*
+/// rounds once the running total reaches the cap. Returns the total simplex
+/// iterations actually spent across all rounds alongside the optional
+/// tightened result, so the caller can charge the gate even on a dry
+/// attempt. The `bool` is whether this call passed the node-selection
+/// interval and actually attempted separation (P3-B: kept independent of the
+/// iteration count, which can legitimately be 0 for a real attempt whose LP
+/// solves all happen to need zero simplex iterations).
 pub(crate) fn separate_tree_cuts(
     node_lp: &LpProblem,
     integer_mask: &[bool],
@@ -1101,9 +1114,10 @@ pub(crate) fn separate_tree_cuts(
     node_res: &SolverResult,
     depth: usize,
     node_index: usize,
-) -> Option<SolverResult> {
+    max_iters: u64,
+) -> (Option<SolverResult>, u64, bool) {
     if !tree_cut_node_selected(depth, node_index) {
-        return None;
+        return (None, 0, false);
     }
     let base_obj = node_res.objective;
     // Fresh per-node pool: cuts are valid only in this subtree (see soundness note).
@@ -1111,11 +1125,16 @@ pub(crate) fn separate_tree_cuts(
     let mut committed = node_lp.clone();
     let mut accepted: Option<SolverResult> = None;
     let mut prev_obj = base_obj;
+    let mut iters_spent: u64 = 0;
 
     for round_idx in 0..TREE_CUT_MAX_ROUNDS {
+        if iters_spent >= max_iters {
+            break;
+        }
         // Re-solve through the cold primal cut path to recover a *full* size-`m`
         // simplex basis (the node's warm-start basis is a compact form).
         let cut_res = solve_cut_lp(&committed, options, options.deadline);
+        iters_spent = iters_spent.saturating_add(cut_res.iterations as u64);
         if cut_res.status != SolveStatus::Optimal {
             break;
         }
@@ -1158,6 +1177,7 @@ pub(crate) fn separate_tree_cuts(
             .collect();
         let candidate = append_ge_rows_with_integer_mask(&committed, &rows, integer_mask);
         let check = solve_validate(&candidate, options, options.deadline);
+        iters_spent = iters_spent.saturating_add(check.iterations as u64);
         if check.status != SolveStatus::Optimal {
             break;
         }
@@ -1176,13 +1196,15 @@ pub(crate) fn separate_tree_cuts(
     // Accept only a meaningful tightening over the node's existing bound. The
     // returned result carries no warm-start basis (its augmented layout would not
     // match child node solves, which use the original constraint structure).
-    let mut res = accepted?;
+    let Some(mut res) = accepted else {
+        return (None, iters_spent, true);
+    };
     let scale = 1.0_f64.max(base_obj.abs());
     if res.objective <= base_obj + MIN_TREE_CUT_GAIN_REL * scale {
-        return None;
+        return (None, iters_spent, true);
     }
     res.warm_start_basis = None;
-    Some(res)
+    (Some(res), iters_spent, true)
 }
 
 #[cfg(test)]

@@ -32,10 +32,20 @@ pub(crate) const LOCAL_BRANCHING_K: usize = 20;
 /// Node limit for the local-branching sub-MIP.
 const LOCAL_BRANCHING_NODE_LIMIT: usize = 2_000;
 
-/// Fraction of remaining wall-clock budget given to the sub-MIP.
-const LOCAL_BRANCHING_TIME_FRACTION: f64 = 0.10;
-
-/// Absolute upper bound on sub-MIP wall time (seconds).
+/// Fixed sub-MIP wall-clock timeout (seconds).
+///
+/// Phase 1c/1d (P1-A): previously scaled as `(remaining_secs * 0.10).min(10.0)`;
+/// see `rins::RINS_MAX_TIME_SECS` for why this was changed to a fixed value
+/// (a wall-clock-scaled sub-MIP budget makes the returned incumbent, and
+/// hence the parent search's trajectory, run-timing dependent). Phase 1d
+/// (P1-B): this cap is exactly the one Phase 1d's determinism re-check found
+/// still binding in practice for `khb05250` (`local_branching_us` pegged at
+/// essentially exactly `10.0s` on every repeat, with the parent search's
+/// `nodes_processed` then varying across repeats due to timing jitter) —
+/// `sub_cfg.max_lp_iters` (see `heuristics::SUB_MIP_MAX_LP_ITERS`) is now the
+/// primary, deterministic stop; this wall-clock cap is expected to stay
+/// dormant for the wide majority of calls and fire only as a final safety
+/// valve against pathologically slow per-iteration LP solves.
 const LOCAL_BRANCHING_MAX_TIME_SECS: f64 = 10.0;
 
 /// Minimum remaining budget below which local branching is skipped.
@@ -47,16 +57,17 @@ const LOCAL_BRANCHING_MIN_REMAINING_SECS: f64 = 1.0;
 /// constants. Returns a feasible sub-MIP `SolverResult` (which may or may not
 /// improve the incumbent; the caller's incumbent test decides), or `None` when
 /// there are no binary variables, the deadline has passed, or the sub-MIP
-/// produced no usable point — together with the sub-MIP's `nodes_processed`,
-/// reported whenever a sub-MIP solve was actually attempted (0 when skipped
-/// before that point).
+/// produced no usable point — together with the sub-MIP's `nodes_processed`
+/// and its own recursive `total_simplex_iters` (see `effort`), both reported
+/// whenever a sub-MIP solve was actually attempted (0 when skipped before
+/// that point).
 pub(crate) fn run_local_branching(
     problem: &MilpProblem,
     x_inc: &[f64],
     cfg: &MipConfig,
     deadline: &Option<Instant>,
     parent_opts: &SolverOptions,
-) -> (Option<SolverResult>, u64) {
+) -> (Option<SolverResult>, u64, u64) {
     local_branching_with_k(
         problem,
         x_inc,
@@ -77,10 +88,10 @@ fn local_branching_with_k(
     cfg: &MipConfig,
     deadline: &Option<Instant>,
     parent_opts: &SolverOptions,
-) -> (Option<SolverResult>, u64) {
+) -> (Option<SolverResult>, u64, u64) {
     let remaining_secs = remaining_budget(deadline);
     if remaining_secs < LOCAL_BRANCHING_MIN_REMAINING_SECS {
-        return (None, 0);
+        return (None, 0, 0);
     }
 
     // Binary variables = integer variables with a [0,1] box.
@@ -96,7 +107,7 @@ fn local_branching_with_k(
         })
         .collect();
     if binaries.is_empty() {
-        return (None, 0);
+        return (None, 0, 0);
     }
 
     let sub_lp = augment_with_local_branching_cut(&problem.lp, &binaries, x_inc, k);
@@ -106,22 +117,23 @@ fn local_branching_with_k(
     let sub_problem = MilpProblem::new(sub_lp, problem.integer_vars.clone())
         .expect("row-only augmentation preserves num_vars; integer_vars already validated");
 
-    let sub_timeout =
-        (remaining_secs * LOCAL_BRANCHING_TIME_FRACTION).min(LOCAL_BRANCHING_MAX_TIME_SECS);
+    let sub_timeout = LOCAL_BRANCHING_MAX_TIME_SECS;
 
     let mut sub_cfg = cfg.clone();
     sub_cfg.max_nodes = LOCAL_BRANCHING_NODE_LIMIT;
+    sub_cfg.max_lp_iters = Some(super::SUB_MIP_MAX_LP_ITERS);
     sub_cfg.rins_enabled = false;
     sub_cfg.rens_enabled = false;
     sub_cfg.local_branching_enabled = false;
     // The sub-MIP searches a Hamming-ball neighborhood already restricted by
-    // the local-branching cut; recursive tree-cut separation and
-    // symmetry-breaking pay the parent search's per-node overhead again for
-    // no corresponding tree-size benefit here (Phase 1a: freed time is
-    // reallocated to the parent tree search via `MipEffortBudget`, see
-    // `mip/effort.rs`).
+    // the local-branching cut; recursive tree-cut separation, symmetry-
+    // breaking, and root cut generation pay the parent search's per-node/
+    // per-root overhead again for no corresponding benefit here (Phase
+    // 1a/1c: freed iteration budget is reallocated to the parent tree
+    // search via `mip::effort`).
     sub_cfg.tree_cuts = false;
     sub_cfg.symmetry = false;
+    sub_cfg.cuts = false;
 
     let mut sub_opts = parent_opts.clone();
     sub_opts.timeout_secs = Some(sub_timeout);
@@ -137,9 +149,11 @@ fn local_branching_with_k(
 
     let (result, sub_stats) = super::solve_sub_milp(&sub_problem, &sub_opts, &sub_cfg);
     let sub_mip_nodes = sub_stats.nodes_processed as u64;
+    let sub_mip_iters = crate::mip::effort::total_simplex_iters(&sub_stats);
     (
         super::usable_sub_mip_result_for_original(problem, result, cfg.integer_feas_tol),
         sub_mip_nodes,
+        sub_mip_iters,
     )
 }
 
@@ -271,7 +285,7 @@ mod tests {
         let x_inc = vec![1.0, 0.0, 0.0];
         let inc_obj = -1.0;
 
-        let (res, _sub_mip_nodes) =
+        let (res, _sub_mip_nodes, _sub_mip_iters) =
             run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
         let res = res.expect("local branching must return a feasible neighborhood solution");
         assert!(
@@ -299,7 +313,7 @@ mod tests {
         let cfg = MipConfig::default();
         let x_inc = vec![1.0, 0.0, 0.0];
 
-        let (res, sub_mip_nodes) =
+        let (res, sub_mip_nodes, _sub_mip_iters) =
             run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
         assert!(
             res.is_some(),
@@ -308,6 +322,32 @@ mod tests {
         assert!(
             sub_mip_nodes > 0,
             "an attempted sub-MIP solve must report at least one processed node; got {sub_mip_nodes}"
+        );
+    }
+
+    /// NEW (Phase 1c): an attempted local-branching sub-MIP solve also
+    /// reports its own recursive `total_simplex_iters` (the unit
+    /// `effort::may_run_local_branching` gates on), not just its node count.
+    ///
+    /// Sentinel: a Phase 1c revert (the `run_local_branching` return type
+    /// stripped back to `(Option<SolverResult>, u64)`) has no way to expose
+    /// this count, so `local_branching_iters` would stay 0 — this test would
+    /// fail.
+    #[test]
+    fn local_branching_reports_sub_mip_iters_processed() {
+        let problem = binary_knapsack(vec![-1.0, -1.0, -1.0], 2.0);
+        let cfg = MipConfig::default();
+        let x_inc = vec![1.0, 0.0, 0.0];
+
+        let (res, _sub_mip_nodes, sub_mip_iters) =
+            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        assert!(
+            res.is_some(),
+            "test premise: local branching must attempt a sub-MIP"
+        );
+        assert!(
+            sub_mip_iters > 0,
+            "an attempted sub-MIP solve must report at least one simplex iteration; got {sub_mip_iters}"
         );
     }
 
@@ -323,7 +363,7 @@ mod tests {
             ..SolverResult::default()
         });
 
-        let (result, _sub_mip_nodes) =
+        let (result, _sub_mip_nodes, _sub_mip_iters) =
             run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
         let result =
             result.expect("local branching must keep feasible timeout incumbent from sub-MIP");
@@ -345,7 +385,7 @@ mod tests {
         let cfg = MipConfig::default();
         let x_inc = vec![0.0, 0.0, 0.0];
 
-        let (res, _sub_mip_nodes) =
+        let (res, _sub_mip_nodes, _sub_mip_iters) =
             local_branching_with_k(&problem, &x_inc, 1, &cfg, &None, &SolverOptions::default());
         let res = res.expect("k=1 neighborhood is feasible (contains the incumbent)");
         assert!(
@@ -363,7 +403,7 @@ mod tests {
         let cfg = MipConfig::default();
         let x_inc = vec![1.0, 0.0, 0.0];
 
-        let (res, _sub_mip_nodes) =
+        let (res, _sub_mip_nodes, _sub_mip_iters) =
             local_branching_with_k(&problem, &x_inc, 0, &cfg, &None, &SolverOptions::default());
         let res = res.expect("k=0 neighborhood still contains the incumbent");
         assert!(
@@ -414,7 +454,7 @@ mod tests {
         let x_inc = vec![1.0, 0.0, 0.0];
 
         super::super::clear_recorded_sub_mip_configs();
-        let (result, _sub_mip_nodes) =
+        let (result, _sub_mip_nodes, _sub_mip_iters) =
             run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
         let configs = super::super::take_recorded_sub_mip_configs();
 
@@ -435,6 +475,41 @@ mod tests {
         );
     }
 
+    /// NEW (Phase 1c/P2-1): the sub-MIP config also disables root cut
+    /// generation, reaching the recursive sub-MIP solve.
+    ///
+    /// Sentinel: removing `sub_cfg.cuts = false` from `local_branching_with_k`
+    /// fails this test via the recorded sub-MIP config.
+    #[test]
+    fn local_branching_run_path_disables_root_cuts_recursively() {
+        let problem = binary_knapsack(vec![-1.0, -1.0, -1.0], 2.0);
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            cuts: true,
+            ..MipConfig::default()
+        };
+        let x_inc = vec![1.0, 0.0, 0.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes, _sub_mip_iters) =
+            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: local branching must call the recursive sub-MIP"
+        );
+        assert_eq!(
+            configs.len(),
+            1,
+            "local branching run path must solve exactly one sub-MIP"
+        );
+        assert!(
+            !configs[0].cuts,
+            "recursive root cut generation must be disabled"
+        );
+    }
+
     #[test]
     fn local_branching_run_path_passes_recursive_sub_mip_config() {
         let problem = binary_knapsack(vec![-1.0, -1.0, -1.0], 2.0);
@@ -448,7 +523,7 @@ mod tests {
         let x_inc = vec![1.0, 0.0, 0.0];
 
         super::super::clear_recorded_sub_mip_configs();
-        let (result, _sub_mip_nodes) =
+        let (result, _sub_mip_nodes, _sub_mip_iters) =
             run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
         let configs = super::super::take_recorded_sub_mip_configs();
 
@@ -468,6 +543,33 @@ mod tests {
         assert!(
             !sub_cfg.local_branching_enabled,
             "recursive local branching must be disabled"
+        );
+    }
+
+    /// Phase 1d (P1-B): the local-branching sub-MIP config carries the
+    /// deterministic `max_lp_iters` cap, not just the node limit.
+    ///
+    /// Sentinel: removing `sub_cfg.max_lp_iters = ...` from
+    /// `local_branching_with_k`'s sub-MIP config construction fails this test.
+    #[test]
+    fn local_branching_sub_mip_sets_deterministic_lp_iters_cap() {
+        let problem = binary_knapsack(vec![-1.0, -1.0, -1.0], 2.0);
+        let cfg = MipConfig::default();
+        let x_inc = vec![1.0, 0.0, 0.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes, _sub_mip_iters) =
+            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: local branching must call the recursive sub-MIP"
+        );
+        assert_eq!(configs.len(), 1);
+        assert_eq!(
+            configs[0].max_lp_iters,
+            Some(crate::mip::heuristics::SUB_MIP_MAX_LP_ITERS)
         );
     }
 

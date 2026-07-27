@@ -1586,19 +1586,145 @@ fn separate_tree_cuts_drops_augmented_warm_start_basis() {
     );
 
     let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
-    let tightened = separate_tree_cuts(
+    let (tightened, _iters, _attempted) = separate_tree_cuts(
         &milp.lp,
         &mask,
         &opts,
         &node_res,
         TREE_CUT_DEPTH_INTERVAL,
         1,
-    )
-    .expect("sentinel node must accept at least one tree-cut tightening");
+        u64::MAX,
+    );
+    let tightened = tightened.expect("sentinel node must accept at least one tree-cut tightening");
     assert!(tightened.objective > node_res.objective);
     assert!(
         tightened.warm_start_basis.is_none(),
         "tree-cut result must not return a basis from the augmented node-local LP"
+    );
+}
+
+/// SENTINEL (Phase 1c/P1-2): `max_iters == 0` must run zero rounds — the
+/// round-boundary budget check happens BEFORE the first round's LP solve,
+/// not only between later rounds.
+///
+/// Sentinel: moving the `if iters_spent >= max_iters { break; }` check to
+/// only run after round 0 always executes would make this FAIL (`tightened`
+/// would be `Some(..)` and/or `iters > 0`).
+#[test]
+fn separate_tree_cuts_respects_zero_iter_budget() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+    let (tightened, iters, _attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        0,
+    );
+    assert!(
+        tightened.is_none(),
+        "zero iteration budget must run no rounds"
+    );
+    assert_eq!(iters, 0, "zero iteration budget must spend zero iterations");
+}
+
+/// NEW (Phase 1d/P3-B): a real attempt (passed the node-selection interval)
+/// that happens to spend zero iterations (e.g. a zero-iteration budget, as
+/// in `separate_tree_cuts_respects_zero_iter_budget` above) still reports
+/// `attempted = true`, distinct from a node-selection-skipped call — the
+/// third return element is kept independent of the iteration count.
+///
+/// Sentinel: computing `attempted` as `iters_spent > 0` instead of an
+/// explicit flag set once the node-selection check passes makes this FAIL.
+#[test]
+fn separate_tree_cuts_reports_attempted_independent_of_zero_iterations() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+    let (_tightened, iters, attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        0,
+    );
+    assert_eq!(
+        iters, 0,
+        "test premise: zero iteration budget must spend zero iterations"
+    );
+    assert!(
+        attempted,
+        "a real attempt (node-selection interval passed) that happens to \
+         spend zero iterations must still report `attempted = true`"
+    );
+}
+
+/// SENTINEL (Phase 1c/P1-2): a small but nonzero iteration budget caps the
+/// simplex iterations actually spent below what an unrestricted call spends
+/// on the same node (which needs multiple rounds to reach its acceptance
+/// criterion — see `separate_tree_cuts_drops_augmented_warm_start_basis`).
+///
+/// Sentinel: removing the round-boundary `max_iters` check makes the
+/// "capped" call spend the SAME iterations as the unrestricted call, failing
+/// the `<` assertion.
+#[test]
+fn separate_tree_cuts_caps_iterations_at_small_budget() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+
+    let (_, unrestricted_iters, _attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        u64::MAX,
+    );
+    assert!(
+        unrestricted_iters > 0,
+        "test premise: the unrestricted attempt must spend some iterations"
+    );
+
+    // A 1-iteration budget is below what even a single round's cut LP solve
+    // needs on this instance, so the capped attempt must stop after fewer
+    // rounds and spend strictly fewer iterations than the unrestricted one.
+    let (_, capped_iters, _attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        1,
+    );
+    assert!(
+        capped_iters < unrestricted_iters,
+        "a 1-iteration budget must spend fewer iterations than an unrestricted attempt: \
+         capped={capped_iters} unrestricted={unrestricted_iters}"
     );
 }
 
