@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3019 testcases, 26 ignored
+# totals: 3027 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -189,6 +189,7 @@ otspot-core	lp::tests::bounded_nonzero_lb_objective_correct	active
 otspot-core	lp::tests::invalid_options_rejected_at_lp_entry	active
 otspot-core	lp::tests::le_only_nonzero_lb_objective_correct	active
 otspot-core	lp::tests::lp_empty_box_lb_gt_ub_is_infeasible	active
+otspot-core	lp::tests::max_iters_is_honored_by_the_real_solver_end_to_end	active
 otspot-core	lp::tests::test_lp_timeout_incumbent_includes_obj_offset	active
 otspot-core	mip::branch::tests::branch_bounds_can_produce_empty_box_for_pruning	active
 otspot-core	mip::branch::tests::branch_bounds_floor_and_ceil	active
@@ -506,6 +507,7 @@ otspot-core	mip::tests::separation_iter_share_is_enforced	active
 otspot-core	mip::tests::solve_milp_rejects_out_of_range_integer_var	active
 otspot-core	mip::tests::solve_miqp_rejects_indefinite_n1001	active
 otspot-core	mip::tests::solve_miqp_rejects_out_of_range_integer_var	active
+otspot-core	mip::tests::solve_node_relaxation_passes_remaining_budget_as_per_lp_iter_cap	active
 otspot-core	mip::tests::stats_bounds_bytes_scales_with_num_vars	active
 otspot-core	mip::tests::stats_timing_infeasible_ms_from_lp	active
 otspot-core	mip::tests::stats_timing_populated_for_milp_bt_then_branch	active
@@ -1361,6 +1363,7 @@ otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_tie_prefers_larger_p
 otspot-core	simplex::dual_advanced::bounded_core::tests::bfrt_flip_count_positive_when_residual_spans_breakpoints	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::bland_entering_returns_smallest_improving_index	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::bland_leaving_breaks_ties_by_smallest_index	active
+otspot-core	simplex::dual_advanced::bounded_core::tests::bland_leaving_tie_band_excludes_non_exact_near_ties	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::cold_dual_le_only_terminates_immediately	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::cold_state_from_bsf_has_consistent_dimensions	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::dse_expired_deadline_returns_timeout_before_gamma_init	active
@@ -1373,6 +1376,11 @@ otspot-core	simplex::dual_advanced::bounded_core::tests::flip_apply_preserves_ba
 otspot-core	simplex::dual_advanced::bounded_core::tests::flip_apply_preserves_basis_rhs_invariant_noop_proof	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::force_bland_reaches_same_optimum_as_devex	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::inject_lb_violation_makes_progress_boxed	active
+otspot-core	simplex::dual_advanced::bounded_core::tests::obj_plateau_bail_advances_by_check_interval_per_sampled_call	active
+otspot-core	simplex::dual_advanced::bounded_core::tests::obj_plateau_bail_fires_exactly_at_trigger_with_frozen_objective	active
+otspot-core	simplex::dual_advanced::bounded_core::tests::obj_plateau_bail_ignores_sub_threshold_noise_and_stops	active
+otspot-core	simplex::dual_advanced::bounded_core::tests::obj_plateau_bail_never_fires_on_genuine_progress	active
+otspot-core	simplex::dual_advanced::bounded_core::tests::obj_plateau_bail_never_fires_when_each_step_is_just_above_noise_floor	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::partial_pricing_aug_phase1_matches_full	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::partial_pricing_false_optimal_requires_full_sweep_noop_proof	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::partial_pricing_phase2_matches_full_and_preserves_flips	active
