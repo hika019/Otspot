@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3027 testcases, 26 ignored
+# totals: 3026 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -662,12 +662,11 @@ otspot-core	presolve::scaling::tests::test_ruiz_scale_identity	active
 otspot-core	presolve::scaling::tests::test_ruiz_scale_unbalanced	active
 otspot-core	presolve::transforms::driver::failure_tests::invalid_rebuild_rolls_back_instead_of_substituting_zero_matrix	active
 otspot-core	presolve::transforms::driver::failure_tests::invalid_reduced_model_rolls_back_without_leaking_postsolve_state	active
-otspot-core	presolve::transforms::driver::per_step_control_tests::full_pass_duration_is_comfortably_above_the_test_deadline	active
+otspot-core	presolve::transforms::driver::per_step_control_tests::cancel_signal_stops_pass_before_all_steps_run_via_run_step	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::no_interrupt_runs_all_steps_of_one_pass	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::pass_limit_hit_true_when_nonzero_budget_exhausted	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::presolve_max_pass_0_disables_the_iterative_loop	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::presolve_max_pass_1_stops_after_first_pass	active
-otspot-core	presolve::transforms::driver::per_step_control_tests::real_deadline_stops_pass_before_all_steps_run_via_run_step	active
 otspot-core	presolve::transforms::tests::presolve_doubleton_dual_recovery_eq_le	active
 otspot-core	presolve::transforms::tests::presolve_doubleton_eq_basic	active
 otspot-core	presolve::transforms::tests::presolve_doubleton_eq_infeasible	active
