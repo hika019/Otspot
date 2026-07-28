@@ -143,21 +143,49 @@ pub(super) fn select_leaving_bounded(
     }
 }
 
-/// Practical Bland leaving: minimum-ratio within a `PIVOT_TOL` tolerance band,
-/// ties broken by smallest basic-variable index.
+/// Relative tolerance for the Bland leaving-rule tie test.
+///
+/// Textbook Bland's-rule finite-termination proofs require selecting, among
+/// rows achieving the *exact* minimum ratio, the smallest basic-variable
+/// index — and the entering rule (`bland_entering`) to pick the exact
+/// smallest-index column with any nonzero improving reduced cost. Neither
+/// precondition holds exactly here: `bland_entering` accepts a column once
+/// its violation exceeds `floor` (`PIVOT_TOL`, not zero), and this leaving
+/// rule admits a *band* (`min_ratio + tie_band`, not exact equality) so two
+/// independently-perturbed rows that are mathematically tied but not
+/// bit-identical (LU roundoff) both count. So this tightened band is **not**
+/// a restored formal finite-termination guarantee — it is a large reduction
+/// in the false-tie window relative to the former `PIVOT_TOL`-sized absolute
+/// band, empirically confirmed to eliminate the specific cycle observed on
+/// pk1 (MIPLIB): one B&B node LP revisited 592 distinct bases for
+/// ~5,000,000 consecutive 100%-degenerate pivots in bland mode before this
+/// fix. The actual backstop against any *residual* cycle this band doesn't
+/// prevent is [`super::primal::obj_plateau_should_bail`]'s objective-plateau bail,
+/// which needs no such proof — it only needs to detect non-improvement.
+///
+/// `1e-9` relative is ~4 orders of magnitude above `f64::EPSILON` (headroom
+/// for the roundoff case above) and ~4 orders of magnitude *below*
+/// `PIVOT_TOL` (1e-8 absolute — sized for rejecting near-zero pivot
+/// *elements*, a different quantity, and far too loose for a ratio-tie test).
+const BLAND_TIE_REL_TOL: f64 = 1e-9;
+
+/// Practical Bland leaving: minimum-ratio within [`BLAND_TIE_REL_TOL`] of the
+/// exact minimum, ties broken by smallest basic-variable index.
 ///
 /// Used by `primal_simplex_aug` once a degenerate stall triggers anti-cycling.
 /// Unlike `select_leaving_bounded` (largest-pivot Harris, chosen for LU
-/// conditioning), this selects the smallest-basis-index row among those whose
-/// ratio lies in `[min_ratio, min_ratio + PIVOT_TOL]`. Paired with Bland
-/// entering (smallest improving column index) it breaks degenerate cycling in
-/// practice.
+/// conditioning), this selects the smallest-basis-index row among those tied
+/// for `min_ratio`. Paired with Bland entering (smallest improving column
+/// index) this substantially narrows the cycling window Bland's rule is
+/// meant to close — see [`BLAND_TIE_REL_TOL`] for why it is *not* a restored
+/// formal guarantee, and [`super::primal::obj_plateau_should_bail`] for the backstop
+/// that does not depend on one.
 ///
-/// The `PIVOT_TOL` band deviates from strict Bland: exact Bland finiteness
-/// requires the strict minimum ratio; the band can admit additional candidates
-/// beyond that strict minimum, so the theoretical finiteness guarantee is
-/// weakened in proportion to `PIVOT_TOL`. Conditioning is sacrificed
-/// deliberately; Bland mode is a transient escape, not the steady-state pricing.
+/// The step actually taken is always the exact `min_ratio`, never the chosen
+/// row's own `true_ratio`: within the (tiny) tie band a non-selected row's
+/// ratio can differ from `min_ratio` by up to the tolerance, and stepping to
+/// a tied-but-not-minimal ratio would leave the true minimizer's row slightly
+/// primal-infeasible.
 pub(super) fn select_leaving_bland_bounded(
     alpha: &[f64],
     dir: f64,
@@ -183,18 +211,21 @@ pub(super) fn select_leaving_bland_bounded(
     if ub_q.is_finite() && ub_q < min_ratio {
         return BoundedLeave::Flip;
     }
-    if ub_q.is_finite() {
-        min_ratio = min_ratio.min(ub_q);
-    }
+    // No `min_ratio = min_ratio.min(ub_q)` here (P3-1): reaching this point
+    // means NOT(ub_q.is_finite() && ub_q < min_ratio), i.e. either `ub_q` is
+    // infinite (the `.min` would be skipped anyway) or `ub_q >= min_ratio`
+    // (the `.min` would be a no-op) — the entering variable's own bound can
+    // never tighten `min_ratio` once the Flip check above has run.
     if !min_ratio.is_finite() {
         return BoundedLeave::Unbounded;
     }
 
-    // Among rows achieving the minimum ratio (within PIVOT_TOL), Bland selects
-    // the smallest basic-variable index — never the largest pivot.
+    // Among rows achieving the exact minimum ratio (within BLAND_TIE_REL_TOL,
+    // absorbing floating-point noise only), Bland selects the smallest
+    // basic-variable index — never the largest pivot.
+    let tie_band = min_ratio.abs().max(1.0) * BLAND_TIE_REL_TOL;
     let mut leaving: Option<usize> = None;
     let mut leaving_at_ub = false;
-    let mut chosen_step = 0.0f64;
     for i in 0..m {
         let eff = alpha[i] * dir;
         let xi = x_b[i];
@@ -206,17 +237,15 @@ pub(super) fn select_leaving_bland_bounded(
         } else {
             continue;
         };
-        if true_ratio <= min_ratio + PIVOT_TOL {
+        if true_ratio <= min_ratio + tie_band {
             match leaving {
                 None => {
                     leaving = Some(i);
                     leaving_at_ub = at_ub;
-                    chosen_step = true_ratio.max(0.0);
                 }
                 Some(prev) if basis[i] < basis[prev] => {
                     leaving = Some(i);
                     leaving_at_ub = at_ub;
-                    chosen_step = true_ratio.max(0.0);
                 }
                 _ => {}
             }
@@ -227,9 +256,21 @@ pub(super) fn select_leaving_bland_bounded(
         Some(row) => BoundedLeave::Pivot {
             row,
             at_ub: leaving_at_ub,
-            step: chosen_step,
+            step: min_ratio.max(0.0),
         },
-        None => BoundedLeave::Unbounded,
+        // P3-1: unreachable, not a defensive fallback. `min_ratio` is finite
+        // here (checked above) and was computed as the minimum of the exact
+        // same per-row formula this second pass recomputes over the exact
+        // same (alpha/x_b/basis/ubs are unchanged between passes) inputs, so
+        // the row that achieved it in pass 1 satisfies `true_ratio <=
+        // min_ratio + tie_band` bit-for-bit in pass 2 — `leaving` is always
+        // `Some`. A future change that could make this fire would be a
+        // correctness bug, not a legitimate Unbounded case; panicking makes
+        // that loud instead of silently reporting an unbounded ray.
+        None => unreachable!(
+            "min_ratio is finite, so its achieving row must be found again \
+             in this identical second pass"
+        ),
     }
 }
 

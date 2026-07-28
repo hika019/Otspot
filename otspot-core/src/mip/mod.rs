@@ -957,9 +957,20 @@ fn dispatch_relaxation_status(
 /// folds the timing/scale/fallback deltas into `stats` via
 /// `accumulate_node_stats`. Returns the relaxation result and the per-node
 /// `SolverOptions` used (needed again by tree-cut separation).
+///
+/// When `cfg.max_lp_iters` is set (RINS/RENS/local-branching sub-MIPs; `None`
+/// for the top-level search), this node's `SolverOptions::max_iters` is set
+/// to the *remaining* share of that budget (`limit - stats.lp_iters_total` so
+/// far). Without this, `check_stop_conditions`'s `max_lp_iters` gate — checked
+/// once per popped node, before this call — cannot stop a single node whose
+/// own relaxation blows past the entire remaining budget by itself; the
+/// per-solve cap here makes that node's own simplex loop enforce it instead
+/// (`dual_advanced::bounded_core`'s bland-mode loops honor `max_iters`
+/// alongside `deadline`, returning `Stalled` rather than grinding on).
 fn solve_node_relaxation<R: Relaxation>(
     problem: &R,
     shared: &SolverOptions,
+    cfg: &MipConfig,
     solve_bounds: &[(f64, f64)],
     node: &MipNode,
     root_solved: &mut bool,
@@ -974,6 +985,9 @@ fn solve_node_relaxation<R: Relaxation>(
     }
     if let Some(ref ws) = node.warm_start {
         node_options.warm_start = Some(ws.clone());
+    }
+    if let Some(limit) = cfg.max_lp_iters {
+        node_options.max_iters = Some(limit.saturating_sub(stats.lp_iters_total));
     }
     let res = if node_options.use_ruiz_scaling {
         problem.solve(solve_bounds, &node_options)
@@ -1226,6 +1240,7 @@ fn solve_mip_core<R: Relaxation>(
         let (mut res, node_options) = solve_node_relaxation(
             problem,
             &shared,
+            cfg,
             solve_bounds,
             &node,
             &mut root_solved,

@@ -1153,6 +1153,111 @@ fn max_lp_iters_deterministically_stops_before_max_nodes() {
     );
 }
 
+/// `solve_node_relaxation` must pass each node's *remaining* share of
+/// `MipConfig::max_lp_iters` (`limit - stats.lp_iters_total` so far) as that
+/// node's own `SolverOptions::max_iters`, not a constant value and not
+/// `None`. Without this, `check_stop_conditions`'s `max_lp_iters` gate is
+/// checked only once per popped node, before that node's own relaxation
+/// solve runs — a single node whose own LP relaxation is pathologically slow
+/// can blow past the *entire* remaining budget by itself before the node
+/// loop ever gets a chance to stop it (pk1, MIPLIB: RINS/RENS/local-branching
+/// sub-MIP node relaxations recorded up to 3.6x the 480_000 design cap before
+/// this fix, each hitting the sub-MIP's 10s wall-clock fallback instead of
+/// the deterministic iteration cap).
+///
+/// Reuses `max_lp_iters_deterministically_stops_before_max_nodes`'s mock
+/// shape (wide root bounds, fixed `ITERS_PER_CALL`) so the exact node count
+/// and per-node budget are independently computable, but with its own
+/// recording mock rather than modifying the sibling test's.
+///
+/// Sentinel: removing the `cfg.max_lp_iters` branch from
+/// `solve_node_relaxation` leaves every recorded `max_iters` as `None`,
+/// failing the `*seen == expected` assertion.
+#[test]
+fn solve_node_relaxation_passes_remaining_budget_as_per_lp_iter_cap() {
+    use std::cell::RefCell;
+
+    struct RecordingMock {
+        bounds: Vec<(f64, f64)>,
+        ints: Vec<usize>,
+        seen_max_iters: RefCell<Vec<Option<u64>>>,
+    }
+
+    const ITERS_PER_CALL: usize = 5;
+
+    impl RecordingMock {
+        fn new() -> Self {
+            Self {
+                bounds: vec![(0.0, 1_099_511_627_776.0)], // 2^40
+                ints: vec![0],
+                seen_max_iters: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl super::Relaxation for RecordingMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.ints
+        }
+        fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            self.seen_max_iters.borrow_mut().push(opts.max_iters);
+            let (lo, hi) = bounds[0];
+            let x = lo + (hi - lo) * 0.5 + 0.3;
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: -1.0,
+                solution: vec![x],
+                iterations: ITERS_PER_CALL,
+                ..Default::default()
+            }
+        }
+        fn skip_node_presolve(&self) -> bool {
+            true
+        }
+    }
+
+    const LP_ITERS_CAP: u64 = 30;
+    let cfg = MipConfig {
+        max_nodes: 10_000,
+        max_lp_iters: Some(LP_ITERS_CAP),
+        branching: crate::options::MipBranching::MostFractional,
+        cuts: false,
+        tree_cuts: false,
+        symmetry: false,
+        rins_enabled: false,
+        rens_enabled: false,
+        local_branching_enabled: false,
+        ..MipConfig::default()
+    };
+    let mock = RecordingMock::new();
+    let (_result, stats) = super::solve_mip_with_stats(&mock, &opts(), &cfg);
+
+    let expected_nodes = (LP_ITERS_CAP / ITERS_PER_CALL as u64) as usize;
+    assert_eq!(
+        stats.nodes_processed, expected_nodes,
+        "test premise: same stopping node count as the sibling max_lp_iters test"
+    );
+
+    let seen = mock.seen_max_iters.borrow();
+    assert_eq!(seen.len(), expected_nodes);
+    let expected: Vec<Option<u64>> = (0..expected_nodes as u64)
+        .map(|i| Some(LP_ITERS_CAP - i * ITERS_PER_CALL as u64))
+        .collect();
+    assert_eq!(
+        *seen, expected,
+        "each node's max_iters must be the remaining budget \
+         (LP_ITERS_CAP - cumulative lp_iters_total so far), strictly \
+         decreasing by ITERS_PER_CALL each node — not a constant \
+         Some(LP_ITERS_CAP) and not None"
+    );
+}
+
 #[test]
 fn scaling_retry_does_not_run_after_deadline_expired() {
     use std::cell::Cell;

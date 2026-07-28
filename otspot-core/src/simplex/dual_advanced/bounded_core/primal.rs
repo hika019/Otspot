@@ -120,9 +120,23 @@ pub(crate) fn phase2_primal_bounded(
     let mut trace = IterTrace::new("bounded-phase2-primal");
 
     let k_trigger = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN);
+    // Bland-mode give-up: see the doc comment on `OBJ_PLATEAU_BAIL_FACTOR` above
+    // `primal_simplex_aug` — this loop has the identical bland_mode/Flip
+    // structure (and calls the same `select_leaving_bland_bounded`), so it
+    // shares the same give-up mechanism and constants.
+    let giveup_obj_trigger = (OBJ_PLATEAU_BAIL_FACTOR * m).max(OBJ_PLATEAU_BAIL_MIN);
     let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
     let force_bland = primal_force_bland();
     let mut iters_since_progress: usize = 0;
+    let mut iters_since_obj_progress: usize = 0;
+    let mut best_obj: f64 = bounded_obj(
+        c,
+        &state.basis,
+        &state.x_b,
+        &state.at_upper,
+        &state.is_basic,
+        ubs,
+    );
     let mut bland_mode = force_bland;
 
     loop {
@@ -151,6 +165,39 @@ pub(crate) fn phase2_primal_bounded(
                 ubs,
             );
             t.log(*iters, obj, &state.basis, bland_mode);
+        }
+        if options
+            .max_iters
+            .is_some_and(|limit| *iters as u64 >= limit)
+        {
+            let obj = bounded_obj(
+                c,
+                &state.basis,
+                &state.x_b,
+                &state.at_upper,
+                &state.is_basic,
+                ubs,
+            );
+            return (SimplexOutcome::Stalled(obj), state);
+        }
+        if iters.is_multiple_of(OBJ_PLATEAU_CHECK_INTERVAL) {
+            let obj = bounded_obj(
+                c,
+                &state.basis,
+                &state.x_b,
+                &state.at_upper,
+                &state.is_basic,
+                ubs,
+            );
+            if obj_plateau_should_bail(
+                &mut best_obj,
+                obj,
+                &mut iters_since_obj_progress,
+                OBJ_PLATEAU_CHECK_INTERVAL,
+                giveup_obj_trigger,
+            ) {
+                return (SimplexOutcome::Stalled(obj), state);
+            }
         }
 
         if deadline_reached(options.deadline) {
@@ -367,6 +414,160 @@ pub(crate) fn phase2_primal_bounded(
     }
 }
 
+/// Objective-plateau bail trigger shared by `primal_simplex_aug` and
+/// `phase2_primal_bounded` (identical bland_mode/Flip loop shape, both built
+/// on `select_leaving_bland_bounded`), mirroring
+/// `crate::simplex::primal::core`'s `BAIL_TRIGGER_FACTOR`/`BAIL_TRIGGER_MIN`
+/// (Primal Phase I's cycling early-bail) by deliberate design symmetry:
+/// `enable_phase1_cycling_bail` only arms that bail for Phase I, leaving these
+/// bounded-primal paths — used for ordinary warm-started B&B node
+/// relaxations, RINS/RENS/local-branching sub-MIP node relaxations, and
+/// in-tree cut-separation re-solves alike — with no independent stop besides
+/// the caller's wall-clock deadline.
+///
+/// Give up once the objective (`c_aug^T x_B`) has not meaningfully improved
+/// for `K` consecutive iterations, sampled every [`OBJ_PLATEAU_CHECK_INTERVAL`]
+/// iterations (not gated on `bland_mode` or the per-pivot step size): a
+/// bounded-variable cycle can route through `BoundedLeave::Flip` steps, which
+/// unconditionally reset both `bland_mode` and the step-plateau counter
+/// without resolving the cycle, so a bland/step-gated check can be dodged
+/// indefinitely by a cycle that flips periodically. The objective-plateau
+/// check has no such escape hatch — a flip only "counts" as progress if it
+/// actually decreases the objective by more than
+/// [`OBJ_PLATEAU_PROGRESS_REL_TOL`].
+///
+/// Motivating measurements (pk1, MIPLIB), both predating this bail:
+/// - With `select_leaving_bland_bounded`'s former `PIVOT_TOL`-sized ratio-tie
+///   band, one B&B node relaxation revisited 592 distinct bases for
+///   ~5,000,000 consecutive 100%-degenerate pivots with zero objective
+///   progress.
+/// - After tightening that tie band, two RENS sub-MIP node relaxations still
+///   each ran 872,044 100%-degenerate pivots — interleaved with a `Flip`
+///   roughly every 34 pivots, which is what motivated dropping the
+///   `bland_mode`/step-based gate in favor of a plain objective-plateau check.
+///
+/// A give-up here returns the honest [`SimplexOutcome::Stalled`] (mapped by
+/// `stop_status` to `SuboptimalSolution`/`MaxIterations`, never silently
+/// reported as `Timeout`), not a symptom-hiding cap.
+///
+/// **Also arms during Phase I** (`primal_simplex_aug` called with
+/// `art_threshold = Some(_)`, minimizing the artificial-variable sum): this
+/// is a deliberate choice, not an oversight — a Phase I run that plateaus
+/// without reducing the artificial sum to zero is exactly as unresolved as a
+/// Phase II plateau, and needs the same bail so it cannot spin indefinitely
+/// either. The risk this trades against is misreporting a *slow-but-still-
+/// converging-toward-Infeasible* Phase I as `Stalled` (→
+/// `SuboptimalSolution`/`MaxIterations`) instead of the correct `Infeasible`.
+/// Measured: `data/lp_problems_infeas` (29 certified) and
+/// `data/lp_problems_unbounded` (12 certified) both still classify 29/29 and
+/// 12/12 correctly with this bail active, including `klein3` — the
+/// adversarial cycling instance `crate::simplex::primal::core`'s own Phase I
+/// bail cites as its origin case — which still resolves to `Infeasible`
+/// (taking 14.9s, the bail never fires because the artificial-sum objective
+/// keeps decreasing). No regression found; not proof no LP can ever trigger
+/// this risk, but the two suites built specifically to exercise
+/// Infeasible/Unbounded classification show no counterexample.
+const OBJ_PLATEAU_BAIL_FACTOR: usize = 10;
+const OBJ_PLATEAU_BAIL_MIN: usize = 5_000;
+
+/// Relative objective-improvement floor for [`OBJ_PLATEAU_BAIL_FACTOR`]'s progress
+/// check — deliberately looser than `dual_common::NO_PROGRESS_REL_EPS`
+/// (1e-12, calibrated for detecting genuine-but-tiny per-pivot progress
+/// elsewhere). At `1e-12` relative, floating-point noise in `bounded_obj`'s
+/// repeated summation across hundreds of thousands of iterations crosses the
+/// threshold often enough to reset the give-up counter indefinitely without
+/// any real progress (this is what let the 872,044-pivot RENS calls above
+/// evade a `NO_PROGRESS_REL_EPS`-scale check); `1e-9` is 1,000x looser, well
+/// above plausible summation noise for problems in scope, while still 1,000x
+/// tighter than `OBJ_MATCH_REL_TOL` (1e-4, a solution-acceptance tolerance,
+/// not an anti-cycling one).
+pub(super) const OBJ_PLATEAU_PROGRESS_REL_TOL: f64 = 1e-9;
+
+/// Iteration interval at which the give-up progress check samples the
+/// objective (`bounded_obj`), rather than every iteration.
+///
+/// `bounded_obj` is an `O(m)` dense pass over the current basis; computing it
+/// on every iteration purely to feed a backstop that almost never fires (the
+/// overwhelming majority of solves converge long before `giveup_obj_trigger`)
+/// measured as a 2-10% wall-clock regression across MIPLIB problems that stay
+/// nowhere near giving up (dcmulti/khb05250/markshare_4_0/p0201, each PASS in
+/// a few hundred to a few thousand iterations). Sampling every `1024`
+/// iterations amortizes that `O(m)` cost to effectively zero on the
+/// non-cycling path (the ordinary case), while still bounding a genuine
+/// stall to `giveup_obj_trigger + OBJ_PLATEAU_CHECK_INTERVAL` iterations — a
+/// small, fixed overshoot against the millions of iterations this backstop
+/// replaces (pk1, MIPLIB: 5,000,000+ and 872,044-pivot degenerate cycles
+/// before this bail existed). The check remains keyed on `*iters`, not
+/// wall-clock, so the stop point stays deterministic.
+///
+/// `*iters` is a single counter threaded across an entire pipeline call
+/// (`dual_advanced::pipeline` declares it once and passes `&mut iters`
+/// through Phase I *and* Phase II in sequence), not reset to 0 at the start
+/// of `primal_simplex_aug` — only `best_obj`/`iters_since_obj_progress`
+/// (local to each call) are fresh per phase. So the first sample a given
+/// phase sees can land anywhere from 1 to `OBJ_PLATEAU_CHECK_INTERVAL`
+/// iterations after that phase starts, depending on where the *previous*
+/// phase left `*iters % OBJ_PLATEAU_CHECK_INTERVAL`. This only ever shortens
+/// a phase's first sampling window, never lengthens it, so it biases toward
+/// *earlier* detection — safe, not a correctness gap.
+///
+/// Lower-bound evidence that `1024`/`5_000` do not misfire on well-behaved
+/// LPs: the full Netlib `data/lp_problems` suite (109/109, `--timeout 1000
+/// --eps 1e-6`) passes unchanged with this bail active, including its
+/// largest/slowest members (pilot87, dfl001, pds-20 — each hundreds of
+/// seconds of real simplex work) — none plateau long enough to trip the
+/// bail on a genuinely converging solve.
+pub(super) const OBJ_PLATEAU_CHECK_INTERVAL: usize = 1_024;
+
+/// Shared give-up progress update for `primal_simplex_aug` /
+/// `phase2_primal_bounded`: records whether `current_obj` is a meaningful
+/// improvement over `*best_obj` (updating it and resetting
+/// `*iters_since_obj_progress` when so), and returns `true` once
+/// `*iters_since_obj_progress` reaches `giveup_trigger` — the caller must
+/// then return `SimplexOutcome::Stalled`.
+///
+/// `progress_check_interval` is the number of iterations this call is
+/// standing in for (the caller only calls this every
+/// [`OBJ_PLATEAU_CHECK_INTERVAL`] iterations — see its doc comment), so a
+/// no-progress call advances the counter by that amount, not by 1; the
+/// trigger threshold stays expressed in iteration units regardless of the
+/// sampling interval.
+///
+/// Pulled out as its own pure function (rather than inlined per-loop) so it
+/// is unit-testable against a synthetic no-progress sequence without needing
+/// to hand-construct an LP that genuinely cycles.
+///
+/// `current_obj`/`*best_obj` non-finite (P3-4): a non-finite `current_obj`
+/// cannot be assessed as an improvement (the `>` comparison against it is
+/// `false` for NaN and typically unreachable for infinities of the same
+/// sign, but relying on that IEEE-754 detail rather than stating it is
+/// fragile), so it is explicitly treated as no-progress — the plateau
+/// counter still advances and the call can still bail. A non-finite
+/// `*best_obj` with a finite `current_obj` is explicitly treated as
+/// progress (finite is strictly better than non-finite), recovering
+/// `*best_obj` instead of latching onto a non-finite value that no future
+/// `current_obj` could ever "improve" on via the relative-tolerance formula.
+pub(super) fn obj_plateau_should_bail(
+    best_obj: &mut f64,
+    current_obj: f64,
+    iters_since_obj_progress: &mut usize,
+    progress_check_interval: usize,
+    giveup_trigger: usize,
+) -> bool {
+    let improved = current_obj.is_finite()
+        && (!best_obj.is_finite()
+            || *best_obj - current_obj > best_obj.abs().max(1.0) * OBJ_PLATEAU_PROGRESS_REL_TOL);
+    if improved {
+        *best_obj = current_obj;
+        *iters_since_obj_progress = 0;
+        false
+    } else {
+        *iters_since_obj_progress =
+            iters_since_obj_progress.saturating_add(progress_check_interval);
+        *iters_since_obj_progress >= giveup_trigger
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn primal_simplex_aug(
     a_aug: &CscMatrix,
@@ -414,9 +615,19 @@ pub(super) fn primal_simplex_aug(
     let mut trace = IterTrace::new("bounded-aug-primal");
 
     let k_trigger = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN);
+    let giveup_obj_trigger = (OBJ_PLATEAU_BAIL_FACTOR * m).max(OBJ_PLATEAU_BAIL_MIN);
     let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
     let force_bland = primal_force_bland();
     let mut iters_since_progress: usize = 0;
+    let mut iters_since_obj_progress: usize = 0;
+    let mut best_obj: f64 = bounded_obj(
+        c_aug,
+        &state.basis,
+        &state.x_b,
+        &state.at_upper,
+        &state.is_basic,
+        ubs_aug,
+    );
     let mut bland_mode = force_bland;
 
     loop {
@@ -440,6 +651,39 @@ pub(super) fn primal_simplex_aug(
                 ubs_aug,
             );
             t.log(*iters, obj, &state.basis, bland_mode);
+        }
+        if options
+            .max_iters
+            .is_some_and(|limit| *iters as u64 >= limit)
+        {
+            let obj = bounded_obj(
+                c_aug,
+                &state.basis,
+                &state.x_b,
+                &state.at_upper,
+                &state.is_basic,
+                ubs_aug,
+            );
+            return SimplexOutcome::Stalled(obj);
+        }
+        if iters.is_multiple_of(OBJ_PLATEAU_CHECK_INTERVAL) {
+            let obj = bounded_obj(
+                c_aug,
+                &state.basis,
+                &state.x_b,
+                &state.at_upper,
+                &state.is_basic,
+                ubs_aug,
+            );
+            if obj_plateau_should_bail(
+                &mut best_obj,
+                obj,
+                &mut iters_since_obj_progress,
+                OBJ_PLATEAU_CHECK_INTERVAL,
+                giveup_obj_trigger,
+            ) {
+                return SimplexOutcome::Stalled(obj);
+            }
         }
 
         if deadline_reached(options.deadline) {

@@ -311,4 +311,105 @@ mod tests {
             cx(&lp, &res.solution)
         );
     }
+
+    /// Klee-Minty LP: the classic worst-case-for-simplex construction
+    /// (`max sum_j 2^(n-j) x_j s.t. 2*sum_{k<i} 2^(i-k) x_k + x_i <= 5^i`,
+    /// `x >= 0`), recast as a minimization of the negated objective. Forces
+    /// many more pivots from a cold start than a "nice" LP of the same size
+    /// — needed so a `max_iters` cap set below the natural iteration count
+    /// is distinguishable from one that's simply irrelevant.
+    fn klee_minty_lp(n: usize) -> LpProblem {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..n {
+            for k in 0..i {
+                rows.push(i);
+                cols.push(k);
+                vals.push(2.0f64.powi((i - k + 1) as i32));
+            }
+            rows.push(i);
+            cols.push(i);
+            vals.push(1.0);
+        }
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+        let b: Vec<f64> = (1..=n).map(|i| 5.0f64.powi(i as i32)).collect();
+        let c: Vec<f64> = (1..=n).map(|j| -(2.0f64.powi((n - j) as i32))).collect();
+        LpProblem::new_general(
+            c,
+            a,
+            b,
+            vec![ConstraintType::Le; n],
+            vec![(0.0, f64::INFINITY); n],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// SENTINEL (P2-4/max_iters plumbing, real solver end-to-end): P2-3 in the
+    /// review — `SolverOptions::max_iters` must be honored by the actual
+    /// dispatch chain (`solve_lp_with` → `simplex::solve_with` → whichever
+    /// simplex core `SimplexMethod::Auto` selects), not only by the
+    /// low-level helpers unit-tested directly in `bounded_core::tests`.
+    ///
+    /// Solves the same LP twice: once uncapped to measure its natural
+    /// iteration count `n`, once with `max_iters = Some(n / 2)`. The capped
+    /// solve must report `iterations <= n / 2` (the cap was honored, not
+    /// silently ignored) and a non-`Optimal` status (an artificially
+    /// truncated solve cannot have a certified optimum) — `stop_status` maps
+    /// this internal (non-wall-clock) stop to `SuboptimalSolution` /
+    /// `MaxIterations`, never `Timeout`.
+    ///
+    /// No-op proof: reverting any of the `options.max_iters` checks added to
+    /// `dual_advanced::bounded_core`/`dual_advanced::core`/`primal::core`
+    /// makes the capped solve run to completion regardless of `max_iters`,
+    /// reporting `Optimal` with `iterations == n` — failing both assertions.
+    #[test]
+    fn max_iters_is_honored_by_the_real_solver_end_to_end() {
+        let lp = klee_minty_lp(12);
+        let opts_uncapped = SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        let uncapped = solve_lp_with(&lp, &opts_uncapped);
+        assert_eq!(
+            uncapped.status,
+            SolveStatus::Optimal,
+            "test premise: the uncapped solve must reach Optimal"
+        );
+        let n = uncapped.iterations;
+        assert!(
+            n >= 2,
+            "test premise: klee_minty_lp must need at least 2 iterations \
+             (a too-easy LP can't distinguish 'cap honored' from 'cap \
+             irrelevant'); got n={n}"
+        );
+
+        let cap = (n / 2) as u64;
+        let capped = solve_lp_with(
+            &lp,
+            &SolverOptions {
+                max_iters: Some(cap),
+                presolve: false,
+                ..Default::default()
+            },
+        );
+        assert!(
+            capped.iterations as u64 <= cap,
+            "max_iters={cap} must bound reported iterations; got {}",
+            capped.iterations
+        );
+        assert_ne!(
+            capped.status,
+            SolveStatus::Optimal,
+            "a solve truncated at max_iters={cap} (< natural n={n}) cannot \
+             have reached a certified optimum"
+        );
+        assert_ne!(
+            capped.status,
+            SolveStatus::Timeout,
+            "max_iters exhaustion is an internal budget decision, not the \
+             external wall-clock deadline — must not report Timeout"
+        );
+    }
 }

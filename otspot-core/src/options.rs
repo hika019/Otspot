@@ -545,6 +545,24 @@ pub struct SolverOptions {
     pub(crate) cancel_flag: Option<Arc<AtomicBool>>,
     /// Solve deadline computed from `timeout_secs` at solve entry (internal use).
     pub(crate) deadline: Option<Instant>,
+    /// Per-solve simplex iteration cap (internal use). `None` = unbounded
+    /// (checked only against `deadline`, the default for a direct LP/MIP
+    /// solve). Set by the MIP B&B driver to the *remaining* share of
+    /// `MipConfig::max_lp_iters` before each node's own relaxation solve, so
+    /// a single pathological node cannot silently consume the entire
+    /// cumulative budget between the node-loop's own (coarser, once-per-node)
+    /// `max_lp_iters` check — see `mip::solve_node_relaxation`.
+    ///
+    /// Checked every iteration (not sampled, unlike the objective-plateau
+    /// bail which only samples every `OBJ_PLATEAU_CHECK_INTERVAL` iterations)
+    /// in `dual_advanced::bounded_core`'s `primal_simplex_aug` /
+    /// `phase2_primal_bounded` loops, regardless of `bland_mode` and in both
+    /// Phase I and Phase II. Exceeding it always returns
+    /// `SimplexOutcome::Stalled` (never `Timeout`, since this is an internal
+    /// budget decision, not the external wall-clock deadline or a
+    /// cancellation) — `stop_status` maps that honestly to
+    /// `SuboptimalSolution`/`MaxIterations`, not a silently-capped result.
+    pub(crate) max_iters: Option<u64>,
     /// Cached Schur complement decision from `probe_schur_decision`.
     pub(crate) schur_hint: Option<bool>,
 
@@ -636,6 +654,7 @@ impl Default for SolverOptions {
             timeout_secs: None,
             cancel_flag: None,
             deadline: None,
+            max_iters: None,
             schur_hint: None,
             use_ruiz_scaling: true,
             tolerance: None,
