@@ -396,6 +396,23 @@ pub(crate) fn dual_simplex_core_advanced(
             let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
         }
+        // P2-4: same per-solve iteration cap as `dual_advanced::bounded_core`
+        // (see `SolverOptions::max_iters`'s doc), extended here so a
+        // sub-MIP's remaining `MipConfig::max_lp_iters` budget is enforced
+        // regardless of which simplex core a node relaxation dispatches to.
+        // Checked every iteration (cheap: an integer compare, no extra
+        // objective computation — `basic_obj` below is already paid for by
+        // the `Stalled` return itself). Unconditional on `yield_on_stall`:
+        // that flag governs whether *internal* Bland-stall detection yields,
+        // while `max_iters` is an externally-imposed hard budget that must
+        // be honored whenever the caller sets it.
+        if options
+            .max_iters
+            .is_some_and(|limit| *iter_count_out as u64 >= limit)
+        {
+            let obj: f64 = basic_obj(c, basis, x_b);
+            return SimplexOutcome::Stalled(obj);
+        }
 
         if let Some(t) = trace.as_mut() {
             let obj = basic_obj(c, basis, x_b);

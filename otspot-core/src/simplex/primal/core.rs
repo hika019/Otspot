@@ -217,6 +217,18 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
         }
+        // P2-4: same per-solve iteration cap as `dual_advanced` (see
+        // `SolverOptions::max_iters`'s doc) — additive to, and independent
+        // of, the Phase I cycling bail / cleanup stall bail above: those
+        // gate on their own dedicated no-progress counters, this gates only
+        // on the raw iteration count, whichever fires first wins.
+        if options
+            .max_iters
+            .is_some_and(|limit| *iter_count_out as u64 >= limit)
+        {
+            let obj: f64 = basic_obj(c, basis, x_b);
+            return SimplexOutcome::Stalled(obj);
+        }
 
         if let Some(t) = trace.as_mut() {
             let obj = basic_obj(c, basis, x_b);
