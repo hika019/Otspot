@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3026 testcases, 26 ignored
+# totals: 3025 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -600,9 +600,8 @@ otspot-core	presolve::qp_postsolve::tests::test_sentinel_c1_boundary_col_needs_b
 otspot-core	presolve::qp_postsolve::tests::test_sentinel_c3_near_singular_pivot_skipped	active
 otspot-core	presolve::qp_postsolve::tests::test_sentinel_ge_singleton_sign_projected	active
 otspot-core	presolve::qp_postsolve::tests::test_sentinel_le_singleton_sign_projected	active
-otspot-core	presolve::qp_transforms::driver::per_step_control_tests::full_pass_duration_is_comfortably_above_the_test_deadline	active
+otspot-core	presolve::qp_transforms::driver::per_step_control_tests::cancel_signal_stops_pass_before_all_steps_run_via_run_step	active
 otspot-core	presolve::qp_transforms::driver::per_step_control_tests::no_interrupt_runs_all_steps_of_one_pass	active
-otspot-core	presolve::qp_transforms::driver::per_step_control_tests::real_deadline_stops_pass_before_all_steps_run_via_run_step	active
 otspot-core	presolve::qp_transforms::finalize::tests::failed_large_coeff_model_rebuild_does_not_push_postsolve_step	active
 otspot-core	presolve::qp_transforms::finalize::tests::invalid_a_rebuild_rolls_back_instead_of_substituting_zero_matrix	active
 otspot-core	presolve::qp_transforms::finalize::tests::invalid_q_rebuild_rolls_back_instead_of_substituting_zero_matrix	active
