@@ -73,16 +73,11 @@ pub(crate) const SEPARATION_DRY_STREAK_RESET_NODE_INTERVAL: usize = 1000;
 /// sub-MIPs' own recursive total), and in-tree separation. The denominator
 /// every `may_run_*` gate below shares.
 ///
-/// Deliberately excludes `stats.tree_cut_overhead_iters` — separation's own
-/// fixed-cost accounting surcharge (see `cuts::tree_cut_construction_
-/// surcharge` and [`MipStats::tree_cut_overhead_iters`](super::MipStats::
-/// tree_cut_overhead_iters)) is iteration-*equivalent* bookkeeping, not real
-/// simplex work, and only [`separation_component_iters`] (separation's own
-/// gate numerator) should see it. Folding it in here would inflate this
-/// shared denominator and loosen every *other* component's `may_run_*`
-/// gate too — measured to regress `gt2 --timeout 60` from a deterministic
-/// 100-node `Optimal` to a 3,744-node `Timeout` when an earlier version did
-/// exactly that.
+/// Deliberately excludes `stats.tree_cut_overhead_iters`: iteration-
+/// *equivalent* bookkeeping (`cuts::tree_cut_construction_surcharge`), not
+/// real simplex work, seen only by [`separation_component_iters`] —
+/// otherwise every other component's `may_run_*` gate loosens too (`gt2`
+/// measured: 100-node `Optimal` → 3,744-node `Timeout`).
 ///
 /// Floored at `nodes_processed` (P2-D): a relaxation can legitimately need
 /// zero simplex iterations (e.g. an already-optimal starting basis, or a
@@ -236,38 +231,26 @@ pub(crate) fn separation_iter_budget(stats: &MipStats) -> u64 {
 /// [`heuristics::SUB_MIP_MAX_LP_ITERS`](super::heuristics::SUB_MIP_MAX_LP_ITERS).
 ///
 /// `SUB_MIP_MAX_LP_ITERS` was calibrated from a *single* call's own
-/// recursive iteration need on realistic instances (see its doc: `khb05250`'s
-/// local-branching call alone needed 595,689; `gt2`'s needed 386,937) — an
-/// entirely different scale from `share * total_simplex_iters`, which for a
-/// whole gt2/khb05250-sized search never approaches `SUB_MIP_MAX_LP_ITERS /
-/// RINS_ITER_SHARE` (≈9.6M). Using the raw (unfloored) share as a hard
-/// per-call cap therefore starves *every* call on realistic small/medium
-/// instances — confirmed by direct regression: `gt2 --timeout 60` regressed
-/// from a deterministic 200-node `Optimal` to a non-deterministic ~2500-node
-/// `Timeout`, three repeats landing on three different node counts.
+/// recursive iteration need (see its doc: `khb05250`/`gt2` needed
+/// 595,689/386,937) — a different scale from `share * total_simplex_iters`,
+/// which never approaches `SUB_MIP_MAX_LP_ITERS / RINS_ITER_SHARE` (≈9.6M)
+/// for a search this size. The raw (unfloored) share as a hard per-call cap
+/// therefore starves every call — confirmed by regression: `gt2 --timeout
+/// 60` went from a deterministic 200-node `Optimal` to a non-deterministic
+/// ~2500-node `Timeout`.
 ///
-/// Flooring the ceiling at `SUB_MIP_MAX_LP_ITERS` gives a heuristic whose
-/// cumulative usage is still below that constant the same full flat-constant
-/// budget as before this fix; the floor is a no-op once `share *
-/// total_simplex_iters` genuinely exceeds it (large/long searches), where
-/// `heuristics::capped_sub_mip_max_lp_iters` still caps every call at
-/// `min(SUB_MIP_MAX_LP_ITERS, this)` and skips the call outright once the
-/// remaining allowance drops below `heuristics::SUB_MIP_MIN_LP_ITERS`.
+/// Flooring the ceiling at `SUB_MIP_MAX_LP_ITERS` preserves the old flat
+/// budget for a heuristic still below that constant; it is a no-op once
+/// `share * total_simplex_iters` exceeds it, where `heuristics::capped_
+/// sub_mip_max_lp_iters` still caps every call at `min(SUB_MIP_MAX_LP_
+/// ITERS, this)` and skips it below `heuristics::SUB_MIP_MIN_LP_ITERS`.
 ///
-/// Early in a search `total_simplex_iters` is small, so `share * total` alone
-/// would starve every call to near-zero — it is exactly the floor (a full
-/// `SUB_MIP_MAX_LP_ITERS`-sized call, ignoring how little share has
-/// technically accrued) that made a heuristic call effective early enough to
-/// matter at all: introducing this floored budget (Phase 1b-1d, `0eb370f5`)
-/// took MIPLIB small from 5 to 7 PASS, `markshare_4_0` among the two newly
-/// passing instances — a floor-less (pure-share) implementation was measured
-/// to leave it un-passing, the same failure mode this function's `gt2`
-/// regression evidence above shows independently. Any early overshoot this
-/// floor grants beyond a call's "fair" share is bounded per call at
-/// `SUB_MIP_MAX_LP_ITERS` (480,000) — never unbounded — and self-corrects as
-/// the search progresses: once `share * total_simplex_iters` exceeds that
-/// constant, the floor stops mattering and later calls are throttled purely
-/// by `share`, the same as if no floor existed.
+/// Early on, `total_simplex_iters` is small enough that `share * total`
+/// alone would starve every call — the floor's early overshoot is what made
+/// a call effective at all (Phase 1b-1d, `0eb370f5`: MIPLIB small 5→7 PASS,
+/// `markshare_4_0` among the two newly passing). That overshoot is bounded
+/// per call at `SUB_MIP_MAX_LP_ITERS` and self-corrects once `share *
+/// total_simplex_iters` exceeds it.
 fn sub_mip_iter_budget_remaining(component_iters: u64, total_iters: u64, share: f64) -> u64 {
     if total_iters == 0 {
         return u64::MAX;

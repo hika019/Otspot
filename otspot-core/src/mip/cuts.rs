@@ -101,37 +101,24 @@ fn tree_cut_dim(lp: &LpProblem) -> u64 {
     (lp.num_vars + lp.num_constraints) as u64
 }
 
-/// Iteration-equivalent cost charged by [`tree_cut_construction_surcharge`]
-/// per unit of [`tree_cut_dim`] per `build_standard_form`-equivalent
-/// construction is `TREE_CUT_BUILD_ITER_COST_PER_DIM /
-/// TREE_CUT_BUILD_ITER_COST_DIVISOR` = 1/4.
+/// Iteration-equivalent cost per unit of [`tree_cut_dim`] per
+/// `build_standard_form`-equivalent construction, charged by
+/// [`tree_cut_construction_surcharge`], is `TREE_CUT_BUILD_ITER_COST_PER_DIM
+/// / TREE_CUT_BUILD_ITER_COST_DIVISOR` = 1/4.
 ///
-/// A single simplex iteration's dominant cost is a sparse triangular solve
-/// (FTRAN/BTRAN) over the current LU factors, touching on the order of `m`
-/// (basis size) nonzeros; `build_standard_form` allocates and populates
-/// arrays of that same order (variable shifts, UB rows, slack columns) —
-/// the same *order* of work as one iteration's triangular solve, which is
-/// what fixes the numerator at 1 rather than some other order-of-magnitude
-/// constant: the bug this surcharge fixes is the iteration budget *ignoring*
-/// this cost entirely, so any nonzero, order-correct charge restores it to
-/// the accounting.
+/// The numerator is order-of-magnitude reasoning, not calibration: one
+/// simplex iteration's dominant cost is a triangular solve (FTRAN/BTRAN)
+/// touching `O(m)` nonzeros; `build_standard_form` allocates/populates
+/// arrays of that same order, so 1 iteration-equivalent per unit of
+/// `tree_cut_dim` is the natural conversion — any nonzero, order-correct
+/// charge fixes the bug (the iteration budget ignoring this cost entirely).
 ///
-/// The `/ 4` divisor is the one number here actually fit to data, not
-/// derived from the complexity argument above (which only pins the order of
-/// magnitude, not the constant): coefficient 1 (no divisor) reduced
-/// `markshare_4_0`'s accepted-round count enough to fix its regression
-/// (Optimal 507.3s) but, measured directly, also broke a small/fast search
-/// unrelated to `markshare_4_0`'s scale — `gt2 --timeout 60` went from a
-/// deterministic 100-node `Optimal` to a 3,744-node `Timeout` purely from
-/// this surcharge's magnitude (before the `MipStats::tree_cut_overhead_
-/// iters` isolation fix below existed to explain *why*: at coefficient 1 the
-/// surcharge was simply too large per round for a fixed-point search this
-/// small). `1/4` was the value found, by direct measurement of both
-/// instances together, to land `markshare_4_0`'s accepted-round count at
-/// 30,251–31,269 — matching its own pre-warm-start cold-equivalent round
-/// count (31,268) — while `gt2 --timeout 60` ×3 stays at the deterministic
-/// 100-node `Optimal` (its separation now self-gates to 0 accepted rounds
-/// entirely, at this instance's dimension, rather than over-firing).
+/// The `/ 4` divisor *is* fit to data: coefficient 1 alone fixed
+/// `markshare_4_0`'s regression but broke `gt2` (100-node `Optimal` →
+/// 3,744-node `Timeout`, from surcharge magnitude alone). `1/4` was found,
+/// measuring both together, to land `markshare_4_0`'s accepted rounds at
+/// 30,251–31,269 (matching its pre-warm-start cold-equivalent 31,268) while
+/// `gt2` ×3 stays at the deterministic 100-node `Optimal`.
 const TREE_CUT_BUILD_ITER_COST_PER_DIM: u64 = 1;
 const TREE_CUT_BUILD_ITER_COST_DIVISOR: u64 = 4;
 
@@ -158,16 +145,9 @@ const TREE_CUT_BUILD_ITER_COST_DIVISOR: u64 = 4;
 ///   [`tree_cut_resolve`]'s shape-check build, plus the warm solve's own
 ///   internal construction) = 3 ([`TREE_CUT_BUILDS_ROUND_END`]).
 ///
-/// markshare_4_0 regression fix (Phase 3b): warm-started re-solves cut each
-/// round's *iteration* cost by roughly 10x, but not this per-round fixed
-/// cost, which the iteration budget was blind to — with rounds no longer
-/// throttled by iterations, `TREE_CUT_MAX_ROUNDS`-bounded but far more
-/// frequent cheap rounds fit inside the same `effort::separation_iter_
-/// budget`, ~3x more on `markshare_4_0` (31,268 → 92,711 accepted rounds in
-/// a 1000s run), whose accumulated fixed cost alone consumed 80% of wall
-/// clock (`tree_cut_us_pct_wall` 68.65% → 79.95%) despite fewer nodes
-/// processed overall (1,813,460 → 1,328,286) — Optimal (921.6s) regressed
-/// to Timeout (1000s).
+/// Phase 3b markshare_4_0 regression fix: warm-started re-solves cut each
+/// round's real iteration cost ~10x, but not this fixed cost — see
+/// [`TREE_CUT_BUILD_ITER_COST_PER_DIM`]'s doc for the resulting calibration.
 const TREE_CUT_BUILDS_ROUND_START_WARM: u64 = 2;
 const TREE_CUT_BUILDS_ROUND_START_COLD: u64 = 1;
 const TREE_CUT_BUILDS_GENERATE_ROUND: u64 = 1;
@@ -540,35 +520,26 @@ fn extend_basis_for_new_rows(candidate: &LpProblem, prev_basis: &[usize], k: usi
 
 /// Warm-solves `lp` from `warm_basis` via [`solve_tree_cut_warm`], falling
 /// back to a cold [`solve_cut_lp`] bootstrap when the *result* cannot be
-/// trusted to seed the next round: the solve reached `Optimal` but the
-/// basis it returned has a different length than `build_standard_form(lp)
-/// .m`.
+/// trusted to seed the next round: `Optimal` but the returned basis has a
+/// different length than `build_standard_form(lp).m`.
 ///
-/// Pure defense, not a reachable path today: with `tree_cut_warm_options`
-/// hardcoding `disable_bounded_dispatch: true`, every warm solve here runs
-/// in `lp`'s own `build_standard_form` space, so this mismatch cannot fire
-/// through this module's own call sites (see
+/// Pure defense, not a reachable path today: `tree_cut_warm_options`
+/// hardcodes `disable_bounded_dispatch: true`, so every warm solve here
+/// runs in `lp`'s own `build_standard_form` space (see
 /// `tree_cut_warm_options_dispatches_dual_advanced_with_disabled_bounded_path`
-/// and `separate_tree_cuts_accepts_legacy_warm_start_without_singular_
-/// fallback`, which cover *that* contract directly and fail if it
-/// regresses). It guards instead against a future regression in
-/// `dual_advanced` itself re-opening this gap: when it silently did pre-fix
-/// (via the bounded fast path's smaller space), the mismatched basis was
-/// not rejected loudly — `generate_round`'s own `basis.len() != sf.m` guard
-/// just returned zero cuts every round after, degrading in-tree separation
-/// into a silent no-op (`gt2`'s `cuts_empty` 1.2% → 15.1%). The
-/// `debug_assert!` turns any recurrence into an immediate test/debug-build
-/// failure; the runtime fallback keeps release builds correct — a cold
-/// re-solve, not silence — at the cost of one extra solve for that round. A
-/// non-`Optimal` warm status is returned as-is, with no cold retry:
+/// / `separate_tree_cuts_accepts_legacy_warm_start_without_singular_
+/// fallback`, which cover that contract directly). It guards against a
+/// future regression in `dual_advanced` re-opening the mismatch — silently
+/// rejected pre-fix, a mismatched basis made `generate_round`'s own shape
+/// guard return zero cuts every round after (`gt2`'s `cuts_empty` 1.2% →
+/// 15.1%). `debug_assert!` makes any recurrence loud in test/debug builds;
+/// the runtime fallback keeps release builds correct.
+///
+/// A non-`Optimal` warm status is returned as-is, never retried cold:
 /// [`separate_tree_cuts`] already ends the round on any non-`Optimal`
-/// result, so retrying here would (at best) waste a solve that cannot
-/// change the outcome, and (for a status like `Infeasible`, a certificate
-/// rather than a resource limit) would risk quietly overriding a real
-/// answer with a different one from a different starting basis — including
-/// self-"healing" a possible false-`Infeasible` misdetection, whose
-/// investigation is explicitly out of scope for this change (see the
-/// task's verification item measuring it, not fixing it here).
+/// result, so retrying could only waste a solve or (for a certificate
+/// status like `Infeasible`) risk overriding a real answer with one from a
+/// different starting basis.
 fn tree_cut_resolve(
     lp: &LpProblem,
     options: &SolverOptions,
@@ -1442,48 +1413,22 @@ fn tree_cut_node_selected(depth: usize, node_index: usize) -> bool {
 /// bound/solution, a valid lower bound for the subtree.
 ///
 /// Mirrors root [`add_root_cuts`] but node-local: bootstrap → (generate →
-/// pool-filter → append (Ge) → warm re-solve → warm re-solve)*, stopping
-/// when the bound stalls. Only the very first solve (round 0's bootstrap) is
-/// cold: `node_res`'s own `warm_start_basis` (from whatever dispatch solved
-/// the node relaxation) is not known to be in this module's own
-/// `build_standard_form` space — it may have come from `dual_advanced`'s
-/// bounded fast path, a smaller basis space this module's tableau cannot
-/// use (see [`tree_cut_warm_options`]'s `disable_bounded_dispatch`) — so
-/// [`solve_cut_lp`] always cold-bootstraps once to obtain a basis in the
-/// right space, which every later warm solve then carries forward. Every
-/// round after round 0 re-solves `committed` itself (warm, from the
-/// previous round's own basis — no new rows since, so this should
-/// re-verify optimality in about one iteration) to derive this round's
-/// cut-generation source, rather than reusing the previous round's
-/// already-in-hand result object directly: the two are mathematically the
-/// same LP, but deriving the source from an explicit fresh solve each round
-/// (through the same shape-guarded [`tree_cut_resolve`] as the round's own
-/// validate step below) means a corrupted or stale basis cannot silently
-/// propagate for more than one round.
+/// pool-filter → append (Ge) → warm re-solve)*, stopping when the bound
+/// stalls. Only round 0 is cold — `node_res`'s own basis is not known to be
+/// in this module's `build_standard_form` space (see
+/// [`tree_cut_warm_options`]'s `disable_bounded_dispatch`) — so
+/// [`solve_cut_lp`] establishes one; every later round warm-resolves
+/// `committed` afresh (via the same shape-guarded [`tree_cut_resolve`] as
+/// its own validate step) rather than reusing the prior round's result.
 ///
-/// `max_iters` bounds simplex iterations across rounds (see
-/// `effort::separation_iter_budget`): each individual solve within a round
-/// is skipped — ending this attempt — once the remaining allowance drops
-/// below [`tree_cut_min_useful_iters`]'s per-dimension minimum, rather than
-/// being attempted with a too-small `SolverOptions::max_iters` (see that
-/// function's doc: `TREE_CUT_MIN_SOLVE_ITER_DIM_MULT`'s markshare_4_0 note).
-/// Otherwise the solve's own `max_iters` is exactly the remaining allowance,
-/// bounding a single solve that would otherwise spend arbitrarily more than
-/// what remains of this attempt's budget on its own (confirmed by
-/// `dcmulti`'s single 27s cold cut-LP solve under Phase 1c re-bench).
-/// Real simplex iterations (the first `u64`) and the [`tree_cut_construction_
-/// surcharge`] fixed-cost overhead (the second `u64`, iteration-equivalent
-/// units, not real simplex work) are tracked and returned separately —
-/// see [`MipStats::tree_cut_overhead_iters`](super::MipStats::
-/// tree_cut_overhead_iters) for why the caller must not merge them into the
-/// same counter. Within this call both still count against the same
-/// `max_iters` allowance: `remaining` at each round boundary is `max_iters`
-/// minus the combined real-plus-overhead spend so far, so a round that would
-/// exceed the *true* per-round cost (real work plus its own accounting
-/// overhead) is skipped exactly as if it were all real iterations. Returns
-/// the iterations actually spent plus whether this call passed the
-/// node-selection interval and attempted separation (independent of the
-/// iteration count, which can legitimately be 0 for a real attempt).
+/// `max_iters` bounds iterations across rounds (see `effort::separation_
+/// iter_budget`): a round is skipped, not truncated, once the remaining
+/// allowance drops below [`tree_cut_min_useful_iters`]. The two returned
+/// `u64`s — real iterations and [`tree_cut_construction_surcharge`]'s
+/// overhead, kept separate per `MipStats::tree_cut_overhead_iters`'s doc but
+/// summed for this budget check — precede a `bool` for whether this call
+/// passed the node-selection interval, independent of the iteration count
+/// (legitimately 0 for a real attempt).
 pub(crate) fn separate_tree_cuts(
     node_lp: &LpProblem,
     integer_mask: &[bool],

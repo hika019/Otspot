@@ -167,14 +167,19 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
         .expect("build_standard_form without deadline must not time out")
 }
 
-pub(crate) fn build_standard_form_with_deadline(
+/// Shifts/splits each original variable into its standard-form column(s):
+/// a lower-bounded variable shifts to `x' = x - lb`, an upper-only-bounded
+/// variable becomes `x' = ub - x`, and a free variable splits into two
+/// nonnegative parts (`x = x_plus - x_minus`). Returns `(orig_var_info,
+/// n_shifted, obj_offset, new_c)`, or `None` if `deadline` expires
+/// mid-loop. Extracted (mechanical, no behavior change) from
+/// [`build_standard_form_with_deadline`] to keep that function under the
+/// function-size gate.
+fn shift_and_split_variables(
     problem: &LpProblem,
     deadline: Option<std::time::Instant>,
-) -> Option<StandardForm> {
-    bump_build_standard_form_call_count();
+) -> Option<(Vec<OrigVarInfo>, usize, f64, Vec<f64>)> {
     let n_orig = problem.num_vars;
-    let m_orig = problem.num_constraints;
-
     let mut orig_var_info: Vec<OrigVarInfo> = Vec::with_capacity(n_orig);
     let mut n_shifted = 0usize;
     let mut obj_offset = 0.0f64;
@@ -216,6 +221,18 @@ pub(crate) fn build_standard_form_with_deadline(
             });
         }
     }
+    Some((orig_var_info, n_shifted, obj_offset, new_c))
+}
+
+pub(crate) fn build_standard_form_with_deadline(
+    problem: &LpProblem,
+    deadline: Option<std::time::Instant>,
+) -> Option<StandardForm> {
+    bump_build_standard_form_call_count();
+    let n_orig = problem.num_vars;
+    let m_orig = problem.num_constraints;
+    let (orig_var_info, n_shifted, obj_offset, new_c) =
+        shift_and_split_variables(problem, deadline)?;
 
     // Upper bound rows.
     let mut ub_constraints: Vec<(usize, f64)> = Vec::new();

@@ -1773,19 +1773,14 @@ fn separate_tree_cuts_accepts_legacy_warm_start_without_singular_fallback() {
 /// `max_iters` below what it needs to repair that reliably produces a
 /// non-`Optimal` premise to compare against.
 ///
-/// Modification 2's shape-mismatch fallback (see [`tree_cut_resolve`]'s doc)
-/// is deliberately not separately sentinel-tested: with
-/// `tree_cut_warm_options` hardcoding `disable_bounded_dispatch: true`,
-/// `dual_advanced`'s own `warm.basis.len() == m` guard (`m` identical to
-/// this function's `expected_m`) already makes a mismatched `warm_basis`
-/// degrade gracefully to a same-shape cold start *inside* `solve_dual_
-/// advanced` itself — verified empirically: stripping `tree_cut_resolve`'s
-/// own shape guard entirely does not change this test's (or any other
-/// test's) outcome, so no revert-fails sentinel exists for that branch
-/// specifically. `tree_cut_warm_options_dispatches_dual_advanced_with_
-/// disabled_bounded_path` and `separate_tree_cuts_accepts_legacy_warm_
-/// start_without_singular_fallback` are the sentinels that actually fail if
-/// `disable_bounded_dispatch` regresses.
+/// [`tree_cut_resolve`]'s shape-mismatch fallback is deliberately not
+/// separately sentinel-tested here — see its own doc for why (a mismatched
+/// `warm_basis` already degrades gracefully inside `solve_dual_advanced`
+/// itself, verified empirically to leave every test's outcome unchanged).
+/// `tree_cut_warm_options_dispatches_dual_advanced_with_disabled_bounded_
+/// path` and `separate_tree_cuts_accepts_legacy_warm_start_without_
+/// singular_fallback` are the sentinels that fail if `disable_bounded_
+/// dispatch` itself regresses.
 #[test]
 fn tree_cut_resolve_is_pure_passthrough_when_warm_solve_is_non_optimal() {
     let milp = tree_cut_sentinel_milp();
