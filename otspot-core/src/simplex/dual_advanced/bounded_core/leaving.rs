@@ -186,6 +186,36 @@ const BLAND_TIE_REL_TOL: f64 = 1e-9;
 /// ratio can differ from `min_ratio` by up to the tolerance, and stepping to
 /// a tied-but-not-minimal ratio would leave the true minimizer's row slightly
 /// primal-infeasible.
+///
+/// **Invariant / error bound (Codex review, P1, documented not fixed — see
+/// below for why).** When the *chosen* row is itself not the exact
+/// minimizer (`true_ratio > min_ratio`, only admitted because it is within
+/// `tie_band` of it — see [`BLAND_TIE_REL_TOL`]), stepping by `min_ratio`
+/// leaves that row's variable short of the bound it is declared nonbasic at
+/// (`at_ub`) by exactly `|eff_i| * (true_ratio - min_ratio) <= |eff_i| *
+/// tie_band`: the row ends up strictly *inside* the box, never past it (a
+/// one-line derivation: for the `at_ub` branch, `x_new = x_i - eff_i *
+/// min_ratio = ub_i + eff_i * (true_ratio - min_ratio)`, and `eff_i < 0`
+/// there, so `x_new <= ub_i`; the lower-bound branch is symmetric with the
+/// bound at `0`).
+///
+/// This is the safe side of a tradeoff intrinsic to a *banded* Bland
+/// tie-break: the alternative (stepping by the chosen row's own
+/// `true_ratio` instead of `min_ratio`) would instead push the true
+/// minimizer's row (a *different* row, whose exact ratio is `min_ratio`)
+/// *past* its own bound by the same gap — a genuine primal infeasibility
+/// introduced by this ratio test itself, which is strictly worse than a
+/// nonbasic variable that merely has not yet reached the bound it is
+/// labelled at. Neither choice is exact once the tie band admits more than
+/// one row; this one cannot manufacture infeasibility.
+///
+/// The residual is transient, not accumulated pivot over pivot: each
+/// LU-rebuild checkpoint recomputes the full `x_b` from `basis` and
+/// `at_upper` directly (`reconcile_bounded_terminal_state` in
+/// `dual_advanced::mod`), independent of the incremental step chain, and its
+/// `BoundedTerminalReconcile::BoundViolation` outcome is the backstop that
+/// catches an actual (non-transient) excursion beyond `options.primal_tol`
+/// — which this bounded-short residual, by construction, is not.
 pub(super) fn select_leaving_bland_bounded(
     alpha: &[f64],
     dir: f64,
@@ -256,6 +286,10 @@ pub(super) fn select_leaving_bland_bounded(
         Some(row) => BoundedLeave::Pivot {
             row,
             at_ub: leaving_at_ub,
+            // `step` is always `min_ratio`, not `row`'s own `true_ratio` when
+            // `row` was picked from within the tie band — see this function's
+            // doc ("Invariant / error bound") for the resulting bounded,
+            // never-past-the-bound short-of-bound residual.
             step: min_ratio.max(0.0),
         },
         // P3-1: unreachable, not a defensive fallback. `min_ratio` is finite

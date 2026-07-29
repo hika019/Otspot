@@ -79,8 +79,9 @@ pub(crate) trait Relaxation {
     /// reused at other nodes) and the cut rows are not propagated to children.
     /// `bounds` are the node's bounds; `res` is its (Optimal) relaxation result.
     /// `max_iters` bounds the simplex iterations this attempt may spend (see
-    /// `effort::separation_iter_budget`); checked at round boundaries only, since
-    /// a single LP solve has no iteration-limit option. The `u64` in the return
+    /// `effort::separation_iter_budget`); a round is skipped once the
+    /// remaining allowance drops below the per-dimension useful minimum (see
+    /// `cuts::separate_tree_cuts`). The `u64` in the return
     /// is the total simplex iterations actually spent across all rounds of this
     /// attempt, reported whether or not a cut was accepted, so the caller can
     /// charge the gate even on a dry attempt. The `bool` is whether this call
@@ -110,12 +111,24 @@ pub(crate) trait Relaxation {
     /// sub-MIP's own recursive `total_simplex_iters` (see `effort`). Both are
     /// reported whenever a sub-MIP solve was actually attempted (independent
     /// of whether the result was usable) so hidden sub-MIP work is never lost.
+    ///
+    /// `iter_budget` is RINS's own remaining share of `effort::
+    /// total_simplex_iters` (`effort::rins_iter_budget`), computed by the
+    /// caller *after* `effort::may_run_rins` approves the call — the
+    /// implementation caps the sub-MIP's own `MipConfig::max_lp_iters` at
+    /// `min(heuristics::SUB_MIP_MAX_LP_ITERS, iter_budget)` (Codex review,
+    /// P1: approval alone did not cap the size of the approved work), or
+    /// skips the call outright when `iter_budget` is below
+    /// `heuristics::SUB_MIP_MIN_LP_ITERS` (markshare_4_0 regression fix: a
+    /// truncated call still pays full per-call setup overhead for a sub-MIP
+    /// too small to search anything useful).
     fn run_rins(
         &self,
         _x_lp: &[f64],
         _x_inc: &[f64],
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
+        _iter_budget: u64,
         _opts: &SolverOptions,
     ) -> (Option<SolverResult>, u64, u64) {
         (None, 0, 0)
@@ -124,12 +137,14 @@ pub(crate) trait Relaxation {
     /// Run the RENS heuristic: round a node LP relaxation by fixing integral
     /// components and restricting fractional ones to `{floor, ceil}`, then solve
     /// the small sub-MIP. Returns `(None, 0, 0)` for MIQP (default) or when
-    /// disabled/skipped. See [`Relaxation::run_rins`] for the `u64` meanings.
+    /// disabled/skipped. See [`Relaxation::run_rins`] for the `u64` meanings
+    /// and the `iter_budget` contract.
     fn run_rens(
         &self,
         _x_lp: &[f64],
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
+        _iter_budget: u64,
         _opts: &SolverOptions,
     ) -> (Option<SolverResult>, u64, u64) {
         (None, 0, 0)
@@ -138,12 +153,14 @@ pub(crate) trait Relaxation {
     /// Run the local-branching heuristic: add a Hamming-distance ≤ k cut on the
     /// binary variables around the incumbent and solve the neighborhood sub-MIP.
     /// Returns `(None, 0, 0)` for MIQP (default) or when disabled/skipped. See
-    /// [`Relaxation::run_rins`] for the `u64` meanings.
+    /// [`Relaxation::run_rins`] for the `u64` meanings and the `iter_budget`
+    /// contract.
     fn run_local_branching(
         &self,
         _x_inc: &[f64],
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
+        _iter_budget: u64,
         _opts: &SolverOptions,
     ) -> (Option<SolverResult>, u64, u64) {
         (None, 0, 0)
@@ -386,9 +403,15 @@ pub fn solve_milp_with_stats(
         let problem_bt: MilpProblem = match presolve_ok {
             None => {
                 // Infeasibility detected at presolve. Report the presolve time as
-                // relaxation_time_infeasible_ms so callers see a nonzero infeasibility cost.
+                // relaxation_time_infeasible_ms so callers see a nonzero infeasibility cost,
+                // and as root_probing_us (Codex review, P2) so this early return's cost is
+                // attributed the same way as the non-infeasible path below (`stats.root_
+                // probing_us = presolve_us;`) — without it, `milp_solve`'s `attribution_
+                // covered_us_root_inclusive` silently undercounts whenever probing proves
+                // infeasibility and takes non-negligible time.
                 let stats = MipStats {
                     relaxation_time_infeasible_ms: presolve_ms,
+                    root_probing_us: presolve_us,
                     ..Default::default()
                 };
                 return (SolverResult::infeasible(), stats);
@@ -651,6 +674,32 @@ fn solve_relaxation_with_scaling_retry<R: Relaxation>(
     {
         return res;
     }
+    // Codex review (P1): the retry re-solves the *same* relaxation the fast
+    // attempt already spent `res.iterations` on, so it must not receive a
+    // fresh copy of `fast_opts.max_iters` — that cap bounds this call's total
+    // simplex work (`solve_node_relaxation` sets it to the node's remaining
+    // share of `MipConfig::max_lp_iters`; see `SolverOptions::max_iters`).
+    // Handing the retry the same limit again would let one node/strong-branch
+    // candidate spend up to 2x its iteration allowance whenever the fast
+    // (unscaled) attempt exhausts its budget without converging (Stalled /
+    // MaxIterations, both in `needs_scaled_retry`). Charge the fast attempt's
+    // iterations against the shared cap first, and skip the retry outright
+    // once nothing remains — an unscaled attempt that stalled at exactly the
+    // node's remaining budget gains nothing from a differently-scaled retry
+    // that would immediately hit the same (now zero) cap.
+    let mut capped_retry_opts;
+    let retry_opts = match fast_opts.max_iters {
+        Some(cap) => {
+            let remaining = cap.saturating_sub(res.iterations as u64);
+            if remaining == 0 {
+                return res;
+            }
+            capped_retry_opts = retry_opts.clone();
+            capped_retry_opts.max_iters = Some(remaining);
+            &capped_retry_opts
+        }
+        None => retry_opts,
+    };
     let mut retry = problem.solve(bounds, retry_opts);
     retry.timing_breakdown = combine_timing(res.timing_breakdown, retry.timing_breakdown);
     // P3-F: the first (unscaled) attempt's simplex iterations would otherwise
@@ -1654,8 +1703,14 @@ fn try_rins<R: Relaxation>(
         };
         stats.rins_calls += 1;
         let rins_t0 = Instant::now();
-        let (res, sub_mip_nodes, sub_mip_iters) =
-            problem.run_rins(rel_sol, inc_sol, cfg, deadline, opts);
+        let (res, sub_mip_nodes, sub_mip_iters) = problem.run_rins(
+            rel_sol,
+            inc_sol,
+            cfg,
+            deadline,
+            effort::rins_iter_budget(stats),
+            opts,
+        );
         stats.rins_us = stats
             .rins_us
             .saturating_add(rins_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
@@ -1710,7 +1765,13 @@ fn try_rens<R: Relaxation>(
     }
     stats.rens_calls += 1;
     let rens_t0 = Instant::now();
-    let (rens_res, sub_mip_nodes, sub_mip_iters) = problem.run_rens(rel_sol, cfg, deadline, opts);
+    let (rens_res, sub_mip_nodes, sub_mip_iters) = problem.run_rens(
+        rel_sol,
+        cfg,
+        deadline,
+        effort::rens_iter_budget(stats),
+        opts,
+    );
     stats.rens_us = stats
         .rens_us
         .saturating_add(rens_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
@@ -1750,8 +1811,13 @@ fn try_local_branching<R: Relaxation>(
         };
         stats.local_branching_calls += 1;
         let lb_t0 = Instant::now();
-        let (res, sub_mip_nodes, sub_mip_iters) =
-            problem.run_local_branching(inc_sol, cfg, deadline, opts);
+        let (res, sub_mip_nodes, sub_mip_iters) = problem.run_local_branching(
+            inc_sol,
+            cfg,
+            deadline,
+            effort::local_branching_iter_budget(stats),
+            opts,
+        );
         stats.local_branching_us = stats
             .local_branching_us
             .saturating_add(lb_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);

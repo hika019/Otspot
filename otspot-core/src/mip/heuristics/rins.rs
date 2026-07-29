@@ -42,6 +42,13 @@ const RINS_MIN_REMAINING_SECS: f64 = 1.0;
 /// `total_simplex_iters` (see `effort`), both reported whenever a sub-MIP
 /// solve was actually attempted (0 when skipped before that point).
 ///
+/// `iter_budget` is RINS's own remaining share of `effort::
+/// total_simplex_iters` (see `Relaxation::run_rins`'s doc); the sub-MIP's
+/// `max_lp_iters` is capped at `min(heuristics::SUB_MIP_MAX_LP_ITERS,
+/// iter_budget)`, skipping the call outright when `iter_budget` is below
+/// `heuristics::SUB_MIP_MIN_LP_ITERS` (see
+/// `heuristics::capped_sub_mip_max_lp_iters`).
+///
 /// `parent_opts` is cloned and its timeout/deadline overridden so that
 /// tolerance, cancellation flag, and other settings are inherited by the sub-MIP.
 pub(crate) fn run_rins(
@@ -50,12 +57,16 @@ pub(crate) fn run_rins(
     x_inc: &[f64],
     cfg: &MipConfig,
     deadline: &Option<Instant>,
+    iter_budget: u64,
     parent_opts: &SolverOptions,
 ) -> (Option<SolverResult>, u64, u64) {
     let remaining_secs = remaining_budget(deadline);
     if remaining_secs < RINS_MIN_REMAINING_SECS {
         return (None, 0, 0);
     }
+    let Some(max_lp_iters) = super::capped_sub_mip_max_lp_iters(iter_budget) else {
+        return (None, 0, 0);
+    };
 
     let mut sub_bounds = problem.lp.bounds.clone();
     let mut n_fixed = 0usize;
@@ -85,7 +96,7 @@ pub(crate) fn run_rins(
     let sub_problem = MilpProblem::new(sub_lp, problem.integer_vars.clone())
         .expect("bounds-only mutation preserves num_vars; integer_vars already validated");
 
-    let sub_cfg = rins_sub_mip_config(cfg);
+    let sub_cfg = rins_sub_mip_config(cfg, max_lp_iters);
 
     let mut sub_opts = parent_opts.clone();
     sub_opts.deadline = Some(super::sub_mip_deadline(deadline, sub_timeout));
@@ -123,10 +134,10 @@ fn remaining_budget(deadline: &Option<Instant>) -> f64 {
     }
 }
 
-fn rins_sub_mip_config(cfg: &MipConfig) -> MipConfig {
+fn rins_sub_mip_config(cfg: &MipConfig, max_lp_iters: u64) -> MipConfig {
     let mut sub_cfg = cfg.clone();
     sub_cfg.max_nodes = RINS_NODE_LIMIT;
-    sub_cfg.max_lp_iters = Some(super::SUB_MIP_MAX_LP_ITERS);
+    sub_cfg.max_lp_iters = Some(max_lp_iters);
     sub_cfg.rins_enabled = false;
     sub_cfg.rens_enabled = false;
     sub_cfg.local_branching_enabled = false;
@@ -186,6 +197,7 @@ mod tests {
             &x_inc,
             &cfg,
             &None,
+            u64::MAX,
             &SolverOptions::default(),
         );
         let result = result.expect("RINS must return Some when at least one variable is fixed");
@@ -214,6 +226,7 @@ mod tests {
             &x_inc,
             &cfg,
             &None,
+            u64::MAX,
             &SolverOptions::default(),
         );
         assert!(
@@ -246,6 +259,7 @@ mod tests {
             &x_inc,
             &cfg,
             &None,
+            u64::MAX,
             &SolverOptions::default(),
         );
         assert!(
@@ -275,6 +289,7 @@ mod tests {
                 &x_inc,
                 &cfg,
                 &None,
+                u64::MAX,
                 &SolverOptions::default()
             )
             .0
@@ -300,6 +315,7 @@ mod tests {
                 &x_inc,
                 &cfg,
                 &Some(past),
+                u64::MAX,
                 &SolverOptions::default()
             )
             .0
@@ -337,25 +353,171 @@ mod tests {
             ..MipConfig::default()
         };
 
-        let sub_cfg = rins_sub_mip_config(&cfg);
+        let sub_cfg = rins_sub_mip_config(&cfg, crate::mip::heuristics::SUB_MIP_MAX_LP_ITERS);
         assert_eq!(sub_cfg.max_nodes, RINS_NODE_LIMIT);
         assert!(!sub_cfg.rins_enabled);
         assert!(!sub_cfg.rens_enabled);
         assert!(!sub_cfg.local_branching_enabled);
     }
 
-    /// Phase 1d (P1-B): the RINS sub-MIP config carries the deterministic
-    /// `max_lp_iters` cap, not just the node limit.
-    ///
-    /// Sentinel: removing `sub_cfg.max_lp_iters = ...` from
-    /// `rins_sub_mip_config` fails this test.
+    /// `rins_sub_mip_config` sets `max_lp_iters` to exactly the value it is
+    /// given (Codex review, P1: `run_rins` now computes this from RINS's own
+    /// remaining iteration-share budget — see the sibling `run_rins`-level
+    /// sentinels below — rather than the config builder hardcoding the flat
+    /// `SUB_MIP_MAX_LP_ITERS` constant).
     #[test]
-    fn rins_sub_mip_sets_deterministic_lp_iters_cap() {
-        let sub_cfg = rins_sub_mip_config(&MipConfig::default());
+    fn rins_sub_mip_config_sets_the_provided_lp_iters_cap() {
+        let sub_cfg = rins_sub_mip_config(&MipConfig::default(), 12_345);
+        assert_eq!(sub_cfg.max_lp_iters, Some(12_345));
+    }
+
+    /// SENTINEL (Codex review, P1): `run_rins`'s sub-MIP `max_lp_iters` is
+    /// capped by RINS's own remaining iteration-share budget (`iter_budget`),
+    /// not just the flat `SUB_MIP_MAX_LP_ITERS` constant — an "approved"
+    /// (`effort::may_run_rins == true`) call could otherwise still hand the
+    /// sub-MIP up to `SUB_MIP_MAX_LP_ITERS` iterations regardless of how
+    /// little share was actually left, overshooting RINS's iteration share
+    /// by up to that entire constant in one call. `50_000` is above
+    /// `heuristics::SUB_MIP_MIN_LP_ITERS` (30_000), so this exercises the
+    /// share-caps-below-the-flat-constant path rather than the skip path
+    /// (see `rins_skips_when_remaining_share_budget_is_below_min`).
+    ///
+    /// Sentinel: reverting `rins_sub_mip_config`'s `max_lp_iters` assignment
+    /// back to the flat `super::SUB_MIP_MAX_LP_ITERS` constant (ignoring
+    /// `iter_budget`) makes this assert `Some(SUB_MIP_MAX_LP_ITERS)` instead
+    /// of `Some(50_000)`, failing.
+    #[test]
+    fn rins_sub_mip_max_lp_iters_is_capped_by_remaining_share_budget() {
+        let problem = two_var_milp([-1.0, -1.0], 3.0);
+        let cfg = MipConfig::default();
+        let x_lp = vec![1.4, 1.6];
+        let x_inc = vec![1.0, 1.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &None,
+            50_000,
+            &SolverOptions::default(),
+        );
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: RINS must call the recursive sub-MIP"
+        );
+        assert_eq!(configs.len(), 1);
         assert_eq!(
-            sub_cfg.max_lp_iters,
+            configs[0].max_lp_iters,
+            Some(50_000),
+            "remaining share budget (50_000) must win over the larger flat \
+             SUB_MIP_MAX_LP_ITERS cap"
+        );
+    }
+
+    /// SENTINEL (markshare_4_0 regression fix): a small but *nonzero*
+    /// remaining share budget below `heuristics::SUB_MIP_MIN_LP_ITERS` must
+    /// skip RINS outright rather than attempt it with a truncated
+    /// `max_lp_iters` — see that constant's doc for why a truncated call is
+    /// worse than no call (fixed per-call overhead with no realistic chance
+    /// of finding an improving point before hitting the cap).
+    ///
+    /// Sentinel: removing the `SUB_MIP_MIN_LP_ITERS` floor from
+    /// `capped_sub_mip_max_lp_iters` (reverting to skip only at exactly 0)
+    /// makes `result.is_some()` and fails the recorded-config assertions.
+    #[test]
+    fn rins_skips_when_remaining_share_budget_is_below_min() {
+        let problem = two_var_milp([-1.0, -1.0], 3.0);
+        let cfg = MipConfig::default();
+        let x_lp = vec![1.4, 1.6];
+        let x_inc = vec![1.0, 1.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, sub_mip_nodes, sub_mip_iters) = run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &None,
+            crate::mip::heuristics::SUB_MIP_MIN_LP_ITERS - 1,
+            &SolverOptions::default(),
+        );
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_none(),
+            "a remaining share below SUB_MIP_MIN_LP_ITERS must skip RINS"
+        );
+        assert_eq!(configs.len(), 0, "the sub-MIP must never be attempted");
+        assert_eq!(sub_mip_nodes, 0);
+        assert_eq!(sub_mip_iters, 0);
+    }
+
+    /// An ample remaining share budget (larger than the flat constant) must
+    /// not exceed the flat `SUB_MIP_MAX_LP_ITERS` cap.
+    #[test]
+    fn rins_sub_mip_max_lp_iters_is_flat_cap_when_share_budget_is_ample() {
+        let problem = two_var_milp([-1.0, -1.0], 3.0);
+        let cfg = MipConfig::default();
+        let x_lp = vec![1.4, 1.6];
+        let x_inc = vec![1.0, 1.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(result.is_some());
+        assert_eq!(configs.len(), 1);
+        assert_eq!(
+            configs[0].max_lp_iters,
             Some(crate::mip::heuristics::SUB_MIP_MAX_LP_ITERS)
         );
+    }
+
+    /// SENTINEL (Codex review, P1): a remaining share budget of exactly 0
+    /// skips the sub-MIP call outright — it is never attempted, not
+    /// attempted with `Some(0)`.
+    ///
+    /// Sentinel: removing the `capped_sub_mip_max_lp_iters` early-return from
+    /// `run_rins` calls `solve_sub_milp` anyway, failing the recorded-config
+    /// count assertion.
+    #[test]
+    fn rins_skips_when_remaining_share_budget_is_zero() {
+        let problem = two_var_milp([-1.0, -1.0], 3.0);
+        let cfg = MipConfig::default();
+        let x_lp = vec![1.4, 1.6];
+        let x_inc = vec![1.0, 1.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, sub_mip_nodes, sub_mip_iters) = run_rins(
+            &problem,
+            &x_lp,
+            &x_inc,
+            &cfg,
+            &None,
+            0,
+            &SolverOptions::default(),
+        );
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_none(),
+            "zero remaining share budget must skip RINS"
+        );
+        assert_eq!(configs.len(), 0, "the sub-MIP must never be attempted");
+        assert_eq!(sub_mip_nodes, 0);
+        assert_eq!(sub_mip_iters, 0);
     }
 
     /// NEW (Phase 1a): the sub-MIP config disables recursive tree-cut
@@ -373,7 +535,7 @@ mod tests {
             ..MipConfig::default()
         };
 
-        let sub_cfg = rins_sub_mip_config(&cfg);
+        let sub_cfg = rins_sub_mip_config(&cfg, crate::mip::heuristics::SUB_MIP_MAX_LP_ITERS);
         assert!(
             !sub_cfg.tree_cuts,
             "RINS sub-MIP must disable in-tree cut separation"
@@ -409,6 +571,7 @@ mod tests {
             &x_inc,
             &cfg,
             &None,
+            u64::MAX,
             &SolverOptions::default(),
         );
         let configs = super::super::take_recorded_sub_mip_configs();
@@ -456,6 +619,7 @@ mod tests {
             &x_inc,
             &cfg,
             &Some(far_parent_deadline),
+            u64::MAX,
             &SolverOptions::default(),
         );
         let deadlines = super::super::take_recorded_sub_mip_deadlines();
@@ -477,6 +641,7 @@ mod tests {
             &x_inc,
             &cfg,
             &Some(near_parent_deadline),
+            u64::MAX,
             &SolverOptions::default(),
         );
         let deadlines = super::super::take_recorded_sub_mip_deadlines();
@@ -506,7 +671,7 @@ mod tests {
             cuts: true,
             ..MipConfig::default()
         };
-        let sub_cfg = rins_sub_mip_config(&cfg);
+        let sub_cfg = rins_sub_mip_config(&cfg, crate::mip::heuristics::SUB_MIP_MAX_LP_ITERS);
         assert!(
             !sub_cfg.cuts,
             "RINS sub-MIP must disable root cut generation"
@@ -536,6 +701,7 @@ mod tests {
             &x_inc,
             &cfg,
             &None,
+            u64::MAX,
             &SolverOptions::default(),
         );
         let configs = super::super::take_recorded_sub_mip_configs();
@@ -575,6 +741,7 @@ mod tests {
             &x_inc,
             &cfg,
             &None,
+            u64::MAX,
             &SolverOptions::default(),
         );
         let configs = super::super::take_recorded_sub_mip_configs();

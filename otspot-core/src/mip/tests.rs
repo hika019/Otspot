@@ -107,6 +107,45 @@ fn bt_detects_infeasibility_before_bb() {
     );
 }
 
+/// Codex review (P2): the presolve-proven-infeasible early return populates
+/// `root_probing_us`, not just `relaxation_time_infeasible_ms` — mirrors the
+/// non-infeasible root path's `stats.root_probing_us = presolve_us;`
+/// (`root_probing_and_symmetry_time_are_recorded`), so `milp_solve`'s
+/// `attribution_covered_us_root_inclusive` does not silently undercount
+/// whenever probing proves infeasibility and takes non-negligible time.
+///
+/// Sentinel: removing `root_probing_us: presolve_us,` from the presolve-
+/// infeasible `MipStats` construction in `solve_milp_with_stats` leaves
+/// `root_probing_us` at its `0` default, failing the last assertion.
+#[test]
+fn presolve_infeasible_early_return_populates_root_probing_us() {
+    let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
+    let lp = LpProblem::new_general(
+        vec![1.0],
+        a,
+        vec![3.7, 3.5],
+        vec![ConstraintType::Le, ConstraintType::Ge],
+        vec![(0.0, 10.0)],
+        None,
+    )
+    .unwrap();
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(
+        r.status,
+        SolveStatus::Infeasible,
+        "test premise: same BT-infeasible fixture as bt_detects_infeasibility_before_bb"
+    );
+    assert_eq!(
+        stats.nodes_processed, 0,
+        "test premise: infeasibility detected by BT, not B&B"
+    );
+    assert!(
+        stats.relaxation_time_infeasible_ms > 0.0,
+        "test premise: relaxation_time_infeasible_ms must be >0"
+    );
+    assert!(stats.root_probing_us > 0, "root_probing_us must be >0");
+}
+
 /// Equality row with a non-integer rhs drives both lb and ub of the same integer
 /// variable past each other, which must be caught as infeasibility before B&B.
 ///
@@ -1377,6 +1416,156 @@ fn scaling_retry_sums_iterations_from_both_attempts() {
         res.iterations, 10,
         "retry's reported iterations must sum both attempts (7 + 3)"
     );
+}
+
+/// SENTINEL (Codex review, P1): the scaling retry must not receive a fresh
+/// copy of `fast_opts.max_iters` — that cap bounds this call's *total*
+/// simplex work (set by `solve_node_relaxation` to the node's remaining
+/// share of `MipConfig::max_lp_iters`), so handing the retry the same limit
+/// again would let a single node/strong-branch candidate spend up to 2x its
+/// iteration allowance whenever the fast attempt stalls without converging.
+///
+/// Sentinel: removing the `fast_opts.max_iters`-based cap from
+/// `solve_relaxation_with_scaling_retry` (reverting to always passing
+/// `retry_opts` through unchanged) makes the last assertion FAIL: the mock
+/// would see `max_iters == Some(10)` (the original, uncapped budget) on the
+/// retry call instead of `Some(3)` (10 - 7 already spent).
+#[test]
+fn scaling_retry_caps_retry_max_iters_by_remaining_budget() {
+    use std::cell::{Cell, RefCell};
+
+    struct BudgetCapMock {
+        calls: Cell<usize>,
+        seen_max_iters: RefCell<Vec<Option<u64>>>,
+    }
+
+    impl super::Relaxation for BudgetCapMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &[(0.0, 1.0)]
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &[0]
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            self.seen_max_iters.borrow_mut().push(opts.max_iters);
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            if !opts.use_ruiz_scaling {
+                SolverResult {
+                    status: SolveStatus::Stalled,
+                    iterations: 7,
+                    solution: vec![0.5],
+                    ..Default::default()
+                }
+            } else {
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 1.0,
+                    iterations: 2,
+                    solution: vec![1.0],
+                    ..Default::default()
+                }
+            }
+        }
+    }
+
+    let problem = BudgetCapMock {
+        calls: Cell::new(0),
+        seen_max_iters: RefCell::new(Vec::new()),
+    };
+    let fast = SolverOptions {
+        use_ruiz_scaling: false,
+        max_iters: Some(10),
+        ..SolverOptions::default()
+    };
+    let retry = SolverOptions {
+        use_ruiz_scaling: true,
+        max_iters: Some(10),
+        ..SolverOptions::default()
+    };
+    let res = super::solve_relaxation_with_scaling_retry(&problem, &[(0.0, 1.0)], &fast, &retry);
+    assert_eq!(
+        problem.calls.get(),
+        2,
+        "test premise: Stalled on the fast attempt must trigger a scaled retry"
+    );
+    let seen = problem.seen_max_iters.borrow();
+    assert_eq!(seen[0], Some(10), "fast attempt keeps its own max_iters");
+    assert_eq!(
+        seen[1],
+        Some(3),
+        "retry's max_iters must be the remaining budget (10 - 7 already spent \
+         by the fast attempt), not a fresh Some(10) copy"
+    );
+    assert_eq!(
+        res.iterations, 9,
+        "retry's reported iterations sum both attempts (7 + 2)"
+    );
+}
+
+/// SENTINEL (Codex review, P1): when the fast attempt's Stalled/MaxIterations
+/// result already exhausted `fast_opts.max_iters`, the retry must not run at
+/// all — zero budget remains, so a differently-scaled retry would only add
+/// cost without any chance to do useful work before immediately hitting the
+/// same (now zero) cap.
+///
+/// Sentinel: removing the `remaining == 0` early-return from
+/// `solve_relaxation_with_scaling_retry` makes the first assertion FAIL
+/// (`calls` becomes 2 instead of 1, since the retry still runs).
+#[test]
+fn scaling_retry_skips_when_fast_attempt_exhausts_budget() {
+    use std::cell::Cell;
+
+    struct ExhaustedBudgetMock {
+        calls: Cell<usize>,
+    }
+
+    impl super::Relaxation for ExhaustedBudgetMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &[(0.0, 1.0)]
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &[0]
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            self.calls.set(self.calls.get() + 1);
+            SolverResult {
+                status: SolveStatus::Stalled,
+                iterations: 7,
+                solution: vec![0.5],
+                ..Default::default()
+            }
+        }
+    }
+
+    let problem = ExhaustedBudgetMock {
+        calls: Cell::new(0),
+    };
+    let fast = SolverOptions {
+        use_ruiz_scaling: false,
+        max_iters: Some(7),
+        ..SolverOptions::default()
+    };
+    let retry = SolverOptions {
+        use_ruiz_scaling: true,
+        max_iters: Some(7),
+        ..SolverOptions::default()
+    };
+    let res = super::solve_relaxation_with_scaling_retry(&problem, &[(0.0, 1.0)], &fast, &retry);
+    assert_eq!(
+        problem.calls.get(),
+        1,
+        "a fast attempt that exhausted the entire max_iters budget must not \
+         trigger a scaled retry"
+    );
+    assert_eq!(res.status, SolveStatus::Stalled);
+    assert_eq!(res.iterations, 7);
 }
 
 /// LP relaxation infeasibility populates infeasible_ms when LP (not propagation) detects it.
@@ -3384,6 +3573,7 @@ impl super::Relaxation for RensScheduleMock {
         _x_lp: &[f64],
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
+        _iter_budget: u64,
         _opts: &SolverOptions,
     ) -> (Option<SolverResult>, u64, u64) {
         self.calls.set(self.calls.get() + 1);
@@ -3901,6 +4091,7 @@ fn heuristic_iter_share_is_enforced() {
             _x_inc: &[f64],
             _cfg: &MipConfig,
             _deadline: &Option<std::time::Instant>,
+            _iter_budget: u64,
             _opts: &SolverOptions,
         ) -> (Option<SolverResult>, u64, u64) {
             self.calls.set(self.calls.get() + 1);
@@ -3967,6 +4158,153 @@ fn heuristic_iter_share_is_enforced() {
         problem.calls.get(),
         1,
         "under-share RINS iteration budget must allow RINS"
+    );
+}
+
+/// SENTINEL (Codex review, P1): `try_rins`/`try_rens`/`try_local_branching`
+/// each pass their own `effort::*_iter_budget(stats)` — the *remaining*
+/// share, not the raw approval boolean or an unbounded sentinel — down to
+/// `Relaxation::run_rins`/`run_rens`/`run_local_branching`'s `iter_budget`
+/// parameter. `effort::may_run_*` alone only approves a call; without this,
+/// the approved call would be handed no information about how much of its
+/// share is actually left, unable to cap its own sub-MIP work accordingly
+/// (see `heuristics::capped_sub_mip_max_lp_iters`).
+///
+/// Sentinel: replacing `effort::rins_iter_budget(stats)` / `effort::
+/// rens_iter_budget(stats)` / `effort::local_branching_iter_budget(stats)`
+/// with e.g. `u64::MAX` at any of the three `try_*` call sites makes the
+/// corresponding recorded value below mismatch the independently computed
+/// expectation, failing that assertion.
+#[test]
+fn try_heuristics_pass_their_own_remaining_share_budget_to_run() {
+    use std::cell::Cell;
+
+    struct BudgetRecordingMock {
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+        seen_rins_budget: Cell<Option<u64>>,
+        seen_rens_budget: Cell<Option<u64>>,
+        seen_lb_budget: Cell<Option<u64>>,
+    }
+
+    impl super::Relaxation for BudgetRecordingMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            unreachable!("budget-plumbing sentinel should not solve node relaxations")
+        }
+        fn run_rins(
+            &self,
+            _x_lp: &[f64],
+            _x_inc: &[f64],
+            _cfg: &MipConfig,
+            _deadline: &Option<std::time::Instant>,
+            iter_budget: u64,
+            _opts: &SolverOptions,
+        ) -> (Option<SolverResult>, u64, u64) {
+            self.seen_rins_budget.set(Some(iter_budget));
+            (None, 1, 1)
+        }
+        fn run_rens(
+            &self,
+            _x_lp: &[f64],
+            _cfg: &MipConfig,
+            _deadline: &Option<std::time::Instant>,
+            iter_budget: u64,
+            _opts: &SolverOptions,
+        ) -> (Option<SolverResult>, u64, u64) {
+            self.seen_rens_budget.set(Some(iter_budget));
+            (None, 1, 1)
+        }
+        fn run_local_branching(
+            &self,
+            _x_inc: &[f64],
+            _cfg: &MipConfig,
+            _deadline: &Option<std::time::Instant>,
+            iter_budget: u64,
+            _opts: &SolverOptions,
+        ) -> (Option<SolverResult>, u64, u64) {
+            self.seen_lb_budget.set(Some(iter_budget));
+            (None, 1, 1)
+        }
+    }
+
+    let problem = BudgetRecordingMock {
+        root_bounds: [(0.0, 1.0)],
+        int_vars: [0],
+        seen_rins_budget: Cell::new(None),
+        seen_rens_budget: Cell::new(None),
+        seen_lb_budget: Cell::new(None),
+    };
+    let cfg = MipConfig::default();
+    let mut state = super::MipState::new();
+    let incumbent = SolverResult {
+        status: SolveStatus::Optimal,
+        objective: -1.0,
+        solution: vec![1.0],
+        ..SolverResult::default()
+    };
+    assert!(
+        state.consider(&incumbent),
+        "test premise: incumbent must be seeded"
+    );
+
+    // Distinct component-iteration counts so each of the three shares is
+    // independently under its bound and yields a distinct, checkable value.
+    let mut stats = super::MipStats {
+        nodes_processed: super::heuristics::rins::RINS_INTERVAL
+            .max(super::heuristics::local_branching::LOCAL_BRANCHING_INTERVAL),
+        lp_iters_total: 1_000_000,
+        rins_iters: 1_000,
+        rens_iters: 2_000,
+        local_branching_iters: 3_000,
+        ..Default::default()
+    };
+    let expected_rins = super::effort::rins_iter_budget(&stats);
+    let expected_rens = super::effort::rens_iter_budget(&stats);
+    let expected_lb = super::effort::local_branching_iter_budget(&stats);
+
+    super::try_rins(
+        &problem,
+        &mut stats.clone(),
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    super::try_rens(
+        &problem,
+        &mut stats.clone(),
+        &mut state,
+        &cfg,
+        &None,
+        &opts(),
+        &[0.5],
+    );
+    super::try_local_branching(&problem, &mut stats, &mut state, &cfg, &None, &opts());
+
+    assert_eq!(
+        problem.seen_rins_budget.get(),
+        Some(expected_rins),
+        "try_rins must pass effort::rins_iter_budget(stats)"
+    );
+    assert_eq!(
+        problem.seen_rens_budget.get(),
+        Some(expected_rens),
+        "try_rens must pass effort::rens_iter_budget(stats)"
+    );
+    assert_eq!(
+        problem.seen_lb_budget.get(),
+        Some(expected_lb),
+        "try_local_branching must pass effort::local_branching_iter_budget(stats)"
     );
 }
 
@@ -4257,6 +4595,7 @@ fn try_rins_incumbent_improvement_resets_separation_dry_streak() {
             _x_inc: &[f64],
             _cfg: &MipConfig,
             _deadline: &Option<std::time::Instant>,
+            _iter_budget: u64,
             _opts: &SolverOptions,
         ) -> (Option<SolverResult>, u64, u64) {
             (

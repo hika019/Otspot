@@ -168,33 +168,113 @@ pub(crate) fn may_run_strong_branch(stats: &MipStats) -> bool {
     )
 }
 
+/// `floor(share * total_iters) - component_iters`, i.e. the remaining
+/// iterations `component_iters` may still spend before reaching `share` of
+/// `total_iters`. `u64::MAX` when `total_iters == 0` (nothing solved yet, so
+/// the very first opportunity is never budget-starved by an empty
+/// denominator) — mirrors [`may_run`]'s zero-total early-allow.
+fn iter_budget_remaining(component_iters: u64, total_iters: u64, share: f64) -> u64 {
+    if total_iters == 0 {
+        return u64::MAX;
+    }
+    let allowed = (share * total_iters as f64) as u64;
+    allowed.saturating_sub(component_iters)
+}
+
 /// Per-call iteration budget remaining for one in-tree separation attempt:
 /// how many more iterations separation may spend before its cumulative usage
 /// would meet or exceed [`SEPARATION_ITER_SHARE`] of [`total_simplex_iters`].
 ///
-/// `cuts::separate_tree_cuts` has no way to cap a *single* LP solve's
-/// iteration count — the underlying `revised_simplex_core` has no iteration
-/// limit option, relying solely on the wall-clock deadline (confirmed by
-/// reading `otspot-core/src/simplex/primal/core.rs`: `let max_iter =
-/// usize::MAX; // timeout is the real guard`) — so this cap is checked only
-/// at round boundaries (after a round's LP solves complete, before starting
-/// the next). It cannot prevent one abnormally expensive single LP solve
-/// within a round (Phase 1c re-bench: `dcmulti` had one such 27s solve) but
-/// does bound how many *additional* rounds a single attempt may run once the
-/// running total is already large.
-///
-/// Mirrors [`may_run`]'s zero-total early-allow: `share * 0 == 0` would
-/// otherwise floor the very first attempt's budget to 0 (in practice
-/// unreachable once any node has been processed, since `total_simplex_iters`
-/// is floored at `nodes_processed`, but kept as an explicit contract rather
-/// than relying on that floor from a different function).
+/// Starting a new round in `cuts::separate_tree_cuts` requires this to be at
+/// least the per-dimension useful minimum (`cuts::tree_cut_min_useful_iters`)
+/// — below that, the round is skipped rather than attempted with a
+/// truncated `max_iters` (markshare_4_0 regression fix). Historically
+/// (Phase 1c) this budget was checked only at round boundaries, and the
+/// underlying simplex core had no iteration-limit option of its own, relying
+/// solely on the wall-clock deadline, so one abnormally expensive single LP
+/// solve within an already-started round could not be capped (re-bench:
+/// `dcmulti` had one such 27s solve). `SolverOptions::max_iters` closed that
+/// gap (Codex review, P1) — `cuts::separate_tree_cuts` now passes each
+/// individual cold solve its own remaining allowance as its `max_iters`, so
+/// a single solve's cost is bounded by exactly this budget rather than only
+/// by the wall clock.
 pub(crate) fn separation_iter_budget(stats: &MipStats) -> u64 {
-    let total = total_simplex_iters(stats);
-    if total == 0 {
+    iter_budget_remaining(
+        stats.tree_cut_iters,
+        total_simplex_iters(stats),
+        SEPARATION_ITER_SHARE,
+    )
+}
+
+/// Like [`iter_budget_remaining`], but the share ceiling (`share *
+/// total_iters`, before subtracting `component_iters`) is floored at
+/// [`heuristics::SUB_MIP_MAX_LP_ITERS`](super::heuristics::SUB_MIP_MAX_LP_ITERS).
+///
+/// `SUB_MIP_MAX_LP_ITERS` was calibrated from a *single* call's own
+/// recursive iteration need on realistic instances (see its doc: `khb05250`'s
+/// local-branching call alone needed 595,689; `gt2`'s needed 386,937) — an
+/// entirely different scale from `share * total_simplex_iters`, which for a
+/// whole gt2/khb05250-sized search never approaches `SUB_MIP_MAX_LP_ITERS /
+/// RINS_ITER_SHARE` (≈9.6M). Using the raw (unfloored) share as a hard
+/// per-call cap therefore starves *every* call on realistic small/medium
+/// instances — confirmed by direct regression: `gt2 --timeout 60` regressed
+/// from a deterministic 200-node `Optimal` to a non-deterministic ~2500-node
+/// `Timeout`, three repeats landing on three different node counts.
+///
+/// Flooring the ceiling at `SUB_MIP_MAX_LP_ITERS` gives a heuristic whose
+/// cumulative usage is still below that constant the same full flat-constant
+/// budget as before this fix; the floor is a no-op once `share *
+/// total_simplex_iters` genuinely exceeds it (large/long searches), where
+/// `heuristics::capped_sub_mip_max_lp_iters` still caps every call at
+/// `min(SUB_MIP_MAX_LP_ITERS, this)` and skips the call outright once the
+/// remaining allowance drops below `heuristics::SUB_MIP_MIN_LP_ITERS`.
+fn sub_mip_iter_budget_remaining(component_iters: u64, total_iters: u64, share: f64) -> u64 {
+    if total_iters == 0 {
         return u64::MAX;
     }
-    let allowed = (SEPARATION_ITER_SHARE * total as f64) as u64;
-    allowed.saturating_sub(stats.tree_cut_iters)
+    let allowed =
+        ((share * total_iters as f64) as u64).max(super::heuristics::SUB_MIP_MAX_LP_ITERS);
+    allowed.saturating_sub(component_iters)
+}
+
+/// Per-call iteration budget remaining for one RINS sub-MIP call: how many
+/// more iterations RINS may spend before its cumulative usage would meet or
+/// exceed [`RINS_ITER_SHARE`] of [`total_simplex_iters`] (floored at
+/// `heuristics::SUB_MIP_MAX_LP_ITERS` — see [`sub_mip_iter_budget_remaining`]).
+///
+/// Codex review (P1): `may_run_rins` alone only *approves* a call — it does
+/// not cap the size of the approved work. Without this, an approved call's
+/// sub-MIP `max_lp_iters` was the flat `heuristics::SUB_MIP_MAX_LP_ITERS`
+/// constant regardless of how little of RINS's own share was actually left,
+/// letting a single "approved" sub-MIP call overshoot its share by up to
+/// that entire constant in one call. See
+/// `heuristics::capped_sub_mip_max_lp_iters`.
+pub(crate) fn rins_iter_budget(stats: &MipStats) -> u64 {
+    sub_mip_iter_budget_remaining(
+        stats.rins_iters,
+        total_simplex_iters(stats),
+        RINS_ITER_SHARE,
+    )
+}
+
+/// Per-call iteration budget remaining for one RENS sub-MIP call. See
+/// [`rins_iter_budget`] for the rationale.
+pub(crate) fn rens_iter_budget(stats: &MipStats) -> u64 {
+    sub_mip_iter_budget_remaining(
+        stats.rens_iters,
+        total_simplex_iters(stats),
+        RENS_ITER_SHARE,
+    )
+}
+
+/// Per-call iteration budget remaining for one local-branching sub-MIP call.
+/// See [`rins_iter_budget`] for the rationale.
+pub(crate) fn local_branching_iter_budget(stats: &MipStats) -> u64 {
+    sub_mip_iter_budget_remaining(
+        stats.local_branching_iters,
+        total_simplex_iters(stats),
+        LOCAL_BRANCHING_ITER_SHARE,
+    )
 }
 
 #[cfg(test)]
@@ -284,6 +364,93 @@ mod tests {
         });
         // 0.15 * 1_000_000 - 40_000 = 110_000.
         assert_eq!(separation_iter_budget(&s), 110_000);
+    }
+
+    /// SENTINEL (Codex review, P1 fix follow-up): on a small/medium-scale
+    /// search, `share * total_simplex_iters` stays far below
+    /// `heuristics::SUB_MIP_MAX_LP_ITERS` (480_000) — that constant was
+    /// calibrated from a *single* call's own recursive iteration need on
+    /// realistic instances, not from 5% of the *parent* search's cumulative
+    /// count. `rins_iter_budget`/`rens_iter_budget`/`local_branching_iter_
+    /// budget` must floor their ceiling at that constant, or every call is
+    /// starved for the whole search on exactly this scale (confirmed by
+    /// direct regression: `gt2 --timeout 60` went from a deterministic
+    /// 200-node `Optimal` to a non-deterministic ~2500-node `Timeout` when
+    /// capped to the raw, unfloored share).
+    ///
+    /// Sentinel: removing `sub_mip_iter_budget_remaining`'s `.max(super::
+    /// heuristics::SUB_MIP_MAX_LP_ITERS)` floor makes each of these return
+    /// `40_000` (the raw `0.05 * 1_000_000 - 10_000` share) instead of
+    /// `470_000` (`480_000 - 10_000`), failing the assertions.
+    #[test]
+    fn heuristic_iter_budgets_floor_their_ceiling_at_sub_mip_max_lp_iters() {
+        let s = stats_with(|s| {
+            s.lp_iters_total = 990_000;
+            s.rins_iters = 10_000;
+        });
+        assert_eq!(rins_iter_budget(&s), 470_000);
+
+        let s = stats_with(|s| {
+            s.lp_iters_total = 990_000;
+            s.rens_iters = 10_000;
+        });
+        assert_eq!(rens_iter_budget(&s), 470_000);
+
+        let s = stats_with(|s| {
+            s.lp_iters_total = 990_000;
+            s.local_branching_iters = 10_000;
+        });
+        assert_eq!(local_branching_iter_budget(&s), 470_000);
+    }
+
+    /// Once `share * total_simplex_iters` genuinely exceeds the
+    /// `SUB_MIP_MAX_LP_ITERS` floor (a large/long search), the floor is a
+    /// no-op and the raw share governs — the original per-call cap this
+    /// fix is meant to provide for exactly that regime.
+    #[test]
+    fn heuristic_iter_budget_uses_raw_share_once_it_exceeds_the_floor() {
+        // total = 20_000_000; 0.05 * 20_000_000 = 1_000_000 > 480_000 floor.
+        let s = stats_with(|s| {
+            s.lp_iters_total = 19_900_000;
+            s.rins_iters = 100_000;
+        });
+        assert_eq!(rins_iter_budget(&s), 900_000);
+    }
+
+    /// SENTINEL: a component already at or beyond its (floored) ceiling has
+    /// 0 remaining budget, not a negative/wrapped value —
+    /// `sub_mip_iter_budget_remaining` saturates rather than underflowing.
+    ///
+    /// Sentinel: replacing the `saturating_sub` in
+    /// `sub_mip_iter_budget_remaining` with a plain `-` panics (debug) or
+    /// wraps to a huge `u64` (release) instead of returning `0`, failing
+    /// this assertion either way.
+    #[test]
+    fn heuristic_iter_budget_saturates_at_zero_when_over_the_floored_ceiling() {
+        // total = 20_000_000, share ceiling = 0.05 * 20_000_000 = 1_000_000
+        // (> the 480_000 floor, so the floor is a no-op here); rins_iters
+        // (1_000_000) is already at that ceiling.
+        let s = stats_with(|s| {
+            s.lp_iters_total = 19_000_000;
+            s.rins_iters = 1_000_000;
+        });
+        assert_eq!(rins_iter_budget(&s), 0);
+    }
+
+    /// SENTINEL: `total_iters == 0` (nothing solved yet) reports `u64::MAX`
+    /// (truly unbounded), not merely `SUB_MIP_MAX_LP_ITERS` from the floor —
+    /// mirrors `zero_total_iters_always_allows`'s `may_run_*` coverage.
+    ///
+    /// Sentinel: removing the `total_iters == 0` early-return from
+    /// `sub_mip_iter_budget_remaining` makes each of these return
+    /// `SUB_MIP_MAX_LP_ITERS` (`0.max(SUB_MIP_MAX_LP_ITERS)`, unaffected by
+    /// `component_iters == 0`) instead of `u64::MAX`, failing this assertion.
+    #[test]
+    fn heuristic_iter_budgets_are_unbounded_at_zero_total_iters() {
+        let stats = MipStats::default();
+        assert_eq!(rins_iter_budget(&stats), u64::MAX);
+        assert_eq!(rens_iter_budget(&stats), u64::MAX);
+        assert_eq!(local_branching_iter_budget(&stats), u64::MAX);
     }
 
     /// SENTINEL (P2-D): `nodes_processed` floors `total_simplex_iters` so a

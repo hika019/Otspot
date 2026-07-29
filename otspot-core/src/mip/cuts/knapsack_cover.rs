@@ -288,7 +288,7 @@ mod tests {
     }
 
     fn lp_root(lp: &LpProblem) -> crate::problem::SolverResult {
-        crate::mip::cuts::solve_cut_lp(lp, &crate::options::SolverOptions::default(), None)
+        crate::mip::cuts::solve_cut_lp(lp, &crate::options::SolverOptions::default(), None, None)
     }
 
     /// **Sentinel — lifting + separation:** a cut is generated, it cuts the LP

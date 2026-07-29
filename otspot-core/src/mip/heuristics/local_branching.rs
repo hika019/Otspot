@@ -61,11 +61,19 @@ const LOCAL_BRANCHING_MIN_REMAINING_SECS: f64 = 1.0;
 /// and its own recursive `total_simplex_iters` (see `effort`), both reported
 /// whenever a sub-MIP solve was actually attempted (0 when skipped before
 /// that point).
+///
+/// `iter_budget` is local branching's own remaining share of `effort::
+/// total_simplex_iters` (see `Relaxation::run_local_branching`'s doc); the
+/// sub-MIP's `max_lp_iters` is capped at `min(heuristics::
+/// SUB_MIP_MAX_LP_ITERS, iter_budget)`, skipping the call outright when
+/// `iter_budget` is below `heuristics::SUB_MIP_MIN_LP_ITERS` (see
+/// `heuristics::capped_sub_mip_max_lp_iters`).
 pub(crate) fn run_local_branching(
     problem: &MilpProblem,
     x_inc: &[f64],
     cfg: &MipConfig,
     deadline: &Option<Instant>,
+    iter_budget: u64,
     parent_opts: &SolverOptions,
 ) -> (Option<SolverResult>, u64, u64) {
     local_branching_with_k(
@@ -74,6 +82,7 @@ pub(crate) fn run_local_branching(
         LOCAL_BRANCHING_K,
         cfg,
         deadline,
+        iter_budget,
         parent_opts,
     )
 }
@@ -87,12 +96,16 @@ fn local_branching_with_k(
     k: usize,
     cfg: &MipConfig,
     deadline: &Option<Instant>,
+    iter_budget: u64,
     parent_opts: &SolverOptions,
 ) -> (Option<SolverResult>, u64, u64) {
     let remaining_secs = remaining_budget(deadline);
     if remaining_secs < LOCAL_BRANCHING_MIN_REMAINING_SECS {
         return (None, 0, 0);
     }
+    let Some(max_lp_iters) = super::capped_sub_mip_max_lp_iters(iter_budget) else {
+        return (None, 0, 0);
+    };
 
     // Binary variables = integer variables with a [0,1] box.
     let binaries: Vec<usize> = problem
@@ -121,7 +134,7 @@ fn local_branching_with_k(
 
     let mut sub_cfg = cfg.clone();
     sub_cfg.max_nodes = LOCAL_BRANCHING_NODE_LIMIT;
-    sub_cfg.max_lp_iters = Some(super::SUB_MIP_MAX_LP_ITERS);
+    sub_cfg.max_lp_iters = Some(max_lp_iters);
     sub_cfg.rins_enabled = false;
     sub_cfg.rens_enabled = false;
     sub_cfg.local_branching_enabled = false;
@@ -285,8 +298,14 @@ mod tests {
         let x_inc = vec![1.0, 0.0, 0.0];
         let inc_obj = -1.0;
 
-        let (res, _sub_mip_nodes, _sub_mip_iters) =
-            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let (res, _sub_mip_nodes, _sub_mip_iters) = run_local_branching(
+            &problem,
+            &x_inc,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
         let res = res.expect("local branching must return a feasible neighborhood solution");
         assert!(
             res.objective < inc_obj - 1e-6,
@@ -313,8 +332,14 @@ mod tests {
         let cfg = MipConfig::default();
         let x_inc = vec![1.0, 0.0, 0.0];
 
-        let (res, sub_mip_nodes, _sub_mip_iters) =
-            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let (res, sub_mip_nodes, _sub_mip_iters) = run_local_branching(
+            &problem,
+            &x_inc,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
         assert!(
             res.is_some(),
             "test premise: local branching must attempt a sub-MIP"
@@ -339,8 +364,14 @@ mod tests {
         let cfg = MipConfig::default();
         let x_inc = vec![1.0, 0.0, 0.0];
 
-        let (res, _sub_mip_nodes, sub_mip_iters) =
-            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let (res, _sub_mip_nodes, sub_mip_iters) = run_local_branching(
+            &problem,
+            &x_inc,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
         assert!(
             res.is_some(),
             "test premise: local branching must attempt a sub-MIP"
@@ -363,8 +394,14 @@ mod tests {
             ..SolverResult::default()
         });
 
-        let (result, _sub_mip_nodes, _sub_mip_iters) =
-            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_local_branching(
+            &problem,
+            &x_inc,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
         let result =
             result.expect("local branching must keep feasible timeout incumbent from sub-MIP");
 
@@ -385,8 +422,15 @@ mod tests {
         let cfg = MipConfig::default();
         let x_inc = vec![0.0, 0.0, 0.0];
 
-        let (res, _sub_mip_nodes, _sub_mip_iters) =
-            local_branching_with_k(&problem, &x_inc, 1, &cfg, &None, &SolverOptions::default());
+        let (res, _sub_mip_nodes, _sub_mip_iters) = local_branching_with_k(
+            &problem,
+            &x_inc,
+            1,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
         let res = res.expect("k=1 neighborhood is feasible (contains the incumbent)");
         assert!(
             (res.objective - (-1.0)).abs() < 1e-6,
@@ -403,8 +447,15 @@ mod tests {
         let cfg = MipConfig::default();
         let x_inc = vec![1.0, 0.0, 0.0];
 
-        let (res, _sub_mip_nodes, _sub_mip_iters) =
-            local_branching_with_k(&problem, &x_inc, 0, &cfg, &None, &SolverOptions::default());
+        let (res, _sub_mip_nodes, _sub_mip_iters) = local_branching_with_k(
+            &problem,
+            &x_inc,
+            0,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
         let res = res.expect("k=0 neighborhood still contains the incumbent");
         assert!(
             (res.objective - (-1.0)).abs() < 1e-6,
@@ -429,9 +480,16 @@ mod tests {
         let problem = MilpProblem::new(lp, vec![0]).unwrap();
         let cfg = MipConfig::default();
         assert!(
-            run_local_branching(&problem, &[3.0], &cfg, &None, &SolverOptions::default())
-                .0
-                .is_none(),
+            run_local_branching(
+                &problem,
+                &[3.0],
+                &cfg,
+                &None,
+                u64::MAX,
+                &SolverOptions::default()
+            )
+            .0
+            .is_none(),
             "local branching requires binary variables"
         );
     }
@@ -454,8 +512,14 @@ mod tests {
         let x_inc = vec![1.0, 0.0, 0.0];
 
         super::super::clear_recorded_sub_mip_configs();
-        let (result, _sub_mip_nodes, _sub_mip_iters) =
-            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_local_branching(
+            &problem,
+            &x_inc,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
         let configs = super::super::take_recorded_sub_mip_configs();
 
         assert!(
@@ -491,8 +555,14 @@ mod tests {
         let x_inc = vec![1.0, 0.0, 0.0];
 
         super::super::clear_recorded_sub_mip_configs();
-        let (result, _sub_mip_nodes, _sub_mip_iters) =
-            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_local_branching(
+            &problem,
+            &x_inc,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
         let configs = super::super::take_recorded_sub_mip_configs();
 
         assert!(
@@ -523,8 +593,14 @@ mod tests {
         let x_inc = vec![1.0, 0.0, 0.0];
 
         super::super::clear_recorded_sub_mip_configs();
-        let (result, _sub_mip_nodes, _sub_mip_iters) =
-            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_local_branching(
+            &problem,
+            &x_inc,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
         let configs = super::super::take_recorded_sub_mip_configs();
 
         assert!(
@@ -558,8 +634,14 @@ mod tests {
         let x_inc = vec![1.0, 0.0, 0.0];
 
         super::super::clear_recorded_sub_mip_configs();
-        let (result, _sub_mip_nodes, _sub_mip_iters) =
-            run_local_branching(&problem, &x_inc, &cfg, &None, &SolverOptions::default());
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_local_branching(
+            &problem,
+            &x_inc,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
         let configs = super::super::take_recorded_sub_mip_configs();
 
         assert!(
@@ -571,6 +653,114 @@ mod tests {
             configs[0].max_lp_iters,
             Some(crate::mip::heuristics::SUB_MIP_MAX_LP_ITERS)
         );
+    }
+
+    /// SENTINEL (Codex review, P1): `run_local_branching`'s sub-MIP
+    /// `max_lp_iters` is capped by local branching's own remaining
+    /// iteration-share budget (`iter_budget`), not just the flat
+    /// `SUB_MIP_MAX_LP_ITERS` constant — an "approved" (`effort::
+    /// may_run_local_branching == true`) call could otherwise still hand the
+    /// sub-MIP up to `SUB_MIP_MAX_LP_ITERS` iterations regardless of how
+    /// little share was actually left. `50_000` is above `heuristics::
+    /// SUB_MIP_MIN_LP_ITERS` (30_000), so this exercises the
+    /// share-caps-below-the-flat-constant path rather than the skip path
+    /// (see `local_branching_skips_when_remaining_share_budget_is_below_min`).
+    ///
+    /// Sentinel: reverting `local_branching_with_k`'s `sub_cfg.max_lp_iters`
+    /// assignment back to the flat `super::SUB_MIP_MAX_LP_ITERS` constant
+    /// (ignoring `iter_budget`) makes this assert `Some(SUB_MIP_MAX_LP_ITERS)`
+    /// instead of `Some(50_000)`, failing.
+    #[test]
+    fn local_branching_sub_mip_max_lp_iters_is_capped_by_remaining_share_budget() {
+        let problem = binary_knapsack(vec![-1.0, -1.0, -1.0], 2.0);
+        let cfg = MipConfig::default();
+        let x_inc = vec![1.0, 0.0, 0.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_local_branching(
+            &problem,
+            &x_inc,
+            &cfg,
+            &None,
+            50_000,
+            &SolverOptions::default(),
+        );
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: local branching must call the recursive sub-MIP"
+        );
+        assert_eq!(configs.len(), 1);
+        assert_eq!(
+            configs[0].max_lp_iters,
+            Some(50_000),
+            "remaining share budget (50_000) must win over the larger flat \
+             SUB_MIP_MAX_LP_ITERS cap"
+        );
+    }
+
+    /// SENTINEL (markshare_4_0 regression fix): a small but *nonzero*
+    /// remaining share budget below `heuristics::SUB_MIP_MIN_LP_ITERS` must
+    /// skip local branching outright rather than attempt it with a truncated
+    /// `max_lp_iters` — see that constant's doc for why a truncated call is
+    /// worse than no call.
+    ///
+    /// Sentinel: removing the `SUB_MIP_MIN_LP_ITERS` floor from
+    /// `capped_sub_mip_max_lp_iters` (reverting to skip only at exactly 0)
+    /// makes `result.is_some()` and fails the recorded-config assertions.
+    #[test]
+    fn local_branching_skips_when_remaining_share_budget_is_below_min() {
+        let problem = binary_knapsack(vec![-1.0, -1.0, -1.0], 2.0);
+        let cfg = MipConfig::default();
+        let x_inc = vec![1.0, 0.0, 0.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, sub_mip_nodes, sub_mip_iters) = run_local_branching(
+            &problem,
+            &x_inc,
+            &cfg,
+            &None,
+            crate::mip::heuristics::SUB_MIP_MIN_LP_ITERS - 1,
+            &SolverOptions::default(),
+        );
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_none(),
+            "a remaining share below SUB_MIP_MIN_LP_ITERS must skip local \
+             branching"
+        );
+        assert_eq!(configs.len(), 0, "the sub-MIP must never be attempted");
+        assert_eq!(sub_mip_nodes, 0);
+        assert_eq!(sub_mip_iters, 0);
+    }
+
+    /// SENTINEL (Codex review, P1): a remaining share budget of exactly 0
+    /// skips the sub-MIP call outright — it is never attempted, not
+    /// attempted with `Some(0)`.
+    ///
+    /// Sentinel: removing the `capped_sub_mip_max_lp_iters` early-return from
+    /// `local_branching_with_k` calls `solve_sub_milp` anyway, failing the
+    /// recorded-config count assertion.
+    #[test]
+    fn local_branching_skips_when_remaining_share_budget_is_zero() {
+        let problem = binary_knapsack(vec![-1.0, -1.0, -1.0], 2.0);
+        let cfg = MipConfig::default();
+        let x_inc = vec![1.0, 0.0, 0.0];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, sub_mip_nodes, sub_mip_iters) =
+            run_local_branching(&problem, &x_inc, &cfg, &None, 0, &SolverOptions::default());
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_none(),
+            "zero remaining share budget must skip local branching"
+        );
+        assert_eq!(configs.len(), 0, "the sub-MIP must never be attempted");
+        assert_eq!(sub_mip_nodes, 0);
+        assert_eq!(sub_mip_iters, 0);
     }
 
     /// Codex review (P1): the sub-MIP's `SolverOptions::deadline` must be
@@ -599,6 +789,7 @@ mod tests {
             &x_inc,
             &cfg,
             &Some(far_parent_deadline),
+            u64::MAX,
             &SolverOptions::default(),
         );
         let deadlines = super::super::take_recorded_sub_mip_deadlines();
@@ -620,6 +811,7 @@ mod tests {
             &x_inc,
             &cfg,
             &Some(near_parent_deadline),
+            u64::MAX,
             &SolverOptions::default(),
         );
         let deadlines = super::super::take_recorded_sub_mip_deadlines();
@@ -648,6 +840,7 @@ mod tests {
                 &x_inc,
                 &cfg,
                 &Some(past),
+                u64::MAX,
                 &SolverOptions::default()
             )
             .0

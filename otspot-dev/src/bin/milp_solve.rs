@@ -328,11 +328,17 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String>
             "--max-nodes" => {
                 i += 1;
                 let value = args.get(i).ok_or("error: --max-nodes requires a value")?;
-                max_nodes = Some(
-                    value
-                        .parse()
-                        .map_err(|_| format!("error: invalid --max-nodes value: {value}"))?,
-                );
+                let parsed: usize = value
+                    .parse()
+                    .map_err(|_| format!("error: invalid --max-nodes value: {value}"))?;
+                // MipConfig::max_nodes contract is `>= 1` (see its doc); 0 would
+                // make the B&B loop exit the first pop-node stop-condition check
+                // before ever processing the root, silently returning an
+                // unproven result rather than the node-count backstop.
+                if parsed == 0 {
+                    return Err("error: --max-nodes must be >= 1".to_string());
+                }
+                max_nodes = Some(parsed);
             }
             other => path = Some(other.to_string()),
         }
@@ -587,6 +593,30 @@ mod tests {
         .unwrap();
         assert_eq!(cli.max_nodes, Some(42));
         assert_eq!(mip_config_from_cli(&cli).max_nodes, 42);
+    }
+
+    /// Codex review (P2): `--max-nodes 0` violates `MipConfig::max_nodes`'s
+    /// documented `>= 1` contract (`otspot-core/src/options.rs`) — with
+    /// `max_nodes == 0`, `check_stop_conditions`'s `stats.nodes_processed
+    /// (0) >= cfg.max_nodes (0)` fires on the very first pop, before the
+    /// root node is ever solved, silently returning an unproven result
+    /// instead of the intended node-count backstop. Rejecting it at parse
+    /// time gives a clear CLI error instead of a confusing silent no-op run.
+    ///
+    /// Sentinel: removing the `if parsed == 0 { return Err(...) }` check
+    /// from `parse_args`'s `--max-nodes` arm makes this return `Ok(..)`
+    /// instead of `Err`, failing the assertion.
+    #[test]
+    fn max_nodes_zero_is_rejected() {
+        let result = parse_args([
+            "tiny.mps".to_string(),
+            "--max-nodes".to_string(),
+            "0".to_string(),
+        ]);
+        assert!(
+            result.is_err(),
+            "--max-nodes 0 must be rejected at parse time; got {result:?}"
+        );
     }
 
     /// NEW (P3-6): a non-numeric flag value returns a `Result::Err` (a

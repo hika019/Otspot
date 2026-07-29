@@ -51,6 +51,56 @@ pub(crate) fn sub_mip_deadline(parent_deadline: &Option<Instant>, max_time_secs:
 /// pathologically slow per-iteration LP solves.
 pub(crate) const SUB_MIP_MAX_LP_ITERS: u64 = 480_000;
 
+/// Minimum per-call iteration allowance below which a RINS/RENS/local-
+/// branching sub-MIP call is skipped outright (deferred until the share
+/// budget accumulates enough headroom) rather than attempted with a
+/// truncated `max_lp_iters` (markshare_4_0 regression fix, follow-up to
+/// Codex review P1).
+///
+/// `capped_sub_mip_max_lp_iters` previously ran *any* nonzero remaining
+/// share as `Some(remaining)`. `effort::rins_iter_budget`'s ceiling is
+/// floored at `SUB_MIP_MAX_LP_ITERS` but does not grow past it while `share *
+/// total_simplex_iters` stays below that floor — so as a heuristic's own
+/// cumulative usage climbs toward that static ceiling, the *remaining*
+/// allowance shrinks monotonically, call by call, down through every value
+/// to 1. Each call pays the same fixed per-call cost (sub-MIP setup,
+/// feasibility pump, probing) regardless of its granted `max_lp_iters`. On
+/// `markshare_4_0` this fragmented 71 calls of ~61.7k iterations each into
+/// 3,007+ calls averaging ~1.2k iterations, whose fixed overhead regressed
+/// the instance from an 841s `Optimal` to a 1000s `Timeout`.
+///
+/// Calibrated from the useful-call range observed before per-call share
+/// capping existed: real calls that meaningfully searched a neighborhood
+/// needed 26k-90k iterations. `30_000` sits just under that range's low end
+/// — a smaller allowance cannot cover even the cheapest useful call, so
+/// attempting it only pays overhead for a sub-MIP almost certain to be cut
+/// off before finding anything. Skipping defers to a later call once the
+/// growing ceiling clears this floor again.
+pub(crate) const SUB_MIP_MIN_LP_ITERS: u64 = 30_000;
+
+/// `min(SUB_MIP_MAX_LP_ITERS, remaining_share_budget)`, or `None` when
+/// `remaining_share_budget` is below [`SUB_MIP_MIN_LP_ITERS`] — the sub-MIP
+/// call should be skipped outright rather than attempted with a knowably
+/// too-small iteration allowance (see that constant's doc).
+///
+/// Codex review (P1): `effort::may_run_rins`/`may_run_rens`/
+/// `may_run_local_branching` only *approve* a call — approval alone did not
+/// cap the size of the approved work, so `rins_sub_mip_config` and its RENS/
+/// local-branching counterparts always granted the flat `SUB_MIP_MAX_LP_
+/// ITERS` regardless of how little of that heuristic's own iteration share
+/// (`effort::rins_iter_budget` / `rens_iter_budget` /
+/// `local_branching_iter_budget`) was actually left. An "approved"
+/// (`component_iters` still comfortably under its float share) call could
+/// therefore still overshoot its own share by up to `SUB_MIP_MAX_LP_ITERS`
+/// in a single sub-MIP solve.
+pub(crate) fn capped_sub_mip_max_lp_iters(remaining_share_budget: u64) -> Option<u64> {
+    if remaining_share_budget < SUB_MIP_MIN_LP_ITERS {
+        None
+    } else {
+        Some(SUB_MIP_MAX_LP_ITERS.min(remaining_share_budget))
+    }
+}
+
 /// sub-MIP の結果を元問題の incumbent 候補へ昇格できるか判定する品質ゲート。
 ///
 /// status を信用せず、どの status でも元問題での整数実行可能性を独立検証し、
@@ -170,6 +220,71 @@ pub(crate) fn take_recorded_sub_mip_configs() -> Vec<MipConfig> {
 #[cfg(test)]
 pub(crate) fn take_recorded_sub_mip_deadlines() -> Vec<Option<Instant>> {
     SUB_MIP_DEADLINES.with(|deadlines| std::mem::take(&mut *deadlines.borrow_mut()))
+}
+
+/// SENTINEL (Codex review, P1 / markshare_4_0 follow-up): `capped_sub_mip_
+/// max_lp_iters` — see its doc.
+///
+/// Sentinel: removing the `.min(remaining_share_budget)` cap (reverting to
+/// always returning `Some(SUB_MIP_MAX_LP_ITERS)`) fails
+/// `share_between_min_and_max_caps_at_the_share`; removing the `<
+/// SUB_MIP_MIN_LP_ITERS` branch entirely (reverting to always `Some(...)`)
+/// fails `share_below_min_lp_iters_skips_the_call`.
+#[cfg(test)]
+mod capped_sub_mip_max_lp_iters_tests {
+    use super::{capped_sub_mip_max_lp_iters, SUB_MIP_MAX_LP_ITERS, SUB_MIP_MIN_LP_ITERS};
+
+    #[test]
+    fn share_between_min_and_max_caps_at_the_share() {
+        assert_eq!(
+            capped_sub_mip_max_lp_iters(50_000),
+            Some(50_000),
+            "a remaining share between the min and flat-constant thresholds \
+             must win over the larger flat constant"
+        );
+    }
+
+    #[test]
+    fn share_at_exactly_min_lp_iters_runs_at_that_size() {
+        assert_eq!(
+            capped_sub_mip_max_lp_iters(SUB_MIP_MIN_LP_ITERS),
+            Some(SUB_MIP_MIN_LP_ITERS),
+            "the boundary value itself must still run, not be skipped"
+        );
+    }
+
+    #[test]
+    fn ample_share_caps_at_the_flat_constant() {
+        assert_eq!(
+            capped_sub_mip_max_lp_iters(SUB_MIP_MAX_LP_ITERS * 10),
+            Some(SUB_MIP_MAX_LP_ITERS),
+            "an ample remaining share must not exceed the flat constant"
+        );
+    }
+
+    /// SENTINEL (markshare_4_0 regression fix): a small but *nonzero*
+    /// remaining share below `SUB_MIP_MIN_LP_ITERS` must skip the call, not
+    /// attempt it with a truncated `max_lp_iters` — the fragmentation this
+    /// fix targets (see `SUB_MIP_MIN_LP_ITERS`'s doc).
+    #[test]
+    fn share_below_min_lp_iters_skips_the_call() {
+        assert_eq!(
+            capped_sub_mip_max_lp_iters(SUB_MIP_MIN_LP_ITERS - 1),
+            None,
+            "a nonzero remaining share below SUB_MIP_MIN_LP_ITERS must skip \
+             the sub-MIP call, not attempt it truncated"
+        );
+    }
+
+    #[test]
+    fn zero_remaining_share_skips_the_call() {
+        assert_eq!(
+            capped_sub_mip_max_lp_iters(0),
+            None,
+            "a provably-zero remaining share must skip the sub-MIP call, \
+             not attempt it with Some(0)"
+        );
+    }
 }
 
 #[cfg(test)]

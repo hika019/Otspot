@@ -38,9 +38,19 @@ use kernels::gen_knapsack_milp;
 /// is why this was widened to N=200. Phase 1c's deterministic
 /// simplex-iteration gate (`mip::effort`) removed that source of
 /// non-determinism — see `attribution_is_deterministic_across_repeated_runs`
-/// below — but N=200 is kept since it is not otherwise harmful and a smaller
-/// N is not required now.
-const KNAPSACK_N: usize = 200;
+/// below.
+///
+/// Widened again to N=300 (markshare_4_0 regression fix): skipping RINS/
+/// RENS/local-branching/tree-cut work outright once the remaining share
+/// budget drops below a useful minimum (rather than always running a
+/// truncated/inflated-floor call) makes the B&B loop itself faster, so at
+/// N=200 the root-level feasibility-pump/root-cut time (excluded from
+/// `attribution_covers_loop_wall_clock`'s view, see
+/// `attribution_covers_wall_clock_including_root_overhead` for the
+/// root-inclusive one) grew to just over 5% of the now-smaller total wall
+/// clock. N=300 gives the loop enough absolute work again for its own
+/// coverage view to stay meaningful.
+const KNAPSACK_N: usize = 300;
 const KNAPSACK_SEED: u64 = 11;
 
 fn solve_attribution_instance() -> (SolverResult, MipStats, u64) {

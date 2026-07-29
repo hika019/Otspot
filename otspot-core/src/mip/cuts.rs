@@ -51,6 +51,39 @@ const MIN_TREE_CUT_GAIN_REL: f64 = 1e-4;
 /// a GMI (even) / MIR (odd) batch; kept small so a separating node costs only a
 /// few extra LP solves. Rounds also stop early when the bound stalls.
 const TREE_CUT_MAX_ROUNDS: usize = 4;
+/// Minimum useful `max_iters` for a single cold cut-LP solve within
+/// `separate_tree_cuts`, as a multiple of `dim = lp.num_vars +
+/// lp.num_constraints`: a round whose remaining allowance is below this
+/// threshold is skipped (deferred to a later attempt) rather than run.
+///
+/// A cold primal simplex from an all-slack start empirically needs on the
+/// order of one to a few pivots per dimension for a well-conditioned LP, so
+/// 4x is below what even a normal (non-pathological), non-warm-started
+/// resolve of the current cut-augmented LP typically needs — an allowance
+/// smaller than this cannot realistically reach `Optimal`, so attempting the
+/// solve only pays cold-solve setup cost for a result that will be discarded
+/// (`cut_res.status != SolveStatus::Optimal` breaks the round immediately
+/// below).
+///
+/// markshare_4_0 regression fix: this constant previously *inflated* a
+/// too-small remaining allowance up to this floor (`max(remaining, dim *
+/// mult)`) so every approved attempt still ran at least one full round
+/// regardless of how little the share budget actually granted. As RINS/RENS/
+/// local-branching (see `heuristics::SUB_MIP_MIN_LP_ITERS`), that let a
+/// round attempt overshoot its nominal share by design; here it also meant
+/// every eligible node paid at least `2 * dim * 4` iterations of guaranteed
+/// overhead once approved, however small its share. Using the same threshold
+/// as a *skip* condition instead — matching the sub-MIP pattern — bounds a
+/// round to only run when it can realistically finish, deferring the rest to
+/// a later attempt once the (growing) share ceiling clears this threshold
+/// again.
+const TREE_CUT_MIN_SOLVE_ITER_DIM_MULT: u64 = 4;
+
+/// `dim * TREE_CUT_MIN_SOLVE_ITER_DIM_MULT` — see that constant's doc.
+fn tree_cut_min_useful_iters(lp: &LpProblem) -> u64 {
+    let dim = (lp.num_vars + lp.num_constraints) as u64;
+    dim.saturating_mul(TREE_CUT_MIN_SOLVE_ITER_DIM_MULT)
+}
 
 /// A generated cut `coeffs · x >= rhs` over the original variable space.
 struct CutRow {
@@ -128,7 +161,7 @@ pub(crate) fn add_root_cuts(
         if deadline_reached(cut_deadline) {
             break;
         }
-        let res = solve_cut_lp(&committed, options, cut_deadline);
+        let res = solve_cut_lp(&committed, options, cut_deadline, None);
         if res.status != SolveStatus::Optimal {
             break;
         }
@@ -153,7 +186,7 @@ pub(crate) fn add_root_cuts(
             break;
         }
         let candidate = append_ge_rows_with_integer_mask(&committed, &cuts, &integer_mask);
-        let check = solve_validate(&candidate, options, cut_deadline);
+        let check = solve_validate(&candidate, options, cut_deadline, None);
         if check.status != SolveStatus::Optimal {
             break;
         }
@@ -166,7 +199,7 @@ pub(crate) fn add_root_cuts(
 
     // Structural cut phase: cover, clique, implied-bound.
     if total_cuts < max_total_cuts && !deadline_reached(cut_deadline) {
-        let res = solve_cut_lp(&committed, options, cut_deadline);
+        let res = solve_cut_lp(&committed, options, cut_deadline, None);
         if res.status == SolveStatus::Optimal {
             let budget = max_total_cuts.saturating_sub(total_cuts);
             let mut structural: Vec<CutRow> = Vec::new();
@@ -199,7 +232,7 @@ pub(crate) fn add_root_cuts(
             if !structural.is_empty() {
                 let candidate =
                     append_ge_rows_with_integer_mask(&committed, &structural, &integer_mask);
-                let check = solve_validate(&candidate, options, cut_deadline);
+                let check = solve_validate(&candidate, options, cut_deadline, None);
                 if check.status == SolveStatus::Optimal {
                     committed = candidate;
                 }
@@ -210,7 +243,7 @@ pub(crate) fn add_root_cuts(
     // Convert added Ge cut rows to Le before handing to B&B.
     let lp = convert_cuts_to_le_with_integer_mask(committed, m_orig, &integer_mask);
 
-    let le_check = solve_validate(&lp, options, cut_deadline);
+    let le_check = solve_validate(&lp, options, cut_deadline, None);
     let final_lp = if le_check.status == SolveStatus::Optimal {
         lp
     } else {
@@ -223,10 +256,18 @@ pub(crate) fn add_root_cuts(
     }
 }
 
+/// `max_iters` is `None` for root cut generation (`add_root_cuts`, which has
+/// no per-call iteration budget concept — bounded only by `cut_deadline`) and
+/// `Some(remaining)` for in-tree separation (`separate_tree_cuts`), whose
+/// caller must bound this single cold solve's own simplex work: without it, a
+/// solve with `presolve: false` and no warm start can run past its round's
+/// share of `effort::separation_iter_budget` on its own (Codex review, P1 —
+/// confirmed by `dcmulti`'s single 27s cut-LP solve under Phase 1c re-bench).
 fn solve_validate(
     lp: &LpProblem,
     options: &SolverOptions,
     deadline: Option<std::time::Instant>,
+    max_iters: Option<u64>,
 ) -> crate::problem::SolverResult {
     let opts = SolverOptions {
         presolve: false,
@@ -235,6 +276,7 @@ fn solve_validate(
         warm_start_lp: None,
         deadline,
         timeout_secs: None,
+        max_iters,
         primal_tol: options.primal_tol,
         dual_tol: options.dual_tol,
         threads: options.threads,
@@ -245,10 +287,13 @@ fn solve_validate(
     crate::lp::solve_lp_with(lp, &opts)
 }
 
+/// See [`solve_validate`] for the `max_iters` contract shared by both cut-LP
+/// solve helpers.
 fn solve_cut_lp(
     lp: &LpProblem,
     options: &SolverOptions,
     deadline: Option<std::time::Instant>,
+    max_iters: Option<u64>,
 ) -> crate::problem::SolverResult {
     let opts = SolverOptions {
         presolve: false,
@@ -258,6 +303,7 @@ fn solve_cut_lp(
         warm_start_lp: None,
         deadline,
         timeout_secs: None,
+        max_iters,
         primal_tol: options.primal_tol,
         dual_tol: options.dual_tol,
         threads: options.threads,
@@ -1092,11 +1138,19 @@ fn tree_cut_node_selected(depth: usize, node_index: usize) -> bool {
 /// Mirrors root [`add_root_cuts`] but node-local: re-solve → generate →
 /// pool-filter → append (Ge) → re-solve, stopping when the bound stalls.
 /// `max_iters` bounds simplex iterations across rounds (see
-/// `effort::separation_iter_budget`), checked at round boundaries only (LP
-/// solves have no intra-solve iteration limit). Returns the iterations
-/// actually spent plus whether this call passed the node-selection interval
-/// and attempted separation (independent of the iteration count, which can
-/// legitimately be 0 for a real attempt).
+/// `effort::separation_iter_budget`): each individual cold solve within a
+/// round is skipped — ending this attempt — once the remaining allowance
+/// drops below [`tree_cut_min_useful_iters`]'s per-dimension minimum, rather
+/// than being attempted with a too-small `SolverOptions::max_iters` (see
+/// that function's doc: `TREE_CUT_MIN_SOLVE_ITER_DIM_MULT`'s markshare_4_0
+/// note). Otherwise the solve's own `max_iters` is exactly the remaining
+/// allowance, bounding a single cold solve (no presolve, no warm start) that
+/// would otherwise spend arbitrarily more than what remains of this
+/// attempt's budget on its own (confirmed by `dcmulti`'s single 27s cut-LP
+/// solve under Phase 1c re-bench). Returns the iterations actually spent
+/// plus whether this call passed the node-selection interval and attempted
+/// separation (independent of the iteration count, which can legitimately
+/// be 0 for a real attempt).
 pub(crate) fn separate_tree_cuts(
     node_lp: &LpProblem,
     integer_mask: &[bool],
@@ -1118,12 +1172,22 @@ pub(crate) fn separate_tree_cuts(
     let mut iters_spent: u64 = 0;
 
     for round_idx in 0..TREE_CUT_MAX_ROUNDS {
-        if iters_spent >= max_iters {
+        // Codex review (P1) / markshare_4_0 follow-up: pass the *actual*
+        // remaining allowance as this solve's own `max_iters` — a single cold
+        // solve (no presolve, no warm start) has no other cap and could
+        // otherwise spend arbitrarily more than what remains of this
+        // attempt's `max_iters` budget on its own (confirmed by `dcmulti`'s
+        // single 27s cut-LP solve under Phase 1c re-bench). Skip the round
+        // entirely (rather than inflating the cap) once the remaining
+        // allowance is below what a cold solve realistically needs — see
+        // `tree_cut_min_useful_iters`'s doc.
+        let remaining = max_iters.saturating_sub(iters_spent);
+        if remaining < tree_cut_min_useful_iters(&committed) {
             break;
         }
         // Re-solve through the cold primal cut path to recover a *full* size-`m`
         // simplex basis (the node's warm-start basis is a compact form).
-        let cut_res = solve_cut_lp(&committed, options, options.deadline);
+        let cut_res = solve_cut_lp(&committed, options, options.deadline, Some(remaining));
         iters_spent = iters_spent.saturating_add(cut_res.iterations as u64);
         if cut_res.status != SolveStatus::Optimal {
             break;
@@ -1166,7 +1230,18 @@ pub(crate) fn separate_tree_cuts(
             })
             .collect();
         let candidate = append_ge_rows_with_integer_mask(&committed, &rows, integer_mask);
-        let check = solve_validate(&candidate, options, options.deadline);
+        // Re-check the remaining allowance between the two solves of this
+        // round: the cut-LP solve above may have already spent some (or all)
+        // of it, and this validate solve is itself a second cold solve
+        // subject to the same skip threshold. If too little remains to
+        // realistically finish it, abandon this round rather than run a
+        // truncated validate solve — the round's cuts are discarded (not
+        // committed), matching the "skip, don't truncate" pattern.
+        let remaining = max_iters.saturating_sub(iters_spent);
+        if remaining < tree_cut_min_useful_iters(&candidate) {
+            break;
+        }
+        let check = solve_validate(&candidate, options, options.deadline, Some(remaining));
         iters_spent = iters_spent.saturating_add(check.iterations as u64);
         if check.status != SolveStatus::Optimal {
             break;

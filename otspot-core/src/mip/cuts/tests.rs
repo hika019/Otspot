@@ -85,7 +85,7 @@ fn feasible_orig(p: &LpProblem, x: &[f64]) -> bool {
 
 /// Solve the LP root the way the cut generator does (primal, no presolve).
 fn lp_root(p: &LpProblem) -> crate::problem::SolverResult {
-    super::solve_cut_lp(p, &SolverOptions::default(), None)
+    super::solve_cut_lp(p, &SolverOptions::default(), None, None)
 }
 
 // ── Test problems (all-integer, small box ⇒ brute-forceable) ───────────────
@@ -975,7 +975,7 @@ fn le_revalidation_lp_is_optimal_no_presolve() {
             continue; // no cuts generated for this problem
         }
         // Solve the Le LP without presolve — the conditions B&B uses.
-        let check = solve_cut_lp(&out.lp, &SolverOptions::default(), None);
+        let check = solve_cut_lp(&out.lp, &SolverOptions::default(), None, None);
         assert_eq!(
             check.status,
             SolveStatus::Optimal,
@@ -1006,7 +1006,7 @@ fn le_revalidation_detects_infeasible_le_cut() {
     let committed_bad = append_ge_rows(&milp.lp, &[infeasible_cut]);
     let le_bad = convert_cuts_to_le(committed_bad, m_orig);
 
-    let check = solve_validate(&le_bad, &SolverOptions::default(), None);
+    let check = solve_validate(&le_bad, &SolverOptions::default(), None, None);
     assert_ne!(
         check.status,
         SolveStatus::Optimal,
@@ -1015,7 +1015,7 @@ fn le_revalidation_detects_infeasible_le_cut() {
     );
 
     // Confirm the original LP (fallback target) is still solvable.
-    let orig_check = solve_validate(&milp.lp, &SolverOptions::default(), None);
+    let orig_check = solve_validate(&milp.lp, &SolverOptions::default(), None, None);
     assert_eq!(
         orig_check.status,
         SolveStatus::Optimal,
@@ -1421,15 +1421,24 @@ fn structural_cuts_validity_end_to_end() {
 
 // ── In-tree separation sentinel ─────────────────────────────────────────────
 
-/// Knapsack-style general-integer MILP used as the in-tree-cut sentinel.
+/// Binary 0/1 knapsack with weight/profit deliberately correlated
+/// (`c_i = a_i + 37`), the classic construction for defeating simple
+/// rounding and forcing deep B&B branching: the LP relaxation's fractional
+/// item makes the bound look nearly achievable, so almost every rounding
+/// is a near-miss and the search must branch extensively to close the gap.
+/// `cap = Σaᵢ / 2` keeps the knapsack at maximum combinatorial tension.
 ///
-/// max Σ c_j x_j  s.t.  Σ a_j x_j ≤ 23,  x_j ∈ {0..5} integer (min of −c).
-/// Its LP relaxation stays fractional several levels deep, so re-separating
-/// GMI/MIR at interior B&B nodes tightens bounds the root cuts miss.
-fn tree_cut_sentinel_milp() -> MilpProblem {
-    let c = [12.0, 17.0, 13.0, 21.0, 9.0, 16.0, 7.0, 19.0];
-    let a = [5.0, 7.0, 6.0, 9.0, 4.0, 7.0, 3.0, 8.0];
-    let n = c.len();
+/// Used wherever a test needs an in-tree-cut-worthy search that is
+/// realistically deep enough to grow `total_simplex_iters` past the
+/// per-dimension useful-work minimum ([`tree_cut_min_useful_iters`]) — unlike
+/// a handful of independently-random small LPs, which typically resolve in
+/// a few dozen nodes regardless of variable count (their LP relaxations
+/// bound tightly, so they never need enough total search to build up a
+/// share of iterations comparable to that per-dimension minimum).
+fn hard_knapsack_milp(n: usize) -> MilpProblem {
+    let a: Vec<f64> = (0..n).map(|i| 101.0 + i as f64 * 13.0).collect();
+    let c: Vec<f64> = a.iter().map(|w| w + 37.0).collect();
+    let cap: f64 = a.iter().sum::<f64>() / 2.0;
     let cneg: Vec<f64> = c.iter().map(|v| -v).collect();
     let rows = vec![0usize; n];
     let cols: Vec<usize> = (0..n).collect();
@@ -1439,11 +1448,18 @@ fn tree_cut_sentinel_milp() -> MilpProblem {
         &cols,
         &a,
         1,
-        vec![23.0],
+        vec![cap],
         vec![ConstraintType::Le],
-        vec![(0.0, 5.0); n],
+        vec![(0.0, 1.0); n],
     );
     MilpProblem::new(l, cols).unwrap()
+}
+
+/// In-tree-cut sentinel fixture: 24-variable [`hard_knapsack_milp`]. Its LP
+/// relaxation stays fractional several levels deep, so re-separating GMI/MIR
+/// at interior B&B nodes tightens bounds the root cuts miss.
+fn tree_cut_sentinel_milp() -> MilpProblem {
+    hard_knapsack_milp(24)
 }
 
 /// **Sentinel**: in-tree cuts must measurably shrink the search vs `tree_cuts=off`.
@@ -1728,6 +1744,123 @@ fn separate_tree_cuts_caps_iterations_at_small_budget() {
     );
 }
 
+/// SENTINEL (Codex review, P1): `solve_cut_lp` / `solve_validate` actually
+/// pass their `max_iters` parameter through to the underlying LP solve —
+/// before this fix both always built a `SolverOptions` with `max_iters:
+/// None` internally, so a `Some(cap)` argument was accepted but silently had
+/// no effect (a single cold solve could still run unboundedly). A too-small
+/// cap on an LP that genuinely needs several iterations must make the solve
+/// stop before reaching `Optimal`.
+///
+/// Sentinel: removing `max_iters,` from either function's constructed
+/// `SolverOptions` (reverting to always `max_iters: None`, as the previous
+/// hardcoded field was) makes the `capped`/`capped_v` assertions below FAIL
+/// — the solve would still reach `Optimal` in more than 1 iteration, exactly
+/// like the unrestricted case.
+#[test]
+fn solve_cut_lp_and_solve_validate_honor_max_iters() {
+    let milp = tree_cut_sentinel_milp();
+
+    let unrestricted = solve_cut_lp(&milp.lp, &SolverOptions::default(), None, None);
+    assert_eq!(unrestricted.status, SolveStatus::Optimal, "test premise");
+    assert!(
+        unrestricted.iterations > 1,
+        "test premise: root LP must need > 1 iteration; got {}",
+        unrestricted.iterations
+    );
+    let capped = solve_cut_lp(&milp.lp, &SolverOptions::default(), None, Some(1));
+    assert_ne!(
+        capped.status,
+        SolveStatus::Optimal,
+        "max_iters=1 must stop solve_cut_lp before it reaches Optimal"
+    );
+
+    let unrestricted_v = solve_validate(&milp.lp, &SolverOptions::default(), None, None);
+    assert_eq!(unrestricted_v.status, SolveStatus::Optimal, "test premise");
+    assert!(
+        unrestricted_v.iterations > 1,
+        "test premise: root LP must need > 1 iteration; got {}",
+        unrestricted_v.iterations
+    );
+    let capped_v = solve_validate(&milp.lp, &SolverOptions::default(), None, Some(1));
+    assert_ne!(
+        capped_v.status,
+        SolveStatus::Optimal,
+        "max_iters=1 must stop solve_validate before it reaches Optimal"
+    );
+}
+
+/// SENTINEL (markshare_4_0 regression fix): a round whose remaining
+/// allowance is below the per-dimension useful minimum
+/// (`tree_cut_min_useful_iters`) is skipped outright — no cold solve is
+/// attempted at all — rather than run with a truncated `max_iters` (the
+/// pre-fix behavior tested by the now-removed `..._via_floor` sentinel,
+/// which inflated a too-small `remaining` up to the per-dimension floor so
+/// every approved attempt still burned at least one full round of
+/// overhead). `max_iters = 1` is far below what any cold resolve of this
+/// instance needs (`>= 4`, per
+/// `separate_tree_cuts_caps_iterations_at_small_budget`'s test premise), so
+/// the first round must never start.
+///
+/// Sentinel: reverting the round-boundary check from `remaining <
+/// tree_cut_min_useful_iters(&committed)` back to `remaining == 0` makes the
+/// solve run with `max_iters = Some(1)` instead of being skipped, so `iters`
+/// becomes nonzero (a cold solve was attempted), failing the second
+/// assertion.
+#[test]
+fn separate_tree_cuts_skips_a_round_below_the_per_dimension_minimum() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+
+    let max_iters = 1;
+    assert!(
+        max_iters < tree_cut_min_useful_iters(&milp.lp),
+        "test premise: max_iters must be below the per-dimension minimum"
+    );
+    let (tightened, iters, attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        max_iters,
+    );
+    assert!(
+        tightened.is_none(),
+        "a round below the per-dimension minimum must be skipped, not run \
+         with a truncated max_iters"
+    );
+    assert_eq!(iters, 0, "no cold solve should have been attempted at all");
+    assert!(
+        attempted,
+        "node-selection still passed, so this remains a real (skipped) \
+         attempt for dry-streak accounting"
+    );
+}
+
+/// `tree_cut_min_useful_iters` returns exactly `dim *
+/// TREE_CUT_MIN_SOLVE_ITER_DIM_MULT`, independent of any `remaining`
+/// argument (unlike the removed `tree_cut_solve_iter_cap`, it is a pure
+/// threshold, not a value combined with `remaining`).
+///
+/// Sentinel: changing the multiplier used internally without updating
+/// `TREE_CUT_MIN_SOLVE_ITER_DIM_MULT` itself would desync this from
+/// `separate_tree_cuts`'s actual skip threshold, failing this equality.
+#[test]
+fn tree_cut_min_useful_iters_is_dim_times_the_multiplier() {
+    let milp = tree_cut_sentinel_milp();
+    let expected =
+        (milp.lp.num_vars + milp.lp.num_constraints) as u64 * TREE_CUT_MIN_SOLVE_ITER_DIM_MULT;
+    assert_eq!(tree_cut_min_useful_iters(&milp.lp), expected);
+}
+
 // ── Optimum-preservation sweep (cross-node soundness gate) ───────────────────
 
 /// Deterministic LCG so the sweep is reproducible (no `rand` dependency).
@@ -1821,9 +1954,24 @@ fn tree_cuts_preserve_optimum_sweep() {
     let mut fired = 0usize;
     let mut checked = 0usize;
     for it in 0..500usize {
-        let n = 5 + it % 3; // 5..7
-        let m = 2 + it % 3; // 2..4
-        let milp = sweep_milp(&mut rng, n, m, 4.0);
+        // markshare_4_0 regression fix: `separate_tree_cuts` now skips a
+        // round outright once the remaining iteration-share budget drops
+        // below the per-dimension useful minimum (see
+        // `cuts::tree_cut_min_useful_iters`), rather than forcing it through
+        // an inflated floor. The independently-random 5..7-variable draws
+        // below bound tightly and resolve in a handful of nodes regardless
+        // of size, so `total_simplex_iters` never grows enough for their
+        // share ceiling to clear that per-dimension minimum (separation
+        // would never fire on any of the 500, making the soundness check
+        // vacuous). A few [`hard_knapsack_milp`] draws interspersed in the
+        // sweep run deep enough B&B searches to clear it.
+        let milp = if it % 100 == 0 {
+            hard_knapsack_milp(16)
+        } else {
+            let n = 5 + it % 3; // 5..7
+            let m = 2 + it % 3; // 2..4
+            sweep_milp(&mut rng, n, m, 4.0)
+        };
 
         let truth = brute_force_opt(&milp);
         let (r_off, _) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_off);
