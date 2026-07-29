@@ -18,6 +18,37 @@ use otspot_num::sparse::CscMatrix;
 
 use super::primal::extract_solution;
 
+// ── Construction call counter (sentinel tests only) ─────────────────────────
+//
+// Total `build_standard_form`/`build_standard_form_with_deadline` calls on
+// this thread — used by `mip::cuts`' P3-2 sentinel to verify its own
+// `TREE_CUT_BUILDS_*` constants (the declared, structural count of
+// construction call sites per round) actually match how many times this
+// function runs when each of those call sites executes in isolation.
+
+#[cfg(test)]
+thread_local! {
+    static BUILD_STANDARD_FORM_CALL_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_build_standard_form_call_count() {
+    BUILD_STANDARD_FORM_CALL_COUNT.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn build_standard_form_call_count() -> u64 {
+    BUILD_STANDARD_FORM_CALL_COUNT.with(|c| c.get())
+}
+
+#[cfg(test)]
+fn bump_build_standard_form_call_count() {
+    BUILD_STANDARD_FORM_CALL_COUNT.with(|c| c.set(c.get().saturating_add(1)));
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn bump_build_standard_form_call_count() {}
+
 /// Mapping from one original variable to its standard-form representation.
 /// Typically 1 new var (shifted bound) or 2 (free-variable split into ±).
 pub(crate) struct OrigVarInfo {
@@ -140,6 +171,7 @@ pub(crate) fn build_standard_form_with_deadline(
     problem: &LpProblem,
     deadline: Option<std::time::Instant>,
 ) -> Option<StandardForm> {
+    bump_build_standard_form_call_count();
     let n_orig = problem.num_vars;
     let m_orig = problem.num_constraints;
 

@@ -116,7 +116,7 @@ impl Relaxation for MilpProblem {
         depth: usize,
         node_index: usize,
         max_iters: u64,
-    ) -> (Option<SolverResult>, u64, bool) {
+    ) -> (Option<SolverResult>, u64, u64, bool) {
         // Node LP = the original relaxation with this node's bounds. Separation
         // is node-local: cuts are valid only in this subtree and are never reused
         // elsewhere; see `cuts::separate_tree_cuts`.
