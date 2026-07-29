@@ -13,7 +13,9 @@
 //! implied-bound cuts directly from the constraint matrix and LP solution.
 
 use crate::basis::{BasisManager, LuBasis};
-use crate::options::{MipConfig, SimplexMethod, SolverOptions, DEFAULT_MAX_CUT_ROUNDS};
+use crate::options::{
+    MipConfig, SimplexMethod, SolverOptions, WarmStartBasis, DEFAULT_MAX_CUT_ROUNDS,
+};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::simplex::{build_standard_form, StandardForm};
 use crate::tolerances::{feas_rel_tol, ZERO_TOL};
@@ -83,6 +85,104 @@ const TREE_CUT_MIN_SOLVE_ITER_DIM_MULT: u64 = 4;
 fn tree_cut_min_useful_iters(lp: &LpProblem) -> u64 {
     let dim = (lp.num_vars + lp.num_constraints) as u64;
     dim.saturating_mul(TREE_CUT_MIN_SOLVE_ITER_DIM_MULT)
+}
+
+/// `lp.num_vars + lp.num_constraints`: same `dim` convention as
+/// [`tree_cut_min_useful_iters`], and the pre-expansion proxy this module's
+/// fixed-cost surcharge (below) uses for `build_standard_form(lp)`'s own
+/// `m + n_total`. Reading the two struct fields directly, this is free —
+/// unlike calling `build_standard_form` itself, which is exactly the cost
+/// the surcharge is charging *for*, not a way to measure it. It is a fair
+/// proxy, not an exact substitute: UB-row expansion adds at most `num_vars`
+/// rows and free-variable splitting at most `num_vars` columns, so `sf.m +
+/// sf.n_total` is bounded by `dim + 2 * lp.num_vars <= 3 * dim` — the two
+/// track each other within a constant factor.
+fn tree_cut_dim(lp: &LpProblem) -> u64 {
+    (lp.num_vars + lp.num_constraints) as u64
+}
+
+/// Iteration-equivalent cost charged by [`tree_cut_construction_surcharge`]
+/// per unit of [`tree_cut_dim`] per `build_standard_form`-equivalent
+/// construction is `TREE_CUT_BUILD_ITER_COST_PER_DIM /
+/// TREE_CUT_BUILD_ITER_COST_DIVISOR` = 1/4.
+///
+/// A single simplex iteration's dominant cost is a sparse triangular solve
+/// (FTRAN/BTRAN) over the current LU factors, touching on the order of `m`
+/// (basis size) nonzeros; `build_standard_form` allocates and populates
+/// arrays of that same order (variable shifts, UB rows, slack columns) —
+/// the same *order* of work as one iteration's triangular solve, which is
+/// what fixes the numerator at 1 rather than some other order-of-magnitude
+/// constant: the bug this surcharge fixes is the iteration budget *ignoring*
+/// this cost entirely, so any nonzero, order-correct charge restores it to
+/// the accounting.
+///
+/// The `/ 4` divisor is the one number here actually fit to data, not
+/// derived from the complexity argument above (which only pins the order of
+/// magnitude, not the constant): coefficient 1 (no divisor) reduced
+/// `markshare_4_0`'s accepted-round count enough to fix its regression
+/// (Optimal 507.3s) but, measured directly, also broke a small/fast search
+/// unrelated to `markshare_4_0`'s scale — `gt2 --timeout 60` went from a
+/// deterministic 100-node `Optimal` to a 3,744-node `Timeout` purely from
+/// this surcharge's magnitude (before the `MipStats::tree_cut_overhead_
+/// iters` isolation fix below existed to explain *why*: at coefficient 1 the
+/// surcharge was simply too large per round for a fixed-point search this
+/// small). `1/4` was the value found, by direct measurement of both
+/// instances together, to land `markshare_4_0`'s accepted-round count at
+/// 30,251–31,269 — matching its own pre-warm-start cold-equivalent round
+/// count (31,268) — while `gt2 --timeout 60` ×3 stays at the deterministic
+/// 100-node `Optimal` (its separation now self-gates to 0 accepted rounds
+/// entirely, at this instance's dimension, rather than over-firing).
+const TREE_CUT_BUILD_ITER_COST_PER_DIM: u64 = 1;
+const TREE_CUT_BUILD_ITER_COST_DIVISOR: u64 = 4;
+
+/// `build_standard_form`-equivalent construction count charged per LP per
+/// call site — a structural count fixed by this module's own call graph
+/// (`separate_tree_cuts`, `generate_round`, `extend_basis_for_new_rows`,
+/// `tree_cut_resolve`), not data-dependent. Applied via
+/// [`tree_cut_construction_surcharge`] at each call site immediately after
+/// it actually runs, so a round that breaks early (e.g. `generate_round`
+/// finds no cuts and never reaches the round-end validate) is charged only
+/// for the constructions it actually performed.
+///
+/// - Round-start warm re-solve (round > 0, via [`tree_cut_resolve`]): its
+///   own shape-check `build_standard_form` call plus the warm solve's own
+///   internal `simplex::entry` construction (`presolve: false`, so exactly
+///   one) = 2 ([`TREE_CUT_BUILDS_ROUND_START_WARM`]).
+/// - Round-start cold bootstrap (round 0, via [`solve_cut_lp`]): only the
+///   cold solve's own internal construction (no separate shape check) = 1
+///   ([`TREE_CUT_BUILDS_ROUND_START_COLD`]).
+/// - [`generate_round`]'s own build, charged every round that reaches it
+///   (whether or not it finds a cut) = 1
+///   ([`TREE_CUT_BUILDS_GENERATE_ROUND`]).
+/// - Round-end validate ([`extend_basis_for_new_rows`]'s build, plus
+///   [`tree_cut_resolve`]'s shape-check build, plus the warm solve's own
+///   internal construction) = 3 ([`TREE_CUT_BUILDS_ROUND_END`]).
+///
+/// markshare_4_0 regression fix (Phase 3b): warm-started re-solves cut each
+/// round's *iteration* cost by roughly 10x, but not this per-round fixed
+/// cost, which the iteration budget was blind to — with rounds no longer
+/// throttled by iterations, `TREE_CUT_MAX_ROUNDS`-bounded but far more
+/// frequent cheap rounds fit inside the same `effort::separation_iter_
+/// budget`, ~3x more on `markshare_4_0` (31,268 → 92,711 accepted rounds in
+/// a 1000s run), whose accumulated fixed cost alone consumed 80% of wall
+/// clock (`tree_cut_us_pct_wall` 68.65% → 79.95%) despite fewer nodes
+/// processed overall (1,813,460 → 1,328,286) — Optimal (921.6s) regressed
+/// to Timeout (1000s).
+const TREE_CUT_BUILDS_ROUND_START_WARM: u64 = 2;
+const TREE_CUT_BUILDS_ROUND_START_COLD: u64 = 1;
+const TREE_CUT_BUILDS_GENERATE_ROUND: u64 = 1;
+const TREE_CUT_BUILDS_ROUND_END: u64 = 3;
+
+/// Deterministic fixed-cost surcharge (iteration-equivalent units, added to
+/// `iters_spent` in [`separate_tree_cuts`]) for `n_builds`
+/// `build_standard_form`-equivalent constructions of `lp`'s standard form.
+/// See [`TREE_CUT_BUILD_ITER_COST_PER_DIM`] and the `TREE_CUT_BUILDS_*`
+/// constants for the per-unit cost and call-count derivations.
+fn tree_cut_construction_surcharge(lp: &LpProblem, n_builds: u64) -> u64 {
+    n_builds
+        .saturating_mul(tree_cut_dim(lp))
+        .saturating_mul(TREE_CUT_BUILD_ITER_COST_PER_DIM)
+        / TREE_CUT_BUILD_ITER_COST_DIVISOR
 }
 
 /// A generated cut `coeffs · x >= rhs` over the original variable space.
@@ -287,15 +387,17 @@ fn solve_validate(
     crate::lp::solve_lp_with(lp, &opts)
 }
 
-/// See [`solve_validate`] for the `max_iters` contract shared by both cut-LP
-/// solve helpers.
-fn solve_cut_lp(
-    lp: &LpProblem,
+/// Builds the [`SolverOptions`] for [`solve_cut_lp`]. Split out (mirroring
+/// [`tree_cut_warm_options`]) so the options themselves — including
+/// `tolerance`, easy to silently drop since `solve_cut_lp` has no other
+/// caller-visible effect of it on a well-scaled LP — are directly testable
+/// rather than only inferable from a solve's output.
+fn solve_cut_lp_options(
     options: &SolverOptions,
     deadline: Option<std::time::Instant>,
     max_iters: Option<u64>,
-) -> crate::problem::SolverResult {
-    let opts = SolverOptions {
+) -> SolverOptions {
+    SolverOptions {
         presolve: false,
         simplex_method: SimplexMethod::Primal,
         recover_warm_start_basis: true,
@@ -307,10 +409,193 @@ fn solve_cut_lp(
         primal_tol: options.primal_tol,
         dual_tol: options.dual_tol,
         threads: options.threads,
+        tolerance: options.tolerance,
         cancel_flag: options.cancel_flag.clone(),
         ..SolverOptions::default()
-    };
+    }
+}
+
+/// See [`solve_validate`] for the `max_iters` contract shared by both cut-LP
+/// solve helpers.
+fn solve_cut_lp(
+    lp: &LpProblem,
+    options: &SolverOptions,
+    deadline: Option<std::time::Instant>,
+    max_iters: Option<u64>,
+) -> crate::problem::SolverResult {
+    let opts = solve_cut_lp_options(options, deadline, max_iters);
     crate::lp::solve_lp_with(lp, &opts)
+}
+
+/// Builds the [`SolverOptions`] for [`solve_tree_cut_warm`]: `DualAdvanced`
+/// (not `Primal`, which never consults `warm_start` at all — see
+/// `primal::two_phase_simplex`'s only use of it, gating the *crash basis*,
+/// not warm-starting) with `disable_bounded_dispatch: true` and `warm_basis`
+/// as the starting basis.
+///
+/// `disable_bounded_dispatch` is required, not optional: this module's
+/// tableau (`generate_round`, [`extend_basis_for_new_rows`]) is built from
+/// `build_standard_form`'s `sf.m`-shaped space (upper bounds as extra rows).
+/// `dual_advanced`'s bounded fast path uses the smaller `build_bounded_
+/// standard_form` space (`bsf.m`) for any LP with a finite upper bound —
+/// true for every in-tree separation candidate in an all-boxed MILP — and
+/// silently rejects an `sf.m`-shaped warm start via its own `warm.basis.len()
+/// == bsf.m` guard, falling back to a cold solve whose returned basis is
+/// then in the *wrong* (`bsf.m`) space for the next round's
+/// `generate_round`/`extend_basis_for_new_rows` call, which return no cuts
+/// rather than erroring (see `disable_bounded_dispatch`'s own doc, and the
+/// `gt2` `cuts_empty` 1.2%→15.1% regression this caused before the option
+/// existed).
+fn tree_cut_warm_options(
+    options: &SolverOptions,
+    deadline: Option<std::time::Instant>,
+    max_iters: Option<u64>,
+    warm_basis: Vec<usize>,
+) -> SolverOptions {
+    SolverOptions {
+        presolve: false,
+        simplex_method: SimplexMethod::DualAdvanced,
+        disable_bounded_dispatch: true,
+        recover_warm_start_basis: true,
+        warm_start: Some(WarmStartBasis {
+            basis: warm_basis,
+            x_b: Vec::new(),
+        }),
+        warm_start_lp: None,
+        deadline,
+        timeout_secs: None,
+        max_iters,
+        primal_tol: options.primal_tol,
+        dual_tol: options.dual_tol,
+        threads: options.threads,
+        tolerance: options.tolerance,
+        cancel_flag: options.cancel_flag.clone(),
+        ..SolverOptions::default()
+    }
+}
+
+/// Warm-started re-solve of an in-tree separation LP from `warm_basis` — a
+/// basis for `lp`'s own `build_standard_form` space, either carried forward
+/// unchanged (no new rows since it was last valid) or extended by
+/// [`extend_basis_for_new_rows`] (this round's new cut rows appended).
+///
+/// See [`tree_cut_warm_options`] for why this must dispatch through
+/// `DualAdvanced` with `disable_bounded_dispatch: true` rather than
+/// [`solve_cut_lp`]'s cold `SimplexMethod::Primal`. Adding rows never
+/// changes the objective or any existing column, so every already-optimal
+/// reduced cost is untouched (dual-feasible); the new rows' own surplus
+/// columns start primal-infeasible (a cut is generated because the current
+/// vertex violates it) — exactly the situation dual simplex resolves in a
+/// handful of pivots rather than a full re-solve.
+fn solve_tree_cut_warm(
+    lp: &LpProblem,
+    options: &SolverOptions,
+    deadline: Option<std::time::Instant>,
+    max_iters: Option<u64>,
+    warm_basis: Vec<usize>,
+) -> crate::problem::SolverResult {
+    let opts = tree_cut_warm_options(options, deadline, max_iters, warm_basis);
+    crate::lp::solve_lp_with(lp, &opts)
+}
+
+/// Extends a `prev_basis` (valid for the LP `candidate` had *before* this
+/// round's `k` new Ge rows were appended) into `candidate`'s larger standard
+/// form, by taking each new row's own surplus column as its basic variable.
+///
+/// `append_ge_rows_with_integer_mask` always appends new rows after all of
+/// `candidate`'s existing *real* rows, and adding rows never introduces new
+/// *structural* columns (variable bounds are unchanged) — only one new
+/// slack/surplus column per non-`Eq` new row (ours are always `Ge`).
+///
+/// `build_standard_form` additionally appends one implicit `Le` row *after
+/// all real rows* for every variable with both bounds finite ("UB rows"),
+/// each consuming its own slack column — for an all-boxed-integer MILP
+/// (e.g. `mas76`, all-binary) this is not a rare edge case, it is most of
+/// `n_total`. Inserting `k` new real rows shifts every one of those UB-row
+/// slack columns later by `k`; a `prev_basis` entry referencing one (very
+/// likely, since `m` basic slots are shared between structural columns and
+/// slacks, so many optimal bases include at least one UB-row slack) would
+/// otherwise alias a *different* column in `candidate`'s larger form,
+/// producing a basis matrix that is usually singular. Column indices below
+/// `boundary` (structural + old real-row slacks, whose relative row-scan
+/// order is unaffected by appending rows after them) are copied as-is;
+/// indices at or above it (UB-row slacks) are shifted by `k` to their new
+/// position. `k == 0` is the identity map (used when re-solving `committed`
+/// itself at a later round's start, with no new rows since `prev_basis`).
+fn extend_basis_for_new_rows(candidate: &LpProblem, prev_basis: &[usize], k: usize) -> Vec<usize> {
+    let sf = build_standard_form(candidate);
+    let n_real_slack = candidate
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct != ConstraintType::Eq)
+        .count();
+    let boundary = sf.n_shifted + n_real_slack - k;
+    let mut extended: Vec<usize> = prev_basis
+        .iter()
+        .map(|&idx| if idx < boundary { idx } else { idx + k })
+        .collect();
+    extended.extend(boundary..boundary + k);
+    extended
+}
+
+/// Warm-solves `lp` from `warm_basis` via [`solve_tree_cut_warm`], falling
+/// back to a cold [`solve_cut_lp`] bootstrap when the *result* cannot be
+/// trusted to seed the next round: the solve reached `Optimal` but the
+/// basis it returned has a different length than `build_standard_form(lp)
+/// .m`.
+///
+/// Pure defense, not a reachable path today: with `tree_cut_warm_options`
+/// hardcoding `disable_bounded_dispatch: true`, every warm solve here runs
+/// in `lp`'s own `build_standard_form` space, so this mismatch cannot fire
+/// through this module's own call sites (see
+/// `tree_cut_warm_options_dispatches_dual_advanced_with_disabled_bounded_path`
+/// and `separate_tree_cuts_accepts_legacy_warm_start_without_singular_
+/// fallback`, which cover *that* contract directly and fail if it
+/// regresses). It guards instead against a future regression in
+/// `dual_advanced` itself re-opening this gap: when it silently did pre-fix
+/// (via the bounded fast path's smaller space), the mismatched basis was
+/// not rejected loudly — `generate_round`'s own `basis.len() != sf.m` guard
+/// just returned zero cuts every round after, degrading in-tree separation
+/// into a silent no-op (`gt2`'s `cuts_empty` 1.2% → 15.1%). The
+/// `debug_assert!` turns any recurrence into an immediate test/debug-build
+/// failure; the runtime fallback keeps release builds correct — a cold
+/// re-solve, not silence — at the cost of one extra solve for that round. A
+/// non-`Optimal` warm status is returned as-is, with no cold retry:
+/// [`separate_tree_cuts`] already ends the round on any non-`Optimal`
+/// result, so retrying here would (at best) waste a solve that cannot
+/// change the outcome, and (for a status like `Infeasible`, a certificate
+/// rather than a resource limit) would risk quietly overriding a real
+/// answer with a different one from a different starting basis — including
+/// self-"healing" a possible false-`Infeasible` misdetection, whose
+/// investigation is explicitly out of scope for this change (see the
+/// task's verification item measuring it, not fixing it here).
+fn tree_cut_resolve(
+    lp: &LpProblem,
+    options: &SolverOptions,
+    deadline: Option<std::time::Instant>,
+    max_iters: Option<u64>,
+    warm_basis: Vec<usize>,
+) -> crate::problem::SolverResult {
+    let expected_m = build_standard_form(lp).m;
+    let res = solve_tree_cut_warm(lp, options, deadline, max_iters, warm_basis);
+    if res.status != SolveStatus::Optimal {
+        return res;
+    }
+    let shape_ok = res
+        .warm_start_basis
+        .as_ref()
+        .is_some_and(|ws| ws.basis.len() == expected_m);
+    debug_assert!(
+        shape_ok,
+        "tree-cut warm solve returned a basis whose length does not match \
+         build_standard_form(lp).m; disable_bounded_dispatch should prevent this"
+    );
+    if shape_ok {
+        return res;
+    }
+    let mut cold = solve_cut_lp(lp, options, deadline, max_iters);
+    cold.iterations = cold.iterations.saturating_add(res.iterations);
+    cold
 }
 
 fn generate_round(
@@ -326,10 +611,31 @@ fn generate_round(
         "cut separation requires one LP value per variable"
     );
     let sf = build_standard_form(lp);
+    // Both guards are the historical phase-2 failure mode made loud
+    // (Codex review, P2-5): a shape-mismatched `basis` (e.g. from the
+    // bounded fast path's smaller space, see `disable_bounded_dispatch`'s
+    // doc) used to make this function silently return no cuts every round,
+    // masking `gt2`'s `cuts_empty` 1.2% → 15.1% regression rather than
+    // surfacing it. With `tree_cut_warm_options` hardcoding `disable_
+    // bounded_dispatch: true`, every caller's `basis` should already be in
+    // `lp`'s own `build_standard_form` space, so these should never fire —
+    // the `debug_assert!`s turn a recurrence into an immediate test/
+    // debug-build failure instead of a silent empty-cuts round.
     if basis.len() != sf.m {
+        debug_assert!(
+            false,
+            "generate_round: basis.len()={} does not match build_standard_form(lp).m={}",
+            basis.len(),
+            sf.m
+        );
         return Vec::new();
     }
     if basis.iter().any(|&j| j >= sf.n_total) {
+        debug_assert!(
+            false,
+            "generate_round: basis contains an index >= sf.n_total={}",
+            sf.n_total
+        );
         return Vec::new();
     }
 
@@ -1135,22 +1441,49 @@ fn tree_cut_node_selected(depth: usize, node_index: usize) -> bool {
 /// nodes or propagated to children — B&B receives only this node's tightened
 /// bound/solution, a valid lower bound for the subtree.
 ///
-/// Mirrors root [`add_root_cuts`] but node-local: re-solve → generate →
-/// pool-filter → append (Ge) → re-solve, stopping when the bound stalls.
+/// Mirrors root [`add_root_cuts`] but node-local: bootstrap → (generate →
+/// pool-filter → append (Ge) → warm re-solve → warm re-solve)*, stopping
+/// when the bound stalls. Only the very first solve (round 0's bootstrap) is
+/// cold: `node_res`'s own `warm_start_basis` (from whatever dispatch solved
+/// the node relaxation) is not known to be in this module's own
+/// `build_standard_form` space — it may have come from `dual_advanced`'s
+/// bounded fast path, a smaller basis space this module's tableau cannot
+/// use (see [`tree_cut_warm_options`]'s `disable_bounded_dispatch`) — so
+/// [`solve_cut_lp`] always cold-bootstraps once to obtain a basis in the
+/// right space, which every later warm solve then carries forward. Every
+/// round after round 0 re-solves `committed` itself (warm, from the
+/// previous round's own basis — no new rows since, so this should
+/// re-verify optimality in about one iteration) to derive this round's
+/// cut-generation source, rather than reusing the previous round's
+/// already-in-hand result object directly: the two are mathematically the
+/// same LP, but deriving the source from an explicit fresh solve each round
+/// (through the same shape-guarded [`tree_cut_resolve`] as the round's own
+/// validate step below) means a corrupted or stale basis cannot silently
+/// propagate for more than one round.
+///
 /// `max_iters` bounds simplex iterations across rounds (see
-/// `effort::separation_iter_budget`): each individual cold solve within a
-/// round is skipped — ending this attempt — once the remaining allowance
-/// drops below [`tree_cut_min_useful_iters`]'s per-dimension minimum, rather
-/// than being attempted with a too-small `SolverOptions::max_iters` (see
-/// that function's doc: `TREE_CUT_MIN_SOLVE_ITER_DIM_MULT`'s markshare_4_0
-/// note). Otherwise the solve's own `max_iters` is exactly the remaining
-/// allowance, bounding a single cold solve (no presolve, no warm start) that
-/// would otherwise spend arbitrarily more than what remains of this
-/// attempt's budget on its own (confirmed by `dcmulti`'s single 27s cut-LP
-/// solve under Phase 1c re-bench). Returns the iterations actually spent
-/// plus whether this call passed the node-selection interval and attempted
-/// separation (independent of the iteration count, which can legitimately
-/// be 0 for a real attempt).
+/// `effort::separation_iter_budget`): each individual solve within a round
+/// is skipped — ending this attempt — once the remaining allowance drops
+/// below [`tree_cut_min_useful_iters`]'s per-dimension minimum, rather than
+/// being attempted with a too-small `SolverOptions::max_iters` (see that
+/// function's doc: `TREE_CUT_MIN_SOLVE_ITER_DIM_MULT`'s markshare_4_0 note).
+/// Otherwise the solve's own `max_iters` is exactly the remaining allowance,
+/// bounding a single solve that would otherwise spend arbitrarily more than
+/// what remains of this attempt's budget on its own (confirmed by
+/// `dcmulti`'s single 27s cold cut-LP solve under Phase 1c re-bench).
+/// Real simplex iterations (the first `u64`) and the [`tree_cut_construction_
+/// surcharge`] fixed-cost overhead (the second `u64`, iteration-equivalent
+/// units, not real simplex work) are tracked and returned separately —
+/// see [`MipStats::tree_cut_overhead_iters`](super::MipStats::
+/// tree_cut_overhead_iters) for why the caller must not merge them into the
+/// same counter. Within this call both still count against the same
+/// `max_iters` allowance: `remaining` at each round boundary is `max_iters`
+/// minus the combined real-plus-overhead spend so far, so a round that would
+/// exceed the *true* per-round cost (real work plus its own accounting
+/// overhead) is skipped exactly as if it were all real iterations. Returns
+/// the iterations actually spent plus whether this call passed the
+/// node-selection interval and attempted separation (independent of the
+/// iteration count, which can legitimately be 0 for a real attempt).
 pub(crate) fn separate_tree_cuts(
     node_lp: &LpProblem,
     integer_mask: &[bool],
@@ -1159,9 +1492,9 @@ pub(crate) fn separate_tree_cuts(
     depth: usize,
     node_index: usize,
     max_iters: u64,
-) -> (Option<SolverResult>, u64, bool) {
+) -> (Option<SolverResult>, u64, u64, bool) {
     if !tree_cut_node_selected(depth, node_index) {
-        return (None, 0, false);
+        return (None, 0, 0, false);
     }
     let base_obj = node_res.objective;
     // Fresh per-node pool: cuts are valid only in this subtree (see soundness note).
@@ -1170,42 +1503,75 @@ pub(crate) fn separate_tree_cuts(
     let mut accepted: Option<SolverResult> = None;
     let mut prev_obj = base_obj;
     let mut iters_spent: u64 = 0;
+    let mut overhead_spent: u64 = 0;
+    // `build_standard_form(committed)`-shaped basis carried warm from round
+    // to round; `None` until round 0's cold bootstrap succeeds.
+    let mut basis: Option<Vec<usize>> = None;
 
     for round_idx in 0..TREE_CUT_MAX_ROUNDS {
         // Codex review (P1) / markshare_4_0 follow-up: pass the *actual*
-        // remaining allowance as this solve's own `max_iters` — a single cold
-        // solve (no presolve, no warm start) has no other cap and could
-        // otherwise spend arbitrarily more than what remains of this
-        // attempt's `max_iters` budget on its own (confirmed by `dcmulti`'s
-        // single 27s cut-LP solve under Phase 1c re-bench). Skip the round
-        // entirely (rather than inflating the cap) once the remaining
-        // allowance is below what a cold solve realistically needs — see
-        // `tree_cut_min_useful_iters`'s doc.
-        let remaining = max_iters.saturating_sub(iters_spent);
+        // remaining allowance as this solve's own `max_iters` — a solve with
+        // no other cap could otherwise spend arbitrarily more than what
+        // remains of this attempt's `max_iters` budget on its own (confirmed
+        // by `dcmulti`'s single 27s cold cut-LP solve under Phase 1c
+        // re-bench). Skip the round entirely (rather than inflating the cap)
+        // once the remaining allowance is below what a solve realistically
+        // needs — see `tree_cut_min_useful_iters`'s doc.
+        let remaining = max_iters.saturating_sub(iters_spent.saturating_add(overhead_spent));
         if remaining < tree_cut_min_useful_iters(&committed) {
             break;
         }
-        // Re-solve through the cold primal cut path to recover a *full* size-`m`
-        // simplex basis (the node's warm-start basis is a compact form).
-        let cut_res = solve_cut_lp(&committed, options, options.deadline, Some(remaining));
+        let is_bootstrap = basis.is_none();
+        let cut_res = match basis.take() {
+            None => solve_cut_lp(&committed, options, options.deadline, Some(remaining)),
+            Some(prev_basis) => tree_cut_resolve(
+                &committed,
+                options,
+                options.deadline,
+                Some(remaining),
+                prev_basis,
+            ),
+        };
         iters_spent = iters_spent.saturating_add(cut_res.iterations as u64);
+        // `is_bootstrap` selects the same branch `cut_res` above just took:
+        // `solve_cut_lp` (no shape-check build of its own — see
+        // `TREE_CUT_BUILDS_ROUND_START_COLD`) on round 0, `tree_cut_resolve`
+        // (with its own shape-check build — `TREE_CUT_BUILDS_ROUND_START_
+        // WARM`) every round after.
+        let round_start_builds = if is_bootstrap {
+            TREE_CUT_BUILDS_ROUND_START_COLD
+        } else {
+            TREE_CUT_BUILDS_ROUND_START_WARM
+        };
+        overhead_spent = overhead_spent.saturating_add(tree_cut_construction_surcharge(
+            &committed,
+            round_start_builds,
+        ));
         if cut_res.status != SolveStatus::Optimal {
             break;
         }
         let Some(ws) = cut_res.warm_start_basis.as_ref() else {
             break;
         };
-        let x_star = &cut_res.solution;
-        if x_star.is_empty() {
+        if cut_res.solution.is_empty() {
             break;
         }
+        let x_star = cut_res.solution.clone();
+        let round_basis = ws.basis.clone();
 
         let kind = if round_idx % 2 == 0 {
             CutKind::Gmi
         } else {
             CutKind::Mir
         };
-        let cuts = generate_round(&committed, integer_mask, x_star, &ws.basis, kind);
+        let cuts = generate_round(&committed, integer_mask, &x_star, &round_basis, kind);
+        // Charged unconditionally, before checking `cuts.is_empty()` below:
+        // `generate_round` always builds `committed`'s standard form first,
+        // even on a round that ends up finding nothing worth cutting.
+        overhead_spent = overhead_spent.saturating_add(tree_cut_construction_surcharge(
+            &committed,
+            TREE_CUT_BUILDS_GENERATE_ROUND,
+        ));
         if cuts.is_empty() {
             break;
         }
@@ -1217,7 +1583,7 @@ pub(crate) fn separate_tree_cuts(
                 sense: ConstraintType::Ge,
             })
             .collect();
-        let selected = pool.separate_round(pool_candidates, x_star);
+        let selected = pool.separate_round(pool_candidates, &x_star);
         if selected.is_empty() {
             break;
         }
@@ -1229,24 +1595,43 @@ pub(crate) fn separate_tree_cuts(
                 rhs: c.rhs,
             })
             .collect();
+        let k = rows.len();
         let candidate = append_ge_rows_with_integer_mask(&committed, &rows, integer_mask);
         // Re-check the remaining allowance between the two solves of this
-        // round: the cut-LP solve above may have already spent some (or all)
-        // of it, and this validate solve is itself a second cold solve
+        // round: the cut-generation solve above may have already spent some
+        // (or all) of it, and this validate solve is itself a second solve
         // subject to the same skip threshold. If too little remains to
         // realistically finish it, abandon this round rather than run a
         // truncated validate solve — the round's cuts are discarded (not
         // committed), matching the "skip, don't truncate" pattern.
-        let remaining = max_iters.saturating_sub(iters_spent);
+        let remaining = max_iters.saturating_sub(iters_spent.saturating_add(overhead_spent));
         if remaining < tree_cut_min_useful_iters(&candidate) {
             break;
         }
-        let check = solve_validate(&candidate, options, options.deadline, Some(remaining));
+        let warm_basis = extend_basis_for_new_rows(&candidate, &round_basis, k);
+        let check = tree_cut_resolve(
+            &candidate,
+            options,
+            options.deadline,
+            Some(remaining),
+            warm_basis,
+        );
         iters_spent = iters_spent.saturating_add(check.iterations as u64);
-        if check.status != SolveStatus::Optimal {
+        // Charged against `candidate` (not `committed`): `extend_basis_for_
+        // new_rows` and `tree_cut_resolve` above both build `candidate`'s
+        // own (larger, +k rows) standard form, not `committed`'s.
+        overhead_spent = overhead_spent.saturating_add(tree_cut_construction_surcharge(
+            &candidate,
+            TREE_CUT_BUILDS_ROUND_END,
+        ));
+        if check.status != SolveStatus::Optimal || check.solution.is_empty() {
             break;
         }
+        let Some(check_ws) = check.warm_start_basis.clone() else {
+            break;
+        };
         committed = candidate;
+        basis = Some(check_ws.basis);
         let obj = check.objective;
         accepted = Some(check);
 
@@ -1262,14 +1647,14 @@ pub(crate) fn separate_tree_cuts(
     // returned result carries no warm-start basis (its augmented layout would not
     // match child node solves, which use the original constraint structure).
     let Some(mut res) = accepted else {
-        return (None, iters_spent, true);
+        return (None, iters_spent, overhead_spent, true);
     };
     let scale = 1.0_f64.max(base_obj.abs());
     if res.objective <= base_obj + MIN_TREE_CUT_GAIN_REL * scale {
-        return (None, iters_spent, true);
+        return (None, iters_spent, overhead_spent, true);
     }
     res.warm_start_basis = None;
-    (Some(res), iters_spent, true)
+    (Some(res), iters_spent, overhead_spent, true)
 }
 
 #[cfg(test)]

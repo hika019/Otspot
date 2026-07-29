@@ -73,6 +73,101 @@ pub(crate) fn fallback_profile_delta(
     }
 }
 
+// ── Legacy-path warm-start dispatch counters (sentinel tests only) ─────────
+//
+// Track whether a `warm_start` supplied to the *legacy* (non-bounded, `sf.m`
+// -shaped) path above is actually accepted (dual-feasible, non-singular,
+// correctly-shaped basis → `core::dual_simplex_core_advanced` runs) versus
+// silently dropped to a cold start for any of its three reasons: shape/range
+// mismatch (`warm.basis.len() != m` or an out-of-range index — falls through
+// the outer `if` with no attempt at all), a singular basis
+// (`LuBasis::new_timed` fails), or dual infeasibility under the new cost
+// vector. Callers whose warm basis is built in this exact space (e.g.
+// `mip::cuts`'s in-tree separation, via `disable_bounded_dispatch`) use
+// these to prove their warm start is genuinely taken, not quietly
+// discarded — [`legacy_warm_start_cold_fallback_total_count`] sums all three
+// so "zero cold fallbacks" is a single check rather than three.
+
+#[cfg(test)]
+thread_local! {
+    static LEGACY_WARM_START_ACCEPTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LEGACY_WARM_START_SINGULAR_FALLBACK: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    static LEGACY_WARM_START_SHAPE_MISMATCH_FALLBACK: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    static LEGACY_WARM_START_DUAL_INFEASIBLE_FALLBACK: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_legacy_warm_start_counts() {
+    LEGACY_WARM_START_ACCEPTED.with(|c| c.set(0));
+    LEGACY_WARM_START_SINGULAR_FALLBACK.with(|c| c.set(0));
+    LEGACY_WARM_START_SHAPE_MISMATCH_FALLBACK.with(|c| c.set(0));
+    LEGACY_WARM_START_DUAL_INFEASIBLE_FALLBACK.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn legacy_warm_start_accepted_count() -> u64 {
+    LEGACY_WARM_START_ACCEPTED.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn legacy_warm_start_singular_fallback_count() -> u64 {
+    LEGACY_WARM_START_SINGULAR_FALLBACK.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn legacy_warm_start_shape_mismatch_fallback_count() -> u64 {
+    LEGACY_WARM_START_SHAPE_MISMATCH_FALLBACK.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn legacy_warm_start_dual_infeasible_fallback_count() -> u64 {
+    LEGACY_WARM_START_DUAL_INFEASIBLE_FALLBACK.with(|c| c.get())
+}
+
+/// Sum of all three ways a supplied `warm_start` falls back to a cold start
+/// on the legacy path instead of being accepted — see this section's doc.
+#[cfg(test)]
+pub(crate) fn legacy_warm_start_cold_fallback_total_count() -> u64 {
+    legacy_warm_start_singular_fallback_count()
+        .saturating_add(legacy_warm_start_shape_mismatch_fallback_count())
+        .saturating_add(legacy_warm_start_dual_infeasible_fallback_count())
+}
+
+#[cfg(test)]
+fn bump_legacy_warm_start_accepted() {
+    LEGACY_WARM_START_ACCEPTED.with(|c| c.set(c.get().saturating_add(1)));
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn bump_legacy_warm_start_accepted() {}
+
+#[cfg(test)]
+fn bump_legacy_warm_start_singular_fallback() {
+    LEGACY_WARM_START_SINGULAR_FALLBACK.with(|c| c.set(c.get().saturating_add(1)));
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn bump_legacy_warm_start_singular_fallback() {}
+
+#[cfg(test)]
+fn bump_legacy_warm_start_shape_mismatch_fallback() {
+    LEGACY_WARM_START_SHAPE_MISMATCH_FALLBACK.with(|c| c.set(c.get().saturating_add(1)));
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn bump_legacy_warm_start_shape_mismatch_fallback() {}
+
+#[cfg(test)]
+fn bump_legacy_warm_start_dual_infeasible_fallback() {
+    LEGACY_WARM_START_DUAL_INFEASIBLE_FALLBACK.with(|c| c.set(c.get().saturating_add(1)));
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn bump_legacy_warm_start_dual_infeasible_fallback() {}
+
 /// Applies deterministic per-row upward jitter to `x_B` with magnitude `mag`.
 /// Row 0 always has frac=0 (Knuth PRNG: `0 * SPREAD_MULT = 0`), so the first
 /// element is never modified; the jitter remains upward-only and keeps the
@@ -265,14 +360,17 @@ pub(crate) fn solve_dual_advanced(
     // Two sub-paths gated on the BSF shape:
     //   - Le-only (num_artificial == 0)        → `try_bounded` (dual BFRT then primal).
     //   - Has artificials (num_artificial > 0) → `try_bounded_phase1_eq` (augmented
-    //     primal Phase I+II); preserves m (no UB-row blow-up) and dispatch is
-    //     skipped via thread-local hook in tests for no-op proofs.
+    //     primal Phase I+II); preserves m (no UB-row blow-up).
     // Le / Ge / Eq rows are handled uniformly: the constraint sense only sets the
     // standard-form slack sign and `needs_artificial`, both already baked into
     // `bsf`. Phase I minimises Σ artificials independent of the original sense, so
     // Ge needs no special path. A spurious "Optimal" is still caught by
     // `guard_lp_optimal` at the entry, so opening Ge cannot return a wrong answer.
-    if !bounded_dispatch_disabled() && problem.bounds.iter().any(|&(_, ub)| ub.is_finite()) {
+    // `options.disable_bounded_dispatch` forces the legacy (sf.m-shaped) path
+    // below unconditionally — used by callers whose warm-start basis was built
+    // in that larger space (see the field's doc) and by this module's own
+    // no-op-proof tests.
+    if !options.disable_bounded_dispatch && problem.bounds.iter().any(|&(_, ub)| ub.is_finite()) {
         let Some(bsf) = build_bounded_standard_form_with_deadline(problem, options.deadline) else {
             return SolverResult::timeout();
         };
@@ -339,6 +437,7 @@ pub(crate) fn solve_dual_advanced(
                         options.dual_tol,
                     ) {
                         // dual infeasible under new c → cold start
+                        bump_legacy_warm_start_dual_infeasible_fallback();
                     } else {
                         let mut leaving = make_leaving_strategy(options.dual_pricing, m);
                         let mut total_iters: usize = 0;
@@ -361,13 +460,19 @@ pub(crate) fn solve_dual_advanced(
                             options,
                         );
                         result.iterations = total_iters;
+                        bump_legacy_warm_start_accepted();
                         return result;
                     }
                 }
                 Err(_) => {
                     // 基底が特異 → cold-startにフォールバック
+                    bump_legacy_warm_start_singular_fallback();
                 }
             }
+        } else {
+            // 基底長/範囲不一致 (bounded fast path 等、別空間の基底) →
+            // cold-startにフォールバック
+            bump_legacy_warm_start_shape_mismatch_fallback();
         }
     }
 
@@ -421,28 +526,6 @@ pub(crate) fn solve_dual_advanced(
 }
 
 // ── Bounded (BFRT) path ───────────────────────────────────────────────────────
-
-#[cfg(test)]
-thread_local! {
-    static BOUNDED_DISPATCH_DISABLE: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-pub(crate) fn set_bounded_dispatch_disabled(v: bool) {
-    BOUNDED_DISPATCH_DISABLE.with(|c| c.set(v));
-}
-
-fn bounded_dispatch_disabled() -> bool {
-    #[cfg(test)]
-    {
-        BOUNDED_DISPATCH_DISABLE.with(|c| c.get())
-    }
-    #[cfg(not(test))]
-    {
-        false
-    }
-}
 
 #[cfg(test)]
 use dispatch::diag_basis_initial_x_b;
@@ -592,12 +675,12 @@ mod tests {
     fn bfrt_wiring_flip_count_positive_noop_proof() {
         let lp = lp_flip_trigger();
         let sf = build_standard_form(&lp);
-        let _guard = crate::ScopedDisable::new(
-            || set_bounded_dispatch_disabled(true),
-            || set_bounded_dispatch_disabled(false),
-        );
+        let options = SolverOptions {
+            disable_bounded_dispatch: true,
+            ..SolverOptions::default()
+        };
         reset_bfrt_flip_invocations();
-        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let result = solve_dual_advanced(&sf, &lp, &options);
         let flips_disabled = bfrt_flip_invocations();
         assert_eq!(
             flips_disabled, 0,
@@ -1071,6 +1154,7 @@ mod tests {
         // Guard must fall through to cold start → correct obj=-3.
         let lp2 = make_lp(vec![-1.0, -1.0]);
         let sf2 = build_standard_form(&lp2);
+        reset_legacy_warm_start_counts();
         let r2 = solve_dual_advanced(
             &sf2,
             &lp2,
@@ -1090,6 +1174,17 @@ mod tests {
             "LP2 warm-solve obj={:.6e} expected -3 (got 0 = guard missing)",
             r2.objective
         );
+        // Codex review (P2-4): this scenario is exactly the dual-infeasible
+        // cold-fallback path — confirm it is actually counted, not just
+        // that the final objective happens to be correct regardless.
+        assert_eq!(
+            legacy_warm_start_dual_infeasible_fallback_count(),
+            1,
+            "the dual-infeasibility guard firing here must be counted"
+        );
+        assert_eq!(legacy_warm_start_accepted_count(), 0);
+        assert_eq!(legacy_warm_start_singular_fallback_count(), 0);
+        assert_eq!(legacy_warm_start_shape_mismatch_fallback_count(), 0);
 
         // Consistency: cold re-solve of LP2 must agree.
         let r2_cold = solve_dual_advanced(&sf2, &lp2, &SolverOptions::default());
@@ -1100,6 +1195,68 @@ mod tests {
             r2_cold.objective,
             r2.objective
         );
+    }
+
+    /// **SENTINEL** (Codex review, P2-4): a `warm_start` whose basis has the
+    /// wrong length for `sf.m` (e.g. a caller mixing up basis spaces) must
+    /// fall through to a cold start via the shape/range-mismatch branch —
+    /// the two previously-uncounted legacy-path exits before this review —
+    /// and that fallback must be counted, not silently invisible to callers
+    /// like `mip::cuts` that assert zero cold fallbacks.
+    ///
+    /// Sentinel: this exercises the outer `if warm.basis.len() == m && ...`
+    /// check's `else` branch specifically (as opposed to the `Err(_)` /
+    /// dual-infeasible branches inside it, covered by the tests above/below)
+    /// — removing `bump_legacy_warm_start_shape_mismatch_fallback()` from
+    /// that `else` makes this FAIL while the solve itself still silently
+    /// succeeds (correct answer, wrong/missing accounting).
+    #[test]
+    fn legacy_warm_start_shape_mismatch_is_counted() {
+        use otspot_num::sparse::CscMatrix;
+
+        // No finite UBs → legacy dual path (matches the dual-infeasible test
+        // above); a warm basis one element too long can never satisfy
+        // `warm.basis.len() == m` regardless of its contents.
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        assert_eq!(sf.m, 1, "test premise");
+
+        reset_legacy_warm_start_counts();
+        let result = solve_dual_advanced(
+            &sf,
+            &lp,
+            &SolverOptions {
+                warm_start: Some(WarmStartBasis {
+                    basis: vec![0, 1], // length 2 != sf.m (1)
+                    x_b: Vec::new(),
+                }),
+                ..SolverOptions::default()
+            },
+        );
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "the mismatched warm start must still fall through to a correct \
+             cold solve: {:?}",
+            result.status
+        );
+        assert_eq!(
+            legacy_warm_start_shape_mismatch_fallback_count(),
+            1,
+            "the shape-mismatch branch firing here must be counted"
+        );
+        assert_eq!(legacy_warm_start_accepted_count(), 0);
+        assert_eq!(legacy_warm_start_singular_fallback_count(), 0);
+        assert_eq!(legacy_warm_start_dual_infeasible_fallback_count(), 0);
     }
 
     /// Sentinel: Ge/Eq cold-start (primal-first dispatch) must solve optimally.
@@ -1272,12 +1429,12 @@ mod tests {
     fn eq_ub_dispatch_noop_proof() {
         let lp = lp_eq_with_finite_ubs();
         let sf = build_standard_form(&lp);
-        let _guard = crate::ScopedDisable::new(
-            || set_bounded_dispatch_disabled(true),
-            || set_bounded_dispatch_disabled(false),
-        );
+        let options = SolverOptions {
+            disable_bounded_dispatch: true,
+            ..SolverOptions::default()
+        };
         bounded_core::reset_eq_ub_dispatch_count();
-        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let result = solve_dual_advanced(&sf, &lp, &options);
         let count = bounded_core::eq_ub_dispatch_count();
         assert_eq!(
             count, 0,

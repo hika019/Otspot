@@ -81,16 +81,20 @@ pub(crate) trait Relaxation {
     /// `max_iters` bounds the simplex iterations this attempt may spend (see
     /// `effort::separation_iter_budget`); a round is skipped once the
     /// remaining allowance drops below the per-dimension useful minimum (see
-    /// `cuts::separate_tree_cuts`). The `u64` in the return
-    /// is the total simplex iterations actually spent across all rounds of this
-    /// attempt, reported whether or not a cut was accepted, so the caller can
-    /// charge the gate even on a dry attempt. The `bool` is whether this call
-    /// actually attempted separation (passed the node-selection interval) —
-    /// P3-B: kept explicit rather than inferred from `u64 > 0`, since a real
-    /// attempt whose LP solves all happen to need zero simplex iterations
-    /// (e.g. an already-optimal starting basis) would otherwise be
-    /// indistinguishable from a skipped one, silently miscounting the
-    /// dry-streak backoff.
+    /// `cuts::separate_tree_cuts`). The first `u64` in the return is the
+    /// total *real* simplex iterations actually spent across all rounds of
+    /// this attempt; the second is [`cuts::tree_cut_construction_surcharge`]'s
+    /// fixed-cost overhead accrued the same way — kept separate so the
+    /// caller can route it to [`MipStats::tree_cut_overhead_iters`] rather
+    /// than [`MipStats::tree_cut_iters`] (see that field's doc for why
+    /// merging them regressed unrelated gates). Both are reported whether or
+    /// not a cut was accepted, so the caller can charge the gate even on a
+    /// dry attempt. The `bool` is whether this call actually attempted
+    /// separation (passed the node-selection interval) — P3-B: kept explicit
+    /// rather than inferred from the iteration counts, since a real attempt
+    /// whose LP solves all happen to need zero simplex iterations (e.g. an
+    /// already-optimal starting basis) would otherwise be indistinguishable
+    /// from a skipped one, silently miscounting the dry-streak backoff.
     fn separate_tree_cuts(
         &self,
         _bounds: &[(f64, f64)],
@@ -100,8 +104,8 @@ pub(crate) trait Relaxation {
         _depth: usize,
         _node_index: usize,
         _max_iters: u64,
-    ) -> (Option<SolverResult>, u64, bool) {
-        (None, 0, false)
+    ) -> (Option<SolverResult>, u64, u64, bool) {
+        (None, 0, 0, false)
     }
 
     /// Run the RINS heuristic: fix integer variables where the LP relaxation and
@@ -336,6 +340,22 @@ pub struct MipStats {
     /// Cumulative simplex iterations spent in in-tree cut separation
     /// (`separate_tree_cuts`), across all rounds of all attempts.
     pub tree_cut_iters: u64,
+    /// Cumulative fixed-cost surcharge (iteration-equivalent units, not real
+    /// simplex iterations) `separate_tree_cuts` charges for its own
+    /// `build_standard_form`-equivalent construction overhead — see
+    /// `cuts::tree_cut_construction_surcharge`. Kept out of `tree_cut_iters`
+    /// deliberately: only `effort::may_run_separation` and `effort::
+    /// separation_iter_budget` add this to their numerator, so separation's
+    /// own gate feels its true per-round cost without inflating
+    /// `effort::total_simplex_iters` — the shared denominator every other
+    /// `may_run_*` gate (RINS/RENS/local-branching/strong-branching) also
+    /// reads. An earlier version charged straight into `tree_cut_iters`,
+    /// which inflated that shared total and measurably distorted unrelated
+    /// gates: `gt2 --timeout 60` regressed from a deterministic 100-node
+    /// `Optimal` to a 3,744-node `Timeout` purely from this cross-component
+    /// leak, on a run where separation's own round count *increased*
+    /// (14 → 183) rather than decreased.
+    pub tree_cut_overhead_iters: u64,
     /// Consecutive in-tree separation attempts (that actually ran at least
     /// one round) yielding zero accepted rounds. Reset to 0 on any accepted
     /// round; once it reaches `effort::SEPARATION_DRY_STREAK_LIMIT`,
@@ -824,7 +844,7 @@ fn maybe_apply_tree_cut_separation<R: Relaxation>(
     }
     let tree_cut_t0 = Instant::now();
     let max_iters = effort::separation_iter_budget(stats);
-    let (separated, sep_iters, attempted) = problem.separate_tree_cuts(
+    let (separated, sep_iters, sep_overhead_iters, attempted) = problem.separate_tree_cuts(
         solve_bounds,
         &res,
         mask,
@@ -837,6 +857,9 @@ fn maybe_apply_tree_cut_separation<R: Relaxation>(
         .tree_cut_us
         .saturating_add(tree_cut_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
     stats.tree_cut_iters = stats.tree_cut_iters.saturating_add(sep_iters);
+    stats.tree_cut_overhead_iters = stats
+        .tree_cut_overhead_iters
+        .saturating_add(sep_overhead_iters);
     record_separation_attempt(stats, attempted, separated.is_some());
     if let Some(improved) = separated {
         stats.tree_cut_rounds += 1;

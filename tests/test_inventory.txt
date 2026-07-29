@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3052 testcases, 26 ignored
+# totals: 3062 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -267,6 +267,7 @@ otspot-core	mip::cuts::tests::cuts_on_root_lp_bound_valid_and_optimum_correct	ac
 otspot-core	mip::cuts::tests::cuts_preserve_optimum	active
 otspot-core	mip::cuts::tests::cuts_preserve_optimum_multi_ge	active
 otspot-core	mip::cuts::tests::cuts_tighten_lp_bound_without_crossing_integer_optimum	active
+otspot-core	mip::cuts::tests::extend_basis_for_new_rows_shifts_ub_row_slacks_past_new_ge_rows	active
 otspot-core	mip::cuts::tests::finalize_cut_rejects_dimension_mismatch	active
 otspot-core	mip::cuts::tests::implied_bound_cut_ge_row_validity	active
 otspot-core	mip::cuts::tests::implied_bound_cut_validity_brute_force	active
@@ -275,18 +276,24 @@ otspot-core	mip::cuts::tests::le_revalidation_lp_is_optimal_no_presolve	active
 otspot-core	mip::cuts::tests::mir_coeff_equals_gmi_for_all_cases	active
 otspot-core	mip::cuts::tests::mir_cut_validity_continuous_nonbasic_negative_alpha	active
 otspot-core	mip::cuts::tests::mir_cuts_generated_after_two_rounds	active
+otspot-core	mip::cuts::tests::separate_tree_cuts_accepts_legacy_warm_start_without_singular_fallback	active
 otspot-core	mip::cuts::tests::separate_tree_cuts_caps_iterations_at_small_budget	active
 otspot-core	mip::cuts::tests::separate_tree_cuts_drops_augmented_warm_start_basis	active
 otspot-core	mip::cuts::tests::separate_tree_cuts_reports_attempted_independent_of_zero_iterations	active
 otspot-core	mip::cuts::tests::separate_tree_cuts_respects_zero_iter_budget	active
 otspot-core	mip::cuts::tests::separate_tree_cuts_skips_a_round_below_the_per_dimension_minimum	active
+otspot-core	mip::cuts::tests::separate_tree_cuts_surcharge_is_nonzero_and_order_of_magnitude_correct	active
 otspot-core	mip::cuts::tests::solve_cut_lp_and_solve_validate_honor_max_iters	active
+otspot-core	mip::cuts::tests::solve_cut_lp_options_inherits_caller_tolerance	active
 otspot-core	mip::cuts::tests::structural_cuts_preserve_optimum	active
 otspot-core	mip::cuts::tests::structural_cuts_validity_end_to_end	active
 otspot-core	mip::cuts::tests::tableau_row_matches_dense	active
+otspot-core	mip::cuts::tests::tree_cut_builds_constants_match_actual_build_standard_form_call_counts	active
 otspot-core	mip::cuts::tests::tree_cut_gate_rejects_zero_depth_zero_node_sentinel	active
 otspot-core	mip::cuts::tests::tree_cut_min_useful_iters_is_dim_times_the_multiplier	active
 otspot-core	mip::cuts::tests::tree_cut_node_gate_depth_node_boundary_decision_table	active
+otspot-core	mip::cuts::tests::tree_cut_resolve_is_pure_passthrough_when_warm_solve_is_non_optimal	active
+otspot-core	mip::cuts::tests::tree_cut_warm_options_dispatches_dual_advanced_with_disabled_bounded_path	active
 otspot-core	mip::cuts::tests::tree_cuts_off_does_not_separate	active
 otspot-core	mip::cuts::tests::tree_cuts_preserve_optimum_sweep	active
 otspot-core	mip::cuts::tests::tree_cuts_reduce_node_count_sentinel	active
@@ -299,8 +306,10 @@ otspot-core	mip::effort::tests::heuristic_iter_budgets_floor_their_ceiling_at_su
 otspot-core	mip::effort::tests::may_run_separation_blocks_when_integer_budget_is_zero_despite_float_check_passing	active
 otspot-core	mip::effort::tests::separation_dry_streak_blocks_regardless_of_iteration_share	active
 otspot-core	mip::effort::tests::separation_iter_budget_is_remaining_share_minus_spent	active
+otspot-core	mip::effort::tests::separation_overhead_iters_count_against_the_separation_gate	active
 otspot-core	mip::effort::tests::shares_leave_majority_for_tree_search	active
 otspot-core	mip::effort::tests::strong_branch_share_not_latched_by_zero_iteration_relaxations	active
+otspot-core	mip::effort::tests::total_simplex_iters_is_independent_of_separation_overhead	active
 otspot-core	mip::effort::tests::zero_total_iters_always_allows	active
 otspot-core	mip::heuristics::capped_sub_mip_max_lp_iters_tests::ample_share_caps_at_the_flat_constant	active
 otspot-core	mip::heuristics::capped_sub_mip_max_lp_iters_tests::share_at_exactly_min_lp_iters_runs_at_that_size	active
@@ -1511,6 +1520,7 @@ otspot-core	simplex::dual_advanced::tests::ge_eq_le_mixed_types_solve_correctly	
 otspot-core	simplex::dual_advanced::tests::ge_infeasible_bounded_path_returns_infeasible	active
 otspot-core	simplex::dual_advanced::tests::ge_with_ub_solves_via_bounded_path_with_warm_basis	active
 otspot-core	simplex::dual_advanced::tests::legacy_warm_start_lb_violation_repairs_and_converges	active
+otspot-core	simplex::dual_advanced::tests::legacy_warm_start_shape_mismatch_is_counted	active
 otspot-core	simplex::dual_advanced::tests::p1_hypothesis_art_goes_positive_in_phase2	active
 otspot-core	simplex::dual_advanced::tests::perturb_noop_proof_reconcile_removes_perturbation	active
 otspot-core	simplex::dual_advanced::tests::perturb_on_off_same_optimal_degenerate_eq_ub	active

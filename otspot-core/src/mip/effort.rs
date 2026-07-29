@@ -73,6 +73,17 @@ pub(crate) const SEPARATION_DRY_STREAK_RESET_NODE_INTERVAL: usize = 1000;
 /// sub-MIPs' own recursive total), and in-tree separation. The denominator
 /// every `may_run_*` gate below shares.
 ///
+/// Deliberately excludes `stats.tree_cut_overhead_iters` — separation's own
+/// fixed-cost accounting surcharge (see `cuts::tree_cut_construction_
+/// surcharge` and [`MipStats::tree_cut_overhead_iters`](super::MipStats::
+/// tree_cut_overhead_iters)) is iteration-*equivalent* bookkeeping, not real
+/// simplex work, and only [`separation_component_iters`] (separation's own
+/// gate numerator) should see it. Folding it in here would inflate this
+/// shared denominator and loosen every *other* component's `may_run_*`
+/// gate too — measured to regress `gt2 --timeout 60` from a deterministic
+/// 100-node `Optimal` to a 3,744-node `Timeout` when an earlier version did
+/// exactly that.
+///
 /// Floored at `nodes_processed` (P2-D): a relaxation can legitimately need
 /// zero simplex iterations (e.g. an already-optimal starting basis, or a
 /// convex-MIQP fixed-point leaf that never calls the LP/QP solver), so
@@ -151,11 +162,25 @@ pub(crate) fn may_run_local_branching(stats: &MipStats) -> bool {
 pub(crate) fn may_run_separation(stats: &MipStats) -> bool {
     stats.tree_cut_dry_streak < SEPARATION_DRY_STREAK_LIMIT
         && may_run(
-            stats.tree_cut_iters,
+            separation_component_iters(stats),
             total_simplex_iters(stats),
             SEPARATION_ITER_SHARE,
         )
         && separation_iter_budget(stats) > 0
+}
+
+/// Separation's own numerator for [`may_run_separation`] and
+/// [`separation_iter_budget`]: real simplex iterations
+/// (`stats.tree_cut_iters`) plus `cuts::tree_cut_construction_surcharge`'s
+/// fixed-cost overhead (`stats.tree_cut_overhead_iters`) — see
+/// [`MipStats::tree_cut_overhead_iters`](super::MipStats::
+/// tree_cut_overhead_iters) for why the overhead is added *only* here and
+/// never folded into [`total_simplex_iters`], the shared denominator every
+/// other `may_run_*` gate also reads.
+fn separation_component_iters(stats: &MipStats) -> u64 {
+    stats
+        .tree_cut_iters
+        .saturating_add(stats.tree_cut_overhead_iters)
 }
 
 /// Whether strong branching may evaluate another candidate batch, given its
@@ -200,7 +225,7 @@ fn iter_budget_remaining(component_iters: u64, total_iters: u64, share: f64) -> 
 /// by the wall clock.
 pub(crate) fn separation_iter_budget(stats: &MipStats) -> u64 {
     iter_budget_remaining(
-        stats.tree_cut_iters,
+        separation_component_iters(stats),
         total_simplex_iters(stats),
         SEPARATION_ITER_SHARE,
     )
@@ -228,6 +253,21 @@ pub(crate) fn separation_iter_budget(stats: &MipStats) -> u64 {
 /// `heuristics::capped_sub_mip_max_lp_iters` still caps every call at
 /// `min(SUB_MIP_MAX_LP_ITERS, this)` and skips the call outright once the
 /// remaining allowance drops below `heuristics::SUB_MIP_MIN_LP_ITERS`.
+///
+/// Early in a search `total_simplex_iters` is small, so `share * total` alone
+/// would starve every call to near-zero — it is exactly the floor (a full
+/// `SUB_MIP_MAX_LP_ITERS`-sized call, ignoring how little share has
+/// technically accrued) that made a heuristic call effective early enough to
+/// matter at all: introducing this floored budget (Phase 1b-1d, `0eb370f5`)
+/// took MIPLIB small from 5 to 7 PASS, `markshare_4_0` among the two newly
+/// passing instances — a floor-less (pure-share) implementation was measured
+/// to leave it un-passing, the same failure mode this function's `gt2`
+/// regression evidence above shows independently. Any early overshoot this
+/// floor grants beyond a call's "fair" share is bounded per call at
+/// `SUB_MIP_MAX_LP_ITERS` (480,000) — never unbounded — and self-corrects as
+/// the search progresses: once `share * total_simplex_iters` exceeds that
+/// constant, the floor stops mattering and later calls are throttled purely
+/// by `share`, the same as if no floor existed.
 fn sub_mip_iter_budget_remaining(component_iters: u64, total_iters: u64, share: f64) -> u64 {
     if total_iters == 0 {
         return u64::MAX;
@@ -364,6 +404,76 @@ mod tests {
         });
         // 0.15 * 1_000_000 - 40_000 = 110_000.
         assert_eq!(separation_iter_budget(&s), 110_000);
+    }
+
+    /// **SENTINEL** (Phase 3b): [`tree_cut_overhead_iters`](super::MipStats::
+    /// tree_cut_overhead_iters) — `cuts::tree_cut_construction_surcharge`'s
+    /// fixed-cost accounting — must count against separation's *own* gate,
+    /// both [`may_run_separation`] and [`separation_iter_budget`], exactly
+    /// like real `tree_cut_iters`.
+    ///
+    /// Sentinel: computing `separation_component_iters` as `stats.
+    /// tree_cut_iters` alone (dropping the `+ tree_cut_overhead_iters` term)
+    /// makes this FAIL — a search that spent nothing on real separation
+    /// iterations but has already accrued a large surcharge would otherwise
+    /// still read as comfortably under its share.
+    #[test]
+    fn separation_overhead_iters_count_against_the_separation_gate() {
+        let s = stats_with(|s| {
+            s.lp_iters_total = 1_000_000;
+            s.tree_cut_iters = 0;
+            s.tree_cut_overhead_iters = 150_000; // >= 0.15 * 1_000_000
+        });
+        assert!(
+            !may_run_separation(&s),
+            "a surcharge alone reaching the share ceiling must block separation"
+        );
+        assert_eq!(
+            separation_iter_budget(&s),
+            0,
+            "a surcharge alone reaching the share ceiling must zero the remaining budget"
+        );
+    }
+
+    /// **SENTINEL** (Phase 3b): [`total_simplex_iters`] — the shared
+    /// denominator every `may_run_*` gate (RENS/RINS/local-branching/
+    /// strong-branching, not just separation) reads — must be independent of
+    /// [`tree_cut_overhead_iters`](super::MipStats::tree_cut_overhead_iters).
+    /// A construction-cost surcharge is iteration-*equivalent* bookkeeping
+    /// for separation's own gate, not real simplex work; leaking it into the
+    /// shared total loosens every other component's gate too.
+    ///
+    /// Sentinel: folding `stats.tree_cut_overhead_iters` into
+    /// `total_simplex_iters`'s sum makes this FAIL — this reproduces the
+    /// measured regression directly (an earlier version of this surcharge
+    /// took `gt2 --timeout 60` from a deterministic 100-node `Optimal` to a
+    /// 3,744-node `Timeout` this way, by loosening RINS/RENS/local-branching/
+    /// strong-branching gates that have nothing to do with separation).
+    #[test]
+    fn total_simplex_iters_is_independent_of_separation_overhead() {
+        let without_overhead = stats_with(|s| {
+            s.lp_iters_total = 1_000;
+        });
+        let with_overhead = stats_with(|s| {
+            s.lp_iters_total = 1_000;
+            s.tree_cut_overhead_iters = 1_000_000_000;
+        });
+        assert_eq!(
+            total_simplex_iters(&without_overhead),
+            total_simplex_iters(&with_overhead),
+            "tree_cut_overhead_iters must never change total_simplex_iters"
+        );
+
+        // Corroborate at the gate level: an unrelated component (RINS) sees
+        // the identical share ceiling whether or not a huge surcharge has
+        // accrued.
+        let rins_budget_without = rins_iter_budget(&without_overhead);
+        let rins_budget_with = rins_iter_budget(&with_overhead);
+        assert_eq!(
+            rins_budget_without, rins_budget_with,
+            "an unrelated component's own budget must not shift because of \
+             separation's surcharge"
+        );
     }
 
     /// SENTINEL (Codex review, P1 fix follow-up): on a small/medium-scale

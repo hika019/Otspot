@@ -565,6 +565,23 @@ pub struct SolverOptions {
     pub(crate) max_iters: Option<u64>,
     /// Cached Schur complement decision from `probe_schur_decision`.
     pub(crate) schur_hint: Option<bool>,
+    /// Force `dual_advanced::solve_dual_advanced` onto its legacy
+    /// (UB-row-expanded, `build_standard_form`-shaped) path, skipping the
+    /// bounded fast path even when every variable has a finite upper bound.
+    /// Default: `false`.
+    ///
+    /// The bounded fast path (`try_bounded`) uses
+    /// `build_bounded_standard_form`'s compact basis space (`bsf.m`), which
+    /// is smaller than the legacy path's `build_standard_form` space
+    /// (`sf.m`, one extra row per two-sided-bound variable) whenever any
+    /// variable has both bounds finite. A caller whose warm-start basis was
+    /// produced in the legacy space (e.g. `mip::cuts`'s in-tree separation,
+    /// whose tableau-based cut generation requires `sf.m`-shaped bases) must
+    /// set this so its warm start is accepted in the same space it was
+    /// built in, rather than being silently rejected by the bounded path's
+    /// own `warm.basis.len() == bsf.m` shape guard and falling back to a
+    /// cold solve.
+    pub(crate) disable_bounded_dispatch: bool,
 
     // --- Ruiz scaling ---
     /// Apply Ruiz equilibration scaling before LP simplex / IPM.  Default: `true`.
@@ -656,6 +673,7 @@ impl Default for SolverOptions {
             deadline: None,
             max_iters: None,
             schur_hint: None,
+            disable_bounded_dispatch: false,
             use_ruiz_scaling: true,
             tolerance: None,
             ipm: IpmOptions::default(),

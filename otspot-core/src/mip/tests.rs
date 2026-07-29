@@ -4525,8 +4525,8 @@ fn separation_dry_streak_periodic_reset_runs_even_on_infeasible_boundary_node() 
             _depth: usize,
             _node_index: usize,
             _max_iters: u64,
-        ) -> (Option<SolverResult>, u64, bool) {
-            (None, 0, true)
+        ) -> (Option<SolverResult>, u64, u64, bool) {
+            (None, 0, 0, true)
         }
     }
 
