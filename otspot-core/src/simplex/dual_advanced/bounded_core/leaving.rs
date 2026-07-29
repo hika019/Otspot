@@ -172,50 +172,24 @@ const BLAND_TIE_REL_TOL: f64 = 1e-9;
 /// Practical Bland leaving: minimum-ratio within [`BLAND_TIE_REL_TOL`] of the
 /// exact minimum, ties broken by smallest basic-variable index.
 ///
-/// Used by `primal_simplex_aug` once a degenerate stall triggers anti-cycling.
-/// Unlike `select_leaving_bounded` (largest-pivot Harris, chosen for LU
-/// conditioning), this selects the smallest-basis-index row among those tied
-/// for `min_ratio`. Paired with Bland entering (smallest improving column
-/// index) this substantially narrows the cycling window Bland's rule is
-/// meant to close — see [`BLAND_TIE_REL_TOL`] for why it is *not* a restored
-/// formal guarantee, and [`super::primal::obj_plateau_should_bail`] for the backstop
-/// that does not depend on one.
+/// Used by `primal_simplex_aug` once a degenerate stall triggers anti-cycling;
+/// see [`BLAND_TIE_REL_TOL`] for why the band means this is *not* a restored
+/// formal guarantee, and [`super::primal::obj_plateau_should_bail`] for the
+/// backstop that does not depend on one.
 ///
-/// The step actually taken is always the exact `min_ratio`, never the chosen
-/// row's own `true_ratio`: within the (tiny) tie band a non-selected row's
-/// ratio can differ from `min_ratio` by up to the tolerance, and stepping to
-/// a tied-but-not-minimal ratio would leave the true minimizer's row slightly
-/// primal-infeasible.
-///
-/// **Invariant / error bound (Codex review, P1, documented not fixed — see
-/// below for why).** When the *chosen* row is itself not the exact
-/// minimizer (`true_ratio > min_ratio`, only admitted because it is within
-/// `tie_band` of it — see [`BLAND_TIE_REL_TOL`]), stepping by `min_ratio`
-/// leaves that row's variable short of the bound it is declared nonbasic at
-/// (`at_ub`) by exactly `|eff_i| * (true_ratio - min_ratio) <= |eff_i| *
-/// tie_band`: the row ends up strictly *inside* the box, never past it (a
-/// one-line derivation: for the `at_ub` branch, `x_new = x_i - eff_i *
-/// min_ratio = ub_i + eff_i * (true_ratio - min_ratio)`, and `eff_i < 0`
-/// there, so `x_new <= ub_i`; the lower-bound branch is symmetric with the
-/// bound at `0`).
-///
-/// This is the safe side of a tradeoff intrinsic to a *banded* Bland
-/// tie-break: the alternative (stepping by the chosen row's own
-/// `true_ratio` instead of `min_ratio`) would instead push the true
-/// minimizer's row (a *different* row, whose exact ratio is `min_ratio`)
-/// *past* its own bound by the same gap — a genuine primal infeasibility
-/// introduced by this ratio test itself, which is strictly worse than a
-/// nonbasic variable that merely has not yet reached the bound it is
-/// labelled at. Neither choice is exact once the tie band admits more than
-/// one row; this one cannot manufacture infeasibility.
-///
-/// The residual is transient, not accumulated pivot over pivot: each
-/// LU-rebuild checkpoint recomputes the full `x_b` from `basis` and
-/// `at_upper` directly (`reconcile_bounded_terminal_state` in
-/// `dual_advanced::mod`), independent of the incremental step chain, and its
-/// `BoundedTerminalReconcile::BoundViolation` outcome is the backstop that
-/// catches an actual (non-transient) excursion beyond `options.primal_tol`
-/// — which this bounded-short residual, by construction, is not.
+/// The step taken is always the exact `min_ratio`, never the chosen row's own
+/// `true_ratio`. When the chosen row is a banded (not exact) minimizer, its
+/// variable therefore lands short of the bound it is declared nonbasic at by
+/// `|eff_i| * (true_ratio - min_ratio) <= |eff_i| * tie_band` — strictly
+/// *inside* the box, never past it (for `at_ub`: `x_new = ub_i + eff_i *
+/// (true_ratio - min_ratio)` with `eff_i < 0`; the lower bound is symmetric).
+/// The alternative (stepping by `true_ratio`) would push the exact
+/// minimizer's row *past* its bound by the same gap — a genuine primal
+/// infeasibility. Neither choice is exact once the band admits several rows;
+/// this one cannot manufacture infeasibility. The residual is transient: each
+/// LU-rebuild recomputes `x_b` from `basis`/`at_upper` directly, and
+/// `BoundedTerminalReconcile::BoundViolation` catches any non-transient
+/// excursion beyond `options.primal_tol`.
 pub(super) fn select_leaving_bland_bounded(
     alpha: &[f64],
     dir: f64,
