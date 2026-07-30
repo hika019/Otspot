@@ -1640,21 +1640,47 @@ fn stats_timing_root_only_for_trivial_integer_root() {
     );
 }
 
-/// Codex review (P2): root-level presolve probing
-/// (`presolve::tighten_bounds_with_probing`) and static symmetry breaking
-/// (`symmetry::break_symmetry`) run unconditionally in `solve_milp_with_stats`'s
-/// root setup, but their wall-clock time was either measured and discarded
-/// (presolve) or never measured at all (symmetry) instead of being threaded
-/// into `MipStats` — so `attribution_covered_us_root_inclusive` in
-/// `milp_solve` silently undercounted whenever either took non-negligible
-/// time.
+/// Resets `FORCE_MIN_ROOT_TIMING` to `false` on drop (including on panic), so
+/// a failing assertion in one test can never leak the flag into whichever
+/// other test happens to reuse this thread next.
+struct ForceMinRootTimingGuard;
+
+impl ForceMinRootTimingGuard {
+    fn new() -> Self {
+        super::FORCE_MIN_ROOT_TIMING.with(|f| f.set(true));
+        Self
+    }
+}
+
+impl Drop for ForceMinRootTimingGuard {
+    fn drop(&mut self) {
+        super::FORCE_MIN_ROOT_TIMING.with(|f| f.set(false));
+    }
+}
+
+/// Codex review (P2): root-level presolve probing and static symmetry
+/// breaking run unconditionally in `solve_milp_with_stats`'s root setup, but
+/// their wall-clock cost was not threaded into `MipStats`, silently
+/// undercounting `attribution_covered_us_root_inclusive`.
+///
+/// Deterministic replacement for the removed `root_probing_and_symmetry_
+/// time_are_recorded`: that test asserted real elapsed time was positive on
+/// a trivial (0-constraint) root problem, where both measured spans can
+/// genuinely complete in under 1us — `Duration::as_micros()` then truncates
+/// to `0`, indistinguishable from "never populated". That raced real
+/// operation speed against the 1us truncation floor instead of testing the
+/// wiring, and flaked under scheduler/CPU variance (same class as the LP/QP
+/// presolve driver deadline flakes fixed via cancel-signal hooks).
+/// `FORCE_MIN_ROOT_TIMING` (`#[cfg(test)]`-only, zero production footprint)
+/// spins both spans past a fixed floor before their `Duration` is captured,
+/// so the assertions hold every run while still exercising the real
+/// `Instant`/`elapsed()` measurement-and-assignment path.
 ///
 /// Sentinel: removing `stats.root_probing_us = presolve_us;` or
-/// `stats.root_symmetry_us = symmetry_us;` from `solve_milp_with_stats`'s
-/// root setup makes the corresponding assertion FAIL (stays at the `0`
-/// default).
+/// `stats.root_symmetry_us = symmetry_us;` makes the corresponding
+/// assertion FAIL (stays at the `0` default).
 #[test]
-fn root_probing_and_symmetry_time_are_recorded() {
+fn root_probing_and_symmetry_us_are_populated_via_forced_min_elapsed() {
     let lp = build_lp(
         vec![1.0],
         &[],
@@ -1665,9 +1691,20 @@ fn root_probing_and_symmetry_time_are_recorded() {
         vec![],
         vec![(0.0, 5.0)],
     );
+    let _guard = ForceMinRootTimingGuard::new();
     let (_, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
-    assert!(stats.root_probing_us > 0, "root_probing_us must be >0");
-    assert!(stats.root_symmetry_us > 0, "root_symmetry_us must be >0");
+    assert!(
+        stats.root_probing_us >= super::FORCED_MIN_ELAPSED_US as u64,
+        "root_probing_us must reflect the forced floor of {}us, got {}",
+        super::FORCED_MIN_ELAPSED_US,
+        stats.root_probing_us
+    );
+    assert!(
+        stats.root_symmetry_us >= super::FORCED_MIN_ELAPSED_US as u64,
+        "root_symmetry_us must reflect the forced floor of {}us, got {}",
+        super::FORCED_MIN_ELAPSED_US,
+        stats.root_symmetry_us
+    );
 }
 
 #[test]
