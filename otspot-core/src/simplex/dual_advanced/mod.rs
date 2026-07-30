@@ -259,6 +259,30 @@ enum BoundedTerminalReconcile {
     SingularBasis,
 }
 
+// Test-only observability: forces the *Nth* call to
+// `reconcile_bounded_terminal_state` to report `BoundViolation` immediately,
+// end-to-end reachable through `solve_lp_with`, without needing to
+// manufacture real eta-drift deterministically. Counted (not a flat bool)
+// because Phase I's own reconcile call must succeed normally first — forcing
+// call 1 (Phase I) makes `run_phase1_then_phase2` bail to the legacy path
+// before ever reaching call 2 (Phase II, the one the P1 honesty fix covers).
+// Proves the fix end-to-end, not just at the unit level. `#[cfg(test)]`-only,
+// zero production footprint.
+#[cfg(test)]
+thread_local! {
+    static FORCE_BOUND_VIOLATION_ON_CALL: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static RECONCILE_CALL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn test_force_bound_violation() -> bool {
+    let n = RECONCILE_CALL_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    FORCE_BOUND_VIOLATION_ON_CALL.with(std::cell::Cell::get) == Some(n)
+}
+
 fn reconcile_bounded_terminal_state(
     a: &CscMatrix,
     b: &[f64],
@@ -267,6 +291,10 @@ fn reconcile_bounded_terminal_state(
     state: &mut BoundedDualState,
     options: &SolverOptions,
 ) -> BoundedTerminalReconcile {
+    #[cfg(test)]
+    if test_force_bound_violation() {
+        return BoundedTerminalReconcile::BoundViolation;
+    }
     let mut rhs = b.to_vec();
     for (j, &at_ub) in state.at_upper.iter().enumerate() {
         if state.is_basic[j] || !at_ub {
@@ -1889,6 +1917,94 @@ mod tests {
             (result.objective - (-2.0)).abs() < 1e-6,
             "expected obj=-2, got {:.6e}",
             result.objective
+        );
+    }
+
+    /// Resets the forced-BoundViolation hook on drop (including on panic),
+    /// so a failing assertion can never leak the flag into whichever other
+    /// test happens to reuse this thread next.
+    struct ForceBoundViolationGuard;
+
+    impl ForceBoundViolationGuard {
+        fn new(on_call: usize) -> Self {
+            RECONCILE_CALL_COUNT.with(|c| c.set(0));
+            FORCE_BOUND_VIOLATION_ON_CALL.with(|c| c.set(Some(on_call)));
+            Self
+        }
+    }
+
+    impl Drop for ForceBoundViolationGuard {
+        fn drop(&mut self) {
+            FORCE_BOUND_VIOLATION_ON_CALL.with(|c| c.set(None));
+        }
+    }
+
+    /// P2-1 (Opus review): end-to-end sentinel for the P1 honesty fix — a
+    /// forced `BoundedTerminalReconcile::BoundViolation` on Phase II's
+    /// reconcile call, reached through the real public `solve_lp_with`
+    /// entry point (not just at the unit level), must not self-report as
+    /// `Timeout` when no deadline/cancel is active.
+    ///
+    /// `x = 3`, `x in [0, 10]`, minimize `x`: a single Eq row needing one
+    /// artificial, forcing the Eq/UB bounded path
+    /// (`try_bounded_phase1_eq`/`run_phase1_then_phase2`). Phase I's own
+    /// reconcile (call 1) must succeed normally — forcing *that* call
+    /// instead would make `run_phase1_then_phase2` bail to the legacy path
+    /// before Phase II's reconcile (call 2, the one the fix covers) ever
+    /// runs — so `ForceBoundViolationGuard::new(2)` targets call 2 exactly.
+    ///
+    /// Sentinel: reverting the Phase II `BoundedTerminalReconcile::
+    /// BoundViolation` arm in `pipeline.rs::run_phase1_then_phase2` back to
+    /// a raw `SolveStatus::Timeout` literal makes this assertion fail.
+    #[test]
+    fn forced_bound_violation_end_to_end_does_not_self_report_as_timeout() {
+        use otspot_num::sparse::CscMatrix;
+
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, 10.0)],
+            None,
+        )
+        .unwrap();
+        let options = SolverOptions {
+            presolve: false,
+            ..SolverOptions::default()
+        };
+        assert!(
+            options.deadline.is_none() && options.cancel_flag.is_none(),
+            "test premise: no external stop condition must be active"
+        );
+
+        let _guard = ForceBoundViolationGuard::new(2);
+        let result = crate::lp::solve_lp_with(&lp, &options);
+
+        // The hook itself must have actually fired call 2 (Phase II's
+        // reconcile) — otherwise a future dispatch change could route this
+        // fixture away from `run_phase1_then_phase2` entirely (e.g. a
+        // presolve reduction, or a different bounded-path selection) and
+        // this test would keep "passing" for the wrong reason (no forced
+        // BoundViolation ever happened) instead of catching the drift.
+        let calls_seen = RECONCILE_CALL_COUNT.with(std::cell::Cell::get);
+        assert!(
+            calls_seen >= 2,
+            "test premise: reconcile_bounded_terminal_state must be called at least \
+             twice (Phase I, then Phase II) for the hook to have forced call 2; \
+             only saw {calls_seen} call(s) — dispatch may have changed",
+        );
+
+        // `SolverResult::numerical_error()`, not a stall status: a bound
+        // violation has no verified basis to report a diagnostic
+        // solution/objective from (mirrors `SingularBasis`, see P3-1).
+        assert_eq!(
+            result.status,
+            SolveStatus::NumericalError,
+            "a forced BoundViolation with no deadline/cancel must report \
+             NumericalError (SingularBasis-style honesty), not {:?}",
+            result.status
         );
     }
 }

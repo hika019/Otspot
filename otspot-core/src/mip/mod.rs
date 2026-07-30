@@ -364,6 +364,40 @@ pub struct MipStats {
     pub tree_cut_dry_streak: usize,
 }
 
+// Test-only observability: on a trivial root problem (few/no constraints),
+// `tighten_bounds_with_probing` / `symmetry::break_symmetry` can genuinely
+// complete in under 1us, at which point `Duration::as_micros()` truncation
+// makes `root_probing_us`/`root_symmetry_us` read back as `0` — indistinguishable
+// from "never populated". Racing real operation speed against that 1us
+// truncation floor is what made `root_probing_and_symmetry_us_are_populated`
+// flaky (see its doc). This flag makes the two measured spans below spin
+// until a small, fixed floor has elapsed, deterministically clearing the
+// truncation boundary regardless of machine speed or scheduler jitter.
+// `#[cfg(test)]`-only, zero footprint in production builds.
+#[cfg(test)]
+thread_local! {
+    static FORCE_MIN_ROOT_TIMING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Floor (in microseconds) `test_force_min_elapsed` spins past when
+/// `FORCE_MIN_ROOT_TIMING` is set. Comfortably above the 1us truncation
+/// boundary so the forced floor can never itself land exactly on it.
+#[cfg(test)]
+const FORCED_MIN_ELAPSED_US: u128 = 5;
+
+#[cfg(test)]
+fn test_force_min_elapsed(t0: Instant) {
+    if FORCE_MIN_ROOT_TIMING.with(std::cell::Cell::get) {
+        while t0.elapsed().as_micros() < FORCED_MIN_ELAPSED_US {
+            std::hint::spin_loop();
+        }
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn test_force_min_elapsed(_: Instant) {}
+
 /// Solve a MILP to (relative) ε-optimality via branch-and-bound.
 pub fn solve_milp(problem: &MilpProblem, options: &SolverOptions, cfg: &MipConfig) -> SolverResult {
     solve_milp_with_stats(problem, options, cfg).0
@@ -417,6 +451,7 @@ pub fn solve_milp_with_stats(
             &problem.integer_vars,
             deadline,
         );
+        test_force_min_elapsed(presolve_t0);
         let presolve_elapsed = presolve_t0.elapsed();
         let presolve_ms = presolve_elapsed.as_secs_f64() * 1000.0;
         let presolve_us = presolve_elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
@@ -457,6 +492,7 @@ pub fn solve_milp_with_stats(
         } else {
             problem_bt
         };
+        test_force_min_elapsed(symmetry_t0);
         let symmetry_us = symmetry_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         // Run the feasibility pump on the original (bound-tightened) LP before
         // augmenting with cuts.  FP must see the unmodified constraint structure

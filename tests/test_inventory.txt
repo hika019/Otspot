@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3062 testcases, 26 ignored
+# totals: 3066 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -528,7 +528,7 @@ otspot-core	mip::tests::rens_with_incumbent_waits_for_regular_interval	active
 otspot-core	mip::tests::rins_disabled_still_optimal	active
 otspot-core	mip::tests::rins_stats_improvements_le_calls	active
 otspot-core	mip::tests::rins_stats_zero_for_single_node_problem	active
-otspot-core	mip::tests::root_probing_and_symmetry_time_are_recorded	active
+otspot-core	mip::tests::root_probing_and_symmetry_us_are_populated_via_forced_min_elapsed	active
 otspot-core	mip::tests::round_integers_rejects_out_of_range_index	active
 otspot-core	mip::tests::scaling_retry_caps_retry_max_iters_by_remaining_budget	active
 otspot-core	mip::tests::scaling_retry_does_not_run_after_deadline_expired	active
@@ -1481,6 +1481,9 @@ otspot-core	simplex::dual_advanced::phase1::tests::fresh_factor_deadline_failure
 otspot-core	simplex::dual_advanced::phase1::tests::fresh_factor_failure_never_uses_stale_positive_artificial_as_proof	active
 otspot-core	simplex::dual_advanced::phase1::tests::fresh_factor_internal_error_fails_fast	active
 otspot-core	simplex::dual_advanced::phase1::tests::most_infeasible_allows_lb_repair_is_true	active
+otspot-core	simplex::dual_advanced::pipeline::tests::cold_start_phase2_unbounded_gate_reacts_to_forced_unverified_ray	active
+otspot-core	simplex::dual_advanced::pipeline::tests::honest_stall_result_clock_rechecks_timeout_variant	active
+otspot-core	simplex::dual_advanced::pipeline::tests::honest_stall_result_honours_genuine_deadline	active
 otspot-core	simplex::dual_advanced::ratio_test::tests::bland_no_eligible_returns_none	active
 otspot-core	simplex::dual_advanced::ratio_test::tests::bland_selects_min_ratio	active
 otspot-core	simplex::dual_advanced::ratio_test::tests::bland_skips_basic_variables	active
@@ -1513,6 +1516,7 @@ otspot-core	simplex::dual_advanced::tests::eq_ub_phase1_detects_infeasibility	ac
 otspot-core	simplex::dual_advanced::tests::eq_ub_phase1_multi_pattern_correct	active
 otspot-core	simplex::dual_advanced::tests::eq_ub_phase1_scaled_le_slack_feasible	active
 otspot-core	simplex::dual_advanced::tests::eq_ub_phase1_solution_recovers_at_upper_variable	active
+otspot-core	simplex::dual_advanced::tests::forced_bound_violation_end_to_end_does_not_self_report_as_timeout	active
 otspot-core	simplex::dual_advanced::tests::ge_at_upper_bound_solution_extracted_correctly	active
 otspot-core	simplex::dual_advanced::tests::ge_dual_sign_nonnegative_in_min_problem	active
 otspot-core	simplex::dual_advanced::tests::ge_eq_cold_start_primal_first_dispatch_solves_optimally	active
