@@ -112,27 +112,28 @@ let result = solve(&prob);
 ## Performance
 
 Solve-rate benchmark on standard public sets via the `otspot-dev` benchmark harness
-(shell scripts — **not** `cargo bench`), `timeout = 1000s`:
+(shell scripts — **not** `cargo bench`), `timeout = 1000s`, measured at commit `5dbc08d4`
+(2026-07-30/31):
 
 | Problem type | Set | # | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
 | Feasible LP | Netlib | 109 | 109 optimal | 108 optimal, 1 suboptimal |
-| Convex QP | Maros–Mészáros | 138 | 121 optimal, 1 suboptimal, 9 stalled, 2 maxiter, 1 mismatch, 4 no-ref | 93 optimal, 42 suboptimal, 1 timeout, 2 no-ref |
-| QCQP | QPLIB | 41 | 11 optimal, 3 suboptimal, 8 stalled, 3 timeout, 11 not-supported, 5 skip | 8 optimal, 4 suboptimal, 9 stalled, 4 timeout, 11 not-supported, 5 skip |
-| MILP | MIPLIB 2017 small | 20 | 5 optimal, 15 timeout, 0 error | 5 optimal, 15 timeout, 0 error |
+| Convex QP | Maros–Mészáros | 138 | 121 optimal, 1 suboptimal, 9 stalled, 2 maxiter, 1 mismatch, 4 no-ref | 92 optimal, 5 suboptimal, 35 stalled, 3 maxiter, 1 timeout, 2 no-ref |
+| QCQP | QPLIB | 41 | 11 optimal, 3 suboptimal, 7 stalled, 4 timeout, 11 not-supported, 5 skip | 8 optimal, 4 suboptimal, 9 stalled, 4 timeout, 11 not-supported, 5 skip |
+| MILP | MIPLIB 2017 small | 20 | 7 optimal, 13 timeout, 0 error | 7 optimal, 13 timeout, 0 error |
 | SOCP | Mittelmann Large-SOCP | 18 | 4 optimal @1000s (6 @3600s), rest timeout, 1 OOM | n/a (1e-6 only) |
 | Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
 **Optimal** = verified against known objective (proof-carrying KKT). **Stalled** = the IPM made no further progress before its iteration/time budget and reports no solution claim (an honest non-convergent status; earlier taxonomy versions folded this into `SuboptimalSolution`). LP/QP/QCQP/MILP rows: `timeout = 1000s`, `jobs = 6`. The SOCP row follows Mittelmann's benchmark instead — `jobs = 1` (sequential; large instances need up to ~18 GB RSS each) with per-problem timeouts noted below; see the SOCP notes for its distinct methodology.
 
-LP: @1e-6 is 109/109 optimal, 0 timeout. @1e-8 is 108/109 optimal, 0 timeout; the sole miss is `greenbea` (SuboptimalSolution after failing the stricter primal proof gate) — this column predates the taxonomy split above and has not been re-measured.
+LP: @1e-6 is 109/109 optimal, 0 timeout. @1e-8 is 108/109 optimal, 0 timeout; the sole miss is `greenbea` (SuboptimalSolution after failing the stricter primal proof gate).
 
-QP: @1e-6 is 121/138 optimal, 0 timeout. Misses are 1 SuboptimalSolution (`UBH1`), 9 Stalled (non-converged, no solution claimed), 2 MaxIterations, 1 OBJ_MISMATCH (`LISWET7`), and 4 solved-but-unverified cases with no published reference. @1e-8 is 93/138 optimal, with 42 SuboptimalSolution, 1 TIMEOUT (`POWELL20`), and 2 solved-but-unverified cases (this column predates the taxonomy split above and has not been re-measured).
+QP: @1e-6 is 121/138 optimal, 0 timeout. Misses are 1 SuboptimalSolution (`UBH1`), 9 Stalled (non-converged, no solution claimed), 2 MaxIterations, 1 OBJ_MISMATCH (`LISWET7`), and 4 solved-but-unverified cases with no published reference. @1e-8 is 92/138 optimal, with 5 SuboptimalSolution, 35 Stalled, 3 MaxIterations (`LISWET11`, `QSHELL`, `YAO`), 1 TIMEOUT (`POWELL20`), and 2 solved-but-unverified cases.
 
-QCQP (QPLIB, single-shot IPM via `bench_qplib` — this suite run does not exercise the `--global` spatial B&B path): @1e-6 is 11/41 optimal, 3 TIMEOUT. Non-passing cases are 3 SuboptimalSolution, 8 Stalled (non-converged IPM iterate, no solution claimed — the honest replacement for what the pre-refactor taxonomy folded into SuboptimalSolution), 11 NOT_SUPPORTED (the non-convex McCormick relaxation requires finite bounds on every variable; these instances have an unbounded one), and 5 SKIP (parse-time out of scope: integer variables or unsupported constraint types). @1e-8 is 8/41 optimal, with 4 SuboptimalSolution and 9 Stalled (4 TIMEOUT; NOT_SUPPORTED/SKIP are eps-independent, unchanged). Loosening to @1e-4 recovers more: 15/41 optimal, 2 SuboptimalSolution, 5 Stalled, 3 TIMEOUT.
+QCQP (QPLIB, single-shot IPM via `bench_qplib` — this suite run does not exercise the `--global` spatial B&B path): @1e-6 is 11/41 optimal, 4 TIMEOUT. Non-passing cases are 3 SuboptimalSolution, 7 Stalled (non-converged IPM iterate, no solution claimed — the honest replacement for what the pre-refactor taxonomy folded into SuboptimalSolution), 11 NOT_SUPPORTED (the non-convex McCormick relaxation requires finite bounds on every variable; these instances have an unbounded one), and 5 SKIP (parse-time out of scope: integer variables or unsupported constraint types). @1e-8 is 8/41 optimal, with 4 SuboptimalSolution and 9 Stalled (4 TIMEOUT; NOT_SUPPORTED/SKIP are eps-independent, unchanged). Loosening to @1e-4 recovers more: 15/41 optimal, 2 SuboptimalSolution, 5 Stalled, 3 TIMEOUT.
 
-MILP: @1e-6 and @1e-8 both prove 5/20 optimal (`flugpl`, `gr4x6`, `gt2`, `khb05250`, `p0201`). Both runs report 15 TIMEOUT and 0 ERROR inside `TOTAL`; `noswot` and `timtab1` now time out instead of panicking in tree-cut separation.
+MILP: @1e-6 and @1e-8 both prove 7/20 optimal (`dcmulti`, `flugpl`, `gr4x6`, `gt2`, `khb05250`, `markshare_4_0`, `p0201`). Both runs report 13 TIMEOUT and 0 ERROR inside `TOTAL`. `noswot` no longer panics in tree-cut separation, nor casts a numerical dead-end as a false early `Timeout` — it now honestly exhausts the full 1000s budget (~75k → ~550k nodes) before still timing out; `timtab1` also times out cleanly.
 
 SOCP: Otspot is run against Hans Mittelmann's [Large Second-Order Cone benchmark](https://plato.asu.edu/ftp/socp.html) (18 CBLIB instances, 29 Jun 2026), which carries published runtimes for MOSEK, ECOS, KNITRO, COPT and cuOpt under a 1-hour limit. This replaces an earlier ad-hoc 22-instance self-baseline; the commercial/OSS runtimes below are an *external* yardstick, not Otspot's own numbers. **Otspot's times are on a memory-constrained 19 GB QEMU VM (8 vCPU), not Mittelmann's Intel i7-11700K / 64 GB**, so absolute seconds are directional and the 64 GB headroom is why `firL2Linfalph` (122M nonzeros, 2.76 GB input) runs out of memory here at the 18 GB cap rather than solving. Otspot returns `Optimal` = proof-carrying KKT convergence at 1e-6; CBLIB/Mittelmann publish no objective values, so these are not cross-checked against the commercial optima.
 
@@ -142,10 +143,10 @@ Runtimes in seconds (Otspot measured; MOSEK/ECOS/COPT are Mittelmann's published
 
 | Problem | nnz | Otspot | MOSEK | ECOS | COPT |
 |---|---:|---|---:|---:|---:|
-| chainsing-50000-1 | 0.9M | **6** | 3 | f | 3 |
-| chainsing-50000-2 | 0.75M | **8** | 4 | f | 3 |
-| chainsing-50000-3 | 0.6M | **6** | 3 | f | 2 |
-| beam7 | 15M | 481 | 17 | 206 | 18 |
+| chainsing-50000-1 | 0.9M | **6.2** | 3 | f | 3 |
+| chainsing-50000-2 | 0.75M | **7.4** | 4 | f | 3 |
+| chainsing-50000-3 | 0.6M | **5.2** | 3 | f | 2 |
+| beam7 | 15M | 436 | 17 | 206 | 18 |
 | firL2L1alph | 10M | 1064 | 6 | 202 | 5 |
 | firL2Linfeps | 19M | 1841 | 25 | 687 | 14 |
 | firL1Linfeps | 9.9M | timeout (>3600s) | 26 | 2531 | 13 |
@@ -162,7 +163,9 @@ Runtimes in seconds (Otspot measured; MOSEK/ECOS/COPT are Mittelmann's published
 | firL2Linfalph | 122M | OOM (>18 GB) | 27 | f | 25 |
 | **solved** | | **6/18** | 18/18 | 11/18 | 18/18 |
 
-Where Otspot wins: all three `chainsing-50000` instances (50k rotated cones, ~1M nonzeros) solve in 6–8s while ECOS fails all three (MOSEK/COPT take ~3s). Where Otspot loses: the large dense-Jacobian `fir`/`db` instances (10–122M nonzeros) time out or exhaust memory — its conic IPM does not yet scale to systems that MOSEK/COPT dispatch in seconds and ECOS (on the 11 it handles) in minutes. Otspot is a developing OSS SOCP solver: competitive on structured sparse cone problems, not yet on large dense ones. (The solver also supports cone types `F`/`L±`/`L=`/`Q`/`QR` and MISOCP via branch-and-bound; `EXP` and PSD cones are rejected as unsupported.)
+`chainsing-50000-*`, `beam7`, `db-joint-soerensen`, `db-plate-yield-line`, `firL2L1alph`, `firL1Linfeps` and `firL2Linfeps` were re-run at commit `5dbc08d4`; the five re-run timeout rows reproduced their timeout status and the table keeps the prior (more informative, 3600s-annotated) figures; the remaining 9 large-CBF rows keep their prior measurement (those files were not re-downloaded for this check, and this branch does not touch the conic solve path).
+
+Where Otspot wins: all three `chainsing-50000` instances (50k rotated cones, ~1M nonzeros) solve in 5–8s while ECOS fails all three (MOSEK/COPT take ~3s). Where Otspot loses: the large dense-Jacobian `fir`/`db` instances (10–122M nonzeros) time out or exhaust memory — its conic IPM does not yet scale to systems that MOSEK/COPT dispatch in seconds and ECOS (on the 11 it handles) in minutes. Otspot is a developing OSS SOCP solver: competitive on structured sparse cone problems, not yet on large dense ones. (The solver also supports cone types `F`/`L±`/`L=`/`Q`/`QR` and MISOCP via branch-and-bound; `EXP` and PSD cones are rejected as unsupported.)
 
 Reproduce (data is gitignored; see [Benchmark data](#benchmark-data)):
 
