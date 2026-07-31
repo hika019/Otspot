@@ -2690,3 +2690,88 @@ fn phase2_primal_degenerate_lp_converges() {
         -sum_cap
     );
 }
+
+/// Codex round 3 (P1) sentinel: `iterate`'s main loop must honour
+/// `SolverOptions::max_iters`, matching `dual_advanced::core`'s per-solve
+/// iteration cap. Before this fix the loop checked only `deadline`/
+/// `cancel_flag`, so a sub-MIP's remaining `MipConfig::max_lp_iters`
+/// budget went silently unenforced whenever a node relaxation dispatched
+/// to this bounded-dual path specifically.
+///
+/// `fixture_two_rows_three_boxed` with its lb-violation injection reaches
+/// a genuine `Unbounded` conclusion at iteration 3 (measured directly,
+/// not assumed) under a generous 2s deadline — proving the fixture
+/// legitimately needs more than 2 iterations on its own. Capping at
+/// `max_iters=2` under the *same* generous deadline must therefore stop
+/// at iteration 2 via the new check, not run to the natural iteration 3
+/// conclusion.
+///
+/// Sentinel: removing the `options.max_iters` check from `iterate`'s loop
+/// makes the capped run's assertions fail (it would instead reach
+/// `Unbounded` at iteration 3, same as the uncapped baseline).
+#[test]
+fn iterate_honours_max_iters_cap() {
+    let fx = fixture_two_rows_three_boxed();
+    let bsf = build_bounded_standard_form(&fx.problem);
+    let cold_state = |bsf: &BoundedStandardForm| {
+        let mut state = BoundedDualState::cold(bsf, &bsf.b);
+        for &(row, mag) in &fx.inject_negative_x_b {
+            state.x_b[row] = -mag;
+        }
+        state
+    };
+    let generous_deadline =
+        || Some(std::time::Instant::now() + std::time::Duration::from_millis(2_000));
+
+    // Baseline: uncapped, generous deadline — confirms the fixture
+    // genuinely needs more than 2 iterations (test premise, not assumed).
+    let baseline_opts = SolverOptions {
+        deadline: generous_deadline(),
+        ..SolverOptions::default()
+    };
+    let (baseline_outcome, baseline_state) = iterate(
+        cold_state(&bsf),
+        &bsf,
+        &bsf.a,
+        &bsf.c,
+        &baseline_opts,
+        &bsf.upper_bounds,
+        &mut MostInfeasibleLeaving,
+    );
+    assert!(
+        baseline_state.iterations > 2,
+        "test premise: uncapped run must take more than 2 iterations to reach a \
+         natural conclusion, got {} (outcome {:?})",
+        baseline_state.iterations,
+        baseline_outcome
+    );
+
+    // Capped at 2, same generous deadline: must stop at iteration 2 via
+    // max_iters, not run to the natural (later) conclusion.
+    let capped_opts = SolverOptions {
+        deadline: generous_deadline(),
+        max_iters: Some(2),
+        ..SolverOptions::default()
+    };
+    let (capped_outcome, capped_state) = iterate(
+        cold_state(&bsf),
+        &bsf,
+        &bsf.a,
+        &bsf.c,
+        &capped_opts,
+        &bsf.upper_bounds,
+        &mut MostInfeasibleLeaving,
+    );
+    assert_eq!(
+        capped_state.iterations, 2,
+        "max_iters=2 must stop the loop at exactly iteration 2, got {} \
+         (outcome {:?})",
+        capped_state.iterations, capped_outcome
+    );
+    assert!(
+        matches!(capped_outcome, BoundedOutcome::Timeout(_)),
+        "an iteration-cap stop must report Timeout (deadline-or-cap per \
+         BoundedOutcome::Timeout's doc), got {:?}",
+        capped_outcome
+    );
+}

@@ -1019,6 +1019,50 @@ pub(crate) fn big_m_cold_start(
     }
 }
 
+// Test-only observation of the `max_iters` [`big_m_cold_start`] actually
+// received, letting `dual_advanced::big_m_retry`'s sentinels assert on the
+// exact pre-charged value its caller passed. A thin wrapper rather than a
+// line inside `big_m_cold_start` itself: that function is already an
+// oversized-function-size legacy exception
+// (`tests/function_size_baseline.txt`), and any growth of it is a hard
+// gate failure, so a real fix must not add a single line to its own body —
+// `big_m_retry` calls this wrapper instead, which delegates unchanged and
+// costs nothing in release builds (`record_big_m_cold_start_max_iters` is a
+// `#[cfg(not(test))]` no-op).
+#[cfg_attr(not(test), inline(always))]
+pub(super) fn big_m_cold_start_observed(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    options: &SolverOptions,
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    row_scale: &[f64],
+    col_scale: &[f64],
+) -> SolverResult {
+    record_big_m_cold_start_max_iters(options.max_iters);
+    big_m_cold_start(sf, problem, options, a, b, c, row_scale, col_scale)
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_BIG_M_COLD_START_MAX_ITERS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn last_big_m_cold_start_max_iters() -> Option<u64> {
+    LAST_BIG_M_COLD_START_MAX_ITERS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_big_m_cold_start_max_iters(v: Option<u64>) {
+    LAST_BIG_M_COLD_START_MAX_ITERS.with(|c| c.set(Some(v.unwrap_or(u64::MAX))));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn record_big_m_cold_start_max_iters(_: Option<u64>) {}
+
 #[cfg(test)]
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 mod tests {

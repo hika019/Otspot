@@ -1012,14 +1012,17 @@ enum StatusDispatch {
 /// Dispatches on a node relaxation's `SolveStatus` before separation/branching
 /// runs. `Infeasible` prunes and learns a conflict clause; `Unbounded` and
 /// `Timeout` stop the search (folding the node's bound into the open region
-/// for `Timeout`); any other status proceeds to separation/branching as
-/// normal.
+/// for `Timeout`); `MaxIterations`/`SuboptimalSolution` do the same when
+/// `cfg.max_lp_iters` is what actually stopped this node's own solve (see the
+/// `cfg.max_lp_iters` check below); any other status proceeds to
+/// separation/branching as normal.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_relaxation_status(
     res: &SolverResult,
     node: &MipNode,
     q: &mut NodeQueue,
     stats: &mut MipStats,
+    cfg: &MipConfig,
     conflicts: &mut conflict::ConflictStore,
     root_bounds: &[(f64, f64)],
     open_lb: &mut f64,
@@ -1049,6 +1052,32 @@ fn dispatch_relaxation_status(
             StatusDispatch::Break
         }
         SolveStatus::Timeout => {
+            *open_lb = open_lb.min(node.lower_bound);
+            *had_open = true;
+            *deadline_stop = true;
+            if q.is_diving() {
+                q.end_dive();
+            }
+            StatusDispatch::Break
+        }
+        // Codex round 3 (P2): `cfg.max_lp_iters` (sub-MIP-only, see
+        // `solve_node_relaxation`'s doc) is "treated identically to deadline
+        // expiry" per `check_stop_conditions`'s doc — but that gate only
+        // re-checks the budget at the *next* pop. A node whose own
+        // relaxation is what pushes `lp_iters_total` past the cap honestly
+        // reports `MaxIterations`/`SuboptimalSolution` (never `Timeout`,
+        // since no wall-clock deadline fired — see `stop_status`), so
+        // without this arm it fell through to `Proceed` and, if this was the
+        // last node left in the queue, the loop would exit with no stop flag
+        // ever set: a budget-truncated search silently finalized as if the
+        // tree had been fully explored. Scoped to `cfg.max_lp_iters` being
+        // both set and actually exhausted, so an unrelated cycling/plateau
+        // bail on the (uncapped) top-level search still proceeds as before.
+        SolveStatus::MaxIterations | SolveStatus::SuboptimalSolution
+            if cfg
+                .max_lp_iters
+                .is_some_and(|limit| stats.lp_iters_total >= limit) =>
+        {
             *open_lb = open_lb.min(node.lower_bound);
             *had_open = true;
             *deadline_stop = true;
@@ -1369,6 +1398,7 @@ fn solve_mip_core<R: Relaxation>(
             &node,
             &mut q,
             &mut stats,
+            cfg,
             &mut conflicts,
             &root_bounds,
             &mut open_lb,

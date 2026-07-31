@@ -547,6 +547,184 @@ fn no_incumbent_budget_exhausted_is_maxiterations_not_infeasible() {
     assert_eq!(r.status, SolveStatus::MaxIterations);
 }
 
+/// SENTINEL (Codex round 3, P2): `cfg.max_lp_iters` (sub-MIP-only) is
+/// documented as "treated identically to deadline expiry"
+/// (`check_stop_conditions`'s doc), but that gate only re-checks the budget
+/// at the *next* pop. A node whose own relaxation is what pushes
+/// `lp_iters_total` past the cap reports `MaxIterations`/`SuboptimalSolution`
+/// honestly (never `Timeout` — no wall-clock deadline fired, see
+/// `stop_status`), so if `dispatch_relaxation_status` doesn't also catch the
+/// exhausted budget right here, and this was the last node left in the
+/// queue, the loop exits with no stop flag ever set — a budget-truncated
+/// search silently finalized as if the tree had been fully explored (see the
+/// `no_incumbent_budget_exhausted_is_maxiterations_not_infeasible` case
+/// above: without `deadline_stop`, this reports `MaxIterations` instead of
+/// the honest `Timeout`).
+///
+/// Sentinel: removing the `SolveStatus::MaxIterations | SolveStatus::
+/// SuboptimalSolution` arm (falling through to `_ => Proceed`) leaves
+/// `deadline_stop` `false` and the dispatch `Proceed`, failing both
+/// assertions below.
+#[test]
+fn dispatch_relaxation_status_treats_exhausted_max_lp_iters_like_timeout() {
+    use super::conflict::ConflictStore;
+    use super::{dispatch_relaxation_status, MipNode, MipStats, NodeQueue, StatusDispatch};
+
+    for status in [SolveStatus::MaxIterations, SolveStatus::SuboptimalSolution] {
+        let node = MipNode::root(vec![(0.0, 1.0)], 2.5);
+        let mut q = NodeQueue::new();
+        let mut stats = MipStats {
+            lp_iters_total: 30,
+            ..MipStats::default()
+        };
+        let cfg = MipConfig {
+            max_lp_iters: Some(30),
+            ..MipConfig::default()
+        };
+        let mut conflicts = ConflictStore::new();
+        let root_bounds = vec![(0.0, 1.0)];
+        let mut open_lb = f64::INFINITY;
+        let mut had_open = false;
+        let mut deadline_stop = false;
+        let mut unbounded = false;
+        let res = SolverResult {
+            status: status.clone(),
+            iterations: 30,
+            ..SolverResult::default()
+        };
+
+        let dispatch = dispatch_relaxation_status(
+            &res,
+            &node,
+            &mut q,
+            &mut stats,
+            &cfg,
+            &mut conflicts,
+            &root_bounds,
+            &mut open_lb,
+            &mut had_open,
+            &mut deadline_stop,
+            &mut unbounded,
+        );
+
+        assert!(
+            matches!(dispatch, StatusDispatch::Break),
+            "{status:?}: exhausted max_lp_iters must break the node loop"
+        );
+        assert!(
+            deadline_stop,
+            "{status:?}: exhausted max_lp_iters must set deadline_stop \
+             (treated identically to deadline expiry)"
+        );
+        assert!(
+            had_open,
+            "{status:?}: the truncated node must be folded into the open region"
+        );
+        assert_eq!(
+            open_lb, 2.5,
+            "{status:?}: must use the node's pre-existing bound"
+        );
+    }
+}
+
+/// Companion to the sentinel above: while `cfg.max_lp_iters`'s budget still
+/// has room, a `MaxIterations`/`SuboptimalSolution` node result (e.g. an
+/// unrelated cycling/plateau bail) must keep proceeding as before — the new
+/// arm is scoped to genuine budget exhaustion, not every such status.
+#[test]
+fn dispatch_relaxation_status_proceeds_on_maxiterations_when_budget_remains() {
+    use super::conflict::ConflictStore;
+    use super::{dispatch_relaxation_status, MipNode, MipStats, NodeQueue, StatusDispatch};
+
+    let node = MipNode::root(vec![(0.0, 1.0)], 2.5);
+    let mut q = NodeQueue::new();
+    let mut stats = MipStats {
+        lp_iters_total: 10,
+        ..MipStats::default()
+    };
+    let cfg = MipConfig {
+        max_lp_iters: Some(30),
+        ..MipConfig::default()
+    };
+    let mut conflicts = ConflictStore::new();
+    let root_bounds = vec![(0.0, 1.0)];
+    let mut open_lb = f64::INFINITY;
+    let mut had_open = false;
+    let mut deadline_stop = false;
+    let mut unbounded = false;
+    let res = SolverResult {
+        status: SolveStatus::MaxIterations,
+        iterations: 10,
+        ..SolverResult::default()
+    };
+
+    let dispatch = dispatch_relaxation_status(
+        &res,
+        &node,
+        &mut q,
+        &mut stats,
+        &cfg,
+        &mut conflicts,
+        &root_bounds,
+        &mut open_lb,
+        &mut had_open,
+        &mut deadline_stop,
+        &mut unbounded,
+    );
+
+    assert!(matches!(dispatch, StatusDispatch::Proceed));
+    assert!(!deadline_stop);
+}
+
+/// Companion to the sentinel above: at the top-level search (`cfg.max_lp_iters
+/// == None`), a `MaxIterations` node result has no configured budget to be
+/// "exhausted" against — an unrelated cycling/plateau bail must keep
+/// proceeding exactly as before this fix.
+#[test]
+fn dispatch_relaxation_status_proceeds_on_maxiterations_without_a_configured_cap() {
+    use super::conflict::ConflictStore;
+    use super::{dispatch_relaxation_status, MipNode, MipStats, NodeQueue, StatusDispatch};
+
+    let node = MipNode::root(vec![(0.0, 1.0)], 2.5);
+    let mut q = NodeQueue::new();
+    let mut stats = MipStats {
+        lp_iters_total: 1_000_000,
+        ..MipStats::default()
+    };
+    let cfg = MipConfig {
+        max_lp_iters: None,
+        ..MipConfig::default()
+    };
+    let mut conflicts = ConflictStore::new();
+    let root_bounds = vec![(0.0, 1.0)];
+    let mut open_lb = f64::INFINITY;
+    let mut had_open = false;
+    let mut deadline_stop = false;
+    let mut unbounded = false;
+    let res = SolverResult {
+        status: SolveStatus::MaxIterations,
+        iterations: 7,
+        ..SolverResult::default()
+    };
+
+    let dispatch = dispatch_relaxation_status(
+        &res,
+        &node,
+        &mut q,
+        &mut stats,
+        &cfg,
+        &mut conflicts,
+        &root_bounds,
+        &mut open_lb,
+        &mut had_open,
+        &mut deadline_stop,
+        &mut unbounded,
+    );
+
+    assert!(matches!(dispatch, StatusDispatch::Proceed));
+    assert!(!deadline_stop);
+}
+
 // ---------------------------------------------------------------------------
 // solve_miqp (low-level entry, convex only)
 // ---------------------------------------------------------------------------

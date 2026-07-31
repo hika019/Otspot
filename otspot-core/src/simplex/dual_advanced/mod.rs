@@ -523,11 +523,15 @@ pub(crate) fn solve_dual_advanced(
         // internal-stall analogue of the old empty-Timeout (stalls minted
         // Timeout before the Stalled split) — the retry policy must not narrow.
         SolveStatus::Timeout | SolveStatus::MaxIterations if primal_result.solution.is_empty() => {
-            let bigm_result =
-                phase1::big_m_cold_start(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
+            let iters = primal_result.iterations;
+            let Some(bigm_result) = big_m_retry(
+                sf, problem, options, &a, &b, &c, &row_scale, &col_scale, iters,
+            ) else {
+                return primal_result;
+            };
             if bigm_result.status == SolveStatus::Timeout {
                 let mut r = primal_result;
-                r.iterations = r.iterations.saturating_add(bigm_result.iterations);
+                r.iterations = bigm_result.iterations;
                 r
             } else {
                 bigm_result
@@ -535,14 +539,16 @@ pub(crate) fn solve_dual_advanced(
         }
         SolveStatus::Infeasible if !primal_result.dual_solution.is_empty() => primal_result,
         SolveStatus::Infeasible => {
-            let bigm_result =
-                phase1::big_m_cold_start(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
+            let iters = primal_result.iterations;
+            let Some(bigm_result) = big_m_retry(
+                sf, problem, options, &a, &b, &c, &row_scale, &col_scale, iters,
+            ) else {
+                return infeasible_without_ray_after_exhausted_retry(primal_result, options);
+            };
             if bigm_result.status == SolveStatus::Timeout {
                 SolverResult {
                     status: SolveStatus::Timeout,
-                    iterations: primal_result
-                        .iterations
-                        .saturating_add(bigm_result.iterations),
+                    iterations: bigm_result.iterations,
                     ..primal_result
                 }
             } else {
@@ -551,6 +557,70 @@ pub(crate) fn solve_dual_advanced(
         }
         _ => primal_result,
     }
+}
+
+/// `primal_result`'s `Infeasible` claim (no Farkas ray — the caller's
+/// sibling arm already claimed the verified case) when the Big-M retry
+/// never ran because the shared budget was exhausted first (Opus review
+/// follow-up, P2-2). Reporting `Infeasible` here would mint an unverified
+/// certificate purely because a resource cap happened to bind before
+/// verification could occur; the honest status is `stop_status`'s
+/// clock-recheck, the same one every other resource-limited dead-end in
+/// this module family uses.
+fn infeasible_without_ray_after_exhausted_retry(
+    primal_result: SolverResult,
+    options: &SolverOptions,
+) -> SolverResult {
+    SolverResult {
+        status: super::stop_status(!primal_result.solution.is_empty(), options),
+        ..primal_result
+    }
+}
+
+/// Runs the Big-M cold-start retry for an inconclusive primal-path result
+/// (`primal_iterations` is that attempt's own already-spent iteration
+/// count). Mirrors `solve_relaxation_with_scaling_retry`'s established
+/// first-attempt accounting (Codex round 3, P1): the retry re-solves the
+/// *same* relaxation the primal attempt already spent `primal_iterations`
+/// on, so it must not receive a fresh copy of `options.max_iters` — handing
+/// it the same limit again would let one relaxation solve spend up to 2x its
+/// allowance whenever the primal path exhausts its budget without
+/// converging. `None` once nothing remains of the shared cap: an attempt
+/// that stalled at exactly the remaining budget gains nothing from a Big-M
+/// retry that would immediately hit the same (now zero) cap. The returned
+/// result's `iterations` always includes `primal_iterations` — both
+/// attempts genuinely ran, regardless of the retry's own outcome (mirrors
+/// the scaling-retry's P3-F fix, which folded it in unconditionally rather
+/// than only on a Timeout-carrying path).
+#[allow(clippy::too_many_arguments)]
+fn big_m_retry(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    options: &SolverOptions,
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    row_scale: &[f64],
+    col_scale: &[f64],
+    primal_iterations: usize,
+) -> Option<SolverResult> {
+    let mut capped_options;
+    let bigm_options = match options.max_iters {
+        Some(cap) => {
+            let remaining = cap.saturating_sub(primal_iterations as u64);
+            if remaining == 0 {
+                return None;
+            }
+            capped_options = options.clone();
+            capped_options.max_iters = Some(remaining);
+            &capped_options
+        }
+        None => options,
+    };
+    let mut bigm_result =
+        phase1::big_m_cold_start_observed(sf, problem, bigm_options, a, b, c, row_scale, col_scale);
+    bigm_result.iterations = bigm_result.iterations.saturating_add(primal_iterations);
+    Some(bigm_result)
 }
 
 // ── Bounded (BFRT) path ───────────────────────────────────────────────────────
@@ -621,6 +691,175 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    /// Unscaled `(a, b, c, row_scale, col_scale)` for `lp`'s standard form —
+    /// the identity-scaling tuple `solve_dual_advanced` itself builds when
+    /// `use_ruiz_scaling` is false, reused here so `big_m_retry` tests don't
+    /// need the full Ruiz-equilibration machinery.
+    fn unscaled_form(sf: &StandardForm) -> (CscMatrix, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+        (
+            sf.a.clone(),
+            sf.b.clone(),
+            sf.c.clone(),
+            vec![1.0; sf.m],
+            vec![1.0; sf.n_total],
+        )
+    }
+
+    /// SENTINEL (Codex round 3, P1): the Big-M retry's own `max_iters` is
+    /// `cap - primal_iterations`, not a fresh copy of `options.max_iters` —
+    /// mirrors `solve_relaxation_with_scaling_retry`'s established
+    /// first-attempt accounting. Also checks the returned result's
+    /// `iterations` includes `primal_iterations` by comparing against a
+    /// direct, unmerged `big_m_cold_start` call with the same reduced cap.
+    ///
+    /// Sentinel: passing `options` (the uncapped original) straight through
+    /// to `phase1::big_m_cold_start` instead of `bigm_options` makes the
+    /// observed `max_iters` assertion fail; dropping the final
+    /// `saturating_add` makes the iteration-count assertion fail.
+    #[test]
+    fn big_m_retry_pre_charges_the_primal_attempts_iterations() {
+        let lp = lp_no_ub();
+        let sf = build_standard_form(&lp);
+        let (a, b, c, row_scale, col_scale) = unscaled_form(&sf);
+        const CAP: u64 = 1_000;
+        const PRIMAL_ITERS: usize = 7;
+        let options = SolverOptions {
+            use_ruiz_scaling: false,
+            max_iters: Some(CAP),
+            ..SolverOptions::default()
+        };
+
+        let direct = phase1::big_m_cold_start(
+            &sf,
+            &lp,
+            &SolverOptions {
+                max_iters: Some(CAP - PRIMAL_ITERS as u64),
+                ..options.clone()
+            },
+            &a,
+            &b,
+            &c,
+            &row_scale,
+            &col_scale,
+        );
+
+        let result = big_m_retry(
+            &sf,
+            &lp,
+            &options,
+            &a,
+            &b,
+            &c,
+            &row_scale,
+            &col_scale,
+            PRIMAL_ITERS,
+        )
+        .expect("budget remains, retry must proceed");
+
+        let observed_max_iters = phase1::last_big_m_cold_start_max_iters();
+        assert_eq!(
+            observed_max_iters,
+            Some(CAP - PRIMAL_ITERS as u64),
+            "the retry's own max_iters must be cap - primal_iterations"
+        );
+        assert_eq!(
+            result.iterations,
+            direct.iterations + PRIMAL_ITERS,
+            "the returned iterations must include the primal attempt's count"
+        );
+    }
+
+    /// SENTINEL (Codex round 3, P1): once the primal attempt already
+    /// consumed the entire shared cap, the Big-M retry must be skipped
+    /// outright (`None`), not run with a zero/negative-then-saturated cap.
+    ///
+    /// Sentinel: replacing the `remaining == 0` check with `false` (always
+    /// retry) makes this return `Some(_)` instead of `None`.
+    #[test]
+    fn big_m_retry_skips_when_the_shared_cap_is_exhausted() {
+        let lp = lp_no_ub();
+        let sf = build_standard_form(&lp);
+        let (a, b, c, row_scale, col_scale) = unscaled_form(&sf);
+        let options = SolverOptions {
+            use_ruiz_scaling: false,
+            max_iters: Some(50),
+            ..SolverOptions::default()
+        };
+
+        let result = big_m_retry(&sf, &lp, &options, &a, &b, &c, &row_scale, &col_scale, 50);
+
+        assert!(
+            result.is_none(),
+            "a primal attempt that already spent the entire cap must skip the retry"
+        );
+    }
+
+    /// Companion: when `options.max_iters` is `None` (no shared cap
+    /// configured at all), the retry must not introduce an artificial one.
+    #[test]
+    fn big_m_retry_does_not_introduce_a_cap_when_none_is_configured() {
+        let lp = lp_no_ub();
+        let sf = build_standard_form(&lp);
+        let (a, b, c, row_scale, col_scale) = unscaled_form(&sf);
+        let options = SolverOptions {
+            use_ruiz_scaling: false,
+            max_iters: None,
+            ..SolverOptions::default()
+        };
+
+        let result = big_m_retry(&sf, &lp, &options, &a, &b, &c, &row_scale, &col_scale, 123);
+        assert!(result.is_some());
+
+        let observed_max_iters = phase1::last_big_m_cold_start_max_iters();
+        assert_eq!(
+            observed_max_iters,
+            Some(u64::MAX),
+            "no configured cap must not gain one from the retry accounting"
+        );
+    }
+
+    /// SENTINEL (Opus review follow-up, P2-2): an `Infeasible` primal result
+    /// with no Farkas ray, whose Big-M retry never ran because the shared
+    /// budget was already exhausted, must not self-report as `Infeasible` —
+    /// that claim was never corroborated, so reporting it would mint an
+    /// unverified certificate purely because a resource cap bound first.
+    /// The honest fallback is `stop_status`'s clock-recheck: `MaxIterations`
+    /// with no incumbent and no external stop active (this test's case), or
+    /// `Timeout` had a genuine deadline/cancel actually fired.
+    ///
+    /// Sentinel: reverting to `primal_result` unchanged (dropping the
+    /// `stop_status` reclassification) leaves `status == Infeasible`,
+    /// failing both assertions below.
+    #[test]
+    fn infeasible_without_ray_after_exhausted_retry_does_not_self_report_as_infeasible() {
+        let primal_result = SolverResult {
+            status: SolveStatus::Infeasible,
+            solution: vec![],
+            dual_solution: vec![],
+            iterations: 10,
+            ..SolverResult::default()
+        };
+        let options = SolverOptions::default();
+        assert!(
+            options.deadline.is_none() && options.cancel_flag.is_none(),
+            "test premise: no external stop condition must be active"
+        );
+
+        let r = infeasible_without_ray_after_exhausted_retry(primal_result, &options);
+
+        assert_ne!(
+            r.status,
+            SolveStatus::Infeasible,
+            "an uncorroborated Infeasible claim must not survive a budget-exhausted retry skip"
+        );
+        assert_eq!(
+            r.status,
+            SolveStatus::MaxIterations,
+            "no incumbent and no external stop must classify as MaxIterations, got {:?}",
+            r.status
+        );
     }
 
     #[test]

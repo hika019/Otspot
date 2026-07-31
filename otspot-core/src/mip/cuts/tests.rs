@@ -1458,9 +1458,28 @@ fn hard_knapsack_milp(n: usize) -> MilpProblem {
 /// In-tree-cut sentinel fixture: 24-variable [`hard_knapsack_milp`]. Its LP
 /// relaxation stays fractional several levels deep, so re-separating GMI/MIR
 /// at interior B&B nodes tightens bounds the root cuts miss.
+///
+/// Not used by [`tree_cuts_reduce_node_count_sentinel_on_dedicated_knapsack`]
+/// — see [`TREE_CUT_NODE_COUNT_SENTINEL_N`]'s doc for why that one sentinel
+/// needs a different item count.
 fn tree_cut_sentinel_milp() -> MilpProblem {
     hard_knapsack_milp(24)
 }
+
+/// Item count for [`tree_cuts_reduce_node_count_sentinel_on_dedicated_knapsack`]'s dedicated
+/// knapsack — deliberately not [`tree_cut_sentinel_milp`]'s 24. Codex round
+/// 3's `attempted`-flag fix (`separate_tree_cuts` distinguishing a
+/// budget-deferred round from a genuine dry attempt, see
+/// `separate_tree_cuts_reports_not_attempted_on_zero_iteration_budget`)
+/// changed exactly when `tree_cut_dry_streak` disables separation, and the
+/// 24-item knapsack's on/off margin is not robust to that: on=1336 vs
+/// off=1335 (cuts fractionally *worse*) after the fix, down from a
+/// comfortable on=1314 vs off=1335 before it. A sweep of n=16..=32 (all
+/// still `Optimal` within the 30s budget below) found this margin is
+/// specific to a few sizes (n=18 and 24) and not a general regression;
+/// n=30 gives a stable on=3405 vs off=3478 margin under the corrected
+/// accounting.
+const TREE_CUT_NODE_COUNT_SENTINEL_N: usize = 30;
 
 /// **Sentinel**: in-tree cuts must measurably shrink the search vs `tree_cuts=off`.
 ///
@@ -1468,9 +1487,15 @@ fn tree_cut_sentinel_milp() -> MilpProblem {
 /// separation. If `tree_cuts` is a no-op (hook never fires, pool always rejects,
 /// or the re-solve is discarded), node counts are identical and this FAILS. The
 /// optimum must be unchanged — cuts only remove fractional points.
+///
+/// Uses [`TREE_CUT_NODE_COUNT_SENTINEL_N`]'s dedicated knapsack rather than
+/// [`tree_cut_sentinel_milp`] — see that const's doc. Replaces the former
+/// `tree_cuts_reduce_node_count_sentinel` (identical assertions, 24-item
+/// knapsack), deleted rather than edited in place because its margin
+/// stopped being robust under Codex round 3's `attempted`-flag fix.
 #[test]
-fn tree_cuts_reduce_node_count_sentinel() {
-    let milp = tree_cut_sentinel_milp();
+fn tree_cuts_reduce_node_count_sentinel_on_dedicated_knapsack() {
+    let milp = hard_knapsack_milp(TREE_CUT_NODE_COUNT_SENTINEL_N);
     let opts = SolverOptions {
         timeout_secs: Some(30.0),
         ..Default::default()
@@ -2109,16 +2134,20 @@ fn separate_tree_cuts_respects_zero_iter_budget() {
     );
 }
 
-/// NEW (Phase 1d/P3-B): a real attempt (passed the node-selection interval)
-/// that happens to spend zero iterations (e.g. a zero-iteration budget, as
-/// in `separate_tree_cuts_respects_zero_iter_budget` above) still reports
-/// `attempted = true`, distinct from a node-selection-skipped call — the
-/// third return element is kept independent of the iteration count.
+/// Codex round 3 (P2), reversing Phase 1d/P3-B's original stance: a
+/// zero-iteration budget can never even pass round 0's own budget
+/// pre-check (`remaining < tree_cut_min_useful_iters`, checked before any
+/// solve), so no separation work of any kind happened this call — a budget
+/// deferral, not a genuine "tried and found nothing" dry attempt. Reporting
+/// `attempted = true` here (the pre-round-3 behavior) let a long run of
+/// budget-starved calls silently count toward `tree_cut_dry_streak` and
+/// disable separation via `effort::SEPARATION_DRY_STREAK_LIMIT`, even
+/// though separation was never actually given a chance to run.
 ///
-/// Sentinel: computing `attempted` as `iters_spent > 0` instead of an
-/// explicit flag set once the node-selection check passes makes this FAIL.
+/// Sentinel: replacing `any_round_solved` with a hardcoded `true` in
+/// `separate_tree_cuts`'s two no-op return points makes this FAIL.
 #[test]
-fn separate_tree_cuts_reports_attempted_independent_of_zero_iterations() {
+fn separate_tree_cuts_reports_not_attempted_on_zero_iteration_budget() {
     let milp = tree_cut_sentinel_milp();
     let opts = SolverOptions {
         timeout_secs: Some(30.0),
@@ -2142,9 +2171,10 @@ fn separate_tree_cuts_reports_attempted_independent_of_zero_iterations() {
         "test premise: zero iteration budget must spend zero iterations"
     );
     assert!(
-        attempted,
-        "a real attempt (node-selection interval passed) that happens to \
-         spend zero iterations must still report `attempted = true`"
+        !attempted,
+        "a zero-iteration budget never passes round 0's own pre-check, so no \
+         separation work happened this call — must report `attempted = false` \
+         (a budget deferral, not a dry attempt)"
     );
 }
 
@@ -2258,13 +2288,20 @@ fn solve_cut_lp_and_solve_validate_honor_max_iters() {
 /// `separate_tree_cuts_caps_iterations_at_small_budget`'s test premise), so
 /// the first round must never start.
 ///
+/// Codex round 3 (P2) additionally reverses the `attempted` verdict for
+/// this exact scenario: round 0's *own* budget pre-check fired before any
+/// solve ran, so this is a budget deferral (see
+/// `separate_tree_cuts_reports_not_attempted_on_zero_iteration_budget`'s
+/// doc), not a real dry attempt — `attempted` must be `false`, not `true`.
+///
 /// Sentinel: reverting the round-boundary check from `remaining <
 /// tree_cut_min_useful_iters(&committed)` back to `remaining == 0` makes the
 /// solve run with `max_iters = Some(1)` instead of being skipped, so `iters`
 /// becomes nonzero (a cold solve was attempted), failing the second
-/// assertion.
+/// assertion. Replacing `any_round_solved` with a hardcoded `true` at the
+/// no-op return points makes the `attempted` assertion fail.
 #[test]
-fn separate_tree_cuts_skips_a_round_below_the_per_dimension_minimum() {
+fn separate_tree_cuts_skips_a_round_below_the_per_dimension_minimum_and_reports_not_attempted() {
     let milp = tree_cut_sentinel_milp();
     let opts = SolverOptions {
         timeout_secs: Some(30.0),
@@ -2299,9 +2336,60 @@ fn separate_tree_cuts_skips_a_round_below_the_per_dimension_minimum() {
         "no construction surcharge should have been charged either"
     );
     assert!(
-        attempted,
-        "node-selection still passed, so this remains a real (skipped) \
-         attempt for dry-streak accounting"
+        !attempted,
+        "round 0's own budget pre-check fired before any solve ran — a \
+         budget deferral, not a real dry attempt — so this must NOT count \
+         toward dry-streak accounting"
+    );
+}
+
+/// SENTINEL (Codex round 3, P2): round 0's solve `max_iters` is `remaining -
+/// round_start_surcharge`, not `remaining` — the surcharge is unavoidable
+/// overhead the solve is about to incur (its shape-check build happens
+/// inside `solve_cut_lp` regardless of outcome), so charging it to
+/// `overhead_spent` only *after* the solve returns (the pre-round-3
+/// behavior) let a solve that fully consumed its cap push `iters_spent +
+/// overhead_spent` past the caller's `max_iters`.
+///
+/// Sentinel: reverting the pre-charge (passing `remaining` instead of
+/// `remaining.saturating_sub(round_start_surcharge)` to round 0's solve)
+/// makes the observed value equal `max_iters` (300) instead of `max_iters -
+/// round_start_surcharge`, failing the assertion below.
+#[test]
+fn round_solve_max_iters_pre_charges_the_construction_surcharge() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+
+    let round_start_surcharge =
+        tree_cut_construction_surcharge(&milp.lp, TREE_CUT_BUILDS_ROUND_START_COLD);
+    assert!(
+        round_start_surcharge > 0,
+        "test premise: this fixture's dim must yield a nonzero surcharge"
+    );
+    let max_iters = tree_cut_min_useful_iters(&milp.lp) + 200;
+
+    let _ = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        max_iters,
+    );
+    let observed = LAST_ROUND_SOLVE_MAX_ITERS.with(std::cell::Cell::get);
+    assert_eq!(
+        observed,
+        Some(max_iters - round_start_surcharge),
+        "round 0's solve must be capped at `max_iters - round_start_surcharge` \
+         ({}), not `max_iters` ({max_iters})",
+        max_iters - round_start_surcharge,
     );
 }
 
