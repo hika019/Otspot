@@ -246,11 +246,25 @@ fn main() {
         match args[i].as_str() {
             "--timeout" => {
                 i += 1;
-                timeout_secs = args[i].parse().expect("--timeout value");
+                let Some(value) = args.get(i) else {
+                    eprintln!("error: --timeout requires a value");
+                    std::process::exit(2);
+                };
+                timeout_secs = match value.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        eprintln!("error: invalid --timeout value: {value}");
+                        std::process::exit(2);
+                    }
+                };
             }
             "--out" => {
                 i += 1;
-                out_path = args[i].clone();
+                let Some(value) = args.get(i) else {
+                    eprintln!("error: --out requires a value");
+                    std::process::exit(2);
+                };
+                out_path = value.clone();
             }
             _ => {}
         }

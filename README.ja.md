@@ -110,27 +110,27 @@ let result = solve(&prob);
 
 ## 性能
 
-標準公開セットでの求解率ベンチ。otspot-dev の benchmark harness（shell スクリプト — **`cargo bench` ではない**）で計測、`timeout = 1000s`:
+標準公開セットでの求解率ベンチ。otspot-dev の benchmark harness（shell スクリプト — **`cargo bench` ではない**）で計測、`timeout = 1000s`。commit `5dbc08d4`（2026-07-30/31）時点の実測:
 
 | 問題種別 | セット | 問題数 | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
 | 実行可能 LP | Netlib | 109 | 最適解 109 | 最適解 108、SuboptimalSolution 1 |
-| 凸 QP | Maros–Mészáros | 138 | 最適解 121、SuboptimalSolution 1、Stalled 9、MaxIterations 2、OBJ_MISMATCH 1、参照値なし 4 | 最適解 93、SuboptimalSolution 42、TIMEOUT 1、参照値なし 2 |
-| QCQP | QPLIB | 41 | 最適解 11、SuboptimalSolution 3、Stalled 8、TIMEOUT 3、NOT_SUPPORTED 11、SKIP 5 | 最適解 8、SuboptimalSolution 4、Stalled 9、TIMEOUT 4、NOT_SUPPORTED 11、SKIP 5 |
-| MILP | MIPLIB 2017 small | 20 | 最適解 5、TIMEOUT 15、ERROR 0 | 最適解 5、TIMEOUT 15、ERROR 0 |
+| 凸 QP | Maros–Mészáros | 138 | 最適解 121、SuboptimalSolution 1、Stalled 9、MaxIterations 2、OBJ_MISMATCH 1、参照値なし 4 | 最適解 92、SuboptimalSolution 5、Stalled 35、MaxIterations 3、TIMEOUT 1、参照値なし 2 |
+| QCQP | QPLIB | 41 | 最適解 11、SuboptimalSolution 3、Stalled 7、TIMEOUT 4、NOT_SUPPORTED 11、SKIP 5 | 最適解 8、SuboptimalSolution 4、Stalled 9、TIMEOUT 4、NOT_SUPPORTED 11、SKIP 5 |
+| MILP | MIPLIB 2017 small | 20 | 最適解 7、TIMEOUT 13、ERROR 0 | 最適解 7、TIMEOUT 13、ERROR 0 |
 | SOCP | Mittelmann Large-SOCP | 18 | Optimal 4 @1000s（3600s で 6）、他 TIMEOUT、OOM 1 | n/a（1e-6 のみ） |
 | 実行不可能 LP | Netlib | 29 | 正答 29 | 正答 29 |
 | 非有界 LP | 合成 | 12 | 正答 12 | 正答 12 |
 
 **最適解** = 既知最適値と照合済み（proof-carrying KKT）。**Stalled** = 反復・時間予算内でこれ以上進展せず、解を主張しない誠実な非収束 status（旧 taxonomy では SuboptimalSolution に丸められていた）。LP/QP/QCQP/MILP 行は `timeout = 1000s`、`jobs = 6`。SOCP 行は Mittelmann ベンチに合わせ `jobs = 1`（逐次。大規模問題は 1 問あたり最大 ~18 GB RSS）で計測し、timeout は下記の SOCP 注記に従う。
 
-LP: @1e-6 は 109/109 最適解、timeout 0。@1e-8 は 108/109 最適解、timeout 0。ミスは `greenbea`（より厳しい primal 証明ゲートで SuboptimalSolution）——この列は上記 taxonomy 分割より前の計測で、今回は再測定していない。
+LP: @1e-6 は 109/109 最適解、timeout 0。@1e-8 は 108/109 最適解、timeout 0。ミスは `greenbea`（より厳しい primal 証明ゲートで SuboptimalSolution）。
 
-QP: @1e-6 は 121/138 最適解、timeout 0。ミスは SuboptimalSolution 1 件 (`UBH1`)、Stalled 9 件（非収束で解を主張しない）、MaxIterations 2 件、OBJ_MISMATCH 1 件 (`LISWET7`)、公開参照値なしの検査済み 4 件。@1e-8 は 93/138 最適解、SuboptimalSolution 42 件、TIMEOUT 1 件 (`POWELL20`)、公開参照値なしの検査済み 2 件（この列は上記 taxonomy 分割より前の計測で、今回は再測定していない）。
+QP: @1e-6 は 121/138 最適解、timeout 0。ミスは SuboptimalSolution 1 件 (`UBH1`)、Stalled 9 件（非収束で解を主張しない）、MaxIterations 2 件、OBJ_MISMATCH 1 件 (`LISWET7`)、公開参照値なしの検査済み 4 件。@1e-8 は 92/138 最適解、SuboptimalSolution 5 件、Stalled 35 件、MaxIterations 3 件 (`LISWET11`、`QSHELL`、`YAO`)、TIMEOUT 1 件 (`POWELL20`)、公開参照値なしの検査済み 2 件。
 
-QCQP（QPLIB、`bench_qplib` による単発 IPM — 本ベンチは `--global` の空間 B&B 経路を使わない）: @1e-6 は 11/41 最適解、TIMEOUT 3 件。非該当の内訳は SuboptimalSolution 3 件、Stalled 8 件（非収束の IPM iterate、解を主張しない — 旧 taxonomy が SuboptimalSolution へ丸めていたものの誠実な置き換え）、NOT_SUPPORTED 11 件（非凸 McCormick 緩和は全変数の有限境界を要求するが、これらの問題には非有界な変数がある）、SKIP 5 件（parse 時点の対象外: 整数変数または非対応の制約型）。@1e-8 は 8/41 最適解、SuboptimalSolution 4 件、Stalled 9 件（TIMEOUT 4 件。NOT_SUPPORTED/SKIP は eps に依存しないため不変）。@1e-4 まで緩めると 15/41 最適解、SuboptimalSolution 2 件、Stalled 5 件、TIMEOUT 3 件まで回復する。
+QCQP（QPLIB、`bench_qplib` による単発 IPM — 本ベンチは `--global` の空間 B&B 経路を使わない）: @1e-6 は 11/41 最適解、TIMEOUT 4 件。非該当の内訳は SuboptimalSolution 3 件、Stalled 7 件（非収束の IPM iterate、解を主張しない — 旧 taxonomy が SuboptimalSolution へ丸めていたものの誠実な置き換え）、NOT_SUPPORTED 11 件（非凸 McCormick 緩和は全変数の有限境界を要求するが、これらの問題には非有界な変数がある）、SKIP 5 件（parse 時点の対象外: 整数変数または非対応の制約型）。@1e-8 は 8/41 最適解、SuboptimalSolution 4 件、Stalled 9 件（TIMEOUT 4 件。NOT_SUPPORTED/SKIP は eps に依存しないため不変）。@1e-4 まで緩めると 15/41 最適解、SuboptimalSolution 2 件、Stalled 5 件、TIMEOUT 3 件まで回復する。
 
-MILP: @1e-6 / @1e-8 とも 5/20 最適解（`flugpl`、`gr4x6`、`gt2`、`khb05250`、`p0201`）。どちらも `TOTAL` 内に TIMEOUT 15 件、ERROR 0 件を計上する。`noswot` と `timtab1` は tree-cut separation の panic ではなく TIMEOUT になる。
+MILP: @1e-6 / @1e-8 とも 7/20 最適解（`dcmulti`、`flugpl`、`gr4x6`、`gt2`、`khb05250`、`markshare_4_0`、`p0201`）。どちらも `TOTAL` 内に TIMEOUT 13 件、ERROR 0 件を計上する。`noswot` は tree-cut separation で panic しなくなり、時間と無関係な数値デッドエンドを偽の早期 `Timeout` として報告することもなくなった — 1000s の予算を正直に使い切り（ノード数 約 7.5 万 → 約 55 万）、それでも TIMEOUT になる。`timtab1` も同様に正常に TIMEOUT する。
 
 SOCP: Otspot を Hans Mittelmann の [Large Second-Order Cone benchmark](https://plato.asu.edu/ftp/socp.html)（CBLIB 18 問、2026-06-29 版）で計測する。同ページには MOSEK/ECOS/KNITRO/COPT/cuOpt の公開実行時間（timeout 1 時間）が併載されている。これは従来の恣意的な 22 問 self-baseline を置き換えるもので、下表の商用/OSS 時間は Otspot 自身の値ではなく*外部の物差し*である。**Otspot の時間はメモリ制約のある 19 GB QEMU VM（8 vCPU）での計測であり、Mittelmann の Intel i7-11700K / 64 GB ではない**。したがって絶対秒数は方向性の目安であり、`firL2Linfalph`（1.22 億 nonzeros、入力 2.76 GB）がここで 18 GB 上限に達して OOM するのは 64 GB のメモリ余裕がないためである。Otspot の `Optimal` は 1e-6 での proof-carrying KKT 収束を指す。CBLIB/Mittelmann は目的値を公表しないため、これらは商用解との数値照合はしていない。
 
@@ -140,10 +140,10 @@ Otspot は **標準 1000s では 4/18** を解く。ベンチの 3600s 上限に
 
 | 問題 | nnz | Otspot | MOSEK | ECOS | COPT |
 |---|---:|---|---:|---:|---:|
-| chainsing-50000-1 | 0.9M | **6** | 3 | f | 3 |
-| chainsing-50000-2 | 0.75M | **8** | 4 | f | 3 |
-| chainsing-50000-3 | 0.6M | **6** | 3 | f | 2 |
-| beam7 | 15M | 481 | 17 | 206 | 18 |
+| chainsing-50000-1 | 0.9M | **6.2** | 3 | f | 3 |
+| chainsing-50000-2 | 0.75M | **7.4** | 4 | f | 3 |
+| chainsing-50000-3 | 0.6M | **5.2** | 3 | f | 2 |
+| beam7 | 15M | 436 | 17 | 206 | 18 |
 | firL2L1alph | 10M | 1064 | 6 | 202 | 5 |
 | firL2Linfeps | 19M | 1841 | 25 | 687 | 14 |
 | firL1Linfeps | 9.9M | timeout (>3600s) | 26 | 2531 | 13 |
@@ -160,7 +160,9 @@ Otspot は **標準 1000s では 4/18** を解く。ベンチの 3600s 上限に
 | firL2Linfalph | 122M | OOM (>18 GB) | 27 | f | 25 |
 | **solved** | | **6/18** | 18/18 | 11/18 | 18/18 |
 
-Otspot が勝つ点: `chainsing-50000` 3 問（5 万回転錐、約 100 万 nonzeros）を 6〜8s で解く一方、ECOS は 3 問とも失敗する（MOSEK/COPT は約 3s）。Otspot が負ける点: 大規模で密なヤコビアンを持つ `fir`/`db` 系（1000 万〜1.22 億 nonzeros）は timeout するかメモリを使い果たす—MOSEK/COPT が数秒、ECOS（解ける 11 問）が数分で片付ける規模に、Otspot の錐 IPM はまだスケールしない。Otspot は発展途上の OSS SOCP ソルバであり、構造的に疎な錐問題では競争力があるが、大規模で密な問題ではまだ及ばない。（ソルバは錐種 `F`/`L±`/`L=`/`Q`/`QR` と分枝限定による MISOCP にも対応する。`EXP` と PSD 錐は非対応として拒否する。）
+`chainsing-50000-*`、`beam7`、`db-joint-soerensen`、`db-plate-yield-line`、`firL2L1alph`、`firL1Linfeps`、`firL2Linfeps` は commit `5dbc08d4` で再実行した。再実行した timeout 5 件は timeout を再現したため、表は情報量の多い前回値（3600s 注記つき）を据え置いた。残り 9 件の大規模 CBF 行は前回の計測値のまま（今回はファイルを再取得しておらず、本ブランチは錐ソルブ経路に手を入れていない）。
+
+Otspot が勝つ点: `chainsing-50000` 3 問（5 万回転錐、約 100 万 nonzeros）を 5〜8s で解く一方、ECOS は 3 問とも失敗する（MOSEK/COPT は約 3s）。Otspot が負ける点: 大規模で密なヤコビアンを持つ `fir`/`db` 系（1000 万〜1.22 億 nonzeros）は timeout するかメモリを使い果たす—MOSEK/COPT が数秒、ECOS（解ける 11 問）が数分で片付ける規模に、Otspot の錐 IPM はまだスケールしない。Otspot は発展途上の OSS SOCP ソルバであり、構造的に疎な錐問題では競争力があるが、大規模で密な問題ではまだ及ばない。（ソルバは錐種 `F`/`L±`/`L=`/`Q`/`QR` と分枝限定による MISOCP にも対応する。`EXP` と PSD 錐は非対応として拒否する。）
 
 再現（データは gitignored、[ベンチマークデータ](#ベンチマークデータ)参照）:
 

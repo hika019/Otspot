@@ -295,7 +295,7 @@ mod tests {
     }
 
     fn lp_root(lp: &LpProblem) -> crate::problem::SolverResult {
-        crate::mip::cuts::solve_cut_lp(lp, &crate::options::SolverOptions::default(), None)
+        crate::mip::cuts::solve_cut_lp(lp, &crate::options::SolverOptions::default(), None, None)
     }
 
     /// **Sentinel — separation:** the flow-cover generator must emit a cut that

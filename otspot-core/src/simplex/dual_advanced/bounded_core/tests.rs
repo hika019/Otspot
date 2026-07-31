@@ -2003,6 +2003,47 @@ fn bland_leaving_breaks_ties_by_smallest_index() {
     );
 }
 
+/// SENTINEL: the Bland leaving-rule tie band must be tight enough to exclude
+/// a row that is *not* genuinely tied for the minimum ratio, even though it
+/// would fall inside the old (too-loose) `PIVOT_TOL`-sized absolute band.
+///
+/// Row 0 (basis 10) has the true minimum ratio (1.0). Row 1 (basis 3, a
+/// *smaller* basic index) has ratio `1.0 + 5e-9` — outside
+/// `BLAND_TIE_REL_TOL` (1e-9 relative) but inside the old `PIVOT_TOL` (1e-8
+/// absolute) band. Bland's finite-termination rule requires selecting among
+/// rows at the *exact* minimum; admitting row 1 as a false tie and then
+/// picking it for its smaller index (the old, reverted behavior) is exactly
+/// the defect that let one pk1 (MIPLIB) B&B node relaxation revisit 592
+/// distinct bases for ~5,000,000 consecutive degenerate pivots.
+///
+/// No-op proof: reverting the tie band from `BLAND_TIE_REL_TOL` back to
+/// `PIVOT_TOL` makes this test select row 1 (basis 3) instead of row 0 (basis
+/// 10), failing the `row == 0` / `step == 1.0` assertions below.
+#[test]
+fn bland_leaving_tie_band_excludes_non_exact_near_ties() {
+    let alpha = [1.0f64, 1.0];
+    let x_b = [1.0f64, 1.0 + 5e-9];
+    let basis = [10usize, 3];
+    let ubs = vec![f64::INFINITY; 11];
+    let inf = f64::INFINITY;
+
+    match select_leaving_bland_bounded(&alpha, 1.0, &x_b, &basis, &ubs, inf, 2, PIVOT_TOL) {
+        BoundedLeave::Pivot { row, step, .. } => {
+            assert_eq!(
+                row, 0,
+                "must select the true minimizer (basis 10), not the near-tie \
+                 row with the smaller index (basis 3): a PIVOT_TOL-sized band \
+                 falsely admits the near-tie row"
+            );
+            assert!(
+                (step - 1.0).abs() < 1e-12,
+                "step must be the exact minimum ratio (1.0), got {step}"
+            );
+        }
+        other => panic!("expected Pivot, got {other:?}"),
+    }
+}
+
 /// Bland entering returns the smallest *improving* column index, skipping
 /// non-improving columns — never the most-improving. No-op proof: an
 /// argmax-violation rule would return column 2 (violation 5 > 1), failing the
@@ -2029,6 +2070,206 @@ fn bland_entering_returns_smallest_improving_index() {
         bland_entering(&a, &c1, &is_basic, &at_upper, &y, 3, PIVOT_TOL),
         Some(1),
         "must skip non-improving col 0 and take col 1"
+    );
+}
+
+// ── obj_plateau_should_bail sentinels ──────────────────────────────────────
+//
+// `obj_plateau_should_bail` backs the `primal_simplex_aug` /
+// `phase2_primal_bounded` give-up: since it is a pure function of
+// (best_obj, current_obj, iters_since_obj_progress, progress_check_interval,
+// giveup_trigger), these exercise its no-progress/progress/exact-boundary
+// behavior directly without needing to hand-construct an LP that genuinely
+// cycles. `progress_check_interval = 1` below reproduces the original
+// per-iteration semantics exactly; `obj_plateau_bail_advances_by_check_interval_
+// per_sampled_call` separately covers the real (`OBJ_PLATEAU_CHECK_INTERVAL`)
+// sampling interval used in production.
+
+/// A frozen objective must trigger the give-up at exactly `giveup_trigger`
+/// calls — not before, not after.
+///
+/// No-op proof: an off-by-one in `obj_plateau_should_bail` (e.g. comparing
+/// with `>` instead of `>=`, or incrementing before vs. after the compare)
+/// shifts the stop point by one, failing one of the per-iteration asserts.
+#[test]
+fn obj_plateau_bail_fires_exactly_at_trigger_with_frozen_objective() {
+    let mut best_obj = 5.0f64;
+    let mut iters_since_obj_progress = 0usize;
+    let giveup_trigger = 7usize;
+    for i in 1..=giveup_trigger {
+        let stop = obj_plateau_should_bail(
+            &mut best_obj,
+            5.0,
+            &mut iters_since_obj_progress,
+            1,
+            giveup_trigger,
+        );
+        if i < giveup_trigger {
+            assert!(
+                !stop,
+                "must not stop before reaching the trigger (iter {i})"
+            );
+        } else {
+            assert!(stop, "must stop exactly at the trigger (iter {i})");
+        }
+    }
+}
+
+/// SENTINEL: a repeated, sub-threshold "improvement" must not count as real
+/// progress — the give-up must still fire. This is what let a bounded-variable
+/// cycle that periodically routes through a `Flip` (a genuine, but often
+/// tiny, objective change) dodge an earlier bland-mode/step-gated give-up
+/// indefinitely: pk1 (MIPLIB) had two RENS sub-MIP node relaxations each run
+/// 872,044 100%-degenerate pivots, interleaved with a flip roughly every 34
+/// pivots, before the give-up was changed to this plain objective-plateau
+/// check with a deliberately coarse noise floor.
+///
+/// No-op proof: loosening `OBJ_PLATEAU_PROGRESS_REL_TOL` from `1e-9` to
+/// `dual_common::NO_PROGRESS_REL_EPS`-scale (`1e-12`) would let the 1e-9
+/// absolute wiggle here (1e-11 relative to `best_obj=100.0`... concretely
+/// `1e-9 > 100.0 * 1e-12`) register as genuine progress, resetting the
+/// counter every call and never firing — failing the `stopped` assertion.
+#[test]
+fn obj_plateau_bail_ignores_sub_threshold_noise_and_stops() {
+    let mut best_obj = 100.0f64;
+    let mut iters_since_obj_progress = 0usize;
+    let giveup_trigger = 10usize;
+    let mut stopped = false;
+    for _ in 0..giveup_trigger {
+        // 1e-9 absolute is far below OBJ_PLATEAU_PROGRESS_REL_TOL's
+        // threshold at this scale (100.0 * 1e-9 = 1e-7).
+        let current_obj = best_obj - 1e-9;
+        if obj_plateau_should_bail(
+            &mut best_obj,
+            current_obj,
+            &mut iters_since_obj_progress,
+            1,
+            giveup_trigger,
+        ) {
+            stopped = true;
+            break;
+        }
+    }
+    assert!(
+        stopped,
+        "sub-threshold noise must not count as progress; give-up must fire \
+         within {giveup_trigger} calls"
+    );
+}
+
+/// A genuinely improving objective (each step exceeds the noise floor) must
+/// never trigger the give-up, however many iterations it takes.
+#[test]
+fn obj_plateau_bail_never_fires_on_genuine_progress() {
+    let mut best_obj = 100.0f64;
+    let mut iters_since_obj_progress = 0usize;
+    let giveup_trigger = 10usize;
+    for i in 1..=1_000usize {
+        // 1e-3 absolute per step is far above the 1e-7 noise floor at this scale.
+        let current_obj = 100.0 - i as f64 * 1e-3;
+        let stop = obj_plateau_should_bail(
+            &mut best_obj,
+            current_obj,
+            &mut iters_since_obj_progress,
+            1,
+            giveup_trigger,
+        );
+        assert!(
+            !stop,
+            "genuine per-iteration progress must never give up (iter {i})"
+        );
+    }
+}
+
+/// SENTINEL (P2-2): a step that clears the noise floor by only a small
+/// margin (`OBJ_PLATEAU_PROGRESS_REL_TOL * 1.5`, not orders of magnitude
+/// above it) must still count as real progress and never trigger the
+/// give-up, however many such steps it takes. This is the boundary case
+/// `obj_plateau_bail_never_fires_on_genuine_progress` (1e-3 absolute, ~1e4x
+/// the floor) doesn't exercise: a genuinely-but-barely-converging solve
+/// sitting just above the threshold, not comfortably above it.
+///
+/// No-op proof: an off-by-direction error in the improvement comparison
+/// (e.g. `>=` treated as `>` combined with floating-point rounding at a
+/// 1.5x margin, or a regression that widens the effective floor toward this
+/// margin) would eventually misclassify one of these many near-boundary
+/// steps as non-progress, incrementing the never-reset counter until it
+/// crosses `giveup_trigger` — failing the `!stop` assertion.
+#[test]
+fn obj_plateau_bail_never_fires_when_each_step_is_just_above_noise_floor() {
+    let mut best_obj = 1.0e6_f64;
+    let mut iters_since_obj_progress = 0usize;
+    let giveup_trigger = 5_000usize;
+    // Fixed margin, deliberately independent of the live
+    // `OBJ_PLATEAU_PROGRESS_REL_TOL` constant (computing it as
+    // `OBJ_PLATEAU_PROGRESS_REL_TOL * 1.5` would make this test tautological
+    // — it would always land 1.5x above whatever the constant currently is,
+    // unable to fail if the constant itself regressed). `1.5e-9` is 1.5x the
+    // *documented* threshold (1e-9) relative to the starting `best_obj`
+    // scale (1e6); `best_obj` drifts by at most ~150 absolute over all
+    // 100_000 steps below (0.015% of 1e6), far too little to change which
+    // side of the (recomputed-per-call) threshold this fixed margin falls
+    // on.
+    let margin = 1.0e6_f64 * 1.5e-9;
+    for i in 1..=100_000usize {
+        let current_obj = best_obj - margin;
+        let stop = obj_plateau_should_bail(
+            &mut best_obj,
+            current_obj,
+            &mut iters_since_obj_progress,
+            1,
+            giveup_trigger,
+        );
+        assert!(
+            !stop,
+            "a step just above the documented noise floor (1.5x the 1e-9 \
+             OBJ_PLATEAU_PROGRESS_REL_TOL) must count as genuine progress \
+             and never give up (iter {i})"
+        );
+    }
+}
+
+/// SENTINEL: the give-up counter must advance by `OBJ_PLATEAU_CHECK_INTERVAL` per
+/// no-progress call — matching how the real loops only sample the objective
+/// every `OBJ_PLATEAU_CHECK_INTERVAL` iterations, not every iteration (see its
+/// doc comment: computing `bounded_obj` on every iteration purely to feed
+/// this rarely-firing backstop measured as a 2-10% wall-clock regression on
+/// MIPLIB problems that never come close to giving up). With
+/// `giveup_trigger = 3 * OBJ_PLATEAU_CHECK_INTERVAL`, a frozen objective must
+/// trigger on exactly the 3rd sampled call.
+///
+/// No-op proof: reverting `obj_plateau_should_bail`'s no-progress branch to
+/// `iters_since_obj_progress.saturating_add(1)` (ignoring
+/// `progress_check_interval`) would need `3 * OBJ_PLATEAU_CHECK_INTERVAL` calls to
+/// reach the same trigger; this test only ever calls it 3 times, so it would
+/// finish without ever stopping — failing the `stopped` assertion.
+#[test]
+fn obj_plateau_bail_advances_by_check_interval_per_sampled_call() {
+    let mut best_obj = 5.0f64;
+    let mut iters_since_obj_progress = 0usize;
+    let giveup_trigger = 3 * OBJ_PLATEAU_CHECK_INTERVAL;
+    let mut stopped = false;
+    for i in 1..=3usize {
+        let stop = obj_plateau_should_bail(
+            &mut best_obj,
+            5.0,
+            &mut iters_since_obj_progress,
+            OBJ_PLATEAU_CHECK_INTERVAL,
+            giveup_trigger,
+        );
+        if i < 3 {
+            assert!(
+                !stop,
+                "must not stop before 3 sampled no-progress calls (iter {i})"
+            );
+        } else {
+            stopped = stop;
+        }
+    }
+    assert!(
+        stopped,
+        "must stop on exactly the 3rd sampled call when \
+         giveup_trigger == 3 * OBJ_PLATEAU_CHECK_INTERVAL"
     );
 }
 
@@ -2447,5 +2688,90 @@ fn phase2_primal_degenerate_lp_converges() {
         (obj - (-sum_cap)).abs() < 1e-6,
         "degenerate LP obj {obj:.9e} ≠ expected {:.9e}",
         -sum_cap
+    );
+}
+
+/// Codex round 3 (P1) sentinel: `iterate`'s main loop must honour
+/// `SolverOptions::max_iters`, matching `dual_advanced::core`'s per-solve
+/// iteration cap. Before this fix the loop checked only `deadline`/
+/// `cancel_flag`, so a sub-MIP's remaining `MipConfig::max_lp_iters`
+/// budget went silently unenforced whenever a node relaxation dispatched
+/// to this bounded-dual path specifically.
+///
+/// `fixture_two_rows_three_boxed` with its lb-violation injection reaches
+/// a genuine `Unbounded` conclusion at iteration 3 (measured directly,
+/// not assumed) under a generous 2s deadline — proving the fixture
+/// legitimately needs more than 2 iterations on its own. Capping at
+/// `max_iters=2` under the *same* generous deadline must therefore stop
+/// at iteration 2 via the new check, not run to the natural iteration 3
+/// conclusion.
+///
+/// Sentinel: removing the `options.max_iters` check from `iterate`'s loop
+/// makes the capped run's assertions fail (it would instead reach
+/// `Unbounded` at iteration 3, same as the uncapped baseline).
+#[test]
+fn iterate_honours_max_iters_cap() {
+    let fx = fixture_two_rows_three_boxed();
+    let bsf = build_bounded_standard_form(&fx.problem);
+    let cold_state = |bsf: &BoundedStandardForm| {
+        let mut state = BoundedDualState::cold(bsf, &bsf.b);
+        for &(row, mag) in &fx.inject_negative_x_b {
+            state.x_b[row] = -mag;
+        }
+        state
+    };
+    let generous_deadline =
+        || Some(std::time::Instant::now() + std::time::Duration::from_millis(2_000));
+
+    // Baseline: uncapped, generous deadline — confirms the fixture
+    // genuinely needs more than 2 iterations (test premise, not assumed).
+    let baseline_opts = SolverOptions {
+        deadline: generous_deadline(),
+        ..SolverOptions::default()
+    };
+    let (baseline_outcome, baseline_state) = iterate(
+        cold_state(&bsf),
+        &bsf,
+        &bsf.a,
+        &bsf.c,
+        &baseline_opts,
+        &bsf.upper_bounds,
+        &mut MostInfeasibleLeaving,
+    );
+    assert!(
+        baseline_state.iterations > 2,
+        "test premise: uncapped run must take more than 2 iterations to reach a \
+         natural conclusion, got {} (outcome {:?})",
+        baseline_state.iterations,
+        baseline_outcome
+    );
+
+    // Capped at 2, same generous deadline: must stop at iteration 2 via
+    // max_iters, not run to the natural (later) conclusion.
+    let capped_opts = SolverOptions {
+        deadline: generous_deadline(),
+        max_iters: Some(2),
+        ..SolverOptions::default()
+    };
+    let (capped_outcome, capped_state) = iterate(
+        cold_state(&bsf),
+        &bsf,
+        &bsf.a,
+        &bsf.c,
+        &capped_opts,
+        &bsf.upper_bounds,
+        &mut MostInfeasibleLeaving,
+    );
+    assert_eq!(
+        capped_state.iterations, 2,
+        "max_iters=2 must stop the loop at exactly iteration 2, got {} \
+         (outcome {:?})",
+        capped_state.iterations, capped_outcome
+    );
+    assert!(
+        matches!(capped_outcome, BoundedOutcome::Timeout(_)),
+        "an iteration-cap stop must report Timeout (deadline-or-cap per \
+         BoundedOutcome::Timeout's doc), got {:?}",
+        capped_outcome
     );
 }

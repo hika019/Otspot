@@ -73,6 +73,101 @@ pub(crate) fn fallback_profile_delta(
     }
 }
 
+// ── Legacy-path warm-start dispatch counters (sentinel tests only) ─────────
+//
+// Track whether a `warm_start` supplied to the *legacy* (non-bounded, `sf.m`
+// -shaped) path above is actually accepted (dual-feasible, non-singular,
+// correctly-shaped basis → `core::dual_simplex_core_advanced` runs) versus
+// silently dropped to a cold start for any of its three reasons: shape/range
+// mismatch (`warm.basis.len() != m` or an out-of-range index — falls through
+// the outer `if` with no attempt at all), a singular basis
+// (`LuBasis::new_timed` fails), or dual infeasibility under the new cost
+// vector. Callers whose warm basis is built in this exact space (e.g.
+// `mip::cuts`'s in-tree separation, via `disable_bounded_dispatch`) use
+// these to prove their warm start is genuinely taken, not quietly
+// discarded — [`legacy_warm_start_cold_fallback_total_count`] sums all three
+// so "zero cold fallbacks" is a single check rather than three.
+
+#[cfg(test)]
+thread_local! {
+    static LEGACY_WARM_START_ACCEPTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LEGACY_WARM_START_SINGULAR_FALLBACK: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    static LEGACY_WARM_START_SHAPE_MISMATCH_FALLBACK: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    static LEGACY_WARM_START_DUAL_INFEASIBLE_FALLBACK: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_legacy_warm_start_counts() {
+    LEGACY_WARM_START_ACCEPTED.with(|c| c.set(0));
+    LEGACY_WARM_START_SINGULAR_FALLBACK.with(|c| c.set(0));
+    LEGACY_WARM_START_SHAPE_MISMATCH_FALLBACK.with(|c| c.set(0));
+    LEGACY_WARM_START_DUAL_INFEASIBLE_FALLBACK.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn legacy_warm_start_accepted_count() -> u64 {
+    LEGACY_WARM_START_ACCEPTED.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn legacy_warm_start_singular_fallback_count() -> u64 {
+    LEGACY_WARM_START_SINGULAR_FALLBACK.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn legacy_warm_start_shape_mismatch_fallback_count() -> u64 {
+    LEGACY_WARM_START_SHAPE_MISMATCH_FALLBACK.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn legacy_warm_start_dual_infeasible_fallback_count() -> u64 {
+    LEGACY_WARM_START_DUAL_INFEASIBLE_FALLBACK.with(|c| c.get())
+}
+
+/// Sum of all three ways a supplied `warm_start` falls back to a cold start
+/// on the legacy path instead of being accepted — see this section's doc.
+#[cfg(test)]
+pub(crate) fn legacy_warm_start_cold_fallback_total_count() -> u64 {
+    legacy_warm_start_singular_fallback_count()
+        .saturating_add(legacy_warm_start_shape_mismatch_fallback_count())
+        .saturating_add(legacy_warm_start_dual_infeasible_fallback_count())
+}
+
+#[cfg(test)]
+fn bump_legacy_warm_start_accepted() {
+    LEGACY_WARM_START_ACCEPTED.with(|c| c.set(c.get().saturating_add(1)));
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn bump_legacy_warm_start_accepted() {}
+
+#[cfg(test)]
+fn bump_legacy_warm_start_singular_fallback() {
+    LEGACY_WARM_START_SINGULAR_FALLBACK.with(|c| c.set(c.get().saturating_add(1)));
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn bump_legacy_warm_start_singular_fallback() {}
+
+#[cfg(test)]
+fn bump_legacy_warm_start_shape_mismatch_fallback() {
+    LEGACY_WARM_START_SHAPE_MISMATCH_FALLBACK.with(|c| c.set(c.get().saturating_add(1)));
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn bump_legacy_warm_start_shape_mismatch_fallback() {}
+
+#[cfg(test)]
+fn bump_legacy_warm_start_dual_infeasible_fallback() {
+    LEGACY_WARM_START_DUAL_INFEASIBLE_FALLBACK.with(|c| c.set(c.get().saturating_add(1)));
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn bump_legacy_warm_start_dual_infeasible_fallback() {}
+
 /// Applies deterministic per-row upward jitter to `x_B` with magnitude `mag`.
 /// Row 0 always has frac=0 (Knuth PRNG: `0 * SPREAD_MULT = 0`), so the first
 /// element is never modified; the jitter remains upward-only and keeps the
@@ -164,6 +259,30 @@ enum BoundedTerminalReconcile {
     SingularBasis,
 }
 
+// Test-only observability: forces the *Nth* call to
+// `reconcile_bounded_terminal_state` to report `BoundViolation` immediately,
+// end-to-end reachable through `solve_lp_with`, without needing to
+// manufacture real eta-drift deterministically. Counted (not a flat bool)
+// because Phase I's own reconcile call must succeed normally first — forcing
+// call 1 (Phase I) makes `run_phase1_then_phase2` bail to the legacy path
+// before ever reaching call 2 (Phase II, the one the P1 honesty fix covers).
+// Proves the fix end-to-end, not just at the unit level. `#[cfg(test)]`-only,
+// zero production footprint.
+#[cfg(test)]
+thread_local! {
+    static FORCE_BOUND_VIOLATION_ON_CALL: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static RECONCILE_CALL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn test_force_bound_violation() -> bool {
+    let n = RECONCILE_CALL_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    FORCE_BOUND_VIOLATION_ON_CALL.with(std::cell::Cell::get) == Some(n)
+}
+
 fn reconcile_bounded_terminal_state(
     a: &CscMatrix,
     b: &[f64],
@@ -172,6 +291,10 @@ fn reconcile_bounded_terminal_state(
     state: &mut BoundedDualState,
     options: &SolverOptions,
 ) -> BoundedTerminalReconcile {
+    #[cfg(test)]
+    if test_force_bound_violation() {
+        return BoundedTerminalReconcile::BoundViolation;
+    }
     let mut rhs = b.to_vec();
     for (j, &at_ub) in state.at_upper.iter().enumerate() {
         if state.is_basic[j] || !at_ub {
@@ -265,14 +388,17 @@ pub(crate) fn solve_dual_advanced(
     // Two sub-paths gated on the BSF shape:
     //   - Le-only (num_artificial == 0)        → `try_bounded` (dual BFRT then primal).
     //   - Has artificials (num_artificial > 0) → `try_bounded_phase1_eq` (augmented
-    //     primal Phase I+II); preserves m (no UB-row blow-up) and dispatch is
-    //     skipped via thread-local hook in tests for no-op proofs.
+    //     primal Phase I+II); preserves m (no UB-row blow-up).
     // Le / Ge / Eq rows are handled uniformly: the constraint sense only sets the
     // standard-form slack sign and `needs_artificial`, both already baked into
     // `bsf`. Phase I minimises Σ artificials independent of the original sense, so
     // Ge needs no special path. A spurious "Optimal" is still caught by
     // `guard_lp_optimal` at the entry, so opening Ge cannot return a wrong answer.
-    if !bounded_dispatch_disabled() && problem.bounds.iter().any(|&(_, ub)| ub.is_finite()) {
+    // `options.disable_bounded_dispatch` forces the legacy (sf.m-shaped) path
+    // below unconditionally — used by callers whose warm-start basis was built
+    // in that larger space (see the field's doc) and by this module's own
+    // no-op-proof tests.
+    if !options.disable_bounded_dispatch && problem.bounds.iter().any(|&(_, ub)| ub.is_finite()) {
         let Some(bsf) = build_bounded_standard_form_with_deadline(problem, options.deadline) else {
             return SolverResult::timeout();
         };
@@ -339,6 +465,7 @@ pub(crate) fn solve_dual_advanced(
                         options.dual_tol,
                     ) {
                         // dual infeasible under new c → cold start
+                        bump_legacy_warm_start_dual_infeasible_fallback();
                     } else {
                         let mut leaving = make_leaving_strategy(options.dual_pricing, m);
                         let mut total_iters: usize = 0;
@@ -361,13 +488,19 @@ pub(crate) fn solve_dual_advanced(
                             options,
                         );
                         result.iterations = total_iters;
+                        bump_legacy_warm_start_accepted();
                         return result;
                     }
                 }
                 Err(_) => {
                     // 基底が特異 → cold-startにフォールバック
+                    bump_legacy_warm_start_singular_fallback();
                 }
             }
+        } else {
+            // 基底長/範囲不一致 (bounded fast path 等、別空間の基底) →
+            // cold-startにフォールバック
+            bump_legacy_warm_start_shape_mismatch_fallback();
         }
     }
 
@@ -390,11 +523,15 @@ pub(crate) fn solve_dual_advanced(
         // internal-stall analogue of the old empty-Timeout (stalls minted
         // Timeout before the Stalled split) — the retry policy must not narrow.
         SolveStatus::Timeout | SolveStatus::MaxIterations if primal_result.solution.is_empty() => {
-            let bigm_result =
-                phase1::big_m_cold_start(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
+            let iters = primal_result.iterations;
+            let Some(bigm_result) = big_m_retry(
+                sf, problem, options, &a, &b, &c, &row_scale, &col_scale, iters,
+            ) else {
+                return primal_result;
+            };
             if bigm_result.status == SolveStatus::Timeout {
                 let mut r = primal_result;
-                r.iterations = r.iterations.saturating_add(bigm_result.iterations);
+                r.iterations = bigm_result.iterations;
                 r
             } else {
                 bigm_result
@@ -402,14 +539,16 @@ pub(crate) fn solve_dual_advanced(
         }
         SolveStatus::Infeasible if !primal_result.dual_solution.is_empty() => primal_result,
         SolveStatus::Infeasible => {
-            let bigm_result =
-                phase1::big_m_cold_start(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
+            let iters = primal_result.iterations;
+            let Some(bigm_result) = big_m_retry(
+                sf, problem, options, &a, &b, &c, &row_scale, &col_scale, iters,
+            ) else {
+                return infeasible_without_ray_after_exhausted_retry(primal_result, options);
+            };
             if bigm_result.status == SolveStatus::Timeout {
                 SolverResult {
                     status: SolveStatus::Timeout,
-                    iterations: primal_result
-                        .iterations
-                        .saturating_add(bigm_result.iterations),
+                    iterations: bigm_result.iterations,
                     ..primal_result
                 }
             } else {
@@ -420,29 +559,71 @@ pub(crate) fn solve_dual_advanced(
     }
 }
 
+/// `primal_result`'s `Infeasible` claim (no Farkas ray — the caller's
+/// sibling arm already claimed the verified case) when the Big-M retry
+/// never ran because the shared budget was exhausted first (Opus review
+/// follow-up, P2-2). Reporting `Infeasible` here would mint an unverified
+/// certificate purely because a resource cap happened to bind before
+/// verification could occur; the honest status is `stop_status`'s
+/// clock-recheck, the same one every other resource-limited dead-end in
+/// this module family uses.
+fn infeasible_without_ray_after_exhausted_retry(
+    primal_result: SolverResult,
+    options: &SolverOptions,
+) -> SolverResult {
+    SolverResult {
+        status: super::stop_status(!primal_result.solution.is_empty(), options),
+        ..primal_result
+    }
+}
+
+/// Runs the Big-M cold-start retry for an inconclusive primal-path result
+/// (`primal_iterations` is that attempt's own already-spent iteration
+/// count). Mirrors `solve_relaxation_with_scaling_retry`'s established
+/// first-attempt accounting (Codex round 3, P1): the retry re-solves the
+/// *same* relaxation the primal attempt already spent `primal_iterations`
+/// on, so it must not receive a fresh copy of `options.max_iters` — handing
+/// it the same limit again would let one relaxation solve spend up to 2x its
+/// allowance whenever the primal path exhausts its budget without
+/// converging. `None` once nothing remains of the shared cap: an attempt
+/// that stalled at exactly the remaining budget gains nothing from a Big-M
+/// retry that would immediately hit the same (now zero) cap. The returned
+/// result's `iterations` always includes `primal_iterations` — both
+/// attempts genuinely ran, regardless of the retry's own outcome (mirrors
+/// the scaling-retry's P3-F fix, which folded it in unconditionally rather
+/// than only on a Timeout-carrying path).
+#[allow(clippy::too_many_arguments)]
+fn big_m_retry(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    options: &SolverOptions,
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    row_scale: &[f64],
+    col_scale: &[f64],
+    primal_iterations: usize,
+) -> Option<SolverResult> {
+    let mut capped_options;
+    let bigm_options = match options.max_iters {
+        Some(cap) => {
+            let remaining = cap.saturating_sub(primal_iterations as u64);
+            if remaining == 0 {
+                return None;
+            }
+            capped_options = options.clone();
+            capped_options.max_iters = Some(remaining);
+            &capped_options
+        }
+        None => options,
+    };
+    let mut bigm_result =
+        phase1::big_m_cold_start_observed(sf, problem, bigm_options, a, b, c, row_scale, col_scale);
+    bigm_result.iterations = bigm_result.iterations.saturating_add(primal_iterations);
+    Some(bigm_result)
+}
+
 // ── Bounded (BFRT) path ───────────────────────────────────────────────────────
-
-#[cfg(test)]
-thread_local! {
-    static BOUNDED_DISPATCH_DISABLE: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-pub(crate) fn set_bounded_dispatch_disabled(v: bool) {
-    BOUNDED_DISPATCH_DISABLE.with(|c| c.set(v));
-}
-
-fn bounded_dispatch_disabled() -> bool {
-    #[cfg(test)]
-    {
-        BOUNDED_DISPATCH_DISABLE.with(|c| c.get())
-    }
-    #[cfg(not(test))]
-    {
-        false
-    }
-}
 
 #[cfg(test)]
 use dispatch::diag_basis_initial_x_b;
@@ -510,6 +691,175 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    /// Unscaled `(a, b, c, row_scale, col_scale)` for `lp`'s standard form —
+    /// the identity-scaling tuple `solve_dual_advanced` itself builds when
+    /// `use_ruiz_scaling` is false, reused here so `big_m_retry` tests don't
+    /// need the full Ruiz-equilibration machinery.
+    fn unscaled_form(sf: &StandardForm) -> (CscMatrix, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+        (
+            sf.a.clone(),
+            sf.b.clone(),
+            sf.c.clone(),
+            vec![1.0; sf.m],
+            vec![1.0; sf.n_total],
+        )
+    }
+
+    /// SENTINEL (Codex round 3, P1): the Big-M retry's own `max_iters` is
+    /// `cap - primal_iterations`, not a fresh copy of `options.max_iters` —
+    /// mirrors `solve_relaxation_with_scaling_retry`'s established
+    /// first-attempt accounting. Also checks the returned result's
+    /// `iterations` includes `primal_iterations` by comparing against a
+    /// direct, unmerged `big_m_cold_start` call with the same reduced cap.
+    ///
+    /// Sentinel: passing `options` (the uncapped original) straight through
+    /// to `phase1::big_m_cold_start` instead of `bigm_options` makes the
+    /// observed `max_iters` assertion fail; dropping the final
+    /// `saturating_add` makes the iteration-count assertion fail.
+    #[test]
+    fn big_m_retry_pre_charges_the_primal_attempts_iterations() {
+        let lp = lp_no_ub();
+        let sf = build_standard_form(&lp);
+        let (a, b, c, row_scale, col_scale) = unscaled_form(&sf);
+        const CAP: u64 = 1_000;
+        const PRIMAL_ITERS: usize = 7;
+        let options = SolverOptions {
+            use_ruiz_scaling: false,
+            max_iters: Some(CAP),
+            ..SolverOptions::default()
+        };
+
+        let direct = phase1::big_m_cold_start(
+            &sf,
+            &lp,
+            &SolverOptions {
+                max_iters: Some(CAP - PRIMAL_ITERS as u64),
+                ..options.clone()
+            },
+            &a,
+            &b,
+            &c,
+            &row_scale,
+            &col_scale,
+        );
+
+        let result = big_m_retry(
+            &sf,
+            &lp,
+            &options,
+            &a,
+            &b,
+            &c,
+            &row_scale,
+            &col_scale,
+            PRIMAL_ITERS,
+        )
+        .expect("budget remains, retry must proceed");
+
+        let observed_max_iters = phase1::last_big_m_cold_start_max_iters();
+        assert_eq!(
+            observed_max_iters,
+            Some(CAP - PRIMAL_ITERS as u64),
+            "the retry's own max_iters must be cap - primal_iterations"
+        );
+        assert_eq!(
+            result.iterations,
+            direct.iterations + PRIMAL_ITERS,
+            "the returned iterations must include the primal attempt's count"
+        );
+    }
+
+    /// SENTINEL (Codex round 3, P1): once the primal attempt already
+    /// consumed the entire shared cap, the Big-M retry must be skipped
+    /// outright (`None`), not run with a zero/negative-then-saturated cap.
+    ///
+    /// Sentinel: replacing the `remaining == 0` check with `false` (always
+    /// retry) makes this return `Some(_)` instead of `None`.
+    #[test]
+    fn big_m_retry_skips_when_the_shared_cap_is_exhausted() {
+        let lp = lp_no_ub();
+        let sf = build_standard_form(&lp);
+        let (a, b, c, row_scale, col_scale) = unscaled_form(&sf);
+        let options = SolverOptions {
+            use_ruiz_scaling: false,
+            max_iters: Some(50),
+            ..SolverOptions::default()
+        };
+
+        let result = big_m_retry(&sf, &lp, &options, &a, &b, &c, &row_scale, &col_scale, 50);
+
+        assert!(
+            result.is_none(),
+            "a primal attempt that already spent the entire cap must skip the retry"
+        );
+    }
+
+    /// Companion: when `options.max_iters` is `None` (no shared cap
+    /// configured at all), the retry must not introduce an artificial one.
+    #[test]
+    fn big_m_retry_does_not_introduce_a_cap_when_none_is_configured() {
+        let lp = lp_no_ub();
+        let sf = build_standard_form(&lp);
+        let (a, b, c, row_scale, col_scale) = unscaled_form(&sf);
+        let options = SolverOptions {
+            use_ruiz_scaling: false,
+            max_iters: None,
+            ..SolverOptions::default()
+        };
+
+        let result = big_m_retry(&sf, &lp, &options, &a, &b, &c, &row_scale, &col_scale, 123);
+        assert!(result.is_some());
+
+        let observed_max_iters = phase1::last_big_m_cold_start_max_iters();
+        assert_eq!(
+            observed_max_iters,
+            Some(u64::MAX),
+            "no configured cap must not gain one from the retry accounting"
+        );
+    }
+
+    /// SENTINEL (Opus review follow-up, P2-2): an `Infeasible` primal result
+    /// with no Farkas ray, whose Big-M retry never ran because the shared
+    /// budget was already exhausted, must not self-report as `Infeasible` —
+    /// that claim was never corroborated, so reporting it would mint an
+    /// unverified certificate purely because a resource cap bound first.
+    /// The honest fallback is `stop_status`'s clock-recheck: `MaxIterations`
+    /// with no incumbent and no external stop active (this test's case), or
+    /// `Timeout` had a genuine deadline/cancel actually fired.
+    ///
+    /// Sentinel: reverting to `primal_result` unchanged (dropping the
+    /// `stop_status` reclassification) leaves `status == Infeasible`,
+    /// failing both assertions below.
+    #[test]
+    fn infeasible_without_ray_after_exhausted_retry_does_not_self_report_as_infeasible() {
+        let primal_result = SolverResult {
+            status: SolveStatus::Infeasible,
+            solution: vec![],
+            dual_solution: vec![],
+            iterations: 10,
+            ..SolverResult::default()
+        };
+        let options = SolverOptions::default();
+        assert!(
+            options.deadline.is_none() && options.cancel_flag.is_none(),
+            "test premise: no external stop condition must be active"
+        );
+
+        let r = infeasible_without_ray_after_exhausted_retry(primal_result, &options);
+
+        assert_ne!(
+            r.status,
+            SolveStatus::Infeasible,
+            "an uncorroborated Infeasible claim must not survive a budget-exhausted retry skip"
+        );
+        assert_eq!(
+            r.status,
+            SolveStatus::MaxIterations,
+            "no incumbent and no external stop must classify as MaxIterations, got {:?}",
+            r.status
+        );
     }
 
     #[test]
@@ -592,12 +942,12 @@ mod tests {
     fn bfrt_wiring_flip_count_positive_noop_proof() {
         let lp = lp_flip_trigger();
         let sf = build_standard_form(&lp);
-        let _guard = crate::ScopedDisable::new(
-            || set_bounded_dispatch_disabled(true),
-            || set_bounded_dispatch_disabled(false),
-        );
+        let options = SolverOptions {
+            disable_bounded_dispatch: true,
+            ..SolverOptions::default()
+        };
         reset_bfrt_flip_invocations();
-        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let result = solve_dual_advanced(&sf, &lp, &options);
         let flips_disabled = bfrt_flip_invocations();
         assert_eq!(
             flips_disabled, 0,
@@ -1071,6 +1421,7 @@ mod tests {
         // Guard must fall through to cold start → correct obj=-3.
         let lp2 = make_lp(vec![-1.0, -1.0]);
         let sf2 = build_standard_form(&lp2);
+        reset_legacy_warm_start_counts();
         let r2 = solve_dual_advanced(
             &sf2,
             &lp2,
@@ -1090,6 +1441,17 @@ mod tests {
             "LP2 warm-solve obj={:.6e} expected -3 (got 0 = guard missing)",
             r2.objective
         );
+        // Codex review (P2-4): this scenario is exactly the dual-infeasible
+        // cold-fallback path — confirm it is actually counted, not just
+        // that the final objective happens to be correct regardless.
+        assert_eq!(
+            legacy_warm_start_dual_infeasible_fallback_count(),
+            1,
+            "the dual-infeasibility guard firing here must be counted"
+        );
+        assert_eq!(legacy_warm_start_accepted_count(), 0);
+        assert_eq!(legacy_warm_start_singular_fallback_count(), 0);
+        assert_eq!(legacy_warm_start_shape_mismatch_fallback_count(), 0);
 
         // Consistency: cold re-solve of LP2 must agree.
         let r2_cold = solve_dual_advanced(&sf2, &lp2, &SolverOptions::default());
@@ -1100,6 +1462,68 @@ mod tests {
             r2_cold.objective,
             r2.objective
         );
+    }
+
+    /// **SENTINEL** (Codex review, P2-4): a `warm_start` whose basis has the
+    /// wrong length for `sf.m` (e.g. a caller mixing up basis spaces) must
+    /// fall through to a cold start via the shape/range-mismatch branch —
+    /// the two previously-uncounted legacy-path exits before this review —
+    /// and that fallback must be counted, not silently invisible to callers
+    /// like `mip::cuts` that assert zero cold fallbacks.
+    ///
+    /// Sentinel: this exercises the outer `if warm.basis.len() == m && ...`
+    /// check's `else` branch specifically (as opposed to the `Err(_)` /
+    /// dual-infeasible branches inside it, covered by the tests above/below)
+    /// — removing `bump_legacy_warm_start_shape_mismatch_fallback()` from
+    /// that `else` makes this FAIL while the solve itself still silently
+    /// succeeds (correct answer, wrong/missing accounting).
+    #[test]
+    fn legacy_warm_start_shape_mismatch_is_counted() {
+        use otspot_num::sparse::CscMatrix;
+
+        // No finite UBs → legacy dual path (matches the dual-infeasible test
+        // above); a warm basis one element too long can never satisfy
+        // `warm.basis.len() == m` regardless of its contents.
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        assert_eq!(sf.m, 1, "test premise");
+
+        reset_legacy_warm_start_counts();
+        let result = solve_dual_advanced(
+            &sf,
+            &lp,
+            &SolverOptions {
+                warm_start: Some(WarmStartBasis {
+                    basis: vec![0, 1], // length 2 != sf.m (1)
+                    x_b: Vec::new(),
+                }),
+                ..SolverOptions::default()
+            },
+        );
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "the mismatched warm start must still fall through to a correct \
+             cold solve: {:?}",
+            result.status
+        );
+        assert_eq!(
+            legacy_warm_start_shape_mismatch_fallback_count(),
+            1,
+            "the shape-mismatch branch firing here must be counted"
+        );
+        assert_eq!(legacy_warm_start_accepted_count(), 0);
+        assert_eq!(legacy_warm_start_singular_fallback_count(), 0);
+        assert_eq!(legacy_warm_start_dual_infeasible_fallback_count(), 0);
     }
 
     /// Sentinel: Ge/Eq cold-start (primal-first dispatch) must solve optimally.
@@ -1272,12 +1696,12 @@ mod tests {
     fn eq_ub_dispatch_noop_proof() {
         let lp = lp_eq_with_finite_ubs();
         let sf = build_standard_form(&lp);
-        let _guard = crate::ScopedDisable::new(
-            || set_bounded_dispatch_disabled(true),
-            || set_bounded_dispatch_disabled(false),
-        );
+        let options = SolverOptions {
+            disable_bounded_dispatch: true,
+            ..SolverOptions::default()
+        };
         bounded_core::reset_eq_ub_dispatch_count();
-        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let result = solve_dual_advanced(&sf, &lp, &options);
         let count = bounded_core::eq_ub_dispatch_count();
         assert_eq!(
             count, 0,
@@ -1732,6 +2156,94 @@ mod tests {
             (result.objective - (-2.0)).abs() < 1e-6,
             "expected obj=-2, got {:.6e}",
             result.objective
+        );
+    }
+
+    /// Resets the forced-BoundViolation hook on drop (including on panic),
+    /// so a failing assertion can never leak the flag into whichever other
+    /// test happens to reuse this thread next.
+    struct ForceBoundViolationGuard;
+
+    impl ForceBoundViolationGuard {
+        fn new(on_call: usize) -> Self {
+            RECONCILE_CALL_COUNT.with(|c| c.set(0));
+            FORCE_BOUND_VIOLATION_ON_CALL.with(|c| c.set(Some(on_call)));
+            Self
+        }
+    }
+
+    impl Drop for ForceBoundViolationGuard {
+        fn drop(&mut self) {
+            FORCE_BOUND_VIOLATION_ON_CALL.with(|c| c.set(None));
+        }
+    }
+
+    /// P2-1 (Opus review): end-to-end sentinel for the P1 honesty fix — a
+    /// forced `BoundedTerminalReconcile::BoundViolation` on Phase II's
+    /// reconcile call, reached through the real public `solve_lp_with`
+    /// entry point (not just at the unit level), must not self-report as
+    /// `Timeout` when no deadline/cancel is active.
+    ///
+    /// `x = 3`, `x in [0, 10]`, minimize `x`: a single Eq row needing one
+    /// artificial, forcing the Eq/UB bounded path
+    /// (`try_bounded_phase1_eq`/`run_phase1_then_phase2`). Phase I's own
+    /// reconcile (call 1) must succeed normally — forcing *that* call
+    /// instead would make `run_phase1_then_phase2` bail to the legacy path
+    /// before Phase II's reconcile (call 2, the one the fix covers) ever
+    /// runs — so `ForceBoundViolationGuard::new(2)` targets call 2 exactly.
+    ///
+    /// Sentinel: reverting the Phase II `BoundedTerminalReconcile::
+    /// BoundViolation` arm in `pipeline.rs::run_phase1_then_phase2` back to
+    /// a raw `SolveStatus::Timeout` literal makes this assertion fail.
+    #[test]
+    fn forced_bound_violation_end_to_end_does_not_self_report_as_timeout() {
+        use otspot_num::sparse::CscMatrix;
+
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, 10.0)],
+            None,
+        )
+        .unwrap();
+        let options = SolverOptions {
+            presolve: false,
+            ..SolverOptions::default()
+        };
+        assert!(
+            options.deadline.is_none() && options.cancel_flag.is_none(),
+            "test premise: no external stop condition must be active"
+        );
+
+        let _guard = ForceBoundViolationGuard::new(2);
+        let result = crate::lp::solve_lp_with(&lp, &options);
+
+        // The hook itself must have actually fired call 2 (Phase II's
+        // reconcile) — otherwise a future dispatch change could route this
+        // fixture away from `run_phase1_then_phase2` entirely (e.g. a
+        // presolve reduction, or a different bounded-path selection) and
+        // this test would keep "passing" for the wrong reason (no forced
+        // BoundViolation ever happened) instead of catching the drift.
+        let calls_seen = RECONCILE_CALL_COUNT.with(std::cell::Cell::get);
+        assert!(
+            calls_seen >= 2,
+            "test premise: reconcile_bounded_terminal_state must be called at least \
+             twice (Phase I, then Phase II) for the hook to have forced call 2; \
+             only saw {calls_seen} call(s) — dispatch may have changed",
+        );
+
+        // `SolverResult::numerical_error()`, not a stall status: a bound
+        // violation has no verified basis to report a diagnostic
+        // solution/objective from (mirrors `SingularBasis`, see P3-1).
+        assert_eq!(
+            result.status,
+            SolveStatus::NumericalError,
+            "a forced BoundViolation with no deadline/cancel must report \
+             NumericalError (SingularBasis-style honesty), not {:?}",
+            result.status
         );
     }
 }

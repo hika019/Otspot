@@ -65,6 +65,59 @@ fn primal_alpha_sv_disabled() -> bool {
     false
 }
 
+/// Per-iteration stop-condition check shared by `primal_simplex_aug` and
+/// `phase2_primal_bounded`: deadline/cancel, trace log, `max_iters` cap, and
+/// the (throttled) objective-plateau bail. Returns `Some(outcome)` when the
+/// loop must return immediately, `None` to continue. `compute_obj` recomputes
+/// `bounded_obj` for whichever cost/bounds vectors the caller is using.
+///
+/// `cancelled` is the caller's own `options.cancel_flag` check result (or
+/// `false` to skip it): `phase2_primal_bounded` does not check it here, an
+/// existing behavior difference this extraction preserves, not introduces.
+#[allow(clippy::too_many_arguments)]
+fn check_plateau_stop_conditions(
+    iters: &mut usize,
+    options: &SolverOptions,
+    cancelled: bool,
+    trace: &mut Option<IterTrace>,
+    basis: &[usize],
+    bland_mode: bool,
+    best_obj: &mut f64,
+    iters_since_obj_progress: &mut usize,
+    giveup_obj_trigger: usize,
+    compute_obj: impl Fn() -> f64,
+) -> Option<SimplexOutcome> {
+    *iters = iters.saturating_add(1);
+    if deadline_reached(options.deadline) || cancelled {
+        return Some(SimplexOutcome::Timeout(compute_obj()));
+    }
+    if let Some(t) = trace.as_mut() {
+        t.log(*iters, compute_obj(), basis, bland_mode);
+    }
+    if options
+        .max_iters
+        .is_some_and(|limit| *iters as u64 >= limit)
+    {
+        return Some(SimplexOutcome::Stalled(compute_obj()));
+    }
+    if iters.is_multiple_of(OBJ_PLATEAU_CHECK_INTERVAL) {
+        let obj = compute_obj();
+        if obj_plateau_should_bail(
+            best_obj,
+            obj,
+            iters_since_obj_progress,
+            OBJ_PLATEAU_CHECK_INTERVAL,
+            giveup_obj_trigger,
+        ) {
+            return Some(SimplexOutcome::Stalled(obj));
+        }
+    }
+    if deadline_reached(options.deadline) {
+        return Some(SimplexOutcome::Timeout(compute_obj()));
+    }
+    None
+}
+
 /// Drive primal Phase 2 from a primal-feasible `BoundedDualState`.
 ///
 /// Caller supplies the state produced by `solve_bounded_dual` (perturbed-cost
@@ -120,42 +173,50 @@ pub(crate) fn phase2_primal_bounded(
     let mut trace = IterTrace::new("bounded-phase2-primal");
 
     let k_trigger = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN);
+    // Bland-mode give-up: see the doc comment on `OBJ_PLATEAU_BAIL_FACTOR` above
+    // `primal_simplex_aug` — this loop has the identical bland_mode/Flip
+    // structure (and calls the same `select_leaving_bland_bounded`), so it
+    // shares the same give-up mechanism and constants.
+    let giveup_obj_trigger = (OBJ_PLATEAU_BAIL_FACTOR * m).max(OBJ_PLATEAU_BAIL_MIN);
     let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
     let force_bland = primal_force_bland();
     let mut iters_since_progress: usize = 0;
+    let mut iters_since_obj_progress: usize = 0;
+    let mut best_obj: f64 = bounded_obj(
+        c,
+        &state.basis,
+        &state.x_b,
+        &state.at_upper,
+        &state.is_basic,
+        ubs,
+    );
     let mut bland_mode = force_bland;
 
     loop {
-        *iters = iters.saturating_add(1);
-        if deadline_reached(options.deadline) {
-            return (
-                SimplexOutcome::Timeout(bounded_obj(
+        if let Some(outcome) = check_plateau_stop_conditions(
+            iters,
+            options,
+            false,
+            &mut trace,
+            &state.basis,
+            bland_mode,
+            &mut best_obj,
+            &mut iters_since_obj_progress,
+            giveup_obj_trigger,
+            || {
+                bounded_obj(
                     c,
                     &state.basis,
                     &state.x_b,
                     &state.at_upper,
                     &state.is_basic,
                     ubs,
-                )),
-                state,
-            );
+                )
+            },
+        ) {
+            return (outcome, state);
         }
 
-        if let Some(t) = trace.as_mut() {
-            let obj = bounded_obj(
-                c,
-                &state.basis,
-                &state.x_b,
-                &state.at_upper,
-                &state.is_basic,
-                ubs,
-            );
-            t.log(*iters, obj, &state.basis, bland_mode);
-        }
-
-        if deadline_reached(options.deadline) {
-            return (timeout_obj(&state), state);
-        }
         compute_dual_vars_into(c, &mut basis_mgr, &state.basis, &mut y);
 
         let q = if bland_mode {
@@ -367,6 +428,106 @@ pub(crate) fn phase2_primal_bounded(
     }
 }
 
+/// Objective-plateau bail trigger shared by `primal_simplex_aug` and
+/// `phase2_primal_bounded`, mirroring `crate::simplex::primal::core`'s
+/// `BAIL_TRIGGER_FACTOR`/`BAIL_TRIGGER_MIN` (Primal Phase I's cycling
+/// early-bail): these bounded-primal paths (ordinary B&B node relaxations,
+/// RINS/RENS/local-branching sub-MIPs, in-tree cut re-solves) otherwise have
+/// no independent stop besides the caller's wall-clock deadline.
+///
+/// Give up once the objective has not meaningfully improved for `K`
+/// iterations, sampled every [`OBJ_PLATEAU_CHECK_INTERVAL`] iterations —
+/// unconditional on `bland_mode`/step size, since a cycle can route through
+/// `BoundedLeave::Flip` (which unconditionally resets both) without
+/// resolving, dodging a bland/step-gated check indefinitely. A flip only
+/// counts as progress if it clears [`OBJ_PLATEAU_PROGRESS_REL_TOL`].
+///
+/// **Also arms during Phase I** (`art_threshold = Some(_)`): deliberate, not
+/// an oversight — an unresolved Phase I plateau needs the same bail. Risk
+/// traded: misreporting a slow-but-converging-toward-Infeasible Phase I as
+/// `Stalled` instead of `Infeasible`. Measured no regression on
+/// `lp_problems_infeas` (29/29) / `lp_problems_unbounded` (12/12), including
+/// `klein3` (the adversarial case Phase I's own bail cites as its origin).
+///
+/// Returns the honest [`SimplexOutcome::Stalled`] (→
+/// `SuboptimalSolution`/`MaxIterations` via `stop_status`), never a silent
+/// `Timeout`.
+const OBJ_PLATEAU_BAIL_FACTOR: usize = 10;
+const OBJ_PLATEAU_BAIL_MIN: usize = 5_000;
+
+/// Relative objective-improvement floor for [`OBJ_PLATEAU_BAIL_FACTOR`]'s progress
+/// check — deliberately looser than `dual_common::NO_PROGRESS_REL_EPS`
+/// (1e-12, calibrated for detecting genuine-but-tiny per-pivot progress
+/// elsewhere). At `1e-12` relative, floating-point noise in `bounded_obj`'s
+/// repeated summation across hundreds of thousands of iterations crosses the
+/// threshold often enough to reset the give-up counter indefinitely without
+/// any real progress (this is what let the 872,044-pivot RENS calls above
+/// evade a `NO_PROGRESS_REL_EPS`-scale check); `1e-9` is 1,000x looser, well
+/// above plausible summation noise for problems in scope, while still 1,000x
+/// tighter than `OBJ_MATCH_REL_TOL` (1e-4, a solution-acceptance tolerance,
+/// not an anti-cycling one).
+pub(super) const OBJ_PLATEAU_PROGRESS_REL_TOL: f64 = 1e-9;
+
+/// Iteration interval at which the give-up progress check samples the
+/// objective (`bounded_obj`, an `O(m)` dense pass), rather than every
+/// iteration. Computing it every iteration to feed a backstop that almost
+/// never fires measured as a 2-10% wall-clock regression on MIPLIB problems
+/// nowhere near giving up (dcmulti/khb05250/markshare_4_0/p0201). Sampling
+/// every `1024` amortizes that cost to near-zero on the non-cycling path,
+/// while still bounding a genuine stall to `giveup_obj_trigger +
+/// OBJ_PLATEAU_CHECK_INTERVAL` iterations — keyed on `*iters`, not
+/// wall-clock, so the stop point stays deterministic.
+///
+/// `*iters` is threaded across an entire pipeline call (Phase I then Phase
+/// II share one counter; only `best_obj`/`iters_since_obj_progress` reset
+/// per phase), so a phase's first sample can land 1..=1024 iterations in —
+/// this only ever shortens the first window, biasing toward earlier
+/// detection (safe, not a correctness gap).
+///
+/// Lower-bound evidence `1024`/`5_000` don't misfire on well-behaved LPs:
+/// the full Netlib `data/lp_problems` suite (109/109) passes unchanged with
+/// this bail active, including its slowest members (pilot87, dfl001,
+/// pds-20).
+pub(super) const OBJ_PLATEAU_CHECK_INTERVAL: usize = 1_024;
+
+/// Shared give-up progress update for `primal_simplex_aug` /
+/// `phase2_primal_bounded`: records whether `current_obj` improves on
+/// `*best_obj` (resetting `*iters_since_obj_progress` when so), returning
+/// `true` once it reaches `giveup_trigger` — the caller then returns
+/// `SimplexOutcome::Stalled`. `progress_check_interval` is the iteration
+/// count this call stands in for (the caller only samples every
+/// [`OBJ_PLATEAU_CHECK_INTERVAL`] iterations), so a no-progress call
+/// advances the counter by that amount, not by 1.
+///
+/// Pulled out as a pure function so it is unit-testable against a synthetic
+/// no-progress sequence without hand-constructing a genuinely cycling LP.
+///
+/// Non-finite `current_obj`/`*best_obj`: a non-finite `current_obj` is
+/// explicitly treated as no-progress (not relying on NaN comparisons being
+/// `false`); a non-finite `*best_obj` with finite `current_obj` is treated
+/// as progress, recovering `*best_obj` rather than latching onto a value no
+/// future `current_obj` could ever "improve" on.
+pub(super) fn obj_plateau_should_bail(
+    best_obj: &mut f64,
+    current_obj: f64,
+    iters_since_obj_progress: &mut usize,
+    progress_check_interval: usize,
+    giveup_trigger: usize,
+) -> bool {
+    let improved = current_obj.is_finite()
+        && (!best_obj.is_finite()
+            || *best_obj - current_obj > best_obj.abs().max(1.0) * OBJ_PLATEAU_PROGRESS_REL_TOL);
+    if improved {
+        *best_obj = current_obj;
+        *iters_since_obj_progress = 0;
+        false
+    } else {
+        *iters_since_obj_progress =
+            iters_since_obj_progress.saturating_add(progress_check_interval);
+        *iters_since_obj_progress >= giveup_trigger
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn primal_simplex_aug(
     a_aug: &CscMatrix,
@@ -414,37 +575,50 @@ pub(super) fn primal_simplex_aug(
     let mut trace = IterTrace::new("bounded-aug-primal");
 
     let k_trigger = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN);
+    let giveup_obj_trigger = (OBJ_PLATEAU_BAIL_FACTOR * m).max(OBJ_PLATEAU_BAIL_MIN);
     let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
     let force_bland = primal_force_bland();
     let mut iters_since_progress: usize = 0;
+    let mut iters_since_obj_progress: usize = 0;
+    let mut best_obj: f64 = bounded_obj(
+        c_aug,
+        &state.basis,
+        &state.x_b,
+        &state.at_upper,
+        &state.is_basic,
+        ubs_aug,
+    );
     let mut bland_mode = force_bland;
 
     loop {
-        *iters = iters.saturating_add(1);
-        if deadline_reached(options.deadline)
-            || options
-                .cancel_flag
-                .as_ref()
-                .is_some_and(|f| f.load(Ordering::Relaxed))
-        {
-            return timeout_obj(state);
+        let cancelled = options
+            .cancel_flag
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed));
+        if let Some(outcome) = check_plateau_stop_conditions(
+            iters,
+            options,
+            cancelled,
+            &mut trace,
+            &state.basis,
+            bland_mode,
+            &mut best_obj,
+            &mut iters_since_obj_progress,
+            giveup_obj_trigger,
+            || {
+                bounded_obj(
+                    c_aug,
+                    &state.basis,
+                    &state.x_b,
+                    &state.at_upper,
+                    &state.is_basic,
+                    ubs_aug,
+                )
+            },
+        ) {
+            return outcome;
         }
 
-        if let Some(t) = trace.as_mut() {
-            let obj = bounded_obj(
-                c_aug,
-                &state.basis,
-                &state.x_b,
-                &state.at_upper,
-                &state.is_basic,
-                ubs_aug,
-            );
-            t.log(*iters, obj, &state.basis, bland_mode);
-        }
-
-        if deadline_reached(options.deadline) {
-            return timeout_obj(state);
-        }
         compute_dual_vars_into(c_aug, &mut basis_mgr, &state.basis, &mut y);
 
         let q = if bland_mode {

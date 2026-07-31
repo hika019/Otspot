@@ -15,17 +15,32 @@ use otspot_num::{run_fixpoint, run_step, PipelineStop, SolveControl};
 use std::sync::atomic::AtomicBool;
 
 // Test-only observability: counts how many transforms actually ran in the
-// current pass. Purely additive bookkeeping (never gates control flow), and
-// entirely `#[cfg(test)]` — both the definition and every call site below —
-// so it has zero footprint in production builds.
+// current pass. Purely additive bookkeeping (never gates control flow on its
+// own), and entirely `#[cfg(test)]` — both the definition and every call
+// site below — so it has zero footprint in production builds.
+//
+// `CANCEL_AFTER_STEPS`/`CANCEL_SIGNAL` piggyback on the same counter to give
+// tests a deterministic stand-in for a real expiring deadline: once the
+// executed count reaches the configured target, `CANCEL_SIGNAL` flips, which
+// a test feeds to `run_presolve_with_flags` as its `cancel` token. That
+// drives the exact same `run_step`/`SolveControl::check()` path a real
+// deadline would, without racing wall-clock time.
 #[cfg(test)]
 thread_local! {
     static STEPS_EXECUTED_TOTAL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CANCEL_AFTER_STEPS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static CANCEL_SIGNAL: AtomicBool = const { AtomicBool::new(false) };
 }
 
 #[cfg(test)]
 fn test_record_step_executed() {
-    STEPS_EXECUTED_TOTAL.with(|c| c.set(c.get() + 1));
+    let executed = STEPS_EXECUTED_TOTAL.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if CANCEL_AFTER_STEPS.with(std::cell::Cell::get) == Some(executed) {
+        CANCEL_SIGNAL.with(|flag| flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    }
 }
 
 /// Run LP presolve with the default per-transform flags and the default
@@ -320,13 +335,7 @@ mod per_step_control_tests {
     use super::*;
     use crate::problem::ConstraintType;
     use otspot_num::sparse::CscMatrix;
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-
-    // Real per-step timing races real wall-clock time, so tests that depend
-    // on it must not run concurrently with each other (a second thread
-    // stealing CPU would blow the timing budget).
-    static TIMING_TEST_LOCK: Mutex<()> = Mutex::new(());
+    use std::sync::atomic::Ordering;
 
     fn any_lp() -> LpProblem {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
@@ -341,132 +350,50 @@ mod per_step_control_tests {
         .unwrap()
     }
 
-    /// A wide LP built from `blocks` independent copies of a known
-    /// presolve-irreducible 2-variable/3-row block (same structure as
-    /// `postsolve.rs`'s `lp_non_reducible`: none of steps 1–11 can fix,
-    /// singleton-resolve, redundancy-eliminate, or dual-fix any block), tiled
-    /// on disjoint variable/row ranges. No step reduces anything, so all 13
-    /// per-pass transforms each do real `O(blocks)` bookkeeping over
-    /// `PresolveState` — used to give a short real deadline enough pass
-    /// duration to land mid-pass.
-    fn wide_lp(blocks: usize) -> LpProblem {
-        let mut rows = Vec::with_capacity(6 * blocks);
-        let mut cols = Vec::with_capacity(6 * blocks);
-        let mut vals = Vec::with_capacity(6 * blocks);
-        let mut b = Vec::with_capacity(3 * blocks);
-        let mut c = Vec::with_capacity(2 * blocks);
-        let mut bounds = Vec::with_capacity(2 * blocks);
-        let mut cts = Vec::with_capacity(3 * blocks);
-        for k in 0..blocks {
-            let (x0, x1) = (2 * k, 2 * k + 1);
-            let (r0, r1, r2) = (3 * k, 3 * k + 1, 3 * k + 2);
-            // x0 + x1 <= 4
-            rows.push(r0);
-            cols.push(x0);
-            vals.push(1.0);
-            rows.push(r0);
-            cols.push(x1);
-            vals.push(1.0);
-            // -x0 + x1 <= 2
-            rows.push(r1);
-            cols.push(x0);
-            vals.push(-1.0);
-            rows.push(r1);
-            cols.push(x1);
-            vals.push(1.0);
-            // x0 - x1 <= 2
-            rows.push(r2);
-            cols.push(x0);
-            vals.push(1.0);
-            rows.push(r2);
-            cols.push(x1);
-            vals.push(-1.0);
-            b.push(4.0);
-            b.push(2.0);
-            b.push(2.0);
-            cts.push(ConstraintType::Le);
-            cts.push(ConstraintType::Le);
-            cts.push(ConstraintType::Le);
-            c.push(-1.0);
-            c.push(-2.0);
-            bounds.push((0.0, f64::INFINITY));
-            bounds.push((0.0, f64::INFINITY));
-        }
-        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 3 * blocks, 2 * blocks).unwrap();
-        LpProblem::new_general(c, a, b, cts, bounds, None).unwrap()
-    }
+    /// Number of steps allowed to run before `CANCEL_SIGNAL` flips, chosen
+    /// strictly between 0 and 13 so the test can distinguish "stopped
+    /// mid-pass" from both "never started" and "ran to completion".
+    const CANCEL_AFTER: usize = 5;
 
-    /// Block count for `wide_lp` in the real-deadline timing tests below.
-    /// Empirically (both debug and `--release`), a full 13-step pass over
-    /// this many blocks takes ~7ms (debug) to ~27ms (release) on this
-    /// machine (see `full_pass_duration_is_comfortably_above_the_test_deadline`),
-    /// comfortably above `TEST_DEADLINE`.
-    const WIDE_LP_BLOCKS: usize = 8000;
-
-    /// Deadline used to force a real, `SolveControl`-driven mid-pass stop.
-    /// Must clear two margins simultaneously in both debug and release
-    /// builds: long enough to outlive `PresolveState::from_problem`'s setup
-    /// cost (empirically ~3-4ms for `WIDE_LP_BLOCKS`, so the deadline isn't
-    /// already expired when `run_fixpoint` enters pass 0), short enough to
-    /// leave a comfortable margin below the full pass duration above.
-    const TEST_DEADLINE: Duration = Duration::from_micros(6000);
-
-    /// Sentinel: a real, already-expiring `SolveControl` deadline stops a
-    /// pass partway through its transforms — proven by going through
-    /// `run_step`'s actual `control.check()`, not a bypass.
+    /// Sentinel: a `SolveControl` whose `cancel` flag flips deterministically
+    /// after `CANCEL_AFTER` steps (a mock-clock stand-in for a real expiring
+    /// deadline) stops a pass partway through its transforms — proven by
+    /// going through `run_step`'s actual `control.check()`, not a bypass.
     ///
     /// Mutation-fail (verified manually, see commit message): replacing the
     /// `control` argument fed to `run_step` inside `run_or_stop!` with
     /// `SolveControl::default()` (severing the wiring while leaving
     /// `run_fixpoint`'s own outer per-pass control check untouched) makes
-    /// `executed` jump to 13 (all steps run) and this assertion fails,
-    /// because `run_fixpoint`'s own check only fires once, before pass 0
-    /// starts (deadline not yet expired at that point), and nothing else
-    /// would stop the pass mid-flight.
+    /// `executed` jump to 13 (all steps run) and the equality assertion
+    /// fails, because `run_fixpoint`'s own check only fires once, before
+    /// pass 0 starts (`CANCEL_SIGNAL` is not yet set at that point), and
+    /// nothing else would stop the pass mid-flight.
     #[test]
-    fn real_deadline_stops_pass_before_all_steps_run_via_run_step() {
-        let _guard = TIMING_TEST_LOCK.lock().unwrap();
-        let lp = wide_lp(WIDE_LP_BLOCKS);
+    fn cancel_signal_stops_pass_before_all_steps_run_via_run_step() {
+        let lp = any_lp();
 
         STEPS_EXECUTED_TOTAL.with(|c| c.set(0));
-        let deadline = Some(Instant::now() + TEST_DEADLINE);
-        let result = run_presolve_with_flags(&lp, deadline, 1, None, PresolveFlags::default())
+        CANCEL_AFTER_STEPS.with(|c| c.set(Some(CANCEL_AFTER)));
+        CANCEL_SIGNAL.with(|flag| flag.store(false, Ordering::Relaxed));
+
+        let result = CANCEL_SIGNAL
+            .with(|flag| {
+                run_presolve_with_flags(&lp, None, 1, Some(flag), PresolveFlags::default())
+            })
             .expect("feasible");
+
+        CANCEL_AFTER_STEPS.with(|c| c.set(None));
         let executed = STEPS_EXECUTED_TOTAL.with(|c| c.get());
 
         assert!(
             !result.was_reduced,
-            "mid-pass deadline expiry must discard the transaction (no_reduction)"
+            "mid-pass cancellation must discard the transaction (no_reduction)"
         );
-        assert!(
-            executed < 13,
-            "a deadline expiring mid-pass must stop before all 13 steps run, got {executed}"
-        );
-        assert!(
-            executed > 0,
-            "the deadline must not already be expired at `run_fixpoint`'s own \
-             pre-pass check (that would test the outer check, not `run_step`), got {executed}"
-        );
-    }
-
-    /// Calibration check (not a correctness sentinel): confirms a full
-    /// 13-step pass over `wide_lp` reliably takes much longer than
-    /// `TEST_DEADLINE` above, so the margin claim is a measured fact, not an
-    /// assumption.
-    #[test]
-    fn full_pass_duration_is_comfortably_above_the_test_deadline() {
-        let _guard = TIMING_TEST_LOCK.lock().unwrap();
-        let lp = wide_lp(WIDE_LP_BLOCKS);
-        let t0 = Instant::now();
-        let result = run_presolve_with_flags(&lp, None, 1, None, PresolveFlags::default())
-            .expect("feasible");
-        let elapsed = t0.elapsed();
-        assert!(!result.was_reduced, "wide_lp must not reduce in one pass");
-        assert!(
-            elapsed > TEST_DEADLINE * 3,
-            "full pass took {elapsed:?}, expected > 3x TEST_DEADLINE ({:?}) \
-             for the deadline test's margin to hold",
-            TEST_DEADLINE * 3
+        assert_eq!(
+            executed, CANCEL_AFTER,
+            "the cancel signal flips right after step {CANCEL_AFTER} runs, so \
+             run_step must let exactly that many steps through before \
+             skipping the rest (out of 13), got {executed}"
         );
     }
 

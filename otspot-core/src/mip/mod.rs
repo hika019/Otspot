@@ -9,6 +9,7 @@ pub(crate) mod branch;
 pub(crate) mod conflict;
 pub(crate) mod cut_pool;
 pub(crate) mod cuts;
+pub(crate) mod effort;
 pub(crate) mod heuristics;
 pub(crate) mod node;
 pub(crate) mod presolve;
@@ -69,7 +70,7 @@ pub(crate) trait Relaxation {
         None
     }
 
-    /// In-tree cut separation hook. Default: no-op (returns `None`).
+    /// In-tree cut separation hook. Default: no-op (returns `(None, 0, false)`).
     ///
     /// MILP overrides this to re-separate GMI/MIR from the node LP relaxation and
     /// return a cut-tightened result when the node bound improves. Cuts bake in
@@ -77,6 +78,23 @@ pub(crate) trait Relaxation {
     /// node's subtree: separation is **node-local** (a fresh pool per call, never
     /// reused at other nodes) and the cut rows are not propagated to children.
     /// `bounds` are the node's bounds; `res` is its (Optimal) relaxation result.
+    /// `max_iters` bounds the simplex iterations this attempt may spend (see
+    /// `effort::separation_iter_budget`); a round is skipped once the
+    /// remaining allowance drops below the per-dimension useful minimum (see
+    /// `cuts::separate_tree_cuts`). The first `u64` in the return is the
+    /// total *real* simplex iterations actually spent across all rounds of
+    /// this attempt; the second is [`cuts::tree_cut_construction_surcharge`]'s
+    /// fixed-cost overhead accrued the same way — kept separate so the
+    /// caller can route it to [`MipStats::tree_cut_overhead_iters`] rather
+    /// than [`MipStats::tree_cut_iters`] (see that field's doc for why
+    /// merging them regressed unrelated gates). Both are reported whether or
+    /// not a cut was accepted, so the caller can charge the gate even on a
+    /// dry attempt. The `bool` is whether this call actually attempted
+    /// separation (passed the node-selection interval) — P3-B: kept explicit
+    /// rather than inferred from the iteration counts, since a real attempt
+    /// whose LP solves all happen to need zero simplex iterations (e.g. an
+    /// already-optimal starting basis) would otherwise be indistinguishable
+    /// from a skipped one, silently miscounting the dry-streak backoff.
     fn separate_tree_cuts(
         &self,
         _bounds: &[(f64, f64)],
@@ -85,48 +103,71 @@ pub(crate) trait Relaxation {
         _opts: &SolverOptions,
         _depth: usize,
         _node_index: usize,
-    ) -> Option<SolverResult> {
-        None
+        _max_iters: u64,
+    ) -> (Option<SolverResult>, u64, u64, bool) {
+        (None, 0, 0, false)
     }
 
     /// Run the RINS heuristic: fix integer variables where the LP relaxation and
     /// the incumbent agree and solve a sub-MIP over the remaining variables.
-    /// Returns `None` for MIQP (default) or when RINS is disabled.
+    /// Returns `(None, 0, 0)` for MIQP (default) or when RINS is disabled/skipped.
+    /// The first `u64` is the sub-MIP's `nodes_processed`; the second is the
+    /// sub-MIP's own recursive `total_simplex_iters` (see `effort`). Both are
+    /// reported whenever a sub-MIP solve was actually attempted (independent
+    /// of whether the result was usable) so hidden sub-MIP work is never lost.
+    ///
+    /// `iter_budget` is RINS's own remaining share of `effort::
+    /// total_simplex_iters` (`effort::rins_iter_budget`), computed by the
+    /// caller *after* `effort::may_run_rins` approves the call — the
+    /// implementation caps the sub-MIP's own `MipConfig::max_lp_iters` at
+    /// `min(heuristics::SUB_MIP_MAX_LP_ITERS, iter_budget)` (Codex review,
+    /// P1: approval alone did not cap the size of the approved work), or
+    /// skips the call outright when `iter_budget` is below
+    /// `heuristics::SUB_MIP_MIN_LP_ITERS` (markshare_4_0 regression fix: a
+    /// truncated call still pays full per-call setup overhead for a sub-MIP
+    /// too small to search anything useful).
     fn run_rins(
         &self,
         _x_lp: &[f64],
         _x_inc: &[f64],
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
+        _iter_budget: u64,
         _opts: &SolverOptions,
-    ) -> Option<SolverResult> {
-        None
+    ) -> (Option<SolverResult>, u64, u64) {
+        (None, 0, 0)
     }
 
     /// Run the RENS heuristic: round a node LP relaxation by fixing integral
     /// components and restricting fractional ones to `{floor, ceil}`, then solve
-    /// the small sub-MIP. Returns `None` for MIQP (default) or when disabled.
+    /// the small sub-MIP. Returns `(None, 0, 0)` for MIQP (default) or when
+    /// disabled/skipped. See [`Relaxation::run_rins`] for the `u64` meanings
+    /// and the `iter_budget` contract.
     fn run_rens(
         &self,
         _x_lp: &[f64],
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
+        _iter_budget: u64,
         _opts: &SolverOptions,
-    ) -> Option<SolverResult> {
-        None
+    ) -> (Option<SolverResult>, u64, u64) {
+        (None, 0, 0)
     }
 
     /// Run the local-branching heuristic: add a Hamming-distance ≤ k cut on the
     /// binary variables around the incumbent and solve the neighborhood sub-MIP.
-    /// Returns `None` for MIQP (default) or when disabled.
+    /// Returns `(None, 0, 0)` for MIQP (default) or when disabled/skipped. See
+    /// [`Relaxation::run_rins`] for the `u64` meanings and the `iter_budget`
+    /// contract.
     fn run_local_branching(
         &self,
         _x_inc: &[f64],
         _cfg: &MipConfig,
         _deadline: &Option<std::time::Instant>,
+        _iter_budget: u64,
         _opts: &SolverOptions,
-    ) -> Option<SolverResult> {
-        None
+    ) -> (Option<SolverResult>, u64, u64) {
+        (None, 0, 0)
     }
 }
 
@@ -208,6 +249,12 @@ pub struct MipStats {
     pub fp_us: u64,
     /// Wall-clock microseconds spent adding root cuts before branch-and-bound.
     pub root_cut_us: u64,
+    /// Wall-clock microseconds spent in root bound-tightening probing
+    /// (`presolve::tighten_bounds_with_probing`) before branch-and-bound.
+    pub root_probing_us: u64,
+    /// Wall-clock microseconds spent in root static symmetry breaking
+    /// (`symmetry::break_symmetry`) before branch-and-bound.
+    pub root_symmetry_us: u64,
 
     /// Objective of the first trusted (Optimal) root relaxation, i.e. the root LP
     /// bound used to start branch-and-bound. With cuts enabled this reflects the
@@ -238,7 +285,118 @@ pub struct MipStats {
     /// (accepted) relaxation result. Zero when `tree_cuts` is off or no cut
     /// improved a node bound.
     pub tree_cut_rounds: usize,
+
+    // --- B&B time attribution (wall-clock microseconds) ---
+    // These, together with `lp_solve_us_total` and `node_propagation_us` above,
+    // are meant to add up to (most of) the search wall clock so that "many
+    // nodes" vs. "expensive per-node heuristics/separation" can be told apart
+    // without re-instrumenting. Measurement only: none of these fields change
+    // solver behaviour.
+    /// Wall-clock microseconds spent in in-tree cut separation (`separate_tree_cuts`).
+    pub tree_cut_us: u64,
+    /// Wall-clock microseconds spent in the RINS heuristic, including its sub-MIP solve.
+    pub rins_us: u64,
+    /// Wall-clock microseconds spent in the RENS heuristic, including its sub-MIP solve.
+    pub rens_us: u64,
+    /// Wall-clock microseconds spent in the local-branching heuristic, including its sub-MIP solve.
+    pub local_branching_us: u64,
+    /// Wall-clock microseconds spent selecting the branching variable
+    /// (`pick_branch_var`), including any strong-branching child solves
+    /// (see `strong_branch_us` for that narrower subset).
+    pub branch_select_us: u64,
+    /// Wall-clock microseconds spent checking/learning conflict clauses.
+    pub conflict_us: u64,
+    /// Wall-clock microseconds of B&B loop overhead not attributed to any
+    /// other named bucket (pruning checks, dive bookkeeping, queue
+    /// operations, node cloning). Computed per node as the residual of that
+    /// node's loop-iteration wall time after subtracting every other
+    /// explicitly measured bucket touched during the same iteration.
+    pub node_loop_other_us: u64,
+    /// Cumulative `nodes_processed` reported by RINS/RENS/local-branching
+    /// sub-MIP solves: branch-and-bound work that is invisible in the outer
+    /// `nodes_processed` count.
+    pub sub_mip_nodes_total: u64,
+
+    // --- B&B time attribution (deterministic simplex-iteration counters) ---
+    // Phase 1c: `mip::effort`'s `may_run_*` gates are computed from these,
+    // not from the `*_us` wall-clock counters above (which stay as pure
+    // measurement — see their doc comments). Unlike wall time, simplex
+    // iteration counts are reproducible for a fixed input and algorithm
+    // path, so gating on them keeps the B&B search itself deterministic.
+    /// Cumulative simplex iterations across all node relaxation solves
+    /// (root + descendants) in the main B&B loop.
+    pub lp_iters_total: u64,
+    /// Cumulative simplex iterations spent in strong-branching child solves.
+    pub strong_branch_iters: u64,
+    /// Cumulative simplex iterations spent in the RINS heuristic, including
+    /// its sub-MIP's own recursive total.
+    pub rins_iters: u64,
+    /// Cumulative simplex iterations spent in the RENS heuristic, including
+    /// its sub-MIP's own recursive total.
+    pub rens_iters: u64,
+    /// Cumulative simplex iterations spent in the local-branching heuristic,
+    /// including its sub-MIP's own recursive total.
+    pub local_branching_iters: u64,
+    /// Cumulative simplex iterations spent in in-tree cut separation
+    /// (`separate_tree_cuts`), across all rounds of all attempts.
+    pub tree_cut_iters: u64,
+    /// Cumulative fixed-cost surcharge (iteration-equivalent units, not real
+    /// simplex iterations) `separate_tree_cuts` charges for its own
+    /// `build_standard_form`-equivalent construction overhead — see
+    /// `cuts::tree_cut_construction_surcharge`. Kept out of `tree_cut_iters`
+    /// deliberately: only `effort::may_run_separation` and `effort::
+    /// separation_iter_budget` add this to their numerator, so separation's
+    /// own gate feels its true per-round cost without inflating
+    /// `effort::total_simplex_iters` — the shared denominator every other
+    /// `may_run_*` gate (RINS/RENS/local-branching/strong-branching) also
+    /// reads. An earlier version charged straight into `tree_cut_iters`,
+    /// which inflated that shared total and measurably distorted unrelated
+    /// gates: `gt2 --timeout 60` regressed from a deterministic 100-node
+    /// `Optimal` to a 3,744-node `Timeout` purely from this cross-component
+    /// leak, on a run where separation's own round count *increased*
+    /// (14 → 183) rather than decreased.
+    pub tree_cut_overhead_iters: u64,
+    /// Consecutive in-tree separation attempts (that actually ran at least
+    /// one round) yielding zero accepted rounds. Reset to 0 on any accepted
+    /// round; once it reaches `effort::SEPARATION_DRY_STREAK_LIMIT`,
+    /// `effort::may_run_separation` disables separation for the rest of
+    /// this solve.
+    pub tree_cut_dry_streak: usize,
 }
+
+// Test-only observability: on a trivial root problem (few/no constraints),
+// `tighten_bounds_with_probing` / `symmetry::break_symmetry` can genuinely
+// complete in under 1us, at which point `Duration::as_micros()` truncation
+// makes `root_probing_us`/`root_symmetry_us` read back as `0` — indistinguishable
+// from "never populated". Racing real operation speed against that 1us
+// truncation floor is what made `root_probing_and_symmetry_us_are_populated`
+// flaky (see its doc). This flag makes the two measured spans below spin
+// until a small, fixed floor has elapsed, deterministically clearing the
+// truncation boundary regardless of machine speed or scheduler jitter.
+// `#[cfg(test)]`-only, zero footprint in production builds.
+#[cfg(test)]
+thread_local! {
+    static FORCE_MIN_ROOT_TIMING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Floor (in microseconds) `test_force_min_elapsed` spins past when
+/// `FORCE_MIN_ROOT_TIMING` is set. Comfortably above the 1us truncation
+/// boundary so the forced floor can never itself land exactly on it.
+#[cfg(test)]
+const FORCED_MIN_ELAPSED_US: u128 = 5;
+
+#[cfg(test)]
+fn test_force_min_elapsed(t0: Instant) {
+    if FORCE_MIN_ROOT_TIMING.with(std::cell::Cell::get) {
+        while t0.elapsed().as_micros() < FORCED_MIN_ELAPSED_US {
+            std::hint::spin_loop();
+        }
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn test_force_min_elapsed(_: Instant) {}
 
 /// Solve a MILP to (relative) ε-optimality via branch-and-bound.
 pub fn solve_milp(problem: &MilpProblem, options: &SolverOptions, cfg: &MipConfig) -> SolverResult {
@@ -293,13 +451,22 @@ pub fn solve_milp_with_stats(
             &problem.integer_vars,
             deadline,
         );
-        let presolve_ms = presolve_t0.elapsed().as_secs_f64() * 1000.0;
+        test_force_min_elapsed(presolve_t0);
+        let presolve_elapsed = presolve_t0.elapsed();
+        let presolve_ms = presolve_elapsed.as_secs_f64() * 1000.0;
+        let presolve_us = presolve_elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
         let problem_bt: MilpProblem = match presolve_ok {
             None => {
                 // Infeasibility detected at presolve. Report the presolve time as
-                // relaxation_time_infeasible_ms so callers see a nonzero infeasibility cost.
+                // relaxation_time_infeasible_ms so callers see a nonzero infeasibility cost,
+                // and as root_probing_us (Codex review, P2) so this early return's cost is
+                // attributed the same way as the non-infeasible path below (`stats.root_
+                // probing_us = presolve_us;`) — without it, `milp_solve`'s `attribution_
+                // covered_us_root_inclusive` silently undercounts whenever probing proves
+                // infeasibility and takes non-negligible time.
                 let stats = MipStats {
                     relaxation_time_infeasible_ms: presolve_ms,
+                    root_probing_us: presolve_us,
                     ..Default::default()
                 };
                 return (SolverResult::infeasible(), stats);
@@ -319,11 +486,14 @@ pub fn solve_milp_with_stats(
         // optimal representative per orbit (objective unchanged) while shrinking
         // the search tree, so the whole downstream pipeline (FP, cuts, B&B) may
         // operate on the reduced symmetric space.
+        let symmetry_t0 = Instant::now();
         let problem_bt = if cfg.symmetry {
             symmetry::break_symmetry(&problem_bt)
         } else {
             problem_bt
         };
+        test_force_min_elapsed(symmetry_t0);
+        let symmetry_us = symmetry_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         // Run the feasibility pump on the original (bound-tightened) LP before
         // augmenting with cuts.  FP must see the unmodified constraint structure
         // so that the LP pump LPs and the final validation both use the original
@@ -349,6 +519,8 @@ pub fn solve_milp_with_stats(
         let (res, mut stats) = solve_mip_core(&effective, &opts_with_dl, cfg, mask, fp_inc);
         stats.fp_us = fp_us;
         stats.root_cut_us = root_cut_us;
+        stats.root_probing_us = presolve_us;
+        stats.root_symmetry_us = symmetry_us;
         return (res, stats);
     }
     solve_mip_with_stats(problem, &opts_with_dl, cfg)
@@ -497,6 +669,10 @@ fn measure_strong_branch_scores<R: Relaxation>(
         stats.strong_branch_us = stats
             .strong_branch_us
             .saturating_add(t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+        stats.strong_branch_iters = stats
+            .strong_branch_iters
+            .saturating_add(r_down.iterations as u64)
+            .saturating_add(r_up.iterations as u64);
 
         let down_ok = matches!(
             r_down.status,
@@ -554,8 +730,38 @@ fn solve_relaxation_with_scaling_retry<R: Relaxation>(
     {
         return res;
     }
+    // Codex review (P1): the retry re-solves the *same* relaxation the fast
+    // attempt already spent `res.iterations` on, so it must not receive a
+    // fresh copy of `fast_opts.max_iters` — that cap bounds this call's total
+    // simplex work (`solve_node_relaxation` sets it to the node's remaining
+    // share of `MipConfig::max_lp_iters`; see `SolverOptions::max_iters`).
+    // Handing the retry the same limit again would let one node/strong-branch
+    // candidate spend up to 2x its iteration allowance whenever the fast
+    // (unscaled) attempt exhausts its budget without converging (Stalled /
+    // MaxIterations, both in `needs_scaled_retry`). Charge the fast attempt's
+    // iterations against the shared cap first, and skip the retry outright
+    // once nothing remains — an unscaled attempt that stalled at exactly the
+    // node's remaining budget gains nothing from a differently-scaled retry
+    // that would immediately hit the same (now zero) cap.
+    let mut capped_retry_opts;
+    let retry_opts = match fast_opts.max_iters {
+        Some(cap) => {
+            let remaining = cap.saturating_sub(res.iterations as u64);
+            if remaining == 0 {
+                return res;
+            }
+            capped_retry_opts = retry_opts.clone();
+            capped_retry_opts.max_iters = Some(remaining);
+            &capped_retry_opts
+        }
+        None => retry_opts,
+    };
     let mut retry = problem.solve(bounds, retry_opts);
     retry.timing_breakdown = combine_timing(res.timing_breakdown, retry.timing_breakdown);
+    // P3-F: the first (unscaled) attempt's simplex iterations would otherwise
+    // be silently dropped — `effort::total_simplex_iters` and friends rely on
+    // `res.iterations` to attribute cost, and both attempts genuinely ran.
+    retry.iterations = retry.iterations.saturating_add(res.iterations);
     retry
 }
 
@@ -605,14 +811,20 @@ fn combine_timing(
 /// pre-B&B heuristic (e.g., feasibility pump). When provided it is adopted as
 /// the starting incumbent so B&B can immediately prune nodes whose relaxation
 /// bound is already within the gap tolerance.
-fn solve_mip_core<R: Relaxation>(
+/// [`prepare_mip_search`]'s early-return variant: the plain-LP/QP solve
+/// result for a problem with no integer variables. Boxed (`clippy::result_
+/// large_err`): `(SolverResult, MipStats)` is large enough to otherwise
+/// bloat every `Result` returned from this rarely-taken path.
+type MipSearchEarlyReturn = Box<(SolverResult, MipStats)>;
+
+/// Builds the shared per-node `SolverOptions` and computes the search
+/// deadline for `solve_mip_core`. Returns `Err` early (with the plain-LP/QP
+/// solve result) when `problem` has no integer variables — no B&B needed.
+fn prepare_mip_search<R: Relaxation>(
     problem: &R,
     options: &SolverOptions,
-    cfg: &MipConfig,
-    mask: Vec<bool>,
-    initial_incumbent: Option<SolverResult>,
-) -> (SolverResult, MipStats) {
-    let mut stats = MipStats {
+) -> Result<(SolverOptions, Option<Instant>, MipStats), MipSearchEarlyReturn> {
+    let stats = MipStats {
         approx_bounds_bytes_per_node: problem.num_vars() * 2 * std::mem::size_of::<f64>(),
         root_lp_bound: f64::NEG_INFINITY,
         ..MipStats::default()
@@ -630,7 +842,10 @@ fn solve_mip_core<R: Relaxation>(
     shared.global_optimization = None;
 
     if problem.integer_vars().is_empty() {
-        return (problem.solve(problem.root_bounds(), &shared), stats);
+        return Err(Box::new((
+            problem.solve(problem.root_bounds(), &shared),
+            stats,
+        )));
     }
 
     shared.recover_warm_start_basis = true;
@@ -639,6 +854,416 @@ fn solve_mip_core<R: Relaxation>(
     if problem.skip_node_presolve() {
         shared.presolve = false;
     }
+    Ok((shared, deadline, stats))
+}
+
+/// In-tree GMI/MIR cut re-separation for one node (gated by
+/// [`may_separate_tree_cuts`]; MILP overrides `separate_tree_cuts`, MIQP is a
+/// no-op). Returns `res` unchanged unless separation found a cut-tightened
+/// result with a better bound, in which case that replaces it.
+#[allow(clippy::too_many_arguments)]
+fn maybe_apply_tree_cut_separation<R: Relaxation>(
+    problem: &R,
+    cfg: &MipConfig,
+    stats: &mut MipStats,
+    mask: &[bool],
+    node: &MipNode,
+    solve_bounds: &[(f64, f64)],
+    node_options: &SolverOptions,
+    res: SolverResult,
+) -> SolverResult {
+    if !may_separate_tree_cuts(cfg, stats)
+        || !matches!(res.status, SolveStatus::Optimal)
+        || res.solution.is_empty()
+    {
+        return res;
+    }
+    let tree_cut_t0 = Instant::now();
+    let max_iters = effort::separation_iter_budget(stats);
+    let (separated, sep_iters, sep_overhead_iters, attempted) = problem.separate_tree_cuts(
+        solve_bounds,
+        &res,
+        mask,
+        node_options,
+        node.depth,
+        stats.nodes_processed,
+        max_iters,
+    );
+    stats.tree_cut_us = stats
+        .tree_cut_us
+        .saturating_add(tree_cut_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+    stats.tree_cut_iters = stats.tree_cut_iters.saturating_add(sep_iters);
+    stats.tree_cut_overhead_iters = stats
+        .tree_cut_overhead_iters
+        .saturating_add(sep_overhead_iters);
+    record_separation_attempt(stats, attempted, separated.is_some());
+    if let Some(improved) = separated {
+        stats.tree_cut_rounds += 1;
+        return improved;
+    }
+    res
+}
+
+/// Applies one node's [`process_node_outcome`] result: prunes, records an
+/// open lower bound, or pushes branched/split children onto `q`. Always the
+/// last step of a node-loop iteration, so it also charges
+/// `node_loop_other_us` for this iteration on every path (matching every
+/// other exit point in the loop).
+#[allow(clippy::too_many_arguments)]
+fn apply_node_outcome<R: Relaxation>(
+    problem: &R,
+    mut node: MipNode,
+    res: &SolverResult,
+    state: &mut MipState,
+    stats: &mut MipStats,
+    cfg: &MipConfig,
+    shared: &SolverOptions,
+    mask: &[bool],
+    integer_vars: &[usize],
+    j_to_k: &HashMap<usize, usize>,
+    pc: &mut PseudocostState,
+    use_reliability: bool,
+    deadline: Option<Instant>,
+    dive_start_depth: usize,
+    q: &mut NodeQueue,
+    open_lb: &mut f64,
+    had_open: &mut bool,
+    proof_uncertain: &mut bool,
+    iter_t0: Instant,
+    iter_before: MipStats,
+) {
+    let trusted = matches!(res.status, SolveStatus::Optimal) && !res.solution.is_empty();
+    match process_node_outcome(
+        problem,
+        &mut node,
+        res,
+        trusted,
+        state,
+        stats,
+        cfg,
+        shared,
+        mask,
+        integer_vars,
+        j_to_k,
+        pc,
+        use_reliability,
+        &deadline,
+        dive_start_depth,
+    ) {
+        NodeAction::Skip { end_dive } => {
+            if end_dive && q.is_diving() {
+                q.end_dive();
+            }
+        }
+        NodeAction::OpenLb {
+            node_lb,
+            uncertain,
+            end_dive,
+        } => {
+            *open_lb = open_lb.min(node_lb);
+            *had_open = true;
+            if uncertain {
+                *proof_uncertain = true;
+            }
+            if end_dive && q.is_diving() {
+                q.end_dive();
+            }
+        }
+        NodeAction::PushChildren {
+            node_lb,
+            down,
+            up,
+            kind,
+            end_dive,
+        } => {
+            if end_dive && q.is_diving() {
+                q.end_dive();
+            }
+            match kind {
+                ChildKind::Branched {
+                    jb,
+                    res_obj,
+                    jb_val,
+                    down_ws,
+                    up_ws,
+                } => {
+                    q.push(node.child_branched(down, node_lb, down_ws, jb, false, res_obj, jb_val));
+                    q.push(node.child_branched(up, node_lb, up_ws, jb, true, res_obj, jb_val));
+                }
+                ChildKind::Split => {
+                    q.push(node.child(down, node_lb));
+                    q.push(node.child(up, node_lb));
+                }
+            }
+        }
+    }
+    flush_loop_other(stats, iter_t0, iter_before);
+}
+
+/// Outcome of [`dispatch_relaxation_status`]: whether the node loop should
+/// keep processing this node (`Proceed`), skip to the next node
+/// (`Continue`), or stop the search (`Break`).
+enum StatusDispatch {
+    Proceed,
+    Continue,
+    Break,
+}
+
+/// Dispatches on a node relaxation's `SolveStatus` before separation/branching
+/// runs. `Infeasible` prunes and learns a conflict clause; `Unbounded` and
+/// `Timeout` stop the search (folding the node's bound into the open region
+/// for `Timeout`); `MaxIterations`/`SuboptimalSolution` do the same when
+/// `cfg.max_lp_iters` is what actually stopped this node's own solve (see the
+/// `cfg.max_lp_iters` check below); any other status proceeds to
+/// separation/branching as normal.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_relaxation_status(
+    res: &SolverResult,
+    node: &MipNode,
+    q: &mut NodeQueue,
+    stats: &mut MipStats,
+    cfg: &MipConfig,
+    conflicts: &mut conflict::ConflictStore,
+    root_bounds: &[(f64, f64)],
+    open_lb: &mut f64,
+    had_open: &mut bool,
+    deadline_stop: &mut bool,
+    unbounded: &mut bool,
+) -> StatusDispatch {
+    match res.status {
+        SolveStatus::Infeasible => {
+            stats.pruned += 1;
+            if q.is_diving() {
+                q.end_dive();
+            }
+            let learn_t0 = Instant::now();
+            conflicts.learn(&node.var_bounds, root_bounds);
+            stats.conflict_us = stats
+                .conflict_us
+                .saturating_add(learn_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+            stats.conflict_clauses_learned = conflicts.len();
+            StatusDispatch::Continue
+        }
+        SolveStatus::Unbounded => {
+            *unbounded = true;
+            if q.is_diving() {
+                q.end_dive();
+            }
+            StatusDispatch::Break
+        }
+        SolveStatus::Timeout => {
+            *open_lb = open_lb.min(node.lower_bound);
+            *had_open = true;
+            *deadline_stop = true;
+            if q.is_diving() {
+                q.end_dive();
+            }
+            StatusDispatch::Break
+        }
+        // Codex round 3 (P2): `cfg.max_lp_iters` (sub-MIP-only, see
+        // `solve_node_relaxation`'s doc) is "treated identically to deadline
+        // expiry" per `check_stop_conditions`'s doc — but that gate only
+        // re-checks the budget at the *next* pop. A node whose own
+        // relaxation is what pushes `lp_iters_total` past the cap honestly
+        // reports `MaxIterations`/`SuboptimalSolution` (never `Timeout`,
+        // since no wall-clock deadline fired — see `stop_status`), so
+        // without this arm it fell through to `Proceed` and, if this was the
+        // last node left in the queue, the loop would exit with no stop flag
+        // ever set: a budget-truncated search silently finalized as if the
+        // tree had been fully explored. Scoped to `cfg.max_lp_iters` being
+        // both set and actually exhausted, so an unrelated cycling/plateau
+        // bail on the (uncapped) top-level search still proceeds as before.
+        SolveStatus::MaxIterations | SolveStatus::SuboptimalSolution
+            if cfg
+                .max_lp_iters
+                .is_some_and(|limit| stats.lp_iters_total >= limit) =>
+        {
+            *open_lb = open_lb.min(node.lower_bound);
+            *had_open = true;
+            *deadline_stop = true;
+            if q.is_diving() {
+                q.end_dive();
+            }
+            StatusDispatch::Break
+        }
+        _ => StatusDispatch::Proceed,
+    }
+}
+
+/// Solves one node's LP/QP relaxation (with the scaling-retry fallback) and
+/// folds the timing/scale/fallback deltas into `stats` via
+/// `accumulate_node_stats`. Returns the relaxation result and the per-node
+/// `SolverOptions` used (needed again by tree-cut separation).
+///
+/// When `cfg.max_lp_iters` is set (RINS/RENS/local-branching sub-MIPs; `None`
+/// for the top-level search), this node's `SolverOptions::max_iters` is set
+/// to the *remaining* share of that budget (`limit - stats.lp_iters_total` so
+/// far). Without this, `check_stop_conditions`'s `max_lp_iters` gate — checked
+/// once per popped node, before this call — cannot stop a single node whose
+/// own relaxation blows past the entire remaining budget by itself; the
+/// per-solve cap here makes that node's own simplex loop enforce it instead
+/// (`dual_advanced::bounded_core`'s bland-mode loops honor `max_iters`
+/// alongside `deadline`, returning `Stalled` rather than grinding on).
+fn solve_node_relaxation<R: Relaxation>(
+    problem: &R,
+    shared: &SolverOptions,
+    cfg: &MipConfig,
+    solve_bounds: &[(f64, f64)],
+    node: &MipNode,
+    root_solved: &mut bool,
+    stats: &mut MipStats,
+) -> (SolverResult, SolverOptions) {
+    let scale_before = crate::presolve::scaling::lp_scale_profile_snapshot();
+    let fallback_before = crate::simplex::dual_advanced::fallback_profile_snapshot();
+    let t0 = Instant::now();
+    let mut node_options = shared.clone();
+    if *root_solved && problem.can_skip_repeated_lp_scaling() {
+        node_options.use_ruiz_scaling = false;
+    }
+    if let Some(ref ws) = node.warm_start {
+        node_options.warm_start = Some(ws.clone());
+    }
+    if let Some(limit) = cfg.max_lp_iters {
+        node_options.max_iters = Some(limit.saturating_sub(stats.lp_iters_total));
+    }
+    let res = if node_options.use_ruiz_scaling {
+        problem.solve(solve_bounds, &node_options)
+    } else {
+        let mut retry_options = node_options.clone();
+        retry_options.use_ruiz_scaling = true;
+        solve_relaxation_with_scaling_retry(problem, solve_bounds, &node_options, &retry_options)
+    };
+    let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let scale_delta = crate::presolve::scaling::lp_scale_profile_delta(
+        scale_before,
+        crate::presolve::scaling::lp_scale_profile_snapshot(),
+    );
+    let fallback_delta = crate::simplex::dual_advanced::fallback_profile_delta(
+        fallback_before,
+        crate::simplex::dual_advanced::fallback_profile_snapshot(),
+    );
+    accumulate_node_stats(
+        stats,
+        elapsed_ms,
+        &scale_delta,
+        &fallback_delta,
+        &res,
+        root_solved,
+        node.depth,
+    );
+    (res, node_options)
+}
+
+/// Per-node bound propagation (MILP only; MIQP's `propagation_data` returns
+/// `None`, so this is always `Ok(None)` for MIQP). `Err(())` means
+/// propagation proved the node's bounds infeasible; the caller must count it
+/// pruned and `continue`. `node_propagation_us` is charged exactly once
+/// either way.
+fn propagate_node_bounds<R: Relaxation>(
+    problem: &R,
+    node: &MipNode,
+    mask: &[bool],
+    stats: &mut MipStats,
+) -> Result<Option<Vec<(f64, f64)>>, ()> {
+    let propagation_t0 = Instant::now();
+    let result = if let Some((prop_a, prop_b, prop_ct)) = problem.propagation_data() {
+        presolve::tighten_bounds_at_node(
+            problem.num_vars(),
+            prop_a,
+            prop_b,
+            prop_ct,
+            &node.var_bounds,
+            mask,
+        )
+        .map(Some)
+    } else {
+        Ok(None)
+    };
+    stats.node_propagation_us = stats.node_propagation_us.saturating_add(
+        propagation_t0
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64,
+    );
+    if result.is_err() {
+        stats.pruned += 1;
+        stats.propagation_pruned += 1;
+    }
+    result
+}
+
+/// Node-loop stop conditions (deadline / `max_nodes` / deterministic
+/// `max_lp_iters`), checked once per popped node before any other
+/// processing. Returns `true` when the loop must stop; on stop, folds
+/// `node`'s bound into the open region, sets the matching stop flag, ends
+/// any active dive, and flushes `node_loop_other_us` for this iteration.
+///
+/// The `max_lp_iters` stop (Phase 1d, P1-B) is a fixed cap on this solve's
+/// own node-relaxation simplex iterations, set on RINS/RENS/local-branching
+/// sub-MIP configs (see `heuristics::SUB_MIP_MAX_LP_ITERS`) so their
+/// termination point does not depend on wall-clock timing; it is treated
+/// identically to deadline expiry.
+#[allow(clippy::too_many_arguments)]
+fn check_stop_conditions(
+    cfg: &MipConfig,
+    deadline: Option<Instant>,
+    node: &MipNode,
+    q: &mut NodeQueue,
+    stats: &mut MipStats,
+    iter_t0: Instant,
+    iter_before: MipStats,
+    open_lb: &mut f64,
+    had_open: &mut bool,
+    deadline_stop: &mut bool,
+    maxnodes_stop: &mut bool,
+) -> bool {
+    if deadline_reached(deadline) {
+        *open_lb = open_lb.min(node.lower_bound);
+        *had_open = true;
+        *deadline_stop = true;
+        if q.is_diving() {
+            q.end_dive();
+        }
+        flush_loop_other(stats, iter_t0, iter_before);
+        return true;
+    }
+    if stats.nodes_processed >= cfg.max_nodes {
+        *open_lb = open_lb.min(node.lower_bound);
+        *had_open = true;
+        *maxnodes_stop = true;
+        if q.is_diving() {
+            q.end_dive();
+        }
+        flush_loop_other(stats, iter_t0, iter_before);
+        return true;
+    }
+    if cfg
+        .max_lp_iters
+        .is_some_and(|limit| stats.lp_iters_total >= limit)
+    {
+        *open_lb = open_lb.min(node.lower_bound);
+        *had_open = true;
+        *deadline_stop = true;
+        if q.is_diving() {
+            q.end_dive();
+        }
+        flush_loop_other(stats, iter_t0, iter_before);
+        return true;
+    }
+    false
+}
+
+fn solve_mip_core<R: Relaxation>(
+    problem: &R,
+    options: &SolverOptions,
+    cfg: &MipConfig,
+    mask: Vec<bool>,
+    initial_incumbent: Option<SolverResult>,
+) -> (SolverResult, MipStats) {
+    let (shared, deadline, mut stats) = match prepare_mip_search(problem, options) {
+        Ok(v) => v,
+        Err(early_return) => return *early_return,
+    };
 
     let integer_vars = problem.integer_vars().to_vec();
     let j_to_k: HashMap<usize, usize> = integer_vars
@@ -675,24 +1300,27 @@ fn solve_mip_core<R: Relaxation>(
     let mut conflicts = conflict::ConflictStore::new();
     let root_bounds = problem.root_bounds().to_vec();
 
-    while let Some(mut node) = q.pop() {
-        // --- Stop conditions ---
-        if deadline_reached(deadline) {
-            open_lb = open_lb.min(node.lower_bound);
-            had_open = true;
-            deadline_stop = true;
-            if q.is_diving() {
-                q.end_dive();
-            }
-            break;
-        }
-        if stats.nodes_processed >= cfg.max_nodes {
-            open_lb = open_lb.min(node.lower_bound);
-            had_open = true;
-            maxnodes_stop = true;
-            if q.is_diving() {
-                q.end_dive();
-            }
+    while let Some(node) = q.pop() {
+        // Snapshot for `node_loop_other_us`: MipStats is Copy, so this is a
+        // cheap per-iteration baseline. Every named bucket below is measured
+        // by Instant and accumulated into `stats`; `flush_loop_other` at each
+        // exit point below charges whatever wall time this iteration spent
+        // outside those buckets to `node_loop_other_us`.
+        let iter_t0 = Instant::now();
+        let iter_before = stats;
+        if check_stop_conditions(
+            cfg,
+            deadline,
+            &node,
+            &mut q,
+            &mut stats,
+            iter_t0,
+            iter_before,
+            &mut open_lb,
+            &mut had_open,
+            &mut deadline_stop,
+            &mut maxnodes_stop,
+        ) {
             break;
         }
 
@@ -718,144 +1346,92 @@ fn solve_mip_core<R: Relaxation>(
                 if q.is_diving() {
                     q.end_dive();
                 }
+                flush_loop_other(&mut stats, iter_t0, iter_before);
                 continue;
             }
         }
-        if node.depth > 0 && conflicts.is_conflicted(&node.var_bounds) {
-            stats.pruned += 1;
-            stats.conflict_pruned += 1;
-            continue;
-        }
-
-        // --- Per-node bound propagation (MILP only; MIQP returns None) ---
-        let propagation_t0 = Instant::now();
-        let tightened = if let Some((prop_a, prop_b, prop_ct)) = problem.propagation_data() {
-            match presolve::tighten_bounds_at_node(
-                problem.num_vars(),
-                prop_a,
-                prop_b,
-                prop_ct,
-                &node.var_bounds,
-                &mask,
-            ) {
-                Ok(tb) => Some(tb),
-                Err(()) => {
-                    stats.node_propagation_us = stats.node_propagation_us.saturating_add(
-                        propagation_t0
-                            .elapsed()
-                            .as_micros()
-                            .min(u128::from(u64::MAX)) as u64,
-                    );
-                    stats.pruned += 1;
-                    stats.propagation_pruned += 1;
-                    continue;
-                }
-            }
-        } else {
-            None
-        };
-        stats.node_propagation_us = stats.node_propagation_us.saturating_add(
-            propagation_t0
+        let conflict_check_t0 = Instant::now();
+        let node_is_conflicted = node.depth > 0 && conflicts.is_conflicted(&node.var_bounds);
+        stats.conflict_us = stats.conflict_us.saturating_add(
+            conflict_check_t0
                 .elapsed()
                 .as_micros()
                 .min(u128::from(u64::MAX)) as u64,
         );
-        let solve_bounds: &[(f64, f64)] = tightened.as_deref().unwrap_or(&node.var_bounds);
-
-        // --- Relaxation solve ---
-        let scale_before = crate::presolve::scaling::lp_scale_profile_snapshot();
-        let fallback_before = crate::simplex::dual_advanced::fallback_profile_snapshot();
-        let t0 = Instant::now();
-        let mut node_options = shared.clone();
-        if root_solved && problem.can_skip_repeated_lp_scaling() {
-            node_options.use_ruiz_scaling = false;
+        if node_is_conflicted {
+            stats.pruned += 1;
+            stats.conflict_pruned += 1;
+            flush_loop_other(&mut stats, iter_t0, iter_before);
+            continue;
         }
-        if let Some(ref ws) = node.warm_start {
-            node_options.warm_start = Some(ws.clone());
-        }
-        let mut res = if node_options.use_ruiz_scaling {
-            problem.solve(solve_bounds, &node_options)
-        } else {
-            let mut retry_options = node_options.clone();
-            retry_options.use_ruiz_scaling = true;
-            solve_relaxation_with_scaling_retry(
-                problem,
-                solve_bounds,
-                &node_options,
-                &retry_options,
-            )
-        };
-        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let scale_delta = crate::presolve::scaling::lp_scale_profile_delta(
-            scale_before,
-            crate::presolve::scaling::lp_scale_profile_snapshot(),
-        );
-        let fallback_delta = crate::simplex::dual_advanced::fallback_profile_delta(
-            fallback_before,
-            crate::simplex::dual_advanced::fallback_profile_snapshot(),
-        );
-        accumulate_node_stats(
-            &mut stats,
-            elapsed_ms,
-            &scale_delta,
-            &fallback_delta,
-            &res,
-            &mut root_solved,
-            node.depth,
-        );
 
-        // --- Status dispatch ---
-        match res.status {
-            SolveStatus::Infeasible => {
-                stats.pruned += 1;
-                if q.is_diving() {
-                    q.end_dive();
-                }
-                conflicts.learn(&node.var_bounds, &root_bounds);
-                stats.conflict_clauses_learned = conflicts.len();
+        let tightened = match propagate_node_bounds(problem, &node, &mask, &mut stats) {
+            Ok(t) => t,
+            Err(()) => {
+                flush_loop_other(&mut stats, iter_t0, iter_before);
                 continue;
             }
-            SolveStatus::Unbounded => {
-                unbounded = true;
-                if q.is_diving() {
-                    q.end_dive();
-                }
-                break;
-            }
-            SolveStatus::Timeout => {
-                open_lb = open_lb.min(node.lower_bound);
-                had_open = true;
-                deadline_stop = true;
-                if q.is_diving() {
-                    q.end_dive();
-                }
-                break;
-            }
-            _ => {}
-        }
+        };
+        let solve_bounds: &[(f64, f64)] = tightened.as_deref().unwrap_or(&node.var_bounds);
 
-        // --- In-tree cut separation (gated; MILP overrides, MIQP no-op) ---
-        if cfg.tree_cuts && matches!(res.status, SolveStatus::Optimal) && !res.solution.is_empty() {
-            if let Some(improved) = problem.separate_tree_cuts(
-                solve_bounds,
-                &res,
-                &mask,
-                &node_options,
-                node.depth,
-                stats.nodes_processed,
-            ) {
-                stats.tree_cut_rounds += 1;
-                res = improved;
-            }
-        }
-
-        // --- Node outcome: prune / leaf / branch ---
-        let trusted = matches!(res.status, SolveStatus::Optimal) && !res.solution.is_empty();
-        match process_node_outcome(
+        let (mut res, node_options) = solve_node_relaxation(
             problem,
-            &mut node,
+            &shared,
+            cfg,
+            solve_bounds,
+            &node,
+            &mut root_solved,
+            &mut stats,
+        );
+        // Must run unconditionally for every processed node (Codex review,
+        // P2): `nodes_processed` was already incremented above regardless of
+        // this node's outcome, but `maybe_apply_tree_cut_separation` below is
+        // skipped entirely on Infeasible/Unbounded/Timeout dispatch. Checking
+        // the reset only inside that skipped path let a boundary node that
+        // happened to be Infeasible push the periodic reset a full interval
+        // late (`is_multiple_of` never matches again until the next
+        // multiple).
+        maybe_reset_separation_dry_streak(&mut stats);
+
+        match dispatch_relaxation_status(
             &res,
-            trusted,
+            &node,
+            &mut q,
+            &mut stats,
+            cfg,
+            &mut conflicts,
+            &root_bounds,
+            &mut open_lb,
+            &mut had_open,
+            &mut deadline_stop,
+            &mut unbounded,
+        ) {
+            StatusDispatch::Continue => {
+                flush_loop_other(&mut stats, iter_t0, iter_before);
+                continue;
+            }
+            StatusDispatch::Break => {
+                flush_loop_other(&mut stats, iter_t0, iter_before);
+                break;
+            }
+            StatusDispatch::Proceed => {}
+        }
+
+        res = maybe_apply_tree_cut_separation(
+            problem,
+            cfg,
+            &mut stats,
+            &mask,
+            &node,
+            solve_bounds,
+            &node_options,
+            res,
+        );
+
+        apply_node_outcome(
+            problem,
+            node,
+            &res,
             &mut state,
             &mut stats,
             cfg,
@@ -865,62 +1441,51 @@ fn solve_mip_core<R: Relaxation>(
             &j_to_k,
             &mut pc,
             use_reliability,
-            &deadline,
+            deadline,
             dive_start_depth,
-        ) {
-            NodeAction::Skip { end_dive } => {
-                if end_dive && q.is_diving() {
-                    q.end_dive();
-                }
-                continue;
-            }
-            NodeAction::OpenLb {
-                node_lb,
-                uncertain,
-                end_dive,
-            } => {
-                open_lb = open_lb.min(node_lb);
-                had_open = true;
-                if uncertain {
-                    proof_uncertain = true;
-                }
-                if end_dive && q.is_diving() {
-                    q.end_dive();
-                }
-                continue;
-            }
-            NodeAction::PushChildren {
-                node_lb,
-                down,
-                up,
-                kind,
-                end_dive,
-            } => {
-                if end_dive && q.is_diving() {
-                    q.end_dive();
-                }
-                match kind {
-                    ChildKind::Branched {
-                        jb,
-                        res_obj,
-                        jb_val,
-                        down_ws,
-                        up_ws,
-                    } => {
-                        q.push(
-                            node.child_branched(down, node_lb, down_ws, jb, false, res_obj, jb_val),
-                        );
-                        q.push(node.child_branched(up, node_lb, up_ws, jb, true, res_obj, jb_val));
-                    }
-                    ChildKind::Split => {
-                        q.push(node.child(down, node_lb));
-                        q.push(node.child(up, node_lb));
-                    }
-                }
-            }
-        }
+            &mut q,
+            &mut open_lb,
+            &mut had_open,
+            &mut proof_uncertain,
+            iter_t0,
+            iter_before,
+        );
     }
 
+    finalize_mip_result(
+        problem,
+        cfg,
+        q,
+        state,
+        stats,
+        open_lb,
+        had_open,
+        unbounded,
+        deadline_stop,
+        maxnodes_stop,
+        proof_uncertain,
+    )
+}
+
+/// Post-loop finalization shared by every `solve_mip_core` exit path:
+/// closes out any active dive, short-circuits on `Unbounded`, computes the
+/// remaining open lower bound, and — from the surviving incumbent (if any) —
+/// decides `Optimal` (with a [`BoundGapCertificate`]) vs `Timeout` vs
+/// `SuboptimalSolution`, or defers to [`finalize_no_incumbent`].
+#[allow(clippy::too_many_arguments)]
+fn finalize_mip_result<R: Relaxation>(
+    problem: &R,
+    cfg: &MipConfig,
+    mut q: NodeQueue,
+    mut state: MipState,
+    stats: MipStats,
+    open_lb: f64,
+    had_open: bool,
+    unbounded: bool,
+    deadline_stop: bool,
+    maxnodes_stop: bool,
+    proof_uncertain: bool,
+) -> (SolverResult, MipStats) {
     if q.is_diving() {
         q.end_dive();
     }
@@ -1046,6 +1611,96 @@ fn accumulate_node_stats(
         stats.lp_solve_us_total += tb.solve_us;
         stats.lp_postsolve_us_total += tb.postsolve_us;
     }
+    stats.lp_iters_total = stats.lp_iters_total.saturating_add(res.iterations as u64);
+}
+
+/// Charge the wall time elapsed since `iter_t0` that is not already
+/// attributed to any other named `MipStats` bucket touched during this B&B
+/// loop iteration to `node_loop_other_us`.
+///
+/// `before` is a per-iteration snapshot (`MipStats` is `Copy`) taken at the
+/// top of the loop; every field compared here is only ever grown via
+/// `saturating_add` within an iteration, so the deltas are non-negative by
+/// construction. This is a "self time" computation (total iteration time
+/// minus the time already booked to named children), not a global residual
+/// against the whole search wall clock, so it stays meaningful even though
+/// several of its subtrahends (tree_cut_us, rins_us, ...) are simultaneously
+/// new Phase 0 counters.
+fn flush_loop_other(stats: &mut MipStats, iter_t0: Instant, before: MipStats) {
+    let iter_us = iter_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+    let relax_delta_us = ((stats.relaxation_time_total_ms - before.relaxation_time_total_ms)
+        * 1_000.0)
+        .max(0.0) as u64;
+    let attributed = stats
+        .node_propagation_us
+        .saturating_sub(before.node_propagation_us)
+        .saturating_add(relax_delta_us)
+        .saturating_add(stats.tree_cut_us.saturating_sub(before.tree_cut_us))
+        .saturating_add(stats.rins_us.saturating_sub(before.rins_us))
+        .saturating_add(stats.rens_us.saturating_sub(before.rens_us))
+        .saturating_add(
+            stats
+                .local_branching_us
+                .saturating_sub(before.local_branching_us),
+        )
+        .saturating_add(
+            stats
+                .branch_select_us
+                .saturating_sub(before.branch_select_us),
+        )
+        .saturating_add(stats.conflict_us.saturating_sub(before.conflict_us));
+    stats.node_loop_other_us = stats
+        .node_loop_other_us
+        .saturating_add(iter_us.saturating_sub(attributed));
+}
+
+/// Whether in-tree GMI/MIR cut re-separation should run at this node: static
+/// config gate (`cfg.tree_cuts`) AND `effort::may_run_separation`'s
+/// deterministic simplex-iteration-share/dry-streak gate. Extracted from the
+/// B&B loop's separation call site so the gate itself is directly
+/// unit-testable (see `mip::tests::separation_iter_share_is_enforced`).
+fn may_separate_tree_cuts(cfg: &MipConfig, stats: &MipStats) -> bool {
+    cfg.tree_cuts && effort::may_run_separation(stats)
+}
+
+/// Update `stats.tree_cut_dry_streak` (see `effort::SEPARATION_DRY_STREAK_LIMIT`)
+/// after one in-tree separation call. `attempted = false` means the
+/// node-selection interval skipped this call entirely (not a real dry
+/// attempt — P3-B: this is the explicit flag from `separate_tree_cuts`, not
+/// inferred from the iteration count, which can legitimately be 0 for a real
+/// attempt), so only a real attempt (rounds actually ran) updates the streak.
+/// `accepted` additionally resets the streak on any incumbent improvement
+/// elsewhere in the loop (P3-A) — see `maybe_reset_separation_dry_streak` for
+/// the periodic, attempt-independent reset. Extracted so the bookkeeping is
+/// directly unit-testable (see
+/// `mip::tests::separation_dry_streak_is_tracked_and_reset`).
+fn record_separation_attempt(stats: &mut MipStats, attempted: bool, accepted: bool) {
+    if !attempted {
+        return;
+    }
+    if accepted {
+        stats.tree_cut_dry_streak = 0;
+    } else {
+        stats.tree_cut_dry_streak = stats.tree_cut_dry_streak.saturating_add(1);
+    }
+}
+
+/// Periodically resets `tree_cut_dry_streak` to 0 regardless of whether
+/// separation is currently attempting anything, so a dry streak accumulated
+/// early in a long search does not disable separation *permanently* — the
+/// tree shape (and hence what separation would see) changes substantially
+/// over hundreds of nodes. See
+/// `effort::SEPARATION_DRY_STREAK_RESET_NODE_INTERVAL` for the interval's
+/// derivation. (P3-A; the complementary incumbent-improvement reset happens
+/// inline wherever `stats.incumbent_updates` is incremented.)
+fn maybe_reset_separation_dry_streak(stats: &mut MipStats) {
+    if stats.nodes_processed > 0
+        && stats
+            .nodes_processed
+            .is_multiple_of(effort::SEPARATION_DRY_STREAK_RESET_NODE_INTERVAL)
+    {
+        stats.tree_cut_dry_streak = 0;
+    }
 }
 
 /// Select the variable to branch on for an Optimal relaxation solution.
@@ -1073,7 +1728,10 @@ fn pick_branch_var<R: Relaxation>(
 ) -> usize {
     if use_reliability {
         let sb_cands = strong_branch_candidates(sol, mask, integer_vars, cfg.integer_feas_tol, pc);
-        let strong_scores = if !sb_cands.is_empty() && !deadline_reached(*deadline) {
+        let strong_scores = if !sb_cands.is_empty()
+            && !deadline_reached(*deadline)
+            && effort::may_run_strong_branch(stats)
+        {
             measure_strong_branch_scores(
                 problem,
                 node_bounds,
@@ -1089,17 +1747,17 @@ fn pick_branch_var<R: Relaxation>(
         } else {
             HashMap::new()
         };
+        // An empty `strong_scores` behaves identically to `None` in
+        // `select_branching_variable_reliability` (every lookup misses,
+        // falling back to `pc.score`), so branching on emptiness here was
+        // dead code — always passing `Some` is equivalent and simpler.
         select_branching_variable_reliability(
             sol,
             mask,
             integer_vars,
             cfg.integer_feas_tol,
             pc,
-            if strong_scores.is_empty() {
-                None
-            } else {
-                Some(&strong_scores)
-            },
+            Some(&strong_scores),
         )
         .expect("non-integer-feasible Optimal relaxation has a fractional integer var")
     } else {
@@ -1123,6 +1781,7 @@ fn try_rins<R: Relaxation>(
             .nodes_processed
             .is_multiple_of(heuristics::rins::RINS_INTERVAL)
         || state.incumbent_obj.is_none()
+        || !effort::may_run_rins(stats)
     {
         return;
     }
@@ -1132,12 +1791,27 @@ fn try_rins<R: Relaxation>(
             None => return,
         };
         stats.rins_calls += 1;
-        problem.run_rins(rel_sol, inc_sol, cfg, deadline, opts)
+        let rins_t0 = Instant::now();
+        let (res, sub_mip_nodes, sub_mip_iters) = problem.run_rins(
+            rel_sol,
+            inc_sol,
+            cfg,
+            deadline,
+            effort::rins_iter_budget(stats),
+            opts,
+        );
+        stats.rins_us = stats
+            .rins_us
+            .saturating_add(rins_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+        stats.rins_iters = stats.rins_iters.saturating_add(sub_mip_iters);
+        stats.sub_mip_nodes_total = stats.sub_mip_nodes_total.saturating_add(sub_mip_nodes);
+        res
     };
     if let Some(res) = rins_res {
         if state.consider(&res) {
             stats.incumbent_updates += 1;
             stats.rins_improvements += 1;
+            stats.tree_cut_dry_streak = 0;
         }
     }
 }
@@ -1154,7 +1828,11 @@ fn try_rens<R: Relaxation>(
     opts: &SolverOptions,
     rel_sol: &[f64],
 ) {
-    if !cfg.rens_enabled {
+    // Checked before the (state-mutating) `should_try` decision below so a
+    // denied budget never consumes the guaranteed first-attempt flag: RENS
+    // still gets that guaranteed attempt on a later call once the budget
+    // allows it.
+    if !cfg.rens_enabled || !effort::may_run_rens(stats) {
         return;
     }
     let should_try = if state.incumbent_obj.is_none() {
@@ -1175,10 +1853,24 @@ fn try_rens<R: Relaxation>(
         return;
     }
     stats.rens_calls += 1;
-    if let Some(res) = problem.run_rens(rel_sol, cfg, deadline, opts) {
+    let rens_t0 = Instant::now();
+    let (rens_res, sub_mip_nodes, sub_mip_iters) = problem.run_rens(
+        rel_sol,
+        cfg,
+        deadline,
+        effort::rens_iter_budget(stats),
+        opts,
+    );
+    stats.rens_us = stats
+        .rens_us
+        .saturating_add(rens_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+    stats.rens_iters = stats.rens_iters.saturating_add(sub_mip_iters);
+    stats.sub_mip_nodes_total = stats.sub_mip_nodes_total.saturating_add(sub_mip_nodes);
+    if let Some(res) = rens_res {
         if state.consider(&res) {
             stats.incumbent_updates += 1;
             stats.rens_improvements += 1;
+            stats.tree_cut_dry_streak = 0;
         }
     }
 }
@@ -1197,6 +1889,7 @@ fn try_local_branching<R: Relaxation>(
         || !stats
             .nodes_processed
             .is_multiple_of(heuristics::local_branching::LOCAL_BRANCHING_INTERVAL)
+        || !effort::may_run_local_branching(stats)
     {
         return;
     }
@@ -1206,12 +1899,26 @@ fn try_local_branching<R: Relaxation>(
             None => return,
         };
         stats.local_branching_calls += 1;
-        problem.run_local_branching(inc_sol, cfg, deadline, opts)
+        let lb_t0 = Instant::now();
+        let (res, sub_mip_nodes, sub_mip_iters) = problem.run_local_branching(
+            inc_sol,
+            cfg,
+            deadline,
+            effort::local_branching_iter_budget(stats),
+            opts,
+        );
+        stats.local_branching_us = stats
+            .local_branching_us
+            .saturating_add(lb_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+        stats.local_branching_iters = stats.local_branching_iters.saturating_add(sub_mip_iters);
+        stats.sub_mip_nodes_total = stats.sub_mip_nodes_total.saturating_add(sub_mip_nodes);
+        res
     };
     if let Some(res) = lb_res {
         if state.consider(&res) {
             stats.incumbent_updates += 1;
             stats.local_branching_improvements += 1;
+            stats.tree_cut_dry_streak = 0;
         }
     }
 }
@@ -1285,6 +1992,7 @@ fn process_node_outcome<R: Relaxation>(
         if is_integer_feasible(&res.solution, mask, cfg.integer_feas_tol) {
             if state.consider(res) {
                 stats.incumbent_updates += 1;
+                stats.tree_cut_dry_streak = 0;
             }
             return NodeAction::Skip { end_dive: true };
         }
@@ -1314,6 +2022,7 @@ fn process_node_outcome<R: Relaxation>(
         }
 
         // Select branching variable and compute child bounds.
+        let branch_select_t0 = Instant::now();
         let jb = pick_branch_var(
             problem,
             &node.var_bounds,
@@ -1329,6 +2038,12 @@ fn process_node_outcome<R: Relaxation>(
             pc,
             stats,
             use_reliability,
+        );
+        stats.branch_select_us = stats.branch_select_us.saturating_add(
+            branch_select_t0
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
         );
         let (down, up) = branch_bounds(&node.var_bounds, jb, res.solution[jb]);
         let child_ws = res.warm_start_basis.clone();

@@ -75,6 +75,42 @@ fn made_cleanup_df_progress(best: f64, current: f64, target_df: f64) -> bool {
     best - current > best.abs().max(target_df) * target_df
 }
 
+/// Cycling early-bail trigger (Codex round 3, P2): requires the Charnes-
+/// perturbation/column-block countermeasure to have already fired at least
+/// once (`cycling_countermeasure_triggered`, set on first repeated-basis
+/// detection and never cleared — mirrors `dual_advanced::core`'s permanent
+/// `bland_mode` escalation), in addition to the original obj+step plateau
+/// AND Phase-I-caller conditions.
+///
+/// That gate is this bail's actual purpose: a backstop for confirmed
+/// cycling that survives the countermeasure, not a generic "slow degenerate
+/// LP" cutoff. Without it, a legitimately slow but non-cycling Phase I
+/// (forplan-class: real, if gradual, progress on some rows while others
+/// plateau) risks a false bail before the countermeasure ever triggers once.
+///
+/// Consequence (Opus review follow-up, P3-1): a Phase I that plateaus but
+/// never repeats a basis has no iteration-count bound at all from this
+/// function — the wall-clock deadline elsewhere in `revised_simplex_core`'s
+/// loop is the only thing that can still stop it.
+///
+/// Extracted as a pure predicate so the "does not fire outside an active
+/// countermeasure" case is directly unit-testable without needing to drive
+/// `revised_simplex_core` through thousands of real iterations.
+#[allow(clippy::too_many_arguments)]
+fn should_bail_on_cycling_plateau(
+    enable_phase1_cycling_bail: bool,
+    cycling_countermeasure_triggered: bool,
+    iters_since_obj_progress: usize,
+    iters_since_step_progress: usize,
+    obj_bail_trigger: usize,
+    step_bail_trigger: usize,
+) -> bool {
+    enable_phase1_cycling_bail
+        && cycling_countermeasure_triggered
+        && iters_since_obj_progress >= obj_bail_trigger
+        && iters_since_step_progress >= step_bail_trigger
+}
+
 /// Primal Phase I cycling early-bail (klein3 origin)。`cold_start_dual` の
 /// Primal Phase I は Bland switch を持たず無限 cycle で half-deadline を焼く。
 /// `Timeout` 早期 return で Big-M (`dual_simplex_core_advanced`、Bland + lex
@@ -202,6 +238,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let cycle_block_duration: usize = m / 2;
     let mut cycle_block_col: Option<usize> = None;
     let mut cycle_block_remaining: usize = 0;
+    let mut cycling_countermeasure_triggered = false;
     let mut trace = IterTrace::new("primal-revised");
 
     for _iter in 0..max_iter {
@@ -216,6 +253,18 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         if timed_out || cancelled {
             let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
+        }
+        // P2-4: same per-solve iteration cap as `dual_advanced` (see
+        // `SolverOptions::max_iters`'s doc) — additive to, and independent
+        // of, the Phase I cycling bail / cleanup stall bail above: those
+        // gate on their own dedicated no-progress counters, this gates only
+        // on the raw iteration count, whichever fires first wins.
+        if options
+            .max_iters
+            .is_some_and(|limit| *iter_count_out as u64 >= limit)
+        {
+            let obj: f64 = basic_obj(c, basis, x_b);
+            return SimplexOutcome::Stalled(obj);
         }
 
         if let Some(t) = trace.as_mut() {
@@ -638,6 +687,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 cycle_block_col = Some(entering_col);
                 cycle_block_remaining = cycle_block_duration;
                 cycle_basis_hashes.clear();
+                cycling_countermeasure_triggered = true;
             }
         }
 
@@ -698,12 +748,6 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             }
         }
 
-        // Cycling early-bail. Trigger requires (a) `c^T x_B`
-        // plateau for `obj_bail_trigger` iters AND (b) step ≈ 0 for
-        // `step_bail_trigger` iters AND (c) Phase I caller. Either signal
-        // alone is insufficient: forplan-style Phase I (slow real progress)
-        // has step > 0 and resets (b); a Phase II near the optimum sees
-        // obj plateau but is gated off by (c).
         let current_obj: f64 = basic_obj(c, basis, x_b);
         if made_progress_with_floor(best_obj, current_obj, 1.0) {
             best_obj = current_obj;
@@ -718,10 +762,14 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         } else {
             iters_since_step_progress = iters_since_step_progress.saturating_add(1);
         }
-        if enable_phase1_cycling_bail
-            && iters_since_obj_progress >= obj_bail_trigger
-            && iters_since_step_progress >= step_bail_trigger
-        {
+        if should_bail_on_cycling_plateau(
+            enable_phase1_cycling_bail,
+            cycling_countermeasure_triggered,
+            iters_since_obj_progress,
+            iters_since_step_progress,
+            obj_bail_trigger,
+            step_bail_trigger,
+        ) {
             return SimplexOutcome::Stalled(current_obj);
         }
     }
@@ -901,5 +949,83 @@ mod revert_to_snapshot_tests {
         assert_eq!(basis, basis_snapshot);
         assert_eq!(x_b, vec![3.0, 4.0]); // B = I ⇒ x_b = b_rhs
         assert!(is_basic[0] && is_basic[1]);
+    }
+}
+
+#[cfg(test)]
+mod cycling_plateau_bail_tests {
+    use super::*;
+
+    /// Codex round 3 (P2) sentinel: the obj+step plateau bail must NOT fire
+    /// outside an active cycling countermeasure, even when every other
+    /// condition (Phase I caller, both plateau counters far past their
+    /// triggers) is satisfied. Before this fix, `enable_phase1_cycling_bail`
+    /// plus the two plateau counters alone were sufficient — risking cutting
+    /// off a legitimately slow-but-progressing degenerate Phase I (e.g.
+    /// forplan-class) that has never even repeated a basis, mistaking a
+    /// normal degenerate LP for cycling.
+    ///
+    /// Pure-predicate unit test (no need to drive `revised_simplex_core`
+    /// through thousands of real iterations to exercise this branch, and no
+    /// risk of an artificial fixture accidentally tripping the real
+    /// countermeasure and masking the case under test).
+    ///
+    /// Sentinel: dropping `cycling_countermeasure_triggered` from
+    /// `should_bail_on_cycling_plateau`'s condition makes the first
+    /// assertion fail (would return `true` instead of `false`).
+    #[test]
+    fn plateau_bail_requires_countermeasure_to_have_fired() {
+        let obj_bail_trigger = 5_000;
+        let step_bail_trigger = 500;
+
+        // All original conditions satisfied (Phase I, both counters well
+        // past trigger) but the countermeasure never fired: must NOT bail.
+        assert!(
+            !should_bail_on_cycling_plateau(
+                true,
+                false,
+                obj_bail_trigger * 10,
+                step_bail_trigger * 10,
+                obj_bail_trigger,
+                step_bail_trigger,
+            ),
+            "plateau alone (no repeated-basis countermeasure) must not trigger the bail"
+        );
+
+        // Identical counters, countermeasure now active: must bail (the
+        // backstop still works for confirmed cycling).
+        assert!(
+            should_bail_on_cycling_plateau(
+                true,
+                true,
+                obj_bail_trigger * 10,
+                step_bail_trigger * 10,
+                obj_bail_trigger,
+                step_bail_trigger,
+            ),
+            "plateau + an already-fired countermeasure must still trigger the bail \
+             (the backstop itself must keep working)"
+        );
+
+        // Countermeasure active but counters not yet at trigger: must not
+        // bail (countermeasure alone is not sufficient either).
+        assert!(
+            !should_bail_on_cycling_plateau(true, true, 1, 1, obj_bail_trigger, step_bail_trigger),
+            "an active countermeasure alone (plateau counters still low) must not bail"
+        );
+
+        // Phase II (enable_phase1_cycling_bail=false): must never bail
+        // regardless of the other three conditions.
+        assert!(
+            !should_bail_on_cycling_plateau(
+                false,
+                true,
+                obj_bail_trigger * 10,
+                step_bail_trigger * 10,
+                obj_bail_trigger,
+                step_bail_trigger,
+            ),
+            "Phase II must never bail on plateau, even with an active countermeasure"
+        );
     }
 }

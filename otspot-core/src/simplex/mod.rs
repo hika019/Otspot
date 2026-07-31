@@ -32,6 +32,10 @@ pub(crate) use standard_form::OrigVarInfo;
 pub(crate) use standard_form::{
     build_bounded_standard_form_with_deadline, scale_upper_bounds, BoundedStandardForm,
 };
+#[cfg(test)]
+pub(crate) use standard_form::{
+    build_standard_form_call_count, reset_build_standard_form_call_count,
+};
 pub(crate) use standard_form::{
     external_stop_requested, extract_dual_info, stall_status, stop_result_with_incumbent,
     stop_status, SimplexOutcome, StandardForm,

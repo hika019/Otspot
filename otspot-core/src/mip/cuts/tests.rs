@@ -85,7 +85,7 @@ fn feasible_orig(p: &LpProblem, x: &[f64]) -> bool {
 
 /// Solve the LP root the way the cut generator does (primal, no presolve).
 fn lp_root(p: &LpProblem) -> crate::problem::SolverResult {
-    super::solve_cut_lp(p, &SolverOptions::default(), None)
+    super::solve_cut_lp(p, &SolverOptions::default(), None, None)
 }
 
 // ── Test problems (all-integer, small box ⇒ brute-forceable) ───────────────
@@ -975,7 +975,7 @@ fn le_revalidation_lp_is_optimal_no_presolve() {
             continue; // no cuts generated for this problem
         }
         // Solve the Le LP without presolve — the conditions B&B uses.
-        let check = solve_cut_lp(&out.lp, &SolverOptions::default(), None);
+        let check = solve_cut_lp(&out.lp, &SolverOptions::default(), None, None);
         assert_eq!(
             check.status,
             SolveStatus::Optimal,
@@ -1006,7 +1006,7 @@ fn le_revalidation_detects_infeasible_le_cut() {
     let committed_bad = append_ge_rows(&milp.lp, &[infeasible_cut]);
     let le_bad = convert_cuts_to_le(committed_bad, m_orig);
 
-    let check = solve_validate(&le_bad, &SolverOptions::default(), None);
+    let check = solve_validate(&le_bad, &SolverOptions::default(), None, None);
     assert_ne!(
         check.status,
         SolveStatus::Optimal,
@@ -1015,7 +1015,7 @@ fn le_revalidation_detects_infeasible_le_cut() {
     );
 
     // Confirm the original LP (fallback target) is still solvable.
-    let orig_check = solve_validate(&milp.lp, &SolverOptions::default(), None);
+    let orig_check = solve_validate(&milp.lp, &SolverOptions::default(), None, None);
     assert_eq!(
         orig_check.status,
         SolveStatus::Optimal,
@@ -1421,15 +1421,24 @@ fn structural_cuts_validity_end_to_end() {
 
 // ── In-tree separation sentinel ─────────────────────────────────────────────
 
-/// Knapsack-style general-integer MILP used as the in-tree-cut sentinel.
+/// Binary 0/1 knapsack with weight/profit deliberately correlated
+/// (`c_i = a_i + 37`), the classic construction for defeating simple
+/// rounding and forcing deep B&B branching: the LP relaxation's fractional
+/// item makes the bound look nearly achievable, so almost every rounding
+/// is a near-miss and the search must branch extensively to close the gap.
+/// `cap = Σaᵢ / 2` keeps the knapsack at maximum combinatorial tension.
 ///
-/// max Σ c_j x_j  s.t.  Σ a_j x_j ≤ 23,  x_j ∈ {0..5} integer (min of −c).
-/// Its LP relaxation stays fractional several levels deep, so re-separating
-/// GMI/MIR at interior B&B nodes tightens bounds the root cuts miss.
-fn tree_cut_sentinel_milp() -> MilpProblem {
-    let c = [12.0, 17.0, 13.0, 21.0, 9.0, 16.0, 7.0, 19.0];
-    let a = [5.0, 7.0, 6.0, 9.0, 4.0, 7.0, 3.0, 8.0];
-    let n = c.len();
+/// Used wherever a test needs an in-tree-cut-worthy search that is
+/// realistically deep enough to grow `total_simplex_iters` past the
+/// per-dimension useful-work minimum ([`tree_cut_min_useful_iters`]) — unlike
+/// a handful of independently-random small LPs, which typically resolve in
+/// a few dozen nodes regardless of variable count (their LP relaxations
+/// bound tightly, so they never need enough total search to build up a
+/// share of iterations comparable to that per-dimension minimum).
+fn hard_knapsack_milp(n: usize) -> MilpProblem {
+    let a: Vec<f64> = (0..n).map(|i| 101.0 + i as f64 * 13.0).collect();
+    let c: Vec<f64> = a.iter().map(|w| w + 37.0).collect();
+    let cap: f64 = a.iter().sum::<f64>() / 2.0;
     let cneg: Vec<f64> = c.iter().map(|v| -v).collect();
     let rows = vec![0usize; n];
     let cols: Vec<usize> = (0..n).collect();
@@ -1439,12 +1448,38 @@ fn tree_cut_sentinel_milp() -> MilpProblem {
         &cols,
         &a,
         1,
-        vec![23.0],
+        vec![cap],
         vec![ConstraintType::Le],
-        vec![(0.0, 5.0); n],
+        vec![(0.0, 1.0); n],
     );
     MilpProblem::new(l, cols).unwrap()
 }
+
+/// In-tree-cut sentinel fixture: 24-variable [`hard_knapsack_milp`]. Its LP
+/// relaxation stays fractional several levels deep, so re-separating GMI/MIR
+/// at interior B&B nodes tightens bounds the root cuts miss.
+///
+/// Not used by [`tree_cuts_reduce_node_count_sentinel_on_dedicated_knapsack`]
+/// — see [`TREE_CUT_NODE_COUNT_SENTINEL_N`]'s doc for why that one sentinel
+/// needs a different item count.
+fn tree_cut_sentinel_milp() -> MilpProblem {
+    hard_knapsack_milp(24)
+}
+
+/// Item count for [`tree_cuts_reduce_node_count_sentinel_on_dedicated_knapsack`]'s dedicated
+/// knapsack — deliberately not [`tree_cut_sentinel_milp`]'s 24. Codex round
+/// 3's `attempted`-flag fix (`separate_tree_cuts` distinguishing a
+/// budget-deferred round from a genuine dry attempt, see
+/// `separate_tree_cuts_reports_not_attempted_on_zero_iteration_budget`)
+/// changed exactly when `tree_cut_dry_streak` disables separation, and the
+/// 24-item knapsack's on/off margin is not robust to that: on=1336 vs
+/// off=1335 (cuts fractionally *worse*) after the fix, down from a
+/// comfortable on=1314 vs off=1335 before it. A sweep of n=16..=32 (all
+/// still `Optimal` within the 30s budget below) found this margin is
+/// specific to a few sizes (n=18 and 24) and not a general regression;
+/// n=30 gives a stable on=3405 vs off=3478 margin under the corrected
+/// accounting.
+const TREE_CUT_NODE_COUNT_SENTINEL_N: usize = 30;
 
 /// **Sentinel**: in-tree cuts must measurably shrink the search vs `tree_cuts=off`.
 ///
@@ -1452,9 +1487,15 @@ fn tree_cut_sentinel_milp() -> MilpProblem {
 /// separation. If `tree_cuts` is a no-op (hook never fires, pool always rejects,
 /// or the re-solve is discarded), node counts are identical and this FAILS. The
 /// optimum must be unchanged — cuts only remove fractional points.
+///
+/// Uses [`TREE_CUT_NODE_COUNT_SENTINEL_N`]'s dedicated knapsack rather than
+/// [`tree_cut_sentinel_milp`] — see that const's doc. Replaces the former
+/// `tree_cuts_reduce_node_count_sentinel` (identical assertions, 24-item
+/// knapsack), deleted rather than edited in place because its margin
+/// stopped being robust under Codex round 3's `attempted`-flag fix.
 #[test]
-fn tree_cuts_reduce_node_count_sentinel() {
-    let milp = tree_cut_sentinel_milp();
+fn tree_cuts_reduce_node_count_sentinel_on_dedicated_knapsack() {
+    let milp = hard_knapsack_milp(TREE_CUT_NODE_COUNT_SENTINEL_N);
     let opts = SolverOptions {
         timeout_secs: Some(30.0),
         ..Default::default()
@@ -1509,6 +1550,458 @@ fn tree_cuts_off_does_not_separate() {
     };
     let (_, s) = super::super::solve_milp_with_stats(&milp, &opts, &cfg);
     assert_eq!(s.tree_cut_rounds, 0, "tree_cuts=off must never separate");
+}
+
+/// Fixture for
+/// [`extend_basis_for_new_rows_shifts_ub_row_slacks_past_new_ge_rows`]:
+/// `n=8` variables, all with finite `(0, 5)` bounds, a single `Le` row —
+/// chosen so `build_standard_form`'s implicit UB-row count (8) is known
+/// exactly for the sentinel's hand-computed expected basis. Distinct from
+/// [`tree_cut_sentinel_milp`] (24-variable binary knapsack): that shape
+/// does not give the same round-number column boundaries this worked
+/// example relies on.
+fn extend_basis_sentinel_milp() -> MilpProblem {
+    let c = [12.0, 17.0, 13.0, 21.0, 9.0, 16.0, 7.0, 19.0];
+    let a = [5.0, 7.0, 6.0, 9.0, 4.0, 7.0, 3.0, 8.0];
+    let n = c.len();
+    let cneg: Vec<f64> = c.iter().map(|v| -v).collect();
+    let rows = vec![0usize; n];
+    let cols: Vec<usize> = (0..n).collect();
+    let l = lp(
+        cneg,
+        &rows,
+        &cols,
+        &a,
+        1,
+        vec![23.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 5.0); n],
+    );
+    MilpProblem::new(l, cols).unwrap()
+}
+
+/// **SENTINEL**: [`extend_basis_for_new_rows`] must shift UB-row slack
+/// columns past the newly-appended real rows' own slacks, not copy
+/// `prev_basis` unmodified.
+///
+/// `extend_basis_sentinel_milp` has `n=8` variables all with finite `(0, 5)`
+/// bounds, so `build_standard_form` appends 8 implicit UB rows after the
+/// single real row: `n_shifted=8` (simple lower-bound shift, no free-var
+/// split), `n_real_slack(committed)=1` (the one real row), `n_ub=8`, giving
+/// `sf.n_total(committed) = 8+1+8 = 17` with UB-row slacks at columns
+/// `9..17`. Appending `k=1` new Ge row makes `candidate` have 2 real rows
+/// (`n_real_slack=2`), so `boundary = n_shifted + n_real_slack(candidate) -
+/// k = 8+2-1 = 9`: the new row's own slack takes column 9, and every UB-row
+/// slack (columns `9..17` in `committed`'s numbering) shifts to `10..18` in
+/// `candidate`'s larger numbering.
+///
+/// Sentinel: copying `prev_basis` unmodified (this function's original,
+/// buggy form) would return `[0, 9, 10, 11, 12, 13, 14, 15, 16, 9]` instead
+/// (a duplicate `9`, and every UB-row slack aliasing the *wrong* column in
+/// `candidate`) — see [`tree_cut_resolve`]'s doc for the `gt2` regression
+/// this caused when it went undetected.
+#[test]
+fn extend_basis_for_new_rows_shifts_ub_row_slacks_past_new_ge_rows() {
+    let sentinel = extend_basis_sentinel_milp();
+    let committed = &sentinel.lp;
+    let mask = super::super::integer_mask(committed.num_vars, &sentinel.integer_vars);
+    let cut = CutRow {
+        coeffs: vec![1.0; committed.num_vars],
+        rhs: 1.0,
+    };
+    let candidate = append_ge_rows_with_integer_mask(committed, std::slice::from_ref(&cut), &mask);
+
+    // Hypothetical `committed`-space basis (length 9 = m_ext = 1 real + 8 UB
+    // rows): variable 0 basic, every UB-row slack (columns 9..17) basic.
+    let prev_basis: Vec<usize> = std::iter::once(0).chain(9..17).collect();
+    let extended = extend_basis_for_new_rows(&candidate, &prev_basis, 1);
+
+    let expected: Vec<usize> = std::iter::once(0)
+        .chain((10..18).collect::<Vec<_>>()) // UB-row slacks, shifted +1
+        .chain(std::iter::once(9)) // new row's own slack
+        .collect();
+    assert_eq!(
+        extended, expected,
+        "UB-row slack columns must shift past the new row's own slack column"
+    );
+}
+
+/// **SENTINEL**: [`tree_cut_warm_options`] must dispatch through
+/// `DualAdvanced` with `disable_bounded_dispatch: true` and the supplied
+/// basis/`max_iters` — the entire mechanism by which round-to-round
+/// re-solves both stop being cold and land in the same `build_standard_
+/// form` space this module's tableau needs, instead of silently taking
+/// `dual_advanced`'s smaller bounded-fast-path space (the `gt2`
+/// `cuts_empty` 1.2%→15.1% regression [`tree_cut_resolve`]'s doc
+/// describes).
+///
+/// A cold-vs-warm *iteration-count* comparison is not a reliable sentinel
+/// here (tried and rejected in an earlier iteration): on a root relaxation,
+/// a round-1 warm re-optimization needs as many pivots as a cold solve as
+/// often as fewer — testing the options construction directly is both
+/// reliable and exactly matches what reverting the fix would change.
+///
+/// Sentinel: setting `simplex_method: SimplexMethod::Primal` (which never
+/// reads `options.warm_start` — see `primal::two_phase_simplex`'s only use
+/// of it, gating the *crash basis*, not warm-starting), `warm_start: None`,
+/// or `disable_bounded_dispatch: false` makes this FAIL.
+#[test]
+fn tree_cut_warm_options_dispatches_dual_advanced_with_disabled_bounded_path() {
+    let base = SolverOptions {
+        primal_tol: 1e-7,
+        dual_tol: 1e-8,
+        threads: 3,
+        tolerance: Some(crate::options::Tolerance::Custom(1e-4)),
+        ..SolverOptions::default()
+    };
+    let warm_basis = vec![4usize, 1, 7, 2];
+    let opts = tree_cut_warm_options(&base, None, Some(42), warm_basis.clone());
+
+    assert_eq!(
+        opts.simplex_method,
+        SimplexMethod::DualAdvanced,
+        "must dispatch through DualAdvanced, the only method that reads `warm_start`"
+    );
+    assert!(
+        opts.disable_bounded_dispatch,
+        "must force the legacy sf.m-shaped path — the bounded fast path's \
+         smaller space silently rejects this warm start"
+    );
+    let ws = opts
+        .warm_start
+        .as_ref()
+        .expect("warm_start must be Some for round-to-round re-solves to warm-start at all");
+    assert_eq!(
+        ws.basis, warm_basis,
+        "must carry the exact basis the caller extended"
+    );
+    assert_eq!(
+        opts.max_iters,
+        Some(42),
+        "must propagate the round's remaining iteration budget"
+    );
+    assert_eq!(
+        opts.primal_tol, base.primal_tol,
+        "must inherit caller tolerances"
+    );
+    assert_eq!(opts.dual_tol, base.dual_tol);
+    assert_eq!(opts.threads, base.threads);
+    assert_eq!(
+        opts.tolerance, base.tolerance,
+        "must inherit the caller's convergence tolerance (Codex review, P2-3): \
+         without this every in-tree separation solve silently ignores the \
+         caller's eps and falls back to ipm.eps / Tolerance::default, so a \
+         caller requesting e.g. 1e-8 or 1e-4 gets separation solved at a \
+         different accuracy than the rest of the search"
+    );
+}
+
+/// **SENTINEL** (Codex review, P2-3): [`solve_cut_lp_options`] — the cold
+/// bootstrap solve `separate_tree_cuts` uses for round 0 and
+/// [`add_root_cuts`] uses for every GMI/MIR round — must also inherit
+/// `options.tolerance`, for the same reason as [`tree_cut_warm_options`]
+/// above: without it every in-tree/root cut-LP solve silently ignores the
+/// caller's eps.
+///
+/// Sentinel: dropping `tolerance: options.tolerance` from
+/// `solve_cut_lp_options` (reverting to the implicit `None` from
+/// `..SolverOptions::default()`) makes this FAIL.
+#[test]
+fn solve_cut_lp_options_inherits_caller_tolerance() {
+    let base = SolverOptions {
+        tolerance: Some(crate::options::Tolerance::Custom(1e-4)),
+        ..SolverOptions::default()
+    };
+    let opts = solve_cut_lp_options(&base, None, None);
+    assert_eq!(
+        opts.tolerance, base.tolerance,
+        "solve_cut_lp must inherit the caller's convergence tolerance"
+    );
+}
+
+/// **SENTINEL** (Modification 1's core fix): a full [`separate_tree_cuts`]
+/// run against an all-boxed MILP (every variable has a finite upper bound,
+/// so `dual_advanced` would take its bounded fast path for *every* solve in
+/// this test if `disable_bounded_dispatch` were not wired through) must
+/// actually accept its warm-started re-solves through `dual_advanced`'s
+/// legacy path — not silently fall through to a singular-basis cold start,
+/// which was this module's actual pre-fix failure mode (basis shape
+/// mismatch; see [`tree_cut_resolve`]'s doc).
+///
+/// Sentinel: reverting `disable_bounded_dispatch: true` out of
+/// [`tree_cut_warm_options`] reintroduces the mismatch — the bounded fast
+/// path rejects an `sf.m`-shaped warm start via its own `bsf.m`-shaped
+/// guard before `LuBasis::new_timed` (the legacy path's own warm-start
+/// entry point) is ever reached, so `legacy_warm_start_accepted_count`
+/// stays 0 and this FAILS.
+#[test]
+fn separate_tree_cuts_accepts_legacy_warm_start_without_singular_fallback() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+
+    crate::simplex::dual_advanced::reset_legacy_warm_start_counts();
+    let (tightened, iters, _overhead, _attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        u64::MAX,
+    );
+    assert!(
+        tightened.is_some(),
+        "test premise: sentinel node must accept at least one tightening"
+    );
+    assert!(iters > 0, "test premise: at least one solve must have run");
+
+    let accepted = crate::simplex::dual_advanced::legacy_warm_start_accepted_count();
+    let cold_fallback_total =
+        crate::simplex::dual_advanced::legacy_warm_start_cold_fallback_total_count();
+    assert!(
+        accepted > 0,
+        "at least one round-to-round re-solve must accept its warm start via \
+         dual_advanced's legacy path (accepted={accepted})"
+    );
+    // Codex review (P2-4): checking only the singular-basis fallback left two
+    // of the legacy path's three cold-fallback exits (shape/range mismatch,
+    // dual-infeasible-under-new-c) uncounted — a regression hitting either
+    // one would have passed this sentinel silently. `..._cold_fallback_
+    // total_count` sums all three, so any of them firing here fails this
+    // single check.
+    assert_eq!(
+        cold_fallback_total, 0,
+        "no warm-started re-solve should hit any of the legacy path's cold-start \
+         fallbacks (shape/range mismatch, singular basis, dual-infeasible) — the \
+         pre-fix shape-mismatch failure mode (cold_fallback_total={cold_fallback_total})"
+    );
+}
+
+/// **Contract test**: [`tree_cut_resolve`] must be a pure passthrough of
+/// [`solve_tree_cut_warm`]'s own result whenever that result is not
+/// `Optimal` — no extra cold solve attempted, no field rewritten. Checked by
+/// comparing `.iterations` (not just `.status`) against a direct
+/// `solve_tree_cut_warm` call with identical arguments: a reintroduced cold
+/// retry would add its own iterations even on the (likely, same-budget)
+/// chance its status also ends up non-`Optimal`, so status equality alone
+/// would not reliably catch it.
+///
+/// A cut-augmented candidate's extended warm basis is primal-infeasible at
+/// the new rows by construction (`generate_round`/`CutPool` only emit a cut
+/// that violates the current vertex), so capping the warm solve's own
+/// `max_iters` below what it needs to repair that reliably produces a
+/// non-`Optimal` premise to compare against.
+///
+/// [`tree_cut_resolve`]'s shape-mismatch fallback is deliberately not
+/// separately sentinel-tested here — see its own doc for why (a mismatched
+/// `warm_basis` already degrades gracefully inside `solve_dual_advanced`
+/// itself, verified empirically to leave every test's outcome unchanged).
+/// `tree_cut_warm_options_dispatches_dual_advanced_with_disabled_bounded_
+/// path` and `separate_tree_cuts_accepts_legacy_warm_start_without_
+/// singular_fallback` are the sentinels that fail if `disable_bounded_
+/// dispatch` itself regresses.
+#[test]
+fn tree_cut_resolve_is_pure_passthrough_when_warm_solve_is_non_optimal() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions::default();
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+
+    let boot = solve_cut_lp(&milp.lp, &opts, None, None);
+    assert_eq!(boot.status, SolveStatus::Optimal, "test premise");
+    let ws = boot
+        .warm_start_basis
+        .as_ref()
+        .expect("test premise: bootstrap must expose a basis");
+    let x_star = &boot.solution;
+
+    let rows = generate_round(&milp.lp, &mask, x_star, &ws.basis, CutKind::Gmi);
+    assert!(
+        !rows.is_empty(),
+        "test premise: root relaxation must yield at least one cut"
+    );
+    let k = rows.len();
+    let candidate = append_ge_rows_with_integer_mask(&milp.lp, &rows, &mask);
+    let warm_basis = extend_basis_for_new_rows(&candidate, &ws.basis, k);
+
+    let direct = solve_tree_cut_warm(&candidate, &opts, None, Some(1), warm_basis.clone());
+    assert_ne!(
+        direct.status,
+        SolveStatus::Optimal,
+        "test premise: max_iters=1 must be too tight for the extended warm \
+         basis to repair {k} newly-violated cut row(s)"
+    );
+
+    let via_resolve = tree_cut_resolve(&candidate, &opts, None, Some(1), warm_basis);
+    assert_eq!(
+        via_resolve.status, direct.status,
+        "tree_cut_resolve must not reinterpret a non-Optimal warm status"
+    );
+    assert_eq!(
+        via_resolve.iterations, direct.iterations,
+        "tree_cut_resolve must not spend extra iterations on a cold retry \
+         when the warm solve is already non-Optimal"
+    );
+}
+
+/// **SENTINEL** (Codex review, P2-1): a full [`separate_tree_cuts`] attempt
+/// against a real LP must return a nonzero [`tree_cut_construction_
+/// surcharge`] overhead, on the same order of magnitude as `n_builds ×
+/// tree_cut_dim / TREE_CUT_BUILD_ITER_COST_DIVISOR` — bounds derived
+/// independently from the round mechanics (at least one accepted round,
+/// costing at least a cold-bootstrap round's builds on `committed`'s
+/// starting dimension; at most [`TREE_CUT_MAX_ROUNDS`], each costing at
+/// most a warm round's builds on a dimension inflated by that round's own
+/// share of [`MAX_CUTS_PER_ROUND`] extra rows), not by calling
+/// [`tree_cut_construction_surcharge`] itself (which would only prove the
+/// arithmetic is self-consistent, not that anything is actually charged).
+///
+/// Sentinel: collapsing `tree_cut_construction_surcharge` to always return 0
+/// makes this FAIL on `overhead > 0` (and every other test that checks
+/// `overhead` explicitly — this one exists so the surcharge's *existence* on
+/// a real accepted attempt has direct, non-tautological coverage even if
+/// those did not).
+#[test]
+fn separate_tree_cuts_surcharge_is_nonzero_and_order_of_magnitude_correct() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+
+    let (tightened, _iters, overhead, _attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        u64::MAX,
+    );
+    assert!(
+        tightened.is_some(),
+        "test premise: sentinel node must accept at least one tightening"
+    );
+    assert!(
+        overhead > 0,
+        "an accepted round must always charge a nonzero construction surcharge"
+    );
+
+    let dim0 = (milp.lp.num_vars + milp.lp.num_constraints) as u64;
+    let min_builds_round0 = TREE_CUT_BUILDS_ROUND_START_COLD
+        + TREE_CUT_BUILDS_GENERATE_ROUND
+        + TREE_CUT_BUILDS_ROUND_END;
+    let lower_bound = (min_builds_round0 * dim0) / TREE_CUT_BUILD_ITER_COST_DIVISOR;
+    assert!(
+        overhead >= lower_bound,
+        "overhead {overhead} is below the minimum possible for a single \
+         accepted round (dim0={dim0}, lower_bound={lower_bound})"
+    );
+
+    let max_dim = dim0 + (TREE_CUT_MAX_ROUNDS as u64) * (MAX_CUTS_PER_ROUND as u64);
+    let max_builds_per_round = TREE_CUT_BUILDS_ROUND_START_WARM
+        + TREE_CUT_BUILDS_GENERATE_ROUND
+        + TREE_CUT_BUILDS_ROUND_END;
+    let upper_bound = (TREE_CUT_MAX_ROUNDS as u64) * max_builds_per_round * max_dim
+        / TREE_CUT_BUILD_ITER_COST_DIVISOR;
+    assert!(
+        overhead <= upper_bound,
+        "overhead {overhead} exceeds the maximum possible across at most \
+         TREE_CUT_MAX_ROUNDS rounds (max_dim={max_dim}, upper_bound={upper_bound})"
+    );
+}
+
+/// **SENTINEL** (Codex review, P3-2): the declared `TREE_CUT_BUILDS_*`
+/// construction-count constants must match how many times `build_standard_
+/// form` actually runs when each call site executes in isolation —
+/// independent empirical confirmation of the structural claim those
+/// constants document, via `simplex::build_standard_form_call_count`'s
+/// global counter (not `tree_cut_construction_surcharge`, which only
+/// multiplies whatever the constants already say).
+///
+/// Sentinel: changing any `TREE_CUT_BUILDS_*` constant without a matching
+/// change in this module's actual call graph — or vice versa — desyncs one
+/// of these four equalities.
+#[test]
+fn tree_cut_builds_constants_match_actual_build_standard_form_call_counts() {
+    let sentinel = tree_cut_sentinel_milp();
+    let committed = &sentinel.lp;
+    let mask = super::super::integer_mask(committed.num_vars, &sentinel.integer_vars);
+    let opts = SolverOptions::default();
+
+    let boot = solve_cut_lp(committed, &opts, None, None);
+    assert_eq!(boot.status, SolveStatus::Optimal, "test premise");
+    let ws = boot
+        .warm_start_basis
+        .as_ref()
+        .expect("test premise: bootstrap must expose a basis");
+
+    // TREE_CUT_BUILDS_GENERATE_ROUND: generate_round's own build.
+    crate::simplex::reset_build_standard_form_call_count();
+    let cuts = generate_round(committed, &mask, &boot.solution, &ws.basis, CutKind::Gmi);
+    assert_eq!(
+        crate::simplex::build_standard_form_call_count(),
+        TREE_CUT_BUILDS_GENERATE_ROUND,
+        "generate_round's own build_standard_form call count must match \
+         TREE_CUT_BUILDS_GENERATE_ROUND"
+    );
+    assert!(
+        !cuts.is_empty(),
+        "test premise: root relaxation must yield at least one cut"
+    );
+
+    // TREE_CUT_BUILDS_ROUND_START_COLD: solve_cut_lp's own internal build.
+    crate::simplex::reset_build_standard_form_call_count();
+    let reboot = solve_cut_lp(committed, &opts, None, None);
+    assert_eq!(reboot.status, SolveStatus::Optimal, "test premise");
+    assert_eq!(
+        crate::simplex::build_standard_form_call_count(),
+        TREE_CUT_BUILDS_ROUND_START_COLD,
+        "solve_cut_lp's own build_standard_form call count must match \
+         TREE_CUT_BUILDS_ROUND_START_COLD"
+    );
+
+    // TREE_CUT_BUILDS_ROUND_START_WARM: tree_cut_resolve's own shape-check
+    // build plus the warm solve's own internal build, on the happy
+    // (non-cold-fallback) path — re-solving the exact same LP from its own
+    // just-accepted basis must stay warm and Optimal.
+    crate::simplex::reset_build_standard_form_call_count();
+    let warm_res = tree_cut_resolve(committed, &opts, None, None, ws.basis.clone());
+    assert_eq!(
+        warm_res.status,
+        SolveStatus::Optimal,
+        "test premise: warm-resolving the exact same LP+basis must stay Optimal"
+    );
+    assert_eq!(
+        crate::simplex::build_standard_form_call_count(),
+        TREE_CUT_BUILDS_ROUND_START_WARM,
+        "tree_cut_resolve's own build_standard_form call count on the happy \
+         path must match TREE_CUT_BUILDS_ROUND_START_WARM"
+    );
+
+    // TREE_CUT_BUILDS_ROUND_END: extend_basis_for_new_rows's own build plus
+    // tree_cut_resolve's (ROUND_START_WARM-shaped) builds on the resulting
+    // candidate, together.
+    let k = cuts.len();
+    let candidate = append_ge_rows_with_integer_mask(committed, &cuts, &mask);
+    crate::simplex::reset_build_standard_form_call_count();
+    let warm_basis = extend_basis_for_new_rows(&candidate, &ws.basis, k);
+    let check = tree_cut_resolve(&candidate, &opts, None, None, warm_basis);
+    assert_eq!(check.status, SolveStatus::Optimal, "test premise");
+    assert_eq!(
+        crate::simplex::build_standard_form_call_count(),
+        TREE_CUT_BUILDS_ROUND_END,
+        "extend_basis_for_new_rows + tree_cut_resolve's combined \
+         build_standard_form call count must match TREE_CUT_BUILDS_ROUND_END"
+    );
 }
 
 #[test]
@@ -1586,20 +2079,334 @@ fn separate_tree_cuts_drops_augmented_warm_start_basis() {
     );
 
     let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
-    let tightened = separate_tree_cuts(
+    let (tightened, _iters, _overhead, _attempted) = separate_tree_cuts(
         &milp.lp,
         &mask,
         &opts,
         &node_res,
         TREE_CUT_DEPTH_INTERVAL,
         1,
-    )
-    .expect("sentinel node must accept at least one tree-cut tightening");
+        u64::MAX,
+    );
+    let tightened = tightened.expect("sentinel node must accept at least one tree-cut tightening");
     assert!(tightened.objective > node_res.objective);
     assert!(
         tightened.warm_start_basis.is_none(),
         "tree-cut result must not return a basis from the augmented node-local LP"
     );
+}
+
+/// SENTINEL (Phase 1c/P1-2): `max_iters == 0` must run zero rounds — the
+/// round-boundary budget check happens BEFORE the first round's LP solve,
+/// not only between later rounds.
+///
+/// Sentinel: moving the `if iters_spent >= max_iters { break; }` check to
+/// only run after round 0 always executes would make this FAIL (`tightened`
+/// would be `Some(..)` and/or `iters > 0`).
+#[test]
+fn separate_tree_cuts_respects_zero_iter_budget() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+    let (tightened, iters, overhead, _attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        0,
+    );
+    assert!(
+        tightened.is_none(),
+        "zero iteration budget must run no rounds"
+    );
+    assert_eq!(iters, 0, "zero iteration budget must spend zero iterations");
+    assert_eq!(
+        overhead, 0,
+        "zero iteration budget must spend zero surcharge overhead either"
+    );
+}
+
+/// Codex round 3 (P2), reversing Phase 1d/P3-B's original stance: a
+/// zero-iteration budget can never even pass round 0's own budget
+/// pre-check (`remaining < tree_cut_min_useful_iters`, checked before any
+/// solve), so no separation work of any kind happened this call — a budget
+/// deferral, not a genuine "tried and found nothing" dry attempt. Reporting
+/// `attempted = true` here (the pre-round-3 behavior) let a long run of
+/// budget-starved calls silently count toward `tree_cut_dry_streak` and
+/// disable separation via `effort::SEPARATION_DRY_STREAK_LIMIT`, even
+/// though separation was never actually given a chance to run.
+///
+/// Sentinel: replacing `any_round_solved` with a hardcoded `true` in
+/// `separate_tree_cuts`'s two no-op return points makes this FAIL.
+#[test]
+fn separate_tree_cuts_reports_not_attempted_on_zero_iteration_budget() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+    let (_tightened, iters, _overhead, attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        0,
+    );
+    assert_eq!(
+        iters, 0,
+        "test premise: zero iteration budget must spend zero iterations"
+    );
+    assert!(
+        !attempted,
+        "a zero-iteration budget never passes round 0's own pre-check, so no \
+         separation work happened this call — must report `attempted = false` \
+         (a budget deferral, not a dry attempt)"
+    );
+}
+
+/// SENTINEL (Phase 1c/P1-2): a small but nonzero iteration budget caps the
+/// simplex iterations actually spent below what an unrestricted call spends
+/// on the same node (which needs multiple rounds to reach its acceptance
+/// criterion — see `separate_tree_cuts_drops_augmented_warm_start_basis`).
+///
+/// Sentinel: removing the round-boundary `max_iters` check makes the
+/// "capped" call spend the SAME iterations as the unrestricted call, failing
+/// the `<` assertion.
+#[test]
+fn separate_tree_cuts_caps_iterations_at_small_budget() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+
+    let (_, unrestricted_iters, _overhead, _attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        u64::MAX,
+    );
+    assert!(
+        unrestricted_iters > 0,
+        "test premise: the unrestricted attempt must spend some iterations"
+    );
+
+    // A 1-iteration budget is below what even a single round's cut LP solve
+    // needs on this instance, so the capped attempt must stop after fewer
+    // rounds and spend strictly fewer iterations than the unrestricted one.
+    let (_, capped_iters, _overhead, _attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        1,
+    );
+    assert!(
+        capped_iters < unrestricted_iters,
+        "a 1-iteration budget must spend fewer iterations than an unrestricted attempt: \
+         capped={capped_iters} unrestricted={unrestricted_iters}"
+    );
+}
+
+/// SENTINEL (Codex review, P1): `solve_cut_lp` / `solve_validate` actually
+/// pass their `max_iters` parameter through to the underlying LP solve —
+/// before this fix both always built a `SolverOptions` with `max_iters:
+/// None` internally, so a `Some(cap)` argument was accepted but silently had
+/// no effect (a single cold solve could still run unboundedly). A too-small
+/// cap on an LP that genuinely needs several iterations must make the solve
+/// stop before reaching `Optimal`.
+///
+/// Sentinel: removing `max_iters,` from either function's constructed
+/// `SolverOptions` (reverting to always `max_iters: None`, as the previous
+/// hardcoded field was) makes the `capped`/`capped_v` assertions below FAIL
+/// — the solve would still reach `Optimal` in more than 1 iteration, exactly
+/// like the unrestricted case.
+#[test]
+fn solve_cut_lp_and_solve_validate_honor_max_iters() {
+    let milp = tree_cut_sentinel_milp();
+
+    let unrestricted = solve_cut_lp(&milp.lp, &SolverOptions::default(), None, None);
+    assert_eq!(unrestricted.status, SolveStatus::Optimal, "test premise");
+    assert!(
+        unrestricted.iterations > 1,
+        "test premise: root LP must need > 1 iteration; got {}",
+        unrestricted.iterations
+    );
+    let capped = solve_cut_lp(&milp.lp, &SolverOptions::default(), None, Some(1));
+    assert_ne!(
+        capped.status,
+        SolveStatus::Optimal,
+        "max_iters=1 must stop solve_cut_lp before it reaches Optimal"
+    );
+
+    let unrestricted_v = solve_validate(&milp.lp, &SolverOptions::default(), None, None);
+    assert_eq!(unrestricted_v.status, SolveStatus::Optimal, "test premise");
+    assert!(
+        unrestricted_v.iterations > 1,
+        "test premise: root LP must need > 1 iteration; got {}",
+        unrestricted_v.iterations
+    );
+    let capped_v = solve_validate(&milp.lp, &SolverOptions::default(), None, Some(1));
+    assert_ne!(
+        capped_v.status,
+        SolveStatus::Optimal,
+        "max_iters=1 must stop solve_validate before it reaches Optimal"
+    );
+}
+
+/// SENTINEL (markshare_4_0 regression fix): a round whose remaining
+/// allowance is below the per-dimension useful minimum
+/// (`tree_cut_min_useful_iters`) is skipped outright — no cold solve is
+/// attempted at all — rather than run with a truncated `max_iters` (the
+/// pre-fix behavior tested by the now-removed `..._via_floor` sentinel,
+/// which inflated a too-small `remaining` up to the per-dimension floor so
+/// every approved attempt still burned at least one full round of
+/// overhead). `max_iters = 1` is far below what any cold resolve of this
+/// instance needs (`>= 4`, per
+/// `separate_tree_cuts_caps_iterations_at_small_budget`'s test premise), so
+/// the first round must never start.
+///
+/// Codex round 3 (P2) additionally reverses the `attempted` verdict for
+/// this exact scenario: round 0's *own* budget pre-check fired before any
+/// solve ran, so this is a budget deferral (see
+/// `separate_tree_cuts_reports_not_attempted_on_zero_iteration_budget`'s
+/// doc), not a real dry attempt — `attempted` must be `false`, not `true`.
+///
+/// Sentinel: reverting the round-boundary check from `remaining <
+/// tree_cut_min_useful_iters(&committed)` back to `remaining == 0` makes the
+/// solve run with `max_iters = Some(1)` instead of being skipped, so `iters`
+/// becomes nonzero (a cold solve was attempted), failing the second
+/// assertion. Replacing `any_round_solved` with a hardcoded `true` at the
+/// no-op return points makes the `attempted` assertion fail.
+#[test]
+fn separate_tree_cuts_skips_a_round_below_the_per_dimension_minimum_and_reports_not_attempted() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+
+    let max_iters = 1;
+    assert!(
+        max_iters < tree_cut_min_useful_iters(&milp.lp),
+        "test premise: max_iters must be below the per-dimension minimum"
+    );
+    let (tightened, iters, overhead, attempted) = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        max_iters,
+    );
+    assert!(
+        tightened.is_none(),
+        "a round below the per-dimension minimum must be skipped, not run \
+         with a truncated max_iters"
+    );
+    assert_eq!(iters, 0, "no cold solve should have been attempted at all");
+    assert_eq!(
+        overhead, 0,
+        "no construction surcharge should have been charged either"
+    );
+    assert!(
+        !attempted,
+        "round 0's own budget pre-check fired before any solve ran — a \
+         budget deferral, not a real dry attempt — so this must NOT count \
+         toward dry-streak accounting"
+    );
+}
+
+/// SENTINEL (Codex round 3, P2): round 0's solve `max_iters` is `remaining -
+/// round_start_surcharge`, not `remaining` — the surcharge is unavoidable
+/// overhead the solve is about to incur (its shape-check build happens
+/// inside `solve_cut_lp` regardless of outcome), so charging it to
+/// `overhead_spent` only *after* the solve returns (the pre-round-3
+/// behavior) let a solve that fully consumed its cap push `iters_spent +
+/// overhead_spent` past the caller's `max_iters`.
+///
+/// Sentinel: reverting the pre-charge (passing `remaining` instead of
+/// `remaining.saturating_sub(round_start_surcharge)` to round 0's solve)
+/// makes the observed value equal `max_iters` (300) instead of `max_iters -
+/// round_start_surcharge`, failing the assertion below.
+#[test]
+fn round_solve_max_iters_pre_charges_the_construction_surcharge() {
+    let milp = tree_cut_sentinel_milp();
+    let opts = SolverOptions {
+        timeout_secs: Some(30.0),
+        ..Default::default()
+    };
+    let node_res = lp_root(&milp.lp);
+    assert_eq!(node_res.status, SolveStatus::Optimal);
+    let mask = super::super::integer_mask(milp.lp.num_vars, &milp.integer_vars);
+
+    let round_start_surcharge =
+        tree_cut_construction_surcharge(&milp.lp, TREE_CUT_BUILDS_ROUND_START_COLD);
+    assert!(
+        round_start_surcharge > 0,
+        "test premise: this fixture's dim must yield a nonzero surcharge"
+    );
+    let max_iters = tree_cut_min_useful_iters(&milp.lp) + 200;
+
+    let _ = separate_tree_cuts(
+        &milp.lp,
+        &mask,
+        &opts,
+        &node_res,
+        TREE_CUT_DEPTH_INTERVAL,
+        1,
+        max_iters,
+    );
+    let observed = LAST_ROUND_SOLVE_MAX_ITERS.with(std::cell::Cell::get);
+    assert_eq!(
+        observed,
+        Some(max_iters - round_start_surcharge),
+        "round 0's solve must be capped at `max_iters - round_start_surcharge` \
+         ({}), not `max_iters` ({max_iters})",
+        max_iters - round_start_surcharge,
+    );
+}
+
+/// `tree_cut_min_useful_iters` returns exactly `dim *
+/// TREE_CUT_MIN_SOLVE_ITER_DIM_MULT`, independent of any `remaining`
+/// argument (unlike the removed `tree_cut_solve_iter_cap`, it is a pure
+/// threshold, not a value combined with `remaining`).
+///
+/// Sentinel: changing the multiplier used internally without updating
+/// `TREE_CUT_MIN_SOLVE_ITER_DIM_MULT` itself would desync this from
+/// `separate_tree_cuts`'s actual skip threshold, failing this equality.
+#[test]
+fn tree_cut_min_useful_iters_is_dim_times_the_multiplier() {
+    let milp = tree_cut_sentinel_milp();
+    let expected =
+        (milp.lp.num_vars + milp.lp.num_constraints) as u64 * TREE_CUT_MIN_SOLVE_ITER_DIM_MULT;
+    assert_eq!(tree_cut_min_useful_iters(&milp.lp), expected);
 }
 
 // ── Optimum-preservation sweep (cross-node soundness gate) ───────────────────
@@ -1695,9 +2502,24 @@ fn tree_cuts_preserve_optimum_sweep() {
     let mut fired = 0usize;
     let mut checked = 0usize;
     for it in 0..500usize {
-        let n = 5 + it % 3; // 5..7
-        let m = 2 + it % 3; // 2..4
-        let milp = sweep_milp(&mut rng, n, m, 4.0);
+        // markshare_4_0 regression fix: `separate_tree_cuts` now skips a
+        // round outright once the remaining iteration-share budget drops
+        // below the per-dimension useful minimum (see
+        // `cuts::tree_cut_min_useful_iters`), rather than forcing it through
+        // an inflated floor. The independently-random 5..7-variable draws
+        // below bound tightly and resolve in a handful of nodes regardless
+        // of size, so `total_simplex_iters` never grows enough for their
+        // share ceiling to clear that per-dimension minimum (separation
+        // would never fire on any of the 500, making the soundness check
+        // vacuous). A few [`hard_knapsack_milp`] draws interspersed in the
+        // sweep run deep enough B&B searches to clear it.
+        let milp = if it % 100 == 0 {
+            hard_knapsack_milp(16)
+        } else {
+            let n = 5 + it % 3; // 5..7
+            let m = 2 + it % 3; // 2..4
+            sweep_milp(&mut rng, n, m, 4.0)
+        };
 
         let truth = brute_force_opt(&milp);
         let (r_off, _) = super::super::solve_milp_with_stats(&milp, &opts, &cfg_off);

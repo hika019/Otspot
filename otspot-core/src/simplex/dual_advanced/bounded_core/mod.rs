@@ -45,6 +45,8 @@ pub(crate) use pricing::{
     set_partial_price_single_window, RC_DEADLINE_CHECK_COUNT,
 };
 #[cfg(test)]
+use primal::{obj_plateau_should_bail, OBJ_PLATEAU_CHECK_INTERVAL};
+#[cfg(test)]
 pub(crate) use primal::{set_primal_alpha_sv_disabled, set_primal_force_bland};
 
 use super::super::pricing::DualLeavingStrategy;

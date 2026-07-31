@@ -15,20 +15,38 @@ use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use otspot_num::run_fixpoint;
 use otspot_num::{run_step, PipelineStop, SolveControl};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 
 // Test-only observability: counts how many transforms actually ran in the
-// current pass. Purely additive bookkeeping (never gates control flow), and
-// entirely `#[cfg(test)]` — both the definition and every call site below —
-// so it has zero footprint in production builds. Mirrors
+// current pass. Purely additive bookkeeping (never gates control flow on its
+// own), and entirely `#[cfg(test)]` — both the definition and every call
+// site below — so it has zero footprint in production builds. Mirrors
 // `transforms::driver`'s `STEPS_EXECUTED_TOTAL`.
+//
+// `CANCEL_AFTER_STEPS`/`CANCEL_SIGNAL` piggyback on the same counter to give
+// tests a deterministic stand-in for a real expiring deadline: once the
+// executed count reaches the configured target, `CANCEL_SIGNAL` flips, which
+// a test feeds to `run_qp_presolve_phase1` via `SolverOptions::cancel_flag`
+// (an `Arc` clone sharing the same underlying `AtomicBool`). That drives the
+// exact same `run_step`/`SolveControl::check()` path a real deadline would,
+// without racing wall-clock time.
 #[cfg(test)]
 thread_local! {
     static STEPS_EXECUTED_TOTAL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CANCEL_AFTER_STEPS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static CANCEL_SIGNAL: std::sync::Arc<AtomicBool> = std::sync::Arc::new(AtomicBool::new(false));
 }
 
 #[cfg(test)]
 fn test_record_step_executed() {
-    STEPS_EXECUTED_TOTAL.with(|c| c.set(c.get() + 1));
+    let executed = STEPS_EXECUTED_TOTAL.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if CANCEL_AFTER_STEPS.with(std::cell::Cell::get) == Some(executed) {
+        CANCEL_SIGNAL.with(|flag| flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    }
 }
 
 /// Run all Phase-1 QP-presolve transforms: fixed-var / singleton / empty-row-col /
@@ -120,16 +138,12 @@ pub fn run_qp_presolve_phase1(prob: &QpProblem, opts: &SolverOptions) -> QpPreso
 mod per_step_control_tests {
     //! Sentinels for the `run_step`-based per-step interruption wiring,
     //! unifying the QP driver with the LP driver's contract (`transforms::
-    //! driver::per_step_control_tests::real_deadline_stops_pass_before_all_steps_run_via_run_step`).
+    //! driver::per_step_control_tests::cancel_signal_stops_pass_before_all_steps_run_via_run_step`).
     use super::*;
     use crate::problem::ConstraintType;
     use otspot_num::sparse::CscMatrix;
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-
-    // Real per-step timing races real wall-clock time, so tests that depend
-    // on it must not run concurrently with each other.
-    static TIMING_TEST_LOCK: Mutex<()> = Mutex::new(());
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     const STEP_COUNT: usize = 11;
 
@@ -197,74 +211,53 @@ mod per_step_control_tests {
         QpProblem::new(q, c, a, b, bounds, cts).unwrap()
     }
 
-    const WIDE_QP_BLOCKS: usize = 2000;
-    const TEST_DEADLINE: Duration = Duration::from_micros(1000);
+    /// Number of steps allowed to run before `CANCEL_SIGNAL` flips, chosen
+    /// strictly between 0 and `STEP_COUNT` so the test can distinguish
+    /// "stopped mid-pass" from both "never started" and "ran to completion".
+    const CANCEL_AFTER: usize = 5;
 
-    /// Sentinel: a real, already-expiring `SolveControl` deadline stops a
-    /// pass partway through its transforms — proven by going through
-    /// `run_step`'s actual `control.check()`, not a bypass, matching the LP
-    /// driver's contract.
+    /// Sentinel: a `SolveControl` whose `cancel` flag flips deterministically
+    /// after `CANCEL_AFTER` steps (a mock-clock stand-in for a real expiring
+    /// deadline) stops a pass partway through its transforms — proven by
+    /// going through `run_step`'s actual `control.check()`, not a bypass,
+    /// matching the LP driver's contract.
     ///
     /// Mutation-fail (verified manually, see commit message): replacing the
     /// `control` argument fed to `run_step` inside `run_or_stop!` with
     /// `SolveControl::default()` (severing the wiring while leaving
     /// `run_fixpoint`'s own outer per-pass control check untouched) makes
-    /// `executed` jump to `STEP_COUNT` (all steps run) and this assertion
-    /// fails, because `run_fixpoint`'s own check only fires once, before
-    /// pass 0 starts (deadline not yet expired at that point), and nothing
-    /// else would stop the pass mid-flight.
+    /// `executed` jump to `STEP_COUNT` (all steps run) and the equality
+    /// assertion fails, because `run_fixpoint`'s own check only fires once,
+    /// before pass 0 starts (`CANCEL_SIGNAL` is not yet set at that point),
+    /// and nothing else would stop the pass mid-flight.
     #[test]
-    fn real_deadline_stops_pass_before_all_steps_run_via_run_step() {
-        let _guard = TIMING_TEST_LOCK.lock().unwrap();
-        let prob = wide_qp(WIDE_QP_BLOCKS);
-        let opts = SolverOptions {
-            presolve_max_pass: 1,
-            use_ruiz_scaling: false,
-            deadline: Some(Instant::now() + TEST_DEADLINE),
-            ..SolverOptions::default()
-        };
+    fn cancel_signal_stops_pass_before_all_steps_run_via_run_step() {
+        let prob = wide_qp(1);
 
         STEPS_EXECUTED_TOTAL.with(|c| c.set(0));
+        CANCEL_AFTER_STEPS.with(|c| c.set(Some(CANCEL_AFTER)));
+        CANCEL_SIGNAL.with(|flag| flag.store(false, Ordering::Relaxed));
+
+        let opts = CANCEL_SIGNAL.with(|flag| SolverOptions {
+            presolve_max_pass: 1,
+            use_ruiz_scaling: false,
+            cancel_flag: Some(Arc::clone(flag)),
+            ..SolverOptions::default()
+        });
         let result = run_qp_presolve_phase1(&prob, &opts);
+
+        CANCEL_AFTER_STEPS.with(|c| c.set(None));
         let executed = STEPS_EXECUTED_TOTAL.with(|c| c.get());
 
         assert!(
             !result.was_reduced,
-            "mid-pass deadline expiry must discard the transaction (no_reduction)"
+            "mid-pass cancellation must discard the transaction (no_reduction)"
         );
-        assert!(
-            executed < STEP_COUNT,
-            "a deadline expiring mid-pass must stop before all {STEP_COUNT} \
-             steps run, got {executed}"
-        );
-        assert!(
-            executed > 0,
-            "the deadline must not already be expired at `run_fixpoint`'s own \
-             pre-pass check (that would test the outer check, not `run_step`), got {executed}"
-        );
-    }
-
-    /// Calibration check (not a correctness sentinel): confirms a full pass
-    /// over `wide_qp` reliably takes much longer than `TEST_DEADLINE`, so
-    /// the margin claim above is a measured fact, not an assumption.
-    #[test]
-    fn full_pass_duration_is_comfortably_above_the_test_deadline() {
-        let _guard = TIMING_TEST_LOCK.lock().unwrap();
-        let prob = wide_qp(WIDE_QP_BLOCKS);
-        let opts = SolverOptions {
-            presolve_max_pass: 1,
-            use_ruiz_scaling: false,
-            ..SolverOptions::default()
-        };
-        let t0 = Instant::now();
-        let result = run_qp_presolve_phase1(&prob, &opts);
-        let elapsed = t0.elapsed();
-        assert!(!result.was_reduced, "wide_qp must not reduce in one pass");
-        assert!(
-            elapsed > TEST_DEADLINE * 3,
-            "full pass took {elapsed:?}, expected > 3x TEST_DEADLINE ({:?}) \
-             for the deadline test's margin to hold",
-            TEST_DEADLINE * 3
+        assert_eq!(
+            executed, CANCEL_AFTER,
+            "the cancel signal flips right after step {CANCEL_AFTER} runs, so \
+             run_step must let exactly that many steps through before \
+             skipping the rest (out of {STEP_COUNT}), got {executed}"
         );
     }
 

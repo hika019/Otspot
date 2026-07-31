@@ -4,6 +4,30 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+- MILP B&Bに決定的なeffort budgetを導入。primal heuristics (RINS/RENS/local branching)・
+  in-tree分離・strong branchingを累積simplex反復比でゲートし、木探索へ予算の過半を構造的
+  に確保。heuristic sub-MIPは反復上限で決定的に打ち切り、tree cut/symmetry/root cutを
+  継承しない。B&B軌跡がrun間で再現するようになり、MIPLIB small (eps=1e-6/1e-8, 1000s)
+  の証明つき最適が5/20→**7/20** (+`dcmulti`, +`markshare_4_0`)
+- bounded primal simplexのBland leaving選択が許容誤差帯タイブレークでanti-cycling条件を
+  破り、退化LPで基底を巡回する問題を修正 (厳密最小比+最小index)。巡回検出後のobjective
+  プラトー打ち切り (`Stalled`) も追加し、`pk1`のノード処理スループットが約20倍に
+- `MipConfig::max_lp_iters`を新設し、MIPの決定的な反復予算をノードLP・sub-MIP・分離LPへ
+  per-solveのsimplex反復上限として伝播 (primal/dual/bounded/Big-Mの全ループが尊重)。
+  scaling/Big-M retryは初回試行と予算を共有する (二重消費と反復数の計上落ちを防止)
+- tree-cut分離LPをcold二相primal再解からwarm start (dual simplex+基底拡張) へ変更。
+  1ラウンドの反復数が約1桁減り、LP構築の固定費は専用カウンタで分離予算へ課金。`gt2`の
+  探索が1616→100ノードに
+- 数値デッドエンド (terminal基底再構成の失敗等) を`Timeout`として誤報告し、B&Bが残り
+  時間を捨てて早期終了する問題を修正 (`noswot`で実測、約860秒を廃棄していた)。資源上限
+  由来の未検証な`Infeasible`/`Unbounded`主張も、Farkas ray検証またはstop statusへの
+  降格で正直なステータスに統一
+- `MipConfig::default()`の`max_nodes`を1,000,000→**10,000,000**へ (実測ノードレートでは
+  時間制限が先に効くべき水準のため)
+- `MipStats`にB&B時間内訳カウンタ (分離/heuristics/分岐選択/隠れsub-MIPノード数等) を
+  追加し、`milp_solve`にablationフラグ (`--no-tree-cuts`/`--no-rins`等) を追加
+- 実時間依存でCIフレークしていたテストの決定化やREADME Performance表の全suite再実測など
+  周辺整備も実施
 - LP presolveを`SolverOptions::presolve_max_pass`(既定10→**50**、netlib/Maros実測の最大
   必要パス数9 [mondou2] に約5倍の余裕)で打ち切るよう是正。従来はLP driverだけ
   `usize::MAX`を渡しており、この設定が事実上無視されていた。上限に到達して打ち切った場合

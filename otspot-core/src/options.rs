@@ -198,7 +198,19 @@ pub enum MipBranching {
 /// Defaults for [`MipConfig`].
 pub const DEFAULT_MIP_GAP_TOL: f64 = 1e-6;
 pub const DEFAULT_INTEGER_FEAS_TOL: f64 = 1e-6;
-pub const DEFAULT_MIP_MAX_NODES: usize = 1_000_000;
+/// Phase 0 (MIPLIB small) measured `markshare_4_0` hitting the prior
+/// 1_000_000-node cap at 822s of its 1000s timeout, wasting the remaining
+/// ~178s of budget on a node-count stop instead of a time stop — the
+/// wall-clock timeout should be the binding stop condition for realistic
+/// problem sizes, with `max_nodes` only a backstop against unbounded memory
+/// growth. Phase 1c re-bench measured `markshare_4_0`'s node rate at
+/// ~1,216 nodes/s; over the full 1000s bench timeout that is ~1.2M nodes, so
+/// 10_000_000 (~8x that observed rate) gives ample headroom for the fastest
+/// node-processing problem in this suite while still bounding the node
+/// queue's memory footprint (100_000_000, tried first, is too large to serve
+/// as a meaningful backstop — no problem in the suite gets remotely close to
+/// it before timing out first).
+pub const DEFAULT_MIP_MAX_NODES: usize = 10_000_000;
 pub const DEFAULT_MIP_MAX_DEPTH: usize = 1_000;
 /// Default root cutting-plane state.
 pub const DEFAULT_MIP_CUTS: bool = true;
@@ -224,6 +236,17 @@ pub struct MipConfig {
     pub integer_feas_tol: f64,
     pub max_nodes: usize,
     pub max_depth: usize,
+    /// Deterministic cap on this solve's own `MipStats::lp_iters_total`
+    /// (node-relaxation simplex iterations only, not the `mip::effort`
+    /// aggregate). `None` (the default, used for the top-level solve) means
+    /// unbounded. Set on RINS/RENS/local-branching sub-MIP configs (Phase
+    /// 1d, P1-B) as their primary, timing-independent stopping condition;
+    /// see `heuristics::SUB_MIP_MAX_LP_ITERS`. Checked in `solve_mip_core`'s
+    /// node loop alongside the wall-clock deadline and `max_nodes`, and
+    /// handled identically to deadline expiry (returns the best incumbent
+    /// found so far as `SolveStatus::Timeout`/no-solution `Timeout`, not
+    /// `MaxIterations`/`SuboptimalSolution`).
+    pub max_lp_iters: Option<u64>,
     pub branching: MipBranching,
     /// Generate Gomory Mixed-Integer cuts at the root before branch-and-bound.
     pub cuts: bool,
@@ -256,6 +279,7 @@ impl Default for MipConfig {
             integer_feas_tol: DEFAULT_INTEGER_FEAS_TOL,
             max_nodes: DEFAULT_MIP_MAX_NODES,
             max_depth: DEFAULT_MIP_MAX_DEPTH,
+            max_lp_iters: None,
             branching: MipBranching::default(),
             cuts: DEFAULT_MIP_CUTS,
             max_cut_rounds: DEFAULT_MAX_CUT_ROUNDS,
@@ -521,8 +545,43 @@ pub struct SolverOptions {
     pub(crate) cancel_flag: Option<Arc<AtomicBool>>,
     /// Solve deadline computed from `timeout_secs` at solve entry (internal use).
     pub(crate) deadline: Option<Instant>,
+    /// Per-solve simplex iteration cap (internal use). `None` = unbounded
+    /// (checked only against `deadline`, the default for a direct LP/MIP
+    /// solve). Set by the MIP B&B driver to the *remaining* share of
+    /// `MipConfig::max_lp_iters` before each node's own relaxation solve, so
+    /// a single pathological node cannot silently consume the entire
+    /// cumulative budget between the node-loop's own (coarser, once-per-node)
+    /// `max_lp_iters` check — see `mip::solve_node_relaxation`.
+    ///
+    /// Checked every iteration (not sampled, unlike the objective-plateau
+    /// bail which only samples every `OBJ_PLATEAU_CHECK_INTERVAL` iterations)
+    /// in `dual_advanced::bounded_core`'s `primal_simplex_aug` /
+    /// `phase2_primal_bounded` loops, regardless of `bland_mode` and in both
+    /// Phase I and Phase II. Exceeding it always returns
+    /// `SimplexOutcome::Stalled` (never `Timeout`, since this is an internal
+    /// budget decision, not the external wall-clock deadline or a
+    /// cancellation) — `stop_status` maps that honestly to
+    /// `SuboptimalSolution`/`MaxIterations`, not a silently-capped result.
+    pub(crate) max_iters: Option<u64>,
     /// Cached Schur complement decision from `probe_schur_decision`.
     pub(crate) schur_hint: Option<bool>,
+    /// Force `dual_advanced::solve_dual_advanced` onto its legacy
+    /// (UB-row-expanded, `build_standard_form`-shaped) path, skipping the
+    /// bounded fast path even when every variable has a finite upper bound.
+    /// Default: `false`.
+    ///
+    /// The bounded fast path (`try_bounded`) uses
+    /// `build_bounded_standard_form`'s compact basis space (`bsf.m`), which
+    /// is smaller than the legacy path's `build_standard_form` space
+    /// (`sf.m`, one extra row per two-sided-bound variable) whenever any
+    /// variable has both bounds finite. A caller whose warm-start basis was
+    /// produced in the legacy space (e.g. `mip::cuts`'s in-tree separation,
+    /// whose tableau-based cut generation requires `sf.m`-shaped bases) must
+    /// set this so its warm start is accepted in the same space it was
+    /// built in, rather than being silently rejected by the bounded path's
+    /// own `warm.basis.len() == bsf.m` shape guard and falling back to a
+    /// cold solve.
+    pub(crate) disable_bounded_dispatch: bool,
 
     // --- Ruiz scaling ---
     /// Apply Ruiz equilibration scaling before LP simplex / IPM.  Default: `true`.
@@ -612,7 +671,9 @@ impl Default for SolverOptions {
             timeout_secs: None,
             cancel_flag: None,
             deadline: None,
+            max_iters: None,
             schur_hint: None,
+            disable_bounded_dispatch: false,
             use_ruiz_scaling: true,
             tolerance: None,
             ipm: IpmOptions::default(),
@@ -802,6 +863,21 @@ impl SolverOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- MipConfig defaults -----------------------------------------------
+
+    /// Pin (P2-2): `DEFAULT_MIP_MAX_NODES` is 10_000_000, and `MipConfig::default()`
+    /// inherits it.
+    ///
+    /// Sentinel: changing `DEFAULT_MIP_MAX_NODES` back to the prior
+    /// 1_000_000 or the briefly-tried 100_000_000 (too large to serve as a
+    /// meaningful node-queue memory backstop — see the const's doc comment)
+    /// fails this test immediately, before any bench run is needed to notice.
+    #[test]
+    fn default_mip_max_nodes_is_ten_million() {
+        assert_eq!(DEFAULT_MIP_MAX_NODES, 10_000_000);
+        assert_eq!(MipConfig::default().max_nodes, 10_000_000);
+    }
 
     // ---- DualPricing default sentinel ------------------------------------
 
