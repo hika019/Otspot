@@ -1402,6 +1402,26 @@ fn tree_cut_node_selected(depth: usize, node_index: usize) -> bool {
         || (node_index > 0 && node_index.is_multiple_of(TREE_CUT_NODE_INTERVAL))
 }
 
+// Test-only observation of round 0's solve `max_iters` (post the surcharge
+// pre-charge — see the round-start comment inside `separate_tree_cuts`),
+// letting `round_solve_max_iters_pre_charges_the_construction_surcharge`
+// assert on the exact value passed to the solve without needing a fixture
+// whose cold solve genuinely exhausts an iteration cap — zero production
+// footprint.
+#[cfg(test)]
+thread_local! {
+    static LAST_ROUND_SOLVE_MAX_ITERS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn record_round_solve_max_iters(v: u64) {
+    LAST_ROUND_SOLVE_MAX_ITERS.with(|c| c.set(Some(v)));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn record_round_solve_max_iters(_: u64) {}
+
 /// Re-separate GMI/MIR cuts from a B&B node's LP relaxation and return a
 /// cut-tightened result when its bound improves by at least
 /// [`MIN_TREE_CUT_GAIN_REL`], else `None`.
@@ -1452,6 +1472,18 @@ pub(crate) fn separate_tree_cuts(
     // `build_standard_form(committed)`-shaped basis carried warm from round
     // to round; `None` until round 0's cold bootstrap succeeds.
     let mut basis: Option<Vec<usize>> = None;
+    // Codex round 3 (P2): distinguishes "this call genuinely tried
+    // separation and found nothing" (a real dry attempt — must bump
+    // `tree_cut_dry_streak`) from "the node-selection interval never even
+    // reached round 0's budget check" — both previously returned the same
+    // hardcoded `attempted=true`, so a call preempted by insufficient
+    // budget (a scheduling/deferral outcome, not a separation failure)
+    // incorrectly counted toward the dry streak and could disable
+    // separation entirely under `effort::SEPARATION_DRY_STREAK_LIMIT`. Set
+    // once round 0's own solve actually runs; a later round's budget skip
+    // (line ~1489 below) still counts as attempted, since real separation
+    // work already happened this call.
+    let mut any_round_solved = false;
 
     for round_idx in 0..TREE_CUT_MAX_ROUNDS {
         // Codex review (P1) / markshare_4_0 follow-up: pass the *actual*
@@ -1466,19 +1498,9 @@ pub(crate) fn separate_tree_cuts(
         if remaining < tree_cut_min_useful_iters(&committed) {
             break;
         }
+        any_round_solved = true;
         let is_bootstrap = basis.is_none();
-        let cut_res = match basis.take() {
-            None => solve_cut_lp(&committed, options, options.deadline, Some(remaining)),
-            Some(prev_basis) => tree_cut_resolve(
-                &committed,
-                options,
-                options.deadline,
-                Some(remaining),
-                prev_basis,
-            ),
-        };
-        iters_spent = iters_spent.saturating_add(cut_res.iterations as u64);
-        // `is_bootstrap` selects the same branch `cut_res` above just took:
+        // `is_bootstrap` selects the same branch `cut_res` below takes:
         // `solve_cut_lp` (no shape-check build of its own — see
         // `TREE_CUT_BUILDS_ROUND_START_COLD`) on round 0, `tree_cut_resolve`
         // (with its own shape-check build — `TREE_CUT_BUILDS_ROUND_START_
@@ -1488,10 +1510,34 @@ pub(crate) fn separate_tree_cuts(
         } else {
             TREE_CUT_BUILDS_ROUND_START_WARM
         };
-        overhead_spent = overhead_spent.saturating_add(tree_cut_construction_surcharge(
-            &committed,
-            round_start_builds,
-        ));
+        // Codex round 3 (P2): this round's construction surcharge is
+        // unavoidable overhead the solve below is about to incur (the
+        // shape-check build happens inside `solve_cut_lp`/`tree_cut_resolve`
+        // regardless of the outcome), but was previously only subtracted
+        // from `remaining` *after* the solve returned. That let the solve's
+        // own `max_iters` cap be `remaining` iterations wide even though
+        // `remaining - surcharge` is all that's actually left once this
+        // round's overhead is honestly counted — breaking the invariant
+        // that `iters_spent + overhead_spent` never exceeds `max_iters`.
+        // Pre-charging it here (before computing the solve's own cap) keeps
+        // that invariant exact.
+        let round_start_surcharge = tree_cut_construction_surcharge(&committed, round_start_builds);
+        let solve_max_iters = remaining.saturating_sub(round_start_surcharge);
+        if is_bootstrap {
+            record_round_solve_max_iters(solve_max_iters);
+        }
+        let cut_res = match basis.take() {
+            None => solve_cut_lp(&committed, options, options.deadline, Some(solve_max_iters)),
+            Some(prev_basis) => tree_cut_resolve(
+                &committed,
+                options,
+                options.deadline,
+                Some(solve_max_iters),
+                prev_basis,
+            ),
+        };
+        iters_spent = iters_spent.saturating_add(cut_res.iterations as u64);
+        overhead_spent = overhead_spent.saturating_add(round_start_surcharge);
         if cut_res.status != SolveStatus::Optimal {
             break;
         }
@@ -1592,14 +1638,14 @@ pub(crate) fn separate_tree_cuts(
     // returned result carries no warm-start basis (its augmented layout would not
     // match child node solves, which use the original constraint structure).
     let Some(mut res) = accepted else {
-        return (None, iters_spent, overhead_spent, true);
+        return (None, iters_spent, overhead_spent, any_round_solved);
     };
     let scale = 1.0_f64.max(base_obj.abs());
     if res.objective <= base_obj + MIN_TREE_CUT_GAIN_REL * scale {
-        return (None, iters_spent, overhead_spent, true);
+        return (None, iters_spent, overhead_spent, any_round_solved);
     }
     res.warm_start_basis = None;
-    (Some(res), iters_spent, overhead_spent, true)
+    (Some(res), iters_spent, overhead_spent, any_round_solved)
 }
 
 #[cfg(test)]

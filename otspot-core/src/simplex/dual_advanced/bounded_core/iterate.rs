@@ -101,6 +101,43 @@ impl IterBuffers {
     }
 }
 
+/// `Some(Timeout(obj))` once the deadline expires, cancellation is
+/// requested, or `options.max_iters`'s per-solve cap is reached — the last
+/// of these is Codex round 3 (P1): this loop never checked `max_iters` at
+/// all, so a sub-MIP's remaining `MipConfig::max_lp_iters` budget went
+/// unenforced whenever a node relaxation dispatched to the bounded-dual path
+/// specifically (see `dual_advanced::core`'s equivalent check).
+/// `BoundedOutcome::Timeout`'s own doc allows "deadline or hard iteration
+/// cap", and the caller's clock-recheck (`honest_stall_result`/
+/// `stop_status`) already re-derives `MaxIterations`/`SuboptimalSolution`
+/// from `options` whenever this wasn't a genuine deadline/cancel, so reusing
+/// this one variant for all three causes is honest.
+fn loop_stop_timeout(
+    options: &SolverOptions,
+    state: &BoundedDualState,
+    c: &[f64],
+    ubs: &[f64],
+) -> Option<BoundedOutcome> {
+    let timed_out = deadline_reached(options.deadline);
+    let cancelled = options
+        .cancel_flag
+        .as_ref()
+        .is_some_and(|f| f.load(Ordering::Relaxed));
+    let capped = options
+        .max_iters
+        .is_some_and(|limit| state.iterations as u64 >= limit);
+    (timed_out || cancelled || capped).then(|| {
+        BoundedOutcome::Timeout(bounded_obj(
+            c,
+            &state.basis,
+            &state.x_b,
+            &state.at_upper,
+            &state.is_basic,
+            ubs,
+        ))
+    })
+}
+
 /// Inner iteration loop. Accepts a pre-populated state — tests use this to
 /// inject synthetic primal infeasibilities; production cold/warm-start callers
 /// supply the matching basis. Cost perturbation is applied here so callers
@@ -225,21 +262,8 @@ pub(crate) fn iterate(
     loop {
         let iteration_before = state.iterations;
         state.iterations = state.iterations.saturating_add(1);
-        let timed_out = deadline_reached(options.deadline);
-        let cancelled = options
-            .cancel_flag
-            .as_ref()
-            .is_some_and(|f| f.load(Ordering::Relaxed));
-        if timed_out || cancelled {
-            let obj = bounded_obj(
-                c,
-                &state.basis,
-                &state.x_b,
-                &state.at_upper,
-                &state.is_basic,
-                ubs,
-            );
-            return (BoundedOutcome::Timeout(obj), state);
+        if let Some(outcome) = loop_stop_timeout(options, &state, c, ubs) {
+            return (outcome, state);
         }
 
         if let Some(t) = trace.as_mut() {

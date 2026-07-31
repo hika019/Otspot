@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3066 testcases, 26 ignored
+# totals: 3076 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -276,12 +276,13 @@ otspot-core	mip::cuts::tests::le_revalidation_lp_is_optimal_no_presolve	active
 otspot-core	mip::cuts::tests::mir_coeff_equals_gmi_for_all_cases	active
 otspot-core	mip::cuts::tests::mir_cut_validity_continuous_nonbasic_negative_alpha	active
 otspot-core	mip::cuts::tests::mir_cuts_generated_after_two_rounds	active
+otspot-core	mip::cuts::tests::round_solve_max_iters_pre_charges_the_construction_surcharge	active
 otspot-core	mip::cuts::tests::separate_tree_cuts_accepts_legacy_warm_start_without_singular_fallback	active
 otspot-core	mip::cuts::tests::separate_tree_cuts_caps_iterations_at_small_budget	active
 otspot-core	mip::cuts::tests::separate_tree_cuts_drops_augmented_warm_start_basis	active
-otspot-core	mip::cuts::tests::separate_tree_cuts_reports_attempted_independent_of_zero_iterations	active
+otspot-core	mip::cuts::tests::separate_tree_cuts_reports_not_attempted_on_zero_iteration_budget	active
 otspot-core	mip::cuts::tests::separate_tree_cuts_respects_zero_iter_budget	active
-otspot-core	mip::cuts::tests::separate_tree_cuts_skips_a_round_below_the_per_dimension_minimum	active
+otspot-core	mip::cuts::tests::separate_tree_cuts_skips_a_round_below_the_per_dimension_minimum_and_reports_not_attempted	active
 otspot-core	mip::cuts::tests::separate_tree_cuts_surcharge_is_nonzero_and_order_of_magnitude_correct	active
 otspot-core	mip::cuts::tests::solve_cut_lp_and_solve_validate_honor_max_iters	active
 otspot-core	mip::cuts::tests::solve_cut_lp_options_inherits_caller_tolerance	active
@@ -296,7 +297,7 @@ otspot-core	mip::cuts::tests::tree_cut_resolve_is_pure_passthrough_when_warm_sol
 otspot-core	mip::cuts::tests::tree_cut_warm_options_dispatches_dual_advanced_with_disabled_bounded_path	active
 otspot-core	mip::cuts::tests::tree_cuts_off_does_not_separate	active
 otspot-core	mip::cuts::tests::tree_cuts_preserve_optimum_sweep	active
-otspot-core	mip::cuts::tests::tree_cuts_reduce_node_count_sentinel	active
+otspot-core	mip::cuts::tests::tree_cuts_reduce_node_count_sentinel_on_dedicated_knapsack	active
 otspot-core	mip::effort::tests::component_at_or_over_its_share_is_blocked	active
 otspot-core	mip::effort::tests::component_comfortably_under_share_is_allowed	active
 otspot-core	mip::effort::tests::heuristic_iter_budget_saturates_at_zero_when_over_the_floored_ceiling	active
@@ -463,6 +464,9 @@ otspot-core	mip::tests::bt_resolves_root_as_integer_feasible	active
 otspot-core	mip::tests::conflict_learns_from_infeasible_nodes	active
 otspot-core	mip::tests::conflict_pruned_le_nodes_processed	active
 otspot-core	mip::tests::conflict_stats_zero_for_integer_root	active
+otspot-core	mip::tests::dispatch_relaxation_status_proceeds_on_maxiterations_when_budget_remains	active
+otspot-core	mip::tests::dispatch_relaxation_status_proceeds_on_maxiterations_without_a_configured_cap	active
+otspot-core	mip::tests::dispatch_relaxation_status_treats_exhausted_max_lp_iters_like_timeout	active
 otspot-core	mip::tests::dive_ends_on_infeasible_and_sibling_explored	active
 otspot-core	mip::tests::equality_row_integer_var_crossed_bounds_detect_infeasibility	active
 otspot-core	mip::tests::feasibility_pump_finds_initial_integer_solution	active
@@ -1409,6 +1413,7 @@ otspot-core	simplex::dual_advanced::bounded_core::tests::flip_apply_preserves_ba
 otspot-core	simplex::dual_advanced::bounded_core::tests::flip_apply_preserves_basis_rhs_invariant_noop_proof	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::force_bland_reaches_same_optimum_as_devex	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::inject_lb_violation_makes_progress_boxed	active
+otspot-core	simplex::dual_advanced::bounded_core::tests::iterate_honours_max_iters_cap	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::obj_plateau_bail_advances_by_check_interval_per_sampled_call	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::obj_plateau_bail_fires_exactly_at_trigger_with_frozen_objective	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::obj_plateau_bail_ignores_sub_threshold_noise_and_stops	active
@@ -1507,6 +1512,9 @@ otspot-core	simplex::dual_advanced::tests::bfrt_wiring_flip_count_positive	activ
 otspot-core	simplex::dual_advanced::tests::bfrt_wiring_flip_count_positive_noop_proof	active
 otspot-core	simplex::dual_advanced::tests::bfrt_wiring_multi_pattern_correct	active
 otspot-core	simplex::dual_advanced::tests::bfrt_wiring_warm_start_reuse	active
+otspot-core	simplex::dual_advanced::tests::big_m_retry_does_not_introduce_a_cap_when_none_is_configured	active
+otspot-core	simplex::dual_advanced::tests::big_m_retry_pre_charges_the_primal_attempts_iterations	active
+otspot-core	simplex::dual_advanced::tests::big_m_retry_skips_when_the_shared_cap_is_exhausted	active
 otspot-core	simplex::dual_advanced::tests::bound_violation_timeout_objective_uses_restored_incumbent	active
 otspot-core	simplex::dual_advanced::tests::diag_basis_initial_x_b_divides_by_diagonal	active
 otspot-core	simplex::dual_advanced::tests::eq_ub_dispatch_count_positive	active
@@ -1523,6 +1531,7 @@ otspot-core	simplex::dual_advanced::tests::ge_eq_cold_start_primal_first_dispatc
 otspot-core	simplex::dual_advanced::tests::ge_eq_le_mixed_types_solve_correctly	active
 otspot-core	simplex::dual_advanced::tests::ge_infeasible_bounded_path_returns_infeasible	active
 otspot-core	simplex::dual_advanced::tests::ge_with_ub_solves_via_bounded_path_with_warm_basis	active
+otspot-core	simplex::dual_advanced::tests::infeasible_without_ray_after_exhausted_retry_does_not_self_report_as_infeasible	active
 otspot-core	simplex::dual_advanced::tests::legacy_warm_start_lb_violation_repairs_and_converges	active
 otspot-core	simplex::dual_advanced::tests::legacy_warm_start_shape_mismatch_is_counted	active
 otspot-core	simplex::dual_advanced::tests::p1_hypothesis_art_goes_positive_in_phase2	active
@@ -1582,6 +1591,7 @@ otspot-core	simplex::pricing::tests::test_dantzig_returns_none_when_optimal	acti
 otspot-core	simplex::pricing::tests::test_dantzig_selects_most_negative	active
 otspot-core	simplex::pricing::tests::test_steepest_edge_prefers_better_score	active
 otspot-core	simplex::pricing::tests::test_steepest_edge_scoring	active
+otspot-core	simplex::primal::core::cycling_plateau_bail_tests::plateau_bail_requires_countermeasure_to_have_fired	active
 otspot-core	simplex::primal::core::revert_to_snapshot_tests::test_revert_to_snapshot_expired_deadline_is_not_singular	active
 otspot-core	simplex::primal::core::revert_to_snapshot_tests::test_revert_to_snapshot_singular_basis_stays_singular	active
 otspot-core	simplex::primal::core::revert_to_snapshot_tests::test_revert_to_snapshot_success_updates_state	active
