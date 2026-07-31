@@ -2,7 +2,9 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.7.4] - 2026-07-31
+
+MILP/simplex の性能改善 (MIPLIB small 5/20→7/20) とステータス誠実化、solver 基盤の otspot-num crate 分離を中心としたリリース。
 
 - MILP B&Bに決定的なeffort budgetを導入。primal heuristics (RINS/RENS/local branching)・
   in-tree分離・strong branchingを累積simplex反復比でゲートし、木探索へ予算の過半を構造的
