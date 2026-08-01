@@ -88,7 +88,9 @@
     "Tolerance": ["High", "Medium", "Fast", "Custom"]
   },
   "python_only_variants": {
-    "_note": "Variants that exist on the Python side but are not real Rust variants -- always the honest fallback for a #[non_exhaustive] Rust enum's mandatory wildcard match arm (see enums.rs's From<SolveStatus> for PySolveStatus), never an invented capability. PySolutionProof/PySolveError have no such fallback: their wildcard arms panic instead, since eq_int enums cannot carry the payload an honest 'Unknown' value would need.",
+    "_note": "Variants that exist on the Python side but are not real Rust variants -- always the honest fallback for a #[non_exhaustive] Rust enum's mandatory wildcard match arm (see enums.rs's From<Rust> for Py* impls), never an invented capability. SolveStatus's Unknown carries the original Display text (a complex enum can hold a payload); SolutionProof/SolveError's Unknown is payload-less (eq_int enums cannot carry one) but is still a distinct, honest 'not one of the known variants' value rather than panicking or silently aliasing a real variant.",
+    "SolutionProof": ["Unknown"],
+    "SolveError": ["Unknown"],
     "SolveStatus": ["Unknown"]
   },
   "out_of_scope": [
@@ -100,7 +102,8 @@
     "Model::try_var_name / try_var_kind / ModelResult::try_value - eager-Result variants of the panicking var_name/var_kind/value/__getitem__; the bound Python var_name/var_kind/value/__getitem__ use these try_* variants internally already (see errors.rs) and raise InvalidInputError on Err instead of letting the panic through, so no separate try_* binding is needed",
     "Expression::from_constant - a convenience constructor equivalent to passing a bare Python float wherever an Expression is expected; every binding's coerce() dispatch already accepts a bare float uniformly, so a separate constructor call has no use in Python",
     "ModelResult.stats (otspot_core::problem::SolveStats) - internal routing/timing diagnostics (SolveRoute enum, per-phase microsecond timings, warm-start counters, ~10+ fields); binding it would also require binding SolveRoute and is disproportionate scope for this PR",
-    "otspot_core::options::SolverOptions / MipConfig / GlobalOptimizationConfig / BranchingStrategy / etc. - only the subset reachable through Model's set_* methods (timeout, tolerance, presolve, threads, obj_offset) is bound",
+    "otspot_core::options::SolverOptions / MipConfig / GlobalOptimizationConfig / BranchingStrategy / etc. (incl. SolverOptions::with_tolerance) - only the subset reachable through Model's set_* methods (timeout, tolerance, presolve, threads, obj_offset) is bound",
+    "otspot_core::qp::ipm_solver::outcome::IpmOutcome::infeasibility / infeasibility_status - internal IPM solver machinery (constructs a diagnostic outcome from a SolveStatus), not part of any path reachable from Model",
     "otspot.InternalError - mapped from ModelError::Internal, a solver-internal invariant violation (e.g. validate_qp_dual_len's length-mismatch guard); not a documented, deliberately-triggerable failure mode from well-formed Python calls, so unlike the other 5 model_error_exceptions it has no dedicated behavior-parity test"
   ]
 }

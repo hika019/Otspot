@@ -175,6 +175,9 @@ fn lp_oracle_matches_hand_solution_and_exercises_manifested_api() {
         oracle::LP_EXPECTED_OBJECTIVE,
         result.objective()
     );
+    // `.objective()` and the `.objective_value` field must agree (both are
+    // manifested; this also confirms `.objective()` is a genuine passthrough).
+    assert_eq!(result.objective(), result.objective_value);
     assert!((result.value(x) - oracle::LP_EXPECTED_X).abs() < oracle::TOL);
     assert!((result[y] - oracle::LP_EXPECTED_Y).abs() < oracle::TOL);
 

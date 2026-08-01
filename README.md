@@ -109,6 +109,29 @@ let prob = mps::parse_mps_file("problem.mps".as_ref()).unwrap();
 let result = solve(&prob);
 ```
 
+### Python
+
+The `otspot-py` crate (PyO3/maturin) exposes the same `Model` API to Python, symbol-for-symbol:
+
+```python
+import otspot
+
+model = otspot.Model("example")
+x = model.add_var("x", 0.0, float("inf"))
+y = model.add_var("y", 0.0, 10.0)
+model.add_constraint((2.0 * x + 3.0 * y).leq(12.0))
+model.add_constraint((x + y).geq(3.0))
+model.minimize(x + 2.0 * y)
+
+result = model.solve()
+print(result.status, result.objective_value, result.value(x), result[y])
+```
+
+See [`otspot-py/README.md`](otspot-py/README.md) for installation, the full API
+(quadratic objectives, integer/binary variables, error handling), and caveats
+(operator overloading differs from Rust's `constraint!` macro, thread-safety,
+GIL release during `solve()`, pickling).
+
 ## Performance
 
 Solve-rate benchmark on standard public sets via the `otspot-dev` benchmark harness
@@ -239,6 +262,7 @@ otspot/          # facade crate — re-exports core / io / model
 otspot-core/     # solver engine (simplex, IPM, B&B, presolve, linalg, sparse)
 otspot-io/       # file parsers (MPS, QPS, QPLIB)
 otspot-model/    # algebraic modeling API (Model, Variable, constraint! macro)
+otspot-py/       # Python bindings (PyO3/maturin); not in default-members
 otspot-dev/      # dev-only binaries (qps_benchmark, qp_runner, …; not published)
 examples/        # solve_lp, solve_qp
 tests/           # integration tests

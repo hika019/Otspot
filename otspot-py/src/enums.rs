@@ -9,11 +9,27 @@
 //! Python `ConstraintSense` binding would be a decorative type nothing ever
 //! produces or consumes. Re-add it if/when otspot-model grows a constraint
 //! introspection API (see api_manifest.json's `out_of_scope`).
+//!
+//! Every type here implements `__reduce__` so instances survive
+//! `pickle`/`copy.deepcopy` (needed for e.g. `multiprocessing` error
+//! propagation: `SolveFailedError.error` is a `PySolveError`, and pickling an
+//! exception pickles its `__dict__`, including that attribute).
 
 use otspot_core::options::Tolerance;
 use otspot_core::problem::SolveStatus;
 use otspot_model::{SolutionProof, SolveError, VarKind};
 use pyo3::prelude::*;
+use pyo3::types::PyType;
+use pyo3::IntoPyObjectExt;
+
+/// `__reduce__` payload for a plain `#[pyclass(eq, eq_int)]` unit variant:
+/// `(getattr, (EnumClass, "VariantName"))`, so unpickling re-evaluates
+/// `getattr(EnumClass, "VariantName")` — exactly the class-attribute access
+/// every caller already uses to obtain one of these singletons.
+fn reduce_via_getattr(py: Python<'_>, cls: Bound<'_, PyType>, name: &str) -> PyResult<Py<PyAny>> {
+    let getattr = PyModule::import(py, "builtins")?.getattr("getattr")?;
+    (getattr, (cls, name)).into_py_any(py)
+}
 
 #[pyclass(module = "otspot", name = "VarKind", eq, eq_int, from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -33,12 +49,31 @@ impl From<VarKind> for PyVarKind {
     }
 }
 
+#[pymethods]
+impl PyVarKind {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let name = match self {
+            PyVarKind::Continuous => "Continuous",
+            PyVarKind::Integer => "Integer",
+            PyVarKind::Binary => "Binary",
+        };
+        reduce_via_getattr(py, py.get_type::<PyVarKind>(), name)
+    }
+}
+
 #[pyclass(module = "otspot", name = "SolutionProof", eq, eq_int, from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PySolutionProof {
     GlobalOptimal,
     LocalOptimal,
     FeasibleUnproven,
+    /// Not a real `SolutionProof` variant: the honest fallback for the
+    /// `#[non_exhaustive]` wildcard below. `eq_int` variants cannot carry a
+    /// payload, so (unlike `PySolveStatus::Unknown`) this cannot preserve
+    /// the original `Debug` text — but mapping to an arbitrary *known*
+    /// variant instead would silently misreport optimality strength to
+    /// callers branching on it, which is strictly worse.
+    Unknown,
 }
 
 impl From<SolutionProof> for PySolutionProof {
@@ -48,17 +83,22 @@ impl From<SolutionProof> for PySolutionProof {
             SolutionProof::LocalOptimal => PySolutionProof::LocalOptimal,
             SolutionProof::FeasibleUnproven => PySolutionProof::FeasibleUnproven,
             // `SolutionProof` is `#[non_exhaustive]`, so a wildcard is
-            // mandatory to compile. Mapping an unknown future variant to an
-            // arbitrary known one would silently misreport optimality
-            // strength to callers branching on it — panic loudly instead
-            // (`eq_int` variants carry no payload, so there is no honest
-            // "Unknown" value to return; see `PySolveStatus` below for the
-            // complex-enum case, which can carry one).
-            _ => panic!(
-                "otspot_core::problem::SolutionProof gained a variant unhandled by \
-                 otspot-py/src/enums.rs; update this From impl and api_manifest.json"
-            ),
+            // mandatory to compile.
+            _ => PySolutionProof::Unknown,
         }
+    }
+}
+
+#[pymethods]
+impl PySolutionProof {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let name = match self {
+            PySolutionProof::GlobalOptimal => "GlobalOptimal",
+            PySolutionProof::LocalOptimal => "LocalOptimal",
+            PySolutionProof::FeasibleUnproven => "FeasibleUnproven",
+            PySolutionProof::Unknown => "Unknown",
+        };
+        reduce_via_getattr(py, py.get_type::<PySolutionProof>(), name)
     }
 }
 
@@ -70,6 +110,8 @@ pub enum PySolveError {
     MaxIterations,
     Stalled,
     NumericalError,
+    /// See `PySolutionProof::Unknown`'s doc comment.
+    Unknown,
 }
 
 impl From<SolveError> for PySolveError {
@@ -80,12 +122,24 @@ impl From<SolveError> for PySolveError {
             SolveError::MaxIterations => PySolveError::MaxIterations,
             SolveError::Stalled => PySolveError::Stalled,
             SolveError::NumericalError => PySolveError::NumericalError,
-            // See `PySolutionProof::from`'s wildcard comment above.
-            _ => panic!(
-                "otspot_model::SolveError gained a variant unhandled by \
-                 otspot-py/src/enums.rs; update this From impl and api_manifest.json"
-            ),
+            // #[non_exhaustive]: wildcard required for cross-crate matching.
+            _ => PySolveError::Unknown,
         }
+    }
+}
+
+#[pymethods]
+impl PySolveError {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let name = match self {
+            PySolveError::Infeasible => "Infeasible",
+            PySolveError::Unbounded => "Unbounded",
+            PySolveError::MaxIterations => "MaxIterations",
+            PySolveError::Stalled => "Stalled",
+            PySolveError::NumericalError => "NumericalError",
+            PySolveError::Unknown => "Unknown",
+        };
+        reduce_via_getattr(py, py.get_type::<PySolveError>(), name)
     }
 }
 
@@ -96,8 +150,7 @@ impl From<SolveError> for PySolveError {
 /// `Unknown(String)` is not a real `SolveStatus` variant: it is the honest
 /// fallback for the `#[non_exhaustive]` wildcard this `From` impl is forced
 /// to have (unlike `PySolutionProof`/`PySolveError`, a complex enum *can*
-/// carry the real `Display` text, so panicking here would throw away
-/// information a panic-only fallback can't preserve).
+/// carry the real `Display` text).
 #[pyclass(module = "otspot", name = "SolveStatus", from_py_object)]
 #[derive(Clone)]
 pub enum PySolveStatus {
@@ -141,6 +194,38 @@ impl From<SolveStatus> for PySolveStatus {
     }
 }
 
+#[pymethods]
+impl PySolveStatus {
+    /// `(VariantClass, ())` for a unit variant, `(VariantClass, (payload,))`
+    /// for a payload variant — `VariantClass(*args)` reconstructs the exact
+    /// instance, mirroring how every variant is already constructed.
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let cls = py.get_type::<PySolveStatus>();
+        let (name, payload): (&str, Option<&str>) = match self {
+            PySolveStatus::Optimal() => ("Optimal", None),
+            PySolveStatus::LocallyOptimal() => ("LocallyOptimal", None),
+            PySolveStatus::Infeasible() => ("Infeasible", None),
+            PySolveStatus::Unbounded() => ("Unbounded", None),
+            PySolveStatus::MaxIterations() => ("MaxIterations", None),
+            PySolveStatus::SuboptimalSolution() => ("SuboptimalSolution", None),
+            PySolveStatus::Stalled() => ("Stalled", None),
+            PySolveStatus::FeasiblePoint() => ("FeasiblePoint", None),
+            PySolveStatus::Timeout() => ("Timeout", None),
+            PySolveStatus::NumericalError() => ("NumericalError", None),
+            PySolveStatus::NonConvex(msg) => ("NonConvex", Some(msg.as_str())),
+            PySolveStatus::NonconvexLocal() => ("NonconvexLocal", None),
+            PySolveStatus::NonconvexGlobal() => ("NonconvexGlobal", None),
+            PySolveStatus::NotSupported(msg) => ("NotSupported", Some(msg.as_str())),
+            PySolveStatus::Unknown(msg) => ("Unknown", Some(msg.as_str())),
+        };
+        let variant_cls = cls.getattr(name)?;
+        match payload {
+            Some(msg) => (variant_cls, (msg,)).into_py_any(py),
+            None => (variant_cls, ()).into_py_any(py),
+        }
+    }
+}
+
 /// `Tolerance::Custom(f64)` carries a payload; same complex-enum treatment as
 /// `SolveStatus` above. This conversion only runs Python -> Rust (there is no
 /// `ModelResult` field of type `Tolerance`), converting *from* this crate's
@@ -162,6 +247,24 @@ impl From<PyTolerance> for Tolerance {
             PyTolerance::Medium() => Tolerance::Medium,
             PyTolerance::Fast() => Tolerance::Fast,
             PyTolerance::Custom(v) => Tolerance::Custom(v),
+        }
+    }
+}
+
+#[pymethods]
+impl PyTolerance {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let cls = py.get_type::<PyTolerance>();
+        let (name, payload): (&str, Option<f64>) = match self {
+            PyTolerance::High() => ("High", None),
+            PyTolerance::Medium() => ("Medium", None),
+            PyTolerance::Fast() => ("Fast", None),
+            PyTolerance::Custom(eps) => ("Custom", Some(*eps)),
+        };
+        let variant_cls = cls.getattr(name)?;
+        match payload {
+            Some(eps) => (variant_cls, (eps,)).into_py_any(py),
+            None => (variant_cls, ()).into_py_any(py),
         }
     }
 }

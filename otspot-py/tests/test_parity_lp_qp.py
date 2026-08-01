@@ -8,7 +8,10 @@ independent-oracle requirement).
 Does not depend on data/ (absent in worktrees, per repo convention).
 """
 
+import copy
+import pickle
 import threading
+import time
 
 import pytest
 
@@ -49,6 +52,10 @@ def test_lp_oracle():
     assert result.proof == otspot.SolutionProof.GlobalOptimal
     assert result.has_global_optimality_proof()
     assert abs(result.objective() - 3.0) < TOL
+    # `.objective()` and the `.objective_value` field must agree (the
+    # manifest lists both; this also verifies `.objective()` is genuinely a
+    # passthrough rather than an independently-computed value).
+    assert result.objective() == result.objective_value
     assert abs(result.value(x) - 3.0) < TOL
     assert abs(result[y] - 0.0) < TOL
 
@@ -68,7 +75,13 @@ def test_lp_oracle():
     assert rc is not None and len(rc) == 2
     assert abs(rc[0]) < TOL, "x is not at a bound"
 
-    assert result.bound_duals == [], "LP path leaves bound_duals empty by design"
+    # Exercises the field (manifested) without pinning the LP path's current
+    # choice not to populate it as a cross-language contract: that's an
+    # implementation detail of *this* solver's LP route, not something a
+    # Rust<->Python parity test should encode as ground truth (the QP oracle
+    # below separately verifies the field is populated when it is expected
+    # to be, on the route where it is).
+    assert isinstance(result.bound_duals, list)
 
 
 def test_qp_oracle():
@@ -244,51 +257,126 @@ def test_cross_model_var_name_and_var_kind_raise_invalid_input_error():
         model_b.var_kind(x_a)
 
 
+def _build_gil_probe_model(n: int = 1200) -> otspot.Model:
+    """A single-model-thread solve of this size takes ~0.12s in a release
+    build and ~21s in debug (measured empirically: this LP's build+solve
+    path is 130-170x slower in debug and grows worse than linearly with
+    `n`). `n` is a compromise: large enough for a stable release-mode ratio
+    signal (n=800 gave a consistent ~0.51 ratio across repeated trials, but
+    one earlier one-off measurement under incidental system load read 0.89
+    -- too close to the 0.75 threshold below for comfort; n=1200 keeps the
+    same ~0.50-0.52 ratio with roughly double the absolute wall-clock
+    margin against that kind of transient noise), while keeping the full
+    test (2 serial + 2 concurrent solves) around ~65s even in debug,
+    comfortably inside the 3-minute-per-test budget."""
+    model = otspot.Model("gil_release_probe")
+    variables = [model.add_var(f"x{i}", 0.0, 10.0) for i in range(n)]
+    obj: otspot.Variable | otspot.Expression | otspot.QuadExpr = variables[0]
+    for i in range(1, n):
+        obj = obj + float(i % 7 + 1) * variables[i]
+    model.minimize(obj)
+    for i in range(n - 1):
+        model.add_constraint((variables[i] + variables[i + 1]).geq(float((i % 5) + 1)))
+    return model
+
+
 def test_solve_releases_the_gil():
     """`Model.solve` must run under `Python::detach` so other Python threads
     can make progress during a long solve (otherwise a `timeout_secs`-bounded
     solve -- unbounded by default -- would also freeze `KeyboardInterrupt`
     delivery for its whole duration).
 
-    Design: a moderately sized LP (~0.4s to solve) plus a background thread
-    that increments a counter in a tight loop with no blocking calls. If the
-    GIL is held throughout `solve()`, the background thread cannot execute
-    any Python bytecode during that window (measured empirically while
-    writing this test: ~1.2e5 increments, a fixed cost from thread startup
-    latency, independent of solve duration -- confirmed by re-running a 3.5x
-    longer solve and seeing the same ~1.2e5 count). With the GIL released,
-    the same setup reaches ~4.5e6 increments. The threshold below sits
-    comfortably between the two regimes (4x above the held-GIL ceiling, 9x
-    below the typical released count): an order-of-magnitude check, not a
-    tight timing race.
+    Design: wall-clock ratio, not a counter-increment race. An earlier
+    version of this test counted background-thread increments during a
+    single ~0.4s (debug-build-calibrated) solve; it failed deterministically
+    against a `--release` wheel (the same solve takes 5-6ms in release, far
+    too short for the counter to distinguish "GIL held" from "GIL released"
+    -- measured 4/4 CI failures). This version instead solves two
+    *independent* `Model`s (never the same instance across threads: PyO3
+    pyclasses use runtime borrow checking, so concurrent `&mut self` access
+    to one shared `Model` raises "already borrowed", which is why each
+    thread gets its own) serially and concurrently, and compares wall time.
+    If the GIL is held throughout each `solve()`, the second thread cannot
+    even *start* its own solve's Rust work until the first thread's call
+    returns to Python, so concurrent time is roughly what serial is. With
+    the GIL released, both run on separate cores. Measured with the release
+    wheel at `n=1200` (`_build_gil_probe_model`'s default), across repeated
+    trials: serial ~0.25s, concurrent ~0.13s (ratio ~0.50-0.52); reverting
+    the `Python::detach` fix gives ratio ~0.99-1.02. The threshold below
+    (0.75) sits comfortably between both regimes, independent of build
+    profile (debug shows the same ~0.5 vs ~1.0 split, just slower overall).
     """
-    n = 150
-    model = otspot.Model("gil_release_probe")
-    variables = [model.add_var(f"x{i}", 0.0, 10.0) for i in range(n)]
-    obj = variables[0]
-    for i in range(1, n):
-        obj = obj + float(i % 7 + 1) * variables[i]
-    model.minimize(obj)
-    for i in range(n - 1):
-        model.add_constraint((variables[i] + variables[i + 1]).geq(float((i % 5) + 1)))
+    m1, m2 = _build_gil_probe_model(), _build_gil_probe_model()
+    t0 = time.perf_counter()
+    r1 = m1.solve()
+    r2 = m2.solve()
+    serial = time.perf_counter() - t0
 
-    counter = {"n": 0}
-    stop = threading.Event()
+    m3, m4 = _build_gil_probe_model(), _build_gil_probe_model()
+    results: dict[str, otspot.ModelResult] = {}
 
-    def spin():
-        while not stop.is_set():
-            counter["n"] += 1
+    def run(key: str, model: otspot.Model) -> None:
+        results[key] = model.solve()
 
-    thread = threading.Thread(target=spin)
-    thread.start()
-    try:
-        result = model.solve()
-    finally:
-        stop.set()
-        thread.join()
+    thread_a = threading.Thread(target=run, args=("a", m3))
+    thread_b = threading.Thread(target=run, args=("b", m4))
+    t0 = time.perf_counter()
+    thread_a.start()
+    thread_b.start()
+    thread_a.join()
+    thread_b.join()
+    concurrent = time.perf_counter() - t0
 
-    assert isinstance(result.status, otspot.SolveStatus.Optimal)
-    assert counter["n"] > 500_000, (
-        f"background thread only progressed {counter['n']} increments during "
-        "solve() -- GIL appears to be held throughout, not released"
+    for result in (r1, r2, results["a"], results["b"]):
+        assert isinstance(result.status, otspot.SolveStatus.Optimal)
+
+    assert concurrent < serial * 0.75, (
+        f"concurrent={concurrent:.3f}s not comfortably faster than serial={serial:.3f}s "
+        f"(ratio {concurrent / serial:.3f}) -- GIL appears to be held throughout "
+        "solve(), preventing real concurrency"
+    )
+
+
+def test_solve_failed_error_error_attribute_survives_pickle():
+    """`SolveFailedError.error` (a `PySolveError` set via `setattr`, see
+    errors.rs) must survive `pickle`/`copy.deepcopy` for `multiprocessing`
+    error propagation to work (a worker process's exception is pickled to
+    send back to the parent). Regression: `PySolveError` initially had no
+    `__reduce__`, so `pickle.dumps` on the exception raised `TypeError:
+    cannot pickle 'otspot.SolveError' object`."""
+    model = otspot.Model("infeasible_pickle_check")
+    x = model.add_var("x", 0.0, 1.0)
+    model.add_constraint(x.geq(5.0))
+    model.minimize(x)
+    with pytest.raises(otspot.SolveFailedError) as exc_info:
+        model.solve()
+    original = exc_info.value
+
+    restored = pickle.loads(pickle.dumps(original))
+    assert isinstance(restored, otspot.SolveFailedError)
+    assert restored.error == otspot.SolveError.Infeasible
+
+    deep_copied = copy.deepcopy(original)
+    assert deep_copied.error == otspot.SolveError.Infeasible
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_type"),
+    [
+        (otspot.VarKind.Continuous, otspot.VarKind),
+        (otspot.SolutionProof.GlobalOptimal, otspot.SolutionProof),
+        (otspot.SolveError.Infeasible, otspot.SolveError),
+        (otspot.SolveStatus.Optimal(), otspot.SolveStatus),
+        (otspot.SolveStatus.NonConvex("indefinite Q"), otspot.SolveStatus),
+        (otspot.Tolerance.Medium(), otspot.Tolerance),
+        (otspot.Tolerance.Custom(1e-7), otspot.Tolerance),
+    ],
+)
+def test_enum_values_survive_pickle_round_trip(value, expected_type):
+    restored = pickle.loads(pickle.dumps(value))
+    assert isinstance(restored, expected_type)
+    assert restored == value or (
+        # Complex-enum variants (SolveStatus/Tolerance) are not `eq`-comparable
+        # (no `#[pyclass(eq)]`); compare via `__reduce__`'s own payload instead.
+        type(restored) is type(value) and restored.__reduce__()[1] == value.__reduce__()[1]
     )

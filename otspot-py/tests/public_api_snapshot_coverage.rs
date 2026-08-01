@@ -1,23 +1,31 @@
 //! Second stage of the `cargo public-api` guardrail (see
 //! `scripts/check_otspot_model_public_api.sh` for the first stage: a diff
-//! between the live `otspot-model` public API and the checked-in
-//! `otspot_model_api_snapshot.txt`, run in CI's `public-api` job since it
-//! needs the nightly toolchain + `cargo-public-api`).
+//! between the live public API and each checked-in snapshot below, run in
+//! CI's `public-api` job since it needs the nightly toolchain +
+//! `cargo-public-api`).
 //!
 //! This test needs neither: it only reads the already-generated snapshot
-//! file and `api_manifest.json`, both checked in, and asserts every
-//! meaningful identifier in the snapshot is mentioned somewhere in the
-//! manifest (a method/type/variant entry, or an `out_of_scope` note). That
-//! catches the case the hand-written `api_manifest_rust.rs` compile checks
-//! cannot: a *new* pub item added to otspot-model that nobody updated the
-//! manifest for.
+//! files and `api_manifest.json`, all checked in, and asserts every
+//! meaningful identifier in them is mentioned somewhere in the manifest (a
+//! method/type/variant entry, or an `out_of_scope` note). That catches the
+//! case the hand-written `api_manifest_rust.rs` compile checks cannot: a
+//! *new* pub item added upstream that nobody updated the manifest for.
+//!
+//! Two snapshots: `otspot_model_api_snapshot.txt` (the full `otspot-model`
+//! public API, the crate otspot-py binds directly) and
+//! `otspot_core_status_tolerance_snapshot.txt` (otspot-core's public API
+//! filtered to `SolveStatus`/`Tolerance` lines — otspot-model's own snapshot
+//! only shows *references* to these otspot_core types as field/parameter
+//! types, not their variants, since they are defined in a different crate).
 //!
 //! The match is a case-insensitive whole-word search over the manifest's
 //! full JSON text, not a structured lookup — approximate, but proportionate:
 //! it catches "this identifier is mentioned nowhere," which is exactly the
 //! silent-drift failure mode this guardrail exists for.
 
-const SNAPSHOT: &str = include_str!("../otspot_model_api_snapshot.txt");
+const MODEL_SNAPSHOT: &str = include_str!("../otspot_model_api_snapshot.txt");
+const CORE_STATUS_TOLERANCE_SNAPSHOT: &str =
+    include_str!("../otspot_core_status_tolerance_snapshot.txt");
 const MANIFEST_JSON: &str = include_str!("../api_manifest.json");
 
 /// Trait-plumbing method names that appear in the snapshot purely because
@@ -99,30 +107,42 @@ fn word_present_case_insensitive(haystack_lower: &str, word: &str) -> bool {
     false
 }
 
-#[test]
-fn public_api_snapshot_is_covered_by_manifest_or_out_of_scope() {
-    let manifest_lower = MANIFEST_JSON.to_lowercase();
+fn uncovered_identifiers<'a>(snapshot: &'a str, manifest_lower: &str) -> Vec<&'a str> {
     let mut uncovered: Vec<&str> = Vec::new();
-
-    for line in SNAPSHOT.lines() {
+    for line in snapshot.lines() {
         let Some(subject) = line_subject(line) else {
             continue;
         };
         if STANDARD_TRAIT_METHOD_NAMES.contains(&subject) {
             continue;
         }
-        if !word_present_case_insensitive(&manifest_lower, subject) {
+        if !word_present_case_insensitive(manifest_lower, subject) {
             uncovered.push(subject);
         }
     }
-
     uncovered.sort_unstable();
     uncovered.dedup();
+    uncovered
+}
+
+#[test]
+fn public_api_snapshot_is_covered_by_manifest_or_out_of_scope() {
+    let manifest_lower = MANIFEST_JSON.to_lowercase();
+
+    let model_uncovered = uncovered_identifiers(MODEL_SNAPSHOT, &manifest_lower);
     assert!(
-        uncovered.is_empty(),
+        model_uncovered.is_empty(),
         "otspot_model_api_snapshot.txt has identifiers not mentioned anywhere in \
          api_manifest.json (add a methods/types/variants entry or an out_of_scope \
-         note): {uncovered:?}"
+         note): {model_uncovered:?}"
+    );
+
+    let core_uncovered = uncovered_identifiers(CORE_STATUS_TOLERANCE_SNAPSHOT, &manifest_lower);
+    assert!(
+        core_uncovered.is_empty(),
+        "otspot_core_status_tolerance_snapshot.txt has identifiers not mentioned anywhere in \
+         api_manifest.json (add a methods/types/variants entry or an out_of_scope \
+         note): {core_uncovered:?}"
     );
 }
 

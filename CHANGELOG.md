@@ -37,6 +37,28 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
   diff を追加。`otspot-py`はworkspace `members`に追加したが
   `default-members`には含めない (cdylib+`extension-module`機能が通常の
   `cargo build`/`test`を汚染するため)
+- **修正**: `otspot-py`の`[lib] name`が root package (`otspot`) と衝突し
+  `cargo doc --workspace --no-deps`が exit 101 で失敗していた問題を修正
+  (`otspot_py`にリネーム。wheel の import 名は `#[pymodule] fn otspot` と
+  `maturin` の `module-name` 経由のため無関係)
+- **修正**: `SolveFailedError.error`をはじめ全 enum 型 (`VarKind`/
+  `SolutionProof`/`SolveError`/`SolveStatus`/`Tolerance`) が pickle 不能
+  だった問題を修正 (`__reduce__`実装。multiprocessing でのエラー伝搬が
+  壊れていた)。`SolutionProof`/`SolveError`に`Unknown` unit variant を追加し、
+  `#[non_exhaustive]` wildcard の panic を解消 (`SolveStatus`と同じ「正直な
+  未知値」方式に統一)
+- **修正**: GIL解放を検証する `test_solve_releases_the_gil` が release wheel
+  で決定論的に fail していた問題を修正 (debug ビルドの solve 時間で較正した
+  カウンタ閾値が release では届かなかった)。2 モデルを 2 スレッドで並行 solve
+  し直列合計時間と比較する wall-clock 比方式に差し替え (ビルドプロファイル
+  非依存)
+- スナップショット防波堤を otspot_core の `SolveStatus`/`Tolerance` まで拡張
+  (`otspot-py/otspot_core_status_tolerance_snapshot.txt`)。従来は
+  otspot-model 側の型参照のみで variant 追加を検知できなかった
+- `otspot-py/README.md`・root `README.md`・`otspot.pyi`に thread 安全性
+  (`Model`の同時アクセス不可)・GIL解放・pickle制約を明記。`.pyi`の
+  `SolveStatus`/`Tolerance` variant 表現を実行時の subclass 関係と一致する
+  形に修正 (mypy での isinstance narrowing を実測確認)
 
 ## [0.7.4] - 2026-07-31
 

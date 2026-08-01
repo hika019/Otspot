@@ -1,0 +1,59 @@
+pub otspot_core::conic::ConicResult::status: otspot_core::problem::SolveStatus
+pub otspot_core::conic::GlobalResult::status: otspot_core::problem::SolveStatus
+pub otspot_core::conic::MisocpResult::status: otspot_core::problem::SolveStatus
+pub otspot_core::conic::QcqpResult::status: otspot_core::problem::SolveStatus
+#[non_exhaustive] pub enum otspot_core::options::Tolerance
+pub otspot_core::options::Tolerance::Custom(f64)
+pub otspot_core::options::Tolerance::Fast
+pub otspot_core::options::Tolerance::High
+pub otspot_core::options::Tolerance::Medium
+pub otspot_core::options::SolverOptions::tolerance: core::option::Option<otspot_core::options::Tolerance>
+pub fn otspot_core::options::SolverOptions::with_tolerance(self, otspot_core::options::Tolerance) -> core::result::Result<Self, otspot_core::options::OptionsError>
+#[non_exhaustive] pub enum otspot_core::problem::SolveStatus
+pub otspot_core::problem::SolveStatus::FeasiblePoint
+pub otspot_core::problem::SolveStatus::Infeasible
+pub otspot_core::problem::SolveStatus::LocallyOptimal
+pub otspot_core::problem::SolveStatus::MaxIterations
+pub otspot_core::problem::SolveStatus::NonConvex(alloc::string::String)
+pub otspot_core::problem::SolveStatus::NonconvexGlobal
+pub otspot_core::problem::SolveStatus::NonconvexLocal
+pub otspot_core::problem::SolveStatus::NotSupported(alloc::string::String)
+pub otspot_core::problem::SolveStatus::NumericalError
+pub otspot_core::problem::SolveStatus::Optimal
+pub otspot_core::problem::SolveStatus::Stalled
+pub otspot_core::problem::SolveStatus::SuboptimalSolution
+pub otspot_core::problem::SolveStatus::Timeout
+pub otspot_core::problem::SolveStatus::Unbounded
+impl core::fmt::Display for otspot_core::problem::SolveStatus
+pub fn otspot_core::problem::SolveStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub otspot_core::problem::SolverResult::status: otspot_core::problem::SolveStatus
+pub otspot_core::qp::ipm_solver::outcome::IpmOutcome::infeasibility_status: core::option::Option<otspot_core::problem::SolveStatus>
+pub fn otspot_core::qp::ipm_solver::outcome::IpmOutcome::infeasibility(otspot_core::problem::SolveStatus) -> Self
+#[non_exhaustive] pub enum otspot_core::SolveStatus
+pub otspot_core::SolveStatus::FeasiblePoint
+pub otspot_core::SolveStatus::Infeasible
+pub otspot_core::SolveStatus::LocallyOptimal
+pub otspot_core::SolveStatus::MaxIterations
+pub otspot_core::SolveStatus::NonConvex(alloc::string::String)
+pub otspot_core::SolveStatus::NonconvexGlobal
+pub otspot_core::SolveStatus::NonconvexLocal
+pub otspot_core::SolveStatus::NotSupported(alloc::string::String)
+pub otspot_core::SolveStatus::NumericalError
+pub otspot_core::SolveStatus::Optimal
+pub otspot_core::SolveStatus::Stalled
+pub otspot_core::SolveStatus::SuboptimalSolution
+pub otspot_core::SolveStatus::Timeout
+pub otspot_core::SolveStatus::Unbounded
+impl core::fmt::Display for otspot_core::problem::SolveStatus
+pub fn otspot_core::problem::SolveStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum otspot_core::Tolerance
+pub otspot_core::Tolerance::Custom(f64)
+pub otspot_core::Tolerance::Fast
+pub otspot_core::Tolerance::High
+pub otspot_core::Tolerance::Medium
+pub otspot_core::ConicResult::status: otspot_core::problem::SolveStatus
+pub otspot_core::MisocpResult::status: otspot_core::problem::SolveStatus
+pub otspot_core::QcqpResult::status: otspot_core::problem::SolveStatus
+pub otspot_core::SolverOptions::tolerance: core::option::Option<otspot_core::options::Tolerance>
+pub fn otspot_core::options::SolverOptions::with_tolerance(self, otspot_core::options::Tolerance) -> core::result::Result<Self, otspot_core::options::OptionsError>
+pub otspot_core::SolverResult::status: otspot_core::problem::SolveStatus

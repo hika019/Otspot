@@ -111,6 +111,25 @@ except otspot.NoObjectiveError:
 See `api_manifest.json`'s `model_error_exceptions` for the full
 `ModelError` variant -> exception class mapping.
 
+`SolveFailedError.error` (and every `VarKind`/`SolutionProof`/`SolveError`/
+`SolveStatus`/`Tolerance` value) supports `pickle`/`copy.deepcopy`, so
+propagating a caught exception across a `multiprocessing` process boundary
+works as expected.
+
+### Threading and the GIL
+
+`Model.solve()` runs with the GIL released (`Python::detach`): other Python
+threads make progress during a solve, and a long or unbounded
+(`timeout_secs` defaults to no limit) solve does not freeze
+`KeyboardInterrupt` delivery for the rest of the process. Independent
+`Model` instances can therefore solve concurrently on separate threads.
+
+A single `Model` instance is **not** safe to call concurrently from multiple
+threads: PyO3 pyclasses use runtime borrow checking, so e.g. two threads
+both calling `.solve()` (or any other `&mut self` method) on the *same*
+`Model` raise a "already borrowed"-style `RuntimeError` rather than racing
+silently. Give each thread (or process) its own `Model`.
+
 ## Testing
 
 ```bash
