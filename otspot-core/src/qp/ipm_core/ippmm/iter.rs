@@ -32,14 +32,6 @@ use otspot_num::linalg::kkt_solver::{inexact_eta_for_eps, KktConfig};
 use otspot_num::linalg::parallelism::with_solver_pool;
 use otspot_num::linalg::timeout::TimeoutCtx;
 
-/// TEMP DIAGNOSTIC (bug-frontier 調査用、報告後に revert): `OTSPOT_IPM_TRACE=1`
-/// で反復軌跡を stderr に出す env-gated トレース。crate 全体で
-/// `deny(clippy::print_stderr)` のため、許可を最小スコープに閉じ込める。
-#[allow(clippy::print_stderr)]
-fn ipm_trace_print(msg: &str) {
-    eprintln!("{msg}");
-}
-
 /// IP-PMM 内部ソルバー (Ruiz scaling 後の problem を受け取る)。
 ///
 /// `SolverOptions::threads` 専用の rayon プールへ solve 全体を閉じ込め、その
@@ -189,9 +181,6 @@ fn solve_ippmm_inner_confined(
     let mut total_solve_ns: u128 = 0;
     let mut total_reg_retries: u32 = 0;
     let mut any_iterative = false;
-    // TEMP DIAGNOSTIC (bug-frontier 調査用、報告後に revert): OTSPOT_IPM_TRACE=1
-    // で反復軌跡 (残差/mu/alpha/PMM ρ,δ) を stderr に出す。
-    let ipm_trace = std::env::var("OTSPOT_IPM_TRACE").is_ok();
     for iter in 0..options.ipm.max_iter {
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
@@ -286,13 +275,6 @@ fn solve_ippmm_inner_confined(
             }
             m
         };
-
-        if ipm_trace {
-            ipm_trace_print(&format!(
-                "[ipm_trace] iter={iter} nr_p={nr_p:.3e} nr_d={nr_d:.3e} nr_p_rel={nr_p_rel:.3e} nr_d_rel={nr_d_rel:.3e} mu={mu:.3e} rel_gap={rel_gap:.3e} best_score={best_score:.3e} last_impr_iter={last_score_improvement_iter} rho={:.3e} delta={:.3e}",
-                pmm.rho, pmm.delta
-            ));
-        }
 
         // 残差小・duality gap 大の偽 Optimal (rank-deficient Q + c=0) を弾くため rel_gap も要求。
         if nr_p_rel < eps && nr_d_rel < eps && mu < eps && rel_gap.abs() < DUALITY_GAP_TOL {
@@ -580,13 +562,7 @@ fn solve_ippmm_inner_confined(
             1.0
         };
         let alpha_tr = alpha_x_cap.min(alpha_y_cap).min(alpha_s_cap);
-        let alpha_pre_tr = alpha;
         let alpha = alpha.min(alpha_tr);
-        if ipm_trace {
-            ipm_trace_print(&format!(
-                "[ipm_trace] iter={iter} alpha_pre_tr={alpha_pre_tr:.3e} alpha_tr={alpha_tr:.3e} alpha={alpha:.3e} ndx={ndx:.3e} ndy={ndy:.3e} nds={nds:.3e}"
-            ));
-        }
 
         // predictor/corrector + Gondzio 全体の solve 時間を常時収集。
         total_solve_ns += t_solve.elapsed().as_nanos();
@@ -607,9 +583,6 @@ fn solve_ippmm_inner_confined(
             && pmm.rho <= reg_limit * 1.01
             && pmm.delta <= reg_limit * 1.01;
         if alpha_stall_count >= ALPHA_STALL_N && (alpha_stall_converged || alpha_stall_deadlock) {
-            if ipm_trace {
-                ipm_trace_print(&format!("[ipm_trace] BREAK alpha_stall iter={iter} alpha={alpha:.3e} alpha_stall_count={alpha_stall_count} converged={alpha_stall_converged} deadlock={alpha_stall_deadlock}"));
-            }
             x.copy_from_slice(&best_x);
             y.copy_from_slice(&best_y);
             s.copy_from_slice(&best_s);
@@ -623,9 +596,6 @@ fn solve_ippmm_inner_confined(
             && iter >= last_score_improvement_iter + RESIDUAL_STALL_WINDOW
             && best_score >= eps;
         if residual_stall {
-            if ipm_trace {
-                ipm_trace_print(&format!("[ipm_trace] BREAK residual_stall iter={iter} best_score={best_score:.3e} last_impr_iter={last_score_improvement_iter} window={RESIDUAL_STALL_WINDOW}"));
-            }
             x.copy_from_slice(&best_x);
             y.copy_from_slice(&best_y);
             s.copy_from_slice(&best_s);
