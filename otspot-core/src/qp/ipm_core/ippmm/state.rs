@@ -43,10 +43,9 @@ pub(super) const REG_LIMIT_INIT_LP: f64 = 5e-10;
 /// prox 項が dual residual を支配と判定する比率。
 pub(super) const PROX_DOMINATE_RATIO: f64 = 0.5;
 
-/// pf-stagnation 検出窓 + 停滞判定比率 + 「収束遠し」係数。
+/// pf-stagnation 検出窓 + 停滞判定比率。
 pub(super) const PF_HISTORY_LEN: usize = 5;
 pub(super) const PF_STUCK_RATIO: f64 = 0.95;
-pub(super) const PF_FAR_FROM_TARGET_RATIO: f64 = 1e2;
 
 /// finite-but-huge 方向 (LDL blow-up) を弾く閾値。
 pub(super) const DIRECTION_BLOWUP_THRESHOLD: f64 = 1e30;
@@ -83,6 +82,28 @@ pub(super) const ADAPTIVE_REG_C_MAX_THRESH: f64 = 1e-6;
 /// Gondzio corrector trigger: alpha がこの値未満のときのみ追加補正を適用する。
 pub(super) const GONDZIO_ALPHA_TRIGGER: f64 = 0.999;
 
+/// pf-stagnation trigger: 直近 `PF_HISTORY_LEN` 反復で primal residual (`nr_p`) が
+/// 実質改善せず (`ratio > PF_STUCK_RATIO`) かつ未収束 (`nr_p > eps_orig`) なら
+/// reg_limit floor を下げるべきと判定する。
+///
+/// 旧実装は `nr_p > eps_orig * 100` (「target から桁違いに離れている」場合のみ)
+/// を追加要求していた。だが reg_limit の初期floor (`REG_LIMIT_INIT_QP` = 5e-8) は
+/// eps_orig に依存しない絶対定数のため、tight eps (例 1e-8) では floor 由来の
+/// 残差が `[eps_orig, 100·eps_orig)` に恒久的に張り付き、このゲートが永久に閉じる。
+///
+/// 実測 (LISWET7 @ eps=1e-8, commit a735fea6, `OTSPOT_IPM_TRACE=1`):
+/// iter 12 から nr_p=6.216e-8 で frozen (floor=5e-8 一致)。100·eps_orig=1e-6 を
+/// 満たさず iter 40 まで trigger せず、その間 μ が 1e-59 まで無意味に underflow
+/// し数値ノイズで残差が発散、iter 62 で `residual_stall` (window=50) が発火し
+/// Stalled のまま終了した。「stuck (5反復で ratio>0.95) かつ未収束 (>eps_orig)」で
+/// 判定十分であり、追加の桁数マージンは進捗を止める副作用しか持たない。
+pub(super) fn pf_stuck_should_lower_reg_limit(nr_p: f64, pf_oldest: f64, eps_orig: f64) -> bool {
+    if pf_oldest <= 0.0 || nr_p <= eps_orig {
+        return false;
+    }
+    (nr_p / pf_oldest) > PF_STUCK_RATIO
+}
+
 pub(super) struct PmmState {
     pub(super) x_ref: Vec<f64>,
     pub(super) y_ref: Vec<f64>,
@@ -90,4 +111,62 @@ pub(super) struct PmmState {
     pub(super) delta: f64,
     pub(super) prev_nr_p: f64,
     pub(super) prev_nr_d: f64,
+}
+
+#[cfg(test)]
+mod pf_stuck_tests {
+    use super::*;
+
+    /// Sentinel: LISWET7 @ eps=1e-8 で実測した凍結値 (nr_p=6.216e-8、5反復前も
+    /// bit-identical の同値) は「未収束 (>eps_orig) かつ停滞 (ratio=1.0>0.95)」
+    /// なので reg_limit を下げるべき。
+    ///
+    /// 旧実装は `nr_p > eps_orig * 100 (=1e-6)` を追加要求しており、6.216e-8 は
+    /// これを満たさず false を返していた (このテストは revert で fail する)。
+    #[test]
+    fn pf_stuck_fires_for_liswet7_observed_floor_residual() {
+        let nr_p = 6.216e-8;
+        let pf_oldest = 6.216e-8;
+        let eps_orig = 1e-8;
+        assert!(
+            pf_stuck_should_lower_reg_limit(nr_p, pf_oldest, eps_orig),
+            "stuck-above-target residual (nr_p={nr_p:.3e} > eps_orig={eps_orig:.3e}, \
+             frozen over PF_HISTORY_LEN iters) must trigger reg_limit lowering"
+        );
+    }
+
+    /// nr_p が既に eps_orig 未満: 追加で reg_limit を下げる必要はない。
+    #[test]
+    fn pf_stuck_does_not_fire_once_already_converged() {
+        assert!(!pf_stuck_should_lower_reg_limit(0.5e-8, 0.5e-8, 1e-8));
+    }
+
+    /// ratio = 5e-8/6e-7 ≈ 0.083 << PF_STUCK_RATIO(0.95): 実質前進中で stuck でない。
+    #[test]
+    fn pf_stuck_does_not_fire_while_still_making_progress() {
+        assert!(!pf_stuck_should_lower_reg_limit(5e-8, 6e-7, 1e-8));
+    }
+
+    /// pf_history 未充足 (oldest=0.0 は「5反復分のデータがまだ無い」を表す番兵)。
+    #[test]
+    fn pf_stuck_requires_nonzero_history() {
+        assert!(!pf_stuck_should_lower_reg_limit(6e-8, 0.0, 1e-8));
+    }
+
+    /// 旧実装 (nr_p > eps_orig*100) を模した回帰確認: LISWET7 の凍結値は
+    /// 100倍マージンを満たさないため旧ゲートは閉じたまま (新実装との対比)。
+    #[test]
+    fn old_hundred_x_margin_gate_would_have_stayed_closed_for_liswet7() {
+        let nr_p = 6.216e-8_f64;
+        let eps_orig = 1e-8_f64;
+        let old_far_from_target_ratio = 1e2_f64;
+        assert!(
+            nr_p <= eps_orig * old_far_from_target_ratio,
+            "documents why the old gate never opened for the LISWET7 floor residual"
+        );
+        assert!(
+            nr_p > eps_orig,
+            "yet the residual is still genuinely unconverged"
+        );
+    }
 }
