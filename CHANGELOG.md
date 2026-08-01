@@ -4,18 +4,37 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+- **修正 (otspot-model)**: `ModelResult::value`/`Index<Variable>`が
+  cross-model の `Variable` を検査せず、別 model の同一 index の値を黙って
+  返していた (`Model::var_name`は既に検査済みだったが`value`/`index`は未検査)。
+  `var_name`と同じ `assert_eq!(var.model_id, self.model_id, ...)` を追加し、
+  sentinel test (revert で fail することを確認済み) を追加
+- `Model::var_kind`/`try_var_kind`を新設 (`var_name`と対称)。`VarKind`を
+  Python から読み取る手段がなく decorative だった問題への対応
 - `otspot-py` crate (PyO3/maturin) を追加し、Otspot を Python ライブラリとして
   利用可能に。`otspot_model::Model`/`Variable`/`Expression`/`QuadExpr`/
   `Constraint`/`ModelResult`と`SolveStatus`/`SolutionProof`/`SolveError`/
-  `VarKind`/`ConstraintSense`/`Tolerance`をRustと同名・同構造でPythonへ写像
-  (演算子オーバーロードはRustの実オペレータへの直接委譲)。`ModelError`の各
-  variantはPython例外クラス群 (`otspot.NoObjectiveError`等) へ対応
+  `VarKind`/`Tolerance`をRustと同名・同構造でPythonへ写像 (演算子オーバー
+  ロードはRustの実オペレータへの直接委譲)。`ModelError`の各variantはPython
+  例外クラス群 (`otspot.NoObjectiveError`等) へ対応。`SolveFailedError`は
+  実際の`SolveError` variant を`.error`属性で保持 (abi3-py39 制約により
+  `#[pyclass(extends=PyException)]`のfieldではなくsetattr経由)。
+  `Model.solve()`は`Python::detach`でGILを解放して実行 (未解放だと
+  `timeout_secs`未指定=無制限のsolveが他スレッド・`KeyboardInterrupt`を
+  ブロックする)。`ConstraintSense`/`NotSupportedError`は Rust 側に到達経路が
+  ないため非バインド (`api_manifest.json`の`out_of_scope`に明記)
 - API parityを`otspot-py/api_manifest.json`で保証: Rust側 (`otspot-py/tests/api_manifest_rust.rs`、
-  コンパイル参照+実行) とPython側 (`otspot-py/tests/test_api_manifest.py`、
-  introspectionで双方向検出) で同一マニフェストを検証。LP/QP挙動parityは
-  独立手計算オラクル問題で確認 (`otspot-py/tests/test_parity_lp_qp.py`)
+  コンパイル参照+全メソッド実行) とPython側 (`otspot-py/tests/test_api_manifest.py`、
+  introspectionで双方向検出、baseline は `object` 由来で自己汚染しない設計) で
+  同一マニフェストを検証。加えて`cargo public-api`スナップショット
+  (`otspot-py/otspot_model_api_snapshot.txt` + `scripts/check_otspot_model_public_api.sh`)
+  で otspot-model の Rust 側追加をマニフェスト未更新のまま見逃さない防波堤を追加。
+  LP/QP/MILP挙動parityは独立手計算オラクル問題で確認
+  (`otspot-py/tests/test_parity_lp_qp.py`。QPオラクルは制約が load-bearing
+  (乗数非ゼロ) なものに変更 — 旧オラクルは制約削除でも解が変わらず検出力ゼロだった)
 - GitHub Actionsに`python`ジョブを追加 (setup-python → maturin build →
-  wheel install → pytest)。`otspot-py`はworkspace `members`に追加したが
+  wheel install → pytest)。`public-api`ジョブに otspot-model スナップショット
+  diff を追加。`otspot-py`はworkspace `members`に追加したが
   `default-members`には含めない (cdylib+`extension-module`機能が通常の
   `cargo build`/`test`を汚染するため)
 

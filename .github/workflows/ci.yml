@@ -212,6 +212,11 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: nightly-2026-05-01
         run: cargo public-api diff origin/main..HEAD
+      # otspot-py/api_manifest.json guardrail: catches otspot-model public
+      # API additions/removals nobody updated the Python-binding manifest
+      # for. See scripts/check_otspot_model_public_api.sh's doc comment.
+      - name: otspot-model public API snapshot (otspot-py manifest guardrail)
+        run: bash scripts/check_otspot_model_public_api.sh
 
   todo-budget:
     name: todo-budget

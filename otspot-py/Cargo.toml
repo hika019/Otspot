@@ -9,7 +9,14 @@ description = "Python bindings for otspot (PyO3 / maturin)"
 publish = false
 
 [lib]
-name = "otspot"
+# NOT "otspot": the root package (Cargo.toml at repo root) already produces a
+# lib crate named "otspot", and `cargo doc --workspace --no-deps` hard-errors
+# (exit 101) when two crates in the same workspace share a doc-output crate
+# name. The wheel's importable Python name stays "otspot" regardless — that
+# comes from `#[pymodule] fn otspot` in src/lib.rs (the PyO3-generated
+# `PyInit_otspot` symbol) and `[tool.maturin] module-name = "otspot"` in
+# pyproject.toml, neither of which reads this Cargo `[lib] name`.
+name = "otspot_py"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

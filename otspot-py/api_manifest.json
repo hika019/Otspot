@@ -1,12 +1,11 @@
 {
-  "_readme": "Single source of truth for the Rust<->Python API parity guarantee. Rust side: otspot-py/tests/api_manifest_rust.rs (compile-time symbol references + invocation of every listed method; #[non_exhaustive] Rust enums can only guarantee variant-removal detection, not variant-addition, per Rust's own forward-compat contract for that attribute). Python side: otspot-py/tests/test_api_manifest.py (introspection of the built `otspot` extension module, both directions: manifest subset of module, and module public surface subset of manifest).",
+  "_readme": "Single source of truth for the Rust<->Python API parity guarantee. Rust side: otspot-py/tests/api_manifest_rust.rs (compile-time symbol references + invocation of every listed method on real oracle problems; #[non_exhaustive] Rust enums can only guarantee variant-removal detection, not variant-addition, per Rust's own forward-compat contract for that attribute) plus otspot-py/otspot_model_api_snapshot.txt + scripts/check_otspot_model_public_api.sh (a `cargo public-api` snapshot diff, catching additions/removals of ANY pub item, not just the ones this manifest already tracks). Python side: otspot-py/tests/test_api_manifest.py (introspection of the built `otspot` extension module, both directions: manifest subset of module, and module public surface subset of manifest).",
   "types": [
     { "rust": "otspot_model::Model", "python": "otspot.Model" },
     { "rust": "otspot_model::Variable", "python": "otspot.Variable" },
     { "rust": "otspot_model::Expression", "python": "otspot.Expression" },
     { "rust": "otspot_model::QuadExpr", "python": "otspot.QuadExpr" },
     { "rust": "otspot_model::Constraint", "python": "otspot.Constraint" },
-    { "rust": "otspot_model::ConstraintSense", "python": "otspot.ConstraintSense" },
     { "rust": "otspot_model::VarKind", "python": "otspot.VarKind" },
     { "rust": "otspot_model::ModelResult", "python": "otspot.ModelResult" },
     { "rust": "otspot_model::SolutionProof", "python": "otspot.SolutionProof" },
@@ -15,14 +14,13 @@
     { "rust": "otspot_core::options::Tolerance", "python": "otspot.Tolerance" }
   ],
   "model_error_exceptions": {
-    "_note": "otspot_model::ModelError has no Python type of its own: each variant maps to a distinct exception class (Python has no Result type), all subclassing otspot.OtspotError.",
+    "_note": "otspot_model::ModelError has no Python type of its own: each variant maps to a distinct exception class (Python has no Result type), all subclassing otspot.OtspotError. ModelError::NotSupported has no entry here (see out_of_scope): it is unreachable from any bound Python call.",
     "entries": [
       { "rust_variant": "ModelError::NoObjective", "python": "otspot.NoObjectiveError" },
       { "rust_variant": "ModelError::InvalidInput", "python": "otspot.InvalidInputError" },
-      { "rust_variant": "ModelError::SolveError", "python": "otspot.SolveFailedError" },
+      { "rust_variant": "ModelError::SolveError", "python": "otspot.SolveFailedError", "note": "carries a `.error: otspot.SolveError` attribute (see methods.SolveFailedError below)" },
       { "rust_variant": "ModelError::Timeout", "python": "otspot.TimeoutError" },
       { "rust_variant": "ModelError::NonConvex", "python": "otspot.NonConvexError" },
-      { "rust_variant": "ModelError::NotSupported", "python": "otspot.NotSupportedError" },
       { "rust_variant": "ModelError::Internal", "python": "otspot.InternalError" }
     ]
   },
@@ -33,6 +31,7 @@
       { "rust": "Model::add_int_var", "python": "Model.add_int_var" },
       { "rust": "Model::add_binary_var", "python": "Model.add_binary_var" },
       { "rust": "Model::var_name", "python": "Model.var_name" },
+      { "rust": "Model::var_kind", "python": "Model.var_kind", "note": "new otspot-model getter added alongside this PR so VarKind is reachable, mirroring var_name" },
       { "rust": "Model::add_constraint", "python": "Model.add_constraint" },
       { "rust": "Model::minimize", "python": "Model.minimize" },
       { "rust": "Model::maximize", "python": "Model.maximize" },
@@ -41,7 +40,7 @@
       { "rust": "Model::set_presolve", "python": "Model.set_presolve" },
       { "rust": "Model::set_threads", "python": "Model.set_threads" },
       { "rust": "Model::set_obj_offset", "python": "Model.set_obj_offset" },
-      { "rust": "Model::solve", "python": "Model.solve" }
+      { "rust": "Model::solve", "python": "Model.solve", "note": "runs under Python::detach (GIL released for the duration of the solve)" }
     ],
     "Variable": [
       { "rust": "Variable::pow2", "python": "Variable.pow2" },
@@ -62,9 +61,9 @@
     ],
     "ModelResult": [
       { "rust": "ModelResult::objective", "python": "ModelResult.objective" },
-      { "rust": "ModelResult::value", "python": "ModelResult.value" },
+      { "rust": "ModelResult::value", "python": "ModelResult.value", "note": "uses try_value internally, raises InvalidInputError instead of panicking on misuse" },
       { "rust": "ModelResult::has_global_optimality_proof", "python": "ModelResult.has_global_optimality_proof" },
-      { "rust": "impl core::ops::Index<Variable> for ModelResult", "python": "ModelResult.__getitem__" },
+      { "rust": "impl core::ops::Index<Variable> for ModelResult", "python": "ModelResult.__getitem__", "note": "uses try_value internally, same as .value()" },
       { "rust": "ModelResult.status", "python": "ModelResult.status" },
       { "rust": "ModelResult.proof", "python": "ModelResult.proof" },
       { "rust": "ModelResult.objective_value", "python": "ModelResult.objective_value" },
@@ -72,11 +71,13 @@
       { "rust": "ModelResult.reduced_costs", "python": "ModelResult.reduced_costs" },
       { "rust": "ModelResult.slack", "python": "ModelResult.slack" },
       { "rust": "ModelResult.bound_duals", "python": "ModelResult.bound_duals" }
+    ],
+    "SolveFailedError": [
+      { "rust": "otspot_model::SolveError (carried inside ModelError::SolveError)", "python": "SolveFailedError.error", "note": "attribute holding the real otspot.SolveError instance, attached via setattr (see errors.rs doc comment: a #[pyclass(extends=PyException)] field needs Py_3_12 under abi3, but this crate targets abi3-py39)" }
     ]
   },
   "variants": {
     "VarKind": ["Continuous", "Integer", "Binary"],
-    "ConstraintSense": ["Le", "Ge", "Eq"],
     "SolutionProof": ["GlobalOptimal", "LocalOptimal", "FeasibleUnproven"],
     "SolveError": ["Infeasible", "Unbounded", "MaxIterations", "Stalled", "NumericalError"],
     "SolveStatus": [
@@ -86,11 +87,20 @@
     ],
     "Tolerance": ["High", "Medium", "Fast", "Custom"]
   },
+  "python_only_variants": {
+    "_note": "Variants that exist on the Python side but are not real Rust variants -- always the honest fallback for a #[non_exhaustive] Rust enum's mandatory wildcard match arm (see enums.rs's From<SolveStatus> for PySolveStatus), never an invented capability. PySolutionProof/PySolveError have no such fallback: their wildcard arms panic instead, since eq_int enums cannot carry the payload an honest 'Unknown' value would need.",
+    "SolveStatus": ["Unknown"]
+  },
   "out_of_scope": [
+    "otspot_model::ConstraintSense (variants Le/Ge/Eq) - Constraint's fields (including `sense`) are pub(crate) with no public getter anywhere in the Rust API (unlike Variable's kind, exposed via the new Model::var_kind), so a Python binding would be a decorative type nothing ever produces or consumes. Re-add if/when otspot-model grows a constraint introspection API.",
+    "ModelError::NotSupported / a hypothetical NotSupportedError - only produced by the QCQP/SOCP bridge (see the conic entry below), which is out of scope; the variant is unreachable from any call this crate binds.",
     "otspot_core::conic::* (QCQP/SOCP/MISOCP solve_socp/solve_qcqp/etc.) - not bound in v1; Model.add_qc_le/add_soc_le are not exposed",
     "otspot_core::problem::{LpProblem, QpProblem} raw construction and otspot_core::lp::solve_lp_with / otspot_core::qp::solve_qp_with raw entrypoints - Python uses otspot_model::Model exclusively, the crate's own recommended high-level entrypoint",
-    "Model::try_add_var / try_add_int_var / try_var_name - eager-Result variants of already-bound methods; Python's exception-raising add_var/var_name already surface the same validation at solve()/call time",
-    "ModelResult::try_value - Python's value()/__getitem__ already raise via PyO3's panic-to-exception conversion on misuse",
-    "otspot_core::options::SolverOptions / MipConfig / GlobalOptimizationConfig / BranchingStrategy / etc. - only the subset reachable through Model's set_* methods (timeout, tolerance, presolve, threads, obj_offset) is bound"
+    "Model::try_add_var / try_add_int_var / try_set_timeout - eager-Result variants of add_var/add_int_var/set_timeout, which already defer validation errors to solve() in Rust (they never panic), matching the bound Python methods' behavior exactly; no separate try_* binding adds anything",
+    "Model::try_var_name / try_var_kind / ModelResult::try_value - eager-Result variants of the panicking var_name/var_kind/value/__getitem__; the bound Python var_name/var_kind/value/__getitem__ use these try_* variants internally already (see errors.rs) and raise InvalidInputError on Err instead of letting the panic through, so no separate try_* binding is needed",
+    "Expression::from_constant - a convenience constructor equivalent to passing a bare Python float wherever an Expression is expected; every binding's coerce() dispatch already accepts a bare float uniformly, so a separate constructor call has no use in Python",
+    "ModelResult.stats (otspot_core::problem::SolveStats) - internal routing/timing diagnostics (SolveRoute enum, per-phase microsecond timings, warm-start counters, ~10+ fields); binding it would also require binding SolveRoute and is disproportionate scope for this PR",
+    "otspot_core::options::SolverOptions / MipConfig / GlobalOptimizationConfig / BranchingStrategy / etc. - only the subset reachable through Model's set_* methods (timeout, tolerance, presolve, threads, obj_offset) is bound",
+    "otspot.InternalError - mapped from ModelError::Internal, a solver-internal invariant violation (e.g. validate_qp_dual_len's length-mismatch guard); not a documented, deliberately-triggerable failure mode from well-formed Python calls, so unlike the other 5 model_error_exceptions it has no dedicated behavior-parity test"
   ]
 }

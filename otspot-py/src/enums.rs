@@ -2,10 +2,17 @@
 //!
 //! Variant names are kept identical to Rust (`Continuous`, not `CONTINUOUS`)
 //! so the parity manifest can assert a literal name match on both sides.
+//!
+//! `ConstraintSense` is not bound: `otspot_model::Constraint`'s fields
+//! (including `sense`) are `pub(crate)` with no public getter anywhere in the
+//! Rust API (unlike `Variable`'s kind, exposed via `Model::var_kind`), so a
+//! Python `ConstraintSense` binding would be a decorative type nothing ever
+//! produces or consumes. Re-add it if/when otspot-model grows a constraint
+//! introspection API (see api_manifest.json's `out_of_scope`).
 
 use otspot_core::options::Tolerance;
 use otspot_core::problem::SolveStatus;
-use otspot_model::{ConstraintSense, SolutionProof, SolveError, VarKind};
+use otspot_model::{SolutionProof, SolveError, VarKind};
 use pyo3::prelude::*;
 
 #[pyclass(module = "otspot", name = "VarKind", eq, eq_int, from_py_object)]
@@ -26,32 +33,6 @@ impl From<VarKind> for PyVarKind {
     }
 }
 
-#[pyclass(
-    module = "otspot",
-    name = "ConstraintSense",
-    eq,
-    eq_int,
-    from_py_object
-)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum PyConstraintSense {
-    Le,
-    Ge,
-    Eq,
-}
-
-impl From<ConstraintSense> for PyConstraintSense {
-    fn from(s: ConstraintSense) -> Self {
-        match s {
-            ConstraintSense::Le => PyConstraintSense::Le,
-            ConstraintSense::Ge => PyConstraintSense::Ge,
-            ConstraintSense::Eq => PyConstraintSense::Eq,
-            // `ConstraintSense` is `#[non_exhaustive]`; cross-crate wildcard required.
-            _ => PyConstraintSense::Eq,
-        }
-    }
-}
-
 #[pyclass(module = "otspot", name = "SolutionProof", eq, eq_int, from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PySolutionProof {
@@ -66,8 +47,17 @@ impl From<SolutionProof> for PySolutionProof {
             SolutionProof::GlobalOptimal => PySolutionProof::GlobalOptimal,
             SolutionProof::LocalOptimal => PySolutionProof::LocalOptimal,
             SolutionProof::FeasibleUnproven => PySolutionProof::FeasibleUnproven,
-            // #[non_exhaustive]: wildcard required for cross-crate matching.
-            _ => PySolutionProof::FeasibleUnproven,
+            // `SolutionProof` is `#[non_exhaustive]`, so a wildcard is
+            // mandatory to compile. Mapping an unknown future variant to an
+            // arbitrary known one would silently misreport optimality
+            // strength to callers branching on it — panic loudly instead
+            // (`eq_int` variants carry no payload, so there is no honest
+            // "Unknown" value to return; see `PySolveStatus` below for the
+            // complex-enum case, which can carry one).
+            _ => panic!(
+                "otspot_core::problem::SolutionProof gained a variant unhandled by \
+                 otspot-py/src/enums.rs; update this From impl and api_manifest.json"
+            ),
         }
     }
 }
@@ -90,15 +80,24 @@ impl From<SolveError> for PySolveError {
             SolveError::MaxIterations => PySolveError::MaxIterations,
             SolveError::Stalled => PySolveError::Stalled,
             SolveError::NumericalError => PySolveError::NumericalError,
-            // #[non_exhaustive]: wildcard required for cross-crate matching.
-            _ => PySolveError::NumericalError,
+            // See `PySolutionProof::from`'s wildcard comment above.
+            _ => panic!(
+                "otspot_model::SolveError gained a variant unhandled by \
+                 otspot-py/src/enums.rs; update this From impl and api_manifest.json"
+            ),
         }
     }
 }
 
-/// `SolveStatus` has two payload-carrying variants (`NonConvex`, `NotSupported`),
+/// `SolveStatus` has payload-carrying variants (`NonConvex`, `NotSupported`),
 /// so it is bound as a PyO3 "complex enum" rather than a C-like `eq_int` enum:
 /// each variant becomes a Python subclass, exactly mirroring the Rust shape.
+///
+/// `Unknown(String)` is not a real `SolveStatus` variant: it is the honest
+/// fallback for the `#[non_exhaustive]` wildcard this `From` impl is forced
+/// to have (unlike `PySolutionProof`/`PySolveError`, a complex enum *can*
+/// carry the real `Display` text, so panicking here would throw away
+/// information a panic-only fallback can't preserve).
 #[pyclass(module = "otspot", name = "SolveStatus", from_py_object)]
 #[derive(Clone)]
 pub enum PySolveStatus {
@@ -116,6 +115,7 @@ pub enum PySolveStatus {
     NonconvexLocal(),
     NonconvexGlobal(),
     NotSupported(String),
+    Unknown(String),
 }
 
 impl From<SolveStatus> for PySolveStatus {
@@ -136,13 +136,16 @@ impl From<SolveStatus> for PySolveStatus {
             SolveStatus::NonconvexGlobal => PySolveStatus::NonconvexGlobal(),
             SolveStatus::NotSupported(msg) => PySolveStatus::NotSupported(msg),
             // #[non_exhaustive]: wildcard required for cross-crate matching.
-            _ => PySolveStatus::NumericalError(),
+            other => PySolveStatus::Unknown(other.to_string()),
         }
     }
 }
 
 /// `Tolerance::Custom(f64)` carries a payload; same complex-enum treatment as
-/// `SolveStatus` above.
+/// `SolveStatus` above. This conversion only runs Python -> Rust (there is no
+/// `ModelResult` field of type `Tolerance`), converting *from* this crate's
+/// own exhaustively-defined `PyTolerance`, so no `#[non_exhaustive]` wildcard
+/// is needed here (unlike the `From<Rust> for Py*` conversions above).
 #[pyclass(module = "otspot", name = "Tolerance", from_py_object)]
 #[derive(Clone)]
 pub enum PyTolerance {
@@ -165,7 +168,6 @@ impl From<PyTolerance> for Tolerance {
 
 pub(crate) fn register(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_class::<PyVarKind>()?;
-    m.add_class::<PyConstraintSense>()?;
     m.add_class::<PySolutionProof>()?;
     m.add_class::<PySolveError>()?;
     m.add_class::<PySolveStatus>()?;

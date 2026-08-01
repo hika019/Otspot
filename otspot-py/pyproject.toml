@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "otspot"
 description = "Python bindings for otspot — LP (Revised Simplex) and QP (Interior Point / Mehrotra predictor-corrector) solver"
-readme = "../README.md"
+readme = "README.md"
 license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.9"
 dynamic = ["version"]

@@ -234,6 +234,45 @@ impl Model {
             })
     }
 
+    /// Return the integrality requirement of a variable as given to
+    /// [`add_var`](Self::add_var)/[`add_int_var`](Self::add_int_var)/
+    /// [`add_binary_var`](Self::add_binary_var).
+    ///
+    /// # Panics
+    /// Panics if `var` belongs to a different model or if `var.index` is out
+    /// of range. Use [`try_var_kind`](Self::try_var_kind) for a non-panicking
+    /// checked variant.
+    pub fn var_kind(&self, var: Variable) -> VarKind {
+        assert_eq!(
+            var.model_id, self.model_id,
+            "variable belongs to a different model"
+        );
+        self.variables
+            .get(var.index)
+            .map(|v| v.kind)
+            .expect("variable index out of range")
+    }
+
+    /// Return the integrality requirement of a variable, returning an error
+    /// instead of panicking. See [`var_kind`](Self::var_kind).
+    pub fn try_var_kind(&self, var: Variable) -> Result<VarKind, ModelError> {
+        if var.model_id != self.model_id {
+            return Err(ModelError::InvalidInput(
+                "variable belongs to a different model".to_string(),
+            ));
+        }
+        self.variables
+            .get(var.index)
+            .map(|v| v.kind)
+            .ok_or_else(|| {
+                ModelError::InvalidInput(format!(
+                    "variable index {} out of range (model has {} variables)",
+                    var.index,
+                    self.variables.len()
+                ))
+            })
+    }
+
     fn push_var(&mut self, name: &str, lb: f64, ub: f64, kind: VarKind) -> Variable {
         let index = self.variables.len();
         self.variables.push(VariableDefinition {
@@ -2065,9 +2104,14 @@ impl ModelResult {
     /// Get the primal value of a variable.
     ///
     /// # Panics
-    /// Panics if the variable index is out of range. Use [`try_value`](Self::try_value)
-    /// to handle this case gracefully.
+    /// Panics if `var` belongs to a different model or if its index is out of
+    /// range (mirrors [`Model::var_name`](crate::Model::var_name)'s contract).
+    /// Use [`try_value`](Self::try_value) to handle this case gracefully.
     pub fn value(&self, var: Variable) -> f64 {
+        assert_eq!(
+            var.model_id, self.model_id,
+            "variable belongs to a different model"
+        );
         self.solution[var.index]
     }
 
@@ -2116,6 +2160,10 @@ impl ModelResult {
 impl Index<Variable> for ModelResult {
     type Output = f64;
     fn index(&self, var: Variable) -> &f64 {
+        assert_eq!(
+            var.model_id, self.model_id,
+            "variable belongs to a different model"
+        );
         &self.solution[var.index]
     }
 }
@@ -2206,7 +2254,7 @@ mod tests {
         classify_status_error, normalize_mip_solution, validate_qp_dual_len, Model, ModelError,
         SolutionProof, SolveError,
     };
-    use crate::variable::Variable;
+    use crate::variable::{VarKind, Variable};
     use otspot_core::problem::SolveStatus;
 
     // concurrent solver での許容誤差（IPM/IP-PMM 並列実行）
@@ -3156,6 +3204,87 @@ mod tests {
         };
 
         let _ = model.var_name(forged);
+    }
+
+    // ModelResult::value / Index<Variable> must reject cross-model variables
+    // the same way var_name does. Before this fix, a variable from another
+    // model with a coincidentally in-range index silently read that other
+    // model's *own* solution slot: `model_b.add_var(..)` at index 0 fixed to
+    // 2.0, `result_b.value(x_a)` (x_a from model_a, also index 0) returned
+    // 2.0 with no error. Reverting the `assert_eq!` in `value`/`index` makes
+    // both tests below FAIL (no panic).
+    #[test]
+    #[should_panic(expected = "variable belongs to a different model")]
+    fn model_result_value_cross_model_in_range_panics() {
+        let mut model_a = Model::new("a");
+        let x_a = model_a.add_var("x_in_a", 0.0, 1.0); // index=0
+        model_a.minimize(x_a);
+        let result_a = model_a.solve().unwrap();
+        assert_close(result_a.value(x_a), 0.0, "sanity: model_a solves to 0");
+
+        let mut model_b = Model::new("b");
+        let y_b = model_b.add_var("y_in_b", 2.0, 2.0); // index=0, fixed at 2.0
+        model_b.minimize(y_b);
+        let result_b = model_b.solve().unwrap();
+        assert_close(result_b.value(y_b), 2.0, "sanity: model_b solves to 2.0");
+
+        // x_a (model_a, index 0) passed into model_b's result: must panic,
+        // not silently return model_b's own index-0 value (2.0).
+        let _ = result_b.value(x_a);
+    }
+
+    #[test]
+    #[should_panic(expected = "variable belongs to a different model")]
+    fn model_result_index_cross_model_in_range_panics() {
+        let mut model_a = Model::new("a");
+        let x_a = model_a.add_var("x_in_a", 0.0, 1.0);
+        model_a.minimize(x_a);
+        let _result_a = model_a.solve().unwrap();
+
+        let mut model_b = Model::new("b");
+        let y_b = model_b.add_var("y_in_b", 2.0, 2.0);
+        model_b.minimize(y_b);
+        let result_b = model_b.solve().unwrap();
+
+        let _ = result_b[x_a];
+    }
+
+    // var_kind: independent oracle (each kind hand-labeled at add_* call
+    // site), plus the same cross-model/out-of-range guards as var_name.
+    #[test]
+    fn var_kind_matches_add_call_site() {
+        let mut model = Model::new("kinds");
+        let c = model.add_var("c", 0.0, 1.0);
+        let i = model.add_int_var("i", 0.0, 5.0);
+        let b = model.add_binary_var("b");
+
+        assert_eq!(model.var_kind(c), VarKind::Continuous);
+        assert_eq!(model.var_kind(i), VarKind::Integer);
+        assert_eq!(model.var_kind(b), VarKind::Binary);
+        assert_eq!(model.try_var_kind(c).unwrap(), VarKind::Continuous);
+    }
+
+    #[test]
+    #[should_panic(expected = "variable belongs to a different model")]
+    fn var_kind_cross_model_panics() {
+        let mut model_a = Model::new("a");
+        let x_a = model_a.add_binary_var("x_in_a"); // index=0
+
+        let model_b = Model::new("b");
+        let _ = model_b.var_kind(x_a);
+    }
+
+    #[test]
+    fn try_var_kind_cross_model_returns_err() {
+        let mut model_a = Model::new("a");
+        let x_a = model_a.add_binary_var("x_in_a");
+
+        let model_b = Model::new("b");
+        let err = model_b.try_var_kind(x_a).unwrap_err();
+        assert!(
+            matches!(err, ModelError::InvalidInput(_)),
+            "expected InvalidInput for cross-model var, got {err:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

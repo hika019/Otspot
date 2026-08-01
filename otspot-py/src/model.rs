@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
 use crate::constraint::PyConstraint;
-use crate::enums::PyTolerance;
+use crate::enums::{PyTolerance, PyVarKind};
 use crate::errors::model_error_to_pyerr;
 use crate::expr::{coerce, Operand};
 use crate::result::PyModelResult;
@@ -54,11 +54,24 @@ impl PyModel {
         PyVariable(self.0.add_binary_var(name))
     }
 
-    /// Matches `Model::var_name`. Panics (raised as a Python exception by
-    /// PyO3's automatic panic-to-`PanicException` conversion) under the same
-    /// conditions as the Rust method.
-    fn var_name(&self, var: PyVariable) -> String {
-        self.0.var_name(var.0).to_string()
+    /// Matches `Model::var_name`. Uses `Model::try_var_name` internally and
+    /// raises `otspot.InvalidInputError` on misuse, rather than calling the
+    /// panicking `var_name` directly: PyO3 converts an uncaught Rust panic
+    /// into `PanicException`, which subclasses `BaseException` (not
+    /// `Exception`), so `except Exception` would not catch it.
+    fn var_name(&self, var: PyVariable, py: Python<'_>) -> PyResult<String> {
+        self.0
+            .try_var_name(var.0)
+            .map(str::to_string)
+            .map_err(|e| model_error_to_pyerr(py, e))
+    }
+
+    /// Matches `Model::var_kind`. Same panic-avoidance rationale as `var_name`.
+    fn var_kind(&self, var: PyVariable, py: Python<'_>) -> PyResult<PyVarKind> {
+        self.0
+            .try_var_kind(var.0)
+            .map(PyVarKind::from)
+            .map_err(|e| model_error_to_pyerr(py, e))
     }
 
     /// Matches `Model::add_constraint`.
@@ -108,11 +121,17 @@ impl PyModel {
 
     /// Matches `Model::solve`. Raises a subclass of `otspot.OtspotError` on
     /// `Err` (see `errors.rs` for the `ModelError` variant -> exception map).
-    fn solve(&mut self) -> PyResult<PyModelResult> {
-        self.0
-            .solve()
+    ///
+    /// Runs under `Python::detach` (GIL released): the underlying solve can
+    /// run for the full `timeout_secs` budget (default: unbounded), and
+    /// holding the GIL for that whole span would freeze every other Python
+    /// thread in the process (including the one running `KeyboardInterrupt`
+    /// delivery) for the duration.
+    fn solve(&mut self, py: Python<'_>) -> PyResult<PyModelResult> {
+        let model = &mut self.0;
+        py.detach(|| model.solve())
             .map(PyModelResult)
-            .map_err(model_error_to_pyerr)
+            .map_err(|e| model_error_to_pyerr(py, e))
     }
 }
 

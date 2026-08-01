@@ -4,6 +4,7 @@ use otspot_model::ModelResult;
 use pyo3::prelude::*;
 
 use crate::enums::{PySolutionProof, PySolveStatus};
+use crate::errors::model_error_to_pyerr;
 use crate::variable::PyVariable;
 
 #[pyclass(module = "otspot", name = "ModelResult")]
@@ -51,9 +52,15 @@ impl PyModelResult {
         self.0.objective()
     }
 
-    /// Matches `ModelResult::value`.
-    fn value(&self, var: PyVariable) -> f64 {
-        self.0.value(var.0)
+    /// Matches `ModelResult::value`. Uses `ModelResult::try_value`
+    /// internally and raises `otspot.InvalidInputError` on misuse (e.g. a
+    /// `Variable` from a different `Model`) instead of calling the panicking
+    /// `value` directly — see `Model.var_name`'s doc comment for why a raw
+    /// Rust panic is not an acceptable Python-facing failure mode.
+    fn value(&self, var: PyVariable, py: Python<'_>) -> PyResult<f64> {
+        self.0
+            .try_value(var.0)
+            .map_err(|e| model_error_to_pyerr(py, e))
     }
 
     /// Matches `ModelResult::has_global_optimality_proof`.
@@ -61,9 +68,12 @@ impl PyModelResult {
         self.0.has_global_optimality_proof()
     }
 
-    /// Matches `Index<Variable> for ModelResult` (`result[x]` in Rust).
-    fn __getitem__(&self, var: PyVariable) -> f64 {
-        self.0[var.0]
+    /// Matches `Index<Variable> for ModelResult` (`result[x]` in Rust). Same
+    /// `try_value`-based panic avoidance as `value`.
+    fn __getitem__(&self, var: PyVariable, py: Python<'_>) -> PyResult<f64> {
+        self.0
+            .try_value(var.0)
+            .map_err(|e| model_error_to_pyerr(py, e))
     }
 }
 

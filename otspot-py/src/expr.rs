@@ -24,15 +24,22 @@ pub(crate) enum Operand {
     Q(QuadExpr),
 }
 
+/// Resolves `obj`'s concrete operand kind. Uses `downcast` (not `extract`)
+/// for the three pyclass checks: `extract::<PyRef<T>>()` on a type mismatch
+/// allocates and returns a Python `TypeError` that this function immediately
+/// discards, and every arithmetic dunder tries up to three of these before
+/// falling through to the `f64` case — `downcast` reports a type mismatch as
+/// a plain Rust `Err` (no Python exception object), same outcome, no
+/// allocation on the common multi-operand-type paths.
 pub(crate) fn coerce(obj: &Bound<'_, PyAny>) -> Option<Operand> {
-    if let Ok(q) = obj.extract::<PyRef<'_, PyQuadExpr>>() {
-        return Some(Operand::Q(q.0.clone()));
+    if let Ok(q) = obj.cast::<PyQuadExpr>() {
+        return Some(Operand::Q(q.borrow().0.clone()));
     }
-    if let Ok(e) = obj.extract::<PyRef<'_, PyExpression>>() {
-        return Some(Operand::E(e.0.clone()));
+    if let Ok(e) = obj.cast::<PyExpression>() {
+        return Some(Operand::E(e.borrow().0.clone()));
     }
-    if let Ok(v) = obj.extract::<PyRef<'_, PyVariable>>() {
-        return Some(Operand::V(v.0));
+    if let Ok(v) = obj.cast::<PyVariable>() {
+        return Some(Operand::V(v.borrow().0));
     }
     if let Ok(f) = obj.extract::<f64>() {
         return Some(Operand::F(f));

@@ -18,12 +18,18 @@ import otspot
 
 MANIFEST = json.loads((Path(__file__).parent.parent / "api_manifest.json").read_text())
 
-# `Constraint` has zero manifested methods of its own (see api_manifest.json),
-# so its `dir()` is exactly what PyO3/CPython attach to every pyclass with no
-# custom methods -- the "standard attribute" baseline every other class is
-# diffed against below, computed live instead of hardcoded so it tracks
-# whatever PyO3/CPython version is actually running the test.
-STANDARD_ATTRS = frozenset(dir(otspot.Constraint))
+# `object` is the one baseline that can never be silently widened by a future
+# change to this crate's own classes (unlike deriving the baseline from one
+# of our own pyclasses, e.g. `Constraint`: adding a method to `Constraint`
+# would have silently loosened the check for every *other* class too, since
+# they all diffed against the same live, mutable reference).
+STANDARD_ATTRS = frozenset(dir(object))
+# Verified empirically (not `dir(object)`): every PyO3 `#[pyclass]` carries
+# `__module__` beyond plain `object`, regardless of what methods it defines.
+PYO3_CLASS_EXTRAS = frozenset({"__module__"})
+# `#[pyclass(eq, eq_int)]` (VarKind/SolutionProof/SolveError) additionally
+# attaches `__int__` for the C-like int cast.
+PYO3_EQ_INT_EXTRAS = PYO3_CLASS_EXTRAS | {"__int__"}
 
 CLASS_NAMES_WITH_METHODS = ["Model", "Variable", "Expression", "QuadExpr", "ModelResult"]
 
@@ -84,6 +90,20 @@ def test_manifest_variants_exist_in_python():
             assert hasattr(cls, variant), f"manifest promises {enum_name}.{variant} but it is missing"
 
 
+def test_manifest_solve_failed_error_has_error_attribute():
+    """`SolveFailedError.error` is not a `dir()`-discoverable class attribute
+    (it is set per-instance via `setattr` in errors.rs, not a `#[pyo3(get)]`
+    field), so it needs its own instance-level check rather than folding into
+    `test_python_class_has_no_undocumented_public_methods` below."""
+    model = otspot.Model("infeasible_for_manifest_check")
+    x = model.add_var("x", 0.0, 1.0)
+    model.add_constraint(x.geq(5.0))
+    model.minimize(x)
+    with pytest.raises(otspot.SolveFailedError) as exc_info:
+        model.solve()
+    assert exc_info.value.error == otspot.SolveError.Infeasible
+
+
 # ---------------------------------------------------------------------------
 # Python -> manifest (nothing exposed but undocumented)
 # ---------------------------------------------------------------------------
@@ -111,9 +131,11 @@ def test_python_module_has_no_undocumented_public_types():
 def test_python_class_has_no_undocumented_public_methods(cls_name):
     """Exact-set comparison: every non-standard attribute on `cls` must be
     exactly the set the manifest declares for it (catches both directions at
-    once for method-level parity)."""
+    once for method-level parity). Adding an undocumented method to *any*
+    class here is caught independently of every other class, since the
+    baseline (`object`) can never itself grow such a method."""
     cls = getattr(otspot, cls_name)
-    extra = set(dir(cls)) - STANDARD_ATTRS
+    extra = set(dir(cls)) - STANDARD_ATTRS - PYO3_CLASS_EXTRAS
     manifested = _manifested_method_names(cls_name)
     assert extra == manifested, (
         f"{cls_name}: dir() extras {sorted(extra - manifested)} not in manifest, "
@@ -124,13 +146,20 @@ def test_python_class_has_no_undocumented_public_methods(cls_name):
 @pytest.mark.parametrize("enum_name", list(MANIFEST["variants"].keys()))
 def test_python_enum_has_no_undocumented_variants(enum_name):
     cls = getattr(otspot, enum_name)
-    # `#[pyclass(eq, eq_int)]` (VarKind/ConstraintSense/SolutionProof/SolveError)
-    # attaches `__int__` for the C-like int cast; it is a structural PyO3
-    # feature, not a variant, so it is allowed alongside the STANDARD_ATTRS
-    # baseline (which was computed from a plain, non-enum pyclass).
-    extra = set(dir(cls)) - STANDARD_ATTRS - {"__int__"}
+    extra = set(dir(cls)) - STANDARD_ATTRS - PYO3_EQ_INT_EXTRAS
     manifested = set(MANIFEST["variants"][enum_name])
+    manifested |= set(MANIFEST.get("python_only_variants", {}).get(enum_name, []))
     assert extra == manifested, (
         f"{enum_name}: dir() extras {sorted(extra - manifested)} not in manifest, "
         f"manifest entries {sorted(manifested - extra)} not found on the class"
     )
+
+
+def test_constraint_sense_is_not_bound():
+    """Sentinel for api_manifest.json's out_of_scope entry: if a future
+    change accidentally reintroduces a `ConstraintSense` binding without
+    updating the manifest, this catches it (`test_python_module_has_no_
+    undocumented_public_types` would too, but this pins the specific,
+    previously-real name so its removal is not silently forgotten)."""
+    assert not hasattr(otspot, "ConstraintSense")
+    assert not hasattr(otspot, "NotSupportedError")
