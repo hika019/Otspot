@@ -1,0 +1,96 @@
+{
+  "_readme": "Single source of truth for the Rust<->Python API parity guarantee. Rust side: otspot-py/tests/api_manifest_rust.rs (compile-time symbol references + invocation of every listed method; #[non_exhaustive] Rust enums can only guarantee variant-removal detection, not variant-addition, per Rust's own forward-compat contract for that attribute). Python side: otspot-py/tests/test_api_manifest.py (introspection of the built `otspot` extension module, both directions: manifest subset of module, and module public surface subset of manifest).",
+  "types": [
+    { "rust": "otspot_model::Model", "python": "otspot.Model" },
+    { "rust": "otspot_model::Variable", "python": "otspot.Variable" },
+    { "rust": "otspot_model::Expression", "python": "otspot.Expression" },
+    { "rust": "otspot_model::QuadExpr", "python": "otspot.QuadExpr" },
+    { "rust": "otspot_model::Constraint", "python": "otspot.Constraint" },
+    { "rust": "otspot_model::ConstraintSense", "python": "otspot.ConstraintSense" },
+    { "rust": "otspot_model::VarKind", "python": "otspot.VarKind" },
+    { "rust": "otspot_model::ModelResult", "python": "otspot.ModelResult" },
+    { "rust": "otspot_model::SolutionProof", "python": "otspot.SolutionProof" },
+    { "rust": "otspot_model::SolveError", "python": "otspot.SolveError" },
+    { "rust": "otspot_core::problem::SolveStatus", "python": "otspot.SolveStatus" },
+    { "rust": "otspot_core::options::Tolerance", "python": "otspot.Tolerance" }
+  ],
+  "model_error_exceptions": {
+    "_note": "otspot_model::ModelError has no Python type of its own: each variant maps to a distinct exception class (Python has no Result type), all subclassing otspot.OtspotError.",
+    "entries": [
+      { "rust_variant": "ModelError::NoObjective", "python": "otspot.NoObjectiveError" },
+      { "rust_variant": "ModelError::InvalidInput", "python": "otspot.InvalidInputError" },
+      { "rust_variant": "ModelError::SolveError", "python": "otspot.SolveFailedError" },
+      { "rust_variant": "ModelError::Timeout", "python": "otspot.TimeoutError" },
+      { "rust_variant": "ModelError::NonConvex", "python": "otspot.NonConvexError" },
+      { "rust_variant": "ModelError::NotSupported", "python": "otspot.NotSupportedError" },
+      { "rust_variant": "ModelError::Internal", "python": "otspot.InternalError" }
+    ]
+  },
+  "methods": {
+    "Model": [
+      { "rust": "Model::new", "python": "Model.__init__" },
+      { "rust": "Model::add_var", "python": "Model.add_var" },
+      { "rust": "Model::add_int_var", "python": "Model.add_int_var" },
+      { "rust": "Model::add_binary_var", "python": "Model.add_binary_var" },
+      { "rust": "Model::var_name", "python": "Model.var_name" },
+      { "rust": "Model::add_constraint", "python": "Model.add_constraint" },
+      { "rust": "Model::minimize", "python": "Model.minimize" },
+      { "rust": "Model::maximize", "python": "Model.maximize" },
+      { "rust": "Model::set_timeout", "python": "Model.set_timeout" },
+      { "rust": "Model::set_tolerance", "python": "Model.set_tolerance" },
+      { "rust": "Model::set_presolve", "python": "Model.set_presolve" },
+      { "rust": "Model::set_threads", "python": "Model.set_threads" },
+      { "rust": "Model::set_obj_offset", "python": "Model.set_obj_offset" },
+      { "rust": "Model::solve", "python": "Model.solve" }
+    ],
+    "Variable": [
+      { "rust": "Variable::pow2", "python": "Variable.pow2" },
+      { "rust": "impl core::ops::{Add,Sub,Neg,Mul} for Variable", "python": "Variable.__add__/__radd__/__sub__/__rsub__/__neg__/__mul__/__rmul__" },
+      { "rust": "Expression::leq via Expression::from(Variable)", "python": "Variable.leq", "note": "replaces the constraint! macro, which Python has no equivalent of" },
+      { "rust": "Expression::geq via Expression::from(Variable)", "python": "Variable.geq", "note": "replaces the constraint! macro" },
+      { "rust": "Expression::eq_constraint via Expression::from(Variable)", "python": "Variable.eq_constraint", "note": "replaces the constraint! macro" }
+    ],
+    "Expression": [
+      { "rust": "impl core::ops::{Add,Sub,Neg,Mul} for Expression", "python": "Expression.__add__/__radd__/__sub__/__rsub__/__neg__/__mul__/__rmul__" },
+      { "rust": "Expression::leq", "python": "Expression.leq" },
+      { "rust": "Expression::geq", "python": "Expression.geq" },
+      { "rust": "Expression::eq_constraint", "python": "Expression.eq_constraint" }
+    ],
+    "QuadExpr": [
+      { "rust": "QuadExpr::is_linear", "python": "QuadExpr.is_linear" },
+      { "rust": "impl core::ops::{Add,Sub,Neg,Mul} for QuadExpr", "python": "QuadExpr.__add__/__radd__/__sub__/__rsub__/__neg__/__mul__/__rmul__" }
+    ],
+    "ModelResult": [
+      { "rust": "ModelResult::objective", "python": "ModelResult.objective" },
+      { "rust": "ModelResult::value", "python": "ModelResult.value" },
+      { "rust": "ModelResult::has_global_optimality_proof", "python": "ModelResult.has_global_optimality_proof" },
+      { "rust": "impl core::ops::Index<Variable> for ModelResult", "python": "ModelResult.__getitem__" },
+      { "rust": "ModelResult.status", "python": "ModelResult.status" },
+      { "rust": "ModelResult.proof", "python": "ModelResult.proof" },
+      { "rust": "ModelResult.objective_value", "python": "ModelResult.objective_value" },
+      { "rust": "ModelResult.dual_solution", "python": "ModelResult.dual_solution" },
+      { "rust": "ModelResult.reduced_costs", "python": "ModelResult.reduced_costs" },
+      { "rust": "ModelResult.slack", "python": "ModelResult.slack" },
+      { "rust": "ModelResult.bound_duals", "python": "ModelResult.bound_duals" }
+    ]
+  },
+  "variants": {
+    "VarKind": ["Continuous", "Integer", "Binary"],
+    "ConstraintSense": ["Le", "Ge", "Eq"],
+    "SolutionProof": ["GlobalOptimal", "LocalOptimal", "FeasibleUnproven"],
+    "SolveError": ["Infeasible", "Unbounded", "MaxIterations", "Stalled", "NumericalError"],
+    "SolveStatus": [
+      "Optimal", "LocallyOptimal", "Infeasible", "Unbounded", "MaxIterations",
+      "SuboptimalSolution", "Stalled", "FeasiblePoint", "Timeout", "NumericalError",
+      "NonConvex", "NonconvexLocal", "NonconvexGlobal", "NotSupported"
+    ],
+    "Tolerance": ["High", "Medium", "Fast", "Custom"]
+  },
+  "out_of_scope": [
+    "otspot_core::conic::* (QCQP/SOCP/MISOCP solve_socp/solve_qcqp/etc.) - not bound in v1; Model.add_qc_le/add_soc_le are not exposed",
+    "otspot_core::problem::{LpProblem, QpProblem} raw construction and otspot_core::lp::solve_lp_with / otspot_core::qp::solve_qp_with raw entrypoints - Python uses otspot_model::Model exclusively, the crate's own recommended high-level entrypoint",
+    "Model::try_add_var / try_add_int_var / try_var_name - eager-Result variants of already-bound methods; Python's exception-raising add_var/var_name already surface the same validation at solve()/call time",
+    "ModelResult::try_value - Python's value()/__getitem__ already raise via PyO3's panic-to-exception conversion on misuse",
+    "otspot_core::options::SolverOptions / MipConfig / GlobalOptimizationConfig / BranchingStrategy / etc. - only the subset reachable through Model's set_* methods (timeout, tolerance, presolve, threads, obj_offset) is bound"
+  ]
+}

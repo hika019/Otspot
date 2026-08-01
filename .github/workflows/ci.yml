@@ -81,6 +81,38 @@ jobs:
       # で otspot-num を軽量に実行し、それらを実際に踏む。
       - run: cargo nextest run -p otspot-num --no-fail-fast
 
+  python:
+    name: Python bindings (otspot-py parity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # otspot-py excludes itself from workspace default-members (a cdylib
+      # would otherwise contaminate every `cargo build`/`test` invocation),
+      # so it needs an explicit `-p` here; the other Rust test jobs never
+      # touch it. `--no-default-features` disables the `extension-module`
+      # PyO3 feature (on by default for `maturin build`, see otspot-py/Cargo.toml):
+      # extension-module skips linking libpython (the host interpreter
+      # provides those symbols at dlopen time), which breaks a normal `cargo
+      # test` binary that needs to link libpython itself. `actions/setup-python`
+      # ships a self-contained interpreter pyo3-build-config can locate cleanly.
+      - name: Rust-side API manifest parity test
+        run: cargo test -p otspot-py --no-default-features
+      - name: Install maturin and pytest
+        run: pip install maturin pytest
+      - name: Build and install the otspot wheel
+        working-directory: otspot-py
+        run: |
+          maturin build --release --out dist
+          pip install dist/*.whl
+      - name: Python-side API manifest + behavior parity tests
+        working-directory: otspot-py
+        run: pytest tests/ -v
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -188,7 +220,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: count TODO/FIXME
         run: |
-          COUNT=$(grep -rE 'TODO|FIXME|XXX|HACK' otspot-core/src otspot-num/src otspot-io/src otspot-model/src otspot-dev/src src 2>/dev/null | wc -l)
+          COUNT=$(grep -rE 'TODO|FIXME|XXX|HACK' otspot-core/src otspot-num/src otspot-io/src otspot-model/src otspot-dev/src otspot-py/src src 2>/dev/null | wc -l)
           echo "todo_count=$COUNT"
           # CLAUDE.md「実装」section「メモ書き・作業ログ的コメントは書かない」を CI で
           # enforce。scripts/lib/check_memo_grep.sh と似ているが scope が異なる意図的な

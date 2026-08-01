@@ -2,6 +2,23 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+- `otspot-py` crate (PyO3/maturin) を追加し、Otspot を Python ライブラリとして
+  利用可能に。`otspot_model::Model`/`Variable`/`Expression`/`QuadExpr`/
+  `Constraint`/`ModelResult`と`SolveStatus`/`SolutionProof`/`SolveError`/
+  `VarKind`/`ConstraintSense`/`Tolerance`をRustと同名・同構造でPythonへ写像
+  (演算子オーバーロードはRustの実オペレータへの直接委譲)。`ModelError`の各
+  variantはPython例外クラス群 (`otspot.NoObjectiveError`等) へ対応
+- API parityを`otspot-py/api_manifest.json`で保証: Rust側 (`otspot-py/tests/api_manifest_rust.rs`、
+  コンパイル参照+実行) とPython側 (`otspot-py/tests/test_api_manifest.py`、
+  introspectionで双方向検出) で同一マニフェストを検証。LP/QP挙動parityは
+  独立手計算オラクル問題で確認 (`otspot-py/tests/test_parity_lp_qp.py`)
+- GitHub Actionsに`python`ジョブを追加 (setup-python → maturin build →
+  wheel install → pytest)。`otspot-py`はworkspace `members`に追加したが
+  `default-members`には含めない (cdylib+`extension-module`機能が通常の
+  `cargo build`/`test`を汚染するため)
+
 ## [0.7.4] - 2026-07-31
 
 MILP/simplex の性能改善 (MIPLIB small 5/20→7/20) とステータス誠実化、solver 基盤の otspot-num crate 分離を中心としたリリース。
