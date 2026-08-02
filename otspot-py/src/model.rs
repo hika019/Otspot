@@ -20,15 +20,30 @@ use crate::expr::{coerce, Operand};
 use crate::result::PyModelResult;
 use crate::variable::PyVariable;
 
-/// Interval between `Python::check_signals` polls while `solve()`'s
+/// Starting interval between `Python::check_signals` polls while `solve()`'s
 /// underlying computation runs on its worker thread (see `solve` below).
 ///
-/// Chosen empirically: `tests/test_parity_lp_qp.py::test_sigint_interrupts_long_solve`
-/// measures `KeyboardInterrupt` arriving well within its budget at this
-/// interval, and re-acquiring the GIL for one `check_signals` call every
-/// 10ms is negligible next to the smallest solve durations exercised by the
-/// test suite (adds <=10ms fixed latency per `solve()` call).
-const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// A flat 10ms interval here previously put a 10ms latency *floor* under
+/// every `solve()` call, regardless of how fast the solve itself was: a
+/// 0.2ms LP took 10.2ms end to end (measured), a 60x slowdown, because the
+/// first poll always had to wait out a full 10ms sleep before the loop's
+/// `is_finished()` check could ever see a solve that had already returned.
+/// Starting short and backing off (`SIGNAL_POLL_BACKOFF_FACTOR`, capped at
+/// `SIGNAL_POLL_INTERVAL_MAX`) keeps that floor at roughly this constant's
+/// order of magnitude for sub-millisecond solves, while a long solve still
+/// settles into `SIGNAL_POLL_INTERVAL_MAX`-cadence polling within a few
+/// doublings (~13ms of ramp-up), leaving `KeyboardInterrupt` latency for a
+/// genuinely long solve essentially unchanged from the flat-interval design.
+const SIGNAL_POLL_INTERVAL_INITIAL: Duration = Duration::from_micros(100);
+
+/// Multiplier applied to the poll interval after each `check_signals` call
+/// that finds nothing pending, until it reaches `SIGNAL_POLL_INTERVAL_MAX`.
+const SIGNAL_POLL_BACKOFF_FACTOR: u32 = 2;
+
+/// Ceiling on the poll interval once backoff has ramped up -- bounds
+/// `KeyboardInterrupt` latency for a long solve the same way the old flat
+/// interval did (this *is* the old flat interval's value).
+const SIGNAL_POLL_INTERVAL_MAX: Duration = Duration::from_millis(10);
 
 #[pyclass(module = "otspot", name = "Model")]
 pub struct PyModel(pub(crate) Model);
@@ -138,10 +153,11 @@ impl PyModel {
     /// The actual computation runs on a worker thread that never touches
     /// the GIL (`Model::solve` is pure `otspot-model`/`otspot-core`, no
     /// PyO3 calls anywhere in it) via `std::thread::scope`, while this
-    /// (calling) thread polls `Python::check_signals` every
-    /// `SIGNAL_POLL_INTERVAL`, releasing the GIL via `Python::detach`
-    /// between polls so other Python threads keep making progress during a
-    /// long solve (`test_solve_releases_the_gil`).
+    /// (calling) thread polls `Python::check_signals` with an
+    /// exponentially-backed-off interval (`SIGNAL_POLL_INTERVAL_INITIAL` up
+    /// to `SIGNAL_POLL_INTERVAL_MAX`), releasing the GIL via
+    /// `Python::detach` between polls so other Python threads keep making
+    /// progress during a long solve (`test_solve_releases_the_gil`).
     ///
     /// This replaces an earlier design that ran the solve directly under
     /// `Python::detach` on the calling thread: releasing the GIL there let
@@ -167,6 +183,7 @@ impl PyModel {
 
         std::thread::scope(|scope| {
             let handle = scope.spawn(move || model.solve());
+            let mut poll_interval = SIGNAL_POLL_INTERVAL_INITIAL;
             loop {
                 if handle.is_finished() {
                     let outcome = match handle.join() {
@@ -181,7 +198,10 @@ impl PyModel {
                         .map(PyModelResult)
                         .map_err(|e| model_error_to_pyerr(py, e));
                 }
-                py.detach(|| std::thread::sleep(SIGNAL_POLL_INTERVAL));
+                py.detach(|| std::thread::sleep(poll_interval));
+                poll_interval = poll_interval
+                    .saturating_mul(SIGNAL_POLL_BACKOFF_FACTOR)
+                    .min(SIGNAL_POLL_INTERVAL_MAX);
                 if let Err(sig_err) = py.check_signals() {
                     cancel.store(true, Ordering::Relaxed);
                     // Block until the worker actually observes the flag and

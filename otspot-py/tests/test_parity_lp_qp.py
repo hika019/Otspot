@@ -455,12 +455,12 @@ def test_sigint_interrupts_long_solve():
        -- which a `detach`-for-the-whole-solve design never gave it the
        chance to do. Fixed in `otspot-py/src/model.rs`: `solve()` now runs
        the computation on a worker thread (`std::thread::scope`) while the
-       calling thread polls `Python::check_signals` every
-       `SIGNAL_POLL_INTERVAL`, setting `Model.set_cancel_flag`'s flag on a
-       caught signal.
-    2. Even with that fixed, `otspot-core`'s Farkas-infeasibility-certificate
-       verification (`dual_advanced::phase1::farkas_infeasibility_certified`
-       and `primal::extract_farkas_certificate`) each ran a `for row in
+       calling thread polls `Python::check_signals` with an
+       exponentially-backed-off interval, setting `Model.set_cancel_flag`'s
+       flag on a caught signal.
+    2. `otspot-core`'s Farkas-infeasibility-certificate verification
+       (`dual_advanced::phase1::farkas_infeasibility_certified` and
+       `primal::extract_farkas_certificate`) each ran a `for row in
        art_rows` loop -- one BTRAN solve + an O(n) certificate check per
        still-basic artificial row -- that checked neither `deadline` nor
        `cancel_flag` internally, only at entry. Cancelling early (the exact
@@ -469,22 +469,41 @@ def test_sigint_interrupts_long_solve():
        `m`) went unnoticed until that whole O(m) loop ran to completion on
        its own. Fixed in `otspot-core/src/simplex/dual_advanced/phase1.rs`
        and `otspot-core/src/simplex/primal/mod.rs` by checking
-       `options.external_stop_requested()` inside the loop. This is the
-       dominant cost: without it, this same test's SIGINT took 2.9-8.6s to
-       be honored (measured directly, both in debug and release builds)
-       even with fix #1 alone in place.
+       `options.external_stop_requested()` inside the loop.
 
-    n=1200 (`_build_gil_probe_model`'s default) with a 0.1s send delay:
-    measured 0.33-0.41s across 5 repeated trials post-fix (debug build) --
-    comfortably inside the 2s bound below with room for CI jitter, and
-    nowhere near `_build_gil_probe_model`'s own documented natural
-    completion times (~0.12s release / ~21s debug) for a would-be-false-pass
-    check: 2s is short enough that a solve which merely *finished on its
-    own* before the signal was even processed would only pass this bound in
-    the release-build regime, which is why the KeyboardInterrupt assertion
-    below (not just the timing bound) is the primary correctness check.
+       This is a *debug-build-specific* fix, not something this Python-level
+       test can demonstrate on its own: the O(m) Farkas loop is cheap enough
+       at `opt-level=3` (this test's own build, and any `--release` wheel)
+       that even *without* the fix, SIGINT here was honored in ~0.130s --
+       fast, not the multi-second stall this fixes in a `dev`-profile
+       build. The dedicated sentinel for fix #2
+       (`otspot-core::lp::tests::farkas_certificate_probe_loop_honors_cancel_flag_preset`,
+       n=6000) reverts the fix and re-runs it *under `cargo test`'s own
+       `opt-level=3` profile* specifically so it reproduces there (1.9s
+       reverted vs 0.05s fixed); this test's job is only to prove fix #1
+       (the worker-thread/poll-loop redesign) end to end.
+
+    n=2000 (not `_build_gil_probe_model`'s default 1200) with a 0.1s send
+    delay: chosen for margin, not just correctness. At n=1200 this test's
+    natural (uninterrupted) release-build completion time is only ~0.145s --
+    a mere ~31ms/24% past the 0.1s send delay, thin enough that a faster
+    machine than this one could plausibly finish the solve *before* the
+    signal is even processed, failing the `pytest.raises(KeyboardInterrupt)`
+    below and (worse) leaving the not-yet-delivered SIGINT to surface as a
+    stray `KeyboardInterrupt` in whatever runs next. n=2000 measured
+    ~0.337s natural completion (release) against the same 0.1s delay --
+    ~237ms/237% margin -- while `KeyboardInterrupt` itself still arrives in
+    ~0.108-0.111s (12/12 trials, release) since the poll loop's response
+    latency is governed by its backoff ramp-up, not by problem size. Debug
+    build: ~0.457-0.472s (5/5 trials) to `KeyboardInterrupt`, still
+    orders of magnitude under n=2000's natural debug completion time
+    (~59s, extrapolated from `_build_gil_probe_model`'s own docstring
+    scaling data), so no analogous margin concern there. The 2s bound below
+    comfortably covers both build-profile regimes with headroom; the
+    `KeyboardInterrupt` assertion (not just the timing bound) remains the
+    primary correctness check.
     """
-    model = _build_gil_probe_model()
+    model = _build_gil_probe_model(2000)
 
     def send_sigint() -> None:
         time.sleep(0.1)
@@ -500,6 +519,57 @@ def test_sigint_interrupts_long_solve():
     assert elapsed < 2.0, (
         f"KeyboardInterrupt took {elapsed:.3f}s to arrive after SIGINT was sent "
         "at ~0.1s -- solve() is not honoring Ctrl-C promptly"
+    )
+
+
+def _build_tiny_lp() -> otspot.Model:
+    model = otspot.Model("tiny")
+    x = model.add_var("x", 0.0, 10.0)
+    y = model.add_var("y", 0.0, 10.0)
+    model.add_constraint((x + y).geq(3.0))
+    model.minimize(x + 2.0 * y)
+    return model
+
+
+def test_solve_poll_backoff_does_not_floor_small_solve_latency():
+    """`Model.solve()`'s `Python::check_signals` poll loop used to sleep a
+    flat 10ms before its very first `is_finished`/`check_signals` check,
+    putting a ~10ms latency *floor* under every `solve()` call no matter how
+    fast the underlying LP actually was (Codex PR #31 review, P2): a
+    trivial 2-variable LP that solves in ~0.2ms on its own measured 10.2ms
+    end to end through `solve()` -- a ~60x slowdown -- reproducibly across
+    200 repeated calls.
+
+    Fixed with an adaptive backoff (`SIGNAL_POLL_INTERVAL_INITIAL` doubling
+    via `SIGNAL_POLL_BACKOFF_FACTOR` up to `SIGNAL_POLL_INTERVAL_MAX`, see
+    `otspot-py/src/model.rs`): the first poll is far shorter than the old
+    flat interval, so a solve that finishes before the loop has ramped up
+    to a coarse polling cadence is observed almost immediately, while a
+    long solve still settles into the same coarse cadence (and the same
+    `KeyboardInterrupt` latency) as before.
+
+    Sentinel: median latency across 200 repeated tiny solves measured
+    ~0.96ms post-fix (this machine, debug build) -- a regression back to a
+    flat 10ms floor would push that to ~10ms+. The 5ms bound below has
+    headroom over the measured value (for machine-to-machine variance in
+    thread-spawn/GIL-detach overhead) while staying well under half the old
+    floor, so it still catches that regression.
+    """
+    n = 200
+    times: list[float] = []
+    for _ in range(n):
+        model = _build_tiny_lp()
+        t0 = time.perf_counter()
+        result = model.solve()
+        times.append(time.perf_counter() - t0)
+        assert isinstance(result.status, otspot.SolveStatus.Optimal)
+
+    times.sort()
+    median = times[n // 2]
+    assert median < 0.005, (
+        f"median solve() latency over {n} trivial solves was {median * 1000:.3f}ms "
+        "-- expected sub-millisecond-scale, not a coarse fixed poll-interval floor "
+        "(regression back to a flat SIGNAL_POLL_INTERVAL would read ~10ms here)"
     )
 
 

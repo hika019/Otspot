@@ -16,6 +16,9 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - `Model.solve()` 中の Ctrl-C (SIGINT) が `KeyboardInterrupt` を即座に送出する
   よう修正 (`Model::set_cancel_flag` 新設 + worker thread 化)。otspot-core の
   Farkas 証明書検証ループが `deadline`/`cancel_flag` 未チェックだった真因も修正
+  (挙動変更: `timeout_secs` 設定時、Infeasible 判定寸前だった問題が Timeout
+  になり得る)。ポーリング間隔を適応 backoff 化し、小型 solve への固定
+  latency 床 (旧: 10ms 固定) を解消
 
 ## [0.7.4] - 2026-07-31
 
