@@ -181,7 +181,19 @@ fn farkas_infeasibility_certified(
     }
 
     // Strategy 2: per-row probes — catches cplex2-class where joint b^Ty ≈ 0.
+    //
+    // O(|art_rows|) BTRAN solves + O(|art_rows| * n_total) certificate checks:
+    // unlike every simplex iteration loop in this module, this has no natural
+    // per-iteration cost bound from a caller-visible progress metric, and
+    // |art_rows| can be close to `m` right after a Phase I bail (most
+    // artificials still basic — exactly the case that reaches this function).
+    // Checked here (not just at entry) for the same reason `deadline` is
+    // rechecked inside any O(m)+ loop elsewhere in this crate: an external
+    // stop must not wait out a loop whose own cost scales with problem size.
     for &row in &art_rows {
+        if options.external_stop_requested() {
+            return false;
+        }
         let mut e_i = vec![0.0_f64; m];
         e_i[row] = 1.0;
         basis_mgr.btran_dense(&mut e_i);

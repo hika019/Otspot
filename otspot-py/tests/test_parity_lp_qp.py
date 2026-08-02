@@ -9,7 +9,9 @@ Does not depend on data/ (absent in worktrees, per repo convention).
 """
 
 import copy
+import os
 import pickle
+import signal
 import threading
 import time
 
@@ -352,6 +354,17 @@ def _build_gil_probe_model(n: int = 1200) -> otspot.Model:
     return model
 
 
+def _available_cpu_count() -> int:
+    """`os.sched_getaffinity` (Linux-only: honors cgroup/taskset CPU limits,
+    unlike `os.cpu_count()`, which reports the host's total core count even
+    inside a constrained container) with an `os.cpu_count()` fallback for
+    platforms where `sched_getaffinity` doesn't exist (e.g. macOS)."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
 def test_solve_releases_the_gil():
     """`Model.solve` must run under `Python::detach` so other Python threads
     can make progress during a long solve (otherwise a `timeout_secs`-bounded
@@ -383,11 +396,16 @@ def test_solve_releases_the_gil():
     Requires >=2 available CPU cores to distinguish the two regimes at all:
     on a single-vCPU host, two threads cannot run Rust work in parallel
     regardless of whether the GIL is released, so the released regime would
-    also read ratio ~1.0 and this test could fail even with a correct
-    `Python::detach`. Not a concern for the CI runners this test targets
-    (>=2 cores), but worth knowing if running locally in a constrained
-    container/VM.
+    also read ratio ~1.0 -- not a real failure of `Python::detach`, but a
+    physical impossibility of measuring its effect this way on that host.
+    Skipped rather than asserted around, below.
     """
+    if _available_cpu_count() < 2:
+        pytest.skip(
+            "test_solve_releases_the_gil needs >=2 available CPU cores to "
+            "distinguish GIL-released from GIL-held (both read ratio ~1.0 "
+            "on a single core regardless of Python::detach)"
+        )
     m1, m2 = _build_gil_probe_model(), _build_gil_probe_model()
     t0 = time.perf_counter()
     r1 = m1.solve()
@@ -416,6 +434,72 @@ def test_solve_releases_the_gil():
         f"concurrent={concurrent:.3f}s not comfortably faster than serial={serial:.3f}s "
         f"(ratio {concurrent / serial:.3f}) -- GIL appears to be held throughout "
         "solve(), preventing real concurrency"
+    )
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGINT"), reason="SIGINT is not available on this platform"
+)
+def test_sigint_interrupts_long_solve():
+    """Ctrl-C during a `timeout_secs`-unbounded `solve()` must raise
+    `KeyboardInterrupt` promptly, not only after the solve finishes on its
+    own -- the actual bug this test guards against (Codex PR #31 review, P1).
+
+    Root cause was two layers, not one:
+    1. `Model.solve()` used to run the entire blocking Rust computation under
+       `Python::detach` on the *same* thread that would otherwise process
+       the signal. Releasing the GIL there lets *other* Python threads make
+       progress, but does nothing for `KeyboardInterrupt` on a script's own
+       main thread, since `Python::check_signals`/the default SIGINT handler
+       only fire when the interpreter actually gets to run Python bytecode
+       -- which a `detach`-for-the-whole-solve design never gave it the
+       chance to do. Fixed in `otspot-py/src/model.rs`: `solve()` now runs
+       the computation on a worker thread (`std::thread::scope`) while the
+       calling thread polls `Python::check_signals` every
+       `SIGNAL_POLL_INTERVAL`, setting `Model.set_cancel_flag`'s flag on a
+       caught signal.
+    2. Even with that fixed, `otspot-core`'s Farkas-infeasibility-certificate
+       verification (`dual_advanced::phase1::farkas_infeasibility_certified`
+       and `primal::extract_farkas_certificate`) each ran a `for row in
+       art_rows` loop -- one BTRAN solve + an O(n) certificate check per
+       still-basic artificial row -- that checked neither `deadline` nor
+       `cancel_flag` internally, only at entry. Cancelling early (the exact
+       scenario Ctrl-C produces: Phase I bails on its first iteration,
+       leaving nearly every artificial basic, i.e. `art_rows.len()` close to
+       `m`) went unnoticed until that whole O(m) loop ran to completion on
+       its own. Fixed in `otspot-core/src/simplex/dual_advanced/phase1.rs`
+       and `otspot-core/src/simplex/primal/mod.rs` by checking
+       `options.external_stop_requested()` inside the loop. This is the
+       dominant cost: without it, this same test's SIGINT took 2.9-8.6s to
+       be honored (measured directly, both in debug and release builds)
+       even with fix #1 alone in place.
+
+    n=1200 (`_build_gil_probe_model`'s default) with a 0.1s send delay:
+    measured 0.33-0.41s across 5 repeated trials post-fix (debug build) --
+    comfortably inside the 2s bound below with room for CI jitter, and
+    nowhere near `_build_gil_probe_model`'s own documented natural
+    completion times (~0.12s release / ~21s debug) for a would-be-false-pass
+    check: 2s is short enough that a solve which merely *finished on its
+    own* before the signal was even processed would only pass this bound in
+    the release-build regime, which is why the KeyboardInterrupt assertion
+    below (not just the timing bound) is the primary correctness check.
+    """
+    model = _build_gil_probe_model()
+
+    def send_sigint() -> None:
+        time.sleep(0.1)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    sender = threading.Thread(target=send_sigint, daemon=True)
+    t0 = time.perf_counter()
+    sender.start()
+    with pytest.raises(KeyboardInterrupt):
+        model.solve()
+    elapsed = time.perf_counter() - t0
+    sender.join()
+    assert elapsed < 2.0, (
+        f"KeyboardInterrupt took {elapsed:.3f}s to arrive after SIGINT was sent "
+        "at ~0.1s -- solve() is not honoring Ctrl-C promptly"
     )
 
 

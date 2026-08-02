@@ -9,6 +9,9 @@ use otspot_model::{Model, QuadExpr};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::constraint::PyConstraint;
 use crate::enums::{PyTolerance, PyVarKind};
@@ -16,6 +19,16 @@ use crate::errors::model_error_to_pyerr;
 use crate::expr::{coerce, Operand};
 use crate::result::PyModelResult;
 use crate::variable::PyVariable;
+
+/// Interval between `Python::check_signals` polls while `solve()`'s
+/// underlying computation runs on its worker thread (see `solve` below).
+///
+/// Chosen empirically: `tests/test_parity_lp_qp.py::test_sigint_interrupts_long_solve`
+/// measures `KeyboardInterrupt` arriving well within its budget at this
+/// interval, and re-acquiring the GIL for one `check_signals` call every
+/// 10ms is negligible next to the smallest solve durations exercised by the
+/// test suite (adds <=10ms fixed latency per `solve()` call).
+const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[pyclass(module = "otspot", name = "Model")]
 pub struct PyModel(pub(crate) Model);
@@ -122,16 +135,65 @@ impl PyModel {
     /// Matches `Model::solve`. Raises a subclass of `otspot.OtspotError` on
     /// `Err` (see `errors.rs` for the `ModelError` variant -> exception map).
     ///
-    /// Runs under `Python::detach` (GIL released): the underlying solve can
-    /// run for the full `timeout_secs` budget (default: unbounded), and
-    /// holding the GIL for that whole span would freeze every other Python
-    /// thread in the process (including the one running `KeyboardInterrupt`
-    /// delivery) for the duration.
+    /// The actual computation runs on a worker thread that never touches
+    /// the GIL (`Model::solve` is pure `otspot-model`/`otspot-core`, no
+    /// PyO3 calls anywhere in it) via `std::thread::scope`, while this
+    /// (calling) thread polls `Python::check_signals` every
+    /// `SIGNAL_POLL_INTERVAL`, releasing the GIL via `Python::detach`
+    /// between polls so other Python threads keep making progress during a
+    /// long solve (`test_solve_releases_the_gil`).
+    ///
+    /// This replaces an earlier design that ran the solve directly under
+    /// `Python::detach` on the calling thread: releasing the GIL there let
+    /// *other* Python threads run, but did nothing for `KeyboardInterrupt`
+    /// on a `timeout_secs`-unbounded solve (the default) run from a
+    /// script's own main thread -- `Python::check_signals`/the SIGINT
+    /// handler only fire when the interpreter's main thread itself gets to
+    /// run Python bytecode, and a `detach`-for-the-whole-solve design never
+    /// gave it the chance to. Here, a caught signal (SIGINT ->
+    /// `KeyboardInterrupt` via Python's default handler) sets a
+    /// `Model::set_cancel_flag` cooperative-cancellation flag, which
+    /// `otspot-core` honors at the same cadence as the wall-clock
+    /// `timeout_secs` deadline (`SolverOptions::cancel_flag`, checked every
+    /// simplex/IPM/B&B-node iteration) -- so the worker actually stops
+    /// instead of running to completion unseen. The worker's own return
+    /// value is discarded once a signal fires: `KeyboardInterrupt` is
+    /// authoritative regardless of what status the now-cancelled solve
+    /// happened to end on.
     fn solve(&mut self, py: Python<'_>) -> PyResult<PyModelResult> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.0.set_cancel_flag(Arc::clone(&cancel));
         let model = &mut self.0;
-        py.detach(|| model.solve())
-            .map(PyModelResult)
-            .map_err(|e| model_error_to_pyerr(py, e))
+
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(move || model.solve());
+            loop {
+                if handle.is_finished() {
+                    let outcome = match handle.join() {
+                        Ok(outcome) => outcome,
+                        // Preserve PyO3's normal panic -> PanicException
+                        // conversion for the pymethod call as a whole,
+                        // rather than inventing a distinct "worker panicked"
+                        // error shape.
+                        Err(panic) => std::panic::resume_unwind(panic),
+                    };
+                    return outcome
+                        .map(PyModelResult)
+                        .map_err(|e| model_error_to_pyerr(py, e));
+                }
+                py.detach(|| std::thread::sleep(SIGNAL_POLL_INTERVAL));
+                if let Err(sig_err) = py.check_signals() {
+                    cancel.store(true, Ordering::Relaxed);
+                    // Block until the worker actually observes the flag and
+                    // returns -- `model` stays mutably borrowed by it until
+                    // then, and `std::thread::scope` would block here on
+                    // its own implicit join anyway; joining explicitly just
+                    // makes that wait visible at the call site.
+                    let _ = handle.join();
+                    return Err(sig_err);
+                }
+            }
+        })
     }
 }
 

@@ -330,6 +330,7 @@ pub fn otspot_model::Model::add_var(&mut self, &str, f64, f64) -> otspot_model::
 pub fn otspot_model::Model::maximize(&mut self, impl core::convert::Into<otspot_model::quad_expr::QuadExpr>) -> &mut Self
 pub fn otspot_model::Model::minimize(&mut self, impl core::convert::Into<otspot_model::quad_expr::QuadExpr>) -> &mut Self
 pub fn otspot_model::Model::new(&str) -> Self
+pub fn otspot_model::Model::set_cancel_flag(&mut self, alloc::sync::Arc<core::sync::atomic::AtomicBool>) -> &mut Self
 pub fn otspot_model::Model::set_obj_offset(&mut self, f64) -> &mut Self
 pub fn otspot_model::Model::set_presolve(&mut self, bool) -> &mut Self
 pub fn otspot_model::Model::set_threads(&mut self, usize) -> &mut Self

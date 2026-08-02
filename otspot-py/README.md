@@ -22,7 +22,11 @@ From source (this directory):
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install maturin
-maturin develop  # or: maturin build --release && pip install target/wheels/*.whl
+maturin develop  # or: maturin build --release && pip install ../target/wheels/*.whl
+# maturin build's default --out resolves through the workspace root (this crate
+# is a workspace member, not its own crate root), landing wheels in
+# ../target/wheels/, not ./target/wheels/ -- verified by running the command
+# above from this directory. Pass --out dist to override the location.
 ```
 
 ### Building from source: prerequisites

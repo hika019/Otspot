@@ -276,7 +276,17 @@ fn extract_farkas_certificate(
 
     // Strategy 3: per-row probes — tries each positive-x_B artificial row
     // individually.  Useful when the weighted combination still fails aty_ok.
+    //
+    // O(|art_rows|) BTRAN solves + O(|art_rows| * n_original) `aty_ok` checks:
+    // |art_rows| can be close to `m` right after a Phase I bail (most
+    // artificials still basic), so this loop's own cost scales with problem
+    // size and needs the same external-stop recheck as any other O(m)+ loop
+    // in this crate (see the identical fix in
+    // `dual_advanced::phase1::farkas_infeasibility_certified`).
     for &row in &art_rows {
+        if options.external_stop_requested() {
+            return vec![];
+        }
         if x_b_fresh[row] <= PIVOT_TOL {
             continue;
         }

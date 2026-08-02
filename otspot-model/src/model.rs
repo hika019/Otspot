@@ -27,7 +27,8 @@ use otspot_core::sparse::CscMatrix;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Index;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 static NEXT_MODEL_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -81,6 +82,12 @@ pub struct Model {
     threads: Option<usize>,
     /// 目的関数定数オフセット (QP: 1/2 x^T Q x + c^T x + offset, LP: c^T x + offset)
     obj_offset: f64,
+    /// Shared cooperative-cancellation flag threaded into the underlying
+    /// solver's `SolverOptions::cancel_flag` / `ConicOptions::cancel_flag`
+    /// (checked at the same cadence as the wall-clock deadline in every
+    /// LP/QP/MIP loop, and in the convex-QCQP bridge). `None` (default): no
+    /// cancellation hook, `solve()` runs to its normal stop condition.
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Model {
@@ -104,6 +111,7 @@ impl Model {
             presolve: None,
             threads: None,
             obj_offset: 0.0,
+            cancel_flag: None,
         }
     }
 
@@ -138,6 +146,33 @@ impl Model {
     /// Presolve の有効/無効を設定する（デフォルト: true）。
     pub fn set_presolve(&mut self, flag: bool) -> &mut Self {
         self.presolve = Some(flag);
+        self
+    }
+
+    /// Install a shared cooperative-cancellation flag: setting it to `true`
+    /// from another thread makes the next check point inside the running
+    /// `solve()` stop early, the same way a wall-clock deadline expiry does
+    /// (`solve()` returns `Err(ModelError::Timeout)` /
+    /// `Err(ModelError::SolveError(SolveError::Timeout))`, whichever the
+    /// underlying route already uses for deadline expiry). `solve()` itself
+    /// never spawns threads or touches OS signals; this is a plumbing hook
+    /// for callers that need to interrupt a solve from outside its own
+    /// thread -- e.g. `otspot-py`'s `Model.solve()`, which polls
+    /// `Python::check_signals` on a worker-thread boundary to turn a Ctrl-C
+    /// during a long solve into `KeyboardInterrupt` instead of leaving it
+    /// queued until the solve returns on its own.
+    ///
+    /// Covers the LP, QP, MIP, and convex-QCQP-bridge solve routes (every
+    /// route reachable from this DSL's public API). The nonconvex spatial
+    /// B&B (`otspot_core::conic::GlobalOptions`) and MISOCP B&B
+    /// (`otspot_core::conic::misocp::BbOptions`) sub-routes inside the QCQP
+    /// path have no `cancel_flag` field in `otspot-core` today (wall-clock
+    /// `deadline` only) -- a pre-existing gap in those two option types,
+    /// unrelated to this hook and not reachable from this DSL either way
+    /// (quadratic/SOC constraints have no `add_qc_le`/`add_soc_le` binding
+    /// in `otspot-py`; see `api_manifest.json`'s `out_of_scope`).
+    pub fn set_cancel_flag(&mut self, flag: Arc<AtomicBool>) -> &mut Self {
+        self.cancel_flag = Some(flag);
         self
     }
 
@@ -614,6 +649,7 @@ impl Model {
         if let Some(n) = self.threads {
             lp_opts.threads = n;
         }
+        lp_opts.cancel_flag = self.cancel_flag.clone();
         let solver_result = otspot_core::lp::solve_lp_with(&problem, &lp_opts);
 
         // SolverResult の dual/rc/slack は extract_dual_info によって
@@ -1178,6 +1214,7 @@ impl Model {
         let opts = otspot_core::conic::ConicOptions {
             tol,
             deadline,
+            cancel_flag: self.cancel_flag.clone(),
             ..otspot_core::conic::ConicOptions::default()
         };
         let bb_opts = otspot_core::conic::BbOptions {
@@ -1631,6 +1668,7 @@ impl Model {
         if let Some(n) = self.threads {
             opts.threads = n;
         }
+        opts.cancel_flag = self.cancel_flag.clone();
         let qp_result = otspot_core::qp::solve_qp_with(&qp_problem, &opts);
         let qp_stats = qp_result.stats.clone();
 
@@ -1738,6 +1776,7 @@ impl Model {
         if let Some(n) = self.threads {
             opts.threads = n;
         }
+        opts.cancel_flag = self.cancel_flag.clone();
         let cfg = otspot_core::options::MipConfig::default();
 
         let result = if let Some(ref q_orig) = self.quadratic_objective.clone() {
@@ -2315,6 +2354,25 @@ mod tests {
         assert!(result.objective_value > 0.0, "objective should be positive");
     }
 
+    /// A preset `cancel_flag` must stop the LP route the same way a
+    /// wall-clock deadline expiry does (`ModelError::Timeout`), mirroring
+    /// `otspot_core::lp`'s own `cancel_flag: Some(AtomicBool::new(true))`
+    /// sentinel. No-op proof: removing `set_cancel_flag`'s wiring into
+    /// `lp_opts.cancel_flag` (model.rs's LP solve path) makes this LP solve
+    /// `Optimal` instead of erroring.
+    #[test]
+    fn test_cancel_flag_preset_stops_lp_solve() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let (mut model, _x, _y) = basic_model();
+        model.set_cancel_flag(Arc::new(AtomicBool::new(true)));
+        let err = model.solve().unwrap_err();
+        assert!(
+            matches!(err, ModelError::Timeout),
+            "expected Timeout from a preset cancel_flag, got {err:?}"
+        );
+    }
+
     #[test]
     fn test_unbounded() {
         // min -x  s.t. x >= 0  (objective goes to -inf)
@@ -2596,6 +2654,29 @@ mod tests {
         assert!(
             matches!(err, ModelError::Timeout),
             "expected Timeout, got {:?}",
+            err
+        );
+    }
+
+    /// QP counterpart of `test_cancel_flag_preset_stops_lp_solve`: a preset
+    /// `cancel_flag` must stop the QP route the same way `set_timeout`
+    /// above does. No-op proof: removing the QP path's
+    /// `opts.cancel_flag = self.cancel_flag.clone()` wiring makes this QP
+    /// solve `Optimal` instead of erroring.
+    #[test]
+    fn test_cancel_flag_preset_stops_qp_solve() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let mut model = Model::new("qp_cancel");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        model.minimize(x * x + y * y + (-4.0) * x + (-4.0) * y);
+        model.set_cancel_flag(Arc::new(AtomicBool::new(true)));
+
+        let err = model.solve().unwrap_err();
+        assert!(
+            matches!(err, ModelError::Timeout),
+            "expected Timeout from a preset cancel_flag, got {:?}",
             err
         );
     }
@@ -3366,6 +3447,29 @@ mod mip_model_tests {
         let r = m.solve().unwrap();
         assert!((r.objective() - 1.0).abs() < EPS, "obj={}", r.objective());
         assert!((r[x] - 1.0).abs() < EPS, "x={}", r[x]);
+    }
+
+    /// MIP counterpart of the LP/QP `cancel_flag` sentinels: a preset
+    /// `cancel_flag` must stop the MILP route the same way a wall-clock
+    /// deadline expiry does. No-op proof: removing the MIP path's
+    /// `opts.cancel_flag = self.cancel_flag.clone()` wiring makes this
+    /// solve return its normal `Optimal` MILP result instead of erroring.
+    #[test]
+    fn model_cancel_flag_preset_stops_mip_solve() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let mut m = Model::new("milp_cancel");
+        let x = m.add_int_var("x", 0.0, 5.0);
+        m.add_constraint((2.0 * x).leq(3.0));
+        m.maximize(x);
+        m.set_cancel_flag(Arc::new(AtomicBool::new(true)));
+
+        let err = m.solve().unwrap_err();
+        assert!(
+            matches!(err, ModelError::Timeout),
+            "expected Timeout from a preset cancel_flag, got {:?}",
+            err
+        );
     }
 
     #[test]

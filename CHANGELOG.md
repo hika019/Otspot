@@ -13,6 +13,9 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
   (`try_var_kind` 含む) を新設
 - `Expression`/`QuadExpr` に `+=` (`__iadd__`) を追加し、蓄積ループの
   O(n²) クローンコストを回避
+- `Model.solve()` 中の Ctrl-C (SIGINT) が `KeyboardInterrupt` を即座に送出する
+  よう修正 (`Model::set_cancel_flag` 新設 + worker thread 化)。otspot-core の
+  Farkas 証明書検証ループが `deadline`/`cancel_flag` 未チェックだった真因も修正
 
 ## [0.7.4] - 2026-07-31
 
