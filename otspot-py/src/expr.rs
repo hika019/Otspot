@@ -130,21 +130,44 @@ impl PyExpression {
     /// `self` to a different type the way `__add__`'s ordinary return value
     /// can) -- raises `TypeError` telling the caller to use `self = self +
     /// rhs` for that specific combination instead.
-    fn __iadd__(&mut self, rhs: &Bound<'_, PyAny>) -> PyResult<()> {
+    ///
+    /// Takes `slf: &Bound<'_, Self>` instead of `&mut self` so that
+    /// self-aliasing (`expr += expr`) doesn't panic: `&mut self` has PyO3
+    /// eagerly `.borrow_mut()` self as part of extracting the receiver,
+    /// *before* this function's body even starts, so `coerce(rhs)`'s
+    /// `.borrow()` on the *same* cell (`rhs` being the identical Python
+    /// object) then panics with `PyBorrowError` -- a `PanicException`,
+    /// which subclasses `BaseException` rather than `Exception`, so
+    /// ordinary `except Exception` does not catch it (Codex PR #31 review,
+    /// P2 -- the same failure class `var_name`/`var_kind` were written to
+    /// avoid). With `slf: &Bound<'_, Self>`, PyO3 does not borrow anything
+    /// up front; `slf.borrow_mut()` below is only reached from *inside* a
+    /// match arm, after `coerce(rhs)` -- the match scrutinee -- has already
+    /// run to completion and dropped whatever borrow it took of `rhs`. So
+    /// even when `rhs` *is* `slf`, `coerce`'s borrow and `slf.borrow_mut()`
+    /// are never alive at the same time: `coerce` clones out `self.0`'s
+    /// current value first (`Operand::E(self.0.clone())` when aliased),
+    /// *then* `self.0` is moved out via `mem::take` and added to that
+    /// snapshot -- `self + self`, computed correctly, no explicit identity
+    /// check needed.
+    fn __iadd__(slf: &Bound<'_, Self>, rhs: &Bound<'_, PyAny>) -> PyResult<()> {
         match coerce(rhs) {
             Some(Operand::F(f)) => {
-                let owned = std::mem::take(&mut self.0);
-                self.0 = owned + f;
+                let mut slf_mut = slf.borrow_mut();
+                let owned = std::mem::take(&mut slf_mut.0);
+                slf_mut.0 = owned + f;
                 Ok(())
             }
             Some(Operand::V(v)) => {
-                let owned = std::mem::take(&mut self.0);
-                self.0 = owned + v;
+                let mut slf_mut = slf.borrow_mut();
+                let owned = std::mem::take(&mut slf_mut.0);
+                slf_mut.0 = owned + v;
                 Ok(())
             }
             Some(Operand::E(e)) => {
-                let owned = std::mem::take(&mut self.0);
-                self.0 = owned + e;
+                let mut slf_mut = slf.borrow_mut();
+                let owned = std::mem::take(&mut slf_mut.0);
+                slf_mut.0 = owned + e;
                 Ok(())
             }
             Some(Operand::Q(_)) => Err(PyTypeError::new_err(
@@ -270,27 +293,34 @@ impl PyQuadExpr {
     /// `self += rhs`. See `PyExpression::__iadd__`'s doc comment: same
     /// mem::take-based clone avoidance, no type-changing case here (unlike
     /// Expression, QuadExpr is already the "widest" of the two -- adding a
-    /// Variable/Expression/QuadExpr/float always stays a QuadExpr).
-    fn __iadd__(&mut self, rhs: &Bound<'_, PyAny>) -> PyResult<()> {
+    /// Variable/Expression/QuadExpr/float always stays a QuadExpr). Also
+    /// takes `slf: &Bound<'_, Self>` and defers `borrow_mut` until after
+    /// `coerce(rhs)` has already run, for the same `quad += quad`
+    /// `PyBorrowError`-panic reason as `PyExpression`'s.
+    fn __iadd__(slf: &Bound<'_, Self>, rhs: &Bound<'_, PyAny>) -> PyResult<()> {
         match coerce(rhs) {
             Some(Operand::F(f)) => {
-                let owned = std::mem::take(&mut self.0);
-                self.0 = owned + f;
+                let mut slf_mut = slf.borrow_mut();
+                let owned = std::mem::take(&mut slf_mut.0);
+                slf_mut.0 = owned + f;
                 Ok(())
             }
             Some(Operand::V(v)) => {
-                let owned = std::mem::take(&mut self.0);
-                self.0 = owned + v;
+                let mut slf_mut = slf.borrow_mut();
+                let owned = std::mem::take(&mut slf_mut.0);
+                slf_mut.0 = owned + v;
                 Ok(())
             }
             Some(Operand::E(e)) => {
-                let owned = std::mem::take(&mut self.0);
-                self.0 = owned + e;
+                let mut slf_mut = slf.borrow_mut();
+                let owned = std::mem::take(&mut slf_mut.0);
+                slf_mut.0 = owned + e;
                 Ok(())
             }
             Some(Operand::Q(q)) => {
-                let owned = std::mem::take(&mut self.0);
-                self.0 = owned + q;
+                let mut slf_mut = slf.borrow_mut();
+                let owned = std::mem::take(&mut slf_mut.0);
+                slf_mut.0 = owned + q;
                 Ok(())
             }
             None => Err(PyTypeError::new_err(format!(

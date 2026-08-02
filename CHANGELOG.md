@@ -17,8 +17,13 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
   よう修正 (`Model::set_cancel_flag` 新設 + worker thread 化)。otspot-core の
   Farkas 証明書検証ループが `deadline`/`cancel_flag` 未チェックだった真因も修正
   (挙動変更: `timeout_secs` 設定時、Infeasible 判定寸前だった問題が Timeout
-  になり得る)。ポーリング間隔を適応 backoff 化し、小型 solve への固定
-  latency 床 (旧: 10ms 固定) を解消
+  になり得る)。ポーリング間隔を適応 backoff + Condvar 化し、小型 solve への
+  固定 latency 床 (旧: 10ms 固定) を解消
+- otspot-model: `set_presolve(false)` が QP/MIQP 経路では無視されていたバグを
+  修正 (LP/MILP のみ反映されていた)。`Expression`/`QuadExpr` の `+=` が
+  自己エイリアス代入 (`expr += expr`) で panic するバグを修正。QP presolve
+  phase-2 の等式制約簡約ループが `cancel_flag` 未チェックだった真因を修正
+  (途中打ち切り時に未検証行を誤って冗長判定する退行も併せて修正)
 
 ## [0.7.4] - 2026-07-31
 

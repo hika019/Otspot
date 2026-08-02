@@ -39,7 +39,7 @@ const RHS_HASH_QUANTIZE: f64 = 1e9;
 /// Detect Le-Le pairs that form an equality (A\[j,*\] = -A\[i,*\] and b\[j\] = -b\[i\]) and
 /// drop redundant equality rows via partial-pivot Gaussian elimination. Only runs when
 /// `m > 2n` since the elimination cost is O(mn²).
-fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool]) {
+fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool], opts: &SolverOptions) {
     use std::collections::hash_map::DefaultHasher;
     use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
@@ -147,6 +147,29 @@ fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool]) {
     let mut work = aeq.clone();
 
     for col in 0..n {
+        // Gaussian elimination here is O(m_eq * n) per column, O(m_eq * n^2)
+        // total (see the module doc / `ROW_OVERDETERMINED_RATIO` comment) --
+        // the same "external stop mid-loop, not just at entry" gap as
+        // `dual_advanced::phase1::farkas_infeasibility_certified`'s per-row
+        // Farkas probe loop. Checked once per outer (column) iteration: cheap
+        // (one atomic load) next to that iteration's own O(m_eq * n) cost.
+        //
+        // `return`, not `break`: a row that never got a chance to compete
+        // for a pivot (because we stopped partway through the columns) has
+        // not been *proven* linearly dependent on the pivots found so far --
+        // the "drop every non-pivot row" pass below is only sound once every
+        // column has had its chance to claim a pivot (or `pivot_count`
+        // already reached the theoretical max `n`). Falling through to that
+        // pass with an artificially-early-truncated pivot set would drop
+        // rows that were never actually shown to be redundant -- a
+        // correctness bug (a wrongly-dropped constraint silently relaxes
+        // the problem), not just a missed optimization. Aborting the whole
+        // function leaves `removed_rows` at the caller's initial
+        // (all-`false`, "no reduction") state, the same honest fallback the
+        // `m * n > QR_SKIP_SIZE_THRESHOLD` size-cap check above already uses.
+        if opts.external_stop_requested() {
+            return;
+        }
         let mut max_val = 0.0f64;
         let mut max_row = usize::MAX;
         for row in 0..m_eq {
@@ -280,7 +303,7 @@ pub fn run_qp_presolve_phase2(
     let q_preserved = prob.q.clone();
 
     let mut removed_rows_phase2 = vec![false; m];
-    equality_constraint_qr(prob, &mut removed_rows_phase2);
+    equality_constraint_qr(prob, &mut removed_rows_phase2, opts);
 
     let any_removed = removed_rows_phase2.iter().any(|&b| b);
 
@@ -479,6 +502,179 @@ mod tests {
         );
     }
 
+    /// Preset `cancel_flag=true` must make `run_qp_presolve_phase2` return
+    /// `phase1_result` unchanged (skip its own work), the same way an
+    /// already-expired `deadline` does -- the entry check used to look at
+    /// `deadline` only, never `cancel_flag` (Codex PR #31 review, item 3).
+    ///
+    /// Same input as `test_equality_constraint_qr_redundant_removal` (m=6,
+    /// n=2, 3 Le-Le equality pairs, 2 redundant): without cancellation,
+    /// phase2 removes at least one redundant row. With `cancel_flag=true`
+    /// preset before phase2 runs at all, `num_constraints` must stay exactly
+    /// what phase1 produced.
+    ///
+    /// Sentinel: reverting the entry check from `opts.external_stop_requested()`
+    /// back to `opts.deadline.is_some_and(...)` lets this preset-cancel call
+    /// run phase2's full reduction anyway, removing redundant rows and
+    /// failing this assertion.
+    #[test]
+    fn test_run_qp_presolve_phase2_honors_preset_cancel_flag() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            &[
+                1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0,
+            ],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![1.0, -1.0, 1.0, -1.0, 0.0, 0.0];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::new(AtomicBool::new(true))),
+            presolve: false, // phase1 itself must not reduce either, isolating phase2's own behavior
+            ..Default::default()
+        };
+        let phase1 = crate::presolve::run_qp_presolve_phase1(&prob, &opts);
+        let phase1_constraints = phase1.reduced.num_constraints;
+        assert_eq!(
+            phase1_constraints, m,
+            "phase1 (presolve=false) must not reduce"
+        );
+
+        let phase2 = run_qp_presolve_phase2(phase1, &opts);
+        assert_eq!(
+            phase2.reduced.num_constraints, phase1_constraints,
+            "preset cancel_flag=true must skip phase2's own reduction \
+             entirely (num_constraints unchanged from phase1's {phase1_constraints}), \
+             not run equality_constraint_qr"
+        );
+    }
+
+    /// `cancel_flag` firing *mid-elimination* (not preset before
+    /// `equality_constraint_qr` starts, which the entry check above already
+    /// covers) exercises the in-loop check specifically, and its
+    /// correctness requirement: on cancellation, `equality_constraint_qr`
+    /// must `return` (abort the whole function), not `break` the column
+    /// loop and fall through to "drop every row that never became a pivot".
+    /// A row that never got a chance to compete for a pivot (because
+    /// elimination stopped partway through the columns) has not been
+    /// *proven* linearly dependent on the pivots found so far -- treating
+    /// it as redundant anyway would silently drop a real constraint
+    /// (relaxing the problem), not just skip an optimization.
+    ///
+    /// n=600 distinct single-variable equalities (`x_i <= c_i` /
+    /// `-x_i <= -c_i`, one Le-Le pair per variable, no duplicates): each
+    /// falls into its own presolve pairing group (`nnz=1`, distinct column
+    /// per group), so `m_eq = n = 600`, and the O(m_eq * n) dense
+    /// elimination per column is O(n^3) total -- large enough to still be
+    /// mid-loop when `cancel_flag` fires ~5ms in.
+    ///
+    /// Sentinel: reverting the in-loop check's `return` back to `break`
+    /// makes this test fail (`removed_count` becomes nonzero: the
+    /// truncated pivot set makes every not-yet-visited row look
+    /// non-pivot/redundant and drops it, even though `equality_constraint_qr`
+    /// never proved any of them dependent). Confirmed by reverting and
+    /// re-running.
+    #[test]
+    fn test_equality_constraint_qr_mid_loop_cancel_aborts_without_dropping_rows() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        // Chain structure (x_i + x_{i+1} = 5, one pair per adjacent column
+        // overlap), not n independent single-variable pairs: the latter
+        // makes every row already-diagonal (disjoint columns), so the
+        // "eliminate other rows" inner loop's factor is always exactly
+        // zero and skipped -- the whole elimination finishes in
+        // microseconds regardless of n, never actually catching a mid-loop
+        // cancel. Overlapping columns force genuine O(m_eq * n) work per
+        // pivot (every other still-active row's factor is nonzero and must
+        // be eliminated), which is what makes this problem size actually
+        // take long enough (milliseconds, not microseconds) for the
+        // spawned thread's cancel to land mid-elimination.
+        // `copies` duplicate sets of the same (n-1)-link chain so
+        // `m = 2 * copies * (n-1) > n * ROW_OVERDETERMINED_RATIO` (the
+        // threshold that gates whether QR runs at all): a single copy
+        // alone (m = 2(n-1)) sits just under `2n`.
+        let n = 600usize;
+        let copies = 3usize;
+        let m = 2 * copies * (n - 1);
+        let mut trip_rows = Vec::with_capacity(2 * m);
+        let mut trip_cols = Vec::with_capacity(2 * m);
+        let mut trip_vals = Vec::with_capacity(2 * m);
+        let mut b = Vec::with_capacity(m);
+        for copy in 0..copies {
+            for i in 0..(n - 1) {
+                let pos_row = 2 * (copy * (n - 1) + i);
+                let neg_row = pos_row + 1;
+                trip_rows.push(pos_row);
+                trip_cols.push(i);
+                trip_vals.push(1.0);
+                trip_rows.push(pos_row);
+                trip_cols.push(i + 1);
+                trip_vals.push(1.0);
+                b.push(5.0);
+                trip_rows.push(neg_row);
+                trip_cols.push(i);
+                trip_vals.push(-1.0);
+                trip_rows.push(neg_row);
+                trip_cols.push(i + 1);
+                trip_vals.push(-1.0);
+                b.push(-5.0);
+            }
+        }
+        let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n).unwrap();
+        let q_idx: Vec<usize> = (0..n).collect();
+        let q = CscMatrix::from_triplets(&q_idx, &q_idx, &vec![2.0; n], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_setter = Arc::clone(&cancel);
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            cancel_setter.store(true, Ordering::Relaxed);
+        });
+
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::clone(&cancel)),
+            ..Default::default()
+        };
+        let mut removed = vec![false; m];
+        equality_constraint_qr(&prob, &mut removed, &opts);
+        setter.join().unwrap();
+
+        let removed_count = removed.iter().filter(|&&b| b).count();
+        assert_eq!(
+            removed_count, 0,
+            "mid-loop cancellation must abort equality_constraint_qr \
+             entirely (removed_rows left at its all-false initial state), \
+             not drop rows that were never proven redundant; got {removed_count} removed"
+        );
+    }
+
     #[test]
     fn test_equality_constraint_qr_redundant_removal() {
         // m=6, n=2: 3 等式制約ペア。うち2つは冗長（同一）。→ 1ペアのみ残す
@@ -511,7 +707,7 @@ mod tests {
         )
         .unwrap();
         let mut removed = vec![false; m];
-        equality_constraint_qr(&prob, &mut removed);
+        equality_constraint_qr(&prob, &mut removed, &SolverOptions::default());
         // 少なくとも1行が除去されているべき（重複行）
         let removed_count = removed.iter().filter(|&&b| b).count();
         assert!(
@@ -585,7 +781,7 @@ mod tests {
         )
         .unwrap();
         let mut removed = vec![false; m];
-        equality_constraint_qr(&prob, &mut removed);
+        equality_constraint_qr(&prob, &mut removed, &SolverOptions::default());
         let removed_count = removed.iter().filter(|&&b| b).count();
         assert_eq!(
             removed_count, 0,
@@ -625,7 +821,7 @@ mod tests {
         )
         .unwrap();
         let mut removed = vec![false; m];
-        equality_constraint_qr(&prob, &mut removed);
+        equality_constraint_qr(&prob, &mut removed, &SolverOptions::default());
         let removed_count = removed.iter().filter(|&&b| b).count();
         assert!(
             removed_count >= 2,

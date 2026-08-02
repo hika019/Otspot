@@ -10,7 +10,7 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crate::constraint::PyConstraint;
@@ -159,6 +159,17 @@ impl PyModel {
     /// `Python::detach` between polls so other Python threads keep making
     /// progress during a long solve (`test_solve_releases_the_gil`).
     ///
+    /// The wait between polls uses `Condvar::wait_timeout`, not a plain
+    /// `thread::sleep`: the worker calls `notify_one` the instant it
+    /// finishes, waking this thread immediately instead of leaving it to
+    /// sleep out the rest of whatever the current poll interval had backed
+    /// off to (up to `SIGNAL_POLL_INTERVAL_MAX` for a solve that finishes
+    /// mid-ramp-up -- a plain-sleep design would add that whole interval as
+    /// pure dead latency on top of an already-finished solve). The
+    /// completion flag is checked under the same lock before waiting, so a
+    /// `notify_one` that lands before this thread starts waiting is not
+    /// missed (the classic Mutex+Condvar race).
+    ///
     /// This replaces an earlier design that ran the solve directly under
     /// `Python::detach` on the calling thread: releasing the GIL there let
     /// *other* Python threads run, but did nothing for `KeyboardInterrupt`
@@ -180,10 +191,19 @@ impl PyModel {
         let cancel = Arc::new(AtomicBool::new(false));
         self.0.set_cancel_flag(Arc::clone(&cancel));
         let model = &mut self.0;
+        let done = Arc::new((Mutex::new(false), Condvar::new()));
+        let done_worker = Arc::clone(&done);
 
         std::thread::scope(|scope| {
-            let handle = scope.spawn(move || model.solve());
+            let handle = scope.spawn(move || {
+                let outcome = model.solve();
+                let (done_lock, done_cvar) = &*done_worker;
+                *done_lock.lock().unwrap() = true;
+                done_cvar.notify_one();
+                outcome
+            });
             let mut poll_interval = SIGNAL_POLL_INTERVAL_INITIAL;
+            let (done_lock, done_cvar) = &*done;
             loop {
                 if handle.is_finished() {
                     let outcome = match handle.join() {
@@ -198,7 +218,12 @@ impl PyModel {
                         .map(PyModelResult)
                         .map_err(|e| model_error_to_pyerr(py, e));
                 }
-                py.detach(|| std::thread::sleep(poll_interval));
+                py.detach(|| {
+                    let guard = done_lock.lock().unwrap();
+                    if !*guard {
+                        let _ = done_cvar.wait_timeout(guard, poll_interval).unwrap();
+                    }
+                });
                 poll_interval = poll_interval
                     .saturating_mul(SIGNAL_POLL_BACKOFF_FACTOR)
                     .min(SIGNAL_POLL_INTERVAL_MAX);

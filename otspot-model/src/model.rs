@@ -1665,6 +1665,9 @@ impl Model {
         if let Some(tol) = self.tolerance {
             opts.tolerance = Some(tol);
         }
+        if let Some(flag) = self.presolve {
+            opts.presolve = flag;
+        }
         if let Some(n) = self.threads {
             opts.threads = n;
         }
@@ -1773,12 +1776,29 @@ impl Model {
         if let Some(tol) = self.tolerance {
             opts.tolerance = Some(tol);
         }
+        if let Some(flag) = self.presolve {
+            opts.presolve = flag;
+        }
         if let Some(n) = self.threads {
             opts.threads = n;
         }
         opts.cancel_flag = self.cancel_flag.clone();
         let cfg = otspot_core::options::MipConfig::default();
 
+        // `opts.presolve` above reaches both branches, but its B&B-search-level
+        // effect differs: `MiqpProblem::skip_node_presolve()` is `false`
+        // (the default -- MIQP's IPM per-node solve genuinely relies on
+        // presolve's Ruiz scaling for conditioning), so `opts.presolve` is
+        // honored at every node. `MilpProblem::skip_node_presolve()` is
+        // unconditionally `true` (each B&B node re-solves the same LP with
+        // only bounds tightened, so re-running presolve per node is
+        // redundant and would drop the propagated warm-start basis) --
+        // `prepare_mip_search` (otspot-core's `mip::mod`) forces node-level
+        // presolve off there regardless of `opts.presolve`. Copying the flag
+        // here anyway keeps MILP's construction structurally consistent with
+        // LP/QP/MIQP and correct for direct (non-Model) callers who solve a
+        // `MilpProblem` with an empty `integer_vars` (falls through to a
+        // plain LP solve that does honor `opts.presolve`).
         let result = if let Some(ref q_orig) = self.quadratic_objective.clone() {
             // MIQP: convex QP relaxation per node.
             let qp = self.build_qp_problem(c, bounds, q_orig.clone())?;
@@ -1787,9 +1807,6 @@ impl Model {
             otspot_core::mip::solve_miqp(&miqp, &opts, &cfg)
         } else {
             // MILP: LP relaxation per node.
-            if let Some(flag) = self.presolve {
-                opts.presolve = flag;
-            }
             let lp = LpProblem::new_general(c, a, b, constraint_types, bounds, self.name.clone())
                 .map_err(map_lp_build_err)?;
             let milp = otspot_core::mip::MilpProblem::new(lp, integer_vars.clone())
@@ -2681,6 +2698,71 @@ mod tests {
         );
     }
 
+    /// A QP with `n-2` trivially-fixed variables (`lb == ub`) bulking out an
+    /// otherwise tiny 2-variable QP: presolve's fixed-variable elimination
+    /// reduces the actual IPM problem to ~2 variables, while `presolve=false`
+    /// leaves the IPM to factor/iterate over the full `n`-variable KKT
+    /// system every time. Independent oracle: min x^2+y^2-6x-6y s.t. x+y<=4,
+    /// x,y in [0,10] -- unconstrained optimum (x,y)=(3,3) violates x+y<=4, so
+    /// the constrained optimum sits on that boundary; substituting y=4-x
+    /// gives f(x) = 2x^2-8x-8, minimized at x=2 (y=2), f(2) = -16.
+    ///
+    /// `Model::solve_qp_internal` used to build its `SolverOptions` without
+    /// ever copying `self.presolve` into it at all (Codex PR #31 review,
+    /// item 1) -- `set_presolve(false)` was silently ignored, and presolve
+    /// ran regardless. Measured directly at n=16000 under `cargo test`'s own
+    /// `[profile.test] opt-level = 3` (this workspace's Cargo.toml; the
+    /// gap is far too small to reproduce reliably under that profile at
+    /// smaller n, the same `opt-level=3` lesson as the Farkas-loop cancel
+    /// sentinel in `otspot-core/src/lp.rs`): presolve=on ~19.4ms,
+    /// presolve=off ~150.9ms -- a ~7.8x difference. A timeout between those
+    /// two ranges distinguishes "presolve reached the solver" (fast enough
+    /// to finish, Optimal) from "presolve is being silently ignored" (still
+    /// running at the deadline, Timeout).
+    ///
+    /// Sentinel: temporarily removing `solve_qp_internal`'s
+    /// `opts.presolve = flag` wiring made `presolve=false` finish in ~19ms
+    /// (indistinguishable from `presolve=on`, both silently presolving
+    /// regardless of the setting) -- this test would then see Optimal
+    /// instead of Timeout for the `presolve=false` case and fail.
+    #[test]
+    fn test_set_presolve_false_reaches_qp_solve_path() {
+        let n = 16000usize;
+        let build = |presolve: bool| -> Model {
+            let mut m = Model::new("qp_presolve_wiring");
+            m.set_presolve(presolve);
+            m.set_timeout(0.05);
+            for i in 0..(n - 2) {
+                m.add_var(&format!("fixed{i}"), 5.0, 5.0);
+            }
+            let x = m.add_var("x", 0.0, 10.0);
+            let y = m.add_var("y", 0.0, 10.0);
+            m.add_constraint((x + y).leq(4.0));
+            m.minimize(x.pow2() + y.pow2() - 6.0 * x - 6.0 * y);
+            m
+        };
+
+        let mut model_on = build(true);
+        let r_on = model_on.solve().unwrap();
+        assert_eq!(r_on.status, SolveStatus::Optimal);
+        assert!(
+            (r_on.objective_value - (-16.0)).abs() < 1e-3,
+            "presolve=on objective: expected -16.0, got {}",
+            r_on.objective_value
+        );
+
+        let mut model_off = build(false);
+        let err_off = model_off.solve().unwrap_err();
+        assert!(
+            matches!(err_off, ModelError::Timeout),
+            "presolve=false must still exceed a 0.05s timeout on this \
+             n=16000 problem if set_presolve(false) actually reaches the QP \
+             solver (measured ~150.9ms unpresolved vs. ~19.4ms presolved); \
+             got {:?}",
+            err_off
+        );
+    }
+
     // -----------------------------------------------------------------------
     // T8-1: LP with Eq constraint (Q=0 path: solve_as_lp)
     // -----------------------------------------------------------------------
@@ -3434,6 +3516,7 @@ mod tests {
 #[cfg(test)]
 mod mip_model_tests {
     use super::{Model, ModelError, SolveError};
+    use otspot_core::problem::SolveStatus;
 
     const EPS: f64 = 1e-4;
 
@@ -3469,6 +3552,72 @@ mod mip_model_tests {
             matches!(err, ModelError::Timeout),
             "expected Timeout from a preset cancel_flag, got {:?}",
             err
+        );
+    }
+
+    /// MIQP counterpart of `test_set_presolve_false_reaches_qp_solve_path`
+    /// (`mod tests`): same n-2-fixed-variables-plus-tiny-QP construction,
+    /// with `x` made an integer variable to route through
+    /// `solve_mip_internal`'s MIQP branch (`otspot_core::mip::solve_miqp`)
+    /// instead of the pure-QP path. Independent oracle: same problem as the
+    /// QP version but with `x` integer -- the unconstrained-QP optimum
+    /// (x,y)=(2,2) (see that test's derivation) is already integral in x,
+    /// so the MIQP optimum matches the QP relaxation's: -16.0.
+    ///
+    /// Unlike MILP (`MilpProblem::skip_node_presolve()` is unconditionally
+    /// `true` -- node-level presolve is *always* forced off during B&B
+    /// regardless of `self.presolve`, since re-running it per node would
+    /// drop the propagated warm-start basis), `MiqpProblem` does not
+    /// override `skip_node_presolve` (default `false`: MIQP's IPM per-node
+    /// solve genuinely relies on presolve's Ruiz scaling for conditioning),
+    /// so `opts.presolve` is honored at every B&B node -- `solve_mip_
+    /// internal`'s MIQP branch silently ignoring `self.presolve` (Codex PR
+    /// #31 review, item 1) was a real, measurable gap, not just an
+    /// inconsistency. Measured directly at n=16000 under `cargo test`'s own
+    /// `[profile.test] opt-level = 3` (same `opt-level=3` calibration lesson
+    /// as the QP version of this test): presolve=on ~22.5ms, presolve=off
+    /// ~177.3ms -- a ~7.9x difference; a 0.06s timeout sits between them.
+    ///
+    /// Sentinel: temporarily reverting the MIQP branch's `opts.presolve`
+    /// wiring (folding it back into the MILP-only `else` branch, as it
+    /// originally was) made `presolve=false` finish in ~22ms
+    /// (indistinguishable from `presolve=on`) -- this test would then see
+    /// Optimal instead of Timeout for the `presolve=false` case and fail.
+    #[test]
+    fn test_set_presolve_false_reaches_miqp_solve_path() {
+        let n = 16000usize;
+        let build = |presolve: bool| -> Model {
+            let mut m = Model::new("miqp_presolve_wiring");
+            m.set_presolve(presolve);
+            m.set_timeout(0.06);
+            for i in 0..(n - 2) {
+                m.add_var(&format!("fixed{i}"), 5.0, 5.0);
+            }
+            let x = m.add_int_var("x", 0.0, 10.0);
+            let y = m.add_var("y", 0.0, 10.0);
+            m.add_constraint((x + y).leq(4.0));
+            m.minimize(x.pow2() + y.pow2() - 6.0 * x - 6.0 * y);
+            m
+        };
+
+        let mut model_on = build(true);
+        let r_on = model_on.solve().unwrap();
+        assert_eq!(r_on.status, SolveStatus::Optimal);
+        assert!(
+            (r_on.objective_value - (-16.0)).abs() < 1e-3,
+            "presolve=on objective: expected -16.0, got {}",
+            r_on.objective_value
+        );
+
+        let mut model_off = build(false);
+        let err_off = model_off.solve().unwrap_err();
+        assert!(
+            matches!(err_off, ModelError::Timeout),
+            "presolve=false must still exceed a 0.06s timeout on this \
+             n=16000 MIQP if set_presolve(false) actually reaches the MIQP \
+             B&B (measured ~177.3ms unpresolved vs. ~22.5ms presolved); \
+             got {:?}",
+            err_off
         );
     }
 

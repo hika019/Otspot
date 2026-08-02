@@ -200,6 +200,59 @@ def test_iadd_matches_add_and_preserves_identity():
         expr += x.pow2()
 
 
+def test_iadd_self_alias_doubles_instead_of_panicking():
+    """`expr += expr` (the identical Python object on both sides of `+=`) used
+    to panic with `PanicException: Already mutably borrowed: PyBorrowError`
+    (Codex PR #31 review, P2): `__iadd__(&mut self, rhs)` had PyO3 eagerly
+    `.borrow_mut()` self as the receiver, and `coerce(rhs)`'s `.borrow()` on
+    the *same* cell (`rhs` being self) then panicked. `PanicException`
+    subclasses `BaseException`, not `Exception`, so ordinary `except
+    Exception` does not catch it -- the same failure class `var_name`/
+    `var_kind` were deliberately written to avoid.
+
+    Fixed in `otspot-py/src/expr.rs`'s `__iadd__` for both `Expression` and
+    `QuadExpr`: takes `slf: &Bound<'_, Self>` instead of `&mut self`, so PyO3
+    does not borrow anything up front, and defers `slf.borrow_mut()` until
+    *after* `coerce(rhs)` (the match scrutinee) has already run and dropped
+    its own borrow of `rhs`. `coerce`/self and `slf.borrow_mut()` are then
+    never borrowed at the same time even when `rhs` *is* `slf`, so no
+    explicit identity check is needed: `coerce` clones out `self`'s current
+    value first, then `self` is moved out (`mem::take`) and added to that
+    clone -- `self + self`, i.e. `2 * self`. Independent oracle: `expr +=
+    expr` on `x` (coefficient 1) must double it to 2, verified by solving
+    `max 2x s.t. x<=5` -> 10 (not `max x s.t. x<=5` -> 5, which a no-op or a
+    silently-discarded `+=` would give). Same check for QuadExpr via `y**2`
+    doubled to `2*y**2`, minimized at y=3 (via `y>=3`) -> 18.
+    """
+    model = otspot.Model("iadd_self_alias_expr")
+    x = model.add_var("x", 0.0, 5.0)
+    expr = x + 0.0
+    expr += expr
+    model.maximize(expr)
+    result = model.solve()
+    assert isinstance(result.status, otspot.SolveStatus.Optimal)
+    assert abs(result.objective() - 10.0) < TOL
+
+    model2 = otspot.Model("iadd_self_alias_quad")
+    y = model2.add_var("y", 0.0, 10.0)
+    quad = y.pow2()
+    quad += quad
+    model2.add_constraint(y.geq(3.0))
+    model2.minimize(quad)
+    result2 = model2.solve()
+    assert isinstance(result2.status, otspot.SolveStatus.Optimal)
+    assert abs(result2.objective() - 18.0) < 1e-3
+
+    # except Exception (not except BaseException) must actually catch any
+    # remaining failure mode here -- this is the property that made the
+    # panic a real production hazard, not just an unhandled-exception nuisance.
+    try:
+        other_expr = x + 0.0
+        other_expr += other_expr
+    except Exception:
+        pass
+
+
 def test_iadd_avoids_add_quadratic_blowup():
     """The actual point of `__iadd__` existing: `+` clones the growing
     expression on every call (Python's `+` must not mutate either operand),
@@ -549,11 +602,15 @@ def test_solve_poll_backoff_does_not_floor_small_solve_latency():
     `KeyboardInterrupt` latency) as before.
 
     Sentinel: median latency across 200 repeated tiny solves measured
-    ~0.96ms post-fix (this machine, debug build) -- a regression back to a
-    flat 10ms floor would push that to ~10ms+. The 5ms bound below has
-    headroom over the measured value (for machine-to-machine variance in
-    thread-spawn/GIL-detach overhead) while staying well under half the old
-    floor, so it still catches that regression.
+    ~0.96ms with the backoff alone, improving further to ~0.68ms once
+    `solve()` also switched its poll wait from a plain `thread::sleep` to
+    `Condvar::wait_timeout` (see `test_solve_condvar_wakes_immediately_
+    on_completion` below for the fix that specifically targets) -- a
+    regression back to a flat 10ms floor would push the median to ~10ms+.
+    The 5ms bound below has headroom over the measured value (for
+    machine-to-machine variance in thread-spawn/GIL-detach overhead) while
+    staying well under half the old floor, so it still catches that
+    regression.
     """
     n = 200
     times: list[float] = []
@@ -570,6 +627,70 @@ def test_solve_poll_backoff_does_not_floor_small_solve_latency():
         f"median solve() latency over {n} trivial solves was {median * 1000:.3f}ms "
         "-- expected sub-millisecond-scale, not a coarse fixed poll-interval floor "
         "(regression back to a flat SIGNAL_POLL_INTERVAL would read ~10ms here)"
+    )
+
+
+def _build_medium_lp(n: int = 20) -> otspot.Model:
+    """Chain LP, small enough that the natural solve time (~10-20ms, this
+    machine) straddles several `SIGNAL_POLL_INTERVAL_INITIAL` backoff
+    doublings without reaching `SIGNAL_POLL_INTERVAL_MAX` -- exactly the
+    "worker finished mid-ramp-up" case `Condvar::wait_timeout` targets. Not
+    `_build_tiny_lp` (finishes before the first poll matters) or
+    `_build_gil_probe_model` (finishes well after backoff has already
+    reached its cap, where a plain-sleep design's *last* interval is the
+    same 10ms `Condvar` would also cap out at)."""
+    model = otspot.Model("medium")
+    variables = [model.add_var(f"x{i}", 0.0, 10.0) for i in range(n)]
+    obj: otspot.Variable | otspot.Expression | otspot.QuadExpr = variables[0]
+    for i in range(1, n):
+        obj = obj + float(i % 7 + 1) * variables[i]
+    model.minimize(obj)
+    for i in range(n - 1):
+        model.add_constraint((variables[i] + variables[i + 1]).geq(float((i % 5) + 1)))
+    return model
+
+
+def test_solve_condvar_wakes_immediately_on_completion():
+    """`Model.solve()`'s poll loop used to `thread::sleep(poll_interval)`
+    unconditionally between polls: a worker that finished *during* that
+    sleep still wasn't noticed until the sleep ran out, adding up to a full
+    poll interval (up to `SIGNAL_POLL_INTERVAL_MAX` = 10ms once backoff has
+    ramped up) of pure dead latency on top of an already-finished solve --
+    worst for solves whose natural runtime lands mid-ramp-up, neither so
+    fast the first short poll catches them nor so slow the eventual 10ms
+    cadence is negligible next to the total (Codex PR #31 review, P2
+    follow-up). Fixed by waiting on a `Condvar` the worker thread notifies
+    the instant it finishes (`Condvar::wait_timeout`, see `otspot-py/src/
+    model.rs`), so completion is observed immediately regardless of which
+    poll interval is currently in effect.
+
+    Sentinel: `_build_medium_lp()` (n=20) measured median 23.5ms end to end
+    with a plain-`thread::sleep` poll wait vs. 14.0ms with `Condvar::
+    wait_timeout` (10 trials each, this machine, debug build) -- the ~9.5ms
+    difference is this fix's effect, not solve-time variance (both regimes
+    solve the identical problem). The 20ms bound below sits between those
+    two measurements: comfortably above the fixed design's 14.0ms with
+    headroom for machine variance, but below the reverted design's 23.5ms
+    so a regression back to plain `thread::sleep` fails here. Confirmed by
+    reverting to `thread::sleep` and re-measuring (23.5ms, over the bound).
+    """
+    n = 10
+    times: list[float] = []
+    for _ in range(n):
+        model = _build_medium_lp()
+        t0 = time.perf_counter()
+        result = model.solve()
+        times.append(time.perf_counter() - t0)
+        assert isinstance(result.status, otspot.SolveStatus.Optimal)
+
+    times.sort()
+    median = times[n // 2]
+    assert median < 0.020, (
+        f"median solve() latency over {n} medium (n=20) solves was "
+        f"{median * 1000:.3f}ms -- expected close to the solve's own natural "
+        "time (~14ms, this machine), not inflated by a full dead poll "
+        "interval on top (regression back to plain thread::sleep would read "
+        "~23.5ms here)"
     )
 
 
