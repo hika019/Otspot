@@ -114,6 +114,50 @@ impl PyExpression {
         }
     }
 
+    /// `self += rhs`. `__add__` above always clones `self.0` (Python's `+`
+    /// must not mutate either operand), so `obj = obj + term` in a loop is
+    /// O(n) per step / O(n^2) total (measured: ~0.17s at n=16000, vs. ~0.007s
+    /// at n=2000 -- a 24x slowdown for an 8x larger n). `+=` has no such
+    /// obligation: Python's augmented-assignment protocol expects `__iadd__`
+    /// to mutate in place when it can, so this uses `mem::take` to move the
+    /// current value out (leaving a cheap `Default` placeholder) and adds
+    /// into it directly, with no clone. Prefer `total += term` over
+    /// `total = total + term` in accumulation loops (see otspot-py/README.md
+    /// and otspot.pyi).
+    ///
+    /// `rhs: QuadExpr` is not accepted here (`self` stays an `Expression`
+    /// Python object; PyO3's `__iadd__` mutates in place and cannot rebind
+    /// `self` to a different type the way `__add__`'s ordinary return value
+    /// can) -- raises `TypeError` telling the caller to use `self = self +
+    /// rhs` for that specific combination instead.
+    fn __iadd__(&mut self, rhs: &Bound<'_, PyAny>) -> PyResult<()> {
+        match coerce(rhs) {
+            Some(Operand::F(f)) => {
+                let owned = std::mem::take(&mut self.0);
+                self.0 = owned + f;
+                Ok(())
+            }
+            Some(Operand::V(v)) => {
+                let owned = std::mem::take(&mut self.0);
+                self.0 = owned + v;
+                Ok(())
+            }
+            Some(Operand::E(e)) => {
+                let owned = std::mem::take(&mut self.0);
+                self.0 = owned + e;
+                Ok(())
+            }
+            Some(Operand::Q(_)) => Err(PyTypeError::new_err(
+                "Expression += QuadExpr is not supported in place (it would change the \
+                 object's type); use `expr = expr + quad_expr` instead",
+            )),
+            None => Err(PyTypeError::new_err(format!(
+                "unsupported operand type(s) for +=: 'Expression' and {}",
+                rhs.get_type().name()?
+            ))),
+        }
+    }
+
     fn __neg__(&self) -> PyExpression {
         PyExpression(-self.0.clone())
     }
@@ -220,6 +264,39 @@ impl PyQuadExpr {
         match coerce(lhs) {
             Some(Operand::F(f)) => PyQuadExpr(f * self.0.clone()).into_py_any(py),
             _ => Ok(not_implemented(py)),
+        }
+    }
+
+    /// `self += rhs`. See `PyExpression::__iadd__`'s doc comment: same
+    /// mem::take-based clone avoidance, no type-changing case here (unlike
+    /// Expression, QuadExpr is already the "widest" of the two -- adding a
+    /// Variable/Expression/QuadExpr/float always stays a QuadExpr).
+    fn __iadd__(&mut self, rhs: &Bound<'_, PyAny>) -> PyResult<()> {
+        match coerce(rhs) {
+            Some(Operand::F(f)) => {
+                let owned = std::mem::take(&mut self.0);
+                self.0 = owned + f;
+                Ok(())
+            }
+            Some(Operand::V(v)) => {
+                let owned = std::mem::take(&mut self.0);
+                self.0 = owned + v;
+                Ok(())
+            }
+            Some(Operand::E(e)) => {
+                let owned = std::mem::take(&mut self.0);
+                self.0 = owned + e;
+                Ok(())
+            }
+            Some(Operand::Q(q)) => {
+                let owned = std::mem::take(&mut self.0);
+                self.0 = owned + q;
+                Ok(())
+            }
+            None => Err(PyTypeError::new_err(format!(
+                "unsupported operand type(s) for +=: 'QuadExpr' and {}",
+                rhs.get_type().name()?
+            ))),
         }
     }
 

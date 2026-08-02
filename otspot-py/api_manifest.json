@@ -51,13 +51,15 @@
     ],
     "Expression": [
       { "rust": "impl core::ops::{Add,Sub,Neg,Mul} for Expression", "python": "Expression.__add__/__radd__/__sub__/__rsub__/__neg__/__mul__/__rmul__" },
+      { "rust": "(otspot-py only, no otspot_model AddAssign impl) mem::take-based in-place add, avoiding __add__'s per-call clone", "python": "Expression.__iadd__", "note": "perf-only Python addition; += stays an Expression except += QuadExpr, which raises TypeError (use expr = expr + quad_expr) since __iadd__ cannot change self's Python type" },
       { "rust": "Expression::leq", "python": "Expression.leq" },
       { "rust": "Expression::geq", "python": "Expression.geq" },
       { "rust": "Expression::eq_constraint", "python": "Expression.eq_constraint" }
     ],
     "QuadExpr": [
       { "rust": "QuadExpr::is_linear", "python": "QuadExpr.is_linear" },
-      { "rust": "impl core::ops::{Add,Sub,Neg,Mul} for QuadExpr", "python": "QuadExpr.__add__/__radd__/__sub__/__rsub__/__neg__/__mul__/__rmul__" }
+      { "rust": "impl core::ops::{Add,Sub,Neg,Mul} for QuadExpr", "python": "QuadExpr.__add__/__radd__/__sub__/__rsub__/__neg__/__mul__/__rmul__" },
+      { "rust": "(otspot-py only, no otspot_model AddAssign impl) mem::take-based in-place add, avoiding __add__'s per-call clone", "python": "QuadExpr.__iadd__", "note": "perf-only Python addition; QuadExpr is already the widest DSL type so += never needs to change self's Python type" }
     ],
     "ModelResult": [
       { "rust": "ModelResult::objective", "python": "ModelResult.objective" },
@@ -87,6 +89,16 @@
     ],
     "Tolerance": ["High", "Medium", "Fast", "Custom"]
   },
+  "baseline_shadowed_dunders": {
+    "_note": "Dunders that ARE part of dir(object) -- invisible to the extra-attribute diff in test_python_class_has_no_undocumented_public_methods / test_python_enum_has_no_undocumented_variants, since that diff only sees names *beyond* the object baseline -- but are custom-overridden here. Listed explicitly and verified by identity-checking against object's own default implementation (getattr(cls, name) is not getattr(object, name)), so removing the override (e.g. reverting Variable's __repr__ to the default identity repr) is still caught.",
+    "Variable": ["__repr__"],
+    "Expression": ["__repr__"],
+    "QuadExpr": ["__repr__"],
+    "Constraint": ["__repr__"],
+    "VarKind": ["__eq__"],
+    "SolutionProof": ["__eq__"],
+    "SolveError": ["__eq__"]
+  },
   "python_only_variants": {
     "_note": "Variants that exist on the Python side but are not real Rust variants -- always the honest fallback for a #[non_exhaustive] Rust enum's mandatory wildcard match arm (see enums.rs's From<Rust> for Py* impls), never an invented capability. SolveStatus's Unknown carries the original Display text (a complex enum can hold a payload); SolutionProof/SolveError's Unknown is payload-less (eq_int enums cannot carry one) but is still a distinct, honest 'not one of the known variants' value rather than panicking or silently aliasing a real variant.",
     "SolutionProof": ["Unknown"],
@@ -96,14 +108,14 @@
   "out_of_scope": [
     "otspot_model::ConstraintSense (variants Le/Ge/Eq) - Constraint's fields (including `sense`) are pub(crate) with no public getter anywhere in the Rust API (unlike Variable's kind, exposed via the new Model::var_kind), so a Python binding would be a decorative type nothing ever produces or consumes. Re-add if/when otspot-model grows a constraint introspection API.",
     "ModelError::NotSupported / a hypothetical NotSupportedError - only produced by the QCQP/SOCP bridge (see the conic entry below), which is out of scope; the variant is unreachable from any call this crate binds.",
-    "otspot_core::conic::* (QCQP/SOCP/MISOCP solve_socp/solve_qcqp/etc.) - not bound in v1; Model.add_qc_le/add_soc_le are not exposed",
-    "otspot_core::problem::{LpProblem, QpProblem} raw construction and otspot_core::lp::solve_lp_with / otspot_core::qp::solve_qp_with raw entrypoints - Python uses otspot_model::Model exclusively, the crate's own recommended high-level entrypoint",
-    "Model::try_add_var / try_add_int_var / try_set_timeout - eager-Result variants of add_var/add_int_var/set_timeout, which already defer validation errors to solve() in Rust (they never panic), matching the bound Python methods' behavior exactly; no separate try_* binding adds anything",
-    "Model::try_var_name / try_var_kind / ModelResult::try_value - eager-Result variants of the panicking var_name/var_kind/value/__getitem__; the bound Python var_name/var_kind/value/__getitem__ use these try_* variants internally already (see errors.rs) and raise InvalidInputError on Err instead of letting the panic through, so no separate try_* binding is needed",
+    "otspot_core::conic::* (QCQP/SOCP/MISOCP Model::add_qc_le, Model::add_soc_le, solve_socp/solve_qcqp/etc., and their result types ConicResult, GlobalResult, MisocpResult, QcqpResult) - not bound in v1",
+    "otspot_core::problem::{LpProblem, QpProblem, SolverResult} raw construction and otspot_core::lp::solve_lp_with / otspot_core::qp::solve_qp_with raw entrypoints - Python uses otspot_model::Model exclusively, the crate's own recommended high-level entrypoint",
+    "Model::try_add_var, Model::try_add_int_var, Model::try_set_timeout - eager-Result variants of add_var/add_int_var/set_timeout, which already defer validation errors to solve() in Rust (they never panic), matching the bound Python methods' behavior exactly; no separate try_* binding adds anything",
+    "Model::try_var_name, Model::try_var_kind, ModelResult::try_value - eager-Result variants of the panicking var_name/var_kind/value/__getitem__; the bound Python var_name/var_kind/value/__getitem__ use these try_* variants internally already (see errors.rs) and raise InvalidInputError on Err instead of letting the panic through, so no separate try_* binding is needed",
     "Expression::from_constant - a convenience constructor equivalent to passing a bare Python float wherever an Expression is expected; every binding's coerce() dispatch already accepts a bare float uniformly, so a separate constructor call has no use in Python",
     "ModelResult.stats (otspot_core::problem::SolveStats) - internal routing/timing diagnostics (SolveRoute enum, per-phase microsecond timings, warm-start counters, ~10+ fields); binding it would also require binding SolveRoute and is disproportionate scope for this PR",
     "otspot_core::options::SolverOptions / MipConfig / GlobalOptimizationConfig / BranchingStrategy / etc. (incl. SolverOptions::with_tolerance) - only the subset reachable through Model's set_* methods (timeout, tolerance, presolve, threads, obj_offset) is bound",
-    "otspot_core::qp::ipm_solver::outcome::IpmOutcome::infeasibility / infeasibility_status - internal IPM solver machinery (constructs a diagnostic outcome from a SolveStatus), not part of any path reachable from Model",
+    "otspot_core::qp::ipm_solver::outcome::IpmOutcome::infeasibility, IpmOutcome::infeasibility_status - internal IPM solver machinery (constructs a diagnostic outcome from a SolveStatus), not part of any path reachable from Model",
     "otspot.InternalError - mapped from ModelError::Internal, a solver-internal invariant violation (e.g. validate_qp_dual_len's length-mismatch guard); not a documented, deliberately-triggerable failure mode from well-formed Python calls, so unlike the other 5 model_error_exceptions it has no dedicated behavior-parity test"
   ]
 }

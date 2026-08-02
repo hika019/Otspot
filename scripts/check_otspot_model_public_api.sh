@@ -61,12 +61,36 @@ check_snapshot() {
 }
 
 MODEL_CURRENT=$(mktemp)
+CORE_RAW=$(mktemp)
 CORE_CURRENT=$(mktemp)
-trap 'rm -f "$MODEL_CURRENT" "$CORE_CURRENT"' EXIT
+trap 'rm -f "$MODEL_CURRENT" "$CORE_RAW" "$CORE_CURRENT"' EXIT
 
-RUSTUP_TOOLCHAIN="$TOOLCHAIN" cargo public-api -p otspot-model -sss 2>/dev/null > "$MODEL_CURRENT"
-RUSTUP_TOOLCHAIN="$TOOLCHAIN" cargo public-api -p otspot-core -sss 2>/dev/null \
-  | grep -E 'SolveStatus|Tolerance' > "$CORE_CURRENT" || true
+# `cargo public-api` prints build progress (Compiling/Documenting) to stderr
+# on success, so it is discarded there -- but a real failure (compile error,
+# missing toolchain) also writes to stderr and leaves stdout short or empty.
+# Piping stderr to /dev/null unconditionally hid that: a failed run produced
+# an empty/truncated "current" snapshot, which then diffed as "every line
+# was deleted" -- a misleading "snapshot needs regenerating" verdict instead
+# of "the tool itself failed" (found by reviewer injecting a build failure
+# into otspot-core). Check the exit status *before* trusting the output, and
+# only suppress stderr after confirming success.
+run_public_api() {
+  local pkg="$1" out="$2" errlog status
+  errlog=$(mktemp)
+  status=0
+  RUSTUP_TOOLCHAIN="$TOOLCHAIN" cargo public-api -p "$pkg" -sss >"$out" 2>"$errlog" || status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "[check_otspot_model_public_api] cargo public-api -p $pkg failed (exit $status):" >&2
+    cat "$errlog" >&2
+    rm -f "$errlog"
+    exit 1
+  fi
+  rm -f "$errlog"
+}
+
+run_public_api otspot-model "$MODEL_CURRENT"
+run_public_api otspot-core "$CORE_RAW"
+grep -E 'SolveStatus|Tolerance' "$CORE_RAW" > "$CORE_CURRENT" || true
 
 check_snapshot "otspot-py/otspot_model_api_snapshot.txt" "$MODEL_CURRENT" || true
 check_snapshot "otspot-py/otspot_core_status_tolerance_snapshot.txt" "$CORE_CURRENT" || true

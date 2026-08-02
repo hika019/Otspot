@@ -102,8 +102,8 @@ jobs:
       # ships a self-contained interpreter pyo3-build-config can locate cleanly.
       - name: Rust-side API manifest parity test
         run: cargo test -p otspot-py --no-default-features
-      - name: Install maturin and pytest
-        run: pip install maturin pytest
+      - name: Install maturin, pytest, and mypy
+        run: pip install maturin pytest mypy
       - name: Build and install the otspot wheel
         working-directory: otspot-py
         run: |
@@ -112,6 +112,13 @@ jobs:
       - name: Python-side API manifest + behavior parity tests
         working-directory: otspot-py
         run: pytest tests/ -v
+      # Catches otspot.pyi drifting from the built module's actual runtime
+      # behavior (e.g. SolveStatus/Tolerance variant subclassing, operator
+      # overload return types) -- nothing else in this job type-checks the
+      # stub against real usage.
+      - name: mypy (stub + tests)
+        working-directory: otspot-py
+        run: mypy tests/ otspot.pyi
 
   clippy:
     name: clippy

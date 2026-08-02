@@ -4,61 +4,15 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-- **修正 (otspot-model)**: `ModelResult::value`/`Index<Variable>`が
-  cross-model の `Variable` を検査せず、別 model の同一 index の値を黙って
-  返していた (`Model::var_name`は既に検査済みだったが`value`/`index`は未検査)。
-  `var_name`と同じ `assert_eq!(var.model_id, self.model_id, ...)` を追加し、
-  sentinel test (revert で fail することを確認済み) を追加
-- `Model::var_kind`/`try_var_kind`を新設 (`var_name`と対称)。`VarKind`を
-  Python から読み取る手段がなく decorative だった問題への対応
 - `otspot-py` crate (PyO3/maturin) を追加し、Otspot を Python ライブラリとして
-  利用可能に。`otspot_model::Model`/`Variable`/`Expression`/`QuadExpr`/
-  `Constraint`/`ModelResult`と`SolveStatus`/`SolutionProof`/`SolveError`/
-  `VarKind`/`Tolerance`をRustと同名・同構造でPythonへ写像 (演算子オーバー
-  ロードはRustの実オペレータへの直接委譲)。`ModelError`の各variantはPython
-  例外クラス群 (`otspot.NoObjectiveError`等) へ対応。`SolveFailedError`は
-  実際の`SolveError` variant を`.error`属性で保持 (abi3-py39 制約により
-  `#[pyclass(extends=PyException)]`のfieldではなくsetattr経由)。
-  `Model.solve()`は`Python::detach`でGILを解放して実行 (未解放だと
-  `timeout_secs`未指定=無制限のsolveが他スレッド・`KeyboardInterrupt`を
-  ブロックする)。`ConstraintSense`/`NotSupportedError`は Rust 側に到達経路が
-  ないため非バインド (`api_manifest.json`の`out_of_scope`に明記)
-- API parityを`otspot-py/api_manifest.json`で保証: Rust側 (`otspot-py/tests/api_manifest_rust.rs`、
-  コンパイル参照+全メソッド実行) とPython側 (`otspot-py/tests/test_api_manifest.py`、
-  introspectionで双方向検出、baseline は `object` 由来で自己汚染しない設計) で
-  同一マニフェストを検証。加えて`cargo public-api`スナップショット
-  (`otspot-py/otspot_model_api_snapshot.txt` + `scripts/check_otspot_model_public_api.sh`)
-  で otspot-model の Rust 側追加をマニフェスト未更新のまま見逃さない防波堤を追加。
-  LP/QP/MILP挙動parityは独立手計算オラクル問題で確認
-  (`otspot-py/tests/test_parity_lp_qp.py`。QPオラクルは制約が load-bearing
-  (乗数非ゼロ) なものに変更 — 旧オラクルは制約削除でも解が変わらず検出力ゼロだった)
-- GitHub Actionsに`python`ジョブを追加 (setup-python → maturin build →
-  wheel install → pytest)。`public-api`ジョブに otspot-model スナップショット
-  diff を追加。`otspot-py`はworkspace `members`に追加したが
-  `default-members`には含めない (cdylib+`extension-module`機能が通常の
-  `cargo build`/`test`を汚染するため)
-- **修正**: `otspot-py`の`[lib] name`が root package (`otspot`) と衝突し
-  `cargo doc --workspace --no-deps`が exit 101 で失敗していた問題を修正
-  (`otspot_py`にリネーム。wheel の import 名は `#[pymodule] fn otspot` と
-  `maturin` の `module-name` 経由のため無関係)
-- **修正**: `SolveFailedError.error`をはじめ全 enum 型 (`VarKind`/
-  `SolutionProof`/`SolveError`/`SolveStatus`/`Tolerance`) が pickle 不能
-  だった問題を修正 (`__reduce__`実装。multiprocessing でのエラー伝搬が
-  壊れていた)。`SolutionProof`/`SolveError`に`Unknown` unit variant を追加し、
-  `#[non_exhaustive]` wildcard の panic を解消 (`SolveStatus`と同じ「正直な
-  未知値」方式に統一)
-- **修正**: GIL解放を検証する `test_solve_releases_the_gil` が release wheel
-  で決定論的に fail していた問題を修正 (debug ビルドの solve 時間で較正した
-  カウンタ閾値が release では届かなかった)。2 モデルを 2 スレッドで並行 solve
-  し直列合計時間と比較する wall-clock 比方式に差し替え (ビルドプロファイル
-  非依存)
-- スナップショット防波堤を otspot_core の `SolveStatus`/`Tolerance` まで拡張
-  (`otspot-py/otspot_core_status_tolerance_snapshot.txt`)。従来は
-  otspot-model 側の型参照のみで variant 追加を検知できなかった
-- `otspot-py/README.md`・root `README.md`・`otspot.pyi`に thread 安全性
-  (`Model`の同時アクセス不可)・GIL解放・pickle制約を明記。`.pyi`の
-  `SolveStatus`/`Tolerance` variant 表現を実行時の subclass 関係と一致する
-  形に修正 (mypy での isinstance narrowing を実測確認)
+  利用可能に。Rust API と同名・同構造の Model DSL、`api_manifest.json` +
+  `cargo public-api` スナップショットによる API parity 保証、GitHub Actions
+  `python` job (maturin build → pytest → mypy) を含む
+- otspot-model: `ModelResult::value`/`Index<Variable>` が cross-model の
+  `Variable` を検査せず別 model の値を誤返却するバグを修正。`Model::var_kind`
+  (`try_var_kind` 含む) を新設
+- `Expression`/`QuadExpr` に `+=` (`__iadd__`) を追加し、蓄積ループの
+  O(n²) クローンコストを回避
 
 ## [0.7.4] - 2026-07-31
 

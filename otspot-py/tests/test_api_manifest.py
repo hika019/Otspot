@@ -155,6 +155,27 @@ def test_python_enum_has_no_undocumented_variants(enum_name):
     )
 
 
+@pytest.mark.parametrize(
+    "cls_name",
+    [k for k in MANIFEST.get("baseline_shadowed_dunders", {}) if not k.startswith("_")],
+)
+def test_baseline_shadowed_dunders_are_actually_overridden(cls_name):
+    """`__repr__`/`__eq__` etc. are already part of `dir(object)`, so
+    `test_python_class_has_no_undocumented_public_methods` /
+    `test_python_enum_has_no_undocumented_variants` (which only look at
+    attributes *beyond* the `object` baseline) cannot see whether a class
+    still has its custom override or has silently fallen back to the
+    default (e.g. `Variable.__repr__` reverting to `object`'s identity
+    repr). Verify each manifested override directly by identity."""
+    cls = getattr(otspot, cls_name)
+    for dunder in MANIFEST["baseline_shadowed_dunders"][cls_name]:
+        assert hasattr(cls, dunder)
+        assert getattr(cls, dunder) is not getattr(object, dunder), (
+            f"{cls_name}.{dunder} is object's default implementation -- "
+            "the custom override appears to have been removed"
+        )
+
+
 def test_constraint_sense_is_not_bound():
     """Sentinel for api_manifest.json's out_of_scope entry: if a future
     change accidentally reintroduces a `ConstraintSense` binding without

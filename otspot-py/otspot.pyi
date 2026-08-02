@@ -172,7 +172,17 @@ class Variable:
 
 class Expression:
     """A linear expression. See `Variable`'s docstring for the `==`/`<=`/`>=`
-    caveat -- it applies here too."""
+    caveat -- it applies here too.
+
+    `+`/`-` (via `__add__`/`__radd__`/`__sub__`/`__rsub__`) clone `self` on
+    every call (Python's binary operators must not mutate either operand),
+    so `total = total + term` in a loop is O(n) per step / O(n^2) overall.
+    Prefer `total += term` (`__iadd__`): it mutates in place, no clone, so a
+    long accumulation is O(n) overall instead. The one exception is `+=
+    QuadExpr` (`expr += x.pow2()`), which raises `TypeError` -- `+=` cannot
+    change `self`'s Python type from `Expression` to `QuadExpr` in place;
+    use `expr = expr + x.pow2()` for that specific combination.
+    """
 
     def leq(self, rhs: Variable | Expression | float) -> Constraint: ...
     def geq(self, rhs: Variable | Expression | float) -> Constraint: ...
@@ -182,6 +192,10 @@ class Expression:
     @overload
     def __add__(self, other: QuadExpr) -> QuadExpr: ...
     def __radd__(self, other: float) -> Expression: ...
+    @overload
+    def __iadd__(self, other: Variable | Expression | float) -> Expression: ...
+    @overload
+    def __iadd__(self, other: QuadExpr) -> Expression: ...  # always raises TypeError
     @overload
     def __sub__(self, other: Variable | Expression | float) -> Expression: ...
     @overload
@@ -196,11 +210,18 @@ class Expression:
 
 class QuadExpr:
     """A linear-or-quadratic objective expression (produced by `Variable.pow2()`
-    or multiplying a `Variable`/`Expression` by another `Variable`)."""
+    or multiplying a `Variable`/`Expression` by another `Variable`).
+
+    Prefer `total += term` over `total = total + term` in accumulation
+    loops -- see `Expression`'s docstring; the same O(n) vs. O(n^2) tradeoff
+    applies, and `QuadExpr.__iadd__` never raises (unlike `Expression`'s,
+    since `QuadExpr` is already the "widest" DSL type).
+    """
 
     def is_linear(self) -> bool: ...
     def __add__(self, other: Variable | Expression | QuadExpr | float) -> QuadExpr: ...
     def __radd__(self, other: float) -> QuadExpr: ...
+    def __iadd__(self, other: Variable | Expression | QuadExpr | float) -> QuadExpr: ...
     def __sub__(self, other: Variable | Expression | QuadExpr | float) -> QuadExpr: ...
     def __rsub__(self, other: float) -> QuadExpr: ...
     def __mul__(self, other: float) -> QuadExpr: ...

@@ -168,6 +168,78 @@ def test_eq_constraint_oracle():
     assert abs(result.value(x) - 5.0) < TOL
 
 
+def test_iadd_matches_add_and_preserves_identity():
+    """`+=` (`__iadd__`) must produce the same expression `+` does. Solved on
+    a small oracle (same `max x+y s.t. x+y<=8` problem as test_maximize_oracle)
+    so this is a real correctness check, not just structural equality."""
+    model = otspot.Model("iadd_oracle")
+    x = model.add_var("x", 0.0, 10.0)
+    y = model.add_var("y", 0.0, 10.0)
+    model.add_constraint((x + y).leq(8.0))
+    obj = x + 0.0  # force Expression (not Variable) before accumulating
+    identity = id(obj)
+    obj += y
+    assert id(obj) == identity, "__iadd__ must mutate in place, not rebind to a new object"
+    model.maximize(obj)
+    result = model.solve()
+    assert isinstance(result.status, otspot.SolveStatus.Optimal)
+    assert abs(result.objective() - 8.0) < TOL
+
+    # QuadExpr += also mutates in place.
+    quad = x.pow2()
+    quad_identity = id(quad)
+    quad += y.pow2()
+    assert id(quad) == quad_identity
+    assert not quad.is_linear()
+
+    # Expression += QuadExpr can't mutate self into a different Python type.
+    expr = x + 0.0
+    with pytest.raises(TypeError):
+        expr += x.pow2()
+
+
+def test_iadd_avoids_add_quadratic_blowup():
+    """The actual point of `__iadd__` existing: `+` clones the growing
+    expression on every call (Python's `+` must not mutate either operand),
+    so `total = total + term` in a loop is O(n) per step / O(n^2) total;
+    `+=` mutates in place via `mem::take`, no clone. No `Model.solve()` here
+    (this is a pure Python-object timing check, not a solver correctness
+    check -- solving a 4000-variable LP would make this test itself slow for
+    no benefit). Measured while designing this fix: `+` took 0.0035s at
+    n=2000 and 0.1743s at n=16000 (50x slower for an 8x larger n, i.e.
+    non-linear); `+=` took 0.0035s and 0.0300s (8.6x, i.e. roughly linear).
+    This test uses a smaller n (`+`'s absolute cost is real but not the
+    point here) and a generous ratio threshold, since the exact multiplier
+    is build-profile- and machine-dependent -- what must hold everywhere is
+    that `+=` scales more favorably than `+` as n grows.
+    """
+    n = 6000
+    model = otspot.Model("iadd_scaling_probe")
+    variables = [model.add_var(f"x{i}", 0.0, 10.0) for i in range(n)]
+
+    def time_accumulation(op) -> float:
+        t0 = time.perf_counter()
+        total = variables[0] + 0.0
+        for i in range(1, n):
+            total = op(total, variables[i])
+        return time.perf_counter() - t0
+
+    def do_add(a, b):
+        return a + b
+
+    def do_iadd(a, b):
+        a += b
+        return a
+
+    add_time = time_accumulation(do_add)
+    iadd_time = time_accumulation(do_iadd)
+    assert iadd_time < add_time * 0.5, (
+        f"+= ({iadd_time:.4f}s) should be meaningfully faster than + "
+        f"({add_time:.4f}s) at n={n} -- the O(n) clone-per-call cost of + "
+        "should dominate over += 's O(1)-per-call mem::take"
+    )
+
+
 def test_infeasible_lp_raises_solve_failed_error():
     model = otspot.Model("infeasible")
     x = model.add_var("x", 0.0, 1.0)
@@ -299,12 +371,22 @@ def test_solve_releases_the_gil():
     If the GIL is held throughout each `solve()`, the second thread cannot
     even *start* its own solve's Rust work until the first thread's call
     returns to Python, so concurrent time is roughly what serial is. With
-    the GIL released, both run on separate cores. Measured with the release
-    wheel at `n=1200` (`_build_gil_probe_model`'s default), across repeated
-    trials: serial ~0.25s, concurrent ~0.13s (ratio ~0.50-0.52); reverting
-    the `Python::detach` fix gives ratio ~0.99-1.02. The threshold below
-    (0.75) sits comfortably between both regimes, independent of build
-    profile (debug shows the same ~0.5 vs ~1.0 split, just slower overall).
+    the GIL released, both run on separate cores.
+
+    Threshold rationale (0.75, not changed lightly -- the margin is real but
+    not huge): repeated measurements put the *released* regime's ratio at
+    0.50-0.73 and the *held* (`Python::detach` reverted) regime's ratio at
+    0.90-1.03 across build profiles and machine load; 0.75 sits in the gap
+    between those ranges with headroom on both sides, but is closer to the
+    released ceiling (0.73) than to the held floor (0.90) is comfortable.
+
+    Requires >=2 available CPU cores to distinguish the two regimes at all:
+    on a single-vCPU host, two threads cannot run Rust work in parallel
+    regardless of whether the GIL is released, so the released regime would
+    also read ratio ~1.0 and this test could fail even with a correct
+    `Python::detach`. Not a concern for the CI runners this test targets
+    (>=2 cores), but worth knowing if running locally in a constrained
+    container/VM.
     """
     m1, m2 = _build_gil_probe_model(), _build_gil_probe_model()
     t0 = time.perf_counter()
