@@ -2710,28 +2710,35 @@ mod tests {
     /// `Model::solve_qp_internal` used to build its `SolverOptions` without
     /// ever copying `self.presolve` into it at all (Codex PR #31 review,
     /// item 1) -- `set_presolve(false)` was silently ignored, and presolve
-    /// ran regardless. Measured directly at n=16000 under `cargo test`'s own
-    /// `[profile.test] opt-level = 3` (this workspace's Cargo.toml; the
-    /// gap is far too small to reproduce reliably under that profile at
-    /// smaller n, the same `opt-level=3` lesson as the Farkas-loop cancel
-    /// sentinel in `otspot-core/src/lp.rs`): presolve=on ~19.4ms,
-    /// presolve=off ~150.9ms -- a ~7.8x difference. A timeout between those
-    /// two ranges distinguishes "presolve reached the solver" (fast enough
-    /// to finish, Optimal) from "presolve is being silently ignored" (still
-    /// running at the deadline, Timeout).
+    /// ran regardless.
+    ///
+    /// Wall-clock *ratio*, not an absolute timeout: an earlier version of
+    /// this test set a timeout between the two regimes' absolute times
+    /// (measured on the machine that wrote it: presolve=on ~19.4ms,
+    /// presolve=off ~150.9ms) and asserted Optimal-within-timeout for "on"
+    /// vs. Timeout-past-it for "off". That is machine-speed-dependent --
+    /// reviewer-measured flaky on a slower/loaded (1 vCPU, ~3x slowdown)
+    /// host, where even the presolved "on" regime no longer finished inside
+    /// the fixed window, failing the Optimal assertion. Switched to the
+    /// same machine-speed-independent design `test_solve_releases_the_gil`
+    /// (otspot-py) uses: solve both regimes to completion (no timeout) and
+    /// compare wall time as a ratio, which stays roughly constant across
+    /// machines even as the absolute times scale together.
+    ///
+    /// Measured ratios (`off / on`): 7.8x (dev-writing machine, `--profile
+    /// dev`), 4.9-5.6x (reviewer's slower/loaded host, `cargo test`'s own
+    /// `opt-level=3`). `> 2.5x` sits comfortably below both.
     ///
     /// Sentinel: temporarily removing `solve_qp_internal`'s
-    /// `opts.presolve = flag` wiring made `presolve=false` finish in ~19ms
-    /// (indistinguishable from `presolve=on`, both silently presolving
-    /// regardless of the setting) -- this test would then see Optimal
-    /// instead of Timeout for the `presolve=false` case and fail.
+    /// `opts.presolve = flag` wiring makes `presolve=false` run in the same
+    /// time as `presolve=on` (both silently presolving regardless of the
+    /// setting, ratio ~1x) -- this test would then fail the ratio assertion.
     #[test]
     fn test_set_presolve_false_reaches_qp_solve_path() {
         let n = 16000usize;
         let build = |presolve: bool| -> Model {
             let mut m = Model::new("qp_presolve_wiring");
             m.set_presolve(presolve);
-            m.set_timeout(0.05);
             for i in 0..(n - 2) {
                 m.add_var(&format!("fixed{i}"), 5.0, 5.0);
             }
@@ -2743,7 +2750,9 @@ mod tests {
         };
 
         let mut model_on = build(true);
+        let t0 = std::time::Instant::now();
         let r_on = model_on.solve().unwrap();
+        let on_elapsed = t0.elapsed();
         assert_eq!(r_on.status, SolveStatus::Optimal);
         assert!(
             (r_on.objective_value - (-16.0)).abs() < 1e-3,
@@ -2752,14 +2761,24 @@ mod tests {
         );
 
         let mut model_off = build(false);
-        let err_off = model_off.solve().unwrap_err();
+        let t1 = std::time::Instant::now();
+        let r_off = model_off.solve().unwrap();
+        let off_elapsed = t1.elapsed();
+        assert_eq!(r_off.status, SolveStatus::Optimal);
         assert!(
-            matches!(err_off, ModelError::Timeout),
-            "presolve=false must still exceed a 0.05s timeout on this \
-             n=16000 problem if set_presolve(false) actually reaches the QP \
-             solver (measured ~150.9ms unpresolved vs. ~19.4ms presolved); \
-             got {:?}",
-            err_off
+            (r_off.objective_value - (-16.0)).abs() < 1e-3,
+            "presolve=off objective: expected -16.0, got {}",
+            r_off.objective_value
+        );
+
+        let ratio = off_elapsed.as_secs_f64() / on_elapsed.as_secs_f64();
+        assert!(
+            ratio > 2.5,
+            "presolve=off/on wall-time ratio was {ratio:.2}x (on={on_elapsed:?}, \
+             off={off_elapsed:?}) -- expected off to be markedly slower than on \
+             if set_presolve(false) actually reaches the QP solver (measured \
+             4.9-7.8x across machines/profiles); got a ratio too close to 1x, \
+             consistent with presolve running regardless of the setting"
         );
     }
 
@@ -3573,23 +3592,29 @@ mod mip_model_tests {
     /// so `opts.presolve` is honored at every B&B node -- `solve_mip_
     /// internal`'s MIQP branch silently ignoring `self.presolve` (Codex PR
     /// #31 review, item 1) was a real, measurable gap, not just an
-    /// inconsistency. Measured directly at n=16000 under `cargo test`'s own
-    /// `[profile.test] opt-level = 3` (same `opt-level=3` calibration lesson
-    /// as the QP version of this test): presolve=on ~22.5ms, presolve=off
-    /// ~177.3ms -- a ~7.9x difference; a 0.06s timeout sits between them.
+    /// inconsistency.
+    ///
+    /// Wall-clock *ratio*, not an absolute timeout -- see the QP version of
+    /// this test (`test_set_presolve_false_reaches_qp_solve_path`) for why
+    /// an absolute-timeout design is machine-speed-dependent and was found
+    /// flaky on a slower/loaded host (reviewer-reported). Same fix here:
+    /// solve both regimes to completion and compare wall time as a ratio.
+    ///
+    /// Measured ratios (`off / on`): 7.9x (dev-writing machine, `--profile
+    /// dev`); `> 2.5x` (same threshold as the QP version) sits comfortably
+    /// below that with headroom for slower/loaded hosts.
     ///
     /// Sentinel: temporarily reverting the MIQP branch's `opts.presolve`
     /// wiring (folding it back into the MILP-only `else` branch, as it
-    /// originally was) made `presolve=false` finish in ~22ms
-    /// (indistinguishable from `presolve=on`) -- this test would then see
-    /// Optimal instead of Timeout for the `presolve=false` case and fail.
+    /// originally was) makes `presolve=false` run in the same time as
+    /// `presolve=on` (ratio ~1x) -- this test would then fail the ratio
+    /// assertion.
     #[test]
     fn test_set_presolve_false_reaches_miqp_solve_path() {
         let n = 16000usize;
         let build = |presolve: bool| -> Model {
             let mut m = Model::new("miqp_presolve_wiring");
             m.set_presolve(presolve);
-            m.set_timeout(0.06);
             for i in 0..(n - 2) {
                 m.add_var(&format!("fixed{i}"), 5.0, 5.0);
             }
@@ -3601,7 +3626,9 @@ mod mip_model_tests {
         };
 
         let mut model_on = build(true);
+        let t0 = std::time::Instant::now();
         let r_on = model_on.solve().unwrap();
+        let on_elapsed = t0.elapsed();
         assert_eq!(r_on.status, SolveStatus::Optimal);
         assert!(
             (r_on.objective_value - (-16.0)).abs() < 1e-3,
@@ -3610,14 +3637,24 @@ mod mip_model_tests {
         );
 
         let mut model_off = build(false);
-        let err_off = model_off.solve().unwrap_err();
+        let t1 = std::time::Instant::now();
+        let r_off = model_off.solve().unwrap();
+        let off_elapsed = t1.elapsed();
+        assert_eq!(r_off.status, SolveStatus::Optimal);
         assert!(
-            matches!(err_off, ModelError::Timeout),
-            "presolve=false must still exceed a 0.06s timeout on this \
-             n=16000 MIQP if set_presolve(false) actually reaches the MIQP \
-             B&B (measured ~177.3ms unpresolved vs. ~22.5ms presolved); \
-             got {:?}",
-            err_off
+            (r_off.objective_value - (-16.0)).abs() < 1e-3,
+            "presolve=off objective: expected -16.0, got {}",
+            r_off.objective_value
+        );
+
+        let ratio = off_elapsed.as_secs_f64() / on_elapsed.as_secs_f64();
+        assert!(
+            ratio > 2.5,
+            "presolve=off/on wall-time ratio was {ratio:.2}x (on={on_elapsed:?}, \
+             off={off_elapsed:?}) -- expected off to be markedly slower than on \
+             if set_presolve(false) actually reaches the MIQP B&B (measured \
+             ~7.9x on the dev-writing machine); got a ratio too close to 1x, \
+             consistent with presolve running regardless of the setting"
         );
     }
 

@@ -291,10 +291,7 @@ pub fn run_qp_presolve_phase2(
         return phase1_result;
     }
 
-    if opts
-        .deadline
-        .is_some_and(|d| std::time::Instant::now() >= d)
-    {
+    if opts.external_stop_requested() {
         return phase1_result;
     }
 
@@ -507,35 +504,65 @@ mod tests {
     /// already-expired `deadline` does -- the entry check used to look at
     /// `deadline` only, never `cancel_flag` (Codex PR #31 review, item 3).
     ///
-    /// Same input as `test_equality_constraint_qr_redundant_removal` (m=6,
-    /// n=2, 3 Le-Le equality pairs, 2 redundant): without cancellation,
-    /// phase2 removes at least one redundant row. With `cancel_flag=true`
-    /// preset before phase2 runs at all, `num_constraints` must stay exactly
-    /// what phase1 produced.
+    /// A small problem can't tell this apart from the in-loop check inside
+    /// `equality_constraint_qr` catching it one statement later: both leave
+    /// `num_constraints` unchanged either way, since the in-loop check fires
+    /// on `col == 0`, before any pivot is found, if cancellation was already
+    /// preset. What the entry check *specifically* saves is the row-entry
+    /// scan, hash-bucketing/pairing, and dense `aeq`/`work` matrix
+    /// allocation that `equality_constraint_qr` does *before* its loop even
+    /// starts -- only visible with a large enough problem that this setup
+    /// itself takes measurable time. Reuses
+    /// `test_equality_constraint_qr_mid_loop_cancel_aborts_without_dropping_rows`'s
+    /// chain construction (n=600, 3 duplicate copies, m=3594) for that
+    /// reason.
+    ///
+    /// Measured directly (this machine, `cargo test`'s own `opt-level=3`
+    /// profile, 5 trials): entry check present, ~1-7us; entry check
+    /// reverted to `deadline`-only (the in-loop check alone still catches
+    /// it, but only *after* paying for the setup), ~7.7-10.3ms -- three
+    /// orders of magnitude. The 1ms bound below sits far below the broken
+    /// floor and far above the fixed ceiling.
     ///
     /// Sentinel: reverting the entry check from `opts.external_stop_requested()`
-    /// back to `opts.deadline.is_some_and(...)` lets this preset-cancel call
-    /// run phase2's full reduction anyway, removing redundant rows and
-    /// failing this assertion.
+    /// back to `opts.deadline.is_some_and(...)` makes this take ~8-10ms,
+    /// over the bound -- confirmed by reverting and re-running.
     #[test]
     fn test_run_qp_presolve_phase2_honors_preset_cancel_flag() {
         use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::time::{Duration, Instant};
 
-        let n = 2usize;
-        let m = 6usize;
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
-            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
-            &[
-                1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0,
-            ],
-            m,
-            n,
-        )
-        .unwrap();
-        let b = vec![1.0, -1.0, 1.0, -1.0, 0.0, 0.0];
-        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let n = 600usize;
+        let copies = 3usize;
+        let m = 2 * copies * (n - 1);
+        let mut trip_rows = Vec::with_capacity(2 * m);
+        let mut trip_cols = Vec::with_capacity(2 * m);
+        let mut trip_vals = Vec::with_capacity(2 * m);
+        let mut b = Vec::with_capacity(m);
+        for copy in 0..copies {
+            for i in 0..(n - 1) {
+                let pos_row = 2 * (copy * (n - 1) + i);
+                let neg_row = pos_row + 1;
+                trip_rows.push(pos_row);
+                trip_cols.push(i);
+                trip_vals.push(1.0);
+                trip_rows.push(pos_row);
+                trip_cols.push(i + 1);
+                trip_vals.push(1.0);
+                b.push(5.0);
+                trip_rows.push(neg_row);
+                trip_cols.push(i);
+                trip_vals.push(-1.0);
+                trip_rows.push(neg_row);
+                trip_cols.push(i + 1);
+                trip_vals.push(-1.0);
+                b.push(-5.0);
+            }
+        }
+        let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n).unwrap();
+        let q_idx: Vec<usize> = (0..n).collect();
+        let q = CscMatrix::from_triplets(&q_idx, &q_idx, &vec![2.0; n], n, n).unwrap();
         let prob = QpProblem::new_all_le(
             q,
             vec![0.0; n],
@@ -557,12 +584,24 @@ mod tests {
             "phase1 (presolve=false) must not reduce"
         );
 
+        let t0 = Instant::now();
         let phase2 = run_qp_presolve_phase2(phase1, &opts);
+        let elapsed = t0.elapsed();
+
         assert_eq!(
             phase2.reduced.num_constraints, phase1_constraints,
             "preset cancel_flag=true must skip phase2's own reduction \
              entirely (num_constraints unchanged from phase1's {phase1_constraints}), \
              not run equality_constraint_qr"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1),
+            "preset cancel_flag=true took {elapsed:?} to return from \
+             run_qp_presolve_phase2 -- expected the entry check to skip \
+             equality_constraint_qr's row-scan/pairing/dense-matrix setup \
+             entirely (measured ~1-7us), not merely have the in-loop check \
+             catch it after paying for that setup (measured ~7.7-10.3ms \
+             with the entry check reverted to deadline-only)"
         );
     }
 
