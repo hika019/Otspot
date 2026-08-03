@@ -331,6 +331,22 @@ impl SolverResult {
             ..Self::default()
         }
     }
+
+    /// Whether this result is safe to adopt as a B&B incumbent (MILP/MIQP
+    /// `mip::MipState::consider`, nonconvex-QP `qp::global::SearchState`):
+    /// `objective` and every `solution` component must be finite.
+    ///
+    /// Mirrors `qcqp_route::is_clean_convex_outcome`'s `Optimal` invariant
+    /// (`objective.is_finite() && x.iter().all(finite)`). A result whose
+    /// `status` claims a feasible/optimal outcome but fails this check is
+    /// corrupt (e.g. a `+inf` objective sentinel that slipped through some
+    /// upstream status-only trust boundary) and must never be reported as a
+    /// genuine solution — see `within_gap`'s `is_finite()` guard, which this
+    /// complements by stopping the poison at the point of *adoption* rather
+    /// than only at the point of *gap-proving*.
+    pub(crate) fn is_finite_candidate(&self) -> bool {
+        self.objective.is_finite() && self.solution.iter().all(|v| v.is_finite())
+    }
 }
 
 impl fmt::Display for SolverResult {

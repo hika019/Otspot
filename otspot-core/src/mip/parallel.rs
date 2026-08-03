@@ -51,11 +51,11 @@ pub(crate) struct SharedIncumbent {
     /// copy is stale without taking the lock. Meaningless until `present`.
     objective_bits: AtomicU64,
     /// Whether `inner` holds an incumbent, tracked separately rather than
-    /// inferred from `objective_bits` being finite. `MipState::consider`
-    /// adopts the *first* result unconditionally, so a serial search can end
-    /// up holding an incumbent whose objective is `+inf` or `NaN`; treating
-    /// non-finite as "none" would have made the parallel view of that same
-    /// result disagree with the serial one.
+    /// inferred from `objective_bits` being finite: a legitimate incumbent's
+    /// objective can itself be `+inf` only if `is_finite_candidate()` already
+    /// rejected it in [`Self::consider`], so in practice this is redundant
+    /// with `objective_bits` today, but kept so `take_better_than` never has
+    /// to special-case what "no incumbent yet" looks like in bit pattern.
     present: AtomicBool,
 }
 
@@ -72,7 +72,15 @@ impl SharedIncumbent {
     /// whether the shared incumbent changed — the caller's cue to count an
     /// `incumbent_updates`, so concurrent workers that rediscover the same
     /// objective do not each count one.
+    ///
+    /// Guards `is_finite_candidate()` itself rather than trusting the
+    /// caller: `MipState::consider` already checks this before delegating
+    /// here, but the search-wide `initial_incumbent` seed calls this
+    /// directly (see [`solve_mip_parallel`]), bypassing that guard entirely.
     pub(crate) fn consider(&self, res: &SolverResult) -> bool {
+        if !res.is_finite_candidate() {
+            return false;
+        }
         let mut guard = lock(&self.inner);
         let better = match &*guard {
             None => true,
@@ -428,72 +436,45 @@ mod tests {
     /// scheduler noise cannot reach it.
     const WAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-    /// A non-finite objective must not be mistaken for "no incumbent yet".
+    /// A non-finite objective must never become the shared incumbent.
     ///
-    /// `MipState::consider` adopts the first result unconditionally, so a
-    /// serial search can hold an incumbent whose objective is `+inf` (or NaN).
-    /// The parallel view has to agree, or a worker would keep re-adopting and
-    /// the finalizer would see a different incumbent than the serial driver.
+    /// `MipState::consider` now rejects `!is_finite_candidate()` outright
+    /// (the `within_gap` false-Optimal fix), and `SharedIncumbent::consider`
+    /// has to enforce the same rule independently: the `initial_incumbent`
+    /// seed in `solve_mip_parallel` calls this directly, bypassing
+    /// `MipState::consider` entirely, so a poisoned FP seed would otherwise
+    /// reach every worker as if it were a genuine solution.
     ///
-    /// Sentinel: inferring presence from `objective_bits.is_finite()` instead
-    /// of the explicit `present` flag makes both `take_better_than` calls
-    /// below return `None`.
+    /// Sentinel: reverting the `is_finite_candidate()` guard in `consider`
+    /// makes the first `assert!(!...)` below fail (both non-finite
+    /// objectives get adopted, and `take_better_than` then hands them out).
     #[test]
-    fn a_non_finite_incumbent_is_still_an_incumbent() {
-        // Both non-finite objectives must be *visible* as incumbents...
-        for objective in [f64::INFINITY, f64::NAN] {
+    fn non_finite_candidates_are_never_adopted() {
+        for objective in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
             let inc = SharedIncumbent::new();
             assert!(
-                inc.consider(&with_objective(objective)),
-                "the first result is always adopted, exactly as in serial"
+                !inc.consider(&with_objective(objective)),
+                "a non-finite objective must never be reported as adopted"
             );
-            let (adopted, _) = inc
-                .take_better_than(None)
-                .expect("a worker with no local view must see it");
-            assert_eq!(
-                adopted.is_nan(),
-                objective.is_nan(),
-                "the adopted objective must be the one that was stored"
+            assert!(
+                inc.take_better_than(None).is_none(),
+                "an empty incumbent must stay empty, not silently hold {objective}"
             );
-            if !objective.is_nan() {
-                assert_eq!(adopted, objective);
-            }
         }
 
-        // ...and whether a later result displaces one must match
-        // `MipState::consider`'s serial rule verbatim, which is the plain
-        // `res.objective < current` comparison. `+inf` loses to anything
-        // finite; `NaN` compares false against everything, so it is sticky.
-        // Neither is a case worth special-casing here — the point is that the
-        // shared path introduces no divergence of its own.
-        let displaceable = SharedIncumbent::new();
-        displaceable.consider(&with_objective(f64::INFINITY));
+        // A poisoned candidate must not displace a genuine finite incumbent
+        // either (the "adopt as the very first result" path is the one the
+        // production `initial_incumbent` seed actually takes).
+        let genuine = SharedIncumbent::new();
+        assert!(genuine.consider(&with_objective(5.0)));
         assert!(
-            displaceable.consider(&with_objective(-1.0)),
-            "a finite objective beats +inf, as `-1.0 < inf` does in serial"
+            !genuine.consider(&with_objective(f64::NEG_INFINITY)),
+            "a non-finite candidate must not beat an existing finite incumbent"
         );
         assert_eq!(
-            displaceable.take_better_than(None).expect("improved").0,
-            -1.0
-        );
-
-        let sticky = SharedIncumbent::new();
-        sticky.consider(&with_objective(f64::NAN));
-        assert!(
-            !sticky.consider(&with_objective(-1.0)),
-            "NaN is sticky here because `-1.0 < NaN` is false in serial too"
-        );
-        // A NaN on either side must short-circuit before the lock: it can
-        // never be an improvement, so paying a clone per node for it would be
-        // pure overhead. (`shared >= local` would not short-circuit — see
-        // `take_better_than`.)
-        assert!(
-            sticky.take_better_than(Some(0.0)).is_none(),
-            "a NaN shared objective is never an improvement"
-        );
-        assert!(
-            displaceable.take_better_than(Some(f64::NAN)).is_none(),
-            "nothing improves on a NaN local view"
+            genuine.take_better_than(None).expect("still present").0,
+            5.0,
+            "the genuine incumbent must survive a rejected non-finite challenger"
         );
     }
 
