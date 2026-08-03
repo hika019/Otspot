@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3076 testcases, 26 ignored
+# totals: 3106 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -298,13 +298,14 @@ otspot-core	mip::cuts::tests::tree_cut_warm_options_dispatches_dual_advanced_wit
 otspot-core	mip::cuts::tests::tree_cuts_off_does_not_separate	active
 otspot-core	mip::cuts::tests::tree_cuts_preserve_optimum_sweep	active
 otspot-core	mip::cuts::tests::tree_cuts_reduce_node_count_sentinel_on_dedicated_knapsack	active
-otspot-core	mip::effort::tests::component_at_or_over_its_share_is_blocked	active
 otspot-core	mip::effort::tests::component_comfortably_under_share_is_allowed	active
+otspot-core	mip::effort::tests::heuristic_and_strong_branch_components_at_their_share_are_blocked	active
 otspot-core	mip::effort::tests::heuristic_iter_budget_saturates_at_zero_when_over_the_floored_ceiling	active
 otspot-core	mip::effort::tests::heuristic_iter_budget_uses_raw_share_once_it_exceeds_the_floor	active
 otspot-core	mip::effort::tests::heuristic_iter_budgets_are_unbounded_at_zero_total_iters	active
 otspot-core	mip::effort::tests::heuristic_iter_budgets_floor_their_ceiling_at_sub_mip_max_lp_iters	active
 otspot-core	mip::effort::tests::may_run_separation_blocks_when_integer_budget_is_zero_despite_float_check_passing	active
+otspot-core	mip::effort::tests::separation_component_at_its_share_is_blocked	active
 otspot-core	mip::effort::tests::separation_dry_streak_blocks_regardless_of_iteration_share	active
 otspot-core	mip::effort::tests::separation_iter_budget_is_remaining_share_minus_spent	active
 otspot-core	mip::effort::tests::separation_overhead_iters_count_against_the_separation_gate	active
@@ -389,6 +390,18 @@ otspot-core	mip::heuristics::tests::timeout_sub_mip_result_rejects_non_finite_co
 otspot-core	mip::heuristics::tests::timeout_sub_mip_result_rejects_original_constraint_violation	active
 otspot-core	mip::node::tests::child_increments_depth	active
 otspot-core	mip::node::tests::root_has_depth_zero	active
+otspot-core	mip::parallel::tests::a_non_finite_incumbent_is_still_an_incumbent	active
+otspot-core	mip::parallel::tests::a_stopped_worker_returns_every_node_it_still_holds	active
+otspot-core	mip::parallel::tests::all_idle_workers_terminate_together	active
+otspot-core	mip::parallel::tests::blocked_worker_wakes_on_push	active
+otspot-core	mip::parallel::tests::concurrent_consider_is_race_free	active
+otspot-core	mip::parallel::tests::drain_from_moves_local_nodes_into_the_pool	active
+otspot-core	mip::parallel::tests::pool_pops_best_bound_first	active
+otspot-core	mip::parallel::tests::pseudocost_delta_merge_is_order_independent	active
+otspot-core	mip::parallel::tests::shared_incumbent_keeps_only_strict_improvements	active
+otspot-core	mip::parallel::tests::stop_releases_waiting_workers	active
+otspot-core	mip::parallel::tests::stopped_pool_keeps_pushed_nodes_for_the_bound	active
+otspot-core	mip::parallel::tests::take_better_than_skips_a_current_local_view	active
 otspot-core	mip::presolve::tests::at_node_feasible_tightens_bounds	active
 otspot-core	mip::presolve::tests::at_node_infeasible_returns_err	active
 otspot-core	mip::presolve::tests::at_node_multi_pass_tightens_cascade	active
@@ -564,6 +577,17 @@ otspot-core	mip::tests::warm_start_infeasible_milp_still_infeasible	active
 otspot-core	mip::tests::warm_start_propagated_to_child_nodes_sentinel	active
 otspot-core	mip::tests::warm_start_propagation_preserves_correct_objective	active
 otspot-core	mip::tests::warm_start_rounding_fails_child_no_timeout	active
+otspot-core	mip::tests_parallel::a_deterministic_iteration_budget_forces_the_serial_driver	active
+otspot-core	mip::tests_parallel::a_panicking_worker_ends_the_search_instead_of_hanging	active
+otspot-core	mip::tests_parallel::an_interrupted_parallel_search_never_overstates_its_lower_bound	active
+otspot-core	mip::tests_parallel::every_thread_count_finds_the_enumerated_optimum	active
+otspot-core	mip::tests_parallel::max_nodes_bounds_the_whole_parallel_search	active
+otspot-core	mip::tests_parallel::parallel_search_does_not_claim_optimality_after_a_timeout	active
+otspot-core	mip::tests_parallel::parallel_search_proves_infeasibility	active
+otspot-core	mip::tests_parallel::parallel_search_returns_the_hand_computed_solution	active
+otspot-core	mip::tests_parallel::parallel_search_stays_within_the_thread_budget	active
+otspot-core	mip::tests_parallel::threads_eq_1_runs_everything_on_the_calling_thread	active
+otspot-core	mip::tests_parallel::worker_statistics_reduce_to_one_coherent_search	active
 otspot-core	options::tests::default_mip_max_nodes_is_ten_million	active
 otspot-core	options::tests::dual_pricing_default_is_steepest_edge	active
 otspot-core	options::tests::test_ipm_builder_with_eps	active
@@ -590,11 +614,11 @@ otspot-core	options::tests::test_solver_validate_defaults_ok	active
 otspot-core	options::tests::test_solver_validate_dual_tol	active
 otspot-core	options::tests::test_solver_validate_primal_tol	active
 otspot-core	options::tests::test_solver_validate_propagates_ipm	active
-otspot-core	options::tests::test_solver_validate_threads	active
 otspot-core	options::tests::test_solver_validate_timeout_secs	active
 otspot-core	options::tests::test_solver_validate_tolerance_custom	active
 otspot-core	options::tests::test_tolerance_fast_is_looser_than_medium	active
 otspot-core	options::tests::test_tolerance_translation	active
+otspot-core	options::tests::threads_is_accepted_only_within_max_threads	active
 otspot-core	presolve::activity::tests::both_directions_infinite	active
 otspot-core	presolve::activity::tests::empty_row_yields_zero_finite	active
 otspot-core	presolve::activity::tests::exclude_col_skips_target_entry	active
@@ -2448,6 +2472,9 @@ otspot-num	linalg::minres::tests::minres_5x5_matches_ldl	active
 otspot-num	linalg::minres::tests::minres_can_be_stopped_early	active
 otspot-num	linalg::minres::tests::minres_nonzero_initial_guess	active
 otspot-num	linalg::minres::tests::minres_zero_rhs	active
+otspot-num	linalg::parallelism::tests::budget_of_one_runs_inline_and_sequential	active
+otspot-num	linalg::parallelism::tests::pooled_run_sees_the_requested_width	active
+otspot-num	linalg::parallelism::tests::pools_are_cached_per_size	active
 otspot-num	linalg::parallelism::tests::threads_n_yields_rayon_n	active
 otspot-num	linalg::parallelism::tests::threads_one_yields_seq	active
 otspot-num	linalg::parallelism::tests::threads_zero_yields_seq	active
@@ -3078,6 +3105,9 @@ otspot::solver_wide_api_contract	model_timeout_and_invalid_option_surface_are_er
 otspot::solver_wide_api_contract	parser_model_and_solver_layers_agree_on_minimal_mps_lp	active
 otspot::solver_wide_api_contract	primal_feasibility_oracle_rejects_bound_violations_without_row_violations	active
 otspot::solver_wide_api_contract	solver_options_public_boundary_and_combination_contract	active
+otspot::thread_budget	milp_solve_borrows_at_most_the_requested_threads	active
+otspot::thread_budget	qp_solve_runs_no_more_than_the_thread_budget_at_once	active
+otspot::thread_budget	serial_milp_solve_creates_no_threads	active
 otspot::verify_free_var_unbounded	eq_free_n5_still_unbounded_with_presolve	active
 otspot::verify_free_var_unbounded	free_1d_still_unbounded_with_presolve	active
 otspot::verify_free_var_unbounded	free_2d_still_unbounded_with_presolve	active
