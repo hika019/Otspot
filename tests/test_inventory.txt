@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3106 testcases, 26 ignored
+# totals: 3106 testcases, 26 ignored (placeholder -- regenerated after this merge completes)
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -961,6 +961,7 @@ otspot-core	qp::global::tests::finalize_proven_kkt_fail_on_feasibility_only_incu
 otspot-core	qp::global::tests::finalize_unproven_feasibility_only_incumbent_yields_feasible_point	active
 otspot-core	qp::global::tests::indefinite_q_proven_yields_nonconvex_global	active
 otspot-core	qp::global::tests::indefinite_q_unproven_yields_nonconvex_local	active
+otspot-core	qp::global::tests::interrupt_break_folds_popped_node_bound_into_remaining_lb	active
 otspot-core	qp::global::tests::invalid_options_rejected_at_global_entry	active
 otspot-core	qp::global::tests::is_polish_kkt_recovery_five_axis_gates	active
 otspot-core	qp::global::tests::is_polish_suboptimal_acceptable_rejects_mismatched_bound_duals	active
