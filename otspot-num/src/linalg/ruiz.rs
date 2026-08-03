@@ -110,6 +110,15 @@ impl RuizScaler {
                 }
             }
             for j in 0..n {
+                // 構造的空列 (Q・A どちらにも非零を持たない列) は列ノルムが厳密に
+                // 0 になる。この列を EPS クランプ経由で更新すると d[j] が sweep
+                // ごとに 1/sqrt(EPS) 倍され RUIZ_SWEEPS 回累積して発散する
+                // (d[j] ≈ 1e159)。空列はスケーリング対象がないため d[j] = 1.0 に
+                // 据え置く。「ほぼゼロだが非零」の列 (col_norms[j] > 0) は従来通り
+                // EPS クランプで扱い挙動を変えない。
+                if col_norms[j] == 0.0 {
+                    continue;
+                }
                 let norm = col_norms[j].max(EPS);
                 self.d[j] /= norm.sqrt();
             }
@@ -321,6 +330,23 @@ mod tests {
                 scaler.e[i]
             );
         }
+    }
+
+    /// Q・A のどちらにも非零を持たない構造的空列では d[j] を 1.0 に据え置く。
+    /// EPS クランプで更新すると sweep ごとに係数が増大するため、その回帰を検知する。
+    #[test]
+    fn structurally_empty_column_keeps_unit_scaling() {
+        let n = 3usize;
+        let m = 1usize;
+        // Q は列 0、A は列 1 のみに非零を持ち、列 2 は構造的空列。
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], n, n).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[1], &[3.0], m, n).unwrap();
+        let q_vec = vec![0.0; n];
+
+        let mut scaler = RuizScaler::new(n, m);
+        scaler.compute_with_rhs(&q, &a, &q_vec, &[]);
+
+        assert_eq!(scaler.d[2], 1.0);
     }
 
     /// scale_problem → unscale_solution の round-trip が恒等であること。
