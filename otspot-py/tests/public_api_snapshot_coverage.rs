@@ -107,10 +107,7 @@ fn type_name_from_declaration(line: &str) -> Option<&str> {
 /// it falls through to `Some(Subject::Type("TempCalibrationAlias"))` here,
 /// while every real associated type's owner matches `known_types` or
 /// `RUST_PRIMITIVE_TYPES` and stays skipped.
-fn classify_pub_type_alias<'a>(
-    line: &'a str,
-    known_types: &HashSet<&str>,
-) -> Option<Subject<'a>> {
+fn classify_pub_type_alias<'a>(line: &'a str, known_types: &HashSet<&str>) -> Option<Subject<'a>> {
     let line = line.trim();
     let path = line.strip_prefix("pub type ")?.split('=').next()?.trim();
     let (owner, leaf) = owner_and_leaf(path)?;
@@ -460,7 +457,10 @@ fn classify_pub_type_alias_distinguishes_real_alias_from_associated_type() {
         None
     );
     assert_eq!(
-        classify_pub_type_alias("pub type f64::Output = otspot_model::expression::Expression", &known_types),
+        classify_pub_type_alias(
+            "pub type f64::Output = otspot_model::expression::Expression",
+            &known_types
+        ),
         None
     );
     assert_eq!(
@@ -473,7 +473,10 @@ fn classify_pub_type_alias_distinguishes_real_alias_from_associated_type() {
 
     // Genuine top-level alias: owner is the crate name, not a declared type.
     assert_eq!(
-        classify_pub_type_alias("pub type otspot_model::TempCalibrationAlias = f64", &known_types),
+        classify_pub_type_alias(
+            "pub type otspot_model::TempCalibrationAlias = f64",
+            &known_types
+        ),
         Some(Subject::Type("TempCalibrationAlias"))
     );
     // Same, nested one level deeper inside a submodule rather than the crate root.
@@ -502,9 +505,8 @@ fn classify_pub_type_alias_distinguishes_real_alias_from_associated_type() {
 #[test]
 fn uncovered_identifiers_flags_unmanifested_top_level_alias() {
     let index = ManifestIndex::parse(MANIFEST_JSON);
-    let injected = format!(
-        "{MODEL_SNAPSHOT}\npub type otspot_model::TotallyUnmanifestedAlias = f64\n"
-    );
+    let injected =
+        format!("{MODEL_SNAPSHOT}\npub type otspot_model::TotallyUnmanifestedAlias = f64\n");
 
     let uncovered = uncovered_identifiers(&injected, &index);
 
