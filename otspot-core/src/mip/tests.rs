@@ -1181,6 +1181,461 @@ fn mip_descendant_scaling_retry_runs_and_accounts_first_attempt_timing() {
     );
 }
 
+/// SENTINEL (false-Optimal from a non-finite incumbent, P1+P2 combined):
+/// `Relaxation::solve` is trusted to report `Optimal` only for a genuine
+/// (finite) solution; nothing forces that. Two independent layers now guard
+/// against a relaxation that violates it (reports `Optimal` with `objective =
+/// +inf`, as e.g. a corrupted/misbehaving LP/QP backend could):
+/// `within_gap`'s `is_finite()` guard (never *prove* gap-closure for a
+/// non-finite incumbent) and, since a Codex review found the first layer
+/// alone still let the poisoned point be *adopted* and reported as a
+/// contract-violating `SuboptimalSolution` (whose docs require a "検証済み
+/// の feasible な点"), `process_node_outcome`'s `is_finite_candidate()` check
+/// ahead of `MipState::consider` (never *adopt* a non-finite candidate at
+/// all, folding it into the open region instead of a resolved `Skip`).
+///
+/// Tree: root (x=2.5, fractional) branches on the sole integer var into
+/// down=[0,2] and up=[3,5] (`branch_bounds`: floor/ceil). `max_depth = 1`
+/// forces the down child (fractional, non-integer-feasible) to stop at the
+/// depth cap and fold a finite `node.lower_bound = 10.0` into the search via
+/// `NodeAction::OpenLb`. The up child (processed next: `NodeQueue` pops
+/// equal-lower-bound siblings FIFO, and down was pushed first) reports
+/// `Optimal` with `objective = +inf` and an integer-feasible solution (3.0):
+/// with both layers in place it is never adopted, and instead also folds
+/// `node.lower_bound = 0.0` into the open region (`uncertain: true`).
+///
+/// With no incumbent ever adopted and open region left behind, the search is
+/// honestly incomplete: `finalize_no_incumbent` reports `MaxIterations`
+/// (`objective = +inf`, `solution = []`) — the same "nothing usable found"
+/// shape used elsewhere in this module, never `Optimal` and never
+/// `SuboptimalSolution`.
+///
+/// Revert the `is_finite_candidate()` pre-check ahead of `state.consider` in
+/// `process_node_outcome` to see this fail: the +inf point gets adopted,
+/// `within_gap(+inf, 10.0, gap_tol)` is correctly `false` (P1 guard stays
+/// active), so `res.status` becomes `SuboptimalSolution` with `objective =
+/// +inf` and `solution = [3.0]` — every assertion below fails.
+///
+/// Reverting `within_gap`'s own `is_finite()` guard instead does *not* fail
+/// this test (verified): this trace never lets a non-finite value reach
+/// `within_gap` at all once the pre-check rejects it earlier — see
+/// `qp::global::pruning::tests::within_gap_rejects_infinite_incumbent_
+/// against_finite_lower_bound` for `within_gap`'s own direct sentinel.
+/// Reverting `MipState::consider`'s *own* internal guard (independent of the
+/// pre-check) is likewise not caught here — the pre-check already intercepts
+/// this trace's poisoned candidate before `consider` ever sees it; see
+/// `poisoned_initial_incumbent_is_never_adopted` below, which reaches
+/// `consider` through a path the pre-check does not guard
+/// (`initial_incumbent`) and *does* fail when only `consider`'s guard is
+/// reverted (verified).
+#[test]
+fn infinite_objective_incumbent_never_certified_optimal() {
+    struct PoisonMock {
+        bounds: [(f64, f64); 1],
+        ints: [usize; 1],
+    }
+    impl super::Relaxation for PoisonMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.ints
+        }
+        fn solve(&self, bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            let optimal = |objective: f64, solution: Vec<f64>| SolverResult {
+                status: SolveStatus::Optimal,
+                objective,
+                solution,
+                ..Default::default()
+            };
+            let (lo, hi) = bounds[0];
+            if lo == 0.0 && hi == 5.0 {
+                optimal(0.0, vec![2.5]) // root: fractional, branches
+            } else if lo == 0.0 && hi == 2.0 {
+                optimal(10.0, vec![1.5]) // down: fractional, hits max_depth
+            } else if lo == 3.0 && hi == 5.0 {
+                // up: reports Optimal but +inf — poisons the incumbent.
+                optimal(f64::INFINITY, vec![3.0])
+            } else {
+                panic!("unexpected node bounds ({lo}, {hi})")
+            }
+        }
+    }
+
+    let mock = PoisonMock {
+        bounds: [(0.0, 5.0)],
+        ints: [0],
+    };
+    let cfg = MipConfig {
+        branching: crate::options::MipBranching::MostFractional,
+        max_depth: 1,
+        ..MipConfig::default()
+    };
+    let (res, stats) = solve_mip_core(&mock, &opts(), &cfg, vec![true], None);
+
+    assert_eq!(
+        stats.incumbent_updates, 0,
+        "a +inf-objective candidate must never be adopted as incumbent at all"
+    );
+    assert_eq!(
+        res.status,
+        SolveStatus::MaxIterations,
+        "no incumbent was ever adopted and an open region remains → honest \
+         MaxIterations (never Optimal, never SuboptimalSolution); got {:?} obj={}",
+        res.status,
+        res.objective
+    );
+    assert_eq!(
+        res.objective,
+        f64::INFINITY,
+        "MaxIterations-with-no-incumbent reports the same objective=+inf sentinel \
+         `no_solution_result` uses elsewhere in this module"
+    );
+    assert!(
+        res.solution.is_empty(),
+        "no claimed solution when the only integer-feasible-looking candidate was rejected"
+    );
+    assert!(
+        res.bound_gap_cert.is_none(),
+        "no BoundGapCertificate may be issued for a non-finite incumbent"
+    );
+}
+
+/// SENTINEL (P2, adoption-time guard, independent of the `process_node_outcome`
+/// pre-check exercised by `infinite_objective_incumbent_never_certified_optimal`
+/// above): `MipState::consider`'s own `is_finite_candidate()` check must reject
+/// a poisoned `initial_incumbent` — the feasibility-pump seed path
+/// (`solve_mip_core`'s `initial_incumbent` parameter) calls `state.consider`
+/// directly, with no other guard ahead of it.
+///
+/// Revert `consider`'s `is_finite_candidate()` guard (keep `within_gap`'s) to
+/// see this fail: the poisoned seed gets adopted; the lone root node is
+/// fractional and immediately hits `max_depth = 0`, so the top-of-loop
+/// `should_prune` check never fires (its own `within_gap` call correctly
+/// declines to prune on the +inf incumbent) and the root's own genuine open
+/// bound (0.0) survives into `finalize_mip_result`, where `within_gap(+inf,
+/// 0.0, gap_tol)` is correctly `false` — so `res.status` becomes
+/// `SuboptimalSolution` with `objective = +inf` and `solution = [0.0]`
+/// (`round_integers` of the poisoned seed's own solution): every assertion
+/// below fails.
+#[test]
+fn poisoned_initial_incumbent_is_never_adopted() {
+    struct TrivialMock {
+        bounds: [(f64, f64); 1],
+        ints: [usize; 1],
+    }
+    impl super::Relaxation for TrivialMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.ints
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            // Root: fractional, never itself integer-feasible or improving.
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: 0.0,
+                solution: vec![0.5],
+                ..Default::default()
+            }
+        }
+    }
+
+    let mock = TrivialMock {
+        bounds: [(0.0, 1.0)],
+        ints: [0],
+    };
+    // max_depth=0: the root alone hits the depth cap and folds an open
+    // region without branching, so the tree drains after exactly one node.
+    let cfg = MipConfig {
+        max_depth: 0,
+        ..MipConfig::default()
+    };
+    let poisoned = SolverResult {
+        status: SolveStatus::Optimal,
+        objective: f64::INFINITY,
+        solution: vec![0.0],
+        ..Default::default()
+    };
+    let (res, stats) = solve_mip_core(&mock, &opts(), &cfg, vec![true], Some(poisoned));
+
+    assert!(
+        !stats.fp_incumbent_found,
+        "a poisoned initial_incumbent must never be adopted"
+    );
+    assert_eq!(stats.incumbent_updates, 0);
+    assert_ne!(res.status, SolveStatus::Optimal);
+    assert_ne!(
+        res.status,
+        SolveStatus::SuboptimalSolution,
+        "SuboptimalSolution requires a verified feasible point; a poisoned \
+         incumbent must never be reported this way"
+    );
+    assert!(
+        res.solution.is_empty(),
+        "no claimed solution when the only candidate was rejected as non-finite"
+    );
+}
+
+/// SENTINEL (P2, false-`Infeasible` risk from silently discarding a poisoned
+/// leaf as "resolved"): reproduces the specific failure mode `process_node_
+/// outcome`'s `is_finite_candidate()` pre-check (ahead of `state.consider`)
+/// guards against, independent of `MipState::consider`'s own guard (which
+/// stays active throughout — this isolates the *other* half of the P2 fix;
+/// `infinite_objective_incumbent_never_certified_optimal` above cannot
+/// distinguish the two, since its down child always contributes a genuine
+/// open region on its own, masking whether the up child's own contribution
+/// matters).
+///
+/// A single-node tree: the root itself claims `Optimal` + integer-feasible +
+/// `objective = +inf`, with no sibling node to ever contribute an open
+/// region. Silently `Skip`ping this leaf (treating "rejected by `consider`"
+/// as "fully resolved, no better solution exists here") would leave `had_open
+/// = false` for the whole search — `finalize_no_incumbent`'s `fully_resolved`
+/// check (`!interrupted && !had_open && queue_empty`) would then see nothing
+/// but a drained queue and report `SolverResult::infeasible()`: a **false**
+/// infeasibility claim manufactured purely from discarding a corrupt
+/// candidate, not from any genuine feasibility proof.
+///
+/// Revert the `is_finite_candidate()` pre-check in `process_node_outcome`
+/// (`consider`'s own guard stays active, so `stats.incumbent_updates` stays
+/// 0 either way) to see `res.status == Infeasible`.
+#[test]
+fn single_poisoned_leaf_never_reports_false_infeasible() {
+    struct SinglePoisonedLeaf {
+        bounds: [(f64, f64); 1],
+        ints: [usize; 1],
+    }
+    impl super::Relaxation for SinglePoisonedLeaf {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.ints
+        }
+        fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: f64::INFINITY,
+                solution: vec![0.0],
+                ..Default::default()
+            }
+        }
+    }
+
+    let mock = SinglePoisonedLeaf {
+        bounds: [(0.0, 1.0)],
+        ints: [0],
+    };
+    let cfg = MipConfig::default();
+    let (res, stats) = solve_mip_core(&mock, &opts(), &cfg, vec![true], None);
+
+    assert_eq!(stats.incumbent_updates, 0);
+    assert_ne!(
+        res.status,
+        SolveStatus::Infeasible,
+        "a rejected (non-finite) candidate is not a feasibility proof; got {:?}",
+        res.status
+    );
+    assert_eq!(res.status, SolveStatus::MaxIterations);
+    assert_eq!(res.objective, f64::INFINITY);
+    assert!(res.solution.is_empty());
+}
+
+/// SENTINEL (P0, reviewer end-to-end repro): symmetric counterpart of
+/// `within_gap`'s incumbent-side guard — `lower_bound.is_finite()` — closes a
+/// distinct false-Optimal mechanism from every other sentinel in this file.
+///
+/// `process_node_outcome` computes `node_lb = node.lower_bound.max(res.
+/// objective)` *before* any adoption guard runs, for every "trusted"
+/// (`Optimal`, non-empty solution) node — not only leaves. A trusted node
+/// that is *fractional* (not integer-feasible) never reaches the leaf-level
+/// `is_finite_candidate()` check added for the P2 fix (that check only guards
+/// the integer-feasible-leaf branch), so a fractional node reporting
+/// `Optimal` with `objective = +inf` folds `node_lb = +inf` straight into the
+/// unconditional "post-solve bound pruning" `should_prune` call — *before*
+/// `within_gap`'s incumbent-side guard is even relevant, since the incumbent
+/// here is a perfectly finite, genuinely-found solution.
+///
+/// Tree: root (x=2.5, fractional) branches into down=[0,2] and up=[3,5].
+/// Down reports `Optimal`, `objective = 1.0`, `solution = [2.0]` — a clean,
+/// fully verified integer-feasible incumbent (`state.consider` adopts it).
+/// Up (processed second, FIFO) reports `Optimal`, `objective = +inf`,
+/// `solution = [3.5]` (fractional — the up subtree is never itself resolved,
+/// let alone explored below this node). Without the `lower_bound.is_finite()`
+/// guard: `should_prune(node_lb=+inf, Some(1.0), gap_tol)` is `within_gap(1.0,
+/// +inf, gap_tol)` = `(1.0 - inf) = -inf <= gap_tol*scale` = **true** — the up
+/// subtree is silently pruned with zero open-region bookkeeping (a bare
+/// `NodeAction::Skip`, no `open_lb`/`had_open` contribution at all).
+/// `finalize_mip_result` then sees `remaining_lb = open_lb = +inf`
+/// (untouched) and computes `proven = within_gap(1.0, +inf, gap_tol)` — the
+/// *exact same* unguarded expression — which is **also** true, so it reports
+/// `status = Optimal` with a `BoundGapCertificate` (`gap_rel = 0.0`) for a
+/// search that never explored (or even bounded) the up subtree.
+///
+/// With the guard: `should_prune` returns `false`, the up node falls through
+/// to its normal `max_depth = 1` cutoff and folds an (uninformative but
+/// harmless — `open_lb.min(+inf)` is a no-op) `NodeAction::OpenLb` instead,
+/// setting `had_open = true`; `finalize_mip_result` then correctly refuses to
+/// prove gap-closure against the still-`+inf` `remaining_lb` and reports
+/// `SuboptimalSolution` with down's own genuine `(objective=1.0,
+/// solution=[2.0])` — never `Optimal`, and no `BoundGapCertificate`. This
+/// confirms the reviewer's note that a `false` return needs no additional
+/// bookkeeping at the call sites: the existing "not proven, keep going" path
+/// (`OpenLb`/`SuboptimalSolution`) already handles it.
+///
+/// Revert `within_gap`'s `lower_bound.is_finite()` guard (the incumbent-side
+/// guard from the P1 fix stays active — irrelevant here, since `1.0` is
+/// finite) to see this fail: `res.status == Optimal` with `res.bound_gap_cert
+/// = Some(..)` reporting `gap_rel = 0.0`.
+#[test]
+fn unsolved_fractional_subtree_never_certifies_false_optimal_via_infinite_node_lb() {
+    struct PoisonedNodeLbMock {
+        bounds: [(f64, f64); 1],
+        ints: [usize; 1],
+    }
+    impl super::Relaxation for PoisonedNodeLbMock {
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.ints
+        }
+        fn solve(&self, bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            let optimal = |objective: f64, solution: Vec<f64>| SolverResult {
+                status: SolveStatus::Optimal,
+                objective,
+                solution,
+                ..Default::default()
+            };
+            let (lo, hi) = bounds[0];
+            if lo == 0.0 && hi == 5.0 {
+                optimal(0.0, vec![2.5]) // root: fractional, branches
+            } else if lo == 0.0 && hi == 2.0 {
+                // down: a clean, fully finite, genuine integer-feasible incumbent.
+                optimal(1.0, vec![2.0])
+            } else if lo == 3.0 && hi == 5.0 {
+                // up: Optimal but +inf and fractional — never itself resolved,
+                // and its own subtree is never explored below it.
+                optimal(f64::INFINITY, vec![3.5])
+            } else {
+                panic!("unexpected node bounds ({lo}, {hi})")
+            }
+        }
+    }
+
+    let mock = PoisonedNodeLbMock {
+        bounds: [(0.0, 5.0)],
+        ints: [0],
+    };
+    let cfg = MipConfig {
+        branching: crate::options::MipBranching::MostFractional,
+        max_depth: 1,
+        ..MipConfig::default()
+    };
+    let (res, stats) = solve_mip_core(&mock, &opts(), &cfg, vec![true], None);
+
+    assert_eq!(
+        stats.incumbent_updates, 1,
+        "only down's clean (objective=1.0) leaf may ever become the incumbent"
+    );
+    assert_ne!(
+        res.status,
+        SolveStatus::Optimal,
+        "the up subtree was never explored/bounded — must never be certified \
+         Optimal; got {:?} obj={}",
+        res.status,
+        res.objective
+    );
+    assert_eq!(
+        res.status,
+        SolveStatus::SuboptimalSolution,
+        "down's own genuine incumbent is real and usable, just unproven; got {:?}",
+        res.status
+    );
+    assert_eq!(
+        res.objective, 1.0,
+        "the reported objective must be down's real value, not the poisoned +inf"
+    );
+    assert_eq!(res.solution, vec![2.0]);
+    assert!(
+        res.bound_gap_cert.is_none(),
+        "no BoundGapCertificate for a search with an unresolved subtree"
+    );
+}
+
+/// SENTINEL (P0 follow-up): `within_gap`'s symmetric `lower_bound.is_finite()`
+/// guard (above) rejects `remaining_lb == +inf` unconditionally — but `+inf`
+/// is *also* the legitimate value `finalize_mip_result` sees whenever the
+/// whole search tree resolves without ever leaving a region open (`open_lb`
+/// stays at its untouched `+inf` sentinel because `had_open` never fired).
+/// Only `finalize_mip_result`'s `fully_resolved` short-circuit (mirroring
+/// `finalize_no_incumbent`'s own condition, and `qp::global::
+/// solve_qp_global_with_stats`'s pre-existing `!halted_early` branch)
+/// distinguishes this from a corrupted node's `+inf` bound; without it, the
+/// guard above would demote every ordinarily-provable MILP to
+/// `SuboptimalSolution`.
+///
+/// This is a real (non-mock) MILP via the full `solve_milp` pipeline — not a
+/// contrived scenario: found empirically during P0 development, where adding
+/// `within_gap`'s `lower_bound.is_finite()` guard alone (before adding the
+/// `fully_resolved` short-circuit) regressed
+/// `mip::cuts::tests::cover_cuts_preserve_optimum` and `clique_cut_mixed_
+/// sign_row_no_false_conflict` from `Optimal` to `SuboptimalSolution`.
+///
+/// Revert the `fully_resolved` short-circuit in `finalize_mip_result` (keep
+/// `within_gap`'s guard) to see this fail the same way.
+#[test]
+fn fully_resolved_search_still_proves_optimal_without_open_region() {
+    // Same problem/oracle as `two_var_general_integer_program`: min -(x+y)
+    // s.t. x+y<=3.5, x<=2.5, y<=2.5, x,y in [0,5] integer. Integer optimum
+    // x+y=3 (e.g. x=1,y=2 or x=2,y=1) -> obj=-3. Small enough that the whole
+    // tree resolves (one branch becomes the incumbent, its sibling is pruned
+    // by an ordinary finite-bound `should_prune` check) well within budget,
+    // with no deadline/node-limit ever engaged and no region ever left open.
+    let lp = build_lp(
+        vec![-1.0, -1.0],
+        &[0, 0, 1, 2],
+        &[0, 1, 0, 1],
+        &[1.0, 1.0, 1.0, 1.0],
+        3,
+        vec![3.5, 2.5, 2.5],
+        vec![ConstraintType::Le; 3],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &MipConfig::default());
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "a genuinely fully-resolved search must still be certified Optimal; got {:?}",
+        r.status
+    );
+    assert!((r.objective - (-3.0)).abs() < EPS, "obj={}", r.objective);
+    assert!(
+        r.bound_gap_cert.is_some(),
+        "Optimal must carry a BoundGapCertificate"
+    );
+    assert_eq!(
+        stats.nodes_processed, 3,
+        "expected exactly root + two children in this small tree; a different \
+         node count would mean the tree no longer resolves the way this \
+         sentinel's fully_resolved-without-open-region premise assumes"
+    );
+}
+
 #[test]
 fn branching_strategy_controls_strong_branch_stats() {
     use std::cell::Cell;

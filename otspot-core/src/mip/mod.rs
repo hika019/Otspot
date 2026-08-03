@@ -1498,11 +1498,29 @@ fn finalize_mip_result<R: Relaxation>(
         None => open_lb,
     };
     let interrupted = deadline_stop || maxnodes_stop;
+    // Codex review (P0 follow-up): `remaining_lb == +inf` is legitimately
+    // either (a) the search is genuinely fully resolved — `open_lb` was never
+    // touched because `had_open` never fired, i.e. the same condition
+    // `finalize_no_incumbent` already uses below for its own `fully_resolved`
+    // — trivially gap-closed; or (b) a corrupted node folded a non-finite
+    // bound into `open_lb` while `had_open == true`, which is NOT a proof.
+    // `within_gap`'s symmetric `is_finite()` guard (P0 fix) correctly rejects
+    // both uniformly, so (a) needs this explicit short-circuit ahead of it —
+    // mirrors `qp::global::solve_qp_global_with_stats`'s `!halted_early`
+    // branch, which already bypasses `within_gap` entirely
+    // (`finalize_proven(problem, inc_obj, ...)`) under the equivalent
+    // conditions (`search_incomplete` idle, no deadline/node-limit, empty
+    // tree). Sentinel: `tests::fully_resolved_search_still_proves_optimal_
+    // without_open_region` — reverting this short-circuit demotes a
+    // genuinely complete search's incumbent from `Optimal` to
+    // `SuboptimalSolution`.
+    let fully_resolved = !interrupted && !had_open && q.is_empty();
 
     match state.incumbent.take() {
         Some(mut inc) => {
             let inc_obj = state.incumbent_obj.expect("incumbent objective set");
-            let proven = !proof_uncertain && within_gap(inc_obj, remaining_lb, cfg.gap_tol);
+            let proven = !proof_uncertain
+                && (fully_resolved || within_gap(inc_obj, remaining_lb, cfg.gap_tol));
             inc.solution = round_integers(inc.solution, problem.integer_vars());
             inc.status = if proven {
                 let effective_lb = remaining_lb.min(inc_obj);
@@ -1990,6 +2008,26 @@ fn process_node_outcome<R: Relaxation>(
 
         // Integer-feasible leaf.
         if is_integer_feasible(&res.solution, mask, cfg.integer_feas_tol) {
+            // Codex review (P2, follow-up to `within_gap`'s false-Optimal fix):
+            // a `res` that reaches here claims a trusted (`Optimal`)
+            // integer-feasible leaf, but if its objective/solution is
+            // non-finite it is a corrupt candidate, not proof this region is
+            // exhausted. `MipState::consider` already refuses to *adopt* it
+            // (its own `is_finite_candidate()` guard), but silently `Skip`ping
+            // the node regardless would still discard the region as if fully
+            // resolved — with no other open node left, `finalize_no_incumbent`
+            // could then report a false `Infeasible` (its `fully_resolved`
+            // check only looks at `had_open`/`queue_empty`, not at whether a
+            // candidate was rejected here). Fold it into the open region
+            // instead, via `node.lower_bound` (the last *trustworthy* bound —
+            // not `node_lb`, which folds in the corrupt `res.objective`).
+            if !res.is_finite_candidate() {
+                return NodeAction::OpenLb {
+                    node_lb: node.lower_bound,
+                    uncertain: true,
+                    end_dive: true,
+                };
+            }
             if state.consider(res) {
                 stats.incumbent_updates += 1;
                 stats.tree_cut_dry_streak = 0;
@@ -2301,7 +2339,23 @@ impl MipState {
 
     /// Adopt `res` as the new incumbent if it strictly improves the objective.
     /// Returns `true` when the incumbent changed.
+    ///
+    /// Codex review (P2, follow-up to the `within_gap` false-Optimal fix):
+    /// rejects a candidate whose `objective`/`solution` isn't
+    /// `is_finite_candidate()` outright, regardless of `status`. Every one of
+    /// this function's 5 call sites (the "trusted" B&B leaf, the FP-seeded
+    /// `initial_incumbent`, RINS, RENS, local branching) trusts its own
+    /// upstream contract to only hand a genuine solution here; this is the
+    /// single point that actually re-verifies it before a result becomes "the
+    /// incumbent" — without it, a poisoned candidate is merely *reported*
+    /// honestly instead of falsely as `Optimal` (the earlier `within_gap`
+    /// fix), but is still wrongly *adopted*, e.g. as `SuboptimalSolution` with
+    /// a non-finite objective, violating that status's documented "verified
+    /// feasible point" contract.
     fn consider(&mut self, res: &SolverResult) -> bool {
+        if !res.is_finite_candidate() {
+            return false;
+        }
         let better = match self.incumbent_obj {
             None => true,
             Some(o) => res.objective < o,

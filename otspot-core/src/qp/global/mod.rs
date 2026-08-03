@@ -130,12 +130,24 @@ pub fn solve_qp_global_with_stats(
     // 点の目的値」で健全なので、非収束 status (Stalled 等) でも点そのものが
     // feasible と検証できれば採用する (status は信用しない)。
     let root_solve = solve_local_upper_bound(problem, &root_bounds, &shared_opts, None);
-    let root_usable = is_feasible_result(&root_solve.status)
+    let root_claims_feasible = is_feasible_result(&root_solve.status)
         || is_verified_feasible_point(problem, &root_solve.solution, shared_opts.ipm_eps());
-    if !root_usable {
+    if !root_claims_feasible {
         // root が使えない (Infeasible / NumericalError / Unbounded / NonConvex /
         // Timeout / infeasible な診断 iterate) → そのまま伝播。
         return (root_solve, stats);
+    }
+    // Codex review (P2, follow-up to `within_gap`'s false-Optimal fix):
+    // `is_feasible_result` trusts `status` alone (Optimal/LocallyOptimal/
+    // SuboptimalSolution) without checking `objective`/`solution` are
+    // finite — mirrors `qcqp_route::is_clean_convex_outcome`'s `Optimal`
+    // invariant (`objective.is_finite() && x.iter().all(finite)`). A root
+    // that claims feasible but is non-finite must not reach `SearchState::
+    // new` (which now `assert!`s this — see its doc): report it honestly as
+    // `NumericalError` rather than forwarding the raw corrupt `root_solve`
+    // (whose `status` would still read `Optimal`/`SuboptimalSolution`).
+    if !root_solve.is_finite_candidate() {
+        return (SolverResult::numerical_error(), stats);
     }
 
     // Phase 4 α-BB: 全 node で共通の α (Q only). use_alpha_bb=false なら 0 で実質無効化。
@@ -251,8 +263,14 @@ pub fn solve_qp_global_with_stats(
 
         let res =
             solve_local_upper_bound(problem, &node.var_bounds, &shared_opts, node.warm.as_ref());
-        let res_usable = is_feasible_result(&res.status)
-            || is_verified_feasible_point(problem, &res.solution, user_eps);
+        // Codex review (P2): `res.is_finite_candidate()` closes the same gap
+        // as the root gate above — a node result claiming Optimal/
+        // SuboptimalSolution but non-finite must be treated as unusable
+        // (folded into `discard_lb`/`search_incomplete` below, exactly like
+        // any other unusable status), not handed to `update_incumbent`.
+        let res_usable = res.is_finite_candidate()
+            && (is_feasible_result(&res.status)
+                || is_verified_feasible_point(problem, &res.solution, user_eps));
         if !res_usable {
             if !node_discard_is_conclusive(&res.status) {
                 // 「box に解があるか不明」なだけで空の証明ではないため、node_lb を
@@ -603,7 +621,24 @@ struct SearchState {
 }
 
 impl SearchState {
+    /// Codex review (P2, follow-up to `within_gap`'s false-Optimal fix):
+    /// `root` must already be `is_finite_candidate()` — enforced by an
+    /// `assert!` rather than silently degrading, because this constructor
+    /// has exactly one production call site (`solve_qp_global_with_stats`,
+    /// immediately after its `root_solve.is_finite_candidate()` gate); a
+    /// non-finite `root` reaching here means that gate itself regressed,
+    /// which is a caller bug, not a data-dependent condition to route
+    /// around. Every existing caller (including all `#[cfg(test)]` call
+    /// sites) already passes a finite root.
     fn new(root: SolverResult) -> Self {
+        assert!(
+            root.is_finite_candidate(),
+            "SearchState::new requires a finite-candidate root (objective and every \
+             solution component finite); got objective={} solution={:?} — caller must \
+             gate via SolverResult::is_finite_candidate() before construction",
+            root.objective,
+            root.solution
+        );
         let obj = root.objective;
         let sol = root.solution.clone();
         Self {
@@ -618,11 +653,23 @@ impl SearchState {
         build_warm_from(&self.incumbent_result)
     }
 
-    fn update_incumbent(&mut self, res: &SolverResult) {
+    /// Adopt `res` as the new incumbent. Returns whether it was actually
+    /// adopted.
+    ///
+    /// Codex review (P2): rejects (no-op) a non-`is_finite_candidate()` `res`
+    /// — mirrors `mip::MipState::consider`. The one production call site
+    /// (the B&B loop in `solve_qp_global_with_stats`) already gates on
+    /// `res.is_finite_candidate()` via `res_usable` before calling this, so
+    /// this is defense-in-depth against a future call site that forgets to.
+    fn update_incumbent(&mut self, res: &SolverResult) -> bool {
+        if !res.is_finite_candidate() {
+            return false;
+        }
         self.incumbent_obj = res.objective;
         self.incumbent_sol = res.solution.clone();
         self.incumbent_result = res.clone();
         self.incumbent_updated = true;
+        true
     }
 
     /// Dual recovery polish: re-solves on original bounds to fix sub-box-contaminated duals.
@@ -1905,6 +1952,83 @@ mod tests {
                 r.status,
             );
         }
+    }
+
+    /// SENTINEL (P2, Codex review follow-up to `within_gap`'s false-Optimal
+    /// fix): `SearchState::new` — the sole point every top-level solve seeds
+    /// its starting incumbent from — must never accept a non-finite
+    /// candidate. Mirrors `mip::MipState::consider`'s guard and
+    /// `qcqp_route::is_clean_convex_outcome`'s `Optimal` invariant
+    /// (`objective.is_finite() && x.iter().all(finite)`).
+    ///
+    /// `new`'s one production call site (`solve_qp_global_with_stats`) now
+    /// gates on `root_solve.is_finite_candidate()` before calling `new` at
+    /// all, so this exercises `new`'s own internal enforcement directly,
+    /// independent of that gate — defense-in-depth against a future caller
+    /// that forgets it. Revert the `assert!` in `SearchState::new` to see
+    /// this stop panicking (verified).
+    #[test]
+    #[should_panic(expected = "finite-candidate")]
+    fn search_state_new_rejects_non_finite_objective() {
+        let poisoned = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: f64::INFINITY,
+            solution: vec![0.0_f64],
+            ..Default::default()
+        };
+        let _ = SearchState::new(poisoned);
+    }
+
+    /// SENTINEL companion: `SearchState::new` must also reject a candidate
+    /// whose objective is finite but whose solution carries a non-finite
+    /// component (the other half of `is_finite_candidate()`).
+    #[test]
+    #[should_panic(expected = "finite-candidate")]
+    fn search_state_new_rejects_non_finite_solution_component() {
+        let poisoned = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 0.0,
+            solution: vec![f64::NAN],
+            ..Default::default()
+        };
+        let _ = SearchState::new(poisoned);
+    }
+
+    /// SENTINEL (P2): `update_incumbent` — the B&B loop's per-node incumbent
+    /// adoption — must reject a non-finite candidate rather than adopting it,
+    /// leaving the last-known-good incumbent untouched. Its one production
+    /// call site already gates on `res.is_finite_candidate()` via `res_usable`
+    /// before calling this, so this is defense-in-depth, tested directly.
+    ///
+    /// Revert the `is_finite_candidate()` check in `update_incumbent` to see
+    /// this fail: the poisoned candidate gets adopted (`updated == true`,
+    /// `incumbent_obj == f64::INFINITY`) (verified).
+    #[test]
+    fn update_incumbent_rejects_non_finite_candidate() {
+        let good_root = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 5.0,
+            solution: vec![1.0_f64],
+            ..Default::default()
+        };
+        let mut state = SearchState::new(good_root);
+        let poisoned = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: f64::INFINITY,
+            solution: vec![0.0_f64],
+            ..Default::default()
+        };
+        let updated = state.update_incumbent(&poisoned);
+        assert!(
+            !updated,
+            "a non-finite candidate must be rejected, not adopted"
+        );
+        assert_eq!(
+            state.incumbent_obj, 5.0,
+            "incumbent must remain the last finite value"
+        );
+        assert_eq!(state.incumbent_sol, vec![1.0_f64]);
+        assert!(!state.incumbent_updated);
     }
 
     /// Regression: proptest seed a46bde58 — PD Q (Gershgorin false positive) must satisfy KKT.
