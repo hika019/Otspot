@@ -97,6 +97,7 @@ fn main() -> ExitCode {
     println!("rens_iters: {}", stats.rens_iters);
     println!("local_branching_iters: {}", stats.local_branching_iters);
     println!("tree_cut_iters: {}", stats.tree_cut_iters);
+    println!("tree_cut_overhead_iters: {}", stats.tree_cut_overhead_iters);
     println!("lp_presolve_us: {}", stats.lp_presolve_us_total);
     println!("lp_solve_us: {}", stats.lp_solve_us_total);
     println!("lp_postsolve_us: {}", stats.lp_postsolve_us_total);

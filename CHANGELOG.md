@@ -2,6 +2,14 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+- MILP B&Bのin-tree cut separationに割り当てるsimplex反復シェア
+  (`SEPARATION_ITER_SHARE`) が誤った除数で導出されており、実際の
+  wall-clockコストを最大5倍過大評価していた問題を修正 (0.15→0.035)。
+  MIPLIB smallの複数TIMEOUT問題でノード数・incumbentが改善し、`mas76`は
+  既知最適値に到達した
+
 ## [0.7.4] - 2026-07-31
 
 MILP/simplex の性能改善 (MIPLIB small 5/20→7/20) とステータス誠実化、solver 基盤の otspot-num crate 分離を中心としたリリース。
