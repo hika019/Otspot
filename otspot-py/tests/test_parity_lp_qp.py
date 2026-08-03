@@ -12,8 +12,10 @@ import copy
 import os
 import pickle
 import signal
+import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -407,15 +409,118 @@ def _build_gil_probe_model(n: int = 1200) -> otspot.Model:
     return model
 
 
+def _cgroup_cpu_quota(cgroup_root: Path = Path("/sys/fs/cgroup")) -> float | None:
+    """Effective CPU budget from the CFS bandwidth controller (cgroup v2
+    `cpu.max`, falling back to cgroup v1 `cpu.cfs_quota_us`/
+    `cpu.cfs_period_us`), or `None` if unconstrained/unreadable.
+
+    `os.sched_getaffinity` reports which cores the process *may run on*, not
+    a fractional throughput cap: a container started with e.g. Docker's
+    `--cpus=1` on a multi-core host still reports every host core in its
+    affinity set (cpuset is untouched) while CFS bandwidth control throttles
+    it to one core's worth of wall-clock CPU time. Affinity alone would pass
+    the `>= 2` gate below on such a host and then fail on GIL-release timing
+    that assumes genuine parallelism.
+
+    `cgroup_root` defaults to the real mount point; tests override it with a
+    `tmp_path`-backed fake layout rather than monkeypatching `Path` itself.
+    """
+    v2 = cgroup_root / "cpu.max"
+    if v2.exists():
+        try:
+            max_str, period_str = v2.read_text().split()
+            return None if max_str == "max" else int(max_str) / int(period_str)
+        except (OSError, ValueError, ZeroDivisionError):
+            return None
+
+    quota_path = cgroup_root / "cpu" / "cpu.cfs_quota_us"
+    period_path = cgroup_root / "cpu" / "cpu.cfs_period_us"
+    if quota_path.exists() and period_path.exists():
+        try:
+            quota = int(quota_path.read_text())
+            period = int(period_path.read_text())
+            return None if quota <= 0 else quota / period
+        except (OSError, ValueError, ZeroDivisionError):
+            return None
+
+    return None
+
+
 def _available_cpu_count() -> int:
-    """`os.sched_getaffinity` (Linux-only: honors cgroup/taskset CPU limits,
-    unlike `os.cpu_count()`, which reports the host's total core count even
-    inside a constrained container) with an `os.cpu_count()` fallback for
-    platforms where `sched_getaffinity` doesn't exist (e.g. macOS)."""
+    """`os.sched_getaffinity` (Linux-only: honors taskset/cpuset CPU
+    restrictions, unlike `os.cpu_count()`, which reports the host's total
+    core count even inside a constrained container) with an
+    `os.cpu_count()` fallback for platforms where `sched_getaffinity`
+    doesn't exist (e.g. macOS), further capped by the cgroup CFS quota (see
+    `_cgroup_cpu_quota`) since affinity alone misses a fractional/whole
+    `--cpus` throughput limit that leaves the affinity set untouched."""
     try:
-        return len(os.sched_getaffinity(0))
+        affinity_count = len(os.sched_getaffinity(0))
     except AttributeError:
-        return os.cpu_count() or 1
+        affinity_count = os.cpu_count() or 1
+
+    quota = _cgroup_cpu_quota()
+    if quota is None:
+        return affinity_count
+    # floor, never below 1: a quota below 1 whole CPU still schedules, just
+    # never concurrently, so `max(1, ...)` -- not `0` -- is the honest floor.
+    return min(affinity_count, max(1, int(quota)))
+
+
+def test_cgroup_cpu_quota_v2_max_means_unconstrained(tmp_path):
+    (tmp_path / "cpu.max").write_text("max 100000\n")
+    assert _cgroup_cpu_quota(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected"),
+    [("100000 100000\n", 1.0), ("50000 100000\n", 0.5), ("150000 100000\n", 1.5)],
+)
+def test_cgroup_cpu_quota_v2_parses_quota_over_period(tmp_path, contents, expected):
+    (tmp_path / "cpu.max").write_text(contents)
+    assert _cgroup_cpu_quota(tmp_path) == pytest.approx(expected)
+
+
+def test_cgroup_cpu_quota_v1_fallback_when_no_v2_file(tmp_path):
+    v1_dir = tmp_path / "cpu"
+    v1_dir.mkdir()
+    (v1_dir / "cpu.cfs_quota_us").write_text("200000\n")
+    (v1_dir / "cpu.cfs_period_us").write_text("100000\n")
+    assert _cgroup_cpu_quota(tmp_path) == pytest.approx(2.0)
+
+
+def test_cgroup_cpu_quota_v1_quota_minus_one_means_unconstrained(tmp_path):
+    v1_dir = tmp_path / "cpu"
+    v1_dir.mkdir()
+    (v1_dir / "cpu.cfs_quota_us").write_text("-1\n")
+    (v1_dir / "cpu.cfs_period_us").write_text("100000\n")
+    assert _cgroup_cpu_quota(tmp_path) is None
+
+
+def test_cgroup_cpu_quota_none_when_neither_file_exists(tmp_path):
+    assert _cgroup_cpu_quota(tmp_path) is None
+
+
+def test_available_cpu_count_capped_by_quota_even_with_wide_affinity(monkeypatch):
+    """The exact regression this fixes: a host reporting >= 2 cores of
+    affinity but a cgroup quota of 1 CPU (the Docker `--cpus=1` case in the
+    module docstring) must report 1, not the affinity count -- a quota=1 CI
+    runner would otherwise pass `test_solve_releases_the_gil`'s `< 2` skip
+    gate and then fail on GIL-release timing that assumes real parallelism.
+
+    Sentinel: `_available_cpu_count` returning bare `affinity_count` (no
+    quota capping at all, i.e. the pre-fix behavior) makes this assert 4
+    instead of 1 -- confirmed by reverting and re-running.
+    """
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: set(range(4)), raising=False)
+    monkeypatch.setattr(sys.modules[__name__], "_cgroup_cpu_quota", lambda: 1.0)
+    assert _available_cpu_count() == 1
+
+
+def test_available_cpu_count_unaffected_when_quota_unconstrained(monkeypatch):
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: set(range(4)), raising=False)
+    monkeypatch.setattr(sys.modules[__name__], "_cgroup_cpu_quota", lambda: None)
+    assert _available_cpu_count() == 4
 
 
 def test_solve_releases_the_gil():
@@ -543,7 +648,8 @@ def test_sigint_interrupts_long_solve():
     machine than this one could plausibly finish the solve *before* the
     signal is even processed, failing the `pytest.raises(KeyboardInterrupt)`
     below and (worse) leaving the not-yet-delivered SIGINT to surface as a
-    stray `KeyboardInterrupt` in whatever runs next. n=2000 measured
+    stray `KeyboardInterrupt` in whatever runs next -- guarded against
+    directly (not just by margin) via `cancel_send` below. n=2000 measured
     ~0.337s natural completion (release) against the same 0.1s delay --
     ~237ms/237% margin -- while `KeyboardInterrupt` itself still arrives in
     ~0.108-0.111s (12/12 trials, release) since the poll loop's response
@@ -557,18 +663,32 @@ def test_sigint_interrupts_long_solve():
     primary correctness check.
     """
     model = _build_gil_probe_model(2000)
+    # Set (from a `finally`, before `sender.join()`) the moment `solve()`
+    # returns *for any reason* -- the expected `KeyboardInterrupt`, some
+    # other exception, or (the exact regression this guards against) solving
+    # to completion without raising at all before the sender's 0.1s delay
+    # elapses. Without this, an early finish leaves `sender` still asleep;
+    # by the time it wakes and fires `os.kill`, this test's `with`/`finally`
+    # scope has already exited, so the SIGINT lands on whatever pytest runs
+    # next (teardown, or an unrelated subsequent test) instead of here.
+    cancel_send = threading.Event()
 
     def send_sigint() -> None:
         time.sleep(0.1)
-        os.kill(os.getpid(), signal.SIGINT)
+        if not cancel_send.is_set():
+            os.kill(os.getpid(), signal.SIGINT)
 
     sender = threading.Thread(target=send_sigint, daemon=True)
     t0 = time.perf_counter()
     sender.start()
-    with pytest.raises(KeyboardInterrupt):
-        model.solve()
-    elapsed = time.perf_counter() - t0
-    sender.join()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            model.solve()
+        elapsed = time.perf_counter() - t0
+    finally:
+        cancel_send.set()
+        sender.join()
+
     assert elapsed < 2.0, (
         f"KeyboardInterrupt took {elapsed:.3f}s to arrive after SIGINT was sent "
         "at ~0.1s -- solve() is not honoring Ctrl-C promptly"

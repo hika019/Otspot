@@ -233,13 +233,23 @@ class Constraint:
     `.eq_constraint()` and pass directly to `Model.add_constraint`."""
 
 class ModelResult:
-    status: SolveStatus
-    proof: SolutionProof
-    objective_value: float
-    dual_solution: list[float] | None
-    reduced_costs: list[float] | None
-    slack: list[float] | None
-    bound_duals: list[float]
+    # PyO3-side: `#[getter]` only, no `#[setter]` (otspot-py/src/result.rs) --
+    # `@property` (not a plain typed attribute) so mypy also rejects
+    # `result.status = ...` as read-only, matching the runtime contract.
+    @property
+    def status(self) -> SolveStatus: ...
+    @property
+    def proof(self) -> SolutionProof: ...
+    @property
+    def objective_value(self) -> float: ...
+    @property
+    def dual_solution(self) -> list[float] | None: ...
+    @property
+    def reduced_costs(self) -> list[float] | None: ...
+    @property
+    def slack(self) -> list[float] | None: ...
+    @property
+    def bound_duals(self) -> list[float]: ...
 
     def objective(self) -> float: ...
     def value(self, var: Variable) -> float: ...
