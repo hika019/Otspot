@@ -578,6 +578,9 @@ fn solve_ipm_with_runner(
     // presolve Ruiz 済なら IPM 側で重ね掛けしない (二重 scale で誤収束する)。
     let presolve_did_ruiz = presolve_result.ruiz_scaler.is_some();
     let mut best: Option<IpmOutcome> = None;
+    // best を生成した (use_ruiz, tighten)。ループ後の IterationLimit 延長で
+    // 同一設定を再現するために必要。
+    let mut best_config: Option<(bool, f64)> = None;
     // use_ruiz ごとに直前 fingerprint を保持 (index: false=0, true=1)。attempts 列は
     // [(true,t),(false,t),(true,10t),(false,10t),...] と tighten 固定・use_ruiz 反転の
     // ペアを含むため、lane を跨いだ比較 (Ruiz flip のみのペア) は「tighten を変えても
@@ -661,6 +664,7 @@ fn solve_ipm_with_runner(
 
         if outcome_proven {
             best = Some(outcome);
+            best_config = Some((use_ruiz, tighten));
             break;
         }
         // 同一 lane (use_ruiz) 内で tighten を変えても bit 同一な run が
@@ -687,14 +691,70 @@ fn solve_ipm_with_runner(
         };
         prev_by_ruiz[lane] = Some((tighten, AttemptFingerprint::of(&outcome)));
         match &best {
-            None => best = Some(outcome),
+            None => {
+                best = Some(outcome);
+                best_config = Some((use_ruiz, tighten));
+            }
             Some(prev) if outcome_is_better_candidate(&outcome, prev, &view, user_eps) => {
                 best = Some(outcome);
+                best_config = Some((use_ruiz, tighten));
             }
             _ => {}
         }
         if run_len_by_ruiz[lane] >= CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK {
             break;
+        }
+    }
+
+    let mut best_ok = best
+        .as_ref()
+        .map(|b| outcome_proves_optimal(b, &view, user_eps))
+        .unwrap_or(false);
+
+    // ループを抜けた時点で best が未証明かつ IterationLimit (= genuine な
+    // stall / 収束 / deadline ではなく MAX_ITER_PER_ATTEMPT による強制打ち切り)
+    // なら、同一 (use_ruiz, tighten) のまま 1 回だけ延長する。futility
+    // (bit-identical retry) はこの条件の特殊ケースに過ぎない — LISWET7/LISWET1
+    // @ eps=1e-8 は attempts 列 (base_tighten=1.0 では 2 要素) を futility 閾値
+    // (3) に届く前に使い切って通常終了しており、旧 futility-only 条件では
+    // 捕捉できなかった (実測)。新たな iteration cap は設けず、genuine な終了
+    // 条件 (deadline と、solve_ippmm_inner 内の residual_stall / alpha_stall
+    // 検出) だけに委ねる。
+    // 実測 (LISWET7 @ eps=1e-8): 500 iter 打ち切り時点で wall time 予算の 6.3%
+    // しか消費しておらず、nr_p は線形に減少中だった (R²=0.9975)。
+    let needs_extension = !best_ok
+        && best
+            .as_ref()
+            .is_some_and(|b| b.termination == IpmTermination::IterationLimit);
+    if needs_extension {
+        if let (Some((ext_use_ruiz, ext_tighten)), Some(d)) = (best_config, total_deadline) {
+            let remaining_ext = user_max_iter.saturating_sub(iter_used);
+            if Instant::now() < d && remaining_ext > 0 {
+                opts.deadline = total_deadline;
+                opts.timeout_secs = None;
+                opts.ipm.max_iter = remaining_ext;
+                opts.use_ruiz_scaling = ext_use_ruiz;
+                opts.ipm.eps =
+                    (user_eps / ext_tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
+                let ext_outcome = runner(problem, &presolve_result, &opts, user_eps);
+                let ext_satisfies = ext_outcome.satisfies_eps(user_eps);
+                let ext_proven =
+                    ext_satisfies && outcome_proves_optimal(&ext_outcome, &view, user_eps);
+                let ext_charged = if ext_satisfies {
+                    ext_outcome.iterations
+                } else {
+                    remaining_ext
+                };
+                iter_used = iter_used.saturating_add(ext_charged);
+                let ext_is_better = match &best {
+                    None => true,
+                    Some(prev) => outcome_is_better_candidate(&ext_outcome, prev, &view, user_eps),
+                };
+                if ext_proven || ext_is_better {
+                    best = Some(ext_outcome);
+                    best_ok = ext_proven;
+                }
+            }
         }
     }
 
@@ -705,10 +765,7 @@ fn solve_ipm_with_runner(
     // Without presolve, the IPM operates in the original space (no amplification)
     // and typically converges within user_eps. Size-gated to avoid overhead on
     // problems that are too large to re-solve without reduction.
-    let best_ok = best
-        .as_ref()
-        .map(|b| outcome_proves_optimal(b, &view, user_eps))
-        .unwrap_or(false);
+    // `best_ok` は延長 attempt を経ても正しく維持される (未証明のままなら false)。
     if !best_ok && presolve_did_ruiz && n_orig <= NO_PRESOLVE_FALLBACK_LIMIT {
         opts.schur_hint = None;
         let fallback_pre = QpPresolveResult::no_reduction(problem);
@@ -2568,6 +2625,199 @@ mod tests {
                 SolveStatus::Stalled,
                 "got {:?}",
                 result.status
+            );
+        }
+    }
+
+    /// best が IterationLimit (MAX_ITER_PER_ATTEMPT による強制打ち切り、genuine
+    /// な stall/収束/deadline ではない) のまま attempts 列を使い切って通常終了
+    /// した場合の延長 attempt sentinel。
+    ///
+    /// 実測 (LISWET7/LISWET1 @ eps=1e-8): base_tighten=1.0 では attempts 列が
+    /// [(false,1.0),(false,10.0)] の 2 要素しかなく、futility 閾値
+    /// (CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK=3) に届く前に通常終了する。
+    /// 「異なる tighten を試すのが無意味 (futility)」と「この設定のまま反復を
+    /// 続けても無意味 (IterationLimit ではなく genuine stall)」は別の命題 —
+    /// 後者のみが延長を正当化しない。deadline がある場合、ループ終了時点の
+    /// best が IterationLimit なら 1 回だけ延長 attempt (新たな iteration cap
+    /// を課さず、残り wall time を使い切る) を追加する。
+    mod iteration_limit_extends_with_deadline {
+        use super::*;
+        use crate::qp::ipm_solver::outcome::IpmTermination;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static EXT_MAX_ITER_SEEN: AtomicUsize = AtomicUsize::new(0);
+        static EXT_DEADLINE_SEEN: AtomicUsize = AtomicUsize::new(0);
+
+        /// attempts 列 (2 要素、eps=1e-8) の両方が IterationLimit を返し、
+        /// 3 call目 (延長) は渡された max_iter/deadline を記録してより良い
+        /// 残差の outcome を返す。
+        fn runner_iteration_limit_then_extends(
+            _problem: &QpProblem,
+            _presolve: &QpPresolveResult,
+            options: &SolverOptions,
+            _user_eps: f64,
+        ) -> IpmOutcome {
+            let call = CALLS.fetch_add(1, Ordering::SeqCst) + 1;
+            if call <= 2 {
+                IpmOutcome {
+                    solution: vec![0.25],
+                    dual_solution: vec![0.5],
+                    bound_duals: vec![0.0],
+                    objective: 0.25,
+                    iterations: 500,
+                    kkt_residual_rel: 1.0,
+                    primal_residual_rel: 1.0,
+                    bound_violation: 0.0,
+                    complementarity_residual_rel: 1.0,
+                    duality_gap_rel: 1.0,
+                    numerical_failure: false,
+                    infeasibility_status: None,
+                    is_locally_optimal: false,
+                    postsolve_krylov_ir_skipped: false,
+                    timing: None,
+                    termination: IpmTermination::IterationLimit,
+                }
+            } else {
+                EXT_MAX_ITER_SEEN.store(options.ipm.max_iter, Ordering::SeqCst);
+                EXT_DEADLINE_SEEN.store(usize::from(options.deadline.is_some()), Ordering::SeqCst);
+                IpmOutcome {
+                    solution: vec![0.1],
+                    dual_solution: vec![0.2],
+                    bound_duals: vec![0.0],
+                    objective: 0.1,
+                    iterations: 12_345,
+                    kkt_residual_rel: 1e-3,
+                    primal_residual_rel: 1e-3,
+                    bound_violation: 0.0,
+                    complementarity_residual_rel: 1e-3,
+                    duality_gap_rel: 1e-3,
+                    numerical_failure: false,
+                    infeasibility_status: None,
+                    is_locally_optimal: false,
+                    postsolve_krylov_ir_skipped: false,
+                    timing: None,
+                    termination: IpmTermination::IterationLimit,
+                }
+            }
+        }
+
+        fn base_opts() -> SolverOptions {
+            let mut opts = SolverOptions {
+                presolve: false,
+                use_ruiz_scaling: false,
+                ..Default::default()
+            };
+            // eps=1e-8 → dynamic_base_tighten の ratio<=1.0 分岐 → base_tighten=1.0
+            // → attempts=[(false,1.0),(false,10.0)] のちょうど 2 要素。
+            opts.ipm.eps = 1e-8;
+            opts
+        }
+
+        #[test]
+        fn extends_once_past_max_iter_per_attempt_when_deadline_present() {
+            let prob = make_simple_eq_qp();
+            let mut opts = base_opts();
+            opts.deadline = Some(Instant::now() + Duration::from_secs(3600));
+
+            CALLS.store(0, Ordering::SeqCst);
+            EXT_MAX_ITER_SEEN.store(0, Ordering::SeqCst);
+            EXT_DEADLINE_SEEN.store(0, Ordering::SeqCst);
+            let (result, _) =
+                solve_ipm_with_runner(&prob, &opts, runner_iteration_limit_then_extends);
+
+            assert_eq!(
+                CALLS.load(Ordering::SeqCst),
+                3,
+                "attempts 列 (2 call) を IterationLimit のまま使い切った後、\
+                 deadline がある場合は延長 attempt がちょうど1回追加で発火する \
+                 べき (2 call のままなら延長が発火していない、4 call 以上なら \
+                 複数回発火している)"
+            );
+            assert!(
+                EXT_MAX_ITER_SEEN.load(Ordering::SeqCst) > MAX_ITER_PER_ATTEMPT,
+                "延長 attempt には MAX_ITER_PER_ATTEMPT ({MAX_ITER_PER_ATTEMPT}) を \
+                 超える max_iter が渡るべき (新たな固定 cap を課してはいけない), got {}",
+                EXT_MAX_ITER_SEEN.load(Ordering::SeqCst)
+            );
+            assert_eq!(
+                EXT_DEADLINE_SEEN.load(Ordering::SeqCst),
+                1,
+                "延長 attempt にも deadline が引き継がれるべき (genuine な終了条件)"
+            );
+            assert_eq!(
+                result.iterations, 12_345,
+                "延長 attempt の outcome (iterations=12345) が IterationLimit \
+                 だった best (iterations=500) より優先されるべき、got iterations={}",
+                result.iterations
+            );
+        }
+
+        /// IterationLimit ではなく genuine な Stalled で attempts 列を使い切った
+        /// 場合は延長してはいけない (「cap で打ち切られた」と「そもそも動けない」
+        /// の区別)。
+        #[test]
+        fn does_not_extend_when_best_is_genuinely_stalled() {
+            fn runner_stalled(
+                _problem: &QpProblem,
+                _presolve: &QpPresolveResult,
+                _options: &SolverOptions,
+                _user_eps: f64,
+            ) -> IpmOutcome {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                IpmOutcome {
+                    solution: vec![0.25],
+                    dual_solution: vec![0.5],
+                    bound_duals: vec![0.0],
+                    objective: 0.25,
+                    iterations: 61,
+                    kkt_residual_rel: 1.0,
+                    primal_residual_rel: 1.0,
+                    bound_violation: 0.0,
+                    complementarity_residual_rel: 1.0,
+                    duality_gap_rel: 1.0,
+                    numerical_failure: false,
+                    infeasibility_status: None,
+                    is_locally_optimal: false,
+                    postsolve_krylov_ir_skipped: false,
+                    timing: None,
+                    termination: IpmTermination::Stalled,
+                }
+            }
+
+            let prob = make_simple_eq_qp();
+            let mut opts = base_opts();
+            opts.deadline = Some(Instant::now() + Duration::from_secs(3600));
+
+            CALLS.store(0, Ordering::SeqCst);
+            let _ = solve_ipm_with_runner(&prob, &opts, runner_stalled);
+            assert_eq!(
+                CALLS.load(Ordering::SeqCst),
+                2,
+                "genuine な Stalled (IterationLimit ではない) は deadline が \
+                 あっても延長してはいけない, got {} calls",
+                CALLS.load(Ordering::SeqCst)
+            );
+        }
+
+        /// IterationLimit で attempts 列を使い切っても deadline が無ければ
+        /// 延長は発火しない (無制限反復を許すことになるため)。
+        #[test]
+        fn does_not_extend_without_deadline() {
+            let prob = make_simple_eq_qp();
+            let mut opts = base_opts();
+            opts.deadline = None;
+
+            CALLS.store(0, Ordering::SeqCst);
+            let _ = solve_ipm_with_runner(&prob, &opts, runner_iteration_limit_then_extends);
+            assert_eq!(
+                CALLS.load(Ordering::SeqCst),
+                2,
+                "deadline が無ければ IterationLimit のまま attempts 列を使い切っても \
+                 延長 attempt を追加してはいけない (genuine な終了条件が無いまま \
+                 無制限反復を許すことになる)"
             );
         }
     }
