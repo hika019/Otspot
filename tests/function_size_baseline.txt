@@ -17,11 +17,11 @@ otspot-core/src/simplex/dual_advanced/bounded_core/iterate.rs	iterate	149	448
 otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	phase2_primal_bounded	137	293
 otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	primal_simplex_aug	532	293
 otspot-core/src/simplex/dual_advanced/core.rs	dual_simplex_core_advanced	282	573
-otspot-core/src/simplex/dual_advanced/phase1.rs	big_m_cold_start	610	411
+otspot-core/src/simplex/dual_advanced/phase1.rs	big_m_cold_start	622	411
 otspot-core/src/simplex/entry.rs	solve_with	79	285
 otspot-core/src/simplex/primal/core.rs	revised_simplex_core	153	627
 otspot-core/src/simplex/primal/crossover.rs	crossover_dual_from_primal	133	421
 otspot-core/src/simplex/primal/reconcile.rs	pivot_out_degenerate_artificials	219	294
 otspot-dev/src/bin/bench_qplib.rs	main	94	636
 otspot-io/src/qplib/parser.rs	parse_token_stream	400	417
-otspot-model/src/model.rs	solve_qcqp_internal	1066	278
+otspot-model/src/model.rs	solve_qcqp_internal	1141	279
