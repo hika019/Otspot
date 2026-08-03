@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3076 testcases, 26 ignored
+# totals: 3077 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -298,13 +298,14 @@ otspot-core	mip::cuts::tests::tree_cut_warm_options_dispatches_dual_advanced_wit
 otspot-core	mip::cuts::tests::tree_cuts_off_does_not_separate	active
 otspot-core	mip::cuts::tests::tree_cuts_preserve_optimum_sweep	active
 otspot-core	mip::cuts::tests::tree_cuts_reduce_node_count_sentinel_on_dedicated_knapsack	active
-otspot-core	mip::effort::tests::component_at_or_over_its_share_is_blocked	active
 otspot-core	mip::effort::tests::component_comfortably_under_share_is_allowed	active
+otspot-core	mip::effort::tests::heuristic_and_strong_branch_components_at_their_share_are_blocked	active
 otspot-core	mip::effort::tests::heuristic_iter_budget_saturates_at_zero_when_over_the_floored_ceiling	active
 otspot-core	mip::effort::tests::heuristic_iter_budget_uses_raw_share_once_it_exceeds_the_floor	active
 otspot-core	mip::effort::tests::heuristic_iter_budgets_are_unbounded_at_zero_total_iters	active
 otspot-core	mip::effort::tests::heuristic_iter_budgets_floor_their_ceiling_at_sub_mip_max_lp_iters	active
 otspot-core	mip::effort::tests::may_run_separation_blocks_when_integer_budget_is_zero_despite_float_check_passing	active
+otspot-core	mip::effort::tests::separation_component_at_its_share_is_blocked	active
 otspot-core	mip::effort::tests::separation_dry_streak_blocks_regardless_of_iteration_share	active
 otspot-core	mip::effort::tests::separation_iter_budget_is_remaining_share_minus_spent	active
 otspot-core	mip::effort::tests::separation_overhead_iters_count_against_the_separation_gate	active
