@@ -78,11 +78,16 @@ const POLISH_TIMEOUT_SECS: f64 = 5.0;
 ///   `nodes_processed`: solve_local_upper_bound 呼び出し総回数 (root 含む)。
 ///   `max_depth_seen`: 探索 tree 内で到達した最大 depth。
 ///   `pruned`: 子展開前に枝刈で discard した node 数。
+///   `remaining_lb`: 終了時点の未探索領域下界 (`tree.best_lower_bound()` と
+///   `discard_lb` の min)。全探索完了 (`!halted_early`) なら未探索領域が無いため
+///   `f64::INFINITY`。`within_gap`/`BoundGapCertificate` の guard 状態に左右されない
+///   直接値のため、fold 系修正 (discard_lb への畳み込み) をピンポイントで検証できる。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GlobalStats {
     pub nodes_processed: usize,
     pub max_depth_seen: usize,
     pub pruned: usize,
+    pub remaining_lb: f64,
 }
 
 pub fn solve_qp_global(
@@ -213,9 +218,11 @@ pub fn solve_qp_global_with_stats(
 
     while let Some(node) = tree.pop() {
         if deadline_reached(deadline) {
+            fold_interrupted_node(&node, &mut search_incomplete, &mut discard_lb);
             break;
         }
         if stats.nodes_processed >= cfg.max_nodes {
+            fold_interrupted_node(&node, &mut search_incomplete, &mut discard_lb);
             break;
         }
 
@@ -289,42 +296,87 @@ pub fn solve_qp_global_with_stats(
     // B&B incumbent の sub-box dual を元問題に整合させる (bound comp 修復)。
     state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
 
-    // 終了条件分岐:
-    // - queue 空 AND max_depth 未超過 AND discard なし AND deadline/max_nodes 未到達 → proven
-    // - それ以外 → 未証明 (incumbent あれば LocallyOptimal)
+    let result = finalize_search_outcome(
+        problem,
+        &tree,
+        state,
+        &mut stats,
+        discard_lb,
+        search_incomplete,
+        deadline,
+        cfg,
+        q_indefinite,
+        user_eps,
+    );
+    (result, stats)
+}
+
+/// Builds the final `SolverResult` from the B&B loop's exit state: queue
+/// non-empty, `search_incomplete`, or deadline/`max_nodes` reached all mean
+/// `halted_early`, in which case `remaining_lb` (folded into `stats.
+/// remaining_lb` — see `GlobalStats`'s doc) decides `finalize_proven` vs
+/// `finalize_unproven`. Otherwise the queue drained cleanly and
+/// `incumbent_obj` is the global optimum.
+#[allow(clippy::too_many_arguments)]
+fn finalize_search_outcome(
+    problem: &QpProblem,
+    tree: &BBTree,
+    state: SearchState,
+    stats: &mut GlobalStats,
+    discard_lb: f64,
+    search_incomplete: bool,
+    deadline: Option<Instant>,
+    cfg: &GlobalOptimizationConfig,
+    q_indefinite: bool,
+    user_eps: f64,
+) -> SolverResult {
     let halted_early = !tree.is_empty()
         || search_incomplete
         || deadline_reached(deadline)
         || stats.nodes_processed >= cfg.max_nodes;
 
-    let result = if halted_early {
-        // 未探索領域の下界: queue に残った node の最小 lb と、深さ上限/discard で
-        // 破棄した node の lb の両方を考慮する。どちらの領域も「未証明」であるため
-        // min を取る。
-        let remaining_lb = tree
-            .best_lower_bound()
-            .unwrap_or(f64::INFINITY)
-            .min(discard_lb);
-        let proven = within_gap(state.incumbent_obj, remaining_lb, cfg.gap_tol);
+    if !halted_early {
+        // queue 空 = 全探索完了 → 未探索領域なし、incumbent_obj が global。
+        stats.remaining_lb = f64::INFINITY;
         let inc_obj = state.incumbent_obj;
-        if proven {
-            let lb_for_proof = remaining_lb.min(inc_obj);
-            state.finalize_proven(problem, lb_for_proof, q_indefinite, cfg.gap_tol, user_eps)
-        } else {
-            state.finalize_unproven(
-                remaining_lb,
-                stats.nodes_processed,
-                stats.max_depth_seen,
-                cfg,
-                q_indefinite,
-            )
-        }
+        return state.finalize_proven(problem, inc_obj, q_indefinite, cfg.gap_tol, user_eps);
+    }
+    // 未探索領域の下界: queue に残った node の最小 lb と、深さ上限/discard で破棄
+    // した node の lb の両方を考慮する。どちらの領域も「未証明」であるため min を取る。
+    let remaining_lb = tree
+        .best_lower_bound()
+        .unwrap_or(f64::INFINITY)
+        .min(discard_lb);
+    stats.remaining_lb = remaining_lb;
+    let proven = within_gap(state.incumbent_obj, remaining_lb, cfg.gap_tol);
+    let inc_obj = state.incumbent_obj;
+    if proven {
+        let lb_for_proof = remaining_lb.min(inc_obj);
+        state.finalize_proven(problem, lb_for_proof, q_indefinite, cfg.gap_tol, user_eps)
     } else {
-        // queue 空 = 全探索完了 → incumbent_obj が global
-        let inc_obj = state.incumbent_obj;
-        state.finalize_proven(problem, inc_obj, q_indefinite, cfg.gap_tol, user_eps)
-    };
-    (result, stats)
+        state.finalize_unproven(
+            remaining_lb,
+            stats.nodes_processed,
+            stats.max_depth_seen,
+            cfg,
+            q_indefinite,
+        )
+    }
+}
+
+/// Folds `node`'s inherited `lower_bound` into `discard_lb` and marks the
+/// search incomplete, for the loop-top `deadline_reached`/`max_nodes` breaks
+/// in `solve_qp_global_with_stats`. `tree.pop()` is best-bound-first, so
+/// `node` holds the smallest lower_bound of everything still unexplored at
+/// this instant (including whatever remains in `tree`); discarding it
+/// without folding would leave `remaining_lb` (computed from `tree.
+/// best_lower_bound()`, which no longer sees this node) skewed optimistic,
+/// which can make an unproven gap look closed. Mirrors `mip::
+/// check_stop_conditions`, which already folds the just-popped node's bound
+/// before its own deadline/max_nodes break.
+fn fold_interrupted_node(node: &BBNode, search_incomplete: &mut bool, discard_lb: &mut f64) {
+    *search_incomplete = true;
+    *discard_lb = discard_lb.min(node.lower_bound);
 }
 
 /// unusable node (`!res_usable`) の discard が「完全探索」扱いにできるか。
@@ -1061,6 +1113,68 @@ mod tests {
         assert!(
             r.bound_gap_cert.is_none(),
             "depth-exceeded unproven must have no BoundGapCertificate"
+        );
+    }
+
+    /// SENTINEL (task #7, review of `fix/inf-incumbent-optimal`): the loop's
+    /// `deadline_reached`/`max_nodes` breaks discard the just-popped node
+    /// without folding its `lower_bound` into `discard_lb`. `tree.pop()` is
+    /// best-bound-first, so that node holds the smallest pending bound of
+    /// everything unexplored; dropping it lets `remaining_lb` skew optimistic
+    /// (`mip::check_stop_conditions` already folds the popped bound before
+    /// its own break — this closes the same gap here).
+    ///
+    /// Asserts `GlobalStats::remaining_lb` directly, not `res.status`/
+    /// `bound_gap_cert`: a status-based version was found *vacuous* once
+    /// tentatively merged with `fix/inf-incumbent-optimal` (07c8b954), whose
+    /// `within_gap` guard independently demotes a `+inf` `remaining_lb` to
+    /// "not proven" regardless of whether this fold ran. `remaining_lb` is
+    /// the raw pre-`within_gap` value, so this assertion is guard-independent.
+    ///
+    /// Problem: `Q=diag(-2,-2)` on box `[-1,1]²` plus constraint `x0>=0.1`
+    /// (invisible to the interval bound). Root's local solve is trapped at
+    /// the interior saddle (`objective=-1`), splitting at `x=0`. The
+    /// `x∈[-1,0]` child is entirely infeasible — a conclusive discard that
+    /// still counts toward `nodes_processed` — so the `x∈[0,1]` sibling's
+    /// `max_nodes=2` check fires as the *last* tree node, `discard_lb` still
+    /// `+inf`; `root_lb = -2` is exact, so the equality check below is exact.
+    ///
+    /// Verified in 3 states (task report): solo, and tentatively merged with
+    /// 07c8b954 (`git merge --no-commit --no-ff`, never committed) — both
+    /// revert-fail (`remaining_lb == +inf`) identically; both pass
+    /// (`remaining_lb == -2.0`) with the fold applied.
+    #[test]
+    fn interrupt_break_folds_popped_node_bound_into_remaining_lb() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        // x0 >= 0.1, i.e. -x0 <= -0.1.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 2).unwrap();
+        let p = QpProblem::new(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![-0.1],
+            vec![(-1.0, 1.0), (-1.0, 1.0)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        let cfg = GlobalOptimizationConfig {
+            gap_tol: 1e-12,
+            max_depth: 30,
+            max_nodes: 2,
+            use_alpha_bb: false,
+            use_mccormick: false,
+            ..GlobalOptimizationConfig::default()
+        };
+        let (_, stats) = solve_qp_global_with_stats(&p, &opts(10.0), &cfg);
+
+        assert_eq!(stats.nodes_processed, 2);
+        assert_eq!(
+            stats.remaining_lb, -2.0,
+            "the last-standing sibling's own inherited bound (root_lb = -2, \
+             exact) must be folded into remaining_lb; got {} (+inf means the \
+             fold in the max_nodes break never ran)",
+            stats.remaining_lb
         );
     }
 
