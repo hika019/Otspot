@@ -172,10 +172,10 @@ fn solver_options_public_boundary_and_combination_contract() {
             "ipm_validation_still_load_bearing_when_tolerance_overrides_eps",
             options_with(|opts| {
                 opts.tolerance = Some(Tolerance::Fast);
-                opts.ipm.delta_min = f64::NAN;
+                opts.ipm.max_correctors = 0;
             }),
             false,
-            "ipm.delta_min",
+            "ipm.max_correctors",
         ),
     ];
 
