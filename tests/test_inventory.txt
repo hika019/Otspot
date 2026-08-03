@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3106 testcases, 26 ignored (placeholder -- regenerated after this merge completes)
+# totals: 3121 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -390,12 +390,12 @@ otspot-core	mip::heuristics::tests::timeout_sub_mip_result_rejects_non_finite_co
 otspot-core	mip::heuristics::tests::timeout_sub_mip_result_rejects_original_constraint_violation	active
 otspot-core	mip::node::tests::child_increments_depth	active
 otspot-core	mip::node::tests::root_has_depth_zero	active
-otspot-core	mip::parallel::tests::a_non_finite_incumbent_is_still_an_incumbent	active
 otspot-core	mip::parallel::tests::a_stopped_worker_returns_every_node_it_still_holds	active
 otspot-core	mip::parallel::tests::all_idle_workers_terminate_together	active
 otspot-core	mip::parallel::tests::blocked_worker_wakes_on_push	active
 otspot-core	mip::parallel::tests::concurrent_consider_is_race_free	active
 otspot-core	mip::parallel::tests::drain_from_moves_local_nodes_into_the_pool	active
+otspot-core	mip::parallel::tests::non_finite_candidates_are_never_adopted	active
 otspot-core	mip::parallel::tests::pool_pops_best_bound_first	active
 otspot-core	mip::parallel::tests::pseudocost_delta_merge_is_order_independent	active
 otspot-core	mip::parallel::tests::shared_incumbent_keeps_only_strict_improvements	active
