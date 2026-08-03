@@ -228,33 +228,38 @@ impl ConicBuilder {
     }
 }
 
-fn expand_blocks(blocks: &[ConeBlock]) -> Vec<(ConeKind, usize, usize)> {
-    let mut out = Vec::with_capacity(blocks.len());
+fn expand_blocks(blocks: &[ConeBlock]) -> Result<Vec<(ConeKind, usize, usize)>, CbfError> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(blocks.len())
+        .map_err(|e| CbfError::ParseError(format!("cannot allocate expanded cone blocks: {e}")))?;
     let mut cursor = 0usize;
     for b in blocks {
-        out.push((b.kind, cursor, b.size));
-        cursor += b.size;
+        let end = cursor
+            .checked_add(b.size)
+            .ok_or_else(|| CbfError::ParseError("cone block offset overflows usize".to_string()))?;
+        out.push((b.kind, cursor, end));
+        cursor = end;
     }
-    out
+    Ok(out)
 }
 
 /// Per-variable `(lb, ub)` implied directly by its `VAR` cone domain.
 /// `Soc`/`SocRotated` couple variables together rather than bound them
 /// individually, so they contribute no box information here.
-fn variable_domain_bounds(n: usize, var_blocks: &[ConeBlock]) -> Vec<(f64, f64)> {
-    let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    for &(kind, start, size) in &expand_blocks(var_blocks) {
+fn variable_domain_bounds(n: usize, var_blocks: &[ConeBlock]) -> Result<Vec<(f64, f64)>, CbfError> {
+    let mut bounds = try_vec_with(n, (f64::NEG_INFINITY, f64::INFINITY), "variable bounds")?;
+    for &(kind, start, end) in &expand_blocks(var_blocks)? {
         let bound = match kind {
             ConeKind::Lpos => (0.0, f64::INFINITY),
             ConeKind::Lneg => (f64::NEG_INFINITY, 0.0),
             ConeKind::Lzero => (0.0, 0.0),
             ConeKind::Free | ConeKind::Soc | ConeKind::SocRotated => continue,
         };
-        for b in &mut bounds[start..start + size] {
+        for b in &mut bounds[start..end] {
             *b = bound;
         }
     }
-    bounds
+    Ok(bounds)
 }
 
 /// Tightens `bounds` using `CON` rows that constrain exactly one variable
@@ -266,12 +271,12 @@ fn tighten_single_variable_bounds(
     a_by_row: &[Vec<(usize, f64)>],
     b_by_row: &[f64],
     bounds: &mut [(f64, f64)],
-) {
-    for &(kind, start, size) in &expand_blocks(con_blocks) {
+) -> Result<(), CbfError> {
+    for &(kind, start, end) in &expand_blocks(con_blocks)? {
         if !matches!(kind, ConeKind::Lpos | ConeKind::Lneg | ConeKind::Lzero) {
             continue;
         }
-        for row in start..start + size {
+        for row in start..end {
             let &[(col, val)] = a_by_row[row].as_slice() else {
                 continue;
             };
@@ -292,13 +297,23 @@ fn tighten_single_variable_bounds(
             bounds[col] = (lb.max(row_lb), ub.min(row_ub));
         }
     }
+    Ok(())
+}
+
+fn try_vec_with<T: Clone>(len: usize, value: T, context: &str) -> Result<Vec<T>, CbfError> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|e| {
+        CbfError::ParseError(format!("cannot allocate {context} of length {len}: {e}"))
+    })?;
+    out.resize(len, value);
+    Ok(out)
 }
 
 pub(super) fn build(raw: RawCbf) -> Result<CbfProblem, CbfError> {
     let n = raw.n;
     let m = raw.m;
 
-    let mut c = vec![0.0f64; n];
+    let mut c = try_vec_with(n, 0.0f64, "objective vector")?;
     for &(v, val) in &raw.obj_a {
         c[v] += val;
     }
@@ -308,21 +323,21 @@ pub(super) fn build(raw: RawCbf) -> Result<CbfProblem, CbfError> {
         }
     }
 
-    let mut a_by_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    let mut a_by_row: Vec<Vec<(usize, f64)>> = try_vec_with(m, Vec::new(), "constraint row index")?;
     for &(row, col, val) in &raw.a_coord {
         a_by_row[row].push((col, val));
     }
-    let mut b_by_row = vec![0.0f64; m];
+    let mut b_by_row = try_vec_with(m, 0.0f64, "constraint constants")?;
     for &(row, val) in &raw.b_coord {
         b_by_row[row] += val;
     }
 
     let mut builder = ConicBuilder::default();
 
-    for &(kind, start, size) in &expand_blocks(&raw.con_blocks) {
+    for &(kind, start, end) in &expand_blocks(&raw.con_blocks)? {
         match kind {
             ConeKind::Soc | ConeKind::SocRotated => {
-                let rows = (start..start + size)
+                let rows = (start..end)
                     .map(|r| RawRow {
                         entries: a_by_row[r].clone(),
                         rhs: b_by_row[r],
@@ -331,7 +346,7 @@ pub(super) fn build(raw: RawCbf) -> Result<CbfProblem, CbfError> {
                 builder.push_block(kind, rows);
             }
             _ => {
-                for r in start..start + size {
+                for r in start..end {
                     builder.push_row(
                         kind,
                         RawRow {
@@ -344,10 +359,10 @@ pub(super) fn build(raw: RawCbf) -> Result<CbfProblem, CbfError> {
         }
     }
 
-    for &(kind, start, size) in &expand_blocks(&raw.var_blocks) {
+    for &(kind, start, end) in &expand_blocks(&raw.var_blocks)? {
         match kind {
             ConeKind::Soc | ConeKind::SocRotated => {
-                let rows = (start..start + size)
+                let rows = (start..end)
                     .map(|v| RawRow {
                         entries: vec![(v, 1.0)],
                         rhs: 0.0,
@@ -356,7 +371,7 @@ pub(super) fn build(raw: RawCbf) -> Result<CbfProblem, CbfError> {
                 builder.push_block(kind, rows);
             }
             _ => {
-                for v in start..start + size {
+                for v in start..end {
                     builder.push_row(
                         kind,
                         RawRow {
@@ -382,8 +397,8 @@ pub(super) fn build(raw: RawCbf) -> Result<CbfProblem, CbfError> {
         });
     }
 
-    let mut bounds = variable_domain_bounds(n, &raw.var_blocks);
-    tighten_single_variable_bounds(&raw.con_blocks, &a_by_row, &b_by_row, &mut bounds);
+    let mut bounds = variable_domain_bounds(n, &raw.var_blocks)?;
+    tighten_single_variable_bounds(&raw.con_blocks, &a_by_row, &b_by_row, &mut bounds)?;
 
     let mut int_lb = Vec::with_capacity(raw.integers.len());
     let mut int_ub = Vec::with_capacity(raw.integers.len());

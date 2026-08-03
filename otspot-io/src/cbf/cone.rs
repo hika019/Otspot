@@ -67,13 +67,30 @@ fn parse_cone_token(tok: &str, size: usize) -> Result<ConeKind, CbfError> {
 pub(super) fn read_cone_blocks(ts: &mut TokenStream) -> Result<(usize, Vec<ConeBlock>), CbfError> {
     let total = ts.read_usize()?;
     let num_blocks = ts.read_usize()?;
-    let mut blocks = Vec::with_capacity(num_blocks);
+    let mut blocks = Vec::new();
+    blocks.try_reserve_exact(num_blocks).map_err(|e| {
+        CbfError::ParseError(format!("cannot allocate {num_blocks} cone blocks: {e}"))
+    })?;
     let mut sum = 0usize;
     for _ in 0..num_blocks {
         let tok = ts.read_string()?;
         let size = ts.read_usize()?;
         let kind = parse_cone_token(&tok, size)?;
-        sum += size;
+        if size > total {
+            return Err(CbfError::ParseError(format!(
+                "cone block size {size} exceeds declared total {total}"
+            )));
+        }
+        sum = sum.checked_add(size).ok_or_else(|| {
+            CbfError::ParseError(format!(
+                "cone block sizes overflow usize (declared total {total})"
+            ))
+        })?;
+        if sum > total {
+            return Err(CbfError::ParseError(format!(
+                "cone block sizes exceed declared total {total}"
+            )));
+        }
         blocks.push(ConeBlock { kind, size });
     }
     if sum != total {

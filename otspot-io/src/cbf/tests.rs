@@ -958,6 +958,43 @@ fn assert_unsupported_contains(cbf: &str, needle: &str) {
 }
 
 #[test]
+fn cone_block_size_sum_overflow_is_error() {
+    let result = parse_cbf_str(
+        "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+6 2
+L+ 9223372036854775808
+L+ 9223372036854775814
+",
+    );
+    assert!(result.is_err(), "oversized cone block must return Err");
+}
+
+#[test]
+fn huge_cone_size_allocation_is_error() {
+    let result = parse_cbf_str(
+        "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+9223372036854775807 1
+L+ 9223372036854775807
+",
+    );
+    assert!(result.is_err(), "huge cone size must return Err");
+}
+
+#[test]
 fn missing_ver_is_error() {
     assert_parse_error_contains(
         "\
