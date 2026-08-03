@@ -29,6 +29,7 @@ fn main() -> ExitCode {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(cli.timeout_secs);
     opts.tolerance = Some(Tolerance::Custom(cli.eps));
+    opts.threads = cli.threads;
     let cfg = mip_config_from_cli(&cli);
     let path = cli.path;
 
@@ -69,6 +70,7 @@ fn main() -> ExitCode {
     }
     println!("wall_ms: {wall_ms:.3}");
     println!("root_lp_bound: {}", stats.root_lp_bound);
+    println!("threads: {}", cli.threads);
     println!("nodes: {}", stats.nodes_processed);
     println!("incumbent_updates: {}", stats.incumbent_updates);
     println!("fp_incumbent_found: {}", stats.fp_incumbent_found);
@@ -97,6 +99,7 @@ fn main() -> ExitCode {
     println!("rens_iters: {}", stats.rens_iters);
     println!("local_branching_iters: {}", stats.local_branching_iters);
     println!("tree_cut_iters: {}", stats.tree_cut_iters);
+    println!("tree_cut_overhead_iters: {}", stats.tree_cut_overhead_iters);
     println!("lp_presolve_us: {}", stats.lp_presolve_us_total);
     println!("lp_solve_us: {}", stats.lp_solve_us_total);
     println!("lp_postsolve_us: {}", stats.lp_postsolve_us_total);
@@ -277,6 +280,8 @@ struct CliArgs {
     no_local_branching: bool,
     /// Ablation: override `MipConfig::max_nodes` (node-count budget cap).
     max_nodes: Option<usize>,
+    /// Branch-and-bound worker threads (`SolverOptions::threads`). 1 = serial.
+    threads: usize,
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> {
@@ -291,6 +296,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String>
     let mut no_rens = false;
     let mut no_local_branching = false;
     let mut max_nodes: Option<usize> = None;
+    let mut threads = 1usize;
     let args: Vec<String> = args.into_iter().collect();
     let mut i = 0;
     while i < args.len() {
@@ -340,6 +346,17 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String>
                 }
                 max_nodes = Some(parsed);
             }
+            "--threads" => {
+                i += 1;
+                let value = args.get(i).ok_or("error: --threads requires a value")?;
+                let parsed: usize = value
+                    .parse()
+                    .map_err(|_| format!("error: invalid --threads value: {value}"))?;
+                if parsed == 0 {
+                    return Err("error: --threads must be >= 1".to_string());
+                }
+                threads = parsed;
+            }
             other => path = Some(other.to_string()),
         }
         i += 1;
@@ -348,7 +365,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String>
     let path = path.ok_or_else(|| {
         "usage: milp_solve <file.mps> [--timeout <secs>] [--eps <tol>] [--cuts|--no-cuts] \
          [--cut-rounds N] [--symmetry|--no-symmetry] [--no-tree-cuts] [--no-rins] [--no-rens] \
-         [--no-local-branching] [--max-nodes N]"
+         [--no-local-branching] [--max-nodes N] [--threads N]"
             .to_string()
     })?;
     Ok(CliArgs {
@@ -363,6 +380,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String>
         no_rens,
         no_local_branching,
         max_nodes,
+        threads,
     })
 }
 

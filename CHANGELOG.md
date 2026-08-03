@@ -2,6 +2,41 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- `SolverOptions::threads` が MILP 分枝限定法で実効化された。`threads >= 2` で共有
+  best-bound ノードプール上に厳密に `threads` 本のワーカーを起動する
+  (`std::thread::scope`)。dive stack はワーカーローカルなので親→子が同一ワーカーで
+  連続処理され、warm start 基底の局所性は serial と同じまま保たれる。ワーカーの
+  緩和ソルブ・カット分離・ヒューリスティック sub-MIP はいずれも `threads = 1` で
+  走るため、指定スレッド数は**上限の保証**であってヒントではない (計装テストで
+  同時実行数と distinct thread 数の両方を実測)。`threads = 1` (既定) は従来の
+  serial 探索そのままで、ノード単位の再現性を維持する。MIQP の B&B は対象外。
+- `milp_solve` に `--threads N`。
+
+### Fixed
+- MILP B&Bのin-tree cut separationに割り当てるsimplex反復シェア
+  (`SEPARATION_ITER_SHARE`) が誤った除数で導出されており、実際の
+  wall-clockコストを最大5倍過大評価していた問題を修正 (0.15→0.035)。
+  MIPLIB smallの複数TIMEOUT問題でノード数・incumbentが改善し、`mas76`は
+  既知最適値に到達した
+- QP/conic の IPM が `threads` を超えて並列実行していた問題を修正。faer へ
+  `Par::Rayon(threads)` を渡しても内部の `spindle` がグローバル rayon プールへ
+  フォールバックするため上限が守られておらず、8 コア機で `threads = 2` 指定の
+  dense QP が同時 10 スレッドを走らせていた。solve をサイズ `threads` の専用
+  プールへ閉じ込めて是正 (同条件で 3)。プールはサイズごとにプロセス内で
+  使い回す (= 初回 solve のみ `threads` 本を生成し、以後は生成なし) ため、
+  MIQP のノードごと QP 解でもコストは乗らない。`threads = 1` (既定) は
+  プールを作らず従来と完全に同一。multistart の per-call プール構築も同じ
+  キャッシュへ統一。
+
+### Changed
+- `SolverOptions::threads` に上限 (`MAX_THREADS` = 1024) を追加し `validate()` /
+  `with_threads()` で拒否する。MILP ワーカー生成は OS 拒否時に panic するため、
+  設定ミスは solve の奥ではなく options 検証で落とす。
+- `otspot-num` が `rayon` に依存するようになった (専用プール構築のため)。
+
 ## [0.7.4] - 2026-07-31
 
 MILP/simplex の性能改善 (MIPLIB small 5/20→7/20) とステータス誠実化、solver 基盤の otspot-num crate 分離を中心としたリリース。
