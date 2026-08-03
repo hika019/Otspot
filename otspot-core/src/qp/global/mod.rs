@@ -130,25 +130,10 @@ pub fn solve_qp_global_with_stats(
     // 点の目的値」で健全なので、非収束 status (Stalled 等) でも点そのものが
     // feasible と検証できれば採用する (status は信用しない)。
     let root_solve = solve_local_upper_bound(problem, &root_bounds, &shared_opts, None);
-    let root_claims_feasible = is_feasible_result(&root_solve.status)
-        || is_verified_feasible_point(problem, &root_solve.solution, shared_opts.ipm_eps());
-    if !root_claims_feasible {
-        // root が使えない (Infeasible / NumericalError / Unbounded / NonConvex /
-        // Timeout / infeasible な診断 iterate) → そのまま伝播。
-        return (root_solve, stats);
-    }
-    // Codex review (P2, follow-up to `within_gap`'s false-Optimal fix):
-    // `is_feasible_result` trusts `status` alone (Optimal/LocallyOptimal/
-    // SuboptimalSolution) without checking `objective`/`solution` are
-    // finite — mirrors `qcqp_route::is_clean_convex_outcome`'s `Optimal`
-    // invariant (`objective.is_finite() && x.iter().all(finite)`). A root
-    // that claims feasible but is non-finite must not reach `SearchState::
-    // new` (which now `assert!`s this — see its doc): report it honestly as
-    // `NumericalError` rather than forwarding the raw corrupt `root_solve`
-    // (whose `status` would still read `Optimal`/`SuboptimalSolution`).
-    if !root_solve.is_finite_candidate() {
-        return (SolverResult::numerical_error(), stats);
-    }
+    let root_solve = match classify_root_usability(root_solve, problem, &shared_opts) {
+        Ok(usable) => usable,
+        Err(fallback) => return (*fallback, stats),
+    };
 
     // Phase 4 α-BB: 全 node で共通の α (Q only). use_alpha_bb=false なら 0 で実質無効化。
     let alpha = if cfg.use_alpha_bb {
@@ -263,15 +248,7 @@ pub fn solve_qp_global_with_stats(
 
         let res =
             solve_local_upper_bound(problem, &node.var_bounds, &shared_opts, node.warm.as_ref());
-        // Codex review (P2): `res.is_finite_candidate()` closes the same gap
-        // as the root gate above — a node result claiming Optimal/
-        // SuboptimalSolution but non-finite must be treated as unusable
-        // (folded into `discard_lb`/`search_incomplete` below, exactly like
-        // any other unusable status), not handed to `update_incumbent`.
-        let res_usable = res.is_finite_candidate()
-            && (is_feasible_result(&res.status)
-                || is_verified_feasible_point(problem, &res.solution, user_eps));
-        if !res_usable {
+        if !is_node_result_usable(&res, problem, user_eps) {
             if !node_discard_is_conclusive(&res.status) {
                 // 「box に解があるか不明」なだけで空の証明ではないため、node_lb を
                 // discard_lb に畳み込み未探索領域として残す (完全探索を偽装しない)。
@@ -343,6 +320,49 @@ pub fn solve_qp_global_with_stats(
         state.finalize_proven(problem, inc_obj, q_indefinite, cfg.gap_tol, user_eps)
     };
     (result, stats)
+}
+
+/// Classifies the root local solve's usability as a starting incumbent.
+/// `Ok` continues the B&B; `Err(fallback)` is the exact early-return result
+/// for `solve_qp_global_with_stats`'s two direct-return paths.
+///
+/// `is_feasible_result`/`is_verified_feasible_point` trust `status` alone
+/// (Optimal/LocallyOptimal/SuboptimalSolution) or a verified point, without
+/// checking `objective`/`solution` are finite (Codex review, P2, follow-up
+/// to `within_gap`'s false-Optimal fix) — mirrors `qcqp_route::
+/// is_clean_convex_outcome`'s `Optimal` invariant. A root that claims
+/// feasible but is non-finite must not reach `SearchState::new` (which
+/// `assert!`s this — see its doc): report it honestly as `NumericalError`
+/// rather than forwarding the raw corrupt result (whose `status` would still
+/// read `Optimal`/`SuboptimalSolution`). A root that never claimed feasible
+/// (Infeasible/NumericalError/Unbounded/NonConvex/Timeout) propagates as-is.
+fn classify_root_usability(
+    root_solve: SolverResult,
+    problem: &QpProblem,
+    opts: &SolverOptions,
+) -> Result<SolverResult, Box<SolverResult>> {
+    let claims_feasible = is_feasible_result(&root_solve.status)
+        || is_verified_feasible_point(problem, &root_solve.solution, opts.ipm_eps());
+    if !claims_feasible {
+        return Err(Box::new(root_solve));
+    }
+    if !root_solve.is_finite_candidate() {
+        return Err(Box::new(SolverResult::numerical_error()));
+    }
+    Ok(root_solve)
+}
+
+/// Whether a node's local upper-bound solve is usable to adopt as an
+/// improving incumbent: independently re-verifies feasibility (status-
+/// trusted or point-verified) AND finiteness (`is_finite_candidate`) —
+/// same gap as `classify_root_usability` (Codex review, P2), so a node
+/// result claiming Optimal/SuboptimalSolution but non-finite is unusable
+/// (folded into `discard_lb`/`search_incomplete` at the call site, exactly
+/// like any other unusable status) rather than handed to `update_incumbent`.
+fn is_node_result_usable(res: &SolverResult, problem: &QpProblem, eps: f64) -> bool {
+    res.is_finite_candidate()
+        && (is_feasible_result(&res.status)
+            || is_verified_feasible_point(problem, &res.solution, eps))
 }
 
 /// unusable node (`!res_usable`) の discard が「完全探索」扱いにできるか。

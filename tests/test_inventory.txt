@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3076 testcases, 26 ignored
+# totals: 3090 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -474,9 +474,11 @@ otspot-core	mip::tests::feasibility_pump_handles_pure_lp_pass_through	active
 otspot-core	mip::tests::feasibility_pump_reduces_bb_nodes	active
 otspot-core	mip::tests::fp_timeout_aborts_iteration	active
 otspot-core	mip::tests::fp_timeout_does_not_exceed_user_limit	active
+otspot-core	mip::tests::fully_resolved_search_still_proves_optimal_without_open_region	active
 otspot-core	mip::tests::heuristic_iter_share_is_enforced	active
 otspot-core	mip::tests::heuristic_shares_are_independent_per_heuristic	active
 otspot-core	mip::tests::hybrid_node_selection_correctness_3var_knapsack	active
+otspot-core	mip::tests::infinite_objective_incumbent_never_certified_optimal	active
 otspot-core	mip::tests::integer_infeasible_between_consecutive_integers	active
 otspot-core	mip::tests::integer_mask_marks_only_integer_vars	active
 otspot-core	mip::tests::integer_mask_rejects_out_of_range_index	active
@@ -507,6 +509,7 @@ otspot-core	mip::tests::no_integer_vars_falls_back_to_lp	active
 otspot-core	mip::tests::node_propagation_counter_increments_for_propagation_prune	active
 otspot-core	mip::tests::node_propagation_prunes_infeasible_node_before_lp	active
 otspot-core	mip::tests::optimal_result_carries_bound_gap_cert	active
+otspot-core	mip::tests::poisoned_initial_incumbent_is_never_adopted	active
 otspot-core	mip::tests::presolve_infeasible_early_return_populates_root_probing_us	active
 otspot-core	mip::tests::proof_uncertain_blocks_optimal_despite_closed_gap	active
 otspot-core	mip::tests::rc_fixing_empty_reduced_costs_returns_zero	active
@@ -542,6 +545,7 @@ otspot-core	mip::tests::separation_dry_streak_is_tracked_and_reset	active
 otspot-core	mip::tests::separation_dry_streak_periodic_reset_runs_even_on_infeasible_boundary_node	active
 otspot-core	mip::tests::separation_dry_streak_resets_periodically	active
 otspot-core	mip::tests::separation_iter_share_is_enforced	active
+otspot-core	mip::tests::single_poisoned_leaf_never_reports_false_infeasible	active
 otspot-core	mip::tests::solve_milp_rejects_out_of_range_integer_var	active
 otspot-core	mip::tests::solve_miqp_rejects_indefinite_n1001	active
 otspot-core	mip::tests::solve_miqp_rejects_out_of_range_integer_var	active
@@ -559,6 +563,7 @@ otspot-core	mip::tests::try_heuristics_pass_their_own_remaining_share_budget_to_
 otspot-core	mip::tests::try_rins_incumbent_improvement_resets_separation_dry_streak	active
 otspot-core	mip::tests::two_var_general_integer_program	active
 otspot-core	mip::tests::unbounded_relaxation_reports_unbounded	active
+otspot-core	mip::tests::unsolved_fractional_subtree_never_certifies_false_optimal_via_infinite_node_lb	active
 otspot-core	mip::tests::warm_start_binary_knapsack_correct	active
 otspot-core	mip::tests::warm_start_infeasible_milp_still_infeasible	active
 otspot-core	mip::tests::warm_start_propagated_to_child_nodes_sentinel	active
@@ -917,6 +922,12 @@ otspot-core	qp::global::pruning::tests::gap_uses_relative_scale_for_large_incumb
 otspot-core	qp::global::pruning::tests::no_prune_when_lower_bound_below_incumbent_minus_gap	active
 otspot-core	qp::global::pruning::tests::no_prune_without_incumbent	active
 otspot-core	qp::global::pruning::tests::prune_when_lower_bound_within_gap_of_incumbent	active
+otspot-core	qp::global::pruning::tests::should_prune_rejects_infinite_incumbent	active
+otspot-core	qp::global::pruning::tests::should_prune_rejects_infinite_lower_bound	active
+otspot-core	qp::global::pruning::tests::within_gap_rejects_infinite_incumbent_against_finite_lower_bound	active
+otspot-core	qp::global::pruning::tests::within_gap_rejects_infinite_lower_bound_against_finite_incumbent	active
+otspot-core	qp::global::pruning::tests::within_gap_rejects_nan_incumbent	active
+otspot-core	qp::global::pruning::tests::within_gap_rejects_nan_lower_bound	active
 otspot-core	qp::global::tests::branched_incumbent_duals_reconciled_to_original_box	active
 otspot-core	qp::global::tests::convex_q_yields_optimal_not_nonconvex_global	active
 otspot-core	qp::global::tests::depth_exceeded_lb_folds_into_remaining_lb_blocks_false_cert	active
@@ -939,10 +950,13 @@ otspot-core	qp::global::tests::proptest_seed_a46bde58_kkt_regression	active
 otspot-core	qp::global::tests::qp_global_proven_convex_has_bound_gap_cert	active
 otspot-core	qp::global::tests::qp_global_proven_nonconvex_has_bound_gap_cert	active
 otspot-core	qp::global::tests::qp_global_unproven_has_no_bound_gap_cert	active
+otspot-core	qp::global::tests::search_state_new_rejects_non_finite_objective	active
+otspot-core	qp::global::tests::search_state_new_rejects_non_finite_solution_component	active
 otspot-core	qp::global::tests::solve_qp_global_cold_vs_global_separation	active
 otspot-core	qp::global::tests::solve_qp_global_empty_box_lb_gt_ub_is_infeasible	active
 otspot-core	qp::global::tests::solve_qp_global_finds_corner_minimum_concave_1d	active
 otspot-core	qp::global::tests::unusable_node_can_be_non_infeasible_with_large_primal_residual	active
+otspot-core	qp::global::tests::update_incumbent_rejects_non_finite_candidate	active
 otspot-core	qp::global::tree::tests::best_lower_bound_matches_top	active
 otspot-core	qp::global::tree::tests::pop_returns_smallest_lower_bound_first	active
 otspot-core	qp::global::tree::tests::pushed_popped_counters_track	active

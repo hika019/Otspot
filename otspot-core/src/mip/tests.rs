@@ -1183,51 +1183,31 @@ fn mip_descendant_scaling_retry_runs_and_accounts_first_attempt_timing() {
 
 /// SENTINEL (false-Optimal from a non-finite incumbent, P1+P2 combined):
 /// `Relaxation::solve` is trusted to report `Optimal` only for a genuine
-/// (finite) solution; nothing forces that. Two independent layers now guard
-/// against a relaxation that violates it (reports `Optimal` with `objective =
-/// +inf`, as e.g. a corrupted/misbehaving LP/QP backend could):
-/// `within_gap`'s `is_finite()` guard (never *prove* gap-closure for a
-/// non-finite incumbent) and, since a Codex review found the first layer
-/// alone still let the poisoned point be *adopted* and reported as a
-/// contract-violating `SuboptimalSolution` (whose docs require a "検証済み
-/// の feasible な点"), `process_node_outcome`'s `is_finite_candidate()` check
-/// ahead of `MipState::consider` (never *adopt* a non-finite candidate at
-/// all, folding it into the open region instead of a resolved `Skip`).
+/// (finite) solution; nothing forces that. Two layers guard a relaxation
+/// that violates it (`Optimal` with `objective = +inf`): `within_gap`'s
+/// `is_finite()` guard (never *prove* gap-closure for a non-finite
+/// incumbent), and `process_node_outcome`'s `is_finite_candidate()` check
+/// ahead of `MipState::consider` (never *adopt* a non-finite candidate,
+/// folding it into the open region instead — added since the first layer
+/// alone still let the point be adopted as `SuboptimalSolution`).
 ///
-/// Tree: root (x=2.5, fractional) branches on the sole integer var into
-/// down=[0,2] and up=[3,5] (`branch_bounds`: floor/ceil). `max_depth = 1`
-/// forces the down child (fractional, non-integer-feasible) to stop at the
-/// depth cap and fold a finite `node.lower_bound = 10.0` into the search via
-/// `NodeAction::OpenLb`. The up child (processed next: `NodeQueue` pops
-/// equal-lower-bound siblings FIFO, and down was pushed first) reports
-/// `Optimal` with `objective = +inf` and an integer-feasible solution (3.0):
-/// with both layers in place it is never adopted, and instead also folds
-/// `node.lower_bound = 0.0` into the open region (`uncertain: true`).
+/// Tree: root (x=2.5, fractional) branches into down=[0,2] and up=[3,5]
+/// (`branch_bounds`). `max_depth = 1` stops the down child at the depth cap,
+/// folding `node.lower_bound = 10.0`. The up child reports `Optimal` with
+/// `objective = +inf` and integer-feasible solution (3.0): never adopted,
+/// also folds `node.lower_bound = 0.0` into the open region.
 ///
-/// With no incumbent ever adopted and open region left behind, the search is
-/// honestly incomplete: `finalize_no_incumbent` reports `MaxIterations`
-/// (`objective = +inf`, `solution = []`) — the same "nothing usable found"
-/// shape used elsewhere in this module, never `Optimal` and never
-/// `SuboptimalSolution`.
+/// No incumbent adopted, open region left: `finalize_no_incumbent` reports
+/// `MaxIterations` (`objective = +inf`, `solution = []`) — never `Optimal`,
+/// never `SuboptimalSolution`.
 ///
-/// Revert the `is_finite_candidate()` pre-check ahead of `state.consider` in
-/// `process_node_outcome` to see this fail: the +inf point gets adopted,
-/// `within_gap(+inf, 10.0, gap_tol)` is correctly `false` (P1 guard stays
-/// active), so `res.status` becomes `SuboptimalSolution` with `objective =
-/// +inf` and `solution = [3.0]` — every assertion below fails.
-///
-/// Reverting `within_gap`'s own `is_finite()` guard instead does *not* fail
-/// this test (verified): this trace never lets a non-finite value reach
-/// `within_gap` at all once the pre-check rejects it earlier — see
-/// `qp::global::pruning::tests::within_gap_rejects_infinite_incumbent_
-/// against_finite_lower_bound` for `within_gap`'s own direct sentinel.
-/// Reverting `MipState::consider`'s *own* internal guard (independent of the
-/// pre-check) is likewise not caught here — the pre-check already intercepts
-/// this trace's poisoned candidate before `consider` ever sees it; see
-/// `poisoned_initial_incumbent_is_never_adopted` below, which reaches
-/// `consider` through a path the pre-check does not guard
-/// (`initial_incumbent`) and *does* fail when only `consider`'s guard is
-/// reverted (verified).
+/// Revert the `is_finite_candidate()` pre-check ahead of `state.consider` to
+/// see this fail: `res.status` becomes `SuboptimalSolution` with `objective
+/// = +inf`, `solution = [3.0]`. Reverting `within_gap`'s own guard, or
+/// `MipState::consider`'s own guard, does NOT fail this specific test (each
+/// is independently sentinel-tested elsewhere: `qp::global::pruning::tests::
+/// within_gap_rejects_infinite_incumbent_against_finite_lower_bound` and
+/// `poisoned_initial_incumbent_is_never_adopted` below).
 #[test]
 fn infinite_objective_incumbent_never_certified_optimal() {
     struct PoisonMock {
@@ -1453,51 +1433,33 @@ fn single_poisoned_leaf_never_reports_false_infeasible() {
 }
 
 /// SENTINEL (P0, reviewer end-to-end repro): symmetric counterpart of
-/// `within_gap`'s incumbent-side guard — `lower_bound.is_finite()` — closes a
-/// distinct false-Optimal mechanism from every other sentinel in this file.
+/// `within_gap`'s incumbent-side guard — `lower_bound.is_finite()`.
 ///
 /// `process_node_outcome` computes `node_lb = node.lower_bound.max(res.
-/// objective)` *before* any adoption guard runs, for every "trusted"
-/// (`Optimal`, non-empty solution) node — not only leaves. A trusted node
-/// that is *fractional* (not integer-feasible) never reaches the leaf-level
-/// `is_finite_candidate()` check added for the P2 fix (that check only guards
-/// the integer-feasible-leaf branch), so a fractional node reporting
-/// `Optimal` with `objective = +inf` folds `node_lb = +inf` straight into the
-/// unconditional "post-solve bound pruning" `should_prune` call — *before*
-/// `within_gap`'s incumbent-side guard is even relevant, since the incumbent
-/// here is a perfectly finite, genuinely-found solution.
+/// objective)` *before* any adoption guard, for every "trusted" (`Optimal`,
+/// non-empty solution) node, not only leaves — a *fractional* trusted node
+/// never reaches the leaf-level `is_finite_candidate()` check (P2), so
+/// `Optimal` with `objective = +inf` folds `node_lb = +inf` into `should_prune`.
 ///
-/// Tree: root (x=2.5, fractional) branches into down=[0,2] and up=[3,5].
-/// Down reports `Optimal`, `objective = 1.0`, `solution = [2.0]` — a clean,
-/// fully verified integer-feasible incumbent (`state.consider` adopts it).
-/// Up (processed second, FIFO) reports `Optimal`, `objective = +inf`,
-/// `solution = [3.5]` (fractional — the up subtree is never itself resolved,
-/// let alone explored below this node). Without the `lower_bound.is_finite()`
-/// guard: `should_prune(node_lb=+inf, Some(1.0), gap_tol)` is `within_gap(1.0,
-/// +inf, gap_tol)` = `(1.0 - inf) = -inf <= gap_tol*scale` = **true** — the up
-/// subtree is silently pruned with zero open-region bookkeeping (a bare
-/// `NodeAction::Skip`, no `open_lb`/`had_open` contribution at all).
-/// `finalize_mip_result` then sees `remaining_lb = open_lb = +inf`
-/// (untouched) and computes `proven = within_gap(1.0, +inf, gap_tol)` — the
-/// *exact same* unguarded expression — which is **also** true, so it reports
-/// `status = Optimal` with a `BoundGapCertificate` (`gap_rel = 0.0`) for a
-/// search that never explored (or even bounded) the up subtree.
+/// Tree: root (x=2.5) branches into down=[0,2] and up=[3,5]. Down reports
+/// `Optimal, objective=1.0, solution=[2.0]` — a clean incumbent (adopted).
+/// Up reports `Optimal, objective=+inf, solution=[3.5]` (fractional, never
+/// itself resolved). Without the guard: `should_prune(+inf, Some(1.0),
+/// gap_tol)` is `within_gap(1.0, +inf, gap_tol)` = `(1.0-inf)<=gap_tol*scale`
+/// = **true** — up is silently pruned with zero open-region bookkeeping.
+/// `finalize_mip_result` then sees `remaining_lb = +inf` and the *same*
+/// unguarded expression proves `status=Optimal` with `BoundGapCertificate
+/// {gap_rel: 0.0}` for a search that never bounded the up subtree.
 ///
-/// With the guard: `should_prune` returns `false`, the up node falls through
-/// to its normal `max_depth = 1` cutoff and folds an (uninformative but
-/// harmless — `open_lb.min(+inf)` is a no-op) `NodeAction::OpenLb` instead,
-/// setting `had_open = true`; `finalize_mip_result` then correctly refuses to
-/// prove gap-closure against the still-`+inf` `remaining_lb` and reports
-/// `SuboptimalSolution` with down's own genuine `(objective=1.0,
-/// solution=[2.0])` — never `Optimal`, and no `BoundGapCertificate`. This
-/// confirms the reviewer's note that a `false` return needs no additional
-/// bookkeeping at the call sites: the existing "not proven, keep going" path
-/// (`OpenLb`/`SuboptimalSolution`) already handles it.
+/// With the guard: `should_prune` returns `false`; up falls through to its
+/// `max_depth=1` cutoff, folding a harmless (`open_lb.min(+inf)` is a no-op)
+/// `NodeAction::OpenLb`. `finalize_mip_result` then correctly refuses to
+/// prove against the still-`+inf` `remaining_lb`, reporting
+/// `SuboptimalSolution` with down's genuine `(1.0, [2.0])` — no cert. The
+/// existing "not proven, keep going" path needs no extra bookkeeping.
 ///
-/// Revert `within_gap`'s `lower_bound.is_finite()` guard (the incumbent-side
-/// guard from the P1 fix stays active — irrelevant here, since `1.0` is
-/// finite) to see this fail: `res.status == Optimal` with `res.bound_gap_cert
-/// = Some(..)` reporting `gap_rel = 0.0`.
+/// Revert `within_gap`'s `lower_bound.is_finite()` guard to see this fail:
+/// `res.status == Optimal` with `bound_gap_cert = Some(..)`, `gap_rel = 0.0`.
 #[test]
 fn unsolved_fractional_subtree_never_certifies_false_optimal_via_infinite_node_lb() {
     struct PoisonedNodeLbMock {

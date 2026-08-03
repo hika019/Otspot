@@ -1498,22 +1498,18 @@ fn finalize_mip_result<R: Relaxation>(
         None => open_lb,
     };
     let interrupted = deadline_stop || maxnodes_stop;
-    // Codex review (P0 follow-up): `remaining_lb == +inf` is legitimately
-    // either (a) the search is genuinely fully resolved — `open_lb` was never
-    // touched because `had_open` never fired, i.e. the same condition
-    // `finalize_no_incumbent` already uses below for its own `fully_resolved`
-    // — trivially gap-closed; or (b) a corrupted node folded a non-finite
-    // bound into `open_lb` while `had_open == true`, which is NOT a proof.
-    // `within_gap`'s symmetric `is_finite()` guard (P0 fix) correctly rejects
-    // both uniformly, so (a) needs this explicit short-circuit ahead of it —
-    // mirrors `qp::global::solve_qp_global_with_stats`'s `!halted_early`
-    // branch, which already bypasses `within_gap` entirely
-    // (`finalize_proven(problem, inc_obj, ...)`) under the equivalent
-    // conditions (`search_incomplete` idle, no deadline/node-limit, empty
-    // tree). Sentinel: `tests::fully_resolved_search_still_proves_optimal_
-    // without_open_region` — reverting this short-circuit demotes a
-    // genuinely complete search's incumbent from `Optimal` to
-    // `SuboptimalSolution`.
+    // Codex review (P0 follow-up): `remaining_lb == +inf` means either (a)
+    // fully resolved (`open_lb` untouched, `had_open` never fired — the same
+    // condition `finalize_no_incumbent` uses for `fully_resolved` below),
+    // trivially gap-closed; or (b) a corrupted node folded a non-finite bound
+    // into `open_lb` with `had_open == true`, which is NOT a proof.
+    // `within_gap`'s symmetric `is_finite()` guard (P0 fix) rejects both
+    // uniformly, so (a) needs this short-circuit ahead of it — mirrors
+    // `qp::global::solve_qp_global_with_stats`'s `!halted_early` branch,
+    // which already bypasses `within_gap` under the equivalent conditions.
+    // Sentinel: `tests::fully_resolved_search_still_proves_optimal_without_
+    // open_region` — reverting this demotes a complete search's incumbent
+    // from `Optimal` to `SuboptimalSolution`.
     let fully_resolved = !interrupted && !had_open && q.is_empty();
 
     match state.incumbent.take() {
