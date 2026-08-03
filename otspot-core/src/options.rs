@@ -234,6 +234,17 @@ pub const DEFAULT_MIP_TREE_CUTS: bool = true;
 pub struct MipConfig {
     pub gap_tol: f64,
     pub integer_feas_tol: f64,
+    /// Node-count budget for the branch-and-bound search, checked once per
+    /// popped node.
+    ///
+    /// With `SolverOptions::threads >= 2` this bounds the **search**, not each
+    /// worker: the counter is shared. It is an *approximate* ceiling, though —
+    /// every worker that is already inside a node when the shared count
+    /// crosses the cap still finishes that node, so the reported
+    /// `MipStats::nodes_processed` may exceed `max_nodes` by up to
+    /// `threads - 1`. Treat it as a memory/effort backstop, not an exact
+    /// quota; `mip::tests_parallel::max_nodes_bounds_the_whole_parallel_search`
+    /// pins that overshoot bound.
     pub max_nodes: usize,
     pub max_depth: usize,
     /// Deterministic cap on this solve's own `MipStats::lp_iters_total`
@@ -604,14 +615,34 @@ pub struct SolverOptions {
     /// Only consumed by explicit `solve_qp_global` calls.
     pub global_optimization: Option<GlobalOptimizationConfig>,
 
-    /// Thread budget for all solver paths (LP / QP / multistart).
+    /// Thread budget for all solver paths (MILP / LP / QP / multistart).
     ///
     /// Default = 1 (serial; no contention with external bench workers).
+    /// Validated to `1 ..= `[`MAX_THREADS`].
     ///
-    /// - **QP** (`threads >= 2`): enables faer parallel sparse LDL on the KKT system.
-    /// - **LP simplex** (`threads >= 2`): no effect.
-    /// - **Multistart** (`threads >= 2`): `min(n_starts, threads)` parallel degree;
-    ///   inner solves forced to `threads = 1`.
+    /// Everything the budget covers runs *inside* it: MILP workers, their
+    /// relaxation solves, cut separation and heuristic sub-MIPs all carry
+    /// `threads = 1`, and the QP factorization is confined to a pool of
+    /// exactly `threads` (`otspot_num::linalg::parallelism`). So it is a hard
+    /// cap on concurrent solver work, not a hint.
+    ///
+    /// - **MILP**: `threads` workers over a shared best-bound node pool.
+    /// - **MIQP**: no effect on the search; node QP relaxations use the below.
+    /// - **QP**: faer parallel sparse LDL on the KKT system.
+    /// - **LP simplex**: no effect.
+    /// - **Multistart**: `min(n_starts, threads)` parallel degree.
+    ///
+    /// Reproducibility: `threads = 1` is deterministic node-for-node. At
+    /// `threads >= 2` a search that **completes its proof** (`Optimal` with a
+    /// [`BoundGapCertificate`](crate::BoundGapCertificate)) still returns a
+    /// thread-independent objective — the proof is what makes it so, checked
+    /// against an exhaustive oracle at every thread count in
+    /// `mip::tests_parallel`. A search **cut short** (`Timeout`,
+    /// `SuboptimalSolution`, `MaxIterations`) returns whatever the workers had
+    /// reached, so objective *and* status are timing-dependent: `gt2` at
+    /// `threads = 4, timeout = 3s` gave four different objectives across
+    /// repeats. Do not read a diff between two interrupted parallel runs as a
+    /// regression.
     pub threads: usize,
 
     /// Reference optimal objective for early-exit.
@@ -621,6 +652,33 @@ pub struct SolverOptions {
     /// Used by bench harnesses.  `None` = no early-exit.
     pub known_optimal_obj: Option<f64>,
 }
+
+/// Upper bound accepted for [`SolverOptions::threads`].
+///
+/// A thread budget is rejected at validation rather than discovered deep in a
+/// solve, because the two consumers fail *asymmetrically*: the MILP driver
+/// spawns its workers with [`std::thread::scope`], whose `spawn` **panics**
+/// when the OS refuses a thread, while the QP path degrades quietly to
+/// sequential. Neither is an acceptable answer to a mistyped budget, and a
+/// panic from inside branch-and-bound is far from the field that caused it.
+///
+/// 1024 is the bound because it cannot plausibly be a real request while
+/// still leaving generous headroom: the largest commodity dual-socket servers
+/// expose on the order of 256 hardware threads, so this is ~4x anything a
+/// machine can actually schedule. What it rejects is the value that was never
+/// a thread count — a byte size, a millisecond budget, a problem dimension
+/// passed to the wrong builder. Each MILP worker additionally owns a full
+/// search state (node queue, pseudocost vectors, statistics), so the memory
+/// cost is linear in this number and an unbounded value is not free.
+///
+/// This narrows the failure mode; it does not close it. A value inside the
+/// range can still be refused by the OS — `RLIMIT_NPROC`, a container's pid
+/// cgroup limit, or simply no memory for another stack — and `Scope::spawn`
+/// panics when that happens. Validation cannot see any of those, since they
+/// depend on the state of the machine at solve time rather than on the
+/// option. Callers running near a thread or memory limit should size
+/// `threads` from what the environment actually allows.
+pub const MAX_THREADS: usize = 1024;
 
 /// Divisor for the `max_etas` heuristic: floor(m / MAX_ETAS_DIVISOR).
 const MAX_ETAS_DIVISOR: usize = 50;
@@ -792,10 +850,10 @@ impl SolverOptions {
                 reason: "must be finite and >= 0",
             });
         }
-        if self.threads == 0 {
+        if self.threads == 0 || self.threads > MAX_THREADS {
             return Err(OptionsError {
                 field: "threads",
-                reason: "must be >= 1",
+                reason: "must be >= 1 and <= MAX_THREADS",
             });
         }
         if let Some(t) = self.timeout_secs {
@@ -830,12 +888,13 @@ impl SolverOptions {
         Ok(self)
     }
 
-    /// Builder: set `threads`, validated immediately.
+    /// Builder: set `threads`, validated immediately against the same
+    /// `1 ..= `[`MAX_THREADS`] range [`SolverOptions::validate`] enforces.
     pub fn with_threads(mut self, n: usize) -> Result<Self, OptionsError> {
-        if n == 0 {
+        if n == 0 || n > MAX_THREADS {
             return Err(OptionsError {
                 field: "threads",
-                reason: "must be >= 1",
+                reason: "must be >= 1 and <= MAX_THREADS",
             });
         }
         self.threads = n;
@@ -1084,19 +1143,42 @@ mod tests {
         }
     }
 
+    /// `threads` is accepted on `1 ..= MAX_THREADS` and rejected outside it,
+    /// by both `validate()` and the `with_threads` builder.
+    ///
+    /// Replaces the earlier `test_solver_validate_threads`, which pinned the
+    /// opposite contract at the top end (it asserted `usize::MAX` valid). That
+    /// is no longer true: an unbounded budget reaches
+    /// `std::thread::scope`'s `spawn`, which *panics* when the OS refuses the
+    /// thread, so the value is rejected at validation instead — see
+    /// [`MAX_THREADS`] for the bound's derivation.
     #[test]
-    fn test_solver_validate_threads() {
-        let o = SolverOptions {
-            threads: 0,
-            ..Default::default()
-        };
-        assert!(o.validate().is_err(), "threads=0");
-        for ok in [1_usize, 2, 8, usize::MAX] {
+    fn threads_is_accepted_only_within_max_threads() {
+        for bad in [0_usize, MAX_THREADS + 1, usize::MAX] {
+            let o = SolverOptions {
+                threads: bad,
+                ..Default::default()
+            };
+            assert!(o.validate().is_err(), "threads={bad} must be rejected");
+            assert!(
+                SolverOptions::default().with_threads(bad).is_err(),
+                "with_threads({bad}) must be rejected"
+            );
+        }
+        for ok in [1_usize, 2, 8, MAX_THREADS] {
             let o = SolverOptions {
                 threads: ok,
                 ..Default::default()
             };
-            assert!(o.validate().is_ok(), "threads={ok}");
+            assert!(o.validate().is_ok(), "threads={ok} must be accepted");
+            assert_eq!(
+                SolverOptions::default()
+                    .with_threads(ok)
+                    .expect("accepted")
+                    .threads,
+                ok,
+                "with_threads({ok}) must round-trip"
+            );
         }
     }
 

@@ -12,12 +12,15 @@ pub(crate) mod cuts;
 pub(crate) mod effort;
 pub(crate) mod heuristics;
 pub(crate) mod node;
+pub(crate) mod parallel;
 pub(crate) mod presolve;
 mod problem;
 pub(crate) mod queue;
+pub(crate) mod stats;
 pub(crate) mod symmetry;
 
 pub use problem::{MilpProblem, MipProblemError, MiqpProblem};
+pub use stats::MipStats;
 
 use crate::options::{MipBranching, MipConfig, SolverOptions, WarmStartBasis};
 use crate::problem::certificate::BoundGapCertificate;
@@ -169,199 +172,6 @@ pub(crate) trait Relaxation {
     ) -> (Option<SolverResult>, u64, u64) {
         (None, 0, 0)
     }
-}
-
-/// Search statistics returned by [`solve_milp_with_stats`] / [`solve_miqp_with_stats`].
-///
-/// Counters and timings instrument the branch-and-bound driver without changing
-/// its behaviour.  The timing fields help separate *exploration explosion* (many
-/// nodes) from *per-node cost* (slow relaxation solves).
-#[derive(Debug, Clone, Copy, Default)]
-#[non_exhaustive]
-pub struct MipStats {
-    /// Relaxation solves performed (root included).
-    pub nodes_processed: usize,
-    /// Number of integer-variable bound fixings applied by reduced-cost fixing.
-    pub rc_vars_fixed: usize,
-    /// Maximum branching depth reached.
-    pub max_depth_seen: usize,
-    /// Nodes discarded by bound/infeasibility before branching.
-    pub pruned: usize,
-    /// Nodes pruned by bound propagation before the LP/QP solve.
-    pub propagation_pruned: usize,
-    /// Wall-clock microseconds spent in per-node bound propagation.
-    pub node_propagation_us: u64,
-    /// Number of incumbent improvements (including the first one found).
-    pub incumbent_updates: usize,
-
-    // --- relaxation solve wall-clock timing (milliseconds) ---
-    /// Total wall time spent inside relaxation solves across all nodes (ms).
-    pub relaxation_time_total_ms: f64,
-    /// Wall time for the root node relaxation solve (ms).
-    pub relaxation_time_root_ms: f64,
-    /// Cumulative wall time for all descendant (non-root) relaxation solves (ms).
-    pub relaxation_time_desc_ms: f64,
-    /// Cumulative time in solves that returned `Optimal` (ms).
-    pub relaxation_time_optimal_ms: f64,
-    /// Cumulative time in solves that returned `Infeasible` (ms).
-    pub relaxation_time_infeasible_ms: f64,
-
-    /// Cumulative LP presolve microseconds across all nodes (zero when presolve does not reduce).
-    pub lp_presolve_us_total: u64,
-    /// Cumulative LP solve (simplex) microseconds across all nodes.
-    pub lp_solve_us_total: u64,
-    /// LP solve microseconds in the root node.
-    pub lp_solve_us_root: u64,
-    /// Cumulative LP solve microseconds in descendant nodes.
-    pub lp_solve_us_desc: u64,
-    /// Cumulative LP postsolve microseconds across all nodes.
-    pub lp_postsolve_us_total: u64,
-    /// Cumulative Ruiz scaling microseconds in root node LP solve.
-    pub lp_scale_us_root: u64,
-    /// Cumulative Ruiz scaling microseconds in descendant node LP solves.
-    pub lp_scale_us_desc: u64,
-    /// Number of Ruiz scaling calls in root node LP solve.
-    pub lp_scale_calls_root: u64,
-    /// Number of Ruiz scaling calls in descendant node LP solves.
-    pub lp_scale_calls_desc: u64,
-    /// Number of branch-variable selections that invoked strong branching.
-    pub strong_branch_calls: usize,
-    /// Total candidate variables evaluated by strong branching.
-    pub strong_branch_candidates: usize,
-    /// Total child relaxation solves launched by strong branching.
-    pub strong_branch_lp_solves: usize,
-    /// Wall-clock microseconds spent in strong-branching child solves.
-    pub strong_branch_us: u64,
-    /// Bounded dual fallback count: terminal UB violation outside current repair scope.
-    pub fallback_ub_violation_out_of_scope: u64,
-    /// Bounded artificial Phase I fallback count: reconciled bound violation.
-    pub fallback_phase1_bound_violation: u64,
-    /// Eq+UB crash-basis fallback count: crash produced bounded-infeasible start.
-    pub fallback_crash_infeasible: u64,
-
-    /// Approximate bytes per node for the bounds clone: `n_vars × 2 × size_of::<f64>()`.
-    /// Gives a rough idea of per-node memory traffic regardless of node count.
-    pub approx_bounds_bytes_per_node: usize,
-
-    /// Whether the feasibility pump found an initial incumbent before branch-and-bound.
-    pub fp_incumbent_found: bool,
-    /// Wall-clock microseconds spent in the pre-B&B feasibility pump.
-    pub fp_us: u64,
-    /// Wall-clock microseconds spent adding root cuts before branch-and-bound.
-    pub root_cut_us: u64,
-    /// Wall-clock microseconds spent in root bound-tightening probing
-    /// (`presolve::tighten_bounds_with_probing`) before branch-and-bound.
-    pub root_probing_us: u64,
-    /// Wall-clock microseconds spent in root static symmetry breaking
-    /// (`symmetry::break_symmetry`) before branch-and-bound.
-    pub root_symmetry_us: u64,
-
-    /// Objective of the first trusted (Optimal) root relaxation, i.e. the root LP
-    /// bound used to start branch-and-bound. With cuts enabled this reflects the
-    /// cut-tightened relaxation, so comparing it against the cuts-off value
-    /// isolates root gap closure from downstream node-count noise.
-    /// `NEG_INFINITY` when no root relaxation solved to Optimal.
-    pub root_lp_bound: f64,
-
-    /// Number of RINS heuristic calls attempted.
-    pub rins_calls: usize,
-    /// Number of times RINS found an improving incumbent.
-    pub rins_improvements: usize,
-    /// Number of RENS heuristic calls attempted.
-    pub rens_calls: usize,
-    /// Number of times RENS found an improving incumbent.
-    pub rens_improvements: usize,
-    /// Number of local-branching heuristic calls attempted.
-    pub local_branching_calls: usize,
-    /// Number of times local branching found an improving incumbent.
-    pub local_branching_improvements: usize,
-
-    /// Number of conflict clauses learned from infeasible nodes.
-    pub conflict_clauses_learned: usize,
-    /// Number of nodes pruned by conflict analysis (LP solve skipped).
-    pub conflict_pruned: usize,
-
-    /// Number of B&B nodes where in-tree separation produced a cut-tightened
-    /// (accepted) relaxation result. Zero when `tree_cuts` is off or no cut
-    /// improved a node bound.
-    pub tree_cut_rounds: usize,
-
-    // --- B&B time attribution (wall-clock microseconds) ---
-    // These, together with `lp_solve_us_total` and `node_propagation_us` above,
-    // are meant to add up to (most of) the search wall clock so that "many
-    // nodes" vs. "expensive per-node heuristics/separation" can be told apart
-    // without re-instrumenting. Measurement only: none of these fields change
-    // solver behaviour.
-    /// Wall-clock microseconds spent in in-tree cut separation (`separate_tree_cuts`).
-    pub tree_cut_us: u64,
-    /// Wall-clock microseconds spent in the RINS heuristic, including its sub-MIP solve.
-    pub rins_us: u64,
-    /// Wall-clock microseconds spent in the RENS heuristic, including its sub-MIP solve.
-    pub rens_us: u64,
-    /// Wall-clock microseconds spent in the local-branching heuristic, including its sub-MIP solve.
-    pub local_branching_us: u64,
-    /// Wall-clock microseconds spent selecting the branching variable
-    /// (`pick_branch_var`), including any strong-branching child solves
-    /// (see `strong_branch_us` for that narrower subset).
-    pub branch_select_us: u64,
-    /// Wall-clock microseconds spent checking/learning conflict clauses.
-    pub conflict_us: u64,
-    /// Wall-clock microseconds of B&B loop overhead not attributed to any
-    /// other named bucket (pruning checks, dive bookkeeping, queue
-    /// operations, node cloning). Computed per node as the residual of that
-    /// node's loop-iteration wall time after subtracting every other
-    /// explicitly measured bucket touched during the same iteration.
-    pub node_loop_other_us: u64,
-    /// Cumulative `nodes_processed` reported by RINS/RENS/local-branching
-    /// sub-MIP solves: branch-and-bound work that is invisible in the outer
-    /// `nodes_processed` count.
-    pub sub_mip_nodes_total: u64,
-
-    // --- B&B time attribution (deterministic simplex-iteration counters) ---
-    // Phase 1c: `mip::effort`'s `may_run_*` gates are computed from these,
-    // not from the `*_us` wall-clock counters above (which stay as pure
-    // measurement — see their doc comments). Unlike wall time, simplex
-    // iteration counts are reproducible for a fixed input and algorithm
-    // path, so gating on them keeps the B&B search itself deterministic.
-    /// Cumulative simplex iterations across all node relaxation solves
-    /// (root + descendants) in the main B&B loop.
-    pub lp_iters_total: u64,
-    /// Cumulative simplex iterations spent in strong-branching child solves.
-    pub strong_branch_iters: u64,
-    /// Cumulative simplex iterations spent in the RINS heuristic, including
-    /// its sub-MIP's own recursive total.
-    pub rins_iters: u64,
-    /// Cumulative simplex iterations spent in the RENS heuristic, including
-    /// its sub-MIP's own recursive total.
-    pub rens_iters: u64,
-    /// Cumulative simplex iterations spent in the local-branching heuristic,
-    /// including its sub-MIP's own recursive total.
-    pub local_branching_iters: u64,
-    /// Cumulative simplex iterations spent in in-tree cut separation
-    /// (`separate_tree_cuts`), across all rounds of all attempts.
-    pub tree_cut_iters: u64,
-    /// Cumulative fixed-cost surcharge (iteration-equivalent units, not real
-    /// simplex iterations) `separate_tree_cuts` charges for its own
-    /// `build_standard_form`-equivalent construction overhead — see
-    /// `cuts::tree_cut_construction_surcharge`. Kept out of `tree_cut_iters`
-    /// deliberately: only `effort::may_run_separation` and `effort::
-    /// separation_iter_budget` add this to their numerator, so separation's
-    /// own gate feels its true per-round cost without inflating
-    /// `effort::total_simplex_iters` — the shared denominator every other
-    /// `may_run_*` gate (RINS/RENS/local-branching/strong-branching) also
-    /// reads. An earlier version charged straight into `tree_cut_iters`,
-    /// which inflated that shared total and measurably distorted unrelated
-    /// gates: `gt2 --timeout 60` regressed from a deterministic 100-node
-    /// `Optimal` to a 3,744-node `Timeout` purely from this cross-component
-    /// leak, on a run where separation's own round count *increased*
-    /// (14 → 183) rather than decreased.
-    pub tree_cut_overhead_iters: u64,
-    /// Consecutive in-tree separation attempts (that actually ran at least
-    /// one round) yielding zero accepted rounds. Reset to 0 on any accepted
-    /// round; once it reaches `effort::SEPARATION_DRY_STREAK_LIMIT`,
-    /// `effort::may_run_separation` disables separation for the rest of
-    /// this solve.
-    pub tree_cut_dry_streak: usize,
 }
 
 // Test-only observability: on a trivial root problem (few/no constraints),
@@ -516,7 +326,7 @@ pub fn solve_milp_with_stats(
             problem_bt
         };
         let root_cut_us = cut_t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-        let (res, mut stats) = solve_mip_core(&effective, &opts_with_dl, cfg, mask, fp_inc);
+        let (res, mut stats) = solve_mip_dispatch(&effective, &opts_with_dl, cfg, mask, fp_inc);
         stats.fp_us = fp_us;
         stats.root_cut_us = root_cut_us;
         stats.root_probing_us = presolve_us;
@@ -943,7 +753,12 @@ pub(crate) struct SearchState {
 }
 
 impl SearchState {
-    fn new(stats: MipStats, n_int: usize, state: MipState, conflicts: conflict::ConflictStore) -> Self {
+    fn new(
+        stats: MipStats,
+        n_int: usize,
+        state: MipState,
+        conflicts: conflict::ConflictStore,
+    ) -> Self {
         Self {
             q: NodeQueue::new(),
             state,
@@ -1022,9 +837,9 @@ fn apply_node_outcome<R: Relaxation>(
                     down_ws,
                     up_ws,
                 } => {
-                    s.q.push(node.child_branched(
-                        down, node_lb, down_ws, jb, false, res_obj, jb_val,
-                    ));
+                    s.q.push(
+                        node.child_branched(down, node_lb, down_ws, jb, false, res_obj, jb_val),
+                    );
                     s.q.push(node.child_branched(up, node_lb, up_ws, jb, true, res_obj, jb_val));
                 }
                 ChildKind::Split => {
@@ -1450,6 +1265,41 @@ fn prepare_search_inputs<R: Relaxation>(
     Ok((shared, integer_vars, j_to_k, root_bounds, stats))
 }
 
+/// Route a branch-and-bound search to the serial or the parallel driver.
+///
+/// The parallel driver is opt-in and requires **both**:
+///
+/// * `options.threads >= 2` — `threads = 1` (the default) must stay on the
+///   serial driver, which is deterministic node-for-node. Reproducibility of
+///   the search trajectory is what the benchmark suite's per-problem
+///   regression diffs are built on, so it is not something a default may
+///   trade away;
+/// * `cfg.max_lp_iters == None` — that budget (set only on RINS / RENS /
+///   local-branching sub-MIPs, see `heuristics::SUB_MIP_MAX_LP_ITERS`) exists
+///   precisely to make a sub-MIP's stopping point independent of timing, so a
+///   caller asking for it gets the serial driver whatever `threads` says.
+///   Sub-MIPs already force `threads = 1` on their own options; this is the
+///   structural guarantee behind that convention.
+pub(crate) fn solve_mip_dispatch<R: Relaxation + Sync>(
+    problem: &R,
+    options: &SolverOptions,
+    cfg: &MipConfig,
+    mask: Vec<bool>,
+    initial_incumbent: Option<SolverResult>,
+) -> (SolverResult, MipStats) {
+    if options.threads >= 2 && cfg.max_lp_iters.is_none() {
+        return parallel::solve_mip_parallel(
+            problem,
+            options,
+            cfg,
+            mask,
+            initial_incumbent,
+            options.threads,
+        );
+    }
+    solve_mip_core(problem, options, cfg, mask, initial_incumbent)
+}
+
 fn solve_mip_core<R: Relaxation>(
     problem: &R,
     options: &SolverOptions,
@@ -1517,6 +1367,19 @@ pub(crate) struct SearchOutcome {
 }
 
 impl SearchOutcome {
+    /// The identity element of [`SearchOutcome::absorb`]: nothing explored,
+    /// nothing left open, no stop requested.
+    fn empty() -> Self {
+        Self {
+            open_lb: f64::INFINITY,
+            had_open: false,
+            unbounded: false,
+            deadline_stop: false,
+            maxnodes_stop: false,
+            proof_uncertain: false,
+        }
+    }
+
     fn from(s: &SearchState) -> Self {
         Self {
             open_lb: s.open_lb,
@@ -2364,10 +2227,19 @@ pub(crate) fn reduced_cost_fixing(
 }
 
 /// Incumbent (best integer-feasible upper bound) tracking.
+///
+/// With `shared = None` (serial search) this is a plain local best. A
+/// parallel worker instead carries a handle onto the search-wide incumbent:
+/// `consider` arbitrates against it under a lock, and `sync_shared` refreshes
+/// the local view. The local objective is then always a *past* value of the
+/// shared one, which only ever decreases — so the bound comparisons this
+/// state feeds (`should_prune`) can only be too conservative, never prune a
+/// region that still holds the optimum.
 struct MipState {
     incumbent: Option<SolverResult>,
     incumbent_obj: Option<f64>,
     rens_first_incumbent_attempted: bool,
+    shared: Option<std::sync::Arc<parallel::SharedIncumbent>>,
 }
 
 impl MipState {
@@ -2376,12 +2248,26 @@ impl MipState {
             incumbent: None,
             incumbent_obj: None,
             rens_first_incumbent_attempted: false,
+            shared: None,
         }
+    }
+
+    /// A worker-local view backed by the search-wide incumbent `shared`.
+    fn shared(shared: std::sync::Arc<parallel::SharedIncumbent>) -> Self {
+        let mut s = Self::new();
+        s.shared = Some(shared);
+        s.sync_shared();
+        s
     }
 
     /// Adopt `res` as the new incumbent if it strictly improves the objective.
     /// Returns `true` when the incumbent changed.
     fn consider(&mut self, res: &SolverResult) -> bool {
+        if let Some(shared) = self.shared.clone() {
+            let improved = shared.consider(res);
+            self.sync_shared();
+            return improved;
+        }
         let better = match self.incumbent_obj {
             None => true,
             Some(o) => res.objective < o,
@@ -2392,7 +2278,20 @@ impl MipState {
         }
         better
     }
+
+    /// Refresh the local view from the search-wide incumbent. No-op for a
+    /// serial search, and lock-free unless the shared value actually improved.
+    fn sync_shared(&mut self) {
+        let Some(shared) = &self.shared else { return };
+        if let Some((obj, res)) = shared.take_better_than(self.incumbent_obj) {
+            self.incumbent_obj = Some(obj);
+            self.incumbent = Some(res);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_parallel;

@@ -27,15 +27,34 @@ use crate::qp::ipm_core::solver_loop::{
 };
 use crate::qp::problem::QpProblem;
 use crate::tolerances::any_nonfinite;
+use faer::Par;
 use otspot_num::linalg::kkt_solver::{inexact_eta_for_eps, KktConfig};
-use otspot_num::linalg::parallelism::solver_par_from_threads;
+use otspot_num::linalg::parallelism::with_solver_pool;
 use otspot_num::linalg::timeout::TimeoutCtx;
 
 /// IP-PMM 内部ソルバー (Ruiz scaling 後の problem を受け取る)。
+///
+/// `SolverOptions::threads` 専用の rayon プールへ solve 全体を閉じ込め、その
+/// プールに対応する `Par` を本体へ渡す。faer へ `Par::Rayon(threads)` を渡す
+/// だけでは上限にならない (`otspot_num::linalg::parallelism` のモジュール doc
+/// に実測値) ため、ここが QP/conic 経路のスレッド上限を成立させる唯一の点。
+/// `threads = 1` (既定) はプールを作らずインライン + `Par::Seq` で走るので、
+/// 従来の挙動と完全に同一。
 pub(crate) fn solve_ippmm_inner(
     problem: &QpProblem,
     options: &SolverOptions,
     eps_orig: f64,
+) -> SolverResult {
+    with_solver_pool(options.threads, |par| {
+        solve_ippmm_inner_confined(problem, options, eps_orig, par)
+    })
+}
+
+fn solve_ippmm_inner_confined(
+    problem: &QpProblem,
+    options: &SolverOptions,
+    eps_orig: f64,
+    par: Par,
 ) -> SolverResult {
     let n = problem.num_vars;
     let timeout_ctx = TimeoutCtx::new(
@@ -43,7 +62,6 @@ pub(crate) fn solve_ippmm_inner(
         options.timeout_secs,
         options.cancel_flag.clone(),
     );
-    let par = solver_par_from_threads(options.threads);
 
     if timeout_ctx.should_stop() {
         return timeout_result(n);

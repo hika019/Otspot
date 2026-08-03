@@ -295,27 +295,44 @@ pub(crate) fn solve_qp_multistart_with_hooks(
             .map(worker)
             .collect()
     } else {
-        let pool_result = hooks
-            .and_then(|h| h.thread_pool_factory.as_ref().map(|f| f(parallel)))
-            .unwrap_or_else(|| {
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(parallel)
-                    .build()
-            });
-        match pool_result {
-            Ok(pool) => pool.install(|| {
+        let run_parallel = |pool: &rayon::ThreadPool, warms: Vec<Option<QpWarmStart>>| {
+            pool.install(|| {
                 warms
                     .into_par_iter()
-                    .map(worker)
+                    .map(&worker)
                     .collect::<Vec<SolverResult>>()
-            }),
-            Err(e) => {
+            })
+        };
+        let run_serial = |warms: Vec<Option<QpWarmStart>>| {
+            warms
+                .into_iter()
+                .map(&worker)
+                .collect::<Vec<SolverResult>>()
+        };
+        // Default path shares `parallelism::solver_thread_pool`'s per-size
+        // cache with the QP/conic factorization confinement, so a program that
+        // multistarts repeatedly builds its pool once instead of once per call
+        // — and the `threads` budget means the same pool everywhere. The hook
+        // stays a genuine override (tests inject build failures through it).
+        match hooks.and_then(|h| h.thread_pool_factory.as_ref().map(|f| f(parallel))) {
+            Some(Ok(pool)) => run_parallel(&pool, warms),
+            Some(Err(e)) => {
                 log::warn!(
-                    "multistart: rayon ThreadPool build failed ({e}); \
+                    "multistart: injected rayon ThreadPool build failed ({e}); \
                      falling back to serial execution"
                 );
-                warms.into_iter().map(worker).collect()
+                run_serial(warms)
             }
+            None => match otspot_num::linalg::parallelism::solver_thread_pool(parallel) {
+                Some(pool) => run_parallel(pool, warms),
+                None => {
+                    log::warn!(
+                        "multistart: rayon ThreadPool of {parallel} threads unavailable; \
+                         falling back to serial execution"
+                    );
+                    run_serial(warms)
+                }
+            },
         }
     };
 
