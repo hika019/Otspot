@@ -40,6 +40,11 @@ pub(super) const REG_LIMIT_STEP: f64 = 1e-3;
 /// initial_reg_limit のデフォルト値 (QP / LP)。
 pub(super) const REG_LIMIT_INIT_QP: f64 = 5e-8;
 pub(super) const REG_LIMIT_INIT_LP: f64 = 5e-10;
+
+/// σ=s/y が非有限 (NaN/Inf) のときの fallback 上限。旧 `1/options.ipm.delta_min`
+/// (delta_min=1e-8 固定) と数値的に同じ 1e8 を維持しつつ、削除された
+/// `delta_min` オプション (正則化 floor と無関係な数値安全弁) から独立させた。
+pub(super) const SIGMA_MAX_FALLBACK: f64 = 1e8;
 /// prox 項が dual residual を支配と判定する比率。
 pub(super) const PROX_DOMINATE_RATIO: f64 = 0.5;
 

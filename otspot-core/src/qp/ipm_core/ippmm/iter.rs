@@ -11,7 +11,7 @@ use super::state::{
     GONDZIO_ALPHA_TRIGGER, INFEAS_DETECTOR_DISTRUST_SCORE, MIN_CONSECUTIVE_INFEAS,
     MU_ZERO_THRESHOLD, PF_HISTORY_LEN, PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO,
     REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
-    RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
+    RESIDUAL_STALL_WINDOW, RHO_INIT, SIGMA_MAX_FALLBACK, STEP_REL_CAP,
 };
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
@@ -100,8 +100,11 @@ fn solve_ippmm_inner_confined(
 
     let (rho_init, delta_init) = match warm_mu {
         // warm start: μ 規模に揃えた rho/delta で出発し proximal pull を最小化。
+        // floor は REG_LIMIT_MIN (adaptive reg_limit が最終的に到達する下限) —
+        // 固定 delta_min=1e-8 は tight eps でこの初期値自体が過大な床になる
+        // (bug-frontier 実測: LISWET7 系, 後述の rho_matrix/delta_matrix 参照)。
         Some(mu) => {
-            let v = mu.max(options.ipm.delta_min);
+            let v = mu.max(REG_LIMIT_MIN);
             (v, v)
         }
         None => (RHO_INIT, DELTA_INIT),
@@ -299,12 +302,20 @@ fn solve_ippmm_inner_confined(
         }
 
         // Σ = diag(s_i / y_i) (等式行は0)
-        let sigma_max = 1.0 / options.ipm.delta_min.max(MU_ZERO_THRESHOLD);
-        let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, sigma_max);
+        let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, SIGMA_MAX_FALLBACK);
 
-        // 正則化は PMM 駆動。mu 依存 floor は使わない。
-        let rho_matrix = pmm.rho.max(options.ipm.delta_min);
-        let delta_matrix = pmm.delta.max(options.ipm.delta_min);
+        // 正則化は PMM 駆動。pmm.rho/pmm.delta は自身の更新式 (下方 `.max(reg_limit)`)
+        // で常に reg_limit ≥ REG_LIMIT_MIN に floor されているため、ここで固定の
+        // 絶対定数を追加で `.max()` してはならない。旧実装は `options.ipm.delta_min`
+        // (デフォルト 1e-8, DEFAULT_IPM_EPS=1e-6 向けに 100倍マージンで校正された
+        // 絶対定数) を課しており、tight eps (例 1e-8) では reg_limit が 1e-14 まで
+        // 下がっても行列側の正則化が 1e-8 に恒久的に張り付く副作用を持っていた。
+        // bug-frontier 実測 (LISWET7 @ eps=1e-8): 停滞行の dy_i=6.216, r_p_i=-6.216e-8
+        // で dy_i×delta_matrix=r_p_i が厳密に成立 (delta_matrix=1e-8 のときのみ) —
+        // 正則化が primal residual を δ·dy に押し付け、x を補正しない解が「厳密解」
+        // になっていた。delta_min オプションは撤去し、reg_limit 経路に一本化する。
+        let rho_matrix = pmm.rho;
+        let delta_matrix = pmm.delta;
 
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
