@@ -904,55 +904,90 @@ fn maybe_apply_tree_cut_separation<R: Relaxation>(
     res
 }
 
+/// Read-only search context shared by every node-loop iteration: the problem
+/// configuration, the per-node `SolverOptions` template and the derived index
+/// tables. Fixed for the whole solve, so a parallel worker can borrow it.
+pub(crate) struct SearchCtx<'a> {
+    cfg: &'a MipConfig,
+    /// Per-node `SolverOptions` template built by [`prepare_mip_search`].
+    shared: &'a SolverOptions,
+    mask: &'a [bool],
+    integer_vars: &'a [usize],
+    j_to_k: &'a HashMap<usize, usize>,
+    deadline: Option<Instant>,
+    root_bounds: &'a [(f64, f64)],
+    use_reliability: bool,
+}
+
+/// Mutable search state advanced by [`run_node`]. The serial driver owns one;
+/// each parallel worker owns its own, with the incumbent and the conflict
+/// clauses backed by process-wide shared handles (see [`MipState`] and
+/// [`conflict::ConflictStore`]) and the remaining fields reduced at join.
+pub(crate) struct SearchState {
+    /// Serial: the whole open-node set. Parallel: the worker's private dive
+    /// stack plus the not-yet-published children of the node it just
+    /// processed (drained into the shared pool by the worker loop).
+    q: NodeQueue,
+    state: MipState,
+    stats: MipStats,
+    pc: PseudocostState,
+    conflicts: conflict::ConflictStore,
+    open_lb: f64,
+    had_open: bool,
+    proof_uncertain: bool,
+    deadline_stop: bool,
+    maxnodes_stop: bool,
+    unbounded: bool,
+    nodes_since_dive: usize,
+    dive_start_depth: usize,
+}
+
+impl SearchState {
+    fn new(stats: MipStats, n_int: usize, state: MipState, conflicts: conflict::ConflictStore) -> Self {
+        Self {
+            q: NodeQueue::new(),
+            state,
+            stats,
+            pc: PseudocostState::new(n_int),
+            conflicts,
+            open_lb: f64::INFINITY,
+            had_open: false,
+            proof_uncertain: false,
+            deadline_stop: false,
+            maxnodes_stop: false,
+            unbounded: false,
+            nodes_since_dive: 0,
+            dive_start_depth: 0,
+        }
+    }
+}
+
+/// Whether the node loop should process another node or stop.
+pub(crate) enum NodeLoop {
+    Continue,
+    Break,
+}
+
 /// Applies one node's [`process_node_outcome`] result: prunes, records an
-/// open lower bound, or pushes branched/split children onto `q`. Always the
+/// open lower bound, or pushes branched/split children onto `s.q`. Always the
 /// last step of a node-loop iteration, so it also charges
 /// `node_loop_other_us` for this iteration on every path (matching every
 /// other exit point in the loop).
-#[allow(clippy::too_many_arguments)]
 fn apply_node_outcome<R: Relaxation>(
     problem: &R,
     mut node: MipNode,
     res: &SolverResult,
-    state: &mut MipState,
-    stats: &mut MipStats,
-    cfg: &MipConfig,
-    shared: &SolverOptions,
-    mask: &[bool],
-    integer_vars: &[usize],
-    j_to_k: &HashMap<usize, usize>,
-    pc: &mut PseudocostState,
-    use_reliability: bool,
-    deadline: Option<Instant>,
-    dive_start_depth: usize,
-    q: &mut NodeQueue,
-    open_lb: &mut f64,
-    had_open: &mut bool,
-    proof_uncertain: &mut bool,
+    ctx: &SearchCtx<'_>,
+    s: &mut SearchState,
+    is_root: bool,
     iter_t0: Instant,
     iter_before: MipStats,
 ) {
     let trusted = matches!(res.status, SolveStatus::Optimal) && !res.solution.is_empty();
-    match process_node_outcome(
-        problem,
-        &mut node,
-        res,
-        trusted,
-        state,
-        stats,
-        cfg,
-        shared,
-        mask,
-        integer_vars,
-        j_to_k,
-        pc,
-        use_reliability,
-        &deadline,
-        dive_start_depth,
-    ) {
+    match process_node_outcome(problem, &mut node, res, trusted, ctx, s, is_root) {
         NodeAction::Skip { end_dive } => {
-            if end_dive && q.is_diving() {
-                q.end_dive();
+            if end_dive && s.q.is_diving() {
+                s.q.end_dive();
             }
         }
         NodeAction::OpenLb {
@@ -960,13 +995,13 @@ fn apply_node_outcome<R: Relaxation>(
             uncertain,
             end_dive,
         } => {
-            *open_lb = open_lb.min(node_lb);
-            *had_open = true;
+            s.open_lb = s.open_lb.min(node_lb);
+            s.had_open = true;
             if uncertain {
-                *proof_uncertain = true;
+                s.proof_uncertain = true;
             }
-            if end_dive && q.is_diving() {
-                q.end_dive();
+            if end_dive && s.q.is_diving() {
+                s.q.end_dive();
             }
         }
         NodeAction::PushChildren {
@@ -976,8 +1011,8 @@ fn apply_node_outcome<R: Relaxation>(
             kind,
             end_dive,
         } => {
-            if end_dive && q.is_diving() {
-                q.end_dive();
+            if end_dive && s.q.is_diving() {
+                s.q.end_dive();
             }
             match kind {
                 ChildKind::Branched {
@@ -987,17 +1022,19 @@ fn apply_node_outcome<R: Relaxation>(
                     down_ws,
                     up_ws,
                 } => {
-                    q.push(node.child_branched(down, node_lb, down_ws, jb, false, res_obj, jb_val));
-                    q.push(node.child_branched(up, node_lb, up_ws, jb, true, res_obj, jb_val));
+                    s.q.push(node.child_branched(
+                        down, node_lb, down_ws, jb, false, res_obj, jb_val,
+                    ));
+                    s.q.push(node.child_branched(up, node_lb, up_ws, jb, true, res_obj, jb_val));
                 }
                 ChildKind::Split => {
-                    q.push(node.child(down, node_lb));
-                    q.push(node.child(up, node_lb));
+                    s.q.push(node.child(down, node_lb));
+                    s.q.push(node.child(up, node_lb));
                 }
             }
         }
     }
-    flush_loop_other(stats, iter_t0, iter_before);
+    flush_loop_other(&mut s.stats, iter_t0, iter_before);
 }
 
 /// Outcome of [`dispatch_relaxation_status`]: whether the node loop should
@@ -1104,20 +1141,28 @@ fn dispatch_relaxation_status(
 /// per-solve cap here makes that node's own simplex loop enforce it instead
 /// (`dual_advanced::bounded_core`'s bland-mode loops honor `max_iters`
 /// alongside `deadline`, returning `Stalled` rather than grinding on).
+///
+/// `is_root` (`node.depth == 0`) selects the root vs. descendant stats
+/// buckets and the repeated-scaling skip. It is exactly the predicate the
+/// previous `root_solved` latch computed: the first relaxation any search
+/// solves is the root (the queue starts seeded with it alone, and every
+/// pre-solve `continue` at the root empties the queue), and no other node
+/// has depth 0. Stating it per node rather than latching it makes the
+/// buckets well-defined when several workers process nodes concurrently.
 fn solve_node_relaxation<R: Relaxation>(
     problem: &R,
     shared: &SolverOptions,
     cfg: &MipConfig,
     solve_bounds: &[(f64, f64)],
     node: &MipNode,
-    root_solved: &mut bool,
     stats: &mut MipStats,
 ) -> (SolverResult, SolverOptions) {
+    let is_root = node.depth == 0;
     let scale_before = crate::presolve::scaling::lp_scale_profile_snapshot();
     let fallback_before = crate::simplex::dual_advanced::fallback_profile_snapshot();
     let t0 = Instant::now();
     let mut node_options = shared.clone();
-    if *root_solved && problem.can_skip_repeated_lp_scaling() {
+    if !is_root && problem.can_skip_repeated_lp_scaling() {
         node_options.use_ruiz_scaling = false;
     }
     if let Some(ref ws) = node.warm_start {
@@ -1148,7 +1193,7 @@ fn solve_node_relaxation<R: Relaxation>(
         &scale_delta,
         &fallback_delta,
         &res,
-        root_solved,
+        is_root,
         node.depth,
     );
     (res, node_options)
@@ -1203,54 +1248,206 @@ fn propagate_node_bounds<R: Relaxation>(
 /// sub-MIP configs (see `heuristics::SUB_MIP_MAX_LP_ITERS`) so their
 /// termination point does not depend on wall-clock timing; it is treated
 /// identically to deadline expiry.
-#[allow(clippy::too_many_arguments)]
+/// `nodes_done` is the node count `cfg.max_nodes` is compared against: the
+/// serial driver passes its own `stats.nodes_processed`; a parallel worker
+/// passes the search-wide total, so the cap bounds the whole tree rather than
+/// each worker's private share.
 fn check_stop_conditions(
-    cfg: &MipConfig,
-    deadline: Option<Instant>,
+    ctx: &SearchCtx<'_>,
     node: &MipNode,
-    q: &mut NodeQueue,
-    stats: &mut MipStats,
+    s: &mut SearchState,
+    nodes_done: usize,
     iter_t0: Instant,
     iter_before: MipStats,
-    open_lb: &mut f64,
-    had_open: &mut bool,
-    deadline_stop: &mut bool,
-    maxnodes_stop: &mut bool,
 ) -> bool {
-    if deadline_reached(deadline) {
-        *open_lb = open_lb.min(node.lower_bound);
-        *had_open = true;
-        *deadline_stop = true;
-        if q.is_diving() {
-            q.end_dive();
-        }
-        flush_loop_other(stats, iter_t0, iter_before);
-        return true;
-    }
-    if stats.nodes_processed >= cfg.max_nodes {
-        *open_lb = open_lb.min(node.lower_bound);
-        *had_open = true;
-        *maxnodes_stop = true;
-        if q.is_diving() {
-            q.end_dive();
-        }
-        flush_loop_other(stats, iter_t0, iter_before);
-        return true;
-    }
-    if cfg
+    let stop_reason = if deadline_reached(ctx.deadline) {
+        Some(false)
+    } else if nodes_done >= ctx.cfg.max_nodes {
+        Some(true)
+    } else if ctx
+        .cfg
         .max_lp_iters
-        .is_some_and(|limit| stats.lp_iters_total >= limit)
+        .is_some_and(|limit| s.stats.lp_iters_total >= limit)
     {
-        *open_lb = open_lb.min(node.lower_bound);
-        *had_open = true;
-        *deadline_stop = true;
-        if q.is_diving() {
-            q.end_dive();
-        }
-        flush_loop_other(stats, iter_t0, iter_before);
-        return true;
+        Some(false)
+    } else {
+        None
+    };
+    let Some(is_maxnodes) = stop_reason else {
+        return false;
+    };
+    s.open_lb = s.open_lb.min(node.lower_bound);
+    s.had_open = true;
+    if is_maxnodes {
+        s.maxnodes_stop = true;
+    } else {
+        s.deadline_stop = true;
     }
-    false
+    if s.q.is_diving() {
+        s.q.end_dive();
+    }
+    flush_loop_other(&mut s.stats, iter_t0, iter_before);
+    true
+}
+
+/// Process exactly one popped node: stop-condition checks, dive bookkeeping,
+/// bound/conflict pruning, the relaxation solve, in-tree separation and the
+/// branching decision. Shared verbatim by the serial driver and by every
+/// parallel worker (`parallel::run_workers`), so the two search modes can
+/// never drift apart in what a node *means*; they differ only in where the
+/// open nodes live and how the per-worker results are reduced.
+///
+/// `nodes_done` — see [`check_stop_conditions`].
+fn run_node<R: Relaxation>(
+    problem: &R,
+    node: MipNode,
+    ctx: &SearchCtx<'_>,
+    s: &mut SearchState,
+    nodes_done: usize,
+) -> NodeLoop {
+    // Snapshot for `node_loop_other_us`: MipStats is Copy, so this is a
+    // cheap per-iteration baseline. Every named bucket below is measured
+    // by Instant and accumulated into `stats`; `flush_loop_other` at each
+    // exit point below charges whatever wall time this iteration spent
+    // outside those buckets to `node_loop_other_us`.
+    let iter_t0 = Instant::now();
+    let iter_before = s.stats;
+    if check_stop_conditions(ctx, &node, s, nodes_done, iter_t0, iter_before) {
+        return NodeLoop::Break;
+    }
+
+    // --- Dive management: start a dive every DIVE_FREQUENCY best-bound pops ---
+    if !s.q.is_diving() {
+        s.nodes_since_dive += 1;
+        let freq = if s.state.incumbent_obj.is_none() {
+            DIVE_FREQUENCY_NO_INCUMBENT
+        } else {
+            DIVE_FREQUENCY
+        };
+        if s.nodes_since_dive >= freq {
+            s.nodes_since_dive = 0;
+            s.dive_start_depth = node.depth;
+            s.q.start_dive();
+        }
+    }
+
+    // --- Incumbent-bound pruning and conflict pruning ---
+    if let Some(inc) = s.state.incumbent_obj {
+        if should_prune(node.lower_bound, Some(inc), ctx.cfg.gap_tol) {
+            s.stats.pruned += 1;
+            if s.q.is_diving() {
+                s.q.end_dive();
+            }
+            flush_loop_other(&mut s.stats, iter_t0, iter_before);
+            return NodeLoop::Continue;
+        }
+    }
+    let conflict_check_t0 = Instant::now();
+    let node_is_conflicted = node.depth > 0 && s.conflicts.is_conflicted(&node.var_bounds);
+    s.stats.conflict_us = s.stats.conflict_us.saturating_add(
+        conflict_check_t0
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64,
+    );
+    if node_is_conflicted {
+        s.stats.pruned += 1;
+        s.stats.conflict_pruned += 1;
+        flush_loop_other(&mut s.stats, iter_t0, iter_before);
+        return NodeLoop::Continue;
+    }
+
+    let tightened = match propagate_node_bounds(problem, &node, ctx.mask, &mut s.stats) {
+        Ok(t) => t,
+        Err(()) => {
+            flush_loop_other(&mut s.stats, iter_t0, iter_before);
+            return NodeLoop::Continue;
+        }
+    };
+    let solve_bounds: &[(f64, f64)] = tightened.as_deref().unwrap_or(&node.var_bounds);
+
+    let is_root = node.depth == 0;
+    let (mut res, node_options) = solve_node_relaxation(
+        problem,
+        ctx.shared,
+        ctx.cfg,
+        solve_bounds,
+        &node,
+        &mut s.stats,
+    );
+    // Must run unconditionally for every processed node (Codex review,
+    // P2): `nodes_processed` was already incremented above regardless of
+    // this node's outcome, but `maybe_apply_tree_cut_separation` below is
+    // skipped entirely on Infeasible/Unbounded/Timeout dispatch. Checking
+    // the reset only inside that skipped path let a boundary node that
+    // happened to be Infeasible push the periodic reset a full interval
+    // late (`is_multiple_of` never matches again until the next
+    // multiple).
+    maybe_reset_separation_dry_streak(&mut s.stats);
+
+    match dispatch_relaxation_status(
+        &res,
+        &node,
+        &mut s.q,
+        &mut s.stats,
+        ctx.cfg,
+        &mut s.conflicts,
+        ctx.root_bounds,
+        &mut s.open_lb,
+        &mut s.had_open,
+        &mut s.deadline_stop,
+        &mut s.unbounded,
+    ) {
+        StatusDispatch::Continue => {
+            flush_loop_other(&mut s.stats, iter_t0, iter_before);
+            return NodeLoop::Continue;
+        }
+        StatusDispatch::Break => {
+            flush_loop_other(&mut s.stats, iter_t0, iter_before);
+            return NodeLoop::Break;
+        }
+        StatusDispatch::Proceed => {}
+    }
+
+    res = maybe_apply_tree_cut_separation(
+        problem,
+        ctx.cfg,
+        &mut s.stats,
+        ctx.mask,
+        &node,
+        solve_bounds,
+        &node_options,
+        res,
+    );
+
+    apply_node_outcome(problem, node, &res, ctx, s, is_root, iter_t0, iter_before);
+    NodeLoop::Continue
+}
+
+/// Owned inputs a [`SearchCtx`] borrows: the per-node options template, the
+/// integer-variable index tables, the root bounds and the seed statistics.
+type PreparedSearch = (
+    SolverOptions,
+    Vec<usize>,
+    HashMap<usize, usize>,
+    Vec<(f64, f64)>,
+    MipStats,
+);
+
+/// Build the owned inputs the serial and parallel drivers both borrow from.
+fn prepare_search_inputs<R: Relaxation>(
+    problem: &R,
+    options: &SolverOptions,
+) -> Result<PreparedSearch, MipSearchEarlyReturn> {
+    let (shared, _deadline, stats) = prepare_mip_search(problem, options)?;
+    let integer_vars = problem.integer_vars().to_vec();
+    let j_to_k: HashMap<usize, usize> = integer_vars
+        .iter()
+        .enumerate()
+        .map(|(k, &j)| (j, k))
+        .collect();
+    let root_bounds = problem.root_bounds().to_vec();
+    Ok((shared, integer_vars, j_to_k, root_bounds, stats))
 }
 
 fn solve_mip_core<R: Relaxation>(
@@ -1260,211 +1457,89 @@ fn solve_mip_core<R: Relaxation>(
     mask: Vec<bool>,
     initial_incumbent: Option<SolverResult>,
 ) -> (SolverResult, MipStats) {
-    let (shared, deadline, mut stats) = match prepare_mip_search(problem, options) {
-        Ok(v) => v,
-        Err(early_return) => return *early_return,
+    let (shared, integer_vars, j_to_k, root_bounds, stats) =
+        match prepare_search_inputs(problem, options) {
+            Ok(v) => v,
+            Err(early_return) => return *early_return,
+        };
+    let ctx = SearchCtx {
+        cfg,
+        shared: &shared,
+        mask: &mask,
+        integer_vars: &integer_vars,
+        j_to_k: &j_to_k,
+        deadline: shared.deadline,
+        root_bounds: &root_bounds,
+        use_reliability: cfg.branching == MipBranching::Reliability,
     };
 
-    let integer_vars = problem.integer_vars().to_vec();
-    let j_to_k: HashMap<usize, usize> = integer_vars
-        .iter()
-        .enumerate()
-        .map(|(k, &j)| (j, k))
-        .collect();
-    let use_reliability = cfg.branching == MipBranching::Reliability;
-    let mut pc = PseudocostState::new(integer_vars.len());
-
-    let mut state = MipState::new();
+    let mut s = SearchState::new(
+        stats,
+        integer_vars.len(),
+        MipState::new(),
+        conflict::ConflictStore::new(),
+    );
     if let Some(inc) = initial_incumbent {
-        if state.consider(&inc) {
-            stats.incumbent_updates += 1;
-            stats.fp_incumbent_found = true;
+        if s.state.consider(&inc) {
+            s.stats.incumbent_updates += 1;
+            s.stats.fp_incumbent_found = true;
         }
     }
-
-    let mut q = NodeQueue::new();
-    q.push(MipNode::root(
+    s.q.push(MipNode::root(
         problem.root_bounds().to_vec(),
         f64::NEG_INFINITY,
     ));
 
-    let mut open_lb = f64::INFINITY;
-    let mut had_open = false;
-    let mut proof_uncertain = false;
-    let mut deadline_stop = false;
-    let mut maxnodes_stop = false;
-    let mut unbounded = false;
-    let mut root_solved = false;
-    let mut nodes_since_dive: usize = 0;
-    let mut dive_start_depth: usize = 0;
-    let mut conflicts = conflict::ConflictStore::new();
-    let root_bounds = problem.root_bounds().to_vec();
-
-    while let Some(node) = q.pop() {
-        // Snapshot for `node_loop_other_us`: MipStats is Copy, so this is a
-        // cheap per-iteration baseline. Every named bucket below is measured
-        // by Instant and accumulated into `stats`; `flush_loop_other` at each
-        // exit point below charges whatever wall time this iteration spent
-        // outside those buckets to `node_loop_other_us`.
-        let iter_t0 = Instant::now();
-        let iter_before = stats;
-        if check_stop_conditions(
-            cfg,
-            deadline,
-            &node,
-            &mut q,
-            &mut stats,
-            iter_t0,
-            iter_before,
-            &mut open_lb,
-            &mut had_open,
-            &mut deadline_stop,
-            &mut maxnodes_stop,
+    while let Some(node) = s.q.pop() {
+        let nodes_done = s.stats.nodes_processed;
+        if matches!(
+            run_node(problem, node, &ctx, &mut s, nodes_done),
+            NodeLoop::Break
         ) {
             break;
         }
-
-        // --- Dive management: start a dive every DIVE_FREQUENCY best-bound pops ---
-        if !q.is_diving() {
-            nodes_since_dive += 1;
-            let freq = if state.incumbent_obj.is_none() {
-                DIVE_FREQUENCY_NO_INCUMBENT
-            } else {
-                DIVE_FREQUENCY
-            };
-            if nodes_since_dive >= freq {
-                nodes_since_dive = 0;
-                dive_start_depth = node.depth;
-                q.start_dive();
-            }
-        }
-
-        // --- Incumbent-bound pruning and conflict pruning ---
-        if let Some(inc) = state.incumbent_obj {
-            if should_prune(node.lower_bound, Some(inc), cfg.gap_tol) {
-                stats.pruned += 1;
-                if q.is_diving() {
-                    q.end_dive();
-                }
-                flush_loop_other(&mut stats, iter_t0, iter_before);
-                continue;
-            }
-        }
-        let conflict_check_t0 = Instant::now();
-        let node_is_conflicted = node.depth > 0 && conflicts.is_conflicted(&node.var_bounds);
-        stats.conflict_us = stats.conflict_us.saturating_add(
-            conflict_check_t0
-                .elapsed()
-                .as_micros()
-                .min(u128::from(u64::MAX)) as u64,
-        );
-        if node_is_conflicted {
-            stats.pruned += 1;
-            stats.conflict_pruned += 1;
-            flush_loop_other(&mut stats, iter_t0, iter_before);
-            continue;
-        }
-
-        let tightened = match propagate_node_bounds(problem, &node, &mask, &mut stats) {
-            Ok(t) => t,
-            Err(()) => {
-                flush_loop_other(&mut stats, iter_t0, iter_before);
-                continue;
-            }
-        };
-        let solve_bounds: &[(f64, f64)] = tightened.as_deref().unwrap_or(&node.var_bounds);
-
-        let (mut res, node_options) = solve_node_relaxation(
-            problem,
-            &shared,
-            cfg,
-            solve_bounds,
-            &node,
-            &mut root_solved,
-            &mut stats,
-        );
-        // Must run unconditionally for every processed node (Codex review,
-        // P2): `nodes_processed` was already incremented above regardless of
-        // this node's outcome, but `maybe_apply_tree_cut_separation` below is
-        // skipped entirely on Infeasible/Unbounded/Timeout dispatch. Checking
-        // the reset only inside that skipped path let a boundary node that
-        // happened to be Infeasible push the periodic reset a full interval
-        // late (`is_multiple_of` never matches again until the next
-        // multiple).
-        maybe_reset_separation_dry_streak(&mut stats);
-
-        match dispatch_relaxation_status(
-            &res,
-            &node,
-            &mut q,
-            &mut stats,
-            cfg,
-            &mut conflicts,
-            &root_bounds,
-            &mut open_lb,
-            &mut had_open,
-            &mut deadline_stop,
-            &mut unbounded,
-        ) {
-            StatusDispatch::Continue => {
-                flush_loop_other(&mut stats, iter_t0, iter_before);
-                continue;
-            }
-            StatusDispatch::Break => {
-                flush_loop_other(&mut stats, iter_t0, iter_before);
-                break;
-            }
-            StatusDispatch::Proceed => {}
-        }
-
-        res = maybe_apply_tree_cut_separation(
-            problem,
-            cfg,
-            &mut stats,
-            &mask,
-            &node,
-            solve_bounds,
-            &node_options,
-            res,
-        );
-
-        apply_node_outcome(
-            problem,
-            node,
-            &res,
-            &mut state,
-            &mut stats,
-            cfg,
-            &shared,
-            &mask,
-            &integer_vars,
-            &j_to_k,
-            &mut pc,
-            use_reliability,
-            deadline,
-            dive_start_depth,
-            &mut q,
-            &mut open_lb,
-            &mut had_open,
-            &mut proof_uncertain,
-            iter_t0,
-            iter_before,
-        );
     }
 
-    finalize_mip_result(
-        problem,
-        cfg,
-        q,
-        state,
-        stats,
-        open_lb,
-        had_open,
-        unbounded,
-        deadline_stop,
-        maxnodes_stop,
-        proof_uncertain,
-    )
+    let outcome = SearchOutcome::from(&s);
+    finalize_mip_result(problem, cfg, s.q, s.state, s.stats, outcome)
+}
+
+/// Terminal flags reduced out of one or more [`SearchState`]s for
+/// [`finalize_mip_result`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SearchOutcome {
+    open_lb: f64,
+    had_open: bool,
+    unbounded: bool,
+    deadline_stop: bool,
+    maxnodes_stop: bool,
+    proof_uncertain: bool,
+}
+
+impl SearchOutcome {
+    fn from(s: &SearchState) -> Self {
+        Self {
+            open_lb: s.open_lb,
+            had_open: s.had_open,
+            unbounded: s.unbounded,
+            deadline_stop: s.deadline_stop,
+            maxnodes_stop: s.maxnodes_stop,
+            proof_uncertain: s.proof_uncertain,
+        }
+    }
+
+    /// Reduce a worker's terminal flags into the search-wide outcome: the
+    /// open lower bound is the minimum over workers (any region one worker
+    /// left open is open for the search), and every stop/uncertainty flag is
+    /// a disjunction.
+    fn absorb(&mut self, other: &Self) {
+        self.open_lb = self.open_lb.min(other.open_lb);
+        self.had_open |= other.had_open;
+        self.unbounded |= other.unbounded;
+        self.deadline_stop |= other.deadline_stop;
+        self.maxnodes_stop |= other.maxnodes_stop;
+        self.proof_uncertain |= other.proof_uncertain;
+    }
 }
 
 /// Post-loop finalization shared by every `solve_mip_core` exit path:
@@ -1472,20 +1547,22 @@ fn solve_mip_core<R: Relaxation>(
 /// remaining open lower bound, and — from the surviving incumbent (if any) —
 /// decides `Optimal` (with a [`BoundGapCertificate`]) vs `Timeout` vs
 /// `SuboptimalSolution`, or defers to [`finalize_no_incumbent`].
-#[allow(clippy::too_many_arguments)]
 fn finalize_mip_result<R: Relaxation>(
     problem: &R,
     cfg: &MipConfig,
     mut q: NodeQueue,
     mut state: MipState,
     stats: MipStats,
-    open_lb: f64,
-    had_open: bool,
-    unbounded: bool,
-    deadline_stop: bool,
-    maxnodes_stop: bool,
-    proof_uncertain: bool,
+    outcome: SearchOutcome,
 ) -> (SolverResult, MipStats) {
+    let SearchOutcome {
+        open_lb,
+        had_open,
+        unbounded,
+        deadline_stop,
+        maxnodes_stop,
+        proof_uncertain,
+    } = outcome;
     if q.is_diving() {
         q.end_dive();
     }
@@ -1576,20 +1653,19 @@ fn accumulate_node_stats(
     scale_delta: &crate::presolve::scaling::LpScaleProfileSnapshot,
     fallback_delta: &crate::simplex::dual_advanced::SimplexFallbackSnapshot,
     res: &SolverResult,
-    root_solved: &mut bool,
+    is_root: bool,
     node_depth: usize,
 ) {
     stats.nodes_processed += 1;
     stats.max_depth_seen = stats.max_depth_seen.max(node_depth);
     stats.relaxation_time_total_ms += elapsed_ms;
-    if !*root_solved {
+    if is_root {
         stats.relaxation_time_root_ms = elapsed_ms;
         stats.lp_scale_us_root += scale_delta.scale_us;
         stats.lp_scale_calls_root += scale_delta.calls;
         if let Some(tb) = res.timing_breakdown {
             stats.lp_solve_us_root += tb.solve_us;
         }
-        *root_solved = true;
     } else {
         stats.relaxation_time_desc_ms += elapsed_ms;
         stats.lp_scale_us_desc += scale_delta.scale_us;
@@ -1928,24 +2004,28 @@ fn try_local_branching<R: Relaxation>(
 /// Handles both trusted (Optimal) and non-trusted paths: pseudocost updates,
 /// integer-feasibility detection, RINS, max-depth, reduced-cost fixing,
 /// branching variable selection, and child bound computation.
-#[allow(clippy::too_many_arguments)]
 fn process_node_outcome<R: Relaxation>(
     problem: &R,
     node: &mut MipNode,
     res: &SolverResult,
     trusted: bool,
-    state: &mut MipState,
-    stats: &mut MipStats,
-    cfg: &MipConfig,
-    shared: &SolverOptions,
-    mask: &[bool],
-    integer_vars: &[usize],
-    j_to_k: &HashMap<usize, usize>,
-    pc: &mut PseudocostState,
-    use_reliability: bool,
-    deadline: &Option<Instant>,
-    dive_start_depth: usize,
+    ctx: &SearchCtx<'_>,
+    s: &mut SearchState,
+    is_root: bool,
 ) -> NodeAction {
+    let SearchCtx {
+        cfg,
+        shared,
+        mask,
+        integer_vars,
+        j_to_k,
+        deadline,
+        use_reliability,
+        ..
+    } = *ctx;
+    let deadline = &deadline;
+    let dive_start_depth = s.dive_start_depth;
+    let (state, stats, pc) = (&mut s.state, &mut s.stats, &mut s.pc);
     if trusted {
         // Pseudocost update: record per-unit cost (delta / fractionality) so
         // that score() can correctly predict gains at different fractionalities.
@@ -1975,7 +2055,7 @@ fn process_node_outcome<R: Relaxation>(
                 }
             }
         }
-        if stats.nodes_processed == 1 {
+        if is_root {
             stats.root_lp_bound = res.objective;
         }
         let node_lb = node.lower_bound.max(res.objective);
