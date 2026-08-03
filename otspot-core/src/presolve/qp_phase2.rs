@@ -147,26 +147,17 @@ fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool], opts: &So
     let mut work = aeq.clone();
 
     for col in 0..n {
-        // Gaussian elimination here is O(m_eq * n) per column, O(m_eq * n^2)
-        // total (see the module doc / `ROW_OVERDETERMINED_RATIO` comment) --
-        // the same "external stop mid-loop, not just at entry" gap as
-        // `dual_advanced::phase1::farkas_infeasibility_certified`'s per-row
-        // Farkas probe loop. Checked once per outer (column) iteration: cheap
-        // (one atomic load) next to that iteration's own O(m_eq * n) cost.
+        // O(m_eq * n) per column, checked once per outer iteration (cheap
+        // next to that cost) -- same gap as
+        // `dual_advanced::phase1::farkas_infeasibility_certified`'s probe loop.
         //
-        // `return`, not `break`: a row that never got a chance to compete
-        // for a pivot (because we stopped partway through the columns) has
-        // not been *proven* linearly dependent on the pivots found so far --
-        // the "drop every non-pivot row" pass below is only sound once every
-        // column has had its chance to claim a pivot (or `pivot_count`
-        // already reached the theoretical max `n`). Falling through to that
-        // pass with an artificially-early-truncated pivot set would drop
-        // rows that were never actually shown to be redundant -- a
-        // correctness bug (a wrongly-dropped constraint silently relaxes
-        // the problem), not just a missed optimization. Aborting the whole
-        // function leaves `removed_rows` at the caller's initial
-        // (all-`false`, "no reduction") state, the same honest fallback the
-        // `m * n > QR_SKIP_SIZE_THRESHOLD` size-cap check above already uses.
+        // `return`, not `break`: a row not yet visited hasn't been *proven*
+        // dependent on the pivots found so far. The "drop every non-pivot
+        // row" pass below is only sound once every column had its chance at
+        // a pivot; falling through early would drop rows never shown
+        // redundant -- silently relaxing the problem, not just a missed
+        // optimization. `return` leaves `removed_rows` at the caller's
+        // all-`false` initial state, same as the size-cap check above.
         if opts.external_stop_requested() {
             return;
         }
@@ -522,33 +513,23 @@ mod tests {
     }
 
     /// Preset `cancel_flag=true` must make `run_qp_presolve_phase2` return
-    /// `phase1_result` unchanged (skip its own work), the same way an
-    /// already-expired `deadline` does -- the entry check used to look at
-    /// `deadline` only, never `cancel_flag` (Codex PR #31 review, item 3).
+    /// `phase1_result` unchanged, the same way an already-expired `deadline`
+    /// does -- the entry check used to look at `deadline` only, never
+    /// `cancel_flag` (Codex PR #31 review, item 3).
     ///
-    /// A small problem can't tell this apart from the in-loop check inside
-    /// `equality_constraint_qr` catching it one statement later: both leave
-    /// `num_constraints` unchanged either way, since the in-loop check fires
-    /// on `col == 0`, before any pivot is found, if cancellation was already
-    /// preset. What the entry check *specifically* saves is the row-entry
-    /// scan, hash-bucketing/pairing, and dense `aeq`/`work` matrix
-    /// allocation that `equality_constraint_qr` does *before* its loop even
-    /// starts -- only visible with a large enough problem that this setup
-    /// itself takes measurable time. Reuses
-    /// `test_equality_constraint_qr_mid_loop_cancel_aborts_without_dropping_rows`'s
-    /// chain construction (n=600, 3 duplicate copies, m=3594) for that
-    /// reason.
+    /// `num_constraints` alone can't tell this apart from the in-loop check
+    /// inside `equality_constraint_qr` catching it one statement later (both
+    /// leave it unchanged). What the entry check specifically saves is the
+    /// row-entry scan, hash-bucketing/pairing, and dense `aeq`/`work`
+    /// allocation `equality_constraint_qr` does *before* its loop starts --
+    /// only visible on a large enough problem for that setup to cost real
+    /// time, hence reusing the mid-loop test's chain construction
+    /// (n=600, 3 copies, m=3594).
     ///
-    /// Measured directly (this machine, `cargo test`'s own `opt-level=3`
-    /// profile, 5 trials): entry check present, ~1-7us; entry check
-    /// reverted to `deadline`-only (the in-loop check alone still catches
-    /// it, but only *after* paying for the setup), ~7.7-10.3ms -- three
-    /// orders of magnitude. The 1ms bound below sits far below the broken
-    /// floor and far above the fixed ceiling.
-    ///
-    /// Sentinel: reverting the entry check from `opts.external_stop_requested()`
-    /// back to `opts.deadline.is_some_and(...)` makes this take ~8-10ms,
-    /// over the bound -- confirmed by reverting and re-running.
+    /// Measured (5 trials): entry check present, ~1-7us; reverted to
+    /// `deadline`-only (in-loop check alone still catches it, but only after
+    /// paying for the setup), ~7.7-10.3ms. Sentinel: reverting the entry
+    /// check confirmed this exceeds the 1ms bound below.
     #[test]
     fn test_run_qp_presolve_phase2_honors_preset_cancel_flag() {
         use std::sync::atomic::AtomicBool;
@@ -658,21 +639,15 @@ mod tests {
         use std::sync::Arc;
         use std::time::Duration;
 
-        // Chain structure (x_i + x_{i+1} = 5, one pair per adjacent column
-        // overlap), not n independent single-variable pairs: the latter
-        // makes every row already-diagonal (disjoint columns), so the
-        // "eliminate other rows" inner loop's factor is always exactly
-        // zero and skipped -- the whole elimination finishes in
-        // microseconds regardless of n, never actually catching a mid-loop
-        // cancel. Overlapping columns force genuine O(m_eq * n) work per
-        // pivot (every other still-active row's factor is nonzero and must
-        // be eliminated), which is what makes this problem size actually
-        // take long enough (milliseconds, not microseconds) for the
-        // spawned thread's cancel to land mid-elimination.
-        // `copies` duplicate sets of the same (n-1)-link chain so
-        // `m = 2 * copies * (n-1) > n * ROW_OVERDETERMINED_RATIO` (the
-        // threshold that gates whether QR runs at all): a single copy
-        // alone (m = 2(n-1)) sits just under `2n`.
+        // Chain structure (x_i + x_{i+1} = 5), not n independent
+        // single-variable pairs: the latter makes every row already-diagonal
+        // (disjoint columns), so the elimination factor is always exactly
+        // zero and skipped -- finishes in microseconds, never catching a
+        // mid-loop cancel. Overlapping columns force genuine O(m_eq * n)
+        // work per pivot, taking long enough (ms) for the spawned thread's
+        // cancel to land mid-elimination. `copies` duplicate chains so
+        // `m = 2 * copies * (n-1) > n * ROW_OVERDETERMINED_RATIO` (a single
+        // copy alone sits just under `2n`, under the threshold).
         let n = 600usize;
         let copies = 3usize;
         let m = 2 * copies * (n - 1);

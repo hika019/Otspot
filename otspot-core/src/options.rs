@@ -544,10 +544,11 @@ pub struct SolverOptions {
     /// Shared cooperative-cancellation flag: setting it to `true` from
     /// another thread makes the next check point inside a running solve
     /// stop early with the same `Timeout`-shaped outcome as a wall-clock
-    /// `deadline` expiry (see [`Self::external_stop_requested`]), without
-    /// needing the caller to know a deadline in advance. Checked at the
-    /// same cadence as `deadline` throughout the LP/QP/MIP/convex-QCQP
-    /// routes. `None` (default): no cancellation hook, unaffected.
+    /// `deadline` expiry (see `external_stop_requested`, private to this
+    /// crate), without needing the caller to know a deadline in advance.
+    /// Checked at the same cadence as `deadline` throughout the
+    /// LP/QP/MIP/convex-QCQP routes. `None` (default): no cancellation
+    /// hook, unaffected.
     pub cancel_flag: Option<Arc<AtomicBool>>,
     /// Solve deadline computed from `timeout_secs` at solve entry (internal use).
     pub(crate) deadline: Option<Instant>,

@@ -57,6 +57,17 @@ const UNCONDITIONAL_SKIP_NAMES: &[&str] = &["fmt", "eq", "ne", "clone", "hash", 
 /// real check (the word must appear *somewhere*), just not owner-qualified.
 const GENERIC_METHOD_NAMES: &[&str] = &["add", "sub", "mul", "neg", "from"];
 
+/// Rust built-in primitive type names: legitimate associated-type owners
+/// (`f64::Output`, see `classify_pub_type_alias`) that never appear as a
+/// `pub struct`/`pub enum`/`pub trait` declaration in any snapshot, so the
+/// `known_types` collection below would otherwise misclassify them as a
+/// module path segment and treat e.g. `f64::Output = Expression` as a real
+/// top-level `Output` alias.
+const RUST_PRIMITIVE_TYPES: &[&str] = &[
+    "bool", "char", "str", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16",
+    "u32", "u64", "u128", "usize",
+];
+
 #[derive(Debug, PartialEq)]
 enum Subject<'a> {
     /// `pub struct Owner` / `pub enum Owner` / `pub trait Owner`.
@@ -65,6 +76,48 @@ enum Subject<'a> {
     Variant { owner: &'a str, variant: &'a str },
     /// `pub fn Owner::leaf(...)` or a field `pub Owner::leaf: Type`.
     Member { owner: &'a str, leaf: &'a str },
+}
+
+/// Extracts the declared name from a `pub struct `/`pub enum `/`pub trait `
+/// line (attribute prefixes like `#[non_exhaustive]` are fine since this
+/// looks for `.contains`, not `.starts_with`). Shared by `classify_line` and
+/// the `known_types` pre-pass `classify_pub_type_alias` needs to tell a
+/// genuine top-level `pub type` alias apart from associated-type boilerplate.
+fn type_name_from_declaration(line: &str) -> Option<&str> {
+    if line.contains("pub struct ") || line.contains("pub enum ") || line.contains("pub trait ") {
+        last_path_segment(line.rsplit(' ').next()?)
+    } else {
+        None
+    }
+}
+
+/// Classifies a `pub type <path> = <target>` line. Associated types from
+/// trait impls (`Add::Output`, `Index::Output`, ...) render as
+/// `pub type <OwnerType>::<AssocName> = <Concrete>`, where `<OwnerType>` is
+/// always a real, already-declared type (a `pub struct`/`pub enum` in this
+/// same snapshot, per `known_types`) or a Rust primitive (`f64::Output`).
+/// A genuine top-level alias (`pub type Foo = Bar;` in source) instead
+/// renders with the *module path* as the owner segment, e.g.
+/// `pub type otspot_model::TempCalibrationAlias = f64` -- confirmed
+/// empirically by injecting `pub type TempCalibrationAlias = f64;` into
+/// `otspot-model/src/lib.rs` and regenerating the live snapshot: the
+/// associated-type lines all kept their `Owner::Output` shape, while the
+/// injected alias appeared as `pub type otspot_model::TempCalibrationAlias
+/// = f64` -- `otspot_model` (the crate name) is never a declared type, so
+/// it falls through to `Some(Subject::Type("TempCalibrationAlias"))` here,
+/// while every real associated type's owner matches `known_types` or
+/// `RUST_PRIMITIVE_TYPES` and stays skipped.
+fn classify_pub_type_alias<'a>(
+    line: &'a str,
+    known_types: &HashSet<&str>,
+) -> Option<Subject<'a>> {
+    let line = line.trim();
+    let path = line.strip_prefix("pub type ")?.split('=').next()?.trim();
+    let (owner, leaf) = owner_and_leaf(path)?;
+    if known_types.contains(owner) || RUST_PRIMITIVE_TYPES.contains(&owner) {
+        return None;
+    }
+    Some(Subject::Type(leaf))
 }
 
 fn classify_line(line: &str) -> Option<Subject<'_>> {
@@ -77,10 +130,12 @@ fn classify_line(line: &str) -> Option<Subject<'_>> {
         // `pub type ...::Output = f64` (associated types from trait impls
         // like `Index`) is structural: the trait impl itself is what
         // matters for coverage, already caught via the `impl ...` skip.
+        // Genuine top-level aliases are handled separately by
+        // `classify_pub_type_alias`, which needs the whole-snapshot
+        // `known_types` set this single-line function doesn't have.
         return None;
     }
-    if line.contains("pub struct ") || line.contains("pub enum ") || line.contains("pub trait ") {
-        let name = last_path_segment(line.rsplit(' ').next()?)?;
+    if let Some(name) = type_name_from_declaration(line) {
         return Some(Subject::Type(name));
     }
     if line.starts_with("pub fn ") {
@@ -273,9 +328,15 @@ fn describe(subject: &Subject<'_>) -> String {
 }
 
 fn uncovered_identifiers(snapshot: &str, index: &ManifestIndex) -> Vec<String> {
+    let known_types: HashSet<&str> = snapshot
+        .lines()
+        .filter_map(|l| type_name_from_declaration(l.trim()))
+        .collect();
+
     let mut uncovered = Vec::new();
     for line in snapshot.lines() {
-        let Some(subject) = classify_line(line) else {
+        let subject = classify_pub_type_alias(line, &known_types).or_else(|| classify_line(line));
+        let Some(subject) = subject else {
             continue;
         };
         if !index.covers(&subject) {
@@ -373,5 +434,83 @@ fn qualified_matching_rejects_leaf_name_collision() {
         !index.covers(&collision),
         "Variable::value is not a real manifested member and must not be \
          covered merely because ModelResult::value shares the leaf name \"value\""
+    );
+}
+
+/// `classify_pub_type_alias` must tell a genuine top-level type alias apart
+/// from associated-type boilerplate using only the owner segment's identity
+/// (a known declared type / a Rust primitive) -- not by, say, path length or
+/// module-name casing, which would misclassify a same-crate alias placed
+/// inside a submodule. Exact line shapes and the crate-name-as-owner case
+/// (`otspot_model::TempCalibrationAlias`) were confirmed empirically by
+/// injecting a real alias into `otspot-model/src/lib.rs` and regenerating
+/// the live snapshot (see `classify_pub_type_alias`'s doc comment).
+#[test]
+fn classify_pub_type_alias_distinguishes_real_alias_from_associated_type() {
+    let known_types: HashSet<&str> = ["Variable", "ModelResult", "Expression", "QuadExpr"]
+        .into_iter()
+        .collect();
+
+    // Associated types: owner is a known declared type or a primitive.
+    assert_eq!(
+        classify_pub_type_alias(
+            "pub type otspot_model::ModelResult::Output = f64",
+            &known_types
+        ),
+        None
+    );
+    assert_eq!(
+        classify_pub_type_alias("pub type f64::Output = otspot_model::expression::Expression", &known_types),
+        None
+    );
+    assert_eq!(
+        classify_pub_type_alias(
+            "pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr",
+            &known_types
+        ),
+        None
+    );
+
+    // Genuine top-level alias: owner is the crate name, not a declared type.
+    assert_eq!(
+        classify_pub_type_alias("pub type otspot_model::TempCalibrationAlias = f64", &known_types),
+        Some(Subject::Type("TempCalibrationAlias"))
+    );
+    // Same, nested one level deeper inside a submodule rather than the crate root.
+    assert_eq!(
+        classify_pub_type_alias(
+            "pub type otspot_model::expression::ExprAlias = otspot_model::expression::Expression",
+            &known_types
+        ),
+        Some(Subject::Type("ExprAlias"))
+    );
+
+    // Not a `pub type` line at all.
+    assert_eq!(
+        classify_pub_type_alias("pub struct otspot_model::variable::Variable", &known_types),
+        None
+    );
+}
+
+/// End-to-end: an unmanifested top-level alias injected into a copy of the
+/// real snapshot must be reported as uncovered by `uncovered_identifiers`,
+/// not silently discarded the way the unconditional `pub type` skip used to
+/// discard it. Sentinel: reverting `uncovered_identifiers` back to calling
+/// only `classify_line` (dropping the `classify_pub_type_alias` pre-pass)
+/// makes this assert an empty `Vec` instead -- confirmed by reverting and
+/// re-running.
+#[test]
+fn uncovered_identifiers_flags_unmanifested_top_level_alias() {
+    let index = ManifestIndex::parse(MANIFEST_JSON);
+    let injected = format!(
+        "{MODEL_SNAPSHOT}\npub type otspot_model::TotallyUnmanifestedAlias = f64\n"
+    );
+
+    let uncovered = uncovered_identifiers(&injected, &index);
+
+    assert!(
+        uncovered.contains(&"type TotallyUnmanifestedAlias".to_string()),
+        "an injected top-level alias absent from api_manifest.json must be \
+         flagged as uncovered, got: {uncovered:?}"
     );
 }

@@ -2708,31 +2708,24 @@ mod tests {
     /// gives f(x) = 2x^2-8x-8, minimized at x=2 (y=2), f(2) = -16.
     ///
     /// `Model::solve_qp_internal` used to build its `SolverOptions` without
-    /// ever copying `self.presolve` into it at all (Codex PR #31 review,
-    /// item 1) -- `set_presolve(false)` was silently ignored, and presolve
-    /// ran regardless.
+    /// ever copying `self.presolve` into it (Codex PR #31 review, item 1) --
+    /// `set_presolve(false)` was silently ignored, and presolve ran regardless.
     ///
-    /// Wall-clock *ratio*, not an absolute timeout: an earlier version of
-    /// this test set a timeout between the two regimes' absolute times
-    /// (measured on the machine that wrote it: presolve=on ~19.4ms,
-    /// presolve=off ~150.9ms) and asserted Optimal-within-timeout for "on"
-    /// vs. Timeout-past-it for "off". That is machine-speed-dependent --
-    /// reviewer-measured flaky on a slower/loaded (1 vCPU, ~3x slowdown)
-    /// host, where even the presolved "on" regime no longer finished inside
-    /// the fixed window, failing the Optimal assertion. Switched to the
-    /// same machine-speed-independent design `test_solve_releases_the_gil`
-    /// (otspot-py) uses: solve both regimes to completion (no timeout) and
-    /// compare wall time as a ratio, which stays roughly constant across
-    /// machines even as the absolute times scale together.
+    /// Wall-clock *ratio*, not an absolute timeout: an absolute-timeout
+    /// version was reviewer-measured flaky on a slower/loaded (1 vCPU, ~3x
+    /// slowdown) host, where even the presolved "on" regime missed the fixed
+    /// window. Switched to the same machine-speed-independent design
+    /// `test_solve_releases_the_gil` (otspot-py) uses: solve both regimes to
+    /// completion and compare wall time as a ratio, roughly constant across
+    /// machines even as absolute times scale together.
     ///
     /// Measured ratios (`off / on`): 7.8x (dev-writing machine, `--profile
-    /// dev`), 4.9-5.6x (reviewer's slower/loaded host, `cargo test`'s own
-    /// `opt-level=3`). `> 2.5x` sits comfortably below both.
+    /// dev`), 4.9-5.6x (reviewer's slower/loaded host). `> 2.5x` sits
+    /// comfortably below both.
     ///
     /// Sentinel: temporarily removing `solve_qp_internal`'s
     /// `opts.presolve = flag` wiring makes `presolve=false` run in the same
-    /// time as `presolve=on` (both silently presolving regardless of the
-    /// setting, ratio ~1x) -- this test would then fail the ratio assertion.
+    /// time as `presolve=on` (ratio ~1x) -- fails the ratio assertion.
     #[test]
     fn test_set_presolve_false_reaches_qp_solve_path() {
         let n = 16000usize;
@@ -3584,31 +3577,24 @@ mod mip_model_tests {
     /// so the MIQP optimum matches the QP relaxation's: -16.0.
     ///
     /// Unlike MILP (`MilpProblem::skip_node_presolve()` is unconditionally
-    /// `true` -- node-level presolve is *always* forced off during B&B
-    /// regardless of `self.presolve`, since re-running it per node would
-    /// drop the propagated warm-start basis), `MiqpProblem` does not
-    /// override `skip_node_presolve` (default `false`: MIQP's IPM per-node
-    /// solve genuinely relies on presolve's Ruiz scaling for conditioning),
-    /// so `opts.presolve` is honored at every B&B node -- `solve_mip_
-    /// internal`'s MIQP branch silently ignoring `self.presolve` (Codex PR
-    /// #31 review, item 1) was a real, measurable gap, not just an
-    /// inconsistency.
+    /// `true` -- node presolve is always forced off during B&B, since
+    /// re-running it per node would drop the warm-start basis), `MiqpProblem`
+    /// does not override `skip_node_presolve` (MIQP's IPM per-node solve
+    /// relies on presolve's Ruiz scaling), so `opts.presolve` is honored at
+    /// every B&B node -- `solve_mip_internal`'s MIQP branch silently
+    /// ignoring `self.presolve` (Codex PR #31 review, item 1) was real.
     ///
     /// Wall-clock *ratio*, not an absolute timeout -- see the QP version of
-    /// this test (`test_set_presolve_false_reaches_qp_solve_path`) for why
-    /// an absolute-timeout design is machine-speed-dependent and was found
-    /// flaky on a slower/loaded host (reviewer-reported). Same fix here:
+    /// this test for why an absolute-timeout design is machine-speed-
+    /// dependent and was found flaky on a slower/loaded host. Same fix:
     /// solve both regimes to completion and compare wall time as a ratio.
     ///
-    /// Measured ratios (`off / on`): 7.9x (dev-writing machine, `--profile
-    /// dev`); `> 2.5x` (same threshold as the QP version) sits comfortably
-    /// below that with headroom for slower/loaded hosts.
+    /// Measured ratio (`off / on`): 7.9x (dev-writing machine); `> 2.5x`
+    /// (same threshold as the QP version) sits comfortably below that.
     ///
-    /// Sentinel: temporarily reverting the MIQP branch's `opts.presolve`
-    /// wiring (folding it back into the MILP-only `else` branch, as it
-    /// originally was) makes `presolve=false` run in the same time as
-    /// `presolve=on` (ratio ~1x) -- this test would then fail the ratio
-    /// assertion.
+    /// Sentinel: reverting the MIQP branch's `opts.presolve` wiring (folding
+    /// it back into the MILP-only `else` branch) makes `presolve=false` run
+    /// in the same time as `presolve=on` (ratio ~1x) -- fails the assertion.
     #[test]
     fn test_set_presolve_false_reaches_miqp_solve_path() {
         let n = 16000usize;
