@@ -277,6 +277,26 @@ fn constraint_precond(a: &mut CscMatrix, b: &mut [f64]) -> Vec<f64> {
     sigmas
 }
 
+/// Runs `work`, honoring cancellation both before and after -- not just
+/// before. `equality_constraint_qr` has checkless fast paths (the top-level
+/// size-guard skip, and the `m_eq == 0` early return after its row-scan/
+/// pairing pass finds nothing to eliminate) that can still cost real time on
+/// a large QP without ever consulting `cancel_flag` internally. Checking only
+/// beforehand would let a cancellation requested *during* one of those
+/// checkless paths go unnoticed until the caller's next unrelated check (or
+/// never, if there isn't one) -- Python's `Model.solve()` signal-poll loop
+/// stays blocked in `handle.join()` for all of that.
+fn cancellable<T>(opts: &SolverOptions, work: impl FnOnce() -> T) -> Option<T> {
+    if opts.external_stop_requested() {
+        return None;
+    }
+    let result = work();
+    if opts.external_stop_requested() {
+        return None;
+    }
+    Some(result)
+}
+
 /// Run Phase 2 of QP presolve on a Phase-1 result: redundant-equality removal,
 /// near-zero Q pruning, and row-norm preconditioning.
 pub fn run_qp_presolve_phase2(
@@ -291,16 +311,18 @@ pub fn run_qp_presolve_phase2(
         return phase1_result;
     }
 
-    if opts.external_stop_requested() {
-        return phase1_result;
-    }
-
     // Coefficient magnitude alone cannot make a Q term semantically zero: the
     // complete objective may simply be expressed in correspondingly small units.
     let q_preserved = prob.q.clone();
 
-    let mut removed_rows_phase2 = vec![false; m];
-    equality_constraint_qr(prob, &mut removed_rows_phase2, opts);
+    let removed_rows_phase2 = match cancellable(opts, || {
+        let mut removed = vec![false; m];
+        equality_constraint_qr(prob, &mut removed, opts);
+        removed
+    }) {
+        Some(r) => r,
+        None => return phase1_result,
+    };
 
     let any_removed = removed_rows_phase2.iter().any(|&b| b);
 
@@ -711,6 +733,68 @@ mod tests {
             "mid-loop cancellation must abort equality_constraint_qr \
              entirely (removed_rows left at its all-false initial state), \
              not drop rows that were never proven redundant; got {removed_count} removed"
+        );
+    }
+
+    /// `cancellable` must not treat "cancellation wasn't requested before
+    /// `work` started" as sufficient -- `work` itself may be the thing that
+    /// makes cancellation true (standing in for `equality_constraint_qr`'s
+    /// checkless fast paths, where real wall-clock time passes between the
+    /// entry check and the moment the caller finds out). A side-effecting
+    /// closure makes this deterministic: no thread, no timing, no race --
+    /// reverting the post-`work` check back out (leaving only the entry
+    /// check) makes this assert `Some(42)` instead, since nothing before
+    /// `work` runs ever observes the flag flipping during it.
+    #[test]
+    fn test_cancellable_rechecks_after_work_not_just_before() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::clone(&cancel)),
+            ..Default::default()
+        };
+
+        let result = cancellable(&opts, || {
+            cancel.store(true, Ordering::Relaxed);
+            42
+        });
+
+        assert_eq!(
+            result, None,
+            "cancellable must recheck after `work` completes, not only before it starts"
+        );
+    }
+
+    #[test]
+    fn test_cancellable_runs_work_when_never_cancelled() {
+        let opts = SolverOptions::default();
+        assert_eq!(
+            cancellable(&opts, || 42),
+            Some(42),
+            "cancellable must return work's result when cancellation is never requested"
+        );
+    }
+
+    #[test]
+    fn test_cancellable_skips_work_when_preset_before_call() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::new(AtomicBool::new(true))),
+            ..Default::default()
+        };
+        let mut ran = false;
+        let result = cancellable(&opts, || {
+            ran = true;
+            42
+        });
+        assert_eq!(result, None);
+        assert!(
+            !ran,
+            "cancellable must not run work at all when already cancelled at entry"
         );
     }
 
