@@ -334,11 +334,6 @@ pub enum Tolerance {
 
 /// Default convergence tolerance for [`IpmOptions::eps`].
 pub const DEFAULT_IPM_EPS: f64 = 1e-6;
-/// Default proximity regularisation lower bound for [`IpmOptions::delta_min`].
-pub const DEFAULT_IPM_DELTA_MIN: f64 = 1e-8;
-/// Default initial proximity regularisation for [`IpmOptions::delta_p_init`]
-/// and [`IpmOptions::delta_d_init`].
-pub const DEFAULT_IPM_DELTA_INIT: f64 = 1e-6;
 /// Default Gondzio corrector count (Gondzio 1997, recommended range 2–5).
 pub const DEFAULT_IPM_MAX_CORRECTORS: usize = 3;
 
@@ -355,12 +350,6 @@ pub struct IpmOptions {
     pub max_iter: usize,
     /// Convergence tolerance.  Default: [`DEFAULT_IPM_EPS`].
     pub eps: f64,
-    /// Proximity regularisation lower bound δ_min.  Default: [`DEFAULT_IPM_DELTA_MIN`].
-    pub delta_min: f64,
-    /// Initial primal proximity regularisation δ_p.  Default: [`DEFAULT_IPM_DELTA_INIT`].
-    pub delta_p_init: f64,
-    /// Initial dual proximity regularisation δ_d.  Default: [`DEFAULT_IPM_DELTA_INIT`].
-    pub delta_d_init: f64,
     /// Maximum Gondzio correctors.  Default: [`DEFAULT_IPM_MAX_CORRECTORS`].
     pub max_correctors: usize,
     /// Use TwoFloat (double-double, ~106-bit) LDL for KKT systems where f64 conditioning
@@ -385,9 +374,6 @@ impl Default for IpmOptions {
         Self {
             max_iter: usize::MAX,
             eps: DEFAULT_IPM_EPS,
-            delta_min: DEFAULT_IPM_DELTA_MIN,
-            delta_p_init: DEFAULT_IPM_DELTA_INIT,
-            delta_d_init: DEFAULT_IPM_DELTA_INIT,
             max_correctors: DEFAULT_IPM_MAX_CORRECTORS,
             dd_ldl: false,
             minres_ir: None,
@@ -401,29 +387,11 @@ impl IpmOptions {
     /// Validate all numeric fields.
     ///
     /// Returns the first `Err` in field declaration order.
-    /// Invalid: non-finite or non-positive `eps` / `delta_*`, or `max_correctors == 0`.
+    /// Invalid: non-finite or non-positive `eps`, or `max_correctors == 0`.
     pub fn validate(&self) -> Result<(), OptionsError> {
         if !self.eps.is_finite() || self.eps <= 0.0 {
             return Err(OptionsError {
                 field: "ipm.eps",
-                reason: "must be finite and > 0",
-            });
-        }
-        if !self.delta_min.is_finite() || self.delta_min <= 0.0 {
-            return Err(OptionsError {
-                field: "ipm.delta_min",
-                reason: "must be finite and > 0",
-            });
-        }
-        if !self.delta_p_init.is_finite() || self.delta_p_init <= 0.0 {
-            return Err(OptionsError {
-                field: "ipm.delta_p_init",
-                reason: "must be finite and > 0",
-            });
-        }
-        if !self.delta_d_init.is_finite() || self.delta_d_init <= 0.0 {
-            return Err(OptionsError {
-                field: "ipm.delta_d_init",
                 reason: "must be finite and > 0",
             });
         }
@@ -1016,45 +984,6 @@ mod tests {
             ..Default::default()
         };
         assert!(o.validate().is_ok());
-    }
-
-    #[test]
-    fn test_ipm_validate_delta_min() {
-        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
-            let o = IpmOptions {
-                delta_min: bad,
-                ..Default::default()
-            };
-            assert!(o.validate().is_err(), "delta_min={bad} should be invalid");
-        }
-    }
-
-    #[test]
-    fn test_ipm_validate_delta_p_init() {
-        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
-            let o = IpmOptions {
-                delta_p_init: bad,
-                ..Default::default()
-            };
-            assert!(
-                o.validate().is_err(),
-                "delta_p_init={bad} should be invalid"
-            );
-        }
-    }
-
-    #[test]
-    fn test_ipm_validate_delta_d_init() {
-        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
-            let o = IpmOptions {
-                delta_d_init: bad,
-                ..Default::default()
-            };
-            assert!(
-                o.validate().is_err(),
-                "delta_d_init={bad} should be invalid"
-            );
-        }
     }
 
     #[test]

@@ -6,12 +6,12 @@ use super::factorize::{
 };
 use super::init::build_initial_point;
 use super::state::{
-    alpha_stall_eps_for, PmmState, ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N,
-    DELTA_INIT, DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL, GONDZIO_ALPHA_TRIGGER,
-    INFEAS_DETECTOR_DISTRUST_SCORE, MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD,
-    PF_FAR_FROM_TARGET_RATIO, PF_HISTORY_LEN, PF_STUCK_RATIO, PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE,
-    PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP,
-    RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
+    alpha_stall_eps_for, pf_stuck_should_lower_reg_limit, PmmState, ADAPTIVE_REG_C_MAX_THRESH,
+    ALPHA_DEADLOCK_N, ALPHA_STALL_N, DELTA_INIT, DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL,
+    GONDZIO_ALPHA_TRIGGER, INFEAS_DETECTOR_DISTRUST_SCORE, MIN_CONSECUTIVE_INFEAS,
+    MU_ZERO_THRESHOLD, PF_HISTORY_LEN, PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO,
+    REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
+    RESIDUAL_STALL_WINDOW, RHO_INIT, SIGMA_MAX_FALLBACK, STEP_REL_CAP,
 };
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
@@ -100,8 +100,11 @@ fn solve_ippmm_inner_confined(
 
     let (rho_init, delta_init) = match warm_mu {
         // warm start: μ 規模に揃えた rho/delta で出発し proximal pull を最小化。
+        // floor は REG_LIMIT_MIN (adaptive reg_limit が最終的に到達する下限) —
+        // 固定 delta_min=1e-8 は tight eps でこの初期値自体が過大な床になる
+        // (bug-frontier 実測: LISWET7 系, 後述の rho_matrix/delta_matrix 参照)。
         Some(mu) => {
-            let v = mu.max(options.ipm.delta_min);
+            let v = mu.max(REG_LIMIT_MIN);
             (v, v)
         }
         None => (RHO_INIT, DELTA_INIT),
@@ -299,12 +302,20 @@ fn solve_ippmm_inner_confined(
         }
 
         // Σ = diag(s_i / y_i) (等式行は0)
-        let sigma_max = 1.0 / options.ipm.delta_min.max(MU_ZERO_THRESHOLD);
-        let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, sigma_max);
+        let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, SIGMA_MAX_FALLBACK);
 
-        // 正則化は PMM 駆動。mu 依存 floor は使わない。
-        let rho_matrix = pmm.rho.max(options.ipm.delta_min);
-        let delta_matrix = pmm.delta.max(options.ipm.delta_min);
+        // 正則化は PMM 駆動。pmm.rho/pmm.delta は自身の更新式 (下方 `.max(reg_limit)`)
+        // で常に reg_limit ≥ REG_LIMIT_MIN に floor されているため、ここで固定の
+        // 絶対定数を追加で `.max()` してはならない。旧実装は `options.ipm.delta_min`
+        // (デフォルト 1e-8, DEFAULT_IPM_EPS=1e-6 向けに 100倍マージンで校正された
+        // 絶対定数) を課しており、tight eps (例 1e-8) では reg_limit が 1e-14 まで
+        // 下がっても行列側の正則化が 1e-8 に恒久的に張り付く副作用を持っていた。
+        // bug-frontier 実測 (LISWET7 @ eps=1e-8): 停滞行の dy_i=6.216, r_p_i=-6.216e-8
+        // で dy_i×delta_matrix=r_p_i が厳密に成立 (delta_matrix=1e-8 のときのみ) —
+        // 正則化が primal residual を δ·dy に押し付け、x を補正しない解が「厳密解」
+        // になっていた。delta_min オプションは撤去し、reg_limit 経路に一本化する。
+        let rho_matrix = pmm.rho;
+        let delta_matrix = pmm.delta;
 
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
@@ -639,7 +650,9 @@ fn solve_ippmm_inner_confined(
             pf_history.remove(0);
         }
 
-        // Adaptive reg_limit: prox が df を支配 (c≈0) または pf が窓内停滞 + target から遠い場合、floor を下げる。
+        // Adaptive reg_limit: prox が df を支配 (c≈0)、または pf-stagnation
+        // (`pf_stuck_should_lower_reg_limit`, state.rs 参照) の場合、floor を
+        // 下げて IPM が boundary を探索できるようにする。
         if (pmm.rho - reg_limit).abs() < reg_limit * 0.01 && reg_limit > REG_LIMIT_MIN {
             let mut should_lower = false;
             if allow_adaptive_reg {
@@ -654,13 +667,9 @@ fn solve_ippmm_inner_confined(
             }
             if !should_lower
                 && pf_history.len() == PF_HISTORY_LEN
-                && pf_history[0] > 0.0
-                && nr_p > eps_orig * PF_FAR_FROM_TARGET_RATIO
+                && pf_stuck_should_lower_reg_limit(nr_p, pf_history[0], eps_orig)
             {
-                let ratio = nr_p / pf_history[0];
-                if ratio > PF_STUCK_RATIO {
-                    should_lower = true;
-                }
+                should_lower = true;
             }
             if should_lower {
                 reg_limit = (reg_limit * REG_LIMIT_STEP).max(REG_LIMIT_MIN);
@@ -700,9 +709,63 @@ fn solve_ippmm_inner_confined(
         pmm.prev_nr_d = nr_d;
     }
 
-    if status.is_none() {
-        iterations_consumed = options.ipm.max_iter;
-    }
+    finalize_ippmm_result(
+        problem,
+        &b_ext,
+        m_orig,
+        q_is_indefinite,
+        options.ipm.max_iter,
+        iterations_consumed,
+        status,
+        final_residuals,
+        best_score,
+        best_residuals,
+        best_rel_gap,
+        x,
+        y,
+        s,
+        &best_x,
+        &best_y,
+        &best_s,
+        total_factorize_ns,
+        total_solve_ns,
+        total_reg_retries,
+        any_iterative,
+    )
+}
+
+/// ループ終端後の後処理: 反復予算枯渇の status 確定 (MaxIterations)、Timeout/
+/// MaxIterations 到達時の best-so-far への上書き、目的値・双対解の復元、不定 Q の
+/// Optimal→LocallyOptimal 降格、`SolverResult` の組み立てを行う。
+#[allow(clippy::too_many_arguments)]
+fn finalize_ippmm_result(
+    problem: &QpProblem,
+    b_ext: &[f64],
+    m_orig: usize,
+    q_is_indefinite: bool,
+    max_iter: usize,
+    iterations_consumed: usize,
+    status: Option<SolveStatus>,
+    mut final_residuals: Option<(f64, f64, f64)>,
+    best_score: f64,
+    best_residuals: (f64, f64, f64),
+    best_rel_gap: f64,
+    mut x: Vec<f64>,
+    mut y: Vec<f64>,
+    mut s: Vec<f64>,
+    best_x: &[f64],
+    best_y: &[f64],
+    best_s: &[f64],
+    total_factorize_ns: u128,
+    total_solve_ns: u128,
+    total_reg_retries: u32,
+    any_iterative: bool,
+) -> SolverResult {
+    let iterations_consumed = if status.is_none() {
+        max_iter
+    } else {
+        iterations_consumed
+    };
 
     // break なしのループ終端 = 反復予算枯渇。Timeout に丸めず MaxIterations で報告する。
     let status = status.unwrap_or(SolveStatus::MaxIterations);
@@ -710,7 +773,7 @@ fn solve_ippmm_inner_confined(
     // 素の Timeout 経路は発散 x をそのまま返してしまうので best-so-far で上書き。
     if matches!(status, SolveStatus::Timeout | SolveStatus::MaxIterations) && best_score.is_finite()
     {
-        let norm_b_bs = norm_inf(&b_ext).max(1.0);
+        let norm_b_bs = norm_inf(b_ext).max(1.0);
         let norm_c_bs = norm_inf(&problem.c).max(1.0);
         let current_score = match final_residuals {
             Some((nr_p, nr_d, mu)) if nr_p.is_finite() && nr_d.is_finite() && mu.is_finite() => {
@@ -719,13 +782,14 @@ fn solve_ippmm_inner_confined(
             _ => f64::INFINITY,
         };
         if best_score < current_score {
-            x.copy_from_slice(&best_x);
-            y.copy_from_slice(&best_y);
-            s.copy_from_slice(&best_s);
+            x.copy_from_slice(best_x);
+            y.copy_from_slice(best_y);
+            s.copy_from_slice(best_s);
             final_residuals = Some(best_residuals);
         }
     }
 
+    let mut qx = vec![0.0f64; problem.num_vars];
     spmv(&problem.q, &x, &mut qx);
     let objective = 0.5
         * qx.iter()
