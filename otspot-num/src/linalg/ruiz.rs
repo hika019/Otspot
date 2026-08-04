@@ -82,8 +82,14 @@ impl RuizScaler {
                     }
                 }
                 for i in 0..m {
-                    let norm = row_norms[i].max(EPS);
-                    self.e[i] /= norm.sqrt();
+                    // 構造的空行 (A のどの列にも非零を持たない行) は行ノルムが
+                    // 厳密に 0 になる。EPS クランプ経由で更新すると Step 2 の
+                    // 空列と同じ機構で e[i] が sweep ごとに発散するため、更新を
+                    // スキップし空行は恒等 (初期化時の e[i]=1.0) に据え置く。
+                    if row_norms[i] > 0.0 {
+                        let norm = row_norms[i].max(EPS);
+                        self.e[i] /= norm.sqrt();
+                    }
                 }
             }
 
@@ -113,8 +119,9 @@ impl RuizScaler {
                 // 構造的空列 (Q・A どちらにも非零を持たない列) は列ノルムが厳密に
                 // 0 になる。この列を EPS クランプ経由で更新すると d[j] が sweep
                 // ごとに 1/sqrt(EPS) 倍され RUIZ_SWEEPS 回累積して発散する
-                // (d[j] ≈ 1e159)。空列はスケーリング対象がないため d[j] = 1.0 に
-                // 据え置く。「ほぼゼロだが非零」の列 (col_norms[j] > 0) は従来通り
+                // (d[j] ≈ 1e159)。空列は更新をスキップし恒等に据え置く (初期化
+                // 時から一貫して空列なら `RuizScaler::new` の初期値 d[j]=1.0 の
+                // まま残る)。「ほぼゼロだが非零」の列 (col_norms[j] > 0) は従来通り
                 // EPS クランプで扱い挙動を変えない。
                 if col_norms[j] == 0.0 {
                     continue;
@@ -139,8 +146,16 @@ impl RuizScaler {
                 .enumerate()
                 .map(|(j, &v)| (self.c * self.d[j] * v).abs())
                 .fold(0.0f64, f64::max);
-            let denom = q_mat_inf.max(q_vec_inf).max(EPS);
-            self.c /= denom;
+            let obj_inf = q_mat_inf.max(q_vec_inf);
+            // Q・q_vec が両方恒等的にゼロ (feasibility-only 問題) の場合、
+            // 目的関数にスケーリング対象がない。EPS クランプ経由で更新すると
+            // sweep ごとに c が 1/EPS 倍され RUIZ_SWEEPS 回累積して inf へ
+            // オーバーフローし、scale_problem の q_vec_s = c*d[j]*v で
+            // inf*0.0 = NaN が伝播するため、更新をスキップし c を恒等
+            // (初期化時の c=1.0) に据え置く。
+            if obj_inf > 0.0 {
+                self.c /= obj_inf.max(EPS);
+            }
         }
     }
 
@@ -347,6 +362,103 @@ mod tests {
         scaler.compute_with_rhs(&q, &a, &q_vec, &[]);
 
         assert_eq!(scaler.d[2], 1.0);
+    }
+
+    /// 複数の空列 (先頭列を含む) が同時に存在しても、それぞれ独立に d[j]=1.0
+    /// に据え置かれること (単一空列のみのケースの回帰では検知できない)。
+    #[test]
+    fn structurally_empty_columns_multiple_and_leading_keep_unit_scaling() {
+        let n = 4usize;
+        let m = 1usize;
+        // 列 0 (先頭) と列 2 が Q・A どちらにも非零を持たない構造的空列。
+        // 列 1, 3 のみ非零を持つ。
+        let q = CscMatrix::from_triplets(&[1, 3], &[1, 3], &[2.0, 5.0], n, n).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[1, 3], &[3.0, 4.0], m, n).unwrap();
+        let q_vec = vec![0.0; n];
+
+        let mut scaler = RuizScaler::new(n, m);
+        scaler.compute_with_rhs(&q, &a, &q_vec, &[]);
+
+        assert_eq!(scaler.d[0], 1.0, "leading empty column must stay unit");
+        assert_eq!(scaler.d[2], 1.0, "interior empty column must stay unit");
+        // 非空列は実際にスケーリングされ 1.0 から動くことを確認 (ガードが
+        // 誤って非空列まで凍結していないことの裏付け)。
+        assert!((scaler.d[1] - 1.0).abs() > 1e-9);
+        assert!((scaler.d[3] - 1.0).abs() > 1e-9);
+    }
+
+    /// A に非零を全く持たない構造的空行では e[i]=1.0 に据え置く。ガードなしでは
+    /// row_norms[i]==0.0 から EPS クランプ経由で sweep ごとに発散する (Step 2
+    /// の空列と同一機構)。独立オラクル: 「データを一切持たない行はスケーリング
+    /// されるべきでない」= e[i] は初期値 1.0 のまま。
+    #[test]
+    fn structurally_empty_row_keeps_unit_scaling() {
+        let n = 2usize;
+        let m = 2usize;
+        // Q は非空 (Step 3 の分岐に影響させないため)。A は行 0 のみに非零を
+        // 持ち、行 1 は構造的空行。
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[4.0], m, n).unwrap();
+        let q_vec = vec![0.0; n];
+
+        let mut scaler = RuizScaler::new(n, m);
+        scaler.compute_with_rhs(&q, &a, &q_vec, &[]);
+
+        assert_eq!(scaler.e[1], 1.0);
+        assert!(scaler.e[1].is_finite());
+    }
+
+    /// Q・q_vec が両方恒等的にゼロ (feasibility-only 問題) でも c は有限
+    /// (1.0 のまま) に据え置かれ、scale_problem の q_vec_s に NaN が伝播しない
+    /// こと。独立オラクル: スケーリング対象 (Q, q_vec) が存在しないので c は
+    /// 恒等 (初期値 1.0)。ガードなしでは EPS クランプ経由で sweep ごとに c が
+    /// 1/EPS 倍され、RUIZ_SWEEPS=53 回累積して `(1/EPS)^53 ≈ 1e318 > f64::MAX`
+    /// で inf にオーバーフローし、さらに `inf * 0.0 = NaN` が q_vec_s へ伝播する。
+    #[test]
+    fn zero_objective_keeps_finite_cost_and_no_nan_propagation() {
+        let n = 2usize;
+        let m = 1usize;
+        // Q, q_vec は完全にゼロ。A/b は非空 (制約自体は存在する feasibility
+        // -only 問題)。
+        let q = CscMatrix::from_triplets(&[], &[], &[], n, n).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[2.0, 3.0], m, n).unwrap();
+        let q_vec = vec![0.0, 0.0];
+        let bounds = vec![(0.0_f64, 10.0); n];
+
+        let mut scaler = RuizScaler::new(n, m);
+        scaler.compute_with_rhs(&q, &a, &q_vec, &[]);
+
+        assert_eq!(scaler.c, 1.0, "c must stay at identity when objective is 0");
+        assert!(scaler.c.is_finite());
+
+        let (_q_s, _a_s, q_vec_s, _b_s, _bounds_s) =
+            scaler.scale_problem(&q, &a, &q_vec, &[], &bounds);
+        for (j, &v) in q_vec_s.iter().enumerate() {
+            assert!(v.is_finite(), "q_vec_s[{j}]={v} must not be NaN/inf");
+        }
+    }
+
+    /// Q・A ともに完全に空 (全列が構造的空列) かつ目的関数もゼロの極端ケース。
+    /// d, e, c すべてが恒等 (1.0) に据え置かれること。P1 (行・コスト) と
+    /// Step 2 (列) の全ガードが同時に発火するケースを一括で検証する。
+    #[test]
+    fn all_columns_and_row_structurally_empty_keeps_identity_scaling() {
+        let n = 3usize;
+        let m = 1usize;
+        let q = CscMatrix::from_triplets(&[], &[], &[], n, n).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], m, n).unwrap();
+        let q_vec = vec![0.0; n];
+
+        let mut scaler = RuizScaler::new(n, m);
+        scaler.compute_with_rhs(&q, &a, &q_vec, &[]);
+
+        for j in 0..n {
+            assert_eq!(scaler.d[j], 1.0, "d[{j}] must stay identity");
+        }
+        for i in 0..m {
+            assert_eq!(scaler.e[i], 1.0, "e[{i}] must stay identity");
+        }
+        assert_eq!(scaler.c, 1.0, "c must stay identity");
     }
 
     /// scale_problem → unscale_solution の round-trip が恒等であること。
