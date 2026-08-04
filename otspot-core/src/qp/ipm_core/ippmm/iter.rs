@@ -709,9 +709,63 @@ fn solve_ippmm_inner_confined(
         pmm.prev_nr_d = nr_d;
     }
 
-    if status.is_none() {
-        iterations_consumed = options.ipm.max_iter;
-    }
+    finalize_ippmm_result(
+        problem,
+        &b_ext,
+        m_orig,
+        q_is_indefinite,
+        options.ipm.max_iter,
+        iterations_consumed,
+        status,
+        final_residuals,
+        best_score,
+        best_residuals,
+        best_rel_gap,
+        x,
+        y,
+        s,
+        &best_x,
+        &best_y,
+        &best_s,
+        total_factorize_ns,
+        total_solve_ns,
+        total_reg_retries,
+        any_iterative,
+    )
+}
+
+/// ループ終端後の後処理: 反復予算枯渇の status 確定 (MaxIterations)、Timeout/
+/// MaxIterations 到達時の best-so-far への上書き、目的値・双対解の復元、不定 Q の
+/// Optimal→LocallyOptimal 降格、`SolverResult` の組み立てを行う。
+#[allow(clippy::too_many_arguments)]
+fn finalize_ippmm_result(
+    problem: &QpProblem,
+    b_ext: &[f64],
+    m_orig: usize,
+    q_is_indefinite: bool,
+    max_iter: usize,
+    iterations_consumed: usize,
+    status: Option<SolveStatus>,
+    mut final_residuals: Option<(f64, f64, f64)>,
+    best_score: f64,
+    best_residuals: (f64, f64, f64),
+    best_rel_gap: f64,
+    mut x: Vec<f64>,
+    mut y: Vec<f64>,
+    mut s: Vec<f64>,
+    best_x: &[f64],
+    best_y: &[f64],
+    best_s: &[f64],
+    total_factorize_ns: u128,
+    total_solve_ns: u128,
+    total_reg_retries: u32,
+    any_iterative: bool,
+) -> SolverResult {
+    let iterations_consumed = if status.is_none() {
+        max_iter
+    } else {
+        iterations_consumed
+    };
 
     // break なしのループ終端 = 反復予算枯渇。Timeout に丸めず MaxIterations で報告する。
     let status = status.unwrap_or(SolveStatus::MaxIterations);
@@ -719,7 +773,7 @@ fn solve_ippmm_inner_confined(
     // 素の Timeout 経路は発散 x をそのまま返してしまうので best-so-far で上書き。
     if matches!(status, SolveStatus::Timeout | SolveStatus::MaxIterations) && best_score.is_finite()
     {
-        let norm_b_bs = norm_inf(&b_ext).max(1.0);
+        let norm_b_bs = norm_inf(b_ext).max(1.0);
         let norm_c_bs = norm_inf(&problem.c).max(1.0);
         let current_score = match final_residuals {
             Some((nr_p, nr_d, mu)) if nr_p.is_finite() && nr_d.is_finite() && mu.is_finite() => {
@@ -728,13 +782,14 @@ fn solve_ippmm_inner_confined(
             _ => f64::INFINITY,
         };
         if best_score < current_score {
-            x.copy_from_slice(&best_x);
-            y.copy_from_slice(&best_y);
-            s.copy_from_slice(&best_s);
+            x.copy_from_slice(best_x);
+            y.copy_from_slice(best_y);
+            s.copy_from_slice(best_s);
             final_residuals = Some(best_residuals);
         }
     }
 
+    let mut qx = vec![0.0f64; problem.num_vars];
     spmv(&problem.q, &x, &mut qx);
     let objective = 0.5
         * qx.iter()
