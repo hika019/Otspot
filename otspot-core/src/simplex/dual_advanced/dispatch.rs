@@ -111,7 +111,7 @@ pub(super) fn try_bounded(
                     };
                     let mut leaving = make_leaving_strategy(options.dual_pricing, bsf.m);
                     let (dual_out, dual_state) =
-                        bounded_iterate(state, bsf, &a, &c, options, &ubs, leaving.as_mut());
+                        bounded_iterate(state, bsf, &a, &b, &c, options, &ubs, leaving.as_mut());
                     total_iters = dual_state.iterations;
                     let result = finish_bounded(
                         dual_out,

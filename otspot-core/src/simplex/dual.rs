@@ -3,8 +3,7 @@
 //! changes (e.g. SQP).
 
 use super::dual_common::{
-    basic_obj, compute_dual_vars, compute_reduced_costs, lp_unbounded_ray_verified,
-    outcome_to_result,
+    basic_obj, compute_reduced_costs, lp_unbounded_ray_verified, outcome_to_result,
 };
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving, SteepestEdgePricing};
 use super::trace::IterTrace;
@@ -78,6 +77,7 @@ pub(crate) fn two_phase_dual_simplex(
                         &a,
                         &mut x_b,
                         &c,
+                        &b,
                         &mut basis,
                         m,
                         sf.n_total,
@@ -130,6 +130,7 @@ fn cold_start_dual(
         a,
         &mut x_b,
         &c_perturbed,
+        b,
         &mut basis,
         m,
         sf.n_total,
@@ -220,6 +221,7 @@ pub(super) fn dual_simplex_core(
     a: &CscMatrix,
     x_b: &mut [f64],
     c: &[f64],
+    b_rhs: &[f64],
     basis: &mut [usize],
     m: usize,
     n_price: usize,
@@ -276,10 +278,19 @@ pub(super) fn dual_simplex_core(
         }
 
         let leaving_row = match leaving_strategy.select_leaving(x_b, options.primal_tol, basis) {
+            // Dual-feasible candidate optimum: verify primal feasibility on a
+            // fresh exact x_b before declaring victory (bug-hunt P1).
             None => {
-                let obj: f64 = basic_obj(c, basis, x_b);
-                let y = compute_dual_vars(c, &mut basis_mgr, basis, m);
-                return SimplexOutcome::Optimal(obj, y);
+                return super::dual_common::mint_optimal_after_fresh_reverify(
+                    a,
+                    x_b,
+                    c,
+                    b_rhs,
+                    basis,
+                    &mut basis_mgr,
+                    m,
+                    options,
+                )
             }
             Some(p) => p,
         };
@@ -491,6 +502,7 @@ mod tests {
             &a,
             &mut x_b,
             &[0.0, 0.0],
+            &[-1.0],
             &mut basis,
             1,
             2,
@@ -505,6 +517,86 @@ mod tests {
         assert_eq!(x_b, old_x_b);
         assert_eq!(basis, old_basis);
         assert_eq!(super::ETA_REJECT_ATOMIC_COUNT.get(), 1);
+    }
+
+    /// SENTINEL (task #10 / bug-hunt P1): `dual_simplex_core` must NOT mint
+    /// `Optimal` off a stale `x_b` that disagrees with a fresh `B^{-1}
+    /// b_rhs` recomputation — it must re-derive `x_b` from `b_rhs` via a
+    /// forced refactor before declaring victory, exactly like its sibling
+    /// `primal::core::revised_simplex_core`
+    /// (`tests.rs::test_phase2_infeasible_vertex_bail_is_stalled` uses this
+    /// EXACT SAME LP: min 0·x s.t. x = -1 (singleton row), x ≥ 0 — genuinely
+    /// infeasible — and bails `Stalled`).
+    ///
+    /// Independent oracle: `LuBasis::ftran_dense` (the same primitive the
+    /// solver itself uses for FTRAN, invoked here directly by the test, not
+    /// by the function under test) on `b_true = [-1.0]` against basis `{0}`
+    /// (B is the 1×1 identity) reproduces `x_b_true = [-1.0]`, matching the
+    /// primal-side sentinel's premise exactly.
+    ///
+    /// The function is handed `x_b_given = [0.0]` — standing in for whatever
+    /// an eta-accumulated incremental update (or any other upstream drift)
+    /// could have left behind — which merely *looks* feasible to
+    /// `select_leaving` (0.0 ≥ -primal_tol) but disagrees with `b_rhs`.
+    ///
+    /// No-op / revert-fail proof: reverting the force-refactor, fresh-FTRAN
+    /// and `min_basic < -primal_tol` guard in `dual_simplex_core` (i.e.
+    /// restoring the pre-fix `None => Optimal` short-circuit) makes this
+    /// test FAIL with `Optimal` instead of `Stalled` — confirmed manually
+    /// against the pre-fix code during this task (see bug-hunt session
+    /// report for the P1 repro that motivated this fix).
+    #[test]
+    fn dual_simplex_core_rejects_stale_x_b_inconsistent_with_b_rhs() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let c = vec![0.0];
+        let basis_true = vec![0usize];
+
+        // Independent oracle: fresh LU solve of B^{-1} * b_true via the
+        // solver's own FTRAN primitive, computed by the TEST, not trusted
+        // from the function under test.
+        let b_true = vec![-1.0];
+        let mut oracle_x_b = b_true.clone();
+        let mut bm = crate::basis::LuBasis::new(&a, &basis_true, 50).unwrap();
+        {
+            use crate::basis::BasisManager;
+            bm.ftran_dense(&mut oracle_x_b);
+        }
+        assert!(
+            oracle_x_b[0] < -PIVOT_TOL,
+            "oracle premise: true B^-1 b_true must be infeasible (matches \
+             tests.rs::test_phase2_infeasible_vertex_bail_is_stalled's \
+             premise), got {:?}",
+            oracle_x_b
+        );
+
+        // Corrupted / drifted x_b handed to the function under test: looks
+        // feasible (0.0 >= -primal_tol) even though it does not match the
+        // oracle B^-1 b_true for this exact basis + b_rhs.
+        let mut x_b_given = vec![0.0];
+        let mut basis = basis_true.clone();
+        let mut iters = 0usize;
+        let opts = SolverOptions::default();
+        let outcome = super::dual_simplex_core(
+            &a,
+            &mut x_b_given,
+            &c,
+            &b_true,
+            &mut basis,
+            1,
+            1,
+            &opts,
+            &mut iters,
+        );
+
+        assert!(
+            matches!(outcome, super::SimplexOutcome::Stalled(_)),
+            "dual_simplex_core must re-derive x_b from b_rhs and honestly bail \
+             Stalled (not Optimal) when the fresh recomputation is infeasible; \
+             got {:?} (stale x_b_given={:?}, oracle x_b_true={:?})",
+            outcome,
+            x_b_given,
+            oracle_x_b,
+        );
     }
 
     fn make_lp(
@@ -731,7 +823,10 @@ mod tests {
         let mut basis = vec![0usize, 0];
         let opts = SolverOptions::default();
         let mut iters = 0usize;
-        let outcome = dual_simplex_core(&a, &mut x_b, &c, &mut basis, 2, 2, &opts, &mut iters);
+        let b_rhs = vec![1.0, 0.0];
+        let outcome = dual_simplex_core(
+            &a, &mut x_b, &c, &b_rhs, &mut basis, 2, 2, &opts, &mut iters,
+        );
         assert!(!matches!(outcome, SimplexOutcome::Optimal(..)));
         assert!(matches!(
             outcome,
