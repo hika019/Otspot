@@ -41,6 +41,49 @@ pub(super) const REG_LIMIT_STEP: f64 = 1e-3;
 pub(super) const REG_LIMIT_INIT_QP: f64 = 5e-8;
 pub(super) const REG_LIMIT_INIT_LP: f64 = 5e-10;
 
+/// 準定値 KKT の (1,1)/(2,2) ブロックに要求する最小正則化。
+///
+/// `[Q+ρI, Aᵀ; A, −Σ−δI]` を y 空間へ縮約すると `−(Σ + δI) − A(Q+ρI)⁻¹Aᵀ`。
+/// (1,1) ブロックの最小固有値を p とすると Schur 項は最大 `‖AAᵀ‖/p` まで増幅
+/// される一方、`A` の行退化方向 v (`Aᵀv = 0`) では Σ_v≈0 と合わせて対角が δ
+/// だけになる。両者の動的レンジ `‖AAᵀ‖/(p·δ)` が `1/ε_machine` を超えると f64
+/// では方向が解けない (`p·δ ≳ ε_machine`、order としては `p = δ ≈ √ε_machine`)。
+///
+/// 値は 2e700955 以前に長期運用されていた `DEFAULT_IPM_DELTA_MIN` と同じ 1e-8。
+/// 新規較正ではなく、suite 全体で検証済みの床をそのまま戻している (変えたのは
+/// 値ではなく適用範囲 = `matrix_reg_floor_for` の Gershgorin ゲート)。
+///
+/// LP sentinel での実測感度 (dfl001 / ken-13、他は不変):
+/// `1e-14` → dfl001 PASS / ken-13 FAIL、`1e-9` → dfl001 FAIL / ken-13 PASS、
+/// `3e-9` と `1e-8` → 双方 PASS、`1.49e-8` (√ε_machine) → dfl001 FAIL。
+/// dfl001 の証明可否はこの床に対し単調でない (obj は全点で truth 一致、
+/// 揺れるのは Optimal 証明のみ) ため、床の上げ下げは再ベンチ必須。
+pub(super) const KKT_PIVOT_FLOOR: f64 = 1e-8;
+
+/// 行列正則化 (`rho_matrix`/`delta_matrix`) の floor。
+///
+/// `pmm.rho`/`pmm.delta` は 2 つの役割を兼ねている:
+///  1. proximal 係数 — `r_d_pmm = r_d − ρ(x−x_ref)`, `r_p_pmm = r_p − δ(y−y_ref)`。
+///     PMM の不動点を決めるので `reg_limit` (→ `REG_LIMIT_MIN`) まで下げてよい。
+///  2. 行列正則化 — Newton 方向の条件数だけを決め、不動点には影響しない。
+///
+/// 2 を 1 と同じ下限で走らせると、Q が (1,1) ピボットを自前で供給しない問題で
+/// 上記の動的レンジが破綻する。実測 (ken-13 = LP なので Q ≡ 0、user eps=1e-6):
+/// δ が 1e-8 を割った反復から ‖dy‖ が 1e4 → 1e17 へ発散し、fraction-to-boundary
+/// が α を 1e-15 まで潰して nr_p が 8.7e-5 で凍結 → Stalled。LDL 健全性プローブは
+/// 全 iter で rel_resid ≤ 1e-8 / retry 0 回 (因子化誤差ではなく系自体の発散)。
+///
+/// 逆に Q が自前で `KKT_PIVOT_FLOOR` 以上の質量を持つなら Schur 項は ρ に依らず
+/// 有界で、floor は不要なばかりか有害になる: 実測 (LISWET7 = Q は単位行列、
+/// eps=1e-8) では固定床 1e-8 が `dy_i·δ = r_p_i` の恒等式で nr_p を 9.8e-8 に
+/// 凍結させる。Gershgorin による λ_min(Q) 下界で両者を連続に切り分ける。
+pub(super) fn matrix_reg_floor_for(q_lambda_min_lower: f64) -> f64 {
+    // `f64::max` は NaN 側を捨てるので、下界が NaN / 負 (indefinite) なら質量 0 =
+    // floor 全量。PSD 化そのものは `inertia_correction` が別途担う。
+    let q_pivot = q_lambda_min_lower.max(0.0);
+    (KKT_PIVOT_FLOOR - q_pivot).max(REG_LIMIT_MIN)
+}
+
 /// σ=s/y が非有限 (NaN/Inf) のときの fallback 上限。旧 `1/options.ipm.delta_min`
 /// (delta_min=1e-8 固定) と数値的に同じ 1e8 を維持しつつ、削除された
 /// `delta_min` オプション (正則化 floor と無関係な数値安全弁) から独立させた。
@@ -116,6 +159,65 @@ pub(super) struct PmmState {
     pub(super) delta: f64,
     pub(super) prev_nr_p: f64,
     pub(super) prev_nr_d: f64,
+}
+
+#[cfg(test)]
+mod matrix_reg_floor_tests {
+    use super::*;
+
+    /// 2e700955 以前の `DEFAULT_IPM_DELTA_MIN` と同値であること。値の変更は
+    /// LP suite (dfl001/ken-13) の再ベンチ無しには許されない — doc の感度表を参照。
+    #[test]
+    fn kkt_pivot_floor_matches_the_long_validated_value() {
+        assert_eq!(KKT_PIVOT_FLOOR, 1e-8);
+    }
+
+    /// order としては √ε_machine 相当 (1 桁以内) — 動的レンジ論の sanity。
+    #[test]
+    fn kkt_pivot_floor_is_within_an_order_of_sqrt_machine_eps() {
+        let ratio = KKT_PIVOT_FLOOR / f64::EPSILON.sqrt();
+        assert!((0.1..=10.0).contains(&ratio), "ratio={ratio}");
+    }
+
+    /// LP (Q ≡ 0 → Gershgorin 下界 0): (1,1) ピボットを ρ が単独で担うので
+    /// floor は `KKT_PIVOT_FLOOR` 全量。実測 (ken-13): この床を外すと
+    /// ‖dy‖ が 1e17 まで発散し α が 1e-15 に潰れて Stalled。
+    #[test]
+    fn zero_hessian_gets_full_pivot_floor() {
+        assert_eq!(matrix_reg_floor_for(0.0), KKT_PIVOT_FLOOR);
+    }
+
+    /// Q が自前で床以上の質量を持つ (LISWET7 の Q = I → 下界 1.0): floor 不要。
+    /// 実測: ここで `KKT_PIVOT_FLOOR` を課すと nr_p が δ·|dy| で 9.8e-8 に凍結する。
+    #[test]
+    fn positive_definite_hessian_needs_no_floor() {
+        assert_eq!(matrix_reg_floor_for(1.0), REG_LIMIT_MIN);
+        assert_eq!(matrix_reg_floor_for(KKT_PIVOT_FLOOR), REG_LIMIT_MIN);
+    }
+
+    /// Q が部分的にしか供給しないなら不足分だけを補う (連続な切り分け)。
+    #[test]
+    fn partial_hessian_mass_is_credited_against_the_floor() {
+        let half = KKT_PIVOT_FLOOR / 2.0;
+        assert_eq!(matrix_reg_floor_for(half), KKT_PIVOT_FLOOR - half);
+    }
+
+    /// indefinite Q (下界が負) は質量 0 として扱う: 負値を引いて床を
+    /// 押し上げてはならない (`inertia_correction` が別途 PSD 化を担う)。
+    #[test]
+    fn indefinite_hessian_lower_bound_is_clamped_to_zero() {
+        assert_eq!(matrix_reg_floor_for(-5.0), KKT_PIVOT_FLOOR);
+        assert_eq!(matrix_reg_floor_for(f64::NAN), KKT_PIVOT_FLOOR);
+        assert_eq!(matrix_reg_floor_for(f64::NEG_INFINITY), KKT_PIVOT_FLOOR);
+    }
+
+    /// 返り値は常に proximal 側の絶対下限以上 (0 に潰れない)。
+    #[test]
+    fn floor_never_drops_below_reg_limit_min() {
+        for q in [0.0, 1e-30, 1e30, f64::INFINITY] {
+            assert!(matrix_reg_floor_for(q) >= REG_LIMIT_MIN, "q={q}");
+        }
+    }
 }
 
 #[cfg(test)]

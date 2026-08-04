@@ -6,11 +6,12 @@ use super::factorize::{
 };
 use super::init::build_initial_point;
 use super::state::{
-    alpha_stall_eps_for, pf_stuck_should_lower_reg_limit, PmmState, ADAPTIVE_REG_C_MAX_THRESH,
-    ALPHA_DEADLOCK_N, ALPHA_STALL_N, DELTA_INIT, DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL,
-    GONDZIO_ALPHA_TRIGGER, INFEAS_DETECTOR_DISTRUST_SCORE, MIN_CONSECUTIVE_INFEAS,
-    MU_ZERO_THRESHOLD, PF_HISTORY_LEN, PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO,
-    REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
+    alpha_stall_eps_for, matrix_reg_floor_for, pf_stuck_should_lower_reg_limit, PmmState,
+    ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N, DELTA_INIT,
+    DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL, GONDZIO_ALPHA_TRIGGER,
+    INFEAS_DETECTOR_DISTRUST_SCORE, MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PF_HISTORY_LEN,
+    PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP,
+    REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
     RESIDUAL_STALL_WINDOW, RHO_INIT, SIGMA_MAX_FALLBACK, STEP_REL_CAP,
 };
 use crate::options::SolverOptions;
@@ -132,6 +133,11 @@ fn solve_ippmm_inner_confined(
     let c_max = problem.c.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
     let allow_adaptive_reg = c_max < ADAPTIVE_REG_C_MAX_THRESH;
     let mut reg_limit = initial_reg_limit;
+    // 行列正則化は Newton 方向の条件数のみを決めるので proximal 側 (reg_limit)
+    // とは別に floor する。Q が (1,1) ピボットを自前で供給する分だけ floor は下がる。
+    let matrix_reg_floor = matrix_reg_floor_for(
+        otspot_num::linalg::gershgorin::lambda_min_lower_bound(&problem.q),
+    );
 
     // pf-stagnation trigger (adaptive reg_limit の追加経路、c≠0 問題向け):
     // pf が最近の N 反復で実質改善せず (ratio > THRESHOLD) かつ pf が target から
@@ -304,18 +310,10 @@ fn solve_ippmm_inner_confined(
         // Σ = diag(s_i / y_i) (等式行は0)
         let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, SIGMA_MAX_FALLBACK);
 
-        // 正則化は PMM 駆動。pmm.rho/pmm.delta は自身の更新式 (下方 `.max(reg_limit)`)
-        // で常に reg_limit ≥ REG_LIMIT_MIN に floor されているため、ここで固定の
-        // 絶対定数を追加で `.max()` してはならない。旧実装は `options.ipm.delta_min`
-        // (デフォルト 1e-8, DEFAULT_IPM_EPS=1e-6 向けに 100倍マージンで校正された
-        // 絶対定数) を課しており、tight eps (例 1e-8) では reg_limit が 1e-14 まで
-        // 下がっても行列側の正則化が 1e-8 に恒久的に張り付く副作用を持っていた。
-        // bug-frontier 実測 (LISWET7 @ eps=1e-8): 停滞行の dy_i=6.216, r_p_i=-6.216e-8
-        // で dy_i×delta_matrix=r_p_i が厳密に成立 (delta_matrix=1e-8 のときのみ) —
-        // 正則化が primal residual を δ·dy に押し付け、x を補正しない解が「厳密解」
-        // になっていた。delta_min オプションは撤去し、reg_limit 経路に一本化する。
-        let rho_matrix = pmm.rho;
-        let delta_matrix = pmm.delta;
+        // 行列側の正則化は PMM 不動点ではなく Newton 系の条件数を決めるので、
+        // proximal 係数 (pmm.rho/pmm.delta) と別の floor を持つ (`matrix_reg_floor`)。
+        let rho_matrix = pmm.rho.max(matrix_reg_floor);
+        let delta_matrix = pmm.delta.max(matrix_reg_floor);
 
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);

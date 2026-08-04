@@ -17,6 +17,15 @@ use std::collections::HashMap;
 /// (Q が真に indefinite でも Gershgorin が保守的に non-negative を返す PSD 偽陽性は
 /// 別途 `is_q_psd_by_cholesky` 等で扱う; 本 helper は素の Gershgorin に専念)。
 pub fn psd_shift_from_gershgorin(q: &CscMatrix) -> f64 {
+    (-lambda_min_lower_bound(q)).max(0.0)
+}
+
+/// `λ_min(Q) ≥ min_j (Q[j,j] − R_j)` の下界そのもの (符号付き)。
+///
+/// `psd_shift_from_gershgorin` が捨てている正の側を必要とする用途向け:
+/// Q が自前でどれだけ正定値質量を持つか (= KKT の (1,1) ブロック `Q+ρI` の
+/// ピボットを ρ 抜きでどこまで保証できるか) の下界。`n == 0` は 0 を返す。
+pub fn lambda_min_lower_bound(q: &CscMatrix) -> f64 {
     let n = q.nrows;
     if n == 0 {
         return 0.0;
@@ -49,14 +58,11 @@ pub fn psd_shift_from_gershgorin(q: &CscMatrix) -> f64 {
         row_offdiag_sum[i] += abs_val;
         row_offdiag_sum[j] += abs_val;
     }
-    let mut shift = 0.0_f64;
+    let mut lambda_min_lower = f64::INFINITY;
     for j in 0..n {
-        let lower = diag[j] - row_offdiag_sum[j];
-        if lower < 0.0 {
-            shift = shift.max(-lower);
-        }
+        lambda_min_lower = lambda_min_lower.min(diag[j] - row_offdiag_sum[j]);
     }
-    shift
+    lambda_min_lower
 }
 
 #[cfg(test)]
@@ -85,6 +91,45 @@ mod tests {
     fn empty_matrix_returns_zero() {
         let q = CscMatrix::new(0, 0);
         assert_eq!(psd_shift_from_gershgorin(&q), 0.0);
+        assert_eq!(lambda_min_lower_bound(&q), 0.0);
+    }
+
+    /// `psd_shift_from_gershgorin` が捨てる正の側を `lambda_min_lower_bound` は返す。
+    /// IPM の KKT (1,1) ピボット floor はこの正の側で LP (Q ≡ 0) と
+    /// 正定値 Q を切り分けるので、0 に丸めてはならない。
+    #[test]
+    fn positive_side_is_reported_not_clamped() {
+        let q = upper_tri(2, &[(0, 0, 1.0), (1, 1, 2.0)]);
+        assert!((lambda_min_lower_bound(&q) - 1.0).abs() < 1e-12);
+        assert_eq!(psd_shift_from_gershgorin(&q), 0.0);
+    }
+
+    /// LP (Q が全ゼロ, n > 0) は下界 0 — 正定値質量ゼロ。
+    #[test]
+    fn all_zero_hessian_bound_is_zero() {
+        assert_eq!(lambda_min_lower_bound(&CscMatrix::new(4, 4)), 0.0);
+    }
+
+    /// off-diag が対角を食う分だけ下界は下がる (単位行列 + 結合項)。
+    #[test]
+    fn offdiag_reduces_the_bound() {
+        // Q=[[1,0.25],[0.25,1]] → 下界 = 1 − 0.25 = 0.75
+        let q = upper_tri(2, &[(0, 0, 1.0), (0, 1, 0.25), (1, 1, 1.0)]);
+        assert!((lambda_min_lower_bound(&q) - 0.75).abs() < 1e-12);
+    }
+
+    /// 下界は常に `-psd_shift_from_gershgorin` と整合 (負側の一貫性)。
+    #[test]
+    fn negative_side_agrees_with_psd_shift() {
+        for q in [
+            upper_tri(2, &[(0, 0, -2.0), (1, 1, -3.0)]),
+            upper_tri(2, &[(0, 1, 1.0)]),
+            upper_tri(4, &[(0, 0, 2.0), (0, 3, 3.0)]),
+        ] {
+            let lower = lambda_min_lower_bound(&q);
+            assert!(lower < 0.0);
+            assert!((psd_shift_from_gershgorin(&q) + lower).abs() < 1e-12);
+        }
     }
 
     #[test]
