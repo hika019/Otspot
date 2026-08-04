@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3076 testcases, 26 ignored
+# totals: 3082 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1376,6 +1376,7 @@ otspot-core	simplex::crash::tests::partial_coverage	active
 otspot-core	simplex::crash::tests::sign_match_accepted	active
 otspot-core	simplex::crash::tests::sign_mismatch_rejected	active
 otspot-core	simplex::crash::tests::small_pivot_column_rejected	active
+otspot-core	simplex::dual::tests::dual_simplex_core_rejects_stale_x_b_inconsistent_with_b_rhs	active
 otspot-core	simplex::dual::tests::rejected_eta_leaves_legacy_dual_state_atomic	active
 otspot-core	simplex::dual::tests::test_dual_basic_nonneg_cost	active
 otspot-core	simplex::dual::tests::test_dual_matches_primal	active
@@ -1385,6 +1386,8 @@ otspot-core	simplex::dual::tests::test_dual_singular_basis_not_optimal	active
 otspot-core	simplex::dual::tests::test_dual_warm_start_preserves_dual_feasibility	active
 otspot-core	simplex::dual::tests::test_dual_warm_start_rhs_change	active
 otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_beats_harris_on_bounded_chain	active
+otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_entering_never_exceeds_its_own_upper_bound	active
+otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_falls_back_to_last_breakpoint_when_capacity_is_exhausted	active
 otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_flip_counter_increments_only_when_flipping	active
 otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_flips_past_small_breakpoint	active
 otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_flips_three_then_enters_at_infinite	active
@@ -1395,6 +1398,7 @@ otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_skips_basic_columns	
 otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_skips_negative_breakpoints	active
 otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_tie_excludes_infinite_upper	active
 otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_tie_filters_only_infinite_upper	active
+otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_tie_fixture_ratios_are_bit_exact	active
 otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_tie_loser_at_selected_breakpoint_is_not_flip	active
 otspot-core	simplex::dual_advanced::bound_flip::tests::bfrt_tie_prefers_larger_pivot	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::bfrt_flip_count_positive_when_residual_spans_breakpoints	active
@@ -1414,6 +1418,7 @@ otspot-core	simplex::dual_advanced::bounded_core::tests::flip_apply_preserves_ba
 otspot-core	simplex::dual_advanced::bounded_core::tests::force_bland_reaches_same_optimum_as_devex	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::inject_lb_violation_makes_progress_boxed	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::iterate_honours_max_iters_cap	active
+otspot-core	simplex::dual_advanced::bounded_core::tests::iterate_rejects_stale_x_b_inconsistent_with_b_rhs	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::obj_plateau_bail_advances_by_check_interval_per_sampled_call	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::obj_plateau_bail_fires_exactly_at_trigger_with_frozen_objective	active
 otspot-core	simplex::dual_advanced::bounded_core::tests::obj_plateau_bail_ignores_sub_threshold_noise_and_stops	active
@@ -1450,6 +1455,7 @@ otspot-core	simplex::dual_advanced::core::tests::core_rc_timed_deadline_checks_a
 otspot-core	simplex::dual_advanced::core::tests::deadline_before_eta_leaves_advanced_dual_state_atomic	active
 otspot-core	simplex::dual_advanced::core::tests::dse_gamma_update_reduces_iterations	active
 otspot-core	simplex::dual_advanced::core::tests::dse_needs_sigma_returns_true	active
+otspot-core	simplex::dual_advanced::core::tests::dual_simplex_core_advanced_rejects_stale_x_b_inconsistent_with_b_rhs	active
 otspot-core	simplex::dual_advanced::core::tests::eta_reject_guard_restores_nested_state	active
 otspot-core	simplex::dual_advanced::core::tests::internal_eta_error_fails_fast_through_production_handler	active
 otspot-core	simplex::dual_advanced::core::tests::n_enter_excludes_high_index_columns_from_entering	active
