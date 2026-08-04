@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3076 testcases, 26 ignored
+# totals: 3081 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -2451,9 +2451,14 @@ otspot-num	linalg::minres::tests::minres_zero_rhs	active
 otspot-num	linalg::parallelism::tests::threads_n_yields_rayon_n	active
 otspot-num	linalg::parallelism::tests::threads_one_yields_seq	active
 otspot-num	linalg::parallelism::tests::threads_zero_yields_seq	active
+otspot-num	linalg::ruiz::tests::all_columns_and_row_structurally_empty_keeps_identity_scaling	active
 otspot-num	linalg::ruiz::tests::dual_residual_unscale_factor_is_c_times_d	active
 otspot-num	linalg::ruiz::tests::scale_unscale_round_trip_identity	active
+otspot-num	linalg::ruiz::tests::structurally_empty_column_keeps_unit_scaling	active
+otspot-num	linalg::ruiz::tests::structurally_empty_columns_multiple_and_leading_keep_unit_scaling	active
+otspot-num	linalg::ruiz::tests::structurally_empty_row_keeps_unit_scaling	active
 otspot-num	linalg::ruiz::tests::test_ruiz_scaler_identity	active
+otspot-num	linalg::ruiz::tests::zero_objective_keeps_finite_cost_and_no_nan_propagation	active
 otspot-num	pipeline::tests::honors_pass_limit	active
 otspot-num	pipeline::tests::run_step_executes_when_not_interrupted	active
 otspot-num	pipeline::tests::run_step_propagates_step_error	active
