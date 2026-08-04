@@ -41,45 +41,78 @@ pub(super) const REG_LIMIT_STEP: f64 = 1e-3;
 pub(super) const REG_LIMIT_INIT_QP: f64 = 5e-8;
 pub(super) const REG_LIMIT_INIT_LP: f64 = 5e-10;
 
-/// 準定値 KKT の (1,1)/(2,2) ブロックに要求する最小正則化。
+/// KKT 行列正則化 (`rho_matrix`/`delta_matrix`) の下限。
 ///
-/// `[Q+ρI, Aᵀ; A, −Σ−δI]` を y 空間へ縮約すると `−(Σ + δI) − A(Q+ρI)⁻¹Aᵀ`。
-/// (1,1) ブロックの最小固有値を p とすると Schur 項は最大 `‖AAᵀ‖/p` まで増幅
-/// される一方、`A` の行退化方向 v (`Aᵀv = 0`) では Σ_v≈0 と合わせて対角が δ
-/// だけになる。両者の動的レンジ `‖AAᵀ‖/(p·δ)` が `1/ε_machine` を超えると f64
-/// では方向が解けない (`p·δ ≳ ε_machine`、order としては `p = δ ≈ √ε_machine`)。
+/// **値も適用範囲も実測較正であり、原理的導出ではない。** 値は 2e700955 が
+/// 撤去した `DEFAULT_IPM_DELTA_MIN` と同じ 1e-8 で、長期運用で suite 全体に
+/// 対して検証されていた床をそのまま戻している (新規較正ではない)。
 ///
-/// 値は 2e700955 以前に長期運用されていた `DEFAULT_IPM_DELTA_MIN` と同じ 1e-8。
-/// 新規較正ではなく、suite 全体で検証済みの床をそのまま戻している (変えたのは
-/// 値ではなく適用範囲 = `matrix_reg_floor_for` の Gershgorin ゲート)。
+/// 機構として実測で閉じているのはここまで: `pmm.rho`/`pmm.delta` は PMM の
+/// 不動点を決める proximal 係数と KKT 行列の正則化を兼ねる。後者は残差が 0 なら
+/// 方向も 0 なので不動点を動かさず、Newton 方向の条件数だけを決める。2e700955 が
+/// 後者を前者の floor (`REG_LIMIT_INIT_LP` = 5e-10、適応引下げ後 5e-13) に
+/// 追随させた結果、ken-13 で ‖dy‖ が 1e4 → 1e17 へ発散し α が 1e-15 へ潰れて
+/// Stalled になった。`iter.rs` の該当 2 行だけを revert すると 137s / Stalled /
+/// rel_err 2.06e-8 が再現する。LDL 健全性プローブは全 iter で rel_resid ≤ 1e-8 /
+/// retry 0 回なので、因子化誤差ではなく系そのものの発散である。
 ///
-/// LP sentinel での実測感度 (dfl001 / ken-13、他は不変):
-/// `1e-14` → dfl001 PASS / ken-13 FAIL、`1e-9` → dfl001 FAIL / ken-13 PASS、
-/// `3e-9` と `1e-8` → 双方 PASS、`1.49e-8` (√ε_machine) → dfl001 FAIL。
-/// dfl001 の証明可否はこの床に対し単調でない (obj は全点で truth 一致、
-/// 揺れるのは Optimal 証明のみ) ため、床の上げ下げは再ベンチ必須。
+/// **PASS/FAIL を分けている量は特定できていない。** ken-13 での 4-arm 実測:
+///
+/// | `rho_matrix` | `delta_matrix` | 積 ρ·δ | 結果 |
+/// |---|---|---|---|
+/// | `max(ρ,1e-8)` | `max(δ,1e-8)` | ~1e-16 | PASS 5.2s |
+/// | `ρ` (床なし) | `max(δ,1e-8)` | ~5e-21 | PASS 4.5s |
+/// | `max(ρ,1e-8)` | `δ` (床なし) | ~5e-21 | PASS 10.4s |
+/// | `ρ` | `δ` | ~2.5e-25 | FAIL 137s |
+///
+/// 分けているのは積 `ρ·δ` ではない (中央 2 arm は積が等しく共に PASS)。
+/// 「ρ か δ の少なくとも一方が 1e-8 級」が観測に整合する唯一の記述だが、
+/// これは説明ではなく要約である。以前ここに書かれていた
+/// `ρ·δ ≳ ε_machine` (order で `√ε_machine`) という条件数由来の導出は、
+/// 上表の中央 2 arm を誤って FAIL と予測するため撤去した。
+///
+/// 値の感度も単調でない (LP heavy sentinel。dfl001 / ken-13 以外は不変):
+/// `1e-14` → dfl001 PASS / ken-13 FAIL、`1e-9` → dfl001 FAIL、`3e-9` → 双方 PASS、
+/// `1e-8` → 双方 PASS、`1.49e-8` (=√ε_machine) → dfl001 FAIL。obj は全点で truth
+/// と一致し、揺れるのは Optimal 証明の可否だけ。実測安全窓は `[3e-9, 1e-8]`
+/// (幅 3.3 倍・上側は閉じている) で、採用値はその上端に接している。
+/// **この定数を動かす変更は LP heavy sentinel (dfl001 / ken-13) の再ベンチ必須。**
 pub(super) const KKT_PIVOT_FLOOR: f64 = 1e-8;
 
-/// 行列正則化 (`rho_matrix`/`delta_matrix`) の floor。
+/// 行列正則化の floor を Gershgorin の λ_min(Q) 下界でゲートする。
 ///
 /// `pmm.rho`/`pmm.delta` は 2 つの役割を兼ねている:
 ///  1. proximal 係数 — `r_d_pmm = r_d − ρ(x−x_ref)`, `r_p_pmm = r_p − δ(y−y_ref)`。
 ///     PMM の不動点を決めるので `reg_limit` (→ `REG_LIMIT_MIN`) まで下げてよい。
 ///  2. 行列正則化 — Newton 方向の条件数だけを決め、不動点には影響しない。
 ///
-/// 2 を 1 と同じ下限で走らせると、Q が (1,1) ピボットを自前で供給しない問題で
-/// 上記の動的レンジが破綻する。実測 (ken-13 = LP なので Q ≡ 0、user eps=1e-6):
-/// δ が 1e-8 を割った反復から ‖dy‖ が 1e4 → 1e17 へ発散し、fraction-to-boundary
-/// が α を 1e-15 まで潰して nr_p が 8.7e-5 で凍結 → Stalled。LDL 健全性プローブは
-/// 全 iter で rel_resid ≤ 1e-8 / retry 0 回 (因子化誤差ではなく系自体の発散)。
+/// ゲートの根拠は 2 つの較正点の実測であって導出ではない:
+///  * LP (ken-13、Q ≡ 0) は床が要る (`KKT_PIVOT_FLOOR` の 4-arm 表を参照)。
+///  * LISWET7 (Q は単位行列、eps=1e-8) は床があると `dy_i·δ = r_p_i` の恒等式で
+///    nr_p が 9.8e-8 に凍結する (`liswet7_pfn_breaks_delta_matrix_floor_at_eps_1e8`)。
 ///
-/// 逆に Q が自前で `KKT_PIVOT_FLOOR` 以上の質量を持つなら Schur 項は ρ に依らず
-/// 有界で、floor は不要なばかりか有害になる: 実測 (LISWET7 = Q は単位行列、
-/// eps=1e-8) では固定床 1e-8 が `dy_i·δ = r_p_i` の恒等式で nr_p を 9.8e-8 に
-/// 凍結させる。Gershgorin による λ_min(Q) 下界で両者を連続に切り分ける。
+/// 両者を分ける観測可能量として「Q が (1,1) ブロック `Q+ρI` に供給するピボット
+/// 質量」を採り、供給分だけ床を減額する。(1,1) については Q が ρ に対して加算的
+/// なのでこの形に意味がある。
+///
+/// **既知の限界 (設計上の再検討は別 task)**:
+///  * (2,2) ブロックは `−(Σ+δI)` で Q は構造的に入らない。それでも δ 側の床まで
+///    Q 質量でクレジットしているのは、ρ 側だけに適用すると LISWET7 の
+///    `delta_matrix` に 1e-8 が復活し上記 sentinel が FAIL するため。導出ではなく
+///    較正上の妥協である。
+///  * 比較対象は Ruiz scaling 後の Q なのでゲートはスケール依存。BOYD1 は
+///    `λ_min(Q_raw) = 6.0` が `λ_min(Q_scaled) = 1.03e-7` まで縮み、僅差で床が
+///    消える。Maros-Meszaros 138 問の走査では `λ_min ≤ 0` が 106 問 (床は満額)、
+///    `≥ 1e-8` が 32 問 (床は消失)、中間帯 `0 < λ_min < 1e-8` は 0 問 —
+///    実質 2 値ゲートで、減額の連続性は unit test でしか行使されていない。
+///  * 床が消える側の問題群 (BOYD1 / HS118 / HS21 / QPCBOEI1 / QPCBOEI2 / KSIP) に
+///    無条件 1e-8 を掛ける arm との A/B では live regression は観測されていない
+///    (BOYD1 のみ iters 40 vs 43、他はビット一致)。
 pub(super) fn matrix_reg_floor_for(q_lambda_min_lower: f64) -> f64 {
     // `f64::max` は NaN 側を捨てるので、下界が NaN / 負 (indefinite) なら質量 0 =
-    // floor 全量。PSD 化そのものは `inertia_correction` が別途担う。
+    // floor 全量。ただし indefinite 時に実際に使われる ρ は
+    // `factorize.rs` の `rho_matrix.max(inertia_correction)` (和ではなく max) なので、
+    // `inertia_correction > KKT_PIVOT_FLOOR` の問題ではここで返す満額の床は届かない。
     let q_pivot = q_lambda_min_lower.max(0.0);
     (KKT_PIVOT_FLOOR - q_pivot).max(REG_LIMIT_MIN)
 }
@@ -166,17 +199,18 @@ mod matrix_reg_floor_tests {
     use super::*;
 
     /// 2e700955 以前の `DEFAULT_IPM_DELTA_MIN` と同値であること。値の変更は
-    /// LP suite (dfl001/ken-13) の再ベンチ無しには許されない — doc の感度表を参照。
+    /// LP heavy sentinel (dfl001 / ken-13) の再ベンチ無しには許されない —
+    /// 感度は単調でなく実測安全窓は `[3e-9, 1e-8]` (doc の表を参照)。
     #[test]
     fn kkt_pivot_floor_matches_the_long_validated_value() {
         assert_eq!(KKT_PIVOT_FLOOR, 1e-8);
     }
 
-    /// order としては √ε_machine 相当 (1 桁以内) — 動的レンジ論の sanity。
+    /// 採用値は実測安全窓の内側にあること。窓の上端に接している事実も pin する
+    /// (上端を跨ぐ 1.49e-8 は dfl001 を FAIL させると doc に記録がある)。
     #[test]
-    fn kkt_pivot_floor_is_within_an_order_of_sqrt_machine_eps() {
-        let ratio = KKT_PIVOT_FLOOR / f64::EPSILON.sqrt();
-        assert!((0.1..=10.0).contains(&ratio), "ratio={ratio}");
+    fn kkt_pivot_floor_sits_inside_the_measured_safe_window() {
+        assert!((3e-9..=1e-8).contains(&KKT_PIVOT_FLOOR));
     }
 
     /// LP (Q ≡ 0 → Gershgorin 下界 0): (1,1) ピボットを ρ が単独で担うので
