@@ -6,8 +6,8 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use otspot::io::qps::parse_qps;
-use otspot::qp::solve_qp_with;
 use otspot::options::SolverOptions;
+use otspot::qp::solve_qp_with;
 use otspot::{QpProblem, SolveStatus};
 
 use clarabel::solver::{DefaultSettings, DefaultSolver, IPSolver};
@@ -30,12 +30,17 @@ fn solve_clarabel_tol(prob: &QpProblem, tol: f64, max_iter: u32) -> (f64, String
         let x = &solver.solution.x;
         let qx = prob.q.mat_vec_mul(x).expect("Qx");
         0.5 * qx.iter().zip(x.iter()).map(|(&q, &x)| q * x).sum::<f64>()
-            + prob.c.iter().zip(x.iter()).map(|(&c, &x)| c * x).sum::<f64>()
+            + prob
+                .c
+                .iter()
+                .zip(x.iter())
+                .map(|(&c, &x)| c * x)
+                .sum::<f64>()
     };
     (obj_internal, format!("{:?}", solver.info.status))
 }
 
-fn check_obj_matches_clarabel(name: &str, baseline_known: f64) {
+fn check_obj_agrees_with_clarabel(name: &str, baseline_known: f64) {
     let path = std::path::PathBuf::from(format!("data/maros_meszaros/{}.QPS", name));
     assert!(path.exists(), "{:?} not found", path);
     let prob = parse_qps(&path).expect("parse");
@@ -78,10 +83,10 @@ fn check_obj_matches_clarabel(name: &str, baseline_known: f64) {
 #[test]
 fn liswet7_obj_independent_oracle() {
     // baseline CSV claims -5.01e3ish for LISWET7.
-    check_obj_matches_clarabel("LISWET7", -5.01e3);
+    check_obj_agrees_with_clarabel("LISWET7", -5.01e3);
 }
 
 #[test]
 fn liswet11_obj_independent_oracle() {
-    check_obj_matches_clarabel("LISWET11", -5.02e3);
+    check_obj_agrees_with_clarabel("LISWET11", -5.02e3);
 }

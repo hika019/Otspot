@@ -166,7 +166,11 @@ fn dynamic_base_tighten(user_eps: f64) -> f64 {
 /// attempt loop の `(use_ruiz, tighten)` ladder を構築する。no-Ruiz only
 /// (`no_ruiz_only`) なのは presolve が既に Ruiz-scaled 済み (二重 scale は誤り) か、
 /// 呼び出し側が明示的に Ruiz を無効化した場合 (no-Ruiz fallback 経路など)。
-fn build_attempt_ladder(base_tighten: f64, no_ruiz_only: bool, use_ruiz_scaling: bool) -> Vec<(bool, f64)> {
+fn build_attempt_ladder(
+    base_tighten: f64,
+    no_ruiz_only: bool,
+    use_ruiz_scaling: bool,
+) -> Vec<(bool, f64)> {
     if no_ruiz_only || !use_ruiz_scaling {
         let mut v = vec![(false, base_tighten), (false, base_tighten * 10.0)];
         if base_tighten > 10.0 {
@@ -852,12 +856,10 @@ fn extend_iteration_limit_attempt(
             opts.timeout_secs = None;
             opts.ipm.max_iter = remaining_ext;
             opts.use_ruiz_scaling = ext_use_ruiz;
-            opts.ipm.eps =
-                (user_eps / ext_tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
+            opts.ipm.eps = (user_eps / ext_tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
             let ext_outcome = runner(problem, presolve_result, opts, user_eps);
             let ext_satisfies = ext_outcome.satisfies_eps(user_eps);
-            let ext_proven =
-                ext_satisfies && outcome_proves_optimal(&ext_outcome, view, user_eps);
+            let ext_proven = ext_satisfies && outcome_proves_optimal(&ext_outcome, view, user_eps);
             let ext_charged = if ext_satisfies {
                 ext_outcome.iterations
             } else {

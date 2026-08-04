@@ -983,6 +983,13 @@ otspot-core	qp::global::tree::tests::best_lower_bound_matches_top	active
 otspot-core	qp::global::tree::tests::pop_returns_smallest_lower_bound_first	active
 otspot-core	qp::global::tree::tests::pushed_popped_counters_track	active
 otspot-core	qp::global::tree::tests::tie_break_fifo_seq	active
+otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::floor_never_drops_below_reg_limit_min	active
+otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::indefinite_hessian_lower_bound_is_clamped_to_zero	active
+otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::kkt_pivot_floor_matches_the_long_validated_value	active
+otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::kkt_pivot_floor_sits_inside_the_measured_safe_window	active
+otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::partial_hessian_mass_is_credited_against_the_floor	active
+otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::positive_definite_hessian_needs_no_floor	active
+otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::zero_hessian_gets_full_pivot_floor	active
 otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::old_hundred_x_margin_gate_would_have_stayed_closed_for_liswet7	active
 otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_does_not_fire_once_already_converged	active
 otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_does_not_fire_while_still_making_progress	active
@@ -2437,6 +2444,7 @@ otspot-num	linalg::amd::tests::test_inverse_perm	active
 otspot-num	linalg::amd::tests::test_permute_inv_permute_roundtrip	active
 otspot-num	linalg::amd::tests::test_permute_sym_upper_swap	active
 otspot-num	linalg::amd::tests::test_permute_vec	active
+otspot-num	linalg::gershgorin::tests::all_zero_hessian_bound_is_zero	active
 otspot-num	linalg::gershgorin::tests::asymmetric_value_pair_takes_max_abs	active
 otspot-num	linalg::gershgorin::tests::diagonal_negative_returns_abs_min_diag	active
 otspot-num	linalg::gershgorin::tests::diagonal_psd_returns_zero	active
@@ -2448,8 +2456,11 @@ otspot-num	linalg::gershgorin::tests::lower_triangular_only_zero_diag_bilinear_m
 otspot-num	linalg::gershgorin::tests::mixed_asymmetric_matches_full_symmetric	active
 otspot-num	linalg::gershgorin::tests::mixed_asymmetric_no_pair_canonicalizes	active
 otspot-num	linalg::gershgorin::tests::mixed_zero_and_negative_diag	active
+otspot-num	linalg::gershgorin::tests::negative_side_agrees_with_psd_shift	active
 otspot-num	linalg::gershgorin::tests::no_op_proof_lower_tri_symmetrize_required	active
 otspot-num	linalg::gershgorin::tests::no_op_proof_mixed_asymmetric_canonicalize_required	active
+otspot-num	linalg::gershgorin::tests::offdiag_reduces_the_bound	active
+otspot-num	linalg::gershgorin::tests::positive_side_is_reported_not_clamped	active
 otspot-num	linalg::gershgorin::tests::psd_with_large_offdiag_returns_positive_shift_false_alarm	active
 otspot-num	linalg::gershgorin::tests::pure_bilinear_zero_diag_off_one	active
 otspot-num	linalg::gershgorin::tests::three_layouts_agree_on_indefinite_q	active
