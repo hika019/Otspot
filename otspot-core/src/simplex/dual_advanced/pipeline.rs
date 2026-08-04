@@ -407,6 +407,7 @@ pub(super) fn cold_start_advanced(
         a,
         &mut x_b,
         &c_perturbed,
+        b,
         &mut basis,
         m,
         sf.n_total,

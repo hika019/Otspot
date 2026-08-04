@@ -310,6 +310,48 @@ pub(super) fn basic_obj(c: &[f64], basis: &[usize], x_b: &[f64]) -> f64 {
     basis.iter().zip(x_b.iter()).map(|(&j, &v)| c[j] * v).sum()
 }
 
+/// Verify primal feasibility on a fresh exact `x_b = B^{-1} b_rhs` before
+/// minting the `Optimal` outcome for a dual-feasible candidate — mirrors
+/// `primal::core::revised_simplex_core`'s pre-Optimal guard. Eta-file drift
+/// accumulated across many incremental pivots can leave `x_b` reporting
+/// every basic variable as (barely) feasible when a numerically clean
+/// recomputation would show otherwise (bug-hunt P1). Shared by
+/// `dual::dual_simplex_core` and `dual_advanced::core::
+/// dual_simplex_core_advanced`, whose non-basic variables are always at
+/// their lower bound (no per-variable upper bound / at_upper accounting —
+/// that is `bounded_core::iterate`'s own concern).
+pub(super) fn mint_optimal_after_fresh_reverify(
+    a: &CscMatrix,
+    x_b: &mut [f64],
+    c: &[f64],
+    b_rhs: &[f64],
+    basis: &[usize],
+    basis_mgr: &mut LuBasis,
+    m: usize,
+    options: &SolverOptions,
+) -> SimplexOutcome {
+    basis_mgr.force_refactor_timed(a, basis, options.deadline);
+    if basis_mgr.refactor_failed {
+        if basis_mgr.singular_basis {
+            return SimplexOutcome::SingularBasis;
+        }
+        return SimplexOutcome::Timeout(basic_obj(c, basis, x_b));
+    }
+    x_b.copy_from_slice(b_rhs);
+    basis_mgr.ftran_dense(x_b);
+    for v in x_b.iter_mut() {
+        if v.abs() < options.clamp_tol {
+            *v = 0.0;
+        }
+    }
+    let obj = basic_obj(c, basis, x_b);
+    let min_basic = x_b.iter().copied().fold(f64::INFINITY, f64::min);
+    if min_basic < -options.primal_tol {
+        return SimplexOutcome::Stalled(obj);
+    }
+    SimplexOutcome::Optimal(obj, compute_dual_vars(c, basis_mgr, basis, m))
+}
+
 /// Anti-cycling: enter Bland mode after K = `(NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN)`
 /// consecutive no-progress iterations.
 pub(super) const NO_PROGRESS_TRIGGER_FACTOR: usize = 3;

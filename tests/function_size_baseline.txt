@@ -13,11 +13,11 @@ otspot-core/src/qp/postsolve/refine/kkt_iterative/extended.rs	refine_kkt_extende
 otspot-core/src/qp/postsolve/refine/kkt_iterative/iterative.rs	refine_kkt_iterative	24	434
 otspot-core/src/qp/postsolve/refine/projected_gradient.rs	refine_dual_projected_gradient	7	251
 otspot-core/src/qp/postsolve/refine/worst_active.rs	refine_dual_worst_active_block	27	336
-otspot-core/src/simplex/dual_advanced/bounded_core/iterate.rs	iterate	149	448
+otspot-core/src/simplex/dual_advanced/bounded_core/iterate.rs	iterate	149	458
 otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	phase2_primal_bounded	137	293
 otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	primal_simplex_aug	532	293
-otspot-core/src/simplex/dual_advanced/core.rs	dual_simplex_core_advanced	282	573
-otspot-core/src/simplex/dual_advanced/phase1.rs	big_m_cold_start	610	411
+otspot-core/src/simplex/dual_advanced/core.rs	dual_simplex_core_advanced	282	581
+otspot-core/src/simplex/dual_advanced/phase1.rs	big_m_cold_start	610	413
 otspot-core/src/simplex/entry.rs	solve_with	79	285
 otspot-core/src/simplex/primal/core.rs	revised_simplex_core	153	627
 otspot-core/src/simplex/primal/crossover.rs	crossover_dual_from_primal	133	421

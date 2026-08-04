@@ -143,7 +143,7 @@ pub(crate) fn solve_bounded_dual(
     leaving: &mut dyn DualLeavingStrategy,
 ) -> (BoundedOutcome, BoundedDualState) {
     let state = BoundedDualState::cold(bsf, b);
-    iterate::iterate(state, bsf, a, c, options, ubs, leaving)
+    iterate::iterate(state, bsf, a, b, c, options, ubs, leaving)
 }
 
 // ── Eq+UB dispatch counter (sentinel tests only) ────────────────────────────
