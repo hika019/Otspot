@@ -8,7 +8,7 @@
 use otspot::io::qps::parse_qps;
 use otspot::qp::solve_qp_with;
 use otspot::options::SolverOptions;
-use otspot::QpProblem;
+use otspot::{QpProblem, SolveStatus};
 
 use clarabel::solver::{DefaultSettings, DefaultSolver, IPSolver};
 
@@ -53,11 +53,26 @@ fn check(name: &str, baseline_known: f64) {
         clarabel_obj / baseline_known,
     );
 
+    assert_eq!(
+        ours.status,
+        SolveStatus::Optimal,
+        "{name}: ours must report Optimal, got {:?} (obj={:.10e})",
+        ours.status,
+        ours.objective,
+    );
+
     // Load-bearing assertion: ours and an independent third-party solver (same
     // parsed Q/c/A/b, so no QPS-convention confound) must agree to within 1%.
     // This is the fact this test exists to establish either way.
     let rel_diff = (ours.objective - clarabel_obj).abs() / clarabel_obj.abs().max(1.0);
     eprintln!("ours vs clarabel rel_diff = {rel_diff:.6e}");
+    assert!(
+        rel_diff < 1e-2,
+        "{name}: ours (obj={:.10e}) vs clarabel (status={clarabel_status}, obj={:.10e}) \
+         rel_diff={rel_diff:.6e} exceeds 1% tolerance",
+        ours.objective,
+        clarabel_obj,
+    );
 }
 
 #[test]
