@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3121 testcases, 26 ignored
+# totals: 3130 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -601,9 +601,6 @@ otspot-core	options::tests::test_ipm_effective_max_l_nnz_default_and_override	ac
 otspot-core	options::tests::test_ipm_effective_minres_ir_default_and_override	active
 otspot-core	options::tests::test_ipm_new_fields_default	active
 otspot-core	options::tests::test_ipm_validate_defaults_ok	active
-otspot-core	options::tests::test_ipm_validate_delta_d_init	active
-otspot-core	options::tests::test_ipm_validate_delta_min	active
-otspot-core	options::tests::test_ipm_validate_delta_p_init	active
 otspot-core	options::tests::test_ipm_validate_eps	active
 otspot-core	options::tests::test_ipm_validate_max_correctors	active
 otspot-core	options::tests::test_ipm_validate_minres_ir	active
@@ -986,6 +983,11 @@ otspot-core	qp::global::tree::tests::best_lower_bound_matches_top	active
 otspot-core	qp::global::tree::tests::pop_returns_smallest_lower_bound_first	active
 otspot-core	qp::global::tree::tests::pushed_popped_counters_track	active
 otspot-core	qp::global::tree::tests::tie_break_fifo_seq	active
+otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::old_hundred_x_margin_gate_would_have_stayed_closed_for_liswet7	active
+otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_does_not_fire_once_already_converged	active
+otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_does_not_fire_while_still_making_progress	active
+otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_fires_for_liswet7_observed_floor_residual	active
+otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_requires_nonzero_history	active
 otspot-core	qp::ipm_core::ippmm::tests::test_box_only_nondiag_q_multi_pattern	active
 otspot-core	qp::ipm_core::ippmm::tests::test_box_only_nondiag_q_stall_reproducer	active
 otspot-core	qp::ipm_core::ippmm::tests::test_ippmm_basic_2d	active
@@ -1065,6 +1067,9 @@ otspot-core	qp::ipm_solver::attempt::tests::guard_qp_optimal_passthrough_valid	a
 otspot-core	qp::ipm_solver::attempt::tests::identical_attempt_early_break::identical_consecutive_attempts_break_early	active
 otspot-core	qp::ipm_solver::attempt::tests::ipm_finalize_outcome_reduced_costs_empty	active
 otspot-core	qp::ipm_solver::attempt::tests::iter_guard_charges_per_attempt_cap_on_failed_attempt	active
+otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_extends_with_deadline::does_not_extend_when_best_is_genuinely_stalled	active
+otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_extends_with_deadline::does_not_extend_without_deadline	active
+otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_extends_with_deadline::extends_once_past_max_iter_per_attempt_when_deadline_present	active
 otspot-core	qp::ipm_solver::attempt::tests::mask_does_not_hide_nonempty_col_false_optimal	active
 otspot-core	qp::ipm_solver::attempt::tests::no_presolve_fallback_does_not_replace_better_objective_incumbent	active
 otspot-core	qp::ipm_solver::attempt::tests::no_presolve_fallback_does_not_replace_structural_infeasible	active
@@ -2848,6 +2853,10 @@ otspot::faer_qd_test	test_ipm_barrier_parameter_sweep	active
 otspot::fast_baseline_regression	fast_regression_conic_matches_closed_form_unit_ball	active
 otspot::fast_baseline_regression	fast_regression_lp_matches_netlib_baseline	active
 otspot::fast_baseline_regression	fast_regression_qp_matches_maros_meszaros_baseline	active
+otspot::liswet7_11_obj_independent_check	liswet11_obj_independent_oracle	active
+otspot::liswet7_11_obj_independent_check	liswet7_obj_independent_oracle	active
+otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_breaks_delta_matrix_floor_at_eps_1e8	active
+otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_unaffected_at_default_eps_1e6	active
 otspot::lp_coverage_screen	lp_coverage_screen_all	ignored
 otspot::lp_coverage_screen	lp_coverage_screen_cycle	active
 otspot::lp_coverage_screen	lp_coverage_screen_sample_fast	active
