@@ -1943,6 +1943,7 @@ otspot-io	cbf::tests::bad_objsense_token_is_error	active
 otspot-io	cbf::tests::change_keyword_is_treated_as_eof	active
 otspot-io	cbf::tests::comment_and_blank_lines_are_ignored	active
 otspot-io	cbf::tests::cone_block_size_sum_mismatch_is_error	active
+otspot-io	cbf::tests::cone_block_size_sum_overflow_is_error	active
 otspot-io	cbf::tests::duplicate_acoord_entry_is_error	active
 otspot-io	cbf::tests::duplicate_bcoord_entry_is_error	active
 otspot-io	cbf::tests::duplicate_con_section_is_error	active
@@ -1952,6 +1953,7 @@ otspot-io	cbf::tests::duplicate_objbcoord_section_is_error	active
 otspot-io	cbf::tests::duplicate_objsense_section_is_error	active
 otspot-io	cbf::tests::duplicate_var_section_is_error	active
 otspot-io	cbf::tests::duplicate_ver_section_is_error	active
+otspot-io	cbf::tests::huge_cone_size_allocation_is_error	active
 otspot-io	cbf::tests::int_section_builds_misocp_with_expected_integer_optimum	active
 otspot-io	cbf::tests::int_variable_bound_derived_from_negative_coefficient_rows	active
 otspot-io	cbf::tests::int_variable_bound_tightened_by_multiple_single_var_rows	active
@@ -1975,8 +1977,12 @@ otspot-io	cbf::tests::q1_cone_accepted_var_and_con_matches_hand_optimum	active
 otspot-io	cbf::tests::q_cone_size_zero_is_error	active
 otspot-io	cbf::tests::qr2_cone_accepted_matches_hand_optimum	active
 otspot-io	cbf::tests::qr_cone_size_one_is_error	active
+otspot-io	cbf::tests::realistic_large_var_total_near_known_cblib_max_is_not_rejected	active
 otspot-io	cbf::tests::rotated_soc_con_block_affine_rows_match_hand_optimum	active
 otspot-io	cbf::tests::rotated_soc_var_block_matches_hand_optimum	active
+otspot-io	cbf::tests::sentinel_huge_var_total_is_error_not_abort	active
+otspot-io	cbf::tests::sentinel_mid_range_var_total_rejected_before_reserve	active
+otspot-io	cbf::tests::sentinel_var_total_one_over_cap_is_error	active
 otspot-io	cbf::tests::soc_cone_con_block_matches_hand_optimum	active
 otspot-io	cbf::tests::unknown_section_keyword_is_error	active
 otspot-io	cbf::tests::unsupported_cone_token_exp_is_error	active
@@ -2107,6 +2113,12 @@ otspot-io	qplib::parser::tail_tests::required_records_ignore_plain_line_end_comm
 otspot-io	qplib::parser::tail_tests::sentinel_con_b_full_official_tail_without_constraint_dual_parses_ok	active
 otspot-io	qplib::parser::tail_tests::sentinel_pre_fix_five_record_tail_missing_constraint_names_is_rejected	active
 otspot-io	qplib::tests::qplib_fractional_objective_count_is_rejected_in_official_n_layout	active
+otspot-io	qplib::tests::realistic_large_declared_variables_count_near_known_qplib_max_is_not_rejected	active
+otspot-io	qplib::tests::sentinel_declared_n_con_lin_terms_one_over_cap_is_error	active
+otspot-io	qplib::tests::sentinel_declared_nqobj_one_over_cap_is_error	active
+otspot-io	qplib::tests::sentinel_declared_variables_count_one_over_cap_is_error	active
+otspot-io	qplib::tests::sentinel_huge_declared_variables_count_is_error_not_crash	active
+otspot-io	qplib::tests::sentinel_mid_range_declared_variables_count_rejected_before_allocation	active
 otspot-io	qplib::tests::test_memory_probe_large_dcl_files	active
 otspot-io	qplib::tests::test_memory_sentinel_no_double_hashmap_qplib8500	active
 otspot-io	qplib::tests::test_memory_sentinel_qplib8683_qcqp	active
@@ -2241,6 +2253,9 @@ otspot-io	qps::tests::test_sentinel_qps_columns_trailing_row_no_value_is_error	a
 otspot-io	qps::tests::test_sentinel_qps_quadobj_undefined_column_is_error	active
 otspot-io	qps::tests::test_solve_qps_basic	active
 otspot-io	qps::tests::test_solve_with_obj_offset	active
+otspot-io	size_limits::tests::check_declared_size_accepts_boundary_and_rejects_above	active
+otspot-io	size_limits::tests::try_vec_filled_rejects_huge_length_gracefully	active
+otspot-io	size_limits::tests::try_vec_with_capacity_rejects_huge_capacity_gracefully	active
 otspot-io::bug_repro	test_hs268_dual_residual_diagnose	active
 otspot-io::bug_repro	test_ipm_hs21_cmp_full_solver	active
 otspot-io::bug_repro	test_scsd6_equality_constraints	active

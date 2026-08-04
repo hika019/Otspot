@@ -1635,4 +1635,176 @@ minimize
             err
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Declared-size guard (`crate::size_limits`): review of 053f9543 found
+    // this parser had no cap at all on `n`/`m`/`nqobj`/`n_con_lin_terms` --
+    // a few-byte file could declare an astronomical count and it flowed
+    // straight into `vec![v; n]` (`Vec::from_elem`), which aborts the process
+    // (SIGABRT via `handle_alloc_error`) rather than returning `Err`. This is
+    // the same class of bug 053f9543 fixed for CBF's `VAR`/`CON` totals, just
+    // left unaddressed here.
+    // -----------------------------------------------------------------------
+
+    /// P0 regression: exact repro from review (40-byte-scale file declaring
+    /// n = 100_000_000_000) must return `Err`, not abort the process.
+    #[test]
+    fn sentinel_huge_declared_variables_count_is_error_not_crash() {
+        let qplib = "\
+SENTINEL_HUGE_N
+LBB
+min
+100000000000
+";
+        let err = parse_qplib_str(qplib).expect_err("astronomical n must be rejected");
+        assert!(
+            matches!(err, QplibError::ParseError(ref msg) if msg.contains("number of variables")),
+            "expected a ParseError mentioning 'number of variables', got {:?}",
+            err
+        );
+    }
+
+    /// P1-style regression: a declared `n` this large is in the range review
+    /// found a bare `try_reserve`/`Vec::with_capacity` cannot reliably reject
+    /// (Linux overcommit lets the reservation succeed; only touching every
+    /// element, e.g. via `vec![v; n]`'s fill, forces the OOM kill). Unlike
+    /// [`sentinel_huge_declared_variables_count_is_error_not_crash`]'s
+    /// 4-line probe, this file supplies real `nqobj`/`default_b0` records so
+    /// that -- with the guard removed -- parsing actually reaches
+    /// `qvec_filled(n, default_b0, ..)` (`c`'s allocation) rather than
+    /// stopping earlier at an unrelated EOF error; a prior version of this
+    /// test used a truncated 4-line file that returned `Err` from EOF alone,
+    /// passing even with the guard removed (verified during this fix: with
+    /// `read_dimension`'s cap check deleted, the old file still returned
+    /// `Err` in 0.003s, never reaching the dangerous allocation).
+    ///
+    /// **No-op failure guarantee**: with `check_declared_size` removed from
+    /// `read_dimension`, running this exact input under
+    /// `systemd-run --user --scope -p MemoryMax=8G` gets the process
+    /// OOM-killed while `qvec_filled` resizes a ~16 GB buffer (verified
+    /// during this fix; not reproduced here as it would defeat the point of
+    /// the fix -- see the task report for the systemd-run transcript).
+    #[test]
+    fn sentinel_mid_range_declared_variables_count_rejected_before_allocation() {
+        let qplib = "\
+SENTINEL_MID_N
+LBB
+min
+2000000000
+0
+0.0
+";
+        let err = parse_qplib_str(qplib).expect_err("mid-range declared n must be rejected");
+        assert!(
+            matches!(err, QplibError::ParseError(ref msg) if msg.contains("exceeds the maximum accepted value")),
+            "expected the declared-size guard's message, got {:?}",
+            err
+        );
+    }
+
+    /// Upper boundary: one past the cap must still be rejected.
+    #[test]
+    fn sentinel_declared_variables_count_one_over_cap_is_error() {
+        let n = crate::size_limits::MAX_DECLARED_DIMENSION + 1;
+        let qplib = format!(
+            "\
+SENTINEL_N_OVER_CAP
+LBB
+min
+{n}
+"
+        );
+        let err = parse_qplib_str(&qplib).expect_err("n one past the cap must be rejected");
+        assert!(
+            matches!(err, QplibError::ParseError(ref msg) if msg.contains("exceeds the maximum accepted value")),
+            "expected the declared-size guard's message, got {:?}",
+            err
+        );
+    }
+
+    /// Upper boundary for the sparse-entry-count cap: `nqobj` one past
+    /// `MAX_DECLARED_TERM_COUNT` must be rejected by the new guard (not the
+    /// pre-existing `nqobj <= n*(n+1)/2` sanity check, which a large enough
+    /// `n` would not itself catch).
+    #[test]
+    fn sentinel_declared_nqobj_one_over_cap_is_error() {
+        let nqobj = crate::size_limits::MAX_DECLARED_TERM_COUNT + 1;
+        let qplib = format!(
+            "\
+SENTINEL_NQOBJ_OVER_CAP
+LBB
+min
+1000
+{nqobj}
+"
+        );
+        let err = parse_qplib_str(&qplib).expect_err("nqobj one past the cap must be rejected");
+        assert!(
+            matches!(err, QplibError::ParseError(ref msg) if msg.contains("exceeds the maximum accepted value")),
+            "expected the declared-size guard's message (not the n*(n+1)/2 sanity check), got {:?}",
+            err
+        );
+    }
+
+    /// Upper boundary for the sparse-entry-count cap on the constraint side:
+    /// `n_con_lin_terms` one past `MAX_DECLARED_TERM_COUNT` must be rejected.
+    #[test]
+    fn sentinel_declared_n_con_lin_terms_one_over_cap_is_error() {
+        let n_con_lin_terms = crate::size_limits::MAX_DECLARED_TERM_COUNT + 1;
+        let qplib = format!(
+            "\
+SENTINEL_NCONLIN_OVER_CAP
+LCL
+min
+10
+10
+0
+0.0
+0
+0.0
+{n_con_lin_terms}
+"
+        );
+        let err =
+            parse_qplib_str(&qplib).expect_err("n_con_lin_terms one past the cap must be rejected");
+        assert!(
+            matches!(err, QplibError::ParseError(ref msg) if msg.contains("exceeds the maximum accepted value")),
+            "expected the declared-size guard's message (not the n*m sanity check), got {:?}",
+            err
+        );
+    }
+
+    /// A declared variable count comfortably above the largest verified real
+    /// QPLIB problem (QPLIB_9008, 1,009,306 variables) but far below the cap
+    /// must parse successfully -- the guard must not create a new ceiling on
+    /// legitimate large problems.
+    #[test]
+    fn realistic_large_declared_variables_count_near_known_qplib_max_is_not_rejected() {
+        const NEAR_MAX_REAL_QPLIB_VARS: usize = 1_200_000;
+        let qplib = format!(
+            "\
+REALISTIC_LARGE_N
+LCB
+min
+{NEAR_MAX_REAL_QPLIB_VARS}
+0
+0.0
+0
+0.0
+1.0e308
+0.0
+0
+1.0
+0
+0.0
+0
+0.0
+0
+0
+0
+"
+        );
+        let prob = unwrap_qp(parse_qplib_str(&qplib).expect("near-real-max n must parse"));
+        assert_eq!(prob.num_vars, NEAR_MAX_REAL_QPLIB_VARS);
+    }
 }

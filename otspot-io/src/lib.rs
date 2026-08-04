@@ -7,6 +7,7 @@ pub mod qplib;
 pub mod qps;
 
 mod common;
+mod size_limits;
 
 /// Thread-local peak-allocation tracker for memory sentinel tests.
 ///

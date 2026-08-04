@@ -22,5 +22,5 @@ otspot-core/src/simplex/primal/core.rs	revised_simplex_core	153	627
 otspot-core/src/simplex/primal/crossover.rs	crossover_dual_from_primal	133	421
 otspot-core/src/simplex/primal/reconcile.rs	pivot_out_degenerate_artificials	219	294
 otspot-dev/src/bin/bench_qplib.rs	main	94	636
-otspot-io/src/qplib/parser.rs	parse_token_stream	400	417
+otspot-io/src/qplib/parser.rs	parse_token_stream	437	417
 otspot-model/src/model.rs	solve_qcqp_internal	1066	278
