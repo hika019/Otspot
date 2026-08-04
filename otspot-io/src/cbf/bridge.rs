@@ -301,12 +301,7 @@ fn tighten_single_variable_bounds(
 }
 
 fn try_vec_with<T: Clone>(len: usize, value: T, context: &str) -> Result<Vec<T>, CbfError> {
-    let mut out = Vec::new();
-    out.try_reserve_exact(len).map_err(|e| {
-        CbfError::ParseError(format!("cannot allocate {context} of length {len}: {e}"))
-    })?;
-    out.resize(len, value);
-    Ok(out)
+    crate::size_limits::try_vec_filled(len, value, context).map_err(CbfError::ParseError)
 }
 
 pub(super) fn build(raw: RawCbf) -> Result<CbfProblem, CbfError> {

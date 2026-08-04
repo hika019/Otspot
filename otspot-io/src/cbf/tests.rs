@@ -939,7 +939,17 @@ fn assert_parse_error_contains(cbf: &str, needle: &str) {
                 "ParseError message should mention {needle:?}, got {msg:?}"
             );
         }
-        other => panic!("expected ParseError, got {other:?}"),
+        // `other` here never binds `Ok(CbfProblem)`: a declared-size sentinel
+        // that accidentally regresses past its cap would build a `CbfProblem`
+        // whose `Vec` fields are sized to the (huge) declared total, and
+        // `{other:?}` on that would try to Debug-format hundreds of MB of
+        // data instead of failing cleanly. `Err(other)` only ever wraps a
+        // `String`/`io::Error`, so it stays cheap to print.
+        Err(other) => panic!("expected ParseError, got a different Err variant: {other:?}"),
+        Ok(_) => panic!(
+            "expected ParseError (message should mention {needle:?}), but the input parsed \
+             successfully -- the guard did not reject it"
+        ),
     }
 }
 
@@ -1397,4 +1407,110 @@ ACOORD
         );
         assert_parse_error_contains(&cbf, "expected finite float");
     }
+}
+
+// ---------------------------------------------------------------------
+// Declared-size guard (`crate::size_limits`): a `VAR`/`CON` total is capped
+// before it can gate any allocation, closing two gaps found in review of
+// 053f9543 -- (P0) the QPLIB parser had no such guard at all and aborted the
+// process (SIGABRT) on a few-byte file declaring an astronomical dimension;
+// (P1) `try_reserve_exact` alone let a "plausible" mid-range dimension
+// (hundreds of millions of elements) reserve successfully under Linux
+// overcommit and then get OOM-killed once `.resize()` paged the buffer in.
+// ---------------------------------------------------------------------
+
+/// P0-style regression: a tiny file declaring an astronomical `VAR` total
+/// must return `Err`, not abort the process. Mirrors the QPLIB repro from
+/// review (n = 100_000_000_000) so the same class of input is covered on
+/// both parsers.
+#[test]
+fn sentinel_huge_var_total_is_error_not_abort() {
+    assert_parse_error_contains(
+        "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+100000000000 1
+L+ 100000000000
+",
+        "exceeds the maximum accepted value",
+    );
+}
+
+/// P1 regression: 500,000,000 declared variables is exactly the size review
+/// found `try_reserve_exact` cannot catch (the reservation succeeds under
+/// Linux overcommit; the OOM kill only happens once `.resize()` in
+/// `try_vec_with` actually pages the buffer in). With the declared-size cap
+/// in place, this must be rejected *before* `bridge::build` ever calls
+/// `try_reserve_exact`, so the test completes instantly with no risk of the
+/// OOM this sentinel is named for.
+///
+/// **No-op failure guarantee**: reverting the `check_declared_size` call in
+/// `cone::read_cone_blocks` reintroduces the reviewed OOM-kill (verified
+/// under `systemd-run --scope -p MemoryMax=8G` during this fix; not
+/// reproduced here as it would defeat the point of the fix).
+#[test]
+fn sentinel_mid_range_var_total_rejected_before_reserve() {
+    assert_parse_error_contains(
+        "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+500000000 1
+L+ 500000000
+",
+        "exceeds the maximum accepted value",
+    );
+}
+
+/// One past the cap must still be rejected (upper boundary).
+#[test]
+fn sentinel_var_total_one_over_cap_is_error() {
+    let total = crate::size_limits::MAX_DECLARED_DIMENSION + 1;
+    let cbf = format!(
+        "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+{total} 1
+L+ {total}
+"
+    );
+    assert_parse_error_contains(&cbf, "exceeds the maximum accepted value");
+}
+
+/// A declared dimension comfortably above the largest verified real CBLIB
+/// problem (`db-joint-soerensen.cbf`, 1,478,669 variables) but far below the
+/// cap must not be rejected -- the guard must not create a new ceiling on
+/// legitimate large problems.
+#[test]
+fn realistic_large_var_total_near_known_cblib_max_is_not_rejected() {
+    const NEAR_MAX_REAL_CBLIB_VARS: usize = 1_500_000;
+    let cbf = format!(
+        "\
+VER
+3
+
+OBJSENSE
+MIN
+
+VAR
+{NEAR_MAX_REAL_CBLIB_VARS} 1
+F {NEAR_MAX_REAL_CBLIB_VARS}
+"
+    );
+    let problem = unwrap_socp(parse_cbf_str(&cbf).expect("near-real-max VAR total must parse"));
+    assert_eq!(problem.c.len(), NEAR_MAX_REAL_CBLIB_VARS);
 }
