@@ -251,15 +251,7 @@ fn run_attempt_ladder(
         let outcome = runner(problem, presolve_result, opts, user_eps);
         let outcome_satisfies = outcome.satisfies_eps(user_eps);
         let outcome_proven = outcome_satisfies && outcome_proves_optimal(&outcome, view, user_eps);
-        // Charge per_attempt_cap for failed attempts: stall paths return best_iter which
-        // can be far below the actual iterations consumed, causing the outer guard to
-        // undercount and permit more total iterations than user_max_iter.
-        let charged = if outcome_satisfies {
-            outcome.iterations
-        } else {
-            per_attempt_cap
-        };
-        *iter_used = iter_used.saturating_add(charged);
+        *iter_used = iter_used.saturating_add(charged_iterations(&outcome, per_attempt_cap));
 
         if outcome_proven {
             *best = Some(outcome);
@@ -304,6 +296,22 @@ fn run_attempt_ladder(
             break;
         }
     }
+}
+
+/// 1 attempt が `iter_used` (= `user_max_iter` 予算) に課金する反復数。
+///
+/// `IpmOutcome::iterations` は inner ループの実消費で、予算を使い切った場合のみ
+/// `granted` と一致する (`solve_ippmm_inner_confined` は break 時に必ず
+/// `iterations_consumed` を確定させ、break なしの終端でのみ `max_iter` を入れる)。
+/// したがって成否によらずこれが正しい課金額であり、`granted` は上振れ clamp に
+/// だけ使う。
+///
+/// 失敗 attempt に `granted` を丸ごと課金してはならない: `granted` は延長 attempt
+/// では残予算全体 (既定の `max_iter = usize::MAX` では実質無限) なので、stall で
+/// 早期終了した 1 回の延長が `iter_used` を飽和させ、下流の
+/// `run_no_presolve_fallback` を無条件にスキップさせる。
+fn charged_iterations(outcome: &IpmOutcome, granted: usize) -> usize {
+    outcome.iterations.min(granted)
 }
 
 fn outcome_proves_optimal(outcome: &IpmOutcome, view: &ProblemView<'_>, user_eps: f64) -> bool {
@@ -860,12 +868,7 @@ fn extend_iteration_limit_attempt(
             let ext_outcome = runner(problem, presolve_result, opts, user_eps);
             let ext_satisfies = ext_outcome.satisfies_eps(user_eps);
             let ext_proven = ext_satisfies && outcome_proves_optimal(&ext_outcome, view, user_eps);
-            let ext_charged = if ext_satisfies {
-                ext_outcome.iterations
-            } else {
-                remaining_ext
-            };
-            *iter_used = iter_used.saturating_add(ext_charged);
+            *iter_used = iter_used.saturating_add(charged_iterations(&ext_outcome, remaining_ext));
             let ext_is_better = match best {
                 None => true,
                 Some(prev) => outcome_is_better_candidate(&ext_outcome, prev, view, user_eps),
@@ -922,12 +925,7 @@ fn run_no_presolve_fallback(
         let fb = runner(problem, &fallback_pre, opts, user_eps);
         let fb_satisfies = fb.satisfies_eps(user_eps);
         let fb_proven = fb_satisfies && outcome_proves_optimal(&fb, view, user_eps);
-        let charged_fb = if fb_satisfies {
-            fb.iterations
-        } else {
-            per_attempt_cap
-        };
-        *iter_used = iter_used.saturating_add(charged_fb);
+        *iter_used = iter_used.saturating_add(charged_iterations(&fb, per_attempt_cap));
         if fb_proven {
             *best = Some(fb);
             break;
@@ -2210,20 +2208,21 @@ mod tests {
         assert!((result.bound_duals[3] - 10.0).abs() < 1e-12);
     }
 
-    /// Sentinel: per_attempt_cap is charged for failed attempts, not outcome.iterations.
+    /// `iter_used` は attempt が実際に消費した反復数 (`IpmOutcome::iterations`) を
+    /// 課金する。granted (per-attempt cap / 残予算) を課金してはならない。
     ///
-    /// Injects a mock runner that always returns `iterations=0` (simulating stall paths
-    /// where `IpmOutcome.iterations = best_iter << actual iterations consumed`). With
-    /// `user_max_iter=2`, the first attempt charges `per_attempt_cap=2`; the guard
-    /// `iter_used >= user_max_iter` triggers immediately and the loop stops.
+    /// - 予算を使い切った attempt (iterations == granted) では guard が発火する。
+    /// - 予算を使い切らなかった attempt では残りが次 attempt に渡る。
     ///
-    /// **Sentinel**: reverting to `iter_used += outcome.iterations` leaves iter_used=0
-    /// after the first attempt → the guard never triggers → all attempts run (count > 1).
-    #[test]
-    fn iter_guard_charges_per_attempt_cap_on_failed_attempt() {
+    /// **Sentinel**: `charged_iterations` を granted 課金へ revert すると
+    /// `unspent_budget_carries_to_the_next_attempt` が 1 call で止まり fail する。
+    mod iter_guard_charges_actual_consumption {
+        use super::*;
         use std::cell::Cell;
+
         thread_local! {
             static CALL_COUNT: Cell<usize> = const { Cell::new(0) };
+            static REPORTED_ITERS: Cell<usize> = const { Cell::new(0) };
         }
 
         fn mock_runner(
@@ -2233,28 +2232,42 @@ mod tests {
             _: f64,
         ) -> IpmOutcome {
             CALL_COUNT.with(|c| c.set(c.get() + 1));
-            // iterations=0 simulates stall best_iter undercount; never converges.
-            IpmOutcome::empty()
+            IpmOutcome {
+                iterations: REPORTED_ITERS.with(|c| c.get()),
+                ..IpmOutcome::empty()
+            }
         }
 
-        let prob = make_simple_eq_qp();
-        let mut opts = SolverOptions::default();
-        opts.ipm.max_iter = 2;
-        opts.presolve = false; // skip presolve to isolate the attempt loop
-        CALL_COUNT.with(|c| c.set(0));
+        fn run_with(reported: usize, max_iter: usize) -> usize {
+            let prob = make_simple_eq_qp();
+            let mut opts = SolverOptions::default();
+            opts.ipm.max_iter = max_iter;
+            opts.presolve = false; // attempt loop を単離
+            CALL_COUNT.with(|c| c.set(0));
+            REPORTED_ITERS.with(|c| c.set(reported));
+            let _ = solve_ipm_with_runner(&prob, &opts, mock_runner);
+            CALL_COUNT.with(|c| c.get())
+        }
 
-        let _ = solve_ipm_with_runner(&prob, &opts, mock_runner);
+        #[test]
+        fn exhausted_budget_stops_the_attempt_loop() {
+            assert_eq!(
+                run_with(2, 2),
+                1,
+                "granted=2 を丸ごと消費した attempt の後は iter_used=2 >= max_iter=2 で \
+                 ループが止まるべき"
+            );
+        }
 
-        let count = CALL_COUNT.with(|c| c.get());
-        // With the fix: attempt 1 charges per_attempt_cap=2 → iter_used=2 >= 2 → stops.
-        // Without fix (charge outcome.iterations=0): iter_used never advances → all
-        // attempts run → count >> 1.
-        assert_eq!(
-            count, 1,
-            "iter guard must stop after 1 attempt when per_attempt_cap charges full budget \
-             (got {} runner calls)",
-            count
-        );
+        #[test]
+        fn unspent_budget_carries_to_the_next_attempt() {
+            assert_eq!(
+                run_with(1, 2),
+                2,
+                "1 反復しか消費していない attempt が残予算 (2-1=1) を次 attempt へ \
+                 渡すべき (granted を課金する実装へ revert すると 1 call で止まる)"
+            );
+        }
     }
 
     /// The attempt loop tightens `opts.ipm.eps` for the inner IPM solve, but
@@ -2931,6 +2944,158 @@ mod tests {
                 "deadline が無ければ IterationLimit のまま attempts 列を使い切っても \
                  延長 attempt を追加してはいけない (genuine な終了条件が無いまま \
                  無制限反復を許すことになる)"
+            );
+        }
+    }
+
+    /// 失敗した延長 attempt が `iter_used` 予算を食い潰し、下流の
+    /// `run_no_presolve_fallback` を無条件にスキップさせないことの sentinel。
+    ///
+    /// 延長 attempt には残予算全部 (`options.ipm.max_iter` の既定は `usize::MAX`)
+    /// が渡る。旧実装は「未収束なら granted を丸ごと課金」していたため、stall で
+    /// 137 反復だけ使って早期終了した 1 回の延長が `iter_used` を飽和させ、
+    /// no-presolve fallback の `iter_used >= user_max_iter` ガードに即座に
+    /// 引っかかっていた。
+    ///
+    /// 実測 (QSHELL @ eps=1e-6, timeout=1000s, 床が QP にも掛かっていた
+    /// 1babe8bc 時点): この経路で fallback が消え、元は fallback が 56 反復で
+    /// 証明していた Optimal が Stalled/MaxIterations に退化した
+    /// (PASS 13.9s → STALLED 19.4s)。床のゲート修正で QSHELL 自体はこの経路に
+    /// 入らなくなった (`charged_iterations` 単独 revert では
+    /// `qshell_reaches_optimal_through_the_no_presolve_fallback` は 18.89s PASS)
+    /// ので、本 unit test が本修正の単独 sentinel である。
+    ///
+    /// Sentinel: `charged_iterations` を `if satisfies { outcome.iterations }
+    /// else { granted }` に revert すると fallback が 0 回になり fail する。
+    mod failed_extension_keeps_no_presolve_fallback_reachable {
+        use super::*;
+        use crate::qp::ipm_solver::outcome::IpmTermination;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        static LADDER_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static FALLBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static EXT_GRANTED: AtomicUsize = AtomicUsize::new(0);
+
+        /// presolve+Ruiz lane: 最初の 3 call は bit 同一の IterationLimit
+        /// (= 500 iter 強制打ち切り) を返して ladder を early-break させ、
+        /// 4 call 目 (延長) は granted を記録した上で 137 反復で stall する。
+        /// no-presolve fallback (`ruiz_scaler.is_none()`) は証明可能な最適解を返す。
+        fn runner_extension_stalls_then_fallback_proves(
+            _problem: &QpProblem,
+            presolve: &QpPresolveResult,
+            options: &SolverOptions,
+            _user_eps: f64,
+        ) -> IpmOutcome {
+            if presolve.ruiz_scaler.is_none() {
+                FALLBACK_CALLS.fetch_add(1, Ordering::SeqCst);
+                return IpmOutcome {
+                    solution: vec![0.0],
+                    dual_solution: vec![],
+                    bound_duals: vec![0.0],
+                    objective: 0.0,
+                    iterations: 56,
+                    kkt_residual_rel: 0.0,
+                    primal_residual_rel: 0.0,
+                    bound_violation: 0.0,
+                    complementarity_residual_rel: 0.0,
+                    duality_gap_rel: 0.0,
+                    numerical_failure: false,
+                    infeasibility_status: None,
+                    is_locally_optimal: false,
+                    postsolve_krylov_ir_skipped: false,
+                    timing: None,
+                    termination: IpmTermination::Converged,
+                };
+            }
+            let call = LADDER_CALLS.fetch_add(1, Ordering::SeqCst) + 1;
+            if call <= CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK {
+                return IpmOutcome {
+                    solution: vec![0.25],
+                    dual_solution: vec![],
+                    bound_duals: vec![0.0, 0.0],
+                    objective: 0.25,
+                    iterations: MAX_ITER_PER_ATTEMPT,
+                    kkt_residual_rel: 1.0,
+                    primal_residual_rel: 1.0,
+                    bound_violation: 0.0,
+                    complementarity_residual_rel: 1.0,
+                    duality_gap_rel: 1.0,
+                    numerical_failure: false,
+                    infeasibility_status: None,
+                    is_locally_optimal: false,
+                    postsolve_krylov_ir_skipped: false,
+                    timing: None,
+                    termination: IpmTermination::IterationLimit,
+                };
+            }
+            EXT_GRANTED.store(options.ipm.max_iter, Ordering::SeqCst);
+            IpmOutcome {
+                solution: vec![0.3],
+                dual_solution: vec![],
+                bound_duals: vec![0.0, 0.0],
+                objective: 0.3,
+                iterations: 137,
+                kkt_residual_rel: 1.0,
+                primal_residual_rel: 1.0,
+                bound_violation: 0.0,
+                complementarity_residual_rel: 1.0,
+                duality_gap_rel: 1.0,
+                numerical_failure: false,
+                infeasibility_status: None,
+                is_locally_optimal: false,
+                postsolve_krylov_ir_skipped: false,
+                timing: None,
+                termination: IpmTermination::Stalled,
+            }
+        }
+
+        #[test]
+        fn stalled_extension_charges_only_what_it_consumed() {
+            // min 0.5 x²  s.t. x >= 0 (最適 x=0, obj=0) — fallback の返す
+            // solution=[0.0] が prove_optimal を通る最小構成。
+            let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+            let prob = QpProblem::new_all_le(
+                q,
+                vec![0.0],
+                CscMatrix::new(0, 1),
+                vec![],
+                vec![(0.0, f64::INFINITY)],
+            )
+            .unwrap();
+            let mut opts = SolverOptions {
+                presolve: true,
+                use_ruiz_scaling: true,
+                ..Default::default()
+            };
+            opts.ipm.eps = 1e-6;
+            // 既定の max_iter (usize::MAX) を維持: 延長 attempt に渡る残予算が
+            // 実質無限になる本番構成そのもの。
+            assert_eq!(opts.ipm.max_iter, usize::MAX);
+            opts.deadline = Some(Instant::now() + Duration::from_secs(3600));
+
+            LADDER_CALLS.store(0, Ordering::SeqCst);
+            FALLBACK_CALLS.store(0, Ordering::SeqCst);
+            EXT_GRANTED.store(0, Ordering::SeqCst);
+            let (result, _) =
+                solve_ipm_with_runner(&prob, &opts, runner_extension_stalls_then_fallback_proves);
+
+            assert!(
+                EXT_GRANTED.load(Ordering::SeqCst) > MAX_ITER_PER_ATTEMPT,
+                "延長 attempt には残予算全部が渡る前提が崩れている, granted={}",
+                EXT_GRANTED.load(Ordering::SeqCst)
+            );
+            assert!(
+                FALLBACK_CALLS.load(Ordering::SeqCst) >= 1,
+                "137 反復で stall した延長 attempt が iter_used 予算を使い切っては \
+                 ならない (no-presolve fallback が 1 度も呼ばれていない: \
+                 charged_iterations が granted を課金する実装に revert している)"
+            );
+            assert_eq!(
+                result.status,
+                crate::problem::SolveStatus::Optimal,
+                "fallback が証明した Optimal が返るべき, got {:?}",
+                result.status
             );
         }
     }

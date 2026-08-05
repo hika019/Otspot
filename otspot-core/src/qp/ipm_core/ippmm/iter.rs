@@ -6,7 +6,7 @@ use super::factorize::{
 };
 use super::init::build_initial_point;
 use super::state::{
-    alpha_stall_eps_for, matrix_reg_floor_for, pf_stuck_should_lower_reg_limit, PmmState,
+    alpha_stall_eps_for, matrix_reg_floor_for_lp, pf_stuck_should_lower_reg_limit, PmmState,
     ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N, DELTA_INIT,
     DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL, GONDZIO_ALPHA_TRIGGER,
     INFEAS_DETECTOR_DISTRUST_SCORE, MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PF_HISTORY_LEN,
@@ -103,7 +103,7 @@ fn solve_ippmm_inner_confined(
         // warm start: μ 規模に揃えた rho/delta で出発し proximal pull を最小化。
         // floor は REG_LIMIT_MIN (adaptive reg_limit が最終的に到達する下限) —
         // 固定 delta_min=1e-8 は tight eps でこの初期値自体が過大な床になる
-        // (bug-frontier 実測: LISWET7 系, 後述の rho_matrix/delta_matrix 参照)。
+        // (bug-frontier 実測: LISWET7 系, `matrix_reg_floor_for_lp` の doc 参照)。
         Some(mu) => {
             let v = mu.max(REG_LIMIT_MIN);
             (v, v)
@@ -124,7 +124,8 @@ fn solve_ippmm_inner_confined(
     let inertia_correction = crate::qp::ipm_core::kkt::compute_inertia_correction(&problem.q);
     let q_is_indefinite = inertia_correction > 0.0;
 
-    let initial_reg_limit = if problem.q.values().iter().all(|&v| v == 0.0) {
+    let is_lp = problem.q.values().iter().all(|&v| v == 0.0);
+    let initial_reg_limit = if is_lp {
         REG_LIMIT_INIT_LP
     } else {
         REG_LIMIT_INIT_QP
@@ -133,11 +134,8 @@ fn solve_ippmm_inner_confined(
     let c_max = problem.c.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
     let allow_adaptive_reg = c_max < ADAPTIVE_REG_C_MAX_THRESH;
     let mut reg_limit = initial_reg_limit;
-    // 行列正則化は Newton 方向の条件数のみを決めるので proximal 側 (reg_limit)
-    // とは別に floor する。Q が (1,1) ピボットを自前で供給する分だけ floor は下がる。
-    let matrix_reg_floor = matrix_reg_floor_for(
-        otspot_num::linalg::gershgorin::lambda_min_lower_bound(&problem.q),
-    );
+    // KKT 行列正則化の絶対下限 (reg_limit の適応引下げとは独立)。
+    let matrix_reg_floor = matrix_reg_floor_for_lp(is_lp);
 
     // pf-stagnation trigger (adaptive reg_limit の追加経路、c≠0 問題向け):
     // pf が最近の N 反復で実質改善せず (ratio > THRESHOLD) かつ pf が target から
@@ -307,13 +305,12 @@ fn solve_ippmm_inner_confined(
             r_p_pmm[i] -= delta_prox * (y[i] - pmm.y_ref[i]);
         }
 
-        // Σ = diag(s_i / y_i) (等式行は0)
-        let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, SIGMA_MAX_FALLBACK);
-
-        // 行列側の正則化は PMM 不動点ではなく Newton 系の条件数を決めるので、
-        // proximal 係数 (pmm.rho/pmm.delta) と別の floor を持つ (`matrix_reg_floor`)。
+        // KKT 行列側の正則化。床は LP 経路のみ (`matrix_reg_floor_for_lp` の doc)。
         let rho_matrix = pmm.rho.max(matrix_reg_floor);
         let delta_matrix = pmm.delta.max(matrix_reg_floor);
+
+        // Σ = diag(s_i / y_i) (等式行は0)
+        let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, SIGMA_MAX_FALLBACK);
 
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);

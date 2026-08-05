@@ -83,6 +83,7 @@ fn run_ipm_with(
         SolveStatus::Infeasible | SolveStatus::Unbounded | SolveStatus::NonConvex(_)
     ) {
         let mut out = IpmOutcome::infeasibility(result.status);
+        out.iterations = result.iterations; // attempt 予算 (`iter_used`) の課金対象
         out.timing = result.timing_breakdown;
         return out;
     }
