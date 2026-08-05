@@ -175,20 +175,16 @@ pub fn bfrt_select_entering(
     // Step 4: tie-aware entering selection. Among breakpoints within
     // BFRT_TIE_TOL of the chosen θ, prefer the largest |pivot| (Harris pass 2)
     // — but only among candidates that can absorb `residual` themselves.
-    //
     // Swapping the entering column leaves the flip set `0..entering_idx`
     // untouched, so the replacement inherits the same `residual` and must pass
     // the very test Step 3 used to stop: `residual ≤ weight_k`, i.e. its primal
     // step `residual / |α_k|` stays inside its own upper bound. Skipping this
     // check lets a tied column with a large pivot but a tiny upper bound enter
     // far past its own bound (the tie only equalises θ, never capacity).
-    //
-    // Candidates *before* `entering_idx` are excluded structurally rather than
-    // by this test: un-flipping one to make it entering hands back the
-    // `weight_k` it already absorbed, so it would have to absorb `residual +
-    // weight_k ≤ weight_k`, i.e. `residual ≤ 0`. The walk only ever subtracts
-    // when `residual > weight`, so a non-empty flip prefix leaves `residual >
-    // 0` strictly — no consumed candidate is ever eligible.
+    // Candidates *before* `entering_idx` are excluded structurally: un-flipping
+    // one hands back the `weight_k` it already absorbed, requiring `residual +
+    // weight_k ≤ weight_k`, i.e. `residual ≤ 0` — impossible, since the walk
+    // only subtracts when `residual > weight`, leaving `residual > 0` strictly.
     let chosen_theta = breaks[entering_idx].0;
     let mut best_idx = entering_idx;
     let mut best_pivot = breaks[entering_idx].2;
