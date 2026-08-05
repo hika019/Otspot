@@ -304,7 +304,15 @@ pub fn run_qp_presolve_phase2(
 
     // Coefficient magnitude alone cannot make a Q term semantically zero: the
     // complete objective may simply be expressed in correspondingly small units.
-    let q_preserved = prob.q.clone();
+    // Wrapped in `cancellable` (not a bare check-then-clone): this is the
+    // former entry check 0821b27d dropped when it added the equality_
+    // constraint_qr wrapper below, and Q's clone cost scales with its own
+    // nnz, not just m/n, so it deserves the same pre+post guard as every
+    // other O(problem-size) step in this function.
+    let q_preserved = match cancellable(opts, || prob.q.clone()) {
+        Some(q) => q,
+        None => return phase1_result,
+    };
 
     let removed_rows_phase2 = match cancellable(opts, || {
         let mut removed = vec![false; m];
@@ -330,65 +338,82 @@ pub fn run_qp_presolve_phase2(
         map
     };
 
-    let (a_new, b_new) = if any_removed {
-        let m_new = new_row_map.iter().filter(|o| o.is_some()).count();
+    // CSC rebuild (or, when nothing was removed, the equivalent plain clone):
+    // O(nnz(A)) either way, and previously ran unconditionally once the
+    // equality_constraint_qr call above returned `Some` -- a cancellation
+    // requested in that exact window went unnoticed until this function's
+    // own return. `cancellable`'s `Option<Option<_>>` collapses via
+    // `.flatten()`: cancellation (outer `None`) and a failed transactional
+    // rebuild (inner `None`) both mean "bail out with `phase1_result`
+    // unchanged", so they share the one early-return below.
+    let (a_new, b_new) = match cancellable(opts, || {
+        if any_removed {
+            let m_new = new_row_map.iter().filter(|o| o.is_some()).count();
 
-        let mut trip_rows: Vec<usize> = Vec::new();
-        let mut trip_cols: Vec<usize> = Vec::new();
-        let mut trip_vals: Vec<f64> = Vec::new();
-        for j in 0..n {
-            let start = prob.a.col_ptr()[j];
-            let end = prob.a.col_ptr()[j + 1];
-            for k in start..end {
-                let row = prob.a.row_ind()[k];
-                if let Some(ii) = new_row_map[row] {
-                    trip_rows.push(ii);
-                    trip_cols.push(j);
-                    trip_vals.push(prob.a.values()[k]);
+            let mut trip_rows: Vec<usize> = Vec::new();
+            let mut trip_cols: Vec<usize> = Vec::new();
+            let mut trip_vals: Vec<f64> = Vec::new();
+            for j in 0..n {
+                let start = prob.a.col_ptr()[j];
+                let end = prob.a.col_ptr()[j + 1];
+                for k in start..end {
+                    let row = prob.a.row_ind()[k];
+                    if let Some(ii) = new_row_map[row] {
+                        trip_rows.push(ii);
+                        trip_cols.push(j);
+                        trip_vals.push(prob.a.values()[k]);
+                    }
                 }
             }
-        }
-        let a_out = if trip_rows.is_empty() {
-            CscMatrix::new(m_new, n)
-        } else {
-            match CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_new, n) {
-                Ok(a) => a,
+            let a_out = if trip_rows.is_empty() {
+                Some(CscMatrix::new(m_new, n))
+            } else {
                 // Phase 2 is transactional: a failed rebuild must retain the valid
                 // Phase-1 problem, never replace its constraints with a zero matrix.
-                Err(_) => return phase1_result,
-            }
-        };
+                CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_new, n).ok()
+            };
 
-        let b_out: Vec<f64> = (0..m)
-            .filter(|&i| !removed_rows_phase2[i])
-            .map(|i| prob.b[i])
-            .collect();
+            let b_out: Vec<f64> = (0..m)
+                .filter(|&i| !removed_rows_phase2[i])
+                .map(|i| prob.b[i])
+                .collect();
 
-        (a_out, b_out)
-    } else {
-        (prob.a.clone(), prob.b.clone())
+            a_out.map(|a| (a, b_out))
+        } else {
+            Some((prob.a.clone(), prob.b.clone()))
+        }
+    })
+    .flatten()
+    {
+        Some(pair) => pair,
+        None => return phase1_result,
     };
 
     let mut a_precond = a_new;
     let mut b_precond = b_new;
-    let sigmas = constraint_precond(&mut a_precond, &mut b_precond);
+    let sigmas = match cancellable(opts, || constraint_precond(&mut a_precond, &mut b_precond)) {
+        Some(s) => s,
+        None => return phase1_result,
+    };
 
-    let constraint_types_new: Vec<crate::problem::ConstraintType> = (0..m)
-        .filter(|&i| !removed_rows_phase2[i])
-        .map(|i| prob.constraint_types[i])
-        .collect();
-    let c_clone = prob.c.clone();
-    let bounds_clone = prob.bounds.clone();
-    let reduced_new = match QpProblem::new(
-        q_preserved,
-        c_clone,
-        a_precond,
-        b_precond,
-        bounds_clone,
-        constraint_types_new,
-    ) {
-        Ok(p) => p,
-        Err(_) => return phase1_result,
+    let reduced_new = match cancellable(opts, || {
+        let constraint_types_new: Vec<crate::problem::ConstraintType> = (0..m)
+            .filter(|&i| !removed_rows_phase2[i])
+            .map(|i| prob.constraint_types[i])
+            .collect();
+        let c_clone = prob.c.clone();
+        let bounds_clone = prob.bounds.clone();
+        QpProblem::new(
+            q_preserved,
+            c_clone,
+            a_precond,
+            b_precond,
+            bounds_clone,
+            constraint_types_new,
+        )
+    }) {
+        Some(Ok(p)) => p,
+        Some(Err(_)) | None => return phase1_result,
     };
 
     let mut result = QpPresolveResult {
@@ -605,6 +630,128 @@ mod tests {
              entirely (measured ~1-7us), not merely have the in-loop check \
              catch it after paying for that setup (measured ~7.7-10.3ms \
              with the entry check reverted to deadline-only)"
+        );
+    }
+
+    /// `run_qp_presolve_phase2`'s CSC row-map rebuild, `constraint_precond`,
+    /// and `QpProblem::new` validation each ran unconditionally once the
+    /// `equality_constraint_qr` call's `cancellable` wrapper returned `Some`
+    /// (Codex PR #31 review follow-up, on top of 0821b27d): none of them
+    /// re-checked `external_stop_requested()`, so a cancellation arriving in
+    /// that exact window (after elimination finishes, before this tail
+    /// completes) went unnoticed until this function's own return -- unlike
+    /// the mid-elimination case the test above already covers.
+    ///
+    /// Fixture: the same chain construction as the tests above (`x_i +
+    /// x_{i+1} <= 5` pairs, already proven above not to trigger phase1's own
+    /// reduction steps), but `copies = 1` and `n` large: `m = 2*(n-1)` is
+    /// then always `<= n * ROW_OVERDETERMINED_RATIO` (`2*(n-1) < 2n` for any
+    /// `n >= 1`), so `equality_constraint_qr` always takes its near-instant
+    /// skip path -- essentially all of `run_qp_presolve_phase2`'s cost sits
+    /// in the newly-guarded tail (`q_preserved`'s clone, the CSC rebuild/
+    /// clone, `constraint_precond`'s row-max scan, `QpProblem::new`'s
+    /// is_finite validation), each O(n).
+    ///
+    /// Self-calibrating (not a hardcoded ms bound, which would be brittle
+    /// across machines/build profiles): measures this fixture's own
+    /// uncancelled runtime first, then asserts a run cancelled partway
+    /// through returns in a small fraction of that -- the same ratio-based
+    /// pattern as the Python binding's `test_solve_releases_the_gil`, for the
+    /// same brittleness reason.
+    ///
+    /// Sentinel: reverting the `cancellable` wrapping around the CSC rebuild /
+    /// `constraint_precond` / `QpProblem::new` steps makes the cancelled
+    /// run's time converge back to the uncancelled baseline (the whole tail
+    /// runs to completion regardless of the flag), failing the ratio assert
+    /// below.
+    #[test]
+    fn test_run_qp_presolve_phase2_tail_honors_cancel_flag_mid_run() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        const N: usize = 2_000_000;
+
+        // Feeds `run_qp_presolve_phase2` directly via `QpPresolveResult::
+        // no_reduction` rather than routing through `run_qp_presolve_phase1`:
+        // this test's target is phase2's own cancellation handling, and
+        // phase1's fixpoint presolve steps (unrelated to this fix, and not
+        // gated by `SolverOptions::presolve` when `run_qp_presolve_phase1` is
+        // called directly -- see the smaller-scale sibling test's own
+        // handling of that) have separately-verified-unrelated superlinear
+        // cost on a 2,000,000-variable chain that dominates any timing
+        // signal phase2 itself would produce here.
+        fn build_phase2_input(n: usize) -> QpPresolveResult {
+            let m = 2 * (n - 1);
+            let mut trip_rows = Vec::with_capacity(2 * m);
+            let mut trip_cols = Vec::with_capacity(2 * m);
+            let mut trip_vals = Vec::with_capacity(2 * m);
+            let mut b = Vec::with_capacity(m);
+            for i in 0..(n - 1) {
+                let pos_row = 2 * i;
+                let neg_row = pos_row + 1;
+                trip_rows.push(pos_row);
+                trip_cols.push(i);
+                trip_vals.push(1.0);
+                trip_rows.push(pos_row);
+                trip_cols.push(i + 1);
+                trip_vals.push(1.0);
+                b.push(5.0);
+                trip_rows.push(neg_row);
+                trip_cols.push(i);
+                trip_vals.push(-1.0);
+                trip_rows.push(neg_row);
+                trip_cols.push(i + 1);
+                trip_vals.push(-1.0);
+                b.push(-5.0);
+            }
+            let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n).unwrap();
+            let q_idx: Vec<usize> = (0..n).collect();
+            let q = CscMatrix::from_triplets(&q_idx, &q_idx, &vec![2.0; n], n, n).unwrap();
+            let prob = QpProblem::new_all_le(
+                q,
+                vec![0.0; n],
+                a,
+                b,
+                vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+            )
+            .unwrap();
+            QpPresolveResult::no_reduction(&prob)
+        }
+
+        let phase1_baseline = build_phase2_input(N);
+        let t0 = Instant::now();
+        let _ = run_qp_presolve_phase2(phase1_baseline, &SolverOptions::default());
+        let uncancelled = t0.elapsed();
+        assert!(
+            uncancelled >= Duration::from_millis(2),
+            "fixture must have genuine tail cost (measured {uncancelled:?}) for the \
+             ratio check below to be meaningful -- increase N if this fires"
+        );
+
+        let phase1_cancelled = build_phase2_input(N);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_setter = Arc::clone(&cancel);
+        let sleep_for = uncancelled / 4;
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(sleep_for);
+            cancel_setter.store(true, Ordering::Relaxed);
+        });
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::clone(&cancel)),
+            ..Default::default()
+        };
+        let t1 = Instant::now();
+        let _ = run_qp_presolve_phase2(phase1_cancelled, &opts);
+        let cancelled = t1.elapsed();
+        setter.join().unwrap();
+
+        assert!(
+            cancelled < uncancelled / 2,
+            "cancel_flag firing ~{sleep_for:?} into the post-elimination tail (CSC \
+             rebuild / constraint_precond / QpProblem::new) must cut the run short \
+             well below the uncancelled baseline: cancelled={cancelled:?} vs \
+             uncancelled={uncancelled:?}"
         );
     }
 

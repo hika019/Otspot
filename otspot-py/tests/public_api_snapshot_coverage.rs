@@ -227,6 +227,19 @@ struct ManifestIndex {
     lower_text: String,
     type_names: HashSet<String>,
     variants_by_owner: HashMap<String, HashSet<String>>,
+    /// `ModelError` variant names (`model_error_exceptions.entries[].rust_variant`,
+    /// with the `"ModelError::"` prefix stripped). `ModelError` has no entry
+    /// of its own in `variants_by_owner` (it maps to distinct Python
+    /// exception classes, not a bound enum), so its variants need this
+    /// dedicated, structured category instead of falling back to a bare
+    /// word search over the whole manifest (see `covers`'s `ModelError`
+    /// special case).
+    model_error_variants: HashSet<String>,
+    /// Lowercased text of just the `out_of_scope` array (not the whole
+    /// manifest): the one category whose entire purpose is "mentioned but
+    /// not structurally tracked", so it is the only place a name-only
+    /// mention should count as coverage.
+    out_of_scope_lower: String,
 }
 
 impl ManifestIndex {
@@ -265,32 +278,91 @@ impl ManifestIndex {
         // additions, not real Rust variants -- never appear in the snapshot,
         // so they are irrelevant here and intentionally not merged in.
 
+        let mut model_error_variants = HashSet::new();
+        let model_error_entries = v["model_error_exceptions"]["entries"]
+            .as_array()
+            .expect("model_error_exceptions.entries must be an array");
+        for entry in model_error_entries {
+            let rust_variant = entry["rust_variant"]
+                .as_str()
+                .expect("model_error_exceptions.entries[].rust_variant must be a string");
+            let variant = rust_variant
+                .strip_prefix("ModelError::")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "model_error_exceptions.entries[].rust_variant {rust_variant:?} \
+                     must start with \"ModelError::\""
+                    )
+                });
+            model_error_variants.insert(variant.to_string());
+        }
+
+        let out_of_scope_lower = v["out_of_scope"]
+            .as_array()
+            .expect("out_of_scope must be an array")
+            .iter()
+            .map(|s| {
+                s.as_str()
+                    .expect("out_of_scope[] entries must be strings")
+                    .to_lowercase()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
         ManifestIndex {
             lower_text: json.to_lowercase(),
             type_names,
             variants_by_owner,
+            model_error_variants,
+            out_of_scope_lower,
         }
     }
 
     /// An owner type this manifest never binds at all (not in `types[]`,
     /// e.g. `ConstraintSense`, `SolverOptions`) only needs to be *mentioned*
-    /// (by an `out_of_scope` note) once, not have every individual
-    /// variant/member spelled out -- unlike a *bound* type (`Variable`,
-    /// `ModelResult`, ...), where each member must be individually
-    /// accounted for (this is what keeps the qualified match strict enough
-    /// to catch the `Variable::value` collision below, while not forcing
-    /// exhaustive enumeration of e.g. `SolverOptions`'s entire API).
+    /// in `out_of_scope` once, not have every individual variant/member
+    /// spelled out -- unlike a *bound* type (`Variable`, `ModelResult`,
+    /// ...), where each member must be individually accounted for (this is
+    /// what keeps the qualified match strict enough to catch the
+    /// `Variable::value` collision below, while not forcing exhaustive
+    /// enumeration of e.g. `SolverOptions`'s entire API).
+    ///
+    /// Scoped to `out_of_scope_lower`, not the whole manifest: `owner`'s name
+    /// coincidentally appearing in some unrelated field (a `methods` note, a
+    /// docstring) must not count -- only an actual `out_of_scope` entry does.
     fn owner_is_out_of_scope_type(&self, owner: &str) -> bool {
-        !self.type_names.contains(owner) && word_present_case_insensitive(&self.lower_text, owner)
+        !self.type_names.contains(owner)
+            && word_present_case_insensitive(&self.out_of_scope_lower, owner)
     }
 
     fn covers(&self, subject: &Subject<'_>) -> bool {
         match subject {
             Subject::Type(name) => {
+                // Scoped to `out_of_scope_lower` (not the whole manifest):
+                // an unbound type/alias must be explicitly declared
+                // out-of-scope, not merely share text with an unrelated
+                // manifest field (the same class of false-cover the
+                // `Variable::value` collision fix closed for members).
                 self.type_names.contains(*name)
-                    || word_present_case_insensitive(&self.lower_text, name)
+                    || word_present_case_insensitive(&self.out_of_scope_lower, name)
             }
             Subject::Variant { owner, variant } => {
+                // `ModelError` maps to Python exception classes, not a bound
+                // enum, so it has no `variants_by_owner` entry of its own;
+                // check its dedicated structured category instead of
+                // falling through to the generic word-search fallback
+                // below, which would let *any* mention of the bare word
+                // "ModelError" anywhere in the manifest (e.g. this file's
+                // own `_note` prose) silently "cover" every variant,
+                // including one newly added upstream with no corresponding
+                // `model_error_exceptions` entry.
+                if *owner == "ModelError" {
+                    return self.model_error_variants.contains(*variant)
+                        || substr_present_case_insensitive(
+                            &self.out_of_scope_lower,
+                            &format!("ModelError::{variant}"),
+                        );
+                }
                 if let Some(vs) = self.variants_by_owner.get(*owner) {
                     return vs.contains(*variant);
                 }
@@ -514,5 +586,96 @@ fn uncovered_identifiers_flags_unmanifested_top_level_alias() {
         uncovered.contains(&"type TotallyUnmanifestedAlias".to_string()),
         "an injected top-level alias absent from api_manifest.json must be \
          flagged as uncovered, got: {uncovered:?}"
+    );
+}
+
+/// Sentinel for the `ModelError` variant fix: a variant absent from both
+/// `model_error_exceptions.entries` and `out_of_scope` must NOT be covered
+/// merely because the bare word "ModelError" appears elsewhere in the
+/// manifest (here, the `model_error_exceptions._note` field, mirroring the
+/// real manifest's own note). Reverting the `ModelError` special case in
+/// `ManifestIndex::covers` back to the generic `owner_is_out_of_scope_type`
+/// word-search fallback makes the last assertion below fail (the bare-word
+/// match would wrongly cover `SomeNewVariant`).
+#[test]
+fn model_error_variant_coverage_is_structured_not_word_search() {
+    let json = r#"{
+        "types": [],
+        "model_error_exceptions": {
+            "_note": "ModelError has no Python type of its own.",
+            "entries": [
+                { "rust_variant": "ModelError::NoObjective", "python": "otspot.NoObjectiveError" }
+            ]
+        },
+        "variants": {},
+        "out_of_scope": [
+            "ModelError::NotSupported / a hypothetical NotSupportedError - out of scope"
+        ]
+    }"#;
+    let index = ManifestIndex::parse(json);
+
+    assert!(
+        index.covers(&Subject::Variant {
+            owner: "ModelError",
+            variant: "NoObjective"
+        }),
+        "a variant with a real model_error_exceptions entry must be covered"
+    );
+    assert!(
+        index.covers(&Subject::Variant {
+            owner: "ModelError",
+            variant: "NotSupported"
+        }),
+        "a variant explicitly named in out_of_scope (ModelError::NotSupported) \
+         must be covered"
+    );
+    assert!(
+        !index.covers(&Subject::Variant {
+            owner: "ModelError",
+            variant: "SomeNewVariant"
+        }),
+        "a variant with neither a model_error_exceptions entry nor an \
+         out_of_scope mention must NOT be covered, even though the bare word \
+         \"ModelError\" appears in this manifest's own _note field -- the \
+         pre-fix word-search fallback would have wrongly covered it"
+    );
+}
+
+/// Sentinel for the type-alias fix: an unbound type name must NOT be
+/// considered covered merely because it happens to appear in an unrelated
+/// manifest field (here, a `model_error_exceptions._note`) -- only a real
+/// `types[]` entry or an actual `out_of_scope` declaration counts. Reverting
+/// `covers`'s `Subject::Type` arm back to a whole-manifest word search makes
+/// the last assertion below fail.
+#[test]
+fn type_coverage_is_scoped_to_out_of_scope_not_whole_manifest() {
+    let json = r#"{
+        "types": [
+            { "rust": "otspot_model::Model", "python": "otspot.Model" }
+        ],
+        "model_error_exceptions": {
+            "_note": "mentions DecoyType incidentally, not as a real entry",
+            "entries": []
+        },
+        "variants": {},
+        "out_of_scope": [
+            "otspot_model::ReallyOutOfScopeType - not bound in v1"
+        ]
+    }"#;
+    let index = ManifestIndex::parse(json);
+
+    assert!(
+        index.covers(&Subject::Type("Model")),
+        "a real types[] entry must be covered"
+    );
+    assert!(
+        index.covers(&Subject::Type("ReallyOutOfScopeType")),
+        "a type explicitly named in out_of_scope must be covered"
+    );
+    assert!(
+        !index.covers(&Subject::Type("DecoyType")),
+        "a type name that only appears incidentally in an unrelated manifest \
+         field (here, model_error_exceptions._note) must NOT be covered -- the \
+         pre-fix whole-manifest word search would have wrongly covered it"
     );
 }
