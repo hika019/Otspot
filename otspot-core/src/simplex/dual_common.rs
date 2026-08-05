@@ -259,6 +259,14 @@ pub(super) fn lp_unbounded_ray_verified(
     basis_mgr.btran_dense(&mut y);
 
     for q in 0..n_enter {
+        // O(n_enter) FTRAN solves + O(nnz) ray checks: same cost profile as
+        // `dual_advanced::phase1::farkas_infeasibility_certified`'s Strategy 2
+        // per-row loop, and needs the identical per-iteration recheck (an
+        // external stop must not wait out a loop whose own cost scales with
+        // problem size).
+        if options.external_stop_requested() {
+            return false;
+        }
         if in_basis[q] {
             continue;
         }
@@ -297,6 +305,15 @@ pub(super) fn lp_unbounded_ray_verified(
             }
         });
         if ray_ok {
+            // An external stop requested while this FTRAN/ray check ran must
+            // not let a coincidentally-already-computed verdict slip past it:
+            // every caller unconditionally maps `true` here to a hard
+            // `SolveStatus::Unbounded`, bypassing the honest Stalled/Timeout
+            // path an external stop is supposed to take (same class of bug as
+            // the Farkas gates' pre-`return true` recheck).
+            if options.external_stop_requested() {
+                return false;
+            }
             return true;
         }
     }
@@ -864,6 +881,180 @@ mod tests {
         assert!(
             !lp_unbounded_ray_verified(&a, &[0, 2], &[0.0, -1.0, 0.0], 2, 3, 2, &opts),
             "a direction that increases a basic artificial off 0 must NOT verify as a recession ray"
+        );
+    }
+
+    /// `lp_unbounded_ray_verified` had no cancellation check anywhere (Codex
+    /// PR #31 review follow-up, same class as the Farkas gates already fixed
+    /// in this crate): all 4 production callers (`dual.rs`, `dual_advanced/
+    /// pipeline.rs`, `primal/mod.rs`'s `gate_phase2_unbounded`, `dual_advanced/
+    /// phase1.rs`) unconditionally map a bare `true` here straight to a hard
+    /// `SolveStatus::Unbounded`.
+    ///
+    /// Fixture: `m = 1`, column 0 is the identity basis (`B = [1]`, so BTRAN/
+    /// FTRAN are no-ops), and `FARKAS`-style padding -- `n_enter - 2` entirely
+    /// empty decoy columns (cost 0, so `rc = 0 >= -dual_tol` skips them via
+    /// `continue` without ever reaching the FTRAN/ray-check) -- before the
+    /// genuine ray at the last column (`a[0][last] = -1`, `c[last] = -1`,
+    /// mirroring `lp_unbounded_ray_verified_distinguishes_genuine_bounded_
+    /// and_artificial`'s minimal genuine-ray case). The `for q in 0..n_enter`
+    /// loop itself is the entire cost of this call (`n_enter` cheap iterations
+    /// dominated by the loop-top `external_stop_requested()` check this test
+    /// targets) -- long enough for a background thread to flip `cancel_flag`
+    /// mid-call, deterministically landing the cancellation before the loop
+    /// ever reaches the genuine ray column.
+    ///
+    /// Self-calibrating (not a hardcoded ms bound, which would be brittle
+    /// across machines/build profiles): measures this fixture's own
+    /// uncancelled duration first, then derives the race thread's delay from
+    /// it.
+    ///
+    /// Sentinel: reverting the `if options.external_stop_requested() { return
+    /// false; }` added at the top of the loop makes this assert `true`
+    /// instead of `false` -- the ray math itself never consults `cancel_flag`.
+    #[test]
+    fn lp_unbounded_ray_verified_honors_cancel_flag_during_loop_scan() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        const N_ENTER: usize = 4_000_000;
+
+        fn build_fixture() -> (CscMatrix, [usize; 1], Vec<f64>) {
+            let last = N_ENTER - 1;
+            // Only 2 real triplets: column 0 (the identity basis) and column
+            // `last` (the genuine ray). Every column in between is entirely
+            // empty -- cheap to construct, but still costs the loop its own
+            // `external_stop_requested()` check on every one of the N_ENTER
+            // iterations traversing them.
+            let rows = vec![0usize, 0usize];
+            let cols = vec![0usize, last];
+            let vals = vec![1.0_f64, -1.0_f64];
+            let a = CscMatrix::from_triplets(&rows, &cols, &vals, 1, N_ENTER).unwrap();
+            let mut c = vec![0.0_f64; N_ENTER];
+            c[last] = -1.0;
+            (a, [0], c)
+        }
+
+        let (a, basis, c) = build_fixture();
+        let baseline_opts = SolverOptions::default();
+        let t0 = Instant::now();
+        let baseline_verified =
+            lp_unbounded_ray_verified(&a, &basis, &c, 1, N_ENTER, N_ENTER, &baseline_opts);
+        let uncancelled = t0.elapsed();
+        assert!(
+            baseline_verified,
+            "sanity: this fixture's last column must genuinely verify as an \
+             unbounded ray when uncancelled"
+        );
+        assert!(
+            uncancelled >= Duration::from_micros(200),
+            "fixture must have genuine per-call cost (measured {uncancelled:?}) \
+             for the race below to reliably land mid-call -- increase N_ENTER \
+             if this fires"
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_setter = Arc::clone(&cancel);
+        let sleep_for = uncancelled / 4;
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(sleep_for);
+            cancel_setter.store(true, Ordering::Relaxed);
+        });
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::clone(&cancel)),
+            ..Default::default()
+        };
+        let verified = lp_unbounded_ray_verified(&a, &basis, &c, 1, N_ENTER, N_ENTER, &opts);
+        setter.join().unwrap();
+
+        assert!(
+            !verified,
+            "cancel_flag flipped ~{sleep_for:?} into a call whose uncancelled \
+             duration measured {uncancelled:?} must prevent the loop from ever \
+             reaching (and accepting) the genuine ray at the last column"
+        );
+    }
+
+    /// Companion to the loop-scan sentinel above, targeting the *other* gap:
+    /// a cancellation arriving *during* the FTRAN/ray-check of the column
+    /// that ultimately verifies -- after the loop-top check for that specific
+    /// iteration already passed, but before the function commits to `true`.
+    ///
+    /// Fixture: `m` large (identity basis, `B = I`, so BTRAN/FTRAN cost is
+    /// dominated by `SparseVec::to_dense`'s O(m) materialization and the
+    /// subsequent O(m) `ray_ok` scan, not by any real linear-algebra work),
+    /// `n_enter = m + 1` with columns `0..m` forming the identity basis
+    /// (skipped via `in_basis[q]` before ever reaching `a.column(q)`, so
+    /// their own traversal cost is negligible next to the accepting column's
+    /// O(m) FTRAN-materialize-and-scan) and column `m` the genuine ray
+    /// (`a[0][m] = -1`, `c[m] = -1`, same shape as the loop-scan test above).
+    ///
+    /// Sentinel: reverting the `if options.external_stop_requested() { return
+    /// false; }` added right before `return true` (after `ray_ok` is computed)
+    /// makes this assert `true` instead of `false`.
+    #[test]
+    fn lp_unbounded_ray_verified_honors_cancel_flag_before_accepting_ray() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        const M: usize = 2_000_000;
+
+        fn build_fixture() -> (CscMatrix, Vec<usize>, Vec<f64>) {
+            let n_enter = M + 1;
+            let mut rows: Vec<usize> = (0..M).collect();
+            let mut cols: Vec<usize> = (0..M).collect();
+            let mut vals: Vec<f64> = vec![1.0; M];
+            rows.push(0);
+            cols.push(M);
+            vals.push(-1.0);
+            let a = CscMatrix::from_triplets(&rows, &cols, &vals, M, n_enter).unwrap();
+            let basis: Vec<usize> = (0..M).collect();
+            let mut c = vec![0.0_f64; n_enter];
+            c[M] = -1.0;
+            (a, basis, c)
+        }
+
+        let (a, basis, c) = build_fixture();
+        let n_enter = M + 1;
+        let baseline_opts = SolverOptions::default();
+        let t0 = Instant::now();
+        let baseline_verified =
+            lp_unbounded_ray_verified(&a, &basis, &c, M, n_enter, n_enter, &baseline_opts);
+        let uncancelled = t0.elapsed();
+        assert!(
+            baseline_verified,
+            "sanity: this fixture's column M must genuinely verify as an \
+             unbounded ray when uncancelled"
+        );
+        assert!(
+            uncancelled >= Duration::from_micros(200),
+            "fixture must have genuine per-call cost (measured {uncancelled:?}) \
+             for the race below to reliably land mid-call -- increase M if \
+             this fires"
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_setter = Arc::clone(&cancel);
+        let sleep_for = uncancelled / 4;
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(sleep_for);
+            cancel_setter.store(true, Ordering::Relaxed);
+        });
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::clone(&cancel)),
+            ..Default::default()
+        };
+        let verified = lp_unbounded_ray_verified(&a, &basis, &c, M, n_enter, n_enter, &opts);
+        setter.join().unwrap();
+
+        assert!(
+            !verified,
+            "cancel_flag flipped ~{sleep_for:?} into a call whose uncancelled \
+             duration measured {uncancelled:?} (the O(m) FTRAN-materialize/\
+             ray_ok scan for column M) must prevent it from accepting an \
+             otherwise-valid ray"
         );
     }
 }

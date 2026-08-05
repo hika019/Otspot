@@ -32,7 +32,7 @@ create_exception!(otspot, InternalError, OtspotError);
 /// via `setattr` post-construction rather than a `#[pyclass(extends =
 /// PyException)]` field: subclassing a native exception with extra fields
 /// needs `Py_3_12` under the `abi3` feature — see PyO3's exception guide —
-/// but this crate targets `abi3-py39`).
+/// but this crate targets `abi3-py311`).
 pub(crate) fn model_error_to_pyerr(py: Python<'_>, err: ModelError) -> PyErr {
     match &err {
         ModelError::NoObjective => NoObjectiveError::new_err(err.to_string()),

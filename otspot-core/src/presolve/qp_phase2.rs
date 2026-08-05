@@ -6,6 +6,42 @@ use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::tolerances::{DROP_TOL, SCALING_SIGMA_FLOOR, ZERO_TOL};
 use otspot_num::sparse::CscMatrix;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+
+// Test-only observability: counts how many of `run_qp_presolve_phase2`'s 5
+// `cancellable`-guarded tail steps (q_preserved clone / equality_constraint_qr
+// / CSC rebuild / constraint_precond / QpProblem::new) actually ran. Purely
+// additive bookkeeping (never gates control flow on its own), and entirely
+// `#[cfg(test)]` -- both the definition and every call site below -- so it
+// has zero footprint in production builds. Mirrors `qp_transforms::driver`'s
+// `STEPS_EXECUTED_TOTAL`.
+//
+// `PHASE2_CANCEL_AFTER_STEPS`/`PHASE2_CANCEL_SIGNAL` piggyback on the same
+// counter to give tests a deterministic stand-in for a real race between
+// `cancel_flag` and this function's progress: once the executed count
+// reaches the configured target, `PHASE2_CANCEL_SIGNAL` flips, which a test
+// feeds to `run_qp_presolve_phase2` via `SolverOptions::cancel_flag` (an
+// `Arc` clone sharing the same underlying `AtomicBool`). That drives the
+// exact same `cancellable`/`external_stop_requested` path a real deadline or
+// `Ctrl-C` would, without racing wall-clock time.
+#[cfg(test)]
+thread_local! {
+    static PHASE2_STEPS_EXECUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PHASE2_CANCEL_AFTER_STEPS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static PHASE2_CANCEL_SIGNAL: std::sync::Arc<AtomicBool> = std::sync::Arc::new(AtomicBool::new(false));
+}
+
+#[cfg(test)]
+fn test_record_phase2_step_executed() {
+    let executed = PHASE2_STEPS_EXECUTED.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if PHASE2_CANCEL_AFTER_STEPS.with(std::cell::Cell::get) == Some(executed) {
+        PHASE2_CANCEL_SIGNAL.with(|flag| flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    }
+}
 
 /// Minimum ratio of rows to columns for equality-constraint QR elimination.
 /// Elimination cost is O(mn²) and only pays off in strongly over-determined
@@ -313,6 +349,8 @@ pub fn run_qp_presolve_phase2(
         Some(q) => q,
         None => return phase1_result,
     };
+    #[cfg(test)]
+    test_record_phase2_step_executed();
 
     let removed_rows_phase2 = match cancellable(opts, || {
         let mut removed = vec![false; m];
@@ -322,6 +360,8 @@ pub fn run_qp_presolve_phase2(
         Some(r) => r,
         None => return phase1_result,
     };
+    #[cfg(test)]
+    test_record_phase2_step_executed();
 
     let any_removed = removed_rows_phase2.iter().any(|&b| b);
 
@@ -388,6 +428,8 @@ pub fn run_qp_presolve_phase2(
         Some(pair) => pair,
         None => return phase1_result,
     };
+    #[cfg(test)]
+    test_record_phase2_step_executed();
 
     let mut a_precond = a_new;
     let mut b_precond = b_new;
@@ -395,6 +437,8 @@ pub fn run_qp_presolve_phase2(
         Some(s) => s,
         None => return phase1_result,
     };
+    #[cfg(test)]
+    test_record_phase2_step_executed();
 
     let reduced_new = match cancellable(opts, || {
         let constraint_types_new: Vec<crate::problem::ConstraintType> = (0..m)
@@ -415,6 +459,8 @@ pub fn run_qp_presolve_phase2(
         Some(Ok(p)) => p,
         Some(Err(_)) | None => return phase1_result,
     };
+    #[cfg(test)]
+    test_record_phase2_step_executed();
 
     let mut result = QpPresolveResult {
         reduced: reduced_new,
@@ -642,72 +688,61 @@ mod tests {
     /// completes) went unnoticed until this function's own return -- unlike
     /// the mid-elimination case the test above already covers.
     ///
-    /// Fixture: the same chain construction as the tests above (`x_i +
-    /// x_{i+1} <= 5` pairs, already proven above not to trigger phase1's own
-    /// reduction steps), but `copies = 1` and `n` large: `m = 2*(n-1)` is
-    /// then always `<= n * ROW_OVERDETERMINED_RATIO` (`2*(n-1) < 2n` for any
-    /// `n >= 1`), so `equality_constraint_qr` always takes its near-instant
-    /// skip path -- essentially all of `run_qp_presolve_phase2`'s cost sits
-    /// in the newly-guarded tail (`q_preserved`'s clone, the CSC rebuild/
-    /// clone, `constraint_precond`'s row-max scan, `QpProblem::new`'s
-    /// is_finite validation), each O(n).
+    /// Deterministic, not wall-clock (Codex review follow-up on the original
+    /// version of this sentinel, which raced a background thread's `sleep`
+    /// against a 2,000,000-variable fixture's measured uncancelled duration:
+    /// reproducibly flaky under `nextest`'s parallel execution -- 72/73 with
+    /// `cancelled=113ms` against a `<103.7ms` threshold on one contended run,
+    /// 73/73 moments later on an uncontended rerun of the identical binary).
+    /// `PHASE2_CANCEL_AFTER_STEPS`/`PHASE2_CANCEL_SIGNAL` (see their doc
+    /// comment above `test_record_phase2_step_executed`) flip `cancel_flag`
+    /// as a synchronous side effect of the `n`th guarded step completing --
+    /// no thread, no sleep, no timing assumption of any kind -- so the flip
+    /// always lands in the exact same place relative to this function's
+    /// progress, every run, on every machine, contended or not.
     ///
-    /// Self-calibrating (not a hardcoded ms bound, which would be brittle
-    /// across machines/build profiles): measures this fixture's own
-    /// uncancelled runtime first, then asserts a run cancelled partway
-    /// through returns in a small fraction of that -- the same ratio-based
-    /// pattern as the Python binding's `test_solve_releases_the_gil`, for the
-    /// same brittleness reason.
+    /// For each `cancel_after` in `1..=4` (flipping after step 1 through step
+    /// 4 of the 5 guarded steps: q_preserved clone / equality_constraint_qr /
+    /// CSC rebuild / constraint_precond / QpProblem::new), asserts both that
+    /// execution stops at exactly that step count (the call-count half of
+    /// "steps that should not be reached after cancellation") and that the
+    /// returned result is `phase1_result` unchanged (the side-effect half --
+    /// none of the unreached steps' work leaked into the output). A trailing
+    /// uncancelled run confirms all 5 steps execute when nothing cancels.
     ///
-    /// Sentinel: reverting the `cancellable` wrapping around the CSC rebuild /
-    /// `constraint_precond` / `QpProblem::new` steps makes the cancelled
-    /// run's time converge back to the uncancelled baseline (the whole tail
-    /// runs to completion regardless of the flag), failing the ratio assert
-    /// below.
+    /// Sentinel: reverting the `cancellable` wrapping around any of the CSC
+    /// rebuild / `constraint_precond` / `QpProblem::new` steps back to bare
+    /// (unconditional) code makes the `cancel_after` in `{3, 4}` cases run
+    /// straight past their target step count to 5 (that step no longer has
+    /// its own guard to stop at), failing the `executed == cancel_after`
+    /// assertion.
     #[test]
-    fn test_run_qp_presolve_phase2_tail_honors_cancel_flag_mid_run() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    fn test_run_qp_presolve_phase2_tail_stops_at_cancellation_point() {
+        use std::sync::atomic::Ordering;
         use std::sync::Arc;
-        use std::time::{Duration, Instant};
 
-        const N: usize = 2_000_000;
-
-        // Feeds `run_qp_presolve_phase2` directly via `QpPresolveResult::
-        // no_reduction` rather than routing through `run_qp_presolve_phase1`:
-        // this test's target is phase2's own cancellation handling, and
-        // phase1's fixpoint presolve steps (unrelated to this fix, and not
-        // gated by `SolverOptions::presolve` when `run_qp_presolve_phase1` is
-        // called directly -- see the smaller-scale sibling test's own
-        // handling of that) have separately-verified-unrelated superlinear
-        // cost on a 2,000,000-variable chain that dominates any timing
-        // signal phase2 itself would produce here.
-        fn build_phase2_input(n: usize) -> QpPresolveResult {
-            let m = 2 * (n - 1);
-            let mut trip_rows = Vec::with_capacity(2 * m);
-            let mut trip_cols = Vec::with_capacity(2 * m);
-            let mut trip_vals = Vec::with_capacity(2 * m);
-            let mut b = Vec::with_capacity(m);
-            for i in 0..(n - 1) {
-                let pos_row = 2 * i;
-                let neg_row = pos_row + 1;
-                trip_rows.push(pos_row);
-                trip_cols.push(i);
-                trip_vals.push(1.0);
-                trip_rows.push(pos_row);
-                trip_cols.push(i + 1);
-                trip_vals.push(1.0);
-                b.push(5.0);
-                trip_rows.push(neg_row);
-                trip_cols.push(i);
-                trip_vals.push(-1.0);
-                trip_rows.push(neg_row);
-                trip_cols.push(i + 1);
-                trip_vals.push(-1.0);
-                b.push(-5.0);
-            }
-            let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n).unwrap();
-            let q_idx: Vec<usize> = (0..n).collect();
-            let q = CscMatrix::from_triplets(&q_idx, &q_idx, &vec![2.0; n], n, n).unwrap();
+        // Same n=2/m=6 redundant-equality fixture as
+        // `test_equality_constraint_qr_redundant_removal` (2 of the 6 rows
+        // are an exact duplicate pair): `any_removed` is genuinely `true`
+        // here, so `num_constraints` actually would drop from 6 if the CSC
+        // rebuild (step 3) and its downstream steps ran to completion --
+        // unlike a fixture with nothing to remove, where "unchanged" would
+        // hold trivially regardless of whether the fix works.
+        fn phase2_input() -> QpPresolveResult {
+            let n = 2usize;
+            let m = 6usize;
+            let a = CscMatrix::from_triplets(
+                &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+                &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+                &[
+                    1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0,
+                ],
+                m,
+                n,
+            )
+            .unwrap();
+            let b = vec![1.0, -1.0, 1.0, -1.0, 0.0, 0.0];
+            let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
             let prob = QpProblem::new_all_le(
                 q,
                 vec![0.0; n],
@@ -719,39 +754,47 @@ mod tests {
             QpPresolveResult::no_reduction(&prob)
         }
 
-        let phase1_baseline = build_phase2_input(N);
-        let t0 = Instant::now();
-        let _ = run_qp_presolve_phase2(phase1_baseline, &SolverOptions::default());
-        let uncancelled = t0.elapsed();
-        assert!(
-            uncancelled >= Duration::from_millis(2),
-            "fixture must have genuine tail cost (measured {uncancelled:?}) for the \
-             ratio check below to be meaningful -- increase N if this fires"
+        for cancel_after in 1..=4usize {
+            PHASE2_STEPS_EXECUTED.with(|c| c.set(0));
+            PHASE2_CANCEL_AFTER_STEPS.with(|c| c.set(Some(cancel_after)));
+            PHASE2_CANCEL_SIGNAL.with(|flag| flag.store(false, Ordering::Relaxed));
+
+            let phase1_result = phase2_input();
+            let orig_num_constraints = phase1_result.reduced.num_constraints;
+            let opts = PHASE2_CANCEL_SIGNAL.with(|flag| SolverOptions {
+                cancel_flag: Some(Arc::clone(flag)),
+                ..SolverOptions::default()
+            });
+            let phase2 = run_qp_presolve_phase2(phase1_result, &opts);
+
+            let executed = PHASE2_STEPS_EXECUTED.with(|c| c.get());
+            assert_eq!(
+                executed, cancel_after,
+                "cancel_flag flips right after step {cancel_after} of 5 completes, \
+                 so run_qp_presolve_phase2 must stop there (not run the remaining \
+                 steps), got {executed} steps executed"
+            );
+            assert_eq!(
+                phase2.reduced.num_constraints, orig_num_constraints,
+                "cancellation after step {cancel_after} must discard the tail's \
+                 side effects entirely, returning phase1_result unchanged"
+            );
+        }
+
+        PHASE2_STEPS_EXECUTED.with(|c| c.set(0));
+        PHASE2_CANCEL_AFTER_STEPS.with(|c| c.set(None));
+        let phase2 = run_qp_presolve_phase2(phase2_input(), &SolverOptions::default());
+        let executed = PHASE2_STEPS_EXECUTED.with(|c| c.get());
+        assert_eq!(
+            executed, 5,
+            "without cancellation all 5 guarded steps must run, got {executed}"
         );
-
-        let phase1_cancelled = build_phase2_input(N);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_setter = Arc::clone(&cancel);
-        let sleep_for = uncancelled / 4;
-        let setter = std::thread::spawn(move || {
-            std::thread::sleep(sleep_for);
-            cancel_setter.store(true, Ordering::Relaxed);
-        });
-        let opts = SolverOptions {
-            cancel_flag: Some(Arc::clone(&cancel)),
-            ..Default::default()
-        };
-        let t1 = Instant::now();
-        let _ = run_qp_presolve_phase2(phase1_cancelled, &opts);
-        let cancelled = t1.elapsed();
-        setter.join().unwrap();
-
         assert!(
-            cancelled < uncancelled / 2,
-            "cancel_flag firing ~{sleep_for:?} into the post-elimination tail (CSC \
-             rebuild / constraint_precond / QpProblem::new) must cut the run short \
-             well below the uncancelled baseline: cancelled={cancelled:?} vs \
-             uncancelled={uncancelled:?}"
+            phase2.reduced.num_constraints < 6,
+            "sanity: uncancelled run must actually remove the redundant pair \
+             (num_constraints < 6), confirming the fixture's `any_removed=true` \
+             premise the loop above depends on; got {}",
+            phase2.reduced.num_constraints
         );
     }
 

@@ -156,6 +156,11 @@ class Variable:
     # and let mypy accept `Variable()` as well-typed) makes mypy flag any
     # direct-construction call site instead of type-checking it silently.
     # Same pattern on `Expression`/`QuadExpr`/`Constraint`/`ModelResult` below.
+    # Trade-off: under `--warn-unreachable` (not enabled anywhere in this
+    # repo today), mypy treats every line after a mistaken `Variable()` call
+    # as unreachable and skips checking it, since `NoReturn` means "this call
+    # never returns" -- so real type errors later in the same function could
+    # go unnoticed if that flag is ever turned on.
     def __init__(self) -> NoReturn: ...
     def pow2(self) -> QuadExpr: ...
     def leq(self, rhs: Variable | Expression | float) -> Constraint: ...

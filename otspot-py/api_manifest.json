@@ -75,7 +75,7 @@
       { "rust": "ModelResult.bound_duals", "python": "ModelResult.bound_duals" }
     ],
     "SolveFailedError": [
-      { "rust": "otspot_model::SolveError (carried inside ModelError::SolveError)", "python": "SolveFailedError.error", "note": "attribute holding the real otspot.SolveError instance, attached via setattr (see errors.rs doc comment: a #[pyclass(extends=PyException)] field needs Py_3_12 under abi3, but this crate targets abi3-py39)" }
+      { "rust": "otspot_model::SolveError (carried inside ModelError::SolveError)", "python": "SolveFailedError.error", "note": "attribute holding the real otspot.SolveError instance, attached via setattr (see errors.rs doc comment: a #[pyclass(extends=PyException)] field needs Py_3_12 under abi3, but this crate targets abi3-py311)" }
     ]
   },
   "variants": {
