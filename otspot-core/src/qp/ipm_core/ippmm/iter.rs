@@ -65,6 +65,15 @@ fn test_record_infeas_commit() {
     }
 }
 
+/// Consecutive-fire commit stop check (Task #11), factored out so the call
+/// site is a single condition instead of a `#[cfg(test)]` hook line plus the
+/// real check.
+fn should_stop_before_infeas_commit(timeout_ctx: &TimeoutCtx) -> bool {
+    #[cfg(test)]
+    test_record_infeas_commit();
+    timeout_ctx.should_stop()
+}
+
 /// IP-PMM 内部ソルバー (Ruiz scaling 後の problem を受け取る)。
 ///
 /// `SolverOptions::threads` 専用の rayon プールへ solve 全体を閉じ込め、その
@@ -562,10 +571,8 @@ fn solve_ippmm_inner_confined(
             consecutive_infeas_triggers += 1;
             // N 連続 fire まで判定保留: PMM floor の false-positive に adaptive reg の猶予を与える。
             if consecutive_infeas_triggers >= MIN_CONSECUTIVE_INFEAS {
-                #[cfg(test)]
-                test_record_infeas_commit();
                 // 証明受理直前の stop check: 関数 doc の contract 参照 (Task #11)。
-                if timeout_ctx.should_stop() {
+                if should_stop_before_infeas_commit(&timeout_ctx) {
                     status = Some(SolveStatus::Timeout);
                     break;
                 }

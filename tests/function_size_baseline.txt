@@ -1,10 +1,10 @@
 # functions over 220 lines; growth is forbidden, shrink/removal is allowed
-otspot-core/src/conic/ipm.rs	solve	163	332
-otspot-core/src/conic/misocp.rs	solve_misocp	446	262
-otspot-core/src/conic/nonconvex.rs	global_core	880	258
+otspot-core/src/conic/ipm.rs	solve	172	328
+otspot-core/src/conic/misocp.rs	solve_misocp	455	262
+otspot-core/src/conic/nonconvex.rs	global_core	884	260
 otspot-core/src/presolve/activity.rs	propagate_row_bounds	81	227
 otspot-core/src/presolve/postsolve.rs	run_postsolve	212	256
-otspot-core/src/qp/ipm_core/ippmm/iter.rs	solve_ippmm_inner_confined	93	684
+otspot-core/src/qp/ipm_core/ippmm/iter.rs	solve_ippmm_inner_confined	102	682
 otspot-core/src/qp/ipm_solver/core.rs	run_ipm_with	65	317
 otspot-core/src/qp/postsolve/postprocess/dual_ir.rs	try_dual_only_ir	27	392
 otspot-core/src/qp/postsolve/refine/kkt_iterative/extended.rs	refine_kkt_extended_precision	135	323

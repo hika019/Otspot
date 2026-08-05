@@ -1222,6 +1222,39 @@ fn cancel_race_before_misocp_unbounded_return_prefers_timeout() {
     assert!(res.x.is_empty());
 }
 
+/// Task #11 P2-A (レビュー指摘): `solve_misocp` の最終分類は Infeasible と
+/// Optimal の両方が同一の `proven` (探索木完全消尽) シグナルに支えられており、
+/// 一方だけ backstop すると非対称になる。`half_int_lp` (同じ fixture が
+/// `misocp_exhaustive_search_without_failures_is_optimal` で使われている,
+/// 通常は Optimal を返す) で、最終分類直前に cancel が観測されれば
+/// incumbent が真に最適であっても Timeout を優先すること。
+///
+/// Sentinel: `solve_misocp` の `proven && opts.stop_requested()` 分岐
+/// (incumbent-あり側) を revert すると `Optimal` が返り FAIL する。
+#[test]
+fn cancel_race_before_misocp_optimal_classification_prefers_timeout() {
+    misocp::FINAL_CLASSIFICATION_COMMIT_COUNT.with(|c| c.set(0));
+    misocp::CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(Some(1)));
+
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opts = ConicOptions {
+        cancel_flag: Some(std::sync::Arc::clone(&cancel)),
+        ..ConicOptions::default()
+    };
+    let res = solve_misocp(&half_int_lp(), &opts, &BbOptions::default());
+    misocp::CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(None));
+
+    assert_eq!(
+        res.status,
+        SolveStatus::Timeout,
+        "cancel racing in right before the final Optimal classification must yield Timeout even though the incumbent is truly optimal, got {res:?}"
+    );
+    assert!(
+        !res.x.is_empty(),
+        "incumbent must still be reported under Timeout"
+    );
+}
+
 #[test]
 fn misocp_rounds_and_rechecks_integer_incumbent() {
     // The relaxation optimum is x=0.9999995, within int_tol of 1, but the

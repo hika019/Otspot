@@ -61,6 +61,15 @@ fn test_record_certificate_commit() {
     }
 }
 
+/// Certificate-acceptance stop check (Task #11), factored out of `solve`'s
+/// two call sites (Farkas / improving-ray) so each is a single condition
+/// instead of a `#[cfg(test)]` hook line plus the real check.
+fn should_stop_before_certificate_commit(opts: &ConicOptions) -> bool {
+    #[cfg(test)]
+    test_record_certificate_commit();
+    opts.stop_requested()
+}
+
 fn kkt_solve_deadline(opts: &ConicOptions) -> Option<Instant> {
     #[cfg(test)]
     if FORCE_EXPIRED_KKT_SOLVE_DEADLINE.get() {
@@ -299,10 +308,8 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) 
             if farkas_val >= opts.tol * val_mag && ray_res <= opts.tol * ray_mag && zn > 0.0 {
                 let zs: Vec<f64> = z.iter().map(|v| v / zn).collect();
                 if cone::in_cone(&blk, &zs, opts.tol) {
-                    #[cfg(test)]
-                    test_record_certificate_commit();
                     // 証明受理直前の stop check (contract: 関数 doc 参照, Task #11)。
-                    if opts.stop_requested() {
+                    if should_stop_before_certificate_commit(opts) {
                         status = SolveStatus::Timeout;
                         break;
                     }
@@ -334,10 +341,8 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) 
                     gx.iter().map(|v| -v).collect()
                 };
                 if cone::in_cone(&blk, &recession, opts.tol) {
-                    #[cfg(test)]
-                    test_record_certificate_commit();
                     // 証明受理直前の stop check (contract: 関数 doc 参照, Task #11)。
-                    if opts.stop_requested() {
+                    if should_stop_before_certificate_commit(opts) {
                         status = SolveStatus::Timeout;
                         break;
                     }

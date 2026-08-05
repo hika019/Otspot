@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3182 testcases, 26 ignored
+# totals: 3184 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -60,6 +60,7 @@ otspot-core	conic::misocp::tests::qcqp_true_objective_panics_on_dimension_mismat
 otspot-core	conic::nonconvex::tests::accept_honors_caller_tolerance_after_rounding_not_a_fixed_floor	active
 otspot-core	conic::nonconvex::tests::cancel_flag_is_honored_inside_the_bnb_loop	active
 otspot-core	conic::nonconvex::tests::cancel_race_before_final_infeasible_classification_prefers_timeout	active
+otspot-core	conic::nonconvex::tests::cancel_race_before_final_optimal_classification_prefers_timeout	active
 otspot-core	conic::nonconvex::tests::exhausted_clean_search_certifies_optimal_with_zero_gap	active
 otspot-core	conic::nonconvex::tests::failed_root_relaxation_is_not_false_infeasible	active
 otspot-core	conic::nonconvex::tests::feasible_panics_on_a_eq_dimension_mismatch	active
@@ -81,6 +82,7 @@ otspot-core	conic::qcqp::tests::qp_bridge_rejects_base_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_objective_upper_triangle_is_symmetrized_for_cholesky	active
 otspot-core	conic::tests::bench_conic_suite	ignored
 otspot-core	conic::tests::cancel_race_before_misocp_final_infeasible_classification_prefers_timeout	active
+otspot-core	conic::tests::cancel_race_before_misocp_optimal_classification_prefers_timeout	active
 otspot-core	conic::tests::cancel_race_before_misocp_unbounded_return_prefers_timeout	active
 otspot-core	conic::tests::cancel_race_during_unscale_window_prefers_timeout_over_infeasible	active
 otspot-core	conic::tests::cone_membership_check_covers_all_branches	active

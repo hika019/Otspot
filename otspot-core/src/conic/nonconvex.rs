@@ -872,11 +872,15 @@ fn validate_integers(n: usize, integers: &[usize]) -> Result<(), String> {
 /// [`solve_global_miqcp`].
 ///
 /// Certificate-acceptance contract (Task #11 横展開, mirrors
-/// `misocp::solve_misocp`): the no-incumbent `Infeasible` classification
-/// defers to `Timeout` when an external stop is observed at that instant,
-/// even if every region's own prune was itself un-raced -- discarding an
-/// already-proven conclusion is the conservative choice once a stop has
-/// been observed.
+/// `misocp::solve_misocp`): both the no-incumbent `Infeasible` classification
+/// and the incumbent `certified` -> `Optimal` classification defer to
+/// `Timeout` when an external stop is observed at that instant, even if the
+/// underlying region prunes were themselves un-raced. Unlike the QP IPPMM /
+/// conic IPM per-certificate checks (where `Optimal` is independently
+/// KKT/residual-verified and therefore exempt), a B&B tree's exhaustive-
+/// search `Infeasible` and `Optimal` both rest on the identical deterministic
+/// "search space fully pruned" signal -- there is no basis to trust one and
+/// distrust the other, so both defer symmetrically.
 fn global_core(
     qp: &NonconvexQcqp,
     integers: &[usize],
@@ -1121,8 +1125,10 @@ fn global_core(
         // With an incumbent, a node/gap-limited search is `SuboptimalSolution`
         // (the incumbent is valid but unproven), matching `misocp::solve_misocp`
         // and `mip::solve_miqp`. `MaxIterations` is reserved for the
-        // no-incumbent node-limited case above.
-        status: if timed_out {
+        // no-incumbent node-limited case above. `certified` shares the same
+        // stop-check backstop as the no-incumbent `Infeasible` branch above
+        // (contract: 関数 doc 参照, Task #11 P2-A).
+        status: if timed_out || (certified && opts.stop_requested()) {
             SolveStatus::Timeout
         } else if certified {
             SolveStatus::Optimal
@@ -1737,6 +1743,41 @@ mod tests {
             SolveStatus::Infeasible,
             "baseline (no cancel): got {:?}",
             res.status
+        );
+    }
+
+    /// Task #11 P2-A (レビュー指摘): `global_core` の最終分類は Infeasible と
+    /// Optimal (`certified`) の両方が同一の決定論的シグナルに支えられており、
+    /// 一方だけ backstop すると非対称になる。`hyperbola` (通常は
+    /// `exhausted_clean_search_certifies_optimal_with_zero_gap` で Optimal を
+    /// 返す fixture) で、最終分類直前に cancel が観測されれば incumbent が
+    /// 真に最適であっても Timeout を優先すること。
+    ///
+    /// Sentinel: `global_core` の `certified && opts.stop_requested()` 分岐を
+    /// revert すると `Optimal` が返り FAIL する。
+    #[test]
+    fn cancel_race_before_final_optimal_classification_prefers_timeout() {
+        let qp = hyperbola();
+
+        FINAL_CLASSIFICATION_COMMIT_COUNT.with(|c| c.set(0));
+        CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(Some(1)));
+
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let opts = ConicOptions {
+            cancel_flag: Some(std::sync::Arc::clone(&cancel)),
+            ..ConicOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default());
+        CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(None));
+
+        assert_eq!(
+            res.status,
+            SolveStatus::Timeout,
+            "cancel racing in right before the final Optimal classification must yield Timeout even though the incumbent is truly optimal, got {res:?}"
+        );
+        assert!(
+            !res.x.is_empty(),
+            "incumbent must still be reported under Timeout"
         );
     }
 
