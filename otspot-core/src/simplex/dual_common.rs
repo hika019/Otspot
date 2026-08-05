@@ -224,19 +224,17 @@ pub(super) fn outcome_to_result(
 // Test-only observability for `lp_unbounded_ray_verified`'s two cancellation
 // checkpoints (loop-top and pre-accept). Mirrors `presolve::qp_phase2`'s
 // `PHASE2_STEPS_EXECUTED`/`PHASE2_CANCEL_AFTER_STEPS`/`PHASE2_CANCEL_SIGNAL`
-// pattern: entirely `#[cfg(test)]` -- both the definitions and every call
-// site below -- so it has zero footprint in production builds.
+// pattern: entirely `#[cfg(test)]` (definitions and every call site below),
+// zero footprint in production builds.
 //
 // `cancel_flag` is monotonic (never reset once `true`), so a plain pass/fail
-// on the function's own boolean return cannot distinguish "the loop-top
-// check caught it" from "the pre-accept check caught it": whichever
-// checkpoint runs *after* the flag flips catches it, regardless of which
-// one(s) are actually present in the code (Codex PR #31 re-review: reverting
-// either checkpoint alone left both new sentinels passing, since the other,
-// untouched checkpoint still caught the monotonic flag -- only reverting
-// both together failed). These counters make each checkpoint's own hit
-// count independently observable, so a test can assert precisely how many
-// times *that* checkpoint ran rather than inferring it from the final bool.
+// on the function's own boolean return cannot distinguish which checkpoint
+// caught it: whichever runs *after* the flip catches it regardless of which
+// one(s) are present (Codex PR #31 re-review: reverting either checkpoint
+// alone left both original sentinels passing, since the other, untouched
+// checkpoint still caught the monotonic flag -- only reverting both failed).
+// These counters make each checkpoint's own hit count independently
+// observable, so a test can assert precisely how many times it ran.
 #[cfg(test)]
 thread_local! {
     static RAY_LOOP_TOP_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -942,36 +940,28 @@ mod tests {
     /// PR #31 review follow-up, same class as the Farkas gates already fixed
     /// in this crate): all 4 production callers (`dual.rs`, `dual_advanced/
     /// pipeline.rs`, `primal/mod.rs`'s `gate_phase2_unbounded`, `dual_advanced/
-    /// phase1.rs`) unconditionally map a bare `true` here straight to a hard
-    /// `SolveStatus::Unbounded`.
+    /// phase1.rs`) unconditionally map a bare `true` here to `SolveStatus::
+    /// Unbounded`.
     ///
-    /// Deterministic, not a wall-clock race (Codex PR #31 re-review of the
-    /// original version of these two sentinels): `cancel_flag` is monotonic,
-    /// so a plain "did `verified` come back `false`" assertion cannot
-    /// distinguish which of the two checkpoints (loop-top,
-    /// `RAY_LOOP_TOP_HITS`; pre-accept, `RAY_PRE_ACCEPT_HITS`) caught it --
-    /// whichever runs *after* the flag flips catches it regardless of which
-    /// one(s) are actually present. Reverting either checkpoint alone left
-    /// the original race-based sentinels passing (reviewer's 4 experiments);
-    /// only reverting both together failed. These two tests instead assert
-    /// each checkpoint's own hit count, which *does* distinguish them: see
-    /// `RAY_LOOP_TOP_HITS`/`RAY_PRE_ACCEPT_HITS`'s doc comment above
-    /// `test_record_ray_loop_top_hit`.
+    /// Deterministic, not a wall-clock race (Codex PR #31 re-review):
+    /// `cancel_flag` is monotonic, so "did `verified` come back `false`"
+    /// cannot distinguish which checkpoint caught it -- whichever runs
+    /// after the flip catches it regardless of presence. Reverting either
+    /// checkpoint alone left the original race-based sentinels passing
+    /// (reviewer's 4 experiments); only reverting both failed. These two
+    /// tests instead assert each checkpoint's own hit count (see
+    /// `RAY_LOOP_TOP_HITS`/`RAY_PRE_ACCEPT_HITS`'s doc comment above).
     ///
-    /// This test targets the loop-top checkpoint specifically. Fixture:
-    /// `m = 1`, column 0 is the identity basis (`B = [1]`), and
-    /// `DECOYS = 10` entirely empty non-ray columns (cost 0, so `rc = 0 >=
-    /// -dual_tol` skips each via `continue` -- `ray_ok` is never computed,
-    /// so `RAY_PRE_ACCEPT_HITS` stays 0 throughout, keeping this test's
-    /// signal isolated to the loop-top checkpoint alone). `cancel_flag`
-    /// flips deterministically right after loop-top hit `CANCEL_AFTER`
-    /// (`RAY_CANCEL_AFTER_LOOP_TOP_HITS`), a mock-clock stand-in for a real
-    /// expiring deadline/cancel arriving mid-scan.
+    /// Targets the loop-top checkpoint. Fixture: `m = 1`, column 0 the
+    /// identity basis, `DECOYS = 10` empty non-ray columns (`rc = 0 >=
+    /// -dual_tol` skips each via `continue`, so `ray_ok` never computes and
+    /// `RAY_PRE_ACCEPT_HITS` stays 0, isolating this test's signal to
+    /// loop-top). `cancel_flag` flips right after loop-top hit
+    /// `CANCEL_AFTER`, a mock-clock stand-in for a real expiring
+    /// deadline/cancel mid-scan.
     ///
-    /// Sentinel: reverting the `if options.external_stop_requested() {
-    /// return false; }` at the top of the loop makes `RAY_LOOP_TOP_HITS`
-    /// climb past `CANCEL_AFTER` to all `DECOYS` (nothing stops the scan
-    /// early anymore), failing the `hits == CANCEL_AFTER` assertion.
+    /// Sentinel: reverting the loop-top check makes `RAY_LOOP_TOP_HITS`
+    /// climb to all `DECOYS`, failing `hits == CANCEL_AFTER`.
     #[test]
     fn lp_unbounded_ray_verified_loop_top_check_stops_scan_at_cancellation_point() {
         use std::sync::atomic::Ordering;

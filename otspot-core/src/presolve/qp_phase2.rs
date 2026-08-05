@@ -9,22 +9,20 @@ use otspot_num::sparse::CscMatrix;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 
-// Test-only observability: counts how many of `run_qp_presolve_phase2`'s 5
-// `cancellable`-guarded tail steps (q_preserved clone / equality_constraint_qr
-// / CSC rebuild / constraint_precond / QpProblem::new) actually ran. Purely
-// additive bookkeeping (never gates control flow on its own), and entirely
-// `#[cfg(test)]` -- both the definition and every call site below -- so it
-// has zero footprint in production builds. Mirrors `qp_transforms::driver`'s
-// `STEPS_EXECUTED_TOTAL`.
+// Test-only observability, entirely `#[cfg(test)]` (definition and every
+// call site below), so it has zero footprint in production builds. Counts
+// how many of `run_qp_presolve_phase2`'s 5 `cancellable`-guarded tail steps
+// (q_preserved clone / equality_constraint_qr / CSC rebuild /
+// constraint_precond / QpProblem::new) actually ran; mirrors
+// `qp_transforms::driver`'s `STEPS_EXECUTED_TOTAL`.
 //
 // `PHASE2_CANCEL_AFTER_STEPS`/`PHASE2_CANCEL_SIGNAL` piggyback on the same
-// counter to give tests a deterministic stand-in for a real race between
-// `cancel_flag` and this function's progress: once the executed count
-// reaches the configured target, `PHASE2_CANCEL_SIGNAL` flips, which a test
-// feeds to `run_qp_presolve_phase2` via `SolverOptions::cancel_flag` (an
-// `Arc` clone sharing the same underlying `AtomicBool`). That drives the
-// exact same `cancellable`/`external_stop_requested` path a real deadline or
-// `Ctrl-C` would, without racing wall-clock time.
+// counter for a deterministic stand-in for a real cancel/deadline race: once
+// the executed count reaches the configured target, `PHASE2_CANCEL_SIGNAL`
+// flips, fed to `run_qp_presolve_phase2` via `SolverOptions::cancel_flag`
+// (an `Arc` clone of the same `AtomicBool`) -- the exact `cancellable`/
+// `external_stop_requested` path a real deadline or `Ctrl-C` takes, without
+// racing wall-clock time.
 #[cfg(test)]
 thread_local! {
     static PHASE2_STEPS_EXECUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -680,42 +678,32 @@ mod tests {
     }
 
     /// `run_qp_presolve_phase2`'s CSC row-map rebuild, `constraint_precond`,
-    /// and `QpProblem::new` validation each ran unconditionally once the
-    /// `equality_constraint_qr` call's `cancellable` wrapper returned `Some`
-    /// (Codex PR #31 review follow-up, on top of 0821b27d): none of them
-    /// re-checked `external_stop_requested()`, so a cancellation arriving in
-    /// that exact window (after elimination finishes, before this tail
-    /// completes) went unnoticed until this function's own return -- unlike
-    /// the mid-elimination case the test above already covers.
+    /// and `QpProblem::new` validation ran unconditionally once
+    /// `equality_constraint_qr`'s `cancellable` wrapper returned `Some`
+    /// (Codex PR #31 review follow-up, on top of 0821b27d): none re-checked
+    /// `external_stop_requested()`, so a cancellation in that window went
+    /// unnoticed until this function's own return.
     ///
-    /// Deterministic, not wall-clock (Codex review follow-up on the original
-    /// version of this sentinel, which raced a background thread's `sleep`
-    /// against a 2,000,000-variable fixture's measured uncancelled duration:
-    /// reproducibly flaky under `nextest`'s parallel execution -- 72/73 with
-    /// `cancelled=113ms` against a `<103.7ms` threshold on one contended run,
-    /// 73/73 moments later on an uncontended rerun of the identical binary).
-    /// `PHASE2_CANCEL_AFTER_STEPS`/`PHASE2_CANCEL_SIGNAL` (see their doc
-    /// comment above `test_record_phase2_step_executed`) flip `cancel_flag`
-    /// as a synchronous side effect of the `n`th guarded step completing --
-    /// no thread, no sleep, no timing assumption of any kind -- so the flip
-    /// always lands in the exact same place relative to this function's
-    /// progress, every run, on every machine, contended or not.
+    /// Deterministic, not wall-clock: the original version of this sentinel
+    /// raced a background thread's `sleep` against a 2,000,000-variable
+    /// fixture's measured uncancelled duration and was reproducibly flaky
+    /// under `nextest`'s parallel execution (`cancelled=113ms` against a
+    /// `<103.7ms` threshold on one contended run, 73/73 moments later
+    /// uncontended). `PHASE2_CANCEL_AFTER_STEPS`/`PHASE2_CANCEL_SIGNAL` (doc
+    /// comment above `test_record_phase2_step_executed`) instead flip
+    /// `cancel_flag` as a synchronous side effect of the `n`th guarded step
+    /// completing -- no thread, no sleep, so the flip lands identically
+    /// every run.
     ///
-    /// For each `cancel_after` in `1..=4` (flipping after step 1 through step
-    /// 4 of the 5 guarded steps: q_preserved clone / equality_constraint_qr /
-    /// CSC rebuild / constraint_precond / QpProblem::new), asserts both that
-    /// execution stops at exactly that step count (the call-count half of
-    /// "steps that should not be reached after cancellation") and that the
-    /// returned result is `phase1_result` unchanged (the side-effect half --
-    /// none of the unreached steps' work leaked into the output). A trailing
-    /// uncancelled run confirms all 5 steps execute when nothing cancels.
+    /// For `cancel_after` in `1..=4` (of the 5 guarded steps), asserts
+    /// execution stops at exactly that step count and the result is
+    /// `phase1_result` unchanged (no unreached step's work leaked out). A
+    /// trailing uncancelled run confirms all 5 steps execute normally.
     ///
-    /// Sentinel: reverting the `cancellable` wrapping around any of the CSC
-    /// rebuild / `constraint_precond` / `QpProblem::new` steps back to bare
-    /// (unconditional) code makes the `cancel_after` in `{3, 4}` cases run
-    /// straight past their target step count to 5 (that step no longer has
-    /// its own guard to stop at), failing the `executed == cancel_after`
-    /// assertion.
+    /// Sentinel: reverting the `cancellable` wrapping on any of the CSC
+    /// rebuild / `constraint_precond` / `QpProblem::new` steps makes
+    /// `cancel_after` in `{3, 4}` run past their target to 5, failing
+    /// `executed == cancel_after`.
     #[test]
     fn test_run_qp_presolve_phase2_tail_stops_at_cancellation_point() {
         use std::sync::atomic::Ordering;
