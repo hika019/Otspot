@@ -33,6 +33,47 @@ use otspot_num::linalg::kkt_solver::{inexact_eta_for_eps, KktConfig};
 use otspot_num::linalg::parallelism::with_solver_pool;
 use otspot_num::linalg::timeout::TimeoutCtx;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only cancel injection for the Infeasible/Unbounded certificate
+    /// commit point below: counts calls to `test_record_infeas_commit`
+    /// (invoked right before the consecutive-fire detector's conclusion is
+    /// accepted); once the count reaches `CANCEL_AFTER_INFEAS_COMMIT`, flips
+    /// `CANCEL_SIGNAL` -- the same shared `AtomicBool` a test threads through
+    /// `SolverOptions::cancel_flag` -- so `timeout_ctx.should_stop()`
+    /// observes a freshly-fired cancellation exactly at the commit point,
+    /// without racing wall-clock time. Mirrors
+    /// `presolve::qp_transforms::driver`'s
+    /// `STEPS_EXECUTED_TOTAL`/`CANCEL_AFTER_STEPS`/`CANCEL_SIGNAL` pattern.
+    /// `pub(super)` so the sibling `ippmm::tests` module can drive it.
+    pub(super) static INFEAS_COMMIT_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    pub(super) static CANCEL_AFTER_INFEAS_COMMIT: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    pub(super) static CANCEL_SIGNAL: std::sync::Arc<std::sync::atomic::AtomicBool> =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+}
+
+#[cfg(test)]
+fn test_record_infeas_commit() {
+    let count = INFEAS_COMMIT_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if CANCEL_AFTER_INFEAS_COMMIT.with(std::cell::Cell::get) == Some(count) {
+        CANCEL_SIGNAL.with(|flag| flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    }
+}
+
+/// Consecutive-fire commit stop check (Task #11), factored out so the call
+/// site is a single condition instead of a `#[cfg(test)]` hook line plus the
+/// real check.
+fn should_stop_before_infeas_commit(timeout_ctx: &TimeoutCtx) -> bool {
+    #[cfg(test)]
+    test_record_infeas_commit();
+    timeout_ctx.should_stop()
+}
+
 /// IP-PMM 内部ソルバー (Ruiz scaling 後の problem を受け取る)。
 ///
 /// `SolverOptions::threads` 専用の rayon プールへ solve 全体を閉じ込め、その
@@ -51,6 +92,13 @@ pub(crate) fn solve_ippmm_inner(
     })
 }
 
+/// Certificate-acceptance contract (Task #11): `check_infeasible_or_unbounded`'s
+/// consecutive-fire detector is a Newton-direction Farkas-like heuristic, not
+/// a hard proof. If an external stop (cancel/deadline) is observed at the
+/// instant its conclusion (Infeasible/Unbounded, or the best-so-far Stalled
+/// downgrade that doubts it) would be accepted, `Timeout` wins -- discarding
+/// an unverified heuristic conclusion in favor of the caller's stop request
+/// is the conservative choice.
 fn solve_ippmm_inner_confined(
     problem: &QpProblem,
     options: &SolverOptions,
@@ -523,6 +571,11 @@ fn solve_ippmm_inner_confined(
             consecutive_infeas_triggers += 1;
             // N 連続 fire まで判定保留: PMM floor の false-positive に adaptive reg の猶予を与える。
             if consecutive_infeas_triggers >= MIN_CONSECUTIVE_INFEAS {
+                // 証明受理直前の stop check: 関数 doc の contract 参照 (Task #11)。
+                if should_stop_before_infeas_commit(&timeout_ctx) {
+                    status = Some(SolveStatus::Timeout);
+                    break;
+                }
                 // best が quality 圏内なら検出器を信用せず best-so-far を Stalled で
                 // 返す (Farkas-like 近似の false-positive 対策)。Optimal 昇格はしない:
                 // 品質判定は finalize の prove_optimal 一本。

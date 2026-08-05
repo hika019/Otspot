@@ -1,7 +1,9 @@
 //! IP-PMM 単体テスト。
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use super::iter::solve_ippmm_inner;
+use super::iter::{
+    solve_ippmm_inner, CANCEL_AFTER_INFEAS_COMMIT, CANCEL_SIGNAL, INFEAS_COMMIT_COUNT,
+};
 use super::state::{warm_bound_margin, WARM_BOUND_REL_MARGIN};
 use super::warm_start::apply_qp_warm_start;
 use crate::options::{QpWarmStart, SolverOptions};
@@ -9,6 +11,8 @@ use crate::problem::{ConstraintType, SolveStatus};
 use crate::qp::ipm_core::kkt::build_extended_constraints;
 use crate::qp::problem::QpProblem;
 use otspot_num::sparse::CscMatrix;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 const EPS: f64 = 1e-4; // IP-PMM は標準 IPM より tolerance がゆるめでも通ることを確認
 
@@ -717,6 +721,70 @@ fn test_box_only_nondiag_q_multi_pattern() {
             );
         }
     }
+}
+
+/// 矛盾する bound (x>=1 かつ x<=0) の infeasible 1変数 QP。Task #11: consecutive
+/// fire が `MIN_CONSECUTIVE_INFEAS` に達し証明を確定する直前に cancel_flag が
+/// 立った場合、Infeasible ではなく Timeout を返すこと。
+///
+/// Sentinel: `iter.rs` の受理直前 `timeout_ctx.should_stop()` チェックを
+/// revert すると、cancel が立っても最終連続検出の commit がそのまま進み
+/// status は Infeasible のまま返るため、このテストは FAIL する。
+fn infeasible_1var_qp() -> QpProblem {
+    let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+    let c = vec![0.0];
+    let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[-1.0, 1.0], 2, 1).unwrap();
+    let b = vec![-1.0, 0.0];
+    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+    QpProblem::new_all_le(q, c, a, b, bounds).unwrap()
+}
+
+#[test]
+fn cancel_race_before_infeasible_certificate_prefers_timeout() {
+    let problem = infeasible_1var_qp();
+
+    INFEAS_COMMIT_COUNT.with(|c| c.set(0));
+    CANCEL_AFTER_INFEAS_COMMIT.with(|c| c.set(Some(1)));
+    CANCEL_SIGNAL.with(|flag| flag.store(false, Ordering::Relaxed));
+
+    let opts = CANCEL_SIGNAL.with(|flag| SolverOptions {
+        timeout_secs: Some(10.0),
+        use_ruiz_scaling: false,
+        cancel_flag: Some(Arc::clone(flag)),
+        ..Default::default()
+    });
+    let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
+
+    CANCEL_AFTER_INFEAS_COMMIT.with(|c| c.set(None));
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Timeout,
+        "cancel racing in right before the Infeasible certificate commit must yield Timeout, got {:?}",
+        result.status
+    );
+}
+
+/// Baseline/control for the sentinel above: without any cancel injection,
+/// the same construction must still report the genuine Infeasible
+/// certificate (confirms the fixture actually reaches the consecutive-fire
+/// detector via `solve_ippmm_inner` directly, with no presolve involved).
+#[test]
+fn no_cancel_still_reports_infeasible_via_inner_solver() {
+    let problem = infeasible_1var_qp();
+
+    INFEAS_COMMIT_COUNT.with(|c| c.set(0));
+    CANCEL_AFTER_INFEAS_COMMIT.with(|c| c.set(None));
+    CANCEL_SIGNAL.with(|flag| flag.store(false, Ordering::Relaxed));
+
+    let opts = default_opts();
+    let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
+    assert_eq!(
+        result.status,
+        SolveStatus::Infeasible,
+        "baseline (no cancel): expected Infeasible, got {:?}",
+        result.status
+    );
 }
 
 fn apply_warm_and_extract_x(problem: &QpProblem, xj_warm: f64) -> f64 {
