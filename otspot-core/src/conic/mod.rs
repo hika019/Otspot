@@ -27,6 +27,36 @@ pub use qcqp::{
 use crate::problem::SolveStatus;
 use otspot_num::sparse::CscMatrix;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only cancel injection for `solve_socp`'s post-unscale backstop
+    /// (Task #11): counts calls to `test_maybe_cancel_after_ipm_solve`
+    /// (invoked right after `ipm::solve` returns, before
+    /// `Equilibrator::unscale_result`); once the count reaches
+    /// `CANCEL_AFTER_POST_SOLVE_COMMIT`, flips the real `cancel_flag`
+    /// `AtomicBool` a test threads through `ConicOptions::cancel_flag`, so
+    /// the backstop's `opts.stop_requested()` observes a freshly-fired
+    /// cancellation from within the equilibration/unscale window, without
+    /// racing wall-clock time. Mirrors `misocp::DEADLINE_AFTER_NODE`'s
+    /// fault-injection pattern.
+    static POST_SOLVE_COMMIT_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CANCEL_AFTER_POST_SOLVE_COMMIT: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn test_maybe_cancel_after_ipm_solve(opts: &ConicOptions) {
+    let count = POST_SOLVE_COMMIT_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if CANCEL_AFTER_POST_SOLVE_COMMIT.with(std::cell::Cell::get) == Some(count) {
+        if let Some(flag) = &opts.cancel_flag {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// Cone specification: nonnegative orthant of dimension `l`, then SOCs with dims in `soc`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConeSpec {
@@ -260,7 +290,21 @@ pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     let eq = equil::Equilibrator::compute(problem);
     let scaled = eq.scale_problem(problem);
     let res = ipm::solve(&scaled, opts, true);
+    #[cfg(test)]
+    test_maybe_cancel_after_ipm_solve(opts);
     let mut res = eq.unscale_result(problem, opts.tol, res);
+    // API 境界 backstop (Task #11): equilibration/unscale/再検証
+    // (`unscale_result`) は `ipm::solve` 内の受理直前チェックより後の、追加の
+    // 実処理時間を持つ窓 -- ここで外部停止が観測されていれば、certificate が
+    // original-space 再検証を通っていても Timeout を優先する (正直化: 検証済み
+    // 証明を捨てる保守的選択)。Optimal 等それ以外の status はこの判定に含めない。
+    if matches!(res.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
+        && opts.stop_requested()
+    {
+        res.status = SolveStatus::Timeout;
+        res.primal_ray = None;
+        res.infeas_cert = None;
+    }
     // Canonicalize only statuses whose `x` is not a usable iterate
     // (PR #25 review 40): `Infeasible` -> `+inf`, `Unbounded` -> `-inf`.
     // Inconclusive statuses keep `dot(c, x)` of the real iterate in `res.x`;

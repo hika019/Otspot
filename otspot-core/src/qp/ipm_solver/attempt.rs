@@ -968,7 +968,23 @@ fn finalize_outcome(
     view: &ProblemView<'_>,
 ) -> SolverResult {
     let krylov_ir_skipped = outcome.postsolve_krylov_ir_skipped;
+    let timed_out = cancelled || total_deadline.is_some_and(|d| Instant::now() >= d);
     if let Some(infeas) = outcome.infeasibility_status {
+        // API 境界 backstop: attempt ladder のどこかで観測された cancel/deadline
+        // は、outcome にどんな Infeasible/Unbounded/NonConvex 証明が乗っていても
+        // 優先する。反復内 (`iter.rs`) の受理直前チェックは反復先頭からの窓しか
+        // 塞げないため、最終連続検出からここに到達するまでの窓は別途ここで塞ぐ
+        // 必要がある。証明を握り潰す保守的な選択で正直化する: キャンセル要求が
+        // 観測された以上、未検証になり得る Newton 方向ヒューリスティック証明より
+        // Timeout を報告する。Optimal/SuboptimalSolution/MaxIterations 等の
+        // 非 infeasibility outcome はこの判定に含めない (satisfies_eps 済みの
+        // 解は cancel 有無と無関係に品質保証されているため、下の分岐が別途扱う)。
+        if timed_out {
+            return SolverResult {
+                iterations: outcome.iterations,
+                ..SolverResult::timeout()
+            };
+        }
         let objective = match infeas {
             SolveStatus::Infeasible => f64::INFINITY,
             SolveStatus::Unbounded => f64::NEG_INFINITY,
@@ -981,8 +997,6 @@ fn finalize_outcome(
             ..Default::default()
         };
     }
-
-    let timed_out = cancelled || total_deadline.is_some_and(|d| Instant::now() >= d);
 
     // numerical_failure は run_ipm の validate ガードまたは内部ソルバー失敗が
     // 明示セットする。solution.is_empty() に依存せず直接 NumericalError へ map
@@ -2654,6 +2668,91 @@ mod tests {
                 &view,
             );
             assert_eq!(r.status, SolveStatus::Stalled, "got {:?}", r.status);
+        }
+    }
+
+    /// Task #11 (キャンセル後の false Infeasible/Unbounded): `finalize_outcome`
+    /// の API 境界 backstop sentinel。`cancelled`/deadline は `infeasibility_status`
+    /// の return より先に判定されなければならない -- 旧順序 (infeasibility を
+    /// 先に return) を revert すると、cancelled=true でも Infeasible/Unbounded が
+    /// そのまま返り、これらのテストは FAIL する。
+    mod cancelled_infeasibility_backstop_sentinels {
+        use super::*;
+        use crate::problem::SolveStatus;
+
+        #[test]
+        fn cancelled_infeasible_outcome_reports_timeout_not_infeasible() {
+            let prob = make_simple_eq_qp();
+            let view = ProblemView::from_problem(&prob);
+            let outcome = IpmOutcome {
+                iterations: 7,
+                ..IpmOutcome::infeasibility(SolveStatus::Infeasible)
+            };
+            let r = finalize_outcome(outcome, 1e-6, 1, None, /* cancelled */ true, &view);
+            assert_eq!(
+                r.status,
+                SolveStatus::Timeout,
+                "cancelled=true must discard the Infeasible certificate, got {:?}",
+                r.status
+            );
+            assert_eq!(r.iterations, 7, "diagnostic iteration count must survive");
+        }
+
+        #[test]
+        fn cancelled_unbounded_outcome_reports_timeout_not_unbounded() {
+            let prob = make_simple_eq_qp();
+            let view = ProblemView::from_problem(&prob);
+            let outcome = IpmOutcome {
+                iterations: 4,
+                ..IpmOutcome::infeasibility(SolveStatus::Unbounded)
+            };
+            let r = finalize_outcome(outcome, 1e-6, 1, None, /* cancelled */ true, &view);
+            assert_eq!(
+                r.status,
+                SolveStatus::Timeout,
+                "cancelled=true must discard the Unbounded certificate, got {:?}",
+                r.status
+            );
+        }
+
+        /// Deadline (not the `cancelled` flag) must trigger the same backstop.
+        #[test]
+        fn expired_deadline_infeasible_outcome_reports_timeout() {
+            let prob = make_simple_eq_qp();
+            let view = ProblemView::from_problem(&prob);
+            let outcome = IpmOutcome {
+                iterations: 3,
+                ..IpmOutcome::infeasibility(SolveStatus::Infeasible)
+            };
+            let expired = Some(Instant::now() - std::time::Duration::from_secs(1));
+            let r = finalize_outcome(outcome, 1e-6, 1, expired, /* cancelled */ false, &view);
+            assert_eq!(
+                r.status,
+                SolveStatus::Timeout,
+                "expired deadline must discard the Infeasible certificate, got {:?}",
+                r.status
+            );
+        }
+
+        /// Baseline/control: without cancel or an expired deadline, the
+        /// genuine certificate is still reported (confirms the backstop is
+        /// gated on `timed_out`, not unconditional).
+        #[test]
+        fn uncancelled_infeasible_outcome_still_reports_infeasible() {
+            let prob = make_simple_eq_qp();
+            let view = ProblemView::from_problem(&prob);
+            let outcome = IpmOutcome {
+                iterations: 7,
+                ..IpmOutcome::infeasibility(SolveStatus::Infeasible)
+            };
+            let r = finalize_outcome(outcome, 1e-6, 1, None, /* cancelled */ false, &view);
+            assert_eq!(
+                r.status,
+                SolveStatus::Infeasible,
+                "baseline (no cancel, no deadline): got {:?}",
+                r.status
+            );
+            assert_eq!(r.objective, f64::INFINITY);
         }
     }
 

@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3167 testcases, 26 ignored
+# totals: 3182 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -38,11 +38,15 @@ otspot-core	conic::equil::tests::equil_stationarity_residual_unscale_factor_is_s
 otspot-core	conic::equil::tests::misocp_equilibration_bound_scale_recovers_integer_optimum	active
 otspot-core	conic::ipm::tests::balance_start_evens_out_complementarity	active
 otspot-core	conic::ipm::tests::balance_start_shifts_soc_head_only_and_evens_complementarity	active
+otspot-core	conic::ipm::tests::cancel_race_before_infeasible_certificate_prefers_timeout	active
+otspot-core	conic::ipm::tests::cancel_race_before_unbounded_certificate_prefers_timeout	active
 otspot-core	conic::ipm::tests::cancellation_during_kkt_failure_is_timeout	active
 otspot-core	conic::ipm::tests::canonical_fallback_reaches_main_loop_optimality_gates	active
 otspot-core	conic::ipm::tests::expired_deadline_at_direction_solve_returns_timeout	active
 otspot-core	conic::ipm::tests::expired_kkt_deadline_guard_restores_nested_state	active
 otspot-core	conic::ipm::tests::kkt_deadline_failure_is_timeout	active
+otspot-core	conic::ipm::tests::no_cancel_still_reports_infeasible_certificate	active
+otspot-core	conic::ipm::tests::no_cancel_still_reports_unbounded_certificate	active
 otspot-core	conic::ipm::tests::shift_into_cone_is_per_block_not_global	active
 otspot-core	conic::ipm::tests::shift_into_cone_pushes_each_outside_soc_by_its_own_distance	active
 otspot-core	conic::kkt::tests::conic_factor_forwards_deadline_to_minres	active
@@ -55,6 +59,7 @@ otspot-core	conic::misocp::tests::classify_ray_node_cases	active
 otspot-core	conic::misocp::tests::qcqp_true_objective_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::accept_honors_caller_tolerance_after_rounding_not_a_fixed_floor	active
 otspot-core	conic::nonconvex::tests::cancel_flag_is_honored_inside_the_bnb_loop	active
+otspot-core	conic::nonconvex::tests::cancel_race_before_final_infeasible_classification_prefers_timeout	active
 otspot-core	conic::nonconvex::tests::exhausted_clean_search_certifies_optimal_with_zero_gap	active
 otspot-core	conic::nonconvex::tests::failed_root_relaxation_is_not_false_infeasible	active
 otspot-core	conic::nonconvex::tests::feasible_panics_on_a_eq_dimension_mismatch	active
@@ -64,6 +69,7 @@ otspot-core	conic::nonconvex::tests::incumbent_with_failed_node_is_not_optimal	a
 otspot-core	conic::nonconvex::tests::leaf_accept_no_longer_loosens_feas_tol_by_100x	active
 otspot-core	conic::nonconvex::tests::mccormick_w_box_bounds_diagonal_square_below	active
 otspot-core	conic::nonconvex::tests::mismatched_dims_returns_not_supported_not_a_panic	active
+otspot-core	conic::nonconvex::tests::no_cancel_still_reports_infeasible_via_global_core	active
 otspot-core	conic::nonconvex::tests::node_limited_with_incumbent_is_suboptimal	active
 otspot-core	conic::nonconvex::tests::public_entry_rejects_non_finite_data_and_integer_indices	active
 otspot-core	conic::nonconvex::tests::quad_val_panics_on_dimension_mismatch	active
@@ -74,6 +80,9 @@ otspot-core	conic::qcqp::tests::qcqp_rejects_objective_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_bridge_rejects_base_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_objective_upper_triangle_is_symmetrized_for_cholesky	active
 otspot-core	conic::tests::bench_conic_suite	ignored
+otspot-core	conic::tests::cancel_race_before_misocp_final_infeasible_classification_prefers_timeout	active
+otspot-core	conic::tests::cancel_race_before_misocp_unbounded_return_prefers_timeout	active
+otspot-core	conic::tests::cancel_race_during_unscale_window_prefers_timeout_over_infeasible	active
 otspot-core	conic::tests::cone_membership_check_covers_all_branches	active
 otspot-core	conic::tests::conic_border_l_fill_stays_linear	active
 otspot-core	conic::tests::conic_default_max_iter_no_longer_caps_a_slow_but_convergent_solve	active
@@ -993,6 +1002,8 @@ otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_does_not_fire_o
 otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_does_not_fire_while_still_making_progress	active
 otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_fires_for_liswet7_observed_floor_residual	active
 otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_requires_nonzero_history	active
+otspot-core	qp::ipm_core::ippmm::tests::cancel_race_before_infeasible_certificate_prefers_timeout	active
+otspot-core	qp::ipm_core::ippmm::tests::no_cancel_still_reports_infeasible_via_inner_solver	active
 otspot-core	qp::ipm_core::ippmm::tests::test_box_only_nondiag_q_multi_pattern	active
 otspot-core	qp::ipm_core::ippmm::tests::test_box_only_nondiag_q_stall_reproducer	active
 otspot-core	qp::ipm_core::ippmm::tests::test_ippmm_basic_2d	active
@@ -1055,6 +1066,10 @@ otspot-core	qp::ipm_solver::attempt::tests::attempt_acceptance_requires_prove_op
 otspot-core	qp::ipm_solver::attempt::tests::attempt_loop_clears_tolerance_so_inner_eps_is_tightened	active
 otspot-core	qp::ipm_solver::attempt::tests::attempt_loop_does_not_stop_on_satisfies_only_gap_failure	active
 otspot-core	qp::ipm_solver::attempt::tests::attempt_loop_keeps_finite_retry_over_infeasibility_status	active
+otspot-core	qp::ipm_solver::attempt::tests::cancelled_infeasibility_backstop_sentinels::cancelled_infeasible_outcome_reports_timeout_not_infeasible	active
+otspot-core	qp::ipm_solver::attempt::tests::cancelled_infeasibility_backstop_sentinels::cancelled_unbounded_outcome_reports_timeout_not_unbounded	active
+otspot-core	qp::ipm_solver::attempt::tests::cancelled_infeasibility_backstop_sentinels::expired_deadline_infeasible_outcome_reports_timeout	active
+otspot-core	qp::ipm_solver::attempt::tests::cancelled_infeasibility_backstop_sentinels::uncancelled_infeasible_outcome_still_reports_infeasible	active
 otspot-core	qp::ipm_solver::attempt::tests::candidate_order_prefers_certificate_then_objective	active
 otspot-core	qp::ipm_solver::attempt::tests::candidate_order_preserves_structural_status_over_unproven_iterate	active
 otspot-core	qp::ipm_solver::attempt::tests::converged_termination_does_not_break_early::converged_termination_runs_full_ladder	active

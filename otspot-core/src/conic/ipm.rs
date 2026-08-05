@@ -33,6 +33,32 @@ thread_local! {
     /// Makes only the optional initializer unavailable. The main IPM loop must
     /// recover from its canonical central point and still pass normal KKT gates.
     static FORCE_STARTING_POINT_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only cancel injection for the Infeasible/Unbounded certificate
+    /// commit points (Task #11): counts calls to
+    /// `test_record_certificate_commit` (invoked right after cone membership
+    /// is verified, right before the certificate is accepted); once the
+    /// count reaches `CANCEL_AFTER_CERTIFICATE_COMMIT`, flips `CANCEL_SIGNAL`
+    /// -- the same shared `AtomicBool` a test threads through
+    /// `ConicOptions::cancel_flag` -- so `opts.stop_requested()` observes a
+    /// freshly-fired cancellation exactly at the commit point, without
+    /// racing wall-clock time. Mirrors `misocp::DEADLINE_AFTER_NODE`'s
+    /// fault-injection pattern.
+    static CERTIFICATE_COMMIT_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CANCEL_AFTER_CERTIFICATE_COMMIT: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    static CANCEL_SIGNAL: std::sync::Arc<std::sync::atomic::AtomicBool> =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+}
+
+#[cfg(test)]
+fn test_record_certificate_commit() {
+    let count = CERTIFICATE_COMMIT_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if CANCEL_AFTER_CERTIFICATE_COMMIT.with(std::cell::Cell::get) == Some(count) {
+        CANCEL_SIGNAL.with(|flag| flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    }
 }
 
 fn kkt_solve_deadline(opts: &ConicOptions) -> Option<Instant> {
@@ -128,6 +154,12 @@ fn balance_start(e: &[f64], s: &mut [f64], z: &mut [f64]) {
 /// Solves the conic problem. `balance` enables the Mehrotra starting-point
 /// complementarity balancing (see [`starting_point`]); root solves pass `true`,
 /// branch-and-bound relaxation nodes pass `false`.
+///
+/// Certificate-acceptance contract (Task #11): if an external stop
+/// (cancel/deadline) is observed at the instant an Infeasible/Unbounded
+/// certificate would be accepted, `Timeout` wins over the certificate --
+/// discarding an already-verified proof is the conservative choice once the
+/// caller's stop request has been observed.
 pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) -> ConicResult {
     if let Err(e) = problem.validate() {
         return failed(problem, SolveStatus::NotSupported(e));
@@ -267,6 +299,13 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) 
             if farkas_val >= opts.tol * val_mag && ray_res <= opts.tol * ray_mag && zn > 0.0 {
                 let zs: Vec<f64> = z.iter().map(|v| v / zn).collect();
                 if cone::in_cone(&blk, &zs, opts.tol) {
+                    #[cfg(test)]
+                    test_record_certificate_commit();
+                    // 証明受理直前の stop check (contract: 関数 doc 参照, Task #11)。
+                    if opts.stop_requested() {
+                        status = SolveStatus::Timeout;
+                        break;
+                    }
                     let scale = (norm2(&y) + zn).max(1.0);
                     verified_infeas_cert = Some((
                         y.iter().map(|v| v / scale).collect(),
@@ -295,6 +334,13 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) 
                     gx.iter().map(|v| -v).collect()
                 };
                 if cone::in_cone(&blk, &recession, opts.tol) {
+                    #[cfg(test)]
+                    test_record_certificate_commit();
+                    // 証明受理直前の stop check (contract: 関数 doc 参照, Task #11)。
+                    if opts.stop_requested() {
+                        status = SolveStatus::Timeout;
+                        break;
+                    }
                     verified_primal_ray = Some(x.iter().map(|v| v / xn).collect());
                     status = SolveStatus::Unbounded;
                     break;
@@ -696,6 +742,143 @@ mod tests {
         assert!(!FORCE_EXPIRED_KKT_SOLVE_DEADLINE.get());
     }
     use crate::conic::ConeSpec;
+
+    /// Task #11 (キャンセル後の false Infeasible/Unbounded): `x0 <= -1` and
+    /// `x0 >= 0` is proven infeasible (mirrors `conic::tests::infeasible_lp_detected`,
+    /// called through `solve` directly instead of `solve_socp`). If cancel
+    /// races in right after cone membership is verified but before the
+    /// certificate is accepted, `Timeout` must win over `Infeasible`.
+    ///
+    /// Sentinel: reverting the `opts.stop_requested()` check right before the
+    /// Infeasible commit (this file, Farkas branch) makes this FAIL with
+    /// `Infeasible` instead of `Timeout`.
+    #[test]
+    fn cancel_race_before_infeasible_certificate_prefers_timeout() {
+        use otspot_num::sparse::CscMatrix;
+
+        CERTIFICATE_COMMIT_COUNT.with(|c| c.set(0));
+        CANCEL_AFTER_CERTIFICATE_COMMIT.with(|c| c.set(Some(1)));
+        CANCEL_SIGNAL.with(|f| f.store(false, std::sync::atomic::Ordering::Relaxed));
+
+        let g = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, 1).unwrap();
+        let problem = ConicProblem {
+            c: vec![0.0],
+            a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b: vec![],
+            g,
+            h: vec![-1.0, 0.0],
+            cone: ConeSpec { l: 2, soc: vec![] },
+        };
+        let opts = CANCEL_SIGNAL.with(|flag| ConicOptions {
+            cancel_flag: Some(std::sync::Arc::clone(flag)),
+            ..ConicOptions::default()
+        });
+        let result = solve(&problem, &opts, true);
+        CANCEL_AFTER_CERTIFICATE_COMMIT.with(|c| c.set(None));
+
+        assert_eq!(
+            result.status,
+            SolveStatus::Timeout,
+            "cancel racing in right before the Infeasible certificate commit must yield Timeout, got {:?}",
+            result.status
+        );
+    }
+
+    /// Baseline/control: same fixture, no cancel injection, direct `solve`
+    /// call (no equilibration) -- confirms the fixture reaches the Farkas
+    /// certificate branch at this exact call layer.
+    #[test]
+    fn no_cancel_still_reports_infeasible_certificate() {
+        use otspot_num::sparse::CscMatrix;
+
+        CERTIFICATE_COMMIT_COUNT.with(|c| c.set(0));
+        CANCEL_AFTER_CERTIFICATE_COMMIT.with(|c| c.set(None));
+        CANCEL_SIGNAL.with(|f| f.store(false, std::sync::atomic::Ordering::Relaxed));
+
+        let g = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, 1).unwrap();
+        let problem = ConicProblem {
+            c: vec![0.0],
+            a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b: vec![],
+            g,
+            h: vec![-1.0, 0.0],
+            cone: ConeSpec { l: 2, soc: vec![] },
+        };
+        let result = solve(&problem, &ConicOptions::default(), true);
+        assert_eq!(
+            result.status,
+            SolveStatus::Infeasible,
+            "baseline (no cancel): got {:?}",
+            result.status
+        );
+    }
+
+    /// Companion sentinel for the Unbounded (improving-ray) branch: `min -x0
+    /// s.t. x0 >= 0` is unbounded below (mirrors
+    /// `conic::tests::unbounded_lp_detected`). Cancel racing in right after
+    /// cone membership is verified must yield `Timeout`, not `Unbounded`.
+    ///
+    /// Sentinel: reverting the `opts.stop_requested()` check right before
+    /// the Unbounded commit (this file, improving-ray branch) makes this
+    /// FAIL with `Unbounded` instead of `Timeout`.
+    #[test]
+    fn cancel_race_before_unbounded_certificate_prefers_timeout() {
+        use otspot_num::sparse::CscMatrix;
+
+        CERTIFICATE_COMMIT_COUNT.with(|c| c.set(0));
+        CANCEL_AFTER_CERTIFICATE_COMMIT.with(|c| c.set(Some(1)));
+        CANCEL_SIGNAL.with(|f| f.store(false, std::sync::atomic::Ordering::Relaxed));
+
+        let g = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap();
+        let problem = ConicProblem {
+            c: vec![-1.0],
+            a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b: vec![],
+            g,
+            h: vec![0.0],
+            cone: ConeSpec { l: 1, soc: vec![] },
+        };
+        let opts = CANCEL_SIGNAL.with(|flag| ConicOptions {
+            cancel_flag: Some(std::sync::Arc::clone(flag)),
+            ..ConicOptions::default()
+        });
+        let result = solve(&problem, &opts, true);
+        CANCEL_AFTER_CERTIFICATE_COMMIT.with(|c| c.set(None));
+
+        assert_eq!(
+            result.status,
+            SolveStatus::Timeout,
+            "cancel racing in right before the Unbounded certificate commit must yield Timeout, got {:?}",
+            result.status
+        );
+    }
+
+    /// Baseline/control for the Unbounded sentinel above.
+    #[test]
+    fn no_cancel_still_reports_unbounded_certificate() {
+        use otspot_num::sparse::CscMatrix;
+
+        CERTIFICATE_COMMIT_COUNT.with(|c| c.set(0));
+        CANCEL_AFTER_CERTIFICATE_COMMIT.with(|c| c.set(None));
+        CANCEL_SIGNAL.with(|f| f.store(false, std::sync::atomic::Ordering::Relaxed));
+
+        let g = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap();
+        let problem = ConicProblem {
+            c: vec![-1.0],
+            a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b: vec![],
+            g,
+            h: vec![0.0],
+            cone: ConeSpec { l: 1, soc: vec![] },
+        };
+        let result = solve(&problem, &ConicOptions::default(), true);
+        assert_eq!(
+            result.status,
+            SolveStatus::Unbounded,
+            "baseline (no cancel): got {:?}",
+            result.status
+        );
+    }
 
     /// Per-block shift: a violated orthant row must not perturb strictly
     /// interior SOC blocks. Under a global `max`-distance shift each interior

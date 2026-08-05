@@ -196,6 +196,50 @@ thread_local! {
         const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only cancel injection for the `RayVerdict::Unbounded` early-return
+    /// stop check (Task #11): counts calls to
+    /// `test_maybe_cancel_before_unbounded_return`; once the count reaches
+    /// `CANCEL_AFTER_UNBOUNDED_RETURN_COMMIT`, flips the real `cancel_flag`
+    /// `AtomicBool` a test threads through `ConicOptions::cancel_flag`.
+    pub(super) static UNBOUNDED_RETURN_COMMIT_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    pub(super) static CANCEL_AFTER_UNBOUNDED_RETURN_COMMIT: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    /// Same pattern for the final-classification stop check.
+    pub(super) static FINAL_CLASSIFICATION_COMMIT_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    pub(super) static CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn test_maybe_cancel_before_unbounded_return(opts: &ConicOptions) {
+    let count = UNBOUNDED_RETURN_COMMIT_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if CANCEL_AFTER_UNBOUNDED_RETURN_COMMIT.with(std::cell::Cell::get) == Some(count) {
+        if let Some(flag) = &opts.cancel_flag {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+fn test_maybe_cancel_before_final_classification(opts: &ConicOptions) {
+    let count = FINAL_CLASSIFICATION_COMMIT_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(std::cell::Cell::get) == Some(count) {
+        if let Some(flag) = &opts.cancel_flag {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// Build a relaxation with per-node integer bounds `[lb_j, ub_j]`. Strict
 /// bounds are appended as orthant rows (kept contiguous before the SOC
 /// blocks); a fixed variable (`lb_j == ub_j`) becomes an equality row
@@ -396,7 +440,9 @@ pub(super) fn classify_ray_node(lb: &[f64], ub: &[f64], int_tol: f64) -> RayVerd
 ///
 /// Final status without an incumbent: `Timeout` > `MaxIterations` >
 /// `NumericalError` > `Infeasible`. With an incumbent: `Timeout` > `Optimal`
-/// (full exhaustion, no numerical failures) > `SuboptimalSolution`.
+/// (full exhaustion, no numerical failures) > `SuboptimalSolution`. A global
+/// `Unbounded`/`Infeasible` conclusion always defers to `Timeout` once an
+/// external stop is observed (Task #11), even un-raced.
 pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -> MisocpResult {
     if let Err(e) = prob
         .validate()
@@ -510,6 +556,15 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
                 // resolves which of the three cases this node is.
                 match classify_ray_node(&lb, &ub, bb.int_tol) {
                     RayVerdict::Unbounded => {
+                        #[cfg(test)]
+                        test_maybe_cancel_before_unbounded_return(opts);
+                        // 証明受理直前の stop check: 関数 doc の contract 参照
+                        // (この分岐は直接 return するため通常の node-top
+                        // チェックの機会がない, Task #11)。
+                        if opts.stop_requested() {
+                            timed_out = true;
+                            break;
+                        }
                         return MisocpResult {
                             status: SolveStatus::Unbounded,
                             objective: f64::NEG_INFINITY,
@@ -611,6 +666,9 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         }
     }
 
+    #[cfg(test)]
+    test_maybe_cancel_before_final_classification(opts);
+
     let proven = !timed_out && !node_limited && numerical_failures == 0;
 
     if incumbent_x.is_empty() {
@@ -620,6 +678,9 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
             SolveStatus::MaxIterations
         } else if numerical_failures > 0 {
             SolveStatus::NumericalError
+        } else if opts.stop_requested() {
+            // 証明受理直前の stop check: 関数 doc の contract 参照 (Task #11)。
+            SolveStatus::Timeout
         } else {
             debug_assert!(proven);
             SolveStatus::Infeasible
