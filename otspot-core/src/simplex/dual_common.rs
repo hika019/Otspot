@@ -221,6 +221,56 @@ pub(super) fn outcome_to_result(
     }
 }
 
+// Test-only observability for `lp_unbounded_ray_verified`'s two cancellation
+// checkpoints (loop-top and pre-accept). Mirrors `presolve::qp_phase2`'s
+// `PHASE2_STEPS_EXECUTED`/`PHASE2_CANCEL_AFTER_STEPS`/`PHASE2_CANCEL_SIGNAL`
+// pattern: entirely `#[cfg(test)]` -- both the definitions and every call
+// site below -- so it has zero footprint in production builds.
+//
+// `cancel_flag` is monotonic (never reset once `true`), so a plain pass/fail
+// on the function's own boolean return cannot distinguish "the loop-top
+// check caught it" from "the pre-accept check caught it": whichever
+// checkpoint runs *after* the flag flips catches it, regardless of which
+// one(s) are actually present in the code (Codex PR #31 re-review: reverting
+// either checkpoint alone left both new sentinels passing, since the other,
+// untouched checkpoint still caught the monotonic flag -- only reverting
+// both together failed). These counters make each checkpoint's own hit
+// count independently observable, so a test can assert precisely how many
+// times *that* checkpoint ran rather than inferring it from the final bool.
+#[cfg(test)]
+thread_local! {
+    static RAY_LOOP_TOP_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RAY_CANCEL_AFTER_LOOP_TOP_HITS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    static RAY_PRE_ACCEPT_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RAY_CANCEL_AFTER_PRE_ACCEPT_HITS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    static RAY_CANCEL_SIGNAL: std::sync::Arc<AtomicBool> =
+        std::sync::Arc::new(AtomicBool::new(false));
+}
+
+#[cfg(test)]
+fn test_record_ray_loop_top_hit() {
+    let hits = RAY_LOOP_TOP_HITS.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if RAY_CANCEL_AFTER_LOOP_TOP_HITS.with(std::cell::Cell::get) == Some(hits) {
+        RAY_CANCEL_SIGNAL.with(|flag| flag.store(true, Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+fn test_record_ray_pre_accept_hit() {
+    let hits = RAY_PRE_ACCEPT_HITS.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if RAY_CANCEL_AFTER_PRE_ACCEPT_HITS.with(std::cell::Cell::get) == Some(hits) {
+        RAY_CANCEL_SIGNAL.with(|flag| flag.store(true, Ordering::Relaxed));
+    }
+}
+
 /// Verify an LP `Unbounded` exit against a re-derived recession ray (symmetric
 /// to the Phase-I Farkas gate: unverified ray ⇒ honest Stalled).
 ///
@@ -267,6 +317,8 @@ pub(super) fn lp_unbounded_ray_verified(
         if options.external_stop_requested() {
             return false;
         }
+        #[cfg(test)]
+        test_record_ray_loop_top_hit();
         if in_basis[q] {
             continue;
         }
@@ -311,6 +363,8 @@ pub(super) fn lp_unbounded_ray_verified(
             // `SolveStatus::Unbounded`, bypassing the honest Stalled/Timeout
             // path an external stop is supposed to take (same class of bug as
             // the Farkas gates' pre-`return true` recheck).
+            #[cfg(test)]
+            test_record_ray_pre_accept_hit();
             if options.external_stop_requested() {
                 return false;
             }
@@ -891,170 +945,142 @@ mod tests {
     /// phase1.rs`) unconditionally map a bare `true` here straight to a hard
     /// `SolveStatus::Unbounded`.
     ///
-    /// Fixture: `m = 1`, column 0 is the identity basis (`B = [1]`, so BTRAN/
-    /// FTRAN are no-ops), and `FARKAS`-style padding -- `n_enter - 2` entirely
-    /// empty decoy columns (cost 0, so `rc = 0 >= -dual_tol` skips them via
-    /// `continue` without ever reaching the FTRAN/ray-check) -- before the
-    /// genuine ray at the last column (`a[0][last] = -1`, `c[last] = -1`,
-    /// mirroring `lp_unbounded_ray_verified_distinguishes_genuine_bounded_
-    /// and_artificial`'s minimal genuine-ray case). The `for q in 0..n_enter`
-    /// loop itself is the entire cost of this call (`n_enter` cheap iterations
-    /// dominated by the loop-top `external_stop_requested()` check this test
-    /// targets) -- long enough for a background thread to flip `cancel_flag`
-    /// mid-call, deterministically landing the cancellation before the loop
-    /// ever reaches the genuine ray column.
+    /// Deterministic, not a wall-clock race (Codex PR #31 re-review of the
+    /// original version of these two sentinels): `cancel_flag` is monotonic,
+    /// so a plain "did `verified` come back `false`" assertion cannot
+    /// distinguish which of the two checkpoints (loop-top,
+    /// `RAY_LOOP_TOP_HITS`; pre-accept, `RAY_PRE_ACCEPT_HITS`) caught it --
+    /// whichever runs *after* the flag flips catches it regardless of which
+    /// one(s) are actually present. Reverting either checkpoint alone left
+    /// the original race-based sentinels passing (reviewer's 4 experiments);
+    /// only reverting both together failed. These two tests instead assert
+    /// each checkpoint's own hit count, which *does* distinguish them: see
+    /// `RAY_LOOP_TOP_HITS`/`RAY_PRE_ACCEPT_HITS`'s doc comment above
+    /// `test_record_ray_loop_top_hit`.
     ///
-    /// Self-calibrating (not a hardcoded ms bound, which would be brittle
-    /// across machines/build profiles): measures this fixture's own
-    /// uncancelled duration first, then derives the race thread's delay from
-    /// it.
+    /// This test targets the loop-top checkpoint specifically. Fixture:
+    /// `m = 1`, column 0 is the identity basis (`B = [1]`), and
+    /// `DECOYS = 10` entirely empty non-ray columns (cost 0, so `rc = 0 >=
+    /// -dual_tol` skips each via `continue` -- `ray_ok` is never computed,
+    /// so `RAY_PRE_ACCEPT_HITS` stays 0 throughout, keeping this test's
+    /// signal isolated to the loop-top checkpoint alone). `cancel_flag`
+    /// flips deterministically right after loop-top hit `CANCEL_AFTER`
+    /// (`RAY_CANCEL_AFTER_LOOP_TOP_HITS`), a mock-clock stand-in for a real
+    /// expiring deadline/cancel arriving mid-scan.
     ///
-    /// Sentinel: reverting the `if options.external_stop_requested() { return
-    /// false; }` added at the top of the loop makes this assert `true`
-    /// instead of `false` -- the ray math itself never consults `cancel_flag`.
+    /// Sentinel: reverting the `if options.external_stop_requested() {
+    /// return false; }` at the top of the loop makes `RAY_LOOP_TOP_HITS`
+    /// climb past `CANCEL_AFTER` to all `DECOYS` (nothing stops the scan
+    /// early anymore), failing the `hits == CANCEL_AFTER` assertion.
     #[test]
-    fn lp_unbounded_ray_verified_honors_cancel_flag_during_loop_scan() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    fn lp_unbounded_ray_verified_loop_top_check_stops_scan_at_cancellation_point() {
+        use std::sync::atomic::Ordering;
         use std::sync::Arc;
-        use std::time::{Duration, Instant};
 
-        const N_ENTER: usize = 4_000_000;
+        const DECOYS: usize = 10;
+        const CANCEL_AFTER: usize = 3;
 
-        fn build_fixture() -> (CscMatrix, [usize; 1], Vec<f64>) {
-            let last = N_ENTER - 1;
-            // Only 2 real triplets: column 0 (the identity basis) and column
-            // `last` (the genuine ray). Every column in between is entirely
-            // empty -- cheap to construct, but still costs the loop its own
-            // `external_stop_requested()` check on every one of the N_ENTER
-            // iterations traversing them.
-            let rows = vec![0usize, 0usize];
-            let cols = vec![0usize, last];
-            let vals = vec![1.0_f64, -1.0_f64];
-            let a = CscMatrix::from_triplets(&rows, &cols, &vals, 1, N_ENTER).unwrap();
-            let mut c = vec![0.0_f64; N_ENTER];
-            c[last] = -1.0;
-            (a, [0], c)
-        }
+        // Column 0 = identity basis; columns 1..=DECOYS = empty decoys, no
+        // genuine ray anywhere.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, DECOYS + 1).unwrap();
+        let c = vec![0.0_f64; DECOYS + 1];
 
-        let (a, basis, c) = build_fixture();
-        let baseline_opts = SolverOptions::default();
-        let t0 = Instant::now();
-        let baseline_verified =
-            lp_unbounded_ray_verified(&a, &basis, &c, 1, N_ENTER, N_ENTER, &baseline_opts);
-        let uncancelled = t0.elapsed();
-        assert!(
-            baseline_verified,
-            "sanity: this fixture's last column must genuinely verify as an \
-             unbounded ray when uncancelled"
-        );
-        assert!(
-            uncancelled >= Duration::from_micros(200),
-            "fixture must have genuine per-call cost (measured {uncancelled:?}) \
-             for the race below to reliably land mid-call -- increase N_ENTER \
-             if this fires"
-        );
+        RAY_LOOP_TOP_HITS.with(|c| c.set(0));
+        RAY_PRE_ACCEPT_HITS.with(|c| c.set(0));
+        RAY_CANCEL_AFTER_LOOP_TOP_HITS.with(|c| c.set(Some(CANCEL_AFTER)));
+        RAY_CANCEL_AFTER_PRE_ACCEPT_HITS.with(|c| c.set(None));
+        RAY_CANCEL_SIGNAL.with(|flag| flag.store(false, Ordering::Relaxed));
 
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_setter = Arc::clone(&cancel);
-        let sleep_for = uncancelled / 4;
-        let setter = std::thread::spawn(move || {
-            std::thread::sleep(sleep_for);
-            cancel_setter.store(true, Ordering::Relaxed);
+        let opts = RAY_CANCEL_SIGNAL.with(|flag| SolverOptions {
+            cancel_flag: Some(Arc::clone(flag)),
+            ..SolverOptions::default()
         });
-        let opts = SolverOptions {
-            cancel_flag: Some(Arc::clone(&cancel)),
-            ..Default::default()
-        };
-        let verified = lp_unbounded_ray_verified(&a, &basis, &c, 1, N_ENTER, N_ENTER, &opts);
-        setter.join().unwrap();
+        let verified = lp_unbounded_ray_verified(&a, &[0], &c, 1, DECOYS + 1, DECOYS + 1, &opts);
 
-        assert!(
-            !verified,
-            "cancel_flag flipped ~{sleep_for:?} into a call whose uncancelled \
-             duration measured {uncancelled:?} must prevent the loop from ever \
-             reaching (and accepting) the genuine ray at the last column"
+        RAY_CANCEL_AFTER_LOOP_TOP_HITS.with(|c| c.set(None));
+        let loop_top_hits = RAY_LOOP_TOP_HITS.with(std::cell::Cell::get);
+        let pre_accept_hits = RAY_PRE_ACCEPT_HITS.with(std::cell::Cell::get);
+
+        assert!(!verified, "no genuine ray exists in this fixture");
+        assert_eq!(
+            pre_accept_hits, 0,
+            "no column here ever satisfies ray_ok, so the pre-accept checkpoint \
+             must never fire -- confirms this test's signal is isolated to the \
+             loop-top checkpoint"
+        );
+        assert_eq!(
+            loop_top_hits,
+            CANCEL_AFTER,
+            "cancel_flag flips right after loop-top hit {CANCEL_AFTER}, so the \
+             loop-top check must stop the scan there (not continue through the \
+             remaining {} decoys), got {loop_top_hits} hits",
+            DECOYS - CANCEL_AFTER
         );
     }
 
-    /// Companion to the loop-scan sentinel above, targeting the *other* gap:
-    /// a cancellation arriving *during* the FTRAN/ray-check of the column
-    /// that ultimately verifies -- after the loop-top check for that specific
-    /// iteration already passed, but before the function commits to `true`.
+    /// Companion to the loop-top sentinel above, targeting the pre-accept
+    /// checkpoint specifically: a cancellation arriving exactly when
+    /// `ray_ok` first becomes `true` for some column, before the function
+    /// commits to `return true` for it.
     ///
-    /// Fixture: `m` large (identity basis, `B = I`, so BTRAN/FTRAN cost is
-    /// dominated by `SparseVec::to_dense`'s O(m) materialization and the
-    /// subsequent O(m) `ray_ok` scan, not by any real linear-algebra work),
-    /// `n_enter = m + 1` with columns `0..m` forming the identity basis
-    /// (skipped via `in_basis[q]` before ever reaching `a.column(q)`, so
-    /// their own traversal cost is negligible next to the accepting column's
-    /// O(m) FTRAN-materialize-and-scan) and column `m` the genuine ray
-    /// (`a[0][m] = -1`, `c[m] = -1`, same shape as the loop-scan test above).
+    /// Fixture: `m = 1`, column 0 the identity basis, column 1 a genuine ray
+    /// (`a[0][1] = -1`, `c[1] = -1`, same shape as
+    /// `lp_unbounded_ray_verified_distinguishes_genuine_bounded_and_
+    /// artificial`'s minimal case) -- reached immediately after column 0
+    /// (`in_basis[0]` skips it before any FTRAN). `RAY_CANCEL_AFTER_PRE_
+    /// ACCEPT_HITS = Some(1)` flips `cancel_flag` as a side effect of
+    /// `ray_ok` becoming `true` for the *first* (only) candidate, landing
+    /// squarely between that candidate's own loop-top check (already passed,
+    /// flag still `false` then) and the accept decision.
     ///
-    /// Sentinel: reverting the `if options.external_stop_requested() { return
-    /// false; }` added right before `return true` (after `ray_ok` is computed)
-    /// makes this assert `true` instead of `false`.
+    /// Sentinel: reverting the `if options.external_stop_requested() {
+    /// return false; }` right before `return true` (after `ray_ok` is
+    /// computed) makes `verified` come back `true` instead of `false` --
+    /// `RAY_PRE_ACCEPT_HITS` reaching 1 is unaffected either way (it's
+    /// recorded before the reverted line), so only the boolean discriminates
+    /// this specific checkpoint, which is exactly what reverting removes.
     #[test]
-    fn lp_unbounded_ray_verified_honors_cancel_flag_before_accepting_ray() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    fn lp_unbounded_ray_verified_pre_accept_check_rejects_ray_at_cancellation_point() {
+        use std::sync::atomic::Ordering;
         use std::sync::Arc;
-        use std::time::{Duration, Instant};
 
-        const M: usize = 2_000_000;
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, -1.0], 1, 2).unwrap();
+        let c = vec![0.0_f64, -1.0];
 
-        fn build_fixture() -> (CscMatrix, Vec<usize>, Vec<f64>) {
-            let n_enter = M + 1;
-            let mut rows: Vec<usize> = (0..M).collect();
-            let mut cols: Vec<usize> = (0..M).collect();
-            let mut vals: Vec<f64> = vec![1.0; M];
-            rows.push(0);
-            cols.push(M);
-            vals.push(-1.0);
-            let a = CscMatrix::from_triplets(&rows, &cols, &vals, M, n_enter).unwrap();
-            let basis: Vec<usize> = (0..M).collect();
-            let mut c = vec![0.0_f64; n_enter];
-            c[M] = -1.0;
-            (a, basis, c)
-        }
+        RAY_LOOP_TOP_HITS.with(|c| c.set(0));
+        RAY_PRE_ACCEPT_HITS.with(|c| c.set(0));
+        RAY_CANCEL_AFTER_LOOP_TOP_HITS.with(|c| c.set(None));
+        RAY_CANCEL_AFTER_PRE_ACCEPT_HITS.with(|c| c.set(Some(1)));
+        RAY_CANCEL_SIGNAL.with(|flag| flag.store(false, Ordering::Relaxed));
 
-        let (a, basis, c) = build_fixture();
-        let n_enter = M + 1;
-        let baseline_opts = SolverOptions::default();
-        let t0 = Instant::now();
-        let baseline_verified =
-            lp_unbounded_ray_verified(&a, &basis, &c, M, n_enter, n_enter, &baseline_opts);
-        let uncancelled = t0.elapsed();
-        assert!(
-            baseline_verified,
-            "sanity: this fixture's column M must genuinely verify as an \
-             unbounded ray when uncancelled"
-        );
-        assert!(
-            uncancelled >= Duration::from_micros(200),
-            "fixture must have genuine per-call cost (measured {uncancelled:?}) \
-             for the race below to reliably land mid-call -- increase M if \
-             this fires"
-        );
-
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_setter = Arc::clone(&cancel);
-        let sleep_for = uncancelled / 4;
-        let setter = std::thread::spawn(move || {
-            std::thread::sleep(sleep_for);
-            cancel_setter.store(true, Ordering::Relaxed);
+        let opts = RAY_CANCEL_SIGNAL.with(|flag| SolverOptions {
+            cancel_flag: Some(Arc::clone(flag)),
+            ..SolverOptions::default()
         });
-        let opts = SolverOptions {
-            cancel_flag: Some(Arc::clone(&cancel)),
-            ..Default::default()
-        };
-        let verified = lp_unbounded_ray_verified(&a, &basis, &c, M, n_enter, n_enter, &opts);
-        setter.join().unwrap();
+        let verified = lp_unbounded_ray_verified(&a, &[0], &c, 1, 2, 2, &opts);
 
+        RAY_CANCEL_AFTER_PRE_ACCEPT_HITS.with(|c| c.set(None));
+        let loop_top_hits = RAY_LOOP_TOP_HITS.with(std::cell::Cell::get);
+        let pre_accept_hits = RAY_PRE_ACCEPT_HITS.with(std::cell::Cell::get);
+
+        assert_eq!(
+            pre_accept_hits, 1,
+            "column 1's ray_ok must genuinely evaluate true (reaching the \
+             pre-accept checkpoint) for this test to exercise anything -- \
+             confirms the fixture's premise, independent of cancellation"
+        );
+        assert_eq!(
+            loop_top_hits, 2,
+            "both column 0 (in_basis, skipped) and column 1 (the ray) must \
+             reach the loop-top checkpoint normally before cancel_flag flips -- \
+             confirms the flip lands at the pre-accept checkpoint specifically, \
+             not any loop-top check (RAY_CANCEL_AFTER_LOOP_TOP_HITS is unset)"
+        );
         assert!(
             !verified,
-            "cancel_flag flipped ~{sleep_for:?} into a call whose uncancelled \
-             duration measured {uncancelled:?} (the O(m) FTRAN-materialize/\
-             ray_ok scan for column M) must prevent it from accepting an \
-             otherwise-valid ray"
+            "cancel_flag flips as a side effect of ray_ok becoming true for \
+             column 1's own pre-accept checkpoint -- must prevent accepting \
+             this otherwise-valid ray"
         );
     }
 }
