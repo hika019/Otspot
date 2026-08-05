@@ -31,7 +31,14 @@ PYO3_CLASS_EXTRAS = frozenset({"__module__"})
 # attaches `__int__` for the C-like int cast.
 PYO3_EQ_INT_EXTRAS = PYO3_CLASS_EXTRAS | {"__int__"}
 
-CLASS_NAMES_WITH_METHODS = ["Model", "Variable", "Expression", "QuadExpr", "ModelResult"]
+CLASS_NAMES_WITH_METHODS = [
+    "Model",
+    "Variable",
+    "Expression",
+    "QuadExpr",
+    "ModelResult",
+    "Constraint",
+]
 
 
 def _split_python_field(field: str) -> tuple[str, list[str]]:

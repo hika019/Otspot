@@ -8,7 +8,7 @@ the manifest against the built module, but not against this file).
 
 from __future__ import annotations
 
-from typing import overload
+from typing import NoReturn, overload
 
 __version__: str
 
@@ -149,6 +149,14 @@ class Variable:
     arithmetic operators (`+`, `-`, `*`, unary `-`) to build expressions.
     """
 
+    # Solver-owned handle: only `Model.add_var`/`add_int_var`/`add_binary_var`
+    # produce real instances (no `#[new]` on the Rust side, so `Variable()`
+    # raises `TypeError` at runtime). `__init__` typed `NoReturn` (rather than
+    # omitted, which would silently inherit `object.__init__`'s real `-> None`
+    # and let mypy accept `Variable()` as well-typed) makes mypy flag any
+    # direct-construction call site instead of type-checking it silently.
+    # Same pattern on `Expression`/`QuadExpr`/`Constraint`/`ModelResult` below.
+    def __init__(self) -> NoReturn: ...
     def pow2(self) -> QuadExpr: ...
     def leq(self, rhs: Variable | Expression | float) -> Constraint: ...
     def geq(self, rhs: Variable | Expression | float) -> Constraint: ...
@@ -184,6 +192,7 @@ class Expression:
     use `expr = expr + x.pow2()` for that specific combination.
     """
 
+    def __init__(self) -> NoReturn: ...
     def leq(self, rhs: Variable | Expression | float) -> Constraint: ...
     def geq(self, rhs: Variable | Expression | float) -> Constraint: ...
     def eq_constraint(self, rhs: Variable | Expression | float) -> Constraint: ...
@@ -218,6 +227,7 @@ class QuadExpr:
     since `QuadExpr` is already the "widest" DSL type).
     """
 
+    def __init__(self) -> NoReturn: ...
     def is_linear(self) -> bool: ...
     def __add__(self, other: Variable | Expression | QuadExpr | float) -> QuadExpr: ...
     def __radd__(self, other: float) -> QuadExpr: ...
@@ -232,10 +242,16 @@ class Constraint:
     """Opaque; construct via `Variable`/`Expression`'s `.leq()`/`.geq()`/
     `.eq_constraint()` and pass directly to `Model.add_constraint`."""
 
+    def __init__(self) -> NoReturn: ...
+
 class ModelResult:
     # PyO3-side: `#[getter]` only, no `#[setter]` (otspot-py/src/result.rs) --
     # `@property` (not a plain typed attribute) so mypy also rejects
     # `result.status = ...` as read-only, matching the runtime contract.
+    # `__init__` typed `NoReturn`: only `Model.solve()` produces real
+    # instances (no `#[new]` on the Rust side), see `Variable`'s docstring
+    # above for why this is spelled out rather than omitted.
+    def __init__(self) -> NoReturn: ...
     @property
     def status(self) -> SolveStatus: ...
     @property
