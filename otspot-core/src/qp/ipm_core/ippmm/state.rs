@@ -41,37 +41,19 @@ pub(super) const REG_LIMIT_STEP: f64 = 1e-3;
 pub(super) const REG_LIMIT_INIT_QP: f64 = 5e-8;
 pub(super) const REG_LIMIT_INIT_LP: f64 = 5e-10;
 
-/// KKT 行列正則化 (`rho_matrix`/`delta_matrix`) の下限。
+/// LP 経路の KKT 行列正則化 (`rho_matrix` / `delta_matrix`) の下限。
 ///
 /// **値も適用範囲も実測較正であり、原理的導出ではない。** 値は 2e700955 が
 /// 撤去した `DEFAULT_IPM_DELTA_MIN` と同じ 1e-8 で、長期運用で suite 全体に
 /// 対して検証されていた床をそのまま戻している (新規較正ではない)。
 ///
-/// 機構として実測で閉じているのはここまで: `pmm.rho`/`pmm.delta` は PMM の
-/// 不動点を決める proximal 係数と KKT 行列の正則化を兼ねる。後者は残差が 0 なら
-/// 方向も 0 なので不動点を動かさず、Newton 方向の条件数だけを決める。2e700955 が
-/// 後者を前者の floor (`REG_LIMIT_INIT_LP` = 5e-10、適応引下げ後 5e-13) に
-/// 追随させた結果、ken-13 で ‖dy‖ が 1e4 → 1e17 へ発散し α が 1e-15 へ潰れて
-/// Stalled になった。`iter.rs` の該当 2 行だけを revert すると 137s / Stalled /
-/// rel_err 2.06e-8 が再現する。LDL 健全性プローブは全 iter で rel_resid ≤ 1e-8 /
-/// retry 0 回なので、因子化誤差ではなく系そのものの発散である。
+/// 床が要る理由 (ken-13 = LP): 2e700955 が ρ/δ を `REG_LIMIT_INIT_LP`
+/// (5e-10、適応引下げ後 5e-13) まで追随させた結果、‖dy‖ が 1e4 → 1e17 へ発散し
+/// α が 1e-15 へ潰れて Stalled になった (137s / rel_err 2.06e-8)。LDL 健全性
+/// プローブは全 iter で rel_resid ≤ 1e-8 / retry 0 回なので、因子化誤差ではなく
+/// (1,1) が `ρI`、等式行の (2,2) が `−δI` だけになった系そのものの発散である。
 ///
-/// **PASS/FAIL を分けている量は特定できていない。** ken-13 での 4-arm 実測:
-///
-/// | `rho_matrix` | `delta_matrix` | 積 ρ·δ | 結果 |
-/// |---|---|---|---|
-/// | `max(ρ,1e-8)` | `max(δ,1e-8)` | ~1e-16 | PASS 5.2s |
-/// | `ρ` (床なし) | `max(δ,1e-8)` | ~5e-21 | PASS 4.5s |
-/// | `max(ρ,1e-8)` | `δ` (床なし) | ~5e-21 | PASS 10.4s |
-/// | `ρ` | `δ` | ~2.5e-25 | FAIL 137s |
-///
-/// 分けているのは積 `ρ·δ` ではない (中央 2 arm は積が等しく共に PASS)。
-/// 「ρ か δ の少なくとも一方が 1e-8 級」が観測に整合する唯一の記述だが、
-/// これは説明ではなく要約である。以前ここに書かれていた
-/// `ρ·δ ≳ ε_machine` (order で `√ε_machine`) という条件数由来の導出は、
-/// 上表の中央 2 arm を誤って FAIL と予測するため撤去した。
-///
-/// 値の感度も単調でない (LP heavy sentinel。dfl001 / ken-13 以外は不変):
+/// 値の感度は単調でない (LP heavy sentinel。dfl001 / ken-13 以外は不変):
 /// `1e-14` → dfl001 PASS / ken-13 FAIL、`1e-9` → dfl001 FAIL、`3e-9` → 双方 PASS、
 /// `1e-8` → 双方 PASS、`1.49e-8` (=√ε_machine) → dfl001 FAIL。obj は全点で truth
 /// と一致し、揺れるのは Optimal 証明の可否だけ。実測安全窓は `[3e-9, 1e-8]`
@@ -79,42 +61,37 @@ pub(super) const REG_LIMIT_INIT_LP: f64 = 5e-10;
 /// **この定数を動かす変更は LP heavy sentinel (dfl001 / ken-13) の再ベンチ必須。**
 pub(super) const KKT_PIVOT_FLOOR: f64 = 1e-8;
 
-/// 行列正則化の floor を Gershgorin の λ_min(Q) 下界でゲートする。
+/// KKT 行列正則化の床は **LP 経路 (`Q ≡ 0`) にだけ** 掛ける。
 ///
-/// `pmm.rho`/`pmm.delta` は 2 つの役割を兼ねている:
-///  1. proximal 係数 — `r_d_pmm = r_d − ρ(x−x_ref)`, `r_p_pmm = r_p − δ(y−y_ref)`。
-///     PMM の不動点を決めるので `reg_limit` (→ `REG_LIMIT_MIN`) まで下げてよい。
-///  2. 行列正則化 — Newton 方向の条件数だけを決め、不動点には影響しない。
+/// 床の根拠は「Q が無いので (1,1) ブロックが `ρI` そのものになり、ρ が
+/// `REG_LIMIT_MIN` まで落ちると系が発散する」という LP 固有の事情
+/// (`KKT_PIVOT_FLOOR` の doc)。Q があれば (1,1) は `Q+ρI` なので同じ議論は立たない。
 ///
-/// ゲートの根拠は 2 つの較正点の実測であって導出ではない:
-///  * LP (ken-13、Q ≡ 0) は床が要る (`KKT_PIVOT_FLOOR` の 4-arm 表を参照)。
-///  * LISWET7 (Q は単位行列、eps=1e-8) は床があると `dy_i·δ = r_p_i` の恒等式で
-///    nr_p が 9.8e-8 に凍結する (`liswet7_pfn_breaks_delta_matrix_floor_at_eps_1e8`)。
+/// 1babe8bc はこのゲートを Gershgorin の `λ_min(Q)` 下界で行っていたが、
+/// 下界は Q の対角に 1 つでもゼロ行があれば `≤ 0` になるため QP へも LP 相当の
+/// 満額の床が掛かっていた (Maros-Meszaros 138 問中 106 問)。その結果 QP 側で
+/// 床が行列にだけ入り、PMM 残差 (`r_d − ρ_prox(x−x_ref)`) と食い違って残差が
+/// `ρ_matrix·‖dx‖` に張り付いた。実測 (QGFRDXPN): `nr_d` が
+/// `1e-8 × ‖dx‖_∞ = 1e-8 × 11.83 = 1.183e-7` で 50 反復凍結 → residual_stall →
+/// STALLED / pfn=1.3e-5。QSHELL も 1babe8bc では STALLED だが、そちらはこの
+/// 張り付きではなく「床で軌跡が変わり 3 attempt が bit 同一 IterationLimit に
+/// なる → 延長 attempt が予算を食い切る」という別経路 (`attempt.rs` の
+/// `charged_iterations`)。どちらもゲートを `Q ≡ 0` に絞れば 8565fe5c の軌跡に戻る。
 ///
-/// 両者を分ける観測可能量として「Q が (1,1) ブロック `Q+ρI` に供給するピボット
-/// 質量」を採り、供給分だけ床を減額する。(1,1) については Q が ρ に対して加算的
-/// なのでこの形に意味がある。
+/// **なぜ QP 側で「行列と PMM 残差の両方に床を掛けて整合させる」を採らないか**
+/// (すべて実測、obj は truth と一致し Optimal 証明の可否だけが揺れる):
+/// ρ・δ 双方の残差側にも掛ける → dfl001 258s Stalled。δ の残差側だけ掛ける
+/// → dfl001 274s Stalled。δ の残差側に掛け ρ の床を全廃 → dfl001 は通るが
+/// QPILOTNO が `ipm_reg_retries=98` で 13.7s STALLED。
 ///
-/// **既知の限界 (設計上の再検討は別 task)**:
-///  * (2,2) ブロックは `−(Σ+δI)` で Q は構造的に入らない。それでも δ 側の床まで
-///    Q 質量でクレジットしているのは、ρ 側だけに適用すると LISWET7 の
-///    `delta_matrix` に 1e-8 が復活し上記 sentinel が FAIL するため。導出ではなく
-///    較正上の妥協である。
-///  * 比較対象は Ruiz scaling 後の Q なのでゲートはスケール依存。BOYD1 は
-///    `λ_min(Q_raw) = 6.0` が `λ_min(Q_scaled) = 1.03e-7` まで縮み、僅差で床が
-///    消える。Maros-Meszaros 138 問の走査では `λ_min ≤ 0` が 106 問 (床は満額)、
-///    `≥ 1e-8` が 32 問 (床は消失)、中間帯 `0 < λ_min < 1e-8` は 0 問 —
-///    実質 2 値ゲートで、減額の連続性は unit test でしか行使されていない。
-///  * 床が消える側の問題群 (BOYD1 / HS118 / HS21 / QPCBOEI1 / QPCBOEI2 / KSIP) に
-///    無条件 1e-8 を掛ける arm との A/B では live regression は観測されていない
-///    (BOYD1 のみ iters 40 vs 43、他はビット一致)。
-pub(super) fn matrix_reg_floor_for(q_lambda_min_lower: f64) -> f64 {
-    // `f64::max` は NaN 側を捨てるので、下界が NaN / 負 (indefinite) なら質量 0 =
-    // floor 全量。ただし indefinite 時に実際に使われる ρ は
-    // `factorize.rs` の `rho_matrix.max(inertia_correction)` (和ではなく max) なので、
-    // `inertia_correction > KKT_PIVOT_FLOOR` の問題ではここで返す満額の床は届かない。
-    let q_pivot = q_lambda_min_lower.max(0.0);
-    (KKT_PIVOT_FLOOR - q_pivot).max(REG_LIMIT_MIN)
+/// LISWET7 (Q = I) は元々 Gershgorin ゲートで床が消えていたので本変更で不変
+/// (`liswet7_pfn_breaks_delta_matrix_floor_at_eps_1e8`)。
+pub(super) fn matrix_reg_floor_for_lp(is_lp: bool) -> f64 {
+    if is_lp {
+        KKT_PIVOT_FLOOR
+    } else {
+        REG_LIMIT_MIN
+    }
 }
 
 /// σ=s/y が非有限 (NaN/Inf) のときの fallback 上限。旧 `1/options.ipm.delta_min`
@@ -213,43 +190,29 @@ mod matrix_reg_floor_tests {
         assert!((3e-9..=1e-8).contains(&KKT_PIVOT_FLOOR));
     }
 
-    /// LP (Q ≡ 0 → Gershgorin 下界 0): (1,1) ピボットを ρ が単独で担うので
-    /// floor は `KKT_PIVOT_FLOOR` 全量。実測 (ken-13): この床を外すと
-    /// ‖dy‖ が 1e17 まで発散し α が 1e-15 に潰れて Stalled。
+    /// LP (Q ≡ 0): (1,1) ブロックが `ρI` そのものになるので床を全量掛ける。
+    /// 実測 (ken-13): この床を外すと ‖dy‖ が 1e17 まで発散し α が 1e-15 に
+    /// 潰れて Stalled。
     #[test]
-    fn zero_hessian_gets_full_pivot_floor() {
-        assert_eq!(matrix_reg_floor_for(0.0), KKT_PIVOT_FLOOR);
+    fn lp_gets_the_full_pivot_floor() {
+        assert_eq!(matrix_reg_floor_for_lp(true), KKT_PIVOT_FLOOR);
     }
 
-    /// Q が自前で床以上の質量を持つ (LISWET7 の Q = I → 下界 1.0): floor 不要。
-    /// 実測: ここで `KKT_PIVOT_FLOOR` を課すと nr_p が δ·|dy| で 9.8e-8 に凍結する。
+    /// QP (Q ≠ 0) には床を掛けない。掛けると行列側と PMM 残差側の ρ が食い違い、
+    /// 残差が `ρ_matrix·‖dx‖` に張り付く (QGFRDXPN 実測 1.183e-7 / 50 反復凍結)。
     #[test]
-    fn positive_definite_hessian_needs_no_floor() {
-        assert_eq!(matrix_reg_floor_for(1.0), REG_LIMIT_MIN);
-        assert_eq!(matrix_reg_floor_for(KKT_PIVOT_FLOOR), REG_LIMIT_MIN);
+    fn qp_gets_no_pivot_floor() {
+        assert_eq!(matrix_reg_floor_for_lp(false), REG_LIMIT_MIN);
     }
 
-    /// Q が部分的にしか供給しないなら不足分だけを補う (連続な切り分け)。
-    #[test]
-    fn partial_hessian_mass_is_credited_against_the_floor() {
-        let half = KKT_PIVOT_FLOOR / 2.0;
-        assert_eq!(matrix_reg_floor_for(half), KKT_PIVOT_FLOOR - half);
-    }
-
-    /// indefinite Q (下界が負) は質量 0 として扱う: 負値を引いて床を
-    /// 押し上げてはならない (`inertia_correction` が別途 PSD 化を担う)。
-    #[test]
-    fn indefinite_hessian_lower_bound_is_clamped_to_zero() {
-        assert_eq!(matrix_reg_floor_for(-5.0), KKT_PIVOT_FLOOR);
-        assert_eq!(matrix_reg_floor_for(f64::NAN), KKT_PIVOT_FLOOR);
-        assert_eq!(matrix_reg_floor_for(f64::NEG_INFINITY), KKT_PIVOT_FLOOR);
-    }
-
-    /// 返り値は常に proximal 側の絶対下限以上 (0 に潰れない)。
+    /// 返り値は常に `reg_limit` の絶対下限以上 (0 に潰れない)。
     #[test]
     fn floor_never_drops_below_reg_limit_min() {
-        for q in [0.0, 1e-30, 1e30, f64::INFINITY] {
-            assert!(matrix_reg_floor_for(q) >= REG_LIMIT_MIN, "q={q}");
+        for is_lp in [true, false] {
+            assert!(
+                matrix_reg_floor_for_lp(is_lp) >= REG_LIMIT_MIN,
+                "is_lp={is_lp}"
+            );
         }
     }
 }

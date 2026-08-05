@@ -984,12 +984,10 @@ otspot-core	qp::global::tree::tests::pop_returns_smallest_lower_bound_first	acti
 otspot-core	qp::global::tree::tests::pushed_popped_counters_track	active
 otspot-core	qp::global::tree::tests::tie_break_fifo_seq	active
 otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::floor_never_drops_below_reg_limit_min	active
-otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::indefinite_hessian_lower_bound_is_clamped_to_zero	active
 otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::kkt_pivot_floor_matches_the_long_validated_value	active
 otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::kkt_pivot_floor_sits_inside_the_measured_safe_window	active
-otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::partial_hessian_mass_is_credited_against_the_floor	active
-otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::positive_definite_hessian_needs_no_floor	active
-otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::zero_hessian_gets_full_pivot_floor	active
+otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::lp_gets_the_full_pivot_floor	active
+otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::qp_gets_no_pivot_floor	active
 otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::old_hundred_x_margin_gate_would_have_stayed_closed_for_liswet7	active
 otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_does_not_fire_once_already_converged	active
 otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_does_not_fire_while_still_making_progress	active
@@ -1063,6 +1061,7 @@ otspot-core	qp::ipm_solver::attempt::tests::converged_termination_does_not_break
 otspot-core	qp::ipm_solver::attempt::tests::dual_lane_true_stall_breaks_at_third_occurrence::dual_lane_true_stall_breaks_at_expected_call_count	active
 otspot-core	qp::ipm_solver::attempt::tests::empty_col_mask_noop_proof_in_finalize	active
 otspot-core	qp::ipm_solver::attempt::tests::empty_col_qp_solves_optimal_not_false_demoted	active
+otspot-core	qp::ipm_solver::attempt::tests::failed_extension_keeps_no_presolve_fallback_reachable::stalled_extension_charges_only_what_it_consumed	active
 otspot-core	qp::ipm_solver::attempt::tests::fallback_runner_receives_user_eps_after_tolerance_clear	active
 otspot-core	qp::ipm_solver::attempt::tests::finalize_outcome_dual_sign_notproven_demotes_to_suboptimal	active
 otspot-core	qp::ipm_solver::attempt::tests::finalize_outcome_dual_sign_valid_returns_optimal	active
@@ -1073,7 +1072,8 @@ otspot-core	qp::ipm_solver::attempt::tests::guard_qp_optimal_passthrough_non_opt
 otspot-core	qp::ipm_solver::attempt::tests::guard_qp_optimal_passthrough_valid	active
 otspot-core	qp::ipm_solver::attempt::tests::identical_attempt_early_break::identical_consecutive_attempts_break_early	active
 otspot-core	qp::ipm_solver::attempt::tests::ipm_finalize_outcome_reduced_costs_empty	active
-otspot-core	qp::ipm_solver::attempt::tests::iter_guard_charges_per_attempt_cap_on_failed_attempt	active
+otspot-core	qp::ipm_solver::attempt::tests::iter_guard_charges_actual_consumption::exhausted_budget_stops_the_attempt_loop	active
+otspot-core	qp::ipm_solver::attempt::tests::iter_guard_charges_actual_consumption::unspent_budget_carries_to_the_next_attempt	active
 otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_extends_with_deadline::does_not_extend_when_best_is_genuinely_stalled	active
 otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_extends_with_deadline::does_not_extend_without_deadline	active
 otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_extends_with_deadline::extends_once_past_max_iter_per_attempt_when_deadline_present	active
@@ -2423,7 +2423,7 @@ otspot-num	linalg::amd::tests::test_inverse_perm	active
 otspot-num	linalg::amd::tests::test_permute_inv_permute_roundtrip	active
 otspot-num	linalg::amd::tests::test_permute_sym_upper_swap	active
 otspot-num	linalg::amd::tests::test_permute_vec	active
-otspot-num	linalg::gershgorin::tests::all_zero_hessian_bound_is_zero	active
+otspot-num	linalg::gershgorin::tests::all_zero_hessian_needs_no_shift	active
 otspot-num	linalg::gershgorin::tests::asymmetric_value_pair_takes_max_abs	active
 otspot-num	linalg::gershgorin::tests::diagonal_negative_returns_abs_min_diag	active
 otspot-num	linalg::gershgorin::tests::diagonal_psd_returns_zero	active
@@ -2435,11 +2435,9 @@ otspot-num	linalg::gershgorin::tests::lower_triangular_only_zero_diag_bilinear_m
 otspot-num	linalg::gershgorin::tests::mixed_asymmetric_matches_full_symmetric	active
 otspot-num	linalg::gershgorin::tests::mixed_asymmetric_no_pair_canonicalizes	active
 otspot-num	linalg::gershgorin::tests::mixed_zero_and_negative_diag	active
-otspot-num	linalg::gershgorin::tests::negative_side_agrees_with_psd_shift	active
 otspot-num	linalg::gershgorin::tests::no_op_proof_lower_tri_symmetrize_required	active
 otspot-num	linalg::gershgorin::tests::no_op_proof_mixed_asymmetric_canonicalize_required	active
-otspot-num	linalg::gershgorin::tests::offdiag_reduces_the_bound	active
-otspot-num	linalg::gershgorin::tests::positive_side_is_reported_not_clamped	active
+otspot-num	linalg::gershgorin::tests::offdiag_within_diag_needs_no_shift	active
 otspot-num	linalg::gershgorin::tests::psd_with_large_offdiag_returns_positive_shift_false_alarm	active
 otspot-num	linalg::gershgorin::tests::pure_bilinear_zero_diag_off_one	active
 otspot-num	linalg::gershgorin::tests::three_layouts_agree_on_indefinite_q	active
@@ -2831,7 +2829,7 @@ otspot::diag_qp_warm_start_smoke	warm_start_30pct_speedup_smoke	active
 otspot::diag_qp_warm_start_smoke	warm_start_degenerate_inputs_handled	active
 otspot::diag_qp_warm_start_smoke	warm_start_propagates_through_presolve_reduction	active
 otspot::diag_qp_warm_start_smoke	warm_start_propagates_through_q_diag_scaling	active
-otspot::diag_qplib_9002_obj	qplib_9002_solver_does_not_regress_or_diverge	active
+otspot::diag_qplib_9002_obj	qplib_9002_objective_and_optimal_claim_are_independently_checked	active
 otspot::diag_simplex_bound_flip	sentinel_bfrt_reduces_pivots_on_bound_rich_lp	active
 otspot::diag_simplex_bound_flip	sentinel_probe_counter_proves_wiring_live	active
 otspot::diag_simplex_bound_flip	sentinel_table_driven_step_size_increases_with_bounds	active
@@ -3078,6 +3076,8 @@ otspot::parse_objsense	qps_duplicate_section_is_error	active
 otspot::parse_objsense	qps_objsense_max_negates_objective	active
 otspot::parse_objsense	qps_objsense_min_unchanged	active
 otspot::parse_objsense	qps_unknown_section_is_error	active
+otspot::pmm_reg_floor_consistency_sentinel	qgfrdxpn_converges_when_the_pivot_floor_is_limited_to_lp	active
+otspot::pmm_reg_floor_consistency_sentinel	qshell_reaches_optimal_through_the_no_presolve_fallback	active
 otspot::postsolve_krylov_ir_gate	gate_skips_krylov_ir_when_already_converged	active
 otspot::proptest_fuzz	prop_nonneg_lp_not_infeasible	active
 otspot::proptest_fuzz	prop_small_lp_no_panic	active
