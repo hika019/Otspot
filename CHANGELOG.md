@@ -4,6 +4,9 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+- `otspot-py`: Python 要件を 3.11+ に引き上げ (abi3-py311)
+- otspot-core: unbounded ray 証明ループも cancel 未チェックだった問題を修正
+  (Farkas 修正の横展開)。QP presolve phase-2 末尾工程の cancel 網羅も強化
 - `otspot-py` crate (PyO3/maturin) を追加し、Otspot を Python ライブラリとして
   利用可能に。Rust API と同名・同構造の Model DSL、`api_manifest.json` +
   `cargo public-api` スナップショットによる API parity 保証、GitHub Actions
