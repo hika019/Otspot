@@ -27,7 +27,8 @@ use otspot_core::sparse::CscMatrix;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Index;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 static NEXT_MODEL_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -81,6 +82,12 @@ pub struct Model {
     threads: Option<usize>,
     /// 目的関数定数オフセット (QP: 1/2 x^T Q x + c^T x + offset, LP: c^T x + offset)
     obj_offset: f64,
+    /// Shared cooperative-cancellation flag threaded into the underlying
+    /// solver's `SolverOptions::cancel_flag` / `ConicOptions::cancel_flag`
+    /// (checked at the same cadence as the wall-clock deadline in every
+    /// LP/QP/MIP loop, and in the convex-QCQP bridge). `None` (default): no
+    /// cancellation hook, `solve()` runs to its normal stop condition.
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Model {
@@ -104,6 +111,7 @@ impl Model {
             presolve: None,
             threads: None,
             obj_offset: 0.0,
+            cancel_flag: None,
         }
     }
 
@@ -138,6 +146,33 @@ impl Model {
     /// Presolve の有効/無効を設定する（デフォルト: true）。
     pub fn set_presolve(&mut self, flag: bool) -> &mut Self {
         self.presolve = Some(flag);
+        self
+    }
+
+    /// Install a shared cooperative-cancellation flag: setting it to `true`
+    /// from another thread makes the next check point inside the running
+    /// `solve()` stop early, the same way a wall-clock deadline expiry does
+    /// (`solve()` returns `Err(ModelError::Timeout)` /
+    /// `Err(ModelError::SolveError(SolveError::Timeout))`, whichever the
+    /// underlying route already uses for deadline expiry). `solve()` itself
+    /// never spawns threads or touches OS signals; this is a plumbing hook
+    /// for callers that need to interrupt a solve from outside its own
+    /// thread -- e.g. `otspot-py`'s `Model.solve()`, which polls
+    /// `Python::check_signals` on a worker-thread boundary to turn a Ctrl-C
+    /// during a long solve into `KeyboardInterrupt` instead of leaving it
+    /// queued until the solve returns on its own.
+    ///
+    /// Covers the LP, QP, MIP, and convex-QCQP-bridge solve routes (every
+    /// route reachable from this DSL's public API). The nonconvex spatial
+    /// B&B (`otspot_core::conic::GlobalOptions`) and MISOCP B&B
+    /// (`otspot_core::conic::misocp::BbOptions`) sub-routes inside the QCQP
+    /// path have no `cancel_flag` field in `otspot-core` today (wall-clock
+    /// `deadline` only) -- a pre-existing gap in those two option types,
+    /// unrelated to this hook and not reachable from this DSL either way
+    /// (quadratic/SOC constraints have no `add_qc_le`/`add_soc_le` binding
+    /// in `otspot-py`; see `api_manifest.json`'s `out_of_scope`).
+    pub fn set_cancel_flag(&mut self, flag: Arc<AtomicBool>) -> &mut Self {
+        self.cancel_flag = Some(flag);
         self
     }
 
@@ -225,6 +260,45 @@ impl Model {
         self.variables
             .get(var.index)
             .map(|v| v.name.as_str())
+            .ok_or_else(|| {
+                ModelError::InvalidInput(format!(
+                    "variable index {} out of range (model has {} variables)",
+                    var.index,
+                    self.variables.len()
+                ))
+            })
+    }
+
+    /// Return the integrality requirement of a variable as given to
+    /// [`add_var`](Self::add_var)/[`add_int_var`](Self::add_int_var)/
+    /// [`add_binary_var`](Self::add_binary_var).
+    ///
+    /// # Panics
+    /// Panics if `var` belongs to a different model or if `var.index` is out
+    /// of range. Use [`try_var_kind`](Self::try_var_kind) for a non-panicking
+    /// checked variant.
+    pub fn var_kind(&self, var: Variable) -> VarKind {
+        assert_eq!(
+            var.model_id, self.model_id,
+            "variable belongs to a different model"
+        );
+        self.variables
+            .get(var.index)
+            .map(|v| v.kind)
+            .expect("variable index out of range")
+    }
+
+    /// Return the integrality requirement of a variable, returning an error
+    /// instead of panicking. See [`var_kind`](Self::var_kind).
+    pub fn try_var_kind(&self, var: Variable) -> Result<VarKind, ModelError> {
+        if var.model_id != self.model_id {
+            return Err(ModelError::InvalidInput(
+                "variable belongs to a different model".to_string(),
+            ));
+        }
+        self.variables
+            .get(var.index)
+            .map(|v| v.kind)
             .ok_or_else(|| {
                 ModelError::InvalidInput(format!(
                     "variable index {} out of range (model has {} variables)",
@@ -575,6 +649,7 @@ impl Model {
         if let Some(n) = self.threads {
             lp_opts.threads = n;
         }
+        lp_opts.cancel_flag = self.cancel_flag.clone();
         let solver_result = otspot_core::lp::solve_lp_with(&problem, &lp_opts);
 
         // SolverResult の dual/rc/slack は extract_dual_info によって
@@ -1139,6 +1214,7 @@ impl Model {
         let opts = otspot_core::conic::ConicOptions {
             tol,
             deadline,
+            cancel_flag: self.cancel_flag.clone(),
             ..otspot_core::conic::ConicOptions::default()
         };
         let bb_opts = otspot_core::conic::BbOptions {
@@ -1589,9 +1665,13 @@ impl Model {
         if let Some(tol) = self.tolerance {
             opts.tolerance = Some(tol);
         }
+        if let Some(flag) = self.presolve {
+            opts.presolve = flag;
+        }
         if let Some(n) = self.threads {
             opts.threads = n;
         }
+        opts.cancel_flag = self.cancel_flag.clone();
         let qp_result = otspot_core::qp::solve_qp_with(&qp_problem, &opts);
         let qp_stats = qp_result.stats.clone();
 
@@ -1696,11 +1776,29 @@ impl Model {
         if let Some(tol) = self.tolerance {
             opts.tolerance = Some(tol);
         }
+        if let Some(flag) = self.presolve {
+            opts.presolve = flag;
+        }
         if let Some(n) = self.threads {
             opts.threads = n;
         }
+        opts.cancel_flag = self.cancel_flag.clone();
         let cfg = otspot_core::options::MipConfig::default();
 
+        // `opts.presolve` above reaches both branches, but its B&B-search-level
+        // effect differs: `MiqpProblem::skip_node_presolve()` is `false`
+        // (the default -- MIQP's IPM per-node solve genuinely relies on
+        // presolve's Ruiz scaling for conditioning), so `opts.presolve` is
+        // honored at every node. `MilpProblem::skip_node_presolve()` is
+        // unconditionally `true` (each B&B node re-solves the same LP with
+        // only bounds tightened, so re-running presolve per node is
+        // redundant and would drop the propagated warm-start basis) --
+        // `prepare_mip_search` (otspot-core's `mip::mod`) forces node-level
+        // presolve off there regardless of `opts.presolve`. Copying the flag
+        // here anyway keeps MILP's construction structurally consistent with
+        // LP/QP/MIQP and correct for direct (non-Model) callers who solve a
+        // `MilpProblem` with an empty `integer_vars` (falls through to a
+        // plain LP solve that does honor `opts.presolve`).
         let result = if let Some(ref q_orig) = self.quadratic_objective.clone() {
             // MIQP: convex QP relaxation per node.
             let qp = self.build_qp_problem(c, bounds, q_orig.clone())?;
@@ -1709,9 +1807,6 @@ impl Model {
             otspot_core::mip::solve_miqp(&miqp, &opts, &cfg)
         } else {
             // MILP: LP relaxation per node.
-            if let Some(flag) = self.presolve {
-                opts.presolve = flag;
-            }
             let lp = LpProblem::new_general(c, a, b, constraint_types, bounds, self.name.clone())
                 .map_err(map_lp_build_err)?;
             let milp = otspot_core::mip::MilpProblem::new(lp, integer_vars.clone())
@@ -2065,9 +2160,14 @@ impl ModelResult {
     /// Get the primal value of a variable.
     ///
     /// # Panics
-    /// Panics if the variable index is out of range. Use [`try_value`](Self::try_value)
-    /// to handle this case gracefully.
+    /// Panics if `var` belongs to a different model or if its index is out of
+    /// range (mirrors [`Model::var_name`](crate::Model::var_name)'s contract).
+    /// Use [`try_value`](Self::try_value) to handle this case gracefully.
     pub fn value(&self, var: Variable) -> f64 {
+        assert_eq!(
+            var.model_id, self.model_id,
+            "variable belongs to a different model"
+        );
         self.solution[var.index]
     }
 
@@ -2116,6 +2216,10 @@ impl ModelResult {
 impl Index<Variable> for ModelResult {
     type Output = f64;
     fn index(&self, var: Variable) -> &f64 {
+        assert_eq!(
+            var.model_id, self.model_id,
+            "variable belongs to a different model"
+        );
         &self.solution[var.index]
     }
 }
@@ -2206,7 +2310,7 @@ mod tests {
         classify_status_error, normalize_mip_solution, validate_qp_dual_len, Model, ModelError,
         SolutionProof, SolveError,
     };
-    use crate::variable::Variable;
+    use crate::variable::{VarKind, Variable};
     use otspot_core::problem::SolveStatus;
 
     // concurrent solver での許容誤差（IPM/IP-PMM 並列実行）
@@ -2265,6 +2369,25 @@ mod tests {
         assert!(result[y] >= -1e-9);
         assert!(result[z] >= -1e-9);
         assert!(result.objective_value > 0.0, "objective should be positive");
+    }
+
+    /// A preset `cancel_flag` must stop the LP route the same way a
+    /// wall-clock deadline expiry does (`ModelError::Timeout`), mirroring
+    /// `otspot_core::lp`'s own `cancel_flag: Some(AtomicBool::new(true))`
+    /// sentinel. No-op proof: removing `set_cancel_flag`'s wiring into
+    /// `lp_opts.cancel_flag` (model.rs's LP solve path) makes this LP solve
+    /// `Optimal` instead of erroring.
+    #[test]
+    fn test_cancel_flag_preset_stops_lp_solve() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let (mut model, _x, _y) = basic_model();
+        model.set_cancel_flag(Arc::new(AtomicBool::new(true)));
+        let err = model.solve().unwrap_err();
+        assert!(
+            matches!(err, ModelError::Timeout),
+            "expected Timeout from a preset cancel_flag, got {err:?}"
+        );
     }
 
     #[test]
@@ -2549,6 +2672,106 @@ mod tests {
             matches!(err, ModelError::Timeout),
             "expected Timeout, got {:?}",
             err
+        );
+    }
+
+    /// QP counterpart of `test_cancel_flag_preset_stops_lp_solve`: a preset
+    /// `cancel_flag` must stop the QP route the same way `set_timeout`
+    /// above does. No-op proof: removing the QP path's
+    /// `opts.cancel_flag = self.cancel_flag.clone()` wiring makes this QP
+    /// solve `Optimal` instead of erroring.
+    #[test]
+    fn test_cancel_flag_preset_stops_qp_solve() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let mut model = Model::new("qp_cancel");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        model.minimize(x * x + y * y + (-4.0) * x + (-4.0) * y);
+        model.set_cancel_flag(Arc::new(AtomicBool::new(true)));
+
+        let err = model.solve().unwrap_err();
+        assert!(
+            matches!(err, ModelError::Timeout),
+            "expected Timeout from a preset cancel_flag, got {:?}",
+            err
+        );
+    }
+
+    /// A QP with `n-2` trivially-fixed variables (`lb == ub`) bulking out an
+    /// otherwise tiny 2-variable QP: presolve's fixed-variable elimination
+    /// reduces the actual IPM problem to ~2 variables, while `presolve=false`
+    /// leaves the IPM to factor/iterate over the full `n`-variable KKT
+    /// system every time. Independent oracle: min x^2+y^2-6x-6y s.t. x+y<=4,
+    /// x,y in [0,10] -- unconstrained optimum (x,y)=(3,3) violates x+y<=4, so
+    /// the constrained optimum sits on that boundary; substituting y=4-x
+    /// gives f(x) = 2x^2-8x-8, minimized at x=2 (y=2), f(2) = -16.
+    ///
+    /// `Model::solve_qp_internal` used to build its `SolverOptions` without
+    /// ever copying `self.presolve` into it (Codex PR #31 review, item 1) --
+    /// `set_presolve(false)` was silently ignored, and presolve ran regardless.
+    ///
+    /// Wall-clock *ratio*, not an absolute timeout: an absolute-timeout
+    /// version was reviewer-measured flaky on a slower/loaded (1 vCPU, ~3x
+    /// slowdown) host, where even the presolved "on" regime missed the fixed
+    /// window. Switched to the same machine-speed-independent design
+    /// `test_solve_releases_the_gil` (otspot-py) uses: solve both regimes to
+    /// completion and compare wall time as a ratio, roughly constant across
+    /// machines even as absolute times scale together.
+    ///
+    /// Measured ratios (`off / on`): 7.8x (dev-writing machine, `--profile
+    /// dev`), 4.9-5.6x (reviewer's slower/loaded host). `> 2.5x` sits
+    /// comfortably below both.
+    ///
+    /// Sentinel: temporarily removing `solve_qp_internal`'s
+    /// `opts.presolve = flag` wiring makes `presolve=false` run in the same
+    /// time as `presolve=on` (ratio ~1x) -- fails the ratio assertion.
+    #[test]
+    fn test_set_presolve_false_reaches_qp_solve_path() {
+        let n = 16000usize;
+        let build = |presolve: bool| -> Model {
+            let mut m = Model::new("qp_presolve_wiring");
+            m.set_presolve(presolve);
+            for i in 0..(n - 2) {
+                m.add_var(&format!("fixed{i}"), 5.0, 5.0);
+            }
+            let x = m.add_var("x", 0.0, 10.0);
+            let y = m.add_var("y", 0.0, 10.0);
+            m.add_constraint((x + y).leq(4.0));
+            m.minimize(x.pow2() + y.pow2() - 6.0 * x - 6.0 * y);
+            m
+        };
+
+        let mut model_on = build(true);
+        let t0 = std::time::Instant::now();
+        let r_on = model_on.solve().unwrap();
+        let on_elapsed = t0.elapsed();
+        assert_eq!(r_on.status, SolveStatus::Optimal);
+        assert!(
+            (r_on.objective_value - (-16.0)).abs() < 1e-3,
+            "presolve=on objective: expected -16.0, got {}",
+            r_on.objective_value
+        );
+
+        let mut model_off = build(false);
+        let t1 = std::time::Instant::now();
+        let r_off = model_off.solve().unwrap();
+        let off_elapsed = t1.elapsed();
+        assert_eq!(r_off.status, SolveStatus::Optimal);
+        assert!(
+            (r_off.objective_value - (-16.0)).abs() < 1e-3,
+            "presolve=off objective: expected -16.0, got {}",
+            r_off.objective_value
+        );
+
+        let ratio = off_elapsed.as_secs_f64() / on_elapsed.as_secs_f64();
+        assert!(
+            ratio > 2.5,
+            "presolve=off/on wall-time ratio was {ratio:.2}x (on={on_elapsed:?}, \
+             off={off_elapsed:?}) -- expected off to be markedly slower than on \
+             if set_presolve(false) actually reaches the QP solver (measured \
+             4.9-7.8x across machines/profiles); got a ratio too close to 1x, \
+             consistent with presolve running regardless of the setting"
         );
     }
 
@@ -3158,6 +3381,87 @@ mod tests {
         let _ = model.var_name(forged);
     }
 
+    // ModelResult::value / Index<Variable> must reject cross-model variables
+    // the same way var_name does. Before this fix, a variable from another
+    // model with a coincidentally in-range index silently read that other
+    // model's *own* solution slot: `model_b.add_var(..)` at index 0 fixed to
+    // 2.0, `result_b.value(x_a)` (x_a from model_a, also index 0) returned
+    // 2.0 with no error. Reverting the `assert_eq!` in `value`/`index` makes
+    // both tests below FAIL (no panic).
+    #[test]
+    #[should_panic(expected = "variable belongs to a different model")]
+    fn model_result_value_cross_model_in_range_panics() {
+        let mut model_a = Model::new("a");
+        let x_a = model_a.add_var("x_in_a", 0.0, 1.0); // index=0
+        model_a.minimize(x_a);
+        let result_a = model_a.solve().unwrap();
+        assert_close(result_a.value(x_a), 0.0, "sanity: model_a solves to 0");
+
+        let mut model_b = Model::new("b");
+        let y_b = model_b.add_var("y_in_b", 2.0, 2.0); // index=0, fixed at 2.0
+        model_b.minimize(y_b);
+        let result_b = model_b.solve().unwrap();
+        assert_close(result_b.value(y_b), 2.0, "sanity: model_b solves to 2.0");
+
+        // x_a (model_a, index 0) passed into model_b's result: must panic,
+        // not silently return model_b's own index-0 value (2.0).
+        let _ = result_b.value(x_a);
+    }
+
+    #[test]
+    #[should_panic(expected = "variable belongs to a different model")]
+    fn model_result_index_cross_model_in_range_panics() {
+        let mut model_a = Model::new("a");
+        let x_a = model_a.add_var("x_in_a", 0.0, 1.0);
+        model_a.minimize(x_a);
+        let _result_a = model_a.solve().unwrap();
+
+        let mut model_b = Model::new("b");
+        let y_b = model_b.add_var("y_in_b", 2.0, 2.0);
+        model_b.minimize(y_b);
+        let result_b = model_b.solve().unwrap();
+
+        let _ = result_b[x_a];
+    }
+
+    // var_kind: independent oracle (each kind hand-labeled at add_* call
+    // site), plus the same cross-model/out-of-range guards as var_name.
+    #[test]
+    fn var_kind_matches_add_call_site() {
+        let mut model = Model::new("kinds");
+        let c = model.add_var("c", 0.0, 1.0);
+        let i = model.add_int_var("i", 0.0, 5.0);
+        let b = model.add_binary_var("b");
+
+        assert_eq!(model.var_kind(c), VarKind::Continuous);
+        assert_eq!(model.var_kind(i), VarKind::Integer);
+        assert_eq!(model.var_kind(b), VarKind::Binary);
+        assert_eq!(model.try_var_kind(c).unwrap(), VarKind::Continuous);
+    }
+
+    #[test]
+    #[should_panic(expected = "variable belongs to a different model")]
+    fn var_kind_cross_model_panics() {
+        let mut model_a = Model::new("a");
+        let x_a = model_a.add_binary_var("x_in_a"); // index=0
+
+        let model_b = Model::new("b");
+        let _ = model_b.var_kind(x_a);
+    }
+
+    #[test]
+    fn try_var_kind_cross_model_returns_err() {
+        let mut model_a = Model::new("a");
+        let x_a = model_a.add_binary_var("x_in_a");
+
+        let model_b = Model::new("b");
+        let err = model_b.try_var_kind(x_a).unwrap_err();
+        assert!(
+            matches!(err, ModelError::InvalidInput(_)),
+            "expected InvalidInput for cross-model var, got {err:?}"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // set_timeout validation (already implemented; table-driven sentinel)
     // No-op'ing validate_timeout makes negative/NaN tests succeed → FAILs.
@@ -3224,6 +3528,7 @@ mod tests {
 #[cfg(test)]
 mod mip_model_tests {
     use super::{Model, ModelError, SolveError};
+    use otspot_core::problem::SolveStatus;
 
     const EPS: f64 = 1e-4;
 
@@ -3237,6 +3542,106 @@ mod mip_model_tests {
         let r = m.solve().unwrap();
         assert!((r.objective() - 1.0).abs() < EPS, "obj={}", r.objective());
         assert!((r[x] - 1.0).abs() < EPS, "x={}", r[x]);
+    }
+
+    /// MIP counterpart of the LP/QP `cancel_flag` sentinels: a preset
+    /// `cancel_flag` must stop the MILP route the same way a wall-clock
+    /// deadline expiry does. No-op proof: removing the MIP path's
+    /// `opts.cancel_flag = self.cancel_flag.clone()` wiring makes this
+    /// solve return its normal `Optimal` MILP result instead of erroring.
+    #[test]
+    fn model_cancel_flag_preset_stops_mip_solve() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let mut m = Model::new("milp_cancel");
+        let x = m.add_int_var("x", 0.0, 5.0);
+        m.add_constraint((2.0 * x).leq(3.0));
+        m.maximize(x);
+        m.set_cancel_flag(Arc::new(AtomicBool::new(true)));
+
+        let err = m.solve().unwrap_err();
+        assert!(
+            matches!(err, ModelError::Timeout),
+            "expected Timeout from a preset cancel_flag, got {:?}",
+            err
+        );
+    }
+
+    /// MIQP counterpart of `test_set_presolve_false_reaches_qp_solve_path`
+    /// (`mod tests`): same n-2-fixed-variables-plus-tiny-QP construction,
+    /// with `x` made an integer variable to route through
+    /// `solve_mip_internal`'s MIQP branch (`otspot_core::mip::solve_miqp`)
+    /// instead of the pure-QP path. Independent oracle: same problem as the
+    /// QP version but with `x` integer -- the unconstrained-QP optimum
+    /// (x,y)=(2,2) (see that test's derivation) is already integral in x,
+    /// so the MIQP optimum matches the QP relaxation's: -16.0.
+    ///
+    /// Unlike MILP (`MilpProblem::skip_node_presolve()` is unconditionally
+    /// `true` -- node presolve is always forced off during B&B, since
+    /// re-running it per node would drop the warm-start basis), `MiqpProblem`
+    /// does not override `skip_node_presolve` (MIQP's IPM per-node solve
+    /// relies on presolve's Ruiz scaling), so `opts.presolve` is honored at
+    /// every B&B node -- `solve_mip_internal`'s MIQP branch silently
+    /// ignoring `self.presolve` (Codex PR #31 review, item 1) was real.
+    ///
+    /// Wall-clock *ratio*, not an absolute timeout -- see the QP version of
+    /// this test for why an absolute-timeout design is machine-speed-
+    /// dependent and was found flaky on a slower/loaded host. Same fix:
+    /// solve both regimes to completion and compare wall time as a ratio.
+    ///
+    /// Measured ratio (`off / on`): 7.9x (dev-writing machine); `> 2.5x`
+    /// (same threshold as the QP version) sits comfortably below that.
+    ///
+    /// Sentinel: reverting the MIQP branch's `opts.presolve` wiring (folding
+    /// it back into the MILP-only `else` branch) makes `presolve=false` run
+    /// in the same time as `presolve=on` (ratio ~1x) -- fails the assertion.
+    #[test]
+    fn test_set_presolve_false_reaches_miqp_solve_path() {
+        let n = 16000usize;
+        let build = |presolve: bool| -> Model {
+            let mut m = Model::new("miqp_presolve_wiring");
+            m.set_presolve(presolve);
+            for i in 0..(n - 2) {
+                m.add_var(&format!("fixed{i}"), 5.0, 5.0);
+            }
+            let x = m.add_int_var("x", 0.0, 10.0);
+            let y = m.add_var("y", 0.0, 10.0);
+            m.add_constraint((x + y).leq(4.0));
+            m.minimize(x.pow2() + y.pow2() - 6.0 * x - 6.0 * y);
+            m
+        };
+
+        let mut model_on = build(true);
+        let t0 = std::time::Instant::now();
+        let r_on = model_on.solve().unwrap();
+        let on_elapsed = t0.elapsed();
+        assert_eq!(r_on.status, SolveStatus::Optimal);
+        assert!(
+            (r_on.objective_value - (-16.0)).abs() < 1e-3,
+            "presolve=on objective: expected -16.0, got {}",
+            r_on.objective_value
+        );
+
+        let mut model_off = build(false);
+        let t1 = std::time::Instant::now();
+        let r_off = model_off.solve().unwrap();
+        let off_elapsed = t1.elapsed();
+        assert_eq!(r_off.status, SolveStatus::Optimal);
+        assert!(
+            (r_off.objective_value - (-16.0)).abs() < 1e-3,
+            "presolve=off objective: expected -16.0, got {}",
+            r_off.objective_value
+        );
+
+        let ratio = off_elapsed.as_secs_f64() / on_elapsed.as_secs_f64();
+        assert!(
+            ratio > 2.5,
+            "presolve=off/on wall-time ratio was {ratio:.2}x (on={on_elapsed:?}, \
+             off={off_elapsed:?}) -- expected off to be markedly slower than on \
+             if set_presolve(false) actually reaches the MIQP B&B (measured \
+             ~7.9x on the dev-writing machine); got a ratio too close to 1x, \
+             consistent with presolve running regardless of the setting"
+        );
     }
 
     #[test]

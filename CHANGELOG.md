@@ -2,6 +2,32 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+- `otspot-py`: Python 要件を 3.11+ に引き上げ (abi3-py311)
+- otspot-core: unbounded ray 証明ループも cancel 未チェックだった問題を修正
+  (Farkas 修正の横展開)。QP presolve phase-2 末尾工程の cancel 網羅も強化
+- `otspot-py` crate (PyO3/maturin) を追加し、Otspot を Python ライブラリとして
+  利用可能に。Rust API と同名・同構造の Model DSL、`api_manifest.json` +
+  `cargo public-api` スナップショットによる API parity 保証、GitHub Actions
+  `python` job (maturin build → pytest → mypy) を含む
+- otspot-model: `ModelResult::value`/`Index<Variable>` が cross-model の
+  `Variable` を検査せず別 model の値を誤返却するバグを修正。`Model::var_kind`
+  (`try_var_kind` 含む) を新設
+- `Expression`/`QuadExpr` に `+=` (`__iadd__`) を追加し、蓄積ループの
+  O(n²) クローンコストを回避
+- `Model.solve()` 中の Ctrl-C (SIGINT) が `KeyboardInterrupt` を即座に送出する
+  よう修正 (`Model::set_cancel_flag` 新設 + worker thread 化)。otspot-core の
+  Farkas 証明書検証ループが `deadline`/`cancel_flag` 未チェックだった真因も修正
+  (挙動変更: `timeout_secs` 設定時、Infeasible 判定寸前だった問題が Timeout
+  になり得る)。ポーリング間隔を適応 backoff + Condvar 化し、小型 solve への
+  固定 latency 床 (旧: 10ms 固定) を解消
+- otspot-model: `set_presolve(false)` が QP/MIQP 経路では無視されていたバグを
+  修正 (LP/MILP のみ反映されていた)。`Expression`/`QuadExpr` の `+=` が
+  自己エイリアス代入 (`expr += expr`) で panic するバグを修正。QP presolve
+  phase-2 の等式制約簡約ループが `cancel_flag` 未チェックだった真因を修正
+  (途中打ち切り時に未検証行を誤って冗長判定する退行も併せて修正)
+
 ## [0.7.4] - 2026-07-31
 
 MILP/simplex の性能改善 (MIPLIB small 5/20→7/20) とステータス誠実化、solver 基盤の otspot-num crate 分離を中心としたリリース。

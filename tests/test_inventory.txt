@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3076 testcases, 26 ignored
+# totals: 3099 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -186,6 +186,7 @@ otspot-core	linalg::tests::ipm_options_control_kkt_memory_budget	active
 otspot-core	linalg::tests::kkt_config_default_matches_ipm_options_default	active
 otspot-core	lp::tests::bigm_nonzero_lb_objective_double_count	active
 otspot-core	lp::tests::bounded_nonzero_lb_objective_correct	active
+otspot-core	lp::tests::farkas_certificate_probe_loop_honors_cancel_flag_preset	active
 otspot-core	lp::tests::invalid_options_rejected_at_lp_entry	active
 otspot-core	lp::tests::le_only_nonzero_lb_objective_correct	active
 otspot-core	lp::tests::lp_empty_box_lb_gt_ub_is_infeasible	active
@@ -622,9 +623,15 @@ otspot-core	presolve::qp_phase2::tests::equality_constraint_qr_runs_at_boundary_
 otspot-core	presolve::qp_phase2::tests::equality_constraint_qr_skip_at_boundary_m_eq_2n	active
 otspot-core	presolve::qp_phase2::tests::failed_constraint_rebuild_keeps_phase1_problem_intact	active
 otspot-core	presolve::qp_phase2::tests::phase2_preserves_cross_terms_at_every_objective_unit_scale	active
+otspot-core	presolve::qp_phase2::tests::test_cancellable_rechecks_after_work_not_just_before	active
+otspot-core	presolve::qp_phase2::tests::test_cancellable_runs_work_when_never_cancelled	active
+otspot-core	presolve::qp_phase2::tests::test_cancellable_skips_work_when_preset_before_call	active
 otspot-core	presolve::qp_phase2::tests::test_constraint_precond_scales_large_rows	active
+otspot-core	presolve::qp_phase2::tests::test_equality_constraint_qr_mid_loop_cancel_aborts_without_dropping_rows	active
 otspot-core	presolve::qp_phase2::tests::test_equality_constraint_qr_redundant_removal	active
+otspot-core	presolve::qp_phase2::tests::test_run_qp_presolve_phase2_honors_preset_cancel_flag	active
 otspot-core	presolve::qp_phase2::tests::test_run_qp_presolve_phase2_no_crash	active
+otspot-core	presolve::qp_phase2::tests::test_run_qp_presolve_phase2_tail_stops_at_cancellation_point	active
 otspot-core	presolve::qp_postsolve::shape_tests::postsolve_qp_rejects_short_reduced_costs	active
 otspot-core	presolve::qp_postsolve::shape_tests::postsolve_qp_rejects_short_reduced_solution	active
 otspot-core	presolve::qp_postsolve::tests::test_compute_qx_at_symmetric_q	active
@@ -1482,6 +1489,8 @@ otspot-core	simplex::dual_advanced::phase1::tests::crash_reduces_num_artificial_
 otspot-core	simplex::dual_advanced::phase1::tests::crash_xb_negative_falls_back_to_identity	active
 otspot-core	simplex::dual_advanced::phase1::tests::farkas_direction_certified_accepts_valid_direction	active
 otspot-core	simplex::dual_advanced::phase1::tests::farkas_direction_not_certified_when_aty_positive	active
+otspot-core	simplex::dual_advanced::phase1::tests::farkas_infeasibility_certified_strategy1_honors_cancel_flag_before_accepting	active
+otspot-core	simplex::dual_advanced::phase1::tests::farkas_infeasibility_certified_strategy2_honors_cancel_flag_before_accepting	active
 otspot-core	simplex::dual_advanced::phase1::tests::fresh_factor_deadline_failure_is_timeout	active
 otspot-core	simplex::dual_advanced::phase1::tests::fresh_factor_failure_never_uses_stale_positive_artificial_as_proof	active
 otspot-core	simplex::dual_advanced::phase1::tests::fresh_factor_internal_error_fails_fast	active
@@ -1549,6 +1558,8 @@ otspot-core	simplex::dual_common::tests::dual_vars_identity_basis_returns_c_b	ac
 otspot-core	simplex::dual_common::tests::dual_vars_into_matches_allocating_and_is_reuse_safe	active
 otspot-core	simplex::dual_common::tests::dual_vars_permuted_basis_uses_basis_indexing	active
 otspot-core	simplex::dual_common::tests::lp_unbounded_ray_verified_distinguishes_genuine_bounded_and_artificial	active
+otspot-core	simplex::dual_common::tests::lp_unbounded_ray_verified_loop_top_check_stops_scan_at_cancellation_point	active
+otspot-core	simplex::dual_common::tests::lp_unbounded_ray_verified_pre_accept_check_rejects_ray_at_cancellation_point	active
 otspot-core	simplex::dual_common::tests::lp_unbounded_ray_verified_rejects_ray_that_increases_basic_artificial	active
 otspot-core	simplex::dual_common::tests::made_progress_threshold_boundary	active
 otspot-core	simplex::dual_common::tests::made_progress_with_floor_protects_near_zero_best	active
@@ -1606,6 +1617,8 @@ otspot-core	simplex::primal::cycle_perturbation_tests::selective_perturbation_de
 otspot-core	simplex::primal::eta_atomicity_tests::rejected_eta_leaves_standard_primal_state_unchanged	active
 otspot-core	simplex::primal::farkas_gate_tests::empty_cert_with_expired_deadline_yields_timeout	active
 otspot-core	simplex::primal::farkas_gate_tests::empty_cert_without_deadline_yields_max_iterations	active
+otspot-core	simplex::primal::farkas_gate_tests::extract_farkas_certificate_strategy1_honors_cancel_flag_before_accepting	active
+otspot-core	simplex::primal::farkas_gate_tests::extract_farkas_certificate_strategy2_honors_cancel_flag_before_accepting	active
 otspot-core	simplex::primal::farkas_gate_tests::extract_farkas_discriminates_witness_from_degenerate	active
 otspot-core	simplex::primal::farkas_gate_tests::verified_cert_yields_infeasible	active
 otspot-core	simplex::primal::phase1_artificial_preference_tests::degenerate_transportation_phase1_finds_optimum	active
@@ -2226,6 +2239,7 @@ otspot-model	model::conic_dsl_tests::soc_with_all_linear_constraint_kinds_and_fi
 otspot-model	model::conic_dsl_tests::socp_zero_timeout_returns_timeout_error	active
 otspot-model	model::mip_model_tests::model_add_int_var_maximize_branches	active
 otspot-model	model::mip_model_tests::model_binary_knapsack	active
+otspot-model	model::mip_model_tests::model_cancel_flag_preset_stops_mip_solve	active
 otspot-model	model::mip_model_tests::model_convex_miqp_branches_to_integer_optimum	active
 otspot-model	model::mip_model_tests::model_integer_infeasible_errors	active
 otspot-model	model::mip_model_tests::model_integer_unbounded_errors	active
@@ -2256,6 +2270,7 @@ otspot-model	model::mip_model_tests::test_quad_state_invariants_transition_table
 otspot-model	model::mip_model_tests::test_quad_state_solve_outcome_table	active
 otspot-model	model::mip_model_tests::test_reminimize_constant_not_double_counted	active
 otspot-model	model::mip_model_tests::test_sentinel_obj_offset_non_finite_rejected	active
+otspot-model	model::mip_model_tests::test_set_presolve_false_reaches_miqp_solve_path	active
 otspot-model	model::qcqp_model_raw_objective_tests::panics_on_dimension_mismatch	active
 otspot-model	model::tests::add_int_var_lb_gt_ub_defers_error_to_solve	active
 otspot-model	model::tests::add_var_lb_gt_ub_defers_error_to_solve	active
@@ -2264,10 +2279,14 @@ otspot-model	model::tests::classify_status_error_typed_variants	active
 otspot-model	model::tests::mip_solution_normalization_rejects_invalid_solver_output	active
 otspot-model	model::tests::miqp_nonconvex_q_returns_nonconvex_error	active
 otspot-model	model::tests::model_result_clone	active
+otspot-model	model::tests::model_result_index_cross_model_in_range_panics	active
+otspot-model	model::tests::model_result_value_cross_model_in_range_panics	active
 otspot-model	model::tests::qp_dual_length_mismatch_is_internal_error_not_prefix_truncation	active
 otspot-model	model::tests::set_timeout_invalid_defers_error	active
 otspot-model	model::tests::solution_proof_mapping_preserves_unproven_statuses	active
 otspot-model	model::tests::test_basic_lp_3var_3con	active
+otspot-model	model::tests::test_cancel_flag_preset_stops_lp_solve	active
+otspot-model	model::tests::test_cancel_flag_preset_stops_qp_solve	active
 otspot-model	model::tests::test_equality_constraint	active
 otspot-model	model::tests::test_infeasible	active
 otspot-model	model::tests::test_lp_maximize_dual_and_reduced_costs_are_oriented_to_user_problem	active
@@ -2284,6 +2303,7 @@ otspot-model	model::tests::test_model_qp_timeout	active
 otspot-model	model::tests::test_model_qp_unreachable_tolerance_errs_stalled	active
 otspot-model	model::tests::test_no_objective_error	active
 otspot-model	model::tests::test_result_index_and_value_agree	active
+otspot-model	model::tests::test_set_presolve_false_reaches_qp_solve_path	active
 otspot-model	model::tests::test_unbounded	active
 otspot-model	model::tests::test_variable_bounds	active
 otspot-model	model::tests::try_add_int_var_returns_err_for_invalid_bounds	active
@@ -2294,9 +2314,12 @@ otspot-model	model::tests::try_set_timeout_returns_err_for_invalid	active
 otspot-model	model::tests::try_value_cross_model_returns_err	active
 otspot-model	model::tests::try_value_out_of_range_same_model_returns_err	active
 otspot-model	model::tests::try_value_valid_returns_ok	active
+otspot-model	model::tests::try_var_kind_cross_model_returns_err	active
 otspot-model	model::tests::try_var_name_err_cross_model	active
 otspot-model	model::tests::try_var_name_err_index_out_of_range	active
 otspot-model	model::tests::try_var_name_ok_same_model	active
+otspot-model	model::tests::var_kind_cross_model_panics	active
+otspot-model	model::tests::var_kind_matches_add_call_site	active
 otspot-model	model::tests::var_name_cross_model_in_range_panics	active
 otspot-model	model::tests::var_name_is_retained	active
 otspot-model	model::tests::var_name_regression_unchecked_still_works	active

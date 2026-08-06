@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "otspot"
+description = "Python bindings for otspot — LP (Revised Simplex) and QP (Interior Point / Mehrotra predictor-corrector) solver"
+readme = "README.md"
+license = { text = "AGPL-3.0-only" }
+requires-python = ">=3.11"
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.maturin]
+module-name = "otspot"
