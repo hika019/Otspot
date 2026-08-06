@@ -29,8 +29,8 @@ use otspot_num::sparse::CscMatrix;
 
 #[cfg(test)]
 thread_local! {
-    /// Test-only cancel injection for `solve_socp`'s post-unscale backstop
-    /// (Task #11): counts calls to `test_maybe_cancel_after_ipm_solve`
+    /// Test-only cancel injection for `solve_socp`'s post-unscale backstop:
+    /// counts calls to `test_maybe_cancel_after_ipm_solve`
     /// (invoked right after `ipm::solve` returns, before
     /// `Equilibrator::unscale_result`); once the count reaches
     /// `CANCEL_AFTER_POST_SOLVE_COMMIT`, flips the real `cancel_flag`
@@ -293,7 +293,7 @@ pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     #[cfg(test)]
     test_maybe_cancel_after_ipm_solve(opts);
     let mut res = eq.unscale_result(problem, opts.tol, res);
-    // API 境界 backstop (Task #11): equilibration/unscale/再検証
+    // API 境界 backstop: equilibration/unscale/再検証
     // (`unscale_result`) は `ipm::solve` 内の受理直前チェックより後の、追加の
     // 実処理時間を持つ窓 -- ここで外部停止が観測されていれば、certificate が
     // original-space 再検証を通っていても Timeout を優先する (正直化: 検証済み

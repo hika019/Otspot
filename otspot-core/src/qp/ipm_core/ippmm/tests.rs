@@ -723,7 +723,7 @@ fn test_box_only_nondiag_q_multi_pattern() {
     }
 }
 
-/// 矛盾する bound (x>=1 かつ x<=0) の infeasible 1変数 QP。Task #11: consecutive
+/// 矛盾する bound (x>=1 かつ x<=0) の infeasible 1変数 QP。consecutive
 /// fire が `MIN_CONSECUTIVE_INFEAS` に達し証明を確定する直前に cancel_flag が
 /// 立った場合、Infeasible ではなく Timeout を返すこと。
 ///

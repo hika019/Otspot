@@ -357,7 +357,7 @@ fn infeasible_lp_detected() {
     assert_eq!(res.status, SolveStatus::Infeasible, "{res:?}");
 }
 
-/// Task #11 (キャンセル後の false Infeasible/Unbounded): `solve_socp`'s
+/// (キャンセル後の false Infeasible/Unbounded): `solve_socp`'s
 /// post-unscale backstop sentinel. Cancel racing in between `ipm::solve`
 /// returning (already `SolveStatus::Infeasible`, no in-loop race) and
 /// `Equilibrator::unscale_result` finishing must still yield `Timeout`.
@@ -1030,7 +1030,7 @@ fn misocp_unresolved_nodes_do_not_prove_infeasibility() {
     assert!(res.x.is_empty());
 }
 
-/// Task #11 (キャンセル後の false Infeasible/Unbounded): MISOCP 最終分類の
+/// (キャンセル後の false Infeasible/Unbounded): MISOCP 最終分類の
 /// stop check sentinel. Cancel racing in right after the root node's Farkas
 /// certificate prunes the stack empty (proven, no per-node race) must still
 /// yield `Timeout`, not the global `Infeasible` the exhaustive-but-cancelled
@@ -1175,7 +1175,7 @@ fn misocp_preset_cancel_returns_before_first_node() {
     assert_eq!(res.nodes, 0);
 }
 
-/// Task #11 (キャンセル後の false Infeasible/Unbounded): `RayVerdict::Unbounded`
+/// (キャンセル後の false Infeasible/Unbounded): `RayVerdict::Unbounded`
 /// の直接 return 直前 stop check sentinel. Same fixture as
 /// `unbounded_ray_with_all_integers_already_fixed_keeps_x_empty` (all
 /// integers already fixed at the root, verified ray certifies the
@@ -1222,7 +1222,7 @@ fn cancel_race_before_misocp_unbounded_return_prefers_timeout() {
     assert!(res.x.is_empty());
 }
 
-/// Task #11 P2-A (レビュー指摘): `solve_misocp` の最終分類は Infeasible と
+/// P2-A (レビュー指摘): `solve_misocp` の最終分類は Infeasible と
 /// Optimal の両方が同一の `proven` (探索木完全消尽) シグナルに支えられており、
 /// 一方だけ backstop すると非対称になる。`half_int_lp` (同じ fixture が
 /// `misocp_exhaustive_search_without_failures_is_optimal` で使われている,

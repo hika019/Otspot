@@ -65,7 +65,7 @@ fn test_record_infeas_commit() {
     }
 }
 
-/// Consecutive-fire commit stop check (Task #11), factored out so the call
+/// Consecutive-fire commit stop check, factored out so the call
 /// site is a single condition instead of a `#[cfg(test)]` hook line plus the
 /// real check.
 fn should_stop_before_infeas_commit(timeout_ctx: &TimeoutCtx) -> bool {
@@ -92,7 +92,7 @@ pub(crate) fn solve_ippmm_inner(
     })
 }
 
-/// Certificate-acceptance contract (Task #11): `check_infeasible_or_unbounded`'s
+/// Certificate-acceptance contract: `check_infeasible_or_unbounded`'s
 /// consecutive-fire detector is a Newton-direction Farkas-like heuristic, not
 /// a hard proof. If an external stop (cancel/deadline) is observed at the
 /// instant its conclusion (Infeasible/Unbounded, or the best-so-far Stalled
@@ -571,7 +571,7 @@ fn solve_ippmm_inner_confined(
             consecutive_infeas_triggers += 1;
             // N 連続 fire まで判定保留: PMM floor の false-positive に adaptive reg の猶予を与える。
             if consecutive_infeas_triggers >= MIN_CONSECUTIVE_INFEAS {
-                // 証明受理直前の stop check: 関数 doc の contract 参照 (Task #11)。
+                // 証明受理直前の stop check: 関数 doc の contract 参照。
                 if should_stop_before_infeas_commit(&timeout_ctx) {
                     status = Some(SolveStatus::Timeout);
                     break;

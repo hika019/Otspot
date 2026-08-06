@@ -34,7 +34,7 @@ thread_local! {
     /// recover from its canonical central point and still pass normal KKT gates.
     static FORCE_STARTING_POINT_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only cancel injection for the Infeasible/Unbounded certificate
-    /// commit points (Task #11): counts calls to
+    /// commit points: counts calls to
     /// `test_record_certificate_commit` (invoked right after cone membership
     /// is verified, right before the certificate is accepted); once the
     /// count reaches `CANCEL_AFTER_CERTIFICATE_COMMIT`, flips `CANCEL_SIGNAL`
@@ -61,7 +61,7 @@ fn test_record_certificate_commit() {
     }
 }
 
-/// Certificate-acceptance stop check (Task #11), factored out of `solve`'s
+/// Certificate-acceptance stop check, factored out of `solve`'s
 /// two call sites (Farkas / improving-ray) so each is a single condition
 /// instead of a `#[cfg(test)]` hook line plus the real check.
 fn should_stop_before_certificate_commit(opts: &ConicOptions) -> bool {
@@ -164,7 +164,7 @@ fn balance_start(e: &[f64], s: &mut [f64], z: &mut [f64]) {
 /// complementarity balancing (see [`starting_point`]); root solves pass `true`,
 /// branch-and-bound relaxation nodes pass `false`.
 ///
-/// Certificate-acceptance contract (Task #11): if an external stop
+/// Certificate-acceptance contract: if an external stop
 /// (cancel/deadline) is observed at the instant an Infeasible/Unbounded
 /// certificate would be accepted, `Timeout` wins over the certificate --
 /// discarding an already-verified proof is the conservative choice once the
@@ -308,7 +308,7 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) 
             if farkas_val >= opts.tol * val_mag && ray_res <= opts.tol * ray_mag && zn > 0.0 {
                 let zs: Vec<f64> = z.iter().map(|v| v / zn).collect();
                 if cone::in_cone(&blk, &zs, opts.tol) {
-                    // 証明受理直前の stop check (contract: 関数 doc 参照, Task #11)。
+                    // 証明受理直前の stop check (contract: 関数 doc 参照)。
                     if should_stop_before_certificate_commit(opts) {
                         status = SolveStatus::Timeout;
                         break;
@@ -341,7 +341,7 @@ pub(super) fn solve(problem: &ConicProblem, opts: &ConicOptions, balance: bool) 
                     gx.iter().map(|v| -v).collect()
                 };
                 if cone::in_cone(&blk, &recession, opts.tol) {
-                    // 証明受理直前の stop check (contract: 関数 doc 参照, Task #11)。
+                    // 証明受理直前の stop check (contract: 関数 doc 参照)。
                     if should_stop_before_certificate_commit(opts) {
                         status = SolveStatus::Timeout;
                         break;
@@ -748,7 +748,7 @@ mod tests {
     }
     use crate::conic::ConeSpec;
 
-    /// Task #11 (キャンセル後の false Infeasible/Unbounded): `x0 <= -1` and
+    /// (キャンセル後の false Infeasible/Unbounded): `x0 <= -1` and
     /// `x0 >= 0` is proven infeasible (mirrors `conic::tests::infeasible_lp_detected`,
     /// called through `solve` directly instead of `solve_socp`). If cancel
     /// races in right after cone membership is verified but before the

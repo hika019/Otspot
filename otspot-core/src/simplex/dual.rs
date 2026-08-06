@@ -519,7 +519,7 @@ mod tests {
         assert_eq!(super::ETA_REJECT_ATOMIC_COUNT.get(), 1);
     }
 
-    /// SENTINEL (task #10 / bug-hunt P1): `dual_simplex_core` must NOT mint
+    /// SENTINEL (task 10 / bug-hunt P1): `dual_simplex_core` must NOT mint
     /// `Optimal` off a stale `x_b` that disagrees with a fresh `B^{-1}
     /// b_rhs` recomputation — it must re-derive `x_b` from `b_rhs` via a
     /// forced refactor before declaring victory, exactly like its sibling

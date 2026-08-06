@@ -1183,7 +1183,7 @@ mod tests {
         );
     }
 
-    /// SENTINEL (task #7, review of `fix/inf-incumbent-optimal`): the loop's
+    /// SENTINEL (task 7, review of `fix/inf-incumbent-optimal`): the loop's
     /// `deadline_reached`/`max_nodes` breaks discard the just-popped node
     /// without folding its `lower_bound` into `discard_lb`. `tree.pop()` is
     /// best-bound-first, so that node holds the smallest pending bound of

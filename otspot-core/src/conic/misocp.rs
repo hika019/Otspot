@@ -199,7 +199,7 @@ thread_local! {
 #[cfg(test)]
 thread_local! {
     /// Test-only cancel injection for the `RayVerdict::Unbounded` early-return
-    /// stop check (Task #11): counts calls to
+    /// stop check: counts calls to
     /// `test_maybe_cancel_before_unbounded_return`; once the count reaches
     /// `CANCEL_AFTER_UNBOUNDED_RETURN_COMMIT`, flips the real `cancel_flag`
     /// `AtomicBool` a test threads through `ConicOptions::cancel_flag`.
@@ -240,7 +240,7 @@ fn test_maybe_cancel_before_final_classification(opts: &ConicOptions) {
     }
 }
 
-/// Stop check for the `RayVerdict::Unbounded` direct-return site (Task #11),
+/// Stop check for the `RayVerdict::Unbounded` direct-return site,
 /// factored out so the call site is a single condition instead of a
 /// `#[cfg(test)]` hook line plus the real check.
 fn should_stop_before_unbounded_return(opts: &ConicOptions) -> bool {
@@ -451,7 +451,7 @@ pub(super) fn classify_ray_node(lb: &[f64], ub: &[f64], int_tol: f64) -> RayVerd
 /// `NumericalError` > `Infeasible`. With an incumbent: `Timeout` > `Optimal`
 /// (full exhaustion, no numerical failures) > `SuboptimalSolution`; both
 /// `Infeasible` and `Optimal` defer to `Timeout` under an observed external
-/// stop (Task #11) since both rest on the same `proven` signal.
+/// stop since both rest on the same `proven` signal.
 pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -> MisocpResult {
     if let Err(e) = prob
         .validate()
@@ -567,7 +567,7 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
                     RayVerdict::Unbounded => {
                         // 証明受理直前の stop check: 関数 doc の contract 参照
                         // (この分岐は直接 return するため通常の node-top
-                        // チェックの機会がない, Task #11)。
+                        // チェックの機会がない, )。
                         if should_stop_before_unbounded_return(opts) {
                             timed_out = true;
                             break;
@@ -686,7 +686,7 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
         } else if numerical_failures > 0 {
             SolveStatus::NumericalError
         } else if opts.stop_requested() {
-            // 証明受理直前の stop check: 関数 doc の contract 参照 (Task #11)。
+            // 証明受理直前の stop check: 関数 doc の contract 参照。
             SolveStatus::Timeout
         } else {
             debug_assert!(proven);
@@ -701,7 +701,7 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
     }
     MisocpResult {
         // `proven` shares the same stop-check backstop as the no-incumbent
-        // `Infeasible` branch above (contract: 関数 doc 参照, Task #11 P2-A).
+        // `Infeasible` branch above (contract: 関数 doc 参照, P2-A).
         status: if timed_out || (proven && opts.stop_requested()) {
             SolveStatus::Timeout
         } else if proven {

@@ -2671,7 +2671,7 @@ mod tests {
         }
     }
 
-    /// Task #11 (キャンセル後の false Infeasible/Unbounded): `finalize_outcome`
+    /// (キャンセル後の false Infeasible/Unbounded): `finalize_outcome`
     /// の API 境界 backstop sentinel。`cancelled`/deadline は `infeasibility_status`
     /// の return より先に判定されなければならない -- 旧順序 (infeasibility を
     /// 先に return) を revert すると、cancelled=true でも Infeasible/Unbounded が

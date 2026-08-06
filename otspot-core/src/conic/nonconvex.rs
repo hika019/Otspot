@@ -313,7 +313,7 @@ thread_local! {
 #[cfg(test)]
 thread_local! {
     /// Test-only cancel injection for the McCormick B&B's final-classification
-    /// stop check (Task #11 横展開: same "last region prunes stack empty, no
+    /// stop check (横展開: same "last region prunes stack empty, no
     /// re-check before declaring Infeasible" gap as `misocp::solve_misocp`).
     /// Counts calls to `test_maybe_cancel_before_final_classification`; once
     /// the count reaches `CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT`, flips the
@@ -871,7 +871,7 @@ fn validate_integers(n: usize, integers: &[usize]) -> Result<(), String> {
 /// McCormick spatial branch-and-bound core shared by [`solve_global_qcqp`] /
 /// [`solve_global_miqcp`].
 ///
-/// Certificate-acceptance contract (Task #11 横展開, mirrors
+/// Certificate-acceptance contract (横展開, mirrors
 /// `misocp::solve_misocp`): both the no-incumbent `Infeasible` classification
 /// and the incumbent `certified` -> `Optimal` classification defer to
 /// `Timeout` when an external stop is observed at that instant, even if the
@@ -1103,7 +1103,6 @@ fn global_core(
             SolveStatus::NumericalError
         } else if opts.stop_requested() {
             // 証明受理直前の stop check: 関数 doc の contract 参照
-            // (Task #11 横展開)。
             SolveStatus::Timeout
         } else {
             SolveStatus::Infeasible
@@ -1127,7 +1126,7 @@ fn global_core(
         // and `mip::solve_miqp`. `MaxIterations` is reserved for the
         // no-incumbent node-limited case above. `certified` shares the same
         // stop-check backstop as the no-incumbent `Infeasible` branch above
-        // (contract: 関数 doc 参照, Task #11 P2-A).
+        // (contract: 関数 doc 参照, P2-A).
         status: if timed_out || (certified && opts.stop_requested()) {
             SolveStatus::Timeout
         } else if certified {
@@ -1672,7 +1671,7 @@ mod tests {
         assert_eq!(res.nodes, 0, "must stop before processing any node");
     }
 
-    /// Task #11 横展開 (キャンセル後の false Infeasible): purely linear,
+    /// 横展開 (キャンセル後の false Infeasible): purely linear,
     /// contradictory constraints (`x0 <= -1` and `x0 >= 0`) -- the root
     /// relaxation LP is itself infeasible, so the single root region is
     /// pruned (`SolveStatus::Infeasible => continue` in `global_core`) and
@@ -1746,7 +1745,7 @@ mod tests {
         );
     }
 
-    /// Task #11 P2-A (レビュー指摘): `global_core` の最終分類は Infeasible と
+    /// P2-A (レビュー指摘): `global_core` の最終分類は Infeasible と
     /// Optimal (`certified`) の両方が同一の決定論的シグナルに支えられており、
     /// 一方だけ backstop すると非対称になる。`hyperbola` (通常は
     /// `exhausted_clean_search_certifies_optimal_with_zero_gap` で Optimal を

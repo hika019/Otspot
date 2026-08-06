@@ -221,7 +221,7 @@ fn cold_dual_le_only_terminates_immediately() {
     assert_eq!(state.iterations, 1);
 }
 
-/// SENTINEL (task #10 / bug-hunt P1): `iterate` must NOT mint `Optimal` off
+/// SENTINEL (task 10 / bug-hunt P1): `iterate` must NOT mint `Optimal` off
 /// a stale `state.x_b` that disagrees with a fresh `B^{-1} b_rhs`
 /// recomputation (accounting for at-upper contributions). Same construction
 /// as `dual::tests::dual_simplex_core_rejects_stale_x_b_inconsistent_with_

@@ -950,7 +950,7 @@ mod tests {
         assert_eq!(super::ETA_REJECT_ATOMIC_COUNT.get(), 1);
     }
 
-    /// SENTINEL (task #10 / bug-hunt P1): `dual_simplex_core_advanced` must
+    /// SENTINEL (task 10 / bug-hunt P1): `dual_simplex_core_advanced` must
     /// NOT mint `Optimal` off a stale `x_b` that disagrees with a fresh
     /// `B^{-1} b_rhs` recomputation. Same construction as `dual::tests::
     /// dual_simplex_core_rejects_stale_x_b_inconsistent_with_b_rhs`, applied
