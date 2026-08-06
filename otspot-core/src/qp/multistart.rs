@@ -309,11 +309,10 @@ pub(crate) fn solve_qp_multistart_with_hooks(
                 .map(&worker)
                 .collect::<Vec<SolverResult>>()
         };
-        // Default path shares `parallelism::solver_thread_pool`'s per-size
-        // cache with the QP/conic factorization confinement, so a program that
-        // multistarts repeatedly builds its pool once instead of once per call
-        // — and the `threads` budget means the same pool everywhere. The hook
-        // stays a genuine override (tests inject build failures through it).
+        // Default path shares `parallelism::solver_thread_pool`'s latest-budget
+        // cache with the QP/conic factorization confinement, so repeated calls
+        // at one `threads` value build once while budget changes retire the old
+        // pool. The hook stays a genuine override (tests inject build failures).
         match hooks.and_then(|h| h.thread_pool_factory.as_ref().map(|f| f(parallel))) {
             Some(Ok(pool)) => run_parallel(&pool, warms),
             Some(Err(e)) => {
@@ -324,7 +323,7 @@ pub(crate) fn solve_qp_multistart_with_hooks(
                 run_serial(warms)
             }
             None => match otspot_num::linalg::parallelism::solver_thread_pool(parallel) {
-                Some(pool) => run_parallel(pool, warms),
+                Some(pool) => run_parallel(&pool, warms),
                 None => {
                     log::warn!(
                         "multistart: rayon ThreadPool of {parallel} threads unavailable; \

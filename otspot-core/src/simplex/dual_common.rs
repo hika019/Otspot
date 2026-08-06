@@ -221,6 +221,61 @@ pub(super) fn outcome_to_result(
     }
 }
 
+// Test-only observability for `lp_unbounded_ray_verified`'s two cancellation
+// checkpoints (loop-top and pre-accept). Mirrors `presolve::qp_phase2`'s
+// `PHASE2_STEPS_EXECUTED`/`PHASE2_CANCEL_AFTER_STEPS`/`PHASE2_CANCEL_SIGNAL`
+// pattern: entirely `#[cfg(test)]` (definitions and every call site below),
+// zero footprint in production builds.
+//
+// `cancel_flag` is monotonic (never reset once `true`), so a plain pass/fail
+// on the function's own boolean return cannot distinguish which checkpoint
+// caught it: whichever runs *after* the flip catches it regardless of which
+// one(s) are present (Codex PR #31 re-review: reverting either checkpoint
+// alone left both original sentinels passing, since the other, untouched
+// checkpoint still caught the monotonic flag -- only reverting both failed).
+// These counters make each checkpoint's own hit count independently
+// observable, so a test can assert precisely how many times it ran.
+#[cfg(test)]
+thread_local! {
+    static RAY_LOOP_TOP_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RAY_CANCEL_AFTER_LOOP_TOP_HITS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    static RAY_PRE_ACCEPT_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RAY_CANCEL_AFTER_PRE_ACCEPT_HITS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    static RAY_CANCEL_SIGNAL: std::sync::Arc<AtomicBool> =
+        std::sync::Arc::new(AtomicBool::new(false));
+    // Plain counter (no cancel-trigger side effect): records whether the
+    // LU factorization + initial BTRAN setup ran at all, so a test can tell
+    // "the entry check returned before setup" apart from "setup ran, then
+    // iteration 0's own loop-top check caught a preset flag" -- both leave
+    // `RAY_LOOP_TOP_HITS` at 0 (its recorder only fires *after* that check
+    // passes), so it alone cannot distinguish them.
+    static RAY_SETUP_REACHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn test_record_ray_loop_top_hit() {
+    let hits = RAY_LOOP_TOP_HITS.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if RAY_CANCEL_AFTER_LOOP_TOP_HITS.with(std::cell::Cell::get) == Some(hits) {
+        RAY_CANCEL_SIGNAL.with(|flag| flag.store(true, Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+fn test_record_ray_pre_accept_hit() {
+    let hits = RAY_PRE_ACCEPT_HITS.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if RAY_CANCEL_AFTER_PRE_ACCEPT_HITS.with(std::cell::Cell::get) == Some(hits) {
+        RAY_CANCEL_SIGNAL.with(|flag| flag.store(true, Ordering::Relaxed));
+    }
+}
+
 /// Verify an LP `Unbounded` exit against a re-derived recession ray (symmetric
 /// to the Phase-I Farkas gate: unverified ray ⇒ honest Stalled).
 ///
@@ -244,6 +299,14 @@ pub(super) fn lp_unbounded_ray_verified(
     n_enter: usize,
     options: &SolverOptions,
 ) -> bool {
+    // Entry check (Codex PR #31 re-review): `LuBasis::new_timed` only
+    // consults `options.deadline`, not `cancel_flag`, and the BTRAN just
+    // below runs unconditionally either way. Without this, a cancel_flag
+    // preset before this function is ever called still pays for a full LU
+    // factorization + BTRAN before the loop's own checks get a chance.
+    if options.external_stop_requested() {
+        return false;
+    }
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(_) => return false,
@@ -257,8 +320,20 @@ pub(super) fn lp_unbounded_ray_verified(
     // y = B⁻ᵀ c_B
     let mut y: Vec<f64> = basis.iter().map(|&col| c[col]).collect();
     basis_mgr.btran_dense(&mut y);
+    #[cfg(test)]
+    RAY_SETUP_REACHED.with(|c| c.set(c.get() + 1));
 
     for q in 0..n_enter {
+        // O(n_enter) FTRAN solves + O(nnz) ray checks: same cost profile as
+        // `dual_advanced::phase1::farkas_infeasibility_certified`'s Strategy 2
+        // per-row loop, and needs the identical per-iteration recheck (an
+        // external stop must not wait out a loop whose own cost scales with
+        // problem size).
+        if options.external_stop_requested() {
+            return false;
+        }
+        #[cfg(test)]
+        test_record_ray_loop_top_hit();
         if in_basis[q] {
             continue;
         }
@@ -297,6 +372,17 @@ pub(super) fn lp_unbounded_ray_verified(
             }
         });
         if ray_ok {
+            // An external stop requested while this FTRAN/ray check ran must
+            // not let a coincidentally-already-computed verdict slip past it:
+            // every caller unconditionally maps `true` here to a hard
+            // `SolveStatus::Unbounded`, bypassing the honest Stalled/Timeout
+            // path an external stop is supposed to take (same class of bug as
+            // the Farkas gates' pre-`return true` recheck).
+            #[cfg(test)]
+            test_record_ray_pre_accept_hit();
+            if options.external_stop_requested() {
+                return false;
+            }
             return true;
         }
     }
@@ -906,6 +992,193 @@ mod tests {
         assert!(
             !lp_unbounded_ray_verified(&a, &[0, 2], &[0.0, -1.0, 0.0], 2, 3, 2, &opts),
             "a direction that increases a basic artificial off 0 must NOT verify as a recession ray"
+        );
+    }
+
+    /// `lp_unbounded_ray_verified` had no cancellation check anywhere (Codex
+    /// PR #31 review follow-up, same class as the Farkas gates already fixed
+    /// in this crate): all 4 production callers (`dual.rs`, `dual_advanced/
+    /// pipeline.rs`, `primal/mod.rs`'s `gate_phase2_unbounded`, `dual_advanced/
+    /// phase1.rs`) unconditionally map a bare `true` here to `SolveStatus::
+    /// Unbounded`.
+    ///
+    /// Deterministic, not a wall-clock race (Codex PR #31 re-review):
+    /// `cancel_flag` is monotonic, so "did `verified` come back `false`"
+    /// cannot distinguish which checkpoint caught it -- whichever runs
+    /// after the flip catches it regardless of presence. Reverting either
+    /// checkpoint alone left the original race-based sentinels passing
+    /// (reviewer's 4 experiments); only reverting both failed. These two
+    /// tests instead assert each checkpoint's own hit count (see
+    /// `RAY_LOOP_TOP_HITS`/`RAY_PRE_ACCEPT_HITS`'s doc comment above).
+    ///
+    /// Targets the loop-top checkpoint. Fixture: `m = 1`, column 0 the
+    /// identity basis, `DECOYS = 10` empty non-ray columns (`rc = 0 >=
+    /// -dual_tol` skips each via `continue`, so `ray_ok` never computes and
+    /// `RAY_PRE_ACCEPT_HITS` stays 0, isolating this test's signal to
+    /// loop-top). `cancel_flag` flips right after loop-top hit
+    /// `CANCEL_AFTER`, a mock-clock stand-in for a real expiring
+    /// deadline/cancel mid-scan.
+    ///
+    /// Sentinel: reverting the loop-top check makes `RAY_LOOP_TOP_HITS`
+    /// climb to all `DECOYS`, failing `hits == CANCEL_AFTER`.
+    #[test]
+    fn lp_unbounded_ray_verified_loop_top_check_stops_scan_at_cancellation_point() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        const DECOYS: usize = 10;
+        const CANCEL_AFTER: usize = 3;
+
+        // Column 0 = identity basis; columns 1..=DECOYS = empty decoys, no
+        // genuine ray anywhere.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, DECOYS + 1).unwrap();
+        let c = vec![0.0_f64; DECOYS + 1];
+
+        RAY_LOOP_TOP_HITS.with(|c| c.set(0));
+        RAY_PRE_ACCEPT_HITS.with(|c| c.set(0));
+        RAY_CANCEL_AFTER_LOOP_TOP_HITS.with(|c| c.set(Some(CANCEL_AFTER)));
+        RAY_CANCEL_AFTER_PRE_ACCEPT_HITS.with(|c| c.set(None));
+        RAY_CANCEL_SIGNAL.with(|flag| flag.store(false, Ordering::Relaxed));
+
+        let opts = RAY_CANCEL_SIGNAL.with(|flag| SolverOptions {
+            cancel_flag: Some(Arc::clone(flag)),
+            ..SolverOptions::default()
+        });
+        let verified = lp_unbounded_ray_verified(&a, &[0], &c, 1, DECOYS + 1, DECOYS + 1, &opts);
+
+        RAY_CANCEL_AFTER_LOOP_TOP_HITS.with(|c| c.set(None));
+        let loop_top_hits = RAY_LOOP_TOP_HITS.with(std::cell::Cell::get);
+        let pre_accept_hits = RAY_PRE_ACCEPT_HITS.with(std::cell::Cell::get);
+
+        assert!(!verified, "no genuine ray exists in this fixture");
+        assert_eq!(
+            pre_accept_hits, 0,
+            "no column here ever satisfies ray_ok, so the pre-accept checkpoint \
+             must never fire -- confirms this test's signal is isolated to the \
+             loop-top checkpoint"
+        );
+        assert_eq!(
+            loop_top_hits,
+            CANCEL_AFTER,
+            "cancel_flag flips right after loop-top hit {CANCEL_AFTER}, so the \
+             loop-top check must stop the scan there (not continue through the \
+             remaining {} decoys), got {loop_top_hits} hits",
+            DECOYS - CANCEL_AFTER
+        );
+    }
+
+    /// Companion to the loop-top sentinel above, targeting the pre-accept
+    /// checkpoint specifically: a cancellation arriving exactly when
+    /// `ray_ok` first becomes `true` for some column, before the function
+    /// commits to `return true` for it.
+    ///
+    /// Fixture: `m = 1`, column 0 the identity basis, column 1 a genuine ray
+    /// (`a[0][1] = -1`, `c[1] = -1`, same shape as
+    /// `lp_unbounded_ray_verified_distinguishes_genuine_bounded_and_
+    /// artificial`'s minimal case) -- reached immediately after column 0
+    /// (`in_basis[0]` skips it before any FTRAN). `RAY_CANCEL_AFTER_PRE_
+    /// ACCEPT_HITS = Some(1)` flips `cancel_flag` as a side effect of
+    /// `ray_ok` becoming `true` for the *first* (only) candidate, landing
+    /// squarely between that candidate's own loop-top check (already passed,
+    /// flag still `false` then) and the accept decision.
+    ///
+    /// Sentinel: reverting the `if options.external_stop_requested() {
+    /// return false; }` right before `return true` (after `ray_ok` is
+    /// computed) makes `verified` come back `true` instead of `false` --
+    /// `RAY_PRE_ACCEPT_HITS` reaching 1 is unaffected either way (it's
+    /// recorded before the reverted line), so only the boolean discriminates
+    /// this specific checkpoint, which is exactly what reverting removes.
+    #[test]
+    fn lp_unbounded_ray_verified_pre_accept_check_rejects_ray_at_cancellation_point() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, -1.0], 1, 2).unwrap();
+        let c = vec![0.0_f64, -1.0];
+
+        RAY_LOOP_TOP_HITS.with(|c| c.set(0));
+        RAY_PRE_ACCEPT_HITS.with(|c| c.set(0));
+        RAY_CANCEL_AFTER_LOOP_TOP_HITS.with(|c| c.set(None));
+        RAY_CANCEL_AFTER_PRE_ACCEPT_HITS.with(|c| c.set(Some(1)));
+        RAY_CANCEL_SIGNAL.with(|flag| flag.store(false, Ordering::Relaxed));
+
+        let opts = RAY_CANCEL_SIGNAL.with(|flag| SolverOptions {
+            cancel_flag: Some(Arc::clone(flag)),
+            ..SolverOptions::default()
+        });
+        let verified = lp_unbounded_ray_verified(&a, &[0], &c, 1, 2, 2, &opts);
+
+        RAY_CANCEL_AFTER_PRE_ACCEPT_HITS.with(|c| c.set(None));
+        let loop_top_hits = RAY_LOOP_TOP_HITS.with(std::cell::Cell::get);
+        let pre_accept_hits = RAY_PRE_ACCEPT_HITS.with(std::cell::Cell::get);
+
+        assert_eq!(
+            pre_accept_hits, 1,
+            "column 1's ray_ok must genuinely evaluate true (reaching the \
+             pre-accept checkpoint) for this test to exercise anything -- \
+             confirms the fixture's premise, independent of cancellation"
+        );
+        assert_eq!(
+            loop_top_hits, 2,
+            "both column 0 (in_basis, skipped) and column 1 (the ray) must \
+             reach the loop-top checkpoint normally before cancel_flag flips -- \
+             confirms the flip lands at the pre-accept checkpoint specifically, \
+             not any loop-top check (RAY_CANCEL_AFTER_LOOP_TOP_HITS is unset)"
+        );
+        assert!(
+            !verified,
+            "cancel_flag flips as a side effect of ray_ok becoming true for \
+             column 1's own pre-accept checkpoint -- must prevent accepting \
+             this otherwise-valid ray"
+        );
+    }
+
+    /// Companion to the two checkpoint sentinels above, for the entry check
+    /// (Codex PR #31 re-review): `LuBasis::new_timed` only consults
+    /// `options.deadline`, not `cancel_flag`, so a preset `cancel_flag` (no
+    /// deadline set) previously still paid for a full LU factorization and
+    /// the `y = B⁻ᵀc_B` BTRAN before the loop's own checks got a chance.
+    ///
+    /// `RAY_SETUP_REACHED`, not `RAY_LOOP_TOP_HITS`, is the discriminator:
+    /// iteration 0's own loop-top check *also* catches a preset flag (this
+    /// fixture's single non-basic column is q=0), so `RAY_LOOP_TOP_HITS`
+    /// stays 0 whether the entry check runs or not -- it cannot tell "entry
+    /// check returned early" apart from "setup ran, then iteration 0 caught
+    /// it anyway". `RAY_SETUP_REACHED` only increments *after* the LU
+    /// factorization and initial BTRAN both complete, so it is 0 only when
+    /// the entry check actually prevented that setup from running at all.
+    ///
+    /// Sentinel: reverting the new entry check makes `verified` come back
+    /// `true` (this fixture's column 1 is a genuine ray) and
+    /// `RAY_SETUP_REACHED` read 1, not 0.
+    #[test]
+    fn lp_unbounded_ray_verified_entry_check_skips_lu_setup_when_preset() {
+        use std::sync::Arc;
+
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, -1.0], 1, 2).unwrap();
+        let c = vec![0.0_f64, -1.0];
+
+        RAY_SETUP_REACHED.with(|c| c.set(0));
+
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::new(AtomicBool::new(true))),
+            ..SolverOptions::default()
+        };
+        let verified = lp_unbounded_ray_verified(&a, &[0], &c, 1, 2, 2, &opts);
+
+        let setup_reached = RAY_SETUP_REACHED.with(std::cell::Cell::get);
+        assert_eq!(
+            setup_reached, 0,
+            "preset cancel_flag=true must return from the entry check before \
+             LuBasis::new_timed/btran_dense ever run -- `RAY_SETUP_REACHED` is \
+             the discriminator here, not `RAY_LOOP_TOP_HITS`: iteration 0's \
+             own loop-top check *also* catches a preset flag and would leave \
+             RAY_LOOP_TOP_HITS at 0 even with the entry check reverted (setup \
+             would have run to completion first), got {setup_reached}"
+        );
+        assert!(
+            !verified,
+            "preset cancel_flag=true must reject this otherwise-genuine ray"
         );
     }
 }

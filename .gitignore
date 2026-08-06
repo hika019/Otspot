@@ -6,6 +6,9 @@
 !/data/baseline_objectives/*.csv
 reports/
 **/__pycache__/
+**/.pytest_cache/
+.venv/
+*.whl
 .DS_Store
 **/.DS_Store
 /bench_results

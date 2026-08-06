@@ -16,10 +16,10 @@
 //! (ワーカー 2 + サンプラ 1) に下がる。
 //!
 //! # プールのライフサイクル
-//! プールはサイズごとにプロセス内へキャッシュされ、以後の solve が
-//! 再利用する。したがって **同じサイズの初回 solve だけが `threads` 本を新規
-//! 生成する**。2 回目以降の生成コストはゼロで、MIQP のノードごと QP 解のように
-//! 高頻度に呼ばれる経路でも問題にならない。
+//! 所有するプールは **直近の 1 サイズだけ**。同サイズは再利用し、budget 変更時は
+//! cache 所有権を新プールへ移す。旧プールは実行中 solve が `Arc` を持つ間のみ
+//! 存続し、最後の利用終了で worker を retire する。これにより同一 budget の生成
+//! コストを避けつつ、可変 budget の長寿命 process でも worker が累積しない。
 //!
 //! # MILP との関係
 //! MILP 分枝限定法 (`otspot_core::mip::parallel`) はこの経路を使わない。
@@ -28,22 +28,17 @@
 //! 双方が構造的に上限として保証される。
 
 use faer::Par;
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// Dedicated rayon pools, one per distinct thread budget, reused for the
-/// lifetime of the process.
-///
-/// The pools are **leaked** (`Box::leak`), so their threads live until the
-/// process exits and never appear in a leak checker's "freed" column. That is
-/// deliberate and bounded: an entry is created only for a thread budget that
-/// was actually requested, so the footprint is
-/// `sum over distinct budgets n of n threads` — in practice one entry, since a
-/// program picks a thread count once. Leaking buys a `&'static ThreadPool`
-/// that any solve can `install` into without refcount traffic, and avoids the
-/// alternative of tearing a pool down and rebuilding it per solve.
-static SOLVER_POOLS: OnceLock<Mutex<HashMap<usize, &'static rayon::ThreadPool>>> = OnceLock::new();
+/// The one process-owned solver pool. Replacing this entry retires the
+/// previous budget after any in-flight [`Arc`] clones finish.
+static SOLVER_POOL: OnceLock<Mutex<Option<CachedSolverPool>>> = OnceLock::new();
+
+struct CachedSolverPool {
+    threads: usize,
+    pool: Arc<rayon::ThreadPool>,
+}
 
 /// Run `f` with every rayon-backed task it spawns confined to `threads`
 /// workers, handing it the faer [`Par`] that matches that confinement.
@@ -71,23 +66,30 @@ pub fn with_solver_pool<R: Send>(threads: usize, f: impl Send + FnOnce(Par) -> R
     }
 }
 
-/// The process-wide rayon pool of size `threads`, building it on first use.
+/// Returns the process-owned rayon pool of size `threads`, building it on first
+/// use or replacing the previously cached budget.
 ///
 /// `None` when the pool could not be built (the OS refused the threads).
 /// Callers must then fall back to sequential execution — see
 /// [`with_solver_pool`] for why widening to the global pool is not an option.
-pub fn solver_thread_pool(threads: usize) -> Option<&'static rayon::ThreadPool> {
-    let pools = SOLVER_POOLS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = pools.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(&pool) = guard.get(&threads) {
-        return Some(pool);
+pub fn solver_thread_pool(threads: usize) -> Option<Arc<rayon::ThreadPool>> {
+    let cached = SOLVER_POOL.get_or_init(|| Mutex::new(None));
+    let mut guard = cached.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = guard.as_ref() {
+        if entry.threads == threads {
+            return Some(Arc::clone(&entry.pool));
+        }
     }
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
-        .ok()?;
-    let pool: &'static rayon::ThreadPool = Box::leak(Box::new(pool));
-    guard.insert(threads, pool);
+    let pool = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .ok()?,
+    );
+    *guard = Some(CachedSolverPool {
+        threads,
+        pool: Arc::clone(&pool),
+    });
     Some(pool)
 }
 
@@ -164,23 +166,32 @@ mod tests {
         }
     }
 
-    /// Pools are cached per size: the same budget reuses one pool (so repeated
-    /// solves do not respawn threads), and different budgets get different
-    /// pools (so one size cannot silently serve another).
+    /// The same budget reuses one pool; changing budget replaces the sole
+    /// cache-owned pool and retires the old one after in-flight users finish.
+    ///
+    /// Sentinel: reverting to the leaked per-budget HashMap leaves `old`
+    /// upgradeable after every local strong reference is dropped.
     #[test]
-    fn pools_are_cached_per_size() {
+    fn changing_budget_retires_the_previous_cached_pool() {
         let a = solver_thread_pool(5).expect("pool");
         let b = solver_thread_pool(5).expect("pool");
         assert!(
-            std::ptr::eq(a, b),
+            Arc::ptr_eq(&a, &b),
             "the same budget must reuse one cached pool"
         );
+        let old = Arc::downgrade(&a);
         let other = solver_thread_pool(6).expect("pool");
         assert!(
-            !std::ptr::eq(a, other),
+            !Arc::ptr_eq(&a, &other),
             "different budgets must not share a pool"
         );
         assert_eq!(a.current_num_threads(), 5);
         assert_eq!(other.current_num_threads(), 6);
+        drop(a);
+        drop(b);
+        assert!(
+            old.upgrade().is_none(),
+            "the previous pool must retire once its in-flight users finish"
+        );
     }
 }

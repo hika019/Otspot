@@ -14,6 +14,13 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
   同時実行数と distinct thread 数の両方を実測)。`threads = 1` (既定) は従来の
   serial 探索そのままで、ノード単位の再現性を維持する。MIQP の B&B は対象外。
 - `milp_solve` に `--threads N`。
+- `otspot-py` crate (PyO3/maturin) を追加し、Otspot を Python ライブラリとして
+  利用可能に。Rust API と同名・同構造の Model DSL、`api_manifest.json` +
+  `cargo public-api` スナップショットによる API parity 保証、GitHub Actions
+  `python` job (maturin build → pytest → mypy) を含む
+- otspot-model: `Model::var_kind` (`try_var_kind` 含む) を新設
+- `Expression`/`QuadExpr` に `+=` (`__iadd__`) を追加し、蓄積ループの
+  O(n²) クローンコストを回避
 
 ### Fixed
 - MILP B&Bのin-tree cut separationに割り当てるsimplex反復シェア
@@ -25,17 +32,57 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
   `Par::Rayon(threads)` を渡しても内部の `spindle` がグローバル rayon プールへ
   フォールバックするため上限が守られておらず、8 コア機で `threads = 2` 指定の
   dense QP が同時 10 スレッドを走らせていた。solve をサイズ `threads` の専用
-  プールへ閉じ込めて是正 (同条件で 3)。プールはサイズごとにプロセス内で
-  使い回す (= 初回 solve のみ `threads` 本を生成し、以後は生成なし) ため、
-  MIQP のノードごと QP 解でもコストは乗らない。`threads = 1` (既定) は
-  プールを作らず従来と完全に同一。multistart の per-call プール構築も同じ
-  キャッシュへ統一。
+  プールへ閉じ込めて是正 (同条件で 3)。プールは直近 1 サイズのみキャッシュし、
+  budget 変更時は作り直す (現行呼び出し経路では `threads` は固定のため実害なし)。
+  `threads = 1` (既定) はプールを作らず従来と完全に同一。
+- otspot-model: `ModelResult::value`/`Index<Variable>` が cross-model の
+  `Variable` を検査せず別 model の値を誤返却するバグを修正
+- `Model.solve()` 中の Ctrl-C (SIGINT) が `KeyboardInterrupt` を即座に送出する
+  よう修正 (`Model::set_cancel_flag` 新設 + worker thread 化)。ポーリング間隔を
+  適応 backoff + Condvar 化し、小型 solve への固定 latency 床 (旧: 10ms 固定) を解消
+- otspot-core: LP の Farkas (Infeasible) 証明ループ・unbounded ray 証明ループ
+  (Farkas 修正の横展開)、および QP presolve phase-2 の全ステップ (等式制約簡約
+  ループ内部を含む) が `deadline`/`cancel_flag` を未チェックのまま完了しうる
+  問題を修正 (証明受理直前チェックを横展開。挙動変更: `timeout_secs` 設定時、
+  Infeasible 判定寸前だった問題が Timeout になり得る)。QP presolve phase-2 側は
+  mid-loop 打ち切り時に未検証行を誤って冗長判定する correctness bug も併せて修正
+- otspot-model: `set_presolve(false)` が QP/MIQP 経路では無視されていたバグを
+  修正 (LP/MILP のみ反映されていた)
+- `Expression`/`QuadExpr` の `+=` が自己エイリアス代入 (`expr += expr`) で
+  panic するバグを修正
+- QP IPM・conic IPM・MISOCP・非凸 QCQP B&B・大域 QP (spatial B&B) の複数経路で、
+  キャンセル後も証明済み status を返したり探索を継続し得た問題を修正
+- QP presolve の等式制約冗長行削除が、矛盾した等式系を誤って Feasible と
+  判定していた問題を修正
+- MIP/大域QP で、非有限 bound の混入や探索中断時の下界の取りこぼしにより、
+  未証明の最適性を Optimal と誤報告しうる問題を修正
+- QP IPM (IPPMM) の数値安定性まわりの複数の真因を修正し、QSHELL/QGFRDXPN 等
+  一部の QP が Stalled から収束するようになった
+- QP/LP の IPM が、Ruiz スケーリング有無を切り替えて再試行する際の打ち切り
+  判定に不具合があり、片方が行き詰まっただけで再試行を止め、収束するはずの
+  LP が Stalled と判定され得た問題を修正
+- bounded dual simplex の tie-break の欠陥、および dual simplex が基底の
+  ドリフトを検証せず誤って Optimal を返しうる問題を修正
+- Ruiz スケーリングが構造的に空の行・列、および目的関数が恒等的に0の
+  feasibility-only 問題でコスト (`c`) が発散し NaN が伝播し得た問題を修正
+- QPLIB/CBF パーサが宣言サイズを検証せず allocation しており、巨大/不正な
+  ファイルで OOM しうる問題を修正
+- `milp_solve --threads` が範囲外の値を検証せず受理していた問題を修正
+- 並列 B&B の統計値 (`conflict_clauses_learned`/大域QPの`remaining_lb`) が
+  過少・不正確に報告されていた問題を修正
+- Python の Ctrl-C (SIGINT) 検知後、GIL を保持したまま worker thread を
+  join していた問題を修正
+- Python の `SolveStatus`/`Tolerance` の `==` 比較が常に `False` になって
+  いた問題を修正 (`SolveStatus` は hash 対応も追加)
 
 ### Changed
 - `SolverOptions::threads` に上限 (`MAX_THREADS` = 1024) を追加し `validate()` /
   `with_threads()` で拒否する。MILP ワーカー生成は OS 拒否時に panic するため、
   設定ミスは solve の奥ではなく options 検証で落とす。
 - `otspot-num` が `rayon` に依存するようになった (専用プール構築のため)。
+- `otspot-py`: Python 要件を 3.11+ に引き上げ (abi3-py311)
+- `IpmOptions::delta_min`/`delta_p_init`/`delta_d_init` を削除 (無視される
+  デッドオプションだった)
 
 ## [0.7.4] - 2026-07-31
 

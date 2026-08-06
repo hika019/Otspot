@@ -22,11 +22,36 @@ mod tests {
             .to_path_buf()
     }
 
-    /// Counts `{` and `}` on a line, ignoring `//`-comments and string literals.
+    /// Walks `line` for `{`/`}` outside `//`-comments and string literals,
+    /// updating `*depth` and popping every stack in `stacks` immediately
+    /// after each individual `}` — in true left-to-right character order,
+    /// rather than by applying a line's net `opens - closes` in one atomic
+    /// step and popping once against the line-final depth.
     ///
-    /// `in_str_in` carries multi-line string state from the previous line.
-    /// Returns `(opens, closes, in_str_out)`.
-    fn count_braces(line: &str, in_str_in: bool) -> (i32, i32, bool) {
+    /// Scanners that track skip/context zones with a stack of entry-floor
+    /// depths (`scan_dead_params`, `scan_underscore_sig_params`) only ever
+    /// check zone membership using the depth *as of the end of a line*, so
+    /// per-character precision within a line is not needed for that check —
+    /// but the atomic-net shortcut still corrupts the zone *stack itself*:
+    /// a line that closes a zone and then opens an unrelated block (e.g.
+    /// `} fn wrapper() {`) nets to a depth equal to what it was before the
+    /// line, so the pop that should happen when depth transiently touches
+    /// the zone's floor never fires, leaving a stale entry that keeps
+    /// misclassifying every following line as "still in the zone" until
+    /// some later, unrelated `}` happens to trigger the pop instead.
+    /// Popping immediately after each `}` (this function) cannot miss that
+    /// transient floor-touch, because depth is checked at every point it
+    /// actually decreases, not just once per line after any later same-line
+    /// re-opens have already raised it back up.
+    ///
+    /// Returns `(opens, closes, in_str_out)` for the line, mirroring the
+    /// `(opens, closes, in_str_out)` shape other scanners in this module use.
+    fn advance_depth_pop_stacks(
+        line: &str,
+        in_str_in: bool,
+        depth: &mut i32,
+        stacks: &mut [&mut Vec<i32>],
+    ) -> (i32, i32, bool) {
         let mut opens = 0i32;
         let mut closes = 0i32;
         let mut in_str = in_str_in;
@@ -35,9 +60,8 @@ mod tests {
         while i < chars.len() {
             let ch = chars[i];
             let prev = if i > 0 { chars[i - 1] } else { '\0' };
-            // Check for line comment only when not in a string
             if !in_str && ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
-                break; // rest of line is a comment
+                break;
             }
             if ch == '"' && prev != '\\' {
                 in_str = !in_str;
@@ -45,9 +69,15 @@ mod tests {
             if !in_str {
                 if ch == '{' {
                     opens += 1;
-                }
-                if ch == '}' {
+                    *depth += 1;
+                } else if ch == '}' {
                     closes += 1;
+                    *depth -= 1;
+                    for stack in stacks.iter_mut() {
+                        while stack.last().is_some_and(|&d| *depth <= d) {
+                            stack.pop();
+                        }
+                    }
                 }
             }
             i += 1;
@@ -58,6 +88,25 @@ mod tests {
     /// Scans `content` for direct print macro calls that are not inside a
     /// test context (i.e., outside `#[cfg(test)]` blocks, `mod tests`/`mod test`
     /// blocks, and `#[test]`/`#[tokio::test]` function bodies).
+    ///
+    /// Position-aware: each line's braces are walked left-to-right and `depth`
+    /// is updated one brace at a time (rather than by applying a line's net
+    /// `opens - closes` atomically, or by checking skip-zone membership
+    /// against a single per-line depth value). A print macro's skip-zone
+    /// membership is decided using the depth *at the macro's own character
+    /// position*. This structurally rules out both failure modes that a
+    /// line-level depth check is prone to:
+    /// - False positive: a same-line balanced pair, e.g.
+    ///   `if b { '1' } else { '0' }` (net 0), can no longer spuriously pop an
+    ///   enclosing skip zone via an intermediate closes-only depth, because
+    ///   depth only ever decreases one `}` at a time and the pop check runs
+    ///   after each individual close.
+    /// - False negative: a line that closes a skip zone and then opens an
+    ///   unrelated block, e.g. `} println!("x"); if true {`, is no longer
+    ///   treated as "inside the zone" for its entire length just because the
+    ///   zone-close and the new block happen to net to the same line-final
+    ///   depth — the `println!` is checked at the depth that holds strictly
+    ///   between the `}` and the following `{`.
     ///
     /// Returns `(1-based line number, macro name)` for each violation.
     fn scan_production_prints(content: &str) -> Vec<(usize, String)> {
@@ -75,35 +124,34 @@ mod tests {
         let mut pending_cfg_test = false;
         let mut pending_test_attr = false; // #[test] / #[tokio::test]
                                            // Stack of depths at which #[allow(clippy::print_stderr/stdout)] was seen.
-                                           // Print macros at depth > allow_stack.last() are exempted.
+                                           // Print macros at depth >= allow_stack.last() are exempted.
         let mut allow_print_stack: Vec<i32> = Vec::new();
+
+        let macro_chars: Vec<Vec<char>> =
+            PRINT_MACROS.iter().map(|m| m.chars().collect()).collect();
 
         for (line_idx, raw_line) in content.lines().enumerate() {
             let line_no = line_idx + 1;
             let trimmed = raw_line.trim();
 
-            // Skip pure line comments
-            if trimmed.starts_with("//") {
+            // Fast-path skip for pure line comments. Only valid when we are
+            // NOT already inside a multi-line string entering this line: a
+            // string opened on a previous line can close mid-line here (e.g.
+            // the tail of `"start\n// end of string";`), and text that merely
+            // *looks* like a `//` comment at the trimmed start is then really
+            // string content followed by real code. Early-continuing in that
+            // case would skip the char walk below entirely, so the closing
+            // quote's toggle is never applied and `in_str_state` gets stuck
+            // `true` for the rest of the file.
+            if !in_str_state && trimmed.starts_with("//") {
                 continue;
             }
 
-            let (opens, closes, in_str_next) = count_braces(raw_line, in_str_state);
-            in_str_state = in_str_next;
-
-            // Apply closes first, then check for skip-zone exit
-            depth -= closes;
-            while skip_stack.last().is_some_and(|&d| depth <= d) {
-                skip_stack.pop();
-            }
-            // Pop allow_print exemptions when depth drops below their entry depth.
-            while allow_print_stack.last().is_some_and(|&d| depth < d) {
-                allow_print_stack.pop();
-            }
-
-            // Apply opens
-            depth += opens;
-
-            // Detect attributes that trigger skip zones
+            // Detect attributes that trigger skip zones. None of these carry
+            // braces themselves, so evaluating them against the depth carried
+            // in from the previous line (before this line's brace walk) is
+            // equivalent to evaluating them after, and keeps the trigger
+            // scoped to whatever block follows.
             if trimmed.contains("#[cfg(test)]") {
                 pending_cfg_test = true;
             }
@@ -117,49 +165,88 @@ mod tests {
                 allow_print_stack.push(depth);
             }
 
-            // `mod tests {` or `mod test {` on the same line (including pub variants)
-            let is_mod_tests = (trimmed.starts_with("mod tests")
+            // `mod tests {` or `mod test {` (including pub variants) — the
+            // opening brace must be on this same physical line to be
+            // attributed to this trigger (mirrors the cfg(test)/test-attr
+            // triggers below, which only consume the *first* `{` seen).
+            let is_mod_tests_start = trimmed.starts_with("mod tests")
                 || trimmed.starts_with("mod test ")
                 || trimmed.starts_with("pub mod tests")
-                || trimmed.starts_with("pub(crate) mod tests"))
-                && opens > 0;
+                || trimmed.starts_with("pub(crate) mod tests");
 
-            // Enter skip zone if:
-            // - we saw a cfg(test)/test attr on a previous line and now opened a block, OR
-            // - this line is `mod tests {`
-            if (pending_cfg_test || pending_test_attr || is_mod_tests) && opens > 0 {
-                // depth already includes this line's opens; entry depth = depth - opens + (opens-1)
-                // i.e., we want to skip while depth > (depth - opens).
-                let entry_floor = depth - opens;
-                skip_stack.push(entry_floor);
-                pending_cfg_test = false;
-                pending_test_attr = false;
-            }
+            // Consumed by the first `{` encountered while scanning this line.
+            let mut pending_enter = pending_cfg_test || pending_test_attr || is_mod_tests_start;
 
-            let in_skip = skip_stack.last().is_some_and(|&d| depth > d);
-            if in_skip {
-                continue;
-            }
+            let chars: Vec<char> = raw_line.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                let ch = chars[i];
+                let prev = if i > 0 { chars[i - 1] } else { '\0' };
+                let mut step = 1usize;
 
-            // Reset pending flags if we passed a function or mod opening without
-            // triggering skip (e.g., attribute + non-opening line sequence)
-            if opens > 0 {
-                pending_cfg_test = false;
-                pending_test_attr = false;
-            }
+                if !in_str_state && ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                    break; // rest of line is a comment
+                }
+                if ch == '"' && prev != '\\' {
+                    in_str_state = !in_str_state;
+                }
 
-            // Check for print macros (strip comment before checking)
-            // Skip if inside an #[allow(clippy::print_stderr/stdout)] scope.
-            let print_is_allowed = allow_print_stack.last().is_some_and(|&d| depth >= d);
-            if !print_is_allowed {
-                let code_part = raw_line.split("//").next().unwrap_or(raw_line);
-                for &macro_name in PRINT_MACROS {
-                    if code_part.contains(macro_name) {
-                        violations
-                            .push((line_no, macro_name.trim_end_matches('(').to_string() + "!"));
-                        break;
+                if !in_str_state {
+                    if ch == '{' {
+                        depth += 1;
+                        if pending_enter {
+                            // depth already includes this brace; the zone's
+                            // floor is the depth just before it.
+                            skip_stack.push(depth - 1);
+                            pending_enter = false;
+                            pending_cfg_test = false;
+                            pending_test_attr = false;
+                        }
+                    } else if ch == '}' {
+                        depth -= 1;
+                        while skip_stack.last().is_some_and(|&d| depth <= d) {
+                            skip_stack.pop();
+                        }
+                        while allow_print_stack.last().is_some_and(|&d| depth < d) {
+                            allow_print_stack.pop();
+                        }
                     }
                 }
+
+                // Macro detection intentionally does NOT gate on
+                // `in_str_state`: a wrong string-state guess would otherwise
+                // be a single point of failure permanently disabling print
+                // detection for the rest of the file (e.g. a raw string's
+                // internal `"` desyncing the naive toggle), unlike the old
+                // plain-substring-search implementation, which never
+                // consulted string state. Trade-off: a possible false
+                // positive for print-lookalike text genuinely inside a
+                // string, same trade-off the old implementation made.
+                if ch != '{' && ch != '}' {
+                    for (macro_idx, mchars) in macro_chars.iter().enumerate() {
+                        let end = i + mchars.len();
+                        if end <= chars.len() && chars[i..end] == mchars[..] {
+                            let in_skip = skip_stack.last().is_some_and(|&d| depth > d);
+                            let print_is_allowed =
+                                allow_print_stack.last().is_some_and(|&d| depth >= d);
+                            if !in_skip && !print_is_allowed {
+                                let macro_name = PRINT_MACROS[macro_idx];
+                                violations.push((
+                                    line_no,
+                                    macro_name.trim_end_matches('(').to_string() + "!",
+                                ));
+                            }
+                            // Skip past the whole matched token so a
+                            // shorter macro name that happens to be a
+                            // substring at a later offset (e.g. "println!("
+                            // starting one char into "eprintln!(") is not
+                            // rechecked and double-reported.
+                            step = mchars.len();
+                            break;
+                        }
+                    }
+                }
+                i += step;
             }
         }
 
@@ -256,27 +343,56 @@ mod tests {
                 continue;
             }
 
-            // Extract the body using brace matching
+            // Extract the body using brace matching. Braces are walked
+            // left-to-right and `depth` is checked immediately after each
+            // individual `}`, rather than by applying a line's net
+            // `opens - closes` atomically and checking `depth <= 0` once at
+            // line-end: the atomic form cannot observe the function's true
+            // closing brace when that same line re-opens an unrelated block
+            // afterward (e.g. `} fn helper() {`, net 0) — it would silently
+            // absorb the unrelated code (and any later `#[test]` function
+            // inside it) into this function's "body" until some later,
+            // unrelated `}` happens to bring the net back to zero.
             let mut depth = 0i32;
             let mut body = String::new();
             let mut started = false;
             let mut end_idx = fn_idx;
 
             let mut body_in_str = false;
-            for (k, line) in lines.iter().enumerate().skip(fn_idx) {
-                let (opens, closes, in_str_next) = count_braces(line, body_in_str);
-                body_in_str = in_str_next;
-                depth += opens - closes;
-                if opens > 0 {
-                    started = true;
+            'body_scan: for (k, line) in lines.iter().enumerate().skip(fn_idx) {
+                let chars: Vec<char> = line.chars().collect();
+                let mut ci = 0;
+                let mut closed_here = false;
+                while ci < chars.len() {
+                    let ch = chars[ci];
+                    let prev = if ci > 0 { chars[ci - 1] } else { '\0' };
+                    if !body_in_str && ch == '/' && ci + 1 < chars.len() && chars[ci + 1] == '/' {
+                        break;
+                    }
+                    if ch == '"' && prev != '\\' {
+                        body_in_str = !body_in_str;
+                    }
+                    if !body_in_str {
+                        if ch == '{' {
+                            depth += 1;
+                            started = true;
+                        } else if ch == '}' {
+                            depth -= 1;
+                            if started && depth <= 0 {
+                                closed_here = true;
+                                break;
+                            }
+                        }
+                    }
+                    ci += 1;
                 }
                 if started {
                     body.push_str(line);
                     body.push('\n');
                 }
-                if started && depth <= 0 {
+                if closed_here {
                     end_idx = k;
-                    break;
+                    break 'body_scan;
                 }
             }
 
@@ -361,6 +477,120 @@ mod tests {
             }
             panic!("{msg}");
         }
+    }
+
+    /// Sentinel: a line with balanced same-line braces inside a
+    /// `#[cfg(test)] mod tests` block (e.g. `if b { '1' } else { '0' }`) must
+    /// not spuriously exit the skip zone. Before the fix, `scan_production_prints`
+    /// applied `closes` and `opens` as two separate steps and popped the
+    /// skip-stack against the intermediate (closes-only) depth, so a matched
+    /// `{...} {...}` pair on one line dropped depth below the zone's entry
+    /// floor even though the line's net effect on nesting is zero — causing a
+    /// `println!` on the *next* line to be misreported as a production print.
+    #[test]
+    fn scan_production_prints_ignores_balanced_braces_before_println_in_test_mod() {
+        let content = r#"
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn probe() {
+        let encoded: String = v.iter().map(|&b| if b { '1' } else { '0' }).collect();
+        println!("RESULT={encoded}");
+    }
+}
+"#;
+        let violations = scan_production_prints(content);
+        assert!(
+            violations.is_empty(),
+            "BUG: balanced same-line braces before println! inside mod tests \
+             falsely exited the skip zone; violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel: a print macro that appears on the *same physical line* as the
+    /// closing brace of a skip zone — immediately after that brace — must
+    /// still be detected. Before the position-aware fix, `scan_production_prints`
+    /// judged skip-zone membership using a single depth value per line (either
+    /// the line's post-net depth, or the aggregate opens/closes count). A line
+    /// like `} println!("LEAK"); if true {` nets to zero (one close, one open),
+    /// so the line-final depth equals the pre-line depth and the skip zone
+    /// appeared to still be active for the *entire* line, hiding the
+    /// `println!` that actually sits strictly between the zone-closing `}`
+    /// and the following unrelated `{`.
+    #[test]
+    fn scan_production_prints_detects_print_right_after_skip_zone_closes_same_line() {
+        let content = r#"
+#[cfg(test)]
+mod tests {
+    fn helper() {}
+} println!("LEAK"); if true {
+    let x = 1;
+}
+
+fn prod2() {
+    println!("AFTER");
+}
+"#;
+        let violations = scan_production_prints(content);
+        let lines: Vec<usize> = violations.iter().map(|(l, _)| *l).collect();
+        assert!(
+            lines.contains(&5),
+            "BUG: println! immediately after a same-line skip-zone close was \
+             missed; violations: {:?}",
+            violations
+        );
+        assert!(
+            lines.contains(&10),
+            "println! in prod2 must still be detected; violations: {:?}",
+            violations
+        );
+        assert_eq!(
+            violations.len(),
+            2,
+            "expected exactly the two production prints (line 5 and line 10); violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel (P1 fix, reviewer-reported): a multi-line string whose
+    /// closing line's trimmed text happens to start with `//` (because the
+    /// string's own content looks like a comment, e.g. the tail of
+    /// `"start\n// end of string";`) must not disable print detection for
+    /// the rest of the file. Before the fix, `if trimmed.starts_with("//") {
+    /// continue; }` ran unconditionally, skipping that line's entire char
+    /// walk — so the closing quote's `in_str_state` toggle never happened,
+    /// leaving `in_str_state` stuck `true`. Because macro detection was
+    /// gated on `!in_str_state`, every print macro for the rest of the file
+    /// (not just on the desynced line) then went undetected — a strictly
+    /// worse outcome than the old plain-substring-search implementation,
+    /// which never consulted `in_str_state` for macro detection at all.
+    #[test]
+    fn scan_production_prints_survives_multiline_string_closing_on_comment_lookalike_line() {
+        // Built with an escaped (non-raw) literal, not `r#"..."#`: a raw
+        // string reproducing this exact quote pattern inline in *this*
+        // source file would itself confuse `scan_observation_only_tests`'s
+        // (unrelated, pre-existing, not fixed here) raw-string handling when
+        // it self-scans audit.rs, corrupting extraction of *this test's own*
+        // body. Every inner `"` here is escaped so this file's own scanners
+        // see a single balanced string.
+        let content = "\nfn prod() {\n    let s = \"start\n// end of string\"; \
+                        println!(\"REAL_ON_COMMENT_LOOKALIKE_LINE\");\n}\nfn prod2() {\n    \
+                        println!(\"AFTER_DESYNC_CHECK\");\n}\n";
+        let violations = scan_production_prints(content);
+        let lines: Vec<usize> = violations.iter().map(|(l, _)| *l).collect();
+        assert!(
+            lines.contains(&4),
+            "BUG: print! right after a string closes on a comment-lookalike \
+             line was missed; violations: {:?}",
+            violations
+        );
+        assert!(
+            lines.contains(&7),
+            "BUG: print detection was permanently disabled for the rest of \
+             the file after the string-closing desync; violations: {:?}",
+            violations
+        );
     }
 
     // ── Layer B: nextest audit — observation-only tests ─────────────────────
@@ -462,9 +692,7 @@ mod tests {
         let mut violations = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
 
-        // Track test/cfg(test) skip zones identically to scan_production_prints,
-        // but using net depth change (opens - closes) to avoid premature pop
-        // from balanced same-line expressions like `use foo::{A, B};`.
+        // Track test/cfg(test) skip zones identically to scan_production_prints.
         let mut depth: i32 = 0;
         let mut in_str_state = false;
         let mut skip_stack: Vec<i32> = Vec::new();
@@ -473,15 +701,11 @@ mod tests {
 
         for (idx, &line) in lines.iter().enumerate() {
             let trimmed = line.trim();
+            let entering_in_str = in_str_state;
 
-            let (opens, closes, in_str_next) = count_braces(line, in_str_state);
+            let (opens, _closes, in_str_next) =
+                advance_depth_pop_stacks(line, in_str_state, &mut depth, &mut [&mut skip_stack]);
             in_str_state = in_str_next;
-            // Use net change so balanced `{...}` on a single line doesn't
-            // prematurely pop an enclosing skip-zone.
-            depth += opens - closes;
-            while skip_stack.last().is_some_and(|&d| depth <= d) {
-                skip_stack.pop();
-            }
 
             if trimmed.contains("#[cfg(test)]") {
                 pending_cfg_test = true;
@@ -509,7 +733,10 @@ mod tests {
                 pending_test_attr = false;
             }
 
-            if trimmed.starts_with("//") {
+            // Only a genuine comment when not entering this line already
+            // inside a multi-line string (see scan_production_prints for why
+            // trimmed-prefix "//" is not reliable otherwise).
+            if !entering_in_str && trimmed.starts_with("//") {
                 continue;
             }
 
@@ -751,16 +978,15 @@ mod tests {
 
         for (idx, &line) in lines.iter().enumerate() {
             let trimmed = line.trim();
+            let entering_in_str = in_str_state;
 
-            let (opens, closes, in_str_next) = count_braces(line, in_str_state);
+            let (opens, closes, in_str_next) = advance_depth_pop_stacks(
+                line,
+                in_str_state,
+                &mut depth,
+                &mut [&mut skip_stack, &mut trait_impl_stack],
+            );
             in_str_state = in_str_next;
-            depth += opens - closes;
-            while skip_stack.last().is_some_and(|&d| depth <= d) {
-                skip_stack.pop();
-            }
-            while trait_impl_stack.last().is_some_and(|&d| depth <= d) {
-                trait_impl_stack.pop();
-            }
 
             // Track trait impl blocks (`impl Trait for Type`) and trait
             // definitions (`trait Foo { ... }`) — both need the exemption.
@@ -876,7 +1102,10 @@ mod tests {
                 pending_cfg_test = false;
                 pending_test_attr = false;
             }
-            if trimmed.starts_with("//") {
+            // Only a genuine comment when not entering this line already
+            // inside a multi-line string (see scan_production_prints for why
+            // trimmed-prefix "//" is not reliable otherwise).
+            if !entering_in_str && trimmed.starts_with("//") {
                 continue;
             }
 
@@ -1259,6 +1488,34 @@ impl Foo {
         );
     }
 
+    /// Sentinel: an underscore-sig-param violation immediately after a
+    /// same-line skip-zone close (`} fn wrapper() {`, net brace effect 0)
+    /// must still be detected. Same root cause as the `scan_dead_params` and
+    /// `scan_production_prints` sentinels of the same name: a stale
+    /// `skip_stack` entry, left behind because a same-line re-open masked
+    /// the line-final depth from ever touching the zone's floor, misclassifies
+    /// the real `fn prod(_unused: i32) {}` as still inside the exited
+    /// `mod tests` block.
+    #[test]
+    fn scan_underscore_sig_params_detects_violation_right_after_skip_zone_closes_same_line() {
+        let content = r#"
+#[cfg(test)]
+mod tests {
+    fn helper() {}
+} fn wrapper() {
+    fn prod(_unused: i32) {}
+}
+"#;
+        let violations = scan_underscore_sig_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            names.contains(&"_unused"),
+            "BUG: _unused right after a same-line skip-zone close was missed; \
+             violations: {:?}",
+            violations
+        );
+    }
+
     // ── Unit tests for scanner helpers ──────────────────────────────────────
 
     /// Sentinel: `let _ = name;` where name is a function parameter must be detected.
@@ -1304,6 +1561,36 @@ fn compute(x: f64) -> f64 {
         );
     }
 
+    /// Sentinel: a dead param immediately after a same-line skip-zone close
+    /// (`} fn wrapper() {`, net brace effect 0) must still be detected. Same
+    /// root cause as `scan_production_prints`'s false-negative: applying a
+    /// line's net `opens - closes` atomically and popping `skip_stack` once
+    /// against the line-final depth cannot observe a transient floor-touch
+    /// that a later same-line re-open masks, leaving a stale skip-zone entry
+    /// that misclassifies subsequent lines (here, the real `let _ = unused;`)
+    /// as still being inside the already-exited `mod tests` block.
+    #[test]
+    fn scan_dead_params_detects_dead_param_right_after_skip_zone_closes_same_line() {
+        let content = r#"
+#[cfg(test)]
+mod tests {
+    fn helper() {}
+} fn wrapper() {
+    fn prod(unused: i32) {
+        let _ = unused;
+    }
+}
+"#;
+        let violations = scan_dead_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            names.contains(&"unused"),
+            "BUG: dead param right after a same-line skip-zone close was missed; \
+             violations: {:?}",
+            violations
+        );
+    }
+
     /// Sentinel: a `// #[should_panic(...)]` comment above a `#[test]` function
     /// must NOT suppress the observation-only violation.  Before the fix the
     /// look-ahead treated it as the real attribute and silently skipped the body.
@@ -1322,6 +1609,36 @@ fn fake_should_panic() {
                 .any(|(_, name)| name == "fake_should_panic"),
             "commented #[should_panic] must not suppress observation-only detection; \
              violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel: an assertion-less `#[test]` fn whose closing brace shares a
+    /// line with a later, unrelated re-open (`} fn helper() {`, net brace
+    /// effect 0) must still be flagged. Before the fix, extracting the body
+    /// via a per-line atomic `depth += opens - closes` (checked once at
+    /// line-end) could not observe the true zero-crossing on that line —
+    /// it kept absorbing lines (including the unrelated helper's own
+    /// `assert!(true);`) into `no_assertion_test`'s "body" until some later,
+    /// unrelated `}` brought the net back to zero, making the genuinely
+    /// assertion-less test wrongly appear to contain an assertion.
+    #[test]
+    fn scan_observation_only_tests_detects_violation_when_closing_brace_shares_line_with_reopen() {
+        let content = r#"
+#[test]
+fn no_assertion_test() {
+    let x = 1;
+} fn helper() {
+    assert!(true);
+}
+"#;
+        let violations = scan_observation_only_tests(content);
+        assert!(
+            violations
+                .iter()
+                .any(|(_, name)| name == "no_assertion_test"),
+            "BUG: assertion-less test whose closing brace shares a line with a \
+             later re-open was missed; violations: {:?}",
             violations
         );
     }

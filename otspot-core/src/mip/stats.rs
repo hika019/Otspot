@@ -392,7 +392,37 @@ impl MipStats {
         self.approx_bounds_bytes_per_node = self
             .approx_bounds_bytes_per_node
             .max(approx_bounds_bytes_per_node);
-        self.conflict_clauses_learned = self.conflict_clauses_learned.max(conflict_clauses_learned);
+        // ConflictStore is worker-private, so each store's length counts
+        // distinct per-worker learning activity and must be summed search-wide.
+        self.conflict_clauses_learned = self
+            .conflict_clauses_learned
+            .saturating_add(conflict_clauses_learned);
         self.tree_cut_dry_streak = self.tree_cut_dry_streak.max(tree_cut_dry_streak);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MipStats;
+
+    /// Conflict stores are worker-private, so the search-wide learned-clause
+    /// count is the sum of every worker's store size, not the largest store.
+    ///
+    /// Sentinel: changing the reduction back to `max` reports 4 instead of 7.
+    #[test]
+    fn merge_worker_sums_private_conflict_clause_counts() {
+        let mut total = MipStats::default();
+        let mut worker_a = MipStats::worker_seed();
+        worker_a.conflict_clauses_learned = 3;
+        let mut worker_b = MipStats::worker_seed();
+        worker_b.conflict_clauses_learned = 4;
+
+        total.merge_worker(&worker_a);
+        total.merge_worker(&worker_b);
+
+        assert_eq!(
+            total.conflict_clauses_learned, 7,
+            "3 + 4 worker-private clauses must be reported search-wide"
+        );
     }
 }

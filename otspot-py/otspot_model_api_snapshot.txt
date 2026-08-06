@@ -1,0 +1,495 @@
+pub mod otspot_model
+pub mod otspot_model::constraint
+#[non_exhaustive] pub enum otspot_model::constraint::ConstraintSense
+pub otspot_model::constraint::ConstraintSense::Eq
+pub otspot_model::constraint::ConstraintSense::Ge
+pub otspot_model::constraint::ConstraintSense::Le
+pub struct otspot_model::constraint::Constraint
+pub mod otspot_model::expression
+pub struct otspot_model::expression::Expression
+impl otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::eq_constraint(self, impl core::convert::Into<otspot_model::expression::Expression>) -> otspot_model::constraint::Constraint
+pub fn otspot_model::expression::Expression::from_constant(f64) -> Self
+pub fn otspot_model::expression::Expression::geq(self, impl core::convert::Into<otspot_model::expression::Expression>) -> otspot_model::constraint::Constraint
+pub fn otspot_model::expression::Expression::leq(self, impl core::convert::Into<otspot_model::expression::Expression>) -> otspot_model::constraint::Constraint
+impl core::convert::From<f64> for otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::from(f64) -> Self
+impl core::convert::From<i32> for otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::from(i32) -> Self
+impl core::convert::From<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(otspot_model::expression::Expression) -> Self
+impl core::convert::From<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::from(otspot_model::variable::Variable) -> Self
+impl core::ops::arith::Add for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::add(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<f64> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::add(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::expression::Expression> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::add(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::add(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::quad_expr::QuadExpr> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::add(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Mul<f64> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::mul(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Mul<otspot_model::expression::Expression> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::mul(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Mul<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::mul(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::mul(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Neg for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::neg(self) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::sub(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<f64> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::sub(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::expression::Expression> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::sub(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::sub(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::quad_expr::QuadExpr> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::sub(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+pub mod otspot_model::quad_expr
+pub struct otspot_model::quad_expr::QuadExpr
+impl otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::is_linear(&self) -> bool
+impl core::convert::From<f64> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(f64) -> Self
+impl core::convert::From<i32> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(i32) -> Self
+impl core::convert::From<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(otspot_model::expression::Expression) -> Self
+impl core::convert::From<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(otspot_model::variable::Variable) -> Self
+impl core::ops::arith::Add for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<f64> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, f64) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::quad_expr::QuadExpr> for f64
+pub type f64::Output = otspot_model::quad_expr::QuadExpr
+pub fn f64::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::quad_expr::QuadExpr> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::quad_expr::QuadExpr> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul<f64> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::mul(self, f64) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul<otspot_model::quad_expr::QuadExpr> for f64
+pub type f64::Output = otspot_model::quad_expr::QuadExpr
+pub fn f64::mul(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Neg for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::neg(self) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<f64> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, f64) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::quad_expr::QuadExpr> for f64
+pub type f64::Output = otspot_model::quad_expr::QuadExpr
+pub fn f64::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::quad_expr::QuadExpr> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::quad_expr::QuadExpr> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+pub mod otspot_model::variable
+pub enum otspot_model::variable::VarKind
+pub otspot_model::variable::VarKind::Binary
+pub otspot_model::variable::VarKind::Continuous
+pub otspot_model::variable::VarKind::Integer
+pub struct otspot_model::variable::Variable
+impl otspot_model::variable::Variable
+pub fn otspot_model::variable::Variable::pow2(self) -> otspot_model::quad_expr::QuadExpr
+impl core::convert::From<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::from(otspot_model::variable::Variable) -> Self
+impl core::convert::From<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(otspot_model::variable::Variable) -> Self
+impl core::ops::arith::Add for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::add(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<f64> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::add(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::add(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::quad_expr::QuadExpr> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::variable::Variable> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::add(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::add(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::mul(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul<f64> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::mul(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Mul<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::mul(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul<otspot_model::variable::Variable> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::mul(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Mul<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::mul(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Neg for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::neg(self) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::sub(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<f64> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::sub(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::sub(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::quad_expr::QuadExpr> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::variable::Variable> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::sub(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::sub(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::index::Index<otspot_model::variable::Variable> for otspot_model::ModelResult
+pub type otspot_model::ModelResult::Output = f64
+pub fn otspot_model::ModelResult::index(&self, otspot_model::variable::Variable) -> &f64
+pub macro otspot_model::constraint!
+#[non_exhaustive] pub enum otspot_model::ConstraintSense
+pub otspot_model::ConstraintSense::Eq
+pub otspot_model::ConstraintSense::Ge
+pub otspot_model::ConstraintSense::Le
+#[non_exhaustive] pub enum otspot_model::ModelError
+pub otspot_model::ModelError::Internal(alloc::string::String)
+pub otspot_model::ModelError::InvalidInput(alloc::string::String)
+pub otspot_model::ModelError::NoObjective
+pub otspot_model::ModelError::NonConvex(alloc::string::String)
+pub otspot_model::ModelError::NotSupported(alloc::string::String)
+pub otspot_model::ModelError::SolveError(otspot_model::SolveError)
+pub otspot_model::ModelError::Timeout
+impl core::error::Error for otspot_model::ModelError
+impl core::fmt::Display for otspot_model::ModelError
+pub fn otspot_model::ModelError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum otspot_model::SolutionProof
+pub otspot_model::SolutionProof::FeasibleUnproven
+pub otspot_model::SolutionProof::GlobalOptimal
+pub otspot_model::SolutionProof::LocalOptimal
+#[non_exhaustive] pub enum otspot_model::SolveError
+pub otspot_model::SolveError::Infeasible
+pub otspot_model::SolveError::MaxIterations
+pub otspot_model::SolveError::NumericalError
+pub otspot_model::SolveError::Stalled
+pub otspot_model::SolveError::Unbounded
+impl core::fmt::Display for otspot_model::SolveError
+pub fn otspot_model::SolveError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum otspot_model::VarKind
+pub otspot_model::VarKind::Binary
+pub otspot_model::VarKind::Continuous
+pub otspot_model::VarKind::Integer
+pub struct otspot_model::Constraint
+pub struct otspot_model::Expression
+impl otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::eq_constraint(self, impl core::convert::Into<otspot_model::expression::Expression>) -> otspot_model::constraint::Constraint
+pub fn otspot_model::expression::Expression::from_constant(f64) -> Self
+pub fn otspot_model::expression::Expression::geq(self, impl core::convert::Into<otspot_model::expression::Expression>) -> otspot_model::constraint::Constraint
+pub fn otspot_model::expression::Expression::leq(self, impl core::convert::Into<otspot_model::expression::Expression>) -> otspot_model::constraint::Constraint
+impl core::convert::From<f64> for otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::from(f64) -> Self
+impl core::convert::From<i32> for otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::from(i32) -> Self
+impl core::convert::From<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(otspot_model::expression::Expression) -> Self
+impl core::convert::From<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::from(otspot_model::variable::Variable) -> Self
+impl core::ops::arith::Add for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::add(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<f64> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::add(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::expression::Expression> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::add(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::add(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::quad_expr::QuadExpr> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::add(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Mul<f64> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::mul(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Mul<otspot_model::expression::Expression> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::mul(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Mul<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::mul(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::mul(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Neg for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::neg(self) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::sub(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<f64> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::sub(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::expression::Expression> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::sub(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::sub(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::quad_expr::QuadExpr> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::sub(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+pub struct otspot_model::Model
+impl otspot_model::Model
+pub fn otspot_model::Model::add_binary_var(&mut self, &str) -> otspot_model::variable::Variable
+pub fn otspot_model::Model::add_constraint(&mut self, otspot_model::constraint::Constraint) -> &mut Self
+pub fn otspot_model::Model::add_int_var(&mut self, &str, f64, f64) -> otspot_model::variable::Variable
+pub fn otspot_model::Model::add_qc_le(&mut self, impl core::convert::Into<otspot_model::quad_expr::QuadExpr>, f64) -> &mut Self
+pub fn otspot_model::Model::add_soc_le(&mut self, alloc::vec::Vec<otspot_model::expression::Expression>, otspot_model::expression::Expression) -> &mut Self
+pub fn otspot_model::Model::add_var(&mut self, &str, f64, f64) -> otspot_model::variable::Variable
+pub fn otspot_model::Model::maximize(&mut self, impl core::convert::Into<otspot_model::quad_expr::QuadExpr>) -> &mut Self
+pub fn otspot_model::Model::minimize(&mut self, impl core::convert::Into<otspot_model::quad_expr::QuadExpr>) -> &mut Self
+pub fn otspot_model::Model::new(&str) -> Self
+pub fn otspot_model::Model::set_cancel_flag(&mut self, alloc::sync::Arc<core::sync::atomic::AtomicBool>) -> &mut Self
+pub fn otspot_model::Model::set_obj_offset(&mut self, f64) -> &mut Self
+pub fn otspot_model::Model::set_presolve(&mut self, bool) -> &mut Self
+pub fn otspot_model::Model::set_threads(&mut self, usize) -> &mut Self
+pub fn otspot_model::Model::set_timeout(&mut self, f64)
+pub fn otspot_model::Model::set_tolerance(&mut self, otspot_core::options::Tolerance) -> &mut Self
+pub fn otspot_model::Model::solve(&mut self) -> core::result::Result<otspot_model::ModelResult, otspot_model::ModelError>
+pub fn otspot_model::Model::try_add_int_var(&mut self, &str, f64, f64) -> core::result::Result<otspot_model::variable::Variable, otspot_model::ModelError>
+pub fn otspot_model::Model::try_add_var(&mut self, &str, f64, f64) -> core::result::Result<otspot_model::variable::Variable, otspot_model::ModelError>
+pub fn otspot_model::Model::try_set_timeout(&mut self, f64) -> core::result::Result<&mut Self, otspot_model::ModelError>
+pub fn otspot_model::Model::try_var_kind(&self, otspot_model::variable::Variable) -> core::result::Result<otspot_model::variable::VarKind, otspot_model::ModelError>
+pub fn otspot_model::Model::try_var_name(&self, otspot_model::variable::Variable) -> core::result::Result<&str, otspot_model::ModelError>
+pub fn otspot_model::Model::var_kind(&self, otspot_model::variable::Variable) -> otspot_model::variable::VarKind
+pub fn otspot_model::Model::var_name(&self, otspot_model::variable::Variable) -> &str
+pub struct otspot_model::ModelResult
+pub otspot_model::ModelResult::bound_duals: alloc::vec::Vec<f64>
+pub otspot_model::ModelResult::dual_solution: core::option::Option<alloc::vec::Vec<f64>>
+pub otspot_model::ModelResult::objective_value: f64
+pub otspot_model::ModelResult::proof: otspot_model::SolutionProof
+pub otspot_model::ModelResult::reduced_costs: core::option::Option<alloc::vec::Vec<f64>>
+pub otspot_model::ModelResult::slack: core::option::Option<alloc::vec::Vec<f64>>
+pub otspot_model::ModelResult::stats: otspot_core::problem::SolveStats
+pub otspot_model::ModelResult::status: otspot_core::problem::SolveStatus
+impl otspot_model::ModelResult
+pub fn otspot_model::ModelResult::has_global_optimality_proof(&self) -> bool
+pub fn otspot_model::ModelResult::objective(&self) -> f64
+pub fn otspot_model::ModelResult::try_value(&self, otspot_model::variable::Variable) -> core::result::Result<f64, otspot_model::ModelError>
+pub fn otspot_model::ModelResult::value(&self, otspot_model::variable::Variable) -> f64
+impl core::ops::index::Index<otspot_model::variable::Variable> for otspot_model::ModelResult
+pub type otspot_model::ModelResult::Output = f64
+pub fn otspot_model::ModelResult::index(&self, otspot_model::variable::Variable) -> &f64
+pub struct otspot_model::QuadExpr
+impl otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::is_linear(&self) -> bool
+impl core::convert::From<f64> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(f64) -> Self
+impl core::convert::From<i32> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(i32) -> Self
+impl core::convert::From<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(otspot_model::expression::Expression) -> Self
+impl core::convert::From<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(otspot_model::variable::Variable) -> Self
+impl core::ops::arith::Add for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<f64> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, f64) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::quad_expr::QuadExpr> for f64
+pub type f64::Output = otspot_model::quad_expr::QuadExpr
+pub fn f64::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::quad_expr::QuadExpr> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::quad_expr::QuadExpr> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul<f64> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::mul(self, f64) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul<otspot_model::quad_expr::QuadExpr> for f64
+pub type f64::Output = otspot_model::quad_expr::QuadExpr
+pub fn f64::mul(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Neg for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::neg(self) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<f64> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, f64) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::expression::Expression> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::quad_expr::QuadExpr> for f64
+pub type f64::Output = otspot_model::quad_expr::QuadExpr
+pub fn f64::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::quad_expr::QuadExpr> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::quad_expr::QuadExpr> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+pub struct otspot_model::Variable
+impl otspot_model::variable::Variable
+pub fn otspot_model::variable::Variable::pow2(self) -> otspot_model::quad_expr::QuadExpr
+impl core::convert::From<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::from(otspot_model::variable::Variable) -> Self
+impl core::convert::From<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::from(otspot_model::variable::Variable) -> Self
+impl core::ops::arith::Add for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::add(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<f64> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::add(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::add(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::quad_expr::QuadExpr> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::add(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Add<otspot_model::variable::Variable> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::add(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::add(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Add<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::add(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::mul(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul<f64> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::mul(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Mul<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::mul(self, otspot_model::expression::Expression) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Mul<otspot_model::variable::Variable> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::mul(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Mul<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::expression::Expression::mul(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Neg for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::neg(self) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::sub(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<f64> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::sub(self, f64) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::expression::Expression> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::expression::Expression
+pub fn otspot_model::variable::Variable::sub(self, otspot_model::expression::Expression) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::quad_expr::QuadExpr> for otspot_model::variable::Variable
+pub type otspot_model::variable::Variable::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::variable::Variable::sub(self, otspot_model::quad_expr::QuadExpr) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::arith::Sub<otspot_model::variable::Variable> for f64
+pub type f64::Output = otspot_model::expression::Expression
+pub fn f64::sub(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::variable::Variable> for otspot_model::expression::Expression
+pub type otspot_model::expression::Expression::Output = otspot_model::expression::Expression
+pub fn otspot_model::expression::Expression::sub(self, otspot_model::variable::Variable) -> otspot_model::expression::Expression
+impl core::ops::arith::Sub<otspot_model::variable::Variable> for otspot_model::quad_expr::QuadExpr
+pub type otspot_model::quad_expr::QuadExpr::Output = otspot_model::quad_expr::QuadExpr
+pub fn otspot_model::quad_expr::QuadExpr::sub(self, otspot_model::variable::Variable) -> otspot_model::quad_expr::QuadExpr
+impl core::ops::index::Index<otspot_model::variable::Variable> for otspot_model::ModelResult
+pub type otspot_model::ModelResult::Output = f64
+pub fn otspot_model::ModelResult::index(&self, otspot_model::variable::Variable) -> &f64

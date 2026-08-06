@@ -11,7 +11,7 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-use otspot_core::options::{MipConfig, SolverOptions, Tolerance};
+use otspot_core::options::{MipConfig, SolverOptions, Tolerance, MAX_THREADS};
 use otspot_core::{solve_milp_with_stats, MipStats};
 use otspot_io::mps::parse_milp_file;
 use std::path::Path;
@@ -352,8 +352,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String>
                 let parsed: usize = value
                     .parse()
                     .map_err(|_| format!("error: invalid --threads value: {value}"))?;
-                if parsed == 0 {
-                    return Err("error: --threads must be >= 1".to_string());
+                if parsed == 0 || parsed > MAX_THREADS {
+                    return Err(format!(
+                        "error: --threads must be between 1 and {MAX_THREADS}"
+                    ));
                 }
                 threads = parsed;
             }
@@ -635,6 +637,37 @@ mod tests {
             result.is_err(),
             "--max-nodes 0 must be rejected at parse time; got {result:?}"
         );
+    }
+
+    /// `SolverOptions` accepts exactly `1..=MAX_THREADS`; the CLI must reject
+    /// the same out-of-range values before reading the input file. `main`
+    /// maps this parse error to exit code 2, rather than reporting a generic
+    /// solver `NumericalError` with exit code 0.
+    ///
+    /// Sentinel: reverting the upper-bound branch makes the two oversized
+    /// values below return `Ok(CliArgs { .. })`.
+    #[test]
+    fn threads_cli_accepts_exact_solver_options_range() {
+        for bad in [0_usize, MAX_THREADS + 1, usize::MAX] {
+            let result = parse_args([
+                "tiny.mps".to_string(),
+                "--threads".to_string(),
+                bad.to_string(),
+            ]);
+            assert!(
+                result.is_err(),
+                "--threads {bad} must be rejected at parse time; got {result:?}"
+            );
+        }
+        for ok in [1_usize, 2, MAX_THREADS] {
+            let result = parse_args([
+                "tiny.mps".to_string(),
+                "--threads".to_string(),
+                ok.to_string(),
+            ])
+            .expect("in-range thread budget");
+            assert_eq!(result.threads, ok);
+        }
     }
 
     /// NEW (P3-6): a non-numeric flag value returns a `Result::Err` (a

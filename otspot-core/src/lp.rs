@@ -120,6 +120,94 @@ mod tests {
         );
     }
 
+    /// A chain LP with `Ge` constraints (forces artificial variables into the
+    /// initial basis, routing through `dual_advanced`'s Big-M cold start) large
+    /// enough that most artificials are still basic when `cancel_flag` fires
+    /// mid-solve, matching the shape that reaches
+    /// `dual_advanced::phase1::farkas_infeasibility_certified` /
+    /// `primal::extract_farkas_certificate`'s per-row Farkas probe loops with
+    /// `art_rows.len()` close to `m`.
+    fn make_chain_lp_with_many_artificials(n: usize) -> LpProblem {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        let mut b = Vec::new();
+        for i in 0..(n - 1) {
+            rows.push(i);
+            cols.push(i);
+            vals.push(1.0);
+            rows.push(i);
+            cols.push(i + 1);
+            vals.push(1.0);
+            b.push(((i % 5) + 1) as f64);
+        }
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, n - 1, n).unwrap();
+        let c: Vec<f64> = (0..n).map(|i| ((i % 7) + 1) as f64).collect();
+        LpProblem::new_general(
+            c,
+            a,
+            b,
+            vec![ConstraintType::Ge; n - 1],
+            vec![(0.0, 10.0); n],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// `farkas_infeasibility_certified` (`dual_advanced::phase1`) and
+    /// `extract_farkas_certificate` (`primal`) each verify a Farkas certificate
+    /// with a `for &row in &art_rows { ... }` loop that does one BTRAN solve
+    /// plus an O(n) certificate check per remaining artificial row -- and
+    /// neither checked `deadline` or `cancel_flag` inside that loop, only at
+    /// entry. A preset `cancel_flag=true` (Phase 1 bails on its very first
+    /// iteration, leaving nearly every artificial still basic --
+    /// `art_rows.len()` close to `m`) went unnoticed until the whole O(m)
+    /// probe loop finished on its own. Deterministic preset (not a delayed
+    /// background thread + sleep) so the assertion isn't a race against
+    /// however long the solve happens to take to reach the probe loop.
+    ///
+    /// n=6000 (not the smaller sizes used elsewhere in this file) because
+    /// `[profile.test] opt-level = 3` (this workspace's Cargo.toml) makes the
+    /// whole per-row probe cheap enough at smaller n that even the *unfixed*
+    /// loop finished in well under a second -- this size was chosen by
+    /// actually reverting the fix and increasing n until the regression
+    /// reproduced under `cargo test`'s own profile, not just under `--profile
+    /// dev`. Measured (opt-level=3, this machine): 0.05s fixed vs 1.9s
+    /// reverted. Sentinel confirmed by reverting and re-running.
+    ///
+    /// 1.5s bound, not 0.05s (Codex PR #31 audit P3): a >30x margin, chosen
+    /// over a counter-based rewrite because the preset-flag setup is already
+    /// deterministic (no background thread to race) and >30x dwarfs the
+    /// contention slowdown actually seen on this project's CI (~9% overshoot
+    /// on a since-fixed, near-zero-margin `qp_phase2.rs` test).
+    #[test]
+    fn farkas_certificate_probe_loop_honors_cancel_flag_preset() {
+        use std::sync::{atomic::AtomicBool, Arc};
+        use std::time::{Duration, Instant};
+
+        let lp = make_chain_lp_with_many_artificials(6000);
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::new(AtomicBool::new(true))),
+            presolve: false,
+            ..Default::default()
+        };
+
+        let t0 = Instant::now();
+        let result = solve_lp_with(&lp, &opts);
+        let elapsed = t0.elapsed();
+        assert_eq!(
+            result.status,
+            SolveStatus::Timeout,
+            "cancel_flag=true must produce Timeout"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "preset cancel_flag=true took {elapsed:?} to stop the solve -- \
+             Farkas certificate probe loop is not honoring cancel_flag \
+             (pre-fix measured 1.9s, opt-level=3, this machine)"
+        );
+    }
+
     /// Invalid options produce NumericalError via `solve_lp_with`.
     ///
     /// Validation is performed by `simplex::solve_with` (the load-bearing sentinel

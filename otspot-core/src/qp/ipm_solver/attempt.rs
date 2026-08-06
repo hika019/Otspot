@@ -203,7 +203,8 @@ fn build_attempt_ladder(
 
 /// `attempts` ladder ((use_ruiz, tighten) の並び) を順に試し、`prove_optimal` を
 /// 満たす最初の outcome で打ち切るか、決定的 stall (同一 lane 内で bit 同一な run が
-/// `CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK` 回続く) で残り attempt をスキップする。
+/// `CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK` 回続く) と判定した lane の残り attempt を
+/// スキップする (反対 lane は継続。両 lane dead で終了)。
 /// `best`/`best_config`/`iter_used` を更新する。
 #[allow(clippy::too_many_arguments)]
 fn run_attempt_ladder(
@@ -230,6 +231,15 @@ fn run_attempt_ladder(
     // 変わって bit が変化したら 1 にリセットする。break は
     // CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK に到達したときのみ。
     let mut run_len_by_ruiz: [usize; 2] = [0, 0];
+    // 決定的 stall と判定した lane は「その lane の残り attempt だけ」を飛ばす。
+    // 打ち切りを ladder 全体 (両 lane) に効かせると、片方の lane
+    // (例: use_ruiz=true) が bit 同一 stall に落ちただけで、まだ試していない
+    // 反対 lane の attempt を巻き添えでスキップしてしまう。dfl001 はまさにこれで
+    // 退化した: ruiz=true 側が tighten=1000/10000 で bit 同一 stall に潰れると、
+    // 直後の唯一 certify 可能な (ruiz=false, tighten=10000) attempt (comp/kkt
+    // ともに LP_CERT_TOL 以下) が実行されず Stalled になる。lane 単位に絞れば
+    // 反対 lane は最後まで走る。両 lane が dead になった時のみ ladder を終える。
+    let mut lane_dead = [false, false];
 
     for &(use_ruiz, tighten) in attempts.iter() {
         if let Some(d) = total_deadline {
@@ -239,6 +249,10 @@ fn run_attempt_ladder(
         }
         if *iter_used >= user_max_iter {
             break;
+        }
+        // この lane は決定的 stall 済み: 残り attempt を飛ばす (反対 lane は継続)。
+        if lane_dead[usize::from(use_ruiz)] {
+            continue;
         }
         let remaining = user_max_iter.saturating_sub(*iter_used);
         let per_attempt_cap = MAX_ITER_PER_ATTEMPT.min(remaining);
@@ -259,8 +273,9 @@ fn run_attempt_ladder(
             break;
         }
         // 同一 lane (use_ruiz) 内で tighten を変えても bit 同一な run が
-        // CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK 回続いたら残り attempt をスキップ
-        // (決定的 stall)。2 連続だけでは早計 (dfl001: tighten=100→1000 で 2 連続
+        // CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK 回続いたら、その lane を
+        // 決定的 stall と判定して残り attempt をスキップする (下の lane_dead)。
+        // 2 連続だけでは早計 (dfl001: tighten=100→1000 で 2 連続
         // 同一でも 3 投目の tighten=10000 で iter が変化し脱出できた)。
         // termination==Converged (scaled 空間では収束したが元空間 eps に届かない
         // 精度床) は「inner eps を変えれば結果も変わる」が定義そのものなので run を
@@ -293,7 +308,11 @@ fn run_attempt_ladder(
             _ => {}
         }
         if run_len_by_ruiz[lane] >= CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK {
-            break;
+            // この lane のみ dead 化。両 lane が dead になったら ladder 終了。
+            lane_dead[lane] = true;
+            if lane_dead.iter().all(|&d| d) {
+                break;
+            }
         }
     }
 }
@@ -1129,6 +1148,103 @@ mod tests {
             timing: None,
             termination: IpmTermination::Converged,
         }
+    }
+
+    thread_local! {
+        static LANE_LOCAL_CALLS: std::cell::RefCell<Vec<(bool, i64)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// use_ruiz=true は全 tighten で bit 同一の非収束 Stalled (決定的 stall を作る)。
+    /// use_ruiz=false は tighten ごとに objective を変え bit 同一化を避ける。
+    /// 実行された (use_ruiz, tighten) を記録する。
+    fn recording_stall_runner(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        options: &SolverOptions,
+        user_eps: f64,
+    ) -> IpmOutcome {
+        let use_ruiz = options.use_ruiz_scaling;
+        let tighten = (user_eps / options.ipm.eps).round() as i64;
+        LANE_LOCAL_CALLS.with(|c| c.borrow_mut().push((use_ruiz, tighten)));
+        let objective = if use_ruiz { 0.0 } else { tighten as f64 };
+        IpmOutcome {
+            solution: vec![1.0],
+            dual_solution: vec![],
+            bound_duals: vec![],
+            objective,
+            iterations: 7,
+            kkt_residual_rel: 1.0,
+            primal_residual_rel: 1.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 1.0,
+            duality_gap_rel: 1.0,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+            termination: IpmTermination::Stalled,
+        }
+    }
+
+    /// SENTINEL (dfl001 IPM-dispatch 退化の真因): 片 lane (use_ruiz=true) の
+    /// 決定的 bit 同一 stall が、反対 lane (use_ruiz=false) の未実行 attempt を
+    /// 巻き添えでスキップしてはならない。旧実装は決定的 stall を検出すると
+    /// `run_attempt_ladder` の for ループを丸ごと break し、直後の唯一 certify
+    /// 可能な (ruiz=false, tighten=10000) attempt を実行せず Stalled を返していた。
+    /// lane 単位の打ち切りに直すと (false,10000) は必ず実行される。break を
+    /// lane 全体へ戻す revert でこの test は FAIL する。
+    #[test]
+    fn deterministic_stall_in_one_lane_does_not_skip_other_lane() {
+        let prob = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![],
+        )
+        .unwrap();
+        let presolve = QpPresolveResult::no_reduction(&prob);
+        let view = ProblemView::from_problem(&prob);
+        let mut opts = SolverOptions::default();
+        let user_eps = 1e-2;
+        // main の attempts 梯子と同じ interleave (true/false ペア)。
+        let attempts = [
+            (true, 100.0),
+            (false, 100.0),
+            (true, 1000.0),
+            (false, 1000.0),
+            (true, 10000.0),
+            (false, 10000.0),
+        ];
+        LANE_LOCAL_CALLS.with(|c| c.borrow_mut().clear());
+        let mut best = None;
+        let mut best_config = None;
+        let mut iter_used = 0usize;
+        run_attempt_ladder(
+            &prob,
+            &presolve,
+            recording_stall_runner,
+            &mut opts,
+            &view,
+            user_eps,
+            usize::MAX,
+            None,
+            &attempts,
+            &mut best,
+            &mut best_config,
+            &mut iter_used,
+        );
+        let calls = LANE_LOCAL_CALLS.with(|c| c.borrow().clone());
+        // ruiz=true lane は 3 連続 bit 同一で決定的 stall と判定されるが、
+        // ruiz=false lane の (false,10000) attempt は必ず実行されねばならない。
+        assert!(
+            calls.contains(&(false, 10000)),
+            "lane-local break regression: (ruiz=false, tighten=10000) was skipped by a \
+             deterministic stall in the ruiz=true lane; calls={calls:?}",
+        );
     }
 
     #[test]
@@ -3210,12 +3326,12 @@ mod tests {
     /// base_tighten=100 → attempts = [(true,100),(false,100),(true,1000),
     /// (false,1000),(true,10000),(false,10000),(true,10),(false,10),(true,1),
     /// (false,1)] (10 要素、lane が true/false と交互)。runner が入力に関わらず
-    /// 常に同一 bit を返す (真の決定論的 stall) とき、lane=true の出現順は
-    /// 全体 call 番号 1,3,5,... (1-indexed) = 1st,2nd,3rd,... occurrence。
-    /// run_len[true] は 1st occurrence で 1、2nd occurrence (call#3) で 2、
-    /// 3rd occurrence (call#5) で 3 となり閾値に到達 → call#5 (0-indexed idx4,
-    /// (true,10000)) で break。break までに実行された call 数は 1,2,3,4,5 の
-    /// 5 回 (idx0..idx4)。revert (early-break 完全削除) すると 10 回全走し FAIL。
+    /// 常に同一 bit を返す (真の決定論的 stall = 両 lane とも同一) とき、打ち切りは
+    /// lane 単位: lane=true は出現 call#1,3,5 で run_len 1→2→3 に達し call#5 で
+    /// dead 化、lane=false は call#2,4,6 で 1→2→3 に達し call#6 で dead 化する。
+    /// 両 lane dead になった call#6 で ladder を終える → 実行 call 数は 6。
+    /// (旧実装は片 lane が閾値到達で ladder 全体を break していたため 5 だった。
+    /// early-break を完全削除すると 10 回全走し FAIL する。)
     mod dual_lane_true_stall_breaks_at_third_occurrence {
         use super::*;
         use crate::qp::ipm_solver::outcome::IpmTermination;
@@ -3264,9 +3380,9 @@ mod tests {
             let (result, _) = solve_ipm_with_runner(&prob, &opts, runner_always_identical);
             let calls = CALLS.load(Ordering::SeqCst);
             assert_eq!(
-                calls, 5,
-                "真の決定論的 stall (dual-lane) は lane=true の 3rd occurrence \
-                 (全体 5 call 目) で打ち切るべき, got {calls}"
+                calls, 6,
+                "真の決定論的 stall (dual-lane) は各 lane が独立に 3rd occurrence に \
+                 達し、両 lane dead になる全体 6 call 目で打ち切るべき, got {calls}"
             );
             assert_eq!(
                 result.status,

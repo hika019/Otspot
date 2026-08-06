@@ -176,16 +176,44 @@ fn farkas_infeasibility_certified(
             .collect();
         basis_mgr.btran_dense(&mut y);
         if farkas_direction_certified(a_aug, b, &y, n_total, tol) {
+            // An external stop requested while this BTRAN/certificate check ran
+            // must not let a coincidentally-already-computed verdict slip past
+            // it: the caller unconditionally maps `true` here to a hard
+            // `SolveStatus::Infeasible`, bypassing `stop_result_with_incumbent`.
+            // Re-check immediately before accepting, not just at loop/function
+            // entry, so a cancel/deadline hit during Strategy 1 is honored the
+            // same way it already is for Strategy 2 below.
+            if options.external_stop_requested() {
+                return false;
+            }
             return true;
         }
     }
 
     // Strategy 2: per-row probes — catches cplex2-class where joint b^Ty ≈ 0.
+    //
+    // O(|art_rows|) BTRAN solves + O(|art_rows| * n_total) certificate checks:
+    // unlike every simplex iteration loop in this module, this has no natural
+    // per-iteration cost bound from a caller-visible progress metric, and
+    // |art_rows| can be close to `m` right after a Phase I bail (most
+    // artificials still basic — exactly the case that reaches this function).
+    // Checked here (not just at entry) for the same reason `deadline` is
+    // rechecked inside any O(m)+ loop elsewhere in this crate: an external
+    // stop must not wait out a loop whose own cost scales with problem size.
     for &row in &art_rows {
+        if options.external_stop_requested() {
+            return false;
+        }
         let mut e_i = vec![0.0_f64; m];
         e_i[row] = 1.0;
         basis_mgr.btran_dense(&mut e_i);
         if farkas_direction_certified(a_aug, b, &e_i, n_total, tol) {
+            // Same re-check as Strategy 1: the per-row entry check above only
+            // proves no stop was requested *before* this row's BTRAN started,
+            // not that none arrived during it.
+            if options.external_stop_requested() {
+                return false;
+            }
             return true;
         }
     }
@@ -2007,6 +2035,186 @@ mod tests {
         assert!(
             !farkas_direction_certified(&a_aug, &b, &y, 1, tol),
             "A^T y = 1 > tol: direction must NOT be certified (removing A^T check breaks this)"
+        );
+    }
+
+    /// Number of entirely-empty "original" columns padding the fixtures below.
+    /// `farkas_direction_certified`'s `for j in 0..n_total` column loop pays a
+    /// real, controllable O(n_total) cost even though every column is the zero
+    /// vector (so `A^T y <= tol` holds trivially for any `y`, regardless of
+    /// cancellation) -- large enough (empirically several ms in `--release`)
+    /// for a background thread's `sleep(1ms)` to land reliably inside a single
+    /// `farkas_infeasibility_certified` call.
+    const FARKAS_RACE_N_TOTAL: usize = 4_000_000;
+
+    /// `A_aug` for the two race sentinels below: 2 rows, `FARKAS_RACE_N_TOTAL`
+    /// empty original columns, and 2 artificial columns forming an identity
+    /// basis (`basis_aug = [n_total, n_total + 1]`, `B = I` so BTRAN is a
+    /// no-op and the entire per-call cost sits in the certificate check).
+    fn build_farkas_race_a_aug() -> (CscMatrix, [usize; 2]) {
+        let n_total = FARKAS_RACE_N_TOTAL;
+        let a_aug = CscMatrix::from_triplets(
+            &[0, 1],
+            &[n_total, n_total + 1],
+            &[1.0, 1.0],
+            2,
+            n_total + 2,
+        )
+        .unwrap();
+        (a_aug, [n_total, n_total + 1])
+    }
+
+    /// `farkas_infeasibility_certified`'s Strategy 1 (joint indicator) had no
+    /// cancellation check anywhere before its `return true` (Codex PR #31
+    /// review follow-up): every caller (the `Unbounded`/`Timeout`/`Stalled`/
+    /// `Optimal` arms in `big_m_cold_start` above) maps a bare `true` here
+    /// straight to a hard `SolveStatus::Infeasible`, bypassing the
+    /// incumbent-preserving `stop_result_with_incumbent` path an external
+    /// stop is supposed to take.
+    ///
+    /// `b = [1, 1]` makes the joint indicator `y = [1, 1]` certify
+    /// (`b^Ty = 2`, above tol, so `farkas_direction_certified` proceeds into
+    /// its O(n_total) column loop; every column is empty, so `A^Ty = 0 <= tol`
+    /// throughout).
+    /// That loop is the entire cost of this call -- long enough for a
+    /// background thread to flip `cancel_flag` mid-call, deterministically
+    /// landing the cancellation inside the exact window this fixes: after
+    /// Strategy 1 has already computed a valid certificate, but before the
+    /// function commits to it.
+    ///
+    /// Sentinel: reverting the `if options.external_stop_requested() { return
+    /// false; }` added right before Strategy 1's `return true` makes this
+    /// assert `true` instead of `false` -- the certificate math itself never
+    /// consults `cancel_flag`, so without the added recheck the race has no
+    /// effect on the result.
+    #[test]
+    fn farkas_infeasibility_certified_strategy1_honors_cancel_flag_before_accepting() {
+        use super::farkas_infeasibility_certified;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let (a_aug, basis_aug) = build_farkas_race_a_aug();
+        let b = [1.0_f64, 1.0_f64];
+
+        // Self-calibrating (not a hardcoded sleep, which would be brittle
+        // across machines/build profiles): measure this fixture's own
+        // uncancelled duration first, then derive the race thread's delay
+        // from it, so the flip reliably lands mid-call regardless of how
+        // fast a single O(n_total) pass actually runs here.
+        let baseline_opts = SolverOptions::default();
+        let t0 = Instant::now();
+        let baseline_certified = farkas_infeasibility_certified(
+            &a_aug,
+            &b,
+            &basis_aug,
+            2,
+            FARKAS_RACE_N_TOTAL,
+            &baseline_opts,
+        );
+        let uncancelled = t0.elapsed();
+        assert!(
+            baseline_certified,
+            "sanity: this fixture must genuinely certify via Strategy 1 (b^Ty=2>tol, \
+             A^Ty=0<=tol trivially) when uncancelled"
+        );
+        assert!(
+            uncancelled >= Duration::from_micros(200),
+            "fixture must have genuine per-call cost (measured {uncancelled:?}) for \
+             the race below to reliably land mid-call -- increase FARKAS_RACE_N_TOTAL \
+             if this fires"
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_setter = Arc::clone(&cancel);
+        let sleep_for = uncancelled / 4;
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(sleep_for);
+            cancel_setter.store(true, Ordering::Relaxed);
+        });
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::clone(&cancel)),
+            ..Default::default()
+        };
+        let certified =
+            farkas_infeasibility_certified(&a_aug, &b, &basis_aug, 2, FARKAS_RACE_N_TOTAL, &opts);
+        setter.join().unwrap();
+
+        assert!(
+            !certified,
+            "cancel_flag flipped ~{sleep_for:?} into a call whose uncancelled \
+             duration measured {uncancelled:?} -- must prevent Strategy 1 from \
+             accepting an otherwise-valid certificate"
+        );
+    }
+
+    /// Companion to the Strategy 1 sentinel above, for Strategy 2 (per-row
+    /// probes). `b = [1, -1]` sign-cancels the joint indicator (`b^Ty = 1 +
+    /// (-1) = 0 <= tol`), so `farkas_direction_certified` short-circuits on
+    /// its own `by <= tol` check *before* reaching the expensive O(n_total)
+    /// column loop -- Strategy 1 fails fast, without ever exercising that
+    /// loop. Strategy 2's row-0 probe (`e_0 = [1, 0]`, `b^Ty = 1 > tol`) is
+    /// then the one that pays the O(n_total) cost and is the one this test's
+    /// race targets.
+    ///
+    /// Sentinel: reverting the `if options.external_stop_requested() { return
+    /// false; }` added right before Strategy 2's `return true` makes this
+    /// assert `true` instead of `false`, the same way as the Strategy 1
+    /// companion above.
+    #[test]
+    fn farkas_infeasibility_certified_strategy2_honors_cancel_flag_before_accepting() {
+        use super::farkas_infeasibility_certified;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let (a_aug, basis_aug) = build_farkas_race_a_aug();
+        let b = [1.0_f64, -1.0_f64];
+
+        let baseline_opts = SolverOptions::default();
+        let t0 = Instant::now();
+        let baseline_certified = farkas_infeasibility_certified(
+            &a_aug,
+            &b,
+            &basis_aug,
+            2,
+            FARKAS_RACE_N_TOTAL,
+            &baseline_opts,
+        );
+        let uncancelled = t0.elapsed();
+        assert!(
+            baseline_certified,
+            "sanity: Strategy 1 must fail fast (joint b^Ty=0<=tol) and Strategy 2's \
+             row-0 probe must certify (b^Ty=1>tol) when uncancelled"
+        );
+        assert!(
+            uncancelled >= Duration::from_micros(200),
+            "fixture must have genuine per-call cost (measured {uncancelled:?}) for \
+             the race below to reliably land mid-call -- increase FARKAS_RACE_N_TOTAL \
+             if this fires"
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_setter = Arc::clone(&cancel);
+        let sleep_for = uncancelled / 4;
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(sleep_for);
+            cancel_setter.store(true, Ordering::Relaxed);
+        });
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::clone(&cancel)),
+            ..Default::default()
+        };
+        let certified =
+            farkas_infeasibility_certified(&a_aug, &b, &basis_aug, 2, FARKAS_RACE_N_TOTAL, &opts);
+        setter.join().unwrap();
+
+        assert!(
+            !certified,
+            "cancel_flag flipped ~{sleep_for:?} into a call whose uncancelled \
+             duration measured {uncancelled:?} (Strategy 2's row-0 O(n_total) \
+             certificate check) must prevent it from accepting an otherwise-valid \
+             certificate"
         );
     }
 
