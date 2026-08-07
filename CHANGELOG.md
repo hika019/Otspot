@@ -58,6 +58,10 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
   未証明の最適性を Optimal と誤報告しうる問題を修正
 - QP IPM (IPPMM) の数値安定性まわりの複数の真因を修正し、QSHELL/QGFRDXPN 等
   一部の QP が Stalled から収束するようになった
+- 非凸 QCQP の大域探索で、実行中のノード緩和がキャンセル要求に反応せず、
+  キャンセル後も探索が長時間継続し得た問題を修正
+- MILP 並列探索で、要求したワーカーの一部を OS が拒否すると solve が
+  デッドロックしていた問題を修正 (フリーズせずエラーを返すようにした)
 - QP/LP の IPM が、Ruiz スケーリング有無を切り替えて再試行する際の打ち切り
   判定に不具合があり、片方が行き詰まっただけで再試行を止め、収束するはずの
   LP が Stalled と判定され得た問題を修正
@@ -79,6 +83,9 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - `SolverOptions::threads` に上限 (`MAX_THREADS` = 1024) を追加し `validate()` /
   `with_threads()` で拒否する。MILP ワーカー生成は OS 拒否時に panic するため、
   設定ミスは solve の奥ではなく options 検証で落とす。
+- [破壊的変更] `Model::set_threads` が範囲外のスレッド数を受理しなくなった。
+  従来 `0` は暗黙に `1` へ丸められていたが、現在は不正な入力として `solve()`
+  前に拒否される (`SolverOptions` と同じ `1..=MAX_THREADS`)。
 - `otspot-num` が `rayon` に依存するようになった (専用プール構築のため)。
 - `otspot-py`: Python 要件を 3.11+ に引き上げ (abi3-py311)
 - `IpmOptions::delta_min`/`delta_p_init`/`delta_d_init` を削除 (無視される

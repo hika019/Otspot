@@ -386,6 +386,34 @@ def test_cross_model_var_name_and_var_kind_raise_invalid_input_error():
         model_b.var_kind(x_a)
 
 
+def test_set_threads_out_of_range_raises_invalid_input_error():
+    """`Model.set_threads` must reject a budget outside `1..=MAX_THREADS` as an
+    identifiable invalid *user input*, mirroring the Rust `set_threads`
+    boundary check (otspot-model/src/model.rs `validate_threads`). Like the
+    other Model-level input validators the error is deferred to `solve()` and
+    surfaces as `InvalidInputError` -- never a generic `SolveFailedError` /
+    `NumericalError` from deep inside the solver. `MAX_THREADS` is 1024
+    (otspot_core::options::MAX_THREADS)."""
+    for n in (0, 1025, 2**32):
+        model = otspot.Model(f"threads_{n}")
+        x = model.add_var("x", 0.0, 1.0)
+        model.minimize(x)
+        model.set_threads(n)
+        with pytest.raises(otspot.InvalidInputError):
+            model.solve()
+
+
+def test_set_threads_in_range_is_accepted():
+    """A valid budget must leave no lingering input error behind: the solve
+    succeeds. Companion to `test_set_threads_out_of_range_raises_invalid_input_error`."""
+    for n in (1, 2, 8, 1024):
+        model = otspot.Model(f"threads_ok_{n}")
+        x = model.add_var("x", 0.0, 1.0)
+        model.minimize(x)
+        model.set_threads(n)
+        model.solve()
+
+
 def _build_gil_probe_model(n: int = 1200) -> otspot.Model:
     """A single-model-thread solve of this size takes ~0.12s in a release
     build and ~21s in debug (measured empirically: this LP's build+solve

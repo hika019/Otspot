@@ -343,12 +343,23 @@ fn test_maybe_cancel_before_final_classification(opts: &ConicOptions) {
 /// blocks. The caller's wall-clock deadline is forwarded so a single node LP
 /// cannot run past the B&B budget.
 ///
+/// The shared `cancel_flag` is forwarded alongside the deadline for the same
+/// reason: the B&B loop only re-reads `stop_requested()` *between* nodes, so a
+/// cancel fired while one node relaxation is mid-solve would otherwise run to
+/// completion, breaking `set_cancel_flag`'s cooperative-cancellation contract
+/// on a single expensive node. `SolverOptions::cancel_flag` is checked at the
+/// same cadence as the LP's wall-clock deadline (`external_stop_requested`).
+///
 /// Builds the combined equality+inequality matrix directly from `prob.a`/
 /// `prob.g`'s own CSC nonzeros (`O(nnz(a) + nnz(g))`) instead of densifying
 /// both to `Vec<Vec<f64>>` first -- `prob` is the per-node relaxation, so a
 /// dense pass here repeated the same `O(n * m)` blowup `build_relax` is
 /// fixed to avoid.
-fn solve_relax_lp(prob: &ConicProblem, deadline: Option<std::time::Instant>) -> RelaxResult {
+fn solve_relax_lp(
+    prob: &ConicProblem,
+    deadline: Option<std::time::Instant>,
+    cancel_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> RelaxResult {
     #[cfg(test)]
     if let Some(status) = RELAX_STATUS_PLAN
         .with(|p| p.borrow_mut().pop_front())
@@ -404,6 +415,7 @@ fn solve_relax_lp(prob: &ConicProblem, deadline: Option<std::time::Instant>) -> 
     .unwrap();
     let lp_opts = crate::options::SolverOptions {
         deadline,
+        cancel_flag: cancel_flag.cloned(),
         ..Default::default()
     };
     let res = crate::lp::solve_lp_with(&lp, &lp_opts);
@@ -937,7 +949,7 @@ fn global_core(
         }
         nodes += 1;
         let relax = build_relax(&static_, &lb, &ub);
-        let res = solve_relax_lp(&relax, opts.deadline);
+        let res = solve_relax_lp(&relax, opts.deadline, opts.cancel_flag.as_ref());
         match res.status {
             SolveStatus::Optimal => {}
             // Empty relaxation => the region holds no feasible point: a
@@ -1562,7 +1574,7 @@ mod tests {
         let static_ = build_static(&qp);
         assert_eq!(static_.pairs, vec![(0, 0)]);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
-        let res = solve_relax_lp(&relax, None);
+        let res = solve_relax_lp(&relax, None, None);
         assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
         assert!(
             res.objective.abs() < 1e-7,
@@ -1581,11 +1593,29 @@ mod tests {
         let static_ = build_static(&qp);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let res = solve_relax_lp(&relax, Some(past));
+        let res = solve_relax_lp(&relax, Some(past), None);
         assert_eq!(
             res.status,
             SolveStatus::Timeout,
             "expired deadline must abort the node LP, got {:?}",
+            res.status
+        );
+    }
+
+    /// Sentinel. `solve_relax_lp` must forward the caller's `cancel_flag` to the
+    /// LP path; an already-fired flag therefore stops the LP with `Timeout`.
+    /// Reverting to `cancel_flag: None` solves the relaxation to `Optimal`.
+    #[test]
+    fn relaxation_lp_honors_fired_cancel_flag() {
+        let qp = hyperbola();
+        let static_ = build_static(&qp);
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let res = solve_relax_lp(&relax, None, Some(&fired));
+        assert_eq!(
+            res.status,
+            SolveStatus::Timeout,
+            "fired cancel_flag must abort the node LP, got {:?}",
             res.status
         );
     }

@@ -207,6 +207,16 @@ fn equality_constraint_qr(
     let mut used_pivot_col = vec![false; n];
     let mut work = aeq.clone();
     let mut b_work = beq.clone();
+    // Running bound on the magnitude of quantities that have been combined
+    // (added/subtracted) into each `b_work[k]` so far, mirroring the standard
+    // floating-point backward-error bound for summation: the rounding error
+    // in a chain of subtractions is O(unit-roundoff) times the sum of the
+    // operand magnitudes, not of the final (possibly cancelled-down) value.
+    // Seeded with `|beq[k]|` and grown by `|factor| * b_scale[max_row]` at
+    // every elimination step below, so it tracks exactly the same row
+    // operations as `b_work` and ends up scaled to the pivot RHS magnitudes
+    // that actually cancelled to produce the final residual.
+    let mut b_scale: Vec<f64> = beq.iter().map(|b| b.abs()).collect();
 
     for col in 0..n {
         // O(m_eq * n) per column, checked once per outer iteration (cheap
@@ -255,6 +265,7 @@ fn equality_constraint_qr(
                 work[k][c] -= delta;
             }
             b_work[k] -= factor * b_work[max_row];
+            b_scale[k] += factor.abs() * b_scale[max_row];
         }
 
         if pivot_count >= n {
@@ -269,11 +280,19 @@ fn equality_constraint_qr(
     // rows' equalities are jointly inconsistent with `orig_row`'s equality —
     // the elimination coefficients used to get here are themselves the Farkas
     // combination proving the whole equality system has no solution.
+    //
+    // The threshold is relative to `b_scale[row_idx]`, not `beq[row_idx]`:
+    // a dependent row whose RHS is small (or zero) can still be produced by
+    // cancelling large pivot RHS values (e.g. `4e12 - 4e12`), and the IEEE-754
+    // rounding noise left behind scales with the magnitudes that cancelled,
+    // not with the tiny result. Scaling by `beq[row_idx].abs()` alone (as
+    // before) let that noise exceed the threshold and falsely report
+    // Infeasible on a system with an exact solution (codex PR#32 review).
     for (row_idx, &orig_row) in eq_pos_rows.iter().enumerate() {
         if pivot_rows[row_idx] {
             continue;
         }
-        let scale = 1.0 + beq[row_idx].abs();
+        let scale = 1.0 + b_scale[row_idx];
         if b_work[row_idx].abs() > ZERO_TOL * scale {
             return false;
         }
@@ -1072,6 +1091,164 @@ mod tests {
             "BUG: Eq_A & Eq_B force x1=1.8, x2=1.6 (hand oracle), giving \
              4x1+3x2=12, contradicting Eq_C's declared 999, but \
              equality_constraint_qr reported the system consistent. removed={:?}",
+            removed
+        );
+    }
+
+    /// Sentinel (P1, codex PR#32 review): a dependent equality reached via
+    /// cancellation of large RHS values must not be flagged inconsistent by
+    /// IEEE-754 rounding noise in the eliminated residual.
+    ///
+    /// Independent oracle (hand solve): `3x+y=4e12`, `x+3y=4e12`,
+    /// `(x-y)/512=0` share the exact point x=y=1e12 (3e12+1e12=4e12,
+    /// 1e12+3e12=4e12, (1e12-1e12)/512=0). Before the fix, eliminating the
+    /// third (dependent) row against the first two pivot rows left a residual
+    /// of ~4.77e-7 against a `ZERO_TOL * (1 + |beq|=0)` = 1e-12 threshold
+    /// (observed exactly via a diagnostic print during triage), so
+    /// `equality_constraint_qr` returned `false` (inconsistent) despite the
+    /// system being satisfiable.
+    #[test]
+    fn equality_constraint_qr_large_rhs_cancellation_is_not_infeasible() {
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            &[
+                3.0,
+                1.0,
+                -3.0,
+                -1.0,
+                1.0,
+                3.0,
+                -1.0,
+                -3.0,
+                1.0 / 512.0,
+                -1.0 / 512.0,
+                -1.0 / 512.0,
+                1.0 / 512.0,
+            ],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![4e12, -4e12, 4e12, -4e12, 0.0, 0.0];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+        let mut removed = vec![false; m];
+        assert!(
+            equality_constraint_qr(&prob, &mut removed, &SolverOptions::default()),
+            "BUG: x=y=1e12 satisfies all three equalities exactly (hand oracle), \
+             but equality_constraint_qr reported the system inconsistent \
+             (false Infeasible from RHS-elimination rounding noise). removed={:?}",
+            removed
+        );
+    }
+
+    /// Negative control for the sentinel above: a *genuine* contradiction
+    /// riding on the same large-magnitude cancellation must still be caught,
+    /// so the relative-to-accumulated-scale threshold cannot have simply been
+    /// widened into uselessness.
+    ///
+    /// Independent oracle: same pivot rows as above force x=y=1e12, so
+    /// `(x-y)/512` must be exactly 0 — declaring it 5000 is unsatisfiable by
+    /// any x,y and must be rejected regardless of the 4e12-scale cancellation
+    /// in the pivot elimination.
+    #[test]
+    fn equality_constraint_qr_detects_inconsistency_amid_large_rhs_cancellation() {
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            &[
+                3.0,
+                1.0,
+                -3.0,
+                -1.0,
+                1.0,
+                3.0,
+                -1.0,
+                -3.0,
+                1.0 / 512.0,
+                -1.0 / 512.0,
+                -1.0 / 512.0,
+                1.0 / 512.0,
+            ],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![4e12, -4e12, 4e12, -4e12, 5000.0, -5000.0];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+        let mut removed = vec![false; m];
+        assert!(
+            !equality_constraint_qr(&prob, &mut removed, &SolverOptions::default()),
+            "BUG: x=y=1e12 (forced by the first two pivot rows, hand oracle) \
+             makes (x-y)/512=0, contradicting the declared 5000, but \
+             equality_constraint_qr reported the system consistent. \
+             removed={:?}",
+            removed
+        );
+    }
+
+    /// Negative control at 1e10 scale (same pattern as a prior review round's
+    /// scale check): `equality_constraint_qr_detects_inconsistent_nonsingleton_triple`
+    /// scaled ×1e10 on every RHS. Coefficients are untouched, so the pivot
+    /// system's residual-to-scale ratio is unchanged by the scaling — this
+    /// confirms the accumulated-scale threshold does not lose genuine
+    /// inconsistencies simply because the problem's RHS values are large.
+    ///
+    /// Independent oracle: scaling a consistent 2-unknown linear system's RHS
+    /// by a constant `k` scales its unique solution by `k` (linearity), so
+    /// Eq_A/Eq_B force x1=1.8e10, x2=1.6e10, giving 4x1+3x2=12e10 — Eq_C's
+    /// declared 999e10 contradicts that by 987e10.
+    #[test]
+    fn equality_constraint_qr_detects_inconsistent_nonsingleton_triple_at_1e10_scale() {
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            &[
+                1.0, 2.0, -1.0, -2.0, 3.0, 1.0, -3.0, -1.0, 4.0, 3.0, -4.0, -3.0,
+            ],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![5.0e10, -5.0e10, 7.0e10, -7.0e10, 999.0e10, -999.0e10];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+        let mut removed = vec![false; m];
+        assert!(
+            !equality_constraint_qr(&prob, &mut removed, &SolverOptions::default()),
+            "BUG: Eq_A & Eq_B force x1=1.8e10, x2=1.6e10 (hand oracle), giving \
+             4x1+3x2=12e10, contradicting Eq_C's declared 999e10, but \
+             equality_constraint_qr reported the system consistent at 1e10 \
+             scale. removed={:?}",
             removed
         );
     }

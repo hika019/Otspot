@@ -289,18 +289,24 @@ fn api_model_set_threads_propagates_to_qp_solve() {
 }
 
 #[test]
-fn api_model_set_threads_clamps_zero_to_one() {
-    // 0 は invalid (LCG/ThreadPool 双方で fatal)、Model::set_threads 入口で 1 に補正。
-    use otspot::model::{Expression, Model};
-    let mut m = Model::new("threads_zero_clamp");
-    let x = m.add_var("x", 0.0, 1.0);
-    m.minimize(Expression::from(x));
-    m.set_threads(0);
-    // After clamping 0→1, the model must remain solvable.
-    assert!(
-        m.solve().is_ok(),
-        "set_threads(0) must not prevent solve (clamps to 1)"
-    );
+fn api_model_set_threads_out_of_range_is_invalid_input() {
+    // 範囲外のスレッド予算 (`1..=MAX_THREADS` の外) は、他の Model 入力
+    // バリデータと同じく `solve()` 前に InvalidInput として弾かれる。下限
+    // (0) と上限超 (MAX_THREADS + 1) の両端を公開 API 越しに確認する。
+    use otspot::model::{Expression, Model, ModelError};
+    for n in [0usize, otspot::options::MAX_THREADS + 1] {
+        let mut m = Model::new("threads_out_of_range");
+        let x = m.add_var("x", 0.0, 1.0);
+        m.minimize(Expression::from(x));
+        m.set_threads(n);
+        let err = m
+            .solve()
+            .expect_err("out-of-range thread budget must be rejected before solve");
+        assert!(
+            matches!(err, ModelError::InvalidInput(_)),
+            "expected InvalidInput for threads={n}, got {err:?}"
+        );
+    }
 }
 
 #[test]

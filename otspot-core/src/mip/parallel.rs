@@ -31,7 +31,28 @@ use super::{
     SearchCtx, SearchOutcome, SearchState,
 };
 use crate::options::{MipBranching, MipConfig, SolverOptions};
-use crate::problem::SolverResult;
+use crate::problem::{SolveStatus, SolverResult};
+
+/// Marker for a *partial* worker-spawn failure in [`solve_mip_parallel`].
+///
+/// The OS can refuse a worker thread (`RLIMIT_NPROC`, a pid cgroup cap, or no
+/// memory for another stack) after some workers have already started, and
+/// `MAX_THREADS` validation cannot foresee it — the limit depends on the
+/// machine's state at solve time, not on the option. This is reported as a
+/// failed solve (`SolveStatus::NumericalError`), never as a silently smaller
+/// one: the thread budget the caller asked for could not be honoured.
+struct WorkerSpawnFailed;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only fault injection for the worker-spawn loop. When set to
+    /// `Some(k)`, the `k`-th (0-based) and every later `spawn_scoped` is
+    /// treated as an OS spawn failure so a sentinel can reproduce a *partial*
+    /// spawn without exhausting real thread limits. `None` (default) spawns
+    /// normally. `thread_local` so parallel tests cannot corrupt each other's
+    /// plan (same rationale as `nonconvex::RELAX_STATUS_PLAN`).
+    static SPAWN_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
 
 /// Nodes a worker processes between shared-pseudocost synchronisations.
 ///
@@ -300,15 +321,59 @@ pub(crate) fn solve_mip_parallel<R: Relaxation + Sync>(
     ));
     let pseudocosts = Mutex::new(PseudocostState::new(integer_vars.len()));
 
-    let joined: Vec<(MipStats, SearchOutcome)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads)
-            .map(|_| scope.spawn(|| run_worker(problem, &ctx, &pool, &incumbent, &pseudocosts)))
-            .collect();
-        handles
+    let joined = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads);
+        for worker_index in 0..threads {
+            let _ = worker_index; // read only by the test-only failure injector
+            #[cfg(test)]
+            let inject_failure =
+                SPAWN_FAIL_AFTER.with(|at| at.get().is_some_and(|at| worker_index >= at));
+            #[cfg(not(test))]
+            let inject_failure = false;
+
+            let handle = if inject_failure {
+                Err(std::io::Error::other("injected MILP worker spawn failure"))
+            } else {
+                std::thread::Builder::new().spawn_scoped(scope, || {
+                    run_worker(problem, &ctx, &pool, &incumbent, &pseudocosts)
+                })
+            };
+            match handle {
+                Ok(handle) => handles.push(handle),
+                Err(_) => {
+                    // Some workers may already be waiting in `pop_blocking`.
+                    // Stop them *before* the scope joins them; unwinding or
+                    // returning without this signal would wait forever because
+                    // `idle` can never reach the requested worker count.
+                    pool.stop();
+                    for handle in handles {
+                        handle
+                            .join()
+                            .expect("MILP branch-and-bound worker panicked");
+                    }
+                    return Err(WorkerSpawnFailed);
+                }
+            }
+        }
+        Ok(handles
             .into_iter()
             .map(|h| h.join().expect("MILP branch-and-bound worker panicked"))
-            .collect()
+            .collect::<Vec<_>>())
     });
+    let joined = match joined {
+        Ok(joined) => joined,
+        Err(WorkerSpawnFailed) => {
+            return (
+                SolverResult {
+                    status: SolveStatus::NumericalError,
+                    objective: f64::INFINITY,
+                    solution: vec![],
+                    ..Default::default()
+                },
+                stats,
+            );
+        }
+    };
 
     let mut outcome = SearchOutcome::empty();
     for (worker_stats, worker_outcome) in &joined {
@@ -552,6 +617,66 @@ mod tests {
             }
             pool.stop();
         });
+    }
+
+    /// A partial worker-spawn failure must stop workers that were already
+    /// accepted by the OS before the scoped joins begin. The one live worker
+    /// below consumes an integral root and then blocks in `pop_blocking`:
+    /// because the pool still records two requested workers, it can never
+    /// reach all-idle termination by itself.
+    ///
+    /// Sentinel: removing the `pool.stop()` in the spawn-error branch leaves
+    /// that worker blocked and this test's bounded receive times out.
+    #[test]
+    fn partial_worker_spawn_failure_returns_instead_of_deadlocking() {
+        struct IntegralLeaf {
+            bounds: Vec<(f64, f64)>,
+            integers: Vec<usize>,
+        }
+
+        impl Relaxation for IntegralLeaf {
+            fn num_vars(&self) -> usize {
+                1
+            }
+            fn root_bounds(&self) -> &[(f64, f64)] {
+                &self.bounds
+            }
+            fn integer_vars(&self) -> &[usize] {
+                &self.integers
+            }
+            fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 0.0,
+                    solution: vec![0.0],
+                    ..Default::default()
+                }
+            }
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            SPAWN_FAIL_AFTER.with(|at| at.set(Some(1)));
+            let problem = IntegralLeaf {
+                bounds: vec![(0.0, 1.0)],
+                integers: vec![0],
+            };
+            let options = SolverOptions::default();
+            let mask = vec![true];
+            let (result, _) =
+                solve_mip_parallel(&problem, &options, &MipConfig::default(), mask, None, 2);
+            SPAWN_FAIL_AFTER.with(|at| at.set(None));
+            tx.send(result.status).expect("test receiver alive");
+        });
+
+        let status = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("partial spawn failure deadlocked instead of returning");
+        assert_eq!(
+            status,
+            SolveStatus::NumericalError,
+            "a requested worker budget that cannot be created must be an explicit failed solve"
+        );
     }
 
     #[test]
