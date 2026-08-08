@@ -5,88 +5,60 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 ## [Unreleased]
 
 ### Added
-- `SolverOptions::threads` が MILP 分枝限定法で実効化された。`threads >= 2` で共有
-  best-bound ノードプール上に厳密に `threads` 本のワーカーを起動する
-  (`std::thread::scope`)。dive stack はワーカーローカルなので親→子が同一ワーカーで
-  連続処理され、warm start 基底の局所性は serial と同じまま保たれる。ワーカーの
-  緩和ソルブ・カット分離・ヒューリスティック sub-MIP はいずれも `threads = 1` で
-  走るため、指定スレッド数は**上限の保証**であってヒントではない (計装テストで
-  同時実行数と distinct thread 数の両方を実測)。`threads = 1` (既定) は従来の
-  serial 探索そのままで、ノード単位の再現性を維持する。MIQP の B&B は対象外。
-- `milp_solve` に `--threads N`。
 - `otspot-py` crate (PyO3/maturin) を追加し、Otspot を Python ライブラリとして
-  利用可能に。Rust API と同名・同構造の Model DSL、`api_manifest.json` +
-  `cargo public-api` スナップショットによる API parity 保証、GitHub Actions
-  `python` job (maturin build → pytest → mypy) を含む
+  利用可能に (Rust 版と同じ Model DSL)
+- `SolverOptions::threads` (`milp_solve --threads`) が MILP 分枝限定法で実効化
+  された。指定数は上限の保証でありヒントではない。既定の `threads = 1` は従来通り。MIQP の B&B は対象外
 - otspot-model: `Model::var_kind` (`try_var_kind` 含む) を新設
-- `Expression`/`QuadExpr` に `+=` (`__iadd__`) を追加し、蓄積ループの
-  O(n²) クローンコストを回避
+- `Expression`/`QuadExpr` に `+=` (`__iadd__`) を追加し、蓄積ループの性能を改善
 
 ### Fixed
-- MILP B&Bのin-tree cut separationに割り当てるsimplex反復シェア
-  (`SEPARATION_ITER_SHARE`) が誤った除数で導出されており、実際の
-  wall-clockコストを最大5倍過大評価していた問題を修正 (0.15→0.035)。
-  MIPLIB smallの複数TIMEOUT問題でノード数・incumbentが改善し、`mas76`は
-  既知最適値に到達した
-- QP/conic の IPM が `threads` を超えて並列実行していた問題を修正。faer へ
-  `Par::Rayon(threads)` を渡しても内部の `spindle` がグローバル rayon プールへ
-  フォールバックするため上限が守られておらず、8 コア機で `threads = 2` 指定の
-  dense QP が同時 10 スレッドを走らせていた。solve をサイズ `threads` の専用
-  プールへ閉じ込めて是正 (同条件で 3)。プールは直近 1 サイズのみキャッシュし、
-  budget 変更時は作り直す (現行呼び出し経路では `threads` は固定のため実害なし)。
-  `threads = 1` (既定) はプールを作らず従来と完全に同一。
-- otspot-model: `ModelResult::value`/`Index<Variable>` が cross-model の
-  `Variable` を検査せず別 model の値を誤返却するバグを修正
-- `Model.solve()` 中の Ctrl-C (SIGINT) が `KeyboardInterrupt` を即座に送出する
-  よう修正 (`Model::set_cancel_flag` 新設 + worker thread 化)。ポーリング間隔を
-  適応 backoff + Condvar 化し、小型 solve への固定 latency 床 (旧: 10ms 固定) を解消
-- otspot-core: LP の Farkas (Infeasible) 証明ループ・unbounded ray 証明ループ
-  (Farkas 修正の横展開)、および QP presolve phase-2 の全ステップ (等式制約簡約
-  ループ内部を含む) が `deadline`/`cancel_flag` を未チェックのまま完了しうる
-  問題を修正 (証明受理直前チェックを横展開。挙動変更: `timeout_secs` 設定時、
-  Infeasible 判定寸前だった問題が Timeout になり得る)。QP presolve phase-2 側は
-  mid-loop 打ち切り時に未検証行を誤って冗長判定する correctness bug も併せて修正
-- otspot-model: `set_presolve(false)` が QP/MIQP 経路では無視されていたバグを
-  修正 (LP/MILP のみ反映されていた)
-- `Expression`/`QuadExpr` の `+=` が自己エイリアス代入 (`expr += expr`) で
-  panic するバグを修正
-- QP IPM・conic IPM・MISOCP・非凸 QCQP B&B・大域 QP (spatial B&B) の複数経路で、
-  キャンセル後も証明済み status を返したり探索を継続し得た問題を修正
-- QP presolve の等式制約冗長行削除が、矛盾した等式系を誤って Feasible と
-  判定していた問題を修正
-- MIP/大域QP で、非有限 bound の混入や探索中断時の下界の取りこぼしにより、
-  未証明の最適性を Optimal と誤報告しうる問題を修正
-- QP IPM (IPPMM) の数値安定性まわりの複数の真因を修正し、QSHELL/QGFRDXPN 等
-  一部の QP が Stalled から収束するようになった
-- 非凸 QCQP の大域探索で、実行中のノード緩和がキャンセル要求に反応せず、
-  キャンセル後も探索が長時間継続し得た問題を修正
-- MILP 並列探索で、要求したワーカーの一部を OS が拒否すると solve が
-  デッドロックしていた問題を修正 (フリーズせずエラーを返すようにした)
-- QP/LP の IPM が、Ruiz スケーリング有無を切り替えて再試行する際の打ち切り
-  判定に不具合があり、片方が行き詰まっただけで再試行を止め、収束するはずの
-  LP が Stalled と判定され得た問題を修正
-- bounded dual simplex の tie-break の欠陥、および dual simplex が基底の
-  ドリフトを検証せず誤って Optimal を返しうる問題を修正
-- Ruiz スケーリングが構造的に空の行・列、および目的関数が恒等的に0の
-  feasibility-only 問題でコスト (`c`) が発散し NaN が伝播し得た問題を修正
+- QP IPM・conic IPM・MISOCP・非凸 QCQP・大域 QP の複数の求解経路で、キャンセル後
+  も証明済み status を返したり探索を継続したりし得た問題を修正
+- bounded dual simplex の tie-break の欠陥、および dual simplex が基底のドリフト
+  を検証せず誤って Optimal を返しうる問題を修正
+- MIP/大域 QP で、非有限 bound の混入や探索中断時の下界取りこぼしにより、未証明
+  の最適性を Optimal と誤報告しうる問題を修正
+- LP の Farkas・unbounded ray 証明ループと QP presolve が、キャンセル・deadline
+  を無視して完了しうる問題を修正。`timeout_secs` 設定時、従来 Infeasible と
+  判定されていた問題が Timeout になる場合がある
+- QP presolve の等式制約冗長行判定の不具合を修正: 矛盾した等式系を誤って
+  Feasible と判定する場合、および打ち切り時に未検証行を誤って冗長と判定する
+  場合があった
+- QP presolve の等式冗長行削除で、大きな RHS の相殺を伴う従属等式の丸め誤差により
+  矛盾していない等式系を誤って Infeasible と判定する場合があった問題を修正 (上記の逆方向)
+- Ruiz スケーリングが構造的に空の行・列や目的関数が恒等的に0の問題で、コストが
+  発散し NaN が伝播し得た問題を修正
 - QPLIB/CBF パーサが宣言サイズを検証せず allocation しており、巨大/不正な
   ファイルで OOM しうる問題を修正
-- `milp_solve --threads` が範囲外の値を検証せず受理していた問題を修正
-- 並列 B&B の統計値 (`conflict_clauses_learned`/大域QPの`remaining_lb`) が
-  過少・不正確に報告されていた問題を修正
-- Python の Ctrl-C (SIGINT) 検知後、GIL を保持したまま worker thread を
-  join していた問題を修正
-- Python の `SolveStatus`/`Tolerance` の `==` 比較が常に `False` になって
-  いた問題を修正 (`SolveStatus` は hash 対応も追加)
+- MILP 並列探索で、要求したワーカーの一部を OS が拒否すると solve がデッドロック
+  していた問題を修正 (フリーズせずエラーを返すようにした)
+- QP/conic の IPM が指定した `threads` 数を超えて並列実行していた問題を修正
+- MILP B&B の cut separation に割り当てる反復予算の見積りに誤りがあり、探索時間
+  を浪費していた問題を修正。複数の TIMEOUT 問題でノード数・incumbent が改善
+- QP IPM (IPPMM) の数値安定性の複数の不具合を修正し、一部の QP が Stalled から
+  収束するようになった
+- QP/LP の IPM が Ruiz スケーリング有無を切り替えて再試行する際の打ち切り判定に
+  不具合があり、収束するはずの LP が Stalled と判定され得た問題を修正
+- otspot-model: `ModelResult::value`/`Index<Variable>` が別モデルの変数を誤って
+  受理し、誤った値を返すバグを修正
+- otspot-model: `set_presolve(false)` が QP/MIQP では無視されていたバグを修正
+  (LP/MILP のみ反映されていた)
+- `Expression`/`QuadExpr` の `+=` が自己代入 (`expr += expr`) で panic するバグ
+  を修正
+- 並列 B&B の統計値 (`conflict_clauses_learned`/`remaining_lb` 等) が
+  不正確に報告されていた問題を修正
+- Python の `Model.solve()` 中の Ctrl-C (SIGINT) が `KeyboardInterrupt` を即座に
+  送出するよう修正 (応答遅延・GIL 保持によるブロッキングを解消)
+- Python の `SolveStatus`/`Tolerance` の `==` 比較が常に `False` になっていた
+  問題を修正 (`SolveStatus` は hash 対応も追加)
 
 ### Changed
-- `SolverOptions::threads` に上限 (`MAX_THREADS` = 1024) を追加し `validate()` /
-  `with_threads()` で拒否する。MILP ワーカー生成は OS 拒否時に panic するため、
-  設定ミスは solve の奥ではなく options 検証で落とす。
-- [破壊的変更] `Model::set_threads` が範囲外のスレッド数を受理しなくなった。
-  従来 `0` は暗黙に `1` へ丸められていたが、現在は不正な入力として `solve()`
-  前に拒否される (`SolverOptions` と同じ `1..=MAX_THREADS`)。
-- `otspot-num` が `rayon` に依存するようになった (専用プール構築のため)。
+- [破壊的変更] スレッド数の指定 (`SolverOptions::threads` / `Model::set_threads`
+  / `milp_solve --threads`) が範囲外の値を `solve()` 前に一貫して拒否するように
+  なった。従来 `set_threads(0)` は暗黙に `1` へ丸められていたが、現在は不正な
+  入力としてエラーになる
+- `otspot-num` が `rayon` に依存するようになった
 - `otspot-py`: Python 要件を 3.11+ に引き上げ (abi3-py311)
 - `IpmOptions::delta_min`/`delta_p_init`/`delta_d_init` を削除 (無視される
   デッドオプションだった)
