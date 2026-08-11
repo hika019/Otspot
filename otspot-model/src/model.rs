@@ -1915,6 +1915,10 @@ fn classify_status_error(status: SolveStatus) -> Option<ModelError> {
         SolveStatus::Infeasible => Some(ModelError::SolveError(SolveError::Infeasible)),
         SolveStatus::Unbounded => Some(ModelError::SolveError(SolveError::Unbounded)),
         SolveStatus::NumericalError => Some(ModelError::SolveError(SolveError::NumericalError)),
+        // OS リソース確保の失敗。数値的破綻 (`NumericalError`) とは区別する。
+        SolveStatus::ResourceExhausted => {
+            Some(ModelError::SolveError(SolveError::ResourceExhausted))
+        }
         // Stalled は「解品質の主張なし」の内部打ち切り。診断 iterate は core の
         // SolverResult に残るが、Model API では有効解なしとして一律 Err にする。
         SolveStatus::Stalled => Some(ModelError::SolveError(SolveError::Stalled)),
@@ -2104,6 +2108,7 @@ impl SolutionProof {
             SolveStatus::Infeasible
             | SolveStatus::Unbounded
             | SolveStatus::NumericalError
+            | SolveStatus::ResourceExhausted
             | SolveStatus::Stalled
             | SolveStatus::NonConvex(_)
             | SolveStatus::NotSupported(_) => {
@@ -2267,6 +2272,10 @@ pub enum SolveError {
     Stalled,
     /// Solver aborted due to numerical breakdown (no usable solution).
     NumericalError,
+    /// Solver could not acquire the OS resources (threads, memory) needed to
+    /// run. Distinct from `NumericalError`: nothing failed numerically, the
+    /// environment simply could not start the solve.
+    ResourceExhausted,
 }
 
 impl fmt::Display for SolveError {
@@ -2281,6 +2290,9 @@ impl fmt::Display for SolveError {
                 write!(f, "Solver stalled before reaching the requested accuracy")
             }
             SolveError::NumericalError => write!(f, "Numerical breakdown during solve"),
+            SolveError::ResourceExhausted => {
+                write!(f, "Insufficient OS resources to run the solve")
+            }
         }
     }
 }
@@ -2986,6 +2998,36 @@ mod tests {
                 err
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Sentinel: OS リソース枯渇 (ResourceExhausted) は数値破綻 (NumericalError)
+    // とは別の SolveError へ写り、利用者向け文言も "Numerical breakdown" に
+    // ならないこと。classify_status_error を NumericalError へ寄せ戻すと FAIL。
+    // -----------------------------------------------------------------------
+    #[test]
+    fn resource_exhausted_maps_to_distinct_error_and_message() {
+        let err = classify_status_error(SolveStatus::ResourceExhausted)
+            .expect("ResourceExhausted must map to Some");
+        assert!(
+            matches!(err, ModelError::SolveError(SolveError::ResourceExhausted)),
+            "ResourceExhausted status must yield SolveError::ResourceExhausted, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            !msg.to_ascii_lowercase().contains("numerical"),
+            "resource-exhaustion message must not read as a numerical breakdown: {msg:?}"
+        );
+        assert!(
+            msg.to_ascii_lowercase().contains("resource"),
+            "resource-exhaustion message must name the real cause: {msg:?}"
+        );
+        // 数値破綻とは別物であること (取り違え防止)。
+        assert_ne!(
+            SolveError::ResourceExhausted,
+            SolveError::NumericalError,
+            "ResourceExhausted must be a distinct SolveError variant"
+        );
     }
 
     #[test]

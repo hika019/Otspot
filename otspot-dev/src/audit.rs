@@ -699,9 +699,17 @@ fn prod2() {
         let mut pending_cfg_test = false;
         let mut pending_test_attr = false;
 
+        // `entering_in_str` for every line, recorded as the main loop below
+        // walks forward — so the backward "find the enclosing fn" search
+        // further down can look up whether an *earlier* line was itself
+        // entering a multi-line string, instead of re-deriving it with a
+        // naive `starts_with("//")` that has no string awareness at all.
+        let mut entering_in_str_by_line: Vec<bool> = Vec::with_capacity(lines.len());
+
         for (idx, &line) in lines.iter().enumerate() {
             let trimmed = line.trim();
             let entering_in_str = in_str_state;
+            entering_in_str_by_line.push(entering_in_str);
 
             let (opens, _closes, in_str_next) =
                 advance_depth_pop_stacks(line, in_str_state, &mut depth, &mut [&mut skip_stack]);
@@ -766,7 +774,14 @@ fn prod2() {
                         break;
                     }
                     let bl = lines[back].trim();
-                    if !bl.starts_with("//") && lines[back].contains("fn ") {
+                    // Same "genuine comment" rule as the check above: a line
+                    // that trims to a `//`-prefix is only a real comment when
+                    // it was not itself entered already inside a multi-line
+                    // string (the tail of a string like `"start\n// end";`
+                    // trims to something starting with `//` but is code, not
+                    // a comment).
+                    let back_is_comment = !entering_in_str_by_line[back] && bl.starts_with("//");
+                    if !back_is_comment && lines[back].contains("fn ") {
                         found = Some(back);
                         break;
                     }
@@ -1586,6 +1601,36 @@ mod tests {
         assert!(
             names.contains(&"unused"),
             "BUG: dead param right after a same-line skip-zone close was missed; \
+             violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel (reviewer-reported, live): the backward "find the nearest
+    /// enclosing `fn`" search used a naive `bl.starts_with("//")` check with
+    /// no `in_str`/`entering_in_str` awareness at all — unlike the line-comment
+    /// check a few lines above it in this same function, which was already
+    /// fixed for exactly this reason. A multi-line string whose closing line
+    /// happens to trim to something starting with `//` (the tail of
+    /// `"start\n// end"; fn prod(unused: i32) {`) makes the backward scan
+    /// misclassify the real `fn prod(...)` line as a comment, skip past it,
+    /// and instead find the outer `fn wrapper()` — so the dead-param check
+    /// never sees `prod`'s own signature and the violation goes undetected.
+    /// Built with an escaped (non-raw) literal for the same self-scan reason
+    /// as `scan_production_prints_survives_multiline_string_closing_on_comment_lookalike_line`.
+    #[test]
+    fn scan_dead_params_finds_fn_across_multiline_string_closing_on_comment_lookalike_line() {
+        let content =
+            "\nfn wrapper() {\n    let s = \"start\n// end\"; fn prod(unused: i32) {\n        \
+                        let _ = unused;\n    }\n}\n";
+        let violations = scan_dead_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            names.contains(&"unused"),
+            "BUG: dead param `unused` in `fn prod` was missed because the backward \
+             fn-search misclassified the real `fn prod(...)` line as a comment \
+             (multi-line string closing on a comment-lookalike line) and instead \
+             attributed the `let _ = unused;` to the outer `fn wrapper()`; \
              violations: {:?}",
             violations
         );

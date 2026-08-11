@@ -255,6 +255,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     &presolve_result,
                     problem,
                     eff_opts.deadline,
+                    eff_opts.cancel_flag.clone(),
                 );
                 crate::simplex::apply_recovered_warm_start_basis(&mut res, problem, options);
                 // Postsolve lifts the solution to original space but says nothing

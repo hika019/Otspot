@@ -110,6 +110,8 @@ pub enum PySolveError {
     MaxIterations,
     Stalled,
     NumericalError,
+    /// OS リソース (スレッド・メモリ等) 確保失敗。数値破綻ではない。
+    ResourceExhausted,
     /// See `PySolutionProof::Unknown`'s doc comment.
     Unknown,
 }
@@ -122,6 +124,7 @@ impl From<SolveError> for PySolveError {
             SolveError::MaxIterations => PySolveError::MaxIterations,
             SolveError::Stalled => PySolveError::Stalled,
             SolveError::NumericalError => PySolveError::NumericalError,
+            SolveError::ResourceExhausted => PySolveError::ResourceExhausted,
             // #[non_exhaustive]: wildcard required for cross-crate matching.
             _ => PySolveError::Unknown,
         }
@@ -137,6 +140,7 @@ impl PySolveError {
             PySolveError::MaxIterations => "MaxIterations",
             PySolveError::Stalled => "Stalled",
             PySolveError::NumericalError => "NumericalError",
+            PySolveError::ResourceExhausted => "ResourceExhausted",
             PySolveError::Unknown => "Unknown",
         };
         reduce_via_getattr(py, py.get_type::<PySolveError>(), name)
@@ -183,6 +187,7 @@ pub enum PySolveStatus {
     FeasiblePoint(),
     Timeout(),
     NumericalError(),
+    ResourceExhausted(),
     NonConvex(String),
     NonconvexLocal(),
     NonconvexGlobal(),
@@ -203,6 +208,7 @@ impl From<SolveStatus> for PySolveStatus {
             SolveStatus::FeasiblePoint => PySolveStatus::FeasiblePoint(),
             SolveStatus::Timeout => PySolveStatus::Timeout(),
             SolveStatus::NumericalError => PySolveStatus::NumericalError(),
+            SolveStatus::ResourceExhausted => PySolveStatus::ResourceExhausted(),
             SolveStatus::NonConvex(msg) => PySolveStatus::NonConvex(msg),
             SolveStatus::NonconvexLocal => PySolveStatus::NonconvexLocal(),
             SolveStatus::NonconvexGlobal => PySolveStatus::NonconvexGlobal(),
@@ -231,6 +237,7 @@ impl PySolveStatus {
             PySolveStatus::FeasiblePoint() => ("FeasiblePoint", None),
             PySolveStatus::Timeout() => ("Timeout", None),
             PySolveStatus::NumericalError() => ("NumericalError", None),
+            PySolveStatus::ResourceExhausted() => ("ResourceExhausted", None),
             PySolveStatus::NonConvex(msg) => ("NonConvex", Some(msg.as_str())),
             PySolveStatus::NonconvexLocal() => ("NonconvexLocal", None),
             PySolveStatus::NonconvexGlobal() => ("NonconvexGlobal", None),

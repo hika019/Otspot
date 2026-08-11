@@ -4,6 +4,8 @@
 //! simplex) に forward する。QP presolve は使わず、LP presolve を先に通した上で
 //! 縮約後の LP を simplex で解く。
 
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::certificate::guard_lp_optimal;
@@ -285,6 +287,7 @@ fn solve_reduced_lp_from_qp(
             &presolve_result,
             original_lp,
             options.deadline,
+            options.cancel_flag.clone(),
         );
         crate::simplex::apply_recovered_warm_start_basis(&mut lifted, original_lp, options);
         lifted.stats = raw.stats.clone();
@@ -447,7 +450,12 @@ fn solve_lp_with_ipm_backend(lp: &LpProblem, options: &SolverOptions) -> SolverR
             | SolveStatus::MaxIterations
     ) {
         let t_crossover = Instant::now();
-        result = certify_lp_ipm_with_crossover(result, lp, options.deadline);
+        result = certify_lp_ipm_with_crossover(
+            result,
+            lp,
+            options.deadline,
+            options.cancel_flag.clone(),
+        );
         let crossover_us = t_crossover.elapsed().as_micros() as u64;
         let timing = result.timing_breakdown.get_or_insert_with(Default::default);
         timing.postsolve_us = timing.postsolve_us.saturating_add(crossover_us);
@@ -482,6 +490,7 @@ fn certify_lp_ipm_with_crossover(
     mut result: SolverResult,
     lp: &LpProblem,
     deadline: Option<Instant>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> SolverResult {
     if result.solution.len() != lp.num_vars {
         return result;
@@ -517,6 +526,7 @@ fn certify_lp_ipm_with_crossover(
         &result.solution,
         Some(&ipm_dual_warm_start),
         deadline,
+        cancel_flag,
     ) else {
         return result;
     };
@@ -1727,8 +1737,6 @@ mod tests {
     /// 初回イテレーション即キャンセル → Timeout with initial BFS objective = 0。
     #[test]
     fn test_qp_simplex_dispatch_timeout_includes_obj_offset() {
-        use std::sync::{atomic::AtomicBool, Arc};
-
         const OBJ_OFFSET: f64 = 42.0;
 
         // min 0·x s.t. x >= 1, x in [0, ∞).  c=0 → c^T x* = 0 for any incumbent.

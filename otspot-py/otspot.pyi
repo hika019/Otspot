@@ -38,6 +38,7 @@ class SolveError:
     MaxIterations: SolveError
     Stalled: SolveError
     NumericalError: SolveError
+    ResourceExhausted: SolveError
     Unknown: SolveError
     """See SolutionProof.Unknown's docstring; same rationale."""
     def __eq__(self, other: object) -> bool: ...
@@ -68,6 +69,7 @@ class SolveStatus:
     FeasiblePoint: type[_SolveStatus_FeasiblePoint]
     Timeout: type[_SolveStatus_Timeout]
     NumericalError: type[_SolveStatus_NumericalError]
+    ResourceExhausted: type[_SolveStatus_ResourceExhausted]
     NonConvex: type[_SolveStatus_NonConvex]
     NonconvexLocal: type[_SolveStatus_NonconvexLocal]
     NonconvexGlobal: type[_SolveStatus_NonconvexGlobal]
@@ -106,6 +108,9 @@ class _SolveStatus_Timeout(SolveStatus):
     def __init__(self) -> None: ...
 
 class _SolveStatus_NumericalError(SolveStatus):
+    def __init__(self) -> None: ...
+
+class _SolveStatus_ResourceExhausted(SolveStatus):
     def __init__(self) -> None: ...
 
 class _SolveStatus_NonConvex(SolveStatus):

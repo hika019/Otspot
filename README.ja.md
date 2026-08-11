@@ -175,7 +175,7 @@ done
 
 Otspot を Hans Mittelmann の [Large Second-Order Cone benchmark](https://plato.asu.edu/ftp/socp.html)（CBLIB 18 問）で計測する。同ページは MOSEK・ECOS・COPT の実行時間（1 時間上限）を公開しており、下表のこの 3 列は Mittelmann の公開値でここでの実測ではない。CBLIB/Mittelmann は目的値を公表しないため、Otspot の結果は商用ソルバの最適値との数値照合はしていない（ここでの `Optimal` は 1e-6 での KKT 収束のみを指す）。Otspot 自身の実行は **`jobs = 1`** — 大規模問題は 1 問あたり最大 ~18 GB RSS を要し、並列実行するとメモリを使い果たすため — かつメモリ制約のある 19 GB VM（8 vCPU）上での計測であり、Mittelmann の 64 GB マシンではないため、絶対秒数は方向性の目安である。
 
-18 問中ローカルにあるのは 9 問のみで、それらは 2026-08-08 に `timeout = 1000s` で再測した。下表の後半 9 行（`firL1` から `firL2Linfalph`）は前回の計測値のままで、今回は再実行していない。
+下表の 18 行はすべて今回の実測であり、2026-08-08〜09 に `eps = 1e-6`、`timeout = 1000s`、メモリ上限 14 GB のスコープ下で計測した。
 
 | 問題 | nnz | Otspot | MOSEK | ECOS | COPT |
 |---|---:|---|---:|---:|---:|
@@ -196,7 +196,7 @@ Otspot を Hans Mittelmann の [Large Second-Order Cone benchmark](https://plato
 | wbNRL | 39M | timeout (>1000s) | 9 | 1333 | 7 |
 | dsNRL | 67M | timeout (>1000s) | 56 | f | 27 |
 | beam30 | 64M | timeout (>1000s) | 99 | 2465 | 84 |
-| firL2Linfalph | 122M | OOM (>18 GB) | 27 | f | 25 |
+| firL2Linfalph | 122M | OOM (>14 GB cap) | 27 | f | 25 |
 | **solved** | | **4/18** | 18/18 | 11/18 | 18/18 |
 
 Otspot は `chainsing-50000` 3 問（回転錐、約 100 万 nonzeros）を 5〜7s で解く一方、ECOS は 3 問とも失敗する。大規模で密なヤコビアンを持つ `fir`/`db`/`beam30`/`dsNRL` 系（600 万〜1.22 億 nonzeros）は timeout するかメモリを使い果たす。対応する錐種は `F`/`L±`/`L=`/`Q`/`QR` と分枝限定による MISOCP。`EXP` と PSD 錐は非対応として拒否する。
@@ -206,17 +206,31 @@ SOCP には専用の `bench_parallel.sh` ハーネスがまだない（同スク
 ```bash
 cargo build --release --example solve_cbf
 out=/tmp/socp18; mkdir -p "$out"
-# Mittelmann Large-SOCP 18。CBLIB のダウンロード名は問題ごとに異なる（多くは
-# 2013_<name> だが beam7/beam30/chainsing-* は 2013_ 接頭辞なし）—
-# plato.asu.edu/ftp/socp.html に従って調整する。
+# Mittelmann Large-SOCP 18、data/cblib_full/ に配置。CBLIB のダウンロード名は
+# 問題ごとに異なり（fir*/dsNRL/wbNRL は 2013_ 接頭辞つき、beam7/beam30/
+# chainsing-*/db-* はなし。plato.asu.edu/ftp/socp.html 参照）、一部は
+# gzip 圧縮のまま残っている。
 for n in beam7 beam30 chainsing-50000-1 chainsing-50000-2 chainsing-50000-3 \
          db-joint-soerensen db-plate-yield-line dsNRL firL1 firL1Linfalph \
          firL1Linfeps firL2L1alph firL2L1eps firL2Linfalph firL2Linfeps \
          firL2a firLinf wbNRL; do
-  f="data/cblib/$n.cbf"
+  case "$n" in fir*|dsNRL|wbNRL) stem="2013_$n" ;; *) stem="$n" ;; esac
+  f="data/cblib_full/$stem.cbf"
+  if [ ! -f "$f" ]; then
+    # フレッシュクローンで 0 バイトを作らない: .gz 必須、一時ファイルへ展開し
+    # 成功時のみ mv する（gunzip 失敗で壊れた .cbf を再利用させない）。
+    [ -f "$f.gz" ] || { echo "$n,Missing,,," >> "$out/$n.csv"; continue; }
+    gunzip -c "$f.gz" > "$f.tmp" && mv "$f.tmp" "$f" \
+      || { echo "$n,DecompressFailed,,," >> "$out/$n.csv"; continue; }
+  fi
   timeout 1000 ./target/release/examples/solve_cbf --eps 1e-6 "$f" > "$out/$n.csv" 2>/dev/null
-  rc=$?   # パイプなし: 124 = timeout、137/134 = OOM、0 = CSV の status を参照
-  [ "$rc" = 124 ] && echo "$n,Timeout,,,1000.0" >> "$out/$n.csv"
+  rc=$?   # パイプなし: 0 = status は CSV 内; それ以外は書き込み前に異常終了
+  case "$rc" in
+    0) : ;;
+    124) echo "$n,Timeout,,,1000.0" >> "$out/$n.csv" ;;       # timeout 1000
+    137|134) echo "$n,OOM,,," >> "$out/$n.csv" ;;             # 14 GB 上限
+    *) echo "$n,Error$rc,,," >> "$out/$n.csv" ;;
+  esac
 done
 grep -hv '^problem,' "$out"/*.csv   # 問題ごとの status,objective,iters,time
 ```

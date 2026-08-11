@@ -156,6 +156,11 @@ pub enum SolveStatus {
     Timeout,
     /// 数値エラー（LDL分解失敗等、問題が数値的に解けない）
     NumericalError,
+    /// OS のリソース (スレッド、メモリ等) を確保できず、solve を実行できなかった。
+    ///
+    /// `NumericalError` が「計算アルゴリズムの過程で生じた数値的な破綻」を指すのに対し、
+    /// 本 variant は実行環境側の制限による起動失敗を明確に区別する。
+    ResourceExhausted,
     /// Q行列が不定（非凸QP）。IPMはQ正半定値を前提とする。
     NonConvex(String),
     /// 非凸 QP の局所最適解 (= `solve_qp_global` 経由で incumbent あり、ε-global 証明なし)。
@@ -189,6 +194,7 @@ impl fmt::Display for SolveStatus {
             SolveStatus::FeasiblePoint => write!(f, "FeasiblePoint"),
             SolveStatus::Timeout => write!(f, "Timeout"),
             SolveStatus::NumericalError => write!(f, "NumericalError"),
+            SolveStatus::ResourceExhausted => write!(f, "ResourceExhausted"),
             SolveStatus::NonConvex(msg) => write!(f, "NonConvex({})", msg),
             SolveStatus::NonconvexLocal => write!(f, "NonconvexLocal"),
             SolveStatus::NonconvexGlobal => write!(f, "NonconvexGlobal"),

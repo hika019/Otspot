@@ -132,7 +132,9 @@ fn status_rank(s: &SolveStatus) -> u8 {
         // 非収束の内部終端は品質同格 (どちらも診断 iterate のみ)。
         MaxIterations | Stalled => 4,
         Timeout => 5,
-        NumericalError => 6,
+        // どちらも「有効解なしのハード失敗」。ResourceExhausted は OS リソース
+        // 起因、NumericalError は数値破綻だが、multistart の品質順位としては同格。
+        NumericalError | ResourceExhausted => 6,
         NonConvex(_) => 7,
         Unbounded => 8,
         Infeasible => 9,

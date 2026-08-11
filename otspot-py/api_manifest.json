@@ -81,10 +81,10 @@
   "variants": {
     "VarKind": ["Continuous", "Integer", "Binary"],
     "SolutionProof": ["GlobalOptimal", "LocalOptimal", "FeasibleUnproven"],
-    "SolveError": ["Infeasible", "Unbounded", "MaxIterations", "Stalled", "NumericalError"],
+    "SolveError": ["Infeasible", "Unbounded", "MaxIterations", "Stalled", "NumericalError", "ResourceExhausted"],
     "SolveStatus": [
       "Optimal", "LocallyOptimal", "Infeasible", "Unbounded", "MaxIterations",
-      "SuboptimalSolution", "Stalled", "FeasiblePoint", "Timeout", "NumericalError",
+      "SuboptimalSolution", "Stalled", "FeasiblePoint", "Timeout", "NumericalError", "ResourceExhausted",
       "NonConvex", "NonconvexLocal", "NonconvexGlobal", "NotSupported"
     ],
     "Tolerance": ["High", "Medium", "Fast", "Custom"]

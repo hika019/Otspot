@@ -11,6 +11,8 @@ use crate::options::SolverOptions;
 use crate::problem::LpProblem;
 use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
 use otspot_num::sparse::{CscMatrix, SparseVec};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Relative tolerance below which a standard-form column value is treated as
 /// at-bound (zero) when seeding the crossover basis from `x_star`.
@@ -134,6 +136,7 @@ pub(crate) fn crossover_dual_from_primal(
     problem: &LpProblem,
     x_star: &[f64],
     deadline: Option<std::time::Instant>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
     let t_total = std::time::Instant::now();
     let sf = build_standard_form(problem);
@@ -155,6 +158,7 @@ pub(crate) fn crossover_dual_from_primal(
     let options = SolverOptions {
         deadline,
         warm_start: None,
+        cancel_flag,
         ..Default::default()
     };
 
@@ -264,7 +268,11 @@ pub(crate) fn crossover_dual_from_primal(
         let active_len = active.len();
         let mut seat_pivots = 0usize;
         for (_xj, j) in active {
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            let cancelled = options
+                .cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Relaxed));
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) || cancelled {
                 break;
             }
             let (col_rows, col_vals) = a_ext.column(j);
@@ -557,6 +565,7 @@ pub(crate) fn crossover_dual_from_primal_with_dual_warm_start(
     x_star: &[f64],
     ipm_dual_prove: Option<&[f64]>,
     deadline: Option<std::time::Instant>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
     let warm = ipm_dual_prove.and_then(|y_prove| {
         if y_prove.len() != problem.num_constraints || x_star.len() != problem.num_vars {
@@ -582,7 +591,7 @@ pub(crate) fn crossover_dual_from_primal_with_dual_warm_start(
         }
     }
 
-    let cold = crossover_dual_from_primal(problem, x_star, deadline);
+    let cold = crossover_dual_from_primal(problem, x_star, deadline, cancel_flag);
     match (warm, cold) {
         (
             Some((warm_df, warm_vertex, warm_dual, warm_rc)),
@@ -621,7 +630,7 @@ mod crossover_tests {
     const DF_TOL: f64 = 1e-7;
 
     fn assert_crossover_complementary(problem: &LpProblem, x_star: &[f64], label: &str) {
-        let (_vertex, y, rc) = crossover_dual_from_primal(problem, x_star, None)
+        let (_vertex, y, rc) = crossover_dual_from_primal(problem, x_star, None, None)
             .unwrap_or_else(|| panic!("{label}: crossover returned None"));
         assert_eq!(y.len(), problem.num_constraints, "{label}: dual length");
         assert_eq!(rc.len(), problem.num_vars, "{label}: rc length");
@@ -730,5 +739,42 @@ mod crossover_tests {
             vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
         );
         assert_crossover_complementary(&p, &[1.0, 1.0], "degenerate");
+    }
+
+    /// Sentinel (cancel propagation, reviewer-reported): `crossover_dual_from_primal`
+    /// used to build its internal `SolverOptions` with `cancel_flag: None`
+    /// unconditionally — the parameter did not even exist — so a caller-supplied
+    /// cancel flag was silently dropped and the Phase I / Phase II simplex loops
+    /// inside crossover never observed it, unlike every other `deadline`-carrying
+    /// entry point in this codebase, which also threads `cancel_flag`.
+    ///
+    /// Fixture: `x1 - x2 = 0` (Eq) at `x* = (0, 0)` seats no support column (both
+    /// structural values are 0 — nothing clears `CROSSOVER_ZERO_TOL`), so the
+    /// row's artificial stays basic after seating and Phase I *must* run to
+    /// clear it. With a pre-set `cancel_flag`, Phase I's `revised_simplex_core`
+    /// call times out on its very first iteration check (before any pivot) and
+    /// the whole function returns `None`. No-op proof: before the fix, Phase I's
+    /// `phase1_options` always had `cancel_flag: None` regardless of what was
+    /// passed in, so it ran its (trivial, single-pivot) sweep to completion and
+    /// the function returned `Some(...)`.
+    #[test]
+    fn crossover_honors_preset_cancel_flag_in_phase1() {
+        let p = lp(
+            vec![1.0, 0.0],
+            &[0, 0],
+            &[0, 1],
+            &[1.0, -1.0],
+            vec![0.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+        );
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let result = crossover_dual_from_primal(&p, &[0.0, 0.0], None, Some(cancel));
+        assert!(
+            result.is_none(),
+            "BUG: cancel_flag=true must abort crossover's Phase I before it \
+             completes; got Some(...) instead of None — cancel_flag is being \
+             silently dropped"
+        );
     }
 }

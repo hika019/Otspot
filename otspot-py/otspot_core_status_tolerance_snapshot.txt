@@ -20,6 +20,7 @@ pub otspot_core::problem::SolveStatus::NonconvexLocal
 pub otspot_core::problem::SolveStatus::NotSupported(alloc::string::String)
 pub otspot_core::problem::SolveStatus::NumericalError
 pub otspot_core::problem::SolveStatus::Optimal
+pub otspot_core::problem::SolveStatus::ResourceExhausted
 pub otspot_core::problem::SolveStatus::Stalled
 pub otspot_core::problem::SolveStatus::SuboptimalSolution
 pub otspot_core::problem::SolveStatus::Timeout
@@ -40,6 +41,7 @@ pub otspot_core::SolveStatus::NonconvexLocal
 pub otspot_core::SolveStatus::NotSupported(alloc::string::String)
 pub otspot_core::SolveStatus::NumericalError
 pub otspot_core::SolveStatus::Optimal
+pub otspot_core::SolveStatus::ResourceExhausted
 pub otspot_core::SolveStatus::Stalled
 pub otspot_core::SolveStatus::SuboptimalSolution
 pub otspot_core::SolveStatus::Timeout

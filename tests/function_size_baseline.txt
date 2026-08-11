@@ -3,7 +3,7 @@ otspot-core/src/conic/ipm.rs	solve	172	328
 otspot-core/src/conic/misocp.rs	solve_misocp	455	262
 otspot-core/src/conic/nonconvex.rs	global_core	896	259
 otspot-core/src/presolve/activity.rs	propagate_row_bounds	81	227
-otspot-core/src/presolve/postsolve.rs	run_postsolve	212	256
+otspot-core/src/presolve/postsolve.rs	run_postsolve	214	258
 otspot-core/src/qp/ipm_core/ippmm/iter.rs	solve_ippmm_inner_confined	102	682
 otspot-core/src/qp/ipm_solver/core.rs	run_ipm_with	65	317
 otspot-core/src/qp/postsolve/postprocess/dual_ir.rs	try_dual_only_ir	27	392
@@ -16,9 +16,9 @@ otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	phase2_primal_bound
 otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	primal_simplex_aug	532	293
 otspot-core/src/simplex/dual_advanced/core.rs	dual_simplex_core_advanced	282	581
 otspot-core/src/simplex/dual_advanced/phase1.rs	big_m_cold_start	638	413
-otspot-core/src/simplex/entry.rs	solve_with	79	285
+otspot-core/src/simplex/entry.rs	solve_with	79	286
 otspot-core/src/simplex/primal/core.rs	revised_simplex_core	153	627
-otspot-core/src/simplex/primal/crossover.rs	crossover_dual_from_primal	133	421
+otspot-core/src/simplex/primal/crossover.rs	crossover_dual_from_primal	135	427
 otspot-core/src/simplex/primal/reconcile.rs	pivot_out_degenerate_artificials	219	294
 otspot-dev/src/bin/bench_qplib.rs	main	94	636
 otspot-io/src/qplib/parser.rs	parse_token_stream	437	417

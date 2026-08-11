@@ -179,7 +179,7 @@ done
 
 Otspot is run against Hans Mittelmann's [Large Second-Order Cone benchmark](https://plato.asu.edu/ftp/socp.html) (18 CBLIB instances), which publishes runtimes for MOSEK, ECOS and COPT under a 1-hour limit — those three columns below are Mittelmann's published values, not measured here, and CBLIB/Mittelmann publish no objective values so Otspot's results are not cross-checked against the commercial optima (`Optimal` here means KKT convergence at 1e-6 only). Otspot's own runs use **`jobs = 1`** — the large instances need up to ~18 GB RSS each, so running them in parallel exhausts memory — on a memory-constrained 19 GB VM (8 vCPU), not Mittelmann's 64 GB machine, so its absolute seconds are directional.
 
-Only 9 of the 18 instances are downloaded locally; those were re-measured 2026-08-08 at `timeout = 1000s`. The last 9 rows below (`firL1` through `firL2Linfalph`) keep their prior measurement, not re-run this time.
+All 18 rows below are this run's own measurement, taken 2026-08-08–09 at `eps = 1e-6`, `timeout = 1000s`, under a 14 GB memory cap.
 
 | Problem | nnz | Otspot | MOSEK | ECOS | COPT |
 |---|---:|---|---:|---:|---:|
@@ -200,7 +200,7 @@ Only 9 of the 18 instances are downloaded locally; those were re-measured 2026-0
 | wbNRL | 39M | timeout (>1000s) | 9 | 1333 | 7 |
 | dsNRL | 67M | timeout (>1000s) | 56 | f | 27 |
 | beam30 | 64M | timeout (>1000s) | 99 | 2465 | 84 |
-| firL2Linfalph | 122M | OOM (>18 GB) | 27 | f | 25 |
+| firL2Linfalph | 122M | OOM (>14 GB cap) | 27 | f | 25 |
 | **solved** | | **4/18** | 18/18 | 11/18 | 18/18 |
 
 Otspot solves the three `chainsing-50000` instances (rotated cones, ~1M nonzeros) in 5–7s, where ECOS fails all three; the large dense-Jacobian `fir`/`db`/`beam30`/`dsNRL` instances (6–122M nonzeros) time out or exhaust memory. Supported cone types are `F`/`L±`/`L=`/`Q`/`QR` plus MISOCP via branch-and-bound; `EXP` and PSD cones are rejected as unsupported.
@@ -210,16 +210,30 @@ SOCP has no `bench_parallel.sh` harness yet (that script is `.mps`/`.qps`/`.qpli
 ```bash
 cargo build --release --example solve_cbf
 out=/tmp/socp18; mkdir -p "$out"
-# Mittelmann Large-SOCP 18; CBLIB download stems vary (most 2013_<name>, but
-# beam7/beam30/chainsing-* have no 2013_ prefix) — adjust per plato.asu.edu/ftp/socp.html.
+# Mittelmann Large-SOCP 18, in data/cblib_full/; CBLIB stems vary per problem —
+# fir*/dsNRL/wbNRL carry a 2013_ prefix, beam7/beam30/chainsing-*/db-* do not
+# (see plato.asu.edu/ftp/socp.html) — and some are still gzip-compressed.
 for n in beam7 beam30 chainsing-50000-1 chainsing-50000-2 chainsing-50000-3 \
          db-joint-soerensen db-plate-yield-line dsNRL firL1 firL1Linfalph \
          firL1Linfeps firL2L1alph firL2L1eps firL2Linfalph firL2Linfeps \
          firL2a firLinf wbNRL; do
-  f="data/cblib/$n.cbf"
+  case "$n" in fir*|dsNRL|wbNRL) stem="2013_$n" ;; *) stem="$n" ;; esac
+  f="data/cblib_full/$stem.cbf"
+  if [ ! -f "$f" ]; then
+    # No 0-byte artifact on a fresh clone: require the .gz, decompress via a
+    # temp so a failed gunzip never leaves a broken .cbf to be reused.
+    [ -f "$f.gz" ] || { echo "$n,Missing,,," >> "$out/$n.csv"; continue; }
+    gunzip -c "$f.gz" > "$f.tmp" && mv "$f.tmp" "$f" \
+      || { echo "$n,DecompressFailed,,," >> "$out/$n.csv"; continue; }
+  fi
   timeout 1000 ./target/release/examples/solve_cbf --eps 1e-6 "$f" > "$out/$n.csv" 2>/dev/null
-  rc=$?   # no pipe: 124 = timeout, 137/134 = OOM, 0 = see status in the CSV
-  [ "$rc" = 124 ] && echo "$n,Timeout,,,1000.0" >> "$out/$n.csv"
+  rc=$?   # no pipe: 0 = status is in the CSV; else the run died before writing it
+  case "$rc" in
+    0) : ;;
+    124) echo "$n,Timeout,,,1000.0" >> "$out/$n.csv" ;;       # timeout 1000
+    137|134) echo "$n,OOM,,," >> "$out/$n.csv" ;;             # 14 GB limit
+    *) echo "$n,Error$rc,,," >> "$out/$n.csv" ;;
+  esac
 done
 grep -hv '^problem,' "$out"/*.csv   # per-problem status,objective,iters,time
 ```

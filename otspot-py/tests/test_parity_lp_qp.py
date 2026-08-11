@@ -317,6 +317,29 @@ def test_unbounded_lp_raises_solve_failed_error():
     assert exc_info.value.error == otspot.SolveError.Unbounded
 
 
+def test_resource_exhausted_is_distinct_from_numerical_error():
+    """OS リソース枯渇 (スレッド起動失敗など) は数値破綻 (NumericalError) とは
+    別の status/error として表現され、利用者が原因を取り違えないこと。実際の
+    ResourceExhausted 発生経路 (MILP 部分 spawn 失敗) は Rust 側の test-only
+    注入でのみ到達可能なため、ここでは binding 表現が NumericalError と分離
+    されていることを検証する (Rust 側 sentinel が返り値の正しさを担保)。
+
+    revert (enums.rs で ResourceExhausted を追加しない) と、これらの属性が
+    無くなり AttributeError で FAIL する。"""
+    # SolveStatus 側: 別 variant であり、互いに等しくない。
+    resource = otspot.SolveStatus.ResourceExhausted()
+    numerical = otspot.SolveStatus.NumericalError()
+    assert isinstance(resource, otspot.SolveStatus.ResourceExhausted)
+    assert not isinstance(resource, otspot.SolveStatus.NumericalError)
+    assert resource != numerical
+
+    # SolveError 側 (SolveFailedError.error が保持する型): 別 variant。
+    assert otspot.SolveError.ResourceExhausted != otspot.SolveError.NumericalError
+    assert int(otspot.SolveError.ResourceExhausted) != int(
+        otspot.SolveError.NumericalError
+    )
+
+
 def test_missing_objective_raises_no_objective_error():
     model = otspot.Model("no_objective")
     model.add_var("x", 0.0, 1.0)

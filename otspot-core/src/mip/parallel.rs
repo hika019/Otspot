@@ -39,8 +39,9 @@ use crate::problem::{SolveStatus, SolverResult};
 /// memory for another stack) after some workers have already started, and
 /// `MAX_THREADS` validation cannot foresee it — the limit depends on the
 /// machine's state at solve time, not on the option. This is reported as a
-/// failed solve (`SolveStatus::NumericalError`), never as a silently smaller
-/// one: the thread budget the caller asked for could not be honoured.
+/// failed solve (`SolveStatus::ResourceExhausted` — an OS resource shortfall,
+/// not a numerical breakdown), never as a silently smaller one: the thread
+/// budget the caller asked for could not be honoured.
 struct WorkerSpawnFailed;
 
 #[cfg(test)]
@@ -365,7 +366,7 @@ pub(crate) fn solve_mip_parallel<R: Relaxation + Sync>(
         Err(WorkerSpawnFailed) => {
             return (
                 SolverResult {
-                    status: SolveStatus::NumericalError,
+                    status: SolveStatus::ResourceExhausted,
                     objective: f64::INFINITY,
                     solution: vec![],
                     ..Default::default()
@@ -619,16 +620,23 @@ mod tests {
         });
     }
 
-    /// A partial worker-spawn failure must stop workers that were already
-    /// accepted by the OS before the scoped joins begin. The one live worker
-    /// below consumes an integral root and then blocks in `pop_blocking`:
-    /// because the pool still records two requested workers, it can never
-    /// reach all-idle termination by itself.
+    /// A partial worker-spawn failure must (a) *not* deadlock — the workers
+    /// already accepted by the OS get stopped before the scoped joins begin,
+    /// so termination detection is reached even though the pool still records
+    /// the full requested worker count — and (b) report the failure as
+    /// [`SolveStatus::ResourceExhausted`] (an OS resource shortfall), not as a
+    /// numerical breakdown. The one live worker below consumes an integral
+    /// root and would otherwise block forever in `pop_blocking`.
     ///
-    /// Sentinel: removing the `pool.stop()` in the spawn-error branch leaves
-    /// that worker blocked and this test's bounded receive times out.
+    /// Two independent obligations are asserted: the bounded `recv_timeout`
+    /// catches a *deadlock* (a hang, not a status), and the `assert_eq!`
+    /// catches a *wrong status*.
+    ///
+    /// Sentinel: removing the `pool.stop()` in the spawn-error branch makes
+    /// the receive time out (deadlock); returning `NumericalError` there makes
+    /// the status assertion fail.
     #[test]
-    fn partial_worker_spawn_failure_returns_instead_of_deadlocking() {
+    fn partial_worker_spawn_failure_returns_resource_exhausted_instead_of_deadlocking() {
         struct IntegralLeaf {
             bounds: Vec<(f64, f64)>,
             integers: Vec<usize>,
@@ -669,13 +677,17 @@ mod tests {
             tx.send(result.status).expect("test receiver alive");
         });
 
+        // Obligation (a): no deadlock — a result arrives within the bound.
         let status = rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("partial spawn failure deadlocked instead of returning");
+        // Obligation (b): the failure is classified as an OS resource
+        // shortfall, not a numerical breakdown.
         assert_eq!(
             status,
-            SolveStatus::NumericalError,
-            "a requested worker budget that cannot be created must be an explicit failed solve"
+            SolveStatus::ResourceExhausted,
+            "a requested worker budget that cannot be created must be an explicit \
+             resource-exhaustion failure, not a numerical breakdown"
         );
     }
 

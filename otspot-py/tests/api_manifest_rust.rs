@@ -425,13 +425,15 @@ fn non_exhaustive_enum_variant_names_match_manifest() {
         "MaxIterations",
         "Stalled",
         "NumericalError",
+        "ResourceExhausted",
     ];
-    let _: [SolveError; 5] = [
+    let _: [SolveError; 6] = [
         SolveError::Infeasible,
         SolveError::Unbounded,
         SolveError::MaxIterations,
         SolveError::Stalled,
         SolveError::NumericalError,
+        SolveError::ResourceExhausted,
     ];
     assert_eq!(se_names.to_vec(), as_strs(&v["variants"]["SolveError"]));
 
@@ -455,12 +457,13 @@ fn non_exhaustive_enum_variant_names_match_manifest() {
         "FeasiblePoint",
         "Timeout",
         "NumericalError",
+        "ResourceExhausted",
         "NonConvex",
         "NonconvexLocal",
         "NonconvexGlobal",
         "NotSupported",
     ];
-    let _: [SolveStatus; 14] = [
+    let _: [SolveStatus; 15] = [
         SolveStatus::Optimal,
         SolveStatus::LocallyOptimal,
         SolveStatus::Infeasible,
@@ -471,6 +474,7 @@ fn non_exhaustive_enum_variant_names_match_manifest() {
         SolveStatus::FeasiblePoint,
         SolveStatus::Timeout,
         SolveStatus::NumericalError,
+        SolveStatus::ResourceExhausted,
         SolveStatus::NonConvex(String::new()),
         SolveStatus::NonconvexLocal,
         SolveStatus::NonconvexGlobal,

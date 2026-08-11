@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3234 testcases, 26 ignored
+# totals: 3237 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -409,7 +409,7 @@ otspot-core	mip::parallel::tests::blocked_worker_wakes_on_push	active
 otspot-core	mip::parallel::tests::concurrent_consider_is_race_free	active
 otspot-core	mip::parallel::tests::drain_from_moves_local_nodes_into_the_pool	active
 otspot-core	mip::parallel::tests::non_finite_candidates_are_never_adopted	active
-otspot-core	mip::parallel::tests::partial_worker_spawn_failure_returns_instead_of_deadlocking	active
+otspot-core	mip::parallel::tests::partial_worker_spawn_failure_returns_resource_exhausted_instead_of_deadlocking	active
 otspot-core	mip::parallel::tests::pool_pops_best_bound_first	active
 otspot-core	mip::parallel::tests::pseudocost_delta_merge_is_order_independent	active
 otspot-core	mip::parallel::tests::shared_incumbent_keeps_only_strict_improvements	active
@@ -1701,6 +1701,7 @@ otspot-core	simplex::primal::core::revert_to_snapshot_tests::test_revert_to_snap
 otspot-core	simplex::primal::crossover::crossover_tests::crossover_degenerate_vertex	active
 otspot-core	simplex::primal::crossover::crossover_tests::crossover_eq_with_free_var	active
 otspot-core	simplex::primal::crossover::crossover_tests::crossover_finite_upper_bound	active
+otspot-core	simplex::primal::crossover::crossover_tests::crossover_honors_preset_cancel_flag_in_phase1	active
 otspot-core	simplex::primal::crossover::crossover_tests::crossover_le_unique_optimum	active
 otspot-core	simplex::primal::crossover::crossover_tests::crossover_seats_support_slack_on_nonbinding_ge	active
 otspot-core	simplex::primal::cycle_perturbation_tests::cycle_perturbation_threshold_scales_with_m	active
@@ -1914,6 +1915,7 @@ otspot-dev	audit::tests::no_observation_only_tests	active
 otspot-dev	audit::tests::no_underscore_sig_params_in_production	active
 otspot-dev	audit::tests::scan_dead_params_detects_dead_param	active
 otspot-dev	audit::tests::scan_dead_params_detects_dead_param_right_after_skip_zone_closes_same_line	active
+otspot-dev	audit::tests::scan_dead_params_finds_fn_across_multiline_string_closing_on_comment_lookalike_line	active
 otspot-dev	audit::tests::scan_dead_params_ignores_non_params	active
 otspot-dev	audit::tests::scan_observation_only_tests_detects_violation_when_closing_brace_shares_line_with_reopen	active
 otspot-dev	audit::tests::scan_observation_only_tests_ignores_commented_should_panic	active
@@ -2396,6 +2398,7 @@ otspot-model	model::tests::model_result_clone	active
 otspot-model	model::tests::model_result_index_cross_model_in_range_panics	active
 otspot-model	model::tests::model_result_value_cross_model_in_range_panics	active
 otspot-model	model::tests::qp_dual_length_mismatch_is_internal_error_not_prefix_truncation	active
+otspot-model	model::tests::resource_exhausted_maps_to_distinct_error_and_message	active
 otspot-model	model::tests::set_threads_in_range_is_accepted	active
 otspot-model	model::tests::set_threads_out_of_range_defers_invalid_input	active
 otspot-model	model::tests::set_timeout_invalid_defers_error	active

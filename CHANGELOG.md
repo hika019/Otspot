@@ -5,6 +5,9 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 ## [Unreleased]
 
 ### Added
+- `SolveStatus::ResourceExhausted` (Python `otspot.SolveStatus.ResourceExhausted`
+  / `SolveError.ResourceExhausted`) を新設。OS リソース (スレッド・メモリ) 確保
+  失敗を数値破綻 (`NumericalError`) と区別して返す
 - `otspot-py` crate (PyO3/maturin) を追加し、Otspot を Python ライブラリとして
   利用可能に (Rust 版と同じ Model DSL)
 - `SolverOptions::threads` (`milp_solve --threads`) が MILP 分枝限定法で実効化
@@ -22,6 +25,9 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - LP の Farkas・unbounded ray 証明ループと QP presolve が、キャンセル・deadline
   を無視して完了しうる問題を修正。`timeout_secs` 設定時、従来 Infeasible と
   判定されていた問題が Timeout になる場合がある
+- LP の primal-to-dual crossover (postsolve のダブルチェック経路、IPM 証明後の
+  crossover 経路) が cancel_flag を受け取っておらず、キャンセル後も完了まで
+  走り得た問題を修正
 - QP presolve の等式制約冗長行判定の不具合を修正: 矛盾した等式系を誤って
   Feasible と判定する場合、および打ち切り時に未検証行を誤って冗長と判定する
   場合があった
@@ -32,7 +38,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - QPLIB/CBF パーサが宣言サイズを検証せず allocation しており、巨大/不正な
   ファイルで OOM しうる問題を修正
 - MILP 並列探索で、要求したワーカーの一部を OS が拒否すると solve がデッドロック
-  していた問題を修正 (フリーズせずエラーを返すようにした)
+  していた問題を修正 (フリーズせず `ResourceExhausted` を返す)
 - QP/conic の IPM が指定した `threads` 数を超えて並列実行していた問題を修正
 - MILP B&B の cut separation に割り当てる反復予算の見積りに誤りがあり、探索時間
   を浪費していた問題を修正。複数の TIMEOUT 問題でノード数・incumbent が改善
