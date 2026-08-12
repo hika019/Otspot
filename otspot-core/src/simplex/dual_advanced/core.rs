@@ -10,8 +10,8 @@
 //!   を計算し `leaving.after_pivot(...)` で γ を rank-1 更新
 
 use super::super::dual_common::{
-    basic_obj, compute_dual_vars, made_progress_with_floor, recompute_gamma_truth, NO_PROGRESS_MIN,
-    NO_PROGRESS_TRIGGER_FACTOR,
+    basic_obj, compute_dual_vars, made_progress_with_floor, mint_optimal_after_fresh_reverify,
+    recompute_gamma_truth, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
 };
 use super::super::pricing::DualLeavingStrategy;
 use super::super::trace::IterTrace;
@@ -283,6 +283,7 @@ pub(crate) fn dual_simplex_core_advanced(
     a: &CscMatrix,
     x_b: &mut [f64],
     c: &[f64],
+    b_rhs: &[f64],
     basis: &mut [usize],
     m: usize,
     n_price: usize,
@@ -432,11 +433,18 @@ pub(crate) fn dual_simplex_core_advanced(
             leaving.select_leaving(x_b, options.primal_tol, basis)
         };
         let leaving_row = match leaving_pick {
+            // 全て x_B[i] ≥ -ε: 最適宣言前に fresh x_b で再検証する (bug-hunt P1)。
             None => {
-                // 全て x_B[i] ≥ -ε → 主実行可能 → 最適
-                let obj: f64 = basic_obj(c, basis, x_b);
-                let y = compute_dual_vars(c, &mut basis_mgr, basis, m);
-                return SimplexOutcome::Optimal(obj, y);
+                return mint_optimal_after_fresh_reverify(
+                    a,
+                    x_b,
+                    c,
+                    b_rhs,
+                    basis,
+                    &mut basis_mgr,
+                    m,
+                    options,
+                )
             }
             Some(p) => p,
         };
@@ -925,6 +933,7 @@ mod tests {
             &a,
             &mut x_b,
             &[0.0, 0.0],
+            &[-1.0],
             &mut basis,
             1,
             2,
@@ -939,6 +948,72 @@ mod tests {
         assert_eq!(x_b, old_x_b);
         assert_eq!(basis, old_basis);
         assert_eq!(super::ETA_REJECT_ATOMIC_COUNT.get(), 1);
+    }
+
+    /// SENTINEL (task 10 / bug-hunt P1): `dual_simplex_core_advanced` must
+    /// NOT mint `Optimal` off a stale `x_b` that disagrees with a fresh
+    /// `B^{-1} b_rhs` recomputation. Same construction as `dual::tests::
+    /// dual_simplex_core_rejects_stale_x_b_inconsistent_with_b_rhs`, applied
+    /// to the "advanced" core (identical LP: min 0·x s.t. x = -1 (singleton
+    /// row), x ≥ 0 — genuinely infeasible; see also tests.rs::
+    /// test_phase2_infeasible_vertex_bail_is_stalled for the primal-core
+    /// sibling this mirrors).
+    ///
+    /// Independent oracle: `LuBasis::ftran_dense` on `b_true = [-1.0]` against
+    /// basis `{0}` (B is the 1×1 identity) reproduces `x_b_true = [-1.0]`.
+    ///
+    /// No-op / revert-fail proof: reverting the force-refactor, fresh-FTRAN
+    /// and `min_basic < -primal_tol` guard in `dual_simplex_core_advanced`
+    /// (restoring the pre-fix `None => Optimal` short-circuit) makes this
+    /// test FAIL with `Optimal` instead of `Stalled` — confirmed manually
+    /// against the pre-fix code during the bug-hunt session that produced
+    /// this fix.
+    #[test]
+    fn dual_simplex_core_advanced_rejects_stale_x_b_inconsistent_with_b_rhs() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let c = vec![0.0];
+        let basis_true = vec![0usize];
+
+        let b_true = vec![-1.0];
+        let mut oracle_x_b = b_true.clone();
+        let mut bm = LuBasis::new(&a, &basis_true, 50).unwrap();
+        bm.ftran_dense(&mut oracle_x_b);
+        assert!(
+            oracle_x_b[0] < -PIVOT_TOL,
+            "oracle premise: true B^-1 b_true must be infeasible, got {:?}",
+            oracle_x_b
+        );
+
+        let mut x_b_given = vec![0.0];
+        let mut basis = basis_true.clone();
+        let mut leaving = MostInfeasibleLeaving;
+        let mut iters = 0usize;
+        let opts = SolverOptions::default();
+        let outcome = dual_simplex_core_advanced(
+            &a,
+            &mut x_b_given,
+            &c,
+            &b_true,
+            &mut basis,
+            1,
+            1,
+            1,
+            false,
+            &opts,
+            &mut leaving,
+            &mut iters,
+        );
+
+        assert!(
+            matches!(outcome, SimplexOutcome::Stalled(_)),
+            "dual_simplex_core_advanced must re-derive x_b from b_rhs and \
+             honestly bail Stalled (not Optimal) when the fresh recomputation \
+             is infeasible; got {:?} (stale x_b_given={:?}, oracle \
+             x_b_true={:?})",
+            outcome,
+            x_b_given,
+            oracle_x_b,
+        );
     }
 
     #[test]
@@ -967,6 +1042,7 @@ mod tests {
             &a,
             &mut x_b,
             &[0.0, 0.0],
+            &[-1.0],
             &mut basis,
             1,
             2,
@@ -995,6 +1071,7 @@ mod tests {
             &a,
             &mut x_b,
             &[0.0, 0.0],
+            &[-1.0],
             &mut basis,
             1,
             2,
@@ -1048,6 +1125,7 @@ mod tests {
             &a,
             &mut x_b,
             &c,
+            &[-1.0],
             &mut basis,
             1,
             2,
@@ -1098,6 +1176,7 @@ mod tests {
                 &a,
                 &mut x_b,
                 &c,
+                &[-1.0],
                 &mut basis,
                 1,
                 4,
@@ -1179,6 +1258,7 @@ mod tests {
                 &a,
                 &mut x_b,
                 &c,
+                &[-1.0],
                 &mut basis,
                 1,
                 3,
@@ -1357,6 +1437,7 @@ mod tests {
             &a,
             &mut x_b,
             &c,
+            &[-1.0, -2.0, -1.0],
             &mut basis,
             3,
             6,

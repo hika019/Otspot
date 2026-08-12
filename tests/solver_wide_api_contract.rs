@@ -172,10 +172,10 @@ fn solver_options_public_boundary_and_combination_contract() {
             "ipm_validation_still_load_bearing_when_tolerance_overrides_eps",
             options_with(|opts| {
                 opts.tolerance = Some(Tolerance::Fast);
-                opts.ipm.delta_min = f64::NAN;
+                opts.ipm.max_correctors = 0;
             }),
             false,
-            "ipm.delta_min",
+            "ipm.max_correctors",
         ),
     ];
 
@@ -338,7 +338,10 @@ fn model_api_crosses_lp_qp_and_mip_layers_with_consistent_results() {
     let b = milp_model.add_binary_var("b");
     milp_model.add_constraint(constraint!((2.0 * a + b) <= 3.0));
     milp_model.set_presolve(false);
-    milp_model.set_threads(0);
+    // A valid serial budget; `set_threads(0)` is now rejected as InvalidInput
+    // (see `api_model_set_threads_out_of_range_is_invalid_input`), so the
+    // contract path uses an in-range value here.
+    milp_model.set_threads(1);
     milp_model.maximize(3.0 * a + 2.0 * b);
     let milp_result = milp_model.solve().unwrap();
     assert_eq!(milp_result.status, SolveStatus::Optimal);

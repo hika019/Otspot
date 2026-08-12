@@ -38,6 +38,7 @@ class SolveError:
     MaxIterations: SolveError
     Stalled: SolveError
     NumericalError: SolveError
+    ResourceExhausted: SolveError
     Unknown: SolveError
     """See SolutionProof.Unknown's docstring; same rationale."""
     def __eq__(self, other: object) -> bool: ...
@@ -55,6 +56,9 @@ class SolveError:
 # that; a naive nested-class stub cannot express the subclass relationship
 # without a self-reference to the not-yet-defined outer class.
 class SolveStatus:
+    """Hashable (usable as a `dict` key / `set` member), by variant + payload
+    -- unlike `Tolerance` below, which is not (see its docstring)."""
+
     Optimal: type[_SolveStatus_Optimal]
     LocallyOptimal: type[_SolveStatus_LocallyOptimal]
     Infeasible: type[_SolveStatus_Infeasible]
@@ -65,6 +69,7 @@ class SolveStatus:
     FeasiblePoint: type[_SolveStatus_FeasiblePoint]
     Timeout: type[_SolveStatus_Timeout]
     NumericalError: type[_SolveStatus_NumericalError]
+    ResourceExhausted: type[_SolveStatus_ResourceExhausted]
     NonConvex: type[_SolveStatus_NonConvex]
     NonconvexLocal: type[_SolveStatus_NonconvexLocal]
     NonconvexGlobal: type[_SolveStatus_NonconvexGlobal]
@@ -105,6 +110,9 @@ class _SolveStatus_Timeout(SolveStatus):
 class _SolveStatus_NumericalError(SolveStatus):
     def __init__(self) -> None: ...
 
+class _SolveStatus_ResourceExhausted(SolveStatus):
+    def __init__(self) -> None: ...
+
 class _SolveStatus_NonConvex(SolveStatus):
     def __init__(self, message: str) -> None: ...
 
@@ -121,6 +129,14 @@ class _SolveStatus_Unknown(SolveStatus):
     def __init__(self, message: str) -> None: ...
 
 class Tolerance:
+    """NOT hashable (`hash(...)` raises `TypeError`), for every variant --
+    not just `Custom(float)`: `Custom`'s `float` payload has no total-order-
+    consistent hash (`NaN != NaN`), and PyO3 only supports hashing a whole
+    `#[pyclass]` type, not per-variant, so `==` support alone (needed for
+    `Tolerance.Medium() == Tolerance.Medium()`) already nulls out hashing for
+    all of `Tolerance`, unlike `SolveStatus` above (no float payload,
+    hashable)."""
+
     High: type[_Tolerance_High]
     Medium: type[_Tolerance_Medium]
     Fast: type[_Tolerance_Fast]
@@ -208,8 +224,17 @@ class Expression:
     def __radd__(self, other: float) -> Expression: ...
     @overload
     def __iadd__(self, other: Variable | Expression | float) -> Expression: ...
+    # NoReturn (not Expression): `expr += quad_expr` always raises TypeError
+    # at runtime (Codex PR #31 review). Verified empirically that a direct
+    # `expr.__iadd__(quad_expr)` call resolves to this overload (mypy reveals
+    # `Never`), but mypy's `+=` augmented-assignment sugar does not consult a
+    # NoReturn `__iadd__` overload the same way -- `expr += quad_expr` itself
+    # is not flagged as an error either way. Dropping the overload entirely
+    # (making mypy reject the call for lacking a match) was tried and rejected:
+    # it triggers a separate "Signatures of __iadd__ and __add__ are
+    # incompatible" error against `__add__`'s own QuadExpr overload above.
     @overload
-    def __iadd__(self, other: QuadExpr) -> Expression: ...  # always raises TypeError
+    def __iadd__(self, other: QuadExpr) -> NoReturn: ...
     @overload
     def __sub__(self, other: Variable | Expression | float) -> Expression: ...
     @overload

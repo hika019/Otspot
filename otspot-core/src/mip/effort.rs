@@ -1,41 +1,59 @@
 //! Deterministic per-solve simplex-iteration-share budget for optional B&B
 //! work (Phase 1c; replaces Phase 1b's wall-clock `MipEffortBudget`, which
-//! made B&B trajectories timing-dependent — `gt2` spread from 100 to 3000+
-//! nodes across repeats instead of a fixed 280-node trajectory). Simplex
-//! iterations are reproducible for a fixed input, so gating optional work
+//! made B&B trajectories timing-dependent). Gating optional work
 //! (heuristics / in-tree separation / strong branching) on a share of
-//! [`total_simplex_iters`] keeps the search deterministic; a gate is checked
-//! only before a unit of work starts, never mid-solve.
+//! [`total_simplex_iters`] keeps the search deterministic, since simplex
+//! iterations (unlike wall-clock) are reproducible for a fixed input. Every
+//! gate below is checked only before a unit of work starts, never mid-solve.
 //!
 //! **Known gaps:** (P2-B) a sub-MIP's own feasibility-pump iterations are not
 //! threaded into `MipStats`, so its recursive `total_simplex_iters`
 //! undercounts by that amount (deferred: touches 8+ call sites for a
-//! return-type change). (P2-C) the shares below were ported from Phase 0's
-//! wall-clock percentages, not independently re-derived from iteration-rate
-//! data; per-iteration cost differs by component (a separation cut LP
-//! re-solves the full node relaxation from a cold basis, while RINS/RENS/
-//! local-branching sub-MIPs search a small restricted neighborhood) — a real
-//! bias, confirmed by `mas76` regressing to TIMEOUT under Phase 1d despite
-//! its iteration share being respected (follow-up task, not fixed here).
+//! return-type change).
 //!
-//! Shares: RENS/RINS/local-branching 0.05 each (split from Phase 1b's pooled
-//! 0.15 so a fixed try-order can't let one heuristic spend the whole pool);
-//! separation 0.15 (Phase 0: `enlight_hard`/`timtab1` spent 87-90% of wall
-//! time there with no bound progress); strong branching 0.10 (Phase 0:
-//! `p0201` was a 34%-of-wall-time outlier). Combined 0.40 — the node loop
-//! keeps >= 60% of the iteration budget structurally.
+//! (P2-C, fixed for separation — perf/milp-bnb) shares were ported 1:1 from
+//! Phase 0's wall-clock percentages, not derived from iteration-rate data;
+//! see [`SEPARATION_ITER_SHARE`]'s own doc for the corrected derivation.
+//!
+//! Combined optional-work share stays well under `shares_leave_majority_
+//! for_tree_search`'s ceiling — see each const below for its own rationale.
 
 use super::MipStats;
 
-/// Share of [`total_simplex_iters`] allowed for RENS.
+/// Share of [`total_simplex_iters`] allowed for RENS. Split, with RINS and
+/// local branching, from Phase 1b's pooled 0.15 (the three shared one 0.15
+/// budget) so a fixed try-order can't let one heuristic spend the whole pool
+/// before the others get a turn.
 pub(crate) const RENS_ITER_SHARE: f64 = 0.05;
-/// Share of [`total_simplex_iters`] allowed for RINS.
+/// Share of [`total_simplex_iters`] allowed for RINS. See
+/// [`RENS_ITER_SHARE`]'s doc for why this was split out on its own.
 pub(crate) const RINS_ITER_SHARE: f64 = 0.05;
-/// Share of [`total_simplex_iters`] allowed for local branching.
+/// Share of [`total_simplex_iters`] allowed for local branching. See
+/// [`RENS_ITER_SHARE`]'s doc for why this was split out on its own.
 pub(crate) const LOCAL_BRANCHING_ITER_SHARE: f64 = 0.05;
 /// Share of [`total_simplex_iters`] allowed for in-tree GMI/MIR separation.
-pub(crate) const SEPARATION_ITER_SHARE: f64 = 0.15;
-/// Share of [`total_simplex_iters`] allowed for strong-branching child solves.
+///
+/// perf/milp-bnb review follow-up (2026-08-02): the first fix here (`0.15`
+/// -> `0.007`) divided the iteration-count share by the wall-clock cost of
+/// one real `tree_cut_iters` unit relative to an ordinary iteration (median
+/// 22.3x), but the gate's actual budget-unit is `tree_cut_iters +
+/// tree_cut_overhead_iters` ([`separation_component_iters`]) — the
+/// construction surcharge already pre-charges part of separation's cold-
+/// resolve cost, so dividing by the real-iteration-only ratio double-counted
+/// it and over-throttled by ~5x (`dcmulti`: separation never fired at all
+/// under `0.007`, 0 rounds). Re-measured per budget-unit (same 10
+/// MIPLIB-small instances): median **5.70x** (this repo), **5.33x** pooled,
+/// **4.31x** (independent reviewer re-measurement) — wall-clock noise across
+/// separate runs, not a disagreement in method. Since `total_simplex_iters`
+/// includes `tree_cut_iters`, the realized wall fraction is `w = k*share /
+/// (1 + k*share)`, not `k*share` linearly. `0.035` was chosen from that
+/// range via a `miplib_small` @1e-6/1000s/jobs=6 A/B against the naive
+/// `0.007`: identical 7/20 PASS set, but faster on the majority of solved
+/// problems (`gt2` -42%, `p0201` -29%, `dcmulti` -12%) and separation no
+/// longer structurally never fires.
+pub(crate) const SEPARATION_ITER_SHARE: f64 = 0.035;
+/// Share of [`total_simplex_iters`] allowed for strong-branching child
+/// solves. 0.10 (Phase 0: `p0201` was a 34%-of-wall-time outlier there).
 pub(crate) const STRONG_BRANCH_ITER_SHARE: f64 = 0.10;
 
 /// Consecutive in-tree separation attempts (calls that passed the node-
@@ -320,8 +338,19 @@ mod tests {
         assert!(may_run_strong_branch(&stats));
     }
 
+    /// perf/milp-bnb review follow-up (2026-08-02): replaces the deleted
+    /// `component_at_or_over_its_share_is_blocked`, which covered this same
+    /// rens/rins/local-branching/strong-branch case plus a `tree_cut_iters`
+    /// (separation) sub-case in one function body. The separation sub-case
+    /// was already split out into its own
+    /// [`separation_component_at_its_share_is_blocked`] test when
+    /// `SEPARATION_ITER_SHARE` first changed; this rename finishes that
+    /// split so neither test is an in-place edit of pre-existing assertions
+    /// (CLAUDE.md: existing test logic changes must read as delete-old +
+    /// add-new, not a trim) — this function's own four checks are otherwise
+    /// unchanged from the original.
     #[test]
-    fn component_at_or_over_its_share_is_blocked() {
+    fn heuristic_and_strong_branch_components_at_their_share_are_blocked() {
         // `total_simplex_iters` includes the tested component's own count, so
         // `lp_iters_total` is set to `1_000_000 - component` for each case,
         // making `total_simplex_iters == 1_000_000` exactly and `component`
@@ -339,12 +368,30 @@ mod tests {
         assert!(!may_run_rins(&s));
         let s = base(950_000, 50_000, |s, v| s.local_branching_iters = v);
         assert!(!may_run_local_branching(&s));
-        // 0.15 * 1_000_000 = 150_000 threshold.
-        let s = base(850_000, 150_000, |s, v| s.tree_cut_iters = v);
-        assert!(!may_run_separation(&s));
         // 0.10 * 1_000_000 = 100_000 threshold.
         let s = base(900_000, 100_000, |s, v| s.strong_branch_iters = v);
         assert!(!may_run_strong_branch(&s));
+    }
+
+    /// Separation's own share boundary. Was originally one sub-case inside
+    /// `component_at_or_over_its_share_is_blocked` (deleted; see
+    /// [`heuristic_and_strong_branch_components_at_their_share_are_blocked`]'s
+    /// doc), split out because `SEPARATION_ITER_SHARE` moves independently
+    /// of the other shares and its hardcoded boundary goes stale on its own
+    /// schedule. Same construction as that test: `lp_iters_total` is set to
+    /// `1_000_000 - component` so `total_simplex_iters == 1_000_000` exactly
+    /// and `component` lands exactly at `share * 1_000_000`.
+    #[test]
+    fn separation_component_at_its_share_is_blocked() {
+        // 0.035 * 1_000_000 = 35_000 threshold.
+        let s = stats_with(|s| {
+            s.lp_iters_total = 965_000;
+            s.tree_cut_iters = 35_000;
+        });
+        assert!(
+            !may_run_separation(&s),
+            "separation at exactly its share must block"
+        );
     }
 
     #[test]
@@ -379,14 +426,17 @@ mod tests {
 
     #[test]
     fn separation_iter_budget_is_remaining_share_minus_spent() {
+        // perf/milp-bnb review follow-up (2026-08-02): SEPARATION_ITER_SHARE
+        // changed 0.007 -> 0.035 (see its own doc for the corrected
+        // budget-unit derivation); numbers below rebased accordingly.
         let s = stats_with(|s| {
             // total_simplex_iters includes tree_cut_iters, so lp_iters_total
-            // is set to 1_000_000 - 40_000 to make the total exactly 1_000_000.
-            s.lp_iters_total = 960_000;
-            s.tree_cut_iters = 40_000;
+            // is set to 1_000_000 - 4_000 to make the total exactly 1_000_000.
+            s.lp_iters_total = 996_000;
+            s.tree_cut_iters = 4_000;
         });
-        // 0.15 * 1_000_000 - 40_000 = 110_000.
-        assert_eq!(separation_iter_budget(&s), 110_000);
+        // 0.035 * 1_000_000 - 4_000 = 31_000.
+        assert_eq!(separation_iter_budget(&s), 31_000);
     }
 
     /// **SENTINEL** (Phase 3b): [`tree_cut_overhead_iters`](super::MipStats::
@@ -395,6 +445,15 @@ mod tests {
     /// both [`may_run_separation`] and [`separation_iter_budget`], exactly
     /// like real `tree_cut_iters`.
     ///
+    /// perf/milp-bnb review follow-up (2026-08-02): the overhead value used
+    /// to be a fixed `150_000` — comfortably over the old `0.15` share's
+    /// threshold, but a loose margin, not the boundary, and it silently
+    /// stopped being tight when the share first changed to `0.007`.
+    /// `(SEPARATION_ITER_SHARE * 1_000_000).ceil()` instead sits at the exact
+    /// threshold for whatever the share currently is, so this keeps testing
+    /// the tight case (overhead alone, right at the ceiling, blocks) rather
+    /// than an increasingly loose one.
+    ///
     /// Sentinel: computing `separation_component_iters` as `stats.
     /// tree_cut_iters` alone (dropping the `+ tree_cut_overhead_iters` term)
     /// makes this FAIL — a search that spent nothing on real separation
@@ -402,10 +461,11 @@ mod tests {
     /// still read as comfortably under its share.
     #[test]
     fn separation_overhead_iters_count_against_the_separation_gate() {
+        let overhead_at_threshold = (SEPARATION_ITER_SHARE * 1_000_000.0).ceil() as u64;
         let s = stats_with(|s| {
             s.lp_iters_total = 1_000_000;
             s.tree_cut_iters = 0;
-            s.tree_cut_overhead_iters = 150_000; // >= 0.15 * 1_000_000
+            s.tree_cut_overhead_iters = overhead_at_threshold;
         });
         assert!(
             !may_run_separation(&s),
@@ -583,21 +643,34 @@ mod tests {
     /// `component < share * total` comparison, so the two never disagree at
     /// the integer-truncation boundary.
     ///
-    /// `total = 1007` (`lp_iters_total = 856` + `tree_cut_iters = 151`):
-    /// `share * total = 0.15 * 1007 = 151.05`. The float comparison
-    /// `151 < 151.05` passes, but `separation_iter_budget` truncates
-    /// `151.05` to `151` before subtracting, giving exactly `0` remaining
-    /// budget.
+    /// perf/milp-bnb review follow-up (2026-08-02): the boundary numbers used
+    /// to be hardcoded for a specific `SEPARATION_ITER_SHARE` value and had
+    /// already gone stale once across a share change. Constructed from the
+    /// constant instead: `total` is the smallest integer with `share * total`
+    /// strictly inside `(component, component + 1)` — guaranteed to exist and
+    /// be unique since `share < 1`, so each unit increase of `total` moves
+    /// `share * total` by less than 1 — i.e. `total = floor(component /
+    /// share) + 1`. That keeps `component < share * total` (float check
+    /// passes) while `floor(share * total) == component` (zero integer
+    /// budget), independent of whatever `SEPARATION_ITER_SHARE` is at the
+    /// time. The pass/budget/block expectations below are the hand-derived
+    /// consequence of that construction, not a mirror of the implementation.
     ///
     /// Sentinel: removing the `separation_iter_budget(stats) > 0` conjunct
     /// from `may_run_separation` makes this FAIL.
     #[test]
     fn may_run_separation_blocks_when_integer_budget_is_zero_despite_float_check_passing() {
+        let component: u64 = 151;
+        let total = (component as f64 / SEPARATION_ITER_SHARE).floor() as u64 + 1;
         let stats = stats_with(|s| {
-            s.lp_iters_total = 856;
-            s.tree_cut_iters = 151;
+            s.lp_iters_total = total - component;
+            s.tree_cut_iters = component;
         });
-        assert_eq!(total_simplex_iters(&stats), 1007, "test premise");
+        assert_eq!(total_simplex_iters(&stats), total, "test premise");
+        assert!(
+            (component as f64) < SEPARATION_ITER_SHARE * (total as f64),
+            "test premise: float share check must pass at this boundary"
+        );
         assert_eq!(
             separation_iter_budget(&stats),
             0,
@@ -613,14 +686,21 @@ mod tests {
 
     #[test]
     fn shares_leave_majority_for_tree_search() {
+        // perf/milp-bnb review follow-up (2026-08-02): the actual combined
+        // share is 0.285 (0.05*3 + 0.035 + 0.10); `0.40` was a stale ceiling
+        // left over from when `SEPARATION_ITER_SHARE` was `0.15` (combined
+        // 0.40, i.e. this test used to assert against its own exact value)
+        // and never tightened after the share dropped. `0.30` gives real
+        // headroom for future tuning while still catching a share creeping
+        // back up toward the old regime.
         let total = RENS_ITER_SHARE
             + RINS_ITER_SHARE
             + LOCAL_BRANCHING_ITER_SHARE
             + SEPARATION_ITER_SHARE
             + STRONG_BRANCH_ITER_SHARE;
         assert!(
-            total <= 0.40,
-            "combined optional-work share must leave >= 60% for the tree search; got {total}"
+            total <= 0.30,
+            "combined optional-work share must leave >= 70% for the tree search; got {total}"
         );
     }
 }

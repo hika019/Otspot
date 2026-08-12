@@ -239,6 +239,7 @@ pub otspot_model::SolutionProof::LocalOptimal
 pub otspot_model::SolveError::Infeasible
 pub otspot_model::SolveError::MaxIterations
 pub otspot_model::SolveError::NumericalError
+pub otspot_model::SolveError::ResourceExhausted
 pub otspot_model::SolveError::Stalled
 pub otspot_model::SolveError::Unbounded
 impl core::fmt::Display for otspot_model::SolveError

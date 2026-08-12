@@ -156,6 +156,11 @@ pub enum SolveStatus {
     Timeout,
     /// 数値エラー（LDL分解失敗等、問題が数値的に解けない）
     NumericalError,
+    /// OS のリソース (スレッド、メモリ等) を確保できず、solve を実行できなかった。
+    ///
+    /// `NumericalError` が「計算アルゴリズムの過程で生じた数値的な破綻」を指すのに対し、
+    /// 本 variant は実行環境側の制限による起動失敗を明確に区別する。
+    ResourceExhausted,
     /// Q行列が不定（非凸QP）。IPMはQ正半定値を前提とする。
     NonConvex(String),
     /// 非凸 QP の局所最適解 (= `solve_qp_global` 経由で incumbent あり、ε-global 証明なし)。
@@ -189,6 +194,7 @@ impl fmt::Display for SolveStatus {
             SolveStatus::FeasiblePoint => write!(f, "FeasiblePoint"),
             SolveStatus::Timeout => write!(f, "Timeout"),
             SolveStatus::NumericalError => write!(f, "NumericalError"),
+            SolveStatus::ResourceExhausted => write!(f, "ResourceExhausted"),
             SolveStatus::NonConvex(msg) => write!(f, "NonConvex({})", msg),
             SolveStatus::NonconvexLocal => write!(f, "NonconvexLocal"),
             SolveStatus::NonconvexGlobal => write!(f, "NonconvexGlobal"),
@@ -330,6 +336,22 @@ impl SolverResult {
             objective: f64::INFINITY,
             ..Self::default()
         }
+    }
+
+    /// Whether this result is safe to adopt as a B&B incumbent (MILP/MIQP
+    /// `mip::MipState::consider`, nonconvex-QP `qp::global::SearchState`):
+    /// `objective` and every `solution` component must be finite.
+    ///
+    /// Mirrors `qcqp_route::is_clean_convex_outcome`'s `Optimal` invariant
+    /// (`objective.is_finite() && x.iter().all(finite)`). A result whose
+    /// `status` claims a feasible/optimal outcome but fails this check is
+    /// corrupt (e.g. a `+inf` objective sentinel that slipped through some
+    /// upstream status-only trust boundary) and must never be reported as a
+    /// genuine solution — see `within_gap`'s `is_finite()` guard, which this
+    /// complements by stopping the poison at the point of *adoption* rather
+    /// than only at the point of *gap-proving*.
+    pub(crate) fn is_finite_candidate(&self) -> bool {
+        self.objective.is_finite() && self.solution.iter().all(|v| v.is_finite())
     }
 }
 

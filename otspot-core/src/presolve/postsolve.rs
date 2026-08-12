@@ -6,6 +6,8 @@ use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
 #[cfg(test)]
 use otspot_num::sparse::CscMatrix;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 
 // Test-only, in-order trace of which dual-recovery passes `run_postsolve`
@@ -214,6 +216,7 @@ pub fn run_postsolve(
     presolve_result: &PresolveResult,
     orig_problem: &LpProblem,
     deadline: Option<Instant>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> SolverResult {
     let n = presolve_result.orig_num_vars;
     let m = presolve_result.orig_num_constraints;
@@ -419,14 +422,15 @@ pub fn run_postsolve(
     // optimum; this is what reconciles presolve rows serving multiple roles
     // (forcing + pivot) that no local recovery can fix, e.g. pilot-ja.
     let gate = PIVOT_TOL;
-    let crossover: Option<Vec<f64>> =
-        if matches!(result.status, SolveStatus::Optimal) && df_loop > gate {
-            trace_pass("crossover");
-            crate::simplex::crossover_dual_from_primal(orig_problem, &solution, deadline)
-                .map(|(_vertex, y, _rc)| y)
-        } else {
-            None
-        };
+    let crossover: Option<Vec<f64>> = if matches!(result.status, SolveStatus::Optimal)
+        && df_loop > gate
+    {
+        trace_pass("crossover");
+        crate::simplex::crossover_dual_from_primal(orig_problem, &solution, deadline, cancel_flag)
+            .map(|(_vertex, y, _rc)| y)
+    } else {
+        None
+    };
     let df_xover = crossover.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
 
     // Select candidate with lowest dual infeasibility.
@@ -608,7 +612,7 @@ mod ipm_dual_convention_tests {
             ..Default::default()
         };
 
-        let lifted = run_postsolve(&raw_ipm, &presolve, &lp, Some(Instant::now()));
+        let lifted = run_postsolve(&raw_ipm, &presolve, &lp, Some(Instant::now()), None);
 
         assert_eq!(
             lifted.dual_solution,
@@ -678,7 +682,7 @@ mod crossover_first_tests {
         let reduced = result_with_dual(SolveStatus::Optimal, &x, vec![0.0]);
 
         let _ = drain_postsolve_pass_trace();
-        let lifted = run_postsolve(&reduced, &presolve, &lp, None);
+        let lifted = run_postsolve(&reduced, &presolve, &lp, None, None);
         let trace = drain_postsolve_pass_trace();
 
         assert_eq!(
@@ -713,7 +717,7 @@ mod crossover_first_tests {
         let reduced = result_with_dual(SolveStatus::Optimal, &x, vec![2.0]);
 
         let _ = drain_postsolve_pass_trace();
-        let lifted = run_postsolve(&reduced, &presolve, &lp, None);
+        let lifted = run_postsolve(&reduced, &presolve, &lp, None, None);
         let trace = drain_postsolve_pass_trace();
 
         assert!(
@@ -735,7 +739,7 @@ mod crossover_first_tests {
         let reduced = result_with_dual(SolveStatus::Infeasible, &x, vec![0.0]);
 
         let _ = drain_postsolve_pass_trace();
-        let _ = run_postsolve(&reduced, &presolve, &lp, None);
+        let _ = run_postsolve(&reduced, &presolve, &lp, None, None);
         let trace = drain_postsolve_pass_trace();
 
         assert!(
@@ -877,7 +881,7 @@ mod recover_removed_row_dual_tests {
             dual_solution: vec![0.0],
             ..Default::default()
         };
-        let out = run_postsolve(&reduced, &pres, &lp, None);
+        let out = run_postsolve(&reduced, &pres, &lp, None, None);
         assert_eq!(out.status, SolveStatus::NumericalError);
         assert!(out.solution.is_empty());
     }
@@ -902,7 +906,7 @@ mod recover_removed_row_dual_tests {
             reduced_costs: vec![0.0],
             ..Default::default()
         };
-        let out = run_postsolve(&reduced, &pres, &lp, None);
+        let out = run_postsolve(&reduced, &pres, &lp, None, None);
         assert_eq!(out.status, SolveStatus::NumericalError);
         assert!(out.solution.is_empty());
     }
@@ -928,7 +932,7 @@ mod recover_removed_row_dual_tests {
             reduced_costs: vec![],
             ..Default::default()
         };
-        let out = run_postsolve(&reduced, &pres, &lp, None);
+        let out = run_postsolve(&reduced, &pres, &lp, None, None);
         assert_eq!(
             out.status,
             SolveStatus::Timeout,

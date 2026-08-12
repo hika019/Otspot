@@ -1467,19 +1467,22 @@ fn tree_cut_sentinel_milp() -> MilpProblem {
 }
 
 /// Item count for [`tree_cuts_reduce_node_count_sentinel_on_dedicated_knapsack`]'s dedicated
-/// knapsack — deliberately not [`tree_cut_sentinel_milp`]'s 24. Codex round
-/// 3's `attempted`-flag fix (`separate_tree_cuts` distinguishing a
-/// budget-deferred round from a genuine dry attempt, see
-/// `separate_tree_cuts_reports_not_attempted_on_zero_iteration_budget`)
-/// changed exactly when `tree_cut_dry_streak` disables separation, and the
-/// 24-item knapsack's on/off margin is not robust to that: on=1336 vs
-/// off=1335 (cuts fractionally *worse*) after the fix, down from a
-/// comfortable on=1314 vs off=1335 before it. A sweep of n=16..=32 (all
-/// still `Optimal` within the 30s budget below) found this margin is
-/// specific to a few sizes (n=18 and 24) and not a general regression;
-/// n=30 gives a stable on=3405 vs off=3478 margin under the corrected
-/// accounting.
-const TREE_CUT_NODE_COUNT_SENTINEL_N: usize = 30;
+/// knapsack — deliberately not [`tree_cut_sentinel_milp`]'s 24. This
+/// fixture's on/off node-count margin is small and size-sensitive (a single
+/// separation round firing or not easily flips it either way), so it has
+/// been re-picked twice already as `SEPARATION_ITER_SHARE` moved: Codex
+/// round 3's `attempted`-flag fix picked n=30; perf/milp-bnb's first pass
+/// (`SEPARATION_ITER_SHARE` 0.15 -> 0.007) flipped n=30 negative and picked
+/// n=45 instead, checked only at that one share value.
+///
+/// perf/milp-bnb review follow-up (2026-08-02): `SEPARATION_ITER_SHARE`
+/// moved again, 0.007 -> 0.035 (see `effort` module doc's corrected
+/// derivation), and flipped n=45 too (off=6592 vs on=6685, +93 — cuts
+/// fractionally *worse*), confirming a single-share pick isn't robust to
+/// further re-tuning. Swept n=20..=80 across all three historical shares
+/// (0.15 / 0.007 / 0.035); n=50 is negative at all three (-42 / -129 / -26)
+/// and is used here instead of picking for the current share alone.
+const TREE_CUT_NODE_COUNT_SENTINEL_N: usize = 50;
 
 /// **Sentinel**: in-tree cuts must measurably shrink the search vs `tree_cuts=off`.
 ///

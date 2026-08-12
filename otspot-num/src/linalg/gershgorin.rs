@@ -87,6 +87,20 @@ mod tests {
         assert_eq!(psd_shift_from_gershgorin(&q), 0.0);
     }
 
+    /// Q が全ゼロ (n > 0): 対角も off-diag も 0 なので λ_min 下界 0 = shift 0。
+    #[test]
+    fn all_zero_hessian_needs_no_shift() {
+        assert_eq!(psd_shift_from_gershgorin(&CscMatrix::new(4, 4)), 0.0);
+    }
+
+    /// off-diag が対角を食っても下界が正なら shift は 0 のまま
+    /// (Q=[[1,0.25],[0.25,1]] → 下界 = 1 − 0.25 = 0.75 > 0)。
+    #[test]
+    fn offdiag_within_diag_needs_no_shift() {
+        let q = upper_tri(2, &[(0, 0, 1.0), (0, 1, 0.25), (1, 1, 1.0)]);
+        assert_eq!(psd_shift_from_gershgorin(&q), 0.0);
+    }
+
     #[test]
     fn diagonal_psd_returns_zero() {
         let q = upper_tri(2, &[(0, 0, 1.0), (1, 1, 2.0)]);

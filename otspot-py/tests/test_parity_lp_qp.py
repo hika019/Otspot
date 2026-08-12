@@ -317,6 +317,29 @@ def test_unbounded_lp_raises_solve_failed_error():
     assert exc_info.value.error == otspot.SolveError.Unbounded
 
 
+def test_resource_exhausted_is_distinct_from_numerical_error():
+    """OS リソース枯渇 (スレッド起動失敗など) は数値破綻 (NumericalError) とは
+    別の status/error として表現され、利用者が原因を取り違えないこと。実際の
+    ResourceExhausted 発生経路 (MILP 部分 spawn 失敗) は Rust 側の test-only
+    注入でのみ到達可能なため、ここでは binding 表現が NumericalError と分離
+    されていることを検証する (Rust 側 sentinel が返り値の正しさを担保)。
+
+    revert (enums.rs で ResourceExhausted を追加しない) と、これらの属性が
+    無くなり AttributeError で FAIL する。"""
+    # SolveStatus 側: 別 variant であり、互いに等しくない。
+    resource = otspot.SolveStatus.ResourceExhausted()
+    numerical = otspot.SolveStatus.NumericalError()
+    assert isinstance(resource, otspot.SolveStatus.ResourceExhausted)
+    assert not isinstance(resource, otspot.SolveStatus.NumericalError)
+    assert resource != numerical
+
+    # SolveError 側 (SolveFailedError.error が保持する型): 別 variant。
+    assert otspot.SolveError.ResourceExhausted != otspot.SolveError.NumericalError
+    assert int(otspot.SolveError.ResourceExhausted) != int(
+        otspot.SolveError.NumericalError
+    )
+
+
 def test_missing_objective_raises_no_objective_error():
     model = otspot.Model("no_objective")
     model.add_var("x", 0.0, 1.0)
@@ -384,6 +407,34 @@ def test_cross_model_var_name_and_var_kind_raise_invalid_input_error():
         model_b.var_name(x_a)
     with pytest.raises(otspot.InvalidInputError):
         model_b.var_kind(x_a)
+
+
+def test_set_threads_out_of_range_raises_invalid_input_error():
+    """`Model.set_threads` must reject a budget outside `1..=MAX_THREADS` as an
+    identifiable invalid *user input*, mirroring the Rust `set_threads`
+    boundary check (otspot-model/src/model.rs `validate_threads`). Like the
+    other Model-level input validators the error is deferred to `solve()` and
+    surfaces as `InvalidInputError` -- never a generic `SolveFailedError` /
+    `NumericalError` from deep inside the solver. `MAX_THREADS` is 1024
+    (otspot_core::options::MAX_THREADS)."""
+    for n in (0, 1025, 2**32):
+        model = otspot.Model(f"threads_{n}")
+        x = model.add_var("x", 0.0, 1.0)
+        model.minimize(x)
+        model.set_threads(n)
+        with pytest.raises(otspot.InvalidInputError):
+            model.solve()
+
+
+def test_set_threads_in_range_is_accepted():
+    """A valid budget must leave no lingering input error behind: the solve
+    succeeds. Companion to `test_set_threads_out_of_range_raises_invalid_input_error`."""
+    for n in (1, 2, 8, 1024):
+        model = otspot.Model(f"threads_ok_{n}")
+        x = model.add_var("x", 0.0, 1.0)
+        model.minimize(x)
+        model.set_threads(n)
+        model.solve()
 
 
 def _build_gil_probe_model(n: int = 1200) -> otspot.Model:
@@ -695,6 +746,102 @@ def test_sigint_interrupts_long_solve():
     )
 
 
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGINT"), reason="SIGINT is not available on this platform"
+)
+def test_solve_join_after_sigint_releases_the_gil():
+    """`test_sigint_interrupts_long_solve` above proves `KeyboardInterrupt`
+    arrives promptly; it does not prove *other Python threads keep running*
+    while `solve()` waits for that to happen. The two are different claims:
+    the poll loop's own `py.detach` around its condvar wait (verified by
+    `test_solve_releases_the_gil`, unchanged by this fix) only covers time
+    *between* polls -- it says nothing about the `handle.join()` that runs
+    right after a caught SIGINT, which previously ran with the GIL still
+    held (Codex PR #31 review, found via lead's direct read: existing tests
+    only ever looked at the normal-completion side of GIL release). Held
+    there, every other Python thread freezes until the cancelled worker
+    reaches its own next internal cancel-flag check point -- a real,
+    measurable stretch for a still-converging solve, not a negligible detail.
+
+    Supersedes an earlier version of this test (deleted, Codex PR #31
+    follow-up review round 2, P1) that sampled its "before" counter value
+    from the *sending* thread right before `os.kill()`. That anchor is too
+    early: SIGINT can land at any point in the poll loop's own cycle, and
+    the pending signal is not actually processed until the next
+    `Python::check_signals` call, up to `SIGNAL_POLL_INTERVAL_MAX` (10ms)
+    later -- during which the loop's ordinary, unrelated `py.detach` around
+    `Condvar::wait_timeout` may *already* be releasing the GIL, letting the
+    counter advance regardless of whether the post-signal `handle.join()`
+    is fixed or reverted. That confound was measured directly: with the
+    join bug reverted, `os.kill`-anchored sampling showed a bimodal
+    ~3.6ms/~13.4ms split in signal-to-interrupt latency across trials
+    (~10ms apart, exactly `SIGNAL_POLL_INTERVAL_MAX`), and the old test
+    falsely passed (missed the reverted bug) in 8/10 pytest runs and 4/10
+    bare-script runs.
+
+    Fixed by anchoring the "before" sample inside a custom `SIGINT` handler
+    installed via `signal.signal`, which runs synchronously *inside*
+    `Python::check_signals`'s own signal dispatch -- i.e. at the exact
+    instant `solve()`'s poll loop notices the pending signal, not some
+    unknown and possibly much earlier time before it. Between that instant
+    and `KeyboardInterrupt` reaching this test, `solve()` does only
+    `cancel.store(...)` (negligible) and `py.detach(|| handle.join())`, so
+    `progressed` below isolates (almost) exactly the join. Reverting the
+    join fix therefore leaves the counting thread unable to acquire the GIL
+    for that whole stretch, collapsing `progressed` to (near) 0
+    deterministically, rather than depending on where in the poll cycle the
+    signal happened to land.
+    """
+    model = _build_gil_probe_model(2000)
+    counter = {"n": 0}
+    stop_counting = threading.Event()
+
+    def count_forever() -> None:
+        while not stop_counting.is_set():
+            counter["n"] += 1
+
+    counter_thread = threading.Thread(target=count_forever, daemon=True)
+    counter_thread.start()
+
+    cancel_send = threading.Event()
+    count_at_signal: dict[str, int] = {}
+    original_handler = signal.getsignal(signal.SIGINT)
+
+    def handle_sigint(signum: int, frame: object) -> None:
+        count_at_signal["n"] = counter["n"]
+        raise KeyboardInterrupt
+
+    def send_sigint() -> None:
+        time.sleep(0.1)
+        if not cancel_send.is_set():
+            os.kill(os.getpid(), signal.SIGINT)
+
+    signal.signal(signal.SIGINT, handle_sigint)
+    sender = threading.Thread(target=send_sigint, daemon=True)
+    sender.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            model.solve()
+        count_after_interrupt = counter["n"]
+    finally:
+        cancel_send.set()
+        signal.signal(signal.SIGINT, original_handler)
+        sender.join()
+        stop_counting.set()
+        counter_thread.join()
+
+    assert "n" in count_at_signal, (
+        "custom SIGINT handler never ran -- solve() never observed the signal"
+    )
+    progressed = count_after_interrupt - count_at_signal["n"]
+    assert progressed > 5000, (
+        f"background counting thread advanced by only {progressed} between "
+        "check_signals() noticing SIGINT and KeyboardInterrupt being caught "
+        "-- expected tens of thousands of increments if the GIL was "
+        "genuinely released throughout the post-signal handle.join()"
+    )
+
+
 def _build_tiny_lp() -> otspot.Model:
     model = otspot.Model("tiny")
     x = model.add_var("x", 0.0, 10.0)
@@ -727,10 +874,17 @@ def test_solve_poll_backoff_does_not_floor_small_solve_latency():
     `Condvar::wait_timeout` (see `test_solve_condvar_wakes_immediately_
     on_completion` below for the fix that specifically targets) -- a
     regression back to a flat 10ms floor would push the median to ~10ms+.
-    The 5ms bound below has headroom over the measured value (for
-    machine-to-machine variance in thread-spawn/GIL-detach overhead) while
-    staying well under half the old floor, so it still catches that
-    regression.
+
+    7ms bound, not 5ms (Codex PR #31 audit P3: a fixed millisecond ceiling
+    against a wall-clock measurement is inherently machine-dependent) --
+    widened for headroom over a CI wheel build's thread-spawn/GIL-detach
+    overhead, while still sitting clearly below the ~10ms a regression back
+    to a flat poll interval would produce. Not rewritten as a ratio or a
+    deterministic poll-count check: this is a 200-trial *median*, already
+    resistant to the occasional-outlier-scheduling-hiccup failure mode a
+    single wall-clock measurement (like the since-fixed `qp_phase2.rs` one)
+    is vulnerable to, and `solve()`'s poll cadence is otspot-py-internal --
+    no counter is exposed across the FFI boundary to assert against instead.
     """
     n = 200
     times: list[float] = []
@@ -743,7 +897,7 @@ def test_solve_poll_backoff_does_not_floor_small_solve_latency():
 
     times.sort()
     median = times[n // 2]
-    assert median < 0.005, (
+    assert median < 0.007, (
         f"median solve() latency over {n} trivial solves was {median * 1000:.3f}ms "
         "-- expected sub-millisecond-scale, not a coarse fixed poll-interval floor "
         "(regression back to a flat SIGNAL_POLL_INTERVAL would read ~10ms here)"
@@ -788,11 +942,17 @@ def test_solve_condvar_wakes_immediately_on_completion():
     with a plain-`thread::sleep` poll wait vs. 14.0ms with `Condvar::
     wait_timeout` (10 trials each, this machine, debug build) -- the ~9.5ms
     difference is this fix's effect, not solve-time variance (both regimes
-    solve the identical problem). The 20ms bound below sits between those
-    two measurements: comfortably above the fixed design's 14.0ms with
-    headroom for machine variance, but below the reverted design's 23.5ms
-    so a regression back to plain `thread::sleep` fails here. Confirmed by
-    reverting to `thread::sleep` and re-measuring (23.5ms, over the bound).
+    solve the identical problem). Confirmed by reverting to `thread::sleep`
+    and re-measuring (23.5ms, over the bound below).
+
+    21ms bound, not 20ms (Codex PR #31 audit P3, same rationale as the 5ms
+    -> 7ms widening above): ~1.5x the fixed design's 14.0ms, giving more
+    headroom for a CI wheel build's machine variance, while staying below
+    the reverted design's 23.5ms so a regression back to plain
+    `thread::sleep` still fails here. Not rewritten as a deterministic
+    poll-count check for the same reason as above: `solve()`'s wait
+    primitive is otspot-py-internal, and this 10-trial median is already
+    more contention-resistant than a single wall-clock sample.
     """
     n = 10
     times: list[float] = []
@@ -805,7 +965,7 @@ def test_solve_condvar_wakes_immediately_on_completion():
 
     times.sort()
     median = times[n // 2]
-    assert median < 0.020, (
+    assert median < 0.021, (
         f"median solve() latency over {n} medium (n=20) solves was "
         f"{median * 1000:.3f}ms -- expected close to the solve's own natural "
         "time (~14ms, this machine), not inflated by a full dead poll "
@@ -853,7 +1013,83 @@ def test_enum_values_survive_pickle_round_trip(value, expected_type):
     restored = pickle.loads(pickle.dumps(value))
     assert isinstance(restored, expected_type)
     assert restored == value or (
-        # Complex-enum variants (SolveStatus/Tolerance) are not `eq`-comparable
-        # (no `#[pyclass(eq)]`); compare via `__reduce__`'s own payload instead.
+        # `restored == value` now covers every type here (SolveStatus/Tolerance
+        # gained `#[pyclass(eq)]`); this branch is kept as a fallback so a
+        # future complex-enum addition without `eq` still passes via
+        # `__reduce__`'s own payload instead of failing this test outright.
         type(restored) is type(value) and restored.__reduce__()[1] == value.__reduce__()[1]
     )
+
+
+def test_solve_status_and_tolerance_compare_by_value_not_identity():
+    """`SolveStatus`/`Tolerance` are PyO3 "complex enums" (payload-carrying
+    variants become subclasses); before `#[pyclass(eq)]` neither had a value
+    comparison, so `==` fell back to Python's default object-identity check.
+    `ModelResult.status` in particular builds a *fresh* wrapper on every
+    property access (see `result.rs`'s getter), so `result.status ==
+    otspot.SolveStatus.Optimal()` was always `False` even for a genuinely
+    Optimal result (Codex PR #31 review).
+    """
+    model = otspot.Model("solve_status_eq")
+    x = model.add_var("x", 0.0, 10.0)
+    model.minimize(x)
+    result = model.solve()
+    assert isinstance(result.status, otspot.SolveStatus.Optimal)
+
+    # Two independent `.status` accesses are distinct Python objects (a fresh
+    # wrapper each time) but must still compare equal by value.
+    first_access = result.status
+    second_access = result.status
+    assert first_access is not second_access, (
+        "sanity: ModelResult.status must build a fresh wrapper per access -- "
+        "otherwise this test cannot distinguish value equality from identity"
+    )
+    assert first_access == second_access
+    assert result.status == otspot.SolveStatus.Optimal()
+
+    # Cross-variant and payload (NonConvex) comparisons.
+    assert otspot.SolveStatus.Optimal() != otspot.SolveStatus.Infeasible()
+    assert otspot.SolveStatus.NonConvex("indefinite Q") == otspot.SolveStatus.NonConvex(
+        "indefinite Q"
+    )
+    assert otspot.SolveStatus.NonConvex("a") != otspot.SolveStatus.NonConvex("b")
+
+    assert otspot.Tolerance.Medium() == otspot.Tolerance.Medium()
+    assert otspot.Tolerance.Medium() != otspot.Tolerance.Fast()
+    assert otspot.Tolerance.Custom(1e-7) == otspot.Tolerance.Custom(1e-7)
+    assert otspot.Tolerance.Custom(1e-7) != otspot.Tolerance.Custom(1e-6)
+
+
+def test_solve_status_is_hashable_tolerance_is_not():
+    """Adding `#[pyclass(eq)]` to `SolveStatus` (previous fix, see the test
+    above) silently made it unhashable: CPython nulls `tp_hash` whenever
+    `tp_richcompare` (`__eq__`) is set unless a hash is explicitly supplied,
+    and PyO3 only emits `__hash__` under `#[pyclass(hash)]` -- confirmed by
+    the reviewer via a wheel A/B (`hash()` worked before the `eq`-only fix,
+    raised `TypeError` after). `SolveStatus` now also declares `hash`, so
+    it is usable as a `set` member / `dict` key again, hashing by variant
+    *and* payload (not just the tag). `Tolerance` cannot follow suit
+    (`Custom(f64)`, and `f64` has no `Hash` impl) and stays unhashable by
+    design for every variant, not just `Custom`.
+    """
+    status_set = {otspot.SolveStatus.Optimal(), otspot.SolveStatus.Optimal()}
+    assert len(status_set) == 1, "equal SolveStatus values must hash equal (set dedup)"
+
+    status_dict = {otspot.SolveStatus.Infeasible(): "reason"}
+    assert status_dict[otspot.SolveStatus.Infeasible()] == "reason"
+
+    payload_set = {
+        otspot.SolveStatus.NonConvex("msg"),
+        otspot.SolveStatus.NonConvex("msg"),
+        otspot.SolveStatus.NonConvex("other"),
+    }
+    assert len(payload_set) == 2, (
+        "the payload must participate in the hash, not just the variant tag "
+        "-- otherwise NonConvex('msg') and NonConvex('other') would collide "
+        "into the same set entry"
+    )
+
+    with pytest.raises(TypeError):
+        hash(otspot.Tolerance.Medium())
+    with pytest.raises(TypeError):
+        hash(otspot.Tolerance.Custom(1e-6))

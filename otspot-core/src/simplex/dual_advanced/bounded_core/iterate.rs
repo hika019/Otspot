@@ -150,6 +150,7 @@ pub(crate) fn iterate(
     mut state: BoundedDualState,
     bsf: &BoundedStandardForm,
     a: &CscMatrix,
+    b_rhs: &[f64],
     c: &[f64],
     options: &SolverOptions,
     ubs: &[f64],
@@ -307,10 +308,19 @@ pub(crate) fn iterate(
             if let Some(row) = ub_violation_row {
                 return (BoundedOutcome::UbViolationOutOfScope { row }, state);
             }
-            let obj = basic_obj(c, &state.basis, &state.x_b);
-            let mut y = vec![0.0; m];
-            compute_dual_vars_into(&c_perturbed, &mut basis_mgr, &state.basis, &mut y);
-            return (BoundedOutcome::Optimal(obj, y), state);
+            // Dual-feasible candidate: re-verify on a fresh x_b (bug-hunt P1).
+            let outcome = mint_bounded_optimal_after_fresh_reverify(
+                a,
+                b_rhs,
+                c,
+                &c_perturbed,
+                ubs,
+                &mut state,
+                &mut basis_mgr,
+                m,
+                options,
+            );
+            return (outcome, state);
         }
         let r = leaving_row.unwrap();
 
@@ -593,6 +603,67 @@ pub(crate) fn iterate(
             }
         }
     }
+}
+
+/// Verify primal feasibility (both bounds, accounting for at-upper nonbasic
+/// contributions to the RHS) on a fresh exact `x_b`, then mint the outcome
+/// for a dual-feasible candidate — mirrors `primal::core::
+/// revised_simplex_core` and the (now-fixed) legacy/advanced dual cores
+/// (bug-hunt P1). Same RHS-adjustment formula as
+/// `reconcile_bounded_terminal_state` (mod.rs), reusing the caller's own
+/// `basis_mgr` rather than a second independent LU factorization.
+#[allow(clippy::too_many_arguments)]
+fn mint_bounded_optimal_after_fresh_reverify(
+    a: &CscMatrix,
+    b_rhs: &[f64],
+    c: &[f64],
+    c_perturbed: &[f64],
+    ubs: &[f64],
+    state: &mut BoundedDualState,
+    basis_mgr: &mut LuBasis,
+    m: usize,
+    options: &SolverOptions,
+) -> BoundedOutcome {
+    basis_mgr.force_refactor_timed(a, &state.basis, options.deadline);
+    if basis_mgr.refactor_failed {
+        if basis_mgr.singular_basis {
+            return BoundedOutcome::SingularBasis;
+        }
+        return BoundedOutcome::Timeout(basic_obj(c, &state.basis, &state.x_b));
+    }
+    let mut rhs = b_rhs.to_vec();
+    for (j, &at_ub) in state.at_upper.iter().enumerate() {
+        if state.is_basic[j] || !at_ub {
+            continue;
+        }
+        let ub_j = ubs[j];
+        if !ub_j.is_finite() {
+            continue;
+        }
+        let (rows, vals) = a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            rhs[row] -= vals[k] * ub_j;
+        }
+    }
+    state.x_b = rhs;
+    basis_mgr.ftran_dense(&mut state.x_b);
+    for v in state.x_b.iter_mut() {
+        if v.abs() < options.clamp_tol {
+            *v = 0.0;
+        }
+    }
+    for (i, &x_i) in state.x_b.iter().enumerate() {
+        let ub_i = ubs[state.basis[i]];
+        let violated =
+            x_i < -options.primal_tol || (ub_i.is_finite() && x_i > ub_i + options.primal_tol);
+        if violated {
+            return BoundedOutcome::Timeout(basic_obj(c, &state.basis, &state.x_b));
+        }
+    }
+    let obj = basic_obj(c, &state.basis, &state.x_b);
+    let mut y = vec![0.0; m];
+    compute_dual_vars_into(c_perturbed, basis_mgr, &state.basis, &mut y);
+    BoundedOutcome::Optimal(obj, y)
 }
 
 /// FTRAN a column of `a` and dump into `out` (length `m`).

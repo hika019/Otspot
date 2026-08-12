@@ -357,6 +357,44 @@ fn infeasible_lp_detected() {
     assert_eq!(res.status, SolveStatus::Infeasible, "{res:?}");
 }
 
+/// (キャンセル後の false Infeasible/Unbounded): `solve_socp`'s
+/// post-unscale backstop sentinel. Cancel racing in between `ipm::solve`
+/// returning (already `SolveStatus::Infeasible`, no in-loop race) and
+/// `Equilibrator::unscale_result` finishing must still yield `Timeout`.
+///
+/// Sentinel: reverting the `opts.stop_requested()` check placed after
+/// `unscale_result` in `solve_socp` makes this FAIL with `Infeasible`
+/// instead of `Timeout`.
+#[test]
+fn cancel_race_during_unscale_window_prefers_timeout_over_infeasible() {
+    POST_SOLVE_COMMIT_COUNT.with(|c| c.set(0));
+    CANCEL_AFTER_POST_SOLVE_COMMIT.with(|c| c.set(Some(1)));
+
+    // Same shape as `infeasible_lp_detected`.
+    let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
+    let prob = ConicProblem {
+        c: vec![0.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![-1.0, 0.0],
+        cone: ConeSpec { l: 2, soc: vec![] },
+    };
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opts = ConicOptions {
+        cancel_flag: Some(std::sync::Arc::clone(&cancel)),
+        ..ConicOptions::default()
+    };
+    let res = solve_socp(&prob, &opts);
+    CANCEL_AFTER_POST_SOLVE_COMMIT.with(|c| c.set(None));
+
+    assert_eq!(
+        res.status,
+        SolveStatus::Timeout,
+        "cancel racing in during the unscale/re-verify window must yield Timeout, got {res:?}"
+    );
+}
+
 #[test]
 fn misocp_ball_integer_optimum() {
     // max x0 + x1  (min -x0 -x1)  s.t. ||(x0,x1)|| <= sqrt(2.5), x in {0,1,2}^2.
@@ -992,6 +1030,36 @@ fn misocp_unresolved_nodes_do_not_prove_infeasibility() {
     assert!(res.x.is_empty());
 }
 
+/// (キャンセル後の false Infeasible/Unbounded): MISOCP 最終分類の
+/// stop check sentinel. Cancel racing in right after the root node's Farkas
+/// certificate prunes the stack empty (proven, no per-node race) must still
+/// yield `Timeout`, not the global `Infeasible` the exhaustive-but-cancelled
+/// search would otherwise report.
+///
+/// Sentinel: reverting the `opts.stop_requested()` branch added right before
+/// `debug_assert!(proven); SolveStatus::Infeasible` in `solve_misocp` makes
+/// this FAIL with `Infeasible` instead of `Timeout`.
+#[test]
+fn cancel_race_before_misocp_final_infeasible_classification_prefers_timeout() {
+    misocp::FINAL_CLASSIFICATION_COMMIT_COUNT.with(|c| c.set(0));
+    misocp::CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(Some(1)));
+
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opts = ConicOptions {
+        cancel_flag: Some(std::sync::Arc::clone(&cancel)),
+        ..ConicOptions::default()
+    };
+    let res = solve_misocp(&infeasible_int_lp(), &opts, &BbOptions::default());
+    misocp::CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(None));
+
+    assert_eq!(
+        res.status,
+        SolveStatus::Timeout,
+        "cancel racing in right before the final Infeasible classification must yield Timeout, got {res:?}"
+    );
+    assert!(res.x.is_empty());
+}
+
 #[test]
 fn misocp_certified_infeasible_returns_infeasible() {
     // Every leaf is pruned by a Farkas certificate: Infeasible is proven.
@@ -1105,6 +1173,86 @@ fn misocp_preset_cancel_returns_before_first_node() {
     let res = solve_misocp(&half_int_lp(), &opts, &BbOptions::default());
     assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
     assert_eq!(res.nodes, 0);
+}
+
+/// (キャンセル後の false Infeasible/Unbounded): `RayVerdict::Unbounded`
+/// の直接 return 直前 stop check sentinel. Same fixture as
+/// `unbounded_ray_with_all_integers_already_fixed_keeps_x_empty` (all
+/// integers already fixed at the root, verified ray certifies the
+/// mixed-integer problem unbounded immediately). Cancel racing in right
+/// before the hard `return MisocpResult { status: Unbounded, .. }` must
+/// still yield `Timeout`.
+///
+/// Sentinel: reverting the `opts.stop_requested()` check added right before
+/// that `return` in `solve_misocp` makes this FAIL with `Unbounded` instead
+/// of `Timeout`.
+#[test]
+fn cancel_race_before_misocp_unbounded_return_prefers_timeout() {
+    misocp::UNBOUNDED_RETURN_COMMIT_COUNT.with(|c| c.set(0));
+    misocp::CANCEL_AFTER_UNBOUNDED_RETURN_COMMIT.with(|c| c.set(Some(1)));
+
+    let n = 2usize;
+    let base = ConicProblem {
+        c: vec![-1.0, 0.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+        b: vec![],
+        g: csc(&[vec![-1.0, 0.0]], 1, n),
+        h: vec![0.0],
+        cone: ConeSpec { l: 1, soc: vec![] },
+    };
+    let prob = MisocpProblem {
+        base,
+        integers: vec![1],
+        int_lb: vec![0.0],
+        int_ub: vec![0.0],
+    };
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opts = ConicOptions {
+        cancel_flag: Some(std::sync::Arc::clone(&cancel)),
+        ..ConicOptions::default()
+    };
+    let res = solve_misocp(&prob, &opts, &BbOptions::default());
+    misocp::CANCEL_AFTER_UNBOUNDED_RETURN_COMMIT.with(|c| c.set(None));
+
+    assert_eq!(
+        res.status,
+        SolveStatus::Timeout,
+        "cancel racing in right before the RayVerdict::Unbounded return must yield Timeout, got {res:?}"
+    );
+    assert!(res.x.is_empty());
+}
+
+/// P2-A (レビュー指摘): `solve_misocp` の最終分類は Infeasible と
+/// Optimal の両方が同一の `proven` (探索木完全消尽) シグナルに支えられており、
+/// 一方だけ backstop すると非対称になる。`half_int_lp` (同じ fixture が
+/// `misocp_exhaustive_search_without_failures_is_optimal` で使われている,
+/// 通常は Optimal を返す) で、最終分類直前に cancel が観測されれば
+/// incumbent が真に最適であっても Timeout を優先すること。
+///
+/// Sentinel: `solve_misocp` の `proven && opts.stop_requested()` 分岐
+/// (incumbent-あり側) を revert すると `Optimal` が返り FAIL する。
+#[test]
+fn cancel_race_before_misocp_optimal_classification_prefers_timeout() {
+    misocp::FINAL_CLASSIFICATION_COMMIT_COUNT.with(|c| c.set(0));
+    misocp::CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(Some(1)));
+
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opts = ConicOptions {
+        cancel_flag: Some(std::sync::Arc::clone(&cancel)),
+        ..ConicOptions::default()
+    };
+    let res = solve_misocp(&half_int_lp(), &opts, &BbOptions::default());
+    misocp::CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(None));
+
+    assert_eq!(
+        res.status,
+        SolveStatus::Timeout,
+        "cancel racing in right before the final Optimal classification must yield Timeout even though the incumbent is truly optimal, got {res:?}"
+    );
+    assert!(
+        !res.x.is_empty(),
+        "incumbent must still be reported under Timeout"
+    );
 }
 
 #[test]

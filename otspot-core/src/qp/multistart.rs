@@ -132,7 +132,9 @@ fn status_rank(s: &SolveStatus) -> u8 {
         // 非収束の内部終端は品質同格 (どちらも診断 iterate のみ)。
         MaxIterations | Stalled => 4,
         Timeout => 5,
-        NumericalError => 6,
+        // どちらも「有効解なしのハード失敗」。ResourceExhausted は OS リソース
+        // 起因、NumericalError は数値破綻だが、multistart の品質順位としては同格。
+        NumericalError | ResourceExhausted => 6,
         NonConvex(_) => 7,
         Unbounded => 8,
         Infeasible => 9,
@@ -295,27 +297,43 @@ pub(crate) fn solve_qp_multistart_with_hooks(
             .map(worker)
             .collect()
     } else {
-        let pool_result = hooks
-            .and_then(|h| h.thread_pool_factory.as_ref().map(|f| f(parallel)))
-            .unwrap_or_else(|| {
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(parallel)
-                    .build()
-            });
-        match pool_result {
-            Ok(pool) => pool.install(|| {
+        let run_parallel = |pool: &rayon::ThreadPool, warms: Vec<Option<QpWarmStart>>| {
+            pool.install(|| {
                 warms
                     .into_par_iter()
-                    .map(worker)
+                    .map(&worker)
                     .collect::<Vec<SolverResult>>()
-            }),
-            Err(e) => {
+            })
+        };
+        let run_serial = |warms: Vec<Option<QpWarmStart>>| {
+            warms
+                .into_iter()
+                .map(&worker)
+                .collect::<Vec<SolverResult>>()
+        };
+        // Default path shares `parallelism::solver_thread_pool`'s latest-budget
+        // cache with the QP/conic factorization confinement, so repeated calls
+        // at one `threads` value build once while budget changes retire the old
+        // pool. The hook stays a genuine override (tests inject build failures).
+        match hooks.and_then(|h| h.thread_pool_factory.as_ref().map(|f| f(parallel))) {
+            Some(Ok(pool)) => run_parallel(&pool, warms),
+            Some(Err(e)) => {
                 log::warn!(
-                    "multistart: rayon ThreadPool build failed ({e}); \
+                    "multistart: injected rayon ThreadPool build failed ({e}); \
                      falling back to serial execution"
                 );
-                warms.into_iter().map(worker).collect()
+                run_serial(warms)
             }
+            None => match otspot_num::linalg::parallelism::solver_thread_pool(parallel) {
+                Some(pool) => run_parallel(&pool, warms),
+                None => {
+                    log::warn!(
+                        "multistart: rayon ThreadPool of {parallel} threads unavailable; \
+                         falling back to serial execution"
+                    );
+                    run_serial(warms)
+                }
+            },
         }
     };
 

@@ -28,7 +28,6 @@ use crate::qp::ipm_solver::kkt::{
 use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid::dual_sign_violation as kkt_dual_sign_violation;
 use crate::qp::problem::QpProblem;
-use otspot_num::linalg::timeout::deadline_reached;
 use std::time::{Duration, Instant};
 
 use bound::{
@@ -65,6 +64,56 @@ const POLISH_KKT_ABS_CAP: f64 = 1e-3;
 /// 破らない。
 const POLISH_TIMEOUT_SECS: f64 = 5.0;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only cancel injection for the B&B loop's own per-iteration stop
+    /// check (the loop previously broke only on `deadline_reached`,
+    /// never observing `cancel_flag`/`external_stop_requested` directly —
+    /// a Ctrl-C racing in mid-search, far from the wall-clock deadline, was
+    /// invisible to the loop's own control flow. It still eventually drained
+    /// because every already-queued node's *local solve* independently
+    /// honors `cancel_flag` via `solve_qp_with`, but only after popping and
+    /// discarding the entire backlog one node at a time). Counts calls to
+    /// `test_maybe_cancel_at_loop_top`; once the count reaches
+    /// `CANCEL_AFTER_LOOP_ITER`, flips the real `cancel_flag` `AtomicBool`
+    /// a test threads through `SolverOptions::cancel_flag`.
+    static LOOP_ITER_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static CANCEL_AFTER_LOOP_ITER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    /// Test-only cancel injection isolated to `finalize_search_outcome`'s own
+    /// `external_stop_requested()` backstop, independent of the loop-top
+    /// check above: fired exactly once, right after the B&B loop/polish have
+    /// already finished cleanly (queue drained, nothing discarded), to
+    /// simulate a cancel racing in during that narrow window. Verifies the
+    /// backstop demotes an otherwise-clean proof to unproven rather than
+    /// minting a `BoundGapCertificate` over a search that observed a stop.
+    static CANCEL_BEFORE_FINALIZE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn test_maybe_cancel_at_loop_top(opts: &SolverOptions) {
+    let count = LOOP_ITER_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if CANCEL_AFTER_LOOP_ITER.with(std::cell::Cell::get) == Some(count) {
+        if let Some(flag) = &opts.cancel_flag {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+fn test_maybe_cancel_before_finalize(opts: &SolverOptions) {
+    if CANCEL_BEFORE_FINALIZE.with(std::cell::Cell::get) {
+        if let Some(flag) = &opts.cancel_flag {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// 大域最適化 entry。
 ///
 /// 入力: convex / nonconvex QP (`QpProblem`) + 共通 solver options + 大域設定。
@@ -78,11 +127,16 @@ const POLISH_TIMEOUT_SECS: f64 = 5.0;
 ///   `nodes_processed`: solve_local_upper_bound 呼び出し総回数 (root 含む)。
 ///   `max_depth_seen`: 探索 tree 内で到達した最大 depth。
 ///   `pruned`: 子展開前に枝刈で discard した node 数。
+///   `remaining_lb`: 終了時点の未探索領域下界 (`tree.best_lower_bound()` と
+///   `discard_lb` の min)。全探索完了 (`!halted_early`) なら未探索領域が無いため
+///   `f64::INFINITY`。`within_gap`/`BoundGapCertificate` の guard 状態に左右されない
+///   直接値のため、fold 系修正 (discard_lb への畳み込み) をピンポイントで検証できる。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GlobalStats {
     pub nodes_processed: usize,
     pub max_depth_seen: usize,
     pub pruned: usize,
+    pub remaining_lb: f64,
 }
 
 pub fn solve_qp_global(
@@ -130,13 +184,10 @@ pub fn solve_qp_global_with_stats(
     // 点の目的値」で健全なので、非収束 status (Stalled 等) でも点そのものが
     // feasible と検証できれば採用する (status は信用しない)。
     let root_solve = solve_local_upper_bound(problem, &root_bounds, &shared_opts, None);
-    let root_usable = is_feasible_result(&root_solve.status)
-        || is_verified_feasible_point(problem, &root_solve.solution, shared_opts.ipm_eps());
-    if !root_usable {
-        // root が使えない (Infeasible / NumericalError / Unbounded / NonConvex /
-        // Timeout / infeasible な診断 iterate) → そのまま伝播。
-        return (root_solve, stats);
-    }
+    let root_solve = match classify_root_usability(root_solve, problem, &shared_opts) {
+        Ok(usable) => usable,
+        Err(fallback) => return (*fallback, stats),
+    };
 
     // Phase 4 α-BB: 全 node で共通の α (Q only). use_alpha_bb=false なら 0 で実質無効化。
     let alpha = if cfg.use_alpha_bb {
@@ -169,6 +220,10 @@ pub fn solve_qp_global_with_stats(
 
     if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
         state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
+        // root incumbent が gap 以内 = 未探索領域なしで全証明完了。`finalize_search_
+        // outcome` の `!halted_early` 経路と同じ「open region なし」sentinel を公開し、
+        // GlobalStats::default() 由来の捏造 `0.0` を返さない。
+        stats.remaining_lb = f64::INFINITY;
         return (
             state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps),
             stats,
@@ -186,11 +241,17 @@ pub fn solve_qp_global_with_stats(
         None => {
             if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
                 state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
+                // 分枝不能かつ gap 以内 = 未探索領域なしで証明完了 → open region なし sentinel。
+                stats.remaining_lb = f64::INFINITY;
                 return (
                     state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps),
                     stats,
                 );
             }
+            // 分枝不能かつ未証明 = root box 全体が未探索 (未証明) 領域として残る。その下界は
+            // root_lb そのもの。default の `0.0` は「documented 下界」でも「open region なし」
+            // でもない捏造値なので、実際の未探索領域下界を公開する。
+            stats.remaining_lb = root_lb;
             return (
                 state.finalize_unproven(root_lb, stats.nodes_processed, 0, cfg, q_indefinite),
                 stats,
@@ -212,10 +273,14 @@ pub fn solve_qp_global_with_stats(
     let mut discard_lb: f64 = f64::INFINITY;
 
     while let Some(node) = tree.pop() {
-        if deadline_reached(deadline) {
+        #[cfg(test)]
+        test_maybe_cancel_at_loop_top(&shared_opts);
+        if shared_opts.external_stop_requested() {
+            fold_interrupted_node(&node, &mut search_incomplete, &mut discard_lb);
             break;
         }
         if stats.nodes_processed >= cfg.max_nodes {
+            fold_interrupted_node(&node, &mut search_incomplete, &mut discard_lb);
             break;
         }
 
@@ -251,9 +316,7 @@ pub fn solve_qp_global_with_stats(
 
         let res =
             solve_local_upper_bound(problem, &node.var_bounds, &shared_opts, node.warm.as_ref());
-        let res_usable = is_feasible_result(&res.status)
-            || is_verified_feasible_point(problem, &res.solution, user_eps);
-        if !res_usable {
+        if !is_node_result_usable(&res, problem, user_eps) {
             if !node_discard_is_conclusive(&res.status) {
                 // 「box に解があるか不明」なだけで空の証明ではないため、node_lb を
                 // discard_lb に畳み込み未探索領域として残す (完全探索を偽装しない)。
@@ -289,42 +352,142 @@ pub fn solve_qp_global_with_stats(
     // B&B incumbent の sub-box dual を元問題に整合させる (bound comp 修復)。
     state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
 
-    // 終了条件分岐:
-    // - queue 空 AND max_depth 未超過 AND discard なし AND deadline/max_nodes 未到達 → proven
-    // - それ以外 → 未証明 (incumbent あれば LocallyOptimal)
+    #[cfg(test)]
+    test_maybe_cancel_before_finalize(&shared_opts);
+
+    let result = finalize_search_outcome(
+        problem,
+        &tree,
+        state,
+        &mut stats,
+        discard_lb,
+        search_incomplete,
+        &shared_opts,
+        cfg,
+        q_indefinite,
+        user_eps,
+    );
+    (result, stats)
+}
+
+/// Builds the final `SolverResult` from the B&B loop's exit state: queue
+/// non-empty, `search_incomplete`, or deadline/cancel/`max_nodes` reached all
+/// mean `halted_early`, in which case `remaining_lb` (folded into `stats.
+/// remaining_lb` — see `GlobalStats`'s doc) decides `finalize_proven` vs
+/// `finalize_unproven`. Otherwise the queue drained cleanly and
+/// `incumbent_obj` is the global optimum.
+///
+/// `opts.external_stop_requested()` (横展開, mirrors `conic::nonconvex::global_core`'s
+/// terminal-classification backstop) is a defense-in-depth backstop, not the
+/// primary cancel detection: the loop's own top-of-iteration check already
+/// folds a mid-search cancel into `search_incomplete` before this function is
+/// ever called. This second check only matters for the narrow race where the
+/// tree drains exactly as cancel fires, in which case treating the search as
+/// `halted_early` (rather than a clean, fully-proven completion) is the
+/// conservative choice.
+#[allow(clippy::too_many_arguments)]
+fn finalize_search_outcome(
+    problem: &QpProblem,
+    tree: &BBTree,
+    state: SearchState,
+    stats: &mut GlobalStats,
+    discard_lb: f64,
+    search_incomplete: bool,
+    opts: &SolverOptions,
+    cfg: &GlobalOptimizationConfig,
+    q_indefinite: bool,
+    user_eps: f64,
+) -> SolverResult {
     let halted_early = !tree.is_empty()
         || search_incomplete
-        || deadline_reached(deadline)
+        || opts.external_stop_requested()
         || stats.nodes_processed >= cfg.max_nodes;
 
-    let result = if halted_early {
-        // 未探索領域の下界: queue に残った node の最小 lb と、深さ上限/discard で
-        // 破棄した node の lb の両方を考慮する。どちらの領域も「未証明」であるため
-        // min を取る。
-        let remaining_lb = tree
-            .best_lower_bound()
-            .unwrap_or(f64::INFINITY)
-            .min(discard_lb);
-        let proven = within_gap(state.incumbent_obj, remaining_lb, cfg.gap_tol);
+    if !halted_early {
+        // queue 空 = 全探索完了 → 未探索領域なし、incumbent_obj が global。
+        stats.remaining_lb = f64::INFINITY;
         let inc_obj = state.incumbent_obj;
-        if proven {
-            let lb_for_proof = remaining_lb.min(inc_obj);
-            state.finalize_proven(problem, lb_for_proof, q_indefinite, cfg.gap_tol, user_eps)
-        } else {
-            state.finalize_unproven(
-                remaining_lb,
-                stats.nodes_processed,
-                stats.max_depth_seen,
-                cfg,
-                q_indefinite,
-            )
-        }
+        return state.finalize_proven(problem, inc_obj, q_indefinite, cfg.gap_tol, user_eps);
+    }
+    // 未探索領域の下界: queue に残った node の最小 lb と、深さ上限/discard で破棄
+    // した node の lb の両方を考慮する。どちらの領域も「未証明」であるため min を取る。
+    let remaining_lb = tree
+        .best_lower_bound()
+        .unwrap_or(f64::INFINITY)
+        .min(discard_lb);
+    stats.remaining_lb = remaining_lb;
+    let proven = within_gap(state.incumbent_obj, remaining_lb, cfg.gap_tol);
+    let inc_obj = state.incumbent_obj;
+    if proven {
+        let lb_for_proof = remaining_lb.min(inc_obj);
+        state.finalize_proven(problem, lb_for_proof, q_indefinite, cfg.gap_tol, user_eps)
     } else {
-        // queue 空 = 全探索完了 → incumbent_obj が global
-        let inc_obj = state.incumbent_obj;
-        state.finalize_proven(problem, inc_obj, q_indefinite, cfg.gap_tol, user_eps)
-    };
-    (result, stats)
+        state.finalize_unproven(
+            remaining_lb,
+            stats.nodes_processed,
+            stats.max_depth_seen,
+            cfg,
+            q_indefinite,
+        )
+    }
+}
+
+/// Folds `node`'s inherited `lower_bound` into `discard_lb` and marks the
+/// search incomplete, for the loop-top `deadline_reached`/`max_nodes` breaks
+/// in `solve_qp_global_with_stats`. `tree.pop()` is best-bound-first, so
+/// `node` holds the smallest lower_bound of everything still unexplored at
+/// this instant (including whatever remains in `tree`); discarding it
+/// without folding would leave `remaining_lb` (computed from `tree.
+/// best_lower_bound()`, which no longer sees this node) skewed optimistic,
+/// which can make an unproven gap look closed. Mirrors `mip::
+/// check_stop_conditions`, which already folds the just-popped node's bound
+/// before its own deadline/max_nodes break.
+fn fold_interrupted_node(node: &BBNode, search_incomplete: &mut bool, discard_lb: &mut f64) {
+    *search_incomplete = true;
+    *discard_lb = discard_lb.min(node.lower_bound);
+}
+
+/// Classifies the root local solve's usability as a starting incumbent.
+/// `Ok` continues the B&B; `Err(fallback)` is the exact early-return result
+/// for `solve_qp_global_with_stats`'s two direct-return paths.
+///
+/// `is_feasible_result`/`is_verified_feasible_point` trust `status` alone
+/// (Optimal/LocallyOptimal/SuboptimalSolution) or a verified point, without
+/// checking `objective`/`solution` are finite (Codex review, P2, follow-up
+/// to `within_gap`'s false-Optimal fix) — mirrors `qcqp_route::
+/// is_clean_convex_outcome`'s `Optimal` invariant. A root that claims
+/// feasible but is non-finite must not reach `SearchState::new` (which
+/// `assert!`s this — see its doc): report it honestly as `NumericalError`
+/// rather than forwarding the raw corrupt result (whose `status` would still
+/// read `Optimal`/`SuboptimalSolution`). A root that never claimed feasible
+/// (Infeasible/NumericalError/Unbounded/NonConvex/Timeout) propagates as-is.
+fn classify_root_usability(
+    root_solve: SolverResult,
+    problem: &QpProblem,
+    opts: &SolverOptions,
+) -> Result<SolverResult, Box<SolverResult>> {
+    let claims_feasible = is_feasible_result(&root_solve.status)
+        || is_verified_feasible_point(problem, &root_solve.solution, opts.ipm_eps());
+    if !claims_feasible {
+        return Err(Box::new(root_solve));
+    }
+    if !root_solve.is_finite_candidate() {
+        return Err(Box::new(SolverResult::numerical_error()));
+    }
+    Ok(root_solve)
+}
+
+/// Whether a node's local upper-bound solve is usable to adopt as an
+/// improving incumbent: independently re-verifies feasibility (status-
+/// trusted or point-verified) AND finiteness (`is_finite_candidate`) —
+/// same gap as `classify_root_usability` (Codex review, P2), so a node
+/// result claiming Optimal/SuboptimalSolution but non-finite is unusable
+/// (folded into `discard_lb`/`search_incomplete` at the call site, exactly
+/// like any other unusable status) rather than handed to `update_incumbent`.
+fn is_node_result_usable(res: &SolverResult, problem: &QpProblem, eps: f64) -> bool {
+    res.is_finite_candidate()
+        && (is_feasible_result(&res.status)
+            || is_verified_feasible_point(problem, &res.solution, eps))
 }
 
 /// unusable node (`!res_usable`) の discard が「完全探索」扱いにできるか。
@@ -603,7 +766,24 @@ struct SearchState {
 }
 
 impl SearchState {
+    /// Codex review (P2, follow-up to `within_gap`'s false-Optimal fix):
+    /// `root` must already be `is_finite_candidate()` — enforced by an
+    /// `assert!` rather than silently degrading, because this constructor
+    /// has exactly one production call site (`solve_qp_global_with_stats`,
+    /// immediately after its `root_solve.is_finite_candidate()` gate); a
+    /// non-finite `root` reaching here means that gate itself regressed,
+    /// which is a caller bug, not a data-dependent condition to route
+    /// around. Every existing caller (including all `#[cfg(test)]` call
+    /// sites) already passes a finite root.
     fn new(root: SolverResult) -> Self {
+        assert!(
+            root.is_finite_candidate(),
+            "SearchState::new requires a finite-candidate root (objective and every \
+             solution component finite); got objective={} solution={:?} — caller must \
+             gate via SolverResult::is_finite_candidate() before construction",
+            root.objective,
+            root.solution
+        );
         let obj = root.objective;
         let sol = root.solution.clone();
         Self {
@@ -618,11 +798,23 @@ impl SearchState {
         build_warm_from(&self.incumbent_result)
     }
 
-    fn update_incumbent(&mut self, res: &SolverResult) {
+    /// Adopt `res` as the new incumbent. Returns whether it was actually
+    /// adopted.
+    ///
+    /// Codex review (P2): rejects (no-op) a non-`is_finite_candidate()` `res`
+    /// — mirrors `mip::MipState::consider`. The one production call site
+    /// (the B&B loop in `solve_qp_global_with_stats`) already gates on
+    /// `res.is_finite_candidate()` via `res_usable` before calling this, so
+    /// this is defense-in-depth against a future call site that forgets to.
+    fn update_incumbent(&mut self, res: &SolverResult) -> bool {
+        if !res.is_finite_candidate() {
+            return false;
+        }
         self.incumbent_obj = res.objective;
         self.incumbent_sol = res.solution.clone();
         self.incumbent_result = res.clone();
         self.incumbent_updated = true;
+        true
     }
 
     /// Dual recovery polish: re-solves on original bounds to fix sub-box-contaminated duals.
@@ -844,6 +1036,58 @@ mod tests {
         );
     }
 
+    /// A root-level gap closure leaves no open region, so the public statistic
+    /// must use the documented `+inf` sentinel rather than `Default`'s `0.0`.
+    ///
+    /// Sentinel: removing the root-return assignment reports exactly `0.0`.
+    #[test]
+    fn root_gap_exit_reports_no_open_region_remaining_lb() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        let p = QpProblem::new_all_le(q, vec![0.0], a, vec![], vec![(-1.0, 1.0)]).unwrap();
+
+        let (_, stats) =
+            solve_qp_global_with_stats(&p, &opts(5.0), &GlobalOptimizationConfig::default());
+
+        assert_eq!(stats.nodes_processed, 1);
+        assert!(
+            stats.remaining_lb.is_infinite() && stats.remaining_lb.is_sign_positive(),
+            "root proof leaves no open region, expected +inf; got {}",
+            stats.remaining_lb
+        );
+    }
+
+    /// If the root box cannot be split but its gap remains open, the whole
+    /// root box is the remaining unproven region and its actual lower bound
+    /// must be exposed.
+    ///
+    /// Sentinel: removing the assignment reports `0.0` instead of the
+    /// negative root lower bound.
+    #[test]
+    fn unbranchable_root_exit_reports_root_lower_bound() {
+        let p = diag_concave_1d(5e-7);
+        let cfg = GlobalOptimizationConfig {
+            gap_tol: 1e-16,
+            use_alpha_bb: false,
+            use_mccormick: false,
+            ..GlobalOptimizationConfig::default()
+        };
+
+        let (_, stats) = solve_qp_global_with_stats(&p, &opts(5.0), &cfg);
+
+        assert_eq!(stats.nodes_processed, 1);
+        assert!(
+            stats.remaining_lb < 0.0,
+            "unbranchable root's interval lower bound must be retained; got {}",
+            stats.remaining_lb
+        );
+        assert!(
+            (stats.remaining_lb + 2.5e-13).abs() <= 1e-25,
+            "expected exact root lower bound -2.5e-13, got {}",
+            stats.remaining_lb
+        );
+    }
+
     /// Sentinel: the global (nonconvex B&B) public entry must report Infeasible
     /// for an empty variable box (lb > ub), never a panic or a spurious incumbent
     /// from the spatial branch/α-BB clamps. The entry's own `first_infeasible_bound`
@@ -1061,6 +1305,68 @@ mod tests {
         assert!(
             r.bound_gap_cert.is_none(),
             "depth-exceeded unproven must have no BoundGapCertificate"
+        );
+    }
+
+    /// SENTINEL (task 7, review of `fix/inf-incumbent-optimal`): the loop's
+    /// `deadline_reached`/`max_nodes` breaks discard the just-popped node
+    /// without folding its `lower_bound` into `discard_lb`. `tree.pop()` is
+    /// best-bound-first, so that node holds the smallest pending bound of
+    /// everything unexplored; dropping it lets `remaining_lb` skew optimistic
+    /// (`mip::check_stop_conditions` already folds the popped bound before
+    /// its own break — this closes the same gap here).
+    ///
+    /// Asserts `GlobalStats::remaining_lb` directly, not `res.status`/
+    /// `bound_gap_cert`: a status-based version was found *vacuous* once
+    /// tentatively merged with `fix/inf-incumbent-optimal` (07c8b954), whose
+    /// `within_gap` guard independently demotes a `+inf` `remaining_lb` to
+    /// "not proven" regardless of whether this fold ran. `remaining_lb` is
+    /// the raw pre-`within_gap` value, so this assertion is guard-independent.
+    ///
+    /// Problem: `Q=diag(-2,-2)` on box `[-1,1]²` plus constraint `x0>=0.1`
+    /// (invisible to the interval bound). Root's local solve is trapped at
+    /// the interior saddle (`objective=-1`), splitting at `x=0`. The
+    /// `x∈[-1,0]` child is entirely infeasible — a conclusive discard that
+    /// still counts toward `nodes_processed` — so the `x∈[0,1]` sibling's
+    /// `max_nodes=2` check fires as the *last* tree node, `discard_lb` still
+    /// `+inf`; `root_lb = -2` is exact, so the equality check below is exact.
+    ///
+    /// Verified in 3 states (task report): solo, and tentatively merged with
+    /// 07c8b954 (`git merge --no-commit --no-ff`, never committed) — both
+    /// revert-fail (`remaining_lb == +inf`) identically; both pass
+    /// (`remaining_lb == -2.0`) with the fold applied.
+    #[test]
+    fn interrupt_break_folds_popped_node_bound_into_remaining_lb() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        // x0 >= 0.1, i.e. -x0 <= -0.1.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 2).unwrap();
+        let p = QpProblem::new(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![-0.1],
+            vec![(-1.0, 1.0), (-1.0, 1.0)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        let cfg = GlobalOptimizationConfig {
+            gap_tol: 1e-12,
+            max_depth: 30,
+            max_nodes: 2,
+            use_alpha_bb: false,
+            use_mccormick: false,
+            ..GlobalOptimizationConfig::default()
+        };
+        let (_, stats) = solve_qp_global_with_stats(&p, &opts(10.0), &cfg);
+
+        assert_eq!(stats.nodes_processed, 2);
+        assert_eq!(
+            stats.remaining_lb, -2.0,
+            "the last-standing sibling's own inherited bound (root_lb = -2, \
+             exact) must be folded into remaining_lb; got {} (+inf means the \
+             fold in the max_nodes break never ran)",
+            stats.remaining_lb
         );
     }
 
@@ -1907,6 +2213,83 @@ mod tests {
         }
     }
 
+    /// SENTINEL (P2, Codex review follow-up to `within_gap`'s false-Optimal
+    /// fix): `SearchState::new` — the sole point every top-level solve seeds
+    /// its starting incumbent from — must never accept a non-finite
+    /// candidate. Mirrors `mip::MipState::consider`'s guard and
+    /// `qcqp_route::is_clean_convex_outcome`'s `Optimal` invariant
+    /// (`objective.is_finite() && x.iter().all(finite)`).
+    ///
+    /// `new`'s one production call site (`solve_qp_global_with_stats`) now
+    /// gates on `root_solve.is_finite_candidate()` before calling `new` at
+    /// all, so this exercises `new`'s own internal enforcement directly,
+    /// independent of that gate — defense-in-depth against a future caller
+    /// that forgets it. Revert the `assert!` in `SearchState::new` to see
+    /// this stop panicking (verified).
+    #[test]
+    #[should_panic(expected = "finite-candidate")]
+    fn search_state_new_rejects_non_finite_objective() {
+        let poisoned = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: f64::INFINITY,
+            solution: vec![0.0_f64],
+            ..Default::default()
+        };
+        let _ = SearchState::new(poisoned);
+    }
+
+    /// SENTINEL companion: `SearchState::new` must also reject a candidate
+    /// whose objective is finite but whose solution carries a non-finite
+    /// component (the other half of `is_finite_candidate()`).
+    #[test]
+    #[should_panic(expected = "finite-candidate")]
+    fn search_state_new_rejects_non_finite_solution_component() {
+        let poisoned = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 0.0,
+            solution: vec![f64::NAN],
+            ..Default::default()
+        };
+        let _ = SearchState::new(poisoned);
+    }
+
+    /// SENTINEL (P2): `update_incumbent` — the B&B loop's per-node incumbent
+    /// adoption — must reject a non-finite candidate rather than adopting it,
+    /// leaving the last-known-good incumbent untouched. Its one production
+    /// call site already gates on `res.is_finite_candidate()` via `res_usable`
+    /// before calling this, so this is defense-in-depth, tested directly.
+    ///
+    /// Revert the `is_finite_candidate()` check in `update_incumbent` to see
+    /// this fail: the poisoned candidate gets adopted (`updated == true`,
+    /// `incumbent_obj == f64::INFINITY`) (verified).
+    #[test]
+    fn update_incumbent_rejects_non_finite_candidate() {
+        let good_root = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 5.0,
+            solution: vec![1.0_f64],
+            ..Default::default()
+        };
+        let mut state = SearchState::new(good_root);
+        let poisoned = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: f64::INFINITY,
+            solution: vec![0.0_f64],
+            ..Default::default()
+        };
+        let updated = state.update_incumbent(&poisoned);
+        assert!(
+            !updated,
+            "a non-finite candidate must be rejected, not adopted"
+        );
+        assert_eq!(
+            state.incumbent_obj, 5.0,
+            "incumbent must remain the last finite value"
+        );
+        assert_eq!(state.incumbent_sol, vec![1.0_f64]);
+        assert!(!state.incumbent_updated);
+    }
+
     /// Regression: proptest seed a46bde58 — PD Q (Gershgorin false positive) must satisfy KKT.
     ///
     /// The a46bde58 problem has a truly PD Q (Cholesky succeeds) but Gershgorin reports
@@ -2068,6 +2451,180 @@ mod tests {
             pf_rel > 1e-3,
             "expected large primal residual demonstrating a genuinely unusable \
              (not just borderline) iterate, got pf_rel={pf_rel:.3e}"
+        );
+    }
+
+    // ---- cancel_flag honored by the B&B loop's own control flow ----
+    //
+    // Fact established by grep before this fix: `otspot-core/src/qp/global/`
+    // had zero references to `cancel_flag`/`stop_requested`/`external_stop`
+    // anywhere; the loop broke only on `deadline_reached`/`max_nodes`. Each
+    // node's own local/α-BB/McCormick sub-solve already honors `cancel_flag`
+    // transitively (they all route through `solve_qp_with`, which clones
+    // `base_opts` — Arc-sharing `cancel_flag` — before solving), so
+    // cancellation was never silently *ignored*: a cancelled search still
+    // eventually drained, one already-queued node at a time, each falling
+    // back to a fast `Timeout`-cancelled discard. The bug is unresponsiveness:
+    // the loop's own break conditions never observed the signal directly.
+
+    fn x0_ge_0p1_concave_2d() -> QpProblem {
+        use crate::problem::ConstraintType;
+        // Q=diag(-2,-2) on box [-1,1]^2, plus x0 >= 0.1 (i.e. -x0 <= -0.1).
+        // Same fixture as `interrupt_break_folds_popped_node_bound_into_remaining_lb`.
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 2).unwrap();
+        QpProblem::new(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![-0.1],
+            vec![(-1.0, 1.0), (-1.0, 1.0)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap()
+    }
+
+    /// Baseline/control for `qp_global_loop_honors_cancel_flag_not_only_deadline`:
+    /// same fixture, generous `max_nodes`/`timeout_secs`, no cancel injected.
+    /// The `x0>=0.1` constraint is invisible to the interval/α-BB bounds, so
+    /// the infeasible-left-child region keeps getting re-split (each split
+    /// discovers infeasibility only once box-restricted local solves are
+    /// attempted) before the search fully exhausts. Value confirmed by this
+    /// test itself (not hand-derived): establishes that this fixture keeps
+    /// the loop busy well past root when nothing interrupts it, so the
+    /// sentinel's contrast (1 vs 10) is not an artifact of a fixture that
+    /// would have stopped at 1 anyway.
+    #[test]
+    fn qp_global_loop_baseline_processes_both_children_without_cancel() {
+        let p = x0_ge_0p1_concave_2d();
+        let cfg = GlobalOptimizationConfig {
+            gap_tol: 1e-12,
+            max_depth: 30,
+            max_nodes: 1000,
+            use_alpha_bb: false,
+            use_mccormick: false,
+            ..GlobalOptimizationConfig::default()
+        };
+        let (_, stats) = solve_qp_global_with_stats(&p, &opts(10.0), &cfg);
+        assert_eq!(
+            stats.nodes_processed, 10,
+            "baseline (no cancel): fixture must exhaust well past 1 node when \
+             nothing interrupts the loop, got {}",
+            stats.nodes_processed
+        );
+    }
+
+    /// SENTINEL: the B&B loop's top-of-iteration stop check must
+    /// observe `cancel_flag` directly, not only `deadline_reached`. Same
+    /// fixture/config as the baseline above (`max_nodes=1000`, `timeout_secs
+    /// =10.0`, both far from firing), but cancel is injected right as the
+    /// very first node is popped from the tree (after root, at loop
+    /// iteration 1). A cancel-aware loop folds that node and breaks
+    /// immediately, leaving `nodes_processed` at 1 (root only) —
+    /// dramatically less than the baseline's 10, and unaffected by the
+    /// (deliberately irrelevant) generous `max_nodes`/`timeout_secs` budget.
+    ///
+    /// Revert-fail (confirmed): reverting the loop-top check from
+    /// `shared_opts.external_stop_requested()` back to
+    /// `deadline_reached(deadline)` makes this FAIL with `nodes_processed ==
+    /// 3` — the loop still eventually stops (each already-queued node's own
+    /// `solve_qp_with` call independently honors `cancel_flag`, so no further
+    /// branching occurs past the point cancel fires), but only after
+    /// draining the small backlog already queued at that instant, not
+    /// immediately as a cancel-aware loop must.
+    #[test]
+    fn qp_global_loop_honors_cancel_flag_not_only_deadline() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let p = x0_ge_0p1_concave_2d();
+        let cfg = GlobalOptimizationConfig {
+            gap_tol: 1e-12,
+            max_depth: 30,
+            max_nodes: 1000,
+            use_alpha_bb: false,
+            use_mccormick: false,
+            ..GlobalOptimizationConfig::default()
+        };
+
+        LOOP_ITER_COUNT.with(|c| c.set(0));
+        CANCEL_AFTER_LOOP_ITER.with(|c| c.set(Some(1)));
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let o = SolverOptions {
+            timeout_secs: Some(10.0),
+            cancel_flag: Some(Arc::clone(&cancel)),
+            ..SolverOptions::default()
+        };
+        let (_, stats) = solve_qp_global_with_stats(&p, &o, &cfg);
+
+        CANCEL_AFTER_LOOP_ITER.with(|c| c.set(None));
+
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "test harness must have actually fired the injected cancel"
+        );
+        assert_eq!(
+            stats.nodes_processed, 1,
+            "cancel injected at the first loop iteration must break the loop \
+             before processing any tree node beyond root, got {}",
+            stats.nodes_processed
+        );
+    }
+
+    /// SENTINEL (isolated from the loop-top check above): once the
+    /// B&B loop drains cleanly (queue empty, nothing discarded),
+    /// `finalize_search_outcome`'s own `external_stop_requested()` backstop
+    /// must still demote an otherwise-fully-proven result if cancel was
+    /// observed right at that boundary — mirrors the "discard an
+    /// already-proven conclusion once a stop is observed" contract
+    /// (`conic::nonconvex::global_core`'s backstop). Without it, a
+    /// genuinely-complete-but-cancelled search takes `finalize_search_
+    /// outcome`'s early `!halted_early` return, which calls `finalize_proven`
+    /// unconditionally.
+    ///
+    /// Fixture: `diag_concave_1d(2.0)`, same as `indefinite_q_proven_yields_
+    /// nonconvex_global` / `qp_global_proven_nonconvex_has_bound_gap_cert`
+    /// (this test's uncancelled control, both assert `NonconvexGlobal` +
+    /// cert). Root branches, one child finds the exact corner, the sibling
+    /// is pruned by the resulting tight incumbent — a clean, fully-exhausted
+    /// search. Cancel is injected *after* the loop/polish finish, isolating
+    /// this backstop from the loop-top check.
+    ///
+    /// Revert-fail: removing `opts.external_stop_requested()` from
+    /// `halted_early` makes this FAIL with `NonconvexGlobal` + `Some(cert)`
+    /// — identical to the uncancelled control.
+    #[test]
+    fn qp_global_finalize_backstop_demotes_cancelled_complete_search() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let p = diag_concave_1d(2.0);
+        let cfg = GlobalOptimizationConfig::default();
+
+        CANCEL_BEFORE_FINALIZE.with(|c| c.set(true));
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let o = SolverOptions {
+            timeout_secs: Some(5.0),
+            cancel_flag: Some(Arc::clone(&cancel)),
+            ..SolverOptions::default()
+        };
+        let r = solve_qp_global(&p, &o, &cfg);
+
+        CANCEL_BEFORE_FINALIZE.with(|c| c.set(false));
+
+        assert_eq!(
+            r.status,
+            SolveStatus::NonconvexLocal,
+            "a cancel observed right before finalization must demote the \
+             otherwise-proven result to unproven, got {:?}",
+            r.status
+        );
+        assert!(
+            r.bound_gap_cert.is_none(),
+            "a cancelled-at-finalization result must not carry a \
+             BoundGapCertificate"
         );
     }
 }

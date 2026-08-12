@@ -110,6 +110,8 @@ pub enum PySolveError {
     MaxIterations,
     Stalled,
     NumericalError,
+    /// OS リソース (スレッド・メモリ等) 確保失敗。数値破綻ではない。
+    ResourceExhausted,
     /// See `PySolutionProof::Unknown`'s doc comment.
     Unknown,
 }
@@ -122,6 +124,7 @@ impl From<SolveError> for PySolveError {
             SolveError::MaxIterations => PySolveError::MaxIterations,
             SolveError::Stalled => PySolveError::Stalled,
             SolveError::NumericalError => PySolveError::NumericalError,
+            SolveError::ResourceExhausted => PySolveError::ResourceExhausted,
             // #[non_exhaustive]: wildcard required for cross-crate matching.
             _ => PySolveError::Unknown,
         }
@@ -137,6 +140,7 @@ impl PySolveError {
             PySolveError::MaxIterations => "MaxIterations",
             PySolveError::Stalled => "Stalled",
             PySolveError::NumericalError => "NumericalError",
+            PySolveError::ResourceExhausted => "ResourceExhausted",
             PySolveError::Unknown => "Unknown",
         };
         reduce_via_getattr(py, py.get_type::<PySolveError>(), name)
@@ -151,8 +155,27 @@ impl PySolveError {
 /// fallback for the `#[non_exhaustive]` wildcard this `From` impl is forced
 /// to have (unlike `PySolutionProof`/`PySolveError`, a complex enum *can*
 /// carry the real `Display` text).
-#[pyclass(module = "otspot", name = "SolveStatus", from_py_object)]
-#[derive(Clone)]
+///
+/// `eq` + derived `PartialEq` compare by variant and payload (`NonConvex`/
+/// `NotSupported`'s `String` included) rather than Python object identity:
+/// `ModelResult.status` builds a fresh wrapper on every access (see
+/// `result.rs`'s getter), so without this `result.status ==
+/// otspot.SolveStatus.Optimal()` was always `False` even for a genuinely
+/// Optimal result (Codex PR #31 review).
+///
+/// `hash` + derived `Hash` (Codex PR #31 re-review): CPython nulls out
+/// `tp_hash` whenever `tp_richcompare` (i.e. `__eq__`) is set unless a hash
+/// is explicitly provided, and PyO3 only emits `__hash__` when
+/// `#[pyclass(hash)]` is present -- so adding bare `eq` above silently made
+/// `SolveStatus` unhashable (confirmed empirically: `hash(otspot.SolveStatus
+/// .Optimal())` worked before that change, raised `TypeError: unhashable
+/// type` after). Every field here is `String`/unit, so `derive(Hash)` is
+/// straightforward; `Tolerance` below cannot follow suit (`Custom(f64)`,
+/// and `f64` has no `Hash` impl -- `NaN != NaN` would break the `a == b =>
+/// hash(a) == hash(b)` contract) and stays unhashable, documented in
+/// `otspot.pyi` and `api_manifest.json`.
+#[pyclass(module = "otspot", name = "SolveStatus", eq, hash, from_py_object)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum PySolveStatus {
     Optimal(),
     LocallyOptimal(),
@@ -164,6 +187,7 @@ pub enum PySolveStatus {
     FeasiblePoint(),
     Timeout(),
     NumericalError(),
+    ResourceExhausted(),
     NonConvex(String),
     NonconvexLocal(),
     NonconvexGlobal(),
@@ -184,6 +208,7 @@ impl From<SolveStatus> for PySolveStatus {
             SolveStatus::FeasiblePoint => PySolveStatus::FeasiblePoint(),
             SolveStatus::Timeout => PySolveStatus::Timeout(),
             SolveStatus::NumericalError => PySolveStatus::NumericalError(),
+            SolveStatus::ResourceExhausted => PySolveStatus::ResourceExhausted(),
             SolveStatus::NonConvex(msg) => PySolveStatus::NonConvex(msg),
             SolveStatus::NonconvexLocal => PySolveStatus::NonconvexLocal(),
             SolveStatus::NonconvexGlobal => PySolveStatus::NonconvexGlobal(),
@@ -212,6 +237,7 @@ impl PySolveStatus {
             PySolveStatus::FeasiblePoint() => ("FeasiblePoint", None),
             PySolveStatus::Timeout() => ("Timeout", None),
             PySolveStatus::NumericalError() => ("NumericalError", None),
+            PySolveStatus::ResourceExhausted() => ("ResourceExhausted", None),
             PySolveStatus::NonConvex(msg) => ("NonConvex", Some(msg.as_str())),
             PySolveStatus::NonconvexLocal() => ("NonconvexLocal", None),
             PySolveStatus::NonconvexGlobal() => ("NonconvexGlobal", None),
@@ -231,8 +257,17 @@ impl PySolveStatus {
 /// `ModelResult` field of type `Tolerance`), converting *from* this crate's
 /// own exhaustively-defined `PyTolerance`, so no `#[non_exhaustive]` wildcard
 /// is needed here (unlike the `From<Rust> for Py*` conversions above).
-#[pyclass(module = "otspot", name = "Tolerance", from_py_object)]
-#[derive(Clone)]
+///
+/// No `#[pyclass(hash)]` here (unlike `SolveStatus` above): `Custom(f64)`
+/// means `derive(Hash)` is not possible (`f64` has no `Hash` impl -- `NaN !=
+/// NaN` would break `a == b => hash(a) == hash(b)`), so `Tolerance` stays
+/// unhashable (`hash(otspot.Tolerance.Medium())` raises `TypeError`, even for
+/// non-`Custom` variants -- `eq` alone already nulled `tp_hash` for the whole
+/// type; PyO3 has no per-variant hash). Documented in `otspot.pyi` and
+/// `api_manifest.json` so this asymmetry with `SolveStatus` is not mistaken
+/// for an oversight.
+#[pyclass(module = "otspot", name = "Tolerance", eq, from_py_object)]
+#[derive(Clone, PartialEq)]
 pub enum PyTolerance {
     High(),
     Medium(),

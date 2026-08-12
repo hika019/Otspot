@@ -73,10 +73,20 @@ pub struct BfrtResult {
 /// when R ≤ 0 (entering column = the one that brings R ≤ 0); (4) return
 /// `(entering, θ, flips)`.
 ///
+/// **Bound-feasibility invariant.** Step 3 stops at the first breakpoint whose
+/// flip capacity `weight_k = u_k·|α_k|` covers the residual still to absorb.
+/// That test *is* the entering column's own box constraint: its primal step is
+/// `R / |α_k|`, so `R ≤ weight_k ⟺ step ≤ u_k`. Every column this function
+/// returns as `entering_col` therefore satisfies `R / |α_entering| ≤
+/// u_entering`, where `R = |leaving_residual| − Σ_{k ∈ flips} u_k·|α_k|` — the
+/// one exception is the residual-not-absorbable fallback below, where *no*
+/// column satisfies it.
+///
 /// Ties within `BFRT_TIE_TOL` of the chosen θ prefer largest |pivot| (Harris
-/// pass 2). Returns `None` if no compatible column (dual unbounded → primal
-/// infeasible); returns Harris-equivalent θ with empty `flips` when no
-/// finite upper bound exists (drop-in wrapper).
+/// pass 2), restricted to candidates that keep the invariant above. Returns
+/// `None` if no compatible column (dual unbounded → primal infeasible);
+/// returns Harris-equivalent θ with empty `flips` when no finite upper bound
+/// exists (drop-in wrapper).
 pub fn bfrt_select_entering(
     trow: &[f64],
     reduced_costs: &[f64],
@@ -133,8 +143,7 @@ pub fn bfrt_select_entering(
     breaks.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
 
     // Step 3: walk breakpoints, tracking residual.
-    let residual_target = leaving_residual.abs();
-    let mut residual = residual_target;
+    let mut residual = leaving_residual.abs();
     let mut entering_idx: usize = 0;
     let mut found = false;
     for (k, &(_theta, _j, _abs_pivot, weight)) in breaks.iter().enumerate() {
@@ -155,20 +164,35 @@ pub fn bfrt_select_entering(
         // Residual never absorbed — all compatible columns are bounded and
         // their combined slack still cannot cover the leaving violation.
         // Standard Maros: pick the last breakpoint as entering (the dual step
-        // is capped there by infeasibility detection in the caller).
+        // is capped there by infeasibility detection in the caller). The last
+        // breakpoint is not a flip, so hand back the capacity the walk just
+        // charged against it: `residual` must stay "what the entering column
+        // has to absorb" in both branches.
         entering_idx = breaks.len() - 1;
+        residual += breaks[entering_idx].3;
     }
 
     // Step 4: tie-aware entering selection. Among breakpoints within
-    // BFRT_TIE_TOL of the chosen θ, prefer the largest |pivot|.
+    // BFRT_TIE_TOL of the chosen θ, prefer the largest |pivot| (Harris pass 2)
+    // — but only among candidates that can absorb `residual` themselves.
+    // Swapping the entering column leaves the flip set `0..entering_idx`
+    // untouched, so the replacement inherits the same `residual` and must pass
+    // the very test Step 3 used to stop: `residual ≤ weight_k`, i.e. its primal
+    // step `residual / |α_k|` stays inside its own upper bound. Skipping this
+    // check lets a tied column with a large pivot but a tiny upper bound enter
+    // far past its own bound (the tie only equalises θ, never capacity).
+    // Candidates *before* `entering_idx` are excluded structurally: un-flipping
+    // one hands back the `weight_k` it already absorbed, requiring `residual +
+    // weight_k ≤ weight_k`, i.e. `residual ≤ 0` — impossible, since the walk
+    // only subtracts when `residual > weight`, leaving `residual > 0` strictly.
     let chosen_theta = breaks[entering_idx].0;
     let mut best_idx = entering_idx;
     let mut best_pivot = breaks[entering_idx].2;
-    for (k, &(theta, _j, abs_pivot, _w)) in breaks.iter().enumerate().skip(entering_idx + 1) {
+    for (k, &(theta, _j, abs_pivot, weight)) in breaks.iter().enumerate().skip(entering_idx + 1) {
         if (theta - chosen_theta).abs() > BFRT_TIE_TOL {
             break;
         }
-        if abs_pivot > best_pivot {
+        if residual <= weight && abs_pivot > best_pivot {
             best_pivot = abs_pivot;
             best_idx = k;
         }
@@ -335,6 +359,228 @@ mod tests {
         let bounds = lb_bounds(&[1.0, 1.0]);
         let res = bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 1.0);
         assert!(res.is_none());
+    }
+
+    /// Independent oracle for the bound-feasibility invariant, recomputed from
+    /// the *inputs and the returned result only* — it never reads
+    /// `bfrt_select_entering`'s internals. The entering column has to absorb
+    /// whatever the reported flips left over, and its primal step is that
+    /// residual divided by its own pivot.
+    fn implied_entering_step(
+        trow: &[f64],
+        bounds: &[ColBound],
+        leaving_residual: f64,
+        res: &BfrtResult,
+    ) -> f64 {
+        let absorbed: f64 = res
+            .flips
+            .iter()
+            .map(|&k| bounds[k].upper * trow[k].abs())
+            .sum();
+        (leaving_residual.abs() - absorbed) / trow[res.entering_col].abs()
+    }
+
+    struct TieCase {
+        name: &'static str,
+        trow: Vec<f64>,
+        r: Vec<f64>,
+        bounds: Vec<ColBound>,
+        leaving_residual: f64,
+        expect_entering: usize,
+        expect_flips: Vec<usize>,
+        /// Hand-computed primal step of the expected entering column.
+        expect_step: f64,
+    }
+
+    fn boxed(upper: f64, at_upper: bool) -> ColBound {
+        ColBound { upper, at_upper }
+    }
+
+    /// SENTINEL + property oracle: the entering column returned by BFRT must
+    /// never be pushed past its *own* upper bound.
+    ///
+    /// The Step 3 walk stops at the first breakpoint whose flip capacity
+    /// `u_k·|α_k|` covers the remaining residual, which is exactly the
+    /// statement `residual / |α_k| ≤ u_k`. The Step 4 tie-break then replaces
+    /// that column with the largest-|pivot| column of the tie band — and a tie
+    /// equalises only θ, never capacity, so an unfiltered swap can hand the
+    /// residual to a column whose upper bound is orders of magnitude too small
+    /// to hold it. Cases A/C below are that bug (present since the tie-break
+    /// was introduced, independent of scan direction); B/D confirm the
+    /// largest-pivot preference is *kept* whenever the swap is legitimate.
+    ///
+    /// All ratios are exact powers of two (1/16/64, 1/128) so `r_j / α_j` is
+    /// bit-identical across the tie — decimal fractions that are only
+    /// *mathematically* equal (0.3/3.0 vs 0.1/1.0) do not round to the same
+    /// f64 and silently dissolve the tie the test means to build.
+    ///
+    /// No-op / revert-fail proof: dropping the `residual <= weight` guard from
+    /// Step 4 makes cases A, C and F select the small-bound column instead
+    /// (`entering_col` 1 instead of 0) and their `expect_step` assertions fail.
+    #[test]
+    fn bfrt_entering_never_exceeds_its_own_upper_bound() {
+        // Case F's second breakpoint sits inside BFRT_TIE_TOL of the first
+        // without being bit-equal to it (band membership, not exact equality).
+        const NEAR_TIE: f64 = 4e-9;
+        const {
+            assert!(NEAR_TIE < BFRT_TIE_TOL, "case F must stay inside the band");
+        }
+
+        let cases = [
+            TieCase {
+                // θ = 0.25 for both; weights 64 and 1/128·16 = 0.125.
+                // Walk: 32 ≤ 64 → entering = j0. j1 ties with |pivot| 16 > 1
+                // but can only absorb 0.125 of the 32 residual.
+                name: "A: forward tie, larger pivot lacks capacity",
+                trow: vec![1.0, 16.0],
+                r: vec![0.25, 4.0],
+                bounds: vec![boxed(64.0, false), boxed(0.0078125, false)],
+                leaving_residual: -32.0,
+                expect_entering: 0,
+                expect_flips: vec![],
+                expect_step: 32.0,
+            },
+            TieCase {
+                // Same tie, but j1's bound now covers the residual
+                // (4·16 = 64 ≥ 32) → the largest-pivot preference applies.
+                name: "B: forward tie, larger pivot has capacity",
+                trow: vec![1.0, 16.0],
+                r: vec![0.25, 4.0],
+                bounds: vec![boxed(64.0, false), boxed(4.0, false)],
+                leaving_residual: -32.0,
+                expect_entering: 1,
+                expect_flips: vec![],
+                expect_step: 2.0,
+            },
+            TieCase {
+                // at_upper tie candidate (negative pivot, non-positive reduced
+                // cost): θ = (-r)/(-α) = 0.25, same capacity shortfall as A.
+                name: "C: at_upper tie candidate lacks capacity",
+                trow: vec![1.0, -16.0],
+                r: vec![0.25, -4.0],
+                bounds: vec![boxed(64.0, false), boxed(0.0078125, true)],
+                leaving_residual: -32.0,
+                expect_entering: 0,
+                expect_flips: vec![],
+                expect_step: 32.0,
+            },
+            TieCase {
+                name: "D: at_upper tie candidate has capacity",
+                trow: vec![1.0, -16.0],
+                r: vec![0.25, -4.0],
+                bounds: vec![boxed(64.0, false), boxed(4.0, true)],
+                leaving_residual: -32.0,
+                expect_entering: 1,
+                expect_flips: vec![],
+                expect_step: 2.0,
+            },
+            TieCase {
+                // Three-way exact tie at θ = 0.2, weight 1 each. The walk
+                // spends j0 and j1 as flips (2.5 → 1.5 → 0.5) and stops at j2.
+                // j1 carries the largest |pivot| of the band but is already
+                // consumed: making it entering would hand back its own weight,
+                // forcing it to absorb 0.5 + 1 = 1.5 > 1 = weight. No consumed
+                // candidate can ever pass that test, so the walk's choice stands.
+                name: "E: consumed flip is never swapped in as entering",
+                trow: vec![1.0, 8.0, 2.0],
+                r: vec![0.2, 1.6, 0.4],
+                bounds: vec![boxed(1.0, false), boxed(0.125, false), boxed(0.5, false)],
+                leaving_residual: -2.5,
+                expect_entering: 2,
+                expect_flips: vec![0, 1],
+                expect_step: 0.25,
+            },
+            TieCase {
+                name: "F: near-tie inside BFRT_TIE_TOL, larger pivot lacks capacity",
+                trow: vec![1.0, 16.0],
+                r: vec![0.25, 16.0 * (0.25 + NEAR_TIE)],
+                bounds: vec![boxed(64.0, false), boxed(0.0078125, false)],
+                leaving_residual: -32.0,
+                expect_entering: 0,
+                expect_flips: vec![],
+                expect_step: 32.0,
+            },
+        ];
+
+        for case in &cases {
+            let n = case.trow.len();
+            let res = bfrt_select_entering(
+                &case.trow,
+                &case.r,
+                &no_basic(n),
+                &case.bounds,
+                n,
+                PIVOT_TOL,
+                case.leaving_residual,
+            )
+            .unwrap_or_else(|| panic!("{}: expected a breakpoint", case.name));
+
+            assert_eq!(
+                res.entering_col, case.expect_entering,
+                "{}: entering_col",
+                case.name
+            );
+            assert_eq!(res.flips, case.expect_flips, "{}: flips", case.name);
+
+            let step = implied_entering_step(&case.trow, &case.bounds, case.leaving_residual, &res);
+            assert!(
+                (step - case.expect_step).abs() < 1e-12,
+                "{}: implied step {step} != hand-computed {}",
+                case.name,
+                case.expect_step
+            );
+            assert!(
+                step <= case.bounds[res.entering_col].upper,
+                "{}: entering column {} steps to {step}, past its own upper bound {}",
+                case.name,
+                res.entering_col,
+                case.bounds[res.entering_col].upper,
+            );
+        }
+    }
+
+    /// The tie band's exactness premise for the E case above, asserted
+    /// separately so a future edit that perturbs the literals cannot silently
+    /// turn the three-way tie into three distinct breakpoints.
+    #[test]
+    fn bfrt_tie_fixture_ratios_are_bit_exact() {
+        for (r, a) in [(0.25, 1.0), (4.0, 16.0)] {
+            assert_eq!(r / a, 0.25, "power-of-two ratio must be bit-exact");
+        }
+        for (r, a) in [(0.2, 1.0), (1.6, 8.0), (0.4, 2.0)] {
+            assert_eq!(r / a, 0.2, "power-of-two ratio must be bit-exact");
+        }
+        for (u, a) in [(1.0, 1.0), (0.125, 8.0), (0.5, 2.0)] {
+            assert_eq!(u * a, 1.0, "power-of-two weight must be bit-exact");
+        }
+        assert_eq!(0.0078125_f64 * 16.0, 0.125);
+        assert_eq!(4.0_f64 * 16.0, 64.0);
+    }
+
+    /// Documented exception to the bound-feasibility invariant: when the
+    /// combined flip capacity of *every* compatible column still cannot cover
+    /// the leaving violation, no column can absorb the residual and BFRT falls
+    /// back to the last breakpoint (Maros; the caller's infeasibility
+    /// detection caps the step). Pinned here so the Step 4 capacity guard is
+    /// not silently widened into "return None" — that maps straight to
+    /// `SolveStatus::Infeasible` in `finish_bounded`.
+    #[test]
+    fn bfrt_falls_back_to_last_breakpoint_when_capacity_is_exhausted() {
+        // weights 1 + 1 = 2 < residual 10 → the walk never stops.
+        let trow = vec![1.0, 1.0];
+        let r = vec![0.25, 0.5];
+        let bounds = lb_bounds(&[1.0, 1.0]);
+        let res =
+            bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, -10.0).unwrap();
+        assert_eq!(res.entering_col, 1, "fallback = last breakpoint");
+        assert_eq!(res.flips, vec![0]);
+        let step = implied_entering_step(&trow, &bounds, -10.0, &res);
+        assert!(
+            step > bounds[res.entering_col].upper,
+            "this fixture is the exhausted-capacity case by construction: \
+             step {step} must exceed upper {}",
+            bounds[res.entering_col].upper
+        );
     }
 
     /// Tie-breaking: two breakpoints within BFRT_TIE_TOL, prefer larger |pivot|.

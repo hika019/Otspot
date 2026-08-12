@@ -1,5 +1,5 @@
 use super::*;
-use crate::basis::LuBasis;
+use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem};
 use crate::simplex::dual_advanced::bound_flip::{
@@ -221,6 +221,86 @@ fn cold_dual_le_only_terminates_immediately() {
     assert_eq!(state.iterations, 1);
 }
 
+/// SENTINEL (task 10 / bug-hunt P1): `iterate` must NOT mint `Optimal` off
+/// a stale `state.x_b` that disagrees with a fresh `B^{-1} b_rhs`
+/// recomputation (accounting for at-upper contributions). Same construction
+/// as `dual::tests::dual_simplex_core_rejects_stale_x_b_inconsistent_with_
+/// b_rhs`, applied to the bounded core's own `iterate` loop.
+///
+/// LP: min 0·x s.t. x ≤ -1 (singleton Le row), 0 ≤ x ≤ 5 — genuinely
+/// infeasible (finite ub=5 forces the bounded/BFRT dispatch path).
+/// `build_bounded_standard_form` row-negates a Le row with negative RHS,
+/// flipping the slack's coefficient and `bsf.b` — so the true `x_B` is NOT
+/// simply `bsf.b`; it is independently recomputed below via
+/// `LuBasis::ftran_dense` on `bsf.initial_basis`, the same primitive
+/// `iterate` itself uses, invoked here directly by the test.
+///
+/// `state.x_b` is corrupted to `[0.0]` (standing in for eta-accumulated
+/// drift) — looks feasible to the leaving-row scan but disagrees with the
+/// oracle. `BoundedOutcome` has no `Stalled` variant, so the honest bail is
+/// `Timeout` (mirroring `finish_bounded`'s `BoundViolation` → `Timeout`
+/// precedent for this same enum).
+///
+/// No-op / revert-fail proof: reverting the fix (restoring the pre-fix
+/// immediate `Optimal` on `leaving_row.is_none()`) makes this test FAIL
+/// with `Optimal` instead of `Timeout` — confirmed manually against the
+/// pre-fix code during the bug-hunt session that produced this fix.
+#[test]
+fn iterate_rejects_stale_x_b_inconsistent_with_b_rhs() {
+    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let lp = LpProblem::new_general(
+        vec![0.0],
+        a,
+        vec![-1.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 5.0)],
+        None,
+    )
+    .unwrap();
+    let bsf = build_bounded_standard_form(&lp);
+    assert!(
+        bsf.upper_bounds.iter().any(|&u| u.is_finite()),
+        "test premise: a finite upper bound must be present to force bounded dispatch"
+    );
+
+    // Independent oracle: fresh LU solve of B^{-1} * bsf.b on the loop's own
+    // initial basis (matches whatever row-negation / slack-sign convention
+    // build_bounded_standard_form chose — not assumed, computed).
+    let mut oracle_x_b = bsf.b.clone();
+    let mut bm = LuBasis::new(&bsf.a, &bsf.initial_basis, 50).unwrap();
+    bm.ftran_dense(&mut oracle_x_b);
+    assert!(
+        oracle_x_b[0] < -PIVOT_TOL,
+        "oracle premise: true B^-1 bsf.b must be infeasible, got {:?}",
+        oracle_x_b
+    );
+
+    let mut state = BoundedDualState::cold(&bsf, &bsf.b);
+    // Corrupt x_b: stands in for eta-accumulated drift. Looks feasible but
+    // disagrees with the oracle B^-1 bsf.b computed above.
+    state.x_b[0] = 0.0;
+
+    let opts = SolverOptions::default();
+    let (outcome, _final_state) = iterate(
+        state,
+        &bsf,
+        &bsf.a,
+        &bsf.b,
+        &bsf.c,
+        &opts,
+        &bsf.upper_bounds,
+        &mut MostInfeasibleLeaving,
+    );
+
+    assert!(
+        matches!(outcome, BoundedOutcome::Timeout(_)),
+        "iterate must re-derive x_b from b_rhs and honestly bail Timeout \
+         (no Stalled variant exists for BoundedOutcome) when the fresh \
+         recomputation is infeasible; got {:?}",
+        outcome
+    );
+}
+
 /// Fixed variable (lb=ub ⇒ shifted upper=0) is handled by BFRT: the
 /// weight contribution is 0, so no flip-set inflation. Drives the
 /// "BFRT early skip" path. Outcome can be Optimal or Timeout depending
@@ -240,6 +320,7 @@ fn fixed_variable_does_not_break_iteration() {
         state,
         &bsf,
         &bsf.a,
+        &bsf.b,
         &bsf.c,
         &opts,
         &bsf.upper_bounds,
@@ -291,6 +372,7 @@ fn measure_iterate_residual(
         state,
         &bsf,
         &bsf.a,
+        &bsf.b,
         &bsf.c,
         &opts,
         &bsf.upper_bounds,
@@ -453,6 +535,7 @@ fn pivot_without_flips_skips_flip_delta_path() {
         initial,
         &bsf,
         &bsf.a,
+        &bsf.b,
         &bsf.c,
         &SolverOptions::default(),
         &bsf.upper_bounds,
@@ -485,6 +568,7 @@ fn rejected_eta_after_bfrt_flip_leaves_state_unchanged() {
         initial,
         &bsf,
         &bsf.a,
+        &bsf.b,
         &bsf.c,
         &opts,
         &bsf.upper_bounds,
@@ -562,6 +646,7 @@ fn ub_violation_returns_specialised_outcome() {
         state,
         &bsf,
         &bsf.a,
+        &bsf.b,
         &bsf.c,
         &opts,
         &bsf.upper_bounds,
@@ -1090,6 +1175,7 @@ fn phase1_dual_timeout_obj_matches_bounded_obj() {
             state,
             bsf,
             &bsf.a,
+            &bsf.b,
             &bsf.c,
             &opts,
             &bsf.upper_bounds,
@@ -1216,6 +1302,7 @@ fn dse_expired_deadline_returns_timeout_before_gamma_init() {
         state_fresh(),
         &bsf,
         &bsf.a,
+        &bsf.b,
         &bsf.c,
         &opts_live,
         &bsf.upper_bounds,
@@ -1236,6 +1323,7 @@ fn dse_expired_deadline_returns_timeout_before_gamma_init() {
         state_fresh(),
         &bsf,
         &bsf.a,
+        &bsf.b,
         &bsf.c,
         &opts_expired,
         &bsf.upper_bounds,
@@ -2733,6 +2821,7 @@ fn iterate_honours_max_iters_cap() {
         cold_state(&bsf),
         &bsf,
         &bsf.a,
+        &bsf.b,
         &bsf.c,
         &baseline_opts,
         &bsf.upper_bounds,
@@ -2757,6 +2846,7 @@ fn iterate_honours_max_iters_cap() {
         cold_state(&bsf),
         &bsf,
         &bsf.a,
+        &bsf.b,
         &bsf.c,
         &capped_opts,
         &bsf.upper_bounds,

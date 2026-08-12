@@ -245,6 +245,13 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static RAY_CANCEL_SIGNAL: std::sync::Arc<AtomicBool> =
         std::sync::Arc::new(AtomicBool::new(false));
+    // Plain counter (no cancel-trigger side effect): records whether the
+    // LU factorization + initial BTRAN setup ran at all, so a test can tell
+    // "the entry check returned before setup" apart from "setup ran, then
+    // iteration 0's own loop-top check caught a preset flag" -- both leave
+    // `RAY_LOOP_TOP_HITS` at 0 (its recorder only fires *after* that check
+    // passes), so it alone cannot distinguish them.
+    static RAY_SETUP_REACHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -292,6 +299,14 @@ pub(super) fn lp_unbounded_ray_verified(
     n_enter: usize,
     options: &SolverOptions,
 ) -> bool {
+    // Entry check (Codex PR #31 re-review): `LuBasis::new_timed` only
+    // consults `options.deadline`, not `cancel_flag`, and the BTRAN just
+    // below runs unconditionally either way. Without this, a cancel_flag
+    // preset before this function is ever called still pays for a full LU
+    // factorization + BTRAN before the loop's own checks get a chance.
+    if options.external_stop_requested() {
+        return false;
+    }
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
         Err(_) => return false,
@@ -305,6 +320,8 @@ pub(super) fn lp_unbounded_ray_verified(
     // y = B⁻ᵀ c_B
     let mut y: Vec<f64> = basis.iter().map(|&col| c[col]).collect();
     basis_mgr.btran_dense(&mut y);
+    #[cfg(test)]
+    RAY_SETUP_REACHED.with(|c| c.set(c.get() + 1));
 
     for q in 0..n_enter {
         // O(n_enter) FTRAN solves + O(nnz) ray checks: same cost profile as
@@ -377,6 +394,48 @@ pub(super) fn lp_unbounded_ray_verified(
 pub(super) fn basic_obj(c: &[f64], basis: &[usize], x_b: &[f64]) -> f64 {
     debug_assert_eq!(basis.len(), x_b.len());
     basis.iter().zip(x_b.iter()).map(|(&j, &v)| c[j] * v).sum()
+}
+
+/// Verify primal feasibility on a fresh exact `x_b = B^{-1} b_rhs` before
+/// minting the `Optimal` outcome for a dual-feasible candidate — mirrors
+/// `primal::core::revised_simplex_core`'s pre-Optimal guard. Eta-file drift
+/// accumulated across many incremental pivots can leave `x_b` reporting
+/// every basic variable as (barely) feasible when a numerically clean
+/// recomputation would show otherwise (bug-hunt P1). Shared by
+/// `dual::dual_simplex_core` and `dual_advanced::core::
+/// dual_simplex_core_advanced`, whose non-basic variables are always at
+/// their lower bound (no per-variable upper bound / at_upper accounting —
+/// that is `bounded_core::iterate`'s own concern).
+pub(super) fn mint_optimal_after_fresh_reverify(
+    a: &CscMatrix,
+    x_b: &mut [f64],
+    c: &[f64],
+    b_rhs: &[f64],
+    basis: &[usize],
+    basis_mgr: &mut LuBasis,
+    m: usize,
+    options: &SolverOptions,
+) -> SimplexOutcome {
+    basis_mgr.force_refactor_timed(a, basis, options.deadline);
+    if basis_mgr.refactor_failed {
+        if basis_mgr.singular_basis {
+            return SimplexOutcome::SingularBasis;
+        }
+        return SimplexOutcome::Timeout(basic_obj(c, basis, x_b));
+    }
+    x_b.copy_from_slice(b_rhs);
+    basis_mgr.ftran_dense(x_b);
+    for v in x_b.iter_mut() {
+        if v.abs() < options.clamp_tol {
+            *v = 0.0;
+        }
+    }
+    let obj = basic_obj(c, basis, x_b);
+    let min_basic = x_b.iter().copied().fold(f64::INFINITY, f64::min);
+    if min_basic < -options.primal_tol {
+        return SimplexOutcome::Stalled(obj);
+    }
+    SimplexOutcome::Optimal(obj, compute_dual_vars(c, basis_mgr, basis, m))
 }
 
 /// Anti-cycling: enter Bland mode after K = `(NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN)`
@@ -1071,6 +1130,55 @@ mod tests {
             "cancel_flag flips as a side effect of ray_ok becoming true for \
              column 1's own pre-accept checkpoint -- must prevent accepting \
              this otherwise-valid ray"
+        );
+    }
+
+    /// Companion to the two checkpoint sentinels above, for the entry check
+    /// (Codex PR #31 re-review): `LuBasis::new_timed` only consults
+    /// `options.deadline`, not `cancel_flag`, so a preset `cancel_flag` (no
+    /// deadline set) previously still paid for a full LU factorization and
+    /// the `y = B⁻ᵀc_B` BTRAN before the loop's own checks got a chance.
+    ///
+    /// `RAY_SETUP_REACHED`, not `RAY_LOOP_TOP_HITS`, is the discriminator:
+    /// iteration 0's own loop-top check *also* catches a preset flag (this
+    /// fixture's single non-basic column is q=0), so `RAY_LOOP_TOP_HITS`
+    /// stays 0 whether the entry check runs or not -- it cannot tell "entry
+    /// check returned early" apart from "setup ran, then iteration 0 caught
+    /// it anyway". `RAY_SETUP_REACHED` only increments *after* the LU
+    /// factorization and initial BTRAN both complete, so it is 0 only when
+    /// the entry check actually prevented that setup from running at all.
+    ///
+    /// Sentinel: reverting the new entry check makes `verified` come back
+    /// `true` (this fixture's column 1 is a genuine ray) and
+    /// `RAY_SETUP_REACHED` read 1, not 0.
+    #[test]
+    fn lp_unbounded_ray_verified_entry_check_skips_lu_setup_when_preset() {
+        use std::sync::Arc;
+
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, -1.0], 1, 2).unwrap();
+        let c = vec![0.0_f64, -1.0];
+
+        RAY_SETUP_REACHED.with(|c| c.set(0));
+
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::new(AtomicBool::new(true))),
+            ..SolverOptions::default()
+        };
+        let verified = lp_unbounded_ray_verified(&a, &[0], &c, 1, 2, 2, &opts);
+
+        let setup_reached = RAY_SETUP_REACHED.with(std::cell::Cell::get);
+        assert_eq!(
+            setup_reached, 0,
+            "preset cancel_flag=true must return from the entry check before \
+             LuBasis::new_timed/btran_dense ever run -- `RAY_SETUP_REACHED` is \
+             the discriminator here, not `RAY_LOOP_TOP_HITS`: iteration 0's \
+             own loop-top check *also* catches a preset flag and would leave \
+             RAY_LOOP_TOP_HITS at 0 even with the entry check reverted (setup \
+             would have run to completion first), got {setup_reached}"
+        );
+        assert!(
+            !verified,
+            "preset cancel_flag=true must reject this otherwise-genuine ray"
         );
     }
 }

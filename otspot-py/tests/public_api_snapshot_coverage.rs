@@ -42,13 +42,62 @@ const CORE_STATUS_TOLERANCE_SNAPSHOT: &str =
     include_str!("../otspot_core_status_tolerance_snapshot.txt");
 const MANIFEST_JSON: &str = include_str!("../api_manifest.json");
 
-/// Pure derive/trait-impl boilerplate (`Debug`'s `fmt`, `PartialEq`'s
-/// `eq`/`ne`, `Clone`'s `clone`, `Hash`'s `hash`, `Index`'s `index`):
-/// present on essentially every type that derives the trait, never
-/// individually mentioned in the manifest (nor should it be -- the *type*
-/// deriving it is what matters for API coverage, already checked
-/// separately). Unconditionally treated as covered, no search at all.
-const UNCONDITIONAL_SKIP_NAMES: &[&str] = &["fmt", "eq", "ne", "clone", "hash", "index"];
+/// Boilerplate leaf name(s) a `impl <trait> for Owner` line licenses skipping
+/// on that *specific* `Owner` -- `Debug`/`Display` -> `fmt`, `PartialEq` ->
+/// `eq`/`ne`, `Clone` -> `clone`, `Hash` -> `hash`, `Index` -> `index`.
+/// Returns `&[]` for any other trait (nothing to skip).
+///
+/// Used by `trait_boilerplate_members` instead of a blanket "skip this leaf
+/// name on any owner" list: a bare-name skip would also silently cover a
+/// genuine future API addition sharing one of these names (e.g. a real
+/// `Model::index` method or `Variable::index` field) with no manifest entry
+/// or `out_of_scope` note, on a type that never actually implements the
+/// corresponding trait (Codex PR #31 review).
+fn boilerplate_leaves_for_trait(trait_path: &str) -> &'static [&'static str] {
+    match trait_path {
+        "core::fmt::Debug" | "core::fmt::Display" => &["fmt"],
+        "core::cmp::PartialEq" => &["eq", "ne"],
+        "core::clone::Clone" => &["clone"],
+        "core::hash::Hash" => &["hash"],
+        _ if trait_path.starts_with("core::ops::index::Index")
+            || trait_path.starts_with("core::ops::Index") =>
+        {
+            &["index"]
+        }
+        _ => &[],
+    }
+}
+
+/// Scans `snapshot` for `impl <TraitPath>[<Generics>] for <Owner>` lines and
+/// returns the set of (owner, boilerplate leaf) pairs those lines actually
+/// license -- e.g. `impl core::ops::index::Index<Variable> for ModelResult`
+/// yields `("ModelResult", "index")`. Only pairs backed by a real impl line
+/// in *this* snapshot are ever treated as boilerplate; a same-named member on
+/// any other owner still needs its own manifest/`out_of_scope` coverage.
+fn trait_boilerplate_members(snapshot: &str) -> HashSet<(String, String)> {
+    let mut members = HashSet::new();
+    for line in snapshot.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("impl ") else {
+            continue;
+        };
+        let Some((trait_part, owner_part)) = rest.split_once(" for ") else {
+            continue;
+        };
+        let trait_base = trait_part.split('<').next().unwrap_or(trait_part).trim();
+        let leaves = boilerplate_leaves_for_trait(trait_base);
+        if leaves.is_empty() {
+            continue;
+        }
+        let Some(owner) = last_path_segment(owner_part.trim()) else {
+            continue;
+        };
+        for &leaf in leaves {
+            members.insert((owner.to_string(), leaf.to_string()));
+        }
+    }
+    members
+}
 
 /// Generic Rust operator-trait method names: legitimately described once in
 /// manifest prose per class rather than spelled out per concrete `Owner::leaf`
@@ -369,9 +418,6 @@ impl ManifestIndex {
                 self.owner_is_out_of_scope_type(owner)
             }
             Subject::Member { owner, leaf } => {
-                if UNCONDITIONAL_SKIP_NAMES.contains(leaf) {
-                    return true;
-                }
                 if GENERIC_METHOD_NAMES.contains(leaf) {
                     return word_present_case_insensitive(&self.lower_text, leaf);
                 }
@@ -401,6 +447,7 @@ fn uncovered_identifiers(snapshot: &str, index: &ManifestIndex) -> Vec<String> {
         .lines()
         .filter_map(|l| type_name_from_declaration(l.trim()))
         .collect();
+    let boilerplate = trait_boilerplate_members(snapshot);
 
     let mut uncovered = Vec::new();
     for line in snapshot.lines() {
@@ -408,6 +455,11 @@ fn uncovered_identifiers(snapshot: &str, index: &ManifestIndex) -> Vec<String> {
         let Some(subject) = subject else {
             continue;
         };
+        if let Subject::Member { owner, leaf } = &subject {
+            if boilerplate.contains(&(owner.to_string(), leaf.to_string())) {
+                continue;
+            }
+        }
         if !index.covers(&subject) {
             uncovered.push(describe(&subject));
         }
@@ -677,5 +729,52 @@ fn type_coverage_is_scoped_to_out_of_scope_not_whole_manifest() {
         "a type name that only appears incidentally in an unrelated manifest \
          field (here, model_error_exceptions._note) must NOT be covered -- the \
          pre-fix whole-manifest word search would have wrongly covered it"
+    );
+}
+
+/// Sentinel for the trait-boilerplate scoping fix: `trait_boilerplate_members`
+/// must license skipping a leaf name (e.g. `index`) only on the specific
+/// owner(s) an actual `impl ... for Owner` line in the snapshot backs, not on
+/// every owner sharing that leaf name. `ModelResult` genuinely has
+/// `impl core::ops::index::Index<Variable> for otspot_model::ModelResult` in
+/// `MODEL_SNAPSHOT`, so `ModelResult::index` is boilerplate; `Variable` has no
+/// such impl anywhere in the snapshot, so an injected `Variable::index`
+/// (same leaf name, unrelated owner) must NOT be silently skipped.
+#[test]
+fn trait_boilerplate_members_scoped_to_owner_with_matching_impl() {
+    let boilerplate = trait_boilerplate_members(MODEL_SNAPSHOT);
+    assert!(
+        boilerplate.contains(&("ModelResult".to_string(), "index".to_string())),
+        "ModelResult::index must be recognized as Index-trait boilerplate \
+         (a real impl line backs it in MODEL_SNAPSHOT)"
+    );
+    assert!(
+        !boilerplate.contains(&("Variable".to_string(), "index".to_string())),
+        "Variable has no Index impl in MODEL_SNAPSHOT, so Variable::index must \
+         NOT be treated as boilerplate merely because it shares the leaf name \
+         \"index\" with ModelResult's real Index impl"
+    );
+}
+
+/// End-to-end companion: an injected `Variable::index` member (no matching
+/// `impl ... Index ... for Variable` anywhere in the snapshot) must be
+/// reported as uncovered. Sentinel: reverting `uncovered_identifiers`'s
+/// per-owner `trait_boilerplate` check back to the blanket
+/// `UNCONDITIONAL_SKIP_NAMES.contains(leaf)` check makes this assert an
+/// empty `Vec` instead (every member named `index`, `fmt`, `eq`, `ne`,
+/// `clone`, or `hash` on *any* type would be silently skipped).
+#[test]
+fn uncovered_identifiers_flags_boilerplate_leaf_name_on_unrelated_owner() {
+    let index = ManifestIndex::parse(MANIFEST_JSON);
+    let injected = format!(
+        "{MODEL_SNAPSHOT}\npub fn otspot_model::variable::Variable::index(&self, usize) -> f64\n"
+    );
+
+    let uncovered = uncovered_identifiers(&injected, &index);
+
+    assert!(
+        uncovered.contains(&"member Variable::index".to_string()),
+        "a member named `index` on a type with no matching Index-trait impl \
+         line in this snapshot must be flagged as uncovered, got: {uncovered:?}"
     );
 }

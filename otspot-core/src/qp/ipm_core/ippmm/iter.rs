@@ -6,12 +6,13 @@ use super::factorize::{
 };
 use super::init::build_initial_point;
 use super::state::{
-    alpha_stall_eps_for, PmmState, ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N,
-    DELTA_INIT, DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL, GONDZIO_ALPHA_TRIGGER,
-    INFEAS_DETECTOR_DISTRUST_SCORE, MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD,
-    PF_FAR_FROM_TARGET_RATIO, PF_HISTORY_LEN, PF_STUCK_RATIO, PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE,
-    PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP,
-    RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
+    alpha_stall_eps_for, matrix_reg_floor_for_lp, pf_stuck_should_lower_reg_limit, PmmState,
+    ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N, DELTA_INIT,
+    DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL, GONDZIO_ALPHA_TRIGGER,
+    INFEAS_DETECTOR_DISTRUST_SCORE, MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PF_HISTORY_LEN,
+    PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP,
+    REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
+    RESIDUAL_STALL_WINDOW, RHO_INIT, SIGMA_MAX_FALLBACK, STEP_REL_CAP,
 };
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
@@ -27,15 +28,82 @@ use crate::qp::ipm_core::solver_loop::{
 };
 use crate::qp::problem::QpProblem;
 use crate::tolerances::any_nonfinite;
+use faer::Par;
 use otspot_num::linalg::kkt_solver::{inexact_eta_for_eps, KktConfig};
-use otspot_num::linalg::parallelism::solver_par_from_threads;
+use otspot_num::linalg::parallelism::with_solver_pool;
 use otspot_num::linalg::timeout::TimeoutCtx;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only cancel injection for the Infeasible/Unbounded certificate
+    /// commit point below: counts calls to `test_record_infeas_commit`
+    /// (invoked right before the consecutive-fire detector's conclusion is
+    /// accepted); once the count reaches `CANCEL_AFTER_INFEAS_COMMIT`, flips
+    /// `CANCEL_SIGNAL` -- the same shared `AtomicBool` a test threads through
+    /// `SolverOptions::cancel_flag` -- so `timeout_ctx.should_stop()`
+    /// observes a freshly-fired cancellation exactly at the commit point,
+    /// without racing wall-clock time. Mirrors
+    /// `presolve::qp_transforms::driver`'s
+    /// `STEPS_EXECUTED_TOTAL`/`CANCEL_AFTER_STEPS`/`CANCEL_SIGNAL` pattern.
+    /// `pub(super)` so the sibling `ippmm::tests` module can drive it.
+    pub(super) static INFEAS_COMMIT_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    pub(super) static CANCEL_AFTER_INFEAS_COMMIT: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    pub(super) static CANCEL_SIGNAL: std::sync::Arc<std::sync::atomic::AtomicBool> =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+}
+
+#[cfg(test)]
+fn test_record_infeas_commit() {
+    let count = INFEAS_COMMIT_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if CANCEL_AFTER_INFEAS_COMMIT.with(std::cell::Cell::get) == Some(count) {
+        CANCEL_SIGNAL.with(|flag| flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    }
+}
+
+/// Consecutive-fire commit stop check, factored out so the call
+/// site is a single condition instead of a `#[cfg(test)]` hook line plus the
+/// real check.
+fn should_stop_before_infeas_commit(timeout_ctx: &TimeoutCtx) -> bool {
+    #[cfg(test)]
+    test_record_infeas_commit();
+    timeout_ctx.should_stop()
+}
+
 /// IP-PMM 内部ソルバー (Ruiz scaling 後の problem を受け取る)。
+///
+/// `SolverOptions::threads` 専用の rayon プールへ solve 全体を閉じ込め、その
+/// プールに対応する `Par` を本体へ渡す。faer へ `Par::Rayon(threads)` を渡す
+/// だけでは上限にならない (`otspot_num::linalg::parallelism` のモジュール doc
+/// に実測値) ため、ここが QP/conic 経路のスレッド上限を成立させる唯一の点。
+/// `threads = 1` (既定) はプールを作らずインライン + `Par::Seq` で走るので、
+/// 従来の挙動と完全に同一。
 pub(crate) fn solve_ippmm_inner(
     problem: &QpProblem,
     options: &SolverOptions,
     eps_orig: f64,
+) -> SolverResult {
+    with_solver_pool(options.threads, |par| {
+        solve_ippmm_inner_confined(problem, options, eps_orig, par)
+    })
+}
+
+/// Certificate-acceptance contract: `check_infeasible_or_unbounded`'s
+/// consecutive-fire detector is a Newton-direction Farkas-like heuristic, not
+/// a hard proof. If an external stop (cancel/deadline) is observed at the
+/// instant its conclusion (Infeasible/Unbounded, or the best-so-far Stalled
+/// downgrade that doubts it) would be accepted, `Timeout` wins -- discarding
+/// an unverified heuristic conclusion in favor of the caller's stop request
+/// is the conservative choice.
+fn solve_ippmm_inner_confined(
+    problem: &QpProblem,
+    options: &SolverOptions,
+    eps_orig: f64,
+    par: Par,
 ) -> SolverResult {
     let n = problem.num_vars;
     let timeout_ctx = TimeoutCtx::new(
@@ -43,7 +111,6 @@ pub(crate) fn solve_ippmm_inner(
         options.timeout_secs,
         options.cancel_flag.clone(),
     );
-    let par = solver_par_from_threads(options.threads);
 
     if timeout_ctx.should_stop() {
         return timeout_result(n);
@@ -82,8 +149,11 @@ pub(crate) fn solve_ippmm_inner(
 
     let (rho_init, delta_init) = match warm_mu {
         // warm start: μ 規模に揃えた rho/delta で出発し proximal pull を最小化。
+        // floor は REG_LIMIT_MIN (adaptive reg_limit が最終的に到達する下限) —
+        // 固定 delta_min=1e-8 は tight eps でこの初期値自体が過大な床になる
+        // (bug-frontier 実測: LISWET7 系, `matrix_reg_floor_for_lp` の doc 参照)。
         Some(mu) => {
-            let v = mu.max(options.ipm.delta_min);
+            let v = mu.max(REG_LIMIT_MIN);
             (v, v)
         }
         None => (RHO_INIT, DELTA_INIT),
@@ -102,7 +172,8 @@ pub(crate) fn solve_ippmm_inner(
     let inertia_correction = crate::qp::ipm_core::kkt::compute_inertia_correction(&problem.q);
     let q_is_indefinite = inertia_correction > 0.0;
 
-    let initial_reg_limit = if problem.q.values().iter().all(|&v| v == 0.0) {
+    let is_lp = problem.q.values().iter().all(|&v| v == 0.0);
+    let initial_reg_limit = if is_lp {
         REG_LIMIT_INIT_LP
     } else {
         REG_LIMIT_INIT_QP
@@ -111,6 +182,8 @@ pub(crate) fn solve_ippmm_inner(
     let c_max = problem.c.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
     let allow_adaptive_reg = c_max < ADAPTIVE_REG_C_MAX_THRESH;
     let mut reg_limit = initial_reg_limit;
+    // KKT 行列正則化の絶対下限 (reg_limit の適応引下げとは独立)。
+    let matrix_reg_floor = matrix_reg_floor_for_lp(is_lp);
 
     // pf-stagnation trigger (adaptive reg_limit の追加経路、c≠0 問題向け):
     // pf が最近の N 反復で実質改善せず (ratio > THRESHOLD) かつ pf が target から
@@ -280,13 +353,12 @@ pub(crate) fn solve_ippmm_inner(
             r_p_pmm[i] -= delta_prox * (y[i] - pmm.y_ref[i]);
         }
 
-        // Σ = diag(s_i / y_i) (等式行は0)
-        let sigma_max = 1.0 / options.ipm.delta_min.max(MU_ZERO_THRESHOLD);
-        let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, sigma_max);
+        // KKT 行列側の正則化。床は LP 経路のみ (`matrix_reg_floor_for_lp` の doc)。
+        let rho_matrix = pmm.rho.max(matrix_reg_floor);
+        let delta_matrix = pmm.delta.max(matrix_reg_floor);
 
-        // 正則化は PMM 駆動。mu 依存 floor は使わない。
-        let rho_matrix = pmm.rho.max(options.ipm.delta_min);
-        let delta_matrix = pmm.delta.max(options.ipm.delta_min);
+        // Σ = diag(s_i / y_i) (等式行は0)
+        let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, SIGMA_MAX_FALLBACK);
 
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
@@ -499,6 +571,11 @@ pub(crate) fn solve_ippmm_inner(
             consecutive_infeas_triggers += 1;
             // N 連続 fire まで判定保留: PMM floor の false-positive に adaptive reg の猶予を与える。
             if consecutive_infeas_triggers >= MIN_CONSECUTIVE_INFEAS {
+                // 証明受理直前の stop check: 関数 doc の contract 参照。
+                if should_stop_before_infeas_commit(&timeout_ctx) {
+                    status = Some(SolveStatus::Timeout);
+                    break;
+                }
                 // best が quality 圏内なら検出器を信用せず best-so-far を Stalled で
                 // 返す (Farkas-like 近似の false-positive 対策)。Optimal 昇格はしない:
                 // 品質判定は finalize の prove_optimal 一本。
@@ -621,7 +698,9 @@ pub(crate) fn solve_ippmm_inner(
             pf_history.remove(0);
         }
 
-        // Adaptive reg_limit: prox が df を支配 (c≈0) または pf が窓内停滞 + target から遠い場合、floor を下げる。
+        // Adaptive reg_limit: prox が df を支配 (c≈0)、または pf-stagnation
+        // (`pf_stuck_should_lower_reg_limit`, state.rs 参照) の場合、floor を
+        // 下げて IPM が boundary を探索できるようにする。
         if (pmm.rho - reg_limit).abs() < reg_limit * 0.01 && reg_limit > REG_LIMIT_MIN {
             let mut should_lower = false;
             if allow_adaptive_reg {
@@ -636,13 +715,9 @@ pub(crate) fn solve_ippmm_inner(
             }
             if !should_lower
                 && pf_history.len() == PF_HISTORY_LEN
-                && pf_history[0] > 0.0
-                && nr_p > eps_orig * PF_FAR_FROM_TARGET_RATIO
+                && pf_stuck_should_lower_reg_limit(nr_p, pf_history[0], eps_orig)
             {
-                let ratio = nr_p / pf_history[0];
-                if ratio > PF_STUCK_RATIO {
-                    should_lower = true;
-                }
+                should_lower = true;
             }
             if should_lower {
                 reg_limit = (reg_limit * REG_LIMIT_STEP).max(REG_LIMIT_MIN);
@@ -682,9 +757,63 @@ pub(crate) fn solve_ippmm_inner(
         pmm.prev_nr_d = nr_d;
     }
 
-    if status.is_none() {
-        iterations_consumed = options.ipm.max_iter;
-    }
+    finalize_ippmm_result(
+        problem,
+        &b_ext,
+        m_orig,
+        q_is_indefinite,
+        options.ipm.max_iter,
+        iterations_consumed,
+        status,
+        final_residuals,
+        best_score,
+        best_residuals,
+        best_rel_gap,
+        x,
+        y,
+        s,
+        &best_x,
+        &best_y,
+        &best_s,
+        total_factorize_ns,
+        total_solve_ns,
+        total_reg_retries,
+        any_iterative,
+    )
+}
+
+/// ループ終端後の後処理: 反復予算枯渇の status 確定 (MaxIterations)、Timeout/
+/// MaxIterations 到達時の best-so-far への上書き、目的値・双対解の復元、不定 Q の
+/// Optimal→LocallyOptimal 降格、`SolverResult` の組み立てを行う。
+#[allow(clippy::too_many_arguments)]
+fn finalize_ippmm_result(
+    problem: &QpProblem,
+    b_ext: &[f64],
+    m_orig: usize,
+    q_is_indefinite: bool,
+    max_iter: usize,
+    iterations_consumed: usize,
+    status: Option<SolveStatus>,
+    mut final_residuals: Option<(f64, f64, f64)>,
+    best_score: f64,
+    best_residuals: (f64, f64, f64),
+    best_rel_gap: f64,
+    mut x: Vec<f64>,
+    mut y: Vec<f64>,
+    mut s: Vec<f64>,
+    best_x: &[f64],
+    best_y: &[f64],
+    best_s: &[f64],
+    total_factorize_ns: u128,
+    total_solve_ns: u128,
+    total_reg_retries: u32,
+    any_iterative: bool,
+) -> SolverResult {
+    let iterations_consumed = if status.is_none() {
+        max_iter
+    } else {
+        iterations_consumed
+    };
 
     // break なしのループ終端 = 反復予算枯渇。Timeout に丸めず MaxIterations で報告する。
     let status = status.unwrap_or(SolveStatus::MaxIterations);
@@ -692,7 +821,7 @@ pub(crate) fn solve_ippmm_inner(
     // 素の Timeout 経路は発散 x をそのまま返してしまうので best-so-far で上書き。
     if matches!(status, SolveStatus::Timeout | SolveStatus::MaxIterations) && best_score.is_finite()
     {
-        let norm_b_bs = norm_inf(&b_ext).max(1.0);
+        let norm_b_bs = norm_inf(b_ext).max(1.0);
         let norm_c_bs = norm_inf(&problem.c).max(1.0);
         let current_score = match final_residuals {
             Some((nr_p, nr_d, mu)) if nr_p.is_finite() && nr_d.is_finite() && mu.is_finite() => {
@@ -701,13 +830,14 @@ pub(crate) fn solve_ippmm_inner(
             _ => f64::INFINITY,
         };
         if best_score < current_score {
-            x.copy_from_slice(&best_x);
-            y.copy_from_slice(&best_y);
-            s.copy_from_slice(&best_s);
+            x.copy_from_slice(best_x);
+            y.copy_from_slice(best_y);
+            s.copy_from_slice(best_s);
             final_residuals = Some(best_residuals);
         }
     }
 
+    let mut qx = vec![0.0f64; problem.num_vars];
     spmv(&problem.q, &x, &mut qx);
     let objective = 0.5
         * qx.iter()

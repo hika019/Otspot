@@ -130,10 +130,19 @@ impl Model {
         Ok(self)
     }
 
-    /// 並列 thread 上限を設定する。0 は 1 に補正、default は SolverOptions の 1。
+    /// 並列 thread 上限を設定する。範囲は `otspot_core` の `SolverOptions` と
+    /// 同じ `1 ..= MAX_THREADS`。範囲外 (`0` または `MAX_THREADS` 超) は
+    /// `set_timeout` と同じく不正なユーザ入力として記録し、`solve()` 前に
+    /// `ModelError::InvalidInput` を返す (solve 内部の汎用エラーに落とさない)。
     /// LP / QP / 非凸 multistart すべてに影響する共通設定。
     pub fn set_threads(&mut self, n: usize) -> &mut Self {
-        self.threads = Some(n.max(1));
+        match validate_threads(n) {
+            Ok(()) => {
+                self.threads = Some(n);
+                self.invalid_inputs.remove("threads");
+            }
+            Err(err) => self.record_input_error("threads", err),
+        }
         self
     }
 
@@ -1906,6 +1915,10 @@ fn classify_status_error(status: SolveStatus) -> Option<ModelError> {
         SolveStatus::Infeasible => Some(ModelError::SolveError(SolveError::Infeasible)),
         SolveStatus::Unbounded => Some(ModelError::SolveError(SolveError::Unbounded)),
         SolveStatus::NumericalError => Some(ModelError::SolveError(SolveError::NumericalError)),
+        // OS リソース確保の失敗。数値的破綻 (`NumericalError`) とは区別する。
+        SolveStatus::ResourceExhausted => {
+            Some(ModelError::SolveError(SolveError::ResourceExhausted))
+        }
         // Stalled は「解品質の主張なし」の内部打ち切り。診断 iterate は core の
         // SolverResult に残るが、Model API では有効解なしとして一律 Err にする。
         SolveStatus::Stalled => Some(ModelError::SolveError(SolveError::Stalled)),
@@ -1996,6 +2009,22 @@ fn validate_timeout(secs: f64) -> Result<(), ModelError> {
     }
 }
 
+/// Reject a thread budget outside `1 ..= MAX_THREADS` at the `Model` boundary,
+/// mirroring `otspot_core::options::SolverOptions::validate`. This keeps an
+/// out-of-range value from reaching the solver, where it would surface as a
+/// generic `NumericalError` (MILP `std::thread::scope` spawn) or a silent
+/// clamp, instead of an identifiable invalid *user input*.
+fn validate_threads(n: usize) -> Result<(), ModelError> {
+    if (1..=otspot_core::options::MAX_THREADS).contains(&n) {
+        Ok(())
+    } else {
+        Err(ModelError::InvalidInput(format!(
+            "threads must be >= 1 and <= MAX_THREADS ({}), got {n}",
+            otspot_core::options::MAX_THREADS
+        )))
+    }
+}
+
 /// Map a `CscMatrix::from_triplets` failure on a user-coefficient matrix to a
 /// `ModelError`. Non-finite coefficients are user input → `InvalidInput`
 /// (consistent with the LP/QP constructors); structural failures stay `Internal`.
@@ -2079,6 +2108,7 @@ impl SolutionProof {
             SolveStatus::Infeasible
             | SolveStatus::Unbounded
             | SolveStatus::NumericalError
+            | SolveStatus::ResourceExhausted
             | SolveStatus::Stalled
             | SolveStatus::NonConvex(_)
             | SolveStatus::NotSupported(_) => {
@@ -2242,6 +2272,10 @@ pub enum SolveError {
     Stalled,
     /// Solver aborted due to numerical breakdown (no usable solution).
     NumericalError,
+    /// Solver could not acquire the OS resources (threads, memory) needed to
+    /// run. Distinct from `NumericalError`: nothing failed numerically, the
+    /// environment simply could not start the solve.
+    ResourceExhausted,
 }
 
 impl fmt::Display for SolveError {
@@ -2256,6 +2290,9 @@ impl fmt::Display for SolveError {
                 write!(f, "Solver stalled before reaching the requested accuracy")
             }
             SolveError::NumericalError => write!(f, "Numerical breakdown during solve"),
+            SolveError::ResourceExhausted => {
+                write!(f, "Insufficient OS resources to run the solve")
+            }
         }
     }
 }
@@ -2963,6 +3000,36 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Sentinel: OS リソース枯渇 (ResourceExhausted) は数値破綻 (NumericalError)
+    // とは別の SolveError へ写り、利用者向け文言も "Numerical breakdown" に
+    // ならないこと。classify_status_error を NumericalError へ寄せ戻すと FAIL。
+    // -----------------------------------------------------------------------
+    #[test]
+    fn resource_exhausted_maps_to_distinct_error_and_message() {
+        let err = classify_status_error(SolveStatus::ResourceExhausted)
+            .expect("ResourceExhausted must map to Some");
+        assert!(
+            matches!(err, ModelError::SolveError(SolveError::ResourceExhausted)),
+            "ResourceExhausted status must yield SolveError::ResourceExhausted, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            !msg.to_ascii_lowercase().contains("numerical"),
+            "resource-exhaustion message must not read as a numerical breakdown: {msg:?}"
+        );
+        assert!(
+            msg.to_ascii_lowercase().contains("resource"),
+            "resource-exhaustion message must name the real cause: {msg:?}"
+        );
+        // 数値破綻とは別物であること (取り違え防止)。
+        assert_ne!(
+            SolveError::ResourceExhausted,
+            SolveError::NumericalError,
+            "ResourceExhausted must be a distinct SolveError variant"
+        );
+    }
+
     #[test]
     fn qp_dual_length_mismatch_is_internal_error_not_prefix_truncation() {
         assert_eq!(
@@ -3485,6 +3552,50 @@ mod tests {
                 matches!(err, ModelError::InvalidInput(_)),
                 "[{label}] expected InvalidInput, got {err:?}"
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // set_threads range validation (1 ..= MAX_THREADS).
+    // Sentinel: no-op'ing `validate_threads` (accept any n) makes the
+    // out-of-range cases below reach solve() as a generic error / clamp
+    // instead of InvalidInput → FAILs.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn set_threads_out_of_range_defers_invalid_input() {
+        let max = otspot_core::options::MAX_THREADS;
+        let cases: &[(&str, usize)] = &[
+            ("zero", 0),
+            ("over_max", max + 1),
+            ("usize_max", usize::MAX),
+        ];
+        for &(label, n) in cases {
+            let mut model = Model::new(label);
+            let x = model.add_var("x", 0.0, 1.0);
+            model.minimize(x);
+            model.set_threads(n);
+            let err = model
+                .solve()
+                .expect_err(&format!("[{label}] expected Err for out-of-range threads"));
+            assert!(
+                matches!(err, ModelError::InvalidInput(_)),
+                "[{label}] expected InvalidInput, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_threads_in_range_is_accepted() {
+        let max = otspot_core::options::MAX_THREADS;
+        for n in [1usize, 2, 8, max] {
+            let mut model = Model::new("ok");
+            let x = model.add_var("x", 0.0, 1.0);
+            model.minimize(x);
+            model.set_threads(n);
+            // A valid budget must not leave a lingering input error behind.
+            model
+                .solve()
+                .unwrap_or_else(|e| panic!("threads={n} must be accepted, got {e:?}"));
         }
     }
 

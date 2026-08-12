@@ -233,8 +233,20 @@ impl PyModel {
                     // returns -- `model` stays mutably borrowed by it until
                     // then, and `std::thread::scope` would block here on
                     // its own implicit join anyway; joining explicitly just
-                    // makes that wait visible at the call site.
-                    let _ = handle.join();
+                    // makes that wait visible at the call site. Wrapped in
+                    // `py.detach`: cancellation is cooperative, checked at
+                    // the same per-iteration cadence as the wall-clock
+                    // deadline (see the class doc comment above), so this
+                    // join can itself take as long as the worker's next
+                    // check-point is away -- without releasing the GIL here
+                    // too, every other Python thread stays frozen for that
+                    // whole stretch, breaking the same "GIL released for
+                    // the duration of solve()" contract the poll loop above
+                    // exists to uphold (Codex PR #31 review; lead-confirmed
+                    // by direct read).
+                    py.detach(|| {
+                        let _ = handle.join();
+                    });
                     return Err(sig_err);
                 }
             }

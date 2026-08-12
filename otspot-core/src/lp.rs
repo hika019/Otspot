@@ -172,10 +172,14 @@ mod tests {
     /// loop finished in well under a second -- this size was chosen by
     /// actually reverting the fix and increasing n until the regression
     /// reproduced under `cargo test`'s own profile, not just under `--profile
-    /// dev`. Measured: reverting `options.external_stop_requested()` from
-    /// `farkas_infeasibility_certified`'s loop makes this same setup take
-    /// 1.9s (opt-level=3); with the fix, 0.05s. Sentinel confirmed by
-    /// reverting and re-running.
+    /// dev`. Measured (opt-level=3, this machine): 0.05s fixed vs 1.9s
+    /// reverted. Sentinel confirmed by reverting and re-running.
+    ///
+    /// 1.5s bound, not 0.05s (Codex PR #31 audit P3): a >30x margin, chosen
+    /// over a counter-based rewrite because the preset-flag setup is already
+    /// deterministic (no background thread to race) and >30x dwarfs the
+    /// contention slowdown actually seen on this project's CI (~9% overshoot
+    /// on a since-fixed, near-zero-margin `qp_phase2.rs` test).
     #[test]
     fn farkas_certificate_probe_loop_honors_cancel_flag_preset() {
         use std::sync::{atomic::AtomicBool, Arc};
@@ -197,10 +201,10 @@ mod tests {
             "cancel_flag=true must produce Timeout"
         );
         assert!(
-            elapsed < Duration::from_secs(1),
+            elapsed < Duration::from_millis(1500),
             "preset cancel_flag=true took {elapsed:?} to stop the solve -- \
              Farkas certificate probe loop is not honoring cancel_flag \
-             (pre-fix measured 2.9-4.0s in a dev-profile build here)"
+             (pre-fix measured 1.9s, opt-level=3, this machine)"
         );
     }
 

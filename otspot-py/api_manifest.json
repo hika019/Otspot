@@ -10,8 +10,8 @@
     { "rust": "otspot_model::ModelResult", "python": "otspot.ModelResult" },
     { "rust": "otspot_model::SolutionProof", "python": "otspot.SolutionProof" },
     { "rust": "otspot_model::SolveError", "python": "otspot.SolveError" },
-    { "rust": "otspot_core::problem::SolveStatus", "python": "otspot.SolveStatus" },
-    { "rust": "otspot_core::options::Tolerance", "python": "otspot.Tolerance" }
+    { "rust": "otspot_core::problem::SolveStatus", "python": "otspot.SolveStatus", "note": "hashable (see baseline_shadowed_dunders.SolveStatus's __hash__) -- unlike Tolerance below, no float payload to break the a==b => hash(a)==hash(b) contract" },
+    { "rust": "otspot_core::options::Tolerance", "python": "otspot.Tolerance", "note": "NOT hashable for any variant (Custom(f64) has no total-order-consistent hash, and PyO3 hash support is whole-type not per-variant); see otspot.pyi's Tolerance docstring" }
   ],
   "model_error_exceptions": {
     "_note": "otspot_model::ModelError has no Python type of its own: each variant maps to a distinct exception class (Python has no Result type), all subclassing otspot.OtspotError. ModelError::NotSupported has no entry here (see out_of_scope): it is unreachable from any bound Python call.",
@@ -81,10 +81,10 @@
   "variants": {
     "VarKind": ["Continuous", "Integer", "Binary"],
     "SolutionProof": ["GlobalOptimal", "LocalOptimal", "FeasibleUnproven"],
-    "SolveError": ["Infeasible", "Unbounded", "MaxIterations", "Stalled", "NumericalError"],
+    "SolveError": ["Infeasible", "Unbounded", "MaxIterations", "Stalled", "NumericalError", "ResourceExhausted"],
     "SolveStatus": [
       "Optimal", "LocallyOptimal", "Infeasible", "Unbounded", "MaxIterations",
-      "SuboptimalSolution", "Stalled", "FeasiblePoint", "Timeout", "NumericalError",
+      "SuboptimalSolution", "Stalled", "FeasiblePoint", "Timeout", "NumericalError", "ResourceExhausted",
       "NonConvex", "NonconvexLocal", "NonconvexGlobal", "NotSupported"
     ],
     "Tolerance": ["High", "Medium", "Fast", "Custom"]
@@ -97,7 +97,9 @@
     "Constraint": ["__repr__"],
     "VarKind": ["__eq__"],
     "SolutionProof": ["__eq__"],
-    "SolveError": ["__eq__"]
+    "SolveError": ["__eq__"],
+    "SolveStatus": ["__eq__", "__hash__"],
+    "Tolerance": ["__eq__"]
   },
   "python_only_variants": {
     "_note": "Variants that exist on the Python side but are not real Rust variants -- always the honest fallback for a #[non_exhaustive] Rust enum's mandatory wildcard match arm (see enums.rs's From<Rust> for Py* impls), never an invented capability. SolveStatus's Unknown carries the original Display text (a complex enum can hold a payload); SolutionProof/SolveError's Unknown is payload-less (eq_int enums cannot carry one) but is still a distinct, honest 'not one of the known variants' value rather than panicking or silently aliasing a real variant.",

@@ -69,6 +69,42 @@ impl PseudocostState {
         }
     }
 
+    /// Publish the observations `local` accumulated since it was cloned from
+    /// `baseline` into `self`.
+    ///
+    /// Every field is a plain running sum or count, so the observations of
+    /// concurrent B&B workers commute: adding `local - baseline` reproduces
+    /// exactly the state a single searcher would have reached had it made the
+    /// same observations in any order. Used by `mip::parallel` to share
+    /// pseudocosts across workers without holding a lock across an LP solve.
+    pub(crate) fn add_delta(&mut self, local: &Self, baseline: &Self) {
+        debug_assert_eq!(self.up_sum.len(), local.up_sum.len(), "pseudocost length");
+        debug_assert_eq!(
+            self.up_sum.len(),
+            baseline.up_sum.len(),
+            "pseudocost length"
+        );
+        // `baseline` must be a snapshot `local` was cloned from, so `local`
+        // can only have grown. Pairing the wrong two states would subtract
+        // observations that were never made here and silently corrupt the
+        // shared branching statistics — worth catching in debug.
+        debug_assert!(
+            local
+                .up_count
+                .iter()
+                .zip(&baseline.up_count)
+                .chain(local.down_count.iter().zip(&baseline.down_count))
+                .all(|(l, b)| l >= b),
+            "add_delta: `baseline` is not a snapshot `local` grew from"
+        );
+        for k in 0..self.up_sum.len() {
+            self.up_sum[k] += local.up_sum[k] - baseline.up_sum[k];
+            self.down_sum[k] += local.down_sum[k] - baseline.down_sum[k];
+            self.up_count[k] += local.up_count[k] - baseline.up_count[k];
+            self.down_count[k] += local.down_count[k] - baseline.down_count[k];
+        }
+    }
+
     /// `true` when variable `k` has enough observations for reliability branching.
     pub(crate) fn is_reliable(&self, k: usize) -> bool {
         self.up_count[k] >= RELIABILITY_THRESHOLD && self.down_count[k] >= RELIABILITY_THRESHOLD

@@ -1,6 +1,8 @@
 //! KKT factorization with 3 段防御 (probe-based regularization retry + identity-perm fallback).
 
-use super::state::{LDL_FALLBACK_DELTA_MIN, LDL_REG_CEILING, LDL_REG_GROWTH, LDL_REG_RETRY_MAX};
+use super::state::{
+    LDL_FALLBACK_DELTA_MIN, LDL_REG_CEILING, LDL_REG_GROWTH, LDL_REG_RETRY_MAX, REG_LIMIT_MIN,
+};
 use crate::qp::ipm_core::kkt::{build_schur_system, AugmentedKktCache, PermutedAugmentedKkt};
 use crate::qp::problem::QpProblem;
 use faer::Par;
@@ -314,7 +316,11 @@ pub(crate) fn auto_schur_enabled(
 ) -> bool {
     use crate::qp::ipm_core::kkt::build_augmented_system;
     let probe_sigma: Vec<f64> = vec![1.0; m_ext];
-    let probe_rho = options.ipm.delta_min;
+    // adaptive reg_limit の最終 floor (REG_LIMIT_MIN) で probe する。旧実装は
+    // 廃止された固定 options.ipm.delta_min (1e-8) を使っていたが、実際の反復では
+    // 正則化がそこまで下がりうるため、fill-in 予測が最悪ケースを反映するよう
+    // 最小値で probe する。
+    let probe_rho = REG_LIMIT_MIN;
     let probe_aug = build_augmented_system(&problem.q, a_ext, &probe_sigma, probe_rho, probe_rho);
     let probe_perm = amd_with_deadline(
         probe_aug.nrows(),

@@ -310,17 +310,56 @@ thread_local! {
         const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only cancel injection for the McCormick B&B's final-classification
+    /// stop check (横展開: same "last region prunes stack empty, no
+    /// re-check before declaring Infeasible" gap as `misocp::solve_misocp`).
+    /// Counts calls to `test_maybe_cancel_before_final_classification`; once
+    /// the count reaches `CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT`, flips the
+    /// real `cancel_flag` `AtomicBool` a test threads through
+    /// `ConicOptions::cancel_flag`.
+    static FINAL_CLASSIFICATION_COMMIT_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn test_maybe_cancel_before_final_classification(opts: &ConicOptions) {
+    let count = FINAL_CLASSIFICATION_COMMIT_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(std::cell::Cell::get) == Some(count) {
+        if let Some(flag) = &opts.cancel_flag {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// McCormick relaxations are pure LPs. Use the mature simplex LP path rather
 /// than the generic conic IPM, which is intentionally small and aimed at SOC
 /// blocks. The caller's wall-clock deadline is forwarded so a single node LP
 /// cannot run past the B&B budget.
+///
+/// The shared `cancel_flag` is forwarded alongside the deadline for the same
+/// reason: the B&B loop only re-reads `stop_requested()` *between* nodes, so a
+/// cancel fired while one node relaxation is mid-solve would otherwise run to
+/// completion, breaking `set_cancel_flag`'s cooperative-cancellation contract
+/// on a single expensive node. `SolverOptions::cancel_flag` is checked at the
+/// same cadence as the LP's wall-clock deadline (`external_stop_requested`).
 ///
 /// Builds the combined equality+inequality matrix directly from `prob.a`/
 /// `prob.g`'s own CSC nonzeros (`O(nnz(a) + nnz(g))`) instead of densifying
 /// both to `Vec<Vec<f64>>` first -- `prob` is the per-node relaxation, so a
 /// dense pass here repeated the same `O(n * m)` blowup `build_relax` is
 /// fixed to avoid.
-fn solve_relax_lp(prob: &ConicProblem, deadline: Option<std::time::Instant>) -> RelaxResult {
+fn solve_relax_lp(
+    prob: &ConicProblem,
+    deadline: Option<std::time::Instant>,
+    cancel_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> RelaxResult {
     #[cfg(test)]
     if let Some(status) = RELAX_STATUS_PLAN
         .with(|p| p.borrow_mut().pop_front())
@@ -376,6 +415,7 @@ fn solve_relax_lp(prob: &ConicProblem, deadline: Option<std::time::Instant>) -> 
     .unwrap();
     let lp_opts = crate::options::SolverOptions {
         deadline,
+        cancel_flag: cancel_flag.cloned(),
         ..Default::default()
     };
     let res = crate::lp::solve_lp_with(&lp, &lp_opts);
@@ -840,6 +880,19 @@ fn validate_integers(n: usize, integers: &[usize]) -> Result<(), String> {
     Ok(())
 }
 
+/// McCormick spatial branch-and-bound core shared by [`solve_global_qcqp`] /
+/// [`solve_global_miqcp`].
+///
+/// Certificate-acceptance contract (横展開, mirrors
+/// `misocp::solve_misocp`): both the no-incumbent `Infeasible` classification
+/// and the incumbent `certified` -> `Optimal` classification defer to
+/// `Timeout` when an external stop is observed at that instant, even if the
+/// underlying region prunes were themselves un-raced. Unlike the QP IPPMM /
+/// conic IPM per-certificate checks (where `Optimal` is independently
+/// KKT/residual-verified and therefore exempt), a B&B tree's exhaustive-
+/// search `Infeasible` and `Optimal` both rest on the identical deterministic
+/// "search space fully pruned" signal -- there is no basis to trust one and
+/// distrust the other, so both defer symmetrically.
 fn global_core(
     qp: &NonconvexQcqp,
     integers: &[usize],
@@ -896,7 +949,7 @@ fn global_core(
         }
         nodes += 1;
         let relax = build_relax(&static_, &lb, &ub);
-        let res = solve_relax_lp(&relax, opts.deadline);
+        let res = solve_relax_lp(&relax, opts.deadline, opts.cancel_flag.as_ref());
         match res.status {
             SolveStatus::Optimal => {}
             // Empty relaxation => the region holds no feasible point: a
@@ -1044,6 +1097,9 @@ fn global_core(
         lower_bound = lower_bound.min(*inherited);
     }
 
+    #[cfg(test)]
+    test_maybe_cancel_before_final_classification(opts);
+
     if inc_x.is_empty() {
         // No incumbent: `Infeasible` is a certificate, so it requires a fully
         // exhausted search in which every region was proven empty. A
@@ -1057,6 +1113,9 @@ fn global_core(
             SolveStatus::MaxIterations
         } else if numerical_failures > 0 || lower_bound < f64::INFINITY {
             SolveStatus::NumericalError
+        } else if opts.stop_requested() {
+            // 証明受理直前の stop check: 関数 doc の contract 参照
+            SolveStatus::Timeout
         } else {
             SolveStatus::Infeasible
         };
@@ -1077,8 +1136,10 @@ fn global_core(
         // With an incumbent, a node/gap-limited search is `SuboptimalSolution`
         // (the incumbent is valid but unproven), matching `misocp::solve_misocp`
         // and `mip::solve_miqp`. `MaxIterations` is reserved for the
-        // no-incumbent node-limited case above.
-        status: if timed_out {
+        // no-incumbent node-limited case above. `certified` shares the same
+        // stop-check backstop as the no-incumbent `Infeasible` branch above
+        // (contract: 関数 doc 参照, P2-A).
+        status: if timed_out || (certified && opts.stop_requested()) {
             SolveStatus::Timeout
         } else if certified {
             SolveStatus::Optimal
@@ -1513,7 +1574,7 @@ mod tests {
         let static_ = build_static(&qp);
         assert_eq!(static_.pairs, vec![(0, 0)]);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
-        let res = solve_relax_lp(&relax, None);
+        let res = solve_relax_lp(&relax, None, None);
         assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
         assert!(
             res.objective.abs() < 1e-7,
@@ -1532,11 +1593,29 @@ mod tests {
         let static_ = build_static(&qp);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let res = solve_relax_lp(&relax, Some(past));
+        let res = solve_relax_lp(&relax, Some(past), None);
         assert_eq!(
             res.status,
             SolveStatus::Timeout,
             "expired deadline must abort the node LP, got {:?}",
+            res.status
+        );
+    }
+
+    /// Sentinel. `solve_relax_lp` must forward the caller's `cancel_flag` to the
+    /// LP path; an already-fired flag therefore stops the LP with `Timeout`.
+    /// Reverting to `cancel_flag: None` solves the relaxation to `Optimal`.
+    #[test]
+    fn relaxation_lp_honors_fired_cancel_flag() {
+        let qp = hyperbola();
+        let static_ = build_static(&qp);
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let res = solve_relax_lp(&relax, None, Some(&fired));
+        assert_eq!(
+            res.status,
+            SolveStatus::Timeout,
+            "fired cancel_flag must abort the node LP, got {:?}",
             res.status
         );
     }
@@ -1620,6 +1699,115 @@ mod tests {
         let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default());
         assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
         assert_eq!(res.nodes, 0, "must stop before processing any node");
+    }
+
+    /// 横展開 (キャンセル後の false Infeasible): purely linear,
+    /// contradictory constraints (`x0 <= -1` and `x0 >= 0`) -- the root
+    /// relaxation LP is itself infeasible, so the single root region is
+    /// pruned (`SolveStatus::Infeasible => continue` in `global_core`) and
+    /// the stack empties immediately, with no per-node race involved.
+    /// Cancel racing in right after that prune (stack now empty, about to
+    /// declare the global search Infeasible) must still yield `Timeout`.
+    ///
+    /// Sentinel: reverting the `opts.stop_requested()` branch added right
+    /// before `SolveStatus::Infeasible` in `global_core`'s final
+    /// classification makes this FAIL with `Infeasible` instead of
+    /// `Timeout`.
+    #[test]
+    fn cancel_race_before_final_infeasible_classification_prefers_timeout() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, n).unwrap(),
+            h_lin: vec![-1.0, 0.0],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![-10.0],
+            ub: vec![10.0],
+        };
+
+        FINAL_CLASSIFICATION_COMMIT_COUNT.with(|c| c.set(0));
+        CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(Some(1)));
+
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let opts = ConicOptions {
+            cancel_flag: Some(std::sync::Arc::clone(&cancel)),
+            ..ConicOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default());
+        CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(None));
+
+        assert_eq!(
+            res.status,
+            SolveStatus::Timeout,
+            "cancel racing in right before the final Infeasible classification must yield Timeout, got {res:?}"
+        );
+        assert!(res.x.is_empty());
+    }
+
+    /// Baseline/control for the sentinel above: without cancel injection,
+    /// the same contradictory-constraint fixture must still report the
+    /// genuine Infeasible certificate.
+    #[test]
+    fn no_cancel_still_reports_infeasible_via_global_core() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, n).unwrap(),
+            h_lin: vec![-1.0, 0.0],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![-10.0],
+            ub: vec![10.0],
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+        assert_eq!(
+            res.status,
+            SolveStatus::Infeasible,
+            "baseline (no cancel): got {:?}",
+            res.status
+        );
+    }
+
+    /// P2-A (レビュー指摘): `global_core` の最終分類は Infeasible と
+    /// Optimal (`certified`) の両方が同一の決定論的シグナルに支えられており、
+    /// 一方だけ backstop すると非対称になる。`hyperbola` (通常は
+    /// `exhausted_clean_search_certifies_optimal_with_zero_gap` で Optimal を
+    /// 返す fixture) で、最終分類直前に cancel が観測されれば incumbent が
+    /// 真に最適であっても Timeout を優先すること。
+    ///
+    /// Sentinel: `global_core` の `certified && opts.stop_requested()` 分岐を
+    /// revert すると `Optimal` が返り FAIL する。
+    #[test]
+    fn cancel_race_before_final_optimal_classification_prefers_timeout() {
+        let qp = hyperbola();
+
+        FINAL_CLASSIFICATION_COMMIT_COUNT.with(|c| c.set(0));
+        CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(Some(1)));
+
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let opts = ConicOptions {
+            cancel_flag: Some(std::sync::Arc::clone(&cancel)),
+            ..ConicOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default());
+        CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(None));
+
+        assert_eq!(
+            res.status,
+            SolveStatus::Timeout,
+            "cancel racing in right before the final Optimal classification must yield Timeout even though the incumbent is truly optimal, got {res:?}"
+        );
+        assert!(
+            !res.x.is_empty(),
+            "incumbent must still be reported under Timeout"
+        );
     }
 
     /// Positive control (companion to the sentinel above). A clean, fully exhausted search proves global

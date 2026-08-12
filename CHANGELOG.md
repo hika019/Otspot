@@ -4,29 +4,70 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-- `otspot-py`: Python 要件を 3.11+ に引き上げ (abi3-py311)
-- otspot-core: unbounded ray 証明ループも cancel 未チェックだった問題を修正
-  (Farkas 修正の横展開)。QP presolve phase-2 末尾工程の cancel 網羅も強化
+### Added
+- `SolveStatus::ResourceExhausted` (Python `otspot.SolveStatus.ResourceExhausted`
+  / `SolveError.ResourceExhausted`) を新設。OS リソース (スレッド・メモリ) 確保
+  失敗を数値破綻 (`NumericalError`) と区別して返す
 - `otspot-py` crate (PyO3/maturin) を追加し、Otspot を Python ライブラリとして
-  利用可能に。Rust API と同名・同構造の Model DSL、`api_manifest.json` +
-  `cargo public-api` スナップショットによる API parity 保証、GitHub Actions
-  `python` job (maturin build → pytest → mypy) を含む
-- otspot-model: `ModelResult::value`/`Index<Variable>` が cross-model の
-  `Variable` を検査せず別 model の値を誤返却するバグを修正。`Model::var_kind`
-  (`try_var_kind` 含む) を新設
-- `Expression`/`QuadExpr` に `+=` (`__iadd__`) を追加し、蓄積ループの
-  O(n²) クローンコストを回避
-- `Model.solve()` 中の Ctrl-C (SIGINT) が `KeyboardInterrupt` を即座に送出する
-  よう修正 (`Model::set_cancel_flag` 新設 + worker thread 化)。otspot-core の
-  Farkas 証明書検証ループが `deadline`/`cancel_flag` 未チェックだった真因も修正
-  (挙動変更: `timeout_secs` 設定時、Infeasible 判定寸前だった問題が Timeout
-  になり得る)。ポーリング間隔を適応 backoff + Condvar 化し、小型 solve への
-  固定 latency 床 (旧: 10ms 固定) を解消
-- otspot-model: `set_presolve(false)` が QP/MIQP 経路では無視されていたバグを
-  修正 (LP/MILP のみ反映されていた)。`Expression`/`QuadExpr` の `+=` が
-  自己エイリアス代入 (`expr += expr`) で panic するバグを修正。QP presolve
-  phase-2 の等式制約簡約ループが `cancel_flag` 未チェックだった真因を修正
-  (途中打ち切り時に未検証行を誤って冗長判定する退行も併せて修正)
+  利用可能に (Rust 版と同じ Model DSL)
+- `SolverOptions::threads` (`milp_solve --threads`) が MILP 分枝限定法で実効化
+  された。指定数は上限の保証でありヒントではない。既定の `threads = 1` は従来通り。MIQP の B&B は対象外
+- otspot-model: `Model::var_kind` (`try_var_kind` 含む) を新設
+- `Expression`/`QuadExpr` に `+=` (`__iadd__`) を追加し、蓄積ループの性能を改善
+
+### Fixed
+- QP IPM・conic IPM・MISOCP・非凸 QCQP・大域 QP の複数の求解経路で、キャンセル後
+  も証明済み status を返したり探索を継続したりし得た問題を修正
+- bounded dual simplex の tie-break の欠陥、および dual simplex が基底のドリフト
+  を検証せず誤って Optimal を返しうる問題を修正
+- MIP/大域 QP で、非有限 bound の混入や探索中断時の下界取りこぼしにより、未証明
+  の最適性を Optimal と誤報告しうる問題を修正
+- LP の Farkas・unbounded ray 証明ループと QP presolve が、キャンセル・deadline
+  を無視して完了しうる問題を修正。`timeout_secs` 設定時、従来 Infeasible と
+  判定されていた問題が Timeout になる場合がある
+- LP の primal-to-dual crossover (postsolve のダブルチェック経路、IPM 証明後の
+  crossover 経路) が cancel_flag を受け取っておらず、キャンセル後も完了まで
+  走り得た問題を修正
+- QP presolve の等式制約冗長行判定の不具合を修正: 矛盾した等式系を誤って
+  Feasible と判定する場合、および打ち切り時に未検証行を誤って冗長と判定する
+  場合があった
+- QP presolve の等式冗長行削除で、大きな RHS の相殺を伴う従属等式の丸め誤差により
+  矛盾していない等式系を誤って Infeasible と判定する場合があった問題を修正 (上記の逆方向)
+- Ruiz スケーリングが構造的に空の行・列や目的関数が恒等的に0の問題で、コストが
+  発散し NaN が伝播し得た問題を修正
+- QPLIB/CBF パーサが宣言サイズを検証せず allocation しており、巨大/不正な
+  ファイルで OOM しうる問題を修正
+- MILP 並列探索で、要求したワーカーの一部を OS が拒否すると solve がデッドロック
+  していた問題を修正 (フリーズせず `ResourceExhausted` を返す)
+- QP/conic の IPM が指定した `threads` 数を超えて並列実行していた問題を修正
+- MILP B&B の cut separation に割り当てる反復予算の見積りに誤りがあり、探索時間
+  を浪費していた問題を修正。複数の TIMEOUT 問題でノード数・incumbent が改善
+- QP IPM (IPPMM) の数値安定性の複数の不具合を修正し、一部の QP が Stalled から
+  収束するようになった
+- QP/LP の IPM が Ruiz スケーリング有無を切り替えて再試行する際の打ち切り判定に
+  不具合があり、収束するはずの LP が Stalled と判定され得た問題を修正
+- otspot-model: `ModelResult::value`/`Index<Variable>` が別モデルの変数を誤って
+  受理し、誤った値を返すバグを修正
+- otspot-model: `set_presolve(false)` が QP/MIQP では無視されていたバグを修正
+  (LP/MILP のみ反映されていた)
+- `Expression`/`QuadExpr` の `+=` が自己代入 (`expr += expr`) で panic するバグ
+  を修正
+- 並列 B&B の統計値 (`conflict_clauses_learned`/`remaining_lb` 等) が
+  不正確に報告されていた問題を修正
+- Python の `Model.solve()` 中の Ctrl-C (SIGINT) が `KeyboardInterrupt` を即座に
+  送出するよう修正 (応答遅延・GIL 保持によるブロッキングを解消)
+- Python の `SolveStatus`/`Tolerance` の `==` 比較が常に `False` になっていた
+  問題を修正 (`SolveStatus` は hash 対応も追加)
+
+### Changed
+- [破壊的変更] スレッド数の指定 (`SolverOptions::threads` / `Model::set_threads`
+  / `milp_solve --threads`) が範囲外の値を `solve()` 前に一貫して拒否するように
+  なった。従来 `set_threads(0)` は暗黙に `1` へ丸められていたが、現在は不正な
+  入力としてエラーになる
+- `otspot-num` が `rayon` に依存するようになった
+- `otspot-py`: Python 要件を 3.11+ に引き上げ (abi3-py311)
+- `IpmOptions::delta_min`/`delta_p_init`/`delta_d_init` を削除 (無視される
+  デッドオプションだった)
 
 ## [0.7.4] - 2026-07-31
 

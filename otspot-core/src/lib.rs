@@ -24,7 +24,7 @@ pub mod sparse;
 pub mod tolerances;
 pub use options::{
     BranchingStrategy, DualPricing, GlobalOptimizationConfig, LpWarmStart, MipBranching, MipConfig,
-    SolverOptions, Tolerance, WarmStartBasis,
+    SolverOptions, Tolerance, WarmStartBasis, MAX_THREADS,
 };
 pub mod conic;
 #[doc(hidden)]

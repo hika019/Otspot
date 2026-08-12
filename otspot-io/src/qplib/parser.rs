@@ -6,6 +6,43 @@ use std::collections::HashSet;
 
 use super::token_stream::TokenStream;
 use super::{QplibError, QplibProblem};
+use crate::size_limits::{
+    check_declared_size, try_vec_filled, try_vec_with_capacity, MAX_DECLARED_DIMENSION,
+    MAX_DECLARED_TERM_COUNT,
+};
+
+/// Reads a declared dimension (variable/constraint count) and validates it
+/// against [`MAX_DECLARED_DIMENSION`]. See `crate::size_limits` for why this
+/// guard exists.
+fn read_dimension(ts: &mut TokenStream, context: &str) -> Result<usize, QplibError> {
+    let value = ts.read_usize(context)?;
+    check_declared_size(value, MAX_DECLARED_DIMENSION, context).map_err(QplibError::ParseError)
+}
+
+/// Reads a declared sparse-entry count and validates it against
+/// [`MAX_DECLARED_TERM_COUNT`].
+fn read_term_count(ts: &mut TokenStream, context: &str) -> Result<usize, QplibError> {
+    let value = ts.read_usize(context)?;
+    check_declared_size(value, MAX_DECLARED_TERM_COUNT, context).map_err(QplibError::ParseError)
+}
+
+/// `crate::size_limits::try_vec_filled`, with the error mapped to `QplibError`.
+fn qvec_filled<T: Clone>(len: usize, value: T, context: &str) -> Result<Vec<T>, QplibError> {
+    try_vec_filled(len, value, context).map_err(QplibError::ParseError)
+}
+
+/// `crate::size_limits::try_vec_with_capacity`, with the error mapped to `QplibError`.
+fn qvec_with_capacity<T>(cap: usize, context: &str) -> Result<Vec<T>, QplibError> {
+    try_vec_with_capacity(cap, context).map_err(QplibError::ParseError)
+}
+
+/// `(lb, ub)` for `n` binary variables: implicit `[0, 1]`, per QPLIB's `var = B` convention.
+fn binary_var_bounds(n: usize) -> Result<(Vec<f64>, Vec<f64>), QplibError> {
+    Ok((
+        qvec_filled(n, 0.0_f64, "var lb")?,
+        qvec_filled(n, 1.0_f64, "var ub")?,
+    ))
+}
 
 /// Relative tolerance for the QPLIB declared-infinity marker.
 ///
@@ -464,11 +501,11 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         }
     };
 
-    let n = ts.read_usize("number of variables")?;
+    let n = read_dimension(&mut ts, "number of variables")?;
     ts.finish_record();
     let m = match con_char {
         'L' | 'Q' => {
-            let value = ts.read_usize("number of constraints")?;
+            let value = read_dimension(&mut ts, "number of constraints")?;
             ts.finish_record();
             value
         }
@@ -476,7 +513,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
     };
 
     // Objective quadratic terms (lower-triangular, symmetrized)
-    let nqobj = ts.read_usize("number of objective quadratic terms")?;
+    let nqobj = read_term_count(&mut ts, "number of objective quadratic terms")?;
     ts.finish_record();
     if nqobj > n.saturating_mul(n.saturating_add(1)) / 2 {
         return Err(QplibError::ParseError(format!(
@@ -487,7 +524,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         )));
     }
 
-    let mut q_triplets: Vec<(usize, usize, f64)> = Vec::with_capacity(nqobj * 2);
+    let mut q_triplets: Vec<(usize, usize, f64)> = qvec_with_capacity(nqobj * 2, "obj quad terms")?;
     for _ in 0..nqobj {
         let i = ts.read_index_1based(n, "Q row")?;
         let j = ts.read_index_1based(n, "Q col")?;
@@ -508,7 +545,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         ts.line_number(),
     )?;
     ts.finish_record();
-    let mut c = vec![default_b0; n];
+    let mut c = qvec_filled(n, default_b0, "objective linear coefficients")?;
     let n_nondefault_b0 = ts.read_usize("number of non-default objective linear terms")?;
     ts.finish_record();
     for _ in 0..n_nondefault_b0 {
@@ -530,7 +567,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
 
     // Constraint quadratic terms (QCQ only)
     let mut con_q_triplets: Vec<Vec<(usize, usize, f64)>> = if con_char == 'Q' {
-        vec![vec![]; m]
+        qvec_filled(m, Vec::new(), "constraint quadratic term rows")?
     } else {
         vec![]
     };
@@ -554,7 +591,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
     // Constraint linear terms (L/N/Q types)
     let mut a_triplets: Vec<(usize, usize, f64)> = Vec::new();
     if matches!(con_char, 'L' | 'Q') {
-        let n_con_lin_terms = ts.read_usize("number of constraint linear terms")?;
+        let n_con_lin_terms = read_term_count(&mut ts, "number of constraint linear terms")?;
         ts.finish_record();
         if n_con_lin_terms > n.saturating_mul(m) {
             return Err(QplibError::ParseError(format!(
@@ -563,7 +600,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
                 n.saturating_mul(m)
             )));
         }
-        a_triplets = Vec::with_capacity(n_con_lin_terms);
+        a_triplets = qvec_with_capacity(n_con_lin_terms, "constraint linear terms")?;
         for _ in 0..n_con_lin_terms {
             let k = ts.read_index_1based(m, "constraint index")?;
             let i = ts.read_index_1based(n, "variable index")?;
@@ -591,15 +628,15 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
     let is_neg_inf = |x: f64| x <= -inf_val * QPLIB_INF_REL_TOL;
 
     // Constraint bounds (L/N/Q types)
-    let mut lb_con = vec![f64::NEG_INFINITY; m];
-    let mut ub_con = vec![f64::INFINITY; m];
+    let mut lb_con = qvec_filled(m, f64::NEG_INFINITY, "constraint lower bounds")?;
+    let mut ub_con = qvec_filled(m, f64::INFINITY, "constraint upper bounds")?;
     if matches!(con_char, 'L' | 'Q') {
         let lb_con_default = ts.read_f64()?;
         require_finite_or_infinite_marker(lb_con_default, "constraint lower bound")?;
         ts.finish_record();
         let n_nondefault_lb_con = ts.read_usize("number of non-default constraint lower bounds")?;
         ts.finish_record();
-        lb_con = vec![lb_con_default; m];
+        lb_con = qvec_filled(m, lb_con_default, "constraint lower bounds")?;
         for _ in 0..n_nondefault_lb_con {
             let k = ts.read_index_1based(m, "lb_con index")?;
             let v = ts.read_f64()?;
@@ -613,7 +650,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         ts.finish_record();
         let n_nondefault_ub_con = ts.read_usize("number of non-default constraint upper bounds")?;
         ts.finish_record();
-        ub_con = vec![ub_con_default; m];
+        ub_con = qvec_filled(m, ub_con_default, "constraint upper bounds")?;
         for _ in 0..n_nondefault_ub_con {
             let k = ts.read_index_1based(m, "ub_con index")?;
             let v = ts.read_f64()?;
@@ -625,14 +662,14 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
     // Variable bounds
     // Binary ('B'): implicit [0,1]; Continuous/Integer: explicit in file.
     let (lb_var, ub_var) = if var_binary {
-        (vec![0.0_f64; n], vec![1.0_f64; n])
+        binary_var_bounds(n)?
     } else {
         let lb_var_default = ts.read_f64()?;
         require_finite_or_infinite_marker(lb_var_default, "variable lower bound")?;
         ts.finish_record();
         let n_nondefault_lb_var = ts.read_usize("number of non-default variable lower bounds")?;
         ts.finish_record();
-        let mut lb_var = vec![lb_var_default; n];
+        let mut lb_var = qvec_filled(n, lb_var_default, "variable lower bounds")?;
         for _ in 0..n_nondefault_lb_var {
             let i = ts.read_index_1based(n, "lb_var index")?;
             let v = ts.read_f64()?;
@@ -645,7 +682,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         ts.finish_record();
         let n_nondefault_ub_var = ts.read_usize("number of non-default variable upper bounds")?;
         ts.finish_record();
-        let mut ub_var = vec![ub_var_default; n];
+        let mut ub_var = qvec_filled(n, ub_var_default, "variable upper bounds")?;
         for _ in 0..n_nondefault_ub_var {
             let i = ts.read_index_1based(n, "ub_var index")?;
             let v = ts.read_f64()?;
@@ -682,8 +719,8 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
     }
 
     // Expand lb_con[k] <= a[k]^T x <= ub_con[k] → Ax <= b rows.
-    let mut aug_ub_row: Vec<Option<usize>> = vec![None; m];
-    let mut aug_lb_row: Vec<Option<usize>> = vec![None; m];
+    let mut aug_ub_row: Vec<Option<usize>> = qvec_filled(m, None, "augmented upper-row index")?;
+    let mut aug_lb_row: Vec<Option<usize>> = qvec_filled(m, None, "augmented lower-row index")?;
     let mut b_vec: Vec<f64> = Vec::new();
     let mut constraint_types: Vec<ConstraintType> = Vec::new();
 
@@ -758,7 +795,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
     // Quadratic constraint matrices (QCQP only).
     // Stored as QcqpMatrix (COO triplets) to avoid O(n) col_ptr per constraint.
     let quadratic_constraints = if con_char == 'Q' {
-        let mut qc: Vec<QcqpMatrix> = vec![QcqpMatrix::new(n); m_aug];
+        let mut qc: Vec<QcqpMatrix> = qvec_filled(m_aug, QcqpMatrix::new(n), "qcqp matrices")?;
         for k in 0..m {
             let trips = &con_q_triplets[k];
             if trips.is_empty() {

@@ -118,7 +118,13 @@ jobs:
       # stub against real usage.
       - name: mypy (stub + tests)
         working-directory: otspot-py
-        run: mypy tests/ otspot.pyi
+        # --check-untyped-defs: pytest test functions are unannotated, and
+        # mypy skips the *bodies* of untyped functions by default -- without
+        # this flag, usages inside those test bodies (the exact operator
+        # overloads / runtime behavior this gate exists to catch stub drift
+        # in) are never actually checked against otspot.pyi (Codex PR #31
+        # review).
+        run: mypy --check-untyped-defs tests/ otspot.pyi
 
   clippy:
     name: clippy

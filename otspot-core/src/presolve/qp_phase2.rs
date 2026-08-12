@@ -1,7 +1,7 @@
 //! QP presolve Phase 2: equality-constraint redundancy elimination, near-zero Q
 //! off-diagonal pruning, and row-norm constraint preconditioning.
 
-use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
+use super::qp_transforms::{QpPostsolveStep, QpPresolveResult, QpPresolveStatus};
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::tolerances::{DROP_TOL, SCALING_SIGMA_FLOOR, ZERO_TOL};
@@ -73,16 +73,31 @@ const RHS_HASH_QUANTIZE: f64 = 1e9;
 /// Detect Le-Le pairs that form an equality (A\[j,*\] = -A\[i,*\] and b\[j\] = -b\[i\]) and
 /// drop redundant equality rows via partial-pivot Gaussian elimination. Only runs when
 /// `m > 2n` since the elimination cost is O(mn²).
-fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool], opts: &SolverOptions) {
+///
+/// Returns `false` if elimination proves the equality system inconsistent: a row whose
+/// coefficients reduce to (numerically) zero against the chosen pivot rows must also have
+/// its RHS reduce to zero, or the pivot rows' equalities jointly contradict it and the
+/// system has no solution (the same argument as checking `rank([A|b]) > rank(A)`, applied
+/// incrementally as pivots are chosen). `removed_rows` reflects only rows confirmed
+/// consistent to drop; on `false` the caller must not trust it and must treat the problem
+/// as infeasible. Also returns `true` (leaving `removed_rows` at its all-`false` initial
+/// state) when cancelled mid-elimination -- cancellation proves nothing either way, and the
+/// caller's `cancellable` wrapper is solely responsible for discarding the result.
+#[must_use]
+fn equality_constraint_qr(
+    prob: &QpProblem,
+    removed_rows: &mut [bool],
+    opts: &SolverOptions,
+) -> bool {
     use std::collections::hash_map::DefaultHasher;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::hash::{Hash, Hasher};
 
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
     if m * n > QR_SKIP_SIZE_THRESHOLD || m <= n * ROW_OVERDETERMINED_RATIO || n == 0 {
-        return;
+        return true;
     }
 
     // Restrict pair detection to Le rows; pairing Eq/Ge rows with Le would corrupt the problem.
@@ -112,7 +127,12 @@ fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool], opts: &So
         h.finish()
     };
 
-    let mut groups: HashMap<(usize, u64, i64), Vec<usize>> = HashMap::new();
+    // BTreeMap, not HashMap: iteration order must be deterministic (key-sorted),
+    // since it fixes the `eq_pos_rows` order and therefore which row wins ties
+    // during pivot selection below. A HashMap's per-process random seed would
+    // make "which redundant row gets dropped" — and which one this function's
+    // consistency check flags — vary across runs of identical input.
+    let mut groups: BTreeMap<(usize, u64, i64), Vec<usize>> = BTreeMap::new();
     for i in 0..m {
         if removed_rows[i] || row_entries[i].is_empty() {
             continue;
@@ -164,36 +184,50 @@ fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool], opts: &So
 
     let m_eq = eq_pos_rows.len();
     if m_eq == 0 {
-        return;
+        return true;
     }
 
-    // Dense Aeq (m_eq × n) for partial-pivot Gaussian elimination.
+    // Dense Aeq (m_eq × n) for partial-pivot Gaussian elimination, plus the
+    // matching RHS column — tracked through the identical row operations so a
+    // dropped row's consistency with the pivot rows can be verified, not just
+    // its coefficients' linear dependence.
     let mut aeq = vec![vec![0.0f64; n]; m_eq];
     for (row_idx, &orig_row) in eq_pos_rows.iter().enumerate() {
         for &(col, val) in &row_entries[orig_row] {
             aeq[row_idx][col] = val;
         }
     }
+    let beq: Vec<f64> = eq_pos_rows
+        .iter()
+        .map(|&orig_row| prob.b[orig_row])
+        .collect();
 
     let mut pivot_rows: Vec<bool> = vec![false; m_eq];
     let mut pivot_count = 0usize;
     let mut used_pivot_col = vec![false; n];
     let mut work = aeq.clone();
+    let mut b_work = beq.clone();
+    // Running bound on the magnitude of quantities that have been combined
+    // (added/subtracted) into each `b_work[k]` so far, mirroring the standard
+    // floating-point backward-error bound for summation: the rounding error
+    // in a chain of subtractions is O(unit-roundoff) times the sum of the
+    // operand magnitudes, not of the final (possibly cancelled-down) value.
+    // Seeded with `|beq[k]|` and grown by `|factor| * b_scale[max_row]` at
+    // every elimination step below, so it tracks exactly the same row
+    // operations as `b_work` and ends up scaled to the pivot RHS magnitudes
+    // that actually cancelled to produce the final residual.
+    let mut b_scale: Vec<f64> = beq.iter().map(|b| b.abs()).collect();
 
     for col in 0..n {
         // O(m_eq * n) per column, checked once per outer iteration (cheap
-        // next to that cost) -- same gap as
-        // `dual_advanced::phase1::farkas_infeasibility_certified`'s probe loop.
-        //
-        // `return`, not `break`: a row not yet visited hasn't been *proven*
-        // dependent on the pivots found so far. The "drop every non-pivot
-        // row" pass below is only sound once every column had its chance at
-        // a pivot; falling through early would drop rows never shown
-        // redundant -- silently relaxing the problem, not just a missed
-        // optimization. `return` leaves `removed_rows` at the caller's
-        // all-`false` initial state, same as the size-cap check above.
+        // next to that cost). `return`, not `break`: a row not yet visited
+        // hasn't been *proven* dependent on the pivots found so far, so the
+        // drop pass below would relax the problem, not just skip work.
+        // Returns `true` (unproven, not inconsistent): the caller's
+        // `cancellable` wrapper re-checks `external_stop_requested()` itself
+        // and discards this call's result regardless of what it returns.
         if opts.external_stop_requested() {
-            return;
+            return true;
         }
         let mut max_val = 0.0f64;
         let mut max_row = usize::MAX;
@@ -230,6 +264,8 @@ fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool], opts: &So
                 let delta = factor * work[max_row][c];
                 work[k][c] -= delta;
             }
+            b_work[k] -= factor * b_work[max_row];
+            b_scale[k] += factor.abs() * b_scale[max_row];
         }
 
         if pivot_count >= n {
@@ -237,16 +273,36 @@ fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool], opts: &So
         }
     }
 
-    // Drop non-pivot rows (and their Le partners) — O(m_eq) via `pair_partner`.
+    // Non-pivot rows are only redundant if their RHS is implied by the same
+    // combination of pivot rows that annihilated their coefficients: after the
+    // row operations above, `b_work[row_idx]` is `b[orig_row]` minus that exact
+    // combination of the pivot rows' `b`. A nonzero residual means the pivot
+    // rows' equalities are jointly inconsistent with `orig_row`'s equality —
+    // the elimination coefficients used to get here are themselves the Farkas
+    // combination proving the whole equality system has no solution.
+    //
+    // The threshold is relative to `b_scale[row_idx]`, not `beq[row_idx]`:
+    // a dependent row whose RHS is small (or zero) can still be produced by
+    // cancelling large pivot RHS values (e.g. `4e12 - 4e12`), and the IEEE-754
+    // rounding noise left behind scales with the magnitudes that cancelled,
+    // not with the tiny result. Scaling by `beq[row_idx].abs()` alone (as
+    // before) let that noise exceed the threshold and falsely report
+    // Infeasible on a system with an exact solution (codex PR#32 review).
     for (row_idx, &orig_row) in eq_pos_rows.iter().enumerate() {
-        if !pivot_rows[row_idx] {
-            removed_rows[orig_row] = true;
-            let partner = pair_partner[orig_row];
-            if partner != usize::MAX {
-                removed_rows[partner] = true;
-            }
+        if pivot_rows[row_idx] {
+            continue;
+        }
+        let scale = 1.0 + b_scale[row_idx];
+        if b_work[row_idx].abs() > ZERO_TOL * scale {
+            return false;
+        }
+        removed_rows[orig_row] = true;
+        let partner = pair_partner[orig_row];
+        if partner != usize::MAX {
+            removed_rows[partner] = true;
         }
     }
+    true
 }
 
 /// Normalise constraint rows by `σ_i = max|A[i,*]|⁻¹` (capped at `SCALING_SIGMA_FLOOR`).
@@ -350,16 +406,27 @@ pub fn run_qp_presolve_phase2(
     #[cfg(test)]
     test_record_phase2_step_executed();
 
-    let removed_rows_phase2 = match cancellable(opts, || {
+    let (removed_rows_phase2, eq_consistent) = match cancellable(opts, || {
         let mut removed = vec![false; m];
-        equality_constraint_qr(prob, &mut removed, opts);
-        removed
+        let consistent = equality_constraint_qr(prob, &mut removed, opts);
+        (removed, consistent)
     }) {
         Some(r) => r,
         None => return phase1_result,
     };
     #[cfg(test)]
     test_record_phase2_step_executed();
+
+    // `equality_constraint_qr` proved the equality system inconsistent (a
+    // dropped row's RHS residual against its pivot combination exceeded
+    // ZERO_TOL) -- not "cancelled", which `cancellable` above already
+    // handles by discarding the whole call and returning `phase1_result`.
+    if !eq_consistent {
+        return QpPresolveResult {
+            presolve_status: QpPresolveStatus::Infeasible,
+            ..phase1_result
+        };
+    }
 
     let any_removed = removed_rows_phase2.iter().any(|&b| b);
 
@@ -581,102 +648,6 @@ mod tests {
         );
     }
 
-    /// Preset `cancel_flag=true` must make `run_qp_presolve_phase2` return
-    /// `phase1_result` unchanged, the same way an already-expired `deadline`
-    /// does -- the entry check used to look at `deadline` only, never
-    /// `cancel_flag` (Codex PR #31 review, item 3).
-    ///
-    /// `num_constraints` alone can't tell this apart from the in-loop check
-    /// inside `equality_constraint_qr` catching it one statement later (both
-    /// leave it unchanged). What the entry check specifically saves is the
-    /// row-entry scan, hash-bucketing/pairing, and dense `aeq`/`work`
-    /// allocation `equality_constraint_qr` does *before* its loop starts --
-    /// only visible on a large enough problem for that setup to cost real
-    /// time, hence reusing the mid-loop test's chain construction
-    /// (n=600, 3 copies, m=3594).
-    ///
-    /// Measured (5 trials): entry check present, ~1-7us; reverted to
-    /// `deadline`-only (in-loop check alone still catches it, but only after
-    /// paying for the setup), ~7.7-10.3ms. Sentinel: reverting the entry
-    /// check confirmed this exceeds the 1ms bound below.
-    #[test]
-    fn test_run_qp_presolve_phase2_honors_preset_cancel_flag() {
-        use std::sync::atomic::AtomicBool;
-        use std::sync::Arc;
-        use std::time::{Duration, Instant};
-
-        let n = 600usize;
-        let copies = 3usize;
-        let m = 2 * copies * (n - 1);
-        let mut trip_rows = Vec::with_capacity(2 * m);
-        let mut trip_cols = Vec::with_capacity(2 * m);
-        let mut trip_vals = Vec::with_capacity(2 * m);
-        let mut b = Vec::with_capacity(m);
-        for copy in 0..copies {
-            for i in 0..(n - 1) {
-                let pos_row = 2 * (copy * (n - 1) + i);
-                let neg_row = pos_row + 1;
-                trip_rows.push(pos_row);
-                trip_cols.push(i);
-                trip_vals.push(1.0);
-                trip_rows.push(pos_row);
-                trip_cols.push(i + 1);
-                trip_vals.push(1.0);
-                b.push(5.0);
-                trip_rows.push(neg_row);
-                trip_cols.push(i);
-                trip_vals.push(-1.0);
-                trip_rows.push(neg_row);
-                trip_cols.push(i + 1);
-                trip_vals.push(-1.0);
-                b.push(-5.0);
-            }
-        }
-        let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n).unwrap();
-        let q_idx: Vec<usize> = (0..n).collect();
-        let q = CscMatrix::from_triplets(&q_idx, &q_idx, &vec![2.0; n], n, n).unwrap();
-        let prob = QpProblem::new_all_le(
-            q,
-            vec![0.0; n],
-            a,
-            b,
-            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
-        )
-        .unwrap();
-
-        let opts = SolverOptions {
-            cancel_flag: Some(Arc::new(AtomicBool::new(true))),
-            presolve: false, // phase1 itself must not reduce either, isolating phase2's own behavior
-            ..Default::default()
-        };
-        let phase1 = crate::presolve::run_qp_presolve_phase1(&prob, &opts);
-        let phase1_constraints = phase1.reduced.num_constraints;
-        assert_eq!(
-            phase1_constraints, m,
-            "phase1 (presolve=false) must not reduce"
-        );
-
-        let t0 = Instant::now();
-        let phase2 = run_qp_presolve_phase2(phase1, &opts);
-        let elapsed = t0.elapsed();
-
-        assert_eq!(
-            phase2.reduced.num_constraints, phase1_constraints,
-            "preset cancel_flag=true must skip phase2's own reduction \
-             entirely (num_constraints unchanged from phase1's {phase1_constraints}), \
-             not run equality_constraint_qr"
-        );
-        assert!(
-            elapsed < Duration::from_millis(1),
-            "preset cancel_flag=true took {elapsed:?} to return from \
-             run_qp_presolve_phase2 -- expected the entry check to skip \
-             equality_constraint_qr's row-scan/pairing/dense-matrix setup \
-             entirely (measured ~1-7us), not merely have the in-loop check \
-             catch it after paying for that setup (measured ~7.7-10.3ms \
-             with the entry check reverted to deadline-only)"
-        );
-    }
-
     /// `run_qp_presolve_phase2`'s CSC row-map rebuild, `constraint_precond`,
     /// and `QpProblem::new` validation ran unconditionally once
     /// `equality_constraint_qr`'s `cancellable` wrapper returned `Some`
@@ -704,6 +675,14 @@ mod tests {
     /// rebuild / `constraint_precond` / `QpProblem::new` steps makes
     /// `cancel_after` in `{3, 4}` run past their target to 5, failing
     /// `executed == cancel_after`.
+    //
+    // Also supersedes the former test_run_qp_presolve_phase2_honors_preset_
+    // cancel_flag (deleted, Codex PR #31 audit P3: its own functional
+    // assertion overlapped this one, and its `elapsed < 1ms` wall-clock
+    // assertion was environment-fragile with no counterpart here to replace
+    // it with). A `cancel_flag` preset *before* `run_qp_presolve_phase2` is
+    // ever called is exactly `cancellable`'s pre-check path, independently
+    // covered by test_cancellable_skips_work_when_preset_before_call.
     #[test]
     fn test_run_qp_presolve_phase2_tail_stops_at_cancellation_point() {
         use std::sync::atomic::Ordering;
@@ -877,7 +856,12 @@ mod tests {
             ..Default::default()
         };
         let mut removed = vec![false; m];
-        equality_constraint_qr(&prob, &mut removed, &opts);
+        assert!(
+            equality_constraint_qr(&prob, &mut removed, &opts),
+            "mid-loop cancellation returns true (unproven, not inconsistent) \
+             -- the outer cancellable() wrapper is solely responsible for \
+             discarding the result"
+        );
         setter.join().unwrap();
 
         let removed_count = removed.iter().filter(|&&b| b).count();
@@ -983,7 +967,10 @@ mod tests {
         )
         .unwrap();
         let mut removed = vec![false; m];
-        equality_constraint_qr(&prob, &mut removed, &SolverOptions::default());
+        assert!(
+            equality_constraint_qr(&prob, &mut removed, &SolverOptions::default()),
+            "duplicate-but-consistent equalities must not be reported infeasible"
+        );
         // 少なくとも1行が除去されているべき（重複行）
         let removed_count = removed.iter().filter(|&&b| b).count();
         assert!(
@@ -991,6 +978,417 @@ mod tests {
             "at least one redundant pair removed, got {}",
             removed_count
         );
+    }
+
+    /// Sentinel (P1): a 3-equation-in-2-unknown singleton system whose
+    /// coefficients are pairwise dependent but whose RHS is not.
+    ///
+    /// Independent oracle (hand solve): pair A forces x1=5, pair B forces x2=7.
+    /// Pair C's coefficients (1,1) equal A's (1,0) + B's (0,1), so a coefficient-only
+    /// redundancy check sees it as implied — but its RHS=100 must then equal
+    /// 5+7=12, which it does not. The system has no solution.
+    ///
+    /// Before the fix, `equality_constraint_qr` dropped whichever row lost the
+    /// coefficient tie-break and returned `()` unconditionally, silently accepting
+    /// the reduced (still-inconsistent) system as feasible.
+    #[test]
+    fn equality_constraint_qr_detects_inconsistent_singleton_triple() {
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 2, 3, 4, 4, 5, 5],
+            &[0, 0, 1, 1, 0, 1, 0, 1],
+            &[1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![5.0, -5.0, 7.0, -7.0, 100.0, -100.0];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+        let mut removed = vec![false; m];
+        assert!(
+            !equality_constraint_qr(&prob, &mut removed, &SolverOptions::default()),
+            "BUG: x1=5 & x2=7 force x1+x2=12, contradicting pair C's =100 \
+             (hand oracle), but equality_constraint_qr reported the system \
+             consistent. removed={:?}",
+            removed
+        );
+    }
+
+    /// Sentinel (P1): end-to-end `solve_qp` must report `Infeasible`,
+    /// not silently solve a truncated-but-feasible-looking reduced system.
+    ///
+    /// Same hand oracle as `equality_constraint_qr_detects_inconsistent_singleton_triple`.
+    #[test]
+    fn solve_qp_reports_infeasible_for_inconsistent_singleton_triple() {
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 2, 3, 4, 4, 5, 5],
+            &[0, 0, 1, 1, 0, 1, 0, 1],
+            &[1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![5.0, -5.0, 7.0, -7.0, 100.0, -100.0];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+        let result = crate::qp::solve_qp(&prob);
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::Infeasible,
+            "result={result:?}"
+        );
+    }
+
+    /// Sentinel (P1): same inconsistency as the singleton triple above,
+    /// but with every row carrying 2 nonzeros so Phase-1's singleton-row bound
+    /// fixing never fires and `equality_constraint_qr` is the only thing that
+    /// can catch it.
+    ///
+    /// Independent oracle (hand solve): Eq_A: x1+2x2=5, Eq_B: 3x1+x2=7 give the
+    /// unique point x1=1.8, x2=1.6 (solve the 2x2 linear system by substitution:
+    /// x1=5-2x2 into 3x1+x2=7 -> 15-6x2+x2=7 -> x2=1.6, x1=1.8). Eq_C's
+    /// coefficients (4,3) equal Eq_A+Eq_B's (1,2)+(3,1), so a coefficient-only
+    /// check sees it as implied, but 4*1.8+3*1.6=12, not the declared 999. No x
+    /// satisfies all three.
+    #[test]
+    fn equality_constraint_qr_detects_inconsistent_nonsingleton_triple() {
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            &[
+                1.0, 2.0, -1.0, -2.0, 3.0, 1.0, -3.0, -1.0, 4.0, 3.0, -4.0, -3.0,
+            ],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![5.0, -5.0, 7.0, -7.0, 999.0, -999.0];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(q, vec![0.0; n], a, b, vec![(-1.0e6, 1.0e6); n]).unwrap();
+        let mut removed = vec![false; m];
+        assert!(
+            !equality_constraint_qr(&prob, &mut removed, &SolverOptions::default()),
+            "BUG: Eq_A & Eq_B force x1=1.8, x2=1.6 (hand oracle), giving \
+             4x1+3x2=12, contradicting Eq_C's declared 999, but \
+             equality_constraint_qr reported the system consistent. removed={:?}",
+            removed
+        );
+    }
+
+    /// Sentinel (P1, codex PR#32 review): a dependent equality reached via
+    /// cancellation of large RHS values must not be flagged inconsistent by
+    /// IEEE-754 rounding noise in the eliminated residual.
+    ///
+    /// Independent oracle (hand solve): `3x+y=4e12`, `x+3y=4e12`,
+    /// `(x-y)/512=0` share the exact point x=y=1e12 (3e12+1e12=4e12,
+    /// 1e12+3e12=4e12, (1e12-1e12)/512=0). Before the fix, eliminating the
+    /// third (dependent) row against the first two pivot rows left a residual
+    /// of ~4.77e-7 against a `ZERO_TOL * (1 + |beq|=0)` = 1e-12 threshold
+    /// (observed exactly via a diagnostic print during triage), so
+    /// `equality_constraint_qr` returned `false` (inconsistent) despite the
+    /// system being satisfiable.
+    #[test]
+    fn equality_constraint_qr_large_rhs_cancellation_is_not_infeasible() {
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            &[
+                3.0,
+                1.0,
+                -3.0,
+                -1.0,
+                1.0,
+                3.0,
+                -1.0,
+                -3.0,
+                1.0 / 512.0,
+                -1.0 / 512.0,
+                -1.0 / 512.0,
+                1.0 / 512.0,
+            ],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![4e12, -4e12, 4e12, -4e12, 0.0, 0.0];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+        let mut removed = vec![false; m];
+        assert!(
+            equality_constraint_qr(&prob, &mut removed, &SolverOptions::default()),
+            "BUG: x=y=1e12 satisfies all three equalities exactly (hand oracle), \
+             but equality_constraint_qr reported the system inconsistent \
+             (false Infeasible from RHS-elimination rounding noise). removed={:?}",
+            removed
+        );
+    }
+
+    /// Negative control for the sentinel above: a *genuine* contradiction
+    /// riding on the same large-magnitude cancellation must still be caught,
+    /// so the relative-to-accumulated-scale threshold cannot have simply been
+    /// widened into uselessness.
+    ///
+    /// Independent oracle: same pivot rows as above force x=y=1e12, so
+    /// `(x-y)/512` must be exactly 0 — declaring it 5000 is unsatisfiable by
+    /// any x,y and must be rejected regardless of the 4e12-scale cancellation
+    /// in the pivot elimination.
+    #[test]
+    fn equality_constraint_qr_detects_inconsistency_amid_large_rhs_cancellation() {
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            &[
+                3.0,
+                1.0,
+                -3.0,
+                -1.0,
+                1.0,
+                3.0,
+                -1.0,
+                -3.0,
+                1.0 / 512.0,
+                -1.0 / 512.0,
+                -1.0 / 512.0,
+                1.0 / 512.0,
+            ],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![4e12, -4e12, 4e12, -4e12, 5000.0, -5000.0];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+        let mut removed = vec![false; m];
+        assert!(
+            !equality_constraint_qr(&prob, &mut removed, &SolverOptions::default()),
+            "BUG: x=y=1e12 (forced by the first two pivot rows, hand oracle) \
+             makes (x-y)/512=0, contradicting the declared 5000, but \
+             equality_constraint_qr reported the system consistent. \
+             removed={:?}",
+            removed
+        );
+    }
+
+    /// Negative control at 1e10 scale (same pattern as a prior review round's
+    /// scale check): `equality_constraint_qr_detects_inconsistent_nonsingleton_triple`
+    /// scaled ×1e10 on every RHS. Coefficients are untouched, so the pivot
+    /// system's residual-to-scale ratio is unchanged by the scaling — this
+    /// confirms the accumulated-scale threshold does not lose genuine
+    /// inconsistencies simply because the problem's RHS values are large.
+    ///
+    /// Independent oracle: scaling a consistent 2-unknown linear system's RHS
+    /// by a constant `k` scales its unique solution by `k` (linearity), so
+    /// Eq_A/Eq_B force x1=1.8e10, x2=1.6e10, giving 4x1+3x2=12e10 — Eq_C's
+    /// declared 999e10 contradicts that by 987e10.
+    #[test]
+    fn equality_constraint_qr_detects_inconsistent_nonsingleton_triple_at_1e10_scale() {
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            &[
+                1.0, 2.0, -1.0, -2.0, 3.0, 1.0, -3.0, -1.0, 4.0, 3.0, -4.0, -3.0,
+            ],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![5.0e10, -5.0e10, 7.0e10, -7.0e10, 999.0e10, -999.0e10];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+        let mut removed = vec![false; m];
+        assert!(
+            !equality_constraint_qr(&prob, &mut removed, &SolverOptions::default()),
+            "BUG: Eq_A & Eq_B force x1=1.8e10, x2=1.6e10 (hand oracle), giving \
+             4x1+3x2=12e10, contradicting Eq_C's declared 999e10, but \
+             equality_constraint_qr reported the system consistent at 1e10 \
+             scale. removed={:?}",
+            removed
+        );
+    }
+
+    /// Sentinel (P1): `run_qp_presolve_phase2` must propagate the
+    /// inconsistency as `QpPresolveStatus::Infeasible`, not hand the IPM a
+    /// truncated reduced problem while still claiming `Feasible`.
+    ///
+    /// Same hand oracle as `equality_constraint_qr_detects_inconsistent_nonsingleton_triple`.
+    /// Before the fix this asserted `phase2.presolve_status == Feasible` with a
+    /// 4-row reduced problem containing only Eq_A/Eq_B — Eq_C silently dropped.
+    #[test]
+    fn run_qp_presolve_phase2_reports_infeasible_for_inconsistent_nonsingleton_triple() {
+        use crate::presolve::run_qp_presolve_phase1;
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            &[
+                1.0, 2.0, -1.0, -2.0, 3.0, 1.0, -3.0, -1.0, 4.0, 3.0, -4.0, -3.0,
+            ],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![5.0, -5.0, 7.0, -7.0, 999.0, -999.0];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
+        let opts = SolverOptions::default();
+        let phase1 = run_qp_presolve_phase1(&prob, &opts);
+        assert_eq!(
+            phase1.presolve_status,
+            QpPresolveStatus::Feasible,
+            "phase1 (singleton/activity checks only) must not catch this \
+             non-singleton inconsistency — phase2 is the frontier under test"
+        );
+        let phase2 = run_qp_presolve_phase2(phase1, &opts);
+        assert_eq!(
+            phase2.presolve_status,
+            QpPresolveStatus::Infeasible,
+            "BUG: phase2 dropped Eq_C as 'redundant' and kept presolve_status \
+             Feasible on a hand-verified infeasible system"
+        );
+    }
+
+    /// Test data for the determinism sentinel below: 3 equality candidates —
+    /// Eq_A: x1+2x2=5, Eq_B: 3x1+x2=7, Eq_C: 4x1+3x2=12 (=Eq_A+Eq_B, consistent
+    /// this time) — that hash into 3 distinct `(nnz, col-pattern, |b|)` buckets.
+    /// n=2 pivots span 2 of the 3, so exactly one is dropped; *which* one
+    /// depends on `groups`' iteration order.
+    fn three_bucket_consistent_prob() -> QpProblem {
+        let n = 2usize;
+        let m = 6usize;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            &[
+                1.0, 2.0, -1.0, -2.0, 3.0, 1.0, -3.0, -1.0, 4.0, 3.0, -4.0, -3.0,
+            ],
+            m,
+            n,
+        )
+        .unwrap();
+        let b = vec![5.0, -5.0, 7.0, -7.0, 12.0, -12.0];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap()
+    }
+
+    /// Not a test on its own — invoked as a *child process* by
+    /// `equality_constraint_qr_redundant_choice_is_deterministic` below, which
+    /// filters to this exact name with `--nocapture` and parses its stdout.
+    /// A `HashMap`'s hasher keys are seeded once per OS process (verified
+    /// empirically: identical input, same already-compiled binary, gives
+    /// `[true,true,false,false,false,false]` in one process invocation and
+    /// `[false,false,true,true,false,false]` in the next), so the choice can
+    /// only be observed to vary across separate process runs, not within one.
+    #[test]
+    #[allow(clippy::print_stdout)] // stdout is the IPC channel to the parent-process sentinel
+    fn equality_constraint_qr_redundant_choice_probe() {
+        let prob = three_bucket_consistent_prob();
+        let mut removed = vec![false; prob.num_constraints];
+        assert!(equality_constraint_qr(
+            &prob,
+            &mut removed,
+            &SolverOptions::default()
+        ));
+        let encoded: String = removed.iter().map(|&b| if b { '1' } else { '0' }).collect();
+        println!("QR_DET_PROBE_RESULT={encoded}");
+    }
+
+    /// Sentinel: the redundant-row choice must be identical across
+    /// process runs on identical input — `groups` must use a
+    /// deterministically-ordered map (`BTreeMap`), not `HashMap` (whose
+    /// hasher keys are randomized per process).
+    #[test]
+    fn equality_constraint_qr_redundant_choice_is_deterministic() {
+        let exe = std::env::current_exe().expect("current_exe");
+        const RUNS: usize = 8;
+        let mut results: Vec<String> = Vec::with_capacity(RUNS);
+        for _ in 0..RUNS {
+            let output = std::process::Command::new(&exe)
+                .args([
+                    "presolve::qp_phase2::tests::equality_constraint_qr_redundant_choice_probe",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .output()
+                .expect("spawn child test process");
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let encoded = stdout
+                .lines()
+                .find_map(|l| l.strip_prefix("QR_DET_PROBE_RESULT="))
+                .unwrap_or_else(|| panic!("child probe did not print a result; stdout={stdout}"))
+                .to_string();
+            results.push(encoded);
+        }
+        let first = &results[0];
+        for (i, r) in results.iter().enumerate() {
+            assert_eq!(
+                r, first,
+                "BUG: redundant-row choice varies across process runs on \
+                 identical input (run {i} vs 0) — all runs: {:?}",
+                results
+            );
+        }
     }
 
     #[test]
@@ -1057,7 +1455,11 @@ mod tests {
         )
         .unwrap();
         let mut removed = vec![false; m];
-        equality_constraint_qr(&prob, &mut removed, &SolverOptions::default());
+        assert!(equality_constraint_qr(
+            &prob,
+            &mut removed,
+            &SolverOptions::default()
+        ));
         let removed_count = removed.iter().filter(|&&b| b).count();
         assert_eq!(
             removed_count, 0,
@@ -1097,7 +1499,11 @@ mod tests {
         )
         .unwrap();
         let mut removed = vec![false; m];
-        equality_constraint_qr(&prob, &mut removed, &SolverOptions::default());
+        assert!(equality_constraint_qr(
+            &prob,
+            &mut removed,
+            &SolverOptions::default()
+        ));
         let removed_count = removed.iter().filter(|&&b| b).count();
         assert!(
             removed_count >= 2,

@@ -473,6 +473,7 @@ pub(crate) fn solve_dual_advanced(
                             &a,
                             &mut x_b,
                             &c,
+                            &b,
                             &mut basis,
                             m,
                             sf.n_total,
