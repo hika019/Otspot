@@ -12,6 +12,7 @@ pub(crate) mod bound;
 pub(crate) mod bound_alpha_bb;
 pub(crate) mod bound_mccormick;
 pub(crate) mod branch;
+pub(crate) mod dual_recovery;
 pub(crate) mod node;
 pub(crate) mod pruning;
 pub(crate) mod tree;
@@ -22,8 +23,10 @@ use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::certificate::prove_optimal;
 use crate::qp::ipm_solver::core::compute_duality_gap_rel;
 use crate::qp::ipm_solver::kkt::{
-    bound_violation as kkt_bound_violation, complementarity_residual_rel as kkt_comp_residual,
-    kkt_residual_rel, primal_residual_rel as kkt_primal_residual,
+    bound_violation as kkt_bound_violation,
+    complementarity_componentwise_rel as kkt_comp_componentwise,
+    complementarity_residual_rel as kkt_comp_residual, kkt_residual_rel,
+    primal_residual_rel as kkt_primal_residual,
 };
 use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid::dual_sign_violation as kkt_dual_sign_violation;
@@ -239,23 +242,17 @@ pub fn solve_qp_global_with_stats(
     let root_x = state.incumbent_sol.clone();
     match select_branching_variable(&root_node, &root_x) {
         None => {
-            if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-                state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
-                // 分枝不能かつ gap 以内 = 未探索領域なしで証明完了 → open region なし sentinel。
-                stats.remaining_lb = f64::INFINITY;
-                return (
-                    state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps),
-                    stats,
-                );
-            }
-            // 分枝不能かつ未証明 = root box 全体が未探索 (未証明) 領域として残る。その下界は
-            // root_lb そのもの。default の `0.0` は「documented 下界」でも「open region なし」
-            // でもない捏造値なので、実際の未探索領域下界を公開する。
-            stats.remaining_lb = root_lb;
-            return (
-                state.finalize_unproven(root_lb, stats.nodes_processed, 0, cfg, q_indefinite),
-                stats,
+            let result = finalize_unbranchable_root(
+                state,
+                problem,
+                &shared_opts,
+                &mut stats,
+                root_lb,
+                cfg,
+                q_indefinite,
+                user_eps,
             );
+            return (result, stats);
         }
         Some(j) => {
             let warm = state.build_warm();
@@ -370,6 +367,57 @@ pub fn solve_qp_global_with_stats(
     (result, stats)
 }
 
+/// polish / dual recovery の sub-solve が使う deadline。
+///
+/// B&B の残時間を優先継承し、枯渇時のみ [`POLISH_TIMEOUT_SECS`] の fresh budget を
+/// 使う (`timeout_secs` 契約破りの回避と、budget 枯渇時の fallback の両立)。
+/// deadline 到達で B&B が終了した経路では `base_opts.deadline` は既に過去なので、
+/// これを補修せずに sub-solve へ渡すと即 Timeout になる。
+fn polish_deadline(base_opts: &SolverOptions) -> Instant {
+    let now = Instant::now();
+    match base_opts.deadline {
+        Some(d) if d > now => d,
+        _ => now + Duration::from_secs_f64(POLISH_TIMEOUT_SECS),
+    }
+}
+
+/// 分枝不能な root の終端処理。
+///
+/// gap 以内なら未探索領域なしで証明完了 (`remaining_lb = ∞` sentinel)。そうでなければ
+/// root box 全体が未証明領域として残るので、その下界 (`root_lb`) を公開する
+/// (`GlobalStats::default()` 由来の `0.0` は「documented 下界」でも
+/// 「open region なし」でもない捏造値)。
+#[allow(clippy::too_many_arguments)]
+fn finalize_unbranchable_root(
+    mut state: SearchState,
+    problem: &QpProblem,
+    shared_opts: &SolverOptions,
+    stats: &mut GlobalStats,
+    root_lb: f64,
+    cfg: &GlobalOptimizationConfig,
+    q_indefinite: bool,
+    user_eps: f64,
+) -> SolverResult {
+    // 証明可否によらず先に polish/復元を通す (B&B ループ側の終端と同じ順序)。
+    // 未証明経路だけ乗数の復元を飛ばすと、局所最適だが barrier 由来の乗数を持つ
+    // root が `local_kkt_within` で `FeasiblePoint` へ落ちる。
+    state.polish_incumbent_duals(problem, shared_opts, cfg.gap_tol, q_indefinite);
+    if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
+        stats.remaining_lb = f64::INFINITY;
+        return state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps);
+    }
+    stats.remaining_lb = root_lb;
+    state.finalize_unproven(
+        problem,
+        root_lb,
+        stats.nodes_processed,
+        0,
+        cfg,
+        q_indefinite,
+        user_eps,
+    )
+}
+
 /// Builds the final `SolverResult` from the B&B loop's exit state: queue
 /// non-empty, `search_incomplete`, or deadline/cancel/`max_nodes` reached all
 /// mean `halted_early`, in which case `remaining_lb` (folded into `stats.
@@ -423,11 +471,13 @@ fn finalize_search_outcome(
         state.finalize_proven(problem, lb_for_proof, q_indefinite, cfg.gap_tol, user_eps)
     } else {
         state.finalize_unproven(
+            problem,
             remaining_lb,
             stats.nodes_processed,
             stats.max_depth_seen,
             cfg,
             q_indefinite,
+            user_eps,
         )
     }
 }
@@ -606,6 +656,58 @@ fn structural_empty_col_mask(problem: &QpProblem) -> Vec<bool> {
         .collect()
 }
 
+/// 局所最適性の主張に必要な KKT 5 条件 (stationarity / primal feasibility /
+/// bound feasibility / complementarity / dual sign) を元問題空間で検証する。
+///
+/// `prove_optimal` との違いは duality gap を含まないこと: gap は大域証明の条件で
+/// あり、`LocallyOptimal` / `NonconvexLocal` の主張には要らない。閾値は
+/// `(user_eps * POLISH_KKT_ACCEPT_FACTOR).min(POLISH_KKT_ABS_CAP)`。
+fn local_kkt_within(problem: &QpProblem, res: &SolverResult, user_eps: f64) -> bool {
+    // dimension guard — mirrors prove_optimal (certificate.rs ~L64)
+    let n_lb = problem
+        .bounds
+        .iter()
+        .filter(|&&(lb, _)| lb.is_finite())
+        .count();
+    let n_ub = problem
+        .bounds
+        .iter()
+        .filter(|&&(_, ub)| ub.is_finite())
+        .count();
+    if res.solution.len() != problem.num_vars
+        || res.dual_solution.len() != problem.num_constraints
+        || res.bound_duals.len() != n_lb + n_ub
+    {
+        return false;
+    }
+    let kkt_tol = (user_eps * POLISH_KKT_ACCEPT_FACTOR).min(POLISH_KKT_ABS_CAP);
+    let eliminated_cols = structural_empty_col_mask(problem);
+    let view = ProblemView {
+        q: &problem.q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+        eliminated_cols: &eliminated_cols,
+    };
+    let kkt = kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals);
+    let pf = kkt_primal_residual(&view, &res.solution);
+    let bv = kkt_bound_violation(&problem.bounds, &res.solution);
+    // `prove_optimal` と同じ基準: 全体スケールで正規化した残差だけでは、大きな正当な
+    // 乗数が分母を膨らませて人工 bound 由来の違反 (成分単位では O(1)) を隠せる。
+    let comp = kkt_comp_residual(&view, &res.solution, &res.dual_solution, &res.bound_duals).max(
+        kkt_comp_componentwise(&view, &res.solution, &res.dual_solution, &res.bound_duals),
+    );
+    let dsign = kkt_dual_sign_violation(
+        &problem.constraint_types,
+        &res.dual_solution,
+        &problem.bounds,
+        &res.bound_duals,
+    );
+    kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol && dsign <= kkt_tol
+}
+
 /// SuboptimalSolution な polish 結果を KKT 残差で採用可否を追加判定する。
 ///
 /// `prove_optimal` の duality_gap チェックが `user_eps` を僅かに上回り SuboptimalSolution
@@ -629,55 +731,7 @@ fn is_polish_suboptimal_acceptable(
     if polished.objective > incumbent_obj + gap_tol * scale {
         return false;
     }
-    // dimension guard — mirrors prove_optimal (certificate.rs ~L64)
-    let n_lb = problem
-        .bounds
-        .iter()
-        .filter(|&&(lb, _)| lb.is_finite())
-        .count();
-    let n_ub = problem
-        .bounds
-        .iter()
-        .filter(|&&(_, ub)| ub.is_finite())
-        .count();
-    if polished.solution.len() != problem.num_vars
-        || polished.dual_solution.len() != problem.num_constraints
-        || polished.bound_duals.len() != n_lb + n_ub
-    {
-        return false;
-    }
-    let kkt_tol = (user_eps * POLISH_KKT_ACCEPT_FACTOR).min(POLISH_KKT_ABS_CAP);
-    let eliminated_cols = structural_empty_col_mask(problem);
-    let view = ProblemView {
-        q: &problem.q,
-        a: &problem.a,
-        c: &problem.c,
-        b: &problem.b,
-        bounds: &problem.bounds,
-        constraint_types: &problem.constraint_types,
-        eliminated_cols: &eliminated_cols,
-    };
-    let kkt = kkt_residual_rel(
-        &view,
-        &polished.solution,
-        &polished.dual_solution,
-        &polished.bound_duals,
-    );
-    let pf = kkt_primal_residual(&view, &polished.solution);
-    let bv = kkt_bound_violation(&problem.bounds, &polished.solution);
-    let comp = kkt_comp_residual(
-        &view,
-        &polished.solution,
-        &polished.dual_solution,
-        &polished.bound_duals,
-    );
-    let dsign = kkt_dual_sign_violation(
-        &problem.constraint_types,
-        &polished.dual_solution,
-        &problem.bounds,
-        &polished.bound_duals,
-    );
-    kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol && dsign <= kkt_tol
+    local_kkt_within(problem, polished, user_eps)
 }
 
 /// 非凸 B&B 向け KKT recovery accept: 目的関数制約なしで IPM 収束 + 全 KKT を確認する。
@@ -706,54 +760,7 @@ fn is_polish_kkt_recovery(
     if polished.objective > incumbent_obj + gap_tol * scale {
         return false;
     }
-    let n_lb = problem
-        .bounds
-        .iter()
-        .filter(|&&(lb, _)| lb.is_finite())
-        .count();
-    let n_ub = problem
-        .bounds
-        .iter()
-        .filter(|&&(_, ub)| ub.is_finite())
-        .count();
-    if polished.solution.len() != problem.num_vars
-        || polished.dual_solution.len() != problem.num_constraints
-        || polished.bound_duals.len() != n_lb + n_ub
-    {
-        return false;
-    }
-    let kkt_tol = (user_eps * POLISH_KKT_ACCEPT_FACTOR).min(POLISH_KKT_ABS_CAP);
-    let eliminated_cols = structural_empty_col_mask(problem);
-    let view = ProblemView {
-        q: &problem.q,
-        a: &problem.a,
-        c: &problem.c,
-        b: &problem.b,
-        bounds: &problem.bounds,
-        constraint_types: &problem.constraint_types,
-        eliminated_cols: &eliminated_cols,
-    };
-    let kkt = kkt_residual_rel(
-        &view,
-        &polished.solution,
-        &polished.dual_solution,
-        &polished.bound_duals,
-    );
-    let pf = kkt_primal_residual(&view, &polished.solution);
-    let bv = kkt_bound_violation(&problem.bounds, &polished.solution);
-    let comp = kkt_comp_residual(
-        &view,
-        &polished.solution,
-        &polished.dual_solution,
-        &polished.bound_duals,
-    );
-    let dsign = kkt_dual_sign_violation(
-        &problem.constraint_types,
-        &polished.dual_solution,
-        &problem.bounds,
-        &polished.bound_duals,
-    );
-    kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol && dsign <= kkt_tol
+    local_kkt_within(problem, polished, user_eps)
 }
 
 /// search state encapsulation: incumbent + 最終 result の組み立てを 1 箇所に集約。
@@ -846,14 +853,7 @@ impl SearchState {
         opts.warm_start_qp = Some(warm);
         opts.multistart = None;
         opts.global_optimization = None;
-        // B&B 残時間を優先継承し、枯渇時のみ POLISH_TIMEOUT_SECS の fresh budget を使う
-        // (timeout_secs 契約破り回避 + budget 枯渇時 fallback 両立)。
-        let now = Instant::now();
-        let polish_deadline = match base_opts.deadline {
-            Some(d) if d > now => d,
-            _ => now + Duration::from_secs_f64(POLISH_TIMEOUT_SECS),
-        };
-        opts.deadline = Some(polish_deadline);
+        opts.deadline = Some(polish_deadline(base_opts));
         opts.timeout_secs = None;
         let user_eps = base_opts.ipm_eps();
         let polished = crate::qp::solve_qp_with(problem, &opts);
@@ -873,6 +873,48 @@ impl SearchState {
         {
             self.update_incumbent(&polished);
         }
+        self.recover_incumbent_duals_in_place(problem, base_opts, user_eps);
+    }
+
+    /// 再解 polish で直らなかった sub-box 乗数を、`x` を固定したまま復元する。
+    ///
+    /// 非凸では polish の再解が別の local optimum へ滑って棄却されることがあり、
+    /// そのとき incumbent には node の (元問題では無効な) 乗数が残る。`x` は動かさず
+    /// 元問題の active set 上で乗数を解き直し、局所 KKT を満たす場合だけ差し替える
+    /// (目的値・主解は不変なので incumbent の品質を落とさない)。
+    fn recover_incumbent_duals_in_place(
+        &mut self,
+        problem: &QpProblem,
+        base_opts: &SolverOptions,
+        user_eps: f64,
+    ) {
+        if local_kkt_within(problem, &self.incumbent_result, user_eps) {
+            return;
+        }
+        // deadline はここで取り直す: 先行する polish の再解が残り budget を
+        // 使い切っていることがあり、その状態を継承すると復元 LP が即 Timeout する
+        // (復元が最も要る場面ほど失敗する)。
+        let mut opts = base_opts.clone();
+        opts.deadline = Some(polish_deadline(base_opts));
+        opts.timeout_secs = None;
+        let Some(recovered) = dual_recovery::recover_duals_at_fixed_x(
+            problem,
+            &self.incumbent_result.solution,
+            &opts,
+            user_eps,
+        ) else {
+            return;
+        };
+        let mut candidate = self.incumbent_result.clone();
+        candidate.dual_solution = recovered.y;
+        candidate.bound_duals = recovered.bound_duals;
+        // 乗数を入れ替えたので、node 解が持っていた duality gap は無効。残すと
+        // `finalize_proven` が古い値を優先し、復元後の乗数と無関係な gap で
+        // 証明済み/未証明を判定してしまう。
+        candidate.duality_gap_rel = None;
+        if local_kkt_within(problem, &candidate, user_eps) {
+            self.incumbent_result = candidate;
+        }
     }
 
     /// Q が indefinite なら `NonconvexGlobal`、convex なら `Optimal` を set。
@@ -888,7 +930,7 @@ impl SearchState {
     ///
     /// ## sentinel (no-op-fail)
     /// このメソッドの `prove_optimal` 呼び出しを除去すると、
-    /// `finalize_proven_dual_gate_table` テストが FAIL する。
+    /// `finalize_proven_bad_dual_demotes_to_feasible_point` テストが FAIL する。
     fn finalize_proven(
         mut self,
         problem: &QpProblem,
@@ -943,14 +985,18 @@ impl SearchState {
                 );
             }
             Err(not_proven) => {
-                self.incumbent_result.status = if !is_feasible_result(&self.incumbent_result.status)
-                {
-                    SolveStatus::FeasiblePoint
-                } else if q_indefinite {
-                    SolveStatus::NonconvexLocal
-                } else {
-                    SolveStatus::LocallyOptimal
-                };
+                // 降格先の `LocallyOptimal`/`NonconvexLocal` も局所最適性の主張なので、
+                // status ゲートに加えて元問題空間の局所 KKT を要求する
+                // (`finalize_unproven` と同じ contract)。
+                let local_ok = local_kkt_within(problem, &self.incumbent_result, user_eps);
+                self.incumbent_result.status =
+                    if !is_feasible_result(&self.incumbent_result.status) || !local_ok {
+                        SolveStatus::FeasiblePoint
+                    } else if q_indefinite {
+                        SolveStatus::NonconvexLocal
+                    } else {
+                        SolveStatus::LocallyOptimal
+                    };
                 log::debug!(
                     "QP global gap-closed but KKT failed ({:?}): demoted to {}",
                     not_proven.failing_conditions,
@@ -962,27 +1008,38 @@ impl SearchState {
     }
 
     /// incumbent が品質ゲート (`is_feasible_result`: Optimal/LocallyOptimal/
-    /// SuboptimalSolution) を通っていれば、Q が indefinite なら `NonconvexLocal`、
-    /// convex なら `LocallyOptimal` を set。品質ゲートを通っていない incumbent
-    /// (= `is_verified_feasible_point` の feasibility 検証のみで採用された
-    /// Stalled/MaxIterations 由来の点) には最適性・KKT 品質を主張できないため
-    /// `FeasiblePoint` を set する。
+    /// SuboptimalSolution) を通り、かつ元問題空間で局所 KKT 条件
+    /// ([`local_kkt_within`]) を満たしていれば、Q が indefinite なら
+    /// `NonconvexLocal`、convex なら `LocallyOptimal` を set。どちらか一方でも
+    /// 欠けた incumbent (feasibility 検証のみで採用された Stalled/MaxIterations
+    /// 由来の点、または node の sub-box 乗数しか持たない点) には局所最適性を
+    /// 主張できないため `FeasiblePoint` を set する。
     /// (= IPM 単発 inertia 補正 `LocallyOptimal` と BB 打切 `NonconvexLocal` を分離)
+    ///
+    /// status だけを見て `NonconvexLocal` を刻むと、分枝で加えた人工 bound の乗数を
+    /// 持つ incumbent が「局所最適解」を名乗る (`prop_nonconvex_qp_kkt_invariants_
+    /// constrained` が KKT max 2.06e-1 で検出した欠陥)。乗数の復元は
+    /// `recover_incumbent_duals_in_place` が先に試み、それでも満たせない点だけが
+    /// ここで降格する。
     fn finalize_unproven(
         mut self,
+        problem: &QpProblem,
         lower_bound: f64,
         nodes: usize,
         depth: usize,
         cfg: &GlobalOptimizationConfig,
         q_indefinite: bool,
+        user_eps: f64,
     ) -> SolverResult {
-        self.incumbent_result.status = if !is_feasible_result(&self.incumbent_result.status) {
-            SolveStatus::FeasiblePoint
-        } else if q_indefinite {
-            SolveStatus::NonconvexLocal
-        } else {
-            SolveStatus::LocallyOptimal
-        };
+        let local_ok = local_kkt_within(problem, &self.incumbent_result, user_eps);
+        self.incumbent_result.status =
+            if !is_feasible_result(&self.incumbent_result.status) || !local_ok {
+                SolveStatus::FeasiblePoint
+            } else if q_indefinite {
+                SolveStatus::NonconvexLocal
+            } else {
+                SolveStatus::LocallyOptimal
+            };
         let gap = self.incumbent_obj - lower_bound;
         log::debug!(
             "QP global unproven: status={} obj={:.6e} lb={:.6e} gap={:.3e} nodes={} depth={} tol={:.0e}",
@@ -1952,30 +2009,6 @@ mod tests {
         );
         assert!(r.opt_cert.is_some(), "Optimal must carry opt_cert");
 
-        // ── convex-bad-dual: z=[100,-100], large gap → LocallyOptimal ────────
-        // Sentinel: without the gate this row returns Optimal, failing the assertion.
-        let bad_conv = SolverResult {
-            status: SolveStatus::SuboptimalSolution,
-            objective: 0.0,
-            solution: vec![0.0_f64],
-            dual_solution: vec![],
-            bound_duals: vec![100.0_f64, -100.0_f64], // wrong sign + stationarity violation
-            duality_gap_rel: Some(0.5),
-            ..Default::default()
-        };
-        let r =
-            SearchState::new(bad_conv).finalize_proven(&p_convex, 0.0, false, gap_tol, user_eps);
-        assert_eq!(
-            r.status,
-            SolveStatus::LocallyOptimal,
-            "convex-bad-dual must be demoted to LocallyOptimal"
-        );
-        assert!(
-            r.bound_gap_cert.is_none(),
-            "demoted must have no bound_gap_cert"
-        );
-        assert!(r.opt_cert.is_none(), "demoted must have no opt_cert");
-
         // ── indefinite-good-dual: x=1 (ub active), z=[0,2] → NonconvexGlobal
         let good_indef = SolverResult {
             status: SolveStatus::Optimal,
@@ -1998,24 +2031,254 @@ mod tests {
             "NonconvexGlobal must carry bound_gap_cert"
         );
         assert!(r.opt_cert.is_some(), "NonconvexGlobal must carry opt_cert");
+    }
 
-        // ── indefinite-bad-dual: z=[50,50] → stationarity fails → NonconvexLocal
-        // Sentinel: without the gate this row returns NonconvexGlobal, failing the assertion.
+    /// B&B が deadline 到達で終了した経路では `base_opts.deadline` は既に過去。
+    /// polish / dual recovery の sub-solve にそのまま渡すと即 Timeout になるため、
+    /// 枯渇時は fresh budget へ補修されなければならない。
+    ///
+    /// ## Sentinel (no-op-fail)
+    /// `polish_deadline` を `base_opts.deadline` の素通しに戻すと、期限切れケースの
+    /// assert が FAIL する。
+    #[test]
+    fn polish_deadline_repairs_exhausted_budget() {
+        let mut expired = SolverOptions::default();
+        expired.deadline = Some(Instant::now() - Duration::from_secs(1));
+        let repaired = polish_deadline(&expired);
+        assert!(
+            repaired > Instant::now(),
+            "期限切れ deadline は fresh budget へ補修されるべき"
+        );
+
+        // 残時間があるときは B&B の deadline をそのまま継承する (契約破り防止)。
+        let live_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut live = SolverOptions::default();
+        live.deadline = Some(live_deadline);
+        assert_eq!(polish_deadline(&live), live_deadline);
+    }
+
+    /// proptest seed 43b5a909 の問題。x* = (lb₀, 0.4960) は元問題の KKT 点だが、
+    /// そこから再解 polish を掛けると別の (より悪い) local optimum へ滑るため、
+    /// 乗数は「x を固定した復元」でしか直せない。
+    fn seed_43b5a909_problem() -> QpProblem {
+        use crate::problem::ConstraintType;
+
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 0, 1],
+            &[0, 0, 1, 1],
+            &[
+                -1.326916674369138_f64,
+                0.5594909414228733,
+                0.5594909414228733,
+                -0.029627559427708422,
+            ],
+            2,
+            2,
+        )
+        .unwrap();
+        let a = CscMatrix::from_triplets(
+            &[0, 0],
+            &[0, 1],
+            &[0.9008102281303486_f64, -0.5517737255870893],
+            2,
+            2,
+        )
+        .unwrap();
+        QpProblem::new(
+            q,
+            vec![0.5093837208820018_f64, 0.5260703864092237],
+            a,
+            vec![-1.9876786522125578_f64, 0.5],
+            vec![
+                (-1.9027544688666718_f64, 1.9027544688666718),
+                (-1.2237729585496602, 1.2237729585496602),
+            ],
+            vec![ConstraintType::Ge, ConstraintType::Le],
+        )
+        .unwrap()
+    }
+
+    /// 期限切れ deadline のまま終わった B&B でも、sub-box 乗数は復元されて
+    /// 局所 KKT を満たす (復元 LP が期限切れ deadline を継承しないこと)。
+    ///
+    /// incumbent は seed 43b5a909 の実測値: 行 0 が active なのに y = 0、非活性な
+    /// x₁ 上界に z = 0.553 が残った node 解。再解 polish はここから別の local へ
+    /// 滑って棄却されるので、直せるのは固定 x の復元だけ。
+    ///
+    /// ## Sentinel (no-op-fail)
+    /// `polish_incumbent_duals` が復元へ `base_opts` (期限切れ deadline) を渡す
+    /// 実装に戻すと、復元 LP が即 Timeout になり FAIL する。
+    #[test]
+    fn polish_recovers_duals_under_exhausted_deadline() {
+        let problem = seed_43b5a909_problem();
+        let contaminated = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: -3.641986_f64,
+            solution: vec![-1.9027544688666718_f64, 0.49596048587182223],
+            dual_solution: vec![0.0, 0.0],
+            bound_duals: vec![3.311665752000553_f64, 0.0, 0.0, 0.5531976014425323],
+            ..Default::default()
+        };
+        assert!(
+            !local_kkt_within(&problem, &contaminated, 1e-6),
+            "test premise: 汚染された乗数は局所 KKT を満たさない"
+        );
+
+        let mut state = SearchState::new(contaminated);
+        state.incumbent_updated = true; // node 由来 incumbent = polish 対象
+        let mut opts = SolverOptions::default();
+        opts.deadline = Some(Instant::now() - Duration::from_secs(1));
+        state.polish_incumbent_duals(&problem, &opts, 1e-6, true);
+        assert!(
+            local_kkt_within(&problem, &state.incumbent_result, 1e-6),
+            "期限切れ budget でも乗数を復元すべき: y = {:?} z = {:?}",
+            state.incumbent_result.dual_solution,
+            state.incumbent_result.bound_duals
+        );
+    }
+
+    /// 大きな正当乗数がスケールを膨らませ、人工 bound 由来の complementarity 違反を
+    /// 全体正規化残差が隠す構成 (Codex P1)。
+    ///
+    /// n=2, Q=diag(2,2), 制約行なし、x=[1, 0.5] (x₀ は上界 active、x₁ は内点)。
+    /// z_ub = [1e5, 1] とし、c を手計算で stationarity ちょうど 0 に合わせる:
+    ///   x₀: 2·1 + c₀ + 1e5 = 0 → c₀ = −100002
+    ///   x₁: 2·0.5 + c₁ + 1  = 0 → c₁ = −2
+    /// 非活性な x₁ 上界の乗数 1 は complementarity 1·|0.5−1| = 0.5 の違反だが、
+    /// 全体正規化 (|zᵀx| ≈ 1e5) では 5e-6 に薄まる。成分単位では O(0.5) のまま。
+    ///
+    /// ## Sentinel (no-op-fail)
+    /// `local_kkt_within` から componentwise complementarity を外すと通ってしまい
+    /// この test が FAIL する。
+    #[test]
+    fn local_kkt_within_catches_componentwise_complementarity() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0_f64, 2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let problem = QpProblem::new_all_le(
+            q,
+            vec![-100002.0_f64, -2.0],
+            a,
+            vec![],
+            vec![(0.0_f64, 1.0), (0.0, 1.0)],
+        )
+        .unwrap();
+        let res = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![1.0_f64, 0.5],
+            dual_solution: vec![],
+            // layout: [z_lb0, z_lb1, z_ub0, z_ub1]
+            bound_duals: vec![0.0_f64, 0.0, 1e5, 1.0],
+            ..Default::default()
+        };
+        assert!(
+            !local_kkt_within(&problem, &res, 1e-6),
+            "非活性 bound の乗数 1 (成分 comp 0.5) を見逃してはならない"
+        );
+    }
+
+    /// 乗数を復元したら sub-box 由来の `duality_gap_rel` は捨てる (Codex P1)。
+    /// 残すと `finalize_proven` が復元後の乗数と無関係な古い gap で判定する。
+    ///
+    /// ## Sentinel (no-op-fail)
+    /// `candidate.duality_gap_rel = None` を外すと stale な `Some(0.0)` が残り FAIL する。
+    #[test]
+    fn recovered_duals_drop_stale_duality_gap() {
+        let problem = seed_43b5a909_problem();
+        let contaminated = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: -3.641986_f64,
+            solution: vec![-1.9027544688666718_f64, 0.49596048587182223],
+            dual_solution: vec![0.0, 0.0],
+            bound_duals: vec![3.311665752000553_f64, 0.0, 0.0, 0.5531976014425323],
+            duality_gap_rel: Some(0.0), // sub-box solve 由来の stale な値
+            ..Default::default()
+        };
+        let mut state = SearchState::new(contaminated);
+        state.incumbent_updated = true;
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(10.0);
+        state.polish_incumbent_duals(&problem, &opts, 1e-6, true);
+
+        assert!(
+            local_kkt_within(&problem, &state.incumbent_result, 1e-6),
+            "test premise: 乗数が復元されていること"
+        );
+        assert!(
+            state.incumbent_result.duality_gap_rel.is_none(),
+            "復元後は stale gap を持ち越さない: {:?}",
+            state.incumbent_result.duality_gap_rel
+        );
+    }
+
+    /// min x², box [−1, 1] (Q = [2])。x* = 0 が内点最適で g = 0、乗数はすべて 0。
+    fn convex_box_1d() -> QpProblem {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        QpProblem::new_all_le(q, vec![0.0], a, vec![], vec![(-1.0, 1.0)]).unwrap()
+    }
+
+    /// `finalize_proven` が `prove_optimal` に落ちたとき、乗数が局所 KKT すら
+    /// 満たさない incumbent は `FeasiblePoint` まで降格する (局所最適性も主張しない)。
+    ///
+    /// ## Sentinel (no-op-fail)
+    /// `finalize_proven` から `prove_optimal` 呼び出しを外すと両行が Optimal /
+    /// NonconvexGlobal になり FAIL する。`local_kkt_within` ゲートを外すと
+    /// LocallyOptimal / NonconvexLocal になり FAIL する。
+    #[test]
+    fn finalize_proven_bad_dual_demotes_to_feasible_point() {
+        let user_eps = 1e-6_f64;
+        let gap_tol = 1e-6_f64;
+
+        // convex: x=0, z=[100,-100] → 符号違反 + stationarity 違反、gap も大。
+        let bad_conv = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![0.0_f64],
+            dual_solution: vec![],
+            bound_duals: vec![100.0_f64, -100.0_f64],
+            duality_gap_rel: Some(0.5),
+            ..Default::default()
+        };
+        let r = SearchState::new(bad_conv).finalize_proven(
+            &convex_box_1d(),
+            0.0,
+            false,
+            gap_tol,
+            user_eps,
+        );
+        assert_eq!(
+            r.status,
+            SolveStatus::FeasiblePoint,
+            "convex-bad-dual must be demoted to FeasiblePoint"
+        );
+        assert!(
+            r.bound_gap_cert.is_none(),
+            "demoted must have no bound_gap_cert"
+        );
+        assert!(r.opt_cert.is_none(), "demoted must have no opt_cert");
+
+        // indefinite: x=1, z=[50,50] → stationarity −2 − 50 + 50 = −2 ≠ 0 (手計算)。
         let bad_indef = SolverResult {
             status: SolveStatus::SuboptimalSolution,
             objective: -1.0,
             solution: vec![1.0_f64],
             dual_solution: vec![],
-            bound_duals: vec![50.0_f64, 50.0_f64], // stationarity: -2 - 50 + 50 = -2 ≠ 0
+            bound_duals: vec![50.0_f64, 50.0_f64],
             duality_gap_rel: Some(0.5),
             ..Default::default()
         };
-        let r =
-            SearchState::new(bad_indef).finalize_proven(&p_indef, -1.0, true, gap_tol, user_eps);
+        let r = SearchState::new(bad_indef).finalize_proven(
+            &indefinite_box_1d(),
+            -1.0,
+            true,
+            gap_tol,
+            user_eps,
+        );
         assert_eq!(
             r.status,
-            SolveStatus::NonconvexLocal,
-            "indefinite-bad-dual must be demoted to NonconvexLocal"
+            SolveStatus::FeasiblePoint,
+            "indefinite-bad-dual must be demoted to FeasiblePoint"
         );
         assert!(
             r.bound_gap_cert.is_none(),
@@ -2085,25 +2348,42 @@ mod tests {
         assert!(r.opt_cert.is_some(), "NonconvexGlobal must carry opt_cert");
     }
 
+    /// min −x², box [−1, 1] (Q = [−2])。x* = 1 で上界 active、g = −2 なので
+    /// 手計算オラクルは `bound_duals = [z_lb, z_ub] = [0, 2]` (stationarity −2 + 2 = 0)。
+    /// `z_ub` を 0 にすると残差 2 が残る。
+    fn indefinite_box_1d() -> QpProblem {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[-2.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        QpProblem::new_all_le(q, vec![0.0], a, vec![], vec![(-1.0, 1.0)]).unwrap()
+    }
+
     /// Sentinel (P2-4): `finalize_unproven` の incumbent が品質ゲート
     /// (`is_feasible_result`) を通っていない (= Stalled/MaxIterations 由来の
     /// feasibility-only 点) 場合、LocallyOptimal/NonconvexLocal ではなく
-    /// `FeasiblePoint` を返さなければならない。品質ゲートを通った incumbent は
-    /// 従来通り LocallyOptimal/NonconvexLocal を維持する。
+    /// `FeasiblePoint` を返さなければならない。
     #[test]
     fn finalize_unproven_feasibility_only_incumbent_yields_feasible_point() {
         let cfg = GlobalOptimizationConfig::default();
+        let problem = indefinite_box_1d();
 
         for status in [SolveStatus::Stalled, SolveStatus::MaxIterations] {
             for q_indefinite in [false, true] {
                 let unverified = SolverResult {
                     status: status.clone(),
-                    objective: 3.0,
-                    solution: vec![0.5_f64],
+                    objective: -1.0,
+                    solution: vec![1.0_f64],
+                    bound_duals: vec![0.0, 2.0],
                     ..Default::default()
                 };
-                let r =
-                    SearchState::new(unverified).finalize_unproven(0.0, 1, 0, &cfg, q_indefinite);
+                let r = SearchState::new(unverified).finalize_unproven(
+                    &problem,
+                    -1.0,
+                    1,
+                    0,
+                    &cfg,
+                    q_indefinite,
+                    1e-6,
+                );
                 assert_eq!(
                     r.status,
                     SolveStatus::FeasiblePoint,
@@ -2113,23 +2393,75 @@ mod tests {
                 );
             }
         }
+    }
 
-        // 対照: 品質ゲートを通った incumbent (SuboptimalSolution = eps 検証済み) は
-        // 従来通り LocallyOptimal/NonconvexLocal のまま。
+    /// 品質ゲートを通り、かつ元問題空間で局所 KKT を満たす incumbent は
+    /// LocallyOptimal / NonconvexLocal を主張できる。
+    #[test]
+    fn finalize_unproven_kkt_consistent_incumbent_claims_local_optimality() {
+        let cfg = GlobalOptimizationConfig::default();
+        let problem = indefinite_box_1d();
+
         for (q_indefinite, expected) in [
             (false, SolveStatus::LocallyOptimal),
             (true, SolveStatus::NonconvexLocal),
         ] {
             let verified = SolverResult {
                 status: SolveStatus::SuboptimalSolution,
-                objective: 3.0,
-                solution: vec![0.5_f64],
+                objective: -1.0,
+                solution: vec![1.0_f64],
+                bound_duals: vec![0.0, 2.0],
                 ..Default::default()
             };
-            let r = SearchState::new(verified).finalize_unproven(0.0, 1, 0, &cfg, q_indefinite);
+            let r = SearchState::new(verified).finalize_unproven(
+                &problem,
+                -1.0,
+                1,
+                0,
+                &cfg,
+                q_indefinite,
+                1e-6,
+            );
             assert_eq!(
                 r.status, expected,
-                "quality-gated incumbent must keep claiming {expected:?}, got {:?}",
+                "KKT 整合な quality-gated incumbent は {expected:?} を名乗れる, got {:?}",
+                r.status,
+            );
+        }
+    }
+
+    /// Sentinel: 品質ゲートを通っていても、乗数が元問題の KKT を満たさない incumbent
+    /// (= 分枝で加えた人工 bound の乗数しか持たない node 解) は局所最適性を主張できない。
+    /// `finalize_unproven` の `local_kkt_within` ゲートを外すと NonconvexLocal /
+    /// LocallyOptimal が返り、この test が FAIL する。
+    #[test]
+    fn finalize_unproven_kkt_inconsistent_incumbent_yields_feasible_point() {
+        let cfg = GlobalOptimizationConfig::default();
+        let problem = indefinite_box_1d();
+
+        for q_indefinite in [false, true] {
+            // z_ub = 0 では stationarity 残差が |g| = 2 残る (手計算)。
+            let contaminated = SolverResult {
+                status: SolveStatus::SuboptimalSolution,
+                objective: -1.0,
+                solution: vec![1.0_f64],
+                bound_duals: vec![0.0, 0.0],
+                ..Default::default()
+            };
+            let r = SearchState::new(contaminated).finalize_unproven(
+                &problem,
+                -1.0,
+                1,
+                0,
+                &cfg,
+                q_indefinite,
+                1e-6,
+            );
+            assert_eq!(
+                r.status,
+                SolveStatus::FeasiblePoint,
+                "KKT を満たさない乗数の incumbent (q_indefinite={q_indefinite}) は \
+                 局所最適性を主張してはならない, got {:?}",
                 r.status,
             );
         }
@@ -2366,6 +2698,71 @@ mod tests {
             stat,
             pf,
         );
+    }
+
+    /// Regression: proptest seed 43b5a909 — B&B incumbent の sub-box 乗数が
+    /// そのまま返り、`NonconvexLocal` を名乗りながら KKT max 2.063e-1 だった欠陥。
+    ///
+    /// x* = (lb₀, 0.4960) は元問題の KKT 点で、root の単発 local solve は
+    /// KKT 2.68e-9 の乗数 (y₀ ≈ −1.0026, z_lb₀ ≈ 2.4085) を出せる。B&B は同じ x を
+    /// node 解として採用したため、行 0 が active であるにもかかわらず y = 0 で、
+    /// 非活性な x₁ の上界に z = 0.553 が残っていた。
+    ///
+    /// ## Sentinel (no-op-fail)
+    /// `polish_incumbent_duals` の `recover_incumbent_duals_in_place` 呼び出しを外すと、
+    /// 乗数が復元されず `finalize_*` の `local_kkt_within` ゲートで `FeasiblePoint` に
+    /// 降格するため、下の status assert が FAIL する (実測)。ゲートも併せて外すと
+    /// status は `NonconvexLocal` に戻るが complementarity 3.774e-2 で FAIL する (実測)。
+    #[test]
+    fn proptest_seed_43b5a909_subbox_duals_recovered() {
+        let problem = seed_43b5a909_problem();
+
+        let mut o = SolverOptions::default();
+        o.timeout_secs = Some(15.0);
+        let res = solve_qp_global(&problem, &o, &GlobalOptimizationConfig::default());
+
+        assert!(
+            matches!(
+                res.status,
+                SolveStatus::NonconvexLocal | SolveStatus::NonconvexGlobal
+            ),
+            "乗数が復元できる KKT 点なので最適性を主張できるはず, got {:?}",
+            res.status
+        );
+
+        let elim = structural_empty_col_mask(&problem);
+        let view = ProblemView {
+            q: &problem.q,
+            a: &problem.a,
+            c: &problem.c,
+            b: &problem.b,
+            bounds: &problem.bounds,
+            constraint_types: &problem.constraint_types,
+            eliminated_cols: &elim,
+        };
+        let stat = kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals);
+        let comp = kkt_comp_residual(&view, &res.solution, &res.dual_solution, &res.bound_duals);
+        let dsign = kkt_dual_sign_violation(
+            &problem.constraint_types,
+            &res.dual_solution,
+            &problem.bounds,
+            &res.bound_duals,
+        );
+        let pf = kkt_primal_residual(&view, &res.solution);
+        let bv = kkt_bound_violation(&problem.bounds, &res.solution);
+        for (name, value) in [
+            ("stationarity", stat),
+            ("complementarity", comp),
+            ("dual_sign", dsign),
+            ("primal_feasibility", pf),
+            ("bound_feasibility", bv),
+        ] {
+            assert!(
+                value < 1e-3,
+                "43b5a909: {name}={value:.3e} >= 1e-3 (status={:?})",
+                res.status
+            );
+        }
     }
 
     /// Sentinel: `node_discard_is_conclusive` は `Infeasible` (線形制約の厳密な

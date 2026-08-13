@@ -26,7 +26,11 @@ pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResu
     // (a raw timeout_secs-only option set is clock-blind at this layer).
     let materialized = options.materialize_deadline();
     let options = materialized.as_ref().unwrap_or(options);
-    let mut result = crate::simplex::solve_with(problem, options);
+    let mut result = guard_lp_incumbent_claim(
+        crate::simplex::solve_with(problem, options),
+        problem,
+        options,
+    );
     if matches!(
         result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
@@ -39,6 +43,39 @@ pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResu
     result
 }
 
+/// LP 公開結果の最終ゲート: `SuboptimalSolution` を名乗れるのは、元問題で primal
+/// feasible と検証できた点だけ。
+///
+/// simplex の停止経路 (`stall_status` / `honest_stall_result`) は「解ベクトルが空で
+/// ないこと」だけを incumbent の条件にしていたため、eta ドリフトで bound を破った
+/// 反復点や postsolve 再構成に失敗した点まで「解」として提示されうる。これは
+/// [`SolveStatus::SuboptimalSolution`] の契約 (= 検証済みの feasible な点、最適性の
+/// 証明のみ欠く) に反するので、検証を通らない点は品質を主張しない
+/// [`SolveStatus::Stalled`] (解ベクトルが無ければ [`SolveStatus::MaxIterations`]) へ
+/// 落とす。許容は postsolve 品質判定と同じ `lp_accept_primal_tol`。
+///
+/// `Optimal` 側の対応物は `qp::certificate::guard_lp_optimal` (証明書ゲート)。
+fn guard_lp_incumbent_claim(
+    mut result: SolverResult,
+    problem: &LpProblem,
+    options: &SolverOptions,
+) -> SolverResult {
+    if result.status != SolveStatus::SuboptimalSolution {
+        return result;
+    }
+    if result.solution.len() != problem.num_vars {
+        result.status = SolveStatus::MaxIterations;
+        return result;
+    }
+    let (primal_residual, bound_violation) = crate::simplex::lp_primal_residuals(problem, &result);
+    if primal_residual > options.lp_accept_primal_tol()
+        || bound_violation > options.lp_accept_primal_tol()
+    {
+        result.status = SolveStatus::Stalled;
+    }
+    result
+}
+
 /// LP entry from `solve_qp_with(Q=0)`. Sets `result.stats.route = SolveRoute::LpForwardedFromQp`.
 pub(crate) fn solve_lp_forwarded_from_qp(
     problem: &LpProblem,
@@ -46,7 +83,11 @@ pub(crate) fn solve_lp_forwarded_from_qp(
 ) -> SolverResult {
     let materialized = options.materialize_deadline();
     let options = materialized.as_ref().unwrap_or(options);
-    let mut result = crate::simplex::solve_with(problem, options);
+    let mut result = guard_lp_incumbent_claim(
+        crate::simplex::solve_with(problem, options),
+        problem,
+        options,
+    );
     if matches!(
         result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
@@ -77,6 +118,100 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    /// `SuboptimalSolution` は「元問題で feasible と検証済みの点」の契約なので、
+    /// bound を破った iterate は `Stalled` (品質主張なし) へ落ちる。
+    ///
+    /// オラクル (手計算): make_trivial_lp は x ≥ 0 / x ≤ 5。x = −3 は下界を 3 破り、
+    /// 相対 bound violation は 3/(1+3) 相当で既定許容 (1e-6 級) を大きく超える。
+    ///
+    /// ## Sentinel (no-op-fail)
+    /// `guard_lp_incumbent_claim` を素通しに戻すと `SuboptimalSolution` のままとなり FAIL。
+    #[test]
+    fn guard_demotes_bound_violating_incumbent_to_stalled() {
+        let problem = make_trivial_lp();
+        let options = SolverOptions::default();
+        let claimed = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: -3.0,
+            solution: vec![-3.0],
+            ..Default::default()
+        };
+        let guarded = guard_lp_incumbent_claim(claimed, &problem, &options);
+        assert_eq!(guarded.status, SolveStatus::Stalled, "{guarded:?}");
+        assert_eq!(
+            guarded.solution,
+            vec![-3.0],
+            "診断用 iterate は残す (status だけ降格する)"
+        );
+    }
+
+    /// 制約 (x ≤ 5) を破った点も同様に `Stalled`。x = 9 は 4 超過。
+    #[test]
+    fn guard_demotes_row_violating_incumbent_to_stalled() {
+        let problem = make_trivial_lp();
+        let claimed = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 9.0,
+            solution: vec![9.0],
+            ..Default::default()
+        };
+        let guarded = guard_lp_incumbent_claim(claimed, &problem, &SolverOptions::default());
+        assert_eq!(guarded.status, SolveStatus::Stalled, "{guarded:?}");
+    }
+
+    /// 逆方向の teeth: feasible な点を誤って降格しない (x = 2 は 0 ≤ 2 ≤ 5)。
+    #[test]
+    fn guard_keeps_feasible_incumbent_as_suboptimal() {
+        let problem = make_trivial_lp();
+        let claimed = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 2.0,
+            solution: vec![2.0],
+            ..Default::default()
+        };
+        let guarded = guard_lp_incumbent_claim(claimed, &problem, &SolverOptions::default());
+        assert_eq!(
+            guarded.status,
+            SolveStatus::SuboptimalSolution,
+            "{guarded:?}"
+        );
+    }
+
+    /// 解ベクトルが無い (次元不一致) 場合は解を主張できないので `MaxIterations`。
+    #[test]
+    fn guard_without_solution_vector_reports_max_iterations() {
+        let problem = make_trivial_lp();
+        let claimed = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![],
+            ..Default::default()
+        };
+        let guarded = guard_lp_incumbent_claim(claimed, &problem, &SolverOptions::default());
+        assert_eq!(guarded.status, SolveStatus::MaxIterations, "{guarded:?}");
+    }
+
+    /// 他 status には触らない (Optimal は `guard_lp_optimal` の担当)。
+    #[test]
+    fn guard_leaves_non_suboptimal_status_untouched() {
+        let problem = make_trivial_lp();
+        for status in [
+            SolveStatus::Optimal,
+            SolveStatus::Timeout,
+            SolveStatus::Stalled,
+            SolveStatus::MaxIterations,
+        ] {
+            let claimed = SolverResult {
+                status: status.clone(),
+                objective: -3.0,
+                solution: vec![-3.0], // bound 違反でも触らない
+                ..Default::default()
+            };
+            let guarded = guard_lp_incumbent_claim(claimed, &problem, &SolverOptions::default());
+            assert_eq!(guarded.status, status, "{status:?} を書き換えてはいけない");
+        }
     }
 
     /// Timeout incumbent must include `problem.obj_offset`.
