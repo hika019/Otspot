@@ -1008,7 +1008,7 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
 name = "otspot"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "clarabel",
  "dyn-stack",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "otspot-core"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "faer",
  "log",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "otspot-dev"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "mimalloc",
  "otspot-core",
@@ -1047,21 +1047,21 @@ dependencies = [
 
 [[package]]
 name = "otspot-io"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "otspot-core",
 ]
 
 [[package]]
 name = "otspot-model"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "otspot-core",
 ]
 
 [[package]]
 name = "otspot-num"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "faer",
  "rayon",
@@ -1070,7 +1070,7 @@ dependencies = [
 
 [[package]]
 name = "otspot-py"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "otspot-core",
  "otspot-model",

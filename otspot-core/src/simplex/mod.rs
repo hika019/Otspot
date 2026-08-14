@@ -11,6 +11,7 @@ mod standard_form;
 mod trace;
 pub(crate) mod warm_start;
 
+pub(crate) use entry::lp_primal_residuals;
 #[cfg(test)]
 pub(crate) use entry::solve;
 pub(crate) use entry::solve_with;

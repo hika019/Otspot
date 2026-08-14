@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3237 testcases, 26 ignored
+# totals: 3256 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -198,7 +198,13 @@ otspot-core	linalg::tests::ipm_options_control_kkt_memory_budget	active
 otspot-core	linalg::tests::kkt_config_default_matches_ipm_options_default	active
 otspot-core	lp::tests::bigm_nonzero_lb_objective_double_count	active
 otspot-core	lp::tests::bounded_nonzero_lb_objective_correct	active
+otspot-core	lp::tests::demoted_incumbent_keeps_public_objective_offset	active
 otspot-core	lp::tests::farkas_certificate_probe_loop_honors_cancel_flag_preset	active
+otspot-core	lp::tests::guard_demotes_bound_violating_incumbent_to_stalled	active
+otspot-core	lp::tests::guard_demotes_row_violating_incumbent_to_stalled	active
+otspot-core	lp::tests::guard_keeps_feasible_incumbent_as_suboptimal	active
+otspot-core	lp::tests::guard_leaves_non_suboptimal_status_untouched	active
+otspot-core	lp::tests::guard_without_solution_vector_reports_max_iterations	active
 otspot-core	lp::tests::invalid_options_rejected_at_lp_entry	active
 otspot-core	lp::tests::le_only_nonzero_lb_objective_correct	active
 otspot-core	lp::tests::lp_empty_box_lb_gt_ub_is_infeasible	active
@@ -965,6 +971,11 @@ otspot-core	qp::global::branch::tests::split_at_boundary_falls_back_to_midpoint	
 otspot-core	qp::global::branch::tests::split_at_interior_uses_provided_point	active
 otspot-core	qp::global::branch::tests::split_propagates_warm_to_both_children	active
 otspot-core	qp::global::branch::tests::widest_box_dominates_even_when_other_var_has_high_dev	active
+otspot-core	qp::global::dual_recovery::tests::interior_non_stationary_point_leaves_residual	active
+otspot-core	qp::global::dual_recovery::tests::recovers_ge_row_multiplier_with_negative_sign	active
+otspot-core	qp::global::dual_recovery::tests::recovers_multiplier_for_approximately_active_bound	active
+otspot-core	qp::global::dual_recovery::tests::recovers_row_multiplier_on_active_le_row	active
+otspot-core	qp::global::dual_recovery::tests::recovers_upper_bound_multiplier	active
 otspot-core	qp::global::node::tests::child_increments_depth_and_propagates_warm	active
 otspot-core	qp::global::node::tests::root_node_depth_zero_no_warm	active
 otspot-core	qp::global::pruning::tests::gap_clamps_to_unit_scale_near_zero_incumbent	active
@@ -981,10 +992,13 @@ otspot-core	qp::global::pruning::tests::within_gap_rejects_nan_lower_bound	activ
 otspot-core	qp::global::tests::branched_incumbent_duals_reconciled_to_original_box	active
 otspot-core	qp::global::tests::convex_q_yields_optimal_not_nonconvex_global	active
 otspot-core	qp::global::tests::depth_exceeded_lb_folds_into_remaining_lb_blocks_false_cert	active
+otspot-core	qp::global::tests::finalize_proven_bad_dual_demotes_to_feasible_point	active
 otspot-core	qp::global::tests::finalize_proven_dual_gate_table	active
 otspot-core	qp::global::tests::finalize_proven_empty_col_not_false_demoted	active
 otspot-core	qp::global::tests::finalize_proven_kkt_fail_on_feasibility_only_incumbent_yields_feasible_point	active
 otspot-core	qp::global::tests::finalize_unproven_feasibility_only_incumbent_yields_feasible_point	active
+otspot-core	qp::global::tests::finalize_unproven_kkt_consistent_incumbent_claims_local_optimality	active
+otspot-core	qp::global::tests::finalize_unproven_kkt_inconsistent_incumbent_yields_feasible_point	active
 otspot-core	qp::global::tests::indefinite_q_proven_yields_nonconvex_global	active
 otspot-core	qp::global::tests::indefinite_q_unproven_yields_nonconvex_local	active
 otspot-core	qp::global::tests::interrupt_break_folds_popped_node_bound_into_remaining_lb	active
@@ -994,9 +1008,13 @@ otspot-core	qp::global::tests::is_polish_suboptimal_acceptable_rejects_mismatche
 otspot-core	qp::global::tests::is_polish_suboptimal_acceptable_rejects_mismatched_dimensions	active
 otspot-core	qp::global::tests::is_polish_suboptimal_acceptable_rejects_wrong_sign_duals	active
 otspot-core	qp::global::tests::is_q_indefinite_distinguishes_psd_and_indefinite	active
+otspot-core	qp::global::tests::local_kkt_within_catches_componentwise_complementarity	active
 otspot-core	qp::global::tests::node_discard_is_conclusive_only_for_infeasible	active
 otspot-core	qp::global::tests::polish_acceptance_rejects_unconverged_status	active
 otspot-core	qp::global::tests::polish_acceptance_rejects_worse_obj	active
+otspot-core	qp::global::tests::polish_deadline_repairs_exhausted_budget	active
+otspot-core	qp::global::tests::polish_recovers_duals_under_exhausted_deadline	active
+otspot-core	qp::global::tests::proptest_seed_43b5a909_subbox_duals_recovered	active
 otspot-core	qp::global::tests::proptest_seed_a46bde58_kkt_regression	active
 otspot-core	qp::global::tests::qp_global_finalize_backstop_demotes_cancelled_complete_search	active
 otspot-core	qp::global::tests::qp_global_loop_baseline_processes_both_children_without_cancel	active
@@ -1004,6 +1022,7 @@ otspot-core	qp::global::tests::qp_global_loop_honors_cancel_flag_not_only_deadli
 otspot-core	qp::global::tests::qp_global_proven_convex_has_bound_gap_cert	active
 otspot-core	qp::global::tests::qp_global_proven_nonconvex_has_bound_gap_cert	active
 otspot-core	qp::global::tests::qp_global_unproven_has_no_bound_gap_cert	active
+otspot-core	qp::global::tests::recovered_duals_drop_stale_duality_gap	active
 otspot-core	qp::global::tests::root_gap_exit_reports_no_open_region_remaining_lb	active
 otspot-core	qp::global::tests::search_state_new_rejects_non_finite_objective	active
 otspot-core	qp::global::tests::search_state_new_rejects_non_finite_solution_component	active
