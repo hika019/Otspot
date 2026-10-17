@@ -512,6 +512,23 @@ mod tests {
         let _ = f64_impl::ax(&a, &x);
     }
 
+    /// A.x sentinel: 行 activity が overflow (`inf + -inf = NaN`) した等式の
+    /// 相対残差は NaN になる。集約側 (`f64_impl::primal_residual_rel`) は非有限を
+    /// `+INFINITY` に伝播させ、NaN が `rel > tol`比較の「偽」で良品扱いされる
+    /// ことを防ぐ。手計算オラクル: A = [[1e308, -1e308]], x = [2, 2] →
+    /// A·x = 1e308·2 + (-1e308)·2 = inf - inf = NaN、NaN/scale は NaN。
+    /// sentinel: 非有限伝播 (`if !rel_i.is_finite()`) を外すと NaN がそのまま
+    /// 返り FAIL。
+    #[test]
+    fn f64_impl_primal_residual_rel_propagates_nonfinite_activity() {
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1e308, -1e308], 1, 2).unwrap();
+        let v = f64_impl::primal_residual_rel(&a, &[0.0], &[ConstraintType::Eq], &[2.0, 2.0]);
+        assert!(
+            v == f64::INFINITY,
+            "non-finite activity must propagate as +INFINITY, got {v}"
+        );
+    }
+
     #[test]
     fn bound_contrib_empty_bd_yields_zero() {
         let bounds = vec![(0.0, 1.0), (f64::NEG_INFINITY, f64::INFINITY)];

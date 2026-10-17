@@ -1016,6 +1016,24 @@ mod tests {
         LpProblem::new_general(c, a, b, ctypes, bounds, None).unwrap()
     }
 
+    /// 非有限な解を持つ point は postsolve 前原空間ゲートを通過できない契約の
+    /// unit 検証。上流 (f64_impl::primal_residual_rel) は非 finite を INFINITY に
+    /// 伝播するため単一層の gate revert は INFINITY で発火するばかり
+    /// (`inf > tol` も偽ではない) — 全層 revert (集約劣化 + `!(v <= tol)` 削除)
+    /// したときにのみ NaN が良品扱いになり FAIL する。層状防御の契約 test。
+    #[test]
+    fn lp_original_primal_bad_fails_closed_on_non_finite_solution() {
+        let lp = eq_lp_fixture(2, 1);
+        let result = SolverResult {
+            solution: vec![f64::NAN, f64::NAN],
+            ..Default::default()
+        };
+        assert!(
+            lp_original_primal_bad(&result, &lp, 1e-9),
+            "non-finite solution must be rejected by the original-space guard"
+        );
+    }
+
     fn nonreducing_q_zero_qp_fixture() -> QpProblem {
         let a = CscMatrix::from_triplets(
             &NONREDUCING_QP_A_ROWS,

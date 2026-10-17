@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3260 testcases, 26 ignored
+# totals: 3266 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -56,6 +56,7 @@ otspot-core	conic::kkt::tests::probe_kkt_health_rejects_non_finite_matrix_and_re
 otspot-core	conic::kkt::tests::probe_kkt_health_rejects_non_finite_rhs_before_norm_reduction	active
 otspot-core	conic::misocp::tests::build_relaxation_matches_dense_reference	active
 otspot-core	conic::misocp::tests::classify_ray_node_cases	active
+otspot-core	conic::misocp::tests::conic_feasible_rejects_nan_equality_activity	active
 otspot-core	conic::misocp::tests::qcqp_true_objective_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::accept_honors_caller_tolerance_after_rounding_not_a_fixed_floor	active
 otspot-core	conic::nonconvex::tests::cancel_flag_is_honored_inside_the_bnb_loop	active
@@ -65,6 +66,8 @@ otspot-core	conic::nonconvex::tests::exhausted_clean_search_certifies_optimal_wi
 otspot-core	conic::nonconvex::tests::failed_root_relaxation_is_not_false_infeasible	active
 otspot-core	conic::nonconvex::tests::feasible_panics_on_a_eq_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::feasible_panics_on_g_lin_dimension_mismatch	active
+otspot-core	conic::nonconvex::tests::feasible_rejects_nan_quad_activity	active
+otspot-core	conic::nonconvex::tests::feasible_rejects_non_finite_input	active
 otspot-core	conic::nonconvex::tests::global_miqcp_nan_int_tol_is_rejected_not_silently_broken	active
 otspot-core	conic::nonconvex::tests::incumbent_with_failed_node_is_not_optimal	active
 otspot-core	conic::nonconvex::tests::leaf_accept_no_longer_loosens_feas_tol_by_100x	active
@@ -87,6 +90,7 @@ otspot-core	conic::tests::cancel_race_before_misocp_optimal_classification_prefe
 otspot-core	conic::tests::cancel_race_before_misocp_unbounded_return_prefers_timeout	active
 otspot-core	conic::tests::cancel_race_during_unscale_window_prefers_timeout_over_infeasible	active
 otspot-core	conic::tests::cone_membership_check_covers_all_branches	active
+otspot-core	conic::tests::cone_membership_rejects_non_finite_slack	active
 otspot-core	conic::tests::conic_border_l_fill_stays_linear	active
 otspot-core	conic::tests::conic_default_max_iter_no_longer_caps_a_slow_but_convergent_solve	active
 otspot-core	conic::tests::conic_kkt_direction_matches_dense_schur_oracle	active
@@ -1233,6 +1237,7 @@ otspot-core	qp::kkt_resid::tests::f64_constraint_violations_le_ge_eq	active
 otspot-core	qp::kkt_resid::tests::f64_constraint_violations_no_negative	active
 otspot-core	qp::kkt_resid::tests::f64_impl_aty_panics_on_dimension_mismatch	active
 otspot-core	qp::kkt_resid::tests::f64_impl_ax_panics_on_dimension_mismatch	active
+otspot-core	qp::kkt_resid::tests::f64_impl_primal_residual_rel_propagates_nonfinite_activity	active
 otspot-core	qp::kkt_resid::tests::f64_impl_qx_panics_on_dimension_mismatch	active
 otspot-core	qp::lp_dispatch::tests::cty_slack_within_noise_separates_real_slack_from_roundoff	active
 otspot-core	qp::lp_dispatch::tests::farkas_certifies_genuine_infeasible	active
@@ -1244,6 +1249,7 @@ otspot-core	qp::lp_dispatch::tests::infeasible_lp_dispatch_obj_offset_not_added	
 otspot-core	qp::lp_dispatch::tests::large_lp_dispatch_stays_on_simplex_path	active
 otspot-core	qp::lp_dispatch::tests::lp_ipm_core_deadline_reserves_crossover_budget	active
 otspot-core	qp::lp_dispatch::tests::lp_ipm_gate_targets_dfl_ken_shape_without_pds_pilot	active
+otspot-core	qp::lp_dispatch::tests::lp_original_primal_bad_fails_closed_on_non_finite_solution	active
 otspot-core	qp::lp_dispatch::tests::parallel_solve_stats_independent	active
 otspot-core	qp::lp_dispatch::tests::postsolved_lp_retry_gate_keys_on_requested_accuracy	active
 otspot-core	qp::lp_dispatch::tests::postsolved_lp_retry_gate_treats_max_iterations_like_stalled	active
