@@ -367,12 +367,14 @@ pub fn solve_qp_global_with_stats(
     (result, stats)
 }
 
-/// polish / dual recovery の sub-solve が使う deadline。
+/// polish solve (`polish_incumbent_duals` の再解) が使う deadline。
 ///
 /// B&B の残時間を優先継承し、枯渇時のみ [`POLISH_TIMEOUT_SECS`] の fresh budget を
-/// 使う (`timeout_secs` 契約破りの回避と、budget 枯渇時の fallback の両立)。
-/// deadline 到達で B&B が終了した経路では `base_opts.deadline` は既に過去なので、
-/// これを補修せずに sub-solve へ渡すと即 Timeout になる。
+/// 使う (budget 枯渇後の後処理 fallback 契約)。deadline 到達で B&B が終了した
+/// 経路では `base_opts.deadline` は既に過去なので、これを補修せずに polish
+/// solve へ渡すと即 Timeout になる。dual recovery (2 段目の solve) はこの
+/// fallback を認めない — 呼び出し側の deadline を素通しにし、枯渇時は開始しない
+/// (`recover_incumbent_duals_in_place` 参照)。
 fn polish_deadline(base_opts: &SolverOptions) -> Instant {
     let now = Instant::now();
     match base_opts.deadline {
@@ -897,11 +899,18 @@ impl SearchState {
         if base_opts.cancel_requested() {
             return;
         }
-        // deadline はここで取り直す: 先行する polish の再解が残り budget を
-        // 使い切っていることがあり、その状態を継承すると復元 LP が即 Timeout する
-        // (復元が最も要る場面ほど失敗する)。
+        // deadline は `base_opts` (呼び出し側の timeout_secs 契約) を素通しにし、
+        // 枯渇したら復元を始めない。B&B が deadline 到達で終わった直後は
+        // `base_opts.deadline` は既に過去で、ここで `polish_deadline` による
+        // fresh budget をもう 1 段積むと timeout_secs 契約を上乗せする
+        // (polish + 復元で最大 +2×5s の越過 — Codex P1)。polish solve への
+        // 1 回分の fallback budget は既存契約 (budget 枯渇後の後処理) のまま
+        // なので、越過は polish 分の最大 1 回で頭打ちになる。復元を行わない
+        // incumbent は finalize の品質ゲートが正直な未証明 status へ降格する。
+        if base_opts.deadline.is_some_and(|d| Instant::now() >= d) {
+            return;
+        }
         let mut opts = base_opts.clone();
-        opts.deadline = Some(polish_deadline(base_opts));
         opts.timeout_secs = None;
         let Some(recovered) = dual_recovery::recover_duals_at_fixed_x(
             problem,
@@ -2042,8 +2051,9 @@ mod tests {
     }
 
     /// B&B が deadline 到達で終了した経路では `base_opts.deadline` は既に過去。
-    /// polish / dual recovery の sub-solve にそのまま渡すと即 Timeout になるため、
-    /// 枯渇時は fresh budget へ補修されなければならない。
+    /// polish solve にそのまま渡すと即 Timeout になるため、枯渇時は fresh budget
+    /// へ補修されなければならない (dual recovery はこの fallback を認めず、
+    /// 枯渇時は開始しない — `dual_recovery_skipped_after_deadline_expiry` 参照)。
     ///
     /// ## Sentinel (no-op-fail)
     /// `polish_deadline` を `base_opts.deadline` の素通しに戻すと、期限切れケースの
@@ -2106,18 +2116,25 @@ mod tests {
         .unwrap()
     }
 
-    /// 期限切れ deadline のまま終わった B&B でも、sub-box 乗数は復元されて
-    /// 局所 KKT を満たす (復元 LP が期限切れ deadline を継承しないこと)。
+    /// 期限切れ deadline 後は乗数復元 solve を始めない (timeout_secs 契約)。
+    ///
+    /// B&B が deadline 到達で終わった経路では、polish solve に限り既存契約の
+    /// `POLISH_TIMEOUT_SECS` fallback budget が使われるが、2 段目の dual recovery
+    /// は期限切れなら開始しない — 復元にも fresh budget を積むと
+    /// `timeout_secs` 契約の越過を 2 回分に上乗せするため (Codex P1)。
+    /// 復元されなかった incumbent の乗数は汚染のまま残り、finalize の品質
+    /// ゲートが正直な未証明 status (`FeasiblePoint` 等) へ降格する。
     ///
     /// incumbent は seed 43b5a909 の実測値: 行 0 が active なのに y = 0、非活性な
     /// x₁ 上界に z = 0.553 が残った node 解。再解 polish はここから別の local へ
-    /// 滑って棄却されるので、直せるのは固定 x の復元だけ。
+    /// 滑って棄却されるので、復元が唯一のdual復元経路 — 復元が始まって
+    /// いないことを dual_solution/bound_duals が不変であることで検出できる。
     ///
     /// ## Sentinel (no-op-fail)
-    /// `polish_incumbent_duals` が復元へ `base_opts` (期限切れ deadline) を渡す
-    /// 実装に戻すと、復元 LP が即 Timeout になり FAIL する。
+    /// 復元 solve に `polish_deadline` による fresh budget を積む実装に戻すと、
+    /// deadline が枯渇していても復元が実行され dual が変わって FAIL する。
     #[test]
-    fn polish_recovers_duals_under_exhausted_deadline() {
+    fn dual_recovery_skipped_after_deadline_expiry() {
         let problem = seed_43b5a909_problem();
         let contaminated = SolverResult {
             status: SolveStatus::SuboptimalSolution,
@@ -2137,11 +2154,19 @@ mod tests {
         let mut opts = SolverOptions::default();
         opts.deadline = Some(Instant::now() - Duration::from_secs(1));
         state.polish_incumbent_duals(&problem, &opts, 1e-6, true);
-        assert!(
-            local_kkt_within(&problem, &state.incumbent_result, 1e-6),
-            "期限切れ budget でも乗数を復元すべき: y = {:?} z = {:?}",
+        assert_eq!(
             state.incumbent_result.dual_solution,
-            state.incumbent_result.bound_duals
+            vec![0.0, 0.0],
+            "期限切れ deadline では復元 solve を始めてはならない (y が変わった)"
+        );
+        assert_eq!(
+            state.incumbent_result.bound_duals,
+            vec![3.311665752000553_f64, 0.0, 0.0, 0.5531976014425323],
+            "期限切れ deadline では復元 solve を始めてはならない (z が変わった)"
+        );
+        assert!(
+            !local_kkt_within(&problem, &state.incumbent_result, 1e-6),
+            "復元が始まっていないなら局所 KKT は未達のまま (品質ゲートへ降格)"
         );
     }
 

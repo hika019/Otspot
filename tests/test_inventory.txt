@@ -999,6 +999,7 @@ otspot-core	qp::global::pruning::tests::within_gap_rejects_nan_lower_bound	activ
 otspot-core	qp::global::tests::branched_incumbent_duals_reconciled_to_original_box	active
 otspot-core	qp::global::tests::convex_q_yields_optimal_not_nonconvex_global	active
 otspot-core	qp::global::tests::depth_exceeded_lb_folds_into_remaining_lb_blocks_false_cert	active
+otspot-core	qp::global::tests::dual_recovery_skipped_after_deadline_expiry	active
 otspot-core	qp::global::tests::finalize_proven_bad_dual_demotes_to_feasible_point	active
 otspot-core	qp::global::tests::finalize_proven_dual_gate_table	active
 otspot-core	qp::global::tests::finalize_proven_empty_col_not_false_demoted	active
@@ -1020,7 +1021,6 @@ otspot-core	qp::global::tests::node_discard_is_conclusive_only_for_infeasible	ac
 otspot-core	qp::global::tests::polish_acceptance_rejects_unconverged_status	active
 otspot-core	qp::global::tests::polish_acceptance_rejects_worse_obj	active
 otspot-core	qp::global::tests::polish_deadline_repairs_exhausted_budget	active
-otspot-core	qp::global::tests::polish_recovers_duals_under_exhausted_deadline	active
 otspot-core	qp::global::tests::proptest_seed_43b5a909_subbox_duals_recovered	active
 otspot-core	qp::global::tests::proptest_seed_a46bde58_kkt_regression	active
 otspot-core	qp::global::tests::qp_global_finalize_backstop_demotes_cancelled_complete_search	active
