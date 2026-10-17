@@ -715,15 +715,19 @@ pub fn solve_misocp(prob: &MisocpProblem, opts: &ConicOptions, bb: &BbOptions) -
     }
 }
 
+/// Equality rows use `!(v <= tol)` so an overflow-produced NaN (`inf - inf`
+/// inside `mat_vec_mul`) fails closed instead of passing as feasible;
+/// `cone::in_cone` handles the conic rows the same way.
 fn conic_feasible(problem: &ConicProblem, x: &[f64], tol: f64) -> bool {
     let ax = problem
         .a
         .mat_vec_mul(x)
         .expect("MisocpProblem::validate checked A dimensions");
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if ax
         .iter()
         .zip(&problem.b)
-        .any(|(&lhs, &rhs)| (lhs - rhs).abs() > tol)
+        .any(|(&lhs, &rhs)| !((lhs - rhs).abs() <= tol))
     {
         return false;
     }
@@ -834,6 +838,27 @@ fn qcqp_true_objective(qp: &QcqpProblem, x: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 等式行の `A·x` が overflow (`1e308·2 + (-1e308)·2 = inf + -inf = NaN`)
+    /// した点を「実行可能」と誤認する欠陥を検証。
+    /// 手計算オラクル: `(NaN - 0).abs() <= tol` は常偽 → bad → infeasible が正。
+    /// sentinel: 等式比較を `(lhs - rhs).abs() > tol` に戻すと NaN が素通りし
+    /// conic 行 (空) も真で true を返し FAIL。
+    #[test]
+    fn conic_feasible_rejects_nan_equality_activity() {
+        let prob = ConicProblem {
+            c: vec![1.0, 1.0],
+            a: CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1e308, -1e308], 1, 2).unwrap(),
+            b: vec![0.0],
+            g: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            h: vec![],
+            cone: ConeSpec { l: 0, soc: vec![] },
+        };
+        assert!(
+            !conic_feasible(&prob, &[2.0, 2.0], 1e-9),
+            "A·x overflows to NaN (inf + -inf): must fail closed"
+        );
+    }
 
     /// Independent oracle for `classify_ray_node`: every case hand-verified
     /// against the doc's own definition (fixed = `lb[k] == ub[k]`; fixed to an

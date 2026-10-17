@@ -761,6 +761,18 @@ impl SolverOptions {
                 .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// 呼び出し側が明示的にキャンセルを要求したか (deadline 超過は含まない)。
+    ///
+    /// deadline 枯渇後の後処理では、polish solve 1 段に限り `POLISH_TIMEOUT_SECS`
+    /// の fallback budget を認める (dual recovery は枯渇時は開始しない)。明示
+    /// キャンセルは「今すぐ止めろ」なのでいずれの段でも追加の solve を始めては
+    /// いけない。両者を混ぜないための述語。
+    pub(crate) fn cancel_requested(&self) -> bool {
+        self.cancel_flag
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     /// Effective IPM eps: derived from `tolerance` if set, otherwise `ipm.eps`.
     pub fn ipm_eps(&self) -> f64 {
         match self.tolerance {

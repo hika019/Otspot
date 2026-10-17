@@ -2,72 +2,53 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.7.5] - 2026-08-12
 
-### Added
-- `SolveStatus::ResourceExhausted` (Python `otspot.SolveStatus.ResourceExhausted`
-  / `SolveError.ResourceExhausted`) を新設。OS リソース (スレッド・メモリ) 確保
-  失敗を数値破綻 (`NumericalError`) と区別して返す
-- `otspot-py` crate (PyO3/maturin) を追加し、Otspot を Python ライブラリとして
-  利用可能に (Rust 版と同じ Model DSL)
-- `SolverOptions::threads` (`milp_solve --threads`) が MILP 分枝限定法で実効化
-  された。指定数は上限の保証でありヒントではない。既定の `threads = 1` は従来通り。MIQP の B&B は対象外
-- otspot-model: `Model::var_kind` (`try_var_kind` 含む) を新設
-- `Expression`/`QuadExpr` に `+=` (`__iadd__`) を追加し、蓄積ループの性能を改善
+Python バインディング (`otspot-py`) の追加、キャンセル/deadline 後に未検証の証明を
+返し得た求解経路の正直化、MILP 並列 B&B のスレッド予算実効化を中心としたリリース。
 
-### Fixed
-- QP IPM・conic IPM・MISOCP・非凸 QCQP・大域 QP の複数の求解経路で、キャンセル後
-  も証明済み status を返したり探索を継続したりし得た問題を修正
-- bounded dual simplex の tie-break の欠陥、および dual simplex が基底のドリフト
-  を検証せず誤って Optimal を返しうる問題を修正
-- MIP/大域 QP で、非有限 bound の混入や探索中断時の下界取りこぼしにより、未証明
-  の最適性を Optimal と誤報告しうる問題を修正
-- LP の Farkas・unbounded ray 証明ループと QP presolve が、キャンセル・deadline
-  を無視して完了しうる問題を修正。`timeout_secs` 設定時、従来 Infeasible と
-  判定されていた問題が Timeout になる場合がある
-- LP の primal-to-dual crossover (postsolve のダブルチェック経路、IPM 証明後の
-  crossover 経路) が cancel_flag を受け取っておらず、キャンセル後も完了まで
-  走り得た問題を修正
-- QP presolve の等式制約冗長行判定の不具合を修正: 矛盾した等式系を誤って
-  Feasible と判定する場合、および打ち切り時に未検証行を誤って冗長と判定する
-  場合があった
-- QP presolve の等式冗長行削除で、大きな RHS の相殺を伴う従属等式の丸め誤差により
-  矛盾していない等式系を誤って Infeasible と判定する場合があった問題を修正 (上記の逆方向)
-- Ruiz スケーリングが構造的に空の行・列や目的関数が恒等的に0の問題で、コストが
-  発散し NaN が伝播し得た問題を修正
-- QPLIB/CBF パーサが宣言サイズを検証せず allocation しており、巨大/不正な
+- Python ライブラリ `otspot` (PyO3/maturin、abi3-py311、Python 3.11+) を追加。
+  Rust 版と同じ Model DSL で LP/QP/MILP を解ける
+- BREAKING: スレッド数の指定 (`SolverOptions::threads` / `Model::set_threads` /
+  `milp_solve --threads`) が範囲外の値を `solve()` 前に一貫して拒否するように
+  なった。従来 `set_threads(0)` は暗黙に `1` へ丸められていた
+- `SolverOptions::threads` が MILP 分枝限定法で実効化された (指定数は上限の保証で
+  ありヒントではない。既定の `threads = 1` は従来どおり、MIQP の B&B は対象外)。
+  QP/conic の IPM が指定値を超えて並列実行していた問題も修正
+- `SolveStatus::ResourceExhausted` を新設し、OS リソース (スレッド・メモリ) の確保
+  失敗を数値破綻 (`NumericalError`) と区別。MILP 並列探索でワーカー起動を OS が
+  一部拒否すると solve がデッドロックしていた問題を修正
+- QP IPM・conic IPM・MISOCP・非凸 QCQP・大域 QP・LP の primal-to-dual crossover・
+  LP の Farkas/unbounded ray 証明ループ・QP presolve が、キャンセル/deadline 後も
+  探索を続けたり証明済み status を返し得た問題を修正。`timeout_secs` 設定時、
+  従来 Infeasible と判定されていた問題が Timeout になる場合がある
+- dual simplex が基底のドリフトを検証せず誤って Optimal を返す問題と bounded dual
+  simplex の tie-break 欠陥、MIP/大域 QP が非有限 bound の混入・探索中断時の下界
+  取りこぼしにより未証明の最適性を Optimal と誤報告する問題を修正
+- 非凸 QP の大域探索 (`solve_qp_global`) が、分枝で加えた人工 bound の乗数を持つ点に
+  `NonconvexLocal` を付けていた問題を修正。乗数を元問題の active set 上で復元し、
+  復元できない点は `FeasiblePoint` を返す
+- LP が、実行可能性を検証していない反復点に `SuboptimalSolution` を付けていた問題を
+  修正。検証を通らない点は `Stalled` (解ベクトルが無ければ `MaxIterations`) になる
+- QP presolve の等式冗長行判定を両方向で修正 (矛盾した等式系の Feasible 誤判定と
+  打ち切り時の未検証行の冗長誤判定、および丸め誤差による Infeasible 誤判定)
+- Ruiz スケーリングが構造的に空の行・列や恒等的に 0 の目的関数でコスト発散し NaN を
+  伝播する問題と、QPLIB/CBF パーサが宣言サイズを検証せず allocation し巨大/不正な
   ファイルで OOM しうる問題を修正
-- MILP 並列探索で、要求したワーカーの一部を OS が拒否すると solve がデッドロック
-  していた問題を修正 (フリーズせず `ResourceExhausted` を返す)
-- QP/conic の IPM が指定した `threads` 数を超えて並列実行していた問題を修正
-- MILP B&B の cut separation に割り当てる反復予算の見積りに誤りがあり、探索時間
-  を浪費していた問題を修正。複数の TIMEOUT 問題でノード数・incumbent が改善
-- QP IPM (IPPMM) の数値安定性の複数の不具合を修正し、一部の QP が Stalled から
-  収束するようになった
-- QP/LP の IPM が Ruiz スケーリング有無を切り替えて再試行する際の打ち切り判定に
-  不具合があり、収束するはずの LP が Stalled と判定され得た問題を修正
-- otspot-model: `ModelResult::value`/`Index<Variable>` が別モデルの変数を誤って
-  受理し、誤った値を返すバグを修正
-- otspot-model: `set_presolve(false)` が QP/MIQP では無視されていたバグを修正
-  (LP/MILP のみ反映されていた)
-- `Expression`/`QuadExpr` の `+=` が自己代入 (`expr += expr`) で panic するバグ
-  を修正
-- 並列 B&B の統計値 (`conflict_clauses_learned`/`remaining_lb` 等) が
-  不正確に報告されていた問題を修正
-- Python の `Model.solve()` 中の Ctrl-C (SIGINT) が `KeyboardInterrupt` を即座に
-  送出するよう修正 (応答遅延・GIL 保持によるブロッキングを解消)
-- Python の `SolveStatus`/`Tolerance` の `==` 比較が常に `False` になっていた
-  問題を修正 (`SolveStatus` は hash 対応も追加)
-
-### Changed
-- [破壊的変更] スレッド数の指定 (`SolverOptions::threads` / `Model::set_threads`
-  / `milp_solve --threads`) が範囲外の値を `solve()` 前に一貫して拒否するように
-  なった。従来 `set_threads(0)` は暗黙に `1` へ丸められていたが、現在は不正な
-  入力としてエラーになる
-- `otspot-num` が `rayon` に依存するようになった
-- `otspot-py`: Python 要件を 3.11+ に引き上げ (abi3-py311)
-- `IpmOptions::delta_min`/`delta_p_init`/`delta_d_init` を削除 (無視される
-  デッドオプションだった)
+- QP IPM (IPPMM) の数値安定性および Ruiz スケーリング有無を切り替えて再試行する際の
+  打ち切り判定を修正し、一部の QP/LP が Stalled から収束するようになった
+- MILP B&B の cut separation に割り当てる反復予算の見積り誤りを修正 (複数の TIMEOUT
+  問題でノード数・incumbent が改善)。並列 B&B の統計値
+  (`conflict_clauses_learned`/`remaining_lb` 等) の不正確な報告も修正
+- otspot-model: `Model::var_kind` (`try_var_kind` 含む) を新設。
+  `ModelResult::value`/`Index<Variable>` が別モデルの変数を誤受理する問題、
+  `set_presolve(false)` が QP/MIQP で無視される問題を修正。`Expression`/`QuadExpr`
+  に `+=` を追加 (自己代入で panic するバグも修正)
+- Python: `Model.solve()` 中の Ctrl-C (SIGINT) が `KeyboardInterrupt` を即座に
+  送出するよう修正。`SolveStatus`/`Tolerance` の `==` 比較が常に `False` になって
+  いた問題を修正 (`SolveStatus` は hash 対応も追加)
+- `IpmOptions::delta_min`/`delta_p_init`/`delta_d_init` を削除 (無視されるデッド
+  オプションだった)。`otspot-num` が `rayon` に依存するようになった
 
 ## [0.7.4] - 2026-07-31
 

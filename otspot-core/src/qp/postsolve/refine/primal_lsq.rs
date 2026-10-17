@@ -191,6 +191,17 @@ pub(crate) fn refine_primal_lsq(
         let scale_post = 1.0 + ax_new[i].abs() + problem.b[i].abs();
         let rel_pre = raw_pre / scale_pre;
         let rel_post = raw_post / scale_post;
+        // 非有限は最悪値として扱う (NaN を「残差 0」と誤読して採用しない)。
+        let rel_pre = if rel_pre.is_finite() {
+            rel_pre
+        } else {
+            f64::INFINITY
+        };
+        let rel_post = if rel_post.is_finite() {
+            rel_post
+        } else {
+            f64::INFINITY
+        };
         if rel_pre > max_rel_pre {
             max_rel_pre = rel_pre;
         }

@@ -275,11 +275,16 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 // The original LP solves cleanly, so re-attempt on the remaining deadline.
                 let (postsolve_pfeas, postsolve_bfeas) = lp_primal_residuals(problem, &res);
                 let accept_primal = options.lp_accept_primal_tol();
+                // `!(v <= tol)` は NaN も「悪い」側に倒す (`v > tol` だと NaN が
+                // 良品扱いになる)。集計器が非有限を INFINITY に伝播している間の
+                // 防御層として同型の他ゲート (lp.rs guard, lp_dispatch
+                // ::lp_original_primal_bad) と揃える。
+                #[allow(clippy::neg_cmp_op_on_partial_ord)]
                 let postsolve_bad = res
                     .postsolve_dfeas
-                    .is_some_and(|d| d > options.lp_accept_dual_tol())
-                    || postsolve_pfeas > accept_primal
-                    || postsolve_bfeas > accept_primal
+                    .is_some_and(|d| !(d <= options.lp_accept_dual_tol()))
+                    || !(postsolve_pfeas <= accept_primal)
+                    || !(postsolve_bfeas <= accept_primal)
                     || res.status == SolveStatus::SuboptimalSolution;
                 if matches!(
                     res.status,

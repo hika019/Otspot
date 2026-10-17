@@ -48,6 +48,11 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
         let aty_j = f64::from(aty_dd[j]).abs();
         let scale_j = 1.0 + qx_j + prob.c[j].abs() + aty_j + bound_contrib[j].abs();
         let rel_j = r / scale_j;
+        // 非有限成分は残差を評価できない = ゲートを通してはいけない。`rel > max_rel`
+        // は NaN で偽になり 0 を返してしまうため、`INFINITY` を明示して落とす。
+        if !rel_j.is_finite() {
+            return f64::INFINITY;
+        }
         if rel_j > max_rel {
             max_rel = rel_j;
         }
@@ -67,6 +72,9 @@ pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
         let ax_i_abs = f64::from(ax_dd[i]).abs();
         let scale_i = 1.0 + ax_i_abs + prob.b[i].abs();
         let rel_i = v / scale_i;
+        if !rel_i.is_finite() {
+            return f64::INFINITY;
+        }
         if rel_i > max_rel {
             max_rel = rel_i;
         }
@@ -227,6 +235,9 @@ pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
         };
         let scale_j = 1.0 + xi.abs() + bnd;
         let rel_j = v / scale_j;
+        if !rel_j.is_finite() {
+            return f64::INFINITY;
+        }
         if rel_j > max_rel {
             max_rel = rel_j;
         }
@@ -239,6 +250,42 @@ mod tests {
     use super::*;
     use crate::problem::ConstraintType;
     use otspot_num::sparse::CscMatrix;
+
+    /// 相対残差の集約は、成分が非有限になったら「違反なし (0)」ではなく
+    /// `INFINITY` を返さなければならない。
+    ///
+    /// `rel > max_rel` / `f64::max` は NaN 側で偽になるため、素朴に書くと
+    /// オーバーフローした行 (`inf/inf = NaN`) が残差 0 として報告され、
+    /// 上位の受理ゲートを素通りする。
+    ///
+    /// ## Sentinel (no-op-fail)
+    /// 各集約ループの `if !rel.is_finite() { return f64::INFINITY }` を外すと、
+    /// 下の assert が 0.0 を観測して FAIL する。
+    #[test]
+    fn residual_aggregation_reports_infinity_on_overflowing_activity() {
+        // 1 行 1 列、係数 2.0。x = 1e308 で A·x はオーバーフローする。
+        let a = CscMatrix::from_triplets(&[0], &[0], &[2.0_f64], 1, 1).unwrap();
+        let q = CscMatrix::new(1, 1);
+        let bounds = [(f64::NEG_INFINITY, f64::INFINITY)];
+        let cts = [ConstraintType::Le];
+        let b = [5.0_f64];
+        let c = [0.0_f64];
+        let view = ProblemView {
+            q: &q,
+            a: &a,
+            c: &c,
+            b: &b,
+            bounds: &bounds,
+            constraint_types: &cts,
+            eliminated_cols: &[],
+        };
+        let x = [1e308_f64];
+        let pres = primal_residual_rel(&view, &x);
+        assert!(
+            !pres.is_finite(),
+            "オーバーフローした activity は非有限として報告すべき, got {pres}"
+        );
+    }
 
     fn build_view<'a>(
         q: &'a CscMatrix,

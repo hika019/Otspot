@@ -1529,6 +1529,49 @@ fn cone_membership_check_covers_all_branches() {
     assert!(super::cone::in_cone(&blk, &[0.0, 0.0, 1.0, 1.0, 0.0], tol));
 }
 
+/// NaN / ±inf な slack は `vi < -tol` / `v0 < nr - tol` 比較で偽になり
+/// 「cone 内」と誤認される欠陥を検証する。到達経路: `misocp.rs::conic_feasible`
+/// の conic 行は `in_cone` を直接通る (overflow は SOC rest の二乗和が inf に
+/// 立、sqrt で inf、二乗和内の inf+(-inf) は NaN)。手計算オラクル: NaN >= t は
+/// 常に偽。
+/// sentinel: 各比較を `<` 形に戻すと NaN slack が素通りし FAIL。
+#[test]
+fn cone_membership_rejects_non_finite_slack() {
+    let blk = super::cone::Blocks::new(&ConeSpec { l: 2, soc: vec![3] });
+    let tol = 1e-9;
+    // Orthant component NaN。
+    assert!(!super::cone::in_cone(
+        &blk,
+        &[f64::NAN, 2.0, 2.0, 1.0, 1.0],
+        tol
+    ));
+    // Orthant component +inf は従来同様 cone 内扱い (`inf < -tol` は偽)。
+    assert!(super::cone::in_cone(
+        &blk,
+        &[f64::INFINITY, 2.0, 2.0, 1.0, 1.0],
+        tol
+    ));
+    // SOC head −inf: reject (従来同様)。
+    assert!(!super::cone::in_cone(
+        &blk,
+        &[0.0, 0.0, f64::NEG_INFINITY, 1.0, 1.0],
+        tol
+    ));
+    // SOC rest の二乗和が overflow → nr = inf → reject (旧実装は
+    // `v0 < inf` が偽で素通り: この手の点は帯内/帯外どちらとも扱えない)。
+    assert!(!super::cone::in_cone(
+        &blk,
+        &[0.0, 2.0, 1e200, 1e200, 1.0],
+        tol
+    ));
+    // SOC head NaN。
+    assert!(!super::cone::in_cone(
+        &blk,
+        &[0.0, f64::NAN, 2.0, 1.0, 1.0],
+        tol
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Scale-invariance sentinels for the certificate checks. The Farkas /
 // improving-ray tests must be immune to problem data scale: a large bound V
