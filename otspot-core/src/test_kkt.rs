@@ -52,7 +52,11 @@ pub fn dfeas_rel_bound(c: &[f64], bounds: &[(f64, f64)], x: &[f64], rc: &[f64]) 
             0.0
         };
         let scale = 1.0 + r.abs() + c[j].abs();
-        max_rel = max_rel.max(viol / scale);
+        let rel = viol / scale;
+        if !rel.is_finite() {
+            return f64::INFINITY;
+        }
+        max_rel = max_rel.max(rel);
     }
     max_rel
 }

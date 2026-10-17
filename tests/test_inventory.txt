@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3256 testcases, 26 ignored
+# totals: 3260 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -201,8 +201,11 @@ otspot-core	lp::tests::bounded_nonzero_lb_objective_correct	active
 otspot-core	lp::tests::demoted_incumbent_keeps_public_objective_offset	active
 otspot-core	lp::tests::farkas_certificate_probe_loop_honors_cancel_flag_preset	active
 otspot-core	lp::tests::guard_demotes_bound_violating_incumbent_to_stalled	active
+otspot-core	lp::tests::guard_demotes_incumbent_with_overflowing_activity	active
+otspot-core	lp::tests::guard_demotes_non_finite_incumbent	active
 otspot-core	lp::tests::guard_demotes_row_violating_incumbent_to_stalled	active
 otspot-core	lp::tests::guard_keeps_feasible_incumbent_as_suboptimal	active
+otspot-core	lp::tests::guard_keeps_feasible_incumbent_under_catastrophic_cancellation	active
 otspot-core	lp::tests::guard_leaves_non_suboptimal_status_untouched	active
 otspot-core	lp::tests::guard_without_solution_vector_reports_max_iterations	active
 otspot-core	lp::tests::invalid_options_rejected_at_lp_entry	active
@@ -1195,6 +1198,7 @@ otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_rejects_malformed_bound
 otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_rejects_malformed_bound_duals_without_nan_masking	active
 otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_uses_dd_to_avoid_f64_cancellation	active
 otspot-core	qp::ipm_solver::kkt::tests::primal_residual_rel_uses_dd_to_avoid_f64_cancellation	active
+otspot-core	qp::ipm_solver::kkt::tests::residual_aggregation_reports_infinity_on_overflowing_activity	active
 otspot-core	qp::kkt_resid::tests::bound_contrib_accepts_fixed_variable_omitted_layout	active
 otspot-core	qp::kkt_resid::tests::bound_contrib_at_var_agrees_with_bound_contrib_full_layout_fixed_var	active
 otspot-core	qp::kkt_resid::tests::bound_contrib_empty_bd_yields_zero	active

@@ -295,6 +295,9 @@ fn solve_reduced_lp_from_qp(
         lifted.stats.deadline_triggered =
             matches!(lifted.status, SolveStatus::Timeout) && options.external_stop_requested();
         lifted = guard_lp_optimal(lifted, original_lp);
+        // reduced 空間の incumbent 検証 (`solve_lp_forwarded_from_qp` 内) は postsolve
+        // 前のもの。復元した元空間の点が行・bound を破っていれば、ここで降格する。
+        lifted = crate::lp::guard_lp_incumbent_claim(lifted, original_lp, options);
         let postsolve_us = t_postsolve.elapsed().as_micros() as u64;
         lifted.timing_breakdown = Some(crate::problem::TimingBreakdown {
             presolve_us,
@@ -690,7 +693,12 @@ fn lp_reduced_cost_bound_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -
             0.0
         };
         let scale = 1.0 + r.abs() + problem.c[j].abs();
-        max_rel = max_rel.max(viol / scale);
+        let rel = viol / scale;
+        // `f64::max` は NaN 側を捨てるため、非有限は明示的に伝播させる。
+        if !rel.is_finite() {
+            return f64::INFINITY;
+        }
+        max_rel = max_rel.max(rel);
     }
     max_rel
 }
@@ -766,7 +774,10 @@ fn lp_original_primal_residuals(result: &SolverResult, original_lp: &LpProblem) 
 
 fn lp_original_primal_bad(result: &SolverResult, original_lp: &LpProblem, primal_tol: f64) -> bool {
     let (pfeas, bfeas) = lp_original_primal_residuals(result, original_lp);
-    pfeas > primal_tol || bfeas > primal_tol
+    // `!(v <= tol)` は NaN も「悪い」側に倒す (`v > tol` だと NaN が良品扱いになる)。
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    let bad = !(pfeas <= primal_tol) || !(bfeas <= primal_tol);
+    bad
 }
 
 fn postsolved_lp_needs_direct_retry(

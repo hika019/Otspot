@@ -129,6 +129,9 @@ pub(super) fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> boo
         };
         let scale = 1.0 + bi.abs() + ax_i.abs();
         let rel = violation / scale;
+        // 非有限は「無違反」ではなく最悪違反として扱う (NaN は比較で偽になり、
+        // そのまま通すと壊れた行を見逃す)。
+        let rel = if rel.is_finite() { rel } else { f64::INFINITY };
         if rel > max_rel {
             max_rel = rel;
             max_abs = violation;

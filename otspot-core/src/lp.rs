@@ -54,7 +54,7 @@ pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResu
 /// 落とす。許容は postsolve 品質判定と同じ `lp_accept_primal_tol`。
 ///
 /// `Optimal` 側の対応物は `qp::certificate::guard_lp_optimal` (証明書ゲート)。
-fn guard_lp_incumbent_claim(
+pub(crate) fn guard_lp_incumbent_claim(
     mut result: SolverResult,
     problem: &LpProblem,
     options: &SolverOptions,
@@ -66,10 +66,38 @@ fn guard_lp_incumbent_claim(
         result.status = SolveStatus::MaxIterations;
         return result;
     }
-    let (primal_residual, bound_violation) = crate::simplex::lp_primal_residuals(problem, &result);
-    if primal_residual > options.lp_accept_primal_tol()
-        || bound_violation > options.lp_accept_primal_tol()
+    // 非有限な点・非有限な行 activity は実行可能性を主張できない。相対残差は
+    // オーバーフローすると `inf/inf = NaN` になり、上流の `primal_residual_rel` は
+    // NaN を `if rel > max_rel` で取りこぼして 0 を返すため、ここで直接弾く。
+    if !result.solution.iter().all(|v| v.is_finite())
+        || problem
+            .a
+            .mat_vec_mul(&result.solution)
+            .is_ok_and(|activity| activity.iter().any(|v| !v.is_finite()))
     {
+        result.status = SolveStatus::Stalled;
+        return result;
+    }
+    // 残差は DD で積算する: `f64_impl` 版は報告用の drift オラクルであり、打ち消しの
+    // 大きい行では単位項が消えて実行可能な等式を違反と見せたり、逆に本物の残差を
+    // 隠したりする。status を決めるゲートには使えない。
+    let zero_q = otspot_num::sparse::CscMatrix::new(problem.num_vars, problem.num_vars);
+    let view = crate::qp::ipm_solver::outcome::ProblemView {
+        q: &zero_q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+        eliminated_cols: &[],
+    };
+    let primal_residual = crate::qp::ipm_solver::kkt::primal_residual_rel(&view, &result.solution);
+    let bound_violation =
+        crate::qp::ipm_solver::kkt::bound_violation(&problem.bounds, &result.solution);
+    let tol = options.lp_accept_primal_tol();
+    // `!(v <= tol)` は NaN も弾く (`v > tol` だと NaN が素通りする)。
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    if !(primal_residual <= tol) || !(bound_violation <= tol) {
         result.status = SolveStatus::Stalled;
     }
     result
@@ -188,6 +216,78 @@ mod tests {
         };
         let guarded = guard_lp_incumbent_claim(claimed, &problem, &SolverOptions::default());
         assert_eq!(guarded.status, SolveStatus::Stalled, "{guarded:?}");
+    }
+
+    /// 行 activity がオーバーフローする iterate を feasible と誤認しない (Codex P2)。
+    ///
+    /// `x = 1e308` は `A·x` (係数 2.0) が inf になり、相対化の分母も inf なので
+    /// 残差は `inf/inf = NaN`。上流の `primal_residual_rel` は NaN を取りこぼして
+    /// 0 を返すため、guard 側で非有限 activity を直接弾く必要がある。
+    #[test]
+    fn guard_demotes_incumbent_with_overflowing_activity() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let problem = LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let claimed = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 1e308,
+            solution: vec![1e308],
+            ..Default::default()
+        };
+        let guarded = guard_lp_incumbent_claim(claimed, &problem, &SolverOptions::default());
+        assert_eq!(guarded.status, SolveStatus::Stalled, "{guarded:?}");
+    }
+
+    /// 非有限な解成分を持つ iterate も同様に降格する。
+    #[test]
+    fn guard_demotes_non_finite_incumbent() {
+        let problem = make_trivial_lp();
+        let claimed = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: f64::INFINITY,
+            solution: vec![f64::INFINITY],
+            ..Default::default()
+        };
+        let guarded = guard_lp_incumbent_claim(claimed, &problem, &SolverOptions::default());
+        assert_eq!(guarded.status, SolveStatus::Stalled, "{guarded:?}");
+    }
+
+    /// 打ち消しの大きい等式行でも、DD 積算なら実行可能な点を誤って降格しない
+    /// (Codex P2)。f64 逐次和では 1e16 + 1 − 1e16 = 0 となり、右辺 1 の等式が
+    /// 違反と判定される。
+    #[test]
+    fn guard_keeps_feasible_incumbent_under_catastrophic_cancellation() {
+        let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[1e16_f64, 1.0, -1e16], 1, 3)
+            .unwrap();
+        let problem = LpProblem::new_general(
+            vec![0.0, 0.0, 0.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, 2.0); 3],
+            None,
+        )
+        .unwrap();
+        // x = [1, 1, 1] は 1e16 + 1 − 1e16 = 1 で厳密に実行可能。
+        let claimed = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![1.0, 1.0, 1.0],
+            ..Default::default()
+        };
+        let guarded = guard_lp_incumbent_claim(claimed, &problem, &SolverOptions::default());
+        assert_eq!(
+            guarded.status,
+            SolveStatus::SuboptimalSolution,
+            "DD 積算なら実行可能: {guarded:?}"
+        );
     }
 
     /// 逆方向の teeth: feasible な点を誤って降格しない (x = 2 は 0 ≤ 2 ≤ 5)。

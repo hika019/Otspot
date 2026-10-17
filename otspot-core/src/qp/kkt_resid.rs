@@ -115,6 +115,9 @@ pub fn dual_sign_violation(
         };
         if viol > 0.0 {
             let rel = viol / (1.0 + y[i].abs());
+            if !rel.is_finite() {
+                return f64::INFINITY;
+            }
             if rel > max_rel {
                 max_rel = rel;
             }
@@ -149,6 +152,9 @@ pub fn dual_sign_violation(
             let v = (-z[idx]).max(0.0); // z_lb must be >= 0
             if v > 0.0 {
                 let rel = v / (1.0 + z[idx].abs());
+                if !rel.is_finite() {
+                    return f64::INFINITY;
+                }
                 if rel > max_rel {
                     max_rel = rel;
                 }
@@ -164,6 +170,9 @@ pub fn dual_sign_violation(
             let v = (-z[idx]).max(0.0); // z_ub must be >= 0
             if v > 0.0 {
                 let rel = v / (1.0 + z[idx].abs());
+                if !rel.is_finite() {
+                    return f64::INFINITY;
+                }
                 if rel > max_rel {
                     max_rel = rel;
                 }
@@ -345,7 +354,12 @@ pub mod f64_impl {
         let mut max_rel = 0.0_f64;
         for (i, &v) in viols.iter().enumerate() {
             let scale_i = 1.0 + ax[i].abs() + b[i].abs();
-            max_rel = max_rel.max(v / scale_i);
+            let rel_i = v / scale_i;
+            // `f64::max` は NaN 側を捨てるため、明示的に非有限を伝播させる。
+            if !rel_i.is_finite() {
+                return f64::INFINITY;
+            }
+            max_rel = max_rel.max(rel_i);
         }
         max_rel
     }

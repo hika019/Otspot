@@ -81,6 +81,18 @@ pub(crate) fn refine_dual_lsq(
         let scale_new = 1.0 + qx_j + problem.c[j].abs() + aty_new_j + bound_contrib[j].abs();
         let rel_old = f64::from(r_old_dd).abs() / scale_old;
         let rel_new = f64::from(r_new_dd).abs() / scale_new;
+        // 非有限は最悪値として扱う。NaN のままだと比較が偽になり「残差 0」と
+        // 見なされて、壊れた候補を採用してしまう。
+        let rel_old = if rel_old.is_finite() {
+            rel_old
+        } else {
+            f64::INFINITY
+        };
+        let rel_new = if rel_new.is_finite() {
+            rel_new
+        } else {
+            f64::INFINITY
+        };
         if rel_old > max_rel_old {
             max_rel_old = rel_old;
         }
@@ -164,6 +176,7 @@ pub(crate) fn refine_dual_lsq_irls(
             let scale =
                 1.0 + qx[j].abs() + problem.c[j].abs() + aty_v[j].abs() + bound_contrib[j].abs();
             let rel = r.abs() / scale;
+            let rel = if rel.is_finite() { rel } else { f64::INFINITY };
             if rel > max_rel {
                 max_rel = rel;
             }

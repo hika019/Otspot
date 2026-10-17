@@ -891,6 +891,12 @@ impl SearchState {
         if local_kkt_within(problem, &self.incumbent_result, user_eps) {
             return;
         }
+        // 明示キャンセル後は追加の solve を始めない (deadline 枯渇との区別は
+        // `cancel_requested` の doc 参照)。乗数を復元できないので、呼び出し側の
+        // ゲートが `FeasiblePoint` へ降格する — status は正直なまま。
+        if base_opts.cancel_requested() {
+            return;
+        }
         // deadline はここで取り直す: 先行する polish の再解が残り budget を
         // 使い切っていることがあり、その状態を継承すると復元 LP が即 Timeout する
         // (復元が最も要る場面ほど失敗する)。
@@ -908,10 +914,12 @@ impl SearchState {
         let mut candidate = self.incumbent_result.clone();
         candidate.dual_solution = recovered.y;
         candidate.bound_duals = recovered.bound_duals;
-        // 乗数を入れ替えたので、node 解が持っていた duality gap は無効。残すと
-        // `finalize_proven` が古い値を優先し、復元後の乗数と無関係な gap で
-        // 証明済み/未証明を判定してしまう。
+        // 乗数を入れ替えたので、node 解が持っていた duality gap と残差診断は無効。
+        // gap を残すと `finalize_proven` が古い値を優先して証明済み/未証明を
+        // 誤判定し、`final_residuals` を残すと返した双対と矛盾する KKT 品質が
+        // ベンチ・診断側へ出る。
         candidate.duality_gap_rel = None;
+        candidate.final_residuals = None;
         if local_kkt_within(problem, &candidate, user_eps) {
             self.incumbent_result = candidate;
         }
