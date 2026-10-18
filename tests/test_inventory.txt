@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3266 testcases, 26 ignored
+# totals: 3274 testcases, 28 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -908,12 +908,15 @@ otspot-core	qp::certificate::tests::guard_lp_optimal_demotes_wrong_sign_dual	act
 otspot-core	qp::certificate::tests::guard_lp_optimal_no_false_demote_for_residuals_below_lp_cert_tol	active
 otspot-core	qp::certificate::tests::guard_lp_optimal_passes_correct_result	active
 otspot-core	qp::certificate::tests::guard_lp_optimal_passthrough_non_optimal_statuses	active
+otspot-core	qp::certificate::tests::infeasible_mass_floor_partitions_measured_band	active
 otspot-core	qp::certificate::tests::lp_cert_tol_equals_feas_rel_tol	active
 otspot-core	qp::certificate::tests::prove_optimal_corrupted_x_fails	active
 otspot-core	qp::certificate::tests::prove_optimal_dimension_mismatch_returns_err_not_panic	active
 otspot-core	qp::certificate::tests::prove_optimal_empty_problem	active
 otspot-core	qp::certificate::tests::prove_optimal_exact_kkt_passes	active
 otspot-core	qp::certificate::tests::prove_optimal_finite_below_tol_still_passes	active
+otspot-core	qp::certificate::tests::prove_optimal_infeasible_mass_is_dual_weighted_average_not_max	active
+otspot-core	qp::certificate::tests::prove_optimal_infeasible_mass_scope_outside_tolerance_skips_witness	active
 otspot-core	qp::certificate::tests::prove_optimal_invalid_gap_and_tol_rejected	active
 otspot-core	qp::certificate::tests::prove_optimal_lp_active_lower_bound_cert	active
 otspot-core	qp::certificate::tests::prove_optimal_lp_correct_simplex_path_passes	active
@@ -923,6 +926,7 @@ otspot-core	qp::certificate::tests::prove_optimal_lp_short_reduced_costs_is_not_
 otspot-core	qp::certificate::tests::prove_optimal_lp_wrong_sign_dual_fails	active
 otspot-core	qp::certificate::tests::prove_optimal_nan_in_each_condition_is_rejected	active
 otspot-core	qp::certificate::tests::prove_optimal_negative_gap_bug_reproduction	active
+otspot-core	qp::certificate::tests::prove_optimal_rejects_infeasible_mass_above_floor	active
 otspot-core	qp::certificate::tests::prove_optimal_stationarity_fails	active
 otspot-core	qp::certificate::tests::prove_optimal_tol_semantics	active
 otspot-core	qp::certificate::tests::prove_optimal_wrong_sign_dual_fails_dual_sign_check	active
@@ -1193,6 +1197,10 @@ otspot-core	qp::ipm_solver::kkt::tests::bound_violation_nan_x_returns_infinity	a
 otspot-core	qp::ipm_solver::kkt::tests::complementarity_componentwise_rel_maps_fixed_omitted_bound_duals	active
 otspot-core	qp::ipm_solver::kkt::tests::complementarity_residual_rel_panics_on_dimension_mismatch	active
 otspot-core	qp::ipm_solver::kkt::tests::complementarity_residual_rel_rejects_malformed_bound_duals_before_scaling	active
+otspot-core	qp::ipm_solver::kkt::tests::infeasible_dual_mass_rel_ignores_eq_duals	active
+otspot-core	qp::ipm_solver::kkt::tests::infeasible_dual_mass_rel_rejects_broken_inputs	active
+otspot-core	qp::ipm_solver::kkt::tests::infeasible_dual_mass_rel_vacuous_and_feasible_points	active
+otspot-core	qp::ipm_solver::kkt::tests::infeasible_dual_mass_rel_weighted_by_dual_magnitude	active
 otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_excludes_fx_and_empty_col	active
 otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_linear_only_var_not_skipped_with_mask	active
 otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_no_mask_exposes_linear_only_var	active
@@ -2987,8 +2995,8 @@ otspot::faer_qd_test	test_ipm_barrier_parameter_sweep	active
 otspot::fast_baseline_regression	fast_regression_conic_matches_closed_form_unit_ball	active
 otspot::fast_baseline_regression	fast_regression_lp_matches_netlib_baseline	active
 otspot::fast_baseline_regression	fast_regression_qp_matches_maros_meszaros_baseline	active
-otspot::liswet7_11_obj_independent_check	liswet11_obj_independent_oracle	active
-otspot::liswet7_11_obj_independent_check	liswet7_obj_independent_oracle	active
+otspot::liswet7_11_obj_truth_sentinel	liswet11_optimal_objective_matches_certified_truth	ignored
+otspot::liswet7_11_obj_truth_sentinel	liswet7_false_optimal_rejected	ignored
 otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_breaks_delta_matrix_floor_at_eps_1e8	active
 otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_unaffected_at_default_eps_1e6	active
 otspot::lp_coverage_screen	lp_coverage_screen_all	ignored
