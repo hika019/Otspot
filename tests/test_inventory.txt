@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3290 testcases, 44 ignored
+# totals: 3291 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1128,6 +1128,7 @@ otspot-core	qp::ipm_solver::attempt::tests::cancelled_infeasibility_backstop_sen
 otspot-core	qp::ipm_solver::attempt::tests::candidate_order_prefers_certificate_then_objective	active
 otspot-core	qp::ipm_solver::attempt::tests::candidate_order_preserves_structural_status_over_unproven_iterate	active
 otspot-core	qp::ipm_solver::attempt::tests::converged_termination_does_not_break_early::converged_termination_runs_full_ladder	active
+otspot-core	qp::ipm_solver::attempt::tests::deep_lane_bit_identical_stall_does_not_skip_loose_lanes	active
 otspot-core	qp::ipm_solver::attempt::tests::deterministic_stall_in_one_lane_does_not_skip_other_lane	active
 otspot-core	qp::ipm_solver::attempt::tests::dual_lane_true_stall_breaks_at_third_occurrence::dual_lane_true_stall_breaks_at_expected_call_count	active
 otspot-core	qp::ipm_solver::attempt::tests::empty_col_mask_noop_proof_in_finalize	active
