@@ -172,6 +172,11 @@ fn build_attempt_ladder(
     use_ruiz_scaling: bool,
 ) -> Vec<(bool, f64)> {
     if no_ruiz_only || !use_ruiz_scaling {
+        // 注意: ここに (base*100) lane を挟むと、深い 3 lane が bit-identical で
+        // lane death を誘発し、後続の loose lane (base/10, 1) が skip される。
+        // 実測 (2026-10-18 maros bench): LISWET7 が loose lane を証明に使っており
+        // skip で PASS → STALLED に転落した (reg_retries=14485 の暴走)。
+        // 深い eps への救済は run_converged_precision_deepening が担う。
         let mut v = vec![(false, base_tighten), (false, base_tighten * 10.0)];
         if base_tighten > 10.0 {
             v.push((false, base_tighten / 10.0));
