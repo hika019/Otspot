@@ -76,7 +76,9 @@ pub(super) fn kkt_already_passes(
         return false;
     }
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
-    if bv > user_eps {
+    // `!(v <= tol)` は NaN も弾く (`v > tol` だと NaN が受理側へ抜ける)。
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    if !(bv <= user_eps) {
         return false;
     }
     let comp = complementarity_residual_rel(
@@ -91,7 +93,8 @@ pub(super) fn kkt_already_passes(
         &final_sol.dual_solution,
         &final_sol.bound_duals,
     ));
-    if comp > user_eps {
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    if !(comp <= user_eps) {
         return false;
     }
     let dsign = dual_sign_violation(
@@ -100,7 +103,8 @@ pub(super) fn kkt_already_passes(
         orig_problem.bounds.as_slice(),
         &final_sol.bound_duals,
     );
-    if dsign > user_eps {
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    if !(dsign <= user_eps) {
         return false;
     }
     let gap = super::duality_gap::compute_duality_gap_rel(orig_problem, final_sol);
@@ -444,7 +448,9 @@ pub(super) fn refine_krylov_and_projection(
             &final_sol.bound_duals,
         );
         let pres_post_std = primal_residual_rel(&view, &final_sol.solution);
-        if kkt_post_std > user_eps || pres_post_std > user_eps {
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        let needs_refine = !(kkt_post_std <= user_eps) || !(pres_post_std <= user_eps);
+        if needs_refine {
             crate::qp::refine_kkt_extended_precision(
                 orig_problem,
                 final_sol,
@@ -485,7 +491,9 @@ pub(super) fn refine_krylov_and_projection(
                 &final_sol.dual_solution,
                 &final_sol.bound_duals,
             );
-            if kkt_after2 > user_eps {
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
+            let reject = !(kkt_after2 <= user_eps);
+            if reject {
                 *final_sol = pre_sol2;
             }
         } else {

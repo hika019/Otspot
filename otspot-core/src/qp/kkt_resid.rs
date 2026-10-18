@@ -115,6 +115,9 @@ pub fn dual_sign_violation(
         };
         if viol > 0.0 {
             let rel = viol / (1.0 + y[i].abs());
+            if !rel.is_finite() {
+                return f64::INFINITY;
+            }
             if rel > max_rel {
                 max_rel = rel;
             }
@@ -149,6 +152,9 @@ pub fn dual_sign_violation(
             let v = (-z[idx]).max(0.0); // z_lb must be >= 0
             if v > 0.0 {
                 let rel = v / (1.0 + z[idx].abs());
+                if !rel.is_finite() {
+                    return f64::INFINITY;
+                }
                 if rel > max_rel {
                     max_rel = rel;
                 }
@@ -164,6 +170,9 @@ pub fn dual_sign_violation(
             let v = (-z[idx]).max(0.0); // z_ub must be >= 0
             if v > 0.0 {
                 let rel = v / (1.0 + z[idx].abs());
+                if !rel.is_finite() {
+                    return f64::INFINITY;
+                }
                 if rel > max_rel {
                     max_rel = rel;
                 }
@@ -345,7 +354,12 @@ pub mod f64_impl {
         let mut max_rel = 0.0_f64;
         for (i, &v) in viols.iter().enumerate() {
             let scale_i = 1.0 + ax[i].abs() + b[i].abs();
-            max_rel = max_rel.max(v / scale_i);
+            let rel_i = v / scale_i;
+            // `f64::max` は NaN 側を捨てるため、明示的に非有限を伝播させる。
+            if !rel_i.is_finite() {
+                return f64::INFINITY;
+            }
+            max_rel = max_rel.max(rel_i);
         }
         max_rel
     }
@@ -496,6 +510,23 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap();
         let x = vec![1.0, 2.0]; // wrong: a.ncols() == 3, x.len() == 2
         let _ = f64_impl::ax(&a, &x);
+    }
+
+    /// A.x sentinel: 行 activity が overflow (`inf + -inf = NaN`) した等式の
+    /// 相対残差は NaN になる。集約側 (`f64_impl::primal_residual_rel`) は非有限を
+    /// `+INFINITY` に伝播させ、NaN が `rel > tol`比較の「偽」で良品扱いされる
+    /// ことを防ぐ。手計算オラクル: A = [[1e308, -1e308]], x = [2, 2] →
+    /// A·x = 1e308·2 + (-1e308)·2 = inf - inf = NaN、NaN/scale は NaN。
+    /// sentinel: 非有限伝播 (`if !rel_i.is_finite()`) を外すと NaN がそのまま
+    /// 返り FAIL。
+    #[test]
+    fn f64_impl_primal_residual_rel_propagates_nonfinite_activity() {
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1e308, -1e308], 1, 2).unwrap();
+        let v = f64_impl::primal_residual_rel(&a, &[0.0], &[ConstraintType::Eq], &[2.0, 2.0]);
+        assert!(
+            v == f64::INFINITY,
+            "non-finite activity must propagate as +INFINITY, got {v}"
+        );
     }
 
     #[test]

@@ -89,15 +89,22 @@ impl Blocks {
 
 /// Approximate membership `v ∈ K` (self-dual, so also `v ∈ K*`): orthant
 /// components `>= -tol` and each SOC block `v0 >= ||v_rest|| - tol`.
+///
+/// NaN-safe by construction: every comparison is written as witness of
+/// membership (`!(v >= t)`), so NaN/overflowed slack rejects instead of
+/// passing (`misocp.rs::conic_feasible` / `equil` / `ipm` certificates all
+/// route through here).
 pub(super) fn in_cone(blk: &Blocks, v: &[f64], tol: f64) -> bool {
-    if v[..blk.l].iter().any(|&vi| vi < -tol) {
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    if v[..blk.l].iter().any(|&vi| !(vi >= -tol)) {
         return false;
     }
     let mut off = blk.l;
     for &d in &blk.soc {
         let rest = &v[off + 1..off + d];
         let nr = rest.iter().map(|x| x * x).sum::<f64>().sqrt();
-        if v[off] < nr - tol {
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(v[off] >= nr - tol) {
             return false;
         }
         off += d;

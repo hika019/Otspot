@@ -132,10 +132,11 @@ pub enum SolveStatus {
     /// 状態のみがこの status を持つ。非収束 iterate は [`SolveStatus::Stalled`] /
     /// [`SolveStatus::MaxIterations`] であり、この status を名乗らない。
     ///
-    /// 既知の例外: LP simplex 経路には未整理の mint が残る
-    /// (`simplex/standard_form.rs` の stall incumbent、`simplex/entry.rs` の
-    /// postsolve 品質降格)。これらは上記の eps 検証を経ておらず、LP 側 taxonomy
-    /// の整理は別 task。上記の保証は QP/IPM 経路と MIP incumbent に対するもの。
+    /// LP: 公開経路 (`lp::solve_lp_with` / `solve_lp_forwarded_from_qp`) では
+    /// `guard_lp_incumbent_claim` が元問題の primal 実行可能性を検証し、通らない
+    /// 反復点は [`SolveStatus::Stalled`] へ降格する。simplex 内部が組み立てる
+    /// 中間結果 (MIP の node LP 等) はこのゲートを通らないため、status を信用せず
+    /// 呼び出し側で点を検証すること。
     SuboptimalSolution,
     /// ソルバーが時限・反復予算の枯渇によらず前進不能になり、要求精度 eps 未達の
     /// まま内部打ち切りした（解品質の主張なし）。
@@ -166,6 +167,10 @@ pub enum SolveStatus {
     /// 非凸 QP の局所最適解 (= `solve_qp_global` 経由で incumbent あり、ε-global 証明なし)。
     ///
     /// BB driver が deadline / max_nodes / max_depth で打ち切られ、incumbent ある状態。
+    ///
+    /// 検証は一次条件 (KKT) のみで、二次の局所最適性証明 (reduced Hessian の
+    /// 半正定値性) は含まない。indefinite Q では停留点である鞍点も一次条件を満たす
+    /// ため、この status は「KKT 点であり大域証明は無い」ことまでを主張する。
     /// `LocallyOptimal` (= IPM inertia 補正後の単発解) と区別して、caller が「探索打切」
     /// vs「単発 KKT 収束」を識別できる。`Optimal` には**含めない** (= global proof なし)。
     NonconvexLocal,

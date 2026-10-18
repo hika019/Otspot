@@ -755,15 +755,21 @@ fn push_mc(
 /// Feasibility check against the caller's literal `NonconvexQcqp` data.
 /// `g_lin`/`a_eq`'s dot products with `x` are computed via `mat_vec_mul`
 /// (`O(nnz)`) rather than by densifying either matrix first.
+///
+/// All residual comparisons use `!(v <= tol)`: overflowed activity turns
+/// `inf/inf`-style dot products into NaN, and `v > tol` would silently
+/// accept such an unverifiable point (conic/misocp.rs::conic_feasible is
+/// the same-shaped gate).
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn feasible(qp: &NonconvexQcqp, x: &[f64], tol: f64) -> bool {
     for (k, &lbv) in qp.lb.iter().enumerate() {
-        if x[k] < lbv - tol || x[k] > qp.ub[k] + tol {
+        if !(lbv - tol <= x[k] && x[k] <= qp.ub[k] + tol) {
             return false;
         }
     }
     for qc in &qp.quad {
         let v = quad_val(&qc.p, x) + qc.q.iter().zip(x).map(|(a, b)| a * b).sum::<f64>() + qc.r;
-        if v > tol {
+        if !(v <= tol) {
             return false;
         }
     }
@@ -772,7 +778,7 @@ fn feasible(qp: &NonconvexQcqp, x: &[f64], tol: f64) -> bool {
          at global_core entry (nonconvex.rs); x is always qp.n long",
     );
     for (i, &v) in gv.iter().enumerate() {
-        if v > qp.h_lin[i] + tol {
+        if !(v <= qp.h_lin[i] + tol) {
             return false;
         }
     }
@@ -781,7 +787,7 @@ fn feasible(qp: &NonconvexQcqp, x: &[f64], tol: f64) -> bool {
          at global_core entry (nonconvex.rs); x is always qp.n long",
     );
     for (i, &v) in av.iter().enumerate() {
-        if (v - qp.b_eq[i]).abs() > tol {
+        if !((v - qp.b_eq[i]).abs() <= tol) {
             return false;
         }
     }
@@ -1206,6 +1212,75 @@ mod tests {
             "rounding x0 to 5.0 leaves a 3e-7 equality residual, which must \
              fail the caller's tol=1e-8 rather than a hardcoded 1e-6 floor: \
              incumbent={incumbent}, inc_x={inc_x:?}"
+        );
+    }
+
+    /// 非 finite な x はどの閾の比較でも偽になり「実行可能」と誤認される。
+    /// sentinel: bounds 比較を `x[k] < lbv - tol || x[k] > ub[k] + tol` に戻すと
+    /// NaN が素通りして true を返し FAIL する。
+    #[test]
+    fn feasible_rejects_non_finite_input() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0],
+            ub: vec![10.0],
+        };
+        assert!(!feasible(&qp, &[f64::NAN], 1e-6));
+        assert!(!feasible(&qp, &[f64::INFINITY], 1e-6));
+        assert!(feasible(&qp, &[1.0], 1e-6));
+    }
+
+    /// 行 activity の overflow (`inf + -inf`) が quad の拘束式内で NaN になり、
+    /// NaN の残差が `v > tol` を素通りして実行可能と誤認される欠陥 (conic
+    /// feasible ゲートの NaN fail-open) を検証。x 自体は有限。
+    ///
+    /// v = 0.5 * xᵀpx + qᵀx + r = 0.5·(1e155·1e155) + (-1e154)·1e155
+    ///   = 0.5·inf + (-inf) = NaN。手計算オラクル。
+    /// sentinel: quad 比較を `v > tol` に戻すと NaN が素通りして FAIL。
+    #[test]
+    fn feasible_rejects_nan_quad_activity() {
+        let n = 1usize;
+        let p = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0],
+            quad: vec![GQuadConstraint {
+                p,
+                q: vec![-1e154],
+                r: 0.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0],
+            ub: vec![f64::INFINITY],
+        };
+        assert!(
+            !feasible(&qp, &[1e155], 1e-6),
+            "quadratic activity overflows to NaN (0.5·inf + -inf); must not be accepted as feasible"
+        );
+        assert!(
+            f64::is_nan(
+                quad_val(&qp.quad[0].p, &[1e155])
+                    + qp.quad[0]
+                        .q
+                        .iter()
+                        .zip(&[1e155])
+                        .map(|(a, b)| a * b)
+                        .sum::<f64>()
+                    + qp.quad[0].r
+            ),
+            "test precondition: the activity really does evaluate to NaN"
         );
     }
 
