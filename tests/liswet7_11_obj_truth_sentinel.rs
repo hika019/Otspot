@@ -13,6 +13,12 @@
 //!   (feasible x の obj ≥ max_y d(y)) より低い元素和要求で不可能値
 //!   (`data/baseline_objectives/maros_meszaros.csv` の訂正は lead 報告)。
 //!
+//! 追記 (2026-10-19): 独立再裁定 (同一手順 + float128 弱双対下界/実行可能点上界の
+//! 挟み込み) でも両真値を再確認 — 判定区間幅は LISWET7 ≤2.0e-11, LISWET11 ≤6.1e-7。
+//! Clarabel 0.11.1 tol=1e-12 の AlmostSolved 反復点の値 (−2483.194968631 /
+//! −2489.222682544) は大域下界を下回る到達不能値 (primal 違反 3.5e-7 × 7169 行 /
+//! 3.5e-7 × 2710 行) で、baseline 参照値には使えない。
+//!
 //! bench (`scripts/bench_parallel.sh`) と同条件の eps / timeout を使う。
 //! 解実装 heavy を tier-2 で走らせる (`--profile heavy --run-ignored all`)。
 
@@ -50,7 +56,7 @@ fn liswet7_false_optimal_rejected() {
 #[test]
 #[ignore = "tier-2"]
 fn liswet11_optimal_objective_matches_certified_truth() {
-    // 独立オラクル確定値 ([liswet7_11_otspot_truth_audit.rs] module doc 参照)。
+    // 独立オラクル確定値 (module doc の手順: HiGHS 生 QPS 直解 + 自前パーサ KKT)。
     const LISWET11_TRUTH: f64 = -2476.226042863;
     let prob = maros_qp("LISWET11.QPS");
     let mut opts = SolverOptions::default();
