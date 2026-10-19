@@ -96,11 +96,41 @@ fn diag_duality_gap_rel(prob: &QpProblem, x: &[f64], y: &[f64], z: &[f64]) -> f6
     }
 }
 
+/// `report_variant` の観測値 (diag 側 assert 用; eprintln と同内容の残差 5 種)。
+#[derive(Debug)]
+struct VariantObservation {
+    kkt: f64,
+    pres: f64,
+    bv: f64,
+    comp: f64,
+    gap: f64,
+}
+
+impl VariantObservation {
+    /// diag の計測機構が下流で評価できる数値を返したか。
+    ///
+    /// 残差関数は次元不整合や非有限入力で INFINITY を返しうる。観測専用 diag でも
+    /// 「計測不能 (非有限)」だけは失敗として検出する (audit gate の
+    /// observation-only 検査対応も兼ねる)。
+    fn is_well_formed(&self) -> bool {
+        self.kkt.is_finite()
+            && self.pres.is_finite()
+            && self.bv.is_finite()
+            && self.comp.is_finite()
+            && self.gap.is_finite()
+    }
+}
+
 /// 1 問分の残差内訳を出力する (bench 条件同一: eps=1e-6, timeout 1000s)。
-/// 1 問分の残差内訳を出力する。
 /// `user_eps`/`ruiz_override`/`timeout` を変えて比較できる (eps ladder / ruiz off)。
 /// 既定 (1e-6, None, 1000.0) が bench 条件。
-fn report_variant(name: &str, user_eps: f64, ruiz_override: Option<bool>, timeout: f64) {
+/// 戻り値は diag 側 assert 用の観測値 (eprintln と同内容の残差 5 種)。
+fn report_variant(
+    name: &str,
+    user_eps: f64,
+    ruiz_override: Option<bool>,
+    timeout: f64,
+) -> VariantObservation {
     let path = std::path::PathBuf::from(format!("data/maros_meszaros/{name}.QPS"));
     assert!(path.exists(), "{path:?} not found");
     let prob = parse_qps(&path).expect("parse failed");
@@ -183,14 +213,27 @@ fn report_variant(name: &str, user_eps: f64, ruiz_override: Option<bool>, timeou
         dt,
         gate
     );
+
+    VariantObservation {
+        kkt,
+        pres,
+        bv,
+        comp,
+        gap,
+    }
 }
 
 macro_rules! stalled_diag {
     ($fn_name:ident, $name:literal) => {
         #[test]
-        #[ignore = "diag (maros STALLED 問の 5 残差内訳; 観測用であり失敗しない)"]
+        #[ignore = "diag (maros STALLED 問の 5 残差内訳; 観測用・非有限検出時のみ失敗)"]
         fn $fn_name() {
-            report_variant($name, 1e-6, None, 1000.0);
+            let obs = report_variant($name, 1e-6, None, 1000.0);
+            assert!(
+                obs.is_well_formed(),
+                "計測機構が非有限残余を返した ({}) : {obs:?}",
+                $name
+            );
         }
     };
 }
@@ -223,17 +266,27 @@ stalled_diag!(maros_stalled_yao, "YAO");
 // timeout は 1 問あたり 120s 区切り (diag 用; bench の 1000s ではない)。
 // ---------------------------------------------------------------------------
 
-/// comp 追随チェック: bench 時間の短い comp-only 3 問 (A组代表)。
+/// comp 追随チェック: bench 時間の短い comp-only 3 問 (comp 単独 fail 群の代表)。
 #[test]
 #[ignore = "diag (comp の eps 追随チェック; 観測用)"]
 fn maros_eps_ladder_fast() {
     const NAMES: [&str; 3] = ["QPCBOEI2", "AUG2DCQP", "YAO"];
     const EPS: [f64; 3] = [1e-6, 1e-8, 1e-10];
+    let mut obs = Vec::new();
     for name in NAMES {
         for &eps in &EPS {
-            report_variant(name, eps, None, 120.0);
+            obs.push(report_variant(name, eps, None, 120.0));
         }
     }
+    assert_eq!(
+        obs.len(),
+        NAMES.len() * EPS.len(),
+        "eps ladder が全 variant を走っていない"
+    );
+    assert!(
+        obs.iter().all(|o| o.is_well_formed()),
+        "計測機構が非有限残余を返した: {obs:?}"
+    );
 }
 
 /// LISWET 家族 off-lane の kkt 崩壊代表 1 問: eps × ruiz on/off。
@@ -241,11 +294,21 @@ fn maros_eps_ladder_fast() {
 #[ignore = "diag (LISWET8 の ruiz on/off 比較; 観測用)"]
 fn maros_ruiz_liswet8() {
     const EPS: [f64; 2] = [1e-6, 1e-8];
+    let mut obs = Vec::new();
     for &eps in &EPS {
         for &ruiz in &[true, false] {
-            report_variant("LISWET8", eps, Some(ruiz), 120.0);
+            obs.push(report_variant("LISWET8", eps, Some(ruiz), 120.0));
         }
     }
+    assert_eq!(
+        obs.len(),
+        EPS.len() * 2,
+        "ruiz on/off ladder が全 variant を走っていない"
+    );
+    assert!(
+        obs.iter().all(|o| o.is_well_formed()),
+        "計測機構が非有限残余を返した: {obs:?}"
+    );
 }
 
 /// 双対崩壊 3 問 (kkt pristine + gap 大) の ruiz on/off。
@@ -254,13 +317,23 @@ fn maros_ruiz_liswet8() {
 fn maros_ruiz_liswet9_10_12() {
     const NAMES: [&str; 3] = ["LISWET9", "LISWET10", "LISWET12"];
     const EPS: [f64; 2] = [1e-6, 1e-8];
+    let mut obs = Vec::new();
     for name in NAMES {
         for &eps in &EPS {
             for &ruiz in &[true, false] {
-                report_variant(name, eps, Some(ruiz), 120.0);
+                obs.push(report_variant(name, eps, Some(ruiz), 120.0));
             }
         }
     }
+    assert_eq!(
+        obs.len(),
+        NAMES.len() * EPS.len() * 2,
+        "ruiz on/off ladder が全 variant を走っていない"
+    );
+    assert!(
+        obs.iter().all(|o| o.is_well_formed()),
+        "計測機構が非有限残余を返した: {obs:?}"
+    );
 }
 
 /// kkt-only 系 (VALUES, m=1, iters=210) の eps × ruiz on/off。
@@ -268,11 +341,21 @@ fn maros_ruiz_liswet9_10_12() {
 #[ignore = "diag (VALUES の eps ラダーと ruiz on/off; 観測用)"]
 fn maros_eps_ladder_values() {
     const EPS: [f64; 3] = [1e-6, 1e-8, 1e-10];
+    let mut obs = Vec::new();
     for &eps in &EPS {
         for &ruiz in &[true, false] {
-            report_variant("VALUES", eps, Some(ruiz), 120.0);
+            obs.push(report_variant("VALUES", eps, Some(ruiz), 120.0));
         }
     }
+    assert_eq!(
+        obs.len(),
+        EPS.len() * 2,
+        "eps ladder が全 variant を走っていない"
+    );
+    assert!(
+        obs.iter().all(|o| o.is_well_formed()),
+        "計測機構が非有限残余を返した: {obs:?}"
+    );
 }
 
 /// Ruiz スケールの実測 (solve 無し・一瞬)。
