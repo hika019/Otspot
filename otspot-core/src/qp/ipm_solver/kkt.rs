@@ -1,7 +1,6 @@
 //! 元空間 KKT 残差 (bench compute_dfeas_orig と同形・成分相対化)。
 
 use super::outcome::ProblemView;
-use crate::problem::ConstraintType;
 use crate::qp::kkt_resid::{self, dd_impl};
 use crate::tolerances::{any_nonfinite, FX_TOL};
 
@@ -83,63 +82,44 @@ pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
     max_rel
 }
 
-/// 実行不能質量計量 (infeasibility-mass witness) — 偽 Optimal の不可能性証拠。
+/// Aggregate primal feasibility `‖r‖₂` with row-relative components
+/// `r_i = viol_i / (1 + |b_i| + Σ_j |A_ij·x_j|)` over all rows.
 ///
-/// `m̄ = Σ_ineq viol⁺ᵢ·|yᵢ| / Σ_ineq |yᵢ|` (Le/Ge 行のみ寄与、Eq 行は符号拘束が
-/// ないため対象外で分子・分母とも除外)。
+/// Each component is invariant under row scaling (up to the absolute floor 1):
+/// `Σ_j |A_ij·x_j|` is the magnitude f64 rounding of `x` acts on, so a row
+/// `α·x ≤ α·β` evaluated at `fl(x*)` yields `r_i ≈ ε` for any α, including
+/// cancelling rows where `|A_i·x| ≪ Σ_j |A_ij·x_j|`.
 ///
-/// `dual_sign` 条件を通過した y (Le: y≥0 / Ge: y≤0) のもとでは、真に実行可能な
-/// 任意の x が不等式行すべての viol⁺ = 0 を満たすので分子は厳密に 0 になる。
-/// m̄ > 0 は返した点 (x, y) の対が不等式制約を実行不能方向に破っていることの
-/// 直接証拠となる。実:m̄ の分子 = |−yᵀ(Ax − b)| の不等式質量部分であり、
-/// 証明済み双対下界 d(ŷ) と主目的の乖離 (LISWET7 偽 mint の −2.13e-3) に
-/// 直結する。max-scale primal_feasibility (per-row 相対化) は数万行の微小
-/// 違反 (1e-7 準位 × 1 万行) を捉えないため、この加重平均が独立の検出器になる
-/// (`prove_optimal` 内で絶対床 `certificate.rs::DUAL_MASS_VIOL_FLOOR` と比較)。
-///
-/// 正規化は双対質量 (Σ|yᵢ|) による加重平均で、符号拘束のない Eq 行の巨大 dual は
-/// 証跡を作れないため分母にも入れない。収集項がすべて非負なので f64 Σ は
-/// cancellation を起こさない (値がそのまま足し合わさる)。分母 0
-/// (不等式行の dual が全 0) は証跡を主張できる情報がないため vacuous として 0 を返す。
-///
-/// 非有限入力は INFINITY (実行不能性を評価できない = ゲートを通してはならない)。
-/// y.len() != a.nrows() も INFINITY。呼び出し側 (`prove_optimal`) は
-/// dimension guard で b/ct 長 == n_rows を担保済み。
-pub fn infeasible_dual_mass_rel(prob: &ProblemView, x: &[f64], y: &[f64]) -> f64 {
+/// `primal_residual_rel` takes the max over rows and cannot see many rows each
+/// violated just below tol; the Euclidean norm grows as √(#rows) for such a
+/// coherent violation while rounding-level components stay ≈ √m·ε ≪ tol.
+/// Non-finite input or residuals return INFINITY.
+pub fn primal_residual_l2_rel(prob: &ProblemView, x: &[f64]) -> f64 {
     let m = prob.a.nrows();
     if m == 0 {
         return 0.0;
     }
-    if y.len() != m || any_nonfinite(x) {
+    if x.len() != prob.a.ncols() || any_nonfinite(x) {
         return f64::INFINITY;
     }
     let ax_dd = dd_impl::ax(prob.a, x);
     let viols = dd_impl::constraint_violations(&ax_dd, prob.b, prob.constraint_types);
-    let mut num = 0.0_f64;
-    let mut den = 0.0_f64;
-    #[allow(unreachable_patterns)] // ConstraintType is #[non_exhaustive].
-    for (i, &cti) in prob.constraint_types.iter().enumerate() {
-        if i >= viols.len() {
-            break;
+    let mut row_mag = vec![0.0_f64; m];
+    for (j, &xj) in x.iter().enumerate() {
+        let (rows, vals) = prob.a.column(j);
+        for (&i, &aij) in rows.iter().zip(vals) {
+            row_mag[i] += (aij * xj).abs();
         }
-        match cti {
-            ConstraintType::Le | ConstraintType::Ge => {}
-            _ => continue,
-        }
-        let yi = y[i].abs();
-        let viol = viols[i];
-        if !yi.is_finite() || !viol.is_finite() {
+    }
+    let mut sum_sq = 0.0_f64;
+    for (i, &v) in viols.iter().enumerate() {
+        let r = v / (1.0 + prob.b[i].abs() + row_mag[i]);
+        if !r.is_finite() {
             return f64::INFINITY;
         }
-        // m̄ は非負質量の比率しか意味を持たない。NaN/±Inf は上の is_finite で
-        // INFINITY に置き換え済みなので、ここに到達する値は必ず非負有限。
-        num += viol * yi;
-        den += yi;
+        sum_sq += r * r;
     }
-    if den == 0.0 {
-        return 0.0;
-    }
-    num / den
+    sum_sq.sqrt()
 }
 
 /// 元空間 KKT complementarity 残差 (問題全体スケール正規化)。
@@ -666,108 +646,86 @@ mod tests {
         );
     }
 
-    // ── infeasible_dual_mass_rel (LISWET7 偽 Optimal 証跡) ────────────────────
-    //
-    // m = 3 行 fixture: [Le: x ≤ 1], [Ge: x ≥ 1], [Eq: x == 1]。x=1 が唯一の
-    // 実行可能点 (全行充足)。x < 1 は Ge を (1−x)+ で破る; Eq 違反も生じるが
-    // Eq 行は証跡対象外 -> 巨大 Eq dual でも訳に立たない。
-    type MassFixture = (
-        CscMatrix,
-        Vec<f64>,
-        Vec<f64>,
-        Vec<(f64, f64)>,
-        Vec<ConstraintType>,
-    );
+    // ── primal_residual_l2_rel ───────────────────────────────────────────────
 
-    fn mass_fixture() -> MassFixture {
-        let a = CscMatrix::from_triplets(&[0usize, 1, 2], &[0, 0, 0], &[1.0_f64, 1.0, 1.0], 3, 1)
-            .unwrap();
-        let c = vec![0.0_f64];
-        let b = vec![1.0_f64, 1.0, 1.0];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+    /// Hand oracle over Le / Ge / Eq rows, x = (2, 1):
+    ///   row0 Le  x0 − x1 ≤ 0.5 : Ax = 1,  viol 0.5, scale 1 + 0.5 + (2+1) = 4.5
+    ///   row1 Ge  3·x0    ≥ 7   : Ax = 6,  viol 1,   scale 1 + 7 + 6       = 14
+    ///   row2 Eq  x0 + x1 = 3   : Ax = 3,  viol 0
+    /// ‖r‖₂ = √((0.5/4.5)² + (1/14)²).
+    #[test]
+    fn primal_residual_l2_rel_matches_hand_oracle() {
+        let a = CscMatrix::from_triplets(
+            &[0usize, 1, 2, 0, 2],
+            &[0usize, 0, 0, 1, 1],
+            &[1.0_f64, 3.0, 1.0, -1.0, 1.0],
+            3,
+            2,
+        )
+        .unwrap();
+        let q = CscMatrix::new(2, 2);
+        let c = vec![0.0_f64; 2];
+        let b = vec![0.5_f64, 7.0, 3.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let ct = vec![ConstraintType::Le, ConstraintType::Ge, ConstraintType::Eq];
-        (a, c, b, bounds, ct)
+        let view = build_view(&q, &a, &c, &b, &bounds, &ct);
+        let r = primal_residual_l2_rel(&view, &[2.0, 1.0]);
+        let expected = ((0.5_f64 / 4.5).powi(2) + (1.0_f64 / 14.0).powi(2)).sqrt();
+        assert!((r - expected).abs() < 1e-15, "got {r}, expected {expected}");
+
+        let r = primal_residual_l2_rel(&view, &[2.0, 1.0 + 0.5]);
+        let expected = ((1.0_f64 / 14.0).powi(2) + (0.5_f64 / (1.0 + 3.0 + 3.5)).powi(2)).sqrt();
+        assert!((r - expected).abs() < 1e-15, "got {r}, expected {expected}");
     }
 
-    /// Le/Ge 行は |y| で重み付けされ、Eq 行 (巨大 dual を含む) は分子・分母とも除外
-    /// される。手計算オラクル: x=0.5, y=[3,−5,100] → viol=[(1−0.5)_+=0 (Le 充足),
-    /// (1−0.5)_+=0.5 (Ge 違反)] → m̄ = (0·3 + 0.5·5)/(3+5) = 5/16。
+    /// A cancelling row `α·x0 − α·x1 ≤ 0` at x0 = x1 = fl(0.1) + one ulp on x0:
+    /// |A·x| ≈ α·1.4e-17 but Σ|A_ij·x_j| = 0.2·α, so r ≈ 7e-17 for every α.
     #[test]
-    fn infeasible_dual_mass_rel_weighted_by_dual_magnitude() {
-        let (a, c, b, bounds, ct) = mass_fixture();
-        let q = CscMatrix::new(1, 1);
-        let view = build_view(&q, &a, &c, &b, &bounds, &ct);
-        let x = vec![0.5_f64];
-        let y = vec![3.0_f64, -5.0, 100.0];
-        let m = infeasible_dual_mass_rel(&view, &x, &y);
-        assert!(
-            (m - 5.0 / 16.0).abs() < 1e-12,
-            "x=0.5, y=[3,-5,100]: m̄ must be (0·3+0.5·5)/8 = 5/16, got {m}"
-        );
-
-        // x=0 (Ge 違反 viol=1, 充た Eq も証跡外) → m̄ = (0·3 + 1·5)/8 = 5/8
-        let x = vec![0.0_f64];
-        let m = infeasible_dual_mass_rel(&view, &x, &y);
-        assert!(
-            (m - 5.0 / 8.0).abs() < 1e-12,
-            "x=0, y=[3,-5,100]: m̄ must be (0·3+1·5)/8 = 5/8, got {m}"
-        );
-    }
-
-    /// Eq 行は証跡を作れない (符号拘束なし): 分子・分母とも Eq 行を除外するので、
-    /// x が Eq を破っていてもその dual が巨大でも m̄ は 0。
-    #[test]
-    fn infeasible_dual_mass_rel_ignores_eq_duals() {
-        let (a, c, b, bounds, ct) = mass_fixture();
-        let q = CscMatrix::new(1, 1);
-        let view = build_view(&q, &a, &c, &b, &bounds, &ct);
-        let x = vec![0.0_f64];
-        let y = vec![0.0_f64, 0.0, 1.0e6];
-        let m = infeasible_dual_mass_rel(&view, &x, &y);
-        assert_eq!(m, 0.0, "Eq-only dual mass must be vacuous, got {m}");
-    }
-
-    /// 不等式行の dual が全 0 (証跡を主張できる質量なし) は vacuous で 0。
-    /// 実行可能な x (全不等式 viol⁺=0) は y ≠ 0 でも 0。
-    #[test]
-    fn infeasible_dual_mass_rel_vacuous_and_feasible_points() {
-        let (a, c, b, bounds, ct) = mass_fixture();
-        let q = CscMatrix::new(1, 1);
-        let view = build_view(&q, &a, &c, &b, &bounds, &ct);
-        let x = vec![0.0_f64];
-        let m = infeasible_dual_mass_rel(&view, &x, &[0.0_f64, 0.0, 0.0]);
-        assert_eq!(m, 0.0, "zero dual mass must be vacuous, got {m}");
-
-        // 実行可能点 x=1: Le/Ge とも viol=0 → m̄=0 (Eq dual が巨大でも)
-        let x = vec![1.0_f64];
-        let y = vec![3.0_f64, -2.0, 100.0];
-        let m = infeasible_dual_mass_rel(&view, &x, &y);
-        assert_eq!(m, 0.0, "ineq-feasible x must give zero witness, got {m}");
-    }
-
-    /// y.len() != m → INFINITY (次元契約違反)。x に非有限成分があるときも
-    /// INFINITY (viol 評価不能 = ゲート通過不可)。
-    #[test]
-    fn infeasible_dual_mass_rel_rejects_broken_inputs() {
-        let (a, c, b, bounds, ct) = mass_fixture();
-        let q = CscMatrix::new(1, 1);
-        let view = build_view(&q, &a, &c, &b, &bounds, &ct);
-        let x = vec![0.0_f64];
-        for y in [vec![], vec![1.0_f64], vec![1.0_f64, -1.0, 2.0, 3.0]] {
-            let m = infeasible_dual_mass_rel(&view, &x, &y);
+    fn primal_residual_l2_rel_uses_term_magnitude_for_cancelling_rows() {
+        let x0 = f64::from_bits(0.1_f64.to_bits() + 1);
+        for alpha in [1e11_f64, 1.0] {
+            let a = CscMatrix::from_triplets(&[0usize, 0], &[0usize, 1], &[alpha, -alpha], 1, 2)
+                .unwrap();
+            let q = CscMatrix::new(2, 2);
+            let c = vec![0.0_f64; 2];
+            let b = vec![0.0_f64];
+            let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+            let ct = vec![ConstraintType::Le];
+            let view = build_view(&q, &a, &c, &b, &bounds, &ct);
+            let r = primal_residual_l2_rel(&view, &[x0, 0.1]);
+            let viol = alpha * (x0 - 0.1);
+            let expected = viol / (1.0 + alpha * x0 + alpha * 0.1);
             assert!(
-                m.is_infinite() && m > 0.0,
-                "y.len()={} must be INFINITY, got {m}",
-                y.len()
+                r > 0.0 && (r - expected).abs() <= 1e-3 * expected,
+                "α={alpha:e}: {r} vs {expected}"
+            );
+            assert!(
+                r < 1e-16,
+                "α={alpha:e}: rounding-level residual must stay ≈ ε, got {r}"
             );
         }
-        let y = vec![3.0_f64, -2.0, 100.0];
-        for bad_x in [vec![f64::NAN], vec![f64::INFINITY]] {
-            let m = infeasible_dual_mass_rel(&view, &bad_x, &y);
+    }
+
+    #[test]
+    fn primal_residual_l2_rel_rejects_broken_inputs_and_handles_empty() {
+        let a = CscMatrix::from_triplets(&[0usize], &[0usize], &[1.0_f64], 1, 1).unwrap();
+        let q = CscMatrix::new(1, 1);
+        let c = vec![0.0_f64];
+        let b = vec![1.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let ct = vec![ConstraintType::Le];
+        let view = build_view(&q, &a, &c, &b, &bounds, &ct);
+        for bad_x in [vec![f64::NAN], vec![f64::INFINITY], vec![], vec![0.0, 0.0]] {
+            let r = primal_residual_l2_rel(&view, &bad_x);
             assert!(
-                m.is_infinite() && m > 0.0,
-                "non-finite x must be INFINITY, got {m}"
+                r.is_infinite() && r > 0.0,
+                "x={bad_x:?} must be INFINITY, got {r}"
             );
         }
+        assert_eq!(primal_residual_l2_rel(&view, &[1.0]), 0.0);
+
+        let a0 = CscMatrix::new(0, 1);
+        let view0 = build_view(&q, &a0, &c, &[], &bounds, &[]);
+        assert_eq!(primal_residual_l2_rel(&view0, &[3.0]), 0.0);
     }
 }

@@ -1,13 +1,13 @@
 //! LISWET7 / LISWET11 偽 Optimal 証跡 sentinel (bug-frontier 2026-10-18)。
 //!
 //! 独立オラクル (HiGHS 1.14 生 QPS 直読み + 自前パーサ KKT 検証 + 弱双対下界) で
-//! 確定した真値と、`prove_optimal` の infeasibility-mass witness
-//! (`certificate.rs::DUAL_MASS_VIOL_FLOOR`) による棄却を integration で pin する。
+//! 確定した真値と、`prove_optimal` の集約 primal feasibility 条件
+//! (`ipm_solver::kkt::primal_residual_l2_rel` ≤ tol) による棄却を integration で pin する。
 //!
 //! - LISWET7  真値 p* = −2026.419109214 (全行 active + 再帰双対 y ≥ 0 証明 +
 //!   HiGHS 主双対 gap −4e-11)。旧返解 −2500.257302 (x̂ ≈ −c アトラクタ,
-//!   viol 9.87e-8 × 9997 行) は不等式行質量を破る実行不能点なので
-//!   Optimal を主張できない (witness が導入する条件)。
+//!   viol 9.87e-8 × 9997 行) は行相対違反の ‖·‖₂ = 2.02e-6 > 1e-6 の
+//!   実行不能点なので Optimal を主張できない。
 //! - LISWET11 真値 p* = −2476.226042863 (HiGHS Optimal + 自前 A^T y ≥ 0 +
 //!   d(y) 下界 gap 6.1e-7)。baseline CSV の −5.015e3 は弱双対性
 //!   (feasible x の obj ≥ max_y d(y)) より低い元素和要求で不可能値
@@ -30,9 +30,9 @@ use std::path::Path;
 
 /// LISWET7 偽 mint (`obj = −0.5‖c‖²`, x̂ ≈ −c) は Optimal を主張してはならない。
 ///
-/// **Sentinel (no-op-fail)**: `prove_optimal` の infeasible_mass 判定を外すと
-/// attempt ladder の悪 mint (m̄ = 6.97e-8 > DUAL_MASS_VIOL_FLOOR) が Optimal に
-/// 昇格し、status == Optimal で本テストが FAIL する。
+/// **Sentinel (no-op-fail)**: `prove_optimal` の primal_feasibility_l2 判定を外すと
+/// attempt ladder の悪 mint (‖r‖₂ = 2.02e-6 > tol) が Optimal に昇格し、
+/// status == Optimal で本テストが FAIL する。
 #[test]
 #[ignore = "tier-2"]
 fn liswet7_false_optimal_rejected() {
@@ -44,15 +44,15 @@ fn liswet7_false_optimal_rejected() {
         res.status,
         SolveStatus::Optimal,
         "LISWET7 返解 obj={:.10e} (viol 9997 行 × 9.87e-8, 弱双対下界 −2026.419109) \
-         は Optimal を主張できない (infeasibility-mass witness が棄却する)",
+         は Optimal を主張できない (集約 primal feasibility が棄却する)",
         res.objective
     );
 }
 
 /// LISWET11 は certified 真値 −2476.226042863 に 1e-6 で到達する Optimal を返す。
 ///
-/// **Sentinel (no-op-fail)**: witness のスコープ/床を狭めて正しい (F,1000) mint
-/// (gap=2.237e-7, m̄=1.758e-12) を誤棄却すると Optimal が失われて FAIL する。
+/// **Sentinel (no-op-fail)**: 集約 feasibility 判定が正しい mint
+/// (gap=2.237e-7, ‖r‖₂=7.46e-11) を誤棄却すると Optimal が失われて FAIL する。
 #[test]
 #[ignore = "tier-2"]
 fn liswet11_optimal_objective_matches_certified_truth() {

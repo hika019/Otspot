@@ -12,7 +12,7 @@ use crate::problem::certificate::{NotProven, OptimalCertificate};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::qp::ipm_solver::kkt::{
     bound_violation, complementarity_componentwise_rel, complementarity_residual_rel,
-    infeasible_dual_mass_rel, kkt_residual_rel, primal_residual_rel,
+    kkt_residual_rel, primal_residual_l2_rel, primal_residual_rel,
 };
 use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid::dual_sign_violation;
@@ -20,15 +20,11 @@ use otspot_num::sparse::CscMatrix;
 
 /// Verify all KKT conditions and mint an [`OptimalCertificate`] if they all pass.
 ///
-/// Assembles stationarity (DD precision), primal/bound feasibility, complementarity,
-/// dual-sign feasibility, the caller-supplied duality gap, and an infeasibility-mass
-/// witness over the Le/Ge rows: the dual-magnitude-weighted mean primal violation
-/// `m̄ = Σ_ineq viol⁺ᵢ·|yᵢ| / Σ_ineq |yᵢ|` (see `DUAL_MASS_VIOL_FLOOR` /
-/// `DUAL_MASS_WITNESS_TOL_SCOPE`, this module). The witness compares against an
-/// absolute noise floor rather than `tol`, and is only evaluated when
-/// `tol <= DUAL_MASS_WITNESS_TOL_SCOPE` (QP proof paths; the LP path passes
-/// `LP_CERT_TOL = 1e-4` and is out of scope). Returns `Err(NotProven)` listing every
-/// condition that exceeded its threshold.
+/// Assembles stationarity (DD precision), primal feasibility (row-wise max and
+/// aggregate ‖·‖₂, see `primal_residual_l2_rel`), bound feasibility,
+/// complementarity, dual-sign feasibility and the caller-supplied duality gap,
+/// each compared against `tol`. Returns `Err(NotProven)` listing every condition
+/// that exceeded it.
 ///
 /// Gap is checked against `tol` (= user_eps), stricter than `PROMOTION_GAP_TOL = 1e-1`
 /// in `IpmOutcome::satisfies_eps`: the loose gate selects the best iterate across
@@ -121,21 +117,12 @@ pub fn prove_optimal<'a>(
     // ── residual computation ─────────────────────────────────────────────────
     let stat = kkt_residual_rel(view, x, y, z);
     let pres = primal_residual_rel(view, x);
+    let pres_l2 = primal_residual_l2_rel(view, x);
     let bviol = bound_violation(view.bounds, x);
     let comp = complementarity_residual_rel(view, x, y, z)
         .max(complementarity_componentwise_rel(view, x, y, z));
     let dsign = dual_sign_violation(view.constraint_types, y, view.bounds, z);
     let gap = duality_gap_rel;
-
-    // ── infeasibility-mass witness (`infeasible_dual_mass_rel`) ──────────────
-    // dual_sign が閉じている前提での実行不能質量。QP 証明 (tol ≤ スコープ) のみ
-    // 評価し、LP 経路 (`prove_optimal_lp` → tol=LP_CERT_TOL=1e-4) では評価自体を
-    // skip する (basis-driven noise model が別物のため)。
-    let mass = if tol <= DUAL_MASS_WITNESS_TOL_SCOPE {
-        infeasible_dual_mass_rel(view, x, y)
-    } else {
-        0.0
-    };
 
     // Use `!(val <= tol)` instead of `val > tol`: NaN comparisons are asymmetric.
     // `NaN > tol` is false (NaN would slip through), but `NaN <= tol` is also false,
@@ -144,6 +131,7 @@ pub fn prove_optimal<'a>(
     for (name, val) in [
         ("stationarity", stat),
         ("primal_feasibility", pres),
+        ("primal_feasibility_l2", pres_l2),
         ("bound_feasibility", bviol),
         ("complementarity", comp),
         ("dual_sign", dsign),
@@ -154,12 +142,6 @@ pub fn prove_optimal<'a>(
         if !(val <= tol) {
             failing.push(name);
         }
-    }
-    // Witness は tol ではなく絶対床 DUAL_MASS_VIOL_FLOOR と比較する
-    // (legit ノイズフロア ~2.3e-9 と LISWET7 偽 mint 6.97e-8 の間に置いた値)。
-    // NaN(= 証跡評価不能) は失格。
-    if mass.is_nan() || mass > DUAL_MASS_VIOL_FLOOR {
-        failing.push("infeasible_mass");
     }
 
     if failing.is_empty() {
@@ -191,42 +173,6 @@ pub fn prove_optimal<'a>(
 ///   5e-5 dual 摂動で (1e-6, 1e-4) 範囲の残差を合成した LP が誤 demote される。
 /// - `lp_cert_tol_equals_feas_rel_tol`: drift-pin が LP_CERT_TOL ≠ feas_rel_tol() を検出。
 pub(crate) const LP_CERT_TOL: f64 = 1e-4; // = feas_rel_tol() = PIVOT_TOL.sqrt()
-
-/// 実行不能質量証跡 (`ipm_solver::kkt::infeasible_dual_mass_rel`) の受容絶対床。
-///
-/// LISWET 家族 (Maros-Mészáros 12 問, b=0 / Q=I / 全変数 FR / 2 次差分行列,
-/// n=10002, m=10000, `prove_optimal(tol=user_eps)` 証跡値
-/// m̄ = Σ_ineq viol⁺·|y| / Σ_ineq |y|) の実測分離データ:
-///
-/// | 対象 | m̄ | 分類 |
-/// |---|---|---|
-/// | LISWET3 / 5 / 6 | 0 (厳密) | legit mint |
-/// | LISWET11 | 1.758e-12 | legit mint |
-/// | LISWET2 / 4 | 1.540e-9 / 2.332e-9 | legit mint (最大 legit フロア) |
-/// | LISWET7 | 6.975e-8 | 偽 mint (返解 obj −2500.257 < 弱双対下界 −2026.419) |
-///
-/// 床は max legit 2.332e-9 の ~9 倍上 / 偽 mint 6.975e-8 の ~3.5 倍下。
-/// eps=1e-8 ベンチでも LISWET2/4 の legit mint が 1e-9 台のフロアを維持する
-/// 実測があり、床を user_eps 比率化 (×k) すると eps=1e-8 時に legit を誤 reject
-/// するため絶対値とする。Stalled 終端の非 mint 証跡 (LISWET1 3.667e-8 /
-/// LISWET8 3.117e-7 / LISWET9 8.885e-8 / LISWET10 6.348e-8 / LISWET12 1.193e-7)
-/// は `satisfies_eps` 未達で受理判定に入らないため、床を上げる動機にはならない。
-///
-/// ## sentinel (no-op-fail)
-/// `prove_optimal` 内の infeasible_mass 判定を外すと、下の証跡が
-/// `Ok(cert)` を観測して `prove_optimal_rejects_infeasible_mass_above_floor`
-/// が FAIL する。
-pub(crate) const DUAL_MASS_VIOL_FLOOR: f64 = 2.0e-8;
-
-/// 実行不能質量証跡の評価スコープ: `tol <= 1e-5` の証明のみ評価する。
-///
-/// tol は証明者の許容誤差 (`prove_optimal` 引数)。QP 経路は user_eps
-/// (1e-6 / 1e-8) をそのまま渡しスコープ内。LP (simplex) 経路は
-/// `prove_optimal_lp` が `LP_CERT_TOL = 1e-4` を渡す: 基底双対は vertex 双対の
-///質量構造で IPM の smooth interior dual と異なり、m̄ の正常準位を本修正では
-/// 検証していないため、スコープ外では証跡を一切評価しない (0 扱い・非失格)。
-/// 将来 LP 経路の m̄ 実測を取るまでスコープは QP 証明に留める。
-pub(crate) const DUAL_MASS_WITNESS_TOL_SCOPE: f64 = 1e-5;
 
 /// Verify LP optimality via full KKT+dual_sign.
 ///
@@ -1399,170 +1345,122 @@ mod tests {
         );
     }
 
-    // ── infeasibility-mass witness (LISWET7 偽 Optimal sentinel) ──────────────
+    // ── aggregate primal feasibility (‖r‖₂, row-relative) ───────────────────
 
-    /// LISWET7 型偽 mint 配置の単行版。x は 6 条件すべてを tol=1e-6 で通る微小
-    /// 違反 (9.87e-8) を等式双対 y=1 で破るのに「実行可能ではない」— max-scale
-    /// primal_feasibility ~3.3e-8 / comp ~2.5e-8 のどちらも公開しておらず、
-    /// 質量加重平均 m̄ = viol⁺·|y| / Σ|y| = 9.87e-8 > `DUAL_MASS_VIOL_FLOOR`
-    /// だけが棄却根拠になる。
+    /// Row scaling must not change the verdict. `min ½x² − x  s.t.  α·x ≤ α/10`
+    /// (x free) has x* = 0.1, y* = 0.9/α for every α > 0 (hand KKT: x − 1 + α·y = 0
+    /// on the active row). `α·fl(0.1)` overshoots `α/10` by ≈ 5.55e-18·α (5.55e-7 at
+    /// α = 1e11): f64 representation error of x, not infeasibility.
     #[test]
-    fn prove_optimal_rejects_infeasible_mass_above_floor() {
-        // Le fixture: min −x ≡ stat = c + Aᵀy = −1 + 1 = 0 厳密。
-        let q = CscMatrix::new(1, 1);
-        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+    fn prove_optimal_certifies_row_scaled_constraint_for_every_scale() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
         let c = vec![-1.0_f64];
-        let b = vec![1.0_f64];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
         let ct = vec![ConstraintType::Le];
-        let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
+        let x = [0.1_f64];
+        for alpha in [1e11_f64, 10.0, 1.0] {
+            let a = CscMatrix::from_triplets(&[0], &[0], &[alpha], 1, 1).unwrap();
+            let b = vec![alpha / 10.0];
+            let y = [0.9 / alpha];
+            let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
+            let p = 0.5 * x[0] * x[0] - x[0];
+            let d = -0.5 * x[0] * x[0] - b[0] * y[0];
+            let gap = (p - d).abs() / p.abs().max(d.abs()).max(1.0);
+            for tol in [1e-6, 1e-8] {
+                let r = prove_optimal(&view, &x, &y, &[], gap, tol);
+                assert!(
+                    r.is_ok(),
+                    "α={alpha:e}, tol={tol:e}: the optimum must be certified: {:?}",
+                    r.err()
+                );
+            }
+        }
+    }
 
-        let viol = 9.87e-8_f64; // LISWET7 実測 primal viol 準位
-        let x = vec![1.0 + viol];
-        let y = vec![1.0_f64]; // Le: y=1 ≥ 0 (dual_sign 厳密充足)
-        let result = prove_optimal(&view, &x, &y, &[], 0.0, 1e-6);
-        assert!(
-            result.is_err(),
-            "実行可能でない点 (viol=9.87e-8 > 0) が 6 条件を通って mint された: {:?}",
-            result.err()
-        );
-        let err = result.unwrap_err();
+    /// `m` rows `x_i ≤ 0`, each violated by δ, with an extra free `w`
+    /// (`min −Σx_i + ½w² − 100w`, y_i = 1, w = 100) so that |p| ≈ 5000 keeps the
+    /// signed gap m·δ/5000 below tol, as on LISWET7. Per-row relative violation
+    /// δ/(1+δ) passes every max-norm check; the aggregate ‖r‖₂ = √m·δ/(1+δ) does not.
+    struct AccumulatedViolation {
+        q: CscMatrix,
+        a: CscMatrix,
+        c: Vec<f64>,
+        b: Vec<f64>,
+        bounds: Vec<(f64, f64)>,
+        ct: Vec<ConstraintType>,
+        x: Vec<f64>,
+        y: Vec<f64>,
+        gap: f64,
+    }
+
+    impl AccumulatedViolation {
+        fn prove(&self, tol: f64) -> Result<OptimalCertificate, NotProven> {
+            let view = trivial_view(&self.q, &self.a, &self.c, &self.b, &self.bounds, &self.ct);
+            prove_optimal(&view, &self.x, &self.y, &[], self.gap, tol)
+        }
+    }
+
+    fn accumulated_violation_fixture(m: usize, delta: f64) -> AccumulatedViolation {
+        let n = m + 1;
+        let q = CscMatrix::from_triplets(&[m], &[m], &[1.0_f64], n, n).unwrap();
+        let rows: Vec<usize> = (0..m).collect();
+        let a = CscMatrix::from_triplets(&rows, &rows, &vec![1.0_f64; m], m, n).unwrap();
+        let mut c = vec![-1.0_f64; n];
+        c[m] = -100.0;
+        let b = vec![0.0_f64; m];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
+        let ct = vec![ConstraintType::Le; m];
+        let mut x = vec![delta; n];
+        x[m] = 100.0;
+        let y = vec![1.0_f64; m];
+        let p = 0.5 * 100.0 * 100.0 - 100.0 * 100.0 - m as f64 * delta;
+        let d = -0.5 * 100.0 * 100.0;
+        let gap = (p - d).abs() / p.abs().max(d.abs()).max(1.0);
+        AccumulatedViolation {
+            q,
+            a,
+            c,
+            b,
+            bounds,
+            ct,
+            x,
+            y,
+            gap,
+        }
+    }
+
+    #[test]
+    fn prove_optimal_rejects_accumulated_row_violation() {
+        let delta = 2e-8;
+        let err = accumulated_violation_fixture(10_000, delta)
+            .prove(1e-6)
+            .unwrap_err();
         assert_eq!(
             err.failing_conditions,
-            vec!["infeasible_mass"],
-            "mass は唯一の棄却根拠であるべき (6 条件は全部 tol を通る): {:?}",
-            err.failing_conditions
+            vec!["primal_feasibility_l2"],
+            "√1e4·2e-8 = 2e-6 > tol must be the sole failure: {err:?}"
         );
 
-        // Ge fixture (対称): min x, x ≥ 1, y=−1 (Ge ≤ 0 厳密)。ct と c のみ差し替え。
-        let c = vec![1.0_f64];
-        let ct = vec![ConstraintType::Ge];
-        let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
-        let x = vec![1.0 - viol];
-        let y = vec![-1.0_f64];
-        let result = prove_optimal(&view, &x, &y, &[], 0.0, 1e-6);
-        let err = result.unwrap_err();
-        assert_eq!(
-            err.failing_conditions,
-            vec!["infeasible_mass"],
-            "Ge 側も mass のみで棄却: {:?}",
-            err.failing_conditions
-        );
-
-        // 同型 fixture で x を実行可能に → mass=0 → Ok (mint baseline)。
-        let ct = vec![ConstraintType::Le];
-        let c = vec![-1.0_f64];
-        let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
-        let result = prove_optimal(&view, &[1.0], &[1.0], &[], 0.0, 1e-6);
+        let r = accumulated_violation_fixture(100, delta).prove(1e-6);
         assert!(
-            result.is_ok(),
-            "実行可能点は mint されるべき (witness が no-op 化していないこと): {:?}",
-            result.err()
-        );
-
-        // legit フロア構成: viol=1e-9 < DUAL_MASS_VIOL_FLOOR → mint OK
-        // (LISWET2/4 の legit mint が 1e-9 準位のノイズフロアに張り付く実測対応)。
-        let x = vec![1.0 + 1e-9];
-        let y = vec![1.0_f64]; // Le fixture の dual 符号 (上の Ge fixture の y=−1 と混同しない)
-        let result = prove_optimal(&view, &x, &y, &[], 0.0, 1e-6);
-        assert!(
-            result.is_ok(),
-            "viol=1e-9 (legit floor) は許容→ Ok: {:?}",
-            result.err()
+            r.is_ok(),
+            "√100·2e-8 = 2e-7 ≤ tol must certify: {:?}",
+            r.err()
         );
     }
 
-    /// 質量は「|y| 加重平均」であって per-row max 相対化ではないことを pin する。
-    ///
-    /// y=[9, 1] の非対称 dual: row0 のみ viol=4e-8 (row1 は厳密充足)。
-    /// max 相対化 primal_feasibility = 4e-8/3 ≈ 1.3e-8 < 床 (2e-8) なので
-    /// max を見ると通過するが、m̄ = (4e-8·9 + 0·1)/10 = 3.6e-8 > 床で棄却。
-    /// これが max 決算系 (primal_feasibility / L∞ comp) を cmap する重み平均
-    /// (9997 行 × 1e-7 準位の LISWET7 型累積違反を y 質量で集約) の根拠。
+    /// The aggregate check is a plain tol comparison, so it binds the LP
+    /// certificate tolerance too: δ = 2e-6 per row passes LP_CERT_TOL row-wise but
+    /// ‖r‖₂ = √1e4·2e-6 = 2e-4 > LP_CERT_TOL.
     #[test]
-    fn prove_optimal_infeasible_mass_is_dual_weighted_average_not_max() {
-        let q = CscMatrix::new(2, 2);
-        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0_f64, 1.0], 2, 2).unwrap();
-        let c = vec![-9.0_f64, -1.0]; // stat: c + Aᵀy = [−9+9, −1+1] = 0 厳密
-        let b = vec![1.0_f64, 5.0];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let ct = vec![ConstraintType::Le, ConstraintType::Le];
-        let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
-
-        // x = [1+4e-8, 5.0] (row0 だけ微小違反, row1 は厳密充足)
-        let x = vec![1.0 + 4e-8, 5.0];
-        let y = vec![9.0_f64, 1.0]; // Le: y ≥ 0 厳密充足
-        let result = prove_optimal(&view, &x, &y, &[], 0.0, 1e-6);
-        assert!(
-            result.is_err(),
-            "mass-weight 検出 (max では検出不能な配置): {result:?}"
-        );
-        let err = result.unwrap_err();
+    fn prove_optimal_aggregate_feasibility_applies_at_lp_cert_tol() {
+        let err = accumulated_violation_fixture(10_000, 2e-6)
+            .prove(LP_CERT_TOL)
+            .unwrap_err();
         assert_eq!(
             err.failing_conditions,
-            vec!["infeasible_mass"],
-            "per-row max 相対化 primal_feasibility (~1.3e-8 < 床) を通過した上で \
-             mass が棄却するべき: {:?} / pres={:.3e}",
-            err.failing_conditions,
-            err.primal_residual_rel
-        );
-        assert!(
-            err.primal_residual_rel < 2e-8,
-            "前提: max 相対化が floor を割る (got {:.3e})",
-            err.primal_residual_rel
-        );
-    }
-
-    /// スコープゲート: `tol > DUAL_MASS_WITNESS_TOL_SCOPE` の証明 (LP 経路の
-    /// `LP_CERT_TOL = 1e-4` など) では mass を一切評価しない (0 扱い・非失格)。
-    /// 同一の bad fixture が tol=1e-6 では棄却、tol=1e-4 では mint される。
-    #[test]
-    fn prove_optimal_infeasible_mass_scope_outside_tolerance_skips_witness() {
-        let q = CscMatrix::new(1, 1);
-        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
-        let c = vec![-1.0_f64];
-        let b = vec![1.0_f64];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let ct = vec![ConstraintType::Le];
-        let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
-        let x = vec![1.0 + 9.87e-8]; // 上記テストと同型の bad 点
-        let y = vec![1.0_f64];
-
-        assert!(prove_optimal(&view, &x, &y, &[], 0.0, 1e-6).is_err());
-        let wide = prove_optimal(&view, &x, &y, &[], 0.0, LP_CERT_TOL);
-        assert!(
-            wide.is_ok(),
-            "tol=LP_CERT_TOL ({LP_CERT_TOL}) はスコープ外→ mass を見ない→ Ok: {:?}",
-            wide.err()
-        );
-        // drift-pin: スコープが LP 証明床以下であること (LP 経路が必ず skip に入る)。
-        // const vs const の静的契約 (clippy で見えてはいる) を runtime assert で
-        // 意味づけする: スコープを広げて LP_CERT_TOL を越す変更は、この行が
-        // compile-unit の契約文書になるよう docstring と一緒に更新を強制する。
-        const _: () = assert!(
-            DUAL_MASS_WITNESS_TOL_SCOPE <= LP_CERT_TOL,
-            "スコープは LP_CERT_TOL 以下でなければ LP 経路に witness が波及する"
-        );
-    }
-
-    /// 床値 pin: LISWET 12 問実測の legit フロア最大値 (LISWET4 = 2.332e-9) の
-    /// 5 倍以上 / LISWET7 偽 mint (6.975e-8) の半分以下に張り付くこと。
-    /// 数値を動かしたら DUAL_MASS_VIOL_FLOOR docstring の実測表を更新すること。
-    #[test]
-    fn infeasible_mass_floor_partitions_measured_band() {
-        // LISWET4 legit mint 最大実測 (documented floor)
-        let legit_max = 5.0 * 2.332e-9;
-        assert!(
-            DUAL_MASS_VIOL_FLOOR >= legit_max,
-            "床は legit フロア (2.332e-9) の 5 倍以上で正当な mint を棄却しない \
-             (floor={DUAL_MASS_VIOL_FLOOR}, legit×5={legit_max})"
-        );
-        // LISWET7 偽 mint 実測 (documented ceiling)
-        let bad = 0.5 * 6.975e-8;
-        assert!(
-            DUAL_MASS_VIOL_FLOOR <= bad,
-            "床は LISWET7 偽 mint (6.975e-8) の半分以下で棄却判定が効く \
-             (floor={DUAL_MASS_VIOL_FLOOR}, bad×0.5={bad})"
+            vec!["primal_feasibility_l2"],
+            "{err:?}"
         );
     }
 }
