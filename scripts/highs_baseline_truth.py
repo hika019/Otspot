@@ -19,7 +19,8 @@ Usage:
   problem,objective,status,highs_pinf,highs_dinf,verify_pinf,p=,d=,relgap=,ysign_fix=
   highs_pinf/highs_dinf は HiGHS 自己申告、verify_* は独立再計算、p/d は再計算した
   主/双対目的値、ysign_fix は row dual の符号射影量。
---csv: 検算を通った問題だけ baseline CSV 行 `NAME,<mantissa>e<exp>,highs_<ver>_<status>_<date>`
+--csv: 検算 (HiGHS 報告値と p(x) の相対差 OBJ_CONSISTENCY_TOL 以下を含む) を通った問題だけ、
+  独立再計算した p(x) を値とする baseline CSV 行 `NAME,<mantissa>e<exp>,highs_<ver>_<status>_<date>`
   を stdout に出し、診断行は stderr へ回す。
 """
 import argparse
@@ -42,8 +43,11 @@ REL_GAP_TOL = BENCH_EPS / 10
 # 行違反 (b=0 なので絶対値) の上限。目的値へ効く誤差が BENCH_EPS の 1e-3 倍以下に
 # なる水準。実測最大は 8.2e-15。
 PRIMAL_INF_TOL = BENCH_EPS * 1e-3
-# baseline CSV の仮数部桁数 (既存行と同じ 13 有効桁)。
-CSV_MANTISSA_DIGITS = 12
+# HiGHS 報告目的値と独立再計算 p(x) の相対差の上限。両者は同じ x の目的値なので浮動小数の
+# 丸め (~1e-12) しか差が出ないはずで、超えたら QPS 解釈 (Q, c, 符号) の食い違いを示す。
+OBJ_CONSISTENCY_TOL = BENCH_EPS * 1e-3
+# baseline CSV の仮数部の小数桁数 (小数点以下 12 桁 = 既存行と同じ 13 有効桁)。
+CSV_MANTISSA_DECIMALS = 12
 
 SUPPORTED_SECTIONS = {"NAME", "ROWS", "COLUMNS", "BOUNDS", "QUADOBJ", "ENDATA"}
 ROW_TYPES = {"G", "L", "E"}
@@ -132,7 +136,7 @@ def verify(path, x, y):
 
 def format_csv_value(v):
     """baseline CSV の値表記 (例 -2.489287597915e3)。"""
-    mant, exp = f"{v:.{CSV_MANTISSA_DIGITS}e}".split("e")
+    mant, exp = f"{v:.{CSV_MANTISSA_DECIMALS}e}".split("e")
     return f"{mant}e{int(exp)}"
 
 
@@ -167,13 +171,17 @@ def main():
               f"{pinf:.3e},p={p!r},d={d!r},relgap={gap:.3e},ysign_fix={sflip:.3e}",
               file=diag)
         # NaN は比較が常に False になるので、合格条件を肯定形で書き否定を取る。
-        ok = status == "Optimal" and gap <= args.gap_tol and pinf <= PRIMAL_INF_TOL
+        hobj = info.objective_function_value
+        objdiff = abs(p - hobj) / (1.0 + abs(p))
+        ok = (status == "Optimal" and gap <= args.gap_tol and pinf <= PRIMAL_INF_TOL
+              and objdiff <= OBJ_CONSISTENCY_TOL)
         if not ok:
             bad += 1
-            print(f"FAIL {name}: status={status} relgap={gap:.3e} verify_pinf={pinf:.3e}",
+            print(f"FAIL {name}: status={status} relgap={gap:.3e} verify_pinf={pinf:.3e} "
+                  f"highs_vs_p={objdiff:.3e}",
                   file=sys.stderr)
         elif args.csv:
-            print(f"{name},{format_csv_value(info.objective_function_value)},"
+            print(f"{name},{format_csv_value(p)},"
                   f"highs_{version}_{status}_{date}")
     return 1 if bad else 0
 

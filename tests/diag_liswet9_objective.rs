@@ -87,10 +87,10 @@ fn yao_objective_self_consistent() {
 }
 
 /// LISWET9 の真値は HiGHS Optimal 値 (`scripts/highs_baseline_truth.py` で弱双対検算済み、
-/// baseline CSV と同値)。Clarabel は AlmostSolved 止まりで -1977.359 という誤値を返すため
+/// baseline CSV と同値)。Clarabel は AlmostSolved 止まりで値が信頼できないため
 /// 参照に使わない。
 #[test]
-fn liswet9_objective_matches_highs_truth() {
+fn liswet9_optimal_claim_matches_highs_truth() {
     assert_objective_matches_clarabel(
         "LISWET9",
         &std::path::PathBuf::from("data/maros_meszaros/LISWET9.QPS"),

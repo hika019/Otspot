@@ -82,11 +82,11 @@ fn check_obj_agrees_with_clarabel(name: &str, baseline_known: f64) {
 
 /// 第 2 引数は HiGHS Optimal 値 (baseline CSV と同値)。出力の ratio 表示専用で assert しない。
 #[test]
-fn liswet7_obj_independent_oracle_highs_ref() {
+fn liswet7_obj_independent_oracle() {
     check_obj_agrees_with_clarabel("LISWET7", -2026.419109214);
 }
 
 #[test]
-fn liswet11_obj_independent_oracle_highs_ref() {
+fn liswet11_obj_independent_oracle() {
     check_obj_agrees_with_clarabel("LISWET11", -2476.226042863);
 }

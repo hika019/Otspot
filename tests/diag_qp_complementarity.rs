@@ -115,9 +115,9 @@ fn solve_qps(path: &std::path::Path) -> (QpProblem, SolverResult) {
 }
 
 /// 参照値は HiGHS Optimal 値 (`scripts/highs_baseline_truth.py` で弱双対検算済み、
-/// baseline CSV と同値)。旧参照 -1977.359 は Clarabel AlmostSolved の誤値。
+/// baseline CSV と同値)。Clarabel AlmostSolved の値は参照に使わない。
 #[test]
-fn liswet9_complementarity_or_subopt_highs_ref() {
+fn liswet9_optimal_claim_matches_highs_ref() {
     let (prob, res) = solve_qps(&std::path::PathBuf::from("data/maros_meszaros/LISWET9.QPS"));
     assert_optimal_objective("LISWET9", &res, &prob, -562.0087391007);
 }
