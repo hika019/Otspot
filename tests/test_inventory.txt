@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3267 testcases, 27 ignored
+# totals: 3266 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -2815,7 +2815,6 @@ otspot::diag_liswet9_objective	liswet9_objective_self_consistent	active
 otspot::diag_liswet9_objective	yao_objective_matches_clarabel	active
 otspot::diag_liswet9_objective	yao_objective_self_consistent	active
 otspot::diag_liswet_basin	diag_liswet_basin_9_12	ignored
-otspot::diag_liswet_family_clarabel_truth	diag_liswet_family_clarabel_truth	ignored
 otspot::diag_lp_bugs	diag_bland_rule_coverage	active
 otspot::diag_lp_bugs	diag_boeing1_current_state	active
 otspot::diag_lp_bugs	diag_capri_presolve_vs_no_presolve	active
