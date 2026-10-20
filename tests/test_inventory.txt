@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3266 testcases, 26 ignored
+# totals: 3276 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1043,6 +1043,14 @@ otspot-core	qp::global::tree::tests::best_lower_bound_matches_top	active
 otspot-core	qp::global::tree::tests::pop_returns_smallest_lower_bound_first	active
 otspot-core	qp::global::tree::tests::pushed_popped_counters_track	active
 otspot-core	qp::global::tree::tests::tie_break_fifo_seq	active
+otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_divides_by_the_larger_objective	active
+otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_matches_hand_computed_value	active
+otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_noise_scales_with_sqrt_of_longest_sum	active
+otspot-core	qp::ipm_core::ippmm::state::convergence_tests::each_measure_alone_blocks_convergence	active
+otspot-core	qp::ipm_core::ippmm::state::convergence_tests::gap_above_eps_is_not_converged_even_with_small_residuals	active
+otspot-core	qp::ipm_core::ippmm::state::convergence_tests::gap_below_eps_with_small_residuals_is_converged	active
+otspot-core	qp::ipm_core::ippmm::state::convergence_tests::gap_within_evaluation_noise_is_converged_when_eps_is_below_noise	active
+otspot-core	qp::ipm_core::ippmm::state::convergence_tests::large_gap_with_tiny_residuals_is_not_converged	active
 otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::floor_never_drops_below_reg_limit_min	active
 otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::kkt_pivot_floor_matches_the_long_validated_value	active
 otspot-core	qp::ipm_core::ippmm::state::matrix_reg_floor_tests::kkt_pivot_floor_sits_inside_the_measured_safe_window	active
@@ -2688,6 +2696,8 @@ otspot::api_correctness	qp_ineq_constrained	active
 otspot::api_correctness	qp_infeasible	active
 otspot::api_correctness	qp_unconstrained_quadratic	active
 otspot::api_correctness	qp_with_linear	active
+otspot::boyd_gap_noise_floor_sentinel	boyd1_inner_gap_gate_respects_evaluation_noise	active
+otspot::boyd_gap_noise_floor_sentinel	boyd2_inner_gap_gate_respects_evaluation_noise	active
 otspot::cbf_feasibility	classical_20_0_root_relaxation_is_feasible	active
 otspot::cbf_feasibility	classical_20_0_solution_satisfies_original_constraints	active
 otspot::cbf_feasibility	classical_30_0_solution_satisfies_original_constraints	active
@@ -2812,8 +2822,8 @@ otspot::diag_large_lp_no_false_infeasible	spot_check_forest6_no_presolve_infeasi
 otspot::diag_large_lp_no_false_infeasible	spot_check_galenet_no_presolve_infeasible	active
 otspot::diag_liswet9_objective	liswet9_objective_self_consistent	active
 otspot::diag_liswet9_objective	liswet9_optimal_claim_matches_highs_truth	active
-otspot::diag_liswet9_objective	yao_objective_matches_clarabel	active
 otspot::diag_liswet9_objective	yao_objective_self_consistent	active
+otspot::diag_liswet9_objective	yao_optimal_claim_matches_highs_truth	active
 otspot::diag_liswet_basin	diag_liswet_basin_9_12	ignored
 otspot::diag_lp_bugs	diag_bland_rule_coverage	active
 otspot::diag_lp_bugs	diag_boeing1_current_state	active
@@ -2896,7 +2906,7 @@ otspot::diag_qp_complementarity	liswet9_optimal_claim_matches_highs_ref	active
 otspot::diag_qp_complementarity	synth_inequality_active_complementarity	active
 otspot::diag_qp_complementarity	synth_inequality_inactive_complementarity	active
 otspot::diag_qp_complementarity	synth_two_inequality_active_inactive	active
-otspot::diag_qp_complementarity	yao_complementarity_or_subopt	active
+otspot::diag_qp_complementarity	yao_optimal_claim_matches_highs_ref	active
 otspot::diag_qp_deadline_lasso	qp_is_lasso_300_real_data_honors_deadline	ignored
 otspot::diag_qp_deadline_lasso	qp_synthetic_lasso_mid_honors_deadline	active
 otspot::diag_qp_deadline_lasso	qp_synthetic_lasso_small_honors_deadline	active
@@ -2978,7 +2988,7 @@ otspot::diag_valid_solution_classifier	small_lp_optimal_early_exit_within_eps	ac
 otspot::eps_regression_2026-05-09	qpcboei2_pfeas_componentwise_at_default_eps_1e6	active
 otspot::eps_regression_2026-05-09	qpcboei2_pfeas_componentwise_at_loose_eps_1e4	active
 otspot::eps_regression_2026-05-09	qpcboei2_pfeas_componentwise_at_tight_eps_1e8	active
-otspot::eps_regression_2026-05-09	qpcboei2_pfeas_monotonicity_across_eps	active
+otspot::eps_regression_2026-05-09	qpcboei2_pfeas_does_not_exceed_looser_eps_target	active
 otspot::faer_qd_test	test_3x3_simplicial_ldlt_default_regularization	active
 otspot::faer_qd_test	test_3x3_simplicial_ldlt_sign_aware_regularization	active
 otspot::faer_qd_test	test_5x5_simplicial_ldlt_quasidefinite	active
@@ -2988,9 +2998,9 @@ otspot::fast_baseline_regression	fast_regression_conic_matches_closed_form_unit_
 otspot::fast_baseline_regression	fast_regression_lp_matches_netlib_baseline	active
 otspot::fast_baseline_regression	fast_regression_qp_matches_maros_meszaros_baseline	active
 otspot::liswet7_11_obj_independent_check	liswet11_obj_independent_oracle	active
-otspot::liswet7_11_obj_independent_check	liswet7_obj_independent_oracle	active
 otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_breaks_delta_matrix_floor_at_eps_1e8	active
 otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_unaffected_at_default_eps_1e6	active
+otspot::liswet7_inner_gap_gate_sentinel	liswet7_attractor_is_not_reported_optimal	active
 otspot::lp_coverage_screen	lp_coverage_screen_all	ignored
 otspot::lp_coverage_screen	lp_coverage_screen_cycle	active
 otspot::lp_coverage_screen	lp_coverage_screen_sample_fast	active
