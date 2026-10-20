@@ -98,11 +98,14 @@ fn liswet9_optimal_claim_matches_highs_truth() {
     );
 }
 
+/// YAO の真値は HiGHS Optimal 値 −75.42074405968671 (目的定数なし)。HiGHS の (x, y, z) から
+/// 再計算した弱双対で d = −75.42072898、相対 gap 2.0e-7、停留性残差 4.8e-8 を確認済み。
+/// 旧参照値 −151.5405 (Clarabel AlmostSolved) はこの区間から 2 倍外れており使わない。
 #[test]
-fn yao_objective_matches_clarabel() {
+fn yao_optimal_claim_matches_highs_truth() {
     assert_objective_matches_clarabel(
         "YAO",
         &std::path::PathBuf::from("data/maros_meszaros/YAO.QPS"),
-        -151.5405,
+        -75.42074405968671,
     );
 }

@@ -122,10 +122,12 @@ fn liswet9_optimal_claim_matches_highs_ref() {
     assert_optimal_objective("LISWET9", &res, &prob, -562.0087391007);
 }
 
+/// 参照値は HiGHS Optimal 値 (`diag_liswet9_objective::yao_optimal_claim_matches_highs_truth`
+/// と同値・同じ検算)。Clarabel AlmostSolved の −151.5405 は参照に使わない。
 #[test]
-fn yao_complementarity_or_subopt() {
+fn yao_optimal_claim_matches_highs_ref() {
     let (prob, res) = solve_qps(&std::path::PathBuf::from("data/maros_meszaros/YAO.QPS"));
-    assert_optimal_objective("YAO", &res, &prob, -151.5405);
+    assert_optimal_objective("YAO", &res, &prob, -75.42074405968671);
 }
 
 // ---------------------------------------------------------------------------

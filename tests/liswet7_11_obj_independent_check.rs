@@ -81,11 +81,10 @@ fn check_obj_agrees_with_clarabel(name: &str, baseline_known: f64) {
 }
 
 /// 第 2 引数は HiGHS Optimal 値 (baseline CSV と同値)。出力の ratio 表示専用で assert しない。
-#[test]
-fn liswet7_obj_independent_oracle() {
-    check_obj_agrees_with_clarabel("LISWET7", -2026.419109214);
-}
-
+///
+/// LISWET7 は Clarabel (tol=1e-12) が `AlmostSolved obj≈−2483` で止まり HiGHS 真値
+/// −2026.419 から 22% 外れるため、Clarabel を独立オラクルに使えない。LISWET7 の目的値は
+/// `liswet7_inner_gap_gate_sentinel` が HiGHS 真値で照合する。
 #[test]
 fn liswet11_obj_independent_oracle() {
     check_obj_agrees_with_clarabel("LISWET11", -2476.226042863);

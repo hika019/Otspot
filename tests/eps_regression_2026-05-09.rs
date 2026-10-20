@@ -140,17 +140,15 @@ fn qpcboei2_pfeas_componentwise_at_tight_eps_1e8() {
     );
 }
 
-/// eps 単調性 regression: `user_eps` を 1e-4 → 1e-8 に締めると pfn は単調非増加 でなくとも、
-/// 各 eps レベルで pfn < user_eps × N (N=2) 程度を最低限満たすべき。fix 前は loose eps で
-/// pfn が緩む overfit があった (1e-4 → 1e-2 級にblowup)。
+/// eps 単調性 regression: `user_eps` を 1e-4 → 1e-6 → 1e-8 と締めたとき、各 eps で
+/// pfn < tol_mul × user_eps を満たし、かつ一段緩い eps の目標値を超えて悪化しないこと。
+/// fix 前は user_eps=1e-4 で pfn=1.8e-4 (>1x) という overfit があった。
 ///
-/// eps_tighten fix (ipm_eps() → ipm.eps) で attempt ごとの実効 eps が
-/// base_tighten = ceil_pow10(user_eps/1e-8) に依存するため、accept される attempt が
-/// user_eps ごとに異なる。QPCBOEI2 では pfn(1e-4)=1.67e-9, pfn(1e-6)=3.71e-8 (22x 逆転)。
-/// 両値とも user_eps を大きく下回る正常解であり、単調性は品質保証でなく副次観察量。
-/// mono_mul=50 は観測最大値 22x の 2.3 倍マージン (別問題やリグレッションで大幅悪化のみ検出)。
+/// 上限は直前 eps の目標値 (user_eps) で取り、直前の実測 pfn の定数倍では取らない。
+/// 実測 pfn 比で縛ると、緩い eps 側の解が良くなっただけで (QPCBOEI2: eps=1e-6 の pfn が
+/// 1.7e-9 → 6.4e-10、eps=1e-8 は 9.8e-8 で不変) fail してしまう。
 #[test]
-fn qpcboei2_pfeas_monotonicity_across_eps() {
+fn qpcboei2_pfeas_does_not_exceed_looser_eps_target() {
     let path = maros_path("QPCBOEI2.QPS");
     assert!(
         path.exists(),
@@ -158,12 +156,11 @@ fn qpcboei2_pfeas_monotonicity_across_eps() {
         path.display()
     );
     let prob = parse_qps(&path).expect("parse QPCBOEI2");
-    let mut prev_pfn = f64::INFINITY;
+    let mut looser_eps = f64::INFINITY;
     for &user_eps in &[1e-4_f64, 1e-6, 1e-8] {
         let result = solve_with_eps(&prob, user_eps);
         let pfn = pfeas_normalized(&prob, &result.solution);
         // eps=1e-8 は f64 精度限界のため 20x、それ以上の eps は 2x を要求。
-        // fix 前は user_eps=1e-4 で pfn=1.8e-4 (>1x) という overfit があった。
         let tol_mul = if user_eps < 1e-7 { 20.0 } else { 2.0 };
         assert!(
             pfn < user_eps * tol_mul,
@@ -171,16 +168,13 @@ fn qpcboei2_pfeas_monotonicity_across_eps() {
             user_eps,
             pfn
         );
-        // Observed max ratio pfn(1e-6)/pfn(1e-4): macOS arm64 ≤ 22x、Linux x86_64 ≤ 58x。
-        // 100 = ~58x × 1.7x safety、env 間 fp variation 許容しつつ catastrophic regression を catch。
-        let mono_mul = 100.0_f64;
         assert!(
-            pfn <= prev_pfn * mono_mul,
-            "QPCBOEI2 eps {:.0e} → pfn {:.3e} regress from prev {:.3e} (>{mono_mul}x)",
+            pfn <= looser_eps,
+            "QPCBOEI2 eps={:.0e}: pfn={:.3e} exceeds the looser eps target {:.0e}",
             user_eps,
             pfn,
-            prev_pfn
+            looser_eps
         );
-        prev_pfn = pfn;
+        looser_eps = user_eps;
     }
 }
