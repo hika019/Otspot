@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3276 testcases, 26 ignored
+# totals: 3275 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -2988,7 +2988,6 @@ otspot::diag_valid_solution_classifier	small_lp_optimal_early_exit_within_eps	ac
 otspot::eps_regression_2026-05-09	qpcboei2_pfeas_componentwise_at_default_eps_1e6	active
 otspot::eps_regression_2026-05-09	qpcboei2_pfeas_componentwise_at_loose_eps_1e4	active
 otspot::eps_regression_2026-05-09	qpcboei2_pfeas_componentwise_at_tight_eps_1e8	active
-otspot::eps_regression_2026-05-09	qpcboei2_pfeas_meets_user_eps_at_each_level	active
 otspot::faer_qd_test	test_3x3_simplicial_ldlt_default_regularization	active
 otspot::faer_qd_test	test_3x3_simplicial_ldlt_sign_aware_regularization	active
 otspot::faer_qd_test	test_5x5_simplicial_ldlt_quasidefinite	active

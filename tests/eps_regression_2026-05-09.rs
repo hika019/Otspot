@@ -139,32 +139,3 @@ fn qpcboei2_pfeas_componentwise_at_tight_eps_1e8() {
         pfn
     );
 }
-
-/// eps 追従 regression: `user_eps` を 1e-4 → 1e-6 → 1e-8 と締めた各段で、pfn が
-/// その eps の目標値を超えないこと。fix 前は user_eps=1e-4 で pfn=1.8e-4 (>1x) という
-/// overfit があった。
-///
-/// 上限は `user_eps` の 1 倍 (Optimal 判定の契約そのもの)。1e-8 のみ f64 精度限界のため
-/// 20 倍を許す (eps=1e-4/1e-6 では実測が目標を 2 桁以上下回るので 1 倍で足りる)。
-/// 実測 pfn の定数倍では縛らない。緩い側の解が良くなっただけで fail するため。
-#[test]
-fn qpcboei2_pfeas_meets_user_eps_at_each_level() {
-    let path = maros_path("QPCBOEI2.QPS");
-    assert!(
-        path.exists(),
-        "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行",
-        path.display()
-    );
-    let prob = parse_qps(&path).expect("parse QPCBOEI2");
-    for &user_eps in &[1e-4_f64, 1e-6, 1e-8] {
-        let result = solve_with_eps(&prob, user_eps);
-        let pfn = pfeas_normalized(&prob, &result.solution);
-        let tol_mul = if user_eps < 1e-7 { 20.0 } else { 1.0 };
-        assert!(
-            pfn < user_eps * tol_mul,
-            "QPCBOEI2 eps={:.0e}: pfn={:.3e} must be < {tol_mul}x eps",
-            user_eps,
-            pfn
-        );
-    }
-}

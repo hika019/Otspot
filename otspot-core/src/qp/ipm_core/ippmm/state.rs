@@ -70,13 +70,16 @@ pub(super) struct DualityGap {
     /// N 項の和の丸め誤差の確率的評価 (Higham & Mary 2019) `√N·ε·Σ|項|` に基づく。
     /// N は最長の内積の長さ `max(n, m_ext)`。`Qx` と `A_extᵀy` の計算内部の丸めは
     /// 含まないため厳密な上界ではなく、過小見積りの場合は収束判定が厳しくなる
-    /// (停滞する) 側にのみ働き、偽収束は起こさない。
+    /// (停滞する) 側にのみ働き、偽収束は起こさない。逆に過大見積りは閾値
+    /// `max(eps, noise_rel)` を緩めるので偽収束側に働く。
     pub(super) noise_rel: f64,
 }
 
 /// 符号規約 `r_d = −(Qx + c + A_extᵀy)` の下で `p = ½xᵀQx + cᵀx`、
 /// `d = −½xᵀQx − b_extᵀy`。分母は `max(|p|, |d|, 1)`。
-/// 元空間の `compute_duality_gap_rel` と違い `obj_offset` と固定変数の bound 寄与は含まない。
+/// 元空間の `compute_duality_gap_rel` は bound 寄与 `lb·z_lb − ub·z_ub` を `by` とは別に
+/// 足し (固定変数は解析的に置換)、`obj_offset` も加える。こちらは bound が `A_ext` の行
+/// なので `b_ext·y` にすでに含まれ、別項も `obj_offset` も持たない。
 pub(super) fn duality_gap(
     qx: &[f64],
     x: &[f64],
