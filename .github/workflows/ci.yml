@@ -35,7 +35,9 @@ jobs:
           # NOTE: 手動 version pin。データシェイプ変更時のみ bump。script の
           # 自動 hash は cache を不要に bust しがちで、netlib 不安定時に CI が
           # 復旧不能となるリスクがあるため。
-          key: bench-data-v1
+          # v3: maros_meszaros を原 QPS (sha256 manifest 検証済み) へ移行した。
+          # test-heavy は別 key (cache の shape が違う)。
+          key: bench-data-v3
           # 旧 hash-based key (bench-data-{md5}) の cache を fallback で活用。
           # netlib 不通時に v1 が無くても過去成功 run の cache から復元できる。
           restore-keys: |

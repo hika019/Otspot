@@ -3,8 +3,9 @@
 //!
 //! Clarabel (tol=1e-12) は LISWET11 で AlmostSolved 36.527 (参照値比 26% 誤差) に止まり、
 //! 独立オラクルに使えない。旧 .mat 変換データ (c が 1 ulp ずれ、目的定数なし) では ours が
-//! Optimal を返したが、原データでは吸引点 (≈ 25.19) で Stalled になる。ここでは false
-//! Optimal を返さないことと、Optimal を主張するなら参照値に一致することを固定する。
+//! Optimal を返したが、原データでは吸引点 (≈ 25.19) で Stalled になる。このテストは
+//! 偽 Optimal (吸引点での収束宣言) を検出する番兵で、Optimal を主張した場合に限り
+//! 目的値が参照値に一致することを要求する。
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
@@ -15,6 +16,8 @@ use otspot::SolveStatus;
 const LISWET11_TRUTH_WITH_CONSTANT: f64 = 4.952395713834e1;
 /// bench の目的値照合と同じ相対許容 (eps=1e-6)。
 const OBJ_REL_TOL: f64 = 1e-6;
+/// 実測 20.5 s (release, 他プロセス並走下) で Stalled 終了する。その約 3 倍の余裕を取りつつ
+/// 1 テスト 3 分以内の上限に収まる値。
 const TIMEOUT_SECS: f64 = 60.0;
 
 #[test]

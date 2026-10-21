@@ -66,6 +66,22 @@ check_dir() {
   fi
 }
 
+# Maros-Meszaros は件数でなく manifest の sha256 で検証する (古い cache の取り違えを検出)。
+check_maros_manifest() {
+  local dir=data/maros_meszaros
+  local manifest="$SCRIPT_DIR/maros_meszaros_qps.sha256"
+  if [[ ! -d "$dir" ]]; then
+    echo "  [missing] $dir"
+    return 1
+  fi
+  if (cd "$dir" && sha256sum -c --quiet "$manifest" >/dev/null 2>&1); then
+    echo "  [ok]      $dir (sha256 matches $(basename "$manifest"))"
+    return 0
+  fi
+  echo "  [stale]   $dir (sha256 mismatch or missing file vs $(basename "$manifest"); rerun scripts/maros_meszaros_download.sh)"
+  return 1
+}
+
 check_python_qp_deps() {
   if ! python3 -c "import numpy, scipy" 2>/dev/null; then
     echo "[error] QP bench data 生成に必要な Python pkg (numpy / scipy) が host にない。" >&2
@@ -188,7 +204,7 @@ if [[ "$MODE" == "check" ]]; then
   check_dir data/lp_problems_unbounded 12 || fail=1
 
   echo "=== QP ==="
-  check_dir data/maros_meszaros 138     || fail=1
+  check_maros_manifest                  || fail=1
   check_dir data/mpc_qp 64             || fail=1
   check_dir data/osqp_bench 62         || fail=1
   check_dir data/osqp_bench_extra 238  || fail=1
@@ -242,7 +258,7 @@ if [[ "$MODE" == "ci-subset-check" ]]; then
   check_dir data/lp_problems_unbounded 12 || fail=1
 
   echo "=== CI subset QP ==="
-  check_dir data/maros_meszaros      138 || fail=1
+  check_maros_manifest                    || fail=1
   check_dir data/osqp_bench           30 || fail=1  # ci-subset: synthetic only (SuiteSparse 抜き、--all で 62)
   check_dir data/qplib                41 || fail=1
   check_dir data/mpc_qp               64 || fail=1

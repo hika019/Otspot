@@ -28,6 +28,10 @@ jobs:
       # already built; running it here would force a cold release build.
       - name: test inventory gate unit tests
         run: python3 tests/test_check_new_ignore_attrs.py
+      - name: baseline truth script sentinel
+        run: |
+          pip install numpy scipy highspy
+          python3 tests/test_highs_baseline_truth.py
 
   comment-hygiene:
     name: comment-hygiene

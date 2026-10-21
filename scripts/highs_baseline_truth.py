@@ -5,8 +5,8 @@ QPS を独立にパースした問題
     min c0 + c'x + 1/2 x'Qx   s.t.  L <= Ax <= U,  l <= x <= u
 を HiGHS に直接渡して解き (HiGHS の MPS reader は使わない; to_highs_model 参照)、
 その解 (x, y) から主実行可能性と弱双対下界を独立に再計算して検算する。HiGHS の解が
-検算を通らない (QP solver の Solve error・時間切れ・dual 精度不足) 問題は Clarabel で
-解き直し、同じ検算にかける。どのソルバの解も検算を通らない問題は非ゼロ終了する。
+検算を通らない (QP solver の Solve error・時間切れ・dual 精度不足) 問題は Clarabel
+(行列スケーリングあり、なしの順) で解き直し、同じ検算にかける。どのソルバの解も検算を通らない問題は非ゼロ終了する。
 参照値の正しさはソルバの status でなく検算 (certify) が担保する。
 
 目的定数 c0 は目的行 RHS の符号反転 (c0 = -RHS; Gurobi MPS 仕様・HiGHS・CPLEX と同じ)。
@@ -19,8 +19,9 @@ fixed format。OBJSENSE、MARKER (整数変数)、2 本目以降の N 行への�
   - 弱双対: y を行種別に合う符号へ射影し、z = c + Qx - A'y を x の固定点で取った
     Lagrange 双対 d = c0 - 1/2 x'Qx + sum_i h_i(y_i) + sum_j g_j(z_j)
     (h_i(y) = y L_i (y>0) / y U_i (y<0)、g_j 同様) は凸 QP の最適値の下界。z_j が無限側の
-    境界を要求する成分 r は 0 へ射影し、Lagrangian の x 方向の下がり 1/2 r'delta
-    (Q delta = -r) を d に足して厳密な下界に戻す (r が range(Q) に無ければ見積りへ退く)。
+    境界を要求する成分 r は 0 へ射影する。残った Lagrangian の x 方向最小値は
+    -1/2 x'Qx + r'x + 1/2 r'delta (Q delta = -r) なので、d にその分 (r'x + 1/2 r'delta)
+    を足して厳密な下界に戻す (r が range(Q) に無ければ見積りへ退く)。
   - 相対不確かさ |p - d|/(1+|p|) + 双対残差影響 + 主違反影響 <= UNCERTAINTY_TOL、
     相対主実行不能度 <= PRIMAL_INF_TOL、ソルバ報告値と自前再計算の一致。
 
@@ -167,6 +168,11 @@ def parse_qps(path, fixed=False):
                 if fixed:
                     kind, col = ft[0], ft[2]
                     val = float(ft[3]) if ft[3] else None
+                    if kind in BOUND_TYPES_WITH_VALUE:
+                        if val is None:
+                            raise ValueError(f"bound {kind} without value: {line!r}")
+                    elif kind not in BOUND_TYPES_NO_VALUE:
+                        raise ValueError(f"bound type {kind}")
                 else:
                     kind = t[0]
                     if kind in BOUND_TYPES_WITH_VALUE:
@@ -361,7 +367,7 @@ def verify(prob, x, y):
         if step is None:
             resid = float(np.abs(z[dropped] * x[dropped]).sum()) / scale
         else:
-            d += 0.5 * float(r @ step)
+            d += float(r @ x) + 0.5 * float(r @ step)
     zk = np.where(dropped, 0.0, z)
     pimpact = float(np.abs(yp) @ _abs_violation(ax, prob["L"], prob["U"])
                     + np.abs(zk) @ _abs_violation(x, prob["lo"], prob["up"])) / scale
@@ -371,9 +377,10 @@ def verify(prob, x, y):
 def _range_step(Q, r):
     """Q delta = -r を解いた delta (r が range(Q) に無ければ None)。
 
-    捨てた双対残差 r を残したままの Lagrangian は x 方向に 1/2 x'Qx + r'x の分だけ下がり、
-    その最小値は min_delta r'delta + 1/2 delta'Q delta = 1/2 r'delta (Q delta = -r)。
-    r が range(Q) に無ければ下界は -inf になるので None を返し、呼び出し側は
+    捨てた双対残差 r を残したままの Lagrangian の x 方向の部分は、x = xbar + delta として
+    1/2 x'Qx + (r - Q xbar)'x = -1/2 xbar'Q xbar + r'xbar + r'delta + 1/2 delta'Q delta。
+    delta の最小値は 1/2 r'delta (Q delta = -r)。呼び出し側は d に r'xbar + 1/2 r'delta
+    を足す (-1/2 xbar'Q xbar は d の本体に含まれる)。r が range(Q) に無ければ下界は -inf になるので None を返し、呼び出し側は
     sum |z_j x_j| の見積りへ退く。
     """
     # Q は特異でありうる (SuperLU は特異行列で segfault しうる) ので LSQR で解く。
@@ -460,11 +467,13 @@ def solve_highs(prob, time_limit):
             np.array(sol.row_dual), h.getInfo().objective_function_value)
 
 
-def solve_clarabel(prob, time_limit):
+def solve_clarabel(prob, time_limit, equilibrate=True):
     """(status, x, y, 報告目的値)。y は verify() と同じ符号規約 (c + Qx - A'y - z = 0)。
 
     Clarabel 形式 Mx + s = b, s in K へ、等式行 (L=U)、上限側、下限側 (符号反転) の順に
     積む。Clarabel の双対 w (Qx + c + M'w = 0) から y_i = w_lo_i - w_up_i - w_eq_i。
+    equilibrate=False は Clarabel の行列スケーリングを切る (BOYD1 は既定だと AlmostSolved で
+    相対 gap 5e-6 に止まり、切ると Solved で 2.5e-11 まで詰まる)。
     """
     import clarabel
 
@@ -484,6 +493,7 @@ def solve_clarabel(prob, time_limit):
     cones = [clarabel.ZeroConeT(n_zero), clarabel.NonnegativeConeT(len(b) - n_zero)]
     settings = clarabel.DefaultSettings()
     settings.verbose = False
+    settings.equilibrate_enable = equilibrate
     settings.time_limit = time_limit if time_limit is not None else CLARABEL_TIME_LIMIT_SECS
     settings.tol_gap_abs = settings.tol_gap_rel = settings.tol_feas = CLARABEL_TOL
     sol = clarabel.DefaultSolver(sp.triu(prob["Q"]).tocsc(), prob["c"], M, b, cones,
@@ -501,6 +511,8 @@ def solve_clarabel(prob, time_limit):
 SOLVERS = (
     ("highs", lambda: highspy.Highs().version(), solve_highs),
     ("clarabel", lambda: __import__("clarabel").__version__, solve_clarabel),
+    ("clarabel-noequil", lambda: __import__("clarabel").__version__,
+     lambda prob, time_limit: solve_clarabel(prob, time_limit, equilibrate=False)),
 )
 
 

@@ -139,7 +139,7 @@ const _: () = assert!(LP_NAMES.len() == LP_PROBLEM_COUNT);
 
 /// LP phase tripwire: 5 small Netlib LPs against `netlib_lp.csv` (official
 /// MINOS 5.3 reference values). Same problems as
-/// `presolve_correctness_sweep::presolve_invariance_curated_clean` (minus
+/// `presolve_correctness_sweep::presolve_invariance_curated_clean_known_with_constant` (minus
 /// `israel`, plus `share2b`), but checking a different property: objective
 /// vs. the external baseline, not ON/OFF presolve invariance.
 #[test]

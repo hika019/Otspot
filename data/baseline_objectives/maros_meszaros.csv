@@ -9,9 +9,10 @@
 #     (relative uncertainty 5.1e-11) is kept.
 #   HUESTIS: Table 3 (BPMPD at default tolerances) deviates by 6.5e-6; the certified value
 #     (relative uncertainty 2.3e-11) is kept.
-# Not certified: BOYD2 keeps its previous value (bench_722f_ippmm_1000s). HiGHS hits the time
-#   limit and Clarabel stops at MaxIterations/AlmostSolved (21.4757, dual bound inconsistent),
-#   so neither passes the certificate. Table 3 lists 21.25669.
+# Not certified: BOYD2 holds the Table 3 value 21.256767 (BPMPD at default tolerances, source
+#   tag maros1997_table3_bpmpd_UNCERTIFIED; every other row's source names a certifying
+#   solver). HiGHS hits the time limit and Clarabel stops at MaxIterations/AlmostSolved
+#   (21.4757, dual bound inconsistent), so neither passes the certificate.
 problem_name,optimal_obj,source
 AUG2D,1.687411752897e6,clarabel_0.11.1_Solved_20261021
 AUG2DC,1.818368065570e6,clarabel_0.11.1_Solved_20261021
@@ -21,8 +22,8 @@ AUG3D,5.540677257925e2,highs_1.14.0_Optimal_20261021
 AUG3DC,7.712624386890e2,highs_1.14.0_Optimal_20261021
 AUG3DCQP,9.933621465251e2,highs_1.14.0_Optimal_20261021
 AUG3DQP,6.752376712749e2,highs_1.14.0_Optimal_20261021
-BOYD1,-6.173521002658e7,clarabel_0.11.1_AlmostSolved_20261021
-BOYD2,2.13e1,bench_722f_ippmm_1000s
+BOYD1,-6.173521963968e7,clarabel-noequil_0.11.1_Solved_20261021
+BOYD2,2.1256767e1,maros1997_table3_bpmpd_UNCERTIFIED
 CONT-050,-4.563850904325e0,highs_1.14.0_Optimal_20261021
 CONT-100,-4.644397868764e0,clarabel_0.11.1_Solved_20261021
 CONT-101,1.955273246765e-1,clarabel_0.11.1_Solved_20261021
@@ -80,7 +81,7 @@ LISWET9,1.963251260880e3,highs_1.14.0_Optimal_20261021
 LOTSCHD,2.398415891449e3,highs_1.14.0_Optimal_20261021
 MOSARQP1,-9.528754430313e2,clarabel_0.11.1_Solved_20261021
 MOSARQP2,-1.597482117517e3,clarabel_0.11.1_Solved_20261021
-POWELL20,5.208958450942e10,highs_1.14.0_Optimal_20261021
+POWELL20,5.208958281250e10,highs_1.14.0_Optimal_20261021
 PRIMAL1,-3.501296573348e-2,highs_1.14.0_Optimal_20261021
 PRIMAL2,-3.373367612272e-2,highs_1.14.0_Optimal_20261021
 PRIMAL3,-1.357558368660e-1,highs_1.14.0_Optimal_20261021

@@ -8,6 +8,8 @@ use crate::qp::problem::QpProblem;
 /// 偽 Optimal (KKT 小だが gap 大) を弾く。FX 変数の bound 寄与は lb·停留性で解析的に置換。
 /// p, d は目的定数 `obj_offset` を含めない: 定数は差では消え、分母にだけ入ると相対値が
 /// 定数の平行移動で変わる (inner の IP-PMM の gap 判定も定数を持たない)。
+/// 帰結として、定数が p と逆符号で |p + 定数| が |p| より小さい問題では、表示目的値
+/// (定数込み) に対する相対精度はこの gap では保証されない。
 pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult) -> f64 {
     let n = problem.num_vars;
     if result.solution.len() != n {

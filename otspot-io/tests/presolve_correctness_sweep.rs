@@ -4,8 +4,8 @@
 //!  * `presolve_not_worsens_80bau3b_grow15` — directional invariance: presolve
 //!    must not worsen feasibility (ON ≤ OFF + LP_CERT_TOL). OFF residual is a
 //!    known primal two-phase numerical artifact (dc658d4, within LP_CERT_TOL=1e-4).
-//!  * `presolve_invariance_curated_clean` — symmetric invariance for clean problems.
-//!  * `presolve_invariance_full_sweep` — all 109 netlib LPs, `#[ignore]` (tier-2).
+//!  * `presolve_invariance_curated_clean_known_with_constant` — symmetric invariance for clean problems.
+//!  * `presolve_invariance_full_sweep_known_with_constant` — all 109 netlib LPs, `#[ignore]` (tier-2).
 //!  * `presolve_infeasible_sweep` — 29 infeasible LPs, `#[ignore]` (tier-2).
 
 use otspot_core::options::SolverOptions;
@@ -137,12 +137,12 @@ fn solve_on_off(prob: &QpProblem, timeout_s: f64) -> OnOff {
 ///
 /// Heavy (≈5 min). Run under the heavy profile (600s cap) or the raw binary:
 ///   cargo nextest run --profile heavy -p otspot-io \
-///     --run-ignored all presolve_invariance_full_sweep --no-capture
+///     --run-ignored all presolve_invariance_full_sweep_known_with_constant --no-capture
 ///   PRESOLVE_SWEEP_TIMEOUT=5 ./target/release/deps/presolve_correctness_sweep-* \
-///     --ignored --nocapture --test-threads 1 presolve_invariance_full_sweep
+///     --ignored --nocapture --test-threads 1 presolve_invariance_full_sweep_known_with_constant
 #[test]
 #[ignore = "tier-2: full 109 sweep, ~5min — run under --profile heavy or raw binary"]
-fn presolve_invariance_full_sweep() {
+fn presolve_invariance_full_sweep_known_with_constant() {
     let known = load_known();
     let timeout: f64 = std::env::var("PRESOLVE_SWEEP_TIMEOUT")
         .ok()
@@ -230,7 +230,7 @@ fn presolve_invariance_full_sweep() {
 /// 手法2 (infeasible half): presolve must not turn an infeasible LP feasible or
 /// vice versa. At 930145d: 26/29 both Infeasible, bgindy/gosh ON=Infeasible while
 /// OFF=Timeout (presolve detects infeasibility faster), klein3 both Timeout. No
-/// ON/OFF status contradiction. Heavy — run as `presolve_invariance_full_sweep`.
+/// ON/OFF status contradiction. Heavy — run as `presolve_invariance_full_sweep_known_with_constant`.
 #[test]
 #[ignore = "tier-2: infeasible-set sweep, run under --profile heavy or raw binary"]
 fn presolve_infeasible_sweep() {
@@ -344,7 +344,7 @@ fn presolve_not_worsens_80bau3b_grow15() {
 /// Curated invariance for problems that solve cleanly with both ON and OFF.
 /// Excludes 80bau3b/grow15 (handled by presolve_not_worsens_80bau3b_grow15 above).
 #[test]
-fn presolve_invariance_curated_clean() {
+fn presolve_invariance_curated_clean_known_with_constant() {
     let names = ["afiro", "adlittle", "israel", "sc50a", "blend"];
     let known = load_known();
     let dir = data_dir(LP_SUBDIR);

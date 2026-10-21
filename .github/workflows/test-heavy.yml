@@ -38,7 +38,8 @@ jobs:
           # v2: heavy 専用データ (lp_problems_hard/neos.QPS, osqp_bench_illscaled)
           # を追加した (PR #25 CI fix)。旧 v1 の shape と異なるため bump。
           # restore-keys の prefix match で v1 からの fallback restore は維持。
-          key: bench-data-v2
+          # v4: maros_meszaros を原 QPS (sha256 manifest 検証済み) へ移行した。
+          key: bench-data-v4
           restore-keys: |
             bench-data-
       - name: Restore git-tracked baselines (cache 上書き対策)
