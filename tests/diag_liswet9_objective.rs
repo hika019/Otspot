@@ -86,9 +86,9 @@ fn yao_objective_self_consistent() {
     );
 }
 
-/// LISWET9 の真値は HiGHS Optimal 値 (`scripts/highs_baseline_truth.py` で弱双対検算済み、
-/// baseline CSV と同値)。Clarabel は AlmostSolved 止まりで値が信頼できないため
-/// 参照に使わない。
+/// LISWET9 の真値は HiGHS Optimal 値の目的定数を除いた部分 (`scripts/highs_baseline_truth.py`
+/// で弱双対検算済みの baseline CSV 値 1963.2512609 から目的定数 2525.26 を引いた値)。
+/// Clarabel は AlmostSolved 止まりで値が信頼できないため参照に使わない。
 #[test]
 fn liswet9_optimal_claim_matches_highs_truth() {
     assert_objective_matches_highs(

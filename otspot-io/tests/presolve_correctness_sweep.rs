@@ -199,12 +199,11 @@ fn presolve_invariance_full_sweep() {
             ));
         }
         if let Some(&k) = known.get(&name) {
-            let kref = k + prob.obj_offset;
-            let s = kref.abs().max(1.0);
-            if (r.on.objective - kref).abs() / s >= 1e-4 {
+            let s = k.abs().max(1.0);
+            if (r.on.objective - k).abs() / s >= 1e-4 {
                 known_mismatch.push(format!(
                     "{name}: ON obj={:.6e} known={:.6e}",
-                    r.on.objective, kref
+                    r.on.objective, k
                 ));
             }
         }
@@ -376,13 +375,12 @@ fn presolve_invariance_curated_clean() {
             r.off_bf
         );
         if let Some(&k) = known.get(name) {
-            let kref = k + prob.obj_offset;
-            let s = kref.abs().max(1.0);
+            let s = k.abs().max(1.0);
             assert!(
-                (r.on.objective - kref).abs() / s < 1e-4,
+                (r.on.objective - k).abs() / s < 1e-4,
                 "{name}: ON obj {:.6e} != known {:.6e}",
                 r.on.objective,
-                kref
+                k
             );
         }
         checked += 1;

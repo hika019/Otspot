@@ -307,7 +307,9 @@ if [[ "$MODE" == "all" || "$MODE" == "qp" ]]; then
   regen data/qplib_nonconvex "python3 scripts/gen_nonconvex_qp.py"
 
   # Maros-Meszaros / QPLIB: 専用 download script
-  run_or_skip data/maros_meszaros            138 "bash scripts/maros_meszaros_download.sh"
+  # Always run: the script skips files whose sha256 matches and replaces stale ones
+  # (a count-based skip would keep files from an outdated cache).
+  bash scripts/maros_meszaros_download.sh
   run_or_skip data/qplib                     41  "bash scripts/qplib_download.sh"
   run_or_skip data/qplib_nonconvex_official  4   "bash scripts/qplib_nonconvex_download.sh"
   run_or_skip data/qplib_unsupported         6   "bash scripts/qplib_unsupported_download.sh"
@@ -349,7 +351,7 @@ if [[ "$MODE" == "ci-subset" ]]; then
   run_or_skip data/mpc_qp               64   "python3 scripts/gen_mpc_qp.py"
   regen data/qp_dense_a      "python3 scripts/gen_dense_a_qp.py"
   regen data/qplib_nonconvex "python3 scripts/gen_nonconvex_qp.py"
-  run_or_skip data/maros_meszaros       138  "bash scripts/maros_meszaros_download.sh"
+  bash scripts/maros_meszaros_download.sh
   run_or_skip data/qplib                41   "bash scripts/qplib_download.sh"
   run_or_skip data/qplib_nonconvex_official 4 "bash scripts/qplib_nonconvex_download.sh"
   run_or_skip data/miplib_small         20   "bash scripts/miplib_small_download.sh"

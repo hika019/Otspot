@@ -2,11 +2,12 @@
 # 用途: 外部参照照合 + 退行検知
 # Source: https://www.netlib.org/lp/data/readme (official Netlib LP benchmark optimal values by MINOS 5.3)
 # Purpose: correctness verification against external reference + regression detection
-# Note: e226 – Netlib reports -1.8751929066e+01 (pure c^T x).
-#   This solver adds N-row RHS constant (-7.113) to objective, yielding -2.5864929066e+01.
-#   Both are correct; they use different conventions for reporting the objective constant.
-#   The value stored here is the Netlib canonical value (pure c^T x, without N-row RHS offset).
-#   The solver's e226 result will show OBJ_MISMATCH vs this reference (known, tracked issue).
+# Convention: every value is the full objective including the file's objective constant
+#   (the objective-row RHS is the negated constant: Gurobi MPS reference, HiGHS, CPLEX).
+#   The bench compares the solver objective against it verbatim.
+# Note: e226 – the file has `RHS OBJ -7.113`, i.e. constant +7.113. Netlib README
+#   -1.8751929066e+01 is c^T x alone; stored here is -1.8751929066e+01 + 7.113
+#   = -1.1638929066e+01 (HiGHS 1.14.0 Optimal -11.638929066370537).
 # Note: standgub – no separate Netlib entry; solver returns same value as standata (no_ref).
 # Note: greenbea – baseline is -7.2555248130e+07 (HiGHS). The Netlib README value
 #   -7.2462405908e+07 is low precision (3 sig digits per Hager's comparison); HiGHS,
@@ -42,7 +43,7 @@ d6cube,3.1549166667e+02,https://www.netlib.org/lp/data/readme
 degen2,-1.4351780000e+03,https://www.netlib.org/lp/data/readme
 degen3,-9.8729400000e+02,https://www.netlib.org/lp/data/readme
 dfl001,1.1266400000e+07,https://www.netlib.org/lp/data/readme
-e226,-1.8751929066e+01,https://www.netlib.org/lp/data/readme
+e226,-1.1638929066e+01,Netlib README c^T x + constant 7.113 (HiGHS 1.14.0 agrees)
 etamacro,-7.5571521774e+02,https://www.netlib.org/lp/data/readme
 fffff800,5.5567961165e+05,https://www.netlib.org/lp/data/readme
 finnis,1.7279096547e+05,https://www.netlib.org/lp/data/readme

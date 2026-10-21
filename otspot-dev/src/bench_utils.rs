@@ -461,15 +461,13 @@ pub fn load_baseline_objectives(csv_path: &Path) -> Result<HashMap<String, f64>,
 
 /// Check solver objective against a baseline CSV.
 ///
-/// `obj_offset` is added to the CSV reference before comparison. Pass `0.0` for
-/// most problem sets; pass `prob.obj_offset` for Netlib LP (which stores shifted
-/// objectives in the CSV).
+/// Every baseline CSV stores the full objective `c0 + cᵀx + ½xᵀQx` including
+/// the file's objective constant, which is what the solver reports.
 pub fn check_baseline_objective(
     problem_name: &str,
     solver_obj: f64,
     known: &HashMap<String, f64>,
     eps_obj: f64,
-    obj_offset: f64,
 ) -> ObjCheckResult {
     match known.get(problem_name) {
         Some(&known_obj) => {
@@ -478,9 +476,8 @@ pub fn check_baseline_objective(
                     rel_err: f64::INFINITY,
                 };
             }
-            let expected = known_obj + obj_offset;
-            let denom = expected.abs().max(1.0);
-            let rel_err = (solver_obj - expected).abs() / denom;
+            let denom = known_obj.abs().max(1.0);
+            let rel_err = (solver_obj - known_obj).abs() / denom;
             if rel_err > eps_obj {
                 ObjCheckResult::Mismatch { rel_err }
             } else {
