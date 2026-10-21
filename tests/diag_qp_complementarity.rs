@@ -25,8 +25,8 @@ fn recompute_obj(prob: &QpProblem, x: &[f64]) -> f64 {
     0.5 * xqx + cx + prob.obj_offset
 }
 
-/// Optimal 判定された解について Clarabel reference との objective 一致を要求する。
-/// rel < 1e-3 (qp-survey 引き継ぎの reference 精度に合わせる)。
+/// Optimal 判定された解について HiGHS reference との objective 一致を要求する。
+/// rel < 1e-3 (参照値の有効桁に合わせる)。
 fn assert_optimal_objective(name: &str, res: &SolverResult, prob: &QpProblem, expected_obj: f64) {
     let internal = recompute_obj(prob, &res.solution);
     let diff = (internal - expected_obj).abs();
@@ -122,10 +122,12 @@ fn liswet9_optimal_claim_matches_highs_ref() {
     assert_optimal_objective("LISWET9", &res, &prob, -562.0087391007);
 }
 
+/// 参照値は HiGHS Optimal 値 (`diag_liswet9_objective::yao_optimal_claim_matches_highs_truth`
+/// と同値・同じ検算)。Clarabel AlmostSolved の −151.5405 は参照に使わない。
 #[test]
-fn yao_complementarity_or_subopt() {
+fn yao_optimal_claim_matches_highs_ref() {
     let (prob, res) = solve_qps(&std::path::PathBuf::from("data/maros_meszaros/YAO.QPS"));
-    assert_optimal_objective("YAO", &res, &prob, -151.5405);
+    assert_optimal_objective("YAO", &res, &prob, -75.42074405968671);
 }
 
 // ---------------------------------------------------------------------------

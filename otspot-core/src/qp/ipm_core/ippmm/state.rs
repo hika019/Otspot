@@ -31,8 +31,78 @@ pub(super) const LDL_REG_GROWTH: f64 = 10.0;
 pub(super) const LDL_REG_CEILING: f64 = 1.0;
 pub(super) const LDL_FALLBACK_DELTA_MIN: f64 = 1e-2;
 
-/// 残差小・gap 大の偽 Optimal を弾く duality gap 上限。
-pub(super) const DUALITY_GAP_TOL: f64 = 1e-3;
+/// inner 停止判定の 4 指標 (Ruiz scaled 空間)。
+///
+/// 各指標の定義:
+/// - `nr_p_rel` / `nr_d_rel`: per-row / per-column の `1+|·|` 相対残差 (bench と同形)。
+/// - `mu`: 不等式行の `sᵀy / m_ineq`。
+/// - `gap`: [`duality_gap`] (Ruiz scaled 空間の相対 gap + 評価誤差の見積り)。
+pub(super) struct ConvergenceMeasures {
+    pub(super) nr_p_rel: f64,
+    pub(super) nr_d_rel: f64,
+    pub(super) mu: f64,
+    pub(super) gap: DualityGap,
+}
+
+impl ConvergenceMeasures {
+    /// 4 指標すべてを lane の `eps` で判定する。gap は `eps` と評価誤差
+    /// `gap.noise_rel` の大きい方を閾値にする。
+    ///
+    /// gap は残差・μ から従わない独立条件である (`p − d = sᵀy + r_pᵀy − xᵀr_d`)。
+    /// per-row 相対残差が小さくても `‖y‖` が大きければ gap は残り、残差だけの
+    /// 判定は偽収束になる。一方 eps が極端に小さい lane では gap が評価誤差の床に
+    /// 張り付くため、`noise_rel` を下限にして収束判定が不能になるのを避ける。
+    pub(super) fn converged(&self, eps: f64) -> bool {
+        self.nr_p_rel < eps
+            && self.nr_d_rel < eps
+            && self.mu < eps
+            && self.gap.rel.abs() < eps.max(self.gap.noise_rel)
+    }
+}
+
+/// 相対 duality gap とその浮動小数点評価誤差の見積り。
+#[derive(Clone, Copy)]
+pub(super) struct DualityGap {
+    /// `(p − d) / max(|p|, |d|, 1)` (符号付き)。
+    pub(super) rel: f64,
+    /// `rel` の丸め誤差の見積り `√N·ε·(½Σ|x_i(Qx)_i| + Σ|c_i x_i| + Σ|b_i y_i|) / max(|p|,|d|,1)`。
+    ///
+    /// N 項の和の丸め誤差の確率的評価 (Higham & Mary 2019) `√N·ε·Σ|項|` に基づく。
+    /// N は最長の内積の長さ `max(n, m_ext)`。`Qx` と `A_extᵀy` の計算内部の丸めは
+    /// 含まないため厳密な上界ではなく、過小見積りの場合は収束判定が厳しくなる
+    /// (停滞する) 側にのみ働き、偽収束は起こさない。逆に過大見積りは閾値
+    /// `max(eps, noise_rel)` を緩めるので偽収束側に働く。
+    pub(super) noise_rel: f64,
+}
+
+/// 符号規約 `r_d = −(Qx + c + A_extᵀy)` の下で `p = ½xᵀQx + cᵀx`、
+/// `d = −½xᵀQx − b_extᵀy`。分母は `max(|p|, |d|, 1)`。
+/// 元空間の `compute_duality_gap_rel` は bound 寄与 `lb·z_lb − ub·z_ub` を `by` とは別に
+/// 足し (固定変数は解析的に置換)、`obj_offset` も加える。こちらは bound が `A_ext` の行
+/// なので `b_ext·y` にすでに含まれ、別項も `obj_offset` も持たない。
+pub(super) fn duality_gap(
+    qx: &[f64],
+    x: &[f64],
+    c: &[f64],
+    b_ext: &[f64],
+    y: &[f64],
+) -> DualityGap {
+    let qx_dot_x: f64 = qx.iter().zip(x).map(|(&a, &b)| a * b).sum();
+    let c_dot_x: f64 = c.iter().zip(x).map(|(&a, &b)| a * b).sum();
+    let b_dot_y: f64 = b_ext.iter().zip(y).map(|(&a, &b)| a * b).sum();
+    let p_obj = 0.5 * qx_dot_x + c_dot_x;
+    let d_obj = -0.5 * qx_dot_x - b_dot_y;
+    let denom = p_obj.abs().max(d_obj.abs()).max(1.0);
+
+    let abs_sum =
+        |u: &[f64], v: &[f64]| -> f64 { u.iter().zip(v).map(|(&a, &b)| (a * b).abs()).sum() };
+    let magnitude = 0.5 * abs_sum(qx, x) + abs_sum(c, x) + abs_sum(b_ext, y);
+    let terms = x.len().max(y.len()) as f64;
+    DualityGap {
+        rel: (p_obj - d_obj) / denom,
+        noise_rel: terms.sqrt() * f64::EPSILON * magnitude / denom,
+    }
+}
 
 /// reg_limit 下限と一段引下げ倍率。
 pub(super) const REG_LIMIT_MIN: f64 = 1e-14;
@@ -272,5 +342,207 @@ mod pf_stuck_tests {
             nr_p > eps_orig,
             "yet the residual is still genuinely unconverged"
         );
+    }
+}
+
+#[cfg(test)]
+mod convergence_tests {
+    use super::*;
+
+    /// `min ½x²  s.t. −x ≤ −1` (内部形 `A_ext x + s = b_ext`, `A_ext=[−1]`, `b_ext=[−1]`) の
+    /// 点 `x = y = 1−δ`, `s = σ` における 4 指標の手計算値。
+    ///
+    /// - `qx = 1−δ`, `aty = −(1−δ)` → `r_d = −(qx + c + aty) = 0`。
+    /// - `r_p = b − ax − s = −1 + (1−δ) − σ = −(δ+σ)`、
+    ///   `nr_p_rel = (δ+σ) / (1 + |ax| + |b|) = (δ+σ) / (3−δ)`。
+    /// - `μ = σ(1−δ)`。
+    /// - `p = ½(1−δ)²`, `d = −½(1−δ)² + (1−δ)` → `p − d = −δ(1−δ)`、分母 `max(|p|,|d|,1) = 1`。
+    /// - 誤差見積り: N=1、`½|x·qx| + |c·x| + |b·y| = ½(1−δ)² + (1−δ)` → `ε(½(1−δ)² + (1−δ))`。
+    struct ShiftedPoint {
+        x: f64,
+        y: f64,
+        nr_p_rel: f64,
+        mu: f64,
+        rel_gap: f64,
+        noise_rel: f64,
+    }
+
+    fn shifted_point(delta: f64, sigma: f64) -> ShiftedPoint {
+        let v = 1.0 - delta;
+        ShiftedPoint {
+            x: v,
+            y: v,
+            nr_p_rel: (delta + sigma) / (3.0 - delta),
+            mu: sigma * v,
+            rel_gap: -delta * v,
+            noise_rel: f64::EPSILON * (0.5 * v * v + v),
+        }
+    }
+
+    fn gap_of(pt: &ShiftedPoint) -> DualityGap {
+        duality_gap(&[pt.x], &[pt.x], &[0.0], &[-1.0], &[pt.y])
+    }
+
+    fn measures_of(pt: &ShiftedPoint) -> ConvergenceMeasures {
+        ConvergenceMeasures {
+            nr_p_rel: pt.nr_p_rel,
+            nr_d_rel: 0.0,
+            mu: pt.mu,
+            gap: gap_of(pt),
+        }
+    }
+
+    #[test]
+    fn duality_gap_matches_hand_computed_value() {
+        for (delta, sigma) in [(1e-6, 1e-12), (1e-3, 0.0), (0.25, 1e-4)] {
+            let pt = shifted_point(delta, sigma);
+            let got = gap_of(&pt);
+            assert!(
+                (got.rel - pt.rel_gap).abs() <= 1e-15,
+                "delta={delta:e}: got {:e}, expected {:e}",
+                got.rel,
+                pt.rel_gap
+            );
+            assert!(
+                (got.noise_rel - pt.noise_rel).abs() <= 1e-30,
+                "delta={delta:e}: noise got {:e}, expected {:e}",
+                got.noise_rel,
+                pt.noise_rel
+            );
+        }
+    }
+
+    /// 分母は `max(|p|, |d|, 1)`: `|p|` が 1 を超えると `|p|` で割る。
+    /// `min x  s.t. −x ≤ −1` (LP) で `x = 10`, `y = 1`: `p = 10`, `d = 1`, gap = 9/10、
+    /// 誤差見積り `ε(|1·10| + |−1·1|)/10 = 1.1ε`。
+    #[test]
+    fn duality_gap_divides_by_the_larger_objective() {
+        let got = duality_gap(&[0.0], &[10.0], &[1.0], &[-1.0], &[1.0]);
+        assert_eq!(got.rel, 0.9);
+        assert!((got.noise_rel - 1.1 * f64::EPSILON).abs() <= 1e-30);
+    }
+
+    /// 誤差見積りは最長の内積の長さ N の平方根に比例する。
+    /// n=4 (x=1, c=1, Q=0)、m_ext=9 (b=0): p = 4, d = 0、`Σ|c_i x_i| = 4` → `√9·ε·4/4 = 3ε`。
+    #[test]
+    fn duality_gap_noise_scales_with_sqrt_of_longest_sum() {
+        let got = duality_gap(&[0.0; 4], &[1.0; 4], &[1.0; 4], &[0.0; 9], &[1.0; 9]);
+        assert_eq!(got.rel, 1.0);
+        assert!((got.noise_rel - 3.0 * f64::EPSILON).abs() <= 1e-30);
+    }
+
+    /// LISWET7 の吸引点の構造: 残差と μ は eps 未満、gap だけが eps を超える。
+    /// δ = 1e-6, eps = 5e-7: `nr_p_rel ≈ 3.3e-7`, `μ ≈ 1e-12`, `|gap| ≈ 1e-6`。
+    /// gap を eps と無関係な定数 1e-3 と比べる旧判定はこの点を収束と判定していた。
+    #[test]
+    fn gap_above_eps_is_not_converged_even_with_small_residuals() {
+        let eps = 5e-7;
+        let pt = shifted_point(1e-6, 1e-12);
+        let m = measures_of(&pt);
+        assert!(m.nr_p_rel < eps && m.nr_d_rel < eps && m.mu < eps);
+        assert!(m.gap.rel.abs() > eps && m.gap.rel.abs() < 1e-3);
+        assert!(m.gap.noise_rel < eps);
+        assert!(!m.converged(eps));
+    }
+
+    /// 同じ点でも lane の eps が gap より緩ければ収束と判定する。
+    #[test]
+    fn gap_below_eps_with_small_residuals_is_converged() {
+        let pt = shifted_point(1e-6, 1e-12);
+        assert!(measures_of(&pt).converged(1e-5));
+        let tight = shifted_point(1e-9, 1e-15);
+        assert!(measures_of(&tight).converged(5e-9));
+    }
+
+    /// eps が gap の評価誤差より小さい lane (BOYD1 実測: eps=2.2e-14、gap 2.7e-12 で
+    /// 張り付き、見積り 7.7e-12): 評価誤差未満の gap は収束と判定する。
+    #[test]
+    fn gap_within_evaluation_noise_is_converged_when_eps_is_below_noise() {
+        let eps = 2.2e-14;
+        let at_floor = ConvergenceMeasures {
+            nr_p_rel: 1e-15,
+            nr_d_rel: 5e-15,
+            mu: 1e-21,
+            gap: DualityGap {
+                rel: -2.7e-12,
+                noise_rel: 7.7e-12,
+            },
+        };
+        assert!(at_floor.converged(eps));
+        let above_floor = ConvergenceMeasures {
+            gap: DualityGap {
+                rel: -1e-11,
+                noise_rel: 7.7e-12,
+            },
+            ..at_floor
+        };
+        assert!(!above_floor.converged(eps));
+    }
+
+    /// rank-deficient Q + c=0 の偽収束 (UBH1: 残差小・gap 91%) は引き続き弾く。
+    #[test]
+    fn large_gap_with_tiny_residuals_is_not_converged() {
+        let m = ConvergenceMeasures {
+            nr_p_rel: 1e-12,
+            nr_d_rel: 1e-12,
+            mu: 1e-30,
+            gap: DualityGap {
+                rel: 0.91,
+                noise_rel: 1e-14,
+            },
+        };
+        assert!(!m.converged(1e-6));
+        let negative = ConvergenceMeasures {
+            gap: DualityGap {
+                rel: -0.91,
+                noise_rel: 1e-14,
+            },
+            ..m
+        };
+        assert!(!negative.converged(1e-6));
+    }
+
+    /// 各指標が単独で eps を超えれば収束としない (全分岐)。
+    #[test]
+    fn each_measure_alone_blocks_convergence() {
+        let eps = 1e-6;
+        let gap = |rel: f64| DualityGap {
+            rel,
+            noise_rel: 1e-14,
+        };
+        let ok = || ConvergenceMeasures {
+            nr_p_rel: 1e-9,
+            nr_d_rel: 1e-9,
+            mu: 1e-9,
+            gap: gap(1e-9),
+        };
+        assert!(ok().converged(eps));
+        let over = 2e-6;
+        assert!(!ConvergenceMeasures {
+            nr_p_rel: over,
+            ..ok()
+        }
+        .converged(eps));
+        assert!(!ConvergenceMeasures {
+            nr_d_rel: over,
+            ..ok()
+        }
+        .converged(eps));
+        assert!(!ConvergenceMeasures { mu: over, ..ok() }.converged(eps));
+        assert!(!ConvergenceMeasures {
+            gap: gap(over),
+            ..ok()
+        }
+        .converged(eps));
+        assert!(!ConvergenceMeasures {
+            gap: gap(-over),
+            ..ok()
+        }
+        .converged(eps));
+        assert!(!ConvergenceMeasures {
+            gap: gap(f64::NAN),
+            ..ok()
+        }
+        .converged(eps));
     }
 }
