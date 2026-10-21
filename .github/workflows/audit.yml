@@ -30,7 +30,7 @@ jobs:
         run: python3 tests/test_check_new_ignore_attrs.py
       - name: baseline truth script sentinel
         run: |
-          pip install numpy scipy highspy
+          pip install 'numpy==1.26.*' 'scipy==1.13.*' 'highspy==1.14.0'
           python3 tests/test_highs_baseline_truth.py
 
   comment-hygiene:

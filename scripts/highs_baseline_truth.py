@@ -375,13 +375,11 @@ def verify(prob, x, y):
 
 
 def _range_step(Q, r):
-    """Q delta = -r を解いた delta (r が range(Q) に無ければ None)。
+    """Q delta = -r の解 delta (r が range(Q) に無ければ None)。
 
-    捨てた双対残差 r を残したままの Lagrangian の x 方向の部分は、x = xbar + delta として
-    1/2 x'Qx + (r - Q xbar)'x = -1/2 xbar'Q xbar + r'xbar + r'delta + 1/2 delta'Q delta。
-    delta の最小値は 1/2 r'delta (Q delta = -r)。呼び出し側は d に r'xbar + 1/2 r'delta
-    を足す (-1/2 xbar'Q xbar は d の本体に含まれる)。r が range(Q) に無ければ下界は -inf になるので None を返し、呼び出し側は
-    sum |z_j x_j| の見積りへ退く。
+    捨てた残差 r を残した Lagrangian の x 方向の最小値は、x = xbar + delta として
+    -1/2 xbar'Q xbar + r'xbar + 1/2 r'delta。呼び出し側は d に r'xbar + 1/2 r'delta を足す。
+    r が range(Q) に無ければ下界は -inf なので None を返し、sum |z_j x_j| の見積りへ退く。
     """
     # Q は特異でありうる (SuperLU は特異行列で segfault しうる) ので LSQR で解く。
     with warnings.catch_warnings():

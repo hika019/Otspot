@@ -38,7 +38,9 @@ jobs:
           # v2: heavy 専用データ (lp_problems_hard/neos.QPS, osqp_bench_illscaled)
           # を追加した (PR #25 CI fix)。旧 v1 の shape と異なるため bump。
           # restore-keys の prefix match で v1 からの fallback restore は維持。
-          # v4: maros_meszaros を原 QPS (sha256 manifest 検証済み) へ移行した。
+          # v4: maros_meszaros を原 QPS へ移行した。bump は新 key での再保存が目的で、
+          # restore-keys が旧 cache を復元しても、manifest の sha256 不一致ファイルは
+          # download_all_bench_data.sh が検出して取り直す (取り違えを防ぐのは sha256 検証)。
           key: bench-data-v4
           restore-keys: |
             bench-data-
