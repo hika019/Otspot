@@ -36,7 +36,7 @@ pub(super) const LDL_FALLBACK_DELTA_MIN: f64 = 1e-2;
 /// 各指標の定義:
 /// - `nr_p_rel` / `nr_d_rel`: per-row / per-column の `1+|·|` 相対残差 (bench と同形)。
 /// - `mu`: 不等式行の `sᵀy / m_ineq`。
-/// - `gap`: [`duality_gap`] (`prove_optimal` の gap と同じ定義 + 評価誤差の見積り)。
+/// - `gap`: [`duality_gap`] (Ruiz scaled 空間の相対 gap + 評価誤差の見積り)。
 pub(super) struct ConvergenceMeasures {
     pub(super) nr_p_rel: f64,
     pub(super) nr_d_rel: f64,
@@ -45,22 +45,13 @@ pub(super) struct ConvergenceMeasures {
 }
 
 impl ConvergenceMeasures {
-    /// 4 指標すべてを lane の `eps` で判定する。gap だけは評価誤差 `gap.noise_rel` を
-    /// 下限に持つ。
+    /// 4 指標すべてを lane の `eps` で判定する。gap は `eps` と評価誤差
+    /// `gap.noise_rel` の大きい方を閾値にする。
     ///
-    /// gap は残差と μ からは従わない独立条件である: 恒等的に
-    /// `p − d = sᵀy + r_pᵀy − xᵀr_d` なので、per-row 相対残差が eps 未満でも
-    /// 行数と ‖y‖ が大きければ gap は eps より桁で大きく残る (LISWET7: 残差 < eps、
-    /// gap 8.5e-7、真値比 obj 誤差 23%)。gap だけを eps と無関係な定数で比べると、
-    /// その lane が狙う精度より粗い点を収束と判定してしまう。
-    /// 「残差小・gap 大」の偽収束 (rank-deficient Q + c=0、UBH1 で gap 91%) も
-    /// 同じ条件で弾かれる。
-    ///
-    /// 残差は per-component の `1+|·|` 相対なので丸め誤差は分母に吸収されるが、
-    /// gap は打ち消し合う内積の差を `max(|p|,|d|,1)` で割るため、その評価誤差より
-    /// 小さい値は観測できない。eps が `IPM_EPS_NOISE_FLOOR` まで締まった lane
-    /// (BOYD1: Ruiz 増幅 1.1e6 で eps=2.2e-14) では gap が 2.7e-12 の誤差床に張り付き、
-    /// 残差・μ が 1e-15 未満でも収束と判定できなくなる。
+    /// gap は残差・μ から従わない独立条件である (`p − d = sᵀy + r_pᵀy − xᵀr_d`)。
+    /// per-row 相対残差が小さくても `‖y‖` が大きければ gap は残り、残差だけの
+    /// 判定は偽収束になる。一方 eps が極端に小さい lane では gap が評価誤差の床に
+    /// 張り付くため、`noise_rel` を下限にして収束判定が不能になるのを避ける。
     pub(super) fn converged(&self, eps: f64) -> bool {
         self.nr_p_rel < eps
             && self.nr_d_rel < eps
@@ -76,15 +67,16 @@ pub(super) struct DualityGap {
     pub(super) rel: f64,
     /// `rel` の丸め誤差の見積り `√N·ε·(½Σ|x_i(Qx)_i| + Σ|c_i x_i| + Σ|b_i y_i|) / max(|p|,|d|,1)`。
     ///
-    /// N 項の和の丸め誤差は確率的評価 (Higham & Mary 2019) で `√N·ε·Σ|項|` 程度に収まる。
-    /// N は最長の内積の長さ `max(n, m_ext)`。実測の誤差床は見積りの内側にある
-    /// (BOYD1: 床 2.7e-12、見積り 7.7e-12。BOYD2: 床 9.4e-12、見積り 3.7e-11)。
+    /// N 項の和の丸め誤差の確率的評価 (Higham & Mary 2019) `√N·ε·Σ|項|` に基づく。
+    /// N は最長の内積の長さ `max(n, m_ext)`。`Qx` と `A_extᵀy` の計算内部の丸めは
+    /// 含まないため厳密な上界ではなく、過小見積りの場合は収束判定が厳しくなる
+    /// (停滞する) 側にのみ働き、偽収束は起こさない。
     pub(super) noise_rel: f64,
 }
 
 /// 符号規約 `r_d = −(Qx + c + A_extᵀy)` の下で `p = ½xᵀQx + cᵀx`、
-/// `d = −½xᵀQx − b_extᵀy`。分母は `prove_optimal` に渡す元空間 gap
-/// (`compute_duality_gap_rel`) と同じ。
+/// `d = −½xᵀQx − b_extᵀy`。分母は `max(|p|, |d|, 1)`。
+/// 元空間の `compute_duality_gap_rel` と違い `obj_offset` と固定変数の bound 寄与は含まない。
 pub(super) fn duality_gap(
     qx: &[f64],
     x: &[f64],

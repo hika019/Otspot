@@ -1,7 +1,7 @@
 //! LISWET9 / YAO: objective must equal 0.5 x^T Q x + c^T x + obj_offset
 //! evaluated at the returned solution (post-processing can mutate x).
 //!
-//! Also asserts internal objective is close to Clarabel strict reference.
+//! Also asserts internal objective is close to the HiGHS reference optimum.
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
@@ -42,9 +42,9 @@ fn assert_objective_self_consistent(name: &str, path: &std::path::Path) {
     );
 }
 
-/// internal objective が external reference (Clarabel strict optimum) と乖離する場合、
+/// internal objective が external reference (HiGHS Optimal 値) と乖離する場合、
 /// solver が `Optimal` を主張しないことを assert。
-fn assert_objective_matches_clarabel(name: &str, path: &std::path::Path, expected_internal: f64) {
+fn assert_objective_matches_highs(name: &str, path: &std::path::Path, expected_internal: f64) {
     assert!(path.exists(), "{} missing", name);
     let prob = parse_qps(path).expect("parse");
     let mut opts = SolverOptions::default();
@@ -56,14 +56,14 @@ fn assert_objective_matches_clarabel(name: &str, path: &std::path::Path, expecte
     let denom = internal.abs().max(expected_internal.abs()).max(1.0);
     let rel = diff / denom;
     eprintln!(
-        "{} vs Clarabel internal: status={:?}, ours_internal={:.6e}, clarabel={:.6e}, rel_diff={:.3e}",
+        "{} vs HiGHS internal: status={:?}, ours_internal={:.6e}, highs={:.6e}, rel_diff={:.3e}",
         name, res.status, internal, expected_internal, rel
     );
     if rel >= 1e-3 {
         assert_ne!(
             res.status,
             otspot::problem::SolveStatus::Optimal,
-            "{}: Clarabel と rel={:.3e} 乖離しているのに Optimal を主張している",
+            "{}: HiGHS 真値と rel={:.3e} 乖離しているのに Optimal を主張している",
             name,
             rel
         );
@@ -91,7 +91,7 @@ fn yao_objective_self_consistent() {
 /// 参照に使わない。
 #[test]
 fn liswet9_optimal_claim_matches_highs_truth() {
-    assert_objective_matches_clarabel(
+    assert_objective_matches_highs(
         "LISWET9",
         &std::path::PathBuf::from("data/maros_meszaros/LISWET9.QPS"),
         -562.0087391007,
@@ -103,7 +103,7 @@ fn liswet9_optimal_claim_matches_highs_truth() {
 /// 旧参照値 −151.5405 (Clarabel AlmostSolved) はこの区間から 2 倍外れており使わない。
 #[test]
 fn yao_optimal_claim_matches_highs_truth() {
-    assert_objective_matches_clarabel(
+    assert_objective_matches_highs(
         "YAO",
         &std::path::PathBuf::from("data/maros_meszaros/YAO.QPS"),
         -75.42074405968671,

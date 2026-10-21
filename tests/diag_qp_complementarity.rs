@@ -25,8 +25,8 @@ fn recompute_obj(prob: &QpProblem, x: &[f64]) -> f64 {
     0.5 * xqx + cx + prob.obj_offset
 }
 
-/// Optimal 判定された解について Clarabel reference との objective 一致を要求する。
-/// rel < 1e-3 (qp-survey 引き継ぎの reference 精度に合わせる)。
+/// Optimal 判定された解について HiGHS reference との objective 一致を要求する。
+/// rel < 1e-3 (参照値の有効桁に合わせる)。
 fn assert_optimal_objective(name: &str, res: &SolverResult, prob: &QpProblem, expected_obj: f64) {
     let internal = recompute_obj(prob, &res.solution);
     let diff = (internal - expected_obj).abs();
