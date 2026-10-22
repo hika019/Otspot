@@ -75,28 +75,14 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
     (pfeas, bfeas)
 }
 
-fn baseline_obj_offset(baseline_csv: &Path, prob: &QpProblem) -> f64 {
-    if baseline_csv
-        .file_name()
-        .and_then(|s| s.to_str())
-        .is_some_and(|s| s == "netlib_lp.csv")
-    {
-        prob.obj_offset
-    } else {
-        0.0
-    }
-}
-
 fn options_for_problem(
     opts: &SolverOptions,
     name: &str,
-    prob: &QpProblem,
     baseline_objectives: &HashMap<String, f64>,
-    baseline_csv: &Path,
 ) -> SolverOptions {
     let mut solve_opts = opts.clone();
     if let Some(&known) = baseline_objectives.get(name) {
-        solve_opts.known_optimal_obj = Some(known + baseline_obj_offset(baseline_csv, prob));
+        solve_opts.known_optimal_obj = Some(known);
     }
     solve_opts
 }
@@ -283,73 +269,29 @@ mod tests {
         );
     }
 
+    /// e226: the baseline holds the full objective (cᵀx* = -18.751929066 plus
+    /// constant 7.113, HiGHS -11.638929066). The constant-free Netlib value must
+    /// not pass.
     #[test]
-    fn test_netlib_objective_check_adds_obj_offset_to_reference() {
+    fn test_objective_check_compares_full_objective_verbatim() {
         let mut known = HashMap::new();
-        known.insert("e226".to_string(), -18.751_929_066);
+        known.insert("e226".to_string(), -11.638_929_066);
 
-        // Netlib: obj_offset = -7.113; solver reports known_obj + offset = -25.864...
-        let result = check_baseline_objective("e226", -25.864_929_066, &known, 1e-9, -7.113);
-        assert!(matches!(result, ObjCheckResult::Ok { .. }));
+        let ok = check_baseline_objective("e226", -11.638_929_066, &known, 1e-9);
+        assert!(matches!(ok, ObjCheckResult::Ok { .. }));
+        let without_constant = check_baseline_objective("e226", -18.751_929_066, &known, 1e-9);
+        assert!(matches!(without_constant, ObjCheckResult::Mismatch { .. }));
     }
 
     #[test]
-    fn test_non_netlib_objective_check_does_not_add_obj_offset() {
+    fn test_known_objective_passed_to_solver_verbatim() {
         let mut known = HashMap::new();
-        known.insert("toy".to_string(), 12.5);
+        known.insert("e226".to_string(), -11.638_929_066);
 
-        // Non-netlib: obj_offset = 0.0; solver reports known_obj directly.
-        let result = check_baseline_objective("toy", 12.5, &known, 1e-9, 0.0);
-        assert!(matches!(result, ObjCheckResult::Ok { .. }));
-    }
-
-    #[test]
-    fn test_netlib_known_objective_passed_to_solver_with_obj_offset() {
-        let mut known = HashMap::new();
-        known.insert("e226".to_string(), -18.751_929_066);
-        let mut prob = QpProblem::new(
-            CscMatrix::new(1, 1),
-            vec![1.0],
-            CscMatrix::new(0, 1),
-            vec![],
-            vec![(0.0, 1.0)],
-            vec![],
-        )
-        .unwrap();
-        prob.obj_offset = -7.113;
-
-        let opts = SolverOptions::default();
-        let solve_opts = options_for_problem(
-            &opts,
-            "e226",
-            &prob,
-            &known,
-            Path::new("data/baseline_objectives/netlib_lp.csv"),
-        );
-
-        assert_eq!(solve_opts.known_optimal_obj, Some(-25.864_929_066));
-    }
-
-    #[test]
-    fn test_non_netlib_known_objective_passed_to_solver_without_obj_offset() {
-        let mut known = HashMap::new();
-        known.insert("toy".to_string(), 12.5);
-        let mut prob = QpProblem::new(
-            CscMatrix::new(1, 1),
-            vec![1.0],
-            CscMatrix::new(0, 1),
-            vec![],
-            vec![(0.0, 1.0)],
-            vec![],
-        )
-        .unwrap();
-        prob.obj_offset = 99.0;
-
-        let opts = SolverOptions::default();
-        let solve_opts =
-            options_for_problem(&opts, "toy", &prob, &known, Path::new("data/other.csv"));
-
-        assert_eq!(solve_opts.known_optimal_obj, Some(12.5));
+        let solve_opts = options_for_problem(&SolverOptions::default(), "e226", &known);
+        assert_eq!(solve_opts.known_optimal_obj, Some(-11.638_929_066));
+        let absent = options_for_problem(&SolverOptions::default(), "toy", &known);
+        assert_eq!(absent.known_optimal_obj, None);
     }
 
     #[test]
@@ -628,8 +570,7 @@ fn main() {
         let m = prob.num_constraints;
         let nnz_before = prob.q.nnz() + prob.a.nnz();
         let is_qp = prob.q.nnz() > 0;
-        let solve_opts =
-            options_for_problem(&opts, &name, &prob, &baseline_objectives, &baseline_csv);
+        let solve_opts = options_for_problem(&opts, &name, &baseline_objectives);
 
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
@@ -729,15 +670,11 @@ fn main() {
                         } else {
                             let dfeas = dfeas_abs;
                             // Step 9: 正解値照合
-                            // netlib_lp.csv のみ CSV 参照値に obj_offset を加算して比較
-                            // (solver は result.objective に offset 込みで返すため)。
-                            let obj_offset = baseline_obj_offset(&baseline_csv, &prob);
                             match check_baseline_objective(
                                 &name,
                                 result.objective,
                                 &baseline_objectives,
                                 eps_obj,
-                                obj_offset,
                             ) {
                                 ObjCheckResult::Mismatch { rel_err } => {
                                     n_obj_mismatch += 1;

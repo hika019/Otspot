@@ -33,7 +33,7 @@
 //! integration job only fetches the `--ci-subset` of `download_all_bench_data.sh`
 //! (109 `lp_problems` + 138 `maros_meszaros`, covering the LP/QP legs above),
 //! and CBLIB is a separate, manually-run `scripts/cblib_download.sh` that is
-//! never part of that subset or its `bench-data-v1` cache — a `data/cblib_socp`
+//! never part of that subset or its `bench-data-v3` cache — a `data/cblib_socp`
 //! hard-require here would panic on every CI run. Instead it solves small
 //! synthetic SOCPs with a closed-form (Cauchy–Schwarz) optimum through the
 //! same `solve_socp` production entry point, so it needs no data files and
@@ -139,7 +139,7 @@ const _: () = assert!(LP_NAMES.len() == LP_PROBLEM_COUNT);
 
 /// LP phase tripwire: 5 small Netlib LPs against `netlib_lp.csv` (official
 /// MINOS 5.3 reference values). Same problems as
-/// `presolve_correctness_sweep::presolve_invariance_curated_clean` (minus
+/// `presolve_correctness_sweep::presolve_invariance_curated_clean_known_with_constant` (minus
 /// `israel`, plus `share2b`), but checking a different property: objective
 /// vs. the external baseline, not ON/OFF presolve invariance.
 #[test]

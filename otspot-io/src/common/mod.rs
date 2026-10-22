@@ -36,6 +36,18 @@ pub(crate) fn parse_objsense_value(value: &str) -> Result<bool, String> {
     }
 }
 
+/// Minimization-form objective constant for an objective-row RHS entry.
+///
+/// The objective row's RHS holds the *negated* constant: the file states
+/// `c^T x - RHS`, so the constant is `-RHS` (Gurobi MPS format reference,
+/// HiGHS `HMpsFF`, CPLEX). A MAX objective `c^T x - RHS` is minimized as
+/// `-c^T x + RHS`, so the stored offset is `+RHS`.
+pub(crate) fn objective_offset_from_rhs(rhs: f64, maximize: bool) -> f64 {
+    let offset = if maximize { rhs } else { -rhs };
+    // Adding +0.0 maps -0.0 (an absent or zero RHS) to +0.0.
+    offset + 0.0
+}
+
 /// Layout of a data line, decided once for the whole file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Format {

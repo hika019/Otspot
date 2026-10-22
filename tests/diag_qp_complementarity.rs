@@ -114,20 +114,20 @@ fn solve_qps(path: &std::path::Path) -> (QpProblem, SolverResult) {
     (prob, res)
 }
 
-/// 参照値は HiGHS Optimal 値 (`scripts/highs_baseline_truth.py` で弱双対検算済み、
-/// baseline CSV と同値)。Clarabel AlmostSolved の値は参照に使わない。
+/// 参照値は目的定数込みの検算済み最適値 (`scripts/highs_baseline_truth.py`、baseline CSV と
+/// 同値)。`recompute_obj` は `obj_offset` を含むので参照値も定数込み。Clarabel AlmostSolved の
+/// 値は参照に使わない。
 #[test]
-fn liswet9_optimal_claim_matches_highs_ref() {
+fn liswet9_optimal_claim_matches_certified_ref_with_constant() {
     let (prob, res) = solve_qps(&std::path::PathBuf::from("data/maros_meszaros/LISWET9.QPS"));
-    assert_optimal_objective("LISWET9", &res, &prob, -562.0087391007);
+    assert_optimal_objective("LISWET9", &res, &prob, 1.963251260880e3);
 }
 
-/// 参照値は HiGHS Optimal 値 (`diag_liswet9_objective::yao_optimal_claim_matches_highs_truth`
-/// と同値・同じ検算)。Clarabel AlmostSolved の −151.5405 は参照に使わない。
+/// 参照値は目的定数 273.125 込みの検算済み最適値 (= HiGHS cᵀx + ½xᵀQx −75.42074 + 273.125)。
 #[test]
-fn yao_optimal_claim_matches_highs_ref() {
+fn yao_optimal_claim_matches_certified_ref_with_constant() {
     let (prob, res) = solve_qps(&std::path::PathBuf::from("data/maros_meszaros/YAO.QPS"));
-    assert_optimal_objective("YAO", &res, &prob, -75.42074405968671);
+    assert_optimal_objective("YAO", &res, &prob, 1.977042559385e2);
 }
 
 // ---------------------------------------------------------------------------

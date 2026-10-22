@@ -1174,6 +1174,7 @@ otspot-core	qp::ipm_solver::attempt::tests::unscale_q_diagonal_rejects_short_bou
 otspot-core	qp::ipm_solver::attempt::tests::unscale_q_diagonal_reverses_x_and_bound_duals	active
 otspot-core	qp::ipm_solver::core::duality_gap::tests::duality_gap_rejects_missing_row_dual	active
 otspot-core	qp::ipm_solver::core::duality_gap::tests::duality_gap_rejects_short_bound_duals	active
+otspot-core	qp::ipm_solver::core::duality_gap::tests::duality_gap_rel_is_invariant_to_objective_constant	active
 otspot-core	qp::ipm_solver::core::eps_tighten::eps_tighten_tests::custom_tolerance_does_not_bypass_attempt_tighten	active
 otspot-core	qp::ipm_solver::core::eps_tighten::eps_tighten_tests::no_custom_tolerance_unchanged	active
 otspot-core	qp::ipm_solver::core::extended_ir_postsolve_path_tests::extended_ir_postsolve_path_does_not_hide_wrong_sign_dual_from_prove_optimal	active
@@ -2023,11 +2024,9 @@ otspot-dev::bin/qp_runner	tests::every_solver_status_has_an_explicit_stable_labe
 otspot-dev::bin/qp_runner	tests::legal_numbers_and_infinity_markers_remain_compatible	active
 otspot-dev::bin/qp_runner	tests::malformed_numbers_are_not_defaulted	active
 otspot-dev::bin/qps_benchmark	tests::test_expected_status_infeasible_loaded	active
-otspot-dev::bin/qps_benchmark	tests::test_netlib_known_objective_passed_to_solver_with_obj_offset	active
-otspot-dev::bin/qps_benchmark	tests::test_netlib_objective_check_adds_obj_offset_to_reference	active
-otspot-dev::bin/qps_benchmark	tests::test_non_netlib_known_objective_passed_to_solver_without_obj_offset	active
-otspot-dev::bin/qps_benchmark	tests::test_non_netlib_objective_check_does_not_add_obj_offset	active
+otspot-dev::bin/qps_benchmark	tests::test_known_objective_passed_to_solver_verbatim	active
 otspot-dev::bin/qps_benchmark	tests::test_nonfinite_residuals_fail_quality_gate	active
+otspot-dev::bin/qps_benchmark	tests::test_objective_check_compares_full_objective_verbatim	active
 otspot-dev::bin/qps_benchmark	tests::test_pfeas_eq_constraint_violation	active
 otspot-dev::bin/qps_benchmark	tests::test_pfeas_ge_constraint	active
 otspot-dev::bin/qps_benchmark	tests::test_phase_timing_note_includes_lp_and_ipm_fields	active
@@ -2147,9 +2146,10 @@ otspot-io	mps::tests::test_mps_fixed_columns_ignores_comment_and_sequence_fields
 otspot-io	mps::tests::test_mps_fixed_grid_rejects_content_outside_the_fields	active
 otspot-io	mps::tests::test_mps_long_name_is_not_truncated_into_a_false_match	active
 otspot-io	mps::tests::test_mps_named_vector_after_unnamed_entries_is_error	active
-otspot-io	mps::tests::test_mps_obj_offset_propagates_to_solve_result	active
+otspot-io	mps::tests::test_mps_obj_row_rhs_constant_in_solve_result	active
+otspot-io	mps::tests::test_mps_obj_row_rhs_is_negated_objective_constant	active
 otspot-io	mps::tests::test_mps_objsense_inline_and_spelled_out	active
-otspot-io	mps::tests::test_mps_objsense_max_obj_offset_sign_flip	active
+otspot-io	mps::tests::test_mps_objsense_max_obj_row_rhs_offset	active
 otspot-io	mps::tests::test_mps_ranges_expansion_follows_declaration_order	active
 otspot-io	mps::tests::test_mps_ranges_fixed_shorthand_trailing_field6_is_error	active
 otspot-io	mps::tests::test_mps_ranges_fixed_shorthand_vector_name_omitted	active
@@ -2167,7 +2167,6 @@ otspot-io	mps::tests::test_mps_rhs_fixed_shorthand_vector_name_omitted	active
 otspot-io	mps::tests::test_mps_rhs_fixed_vector_name_collides_with_declared_row_name	active
 otspot-io	mps::tests::test_mps_rhs_malformed_too_few_fields_is_error	active
 otspot-io	mps::tests::test_mps_rhs_multiple_named_vectors_first_wins	active
-otspot-io	mps::tests::test_mps_rhs_n_row_finite_propagates_to_obj_offset	active
 otspot-io	mps::tests::test_mps_rhs_n_row_nan_is_error	active
 otspot-io	mps::tests::test_mps_rhs_nan_value_is_error	active
 otspot-io	mps::tests::test_mps_rhs_second_vector_undefined_row_is_error	active
@@ -2271,7 +2270,7 @@ otspot-io	qps::parser::tests::build_qp_problem_rejects_missing_value_for_lo_boun
 otspot-io	qps::parser::tests::build_qp_problem_rejects_missing_value_for_up_bound	active
 otspot-io	qps::tests::dt_qps_ge_eq_row_types	active
 otspot-io	qps::tests::ep_qps_2var_quadobj_structure	active
-otspot-io	qps::tests::test_e226_obj_offset	active
+otspot-io	qps::tests::test_e226_objective_constant_is_negated_rhs	active
 otspot-io	qps::tests::test_obj_offset_nan_inf_guard	active
 otspot-io	qps::tests::test_parse_bounds_3token_fr_bname	active
 otspot-io	qps::tests::test_parse_bounds_3token_no_bname	active
@@ -2282,7 +2281,6 @@ otspot-io	qps::tests::test_parse_bounds_mi_with_numeric_var_name	active
 otspot-io	qps::tests::test_parse_qps_accumulates_duplicate_objective_entries	active
 otspot-io	qps::tests::test_parse_qps_eq_constraint	active
 otspot-io	qps::tests::test_parse_qps_no_quadobj	active
-otspot-io	qps::tests::test_parse_qps_obj_offset	active
 otspot-io	qps::tests::test_parse_qps_simple	active
 otspot-io	qps::tests::test_qps_blend_shorthand_rhs_matches_known_optimal	active
 otspot-io	qps::tests::test_qps_bounds_fixed_bound_set_name_collides_with_declared_column_name	active
@@ -2313,8 +2311,9 @@ otspot-io	qps::tests::test_qps_forplan_style_rhs_ranges_fixed_columns	active
 otspot-io	qps::tests::test_qps_free_format_single_space_row_names	active
 otspot-io	qps::tests::test_qps_long_name_truncation_and_duplicate_rows_are_errors	active
 otspot-io	qps::tests::test_qps_marker_column_row_name_collision_keeps_coefficient	active
+otspot-io	qps::tests::test_qps_obj_row_rhs_is_negated_objective_constant	active
 otspot-io	qps::tests::test_qps_objsense_inline_and_spelled_out	active
-otspot-io	qps::tests::test_qps_objsense_max_obj_offset_sign_flip	active
+otspot-io	qps::tests::test_qps_objsense_max_obj_row_rhs_offset	active
 otspot-io	qps::tests::test_qps_quadobj_duplicate_entry_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_malformed_too_few_fields_is_error	active
 otspot-io	qps::tests::test_qps_quadobj_nan_value_is_error	active
@@ -2353,7 +2352,7 @@ otspot-io	qps::tests::test_sentinel_qps_bounds_undefined_column_is_error	active
 otspot-io	qps::tests::test_sentinel_qps_columns_trailing_row_no_value_is_error	active
 otspot-io	qps::tests::test_sentinel_qps_quadobj_undefined_column_is_error	active
 otspot-io	qps::tests::test_solve_qps_basic	active
-otspot-io	qps::tests::test_solve_with_obj_offset	active
+otspot-io	qps::tests::test_solve_with_negated_obj_row_rhs	active
 otspot-io	size_limits::tests::check_declared_size_accepts_boundary_and_rejects_above	active
 otspot-io	size_limits::tests::try_vec_filled_rejects_huge_length_gracefully	active
 otspot-io	size_limits::tests::try_vec_with_capacity_rejects_huge_capacity_gracefully	active
@@ -2365,8 +2364,8 @@ otspot-io::cbf_cblib_integration	cblib_socp_files_parse_and_validate	active
 otspot-io::israel_objective_mismatch	parse_fidelity_matches_raw_qps	active
 otspot-io::israel_objective_mismatch	presolve_objective_invariance	active
 otspot-io::presolve_correctness_sweep	presolve_infeasible_sweep	ignored
-otspot-io::presolve_correctness_sweep	presolve_invariance_curated_clean	active
-otspot-io::presolve_correctness_sweep	presolve_invariance_full_sweep	ignored
+otspot-io::presolve_correctness_sweep	presolve_invariance_curated_clean_known_with_constant	active
+otspot-io::presolve_correctness_sweep	presolve_invariance_full_sweep_known_with_constant	ignored
 otspot-io::presolve_correctness_sweep	presolve_not_worsens_80bau3b_grow15	active
 otspot-io::qplib_fixture	test_qplib_constraint_type_expansion	active
 otspot-io::qplib_fixture	test_qplib_integer_and_binary	active
@@ -2376,7 +2375,7 @@ otspot-io::qplib_fixture	test_qplib_qcl_patterns	active
 otspot-io::qps_fixture	test_qps_bound_types	active
 otspot-io::qps_fixture	test_qps_constraint_types	active
 otspot-io::qps_fixture	test_qps_lp_only_patterns	active
-otspot-io::qps_fixture	test_qps_obj_offset_patterns	active
+otspot-io::qps_fixture	test_qps_obj_row_rhs_offset_patterns	active
 otspot-io::qps_fixture	test_qps_quadobj_patterns	active
 otspot-model	model::conic_bridge_sparse_builder_tests::bounds_to_rows_matches_hand_computed_unit_rows	active
 otspot-model	model::conic_bridge_sparse_builder_tests::csc_triplets_matches_hand_built_entries	active
@@ -2902,11 +2901,11 @@ otspot::diag_presolve_dup_transforms	parallel_row_roundtrip_kkt_le	active
 otspot::diag_presolve_dup_transforms	random_lp_consistency_across_seeds	active
 otspot::diag_presolve_dup_transforms	reduction_rate_fact_synthetic_battery	active
 otspot::diag_qap15_iter_reporting	qap15_timeout_reports_nonzero_iter	active
-otspot::diag_qp_complementarity	liswet9_optimal_claim_matches_highs_ref	active
+otspot::diag_qp_complementarity	liswet9_optimal_claim_matches_certified_ref_with_constant	active
 otspot::diag_qp_complementarity	synth_inequality_active_complementarity	active
 otspot::diag_qp_complementarity	synth_inequality_inactive_complementarity	active
 otspot::diag_qp_complementarity	synth_two_inequality_active_inactive	active
-otspot::diag_qp_complementarity	yao_optimal_claim_matches_highs_ref	active
+otspot::diag_qp_complementarity	yao_optimal_claim_matches_certified_ref_with_constant	active
 otspot::diag_qp_deadline_lasso	qp_is_lasso_300_real_data_honors_deadline	ignored
 otspot::diag_qp_deadline_lasso	qp_synthetic_lasso_mid_honors_deadline	active
 otspot::diag_qp_deadline_lasso	qp_synthetic_lasso_small_honors_deadline	active
@@ -2996,10 +2995,10 @@ otspot::faer_qd_test	test_ipm_barrier_parameter_sweep	active
 otspot::fast_baseline_regression	fast_regression_conic_matches_closed_form_unit_ball	active
 otspot::fast_baseline_regression	fast_regression_lp_matches_netlib_baseline	active
 otspot::fast_baseline_regression	fast_regression_qp_matches_maros_meszaros_baseline	active
-otspot::liswet7_11_obj_independent_check	liswet11_obj_independent_oracle	active
+otspot::liswet7_11_obj_independent_check	liswet11_optimal_claim_matches_certified_value	active
 otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_breaks_delta_matrix_floor_at_eps_1e8	active
 otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_unaffected_at_default_eps_1e6	active
-otspot::liswet7_inner_gap_gate_sentinel	liswet7_attractor_is_not_reported_optimal	active
+otspot::liswet7_inner_gap_gate_sentinel	liswet7_attractor_with_constant_is_not_reported_optimal	active
 otspot::lp_coverage_screen	lp_coverage_screen_all	ignored
 otspot::lp_coverage_screen	lp_coverage_screen_cycle	active
 otspot::lp_coverage_screen	lp_coverage_screen_sample_fast	active
@@ -3053,7 +3052,8 @@ otspot::lp_simplex_formal_design	simplex_method_selection_solves_representative_
 otspot::lp_simplex_formal_design	status_boundaries_for_minimal_lps_are_semantic_not_path_dependent	active
 otspot::lp_simplex_formal_design	timeout_deadline_boundary_returns_no_incumbent_and_sets_route_stats	active
 otspot::lp_simplex_formal_design	warm_start_basis_is_reused_when_valid_and_rejected_when_shape_is_invalid	active
-otspot::maros_meszaros_qp	aug3d_baseline_matches_qps_kkt_solution	active
+otspot::maros_meszaros_qp	aug3d_baseline_includes_objective_constant	active
+otspot::maros_meszaros_qp	maros_objective_constants_match_highs	active
 otspot::maros_meszaros_qp	test_cvxqp1_s	active
 otspot::maros_meszaros_qp	test_hs21	active
 otspot::maros_meszaros_qp	test_hs35	active
@@ -3186,7 +3186,7 @@ otspot::netlib_lp_extra	test_lp_agg	active
 otspot::netlib_lp_extra	test_lp_agg2	active
 otspot::netlib_lp_extra	test_lp_bandm	active
 otspot::netlib_lp_extra	test_lp_beaconfd	active
-otspot::netlib_lp_extra	test_lp_e226	active
+otspot::netlib_lp_extra	test_lp_e226_with_objective_constant	active
 otspot::netlib_lp_extra	test_lp_etamacro	active
 otspot::netlib_lp_extra	test_lp_finnis	active
 otspot::netlib_lp_extra	test_lp_forplan	active

@@ -78,8 +78,8 @@ pub(super) struct DualityGap {
 /// 符号規約 `r_d = −(Qx + c + A_extᵀy)` の下で `p = ½xᵀQx + cᵀx`、
 /// `d = −½xᵀQx − b_extᵀy`。分母は `max(|p|, |d|, 1)`。
 /// 元空間の `compute_duality_gap_rel` は bound 寄与 `lb·z_lb − ub·z_ub` を `by` とは別に
-/// 足し (固定変数は解析的に置換)、`obj_offset` も加える。こちらは bound が `A_ext` の行
-/// なので `b_ext·y` にすでに含まれ、別項も `obj_offset` も持たない。
+/// 足す (固定変数は解析的に置換)。こちらは bound が `A_ext` の行なので `b_ext·y` にすでに
+/// 含まれ、別項を持たない。どちらも目的定数 `obj_offset` は含めない。
 pub(super) fn duality_gap(
     qx: &[f64],
     x: &[f64],
