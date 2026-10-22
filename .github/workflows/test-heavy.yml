@@ -52,9 +52,9 @@ jobs:
       - name: Restore git-tracked baselines (cache 上書き対策)
         run: git checkout HEAD -- data/baseline_objectives/
       # eMudhra/emSign CA 事故: pip < 26.2.2 は vendored certifi に脆弱な
-      # ルート証明書を保持するため、pip と certifi を修正版へ固定する。
+      # ルート証明書を保持するため、pip と certifi を修正版以上へ引き上げる。
       - name: Bootstrap secure pip and certifi (eMudhra CA incident)
-        run: python -m pip install --upgrade 'pip==26.2.2' 'certifi==2026.10.19'
+        run: python -m pip install --upgrade 'pip>=26.2.2' 'certifi>=2026.10.19'
       - name: Install python deps for data generation
         run: python -m pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*'
       - name: Build emps decoder (Netlib LP data 変換用)
