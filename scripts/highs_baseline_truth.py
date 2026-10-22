@@ -26,6 +26,9 @@ fixed format。OBJSENSE、MARKER (整数変数)、2 本目以降の N 行への�
     やり直す; _linearized_dual)。消せなければ検算失敗 (その問題は UNCERTIFIED とする)。
   - 相対不確かさ |p - d|/(1+|p|) + 丸め影響 + 主違反影響 <= UNCERTAINTY_TOL、
     相対主実行不能度 <= PRIMAL_INF_TOL、ソルバ報告値と自前再計算の一致。
+  - Q の半正定値性: load_qps が非ゼロ非対角グラフのブロックごとに確認する。負固有値が
+    丸め許容を超える場合と、ブロックが大きすぎて判定できない場合は検算不能
+    (d = -inf) とし、その問題は UNCERTIFIED とする (非凸 QP は対象外)。
 
 Usage:
   python3 scripts/highs_baseline_truth.py data/maros_meszaros/LISWET7.QPS ...
@@ -48,6 +51,7 @@ import warnings
 import highspy
 import numpy as np
 import scipy.sparse as sp
+from scipy.sparse import csgraph
 from scipy.sparse.linalg import lsqr, spsolve
 
 # baseline 比較の許容 eps (bench 基準, CLAUDE.md: eps=1e-6)。参照値の誤差は比較側の
@@ -76,6 +80,11 @@ LSQR_ITER_LIMIT = 200_000
 # 候補は検算が通らない可能性があるが、下界の妥当性は変わらない (失敗側に倒れる)。
 REPAIR_LSQR_ITER_LIMIT = 20_000
 REPAIR_TIME_BUDGET = 60.0
+# Q の PSD 判定。丸めで生じる微小な負固有値を許す相対許容 (行列の 1-ノルム基準)。
+# これを超える負固有値がある Q は非凸として検算しない。ブロックが大きすぎて判定
+# できない場合も検算しない (fail-safe)。
+PSD_REL_TOL = 1e-10
+PSD_DENSE_MAX = 4_000
 # IEEE 754 binary64 の単位丸め u = 2^-53 (丸め誤差上界 gamma_k の基準)。
 UNIT_ROUNDOFF = np.finfo(float).eps / 2
 # 積が subnormal へ下位桁あふれしたときの 1 演算あたりの絶対誤差上界 (subnormal の間隔)。
@@ -276,9 +285,11 @@ def parse_qps(path, fixed=False):
 
 def load_qps(path):
     try:
-        return parse_qps(path)
+        prob = parse_qps(path)
     except (ValueError, IndexError, KeyError):
-        return parse_qps(path, fixed=True)
+        prob = parse_qps(path, fixed=True)
+    prob["psd"] = _psd_ok(prob["Q"])
+    return prob
 
 
 def _rel_violation(val, lower, upper):
@@ -367,6 +378,62 @@ def _max_col_nnz(M):
     return int(np.diff(M.tocsc().indptr).max(initial=0))
 
 
+def _safe_fsum(values):
+    """math.fsum の ±inf 混在・overflow を nan に落とす (呼び側で -inf 扱い)。"""
+    try:
+        return math.fsum(values)
+    except (ValueError, OverflowError):
+        return math.nan
+
+
+def _psd_ok(Q):
+    """Q が半正定値か。True / False / None (判定不能) を返す。
+
+    Q の非ゼロ非対角グラフの連結成分 (ブロック対角構造) ごとに固有値を調べる。
+    ブロックが PSD_DENSE_MAX 以下のときだけ密固有値計算し、それより大きいブロックは
+    「判定不能」として None を返す (証明できない Q は検算しない)。対角行列は対角成分
+    だけで判定する。
+    """
+    n = Q.shape[0]
+    if n == 0:
+        return True
+    diag = np.asarray(Q.diagonal()).ravel()
+    if not np.all(np.isfinite(diag)):
+        return False
+    A = Q.tocsr(copy=True)
+    A.setdiag(0)
+    A.eliminate_zeros()
+    if A.nnz == 0:
+        scale = max(1.0, float(np.abs(diag).max()))
+        return bool(diag.min() >= -PSD_REL_TOL * scale)
+    _, labels = csgraph.connected_components(A, directed=False)
+    unknown = False
+    for c in np.unique(labels):
+        idx = np.flatnonzero(labels == c)
+        if len(idx) == 1:
+            d = float(diag[idx[0]])
+            scale = max(1.0, abs(d))
+            if d < -PSD_REL_TOL * scale:
+                return False
+            continue
+        if len(idx) > PSD_DENSE_MAX:
+            unknown = True
+            continue
+        sub = Q[idx][:, idx]
+        scale = max(1.0, float(np.abs(sub).sum(axis=1).max()))
+        try:
+            w = np.linalg.eigvalsh(sub.toarray())
+        except np.linalg.LinAlgError:
+            unknown = True
+            continue
+        if not np.all(np.isfinite(w)):
+            unknown = True
+            continue
+        if float(w[0]) < -PSD_REL_TOL * scale:
+            return False
+    return None if unknown else True
+
+
 def _down(v):
     return np.nextafter(v, -math.inf)
 
@@ -384,14 +451,24 @@ def _project_dual(prob, y):
 
 
 def _quad_form(Q, x):
-    """(fl(x'Qx), 誤差上界)。|fl(x'Qx) - x'Qx| <= 誤差上界。"""
-    q = Q @ x
-    k = _max_col_nnz(Q)
-    err_q = _gamma(k) * (abs(Q) @ np.abs(x)) + k * UNDERFLOW_ABS
-    prod = x * q
-    val = math.fsum(prod)
-    err = (math.fsum(np.abs(x) * err_q) + UNIT_ROUNDOFF * math.fsum(np.abs(prod))
-           + len(x) * UNDERFLOW_ABS + UNIT_ROUNDOFF * abs(val))
+    """(fl(x'Qx), 誤差上界)。|fl(x'Qx) - x'Qx| <= 誤差上界。
+
+    非有限・overflow では下界を諦めて (-inf, inf) を返す (呼び側で d=-inf)。
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        q = Q @ x
+        k = _max_col_nnz(Q)
+        err_q = _gamma(k) * (abs(Q) @ np.abs(x)) + k * UNDERFLOW_ABS
+        prod = x * q
+        abs_prod = np.abs(prod)
+        try:
+            val = math.fsum(prod)
+            err = (math.fsum(np.abs(x) * err_q) + UNIT_ROUNDOFF * math.fsum(abs_prod)
+                   + len(x) * UNDERFLOW_ABS + UNIT_ROUNDOFF * abs(val))
+        except (ValueError, OverflowError):
+            return -math.inf, math.inf
+    if not math.isfinite(val):
+        return val, math.inf
     return val, ERROR_BOUND_SAFETY * err
 
 
@@ -437,7 +514,11 @@ def _classify(prob, xh, y):
     unbounded |= ~np.isfinite(gl) | ~np.isfinite(gu)
     # 両側無限で unbounded でない成分だけがここに残る (区間が厳密に [0, 0])。
     corner = np.where(~lo_ok & ~up_ok, 0.0, corner)
-    col = _down(math.fsum(corner[~unbounded]))
+    col = _safe_fsum(corner[~unbounded])
+    if not math.isfinite(col):
+        col = -math.inf
+    else:
+        col = _down(col)
     return gl, gu, col, unbounded
 
 
@@ -539,6 +620,8 @@ def dual_bound(prob, xh, y):
     丸めるので、返す値は浮動小数計算の結果でなく真の右辺の下界である。無限側の境界を
     要求する成分の符号が区間で確定できなければ -inf を返す (0 扱いの見積りはしない)。
     """
+    if prob.get("psd", True) is not True:
+        return -math.inf
     yp = _project_dual(prob, y)
     _, _, col, unbounded = _classify(prob, xh, yp)
     if unbounded.any():
@@ -546,10 +629,16 @@ def dual_bound(prob, xh, y):
     L, U = prob["L"], prob["U"]
     with np.errstate(invalid="ignore"):
         h = np.where(yp > 0, _down(yp * L), np.where(yp < 0, _down(yp * U), 0.0))
-    row = _down(math.fsum(h))
+    row = _safe_fsum(h)
+    if not math.isfinite(row):
+        return -math.inf
+    row = _down(row)
     xqx, xqx_err = _quad_form(prob["Q"], xh)
     half_quad_up = _up(0.5 * _up(xqx + xqx_err))
-    return float(_down(math.fsum([prob["c0"], row, -half_quad_up, col])))
+    total = _safe_fsum([prob["c0"], row, -half_quad_up, col])
+    if not math.isfinite(total):
+        return -math.inf
+    return float(_down(total))
 
 
 Certificate = collections.namedtuple(
@@ -569,14 +658,27 @@ def verify(prob, x, y):
       repair_iters  _repair() の反復数 (0 は修正不要)
     """
     A, Q, c, c0 = prob["A"], prob["Q"], prob["c"], prob["c0"]
+    if not np.all(np.isfinite(x)):
+        return Certificate(math.nan, -math.inf, math.inf, math.inf, math.inf, 0)
     ax = A @ x
     pinf = max(_rel_violation(ax, prob["L"], prob["U"]),
                _rel_violation(x, prob["lo"], prob["up"]))
     xqx, xqx_err = _quad_form(Q, x)
     cx = c * x
-    p = math.fsum([c0, math.fsum(cx), 0.5 * xqx])
-    p_err = ERROR_BOUND_SAFETY * (UNIT_ROUNDOFF * (math.fsum(np.abs(cx)) + abs(p))
+    try:
+        p = math.fsum([c0, math.fsum(cx), 0.5 * xqx])
+        cx_abs = math.fsum(np.abs(cx))
+    except (ValueError, OverflowError):
+        p = math.nan
+        cx_abs = math.inf
+    p_err = ERROR_BOUND_SAFETY * (UNIT_ROUNDOFF * (cx_abs + abs(p))
                                   + len(x) * UNDERFLOW_ABS) + 0.5 * xqx_err
+    scale = 1.0 + abs(p)
+    roundoff = float(p_err) / scale
+    if prob.get("psd", True) is not True:
+        return Certificate(p, -math.inf, pinf, roundoff, 0.0, 0)
+    if not math.isfinite(p) or not math.isfinite(xqx):
+        return Certificate(p, -math.inf, pinf, roundoff, math.inf, 0)
     xh, yr, iters = _repair(prob, x.copy(), _project_dual(prob, y))
     if iters == REPAIR_ITERS:
         y_lin = _linearized_dual(prob, x, _project_dual(prob, y))
@@ -585,8 +687,6 @@ def verify(prob, x, y):
             iters += more
     d = dual_bound(prob, xh, yr)
     gl, gu, _ = _reduced_cost_interval(prob, xh, yr)
-    scale = 1.0 + abs(p)
-    roundoff = float(p_err) / scale
     g = 0.5 * (gl + gu)
     pimpact = float(np.abs(yr) @ _abs_violation(ax, prob["L"], prob["U"])
                     + np.abs(g) @ _abs_violation(x, prob["lo"], prob["up"])) / scale
@@ -603,6 +703,8 @@ def uncertainty(cert):
 def best_certificate(prob, x, y):
     """ソルバの (x, y) と polish() の (x, y) のうち、相対主実行不能度が PRIMAL_INF_TOL
     以下で uncertainty() 最小の候補の verify 結果。該当候補が無ければソルバ側を返す。"""
+    if prob.get("psd", True) is not True:
+        return verify(prob, x, y)
     cands = [(x, y)]
     polished = polish(prob, x, y)
     if polished is not None:
@@ -746,26 +848,45 @@ def main():
     ap.add_argument("--csv", action="store_true", help="baseline CSV 行を stdout へ出す")
     args = ap.parse_args()
     date = datetime.date.today().strftime("%Y%m%d")
+    # --csv の stdout は CSV 行だけにする。ソルバの C ライブラリ (HiGHS/Clarabel) が
+    # stdout へ出す LAPACK 警告は、プロセス全体で fd 1 を stderr へ向けて逃がし、
+    # CSV は元の stdout の複製 fd へ書く。C のバッファは終了時に fd 1 (= stderr) へ
+    # flush されるので、CSV に混入しない。
+    if args.csv:
+        csv_fd = os.dup(1)
+        os.dup2(2, 1)
+        csv_out = os.fdopen(csv_fd, "w", buffering=1)
+    else:
+        csv_out = sys.stdout
     diag = sys.stderr if args.csv else sys.stdout
-    bad = 0
-    for path in args.paths:
-        name = os.path.splitext(os.path.basename(path))[0]
-        prob = load_qps(path)
-        accepted = None
-        for solver, version, solve in SOLVERS:
-            solved = solve(prob, args.time_limit)
-            ok, p, msg = certify(prob, solved)
-            print(f"{name},{solver},{'PASS' if ok else 'FAIL'},{msg}", file=diag, flush=True)
-            if ok:
-                status = solved[0].replace(" ", "")
-                accepted = (p, f"{solver}_{version()}_{status}_{date}")
-                break
-        if accepted is None:
-            bad += 1
-            print(f"FAIL {name}: no solver passed the certificate", file=sys.stderr, flush=True)
-        elif args.csv:
-            print(f"{name},{format_csv_value(accepted[0])},{accepted[1]}", flush=True)
-    return 1 if bad else 0
+    try:
+        bad = 0
+        for path in args.paths:
+            name = os.path.splitext(os.path.basename(path))[0]
+            prob = load_qps(path)
+            accepted = None
+            for solver, version, solve in SOLVERS:
+                solved = solve(prob, args.time_limit)
+                ok, p, msg = certify(prob, solved)
+                print(f"{name},{solver},{'PASS' if ok else 'FAIL'},{msg}",
+                      file=diag, flush=True)
+                if ok:
+                    status = solved[0].replace(" ", "")
+                    accepted = (p, f"{solver}_{version()}_{status}_{date}")
+                    break
+            if accepted is None:
+                bad += 1
+                print(f"FAIL {name}: no solver passed the certificate",
+                      file=sys.stderr, flush=True)
+            elif args.csv:
+                print(f"{name},{format_csv_value(accepted[0])},{accepted[1]}",
+                      file=csv_out, flush=True)
+        return 1 if bad else 0
+    finally:
+        if args.csv:
+            # fd 1 は stderr のまま終了する。C/Fortran の stdout バッファが終了時に
+            # flush されても CSV ファイルへ混入しない (CSV は複製 fd に書いている)。
+            csv_out.close()
 
 
 if __name__ == "__main__":

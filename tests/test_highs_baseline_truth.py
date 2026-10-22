@@ -399,6 +399,33 @@ FIXED_QPS = (
 )
 
 
+class PsdAndOverflowTests(unittest.TestCase):
+    def test_psd_accepts_semidefinite_blocks(self):
+        self.assertTrue(truth._psd_ok(sp.csr_matrix(np.array([[2.0, 1.0], [1.0, 2.0]]))))
+        # 特異 (固有値 0, 2) も PSD。
+        self.assertTrue(truth._psd_ok(sp.csr_matrix(np.array([[1.0, 1.0], [1.0, 1.0]]))))
+
+    def test_psd_rejects_indefinite_blocks(self):
+        self.assertFalse(truth._psd_ok(sp.csr_matrix(np.array([[-1.0]]))))
+        self.assertFalse(truth._psd_ok(sp.csr_matrix(np.array([[1.0, 2.0], [2.0, 1.0]]))))
+
+    def test_nonconvex_problem_is_not_certified(self):
+        prob = scalar_problem()
+        prob["Q"] = sp.csr_matrix(np.array([[-1.0]]))
+        prob["lo"] = np.array([-1.0])
+        prob["up"] = np.array([1.0])
+        prob["psd"] = False
+        cert = truth.verify(prob, np.array([0.0]), np.zeros(0))
+        self.assertEqual(cert.d, -math.inf)
+        self.assertFalse(truth.certify(prob, ("Optimal", np.array([0.0]), np.zeros(0), 0.0))[0])
+
+    def test_overflowing_quad_form_returns_minus_inf(self):
+        Q = sp.csr_matrix(np.array([[1.0, -2.0], [-2.0, 5.0]]))
+        val, err = truth._quad_form(Q, np.array([1e200, 1e200]))
+        self.assertEqual(val, -math.inf)
+        self.assertEqual(err, math.inf)
+
+
 class FixedBoundTypeTests(unittest.TestCase):
     def parse(self, kind):
         with tempfile.TemporaryDirectory() as tmp:
