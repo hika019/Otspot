@@ -42,6 +42,7 @@ import datetime
 import math
 import os
 import sys
+import time
 import warnings
 
 import highspy
@@ -70,6 +71,11 @@ ACTIVE_TOL = 1e-7
 # 特異 KKT を LSQR で解くときの停止許容と反復上限 (倍精度の丸めに近い水準まで詰める)。
 LSQR_TOL = 1e-15
 LSQR_ITER_LIMIT = 200_000
+# _repair() の LSQR は「候補を 1 つ作る」ためだけに使う。200k 反復は大規模問題で
+# 数時間かかることがあるため、反復数と壁時計時間の両方に上限を置く。上限に達した
+# 候補は検算が通らない可能性があるが、下界の妥当性は変わらない (失敗側に倒れる)。
+REPAIR_LSQR_ITER_LIMIT = 20_000
+REPAIR_TIME_BUDGET = 60.0
 # IEEE 754 binary64 の単位丸め u = 2^-53 (丸め誤差上界 gamma_k の基準)。
 UNIT_ROUNDOFF = np.finfo(float).eps / 2
 # 積が subnormal へ下位桁あふれしたときの 1 演算あたりの絶対誤差上界 (subnormal の間隔)。
@@ -455,7 +461,10 @@ def _repair(prob, xh, y):
     gl, gu, mag = _reduced_cost_interval(prob, xh, y)
     small = np.abs(0.5 * (gl + gu)) <= REPAIR_PIN_TOL * (1.0 + mag)
     pinned = (lo_inf & up_inf) | (small & ~_at_bound(xh, lo) & ~_at_bound(xh, up))
+    started = time.monotonic()
     for it in range(REPAIR_ITERS):
+        if time.monotonic() - started > REPAIR_TIME_BUDGET:
+            break
         gl, gu, _, unbounded = _classify(prob, xh, y)
         if not unbounded.any():
             return xh, y, it
@@ -470,7 +479,10 @@ def _repair(prob, xh, y):
         M = sp.hstack([Q[P][:, P], -A[R][:, P].T]).tocsr()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            sol = lsqr(M, target - g, atol=LSQR_TOL, btol=LSQR_TOL, iter_lim=LSQR_ITER_LIMIT)[0]
+            # LSQR の収束は行数程度で頭打ちになる。小さい系で 20k 回も回さない。
+            iter_cap = min(REPAIR_LSQR_ITER_LIMIT, max(1_000, 4 * M.shape[0]))
+            sol = lsqr(M, target - g, atol=LSQR_TOL, btol=LSQR_TOL,
+                       iter_lim=iter_cap)[0]
         if not np.all(np.isfinite(sol)):
             break
         xh = xh.copy()
