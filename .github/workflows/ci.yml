@@ -28,6 +28,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # 2026-10: ubuntu-latest の既定 Python が 3.14 になり、pin 済みの
+      # numpy/scipy に cp314 wheel が無いため source build で落ちる。3.12 に固定する。
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - uses: actions/cache@v6
         id: cache
         with:
@@ -46,8 +51,13 @@ jobs:
             bench-data-
       - name: Restore git-tracked baselines (cache 上書き対策)
         run: git checkout HEAD -- data/baseline_objectives/
+      # eMudhra/emSign CA 事故: pip < 26.2.2 は vendored certifi に脆弱な
+      # ルート証明書を保持するため、pip と certifi を修正版以上へ引き上げる。
+      # https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576
+      - name: Bootstrap secure pip and certifi (eMudhra CA incident)
+        run: python -m pip install --upgrade 'pip>=26.2.2' 'certifi>=2026.10.19'
       - name: Install python deps for data generation
-        run: pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*'
+        run: python -m pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*'
       - name: Build emps decoder (Netlib LP data 変換用)
         if: steps.cache.outputs.cache-hit != 'true'
         run: bash scripts/ensure_emps.sh
@@ -106,13 +116,16 @@ jobs:
       # ships a self-contained interpreter pyo3-build-config can locate cleanly.
       - name: Rust-side API manifest parity test
         run: cargo test -p otspot-py --no-default-features
+      # eMudhra/emSign CA 事故: pip の vendored certifi を更新してから依存を入れる。
+      - name: Bootstrap secure pip and certifi (eMudhra CA incident)
+        run: python -m pip install --upgrade 'pip>=26.2.2' 'certifi>=2026.10.19'
       - name: Install maturin, pytest, and mypy
-        run: pip install maturin pytest mypy
+        run: python -m pip install maturin pytest mypy
       - name: Build and install the otspot wheel
         working-directory: otspot-py
         run: |
           maturin build --release --out dist
-          pip install dist/*.whl
+          python -m pip install dist/*.whl
       - name: Python-side API manifest + behavior parity tests
         working-directory: otspot-py
         run: pytest tests/ -v
