@@ -28,6 +28,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # 2026-10: ubuntu-latest の既定 Python が 3.14 になり、pin 済みの
+      # numpy/scipy に cp314 wheel が無いため source build で落ちる。3.12 に固定する。
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - uses: actions/cache@v6
         id: cache
         with:
