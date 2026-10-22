@@ -16,13 +16,15 @@ fixed format。OBJSENSE、MARKER (整数変数)、2 本目以降の N 行への�
 で拒否する (黙って誤値を出さない)。
 
 検算: active set で KKT を解き直した候補 (polish) も含め、
-  - 弱双対: y を行種別に合う符号へ射影し、z = c + Qx - A'y を x の固定点で取った
-    Lagrange 双対 d = c0 - 1/2 x'Qx + sum_i h_i(y_i) + sum_j g_j(z_j)
-    (h_i(y) = y L_i (y>0) / y U_i (y<0)、g_j 同様) は凸 QP の最適値の下界。z_j が無限側の
-    境界を要求する成分 r は 0 へ射影する。残った Lagrangian の x 方向最小値は
-    -1/2 x'Qx + r'x + 1/2 r'delta (Q delta = -r) なので、d にその分 (r'x + 1/2 r'delta)
-    を足して厳密な下界に戻す (r が range(Q) に無ければ見積りへ退く)。
-  - 相対不確かさ |p - d|/(1+|p|) + 双対残差影響 + 主違反影響 <= UNCERTAINTY_TOL、
+  - 弱双対 (dual_bound): 符号を射影した y と任意の線形化点 xh で
+        f* >= c0 + sum_i h_i(y_i) - 1/2 xh'Q xh + sum_j min_{lo_j<=x_j<=up_j} g_j x_j,
+        g = c + Q xh - A'y
+    (h_i(y) = y L_i (y>0) / y U_i (y<0); Q の凸性 1/2 x'Qx >= 1/2 xh'Q xh + (Q xh)'(x-xh))。
+    g を丸め誤差上界つきの区間で、各項と和を -inf 方向へ丸めて評価するので、得る値は
+    浮動小数の丸めを含めて最適値の下界になる。g_j が無限側の境界を要求する成分があれば
+    下界は -inf で、_repair が xh と y を動かして消す (収束しなければ線形化 LP の双対から
+    やり直す; _linearized_dual)。消せなければ検算失敗 (その問題は UNCERTIFIED とする)。
+  - 相対不確かさ |p - d|/(1+|p|) + 丸め影響 + 主違反影響 <= UNCERTAINTY_TOL、
     相対主実行不能度 <= PRIMAL_INF_TOL、ソルバ報告値と自前再計算の一致。
 
 Usage:
@@ -35,6 +37,7 @@ Usage:
   stderr へ回す。
 """
 import argparse
+import collections
 import datetime
 import math
 import os
@@ -51,7 +54,7 @@ from scipy.sparse.linalg import lsqr, spsolve
 BENCH_EPS = 1e-6
 # 相対 gap |p-d|/(1+|p|) の上限。参照値の不確かさ上界 = BENCH_EPS/10。
 REL_GAP_TOL = BENCH_EPS / 10
-# 参照値の相対不確かさ (gap + 双対残差影響 + 主違反影響, uncertainty()) の上限。
+# 参照値の相対不確かさ (gap + 丸め影響 + 主違反影響, uncertainty()) の上限。
 UNCERTAINTY_TOL = REL_GAP_TOL
 # 相対主実行不能度 (違反量 / (1 + |境界|)) の上限。HiGHS の既定主実行可能性許容 1e-7 と
 # 同じ。目的値への影響は別途 pimpact (乗数 × 違反量) として REL_GAP_TOL 予算で検査する。
@@ -67,9 +70,28 @@ ACTIVE_TOL = 1e-7
 # 特異 KKT を LSQR で解くときの停止許容と反復上限 (倍精度の丸めに近い水準まで詰める)。
 LSQR_TOL = 1e-15
 LSQR_ITER_LIMIT = 200_000
-# _range_step の Q delta = -r の解の採否 (残差 / |r|_inf の上限)。r が range(Q) にあるか
-# の判定で、超えたら Lagrangian 下界を厳密に取れないとみなす。
-RANGE_RESID_TOL = 1e-10
+# IEEE 754 binary64 の単位丸め u = 2^-53 (丸め誤差上界 gamma_k の基準)。
+UNIT_ROUNDOFF = np.finfo(float).eps / 2
+# 積が subnormal へ下位桁あふれしたときの 1 演算あたりの絶対誤差上界 (subnormal の間隔)。
+UNDERFLOW_ABS = np.finfo(float).smallest_subnormal
+# 丸め誤差上界の安全係数。上界そのものを浮動小数で計算する相対誤差 (<= gamma_k << 1) を
+# 吸収するのに 1 + gamma_k で足りるところを、桁の余裕を見て 2 とする。
+ERROR_BOUND_SAFETY = 2.0
+# _repair() の反復上限。各反復で無限側を要求する成分が修正対象に加わり、対象が基底成分を
+# 覆うまで反復が続く。収束する問題は数回で収束し、32 回で収束しないものは循環しているので
+# _linearized_dual() からやり直す。
+REPAIR_ITERS = 32
+# 片側無限変数の修正目標 tau = REPAIR_MARGIN * (修正対象の縮約費用区間の最大半幅)。修正後の
+# 区間幅の変動と LSQR の残差 (成分ごとでなく系全体の大きさで決まる) を超えて、区間全体を
+# 有限側へ置く余裕。有限側の境界が 0 の成分では下界を損なわない。
+REPAIR_MARGIN = 4.0
+# _repair() で基底成分 (境界に無い変数) とみなす縮約費用の相対上限 |g_j| / (1 + mag_j)。
+# ソルバの双対許容 (HiGHS 1e-7、Clarabel 1e-10) を上回り、非基底成分の縮約費用
+# (問題データの桁) を下回る値。誤判定しても下界の妥当性は崩れず、緩さが変わるだけ。
+REPAIR_PIN_TOL = 1e-6
+# _linearized_dual() の HiGHS の主・双対実行可能性許容 (HiGHS が受け付ける最小値)。残る
+# 双対残差は後続の _repair() が丸め誤差の水準まで消す。
+LINEARIZED_LP_TOL = 1e-10
 # Clarabel (HiGHS が検算に通る解を出せない問題の代替ソルバ) の停止許容と時間上限。
 CLARABEL_TOL = 1e-10
 CLARABEL_TIME_LIMIT_SECS = 1800.0
@@ -253,18 +275,6 @@ def load_qps(path):
         return parse_qps(path, fixed=True)
 
 
-def _bound_term(mult, lower, upper):
-    """sum h(mult) と、無限側を要求して捨てた成分のマスク。"""
-    term = np.zeros_like(mult)
-    pos, neg = mult > 0, mult < 0
-    lo_ok = np.isfinite(lower)
-    up_ok = np.isfinite(upper)
-    term[pos & lo_ok] = mult[pos & lo_ok] * lower[pos & lo_ok]
-    term[neg & up_ok] = mult[neg & up_ok] * upper[neg & up_ok]
-    dropped = (pos & ~lo_ok) | (neg & ~up_ok)
-    return float(term.sum()), dropped
-
-
 def _rel_violation(val, lower, upper):
     with np.errstate(invalid="ignore"):
         below = np.where(np.isfinite(lower), (lower - val) / (1.0 + np.abs(lower)), 0.0)
@@ -334,78 +344,259 @@ def _abs_violation(val, lower, upper):
     return np.maximum(np.maximum(below, above), 0.0)
 
 
-def verify(prob, x, y):
-    """独立再計算 (docstring 冒頭の定義)。
+def _gamma(k):
+    """k 回の浮動小数演算の相対誤差上界 gamma_k = k u / (1 - k u) (Higham 2002, §3.1)。"""
+    ku = k * UNIT_ROUNDOFF
+    return ku / (1.0 - ku)
 
-    返り値 (p, d, pinf, resid, pimpact):
-      p       主目的値 c0 + c'x + 1/2 x'Qx
-      d       Lagrange 双対下界
-      pinf    相対主実行不能度 max 違反 / (1 + |境界|)
-      resid   射影で捨てた双対残差の目的値影響 sum |z_j x_j| / (1 + |p|)
-      pimpact 主違反の目的値影響 (sum |y_i| 行違反_i + sum |z_j| 列違反_j) / (1 + |p|)。
-              x が境界を僅かに破るとき p(x) は真の最適値の上界でなくなるが、その差は
-              一次で乗数 × 違反量 (感度) で抑えられる。
-    """
-    A, Q, c, c0 = prob["A"], prob["Q"], prob["c"], prob["c0"]
-    ax = A @ x
-    qx = Q @ x
-    pinf = max(_rel_violation(ax, prob["L"], prob["U"]),
-               _rel_violation(x, prob["lo"], prob["up"]))
-    p = float(c0 + c @ x + 0.5 * x @ qx)
+
+def _pattern(M):
+    """M の非ゼロ配置を 1 にした行列。"""
+    P = M.tocsr(copy=True)
+    P.data = (P.data != 0).astype(float)
+    return P
+
+
+def _max_col_nnz(M):
+    return int(np.diff(M.tocsc().indptr).max(initial=0))
+
+
+def _down(v):
+    return np.nextafter(v, -math.inf)
+
+
+def _up(v):
+    return np.nextafter(v, math.inf)
+
+
+def _project_dual(prob, y):
+    """行乗数を行種別に合う符号へ射影する (y_i > 0 は L_i 有限、y_i < 0 は U_i 有限を要求)。"""
     yp = y.copy()
     yp[(yp > 0) & ~np.isfinite(prob["L"])] = 0.0
     yp[(yp < 0) & ~np.isfinite(prob["U"])] = 0.0
-    z = c + qx - A.T @ yp
-    row_term, _ = _bound_term(yp, prob["L"], prob["U"])
-    col_term, dropped = _bound_term(z, prob["lo"], prob["up"])
-    d = float(c0 - 0.5 * x @ qx + row_term + col_term)
-    scale = 1.0 + abs(p)
-    resid = 0.0
-    if dropped.any():
-        r = np.where(dropped, z, 0.0)
-        step = _range_step(Q, r)
-        if step is None:
-            resid = float(np.abs(z[dropped] * x[dropped]).sum()) / scale
-        else:
-            d += float(r @ x) + 0.5 * float(r @ step)
-    zk = np.where(dropped, 0.0, z)
-    pimpact = float(np.abs(yp) @ _abs_violation(ax, prob["L"], prob["U"])
-                    + np.abs(zk) @ _abs_violation(x, prob["lo"], prob["up"])) / scale
-    return p, d, pinf, resid, pimpact
+    return yp
 
 
-def _range_step(Q, r):
-    """Q delta = -r の解 delta (r が range(Q) に無ければ None)。
+def _quad_form(Q, x):
+    """(fl(x'Qx), 誤差上界)。|fl(x'Qx) - x'Qx| <= 誤差上界。"""
+    q = Q @ x
+    k = _max_col_nnz(Q)
+    err_q = _gamma(k) * (abs(Q) @ np.abs(x)) + k * UNDERFLOW_ABS
+    prod = x * q
+    val = math.fsum(prod)
+    err = (math.fsum(np.abs(x) * err_q) + UNIT_ROUNDOFF * math.fsum(np.abs(prod))
+           + len(x) * UNDERFLOW_ABS + UNIT_ROUNDOFF * abs(val))
+    return val, ERROR_BOUND_SAFETY * err
 
-    捨てた残差 r を残した Lagrangian の x 方向の最小値は、x = xbar + delta として
-    -1/2 xbar'Q xbar + r'xbar + 1/2 r'delta。呼び出し側は d に r'xbar + 1/2 r'delta を足す。
-    r が range(Q) に無ければ下界は -inf なので None を返し、sum |z_j x_j| の見積りへ退く。
+
+def _reduced_cost_interval(prob, xh, y):
+    """g = c + Q xh - A'y を真値で含む区間 [gl, gu] (浮動小数計算の誤差上界で外側へ広げる)。
+
+    返り値 (gl, gu, mag): mag = |c| + |Q||xh| + |A'||y| (g の各成分の大きさ)。
     """
-    # Q は特異でありうる (SuperLU は特異行列で segfault しうる) ので LSQR で解く。
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        step = lsqr(Q, -r, atol=LSQR_TOL, btol=LSQR_TOL, iter_lim=LSQR_ITER_LIMIT)[0]
-    rnorm = float(np.abs(r).max())
-    if not np.all(np.isfinite(step)) or np.abs(Q @ step + r).max() > RANGE_RESID_TOL * rnorm:
-        return None
-    return step
+    A, Q, c = prob["A"], prob["Q"], prob["c"]
+    g = c + Q @ xh - A.T @ y
+    mag = np.abs(c) + abs(Q) @ np.abs(xh) + abs(A).T @ np.abs(y)
+    k = _max_col_nnz(Q) + _max_col_nnz(A) + 2
+    # 下位桁あふれしうるのは両因子が非ゼロの積だけ。その数が 0 で mag も 0 なら g は厳密に 0。
+    nonzero_products = ((c != 0).astype(float) + _pattern(Q) @ (xh != 0).astype(float)
+                        + _pattern(A).T @ (y != 0).astype(float))
+    err = ERROR_BOUND_SAFETY * (_gamma(k) * mag + nonzero_products * UNDERFLOW_ABS)
+    exact = err == 0
+    return np.where(exact, g, _down(g - err)), np.where(exact, g, _up(g + err)), mag
 
 
-def uncertainty(result):
-    """参照値 p の相対不確かさ上界の見積り: gap + 双対残差影響 + 主違反影響。"""
-    p, d, _, resid, pimpact = result
-    return abs(p - d) / (1.0 + abs(p)) + resid + pimpact
+def _classify(prob, xh, y):
+    """縮約費用区間と、成分ごとの box 最小値の下界。
+
+    返り値 (gl, gu, col, unbounded):
+      col       sum_j min { g x : g in [gl_j, gu_j], lo_j <= x <= up_j } の下界 (unbounded 成分を除く)
+      unbounded 区間が無限側の境界を要求する成分 (その成分の最小値は -inf)
+
+    区間が無限側の境界を跨ぐ成分は、g の符号を丸め誤差の内で確定できないので下界を
+    作れない (conceded のような「0 扱い」はしない)。g が厳密に 0 と分かる成分だけは
+    自由変数・片側無限変数でも項が 0 になり、そのまま扱える。
+    """
+    gl, gu, _ = _reduced_cost_interval(prob, xh, y)
+    lo, up = prob["lo"], prob["up"]
+    lo_ok, up_ok = np.isfinite(lo), np.isfinite(up)
+    corner = np.full_like(gl, math.inf)
+    with np.errstate(invalid="ignore"):
+        for ok, bound in ((lo_ok, lo), (up_ok, up)):
+            for gv in (gl, gu):
+                corner = np.where(ok, np.minimum(corner, _down(gv * bound)), corner)
+    # 上限なしなら g < 0 で -inf、下限なしなら g > 0 で -inf。区間が非有限 (オーバーフロー)
+    # のときは符号を確定できないので、同じく検算不能として扱う。
+    unbounded = (~lo_ok & (gu > 0)) | (~up_ok & (gl < 0))
+    unbounded |= ~np.isfinite(gl) | ~np.isfinite(gu)
+    # 両側無限で unbounded でない成分だけがここに残る (区間が厳密に [0, 0])。
+    corner = np.where(~lo_ok & ~up_ok, 0.0, corner)
+    col = _down(math.fsum(corner[~unbounded]))
+    return gl, gu, col, unbounded
+
+
+def _repair(prob, xh, y):
+    """無限側を要求する縮約費用成分を、xh と y の修正で有限側 (自由変数は 0) へ寄せる。
+
+    下界 dual_bound(xh, y) は任意の (xh, y) で成り立つので、修正は下界の妥当性に影響せず、
+    下界が有限になるかと緩さだけを左右する。修正対象 P は、相補性から g_j = 0 であるべき
+    成分 (自由変数と、xh_j が境界に無く |g_j| <= REPAIR_PIN_TOL (1 + mag_j) の基底成分) と、
+    無限側を要求した成分の累積。P の外の成分は g を保ったまま境界で抑えられる。基底成分を
+    固定しないと、y の修正で g_j が膨らみ下界が g_j (境界 - xh_j) だけ緩む。P の g を目標
+    (片側無限は有限側へ tau、それ以外は 0) へ合わせる最小ノルム解を、P 成分の xh (Q_PP s) と
+    行乗数 y で取る (LSQR)。片側有限行の乗数が逆符号へ動いたら 0 へ射影し、以後その行は
+    動かさない。一度入れた成分は P から外さない (外すと次の修正で相補的な成分の符号が倒れて
+    循環する)。
+    """
+    A, Q, lo, up = prob["A"], prob["Q"], prob["lo"], prob["up"]
+    both = np.isfinite(prob["L"]) & np.isfinite(prob["U"])
+    frozen = np.zeros(prob["m"], dtype=bool)
+    lo_inf, up_inf = ~np.isfinite(lo), ~np.isfinite(up)
+    gl, gu, mag = _reduced_cost_interval(prob, xh, y)
+    small = np.abs(0.5 * (gl + gu)) <= REPAIR_PIN_TOL * (1.0 + mag)
+    pinned = (lo_inf & up_inf) | (small & ~_at_bound(xh, lo) & ~_at_bound(xh, up))
+    for it in range(REPAIR_ITERS):
+        gl, gu, _, unbounded = _classify(prob, xh, y)
+        if not unbounded.any():
+            return xh, y, it
+        pinned |= unbounded
+        P = np.flatnonzero(pinned)
+        g = 0.5 * (gl[P] + gu[P])
+        tau = REPAIR_MARGIN * float(0.5 * (gu[P] - gl[P]).max())
+        one_sided = lo_inf[P] != up_inf[P]
+        target = np.where(one_sided, np.where(lo_inf[P], -tau, tau), 0.0)
+        # 両側無限の行の乗数も自由に動かせる (符号制約なし)。片側有限行だけが射影で凍る。
+        R = np.flatnonzero(~frozen)
+        M = sp.hstack([Q[P][:, P], -A[R][:, P].T]).tocsr()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sol = lsqr(M, target - g, atol=LSQR_TOL, btol=LSQR_TOL, iter_lim=LSQR_ITER_LIMIT)[0]
+        if not np.all(np.isfinite(sol)):
+            break
+        xh = xh.copy()
+        xh[P] += sol[: len(P)]
+        y = y.copy()
+        y[R] += sol[len(P):]
+        projected = _project_dual(prob, y)
+        frozen |= ~both & (projected != y)
+        y = projected
+    return xh, y, REPAIR_ITERS
+
+
+def _linearized_dual(prob, xh, y_ref):
+    """xh で目的を線形化した LP の行双対 (解けなければ None)。
+
+    Q の凸性から f(x) >= f(xh) + (c + Q xh)'(x - xh) なので、線形化 LP  min (c + Q xh)'x
+    (元の制約) の双対は dual_bound() にそのまま渡せる下界の y で、xh = x* なら下界は f* に届く。
+    基底の片側無限成分は最適双対で g_j = 0 となり、丸め誤差の区間が 0 を跨いで -inf になる
+    ので、その成分の費用を有限側へ tau_j (区間半幅と LP の双対許容の REPAIR_MARGIN 倍) だけ
+    ずらした LP を解く (Neumaier-Shcherbina の摂動): 双対は g_j >= tau_j を満たし、
+    dual_bound() は元の c で評価するので下界の妥当性は変わらない。半幅は y_ref で見積もる。
+    費用 0 の後退方向 (A d = 0, d >= 0 の組) があるとずらした LP は非有界になる (その方向の
+    成分は g'd = 0 から g_j >= tau_j を同時に満たせない) ので、ずらさない LP へ退く。
+    _repair() が縮退した双対で収束しないときに使う。
+    """
+    lo_inf, up_inf = ~np.isfinite(prob["lo"]), ~np.isfinite(prob["up"])
+    gl, gu, _ = _reduced_cost_interval(prob, xh, y_ref)
+    tau = REPAIR_MARGIN * (0.5 * (gu - gl) + LINEARIZED_LP_TOL)
+    shift = np.where(lo_inf == up_inf, 0.0, np.where(lo_inf, tau, -tau))
+    lin_c = prob["c"] + prob["Q"] @ xh
+    for c_lin in (lin_c + shift, lin_c):
+        h = highspy.Highs()
+        h.setOptionValue("output_flag", False)
+        h.setOptionValue("primal_feasibility_tolerance", LINEARIZED_LP_TOL)
+        h.setOptionValue("dual_feasibility_tolerance", LINEARIZED_LP_TOL)
+        h.passModel(to_highs_model(dict(prob, c=c_lin, Q=sp.csr_matrix(prob["Q"].shape))))
+        h.run()
+        if h.getModelStatus() == highspy.HighsModelStatus.kOptimal:
+            y = _project_dual(prob, np.array(h.getSolution().row_dual))
+            # ずらした LP の双対が有限な下界を与えないなら、ずらさない LP も試す。
+            if math.isfinite(dual_bound(prob, xh, y)):
+                return y
+    return None
+
+
+def dual_bound(prob, xh, y):
+    """凸 QP の最適値の厳密な下界 (取れなければ -inf)。
+
+    実行可能な x と符号を射影した y で y_i (Ax)_i >= h_i(y_i) (h_i(y) = y L_i (y > 0) /
+    y U_i (y < 0))、Q の凸性で 1/2 x'Qx >= -1/2 xh'Q xh + (Q xh)'x なので
+        f(x) >= c0 + sum_i h_i(y_i) - 1/2 xh'Q xh + sum_j min_{lo_j <= x_j <= up_j} g_j x_j,
+        g = c + Q xh - A'y
+    が任意の xh で成り立つ。g は丸め誤差上界で広げた区間で評価し、各項・和を -inf 方向へ
+    丸めるので、返す値は浮動小数計算の結果でなく真の右辺の下界である。無限側の境界を
+    要求する成分の符号が区間で確定できなければ -inf を返す (0 扱いの見積りはしない)。
+    """
+    yp = _project_dual(prob, y)
+    _, _, col, unbounded = _classify(prob, xh, yp)
+    if unbounded.any():
+        return -math.inf
+    L, U = prob["L"], prob["U"]
+    with np.errstate(invalid="ignore"):
+        h = np.where(yp > 0, _down(yp * L), np.where(yp < 0, _down(yp * U), 0.0))
+    row = _down(math.fsum(h))
+    xqx, xqx_err = _quad_form(prob["Q"], xh)
+    half_quad_up = _up(0.5 * _up(xqx + xqx_err))
+    return float(_down(math.fsum([prob["c0"], row, -half_quad_up, col])))
+
+
+Certificate = collections.namedtuple(
+    "Certificate", "p d pinf roundoff pimpact repair_iters")
+
+
+def verify(prob, x, y):
+    """独立再計算 (docstring 冒頭の定義)。Certificate を返す。
+
+      p             主目的値 c0 + c'x + 1/2 x'Qx (浮動小数値)
+      d             _repair() した (xh, y) での dual_bound()。最適値の厳密な下界 (なければ -inf)
+      pinf          相対主実行不能度 max 違反 / (1 + |境界|)
+      roundoff      p の丸め誤差上界 / (1 + |p|)
+      pimpact       主違反の目的値影響 (sum |y_i| 行違反_i + sum |g_j| 列違反_j) / (1 + |p|)。
+                    x が境界を僅かに破るとき p(x) は真の最適値の上界でなくなるが、その差は
+                    一次で乗数 × 違反量 (感度) で抑えられる。
+      repair_iters  _repair() の反復数 (0 は修正不要)
+    """
+    A, Q, c, c0 = prob["A"], prob["Q"], prob["c"], prob["c0"]
+    ax = A @ x
+    pinf = max(_rel_violation(ax, prob["L"], prob["U"]),
+               _rel_violation(x, prob["lo"], prob["up"]))
+    xqx, xqx_err = _quad_form(Q, x)
+    cx = c * x
+    p = math.fsum([c0, math.fsum(cx), 0.5 * xqx])
+    p_err = ERROR_BOUND_SAFETY * (UNIT_ROUNDOFF * (math.fsum(np.abs(cx)) + abs(p))
+                                  + len(x) * UNDERFLOW_ABS) + 0.5 * xqx_err
+    xh, yr, iters = _repair(prob, x.copy(), _project_dual(prob, y))
+    if iters == REPAIR_ITERS:
+        y_lin = _linearized_dual(prob, x, _project_dual(prob, y))
+        if y_lin is not None:
+            xh, yr, more = _repair(prob, x.copy(), y_lin)
+            iters += more
+    d = dual_bound(prob, xh, yr)
+    gl, gu, _ = _reduced_cost_interval(prob, xh, yr)
+    scale = 1.0 + abs(p)
+    roundoff = float(p_err) / scale
+    g = 0.5 * (gl + gu)
+    pimpact = float(np.abs(yr) @ _abs_violation(ax, prob["L"], prob["U"])
+                    + np.abs(g) @ _abs_violation(x, prob["lo"], prob["up"])) / scale
+    return Certificate(p, d, pinf, roundoff, pimpact, iters)
+
+
+def uncertainty(cert):
+    """参照値 p の相対不確かさ: |p - d| / (1 + |p|) + roundoff + pimpact (d = -inf なら inf)。"""
+    if not math.isfinite(cert.d):
+        return math.inf
+    return abs(cert.p - cert.d) / (1.0 + abs(cert.p)) + cert.roundoff + cert.pimpact
 
 
 def best_certificate(prob, x, y):
-    """HiGHS の (x, y) と polish() の (x, y) のうち、相対主実行不能度が PRIMAL_INF_TOL
-    以下で uncertainty() 最小の候補の verify 結果。該当候補が無ければ HiGHS 側を返す。"""
+    """ソルバの (x, y) と polish() の (x, y) のうち、相対主実行不能度が PRIMAL_INF_TOL
+    以下で uncertainty() 最小の候補の verify 結果。該当候補が無ければソルバ側を返す。"""
     cands = [(x, y)]
     polished = polish(prob, x, y)
     if polished is not None:
         cands.append(polished)
     results = [verify(prob, cx, cy) for cx, cy in cands]
-    feasible = [r for r in results if r[2] <= PRIMAL_INF_TOL]
+    feasible = [r for r in results if r.pinf <= PRIMAL_INF_TOL]
     if not feasible:
         return results[0]
     return min(feasible, key=uncertainty)
@@ -522,16 +713,18 @@ def certify(prob, solved):
     # 報告値と自前再計算の食い違いは QPS 解釈 (Q, c, c0, 符号) の食い違いを示す。
     p_raw = float(prob["c0"] + prob["c"] @ x + 0.5 * x @ (prob["Q"] @ x))
     objdiff = abs(p_raw - reported) / (1.0 + abs(p_raw))
-    result = best_certificate(prob, x, y)
-    p, d, pinf, resid, pimpact = result
-    unc = uncertainty(result)
-    gap = abs(p - d) / (1.0 + abs(p))
+    cert = best_certificate(prob, x, y)
+    unc = uncertainty(cert)
+    gap = abs(cert.p - cert.d) / (1.0 + abs(cert.p))
     # NaN は比較が常に False になるので、合格条件を肯定形で書き否定を取る。
-    ok = unc <= UNCERTAINTY_TOL and pinf <= PRIMAL_INF_TOL and objdiff <= OBJ_CONSISTENCY_TOL
-    msg = (f"status={status} reported={reported!r} p={p!r} d={d!r} uncertainty={unc:.3e} "
-           f"relgap={gap:.3e} dual_resid={resid:.3e} pimpact={pimpact:.3e} "
-           f"verify_pinf={pinf:.3e} reported_vs_p={objdiff:.3e} c0={prob['c0']!r}")
-    return ok, p, msg
+    ok = (unc <= UNCERTAINTY_TOL and cert.pinf <= PRIMAL_INF_TOL
+          and objdiff <= OBJ_CONSISTENCY_TOL)
+    msg = (f"status={status} reported={reported!r} p={cert.p!r} d={cert.d!r} "
+           f"uncertainty={unc:.3e} relgap={gap:.3e} roundoff={cert.roundoff:.3e} "
+           f"pimpact={cert.pimpact:.3e} "
+           f"repair_iters={cert.repair_iters} verify_pinf={cert.pinf:.3e} "
+           f"reported_vs_p={objdiff:.3e} c0={prob['c0']!r}")
+    return ok, cert.p, msg
 
 
 def main():
