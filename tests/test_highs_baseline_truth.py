@@ -8,6 +8,7 @@ import time
 import unittest
 from fractions import Fraction
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import scipy.sparse as sp
@@ -140,6 +141,67 @@ class ExactRationalRecoveryTests(unittest.TestCase):
             self.assertLessEqual(Fraction(down), exact)
             self.assertLess(exact, Fraction(up))
         self.assertEqual(truth._exact_float(HAND_OPTIMUM), -4.5)
+
+
+class SparseExactCertificateTests(unittest.TestCase):
+    """dense 上限を超える疎問題を厳密有理数 dual で認証する経路の sentinel。"""
+
+    def test_sparse_path_repairs_small_problem(self):
+        # min 1/2 x^2 - 3x (x >= 0), x* = 3。x = 2.9 の縮約費用 g = -0.1 を
+        # 疎な厳密解で xh = 3 へ修復し、d = -9/2 を返す。
+        prob = scalar_problem()
+        x = np.array([2.9])
+        base = truth.verify(prob, x, np.zeros(0))
+        cert = truth._sparse_exact_certificate(prob, x, base, np.zeros(0))
+        self.assertIsNotNone(cert)
+        self.assertEqual(cert.method, "exact-sparse")
+        self.assertEqual(cert.d, -4.5)
+        self.assertLessEqual(Fraction(cert.d), HAND_OPTIMUM)
+
+    def test_zero_cost_dummy_columns_are_certified_by_sparse_path(self):
+        # 浮動小数では認証できない既知の小問題 (SEED=20260821, i=5, 6 番目の摂動) に、
+        # 目的・制約・曲率を持たない零コスト列を EXACT_MAX_COLS 本足す。n が dense 経路の
+        # 上限を超えるので _exact_certificate は候補を作れず、疎経路だけが認証できる。
+        prob, x, y = _padded_sentinel_problem(truth.EXACT_MAX_COLS)
+        self.assertGreater(prob["n"], truth.EXACT_MAX_COLS)
+        base = truth.verify(prob, x, y)
+        self.assertGreater(truth.uncertainty(base), truth.UNCERTAINTY_TOL)
+        self.assertIsNone(truth._exact_certificate(prob, x, base, y))
+        cert = truth.verify(prob, x, y, exact=True)
+        self.assertEqual(cert.method, "exact-sparse")
+        self.assertLessEqual(truth.uncertainty(cert), truth.UNCERTAINTY_TOL)
+        self.assertEqual(cert.d, PADDED_SENTINEL_D)
+        self.assertLessEqual(Fraction(cert.d), Fraction(cert.p))
+        # polish() が候補を作れない場合でも、best_certificate() が疎経路へ落ちること。
+        with mock.patch.object(truth, "polish", return_value=None):
+            best = truth.best_certificate(prob, x, y)
+        self.assertEqual(best.method, "exact-sparse")
+        self.assertLessEqual(truth.uncertainty(best), truth.UNCERTAINTY_TOL)
+
+
+def _padded_sentinel_problem(pad):
+    """小問題 (SEED=20260821, i=5) の x/y を保ったまま零コスト列を pad 本足す。"""
+    prob = dict(c0=0.4847014283021232, c=np.array([-0.4, 0.2, -0.6]),
+                Q=sp.csr_matrix(np.array([[6.61, -3.85, -1.33],
+                                          [-3.85, 2.7800000000000002, 0.69],
+                                          [-1.33, 0.69, 3.54]])),
+                A=sp.csr_matrix(np.array([[1.8, 0.1, 0.3]])),
+                L=np.array([-math.inf]), U=np.array([math.inf]),
+                lo=np.array([-0.3, -math.inf, -math.inf]),
+                up=np.array([math.inf, 1.9, 1.2]), n=3, m=1)
+    x = np.array([0.15792544888563192, 0.09444327429383367, 0.21033222907624805])
+    y = np.array([0.0012936184205120916])
+    padded = dict(prob, n=prob["n"] + pad,
+                  c=np.concatenate([prob["c"], np.zeros(pad)]),
+                  Q=sp.block_diag([prob["Q"], sp.csr_matrix((pad, pad))], format="csr"),
+                  A=sp.hstack([prob["A"], sp.csr_matrix((prob["m"], pad))], format="csr"),
+                  lo=np.concatenate([prob["lo"], np.zeros(pad)]),
+                  up=np.concatenate([prob["up"], np.full(pad, math.inf)]))
+    return padded, np.concatenate([x, np.zeros(pad)]), y
+
+
+# 疎経路が返す厳密下界 (この問題の active set は一意なので再現可能)。
+PADDED_SENTINEL_D = 0.3994564252974797
 
 
 SEED = 20260821
