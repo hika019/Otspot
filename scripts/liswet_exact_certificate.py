@@ -14,15 +14,15 @@ Q = I なので KKT は
 であり (S は有効制約)、これらを厳密に満たす点は凸 QP の大域最適解である。
 浮動小数の KKT 残差ではなく、有理数の等式・不等式だけで判定する。
 
-A_S x = 0 は「有効行以外の二次差分だけが非零」を意味する。無効行 (gap) の
-集合を G とすると、x は
+有効行 S を固定すると、x を消去した y の方程式は 5 点差分
 
-    x_j = p + q j + sum_{g in G} d_g max(0, j - g - 1)
+    y_{i-2} - 4 y_{i-1} + 6 y_i - 4 y_{i+1} + y_{i+2}
+        = c_i - 2 c_{i+1} + c_{i+2}       (i in S)
 
-と書ける。x + c が A_S' の像に入る条件は null(A_S) との直交性で、その基底は
-{1, j, max(0, j - g - 1)}_{g in G} である。したがって 2 + |G| 個の有理数
-(p, q, d) を Gram 行列の連立一次方程式で決めればよい。y は A_S' y = x + c を
-列ごとの前進代入で厳密に復元する。
+になる。無効行の y は 0 なので、有効行だけを未知数にすれば係数行列は
+帯幅 2 の帯行列である。部分ピボット付き Gauss 消去で厳密に解き、x を
+stationarity から復元する。密な Gram 行列を使う旧方式は無効行数 g に対して
+O(g^3) の有理数演算を要したが、この方式は O(|S|) 回の帯内消去で済む。
 
 使い方:
   python3 scripts/liswet_exact_certificate.py data/maros_meszaros/LISWET7.QPS
@@ -48,8 +48,10 @@ from pathlib import Path
 # A x は 1e-15 程度、無効行は 1e-7 以上離れる。誤判定は厳密検証と
 # active set 修正で回復する。
 ACTIVE_TOL = 1e-7
-# 厳密一次方程式の係数行列サイズ上限 (2 + 無効行数)。LISWET11 は 85。
-MAX_EXACT_SYSTEM = 256
+# 有効行の KKT 方程式に現れる 5 点差分の係数。オフセットは行 i からの差。
+_KKT_STENCIL = ((-2, 1), (-1, -4), (0, 6), (1, -4), (2, 1))
+# 5 点差分の片側帯幅。部分ピボットはこの範囲内だけで十分。
+_KKT_BANDWIDTH = 2
 # active set 修正の反復上限。候補が循環したら打ち切る。
 MAX_REFINE_ITERS = 64
 # baseline CSV と同じ 13 有効桁 (小数点以下 12 桁)。
@@ -235,135 +237,94 @@ def parse_exact_qps(path: str | Path) -> ExactQp:
     return ExactQp(name=name, n=n, m=m, c0=c0, c=tuple(c), rows=tuple(normalized))
 
 
-def _sum1(lo: int, hi: int) -> int:
-    if hi < lo:
-        return 0
-    return (lo + hi) * (hi - lo + 1) // 2
-
-
-def _sum2(lo: int, hi: int) -> int:
-    if hi < lo:
-        return 0
-
-    def prefix(x: int) -> int:
-        return x * (x + 1) * (2 * x + 1) // 6
-
-    return prefix(hi) - prefix(lo - 1)
-
-
-def _solve_exact(matrix: list[list[Fraction]], rhs: list[Fraction]) -> list[Fraction]:
-    """部分ピボット付き Gauss 消去 (有理数、厳密)。"""
+def _solve_banded_system(
+    rows: list[dict[int, Fraction]], rhs: list[Fraction]
+) -> list[Fraction]:
+    """帯幅 2 の有理数連立一次方程式を部分ピボット付き Gauss 消去で解く。"""
     size = len(rhs)
-    a = [matrix[i][:] + [rhs[i]] for i in range(size)]
+    a = [dict(row) for row in rows]
+    b = list(rhs)
     for col in range(size):
-        pivot = next((r for r in range(col, size) if a[r][col] != 0), None)
+        # 下側帯幅は消去と帯内ピボット交換で 2 のままなので、候補は col..col+2。
+        pivot = next(
+            (
+                r
+                for r in range(col, min(size, col + _KKT_BANDWIDTH + 1))
+                if a[r].get(col, Fraction(0)) != 0
+            ),
+            None,
+        )
         if pivot is None:
-            raise CertificateError("singular exact system")
+            raise CertificateError(f"singular exact banded KKT system at column {col}")
         if pivot != col:
             a[col], a[pivot] = a[pivot], a[col]
-        inv = a[col][col]
-        for r in range(col + 1, size):
-            if a[r][col] == 0:
+            b[col], b[pivot] = b[pivot], b[col]
+        pivot_value = a[col][col]
+        for r in range(col + 1, min(size, col + _KKT_BANDWIDTH + 1)):
+            factor = a[r].get(col, Fraction(0)) / pivot_value
+            if factor == 0:
                 continue
-            factor = a[r][col] / inv
-            for k in range(col, size + 1):
-                a[r][k] -= factor * a[col][k]
+            for k, value in a[col].items():
+                updated = a[r].get(k, Fraction(0)) - factor * value
+                if updated == 0:
+                    a[r].pop(k, None)
+                else:
+                    a[r][k] = updated
+            b[r] -= factor * b[col]
     result = [Fraction(0)] * size
     for r in range(size - 1, -1, -1):
-        value = a[r][size]
-        for k in range(r + 1, size):
-            value -= a[r][k] * result[k]
+        value = b[r]
+        for k, coefficient in a[r].items():
+            if k != r:
+                value -= coefficient * result[k]
         result[r] = value / a[r][r]
     return result
 
 
-def _exact_solve(qp: ExactQp, gaps: tuple[int, ...]) -> tuple[list[Fraction], list[Fraction], set[int]]:
-    """指定した無効行集合に対する等式制約 KKT 点を厳密に構成する。"""
+def _solve_kkt_banded(
+    qp: ExactQp, gaps: tuple[int, ...]
+) -> tuple[list[Fraction], list[Fraction], set[int]]:
+    """指定した無効行集合に対する KKT 点を帯行列の厳密解から構成する。"""
     gaps = tuple(sorted(set(gaps)))
     if any(g < 0 or g >= qp.m for g in gaps):
         raise CertificateError(f"gap index out of range: {gaps!r}")
-    if len(gaps) + 2 > MAX_EXACT_SYSTEM:
-        raise CertificateError(
-            f"exact system too large: {len(gaps) + 2} > {MAX_EXACT_SYSTEM}; "
-            "this active set needs a different method"
-        )
-    active = set(range(qp.m)) - set(gaps)
+    active = sorted(set(range(qp.m)) - set(gaps))
     if not active:
         raise CertificateError("no active rows")
-    size = 2 + len(gaps)
-    n = qp.n
+    position = {row: index for index, row in enumerate(active)}
 
-    # Gram 行列 (基底 1, j, max(0, j-g-1) は整数値なので H も整数)。
-    gram = [[0] * size for _ in range(size)]
-    gram[0][0] = n
-    gram[0][1] = gram[1][0] = _sum1(0, n - 1)
-    gram[1][1] = _sum2(0, n - 1)
-    for gi, g in enumerate(gaps):
-        a = 2 + gi
-        lo = g + 2
-        gram[0][a] = gram[a][0] = _sum1(lo, n - 1) - (g + 1) * (n - lo)
-        gram[1][a] = gram[a][1] = _sum2(lo, n - 1) - (g + 1) * _sum1(lo, n - 1)
-        for hi, h in enumerate(gaps):
-            b = 2 + hi
-            lo2 = max(g, h) + 2
-            gram[a][b] = (
-                _sum2(lo2, n - 1)
-                - (g + h + 2) * _sum1(lo2, n - 1)
-                + (g + 1) * (h + 1) * (n - lo2)
-            )
+    rows: list[dict[int, Fraction]] = []
+    rhs: list[Fraction] = []
+    for i in active:
+        coefficients: dict[int, Fraction] = {}
+        for offset, value in _KKT_STENCIL:
+            row = i + offset
+            if 0 <= row < qp.m and row in position:
+                coefficients[position[row]] = Fraction(value)
+        rows.append(coefficients)
+        rhs.append(qp.c[i] - 2 * qp.c[i + 1] + qp.c[i + 2])
 
-    # 右辺 = -c' * 基底。c の suffix sum で O(n + |G|)。
-    c_suffix = [Fraction(0)] * (n + 1)
-    jc_suffix = [Fraction(0)] * (n + 1)
-    for j in range(n - 1, -1, -1):
-        c_suffix[j] = c_suffix[j + 1] + qp.c[j]
-        jc_suffix[j] = jc_suffix[j + 1] + j * qp.c[j]
-    rhs = [-c_suffix[0], -jc_suffix[0]]
-    for g in gaps:
-        lo = g + 2
-        rhs.append(-(jc_suffix[lo] - (g + 1) * c_suffix[lo]))
+    y_active = _solve_banded_system(rows, rhs)
+    y = [Fraction(0)] * qp.m
+    for index, row in enumerate(active):
+        y[row] = y_active[index]
 
-    theta = _solve_exact([[Fraction(v) for v in row] for row in gram], rhs)
-    p, q = theta[0], theta[1]
-    d = theta[2:]
-
-    # x_j = p + q j + sum d_g max(0, j-g-1) を prefix sum で構築。
-    x = [Fraction(0)] * n
-    sum_d = Fraction(0)
-    sum_gd = Fraction(0)
-    ptr = 0
-    for j in range(n):
-        while ptr < len(gaps) and gaps[ptr] <= j - 2:
-            sum_d += d[ptr]
-            sum_gd += (gaps[ptr] + 1) * d[ptr]
-            ptr += 1
-        x[j] = p + q * j + j * sum_d - sum_gd
+    # x + c = A'y を列ごとに評価する。
+    x = [Fraction(0)] * qp.n
+    for j in range(qp.n):
+        value = -qp.c[j]
+        if j < qp.m:
+            value += y[j]
+        if 0 <= j - 1 < qp.m:
+            value -= 2 * y[j - 1]
+        if 0 <= j - 2 < qp.m:
+            value += y[j - 2]
+        x[j] = value
 
     for i in active:
         if x[i] - 2 * x[i + 1] + x[i + 2] != 0:
             raise CertificateError(f"active row {i} is not exactly zero")
-
-    # A_S' y = x + c を列ごとに前進代入。無効行の列は整合性チェックになる。
-    y = [Fraction(0)] * qp.m
-    for j in range(qp.m):
-        value = x[j] + qp.c[j]
-        if j >= 1 and j - 1 in active:
-            value += 2 * y[j - 1]
-        if j >= 2 and j - 2 in active:
-            value -= y[j - 2]
-        if j in active:
-            y[j] = value
-        elif value != 0:
-            raise CertificateError(f"inactive column {j} has nonzero dual residual")
-    for j in (qp.m, qp.m + 1):
-        value = x[j] + qp.c[j]
-        if j - 1 in active:
-            value += 2 * y[j - 1]
-        if j - 2 in active:
-            value -= y[j - 2]
-        if value != 0:
-            raise CertificateError(f"tail column {j} has nonzero dual residual")
-    return x, y, active
+    return x, y, set(active)
 
 
 def _certificate_from_point(
@@ -461,7 +422,7 @@ def certify(
         if current in seen:
             raise CertificateError(f"active set refinement cycled at {len(current)} gaps")
         seen.add(current)
-        x, y, active = _exact_solve(qp, current)
+        x, y, active = _solve_kkt_banded(qp, current)
         ax = [x[i] - 2 * x[i + 1] + x[i + 2] for i in range(qp.m)]
         negative = [i for i in active if y[i] < 0]
         violated = [i for i in current if ax[i] < 0]
