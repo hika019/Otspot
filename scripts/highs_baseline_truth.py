@@ -42,15 +42,18 @@ Usage:
 import argparse
 import collections
 import datetime
+import heapq
 import math
 import os
 import sys
 import time
 import warnings
+from fractions import Fraction
 
 import highspy
 import numpy as np
 import scipy.sparse as sp
+from scipy.optimize import linprog
 from scipy.sparse import csgraph
 from scipy.sparse.linalg import lsqr, spsolve
 
@@ -107,6 +110,26 @@ REPAIR_PIN_TOL = 1e-6
 # _linearized_dual() の HiGHS の主・双対実行可能性許容 (HiGHS が受け付ける最小値)。残る
 # 双対残差は後続の _repair() が丸め誤差の水準まで消す。
 LINEARIZED_LP_TOL = 1e-10
+# _linearized_dual() の LP の時間上限。候補を作るためだけの LP なので、大規模問題で
+# 際限なく待たず、時間切れなら候補なし (UNCERTIFIED) に倒す。
+LINEARIZED_LP_TIME_LIMIT = 60.0
+# 厳密有理数修復の初期候補を作る双対 QP (Clarabel) の停止許容。候補の妥当性は
+# 浮動小数の双対 QP の精度ではなく、最後の有理数評価 (_exact_d) が担保する。
+DUAL_QP_TOL = 1e-11
+# margin LP の境界近傍幅と行乗数の探索幅。零接触集合 (縮約費用が厳密に 0 の列) を
+# 同定するためだけに使い、得られた候補は厳密有理数で再検査する。
+MARGIN_LP_DELTA = 1e-3
+MARGIN_LP_DY = 1e-3
+# 厳密有理数修復を試す問題の上限。有理数 Gauss-Jordan の作業量は非ゼロ数とピボット数に
+# 比例して増えるため、これを超える問題は候補を作らず UNCERTIFIED のままにする
+# (証明できないものを時間切れで曖昧にしない fail-safe)。
+EXACT_MAX_COLS = 10_000
+EXACT_MAX_ROWS = 20_000
+# 厳密消去の作業量上限 (メモリ・時間の暴走を防ぐ fail-safe)。超えた候補は捨てる。
+EXACT_MAX_NNZ = 4_000_000
+EXACT_MAX_OPS = 200_000_000
+EXACT_MAX_PIVOTS = 300_000
+EXACT_TIME_BUDGET = 120.0
 # Clarabel (HiGHS が検算に通る解を出せない問題の代替ソルバ) の停止許容と時間上限。
 CLARABEL_TOL = 1e-10
 CLARABEL_TIME_LIMIT_SECS = 1800.0
@@ -597,6 +620,7 @@ def _linearized_dual(prob, xh, y_ref):
     for c_lin in (lin_c + shift, lin_c):
         h = highspy.Highs()
         h.setOptionValue("output_flag", False)
+        h.setOptionValue("time_limit", LINEARIZED_LP_TIME_LIMIT)
         h.setOptionValue("primal_feasibility_tolerance", LINEARIZED_LP_TOL)
         h.setOptionValue("dual_feasibility_tolerance", LINEARIZED_LP_TOL)
         h.passModel(to_highs_model(dict(prob, c=c_lin, Q=sp.csr_matrix(prob["Q"].shape))))
@@ -641,11 +665,683 @@ def dual_bound(prob, xh, y):
     return float(_down(total))
 
 
+def _dual_qp_candidate(prob):
+    """弱双対下界を最大化する双対 QP を Clarabel で解き、(xh, y) を返す (失敗なら None)。
+
+    双対 QP は
+        max  sum_i h_i(y_i) - 1/2 xh'Qxh + sum_j min_{lo_j<=x_j<=up_j} g_j x_j,
+        g = c + Qxh - A'y
+    を y の符号制約のもとで解く問題で、box 最小値は補助変数 t_j と
+        t_j <= g_j x_j  (x_j は lo/up の端点)
+    で表す。返す候補は浮動小数の解にすぎず、下界の妥当性は _exact_d() が有理数で検査する。
+    """
+    try:
+        import clarabel
+    except ImportError:
+        return None
+
+    A, Q, c = prob["A"].tocsr(), prob["Q"].tocsc(), prob["c"]
+    lo, up, L, U = prob["lo"], prob["up"], prob["L"], prob["U"]
+    n, m = prob["n"], prob["m"]
+    pidx = np.flatnonzero(np.isfinite(L))
+    nidx = np.flatnonzero(np.isfinite(U))
+    P, N = len(pidx), len(nidx)
+    off_y = n
+    off_yn = n + P
+    off_t = n + P + N
+    nv = n + P + N + n
+    q = np.zeros(nv)
+    q[off_y:off_y + P] = -L[pidx]
+    q[off_yn:off_yn + N] = U[nidx]
+    q[off_t:] = -1.0
+    rows, cols, vals, b = [], [], [], []
+    r = 0
+    Acsc = A.tocsc()
+    for j in range(n):
+        aj = Acsc[:, j].tocoo()
+        # 有限な下限・上限それぞれで t_j <= g_j * bound を課す。
+        for bound in (lo[j], up[j]):
+            if not np.isfinite(bound):
+                continue
+            rows.append(r)
+            cols.append(off_t + j)
+            vals.append(1.0)
+            for i, v in zip(aj.row, aj.data):
+                ip = np.searchsorted(pidx, i)
+                if ip < P and pidx[ip] == i:
+                    rows.append(r)
+                    cols.append(off_y + ip)
+                    vals.append(bound * v)
+                iN = np.searchsorted(nidx, i)
+                if iN < N and nidx[iN] == i:
+                    rows.append(r)
+                    cols.append(off_yn + iN)
+                    vals.append(-bound * v)
+            qj = Q[:, j].tocoo()
+            for i, v in zip(qj.row, qj.data):
+                rows.append(r)
+                cols.append(i)
+                vals.append(-bound * v)
+            b.append(bound * c[j])
+            r += 1
+        # 片側無限変数では有限側の端点だけを考えればよい (反対側は g の符号で消える)。
+        if np.isfinite(lo[j]) and lo[j] != up[j] and not np.isfinite(up[j]):
+            for i, v in zip(aj.row, aj.data):
+                ip = np.searchsorted(pidx, i)
+                if ip < P and pidx[ip] == i:
+                    rows.append(r)
+                    cols.append(off_y + ip)
+                    vals.append(v)
+                iN = np.searchsorted(nidx, i)
+                if iN < N and nidx[iN] == i:
+                    rows.append(r)
+                    cols.append(off_yn + iN)
+                    vals.append(-v)
+            qj = Q[:, j].tocoo()
+            for i, v in zip(qj.row, qj.data):
+                rows.append(r)
+                cols.append(i)
+                vals.append(-v)
+            b.append(c[j])
+            r += 1
+        if np.isfinite(up[j]) and up[j] != lo[j] and not np.isfinite(lo[j]):
+            for i, v in zip(aj.row, aj.data):
+                ip = np.searchsorted(pidx, i)
+                if ip < P and pidx[ip] == i:
+                    rows.append(r)
+                    cols.append(off_y + ip)
+                    vals.append(-v)
+                iN = np.searchsorted(nidx, i)
+                if iN < N and nidx[iN] == i:
+                    rows.append(r)
+                    cols.append(off_yn + iN)
+                    vals.append(v)
+            qj = Q[:, j].tocoo()
+            for i, v in zip(qj.row, qj.data):
+                rows.append(r)
+                cols.append(i)
+                vals.append(v)
+            b.append(-c[j])
+            r += 1
+    # y = yp - yn, yp, yn >= 0 (非負錐で課す)。
+    for k in range(P):
+        rows.append(r)
+        cols.append(off_y + k)
+        vals.append(-1.0)
+        b.append(0.0)
+        r += 1
+    for k in range(N):
+        rows.append(r)
+        cols.append(off_yn + k)
+        vals.append(-1.0)
+        b.append(0.0)
+        r += 1
+    M = sp.coo_matrix((vals, (rows, cols)), shape=(r, nv)).tocsc()
+    Pmat = sp.lil_matrix((nv, nv))
+    Pmat[:n, :n] = Q
+    settings = clarabel.DefaultSettings()
+    settings.verbose = False
+    settings.tol_gap_abs = settings.tol_gap_rel = settings.tol_feas = DUAL_QP_TOL
+    settings.max_iter = 2000
+    try:
+        sol = clarabel.DefaultSolver(sp.triu(Pmat).tocsc(), q, M, np.array(b),
+                                     [clarabel.NonnegativeConeT(r)], settings).solve()
+    except Exception:
+        return None
+    if str(sol.status) != "Solved":
+        return None
+    xh = np.array(sol.x[:n])
+    yp = np.array(sol.x[off_y:off_y + P])
+    yn = np.array(sol.x[off_yn:off_yn + N])
+    y = np.zeros(m)
+    y[pidx] += yp
+    y[nidx] -= yn
+    if not (np.all(np.isfinite(xh)) and np.all(np.isfinite(y))):
+        return None
+    return xh, y
+
+
+def _margin_lp(prob, x, y_ref):
+    """零接触集合を同定する LP を解き、(xh, y, 集合) を返す (失敗なら None)。
+
+    x の active set を固定し、interior 列では g_j = 0、active な片側無限列では
+    g_j に符号付きの margin tau を要求する。tau を最大化して、tau > 0 の列を
+    「零接触でない」、tau = 0 の列を「零接触」と判定する。得られた候補は
+    厳密有理数の修復初期値に使うだけで、下界の妥当性は _exact_d() が検査する。
+    """
+    A, Q, c = prob["A"].tocsc(), prob["Q"].tocsc(), prob["c"]
+    lo, up, L, U = prob["lo"], prob["up"], prob["L"], prob["U"]
+    n, m = prob["n"], prob["m"]
+    s = _exact_sets(prob, x)
+    atL, atU, atlo, atup, fixed = s["atL"], s["atU"], s["atlo"], s["atup"], s["fixed"]
+    interior = s["interior"]
+    I = np.flatnonzero(interior)
+    R = np.flatnonzero(atL | atU)
+    nv = len(I) + len(R) + 1
+    rows, cols, vals, b = [], [], [], []
+    r = 0
+
+    def add(j, sign):
+        q = Q[:, j].tocoo()
+        for i, v in zip(q.row, q.data):
+            k = np.searchsorted(I, i)
+            if k < len(I) and I[k] == i:
+                rows.append(r)
+                cols.append(int(k))
+                vals.append(sign * float(v))
+        a = A[:, j].tocoo()
+        for i, v in zip(a.row, a.data):
+            k = np.searchsorted(R, i)
+            if k < len(R) and R[k] == i:
+                rows.append(r)
+                cols.append(len(I) + int(k))
+                vals.append(-sign * float(v))
+
+    # interior 列: Q xh - A'y = -c。
+    for j in np.flatnonzero(interior):
+        add(j, 1.0)
+        b.append(-c[j])
+        r += 1
+    neq = r
+    # active な片側無限列: g >= tau (下限側) / g <= -tau (上限側)。
+    for j in range(n):
+        if fixed[j]:
+            continue
+        if atlo[j] and not atup[j]:
+            add(j, -1.0)
+            rows.append(r)
+            cols.append(nv - 1)
+            vals.append(1.0)
+            b.append(c[j])
+            r += 1
+        elif atup[j] and not atlo[j]:
+            add(j, 1.0)
+            rows.append(r)
+            cols.append(nv - 1)
+            vals.append(1.0)
+            b.append(-c[j])
+            r += 1
+    lb = np.full(nv, -np.inf)
+    ub = np.full(nv, np.inf)
+    for k, i in enumerate(R):
+        hlb = -math.inf
+        hub = math.inf
+        if not np.isfinite(L[i]):
+            hub = 0.0
+        if not np.isfinite(U[i]):
+            hlb = 0.0
+        ctr = min(max(y_ref[i], hlb), hub)
+        lb[len(I) + k] = max(hlb, ctr - MARGIN_LP_DY)
+        ub[len(I) + k] = min(hub, ctr + MARGIN_LP_DY)
+    lb[-1] = 0.0
+    for k, j in enumerate(I):
+        lb[k] = x[j] - MARGIN_LP_DELTA
+        ub[k] = x[j] + MARGIN_LP_DELTA
+    M = sp.coo_matrix((vals, (rows, cols)), shape=(r, nv)).tocsr()
+    Aeq, beq = M[:neq], np.array(b[:neq])
+    Aub, bub = M[neq:], np.array(b[neq:])
+    cv = np.zeros(nv)
+    cv[-1] = -1.0
+    res = linprog(cv, A_ub=Aub, b_ub=bub, A_eq=Aeq, b_eq=beq,
+                  bounds=list(zip(lb, ub)), method="highs",
+                  options=dict(dual_feasibility_tolerance=1e-10,
+                               primal_feasibility_tolerance=1e-10))
+    if res.status != 0 or not np.all(np.isfinite(res.x)):
+        return None
+    xh = np.zeros(n)
+    xh[I] = res.x[:len(I)]
+    xh[atlo & ~fixed] = lo[atlo & ~fixed]
+    xh[atup & ~fixed] = up[atup & ~fixed]
+    xh[fixed] = lo[fixed]
+    y = np.zeros(m)
+    y[R] = res.x[len(I):len(I) + len(R)]
+    return xh, y, s
+
+
+class _ExactData:
+    """浮動小数の問題データを有理数へ移したもの。
+
+    QPS の浮動小数は有理数として厳密に扱える。列ごとの非ゼロ (行番号, Fraction) を
+    保持し、厳密な縮約費用と弱双対値を評価する。
+    """
+
+    def __init__(self, prob):
+        self.n, self.m = prob["n"], prob["m"]
+        self.c0 = Fraction(float(prob["c0"]))
+        self.c = [Fraction(float(v)) for v in prob["c"]]
+        self.A = self._columns(prob["A"].tocsc())
+        self.Q = self._columns(prob["Q"].tocsc())
+        finite = lambda v: Fraction(float(v)) if math.isfinite(v) else None
+        self.L = [finite(v) for v in prob["L"]]
+        self.U = [finite(v) for v in prob["U"]]
+        self.lo = [finite(v) for v in prob["lo"]]
+        self.up = [finite(v) for v in prob["up"]]
+
+    @staticmethod
+    def _columns(M):
+        return [[(int(M.indices[k]), Fraction(float(M.data[k])))
+                 for k in range(M.indptr[j], M.indptr[j + 1]) if M.data[k] != 0.0]
+                for j in range(M.shape[1])]
+
+
+def _exact_g(data, xh, y):
+    """縮約費用 g = c + Q xh - A'y を有理数で評価する。"""
+    out = []
+    for j in range(data.n):
+        g = data.c[j]
+        for i, v in data.Q[j]:
+            g += v * xh[i]
+        for i, v in data.A[j]:
+            g -= v * y[i]
+        out.append(g)
+    return out
+
+
+def _exact_d(data, xh, y, gex=None):
+    """弱双対の右辺 c0 + h(y) - 1/2 xh'Qxh + sum_j min g_j x_j を有理数で評価する。
+
+    符号制約 (y_i > 0 なら L_i 有限、y_i < 0 なら U_i 有限、片側無限列では g_j が
+    有限側を要求しないこと、自由列では g_j = 0) を満たさなければ None を返す。
+    返す Fraction は浮動小数の丸めを含まない厳密な下界である。
+    """
+    h = Fraction(0)
+    for i, yi in enumerate(y):
+        if yi > 0:
+            if data.L[i] is None:
+                return None
+            h += yi * data.L[i]
+        elif yi < 0:
+            if data.U[i] is None:
+                return None
+            h += yi * data.U[i]
+    if gex is None:
+        gex = _exact_g(data, xh, y)
+    quad = Fraction(0)
+    for j in range(data.n):
+        if xh[j]:
+            s = Fraction(0)
+            for i, v in data.Q[j]:
+                s += v * xh[i]
+            quad += xh[j] * s
+    col = Fraction(0)
+    for j, g in enumerate(gex):
+        lo, up = data.lo[j], data.up[j]
+        if lo is not None and up is not None:
+            col += min(g * lo, g * up)
+        elif lo is not None:
+            if g < 0:
+                return None
+            col += g * lo
+        elif up is not None:
+            if g > 0:
+                return None
+            col += g * up
+        else:
+            if g != 0:
+                return None
+    return data.c0 + h - quad / 2 + col
+
+
+def _exact_float(d):
+    """有理数の下界 d を、d 以下の float へ丸める (丸めで上へ出さない)。"""
+    try:
+        df = float(d)
+    except OverflowError:
+        return -math.inf
+    if not math.isfinite(df):
+        return -math.inf
+    if Fraction(df) > d:
+        df = math.nextafter(df, -math.inf)
+    return df
+
+
+def _fraction_float_up(v):
+    """非負の有理数 v を v 以上の float へ丸める。"""
+    try:
+        f = float(v)
+    except OverflowError:
+        return math.inf
+    if not math.isfinite(f):
+        return math.inf
+    if Fraction(f) < v:
+        f = math.nextafter(f, math.inf)
+    return f
+
+
+def _exact_sets(prob, x):
+    """x の active set と interior 列。"""
+    ax = prob["A"] @ x
+    atL, atU = _at_bound(ax, prob["L"]), _at_bound(ax, prob["U"])
+    atlo, atup = _at_bound(x, prob["lo"]), _at_bound(x, prob["up"])
+    fixed = prob["lo"] == prob["up"]
+    interior = ~(fixed | atlo | atup)
+    return dict(ax=ax, atL=atL, atU=atU, atlo=atlo, atup=atup, fixed=fixed,
+                interior=interior)
+
+
+def _solve_sparse_exact(rows, rhs, deadline):
+    """疎な有理数連立一次方程式を Markowitz 風の Gauss-Jordan で解く。
+
+    rows は {未知数番号: 係数} の辞書、rhs は右辺。返り値は (ピボット解, 演算数)。
+    非ピボット変数は 0 とし、不整合・作業量上限・時間切れなら None。
+    """
+    eqs = [[dict(d), r] for d, r in zip(rows, rhs)]
+    col_all, col_alive = {}, {}
+    for k, (d, _) in enumerate(eqs):
+        for i in d:
+            col_all.setdefault(i, set()).add(k)
+            col_alive.setdefault(i, set()).add(k)
+    alive = set(range(len(eqs)))
+    heap = [(len(d), k) for k, (d, _) in enumerate(eqs)]
+    heapq.heapify(heap)
+    pivot_pairs = []
+    nnz = sum(len(d) for d, _ in eqs)
+    ops = 0
+    while heap:
+        if time.monotonic() > deadline:
+            return None
+        ln, k = heapq.heappop(heap)
+        if k not in alive:
+            continue
+        d, r = eqs[k]
+        if ln != len(d):
+            heapq.heappush(heap, (len(d), k))
+            continue
+        if not d:
+            if r != 0:
+                return None
+            alive.discard(k)
+            continue
+        col = min(d, key=lambda i: (len(col_alive.get(i, ())), abs(d[i])))
+        inv = Fraction(1) / d[col]
+        d2 = {i: v * inv for i, v in d.items()}
+        r2 = r * inv
+        eqs[k] = [d2, r2]
+        alive.discard(k)
+        for i in d2:
+            col_alive.get(i, set()).discard(k)
+        pivot_pairs.append((col, k))
+        for kk in list(col_all.get(col, ())):
+            if kk == k:
+                continue
+            dk, rk = eqs[kk]
+            fac = dk.pop(col, None)
+            if fac is None:
+                continue
+            col_all.get(col, set()).discard(kk)
+            col_alive.get(col, set()).discard(kk)
+            nnz -= 1
+            for i, v in d2.items():
+                if i == col:
+                    continue
+                old = dk.get(i)
+                nv = (old if old is not None else Fraction(0)) - fac * v
+                if nv == 0:
+                    if old is not None:
+                        dk.pop(i)
+                        col_all.get(i, set()).discard(kk)
+                        col_alive.get(i, set()).discard(kk)
+                        nnz -= 1
+                else:
+                    if old is None:
+                        col_all.setdefault(i, set()).add(kk)
+                        if kk in alive:
+                            col_alive.setdefault(i, set()).add(kk)
+                        nnz += 1
+                    dk[i] = nv
+            eqs[kk][1] = rk - fac * r2
+            if kk in alive:
+                heapq.heappush(heap, (len(dk), kk))
+            ops += len(d2)
+            if nnz > EXACT_MAX_NNZ or ops > EXACT_MAX_OPS:
+                return None
+        if len(pivot_pairs) > EXACT_MAX_PIVOTS:
+            return None
+    for k in alive:
+        d, r = eqs[k]
+        if d or r != 0:
+            return None
+    return {col: eqs[k][1] for col, k in pivot_pairs}, ops
+
+
+def _recover_exact(prob, data, s, xh0, y0, E0, R, deadline):
+    """有理数の active-set 双対候補を、縮約費用の符号が厳密に正しくなるまで修正する。
+
+    E0 の列は g_j = 0 を方程式として解き、xh と行乗数を動かす。片側無限列の g の
+    符号がまだ悪い列、自由列の g != 0、符号制約に反する行乗数を検出したら、その列/
+    行を方程式に加えて再解する。返す (xh, y, gex, 反復数) はすべて Fraction。
+    """
+    n, m = data.n, data.m
+    I = np.flatnonzero(s["interior"])
+    ridx = {int(r): k for k, r in enumerate(R)}
+    xh = [Fraction(float(v)) for v in xh0]
+    y = [Fraction(float(v)) for v in y0]
+    gex = _exact_g(data, xh, y)
+    lo_side = np.isfinite(prob["lo"]) & ~np.isfinite(prob["up"]) & ~s["fixed"]
+    up_side = np.isfinite(prob["up"]) & ~np.isfinite(prob["lo"]) & ~s["fixed"]
+    free = ~np.isfinite(prob["lo"]) & ~np.isfinite(prob["up"]) & ~s["fixed"]
+    E = {int(j) for j in E0}
+    E |= {int(j) for j in np.flatnonzero(lo_side) if gex[j] < 0}
+    E |= {int(j) for j in np.flatnonzero(up_side) if gex[j] > 0}
+    E |= {int(j) for j in np.flatnonzero(free) if gex[j] != 0}
+    pin_rows = set()
+    max_iter = 15
+    for it in range(max_iter):
+        if time.monotonic() > deadline:
+            return None
+        cols = np.array(sorted(E), dtype=int)
+        rows, rhs = [], []
+        for j in cols:
+            d = {}
+            for i, v in data.Q[j]:
+                k = np.searchsorted(I, i)
+                if k < len(I) and I[k] == i:
+                    d[int(k)] = d.get(int(k), Fraction(0)) + v
+            for i, v in data.A[j]:
+                k = ridx.get(int(i))
+                if k is not None:
+                    d[len(I) + k] = d.get(len(I) + k, Fraction(0)) - v
+            rows.append({k: v for k, v in d.items() if v})
+            rhs.append(-gex[j])
+        for i in sorted(pin_rows):
+            k = ridx.get(int(i))
+            if k is not None:
+                rows.append({len(I) + k: Fraction(1)})
+                rhs.append(-y[i])
+        out = _solve_sparse_exact(rows, rhs, deadline)
+        if out is None:
+            return None
+        piv, _ = out
+        new_xh = list(xh)
+        new_y = list(y)
+        for k, v in piv.items():
+            if k < len(I):
+                new_xh[I[k]] += v
+            else:
+                new_y[R[k - len(I)]] += v
+        xh, y = new_xh, new_y
+        gex = _exact_g(data, xh, y)
+        badlo = [int(j) for j in np.flatnonzero(lo_side) if gex[j] < 0]
+        badup = [int(j) for j in np.flatnonzero(up_side) if gex[j] > 0]
+        badfree = [int(j) for j in np.flatnonzero(free) if gex[j] != 0]
+        rowbad = [int(i) for i in R
+                  if (y[i] > 0 and not math.isfinite(prob["L"][i]))
+                  or (y[i] < 0 and not math.isfinite(prob["U"][i]))]
+        if not badlo and not badup and not badfree and not rowbad:
+            return xh, y, gex, it + 1
+        old = (len(E), len(pin_rows))
+        E |= set(badlo) | set(badup) | set(badfree)
+        pin_rows |= set(rowbad)
+        if (len(E), len(pin_rows)) == old:
+            return None
+    return None
+
+
+def _exact_base(prob, s, xh_base, y_base, R):
+    """厳密修復の初期値を、x の active set に合わせて境界値へ寄せた float で返す。"""
+    xh = np.array(xh_base, dtype=float, copy=True)
+    y = np.array(y_base, dtype=float, copy=True)
+    fixed = s["fixed"]
+    lo_at = s["atlo"] & ~fixed
+    up_at = s["atup"] & ~fixed
+    xh[fixed] = prob["lo"][fixed]
+    xh[lo_at] = prob["lo"][lo_at]
+    xh[up_at] = prob["up"][up_at]
+    y = _project_dual(prob, y)
+    mask = np.ones(prob["m"], dtype=bool)
+    mask[R] = False
+    y[mask] = 0.0
+    return xh, y
+
+
+def _exact_violations(data, x):
+    """x の主実行不能度を有理数で評価し、(相対違反の上界, 行違反, 列違反) を返す。"""
+    xf = [Fraction(float(v)) for v in x]
+    ax = [Fraction(0)] * data.m
+    for j, xj in enumerate(xf):
+        if xj:
+            for i, v in data.A[j]:
+                ax[i] += v * xj
+    pinf = Fraction(0)
+    row_v = []
+    for i, val in enumerate(ax):
+        v = Fraction(0)
+        lo, up = data.L[i], data.U[i]
+        if lo is not None and val < lo:
+            v = lo - val
+            pinf = max(pinf, v / (1 + abs(lo)))
+        if up is not None and val > up:
+            d = val - up
+            v = max(v, d)
+            pinf = max(pinf, d / (1 + abs(up)))
+        row_v.append(v)
+    col_v = []
+    for j, val in enumerate(xf):
+        v = Fraction(0)
+        lo, up = data.lo[j], data.up[j]
+        if lo is not None and val < lo:
+            v = lo - val
+            pinf = max(pinf, v / (1 + abs(lo)))
+        if up is not None and val > up:
+            d = val - up
+            v = max(v, d)
+            pinf = max(pinf, d / (1 + abs(up)))
+        col_v.append(v)
+    return _fraction_float_up(pinf), row_v, col_v
+
+
+def _exact_pimpact(p, y, gex, row_v, col_v):
+    """厳密候補の主違反影響を、有理数の乗数・縮約費用から上界側で評価する。"""
+    total = Fraction(0)
+    for i, yi in enumerate(y):
+        if yi and row_v[i]:
+            total += abs(yi) * row_v[i]
+    for j, gj in enumerate(gex):
+        if gj and col_v[j]:
+            total += abs(gj) * col_v[j]
+    return _fraction_float_up(total / Fraction(1.0 + abs(p)))
+
+
+def _exact_certificate(prob, x, base, y_hint):
+    """厳密有理数の双対候補を作り、base と同じ p/pinf/roundoff を持つ Certificate を返す。
+
+    双対 QP の候補を出発点に、負の縮約費用だけを修復する戦略 A と、margin LP で
+    零接触集合を同定してから修復する戦略 B を試す。返す d は _exact_d() の Fraction を
+    下向きに丸めた float なので、浮動小数の丸めを含めても最適値の下界である。
+    """
+    if prob.get("psd", True) is not True:
+        return None
+    if prob["n"] > EXACT_MAX_COLS or prob["m"] > EXACT_MAX_ROWS:
+        return None
+    deadline = time.monotonic() + EXACT_TIME_BUDGET
+    data = _ExactData(prob)
+    s = _exact_sets(prob, x)
+    pinf_exact, row_v, col_v = _exact_violations(data, x)
+    all_rows = np.arange(prob["m"])
+    active_rows = np.flatnonzero(s["atL"] | s["atU"])
+    candidates = []
+
+    def evaluate(method, xh, y, gex):
+        d = _exact_d(data, xh, y, gex)
+        if d is None:
+            return None
+        cert = Certificate(base.p, _exact_float(d), max(base.pinf, pinf_exact),
+                           base.roundoff,
+                           _exact_pimpact(base.p, y, gex, row_v, col_v),
+                           base.repair_iters, method)
+        candidates.append(cert)
+        return cert
+
+    def margin_set(margin):
+        xh_lp, y_lp, _ = margin
+        glp = _exact_g(data, [Fraction(float(v)) for v in xh_lp],
+                       [Fraction(float(v)) for v in y_lp])
+        lo_only = s["atlo"] & ~s["atup"] & ~s["fixed"]
+        up_only = s["atup"] & ~s["atlo"] & ~s["fixed"]
+        E = {int(j) for j in np.flatnonzero(s["interior"])}
+        E |= {int(j) for j in np.flatnonzero(lo_only) if glp[j] <= 0}
+        E |= {int(j) for j in np.flatnonzero(up_only) if glp[j] >= 0}
+        return E
+
+    qp = _dual_qp_candidate(prob)
+    y_ref = _project_dual(prob, y_hint)
+    if qp is not None:
+        y_ref = _project_dual(prob, qp[1])
+    margin = _margin_lp(prob, x, y_ref)
+    E_margin = margin_set(margin) if margin is not None else None
+
+    def try_recover(method, xh_base, y_base, E0, R):
+        xh0, y0 = _exact_base(prob, s, xh_base, y_base, R)
+        out = _recover_exact(prob, data, s, xh0, y0, E0, R, deadline)
+        if out is None:
+            return None
+        xh, y, gex, _ = out
+        return evaluate(method, xh, y, gex)
+
+    if qp is not None:
+        # 戦略 A: 全行を候補に残し、厳密に負の縮約費用だけを修復する。
+        xh_qp, y_qp = qp
+        xh0, y0 = _exact_base(prob, s, xh_qp, y_qp, all_rows)
+        gex0 = _exact_g(data, [Fraction(float(v)) for v in xh0],
+                        [Fraction(float(v)) for v in y0])
+        lo_side = np.isfinite(prob["lo"]) & ~np.isfinite(prob["up"]) & ~s["fixed"]
+        up_side = np.isfinite(prob["up"]) & ~np.isfinite(prob["lo"]) & ~s["fixed"]
+        E_neg = {int(j) for j in np.flatnonzero(lo_side) if gex0[j] < 0}
+        E_neg |= {int(j) for j in np.flatnonzero(up_side) if gex0[j] > 0}
+        cert = try_recover("exact-neg", xh_qp, y_qp, E_neg, all_rows)
+        if cert is not None and uncertainty(cert) <= UNCERTAINTY_TOL:
+            return cert
+        # 戦略 B: margin LP の零接触集合を使い、active 行だけを候補に残す。
+        if margin is not None:
+            cert = try_recover("exact-margin", xh_qp, y_qp, E_margin, active_rows)
+            if cert is not None and uncertainty(cert) <= UNCERTAINTY_TOL:
+                return cert
+    # 双対 QP が使えない/失敗した場合の保険: margin LP 自体を初期値にする。
+    if margin is not None:
+        xh_lp, y_lp, _ = margin
+        cert = try_recover("exact-margin-lp", xh_lp, y_lp, E_margin, active_rows)
+        if cert is not None and uncertainty(cert) <= UNCERTAINTY_TOL:
+            return cert
+    if not candidates:
+        return None
+    return min(candidates, key=uncertainty)
+
+
 Certificate = collections.namedtuple(
-    "Certificate", "p d pinf roundoff pimpact repair_iters")
+    "Certificate", "p d pinf roundoff pimpact repair_iters method", defaults=("float",))
 
 
-def verify(prob, x, y):
+def _float_certificate(prob, x, ax, p, pinf, roundoff, xh, y, iters, method):
+    """浮動小数の候補 (xh, y) から Certificate を作る。"""
+    d = dual_bound(prob, xh, y)
+    gl, gu, _ = _reduced_cost_interval(prob, xh, y)
+    g = 0.5 * (gl + gu)
+    pimpact = float(np.abs(y) @ _abs_violation(ax, prob["L"], prob["U"])
+                    + np.abs(g) @ _abs_violation(x, prob["lo"], prob["up"])) / (1.0 + abs(p))
+    return Certificate(p, d, pinf, roundoff, pimpact, iters, method)
+
+
+def verify(prob, x, y, exact=False):
     """独立再計算 (docstring 冒頭の定義)。Certificate を返す。
 
       p             主目的値 c0 + c'x + 1/2 x'Qx (浮動小数値)
@@ -656,10 +1352,15 @@ def verify(prob, x, y):
                     x が境界を僅かに破るとき p(x) は真の最適値の上界でなくなるが、その差は
                     一次で乗数 × 違反量 (感度) で抑えられる。
       repair_iters  _repair() の反復数 (0 は修正不要)
+      method        d を作った経路 ("solver" / "repair" / "linearized" / "exact-*")
+
+    exact=True のとき、浮動小数の候補が UNCERTAINTY_TOL を超える場合に厳密有理数の
+    双対候補 (_exact_certificate) も試す。best_certificate() は候補ごとの二重実行を
+    避けるため exact=False で比較してから、最良の主候補に一度だけ厳密候補を適用する。
     """
     A, Q, c, c0 = prob["A"], prob["Q"], prob["c"], prob["c0"]
     if not np.all(np.isfinite(x)):
-        return Certificate(math.nan, -math.inf, math.inf, math.inf, math.inf, 0)
+        return Certificate(math.nan, -math.inf, math.inf, math.inf, math.inf, 0, "invalid")
     ax = A @ x
     pinf = max(_rel_violation(ax, prob["L"], prob["U"]),
                _rel_violation(x, prob["lo"], prob["up"]))
@@ -676,21 +1377,38 @@ def verify(prob, x, y):
     scale = 1.0 + abs(p)
     roundoff = float(p_err) / scale
     if prob.get("psd", True) is not True:
-        return Certificate(p, -math.inf, pinf, roundoff, 0.0, 0)
+        return Certificate(p, -math.inf, pinf, roundoff, 0.0, 0, "nonconvex")
     if not math.isfinite(p) or not math.isfinite(xqx):
-        return Certificate(p, -math.inf, pinf, roundoff, math.inf, 0)
-    xh, yr, iters = _repair(prob, x.copy(), _project_dual(prob, y))
-    if iters == REPAIR_ITERS:
-        y_lin = _linearized_dual(prob, x, _project_dual(prob, y))
+        return Certificate(p, -math.inf, pinf, roundoff, math.inf, 0, "overflow")
+    y_proj = _project_dual(prob, y)
+    xh, yr, iters = _repair(prob, x.copy(), y_proj)
+    method = "repair" if iters else "solver"
+    cert = _float_certificate(prob, x, ax, p, pinf, roundoff, xh, yr, iters, method)
+    tried_linearized = iters == REPAIR_ITERS
+    if tried_linearized:
+        y_lin = _linearized_dual(prob, x, y_proj)
         if y_lin is not None:
-            xh, yr, more = _repair(prob, x.copy(), y_lin)
-            iters += more
-    d = dual_bound(prob, xh, yr)
-    gl, gu, _ = _reduced_cost_interval(prob, xh, yr)
-    g = 0.5 * (gl + gu)
-    pimpact = float(np.abs(yr) @ _abs_violation(ax, prob["L"], prob["U"])
-                    + np.abs(g) @ _abs_violation(x, prob["lo"], prob["up"])) / scale
-    return Certificate(p, d, pinf, roundoff, pimpact, iters)
+            xh2, yr2, more = _repair(prob, x.copy(), y_lin)
+            cert2 = _float_certificate(prob, x, ax, p, pinf, roundoff, xh2, yr2,
+                                       iters + more, "linearized")
+            if uncertainty(cert2) < uncertainty(cert):
+                cert = cert2
+    elif uncertainty(cert) > UNCERTAINTY_TOL:
+        # _repair() が 0 回で終わっても、双対候補が悪ければ線形化 LP の双対を試す。
+        # QRECIPE はこの経路で ~1e-6 の gap を ~1e-11 まで詰める。
+        y_lin = _linearized_dual(prob, x, y_proj)
+        if y_lin is not None:
+            xh2, yr2, more = _repair(prob, x.copy(), y_lin)
+            cert2 = _float_certificate(prob, x, ax, p, pinf, roundoff, xh2, yr2,
+                                       iters + more, "linearized")
+            if uncertainty(cert2) < uncertainty(cert):
+                cert = cert2
+    if exact and uncertainty(cert) > UNCERTAINTY_TOL:
+        ex = _exact_certificate(prob, x, cert, y)
+        if (ex is not None and ex.pinf <= PRIMAL_INF_TOL
+                and uncertainty(ex) < uncertainty(cert)):
+            cert = ex
+    return cert
 
 
 def uncertainty(cert):
@@ -702,7 +1420,8 @@ def uncertainty(cert):
 
 def best_certificate(prob, x, y):
     """ソルバの (x, y) と polish() の (x, y) のうち、相対主実行不能度が PRIMAL_INF_TOL
-    以下で uncertainty() 最小の候補の verify 結果。該当候補が無ければソルバ側を返す。"""
+    以下で uncertainty() 最小の候補を返す。浮動小数の候補が許容を超える場合は、最良の
+    主候補に対して厳密有理数の双対候補も試す。該当候補が無ければソルバ側を返す。"""
     if prob.get("psd", True) is not True:
         return verify(prob, x, y)
     cands = [(x, y)]
@@ -710,10 +1429,21 @@ def best_certificate(prob, x, y):
     if polished is not None:
         cands.append(polished)
     results = [verify(prob, cx, cy) for cx, cy in cands]
-    feasible = [r for r in results if r.pinf <= PRIMAL_INF_TOL]
+    feasible = [(r, cx, cy) for r, (cx, cy) in zip(results, cands)
+                if r.pinf <= PRIMAL_INF_TOL]
     if not feasible:
         return results[0]
-    return min(feasible, key=uncertainty)
+    best = min(feasible, key=lambda t: uncertainty(t[0]))
+    if uncertainty(best[0]) <= UNCERTAINTY_TOL:
+        return best[0]
+    for r, cx, cy in sorted(feasible, key=lambda t: uncertainty(t[0])):
+        ex = _exact_certificate(prob, cx, r, cy)
+        if (ex is not None and ex.pinf <= PRIMAL_INF_TOL
+                and uncertainty(ex) < uncertainty(best[0])):
+            best = (ex, cx, cy)
+        if uncertainty(best[0]) <= UNCERTAINTY_TOL:
+            break
+    return best[0]
 
 
 def to_highs_model(prob):
@@ -836,7 +1566,8 @@ def certify(prob, solved):
     msg = (f"status={status} reported={reported!r} p={cert.p!r} d={cert.d!r} "
            f"uncertainty={unc:.3e} relgap={gap:.3e} roundoff={cert.roundoff:.3e} "
            f"pimpact={cert.pimpact:.3e} "
-           f"repair_iters={cert.repair_iters} verify_pinf={cert.pinf:.3e} "
+           f"repair_iters={cert.repair_iters} method={cert.method} "
+           f"verify_pinf={cert.pinf:.3e} "
            f"reported_vs_p={objdiff:.3e} c0={prob['c0']!r}")
     return ok, cert.p, msg
 

@@ -4,6 +4,7 @@ import importlib.util
 import itertools
 import math
 import tempfile
+import time
 import unittest
 from fractions import Fraction
 from pathlib import Path
@@ -89,6 +90,56 @@ class VerifyLowerBoundTests(unittest.TestCase):
         d = truth.dual_bound(prob, np.zeros(1), np.zeros(0))
         self.assertLessEqual(d, 0.0)
         self.assertGreaterEqual(d, -HAND_SLACK)
+
+
+class LinearizedDualFallbackTests(unittest.TestCase):
+    def test_linearized_dual_runs_when_repair_makes_no_progress(self):
+        # min x1 + x2 s.t. x1 + x2 >= 1, x >= 0。y = 0 では g = (1, 1) >= 0 なので
+        # _repair は 0 回で終わり d = 0。線形化 LP の双対 y = 1 では d = 1 になり p = 1 と一致する。
+        prob = dict(c0=0.0, c=np.array([1.0, 1.0]),
+                    A=sp.csr_matrix(np.array([[1.0, 1.0]])),
+                    L=np.array([1.0]), U=np.array([math.inf]),
+                    lo=np.zeros(2), up=np.array([math.inf, math.inf]),
+                    Q=sp.csr_matrix((2, 2)), n=2, m=1)
+        cert = truth.verify(prob, np.array([1.0, 0.0]), np.array([0.0]))
+        self.assertEqual(cert.repair_iters, 0)
+        self.assertEqual(cert.method, "linearized")
+        self.assertLessEqual(cert.d, 1.0)
+        self.assertGreater(cert.d, 1.0 - 1e-8)
+        self.assertLessEqual(truth.uncertainty(cert), truth.UNCERTAINTY_TOL)
+
+
+class ExactRationalRecoveryTests(unittest.TestCase):
+    def test_negative_reduced_cost_is_repaired_exactly(self):
+        # min 1/2 x^2 - 3x (x >= 0), x* = 3, f* = -9/2。xh = 2.9 では g = -0.1 < 0。
+        # g = 0 を Q_PP s = -g で厳密に解くと xh = 3、d = -9/2。
+        prob = scalar_problem()
+        data = truth._ExactData(prob)
+        s = truth._exact_sets(prob, np.array([3.0]))
+        out = truth._recover_exact(prob, data, s, np.array([2.9]), np.zeros(0),
+                                   {0}, np.zeros(0, dtype=int),
+                                   time.monotonic() + 10.0)
+        self.assertIsNotNone(out)
+        xh, y, gex, iters = out
+        self.assertEqual(iters, 1)
+        d = truth._exact_d(data, xh, y, gex)
+        self.assertEqual(d, HAND_OPTIMUM)
+        self.assertLessEqual(d, HAND_OPTIMUM)
+        self.assertEqual(truth._exact_float(d), -4.5)
+
+    def test_exact_d_rejects_negative_cost_on_lower_only_column(self):
+        data = truth._ExactData(scalar_problem())
+        self.assertIsNone(truth._exact_d(data, [Fraction(0)], [], [Fraction(-1)]))
+
+    def test_exact_float_rounds_down_and_up(self):
+        # 1/10 は最近接 float が真値より上、3/10 は下。どちらも下界は真値以下、
+        # 上界は真値以上になること。
+        for exact in (Fraction(1, 10), Fraction(3, 10)):
+            down = truth._exact_float(exact)
+            up = truth._fraction_float_up(exact)
+            self.assertLessEqual(Fraction(down), exact)
+            self.assertLess(exact, Fraction(up))
+        self.assertEqual(truth._exact_float(HAND_OPTIMUM), -4.5)
 
 
 SEED = 20260821
