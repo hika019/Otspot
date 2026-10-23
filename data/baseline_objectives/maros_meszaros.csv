@@ -18,7 +18,7 @@
 #     (relative uncertainty 5.1e-11) is kept.
 #   HUESTIS: Table 3 (BPMPD at default tolerances) deviates by 6.5e-6; the certified value
 #     (relative uncertainty 2.3e-11) is kept.
-# Not certified (4 of 138): rows whose source ends in _UNCERTIFIED keep the named solver's
+# Not certified (1 of 138): rows whose source ends in _UNCERTIFIED keep the named solver's
 #   reference value, but the strict lower-bound certificate could not prove it: typically a
 #   reduced cost on an unbounded (free or one-sided) variable cannot be shown to be exactly
 #   zero / of the required sign from floating-point multipliers; in other cases the solver's
@@ -78,7 +78,7 @@ HS76,-4.681818181818e0,highs_1.14.0_Optimal_20261022
 HUES-MOD,3.482446387363e7,clarabel_0.11.1_Solved_20261022
 HUESTIS,3.482446387346e11,clarabel_0.11.1_Solved_20261022
 KSIP,5.757979412401e-1,clarabel_0.11.1_Solved_20261023
-LASER,2.409601345619e6,clarabel_0.11.1_Solved_20261021_UNCERTIFIED
+LASER,2.409601345619e6,clarabel_0.11.1_Solved_20261023
 LISWET1,3.612240208495e1,exact_rational_kkt_20261023
 LISWET10,4.948578468800e1,exact_rational_kkt_20261023
 LISWET11,4.952395713866e1,exact_rational_kkt_20261023
@@ -110,7 +110,7 @@ QBANDM,1.635234203665e4,highs_1.14.0_Optimal_20261022
 QBEACONF,1.647120601499e5,clarabel-noequil_0.11.1_Solved_20261022
 QBORE3D,3.100200803548e3,clarabel_0.11.1_Solved_20261022
 QBRANDY,2.837511485714e4,highs_1.14.0_Optimal_20261023
-QCAPRI,6.679329326200e7,clarabel_0.11.1_Solved_20261021_UNCERTIFIED
+QCAPRI,6.679329326200e7,clarabel_0.11.1_Solved_20261023
 QE226,2.126534328684e2,clarabel_0.11.1_Solved_20261022
 QETAMACR,8.676036962633e4,highs_1.14.0_Optimal_20261022
 QFFFFF80,8.731474605279e5,clarabel_0.11.1_Solved_20261022
@@ -152,7 +152,7 @@ QSHIP08S,2.385728851391e6,highs_1.14.0_Optimal_20261022
 QSHIP12L,3.018876577180e6,highs_1.14.0_Optimal_20261022
 QSHIP12S,3.056962249278e6,highs_1.14.0_Optimal_20261022
 QSIERRA,2.375045817875e7,clarabel_0.11.1_AlmostSolved_20261022
-QSTAIR,7.985452756288e6,highs_1.14.0_Timelimitreached_20261021_UNCERTIFIED
+QSTAIR,7.985452756104e6,clarabel_0.11.1_Solved_20261023
 QSTANDAT,6.411838388889e3,clarabel_0.11.1_Solved_20261022
 S268,-1.818989403546e-12,highs_1.14.0_Optimal_20261023
 STADAT1,-2.852686404498e7,clarabel_0.11.1_Solved_20261023

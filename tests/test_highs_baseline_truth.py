@@ -221,6 +221,76 @@ class SparseExactCertificateTests(unittest.TestCase):
         self.assertEqual(cert.d, -4.5)
         self.assertLessEqual(Fraction(cert.d), HAND_OPTIMUM)
 
+    def test_free_column_strategy_uses_all_rows_when_active_rows_fail(self):
+        # 自由列を含む問題で、active 行だけを候補に残すと、active 行に触れない
+        # 内部列の方程式 0 = -g_j (空係数、右辺非零) が不整合になる。全行を候補に
+        # 残し、自由列の g_j = 0 だけを初期方程式にして修復する経路がこれを直す。
+        #
+        # 列: f (自由, Q 列 0, 費用 1, 行 0 係数 1), z (両側有限 [-1,1], Q 列 0,
+        # 費用 1, 行 1 係数 1), b (両側有限 [0,2], Q = 2, 費用 -2, 行 0 係数 1)。
+        # 行: 0 は f + b = 2 (等式), 1 は z ∈ [0,1] (ranged)。候補 x = (1, 0.5, 1),
+        # y = (0.5, 0): g_f = 1 - 0.5 = 0.5 != 0 で下界 -inf、z は内部で
+        # g_z = 1 - y_1 = 1 != 0 だが z が触れる行 1 は非 active なので
+        # active 行だけの系は 0 = -1 で不整合。
+        prob = dict(c0=0.0, c=np.array([1.0, 1.0, -2.0]),
+                    Q=sp.csr_matrix(np.array([[0.0, 0.0, 0.0],
+                                              [0.0, 0.0, 0.0],
+                                              [0.0, 0.0, 2.0]])),
+                    A=sp.csr_matrix(np.array([[1.0, 0.0, 1.0],
+                                              [0.0, 1.0, 0.0]])),
+                    L=np.array([2.0, 0.0]), U=np.array([2.0, 1.0]),
+                    lo=np.array([-math.inf, -1.0, 0.0]),
+                    up=np.array([math.inf, 1.0, 2.0]), n=3, m=2)
+        x = np.array([1.0, 0.5, 1.0])
+        y = np.array([0.5, 0.0])
+        base = truth.verify(prob, x, y)
+        # repair が等式行の乗数で g_f を直すので base.d は有限だが、緩すぎ
+        # (uncertainty > tol) のまま厳密経路が走る。
+        self.assertGreater(truth.uncertainty(base), truth.UNCERTAINTY_TOL)
+        # active 行だけを候補に残す旧経路は不整合 (空方程式 0 = -1) で None。
+        s = truth._exact_sets(prob, x)
+        data = truth._ExactData(prob)
+        active = np.flatnonzero(s["atL"] | s["atU"])
+        self.assertEqual(list(active), [0])
+        xh0, y0 = truth._exact_base(prob, s, x, y, active)
+        self.assertIsNone(truth._recover_exact(
+            prob, data, s, xh0, y0,
+            {int(j) for j in np.flatnonzero(s["interior"])}, active,
+            time.monotonic() + 60))
+        cert = truth._sparse_exact_certificate(prob, x, base, y)
+        self.assertIsNotNone(cert)
+        self.assertEqual(cert.method, "exact-sparse-free")
+        # y_0 = 1 で g_f = 0 厳密、d = h - 1/2 x'Qx + 境界項 = 2 - 1 - 1 - 2 = -2。
+        self.assertEqual(cert.d, -2.0)
+        self.assertLessEqual(Fraction(cert.d), Fraction(cert.p))
+
+    def test_banded_free_certificate_solves_all_free_all_ranged(self):
+        # 全列自由・全行 ranged (LASER 形) で Q が帯行列の問題: 弱双対は
+        # g = Qxh - A'y = 0 (厳密) だけを要求し、y は符号自由。帯消去で
+        # Q xh = A'y - c を厳密に解いて d = h(y) - 1/2 xh'Qxh を返す。
+        # Q = [[2,1,0],[1,2,1],[0,1,2]], A = [[1,1,0],[0,1,1]], 候補
+        # x = (0,1,0), y = (1,1): g = (1,2,1) - (1,2,1) = 0 厳密で、
+        # xh = x 厳密、h = 1*0 + 1*0 = 0、d = -1/2 * (x'Qx) = -1。
+        prob = dict(c0=0.0, c=np.zeros(3),
+                    Q=sp.csr_matrix(np.array([[2.0, 1.0, 0.0],
+                                              [1.0, 2.0, 1.0],
+                                              [0.0, 1.0, 2.0]])),
+                    A=sp.csr_matrix(np.array([[1.0, 1.0, 0.0],
+                                              [0.0, 1.0, 1.0]])),
+                    L=np.zeros(2), U=np.full(2, 2.0),
+                    lo=np.full(3, -math.inf), up=np.full(3, math.inf),
+                    n=3, m=2)
+        x = np.array([0.0, 1.0, 0.0])
+        y = np.array([1.0, 1.0])
+        out = truth._banded_free_certificate(prob, x, y, 1.0)
+        self.assertIsNotNone(out)
+        self.assertEqual(out[0], -1.0)
+        self.assertLessEqual(out[1], truth.UNCERTAINTY_TOL)
+        # stationarity 残差が BANDED_G0_TOL を超える候補は前に断す (有効な下界は
+        # 近特異方向の増幅で作れない)。
+        self.assertIsNone(truth._banded_free_certificate(
+            prob, x, np.array([2.0, 1.0]), 1.0))
+
     def test_zero_cost_dummy_columns_are_certified_by_sparse_path(self):
         # 浮動小数では認証できない既知の小問題 (SEED=20260821, i=5, 6 番目の摂動) に、
         # 目的・制約・曲率を持たない零コスト列を EXACT_MAX_COLS 本足す。n が dense 経路の
@@ -632,7 +702,7 @@ class BaselineCsvSeparationTests(unittest.TestCase):
         certified = self.load("maros_meszaros.csv")
         self.assertEqual(len(certified), 138)
         uncertified = [r for r in certified.values() if r["source"].endswith("_UNCERTIFIED")]
-        self.assertEqual(len(uncertified), 4)
+        self.assertEqual(len(uncertified), 1)
         # exact rational KKT 証明で認証した LISWET。
         for name in ("LISWET1", "LISWET2", "LISWET3", "LISWET4", "LISWET5",
                      "LISWET6", "LISWET7", "LISWET8", "LISWET9", "LISWET10",
@@ -656,9 +726,10 @@ class BaselineCsvSeparationTests(unittest.TestCase):
                      "PRIMAL1", "PRIMAL2", "PRIMAL3", "PRIMAL4", "S268",
                      "STADAT1", "STADAT2", "STADAT3", "UBH1", "YAO"):
             self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
-        self.assertTrue(certified["QCAPRI"]["source"].endswith("_UNCERTIFIED"))
-        self.assertTrue(certified["QSTAIR"]["source"].endswith("_UNCERTIFIED"))
-        self.assertTrue(certified["LASER"]["source"].endswith("_UNCERTIFIED"))
+        # 疎 exact dual の自由列 + 全行戦略 (QCAPRI/QSTAIR) と全列自由・全行 ranged の
+        # 帯消去証明 (LASER) で認証した残り 3 件。
+        for name in ("QCAPRI", "QSTAIR", "LASER"):
+            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
 
     def test_selfbest_csv_is_a_regression_subset_with_full_objective_liswet(self):
         certified = self.load("maros_meszaros.csv")
