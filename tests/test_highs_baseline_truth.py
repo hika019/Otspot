@@ -643,7 +643,7 @@ class BaselineCsvSeparationTests(unittest.TestCase):
             self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
         # VALUES は最小固有値が負の非凸 QP なので、convex QP の検算対象外。
         self.assertTrue(certified["VALUES"]["source"].endswith("_UNCERTIFIED"))
-        # 厳密有理数 dual 修復で認証した 7 件。BOYD2 は大規模すぎて今回の範囲外。
+        # 厳密有理数 dual 修復で認証した 7 件と、大規模疎 exact dual の BOYD2。
         for name in ("QBRANDY", "QRECIPE", "QSC205", "QSCFXM1", "QSCFXM2",
                      "QSCFXM3", "QSCRS8"):
             self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))

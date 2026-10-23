@@ -18,13 +18,12 @@
 #     (relative uncertainty 5.1e-11) is kept.
 #   HUESTIS: Table 3 (BPMPD at default tolerances) deviates by 6.5e-6; the certified value
 #     (relative uncertainty 2.3e-11) is kept.
-# Not certified (54 of 138): rows whose source ends in _UNCERTIFIED keep the named solver's
+# Not certified (4 of 138): rows whose source ends in _UNCERTIFIED keep the named solver's
 #   reference value, but the strict lower-bound certificate could not prove it: typically a
 #   reduced cost on an unbounded (free or one-sided) variable cannot be shown to be exactly
 #   zero / of the required sign from floating-point multipliers; in other cases the solver's
 #   dual did not reach the required accuracy, or Q was not proven positive semidefinite.
 #   Their values are still used as bench references but must not be treated as proven optima.
-#   BOYD2 additionally keeps the Maros & Meszaros Table 3 value (BPMPD at default tolerances).
 #   The source date is the run that produced the kept value; the current solver may report a
 #   different value for an _UNCERTIFIED row.
 problem_name,optimal_obj,source
