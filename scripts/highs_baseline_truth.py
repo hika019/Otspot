@@ -135,6 +135,13 @@ EXACT_MAX_NNZ = 4_000_000
 EXACT_MAX_OPS = 200_000_000
 EXACT_MAX_PIVOTS = 300_000
 EXACT_TIME_BUDGET = 120.0
+# 大規模疎問題の厳密有理数修復を試す上限。dense 経路の列/行上限を超える問題でも、
+# 次元と非ゼロ数がこの範囲なら、ソルバの (x, y) から active 行だけを使って疎に修復する。
+# BOYD2 (n=93263, m=186531, A+Q の非ゼロ 423786) を通し、有理数の充填で破綻する規模は
+# 候補を作らず UNCERTIFIED に倒す fail-safe。
+EXACT_SPARSE_MAX_DIM = 1_000_000
+EXACT_SPARSE_MAX_NNZ = 1_000_000
+EXACT_SPARSE_TIME_BUDGET = 300.0
 # Clarabel (HiGHS が検算に通る解を出せない問題の代替ソルバ) の停止許容と時間上限。
 CLARABEL_TOL = 1e-10
 CLARABEL_TIME_LIMIT_SECS = 1800.0
@@ -1796,6 +1803,40 @@ def _exact_certificate(prob, x, base, y_hint):
     return min(candidates, key=uncertainty)
 
 
+def _sparse_exact_certificate(prob, x, base, y_hint):
+    """大規模疎問題向けの厳密有理数 dual 候補。
+
+    dense 経路 (_exact_certificate) の列/行上限を超える問題でも、次元と非ゼロ数が
+    EXACT_SPARSE_* の範囲なら、ソルバの (x, y) をそのまま初期値にして active 行だけを
+    候補に残した _recover_exact() で縮約費用の符号を厳密に修復する。追加の LP は解かない。
+    返す d は _exact_d() の Fraction を下向きに丸めた float なので最適値の下界である。
+    """
+    if prob.get("psd", True) is not True:
+        return None
+    if prob["n"] > EXACT_SPARSE_MAX_DIM or prob["m"] > EXACT_SPARSE_MAX_DIM:
+        return None
+    if prob["A"].nnz + prob["Q"].nnz > EXACT_SPARSE_MAX_NNZ:
+        return None
+    deadline = time.monotonic() + EXACT_SPARSE_TIME_BUDGET
+    data = _ExactData(prob)
+    s = _exact_sets(prob, x)
+    pinf_exact, row_v, col_v = _exact_violations(data, x)
+    active_rows = np.flatnonzero(s["atL"] | s["atU"])
+    E0 = {int(j) for j in np.flatnonzero(s["interior"])}
+    xh0, y0 = _exact_base(prob, s, x, y_hint, active_rows)
+    out = _recover_exact(prob, data, s, xh0, y0, E0, active_rows, deadline)
+    if out is None:
+        return None
+    xh, y, gex, _ = out
+    d = _exact_d(data, xh, y, gex)
+    if d is None:
+        return None
+    return Certificate(base.p, _exact_float(d), max(base.pinf, pinf_exact),
+                       base.roundoff,
+                       _exact_pimpact(base.p, y, gex, row_v, col_v),
+                       base.repair_iters, "exact-sparse")
+
+
 Certificate = collections.namedtuple(
     "Certificate", "p d pinf roundoff pimpact repair_iters method", defaults=("float",))
 
@@ -1826,8 +1867,10 @@ def verify(prob, x, y, exact=False):
       method        d を作った経路 ("solver" / "repair" / "linearized" / "exact-*")
 
     exact=True のとき、浮動小数の候補が UNCERTAINTY_TOL を超える場合に厳密有理数の
-    双対候補 (_exact_certificate) も試す。best_certificate() は候補ごとの二重実行を
-    避けるため exact=False で比較してから、最良の主候補に一度だけ厳密候補を適用する。
+    双対候補 (_exact_certificate) も試す。dense 経路が上限で候補を作れない場合は
+    大規模疎問題向けの _sparse_exact_certificate も試す。best_certificate() は候補ごとの
+    二重実行を避けるため exact=False で比較してから、最良の主候補に一度だけ厳密候補を
+    適用する。
     """
     A, Q, c, c0 = prob["A"], prob["Q"], prob["c"], prob["c0"]
     if not np.all(np.isfinite(x)):
@@ -1876,6 +1919,8 @@ def verify(prob, x, y, exact=False):
                 cert = cert2
     if exact and uncertainty(cert) > UNCERTAINTY_TOL:
         ex = _exact_certificate(prob, x, cert, y)
+        if ex is None:
+            ex = _sparse_exact_certificate(prob, x, cert, y)
         if (ex is not None and ex.pinf <= PRIMAL_INF_TOL
                 and uncertainty(ex) < uncertainty(cert)):
             cert = ex
@@ -1909,7 +1954,8 @@ def uncertainty(cert):
 def best_certificate(prob, x, y):
     """ソルバの (x, y) と polish() の (x, y) のうち、相対主実行不能度が PRIMAL_INF_TOL
     以下で uncertainty() 最小の候補を返す。浮動小数の候補が許容を超える場合は、最良の
-    主候補に対して厳密有理数の双対候補も試す。該当候補が無ければソルバ側を返す。"""
+    主候補に対して厳密有理数の双対候補 (dense 経路、次に疎経路) も試す。該当候補が
+    無ければソルバ側を返す。"""
     if prob.get("psd", True) is not True:
         return verify(prob, x, y)
     cands = [(x, y)]
@@ -1926,6 +1972,8 @@ def best_certificate(prob, x, y):
         return best[0]
     for r, cx, cy in sorted(feasible, key=lambda t: uncertainty(t[0])):
         ex = _exact_certificate(prob, cx, r, cy)
+        if ex is None:
+            ex = _sparse_exact_certificate(prob, cx, r, cy)
         if (ex is not None and ex.pinf <= PRIMAL_INF_TOL
                 and uncertainty(ex) < uncertainty(best[0])):
             best = (ex, cx, cy)
