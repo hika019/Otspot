@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3275 testcases, 26 ignored
+# totals: 3276 testcases, 26 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1152,6 +1152,7 @@ otspot-core	qp::ipm_solver::attempt::tests::iter_guard_charges_actual_consumptio
 otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_extends_with_deadline::does_not_extend_when_best_is_genuinely_stalled	active
 otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_extends_with_deadline::does_not_extend_without_deadline	active
 otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_extends_with_deadline::extends_once_past_max_iter_per_attempt_when_deadline_present	active
+otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_progress_extends_past_shallow_converged_best::extension_uses_deep_iteration_limit_config_not_shallow_best	active
 otspot-core	qp::ipm_solver::attempt::tests::mask_does_not_hide_nonempty_col_false_optimal	active
 otspot-core	qp::ipm_solver::attempt::tests::no_presolve_fallback_does_not_replace_better_objective_incumbent	active
 otspot-core	qp::ipm_solver::attempt::tests::no_presolve_fallback_does_not_replace_structural_infeasible	active
