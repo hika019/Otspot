@@ -1,4 +1,5 @@
 """scripts/highs_baseline_truth.py の検算 (弱双対下界) とパーサの sentinel。"""
+import csv
 import importlib.util
 import itertools
 import math
@@ -439,6 +440,43 @@ class FixedBoundTypeTests(unittest.TestCase):
 
     def test_known_bound_type_is_accepted(self):
         self.assertEqual(self.parse("UP")["up"][0], 1.0)
+
+
+class BaselineCsvSeparationTests(unittest.TestCase):
+    """certified external CSV と selfbest regression CSV の役割分離を固定する。"""
+
+    @staticmethod
+    def load(name):
+        path = ROOT / "data" / "baseline_objectives" / name
+        with path.open() as f:
+            lines = [line for line in f if not line.startswith("#")]
+        return {row["problem_name"]: row for row in csv.DictReader(lines)}
+
+    def test_certified_csv_is_complete_and_keeps_uncertified_tags(self):
+        certified = self.load("maros_meszaros.csv")
+        self.assertEqual(len(certified), 138)
+        uncertified = [r for r in certified.values() if r["source"].endswith("_UNCERTIFIED")]
+        self.assertEqual(len(uncertified), 54)
+        for name in ("LISWET1", "LISWET7", "LISWET10", "LISWET11", "LISWET12"):
+            self.assertTrue(certified[name]["source"].endswith("_UNCERTIFIED"))
+
+    def test_selfbest_csv_is_a_regression_subset_with_full_objective_liswet(self):
+        certified = self.load("maros_meszaros.csv")
+        selfbest = self.load("maros_meszaros_selfbest.csv")
+        self.assertEqual(len(selfbest), 131)
+        self.assertTrue(set(selfbest) <= set(certified))
+        for name in ("LISWET1", "LISWET7", "LISWET10", "LISWET11", "LISWET12"):
+            # main の LISWET 値は c0 抜きだった。selfbest は c0 込みへ変換済み。
+            self.assertGreater(float(selfbest[name]["optimal_obj"]), 0.0)
+            self.assertIn("full objective", selfbest[name]["source"])
+            self.assertTrue(
+                math.isclose(
+                    float(selfbest[name]["optimal_obj"]),
+                    float(certified[name]["optimal_obj"]),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            )
 
 
 if __name__ == "__main__":

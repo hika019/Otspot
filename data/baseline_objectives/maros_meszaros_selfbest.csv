@@ -1,0 +1,135 @@
+# 出典: 自己回帰用baseline（main の maros_meszaros.csv を元に、LISWET は c0 を加えて full objective に統一）
+# Source: self-regression baseline derived from main maros_meszaros.csv; LISWET rows converted to full objective (c0 added).
+# CAUTION: not an externally certified reference. Use maros_meszaros.csv for certified external values.
+problem_name,optimal_obj,source
+AUG2D,1.670000000000e+06,bench_722f_ippmm_1000s
+AUG2DC,1.800000000000e+06,bench_722f_ippmm_1000s
+AUG2DCQP,6.480000000000e+06,bench_722f_ippmm_1000s
+AUG2DQP,6.220000000000e+06,bench_722f_ippmm_1000s
+AUG3D,-7.824322739640e+02,kkt_osqp_crosscheck_20260606
+AUG3DC,-1.165237561744e+03,kkt_osqp_crosscheck_20260606
+AUG3DCQP,-9.431378406874e+02,kkt_osqp_crosscheck_20260606
+AUG3DQP,-6.612623221186e+02,kkt_osqp_crosscheck_20260606
+BOYD1,-6.170000000000e+07,bench_722f_ippmm_1000s
+BOYD2,2.130000000000e+01,bench_722f_ippmm_1000s
+CONT-050,-4.560000000000e+00,bench_722f_ippmm_1000s
+CONT-100,-4.640000000000e+00,bench_722f_ippmm_1000s
+CONT-101,1.960000000000e-01,bench_722f_ippmm_1000s
+CONT-200,-4.680000000000e+00,bench_722f_ippmm_1000s
+CONT-201,1.920000000000e-01,bench_722f_ippmm_1000s
+CONT-300,1.880000000000e-01,bench_722f_ippmm_1000s
+CVXQP1_L,1.090000000000e+08,bench_722f_ippmm_1000s
+CVXQP1_M,1.090000000000e+06,bench_722f_ippmm_1000s
+CVXQP1_S,1.160000000000e+04,bench_722f_ippmm_1000s
+CVXQP2_L,8.180000000000e+07,bench_722f_ippmm_1000s
+CVXQP2_M,8.200000000000e+05,bench_722f_ippmm_1000s
+CVXQP2_S,8.120000000000e+03,bench_722f_ippmm_1000s
+CVXQP3_L,1.160000000000e+08,bench_722f_ippmm_1000s
+CVXQP3_M,1.360000000000e+06,bench_722f_ippmm_1000s
+CVXQP3_S,1.190000000000e+04,bench_722f_ippmm_1000s
+DTOC3,2.350000000000e+02,bench_722f_ippmm_1000s
+DUAL1,3.500000000000e-02,bench_722f_ippmm_1000s
+DUAL2,3.370000000000e-02,bench_722f_ippmm_1000s
+DUAL3,1.360000000000e-01,bench_722f_ippmm_1000s
+DUAL4,7.460000000000e-01,bench_722f_ippmm_1000s
+DUALC1,6.160000000000e+03,bench_722f_ippmm_1000s
+DUALC2,3.550000000000e+03,bench_722f_ippmm_1000s
+DUALC5,4.270000000000e+02,bench_722f_ippmm_1000s
+DUALC8,1.830000000000e+04,bench_722f_ippmm_1000s
+EXDATA,-1.420000000000e+02,bench_722f_ippmm_1000s
+GENHS28,9.270000000000e-01,bench_722f_ippmm_1000s
+GOULDQP2,1.850000000000e-04,bench_722f_ippmm_1000s
+GOULDQP3,-2.964783721603e+04,clarabel_0.11.1_tol1e-12_Solved_20260608
+HS118,6.650000000000e+02,bench_722f_ippmm_1000s
+HS21,4.000000000009e-02,clarabel_0.11.1_tol1e-12_Solved_20260608
+HS268,-1.446300000000e+04,clarabel_0.11.1_tol1e-12_Solved_20260608
+HS35,-8.888888888888e+00,clarabel_0.11.1_tol1e-12_Solved_20260608
+HS35MOD,-8.749999999999e+00,clarabel_0.11.1_tol1e-12_Solved_20260608
+HS51,-6.000000000000e+00,clarabel_0.11.1_tol1e-12_Solved_20260608
+HS52,-6.733524355301e-01,clarabel_0.11.1_tol1e-12_Solved_20260608
+HS53,-1.906976744186e+00,clarabel_0.11.1_tol1e-12_Solved_20260608
+HS76,-4.680000000000e+00,bench_722f_ippmm_1000s
+HUES-MOD,3.480000000000e+07,bench_722f_ippmm_1000s
+HUESTIS,3.480000000000e+11,bench_722f_ippmm_1000s
+KSIP,5.760000000000e-01,bench_722f_ippmm_1000s
+LASER,2.410000000000e+06,bench_722f_ippmm_1000s
+LISWET1,3.612240208500e+01,highs_1.14.0_Optimal_20261020; full objective: main variable-part value + c0
+LISWET10,4.948578469000e+01,highs_1.14.0_Optimal_20261020; full objective: main variable-part value + c0
+LISWET11,4.952395713700e+01,highs_1.14.0_Optimal_20261020; full objective: main variable-part value + c0
+LISWET12,1.736927426122e+03,highs_1.14.0_Optimal_20261020; full objective: main variable-part value + c0
+LISWET2,2.499806529700e+01,clarabel_0.11.1_tol1e-12_AlmostSolved_20260608; full objective: main variable-part value + c0
+LISWET3,2.500122000000e+01,clarabel_0.11.1_tol1e-12_Solved_20260608; full objective: main variable-part value + c0
+LISWET4,2.500011208580e+01,clarabel_0.11.1_tol1e-12_AlmostSolved_20260608; full objective: main variable-part value + c0
+LISWET5,2.503425340000e+01,clarabel_0.11.1_tol1e-12_Solved_20260608; full objective: main variable-part value + c0
+LISWET6,2.499574753200e+01,clarabel_0.11.1_tol1e-12_AlmostSolved_20260608; full objective: main variable-part value + c0
+LISWET7,4.988408907860e+02,highs_1.14.0_Optimal_20261020; full objective: main variable-part value + c0
+LISWET8,7.144700590020e+02,highs_1.14.0_Optimal_20261020; full objective: main variable-part value + c0
+LISWET9,1.963251260899e+03,highs_1.14.0_Optimal_20261020; full objective: main variable-part value + c0
+LOTSCHD,2.400000000000e+03,bench_722f_ippmm_1000s
+MOSARQP1,-9.530000000000e+02,bench_722f_ippmm_1000s
+MOSARQP2,-1.600000000000e+03,bench_722f_ippmm_1000s
+POWELL20,5.210000000000e+10,bench_722f_ippmm_1000s
+PRIMAL1,-3.500000000000e-02,bench_722f_ippmm_1000s
+PRIMAL2,-3.370000000000e-02,bench_722f_ippmm_1000s
+PRIMAL3,-1.360000000000e-01,bench_722f_ippmm_1000s
+PRIMAL4,-7.460000000000e-01,bench_722f_ippmm_1000s
+PRIMALC1,-6.160000000000e+03,bench_722f_ippmm_1000s
+PRIMALC2,-3.550000000000e+03,bench_722f_ippmm_1000s
+PRIMALC5,-4.270000000000e+02,bench_722f_ippmm_1000s
+PRIMALC8,-1.830000000000e+04,bench_722f_ippmm_1000s
+Q25FV47,1.370000000000e+07,bench_722f_ippmm_1000s
+QADLITTL,4.800000000000e+05,bench_722f_ippmm_1000s
+QAFIRO,-1.590000000000e+00,bench_722f_ippmm_1000s
+QBANDM,1.640000000000e+04,bench_722f_ippmm_1000s
+QBEACONF,1.650000000000e+05,bench_722f_ippmm_1000s
+QBORE3D,3.100000000000e+03,bench_722f_ippmm_1000s
+QBRANDY,2.840000000000e+04,bench_722f_ippmm_1000s
+QCAPRI,6.680000000000e+07,bench_722f_ippmm_1000s
+QE226,2.055404328685e+02,clarabel_0.11.1_tol1e-12_Solved_20260608
+QETAMACR,8.680000000000e+04,bench_722f_ippmm_1000s
+QFFFFF80,8.730000000000e+05,bench_722f_ippmm_1000s
+QGROW15,-1.020000000000e+08,bench_722f_ippmm_1000s
+QGROW22,-1.500000000000e+08,bench_722f_ippmm_1000s
+QGROW7,-4.280000000000e+07,bench_722f_ippmm_1000s
+QISRAEL,2.530000000000e+07,bench_722f_ippmm_1000s
+QPCBLEND,-7.840000000000e-03,bench_722f_ippmm_1000s
+QPCBOEI1,1.150000000000e+07,bench_722f_ippmm_1000s
+QPCSTAIR,6.200000000000e+06,bench_722f_ippmm_1000s
+QPTEST,4.370000000000e+00,bench_722f_ippmm_1000s
+QRECIPE,-2.670000000000e+02,bench_722f_ippmm_1000s
+QSC205,-5.810000000000e-03,bench_722f_ippmm_1000s
+QSCAGR25,2.020000000000e+08,bench_722f_ippmm_1000s
+QSCAGR7,2.690000000000e+07,bench_722f_ippmm_1000s
+QSCFXM1,1.690000000000e+07,bench_722f_ippmm_1000s
+QSCFXM2,2.780000000000e+07,bench_722f_ippmm_1000s
+QSCFXM3,3.080000000000e+07,bench_722f_ippmm_1000s
+QSCORPIO,1.880000000000e+03,bench_722f_ippmm_1000s
+QSCRS8,9.050000000000e+02,bench_722f_ippmm_1000s
+QSCSD1,8.670000000000e+00,bench_722f_ippmm_1000s
+QSCSD6,5.080000000000e+01,bench_722f_ippmm_1000s
+QSCSD8,9.410000000000e+02,bench_722f_ippmm_1000s
+QSCTAP1,1.420000000000e+03,bench_722f_ippmm_1000s
+QSCTAP2,1.740000000000e+03,bench_722f_ippmm_1000s
+QSCTAP3,1.440000000000e+03,bench_722f_ippmm_1000s
+QSEBA,8.150000000000e+07,bench_722f_ippmm_1000s
+QSHARE1B,7.200000000000e+05,bench_722f_ippmm_1000s
+QSHARE2B,1.170000000000e+04,bench_722f_ippmm_1000s
+QSHIP04L,2.420000000000e+06,bench_722f_ippmm_1000s
+QSHIP04S,2.420000000000e+06,bench_722f_ippmm_1000s
+QSHIP08L,2.380000000000e+06,bench_722f_ippmm_1000s
+QSHIP08S,2.390000000000e+06,bench_722f_ippmm_1000s
+QSHIP12L,3.020000000000e+06,bench_722f_ippmm_1000s
+QSHIP12S,3.060000000000e+06,bench_722f_ippmm_1000s
+QSIERRA,2.380000000000e+07,bench_722f_ippmm_1000s
+QSTAIR,7.990000000000e+06,bench_722f_ippmm_1000s
+QSTANDAT,6.410000000000e+03,bench_722f_ippmm_1000s
+S268,-1.446300000000e+04,clarabel_0.11.1_tol1e-12_Solved_20260608
+STADAT1,-2.850000000000e+07,bench_722f_ippmm_1000s
+STADAT2,-3.260000000000e+01,bench_722f_ippmm_1000s
+STADAT3,-3.580000000000e+01,bench_722f_ippmm_1000s
+STCQP1,1.550000000000e+05,bench_722f_ippmm_1000s
+STCQP2,2.230000000000e+04,bench_722f_ippmm_1000s
+TAME,0.000000000000e+00,bench_722f_ippmm_1000s
+UBH1,1.116000000000e+00,piqp_clarabel_osqp_crosscheck_20260422
+ZECEVIC2,-4.120000000000e+00,bench_722f_ippmm_1000s
+QSHELL,1.570000000000e+12,bench_740_concurrent_60s
