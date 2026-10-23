@@ -158,6 +158,15 @@ KKT_MAX_DENSE = 200_000
 # 非対角 Q の厳密 PSD 判定 (有理数 LDL) を行う最大次元。これを超える非対角 Q は
 # 厳密な凸性を証明できないので KKT 証明を諦める (対角 Q は対角成分だけで判定する)。
 KKT_EXACT_PSD_MAX = 64
+# 全列が自由で全行が ranged (LASER) の問題は弱双対だけ g = Qxh - A'y = 0 (厳密) を
+# 要求し、y は符号自由。Q が帯行列なら帯幅 halfband の有理数消去で Q xh = A'y - c を
+# 厳密に解いて xh を構成する。帯幅の上限と時間上限を置く。消去は近特異方向に
+# |g0|/λmin(Q) 倍の増幅を受けるので、浮動小数の stationarity 残差が BANDED_G0_TOL を
+# 超える候補は有効な下界を作れないことが前に分かる。この門はヒューリスティックな
+# 節約だけに使う。下界の妥当性は _exact_d() と uncertainty() が検査する。
+BANDED_MAX_HALFBAND = 8
+BANDED_TIME_BUDGET = 600.0
+BANDED_G0_TOL = 1e-9
 
 SECTIONS = {"NAME", "ROWS", "COLUMNS", "RHS", "RANGES", "BOUNDS", "QUADOBJ", "ENDATA"}
 ROW_TYPES = {"N", "G", "L", "E"}
@@ -1109,6 +1118,140 @@ def _kkt_certificate(prob, x, debug=False):
     return d, pimpact
 
 
+def _solve_banded_exact(rows, rhs, halfband, deadline):
+    """帯幅 halfband の有理数連立一次方程式を左から右の帯内消去で解く。
+
+    rows は {未知数番号: 係数} の辞表で、第 k 本の方程式の最小列番号が k - halfband
+    以上で、帯内のピボットを絶対値最大で選ぶ (係数が 1e-16 の丸め残かむは
+    Markowitz 風の最小係数の選び方ではピボットになって桁数が爆発する)。行が
+    帯内でピボットを持たなければさらに下を探す。不整合・時間切れなら None。
+    非ピボット変数は 0 とし、解は Fraction のリストである。
+    """
+    n = len(rhs)
+    a = [dict(r) for r in rows]
+    b = list(rhs)
+    for col in range(n):
+        if time.monotonic() > deadline:
+            return None
+        best = None
+        for r in range(col, min(n, col + halfband + 1)):
+            v = a[r].get(col)
+            if v and (best is None or abs(v) > abs(a[best].get(col, Fraction(0)))):
+                best = r
+        if best is None:
+            for r in range(col + halfband + 1, n):
+                if a[r].get(col):
+                    best = r
+                    break
+            if best is None:
+                return None
+        if best != col:
+            a[col], a[best] = a[best], a[col]
+            b[col], b[best] = b[best], b[col]
+        inv = Fraction(1) / a[col][col]
+        if inv != 1:
+            a[col] = {k: v * inv for k, v in a[col].items()}
+            b[col] = b[col] * inv
+        for r in range(col + 1, min(n, col + halfband + 1)):
+            fac = a[r].get(col)
+            if not fac:
+                continue
+            for k, v in a[col].items():
+                if k <= col:
+                    continue
+                old = a[r].get(k)
+                nv = (old if old is not None else Fraction(0)) - fac * v
+                if nv == 0:
+                    if old is not None:
+                        del a[r][k]
+                else:
+                    a[r][k] = nv
+            b[r] = b[r] - fac * b[col]
+            del a[r][col]
+    x = [Fraction(0)] * n
+    for col in range(n - 1, -1, -1):
+        s = b[col]
+        for k, v in a[col].items():
+            if k != col:
+                s -= v * x[k]
+        x[col] = s
+    return x
+
+
+def _banded_free_certificate(prob, x, y_hint, p):
+    """全列が自由で全行が ranged (LASER) の問題向けの厳密下界 (d, pimpact)。
+
+    全列が自由なので弱双対は g = Qxh - A'y = 0 (厳密) のみを要求し、y は符号自由。
+    y を候補の dual (投影後) のまま保持して、帯幅 halfband の有理数消去で
+    Q xh = A'y - c を厳密に解き、d = c0 + h(y) - 1/2 xh'Qxh を _exact_d() で
+    評価する。xh が近特異方向へ |g0|/λmin(Q) 倍の増幅を受けるので、浮動小数の
+    stationarity 残差が BANDED_G0_TOL を超える候補を前もって断す (有効な下界は
+    作れない)。
+    """
+    n, m = prob["n"], prob["m"]
+    if prob.get("psd", True) is not True:
+        return None
+    lo, up, L, U = prob["lo"], prob["up"], prob["L"], prob["U"]
+    if (np.isfinite(lo) | np.isfinite(up)).any():
+        return None
+    if not (np.isfinite(L) & np.isfinite(U)).all():
+        return None
+    if n > EXACT_SPARSE_MAX_DIM or m > EXACT_SPARSE_MAX_DIM:
+        return None
+    if prob["A"].nnz + prob["Q"].nnz > EXACT_SPARSE_MAX_NNZ:
+        return None
+    Qsp = prob["Q"].tocsc()
+    if (Qsp != Qsp.T).nnz != 0:
+        return None
+    qc = Qsp.tocoo()
+    if not len(qc.data):
+        return None
+    halfband = int(np.max(np.abs(qc.row - qc.col)))
+    if halfband > BANDED_MAX_HALFBAND:
+        return None
+    yp = _project_dual(prob, y_hint)
+    g0 = prob["c"] + prob["Q"] @ x - prob["A"].T @ yp
+    if float(np.max(np.abs(g0), initial=0.0)) > BANDED_G0_TOL:
+        return None
+    deadline = time.monotonic() + BANDED_TIME_BUDGET
+    frac = lambda v: Fraction(float(v))
+    y0 = [frac(v) for v in yp]
+    A_csc = prob["A"].tocsc()
+    rhs = [-frac(prob["c"][j]) for j in range(n)]
+    for j in range(n):
+        for i, v in zip(A_csc.indices[A_csc.indptr[j]:A_csc.indptr[j + 1]],
+                        A_csc.data[A_csc.indptr[j]:A_csc.indptr[j + 1]]):
+            rhs[j] += frac(v) * y0[int(i)]
+    Q_csr = prob["Q"].tocsr()
+    rows = []
+    for j in range(n):
+        d = {}
+        for k, v in zip(Q_csr.indices[Q_csr.indptr[j]:Q_csr.indptr[j + 1]],
+                        Q_csr.data[Q_csr.indptr[j]:Q_csr.indptr[j + 1]]):
+            d[int(k)] = d.get(int(k), Fraction(0)) + frac(v)
+        rows.append({k: v for k, v in d.items() if v})
+    xh = _solve_banded_exact(rows, rhs, halfband, deadline)
+    if xh is None:
+        return None
+    data = _ExactData(prob)
+    d = _exact_d(data, xh, y0)
+    if d is None:
+        return None
+    df = _exact_float(d)
+    if df == -math.inf:
+        return None
+    ax = prob["A"] @ x
+    row_viol = _abs_violation(ax, L, U)
+    var_viol = _abs_violation(x, lo, up)
+    gabs = np.zeros(n)
+    for j, gj in enumerate(_exact_g(data, xh, y0)):
+        giv = _fiv(gj)
+        gabs[j] = max(abs(giv[0]), abs(giv[1]))
+    pimpact = float(np.abs(np.array([float(v) for v in y0])) @ row_viol
+                    + gabs @ var_viol) / (1.0 + abs(p))
+    return df, pimpact
+
+
 def dual_bound(prob, xh, y):
     """凸 QP の最適値の厳密な下界 (取れなければ -inf)。
 
@@ -1822,19 +1965,41 @@ def _sparse_exact_certificate(prob, x, base, y_hint):
     s = _exact_sets(prob, x)
     pinf_exact, row_v, col_v = _exact_violations(data, x)
     active_rows = np.flatnonzero(s["atL"] | s["atU"])
+    candidates = []
+
+    def evaluate(xh, y, gex, method):
+        d = _exact_d(data, xh, y, gex)
+        if d is None:
+            return None
+        return Certificate(base.p, _exact_float(d), max(base.pinf, pinf_exact),
+                           base.roundoff,
+                           _exact_pimpact(base.p, y, gex, row_v, col_v),
+                           base.repair_iters, method)
+
     E0 = {int(j) for j in np.flatnonzero(s["interior"])}
     xh0, y0 = _exact_base(prob, s, x, y_hint, active_rows)
     out = _recover_exact(prob, data, s, xh0, y0, E0, active_rows, deadline)
-    if out is None:
+    if out is not None:
+        cert = evaluate(*out[:3], "exact-sparse")
+        if cert is not None:
+            candidates.append(cert)
+    # 自由列を含む問題 (QCAPRI/QSTAIR) で、active 行だけを候補に残すと 0 = -g_j の
+    # 不整合になることがある。全行を候補に残し、自由列の g_j = 0 だけを初期方程式に
+    # して、片側の悪い符号を _recover_exact() の反復で拾う。自由列がない問題
+    # (BOYD2) はこの経路が不要なので、既存の active 行経路だけを走らせる。
+    free_cols = np.flatnonzero(~np.isfinite(prob["lo"]) & ~np.isfinite(prob["up"]))
+    if len(free_cols):
+        all_rows = np.arange(prob["m"])
+        xh0f, y0f = _exact_base(prob, s, x, y_hint, all_rows)
+        outf = _recover_exact(prob, data, s, xh0f, y0f,
+                              {int(j) for j in free_cols}, all_rows, deadline)
+        if outf is not None:
+            cert = evaluate(*outf[:3], "exact-sparse-free")
+            if cert is not None:
+                candidates.append(cert)
+    if not candidates:
         return None
-    xh, y, gex, _ = out
-    d = _exact_d(data, xh, y, gex)
-    if d is None:
-        return None
-    return Certificate(base.p, _exact_float(d), max(base.pinf, pinf_exact),
-                       base.roundoff,
-                       _exact_pimpact(base.p, y, gex, row_v, col_v),
-                       base.repair_iters, "exact-sparse")
+    return min(candidates, key=uncertainty)
 
 
 Certificate = collections.namedtuple(
@@ -1939,6 +2104,14 @@ def verify(prob, x, y, exact=False):
             if kk is not None:
                 cand = Certificate(cert.p, kk[0], cert.pinf, cert.roundoff,
                                    kk[1], cert.repair_iters, "kkt")
+                if uncertainty(cand) < uncertainty(cert):
+                    cert = cand
+        if cert.d == -math.inf or uncertainty(cert) > UNCERTAINTY_TOL:
+            # 全列自由・全行 ranged で Q が帯行列 (LASER) の厳密帯消去証明。
+            bd = _banded_free_certificate(prob, x, y, cert.p)
+            if bd is not None:
+                cand = Certificate(cert.p, bd[0], cert.pinf, cert.roundoff,
+                                   bd[1], cert.repair_iters, "banded")
                 if uncertainty(cand) < uncertainty(cert):
                     cert = cand
     return cert
