@@ -128,6 +128,44 @@ class ExactCertificateTests(unittest.TestCase):
         self.assertEqual(cert.gaps, (2,))
         self.assertEqual(cert.objective, Fraction(-8))
 
+    def test_banded_kkt_handles_more_gaps_than_legacy_gram_limit(self):
+        # 旧 Gram 方式の上限 256 を超える 292 個の無効行を持つ KKT 点。
+        # 有効行では二次差分 0、無効行では二次差分 1 になる x を作り、
+        # 有効行だけ 1 の y から c = A'y - x を定義する。
+        n = 300
+        rows = tuple(
+            {i: Fraction(1), i + 1: Fraction(-2), i + 2: Fraction(1)}
+            for i in range(n - 2)
+        )
+        m = len(rows)
+        active = tuple(range(0, m, 50))
+        active_set = set(active)
+        gaps = tuple(i for i in range(m) if i not in active_set)
+        d = [0 if i in active_set else 1 for i in range(m)]
+        x = [Fraction(0)] * n
+        for i in range(m):
+            x[i + 2] = d[i] + 2 * x[i + 1] - x[i]
+        y = [Fraction(1) if i in active_set else Fraction(0) for i in range(m)]
+        aty = [Fraction(0)] * n
+        for i, row in enumerate(rows):
+            for j, value in row.items():
+                aty[j] += value * y[i]
+        c = [aty[j] - x[j] for j in range(n)]
+        c0 = Fraction(5, 2)
+        expected, ax = objective_at(c, c0, rows, x)
+        self.assertEqual([ax[i] for i in active], [0] * len(active))
+        self.assertEqual([ax[i] for i in gaps], [1] * len(gaps))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "many_gaps.qps"
+            write_qps(path, c, c0, rows)
+            cert = exact.certify(path, gaps=gaps)
+        self.assertGreater(len(cert.gaps), 256)
+        self.assertEqual(cert.gaps, gaps)
+        self.assertEqual(cert.objective, expected)
+        self.assertEqual(cert.y_min, 1)
+        self.assertEqual(cert.inactive_min, 1)
+
     def test_non_liswet_row_is_rejected(self):
         c = [Fraction(0)] * 6
         rows = list(ROWS)
