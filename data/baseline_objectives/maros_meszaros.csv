@@ -1,7 +1,8 @@
 # Source: data/maros_meszaros (original QPS files), independently parsed. Each value whose
 #   source does not end in _UNCERTIFIED passed one of:
 #   - the weak-duality certificate in scripts/highs_baseline_truth.py (relative uncertainty
-#     <= 1e-7), using HiGHS or Clarabel;
+#     <= 1e-7), using HiGHS or Clarabel; its run log records method=exact-* when the final
+#     certifying lower bound was recovered and evaluated in exact rational arithmetic;
 #   - the exact rational KKT certificate in scripts/liswet_exact_certificate.py
 #     (source exact_rational_kkt_*).
 #   For _UNCERTIFIED rows the source names the solver (and date) of the kept reference value.
