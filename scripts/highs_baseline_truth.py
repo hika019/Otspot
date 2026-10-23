@@ -51,6 +51,7 @@ import warnings
 import highspy
 import numpy as np
 import scipy.sparse as sp
+from scipy.linalg import eigh
 from scipy.sparse import csgraph
 from scipy.sparse.linalg import lsqr, spsolve
 
@@ -84,7 +85,7 @@ REPAIR_TIME_BUDGET = 60.0
 # これを超える負固有値がある Q は非凸として検算しない。ブロックが大きすぎて判定
 # できない場合も検算しない (fail-safe)。
 PSD_REL_TOL = 1e-10
-PSD_DENSE_MAX = 4_000
+PSD_DENSE_MAX = 8_000
 # IEEE 754 binary64 の単位丸め u = 2^-53 (丸め誤差上界 gamma_k の基準)。
 UNIT_ROUNDOFF = np.finfo(float).eps / 2
 # 積が subnormal へ下位桁あふれしたときの 1 演算あたりの絶対誤差上界 (subnormal の間隔)。
@@ -422,8 +423,11 @@ def _psd_ok(Q):
         sub = Q[idx][:, idx]
         scale = max(1.0, float(np.abs(sub).sum(axis=1).max()))
         try:
-            w = np.linalg.eigvalsh(sub.toarray())
-        except np.linalg.LinAlgError:
+            # 最小固有値だけを求める。8000 列の CVXQP_L ブロックでも
+            # 512 MiB 程度の作業領域で済み、全固有値を求めるより速い。
+            w = eigh(sub.toarray(), subset_by_index=[0, 0],
+                     eigvals_only=True, driver="evr")
+        except (np.linalg.LinAlgError, ValueError):
             unknown = True
             continue
         if not np.all(np.isfinite(w)):
