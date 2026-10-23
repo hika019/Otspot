@@ -140,6 +140,69 @@ class ExactRationalRecoveryTests(unittest.TestCase):
             self.assertLessEqual(Fraction(down), exact)
             self.assertLess(exact, Fraction(up))
         self.assertEqual(truth._exact_float(HAND_OPTIMUM), -4.5)
+class ExactFreeVariableCertificateTests(unittest.TestCase):
+    """自由変数の縮約費用を厳密に 0 にする証明と、非対角 Q の厳密 KKT の sentinel。"""
+
+    def test_diagonal_fr_uses_exact_zero_reduced_cost(self):
+        # min 1/2 * 3 x^2 + x (x 自由)。最適値 -1/6。x = fl(-1/3) では
+        # g = 1 + 3x が浮動小数の区間で 0 を跨ぐため dual_bound は -inf。
+        # 有理数で xh = -1/3 を構成すると g = 0 が厳密になり下界が閉じる。
+        prob = dict(c0=0.0, c=np.array([1.0]), A=sp.csr_matrix((0, 1)), L=np.zeros(0),
+                    U=np.zeros(0), lo=np.array([-math.inf]), up=np.array([math.inf]),
+                    Q=sp.csr_matrix(np.array([[3.0]])), n=1, m=0)
+        x = np.array([-1.0 / 3.0])
+        self.assertEqual(truth.dual_bound(prob, x, np.zeros(0)), -math.inf)
+        cert = truth.verify(prob, x, np.zeros(0))
+        opt = Fraction(-1, 6)
+        self.assertLessEqual(Fraction(cert.d), opt)
+        self.assertLessEqual(opt - Fraction(cert.d), HAND_SLACK)
+        self.assertEqual(cert.pimpact, 0.0)
+
+    def test_q0_free_column_is_corrected_exactly(self):
+        # min x1 s.t. x1 - x2 = 0, x1 >= 0, x2 自由 (最適値 0)。y = 1 - 2^-40 の
+        # ままでは q=0 の自由列 x2 の縮約費用 g2 = -y != 0。_sparse_correction が
+        # A_F0' y = c_F0 を厳密に解いて y = 0 にし、下界 0 を与える。
+        prob = dict(c0=0.0, c=np.array([1.0, 0.0]),
+                    A=sp.csr_matrix(np.array([[1.0, -1.0]])), L=np.zeros(1), U=np.zeros(1),
+                    lo=np.array([0.0, -math.inf]), up=np.array([math.inf, math.inf]),
+                    Q=sp.csr_matrix((2, 2)), n=2, m=1)
+        y = np.array([1.0 - 2.0 ** -40])
+        self.assertEqual(truth.dual_bound(prob, np.zeros(2), y), -math.inf)
+        fr = truth._fr_certificate(prob, np.zeros(2), y)
+        self.assertIsNotNone(fr)
+        self.assertLessEqual(fr[0], 0.0)
+        self.assertLessEqual(-Fraction(fr[0]), HAND_SLACK)
+
+    def test_non_diagonal_q_falls_back_to_exact_kkt(self):
+        # min 1/2 x'Qx + c'x (x 自由), Q = [[2,1],[1,2]], c = [-1,-2]。最適値 -1。
+        # Q が非対角なので _fr_certificate は使えず、厳密 KKT が下界 -1 を与える。
+        prob = dict(c0=0.0, c=np.array([-1.0, -2.0]), A=sp.csr_matrix((0, 2)),
+                    L=np.zeros(0), U=np.zeros(0),
+                    lo=np.array([-math.inf, -math.inf]), up=np.array([math.inf, math.inf]),
+                    Q=sp.csr_matrix(np.array([[2.0, 1.0], [1.0, 2.0]])), n=2, m=0)
+        x = np.array([0.0, 1.0])
+        self.assertIsNone(truth._fr_certificate(prob, x, np.zeros(0)))
+        cert = truth.verify(prob, x, np.zeros(0))
+        opt = Fraction(-1)
+        self.assertLessEqual(Fraction(cert.d), opt)
+        self.assertLessEqual(opt - Fraction(cert.d), HAND_SLACK)
+        self.assertEqual(cert.pimpact, 0.0)
+
+    def test_exact_psd_rejects_indefinite_q_and_skips_kkt(self):
+        # Q = [[1,2],[2,1]] は固有値 -1, 3 で非凸。浮動小数の固有値判定では
+        # ない厳密 LDL が負 pivot を見つけ、KKT 証明を出さない。
+        Q = sp.csr_matrix(np.array([[1.0, 2.0], [2.0, 1.0]]))
+        self.assertFalse(truth._psd_exact(Q))
+        prob = dict(c0=0.0, c=np.zeros(2), A=sp.csr_matrix((0, 2)), L=np.zeros(0),
+                    U=np.zeros(0), lo=np.array([-math.inf, -math.inf]),
+                    up=np.array([math.inf, math.inf]), Q=Q, n=2, m=0, psd=False)
+        self.assertIsNone(truth._kkt_certificate(prob, np.zeros(2)))
+        self.assertEqual(truth.verify(prob, np.zeros(2), np.zeros(0)).d, -math.inf)
+
+    def test_exact_psd_accepts_semidefinite_and_zero_matrices(self):
+        self.assertTrue(truth._psd_exact(sp.csr_matrix(np.array([[1.0, 1.0], [1.0, 1.0]]))))
+        self.assertTrue(truth._psd_exact(sp.csr_matrix((2, 2))))
+        self.assertFalse(truth._psd_exact(sp.csr_matrix(np.array([[0.0, 1.0], [1.0, 0.0]]))))
 
 
 SEED = 20260821
