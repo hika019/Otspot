@@ -507,7 +507,7 @@ class BaselineCsvSeparationTests(unittest.TestCase):
         certified = self.load("maros_meszaros.csv")
         self.assertEqual(len(certified), 138)
         uncertified = [r for r in certified.values() if r["source"].endswith("_UNCERTIFIED")]
-        self.assertEqual(len(uncertified), 36)
+        self.assertEqual(len(uncertified), 31)
         # exact rational KKT 証明で認証した LISWET。
         for name in ("LISWET1", "LISWET2", "LISWET7", "LISWET8", "LISWET9",
                      "LISWET10", "LISWET11", "LISWET12"):
@@ -522,6 +522,9 @@ class BaselineCsvSeparationTests(unittest.TestCase):
                      "QSCFXM3", "QSCRS8"):
             self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
         self.assertTrue(certified["BOYD2"]["source"].endswith("_UNCERTIFIED"))
+        # 厳密有理数 dual 修復で認証した FR 問題。
+        for name in ("QPCSTAIR", "PRIMALC1", "PRIMALC2", "PRIMALC5", "PRIMALC8"):
+            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
 
     def test_selfbest_csv_is_a_regression_subset_with_full_objective_liswet(self):
         certified = self.load("maros_meszaros.csv")
