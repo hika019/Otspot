@@ -456,9 +456,12 @@ class BaselineCsvSeparationTests(unittest.TestCase):
         certified = self.load("maros_meszaros.csv")
         self.assertEqual(len(certified), 138)
         uncertified = [r for r in certified.values() if r["source"].endswith("_UNCERTIFIED")]
-        self.assertEqual(len(uncertified), 51)
-        for name in ("LISWET1", "LISWET7", "LISWET10", "LISWET11", "LISWET12"):
+        self.assertEqual(len(uncertified), 47)
+        for name in ("LISWET10", "LISWET12"):
             self.assertTrue(certified[name]["source"].endswith("_UNCERTIFIED"))
+        # exact rational KKT 証明で認証した LISWET。
+        for name in ("LISWET1", "LISWET7", "LISWET9", "LISWET11"):
+            self.assertEqual(certified[name]["source"], "exact_rational_kkt_20261023")
         # PSD ブロックを 8000 列まで密固有値で判定できるようにした結果。
         for name in ("CVXQP1_L", "CVXQP2_L", "CVXQP3_L"):
             self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
