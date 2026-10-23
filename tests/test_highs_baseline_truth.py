@@ -1,11 +1,14 @@
 """scripts/highs_baseline_truth.py の検算 (弱双対下界) とパーサの sentinel。"""
+import csv
 import importlib.util
 import itertools
 import math
 import tempfile
+import time
 import unittest
 from fractions import Fraction
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import scipy.sparse as sp
@@ -88,6 +91,180 @@ class VerifyLowerBoundTests(unittest.TestCase):
         d = truth.dual_bound(prob, np.zeros(1), np.zeros(0))
         self.assertLessEqual(d, 0.0)
         self.assertGreaterEqual(d, -HAND_SLACK)
+
+
+class LinearizedDualFallbackTests(unittest.TestCase):
+    def test_linearized_dual_runs_when_repair_makes_no_progress(self):
+        # min x1 + x2 s.t. x1 + x2 >= 1, x >= 0。y = 0 では g = (1, 1) >= 0 なので
+        # _repair は 0 回で終わり d = 0。線形化 LP の双対 y = 1 では d = 1 になり p = 1 と一致する。
+        prob = dict(c0=0.0, c=np.array([1.0, 1.0]),
+                    A=sp.csr_matrix(np.array([[1.0, 1.0]])),
+                    L=np.array([1.0]), U=np.array([math.inf]),
+                    lo=np.zeros(2), up=np.array([math.inf, math.inf]),
+                    Q=sp.csr_matrix((2, 2)), n=2, m=1)
+        cert = truth.verify(prob, np.array([1.0, 0.0]), np.array([0.0]))
+        self.assertEqual(cert.repair_iters, 0)
+        self.assertEqual(cert.method, "linearized")
+        self.assertLessEqual(cert.d, 1.0)
+        self.assertGreater(cert.d, 1.0 - 1e-8)
+        self.assertLessEqual(truth.uncertainty(cert), truth.UNCERTAINTY_TOL)
+
+
+class ExactRationalRecoveryTests(unittest.TestCase):
+    def test_negative_reduced_cost_is_repaired_exactly(self):
+        # min 1/2 x^2 - 3x (x >= 0), x* = 3, f* = -9/2。xh = 2.9 では g = -0.1 < 0。
+        # g = 0 を Q_PP s = -g で厳密に解くと xh = 3、d = -9/2。
+        prob = scalar_problem()
+        data = truth._ExactData(prob)
+        s = truth._exact_sets(prob, np.array([3.0]))
+        out = truth._recover_exact(prob, data, s, np.array([2.9]), np.zeros(0),
+                                   {0}, np.zeros(0, dtype=int),
+                                   time.monotonic() + 10.0)
+        self.assertIsNotNone(out)
+        xh, y, gex, iters = out
+        self.assertEqual(iters, 1)
+        d = truth._exact_d(data, xh, y, gex)
+        self.assertEqual(d, HAND_OPTIMUM)
+        self.assertLessEqual(d, HAND_OPTIMUM)
+        self.assertEqual(truth._exact_float(d), -4.5)
+
+    def test_exact_d_rejects_negative_cost_on_lower_only_column(self):
+        data = truth._ExactData(scalar_problem())
+        self.assertIsNone(truth._exact_d(data, [Fraction(0)], [], [Fraction(-1)]))
+
+    def test_exact_float_rounds_down_and_up(self):
+        # 1/10 は最近接 float が真値より上、3/10 は下。どちらも下界は真値以下、
+        # 上界は真値以上になること。
+        for exact in (Fraction(1, 10), Fraction(3, 10)):
+            down = truth._exact_float(exact)
+            up = truth._fraction_float_up(exact)
+            self.assertLessEqual(Fraction(down), exact)
+            self.assertLess(exact, Fraction(up))
+        self.assertEqual(truth._exact_float(HAND_OPTIMUM), -4.5)
+class ExactFreeVariableCertificateTests(unittest.TestCase):
+    """自由変数の縮約費用を厳密に 0 にする証明と、非対角 Q の厳密 KKT の sentinel。"""
+
+    def test_diagonal_fr_uses_exact_zero_reduced_cost(self):
+        # min 1/2 * 3 x^2 + x (x 自由)。最適値 -1/6。x = fl(-1/3) では
+        # g = 1 + 3x が浮動小数の区間で 0 を跨ぐため dual_bound は -inf。
+        # 有理数で xh = -1/3 を構成すると g = 0 が厳密になり下界が閉じる。
+        prob = dict(c0=0.0, c=np.array([1.0]), A=sp.csr_matrix((0, 1)), L=np.zeros(0),
+                    U=np.zeros(0), lo=np.array([-math.inf]), up=np.array([math.inf]),
+                    Q=sp.csr_matrix(np.array([[3.0]])), n=1, m=0)
+        x = np.array([-1.0 / 3.0])
+        self.assertEqual(truth.dual_bound(prob, x, np.zeros(0)), -math.inf)
+        cert = truth.verify(prob, x, np.zeros(0))
+        opt = Fraction(-1, 6)
+        self.assertLessEqual(Fraction(cert.d), opt)
+        self.assertLessEqual(opt - Fraction(cert.d), HAND_SLACK)
+        self.assertEqual(cert.pimpact, 0.0)
+
+    def test_q0_free_column_is_corrected_exactly(self):
+        # min x1 s.t. x1 - x2 = 0, x1 >= 0, x2 自由 (最適値 0)。y = 1 - 2^-40 の
+        # ままでは q=0 の自由列 x2 の縮約費用 g2 = -y != 0。_sparse_correction が
+        # A_F0' y = c_F0 を厳密に解いて y = 0 にし、下界 0 を与える。
+        prob = dict(c0=0.0, c=np.array([1.0, 0.0]),
+                    A=sp.csr_matrix(np.array([[1.0, -1.0]])), L=np.zeros(1), U=np.zeros(1),
+                    lo=np.array([0.0, -math.inf]), up=np.array([math.inf, math.inf]),
+                    Q=sp.csr_matrix((2, 2)), n=2, m=1)
+        y = np.array([1.0 - 2.0 ** -40])
+        self.assertEqual(truth.dual_bound(prob, np.zeros(2), y), -math.inf)
+        fr = truth._fr_certificate(prob, np.zeros(2), y)
+        self.assertIsNotNone(fr)
+        self.assertLessEqual(fr[0], 0.0)
+        self.assertLessEqual(-Fraction(fr[0]), HAND_SLACK)
+
+    def test_non_diagonal_q_falls_back_to_exact_kkt(self):
+        # min 1/2 x'Qx + c'x (x 自由), Q = [[2,1],[1,2]], c = [-1,-2]。最適値 -1。
+        # Q が非対角なので _fr_certificate は使えず、厳密 KKT が下界 -1 を与える。
+        prob = dict(c0=0.0, c=np.array([-1.0, -2.0]), A=sp.csr_matrix((0, 2)),
+                    L=np.zeros(0), U=np.zeros(0),
+                    lo=np.array([-math.inf, -math.inf]), up=np.array([math.inf, math.inf]),
+                    Q=sp.csr_matrix(np.array([[2.0, 1.0], [1.0, 2.0]])), n=2, m=0)
+        x = np.array([0.0, 1.0])
+        self.assertIsNone(truth._fr_certificate(prob, x, np.zeros(0)))
+        cert = truth.verify(prob, x, np.zeros(0))
+        opt = Fraction(-1)
+        self.assertLessEqual(Fraction(cert.d), opt)
+        self.assertLessEqual(opt - Fraction(cert.d), HAND_SLACK)
+        self.assertEqual(cert.pimpact, 0.0)
+
+    def test_exact_psd_rejects_indefinite_q_and_skips_kkt(self):
+        # Q = [[1,2],[2,1]] は固有値 -1, 3 で非凸。浮動小数の固有値判定では
+        # ない厳密 LDL が負 pivot を見つけ、KKT 証明を出さない。
+        Q = sp.csr_matrix(np.array([[1.0, 2.0], [2.0, 1.0]]))
+        self.assertFalse(truth._psd_exact(Q))
+        prob = dict(c0=0.0, c=np.zeros(2), A=sp.csr_matrix((0, 2)), L=np.zeros(0),
+                    U=np.zeros(0), lo=np.array([-math.inf, -math.inf]),
+                    up=np.array([math.inf, math.inf]), Q=Q, n=2, m=0, psd=False)
+        self.assertIsNone(truth._kkt_certificate(prob, np.zeros(2)))
+        self.assertEqual(truth.verify(prob, np.zeros(2), np.zeros(0)).d, -math.inf)
+
+    def test_exact_psd_accepts_semidefinite_and_zero_matrices(self):
+        self.assertTrue(truth._psd_exact(sp.csr_matrix(np.array([[1.0, 1.0], [1.0, 1.0]]))))
+        self.assertTrue(truth._psd_exact(sp.csr_matrix((2, 2))))
+        self.assertFalse(truth._psd_exact(sp.csr_matrix(np.array([[0.0, 1.0], [1.0, 0.0]]))))
+
+
+class SparseExactCertificateTests(unittest.TestCase):
+    """dense 上限を超える疎問題を厳密有理数 dual で認証する経路の sentinel。"""
+
+    def test_sparse_path_repairs_small_problem(self):
+        # min 1/2 x^2 - 3x (x >= 0), x* = 3。x = 2.9 の縮約費用 g = -0.1 を
+        # 疎な厳密解で xh = 3 へ修復し、d = -9/2 を返す。
+        prob = scalar_problem()
+        x = np.array([2.9])
+        base = truth.verify(prob, x, np.zeros(0))
+        cert = truth._sparse_exact_certificate(prob, x, base, np.zeros(0))
+        self.assertIsNotNone(cert)
+        self.assertEqual(cert.method, "exact-sparse")
+        self.assertEqual(cert.d, -4.5)
+        self.assertLessEqual(Fraction(cert.d), HAND_OPTIMUM)
+
+    def test_zero_cost_dummy_columns_are_certified_by_sparse_path(self):
+        # 浮動小数では認証できない既知の小問題 (SEED=20260821, i=5, 6 番目の摂動) に、
+        # 目的・制約・曲率を持たない零コスト列を EXACT_MAX_COLS 本足す。n が dense 経路の
+        # 上限を超えるので _exact_certificate は候補を作れず、疎経路だけが認証できる。
+        prob, x, y = _padded_sentinel_problem(truth.EXACT_MAX_COLS)
+        self.assertGreater(prob["n"], truth.EXACT_MAX_COLS)
+        base = truth.verify(prob, x, y)
+        self.assertGreater(truth.uncertainty(base), truth.UNCERTAINTY_TOL)
+        self.assertIsNone(truth._exact_certificate(prob, x, base, y))
+        cert = truth.verify(prob, x, y, exact=True)
+        self.assertEqual(cert.method, "exact-sparse")
+        self.assertLessEqual(truth.uncertainty(cert), truth.UNCERTAINTY_TOL)
+        self.assertEqual(cert.d, PADDED_SENTINEL_D)
+        self.assertLessEqual(Fraction(cert.d), Fraction(cert.p))
+        # polish() が候補を作れない場合でも、best_certificate() が疎経路へ落ちること。
+        with mock.patch.object(truth, "polish", return_value=None):
+            best = truth.best_certificate(prob, x, y)
+        self.assertEqual(best.method, "exact-sparse")
+        self.assertLessEqual(truth.uncertainty(best), truth.UNCERTAINTY_TOL)
+
+
+def _padded_sentinel_problem(pad):
+    """小問題 (SEED=20260821, i=5) の x/y を保ったまま零コスト列を pad 本足す。"""
+    prob = dict(c0=0.4847014283021232, c=np.array([-0.4, 0.2, -0.6]),
+                Q=sp.csr_matrix(np.array([[6.61, -3.85, -1.33],
+                                          [-3.85, 2.7800000000000002, 0.69],
+                                          [-1.33, 0.69, 3.54]])),
+                A=sp.csr_matrix(np.array([[1.8, 0.1, 0.3]])),
+                L=np.array([-math.inf]), U=np.array([math.inf]),
+                lo=np.array([-0.3, -math.inf, -math.inf]),
+                up=np.array([math.inf, 1.9, 1.2]), n=3, m=1)
+    x = np.array([0.15792544888563192, 0.09444327429383367, 0.21033222907624805])
+    y = np.array([0.0012936184205120916])
+    padded = dict(prob, n=prob["n"] + pad,
+                  c=np.concatenate([prob["c"], np.zeros(pad)]),
+                  Q=sp.block_diag([prob["Q"], sp.csr_matrix((pad, pad))], format="csr"),
+                  A=sp.hstack([prob["A"], sp.csr_matrix((prob["m"], pad))], format="csr"),
+                  lo=np.concatenate([prob["lo"], np.zeros(pad)]),
+                  up=np.concatenate([prob["up"], np.full(pad, math.inf)]))
+    return padded, np.concatenate([x, np.zeros(pad)]), y
+
+
+# 疎経路が返す厳密下界 (この問題の active set は一意なので再現可能)。
+PADDED_SENTINEL_D = 0.3994564252974797
 
 
 SEED = 20260821
@@ -439,6 +616,67 @@ class FixedBoundTypeTests(unittest.TestCase):
 
     def test_known_bound_type_is_accepted(self):
         self.assertEqual(self.parse("UP")["up"][0], 1.0)
+
+
+class BaselineCsvSeparationTests(unittest.TestCase):
+    """certified external CSV と selfbest regression CSV の役割分離を固定する。"""
+
+    @staticmethod
+    def load(name):
+        path = ROOT / "data" / "baseline_objectives" / name
+        with path.open() as f:
+            lines = [line for line in f if not line.startswith("#")]
+        return {row["problem_name"]: row for row in csv.DictReader(lines)}
+
+    def test_certified_csv_is_complete_and_keeps_uncertified_tags(self):
+        certified = self.load("maros_meszaros.csv")
+        self.assertEqual(len(certified), 138)
+        uncertified = [r for r in certified.values() if r["source"].endswith("_UNCERTIFIED")]
+        self.assertEqual(len(uncertified), 4)
+        # exact rational KKT 証明で認証した LISWET。
+        for name in ("LISWET1", "LISWET2", "LISWET3", "LISWET4", "LISWET5",
+                     "LISWET6", "LISWET7", "LISWET8", "LISWET9", "LISWET10",
+                     "LISWET11", "LISWET12"):
+            self.assertEqual(certified[name]["source"], "exact_rational_kkt_20261023")
+        # PSD ブロックを 8000 列まで密固有値で判定できるようにした結果。
+        for name in ("CVXQP1_L", "CVXQP2_L", "CVXQP3_L"):
+            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
+        # VALUES は最小固有値が負の非凸 QP なので、convex QP の検算対象外。
+        self.assertTrue(certified["VALUES"]["source"].endswith("_UNCERTIFIED"))
+        # 厳密有理数 dual 修復で認証した 7 件と、大規模疎 exact dual の BOYD2。
+        for name in ("QBRANDY", "QRECIPE", "QSC205", "QSCFXM1", "QSCFXM2",
+                     "QSCFXM3", "QSCRS8"):
+            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
+        self.assertFalse(certified["BOYD2"]["source"].endswith("_UNCERTIFIED"))
+        # 厳密有理数 dual 修復で認証した FR 問題。
+        for name in ("QPCSTAIR", "PRIMALC1", "PRIMALC2", "PRIMALC5", "PRIMALC8"):
+            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
+        for name in ("AUG2D", "AUG2DC", "AUG3D", "AUG3DC", "DPKLO1", "DTOC3",
+                     "GENHS28", "HS268", "HS51", "HS52", "KSIP", "POWELL20",
+                     "PRIMAL1", "PRIMAL2", "PRIMAL3", "PRIMAL4", "S268",
+                     "STADAT1", "STADAT2", "STADAT3", "UBH1", "YAO"):
+            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
+        self.assertTrue(certified["QCAPRI"]["source"].endswith("_UNCERTIFIED"))
+        self.assertTrue(certified["QSTAIR"]["source"].endswith("_UNCERTIFIED"))
+        self.assertTrue(certified["LASER"]["source"].endswith("_UNCERTIFIED"))
+
+    def test_selfbest_csv_is_a_regression_subset_with_full_objective_liswet(self):
+        certified = self.load("maros_meszaros.csv")
+        selfbest = self.load("maros_meszaros_selfbest.csv")
+        self.assertEqual(len(selfbest), 131)
+        self.assertTrue(set(selfbest) <= set(certified))
+        for name in ("LISWET1", "LISWET7", "LISWET10", "LISWET11", "LISWET12"):
+            # main の LISWET 値は c0 抜きだった。selfbest は c0 込みへ変換済み。
+            self.assertGreater(float(selfbest[name]["optimal_obj"]), 0.0)
+            self.assertIn("full objective", selfbest[name]["source"])
+            self.assertTrue(
+                math.isclose(
+                    float(selfbest[name]["optimal_obj"]),
+                    float(certified[name]["optimal_obj"]),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            )
 
 
 if __name__ == "__main__":
