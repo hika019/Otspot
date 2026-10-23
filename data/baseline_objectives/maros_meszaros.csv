@@ -1,16 +1,17 @@
-# Source: data/maros_meszaros (original QPS files) solved by scripts/highs_baseline_truth.py:
-#   HiGHS (Clarabel where HiGHS gives no certifiable solution) on the independently parsed
-#   problem; each value whose source does not end in _UNCERTIFIED passed the script's
-#   weak-duality certificate (relative uncertainty <= 1e-7). For certified rows the source
-#   names the solver whose solution was certified; for _UNCERTIFIED rows it names the solver
-#   (and date) of the kept reference value.
+# Source: data/maros_meszaros (original QPS files), independently parsed. Each value whose
+#   source does not end in _UNCERTIFIED passed one of:
+#   - the weak-duality certificate in scripts/highs_baseline_truth.py (relative uncertainty
+#     <= 1e-7), using HiGHS or Clarabel;
+#   - the exact rational KKT certificate in scripts/liswet_exact_certificate.py
+#     (source exact_rational_kkt_*).
+#   For _UNCERTIFIED rows the source names the solver (and date) of the kept reference value.
 # Convention: full objective c0 + c'x + 1/2 x'Qx including the objective constant
 #   c0 = -(objective-row RHS) (31 problems have c0 != 0, e.g. LISWET7 c0 = 2525.26).
 # Q PSD: the weak-duality bound assumes Q is positive semidefinite. Q is checked blockwise
 #   before certification; a negative eigenvalue beyond the rounding tolerance makes the row
 #   _UNCERTIFIED, and so does a block too large to decide. VALUES has an indefinite Q
-#   (smallest eigenvalue -1.27e-5); the 8000-variable block of CVXQP{1,2,3}_L exceeds the
-#   dense-check limit, so those four rows are excluded.
+#   (smallest eigenvalue -1.27e-5), so it remains _UNCERTIFIED. The 8000-variable blocks
+#   of CVXQP{1,2,3}_L are within the dense-check limit and are certified.
 # Cross-check: Maros & Meszaros (1997) Table 3 agrees within relative 1e-6 except:
 #   HUES-MOD: Table 3 (BPMPD at default tolerances) deviates by 6.5e-6; the certified value
 #     (relative uncertainty 5.1e-11) is kept.
