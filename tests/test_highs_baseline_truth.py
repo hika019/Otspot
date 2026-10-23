@@ -456,9 +456,14 @@ class BaselineCsvSeparationTests(unittest.TestCase):
         certified = self.load("maros_meszaros.csv")
         self.assertEqual(len(certified), 138)
         uncertified = [r for r in certified.values() if r["source"].endswith("_UNCERTIFIED")]
-        self.assertEqual(len(uncertified), 54)
+        self.assertEqual(len(uncertified), 51)
         for name in ("LISWET1", "LISWET7", "LISWET10", "LISWET11", "LISWET12"):
             self.assertTrue(certified[name]["source"].endswith("_UNCERTIFIED"))
+        # PSD ブロックを 8000 列まで密固有値で判定できるようにした結果。
+        for name in ("CVXQP1_L", "CVXQP2_L", "CVXQP3_L"):
+            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
+        # VALUES は最小固有値が負の非凸 QP なので、convex QP の検算対象外。
+        self.assertTrue(certified["VALUES"]["source"].endswith("_UNCERTIFIED"))
 
     def test_selfbest_csv_is_a_regression_subset_with_full_objective_liswet(self):
         certified = self.load("maros_meszaros.csv")
