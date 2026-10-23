@@ -24,6 +24,10 @@ fixed format。OBJSENSE、MARKER (整数変数)、2 本目以降の N 行への�
     浮動小数の丸めを含めて最適値の下界になる。g_j が無限側の境界を要求する成分があれば
     下界は -inf で、_repair が xh と y を動かして消す (収束しなければ線形化 LP の双対から
     やり直す; _linearized_dual)。消せなければ検算失敗 (その問題は UNCERTIFIED とする)。
+    自由変数 (FR) を含む問題で _repair が -inf のままなら、対角 Q は有理数で縮約費用を
+    厳密に 0 にする FR 証明 (_fr_certificate)、非対角 Q は厳密 KKT 証明
+    (_kkt_certificate) を追加で試す。どちらも下界の妥当性は同じ弱双対式で、厳密な
+    有理数評価により浮動小数の区間では作れない [0, 0] の縮約費用を与える。
   - 相対不確かさ |p - d|/(1+|p|) + 丸め影響 + 主違反影響 <= UNCERTAINTY_TOL、
     相対主実行不能度 <= PRIMAL_INF_TOL、ソルバ報告値と自前再計算の一致。
   - Q の半正定値性: load_qps が非ゼロ非対角グラフのブロックごとに確認する。負固有値が
@@ -42,11 +46,13 @@ Usage:
 import argparse
 import collections
 import datetime
+import heapq
 import math
 import os
 import sys
 import time
 import warnings
+from fractions import Fraction
 
 import highspy
 import numpy as np
@@ -112,6 +118,17 @@ CLARABEL_TOL = 1e-10
 CLARABEL_TIME_LIMIT_SECS = 1800.0
 # MPS の無限大表記 (|v| >= 1e20 は無限大; HiGHS kHighsInf 判定と同じ閾値)。
 MPS_INFINITY = 1e20
+# 自由変数の縮約費用を厳密に 0 にする補正 (Q 対角 0 の自由列) の疎消去上限。
+# これを超える系は有理数の桁数が爆発するため証明を諦める (下界 -inf のまま)。
+FR_MAX_NNZ = 3_000_000
+FR_MAX_OPS = 50_000_000
+# 非対角 Q の厳密 KKT 証明は密な有理数消去なので、未知数と行列要素数に上限を置く。
+# 上限内でも係数成長で遅い場合は呼び側の時間予算で打ち切る (証明できない側に倒れる)。
+KKT_MAX_UNKNOWNS = 300
+KKT_MAX_DENSE = 200_000
+# 非対角 Q の厳密 PSD 判定 (有理数 LDL) を行う最大次元。これを超える非対角 Q は
+# 厳密な凸性を証明できないので KKT 証明を諦める (対角 Q は対角成分だけで判定する)。
+KKT_EXACT_PSD_MAX = 64
 
 SECTIONS = {"NAME", "ROWS", "COLUMNS", "RHS", "RANGES", "BOUNDS", "QUADOBJ", "ENDATA"}
 ROW_TYPES = {"N", "G", "L", "E"}
@@ -609,6 +626,456 @@ def _linearized_dual(prob, xh, y_ref):
     return None
 
 
+def _fiv(fr):
+    """Fraction を、その値を含む float 区間 [lo, hi] へ丸める。"""
+    try:
+        f = float(fr)
+    except OverflowError:
+        return -math.inf, math.inf
+    if math.isinf(f) or math.isnan(f):
+        return f, f
+    lo = f if Fraction(f) <= fr else math.nextafter(f, -math.inf)
+    hi = f if Fraction(f) >= fr else math.nextafter(f, math.inf)
+    return lo, hi
+
+
+def _imul(a, b):
+    """区間積。NaN は呼び側で検算不能として扱う。"""
+    if any(math.isnan(v) for v in (*a, *b)):
+        return math.nan, math.nan
+    p = (a[0] * b[0], a[0] * b[1], a[1] * b[0], a[1] * b[1])
+    if any(math.isnan(v) for v in p):
+        return math.nan, math.nan
+    return min(_down(v) for v in p), max(_up(v) for v in p)
+
+
+def _isum(ivs):
+    """区間和。fsum の結果を外側へ丸める。"""
+    try:
+        lo = math.fsum(v[0] for v in ivs)
+        hi = math.fsum(v[1] for v in ivs)
+    except (ValueError, OverflowError):
+        return -math.inf, math.inf
+    if math.isnan(lo) or math.isnan(hi):
+        return math.nan, math.nan
+    return _down(lo), _up(hi)
+
+
+def _square(iv):
+    """区間の二乗。"""
+    lo, hi = iv
+    if math.isnan(lo) or math.isnan(hi):
+        return math.nan, math.nan
+    if lo >= 0.0:
+        return _down(lo * lo), _up(hi * hi)
+    if hi <= 0.0:
+        return _down(hi * hi), _up(lo * lo)
+    return 0.0, _up(max(lo * lo, hi * hi))
+
+
+def _sparse_correction(prob, y0):
+    """Q 対角 0 の自由列について A_F0' y = c_F0 を厳密に解き、y を補正する。
+
+    y0 からの差分を疎な有理数 Gauss-Jordan で求める。返す y は厳密に
+    A_F0' y = c_F0 を満たす。係数成長が上限を超えたら (None, ops) を返す。
+    """
+    A = prob["A"].tocsc(); c = prob["c"]
+    q = np.asarray(prob["Q"].diagonal()).ravel()
+    lo, up = prob["lo"], prob["up"]
+    free0 = np.flatnonzero(~np.isfinite(lo) & ~np.isfinite(up) & (q == 0))
+    if len(free0) == 0:
+        return [Fraction(float(v)) for v in y0], 0
+    frac = lambda v: Fraction(float(v))
+    y0f = [frac(v) for v in y0]
+    eqs = []
+    for j in free0:
+        a = A[:, j].tocoo()
+        d = {int(i): frac(v) for i, v in zip(a.row, a.data)}
+        rhs = frac(c[j]) - sum(v * y0f[i] for i, v in d.items())
+        eqs.append([d, rhs])
+    col_all, col_alive = {}, {}
+    for k, (d, _) in enumerate(eqs):
+        for i in d:
+            col_all.setdefault(i, set()).add(k)
+            col_alive.setdefault(i, set()).add(k)
+    alive = set(range(len(eqs)))
+    heap = [(len(d), k) for k, (d, _) in enumerate(eqs)]
+    heapq.heapify(heap)
+    pivots_list = []
+    nnz = sum(len(d) for d, _ in eqs)
+    ops = 0
+    while heap:
+        ln, k = heapq.heappop(heap)
+        if k not in alive:
+            continue
+        d, rhs = eqs[k]
+        if ln != len(d):
+            heapq.heappush(heap, (len(d), k))
+            continue
+        if not d:
+            if rhs != 0:
+                return None, ops
+            alive.discard(k)
+            continue
+        col = min(d, key=lambda i: (len(col_alive.get(i, ())), abs(d[i])))
+        inv = Fraction(1) / d[col]
+        d2 = {i: v * inv for i, v in d.items()}
+        rhs2 = rhs * inv
+        eqs[k][0] = d2
+        eqs[k][1] = rhs2
+        alive.discard(k)
+        for i in d2:
+            col_alive.get(i, set()).discard(k)
+        pivots_list.append((col, k))
+        for kk in list(col_all.get(col, ())):
+            if kk == k:
+                continue
+            dk, rhsk = eqs[kk]
+            fac = dk.pop(col, None)
+            if fac is None:
+                continue
+            col_all.get(col, set()).discard(kk)
+            col_alive.get(col, set()).discard(kk)
+            nnz -= 1
+            for i, v in d2.items():
+                if i == col:
+                    continue
+                old = dk.get(i)
+                nv = (old if old is not None else Fraction(0)) - fac * v
+                if nv == 0:
+                    if old is not None:
+                        dk.pop(i, None)
+                        col_all.get(i, set()).discard(kk)
+                        col_alive.get(i, set()).discard(kk)
+                        nnz -= 1
+                else:
+                    if old is None:
+                        col_all.setdefault(i, set()).add(kk)
+                        if kk in alive:
+                            col_alive.setdefault(i, set()).add(kk)
+                        nnz += 1
+                    dk[i] = nv
+            rhsk -= fac * rhs2
+            eqs[kk][1] = rhsk
+            heapq.heappush(heap, (len(dk), kk))
+            ops += len(d2)
+            if nnz > FR_MAX_NNZ or ops > FR_MAX_OPS:
+                return None, ops
+        if len(pivots_list) > len(eqs) + 10:
+            return None, ops
+    for k in alive:
+        if eqs[k][0] or eqs[k][1] != 0:
+            return None, ops
+    pivots = {col: eqs[k][1] for col, k in pivots_list}
+    y = [frac(v) for v in y0]
+    for i, v in pivots.items():
+        y[i] += v
+    return y, ops
+
+
+def _fr_certificate(prob, x, y, debug=False):
+    """対角 Q の FR 問題で、縮約費用を厳密に 0 にした下界 (d, pimpact)。
+
+    Q 対角 q_j > 0 の列は xh_j = clamp((A_j'y - c_j)/q_j, lo_j, up_j) を有理数で
+    構成し、g_j を厳密に評価する。q_j = 0 の自由列は _sparse_correction() で
+    A_j'y = c_j を厳密に満たす。これにより自由列の縮約費用区間は厳密に [0, 0] と
+    なり、浮動小数の区間演算では作れない弱双対下界を与える。二次項だけは
+    xh の float 区間で上界を作る。
+    """
+    Q = prob["Q"]; A = prob["A"].tocsc(); c = prob["c"]
+    lo, up = prob["lo"], prob["up"]
+    n, m = prob["n"], prob["m"]
+    if prob.get("psd", True) is not True:
+        return None
+    free = (~np.isfinite(lo)) & (~np.isfinite(up))
+    if not free.any():
+        return None
+    q = np.asarray(Q.diagonal()).ravel()
+    qc = Q.tocoo()
+    if np.any((qc.data != 0) & (qc.row != qc.col)):
+        return None
+    if np.any(q < 0):
+        return None
+    y0 = _project_dual(prob, y)
+    y1, ops = _sparse_correction(prob, y0)
+    if y1 is None:
+        if debug:
+            print("  correction failed", flush=True)
+        return None
+    frac = lambda v: Fraction(float(v))
+    h_frac = Fraction(0)
+    for i in range(m):
+        yi = y1[i]
+        if yi > 0:
+            if not math.isfinite(prob["L"][i]):
+                if debug:
+                    print("  row sign", i, flush=True)
+                return None
+            h_frac += yi * frac(prob["L"][i])
+        elif yi < 0:
+            if not math.isfinite(prob["U"][i]):
+                if debug:
+                    print("  row sign", i, flush=True)
+                return None
+            h_frac += yi * frac(prob["U"][i])
+    xh_iv = []
+    g_frac = []
+    for j in range(n):
+        a = A[:, j].tocoo()
+        aty = sum(frac(v) * y1[int(i)] for i, v in zip(a.row, a.data))
+        if q[j] != 0:
+            xr = (aty - frac(c[j])) / frac(q[j])
+            if math.isfinite(lo[j]):
+                xr = max(xr, frac(lo[j]))
+            if math.isfinite(up[j]):
+                xr = min(xr, frac(up[j]))
+            xh_iv.append(_fiv(xr))
+            g_frac.append(frac(c[j]) + frac(q[j]) * xr - aty)
+            continue
+        if free[j]:
+            if frac(c[j]) - aty != 0:
+                if debug:
+                    print("  free q0 not zero", j, flush=True)
+                return None
+            xh_iv.append((0.0, 0.0))
+            g_frac.append(Fraction(0))
+            continue
+        xj = float(x[j])
+        xh_iv.append((xj, xj))
+        g_frac.append(frac(c[j]) - aty)
+    col_frac = Fraction(0)
+    for j in range(n):
+        g = g_frac[j]
+        if not math.isfinite(lo[j]) and not math.isfinite(up[j]):
+            if g != 0:
+                if debug:
+                    print("  free col", j, flush=True)
+                return None
+        elif math.isfinite(lo[j]) and not math.isfinite(up[j]):
+            if g < 0:
+                if debug:
+                    print("  lower col", j, flush=True)
+                return None
+            col_frac += g * frac(lo[j])
+        elif not math.isfinite(lo[j]) and math.isfinite(up[j]):
+            if g > 0:
+                if debug:
+                    print("  upper col", j, flush=True)
+                return None
+            col_frac += g * frac(up[j])
+        else:
+            col_frac += min(g * frac(lo[j]), g * frac(up[j]))
+    q_terms = []
+    for j in range(n):
+        if q[j] == 0:
+            continue
+        if not math.isfinite(q[j]) or q[j] < 0:
+            return None
+        sq = _square(xh_iv[j])
+        if math.isnan(sq[0]):
+            return None
+        q_terms.append(_imul((float(q[j]), float(q[j])), sq))
+    q_iv = _isum(q_terms)
+    if not math.isfinite(q_iv[1]) or math.isnan(q_iv[1]):
+        return None
+    total_frac = frac(prob["c0"]) + h_frac + col_frac - Fraction(q_iv[1]) / 2
+    d = _fiv(total_frac)[0]
+    if math.isnan(d) or d == -math.inf:
+        return None
+    yf = np.array([float(v) for v in y1])
+    ax = prob["A"] @ x
+    row_viol = _abs_violation(ax, prob["L"], prob["U"])
+    var_viol = _abs_violation(x, lo, up)
+    gabs = np.zeros(n)
+    for j in range(n):
+        giv = _fiv(g_frac[j])
+        gabs[j] = max(abs(giv[0]), abs(giv[1]))
+    p = float(prob["c0"] + prob["c"] @ x + 0.5 * x @ (prob["Q"] @ x))
+    scale = 1.0 + abs(p)
+    pimpact = float(np.abs(yf) @ row_viol + gabs @ var_viol) / scale
+    if debug:
+        print(f"  fr d={d!r} qhi={q_iv[1]!r} h={float(h_frac)!r} "
+              f"col={float(col_frac)!r} ops={ops}", flush=True)
+    return d, pimpact
+
+
+def _solve_exact(M, r):
+    """有理数 Gauss-Jordan。解けなければ None。"""
+    rows, cols = len(M), len(M[0]) if M else 0
+    aug = [list(M[i]) + [r[i]] for i in range(rows)]
+    pivots, row = [], 0
+    for col in range(cols):
+        piv = next((i for i in range(row, rows) if aug[i][col] != 0), None)
+        if piv is None:
+            continue
+        aug[row], aug[piv] = aug[piv], aug[row]
+        inv = 1 / aug[row][col]
+        aug[row] = [v * inv for v in aug[row]]
+        for i in range(rows):
+            if i != row and aug[i][col] != 0:
+                f = aug[i][col]
+                aug[i] = [a - f * b for a, b in zip(aug[i], aug[row])]
+        pivots.append(col)
+        row += 1
+    if any(aug[i][cols] != 0 for i in range(row, rows)):
+        return None
+    sol = [Fraction(0)] * cols
+    for i, col in enumerate(pivots):
+        sol[col] = aug[i][cols]
+    return sol
+
+
+def _psd_exact(Q):
+    """Q が有理数として厳密に半正定値かを LDL 分解で判定する。
+
+    PSD 行列は対角成分が非負で、正の対角 pivot で Schur 補元を取っても PSD。
+    対角が全て 0 になったら、PSD であるためには残りの非対角も全て 0 でなければ
+    ならない (0 対角で非対角が非零だと 2x2 小行列式が負)。浮動小数の固有値判定と
+    違い、丸めで生じた微小な負曲率を見逃さない。
+    """
+    n = Q.shape[0]
+    A = [[Fraction(float(Q[i, j])) for j in range(n)] for i in range(n)]
+    for k in range(n):
+        piv = None
+        for t in range(k, n):
+            if A[t][t] < 0:
+                return False
+            if A[t][t] > 0 and piv is None:
+                piv = t
+        if piv is None:
+            for i in range(k, n):
+                for j in range(k, n):
+                    if A[i][j] != 0:
+                        return False
+            return True
+        if piv != k:
+            A[k], A[piv] = A[piv], A[k]
+            for i in range(n):
+                A[i][k], A[i][piv] = A[i][piv], A[i][k]
+        p = A[k][k]
+        for i in range(k + 1, n):
+            f = A[i][k] / p
+            if f == 0:
+                continue
+            for j in range(k + 1, n):
+                A[i][j] -= f * A[k][j]
+    return True
+
+
+def _kkt_certificate(prob, x, debug=False):
+    """非対角 Q 用の厳密 KKT 下界 (d, pimpact)。
+
+    active set を固定して KKT 方程式を有理数で解き、得た (xs, y) で双対下界
+         c0 + h(y) - 1/2 xs'Qxs + sum_j min_{box} (c + Qxs - A'y)_j x_j
+    を厳密に評価する。xs の主実行可能性は要求しない (下界の妥当性に不要)。
+    自由列の g が厳密に 0 でない、または係数が無限大になる場合は None。
+    """
+    n, m = prob["n"], prob["m"]
+    if prob.get("psd", True) is not True:
+        return None
+    Qsp = prob["Q"].tocsc()
+    if (Qsp != Qsp.T).nnz != 0:
+        return None
+    qd = np.asarray(prob["Q"].diagonal()).ravel()
+    qc = Qsp.tocoo()
+    if np.any((qc.data != 0) & (qc.row != qc.col)):
+        if n > KKT_EXACT_PSD_MAX or not _psd_exact(prob["Q"]):
+            return None
+    elif np.any(qd < 0):
+        return None
+    lo, up, L, U = prob["lo"], prob["up"], prob["L"], prob["U"]
+    ax = prob["A"] @ x
+    at_lo, at_up = _at_bound(x, lo), _at_bound(x, up)
+    fixed = at_lo | at_up
+    xb = np.where(at_lo, lo, up)
+    F = np.flatnonzero(~fixed)
+    B = np.flatnonzero(fixed)
+    rows = np.flatnonzero(_at_bound(ax, L) | _at_bound(ax, U))
+    if len(F) + len(rows) > KKT_MAX_UNKNOWNS or n * m > KKT_MAX_DENSE:
+        return None
+    A = prob["A"].toarray(); Q = prob["Q"].toarray(); c = prob["c"]
+    Asp = prob["A"].tocsr()
+    frac = lambda v: Fraction(float(v))
+    xf = [frac(xb[j]) for j in B]
+    b_rows = np.where(_at_bound(ax, L), L, U)[rows]
+    k = len(F) + len(rows)
+    M, r = [], []
+    for j in F:
+        M.append([frac(Q[j, kk]) for kk in F] + [-frac(A[i, j]) for i in rows])
+        r.append(-frac(c[j]) - sum(frac(Q[j, b]) * xf[t] for t, b in enumerate(B)))
+    for ii, i in enumerate(rows):
+        M.append([frac(A[i, j]) for j in F] + [Fraction(0)] * len(rows))
+        r.append(frac(b_rows[ii]) - sum(frac(A[i, b]) * xf[t] for t, b in enumerate(B)))
+    sol = _solve_exact(M, r) if k else []
+    if sol is None:
+        return None
+    xs = [Fraction(0)] * n
+    for t, j in enumerate(F):
+        xs[j] = sol[t]
+    for t, j in enumerate(B):
+        xs[j] = xf[t]
+    yv = [Fraction(0)] * m
+    for ii, i in enumerate(rows):
+        yv[i] = sol[len(F) + ii]
+    h = Fraction(0)
+    for i in range(m):
+        yi = yv[i]
+        if yi > 0:
+            if not math.isfinite(L[i]):
+                return None
+            h += yi * frac(L[i])
+        elif yi < 0:
+            if not math.isfinite(U[i]):
+                return None
+            h += yi * frac(U[i])
+    Qxs = [Fraction(0)] * n
+    for j in range(n):
+        for kk, v in zip(Qsp.indices[Qsp.indptr[j]:Qsp.indptr[j + 1]],
+                         Qsp.data[Qsp.indptr[j]:Qsp.indptr[j + 1]]):
+            Qxs[j] += frac(v) * xs[int(kk)]
+    g = [frac(c[j]) + Qxs[j] for j in range(n)]
+    for i in range(m):
+        if yv[i] == 0:
+            continue
+        yi = yv[i]
+        for j, v in zip(Asp.indices[Asp.indptr[i]:Asp.indptr[i + 1]],
+                        Asp.data[Asp.indptr[i]:Asp.indptr[i + 1]]):
+            g[int(j)] -= yi * frac(v)
+    qterm = Fraction(1, 2) * sum(xs[j] * Qxs[j] for j in range(n))
+    box = Fraction(0)
+    for j in range(n):
+        if not math.isfinite(lo[j]) and not math.isfinite(up[j]):
+            if g[j] != 0:
+                return None
+        elif math.isfinite(lo[j]) and not math.isfinite(up[j]):
+            if g[j] < 0:
+                return None
+            box += g[j] * frac(lo[j])
+        elif not math.isfinite(lo[j]) and math.isfinite(up[j]):
+            if g[j] > 0:
+                return None
+            box += g[j] * frac(up[j])
+        else:
+            box += min(g[j] * frac(lo[j]), g[j] * frac(up[j]))
+    total = frac(prob["c0"]) + h - qterm + box
+    d = _fiv(total)[0]
+    if math.isnan(d) or d == -math.inf:
+        return None
+    yf = np.array([float(v) for v in yv])
+    row_viol = _abs_violation(ax, L, U)
+    var_viol = _abs_violation(x, lo, up)
+    gabs = np.zeros(n)
+    for j in range(n):
+        giv = _fiv(g[j])
+        gabs[j] = max(abs(giv[0]), abs(giv[1]))
+    p = float(prob["c0"] + prob["c"] @ x + 0.5 * x @ (prob["Q"] @ x))
+    scale = 1.0 + abs(p)
+    pimpact = float(np.abs(yf) @ row_viol + gabs @ var_viol) / scale
+    if debug:
+        print(f"  kkt d={d!r} k={k} pimpact={pimpact!r}", flush=True)
+    return d, pimpact
+
+
 def dual_bound(prob, xh, y):
     """凸 QP の最適値の厳密な下界 (取れなければ -inf)。
 
@@ -649,7 +1116,9 @@ def verify(prob, x, y):
     """独立再計算 (docstring 冒頭の定義)。Certificate を返す。
 
       p             主目的値 c0 + c'x + 1/2 x'Qx (浮動小数値)
-      d             _repair() した (xh, y) での dual_bound()。最適値の厳密な下界 (なければ -inf)
+      d             _repair() した (xh, y) での dual_bound()。最適値の厳密な下界 (なければ -inf)。
+                    自由変数を含み dual_bound() が -inf の場合は _fr_certificate() /
+                    _kkt_certificate() の厳密証明も試し、より強い下界を採用する。
       pinf          相対主実行不能度 max 違反 / (1 + |境界|)
       roundoff      p の丸め誤差上界 / (1 + |p|)
       pimpact       主違反の目的値影響 (sum |y_i| 行違反_i + sum |g_j| 列違反_j) / (1 + |p|)。
@@ -690,6 +1159,15 @@ def verify(prob, x, y):
     g = 0.5 * (gl + gu)
     pimpact = float(np.abs(yr) @ _abs_violation(ax, prob["L"], prob["U"])
                     + np.abs(g) @ _abs_violation(x, prob["lo"], prob["up"])) / scale
+    free = (~np.isfinite(prob["lo"])) & (~np.isfinite(prob["up"]))
+    if d == -math.inf and free.any():
+        fr = _fr_certificate(prob, x, y)
+        if fr is not None and fr[0] > d:
+            d, pimpact = fr
+        if d == -math.inf or (p - d) / scale > UNCERTAINTY_TOL:
+            kk = _kkt_certificate(prob, x)
+            if kk is not None and kk[0] > d:
+                d, pimpact = kk
     return Certificate(p, d, pinf, roundoff, pimpact, iters)
 
 
