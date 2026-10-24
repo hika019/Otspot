@@ -188,6 +188,48 @@ def _pairs(tokens, has_set_name):
     return [(rest[k], float(rest[k + 1])) for k in range(0, len(rest), 2)]
 
 
+class _VectorSection:
+    """RHS/RANGES の名前付きベクタ状態。最初に開いたベクタだけを採用する。
+
+    MPS/QPS 標準は同一セクションに複数の名前付きベクタを許し、各行は慣行
+    (GLPK/CPLEX、otspot-io/src/common/mod.rs の VectorSectionState と同じ) により
+    最初に現れたベクタの値を採用して以降のベクタを捨てる。行が後続ベクタにしか
+    現れないときは値が落ちるので、インデックス側 (L/U) を既定値のままにする。
+    名前を省いた行はセクションで開いているベクタへ属性する。名前の無い行の後で
+    名前付きベクタが現れると 2 通りの解釈で値が異なるので曖昧として退ける。
+    同一 (ベクタ, 行) の重複は、後続ベクタを棄てるときでも検査して不正入力の
+    黙認を防ぐ。
+    """
+
+    ANONYMOUS = ""
+
+    def __init__(self):
+        self.seen = set()
+        self.first = None
+
+    def record(self, target, section, vector_name, row, value):
+        if self.first == self.ANONYMOUS and vector_name is not None:
+            raise ValueError(
+                f"{section}: vector {vector_name!r} is named after unnamed entries "
+                f"were already read; the section is ambiguous (one vector with the "
+                f"name omitted earlier, or a second vector whose entries must be "
+                f"discarded)")
+        if vector_name is not None:
+            vector = vector_name
+        elif self.first is not None:
+            vector = self.first
+        else:
+            vector = self.ANONYMOUS
+        if (vector, row) in self.seen:
+            raise ValueError(
+                f"{section}: duplicate entry for row {row!r} in vector {vector!r}")
+        self.seen.add((vector, row))
+        if self.first is None:
+            self.first = vector
+        if self.first == vector:
+            target[row] = value
+
+
 def parse_qps(path, fixed=False):
     """独立 QPS パーサ。辞書 (c0, c, A(csr), L, U, l, u, Q(csr, 対称), n, m) を返す。"""
     section = None
@@ -197,6 +239,7 @@ def parse_qps(path, fixed=False):
     cols = {}
     c, a_i, a_j, a_v = {}, [], [], []
     rhs, rng, bnd, qent = {}, {}, [], []
+    vec_state = {"RHS": _VectorSection(), "RANGES": _VectorSection()}
     with open(path, errors="strict") as f:
         for raw in f:
             line = raw.rstrip("\n")
@@ -247,15 +290,18 @@ def parse_qps(path, fixed=False):
             elif section in ("RHS", "RANGES"):
                 if fixed:
                     pairs = [(ft[k], float(ft[k + 1])) for k in (2, 4) if ft[k]]
+                    name = ft[1] or None
                 else:
                     pairs = _pairs(t, len(t) % 2 == 1)
-                dest = rhs if section == "RHS" else rng
+                    name = t[0] if len(t) % 2 == 1 else None
+                state = vec_state[section]
+                target = rhs if section == "RHS" else rng
                 for r, v in pairs:
                     if r in free_rows:
                         if v != 0.0:
                             raise ValueError(f"nonzero {section} on free row {r}")
                         continue
-                    dest[r] = v
+                    state.record(target, section, name, r, v)
             elif section == "BOUNDS":
                 if fixed:
                     kind, col = ft[0], ft[2]
@@ -445,9 +491,12 @@ def _psd_ok(Q):
     """Q が半正定値か。True / False / None (判定不能) を返す。
 
     Q の非ゼロ非対角グラフの連結成分 (ブロック対角構造) ごとに固有値を調べる。
-    ブロックが PSD_DENSE_MAX 以下のときだけ密固有値計算し、それより大きいブロックは
-    「判定不能」として None を返す (証明できない Q は検算しない)。対角行列は対角成分
-    だけで判定する。
+    負の対角成分は e_i' Q e_i < 0 をデータ値そのもの (丸め誤差を含まない rational 値)
+    で与えるので、固有値計算の許容差とは無関係に非 PSD と判定する。対角ブロックに
+    許容差を許すと、それ自身が非 PSD な Q に凸性の接線下界 (dual_bound) を使って
+    誤った「証明書」を作りえる。ブロックが PSD_DENSE_MAX 以下のときだけ密固有値計算し、
+    それより大きいブロックは「判定不能」として None を返す (証明できない Q は検算
+    しない)。計算で得た固有値は丸め誤差上界だけ広げた許容差で判定する。
     """
     n = Q.shape[0]
     if n == 0:
@@ -455,21 +504,19 @@ def _psd_ok(Q):
     diag = np.asarray(Q.diagonal()).ravel()
     if not np.all(np.isfinite(diag)):
         return False
+    if np.any(diag < 0):
+        return False
     A = Q.tocsr(copy=True)
     A.setdiag(0)
     A.eliminate_zeros()
     if A.nnz == 0:
-        scale = max(1.0, float(np.abs(diag).max()))
-        return bool(diag.min() >= -PSD_REL_TOL * scale)
+        return True
     _, labels = csgraph.connected_components(A, directed=False)
     unknown = False
     for c in np.unique(labels):
         idx = np.flatnonzero(labels == c)
         if len(idx) == 1:
-            d = float(diag[idx[0]])
-            scale = max(1.0, abs(d))
-            if d < -PSD_REL_TOL * scale:
-                return False
+            # 対角成分は上で < 0 を退けているので、残る判定はない。
             continue
         if len(idx) > PSD_DENSE_MAX:
             unknown = True

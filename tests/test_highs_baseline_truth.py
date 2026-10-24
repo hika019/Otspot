@@ -656,6 +656,33 @@ class PsdAndOverflowTests(unittest.TestCase):
         self.assertFalse(truth._psd_ok(sp.csr_matrix(np.array([[-1.0]]))))
         self.assertFalse(truth._psd_ok(sp.csr_matrix(np.array([[1.0, 2.0], [2.0, 1.0]]))))
 
+    def test_psd_rejects_negative_diagonal_below_tolerance(self):
+        # P1 指摘: 許容差 (PSD_REL_TOL) で受け入れると min -0.5e-11 x^2 over [0, 1e8]
+        # のような非 PSD Q に凸接線下界が使われ、x=0 の p=d=0 が証明書として誤って
+        # 合格する。対角成分はパース値そのもの (丸め誤差なし) なので、どんなに小さく
+        # ても負なら非 PSD。
+        self.assertFalse(truth._psd_ok(sp.csr_matrix(np.array([[-1e-11]]))))
+        self.assertFalse(truth._psd_ok(
+            sp.csr_matrix(np.array([[1.0, 1.0], [1.0, -1e-11]]))))
+        # 受け入れ側の境界も固定する (半正定値の微小値と -0.0)。
+        self.assertTrue(truth._psd_ok(sp.csr_matrix(np.array([[1e-11]]))))
+        self.assertTrue(truth._psd_ok(sp.csr_matrix(np.array([[-0.0]]))))
+
+    def test_minimal_negative_curvature_is_not_certified(self):
+        # P1 指摘の end-to-end sentinel: min -0.5e-11 x^2 over [0, 1e8] の真の
+        # 最適値は -50000。旧コードは許容差で Q を PSD と判定し、x=0 の p=d=0 を
+        # 重み 0 で証明書として合格していた。
+        prob = scalar_problem()
+        prob["c"] = np.zeros(1)
+        prob["Q"] = sp.csr_matrix(np.array([[-1e-11]]))
+        prob["up"] = np.array([1e8])
+        # load_qps と同じ流れで psd フラグを詰める。
+        prob["psd"] = truth._psd_ok(prob["Q"])
+        cert = truth.verify(prob, np.array([0.0]), np.zeros(0))
+        self.assertEqual(cert.d, -math.inf)
+        ok, _p, _msg = truth.certify(prob, ("Optimal", np.array([0.0]), np.zeros(0), 0.0))
+        self.assertFalse(ok)
+
     def test_nonconvex_problem_is_not_certified(self):
         prob = scalar_problem()
         prob["Q"] = sp.csr_matrix(np.array([[-1.0]]))
@@ -686,6 +713,165 @@ class FixedBoundTypeTests(unittest.TestCase):
 
     def test_known_bound_type_is_accepted(self):
         self.assertEqual(self.parse("UP")["up"][0], 1.0)
+
+
+FIXED_QPS_FIRST_SECOND = (
+    "NAME t\n"
+    "ROWS\n"
+    " N  OBJ\n"
+    " E  r\n"
+    "COLUMNS\n"
+    "    X         OBJ       0.0\n"
+    "    X         r         1.0\n"
+    "QUADOBJ\n"
+    "    X         X         1.0\n"
+    "RHS\n"
+    "    FIRST     r         1.0\n"
+    "    SECOND    r         2.0\n"
+    "ENDATA\n"
+)
+
+FREE_QPS_FIRST_SECOND = (
+    "NAME t\n"
+    "ROWS\n"
+    " N OBJ\n"
+    " E r\n"
+    "COLUMNS\n"
+    " X OBJ 0.0\n"
+    " X r 1.0\n"
+    "QUADOBJ\n"
+    " X X 1.0\n"
+    "RHS\n"
+    " FIRST r 1.0\n"
+    " SECOND r 2.0\n"
+    "ENDATA\n"
+)
+
+
+class VectorSectionTests(unittest.TestCase):
+    """RHS/RANGES の複数名前付きベクタ: 最初のベクタが勝つ (otspot-io と同じ)。"""
+
+    def parse(self, text, fixed=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.qps"
+            path.write_text(text)
+            return truth.parse_qps(str(path), fixed=fixed)
+
+    def test_rhs_multiple_named_vectors_first_wins_fixed(self):
+        # P1 指摘: 第二ベクタで上書きすると、独立オラクルが第一ベクタを採用する
+        # production パーサ (otspot-io/src/common/mod.rs:948) と異なるモデルを
+        # 証明してしまう (test_qps_rhs_multiple_named_vectors_first_wins と同じ形状)。
+        prob = self.parse(FIXED_QPS_FIRST_SECOND, fixed=True)
+        self.assertEqual(prob["L"][0], 1.0)
+        self.assertEqual(prob["U"][0], 1.0)
+
+    def test_rhs_multiple_named_vectors_first_wins_free(self):
+        prob = self.parse(FREE_QPS_FIRST_SECOND)
+        self.assertEqual(prob["L"][0], 1.0)
+        self.assertEqual(prob["U"][0], 1.0)
+
+    def test_ranges_multiple_named_vectors_first_wins(self):
+        # RANGES も同じ上書き問題を持つ。G 行 r (rhs は FIRST ベクタの 1.0) に
+        # FIRST = 1.0 → U = 2.0。SECOND = 4.0 を受けても 2.0 のままであること。
+        text = (
+            "NAME t\n"
+            "ROWS\n"
+            " N OBJ\n"
+            " G r\n"
+            "COLUMNS\n"
+            " X OBJ 0.0\n"
+            " X r 1.0\n"
+            "QUADOBJ\n"
+            " X X 1.0\n"
+            "RHS\n"
+            " FIRST r 1.0\n"
+            "RANGES\n"
+            " FIRST r 1.0\n"
+            " SECOND r 4.0\n"
+            "ENDATA\n"
+        )
+        prob = self.parse(text)
+        self.assertEqual(prob["L"][0], 1.0)
+        self.assertEqual(prob["U"][0], 2.0)
+
+    def test_named_vector_after_unnamed_entries_is_rejected(self):
+        text = (
+            "NAME t\n"
+            "ROWS\n"
+            " N OBJ\n"
+            " E r\n"
+            "COLUMNS\n"
+            " X OBJ 0.0\n"
+            " X r 1.0\n"
+            "QUADOBJ\n"
+            " X X 1.0\n"
+            "RHS\n"
+            " r 1.0\n"
+            " FIRST r 2.0\n"
+            "ENDATA\n"
+        )
+        with self.assertRaises(ValueError):
+            self.parse(text)
+
+    def test_duplicate_entry_in_first_vector_is_rejected(self):
+        text = (
+            "NAME t\n"
+            "ROWS\n"
+            " N OBJ\n"
+            " E r\n"
+            "COLUMNS\n"
+            " X OBJ 0.0\n"
+            " X r 1.0\n"
+            "QUADOBJ\n"
+            " X X 1.0\n"
+            "RHS\n"
+            " FIRST r 1.0\n"
+            " FIRST r 2.0\n"
+            "ENDATA\n"
+        )
+        with self.assertRaises(ValueError):
+            self.parse(text)
+
+    def test_duplicate_entry_in_discarded_later_vector_is_rejected(self):
+        # 後続ベクタは棄てられるが、不正入力の黙認はしない (production と同じ)。
+        text = (
+            "NAME t\n"
+            "ROWS\n"
+            " N OBJ\n"
+            " E r\n"
+            "COLUMNS\n"
+            " X OBJ 0.0\n"
+            " X r 1.0\n"
+            "QUADOBJ\n"
+            " X X 1.0\n"
+            "RHS\n"
+            " FIRST r 1.0\n"
+            " SECOND r 2.0\n"
+            " SECOND r 3.0\n"
+            "ENDATA\n"
+        )
+        with self.assertRaises(ValueError):
+            self.parse(text)
+
+    def test_unnamed_line_after_named_vector_is_duplicate_in_same_vector(self):
+        text = (
+            "NAME t\n"
+            "ROWS\n"
+            " N OBJ\n"
+            " E r\n"
+            "COLUMNS\n"
+            " X OBJ 0.0\n"
+            " X r 1.0\n"
+            "QUADOBJ\n"
+            " X X 1.0\n"
+            "RHS\n"
+            " FIRST r 1.0\n"
+            " r 0.0\n"
+            "ENDATA\n"
+        )
+        # 名前を省いた行は FIRST へ属性されるので、(FIRST, r) の重複として退けられる。
+        with self.assertRaises(ValueError):
+            self.parse(text)
 
 
 class BaselineCsvSeparationTests(unittest.TestCase):
