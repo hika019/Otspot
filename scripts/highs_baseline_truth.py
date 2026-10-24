@@ -30,9 +30,15 @@ fixed format。OBJSENSE、MARKER (整数変数)、2 本目以降の N 行への�
     有理数評価により浮動小数の区間では作れない [0, 0] の縮約費用を与える。
   - 相対不確かさ |p - d|/(1+|p|) + 丸め影響 + 主違反影響 <= UNCERTAINTY_TOL、
     相対主実行不能度 <= PRIMAL_INF_TOL、ソルバ報告値と自前再計算の一致。
+    加えて参照値 p を「最適値の上界」として主張するには、原候補が有理数で厳密に
+    実行可能である必要がある (一次感度 |y|×違反量 は境界にならない; y=0・違
+    反 1e-8・真の感度 1e8 の例で 0 を誤認証できる)。(_exact_primal_optimum()) が
+    主実行可能性と f(xh) == d (厳密 KKT) を立証した候補 (primal=True) に限って
+    p を厳密な最適値に置き、他の候補は UNCERTIFIED に倒す。
   - Q の半正定値性: load_qps が非ゼロ非対角グラフのブロックごとに確認する。負固有値が
     丸め許容を超える場合と、ブロックが大きすぎて判定できない場合は検算不能
-    (d = -inf) とし、その問題は UNCERTIFIED とする (非凸 QP は対象外)。
+    (d = -inf) とし、その問題は UNCERTIFIED とする (非凸 QP は対象外)。負の対角
+    成分は丸め誤差を含まないデータ値そのものなので許容差なしに即非 PSD。
 
 Usage:
   python3 scripts/highs_baseline_truth.py data/maros_meszaros/LISWET7.QPS ...
@@ -908,6 +914,7 @@ def _fr_certificate(prob, x, y, debug=False):
                 return None
             h_frac += yi * frac(prob["U"][i])
     xh_iv = []
+    xs_frac = []
     g_frac = []
     for j in range(n):
         a = A[:, j].tocoo()
@@ -919,6 +926,7 @@ def _fr_certificate(prob, x, y, debug=False):
             if math.isfinite(up[j]):
                 xr = min(xr, frac(up[j]))
             xh_iv.append(_fiv(xr))
+            xs_frac.append(xr)
             g_frac.append(frac(c[j]) + frac(q[j]) * xr - aty)
             continue
         if free[j]:
@@ -927,10 +935,12 @@ def _fr_certificate(prob, x, y, debug=False):
                     print("  free q0 not zero", j, flush=True)
                 return None
             xh_iv.append((0.0, 0.0))
+            xs_frac.append(Fraction(0))
             g_frac.append(Fraction(0))
             continue
         xj = float(x[j])
         xh_iv.append((xj, xj))
+        xs_frac.append(Fraction(xj))
         g_frac.append(frac(c[j]) - aty)
     col_frac = Fraction(0)
     for j in range(n):
@@ -985,7 +995,11 @@ def _fr_certificate(prob, x, y, debug=False):
     if debug:
         print(f"  fr d={d!r} qhi={q_iv[1]!r} h={float(h_frac)!r} "
               f"col={float(col_frac)!r} ops={ops}", flush=True)
-    return d, pimpact
+    # 厳密最適値 (主実行可能性 + 補完性) の検査は独立再計算 (_exact_primal_optimum)
+    # で行い、通れば参照値を厳密な最適値に置く。通らなければ一次感度の pimpact
+    # のまま (certify の primal ゲートで未認証扱いになる)。
+    pstar = _exact_primal_optimum(_ExactData(prob), xs_frac, y1, g_frac)
+    return d, pimpact, pstar
 
 
 def _solve_exact(M, r):
@@ -1162,7 +1176,10 @@ def _kkt_certificate(prob, x, debug=False):
     pimpact = float(np.abs(yf) @ row_viol + gabs @ var_viol) / scale
     if debug:
         print(f"  kkt d={d!r} k={k} pimpact={pimpact!r}", flush=True)
-    return d, pimpact
+    # 厳密最適値の検査は独立再計算 (_exact_primal_optimum) で行う。KKT 系は active 行
+    # を厳密に境界へ固定しているので、ここが通れば参照値の主上界は厳密になる。
+    pstar = _exact_primal_optimum(_ExactData(prob), xs, yv)
+    return d, pimpact, pstar
 
 
 def _solve_banded_exact(rows, rhs, halfband, deadline):
@@ -1296,7 +1313,10 @@ def _banded_free_certificate(prob, x, y_hint, p):
         gabs[j] = max(abs(giv[0]), abs(giv[1]))
     pimpact = float(np.abs(np.array([float(v) for v in y0])) @ row_viol
                     + gabs @ var_viol) / (1.0 + abs(p))
-    return df, pimpact
+    # 弱双対は g のみを厳密に 0 にしたが、参照値の主上界 (pimpact を境に行えない
+    # y_i × 違反の一次感度の代わり) には行境界の厳密な充足が要る (P1 指摘)。
+    pstar = _exact_primal_optimum(data, xh, y0)
+    return df, pimpact, pstar
 
 
 def dual_bound(prob, xh, y):
@@ -1577,6 +1597,12 @@ class _ExactData:
         self.c = [Fraction(float(v)) for v in prob["c"]]
         self.A = self._columns(prob["A"].tocsc())
         self.Q = self._columns(prob["Q"].tocsc())
+        # 行ごとの非ゼロ (列番号, Fraction)。pin の方程式 (A xh_i = 境界) は
+        # 行 i をまたぐ列の和を有理数で立てるのに必要。
+        self.Arow = [[] for _ in range(self.m)]
+        for j, colv in enumerate(self.A):
+            for i, v in colv:
+                self.Arow[i].append((j, v))
         finite = lambda v: Fraction(float(v)) if math.isfinite(v) else None
         self.L = [finite(v) for v in prob["L"]]
         self.U = [finite(v) for v in prob["U"]]
@@ -1601,6 +1627,72 @@ def _exact_g(data, xh, y):
             g -= v * y[i]
         out.append(g)
     return out
+
+
+def _exact_axh(data, xh):
+    """A xh を有理数で評価する (_exact_g と同じ列ごとの走査)。"""
+    ax = [Fraction(0)] * data.m
+    for j, xj in enumerate(xh):
+        if xj:
+            for i, v in data.A[j]:
+                ax[i] += v * xj
+    return ax
+
+
+def _exact_primal_optimum(data, xh, y, gex=None):
+    """(xh, y) が厳密 KKT を作るか有理数で検査し、成り立てば厳密な最適値を返す。
+
+    条件は xh の列境界と行境界の厳密な充足 (主実行可能性) と、弱双対 d(xh, y)
+    (_exact_d() の符号制約込み) が実行可能点 xh の目的値 c0 + c'xh + 1/2 xh'Qxh
+    と有理数として厳密に一致すること。Q が半正定値なら d は任意の実行可能 x の
+    下界なので、一致は xh が最適であること (主上界 = 双対下界) と同値で、返す
+    Fraction は最適値そのままになる。主実行可能性や符号の不一致なら None。
+
+    浮動小数の候補 x は A x が有理数として境界に一致しないことが普通で、一次感度
+    (|y| × 違反量) は「x が実行可能でないとき p が最適値の上界でない」差を境に行え
+    ない (P1 指摘)。この検査を通した候補だけが参照値 p の厳密な上界側を持ち、
+    証明書は slack を 0 に取れる。
+    """
+    d = _exact_d(data, xh, y, gex)
+    if d is None:
+        return None
+    for j, xj in enumerate(xh):
+        lo, up = data.lo[j], data.up[j]
+        if (lo is not None and xj < lo) or (up is not None and xj > up):
+            return None
+    ax = _exact_axh(data, xh)
+    for i, v in enumerate(ax):
+        lo, up = data.L[i], data.U[i]
+        if (lo is not None and v < lo) or (up is not None and v > up):
+            return None
+    f = data.c0
+    for j, xj in enumerate(xh):
+        if xj:
+            f += data.c[j] * xj
+            s = Fraction(0)
+            for i, v in data.Q[j]:
+                s += v * xh[i]
+            f += xj * s / 2
+    if f != d:
+        return None
+    return f
+
+
+def _upgraded_certificate(base, pstar, method):
+    """厳密最適値 pstar (Fraction) を参照値と不確かさに置いた証明書を作る。
+
+    d は pstar 以下に丸めた float、pinf は 0 (xh は有理数で厳密実行可能と検査済み)、
+    roundoff は float(pstar) の丸め誤差上界、pimpact は d の下向き丸め分を有理数で
+    境界に置く。|p − d| + roundoff + pimpact の和が float(p* ) と p* の厳密な距離の
+    上界になるため、参照値の相対不確かさは丸め誤差の桁で済む。
+    """
+    pf = float(pstar)
+    abs_p = abs(pf)
+    perr = _fraction_float_up(abs(pstar - Fraction(pf)) / (1.0 + abs_p))
+    d = _exact_float(pstar)
+    return Certificate(pf, d, 0.0, perr,
+                       _fraction_float_up((pstar - Fraction(d)) / (1.0 + abs_p)),
+                       base.repair_iters, method, True)
 
 
 def _exact_d(data, xh, y, gex=None):
@@ -1775,13 +1867,38 @@ def _recover_exact(prob, data, s, xh0, y0, E0, R, deadline):
 
     E0 の列は g_j = 0 を方程式として解き、xh と行乗数を動かす。片側無限列の g の
     符号がまだ悪い列、自由列の g != 0、符号制約に反する行乗数を検出したら、その列/
-    行を方程式に加えて再解する。返す (xh, y, gex, 反復数) はすべて Fraction。
+    行を方程式に加えて再解する。加えて、y_i != 0 か等式の行は主実行可能な A xh =
+    境界 の方程式 (primal pin) を順次追加する: これがないと候補の xh はほとんどの
+    行で有理数として境界から少し外れ、_exact_primal_optimum() の厳密最適値 (主上界
+    と双対下界の一致) が立たない。返す (xh, y, gex, 反復数) はすべて Fraction。
     """
     n, m = data.n, data.m
     I = np.flatnonzero(s["interior"])
     ridx = {int(r): k for k, r in enumerate(R)}
     xh = [Fraction(float(v)) for v in xh0]
     y = [Fraction(float(v)) for v in y0]
+
+    def _snap_y():
+        """境界から浮いた行 (float の active 分類で境界に触れていない行) の乗数を 0 に落とす。
+
+        最適点で境界から浮いた行の乗数は厳密な 0 である (相補性)。y_i != 0 の行は
+        pin 方程式で Axh_i が境界と厳密に一致するので補完性が保たれるが、浮動小数の
+        ノイズ乗数 (1e-17 程度の != 0) を残すと偽の pin が生えて系が過剰拘束になる。
+        スナップの判定は有理数の axh との厳密一致ではなく _exact_sets() の float
+        active 分類 (atL | atU) を使う: スナップ後の xh は有理数として境界に
+        一致しない (1e-13 の誤差) ので厳密一致では境界から浮いたと誤判定する。
+        """
+        for i in R:
+            if y[int(i)] == 0:
+                continue
+            if not (s["atL"][int(i)] or s["atU"][int(i)]):
+                y[int(i)] = Fraction(0)
+
+    axh = _exact_axh(data, xh)
+    # 最初に y をスナップしてから gex/E を作る。逆順だと gex がスナップ前の
+    # 浮動小数ノイズ y を含み、最初の方程式の右辺がずれる (TAME で g = -y が
+    # 残って no-progress になる)。
+    _snap_y()
     gex = _exact_g(data, xh, y)
     lo_side = np.isfinite(prob["lo"]) & ~np.isfinite(prob["up"]) & ~s["fixed"]
     up_side = np.isfinite(prob["up"]) & ~np.isfinite(prob["lo"]) & ~s["fixed"]
@@ -1791,6 +1908,39 @@ def _recover_exact(prob, data, s, xh0, y0, E0, R, deadline):
     E |= {int(j) for j in np.flatnonzero(up_side) if gex[j] > 0}
     E |= {int(j) for j in np.flatnonzero(free) if gex[j] != 0}
     pin_rows = set()
+    # primal pin: 行 i の A xh_i を境界値に厳密に合わせる方程式 (pinned は i → 境界値)。
+    # 行をまたぐ候補の xh は有理数として境界に一致しないことが普通なので、y != 0 の
+    # 行と等式行は初期から固定し、それ以外で境界を厳密に外れた行は各反復で追加する。
+    pinned = {}
+
+    def _pin_target(i):
+        """行 i を pin するべきなら境界値 (Fraction)、不要なら None を返す。
+
+        境界値は行乗数の符号 (y_i > 0 なら L, y_i < 0 なら U)、等式行は L、
+        y = 0 で境界を厳密に外れた行は外れている側の境界とする。"""
+        if i in pinned:
+            return None
+        lo_, up_ = data.L[i], data.U[i]
+        eq = lo_ is not None and up_ is not None and lo_ == up_
+        yi = y[i]
+        if eq:
+            return lo_
+        if yi > 0:
+            return lo_
+        if yi < 0:
+            return up_
+        # y = 0 の行は境界内にさえあれば pin 不要。
+        if lo_ is not None and axh[i] < lo_:
+            return lo_
+        if up_ is not None and axh[i] > up_:
+            return up_
+        return None
+
+    for i in R:
+        t = _pin_target(int(i))
+        if t is not None:
+            pinned[int(i)] = t
+
     max_iter = 15
     for it in range(max_iter):
         if time.monotonic() > deadline:
@@ -1814,6 +1964,23 @@ def _recover_exact(prob, data, s, xh0, y0, E0, R, deadline):
             if k is not None:
                 rows.append({len(I) + k: Fraction(1)})
                 rhs.append(-y[i])
+        for i in sorted(pinned):
+            k = ridx.get(int(i))
+            if k is not None:
+                d = {}
+                # data.A は列ごとの格納なので、行 i をまたぐ項は Arow で拾う。
+                # (data.A[i] は列 i の項で、pin に必要な行 i の和にならない。)
+                for j2, v in data.Arow[i]:
+                    k2 = np.searchsorted(I, j2)
+                    if k2 < len(I) and I[k2] == j2:
+                        d[int(k2)] = d.get(int(k2), Fraction(0)) + v
+                if not d:
+                    # 行内に interior 列がなければ A xh_i は固定列だけで決まり、
+                    # xh が更新されていない限り pin は既に成立している。維持検査
+                    # は pin_target() に任せる。
+                    continue
+                rows.append({k2: v for k2, v in d.items() if v})
+                rhs.append(pinned[i] - axh[i])
         out = _solve_sparse_exact(rows, rhs, deadline)
         if out is None:
             return None
@@ -1826,6 +1993,8 @@ def _recover_exact(prob, data, s, xh0, y0, E0, R, deadline):
             else:
                 new_y[R[k - len(I)]] += v
         xh, y = new_xh, new_y
+        axh = _exact_axh(data, xh)
+        _snap_y()
         gex = _exact_g(data, xh, y)
         badlo = [int(j) for j in np.flatnonzero(lo_side) if gex[j] < 0]
         badup = [int(j) for j in np.flatnonzero(up_side) if gex[j] > 0]
@@ -1833,12 +2002,15 @@ def _recover_exact(prob, data, s, xh0, y0, E0, R, deadline):
         rowbad = [int(i) for i in R
                   if (y[i] > 0 and not math.isfinite(prob["L"][i]))
                   or (y[i] < 0 and not math.isfinite(prob["U"][i]))]
-        if not badlo and not badup and not badfree and not rowbad:
+        newpins = [int(i) for i in R if _pin_target(int(i)) is not None]
+        for i in newpins:
+            pinned[i] = _pin_target(i)
+        if not badlo and not badup and not badfree and not rowbad and not newpins:
             return xh, y, gex, it + 1
-        old = (len(E), len(pin_rows))
+        old = (len(E), len(pin_rows), len(pinned))
         E |= set(badlo) | set(badup) | set(badfree)
         pin_rows |= set(rowbad)
-        if (len(E), len(pin_rows)) == old:
+        if (len(E), len(pin_rows), len(pinned)) == old:
             return None
     return None
 
@@ -1911,9 +2083,11 @@ def _exact_pimpact(p, y, gex, row_v, col_v):
 def _exact_certificate(prob, x, base, y_hint):
     """厳密有理数の双対候補を作り、base と同じ p/pinf/roundoff を持つ Certificate を返す。
 
-    双対 QP の候補を出発点に、負の縮約費用だけを修復する戦略 A と、margin LP で
-    零接触集合を同定してから修復する戦略 B を試す。返す d は _exact_d() の Fraction を
-    下向きに丸めた float なので、浮動小数の丸めを含めても最適値の下界である。
+    ソルバの (x, y) を基点に interior 列の g_j = 0 と行の pin (Axh = 境界) を厳密に
+    解く完全 KKT 救済 (戦略 A1) を最初に試す。dual QP 候補を基点にした同じ系
+    (戦略 A2) と、margin LP の零接触集合を使う戦略 B も試す。補完性まで立った候補は
+    _exact_primal_optimum() で参照値を厳密な主最適値に置く。返す d は _exact_d() の
+    Fraction を下向きに丸めた float なので、浮動小数の丸めを含めても最適値の下界である。
     """
     if prob.get("psd", True) is not True:
         return None
@@ -1931,10 +2105,16 @@ def _exact_certificate(prob, x, base, y_hint):
         d = _exact_d(data, xh, y, gex)
         if d is None:
             return None
-        cert = Certificate(base.p, _exact_float(d), max(base.pinf, pinf_exact),
-                           base.roundoff,
-                           _exact_pimpact(base.p, y, gex, row_v, col_v),
-                           base.repair_iters, method)
+        # 厳密最適値 (主実行可能性 + 補完性) が立つ候補は参照値を厳密な最適値に
+        # 置く (一次感度の pimpact は上界の境界にならない; P1 指摘)。
+        pstar = _exact_primal_optimum(data, xh, y, gex)
+        if pstar is not None:
+            cert = _upgraded_certificate(base, pstar, method)
+        else:
+            cert = Certificate(base.p, _exact_float(d), max(base.pinf, pinf_exact),
+                               base.roundoff,
+                               _exact_pimpact(base.p, y, gex, row_v, col_v),
+                               base.repair_iters, method)
         candidates.append(cert)
         return cert
 
@@ -1964,17 +2144,36 @@ def _exact_certificate(prob, x, base, y_hint):
         xh, y, gex, _ = out
         return evaluate(method, xh, y, gex)
 
+    def interior_E0(gex0):
+        # interior 列の g_j = 0 を最初から方程式にする。主上界と双対下界の一致
+        # (= 参照値の厳密な主最適値) に interior 列の補完性が必要で、縮約費用の
+        # 符号だけの修復では d が弱い下界にとどまり pimpact が上界にならない。
+        lo_side = np.isfinite(prob["lo"]) & ~np.isfinite(prob["up"]) & ~s["fixed"]
+        up_side = np.isfinite(prob["up"]) & ~np.isfinite(prob["lo"]) & ~s["fixed"]
+        E0 = {int(j) for j in np.flatnonzero(s["interior"])}
+        E0 |= {int(j) for j in np.flatnonzero(lo_side) if gex0[j] < 0}
+        E0 |= {int(j) for j in np.flatnonzero(up_side) if gex0[j] > 0}
+        return E0
+
+    # 戦略 A1: ソルバの (x, y) をそのまま基点に、全行を候補に残す完全な KKT 救済。
+    # 基点の x が真の解に近いので _exact_base() の境界スナップと y のスナップ
+    # (Axh が境界から浮いた行の乗数を 0) が正しい active 集合を反映し、pin 方程式
+    # も崩れない。dual QP 候補の基点は Q の縮退で degenerate になり、本物の乗数を
+    # 0 に落としたまま E を空で終わる (ZECEVIC2) ので、ソルバ基点を先に試す。
+    xh0, y0 = _exact_base(prob, s, x, _project_dual(prob, y_hint), all_rows)
+    gex0 = _exact_g(data, [Fraction(float(v)) for v in xh0],
+                    [Fraction(float(v)) for v in y0])
+    cert = try_recover("exact-neg", x, _project_dual(prob, y_hint), interior_E0(gex0),
+                       all_rows)
+    if cert is not None and uncertainty(cert) <= UNCERTAINTY_TOL:
+        return cert
     if qp is not None:
-        # 戦略 A: 全行を候補に残し、厳密に負の縮約費用だけを修復する。
+        # 戦略 A2: dual QP 候補 (xh_qp, y_qp) を基点に同じ系を解く保険。
         xh_qp, y_qp = qp
         xh0, y0 = _exact_base(prob, s, xh_qp, y_qp, all_rows)
         gex0 = _exact_g(data, [Fraction(float(v)) for v in xh0],
                         [Fraction(float(v)) for v in y0])
-        lo_side = np.isfinite(prob["lo"]) & ~np.isfinite(prob["up"]) & ~s["fixed"]
-        up_side = np.isfinite(prob["up"]) & ~np.isfinite(prob["lo"]) & ~s["fixed"]
-        E_neg = {int(j) for j in np.flatnonzero(lo_side) if gex0[j] < 0}
-        E_neg |= {int(j) for j in np.flatnonzero(up_side) if gex0[j] > 0}
-        cert = try_recover("exact-neg", xh_qp, y_qp, E_neg, all_rows)
+        cert = try_recover("exact-neg-qp", xh_qp, y_qp, interior_E0(gex0), all_rows)
         if cert is not None and uncertainty(cert) <= UNCERTAINTY_TOL:
             return cert
         # 戦略 B: margin LP の零接触集合を使い、active 行だけを候補に残す。
@@ -2018,6 +2217,11 @@ def _sparse_exact_certificate(prob, x, base, y_hint):
         d = _exact_d(data, xh, y, gex)
         if d is None:
             return None
+        # 厳密最適値 (主実行可能性 + 補完性) が立つ候補は参照値を厳密な最適値に
+        # 置く (一次感度の pimpact は上界の境界にならない; P1 指摘)。
+        pstar = _exact_primal_optimum(data, xh, y, gex)
+        if pstar is not None:
+            return _upgraded_certificate(base, pstar, method)
         return Certificate(base.p, _exact_float(d), max(base.pinf, pinf_exact),
                            base.roundoff,
                            _exact_pimpact(base.p, y, gex, row_v, col_v),
@@ -2050,7 +2254,8 @@ def _sparse_exact_certificate(prob, x, base, y_hint):
 
 
 Certificate = collections.namedtuple(
-    "Certificate", "p d pinf roundoff pimpact repair_iters method", defaults=("float",))
+    "Certificate", "p d pinf roundoff pimpact repair_iters method primal",
+    defaults=("float", False))
 
 
 def _float_certificate(prob, x, ax, p, pinf, roundoff, xh, y, iters, method):
@@ -2074,9 +2279,13 @@ def verify(prob, x, y, exact=False):
       roundoff      p の丸め誤差上界 / (1 + |p|)
       pimpact       主違反の目的値影響 (sum |y_i| 行違反_i + sum |g_j| 列違反_j) / (1 + |p|)。
                     x が境界を僅かに破るとき p(x) は真の最適値の上界でなくなるが、その差は
-                    一次で乗数 × 違反量 (感度) で抑えられる。
+                    一次で乗数 × 違反量 (感度) で抑えられる。これは感度推定であって
+                    境界ではない (P1 指摘)。厳密な主候補 (primal=True) では p が
+                    厳密な最適値になり、pimpact は d の下向き丸め分だけになる。
       repair_iters  _repair() の反復数 (0 は修正不要)
       method        d を作った経路 ("solver" / "repair" / "linearized" / "exact-*")
+      primal        _exact_primal_optimum() で xh の主実行可能性と f(xh) == d が
+                    厳密に立った (p が厳密な最適値)。certify() の合格条件。
 
     exact=True のとき、浮動小数の候補が UNCERTAINTY_TOL を超える場合に厳密有理数の
     双対候補 (_exact_certificate) も試す。dense 経路が上限で候補を作れない場合は
@@ -2142,23 +2351,33 @@ def verify(prob, x, y, exact=False):
     if free.any() and cert.d == -math.inf:
         fr = _fr_certificate(prob, x, y)
         if fr is not None:
-            cand = Certificate(cert.p, fr[0], cert.pinf, cert.roundoff,
-                               fr[1], cert.repair_iters, "fr")
+            # fr[2] は厳密最適値 (Fraction)。通れば参照値 p も厳密な最適値に置く。
+            if fr[2] is not None:
+                cand = _upgraded_certificate(cert, fr[2], "fr")
+            else:
+                cand = Certificate(cert.p, fr[0], cert.pinf, cert.roundoff,
+                                   fr[1], cert.repair_iters, "fr")
             if uncertainty(cand) < uncertainty(cert):
                 cert = cand
         if cert.d == -math.inf or uncertainty(cert) > UNCERTAINTY_TOL:
             kk = _kkt_certificate(prob, x)
             if kk is not None:
-                cand = Certificate(cert.p, kk[0], cert.pinf, cert.roundoff,
-                                   kk[1], cert.repair_iters, "kkt")
+                if kk[2] is not None:
+                    cand = _upgraded_certificate(cert, kk[2], "kkt")
+                else:
+                    cand = Certificate(cert.p, kk[0], cert.pinf, cert.roundoff,
+                                       kk[1], cert.repair_iters, "kkt")
                 if uncertainty(cand) < uncertainty(cert):
                     cert = cand
         if cert.d == -math.inf or uncertainty(cert) > UNCERTAINTY_TOL:
             # 全列自由・全行 ranged で Q が帯行列 (LASER) の厳密帯消去証明。
             bd = _banded_free_certificate(prob, x, y, cert.p)
             if bd is not None:
-                cand = Certificate(cert.p, bd[0], cert.pinf, cert.roundoff,
-                                   bd[1], cert.repair_iters, "banded")
+                if bd[2] is not None:
+                    cand = _upgraded_certificate(cert, bd[2], "banded")
+                else:
+                    cand = Certificate(cert.p, bd[0], cert.pinf, cert.roundoff,
+                                       bd[1], cert.repair_iters, "banded")
                 if uncertainty(cand) < uncertainty(cert):
                     cert = cand
     return cert
@@ -2173,9 +2392,17 @@ def uncertainty(cert):
 
 def best_certificate(prob, x, y):
     """ソルバの (x, y) と polish() の (x, y) のうち、相対主実行不能度が PRIMAL_INF_TOL
-    以下で uncertainty() 最小の候補を返す。浮動小数の候補が許容を超える場合は、最良の
-    主候補に対して厳密有理数の双対候補 (dense 経路、次に疎経路) も試す。該当候補が
-    無ければソルバ側を返す。"""
+    以下で uncertainty() 最小の候補を返す。原候補は有理数として厳密に実行可能でない
+    (一次感度の pimpact は参照値の上界を支えない; P1 指摘) ので、uncertainty() が
+    許容内でも、さらに厳密有理数の双対候補 (dense 経路、次に疎経路) を試して
+    primal=True の候補を作る。該当候補が無ければソルバ側を返す (certify() の
+    primal ゲートで未認証になる)。
+
+    厳密候補は最良候補に一度だけ試す。失敗した救済は EXACT_TIME_BUDGET /
+    EXACT_SPARSE_TIME_BUDGET の有理数消去を最後まで降り、候補ごとに試すと 1 行で
+    数十分になり baseline 全体の再認証が実行できない。upgrade の成功率は候補の
+    KKT への近さで決まるので、最良候補への絞りで実用上の損失は小さい。
+    """
     if prob.get("psd", True) is not True:
         return verify(prob, x, y)
     cands = [(x, y)]
@@ -2188,17 +2415,17 @@ def best_certificate(prob, x, y):
     if not feasible:
         return results[0]
     best = min(feasible, key=lambda t: uncertainty(t[0]))
-    if uncertainty(best[0]) <= UNCERTAINTY_TOL:
-        return best[0]
-    for r, cx, cy in sorted(feasible, key=lambda t: uncertainty(t[0])):
-        ex = _exact_certificate(prob, cx, r, cy)
-        if ex is None:
-            ex = _sparse_exact_certificate(prob, cx, r, cy)
-        if (ex is not None and ex.pinf <= PRIMAL_INF_TOL
-                and uncertainty(ex) < uncertainty(best[0])):
-            best = (ex, cx, cy)
-        if uncertainty(best[0]) <= UNCERTAINTY_TOL:
-            break
+    # 浮動小数の候補は pimpact (一次感度、P1 指摘: 厳密な境界ではない) でしか
+    # 「参照値が最適値の上界」を支えられない。uncertainty() が許容内でも、厳密に
+    # 実行可能な primal 候補 (primal=True) を常に作る。
+    br, bx, by = best
+    ex = _exact_certificate(prob, bx, br, by)
+    if ex is None:
+        ex = _sparse_exact_certificate(prob, bx, br, by)
+    if (ex is not None and ex.pinf <= PRIMAL_INF_TOL
+            and (ex.primal and not br.primal
+                 or uncertainty(ex) < uncertainty(br))):
+        best = (ex, bx, by)
     return best[0]
 
 
@@ -2317,12 +2544,18 @@ def certify(prob, solved):
     unc = uncertainty(cert)
     gap = abs(cert.p - cert.d) / (1.0 + abs(cert.p))
     # NaN は比較が常に False になるので、合格条件を肯定形で書き否定を取る。
-    ok = (unc <= UNCERTAINTY_TOL and cert.pinf <= PRIMAL_INF_TOL
+    # 証明書の参照値 p が最適値の上界と下界を同時に支えるには、原候補が厳密に
+    # 実行可能である (有理数で A x = 境界 が立つ) 必要がある。一次感度
+    # (|y| × 違反量) の pimpact は上界の境界にならない (P1 指摘: y=0・viol 1e-8・
+    # 真の感度 1e8 の例で 0 を認証できてしまった)。cert.primal は `_exact_primal_optimum()`
+    # で厳密 KKT が立った候補にだけ True で、そのとき p は厳密な最適値である。
+    ok = (cert.primal and unc <= UNCERTAINTY_TOL and cert.pinf <= PRIMAL_INF_TOL
           and objdiff <= OBJ_CONSISTENCY_TOL)
     msg = (f"status={status} reported={reported!r} p={cert.p!r} d={cert.d!r} "
            f"uncertainty={unc:.3e} relgap={gap:.3e} roundoff={cert.roundoff:.3e} "
            f"pimpact={cert.pimpact:.3e} "
            f"repair_iters={cert.repair_iters} method={cert.method} "
+           f"primal={cert.primal} "
            f"verify_pinf={cert.pinf:.3e} "
            f"reported_vs_p={objdiff:.3e} c0={prob['c0']!r}")
     return ok, cert.p, msg

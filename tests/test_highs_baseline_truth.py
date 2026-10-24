@@ -157,7 +157,12 @@ class ExactFreeVariableCertificateTests(unittest.TestCase):
         opt = Fraction(-1, 6)
         self.assertLessEqual(Fraction(cert.d), opt)
         self.assertLessEqual(opt - Fraction(cert.d), HAND_SLACK)
-        self.assertEqual(cert.pimpact, 0.0)
+        # 証明書は厳密 KKT (xh 自由列の g = 0 が厳密なので補完性が成立) となり、
+        # 参照値 p も厳密な最適値 -1/6 に置き換わる (primal ゲートを通る)。
+        # pimpact は d の下向き丸め分 (有理数で境界付け、0 でなくても厳密) になる。
+        self.assertTrue(cert.primal)
+        self.assertEqual(cert.p, -1.0 / 6.0)
+        self.assertLessEqual(Fraction(cert.pimpact), Fraction(1, 2) ** -40)
 
     def test_q0_free_column_is_corrected_exactly(self):
         # min x1 s.t. x1 - x2 = 0, x1 >= 0, x2 自由 (最適値 0)。y = 1 - 2^-40 の
@@ -413,6 +418,95 @@ def _solve_exact(M, r):
     for i, col in enumerate(pivots):
         sol[col] = aug[i][cols]
     return sol
+
+
+class PrimalExactCertificateTests(unittest.TestCase):
+    """参照値の主上界 (P1 指摘) の sentinel: 厳密 KKT が立てない候補は未認証。
+
+    min 1/2 x^2 (x 自由), 1e-8 x = 1e-8。違反 1e-8 は PRIMAL_INF_TOL (1e-7) 未満で、
+    乗数 y=0 だと一次感度 (pimpact) は 0 になる。浮動小数の候補 x=0 の p=0 は
+    「最適値の上界」として何も支えず、真の最適値は 0.5。
+    """
+
+    def setUp(self):
+        self.prob = dict(c0=0.0, c=np.array([0.0]),
+                         A=sp.csr_matrix(np.array([[1e-8]])), L=np.array([1e-8]),
+                         U=np.array([1e-8]), lo=np.array([-math.inf]),
+                         up=np.array([math.inf]),
+                         Q=sp.csr_matrix(np.array([[1.0]])), n=1, m=1)
+
+    def solved(self, x, y, reported=None):
+        if reported is None:
+            reported = float(self.prob["c0"] + self.prob["c"] @ x
+                             + 0.5 * x @ (self.prob["Q"] @ x))
+        return ("Optimal", np.array(x), np.array(y), reported)
+
+    def test_exact_primal_upgrade_certifies_true_optimum(self):
+        # 厳密 KKT (xh = 1, y = 1e8 を有理数で) が立つので、参照値は浮動小数の
+        # 候補の p=0 でなく厳密な最適値 0.5 に置き換わる。
+        ok, p, msg = truth.certify(self.prob, self.solved([0.0], [0.0], 0.0))
+        self.assertTrue(ok, msg)
+        self.assertEqual(p, 0.5)
+        cert = truth.best_certificate(self.prob, np.array([0.0]), np.array([0.0]))
+        self.assertTrue(cert.primal)
+        self.assertEqual(cert.d, 0.5)
+        self.assertEqual(cert.pinf, 0.0)
+
+    def test_primal_gate_rejects_candidate_without_exact_upgrade(self):
+        # 厳密有理数の候補が時間・サイズ上限で得られない問題では、浮動小数の
+        # 候補だけで参照値を「認証」しない (以前は p=d=pimpact=0 で合格していた)。
+        with mock.patch.object(truth, "_exact_certificate", return_value=None), \
+                mock.patch.object(truth, "_sparse_exact_certificate",
+                                  return_value=None):
+            ok, p, msg = truth.certify(self.prob, self.solved([0.0], [0.0], 0.0))
+            self.assertFalse(ok, msg)
+            cert = truth.best_certificate(self.prob, np.array([0.0]),
+                                          np.array([0.0]))
+            self.assertFalse(cert.primal)
+
+    def test_degenerate_zero_multiplier_equality_row_upgrades(self):
+        # TAME 型: Q が特異 (ベクトル (1,-1) の 2 乗) で等式行の最適乗数が厳密 0
+        # になる (min (x1-x2)^2 s.t. x1+x2=1, x >= 0 の最適 (1/2, 1/2) は内部点)。
+        # ソルバ乗数に 5e-8 のノイズが残っていても、interior 列の g = 0 と行 pin
+        # (pin 方程式は行をまたぐ interior 列すべてを覆う) で厳密 KKT が立ち、
+        # 参照値は厳密な最適値 0 に置き換わる。pin を 1 列で立てる・g の方程式を
+        # interior 列に展開しない旧実装では f(xh) == d が立たない (sentinel)。
+        prob = dict(c0=0.0, c=np.array([0.0, 0.0]),
+                    A=sp.csr_matrix(np.array([[1.0, 1.0]])),
+                    L=np.array([1.0]), U=np.array([1.0]),
+                    lo=np.array([0.0, 0.0]),
+                    up=np.array([math.inf, math.inf]),
+                    Q=sp.csr_matrix(np.array([[2.0, -2.0], [-2.0, 2.0]])),
+                    n=2, m=1)
+        solved = ("Optimal", np.array([0.5, 0.5]), np.array([5e-8]), 0.0)
+        ok, p, msg = truth.certify(prob, solved)
+        self.assertTrue(ok, msg)
+        self.assertEqual(p, 0.0)
+
+    def test_pin_equation_spans_all_row_columns(self):
+        # pin 方程式 (A xh = 境界) は行をまたぐ全 interior 列を覆う必要がある。
+        # 1 列分しか式を立てないと残りの列が動いた分だけ Axh が境界から外れ、
+        # f(xh) == d の厳密一致が立たない。境界を float 和の 1 ulp 先に置いて
+        # pin の右辺を厳密に非零にし、interior の 2 列をそろって動かして初めて
+        # 境界に一致する状況を作る。
+        s = 0.1 + 0.4
+        bound = float(np.nextafter(s, np.inf))
+        prob = dict(c0=0.0, c=np.array([0.0, 0.0]),
+                    A=sp.csr_matrix(np.array([[1.0, 1.0]])),
+                    L=np.array([bound]), U=np.array([bound]),
+                    lo=np.array([0.0, 0.0]),
+                    up=np.array([math.inf, math.inf]),
+                    Q=sp.csr_matrix(np.diag([2.0, 0.5])), n=2, m=1)
+        # 最適は 2x1 = 0.5x2 = y, x1+x2 = bound より x1 = bound/5, x2 = 4*bound/5。
+        # 浮動小数の候補 x は KKT から 1e-17 程度しか外れていない。
+        x = np.array([0.1, 0.4])
+        y = np.array([0.2])
+        reported = float(0.5 * x @ (prob["Q"] @ x))
+        ok, p, msg = truth.certify(prob, ("Optimal", x, y, reported))
+        self.assertTrue(ok, msg)
+        # 厳密な最適値 f* = x1*^2 + x2*^2 / 4 (f = 1/2 x'Qx, Q = diag(2, 1/2))。
+        expected = float(Fraction(bound) ** 2 / 5)
+        self.assertEqual(p, expected)
 
 
 class ExactProblem:
