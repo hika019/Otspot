@@ -8,9 +8,10 @@ use otspot_core::sparse::CscMatrix;
 use super::types::{BoundType, Section};
 use super::QpsError;
 use crate::common::{
-    integer_marker_kind, parse_bounds_entry, parse_columns_entry, parse_objsense_value,
-    parse_quadobj_entry, parse_row_decl, parse_vector_entry, parse_with_format_fallback, Format,
-    LineSource, ReaderSource, RowNameIndex, RowType, SectionState, VectorSectionState,
+    integer_marker_kind, objective_offset_from_rhs, parse_bounds_entry, parse_columns_entry,
+    parse_objsense_value, parse_quadobj_entry, parse_row_decl, parse_vector_entry,
+    parse_with_format_fallback, Format, LineSource, ReaderSource, RowNameIndex, RowType,
+    SectionState, VectorSectionState,
 };
 
 pub(super) struct QpsParser {
@@ -547,12 +548,7 @@ impl QpsParser {
 
         let obj_offset = match obj_row {
             Some(name) => {
-                let raw = self.rhs.get(name).copied().unwrap_or(0.0);
-                if self.maximize {
-                    -raw
-                } else {
-                    raw
-                }
+                objective_offset_from_rhs(self.rhs.get(name).copied().unwrap_or(0.0), self.maximize)
             }
             None => 0.0,
         };

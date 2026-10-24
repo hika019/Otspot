@@ -66,6 +66,22 @@ check_dir() {
   fi
 }
 
+# Maros-Meszaros は件数でなく manifest の sha256 で検証する (古い cache の取り違えを検出)。
+check_maros_manifest() {
+  local dir=data/maros_meszaros
+  local manifest="$SCRIPT_DIR/maros_meszaros_qps.sha256"
+  if [[ ! -d "$dir" ]]; then
+    echo "  [missing] $dir"
+    return 1
+  fi
+  if (cd "$dir" && sha256sum -c --quiet "$manifest" >/dev/null 2>&1); then
+    echo "  [ok]      $dir (sha256 matches $(basename "$manifest"))"
+    return 0
+  fi
+  echo "  [stale]   $dir (sha256 mismatch or missing file vs $(basename "$manifest"); rerun scripts/maros_meszaros_download.sh)"
+  return 1
+}
+
 check_python_qp_deps() {
   if ! python3 -c "import numpy, scipy" 2>/dev/null; then
     echo "[error] QP bench data 生成に必要な Python pkg (numpy / scipy) が host にない。" >&2
@@ -188,7 +204,7 @@ if [[ "$MODE" == "check" ]]; then
   check_dir data/lp_problems_unbounded 12 || fail=1
 
   echo "=== QP ==="
-  check_dir data/maros_meszaros 138     || fail=1
+  check_maros_manifest                  || fail=1
   check_dir data/mpc_qp 64             || fail=1
   check_dir data/osqp_bench 62         || fail=1
   check_dir data/osqp_bench_extra 238  || fail=1
@@ -242,7 +258,7 @@ if [[ "$MODE" == "ci-subset-check" ]]; then
   check_dir data/lp_problems_unbounded 12 || fail=1
 
   echo "=== CI subset QP ==="
-  check_dir data/maros_meszaros      138 || fail=1
+  check_maros_manifest                    || fail=1
   check_dir data/osqp_bench           30 || fail=1  # ci-subset: synthetic only (SuiteSparse 抜き、--all で 62)
   check_dir data/qplib                41 || fail=1
   check_dir data/mpc_qp               64 || fail=1
@@ -307,7 +323,9 @@ if [[ "$MODE" == "all" || "$MODE" == "qp" ]]; then
   regen data/qplib_nonconvex "python3 scripts/gen_nonconvex_qp.py"
 
   # Maros-Meszaros / QPLIB: 専用 download script
-  run_or_skip data/maros_meszaros            138 "bash scripts/maros_meszaros_download.sh"
+  # Always run: the script skips files whose sha256 matches and replaces stale ones
+  # (a count-based skip would keep files from an outdated cache).
+  bash scripts/maros_meszaros_download.sh
   run_or_skip data/qplib                     41  "bash scripts/qplib_download.sh"
   run_or_skip data/qplib_nonconvex_official  4   "bash scripts/qplib_nonconvex_download.sh"
   run_or_skip data/qplib_unsupported         6   "bash scripts/qplib_unsupported_download.sh"
@@ -349,7 +367,7 @@ if [[ "$MODE" == "ci-subset" ]]; then
   run_or_skip data/mpc_qp               64   "python3 scripts/gen_mpc_qp.py"
   regen data/qp_dense_a      "python3 scripts/gen_dense_a_qp.py"
   regen data/qplib_nonconvex "python3 scripts/gen_nonconvex_qp.py"
-  run_or_skip data/maros_meszaros       138  "bash scripts/maros_meszaros_download.sh"
+  bash scripts/maros_meszaros_download.sh
   run_or_skip data/qplib                41   "bash scripts/qplib_download.sh"
   run_or_skip data/qplib_nonconvex_official 4 "bash scripts/qplib_nonconvex_download.sh"
   run_or_skip data/miplib_small         20   "bash scripts/miplib_small_download.sh"

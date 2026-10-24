@@ -110,10 +110,11 @@ fn test_lp_beaconfd() {
     solve_and_check("beaconfd", 3.3592485807e+04, 30);
 }
 
+/// e226 の目的定数は +7.113 (`RHS OBJ -7.113` の符号反転)。期待値は HiGHS 1.14.0 の
+/// Optimal 値 -11.638929066 (= Netlib 公表 cᵀx -18.751929066 + 7.113)。
 #[test]
-fn test_lp_e226() {
-    // e226: obj_offset 利用問題 (Netlib OBJ 定義に -7.113 オフセット)
-    solve_and_check("e226", -2.5864929066e+01, 30);
+fn test_lp_e226_with_objective_constant() {
+    solve_and_check("e226", -1.1638929066e+01, 30);
 }
 
 #[test]

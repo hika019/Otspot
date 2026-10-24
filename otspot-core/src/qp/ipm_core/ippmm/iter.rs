@@ -6,13 +6,13 @@ use super::factorize::{
 };
 use super::init::build_initial_point;
 use super::state::{
-    alpha_stall_eps_for, matrix_reg_floor_for_lp, pf_stuck_should_lower_reg_limit, PmmState,
-    ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N, DELTA_INIT,
-    DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL, GONDZIO_ALPHA_TRIGGER,
-    INFEAS_DETECTOR_DISTRUST_SCORE, MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PF_HISTORY_LEN,
-    PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP,
-    REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
-    RESIDUAL_STALL_WINDOW, RHO_INIT, SIGMA_MAX_FALLBACK, STEP_REL_CAP,
+    alpha_stall_eps_for, duality_gap, matrix_reg_floor_for_lp, pf_stuck_should_lower_reg_limit,
+    ConvergenceMeasures, PmmState, ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N,
+    DELTA_INIT, DIRECTION_BLOWUP_THRESHOLD, GONDZIO_ALPHA_TRIGGER, INFEAS_DETECTOR_DISTRUST_SCORE,
+    MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PF_HISTORY_LEN, PMM_IMPROVE_THRESHOLD,
+    PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN,
+    REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT, SIGMA_MAX_FALLBACK,
+    STEP_REL_CAP,
 };
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
@@ -270,18 +270,7 @@ fn solve_ippmm_inner_confined(
         let nr_d = norm_inf(&r_d);
         final_residuals = Some((nr_p, nr_d, mu));
 
-        // 符号規約: r_d = -(Qx + c + A^T y) → dual = -0.5 x^T Q x - Σ b_ext·y。
-        let qx_dot_x: f64 = qx.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
-        let c_dot_x: f64 = problem.c.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
-        let p_obj_s = 0.5 * qx_dot_x + c_dot_x;
-        let mut d_lin: f64 = 0.0;
-        for i in 0..m_ext {
-            d_lin -= b_ext[i] * y[i];
-        }
-        let d_obj_s = -0.5 * qx_dot_x + d_lin;
-        let gap_abs = p_obj_s - d_obj_s;
-        let gap_denom = p_obj_s.abs().max(d_obj_s.abs()).max(1.0);
-        let rel_gap = gap_abs / gap_denom;
+        let gap = duality_gap(&qx, &x, &problem.c, &b_ext, &y);
 
         // mu は dual と同スケール (sᵀy/m) なので ||c|| 大の問題でバイアスしないよう mu/(1+||c||) 正規化。
         let norm_c_bs = norm_inf(&problem.c).max(1.0);
@@ -295,7 +284,7 @@ fn solve_ippmm_inner_confined(
                 best_y.copy_from_slice(&y);
                 best_s.copy_from_slice(&s);
                 best_residuals = (nr_p, nr_d, mu);
-                best_rel_gap = rel_gap;
+                best_rel_gap = gap.rel;
             }
             // residual 停滞検出: best_score が「有意に」減少したら improvement とみなす。
             if score < last_score_improvement_value * (1.0 - RESIDUAL_STALL_REL_DEC) {
@@ -331,8 +320,13 @@ fn solve_ippmm_inner_confined(
             m
         };
 
-        // 残差小・duality gap 大の偽 Optimal (rank-deficient Q + c=0) を弾くため rel_gap も要求。
-        if nr_p_rel < eps && nr_d_rel < eps && mu < eps && rel_gap.abs() < DUALITY_GAP_TOL {
+        let measures = ConvergenceMeasures {
+            nr_p_rel,
+            nr_d_rel,
+            mu,
+            gap,
+        };
+        if measures.converged(eps) {
             status = Some(SolveStatus::Optimal);
             break;
         }

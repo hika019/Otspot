@@ -1218,24 +1218,26 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
         );
     }
 
-    /// N-row RHS with a finite value must propagate to LpProblem.obj_offset.
+    /// The objective-row RHS is the negated constant (HiGHS reads `offset = -42.5`).
     #[test]
-    fn test_mps_rhs_n_row_finite_propagates_to_obj_offset() {
+    fn test_mps_obj_row_rhs_is_negated_objective_constant() {
         let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs obj 42.5\n    rhs c1 10.0\nENDATA\n";
         let lp = parse_mps(mps).expect("valid MPS with N-row RHS");
         assert!(
-            (lp.obj_offset - 42.5).abs() < 1e-12,
-            "obj_offset must equal N-row RHS 42.5, got {}",
+            (lp.obj_offset - (-42.5)).abs() < 1e-12,
+            "N-row RHS 42.5 must yield obj_offset -42.5; got {}",
             lp.obj_offset
         );
     }
 
-    /// MPS OBJSENSE MAX with N-row RHS must sign-flip obj_offset (MAX→MIN negation).
-    ///
-    /// Sentinel: removing the `if self.maximize { -raw } else { raw }` sign-flip in
-    /// `mps/parser.rs` causes `obj_offset == +10.0` instead of `-10.0` → FAIL.
+    /// OBJSENSE MAX: `max x1 - 10` (RHS 10.0) is minimized as `-x1 + 10`; the
+    /// stored offset is +10 and the minimization-form optimum is 5.0 (HiGHS
+    /// reports the MAX optimum -5.0).
     #[test]
-    fn test_mps_objsense_max_obj_offset_sign_flip() {
+    fn test_mps_objsense_max_obj_row_rhs_offset() {
+        use otspot_core::lp::solve_lp_with;
+        use otspot_core::problem::SolveStatus;
+
         let mps = concat!(
             "NAME  MAX_OFFSET\n",
             "OBJSENSE\n",
@@ -1252,21 +1254,23 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
         );
         let lp = parse_mps(mps).expect("valid MPS with OBJSENSE MAX + N-row RHS");
         assert!(
-            (lp.obj_offset - (-10.0)).abs() < 1e-12,
-            "OBJSENSE MAX with N-row RHS=10.0 must yield obj_offset=-10.0; got {}",
+            (lp.obj_offset - 10.0).abs() < 1e-12,
+            "OBJSENSE MAX with N-row RHS 10.0 must yield obj_offset +10.0; got {}",
             lp.obj_offset,
+        );
+        let result = solve_lp_with(&lp, &Default::default());
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(
+            (result.objective - 5.0).abs() < 1e-9,
+            "expected 5.0, got {}",
+            result.objective
         );
     }
 
-    /// MPS N-row RHS (obj_offset) must appear in the solve result objective end-to-end.
-    ///
-    /// Problem: min x  s.t. x <= 5,  x >= 0,  N-row RHS = 10.0
-    /// Optimal: x* = 0,  c^T x* = 0,  result.objective = 0 + 10.0 = 10.0.
-    ///
-    /// Sentinel: removing `result.objective += problem.obj_offset` from
-    /// `lp::solve_lp_with` causes result.objective == 0.0 ≠ 10.0 → FAIL.
+    /// min x s.t. x <= 5, x >= 0 with `RHS obj 10.0`: HiGHS reports -10.0
+    /// (cᵀx* = 0 plus constant -10).
     #[test]
-    fn test_mps_obj_offset_propagates_to_solve_result() {
+    fn test_mps_obj_row_rhs_constant_in_solve_result() {
         use otspot_core::lp::solve_lp_with;
         use otspot_core::problem::SolveStatus;
 
@@ -1275,8 +1279,8 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
         let result = solve_lp_with(&lp, &Default::default());
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!(
-            (result.objective - 10.0).abs() < 1e-9,
-            "expected objective 10.0 (c^Tx*=0 + offset 10.0), got {}",
+            (result.objective - (-10.0)).abs() < 1e-9,
+            "expected objective -10.0 (c^Tx*=0 + constant -10), got {}",
             result.objective
         );
     }

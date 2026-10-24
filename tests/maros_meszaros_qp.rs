@@ -11,11 +11,13 @@ use std::path::Path;
 const EPS_SOL: f64 = 1e-5;
 // 退化制約境界 (λ*=0) は補完余裕 λs=μ より s≈√μ で収束するため O(√eps)
 const EPS_DEG: f64 = 5e-4;
-const AUG3D_KKT_REFERENCE_OBJS: [(&str, f64); 4] = [
-    ("AUG3D", -7.824322739640e2),
-    ("AUG3DC", -1.165237561744e3),
-    ("AUG3DCQP", -9.431378406874e2),
-    ("AUG3DQP", -6.612623221186e2),
+/// AUG3D 家族の目的値 = KKT 解の cᵀx + ½xᵀQx (kkt_osqp_crosscheck_20260606) + 原 QPS の
+/// 目的定数 (目的行 RHS -1336.5 / -1936.5 の符号反転)。
+const AUG3D_OBJS_WITH_CONSTANT: [(&str, f64); 4] = [
+    ("AUG3D", -7.824322739640e2 + 1336.5),
+    ("AUG3DC", -1.165237561744e3 + 1936.5),
+    ("AUG3DCQP", -9.431378406874e2 + 1936.5),
+    ("AUG3DQP", -6.612623221186e2 + 1336.5),
 ];
 
 /// 相対誤差 eps=1e-6 で目的値を検証 (solver の relative gap 収束判定と整合)。
@@ -266,8 +268,9 @@ fn test_qpcstair_like() {
     assert_obj_close(result.objective, -9.375, "QPCSTAIR: QP objective = -9.375");
 }
 
+/// baseline CSV と原 QPS fixture (AUG3D) の解が、目的定数込みの独立参照値と一致する。
 #[test]
-fn aug3d_baseline_matches_qps_kkt_solution() {
+fn aug3d_baseline_includes_objective_constant() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let qps_path = Path::new(manifest)
         .join("tests/fixtures/maros_meszaros")
@@ -277,7 +280,7 @@ fn aug3d_baseline_matches_qps_kkt_solution() {
         .join("data/baseline_objectives")
         .join("maros_meszaros.csv");
     let baselines = load_baseline_objectives(&baseline_path).expect("load maros baseline");
-    for (name, expected) in AUG3D_KKT_REFERENCE_OBJS {
+    for (name, expected) in AUG3D_OBJS_WITH_CONSTANT {
         let csv_expected = *baselines
             .get(name)
             .unwrap_or_else(|| panic!("{name} baseline exists"));
@@ -296,7 +299,81 @@ fn aug3d_baseline_matches_qps_kkt_solution() {
     assert_eq!(result.status, SolveStatus::Optimal, "AUG3D status");
     assert_obj_close(
         result.objective,
-        AUG3D_KKT_REFERENCE_OBJS[0].1,
-        "AUG3D KKT reference objective",
+        AUG3D_OBJS_WITH_CONSTANT[0].1,
+        "AUG3D objective with constant",
     );
+}
+
+/// HiGHS 1.14.0 `readModel` が原 QPS から読む目的定数 (`offset_`)。目的行 RHS の符号反転。
+/// ここに無い Maros-Mészáros 107 問の目的定数は 0。
+const MAROS_OBJECTIVE_CONSTANTS: [(&str, f64); 31] = [
+    ("AUG2D", 9900.0),
+    ("AUG2DC", 10100.0),
+    ("AUG2DCQP", 10100.0),
+    ("AUG2DQP", 9900.0),
+    ("AUG3D", 1336.5),
+    ("AUG3DC", 1936.5),
+    ("AUG3DCQP", 1936.5),
+    ("AUG3DQP", 1336.5),
+    ("GOULDQP3", 29649.9),
+    ("HS21", -100.0),
+    ("HS268", 14463.0),
+    ("HS35", 9.0),
+    ("HS35MOD", 9.0),
+    ("HS51", 6.0),
+    ("HS52", 6.0),
+    ("HS53", 6.0),
+    ("LISWET1", 2525.41),
+    ("LISWET10", 2525.95),
+    ("LISWET11", 2525.75),
+    ("LISWET12", 2525.75),
+    ("LISWET2", 1691.99),
+    ("LISWET3", 1025.26),
+    ("LISWET4", 739.516),
+    ("LISWET5", 16001.2),
+    ("LISWET6", 2187.22),
+    ("LISWET7", 2525.26),
+    ("LISWET8", 2525.26),
+    ("LISWET9", 2525.26),
+    ("QE226", 7.113),
+    ("S268", 14463.0),
+    ("YAO", 273.125),
+];
+/// Maros-Mészáros の問題数 (Maros & Mészáros 1997, Table 3)。
+const MAROS_PROBLEM_COUNT: usize = 138;
+/// 目的定数の照合許容 (相対)。両 reader とも 10 進表記を正しく丸めて読むので丸め程度のみ許す。
+const OBJ_CONSTANT_REL_TOL: f64 = 1e-12;
+
+/// 原 QPS 138 問の目的定数が HiGHS の読みと一致する (31 問は非零、残りは 0)。
+/// N 行 RHS の符号を反転しないパーサや、目的定数を落とすデータ変換 (旧 .mat 経由) で fail する。
+#[test]
+fn maros_objective_constants_match_highs() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/maros_meszaros");
+    assert!(
+        dir.exists(),
+        "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行",
+        dir.display()
+    );
+    let mut checked = 0usize;
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("read maros dir")
+        .map(|e| e.expect("dir entry").path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("qps")))
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let expected = MAROS_OBJECTIVE_CONSTANTS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(0.0, |&(_, v)| v);
+        let prob = parse_qps(&path).unwrap_or_else(|e| panic!("{name}: parse failed: {e:?}"));
+        assert!(
+            (prob.obj_offset - expected).abs() <= OBJ_CONSTANT_REL_TOL * (1.0 + expected.abs()),
+            "{name}: obj_offset {} != HiGHS {expected}",
+            prob.obj_offset
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, MAROS_PROBLEM_COUNT, "maros QPS file count");
 }

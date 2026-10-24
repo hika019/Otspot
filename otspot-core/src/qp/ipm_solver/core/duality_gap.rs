@@ -6,6 +6,10 @@ use crate::qp::problem::QpProblem;
 /// 元空間 双対ギャップ相対値: |primal_obj − dual_obj| / max(|p|, |d|, 1)。
 /// QP 弱双対性 dual_obj = -1/2 x'Qx - b'y + lb'z_lb - ub'z_ub。rank-deficient Q の
 /// 偽 Optimal (KKT 小だが gap 大) を弾く。FX 変数の bound 寄与は lb·停留性で解析的に置換。
+/// p, d は目的定数 `obj_offset` を含めない: 定数は差では消え、分母にだけ入ると相対値が
+/// 定数の平行移動で変わる (inner の IP-PMM の gap 判定も定数を持たない)。
+/// 帰結として、定数が p と逆符号で |p + 定数| が |p| より小さい問題では、表示目的値
+/// (定数込み) に対する相対精度はこの gap では保証されない。
 pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult) -> f64 {
     let n = problem.num_vars;
     if result.solution.len() != n {
@@ -34,7 +38,7 @@ pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult
     };
     let xqx: f64 = qx.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
     let cx: f64 = problem.c.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
-    let primal_obj = 0.5 * xqx + cx + problem.obj_offset;
+    let primal_obj = 0.5 * xqx + cx;
 
     let mut by: f64 = 0.0;
     for (&bi, &yi) in problem.b.iter().zip(result.dual_solution.iter()) {
@@ -80,7 +84,7 @@ pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult
             }
         }
     }
-    let dual_obj = -0.5 * xqx - by + bnd_term + problem.obj_offset;
+    let dual_obj = -0.5 * xqx - by + bnd_term;
     let gap_abs = (primal_obj - dual_obj).abs();
     let denom = primal_obj.abs().max(dual_obj.abs()).max(1.0);
     if denom > 0.0 && gap_abs.is_finite() {
@@ -143,5 +147,35 @@ mod tests {
             compute_duality_gap_rel(&qp, &r).is_infinite(),
             "missing row dual must not be treated as zero"
         );
+    }
+
+    /// min ½x² − x (x ∈ [0, 2]) の点 x=0.9, 双対 z=0 で gap を測る。目的定数を足しても
+    /// 相対 gap は変わらない (定数を p, d に入れると分母だけが変わり、定数 1e3 で
+    /// 0.09 が 0.09/1e3 程度へ縮む)。
+    #[test]
+    fn duality_gap_rel_is_invariant_to_objective_constant() {
+        let mut qp = QpProblem::new(
+            CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap(),
+            vec![-1.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, 2.0)],
+            vec![],
+        )
+        .unwrap();
+        let r = SolverResult {
+            solution: vec![0.9],
+            bound_duals: vec![0.0, 0.0],
+            ..Default::default()
+        };
+        let without = compute_duality_gap_rel(&qp, &r);
+        qp.obj_offset = 1e3;
+        let with = compute_duality_gap_rel(&qp, &r);
+        // p = ½·0.81 − 0.9 = −0.495, d = −½·0.81 = −0.405: |p − d| / max(|p|, |d|, 1) = 0.09。
+        assert!(
+            (without - 0.09).abs() < 1e-12,
+            "gap without constant {without}"
+        );
+        assert_eq!(with, without, "gap must not depend on obj_offset");
     }
 }

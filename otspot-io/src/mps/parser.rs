@@ -10,9 +10,9 @@ use super::types::{
     integer_marker_kind, BoundType, IntegerMarker, Section, INTEGER_DEFAULT_UPPER_BINARY,
 };
 use crate::common::{
-    parse_bounds_entry, parse_columns_entry, parse_objsense_value, parse_row_decl,
-    parse_vector_entry, parse_with_format_fallback, Format, LineSource, ReaderSource, RowNameIndex,
-    RowType, SectionState, VectorSectionState,
+    objective_offset_from_rhs, parse_bounds_entry, parse_columns_entry, parse_objsense_value,
+    parse_row_decl, parse_vector_entry, parse_with_format_fallback, Format, LineSource,
+    ReaderSource, RowNameIndex, RowType, SectionState, VectorSectionState,
 };
 
 pub(super) struct MpsParser {
@@ -456,16 +456,10 @@ impl MpsParser {
             }
         }
 
-        // Objective constant (N-row RHS); the sign flip mirrors MAX → MIN above.
-        // Finiteness is guaranteed at parse time.
+        // Finiteness of the objective-row RHS is guaranteed at parse time.
         let obj_offset = match obj_row {
             Some(name) => {
-                let raw = self.rhs.get(name).copied().unwrap_or(0.0);
-                if self.maximize {
-                    -raw
-                } else {
-                    raw
-                }
+                objective_offset_from_rhs(self.rhs.get(name).copied().unwrap_or(0.0), self.maximize)
             }
             None => 0.0,
         };

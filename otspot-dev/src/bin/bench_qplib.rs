@@ -440,7 +440,6 @@ fn main() {
                             result.objective,
                             &baseline_objectives,
                             eps_obj,
-                            0.0,
                         ) {
                             ObjCheckResult::Ok { rel_err } => {
                                 n_pass += 1;

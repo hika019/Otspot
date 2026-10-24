@@ -201,11 +201,19 @@ fn build_attempt_ladder(
     }
 }
 
+/// `IterationLimit` (per-attempt cap による強制打ち切り) で終わった attempt の
+/// うち、証明書 score が最良のもの。`best` が浅い `Converged` に奪われても、
+/// 延長すべき設定を失わないために別に保持する。
+struct ProgressCandidate {
+    config: (bool, f64),
+    score: f64,
+}
+
 /// `attempts` ladder ((use_ruiz, tighten) の並び) を順に試し、`prove_optimal` を
 /// 満たす最初の outcome で打ち切るか、決定的 stall (同一 lane 内で bit 同一な run が
 /// `CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK` 回続く) と判定した lane の残り attempt を
 /// スキップする (反対 lane は継続。両 lane dead で終了)。
-/// `best`/`best_config`/`iter_used` を更新する。
+/// `best`/`progress`/`iter_used` を更新する。
 #[allow(clippy::too_many_arguments)]
 fn run_attempt_ladder(
     problem: &QpProblem,
@@ -218,7 +226,7 @@ fn run_attempt_ladder(
     total_deadline: Option<Instant>,
     attempts: &[(bool, f64)],
     best: &mut Option<IpmOutcome>,
-    best_config: &mut Option<(bool, f64)>,
+    progress: &mut Option<ProgressCandidate>,
     iter_used: &mut usize,
 ) {
     // use_ruiz ごとに直前 fingerprint を保持 (index: false=0, true=1)。attempts 列は
@@ -267,9 +275,23 @@ fn run_attempt_ladder(
         let outcome_proven = outcome_satisfies && outcome_proves_optimal(&outcome, view, user_eps);
         *iter_used = iter_used.saturating_add(charged_iterations(&outcome, per_attempt_cap));
 
+        // `best` とは独立に、延長可能な (cap で切られた) attempt を保持する。
+        // 浅い inner Converged が best になっても延長先を失わない (LISWET7)。
+        if outcome.termination == IpmTermination::IterationLimit {
+            let score = outcome_certificate_score(&outcome, view, user_eps);
+            if progress
+                .as_ref()
+                .is_none_or(|p| score.total_cmp(&p.score).is_lt())
+            {
+                *progress = Some(ProgressCandidate {
+                    config: (use_ruiz, tighten),
+                    score,
+                });
+            }
+        }
+
         if outcome_proven {
             *best = Some(outcome);
-            *best_config = Some((use_ruiz, tighten));
             break;
         }
         // 同一 lane (use_ruiz) 内で tighten を変えても bit 同一な run が
@@ -297,13 +319,9 @@ fn run_attempt_ladder(
         };
         prev_by_ruiz[lane] = Some((tighten, AttemptFingerprint::of(&outcome)));
         match &*best {
-            None => {
-                *best = Some(outcome);
-                *best_config = Some((use_ruiz, tighten));
-            }
+            None => *best = Some(outcome),
             Some(prev) if outcome_is_better_candidate(&outcome, prev, view, user_eps) => {
                 *best = Some(outcome);
-                *best_config = Some((use_ruiz, tighten));
             }
             _ => {}
         }
@@ -748,9 +766,7 @@ fn solve_ipm_with_runner(
     // presolve Ruiz 済なら IPM 側で重ね掛けしない (二重 scale で誤収束する)。
     let presolve_did_ruiz = presolve_result.ruiz_scaler.is_some();
     let mut best: Option<IpmOutcome> = None;
-    // best を生成した (use_ruiz, tighten)。ループ後の IterationLimit 延長で
-    // 同一設定を再現するために必要。
-    let mut best_config: Option<(bool, f64)> = None;
+    let mut progress: Option<ProgressCandidate> = None;
 
     let user_max_iter = options.ipm.max_iter;
     let mut iter_used: usize = 0;
@@ -774,7 +790,7 @@ fn solve_ipm_with_runner(
         total_deadline,
         &attempts,
         &mut best,
-        &mut best_config,
+        &mut progress,
         &mut iter_used,
     );
 
@@ -783,21 +799,14 @@ fn solve_ipm_with_runner(
         .map(|b| outcome_proves_optimal(b, &view, user_eps))
         .unwrap_or(false);
 
-    // ループを抜けた時点で best が未証明かつ IterationLimit (= genuine な
-    // stall / 収束 / deadline ではなく MAX_ITER_PER_ATTEMPT による強制打ち切り)
-    // なら、同一 (use_ruiz, tighten) のまま 1 回だけ延長する。futility
-    // (bit-identical retry) はこの条件の特殊ケースに過ぎない — LISWET7/LISWET1
-    // @ eps=1e-8 は attempts 列 (base_tighten=1.0 では 2 要素) を futility 閾値
-    // (3) に届く前に使い切って通常終了しており、旧 futility-only 条件では
-    // 捕捉できなかった (実測)。新たな iteration cap は設けず、genuine な終了
-    // 条件 (deadline と、solve_ippmm_inner 内の residual_stall / alpha_stall
-    // 検出) だけに委ねる。
-    // 実測 (LISWET7 @ eps=1e-8): 500 iter 打ち切り時点で wall time 予算の 6.3%
-    // しか消費しておらず、nr_p は線形に減少中だった (R²=0.9975)。
-    let needs_extension = !best_ok
-        && best
-            .as_ref()
-            .is_some_and(|b| b.termination == IpmTermination::IterationLimit);
+    // 未証明のまま終わった場合、cap で切られた (IterationLimit) attempt が
+    // あればその設定を 1 回だけ延長する。`best` 自体が IterationLimit とは
+    // 限らない: LISWET7 @ eps=1e-6 では tighten=1 の浅い inner Converged
+    // (元空間 comp≈4.8e-4) が証明書 score で深い IterationLimit
+    // (comp≈5e-2) に勝ち best になるが、延長すべきなのは後者。
+    // 延長は残り予算/deadline に有界で、受理は prove_optimal がゲートする。
+    let ext_config = progress.as_ref().map(|p| p.config);
+    let needs_extension = !best_ok && ext_config.is_some();
     if needs_extension {
         best_ok = extend_iteration_limit_attempt(
             problem,
@@ -808,7 +817,7 @@ fn solve_ipm_with_runner(
             user_eps,
             user_max_iter,
             total_deadline,
-            best_config,
+            ext_config,
             &mut best,
             &mut iter_used,
         );
@@ -852,11 +861,11 @@ fn solve_ipm_with_runner(
 }
 
 /// `solve_ipm_with_runner` の attempt ループを抜けた時点で best が未証明かつ
-/// IterationLimit (MAX_ITER_PER_ATTEMPT による強制打ち切り。genuine な stall /
-/// 収束 / deadline ではない) なら、同一 (use_ruiz, tighten) のまま残り予算全部を
-/// 使って 1 回だけ延長する。呼び出し元はこの条件 (`needs_extension`) を確認済みの
-/// ときのみ呼ぶため、返り値は「延長を試みた結果の best_ok」であり、延長不発火時は
-/// 常に `false` (呼び出し前の `best_ok` と同値) を返す。
+/// cap 打ち切り (IterationLimit。genuine な stall / 収束 / deadline ではない)
+/// の attempt があれば、その (use_ruiz, tighten) のまま残り予算全部を使って
+/// 1 回だけ延長する。呼び出し元は `needs_extension` を確認済みのときのみ呼ぶため、
+/// 返り値は「延長を試みた結果の best_ok」であり、延長不発火時は常に `false`
+/// (呼び出し前の `best_ok` と同値) を返す。
 ///
 /// deadline と残 iter 予算の両方で有界 (無限ループ・多重延長なし):
 /// `remaining_ext = user_max_iter - iter_used` を `opts.ipm.max_iter` に渡し、
@@ -871,12 +880,12 @@ fn extend_iteration_limit_attempt(
     user_eps: f64,
     user_max_iter: usize,
     total_deadline: Option<Instant>,
-    best_config: Option<(bool, f64)>,
+    ext_config: Option<(bool, f64)>,
     best: &mut Option<IpmOutcome>,
     iter_used: &mut usize,
 ) -> bool {
     let mut best_ok = false;
-    if let (Some((ext_use_ruiz, ext_tighten)), Some(d)) = (best_config, total_deadline) {
+    if let (Some((ext_use_ruiz, ext_tighten)), Some(d)) = (ext_config, total_deadline) {
         let remaining_ext = user_max_iter.saturating_sub(*iter_used);
         if Instant::now() < d && remaining_ext > 0 {
             opts.deadline = total_deadline;
@@ -1221,7 +1230,7 @@ mod tests {
         ];
         LANE_LOCAL_CALLS.with(|c| c.borrow_mut().clear());
         let mut best = None;
-        let mut best_config = None;
+        let mut progress = None;
         let mut iter_used = 0usize;
         run_attempt_ladder(
             &prob,
@@ -1234,7 +1243,7 @@ mod tests {
             None,
             &attempts,
             &mut best,
-            &mut best_config,
+            &mut progress,
             &mut iter_used,
         );
         let calls = LANE_LOCAL_CALLS.with(|c| c.borrow().clone());
@@ -3159,6 +3168,136 @@ mod tests {
                 "deadline が無ければ IterationLimit のまま attempts 列を使い切っても \
                  延長 attempt を追加してはいけない (genuine な終了条件が無いまま \
                  無制限反復を許すことになる)"
+            );
+        }
+    }
+
+    /// 浅い `Converged` が `best` を奪っても、cap で切られた深い
+    /// `IterationLimit` の設定を延長することの sentinel。
+    ///
+    /// LISWET7 @ eps=1e-6 では tighten=1 の浅い inner Converged
+    /// (元空間 comp≈4.8e-4) が証明書 score で深い IterationLimit に勝ち
+    /// `best` になる。旧 `needs_extension` は best の termination だけを見たため
+    /// 延長をスキップして Stalled に落ちた。progress を別追跡して延長先を
+    /// 選ぶ修正を revert すると、延長が発火せず calls=2 / iterations=9 になる。
+    mod iteration_limit_progress_extends_past_shallow_converged_best {
+        use super::*;
+        use crate::qp::ipm_solver::outcome::IpmTermination;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        /// 延長 attempt が観測した tighten。0 は未観測。
+        static EXT_TIGHTEN: AtomicUsize = AtomicUsize::new(0);
+        static EXT_MAX_ITER: AtomicUsize = AtomicUsize::new(0);
+
+        /// x=1−violation, y=−1 で stationarity を満たし、primal 残差だけを
+        /// violation にした outcome (prove_optimal の再計算 score を制御する)。
+        fn residual_outcome(violation: f64, termination: IpmTermination) -> IpmOutcome {
+            IpmOutcome {
+                solution: vec![1.0 - violation],
+                dual_solution: vec![-1.0],
+                bound_duals: vec![0.0],
+                objective: 1.0 - violation,
+                iterations: if termination == IpmTermination::Converged {
+                    9
+                } else {
+                    500
+                },
+                kkt_residual_rel: 0.0,
+                primal_residual_rel: violation,
+                bound_violation: 0.0,
+                complementarity_residual_rel: 0.0,
+                duality_gap_rel: violation,
+                numerical_failure: false,
+                infeasibility_status: None,
+                is_locally_optimal: false,
+                postsolve_krylov_ir_skipped: false,
+                timing: None,
+                termination,
+            }
+        }
+
+        fn runner(
+            _problem: &QpProblem,
+            _presolve: &QpPresolveResult,
+            options: &SolverOptions,
+            user_eps: f64,
+        ) -> IpmOutcome {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            let tighten = (user_eps / options.ipm.eps).round() as usize;
+            if options.ipm.max_iter > MAX_ITER_PER_ATTEMPT {
+                EXT_TIGHTEN.store(tighten, Ordering::SeqCst);
+                EXT_MAX_ITER.store(options.ipm.max_iter, Ordering::SeqCst);
+                return IpmOutcome {
+                    solution: vec![1.0],
+                    dual_solution: vec![-1.0],
+                    bound_duals: vec![0.0],
+                    objective: 1.0,
+                    iterations: 12_345,
+                    kkt_residual_rel: 0.0,
+                    primal_residual_rel: 0.0,
+                    bound_violation: 0.0,
+                    complementarity_residual_rel: 0.0,
+                    duality_gap_rel: 0.0,
+                    numerical_failure: false,
+                    infeasibility_status: None,
+                    is_locally_optimal: false,
+                    postsolve_krylov_ir_skipped: false,
+                    timing: None,
+                    termination: IpmTermination::Converged,
+                };
+            }
+            if tighten == 1 {
+                residual_outcome(1e-4, IpmTermination::Converged)
+            } else {
+                residual_outcome(1e-2, IpmTermination::IterationLimit)
+            }
+        }
+
+        #[test]
+        fn extension_uses_deep_iteration_limit_config_not_shallow_best() {
+            let prob = make_simple_eq_qp();
+            let mut opts = SolverOptions {
+                presolve: false,
+                use_ruiz_scaling: false,
+                ..Default::default()
+            };
+            opts.ipm.eps = 1e-8;
+            opts.deadline = Some(Instant::now() + Duration::from_secs(3600));
+
+            CALLS.store(0, Ordering::SeqCst);
+            EXT_TIGHTEN.store(0, Ordering::SeqCst);
+            EXT_MAX_ITER.store(0, Ordering::SeqCst);
+            let (result, _) = solve_ipm_with_runner(&prob, &opts, runner);
+
+            assert_eq!(
+                CALLS.load(Ordering::SeqCst),
+                3,
+                "深い IterationLimit が progress として延長されるべき \
+                 (calls=2 なら shallow Converged best が延長を阻んでいる)"
+            );
+            assert_eq!(
+                EXT_TIGHTEN.load(Ordering::SeqCst),
+                10,
+                "延長は best (tighten=1 の Converged) ではなく progress \
+                 (tighten=10 の IterationLimit) の設定で走るべき"
+            );
+            assert!(
+                EXT_MAX_ITER.load(Ordering::SeqCst) > MAX_ITER_PER_ATTEMPT,
+                "延長には per-attempt cap を超える max_iter が渡るべき, got {}",
+                EXT_MAX_ITER.load(Ordering::SeqCst)
+            );
+            assert_eq!(
+                result.status,
+                SolveStatus::Optimal,
+                "got {:?}",
+                result.status
+            );
+            assert_eq!(
+                result.iterations, 12_345,
+                "延長 outcome が best を置き換えるべき, got {}",
+                result.iterations
             );
         }
     }

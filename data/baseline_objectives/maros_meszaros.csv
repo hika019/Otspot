@@ -1,136 +1,167 @@
-# 出典: 自ソルバーの計測値（ベンチマーク実行結果）。外部参照の最適値ではない。
-# 用途: 退行検知（過去の自己ベストとの比較）。
-# Source: measured by this solver's benchmark runs. NOT externally verified optimal values.
-# Purpose: regression detection (comparison against own historical best).
+# Source: data/maros_meszaros (original QPS files), independently parsed. Each value whose
+#   source does not end in _UNCERTIFIED passed one of:
+#   - the weak-duality certificate in scripts/highs_baseline_truth.py (relative uncertainty
+#     <= 1e-7), using HiGHS or Clarabel; its run log records method=exact-* when the final
+#     certifying lower bound was recovered and evaluated in exact rational arithmetic;
+#   - the exact rational KKT certificate in scripts/liswet_exact_certificate.py
+#     (source exact_rational_kkt_*).
+#   For _UNCERTIFIED rows the source names the solver (and date) of the kept reference value.
+# Convention: full objective c0 + c'x + 1/2 x'Qx including the objective constant
+#   c0 = -(objective-row RHS) (31 problems have c0 != 0, e.g. LISWET7 c0 = 2525.26).
+# Q PSD: the weak-duality bound assumes Q is positive semidefinite. Q is checked blockwise
+#   before certification; a negative eigenvalue beyond the rounding tolerance makes the row
+#   _UNCERTIFIED, and so does a block too large to decide. VALUES has an indefinite Q
+#   (smallest eigenvalue -1.27e-5), so it remains _UNCERTIFIED. The 8000-variable blocks
+#   of CVXQP{1,2,3}_L are within the dense-check limit and are certified.
+# Cross-check: Maros & Meszaros (1997) Table 3 agrees within relative 1e-6 except:
+#   HUES-MOD: Table 3 (BPMPD at default tolerances) deviates by 6.5e-6; the certified value
+#     (relative uncertainty 5.1e-11) is kept.
+#   HUESTIS: Table 3 (BPMPD at default tolerances) deviates by 6.5e-6; the certified value
+#     (relative uncertainty 2.3e-11) is kept.
+# Not certified (1 of 138): rows whose source ends in _UNCERTIFIED keep the named solver's
+#   reference value, but the strict lower-bound certificate could not prove it: typically a
+#   reduced cost on an unbounded (free or one-sided) variable cannot be shown to be exactly
+#   zero / of the required sign from floating-point multipliers; in other cases the solver's
+#   dual did not reach the required accuracy, or Q was not proven positive semidefinite.
+#   Their values are still used as bench references but must not be treated as proven optima.
+#   The source date is the run that produced the kept value; the current solver may report a
+#   different value for an _UNCERTIFIED row.
 problem_name,optimal_obj,source
-AUG2D,1.67e6,bench_722f_ippmm_1000s
-AUG2DC,1.80e6,bench_722f_ippmm_1000s
-AUG2DCQP,6.48e6,bench_722f_ippmm_1000s
-AUG2DQP,6.22e6,bench_722f_ippmm_1000s
-AUG3D,-7.824322739640e2,kkt_osqp_crosscheck_20260606
-AUG3DC,-1.165237561744e3,kkt_osqp_crosscheck_20260606
-AUG3DCQP,-9.431378406874e2,kkt_osqp_crosscheck_20260606
-AUG3DQP,-6.612623221186e2,kkt_osqp_crosscheck_20260606
-BOYD1,-6.17e7,bench_722f_ippmm_1000s
-BOYD2,2.13e1,bench_722f_ippmm_1000s
-CONT-050,-4.56e0,bench_722f_ippmm_1000s
-CONT-100,-4.64e0,bench_722f_ippmm_1000s
-CONT-101,1.96e-1,bench_722f_ippmm_1000s
-CONT-200,-4.68e0,bench_722f_ippmm_1000s
-CONT-201,1.92e-1,bench_722f_ippmm_1000s
-CONT-300,1.88e-1,bench_722f_ippmm_1000s
-CVXQP1_L,1.09e8,bench_722f_ippmm_1000s
-CVXQP1_M,1.09e6,bench_722f_ippmm_1000s
-CVXQP1_S,1.16e4,bench_722f_ippmm_1000s
-CVXQP2_L,8.18e7,bench_722f_ippmm_1000s
-CVXQP2_M,8.20e5,bench_722f_ippmm_1000s
-CVXQP2_S,8.12e3,bench_722f_ippmm_1000s
-CVXQP3_L,1.16e8,bench_722f_ippmm_1000s
-CVXQP3_M,1.36e6,bench_722f_ippmm_1000s
-CVXQP3_S,1.19e4,bench_722f_ippmm_1000s
-DTOC3,2.35e2,bench_722f_ippmm_1000s
-DUAL1,3.50e-2,bench_722f_ippmm_1000s
-DUAL2,3.37e-2,bench_722f_ippmm_1000s
-DUAL3,1.36e-1,bench_722f_ippmm_1000s
-DUAL4,7.46e-1,bench_722f_ippmm_1000s
-DUALC1,6.16e3,bench_722f_ippmm_1000s
-DUALC2,3.55e3,bench_722f_ippmm_1000s
-DUALC5,4.27e2,bench_722f_ippmm_1000s
-DUALC8,1.83e4,bench_722f_ippmm_1000s
-EXDATA,-1.42e2,bench_722f_ippmm_1000s
-GENHS28,9.27e-1,bench_722f_ippmm_1000s
-GOULDQP2,1.85e-4,bench_722f_ippmm_1000s
-GOULDQP3,-2.964783721603e4,clarabel_0.11.1_tol1e-12_Solved_20260608
-HS118,6.65e2,bench_722f_ippmm_1000s
-HS21,4.000000000009e-2,clarabel_0.11.1_tol1e-12_Solved_20260608
-HS268,-1.446300000000e4,clarabel_0.11.1_tol1e-12_Solved_20260608
-HS35,-8.888888888888e0,clarabel_0.11.1_tol1e-12_Solved_20260608
-HS35MOD,-8.749999999999e0,clarabel_0.11.1_tol1e-12_Solved_20260608
-HS51,-6.000000000000e0,clarabel_0.11.1_tol1e-12_Solved_20260608
-HS52,-6.733524355301e-1,clarabel_0.11.1_tol1e-12_Solved_20260608
-HS53,-1.906976744186e0,clarabel_0.11.1_tol1e-12_Solved_20260608
-HS76,-4.68e0,bench_722f_ippmm_1000s
-HUES-MOD,3.48e7,bench_722f_ippmm_1000s
-HUESTIS,3.48e11,bench_722f_ippmm_1000s
-KSIP,5.76e-1,bench_722f_ippmm_1000s
-LASER,2.41e6,bench_722f_ippmm_1000s
-LISWET1,-2.489287597915e3,highs_1.14.0_Optimal_20261020
-LISWET10,-2.476464215310e3,highs_1.14.0_Optimal_20261020
-LISWET11,-2.476226042863e3,highs_1.14.0_Optimal_20261020
-LISWET12,-7.888225738783e2,highs_1.14.0_Optimal_20261020
-LISWET2,-1.666991934703e3,clarabel_0.11.1_tol1e-12_AlmostSolved_20260608
-LISWET3,-1.000258780000e3,clarabel_0.11.1_tol1e-12_Solved_20260608
-LISWET4,-7.145158879142e2,clarabel_0.11.1_tol1e-12_AlmostSolved_20260608
-LISWET5,-1.597616574660e4,clarabel_0.11.1_tol1e-12_Solved_20260608
-LISWET6,-2.162224252468e3,clarabel_0.11.1_tol1e-12_AlmostSolved_20260608
-LISWET7,-2.026419109214e3,highs_1.14.0_Optimal_20261020
-LISWET8,-1.810789940998e3,highs_1.14.0_Optimal_20261020
-LISWET9,-5.620087391007e2,highs_1.14.0_Optimal_20261020
-LOTSCHD,2.40e3,bench_722f_ippmm_1000s
-MOSARQP1,-9.53e2,bench_722f_ippmm_1000s
-MOSARQP2,-1.60e3,bench_722f_ippmm_1000s
-POWELL20,5.21e10,bench_722f_ippmm_1000s
-PRIMAL1,-3.50e-2,bench_722f_ippmm_1000s
-PRIMAL2,-3.37e-2,bench_722f_ippmm_1000s
-PRIMAL3,-1.36e-1,bench_722f_ippmm_1000s
-PRIMAL4,-7.46e-1,bench_722f_ippmm_1000s
-PRIMALC1,-6.16e3,bench_722f_ippmm_1000s
-PRIMALC2,-3.55e3,bench_722f_ippmm_1000s
-PRIMALC5,-4.27e2,bench_722f_ippmm_1000s
-PRIMALC8,-1.83e4,bench_722f_ippmm_1000s
-Q25FV47,1.37e7,bench_722f_ippmm_1000s
-QADLITTL,4.80e5,bench_722f_ippmm_1000s
-QAFIRO,-1.59e0,bench_722f_ippmm_1000s
-QBANDM,1.64e4,bench_722f_ippmm_1000s
-QBEACONF,1.65e5,bench_722f_ippmm_1000s
-QBORE3D,3.10e3,bench_722f_ippmm_1000s
-QBRANDY,2.84e4,bench_722f_ippmm_1000s
-QCAPRI,6.68e7,bench_722f_ippmm_1000s
-QE226,2.055404328685e2,clarabel_0.11.1_tol1e-12_Solved_20260608
-QETAMACR,8.68e4,bench_722f_ippmm_1000s
-QFFFFF80,8.73e5,bench_722f_ippmm_1000s
-QGROW15,-1.02e8,bench_722f_ippmm_1000s
-QGROW22,-1.50e8,bench_722f_ippmm_1000s
-QGROW7,-4.28e7,bench_722f_ippmm_1000s
-QISRAEL,2.53e7,bench_722f_ippmm_1000s
-QPCBLEND,-7.84e-3,bench_722f_ippmm_1000s
-QPCBOEI1,1.15e7,bench_722f_ippmm_1000s
-QPCSTAIR,6.20e6,bench_722f_ippmm_1000s
-QPTEST,4.37e0,bench_722f_ippmm_1000s
-QRECIPE,-2.67e2,bench_722f_ippmm_1000s
-QSC205,-5.81e-3,bench_722f_ippmm_1000s
-QSCAGR25,2.02e8,bench_722f_ippmm_1000s
-QSCAGR7,2.69e7,bench_722f_ippmm_1000s
-QSCFXM1,1.69e7,bench_722f_ippmm_1000s
-QSCFXM2,2.78e7,bench_722f_ippmm_1000s
-QSCFXM3,3.08e7,bench_722f_ippmm_1000s
-QSCORPIO,1.88e3,bench_722f_ippmm_1000s
-QSCRS8,9.05e2,bench_722f_ippmm_1000s
-QSCSD1,8.67e0,bench_722f_ippmm_1000s
-QSCSD6,5.08e1,bench_722f_ippmm_1000s
-QSCSD8,9.41e2,bench_722f_ippmm_1000s
-QSCTAP1,1.42e3,bench_722f_ippmm_1000s
-QSCTAP2,1.74e3,bench_722f_ippmm_1000s
-QSCTAP3,1.44e3,bench_722f_ippmm_1000s
-QSEBA,8.15e7,bench_722f_ippmm_1000s
-QSHARE1B,7.20e5,bench_722f_ippmm_1000s
-QSHARE2B,1.17e4,bench_722f_ippmm_1000s
-QSHIP04L,2.42e6,bench_722f_ippmm_1000s
-QSHIP04S,2.42e6,bench_722f_ippmm_1000s
-QSHIP08L,2.38e6,bench_722f_ippmm_1000s
-QSHIP08S,2.39e6,bench_722f_ippmm_1000s
-QSHIP12L,3.02e6,bench_722f_ippmm_1000s
-QSHIP12S,3.06e6,bench_722f_ippmm_1000s
-QSIERRA,2.38e7,bench_722f_ippmm_1000s
-QSTAIR,7.99e6,bench_722f_ippmm_1000s
-QSTANDAT,6.41e3,bench_722f_ippmm_1000s
-S268,-1.446300000000e4,clarabel_0.11.1_tol1e-12_Solved_20260608
-STADAT1,-2.85e7,bench_722f_ippmm_1000s
-STADAT2,-3.26e1,bench_722f_ippmm_1000s
-STADAT3,-3.58e1,bench_722f_ippmm_1000s
-STCQP1,1.55e5,bench_722f_ippmm_1000s
-STCQP2,2.23e4,bench_722f_ippmm_1000s
-TAME,0.00e0,bench_722f_ippmm_1000s
-UBH1,1.116e0,piqp_clarabel_osqp_crosscheck_20260422
-ZECEVIC2,-4.12e0,bench_722f_ippmm_1000s
-QSHELL,1.57e12,bench_740_concurrent_60s
+AUG2D,1.687411752897e6,clarabel_0.11.1_Solved_20261023
+AUG2DC,1.818368065570e6,clarabel_0.11.1_Solved_20261023
+AUG2DCQP,6.498134739496e6,clarabel_0.11.1_Solved_20261022
+AUG2DQP,6.237012025567e6,clarabel_0.11.1_Solved_20261022
+AUG3D,5.540677257925e2,highs_1.14.0_Optimal_20261023
+AUG3DC,7.712624386890e2,highs_1.14.0_Optimal_20261023
+AUG3DCQP,9.933621465251e2,highs_1.14.0_Optimal_20261022
+AUG3DQP,6.752376712749e2,highs_1.14.0_Optimal_20261022
+BOYD1,-6.173521963968e7,clarabel-noequil_0.11.1_Solved_20261022
+BOYD2,2.125676700395e1,clarabel-noequil_0.11.1_Solved_20261023
+CONT-050,-4.563850904325e0,highs_1.14.0_Optimal_20261022
+CONT-100,-4.644397868764e0,clarabel_0.11.1_Solved_20261022
+CONT-101,1.955273246559e-1,clarabel_0.11.1_Solved_20261022
+CONT-200,-4.684875920370e0,clarabel_0.11.1_Solved_20261022
+CONT-201,1.924833729861e-1,clarabel_0.11.1_Solved_20261022
+CONT-300,1.915122860731e-1,clarabel_0.11.1_Solved_20261022
+CVXQP1_L,1.087047999159e8,clarabel_0.11.1_Solved_20261023
+CVXQP1_M,1.087511567357e6,highs_1.14.0_Optimal_20261022
+CVXQP1_S,1.159071811943e4,highs_1.14.0_Optimal_20261022
+CVXQP2_L,8.184245826284e7,highs_1.14.0_Optimal_20261023
+CVXQP2_M,8.201554310720e5,highs_1.14.0_Optimal_20261022
+CVXQP2_S,8.120940477251e3,highs_1.14.0_Optimal_20261022
+CVXQP3_L,1.157111034994e8,highs_1.14.0_Optimal_20261023
+CVXQP3_M,1.362828736712e6,highs_1.14.0_Optimal_20261022
+CVXQP3_S,1.194343220231e4,highs_1.14.0_Optimal_20261022
+DPKLO1,3.700962171143e-1,highs_1.14.0_Optimal_20261023
+DTOC3,2.352624810352e2,clarabel_0.11.1_Solved_20261023
+DUAL1,3.501296573348e-2,highs_1.14.0_Optimal_20261022
+DUAL2,3.373367612272e-2,highs_1.14.0_Optimal_20261022
+DUAL3,1.357558368660e-1,highs_1.14.0_Optimal_20261022
+DUAL4,7.460908418021e-1,highs_1.14.0_Optimal_20261022
+DUALC1,6.155250829463e3,highs_1.14.0_Optimal_20261022
+DUALC2,3.551307692671e3,highs_1.14.0_Optimal_20261022
+DUALC5,4.272323267764e2,highs_1.14.0_Optimal_20261022
+DUALC8,1.830935883273e4,highs_1.14.0_Optimal_20261022
+EXDATA,-1.418434321883e2,clarabel_0.11.1_Solved_20261022
+GENHS28,9.271736937664e-1,highs_1.14.0_Optimal_20261023
+GOULDQP2,1.842745040940e-4,clarabel_0.11.1_Solved_20261022
+GOULDQP3,2.062783971465e0,highs_1.14.0_Optimal_20261022
+HS118,6.648204500000e2,highs_1.14.0_Optimal_20261022
+HS21,-9.996000000000e1,highs_1.14.0_Optimal_20261022
+HS268,-1.818989403546e-12,highs_1.14.0_Optimal_20261023
+HS35,1.111111111111e-1,highs_1.14.0_Optimal_20261022
+HS35MOD,2.500000000000e-1,highs_1.14.0_Optimal_20261022
+HS51,0.000000000000e0,highs_1.14.0_Optimal_20261023
+HS52,5.326647564470e0,highs_1.14.0_Optimal_20261023
+HS53,4.093023255814e0,highs_1.14.0_Optimal_20261022
+HS76,-4.681818181818e0,highs_1.14.0_Optimal_20261022
+HUES-MOD,3.482446387363e7,clarabel_0.11.1_Solved_20261022
+HUESTIS,3.482446387346e11,clarabel_0.11.1_Solved_20261022
+KSIP,5.757979412401e-1,clarabel_0.11.1_Solved_20261023
+LASER,2.409601345619e6,clarabel_0.11.1_Solved_20261023
+LISWET1,3.612240208495e1,exact_rational_kkt_20261023
+LISWET10,4.948578468800e1,exact_rational_kkt_20261023
+LISWET11,4.952395713866e1,exact_rational_kkt_20261023
+LISWET12,1.736927426116e3,exact_rational_kkt_20261023
+LISWET2,2.499807610288e1,exact_rational_kkt_20261023
+LISWET3,2.500122000019e1,exact_rational_kkt_20261023
+LISWET4,2.500011208647e1,exact_rational_kkt_20261023
+LISWET5,2.503425340170e1,exact_rational_kkt_20261023
+LISWET6,2.499574755706e1,exact_rational_kkt_20261023
+LISWET7,4.988408907861e2,exact_rational_kkt_20261023
+LISWET8,7.144700590265e2,exact_rational_kkt_20261023
+LISWET9,1.963251260895e3,exact_rational_kkt_20261023
+LOTSCHD,2.398415891449e3,highs_1.14.0_Optimal_20261022
+MOSARQP1,-9.528754430313e2,clarabel_0.11.1_Solved_20261022
+MOSARQP2,-1.597482117517e3,clarabel_0.11.1_Solved_20261022
+POWELL20,5.208958281250e10,highs_1.14.0_Optimal_20261023
+PRIMAL1,-3.501296572238e-2,clarabel_0.11.1_Solved_20261023
+PRIMAL2,-3.373367610146e-2,clarabel_0.11.1_Solved_20261023
+PRIMAL3,-1.357558367948e-1,clarabel_0.11.1_Solved_20261023
+PRIMAL4,-7.460908418021e-1,highs_1.14.0_Optimal_20261023
+PRIMALC1,-6.155250829463e3,highs_1.14.0_Optimal_20261023
+PRIMALC2,-3.551307692671e3,highs_1.14.0_Optimal_20261023
+PRIMALC5,-4.272323267403e2,highs_1.14.0_Optimal_20261023
+PRIMALC8,-1.830942978842e4,highs_1.14.0_Optimal_20261023
+Q25FV47,1.374444789491e7,clarabel_0.11.1_Solved_20261022
+QADLITTL,4.803188585448e5,highs_1.14.0_Optimal_20261022
+QAFIRO,-1.590781793902e0,clarabel_0.11.1_Solved_20261022
+QBANDM,1.635234203665e4,highs_1.14.0_Optimal_20261022
+QBEACONF,1.647120601499e5,clarabel-noequil_0.11.1_Solved_20261022
+QBORE3D,3.100200803548e3,clarabel_0.11.1_Solved_20261022
+QBRANDY,2.837511485714e4,highs_1.14.0_Optimal_20261023
+QCAPRI,6.679329326200e7,clarabel_0.11.1_Solved_20261023
+QE226,2.126534328684e2,clarabel_0.11.1_Solved_20261022
+QETAMACR,8.676036962633e4,highs_1.14.0_Optimal_20261022
+QFFFFF80,8.731474605279e5,clarabel_0.11.1_Solved_20261022
+QFORPLAN,7.456631460955e9,clarabel_0.11.1_Solved_20261022
+QGFRDXPN,1.007905848704e11,highs_1.14.0_Optimal_20261022
+QGROW15,-1.016936404683e8,clarabel_0.11.1_Solved_20261022
+QGROW22,-1.496289534713e8,clarabel_0.11.1_Solved_20261022
+QGROW7,-4.279871387253e7,clarabel_0.11.1_Solved_20261022
+QISRAEL,2.534783778912e7,highs_1.14.0_Optimal_20261022
+QPCBLEND,-7.842543074256e-3,highs_1.14.0_Optimal_20261022
+QPCBOEI1,1.150391400977e7,highs_1.14.0_Optimal_20261022
+QPCBOEI2,8.171962244331e6,highs_1.14.0_Optimal_20261022
+QPCSTAIR,6.204387477317e6,highs_1.14.0_Timelimitreached_20261023
+QPILOTNO,4.728586899006e6,clarabel_0.11.1_Solved_20261022
+QPTEST,4.371875000000e0,highs_1.14.0_Optimal_20261022
+QRECIPE,-2.666160000000e2,highs_1.14.0_Optimal_20261023
+QSC205,-5.813953488372e-3,highs_1.14.0_Optimal_20261023
+QSCAGR25,2.017379383707e8,highs_1.14.0_Optimal_20261022
+QSCAGR7,2.686594858902e7,highs_1.14.0_Optimal_20261022
+QSCFXM1,1.688269163932e7,highs_1.14.0_Optimal_20261023
+QSCFXM2,2.777616157862e7,highs_1.14.0_Optimal_20261023
+QSCFXM3,3.081635447797e7,highs_1.14.0_Optimal_20261023
+QSCORPIO,1.880509552982e3,highs_1.14.0_Optimal_20261022
+QSCRS8,9.045600138510e2,highs_1.14.0_Optimal_20261023
+QSCSD1,8.666666674333e0,highs_1.14.0_Optimal_20261022
+QSCSD6,5.080821389964e1,highs_1.14.0_Optimal_20261022
+QSCSD8,9.407635742185e2,highs_1.14.0_Timelimitreached_20261022
+QSCTAP1,1.415861111111e3,highs_1.14.0_Optimal_20261022
+QSCTAP2,1.735026497696e3,clarabel_0.11.1_Solved_20261022
+QSCTAP3,1.438754680926e3,clarabel_0.11.1_Solved_20261022
+QSEBA,8.148180035683e7,highs_1.14.0_Optimal_20261022
+QSHARE1B,7.200783183544e5,clarabel_0.11.1_Solved_20261022
+QSHARE2B,1.170369175834e4,highs_1.14.0_Optimal_20261022
+QSHELL,1.572636842999e12,highs_1.14.0_Optimal_20261022
+QSHIP04L,2.420015534110e6,highs_1.14.0_Optimal_20261022
+QSHIP04S,2.424993673005e6,highs_1.14.0_Optimal_20261022
+QSHIP08L,2.376040616579e6,highs_1.14.0_Optimal_20261022
+QSHIP08S,2.385728851391e6,highs_1.14.0_Optimal_20261022
+QSHIP12L,3.018876577180e6,highs_1.14.0_Optimal_20261022
+QSHIP12S,3.056962249278e6,highs_1.14.0_Optimal_20261022
+QSIERRA,2.375045817875e7,clarabel_0.11.1_AlmostSolved_20261022
+QSTAIR,7.985452756104e6,clarabel_0.11.1_Solved_20261023
+QSTANDAT,6.411838388889e3,clarabel_0.11.1_Solved_20261022
+S268,-1.818989403546e-12,highs_1.14.0_Optimal_20261023
+STADAT1,-2.852686404498e7,clarabel_0.11.1_Solved_20261023
+STADAT2,-3.262666457852e1,highs_1.14.0_Optimal_20261023
+STADAT3,-3.577945295702e1,clarabel_0.11.1_Solved_20261023
+STCQP1,1.551435547040e5,highs_1.14.0_Optimal_20261022
+STCQP2,2.232731327242e4,highs_1.14.0_Optimal_20261022
+TAME,0.000000000000e0,highs_1.14.0_Optimal_20261022
+UBH1,1.116000815695e0,clarabel_0.11.1_Solved_20261023
+VALUES,-1.396621144714e0,highs_1.14.0_Optimal_20261021_UNCERTIFIED
+YAO,1.977042559403e2,highs_1.14.0_Optimal_20261023
+ZECEVIC2,-4.125000000000e0,highs_1.14.0_Optimal_20261022
