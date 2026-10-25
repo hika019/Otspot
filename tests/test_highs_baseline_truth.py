@@ -508,6 +508,30 @@ class PrimalExactCertificateTests(unittest.TestCase):
         expected = float(Fraction(bound) ** 2 / 5)
         self.assertEqual(p, expected)
 
+    def test_newly_pinned_row_counts_as_recovery_progress(self):
+        # 進捨の基準を新 pin の挿入前に取る (Codex P2 4370997713)。候補 x=1, y=0
+        # は g = -1e-8 のノイズを残し、初反復で E 増して xh が境界外へ動き、次の
+        # 反復だけ行を pin する (E/pin_rows 増えない)。pin 挿入後に基準を取る旧
+        # 実装は no-progress と誤判定して None を返す。下限 -10 (有限) は自由列の
+        # fr 証明を閉け、_dual_qp_candidate を退させる (A2/B の救済経路を閉け、
+        # clarabel の成否で sentinel が揺れるのを防ぐ)。厳密修復が
+        # _recover_exact() の pin 進捨だけになるので、旧実装の早退 None は
+        # certify の合格に直に効く。min 0.5x^2 - 1.00000001x s.t. x <= 1,
+        # x >= -10 の厳密最適は x = 1 で f* = 1/2 - 1.00000001 (float 1.00000001
+        # の有理数値)。
+        prob = dict(c0=0.0, c=np.array([-1.00000001]),
+                    A=sp.csr_matrix(np.array([[1.0]])),
+                    L=np.array([-math.inf]), U=np.array([1.0]),
+                    lo=np.array([-10.0]), up=np.array([math.inf]),
+                    Q=sp.csr_matrix(np.array([[1.0]])), n=1, m=1)
+        solved = ("Optimal", np.array([1.0]), np.array([0.0]),
+                  float(0.5 - 1.00000001))
+        with mock.patch.object(truth, "_dual_qp_candidate", return_value=None):
+            ok, p, msg = truth.certify(prob, solved)
+        self.assertTrue(ok, msg)
+        expected = float(Fraction(1, 2) - Fraction(float(1.00000001)))
+        self.assertEqual(p, expected)
+
 
 class ExactProblem:
     """浮動小数データを Fraction に移した問題 (QPS 由来の浮動小数は有理数として厳密)。"""

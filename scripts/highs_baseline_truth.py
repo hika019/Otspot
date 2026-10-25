@@ -2003,11 +2003,15 @@ def _recover_exact(prob, data, s, xh0, y0, E0, R, deadline):
                   if (y[i] > 0 and not math.isfinite(prob["L"][i]))
                   or (y[i] < 0 and not math.isfinite(prob["U"][i]))]
         newpins = [int(i) for i in R if _pin_target(int(i)) is not None]
+        # 進捨の基準を pin の挿入前に取る: 新 pin の挿入自体は進捨 (次反復で
+        # その pin 方程式が解かれる)。挿入後に基準を取ると、E/pin_rows が増え
+        # ない反復で新 pin を無視して no-progress と誤判定し、回復可能な証明を
+        # 早退 None に落とす (Codex P2 4370997713)。
+        old = (len(E), len(pin_rows), len(pinned))
         for i in newpins:
             pinned[i] = _pin_target(i)
         if not badlo and not badup and not badfree and not rowbad and not newpins:
             return xh, y, gex, it + 1
-        old = (len(E), len(pin_rows), len(pinned))
         E |= set(badlo) | set(badup) | set(badfree)
         pin_rows |= set(rowbad)
         if (len(E), len(pin_rows), len(pinned)) == old:
