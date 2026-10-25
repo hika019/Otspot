@@ -109,6 +109,48 @@ def _pairs(tokens: list[str], has_set_name: bool) -> list[tuple[str, str]]:
     return [(tokens[k], tokens[k + 1]) for k in range(start, len(tokens), 2)]
 
 
+class _VectorSection:
+    """RHS の名前付きベクタ状態。最初に開いたベクタだけを採用する。
+
+    MPS/QPS 標準は同一セクションに複数の名前付きベクタを許し、各行は慣行
+    (GLPK/CPLEX、otspot-io/src/common/mod.rs の VectorSectionState と同じ) により
+    最初に現れたベクタの値を採用して以降のベクタを捨てる。名前を省いた行は
+    セクションで開いているベクタへ属性する。名前の無い行の後で名前付きベクタが
+    現れると 2 通りの解釈で値が異なるので曖昧として退ける。同一 (ベクタ, 行) の
+    重複は、後続ベクタを棄てるときでも検査して不正入力の黙認を防ぐ。production
+    parser (first-wins) と独立証明器が同ファイルで異なる規則を取ると、証明器は
+    production が解さない別モデルを認証してしまう (Codex P1 4366021328)。
+    """
+
+    ANONYMOUS = ""
+
+    def __init__(self):
+        self.seen = set()
+        self.first = None
+
+    def record(self, target, section, vector_name, row, value):
+        if self.first == self.ANONYMOUS and vector_name is not None:
+            raise UnsupportedProblem(
+                f"{section}: vector {vector_name!r} is named after unnamed entries "
+                f"were already read; the section is ambiguous (one vector with the "
+                f"name omitted earlier, or a second vector whose entries must be "
+                f"discarded)")
+        if vector_name is not None:
+            vector = vector_name
+        elif self.first is not None:
+            vector = self.first
+        else:
+            vector = self.ANONYMOUS
+        if (vector, row) in self.seen:
+            raise UnsupportedProblem(
+                f"{section}: duplicate entry for row {row!r} in vector {vector!r}")
+        self.seen.add((vector, row))
+        if self.first is None:
+            self.first = vector
+        if self.first == vector:
+            target[row] = value
+
+
 def parse_exact_qps(path: str | Path) -> ExactQp:
     """QPS を 10 進有理数として読む。LISWET の構造だけを受け付ける。"""
     path = Path(path)
@@ -121,6 +163,7 @@ def parse_exact_qps(path: str | Path) -> ExactQp:
     c: list[Fraction] = []
     rows: list[dict[int, Fraction]] = []
     rhs: dict[str, Fraction] = {}
+    rhs_vectors = _VectorSection()
     free: set[str] = set()
     q_diag: set[str] = set()
 
@@ -173,10 +216,9 @@ def parse_exact_qps(path: str | Path) -> ExactQp:
                     i = row_index[row_name]
                     rows[i][column] = rows[i].get(column, Fraction(0)) + Fraction(value)
             elif section == "RHS":
+                name = tokens[0] if len(tokens) % 2 == 1 else None
                 for row_name, value in _pairs(tokens, len(tokens) % 2 == 1):
-                    if row_name in rhs:
-                        raise UnsupportedProblem(f"duplicate RHS for {row_name!r}")
-                    rhs[row_name] = Fraction(value)
+                    rhs_vectors.record(rhs, "RHS", name, row_name, Fraction(value))
             elif section == "RANGES":
                 raise UnsupportedProblem("RANGES is not supported")
             elif section == "BOUNDS":

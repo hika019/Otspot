@@ -59,6 +59,38 @@ def objective_at(
     return value, ax
 
 
+def write_vector_section_qps(path: Path, rhs_lines: list[str]) -> None:
+    """n=3, m=1 の LISWET 形 QPS を書く。RHS セクションの中身を rhs_lines に任す。
+
+    行 R1 は列 1, 2, 3 に 1, -2, 1 (二次差分)。c = (1, -2, 1)、Q = I、
+    全変数 FR で、x = 0・y = 1 は厳密 KKT 点 (手計算: x + c = A'y で
+    (1, -2, 1) = 1·(1, -2, 1)、A x = 0 で R1 有効、y >= 0) なので
+    c0 = 0 のとき大域最適値は 0。
+    """
+    lines = [
+        "NAME SYNTH",
+        "ROWS",
+        " N OBJ",
+        " G R1",
+        "COLUMNS",
+        "    X1  OBJ 1  R1 1",
+        "    X2  OBJ -2  R1 -2",
+        "    X3  OBJ 1  R1 1",
+        "RHS",
+        *rhs_lines,
+        "BOUNDS",
+        " FR BOUNDS X1",
+        " FR BOUNDS X2",
+        " FR BOUNDS X3",
+        "QUADOBJ",
+        "    X1 X1 1",
+        "    X2 X2 1",
+        "    X3 X3 1",
+        "ENDATA",
+    ]
+    path.write_text("\n".join(lines) + "\n")
+
+
 class ExactCertificateTests(unittest.TestCase):
     def test_all_active_rows_match_hand_computed_kkt_point(self):
         # x はアフィン (全行有効)、y > 0。c = A'y - x を解析的に作り、目的値を
@@ -182,6 +214,55 @@ class ExactCertificateTests(unittest.TestCase):
             exact.format_rational_csv(Fraction(4988408907861147, 10**13)),
             "4.988408907861e2",
         )
+
+
+class VectorSectionTests(unittest.TestCase):
+    """複数 named RHS ベクタの first-wins (production parser 同規則; Codex P1)."""
+
+    def test_rhs_multiple_named_vectors_first_wins(self):
+        # Codex P1 (4366021328) の例。FIRST R1 0 が開き、SECOND OBJ -100 を
+        # 棄てる。旧実装は disjoint 行を merge して c0=100 を誤認証する;
+        # production parser (otspot-io) は first-wins で c0=0、x=0 が大域最適。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "first_wins.qps"
+            write_vector_section_qps(path, ["    FIRST R1 0", "    SECOND OBJ -100"])
+            cert = exact.certify(path, gaps=())
+        self.assertEqual(cert.objective, Fraction(0))
+
+    def test_named_vector_after_unnamed_entries_is_rejected(self):
+        # 名前の無い行の後で名前付きベクタが現れると 2 通りの解釈で値が異なる
+        # ので曖昧として退ける (production 同規則)。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ambiguous.qps"
+            write_vector_section_qps(path, ["    R1 0", "    SECOND OBJ -100"])
+            with self.assertRaises(exact.UnsupportedProblem):
+                exact.parse_exact_qps(path)
+
+    def test_duplicate_entry_in_first_vector_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dup_first.qps"
+            write_vector_section_qps(path, ["    FIRST R1 0", "    FIRST R1 5"])
+            with self.assertRaises(exact.UnsupportedProblem):
+                exact.parse_exact_qps(path)
+
+    def test_duplicate_entry_in_discarded_later_vector_is_rejected(self):
+        # 棄てるベクタ内の重複も検査して不正入力の黙認を防ぐ (production 同規則)。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dup_discarded.qps"
+            write_vector_section_qps(
+                path, ["    FIRST R1 0", "    SECOND R1 5", "    SECOND R1 6"])
+            with self.assertRaises(exact.UnsupportedProblem):
+                exact.parse_exact_qps(path)
+
+    def test_same_row_in_second_vector_is_discarded(self):
+        # 同一行が 2 ベクタに現れるときは後続ベクタを棄てる (production 同規則;
+        # 旧実装は "duplicate RHS" を退けるので first-wins で受理できる QPS を
+        # 証明器側で拒絶する食い違いも直す)。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discard.qps"
+            write_vector_section_qps(path, ["    FIRST R1 0", "    SECOND R1 5"])
+            cert = exact.certify(path, gaps=())
+        self.assertEqual(cert.objective, Fraction(0))
 
 
 if __name__ == "__main__":
