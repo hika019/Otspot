@@ -11,6 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # 3.14 既定ランナーで pin 済み Python 依存を source build しないよう固定。
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: taiki-e/install-action@nextest
       - uses: taiki-e/install-action@v2
