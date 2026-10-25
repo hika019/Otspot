@@ -264,6 +264,22 @@ class VectorSectionTests(unittest.TestCase):
             cert = exact.certify(path, gaps=())
         self.assertEqual(cert.objective, Fraction(0))
 
+    def test_rhs_vector_name_does_not_shadow_problem_name(self):
+        # RHS 行のベクタ名は専変数で受ける; name は NAME セクション以来の問題名
+        # (ExactQp.name → Certificate.problem → CSV 行の problem 列)。旧実装は
+        # 匿名行で None、named 行で最後のベクタ名に上書きし、基準行の問題列が
+        # 破れる (Codex P2 4370997709)。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "anon.qps"
+            write_vector_section_qps(path, ["    R1 0"])
+            cert = exact.certify(path, gaps=())
+        self.assertEqual(cert.problem, "SYNTH")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "named.qps"
+            write_vector_section_qps(path, ["    FIRST R1 0", "    SECOND OBJ -100"])
+            cert = exact.certify(path, gaps=())
+        self.assertEqual(cert.problem, "SYNTH")
+
 
 if __name__ == "__main__":
     unittest.main()

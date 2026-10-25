@@ -216,9 +216,12 @@ def parse_exact_qps(path: str | Path) -> ExactQp:
                     i = row_index[row_name]
                     rows[i][column] = rows[i].get(column, Fraction(0)) + Fraction(value)
             elif section == "RHS":
-                name = tokens[0] if len(tokens) % 2 == 1 else None
+                # ベクタ名は専変数で受ける。name は NAME セクション以来の問題名
+                # (ExactQp.name → Certificate.problem → CSV 行の problem 列) で、
+                # ここで上書きすると基準行の問題列が破れる (Codex P2 4370997709)。
+                vector_name = tokens[0] if len(tokens) % 2 == 1 else None
                 for row_name, value in _pairs(tokens, len(tokens) % 2 == 1):
-                    rhs_vectors.record(rhs, "RHS", name, row_name, Fraction(value))
+                    rhs_vectors.record(rhs, "RHS", vector_name, row_name, Fraction(value))
             elif section == "RANGES":
                 raise UnsupportedProblem("RANGES is not supported")
             elif section == "BOUNDS":
