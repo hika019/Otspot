@@ -12,7 +12,7 @@ use crate::problem::certificate::{NotProven, OptimalCertificate};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::qp::ipm_solver::kkt::{
     bound_violation, complementarity_componentwise_rel, complementarity_residual_rel,
-    kkt_residual_rel, primal_residual_rel,
+    kkt_residual_rel, primal_residual_l2_rel, primal_residual_rel,
 };
 use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid::dual_sign_violation;
@@ -20,9 +20,11 @@ use otspot_num::sparse::CscMatrix;
 
 /// Verify all KKT conditions and mint an [`OptimalCertificate`] if they all pass.
 ///
-/// Assembles stationarity (DD precision), primal/bound feasibility, complementarity,
-/// dual-sign feasibility, and the caller-supplied duality gap. Returns
-/// `Err(NotProven)` listing every condition that exceeded `tol`.
+/// Assembles stationarity (DD precision), primal feasibility (row-wise max and
+/// aggregate ‖·‖₂, see `primal_residual_l2_rel`), bound feasibility,
+/// complementarity, dual-sign feasibility and the caller-supplied duality gap,
+/// each compared against `tol`. Returns `Err(NotProven)` listing every condition
+/// that exceeded it.
 ///
 /// Gap is checked against `tol` (= user_eps), stricter than `PROMOTION_GAP_TOL = 1e-1`
 /// in `IpmOutcome::satisfies_eps`: the loose gate selects the best iterate across
@@ -115,6 +117,7 @@ pub fn prove_optimal<'a>(
     // ── residual computation ─────────────────────────────────────────────────
     let stat = kkt_residual_rel(view, x, y, z);
     let pres = primal_residual_rel(view, x);
+    let pres_l2 = primal_residual_l2_rel(view, x);
     let bviol = bound_violation(view.bounds, x);
     let comp = complementarity_residual_rel(view, x, y, z)
         .max(complementarity_componentwise_rel(view, x, y, z));
@@ -128,6 +131,7 @@ pub fn prove_optimal<'a>(
     for (name, val) in [
         ("stationarity", stat),
         ("primal_feasibility", pres),
+        ("primal_feasibility_l2", pres_l2),
         ("bound_feasibility", bviol),
         ("complementarity", comp),
         ("dual_sign", dsign),
@@ -1338,6 +1342,125 @@ mod tests {
             guarded.status,
             SolveStatus::Optimal,
             "guard must not demote an LP result whose residuals are within LP_CERT_TOL"
+        );
+    }
+
+    // ── aggregate primal feasibility (‖r‖₂, row-relative) ───────────────────
+
+    /// Row scaling must not change the verdict. `min ½x² − x  s.t.  α·x ≤ α/10`
+    /// (x free) has x* = 0.1, y* = 0.9/α for every α > 0 (hand KKT: x − 1 + α·y = 0
+    /// on the active row). `α·fl(0.1)` overshoots `α/10` by ≈ 5.55e-18·α (5.55e-7 at
+    /// α = 1e11): f64 representation error of x, not infeasibility.
+    #[test]
+    fn prove_optimal_certifies_row_scaled_constraint_for_every_scale() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let c = vec![-1.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let ct = vec![ConstraintType::Le];
+        let x = [0.1_f64];
+        for alpha in [1e11_f64, 10.0, 1.0] {
+            let a = CscMatrix::from_triplets(&[0], &[0], &[alpha], 1, 1).unwrap();
+            let b = vec![alpha / 10.0];
+            let y = [0.9 / alpha];
+            let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
+            let p = 0.5 * x[0] * x[0] - x[0];
+            let d = -0.5 * x[0] * x[0] - b[0] * y[0];
+            let gap = (p - d).abs() / p.abs().max(d.abs()).max(1.0);
+            for tol in [1e-6, 1e-8] {
+                let r = prove_optimal(&view, &x, &y, &[], gap, tol);
+                assert!(
+                    r.is_ok(),
+                    "α={alpha:e}, tol={tol:e}: the optimum must be certified: {:?}",
+                    r.err()
+                );
+            }
+        }
+    }
+
+    /// `m` rows `x_i ≤ 0`, each violated by δ, with an extra free `w`
+    /// (`min −Σx_i + ½w² − 100w`, y_i = 1, w = 100) so that |p| ≈ 5000 keeps the
+    /// signed gap m·δ/5000 below tol, as on LISWET7. Per-row relative violation
+    /// δ/(1+δ) passes every max-norm check; the aggregate ‖r‖₂ = √m·δ/(1+δ) does not.
+    struct AccumulatedViolation {
+        q: CscMatrix,
+        a: CscMatrix,
+        c: Vec<f64>,
+        b: Vec<f64>,
+        bounds: Vec<(f64, f64)>,
+        ct: Vec<ConstraintType>,
+        x: Vec<f64>,
+        y: Vec<f64>,
+        gap: f64,
+    }
+
+    impl AccumulatedViolation {
+        fn prove(&self, tol: f64) -> Result<OptimalCertificate, NotProven> {
+            let view = trivial_view(&self.q, &self.a, &self.c, &self.b, &self.bounds, &self.ct);
+            prove_optimal(&view, &self.x, &self.y, &[], self.gap, tol)
+        }
+    }
+
+    fn accumulated_violation_fixture(m: usize, delta: f64) -> AccumulatedViolation {
+        let n = m + 1;
+        let q = CscMatrix::from_triplets(&[m], &[m], &[1.0_f64], n, n).unwrap();
+        let rows: Vec<usize> = (0..m).collect();
+        let a = CscMatrix::from_triplets(&rows, &rows, &vec![1.0_f64; m], m, n).unwrap();
+        let mut c = vec![-1.0_f64; n];
+        c[m] = -100.0;
+        let b = vec![0.0_f64; m];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
+        let ct = vec![ConstraintType::Le; m];
+        let mut x = vec![delta; n];
+        x[m] = 100.0;
+        let y = vec![1.0_f64; m];
+        let p = 0.5 * 100.0 * 100.0 - 100.0 * 100.0 - m as f64 * delta;
+        let d = -0.5 * 100.0 * 100.0;
+        let gap = (p - d).abs() / p.abs().max(d.abs()).max(1.0);
+        AccumulatedViolation {
+            q,
+            a,
+            c,
+            b,
+            bounds,
+            ct,
+            x,
+            y,
+            gap,
+        }
+    }
+
+    #[test]
+    fn prove_optimal_rejects_accumulated_row_violation() {
+        let delta = 2e-8;
+        let err = accumulated_violation_fixture(10_000, delta)
+            .prove(1e-6)
+            .unwrap_err();
+        assert_eq!(
+            err.failing_conditions,
+            vec!["primal_feasibility_l2"],
+            "√1e4·2e-8 = 2e-6 > tol must be the sole failure: {err:?}"
+        );
+
+        let r = accumulated_violation_fixture(100, delta).prove(1e-6);
+        assert!(
+            r.is_ok(),
+            "√100·2e-8 = 2e-7 ≤ tol must certify: {:?}",
+            r.err()
+        );
+    }
+
+    /// The aggregate check is a plain tol comparison, so it binds the LP
+    /// certificate tolerance too: δ = 2e-6 per row passes LP_CERT_TOL row-wise but
+    /// ‖r‖₂ = √1e4·2e-6 = 2e-4 > LP_CERT_TOL.
+    #[test]
+    fn prove_optimal_aggregate_feasibility_applies_at_lp_cert_tol() {
+        let err = accumulated_violation_fixture(10_000, 2e-6)
+            .prove(LP_CERT_TOL)
+            .unwrap_err();
+        assert_eq!(
+            err.failing_conditions,
+            vec!["primal_feasibility_l2"],
+            "{err:?}"
         );
     }
 }

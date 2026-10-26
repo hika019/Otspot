@@ -82,6 +82,46 @@ pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
     max_rel
 }
 
+/// Aggregate primal feasibility `‖r‖₂` with row-relative components
+/// `r_i = viol_i / (1 + |b_i| + Σ_j |A_ij·x_j|)` over all rows.
+///
+/// Each component is invariant under row scaling (up to the absolute floor 1):
+/// `Σ_j |A_ij·x_j|` is the magnitude f64 rounding of `x` acts on, so a row
+/// `α·x ≤ α·β` evaluated at `fl(x*)` yields `r_i ≈ ε` for any α, including
+/// cancelling rows where `|A_i·x| ≪ Σ_j |A_ij·x_j|`.
+///
+/// `primal_residual_rel` takes the max over rows and cannot see many rows each
+/// violated just below tol; the Euclidean norm grows as √(#rows) for such a
+/// coherent violation while rounding-level components stay ≈ √m·ε ≪ tol.
+/// Non-finite input or residuals return INFINITY.
+pub fn primal_residual_l2_rel(prob: &ProblemView, x: &[f64]) -> f64 {
+    let m = prob.a.nrows();
+    if m == 0 {
+        return 0.0;
+    }
+    if x.len() != prob.a.ncols() || any_nonfinite(x) {
+        return f64::INFINITY;
+    }
+    let ax_dd = dd_impl::ax(prob.a, x);
+    let viols = dd_impl::constraint_violations(&ax_dd, prob.b, prob.constraint_types);
+    let mut row_mag = vec![0.0_f64; m];
+    for (j, &xj) in x.iter().enumerate() {
+        let (rows, vals) = prob.a.column(j);
+        for (&i, &aij) in rows.iter().zip(vals) {
+            row_mag[i] += (aij * xj).abs();
+        }
+    }
+    let mut sum_sq = 0.0_f64;
+    for (i, &v) in viols.iter().enumerate() {
+        let r = v / (1.0 + prob.b[i].abs() + row_mag[i]);
+        if !r.is_finite() {
+            return f64::INFINITY;
+        }
+        sum_sq += r * r;
+    }
+    sum_sq.sqrt()
+}
+
 /// 元空間 KKT complementarity 残差 (問題全体スケール正規化)。
 ///
 /// stationarity / primal feas / bound feas に加えて KKT 4 条件目を gating する。
@@ -604,5 +644,88 @@ mod tests {
             "linear-only var の stationarity が露出するべき (got rel={:.3e})",
             r
         );
+    }
+
+    // ── primal_residual_l2_rel ───────────────────────────────────────────────
+
+    /// Hand oracle over Le / Ge / Eq rows, x = (2, 1):
+    ///   row0 Le  x0 − x1 ≤ 0.5 : Ax = 1,  viol 0.5, scale 1 + 0.5 + (2+1) = 4.5
+    ///   row1 Ge  3·x0    ≥ 7   : Ax = 6,  viol 1,   scale 1 + 7 + 6       = 14
+    ///   row2 Eq  x0 + x1 = 3   : Ax = 3,  viol 0
+    /// ‖r‖₂ = √((0.5/4.5)² + (1/14)²).
+    #[test]
+    fn primal_residual_l2_rel_matches_hand_oracle() {
+        let a = CscMatrix::from_triplets(
+            &[0usize, 1, 2, 0, 2],
+            &[0usize, 0, 0, 1, 1],
+            &[1.0_f64, 3.0, 1.0, -1.0, 1.0],
+            3,
+            2,
+        )
+        .unwrap();
+        let q = CscMatrix::new(2, 2);
+        let c = vec![0.0_f64; 2];
+        let b = vec![0.5_f64, 7.0, 3.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let ct = vec![ConstraintType::Le, ConstraintType::Ge, ConstraintType::Eq];
+        let view = build_view(&q, &a, &c, &b, &bounds, &ct);
+        let r = primal_residual_l2_rel(&view, &[2.0, 1.0]);
+        let expected = ((0.5_f64 / 4.5).powi(2) + (1.0_f64 / 14.0).powi(2)).sqrt();
+        assert!((r - expected).abs() < 1e-15, "got {r}, expected {expected}");
+
+        let r = primal_residual_l2_rel(&view, &[2.0, 1.0 + 0.5]);
+        let expected = ((1.0_f64 / 14.0).powi(2) + (0.5_f64 / (1.0 + 3.0 + 3.5)).powi(2)).sqrt();
+        assert!((r - expected).abs() < 1e-15, "got {r}, expected {expected}");
+    }
+
+    /// A cancelling row `α·x0 − α·x1 ≤ 0` at x0 = x1 = fl(0.1) + one ulp on x0:
+    /// |A·x| ≈ α·1.4e-17 but Σ|A_ij·x_j| = 0.2·α, so r ≈ 7e-17 for every α.
+    #[test]
+    fn primal_residual_l2_rel_uses_term_magnitude_for_cancelling_rows() {
+        let x0 = f64::from_bits(0.1_f64.to_bits() + 1);
+        for alpha in [1e11_f64, 1.0] {
+            let a = CscMatrix::from_triplets(&[0usize, 0], &[0usize, 1], &[alpha, -alpha], 1, 2)
+                .unwrap();
+            let q = CscMatrix::new(2, 2);
+            let c = vec![0.0_f64; 2];
+            let b = vec![0.0_f64];
+            let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+            let ct = vec![ConstraintType::Le];
+            let view = build_view(&q, &a, &c, &b, &bounds, &ct);
+            let r = primal_residual_l2_rel(&view, &[x0, 0.1]);
+            let viol = alpha * (x0 - 0.1);
+            let expected = viol / (1.0 + alpha * x0 + alpha * 0.1);
+            assert!(
+                r > 0.0 && (r - expected).abs() <= 1e-3 * expected,
+                "α={alpha:e}: {r} vs {expected}"
+            );
+            assert!(
+                r < 1e-16,
+                "α={alpha:e}: rounding-level residual must stay ≈ ε, got {r}"
+            );
+        }
+    }
+
+    #[test]
+    fn primal_residual_l2_rel_rejects_broken_inputs_and_handles_empty() {
+        let a = CscMatrix::from_triplets(&[0usize], &[0usize], &[1.0_f64], 1, 1).unwrap();
+        let q = CscMatrix::new(1, 1);
+        let c = vec![0.0_f64];
+        let b = vec![1.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let ct = vec![ConstraintType::Le];
+        let view = build_view(&q, &a, &c, &b, &bounds, &ct);
+        for bad_x in [vec![f64::NAN], vec![f64::INFINITY], vec![], vec![0.0, 0.0]] {
+            let r = primal_residual_l2_rel(&view, &bad_x);
+            assert!(
+                r.is_infinite() && r > 0.0,
+                "x={bad_x:?} must be INFINITY, got {r}"
+            );
+        }
+        assert_eq!(primal_residual_l2_rel(&view, &[1.0]), 0.0);
+
+        let a0 = CscMatrix::new(0, 1);
+        let view0 = build_view(&q, &a0, &c, &[], &bounds, &[]);
+        assert_eq!(primal_residual_l2_rel(&view0, &[3.0]), 0.0);
     }
 }
