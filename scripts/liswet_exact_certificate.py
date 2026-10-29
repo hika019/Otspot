@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """LISWET QP の厳密有理 KKT 証明。
 
-QPS の数値リテラルを 10 進有理数として厳密に読み、LISWET の構造
+共有 QPS パーサの binary64 モデルを有理数として厳密に読み、LISWET の構造
 
     min  c0 + c'x + 1/2 x'x
     s.t. A x >= 0,  x free
@@ -37,12 +37,17 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import highs_baseline_truth as truth
+from baseline_certificate import ExactModel, reference_error, REFERENCE_TOLERANCE, save_evidence
 
 # 有効行の候補判定 (境界 0 からの絶対偏差)。LISWET の数値解では有効行の
 # A x は 1e-15 程度、無効行は 1e-7 以上離れる。誤判定は厳密検証と
@@ -77,6 +82,7 @@ class ExactQp:
     c0: Fraction
     c: tuple[Fraction, ...]
     rows: tuple[tuple[tuple[int, Fraction], ...], ...]
+    model: ExactModel
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,7 @@ class Certificate:
     reported: float | None
     n: int
     m: int
+    enclosure: object
 
     @property
     def objective_float(self) -> float:
@@ -102,184 +109,36 @@ class Certificate:
         return abs(self.objective_float - self.reported) / (1.0 + abs(self.reported))
 
 
-def _pairs(tokens: list[str], has_set_name: bool) -> list[tuple[str, str]]:
-    start = 1 if has_set_name else 0
-    if (len(tokens) - start) % 2:
-        raise UnsupportedProblem(f"odd token count in data line: {tokens!r}")
-    return [(tokens[k], tokens[k + 1]) for k in range(start, len(tokens), 2)]
-
-
-class _VectorSection:
-    """RHS の名前付きベクタ状態。最初に開いたベクタだけを採用する。
-
-    MPS/QPS 標準は同一セクションに複数の名前付きベクタを許し、各行は慣行
-    (GLPK/CPLEX、otspot-io/src/common/mod.rs の VectorSectionState と同じ) により
-    最初に現れたベクタの値を採用して以降のベクタを捨てる。名前を省いた行は
-    セクションで開いているベクタへ属性する。名前の無い行の後で名前付きベクタが
-    現れると 2 通りの解釈で値が異なるので曖昧として退ける。同一 (ベクタ, 行) の
-    重複は、後続ベクタを棄てるときでも検査して不正入力の黙認を防ぐ。production
-    parser (first-wins) と独立証明器が同ファイルで異なる規則を取ると、証明器は
-    production が解さない別モデルを認証してしまう (Codex P1 4366021328)。
-    """
-
-    ANONYMOUS = ""
-
-    def __init__(self):
-        self.seen = set()
-        self.first = None
-
-    def record(self, target, section, vector_name, row, value):
-        if self.first == self.ANONYMOUS and vector_name is not None:
-            raise UnsupportedProblem(
-                f"{section}: vector {vector_name!r} is named after unnamed entries "
-                f"were already read; the section is ambiguous (one vector with the "
-                f"name omitted earlier, or a second vector whose entries must be "
-                f"discarded)")
-        if vector_name is not None:
-            vector = vector_name
-        elif self.first is not None:
-            vector = self.first
-        else:
-            vector = self.ANONYMOUS
-        if (vector, row) in self.seen:
-            raise UnsupportedProblem(
-                f"{section}: duplicate entry for row {row!r} in vector {vector!r}")
-        self.seen.add((vector, row))
-        if self.first is None:
-            self.first = vector
-        if self.first == vector:
-            target[row] = value
-
-
 def parse_exact_qps(path: str | Path) -> ExactQp:
-    """QPS を 10 進有理数として読む。LISWET の構造だけを受け付ける。"""
+    """Read the shared binary64 model and require the LISWET structure."""
     path = Path(path)
-    section = None
-    name = path.stem
-    objective_row = None
-    row_names: list[str] = []
-    row_index: dict[str, int] = {}
-    col_index: dict[str, int] = {}
-    c: list[Fraction] = []
-    rows: list[dict[int, Fraction]] = []
-    rhs: dict[str, Fraction] = {}
-    rhs_vectors = _VectorSection()
-    free: set[str] = set()
-    q_diag: set[str] = set()
-
-    def intern_column(token: str) -> int:
-        if token not in col_index:
-            col_index[token] = len(c)
-            c.append(Fraction(0))
-        return col_index[token]
-
-    with path.open(errors="strict") as handle:
-        for raw in handle:
-            line = raw.rstrip("\n")
-            if not line.strip() or line.startswith("*"):
-                continue
-            if not line[0].isspace():
-                tokens = line.split()
-                if tokens[0] not in {
-                    "NAME", "ROWS", "COLUMNS", "RHS", "RANGES", "BOUNDS", "QUADOBJ", "ENDATA",
-                }:
-                    raise UnsupportedProblem(f"unsupported section {tokens[0]!r}")
-                section = tokens[0]
-                if section == "NAME" and len(tokens) > 1:
-                    name = tokens[1]
-                continue
-            tokens = line.split()
-            if section == "ROWS":
-                if len(tokens) != 2:
-                    raise UnsupportedProblem(f"bad ROWS line: {line!r}")
-                kind, row_name = tokens
-                if kind == "N":
-                    if objective_row is not None:
-                        raise UnsupportedProblem("multiple N rows")
-                    objective_row = row_name
-                elif kind == "G":
-                    if row_name in row_index:
-                        raise UnsupportedProblem(f"duplicate row {row_name!r}")
-                    row_index[row_name] = len(row_names)
-                    row_names.append(row_name)
-                    rows.append({})
-                else:
-                    raise UnsupportedProblem(f"row type {kind!r} (only G rows supported)")
-            elif section == "COLUMNS":
-                column = intern_column(tokens[0])
-                for row_name, value in _pairs(tokens[1:], False):
-                    if row_name == objective_row:
-                        c[column] += Fraction(value)
-                        continue
-                    if row_name not in row_index:
-                        raise UnsupportedProblem(f"unknown row {row_name!r} in COLUMNS")
-                    i = row_index[row_name]
-                    rows[i][column] = rows[i].get(column, Fraction(0)) + Fraction(value)
-            elif section == "RHS":
-                # ベクタ名は専変数で受ける。name は NAME セクション以来の問題名
-                # (ExactQp.name → Certificate.problem → CSV 行の problem 列) で、
-                # ここで上書きすると基準行の問題列が破れる (Codex P2 4370997709)。
-                vector_name = tokens[0] if len(tokens) % 2 == 1 else None
-                for row_name, value in _pairs(tokens, len(tokens) % 2 == 1):
-                    rhs_vectors.record(rhs, "RHS", vector_name, row_name, Fraction(value))
-            elif section == "RANGES":
-                raise UnsupportedProblem("RANGES is not supported")
-            elif section == "BOUNDS":
-                if len(tokens) not in (2, 3):
-                    raise UnsupportedProblem(f"bad BOUNDS line: {line!r}")
-                if tokens[0] != "FR":
-                    raise UnsupportedProblem(f"bound type {tokens[0]!r} (only FR supported)")
-                column = tokens[-1]
-                if column not in col_index:
-                    raise UnsupportedProblem(f"bound for unknown column {column!r}")
-                free.add(column)
-            elif section == "QUADOBJ":
-                if len(tokens) != 3:
-                    raise UnsupportedProblem(f"bad QUADOBJ line: {line!r}")
-                left, right, value = tokens
-                if left != right or Fraction(value) != 1:
-                    raise UnsupportedProblem(f"Q is not the identity: {line!r}")
-                if left in q_diag:
-                    raise UnsupportedProblem(f"duplicate QUADOBJ entry {left!r}")
-                q_diag.add(left)
-            elif section == "ENDATA":
-                break
-            else:
-                raise UnsupportedProblem(f"data line in section {section!r}")
-
-    if objective_row is None:
-        raise UnsupportedProblem("missing objective N row")
-    unknown_rhs = set(rhs) - set(row_names) - {objective_row}
-    if unknown_rhs:
-        raise UnsupportedProblem(f"RHS for unknown row {sorted(unknown_rhs)[:4]}")
-    n = len(c)
-    m = len(rows)
-    if n == 0 or m == 0:
-        raise UnsupportedProblem("empty problem")
-    if len(free) != n:
-        missing = sorted(set(col_index) - free)
-        raise UnsupportedProblem(f"all variables must be FR (missing {missing[:4]})")
-    if q_diag != set(col_index):
-        raise UnsupportedProblem("QUADOBJ must list every diagonal entry of Q = I")
-    for row_name in row_names:
-        if rhs.get(row_name, Fraction(0)) != 0:
-            raise UnsupportedProblem(f"G row {row_name!r} has nonzero RHS")
-    if objective_row in rhs:
-        c0 = -rhs[objective_row]
-    else:
-        c0 = Fraction(0)
-
-    # LISWET の構造: m = n - 2、行 i は列 i, i+1, i+2 に 1, -2, 1。
-    if m != n - 2:
+    try:
+        prob = truth.load_qps(path)
+        model = ExactModel(prob)
+    except (ValueError, IndexError, KeyError) as exc:
+        raise UnsupportedProblem(str(exc)) from exc
+    n, m = model.n, model.m
+    if not n or not m or m != n - 2:
         raise UnsupportedProblem(f"expected m = n - 2, got n={n}, m={m}")
-    normalized: list[tuple[tuple[int, Fraction], ...]] = []
-    for i, row in enumerate(rows):
-        entries = tuple(sorted((j, v) for j, v in row.items() if v != 0))
+    if any(v is not None for v in model.lo + model.up):
+        raise UnsupportedProblem("all variables must be FR")
+    if model.Q != tuple(((j, Fraction(1)),) for j in range(n)):
+        raise UnsupportedProblem("Q must be the identity")
+    if any(v != 0 for v in model.L) or any(v is not None for v in model.U):
+        raise UnsupportedProblem("rows must have lower bound zero and no upper bound")
+    for i, row in enumerate(model.Arow):
         expected = ((i, Fraction(1)), (i + 1, Fraction(-2)), (i + 2, Fraction(1)))
-        if entries != expected:
-            raise UnsupportedProblem(f"row {i} is not the LISWET second difference: {entries!r}")
-        normalized.append(entries)
-    return ExactQp(name=name, n=n, m=m, c0=c0, c=tuple(c), rows=tuple(normalized))
+        if row != expected:
+            raise UnsupportedProblem(f"row {i} is not the LISWET second difference")
+    name = path.stem
+    with path.open() as handle:
+        for line in handle:
+            if line.startswith("NAME"):
+                tokens = line.split()
+                if len(tokens) > 1:
+                    name = tokens[1]
+                break
+    return ExactQp(name, n, m, model.c0, model.c, model.Arow, model)
 
 
 def _solve_banded_system(
@@ -334,8 +193,6 @@ def _solve_kkt_banded(
     if any(g < 0 or g >= qp.m for g in gaps):
         raise CertificateError(f"gap index out of range: {gaps!r}")
     active = sorted(set(range(qp.m)) - set(gaps))
-    if not active:
-        raise CertificateError("no active rows")
     position = {row: index for index, row in enumerate(active)}
 
     rows: list[dict[int, Fraction]] = []
@@ -417,17 +274,23 @@ def _certificate_from_point(
     if complementarity != 0:
         raise CertificateError("complementarity residual is nonzero")
 
+    enclosure = qp.model.check(x, x, y)
+    if enclosure is None or enclosure.lower != enclosure.upper:
+        raise CertificateError("shared model checker rejected the KKT witness")
+    if reference_error(enclosure, format_rational_csv(objective)) > REFERENCE_TOLERANCE:
+        raise CertificateError("serialized reference exceeds its error budget")
     inactive_min = min((ax[i] for i in inactive), default=None)
     return Certificate(
         problem=qp.name,
         objective=objective,
         c0=qp.c0,
         gaps=gaps,
-        y_min=min(y[i] for i in active),
+        y_min=min((y[i] for i in active), default=Fraction(0)),
         inactive_min=inactive_min,
         reported=reported,
         n=qp.n,
         m=qp.m,
+        enclosure=enclosure,
     )
 
 
@@ -532,6 +395,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--time-limit", type=float, default=300.0, help="HiGHS time limit [s]")
     parser.add_argument("--csv", action="store_true", help="print baseline CSV rows")
     parser.add_argument("--json", action="store_true", help="print one JSON object per problem")
+    parser.add_argument("--evidence-dir", type=Path, default=Path("baseline-evidence"))
     args = parser.parse_args(argv)
 
     gaps = None
@@ -543,7 +407,13 @@ def main(argv: list[str] | None = None) -> int:
     status = 0
     for path in args.paths:
         try:
+            input_hash = hashlib.sha256(Path(path).read_bytes()).hexdigest()
             cert = certify(path, gaps=gaps, time_limit=args.time_limit)
+            if hashlib.sha256(Path(path).read_bytes()).hexdigest() != input_hash:
+                raise CertificateError("input changed during verification")
+            save_evidence(args.evidence_dir / (Path(path).stem + ".proof.json.gz"),
+                          cert.enclosure, format_rational_csv(cert.objective), input_hash,
+                          dict(method="liswet_banded", gaps=list(cert.gaps)))
         except (UnsupportedProblem, CertificateError, OSError) as exc:
             print(f"{Path(path).stem}: NOT CERTIFIED: {exc}", file=sys.stderr)
             status = 1

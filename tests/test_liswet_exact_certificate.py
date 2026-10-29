@@ -92,32 +92,24 @@ def write_vector_section_qps(path: Path, rhs_lines: list[str]) -> None:
 
 
 class ExactCertificateTests(unittest.TestCase):
-    def test_all_active_rows_match_hand_computed_kkt_point(self):
-        # x はアフィン (全行有効)、y > 0。c = A'y - x を解析的に作り、目的値を
-        # 独立に手計算した値と比較する。
-        x = [Fraction(1), Fraction(11, 10), Fraction(6, 5),
-             Fraction(13, 10), Fraction(7, 5), Fraction(3, 2)]
-        y = [Fraction(1), Fraction(2), Fraction(3), Fraction(4)]
-        aty = [
-            y[0],
-            -2 * y[0] + y[1],
-            y[0] - 2 * y[1] + y[2],
-            y[1] - 2 * y[2] + y[3],
-            y[2] - 2 * y[3],
-            y[3],
-        ]
-        c = [aty[j] - x[j] for j in range(6)]
-        c0 = Fraction(7, 8)
-        expected, ax = objective_at(c, c0, ROWS, x)
-        self.assertEqual(ax, [0] * 4)
-
+    def test_binary64_all_active_optimum_matches_affine_projection(self):
+        # Orthogonal projection onto span(1,j), computed independently of KKT recovery.
+        c = [Fraction(0), Fraction(-11, 10), Fraction(-6, 5),
+             Fraction(-13, 10), Fraction(-32, 5), Fraction(5, 2)]
+        binary_c = [Fraction(float(v)) for v in c]
+        s0 = -sum(binary_c)
+        s1 = -sum(j * v for j, v in enumerate(binary_c))
+        intercept = (55 * s0 - 15 * s1) / 105
+        slope = (6 * s1 - 15 * s0) / 105
+        optimum = Fraction(7, 8) - sum((intercept + j * slope)**2 for j in range(6)) / 2
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "all_active.qps"
-            write_qps(path, c, c0, ROWS)
+            path = Path(tmp) / "binary64_active.qps"
+            write_qps(path, c, Fraction(7, 8), ROWS)
             cert = exact.certify(path, gaps=())
-        self.assertEqual(cert.gaps, ())
-        self.assertEqual(cert.objective, expected)
-        self.assertEqual(cert.objective, Fraction(-39, 10))
+        self.assertEqual(cert.objective, optimum)
+        self.assertEqual(cert.enclosure.lower, optimum)
+        self.assertEqual(cert.enclosure.upper, optimum)
+        self.assertNotEqual(optimum, Fraction(-39, 10))
         self.assertGreater(cert.y_min, 0)
 
     def test_inactive_row_matches_hand_computed_kkt_point(self):
