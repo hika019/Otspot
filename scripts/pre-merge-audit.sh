@@ -25,9 +25,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 # 共有し、concurrent.rs の並列テストを目録に含めるため。この feature は非-parallel
 # の上位集合 (テストは減らない) なので full-suite を弱めない。
 cargo nextest run --release --features parallel --test-threads 6
-# `cargo test --doc` runs doctests; it does not lint intra-doc links. The
-# rustdoc gate below is a separate check and CI runs both (ci.yml `docs` job).
-cargo test --doc
+# `cargo test --doc --release` runs doctests (AGENTS.md prescribes --release;
+# it shares the release build above instead of recompiling in debug); it does
+# not lint intra-doc links. The rustdoc gate below is a separate check and CI
+# runs both (ci.yml `docs` job).
+cargo test --doc --release
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 bash scripts/check_file_size.sh
 # grep exits 1 on zero matches, which is the passing state here; `|| true`

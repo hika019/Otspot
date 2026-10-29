@@ -89,7 +89,8 @@ jobs:
       # 構造検証など) は debug-assertions が off の release では一度も走らず
       # CI で退化を検出できない。debug profile (既定で debug-assertions on)
       # で otspot-num を軽量に実行し、それらを実際に踏む。
-      - run: cargo nextest run -p otspot-num --no-fail-fast
+      # --test-threads 3: CI は 3 固定 (ローカルは nextest.toml default の 6)
+      - run: cargo nextest run -p otspot-num --no-fail-fast --test-threads 3
 
   python:
     name: Python bindings (otspot-py parity)
