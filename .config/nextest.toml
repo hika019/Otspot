@@ -1,7 +1,10 @@
 [profile.default]
-# doctest は nextest 非対応 → `cargo test --doc` で別途実行。
+# doctest は nextest 非対応 → AGENTS.md 規定どおり `cargo test --doc --release` で別途実行
+# (CI の docs job 側は debug 版を別途実行する。ci.yml の該当ステップコメントと対応)。
 # ローカル開発は 6 スレッド、GitHub Actions は 3 (ユーザ指示 2026-07-06)。
-# CI は ci.yml/test-heavy.yml が --test-threads 3 を明示指定して override する。
+# override の実態: ci.yml test-integration/test-num-debug と test-heavy.yml は CLI で
+# --test-threads 3 を明示指定。ci.yml test-lib は --profile lib-only を使い
+# [profile.lib-only] test-threads = 3 を継承 (CLI 明示指定なし)。
 test-threads = 6
 # slow-timeout.period 60s, terminate-after 5 → 300s で kill。
 # tier-2 sentinel (pilot87 ~142s, ken18 ~62s 等) を default で実走させるため
