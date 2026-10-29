@@ -3,7 +3,6 @@
 import argparse
 import concurrent.futures
 import csv
-import gzip
 import hashlib
 import json
 import os
@@ -11,6 +10,14 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from baseline_certificate import (LOADED_CHECKER_DIGEST, ExactModel, checker_digest,
+                                  reference_error, REFERENCE_TOLERANCE, save_evidence)
+
+
+class CheckerCodeChanged(RuntimeError):
+    """The checker code differs from the digest pinned at the start of the run."""
 
 
 def sha256(path):
@@ -44,18 +51,10 @@ def read_gaps(paths):
     return records
 
 
-def checker_digest():
-    root = Path(__file__).parent
-    files = ("baseline_certificate.py", "highs_baseline_truth.py",
-             "liswet_exact_certificate.py", "revalidate_baselines.py")
-    return hashlib.sha256(b"".join((root / name).read_bytes() for name in files)).hexdigest()
-
-
-def evaluate_row(config, row):
+def evaluate_row(config, row, expected_digest):
     import numpy as np
     import highs_baseline_truth as truth
     import liswet_exact_certificate as liswet
-    from baseline_certificate import ExactModel, evidence, reference_error, REFERENCE_TOLERANCE
 
     name = row["problem_name"]
     path = Path(config["data_dir"]) / (name + ".QPS")
@@ -64,7 +63,7 @@ def evaluate_row(config, row):
     model = ExactModel(prob)
     result = dict(problem_name=name, old_value=row["optimal_obj"], old_source=row["source"],
                   reference=row["optimal_obj"], accepted=False, input_sha256=input_hash,
-                  checker_sha256=checker_digest(), reason="no_verified_enclosure")
+                  checker_sha256=expected_digest, reason="no_verified_enclosure")
     verdict = truth._psd_ok(prob["Q"])
     if verdict is not True:
         result["reason"] = "nonconvex" if verdict is False else "psd_unknown"
@@ -106,30 +105,38 @@ def evaluate_row(config, row):
     # Keep a published reference only when this run proves that exact string too.
     if reference_error(enclosure, row["optimal_obj"]) <= REFERENCE_TOLERANCE:
         reference = row["optimal_obj"]
-    proof = evidence(enclosure, reference, input_hash)
-    proof.update(checker_sha256=result["checker_sha256"], proposal=proposal)
-    proof_path = Path(config["output_dir"]) / (name + ".proof.json.gz")
-    with gzip.open(proof_path, "wt") as handle:
-        json.dump(proof, handle, allow_nan=False)
-    result.update(accepted=True, reason="certified", reference=reference,
-                  lower=proof["lower"], upper=proof["upper"],
-                  relative_error=proof["relative_error"],
-                  proof=proof_path.name, proof_sha256=sha256(proof_path))
+    if checker_digest() != expected_digest:
+        raise CheckerCodeChanged("checker code changed during verification")
+    compact = save_evidence(Path(config["output_dir"]) / (name + ".proof.json.gz"),
+                            enclosure, reference, input_hash, proposal, expected_digest)
+    result.update(compact)
+    result.update(accepted=True, reason="certified", reference=reference)
     return result
 
 
 def worker(config_path, name):
     config = json.loads(Path(config_path).read_text())
     row = next(row for row in config["rows"] if row["problem_name"] == name)
+    output = Path(config["output_dir"])
     started = time.monotonic()
+    result = None
     try:
-        result = evaluate_row(config, row)
+        expected = config["checker_sha256"]
+        if LOADED_CHECKER_DIGEST != expected or checker_digest() != expected:
+            raise CheckerCodeChanged("imported code differs from the digest pinned at run start")
+        result = evaluate_row(config, row, expected)
+        if checker_digest() != expected:
+            raise CheckerCodeChanged("checker code changed during verification")
     except Exception as exc:
+        reason = "checker_code_changed" if isinstance(exc, CheckerCodeChanged) else "error"
         result = dict(problem_name=name, old_value=row["optimal_obj"],
                       old_source=row["source"], reference=row["optimal_obj"],
-                      accepted=False, reason="error", error=f"{type(exc).__name__}: {exc}")
+                      accepted=False, reason=reason, error=f"{type(exc).__name__}: {exc}")
     result["elapsed_seconds"] = time.monotonic() - started
-    write_json(Path(config["output_dir"]) / (name + ".result.json"), result)
+    # An unaccepted row must not leave a proof file behind as if it were verified.
+    if not result["accepted"]:
+        (output / (name + ".proof.json.gz")).unlink(missing_ok=True)
+    write_json(output / (name + ".result.json"), result)
 
 
 def run_row(config_path, row, output, timeout):
@@ -149,6 +156,8 @@ def run_row(config_path, row, output, timeout):
     if reason is None:
         result = json.loads((output / (name + ".result.json")).read_text())
     else:
+        # Same contract as the worker: no accepted row, no adjacent proof file.
+        (output / (name + ".proof.json.gz")).unlink(missing_ok=True)
         result = dict(problem_name=name, old_value=row["optimal_obj"], old_source=row["source"],
                       reference=row["optimal_obj"], accepted=False, reason=reason,
                       elapsed_seconds=time.monotonic() - started)
@@ -162,6 +171,33 @@ def output_source(result):
     if result["accepted"]:
         return "exact_enclosure_v1"
     return f"revalidation_{result['reason']}_UNCERTIFIED"
+
+
+def invalidate(result, reason):
+    return dict(problem_name=result["problem_name"], old_value=result["old_value"],
+                old_source=result["old_source"], reference=result["old_value"],
+                accepted=False, reason=reason)
+
+
+def finalize(results, output, start_digest):
+    """Write the run outputs under a code freeze: digest drift voids every row."""
+    frozen = checker_digest() == start_digest
+    if not frozen:
+        for result in results:
+            if result.get("proof"):
+                (output / result["proof"]).unlink(missing_ok=True)
+        results = [invalidate(result, "checker_code_changed") for result in results]
+    with (output / "baseline.csv").open("w") as handle:
+        handle.write("# Exact binary64 model enclosures; evidence in adjacent *.proof.json.gz.\n")
+        writer = csv.writer(handle)
+        writer.writerow(["problem_name", "optimal_obj", "source"])
+        for result in results:
+            writer.writerow([result["problem_name"], result["reference"], output_source(result)])
+    summary = dict(total=len(results), certified=sum(r["accepted"] for r in results),
+                   results=results, checker_sha256=start_digest, code_frozen=frozen)
+    write_json(output / "summary.json", summary)
+    print(f"{summary['certified']}/{summary['total']} certified", flush=True)
+    return 0 if frozen else 1
 
 
 def main(argv=None):
@@ -190,22 +226,13 @@ def main(argv=None):
     output.mkdir(parents=True, exist_ok=True)
     config = dict(rows=rows, data_dir=str(args.data_dir.resolve()),
                   candidate_dir=str(args.candidate_dir.resolve()), output_dir=str(output),
-                  gaps=read_gaps(args.gaps_json), timeout=args.timeout)
+                  gaps=read_gaps(args.gaps_json), timeout=args.timeout,
+                  checker_sha256=checker_digest())
     config_path = output / "run.json"
     write_json(config_path, config)
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         results = list(pool.map(lambda row: run_row(config_path, row, output, args.timeout), rows))
-    with (output / "baseline.csv").open("w") as handle:
-        handle.write("# Exact binary64 model enclosures; evidence in adjacent *.proof.json.gz.\n")
-        writer = csv.writer(handle)
-        writer.writerow(["problem_name", "optimal_obj", "source"])
-        for result in results:
-            writer.writerow([result["problem_name"], result["reference"], output_source(result)])
-    summary = dict(total=len(results), certified=sum(r["accepted"] for r in results), results=results,
-                   checker_sha256=checker_digest())
-    write_json(output / "summary.json", summary)
-    print(f"{summary['certified']}/{summary['total']} certified", flush=True)
-    return 0
+    return finalize(results, output, config["checker_sha256"])
 
 
 if __name__ == "__main__":
