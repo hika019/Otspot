@@ -1,6 +1,9 @@
 [profile.default]
-# doctest は nextest 非対応 → AGENTS.md 規定どおり `cargo test --doc --release` で別途実行
-# (CI の docs job 側は debug 版を別途実行する。ci.yml の該当ステップコメントと対応)。
+# doctest は nextest 非対応 → AGENTS.md 規定どおり `cargo test --doc --release` で別途実行。
+# doctest 本文は rustdoc が -C debug-assertions/-C overflow-checks/-C opt-level を渡さない
+# ため、--release でも debug_assertions=true。CI docs job (`cargo test --doc`) との差は
+# リンクする lib ビルド (debug-assertions ON の debug lib vs release lib) のみ
+# (ci.yml の該当ステップコメントと対応)。
 # ローカル開発は 6 スレッド、GitHub Actions は 3 (ユーザ指示 2026-07-06)。
 # override の実態: ci.yml test-integration/test-num-debug と test-heavy.yml は CLI で
 # --test-threads 3 を明示指定。ci.yml test-lib は --profile lib-only を使い
@@ -24,16 +27,19 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 # override is not needed for correctness. It is retained to avoid CPU
 # oversubscription: each test runs a CPU-bound n=1500 dense factorization, so
 # threads-required = "num-cpus" schedules them exclusively rather than letting
-# several stack onto the same cores.
+# several stack onto the same cores. Match by binary(): nextest's test() does
+# not match binary names, so the former test(linalg::par_sentinel::) was a
+# silent 0-match no-op.
 [[profile.default.overrides]]
-filter = "test(linalg::par_sentinel::)"
+filter = "binary(linalg_par_sentinel)"
 threads-required = "num-cpus"
 
 # greenbea_postsolve_dual_feasibility: idle ~164s で converge、170s margin 6s。
 # #91 で CPU contention 1.04x でも FAIL することを実証 (threads-required では不十分) →
 # #[ignore] 復活で default 除外。本 override は `--run-ignored only` 時に CPU 専有で安定化させる用途。
+# test() はバイナリ名に一致しないため、binary() と & (積) で対象を限定する。
 [[profile.default.overrides]]
-filter = "test(lp_regression_postsolve_y_dual::greenbea_postsolve_dual_feasibility)"
+filter = "binary(lp_regression_postsolve_y_dual) & test(=greenbea_postsolve_dual_feasibility)"
 threads-required = "num-cpus"
 
 # lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent: 2500×3500 sparse LP
@@ -84,17 +90,6 @@ threads-required = "num-cpus"
 # future change shrinks it, revisit the deadline/budget rather than loosening asserts.
 [[profile.default.overrides]]
 filter = "test(diag_osa60_must_reach_known_objective)"
-threads-required = "num-cpus"
-
-# LP/QP presolve driver per-step control real-deadline sentinels
-# (presolve::transforms::driver / presolve::qp_transforms::driver
-# per_step_control_tests): margin is ~4-5x (deadline vs. full pass
-# duration), but under full-suite CPU contention (test-threads=6, many
-# concurrent CPU-bound tests) the mid-pass deadline can still fire before
-# `run_fixpoint` even enters pass 0 (observed FAIL: executed=0). Serialise
-# so the wall-clock margin reflects the algorithm, not scheduling noise.
-[[profile.default.overrides]]
-filter = "test(real_deadline_stops_pass_before_all_steps_run_via_run_step) + test(full_pass_duration_is_comfortably_above_the_test_deadline)"
 threads-required = "num-cpus"
 
 # Memory-heavy qplib parse tests peak 100-800 MB each (QPLIB_8500 = 100 MB,
