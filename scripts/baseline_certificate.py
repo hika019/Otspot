@@ -16,11 +16,30 @@ REFERENCE_TOLERANCE = Fraction(1, 10_000_000)
 CHECKER_VERSION = "binary64-enclosure-v1"
 
 
+# v1 (生 bytes 連結の単一 hash) は分割シフト攻撃に無防備だった: バイト列
+# (例: shebang 行) をファイル境界を跨いで移動すると連結結果が同一で digest が
+# 不変だった (レビュー PoC 実測)。v2 はファイルごとに自己区切りフレーム
+# (name \0 length \0 content-hash \0) を個別 hash し、その連結を外层 hash する。
+# 名前と長さ自体が preimage に含まれるため再分割もファイル間の内容入れ替えも
+# digest を保存できず、scheme tag により v1 値は v2 の値域に到達不能
+# (旧書式 digest の混在受理が構造的に起きない)。
+CHECKER_FILES = ("baseline_certificate.py", "highs_baseline_truth.py",
+                 "liswet_exact_certificate.py", "revalidate_baselines.py")
+
+
+def digest_of(files):
+    """files: ordered mapping name -> bytes. Pure; checker_digest feeds the repo."""
+    parts = [b"checker-files-v2\0"]
+    for name, content in files.items():
+        frame = (name.encode("utf-8") + b"\0" + str(len(content)).encode() + b"\0"
+                 + hashlib.sha256(content).hexdigest().encode() + b"\0")
+        parts.append(hashlib.sha256(frame).digest())
+    return hashlib.sha256(b"".join(parts)).hexdigest()
+
+
 def checker_digest():
     root = Path(__file__).parent
-    files = ("baseline_certificate.py", "highs_baseline_truth.py",
-             "liswet_exact_certificate.py", "revalidate_baselines.py")
-    return hashlib.sha256(b"".join((root / name).read_bytes() for name in files)).hexdigest()
+    return digest_of({name: (root / name).read_bytes() for name in CHECKER_FILES})
 
 
 LOADED_CHECKER_DIGEST = checker_digest()
