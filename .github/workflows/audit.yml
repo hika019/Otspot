@@ -50,6 +50,9 @@ jobs:
           python3 tests/test_liswet_exact_certificate.py
           python3 tests/test_certificate_contract.py
           python3 tests/test_certificate_contract_adversarial.py
+          python3 tests/test_check_baseline_proofs.py
+          # committed 証跡のオフライン検証 (hermetic 層; data が無い環境では C/E を明示 SKIP)。
+          python3 scripts/check_baseline_proofs.py
 
   comment-hygiene:
     name: comment-hygiene
