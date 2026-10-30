@@ -25,11 +25,17 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 # 共有し、concurrent.rs の並列テストを目録に含めるため。この feature は非-parallel
 # の上位集合 (テストは減らない) なので full-suite を弱めない。
 cargo nextest run --release --features parallel --test-threads 6
-# `cargo test --doc --release` runs doctests (AGENTS.md prescribes --release).
-# Feature-free like the `cargo build --release` step above, so its doctest
-# builds reuse that step's cache instead of recompiling in debug; it does not
-# lint intra-doc links. The rustdoc gate below is a separate check and CI runs
-# both (the ci.yml `docs` job intentionally runs the doctests in debug).
+# heavy: AGENTS.md の `--profile heavy --run-ignored all` に --features parallel を
+# 足す。full-suite と同じ feature 集合で release バイナリを共有し (上位集合なので
+# テストは減らない)、concurrent.rs の並列テストも heavy 側で実走させるため。
+# 長時間ステージ: #[ignore] 済み tier-2 sentinel を全実走する。
+cargo nextest run --release --features parallel --profile heavy --run-ignored all --test-threads 6
+# Doctest bodies get no -C debug-assertions/overflow-checks/opt-level from
+# rustdoc, so they run with debug_assertions=true in both modes; --release only
+# changes the linked lib build (release lib, debug-assertions off; AGENTS.md).
+# Runs after the suite for partial reuse (workspace crates still rebuild on the
+# feature difference; cold without the suite is 82 units). Intra-doc links are
+# covered by the separate rustdoc gate below.
 cargo test --doc --release
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 bash scripts/check_file_size.sh

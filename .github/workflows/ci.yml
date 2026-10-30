@@ -169,8 +169,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-      # docs job は debug doctest を意図的に担当 (debug_assert!/overflow-checks 下で実走)。
-      # AGENTS.md 規定の --release 版は scripts/pre-merge-audit.sh (pre-merge gate) が担当する役割分担。
+      # doctest 本文は rustdoc が -C debug-assertions/-C overflow-checks/-C opt-level を
+      # 渡さないため、debug/release どちらでも debug_assertions=true でコンパイルされる。
+      # 役割分担の実差はリンクする lib ビルドのみ: この job は debug-assertions ON の
+      # debug lib、pre-merge gate (--release) は release lib をリンクする。
+      # AGENTS.md 規定の --release 版は scripts/pre-merge-audit.sh が担当する役割分担。
       - run: cargo test --doc
 
   compatibility:
