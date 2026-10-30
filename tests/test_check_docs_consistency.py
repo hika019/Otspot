@@ -233,6 +233,11 @@ class DocsConsistencyTests(unittest.TestCase):
             [],
         )
 
+    def test_missing_doc_file_fails(self):
+        root = self.fixture()
+        (root / "CLAUDE.md").unlink()
+        self.assert_failure(root, "doc_files_present", "CLAUDE.md", "missing or empty")
+
     def test_toolchain_mismatch_fails(self):
         root = self.fixture()
         (root / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.94.0"\n')
@@ -299,6 +304,90 @@ class DocsConsistencyTests(unittest.TestCase):
             + '\n[[profile.default.overrides]]\nfilter = "test(fixture_case) - test(x)"\n'
         )
         self.assert_failure(root, "nextest_override_filters_live", "test(fixture_case) - test(x)", "unsupported")
+
+    def test_intersection_filter_matching_catalog_passes(self):
+        # The `.config/nextest.toml` shape this repo actually uses: binary()
+        # exact-matches the NAME part of the suite id (`fixture::suite` ->
+        # `suite`) and narrows an exact test() name to one testcase.
+        root = self.fixture()
+        path = root / ".config/nextest.toml"
+        path.write_text(
+            path.read_text()
+            + '\n[[profile.default.overrides]]\n'
+            'filter = "binary(suite) & test(=fixture_case)"\n'
+        )
+        _, failures = self.evaluate(root)
+        self.assertEqual([(f.claim, f.key) for f in failures], [])
+
+    def test_binary_name_exact_match_passes(self):
+        root = self.fixture()
+        path = root / ".config/nextest.toml"
+        path.write_text(
+            path.read_text()
+            + '\n[[profile.default.overrides]]\nfilter = "binary(suite)"\n'
+        )
+        _, failures = self.evaluate(root)
+        self.assertEqual([(f.claim, f.key) for f in failures], [])
+
+    def test_binary_matching_full_id_fails_as_zero_match(self):
+        # binary() matches the NAME part only. `fixture::suite` is a
+        # substring of the catalog binary-id, so the old full-id substring
+        # reading passed it; real nextest matches nothing with it.
+        root = self.fixture()
+        path = root / ".config/nextest.toml"
+        path.write_text(
+            path.read_text()
+            + '\n[[profile.default.overrides]]\nfilter = "binary(fixture::suite)"\n'
+        )
+        self.assert_failure(
+            root,
+            "nextest_override_filters_live",
+            "default::binary(fixture::suite)",
+            "0 of",
+        )
+
+    def test_binary_prefix_substring_fails_as_zero_match(self):
+        # `fix` is a substring of the catalog binary-id `fixture::suite` but
+        # not the full NAME, so the old id-substring reading passed it; the
+        # NAME exact match keeps it dead.
+        root = self.fixture()
+        path = root / ".config/nextest.toml"
+        path.write_text(
+            path.read_text()
+            + '\n[[profile.default.overrides]]\nfilter = "binary(fix)"\n'
+        )
+        self.assert_failure(
+            root,
+            "nextest_override_filters_live",
+            "default::binary(fix)",
+            "0 of",
+        )
+
+    def test_intersection_with_unknown_binary_fails_as_zero_match(self):
+        root = self.fixture()
+        path = root / ".config/nextest.toml"
+        path.write_text(
+            path.read_text()
+            + '\n[[profile.default.overrides]]\n'
+            'filter = "binary(no_such_binary) & test(=fixture_case)"\n'
+        )
+        self.assert_failure(
+            root,
+            "nextest_override_filters_live",
+            "binary(no_such_binary)",
+            "0 of",
+        )
+
+    def test_negation_filter_still_fails_closed(self):
+        root = self.fixture()
+        path = root / ".config/nextest.toml"
+        path.write_text(
+            path.read_text()
+            + '\n[[profile.default.overrides]]\nfilter = "not(test(fixture_case))"\n'
+        )
+        self.assert_failure(
+            root, "nextest_override_filters_live", "not(test(fixture_case))", "unsupported"
+        )
 
     def test_missing_doc_path_fails(self):
         root = self.fixture()
@@ -453,6 +542,25 @@ class DocsConsistencyTests(unittest.TestCase):
         self.assertIn("--profile heavy", heavy[0].text)
         self.assertIn("--test-threads 3", heavy[0].text)
 
+    def test_binary_filter_matches_name_part_exactly(self):
+        cases = [
+            ("otspot-core::linalg_par_sentinel", "mod::sentinel_a"),
+            ("suite", "plain"),
+        ]
+        # bare binary(X) exact-matches the NAME part after `::`
+        self.assertEqual(
+            gate._filter_matches("binary(linalg_par_sentinel)", cases),
+            {("otspot-core::linalg_par_sentinel", "mod::sentinel_a")},
+        )
+        # the full id is no longer a comparison target (old substring read
+        # matched it; real nextest matches nothing)
+        self.assertEqual(
+            gate._filter_matches("binary(otspot-core::linalg)", cases), set()
+        )
+        # `=` is exact as well; an id-less binary-id has itself as NAME
+        self.assertEqual(gate._filter_matches("binary(=suite)", cases), {("suite", "plain")})
+        self.assertEqual(gate._filter_matches("binary(sentinels)", cases), set())
+
     def test_filter_union_and_exact_semantics(self):
         cases = [
             ("suite", "mod::alpha"),
@@ -467,6 +575,35 @@ class DocsConsistencyTests(unittest.TestCase):
             gate._filter_matches("test(=beta)", cases), {("suite", "beta")}
         )
         self.assertIsNone(gate._filter_matches("test(alpha) - test(beta)", cases))
+
+    def test_filter_intersection_semantics(self):
+        cases = [
+            ("suite", "mod::alpha"),
+            ("suite", "beta"),
+            ("other", "alpha2"),
+        ]
+        self.assertEqual(
+            gate._filter_matches("binary(suite) & test(mod::alpha)", cases),
+            {("suite", "mod::alpha")},
+        )
+        self.assertEqual(
+            gate._filter_matches("binary(suite) & test(=beta)", cases),
+            {("suite", "beta")},
+        )
+        # an unknown conjunct narrows the set to empty (0-match, not unknown)
+        self.assertEqual(
+            gate._filter_matches("binary(no_such) & test(=beta)", cases), set()
+        )
+        # `+` binds looser than `&`: each union branch intersects on its own
+        self.assertEqual(
+            gate._filter_matches("test(=beta) + binary(other) & test(=alpha2)", cases),
+            {("suite", "beta"), ("other", "alpha2")},
+        )
+        # fail-closed is kept for unknown syntax inside or beside a `&`
+        self.assertIsNone(gate._filter_matches("not(test(x)) & test(beta)", cases))
+        self.assertIsNone(
+            gate._filter_matches("binary(suite) & test(beta) - test(=beta)", cases)
+        )
 
     def test_known_drift_suppresses_exact_key_and_becomes_stale(self):
         root = self.fixture()

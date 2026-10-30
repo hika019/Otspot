@@ -32,7 +32,7 @@ cargo test --doc --release                                        # doctest (nex
 cargo nextest run --release -E 'test(テスト名)'                   # 1 test
 ```
 
-マージ前ゲートを一発で: `bash scripts/pre-merge-audit.sh`。integrate へのマージには full-suite に加え heavy (`--profile heavy --run-ignored all`) も必須 (一次ソースは CLAUDE.md「git」。heavy は長時間ステージ)。heavy ステージのスクリプトへの組み込みは `fix/ci-doc-consistency` で対応中。
+マージ前ゲートを一発で: `bash scripts/pre-merge-audit.sh`。integrate へのマージには full-suite に加え heavy (`--profile heavy --run-ignored all`) も必須 (一次ソースは CLAUDE.md「git」。heavy は長時間ステージ)。
 
 CI が red になる主要 gate (ローカルでも意識):
 
