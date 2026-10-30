@@ -41,6 +41,7 @@ import csv
 import gzip
 import hashlib
 import json
+import lzma
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,8 @@ ENCLOSURE_TAG = "exact_enclosure_v1"
 PROOF_SUBDIR = "proofs"
 LISWET_MANIFEST = "proofs/liswet/manifest.json"
 UNCERTIFIED_CLAIM = "claim=pre_contract_numeric_reference_not_certified"
+# Undecodable proof entities are a fail, never a silent skip.
+PROOF_ERRORS = (OSError, ValueError, EOFError, lzma.LZMAError)
 
 
 def normalized_hash(payload: dict) -> str:
@@ -66,6 +69,20 @@ def normalized_hash(payload: dict) -> str:
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
+
+def expand_proof(path: Path) -> dict:
+    """Decode a committed proof entity. The storage codec is the file
+    extension; proof_sha256 is defined over the expanded content, so any
+    lossless codec is legal. An unknown codec is refused, never guessed."""
+    raw = path.read_bytes()
+    if path.name.endswith(".lzma"):
+        expanded = lzma.decompress(raw)
+    elif path.name.endswith(".gz"):
+        expanded = gzip.decompress(raw)
+    else:
+        raise ValueError(f"unsupported proof codec extension: {path.name}")
+    return json.loads(expanded.decode("utf-8"))
 
 
 def _is_hex64(text: str) -> bool:
@@ -160,8 +177,8 @@ def regenerate(entry: dict, root: Path):
         if not proof.is_file():
             return None, "regeneration produced no proof file"
         try:
-            return json.loads(gzip.decompress(proof.read_bytes()).decode()), ""
-        except (OSError, ValueError) as exc:
+            return expand_proof(proof), ""
+        except PROOF_ERRORS as exc:
             return None, f"regenerated proof unreadable: {exc}"
 
 
@@ -242,8 +259,8 @@ def check(csv_path: Path, root: Path, data_dir: Path, regenerate_liswet: bool) -
                     layers.record(layer, "skip", name, "proof file missing")
                 continue
             try:
-                payload = json.loads(gzip.decompress(proof_path.read_bytes()).decode())
-            except (OSError, ValueError) as exc:
+                payload = expand_proof(proof_path)
+            except PROOF_ERRORS as exc:
                 layers.record("A", "fail", name, f"proof unreadable: {exc}")
                 for layer in ("B", "C", "E"):
                     layers.record(layer, "skip", name, "proof unreadable")

@@ -153,7 +153,10 @@ QP: 主なミスは `UBH1`（両 eps で Suboptimal）と `POWELL20`（@1e-8 で
 Maros–Mészáros CSV、`docs/baseline-certificate-contract.md`）より前の計測によるもの。
 現行 baseline では `LISWET7` は Optimal で認証参照値に 1e-6 以内で一致する（2026-10-30 実測）。
 上表の Maros–Mészáros 行（`mismatch 2` = `LISWET7`/`LISWET11` 含む）は移行前 CSV に対する
-値であり、現行 CSV での再計測は未実施。
+値であり、現行 CSV での再計測は未実施。現行 CSV は 138 件のうち 88 件（LISWET 12 件は
+マニフェスト経由の再生成で検証）を機械検証可能な契約主張として保持し、残り 50 件は
+契約前の数値参照であることを source 列で明示している（認証ではない）。検証は
+`python3 scripts/check_baseline_proofs.py`。
 
 QCQP（QPLIB、`bench_qplib` による単発 IPM — `--global` の空間 B&B 経路は使わない）: `not-supported` は McCormick 緩和が全変数の有限境界を要求するが非有界な変数を含むケース、`skip` は整数変数または非対応の制約型を含むケース。いずれも eps に依存しない。
 

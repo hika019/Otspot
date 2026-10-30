@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import io
 import json
+import lzma
 import sys
 import tempfile
 import unittest
@@ -267,6 +268,41 @@ class ProofVerifierTests(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("C: 0 pass, 1 fail", out)
         self.assertIn("QPS sha256 != CSV input_sha256", out)
+
+    # ---- codec dispatch (committed entities may be lzma) -------------------
+    def test_lzma_codec_roundtrip_keeps_hash(self):
+        # proof_sha256 は展開後内容のハッシュ。可逆な codec 差替は CSV の
+        # proof= 参照だけ追随し、stamp も検証結果も不変であること。
+        gz = self.root / "proofs" / "A1.proof.json.gz"
+        lz = self.root / "proofs" / "A1.proof.json.lzma"
+        lz.write_bytes(lzma.compress(gzip.decompress(gz.read_bytes()), preset=6))
+        gz.unlink()
+        self.edit_row("A1", source=self.claim("proofs/A1.proof.json.lzma",
+                                              self.a1_stamp, checker.checker_digest()))
+        code, out = self.run_verifier()
+        self.assertEqual(code, 0, out)
+        self.assertIn("A: 1 pass", out)
+        self.assertIn("E: 1 pass", out)
+
+    def test_undecompressible_lzma_caught(self):
+        lz = self.root / "proofs" / "A1.proof.json.lzma"
+        lz.write_bytes(b"not-an-xz-stream-at-all")
+        (self.root / "proofs" / "A1.proof.json.gz").unlink()
+        self.edit_row("A1", source=self.claim("proofs/A1.proof.json.lzma",
+                                              self.a1_stamp, checker.checker_digest()))
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("proof unreadable", out)
+
+    def test_unknown_codec_refused_not_guessed(self):
+        gz = self.root / "proofs" / "A1.proof.json.gz"
+        (self.root / "proofs" / "A1.proof.json.zip").write_bytes(gz.read_bytes())
+        gz.unlink()
+        self.edit_row("A1", source=self.claim("proofs/A1.proof.json.zip",
+                                              self.a1_stamp, checker.checker_digest()))
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("unsupported proof codec", out)
 
 
 if __name__ == "__main__":
