@@ -233,6 +233,11 @@ class DocsConsistencyTests(unittest.TestCase):
             [],
         )
 
+    def test_missing_doc_file_fails(self):
+        root = self.fixture()
+        (root / "CLAUDE.md").unlink()
+        self.assert_failure(root, "doc_files_present", "CLAUDE.md", "missing or empty")
+
     def test_toolchain_mismatch_fails(self):
         root = self.fixture()
         (root / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.94.0"\n')
@@ -299,6 +304,45 @@ class DocsConsistencyTests(unittest.TestCase):
             + '\n[[profile.default.overrides]]\nfilter = "test(fixture_case) - test(x)"\n'
         )
         self.assert_failure(root, "nextest_override_filters_live", "test(fixture_case) - test(x)", "unsupported")
+
+    def test_intersection_filter_matching_catalog_passes(self):
+        # The `.config/nextest.toml` shape this repo actually uses: binary()
+        # narrows an exact test() name down to one testcase of one suite.
+        root = self.fixture()
+        path = root / ".config/nextest.toml"
+        path.write_text(
+            path.read_text()
+            + '\n[[profile.default.overrides]]\n'
+            'filter = "binary(fixture::suite) & test(=fixture_case)"\n'
+        )
+        _, failures = self.evaluate(root)
+        self.assertEqual([(f.claim, f.key) for f in failures], [])
+
+    def test_intersection_with_unknown_binary_fails_as_zero_match(self):
+        root = self.fixture()
+        path = root / ".config/nextest.toml"
+        path.write_text(
+            path.read_text()
+            + '\n[[profile.default.overrides]]\n'
+            'filter = "binary(no_such_binary) & test(=fixture_case)"\n'
+        )
+        self.assert_failure(
+            root,
+            "nextest_override_filters_live",
+            "binary(no_such_binary)",
+            "0 of",
+        )
+
+    def test_negation_filter_still_fails_closed(self):
+        root = self.fixture()
+        path = root / ".config/nextest.toml"
+        path.write_text(
+            path.read_text()
+            + '\n[[profile.default.overrides]]\nfilter = "not(test(fixture_case))"\n'
+        )
+        self.assert_failure(
+            root, "nextest_override_filters_live", "not(test(fixture_case))", "unsupported"
+        )
 
     def test_missing_doc_path_fails(self):
         root = self.fixture()
@@ -467,6 +511,35 @@ class DocsConsistencyTests(unittest.TestCase):
             gate._filter_matches("test(=beta)", cases), {("suite", "beta")}
         )
         self.assertIsNone(gate._filter_matches("test(alpha) - test(beta)", cases))
+
+    def test_filter_intersection_semantics(self):
+        cases = [
+            ("suite", "mod::alpha"),
+            ("suite", "beta"),
+            ("other", "alpha2"),
+        ]
+        self.assertEqual(
+            gate._filter_matches("binary(suite) & test(mod::alpha)", cases),
+            {("suite", "mod::alpha")},
+        )
+        self.assertEqual(
+            gate._filter_matches("binary(suite) & test(=beta)", cases),
+            {("suite", "beta")},
+        )
+        # an unknown conjunct narrows the set to empty (0-match, not unknown)
+        self.assertEqual(
+            gate._filter_matches("binary(no_such) & test(=beta)", cases), set()
+        )
+        # `+` binds looser than `&`: each union branch intersects on its own
+        self.assertEqual(
+            gate._filter_matches("test(=beta) + binary(other) & test(=alpha2)", cases),
+            {("suite", "beta"), ("other", "alpha2")},
+        )
+        # fail-closed is kept for unknown syntax inside or beside a `&`
+        self.assertIsNone(gate._filter_matches("not(test(x)) & test(beta)", cases))
+        self.assertIsNone(
+            gate._filter_matches("binary(suite) & test(beta) - test(=beta)", cases)
+        )
 
     def test_known_drift_suppresses_exact_key_and_becomes_stale(self):
         root = self.fixture()

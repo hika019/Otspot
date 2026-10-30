@@ -161,33 +161,59 @@ def _strip_shell_comment(text: str) -> str:
 def _filter_matches(expr: str, cases: Iterable[tuple[str, str]]) -> set[tuple[str, str]] | None:
     """Evaluate the nextest filter subset used by this repo.
 
-    Supported: `test(...)`, `binary(...)`, `test(=exact)`, and `+` unions.
+    Supported: `test(...)`, `binary(...)`, `test(=exact)`, `+` unions, and
+    `&` intersections -- the operators this repo's overrides actually use.
     Anything else returns None; the claim fails closed instead of guessing.
     """
     cases = tuple(cases)
-    pieces = _split_union(expr)
-    if pieces is None:
+    branches = _split_top_level(expr, "+")
+    if branches is None:
         return None
     matched: set[tuple[str, str]] = set()
-    for piece in pieces:
-        match = NEXTEST_FILTER_RE.match(piece.strip())
-        if not match:
+    for branch in branches:
+        conjuncts = _split_top_level(branch, "&")
+        if conjuncts is None:
             return None
-        kind, arg = match.groups()
-        exact = arg.startswith("=")
-        if exact:
-            arg = arg[1:]
-        if not arg or "(" in arg or ")" in arg:
-            return None
-        for binary, name in cases:
-            value = name if kind == "test" else binary
-            if (value == arg) if exact else (arg in value):
-                matched.add((binary, name))
+        intersected: set[tuple[str, str]] | None = None
+        for conjunct in conjuncts:
+            part = _match_single_filter(conjunct, cases)
+            if part is None:
+                return None
+            intersected = part if intersected is None else intersected & part
+        matched |= intersected if intersected is not None else set()
     return matched
 
 
-def _split_union(expr: str) -> list[str] | None:
-    """Split on top-level `+`; reject other top-level operators."""
+def _match_single_filter(
+    expr: str, cases: tuple[tuple[str, str], ...]
+) -> set[tuple[str, str]] | None:
+    """Match one `test(...)`/`binary(...)` atom, with optional leading `=`."""
+    match = NEXTEST_FILTER_RE.match(expr.strip())
+    if not match:
+        return None
+    kind, arg = match.groups()
+    exact = arg.startswith("=")
+    if exact:
+        arg = arg[1:]
+    if not arg or "(" in arg or ")" in arg:
+        return None
+    matched: set[tuple[str, str]] = set()
+    for binary, name in cases:
+        value = name if kind == "test" else binary
+        if (value == arg) if exact else (arg in value):
+            matched.add((binary, name))
+    return matched
+
+
+def _split_top_level(expr: str, operator: str) -> list[str] | None:
+    """Split on top-level `operator` (`+` union or `&` intersection).
+
+    The remaining set operators (`-` subtraction, `|` union sugar, `!`
+    negation) stay rejected, so unsupported syntax keeps failing closed.
+    """
+    if operator not in ("+", "&"):
+        raise AssertionError(f"unsupported split operator: {operator!r}")
+    rejected = frozenset("-|!")
     pieces: list[str] = []
     depth = 0
     start = 0
@@ -198,10 +224,10 @@ def _split_union(expr: str) -> list[str] | None:
             depth -= 1
             if depth < 0:
                 return None
-        elif depth == 0 and char == "+":
+        elif depth == 0 and char == operator:
             pieces.append(expr[start:index])
             start = index + 1
-        elif depth == 0 and char in "-&|!":
+        elif depth == 0 and char in rejected:
             return None
     if depth != 0:
         return None
@@ -902,7 +928,7 @@ def check_override_filters(ctx: Context) -> list[Failure]:
                     doc_ref=doc_ref,
                     actual=f"unsupported filter syntax: {expr}",
                     expected="filter uses the supported nextest subset "
-                    "(test/binary, optional =, + unions)",
+                    "(test/binary, optional =, + unions, & intersections)",
                 )
             )
         elif not matched:
@@ -1430,39 +1456,7 @@ CLAIMS: tuple[Claim, ...] = (
 )
 
 
-KNOWN_DRIFT: tuple[KnownDrift, ...] = (
-    KnownDrift(
-        "nextest_ci_threads",
-        "ci.yml::cargo nextest run -p otspot-num --no-fail-fast",
-        "fix/ci-doc-consistency adds --test-threads 3 to this job",
-    ),
-    KnownDrift(
-        "nextest_override_filters_live",
-        "default::test(linalg::par_sentinel::)",
-        "filter names a binary path that is not part of any test name",
-    ),
-    KnownDrift(
-        "nextest_override_filters_live",
-        "default::test(lp_regression_postsolve_y_dual::greenbea_postsolve_dual_feasibility)",
-        "filter names a binary path that is not part of the test name",
-    ),
-    KnownDrift(
-        "nextest_override_filters_live",
-        "default::test(real_deadline_stops_pass_before_all_steps_run_via_run_step) + "
-        "test(full_pass_duration_is_comfortably_above_the_test_deadline)",
-        "the two sentinel names live in nested modules and do not match this filter",
-    ),
-    KnownDrift(
-        "premerge_gate_commands",
-        "missing::heavy",
-        "fix/ci-doc-consistency is integrating the heavy stage into the script",
-    ),
-    KnownDrift(
-        "premerge_gate_commands",
-        "missing::doctest-release",
-        "fix/ci-doc-consistency changes the gate doctest to --release",
-    ),
-)
+KNOWN_DRIFT: tuple[KnownDrift, ...] = ()
 
 
 def evaluate(root: Path = ROOT, catalog_path: Path | None = None) -> tuple[Context, list[Failure]]:
