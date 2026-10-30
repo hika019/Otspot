@@ -63,6 +63,8 @@ python3 tests/test_iso_25010_quality_matrix.py
 python3 tests/test_check_new_ignore_attrs.py
 python3 scripts/check_architecture.py
 python3 tests/test_check_architecture.py
+python3 scripts/check_docs_consistency.py
+python3 tests/test_check_docs_consistency.py
 python3 scripts/check_function_size.py
 python3 tests/test_check_function_size.py
 

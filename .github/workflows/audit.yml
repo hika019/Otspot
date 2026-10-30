@@ -32,6 +32,13 @@ jobs:
       # already built; running it here would force a cold release build.
       - name: test inventory gate unit tests
         run: python3 tests/test_check_new_ignore_attrs.py
+      # CLAUDE.md / AGENTS.md と実体の突合。全 claim は即時有効。KNOWN_DRIFT は
+      # レビュー済みの既知乖離だけを exact key で抑止し、解消済み entry は stale
+      # として fail する (新規乖離は常に fail)。
+      - name: docs consistency gate
+        run: python3 scripts/check_docs_consistency.py
+      - name: docs consistency gate self-test
+        run: python3 tests/test_check_docs_consistency.py
 
   comment-hygiene:
     name: comment-hygiene
