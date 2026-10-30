@@ -152,7 +152,12 @@ Solve-rate benchmark on standard public sets via the `otspot-dev` benchmark harn
 
 LP: the only miss is `greenbea` (Suboptimal at @1e-8).
 
-QP: named misses are `UBH1` (Suboptimal at both eps), `LISWET7` (objective mismatch at @1e-6, Stalled at @1e-8), and `POWELL20` (Timeout at @1e-8).
+QP: named misses are `UBH1` (Suboptimal at both eps) and `POWELL20` (Timeout at @1e-8).
+The `LISWET7` objective mismatch listed here predates the 2026-10 baseline migration to the
+certified c0-inclusive Maros–Mészáros CSV (`docs/baseline-certificate-contract.md`); with the
+current baseline `LISWET7` reaches Optimal and agrees with the certified reference within
+1e-6 (measured 2026-10-30), and the Maros–Mészáros row above (incl. `2 mismatch`,
+`LISWET7`/`LISWET11`) is against the pre-migration CSV and awaits re-measurement.
 
 QCQP (QPLIB, single-shot IPM via `bench_qplib` — does not exercise the `--global` spatial B&B path): `not-supported` cases need a finite bound on every variable for the McCormick relaxation and have at least one unbounded variable; `skip` cases have integer variables or unsupported constraint types. Both categories are eps-independent.
 

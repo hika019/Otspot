@@ -42,6 +42,7 @@ jobs:
           python3 tests/test_highs_baseline_truth.py
           python3 tests/test_liswet_exact_certificate.py
           python3 tests/test_certificate_contract.py
+          python3 tests/test_certificate_contract_adversarial.py
 
   comment-hygiene:
     name: comment-hygiene

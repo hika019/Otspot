@@ -4,6 +4,8 @@
 !/data/baseline_objectives/
 /data/baseline_objectives/*
 !/data/baseline_objectives/*.csv
+!/data/baseline_objectives/proofs/
+!/data/baseline_objectives/proofs/*
 reports/
 **/__pycache__/
 **/.pytest_cache/

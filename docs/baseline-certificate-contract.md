@@ -9,10 +9,16 @@ problems is a coverage result, not a correctness criterion.
 
 The shared QPS parser defines one canonical model with binary64 coefficients,
 including coefficient accumulation, selected named vectors, bounds, and the
-objective constant. The checker interprets these binary64 values as exact
+objective constant. A variable with no BOUNDS entry defaults to `x >= 0`
+(MPS convention). The checker interprets these binary64 values as exact
 rational numbers. Every candidate generator, including the LISWET specialization,
 must refer to this same model. Decimal-token and binary64 certificates must not
 be mixed as certificates of an identical model.
+
+Two thresholds are part of the model contract: candidate primal points enter
+certification only at relative violation at most `1e-7` (`PRIMAL_INF_TOL`), and
+a retained CSV claim requires serialized reference error at most `1e-7`
+(`REFERENCE_TOLERANCE`, pinned by `tests/test_certificate_contract_adversarial.py`).
 
 ## Proof
 

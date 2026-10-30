@@ -317,5 +317,24 @@ class RevalidateLiswetRoutingTests(unittest.TestCase):
                                     result["input_sha256"])
 
 
+class OutputSourceProvenanceTests(unittest.TestCase):
+    """受理行の source 列は契約が要求する traceability (proof 参照・入力 hash・
+    checker version) を載せる。reviewer 指摘「committed CSV は契約ツールの成果物で
+    ない」の解消として、revalidate の出力そのものを committed データにする。"""
+
+    def test_accepted_source_carries_proof_and_hashes(self):
+        result = dict(accepted=True, problem_name="A", reference="1.0",
+                      proof="A.proof.json.gz",
+                      input_sha256="a" * 64, checker_sha256="b" * 64)
+        self.assertEqual(revalidation.output_source(result),
+                         "exact_enclosure_v1;proof=A.proof.json.gz;"
+                         "input_sha256=" + "a" * 64 + ";checker_sha256=" + "b" * 64)
+
+    def test_failed_source_keeps_uncertified_suffix(self):
+        result = dict(accepted=False, reason="missing_candidate")
+        self.assertEqual(revalidation.output_source(result),
+                         "revalidation_missing_candidate_UNCERTIFIED")
+
+
 if __name__ == "__main__":
     unittest.main()

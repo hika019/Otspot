@@ -168,8 +168,15 @@ def run_row(config_path, row, output, timeout):
 
 def output_source(result):
     # Repeated failed runs never retain the old source's certification claim.
+    # Accepted rows carry the provenance the contract requires of a retained
+    # claim: proof file, input hash, and checker version, so the CSV row alone
+    # is traceable without opening the run directory.
     if result["accepted"]:
-        return "exact_enclosure_v1"
+        source = "exact_enclosure_v1"
+        for key in ("proof", "input_sha256", "checker_sha256"):
+            if result.get(key):
+                source += f";{key}={result[key]}"
+        return source
     return f"revalidation_{result['reason']}_UNCERTIFIED"
 
 
