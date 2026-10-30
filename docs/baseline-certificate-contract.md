@@ -51,3 +51,33 @@ Each retained certification claim must be traceable to the input hash, checker
 version, bounds, and reference checked. Revalidation compares every row with its
 previous value. Failure or unknown status must not silently preserve an old
 certification label; neither implies that the previous numerical value is wrong.
+An accepted row carries that provenance in its `source` column, format
+`exact_enclosure_v1;proof=<path relative to the CSV's directory>;proof_sha256=
+<hex>;input_sha256=<hex>;checker_sha256=<hex>`, with proofs stored in a `proofs/`
+subdirectory beside the CSV. A retained accepted row missing any of these fields
+is a run error; the writer fails closed instead of downgrading silently.
+
+## Test coverage honesty
+
+Known gaps a reader must not mistake for coverage:
+
+1. Rejecting a false `Optimal` via aggregated row violations in `prove_optimal`
+   is pinned only by two function-level unit tests (`certificate.rs`:
+   `prove_optimal_rejects_accumulated_row_violation`,
+   `prove_optimal_aggregate_feasibility_applies_at_lp_cert_tol`). No
+   integration scenario through `solve_qp_with` exercises that path under the
+   current data convention, so the integration route is uncovered.
+2. The Python checker parser maps "negative UP bound with no LO" to
+   `lo = -inf` (HiGHS/CPLEX convention) while the Rust QPS parser keeps the
+   `x >= 0` default for that input. This is a known deviation from the "one
+   canonical model" statement above; it is latent — a sweep of all 188
+   Maros-Meszaros QPS files found no occurrence, and no certified value
+   depends on it.
+3. Revert demonstrations for the Python-side sentinels (R1-R9b, R10-R13) live
+   only in the ephemeral temporary area outside this repository
+   (`/tmp/revert_proof.sh`, `/tmp/revert_proof_p21b.sh` and their
+   `/tmp/revert_case*.log`). A permanent CI job replaying them is a separate
+   change.
+4. Cache-generation precision: `ci.yml` uses bench-data cache keys up to `v3`
+   and `test-heavy.yml` a separate keyspace up to `v4`. A blanket "CI cache
+   v4" is imprecise; `v4` names only the heavy-side generation.

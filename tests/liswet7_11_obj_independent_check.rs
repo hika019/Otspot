@@ -1,5 +1,7 @@
 //! LISWET11 の目的値照合。参照値は原 QPS (目的定数 2525.75 込み) を HiGHS で解き、
-//! `scripts/highs_baseline_truth.py` で弱双対検算した値 (baseline CSV と同値)。
+//! `scripts/highs_baseline_truth.py` で弱双対検算した値 (92ce6cc2 Era の HiGHS 検算値。
+//! 現行 baseline CSV は exact_rational_kkt 認証値で絶対差 3.2e-10 — ベンチ tol 1e-6 内
+//! だが同値ではない。docs/baseline-certificate-contract.md 参照)。
 //!
 //! Clarabel (tol=1e-12) は LISWET11 で AlmostSolved 36.527 (参照値比 26% 誤差) に止まり、
 //! 独立オラクルに使えない。旧 .mat 変換データ (c が 1 ulp ずれ、目的定数なし) では ours が
