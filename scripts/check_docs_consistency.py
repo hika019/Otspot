@@ -1162,7 +1162,7 @@ def check_doc_name_references(ctx: Context) -> list[Failure]:
 def check_data_tracking(ctx: Context) -> list[Failure]:
     claim = "data_tracking"
     doc = ctx.doc("AGENTS.md")
-    found = doc.find_re(r"`data/baseline_objectives/\*\.csv` のみ git 追跡")
+    found = doc.find_re(r"`data/baseline_objectives/\*\.csv`[^\n]*のみ git 追跡")
     if found is None:
         return [
             _anchor_failure(
@@ -1170,7 +1170,7 @@ def check_data_tracking(ctx: Context) -> list[Failure]:
                 "anchor",
                 doc,
                 "`data/baseline_objectives/*.csv` のみ git 追跡",
-                "AGENTS.md states the only tracked data files are the baseline CSVs",
+                "AGENTS.md states the tracked data files are the baseline CSVs and proofs/",
             )
         ]
     lineno, _ = found
@@ -1198,16 +1198,20 @@ def check_data_tracking(ctx: Context) -> list[Failure]:
             )
         )
     for item in tracked:
-        if not re.fullmatch(r"data/baseline_objectives/[^/]+\.csv", item):
-            failures.append(
-                Failure(
-                    claim=claim,
-                    key=f"tracked::{item}",
-                    doc_ref=doc.ref(lineno),
-                    actual=f"tracked data file: {item}",
-                    expected="only data/baseline_objectives/*.csv is tracked",
-                )
+        # csv refs and the committed strict-certification proofs are legal;
+        # anything else under data/ is still rejected (fail-closed).
+        if re.fullmatch(r"data/baseline_objectives/[^/]+\.csv", item) or \
+                re.fullmatch(r"data/baseline_objectives/proofs/[^/].*", item):
+            continue
+        failures.append(
+            Failure(
+                claim=claim,
+                key=f"tracked::{item}",
+                doc_ref=doc.ref(lineno),
+                actual=f"tracked data file: {item}",
+                expected="only data/baseline_objectives/*.csv and proofs/** are tracked",
             )
+        )
     if not any(item.startswith("data/baseline_objectives/") for item in tracked):
         failures.append(
             Failure(
@@ -1450,7 +1454,8 @@ CLAIMS: tuple[Claim, ...] = (
     ),
     Claim(
         "data_tracking",
-        "only data/baseline_objectives/*.csv is git-tracked under data/",
+        "only data/baseline_objectives/*.csv and data/baseline_objectives/proofs/** "
+        "are git-tracked under data/",
         check_data_tracking,
     ),
     Claim(
