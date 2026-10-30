@@ -25,9 +25,27 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 # 共有し、concurrent.rs の並列テストを目録に含めるため。この feature は非-parallel
 # の上位集合 (テストは減らない) なので full-suite を弱めない。
 cargo nextest run --release --features parallel --test-threads 6
-# `cargo test --doc` runs doctests; it does not lint intra-doc links. The
-# rustdoc gate below is a separate check and CI runs both (ci.yml `docs` job).
-cargo test --doc
+# heavy 専用 data (lp_problems_hard/neos.QPS、osqp_bench_illscaled 126 件) の充足
+# チェック。CI test-heavy.yml では実行前の明示 step だがローカル worktree では
+# 未配置になりやすく、無いと heavy 中盤のテスト panic ('data missing' 設計上
+# silent skip しない) で失敗理由が分かりにくい。CI と同じ実体を先に走らせ
+# 欠落パスと補完手順 (test-heavy.yml の data-prep) を読みやすく示す。あえて
+# full-suite (default profile) の後: default は #[ignore] を走らせず heavy 専用
+# data を要しないため、ここが唯一の必須地点。実体の単体テストは下のゲート列の
+# tests/test_check_test_data_requirements.py。
+python3 scripts/check_test_data_requirements.py
+# heavy: AGENTS.md の `--profile heavy --run-ignored all` に --features parallel を
+# 足す。full-suite と同じ feature 集合で release バイナリを共有し (上位集合なので
+# テストは減らない)、concurrent.rs の並列テストも heavy 側で実走させるため。
+# 長時間ステージ: #[ignore] 済み tier-2 sentinel を全実走する。
+cargo nextest run --release --features parallel --profile heavy --run-ignored all --test-threads 6
+# Doctest bodies get no -C debug-assertions/overflow-checks/opt-level from
+# rustdoc, so they run with debug_assertions=true in both modes; --release only
+# changes the linked lib build (release lib, debug-assertions off; AGENTS.md).
+# Runs after the suite for partial reuse (workspace crates still rebuild on the
+# feature difference; cold without the suite is 82 units). Intra-doc links are
+# covered by the separate rustdoc gate below.
+cargo test --doc --release
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 bash scripts/check_file_size.sh
 # grep exits 1 on zero matches, which is the passing state here; `|| true`
@@ -47,6 +65,8 @@ python3 tests/test_liswet_exact_certificate.py
 python3 tests/test_certificate_contract.py
 python3 scripts/check_architecture.py
 python3 tests/test_check_architecture.py
+python3 scripts/check_docs_consistency.py
+python3 tests/test_check_docs_consistency.py
 python3 scripts/check_function_size.py
 python3 tests/test_check_function_size.py
 

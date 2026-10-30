@@ -93,7 +93,8 @@ jobs:
       # 構造検証など) は debug-assertions が off の release では一度も走らず
       # CI で退化を検出できない。debug profile (既定で debug-assertions on)
       # で otspot-num を軽量に実行し、それらを実際に踏む。
-      - run: cargo nextest run -p otspot-num --no-fail-fast
+      # --test-threads 3: CI は 3 固定 (ローカルは nextest.toml default の 6)
+      - run: cargo nextest run -p otspot-num --no-fail-fast --test-threads 3
 
   python:
     name: Python bindings (otspot-py parity)
@@ -172,6 +173,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+      # doctest 本文は rustdoc が -C debug-assertions/-C overflow-checks/-C opt-level を
+      # 渡さないため、debug/release どちらでも debug_assertions=true でコンパイルされる。
+      # 役割分担の実差はリンクする lib ビルドのみ: この job は debug-assertions ON の
+      # debug lib、pre-merge gate (--release) は release lib をリンクする。
+      # AGENTS.md 規定の --release 版は scripts/pre-merge-audit.sh が担当する役割分担。
       - run: cargo test --doc
 
   compatibility:
