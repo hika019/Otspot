@@ -163,6 +163,7 @@ def _filter_matches(expr: str, cases: Iterable[tuple[str, str]]) -> set[tuple[st
 
     Supported: `test(...)`, `binary(...)`, `test(=exact)`, `+` unions, and
     `&` intersections -- the operators this repo's overrides actually use.
+    Matching follows real nextest (see `_match_single_filter`).
     Anything else returns None; the claim fails closed instead of guessing.
     """
     cases = tuple(cases)
@@ -187,7 +188,14 @@ def _filter_matches(expr: str, cases: Iterable[tuple[str, str]]) -> set[tuple[st
 def _match_single_filter(
     expr: str, cases: tuple[tuple[str, str], ...]
 ) -> set[tuple[str, str]] | None:
-    """Match one `test(...)`/`binary(...)` atom, with optional leading `=`."""
+    """Match one `test(...)`/`binary(...)` atom, with optional leading `=`.
+
+    Real nextest (0.9.x): `binary(...)` matches the binary *name* -- the
+    part of the inventory binary-id after `::` -- and only by exact match,
+    with or without `=`. `test(=...)` is an exact name match, bare
+    `test(...)` a substring. The old full-id substring reading of `binary()`
+    accepted dead filters (0 real matches) as live, so it is gone.
+    """
     match = NEXTEST_FILTER_RE.match(expr.strip())
     if not match:
         return None
@@ -199,8 +207,11 @@ def _match_single_filter(
         return None
     matched: set[tuple[str, str]] = set()
     for binary, name in cases:
-        value = name if kind == "test" else binary
-        if (value == arg) if exact else (arg in value):
+        if kind == "test":
+            hit = (name == arg) if exact else (arg in name)
+        else:
+            hit = binary.rpartition("::")[2] == arg
+        if hit:
             matched.add((binary, name))
     return matched
 
