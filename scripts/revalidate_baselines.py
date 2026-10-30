@@ -20,6 +20,21 @@ class CheckerCodeChanged(RuntimeError):
     """The checker code differs from the digest pinned at the start of the run."""
 
 
+# Proofs live in this CSV-directory-relative subdirectory so the source column's
+# proof= reference resolves from the CSV itself, wherever the pair is stored
+# (run directory or data/baseline_objectives/ + data/baseline_objectives/proofs/).
+PROOF_SUBDIR = "proofs"
+
+# Contract-required provenance of a retained accepted claim. output_source must
+# refuse to emit an accepted label when any of these is absent (fail-closed).
+CLAIM_KEYS = ("proof", "proof_sha256", "input_sha256", "checker_sha256")
+
+
+def proof_rel(name):
+    """Path of the proof file relative to the CSV's directory."""
+    return f"{PROOF_SUBDIR}/{name}.proof.json.gz"
+
+
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -107,9 +122,12 @@ def evaluate_row(config, row, expected_digest):
         reference = row["optimal_obj"]
     if checker_digest() != expected_digest:
         raise CheckerCodeChanged("checker code changed during verification")
-    compact = save_evidence(Path(config["output_dir"]) / (name + ".proof.json.gz"),
+    compact = save_evidence(Path(config["output_dir"]) / proof_rel(name),
                             enclosure, reference, input_hash, proposal, expected_digest)
     result.update(compact)
+    # The source column and every unlink below resolve the proof from the CSV's
+    # directory; save_evidence only reports the physical file name.
+    result["proof"] = proof_rel(name)
     result.update(accepted=True, reason="certified", reference=reference)
     return result
 
@@ -135,7 +153,7 @@ def worker(config_path, name):
     result["elapsed_seconds"] = time.monotonic() - started
     # An unaccepted row must not leave a proof file behind as if it were verified.
     if not result["accepted"]:
-        (output / (name + ".proof.json.gz")).unlink(missing_ok=True)
+        (output / proof_rel(name)).unlink(missing_ok=True)
     write_json(output / (name + ".result.json"), result)
 
 
@@ -157,7 +175,7 @@ def run_row(config_path, row, output, timeout):
         result = json.loads((output / (name + ".result.json")).read_text())
     else:
         # Same contract as the worker: no accepted row, no adjacent proof file.
-        (output / (name + ".proof.json.gz")).unlink(missing_ok=True)
+        (output / proof_rel(name)).unlink(missing_ok=True)
         result = dict(problem_name=name, old_value=row["optimal_obj"], old_source=row["source"],
                       reference=row["optimal_obj"], accepted=False, reason=reason,
                       elapsed_seconds=time.monotonic() - started)
@@ -169,13 +187,18 @@ def run_row(config_path, row, output, timeout):
 def output_source(result):
     # Repeated failed runs never retain the old source's certification claim.
     # Accepted rows carry the provenance the contract requires of a retained
-    # claim: proof file, input hash, and checker version, so the CSV row alone
-    # is traceable without opening the run directory.
+    # claim: proof file, proof content digest, input hash, and checker version,
+    # so the CSV row alone is traceable without opening the run directory.
+    # A missing key means the claim cannot be audited where it is read: fail
+    # closed instead of silently downgrading to the pre-provenance format.
     if result["accepted"]:
+        missing = [key for key in CLAIM_KEYS if not result.get(key)]
+        if missing:
+            raise ValueError(f"accepted claim for {result.get('problem_name')!r} "
+                             f"lacks provenance keys: {missing}")
         source = "exact_enclosure_v1"
-        for key in ("proof", "input_sha256", "checker_sha256"):
-            if result.get(key):
-                source += f";{key}={result[key]}"
+        for key in CLAIM_KEYS:
+            source += f";{key}={result[key]}"
         return source
     return f"revalidation_{result['reason']}_UNCERTIFIED"
 
@@ -195,7 +218,7 @@ def finalize(results, output, start_digest):
                 (output / result["proof"]).unlink(missing_ok=True)
         results = [invalidate(result, "checker_code_changed") for result in results]
     with (output / "baseline.csv").open("w") as handle:
-        handle.write("# Exact binary64 model enclosures; evidence in adjacent *.proof.json.gz.\n")
+        handle.write("# Exact binary64 model enclosures; evidence in proofs/*.proof.json.gz.\n")
         writer = csv.writer(handle)
         writer.writerow(["problem_name", "optimal_obj", "source"])
         for result in results:

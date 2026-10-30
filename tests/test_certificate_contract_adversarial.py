@@ -7,6 +7,7 @@
 または緩和すると fail する (実測済みの sentinel)。
 """
 import gzip
+import csv
 import hashlib
 import importlib.util
 import json
@@ -28,6 +29,9 @@ SPEC = importlib.util.spec_from_file_location("truth", ROOT / "scripts/highs_bas
 truth = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(truth)
 sys.modules.setdefault("highs_baseline_truth", truth)
+# 共有インスタンス再バインド (test_certificate_contract.py と同理由): 後続
+# spec 読込ファイルの patch が sys.modules 越しに無効化されるのを防ぐ。
+truth = sys.modules["highs_baseline_truth"]
 import baseline_certificate as checker
 import liswet_exact_certificate as liswet
 import revalidate_baselines as revalidation
@@ -310,30 +314,86 @@ class RevalidateLiswetRoutingTests(unittest.TestCase):
             self.assertNotIn("method", result)
             self.assertEqual(result["proposal"]["method"], "liswet_banded")
             self.assertEqual(result["proposal"]["gaps"], [2])
-            payload = json.loads(gzip.decompress(
-                (out / "LISWETS.proof.json.gz").read_bytes()).decode())
             # 保存 proof は共有 enclosure で replay できる (厳密経路の証跡)。
+            # result["proof"] の CSV 基準相対参照で解決できることも同時に pin。
+            payload = json.loads(gzip.decompress(
+                (out / result["proof"]).read_bytes()).decode())
             checker.replay_evidence(truth.load_qps(str(data / "LISWETS.QPS")), payload,
                                     result["input_sha256"])
 
 
 class OutputSourceProvenanceTests(unittest.TestCase):
-    """受理行の source 列は契約が要求する traceability (proof 参照・入力 hash・
-    checker version) を載せる。reviewer 指摘「committed CSV は契約ツールの成果物で
-    ない」の解消として、revalidate の出力そのものを committed データにする。"""
+    """受理行の source 列は契約が要求する traceability (CSV 基準の proof 参照・
+    proof 内容 digest・入力 hash・checker version) を載せる。必須キー欠落時は
+    旧書式 (exact_enclosure_v1 素) へ silent に劣化させず raise する fail-closed の
+    sentinel。reviewer 指摘「proof= が basename のみ・sha256 なし・キー欠落時
+    silent 劣化」の解消。"""
 
-    def test_accepted_source_carries_proof_and_hashes(self):
-        result = dict(accepted=True, problem_name="A", reference="1.0",
-                      proof="A.proof.json.gz",
-                      input_sha256="a" * 64, checker_sha256="b" * 64)
-        self.assertEqual(revalidation.output_source(result),
-                         "exact_enclosure_v1;proof=A.proof.json.gz;"
+    @staticmethod
+    def full_result():
+        return dict(accepted=True, problem_name="A", reference="1.0",
+                    proof="proofs/A.proof.json.gz", proof_sha256="c" * 64,
+                    input_sha256="a" * 64, checker_sha256="b" * 64)
+
+    def test_accepted_source_carries_relative_proof_and_all_hashes(self):
+        self.assertEqual(revalidation.output_source(self.full_result()),
+                         "exact_enclosure_v1;proof=proofs/A.proof.json.gz;"
+                         "proof_sha256=" + "c" * 64 + ";"
                          "input_sha256=" + "a" * 64 + ";checker_sha256=" + "b" * 64)
+
+    def test_accepted_source_missing_any_provenance_key_raises(self):
+        for key in revalidation.CLAIM_KEYS:
+            broken = self.full_result()
+            del broken[key]
+            with self.assertRaisesRegex(ValueError, key):
+                revalidation.output_source(broken)
+
+    def test_accepted_source_empty_provenance_value_raises(self):
+        # キーがあっても空値は provenance でない (無言の項目欠落への sentinel)。
+        for key in revalidation.CLAIM_KEYS:
+            broken = self.full_result()
+            broken[key] = ""
+            with self.assertRaisesRegex(ValueError, key):
+                revalidation.output_source(broken)
 
     def test_failed_source_keeps_uncertified_suffix(self):
         result = dict(accepted=False, reason="missing_candidate")
         self.assertEqual(revalidation.output_source(result),
                          "revalidation_missing_candidate_UNCERTIFIED")
+
+
+class SourceColumnResolveTests(unittest.TestCase):
+    """finalize が書き出す source 列の proof= 参照は CSV の位置から解決でき、
+    proof_sha256 は trust でなく独立再計算で実ファイルと一致する。
+
+    proof= を basename (または CSV 基準で解けない絶対配置) へ、あるいは
+    proof_sha256 を run 時の記憶値 (ファイル実体と無関係) へ戻す revert では
+    このテストが fail する。
+    """
+
+    def test_written_csv_resolves_its_own_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = RevalidationPreviousValueTests.scalar_case(root, "-4.500000000000e0")
+            result = RevalidationPreviousValueTests.run_worker(config, root)
+            self.assertTrue(result["accepted"], msg=result.get("reason"))
+            code = revalidation.finalize([result], root / "out", config["checker_sha256"])
+            self.assertEqual(code, 0)
+            csv_path = root / "out" / "baseline.csv"
+            rows = list(csv.DictReader(line for line in csv_path.read_text().splitlines()
+                                       if not line.startswith("#")))
+            self.assertEqual([row["problem_name"] for row in rows], ["SCALAR"])
+            fields = dict(item.split("=", 1) for item in rows[0]["source"].split(";")[1:])
+            self.assertEqual(set(fields), set(revalidation.CLAIM_KEYS))
+            # 配置も pin: 証跡は CSV 基準の proofs/ 副次目录下 (committed layout と同形)。
+            self.assertEqual(fields["proof"], revalidation.proof_rel("SCALAR"))
+            proof = (csv_path.parent / fields["proof"]).resolve()  # CSV 基準の解決
+            self.assertTrue(proof.is_file())
+            self.assertEqual(fields["proof_sha256"],
+                             hashlib.sha256(proof.read_bytes()).hexdigest())
+            self.assertEqual(fields["input_sha256"], hashlib.sha256(
+                (root / "data" / "SCALAR.QPS").read_bytes()).hexdigest())
+            self.assertEqual(fields["checker_sha256"], checker.checker_digest())
 
 
 if __name__ == "__main__":

@@ -22,6 +22,13 @@ SPEC = importlib.util.spec_from_file_location("truth", ROOT / "scripts/highs_bas
 truth = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(truth)
 sys.modules.setdefault("highs_baseline_truth", truth)
+# revalidate は evaluate_row 内で `import highs_baseline_truth` するため、mock や
+# 属性差替がそこから見えるのは sys.modules のインスタンスだけ。spec 読込を複数
+# テストファイルで combined pytest すると setdefault 先行ファイルのインスタンスが
+# 残り、後続ファイルの patch が无声で無効化する (test_worker_fails_when_checker_
+# source_changes_during_verification が combined で fail する)。共有インスタンスへ
+# 再バインドし、ファイル間で同一 object を指すようにする。
+truth = sys.modules["highs_baseline_truth"]
 import baseline_certificate as checker
 import revalidate_baselines as revalidation
 import liswet_exact_certificate as liswet
@@ -167,7 +174,7 @@ class RevalidationCodeFreezeTests(unittest.TestCase):
             self.assertEqual(result["reference"], "-4.5")
             self.assertEqual(result["checker_sha256"], config["checker_sha256"])
             payload = json.loads(gzip.decompress(
-                (root / "out" / "SCALAR.proof.json.gz").read_bytes()).decode())
+                (root / "out" / result["proof"]).read_bytes()).decode())
             self.assertEqual(payload["checker_sha256"], config["checker_sha256"])
             self.assertEqual(payload["lower"], payload["upper"])
             prob = truth.load_qps(str(root / "data" / "SCALAR.QPS"))
@@ -178,7 +185,8 @@ class RevalidationCodeFreezeTests(unittest.TestCase):
             root = Path(tmp)
             config = self.scalar_case(root)
             config["checker_sha256"] = "0" * 64
-            stale = root / "out" / "SCALAR.proof.json.gz"
+            stale = root / "out" / revalidation.proof_rel("SCALAR")
+            stale.parent.mkdir(parents=True, exist_ok=True)
             stale.write_bytes(b"stale evidence from an earlier run")
             result = self.run_worker(config, root)
             self.assertFalse(result["accepted"])
@@ -195,10 +203,12 @@ class RevalidationCodeFreezeTests(unittest.TestCase):
             config_path = root / "run.json"
             revalidation.write_json(config_path, config)
             row = dict(problem_name="MISSING", optimal_obj="1.0", source="previous_cert")
-            (root / "out" / "MISSING.proof.json.gz").write_bytes(b"stale evidence")
+            stale = root / "out" / revalidation.proof_rel("MISSING")
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_bytes(b"stale evidence")
             result = revalidation.run_row(config_path, row, root / "out", 60)
             self.assertEqual(result["reason"], "worker_failed")
-            self.assertFalse((root / "out" / "MISSING.proof.json.gz").exists())
+            self.assertFalse(stale.exists())
 
     def test_worker_fails_when_checker_source_changes_during_verification(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -221,7 +231,7 @@ class RevalidationCodeFreezeTests(unittest.TestCase):
                 truth.best_certificate = real
             self.assertFalse(result["accepted"])
             self.assertEqual(result["reason"], "checker_code_changed")
-            self.assertFalse((root / "out" / "SCALAR.proof.json.gz").exists())
+            self.assertFalse((root / "out" / revalidation.proof_rel("SCALAR")).exists())
             self.assertTrue(revalidation.output_source(result).endswith("_UNCERTIFIED"))
 
 
@@ -230,10 +240,14 @@ class CertificationRunCodeFreezeTests(unittest.TestCase):
 
     @staticmethod
     def rows(output, proof_bytes=b"gzip-placeholder"):
-        (output / "A.proof.json.gz").write_bytes(proof_bytes)
+        # 受理行は CLAIM_KEYS すべてを備える (欠落は output_source が fail-closed)。
+        proof = revalidation.proof_rel("A")
+        (output / proof).parent.mkdir(parents=True, exist_ok=True)
+        (output / proof).write_bytes(proof_bytes)
         accepted = dict(problem_name="A", old_value="1.0", old_source="exact_enclosure_v1",
                         reference="1.0", accepted=True, reason="certified",
-                        proof="A.proof.json.gz")
+                        proof=proof, proof_sha256="c" * 64, input_sha256="a" * 64,
+                        checker_sha256="b" * 64)
         failed = dict(problem_name="B", old_value="2.0", old_source="old_cert",
                       reference="2.0", accepted=False, reason="missing_candidate")
         return [accepted, failed]
@@ -247,7 +261,7 @@ class CertificationRunCodeFreezeTests(unittest.TestCase):
             csv_text = (output / "baseline.csv").read_text()
             self.assertNotIn("exact_enclosure_v1", csv_text)
             self.assertEqual(csv_text.count("checker_code_changed_UNCERTIFIED"), 2)
-            self.assertFalse((output / "A.proof.json.gz").exists())
+            self.assertFalse((output / revalidation.proof_rel("A")).exists())
             summary = json.loads((output / "summary.json").read_text())
             self.assertFalse(summary["code_frozen"])
             self.assertEqual(summary["certified"], 0)
@@ -262,7 +276,7 @@ class CertificationRunCodeFreezeTests(unittest.TestCase):
             csv_text = (output / "baseline.csv").read_text()
             self.assertIn("A,1.0,exact_enclosure_v1", csv_text)
             self.assertIn("missing_candidate_UNCERTIFIED", csv_text)
-            self.assertTrue((output / "A.proof.json.gz").exists())
+            self.assertTrue((output / revalidation.proof_rel("A")).exists())
             summary = json.loads((output / "summary.json").read_text())
             self.assertTrue(summary["code_frozen"])
             self.assertEqual(summary["certified"], 1)
@@ -316,6 +330,19 @@ class DirectCsvProvenanceTests(unittest.TestCase):
                 (root / "ev" / "SYNTH3.proof.json.gz").read_bytes()).decode())
             self.assertEqual(payload["proposal"]["solver"], "highs")
             self.assert_contract_evidence(payload, qps)
+
+
+class TruthModuleIdentityTests(unittest.TestCase):
+    """spec 読み込みした truth は revalidate が import する sys.modules インスタンスと
+    同一 object であること。combined pytest でファイルごとに別 instance が残ると
+    属性差替が无声で無効化される (import 再バインド revert + 2 ファイル combined
+    実行で本テストが fail する sentinel)。
+    """
+
+    def test_truth_module_is_shared_instance(self):
+        import highs_baseline_truth as seen
+        self.assertIs(seen, truth)
+        self.assertIs(sys.modules["highs_baseline_truth"], truth)
 
 
 if __name__ == "__main__":
