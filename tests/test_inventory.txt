@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3276 testcases, 26 ignored
+# totals: 3301 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -909,6 +909,8 @@ otspot-core	qp::certificate::tests::guard_lp_optimal_no_false_demote_for_residua
 otspot-core	qp::certificate::tests::guard_lp_optimal_passes_correct_result	active
 otspot-core	qp::certificate::tests::guard_lp_optimal_passthrough_non_optimal_statuses	active
 otspot-core	qp::certificate::tests::lp_cert_tol_equals_feas_rel_tol	active
+otspot-core	qp::certificate::tests::prove_optimal_aggregate_feasibility_applies_at_lp_cert_tol	active
+otspot-core	qp::certificate::tests::prove_optimal_certifies_row_scaled_constraint_for_every_scale	active
 otspot-core	qp::certificate::tests::prove_optimal_corrupted_x_fails	active
 otspot-core	qp::certificate::tests::prove_optimal_dimension_mismatch_returns_err_not_panic	active
 otspot-core	qp::certificate::tests::prove_optimal_empty_problem	active
@@ -923,6 +925,7 @@ otspot-core	qp::certificate::tests::prove_optimal_lp_short_reduced_costs_is_not_
 otspot-core	qp::certificate::tests::prove_optimal_lp_wrong_sign_dual_fails	active
 otspot-core	qp::certificate::tests::prove_optimal_nan_in_each_condition_is_rejected	active
 otspot-core	qp::certificate::tests::prove_optimal_negative_gap_bug_reproduction	active
+otspot-core	qp::certificate::tests::prove_optimal_rejects_accumulated_row_violation	active
 otspot-core	qp::certificate::tests::prove_optimal_stationarity_fails	active
 otspot-core	qp::certificate::tests::prove_optimal_tol_semantics	active
 otspot-core	qp::certificate::tests::prove_optimal_wrong_sign_dual_fails_dual_sign_check	active
@@ -1132,6 +1135,7 @@ otspot-core	qp::ipm_solver::attempt::tests::cancelled_infeasibility_backstop_sen
 otspot-core	qp::ipm_solver::attempt::tests::candidate_order_prefers_certificate_then_objective	active
 otspot-core	qp::ipm_solver::attempt::tests::candidate_order_preserves_structural_status_over_unproven_iterate	active
 otspot-core	qp::ipm_solver::attempt::tests::converged_termination_does_not_break_early::converged_termination_runs_full_ladder	active
+otspot-core	qp::ipm_solver::attempt::tests::deep_lane_bit_identical_stall_does_not_skip_loose_lanes	active
 otspot-core	qp::ipm_solver::attempt::tests::deterministic_stall_in_one_lane_does_not_skip_other_lane	active
 otspot-core	qp::ipm_solver::attempt::tests::dual_lane_true_stall_breaks_at_third_occurrence::dual_lane_true_stall_breaks_at_expected_call_count	active
 otspot-core	qp::ipm_solver::attempt::tests::empty_col_mask_noop_proof_in_finalize	active
@@ -1211,6 +1215,9 @@ otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_qgfrdxpn_eliminated_var
 otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_rejects_malformed_bound_duals_before_scaling	active
 otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_rejects_malformed_bound_duals_without_nan_masking	active
 otspot-core	qp::ipm_solver::kkt::tests::kkt_residual_rel_uses_dd_to_avoid_f64_cancellation	active
+otspot-core	qp::ipm_solver::kkt::tests::primal_residual_l2_rel_matches_hand_oracle	active
+otspot-core	qp::ipm_solver::kkt::tests::primal_residual_l2_rel_rejects_broken_inputs_and_handles_empty	active
+otspot-core	qp::ipm_solver::kkt::tests::primal_residual_l2_rel_uses_term_magnitude_for_cancelling_rows	active
 otspot-core	qp::ipm_solver::kkt::tests::primal_residual_rel_uses_dd_to_avoid_f64_cancellation	active
 otspot-core	qp::ipm_solver::kkt::tests::residual_aggregation_reports_infinity_on_overflowing_activity	active
 otspot-core	qp::kkt_resid::tests::bound_contrib_accepts_fixed_variable_omitted_layout	active
@@ -2858,6 +2865,22 @@ otspot::diag_lp_simplex_stall_sentinel	lp_simplex_stall_ken13_converges	ignored
 otspot::diag_lp_simplex_stall_sentinel	lp_simplex_stall_ken18_converges	ignored
 otspot::diag_lp_simplex_stall_sentinel	lp_simplex_stall_pilot_converges	ignored
 otspot::diag_lp_simplex_stall_sentinel	lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent	ignored
+otspot::diag_maros_stalled_gates	maros_eps_ladder_fast	ignored
+otspot::diag_maros_stalled_gates	maros_eps_ladder_values	ignored
+otspot::diag_maros_stalled_gates	maros_ruiz_liswet8	ignored
+otspot::diag_maros_stalled_gates	maros_ruiz_liswet9_10_12	ignored
+otspot::diag_maros_stalled_gates	maros_ruiz_scale_profile	ignored
+otspot::diag_maros_stalled_gates	maros_stalled_aug2dcqp	ignored
+otspot::diag_maros_stalled_gates	maros_stalled_liswet1	ignored
+otspot::diag_maros_stalled_gates	maros_stalled_liswet10	ignored
+otspot::diag_maros_stalled_gates	maros_stalled_liswet12	ignored
+otspot::diag_maros_stalled_gates	maros_stalled_liswet7	ignored
+otspot::diag_maros_stalled_gates	maros_stalled_liswet8	ignored
+otspot::diag_maros_stalled_gates	maros_stalled_liswet9	ignored
+otspot::diag_maros_stalled_gates	maros_stalled_qpcboei2	ignored
+otspot::diag_maros_stalled_gates	maros_stalled_stadat1	ignored
+otspot::diag_maros_stalled_gates	maros_stalled_values	ignored
+otspot::diag_maros_stalled_gates	maros_stalled_yao	ignored
 otspot::diag_mas76_fp_false_incumbent	mas76_cuts_does_not_accept_fp_upper_bound_objective	active
 otspot::diag_milp_bruteforce	brute_force_matches_miqp_solver	active
 otspot::diag_milp_bruteforce	brute_force_matches_solver_all_cases	active
@@ -2997,6 +3020,8 @@ otspot::fast_baseline_regression	fast_regression_conic_matches_closed_form_unit_
 otspot::fast_baseline_regression	fast_regression_lp_matches_netlib_baseline	active
 otspot::fast_baseline_regression	fast_regression_qp_matches_maros_meszaros_baseline	active
 otspot::liswet7_11_obj_independent_check	liswet11_optimal_claim_matches_certified_value	active
+otspot::liswet7_11_obj_truth_sentinel	liswet11_optimal_objective_matches_certified_truth	ignored
+otspot::liswet7_11_obj_truth_sentinel	liswet7_false_optimal_rejected	ignored
 otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_breaks_delta_matrix_floor_at_eps_1e8	active
 otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_unaffected_at_default_eps_1e6	active
 otspot::liswet7_inner_gap_gate_sentinel	liswet7_attractor_with_constant_is_not_reported_optimal	active

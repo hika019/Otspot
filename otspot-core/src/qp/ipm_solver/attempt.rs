@@ -172,6 +172,14 @@ fn build_attempt_ladder(
     use_ruiz_scaling: bool,
 ) -> Vec<(bool, f64)> {
     if no_ruiz_only || !use_ruiz_scaling {
+        // 注意: ここに (base×100) lane を挟むと、深い 3 lane が bit-identical で
+        // lane death を誘発し、後続の loose lane (base/10, 1) が skip される。
+        // 実測 (2026-10-18 maros bench): LISWET7 が loose lane を証明に使っており
+        // skip で PASS → STALLED に転落した (reg_retries=14485 の暴走)。
+        // 深い eps への救済機構は現状存在しない。将来実装する場合もこの ladder への
+        // 直接挿入ではなく明示的な機構で行うこと (挿入は
+        // deep_lane_bit_identical_stall_does_not_skip_loose_lanes が bit 列で fail
+        // として検出する)。
         let mut v = vec![(false, base_tighten), (false, base_tighten * 10.0)];
         if base_tighten > 10.0 {
             v.push((false, base_tighten / 10.0));
@@ -3740,5 +3748,114 @@ mod tests {
                  (tighten ladder 全 10 attempt を尽くすべき), got {calls}"
             );
         }
+    }
+
+    /// SENTINEL (2026-10-18 LISWET7 maros bench 退化の再発防止)。
+    ///
+    /// guard 対象: no-ruiz ladder への深い lane (base×100) の sneaking 挿入。
+    /// 深い lane が 3 つ (base, base×10, base×100) 連続で bit 同一 stall に落ちると
+    /// `CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK` (=3) で lane death が発火し、後続の
+    /// loose lane (base/10, 1) が同一 lane (use_ruiz=false) の残り attempt として
+    /// skip される。LISWET7 は loose lane で初めて証明に至るため、skip が起こると
+    /// PASS していた問題が STALLED に転落する (2026-10-18 maros bench 実測、
+    /// reg_retries=14485 の暴走)。深い eps への救済は現状未実装であり、将来実装
+    /// する場合も ladder への直接挿入ではなく独立した機構 (Converged 終端 gate
+    /// 付き) として行う。
+    ///
+    /// 検証は production の `build_attempt_ladder` (base_tighten=100 は LISWET7 の
+    /// user_eps=1e-6 相当の実形) で組み立てた実 ladder を mock runner に通し、
+    /// runner 呼び出し列 (tighten 順序列) を exhaust に pin する。深い lane が
+    /// 挿入された実測では呼び出し列が [100, 1000, 10000] で止まり、loose lane が
+    /// 呼ばれず lane death に潰れる — 本 sentinel はこれを bit 列で検出して fail
+    /// する。
+    #[test]
+    fn deep_lane_bit_identical_stall_does_not_skip_loose_lanes() {
+        use std::cell::RefCell;
+        thread_local! {
+            static DEATH_CALLS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+        }
+
+        fn runner_deep_stall_then_loose_diverge(
+            _: &QpProblem,
+            _: &QpPresolveResult,
+            options: &SolverOptions,
+            user_eps: f64,
+        ) -> IpmOutcome {
+            // runner 呼び出し時点の内部 eps から実装が組んだ tighten を復元する
+            // (run_attempt_ladder は eps_i = user_eps / tighten を設定する)。
+            let tighten = (user_eps / options.ipm.eps).round() as usize;
+            DEATH_CALLS.with(|c| c.borrow_mut().push(tighten));
+            // 深い lane (tighten >= base=100) は iterations 込みで bit 同一 stall
+            // (AttemptFingerprint が完全一致する)。loose lane (<100) は iterations
+            // を tighten 依存にして bit を切り替え、lane death の run リセットに
+            // 相当する脱出を模写する。どちらも証明はしない (Stalled のまま)。
+            let identical_deep_stall = tighten >= 100;
+            IpmOutcome {
+                solution: vec![1.0],
+                dual_solution: vec![],
+                bound_duals: vec![],
+                objective: 0.0,
+                iterations: if identical_deep_stall { 7 } else { 7 + tighten },
+                kkt_residual_rel: 1.0,
+                primal_residual_rel: 1.0,
+                bound_violation: 0.0,
+                complementarity_residual_rel: 1.0,
+                duality_gap_rel: 1.0,
+                numerical_failure: false,
+                infeasibility_status: None,
+                is_locally_optimal: false,
+                postsolve_krylov_ir_skipped: false,
+                timing: None,
+                termination: IpmTermination::Stalled,
+            }
+        }
+
+        let prob = make_simple_eq_qp();
+        let presolve = QpPresolveResult::no_reduction(&prob);
+        let view = ProblemView::from_problem(&prob);
+        let user_eps = 1e-6_f64;
+        // attempts はテスト側の hand-roll ではなく production の build_attempt_ladder
+        // で組み立てる (ladder 構成の変更もこの実行で検出できる)。
+        let attempts = build_attempt_ladder(100.0, true, false);
+        DEATH_CALLS.with(|c| c.borrow_mut().clear());
+        let mut opts = SolverOptions {
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
+        let mut best = None;
+        let mut best_config = None;
+        let mut iter_used = 0usize;
+        run_attempt_ladder(
+            &prob,
+            &presolve,
+            runner_deep_stall_then_loose_diverge,
+            &mut opts,
+            &view,
+            user_eps,
+            usize::MAX,
+            None,
+            &attempts,
+            &mut best,
+            &mut best_config,
+            &mut iter_used,
+        );
+        let calls = DEATH_CALLS.with(|c| c.borrow().clone());
+        // exhaust assertion: runner 呼び出し列を bit 列で pin する。深い lane の
+        // 挿入・attempt の skip・並び替え・lane death の早発 (閾値緩和) はいずれも
+        // ここで fail する (2026-10-18 実測: 深い lane 挿入状態では呼び出し列が
+        // [100, 1000, 10000] で止まり loose lane が欠落)。
+        assert_eq!(
+            calls,
+            vec![100, 1000, 10, 1],
+            "no-ruiz ladder は深い lane を挿入しない限り loose lane (tighten=10, 1) まで \
+             走るべき (LISWET7 の実走列): calls={calls:?}"
+        );
+        // exhaust pin に加えて、LISWET7 の証明 lane (tighten=10, 1) 生存を正面の
+        // 特徴として明示的に pin する。
+        assert!(
+            calls.contains(&10) && calls.contains(&1),
+            "深い 3 lane の bit 同一 stall で loose lane (tighten=10, 1) が skip された \
+             (LISWET7 は loose lane で証明する): calls={calls:?}"
+        );
     }
 }
