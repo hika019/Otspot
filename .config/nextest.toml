@@ -34,9 +34,15 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 filter = "binary(linalg_par_sentinel)"
 threads-required = "num-cpus"
 
-# greenbea_postsolve_dual_feasibility: idle ~164s で converge、170s margin 6s。
-# #91 で CPU contention 1.04x でも FAIL することを実証 (threads-required では不十分) →
-# #[ignore] 復活で default 除外。本 override は `--run-ignored only` 時に CPU 専有で安定化させる用途。
+# greenbea_postsolve_dual_feasibility: active (4d05b36c で default 昇格済み、default
+# 除外ではない)。実測: ソース内コメント 2026-07-09 再測 5.327s (b43b0a42 の postsolve
+# gate fix 後)、default profile 実走 PASS 5.106s。旧記述の「idle ~164s / 170s margin
+# 6s / #[ignore] 復活で除外」は fix 前の過去計測に基づく歴史記述で、現実に不成。
+# 本 override は [profile.default.overrides] なので default 実行に効き、heavy 等の
+# カスタム profile にも継承される (probe 実測済み)。`--run-ignored` 専用ではない。
+# threads-required 専有は実測 5.1s に対し test 内 timeout budget 170s と余裕が
+# 大きい上の CI 3スレッド contention への安価な保険。退役には contention 下実測が
+# 必要なので判断保留。
 # test() はバイナリ名に一致しないため、binary() と & (積) で対象を限定する。
 [[profile.default.overrides]]
 filter = "binary(lp_regression_postsolve_y_dual) & test(=greenbea_postsolve_dual_feasibility)"
