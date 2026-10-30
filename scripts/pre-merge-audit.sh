@@ -25,6 +25,15 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 # 共有し、concurrent.rs の並列テストを目録に含めるため。この feature は非-parallel
 # の上位集合 (テストは減らない) なので full-suite を弱めない。
 cargo nextest run --release --features parallel --test-threads 6
+# heavy 専用 data (lp_problems_hard/neos.QPS、osqp_bench_illscaled 126 件) の充足
+# チェック。CI test-heavy.yml では実行前の明示 step だがローカル worktree では
+# 未配置になりやすく、無いと heavy 中盤のテスト panic ('data missing' 設計上
+# silent skip しない) で失敗理由が分かりにくい。CI と同じ実体を先に走らせ
+# 欠落パスと補完手順 (test-heavy.yml の data-prep) を読みやすく示す。あえて
+# full-suite (default profile) の後: default は #[ignore] を走らせず heavy 専用
+# data を要しないため、ここが唯一の必須地点。実体の単体テストは下のゲート列の
+# tests/test_check_test_data_requirements.py。
+python3 scripts/check_test_data_requirements.py
 # heavy: AGENTS.md の `--profile heavy --run-ignored all` に --features parallel を
 # 足す。full-suite と同じ feature 集合で release バイナリを共有し (上位集合なので
 # テストは減らない)、concurrent.rs の並列テストも heavy 側で実走させるため。
