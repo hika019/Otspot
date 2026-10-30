@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -28,6 +29,10 @@ PROOF_SUBDIR = "proofs"
 # Contract-required provenance of a retained accepted claim. output_source must
 # refuse to emit an accepted label when any of these is absent (fail-closed).
 CLAIM_KEYS = ("proof", "proof_sha256", "input_sha256", "checker_sha256")
+
+# Problem names enter the source column via the proof path; this charset cannot
+# contain the CSV field separator or the claim's ';'/'=' key separators.
+SAFE_NAME = re.compile(r"[A-Za-z0-9_.+-]+")
 
 
 def proof_rel(name):
@@ -250,7 +255,13 @@ def main(argv=None):
         ap.error("jobs and timeout must be positive")
     rows = read_rows(args.csv)
     names = [r["problem_name"] for r in rows]
-    if len(names) != len(set(names)) or any(Path(name).name != name for name in names):
+    # The accepted source column embeds the name inside `proof=proofs/<name>...`
+    # alongside `;`/`=` separators, and the CSV writer only quotes `,`; a name
+    # carrying those characters would make the claim unparseable. Fail closed at
+    # entry: names are restricted to the charset actually used by QPS problem
+    # names (all committed baseline names match).
+    if len(names) != len(set(names)) or any(
+            Path(name).name != name or not SAFE_NAME.fullmatch(name) for name in names):
         ap.error("duplicate or invalid problem name")
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
