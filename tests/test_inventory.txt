@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3301 testcases, 44 ignored
+# totals: 3299 testcases, 42 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -3020,8 +3020,6 @@ otspot::fast_baseline_regression	fast_regression_conic_matches_closed_form_unit_
 otspot::fast_baseline_regression	fast_regression_lp_matches_netlib_baseline	active
 otspot::fast_baseline_regression	fast_regression_qp_matches_maros_meszaros_baseline	active
 otspot::liswet7_11_obj_independent_check	liswet11_optimal_claim_matches_certified_value	active
-otspot::liswet7_11_obj_truth_sentinel	liswet11_optimal_objective_matches_certified_truth	ignored
-otspot::liswet7_11_obj_truth_sentinel	liswet7_false_optimal_rejected	ignored
 otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_breaks_delta_matrix_floor_at_eps_1e8	active
 otspot::liswet7_delta_matrix_floor_sentinel	liswet7_pfn_unaffected_at_default_eps_1e6	active
 otspot::liswet7_inner_gap_gate_sentinel	liswet7_attractor_with_constant_is_not_reported_optimal	active
