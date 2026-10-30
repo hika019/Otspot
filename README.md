@@ -159,7 +159,7 @@ current baseline `LISWET7` reaches Optimal and agrees with the certified referen
 1e-6 (measured 2026-10-30), and the Maros–Mészáros row above (incl. `2 mismatch`,
 `LISWET7`/`LISWET11`) is against the pre-migration CSV and awaits re-measurement.
 Under the certificate contract the CSV now carries 88 of the 138 objective values as
-machine-checkable claims (88 LISWET included, via a regeneration manifest); the other
+machine-checkable claims (12 LISWET included, via a regeneration manifest); the other
 50 are explicitly labelled pre-contract reference values, not certified optima.
 Verify any checkout with `python3 scripts/check_baseline_proofs.py`.
 

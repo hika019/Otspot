@@ -1174,6 +1174,12 @@ def check_data_tracking(ctx: Context) -> list[Failure]:
             )
         ]
     lineno, _ = found
+    # Asymmetry note: the anchor accepts both the old "csv only" sentence and
+    # the new "csv and proofs/**" sentence, so it cannot flag a doc that
+    # regresses to the old wording while proofs stay tracked. That laxness is
+    # the deliberate cost of keeping the fixture's pre-reissue wording valid;
+    # an operator who truly reverts the policy must narrow the allow list below
+    # in the same change, which then fails closed again.
     result = _git(ctx.root, "ls-files", "-z", "--", "data")
     if result.returncode != 0:
         return [
