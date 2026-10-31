@@ -47,7 +47,7 @@ const TIMEOUT_HONOR_RATIO_MIN: f64 = 0.90;
 const NEOS_BUDGET_SEC: f64 = 20.0;
 
 #[test]
-#[ignore = "requires data/lp_problems_hard/neos.QPS (heavy excluded from CI)"]
+#[ignore = "requires data/lp_problems_hard/neos.QPS (heavy tier; CI test-heavy.yml fetches that data and runs this via --profile heavy --run-ignored all)"]
 fn timeout_honored_on_neos_bigm_cold_start() {
     let path_str = "data/lp_problems_hard/neos.QPS";
     let path = Path::new(path_str);
