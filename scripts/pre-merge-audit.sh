@@ -25,26 +25,16 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 # 共有し、concurrent.rs の並列テストを目録に含めるため。この feature は非-parallel
 # の上位集合 (テストは減らない) なので full-suite を弱めない。
 cargo nextest run --release --features parallel --test-threads 6
-# heavy 専用 data (lp_problems_hard/neos.QPS、osqp_bench_illscaled 126 件) の充足
-# チェック。CI test-heavy.yml では実行前の明示 step だがローカル worktree では
-# 未配置になりやすく、無いと heavy 中盤のテスト panic ('data missing' 設計上
-# silent skip しない) で失敗理由が分かりにくい。CI と同じ実体を先に走らせ
-# 欠落パスと補完手順 (test-heavy.yml の data-prep) を読みやすく示す。あえて
-# full-suite (default profile) の後: default は #[ignore] を走らせず heavy 専用
-# data を要しないため、ここが唯一の必須地点。実体の単体テストは下のゲート列の
-# tests/test_check_test_data_requirements.py。
-python3 scripts/check_test_data_requirements.py
-# heavy: AGENTS.md の `--profile heavy --run-ignored all` に --features parallel を
-# 足す。full-suite と同じ feature 集合で release バイナリを共有し (上位集合なので
-# テストは減らない)、concurrent.rs の並列テストも heavy 側で実走させるため。
-# 長時間ステージ: #[ignore] 済み tier-2 sentinel を全実走する。
-cargo nextest run --release --features parallel --profile heavy --run-ignored all --test-threads 6
 # Doctest bodies get no -C debug-assertions/overflow-checks/opt-level from
 # rustdoc, so they run with debug_assertions=true in both modes; --release only
 # changes the linked lib build (release lib, debug-assertions off; AGENTS.md).
-# Runs after the suite for partial reuse (workspace crates still rebuild on the
-# feature difference; cold without the suite is 82 units). Intra-doc links are
-# covered by the separate rustdoc gate below.
+# The `cargo build --release` above built the default-features release libs,
+# and the suite's `--features parallel` build coexists with them in
+# target/release/deps as separate fingerprint units (the feature differs only
+# for otspot-core and the root facade; otspot-num declares no features at all),
+# so this default-features doctest run reuses the earlier build rather than
+# rebuilding workspace crates. Intra-doc links are covered by the separate
+# rustdoc gate below.
 cargo test --doc --release
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 bash scripts/check_file_size.sh
@@ -142,6 +132,34 @@ echo "--- 新規 inline numeric literal (production source 内、2桁以上) ---
 git diff main..HEAD --unified=0 -- 'otspot-core/src/*.rs' 'otspot-num/src/*.rs' 'otspot-io/src/*.rs' 'otspot-model/src/*.rs' | \
   grep -E '^\+[^+]*\b[0-9]{2,}(_[0-9]+)*(\.[0-9]+)?([eE][+-]?[0-9]+)?\b' | \
   grep -vE 'cfg\(test\)|//|test_' | head -20 || true
+
+# 7. heavy (50分級ステージ: 末尾配置)
+# set -e 下で最初の失敗が監査を打ち切るため、heavy を cheap ゲート列より前に置く
+# と heavy 失敗 (または heavy data 欠落) 時に doctest / cargo doc / 後続ゲートが
+# 一度も走らない。末尾配置でその構造を解消する。バイナリ共有は移動後も成立:
+# full-suite が --release --features parallel を build 済みで heavy も同一の build
+# フラグ (profile キーと --run-ignored はビルドに効かない)。間の doctest / rustdoc
+# は target/release/deps の別 fingerprint unit なので退去させない
+# (移動後順位の probe で "Finished `release` profile" 再ビルド 0 を実測)。
+echo
+echo "=== heavy (must-pass, 長時間) ==="
+# heavy 専用 data (lp_problems_hard/neos.QPS、osqp_bench_illscaled 126 件) の充足
+# チェック。CI test-heavy.yml では実行前の明示 step だがローカル worktree では
+# 未配置になりやすく、無いと heavy 中盤のテスト panic ('data missing' 設計上
+# silent skip しない) で失敗理由が分かりにくい。CI と同じ実体を直前に走らせ
+# 欠落パスと補完手順 (test-heavy.yml の data-prep) を読みやすく示す。heavy 専用
+# data の唯一の消費直前 (末尾) に配置するため、default full-suite は #[ignore] を
+# 走らせずこれらの data を要さない、という順序が成立し、heavy data 欠落でも前段の
+# cheap ゲートは止めない。実体の単体テストは上のゲート列の
+# tests/test_check_test_data_requirements.py。
+python3 scripts/check_test_data_requirements.py
+# heavy: AGENTS.md の `--profile heavy --run-ignored all` に --features parallel を
+# 足す。full-suite と同じ feature 集合で release バイナリを共有し (上位集合なので
+# テストは減らない)、concurrent.rs の並列テストも heavy 側で実走させるため。
+# CI test-heavy.yml の must-pass step と実体を統一し --no-fail-fast を付ける:
+# fail-fast では最初の 1 失敗で残り 3045 件が走らず (実測)、失敗全容が 1 回では
+# 把握できない。
+cargo nextest run --release --features parallel --profile heavy --run-ignored all --no-fail-fast --test-threads 6
 
 echo
 echo "=== audit complete ==="

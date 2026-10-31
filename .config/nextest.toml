@@ -34,12 +34,45 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 filter = "binary(linalg_par_sentinel)"
 threads-required = "num-cpus"
 
-# greenbea_postsolve_dual_feasibility: idle ~164s で converge、170s margin 6s。
-# #91 で CPU contention 1.04x でも FAIL することを実証 (threads-required では不十分) →
-# #[ignore] 復活で default 除外。本 override は `--run-ignored only` 時に CPU 専有で安定化させる用途。
+# greenbea_postsolve_dual_feasibility: active (4d05b36c で default 昇格済み、default
+# 除外ではない)。実測: ソース内コメント 2026-07-09 再測 5.327s (b43b0a42 の postsolve
+# gate fix 後)、default profile 実走 PASS 5.106s。旧記述の「idle ~164s / 170s margin
+# 6s / #[ignore] 復活で除外」は fix 前の過去計測に基づく歴史記述で、現実に不成。
+# 本 override は [profile.default.overrides] なので default 実行に効き、heavy 等の
+# カスタム profile にも継承される (probe 実測済み)。`--run-ignored` 専用ではない。
+# threads-required 専有は実測 5.1s に対し test 内 timeout budget 170s と余裕が
+# 大きい上の CI 3スレッド contention への安価な保険。退役には contention 下実測が
+# 必要なので判断保留。
 # test() はバイナリ名に一致しないため、binary() と & (積) で対象を限定する。
 [[profile.default.overrides]]
 filter = "binary(lp_regression_postsolve_y_dual) & test(=greenbea_postsolve_dual_feasibility)"
+threads-required = "num-cpus"
+
+# greenbea_postsolve_under_5s: assert は postsolve 区間実測
+# (timing_breakdown.postsolve_us) < 5.0s。ローカル実測 postsolve 3.10/3.11s
+# に対し、CPU contention 下で区間が拉伸され main push 2 回連続 FAIL
+# (nextest wall 8.8s、runs 41029140965 / 41047736645)。同一 code の PR CI は
+# integration 4/4 緑で contention 依存が実証済み (#91 greenbea dual
+# feasibility と同型の既存 flake 級事例)。マージン 1.6 倍と薄く、同 job 内
+# wood1p_postsolve_under_2s (wall 0.66s) のような余裕は無いため専有で fair
+# timing を確保する。cap 5.0s 自体の変更は失敗の隠蔽なので禁止。heavy 側には
+# 既に同種 override あり ([profile.heavy.overrides]、#39 の拉伸実測起源)。
+[[profile.default.overrides]]
+filter = "test(=greenbea_postsolve_under_5s)"
+threads-required = "num-cpus"
+
+# klein3 dual-Phase-I 群 (同一 binary / 同一 data、CPU-bound): wall assert だが
+# 専有が無く、main CI 3スレッドで拉伸が gh run log の 2 run (41029140965 /
+# 41047736645) で実測済み — worst margin が greenbea より薄い:
+#   no_presolve 45.019/45.013s vs ceiling 60s = 1.33x (wall は solver deadline
+#     45s 到達状態で、ローカル自然終了 24.7s に対し CI 実走で既に 1.8x 化)
+#   anticycling 16.313/20.022s vs ceiling 30s = 1.50x (2 run 目は deadline 20s 到達)
+#   no_false_optimal 19.740/21.610s vs ceiling 30s = 1.39x
+#   primal_early_bail_fast 22.210/16.449s vs ceiling 40s = 1.80x (ばらつき大)
+# greenbea_postsolve_under_5s と同じ専有方針で fair timing を確保する。cap /
+# deadline 定数自体の変更は失敗の隠蔽なので禁止 (テスト本体は無変更)。
+[[profile.default.overrides]]
+filter = "test(klein3_anticycling_terminates_within_deadline) + test(klein3_no_false_optimal_within_60s) + test(klein3_no_presolve_terminates_within_deadline) + test(klein3_primal_early_bail_fast)"
 threads-required = "num-cpus"
 
 # lp_simplex_stall_synthetic_large_lp_dispatches_to_valid_incumbent: 2500×3500 sparse LP
