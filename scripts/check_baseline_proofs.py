@@ -5,12 +5,14 @@ The CSV source column is only honest if somebody can check it without rerunning
 the full certification pipeline. This script is that somebody. It resolves every
 claim in a baseline CSV and checks it in independent layers:
 
-  S  shape (always, hermetic): row count, no duplicate problem_name, header
-     count claims (when present) match the actual 88/50/138 breakdown, certified
-     sources carry exactly the four claim keys with 64-hex digests and proof
-     paths under proofs/, uncertified rows carry the pre-contract claim marker,
-     and the LISWET manifest is structurally exact (per-row problem/qps/gaps/
-     proof_sha256/reference, set-equal to the CSV's LISWET claims).
+  S  shape (always, hermetic): row count, safe problem_name file stems, CSV
+     rows set-equal to the pinned QPS set (scripts/maros_meszaros_qps.sha256),
+     no duplicate problem_name, header count claims (when present) match the
+     actual 88/50/138 breakdown, certified sources carry exactly the four
+     claim keys with 64-hex digests and proof paths under proofs/, uncertified
+     rows carry the pre-contract claim marker, and the LISWET manifest is
+     structurally exact (per-row problem/qps/gaps/proof_sha256/reference,
+     set-equal to the CSV's LISWET claims).
   A  hash (hermetic for committed entities): SHA-256 over the canonical
      expanded proof JSON equals the CSV proof_sha256; the proof's contract
      version matches. LISWET proofs are not committed; layer A covers them
@@ -228,6 +230,33 @@ def regenerate(entry: dict, root: Path, data_dir: Path):
             return None, f"regenerated proof unreadable: {exc}"
 
 
+def check_stem_set(root: Path, names: set[str], layers: Layers) -> None:
+    """The CSV must cover exactly the pinned QPS set (review re-attack P1).
+
+    scripts/maros_meszaros_qps.sha256 is the download-side truth of which
+    problems exist. Without this pin, adding a row named ../maros_meszaros/X
+    (or ../lp_problems/X) re-anchors C/E and the LISWET argv onto a body
+    outside the certified inventory while every hash stays self-consistent.
+    Extra rows, dropped rows and renames are all red; a missing pin file is
+    fail-closed, never an implicit skip.
+    """
+    sha = root / "scripts" / "maros_meszaros_qps.sha256"
+    if not sha.is_file():
+        layers.failures.append(
+            f"S pinned: {sha.name} missing (cannot pin the problem set)")
+        return
+    stems = set()
+    for line in sha.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            stems.add(Path(line.split()[-1]).stem)
+    extra, missing = sorted(names - stems), sorted(stems - names)
+    if extra:
+        layers.failures.append(f"S pinned: CSV rows outside pinned QPS set: {extra[:5]}")
+    if missing:
+        layers.failures.append(f"S pinned: pinned QPS files without CSV row: {missing[:5]}")
+
+
 def check_header_counts(text: str, rows: list[dict], certified: int,
                         uncertified: int, reasons: dict, layers: Layers) -> None:
     """Header claims (Certified (N of M) / Uncertified (K of M) / breakdown)
@@ -248,7 +277,7 @@ def check_header_counts(text: str, rows: list[dict], certified: int,
 
 
 def check(csv_path: Path, root: Path, data_dir: Path, regenerate_liswet: bool,
-          require_layers: set[str]) -> int:
+          require_layers: set[str], min_certified: int) -> int:
     layers = Layers()
     text, rows = read_text_and_rows(csv_path)
     proofs_dir = csv_path.parent / PROOF_SUBDIR
@@ -258,11 +287,23 @@ def check(csv_path: Path, root: Path, data_dir: Path, regenerate_liswet: bool,
     uncertified = 0
     reasons: dict[str, int] = {}
     seen: set[str] = set()
+    row_names: set[str] = set()
     for index, row in enumerate(rows):
         name, source = row.get("problem_name"), row.get("source")
         if not name or not isinstance(name, str) or not isinstance(source, str):
             layers.failures.append(f"S row{index}: missing problem_name or source")
             continue
+        # Names reach filesystem paths (data_dir/<name>.QPS, proofs/<name>...)
+        # and one argv slot, so they must be plain file stems. SAFE_NAME alone
+        # admits ".." and "-flag", hence the extra checks (reuses the writer's
+        # guard in revalidate_baselines); dot-only names are rejected because
+        # SAFE_NAME admits them and they are pure directory references.
+        if (not reval.SAFE_NAME.fullmatch(name) or Path(name).name != name
+                or name.startswith("-") or set(name) == {"."}):
+            layers.failures.append(f"S row{index}: unsafe problem_name {name!r}")
+            row_names.add(name)
+            continue
+        row_names.add(name)
         if name in seen:
             # last-wins in dict readers would hide a second claim for one row.
             layers.failures.append(f"S {name}: duplicate problem_name")
@@ -300,6 +341,7 @@ def check(csv_path: Path, root: Path, data_dir: Path, regenerate_liswet: bool,
     manifest_rows = load_manifest(proofs_dir / "liswet" / "manifest.json",
                                   liswet_rows, layers) if liswet_rows else {}
     check_header_counts(text, rows, len(certified), uncertified, reasons, layers)
+    check_stem_set(root, row_names, layers)
 
     data_present = data_dir.is_dir()
     truth = None
@@ -391,6 +433,15 @@ def check(csv_path: Path, root: Path, data_dir: Path, regenerate_liswet: bool,
             layers.failures.append(
                 f"R {layer}: required layer reported {stat['skip']} skip(s) "
                 f"[{'; '.join(sorted(layers.skips[layer]))}]")
+        if stat["pass"] == 0:
+            # A required layer that never ran a single check (empty or fully
+            # uncertified CSV) is not "passing", it is an absent guard.
+            layers.failures.append(
+                f"R {layer}: required layer produced 0 passing checks")
+    if len(certified) < min_certified:
+        layers.failures.append(
+            f"R min-certified: {len(certified)} certified claims < required "
+            f"minimum {min_certified} (inventory shrink must be a reviewed decision)")
 
     stamped_current = sum(1 for _, keys in certified.values()
                           if keys["checker_sha256"] == checker.checker_digest())
@@ -430,8 +481,15 @@ def main(argv: list[str] | None = None) -> int:
                          "(needs the QPS data and the cert-suite pip deps)")
     ap.add_argument("--require-layers", default="",
                     help="comma list of layers that must run with zero skips "
+                         "and at least one passing check "
                          "(audit job: S; data job: S,A,B,C,E)")
+    ap.add_argument("--min-certified", type=int, default=0,
+                    help="fail if the CSV carries fewer certified claims than "
+                         "this floor (CI jobs pass 88)")
     args = ap.parse_args(argv)
+    if args.min_certified < 0:
+        print("FATAL: --min-certified must be >= 0")
+        return 1
     require = {part.strip().upper() for part in args.require_layers.split(",") if part.strip()}
     unknown = require - {"S", "A", "B", "C", "E", "D"}
     if "D" in require:
@@ -442,7 +500,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     data_dir = args.data_dir or args.root / "data" / "maros_meszaros"
     try:
-        return check(args.csv, args.root, data_dir, args.regenerate, require)
+        return check(args.csv, args.root, data_dir, args.regenerate, require,
+                     args.min_certified)
     except Exception as exc:  # fail closed with a diagnosis, never a traceback
         print(f"FATAL: verifier aborted fail-closed: {type(exc).__name__}: {exc}")
         return 1
