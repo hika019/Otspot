@@ -1051,6 +1051,23 @@ class BaselineCsvSeparationTests(unittest.TestCase):
                 self.assertTrue((ROOT / "data/baseline_objectives" /
                                  f"proofs/{name}.proof.json.lzma").is_file(), name)
 
+    def test_liswet_manifest_schema_is_structured_data_only(self):
+        # P1-2: 旧 schema の free-form argv (--regenerate で任意実行できた) は
+        # 攻撃面。現 schema は構造フィールドのみ — 検証器が argv を組み立て、
+        # 実行対象は scripts/liswet_exact_certificate.py に限定される。
+        # (12 行の網羅とハッシュ突合は test_claim_rows_carry_the_full_contract_provenance。)
+        doc = json.loads((ROOT / "data/baseline_objectives/proofs/liswet/manifest.json")
+                         .read_text())
+        self.assertEqual(set(doc), {"policy", "rows"})
+        for name, entry in doc["rows"].items():
+            self.assertEqual(set(entry), {"problem", "gaps", "qps",
+                                          "proof_sha256", "reference"})
+            self.assertEqual(entry["problem"], name)
+            self.assertEqual(entry["qps"], name + ".QPS")
+            self.assertTrue(all(isinstance(g, int) and not isinstance(g, bool)
+                                and g >= 1 for g in entry["gaps"]))
+            self.assertEqual(len(set(entry["gaps"])), len(entry["gaps"]))
+
     def test_reissue_flip_side_names_match_the_frozen_run(self):
         rows = self.load("maros_meszaros.csv")
         still = ("QSTAIR", "QBRANDY", "QPCSTAIR", "PRIMALC1", "BOYD2", "QSCSD8", "LISWET7")

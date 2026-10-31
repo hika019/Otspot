@@ -1,10 +1,11 @@
 """Self-tests for scripts/check_baseline_proofs.py (offline proof verifier).
 
-Each detection layer has both a pass lineage and a fail lineage built from a
-synthetic fixture (a real scalar QP, a real checker-saved witness). These fail
-lineages are the sentinel set: a verifier mutation that ignores tampering must
-turn one of them red (see /tmp/revert_proof_stage3b.sh for the measured
-revert-proof runs).
+Every detection path from the adversarial review (mu1-mu10, T3c) is pinned by
+a boundary fixture here, not by the ephemeral mutation script: a verifier
+mutation that ignores tampering must turn one of these red. The regenerate
+happy path for real LISWET proofs cannot run hermetically (the LISWET script
+needs its banded exact structure), so it is exercised by the CI data job and
+locally; the fixtures pin everything the audit job can see.
 """
 import contextlib
 import gzip
@@ -15,6 +16,7 @@ import lzma
 import sys
 import tempfile
 import unittest
+from fractions import Fraction
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,23 +38,12 @@ QUADOBJ
     X         X         1.0
 ENDATA
 """
-# regenerate 用の独立生成スクリプト。liswet_exact_certificate.py と同じ CLI
-# (--evidence-dir + 位置 QPS) を模擬し、同一問題から同一証跡を書く。
-GENERATOR = """import hashlib, sys
-from fractions import Fraction
-from pathlib import Path
-sys.path.insert(0, {scripts!r})
-import baseline_certificate as checker
-import highs_baseline_truth as truth
-argv = sys.argv[1:]
-evidence = argv[argv.index("--evidence-dir") + 1]
-qps = Path(argv[-1])
-enc = checker.ExactModel(truth.load_qps(qps)).check([Fraction(3)], [Fraction(3)], [])
-checker.save_evidence(Path(evidence) / (qps.stem + ".proof.json.gz"), enc, "-4.5",
-                      hashlib.sha256(qps.read_bytes()).hexdigest(),
-                      proposal={{"method": "synthetic"}})
-"""
-FAILING_GENERATOR = "import sys; sys.exit(3)\n"
+# mu3 probe (measured): 100000000.01 rounds UP to the next binary64; with the
+# bounds below the DECIMAL reading sits exactly on REFERENCE_TOLERANCE (pass,
+# fail is strict >) while the BINARY64 reading exceeds it (fail). A verifier
+# that only checks the decimal interpretation survives nothing here.
+MU3_VALUE = "100000000.01"
+MU3_BOUND = "99999990009999899/1000000000"
 
 
 class ProofVerifierTests(unittest.TestCase):
@@ -66,8 +57,8 @@ class ProofVerifierTests(unittest.TestCase):
         self.csv = self.root / "baseline.csv"
         self.data_dir = data
 
-        # A1: committed non-LISWET proof. L1: manifest-backed claim that the
-        # working generator can regenerate. U1: labelled pre-contract value.
+        # A1: committed non-LISWET proof. L1: manifest-backed claim.
+        # U1: labelled pre-contract value.
         qps = data / "A1.QPS"
         qps.write_text(FIXTURE_QPS)
         self.input_hash = hashlib.sha256(qps.read_bytes()).hexdigest()
@@ -77,12 +68,9 @@ class ProofVerifierTests(unittest.TestCase):
         checker.save_evidence(proof, enc, "-4.5", self.input_hash,
                               proposal={"method": "synthetic"})
         self.a1_stamp = verifier.normalized_hash(self.payload(proof))
-        self.gen = Path(tmp.name) / "gen.py"
-        self.gen.write_text(GENERATOR.format(scripts=str(ROOT / "scripts")))
         (data / "L1.QPS").write_text(FIXTURE_QPS)
         self.manifest = self.root / "proofs" / "liswet" / "manifest.json"
-        self.write_manifest(args=[sys.executable, str(self.gen), "--evidence-dir",
-                                  "{evidence_dir}", str(data / "L1.QPS")])
+        self.write_manifest_rows({"L1": self.l1_entry()})
         self.csv.write_text(
             "problem_name,optimal_obj,source\n"
             f"A1,-4.5,{self.claim('proofs/A1.proof.json.gz', self.a1_stamp, checker.checker_digest())}\n"
@@ -90,18 +78,36 @@ class ProofVerifierTests(unittest.TestCase):
             "U1,-4.5,claim=pre_contract_numeric_reference_not_certified;"
             "revalidation_psd_unknown_UNCERTIFIED\n")
 
+    # ---- fixture helpers ----------------------------------------------------
     def claim(self, proof, stamp, checker_sha):
         return (f"{verifier.ENCLOSURE_TAG};proof={proof};proof_sha256={stamp};"
                 f"input_sha256={self.input_hash};checker_sha256={checker_sha}")
 
-    def write_manifest(self, args, stamp=None):
-        self.manifest.write_text(json.dumps({"rows": {"L1": {
-            "gaps": [1], "args": args, "command": " ".join(args),
-            "proof_sha256": stamp or self.a1_stamp, "reference": "-4.5"}}}))
+    def l1_entry(self, **overrides):
+        entry = {"problem": "L1", "gaps": [], "qps": "L1.QPS",
+                 "proof_sha256": self.a1_stamp, "reference": "-4.5"}
+        entry.update(overrides)
+        return entry
+
+    def write_manifest_rows(self, rows):
+        self.manifest.write_text(json.dumps({"policy": "fixture", "rows": rows}))
 
     @staticmethod
     def payload(path):
         return json.loads(gzip.decompress(Path(path).read_bytes()).decode())
+
+    def forge_payload(self, mut, name="A1", proof_rel=None, value=None):
+        """Rewrite a proof payload, optionally re-stamping the CSV row (a
+        capable attacker recomputes the canonical hash too)."""
+        proof = self.root / "proofs" / (name + ".proof.json.gz")
+        payload = self.payload(proof)
+        mut(payload)
+        proof.write_bytes(gzip.compress(json.dumps(payload).encode()))
+        stamp = verifier.normalized_hash(payload)
+        rel = proof_rel or f"proofs/{name}.proof.json.gz"
+        self.edit_row(name, value=value,
+                      source=self.claim(rel, stamp, checker.checker_digest()))
+        return stamp
 
     def edit_row(self, name, value=None, source=None):
         lines = self.csv.read_text().splitlines()
@@ -121,21 +127,17 @@ class ProofVerifierTests(unittest.TestCase):
             code = verifier.main(argv + list(args))
         return code, buf.getvalue()
 
-    # ---- pass lineages ----------------------------------------------------
-    def test_clean_fixture_passes_with_explicit_liswet_skip(self):
+    # ---- pass lineages ------------------------------------------------------
+    def test_clean_fixture_passes_and_advertises_the_data_job(self):
         code, out = self.run_verifier()
         self.assertEqual(code, 0, out)
         self.assertIn("S: 3 pass, 0 fail", out)
         self.assertIn("A: 1 pass, 0 fail, 1 skip [LISWET proof not committed", out)
         self.assertIn("E: 1 pass, 0 fail, 1 skip", out)
+        # audit と data job の関係は出力で表明される (review P0 の code-level 表明)。
+        self.assertIn("note: C/E skips here are only acceptable in the hermetic", out)
         # D は情報専用: 旧ツリー stamp があっても exit code を汚さない。
         self.assertIn("1 against an older tree", out)
-
-    def test_regenerate_closes_liswet_layers(self):
-        code, out = self.run_verifier("--regenerate")
-        self.assertEqual(code, 0, out)
-        self.assertIn("A: 2 pass, 0 fail, 0 skip", out)
-        self.assertIn("E: 2 pass, 0 fail, 0 skip", out)
 
     def test_missing_data_dir_skips_layers_explicitly(self):
         code, out = self.run_verifier(data_dir=self.root / "absent")
@@ -143,19 +145,82 @@ class ProofVerifierTests(unittest.TestCase):
         self.assertIn("2 skip [LISWET proof not committed; use --regenerate; QPS data not available]", out)
         self.assertIn("QPS data or checker deps not available]", out)
 
-    # ---- fail lineages (each pins one detection path) ----------------------
+    def test_require_layers_fails_on_skips_and_passes_without_them(self):
+        code, out = self.run_verifier("--require-layers", "S")
+        self.assertEqual(code, 0, out)
+        code, out = self.run_verifier("--require-layers", "C")
+        self.assertEqual(code, 1, out)
+        self.assertIn("R C: required layer reported 1 skip(s)", out)
+        code, out = self.run_verifier("--require-layers", "D")
+        self.assertEqual(code, 1, out)
+        self.assertIn("informational and cannot be required", out)
+
+    # ---- manifest structure (mu1/mu2, P1-2 RCE closure) ----------------------
+    def test_manifest_non_object_json_fails_closed(self):
+        self.manifest.write_text("[1, 2]")
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("manifest must be an object with a rows object", out)
+
+    def test_manifest_entry_missing_skips_without_crash(self):
+        self.write_manifest_rows({})
+        code, out = self.run_verifier("--regenerate")
+        self.assertEqual(code, 1, out)
+        self.assertIn("no manifest entry", out)
+        self.assertIn("manifest entry missing or malformed", out)
+
+    def test_manifest_argv_keys_rejected(self):
+        # P1-2: free-form argv arrays were the RCE surface; the schema has no
+        # place for a command any more.
+        self.write_manifest_rows({"L1": {**self.l1_entry(), "command": "touch pwned"}})
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("manifest entry keys must be exactly", out)
+        self.assertFalse((self.root / "pwned").exists())
+
+    def test_manifest_qps_mismatch_and_template_rejected(self):
+        for bad in ("/etc/passwd", "L1{evidence_dir}.QPS", "Other.QPS"):
+            self.write_manifest_rows({"L1": self.l1_entry(qps=bad)})
+            code, out = self.run_verifier()
+            self.assertEqual(code, 1, f"{bad}: {out}")
+            self.assertIn("manifest entry malformed", out)
+
+    def test_manifest_extra_row_rejected(self):
+        self.write_manifest_rows({"L1": self.l1_entry(),
+                                  "L2": self.l1_entry(problem="L2", qps="L2.QPS")})
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("manifest rows not referenced by CSV", out)
+
+    def test_manifest_reference_and_hash_agreement(self):
+        self.write_manifest_rows({"L1": self.l1_entry(reference="-9")})
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("manifest reference", out)
+        self.write_manifest_rows({"L1": self.l1_entry(proof_sha256="b" * 64)})
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("manifest expected hash != CSV proof_sha256", out)
+
+    def test_gaps_structures_rejected(self):  # mu7
+        for bad in ([0], [-1], [1.5], ["1"], [True], [2, 2], {"g": 1}):
+            self.write_manifest_rows({"L1": self.l1_entry(gaps=bad)})
+            code, out = self.run_verifier()
+            self.assertEqual(code, 1, f"{bad!r}: {out}")
+            self.assertIn("manifest entry malformed", out)
+
+    def test_fake_gaps_regenerate_fails_closed(self):
+        # gaps は構造検証を通っても、実再生成が失敗すれば赤 (偽 gaps 防御)。
+        self.write_manifest_rows({"L1": self.l1_entry(gaps=[999])})
+        code, out = self.run_verifier("--regenerate")
+        self.assertEqual(code, 1, out)
+        self.assertIn("regeneration failed", out)
+
+    # ---- proof tampering (mu3-mu5, mu9, mu10, T3c) ---------------------------
     def test_forged_bounds_with_rehashed_proof_caught_by_replay(self):
-        # 最悪ケース: 攻撃者は lower を 1e-9 だけ広げ (B の予算内)、正規化
-        # ハッシュも CSV stamp も正規の手順で再計算してくる。ハッシュ系は
-        # 全部緑のまま通るが、証跡内 bounds が独立再計算と食い違う。
-        proof = self.root / "proofs" / "A1.proof.json.gz"
-        payload = self.payload(proof)
-        from fractions import Fraction
-        payload["lower"] = str(Fraction(payload["lower"]) - Fraction(1, 10**9))
-        proof.write_bytes(gzip.compress(json.dumps(payload).encode()))
-        self.edit_row("A1", source=self.claim("proofs/A1.proof.json.gz",
-                                              verifier.normalized_hash(payload),
-                                              checker.checker_digest()))
+        # 攻撃者は lower を 1e-9 広げ (B 予算内) 正規化ハッシュも再計算する。
+        self.forge_payload(lambda p: p.__setitem__(
+            "lower", str(Fraction(p["lower"]) - Fraction(1, 10**9))))
         code, out = self.run_verifier()
         self.assertEqual(code, 1, out)
         self.assertIn("A: 1 pass", out)
@@ -178,72 +243,20 @@ class ProofVerifierTests(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("A: 0 pass, 1 fail", out)
 
-    def test_value_outside_bounds_caught_by_layer_b(self):
-        # 証跡とハッシュは完全なまま、CSV の主張値だけを bounds 外へ。
-        self.edit_row("A1", value="100.0")
-        code, out = self.run_verifier()
-        self.assertEqual(code, 1, out)
-        self.assertIn("A: 1 pass", out)
-        self.assertIn("B: 0 pass, 1 fail", out)
-
-    def test_missing_proof_file_caught(self):
-        (self.root / "proofs" / "A1.proof.json.gz").unlink()
-        code, out = self.run_verifier()
-        self.assertEqual(code, 1, out)
-        self.assertIn("proof file missing", out)
-
-    def test_proof_checker_version_checked(self):
-        proof = self.root / "proofs" / "A1.proof.json.gz"
-        payload = self.payload(proof)
-        payload["checker"] = "totally-different-era"
-        proof.write_bytes(gzip.compress(json.dumps(payload).encode()))
-        self.edit_row("A1", source=self.claim("proofs/A1.proof.json.gz",
-                                              verifier.normalized_hash(payload),
-                                              checker.checker_digest()))
-        code, out = self.run_verifier()
-        self.assertEqual(code, 1, out)
-        self.assertIn("proof checker version", out)
-
-    def test_missing_manifest_caught(self):
-        self.manifest.unlink()
-        code, out = self.run_verifier()
-        self.assertEqual(code, 1, out)
-        self.assertIn("manifest missing for LISWET claims", out)
-
-    def test_manifest_hash_disagreement_caught(self):
-        self.write_manifest(args=["true"], stamp="b" * 64)
-        code, out = self.run_verifier()
-        self.assertEqual(code, 1, out)
-        self.assertIn("manifest expected hash != CSV proof_sha256", out)
-
-    def test_manifest_reference_drift_caught(self):
-        text = self.manifest.read_text().replace('"reference": "-4.5"', '"reference": "-9"')
-        self.manifest.write_text(text)
-        code, out = self.run_verifier()
-        self.assertEqual(code, 1, out)
-        self.assertIn("manifest reference", out)
-
-    def test_regeneration_failure_caught(self):
-        dead = Path(self.gen).with_name("dead.py")
-        dead.write_text(FAILING_GENERATOR)
-        self.write_manifest(args=[sys.executable, str(dead), "--evidence-dir",
-                                  "{evidence_dir}", str(self.data_dir / "L1.QPS")])
-        code, out = self.run_verifier("--regenerate")
-        self.assertEqual(code, 1, out)
-        self.assertIn("regeneration failed", out)
-
-    def test_uncertified_row_needs_claim_marker(self):
-        self.edit_row("U1", source="revalidation_psd_unknown_UNCERTIFIED")
-        code, out = self.run_verifier()
-        self.assertEqual(code, 1, out)
-        self.assertIn("uncertified row lacks the claim marker", out)
-
     def test_malformed_claim_keys_caught(self):
         row = ("A1,-4.5,exact_enclosure_v1;proof=proofs/A1.proof.json.gz;"
                f"input_sha256={self.input_hash};checker_sha256={'0' * 64}")
         lines = [row if line.startswith("A1,") else line
                  for line in self.csv.read_text().splitlines()]
         self.csv.write_text("\n".join(lines) + "\n")
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("neither a claim nor _UNCERTIFIED", out)
+
+    def test_extra_claim_key_rejected(self):  # mu6
+        self.edit_row("A1", source=self.claim("proofs/A1.proof.json.gz",
+                                              self.a1_stamp, checker.checker_digest())
+                      + ";evil=1")
         code, out = self.run_verifier()
         self.assertEqual(code, 1, out)
         self.assertIn("neither a claim nor _UNCERTIFIED", out)
@@ -255,24 +268,118 @@ class ProofVerifierTests(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("non-hex64 claim digests", out)
 
-    def test_proof_path_escape_caught(self):
-        self.edit_row("A1", source=self.claim("../outside.proof.json.gz",
-                                              self.a1_stamp, checker.checker_digest()))
+    def test_proof_path_escape_and_sibling_caught(self):  # mu8
+        for bad in ("../outside.proof.json.gz", "other/A1.proof.json.gz"):
+            self.edit_row("A1", source=self.claim(bad, self.a1_stamp,
+                                                   checker.checker_digest()))
+            code, out = self.run_verifier()
+            self.assertEqual(code, 1, f"{bad}: {out}")
+            self.assertIn("proof path escapes proofs/", out)
+
+    def test_binary64_reading_caught(self):  # mu3
+        # decimal 解釈はちょうど tol 上 (pass)、binary64 解釈は超える (fail)。
+        # bounds_error が両方の読みを検証していることの境界 pin。
+        self.forge_payload(lambda p: p.update({"lower": MU3_BOUND, "upper": MU3_BOUND}),
+                           value=MU3_VALUE)
         code, out = self.run_verifier()
         self.assertEqual(code, 1, out)
-        self.assertIn("proof path escapes proofs/", out)
+        self.assertIn("B: 0 pass, 1 fail", out)
 
-    def test_tampered_input_file_caught_by_layer_c(self):
-        (self.data_dir / "A1.QPS").write_text(FIXTURE_QPS + "X\n")
+    def test_budget_ordering_boundaries(self):  # mu4
+        # ×100 緩和では通らない magnitude 境界: 1.1e-7 絶対リテラルで赤、
+        # 9.9e-8 で緑 (bounds=[0,0]、value が誤差そのもの)。緑側も bounds を
+        # 偽装しているので replay は落ちる — B 層単体の境界を固定する。
+        self.forge_payload(lambda p: p.update({"lower": "0", "upper": "0"}),
+                           value="1.1e-7")
         code, out = self.run_verifier()
         self.assertEqual(code, 1, out)
-        self.assertIn("C: 0 pass, 1 fail", out)
-        self.assertIn("QPS sha256 != CSV input_sha256", out)
+        self.assertIn("value outside bounds budget", out)
+        self.forge_payload(lambda p: p.update({"lower": "0", "upper": "0"}),
+                           value="9.9e-8")
+        code, out = self.run_verifier()
+        self.assertIn("B: 1 pass, 0 fail", out)
 
-    # ---- codec dispatch (committed entities may be lzma) -------------------
+    def test_upper_endpoint_budget_checked(self):  # mu10
+        # lower だけ見れば green になる非対称 bounds (|r|=1 なので誤差は
+        # 距離/2)。upper 端の距離 2.2e-7 が予算超で赤。
+        self.forge_payload(lambda p: p.update(
+            {"lower": "19999999/20000000", "upper": "50000011/50000000"}), value="1.0")
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("B: 0 pass, 1 fail", out)
+        # lower 距離 5e-8 / upper 距離 8e-8 なら両端 green。
+        self.forge_payload(lambda p: p.update(
+            {"lower": "19999999/20000000", "upper": "50000004/50000000"}), value="1.0")
+        code, out = self.run_verifier()
+        self.assertIn("B: 1 pass, 0 fail", out)
+
+    def test_payload_input_hash_cross_checked(self):  # mu5
+        # 攻撃者が CSV の proof_sha256 まで再計算しても (A green)、proof 内の
+        # input_sha256 と CSV input_sha256 の突合 (C) で必ず赤くなる。
+        self.forge_payload(lambda p: p.__setitem__("input_sha256", "c" * 64))
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("A: 1 pass", out)
+        self.assertIn("proof input hash != CSV input_sha256", out)
+
+    def test_forged_reference_caught_by_replay(self):  # mu9
+        self.forge_payload(lambda p: p.__setitem__("reference", "999"))
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("A: 1 pass", out)
+        self.assertIn("B: 1 pass", out)
+        self.assertIn("replay rejected", out)
+
+    def test_forged_minimal_proof_hits_replay(self):  # T3c 回帰
+        # 攻撃レビュー T3c: 簡略区間 + 空 witness の偽 proof を、全ハッシュを
+        # 自己整合させてコミットしても、data ありでは replay が赤くする。
+        name = "F1"
+        qps = self.data_dir / "F1.QPS"
+        qps.write_text(FIXTURE_QPS)
+        h = hashlib.sha256(qps.read_bytes()).hexdigest()
+        payload = {"checker": checker.CHECKER_VERSION, "input_sha256": h,
+                   "model_sha256": "0" * 64, "reference": "-4.5",
+                   "lower": "-9/2", "upper": "-9/2", "relative_error": "0",
+                   "primal": [], "linearization": [], "dual": [],
+                   "checker_sha256": checker.checker_digest(), "proposal": None}
+        proof = self.root / "proofs" / "F1.proof.json.gz"
+        proof.write_bytes(gzip.compress(json.dumps(payload).encode()))
+        lines = self.csv.read_text().splitlines()
+        lines.append(f"{name},-4.5,"
+                     + f"{verifier.ENCLOSURE_TAG};proof=proofs/{name}.proof.json.gz;"
+                     + f"proof_sha256={verifier.normalized_hash(payload)};"
+                     + f"input_sha256={h};checker_sha256={checker.checker_digest()}")
+        self.csv.write_text("\n".join(lines) + "\n")
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        # A/B/C は通る (ハッシュ自己整合) — 検出は replay 依存であることを固定。
+        self.assertIn("A: 2 pass", out)
+        self.assertIn("B: 2 pass", out)
+        self.assertIn("C: 2 pass", out)
+        self.assertIn("E: 1 pass, 1 fail", out)
+        self.assertIn("replay rejected", out)
+
+    def test_non_object_proof_json_caught(self):  # P3
+        proof = self.root / "proofs" / "A1.proof.json.gz"
+        proof.write_bytes(gzip.compress(b"[1, 2]"))
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("proof unreadable", out)
+
+    def test_missing_proof_file_caught(self):
+        (self.root / "proofs" / "A1.proof.json.gz").unlink()
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("proof file missing", out)
+
+    def test_proof_checker_version_checked(self):
+        self.forge_payload(lambda p: p.__setitem__("checker", "totally-different-era"))
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("proof checker version", out)
+
+    # ---- codec dispatch (committed entities may be lzma) --------------------
     def test_lzma_codec_roundtrip_keeps_hash(self):
-        # proof_sha256 は展開後内容のハッシュ。可逆な codec 差替は CSV の
-        # proof= 参照だけ追随し、stamp も検証結果も不変であること。
         gz = self.root / "proofs" / "A1.proof.json.gz"
         lz = self.root / "proofs" / "A1.proof.json.lzma"
         lz.write_bytes(lzma.compress(gzip.decompress(gz.read_bytes()), preset=6))
@@ -303,6 +410,43 @@ class ProofVerifierTests(unittest.TestCase):
         code, out = self.run_verifier()
         self.assertEqual(code, 1, out)
         self.assertIn("unsupported proof codec", out)
+
+    # ---- CSV structure (P2) ---------------------------------------------------
+    def test_uncertified_row_needs_claim_marker(self):
+        self.edit_row("U1", source="revalidation_psd_unknown_UNCERTIFIED")
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("uncertified row lacks the claim marker", out)
+
+    def test_duplicate_problem_name_caught(self):
+        dup = ('A1,-4.5,' + self.claim("proofs/A1.proof.json.gz", self.a1_stamp,
+                                        checker.checker_digest()))
+        text = self.csv.read_text().rstrip("\n")
+        self.csv.write_text(text + "\n" + dup + "\n")
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("duplicate problem_name", out)
+
+    def test_header_count_claims_pin_down_the_rows(self):
+        good = ("# Certified (2 of 3)\n# Uncertified (1 of 3)\n"
+                "#   Breakdown: 1 revalidation_psd_unknown (fixture)\n")
+        text = self.csv.read_text()
+        self.csv.write_text(good + text)
+        code, out = self.run_verifier()
+        self.assertEqual(code, 0, out)
+        bad = ("# Certified (9 of 3)\n# Uncertified (1 of 3)\n"
+               "#   Breakdown: 2 revalidation_psd_unknown (fixture)\n")
+        self.csv.write_text(bad + text)
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("header:", out)
+
+    def test_tampered_input_file_caught_by_layer_c(self):
+        (self.data_dir / "A1.QPS").write_text(FIXTURE_QPS + "X\n")
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("C: 0 pass, 1 fail", out)
+        self.assertIn("QPS sha256 != CSV input_sha256", out)
 
 
 if __name__ == "__main__":
