@@ -161,7 +161,12 @@ current baseline `LISWET7` reaches Optimal and agrees with the certified referen
 Under the certificate contract the CSV now carries 88 of the 138 objective values as
 machine-checkable claims (12 LISWET included, via a regeneration manifest); the other
 50 are explicitly labelled pre-contract reference values, not certified optima.
-Verify any checkout with `python3 scripts/check_baseline_proofs.py`.
+Verify any checkout with `python3 scripts/check_baseline_proofs.py`
+(hermetic layers; C/E skip by design without data). Where the Maros-Meszaros
+QPS data is present, run `python3 scripts/check_baseline_proofs.py --regenerate
+--require-layers S,A,B,C,E` so the 12 LISWET claims are actually regenerated
+and every claim is replayed — the CI `baseline proof verification` job does
+exactly this.
 
 QCQP (QPLIB, single-shot IPM via `bench_qplib` — does not exercise the `--global` spatial B&B path): `not-supported` cases need a finite bound on every variable for the McCormick relaxation and have at least one unbounded variable; `skip` cases have integer variables or unsupported constraint types. Both categories are eps-independent.
 

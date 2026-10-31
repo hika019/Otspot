@@ -63,12 +63,17 @@ Uncertified rows are labelled, not dropped; see Evidence storage below.
 Committed proof entities live in a `proofs/` subdirectory beside the CSV. Exact
 rational witnesses are megabyte-scale for the LISWET family, so the 12 LISWET
 proofs are not committed: their `proof=` resolves to
-`proofs/liswet/manifest.json`, which records per-row gaps, the regeneration
-command, and the expected `proof_sha256`. A certified row's `proof=` therefore
-resolves either to a committed proof entity (stored as `.lzma`; the storage
-codec is free because `proof_sha256` is defined over expanded content, and the
-checker's native writer produces gzip) or to that manifest, and never leaves
-`proofs/`.
+`proofs/liswet/manifest.json`, whose per-row entries are structured data only —
+`problem`, `gaps`, `qps` (which must equal `<problem>.QPS`), `proof_sha256`,
+`reference`, with any other key a verifier fail. An earlier schema carried a
+free-form regeneration command; under `--regenerate` that was arbitrary-argv
+execution of committed data, so it was removed: the verifier builds argv itself
+(`sys.executable` + `scripts/liswet_exact_certificate.py` + manifest gaps + the
+QPS file under `--data-dir`) and executes nothing else. A certified row's
+`proof=` therefore resolves either to a committed proof entity (stored as
+`.lzma`; the storage codec is free because `proof_sha256` is defined over
+expanded content, and the checker's native writer produces gzip) or to that
+manifest, and never leaves `proofs/`.
 
 `proof_sha256` is defined over the canonical expanded content: SHA-256 of
 `json.dumps(payload, sort_keys=True, separators=(',',':'), ensure_ascii=False).encode('utf-8')`.
@@ -79,14 +84,25 @@ generated twice during the 2026-10-31 reissue and the canonical hashes were
 compared (12/12 identical while the gzip bytes differed).
 
 `scripts/check_baseline_proofs.py` is the verifier the format demands. Layer S
-(shape, manifest agreement) and layer B (committed bounds against the CSV
-value) run hermetically anywhere; layer A (canonical hash) additionally covers
-the LISWET rows under `--regenerate`, which runs the manifest command; layer C
-(input file hash) and layer E (`replay_evidence` recomputation of the
-enclosure from the witness) run wherever the QPS data is present. Skips are
-reported per layer and never counted as checks; any fail exits 1. Layer E is
-what a hash-only review cannot defeat: bounds forged into a proof fail
-independent recomputation even when every hash is self-consistent.
+(shape: row structure, duplicate names, header count claims, claim keys, proof
+paths, exact manifest schema and set agreement with the CSV's LISWET rows) and
+layer B (committed bounds against the CSV value, over both decimal and binary64
+readings) run hermetically anywhere; layer A (canonical hash) additionally
+covers the LISWET rows under `--regenerate`; layer C (input file hash against
+the CSV and against the hash stored inside the proof) and layer E
+(`replay_evidence` recomputation of the enclosure from the witness) run where
+the QPS data is present. Skips are reported per layer and never counted as
+checks; `--require-layers L,...` fails the run if a required layer skipped
+anything. CI placement: the audit job has no QPS data and runs
+`--require-layers S` — its C/E skips are by design. The `baseline proof
+verification` job in `audit.yml` downloads the ci-subset and must run
+`--regenerate --require-layers S,A,B,C,E`: that job is where the 12 LISWET
+claims are actually content-checked and where forged proofs hit layer E, so if
+it is ever removed or unrequired, the audit job's green is not a certificate
+integrity claim. Layer E is what a hash-only review cannot defeat: bounds
+forged into a proof fail independent recomputation even when every hash is
+self-consistent (the audit job alone cannot see this; see the layer-C attack
+reproduced in `tests/test_check_baseline_proofs.py`).
 
 Two digest honesty notes. The `checker_sha256` stamped in a committed row
 records the checker tree the claim was last reissued and verified against;
@@ -94,10 +110,12 @@ proof payloads separately embed the digest of the code that generated them.
 For the 76 non-LISWET proofs reissued on 2026-10-31 these differ (the frozen
 run predates the framing-v2 digest scheme; verification semantics did not
 change). The reissue stamps the current digest and the payload keeps the
-generation-time value; the verifier reports such drift as information without
-failing, because stale provenance calls for revalidation, not for deleting
-proofs. A payload whose content hash or contract version disagrees with the
-claim still fails layer A.
+generation-time value; the verifier reports such drift as information (layer D)
+without failing, because stale provenance calls for revalidation, not for
+deleting proofs. Layer D is a report, not a guard: the real defenses against
+forgery are the checker's adversarial test suite plus verifier layer E, and
+neither depends on D. A payload whose content hash or contract version
+disagrees with the claim still fails layer A.
 
 Uncertified rows keep their value for benchmark regression but must say what
 they are:
@@ -121,20 +139,25 @@ Known gaps a reader must not mistake for coverage:
    canonical model" statement above; it is latent — a sweep of all 188
    Maros-Meszaros QPS files found no occurrence, and no certified value
    depends on it.
-3. Revert demonstrations for the Python-side sentinels (R1-R9b, R10-R13, and
-   the stage-3b verifier mutations) live only in the ephemeral temporary area
+3. Revert demonstrations for the Python-side sentinels (R1-R9b, R10-R13, the
+   stage-3b verifier mutations, and the stage-3c structured-manifest / layer
+   requirement mutations) live only in the ephemeral temporary area
    outside this repository
    (`/tmp/revert_proof.sh`, `/tmp/revert_proof_p21b.sh`,
-   `/tmp/revert_proof_stage3b.sh` and their
-   `/tmp/revert_case*.log`). A permanent CI job replaying them is a separate
-   change.
+   `/tmp/revert_proof_stage3b.sh`, `/tmp/revert_proof_stage3c.sh` and their
+   `/tmp/revert_case*.log`). The verifier detection paths these mutations
+   targeted are pinned permanently by boundary fixtures in
+   `tests/test_check_baseline_proofs.py`; a permanent CI job replaying the
+   mutation scripts themselves is a separate change.
 4. Cache-generation precision: `ci.yml` uses bench-data cache keys up to `v3`
    and `test-heavy.yml` a separate keyspace up to `v4`. A blanket "CI cache
    v4" is imprecise; `v4` names only the heavy-side generation.
 5. The storage policy's cost: in default verification mode (no QPS data, no
    `--regenerate`) the 12 LISWET claims contribute skips, not checks, to
-   layers A/B/C/E. A manifest agreement pins the expected hash and the
-   regeneration command, not the proof content; content verification of those
+   layers A/B/C/E. A manifest agreement pins the expected hash, the gaps, and
+   the QPS file name, not the proof content; content verification of those
    rows requires `--regenerate` together with the data and cert-suite
-   dependencies. Committed non-LISWET proofs are fully checked up to replay
-   wherever layer C/E can run.
+   dependencies — which the `baseline proof verification` CI job runs on every
+   push and PR (locally measured 2m01s with the ci-subset warm). Committed
+   non-LISWET proofs are fully checked up to replay wherever layer C/E can
+   run.

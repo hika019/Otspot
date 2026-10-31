@@ -51,8 +51,54 @@ jobs:
           python3 tests/test_certificate_contract.py
           python3 tests/test_certificate_contract_adversarial.py
           python3 tests/test_check_baseline_proofs.py
-          # committed 証跡のオフライン検証 (hermetic 層; data が無い環境では C/E を明示 SKIP)。
-          python3 scripts/check_baseline_proofs.py
+          # committed 証跡のオフライン検証 (hermetic 層のみ)。この job には QPS data
+          # が無いので C/E は明示 SKIP — S 層 (行構造・claim 書式・manifest 構造)
+          # の zero-skip を要求し、C/E skip が想定であることをコードで表明する。
+          # 認証の完全性は下の baseline-proof job (data + --regenerate + 全層必須)
+          # が担保する。この 2 重構造が無い状態で C/E skip を許すと偽証跡が
+          # 緑を通る (攻撃レビュー P0)。
+          python3 scripts/check_baseline_proofs.py --require-layers S
+
+  baseline-proof:
+    name: baseline proof verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v6
+        id: cache
+        with:
+          path: data/
+          # ci.yml test-integration と同一の data cache (key 変更は両側で同時に行う)。
+          key: bench-data-v3
+          restore-keys: |
+            bench-data-
+      # cache が checkout より後に data/ を上書きすると、古い CSV/proofs で検証する
+      # 攻撃面になる。git 追跡下の baseline 一式を必ず HEAD 版に戻す (ci.yml 追随)。
+      - name: Restore git-tracked baselines (cache 上書き対策)
+        run: git checkout HEAD -- data/baseline_objectives/
+      # eMudhra/emSign CA 事故: pip < 26.2.2 は vendored certifi に脆弱な
+      # ルート証明書を保持するため、pip と certifi を修正版以上へ引き上げる。
+      - name: Bootstrap secure pip and certifi (eMudhra CA incident)
+        run: python -m pip install --upgrade 'pip>=26.2.2' 'certifi>=2026.10.19'
+      # numpy/scipy/cvxpy は ci-subset の gen スクリプト、highspy は層 E の replay
+      # (highs_baseline_truth) と LISWET 再生成が必要。cert suite と同一 pins。
+      - name: Install python deps (data generation + replay layers)
+        run: python -m pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*' 'highspy==1.14.0' 'certifi>=2026.10.19'
+      - name: Build emps decoder (Netlib LP data 変換用)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash scripts/ensure_emps.sh
+      # maros_meszaros は ci-subset に含まれる (専用 download script + sha256
+      # manifest 検証。bash scripts/download_all_bench_data.sh --ci-subset --check
+      # で [ok] を実測済み)。
+      - name: Download CI subset (~1.2 GiB)
+        run: bash scripts/download_all_bench_data.sh --ci-subset
+      # data があるこの job だけが全層を実行できる: C (入力 hash) / E (witness
+      # replay) + LISWET 12 件の実再生成。skip を 1 つでも出したら red。
+      - name: Verify all proof claims up to replay, including LISWET regeneration
+        run: python3 scripts/check_baseline_proofs.py --regenerate --require-layers S,A,B,C,E
 
   comment-hygiene:
     name: comment-hygiene
