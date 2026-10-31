@@ -84,25 +84,35 @@ generated twice during the 2026-10-31 reissue and the canonical hashes were
 compared (12/12 identical while the gzip bytes differed).
 
 `scripts/check_baseline_proofs.py` is the verifier the format demands. Layer S
-(shape: row structure, duplicate names, header count claims, claim keys, proof
-paths, exact manifest schema and set agreement with the CSV's LISWET rows) and
-layer B (committed bounds against the CSV value, over both decimal and binary64
+(shape: safe `problem_name` stems (writer-side `SAFE_NAME` plus no path
+separators and no leading `-`, because names reach file paths and one argv
+slot), set agreement between CSV rows and the pinned QPS stems in
+`scripts/maros_meszaros_qps.sha256` — extra rows, dropped rows and renames are
+all red —, duplicate names, header count claims, claim keys, proof paths,
+exact manifest schema and set agreement with the CSV's LISWET rows) and layer
+B (committed bounds against the CSV value, over both decimal and binary64
 readings) run hermetically anywhere; layer A (canonical hash) additionally
 covers the LISWET rows under `--regenerate`; layer C (input file hash against
 the CSV and against the hash stored inside the proof) and layer E
 (`replay_evidence` recomputation of the enclosure from the witness) run where
 the QPS data is present. Skips are reported per layer and never counted as
 checks; `--require-layers L,...` fails the run if a required layer skipped
-anything. CI placement: the audit job has no QPS data and runs
-`--require-layers S` — its C/E skips are by design. The `baseline proof
-verification` job in `audit.yml` downloads the ci-subset and must run
-`--regenerate --require-layers S,A,B,C,E`: that job is where the 12 LISWET
-claims are actually content-checked and where forged proofs hit layer E, so if
-it is ever removed or unrequired, the audit job's green is not a certificate
-integrity claim. Layer E is what a hash-only review cannot defeat: bounds
-forged into a proof fail independent recomputation even when every hash is
-self-consistent (the audit job alone cannot see this; see the layer-C attack
-reproduced in `tests/test_check_baseline_proofs.py`).
+anything or produced zero passing checks (a guard that never ran is not a
+guard), and `--min-certified N` fails it if fewer than N certified claims
+exist. CI placement: the audit job has no QPS data and runs
+`--require-layers S --min-certified 88` — its C/E skips are by design. The
+`baseline proof verification` job in `audit.yml` downloads the ci-subset,
+cross-checks CSV rows against data files with `check_data_coverage.py`, and
+must run `--regenerate --require-layers S,A,B,C,E --min-certified 88`: that
+job is where the 12 LISWET claims are actually content-checked and where
+forged proofs hit layer E, so if it is ever removed or unrequired, the audit
+job's green is not a certificate integrity claim. The floor 88 is intentionally
+hardcoded in both CI invocations and double-managed beside the 88/138 figures
+in the README: inventory only grows through revalidation effort, and any change
+that lowers the floor must pass PR review. Layer E is what a hash-only review
+cannot defeat: bounds forged into a proof fail independent recomputation even
+when every hash is self-consistent (the audit job alone cannot see this; see
+the layer-C attack reproduced in `tests/test_check_baseline_proofs.py`).
 
 Two digest honesty notes. The `checker_sha256` stamped in a committed row
 records the checker tree the claim was last reissued and verified against;

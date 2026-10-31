@@ -52,12 +52,18 @@ jobs:
           python3 tests/test_certificate_contract_adversarial.py
           python3 tests/test_check_baseline_proofs.py
           # committed 証跡のオフライン検証 (hermetic 層のみ)。この job には QPS data
-          # が無いので C/E は明示 SKIP — S 層 (行構造・claim 書式・manifest 構造)
-          # の zero-skip を要求し、C/E skip が想定であることをコードで表明する。
+          # が無いので C/E は明示 SKIP — S 層 (行構造・safe name・pinned stem 集合・
+          # claim 書式・manifest 構造) の zero-skip/zero-pass を要求し、C/E skip が
+          # 想定であることをコードで表明する。
           # 認証の完全性は下の baseline-proof job (data + --regenerate + 全層必須)
           # が担保する。この 2 重構造が無い状態で C/E skip を許すと偽証跡が
           # 緑を通る (攻撃レビュー P0)。
-          python3 scripts/check_baseline_proofs.py --require-layers S
+          # --min-certified 88: 全行 UNCERTIFIED 反転による「認証在庫の無言
+          # ゼロ化」を hermetic 層でも赤くする (回帰攻撃 発見2)。88 という下限は
+          # README/契約文書の 88/138 記述と二重管理になる — 再認証 effort で
+          # 件数は増える方向にしか変わらないため許容し、下限を減らす変更は
+          # PR レビュー対象として CI 側で明示管理する。
+          python3 scripts/check_baseline_proofs.py --require-layers S --min-certified 88
 
   baseline-proof:
     name: baseline proof verification
@@ -95,10 +101,16 @@ jobs:
       # で [ok] を実測済み)。
       - name: Download CI subset (~1.2 GiB)
         run: bash scripts/download_all_bench_data.sh --ci-subset
+      # CSV 行集合と data 実体の突合 (検証器の pinned stem 集合 pin とは独立の
+      # 二重防御。maros_meszaros は CSV 138 = dir 138 をローカル実測済み)。
+      - name: Baseline CSV vs data coverage cross-check
+        run: python3 scripts/check_data_coverage.py --repo-root .
       # data があるこの job だけが全層を実行できる: C (入力 hash) / E (witness
-      # replay) + LISWET 12 件の実再生成。skip を 1 つでも出したら red。
+      # replay) + LISWET 12 件の実再生成。skip・zero-pass を 1 つでも出したら red。
+      # --min-certified 88 は inventory ゼロ化の下限ゲート (audit 側と同趣旨、
+      # 下限変更は PR レビュー対象)。
       - name: Verify all proof claims up to replay, including LISWET regeneration
-        run: python3 scripts/check_baseline_proofs.py --regenerate --require-layers S,A,B,C,E
+        run: python3 scripts/check_baseline_proofs.py --regenerate --require-layers S,A,B,C,E --min-certified 88
 
   comment-hygiene:
     name: comment-hygiene
