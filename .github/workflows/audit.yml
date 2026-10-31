@@ -102,9 +102,17 @@ jobs:
       - name: Download CI subset (~1.2 GiB)
         run: bash scripts/download_all_bench_data.sh --ci-subset
       # CSV 行集合と data 実体の突合 (検証器の pinned stem 集合 pin とは独立の
-      # 二重防御。maros_meszaros は CSV 138 = dir 138 をローカル実測済み)。
-      - name: Baseline CSV vs data coverage cross-check
-        run: python3 scripts/check_data_coverage.py --repo-root .
+      # 二重防御)。maros 限定: ci-subset には lp_problems 系 (infeas/unbounded
+      # 等) の全集合が含まれず、フル突合は CSV_GAP で赤になる (CI 着弾 2026-10、
+      # --dataset 無しで 41s fail 実測)。maros 以外の coverage の検証場所は
+      # `bash scripts/download_all_bench_data.sh --check` (full 取得モードのみ)
+      # で、CI ジョブは現時点でどこも走らせない (full-data 環境限定ゲート)。
+      # なお本機の main repo フルデータでも当該フル mode は rc=1 — lp 系 dir が
+      # .QPS へ移行済みなことと check_data_coverage の lp 拡張子想定
+      # (.mps/.lp/.SIF) の不一致による既存論点 (CI 非実行のため未surface、
+      # lp 移行追随は本コミットの範囲外)。
+      - name: Baseline CSV vs data coverage cross-check (maros)
+        run: python3 scripts/check_data_coverage.py --repo-root . --dataset maros_meszaros
       # data があるこの job だけが全層を実行できる: C (入力 hash) / E (witness
       # replay) + LISWET 12 件の実再生成。skip・zero-pass を 1 つでも出したら red。
       # --min-certified 88 は inventory ゼロ化の下限ゲート (audit 側と同趣旨、
