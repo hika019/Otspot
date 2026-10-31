@@ -11,7 +11,7 @@
 //!
 //! no-op 実証 (memory `feedback_sentinel_must_fail_under_noop`):
 //! `solver_par_from_threads` を `|_| Par::Seq` 固定化して
-//! `cargo nextest run --lib linalg::par_sentinel`
+//! `cargo nextest run --release -E 'binary(linalg_par_sentinel)'`
 //! を再実行すると par_thread_count が 1 になり `assert_eq!(..., 8)` が FAIL する
 //! (配線が単一 helper 経由のため、helper を no-op に戻すと sentinel が
 //! 自動的に壊れることが保証される)。

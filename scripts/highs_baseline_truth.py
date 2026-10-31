@@ -1,71 +1,38 @@
 #!/usr/bin/env python3
-"""Maros-Meszaros QPS 問題の baseline CSV 参照値を、検算付きで出力する。
+"""Generate baseline references for the shared binary64 QPS model.
 
-QPS を独立にパースした問題
-    min c0 + c'x + 1/2 x'Qx   s.t.  L <= Ax <= U,  l <= x <= u
-を HiGHS に直接渡して解き (HiGHS の MPS reader は使わない; to_highs_model 参照)、
-その解 (x, y) から主実行可能性と弱双対下界を独立に再計算して検算する。HiGHS の解が
-検算を通らない (QP solver の Solve error・時間切れ・dual 精度不足) 問題は Clarabel
-(行列スケーリングあり、なしの順) で解き直し、同じ検算にかける。どのソルバの解も検算を通らない問題は非ゼロ終了する。
-参照値の正しさはソルバの status でなく検算 (certify) が担保する。
+Numerical solvers and exact recovery produce untrusted candidates.
+baseline_certificate checks PSD, primal feasibility and a weak-duality
+lower bound in rational arithmetic. A reference is accepted only when
+its serialized decimal and binary64 interpretation lie within 1e-7
+relative error of every value in that enclosure. Exact KKT is sufficient,
+but not necessary. Residual and sensitivity scores only rank unverified
+candidates; they never certify an upper bound.
 
-目的定数 c0 は目的行 RHS の符号反転 (c0 = -RHS; Gurobi MPS 仕様・HiGHS・CPLEX と同じ)。
-対応範囲: NAME/ROWS/COLUMNS/RHS/RANGES/BOUNDS(UP/LO/FX/FR/MI/PL)/QUADOBJ/ENDATA の
-free format (RHS/RANGES/BOUNDS の set 名省略も可) と、free format で読めない場合の
-fixed format。OBJSENSE、MARKER (整数変数)、2 本目以降の N 行への非ゼロは ValueError
-で拒否する (黙って誤値を出さない)。
-
-検算: active set で KKT を解き直した候補 (polish) も含め、
-  - 弱双対 (dual_bound): 符号を射影した y と任意の線形化点 xh で
-        f* >= c0 + sum_i h_i(y_i) - 1/2 xh'Q xh + sum_j min_{lo_j<=x_j<=up_j} g_j x_j,
-        g = c + Q xh - A'y
-    (h_i(y) = y L_i (y>0) / y U_i (y<0); Q の凸性 1/2 x'Qx >= 1/2 xh'Q xh + (Q xh)'(x-xh))。
-    g を丸め誤差上界つきの区間で、各項と和を -inf 方向へ丸めて評価するので、得る値は
-    浮動小数の丸めを含めて最適値の下界になる。g_j が無限側の境界を要求する成分があれば
-    下界は -inf で、_repair が xh と y を動かして消す (収束しなければ線形化 LP の双対から
-    やり直す; _linearized_dual)。消せなければ検算失敗 (その問題は UNCERTIFIED とする)。
-    自由変数 (FR) を含む問題で _repair が -inf のままなら、対角 Q は有理数で縮約費用を
-    厳密に 0 にする FR 証明 (_fr_certificate)、非対角 Q は厳密 KKT 証明
-    (_kkt_certificate) を追加で試す。どちらも下界の妥当性は同じ弱双対式で、厳密な
-    有理数評価により浮動小数の区間では作れない [0, 0] の縮約費用を与える。
-  - 相対不確かさ |p - d|/(1+|p|) + 丸め影響 + 主違反影響 <= UNCERTAINTY_TOL、
-    相対主実行不能度 <= PRIMAL_INF_TOL、ソルバ報告値と自前再計算の一致。
-    加えて参照値 p を「最適値の上界」として主張するには、原候補が有理数で厳密に
-    実行可能である必要がある (一次感度 |y|×違反量 は境界にならない; y=0・違
-    反 1e-8・真の感度 1e8 の例で 0 を誤認証できる)。(_exact_primal_optimum()) が
-    主実行可能性と f(xh) == d (厳密 KKT) を立証した候補 (primal=True) に限って
-    p を厳密な最適値に置き、他の候補は UNCERTIFIED に倒す。
-  - Q の半正定値性: load_qps が非ゼロ非対角グラフのブロックごとに確認する。負固有値が
-    丸め許容を超える場合と、ブロックが大きすぎて判定できない場合は検算不能
-    (d = -inf) とし、その問題は UNCERTIFIED とする (非凸 QP は対象外)。負の対角
-    成分は丸め誤差を含まないデータ値そのものなので許容差なしに即非 PSD。
-
-Usage:
-  python3 scripts/highs_baseline_truth.py data/maros_meszaros/LISWET7.QPS ...
-  python3 scripts/highs_baseline_truth.py --csv --time-limit 1200 data/maros_meszaros/*.QPS
-
-診断出力 (1 ソルバ試行 1 行): problem,solver,PASS|FAIL,status= reported= p= d= uncertainty= ...
---csv: 検算を通った問題だけ、参照値 p (検算した候補の主目的値) の baseline CSV 行
-  `NAME,<mantissa>e<exp>,<solver>_<ver>_<status>_<date>` を stdout に出し、診断行は
-  stderr へ回す。
+The objective constant is -RHS(objective). Supported QPS sections are
+NAME/ROWS/COLUMNS/RHS/RANGES/BOUNDS/QUADOBJ/ENDATA, in free or fixed format.
 """
 import argparse
 import collections
 import datetime
 import heapq
+import hashlib
 import math
 import os
 import sys
 import time
 import warnings
 from fractions import Fraction
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from baseline_certificate import (ExactModel, columns, prove_psd, reference_error,
+                                  REFERENCE_TOLERANCE, save_evidence)
 
 import highspy
 import numpy as np
 import scipy.sparse as sp
-from scipy.linalg import eigh
 from scipy.optimize import linprog
-from scipy.sparse import csgraph
 from scipy.sparse.linalg import lsqr, spsolve
 
 # baseline 比較の許容 eps (bench 基準, CLAUDE.md: eps=1e-6)。参照値の誤差は比較側の
@@ -94,11 +61,6 @@ LSQR_ITER_LIMIT = 200_000
 # 候補は検算が通らない可能性があるが、下界の妥当性は変わらない (失敗側に倒れる)。
 REPAIR_LSQR_ITER_LIMIT = 20_000
 REPAIR_TIME_BUDGET = 60.0
-# Q の PSD 判定。丸めで生じる微小な負固有値を許す相対許容 (行列の 1-ノルム基準)。
-# これを超える負固有値がある Q は非凸として検算しない。ブロックが大きすぎて判定
-# できない場合も検算しない (fail-safe)。
-PSD_REL_TOL = 1e-10
-PSD_DENSE_MAX = 8_000
 # IEEE 754 binary64 の単位丸め u = 2^-53 (丸め誤差上界 gamma_k の基準)。
 UNIT_ROUNDOFF = np.finfo(float).eps / 2
 # 積が subnormal へ下位桁あふれしたときの 1 演算あたりの絶対誤差上界 (subnormal の間隔)。
@@ -494,56 +456,13 @@ def _safe_fsum(values):
 
 
 def _psd_ok(Q):
-    """Q が半正定値か。True / False / None (判定不能) を返す。
-
-    Q の非ゼロ非対角グラフの連結成分 (ブロック対角構造) ごとに固有値を調べる。
-    負の対角成分は e_i' Q e_i < 0 をデータ値そのもの (丸め誤差を含まない rational 値)
-    で与えるので、固有値計算の許容差とは無関係に非 PSD と判定する。対角ブロックに
-    許容差を許すと、それ自身が非 PSD な Q に凸性の接線下界 (dual_bound) を使って
-    誤った「証明書」を作りえる。ブロックが PSD_DENSE_MAX 以下のときだけ密固有値計算し、
-    それより大きいブロックは「判定不能」として None を返す (証明できない Q は検算
-    しない)。計算で得た固有値は丸め誤差上界だけ広げた許容差で判定する。
-    """
-    n = Q.shape[0]
-    if n == 0:
-        return True
-    diag = np.asarray(Q.diagonal()).ravel()
-    if not np.all(np.isfinite(diag)):
-        return False
-    if np.any(diag < 0):
-        return False
-    A = Q.tocsr(copy=True)
-    A.setdiag(0)
-    A.eliminate_zeros()
-    if A.nnz == 0:
-        return True
-    _, labels = csgraph.connected_components(A, directed=False)
-    unknown = False
-    for c in np.unique(labels):
-        idx = np.flatnonzero(labels == c)
-        if len(idx) == 1:
-            # 対角成分は上で < 0 を退けているので、残る判定はない。
-            continue
-        if len(idx) > PSD_DENSE_MAX:
-            unknown = True
-            continue
-        sub = Q[idx][:, idx]
-        scale = max(1.0, float(np.abs(sub).sum(axis=1).max()))
-        try:
-            # 最小固有値だけを求める。8000 列の CVXQP_L ブロックでも
-            # 512 MiB 程度の作業領域で済み、全固有値を求めるより速い。
-            w = eigh(sub.toarray(), subset_by_index=[0, 0],
-                     eigvals_only=True, driver="evr")
-        except (np.linalg.LinAlgError, ValueError):
-            unknown = True
-            continue
-        if not np.all(np.isfinite(w)):
-            unknown = True
-            continue
-        if float(w[0]) < -PSD_REL_TOL * scale:
+    """Return an exact PSD verdict; exhausted proof work is unknown."""
+    try:
+        if Q.shape[0] != Q.shape[1]:
             return False
-    return None if unknown else True
-
+        return prove_psd(columns(Q))
+    except (ValueError, OverflowError):
+        return False
 
 def _down(v):
     return np.nextafter(v, -math.inf)
@@ -880,7 +799,7 @@ def _fr_certificate(prob, x, y, debug=False):
     Q = prob["Q"]; A = prob["A"].tocsc(); c = prob["c"]
     lo, up = prob["lo"], prob["up"]
     n, m = prob["n"], prob["m"]
-    if prob.get("psd", True) is not True:
+    if _psd_ok(prob["Q"]) is not True:
         return None
     free = (~np.isfinite(lo)) & (~np.isfinite(up))
     if not free.any():
@@ -995,11 +914,8 @@ def _fr_certificate(prob, x, y, debug=False):
     if debug:
         print(f"  fr d={d!r} qhi={q_iv[1]!r} h={float(h_frac)!r} "
               f"col={float(col_frac)!r} ops={ops}", flush=True)
-    # 厳密最適値 (主実行可能性 + 補完性) の検査は独立再計算 (_exact_primal_optimum)
-    # で行い、通れば参照値を厳密な最適値に置く。通らなければ一次感度の pimpact
-    # のまま (certify の primal ゲートで未認証扱いになる)。
-    pstar = _exact_primal_optimum(_ExactData(prob), xs_frac, y1, g_frac)
-    return d, pimpact, pstar
+    enclosure = _ExactData(prob).check(xs_frac, xs_frac, y1)
+    return d, pimpact, enclosure
 
 
 def _solve_exact(M, r):
@@ -1029,41 +945,8 @@ def _solve_exact(M, r):
 
 
 def _psd_exact(Q):
-    """Q が有理数として厳密に半正定値かを LDL 分解で判定する。
-
-    PSD 行列は対角成分が非負で、正の対角 pivot で Schur 補元を取っても PSD。
-    対角が全て 0 になったら、PSD であるためには残りの非対角も全て 0 でなければ
-    ならない (0 対角で非対角が非零だと 2x2 小行列式が負)。浮動小数の固有値判定と
-    違い、丸めで生じた微小な負曲率を見逃さない。
-    """
-    n = Q.shape[0]
-    A = [[Fraction(float(Q[i, j])) for j in range(n)] for i in range(n)]
-    for k in range(n):
-        piv = None
-        for t in range(k, n):
-            if A[t][t] < 0:
-                return False
-            if A[t][t] > 0 and piv is None:
-                piv = t
-        if piv is None:
-            for i in range(k, n):
-                for j in range(k, n):
-                    if A[i][j] != 0:
-                        return False
-            return True
-        if piv != k:
-            A[k], A[piv] = A[piv], A[k]
-            for i in range(n):
-                A[i][k], A[i][piv] = A[i][piv], A[i][k]
-        p = A[k][k]
-        for i in range(k + 1, n):
-            f = A[i][k] / p
-            if f == 0:
-                continue
-            for j in range(k + 1, n):
-                A[i][j] -= f * A[k][j]
-    return True
-
+    """Use the same exact PSD proof as every certificate path."""
+    return _psd_ok(Q) is True
 
 def _kkt_certificate(prob, x, debug=False):
     """非対角 Q 用の厳密 KKT 下界 (d, pimpact)。
@@ -1074,7 +957,7 @@ def _kkt_certificate(prob, x, debug=False):
     自由列の g が厳密に 0 でない、または係数が無限大になる場合は None。
     """
     n, m = prob["n"], prob["m"]
-    if prob.get("psd", True) is not True:
+    if _psd_ok(prob["Q"]) is not True:
         return None
     Qsp = prob["Q"].tocsc()
     if (Qsp != Qsp.T).nnz != 0:
@@ -1176,10 +1059,8 @@ def _kkt_certificate(prob, x, debug=False):
     pimpact = float(np.abs(yf) @ row_viol + gabs @ var_viol) / scale
     if debug:
         print(f"  kkt d={d!r} k={k} pimpact={pimpact!r}", flush=True)
-    # 厳密最適値の検査は独立再計算 (_exact_primal_optimum) で行う。KKT 系は active 行
-    # を厳密に境界へ固定しているので、ここが通れば参照値の主上界は厳密になる。
-    pstar = _exact_primal_optimum(_ExactData(prob), xs, yv)
-    return d, pimpact, pstar
+    enclosure = _ExactData(prob).check(xs, xs, yv)
+    return d, pimpact, enclosure
 
 
 def _solve_banded_exact(rows, rhs, halfband, deadline):
@@ -1253,7 +1134,7 @@ def _banded_free_certificate(prob, x, y_hint, p):
     作れない)。
     """
     n, m = prob["n"], prob["m"]
-    if prob.get("psd", True) is not True:
+    if _psd_ok(prob["Q"]) is not True:
         return None
     lo, up, L, U = prob["lo"], prob["up"], prob["L"], prob["U"]
     if (np.isfinite(lo) | np.isfinite(up)).any():
@@ -1315,8 +1196,10 @@ def _banded_free_certificate(prob, x, y_hint, p):
                     + gabs @ var_viol) / (1.0 + abs(p))
     # 弱双対は g のみを厳密に 0 にしたが、参照値の主上界 (pimpact を境に行えない
     # y_i × 違反の一次感度の代わり) には行境界の厳密な充足が要る (P1 指摘)。
-    pstar = _exact_primal_optimum(data, xh, y0)
-    return df, pimpact, pstar
+    enclosure = data.check(xh, xh, y0)
+    if enclosure is None:
+        enclosure = data.check(x, xh, y0)
+    return df, pimpact, enclosure
 
 
 def dual_bound(prob, xh, y):
@@ -1330,7 +1213,7 @@ def dual_bound(prob, xh, y):
     丸めるので、返す値は浮動小数計算の結果でなく真の右辺の下界である。無限側の境界を
     要求する成分の符号が区間で確定できなければ -inf を返す (0 扱いの見積りはしない)。
     """
-    if prob.get("psd", True) is not True:
+    if _psd_ok(prob["Q"]) is not True:
         return -math.inf
     yp = _project_dual(prob, y)
     _, _, col, unbounded = _classify(prob, xh, yp)
@@ -1584,36 +1467,7 @@ def _margin_lp(prob, x, y_ref):
     return xh, y, s
 
 
-class _ExactData:
-    """浮動小数の問題データを有理数へ移したもの。
-
-    QPS の浮動小数は有理数として厳密に扱える。列ごとの非ゼロ (行番号, Fraction) を
-    保持し、厳密な縮約費用と弱双対値を評価する。
-    """
-
-    def __init__(self, prob):
-        self.n, self.m = prob["n"], prob["m"]
-        self.c0 = Fraction(float(prob["c0"]))
-        self.c = [Fraction(float(v)) for v in prob["c"]]
-        self.A = self._columns(prob["A"].tocsc())
-        self.Q = self._columns(prob["Q"].tocsc())
-        # 行ごとの非ゼロ (列番号, Fraction)。pin の方程式 (A xh_i = 境界) は
-        # 行 i をまたぐ列の和を有理数で立てるのに必要。
-        self.Arow = [[] for _ in range(self.m)]
-        for j, colv in enumerate(self.A):
-            for i, v in colv:
-                self.Arow[i].append((j, v))
-        finite = lambda v: Fraction(float(v)) if math.isfinite(v) else None
-        self.L = [finite(v) for v in prob["L"]]
-        self.U = [finite(v) for v in prob["U"]]
-        self.lo = [finite(v) for v in prob["lo"]]
-        self.up = [finite(v) for v in prob["up"]]
-
-    @staticmethod
-    def _columns(M):
-        return [[(int(M.indices[k]), Fraction(float(M.data[k])))
-                 for k in range(M.indptr[j], M.indptr[j + 1]) if M.data[k] != 0.0]
-                for j in range(M.shape[1])]
+_ExactData = ExactModel
 
 
 def _exact_g(data, xh, y):
@@ -1639,106 +1493,24 @@ def _exact_axh(data, xh):
     return ax
 
 
-def _exact_primal_optimum(data, xh, y, gex=None):
-    """(xh, y) が厳密 KKT を作るか有理数で検査し、成り立てば厳密な最適値を返す。
+def _upgraded_certificate(base, enclosure, method):
+    """Represent a verified enclosure without losing its rational endpoints."""
+    pf = float(enclosure.upper)
+    d = _exact_float(enclosure.lower)
+    error = _fraction_float_up(abs(enclosure.upper - Fraction(pf)) / (1 + abs(Fraction(pf))))
+    return Certificate(pf, d, 0.0, error, 0.0, base.repair_iters,
+                       method, True, enclosure)
 
-    条件は xh の列境界と行境界の厳密な充足 (主実行可能性) と、弱双対 d(xh, y)
-    (_exact_d() の符号制約込み) が実行可能点 xh の目的値 c0 + c'xh + 1/2 xh'Qxh
-    と有理数として厳密に一致すること。Q が半正定値なら d は任意の実行可能 x の
-    下界なので、一致は xh が最適であること (主上界 = 双対下界) と同値で、返す
-    Fraction は最適値そのままになる。主実行可能性や符号の不一致なら None。
 
-    浮動小数の候補 x は A x が有理数として境界に一致しないことが普通で、一次感度
-    (|y| × 違反量) は「x が実行可能でないとき p が最適値の上界でない」差を境に行え
-    ない (P1 指摘)。この検査を通した候補だけが参照値 p の厳密な上界側を持ち、
-    証明書は slack を 0 に取れる。
-    """
-    d = _exact_d(data, xh, y, gex)
-    if d is None:
+def _checked_certificate(data, base, x, xh, y, method):
+    enclosure = data.check(x, xh, y)
+    if enclosure is None:
         return None
-    for j, xj in enumerate(xh):
-        lo, up = data.lo[j], data.up[j]
-        if (lo is not None and xj < lo) or (up is not None and xj > up):
-            return None
-    ax = _exact_axh(data, xh)
-    for i, v in enumerate(ax):
-        lo, up = data.L[i], data.U[i]
-        if (lo is not None and v < lo) or (up is not None and v > up):
-            return None
-    f = data.c0
-    for j, xj in enumerate(xh):
-        if xj:
-            f += data.c[j] * xj
-            s = Fraction(0)
-            for i, v in data.Q[j]:
-                s += v * xh[i]
-            f += xj * s / 2
-    if f != d:
-        return None
-    return f
-
-
-def _upgraded_certificate(base, pstar, method):
-    """厳密最適値 pstar (Fraction) を参照値と不確かさに置いた証明書を作る。
-
-    d は pstar 以下に丸めた float、pinf は 0 (xh は有理数で厳密実行可能と検査済み)、
-    roundoff は float(pstar) の丸め誤差上界、pimpact は d の下向き丸め分を有理数で
-    境界に置く。|p − d| + roundoff + pimpact の和が float(p* ) と p* の厳密な距離の
-    上界になるため、参照値の相対不確かさは丸め誤差の桁で済む。
-    """
-    pf = float(pstar)
-    abs_p = abs(pf)
-    perr = _fraction_float_up(abs(pstar - Fraction(pf)) / (1.0 + abs_p))
-    d = _exact_float(pstar)
-    return Certificate(pf, d, 0.0, perr,
-                       _fraction_float_up((pstar - Fraction(d)) / (1.0 + abs_p)),
-                       base.repair_iters, method, True)
-
+    return _upgraded_certificate(base, enclosure, method)
 
 def _exact_d(data, xh, y, gex=None):
-    """弱双対の右辺 c0 + h(y) - 1/2 xh'Qxh + sum_j min g_j x_j を有理数で評価する。
-
-    符号制約 (y_i > 0 なら L_i 有限、y_i < 0 なら U_i 有限、片側無限列では g_j が
-    有限側を要求しないこと、自由列では g_j = 0) を満たさなければ None を返す。
-    返す Fraction は浮動小数の丸めを含まない厳密な下界である。
-    """
-    h = Fraction(0)
-    for i, yi in enumerate(y):
-        if yi > 0:
-            if data.L[i] is None:
-                return None
-            h += yi * data.L[i]
-        elif yi < 0:
-            if data.U[i] is None:
-                return None
-            h += yi * data.U[i]
-    if gex is None:
-        gex = _exact_g(data, xh, y)
-    quad = Fraction(0)
-    for j in range(data.n):
-        if xh[j]:
-            s = Fraction(0)
-            for i, v in data.Q[j]:
-                s += v * xh[i]
-            quad += xh[j] * s
-    col = Fraction(0)
-    for j, g in enumerate(gex):
-        lo, up = data.lo[j], data.up[j]
-        if lo is not None and up is not None:
-            col += min(g * lo, g * up)
-        elif lo is not None:
-            if g < 0:
-                return None
-            col += g * lo
-        elif up is not None:
-            if g > 0:
-                return None
-            col += g * up
-        else:
-            if g != 0:
-                return None
-    return data.c0 + h - quad / 2 + col
-
+    """Recompute the rational weak-duality bound, including reduced costs."""
+    return data.dual_bound(xh, y)
 
 def _exact_float(d):
     """有理数の下界 d を、d 以下の float へ丸める (丸めで上へ出さない)。"""
@@ -1869,7 +1641,7 @@ def _recover_exact(prob, data, s, xh0, y0, E0, R, deadline):
     符号がまだ悪い列、自由列の g != 0、符号制約に反する行乗数を検出したら、その列/
     行を方程式に加えて再解する。加えて、y_i != 0 か等式の行は主実行可能な A xh =
     境界 の方程式 (primal pin) を順次追加する: これがないと候補の xh はほとんどの
-    行で有理数として境界から少し外れ、_exact_primal_optimum() の厳密最適値 (主上界
+    行で有理数として境界から少し外れ、共有検証器の厳密実行可能性 (主上界
     と双対下界の一致) が立たない。返す (xh, y, gex, 反復数) はすべて Fraction。
     """
     n, m = data.n, data.m
@@ -2085,15 +1857,8 @@ def _exact_pimpact(p, y, gex, row_v, col_v):
 
 
 def _exact_certificate(prob, x, base, y_hint):
-    """厳密有理数の双対候補を作り、base と同じ p/pinf/roundoff を持つ Certificate を返す。
-
-    ソルバの (x, y) を基点に interior 列の g_j = 0 と行の pin (Axh = 境界) を厳密に
-    解く完全 KKT 救済 (戦略 A1) を最初に試す。dual QP 候補を基点にした同じ系
-    (戦略 A2) と、margin LP の零接触集合を使う戦略 B も試す。補完性まで立った候補は
-    _exact_primal_optimum() で参照値を厳密な主最適値に置く。返す d は _exact_d() の
-    Fraction を下向きに丸めた float なので、浮動小数の丸めを含めても最適値の下界である。
-    """
-    if prob.get("psd", True) is not True:
+    """Recover rational candidate points and pass them through the common checker."""
+    if _psd_ok(prob["Q"]) is not True:
         return None
     if prob["n"] > EXACT_MAX_COLS or prob["m"] > EXACT_MAX_ROWS:
         return None
@@ -2111,10 +1876,10 @@ def _exact_certificate(prob, x, base, y_hint):
             return None
         # 厳密最適値 (主実行可能性 + 補完性) が立つ候補は参照値を厳密な最適値に
         # 置く (一次感度の pimpact は上界の境界にならない; P1 指摘)。
-        pstar = _exact_primal_optimum(data, xh, y, gex)
-        if pstar is not None:
-            cert = _upgraded_certificate(base, pstar, method)
-        else:
+        cert = _checked_certificate(data, base, xh, xh, y, method)
+        if cert is None:
+            cert = _checked_certificate(data, base, x, xh, y, method)
+        if cert is None:
             cert = Certificate(base.p, _exact_float(d), max(base.pinf, pinf_exact),
                                base.roundoff,
                                _exact_pimpact(base.p, y, gex, row_v, col_v),
@@ -2169,7 +1934,7 @@ def _exact_certificate(prob, x, base, y_hint):
                     [Fraction(float(v)) for v in y0])
     cert = try_recover("exact-neg", x, _project_dual(prob, y_hint), interior_E0(gex0),
                        all_rows)
-    if cert is not None and uncertainty(cert) <= UNCERTAINTY_TOL:
+    if cert is not None and cert.primal and uncertainty(cert) <= UNCERTAINTY_TOL:
         return cert
     if qp is not None:
         # 戦略 A2: dual QP 候補 (xh_qp, y_qp) を基点に同じ系を解く保険。
@@ -2178,33 +1943,27 @@ def _exact_certificate(prob, x, base, y_hint):
         gex0 = _exact_g(data, [Fraction(float(v)) for v in xh0],
                         [Fraction(float(v)) for v in y0])
         cert = try_recover("exact-neg-qp", xh_qp, y_qp, interior_E0(gex0), all_rows)
-        if cert is not None and uncertainty(cert) <= UNCERTAINTY_TOL:
+        if cert is not None and cert.primal and uncertainty(cert) <= UNCERTAINTY_TOL:
             return cert
         # 戦略 B: margin LP の零接触集合を使い、active 行だけを候補に残す。
         if margin is not None:
             cert = try_recover("exact-margin", xh_qp, y_qp, E_margin, active_rows)
-            if cert is not None and uncertainty(cert) <= UNCERTAINTY_TOL:
+            if cert is not None and cert.primal and uncertainty(cert) <= UNCERTAINTY_TOL:
                 return cert
     # 双対 QP が使えない/失敗した場合の保険: margin LP 自体を初期値にする。
     if margin is not None:
         xh_lp, y_lp, _ = margin
         cert = try_recover("exact-margin-lp", xh_lp, y_lp, E_margin, active_rows)
-        if cert is not None and uncertainty(cert) <= UNCERTAINTY_TOL:
+        if cert is not None and cert.primal and uncertainty(cert) <= UNCERTAINTY_TOL:
             return cert
     if not candidates:
         return None
-    return min(candidates, key=uncertainty)
+    return min(candidates, key=certificate_rank)
 
 
 def _sparse_exact_certificate(prob, x, base, y_hint):
-    """大規模疎問題向けの厳密有理数 dual 候補。
-
-    dense 経路 (_exact_certificate) の列/行上限を超える問題でも、次元と非ゼロ数が
-    EXACT_SPARSE_* の範囲なら、ソルバの (x, y) をそのまま初期値にして active 行だけを
-    候補に残した _recover_exact() で縮約費用の符号を厳密に修復する。追加の LP は解かない。
-    返す d は _exact_d() の Fraction を下向きに丸めた float なので最適値の下界である。
-    """
-    if prob.get("psd", True) is not True:
+    """Recover sparse rational witnesses and check every original constraint."""
+    if _psd_ok(prob["Q"]) is not True:
         return None
     if prob["n"] > EXACT_SPARSE_MAX_DIM or prob["m"] > EXACT_SPARSE_MAX_DIM:
         return None
@@ -2223,9 +1982,11 @@ def _sparse_exact_certificate(prob, x, base, y_hint):
             return None
         # 厳密最適値 (主実行可能性 + 補完性) が立つ候補は参照値を厳密な最適値に
         # 置く (一次感度の pimpact は上界の境界にならない; P1 指摘)。
-        pstar = _exact_primal_optimum(data, xh, y, gex)
-        if pstar is not None:
-            return _upgraded_certificate(base, pstar, method)
+        cert = _checked_certificate(data, base, xh, xh, y, method)
+        if cert is None:
+            cert = _checked_certificate(data, base, x, xh, y, method)
+        if cert is not None:
+            return cert
         return Certificate(base.p, _exact_float(d), max(base.pinf, pinf_exact),
                            base.roundoff,
                            _exact_pimpact(base.p, y, gex, row_v, col_v),
@@ -2254,16 +2015,26 @@ def _sparse_exact_certificate(prob, x, base, y_hint):
                 candidates.append(cert)
     if not candidates:
         return None
-    return min(candidates, key=uncertainty)
+    return min(candidates, key=certificate_rank)
 
 
 Certificate = collections.namedtuple(
-    "Certificate", "p d pinf roundoff pimpact repair_iters method primal",
-    defaults=("float", False))
+    "Certificate", "p d pinf roundoff pimpact repair_iters method primal enclosure",
+    defaults=("float", False, None))
 
 
 def _float_certificate(prob, x, ax, p, pinf, roundoff, xh, y, iters, method):
     """浮動小数の候補 (xh, y) から Certificate を作る。"""
+    base = Certificate(p, -math.inf, pinf, roundoff, math.inf, iters, method)
+    data = _ExactData(prob)
+    checked = _checked_certificate(data, base, x, xh, y, method)
+    tangent = data.diagonal_linearization(xh, y)
+    if tangent is not None:
+        diagonal = _checked_certificate(data, base, x, tangent, y, method)
+        if diagonal is not None and (checked is None or uncertainty(diagonal) < uncertainty(checked)):
+            checked = diagonal
+    if checked is not None:
+        return checked
     d = dual_bound(prob, xh, y)
     gl, gu, _ = _reduced_cost_interval(prob, xh, y)
     g = 0.5 * (gl + gu)
@@ -2273,30 +2044,7 @@ def _float_certificate(prob, x, ax, p, pinf, roundoff, xh, y, iters, method):
 
 
 def verify(prob, x, y, exact=False):
-    """独立再計算 (docstring 冒頭の定義)。Certificate を返す。
-
-      p             主目的値 c0 + c'x + 1/2 x'Qx (浮動小数値)
-      d             _repair() した (xh, y) での dual_bound()。最適値の厳密な下界 (なければ -inf)。
-                    自由変数を含み dual_bound() が -inf の場合は _fr_certificate() /
-                    _kkt_certificate() の厳密証明も試し、より強い下界を採用する。
-      pinf          相対主実行不能度 max 違反 / (1 + |境界|)
-      roundoff      p の丸め誤差上界 / (1 + |p|)
-      pimpact       主違反の目的値影響 (sum |y_i| 行違反_i + sum |g_j| 列違反_j) / (1 + |p|)。
-                    x が境界を僅かに破るとき p(x) は真の最適値の上界でなくなるが、その差は
-                    一次で乗数 × 違反量 (感度) で抑えられる。これは感度推定であって
-                    境界ではない (P1 指摘)。厳密な主候補 (primal=True) では p が
-                    厳密な最適値になり、pimpact は d の下向き丸め分だけになる。
-      repair_iters  _repair() の反復数 (0 は修正不要)
-      method        d を作った経路 ("solver" / "repair" / "linearized" / "exact-*")
-      primal        _exact_primal_optimum() で xh の主実行可能性と f(xh) == d が
-                    厳密に立った (p が厳密な最適値)。certify() の合格条件。
-
-    exact=True のとき、浮動小数の候補が UNCERTAINTY_TOL を超える場合に厳密有理数の
-    双対候補 (_exact_certificate) も試す。dense 経路が上限で候補を作れない場合は
-    大規模疎問題向けの _sparse_exact_certificate も試す。best_certificate() は候補ごとの
-    二重実行を避けるため exact=False で比較してから、最良の主候補に一度だけ厳密候補を
-    適用する。
-    """
+    """Search candidate tangents and return diagnostics plus an optional verified enclosure."""
     A, Q, c, c0 = prob["A"], prob["Q"], prob["c"], prob["c0"]
     if not np.all(np.isfinite(x)):
         return Certificate(math.nan, -math.inf, math.inf, math.inf, math.inf, 0, "invalid")
@@ -2315,7 +2063,7 @@ def verify(prob, x, y, exact=False):
                                   + len(x) * UNDERFLOW_ABS) + 0.5 * xqx_err
     scale = 1.0 + abs(p)
     roundoff = float(p_err) / scale
-    if prob.get("psd", True) is not True:
+    if _psd_ok(prob["Q"]) is not True:
         return Certificate(p, -math.inf, pinf, roundoff, 0.0, 0, "nonconvex")
     if not math.isfinite(p) or not math.isfinite(xqx):
         return Certificate(p, -math.inf, pinf, roundoff, math.inf, 0, "overflow")
@@ -2330,7 +2078,7 @@ def verify(prob, x, y, exact=False):
             xh2, yr2, more = _repair(prob, x.copy(), y_lin)
             cert2 = _float_certificate(prob, x, ax, p, pinf, roundoff, xh2, yr2,
                                        iters + more, "linearized")
-            if uncertainty(cert2) < uncertainty(cert):
+            if certificate_rank(cert2) < certificate_rank(cert):
                 cert = cert2
     elif uncertainty(cert) > UNCERTAINTY_TOL:
         # _repair() が 0 回で終わっても、双対候補が悪ければ線形化 LP の双対を試す。
@@ -2340,14 +2088,14 @@ def verify(prob, x, y, exact=False):
             xh2, yr2, more = _repair(prob, x.copy(), y_lin)
             cert2 = _float_certificate(prob, x, ax, p, pinf, roundoff, xh2, yr2,
                                        iters + more, "linearized")
-            if uncertainty(cert2) < uncertainty(cert):
+            if certificate_rank(cert2) < certificate_rank(cert):
                 cert = cert2
     if exact and uncertainty(cert) > UNCERTAINTY_TOL:
         ex = _exact_certificate(prob, x, cert, y)
         if ex is None:
             ex = _sparse_exact_certificate(prob, x, cert, y)
         if (ex is not None and ex.pinf <= PRIMAL_INF_TOL
-                and uncertainty(ex) < uncertainty(cert)):
+                and certificate_rank(ex) < certificate_rank(cert)):
             cert = ex
     # 自由変数を含み、通常の dual_bound() が -inf のときの厳密証明。
     # _fr_certificate は対角 Q 用、_kkt_certificate は小規模な非対角 Q 用。
@@ -2355,13 +2103,13 @@ def verify(prob, x, y, exact=False):
     if free.any() and cert.d == -math.inf:
         fr = _fr_certificate(prob, x, y)
         if fr is not None:
-            # fr[2] は厳密最適値 (Fraction)。通れば参照値 p も厳密な最適値に置く。
+            # The structured path returns an independently checked enclosure.
             if fr[2] is not None:
                 cand = _upgraded_certificate(cert, fr[2], "fr")
             else:
                 cand = Certificate(cert.p, fr[0], cert.pinf, cert.roundoff,
                                    fr[1], cert.repair_iters, "fr")
-            if uncertainty(cand) < uncertainty(cert):
+            if certificate_rank(cand) < certificate_rank(cert):
                 cert = cand
         if cert.d == -math.inf or uncertainty(cert) > UNCERTAINTY_TOL:
             kk = _kkt_certificate(prob, x)
@@ -2371,7 +2119,7 @@ def verify(prob, x, y, exact=False):
                 else:
                     cand = Certificate(cert.p, kk[0], cert.pinf, cert.roundoff,
                                        kk[1], cert.repair_iters, "kkt")
-                if uncertainty(cand) < uncertainty(cert):
+                if certificate_rank(cand) < certificate_rank(cert):
                     cert = cand
         if cert.d == -math.inf or uncertainty(cert) > UNCERTAINTY_TOL:
             # 全列自由・全行 ranged で Q が帯行列 (LASER) の厳密帯消去証明。
@@ -2382,32 +2130,28 @@ def verify(prob, x, y, exact=False):
                 else:
                     cand = Certificate(cert.p, bd[0], cert.pinf, cert.roundoff,
                                        bd[1], cert.repair_iters, "banded")
-                if uncertainty(cand) < uncertainty(cert):
+                if certificate_rank(cand) < certificate_rank(cert):
                     cert = cand
     return cert
 
 
+def certificate_rank(cert):
+    """Every verified enclosure precedes an unverified candidate."""
+    return cert.enclosure is None, uncertainty(cert)
+
+
 def uncertainty(cert):
-    """参照値 p の相対不確かさ: |p - d| / (1 + |p|) + roundoff + pimpact (d = -inf なら inf)。"""
+    """Serialized reference error for verified enclosures; a heuristic otherwise."""
     if not math.isfinite(cert.d):
         return math.inf
+    if cert.enclosure is not None:
+        return float(reference_error(cert.enclosure, format_csv_value(cert.p)))
     return abs(cert.p - cert.d) / (1.0 + abs(cert.p)) + cert.roundoff + cert.pimpact
 
 
 def best_certificate(prob, x, y):
-    """ソルバの (x, y) と polish() の (x, y) のうち、相対主実行不能度が PRIMAL_INF_TOL
-    以下で uncertainty() 最小の候補を返す。原候補は有理数として厳密に実行可能でない
-    (一次感度の pimpact は参照値の上界を支えない; P1 指摘) ので、uncertainty() が
-    許容内でも、さらに厳密有理数の双対候補 (dense 経路、次に疎経路) を試して
-    primal=True の候補を作る。該当候補が無ければソルバ側を返す (certify() の
-    primal ゲートで未認証になる)。
-
-    厳密候補は最良候補に一度だけ試す。失敗した救済は EXACT_TIME_BUDGET /
-    EXACT_SPARSE_TIME_BUDGET の有理数消去を最後まで降り、候補ごとに試すと 1 行で
-    数十分になり baseline 全体の再認証が実行できない。upgrade の成功率は候補の
-    KKT への近さで決まるので、最良候補への絞りで実用上の損失は小さい。
-    """
-    if prob.get("psd", True) is not True:
+    """Prefer verified enclosures, then refine the best numerical candidate."""
+    if _psd_ok(prob["Q"]) is not True:
         return verify(prob, x, y)
     cands = [(x, y)]
     polished = polish(prob, x, y)
@@ -2418,17 +2162,15 @@ def best_certificate(prob, x, y):
                 if r.pinf <= PRIMAL_INF_TOL]
     if not feasible:
         return results[0]
-    best = min(feasible, key=lambda t: uncertainty(t[0]))
-    # 浮動小数の候補は pimpact (一次感度、P1 指摘: 厳密な境界ではない) でしか
-    # 「参照値が最適値の上界」を支えられない。uncertainty() が許容内でも、厳密に
-    # 実行可能な primal 候補 (primal=True) を常に作る。
+    best = min(feasible, key=lambda t: certificate_rank(t[0]))
     br, bx, by = best
+    if br.primal and uncertainty(br) <= UNCERTAINTY_TOL:
+        return br
     ex = _exact_certificate(prob, bx, br, by)
     if ex is None:
         ex = _sparse_exact_certificate(prob, bx, br, by)
     if (ex is not None and ex.pinf <= PRIMAL_INF_TOL
-            and (ex.primal and not br.primal
-                 or uncertainty(ex) < uncertainty(br))):
+            and certificate_rank(ex) < certificate_rank(br)):
         best = (ex, bx, by)
     return best[0]
 
@@ -2536,9 +2278,13 @@ SOLVERS = (
 )
 
 
-def certify(prob, solved):
+def certify(prob, solved, evidence_path=None, input_sha256=None, proposal=None):
     """solve_* の結果を検算し (ok, 参照値 p, 診断文字列) を返す。"""
     status, x, y, reported = solved
+    try:
+        ExactModel(prob)
+    except (ValueError, TypeError, OverflowError, IndexError):
+        return False, math.nan, f"status={status} invalid model"
     if len(x) != prob["n"] or len(y) != prob["m"] or not np.all(np.isfinite(x)):
         return False, math.nan, f"status={status} no solution"
     # 報告値と自前再計算の食い違いは QPS 解釈 (Q, c, c0, 符号) の食い違いを示す。
@@ -2547,13 +2293,8 @@ def certify(prob, solved):
     cert = best_certificate(prob, x, y)
     unc = uncertainty(cert)
     gap = abs(cert.p - cert.d) / (1.0 + abs(cert.p))
-    # NaN は比較が常に False になるので、合格条件を肯定形で書き否定を取る。
-    # 証明書の参照値 p が最適値の上界と下界を同時に支えるには、原候補が厳密に
-    # 実行可能である (有理数で A x = 境界 が立つ) 必要がある。一次感度
-    # (|y| × 違反量) の pimpact は上界の境界にならない (P1 指摘: y=0・viol 1e-8・
-    # 真の感度 1e8 の例で 0 を認証できてしまった)。cert.primal は `_exact_primal_optimum()`
-    # で厳密 KKT が立った候補にだけ True で、そのとき p は厳密な最適値である。
-    ok = (cert.primal and unc <= UNCERTAINTY_TOL and cert.pinf <= PRIMAL_INF_TOL
+    ok = (cert.enclosure is not None
+          and reference_error(cert.enclosure, format_csv_value(cert.p)) <= REFERENCE_TOLERANCE
           and objdiff <= OBJ_CONSISTENCY_TOL)
     msg = (f"status={status} reported={reported!r} p={cert.p!r} d={cert.d!r} "
            f"uncertainty={unc:.3e} relgap={gap:.3e} roundoff={cert.roundoff:.3e} "
@@ -2562,6 +2303,9 @@ def certify(prob, solved):
            f"primal={cert.primal} "
            f"verify_pinf={cert.pinf:.3e} "
            f"reported_vs_p={objdiff:.3e} c0={prob['c0']!r}")
+    if ok and evidence_path is not None:
+        save_evidence(evidence_path, cert.enclosure, format_csv_value(cert.p),
+                      input_sha256, proposal)
     return ok, cert.p, msg
 
 
@@ -2570,6 +2314,7 @@ def main():
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--time-limit", type=float, default=None, help="各ソルバの時間上限 [s]")
     ap.add_argument("--csv", action="store_true", help="baseline CSV 行を stdout へ出す")
+    ap.add_argument("--evidence-dir", type=Path, default=Path("baseline-evidence"))
     args = ap.parse_args()
     date = datetime.date.today().strftime("%Y%m%d")
     # --csv の stdout は CSV 行だけにする。ソルバの C ライブラリ (HiGHS/Clarabel) が
@@ -2587,11 +2332,15 @@ def main():
         bad = 0
         for path in args.paths:
             name = os.path.splitext(os.path.basename(path))[0]
+            input_hash = hashlib.sha256(Path(path).read_bytes()).hexdigest()
             prob = load_qps(path)
+            if hashlib.sha256(Path(path).read_bytes()).hexdigest() != input_hash:
+                raise ValueError("input changed while parsing")
             accepted = None
             for solver, version, solve in SOLVERS:
                 solved = solve(prob, args.time_limit)
-                ok, p, msg = certify(prob, solved)
+                ok, p, msg = certify(prob, solved, args.evidence_dir / (name + ".proof.json.gz"),
+                                     input_hash, dict(solver=solver, version=version(), status=solved[0]))
                 print(f"{name},{solver},{'PASS' if ok else 'FAIL'},{msg}",
                       file=diag, flush=True)
                 if ok:

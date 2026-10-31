@@ -152,7 +152,21 @@ Solve-rate benchmark on standard public sets via the `otspot-dev` benchmark harn
 
 LP: the only miss is `greenbea` (Suboptimal at @1e-8).
 
-QP: named misses are `UBH1` (Suboptimal at both eps), `LISWET7` (objective mismatch at @1e-6, Stalled at @1e-8), and `POWELL20` (Timeout at @1e-8).
+QP: named misses are `UBH1` (Suboptimal at both eps) and `POWELL20` (Timeout at @1e-8).
+The `LISWET7` objective mismatch listed here predates the 2026-10 baseline migration to the
+certified c0-inclusive Maros–Mészáros CSV (`docs/baseline-certificate-contract.md`); with the
+current baseline `LISWET7` reaches Optimal and agrees with the certified reference within
+1e-6 (measured 2026-10-30), and the Maros–Mészáros row above (incl. `2 mismatch`,
+`LISWET7`/`LISWET11`) is against the pre-migration CSV and awaits re-measurement.
+Under the certificate contract the CSV now carries 88 of the 138 objective values as
+machine-checkable claims (12 LISWET included, via a regeneration manifest); the other
+50 are explicitly labelled pre-contract reference values, not certified optima.
+Verify any checkout with `python3 scripts/check_baseline_proofs.py`
+(hermetic layers; C/E skip by design without data). Where the Maros-Meszaros
+QPS data is present, run `python3 scripts/check_baseline_proofs.py --regenerate
+--require-layers S,A,B,C,E` so the 12 LISWET claims are actually regenerated
+and every claim is replayed — the CI `baseline proof verification` job does
+exactly this.
 
 QCQP (QPLIB, single-shot IPM via `bench_qplib` — does not exercise the `--global` spatial B&B path): `not-supported` cases need a finite bound on every variable for the McCormick relaxation and have at least one unbounded variable; `skip` cases have integer variables or unsupported constraint types. Both categories are eps-independent.
 

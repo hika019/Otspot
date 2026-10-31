@@ -6,7 +6,9 @@
 //! 判定が gap を lane の eps と無関係な定数 (1e-3) と比べていた間は、eps≈6.3e-8 の
 //! lane がこの点を収束と判定し、目的定数を除いて `Optimal obj=−2500.257` (真値 −2026.419 比
 //! 23% 誤差) を返していた。真値 p* = 498.8408907371 (目的定数込み) は HiGHS 解を
-//! `scripts/highs_baseline_truth.py` で弱双対検算した値 (baseline CSV と同値)。
+//! `scripts/highs_baseline_truth.py` で弱双対検算した値 (92ce6cc2 Era の HiGHS 検算値。
+//! 現行 baseline CSV の exact_rational_kkt 認証値とは絶対差 4.9e-8 — ベンチ tol 1e-6 内
+//! だが同値ではない。docs/baseline-certificate-contract.md 参照)。
 //!
 //! Sentinel: inner の gap 許容を定数 1e-3 に戻すと、Optimal 25.003 が返って fail する。
 
@@ -16,7 +18,8 @@ use otspot::qp::solve_qp_with;
 use otspot::SolveStatus;
 use std::path::Path;
 
-/// 目的定数込みの検算済み最適値 (`data/baseline_objectives` と同値)。
+/// 目的定数込みの HiGHS Era 検算値。現行 `data/baseline_objectives` の exact_rational_kkt
+/// 認証値 (4.988408907861e2) とは絶対差 4.9e-8 (tol 1e-6 内、同値ではない)。
 const LISWET7_TRUTH_WITH_CONSTANT: f64 = 498.8408907371;
 /// bench (`qps_benchmark`) が目的値照合に使う相対許容誤差。
 const BENCH_OBJ_REL_TOL: f64 = 1e-2;

@@ -1,6 +1,7 @@
 """scripts/highs_baseline_truth.py の検算 (弱双対下界) とパーサの sentinel。"""
 import csv
 import importlib.util
+import json
 import itertools
 import math
 import tempfile
@@ -1002,38 +1003,91 @@ class BaselineCsvSeparationTests(unittest.TestCase):
             lines = [line for line in f if not line.startswith("#")]
         return {row["problem_name"]: row for row in csv.DictReader(lines)}
 
-    def test_certified_csv_is_complete_and_keeps_uncertified_tags(self):
-        certified = self.load("maros_meszaros.csv")
-        self.assertEqual(len(certified), 138)
-        uncertified = [r for r in certified.values() if r["source"].endswith("_UNCERTIFIED")]
-        self.assertEqual(len(uncertified), 1)
-        # exact rational KKT 証明で認証した LISWET。
-        for name in ("LISWET1", "LISWET2", "LISWET3", "LISWET4", "LISWET5",
-                     "LISWET6", "LISWET7", "LISWET8", "LISWET9", "LISWET10",
-                     "LISWET11", "LISWET12"):
-            self.assertEqual(certified[name]["source"], "exact_rational_kkt_20261023")
-        # PSD ブロックを 8000 列まで密固有値で判定できるようにした結果。
-        for name in ("CVXQP1_L", "CVXQP2_L", "CVXQP3_L"):
-            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
-        # VALUES は最小固有値が負の非凸 QP なので、convex QP の検算対象外。
-        self.assertTrue(certified["VALUES"]["source"].endswith("_UNCERTIFIED"))
-        # 厳密有理数 dual 修復で認証した 7 件と、大規模疎 exact dual の BOYD2。
-        for name in ("QBRANDY", "QRECIPE", "QSC205", "QSCFXM1", "QSCFXM2",
-                     "QSCFXM3", "QSCRS8"):
-            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
-        self.assertFalse(certified["BOYD2"]["source"].endswith("_UNCERTIFIED"))
-        # 厳密有理数 dual 修復で認証した FR 問題。
-        for name in ("QPCSTAIR", "PRIMALC1", "PRIMALC2", "PRIMALC5", "PRIMALC8"):
-            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
-        for name in ("AUG2D", "AUG2DC", "AUG3D", "AUG3DC", "DPKLO1", "DTOC3",
-                     "GENHS28", "HS268", "HS51", "HS52", "KSIP", "POWELL20",
-                     "PRIMAL1", "PRIMAL2", "PRIMAL3", "PRIMAL4", "S268",
-                     "STADAT1", "STADAT2", "STADAT3", "UBH1", "YAO"):
-            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
-        # 疎 exact dual の自由列 + 全行戦略 (QCAPRI/QSTAIR) と全列自由・全行 ranged の
-        # 帯消去証明 (LASER) で認証した残り 3 件。
-        for name in ("QCAPRI", "QSTAIR", "LASER"):
-            self.assertFalse(certified[name]["source"].endswith("_UNCERTIFIED"))
+    def test_reissued_csv_has_88_contract_claims_and_50_uncertified_rows(self):
+        rows = self.load("maros_meszaros.csv")
+        self.assertEqual(len(rows), 138)
+        claims = {n: r for n, r in rows.items() if r["source"].startswith("exact_enclosure_v1;")}
+        uncer = {n: r for n, r in rows.items() if r["source"].endswith("_UNCERTIFIED")}
+        self.assertEqual(len(claims), 88)
+        self.assertEqual(len(uncer), 50)
+        reasons = {}
+        for r in uncer.values():
+            reason = r["source"].split("revalidation_")[1].split("_UNCERTIFIED")[0]
+            reasons[reason] = reasons.get(reason, 0) + 1
+        # 2026-10-31 frozen run の実測内訳。件数主張は CSV から自己記述で読める。
+        self.assertEqual(reasons, {"no_verified_enclosure": 33, "psd_unknown": 16,
+                                   "nonconvex": 1})
+        for r in uncer.values():
+            self.assertTrue(r["source"].startswith(
+                "claim=pre_contract_numeric_reference_not_certified;"))
+        self.assertIn("VALUES", uncer)
+
+    def test_claim_rows_carry_the_full_contract_provenance(self):
+        rows = self.load("maros_meszaros.csv")
+        claims = {n: r for n, r in rows.items() if r["source"].startswith("exact_enclosure_v1;")}
+        for name, r in claims.items():
+            parts = dict(item.split("=", 1) for item in r["source"].split(";")[1:])
+            self.assertEqual(set(parts), {"proof", "proof_sha256", "input_sha256",
+                                          "checker_sha256"})
+            expected = ("proofs/liswet/manifest.json" if name.startswith("LISWET")
+                        else f"proofs/{name}.proof.json.lzma")
+            self.assertEqual(parts["proof"], expected)
+            for key in ("proof_sha256", "input_sha256", "checker_sha256"):
+                self.assertRegex(parts[key], r"^[0-9a-f]{64}$")
+        # LISWET の有理数証跡は MB 級でリポジトリに載せない。manifest が 12 行を
+        # 網羅し、期待ハッシュが CSV の stamp と一致すること (検証器と同じ結線)。
+        liswet = sorted(n for n in claims if n.startswith("LISWET"))
+        self.assertEqual(len(liswet), 12)
+        manifest = json.loads((ROOT / "data/baseline_objectives/proofs/liswet/manifest.json")
+                              .read_text())["rows"]
+        self.assertEqual(sorted(manifest), liswet)
+        for name in liswet:
+            self.assertEqual(manifest[name]["proof_sha256"],
+                             dict(item.split("=", 1) for item in
+                                  claims[name]["source"].split(";")[1:])["proof_sha256"])
+            self.assertEqual(manifest[name]["reference"], claims[name]["optimal_obj"])
+        for name in claims:
+            if name not in liswet:
+                self.assertTrue((ROOT / "data/baseline_objectives" /
+                                 f"proofs/{name}.proof.json.lzma").is_file(), name)
+
+    def test_liswet_manifest_schema_is_structured_data_only(self):
+        # P1-2: 旧 schema の free-form argv (--regenerate で任意実行できた) は
+        # 攻撃面。現 schema は構造フィールドのみ — 検証器が argv を組み立て、
+        # 実行対象は scripts/liswet_exact_certificate.py に限定される。
+        # (12 行の網羅とハッシュ突合は test_claim_rows_carry_the_full_contract_provenance。)
+        doc = json.loads((ROOT / "data/baseline_objectives/proofs/liswet/manifest.json")
+                         .read_text())
+        self.assertEqual(set(doc), {"policy", "rows"})
+        for name, entry in doc["rows"].items():
+            self.assertEqual(set(entry), {"problem", "gaps", "qps",
+                                          "proof_sha256", "reference"})
+            self.assertEqual(entry["problem"], name)
+            self.assertEqual(entry["qps"], name + ".QPS")
+            self.assertTrue(all(isinstance(g, int) and not isinstance(g, bool)
+                                and g >= 1 for g in entry["gaps"]))
+            self.assertEqual(len(set(entry["gaps"])), len(entry["gaps"]))
+
+    def test_reissue_flip_side_names_match_the_frozen_run(self):
+        rows = self.load("maros_meszaros.csv")
+        still = ("QSTAIR", "QBRANDY", "QPCSTAIR", "PRIMALC1", "BOYD2", "QSCSD8", "LISWET7")
+        flipped_uncertified = {"CVXQP1_L", "CVXQP2_L", "CVXQP3_L", "LASER",
+                               "HUES-MOD", "HUESTIS", "QCAPRI", "QSCFXM3"}
+        for name in still:
+            self.assertTrue(rows[name]["source"].startswith("exact_enclosure_v1;"), name)
+        for name in flipped_uncertified:
+            self.assertTrue(rows[name]["source"].endswith("_UNCERTIFIED"), name)
+
+    def test_published_values_are_stable_across_the_reissue(self):
+        # 再発行は source 列だけを書き換える。値の 1 文字の漂移も検出する。
+        rows = self.load("maros_meszaros.csv")
+        pinned = {"AUG2D": "1.687411752897e6", "BOYD2": "2.125676700395e1",
+                  "HS51": "0.000000000000e0", "LISWET11": "4.952395713866e1",
+                  "LISWET7": "4.988408907861e2", "QPCSTAIR": "6.204387477317e6",
+                  "QSCSD8": "9.407635742185e2", "QSTAIR": "7.985452756104e6",
+                  "VALUES": "-1.396621144714e0"}
+        for name, value in pinned.items():
+            self.assertEqual(rows[name]["optimal_obj"], value, name)
 
     def test_selfbest_csv_is_a_regression_subset_with_full_objective_liswet(self):
         certified = self.load("maros_meszaros.csv")
