@@ -59,6 +59,10 @@ class ProofVerifierTests(unittest.TestCase):
 
         # A1: committed non-LISWET proof. L1: manifest-backed claim.
         # U1: labelled pre-contract value.
+        pins = self.root / "scripts"
+        pins.mkdir()
+        self.pin_file = pins / "maros_meszaros_qps.sha256"
+        self.pin_stems("A1", "L1", "U1")
         qps = data / "A1.QPS"
         qps.write_text(FIXTURE_QPS)
         self.input_hash = hashlib.sha256(qps.read_bytes()).hexdigest()
@@ -79,6 +83,13 @@ class ProofVerifierTests(unittest.TestCase):
             "revalidation_psd_unknown_UNCERTIFIED\n")
 
     # ---- fixture helpers ----------------------------------------------------
+    def pin_stems(self, *names):
+        self.pin_file.write_text("".join(f"{'0' * 64}  {n}.QPS\n" for n in names))
+
+    def append_row(self, line):
+        text = self.csv.read_text().rstrip("\n")
+        self.csv.write_text(text + "\n" + line + "\n")
+
     def claim(self, proof, stamp, checker_sha):
         return (f"{verifier.ENCLOSURE_TAG};proof={proof};proof_sha256={stamp};"
                 f"input_sha256={self.input_hash};checker_sha256={checker_sha}")
@@ -344,6 +355,7 @@ class ProofVerifierTests(unittest.TestCase):
                    "checker_sha256": checker.checker_digest(), "proposal": None}
         proof = self.root / "proofs" / "F1.proof.json.gz"
         proof.write_bytes(gzip.compress(json.dumps(payload).encode()))
+        self.pin_stems("A1", "L1", "U1", "F1")
         lines = self.csv.read_text().splitlines()
         lines.append(f"{name},-4.5,"
                      + f"{verifier.ENCLOSURE_TAG};proof=proofs/{name}.proof.json.gz;"
@@ -447,6 +459,86 @@ class ProofVerifierTests(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("C: 0 pass, 1 fail", out)
         self.assertIn("QPS sha256 != CSV input_sha256", out)
+
+    # ---- re-attack P1: problem_name re-anchoring (回帰攻撃 発見1) -------------
+    def test_unsafe_problem_names_rejected(self):
+        # 各危険名は独立の CSV で検証 (前の行の検出メッセージで後の変種が
+        # 緑を偽装できないようにする)。
+        base = self.csv.read_text()
+        for bad in (".", "..", "../A1", "-flag", "sub/A1", "A B"):
+            self.csv.write_text(base)
+            self.append_row(f"{bad},-4.5," + self.claim("proofs/A1.proof.json.gz",
+                                                        self.a1_stamp,
+                                                        checker.checker_digest()))
+            code, out = self.run_verifier()
+            self.assertEqual(code, 1, f"{bad!r}: {out}")
+            self.assertIn(f"unsafe problem_name {bad!r}", out)
+
+    def test_lead_reproduction_traversal_row_forgery_closed(self):
+        # lead 再現手順そのもの: ../maros_meszaros/BOYD2 相当 — data_dir の外
+        # (root/A1.QPS) を指す行で、hash・proof・header すべて自己整合させても
+        # 「OK: 2 certified claims checked」の緑偽装になる (修正前は実際 rc=0、
+        # /tmp/pr51-reattack/before_attack1.log 実測)。
+        (self.root / "A1.QPS").write_text(FIXTURE_QPS)  # data_dir/../A1.QPS
+        self.append_row("../A1,-4.5," + self.claim("proofs/A1.proof.json.gz",
+                                                   self.a1_stamp,
+                                                   checker.checker_digest()))
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("OK: 2 certified claims", out)
+        self.assertIn("unsafe problem_name", out)
+        self.assertIn("outside pinned QPS set", out)
+
+    def test_pinned_stem_set_agreement(self):
+        self.pin_stems("A1", "L1")  # U1 の行はあるが pin に無い
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("outside pinned QPS set", out)
+        self.pin_stems("A1", "L1", "U1", "Z9")  # pin にあって行に無い
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("without CSV row", out)
+        self.pin_file.unlink()
+        code, out = self.run_verifier()
+        self.assertEqual(code, 1, out)
+        self.assertIn("missing (cannot pin the problem set)", out)
+
+    # ---- re-attack P2: silent inventory zeroing (回帰攻撃 発見2) --------------
+    def flip_all_uncertified(self):
+        lines = []
+        for line in self.csv.read_text().splitlines():
+            if line.startswith(("A1,", "L1,")):
+                line = line.split(",")[0] + (",1e99,claim=pre_contract_numeric_"
+                                            "reference_not_certified;revalidation_psd_unknown_UNCERTIFIED")
+            lines.append(line)
+        self.csv.write_text("\n".join(lines) + "\n")
+
+    def test_zero_inventory_red_even_with_full_layers(self):
+        # 全行 UNCERTIFIED 反転 + ガベ値: 層は一度も走らないのに従来は緑だった
+        # (修正前実測 /tmp/pr51-reattack/before_attack2.log)。
+        self.flip_all_uncertified()
+        code, out = self.run_verifier("--require-layers", "S,A,B,C,E",
+                                      "--regenerate")
+        self.assertEqual(code, 1, out)
+        self.assertIn("required layer produced 0 passing checks", out)
+        code, out = self.run_verifier("--min-certified", "1")
+        self.assertEqual(code, 1, out)
+        self.assertIn("certified claims < required minimum 1", out)
+
+    def test_min_certified_boundary(self):
+        # fixture の認証在庫は 2 (A1 + L1)。
+        code, out = self.run_verifier("--min-certified", "2")
+        self.assertEqual(code, 0, out)
+        code, out = self.run_verifier("--min-certified", "3")
+        self.assertEqual(code, 1, out)
+        self.assertIn("certified claims < required minimum 3", out)
+
+    def test_require_layer_zero_pass_red(self):
+        # pass=0 かつ skip=0 の層 (認証行ゼロで誰も走らない) を require したら赤。
+        self.flip_all_uncertified()
+        code, out = self.run_verifier("--require-layers", "C")
+        self.assertEqual(code, 1, out)
+        self.assertIn("R C: required layer produced 0 passing checks", out)
 
 
 if __name__ == "__main__":
