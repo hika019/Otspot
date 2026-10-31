@@ -3,10 +3,7 @@
 //! Purpose: LP simplex regression detection across diverse LP features
 //! (RANGES / FR / OBJSENSE MAX / negative bounds, EQ/LE/GE constraints, degenerate bases).
 //!
-//! # ベースラインとobj_offsetの扱い
-//! ベースライン CSV の値は Netlib 公式値 (MINOS 5.3)。c^T x のみ (N-row RHS 除外)。
-//! ソルバーは N-row RHS を problem.obj_offset として加算して報告するため、比較は
-//! exp_adjusted = netlib_ref + problem.obj_offset で補正する。
+//! ベースライン CSV は目的定数込みの目的値を保持し、solver の報告値とそのまま比較する。
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;

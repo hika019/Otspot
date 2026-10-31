@@ -440,6 +440,32 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assert_failure(root, "data_tracking", "tracked::data/raw.txt")
 
+    def test_tracked_proof_files_are_accepted(self):
+        # 証跡 proofs/ 副次目录 (入れ子含む) は追跡してよい。契約文書が要る。
+        root = self.fixture()
+        (root / "data/baseline_objectives/proofs/liswet").mkdir(parents=True)
+        (root / "data/baseline_objectives/proofs/A.proof.json.lzma").write_bytes(b"\xfd7zXZ\x00")
+        (root / "data/baseline_objectives/proofs/liswet/manifest.json").write_text("{}\n")
+        for rel in ("data/baseline_objectives/proofs/A.proof.json.lzma",
+                    "data/baseline_objectives/proofs/liswet/manifest.json"):
+            subprocess.run(["git", "-C", str(root), "add", "-f", rel], check=True)
+        _, failures = self.evaluate(root)
+        tracked = [f for f in failures
+                   if f.claim == "data_tracking" and f.key.startswith("tracked::")]
+        self.assertEqual([(f.key) for f in tracked], [])
+
+    def test_tracked_non_proof_sibling_still_fails(self):
+        # fail-closed 維持: proofs/ 以外のディレクトリ追加は従来どおり拒否。
+        root = self.fixture()
+        (root / "data/baseline_objectives/runs").mkdir(parents=True)
+        (root / "data/baseline_objectives/runs/x.json").write_text("{}\n")
+        subprocess.run(
+            ["git", "-C", str(root), "add", "-f", "data/baseline_objectives/runs/x.json"],
+            check=True,
+        )
+        self.assert_failure(
+            root, "data_tracking", "tracked::data/baseline_objectives/runs/x.json")
+
     def test_stale_pending_pointer_fails(self):
         root = self.fixture()
         path = root / "AGENTS.md"

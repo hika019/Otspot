@@ -260,9 +260,10 @@ fn test_qps_bound_types() {
 
 // ── Objective offset (N-row RHS) ──────────────────────────────────────────────
 
+/// The N-row RHS holds the negated objective constant (HiGHS: `RHS obj -7.0` → offset 7.0).
 #[test]
-fn test_qps_obj_offset_patterns() {
-    // offset = -7.0
+fn test_qps_obj_row_rhs_offset_patterns() {
+    // RHS -7.0 → constant +7.0
     let qps_neg = r"NAME  OFF
 ROWS
  N  obj
@@ -275,7 +276,11 @@ RHS
 ENDATA
 ";
     let p_neg = parse_qps_str(qps_neg).unwrap();
-    assert!((p_neg.obj_offset - (-7.0)).abs() < 1e-12, "negative offset");
+    assert!(
+        (p_neg.obj_offset - 7.0).abs() < 1e-12,
+        "RHS -7.0 must yield offset +7.0; got {}",
+        p_neg.obj_offset
+    );
 
     // offset = 0 (no N-row RHS)
     let qps_zero = r"NAME  OFF2

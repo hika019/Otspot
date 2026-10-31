@@ -46,7 +46,7 @@ CI が red になる主要 gate (ローカルでも意識):
 
 ## data/ (テスト・ベンチデータ)
 
-gitignored。`data/baseline_objectives/*.csv` のみ git 追跡 (期待値参照)。
+gitignored。`data/baseline_objectives/*.csv` (期待値参照) と `data/baseline_objectives/proofs/**` (厳密認証の証跡。契約文書 `docs/baseline-certificate-contract.md` 参照) のみ git 追跡。
 
 ```bash
 bash scripts/download_all_bench_data.sh             # 全取得

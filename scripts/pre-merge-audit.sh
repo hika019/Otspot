@@ -51,6 +51,8 @@ python3 tests/test_check_data_coverage.py
 python3 tests/test_check_test_data_requirements.py
 python3 tests/test_iso_25010_quality_matrix.py
 python3 tests/test_check_new_ignore_attrs.py
+python3 tests/test_liswet_exact_certificate.py
+python3 tests/test_certificate_contract.py
 python3 scripts/check_architecture.py
 python3 tests/test_check_architecture.py
 python3 scripts/check_docs_consistency.py

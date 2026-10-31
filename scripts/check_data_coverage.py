@@ -11,11 +11,14 @@ Checks:
 Exit code: 0 = all checks pass, 1 = CSV_GAP (required row missing) or --strict + no_ref.
 
 Usage:
-    python3 scripts/check_data_coverage.py [--repo-root DIR] [--strict]
+    python3 scripts/check_data_coverage.py [--repo-root DIR] [--strict] [--dataset NAME ...]
 
 Options:
     --repo-root DIR   Path to repo root (default: parent of this script's dir).
     --strict          Exit 1 if any no_ref files exist.
+    --dataset NAME    Check only these datasets (repeatable). Selection is a
+                      target choice, not a verification shrink: unknown names,
+                      and missing dirs/CSVs of selected datasets, fail closed.
 
 Optional-row detection: rows whose ``problem_name`` starts with ``SS_`` are
 treated as optional.  This prefix-based rule is regen-stable — tools such as
@@ -164,6 +167,15 @@ def main() -> int:
                         help="Repo root directory (default: parent of scripts/)")
     parser.add_argument("--strict", action="store_true",
                         help="Exit 1 if any no_ref data files exist")
+    parser.add_argument("--dataset", action="append", default=None,
+                        metavar="NAME",
+                        help="only check these datasets (repeatable). An "
+                             "unknown name fails closed. For selected "
+                             "datasets a missing data dir or CSV is a FAIL, "
+                             "not a MISSING_DIR note: explicit selection "
+                             "demands the target exists. Without --dataset "
+                             "the historical full-sweep behavior stands "
+                             "(absent dirs are noted, tolerated).")
     args = parser.parse_args()
 
     if args.repo_root:
@@ -171,25 +183,46 @@ def main() -> int:
     else:
         root = Path(__file__).resolve().parent.parent
 
+    datasets = DATASETS
+    if args.dataset:
+        known = {ds.name for ds in DATASETS}
+        unknown = sorted(set(args.dataset) - known)
+        if unknown:
+            print(f"unknown --dataset: {unknown}; known: {sorted(known)}")
+            return 1
+        datasets = [ds for ds in DATASETS if ds.name in set(args.dataset)]
+
     ok = True
     rows = []
 
-    for ds in DATASETS:
+    for ds in datasets:
         data_dir = root / "data" / ds.name
         csv_path = root / ds.csv_path if ds.csv_path else None
         extra_csv_path = root / ds.extra_csv_path if ds.extra_csv_path else None
 
         if not data_dir.is_dir():
-            rows.append({
-                "dataset": ds.name,
-                "origin": ds.origin,
-                "files": 0,
-                "csv_rows": 0,
-                "no_ref": 0,
-                "csv_gap": 0,
-                "opt_gap": 0,
-                "status": "MISSING_DIR",
-            })
+            if args.dataset:
+                print(f"[MISSING_DIR] {ds.name}: explicitly selected but "
+                      f"{data_dir} does not exist")
+                ok = False
+            else:
+                rows.append({
+                    "dataset": ds.name,
+                    "origin": ds.origin,
+                    "files": 0,
+                    "csv_rows": 0,
+                    "no_ref": 0,
+                    "csv_gap": 0,
+                    "opt_gap": 0,
+                    "status": "MISSING_DIR",
+                })
+            continue
+        if csv_path and not csv_path.is_file():
+            # An explicitly requested dataset without its baseline CSV must
+            # not pass as "nothing to check" (restriction = target choice,
+            # never verification shrink).
+            print(f"[MISSING_CSV] {ds.name}: {csv_path} does not exist")
+            ok = False
             continue
 
         all_files = data_files(data_dir, ds.exts)

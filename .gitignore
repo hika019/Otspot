@@ -4,7 +4,12 @@
 !/data/baseline_objectives/
 /data/baseline_objectives/*
 !/data/baseline_objectives/*.csv
+!/data/baseline_objectives/proofs/
+!/data/baseline_objectives/proofs/*
 reports/
+# 証憑ツール (scripts/revalidate_baselines.py 等) の既定 --evidence-dir 出力先。
+# 生成物の誤追跡 (git add -A 事故) 防止。証跡実体の保存先は未定 (lead 判断待ち)。
+/baseline-evidence/
 **/__pycache__/
 **/.pytest_cache/
 .venv/

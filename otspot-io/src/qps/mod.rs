@@ -195,8 +195,10 @@ ENDATA
         assert_eq!(prob.q.values().len(), 4);
     }
 
+    /// The objective-row RHS is the negated constant (HiGHS reads `offset = 7.5`
+    /// for this file). Sentinel: dropping the negation yields `-7.5`.
     #[test]
-    fn test_parse_qps_obj_offset() {
+    fn test_qps_obj_row_rhs_is_negated_objective_constant() {
         let qps = r"NAME          OBJ_OFFSET_TEST
 ROWS
  N  obj
@@ -209,18 +211,28 @@ RHS
 ENDATA
 ";
         let prob = parse_qps_str(qps).unwrap();
-        assert!((prob.obj_offset - (-7.5)).abs() < 1e-10);
+        assert!(
+            (prob.obj_offset - 7.5).abs() < 1e-12,
+            "N-row RHS -7.5 must yield obj_offset +7.5; got {}",
+            prob.obj_offset
+        );
     }
 
+    /// e226 (Netlib) carries `RHS OBJ -7.113`; HiGHS reads `offset = 7.113`.
     #[test]
-    fn test_e226_obj_offset() {
-        let path = std::path::Path::new("data/lp_problems/e226.QPS");
+    fn test_e226_objective_constant_is_negated_rhs() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/lp_problems/e226.QPS");
         if !path.exists() {
-            eprintln!("e226.QPS not found, skip");
+            eprintln!("{} not found, skip", path.display());
             return;
         }
-        let prob = parse_qps(path).unwrap();
-        assert!((prob.obj_offset - (-7.113)).abs() < 1e-3);
+        let prob = parse_qps(&path).unwrap();
+        assert!(
+            (prob.obj_offset - 7.113).abs() < 1e-12,
+            "e226 obj_offset must be +7.113; got {}",
+            prob.obj_offset
+        );
     }
 
     #[test]
@@ -253,8 +265,10 @@ ENDATA
         );
     }
 
+    /// min x1 + x2 s.t. x1 + x2 >= 3 with `RHS obj -7.0`: HiGHS reports 10.0
+    /// (cᵀx* = 3 plus constant 7).
     #[test]
-    fn test_solve_with_obj_offset() {
+    fn test_solve_with_negated_obj_row_rhs() {
         let qps = r"NAME          OFFSET_INTEG
 ROWS
  N  obj
@@ -268,10 +282,14 @@ RHS
 ENDATA
 ";
         let prob = parse_qps_str(qps).unwrap();
-        assert!((prob.obj_offset - (-7.0)).abs() < 1e-10);
+        assert!((prob.obj_offset - 7.0).abs() < 1e-12);
         let result = solve_qp(&prob);
         assert_eq!(result.status, SolveStatus::Optimal);
-        assert!((result.objective - (-4.0)).abs() < 1e-3);
+        assert!(
+            (result.objective - 10.0).abs() < 1e-6,
+            "expected 10.0, got {}",
+            result.objective
+        );
     }
 
     #[test]
@@ -731,12 +749,11 @@ ENDATA\n";
         );
     }
 
-    /// Sentinel: OBJSENSE MAX with an N-row RHS must negate the offset.
-    ///
-    /// **No-op failure guarantee**: removing the `if self.maximize { -raw }` sign-flip
-    /// leaves `obj_offset = 10.0` instead of `-10.0` → assertion fires.
+    /// OBJSENSE MAX: `max x1 - 10` (RHS 10.0) is minimized as `-x1 + 10`, so the
+    /// stored offset is +10. HiGHS reports the MAX optimum -5.0 at x1 = 5; the
+    /// minimization form is its negation, 5.0.
     #[test]
-    fn test_qps_objsense_max_obj_offset_sign_flip() {
+    fn test_qps_objsense_max_obj_row_rhs_offset() {
         let qps = r"NAME  MAX_OFFSET
 OBJSENSE
     MAX
@@ -752,9 +769,16 @@ ENDATA
 ";
         let prob = parse_qps_str(qps).unwrap();
         assert!(
-            (prob.obj_offset - (-10.0)).abs() < 1e-12,
-            "OBJSENSE MAX with N-row RHS=10.0 must yield obj_offset=-10.0; got {}",
+            (prob.obj_offset - 10.0).abs() < 1e-12,
+            "OBJSENSE MAX with N-row RHS 10.0 must yield obj_offset +10.0; got {}",
             prob.obj_offset
+        );
+        let result = solve_qp(&prob);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(
+            (result.objective - 5.0).abs() < 1e-6,
+            "expected 5.0, got {}",
+            result.objective
         );
     }
 

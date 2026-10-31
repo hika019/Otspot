@@ -14,7 +14,6 @@
 #                 HiGHS: full-precision obj vs baseline
 #                 3 thresholds reported: 1e-2, 1e-4, 1e-6
 #                 Self-solver internal acceptance gate = 1e-2 (§2.4), NOT 1e-6
-#   e226:         Excluded — objective constant convention differs for all 3 (self/HiGHS/Netlib)
 #
 # Usage:
 #   bash scripts/lp_vs_highs.sh [--mini] [--jobs N] [--timeout SEC]
@@ -345,9 +344,7 @@ problem_names = sorted(
 # Both solvers: relative error = |obj - baseline| / max(|baseline|, 1.0)
 # Self-solver:  obj_err% from note / 100  (solver already computed this vs baseline)
 # HiGHS:        |highs_obj - baseline| / max(|baseline|, 1.0)
-# e226: excluded — objective constant convention differs across self/HiGHS/Netlib (all correct)
 
-EXCLUDE_SCORING = {'e226'}
 THRESHOLDS      = [1e-2, 1e-4, 1e-6]
 THR_LABELS      = {1e-2: '1e-2', 1e-4: '1e-4', 1e-6: '1e-6'}
 
@@ -388,12 +385,8 @@ for name in problem_names:
     b  = baseline.get(name)
     h_obj    = hd.get('obj')
     s_status = sd.get('status', 'NA')
-    if name in EXCLUDE_SCORING:
-        s_match = 'excluded(convention)'
-        h_match = 'excluded(convention)'
-    else:
-        s_match = match_label(self_rel_err(sd), 1e-2)
-        h_match = match_label(highs_rel_err(hd, b), 1e-2)
+    s_match = match_label(self_rel_err(sd), 1e-2)
+    h_match = match_label(highs_rel_err(hd, b), 1e-2)
     rows.append({
         'instance':         name,
         'solver_status':    s_status,
@@ -420,8 +413,8 @@ n_h_opt   = sum(1 for r in rows if r['highs_status'] == 'Optimal')
 n_s_tmout = sum(1 for r in rows if r['solver_status'] == 'TIMEOUT')
 n_h_tmout = sum(1 for r in rows if 'time' in r['highs_status'].lower())
 
-# 3-threshold match counts (e226 excluded from scoring pool)
-scorable = [r for r in rows if r['instance'] not in EXCLUDE_SCORING]
+# 3-threshold match counts
+scorable = rows
 n_score  = len(scorable)
 thresh_counts = {}
 for thr in THRESHOLDS:
@@ -500,8 +493,7 @@ with open(summary_md, 'w') as f:
     f.write('# LP Benchmark: Self-solver vs HiGHS\n\n')
     f.write('**Generated**: {}\n\n'.format(now))
     f.write('**Suite**: Netlib LP standard — {} problems available'.format(n_total))
-    f.write(' (pilot-ja / pilot-we / vtp-base 未DL),')
-    f.write(' e226 を objective-constant convention 差として除外し **{}問** で採点\n\n'.format(n_score))
+    f.write(' (pilot-ja / pilot-we / vtp-base 未DL), **{}問** で採点\n\n'.format(n_score))
     f.write('**CSV**: lp_vs_highs.csv\n\n')
 
     f.write('## Methodology\n\n')
@@ -527,8 +519,6 @@ with open(summary_md, 'w') as f:
 
     # 3-threshold match table
     f.write('## 正解率 (Objective match vs Netlib baseline)\n\n')
-    f.write('**e226除外** (objective定数のconvention差 — self=-25.86, HiGHS=-11.64,')
-    f.write(' Netlib=-18.75; 3者全て別convention)\n\n')
     f.write('| 閾値 | 自solver | HiGHS | 備考 |\n')
     f.write('|------|---------|-------|------|\n')
     for thr in THRESHOLDS:
@@ -559,8 +549,6 @@ with open(summary_md, 'w') as f:
             f.write('| {} | {} | {} | {} | {} | {} | {} |\n'.format(
                 name, s_pct, h_val, col12, col14, col16, remark))
         f.write('\n')
-        f.write('**e226** (除外): 自solver=-25.86 (obj_offset=-7.113), HiGHS=-11.64,')
-        f.write(' baseline=-18.75 — 3者いずれも異なるconventionで正しい\n\n')
         f.write('**greenbea/greenbeb** (含む): 両solverが独立に同一値を返し、旧baselineと一致。')
         f.write('netlib_lp.csv更新後の新値が外れ値の可能性あり\n\n')
 
@@ -604,7 +592,7 @@ with open(summary_md, 'w') as f:
 print('[lp_vs_highs] Summary -> ' + summary_md)
 print('[lp_vs_highs] Optimal: self={}/{}, HiGHS={}/{}'.format(n_s_opt, n_total, n_h_opt, n_total))
 print('')
-print('[lp_vs_highs] === 3-threshold obj_match ({} problems, excl. e226) ==='.format(n_score))
+print('[lp_vs_highs] === 3-threshold obj_match ({} problems) ==='.format(n_score))
 for thr in THRESHOLDS:
     s_cnt, h_cnt = thresh_counts[thr]
     print('[lp_vs_highs]   {} | self={}/{} | HiGHS={}/{}'.format(

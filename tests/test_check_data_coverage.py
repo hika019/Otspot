@@ -156,6 +156,79 @@ def test_qplib_qcqp_row_without_file_is_still_csv_gap():
     assert "QPLIB_2546" in out
 
 
+def _run_ds(repo_root: Path, *datasets: str) -> tuple[int, str]:
+    cmd = [sys.executable, str(SCRIPT), "--repo-root", str(repo_root)]
+    for d in datasets:
+        cmd += ["--dataset", d]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return result.returncode, result.stdout + result.stderr
+
+
+def test_dataset_scoped_clean_dir_ok():
+    """限定指定 + gap なし dir → 緑。限定時も CSV↔dir 突合は従来どおり走る。"""
+    csv = SENTINEL_CSV_HEADER + "OSQP_TEST_A,1.0,source\n"
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), csv, ["OSQP_TEST_A"])
+        code, out = _run_ds(repo, "osqp_bench")
+    assert code == 0, f"Expected exit 0, got {code}.\nOutput:\n{out}"
+    assert "osqp_bench" in out
+
+
+def test_dataset_scoped_gap_fails():
+    csv = SENTINEL_CSV_HEADER + "OSQP_TEST_A,1.0,source\nOSQP_TEST_B,1.0,source\n"
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), csv, ["OSQP_TEST_A"])
+        code, out = _run_ds(repo, "osqp_bench")
+    assert code == 1, f"Expected exit 1, got {code}.\nOutput:\n{out}"
+    assert "CSV_GAP" in out
+
+
+def test_dataset_selection_ignores_other_dataset_gaps():
+    """限定=対象選択: 対象外の gap は赤にしない (フル実行なら赤になる)。"""
+    csv = SENTINEL_CSV_HEADER + "OSQP_TEST_A,1.0,source\n"
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), csv, ["OSQP_TEST_A"])
+        other = repo / "data" / "lp_problems_infeas"
+        other.mkdir()
+        (other / "straysolve.mps").write_text("")
+        (repo / "data" / "baseline_objectives" / "netlib_lp_infeas.csv").write_text(
+            SENTINEL_CSV_HEADER + "GHOST_LP,1.0,source\n")
+        full_code, full_out = _run(repo)
+        assert full_code == 1, f"full sweep should be red.\nOutput:\n{full_out}"
+        code, out = _run_ds(repo, "osqp_bench")
+    assert code == 0, f"scoped run should be green.\nOutput:\n{out}"
+
+
+def test_dataset_unknown_name_fails_closed():
+    csv = SENTINEL_CSV_HEADER + "OSQP_TEST_A,1.0,source\n"
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), csv, ["OSQP_TEST_A"])
+        code, out = _run_ds(repo, "no_such_dataset")
+    assert code == 1, f"unknown dataset must fail closed, got {code}.\nOutput:\n{out}"
+    assert "unknown --dataset" in out
+
+
+def test_dataset_scoped_missing_dir_fails():
+    """明示選択した dataset の dir 欠落は MISSING_DIR 許容ではなく赤。"""
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td) / "repo"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "data" / "baseline_objectives").mkdir(parents=True)
+        code, out = _run_ds(repo, "osqp_bench")
+    assert code == 1, f"missing dir for selected dataset must fail, got {code}.\nOutput:\n{out}"
+    assert "MISSING_DIR" in out
+
+
+def test_dataset_scoped_missing_csv_fails():
+    csv = SENTINEL_CSV_HEADER + "OSQP_TEST_A,1.0,source\n"
+    with tempfile.TemporaryDirectory() as td:
+        repo = _build_repo(Path(td), csv, ["OSQP_TEST_A"])
+        (repo / "data" / "baseline_objectives" / "osqp_bench.csv").unlink()
+        code, out = _run_ds(repo, "osqp_bench")
+    assert code == 1, f"missing CSV for selected dataset must fail, got {code}.\nOutput:\n{out}"
+    assert "MISSING_CSV" in out
+
+
 if __name__ == "__main__":
     tests = [
         test_required_present_ok,
@@ -164,6 +237,12 @@ if __name__ == "__main__":
         test_optional_absent_warn_only,
         test_qplib_qcqp_extra_csv_merged_into_coverage,
         test_qplib_qcqp_row_without_file_is_still_csv_gap,
+        test_dataset_scoped_clean_dir_ok,
+        test_dataset_scoped_gap_fails,
+        test_dataset_selection_ignores_other_dataset_gaps,
+        test_dataset_unknown_name_fails_closed,
+        test_dataset_scoped_missing_dir_fails,
+        test_dataset_scoped_missing_csv_fails,
     ]
     failed = 0
     for t in tests:

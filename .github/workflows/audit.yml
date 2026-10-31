@@ -39,6 +39,86 @@ jobs:
         run: python3 scripts/check_docs_consistency.py
       - name: docs consistency gate self-test
         run: python3 tests/test_check_docs_consistency.py
+      # eMudhra/emSign CA 事故: pip < 26.2.2 は vendored certifi に脆弱な
+      # ルート証明書を保持するため、pip と certifi を修正版以上へ引き上げる。
+      - name: Bootstrap secure pip and certifi (eMudhra CA incident)
+        run: python -m pip install --upgrade 'pip>=26.2.2' 'certifi>=2026.10.19'
+      - name: baseline truth script sentinel
+        run: |
+          python -m pip install 'numpy==1.26.*' 'scipy==1.13.*' 'highspy==1.14.0' 'certifi>=2026.10.19'
+          python3 tests/test_highs_baseline_truth.py
+          python3 tests/test_liswet_exact_certificate.py
+          python3 tests/test_certificate_contract.py
+          python3 tests/test_certificate_contract_adversarial.py
+          python3 tests/test_check_baseline_proofs.py
+          # committed 証跡のオフライン検証 (hermetic 層のみ)。この job には QPS data
+          # が無いので C/E は明示 SKIP — S 層 (行構造・safe name・pinned stem 集合・
+          # claim 書式・manifest 構造) の zero-skip/zero-pass を要求し、C/E skip が
+          # 想定であることをコードで表明する。
+          # 認証の完全性は下の baseline-proof job (data + --regenerate + 全層必須)
+          # が担保する。この 2 重構造が無い状態で C/E skip を許すと偽証跡が
+          # 緑を通る (攻撃レビュー P0)。
+          # --min-certified 88: 全行 UNCERTIFIED 反転による「認証在庫の無言
+          # ゼロ化」を hermetic 層でも赤くする (回帰攻撃 発見2)。88 という下限は
+          # README/契約文書の 88/138 記述と二重管理になる — 再認証 effort で
+          # 件数は増える方向にしか変わらないため許容し、下限を減らす変更は
+          # PR レビュー対象として CI 側で明示管理する。
+          python3 scripts/check_baseline_proofs.py --require-layers S --min-certified 88
+
+  baseline-proof:
+    name: baseline proof verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v6
+        id: cache
+        with:
+          path: data/
+          # ci.yml test-integration と同一の data cache (key 変更は両側で同時に行う)。
+          key: bench-data-v3
+          restore-keys: |
+            bench-data-
+      # cache が checkout より後に data/ を上書きすると、古い CSV/proofs で検証する
+      # 攻撃面になる。git 追跡下の baseline 一式を必ず HEAD 版に戻す (ci.yml 追随)。
+      - name: Restore git-tracked baselines (cache 上書き対策)
+        run: git checkout HEAD -- data/baseline_objectives/
+      # eMudhra/emSign CA 事故: pip < 26.2.2 は vendored certifi に脆弱な
+      # ルート証明書を保持するため、pip と certifi を修正版以上へ引き上げる。
+      - name: Bootstrap secure pip and certifi (eMudhra CA incident)
+        run: python -m pip install --upgrade 'pip>=26.2.2' 'certifi>=2026.10.19'
+      # numpy/scipy/cvxpy は ci-subset の gen スクリプト、highspy は層 E の replay
+      # (highs_baseline_truth) と LISWET 再生成が必要。cert suite と同一 pins。
+      - name: Install python deps (data generation + replay layers)
+        run: python -m pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*' 'highspy==1.14.0' 'certifi>=2026.10.19'
+      - name: Build emps decoder (Netlib LP data 変換用)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash scripts/ensure_emps.sh
+      # maros_meszaros は ci-subset に含まれる (専用 download script + sha256
+      # manifest 検証。bash scripts/download_all_bench_data.sh --ci-subset --check
+      # で [ok] を実測済み)。
+      - name: Download CI subset (~1.2 GiB)
+        run: bash scripts/download_all_bench_data.sh --ci-subset
+      # CSV 行集合と data 実体の突合 (検証器の pinned stem 集合 pin とは独立の
+      # 二重防御)。maros 限定: ci-subset には lp_problems 系 (infeas/unbounded
+      # 等) の全集合が含まれず、フル突合は CSV_GAP で赤になる (CI 着弾 2026-10、
+      # --dataset 無しで 41s fail 実測)。maros 以外の coverage の検証場所は
+      # `bash scripts/download_all_bench_data.sh --check` (full 取得モードのみ)
+      # で、CI ジョブは現時点でどこも走らせない (full-data 環境限定ゲート)。
+      # なお本機の main repo フルデータでも当該フル mode は rc=1 — lp 系 dir が
+      # .QPS へ移行済みなことと check_data_coverage の lp 拡張子想定
+      # (.mps/.lp/.SIF) の不一致による既存論点 (CI 非実行のため未surface、
+      # lp 移行追随は本コミットの範囲外)。
+      - name: Baseline CSV vs data coverage cross-check (maros)
+        run: python3 scripts/check_data_coverage.py --repo-root . --dataset maros_meszaros
+      # data があるこの job だけが全層を実行できる: C (入力 hash) / E (witness
+      # replay) + LISWET 12 件の実再生成。skip・zero-pass を 1 つでも出したら red。
+      # --min-certified 88 は inventory ゼロ化の下限ゲート (audit 側と同趣旨、
+      # 下限変更は PR レビュー対象)。
+      - name: Verify all proof claims up to replay, including LISWET regeneration
+        run: python3 scripts/check_baseline_proofs.py --regenerate --require-layers S,A,B,C,E --min-certified 88
 
   comment-hygiene:
     name: comment-hygiene
