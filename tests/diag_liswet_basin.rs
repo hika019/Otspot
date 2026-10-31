@@ -429,7 +429,12 @@ fn measure(name: &str) -> Outcome {
     }
 }
 
-fn sentinel_asserts(name: &str, cert_obj: f64, out: &Outcome) {
+/// Full sentinel decision as a `Result` whose `Err` carries the evidence
+/// (status / objective / DD values). The heavy test bodies keep the load-
+/// bearing `assert!` so the verdict is asserted where nextest reports it
+/// (and where the observation-only audit can see it), not hidden in a
+/// helper. Problem-name attribution lives at the assert sites.
+fn sentinel_verdict(cert_obj: f64, out: &Outcome) -> Result<(), String> {
     // Non-claiming completion statuses that are honest for this convex,
     // bounded, feasible problem under a budget. Infeasible/Unbounded/
     // NumericalError etc. would be wrong-direction claims for this class and
@@ -442,20 +447,19 @@ fn sentinel_asserts(name: &str, cert_obj: f64, out: &Outcome) {
         "SuboptimalSolution",
         "FeasiblePoint",
     ];
-    if !out.claims_optimal {
-        assert!(
-            ALLOWED.contains(&out.status_debug.as_str()),
-            "{name}: completion {} is neither an in-band Optimal nor an allowed \
+    if !out.claims_optimal && !ALLOWED.contains(&out.status_debug.as_str()) {
+        return Err(format!(
+            "completion {} is neither an in-band Optimal nor an allowed \
              non-claiming status {ALLOWED:?}",
             out.status_debug
-        );
+        ));
     }
-    let verdict = sentinel_check(out.claims_optimal, out.objective, cert_obj, out.dd_ours);
-    assert!(
-        verdict.is_ok(),
-        "{name}: sentinel rejected the solver verdict: {}",
-        verdict.unwrap_err()
-    );
+    sentinel_check(out.claims_optimal, out.objective, cert_obj, out.dd_ours)
+}
+
+/// Post-assert diagnostic only (the assert in the test bodies is the
+/// load-bearing part).
+fn report_green(name: &str, out: &Outcome) {
     eprintln!(
         "{name}: SENTINEL GREEN status={} objective={:.6e} dd={:?} (clarabel dd {:.3e} is diagnostic only)",
         out.status_debug, out.objective, out.dd_ours, out.dd_ref
@@ -469,14 +473,26 @@ fn sentinel_asserts(name: &str, cert_obj: f64, out: &Outcome) {
 #[ignore = "heavy: 無負荷でも clarabel 復習 + warm-start 込みで数分 (main solve は 60s budget、local 自然完走 163s → Timeout 分岐で緑)。Optimal 分岐の実測は LISWET_BUDGET_SECS=165。never-Optimal 前提は 92ce6cc2/2938b3c5 で退役、センチネルは認証 baseline 突合へ刷新済み"]
 fn diag_liswet9_basin_sentinel() {
     let out = measure("LISWET9");
-    sentinel_asserts("LISWET9", LISWET9_CERT_OBJ, &out);
+    let verdict = sentinel_verdict(LISWET9_CERT_OBJ, &out);
+    assert!(
+        verdict.is_ok(),
+        "LISWET9 sentinel violated: {}",
+        verdict.unwrap_err()
+    );
+    report_green("LISWET9", &out);
 }
 
 #[test]
 #[ignore = "heavy: 同上 (LISWET9 と同一設計)。CI 着弾はこの問題の Optimal 誤発火 — 認証値と rel 3e-7 で一致する正解 Optimal を never-Optimal が罰していた。刷新後は Optimal=band 突合 / 非決定完了=許容集合 で両分岐緑が決定的"]
 fn diag_liswet12_basin_sentinel() {
     let out = measure("LISWET12");
-    sentinel_asserts("LISWET12", LISWET12_CERT_OBJ, &out);
+    let verdict = sentinel_verdict(LISWET12_CERT_OBJ, &out);
+    assert!(
+        verdict.is_ok(),
+        "LISWET12 sentinel violated: {}",
+        verdict.unwrap_err()
+    );
+    report_green("LISWET12", &out);
 }
 
 // ---- pure sentinel logic pinned by synthetic inputs (no data, no solver) ----
