@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3299 testcases, 42 ignored
+# totals: 3305 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -2831,7 +2831,13 @@ otspot::diag_liswet9_objective	liswet9_objective_self_consistent	active
 otspot::diag_liswet9_objective	liswet9_optimal_claim_matches_highs_truth	active
 otspot::diag_liswet9_objective	yao_objective_self_consistent	active
 otspot::diag_liswet9_objective	yao_optimal_claim_matches_highs_truth	active
-otspot::diag_liswet_basin	diag_liswet_basin_9_12	ignored
+otspot::diag_liswet_basin	diag_liswet12_basin_sentinel	ignored
+otspot::diag_liswet_basin	diag_liswet9_basin_sentinel	ignored
+otspot::diag_liswet_basin	sentinel_accepts_true_optimal	active
+otspot::diag_liswet_basin	sentinel_band_edges_absolute_probes	active
+otspot::diag_liswet_basin	sentinel_nonoptimal_completion_ignores_objective	active
+otspot::diag_liswet_basin	sentinel_rejects_infeasible_solution_any_status	active
+otspot::diag_liswet_basin	sentinel_rejects_pre_convention_optimal	active
 otspot::diag_lp_bugs	diag_bland_rule_coverage	active
 otspot::diag_lp_bugs	diag_boeing1_current_state	active
 otspot::diag_lp_bugs	diag_capri_presolve_vs_no_presolve	active
