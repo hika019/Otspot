@@ -7,7 +7,7 @@ description: ベンチマーク実行時に必ず読む。実行コマンド・�
 
 ## 基準値
 - 実行前に `df -h /` (AGENTS.md「ディスク規律」。80% 超では先に掃除。容量満杯は bench 途中脱落と出力捕捉失敗を起こす)。
-- 実行前に `bash scripts/download_all_bench_data.sh --check` で data の取得版を検証する (sha256 manifest 照合は maros のみ。他 suite は件数確認のみ)。旧取得経路の残存ファイル (例: .mat 変換由来で目的行 RHS 定数なし) を検出できる。古い cache の取り違えは OBJ_MISMATCH として静かに現れる (2026-11-01 実事故: maros 全 138 問が正規版と不一致、N 行定数欠落は 21 問に及び eps=1e-4 の実測で OBJ_MISMATCH 26)。
+- 実行前に `bash scripts/download_all_bench_data.sh --check` で data の取得版を検証する。判定は全体の終了コードでなく**対象 suite の行が `[ok]` か**で行う (未取得の他 suite があっても exit 1 になるため。`[stale]` は再取得)。maros では sha256 manifest 照合により旧取得経路の残存ファイル (例: .mat 変換由来で目的行 RHS 定数なし) を検出できる。古い cache の取り違えは OBJ_MISMATCH として静かに現れる (2026-11-01 の実事故: PR #61 の経緯参照。他 suite の sha256 照合・`--check <suite>` は #63 管理)。
 - timeout=1000s (バグ再現の短縮時は 400s 可)、eps=1e-6 (任意で 1e-4 / 1e-8 の3点)。
 - jobs=6 固定。CPU 取り合いを避けるため、問題集 (suite) は並行させず順次実行する。
 - 実行は haiku subagent へ委譲し、background で完了通知を待つ。
