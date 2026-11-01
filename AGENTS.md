@@ -77,6 +77,14 @@ bash scripts/bench_parallel.sh --data-dir data/<suite> --eps 1e-6 --jobs 6 --tim
 - SOCP (data/cblib_socp) は harness 非対応。`solve_cbf` example を jobs=1 で直列実行 (大規模問題は ~18 GB RSS、並列で OOM)
 - 判定は合計 PASS 数でなく baseline との per-problem diff。TIMEOUT と非収束は別物 (skill bug-frontier の 6 状態)
 
+## ディスク規律
+
+- 作業着手時に `df -h /`。使用率 80% 超は先に解消してから着手 (`systemctl --user start disk-guard.service` で即掃討、手順は `~/bin/otspot-wt-clean.sh`)。満杯になると shell ツールの出力捕捉が失敗し、ベンチ・ビルドが黙ったまま壊れる (2026-11-01 実事故)
+- 調査用 worktree は `~/bin/otspot-wt-new.sh <name> <branch>` で作成。`data/` は symlink で本体を共有するためコピー不要 (6.4 GiB 重複回避)
+- マージ後は必ず `~/bin/otspot-wt-rm.sh <name>` で後始末 (上記「git 運用」の untracked 確認規定に従い、提示されたら `--force`)。統合済み branch 一括は `~/bin/otspot-wt-clean.sh --apply`。worktree の `target/` 重複が最大の容量要因 (~2〜11 GiB/個)
+- セッション産物は `/tmp/opencode/<セッション名>/` に置く。14 日超のものは disk-guard が掃討対象にする。長期保存が要る証跡は `/tmp/opencode` の外へ移すこと
+- ベンチ実行中の main repo `target/` を削除しない (harness は相対パス `./target/release/*` を呼ぶ)。disk-guard も main の target は対象外にしている
+
 ## git 運用 (CLAUDE.md 抜粋)
 
 - コミットメッセージは日本語 (conventional prefix 可)

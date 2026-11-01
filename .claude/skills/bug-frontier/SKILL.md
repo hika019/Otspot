@@ -19,7 +19,7 @@ description: バグ調査・修正・性能退化調査を開始する前に必�
 ## ループ (1 iteration)
 1. 観測を再現 (bench: timeout=400 or 1000, eps=1e-6 固定) — subagent 実行。
 2. 異常を【段】×【correctness / それ以外】で分類 (timing/iters/残差の実測値から)。
-3. フロンティア段を厳密検証し proven か全バグかを確定 (subagent/worktree。env-gated トレース可、報告後 revert)。
+3. フロンティア段を厳密検証し proven か全バグかを確定 (subagent/worktree。worktree は `~/bin/otspot-wt-new.sh` で作り `~/bin/otspot-wt-rm.sh` で消す — AGENTS.md「ディスク規律」。env-gated トレース可、報告後 revert)。
 4. 見つけた全バグを真因修正する。症状隠し・cap・当該段の無効化・マジックナンバーで抑えるのは修正ではない — 真因が未特定なら修正せず調査を続ける。
 5. lead が full-suite (`cargo nextest run --release --test-threads 6`) を実走 → integrate へ --no-ff マージ。
 6. フロンティア段の proven を再確認 → フロンティア前進 → 再観測。
