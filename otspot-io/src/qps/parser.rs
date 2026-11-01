@@ -63,7 +63,13 @@ impl QpsParser {
         source.visit_lines(QpsError::IoError, |line_num, line| {
             self.progress = line_num;
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('$') {
+            // `*` opens a comment wherever it leads a line, but `$` is only a
+            // comment marker in column 1 (the IBM fixed-column dialect). A `$`
+            // behind leading blanks is the first field of a data line:
+            // pang.QPS has a column legitimately named `$0AICCB`, and testing
+            // the *trimmed* line skipped its COLUMNS lines, silently dropping
+            // the variable (n=459 where the file declares 460).
+            if trimmed.is_empty() || trimmed.starts_with('*') || line.starts_with('$') {
                 return Ok(true);
             }
 
