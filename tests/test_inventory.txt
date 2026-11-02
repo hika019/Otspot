@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3305 testcases, 43 ignored
+# totals: 3307 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -2306,7 +2306,9 @@ otspot-io	qps::tests::test_qps_bounds_malformed_too_few_fields_is_error	active
 otspot-io	qps::tests::test_qps_bounds_shorthand_non_value_taking_2token	active
 otspot-io	qps::tests::test_qps_bounds_up_surplus_value_token_is_error	active
 otspot-io	qps::tests::test_qps_bounds_value_on_value_less_type_is_error	active
+otspot-io	qps::tests::test_qps_column_name_starting_with_dollar_is_not_a_comment	active
 otspot-io	qps::tests::test_qps_column_named_marker_is_not_a_marker_line	active
+otspot-io	qps::tests::test_qps_column_one_dollar_line_is_a_comment	active
 otspot-io	qps::tests::test_qps_columns_inf_value_is_error	active
 otspot-io	qps::tests::test_qps_columns_malformed_too_few_fields_is_error	active
 otspot-io	qps::tests::test_qps_columns_nan_value_is_error	active

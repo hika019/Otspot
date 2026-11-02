@@ -569,6 +569,59 @@ ENDATA\n";
         );
     }
 
+    /// A `$` opens a comment only in column 1 (IBM fixed-column dialect); a
+    /// `$` behind the leading blanks that introduce a data line is the first
+    /// character of a name. pang.QPS carries a column legitimately named
+    /// `$0AICCB` (its COLUMNS lines at file lines 1790-1791), and testing the
+    /// trimmed line skipped those lines as comments.
+    ///
+    /// **No-op failure guarantee**: replacing `line.starts_with('$')` with
+    /// `trimmed.starts_with('$')` in `QpsParser::run` skips both `$0AICCB`
+    /// lines — `num_vars` drops to 1 and its coefficients never reach `c`/`a`
+    /// (the exact pang 459-vs-460 shape) — verified by temporarily reverting.
+    #[test]
+    fn test_qps_column_name_starting_with_dollar_is_not_a_comment() {
+        let qps = concat!(
+            "NAME\nROWS\n N obj\n L c1\n L c2\n",
+            "COLUMNS\n",
+            "    x         obj  1.0  c1  1.0\n",
+            "    $0AICCB   obj  3.0  c1  1.0  c2  -1.0\n",
+            "RHS\n    rhs c1 10.0  c2 4.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps).expect("a column name starting with $ must parse as data");
+        assert_eq!(prob.num_vars, 2, "the column $0AICCB must not be dropped");
+        assert_eq!(
+            prob.c,
+            vec![1.0, 3.0],
+            "both objective coefficients survive"
+        );
+        // Column order: x (0), $0AICCB (1); row order: c1 (0), c2 (1).
+        let av = prob.a.mat_vec_mul(&[0.0, 1.0]).unwrap();
+        assert_eq!(
+            av,
+            vec![1.0, -1.0],
+            "$0AICCB's constraint coefficients must survive, got {av:?}"
+        );
+    }
+
+    /// The other half of the rule: a `$` in column 1 stays a comment marker,
+    /// so dialect files that use `$` banners still parse (were the check
+    /// dropped entirely, the section-header pass would reject these lines).
+    #[test]
+    fn test_qps_column_one_dollar_line_is_a_comment() {
+        let qps = concat!(
+            "$ written by a fixed-column writer\n",
+            "$$ every column-1 dollar line is a comment\n",
+            "NAME\nROWS\n N obj\n L c1\n",
+            "COLUMNS\n    x  obj  1.0  c1  1.0\n",
+            "RHS\n    rhs c1 1.0\n",
+            "ENDATA\n",
+        );
+        let prob = parse_qps_str(qps).expect("column-1 dollar comments must be skipped");
+        assert_eq!((prob.num_vars, prob.num_constraints), (1, 1));
+    }
+
     /// The QPS twin of the MPS truncation/duplicate-name guards: a name that
     /// overflows the fixed 8-byte field must not be clipped into a false match,
     /// and two rows may not share a name.

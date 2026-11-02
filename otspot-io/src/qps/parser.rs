@@ -63,7 +63,16 @@ impl QpsParser {
         source.visit_lines(QpsError::IoError, |line_num, line| {
             self.progress = line_num;
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('$') {
+            // `$` is only a comment marker in column 1 (the IBM fixed-column
+            // dialect). A `$` behind leading blanks is the first field of a
+            // data line: pang.QPS has a column legitimately named `$0AICCB`,
+            // and testing the *trimmed* line skipped its COLUMNS lines,
+            // silently dropping the variable (n=459 where the file declares 460).
+            // `*` keeps the trimmed-line rule (an indented `*` opens a comment),
+            // so a name legitimately starting with `*` would be dropped here and
+            // in the MPS parser alike. Known asymmetry, no such line in the
+            // bench data; tracked in https://github.com/hika019/Otspot/issues/62.
+            if trimmed.is_empty() || trimmed.starts_with('*') || line.starts_with('$') {
                 return Ok(true);
             }
 
