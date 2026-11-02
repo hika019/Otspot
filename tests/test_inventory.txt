@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3318 testcases, 43 ignored
+# totals: 3321 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1048,8 +1048,10 @@ otspot-core	qp::global::tree::tests::pushed_popped_counters_track	active
 otspot-core	qp::global::tree::tests::tie_break_fifo_seq	active
 otspot-core	qp::ipm_core::common::tests::verify_farkas_accepts_valid_certificate	active
 otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_negative_multiplier	active
+otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_stationarity_loosened_by_unrelated_huge_a_col	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_true_unbounded_ray	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_direction_exiting_finite_bound	active
+otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_flatness_loosened_by_unrelated_huge_q_row	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_noise_level_descent_on_large_c	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_nonflat_quadratic_direction	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_divides_by_the_larger_objective	active
@@ -1138,8 +1140,9 @@ otspot-core	qp::ipm_solver::attempt::tests::cancelled_infeasibility_backstop_sen
 otspot-core	qp::ipm_solver::attempt::tests::cancelled_infeasibility_backstop_sentinels::cancelled_unbounded_outcome_reports_timeout_not_unbounded	active
 otspot-core	qp::ipm_solver::attempt::tests::cancelled_infeasibility_backstop_sentinels::expired_deadline_infeasible_outcome_reports_timeout	active
 otspot-core	qp::ipm_solver::attempt::tests::cancelled_infeasibility_backstop_sentinels::uncancelled_infeasible_outcome_still_reports_infeasible	active
+otspot-core	qp::ipm_solver::attempt::tests::candidate_order_certified_infeasibility_outranks_finite_candidate	active
 otspot-core	qp::ipm_solver::attempt::tests::candidate_order_prefers_certificate_then_objective	active
-otspot-core	qp::ipm_solver::attempt::tests::candidate_order_preserves_structural_status_over_unproven_iterate	active
+otspot-core	qp::ipm_solver::attempt::tests::candidate_order_unproven_infeasibility_does_not_displace_finite_incumbent	active
 otspot-core	qp::ipm_solver::attempt::tests::candidate_order_unproven_infeasibility_yields_to_finite_candidate	active
 otspot-core	qp::ipm_solver::attempt::tests::converged_termination_does_not_break_early::converged_termination_runs_full_ladder	active
 otspot-core	qp::ipm_solver::attempt::tests::deep_lane_bit_identical_stall_does_not_skip_loose_lanes	active

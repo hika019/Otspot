@@ -1086,10 +1086,16 @@ fn finalize_outcome(
                 SolveStatus::Unbounded => f64::NEG_INFINITY,
                 _ => f64::NAN,
             };
+            // stats を Default 再構築で失うと受理部の検証記録が消える (review P2)。
+            // proven フラグをそのまま最終 SolverResult へ引き継ぐ。
             return SolverResult {
                 status: infeas,
                 objective,
                 iterations: outcome.iterations,
+                stats: crate::problem::SolveStats {
+                    infeasibility_certified: outcome.infeasibility_proven,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
         }
@@ -1789,20 +1795,20 @@ mod tests {
         );
     }
 
-    /// 検証済み (proven) 構造判定の絶対優先を pin する。
+    /// 検証済み (proven) infeasibility 判定の絶対優先を pin する新契約テスト
+    /// (PR #66)。base の同名テスト `candidate_order_preserves_structural_status_
+    /// over_unproven_iterate` は「未証明 status でも絶対優先」を pin していたが、
+    /// QFORPLAN@1e-8 偽 Unbounded 誤判定 (/tmp/opencode/inv_eps_anom/REPORT.md)
+    /// で契約自体が誤りだったため、AGENTS.md の既存テスト変更禁止規定に従い
+    /// 削除 + 別名置き換えとする。未証明側の順位は
+    /// `candidate_order_unproven_infeasibility_yields_to_finite_candidate` と
+    /// `candidate_order_unproven_infeasibility_does_not_displace_finite_incumbent`
+    /// が担う。
     ///
-    /// ## 意味変更の歴史 (2026-11 / QFORPLAN@1e-8 偽 Unbounded 修正)
-    ///
-    /// 旧版は未証明の `infeasibility_status` にも同じ絶対優先を与えていたが、
-    /// その出所 (検出器受理) には ray/Farkas 検証が無く、QFORPLAN@1e-8 で
-    /// 偽 Unbounded 判定 (HiGHS 1.15.1 オラクルは bounded + obj=7.4566e9 を
-    /// 証明済み) が fallback の真最適点より優先される誤報告が実測された
-    /// (/tmp/opencode/inv_eps_anom/REPORT.md §1)。優先の条件を「infeasibility
-    /// status であること」から「検証済みであること」へ移したため、未証明判定に
-    /// 関する順位は `candidate_order_unproven_infeasibility_yields_to_finite`
-    /// を参照。
+    /// `fallback_can_replace_unproven` の proven ゲートを除去 (検証済み判定でも
+    /// 有限 fallback に譲る実装への変更) すると本テストは FAIL する。
     #[test]
-    fn candidate_order_preserves_structural_status_over_unproven_iterate() {
+    fn candidate_order_certified_infeasibility_outranks_finite_candidate() {
         let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
         let prob = QpProblem::new_all_le(
             q,
@@ -1813,14 +1819,12 @@ mod tests {
         )
         .unwrap();
         let view = ProblemView::from_problem(&prob);
-        // retry-local: 検出器受理由来の未証明判定 (proven=false)。
-        let retry_local = IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible);
         // 検証済み判定: 内側受理部の独立 ray/Farkas 検証を通過した想定 (proven=true)。
         let certified = IpmOutcome {
             infeasibility_proven: true,
             ..IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible)
         };
-        let finite_unproven = IpmOutcome {
+        let finite_incumbent = IpmOutcome {
             solution: vec![0.0],
             dual_solution: vec![],
             bound_duals: vec![0.0],
@@ -1841,24 +1845,62 @@ mod tests {
         };
 
         assert!(
-            outcome_is_better_candidate(&finite_unproven, &retry_local, &view, 1e-6),
-            "a finite retry candidate must displace a retry-local infeasibility status"
-        );
-        assert!(
-            !outcome_is_better_candidate(&retry_local, &finite_unproven, &view, 1e-6),
-            "an unproven infeasibility status must not displace a finite incumbent"
-        );
-        assert!(
-            outcome_is_better_candidate(&certified, &finite_unproven, &view, 1e-6),
+            outcome_is_better_candidate(&certified, &finite_incumbent, &view, 1e-6),
             "a verified (proven) infeasibility verdict must outrank a finite iterate"
         );
         assert!(
-            !outcome_is_better_candidate(&finite_unproven, &certified, &view, 1e-6),
+            !outcome_is_better_candidate(&finite_incumbent, &certified, &view, 1e-6),
             "a finite iterate must not displace a verified (proven) infeasibility verdict"
         );
         assert!(
-            !fallback_can_replace_unproven(&finite_unproven, &certified, &view, 1e-6),
+            !fallback_can_replace_unproven(&finite_incumbent, &certified, &view, 1e-6),
             "an unproven no-presolve fallback must not displace a certified infeasibility certificate"
+        );
+    }
+
+    /// 未証明 infeasibility 候補は有限 incumbent を押し退けない (新契約の逆方向。
+    /// `candidate_order_unproven_infeasibility_yields_to_finite_candidate` が
+    /// 「有限候補が未証明 incumbent を上回る」側なので、こちらは候補側が未証明
+    /// 判定の方向を pin する)。旧実装 (infeasibility_status 無条件絶対優先) へ
+    /// の revert では本テストは通るが、無条件優先側を緩めた実装変更を
+    /// `..._yields_to_finite_candidate` と `..._certified_...` の組で捕まえる。
+    #[test]
+    fn candidate_order_unproven_infeasibility_does_not_displace_finite_incumbent() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let view = ProblemView::from_problem(&prob);
+        // retry-local: 検出器受理由来の未証明判定 (proven=false)。
+        let retry_local = IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible);
+        let finite_incumbent = IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 1e-3,
+            numerical_failure: false,
+            infeasibility_status: None,
+            infeasibility_proven: false,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+            termination: IpmTermination::Converged,
+        };
+
+        assert!(
+            !outcome_is_better_candidate(&retry_local, &finite_incumbent, &view, 1e-6),
+            "an unproven infeasibility candidate must not displace a finite incumbent"
         );
     }
 

@@ -7,56 +7,84 @@ use otspot_num::linalg::ldl;
 use otspot_num::linalg::timeout::TimeoutCtx;
 use otspot_num::sparse::CscMatrix;
 
-/// 検出器・証明検査が使う problem-scale 相対閾値の基準係数。
+/// 検出器・証明検査が使う componentwise 後方誤差境界の基準係数。
 ///
 /// 旧実装の絶対定数 `EPS_INF = 1e-8` は ‖c‖∞ ~ 2.5e4 の問題 (QFORPLAN 実測) で
 /// fp ノイズレベルの傾斜 (cᵀdx/‖dx‖∞ = -6.9e-8) を「単調減少 ray」と誤認した
-/// (2026-11 調査 /tmp/opencode/inv_eps_anom/REPORT.md §1)。LP 側 simplex Phase I の
-/// `farkas_infeasibility_certified` が `tol = dual_tol * max(1, ‖b‖∞)` で
-/// ‖b‖∞ スケールしているのと同じ構成へ揃える (tests/diag_klein3_dual_phase1.rs
-/// が検証する certified 経路との整合)。`max(1, ·)` により全データ ≤ 1 の
-/// 小規模問題では旧絶対閾値とビット同値 — 既存の検出力を落とさない。
+/// (2026-11 調査 /tmp/opencode/inv_eps_anom/REPORT.md §1)。一方で global な
+/// max(‖c‖, ‖b‖, ‖Q‖行和, ‖A‖行和) 基準のスケールは、検査する残差と**無関係な
+/// 大係数**が tolerance を緩め偽証書を通す (PR #66 レビュー反例: Q=diag(1e10,1)
+/// の 1e10 が dx=e₂ 成分の平坦性 tol を 100 にする)。そこで各残差を、それが
+/// 計算された内積自体の後方誤差境界 `DETECT_REL_EPS * ‖オペランド_i‖₁ * ‖方向‖₁`
+/// で成分ごとに判定する (行・列・方向局所)。1e-8 は eps_machine・内積成長率に
+/// 対する安全係数として十分大きい。LP 側 Phase I の
+/// `farkas_infeasibility_certified` (tol = dual_tol・max(1, ‖b‖∞)) は元来
+/// ベクトル 1 本分のスケールであり、この構成と矛盾しない。
 const DETECT_REL_EPS: f64 = 1e-8;
 
-/// 検出器が毎回 O(nnz) でノルムを再計算しないよう、solve 1 回分の特徴量を
-/// 事前計算するスケールパック。閾値はすべて `DETECT_REL_EPS * max(1, 対応ノルム)`。
+/// 内積 `operand_i・dir` の後方誤差境界基準として、行列の行和・列和・ベクトル和を
+/// solve 1 回分だけ事前計算するスケールパック (検出器は毎反復 O(nnz) を再計算しない)。
 pub(crate) struct DetectionScales {
-    /// max(1, ‖c‖∞)。降下条件 (cᵀdx) の基準。
-    c: f64,
-    /// max(1, ‖b_ext‖∞)。Farkas 厳密性 (bᵀdy) の基準 (LP Phase I 前例)。
-    b: f64,
-    /// max(1, ‖Q‖∞ 行和)。平坦条件 (‖Q·dx‖∞) の基準。
-    q: f64,
-    /// max(1, ‖A_ext‖∞ 行和)。退行条件 (‖A·dx‖∞) と Farkas 停留条件の基準。
-    a: f64,
+    /// ‖c‖₁。降下 (cᵀdx) の内積誤差基準。
+    c1: f64,
+    /// ‖b_ext‖₁。Farkas 厳密性 (b_extᵀy) の内積誤差基準。
+    b1: f64,
+    /// Q の行絶対値和 ‖Q_i‖₁ (平坦性 ‖Q·dx‖ の成分ごと基準)。
+    q_rows: Vec<f64>,
+    /// A_ext の行絶対値和 ‖A_ext_i‖₁ (退行実行可能性の行ごと基準)。
+    a_rows: Vec<f64>,
+    /// A_ext の列絶対値和 ‖A_ext^j‖₁ (停留・検出器 Aᵀ 条件の列ごと基準)。
+    a_cols: Vec<f64>,
 }
 
-/// CSC 行和ノルム (行方向絶対値和の最大) — `row_infinity_norms` の最大。
-fn row_sums_abs_max(m: &CscMatrix) -> f64 {
+fn l1(v: &[f64]) -> f64 {
+    v.iter().fold(0.0_f64, |acc, &x| acc + x.abs())
+}
+
+/// 内積残差の componentwise 許容値: `DETECT_REL_EPS * ‖オペランド_i‖₁ * ‖方向‖₁`。
+#[inline]
+fn dot_tol(operand_l1: f64, dir_l1: f64) -> f64 {
+    DETECT_REL_EPS * operand_l1 * dir_l1
+}
+
+/// 符号条件の許容値。値自体に cancellation は無く、方向ベクトルの絶対値和に対する
+/// 相対ノイズ + 小問題の床 (1.0) で決める。
+#[inline]
+fn sign_tol(dir_l1: f64) -> f64 {
+    DETECT_REL_EPS * (1.0 + dir_l1)
+}
+
+/// CSC 行絶対値和ベクトル (`row_infinity_norms` の各行)。
+fn row_abs_sums(m: &CscMatrix) -> Vec<f64> {
     m.row_infinity_norms()
-        .into_iter()
-        .fold(0.0_f64, |acc, s| acc.max(s))
+}
+
+/// CSC 列絶対値和ベクトル (CSC は列スライス直接和)。
+fn col_abs_sums(m: &CscMatrix) -> Vec<f64> {
+    (0..m.ncols())
+        .map(|j| {
+            m.values()[m.col_ptr()[j]..m.col_ptr()[j + 1]]
+                .iter()
+                .fold(0.0_f64, |acc, &v| acc + v.abs())
+        })
+        .collect()
 }
 
 impl DetectionScales {
     pub(crate) fn compute(problem: &QpProblem, a_ext: &CscMatrix, b_ext: &[f64]) -> Self {
         Self {
-            c: 1.0_f64.max(norm_inf(&problem.c)),
-            b: 1.0_f64.max(norm_inf(b_ext)),
-            q: 1.0_f64.max(row_sums_abs_max(&problem.q)),
-            a: 1.0_f64.max(row_sums_abs_max(a_ext)),
+            c1: l1(&problem.c),
+            b1: l1(b_ext),
+            q_rows: row_abs_sums(&problem.q),
+            a_rows: row_abs_sums(a_ext),
+            a_cols: col_abs_sums(a_ext),
         }
-    }
-
-    #[inline]
-    fn eps(&self, base: f64) -> f64 {
-        DETECT_REL_EPS * base
     }
 }
 
 /// ステップ方向 (Δx, Δy) から infeasibility / unboundedness を検出する。
 ///
-/// 閾値は `DetectionScales` 経由の problem-scale 相対 (上記 DETECT_REL_EPS doc 参照)。
+/// 閾値は `DetectionScales` 経由の componentwise 後方誤差境界 (DETECT_REL_EPS doc 参照)。
 /// 検出はヒューリスティックであり、確定判定には [`verify_unbounded_ray`] /
 /// [`verify_infeasible_farkas`] の独立証明が別途必要 (受理ゲート側で強制)。
 #[allow(clippy::too_many_arguments)]
@@ -77,18 +105,13 @@ pub(crate) fn check_infeasible_or_unbounded(
     if iter < MIN_ITER {
         return None;
     }
-    let eps_a = scales.eps(scales.a);
-    let eps_b = scales.eps(scales.b);
-    let eps_c = scales.eps(scales.c);
-    let eps_q = scales.eps(scales.q);
 
     let n = dx.len();
 
     if m_orig > 0 {
         let dy_orig = &dy[..m_orig];
-        let norm_dy_inf = norm_inf(dy_orig);
-        if norm_dy_inf > MIN_DIR_NORM {
-            let norm_dy = norm_dy_inf;
+        let dy1 = l1(dy_orig);
+        if norm_inf(dy_orig) > MIN_DIR_NORM {
             let mut at_dy = vec![0.0f64; n];
             for (j, at_dy_j) in at_dy.iter_mut().enumerate() {
                 for ptr in a_ext.col_ptr()[j]..a_ext.col_ptr()[j + 1] {
@@ -98,14 +121,15 @@ pub(crate) fn check_infeasible_or_unbounded(
                     }
                 }
             }
-            let cond_a = norm_inf(&at_dy) / norm_dy < eps_a;
+            // 停留近似: 全列で |Aᵀdy|_j がその列自身の後方誤差境界以内。
+            let cond_a = (0..n).all(|j| at_dy[j].abs() <= dot_tol(scales.a_cols[j], dy1));
             let b_dy: f64 = problem
                 .b
                 .iter()
                 .zip(dy_orig.iter())
                 .map(|(&bi, &dyi)| bi * dyi)
                 .sum();
-            let cond_b = b_dy / norm_dy < -eps_b;
+            let cond_b = b_dy < -dot_tol(scales.b1, dy1);
             if cond_a && cond_b {
                 return Some(SolveStatus::Infeasible);
             }
@@ -119,7 +143,7 @@ pub(crate) fn check_infeasible_or_unbounded(
     if norm_dx_inf <= MIN_DIR_NORM {
         return None;
     }
-    let norm_dx = norm_dx_inf;
+    let dx1 = l1(dx);
 
     let is_lp = problem.q.values().iter().all(|&v| v == 0.0);
     let cond_obj = if is_lp {
@@ -129,21 +153,21 @@ pub(crate) fn check_infeasible_or_unbounded(
             .zip(dx.iter())
             .map(|(&ci, &dxi)| ci * dxi)
             .sum();
-        c_dx / norm_dx < -eps_c
+        c_dx < -dot_tol(scales.c1, dx1)
     } else {
         let mut qdx = vec![0.0f64; n];
         spmv(&problem.q, dx, &mut qdx);
         for i in 0..n {
             qdx[i] += delta_p * dx[i];
         }
-        let norm_qdx: f64 = qdx.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max);
         let c_dx: f64 = problem
             .c
             .iter()
             .zip(dx.iter())
             .map(|(&ci, &dxi)| ci * dxi)
             .sum();
-        (norm_qdx / norm_dx < eps_q) && (c_dx / norm_dx < -eps_c)
+        let flat = (0..n).all(|i| qdx[i].abs() <= dot_tol(scales.q_rows[i], dx1));
+        flat && c_dx < -dot_tol(scales.c1, dx1)
     };
     if !cond_obj {
         return None;
@@ -159,7 +183,7 @@ pub(crate) fn check_infeasible_or_unbounded(
                 }
             }
         }
-        if norm_inf(&a_dx) / norm_dx >= eps_a {
+        if (0..m_orig).any(|i| a_dx[i].abs() >= dot_tol(scales.a_rows[i], dx1)) {
             return None;
         }
     }
@@ -171,20 +195,20 @@ pub(crate) fn check_infeasible_or_unbounded(
 /// `(x + t·dx, s + t·ds)` が **全 t ≥ 0** で拡張系 `{A_ext x + s = b_ext, s ≥ 0}`
 /// の実行可能性を保ち、目的関数が線形に減少することを検証する。
 ///
-/// 条件 (すべて problem-scale 相対閾値、`DETECT_REL_EPS` doc 参照):
-/// 1. 平坦性 `‖Q·dx‖∞ ≤ eps · ‖dx‖∞` — **delta_p 正則化を含まない生の Q**
-///    (正則化項は問題の Q ではなく PMM の足場であり、平坦性の証拠にならない)。
-/// 2. 降下 `cᵀdx ≤ -eps_c · ‖dx‖∞`。
-/// 3. 退行実行可能性: 全 m_ext 行 (境界行を含む) で `|a_ext_i·dx + ds_i| ≈ 0`。
-/// 4. 退行非負性: s ≥ 0 全行で `ds_i ≥ -eps` — s(t) = s₀ + t·ds が全 t ≥ 0 で ≥ 0。
+/// 条件 (すべて componentwise 後方誤差境界、`DETECT_REL_EPS` doc 参照):
+/// 1. 平坦性: 全行で `|Q·dx|_i ≤ eps · ‖Q_i‖₁ · ‖dx‖₁` — **delta_p 正則化を
+///    含まない生の Q** (正則化項は問題の Q ではなく PMM の足場であり証拠にならない)。
+/// 2. 降下 `cᵀdx < -eps · ‖c‖₁ · ‖dx‖₁`。
+/// 3. 退行実行可能性: 全 m_ext 行 (境界行を含む) で
+///    `|a_ext_i·dx + ds_i| ≤ eps · (‖a_ext_i‖₁·‖dx‖₁ + ‖ds‖₁)`。
+/// 4. 退行非負性: s ≥ 0 全行で `ds_i ≥ -sign_tol(‖ds‖₁)` — s(t) が全 t ≥ 0 で ≥ 0。
 ///
 /// 検出器 (`check_infeasible_or_unbounded`) との独立点: 検出器は (a) 境界行を
-/// 一切見ない (rows < m_orig のみ)、(b) ds の符号条件を検査しない、
-/// (c) 平坦性に delta_p を織り込む、(d) 絶対閾値 — のいずれもが偽陽性の原因
-/// (QFORPLAN 実測: ‖Q·dx‖∞ = 1.0e-14 = fp ノイズ、cᵀdx/‖dx‖∞ = -6.9e-8 なのに
-/// ‖c‖∞ ~ 2.5e4)。LP 側 simplex Phase I の `farkas_infeasibility_certified`
-/// (tol = dual_tol · max(1, ‖b‖∞) で検証し失敗時は判定を撤回する) と同じ
-/// 契約を QP 側 unboundedness に導入したもの。
+/// 見ない (rows < m_orig のみ)、(b) ds の符号条件を検査しない、(c) 平坦性に
+/// delta_p を織り込む — のいずれかが偽陽性の原因 (QFORPLAN 実測: ‖Q·dx‖∞ =
+/// 1.0e-14 = fp ノイズ、cᵀdx/‖dx‖∞ = -6.9e-8 なのに ‖c‖∞ ~ 2.5e4)。LP 側
+/// simplex Phase I の `farkas_infeasibility_certified` (検証失敗時は判定を撤回する)
+/// と同じ契約を QP 側 unboundedness に導入したもの。
 pub(crate) fn verify_unbounded_ray(
     dx: &[f64],
     ds: &[f64],
@@ -195,16 +219,16 @@ pub(crate) fn verify_unbounded_ray(
 ) -> bool {
     const MIN_DIR_NORM: f64 = 1e-3;
     let n = dx.len();
-    let norm_dx = norm_inf(dx);
-    if norm_dx < MIN_DIR_NORM {
+    if norm_inf(dx) < MIN_DIR_NORM {
         return false;
     }
-    let norm_ds = norm_inf(ds);
+    let dx1 = l1(dx);
+    let ds1 = l1(ds);
 
-    // 1. 平坦性: delta_p なしの Q·dx。
+    // 1. 平坦性: delta_p なしの Q·dx を行ごとに判定。
     let mut qdx = vec![0.0_f64; n];
     spmv(&problem.q, dx, &mut qdx);
-    if norm_inf(&qdx) > scales.eps(scales.q) * norm_dx {
+    if (0..n).any(|i| qdx[i].abs() > dot_tol(scales.q_rows[i], dx1)) {
         return false;
     }
 
@@ -215,7 +239,7 @@ pub(crate) fn verify_unbounded_ray(
         .zip(dx.iter())
         .map(|(&ci, &dxi)| ci * dxi)
         .sum();
-    if c_dx > -scales.eps(scales.c) * norm_dx {
+    if c_dx >= -dot_tol(scales.c1, dx1) {
         return false;
     }
 
@@ -226,12 +250,12 @@ pub(crate) fn verify_unbounded_ray(
             a_dx[a_ext.row_ind()[ptr]] += a_ext.values()[ptr] * dxj;
         }
     }
-    let row_tol = scales.eps(scales.a) * norm_dx + DETECT_REL_EPS * norm_ds;
+    let ds_sign_tol = sign_tol(ds1);
     for i in 0..a_ext.nrows() {
-        if (a_dx[i] + ds[i]).abs() > row_tol {
+        if (a_dx[i] + ds[i]).abs() > dot_tol(scales.a_rows[i], dx1) + DETECT_REL_EPS * ds1 {
             return false;
         }
-        if !is_eq_ext[i] && ds[i] < -DETECT_REL_EPS * 1.0_f64.max(norm_ds) {
+        if !is_eq_ext[i] && ds[i] < -ds_sign_tol {
             return false;
         }
     }
@@ -241,15 +265,16 @@ pub(crate) fn verify_unbounded_ray(
 /// 検出器受理時に求める独立 Farkas 証明: 方向 dy を**拡張系全体**
 /// `{A_ext x + s = b_ext, s ≥ 0}` に対する Farkas 証書 y として検証する。
 ///
-/// 条件 (problem-scale 相対):
-/// 1. 符号: s ≥ 0 全行 (境界行を含む) で `y_i ≥ -eps`。等式行の乗数は自由。
-/// 2. 停留: 全列 j で `|A_extᵀy|_j ≤ eps_a · ‖y‖∞` (x は自由変数)。
-/// 3. 厳密性: `b_extᵀy ≤ -eps_b · ‖y‖∞` — 境界行の寄与を含む全行合計。
+/// 条件 (componentwise 後方誤差境界):
+/// 1. 符号: s ≥ 0 全行 (境界行を含む) で `y_i ≥ -sign_tol(‖y‖₁)`。等式行は自由。
+/// 2. 停留: 全列 j で `|A_extᵀy|_j ≤ eps · ‖A_ext^j‖₁ · ‖y‖₁` (列局所 —
+///    無関係な大係数列が他列の残差を救わない)。
+/// 3. 厳密性: `b_extᵀy < -eps · ‖b_ext‖₁ · ‖y‖₁` — 境界行の寄与を含む全行合計。
 ///
 /// 成立時は任意の実行可能点で bᵀy = yᵀ(Ax+s) = (Aᵀy)ᵀx + Σ yᵢsᵢ ≤ 0 となり、
-/// 厳密性と矛盾 → 実行不可能。検出器 (rows < m_orig のみ・符号unchecked・
-/// b_orig のみ) より条件が厳しく、LP 側 `farkas_direction_certified`
-/// (`Aᵀy ≤ tol`, `bᵀy > tol`, tol = dual_tol · max(1, ‖b‖∞)) と同格の独立検証。
+/// 厳密性と矛盾 → 実行不可能。検出器 (rows < m_orig のみ・符号 unchecked・
+/// b_orig のみ) より条件が厳しく、LP 側 `farkas_direction_certified` と同格の
+/// 独立検証。
 pub(crate) fn verify_infeasible_farkas(
     dy: &[f64],
     a_ext: &CscMatrix,
@@ -262,22 +287,23 @@ pub(crate) fn verify_infeasible_farkas(
     if norm_dy < MIN_DIR_NORM {
         return false;
     }
+    let y1 = l1(dy);
 
     // 1. 符号: 不等式行 (s ≥ 0) の乗数は非負。
-    let sign_tol = DETECT_REL_EPS * 1.0_f64.max(norm_dy);
+    let dy_sign_tol = sign_tol(y1);
     for (i, &dyi) in dy.iter().enumerate() {
-        if !is_eq_ext[i] && dyi < -sign_tol {
+        if !is_eq_ext[i] && dyi < -dy_sign_tol {
             return false;
         }
     }
 
-    // 2. 停留: A_extᵀy ≈ 0 (全行・全列)。
+    // 2. 停留: A_extᵀy ≈ 0 を列ごとに判定。
     for j in 0..a_ext.ncols() {
         let mut aty = 0.0_f64;
         for ptr in a_ext.col_ptr()[j]..a_ext.col_ptr()[j + 1] {
             aty += a_ext.values()[ptr] * dy[a_ext.row_ind()[ptr]];
         }
-        if aty.abs() > scales.eps(scales.a) * norm_dy {
+        if aty.abs() > dot_tol(scales.a_cols[j], y1) {
             return false;
         }
     }
@@ -288,7 +314,7 @@ pub(crate) fn verify_infeasible_farkas(
         .zip(dy.iter())
         .map(|(&bi, &dyi)| bi * dyi)
         .sum();
-    b_dy <= -scales.eps(scales.b) * norm_dy
+    b_dy < -dot_tol(scales.b1, y1)
 }
 
 /// α = min(1, τ · min_i { -v_i / Δv_i  for Δv_i < 0, skip_mask[i] == false } )
@@ -578,5 +604,56 @@ mod tests {
         assert!(!verify_infeasible_farkas(
             &dy, &a_ext, &b_ext, &is_eq_ext, &scales
         ));
+    }
+
+    /// PR #66 レビュー (P1) 反例 a: global max(·‖Q‖行和) 基準では diag(1e10,1) の
+    /// 無関係な 1e10 が dx=e₂ の平坦性 tolerance を 100 へ緩め、曲率 1 を持つ
+    /// 方向が ray と誤認証される (min 0.5xᵀQx - x₂, x₁=0 は x₂*=1 で有限最小)。
+    /// componentwise 行局所基準 (`dot_tol(‖Q_i‖₁, ‖dx‖₁)`) では行 2 の tol が 1e-8
+    /// となり却下する。global 基準への revert で本テストは FAIL する sentinel。
+    #[test]
+    fn verify_ray_rejects_flatness_loosened_by_unrelated_huge_q_row() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1e10, 1.0], 2, 2).unwrap();
+        let problem = QpProblem::new_all_le(
+            q,
+            vec![0.0, -1.0],
+            CscMatrix::new(0, 2),
+            vec![],
+            vec![(0.0, 0.0), (f64::NEG_INFINITY, f64::INFINITY)],
+        )
+        .unwrap();
+        let (a_ext, _b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let dx = vec![0.0, 1.0];
+        let ds = vec![0.0; a_ext.nrows()];
+        assert!(
+            !verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &is_eq_ext, &scales),
+            "column x2 has curvature 1 — e2 is not a recession direction; an unrelated \
+             1e10 in row 1 must not loosen row 2's flatness tolerance"
+        );
+    }
+
+    /// PR #66 レビュー (P1) 反例 b: global max(·‖A‖行和) 基準では diag(1e10,1) の
+    /// 大係数が列 2 の停留残差 (Aᵀy)₂ = 1 を tol=100 で通し、実行可能系
+    /// {1e10·x₁ ≤ 0, x₂ ≤ -1} (可行点 (0,-1)) が Infeasible と誤認証される。
+    /// 列局所基準 (`dot_tol(‖A^j‖₁, ‖y‖₁)`) では列 2 の tol が 1e-8 で却下する。
+    #[test]
+    fn verify_farkas_rejects_stationarity_loosened_by_unrelated_huge_a_col() {
+        let q = CscMatrix::new(2, 2);
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1e10, 1.0], 2, 2).unwrap();
+        let problem = QpProblem::new_all_le(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![0.0, -1.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let dy = vec![0.0, 1.0];
+        assert!(
+            !verify_infeasible_farkas(&dy, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "(Aᵀy)₂ = 1 is a real nonzero certificate residual — the unrelated 1e10 \
+             in column 1 must not absorb it; (0,-1) is feasible"
+        );
     }
 }
