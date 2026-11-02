@@ -82,9 +82,16 @@ fn run_ipm_with(
         result.status,
         SolveStatus::Infeasible | SolveStatus::Unbounded | SolveStatus::NonConvex(_)
     ) {
+        // NonConvex 判定の抽出は `result.status` の move より前で行うこと
+        // (SolveStatus は非 Copy)。
+        let nonconvex_structural = matches!(result.status, SolveStatus::NonConvex(_));
         let mut out = IpmOutcome::infeasibility(result.status);
         out.iterations = result.iterations; // attempt 予算 (`iter_used`) の課金対象
         out.timing = result.timing_breakdown;
+        // 内側受理部の独立 ray / Farkas 検証を通った判定のみ proven (確定判定候補)。
+        // NonConvex は慣性修正による構造的主張であり ray/Farkas 系ではないため
+        // 検証対象外 = proven として扱う (finalize の ray 検証ゲートは通さない)。
+        out.infeasibility_proven = result.stats.infeasibility_certified || nonconvex_structural;
         return out;
     }
 
@@ -129,6 +136,7 @@ fn run_ipm_with(
             duality_gap_rel: f64::INFINITY,
             numerical_failure: true,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: result.timing_breakdown,
@@ -171,6 +179,7 @@ fn run_ipm_with(
             duality_gap_rel: f64::INFINITY,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: result.timing_breakdown,
@@ -373,6 +382,7 @@ fn run_ipm_with(
         duality_gap_rel: dual_gap,
         numerical_failure: false,
         infeasibility_status: None,
+        infeasibility_proven: false,
         is_locally_optimal,
         postsolve_krylov_ir_skipped: krylov_ir_skipped,
         timing: Some(combined_timing),
@@ -402,7 +412,8 @@ fn recompute_objective(orig_problem: &QpProblem, solution: &[f64]) -> f64 {
         .zip(solution.iter())
         .map(|(&c, &x)| c * x)
         .sum();
-    0.5 * xqx + cx + orig_problem.obj_offset
+    let raw = 0.5 * xqx + cx;
+    raw + orig_problem.obj_offset
 }
 
 #[cfg(test)]

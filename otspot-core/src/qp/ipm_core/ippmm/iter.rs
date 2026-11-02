@@ -18,6 +18,7 @@ use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::ipm_core::common::{
     check_infeasible_or_unbounded, numerical_error_result, solve_unconstrained, timeout_result,
+    verify_infeasible_farkas, verify_unbounded_ray, DetectionScales,
 };
 use crate::qp::ipm_core::kkt::{
     build_extended_constraints, collapse_extended_dual, norm_inf, spmtv, spmv,
@@ -130,6 +131,13 @@ fn solve_ippmm_inner_confined(
     if m_ext == 0 {
         return solve_unconstrained(problem, &timeout_ctx);
     }
+
+    // 検出器・受理時証明検証の閾値基準 (solve 中一定)。problem は実行空間
+    // (Ruiz scaling 済み) のデータであり、比率評価も同じ空間で行うため基準は整合する。
+    let scales = DetectionScales::compute(problem, &a_ext, &b_ext);
+    // 受理部の独立 ray / Farkas 検証が成立したときのみ true (finalize 側が
+    // 未証明の Infeasible/Unbounded を確定判定として返すことを禁止する)。
+    let mut infeas_certified = false;
 
     let eq_count = is_eq_ext.iter().filter(|&&v| v).count();
     let m_ineq = m_ext - eq_count;
@@ -559,9 +567,9 @@ fn solve_ippmm_inner_confined(
         // check_infeasible_or_unbounded は Newton 方向の Farkas-like 近似なので
         // PMM floor 起因の false-positive がありうる。best-so-far がある間は信用せず、
         // best が無い時のみ Infeasible/Unbounded を確定とみなす。
-        if let Some(infeas_status) =
-            check_infeasible_or_unbounded(&dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry)
-        {
+        if let Some(infeas_status) = check_infeasible_or_unbounded(
+            &dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry, &scales,
+        ) {
             consecutive_infeas_triggers += 1;
             // N 連続 fire まで判定保留: PMM floor の false-positive に adaptive reg の猶予を与える。
             if consecutive_infeas_triggers >= MIN_CONSECUTIVE_INFEAS {
@@ -582,8 +590,36 @@ fn solve_ippmm_inner_confined(
                     status = Some(SolveStatus::Stalled);
                     break;
                 }
-                status = Some(infeas_status);
-                break;
+                // 受理直前の独立証明検証 (QFORPLAN@1e-8 FAIL:Unbounded 誤判定修正)。
+                // 検出器は Newton 方向の Farkas-like 近似であり、修正前はここで
+                // 追加検証なしで確定判定を受理していた (計装ビルドの trace で
+                // "accepted WITHOUT further verification" を実測、調査台帳
+                // /tmp/opencode/inv_eps_anom/REPORT.md)。LP 側 simplex Phase I の
+                // `farkas_infeasibility_certified` (検証失敗時は Infeasible を主張せず
+                // Timeout を返す) と同じ契約を受理ゲートに導入する。
+                let verified = match infeas_status {
+                    SolveStatus::Unbounded => {
+                        verify_unbounded_ray(&dx, &ds, problem, &a_ext, &is_eq_ext, &scales)
+                    }
+                    SolveStatus::Infeasible => {
+                        verify_infeasible_farkas(&dy, &a_ext, &b_ext, &is_eq_ext, &scales)
+                    }
+                    _ => false,
+                };
+                if verified {
+                    infeas_certified = true;
+                    status = Some(infeas_status);
+                    break;
+                }
+                // 未証明の判定は確定応答にしない (撤回)。反復は継続する:
+                // 偽陽性で打ち切ると、その後も収束へ進めたはずの solve を
+                // 早期に奪う (QFORPLAN no-presolve fallback 実測: iter 42 で
+                // 打ち切り → comp 6.7e-7、継続なら iter 52 で真最適点 comp 3.9e-8)。
+                // 有限 best の保持・正直な status 帰属はループ正常終端 (resid/alpha
+                // stall, 予算枯渇) と finalize の品質ゲートが担う。カウントを
+                // リセットするので、後に本物の ray 方向が出れば再度受理され得る
+                // (検出器の検出力は維持)。
+                consecutive_infeas_triggers = 0;
             }
         } else {
             // 検出器が反応しなかった iter で carry-over count をリセット。
@@ -773,6 +809,7 @@ fn solve_ippmm_inner_confined(
         total_solve_ns,
         total_reg_retries,
         any_iterative,
+        infeas_certified,
     )
 }
 
@@ -802,6 +839,7 @@ fn finalize_ippmm_result(
     total_solve_ns: u128,
     total_reg_retries: u32,
     any_iterative: bool,
+    infeas_certified: bool,
 ) -> SolverResult {
     let iterations_consumed = if status.is_none() {
         max_iter
@@ -879,6 +917,13 @@ fn finalize_ippmm_result(
             None
         },
         timing_breakdown: Some(ipm_timing),
+        stats: crate::problem::SolveStats {
+            // Infeasible/Unbounded を確定判定として受理したときのみ true。
+            // 下流 (`ipm_solver::core` → `finalize_outcome`) の検証義務ゲートが
+            // このフラグを参照する (SolveStats の doc 参照)。
+            infeasibility_certified: infeas_certified,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
