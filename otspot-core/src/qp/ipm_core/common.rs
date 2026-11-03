@@ -35,14 +35,6 @@ pub(crate) struct DetectionScales {
     a_rows: Vec<f64>,
     /// A_ext の列絶対値和 ‖A_ext^j‖₁ (停留・検出器 Aᵀ 条件の列ごと基準)。
     a_cols: Vec<f64>,
-    /// 恒等に空疎な行 (係数 ‖a_i‖₁ = 0 かつ b_ext_i ≥ 0) のフラグ。行が
-    /// `0·x ≤ b (b ≥ 0)` は元系に何の制約も課さず、スラック s_i = b_i ≥ 0 は
-    /// dx・ds_i と無関係に退行実行可能性を保つ (Farkas でも dy_i は停留・厳密性
-    /// のどちらにも寄与しない)。検証器はこの行の残差・符号条件をスキップする —
-    /// 空疎行の ds_i / dy_i は係数ゼロ成分上の KKT 解ノイズそのもので、いかなる
-    /// データ駆動の後方誤差境界 (‖ds‖₁ 相対など) も自己成分を覆えない
-    /// (PR #66 round 3 / P2)。
-    vacuous_rows: Vec<bool>,
 }
 
 fn l1(v: &[f64]) -> f64 {
@@ -60,6 +52,24 @@ fn dot_tol(operand_l1: f64, dir_l1: f64) -> f64 {
 #[inline]
 fn sign_tol(dir_l1: f64) -> f64 {
     DETECT_REL_EPS * (1.0 + dir_l1)
+}
+
+/// ray 検証 (退行実行可能性・非負性) 用の空疎行述語: 係数 ‖a_i‖₁ = 0 の不等式行は
+/// スラック s_i = b_i ≥ 0 が定数で非負 (スラック修復論法)、等式行は b_i = 0 のとき
+/// のみ無害。Round 3 ではこれを `b ≥ 0` 一律 (EQ 込み) とし実行不能系への証明を
+/// 通した (round 4 sentinel `verify_ray_rejects_vacuous_eq_row_with_nonzero_rhs`)。
+#[inline]
+fn ray_row_vacuous(a_l1: f64, b_i: f64, is_eq: bool) -> bool {
+    a_l1 == 0.0 && if is_eq { b_i == 0.0 } else { b_i >= 0.0 }
+}
+
+/// Farkas 符号条件用の空疎行述語: 係数ゼロ行の乗数 dy_i は停留 (A_extᵀy) に
+/// 無寄与だが、厳密性 b_extᵀy には `b_i·dy_i` で**寄与する**。符号自由化が安全なのは
+/// 寄与が恒ゼロの b_i = 0 のみ (round 4 sentinel
+/// `verify_farkas_rejects_sign_free_vacuous_row_with_positive_rhs`)。
+#[inline]
+fn farkas_row_sign_free(a_l1: f64, b_i: f64) -> bool {
+    a_l1 == 0.0 && b_i == 0.0
 }
 
 /// CSC 行絶対値和ベクトル (`row_infinity_norms` の各行)。
@@ -80,19 +90,12 @@ fn col_abs_sums(m: &CscMatrix) -> Vec<f64> {
 
 impl DetectionScales {
     pub(crate) fn compute(problem: &QpProblem, a_ext: &CscMatrix, b_ext: &[f64]) -> Self {
-        let a_rows = row_abs_sums(a_ext);
-        let vacuous_rows = a_rows
-            .iter()
-            .zip(b_ext)
-            .map(|(ai, &bi)| *ai == 0.0 && bi >= 0.0)
-            .collect();
         Self {
             c1: l1(&problem.c),
             b1: l1(b_ext),
             q_rows: row_abs_sums(&problem.q),
-            a_rows,
+            a_rows: row_abs_sums(a_ext),
             a_cols: col_abs_sums(a_ext),
-            vacuous_rows,
         }
     }
 }
@@ -225,10 +228,11 @@ pub(crate) fn check_infeasible_or_unbounded(
 ///    `|a_ext_i·dx + ds_i| ≤ eps · (‖a_ext_i‖₁·‖dx‖₁ + ‖ds‖₁)`。
 /// 4. 退行非負性: s ≥ 0 全行で `ds_i ≥ -sign_tol(‖ds‖₁)` — s(t) が全 t ≥ 0 で ≥ 0。
 ///
-/// 空疎行 (`DetectionScales::vacuous_rows` — 係数恒ゼロ・RHS ≥ 0) は 3・4 から
-/// 除外: 空疎な不等式は元系に制約を課さずスラックは定数 b_i ≥ 0 で退行実行可能。
-/// その ds_i への検査は証明の強さをnothingから取り消すだけで、KKT ノイズにより
-/// 真 ray を棄却する (round 3 / P2 反例)。
+/// 空疎な不等式行 (`ray_row_vacuous`: 係数恒ゼロ・RHS ≥ 0) は 3・4 から除外 —
+/// スラック s_i = b_i ≥ 0 が定数で退行実行可能性は dx・ds_i と無関係に成立し、
+/// 空疎成分の ds_i (KKT 解ノイズ) への検査は真 ray を棄却するだけ (round 3 / P2)。
+/// 空疎 **EQ** 行は b ≠ 0 です系が実行不能 (スラック修復論法なし) → 即 false、
+/// b = 0 は除外 (round 4)。
 ///
 /// 検出器 (`check_infeasible_or_unbounded`) との独立点: 検出器は (a) 境界行を
 /// 見ない (rows < m_orig のみ)、(b) ds を構築・検査しない (s(t) の退行非負性が
@@ -241,6 +245,7 @@ pub(crate) fn verify_unbounded_ray(
     ds: &[f64],
     problem: &QpProblem,
     a_ext: &CscMatrix,
+    b_ext: &[f64],
     is_eq_ext: &[bool],
     scales: &DetectionScales,
 ) -> bool {
@@ -279,7 +284,13 @@ pub(crate) fn verify_unbounded_ray(
     }
     let ds_sign_tol = sign_tol(ds1);
     for i in 0..a_ext.nrows() {
-        if scales.vacuous_rows[i] {
+        if scales.a_rows[i] == 0.0 && is_eq_ext[i] && b_ext[i] != 0.0 {
+            // 満たす点が存在しない空疎 EQ 行 (0·x = b, b ≠ 0)。不等式行にある
+            // スラック修復論法 (s_i = b_i ≥ 0) が存在しないため、この系の
+            // unboundedness 証明は不成立 (round 4)。
+            return false;
+        }
+        if ray_row_vacuous(scales.a_rows[i], b_ext[i], is_eq_ext[i]) {
             continue;
         }
         if (a_dx[i] + ds[i]).abs() > dot_tol(scales.a_rows[i], dx1) + DETECT_REL_EPS * ds1 {
@@ -296,9 +307,10 @@ pub(crate) fn verify_unbounded_ray(
 /// `{A_ext x + s = b_ext, s ≥ 0}` に対する Farkas 証書 y として検証する。
 ///
 /// 条件 (componentwise 後方誤差境界):
-/// 1. 符号: s ≥ 0 全行 (境界行を含む) で `y_i ≥ -sign_tol(‖y‖₁)`。等式行と空疎行
-///    (`DetectionScales::vacuous_rows`) は自由 — 空疎行の乗数 dy_i は条件 2・3 の
-///    どちらにも寄与せず (係数・RHS がゼロ)、符号検査は証明の成否に無関係。
+/// 1. 符号: s ≥ 0 全行 (境界行を含む) で `y_i ≥ -sign_tol(‖y‖₁)`。等式行と
+///    `farkas_row_sign_free` (係数ゼロ・**b_i = 0**) の行は自由。係数ゼロ行の
+///    dy_i は停留 (条件 2) へは無寄与だが厳密性 (条件 3) へは `b_i·dy_i` で
+///    寄与するため、b_i ≠ 0 の行の符号を自由化すると偽証書を通す (round 4)。
 /// 2. 停留: 全列 j で `|A_extᵀy|_j ≤ eps · ‖A_ext^j‖₁ · ‖y‖₁` (列局所 —
 ///    無関係な大係数列が他列の残差を救わない)。
 /// 3. 厳密性: `b_extᵀy < -eps · ‖b_ext‖₁ · ‖y‖₁` — 境界行の寄与を含む全行合計。
@@ -324,7 +336,7 @@ pub(crate) fn verify_infeasible_farkas(
     // 1. 符号: 不等式行 (s ≥ 0) の乗数は非負。
     let dy_sign_tol = sign_tol(y1);
     for (i, &dyi) in dy.iter().enumerate() {
-        if scales.vacuous_rows[i] {
+        if farkas_row_sign_free(scales.a_rows[i], b_ext[i]) {
             continue;
         }
         if !is_eq_ext[i] && dyi < -dy_sign_tol {
@@ -504,11 +516,11 @@ mod tests {
             vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, f64::INFINITY)],
         )
         .unwrap();
-        let (a_ext, _b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
         let dx = vec![1.0, 0.0];
         let ds = vec![0.0; a_ext.nrows()];
         assert!(verify_unbounded_ray(
-            &dx, &ds, &problem, &a_ext, &is_eq_ext, &scales
+            &dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales
         ));
     }
 
@@ -529,11 +541,11 @@ mod tests {
             ],
         )
         .unwrap();
-        let (a_ext, _b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
         let dx = vec![1.0, 0.0];
         let ds = vec![0.0; a_ext.nrows()];
         assert!(!verify_unbounded_ray(
-            &dx, &ds, &problem, &a_ext, &is_eq_ext, &scales
+            &dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales
         ));
     }
 
@@ -551,18 +563,18 @@ mod tests {
             vec![(f64::NEG_INFINITY, f64::INFINITY), (f64::NEG_INFINITY, 1.0)],
         )
         .unwrap();
-        let (a_ext, _b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
         let dx = vec![0.0, 1.0];
         // 境界行 (x₂ ≤ 1) を dx = e₂ で突っ走る方向。ds 未補償なら残差で落ちる。
         let ds = vec![0.0; a_ext.nrows()];
         assert!(!verify_unbounded_ray(
-            &dx, &ds, &problem, &a_ext, &is_eq_ext, &scales
+            &dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales
         ));
         // 残差を補償した row-feasible な ds = -1 でも、退行非負性
         // (s(t) = s₀ - t ≥ 0 ∀t が成立しない) に反するため拒否。
         let ds_comp = vec![-1.0; a_ext.nrows()];
         assert!(!verify_unbounded_ray(
-            &dx, &ds_comp, &problem, &a_ext, &is_eq_ext, &scales
+            &dx, &ds_comp, &problem, &a_ext, &b_ext, &is_eq_ext, &scales
         ));
     }
 
@@ -579,13 +591,14 @@ mod tests {
             vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
         )
         .unwrap();
-        let (a_ext, _b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
         let ds = vec![0.0; a_ext.nrows()];
         assert!(verify_unbounded_ray(
             &[0.0, 1.0],
             &ds,
             &problem,
             &a_ext,
+            &b_ext,
             &is_eq_ext,
             &scales
         ));
@@ -594,6 +607,7 @@ mod tests {
             &ds,
             &problem,
             &a_ext,
+            &b_ext,
             &is_eq_ext,
             &scales
         ));
@@ -657,11 +671,11 @@ mod tests {
             vec![(0.0, 0.0), (f64::NEG_INFINITY, f64::INFINITY)],
         )
         .unwrap();
-        let (a_ext, _b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
         let dx = vec![0.0, 1.0];
         let ds = vec![0.0; a_ext.nrows()];
         assert!(
-            !verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &is_eq_ext, &scales),
+            !verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
             "column x2 has curvature 1 — e2 is not a recession direction; an unrelated \
              1e10 in row 1 must not loosen row 2's flatness tolerance"
         );
@@ -714,7 +728,7 @@ mod tests {
             vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
         )
         .unwrap();
-        let (a_ext, _b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
         let dx = vec![0.0, 1.0];
         let dy = vec![0.0; a_ext.nrows()];
         assert_eq!(
@@ -734,7 +748,7 @@ mod tests {
         );
         let ds = vec![0.0; a_ext.nrows()];
         assert!(
-            verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &is_eq_ext, &scales),
+            verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
             "verify_unbounded_ray evaluates raw Q and must certify the strict nullspace ray"
         );
     }
@@ -762,7 +776,7 @@ mod tests {
             vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
         )
         .unwrap();
-        let (a_ext, _b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
         let dx = vec![0.0, 1.0];
         let dy = vec![0.0; a_ext.nrows()];
         assert_eq!(
@@ -782,8 +796,64 @@ mod tests {
         );
         let ds = vec![0.0; a_ext.nrows()];
         assert!(
-            verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &is_eq_ext, &scales),
+            verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
             "verify_unbounded_ray uses strict exceed comparison and must certify (0,1)"
+        );
+    }
+
+    /// PR #66 round 4 regression sentinel: 空疎行マスクを「係数ゼロ・RHS ≥ 0」で
+    /// 符号検査から外すと、Farkas **厳密性**は `b_i·dy_i` を依然加算するため、
+    /// `0·x ≤ 5` (b>0) + `x₁ ≤ 0` の実行可能系に dy=[-1,0] が偽証書となる
+    /// (符号: マスクで自由化、停留: ゼロ行は無寄与、厳密性: b·dy = -5 < -5e-8)。
+    /// 符号自由化は厳密性寄与 `b_i·dy_i` が恒ゼロのとき (b_i = 0) のみに限る。
+    /// Round 3 マスクへ revert すると本テストは FAIL する (HEAD 実測済み)。
+    #[test]
+    fn verify_farkas_rejects_sign_free_vacuous_row_with_positive_rhs() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(&[1], &[0], &[1.0], 2, 1).unwrap();
+        let problem = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            a,
+            vec![5.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let dy = vec![-1.0, 0.0];
+        assert!(
+            !verify_infeasible_farkas(&dy, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "dy = [-1, 0] on {{0·x ≤ 5, x₁ ≤ 0}} is a false certificate: the vacuous row's              strictness contribution b_i·dy_i = -5 is nonzero, so its multiplier sign must              not be freed by the row-vacuity mask"
+        );
+    }
+
+    /// PR #66 round 4 regression sentinel: 空疎 **EQ** 行 `0·x = 5` (b ≠ 0) は
+    /// 系自体を満たす点が存在せず、不等式のようなスラック修復論法 (s = b ≥ 0) が
+    /// 存在しない。ray 検証の退行実行可能性から「係数ゼロ・RHS ≥ 0」でスキップ
+    /// すると実行不能系に Unbounded を証明しうる。EQ 行は b == 0 のみ無害。
+    /// Round 3 マスクへ revert すると本テストは FAIL する (HEAD 実測済み)。
+    #[test]
+    fn verify_ray_rejects_vacuous_eq_row_with_nonzero_rhs() {
+        let q = CscMatrix::new(2, 2);
+        let a = CscMatrix::from_triplets(&[1], &[0], &[1.0], 2, 2).unwrap();
+        let problem = QpProblem::new_all_le(
+            q,
+            vec![0.0, -1.0],
+            a.clone(),
+            vec![0.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        // 拡張系を手作成: 行 0 = 空疎 EQ `0·x = 5`、行 1 = `x₁ ≤ 0` (実行可能性の装い)。
+        let a_ext = a;
+        let b_ext = vec![5.0, 0.0];
+        let is_eq_ext = vec![true, false];
+        let scales = DetectionScales::compute(&problem, &a_ext, &b_ext);
+        let dx = vec![0.0, 1.0];
+        let ds = vec![0.0; 2];
+        assert!(
+            !verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "an unsatisfiable vacuous EQ row (0·x = 5) must block any unboundedness              certificate over the same system"
         );
     }
 }

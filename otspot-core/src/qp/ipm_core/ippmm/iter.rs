@@ -849,7 +849,7 @@ fn check_infeas_verdict(
     }
     let verified = match infeas_status {
         SolveStatus::Unbounded => crate::qp::ipm_core::common::verify_unbounded_ray(
-            dx, ds, problem, a_ext, is_eq_ext, scales,
+            dx, ds, problem, a_ext, b_ext, is_eq_ext, scales,
         ),
         SolveStatus::Infeasible => crate::qp::ipm_core::common::verify_infeasible_farkas(
             dy, a_ext, b_ext, is_eq_ext, scales,
