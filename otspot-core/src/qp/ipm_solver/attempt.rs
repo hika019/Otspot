@@ -3155,16 +3155,18 @@ mod tests {
             );
         }
 
-        /// Baseline/control: without cancel or an expired deadline, the
-        /// genuine certificate is still reported (confirms the backstop is
-        /// gated on `timed_out`, not unconditional).
-        /// 2026-11 意味更新: 「genuine certificate」は検証済み (proven) を意味する。
-        /// 検出器由来の未証明 outcome は QFORPLAN@1e-8 誤判定修正により proven ゲート
-        /// 側で差し戻される (`finalize_withholds_unproven_infeasibility_verdict`
-        /// 参照)。このテストは cancel 優先順の sentinel であり、検証済み判定を
-        /// シミュレートするため proven=true を立てる。
+        /// Control: cancel 無く deadline 失効も無いとき、**検証済み (proven)** の
+        /// Infeasible はそのまま返る (backstop が無条件撤回でなく `timed_out`
+        /// ゲートであることを確認)。
+        ///
+        /// base 同名テスト `uncancelled_infeasible_outcome_still_reports_infeasible`
+        /// は未証明 outcome の「そのまま返る」を pin していたが、QFORPLAN@1e-8
+        /// 誤判定修正でその契約自体が撤回された (未証明判定は proven ゲートで
+        /// 差し戻し)。AGENTS.md の既存テスト変更禁止規定に従い削除 + 別名
+        /// 置き換えとする。未証明判定の withholding 自体は
+        /// `finalize_withholds_unproven_infeasibility_verdict` が別途 pin する。
         #[test]
-        fn uncancelled_infeasible_outcome_still_reports_infeasible() {
+        fn uncancelled_certified_infeasible_outcome_still_reports_infeasible() {
             let prob = make_simple_eq_qp();
             let view = ProblemView::from_problem(&prob);
             let outcome = IpmOutcome {
@@ -3181,6 +3183,38 @@ mod tests {
             );
             assert_eq!(r.objective, f64::INFINITY);
         }
+    }
+
+    /// solve_ipm 経由の e2e sentinel (PR #66 round 2 / P1-3): presolve 無効で
+    /// Q の厳密ゼロ行を持つ真に unbounded な QP (min 0.5x₁² - x₂ s.t. x₁=0 を
+    /// 両側不等式で表現、x₂ 自由) が `Unbounded` を返すこと。検出器平坦性が
+    /// 正則化項 (Q+ρI)·dx を織り込んだ旧実装では、ゼロ行の componentwise tol=0
+    /// に ρ·dx (ρ 床 ≥1e-14) が勝って検出器が fire せず、この status は
+    /// 得られない (common.rs::verify_ray_accepts_exact_nullspace_direction_
+    /// under_regularization と同機構の実機再現)。
+    #[test]
+    fn ipm_reports_unbounded_for_zero_q_row_ray_with_presolve_off() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, 2).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0, -1.0],
+            a,
+            vec![0.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        let r = solve_ipm(&prob, &opts);
+        assert_eq!(
+            r.status,
+            crate::problem::SolveStatus::Unbounded,
+            "exact nullspace ray (e₂) must survive the detector under regularization, got {:?}",
+            r.status
+        );
     }
 
     /// 公開 API 経由の sentinel: 到達不能 eps では IPM は有限残差まで収束するが

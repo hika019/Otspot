@@ -85,6 +85,7 @@ impl DetectionScales {
 /// ステップ方向 (Δx, Δy) から infeasibility / unboundedness を検出する。
 ///
 /// 閾値は `DetectionScales` 経由の componentwise 後方誤差境界 (DETECT_REL_EPS doc 参照)。
+/// 平坦性は**元の Q** で評価する (正則化項 ρ·dx を織り込まない — 平坦性側の注参照)。
 /// 検出はヒューリスティックであり、確定判定には [`verify_unbounded_ray`] /
 /// [`verify_infeasible_farkas`] の独立証明が別途必要 (受理ゲート側で強制)。
 #[allow(clippy::too_many_arguments)]
@@ -96,7 +97,6 @@ pub(crate) fn check_infeasible_or_unbounded(
     m_orig: usize,
     m_ext: usize,
     iter: usize,
-    delta_p: f64,
     scales: &DetectionScales,
 ) -> Option<SolveStatus> {
     const MIN_ITER: usize = 5;
@@ -157,9 +157,12 @@ pub(crate) fn check_infeasible_or_unbounded(
     } else {
         let mut qdx = vec![0.0f64; n];
         spmv(&problem.q, dx, &mut qdx);
-        for i in 0..n {
-            qdx[i] += delta_p * dx[i];
-        }
+        // PR #66 round 2 (P1-3): 平坦性は元の Q で評価 (旧実装は (Q+ρI)·dx を
+        // 織り込んでいた)。織り込みは Q 厳密ゼロ行 (componentwise tol =
+        // 1e-8×0×‖dx‖₁ = ちょうど 0) に正則化アーティファクト ρ·dx — ρ 床
+        // ≥1e-14 で常に非ゼロ — を持ち込み、真の nullspace 方向を検出器が
+        // 棄却して検証器に届かない (tests 参照)。生 Q では真の退行行は
+        // 正確に 0 なので tol=0 と両立する。
         let c_dx: f64 = problem
             .c
             .iter()
@@ -204,8 +207,8 @@ pub(crate) fn check_infeasible_or_unbounded(
 /// 4. 退行非負性: s ≥ 0 全行で `ds_i ≥ -sign_tol(‖ds‖₁)` — s(t) が全 t ≥ 0 で ≥ 0。
 ///
 /// 検出器 (`check_infeasible_or_unbounded`) との独立点: 検出器は (a) 境界行を
-/// 見ない (rows < m_orig のみ)、(b) ds の符号条件を検査しない、(c) 平坦性に
-/// delta_p を織り込む — のいずれかが偽陽性の原因 (QFORPLAN 実測: ‖Q·dx‖∞ =
+/// 見ない (rows < m_orig のみ)、(b) ds を構築・検査しない (s(t) の退行非負性が
+/// 未検証) — のいずれかが偽陽性の原因 (QFORPLAN 実測: ‖Q·dx‖∞ =
 /// 1.0e-14 = fp ノイズ、cᵀdx/‖dx‖∞ = -6.9e-8 なのに ‖c‖∞ ~ 2.5e4)。LP 側
 /// simplex Phase I の `farkas_infeasibility_certified` (検証失敗時は判定を撤回する)
 /// と同じ契約を QP 側 unboundedness に導入したもの。
@@ -654,6 +657,53 @@ mod tests {
             !verify_infeasible_farkas(&dy, &a_ext, &b_ext, &is_eq_ext, &scales),
             "(Aᵀy)₂ = 1 is a real nonzero certificate residual — the unrelated 1e10 \
              in column 1 must not absorb it; (0,-1) is feasible"
+        );
+    }
+
+    /// PR #66 round 2 review (P1-3) 反例: 検出器の平坦性残差に正則化項 (Q+ρI)·dx を
+    /// 織り込むと、Q の厳密ゼロ行では componentwise tol = 1e-8 × ‖Q_i‖₁ × ‖dx‖₁ =
+    /// **ちょうど 0** なのに、織り込み項 ρ·dx が IPPMM の ρ 床 (≥1e-14) で常に 0 を
+    /// 超え、真の nullspace 方向が検出器を通過して検証器に一切届かない
+    /// (旧絶対閾値 1e-8 では ρ<1e-8 で受理されていた)。
+    ///
+    /// Q=diag(1,0), c=(0,-1)、x₁=0 (両側不等式)、x₂ 自由は真に unbounded
+    /// (dx=e₂ が厳密 nullspace の退行方向)。平坦性を元の Q で評価する修正では
+    /// 検出器 fire → 検証器 (生 Q 基準) 認証の双方が成立する。
+    /// 修正前のビルド (delta_p 織り込み) では検出器 assert が FAIL する sentinel。
+    #[test]
+    fn verify_ray_accepts_exact_nullspace_direction_under_regularization() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, 2).unwrap();
+        let problem = QpProblem::new_all_le(
+            q,
+            vec![0.0, -1.0],
+            a,
+            vec![0.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        let (a_ext, _b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let dx = vec![0.0, 1.0];
+        let dy = vec![0.0; a_ext.nrows()];
+        assert_eq!(
+            check_infeasible_or_unbounded(
+                &dx,
+                &dy,
+                &problem,
+                &a_ext,
+                2,
+                a_ext.nrows(),
+                10,
+                &scales,
+            ),
+            Some(SolveStatus::Unbounded),
+            "e2 spans the exact nullspace of Q — the ρ (>= 1e-14) regularization artifact \
+             must not veto it on the zero-Q row whose local tolerance is exactly 0"
+        );
+        let ds = vec![0.0; a_ext.nrows()];
+        assert!(
+            verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &is_eq_ext, &scales),
+            "verify_unbounded_ray evaluates raw Q and must certify the strict nullspace ray"
         );
     }
 }

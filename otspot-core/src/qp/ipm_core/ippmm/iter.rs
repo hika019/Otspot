@@ -385,12 +385,11 @@ fn solve_ippmm_inner_confined(
             },
         };
         let factorize_outcome = factorize_kkt_with_retry(&fact_ctx, &mut factor_caches);
-        let (mut fac, aug_mat, d_inv_opt, rho_retry) = match factorize_outcome {
+        let (mut fac, aug_mat, d_inv_opt) = match factorize_outcome {
             FactorizeOutcome::Ok {
                 factor,
                 aug_mat,
                 d_inv,
-                rho_used,
                 retry_count,
                 used_iterative,
                 factorize_ns,
@@ -398,7 +397,7 @@ fn solve_ippmm_inner_confined(
                 total_factorize_ns += factorize_ns;
                 total_reg_retries += retry_count;
                 any_iterative |= used_iterative;
-                (factor, aug_mat, d_inv, rho_used)
+                (factor, aug_mat, d_inv)
             }
             FactorizeOutcome::Timeout => {
                 status = Some(SolveStatus::Timeout);
@@ -573,7 +572,7 @@ fn solve_ippmm_inner_confined(
             (&timeout_ctx, best_score, eps_orig),
             (&dx, &ds, &dy),
             (problem, &a_ext),
-            (m_orig, m_ext, iter, rho_retry),
+            (m_orig, m_ext, iter),
             (&b_ext, &is_eq_ext, &scales),
         ) {
             // Break の *status (検証済み判定 / stop 時の Timeout) はゲート側で確定済み。
@@ -821,16 +820,16 @@ fn check_infeas_verdict(
     (timeout_ctx, best_score, eps_orig): (&TimeoutCtx, f64, f64),
     (dx, ds, dy): (&[f64], &[f64], &[f64]),
     (problem, a_ext): (&QpProblem, &otspot_num::sparse::CscMatrix),
-    (m_orig, m_ext, iter, rho_retry): (usize, usize, usize, f64),
+    (m_orig, m_ext, iter): (usize, usize, usize),
     (b_ext, is_eq_ext, scales): (
         &[f64],
         &[bool],
         &crate::qp::ipm_core::common::DetectionScales,
     ),
 ) -> InfeasGate {
-    let Some(infeas_status) = check_infeasible_or_unbounded(
-        dx, dy, problem, a_ext, m_orig, m_ext, iter, rho_retry, scales,
-    ) else {
+    let Some(infeas_status) =
+        check_infeasible_or_unbounded(dx, dy, problem, a_ext, m_orig, m_ext, iter, scales)
+    else {
         *consecutive = 0;
         return InfeasGate::Continue;
     };
