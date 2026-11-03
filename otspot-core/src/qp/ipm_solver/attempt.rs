@@ -3217,6 +3217,37 @@ mod tests {
         );
     }
 
+    /// solve_ipm 経由の e2e sentinel (PR #66 round 3 / P2): presolve 無効で
+    /// 恒等ゼロ制約行 (0=0) を持つ真に unbounded な QP (min -x₂ s.t. x₁=0 を
+    /// 両側不等式 + 0=0 行で表現) が `Unbounded` を返すこと。検出器の
+    /// `>=` 棄却比較はゼロ行の残差 0 / tol 0 を棄却し検証到達を拒否するため
+    /// この status は得られない (common.rs::verify_ray_accepts_unbounded_with_
+    /// identically_zero_constraint_row と同機構の実機再現)。
+    #[test]
+    fn ipm_reports_unbounded_with_identically_zero_row_and_presolve_off() {
+        let q = CscMatrix::new(2, 2);
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 3, 2).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0, -1.0],
+            a,
+            vec![0.0, 0.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        let r = solve_ipm(&prob, &opts);
+        assert_eq!(
+            r.status,
+            crate::problem::SolveStatus::Unbounded,
+            "an identically zero constraint row must not veto the unboundedness proof, got {:?}",
+            r.status
+        );
+    }
+
     /// 公開 API 経由の sentinel: 到達不能 eps では IPM は有限残差まで収束するが
     /// satisfies_eps は常に false → 解品質を主張する status を返してはならない。
     /// 旧 finalize (:778) を revert すると SuboptimalSolution が返り FAIL する。

@@ -35,6 +35,14 @@ pub(crate) struct DetectionScales {
     a_rows: Vec<f64>,
     /// A_ext の列絶対値和 ‖A_ext^j‖₁ (停留・検出器 Aᵀ 条件の列ごと基準)。
     a_cols: Vec<f64>,
+    /// 恒等に空疎な行 (係数 ‖a_i‖₁ = 0 かつ b_ext_i ≥ 0) のフラグ。行が
+    /// `0·x ≤ b (b ≥ 0)` は元系に何の制約も課さず、スラック s_i = b_i ≥ 0 は
+    /// dx・ds_i と無関係に退行実行可能性を保つ (Farkas でも dy_i は停留・厳密性
+    /// のどちらにも寄与しない)。検証器はこの行の残差・符号条件をスキップする —
+    /// 空疎行の ds_i / dy_i は係数ゼロ成分上の KKT 解ノイズそのもので、いかなる
+    /// データ駆動の後方誤差境界 (‖ds‖₁ 相対など) も自己成分を覆えない
+    /// (PR #66 round 3 / P2)。
+    vacuous_rows: Vec<bool>,
 }
 
 fn l1(v: &[f64]) -> f64 {
@@ -72,12 +80,19 @@ fn col_abs_sums(m: &CscMatrix) -> Vec<f64> {
 
 impl DetectionScales {
     pub(crate) fn compute(problem: &QpProblem, a_ext: &CscMatrix, b_ext: &[f64]) -> Self {
+        let a_rows = row_abs_sums(a_ext);
+        let vacuous_rows = a_rows
+            .iter()
+            .zip(b_ext)
+            .map(|(ai, &bi)| *ai == 0.0 && bi >= 0.0)
+            .collect();
         Self {
             c1: l1(&problem.c),
             b1: l1(b_ext),
             q_rows: row_abs_sums(&problem.q),
-            a_rows: row_abs_sums(a_ext),
+            a_rows,
             a_cols: col_abs_sums(a_ext),
+            vacuous_rows,
         }
     }
 }
@@ -186,7 +201,11 @@ pub(crate) fn check_infeasible_or_unbounded(
                 }
             }
         }
-        if (0..m_orig).any(|i| a_dx[i].abs() >= dot_tol(scales.a_rows[i], dx1)) {
+        // 棄却は tol の**厳密超過**のみ (PR #66 round 3 / P2): 恒等ゼロ行 (0=0) は
+        // 残差 0・tol 1e-8×0×‖dx‖₁ = 0 で `0 >= 0` 棄却となり証明の検証到達を
+        // 全て拒否した (旧絶対閾値は受理)。非ゼロ残差は tol 超過で従来通り棄却 —
+        // 局所 tolerance 設計 (P1-1/P1-3) の棄却力は不変。
+        if (0..m_orig).any(|i| a_dx[i].abs() > dot_tol(scales.a_rows[i], dx1)) {
             return None;
         }
     }
@@ -205,6 +224,11 @@ pub(crate) fn check_infeasible_or_unbounded(
 /// 3. 退行実行可能性: 全 m_ext 行 (境界行を含む) で
 ///    `|a_ext_i·dx + ds_i| ≤ eps · (‖a_ext_i‖₁·‖dx‖₁ + ‖ds‖₁)`。
 /// 4. 退行非負性: s ≥ 0 全行で `ds_i ≥ -sign_tol(‖ds‖₁)` — s(t) が全 t ≥ 0 で ≥ 0。
+///
+/// 空疎行 (`DetectionScales::vacuous_rows` — 係数恒ゼロ・RHS ≥ 0) は 3・4 から
+/// 除外: 空疎な不等式は元系に制約を課さずスラックは定数 b_i ≥ 0 で退行実行可能。
+/// その ds_i への検査は証明の強さをnothingから取り消すだけで、KKT ノイズにより
+/// 真 ray を棄却する (round 3 / P2 反例)。
 ///
 /// 検出器 (`check_infeasible_or_unbounded`) との独立点: 検出器は (a) 境界行を
 /// 見ない (rows < m_orig のみ)、(b) ds を構築・検査しない (s(t) の退行非負性が
@@ -255,6 +279,9 @@ pub(crate) fn verify_unbounded_ray(
     }
     let ds_sign_tol = sign_tol(ds1);
     for i in 0..a_ext.nrows() {
+        if scales.vacuous_rows[i] {
+            continue;
+        }
         if (a_dx[i] + ds[i]).abs() > dot_tol(scales.a_rows[i], dx1) + DETECT_REL_EPS * ds1 {
             return false;
         }
@@ -269,7 +296,9 @@ pub(crate) fn verify_unbounded_ray(
 /// `{A_ext x + s = b_ext, s ≥ 0}` に対する Farkas 証書 y として検証する。
 ///
 /// 条件 (componentwise 後方誤差境界):
-/// 1. 符号: s ≥ 0 全行 (境界行を含む) で `y_i ≥ -sign_tol(‖y‖₁)`。等式行は自由。
+/// 1. 符号: s ≥ 0 全行 (境界行を含む) で `y_i ≥ -sign_tol(‖y‖₁)`。等式行と空疎行
+///    (`DetectionScales::vacuous_rows`) は自由 — 空疎行の乗数 dy_i は条件 2・3 の
+///    どちらにも寄与せず (係数・RHS がゼロ)、符号検査は証明の成否に無関係。
 /// 2. 停留: 全列 j で `|A_extᵀy|_j ≤ eps · ‖A_ext^j‖₁ · ‖y‖₁` (列局所 —
 ///    無関係な大係数列が他列の残差を救わない)。
 /// 3. 厳密性: `b_extᵀy < -eps · ‖b_ext‖₁ · ‖y‖₁` — 境界行の寄与を含む全行合計。
@@ -295,6 +324,9 @@ pub(crate) fn verify_infeasible_farkas(
     // 1. 符号: 不等式行 (s ≥ 0) の乗数は非負。
     let dy_sign_tol = sign_tol(y1);
     for (i, &dyi) in dy.iter().enumerate() {
+        if scales.vacuous_rows[i] {
+            continue;
+        }
         if !is_eq_ext[i] && dyi < -dy_sign_tol {
             return false;
         }
@@ -704,6 +736,54 @@ mod tests {
         assert!(
             verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &is_eq_ext, &scales),
             "verify_unbounded_ray evaluates raw Q and must certify the strict nullspace ray"
+        );
+    }
+
+    /// PR #66 round 3 review (P2) 反例: 検出器の後退実行可能性検査が
+    /// `|a_i·dx| >= tol` で棄却するため、係数が恒等的にゼロの原制約行 (0=0 行)
+    /// では残差 0 と tolerance `1e-8×0×‖dx‖₁ = 0` が `0 >= 0` で棄却経路に乗り、
+    /// unboundedness 証明の検証到達を全て拒否する (旧絶対閾値 `|a_i·dx| < 1e-8`
+    /// は受理していた)。exact zero residual は zero tolerance を満たす
+    /// (厳密超過のみ棄却) こと。
+    ///
+    /// 系: min -x₂ s.t. x₁=0 (両側不等式) + 0=0 行、変数自由。厳密後退方向
+    /// dx=(0,1) は行 1・2・3 すべてで残差 0。修正前ビルドでは検出器 assert が
+    /// FAIL する sentinel。
+    #[test]
+    fn verify_ray_accepts_unbounded_with_identically_zero_constraint_row() {
+        let q = CscMatrix::new(2, 2);
+        // rows: x₁ ≤ 0, -x₁ ≤ 0, [0 = 0] (第 3 行は係数・RHS とも恒等的にゼロ)
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 3, 2).unwrap();
+        let problem = QpProblem::new_all_le(
+            q,
+            vec![0.0, -1.0],
+            a,
+            vec![0.0, 0.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        let (a_ext, _b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let dx = vec![0.0, 1.0];
+        let dy = vec![0.0; a_ext.nrows()];
+        assert_eq!(
+            check_infeasible_or_unbounded(
+                &dx,
+                &dy,
+                &problem,
+                &a_ext,
+                3,
+                a_ext.nrows(),
+                10,
+                &scales
+            ),
+            Some(SolveStatus::Unbounded),
+            "an identically zero constraint row leaves an exact zero residual against an \
+             exactly zero local tolerance — equality with tolerance must not be a violation"
+        );
+        let ds = vec![0.0; a_ext.nrows()];
+        assert!(
+            verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &is_eq_ext, &scales),
+            "verify_unbounded_ray uses strict exceed comparison and must certify (0,1)"
         );
     }
 }
