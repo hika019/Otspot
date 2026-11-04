@@ -2071,7 +2071,7 @@ mod tests {
     }
 
     #[test]
-    fn no_presolve_fallback_does_not_replace_structural_infeasible() {
+    fn no_presolve_fallback_does_not_replace_certified_infeasible() {
         let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
         let prob = QpProblem::new_all_le(
             q,

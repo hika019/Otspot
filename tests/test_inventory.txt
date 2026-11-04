@@ -1189,7 +1189,7 @@ otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_extends_with_deadlin
 otspot-core	qp::ipm_solver::attempt::tests::iteration_limit_progress_extends_past_shallow_converged_best::extension_uses_deep_iteration_limit_config_not_shallow_best	active
 otspot-core	qp::ipm_solver::attempt::tests::mask_does_not_hide_nonempty_col_false_optimal	active
 otspot-core	qp::ipm_solver::attempt::tests::no_presolve_fallback_does_not_replace_better_objective_incumbent	active
-otspot-core	qp::ipm_solver::attempt::tests::no_presolve_fallback_does_not_replace_structural_infeasible	active
+otspot-core	qp::ipm_solver::attempt::tests::no_presolve_fallback_does_not_replace_certified_infeasible	active
 otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::accuracy_floor_termination_reports_stalled	active
 otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::iteration_budget_termination_reports_max_iterations	active
 otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::stall_termination_reports_stalled_not_suboptimal	active

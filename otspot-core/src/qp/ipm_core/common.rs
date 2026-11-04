@@ -15,23 +15,24 @@ use otspot_num::sparse::CscMatrix;
 /// max(‖c‖, ‖b‖, ‖Q‖行和, ‖A‖行和) 基準のスケールは、検査する残差と**無関係な
 /// 大係数**が tolerance を緩め偽証書を通す (PR #66 レビュー反例: Q=diag(1e10,1)
 /// の 1e10 が dx=e₂ 成分の平坦性 tol を 100 にする)。そこで各残差を、それが
-/// 計算された内積自体の後方誤差境界 `DETECT_REL_EPS * ‖オペランド_i‖₁ * ‖方向‖₁`
-/// で成分ごとに判定する (行・列・方向局所)。1e-8 は eps_machine・内積成長率に
-/// 対する安全係数として十分大きい。LP 側 Phase I の
+/// 計算された内積自体の後方誤差境界 `DETECT_REL_EPS * ‖オペランド_i‖ * ‖方向‖₁`
+/// で成分ごとに判定する (行・列・方向局所)。Q・A_ext の行オペランドは行最大絶対値
+/// ‖·‖∞ 基準 (後方誤差境界 ‖·‖₁・‖方向‖₁ より厳しい安全側)、列とベクトルは ‖·‖₁。
+/// 1e-8 は eps_machine・内積成長率に対する安全係数として十分大きい。LP 側 Phase I の
 /// `farkas_infeasibility_certified` (tol = dual_tol・max(1, ‖b‖∞)) は元来
 /// ベクトル 1 本分のスケールであり、この構成と矛盾しない。
 const DETECT_REL_EPS: f64 = 1e-8;
 
-/// 内積 `operand_i・dir` の後方誤差境界基準として、行列の行和・列和・ベクトル和を
-/// solve 1 回分だけ事前計算するスケールパック (検出器は毎反復 O(nnz) を再計算しない)。
+/// 内積 `operand_i・dir` の後方誤差境界基準として、行列の行最大絶対値・列和・
+/// ベクトル和を solve 1 回分だけ事前計算するスケールパック (検出器は毎反復 O(nnz) を再計算しない)。
 pub(crate) struct DetectionScales {
     /// ‖c‖₁。降下 (cᵀdx) の内積誤差基準。
     c1: f64,
     /// ‖b_ext‖₁。Farkas 厳密性 (b_extᵀy) の内積誤差基準。
     b1: f64,
-    /// Q の行絶対値和 ‖Q_i‖₁ (平坦性 ‖Q·dx‖ の成分ごと基準)。
+    /// Q の行最大絶対値 ‖Q_i‖∞ (平坦性 ‖Q·dx‖ の成分ごと基準)。
     q_rows: Vec<f64>,
-    /// A_ext の行絶対値和 ‖A_ext_i‖₁ (退行実行可能性の行ごと基準)。
+    /// A_ext の行最大絶対値 ‖A_ext_i‖∞ (退行実行可能性の行ごと基準)。
     a_rows: Vec<f64>,
     /// A_ext の列絶対値和 ‖A_ext^j‖₁ (停留・検出器 Aᵀ 条件の列ごと基準)。
     a_cols: Vec<f64>,
@@ -41,10 +42,10 @@ fn l1(v: &[f64]) -> f64 {
     v.iter().fold(0.0_f64, |acc, &x| acc + x.abs())
 }
 
-/// 内積残差の componentwise 許容値: `DETECT_REL_EPS * ‖オペランド_i‖₁ * ‖方向‖₁`。
+/// 内積残差の componentwise 許容値: `DETECT_REL_EPS * ‖オペランド_i‖ * ‖方向‖₁`。
 #[inline]
-fn dot_tol(operand_l1: f64, dir_l1: f64) -> f64 {
-    DETECT_REL_EPS * operand_l1 * dir_l1
+fn dot_tol(operand_norm: f64, dir_l1: f64) -> f64 {
+    DETECT_REL_EPS * operand_norm * dir_l1
 }
 
 /// 符号条件の許容値。値自体に cancellation は無く、方向ベクトルの絶対値和に対する
@@ -54,21 +55,21 @@ fn sign_tol(dir_l1: f64) -> f64 {
     DETECT_REL_EPS * (1.0 + dir_l1)
 }
 
-/// ray 検証 (退行実行可能性・非負性) 用の空疎行述語: 係数 ‖a_i‖₁ = 0 の不等式行は
+/// ray 検証 (退行実行可能性・非負性) 用の空疎行述語: 係数 ‖a_i‖∞ = 0 の不等式行は
 /// スラック s_i = b_i ≥ 0 が定数で非負 (スラック修復論法)、等式行は b_i = 0 のとき
 /// のみ無害。Round 3 ではこれを `b ≥ 0` 一律 (EQ 込み) とし実行不能系への証明を
 /// 通した (round 4 sentinel `verify_ray_rejects_vacuous_eq_row_with_nonzero_rhs`)。
 #[inline]
-fn ray_row_vacuous(a_l1: f64, b_i: f64, is_eq: bool) -> bool {
-    a_l1 == 0.0 && if is_eq { b_i == 0.0 } else { b_i >= 0.0 }
+fn ray_row_vacuous(a_norm: f64, b_i: f64, is_eq: bool) -> bool {
+    a_norm == 0.0 && if is_eq { b_i == 0.0 } else { b_i >= 0.0 }
 }
 
 /// 係数ゼロ行が系全体を実行不能にする: `0·x = b` (b ≠ 0) は満たす点が無く、
 /// `0·x ≤ b` (b < 0) はスラック s_i = b_i が全点で負。どちらも実行可能点が存在せず
 /// unboundedness の主張は不成立 (round 4 / #69)。
 #[inline]
-fn zero_row_unsatisfiable(a_l1: f64, b_i: f64, is_eq: bool) -> bool {
-    a_l1 == 0.0 && if is_eq { b_i != 0.0 } else { b_i < 0.0 }
+fn zero_row_unsatisfiable(a_norm: f64, b_i: f64, is_eq: bool) -> bool {
+    a_norm == 0.0 && if is_eq { b_i != 0.0 } else { b_i < 0.0 }
 }
 
 /// Farkas 符号条件用の空疎行述語: 係数ゼロ行の乗数 dy_i は停留 (A_extᵀy) に
@@ -76,12 +77,12 @@ fn zero_row_unsatisfiable(a_l1: f64, b_i: f64, is_eq: bool) -> bool {
 /// 寄与が恒ゼロの b_i = 0 のみ (round 4 sentinel
 /// `verify_farkas_rejects_sign_free_vacuous_row_with_positive_rhs`)。
 #[inline]
-fn farkas_row_sign_free(a_l1: f64, b_i: f64) -> bool {
-    a_l1 == 0.0 && b_i == 0.0
+fn farkas_row_sign_free(a_norm: f64, b_i: f64) -> bool {
+    a_norm == 0.0 && b_i == 0.0
 }
 
-/// CSC 行絶対値和ベクトル (`row_infinity_norms` の各行)。
-fn row_abs_sums(m: &CscMatrix) -> Vec<f64> {
+/// 行最大絶対値ベクトル ‖m_i‖∞ (`DETECT_REL_EPS` doc の行オペランド基準)。
+fn row_max_abs(m: &CscMatrix) -> Vec<f64> {
     m.row_infinity_norms()
 }
 
@@ -101,8 +102,8 @@ impl DetectionScales {
         Self {
             c1: l1(&problem.c),
             b1: l1(b_ext),
-            q_rows: row_abs_sums(&problem.q),
-            a_rows: row_abs_sums(a_ext),
+            q_rows: row_max_abs(&problem.q),
+            a_rows: row_max_abs(a_ext),
             a_cols: col_abs_sums(a_ext),
         }
     }
@@ -229,11 +230,11 @@ pub(crate) fn check_infeasible_or_unbounded(
 /// の実行可能性を保ち、目的関数が線形に減少することを検証する。
 ///
 /// 条件 (すべて componentwise 後方誤差境界、`DETECT_REL_EPS` doc 参照):
-/// 1. 平坦性: 全行で `|Q·dx|_i ≤ eps · ‖Q_i‖₁ · ‖dx‖₁` — **delta_p 正則化を
+/// 1. 平坦性: 全行で `|Q·dx|_i ≤ eps · ‖Q_i‖∞ · ‖dx‖₁` — **delta_p 正則化を
 ///    含まない生の Q** (正則化項は問題の Q ではなく PMM の足場であり証拠にならない)。
 /// 2. 降下 `cᵀdx < -eps · ‖c‖₁ · ‖dx‖₁`。
 /// 3. 退行実行可能性: 全 m_ext 行 (境界行を含む) で
-///    `|a_ext_i·dx + ds_i| ≤ eps · (‖a_ext_i‖₁·‖dx‖₁ + ‖ds‖₁)`。
+///    `|a_ext_i·dx + ds_i| ≤ eps · (‖a_ext_i‖∞·‖dx‖₁ + ‖ds‖₁)`。
 /// 4. 退行非負性: s ≥ 0 全行で `ds_i ≥ -sign_tol(‖ds‖₁)` — s(t) が全 t ≥ 0 で ≥ 0。
 ///
 /// 3・4 の tol 用 ‖ds‖₁ は**検査対象行のみ**の和。空疎な不等式行 (`ray_row_vacuous`:
@@ -675,7 +676,7 @@ mod tests {
     /// PR #66 レビュー (P1) 反例 a: global max(·‖Q‖行和) 基準では diag(1e10,1) の
     /// 無関係な 1e10 が dx=e₂ の平坦性 tolerance を 100 へ緩め、曲率 1 を持つ
     /// 方向が ray と誤認証される (min 0.5xᵀQx - x₂, x₁=0 は x₂*=1 で有限最小)。
-    /// componentwise 行局所基準 (`dot_tol(‖Q_i‖₁, ‖dx‖₁)`) では行 2 の tol が 1e-8
+    /// componentwise 行局所基準 (`dot_tol(‖Q_i‖∞, ‖dx‖₁)`) では行 2 の tol が 1e-8
     /// となり却下する。global 基準への revert で本テストは FAIL する sentinel。
     #[test]
     fn verify_ray_rejects_flatness_loosened_by_unrelated_huge_q_row() {
@@ -724,7 +725,7 @@ mod tests {
     }
 
     /// PR #66 round 2 review (P1-3) 反例: 検出器の平坦性残差に正則化項 (Q+ρI)·dx を
-    /// 織り込むと、Q の厳密ゼロ行では componentwise tol = 1e-8 × ‖Q_i‖₁ × ‖dx‖₁ =
+    /// 織り込むと、Q の厳密ゼロ行では componentwise tol = 1e-8 × ‖Q_i‖∞ × ‖dx‖₁ =
     /// **ちょうど 0** なのに、織り込み項 ρ·dx が IPPMM の ρ 床 (≥1e-14) で常に 0 を
     /// 超え、真の nullspace 方向が検出器を通過して検証器に一切届かない
     /// (旧絶対閾値 1e-8 では ρ<1e-8 で受理されていた)。
