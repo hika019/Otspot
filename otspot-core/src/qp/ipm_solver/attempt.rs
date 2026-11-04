@@ -3248,6 +3248,34 @@ mod tests {
         );
     }
 
+    /// 実機経路の pin: `min -x, 0·x ≤ 0, x ≤ 1` (presolve 無効) は x* = 1, 目的値 -1 の
+    /// 有界 LP であり、空疎行が残っても `Unbounded` を返してはならない (Codex P1 反例の
+    /// 問題そのもの。検証器単体の反例は common.rs の
+    /// `verify_ray_rejects_slack_noise_on_vacuous_row_excusing_bound_exit`)。
+    #[test]
+    fn ipm_does_not_report_unbounded_for_bounded_lp_with_vacuous_row_and_presolve_off() {
+        let prob = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, 1.0)],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        let r = solve_ipm(&prob, &opts);
+        assert_ne!(r.status, crate::problem::SolveStatus::Unbounded);
+        assert_eq!(r.status, crate::problem::SolveStatus::Optimal);
+        assert!(
+            (r.objective + 1.0).abs() < 1e-6,
+            "x* = 1 → obj = -1, got {}",
+            r.objective
+        );
+    }
+
     /// 公開 API 経由の sentinel: 到達不能 eps では IPM は有限残差まで収束するが
     /// satisfies_eps は常に false → 解品質を主張する status を返してはならない。
     /// 旧 finalize (:778) を revert すると SuboptimalSolution が返り FAIL する。

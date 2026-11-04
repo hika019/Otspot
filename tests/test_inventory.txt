@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3327 testcases, 43 ignored
+# totals: 3335 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1046,17 +1046,24 @@ otspot-core	qp::global::tree::tests::best_lower_bound_matches_top	active
 otspot-core	qp::global::tree::tests::pop_returns_smallest_lower_bound_first	active
 otspot-core	qp::global::tree::tests::pushed_popped_counters_track	active
 otspot-core	qp::global::tree::tests::tie_break_fifo_seq	active
+otspot-core	qp::ipm_core::common::tests::verify_farkas_accepts_true_certificate_with_multiplier_noise_on_vacuous_row	active
 otspot-core	qp::ipm_core::common::tests::verify_farkas_accepts_valid_certificate	active
+otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_direction_carried_only_by_vacuous_noise	active
+otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_multiplier_noise_on_vacuous_row_excusing_sign_violation	active
+otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_multiplier_noise_on_vacuous_row_excusing_stationarity	active
 otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_negative_multiplier	active
 otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_sign_free_vacuous_row_with_positive_rhs	active
 otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_stationarity_loosened_by_unrelated_huge_a_col	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_exact_nullspace_direction_under_regularization	active
+otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_true_ray_with_slack_noise_on_vacuous_row	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_true_unbounded_ray	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_unbounded_with_identically_zero_constraint_row	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_direction_exiting_finite_bound	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_flatness_loosened_by_unrelated_huge_q_row	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_noise_level_descent_on_large_c	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_nonflat_quadratic_direction	active
+otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_slack_noise_on_vacuous_row_excusing_bound_exit	active
+otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_slack_noise_on_vacuous_row_excusing_residual	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_vacuous_eq_row_with_nonzero_rhs	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_divides_by_the_larger_objective	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_matches_hand_computed_value	active
@@ -1166,6 +1173,7 @@ otspot-core	qp::ipm_solver::attempt::tests::guard_qp_optimal_no_op_proof	active
 otspot-core	qp::ipm_solver::attempt::tests::guard_qp_optimal_passthrough_non_optimal	active
 otspot-core	qp::ipm_solver::attempt::tests::guard_qp_optimal_passthrough_valid	active
 otspot-core	qp::ipm_solver::attempt::tests::identical_attempt_early_break::identical_consecutive_attempts_break_early	active
+otspot-core	qp::ipm_solver::attempt::tests::ipm_does_not_report_unbounded_for_bounded_lp_with_vacuous_row_and_presolve_off	active
 otspot-core	qp::ipm_solver::attempt::tests::ipm_finalize_outcome_reduced_costs_empty	active
 otspot-core	qp::ipm_solver::attempt::tests::ipm_reports_unbounded_for_zero_q_row_ray_with_presolve_off	active
 otspot-core	qp::ipm_solver::attempt::tests::ipm_reports_unbounded_with_identically_zero_row_and_presolve_off	active

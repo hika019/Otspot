@@ -72,6 +72,15 @@ fn farkas_row_sign_free(a_l1: f64, b_i: f64) -> bool {
     a_l1 == 0.0 && b_i == 0.0
 }
 
+/// `excluded(i)` の成分を 0 にしたコピー。検査から除外した行の方向成分 (KKT 解ノイズ)
+/// が tolerance・最小方向ノルムを動かさないよう、ノルム計算の前に通す。
+fn without_rows(v: &[f64], excluded: impl Fn(usize) -> bool) -> Vec<f64> {
+    v.iter()
+        .enumerate()
+        .map(|(i, &x)| if excluded(i) { 0.0 } else { x })
+        .collect()
+}
+
 /// CSC 行絶対値和ベクトル (`row_infinity_norms` の各行)。
 fn row_abs_sums(m: &CscMatrix) -> Vec<f64> {
     m.row_infinity_norms()
@@ -228,9 +237,10 @@ pub(crate) fn check_infeasible_or_unbounded(
 ///    `|a_ext_i·dx + ds_i| ≤ eps · (‖a_ext_i‖₁·‖dx‖₁ + ‖ds‖₁)`。
 /// 4. 退行非負性: s ≥ 0 全行で `ds_i ≥ -sign_tol(‖ds‖₁)` — s(t) が全 t ≥ 0 で ≥ 0。
 ///
-/// 空疎な不等式行 (`ray_row_vacuous`: 係数恒ゼロ・RHS ≥ 0) は 3・4 から除外 —
-/// スラック s_i = b_i ≥ 0 が定数で退行実行可能性は dx・ds_i と無関係に成立し、
-/// 空疎成分の ds_i (KKT 解ノイズ) への検査は真 ray を棄却するだけ (round 3 / P2)。
+/// 3・4 の tol 用 ‖ds‖₁ は**検査対象行のみ**の和。空疎な不等式行 (`ray_row_vacuous`:
+/// 係数恒ゼロ・RHS ≥ 0) は 3・4 から除外 — スラック s_i = b_i ≥ 0 が定数で退行実行
+/// 可能性は dx・ds_i と無関係に成立し、空疎成分の ds_i (KKT 解ノイズ) への検査は真 ray
+/// を棄却するだけ (round 3 / P2)。tol へ残すと他行の違反を免除する。
 /// 空疎 **EQ** 行は b ≠ 0 です系が実行不能 (スラック修復論法なし) → 即 false、
 /// b = 0 は除外 (round 4)。
 ///
@@ -255,7 +265,9 @@ pub(crate) fn verify_unbounded_ray(
         return false;
     }
     let dx1 = l1(dx);
-    let ds1 = l1(ds);
+    let ds1 = l1(&without_rows(ds, |i| {
+        ray_row_vacuous(scales.a_rows[i], b_ext[i], is_eq_ext[i])
+    }));
 
     // 1. 平坦性: delta_p なしの Q·dx を行ごとに判定。
     let mut qdx = vec![0.0_f64; n];
@@ -315,6 +327,10 @@ pub(crate) fn verify_unbounded_ray(
 ///    無関係な大係数列が他列の残差を救わない)。
 /// 3. 厳密性: `b_extᵀy < -eps · ‖b_ext‖₁ · ‖y‖₁` — 境界行の寄与を含む全行合計。
 ///
+/// 最小方向ノルムと 1〜3 の tol 用 ‖y‖₁ は `farkas_row_sign_free` 行を除いて計算する:
+/// その行の dy_i は条件 2・3 へ無寄与の KKT 解ノイズで、tol へ残すと他行の違反を
+/// 免除し、真の証書を厳密性 tol に埋もれさせる。
+///
 /// 成立時は任意の実行可能点で bᵀy = yᵀ(Ax+s) = (Aᵀy)ᵀx + Σ yᵢsᵢ ≤ 0 となり、
 /// 厳密性と矛盾 → 実行不可能。検出器 (rows < m_orig のみ・符号 unchecked・
 /// b_orig のみ) より条件が厳しく、LP 側 `farkas_direction_certified` と同格の
@@ -327,11 +343,11 @@ pub(crate) fn verify_infeasible_farkas(
     scales: &DetectionScales,
 ) -> bool {
     const MIN_DIR_NORM: f64 = 1e-3;
-    let norm_dy = norm_inf(dy);
-    if norm_dy < MIN_DIR_NORM {
+    let dy_checked = without_rows(dy, |i| farkas_row_sign_free(scales.a_rows[i], b_ext[i]));
+    if norm_inf(&dy_checked) < MIN_DIR_NORM {
         return false;
     }
-    let y1 = l1(dy);
+    let y1 = l1(&dy_checked);
 
     // 1. 符号: 不等式行 (s ≥ 0) の乗数は非負。
     let dy_sign_tol = sign_tol(y1);
@@ -854,6 +870,171 @@ mod tests {
         assert!(
             !verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
             "an unsatisfiable vacuous EQ row (0·x = 5) must block any unboundedness              certificate over the same system"
+        );
+    }
+
+    /// PR #66 Codex P1 反例: `min -x, 0·x ≤ 0, x ≤ 1` は有界 (x* = 1)。dx=1 は上限を
+    /// 突き破るのに、空疎行の ds = 1e10 が ‖ds‖₁ 経由で符号 tol を 100 超へ吊り上げ
+    /// 上限スラックの ds = -1 を免除していた。tol は検査対象行のみで計算する。
+    #[test]
+    fn verify_ray_rejects_slack_noise_on_vacuous_row_excusing_bound_exit() {
+        let problem = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, 1.0)],
+        )
+        .unwrap();
+        let (a_ext, b_ext, mut is_eq_ext, scales) = lp_like(&problem);
+        let dx = vec![1.0];
+        let dy = vec![0.0; a_ext.nrows()];
+        assert_eq!(
+            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 1, 2, 10, &scales),
+            Some(SolveStatus::Unbounded),
+            "the detector ignores bound rows, so the verifier is the only gate here"
+        );
+        let ds = vec![1e10, -1.0];
+        assert!(
+            !verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "noise on the unchecked 0·x ≤ 0 row must not excuse leaving x ≤ 1"
+        );
+        is_eq_ext[0] = true;
+        assert!(
+            !verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "noise on the unchecked 0·x = 0 row must not excuse leaving x ≤ 1"
+        );
+    }
+
+    /// 同じ系で符号でなく残差側の免除経路: ds = [1e10, 0] は上限行に残差 1 を残すが
+    /// (`a·dx + ds = 1`)、空疎行の ds が残差 tol にも 100 を足すため通過していた。
+    #[test]
+    fn verify_ray_rejects_slack_noise_on_vacuous_row_excusing_residual() {
+        let problem = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, 1.0)],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let ds = vec![1e10, 0.0];
+        assert!(
+            !verify_unbounded_ray(&[1.0], &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "row x ≤ 1 keeps residual 1 — noise on the vacuous row must not absorb it"
+        );
+    }
+
+    /// 真 ray は空疎行のノイズがあっても証明され続ける (除外が検査へ波及しない)。
+    #[test]
+    fn verify_ray_accepts_true_ray_with_slack_noise_on_vacuous_row() {
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 3, 2).unwrap();
+        let problem = QpProblem::new_all_le(
+            CscMatrix::new(2, 2),
+            vec![0.0, -1.0],
+            a,
+            vec![0.0, 0.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let ds = vec![0.0, 0.0, 1e10];
+        assert!(verify_unbounded_ray(
+            &[0.0, 1.0],
+            &ds,
+            &problem,
+            &a_ext,
+            &b_ext,
+            &is_eq_ext,
+            &scales
+        ));
+    }
+
+    /// 実行可能系 {0·x ≤ 0, x ≤ -1, 1e6·x ≤ 0} (x = -1 が可行) への偽証書:
+    /// y₃ = -1e-6 < 0 は `bᵀy = s₂y₂ + s₃y₃ = -1` を作る真の符号違反だが、空疎行の
+    /// dy = 1e4 が符号 tol を 1e-4 へ吊り上げて免除していた。
+    #[test]
+    fn verify_farkas_rejects_multiplier_noise_on_vacuous_row_excusing_sign_violation() {
+        let a = CscMatrix::from_triplets(&[1, 2], &[0, 0], &[1.0, 1e6], 3, 1).unwrap();
+        let problem = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            a,
+            vec![0.0, -1.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let dy = vec![1e4, 1.0, -1e-6];
+        assert!(
+            !verify_infeasible_farkas(&dy, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "x = -1 is feasible — noise on the 0·x ≤ 0 row must not excuse y₃ < 0"
+        );
+    }
+
+    /// 実行可能系 {0·x ≤ 0, -x ≤ -1, 1e6·x - z ≤ 0} ((x, z) = (1, 1e6) が可行) への
+    /// 偽証書: 列 x の停留残差 (Aᵀy)ₓ = -1 が、空疎行の dy = 1e3 による列 tol 10 で
+    /// 素通りしていた。厳密性 tol は ‖b‖₁ = 1 基準で 1e-5 に留まるので落ちない。
+    #[test]
+    fn verify_farkas_rejects_multiplier_noise_on_vacuous_row_excusing_stationarity() {
+        let a = CscMatrix::from_triplets(&[1, 2, 2], &[0, 0, 1], &[-1.0, 1e6, -1.0], 3, 2).unwrap();
+        let problem = QpProblem::new_all_le(
+            CscMatrix::new(2, 2),
+            vec![0.0, 0.0],
+            a,
+            vec![0.0, -1.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let dy = vec![1e3, 1.0, 0.0];
+        assert!(
+            !verify_infeasible_farkas(&dy, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "(Aᵀy)ₓ = -1 is a real residual — noise on the 0·x ≤ 0 row must not absorb it"
+        );
+    }
+
+    /// 実行可能系 {0·x ≤ 0, x ≤ 1, -x ≤ 0} で、検査対象行の dy は 1e-9 のみ。空疎行の
+    /// dy = 1e-3 が最小方向ノルム判定を通し、符号 tol の床 1e-8 が負の乗数を無検査に
+    /// していた。tol だけ直して判定を全成分のまま残すとこの経路は開いたままになる。
+    #[test]
+    fn verify_farkas_rejects_direction_carried_only_by_vacuous_noise() {
+        let a = CscMatrix::from_triplets(&[1, 2], &[0, 0], &[1.0, -1.0], 3, 1).unwrap();
+        let problem = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            a,
+            vec![0.0, 1.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let dy = vec![1e-3, -1e-9, -1e-9];
+        assert!(
+            !verify_infeasible_farkas(&dy, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "x = 0 is feasible — vacuous noise must not satisfy the minimum-norm gate"
+        );
+    }
+
+    /// liveness: 実行不能系 {0·x ≤ 0, x ≤ 0, -x ≤ -1} の真の証書 y = (·, 1, 1) が、
+    /// 空疎行の dy = 1e12 で厳密性 tol 1e4 に埋もれて棄却されていた。
+    #[test]
+    fn verify_farkas_accepts_true_certificate_with_multiplier_noise_on_vacuous_row() {
+        let a = CscMatrix::from_triplets(&[1, 2], &[0, 0], &[1.0, -1.0], 3, 1).unwrap();
+        let problem = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            a,
+            vec![0.0, 0.0, -1.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let dy = vec![1e12, 1.0, 1.0];
+        assert!(
+            verify_infeasible_farkas(&dy, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "bᵀy = -1 with Aᵀy = 0 is a valid certificate whatever the vacuous row carries"
         );
     }
 }
