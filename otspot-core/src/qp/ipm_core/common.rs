@@ -72,15 +72,6 @@ fn farkas_row_sign_free(a_l1: f64, b_i: f64) -> bool {
     a_l1 == 0.0 && b_i == 0.0
 }
 
-/// `excluded(i)` の成分を 0 にしたコピー。検査から除外した行の方向成分 (KKT 解ノイズ)
-/// が tolerance・最小方向ノルムを動かさないよう、ノルム計算の前に通す。
-fn without_rows(v: &[f64], excluded: impl Fn(usize) -> bool) -> Vec<f64> {
-    v.iter()
-        .enumerate()
-        .map(|(i, &x)| if excluded(i) { 0.0 } else { x })
-        .collect()
-}
-
 /// CSC 行絶対値和ベクトル (`row_infinity_norms` の各行)。
 fn row_abs_sums(m: &CscMatrix) -> Vec<f64> {
     m.row_infinity_norms()
@@ -265,9 +256,10 @@ pub(crate) fn verify_unbounded_ray(
         return false;
     }
     let dx1 = l1(dx);
-    let ds1 = l1(&without_rows(ds, |i| {
-        ray_row_vacuous(scales.a_rows[i], b_ext[i], is_eq_ext[i])
-    }));
+    let ds1: f64 = (0..a_ext.nrows())
+        .filter(|&i| !ray_row_vacuous(scales.a_rows[i], b_ext[i], is_eq_ext[i]))
+        .map(|i| ds[i].abs())
+        .sum();
 
     // 1. 平坦性: delta_p なしの Q·dx を行ごとに判定。
     let mut qdx = vec![0.0_f64; n];
@@ -343,11 +335,15 @@ pub(crate) fn verify_infeasible_farkas(
     scales: &DetectionScales,
 ) -> bool {
     const MIN_DIR_NORM: f64 = 1e-3;
-    let dy_checked = without_rows(dy, |i| farkas_row_sign_free(scales.a_rows[i], b_ext[i]));
-    if norm_inf(&dy_checked) < MIN_DIR_NORM {
+    let dy_checked_abs = || {
+        (0..a_ext.nrows())
+            .filter(|&i| !farkas_row_sign_free(scales.a_rows[i], b_ext[i]))
+            .map(|i| dy[i].abs())
+    };
+    if dy_checked_abs().fold(0.0_f64, f64::max) < MIN_DIR_NORM {
         return false;
     }
-    let y1 = l1(&dy_checked);
+    let y1: f64 = dy_checked_abs().sum();
 
     // 1. 符号: 不等式行 (s ≥ 0) の乗数は非負。
     let dy_sign_tol = sign_tol(y1);
@@ -1036,5 +1032,29 @@ mod tests {
             verify_infeasible_farkas(&dy, &a_ext, &b_ext, &is_eq_ext, &scales),
             "bᵀy = -1 with Aᵀy = 0 is a valid certificate whatever the vacuous row carries"
         );
+    }
+
+    /// 全行が恒ゼロの系は a_ext が 0 行に落ちる (#68) ため ds の長さと行数が一致しない。
+    /// tol 用ノルムは検査ループと同じ行範囲で計算し、マスクを範囲外参照しない。
+    #[test]
+    fn verify_ray_scans_only_rows_present_in_extended_matrix() {
+        let problem = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        assert!(verify_unbounded_ray(
+            &[1.0],
+            &[0.0],
+            &problem,
+            &a_ext,
+            &b_ext,
+            &is_eq_ext,
+            &scales
+        ));
     }
 }

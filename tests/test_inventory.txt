@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3335 testcases, 43 ignored
+# totals: 3336 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1065,6 +1065,7 @@ otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_nonflat_quadratic_di
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_slack_noise_on_vacuous_row_excusing_bound_exit	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_slack_noise_on_vacuous_row_excusing_residual	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_vacuous_eq_row_with_nonzero_rhs	active
+otspot-core	qp::ipm_core::common::tests::verify_ray_scans_only_rows_present_in_extended_matrix	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_divides_by_the_larger_objective	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_matches_hand_computed_value	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_noise_scales_with_sqrt_of_longest_sum	active
