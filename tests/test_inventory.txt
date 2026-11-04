@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3336 testcases, 43 ignored
+# totals: 3339 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1058,6 +1058,7 @@ otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_exact_nullspace_dire
 otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_true_ray_with_slack_noise_on_vacuous_row	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_true_unbounded_ray	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_unbounded_with_identically_zero_constraint_row	active
+otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_zero_row_with_zero_rhs_next_to_bound	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_direction_exiting_finite_bound	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_flatness_loosened_by_unrelated_huge_q_row	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_noise_level_descent_on_large_c	active
@@ -1065,6 +1066,7 @@ otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_nonflat_quadratic_di
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_slack_noise_on_vacuous_row_excusing_bound_exit	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_slack_noise_on_vacuous_row_excusing_residual	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_vacuous_eq_row_with_nonzero_rhs	active
+otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_zero_row_with_negative_rhs	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_scans_only_rows_present_in_extended_matrix	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_divides_by_the_larger_objective	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_matches_hand_computed_value	active
@@ -1176,6 +1178,7 @@ otspot-core	qp::ipm_solver::attempt::tests::guard_qp_optimal_passthrough_valid	a
 otspot-core	qp::ipm_solver::attempt::tests::identical_attempt_early_break::identical_consecutive_attempts_break_early	active
 otspot-core	qp::ipm_solver::attempt::tests::ipm_does_not_report_unbounded_for_bounded_lp_with_vacuous_row_and_presolve_off	active
 otspot-core	qp::ipm_solver::attempt::tests::ipm_finalize_outcome_reduced_costs_empty	active
+otspot-core	qp::ipm_solver::attempt::tests::ipm_reports_infeasible_for_zero_row_with_negative_rhs_and_presolve_off	active
 otspot-core	qp::ipm_solver::attempt::tests::ipm_reports_unbounded_for_zero_q_row_ray_with_presolve_off	active
 otspot-core	qp::ipm_solver::attempt::tests::ipm_reports_unbounded_with_identically_zero_row_and_presolve_off	active
 otspot-core	qp::ipm_solver::attempt::tests::iter_guard_charges_actual_consumption::exhausted_budget_stops_the_attempt_loop	active

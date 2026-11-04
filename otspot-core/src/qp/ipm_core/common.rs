@@ -63,6 +63,14 @@ fn ray_row_vacuous(a_l1: f64, b_i: f64, is_eq: bool) -> bool {
     a_l1 == 0.0 && if is_eq { b_i == 0.0 } else { b_i >= 0.0 }
 }
 
+/// 係数ゼロ行が系全体を実行不能にする: `0·x = b` (b ≠ 0) は満たす点が無く、
+/// `0·x ≤ b` (b < 0) はスラック s_i = b_i が全点で負。どちらも実行可能点が存在せず
+/// unboundedness の主張は不成立 (round 4 / #69)。
+#[inline]
+fn zero_row_unsatisfiable(a_l1: f64, b_i: f64, is_eq: bool) -> bool {
+    a_l1 == 0.0 && if is_eq { b_i != 0.0 } else { b_i < 0.0 }
+}
+
 /// Farkas 符号条件用の空疎行述語: 係数ゼロ行の乗数 dy_i は停留 (A_extᵀy) に
 /// 無寄与だが、厳密性 b_extᵀy には `b_i·dy_i` で**寄与する**。符号自由化が安全なのは
 /// 寄与が恒ゼロの b_i = 0 のみ (round 4 sentinel
@@ -232,8 +240,8 @@ pub(crate) fn check_infeasible_or_unbounded(
 /// 係数恒ゼロ・RHS ≥ 0) は 3・4 から除外 — スラック s_i = b_i ≥ 0 が定数で退行実行
 /// 可能性は dx・ds_i と無関係に成立し、空疎成分の ds_i (KKT 解ノイズ) への検査は真 ray
 /// を棄却するだけ (round 3 / P2)。tol へ残すと他行の違反を免除する。
-/// 空疎 **EQ** 行は b ≠ 0 です系が実行不能 (スラック修復論法なし) → 即 false、
-/// b = 0 は除外 (round 4)。
+/// 実行不能な係数ゼロ行 (`zero_row_unsatisfiable`) があれば即 false。空疎 EQ 行
+/// (b = 0) は同様に除外 (round 4)。
 ///
 /// 検出器 (`check_infeasible_or_unbounded`) との独立点: 検出器は (a) 境界行を
 /// 見ない (rows < m_orig のみ)、(b) ds を構築・検査しない (s(t) の退行非負性が
@@ -288,10 +296,7 @@ pub(crate) fn verify_unbounded_ray(
     }
     let ds_sign_tol = sign_tol(ds1);
     for i in 0..a_ext.nrows() {
-        if scales.a_rows[i] == 0.0 && is_eq_ext[i] && b_ext[i] != 0.0 {
-            // 満たす点が存在しない空疎 EQ 行 (0·x = b, b ≠ 0)。不等式行にある
-            // スラック修復論法 (s_i = b_i ≥ 0) が存在しないため、この系の
-            // unboundedness 証明は不成立 (round 4)。
+        if zero_row_unsatisfiable(scales.a_rows[i], b_ext[i], is_eq_ext[i]) {
             return false;
         }
         if ray_row_vacuous(scales.a_rows[i], b_ext[i], is_eq_ext[i]) {
@@ -1032,6 +1037,51 @@ mod tests {
             verify_infeasible_farkas(&dy, &a_ext, &b_ext, &is_eq_ext, &scales),
             "bᵀy = -1 with Aᵀy = 0 is a valid certificate whatever the vacuous row carries"
         );
+    }
+
+    /// #69: `0·x ≤ -1` のスラックは全実行可能点で s = b < 0 となり、系に実行可能点が
+    /// 存在しない。dx=1, ds=[0, 1] は x ≥ 0 行を含む他の全条件を満たすため、行自体を
+    /// 棄却する必要がある。
+    #[test]
+    fn verify_ray_rejects_zero_row_with_negative_rhs() {
+        let problem = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let ds = vec![0.0, 1.0];
+        assert!(
+            !verify_unbounded_ray(&[1.0], &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "0·x ≤ -1 has no feasible point, so no ray can prove unboundedness"
+        );
+    }
+
+    /// 上と b の値だけが異なる `0·x ≤ 0` は実行可能で ray を阻まない。
+    #[test]
+    fn verify_ray_accepts_zero_row_with_zero_rhs_next_to_bound() {
+        let problem = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let ds = vec![0.0, 1.0];
+        assert!(verify_unbounded_ray(
+            &[1.0],
+            &ds,
+            &problem,
+            &a_ext,
+            &b_ext,
+            &is_eq_ext,
+            &scales
+        ));
     }
 
     /// 全行が恒ゼロの系は a_ext が 0 行に落ちる (#68) ため ds の長さと行数が一致しない。

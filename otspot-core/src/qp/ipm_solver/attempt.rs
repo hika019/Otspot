@@ -3276,6 +3276,26 @@ mod tests {
         );
     }
 
+    /// 実機経路の pin (#69): `min -x, 0·x ≤ -1, x ≥ 0` は実行可能点を持たない。c が
+    /// 降下方向を与えても `Unbounded` ではなく `Infeasible` を返す。
+    #[test]
+    fn ipm_reports_infeasible_for_zero_row_with_negative_rhs_and_presolve_off() {
+        let prob = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        let r = solve_ipm(&prob, &opts);
+        assert_eq!(r.status, crate::problem::SolveStatus::Infeasible);
+    }
+
     /// 公開 API 経由の sentinel: 到達不能 eps では IPM は有限残差まで収束するが
     /// satisfies_eps は常に false → 解品質を主張する status を返してはならない。
     /// 旧 finalize (:778) を revert すると SuboptimalSolution が返り FAIL する。
