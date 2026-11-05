@@ -102,6 +102,17 @@ pub struct SolveStats {
     /// This is a load-bearing route sentinel for large Netlib LPs whose upper
     /// bounds must stay as variable bounds instead of expanded UB rows.
     pub bounded_eq_ub_path: bool,
+    /// `true` iff the returned `Infeasible` / `Unbounded` status passed the
+    /// independent ray / Farkas certificate verification at the IPM detector's
+    /// acceptance point (`ippmm::iter`), not just the Newton-direction
+    /// Farkas-like heuristic of `check_infeasible_or_unbounded`.
+    ///
+    /// Load-bearing correctness sentinel (QFORPLAN false-Unbounded, 2026-11):
+    /// `finalize_outcome` refuses to report an unverified structural status and
+    /// falls back to the finite best iterate / an honest `Stalled` instead.
+    /// Removing the verification gate flips `false` conclusions back to
+    /// unverified hard verdicts, which the gate exists to prevent.
+    pub infeasibility_certified: bool,
 }
 
 /// ソルバーの求解結果ステータス

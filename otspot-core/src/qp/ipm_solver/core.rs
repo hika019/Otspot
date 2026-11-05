@@ -78,14 +78,8 @@ fn run_ipm_with(
     let mut result = inner_solver(reduced, &opts_for_ipm);
 
     // 確定的 Infeasible/Unbounded/NonConvex は outcome に保持して Timeout 隠蔽を避ける。
-    if matches!(
-        result.status,
-        SolveStatus::Infeasible | SolveStatus::Unbounded | SolveStatus::NonConvex(_)
-    ) {
-        let mut out = IpmOutcome::infeasibility(result.status);
-        out.iterations = result.iterations; // attempt 予算 (`iter_used`) の課金対象
-        out.timing = result.timing_breakdown;
-        return out;
+    if structural_infeasibility(&result.status) {
+        return infeasibility_outcome(result);
     }
 
     // 不定 Q + 慣性修正 IPM 収束時は LocallyOptimal フラグを保持。
@@ -129,6 +123,7 @@ fn run_ipm_with(
             duality_gap_rel: f64::INFINITY,
             numerical_failure: true,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: result.timing_breakdown,
@@ -171,6 +166,7 @@ fn run_ipm_with(
             duality_gap_rel: f64::INFINITY,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: result.timing_breakdown,
@@ -373,6 +369,7 @@ fn run_ipm_with(
         duality_gap_rel: dual_gap,
         numerical_failure: false,
         infeasibility_status: None,
+        infeasibility_proven: false,
         is_locally_optimal,
         postsolve_krylov_ir_skipped: krylov_ir_skipped,
         timing: Some(combined_timing),
@@ -387,6 +384,30 @@ fn should_run_krylov_ir(ipm_made_progress: bool, kkt_pass_after_refine: bool) ->
 /// Recomputes `0.5 x^T Q x + c^T x + obj_offset` from the returned solution
 /// `x`, so the reported objective stays consistent with post-processing
 /// (bound clip, dual refit, Krylov IR, ...) rather than trusting the IPM
+/// 内側 IPM が構造判定 (Infeasible / Unbounded / NonConvex) を返したかの述語。
+/// 確定応答化するかは `infeasibility_outcome` の proven フラグで決まる。
+fn structural_infeasibility(status: &SolveStatus) -> bool {
+    matches!(
+        status,
+        SolveStatus::Infeasible | SolveStatus::Unbounded | SolveStatus::NonConvex(_)
+    )
+}
+
+/// 構造判定を `IpmOutcome` に変換する。proven (確定判定候補) は内側受理部の
+/// 独立 ray / Farkas 検証を通過した判定のみ (`stats.infeasibility_certified`)。
+/// NonConvex は慣性修正による構造的主張であり ray/Farkas 系ではないため
+/// 検証対象外 = proven として扱う (finalize の ray 検証ゲートは通さない)。
+fn infeasibility_outcome(result: crate::problem::SolverResult) -> IpmOutcome {
+    // NonConvex 判定の抽出は `result.status` の move より前で行うこと
+    // (SolveStatus は非 Copy)。
+    let nonconvex_structural = matches!(result.status, SolveStatus::NonConvex(_));
+    let mut out = IpmOutcome::infeasibility(result.status);
+    out.iterations = result.iterations; // attempt 予算 (`iter_used`) の課金対象
+    out.timing = result.timing_breakdown;
+    out.infeasibility_proven = result.stats.infeasibility_certified || nonconvex_structural;
+    out
+}
+
 /// inner solver's own last-iterate objective.
 fn recompute_objective(orig_problem: &QpProblem, solution: &[f64]) -> f64 {
     let qx = orig_problem.q.mat_vec_mul(solution).expect(

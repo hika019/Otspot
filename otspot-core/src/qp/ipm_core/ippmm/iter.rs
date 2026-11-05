@@ -131,6 +131,9 @@ fn solve_ippmm_inner_confined(
         return solve_unconstrained(problem, &timeout_ctx);
     }
 
+    let scales = crate::qp::ipm_core::common::DetectionScales::compute(problem, &a_ext, &b_ext);
+    let mut infeas_certified = false;
+
     let eq_count = is_eq_ext.iter().filter(|&&v| v).count();
     let m_ineq = m_ext - eq_count;
 
@@ -382,12 +385,11 @@ fn solve_ippmm_inner_confined(
             },
         };
         let factorize_outcome = factorize_kkt_with_retry(&fact_ctx, &mut factor_caches);
-        let (mut fac, aug_mat, d_inv_opt, rho_retry) = match factorize_outcome {
+        let (mut fac, aug_mat, d_inv_opt) = match factorize_outcome {
             FactorizeOutcome::Ok {
                 factor,
                 aug_mat,
                 d_inv,
-                rho_used,
                 retry_count,
                 used_iterative,
                 factorize_ns,
@@ -395,7 +397,7 @@ fn solve_ippmm_inner_confined(
                 total_factorize_ns += factorize_ns;
                 total_reg_retries += retry_count;
                 any_iterative |= used_iterative;
-                (factor, aug_mat, d_inv, rho_used)
+                (factor, aug_mat, d_inv)
             }
             FactorizeOutcome::Timeout => {
                 status = Some(SolveStatus::Timeout);
@@ -545,10 +547,16 @@ fn solve_ippmm_inner_confined(
             // 名乗る。blow-up からの best-so-far 復帰は品質を主張せず Stalled で返し、
             // 実際の品質判定は finalize (prove_optimal) に委ねる。
             if best_score.is_finite() {
-                x.copy_from_slice(&best_x);
-                y.copy_from_slice(&best_y);
-                s.copy_from_slice(&best_s);
-                final_residuals = Some(best_residuals);
+                restore_best_so_far(
+                    &mut x,
+                    &mut y,
+                    &mut s,
+                    &mut final_residuals,
+                    &best_x,
+                    &best_y,
+                    &best_s,
+                    best_residuals,
+                );
                 status = Some(SolveStatus::Stalled);
             } else {
                 status = Some(SolveStatus::NumericalError);
@@ -556,38 +564,34 @@ fn solve_ippmm_inner_confined(
             break;
         }
 
-        // check_infeasible_or_unbounded は Newton 方向の Farkas-like 近似なので
-        // PMM floor 起因の false-positive がありうる。best-so-far がある間は信用せず、
-        // best が無い時のみ Infeasible/Unbounded を確定とみなす。
-        if let Some(infeas_status) =
-            check_infeasible_or_unbounded(&dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry)
-        {
-            consecutive_infeas_triggers += 1;
-            // N 連続 fire まで判定保留: PMM floor の false-positive に adaptive reg の猶予を与える。
-            if consecutive_infeas_triggers >= MIN_CONSECUTIVE_INFEAS {
-                // 証明受理直前の stop check: 関数 doc の contract 参照。
-                if should_stop_before_infeas_commit(&timeout_ctx) {
-                    status = Some(SolveStatus::Timeout);
-                    break;
-                }
-                // best が quality 圏内なら検出器を信用せず best-so-far を Stalled で
-                // 返す (Farkas-like 近似の false-positive 対策)。Optimal 昇格はしない:
-                // 品質判定は finalize の prove_optimal 一本。
-                if best_score.is_finite() && best_score < INFEAS_DETECTOR_DISTRUST_SCORE * eps_orig
-                {
-                    x.copy_from_slice(&best_x);
-                    y.copy_from_slice(&best_y);
-                    s.copy_from_slice(&best_s);
-                    final_residuals = Some(best_residuals);
-                    status = Some(SolveStatus::Stalled);
-                    break;
-                }
-                status = Some(infeas_status);
+        // 受理ゲート (count 管理・distrust・独立 ray/Farkas 検証) は helper doc 参照。
+        match check_infeas_verdict(
+            &mut consecutive_infeas_triggers,
+            &mut status,
+            &mut infeas_certified,
+            (&timeout_ctx, best_score, eps_orig),
+            (&dx, &ds, &dy),
+            (problem, &a_ext),
+            (m_orig, m_ext, iter),
+            (&b_ext, &is_eq_ext, &scales),
+        ) {
+            // Break の *status (検証済み判定 / stop 時の Timeout) はゲート側で確定済み。
+            InfeasGate::Break => break,
+            InfeasGate::Stall => {
+                restore_best_so_far(
+                    &mut x,
+                    &mut y,
+                    &mut s,
+                    &mut final_residuals,
+                    &best_x,
+                    &best_y,
+                    &best_s,
+                    best_residuals,
+                );
+                status = Some(SolveStatus::Stalled);
                 break;
             }
-        } else {
-            // 検出器が反応しなかった iter で carry-over count をリセット。
-            consecutive_infeas_triggers = 0;
+            InfeasGate::Continue => {}
         }
 
         let ndx = dx.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
@@ -773,11 +777,112 @@ fn solve_ippmm_inner_confined(
         total_solve_ns,
         total_reg_retries,
         any_iterative,
+        infeas_certified,
     )
 }
 
 /// ループ終端後の後処理: 反復予算枯渇の status 確定 (MaxIterations)、Timeout/
 /// MaxIterations 到達時の best-so-far への上書き、目的値・双対解の復元、不定 Q の
+/// 検出器 fire の受理ゲート (巨大ループからの切り出しであり、受理部契約の
+/// 明文化でもある)。
+///
+/// 動作:
+/// 1. fire 回数管理 — fire 無しでカウントリセット、N 連続 fire まで判定保留し
+///    (PMM floor の false-positive に adaptive reg の猶予を与える)、N 到達で
+///    カウントを戻してゲート評価へ。
+/// 2. 受理直前の時間切れ check — `should_stop_before_infeas_commit` 側は best
+///    破棄の Timeout 返却を許可しない契約のため、best を Stalled で返す。
+/// 3. best が quality 圏内なら検出器を信用せず best-so-far を Stalled で返す
+///    (Farkas-like 近似の false-positive 対策)。Optimal 昇格はしない — 品質
+///    判定は finalize の prove_optimal 一本。
+/// 4. best が無い場合のみ ray / Farkas の独立検証を要求し、成立時のみ
+///    *status と *infeas_certified を設定してループ終了を返す。修正前はここで
+///    追加検証なしに確定判定を受理していた (計装ビルドの trace で
+///    "accepted WITHOUT further verification" を実測、調査台帳
+///    /tmp/opencode/inv_eps_anom/REPORT.md)。未証明の判定は撤回して反復継続 —
+///    偽陽性で打ち切るとその後も収束へ進めた solve を早期に奪う (QFORPLAN
+///    no-presolve fallback 実測: iter 42 打ち切り comp 6.7e-7、継続なら iter 52
+///    で真最適点 comp 3.9e-8)。後に本物の ray 方向が出れば再受理され得る。
+///
+/// ゲートの終了指示。Break = *status 確定済みで break、Stall = best を復元して
+/// Stalled で break、Continue = 反復継続 (fire 無し / 保留 / 未証明撤回)。
+enum InfeasGate {
+    Break,
+    Stall,
+    Continue,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_infeas_verdict(
+    consecutive: &mut usize,
+    status: &mut Option<SolveStatus>,
+    infeas_certified: &mut bool,
+    (timeout_ctx, best_score, eps_orig): (&TimeoutCtx, f64, f64),
+    (dx, ds, dy): (&[f64], &[f64], &[f64]),
+    (problem, a_ext): (&QpProblem, &otspot_num::sparse::CscMatrix),
+    (m_orig, m_ext, iter): (usize, usize, usize),
+    (b_ext, is_eq_ext, scales): (
+        &[f64],
+        &[bool],
+        &crate::qp::ipm_core::common::DetectionScales,
+    ),
+) -> InfeasGate {
+    let Some(infeas_status) =
+        check_infeasible_or_unbounded(dx, dy, problem, a_ext, m_orig, m_ext, iter, scales)
+    else {
+        *consecutive = 0;
+        return InfeasGate::Continue;
+    };
+    *consecutive += 1;
+    if *consecutive < MIN_CONSECUTIVE_INFEAS {
+        return InfeasGate::Continue;
+    }
+    *consecutive = 0;
+    // stop check は base 同一に best 破棄の Timeout を返す (cancel race sentinel
+    // `cancel_race_before_infeasible_certificate_prefers_timeout` が pin する契約)。
+    if should_stop_before_infeas_commit(timeout_ctx) {
+        *status = Some(SolveStatus::Timeout);
+        return InfeasGate::Break;
+    }
+    if best_score.is_finite() && best_score < INFEAS_DETECTOR_DISTRUST_SCORE * eps_orig {
+        return InfeasGate::Stall;
+    }
+    let verified = match infeas_status {
+        SolveStatus::Unbounded => crate::qp::ipm_core::common::verify_unbounded_ray(
+            dx, ds, problem, a_ext, b_ext, is_eq_ext, scales,
+        ),
+        SolveStatus::Infeasible => crate::qp::ipm_core::common::verify_infeasible_farkas(
+            dy, a_ext, b_ext, is_eq_ext, scales,
+        ),
+        _ => false,
+    };
+    if verified {
+        *infeas_certified = true;
+        *status = Some(infeas_status);
+        return InfeasGate::Break;
+    }
+    InfeasGate::Continue
+}
+
+/// best-so-far iterate (x, y, s) と残差計測を復元する (blow-up 復帰と検出器
+/// distrust 復帰の共通化)。
+#[allow(clippy::too_many_arguments)]
+fn restore_best_so_far(
+    x: &mut [f64],
+    y: &mut [f64],
+    s: &mut [f64],
+    final_residuals: &mut Option<(f64, f64, f64)>,
+    best_x: &[f64],
+    best_y: &[f64],
+    best_s: &[f64],
+    best_residuals: (f64, f64, f64),
+) {
+    x.copy_from_slice(best_x);
+    y.copy_from_slice(best_y);
+    s.copy_from_slice(best_s);
+    *final_residuals = Some(best_residuals);
+}
+
 /// Optimal→LocallyOptimal 降格、`SolverResult` の組み立てを行う。
 #[allow(clippy::too_many_arguments)]
 fn finalize_ippmm_result(
@@ -802,6 +907,7 @@ fn finalize_ippmm_result(
     total_solve_ns: u128,
     total_reg_retries: u32,
     any_iterative: bool,
+    infeas_certified: bool,
 ) -> SolverResult {
     let iterations_consumed = if status.is_none() {
         max_iter
@@ -879,6 +985,13 @@ fn finalize_ippmm_result(
             None
         },
         timing_breakdown: Some(ipm_timing),
+        stats: crate::problem::SolveStats {
+            // Infeasible/Unbounded を確定判定として受理したときのみ true。
+            // 下流 (`ipm_solver::core` → `finalize_outcome`) の検証義務ゲートが
+            // このフラグを参照する (SolveStats の doc 参照)。
+            infeasibility_certified: infeas_certified,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }

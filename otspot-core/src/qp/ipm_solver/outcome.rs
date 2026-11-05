@@ -43,6 +43,15 @@ pub struct IpmOutcome {
     pub numerical_failure: bool,
     /// 確定判定された Infeasible / Unbounded のみ保持 (他 status は残差から外部判定)。
     pub infeasibility_status: Option<crate::problem::SolveStatus>,
+    /// `infeasibility_status` が独立検証 (ray / Farkas 証明) を通った判定か。
+    ///
+    /// `false` の infeasibility status は Newton 方向ヒューリスティック検出の
+    /// 未証明候補であり、attempt 層の候補比較・finalize で確定判定として
+    /// 優先されない (QFORPLAN@1e-8 FAIL:Unbounded 誤判定修正、2026-11)。
+    /// 検証済み判定のみ `run_ipm_with` が `result.stats.infeasibility_certified`
+    /// 経由で `true` を設定する。`NonConvex` は ray/Farkas 系の主張ではないため
+    /// このフラグに関係なく構造的判定として扱われる。
+    pub infeasibility_proven: bool,
     /// 慣性修正付き IPM が走った場合、収束時に Optimal でなく LocallyOptimal を返す。
     pub is_locally_optimal: bool,
     /// postsolve の saddle-point Krylov IR が `kkt_already_pass` ゲートで省略されたか。
@@ -71,6 +80,7 @@ impl IpmOutcome {
             duality_gap_rel: f64::INFINITY,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -79,6 +89,9 @@ impl IpmOutcome {
     }
 
     /// 構造的判定 (Infeasible / Unbounded / NonConvex) を保持する outcome。
+    /// 未証明候補として構成される (`infeasibility_proven = false`)。検証済みで
+    /// 確定判定としてよいもののみ、`run_ipm_with` が内側 stats 経由で proven を
+    /// 立てる (`IpmOutcome::infeasibility_proven` の doc 参照)。
     pub fn infeasibility(status: crate::problem::SolveStatus) -> Self {
         debug_assert!(
             matches!(

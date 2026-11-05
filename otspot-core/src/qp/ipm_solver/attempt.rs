@@ -398,6 +398,26 @@ fn outcome_certificate_score(outcome: &IpmOutcome, view: &ProblemView<'_>, user_
     }
 }
 
+/// `infeasibility_status` を「確定判定として扱うか」を返す。
+///
+/// 確定判定 = 独立 ray / Farkas 検証を通過した proven、または `NonConvex`
+/// (慣性修正による構造的主張であり ray/Farkas 系ではないため検証ゲートの
+/// 対象外)。未証明 (proven=false) の検出器ヒューリスティック判定は含まない。
+fn infeasibility_is_final(outcome: &IpmOutcome) -> bool {
+    match outcome.infeasibility_status {
+        Some(crate::problem::SolveStatus::NonConvex(_)) => true,
+        Some(_) => outcome.infeasibility_proven,
+        None => false,
+    }
+}
+
+/// `candidate` が `incumbent` に取って代わる最良候補か。
+///
+/// infeasibility status の優先は「検証済みかどうか」で決まる (2026-11 変更):
+/// 検証済み (final) 判定は有限 iterate より絶対優先、未証明判定は score 比較に
+/// 降ろす。旧実装は検出器由来の未証明判定にも絶対優先を与えていたが、受理部に
+/// ray/Farkas 検証が無い状態で QFORPLAN@1e-8 の偽 Unbounded が fallback の真
+/// 最適点より優先される誤報告が実測された (fallback_can_replace_unproven doc)。
 fn outcome_is_better_candidate(
     candidate: &IpmOutcome,
     incumbent: &IpmOutcome,
@@ -408,9 +428,14 @@ fn outcome_is_better_candidate(
         candidate.infeasibility_status.is_some(),
         incumbent.infeasibility_status.is_some(),
     ) {
-        (true, false) => return false,
-        (false, true) => return true,
-        (true, true) => return false,
+        // 検証済み判定のみが有限 iterate に勝てる。未証明判定は有限候補を置換できない。
+        (true, false) => return infeasibility_is_final(candidate),
+        // 有限候補は未証明の infeasibility incumbent を置換できる。検証済み判定は守る。
+        (false, true) => return !infeasibility_is_final(incumbent),
+        // proven が unproven を置換可。同格 (both proven / both unproven) は現順位維持。
+        (true, true) => {
+            return infeasibility_is_final(candidate) && !infeasibility_is_final(incumbent)
+        }
         (false, false) => {}
     }
 
@@ -458,13 +483,30 @@ impl AttemptFingerprint {
     }
 }
 
+/// no-presolve fallback が未証明 incumbent を置換してよいか。
+///
+/// ## 優先順位の意味 (2026-11 変更)
+///
+/// 旧実装は `incumbent.infeasibility_status` が有るだけで無条件に false を返し、
+/// **未検証の構造判定を絶対優先**していた。しかしその判定の出所は検出器受理
+/// (Newton 方向ヒューリスティック) であり ray/Farkas 検証を通っていない。
+/// QFORPLAN@1e-8 の実測 (調査 REPORT /tmp/opencode/inv_eps_anom §1、HiGHS 1.15.1
+/// オラクルが bounded + obj=7.4566314758e9 を証明済み) では、fallback が真の
+/// 最適点 (obj=7.456631e9, kkt=3.9e-9, comp=3.945e-8) を 52 iter で発見してい
+/// ながら、この絶対優先規則と satisfies_eps(1e-8) ゲート (comp 3.945e-8 > 1e-8)
+/// の組み合わせで置換が拒否され、finalize が偽 Unbounded を確定応答として返した。
+///
+/// 新意味: 絶対優先するのは**検証済み確定判定** (独立 ray/Farkas 証明を通過した
+/// proven、または NonConvex) のみ。未証明の infeasibility status は有限候補と
+/// score 比較で競い、数値的に優れた有限候補が勝つ。これにより eps=1e-6/1e-8 で
+/// 証明ゲートの偶然の合否だけが判定をフリップさせる構造を解消する。
 fn fallback_can_replace_unproven(
     fallback: &IpmOutcome,
     incumbent: &IpmOutcome,
     view: &ProblemView<'_>,
     user_eps: f64,
 ) -> bool {
-    if incumbent.infeasibility_status.is_some() {
+    if infeasibility_is_final(incumbent) {
         return false;
     }
     outcome_is_better_candidate(fallback, incumbent, view, user_eps)
@@ -986,6 +1028,10 @@ fn run_no_presolve_fallback(
 /// - eps 未達 + 内部停止 → 終端条件どおり Stalled (停滞 / 精度床) または
 ///   MaxIterations (予算枯渇)。解品質は主張しない (solution は診断用 iterate)。
 /// - 解無し → NumericalError (外部停止なら Timeout)
+/// - 未検証 (未証明) の Infeasible/Unbounded → 確定応答にしない。有限 candidate
+///   があれば attempt 層の比較で差し替え済み。無い場合は検証不能の解無し候補と
+///   して上記の iterate / NumericalError 分岐で正直に報告する (検証済み判定のみ
+///   確定応答)。
 ///
 /// ## Gap 基準の意図的な厳格化
 ///
@@ -1005,7 +1051,11 @@ fn finalize_outcome(
 ) -> SolverResult {
     let krylov_ir_skipped = outcome.postsolve_krylov_ir_skipped;
     let timed_out = cancelled || total_deadline.is_some_and(|d| Instant::now() >= d);
-    if let Some(infeas) = outcome.infeasibility_status {
+    // SolveStatus は非 Copy (NonConvex がデータを持つ) ため、後続の iterate 分岐で
+    // outcome をそのまま使う必要がある。infeasibility status は clone して扱い、
+    // outcome の部分 move を発生させない。
+    let infeas_final = infeasibility_is_final(&outcome);
+    if let Some(infeas) = outcome.infeasibility_status.clone() {
         // API 境界 backstop: attempt ladder のどこかで観測された cancel/deadline
         // は、outcome にどんな Infeasible/Unbounded/NonConvex 証明が乗っていても
         // 優先する。反復内 (`iter.rs`) の受理直前チェックは反復先頭からの窓しか
@@ -1021,17 +1071,34 @@ fn finalize_outcome(
                 ..SolverResult::timeout()
             };
         }
-        let objective = match infeas {
-            SolveStatus::Infeasible => f64::INFINITY,
-            SolveStatus::Unbounded => f64::NEG_INFINITY,
-            _ => f64::NAN,
-        };
-        return SolverResult {
-            status: infeas,
-            objective,
-            iterations: outcome.iterations,
-            ..Default::default()
-        };
+        // 検証義務 (QFORPLAN@1e-8 誤判定修正): 独立 ray / Farkas 検証を通過して
+        // いない Infeasible/Unbounded は確定応答として返さない。より良い有限候補が
+        // あれば attempt 層の候補比較 (`outcome_is_better_candidate` /
+        // `fallback_can_replace_unproven`) で既に `best` へ差し替え済みなので、
+        // ここへ未証明 outcome が届いた時点で「保持すべき有限解が存在しない」こと
+        // を意味する。その場合は下の有限 iterate / 正直な status 分岐へ落ちる
+        // (solution 空 → NumericalError。品質ある iterate があれば satisfies_eps 判定で
+        // Optimal / Stalled 側へ振るわれる)。LP 側 Phase I が
+        // `farkas_infeasibility_certified` 失敗時に判定を撤回する契約との整合。
+        if infeas_final {
+            let objective = match infeas {
+                SolveStatus::Infeasible => f64::INFINITY,
+                SolveStatus::Unbounded => f64::NEG_INFINITY,
+                _ => f64::NAN,
+            };
+            // stats を Default 再構築で失うと受理部の検証記録が消える (review P2)。
+            // proven フラグをそのまま最終 SolverResult へ引き継ぐ。
+            return SolverResult {
+                status: infeas,
+                objective,
+                iterations: outcome.iterations,
+                stats: crate::problem::SolveStats {
+                    infeasibility_certified: outcome.infeasibility_proven,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+        }
     }
 
     // numerical_failure は run_ipm の validate ガードまたは内部ソルバー失敗が
@@ -1160,6 +1227,7 @@ mod tests {
             duality_gap_rel: if call == 0 { 1e-3 } else { 0.0 },
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1198,6 +1266,7 @@ mod tests {
             duality_gap_rel: 1.0,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1291,7 +1360,16 @@ mod tests {
         _user_eps: f64,
     ) -> IpmOutcome {
         if presolve.ruiz_scaler.is_some() {
-            return IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible);
+            // 内側受理部の ray/Farkas 検証を通過した (stats.infeasibility_certified)
+            // 想定 outcome: run_ipm_with は内側 stats から proven を立てるが、テスト
+            // runner は outcome を直接構成するため proven=true を明示して検証済み
+            // 構造的判定をシミュレートする。未証明の infeasibility_status は
+            // 2026-11 の優先順位変更で絶対優先ではなくなった (QFORPLAN@1e-8
+            // 誤判定修正、fallback_can_replace_unproven の doc 参照)。
+            return IpmOutcome {
+                infeasibility_proven: true,
+                ..IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible)
+            };
         }
         IpmOutcome {
             solution: vec![0.0],
@@ -1306,6 +1384,7 @@ mod tests {
             duality_gap_rel: 1e-3,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1336,6 +1415,7 @@ mod tests {
             duality_gap_rel: 1e-3,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1363,6 +1443,7 @@ mod tests {
             duality_gap_rel: if is_fallback { 1e-3 } else { 1e-2 },
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1464,6 +1545,7 @@ mod tests {
             duality_gap_rel: 0.0,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1528,6 +1610,7 @@ mod tests {
             duality_gap_rel: 1e-3,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1576,6 +1659,7 @@ mod tests {
             duality_gap_rel: 0.0,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1614,6 +1698,7 @@ mod tests {
             duality_gap_rel: 0.0,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1679,6 +1764,7 @@ mod tests {
             duality_gap_rel: 1e-2,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1709,8 +1795,20 @@ mod tests {
         );
     }
 
+    /// 検証済み (proven) infeasibility 判定の絶対優先を pin する新契約テスト
+    /// (PR #66)。base の同名テスト `candidate_order_preserves_structural_status_
+    /// over_unproven_iterate` は「未証明 status でも絶対優先」を pin していたが、
+    /// QFORPLAN@1e-8 偽 Unbounded 誤判定 (/tmp/opencode/inv_eps_anom/REPORT.md)
+    /// で契約自体が誤りだったため、AGENTS.md の既存テスト変更禁止規定に従い
+    /// 削除 + 別名置き換えとする。未証明側の順位は
+    /// `candidate_order_unproven_infeasibility_yields_to_finite_candidate` と
+    /// `candidate_order_unproven_infeasibility_does_not_displace_finite_incumbent`
+    /// が担う。
+    ///
+    /// `fallback_can_replace_unproven` の proven ゲートを除去 (検証済み判定でも
+    /// 有限 fallback に譲る実装への変更) すると本テストは FAIL する。
     #[test]
-    fn candidate_order_preserves_structural_status_over_unproven_iterate() {
+    fn candidate_order_certified_infeasibility_outranks_finite_candidate() {
         let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
         let prob = QpProblem::new_all_le(
             q,
@@ -1721,8 +1819,12 @@ mod tests {
         )
         .unwrap();
         let view = ProblemView::from_problem(&prob);
-        let structural = IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible);
-        let finite_unproven = IpmOutcome {
+        // 検証済み判定: 内側受理部の独立 ray/Farkas 検証を通過した想定 (proven=true)。
+        let certified = IpmOutcome {
+            infeasibility_proven: true,
+            ..IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible)
+        };
+        let finite_incumbent = IpmOutcome {
             solution: vec![0.0],
             dual_solution: vec![],
             bound_duals: vec![0.0],
@@ -1735,6 +1837,7 @@ mod tests {
             duality_gap_rel: 1e-3,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1742,17 +1845,195 @@ mod tests {
         };
 
         assert!(
-            outcome_is_better_candidate(&finite_unproven, &structural, &view, 1e-6),
-            "a finite retry candidate must displace a retry-local infeasibility status"
+            outcome_is_better_candidate(&certified, &finite_incumbent, &view, 1e-6),
+            "a verified (proven) infeasibility verdict must outrank a finite iterate"
         );
         assert!(
-            !outcome_is_better_candidate(&structural, &finite_unproven, &view, 1e-6),
-            "a retry-local infeasibility status must not displace a finite incumbent"
+            !outcome_is_better_candidate(&finite_incumbent, &certified, &view, 1e-6),
+            "a finite iterate must not displace a verified (proven) infeasibility verdict"
         );
         assert!(
-            !fallback_can_replace_unproven(&finite_unproven, &structural, &view, 1e-6),
-            "an unproven no-presolve fallback must not displace an incumbent infeasibility status"
+            !fallback_can_replace_unproven(&finite_incumbent, &certified, &view, 1e-6),
+            "an unproven no-presolve fallback must not displace a certified infeasibility certificate"
         );
+    }
+
+    /// 未証明 infeasibility 候補は有限 incumbent を押し退けない (新契約の逆方向。
+    /// `candidate_order_unproven_infeasibility_yields_to_finite_candidate` が
+    /// 「有限候補が未証明 incumbent を上回る」側なので、こちらは候補側が未証明
+    /// 判定の方向を pin する)。旧実装 (infeasibility_status 無条件絶対優先) へ
+    /// の revert では本テストは通るが、無条件優先側を緩めた実装変更を
+    /// `..._yields_to_finite_candidate` と `..._certified_...` の組で捕まえる。
+    #[test]
+    fn candidate_order_unproven_infeasibility_does_not_displace_finite_incumbent() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let view = ProblemView::from_problem(&prob);
+        // retry-local: 検出器受理由来の未証明判定 (proven=false)。
+        let retry_local = IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible);
+        let finite_incumbent = IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 1e-3,
+            numerical_failure: false,
+            infeasibility_status: None,
+            infeasibility_proven: false,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+            termination: IpmTermination::Converged,
+        };
+
+        assert!(
+            !outcome_is_better_candidate(&retry_local, &finite_incumbent, &view, 1e-6),
+            "an unproven infeasibility candidate must not displace a finite incumbent"
+        );
+    }
+
+    /// 未証明 infeasibility incumbent と有限 candidate の優先順位反転を pin する
+    /// (QFORPLAN@1e-8 実測パターンの unit 再現: ACCEPT-Unbounded (未証明)
+    /// incumbent + 有限 fallback 最良候補)。
+    ///
+    /// `fallback_can_replace_unproven` / `outcome_is_better_candidate` の
+    /// proven ゲート反転を旧実装 (infeasibility_status 無条件絶対優先) へ
+    /// revert すると FAIL する sentinel。
+    #[test]
+    fn candidate_order_unproven_infeasibility_yields_to_finite_candidate() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let view = ProblemView::from_problem(&prob);
+        // ladder が ACCEPT-Unbounded で終端した想定: 未証明・solution 空・objective 未設定。
+        let unproven_unbounded = IpmOutcome::infeasibility(crate::problem::SolveStatus::Unbounded);
+        // fallback が発見した有限候補 (QFORPLAN@1e-8 の実測と同型: 残差小さいが
+        // satisfies_eps(1e-8) は comp 未達で false、という状態は 1e-6 で再現)。
+        let finite_fallback = IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 1e-3,
+            numerical_failure: false,
+            infeasibility_status: None,
+            infeasibility_proven: false,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+            termination: IpmTermination::Converged,
+        };
+
+        assert!(
+            outcome_is_better_candidate(&finite_fallback, &unproven_unbounded, &view, 1e-6),
+            "a finite candidate must outrank an UNPROVEN unbounded verdict (score comparison, not absolute priority)"
+        );
+        assert!(
+            fallback_can_replace_unproven(&finite_fallback, &unproven_unbounded, &view, 1e-6),
+            "the no-presolve fallback must replace an UNPROVEN unbounded incumbent (QFORPLAN@1e-8 pattern)"
+        );
+    }
+
+    fn runner_always_unproven_infeasible(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+        _user_eps: f64,
+    ) -> IpmOutcome {
+        IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible)
+    }
+
+    fn runner_always_certified_unbounded(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+        _user_eps: f64,
+    ) -> IpmOutcome {
+        IpmOutcome {
+            infeasibility_proven: true,
+            ..IpmOutcome::infeasibility(crate::problem::SolveStatus::Unbounded)
+        }
+    }
+
+    fn unproven_gate_problem_and_opts() -> (QpProblem, SolverOptions) {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let mut options = SolverOptions {
+            presolve: false,
+            use_ruiz_scaling: false,
+            ..SolverOptions::default()
+        };
+        options.ipm.eps = 1e-6;
+        options.ipm.max_iter = MAX_ITER_PER_ATTEMPT * 4;
+        (prob, options)
+    }
+
+    /// 検証義務 sentinel: 未証明 (proven=false) の infeasibility 判定だけで全 attempt
+    /// が終端したとき、最終 answer は Infeasible/Unbounded になってはならない。
+    /// 有限 iterate が存在しない場合は「解無し」として正直に報告する。
+    /// finalize_outcome の infeasibility 分岐を無条件 return (旧実装) へ revert
+    /// すると FAIL。
+    #[test]
+    fn finalize_withholds_unproven_infeasibility_verdict() {
+        let (prob, options) = unproven_gate_problem_and_opts();
+        let (result, _) = solve_ipm_with_runner(&prob, &options, runner_always_unproven_infeasible);
+        assert!(
+            !matches!(
+                result.status,
+                crate::problem::SolveStatus::Infeasible | crate::problem::SolveStatus::Unbounded
+            ),
+            "an UNVERIFIED infeasibility verdict must never be returned as the final answer, got {:?}",
+            result.status
+        );
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::NumericalError,
+            "no finite iterate was ever produced, so the honest status is 解無し (NumericalError)"
+        );
+    }
+
+    /// 検証義務 sentinel の反方向: 独立 ray/Farkas 検証を通過した proven 判定は
+    /// 従来どおり確定応答として返る (検証義務は検出力の削減であってはならない)。
+    #[test]
+    fn finalize_returns_certified_unbounded_verdict() {
+        let (prob, options) = unproven_gate_problem_and_opts();
+        let (result, _) = solve_ipm_with_runner(&prob, &options, runner_always_certified_unbounded);
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::Unbounded,
+            "a verified (proven) unbounded verdict must still be returned"
+        );
+        assert_eq!(result.objective, f64::NEG_INFINITY);
     }
 
     #[test]
@@ -1790,7 +2071,7 @@ mod tests {
     }
 
     #[test]
-    fn no_presolve_fallback_does_not_replace_structural_infeasible() {
+    fn no_presolve_fallback_does_not_replace_certified_infeasible() {
         let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
         let prob = QpProblem::new_all_le(
             q,
@@ -1925,6 +2206,7 @@ mod tests {
             duality_gap_rel: 0.0,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -2216,6 +2498,7 @@ mod tests {
             duality_gap_rel: 0.0,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -2271,6 +2554,7 @@ mod tests {
             duality_gap_rel: 0.0,
             numerical_failure: false,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -2310,6 +2594,7 @@ mod tests {
             duality_gap_rel: 0.0,
             numerical_failure: true,
             infeasibility_status: None,
+            infeasibility_proven: false,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -2548,6 +2833,7 @@ mod tests {
                 duality_gap_rel: 1e-3,
                 numerical_failure: false,
                 infeasibility_status: None,
+                infeasibility_proven: false,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -2684,6 +2970,7 @@ mod tests {
                 duality_gap_rel: 1e-3,
                 numerical_failure: false,
                 infeasibility_status: None,
+                infeasibility_proven: false,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -2749,6 +3036,7 @@ mod tests {
                 duality_gap_rel: 1.0,
                 numerical_failure: false,
                 infeasibility_status: None,
+                infeasibility_proven: false,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -2867,14 +3155,22 @@ mod tests {
             );
         }
 
-        /// Baseline/control: without cancel or an expired deadline, the
-        /// genuine certificate is still reported (confirms the backstop is
-        /// gated on `timed_out`, not unconditional).
+        /// Control: cancel 無く deadline 失効も無いとき、**検証済み (proven)** の
+        /// Infeasible はそのまま返る (backstop が無条件撤回でなく `timed_out`
+        /// ゲートであることを確認)。
+        ///
+        /// base 同名テスト `uncancelled_infeasible_outcome_still_reports_infeasible`
+        /// は未証明 outcome の「そのまま返る」を pin していたが、QFORPLAN@1e-8
+        /// 誤判定修正でその契約自体が撤回された (未証明判定は proven ゲートで
+        /// 差し戻し)。AGENTS.md の既存テスト変更禁止規定に従い削除 + 別名
+        /// 置き換えとする。未証明判定の withholding 自体は
+        /// `finalize_withholds_unproven_infeasibility_verdict` が別途 pin する。
         #[test]
-        fn uncancelled_infeasible_outcome_still_reports_infeasible() {
+        fn uncancelled_certified_infeasible_outcome_still_reports_infeasible() {
             let prob = make_simple_eq_qp();
             let view = ProblemView::from_problem(&prob);
             let outcome = IpmOutcome {
+                infeasibility_proven: true,
                 iterations: 7,
                 ..IpmOutcome::infeasibility(SolveStatus::Infeasible)
             };
@@ -2887,6 +3183,117 @@ mod tests {
             );
             assert_eq!(r.objective, f64::INFINITY);
         }
+    }
+
+    /// solve_ipm 経由の e2e sentinel (PR #66 round 2 / P1-3): presolve 無効で
+    /// Q の厳密ゼロ行を持つ真に unbounded な QP (min 0.5x₁² - x₂ s.t. x₁=0 を
+    /// 両側不等式で表現、x₂ 自由) が `Unbounded` を返すこと。検出器平坦性が
+    /// 正則化項 (Q+ρI)·dx を織り込んだ旧実装では、ゼロ行の componentwise tol=0
+    /// に ρ·dx (ρ 床 ≥1e-14) が勝って検出器が fire せず、この status は
+    /// 得られない (common.rs::verify_ray_accepts_exact_nullspace_direction_
+    /// under_regularization と同機構の実機再現)。
+    #[test]
+    fn ipm_reports_unbounded_for_zero_q_row_ray_with_presolve_off() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, 2).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0, -1.0],
+            a,
+            vec![0.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        let r = solve_ipm(&prob, &opts);
+        assert_eq!(
+            r.status,
+            crate::problem::SolveStatus::Unbounded,
+            "exact nullspace ray (e₂) must survive the detector under regularization, got {:?}",
+            r.status
+        );
+    }
+
+    /// solve_ipm 経由の e2e sentinel (PR #66 round 3 / P2): presolve 無効で
+    /// 恒等ゼロ制約行 (0=0) を持つ真に unbounded な QP (min -x₂ s.t. x₁=0 を
+    /// 両側不等式 + 0=0 行で表現) が `Unbounded` を返すこと。検出器の
+    /// `>=` 棄却比較はゼロ行の残差 0 / tol 0 を棄却し検証到達を拒否するため
+    /// この status は得られない (common.rs::verify_ray_accepts_unbounded_with_
+    /// identically_zero_constraint_row と同機構の実機再現)。
+    #[test]
+    fn ipm_reports_unbounded_with_identically_zero_row_and_presolve_off() {
+        let q = CscMatrix::new(2, 2);
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 3, 2).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0, -1.0],
+            a,
+            vec![0.0, 0.0, 0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        let r = solve_ipm(&prob, &opts);
+        assert_eq!(
+            r.status,
+            crate::problem::SolveStatus::Unbounded,
+            "an identically zero constraint row must not veto the unboundedness proof, got {:?}",
+            r.status
+        );
+    }
+
+    /// 実機経路の pin: `min -x, 0·x ≤ 0, x ≤ 1` (presolve 無効) は x* = 1, 目的値 -1 の
+    /// 有界 LP であり、空疎行が残っても `Unbounded` を返してはならない (Codex P1 反例の
+    /// 問題そのもの。検証器単体の反例は common.rs の
+    /// `verify_ray_rejects_slack_noise_on_vacuous_row_excusing_bound_exit`)。
+    #[test]
+    fn ipm_does_not_report_unbounded_for_bounded_lp_with_vacuous_row_and_presolve_off() {
+        let prob = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, 1.0)],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        let r = solve_ipm(&prob, &opts);
+        assert_ne!(r.status, crate::problem::SolveStatus::Unbounded);
+        assert_eq!(r.status, crate::problem::SolveStatus::Optimal);
+        assert!(
+            (r.objective + 1.0).abs() < 1e-6,
+            "x* = 1 → obj = -1, got {}",
+            r.objective
+        );
+    }
+
+    /// 実機経路の pin (#69): `min -x, 0·x ≤ -1, x ≥ 0` は実行可能点を持たない。c が
+    /// 降下方向を与えても `Unbounded` ではなく `Infeasible` を返す。
+    #[test]
+    fn ipm_reports_infeasible_for_zero_row_with_negative_rhs_and_presolve_off() {
+        let prob = QpProblem::new_all_le(
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            CscMatrix::new(1, 1),
+            vec![-1.0],
+            vec![(0.0, f64::INFINITY)],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        let r = solve_ipm(&prob, &opts);
+        assert_eq!(r.status, crate::problem::SolveStatus::Infeasible);
     }
 
     /// 公開 API 経由の sentinel: 到達不能 eps では IPM は有限残差まで収束するが
@@ -2951,6 +3358,7 @@ mod tests {
                 duality_gap_rel: 1.0,
                 numerical_failure: false,
                 infeasibility_status: None,
+                infeasibility_proven: false,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3033,6 +3441,7 @@ mod tests {
                     duality_gap_rel: 1.0,
                     numerical_failure: false,
                     infeasibility_status: None,
+                    infeasibility_proven: false,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3054,6 +3463,7 @@ mod tests {
                     duality_gap_rel: 1e-3,
                     numerical_failure: false,
                     infeasibility_status: None,
+                    infeasibility_proven: false,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3138,6 +3548,7 @@ mod tests {
                     duality_gap_rel: 1.0,
                     numerical_failure: false,
                     infeasibility_status: None,
+                    infeasibility_proven: false,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3219,6 +3630,7 @@ mod tests {
                 duality_gap_rel: violation,
                 numerical_failure: false,
                 infeasibility_status: None,
+                infeasibility_proven: false,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3250,6 +3662,7 @@ mod tests {
                     duality_gap_rel: 0.0,
                     numerical_failure: false,
                     infeasibility_status: None,
+                    infeasibility_proven: false,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3364,6 +3777,7 @@ mod tests {
                     duality_gap_rel: 0.0,
                     numerical_failure: false,
                     infeasibility_status: None,
+                    infeasibility_proven: false,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3385,6 +3799,7 @@ mod tests {
                     duality_gap_rel: 1.0,
                     numerical_failure: false,
                     infeasibility_status: None,
+                    infeasibility_proven: false,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3405,6 +3820,7 @@ mod tests {
                 duality_gap_rel: 1.0,
                 numerical_failure: false,
                 infeasibility_status: None,
+                infeasibility_proven: false,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3506,6 +3922,7 @@ mod tests {
                 duality_gap_rel: 1.0,
                 numerical_failure: false,
                 infeasibility_status: None,
+                infeasibility_proven: false,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3576,6 +3993,7 @@ mod tests {
                 duality_gap_rel: 1.0,
                 numerical_failure: false,
                 infeasibility_status: None,
+                infeasibility_proven: false,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3660,6 +4078,7 @@ mod tests {
                 duality_gap_rel: 1.0,
                 numerical_failure: false,
                 infeasibility_status: None,
+                infeasibility_proven: false,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3722,6 +4141,7 @@ mod tests {
                 duality_gap_rel: 1.0,
                 numerical_failure: false,
                 infeasibility_status: None,
+                infeasibility_proven: false,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3803,6 +4223,7 @@ mod tests {
                 duality_gap_rel: 1.0,
                 numerical_failure: false,
                 infeasibility_status: None,
+                infeasibility_proven: false,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,

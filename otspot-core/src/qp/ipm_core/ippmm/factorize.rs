@@ -40,9 +40,6 @@ pub(super) enum FactorizeOutcome {
         factor: KktFactor,
         aug_mat: CscMatrix,
         d_inv: Option<Vec<f64>>,
-        /// 因子化で実際に採用された ρ (regularization retry で持ち上げ済みの値)。
-        /// check_infeasible_or_unbounded の delta_p に必要。
-        rho_used: f64,
         /// この 1 iteration で発生した regularization retry 回数 (健全性プローブ失敗含む)。
         retry_count: u32,
         /// 採用された KktFactor が iterative (MINRES) backend か。
@@ -233,7 +230,6 @@ pub(super) fn factorize_kkt_with_retry(
             factor,
             aug_mat,
             d_inv: d_inv_opt,
-            rho_used: rho_retry,
             retry_count,
             used_iterative,
             factorize_ns: total_factorize_ns,
