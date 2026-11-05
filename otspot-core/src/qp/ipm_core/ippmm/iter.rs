@@ -330,6 +330,25 @@ fn solve_ippmm_inner_confined(
             gap,
         };
         if measures.converged(eps) {
+            // Optimal 打刻は検証済み ray をレースで追い越せない: 直近の
+            // Newton 方向へ単発の構造チェックを走らせ、検証 PASS なら
+            // 構造判定が勝つ (sentinel: truly_unbounded_delta_5e_8_*、
+            // final_structural_check の doc 参照)。iter == 0 では方向が未計算。
+            let structural = if iter > 0 {
+                final_structural_check(
+                    (&dx, &ds, &dy),
+                    (problem, &a_ext),
+                    (m_orig, m_ext, iter),
+                    (&b_ext, &is_eq_ext, &scales),
+                )
+            } else {
+                None
+            };
+            if let Some(structural) = structural {
+                infeas_certified = true;
+                status = Some(structural);
+                break;
+            }
             status = Some(SolveStatus::Optimal);
             break;
         }
@@ -792,20 +811,22 @@ fn solve_ippmm_inner_confined(
 ///    カウントを戻してゲート評価へ。
 /// 2. 受理直前の時間切れ check — `should_stop_before_infeas_commit` 側は best
 ///    破棄の Timeout 返却を許可しない契約のため、best を Stalled で返す。
-/// 3. best が quality 圏内なら検出器を信用せず best-so-far を Stalled で返す
-///    (Farkas-like 近似の false-positive 対策)。Optimal 昇格はしない — 品質
-///    判定は finalize の prove_optimal 一本。
-/// 4. best が無い場合のみ ray / Farkas の独立検証を要求し、成立時のみ
-///    *status と *infeas_certified を設定してループ終了を返す。修正前はここで
-///    追加検証なしに確定判定を受理していた (計装ビルドの trace で
-///    "accepted WITHOUT further verification" を実測、調査台帳
-///    /tmp/opencode/inv_eps_anom/REPORT.md)。未証明の判定は撤回して反復継続 —
+/// 3. ray / Farkas の独立検証を先に実行し、成立時に *status と
+///    *infeas_certified を設定してループ終了を返す。検証 PASS は eps-free の
+///    証明であり、eps 依存の distrust が前借りしてはならない (真に非有界な
+///    問題で distrust Stall → finalize の Optimal 打刻、調査台帳
+///    /tmp/opencode/eps_diverge_repro/REPORT.md)。
+/// 4. distrust が扱うのは未証明の主張のみ: best が quality 圏内なら
+///    best-so-far を Stalled で返し、そうでなければ撤回して反復継続 —
 ///    偽陽性で打ち切るとその後も収束へ進めた solve を早期に奪う (QFORPLAN
-///    no-presolve fallback 実測: iter 42 打ち切り comp 6.7e-7、継続なら iter 52
-///    で真最適点 comp 3.9e-8)。後に本物の ray 方向が出れば再受理され得る。
+///    no-presolve fallback: iter 42 打ち切り comp 6.7e-7、継続なら iter 52 で
+///    真最適点 comp 3.9e-8)。後に本物の ray 方向が出れば再受理され得る。
+///    修正前は distrust の後のみ検証を走らせていた (検証省略 trace 実測:
+///    /tmp/opencode/inv_eps_anom/REPORT.md)。
 ///
 /// ゲートの終了指示。Break = *status 確定済みで break、Stall = best を復元して
 /// Stalled で break、Continue = 反復継続 (fire 無し / 保留 / 未証明撤回)。
+#[derive(Debug)]
 enum InfeasGate {
     Break,
     Stall,
@@ -844,10 +865,41 @@ fn check_infeas_verdict(
         *status = Some(SolveStatus::Timeout);
         return InfeasGate::Break;
     }
+    // 検証器が審判: PASS は eps-free の証明であり、ヒューリスティックは
+    // 証明を棄却できない。distrust は未証明の主張にのみ作用する
+    // (revert sentinel: truly_unbounded_delta_1e_9_never_optimal_cross_eps)。
+    if verify_detector_claim(
+        &infeas_status,
+        (dx, ds, dy),
+        (problem, a_ext),
+        (b_ext, is_eq_ext, scales),
+    ) {
+        *infeas_certified = true;
+        *status = Some(infeas_status);
+        return InfeasGate::Break;
+    }
     if best_score.is_finite() && best_score < INFEAS_DETECTOR_DISTRUST_SCORE * eps_orig {
         return InfeasGate::Stall;
     }
-    let verified = match infeas_status {
+    InfeasGate::Continue
+}
+
+/// 検出器の主張 (Unbounded→ray / Infeasible→Farkas) への独立検証器の判定。
+/// 検証器は eps-free・componentwise 後方誤差境界 (common.rs) で、PASS は
+/// 本物の ray / Farkas 証書の証明。連続 fire 受理ゲート
+/// (`check_infeas_verdict`) と Optimal 打刻直前の構造チェック
+/// (`final_structural_check`) で共有する。
+fn verify_detector_claim(
+    claimed: &SolveStatus,
+    (dx, ds, dy): (&[f64], &[f64], &[f64]),
+    (problem, a_ext): (&QpProblem, &otspot_num::sparse::CscMatrix),
+    (b_ext, is_eq_ext, scales): (
+        &[f64],
+        &[bool],
+        &crate::qp::ipm_core::common::DetectionScales,
+    ),
+) -> bool {
+    match claimed {
         SolveStatus::Unbounded => crate::qp::ipm_core::common::verify_unbounded_ray(
             dx, ds, problem, a_ext, b_ext, is_eq_ext, scales,
         ),
@@ -855,13 +907,39 @@ fn check_infeas_verdict(
             dy, a_ext, b_ext, is_eq_ext, scales,
         ),
         _ => false,
-    };
-    if verified {
-        *infeas_certified = true;
-        *status = Some(infeas_status);
-        return InfeasGate::Break;
     }
-    InfeasGate::Continue
+}
+
+/// Optimal 打刻直前の単発構造チェック。
+///
+/// 収束判定はループ本体で検出器ブロックより先に走るため、loose eps では
+/// 真に非有界な問題が検出器の連続 fire 完了前に Optimal で break できる
+/// (ray 上の変数に残るコスト係数がそのまま KKT 残差になるため、有限
+/// iterate は eps ≥ delta で常に収束を通る。/tmp/opencode/
+/// eps_diverge_repro/REPORT.md)。よって Optimal を返す直前に、直近計算済み
+/// Newton 方向へ検出器 + 独立検証器を 1 回走らせ、検証 PASS なら構造判定が
+/// 勝つ。この 1 回のみ MIN_CONSECUTIVE_INFEAS を迂回する — カウンタは毎反復
+/// fire のコスト抑制が目的で、正しさの網は検証器 (偽 ray は PASS 不能) そのもの。
+/// コストは Optimal break 1 回につき O(nnz) × 1。
+fn final_structural_check(
+    (dx, ds, dy): (&[f64], &[f64], &[f64]),
+    (problem, a_ext): (&QpProblem, &otspot_num::sparse::CscMatrix),
+    (m_orig, m_ext, iter): (usize, usize, usize),
+    (b_ext, is_eq_ext, scales): (
+        &[f64],
+        &[bool],
+        &crate::qp::ipm_core::common::DetectionScales,
+    ),
+) -> Option<SolveStatus> {
+    let claimed =
+        check_infeasible_or_unbounded(dx, dy, problem, a_ext, m_orig, m_ext, iter, scales)?;
+    verify_detector_claim(
+        &claimed,
+        (dx, ds, dy),
+        (problem, a_ext),
+        (b_ext, is_eq_ext, scales),
+    )
+    .then_some(claimed)
 }
 
 /// best-so-far iterate (x, y, s) と残差計測を復元する (blow-up 復帰と検出器
@@ -993,5 +1071,167 @@ fn finalize_ippmm_result(
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod gate_ordering_tests {
+    use super::*;
+    use crate::problem::ConstraintType;
+    use crate::qp::ipm_core::common::DetectionScales;
+    use otspot_num::sparse::CscMatrix;
+
+    fn inf() -> f64 {
+        f64::INFINITY
+    }
+
+    /// U1 (手計算 true-unbounded: min -delta·x2 s.t. x1=1, ray=e2)。
+    /// `bound_x2` は x2 ≥ 0 を付与し e2 を退行方向でなくする検出器偽陽性 fixture。
+    fn u1(delta: f64, bound_x2: bool) -> QpProblem {
+        let x2b = if bound_x2 {
+            (0.0, inf())
+        } else {
+            (-inf(), inf())
+        };
+        QpProblem::new(
+            CscMatrix::new(2, 2),
+            vec![0.0, -delta],
+            CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 2).unwrap(),
+            vec![1.0],
+            vec![(-inf(), inf()), x2b],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap()
+    }
+
+    struct Fixture {
+        problem: QpProblem,
+        a_ext: CscMatrix,
+        b_ext: Vec<f64>,
+        is_eq_ext: Vec<bool>,
+        scales: DetectionScales,
+        m_orig: usize,
+        m_ext: usize,
+    }
+
+    fn fixture(delta: f64, bound_x2: bool) -> Fixture {
+        let problem = u1(delta, bound_x2);
+        let (a_ext, b_ext, m_ext, m_orig, _n_lb, is_eq_ext) = build_extended_constraints(&problem);
+        let scales = DetectionScales::compute(&problem, &a_ext, &b_ext);
+        Fixture {
+            problem,
+            a_ext,
+            b_ext,
+            is_eq_ext,
+            scales,
+            m_orig,
+            m_ext,
+        }
+    }
+
+    /// 真 ray 方向が検証 PASS したとき、distrust 圏内の best_score (1e-12
+    /// < 10·1e-6) でも Stall でなく証明受理 (Break + certified) すること。
+    /// Part 1 (検証器を distrust より前へ) の revert で Stall が返り FAIL。
+    #[test]
+    fn verifier_pass_preempts_distrust_stall() {
+        let f = fixture(1e-9, false);
+        let dx = vec![0.0, 1.0];
+        let ds = vec![0.0; f.m_ext];
+        let dy = vec![0.0; f.m_ext];
+        let timeout_ctx = TimeoutCtx::new(None, Some(60.0), None);
+        let mut consecutive = MIN_CONSECUTIVE_INFEAS - 1;
+        let mut status = None;
+        let mut certified = false;
+        let gate = check_infeas_verdict(
+            &mut consecutive,
+            &mut status,
+            &mut certified,
+            (&timeout_ctx, 1e-12, 1e-6),
+            (&dx, &ds, &dy),
+            (&f.problem, &f.a_ext),
+            (f.m_orig, f.m_ext, 6),
+            (&f.b_ext, &f.is_eq_ext, &f.scales),
+        );
+        assert!(
+            matches!(gate, InfeasGate::Break),
+            "verifier-passed ray must be accepted even when distrust range, got {gate:?}"
+        );
+        assert!(
+            certified,
+            "accepted structural verdict must carry the cert flag"
+        );
+        assert_eq!(status, Some(SolveStatus::Unbounded));
+    }
+
+    /// 検証 FAIL の未証明主張 (境界行により e2 は退行方向でない) は、従来
+    /// 通り distrust が Stalled に退ける (distrust の役割は維持される)。
+    #[test]
+    fn unproven_claim_still_distrust_stalled() {
+        let f = fixture(1e-9, true);
+        assert_eq!(f.m_ext, 2, "fixture must carry the bound row");
+        let dx = vec![0.0, 1.0];
+        let ds = vec![0.0; f.m_ext];
+        let dy = vec![0.0; f.m_ext];
+        let timeout_ctx = TimeoutCtx::new(None, Some(60.0), None);
+        let mut consecutive = MIN_CONSECUTIVE_INFEAS - 1;
+        let mut status = None;
+        let mut certified = false;
+        let gate = check_infeas_verdict(
+            &mut consecutive,
+            &mut status,
+            &mut certified,
+            (&timeout_ctx, 1e-12, 1e-6),
+            (&dx, &ds, &dy),
+            (&f.problem, &f.a_ext),
+            (f.m_orig, f.m_ext, 6),
+            (&f.b_ext, &f.is_eq_ext, &f.scales),
+        );
+        assert!(
+            matches!(gate, InfeasGate::Stall),
+            "unproven detector claim within distrust range must stall, got {gate:?}"
+        );
+        assert!(!certified);
+        assert!(status.is_none());
+    }
+
+    /// final_structural_check: 真 ray は Some(Unbounded)、検出器 MIN_ITER 未満と
+    /// ゼロ方向は None (Optimal 打刻を允许)。
+    #[test]
+    fn final_structural_check_accepts_ray_guards_cheap_cases() {
+        let f = fixture(1e-9, false);
+        let dx = vec![0.0, 1.0];
+        let ds = vec![0.0; f.m_ext];
+        let dy = vec![0.0; f.m_ext];
+        assert_eq!(
+            final_structural_check(
+                (&dx, &ds, &dy),
+                (&f.problem, &f.a_ext),
+                (f.m_orig, f.m_ext, 5),
+                (&f.b_ext, &f.is_eq_ext, &f.scales),
+            ),
+            Some(SolveStatus::Unbounded),
+            "true ray direction must win the at-convergence structural check"
+        );
+        assert_eq!(
+            final_structural_check(
+                (&dx, &ds, &dy),
+                (&f.problem, &f.a_ext),
+                (f.m_orig, f.m_ext, 4),
+                (&f.b_ext, &f.is_eq_ext, &f.scales),
+            ),
+            None,
+            "below detector MIN_ITER the check must yield to Optimal"
+        );
+        let dz = vec![0.0; 2];
+        assert_eq!(
+            final_structural_check(
+                (&dz, &ds, &dy),
+                (&f.problem, &f.a_ext),
+                (f.m_orig, f.m_ext, 6),
+                (&f.b_ext, &f.is_eq_ext, &f.scales),
+            ),
+            None,
+            "zero direction must yield to Optimal"
+        );
     }
 }
