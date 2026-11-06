@@ -136,6 +136,11 @@ pub fn postsolve_qp(
         stats: reduced_sol.stats.clone(),
         bound_gap_cert: None,
         opt_cert: None,
+        // postsolve 経路に ray ペイロードは届かない (検証済み構造判定は
+        // `run_ipm_with` が postsolve を迂回して outcome 化するため、reduced_sol
+        // のペイロードは常に None)。仮に非 None が来ても reduced 空間座標の
+        // 可能性が高く、元空間向け証書として流用するのは誤りなので意図的 None。
+        ray_certificate: None,
     }
 }
 

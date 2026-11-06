@@ -777,7 +777,7 @@ fn solve_ippmm_inner_confined(
     finalize_ippmm_result(
         problem,
         &b_ext,
-        m_orig,
+        accepted_ray_dir(status.as_ref(), &dx),
         q_is_indefinite,
         options.ipm.max_iter,
         iterations_consumed,
@@ -831,6 +831,21 @@ enum InfeasGate {
     Break,
     Stall,
     Continue,
+}
+
+/// 検証 PASS 済み受理から ray 証書の方向だけを抽出する (finalize 呼び出し
+/// 引数用)。Unbounded 判定のときのみ直近 Newton 方向 dx が受理部検証の
+/// 検査対象であり、それ以外の終端 (Timeout 撤回 / Stalled / Infeasible /
+/// 非構造判定) は方向を保持しない。受理部 2 箇所はいずれも検証 PASS 後
+/// `update_variables` の step 適用前に break するため、break 時点の dx は
+/// 検証が検査した方向そのもの (検証の再実行はしない)。
+fn accepted_ray_dir(claimed: Option<&SolveStatus>, dx: &[f64]) -> Option<Vec<f64>> {
+    // Infeasible の Farkas 証書 dy は拡張系の内部行レイアウト (元行 + 境界行の
+    // 並び・符号慣例) に依存するためレイアウト非依存の独立再計算形状が無く
+    // 対象外 (`crate::problem::SolverResult::ray_certificate` doc 参照)。
+    claimed
+        .filter(|s| **s == SolveStatus::Unbounded)
+        .map(|_| dx.to_vec())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -966,7 +981,7 @@ fn restore_best_so_far(
 fn finalize_ippmm_result(
     problem: &QpProblem,
     b_ext: &[f64],
-    m_orig: usize,
+    certified_ray: Option<Vec<f64>>,
     q_is_indefinite: bool,
     max_iter: usize,
     iterations_consumed: usize,
@@ -987,6 +1002,9 @@ fn finalize_ippmm_result(
     any_iterative: bool,
     infeas_certified: bool,
 ) -> SolverResult {
+    // `build_extended_constraints` の 4 番目の返り値は `problem.num_constraints`
+    // そのもの (kkt.rs)。導出に置き換えて呼び出し引数を ray ペイロードへ転用した。
+    let m_orig = problem.num_constraints;
     let iterations_consumed = if status.is_none() {
         max_iter
     } else {
@@ -1047,12 +1065,27 @@ fn finalize_ippmm_result(
         ..Default::default()
     };
 
+    // ray 証書ペイロードの組立: 検証済み Unbounded のときのみ Some。
+    // certified_ray (accepted_ray_dir 経由) は受理部検証の検査方向そのもの、
+    // 基点はここへ渡された x (受理 break 時に step 未適用の検証検査 iterate)。
+    // certified でない・Unbounded 以外の方向は保持せず廃棄
+    // (Some ⇔ 検証済み Unbounded の契約)。
+    let ray_certificate = if final_status == SolveStatus::Unbounded && infeas_certified {
+        certified_ray.map(|direction| crate::problem::RayCertificate {
+            direction,
+            base_point: x.clone(),
+        })
+    } else {
+        None
+    };
+
     SolverResult {
         status: final_status,
         objective,
         solution: x,
         dual_solution,
         bound_duals,
+        ray_certificate,
 
         iterations: iterations_consumed,
         final_residuals,
@@ -1192,6 +1225,33 @@ mod gate_ordering_tests {
         );
         assert!(!certified);
         assert!(status.is_none());
+    }
+
+    /// accepted_ray_dir: Unbounded 受理のときのみ検証検査方向を渡す。
+    /// Timeout 撤回 (status=Timeout)、Stalled、Infeasible (Farkas 対象外)、
+    /// 非構造終端 (status=None) はすべて None — ペイロードが未受理方向を
+    /// 運ぶ経路を unit で封じる (revert: 判定フィルタを外すと fail)。
+    #[test]
+    fn accepted_ray_dir_only_carries_verified_unbounded_direction() {
+        let dx = vec![0.0, 1.0];
+        assert_eq!(
+            accepted_ray_dir(Some(&SolveStatus::Unbounded), &dx),
+            Some(dx.clone()),
+            "verified Unbounded acceptance must carry the checked direction"
+        );
+        for status in [
+            SolveStatus::Timeout,
+            SolveStatus::Stalled,
+            SolveStatus::Infeasible,
+            SolveStatus::Optimal,
+        ] {
+            assert_eq!(
+                accepted_ray_dir(Some(&status), &dx),
+                None,
+                "{status:?} termination must not carry a ray payload"
+            );
+        }
+        assert_eq!(accepted_ray_dir(None, &dx), None);
     }
 
     /// final_structural_check: 真 ray は Some(Unbounded)、検出器 MIN_ITER 未満と

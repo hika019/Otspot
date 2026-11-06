@@ -52,6 +52,14 @@ pub struct IpmOutcome {
     /// 経由で `true` を設定する。`NonConvex` は ray/Farkas 系の主張ではないため
     /// このフラグに関係なく構造的判定として扱われる。
     pub infeasibility_proven: bool,
+    /// 検証済み Unbounded の ray 証書ペイロード (元空間)。
+    ///
+    /// `infeasibility_status == Some(Unbounded)` かつ `infeasibility_proven` の
+    /// ときのみ Some になり得る。内側 IPM が元空間と異なる座標 (presolve 縮約 /
+    /// presolve 側 Ruiz) で検証した場合は `run_ipm_with` が破棄するため、ここへ
+    /// 届く Some は消費者が元問題で独立再計算可能な座標に限定される
+    /// (`crate::problem::SolverResult::ray_certificate` の doc 参照)。
+    pub ray_certificate: Option<crate::problem::RayCertificate>,
     /// 慣性修正付き IPM が走った場合、収束時に Optimal でなく LocallyOptimal を返す。
     pub is_locally_optimal: bool,
     /// postsolve の saddle-point Krylov IR が `kkt_already_pass` ゲートで省略されたか。
@@ -81,6 +89,7 @@ impl IpmOutcome {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,

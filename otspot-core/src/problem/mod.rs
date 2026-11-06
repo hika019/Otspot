@@ -284,6 +284,51 @@ pub struct SolverResult {
     /// Set when `finalize_proven` verifies all KKT conditions on the returned point.
     /// `None` for demoted (LocallyOptimal/NonconvexLocal) or non-B&B results.
     pub opt_cert: Option<OptimalCertificate>,
+    /// 検証済み Unbounded の ray 証書ペイロード (回収方向 + 実行可能基点)。
+    ///
+    /// Some となるのは `status == Unbounded` かつ `stats.infeasibility_certified
+    /// == true` のときのみ — IPM 受理点の eps-free 独立検証器
+    /// (`verify_unbounded_ray`) を通過し、かつ検証座標が
+    /// 元問題空間と一致する (presolve 縮約・presolve 側 Ruiz が掛かると内部座標
+    /// が元空間と異なり、回収方向の写像は置換変換を跨ぐため非自明 → ペイロード
+    /// は破棄される) 場合に限定される。未証明判定・Stalled / Infeasible /
+    /// Optimal 等はすべて None。
+    ///
+    /// 検証済み Infeasible の Farkas 証書は現状あえて公開しない: 検証器の dy は
+    /// 拡張系 (元行 + 境界行) のソルバ内部行レイアウト・符号慣例で定義され、
+    /// 消費者が独立再計算するにはそのレイアウト自体が公開 API である必要がある
+    /// (ray 側の dx / 基点は長さ num_vars の元空間ベクトルでレイアウト非依存)。
+    /// レイアウト安定化の API 設計なしに dy を渡すことは誤検証を招くため、
+    /// ペイロードは ray に限定する。
+    pub ray_certificate: Option<RayCertificate>,
+}
+
+/// 検証済み Unbounded の独立再計算可能ペイロード ([`SolverResult::ray_certificate`])。
+///
+/// IPM 受理点の独立検証器 (`verify_unbounded_ray`) が **eps-free な
+/// componentwise 後方誤差境界**で成立を確認した量の組。検証は拡張系
+/// `{A_ext·x + s = b_ext, s ≥ 0}` (境界行をスラック付き行へ展開した系) に対し
+/// 行われており、対角スケーリング (Ruiz) は拡張系の行後方誤差のゼロパターンを
+/// 保存するため、元空間座標へ写像した下記量も元問題に対して同じ意味で成立する:
+///
+/// - 退行実行可能性: 全等式行で `A_eq·dx ≈ 0`、全不等式行で `A_ineq·dx ≤ ≈0`、
+///   境界について `dx_j ≈ 0` (固定)、`dx_j ≤ ≈0` (上側)、`dx_j ≥ ≈0` (下側)。
+///   よって基点からray `x(t) = base + t·dx` は全 t ≥ 0 で実行可能域に留まる。
+/// - 目的減少: 凸 QP では `Q·dx ≈ 0` (平坦性) かつ `cᵀdx < 0` が検証され、
+///   `φ(x(t)) = ½xᵀQx + cᵀx` は t → ∞ で −∞ へ発散する。
+///
+/// 消費者はソルバを信用せず `direction` / `base_point` だけの純粋な線形代数で
+/// 再検証できる (sentinel: `tests/qp_ray_certificate_payload.rs`)。
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RayCertificate {
+    /// 回収方向 dx (長さ = 決定変数数、元空間)。‖dx‖∞ ≥ 検証器の最小方向ノルム。
+    pub direction: Vec<f64>,
+    /// ray の基点 x₀ (長さ = 決定変数数、元空間)。検証時点の iterate であり、
+    /// 等式残差 `A_eq·x₀ − b_eq` は検証時点の fp 後方誤差以内。等式残差は
+    /// `A_eq·dx ≈ 0` によりray 上不変なので、この基点からray 全体の実行可能性
+    /// が従う。目的関数の減少は基点 x₀ から保証される。
+    pub base_point: Vec<f64>,
 }
 
 /// 各 phase 所要時間 (μs精度)。LP simplex と QP IPM の両経路で共用。
@@ -340,6 +385,7 @@ impl Default for SolverResult {
             stats: SolveStats::default(),
             bound_gap_cert: None,
             opt_cert: None,
+            ray_certificate: None,
         }
     }
 }
