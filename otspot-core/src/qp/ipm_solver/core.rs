@@ -397,9 +397,11 @@ fn structural_infeasibility(status: &SolveStatus) -> bool {
 }
 
 /// 構造判定を `IpmOutcome` に変換する。proven (確定判定候補) は内側受理部の
-/// 独立 ray / Farkas 検証を通過した判定のみ (`stats.infeasibility_certified`)。
-/// NonConvex は慣性修正による構造的主張であり ray/Farkas 系ではないため
-/// 検証対象外 = proven として扱う (finalize の ray 検証ゲートは通さない)。
+/// 独立 ray / Farkas 検証を通過した判定のみ (`stats.unbounded_ray_certified`
+/// = ray / `stats.infeasible_farkas_certified` = Farkas)。NonConvex は慣性
+/// 修正による構造的主張であり ray/Farkas 系ではないため検証対象外 = proven
+/// として扱う (finalize の ray 検証ゲートは通さない。どちらの証書フラグも
+/// 立てない)。
 ///
 /// ray ペイロードの空間ゲート: presolve 縮約や presolve 側 Ruiz が掛かると
 /// 検証座標が元空間と異なり、置換変換を跨ぐ回収方向の写像は非自明のため
@@ -424,7 +426,9 @@ fn infeasibility_outcome(
     let mut out = IpmOutcome::infeasibility(result.status);
     out.iterations = result.iterations; // attempt 予算 (`iter_used`) の課金対象
     out.timing = result.timing_breakdown;
-    out.infeasibility_proven = result.stats.infeasibility_certified || nonconvex_structural;
+    out.infeasibility_proven = result.stats.unbounded_ray_certified
+        || result.stats.infeasible_farkas_certified
+        || nonconvex_structural;
     out.ray_certificate = ray_certificate;
     out
 }

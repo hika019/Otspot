@@ -102,17 +102,39 @@ pub struct SolveStats {
     /// This is a load-bearing route sentinel for large Netlib LPs whose upper
     /// bounds must stay as variable bounds instead of expanded UB rows.
     pub bounded_eq_ub_path: bool,
-    /// `true` iff the returned `Infeasible` / `Unbounded` status passed the
-    /// independent ray / Farkas certificate verification at the IPM detector's
-    /// acceptance point (`ippmm::iter`), not just the Newton-direction
-    /// Farkas-like heuristic of `check_infeasible_or_unbounded`.
+    /// 返された `Unbounded` status が IPM 検出器の受理点 (`ippmm::iter`) での
+    /// 降下方向 dx に対する独立検証 `verify_unbounded_ray` を通過したときのみ
+    /// `true`。`check_infeasible_or_unbounded` の Newton 方向ヒューリスティック
+    /// だけで済んだ未証明判定は立たない。
+    ///
+    /// 主張しているのは **ray 証書** (目的関数の非有界性) であり、実行可能性の
+    /// 主張ではない点に注意: 「非有界」は実行可能集合の空性の否定ですらない
+    /// (`infeasible_farkas_certified` の doc 参照)。確定 status は単一なので
+    /// 両フラグが同時に `true` になることはない。`Unbounded` 以外の status では
+    /// 常に `false` (`NonConvex` は慣性修正による構造的主張であり ray/Farkas
+    /// 系ではないため、どちらのフラグも立たない)。
     ///
     /// Load-bearing correctness sentinel (QFORPLAN false-Unbounded, 2026-11):
     /// `finalize_outcome` refuses to report an unverified structural status and
     /// falls back to the finite best iterate / an honest `Stalled` instead.
     /// Removing the verification gate flips `false` conclusions back to
     /// unverified hard verdicts, which the gate exists to prevent.
-    pub infeasibility_certified: bool,
+    pub unbounded_ray_certified: bool,
+    /// 返された `Infeasible` status が IPM 検出器の受理点 (`ippmm::iter`) での
+    /// 双対方向 dy に対する独立検証 `verify_infeasible_farkas` (Farkas 代替定理
+    /// = 実行可能集合が空であることの証書) を通過したときのみ `true`。
+    /// 検出器ヒューリスティックだけの未証明判定は立たない。
+    ///
+    /// 主張しているのは **Farkas 証書** (実行不可能性) であり、目的関数の非有界性
+    /// (`unbounded_ray_certified` の主張) とは無関係。両者は混同すると
+    /// 「Unbounded なのに infeasibility が証明された」に見える誤読を生むため
+    /// 分離されている (PR #71 review 指摘)。`Infeasible` 以外の status では常に
+    /// `false`。
+    ///
+    /// Load-bearing correctness sentinel (QFORPLAN 誤判定修正、2026-11):
+    /// `finalize_outcome` は検証を通っていない `Infeasible` を確定応答として
+    /// 返さない (検証ゲートを外すと偽 Infeasible 確定が復活する)。
+    pub infeasible_farkas_certified: bool,
 }
 
 /// ソルバーの求解結果ステータス

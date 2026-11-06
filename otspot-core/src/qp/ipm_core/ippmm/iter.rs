@@ -132,7 +132,9 @@ fn solve_ippmm_inner_confined(
     }
 
     let scales = crate::qp::ipm_core::common::DetectionScales::compute(problem, &a_ext, &b_ext);
-    let mut infeas_certified = false;
+    // 受理部が通過した証書の種類 (None = 未受理)。終端の stats 組立で
+    // ray / Farkas 各フラグへ分離して記録する (SolveStats の doc 参照)。
+    let mut certified: Option<CertKind> = None;
 
     let eq_count = is_eq_ext.iter().filter(|&&v| v).count();
     let m_ineq = m_ext - eq_count;
@@ -345,7 +347,7 @@ fn solve_ippmm_inner_confined(
                 None
             };
             if let Some(structural) = structural {
-                infeas_certified = true;
+                certified = cert_kind_of(&structural);
                 status = Some(structural);
                 break;
             }
@@ -587,7 +589,7 @@ fn solve_ippmm_inner_confined(
         match check_infeas_verdict(
             &mut consecutive_infeas_triggers,
             &mut status,
-            &mut infeas_certified,
+            &mut certified,
             (&timeout_ctx, best_score, eps_orig),
             (&dx, &ds, &dy),
             (problem, &a_ext),
@@ -796,7 +798,7 @@ fn solve_ippmm_inner_confined(
         total_solve_ns,
         total_reg_retries,
         any_iterative,
-        infeas_certified,
+        certified,
     )
 }
 
@@ -812,9 +814,9 @@ fn solve_ippmm_inner_confined(
 /// 2. 受理直前の時間切れ check — `should_stop_before_infeas_commit` 側は best
 ///    破棄の Timeout 返却を許可しない契約のため、best を Stalled で返す。
 /// 3. ray / Farkas の独立検証を先に実行し、成立時に *status と
-///    *infeas_certified を設定してループ終了を返す。検証 PASS は eps-free の
-///    証明であり、eps 依存の distrust が前借りしてはならない (真に非有界な
-///    問題で distrust Stall → finalize の Optimal 打刻、調査台帳
+///    *certified (検証 PASS した証書種類) を設定してループ終了を返す。検証 PASS
+///    は eps-free の証明であり、eps 依存の distrust が前借りしてはならない (真に
+///    非有界な問題で distrust Stall → finalize の Optimal 打刻、調査台帳
 ///    /tmp/opencode/eps_diverge_repro/REPORT.md)。
 /// 4. distrust が扱うのは未証明の主張のみ: best が quality 圏内なら
 ///    best-so-far を Stalled で返し、そうでなければ撤回して反復継続 —
@@ -848,11 +850,35 @@ fn accepted_ray_dir(claimed: Option<&SolveStatus>, dx: &[f64]) -> Option<Vec<f64
         .map(|_| dx.to_vec())
 }
 
+/// 内側受理部が通過した証書の種類。検出器の主張に対応する:
+/// `Unbounded` は降下方向 dx の recession ray 証明 (`verify_unbounded_ray`)、
+/// `Infeasible` は双対方向 dy の Farkas 代替証明 (`verify_infeasible_farkas`)。
+/// 両者は主張する数学的事実が別物なので、`SolveStats` の側でも
+/// `unbounded_ray_certified` / `infeasible_farkas_certified` に分離して記録する
+/// (共有名は「Unbounded + infeasibility certified」の誤読を生む。PR #71 review)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CertKind {
+    Ray,
+    Farkas,
+}
+
+/// 検証 PASS した検出器主張の status → 証書種類の対応。`verify_detector_claim`
+/// は `Unbounded` / `Infeasible` 以外常に false を返すので、この関数は受理
+/// 経路では必ず Some になる。`_ => None` arm は検証器契約が将来ずれたときに
+/// 存在しない証書を主張しないための保守的ガード。
+fn cert_kind_of(claimed: &SolveStatus) -> Option<CertKind> {
+    match claimed {
+        SolveStatus::Unbounded => Some(CertKind::Ray),
+        SolveStatus::Infeasible => Some(CertKind::Farkas),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_infeas_verdict(
     consecutive: &mut usize,
     status: &mut Option<SolveStatus>,
-    infeas_certified: &mut bool,
+    certified: &mut Option<CertKind>,
     (timeout_ctx, best_score, eps_orig): (&TimeoutCtx, f64, f64),
     (dx, ds, dy): (&[f64], &[f64], &[f64]),
     (problem, a_ext): (&QpProblem, &otspot_num::sparse::CscMatrix),
@@ -889,7 +915,7 @@ fn check_infeas_verdict(
         (problem, a_ext),
         (b_ext, is_eq_ext, scales),
     ) {
-        *infeas_certified = true;
+        *certified = cert_kind_of(&infeas_status);
         *status = Some(infeas_status);
         return InfeasGate::Break;
     }
@@ -1000,7 +1026,7 @@ fn finalize_ippmm_result(
     total_solve_ns: u128,
     total_reg_retries: u32,
     any_iterative: bool,
-    infeas_certified: bool,
+    certified: Option<CertKind>,
 ) -> SolverResult {
     // `build_extended_constraints` の 4 番目の返り値は `problem.num_constraints`
     // そのもの (kkt.rs)。導出に置き換えて呼び出し引数を ray ペイロードへ転用した。
@@ -1097,10 +1123,12 @@ fn finalize_ippmm_result(
         },
         timing_breakdown: Some(ipm_timing),
         stats: crate::problem::SolveStats {
-            // Infeasible/Unbounded を確定判定として受理したときのみ true。
-            // 下流 (`ipm_solver::core` → `finalize_outcome`) の検証義務ゲートが
-            // このフラグを参照する (SolveStats の doc 参照)。
-            infeasibility_certified: infeas_certified,
+            // 受理した証書の種類ごとに別フラグへ立てる。ray (非有界) と
+            // Farkas (実行不可能) は主張する数学的事実が別物なので共有名は
+            // 使わない (SolveStats の doc 参照)。下流 (`ipm_solver::core` →
+            // `finalize_outcome`) の検証義務ゲートがこれらのフラグを参照する。
+            unbounded_ray_certified: matches!(certified, Some(CertKind::Ray)),
+            infeasible_farkas_certified: matches!(certified, Some(CertKind::Farkas)),
             ..Default::default()
         },
         ..Default::default()
@@ -1174,7 +1202,7 @@ mod gate_ordering_tests {
         let timeout_ctx = TimeoutCtx::new(None, Some(60.0), None);
         let mut consecutive = MIN_CONSECUTIVE_INFEAS - 1;
         let mut status = None;
-        let mut certified = false;
+        let mut certified: Option<CertKind> = None;
         let gate = check_infeas_verdict(
             &mut consecutive,
             &mut status,
@@ -1189,9 +1217,10 @@ mod gate_ordering_tests {
             matches!(gate, InfeasGate::Break),
             "verifier-passed ray must be accepted even when distrust range, got {gate:?}"
         );
-        assert!(
+        assert_eq!(
             certified,
-            "accepted structural verdict must carry the cert flag"
+            Some(CertKind::Ray),
+            "accepted Unbounded must carry the ray certificate (not Farkas, not none)"
         );
         assert_eq!(status, Some(SolveStatus::Unbounded));
     }
@@ -1208,7 +1237,7 @@ mod gate_ordering_tests {
         let timeout_ctx = TimeoutCtx::new(None, Some(60.0), None);
         let mut consecutive = MIN_CONSECUTIVE_INFEAS - 1;
         let mut status = None;
-        let mut certified = false;
+        let mut certified: Option<CertKind> = None;
         let gate = check_infeas_verdict(
             &mut consecutive,
             &mut status,
@@ -1223,7 +1252,7 @@ mod gate_ordering_tests {
             matches!(gate, InfeasGate::Stall),
             "unproven detector claim within distrust range must stall, got {gate:?}"
         );
-        assert!(!certified);
+        assert_eq!(certified, None);
         assert!(status.is_none());
     }
 
