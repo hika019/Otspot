@@ -298,7 +298,9 @@ fn run_attempt_ladder(
             }
         }
 
-        if outcome_proven {
+        if outcome_proven && finite_mint_may_replace(best) {
+            // eps 許容の prove_optimal mint は、受理部で検証済み (ray/Farkas) の
+            // 構造的判定を上書きできない (`finite_mint_may_replace` の doc)。
             *best = Some(outcome);
             break;
         }
@@ -409,6 +411,17 @@ fn infeasibility_is_final(outcome: &IpmOutcome) -> bool {
         Some(_) => outcome.infeasibility_proven,
         None => false,
     }
+}
+
+/// 有限 (Optimal 系) outcome が現 `best` を上書きしてよいか。受理部で ray /
+/// Farkas 検証を通過した構造的判定 (eps-free の証明) は、eps 許容の
+/// `prove_optimal` mint では上書きできない — `outcome_is_better_candidate` の
+/// 「検証済み判定は有限 iterate より絶対優先」と同じ審判順を、ladder の
+/// proven break・延長 attempt・no-presolve fallback の 3 上書き点に一律適用する
+/// (sentinel: tests/qp_truly_unbounded_eps_consistency.rs。真に非有界な問題で
+/// 別 lane の検証済み Unbounded を KKT 残差 ≤ eps の打刻が打ち消した)。
+fn finite_mint_may_replace(best: &Option<IpmOutcome>) -> bool {
+    !best.as_ref().is_some_and(infeasibility_is_final)
 }
 
 /// `candidate` が `incumbent` に取って代わる最良候補か。
@@ -951,7 +964,7 @@ fn extend_iteration_limit_attempt(
                 None => true,
                 Some(prev) => outcome_is_better_candidate(&ext_outcome, prev, view, user_eps),
             };
-            if ext_proven || ext_is_better {
+            if (ext_proven && finite_mint_may_replace(best)) || ext_is_better {
                 *best = Some(ext_outcome);
                 best_ok = ext_proven;
             }
@@ -1004,7 +1017,7 @@ fn run_no_presolve_fallback(
         let fb_satisfies = fb.satisfies_eps(user_eps);
         let fb_proven = fb_satisfies && outcome_proves_optimal(&fb, view, user_eps);
         *iter_used = iter_used.saturating_add(charged_iterations(&fb, per_attempt_cap));
-        if fb_proven {
+        if fb_proven && finite_mint_may_replace(best) {
             *best = Some(fb);
             break;
         }

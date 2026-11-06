@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3339 testcases, 43 ignored
+# totals: 3349 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1055,6 +1055,7 @@ otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_negative_multipli
 otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_sign_free_vacuous_row_with_positive_rhs	active
 otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_stationarity_loosened_by_unrelated_huge_a_col	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_exact_nullspace_direction_under_regularization	active
+otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_exact_zero_curvature_nullspace_ray	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_true_ray_with_slack_noise_on_vacuous_row	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_true_unbounded_ray	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_accepts_unbounded_with_identically_zero_constraint_row	active
@@ -1063,11 +1064,15 @@ otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_direction_exiting_fi
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_flatness_loosened_by_unrelated_huge_q_row	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_noise_level_descent_on_large_c	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_nonflat_quadratic_direction	active
+otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_positive_curvature_on_flat_tolerated_pd_direction	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_slack_noise_on_vacuous_row_excusing_bound_exit	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_slack_noise_on_vacuous_row_excusing_residual	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_vacuous_eq_row_with_nonzero_rhs	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_zero_row_with_negative_rhs	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_scans_only_rows_present_in_extended_matrix	active
+otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::final_structural_check_accepts_ray_guards_cheap_cases	active
+otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::unproven_claim_still_distrust_stalled	active
+otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::verifier_pass_preempts_distrust_stall	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_divides_by_the_larger_objective	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_matches_hand_computed_value	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_noise_scales_with_sqrt_of_longest_sum	active
@@ -3278,6 +3283,8 @@ otspot::postsolve_krylov_ir_gate	gate_skips_krylov_ir_when_already_converged	act
 otspot::proptest_fuzz	prop_nonneg_lp_not_infeasible	active
 otspot::proptest_fuzz	prop_small_lp_no_panic	active
 otspot::proptest_fuzz	prop_zero_objective_always_optimal	active
+otspot::qp_bounded_curvature_ray_rejection	bounded_p1_never_certified_unbounded_cross_eps_presolve	active
+otspot::qp_bounded_curvature_ray_rejection	bounded_p1_status_and_objective_match_oracle_across_configs	active
 otspot::qp_clarabel_extra_assertions	cross_aug2d	active
 otspot::qp_clarabel_extra_assertions	cross_aug2dc	active
 otspot::qp_clarabel_extra_assertions	cross_dual1	active
@@ -3328,6 +3335,9 @@ otspot::qp_minimal_scaling	scl5_q_offdiagonal_full_storage	active
 otspot::qp_minimal_scaling	scl6_q_upper_only_violates_input_contract	active
 otspot::qp_qforplan_unbounded_verification	qforplan_eps_1e_6_stays_optimal	active
 otspot::qp_qforplan_unbounded_verification	qforplan_eps_1e_8_must_not_report_false_unbounded	active
+otspot::qp_truly_unbounded_eps_consistency	truly_unbounded_delta_1e_9_never_optimal_cross_eps	active
+otspot::qp_truly_unbounded_eps_consistency	truly_unbounded_delta_5e_8_never_optimal_cross_eps	active
+otspot::qp_truly_unbounded_eps_consistency	truly_unbounded_delta_eq_eps_is_deterministic_unbounded	active
 otspot::smoke_tests	pricing_module_exists	active
 otspot::smoke_tests	scaling_module_exists	active
 otspot::solver_wide_api_contract	immediate_deadline_is_reported_consistently_for_lp_and_qp_entries	active

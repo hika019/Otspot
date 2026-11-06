@@ -187,6 +187,8 @@ pub(super) const MIN_CONSECUTIVE_INFEAS: usize = 3;
 /// Farkas-like 近似 (PMM floor 由来の false-positive がある) より iterate 側を
 /// 信用し、Infeasible ではなく Stalled + best-so-far で返す。10 は「eps に 1 桁
 /// 以内まで迫った iterate は infeasible な問題では現れない」という経験則。
+/// 作用対象は独立検証器を通過していない検出器主張のみ — 検証 PASS は eps-free
+/// の証明であり distrust より優先する (`iter::check_infeas_verdict` の契約)。
 pub(super) const INFEAS_DETECTOR_DISTRUST_SCORE: f64 = 10.0;
 
 /// fraction-to-boundary を補う trust-region cap (alpha·|dv|_inf ≤ cap·max(|v|_inf,1))。

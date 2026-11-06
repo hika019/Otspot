@@ -225,6 +225,18 @@ pub(crate) fn check_infeasible_or_unbounded(
     Some(SolveStatus::Unbounded)
 }
 
+/// `verify_unbounded_ray` 条件 5 (非正曲率) のスラック係数。
+///
+/// 曲率 `q = dxᵀ·Q·dx` は spmv と内積の 2 段合計であり、その fp 後方誤差境界は
+/// `γ·u·Σ|dxᵢ·Q_ij·dxⱼ|` (u = 機械精度、Σ = 演算子データのスケーリング)。
+/// γ=256 は 1 次境界 u に対する 256 倍の余裕 (行長 n までの合計成長を含む) で、
+/// 機械精度水準に留めることが本質: `DETECT_REL_EPS` 水準 (1e-8·Σ = 4e-8) の
+/// スラックでは平坦性 tol とほぼ重複し、Codex PR #71 P1 の曲率 +1e-9 が
+/// 素通りして正曲率が再び隠れる (実測)。機械精度なら正当 ray (実測 suite 全件で
+/// 曲率はビット単位ちょうど 0.0) を棄却せず、`DETECT_REL_EPS` doc の
+/// componentwise 後方誤差設計と同じ言語で語れる。
+const CURV_BACKWARD_FACTOR: f64 = 256.0 * f64::EPSILON;
+
 /// 検出器受理時に求める独立 ray 証明: 回収方向 (dx, ds) の ray
 /// `(x + t·dx, s + t·ds)` が **全 t ≥ 0** で拡張系 `{A_ext x + s = b_ext, s ≥ 0}`
 /// の実行可能性を保ち、目的関数が線形に減少することを検証する。
@@ -236,6 +248,8 @@ pub(crate) fn check_infeasible_or_unbounded(
 /// 3. 退行実行可能性: 全 m_ext 行 (境界行を含む) で
 ///    `|a_ext_i·dx + ds_i| ≤ eps · (‖a_ext_i‖∞·‖dx‖₁ + ‖ds‖₁)`。
 /// 4. 退行非負性: s ≥ 0 全行で `ds_i ≥ -sign_tol(‖ds‖₁)` — s(t) が全 t ≥ 0 で ≥ 0。
+/// 5. 非正曲率: `dxᵀ·Q·dx ≤ CURV_BACKWARD_FACTOR · Σ|dxᵢ·Q_ij·dxⱼ|` — 平坦性 1. の tol は
+///    近平な正定値の正曲率を隠すため (PR #71 P1)、機械精度スラックで別軸から弾く。
 ///
 /// 3・4 の tol 用 ‖ds‖₁ は**検査対象行のみ**の和。空疎な不等式行 (`ray_row_vacuous`:
 /// 係数恒ゼロ・RHS ≥ 0) は 3・4 から除外 — スラック s_i = b_i ≥ 0 が定数で退行実行
@@ -245,11 +259,11 @@ pub(crate) fn check_infeasible_or_unbounded(
 /// (b = 0) は同様に除外 (round 4)。
 ///
 /// 検出器 (`check_infeasible_or_unbounded`) との独立点: 検出器は (a) 境界行を
-/// 見ない (rows < m_orig のみ)、(b) ds を構築・検査しない (s(t) の退行非負性が
-/// 未検証) — のいずれかが偽陽性の原因 (QFORPLAN 実測: ‖Q·dx‖∞ =
-/// 1.0e-14 = fp ノイズ、cᵀdx/‖dx‖∞ = -6.9e-8 なのに ‖c‖∞ ~ 2.5e4)。LP 側
-/// simplex Phase I の `farkas_infeasibility_certified` (検証失敗時は判定を撤回する)
-/// と同じ契約を QP 側 unboundedness に導入したもの。
+/// 見ない (rows < m_orig のみ)、(b) ds を構築・検査しない (s(t) の退行非負性未検証)
+/// — のいずれかが偽陽性の原因 (QFORPLAN 実測: ‖Q·dx‖∞ = 1.0e-14 の fp ノイズ、
+/// cᵀdx/‖dx‖∞ = -6.9e-8 なのに ‖c‖∞ ~ 2.5e4)。LP 側 Phase I の
+/// `farkas_infeasibility_certified` (検証失敗時は判定を撤回する) と同じ契約を
+/// QP 側 unboundedness に導入したもの。
 pub(crate) fn verify_unbounded_ray(
     dx: &[f64],
     ds: &[f64],
@@ -274,6 +288,21 @@ pub(crate) fn verify_unbounded_ray(
     let mut qdx = vec![0.0_f64; n];
     spmv(&problem.q, dx, &mut qdx);
     if (0..n).any(|i| qdx[i].abs() > dot_tol(scales.q_rows[i], dx1)) {
+        return false;
+    }
+
+    // 5. 非正曲率 (検査位置は平坦性直後: qdx を再利用し O(nnz(Q)) を追加 1 回)。
+    //    平坦性 tol は近平な正定値方向の正曲率を隠すため、曲率を別軸から弾く
+    //    (CURV_BACKWARD_FACTOR doc / 関数 doc 条件 5 参照)。
+    let curvature: f64 = dx.iter().zip(&qdx).map(|(&a, &b)| a * b).sum();
+    let mut curv_scale = 0.0_f64;
+    for j in 0..n {
+        for ptr in problem.q.col_ptr()[j]..problem.q.col_ptr()[j + 1] {
+            let i = problem.q.row_ind()[ptr];
+            curv_scale += dx[i].abs() * problem.q.values()[ptr].abs() * dx[j].abs();
+        }
+    }
+    if curvature > CURV_BACKWARD_FACTOR * curv_scale {
         return false;
     }
 
@@ -1107,5 +1136,67 @@ mod tests {
             &is_eq_ext,
             &scales
         ));
+    }
+
+    /// P1 反例インスタンス (Codex PR #71 P1): Q = [[1,-1],[-1,1+1e-9]]、
+    /// c = (-1e-7,-1e-7)、x1-x2 = 0 (Eq)、自由境界。手計算オラクル: 実行可能
+    /// 直線 x=(s,s) 上で obj = 5e-10·s² - 2e-7·s、唯一の最小点 s*=200、
+    /// obj* = -2e-5 → **有界**。方向 dx=(1,1) は Q·dx = (0, 1e-9) が平坦性
+    /// tol 1e-8·1·2 = 2e-8 を通り、cᵀdx = -2e-7 < 0 も満たすため、曲率検査が
+    /// 無い検証器は ray と誤受理した (台帳 /tmp/opencode/codex_p1_probe)。
+    fn p1_instance(eps_diag: f64) -> QpProblem {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[1.0, -1.0, -1.0, 1.0 + eps_diag],
+            2,
+            2,
+        )
+        .unwrap();
+        QpProblem::new(
+            q,
+            vec![-1e-7, -1e-7],
+            CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, -1.0], 1, 2).unwrap(),
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap()
+    }
+
+    /// 条件 5 (非正曲率) の棄却側: dx=(1,1) の曲率は +1.000000082740371e-9 で
+    /// 機械精度スラック 256·u·Σ ≈ 2.3e-13 の約 4400 倍。平坦性・降下・退行実行
+    /// 可能性はすべて通すため、この検査のみが偽 ray を棄却する sentinel。
+    /// 曲率検査の revert で FAIL。
+    #[test]
+    fn verify_ray_rejects_positive_curvature_on_flat_tolerated_pd_direction() {
+        let problem = p1_instance(1e-9);
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let dx = vec![1.0, 1.0];
+        let ds = vec![0.0; a_ext.nrows()];
+        assert!(
+            !verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "dx=(1,1) has curvature +1e-9 > 0 on a hand-proved bounded instance; \
+             accepting it certifies Unbounded for a problem with optimum -2e-5"
+        );
+    }
+
+    /// 条件 5 の受理側境界: 対角を 1e-9 でなくちょうど 1.0 にした同一形状
+    /// (Q = [[1,-1],[-1,1]]、rank-1 PSD) では dx=(1,1) が Q の厳密 nullspace で、
+    /// 曲率はビット単位ちょうど 0.0。obj = -2e-7·s は真に非有界なので検証器は
+    /// 受理しなければならない (U1 と同型の正当 ray。機械精度スラックがあっても
+    /// 正当 ray を棄却しないことの回帰防止)。
+    #[test]
+    fn verify_ray_accepts_exact_zero_curvature_nullspace_ray() {
+        let problem = p1_instance(0.0);
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        let dx = vec![1.0, 1.0];
+        let ds = vec![0.0; a_ext.nrows()];
+        assert!(
+            verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
+            "exact nullspace direction of rank-1 PSD Q has curvature 0.0 bitwise; \
+             the curvature condition must not reject true recession rays"
+        );
     }
 }
