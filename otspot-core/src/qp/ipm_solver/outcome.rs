@@ -48,9 +48,11 @@ pub struct IpmOutcome {
     /// `false` の infeasibility status は Newton 方向ヒューリスティック検出の
     /// 未証明候補であり、attempt 層の候補比較・finalize で確定判定として
     /// 優先されない (QFORPLAN@1e-8 FAIL:Unbounded 誤判定修正、2026-11)。
-    /// 検証済み判定のみ `run_ipm_with` が `result.stats.infeasibility_certified`
-    /// 経由で `true` を設定する。`NonConvex` は ray/Farkas 系の主張ではないため
-    /// このフラグに関係なく構造的判定として扱われる。
+    /// 検証済み判定のみ `run_ipm_with` が `result.stats.unbounded_ray_certified`
+    /// (ray) / `result.stats.infeasible_farkas_certified` (Farkas) 経由で
+    /// `true` を設定する。`NonConvex` は ray/Farkas 系の主張ではないため
+    /// このフラグに関係なく構造的判定として扱われ、どちらの証書フラグも
+    /// 立たない。
     pub infeasibility_proven: bool,
     /// 検証済み Unbounded の ray 証書ペイロード (元空間)。
     ///

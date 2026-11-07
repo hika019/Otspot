@@ -1100,13 +1100,22 @@ fn finalize_outcome(
                 _ => f64::NAN,
             };
             // stats を Default 再構築で失うと受理部の検証記録が消える (review P2)。
-            // proven フラグをそのまま最終 SolverResult へ引き継ぐ。
+            // proven を最終 SolverResult へ引き継ぐ際も、検証を通過した証書の
+            // 種類ごとのフラグに分離して立てる (ray = Unbounded、Farkas =
+            // Infeasible)。NonConvex は ray/Farkas 系の主張ではないため
+            // どちらも立たない (infeasibility_proven の doc 参照)。
+            // `infeas` は status フィールドで move されるため先に読む。
+            let ray_certified =
+                outcome.infeasibility_proven && matches!(infeas, SolveStatus::Unbounded);
+            let farkas_certified =
+                outcome.infeasibility_proven && matches!(infeas, SolveStatus::Infeasible);
             return SolverResult {
                 status: infeas,
                 objective,
                 iterations: outcome.iterations,
                 stats: crate::problem::SolveStats {
-                    infeasibility_certified: outcome.infeasibility_proven,
+                    unbounded_ray_certified: ray_certified,
+                    infeasible_farkas_certified: farkas_certified,
                     ..Default::default()
                 },
                 // 検証済み Unbounded の ray 証書 (受理部検証 → outcome 経由、
@@ -1379,7 +1388,8 @@ mod tests {
         _user_eps: f64,
     ) -> IpmOutcome {
         if presolve.ruiz_scaler.is_some() {
-            // 内側受理部の ray/Farkas 検証を通過した (stats.infeasibility_certified)
+            // 内側受理部の ray/Farkas 検証を通過した (stats の
+            // unbounded_ray_certified / infeasible_farkas_certified)
             // 想定 outcome: run_ipm_with は内側 stats から proven を立てるが、テスト
             // runner は outcome を直接構成するため proven=true を明示して検証済み
             // 構造的判定をシミュレートする。未証明の infeasibility_status は

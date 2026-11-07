@@ -19,7 +19,9 @@
 //!
 //! ## GREEN 基準 (修正後)
 //!
-//! 全 eps で `Unbounded` かつ `stats.infeasibility_certified == true`。
+//! 全 eps で `Unbounded` かつ `stats.unbounded_ray_certified == true`
+//! (2026-11 の証書フラグ分離後は ray 側。分離前の shared 名は
+//! tests/qp_cert_flag_split_sentinel.rs が各側の独立性を pin する)。
 //! eps-free な独立検証器 (verify_unbounded_ray) が唯一の審判であり、
 //! eps 依存ヒューリスティック (distrust gate / 収束判定) は未証明の
 //! 検出器主張にのみ作用する。
@@ -78,12 +80,12 @@ fn truly_unbounded_delta_5e_8_never_optimal_cross_eps() {
             r.iterations
         );
         assert!(
-            r.stats.infeasibility_certified,
+            r.stats.unbounded_ray_certified,
             "delta=5e-8 eps={eps:.0e}: Unbounded must carry the verifier certificate"
         );
         eprintln!(
             "[U1 5e-8] eps={eps:.0e} -> {:?} certified={} iters={}",
-            r.status, r.stats.infeasibility_certified, r.iterations
+            r.status, r.stats.unbounded_ray_certified, r.iterations
         );
     }
 }
@@ -105,7 +107,7 @@ fn truly_unbounded_delta_eq_eps_is_deterministic_unbounded() {
             r.iterations
         );
         assert!(
-            r.stats.infeasibility_certified,
+            r.stats.unbounded_ray_certified,
             "delta=eps race (rep {rep}): Unbounded must carry the verifier certificate"
         );
     }
@@ -132,12 +134,12 @@ fn truly_unbounded_delta_1e_9_never_optimal_cross_eps() {
             r.iterations
         );
         assert!(
-            r.stats.infeasibility_certified,
+            r.stats.unbounded_ray_certified,
             "delta=1e-9 eps={eps:.0e}: Unbounded must carry the verifier certificate"
         );
         eprintln!(
             "[U1 1e-9] eps={eps:.0e} -> {:?} certified={} iters={}",
-            r.status, r.stats.infeasibility_certified, r.iterations
+            r.status, r.stats.unbounded_ray_certified, r.iterations
         );
     }
 }

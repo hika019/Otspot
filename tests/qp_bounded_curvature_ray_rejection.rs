@@ -109,7 +109,7 @@ fn bounded_p1_never_certified_unbounded_cross_eps_presolve() {
                 r.objective
             );
             assert!(
-                !(r.status == SolveStatus::Unbounded && r.stats.infeasibility_certified),
+                !(r.status == SolveStatus::Unbounded && r.stats.unbounded_ray_certified),
                 "presolve={presolve} eps={eps:.0e}: certified Unbounded must never \
                  appear on a bounded instance"
             );

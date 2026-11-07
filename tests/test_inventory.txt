@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3354 testcases, 43 ignored
+# totals: 3357 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -3286,6 +3286,9 @@ otspot::proptest_fuzz	prop_small_lp_no_panic	active
 otspot::proptest_fuzz	prop_zero_objective_always_optimal	active
 otspot::qp_bounded_curvature_ray_rejection	bounded_p1_never_certified_unbounded_cross_eps_presolve	active
 otspot::qp_bounded_curvature_ray_rejection	bounded_p1_status_and_objective_match_oracle_across_configs	active
+otspot::qp_cert_flag_split_sentinel	certified_infeasible_sets_farkas_flag_only	active
+otspot::qp_cert_flag_split_sentinel	certified_unbounded_sets_ray_flag_only	active
+otspot::qp_cert_flag_split_sentinel	optimal_solve_carries_no_certificate_flags	active
 otspot::qp_clarabel_extra_assertions	cross_aug2d	active
 otspot::qp_clarabel_extra_assertions	cross_aug2dc	active
 otspot::qp_clarabel_extra_assertions	cross_dual1	active
