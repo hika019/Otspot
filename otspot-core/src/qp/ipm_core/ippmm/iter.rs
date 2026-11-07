@@ -335,19 +335,15 @@ fn solve_ippmm_inner_confined(
             // Optimal 打刻は検証済み ray をレースで追い越せない: 直近の
             // Newton 方向へ単発の構造チェックを走らせ、検証 PASS なら
             // 構造判定が勝つ (sentinel: truly_unbounded_delta_5e_8_*、
-            // final_structural_check の doc 参照)。iter == 0 では方向が未計算。
-            let structural = if iter > 0 {
-                final_structural_check(
-                    (&dx, &ds, &dy),
-                    (problem, &a_ext),
-                    (m_orig, m_ext, iter),
-                    (&b_ext, &is_eq_ext, &scales),
-                )
-            } else {
-                None
-            };
-            if let Some(structural) = structural {
-                certified = cert_kind_of(&structural);
+            // structural_verdict_at_convergence の doc 参照)。
+            if let Some((structural, cert)) = structural_verdict_at_convergence(
+                iter,
+                (&dx, &ds, &dy),
+                (problem, &a_ext),
+                (m_orig, m_ext),
+                (&b_ext, &is_eq_ext, &scales),
+            ) {
+                certified = cert;
                 status = Some(structural);
                 break;
             }
@@ -949,6 +945,41 @@ fn verify_detector_claim(
         ),
         _ => false,
     }
+}
+
+/// 収束時 (Optimal 打刻直前) の構造判定受理。
+///
+/// `final_structural_check` の単発走査に、iter 0 で Newton 方向が未計算のため
+/// 走らせないガードと、検証 PASS した構造判定の証書種類 (`cert_kind_of`)
+/// 紐付けを畳み込み、`(status, 証書種類)` を返す。呼び出し側は status と
+/// `certified` に書き込んで break するだけでよく、受理部 2 系統 (ここ と
+/// `check_infeas_verdict`) とも証書の配線は証書種類側の名前関数に一元化する
+/// (`CertKind` の doc 参照)。
+fn structural_verdict_at_convergence(
+    iter: usize,
+    (dx, ds, dy): (&[f64], &[f64], &[f64]),
+    (problem, a_ext): (&QpProblem, &otspot_num::sparse::CscMatrix),
+    (m_orig, m_ext): (usize, usize),
+    (b_ext, is_eq_ext, scales): (
+        &[f64],
+        &[bool],
+        &crate::qp::ipm_core::common::DetectionScales,
+    ),
+) -> Option<(SolveStatus, Option<CertKind>)> {
+    let structural = if iter > 0 {
+        final_structural_check(
+            (dx, ds, dy),
+            (problem, a_ext),
+            (m_orig, m_ext, iter),
+            (b_ext, is_eq_ext, scales),
+        )
+    } else {
+        None
+    };
+    structural.map(|claimed| {
+        let kind = cert_kind_of(&claimed);
+        (claimed, kind)
+    })
 }
 
 /// Optimal 打刻直前の単発構造チェック。
