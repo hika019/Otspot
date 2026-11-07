@@ -418,7 +418,7 @@ fn infeasibility_is_final(outcome: &IpmOutcome) -> bool {
 /// `prove_optimal` mint では上書きできない — `outcome_is_better_candidate` の
 /// 「検証済み判定は有限 iterate より絶対優先」と同じ審判順を、ladder の
 /// proven break・延長 attempt・no-presolve fallback の 3 上書き点に一律適用する
-/// (sentinel: tests/qp_truly_unbounded_eps_consistency.rs。真に非有界な問題で
+/// (sentinel: tests/qp_truly_unbounded_ray_certified_consistency.rs。真に非有界な問題で
 /// 別 lane の検証済み Unbounded を KKT 残差 ≤ eps の打刻が打ち消した)。
 fn finite_mint_may_replace(best: &Option<IpmOutcome>) -> bool {
     !best.as_ref().is_some_and(infeasibility_is_final)

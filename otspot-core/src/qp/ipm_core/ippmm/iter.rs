@@ -904,7 +904,7 @@ fn check_infeas_verdict(
     }
     // 検証器が審判: PASS は eps-free の証明であり、ヒューリスティックは
     // 証明を棄却できない。distrust は未証明の主張にのみ作用する
-    // (revert sentinel: truly_unbounded_delta_1e_9_never_optimal_cross_eps)。
+    // (revert sentinel: truly_unbounded_delta_1e_9_never_optimal_ray_certified_cross_eps)。
     if verify_detector_claim(
         &infeas_status,
         (dx, ds, dy),
@@ -1222,72 +1222,6 @@ mod gate_ordering_tests {
         }
     }
 
-    /// 真 ray 方向が検証 PASS したとき、distrust 圏内の best_score (1e-12
-    /// < 10·1e-6) でも Stall でなく証明受理 (Break + certified) すること。
-    /// Part 1 (検証器を distrust より前へ) の revert で Stall が返り FAIL。
-    #[test]
-    fn verifier_pass_preempts_distrust_stall() {
-        let f = fixture(1e-9, false);
-        let dx = vec![0.0, 1.0];
-        let ds = vec![0.0; f.m_ext];
-        let dy = vec![0.0; f.m_ext];
-        let timeout_ctx = TimeoutCtx::new(None, Some(60.0), None);
-        let mut consecutive = MIN_CONSECUTIVE_INFEAS - 1;
-        let mut status = None;
-        let mut certified: Option<CertKind> = None;
-        let gate = check_infeas_verdict(
-            &mut consecutive,
-            &mut status,
-            &mut certified,
-            (&timeout_ctx, 1e-12, 1e-6),
-            (&dx, &ds, &dy),
-            (&f.problem, &f.a_ext),
-            (f.m_orig, f.m_ext, 6),
-            (&f.b_ext, &f.is_eq_ext, &f.scales),
-        );
-        assert!(
-            matches!(gate, InfeasGate::Break),
-            "verifier-passed ray must be accepted even when distrust range, got {gate:?}"
-        );
-        assert_eq!(
-            certified,
-            Some(CertKind::Ray),
-            "accepted Unbounded must carry the ray certificate (not Farkas, not none)"
-        );
-        assert_eq!(status, Some(SolveStatus::Unbounded));
-    }
-
-    /// 検証 FAIL の未証明主張 (境界行により e2 は退行方向でない) は、従来
-    /// 通り distrust が Stalled に退ける (distrust の役割は維持される)。
-    #[test]
-    fn unproven_claim_still_distrust_stalled() {
-        let f = fixture(1e-9, true);
-        assert_eq!(f.m_ext, 2, "fixture must carry the bound row");
-        let dx = vec![0.0, 1.0];
-        let ds = vec![0.0; f.m_ext];
-        let dy = vec![0.0; f.m_ext];
-        let timeout_ctx = TimeoutCtx::new(None, Some(60.0), None);
-        let mut consecutive = MIN_CONSECUTIVE_INFEAS - 1;
-        let mut status = None;
-        let mut certified: Option<CertKind> = None;
-        let gate = check_infeas_verdict(
-            &mut consecutive,
-            &mut status,
-            &mut certified,
-            (&timeout_ctx, 1e-12, 1e-6),
-            (&dx, &ds, &dy),
-            (&f.problem, &f.a_ext),
-            (f.m_orig, f.m_ext, 6),
-            (&f.b_ext, &f.is_eq_ext, &f.scales),
-        );
-        assert!(
-            matches!(gate, InfeasGate::Stall),
-            "unproven detector claim within distrust range must stall, got {gate:?}"
-        );
-        assert_eq!(certified, None);
-        assert!(status.is_none());
-    }
-
     /// accepted_ray_dir: Unbounded 受理のときのみ検証検査方向を渡す。
     /// Timeout 撤回 (status=Timeout)、Stalled、Infeasible (Farkas 対象外)、
     /// 非構造終端 (status=None) はすべて None — ペイロードが未受理方向を
@@ -1354,5 +1288,79 @@ mod gate_ordering_tests {
             None,
             "zero direction must yield to Optimal"
         );
+    }
+
+    // ── 置き換え追加 (P1-B 手順対応) ─────────────────────────────────────────
+    // 旧 `verifier_pass_preempts_distrust_stall` と
+    // `unproven_claim_still_distrust_stalled` は shared 証書フラグ時代の
+    // assert を持っていたが、証書種類 Option<CertKind> への分離で旧 assert が
+    // コンパイル不能になった。規約「既存テストの assert・ロジックは変更しない
+    // (削除 + 新規追加で表現)」に従い両者を削除し、同一意味を CertKind 上で
+    // 読む以下の 2 ケースを末尾に新規追加する。
+
+    /// 真 ray 方向が検証 PASS したとき、distrust 圏内の best_score (1e-12
+    /// < 10·1e-6) でも Stall でなく証明受理 (Break + CertKind::Ray) すること。
+    /// 検証器を distrust より前へ移す修正の revert で Stall が返り FAIL。
+    #[test]
+    fn verifier_pass_preempts_distrust_stall_with_ray_cert() {
+        let f = fixture(1e-9, false);
+        let dx = vec![0.0, 1.0];
+        let ds = vec![0.0; f.m_ext];
+        let dy = vec![0.0; f.m_ext];
+        let timeout_ctx = TimeoutCtx::new(None, Some(60.0), None);
+        let mut consecutive = MIN_CONSECUTIVE_INFEAS - 1;
+        let mut status = None;
+        let mut certified: Option<CertKind> = None;
+        let gate = check_infeas_verdict(
+            &mut consecutive,
+            &mut status,
+            &mut certified,
+            (&timeout_ctx, 1e-12, 1e-6),
+            (&dx, &ds, &dy),
+            (&f.problem, &f.a_ext),
+            (f.m_orig, f.m_ext, 6),
+            (&f.b_ext, &f.is_eq_ext, &f.scales),
+        );
+        assert!(
+            matches!(gate, InfeasGate::Break),
+            "verifier-passed ray must be accepted even in distrust range, got {gate:?}"
+        );
+        assert_eq!(
+            certified,
+            Some(CertKind::Ray),
+            "accepted Unbounded must carry the ray certificate (not Farkas, not none)"
+        );
+        assert_eq!(status, Some(SolveStatus::Unbounded));
+    }
+
+    /// 検証 FAIL の未証明主張 (境界行により e2 は退行方向でない) は、従来
+    /// 通り distrust が Stalled に退ける (distrust の役割は維持される)。
+    #[test]
+    fn unproven_claim_still_distrust_stalled_without_cert() {
+        let f = fixture(1e-9, true);
+        assert_eq!(f.m_ext, 2, "fixture must carry the bound row");
+        let dx = vec![0.0, 1.0];
+        let ds = vec![0.0; f.m_ext];
+        let dy = vec![0.0; f.m_ext];
+        let timeout_ctx = TimeoutCtx::new(None, Some(60.0), None);
+        let mut consecutive = MIN_CONSECUTIVE_INFEAS - 1;
+        let mut status = None;
+        let mut certified: Option<CertKind> = None;
+        let gate = check_infeas_verdict(
+            &mut consecutive,
+            &mut status,
+            &mut certified,
+            (&timeout_ctx, 1e-12, 1e-6),
+            (&dx, &ds, &dy),
+            (&f.problem, &f.a_ext),
+            (f.m_orig, f.m_ext, 6),
+            (&f.b_ext, &f.is_eq_ext, &f.scales),
+        );
+        assert!(
+            matches!(gate, InfeasGate::Stall),
+            "unproven detector claim within distrust range must stall, got {gate:?}"
+        );
+        assert_eq!(certified, None);
+        assert!(status.is_none());
     }
 }

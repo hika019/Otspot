@@ -31,7 +31,7 @@ fn inf() -> f64 {
 }
 
 /// U1: min -δ·x2 s.t. x1 = 1 (Eq)、x1, x2 自由。δ = eps の決定性構成は
-/// `truly_unbounded_delta_eq_eps_is_deterministic_unbounded` (同ディレクトリ)
+/// `truly_unbounded_delta_eq_eps_ray_certified_deterministic_unbounded` (同ディレクトリ)
 /// が検証済み Unbounded を pin 済みのパラメータを借用する。
 fn solve_u1() -> SolverResult {
     let problem = QpProblem::new(
