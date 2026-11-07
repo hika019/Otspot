@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    # feature branch の検証は pull_request 側が担う。push はマージ後の main 検証のみ
+    # （PR 存在時の branch push と二重 run になり runner を占有するため "**" から縮小）。
+    branches: ["main"]
   pull_request:
 
 concurrency:
