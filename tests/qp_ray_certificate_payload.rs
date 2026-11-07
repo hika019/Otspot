@@ -4,7 +4,9 @@
 //!
 //! IPM が検証済み Unbounded を返すとき、`verify_unbounded_ray` は実際に回収
 //! 方向 dx と検査対象 iterate を検証しているのに、従来 API は bool
-//! (`stats.infeasibility_certified`) しか返さず、`objective = -inf` と空
+//! (`stats.infeasibility_certified`、現在はこの file の sentinel と同時に
+//! `unbounded_ray_certified` / `infeasible_farkas_certified` へ分離済み)
+//! しか返さず、`objective = -inf` と空
 //! solution だけで「証明済み」という主張を消費者が独立検証できなかった。
 //! `SolverResult::ray_certificate` (direction + base_point) により、ソルバを
 //! 信用せずに線形代数だけで非有界性を再検証できることをこの file が pin する。
@@ -134,7 +136,7 @@ fn u1_certified_unbounded_carries_recomputable_ray_payload() {
         r.objective
     );
     assert!(
-        r.stats.infeasibility_certified,
+        r.stats.unbounded_ray_certified,
         "precondition: status Unbounded without cert must not carry payload"
     );
     // 公開 API 形状 (変更前からの契約): 目的値 -inf・solution 空。
@@ -228,7 +230,7 @@ fn qforplan_unverified_verdict_carries_no_payload() {
         r.status
     );
     assert!(
-        !r.stats.infeasibility_certified,
+        !r.stats.unbounded_ray_certified && !r.stats.infeasible_farkas_certified,
         "no ray/Farkas verification was accepted at eps=1e-8, so the cert \
          flag must stay false"
     );
@@ -259,7 +261,7 @@ fn certified_infeasible_carries_no_ray_payload() {
     if r.status == SolveStatus::Infeasible {
         // 未証明 Infeasible は確定応答にならない既存契約との整合。
         assert!(
-            r.stats.infeasibility_certified,
+            r.stats.infeasible_farkas_certified,
             "an Infeasible final verdict must be Farkas-verified (status \
              {:?} obj={:e})",
             r.status, r.objective
@@ -268,7 +270,7 @@ fn certified_infeasible_carries_no_ray_payload() {
     eprintln!(
         "[infeasible two-eq] status={:?} certified={} payload={:?}",
         r.status,
-        r.stats.infeasibility_certified,
+        r.stats.infeasible_farkas_certified,
         r.ray_certificate.is_some()
     );
 }

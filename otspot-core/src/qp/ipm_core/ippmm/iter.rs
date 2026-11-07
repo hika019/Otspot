@@ -1127,14 +1127,15 @@ fn finalize_ippmm_result(
     // 基点はここへ渡された x (受理 break 時に step 未適用の検証検査 iterate)。
     // certified でない・Unbounded 以外の方向は保持せず廃棄
     // (Some ⇔ 検証済み Unbounded の契約)。
-    let ray_certificate = if final_status == SolveStatus::Unbounded && infeas_certified {
-        certified_ray.map(|direction| crate::problem::RayCertificate {
-            direction,
-            base_point: x.clone(),
-        })
-    } else {
-        None
-    };
+    let ray_certificate =
+        if final_status == SolveStatus::Unbounded && certified == Some(CertKind::Ray) {
+            certified_ray.map(|direction| crate::problem::RayCertificate {
+                direction,
+                base_point: x.clone(),
+            })
+        } else {
+            None
+        };
 
     SolverResult {
         status: final_status,

@@ -308,7 +308,7 @@ pub struct SolverResult {
     pub opt_cert: Option<OptimalCertificate>,
     /// 検証済み Unbounded の ray 証書ペイロード (回収方向 + 実行可能基点)。
     ///
-    /// Some となるのは `status == Unbounded` かつ `stats.infeasibility_certified
+    /// Some となるのは `status == Unbounded` かつ `stats.unbounded_ray_certified
     /// == true` のときのみ — IPM 受理点の eps-free 独立検証器
     /// (`verify_unbounded_ray`) を通過し、かつ検証座標が
     /// 元問題空間と一致する (presolve 縮約・presolve 側 Ruiz が掛かると内部座標
