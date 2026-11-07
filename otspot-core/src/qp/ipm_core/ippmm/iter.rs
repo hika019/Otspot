@@ -132,9 +132,10 @@ fn solve_ippmm_inner_confined(
     }
 
     let scales = crate::qp::ipm_core::common::DetectionScales::compute(problem, &a_ext, &b_ext);
-    // 受理部が通過した証書の種類 (None = 未受理)。終端の stats 組立で
-    // ray / Farkas 各フラグへ分離して記録する (SolveStats の doc 参照)。
-    let mut certified: Option<CertKind> = None;
+    // 受理部が通過した証書 (None = 未受理)。ray variant は受理時点基点の
+    // 原始実行可能性ゲートビットを運び、終端の stats / ray ペイロード組立
+    // (finalize) で消費する。
+    let mut certified: Option<AcceptedCert> = None;
 
     let eq_count = is_eq_ext.iter().filter(|&&v| v).count();
     let m_ineq = m_ext - eq_count;
@@ -338,7 +339,7 @@ fn solve_ippmm_inner_confined(
             // structural_verdict_at_convergence の doc 参照)。
             if let Some((structural, cert)) = structural_verdict_at_convergence(
                 iter,
-                (&dx, &ds, &dy),
+                (&x, &dx, &ds, &dy),
                 (problem, &a_ext),
                 (m_orig, m_ext),
                 (&b_ext, &is_eq_ext, &scales),
@@ -587,7 +588,7 @@ fn solve_ippmm_inner_confined(
             &mut status,
             &mut certified,
             (&timeout_ctx, best_score, eps_orig),
-            (&dx, &ds, &dy),
+            (&x, &dx, &ds, &dy),
             (problem, &a_ext),
             (m_orig, m_ext, iter),
             (&b_ext, &is_eq_ext, &scales),
@@ -853,19 +854,39 @@ fn accepted_ray_dir(claimed: Option<&SolveStatus>, dx: &[f64]) -> Option<Vec<f64
 /// `unbounded_ray_certified` / `infeasible_farkas_certified` に分離して記録する
 /// (共有名は「Unbounded + infeasibility certified」の誤読を生む。PR #71 review)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CertKind {
-    Ray,
+enum AcceptedCert {
     Farkas,
+    Ray { base_feasible: bool },
 }
 
-/// 検証 PASS した検出器主張の status → 証書種類の対応。`verify_detector_claim`
+/// 検証 PASS した検出器主張の status → 受理証書の対応。`verify_detector_claim`
 /// は `Unbounded` / `Infeasible` 以外常に false を返すので、この関数は受理
 /// 経路では必ず Some になる。`_ => None` arm は検証器契約が将来ずれたときに
 /// 存在しない証書を主張しないための保守的ガード。
-fn cert_kind_of(claimed: &SolveStatus) -> Option<CertKind> {
+///
+/// ray .variant の `base_feasible` は受理時点基点の原始実行可能性
+/// (`base_point_primal_feasible`)。ray 証明は「実行可能基点 + 退行 ray」の組
+/// で非有界性を支持するため、finalize のペイロード Some 条件はこのゲートビット
+/// を要求する (失敗時も recession 証明自体は有効なので判定は維持)。Farkas は
+/// ray ペイロードを生成しないためゲートビットを持たない。受理部 2 系統
+/// (`check_infeas_verdict` / `structural_verdict_at_convergence`) で共有。
+fn accepted_cert_of(
+    claimed: &SolveStatus,
+    (x, a_ext, b_ext, is_eq_ext, scales): (
+        &[f64],
+        &otspot_num::sparse::CscMatrix,
+        &[f64],
+        &[bool],
+        &crate::qp::ipm_core::common::DetectionScales,
+    ),
+) -> Option<AcceptedCert> {
     match claimed {
-        SolveStatus::Unbounded => Some(CertKind::Ray),
-        SolveStatus::Infeasible => Some(CertKind::Farkas),
+        SolveStatus::Unbounded => Some(AcceptedCert::Ray {
+            base_feasible: crate::qp::ipm_core::common::base_point_primal_feasible(
+                x, a_ext, b_ext, is_eq_ext, scales,
+            ),
+        }),
+        SolveStatus::Infeasible => Some(AcceptedCert::Farkas),
         _ => None,
     }
 }
@@ -874,9 +895,9 @@ fn cert_kind_of(claimed: &SolveStatus) -> Option<CertKind> {
 fn check_infeas_verdict(
     consecutive: &mut usize,
     status: &mut Option<SolveStatus>,
-    certified: &mut Option<CertKind>,
+    certified: &mut Option<AcceptedCert>,
     (timeout_ctx, best_score, eps_orig): (&TimeoutCtx, f64, f64),
-    (dx, ds, dy): (&[f64], &[f64], &[f64]),
+    (x, dx, ds, dy): (&[f64], &[f64], &[f64], &[f64]),
     (problem, a_ext): (&QpProblem, &otspot_num::sparse::CscMatrix),
     (m_orig, m_ext, iter): (usize, usize, usize),
     (b_ext, is_eq_ext, scales): (
@@ -911,7 +932,10 @@ fn check_infeas_verdict(
         (problem, a_ext),
         (b_ext, is_eq_ext, scales),
     ) {
-        *certified = cert_kind_of(&infeas_status);
+        // ray ペイロードは「実行可能基点 + 退行 ray」の組で非有界性の証明を
+        // 支持するため、基点の原始実行可能性を受理時点で評価し証書に畳む
+        // (ゲート失敗は判定を維持しペイロードのみ棄否 — finalize の Some 条件)。
+        *certified = accepted_cert_of(&infeas_status, (x, a_ext, b_ext, is_eq_ext, scales));
         *status = Some(infeas_status);
         return InfeasGate::Break;
     }
@@ -951,13 +975,15 @@ fn verify_detector_claim(
 ///
 /// `final_structural_check` の単発走査に、iter 0 で Newton 方向が未計算のため
 /// 走らせないガードと、検証 PASS した構造判定の証書種類 (`cert_kind_of`)
-/// 紐付けを畳み込み、`(status, 証書種類)` を返す。呼び出し側は status と
-/// `certified` に書き込んで break するだけでよく、受理部 2 系統 (ここ と
-/// `check_infeas_verdict`) とも証書の配線は証書種類側の名前関数に一元化する
-/// (`CertKind` の doc 参照)。
+/// 紐付け、ray 受理の基点実行可能性評価 (`base_point_primal_feasible`、
+/// ペイロード公開ゲート) を畳み込み、`(status, 証書種類, 基点実行可能)` を
+/// 返す。呼び出し側は status・`certified`・`ray_base_feasible` に書き込んで
+/// break するだけでよく、受理部 2 系統 (ここ と `check_infeas_verdict`) とも
+/// 証書の配線は受理証書の名前関数に一元化する (`AcceptedCert` / `accepted_cert_of`
+/// の doc 参照)。
 fn structural_verdict_at_convergence(
     iter: usize,
-    (dx, ds, dy): (&[f64], &[f64], &[f64]),
+    (x, dx, ds, dy): (&[f64], &[f64], &[f64], &[f64]),
     (problem, a_ext): (&QpProblem, &otspot_num::sparse::CscMatrix),
     (m_orig, m_ext): (usize, usize),
     (b_ext, is_eq_ext, scales): (
@@ -965,7 +991,7 @@ fn structural_verdict_at_convergence(
         &[bool],
         &crate::qp::ipm_core::common::DetectionScales,
     ),
-) -> Option<(SolveStatus, Option<CertKind>)> {
+) -> Option<(SolveStatus, Option<AcceptedCert>)> {
     let structural = if iter > 0 {
         final_structural_check(
             (dx, ds, dy),
@@ -977,8 +1003,8 @@ fn structural_verdict_at_convergence(
         None
     };
     structural.map(|claimed| {
-        let kind = cert_kind_of(&claimed);
-        (claimed, kind)
+        let cert = accepted_cert_of(&claimed, (x, a_ext, b_ext, is_eq_ext, scales));
+        (claimed, cert)
     })
 }
 
@@ -1057,7 +1083,7 @@ fn finalize_ippmm_result(
     total_solve_ns: u128,
     total_reg_retries: u32,
     any_iterative: bool,
-    certified: Option<CertKind>,
+    certified: Option<AcceptedCert>,
 ) -> SolverResult {
     // `build_extended_constraints` の 4 番目の返り値は `problem.num_constraints`
     // そのもの (kkt.rs)。導出に置き換えて呼び出し引数を ray ペイロードへ転用した。
@@ -1122,20 +1148,28 @@ fn finalize_ippmm_result(
         ..Default::default()
     };
 
-    // ray 証書ペイロードの組立: 検証済み Unbounded のときのみ Some。
+    // ray 証書ペイロードの組立: 検証済み Unbounded・受理済み ray 証書、かつ
+    // 受理時点の基点原始実行可能性ゲートビットが true のときのみ Some。
     // certified_ray (accepted_ray_dir 経由) は受理部検証の検査方向そのもの、
     // 基点はここへ渡された x (受理 break 時に step 未適用の検証検査 iterate)。
-    // certified でない・Unbounded 以外の方向は保持せず廃棄
-    // (Some ⇔ 検証済み Unbounded の契約)。
-    let ray_certificate =
-        if final_status == SolveStatus::Unbounded && certified == Some(CertKind::Ray) {
-            certified_ray.map(|direction| crate::problem::RayCertificate {
-                direction,
-                base_point: x.clone(),
+    // 退行 ray 証明は実行可能基点と組で初めて ray 全体の実行可能性を支持する
+    // ため、基点実行可能性ゲート失敗時は判定 (verify_unbounded_ray の証明) を
+    // 維持しつつペイロードを棄否する (Some ⇔ 検証済み Unbounded ∧ 基点実行可能)。
+    // certified でない・Unbounded 以外の方向は保持せず廃棄。
+    let ray_certificate = if final_status == SolveStatus::Unbounded
+        && matches!(
+            certified,
+            Some(AcceptedCert::Ray {
+                base_feasible: true
             })
-        } else {
-            None
-        };
+        ) {
+        certified_ray.map(|direction| crate::problem::RayCertificate {
+            direction,
+            base_point: x.clone(),
+        })
+    } else {
+        None
+    };
 
     SolverResult {
         status: final_status,
@@ -1159,8 +1193,8 @@ fn finalize_ippmm_result(
             // Farkas (実行不可能) は主張する数学的事実が別物なので共有名は
             // 使わない (SolveStats の doc 参照)。下流 (`ipm_solver::core` →
             // `finalize_outcome`) の検証義務ゲートがこれらのフラグを参照する。
-            unbounded_ray_certified: matches!(certified, Some(CertKind::Ray)),
-            infeasible_farkas_certified: matches!(certified, Some(CertKind::Farkas)),
+            unbounded_ray_certified: matches!(certified, Some(AcceptedCert::Ray { .. })),
+            infeasible_farkas_certified: matches!(certified, Some(AcceptedCert::Farkas)),
             ..Default::default()
         },
         ..Default::default()
@@ -1293,30 +1327,32 @@ mod gate_ordering_tests {
     // ── 置き換え追加 (P1-B 手順対応) ─────────────────────────────────────────
     // 旧 `verifier_pass_preempts_distrust_stall` と
     // `unproven_claim_still_distrust_stalled` は shared 証書フラグ時代の
-    // assert を持っていたが、証書種類 Option<CertKind> への分離で旧 assert が
+    // assert を持っていたが、受理証書 Option<AcceptedCert> への分離で旧 assert が
     // コンパイル不能になった。規約「既存テストの assert・ロジックは変更しない
-    // (削除 + 新規追加で表現)」に従い両者を削除し、同一意味を CertKind 上で
+    // (削除 + 新規追加で表現)」に従い両者を削除し、同一意味を受理証書上で
     // 読む以下の 2 ケースを末尾に新規追加する。
 
     /// 真 ray 方向が検証 PASS したとき、distrust 圏内の best_score (1e-12
-    /// < 10·1e-6) でも Stall でなく証明受理 (Break + CertKind::Ray) すること。
+    /// < 10·1e-6) でも Stall でなく証明受理 (Break + ray 証書) すること。
     /// 検証器を distrust より前へ移す修正の revert で Stall が返り FAIL。
+    /// 基点 (1,0) は等式 x1=1 上なのでペイロードゲートビットも立つ。
     #[test]
     fn verifier_pass_preempts_distrust_stall_with_ray_cert() {
         let f = fixture(1e-9, false);
+        let x = vec![1.0, 0.0];
         let dx = vec![0.0, 1.0];
         let ds = vec![0.0; f.m_ext];
         let dy = vec![0.0; f.m_ext];
         let timeout_ctx = TimeoutCtx::new(None, Some(60.0), None);
         let mut consecutive = MIN_CONSECUTIVE_INFEAS - 1;
         let mut status = None;
-        let mut certified: Option<CertKind> = None;
+        let mut certified: Option<AcceptedCert> = None;
         let gate = check_infeas_verdict(
             &mut consecutive,
             &mut status,
             &mut certified,
             (&timeout_ctx, 1e-12, 1e-6),
-            (&dx, &ds, &dy),
+            (&x, &dx, &ds, &dy),
             (&f.problem, &f.a_ext),
             (f.m_orig, f.m_ext, 6),
             (&f.b_ext, &f.is_eq_ext, &f.scales),
@@ -1327,8 +1363,11 @@ mod gate_ordering_tests {
         );
         assert_eq!(
             certified,
-            Some(CertKind::Ray),
-            "accepted Unbounded must carry the ray certificate (not Farkas, not none)"
+            Some(AcceptedCert::Ray {
+                base_feasible: true
+            }),
+            "accepted Unbounded must carry the ray certificate with the payload \
+             gate open (base (1,0) lies on the equality x1=1); not Farkas, not none"
         );
         assert_eq!(status, Some(SolveStatus::Unbounded));
     }
@@ -1339,19 +1378,20 @@ mod gate_ordering_tests {
     fn unproven_claim_still_distrust_stalled_without_cert() {
         let f = fixture(1e-9, true);
         assert_eq!(f.m_ext, 2, "fixture must carry the bound row");
+        let x = vec![0.0, 0.0];
         let dx = vec![0.0, 1.0];
         let ds = vec![0.0; f.m_ext];
         let dy = vec![0.0; f.m_ext];
         let timeout_ctx = TimeoutCtx::new(None, Some(60.0), None);
         let mut consecutive = MIN_CONSECUTIVE_INFEAS - 1;
         let mut status = None;
-        let mut certified: Option<CertKind> = None;
+        let mut certified: Option<AcceptedCert> = None;
         let gate = check_infeas_verdict(
             &mut consecutive,
             &mut status,
             &mut certified,
             (&timeout_ctx, 1e-12, 1e-6),
-            (&dx, &ds, &dy),
+            (&x, &dx, &ds, &dy),
             (&f.problem, &f.a_ext),
             (f.m_orig, f.m_ext, 6),
             (&f.b_ext, &f.is_eq_ext, &f.scales),
@@ -1362,5 +1402,110 @@ mod gate_ordering_tests {
         );
         assert_eq!(certified, None);
         assert!(status.is_none());
+    }
+
+    /// P1-A sentinel (受理部配線): 検証 PASS で ray が受理されても、基点が
+    /// 原始実行可能でなければ証書のゲートビットが立つ (判定は維持、ペイロード
+    /// ゲートのみ閉じる)。手計算オラクル: x=(0,0) は x1=1 を 1.0 違反
+    /// (後方誤差境界 ~2e-8 の 5e7 倍)。受理部の base_point_primal_feasible
+    /// 評価を恒真に revert すると base_feasible=true が返り FAIL。
+    #[test]
+    fn ray_acceptance_with_infeasible_base_gates_payload_publication() {
+        let f = fixture(1e-9, false);
+        let dx = vec![0.0, 1.0];
+        let ds = vec![0.0; f.m_ext];
+        let dy = vec![0.0; f.m_ext];
+        let timeout_ctx = TimeoutCtx::new(None, Some(60.0), None);
+        let run = |x: &[f64]| {
+            let mut consecutive = MIN_CONSECUTIVE_INFEAS - 1;
+            let mut status = None;
+            let mut certified: Option<AcceptedCert> = None;
+            let gate = check_infeas_verdict(
+                &mut consecutive,
+                &mut status,
+                &mut certified,
+                (&timeout_ctx, 1e-12, 1e-6),
+                (x, &dx, &ds, &dy),
+                (&f.problem, &f.a_ext),
+                (f.m_orig, f.m_ext, 6),
+                (&f.b_ext, &f.is_eq_ext, &f.scales),
+            );
+            assert!(
+                matches!(gate, InfeasGate::Break),
+                "verified recession ray must keep the verdict, base {x:?}"
+            );
+            certified
+        };
+        assert_eq!(
+            run(&[0.0, 0.0]),
+            Some(AcceptedCert::Ray {
+                base_feasible: false
+            }),
+            "infeasible base (0,0) must close the ray payload gate while \
+             keeping the ray certificate (verdict preserved)"
+        );
+        assert_eq!(
+            run(&[1.0, 0.0]),
+            Some(AcceptedCert::Ray {
+                base_feasible: true
+            }),
+            "feasible base (1,0) must keep the ray payload gate open \
+             (gate must not over-close)"
+        );
+    }
+
+    /// P1-A sentinel (finalize 組立): status Unbounded ∧ ray 証書でも
+    /// base_feasible = false なら ray_certificate は None、判定と
+    /// stats.unbounded_ray_certified は維持される。finalize のゲート条件
+    /// (`base_feasible: true` パターン) を外すと None 期待 assert が FAIL。
+    #[test]
+    fn finalize_publishes_ray_payload_only_with_feasible_base() {
+        let f = fixture(1e-9, false);
+        let x = vec![1.0, 0.0];
+        let y = vec![0.0; f.m_ext];
+        let s = vec![0.0; f.m_ext];
+        let mk = |base_ok: bool| {
+            finalize_ippmm_result(
+                &f.problem,
+                &f.b_ext,
+                Some(vec![0.0, 1.0]),
+                false,
+                100,
+                7,
+                Some(SolveStatus::Unbounded),
+                Some((0.0, 0.0, 0.0)),
+                0.0,
+                (0.0, 0.0, 0.0),
+                0.0,
+                x.clone(),
+                y.clone(),
+                s.clone(),
+                &x,
+                &y,
+                &s,
+                0u128,
+                0u128,
+                0u32,
+                false,
+                Some(AcceptedCert::Ray {
+                    base_feasible: base_ok,
+                }),
+            )
+        };
+        let gated = mk(false);
+        assert_eq!(gated.status, SolveStatus::Unbounded);
+        assert!(
+            gated.stats.unbounded_ray_certified,
+            "the recession-ray proof backs the verdict regardless of base gating"
+        );
+        assert!(
+            gated.ray_certificate.is_none(),
+            "an infeasible base must never be published as a certified feasible base point"
+        );
+        let published = mk(true);
+        assert!(
+            published.ray_certificate.is_some(),
+            "verified Unbounded with a feasible base must keep publishing the payload"
+        );
     }
 }

@@ -304,3 +304,76 @@ fn optimal_result_carries_no_payload() {
         r.ray_certificate
     );
 }
+
+/// U1-ineq: U1 と同一係数で等式行を不等式行 (x1 ≤ 1) に置き換えた変種。
+/// e2 方向は退行 (A_ineq·e2 = 0)、Q = 0・c = (0, -delta) より真に非有界。
+/// 基点実行可能性ゲートが「violation 側」の不等式行経路を走ることになる。
+fn u1_ineq(delta: f64) -> QpProblem {
+    QpProblem::new_all_le(
+        CscMatrix::new(2, 2),
+        vec![0.0, -delta],
+        CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 2).unwrap(),
+        vec![1.0],
+        vec![(-inf(), inf()), (-inf(), inf())],
+    )
+    .unwrap()
+}
+
+/// 基点契約ケース: (名称, 問題, 元制約行の記述 (行の非零係数, b, 等式なら true))。
+/// hand-crafted な 1 行問題のみを扱う (テスト内オラクルの独立再計算用)。
+type BaseCase<'a> = (&'a str, QpProblem, Vec<(f64, f64, bool)>);
+
+/// P1-A 公開契約 (独立再計算): ペイロードが Some のとき、基点は元空間の
+/// 全制約行・境界を componentwise 後方誤差境界
+/// `REL · (‖a_i‖∞ · ‖x₀‖₁ + |b_i|)` (REL = 検証器と同じ 1e-8) 以内で
+/// 満たす。U1(等式) と U1-ineq(不等式) の両経路を検査する。ゲート除去
+/// revert では未実行可能基点が公開され得るようになるため、この検査が
+/// 公開 API 側の回帰防止となる (受理時点実測: 全 suite 基点違反 0.0 —
+/// /tmp/opencode/pr75_codex_fix/REPORT.md)。
+#[test]
+fn published_base_point_is_primal_feasible_independently_recomputed() {
+    let cases: [BaseCase; 2] = [
+        (
+            "U1-eq",
+            u1_truly_unbounded(U1_DELTA),
+            vec![(1.0, U1_B_EQ, true)],
+        ),
+        ("U1-ineq", u1_ineq(U1_DELTA), vec![(1.0, U1_B_EQ, false)]),
+    ];
+    for (name, problem, rows) in cases {
+        let mut opts = SolverOptions::default();
+        opts.ipm.eps = 1e-8;
+        opts.presolve = false;
+        opts.timeout_secs = Some(4.0);
+        let r = solve_ipm(&problem, &opts);
+        let Some(cert) = r.ray_certificate else {
+            // Some ⇔ 検証済み Unbounded ∧ 基点実行可能 の契約上、None 自体は
+            // 許されるが、この 2 インスタンスでは受理が预期 (実測 0.0 違反)。
+            panic!(
+                "[{name}] precondition: certified Unbounded with feasible base \
+                 expected payload, got status={:?} certified={} payload={:?}",
+                r.status, r.stats.unbounded_ray_certified, r.ray_certificate
+            );
+        };
+        assert_eq!(r.status, SolveStatus::Unbounded);
+        let base = &cert.base_point;
+        assert_eq!(base.len(), 2);
+        let x_norm_1: f64 = base.iter().fold(0.0, |a, v| a + v.abs());
+        for (a1, b, is_eq) in rows {
+            let lhs = a1 * base[0];
+            let viol = if is_eq {
+                (lhs - b).abs()
+            } else {
+                (lhs - b).max(0.0)
+            };
+            let tol = RECESSION_BACKWARD_EPS * (a1.abs() * x_norm_1 + b.abs());
+            assert!(
+                viol <= tol,
+                "[{name}] base point {:?} violates row (a={a1}, b={b}, eq={is_eq}) \
+                 by {viol:e} > backward tol {tol:e}",
+                base
+            );
+        }
+        eprintln!("[{name}] base={:?} dx={:?} feasible", base, cert.direction);
+    }
+}

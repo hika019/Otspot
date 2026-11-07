@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3357 testcases, 43 ignored
+# totals: 3362 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1046,6 +1046,8 @@ otspot-core	qp::global::tree::tests::best_lower_bound_matches_top	active
 otspot-core	qp::global::tree::tests::pop_returns_smallest_lower_bound_first	active
 otspot-core	qp::global::tree::tests::pushed_popped_counters_track	active
 otspot-core	qp::global::tree::tests::tie_break_fifo_seq	active
+otspot-core	qp::ipm_core::common::tests::base_point_feasible_accepts_feasible_and_interior_points	active
+otspot-core	qp::ipm_core::common::tests::base_point_feasible_rejects_eq_and_bound_violations	active
 otspot-core	qp::ipm_core::common::tests::verify_farkas_accepts_true_certificate_with_multiplier_noise_on_vacuous_row	active
 otspot-core	qp::ipm_core::common::tests::verify_farkas_accepts_valid_certificate	active
 otspot-core	qp::ipm_core::common::tests::verify_farkas_rejects_direction_carried_only_by_vacuous_noise	active
@@ -1072,6 +1074,8 @@ otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_zero_row_with_negati
 otspot-core	qp::ipm_core::common::tests::verify_ray_scans_only_rows_present_in_extended_matrix	active
 otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::accepted_ray_dir_only_carries_verified_unbounded_direction	active
 otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::final_structural_check_accepts_ray_guards_cheap_cases	active
+otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::finalize_publishes_ray_payload_only_with_feasible_base	active
+otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::ray_acceptance_with_infeasible_base_gates_payload_publication	active
 otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::unproven_claim_still_distrust_stalled_without_cert	active
 otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::verifier_pass_preempts_distrust_stall_with_ray_cert	active
 otspot-core	qp::ipm_core::ippmm::state::convergence_tests::duality_gap_divides_by_the_larger_objective	active
@@ -3341,6 +3345,7 @@ otspot::qp_qforplan_unbounded_verification	qforplan_eps_1e_6_stays_optimal	activ
 otspot::qp_qforplan_unbounded_verification	qforplan_eps_1e_8_must_not_report_false_unbounded	active
 otspot::qp_ray_certificate_payload	certified_infeasible_carries_no_ray_payload	active
 otspot::qp_ray_certificate_payload	optimal_result_carries_no_payload	active
+otspot::qp_ray_certificate_payload	published_base_point_is_primal_feasible_independently_recomputed	active
 otspot::qp_ray_certificate_payload	qforplan_unverified_verdict_carries_no_payload	active
 otspot::qp_ray_certificate_payload	u1_certified_unbounded_carries_recomputable_ray_payload	active
 otspot::qp_truly_unbounded_ray_certified_consistency	truly_unbounded_delta_1e_9_never_optimal_ray_certified_cross_eps	active

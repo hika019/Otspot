@@ -309,8 +309,9 @@ pub struct SolverResult {
     /// 検証済み Unbounded の ray 証書ペイロード (回収方向 + 実行可能基点)。
     ///
     /// Some となるのは `status == Unbounded` かつ `stats.unbounded_ray_certified
-    /// == true` のときのみ — IPM 受理点の eps-free 独立検証器
-    /// (`verify_unbounded_ray`) を通過し、かつ検証座標が
+    /// == true` かつ ray 基点が原始実行可能性検査 (`base_point_primal_feasible`、
+    /// componentwise 後方誤差境界) を通過したときのみ — IPM 受理点の eps-free
+    /// 独立検証器 (`verify_unbounded_ray`) を通過し、かつ検証座標が
     /// 元問題空間と一致する (presolve 縮約・presolve 側 Ruiz が掛かると内部座標
     /// が元空間と異なり、回収方向の写像は置換変換を跨ぐため非自明 → ペイロード
     /// は破棄される) 場合に限定される。未証明判定・Stalled / Infeasible /
@@ -347,9 +348,12 @@ pub struct RayCertificate {
     /// 回収方向 dx (長さ = 決定変数数、元空間)。‖dx‖∞ ≥ 検証器の最小方向ノルム。
     pub direction: Vec<f64>,
     /// ray の基点 x₀ (長さ = 決定変数数、元空間)。検証時点の iterate であり、
-    /// 等式残差 `A_eq·x₀ − b_eq` は検証時点の fp 後方誤差以内。等式残差は
-    /// `A_eq·dx ≈ 0` によりray 上不変なので、この基点からray 全体の実行可能性
-    /// が従う。目的関数の減少は基点 x₀ から保証される。
+    /// 受理ゲート (`base_point_primal_feasible`) により元制約・境界の違反が
+    /// componentwise 後方誤差境界 `DETECT_REL_EPS·(‖a_i‖∞·‖x₀‖₁ + |b_i|)`
+    /// 以内であることが検査済み (不等式行は violation 側のみ、等式行は両側)。
+    /// 等式残差は `A_eq·dx ≈ 0` により ray 上不変、不等式・境界は退行条件
+    /// (`A_ineq·dx ≤ ≈0` 等) で悪化しないため、この基点から ray 全体の実行
+    /// 可能性が従う。目的関数の減少は基点 x₀ から保証される。
     pub base_point: Vec<f64>,
 }
 
