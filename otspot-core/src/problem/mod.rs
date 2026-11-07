@@ -102,17 +102,39 @@ pub struct SolveStats {
     /// This is a load-bearing route sentinel for large Netlib LPs whose upper
     /// bounds must stay as variable bounds instead of expanded UB rows.
     pub bounded_eq_ub_path: bool,
-    /// `true` iff the returned `Infeasible` / `Unbounded` status passed the
-    /// independent ray / Farkas certificate verification at the IPM detector's
-    /// acceptance point (`ippmm::iter`), not just the Newton-direction
-    /// Farkas-like heuristic of `check_infeasible_or_unbounded`.
+    /// 返された `Unbounded` status が IPM 検出器の受理点 (`ippmm::iter`) での
+    /// 降下方向 dx に対する独立検証 `verify_unbounded_ray` を通過したときのみ
+    /// `true`。`check_infeasible_or_unbounded` の Newton 方向ヒューリスティック
+    /// だけで済んだ未証明判定は立たない。
+    ///
+    /// 主張しているのは **ray 証書** (目的関数の非有界性) であり、実行可能性の
+    /// 主張ではない点に注意: 「非有界」は実行可能集合の空性の否定ですらない
+    /// (`infeasible_farkas_certified` の doc 参照)。確定 status は単一なので
+    /// 両フラグが同時に `true` になることはない。`Unbounded` 以外の status では
+    /// 常に `false` (`NonConvex` は慣性修正による構造的主張であり ray/Farkas
+    /// 系ではないため、どちらのフラグも立たない)。
     ///
     /// Load-bearing correctness sentinel (QFORPLAN false-Unbounded, 2026-11):
     /// `finalize_outcome` refuses to report an unverified structural status and
     /// falls back to the finite best iterate / an honest `Stalled` instead.
     /// Removing the verification gate flips `false` conclusions back to
     /// unverified hard verdicts, which the gate exists to prevent.
-    pub infeasibility_certified: bool,
+    pub unbounded_ray_certified: bool,
+    /// 返された `Infeasible` status が IPM 検出器の受理点 (`ippmm::iter`) での
+    /// 双対方向 dy に対する独立検証 `verify_infeasible_farkas` (Farkas 代替定理
+    /// = 実行可能集合が空であることの証書) を通過したときのみ `true`。
+    /// 検出器ヒューリスティックだけの未証明判定は立たない。
+    ///
+    /// 主張しているのは **Farkas 証書** (実行不可能性) であり、目的関数の非有界性
+    /// (`unbounded_ray_certified` の主張) とは無関係。両者は混同すると
+    /// 「Unbounded なのに infeasibility が証明された」に見える誤読を生むため
+    /// 分離されている (PR #71 review 指摘)。`Infeasible` 以外の status では常に
+    /// `false`。
+    ///
+    /// Load-bearing correctness sentinel (QFORPLAN 誤判定修正、2026-11):
+    /// `finalize_outcome` は検証を通っていない `Infeasible` を確定応答として
+    /// 返さない (検証ゲートを外すと偽 Infeasible 確定が復活する)。
+    pub infeasible_farkas_certified: bool,
 }
 
 /// ソルバーの求解結果ステータス
@@ -284,6 +306,51 @@ pub struct SolverResult {
     /// Set when `finalize_proven` verifies all KKT conditions on the returned point.
     /// `None` for demoted (LocallyOptimal/NonconvexLocal) or non-B&B results.
     pub opt_cert: Option<OptimalCertificate>,
+    /// 検証済み Unbounded の ray 証書ペイロード (回収方向 + 実行可能基点)。
+    ///
+    /// Some となるのは `status == Unbounded` かつ `stats.unbounded_ray_certified
+    /// == true` のときのみ — IPM 受理点の eps-free 独立検証器
+    /// (`verify_unbounded_ray`) を通過し、かつ検証座標が
+    /// 元問題空間と一致する (presolve 縮約・presolve 側 Ruiz が掛かると内部座標
+    /// が元空間と異なり、回収方向の写像は置換変換を跨ぐため非自明 → ペイロード
+    /// は破棄される) 場合に限定される。未証明判定・Stalled / Infeasible /
+    /// Optimal 等はすべて None。
+    ///
+    /// 検証済み Infeasible の Farkas 証書は現状あえて公開しない: 検証器の dy は
+    /// 拡張系 (元行 + 境界行) のソルバ内部行レイアウト・符号慣例で定義され、
+    /// 消費者が独立再計算するにはそのレイアウト自体が公開 API である必要がある
+    /// (ray 側の dx / 基点は長さ num_vars の元空間ベクトルでレイアウト非依存)。
+    /// レイアウト安定化の API 設計なしに dy を渡すことは誤検証を招くため、
+    /// ペイロードは ray に限定する。
+    pub ray_certificate: Option<RayCertificate>,
+}
+
+/// 検証済み Unbounded の独立再計算可能ペイロード ([`SolverResult::ray_certificate`])。
+///
+/// IPM 受理点の独立検証器 (`verify_unbounded_ray`) が **eps-free な
+/// componentwise 後方誤差境界**で成立を確認した量の組。検証は拡張系
+/// `{A_ext·x + s = b_ext, s ≥ 0}` (境界行をスラック付き行へ展開した系) に対し
+/// 行われており、対角スケーリング (Ruiz) は拡張系の行後方誤差のゼロパターンを
+/// 保存するため、元空間座標へ写像した下記量も元問題に対して同じ意味で成立する:
+///
+/// - 退行実行可能性: 全等式行で `A_eq·dx ≈ 0`、全不等式行で `A_ineq·dx ≤ ≈0`、
+///   境界について `dx_j ≈ 0` (固定)、`dx_j ≤ ≈0` (上側)、`dx_j ≥ ≈0` (下側)。
+///   よって基点からray `x(t) = base + t·dx` は全 t ≥ 0 で実行可能域に留まる。
+/// - 目的減少: 凸 QP では `Q·dx ≈ 0` (平坦性) かつ `cᵀdx < 0` が検証され、
+///   `φ(x(t)) = ½xᵀQx + cᵀx` は t → ∞ で −∞ へ発散する。
+///
+/// 消費者はソルバを信用せず `direction` / `base_point` だけの純粋な線形代数で
+/// 再検証できる (sentinel: `tests/qp_ray_certificate_payload.rs`)。
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RayCertificate {
+    /// 回収方向 dx (長さ = 決定変数数、元空間)。‖dx‖∞ ≥ 検証器の最小方向ノルム。
+    pub direction: Vec<f64>,
+    /// ray の基点 x₀ (長さ = 決定変数数、元空間)。検証時点の iterate であり、
+    /// 等式残差 `A_eq·x₀ − b_eq` は検証時点の fp 後方誤差以内。等式残差は
+    /// `A_eq·dx ≈ 0` によりray 上不変なので、この基点からray 全体の実行可能性
+    /// が従う。目的関数の減少は基点 x₀ から保証される。
+    pub base_point: Vec<f64>,
 }
 
 /// 各 phase 所要時間 (μs精度)。LP simplex と QP IPM の両経路で共用。
@@ -340,6 +407,7 @@ impl Default for SolverResult {
             stats: SolveStats::default(),
             bound_gap_cert: None,
             opt_cert: None,
+            ray_certificate: None,
         }
     }
 }
