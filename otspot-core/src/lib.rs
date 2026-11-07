@@ -77,7 +77,7 @@ pub use mip::{
     MipProblemError, MipStats, MiqpProblem,
 };
 pub use problem::certificate::{BoundGapCertificate, NotProven, OptimalCertificate};
-pub use problem::{SolveRoute, SolveStats, SolveStatus, SolverResult};
+pub use problem::{RayCertificate, SolveRoute, SolveStats, SolveStatus, SolverResult};
 pub use qp::certificate::prove_optimal;
 pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, QpWarmStart};
 pub use sparse::CscMatrix;
