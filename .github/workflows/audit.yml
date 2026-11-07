@@ -2,7 +2,9 @@ name: Audit
 
 on:
   push:
-    branches: ["**"]
+    # feature branch の検証は pull_request 側が担う（ci.yml と同じ理由。"**" だと
+    # PR 用 branch への push で同一内容の run が 2 組になる）。
+    branches: ["main"]
   pull_request:
 
 jobs:

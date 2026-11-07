@@ -16,7 +16,9 @@ name: CI (heavy)
 on:
   workflow_dispatch:
   push:
-    branches: ["**"]
+    # feature branch の検証は pull_request 側が担う（ci.yml と同じ理由。"**" だと
+    # PR 用 branch への push で heavy (45-52 分) が二重に runner を占有する）。
+    branches: ["main"]
   pull_request:
 
 jobs:
