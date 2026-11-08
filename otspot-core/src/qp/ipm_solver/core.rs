@@ -79,7 +79,7 @@ fn run_ipm_with(
 
     // 確定的 Infeasible/Unbounded/NonConvex は outcome に保持して Timeout 隠蔽を避ける。
     if structural_infeasibility(&result.status) {
-        return infeasibility_outcome(result);
+        return infeasibility_outcome(result, presolve_result);
     }
 
     // 不定 Q + 慣性修正 IPM 収束時は LocallyOptimal フラグを保持。
@@ -124,6 +124,7 @@ fn run_ipm_with(
             numerical_failure: true,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: result.timing_breakdown,
@@ -167,6 +168,7 @@ fn run_ipm_with(
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: result.timing_breakdown,
@@ -370,6 +372,7 @@ fn run_ipm_with(
         numerical_failure: false,
         infeasibility_status: None,
         infeasibility_proven: false,
+        ray_certificate: None,
         is_locally_optimal,
         postsolve_krylov_ir_skipped: krylov_ir_skipped,
         timing: Some(combined_timing),
@@ -394,17 +397,39 @@ fn structural_infeasibility(status: &SolveStatus) -> bool {
 }
 
 /// 構造判定を `IpmOutcome` に変換する。proven (確定判定候補) は内側受理部の
-/// 独立 ray / Farkas 検証を通過した判定のみ (`stats.infeasibility_certified`)。
-/// NonConvex は慣性修正による構造的主張であり ray/Farkas 系ではないため
-/// 検証対象外 = proven として扱う (finalize の ray 検証ゲートは通さない)。
-fn infeasibility_outcome(result: crate::problem::SolverResult) -> IpmOutcome {
+/// 独立 ray / Farkas 検証を通過した判定のみ (`stats.unbounded_ray_certified`
+/// = ray / `stats.infeasible_farkas_certified` = Farkas)。NonConvex は慣性
+/// 修正による構造的主張であり ray/Farkas 系ではないため検証対象外 = proven
+/// として扱う (finalize の ray 検証ゲートは通さない。どちらの証書フラグも
+/// 立てない)。
+///
+/// ray ペイロードの空間ゲート: presolve 縮約や presolve 側 Ruiz が掛かると
+/// 検証座標が元空間と異なり、置換変換を跨ぐ回収方向の写像は非自明のため
+/// ペイロードを破棄する (判定自体は検証済みで有効)。IPM 側 Ruiz は
+/// `scaling.rs::unscale_ipm_result` で元空間へ写像済みなので素通しする。
+fn infeasibility_outcome(
+    result: crate::problem::SolverResult,
+    presolve_result: &QpPresolveResult,
+) -> IpmOutcome {
     // NonConvex 判定の抽出は `result.status` の move より前で行うこと
     // (SolveStatus は非 Copy)。
     let nonconvex_structural = matches!(result.status, SolveStatus::NonConvex(_));
+    // ray ペイロードは status の部分 move とは無関係に引き継ぐ (空間ゲートは
+    // ここで presolve 情報から判定する)。
+    let original_space_coords =
+        !presolve_result.was_reduced && presolve_result.ruiz_scaler.is_none();
+    let ray_certificate = if original_space_coords {
+        result.ray_certificate
+    } else {
+        None
+    };
     let mut out = IpmOutcome::infeasibility(result.status);
     out.iterations = result.iterations; // attempt 予算 (`iter_used`) の課金対象
     out.timing = result.timing_breakdown;
-    out.infeasibility_proven = result.stats.infeasibility_certified || nonconvex_structural;
+    out.infeasibility_proven = result.stats.unbounded_ray_certified
+        || result.stats.infeasible_farkas_certified
+        || nonconvex_structural;
+    out.ray_certificate = ray_certificate;
     out
 }
 

@@ -1,5 +1,23 @@
 //! 真に非有界な QP が eps に依らず Optimal を名乗らない sentinel (2026-11)。
 //!
+//! ## 置き換え経緯 (既存テストの assert 編集禁止に対応)
+//!
+//! 本ファイルは tests/qp_truly_unbounded_eps_consistency.rs (削除済み) の
+//! 置き換えである。旧ファイルは shared 証書フラグ `infeasibility_certified`
+//! を assert していたが、証書フラグの ray / Farkas 分離 (PR #71 review 指摘)
+//! で旧名は廃止され、旧 assert はコンパイル不能になった。AGENTS.md 実装規約
+//! 「既存テストの assert・ロジックは変更しない (削除 + 新規追加で表現)」に
+//! 従い、旧 3 ケースは削除 (git 履歴に残る) し、同一意味を新フラグ
+//! `stats.unbounded_ray_certified` 上で読む新規ケースとして本ファイルに
+//! 追加した。旧→新テスト名対応:
+//!
+//! - `truly_unbounded_delta_5e_8_never_optimal_cross_eps`
+//!   → `truly_unbounded_delta_5e_8_never_optimal_ray_certified_cross_eps`
+//! - `truly_unbounded_delta_eq_eps_is_deterministic_unbounded`
+//!   → `truly_unbounded_delta_eq_eps_ray_certified_deterministic_unbounded`
+//! - `truly_unbounded_delta_1e_9_never_optimal_cross_eps`
+//!   → `truly_unbounded_delta_1e_9_never_optimal_ray_certified_cross_eps`
+//!
 //! ## 台帳 (手計算オラクル、ソルバ非依存)
 //!
 //! インスタンス U1: min (0, -delta)'x  s.t. x1 = 1 (Eq 1 行)、Q = 0、
@@ -19,9 +37,10 @@
 //!
 //! ## GREEN 基準 (修正後)
 //!
-//! 全 eps で `Unbounded` かつ `stats.infeasibility_certified == true`。
-//! eps-free な独立検証器 (verify_unbounded_ray) が唯一の審判であり、
-//! eps 依存ヒューリスティック (distrust gate / 収束判定) は未証明の
+//! 全 eps で `Unbounded` かつ `stats.unbounded_ray_certified == true`
+//! (ray 側証書。ray / Farkas の独立性は tests/qp_cert_flag_split_sentinel.rs
+//! が pin する)。eps-free な独立検証器 (verify_unbounded_ray) が唯一の審判
+//! であり、eps 依存ヒューリスティック (distrust gate / 収束判定) は未証明の
 //! 検出器主張にのみ作用する。
 
 use otspot::options::SolverOptions;
@@ -61,7 +80,7 @@ fn solve_u1(delta: f64, eps: f64) -> SolverResult {
 /// revert では受理部 verify-first と ladder 守衛の二重防御のため GREEN のまま、
 /// 両方同時に revert して FAIL (台帳は commit に届く全経路の審判順の修正を要求)。
 #[test]
-fn truly_unbounded_delta_5e_8_never_optimal_cross_eps() {
+fn truly_unbounded_delta_5e_8_never_optimal_ray_certified_cross_eps() {
     for &eps in &[1e-6_f64, 1e-7, 1e-8] {
         let r = solve_u1(5e-8, eps);
         assert_ne!(
@@ -78,12 +97,12 @@ fn truly_unbounded_delta_5e_8_never_optimal_cross_eps() {
             r.iterations
         );
         assert!(
-            r.stats.infeasibility_certified,
-            "delta=5e-8 eps={eps:.0e}: Unbounded must carry the verifier certificate"
+            r.stats.unbounded_ray_certified,
+            "delta=5e-8 eps={eps:.0e}: Unbounded must carry the ray certificate"
         );
         eprintln!(
-            "[U1 5e-8] eps={eps:.0e} -> {:?} certified={} iters={}",
-            r.status, r.stats.infeasibility_certified, r.iterations
+            "[U1 5e-8] eps={eps:.0e} -> {:?} ray_certified={} iters={}",
+            r.status, r.stats.unbounded_ray_certified, r.iterations
         );
     }
 }
@@ -92,7 +111,7 @@ fn truly_unbounded_delta_5e_8_never_optimal_cross_eps() {
 /// Optimal / 検証済み Unbounded を交互に返したレース窓)。修正後は全試行で
 /// 検証済み Unbounded に決定すること。
 #[test]
-fn truly_unbounded_delta_eq_eps_is_deterministic_unbounded() {
+fn truly_unbounded_delta_eq_eps_ray_certified_deterministic_unbounded() {
     for rep in 0..5 {
         let r = solve_u1(1e-7, 1e-7);
         assert_eq!(
@@ -105,8 +124,8 @@ fn truly_unbounded_delta_eq_eps_is_deterministic_unbounded() {
             r.iterations
         );
         assert!(
-            r.stats.infeasibility_certified,
-            "delta=eps race (rep {rep}): Unbounded must carry the verifier certificate"
+            r.stats.unbounded_ray_certified,
+            "delta=eps race (rep {rep}): Unbounded must carry the ray certificate"
         );
     }
 }
@@ -115,7 +134,7 @@ fn truly_unbounded_delta_eq_eps_is_deterministic_unbounded() {
 /// 判定を打ち消す経路。`finite_mint_may_replace` 守衛の revert で全 eps レッグが
 /// Optimal を返し FAIL (実測)。
 #[test]
-fn truly_unbounded_delta_1e_9_never_optimal_cross_eps() {
+fn truly_unbounded_delta_1e_9_never_optimal_ray_certified_cross_eps() {
     for &eps in &[1e-6_f64, 1e-7, 1e-8] {
         let r = solve_u1(1e-9, eps);
         assert_ne!(
@@ -132,12 +151,12 @@ fn truly_unbounded_delta_1e_9_never_optimal_cross_eps() {
             r.iterations
         );
         assert!(
-            r.stats.infeasibility_certified,
-            "delta=1e-9 eps={eps:.0e}: Unbounded must carry the verifier certificate"
+            r.stats.unbounded_ray_certified,
+            "delta=1e-9 eps={eps:.0e}: Unbounded must carry the ray certificate"
         );
         eprintln!(
-            "[U1 1e-9] eps={eps:.0e} -> {:?} certified={} iters={}",
-            r.status, r.stats.infeasibility_certified, r.iterations
+            "[U1 1e-9] eps={eps:.0e} -> {:?} ray_certified={} iters={}",
+            r.status, r.stats.unbounded_ray_certified, r.iterations
         );
     }
 }

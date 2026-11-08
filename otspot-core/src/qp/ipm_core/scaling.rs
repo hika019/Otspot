@@ -134,11 +134,33 @@ pub(crate) fn unscale_ipm_result(
     } else {
         scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds)
     };
+    // ray 証書ペイロードは解空間と同じ対角写像 (x = D·x_s)。対角正則写像は
+    // 後方誤差境界のゼロパターンと同次性を保存するため、検証成立は元空間の
+    // 同型条件 (A·dx ≈ 0 / Q·dx ≈ 0 / cᵀdx < 0) へ正確に移像される。
+    let ray_certificate = result.ray_certificate.as_ref().map(|ray| {
+        debug_assert_eq!(ray.direction.len(), scaler.d.len());
+        debug_assert_eq!(ray.base_point.len(), scaler.d.len());
+        crate::problem::RayCertificate {
+            direction: ray
+                .direction
+                .iter()
+                .zip(scaler.d.iter())
+                .map(|(v, d)| v * d)
+                .collect(),
+            base_point: ray
+                .base_point
+                .iter()
+                .zip(scaler.d.iter())
+                .map(|(v, d)| v * d)
+                .collect(),
+        }
+    });
     SolverResult {
         objective: result.objective / scaler.c,
         solution: x,
         dual_solution: y,
         bound_duals,
+        ray_certificate,
         ..result
     }
 }

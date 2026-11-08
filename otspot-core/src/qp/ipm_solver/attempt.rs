@@ -418,7 +418,7 @@ fn infeasibility_is_final(outcome: &IpmOutcome) -> bool {
 /// `prove_optimal` mint では上書きできない — `outcome_is_better_candidate` の
 /// 「検証済み判定は有限 iterate より絶対優先」と同じ審判順を、ladder の
 /// proven break・延長 attempt・no-presolve fallback の 3 上書き点に一律適用する
-/// (sentinel: tests/qp_truly_unbounded_eps_consistency.rs。真に非有界な問題で
+/// (sentinel: tests/qp_truly_unbounded_ray_certified_consistency.rs。真に非有界な問題で
 /// 別 lane の検証済み Unbounded を KKT 残差 ≤ eps の打刻が打ち消した)。
 fn finite_mint_may_replace(best: &Option<IpmOutcome>) -> bool {
     !best.as_ref().is_some_and(infeasibility_is_final)
@@ -1100,15 +1100,28 @@ fn finalize_outcome(
                 _ => f64::NAN,
             };
             // stats を Default 再構築で失うと受理部の検証記録が消える (review P2)。
-            // proven フラグをそのまま最終 SolverResult へ引き継ぐ。
+            // proven を最終 SolverResult へ引き継ぐ際も、検証を通過した証書の
+            // 種類ごとのフラグに分離して立てる (ray = Unbounded、Farkas =
+            // Infeasible)。NonConvex は ray/Farkas 系の主張ではないため
+            // どちらも立たない (infeasibility_proven の doc 参照)。
+            // `infeas` は status フィールドで move されるため先に読む。
+            let ray_certified =
+                outcome.infeasibility_proven && matches!(infeas, SolveStatus::Unbounded);
+            let farkas_certified =
+                outcome.infeasibility_proven && matches!(infeas, SolveStatus::Infeasible);
             return SolverResult {
                 status: infeas,
                 objective,
                 iterations: outcome.iterations,
                 stats: crate::problem::SolveStats {
-                    infeasibility_certified: outcome.infeasibility_proven,
+                    unbounded_ray_certified: ray_certified,
+                    infeasible_farkas_certified: farkas_certified,
                     ..Default::default()
                 },
+                // 検証済み Unbounded の ray 証書 (受理部検証 → outcome 経由、
+                // finalize での再検証は行わない — proven フラグが検証済みの主張)。
+                // 未証明・非 ray 系判定は None のまま (ペイロードは受理部のみ生成)。
+                ray_certificate: outcome.ray_certificate,
                 ..Default::default()
             };
         }
@@ -1241,6 +1254,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1280,6 +1294,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1373,7 +1388,8 @@ mod tests {
         _user_eps: f64,
     ) -> IpmOutcome {
         if presolve.ruiz_scaler.is_some() {
-            // 内側受理部の ray/Farkas 検証を通過した (stats.infeasibility_certified)
+            // 内側受理部の ray/Farkas 検証を通過した (stats の
+            // unbounded_ray_certified / infeasible_farkas_certified)
             // 想定 outcome: run_ipm_with は内側 stats から proven を立てるが、テスト
             // runner は outcome を直接構成するため proven=true を明示して検証済み
             // 構造的判定をシミュレートする。未証明の infeasibility_status は
@@ -1381,6 +1397,7 @@ mod tests {
             // 誤判定修正、fallback_can_replace_unproven の doc 参照)。
             return IpmOutcome {
                 infeasibility_proven: true,
+                ray_certificate: None,
                 ..IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible)
             };
         }
@@ -1398,6 +1415,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1429,6 +1447,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1457,6 +1476,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1559,6 +1579,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1624,6 +1645,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1673,6 +1695,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1712,6 +1735,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1778,6 +1802,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1835,6 +1860,7 @@ mod tests {
         // 検証済み判定: 内側受理部の独立 ray/Farkas 検証を通過した想定 (proven=true)。
         let certified = IpmOutcome {
             infeasibility_proven: true,
+            ray_certificate: None,
             ..IpmOutcome::infeasibility(crate::problem::SolveStatus::Infeasible)
         };
         let finite_incumbent = IpmOutcome {
@@ -1851,6 +1877,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1905,6 +1932,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1954,6 +1982,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -1987,6 +2016,7 @@ mod tests {
     ) -> IpmOutcome {
         IpmOutcome {
             infeasibility_proven: true,
+            ray_certificate: None,
             ..IpmOutcome::infeasibility(crate::problem::SolveStatus::Unbounded)
         }
     }
@@ -2220,6 +2250,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -2512,6 +2543,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -2568,6 +2600,7 @@ mod tests {
             numerical_failure: false,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -2608,6 +2641,7 @@ mod tests {
             numerical_failure: true,
             infeasibility_status: None,
             infeasibility_proven: false,
+            ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
             timing: None,
@@ -2847,6 +2881,7 @@ mod tests {
                 numerical_failure: false,
                 infeasibility_status: None,
                 infeasibility_proven: false,
+                ray_certificate: None,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -2984,6 +3019,7 @@ mod tests {
                 numerical_failure: false,
                 infeasibility_status: None,
                 infeasibility_proven: false,
+                ray_certificate: None,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3050,6 +3086,7 @@ mod tests {
                 numerical_failure: false,
                 infeasibility_status: None,
                 infeasibility_proven: false,
+                ray_certificate: None,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3184,6 +3221,7 @@ mod tests {
             let view = ProblemView::from_problem(&prob);
             let outcome = IpmOutcome {
                 infeasibility_proven: true,
+                ray_certificate: None,
                 iterations: 7,
                 ..IpmOutcome::infeasibility(SolveStatus::Infeasible)
             };
@@ -3372,6 +3410,7 @@ mod tests {
                 numerical_failure: false,
                 infeasibility_status: None,
                 infeasibility_proven: false,
+                ray_certificate: None,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3455,6 +3494,7 @@ mod tests {
                     numerical_failure: false,
                     infeasibility_status: None,
                     infeasibility_proven: false,
+                    ray_certificate: None,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3477,6 +3517,7 @@ mod tests {
                     numerical_failure: false,
                     infeasibility_status: None,
                     infeasibility_proven: false,
+                    ray_certificate: None,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3562,6 +3603,7 @@ mod tests {
                     numerical_failure: false,
                     infeasibility_status: None,
                     infeasibility_proven: false,
+                    ray_certificate: None,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3644,6 +3686,7 @@ mod tests {
                 numerical_failure: false,
                 infeasibility_status: None,
                 infeasibility_proven: false,
+                ray_certificate: None,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3676,6 +3719,7 @@ mod tests {
                     numerical_failure: false,
                     infeasibility_status: None,
                     infeasibility_proven: false,
+                    ray_certificate: None,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3791,6 +3835,7 @@ mod tests {
                     numerical_failure: false,
                     infeasibility_status: None,
                     infeasibility_proven: false,
+                    ray_certificate: None,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3813,6 +3858,7 @@ mod tests {
                     numerical_failure: false,
                     infeasibility_status: None,
                     infeasibility_proven: false,
+                    ray_certificate: None,
                     is_locally_optimal: false,
                     postsolve_krylov_ir_skipped: false,
                     timing: None,
@@ -3834,6 +3880,7 @@ mod tests {
                 numerical_failure: false,
                 infeasibility_status: None,
                 infeasibility_proven: false,
+                ray_certificate: None,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -3936,6 +3983,7 @@ mod tests {
                 numerical_failure: false,
                 infeasibility_status: None,
                 infeasibility_proven: false,
+                ray_certificate: None,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -4007,6 +4055,7 @@ mod tests {
                 numerical_failure: false,
                 infeasibility_status: None,
                 infeasibility_proven: false,
+                ray_certificate: None,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -4092,6 +4141,7 @@ mod tests {
                 numerical_failure: false,
                 infeasibility_status: None,
                 infeasibility_proven: false,
+                ray_certificate: None,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -4155,6 +4205,7 @@ mod tests {
                 numerical_failure: false,
                 infeasibility_status: None,
                 infeasibility_proven: false,
+                ray_certificate: None,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,
@@ -4237,6 +4288,7 @@ mod tests {
                 numerical_failure: false,
                 infeasibility_status: None,
                 infeasibility_proven: false,
+                ray_certificate: None,
                 is_locally_optimal: false,
                 postsolve_krylov_ir_skipped: false,
                 timing: None,

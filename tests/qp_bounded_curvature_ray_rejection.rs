@@ -84,39 +84,6 @@ fn solve_p1(eps: f64, presolve: bool) -> SolverResult {
     solve_ipm(&problem, &opts)
 }
 
-/// soundness 本体: 有界問題 (手計算 obj* = -2e-5) がいかなる presolve × eps
-/// 構成でも certified Unbounded を返さない。曲率検査の revert では全構成が
-/// `Unbounded` (certified=true) を返し FAIL (台帳 TASK 2 で 6/6 実測)。
-#[test]
-fn bounded_p1_never_certified_unbounded_cross_eps_presolve() {
-    for &presolve in &[false, true] {
-        for &eps in &[1e-6_f64, 1e-7, 1e-8] {
-            let r = solve_p1(eps, presolve);
-            assert_ne!(
-                r.status,
-                SolveStatus::Unbounded,
-                "presolve={presolve} eps={eps:.0e}: Unbounded is oracle-false \
-                 (substitution-proved unique min obj* = -2e-5 at x=(200,200)); \
-                 got obj={:e} iters={}",
-                r.objective,
-                r.iterations
-            );
-            assert_ne!(
-                r.status,
-                SolveStatus::Infeasible,
-                "presolve={presolve} eps={eps:.0e}: x=(0,0) is feasible, so \
-                 Infeasible is oracle-false; got obj={:e}",
-                r.objective
-            );
-            assert!(
-                !(r.status == SolveStatus::Unbounded && r.stats.infeasibility_certified),
-                "presolve={presolve} eps={eps:.0e}: certified Unbounded must never \
-                 appear on a bounded instance"
-            );
-        }
-    }
-}
-
 /// 修正後の挙動を 6 構成それぞれで正確に pin (上記 GREEN 基準の実測値) +
 /// 目的値が手計算オラクルに許容誤差 1e-9 以内。旧実装の誤答 obj=0 (Optimal
 /// 早期収束) もこの tolerances で同時に弾く。
@@ -154,5 +121,43 @@ fn bounded_p1_status_and_objective_match_oracle_across_configs() {
             "[P1 bounded] {label} -> {:?} obj={:e} iters={}",
             r.status, r.objective, r.iterations
         );
+    }
+}
+
+/// soundness 本体 (置き換え追加: 旧 `bounded_p1_never_certified_unbounded_cross_eps_presolve`
+/// は shared 証書フラグ `infeasibility_certified` を assert していたが、証書フラグの
+/// ray / Farkas 分離で旧名が廃止されコンパイル不能になった。規約「既存テストの
+/// assert・ロジックは変更しない (削除 + 新規追加で表現)」に従い旧ケースは削除し、
+/// 同一意味を `stats.unbounded_ray_certified` 上で読む本ケースとして末尾に追加した)。
+/// 有界問題 (手計算 obj* = -2e-5) がいかなる presolve × eps 構成でも
+/// certified Unbounded を返さない。曲率検査の revert では全構成が
+/// `Unbounded` (certified=true) を返し FAIL (台帳 TASK 2 で 6/6 実測)。
+#[test]
+fn bounded_p1_never_ray_certified_unbounded_cross_eps_presolve() {
+    for &presolve in &[false, true] {
+        for &eps in &[1e-6_f64, 1e-7, 1e-8] {
+            let r = solve_p1(eps, presolve);
+            assert_ne!(
+                r.status,
+                SolveStatus::Unbounded,
+                "presolve={presolve} eps={eps:.0e}: Unbounded is oracle-false \
+                 (substitution-proved unique min obj* = -2e-5 at x=(200,200)); \
+                 got obj={:e} iters={}",
+                r.objective,
+                r.iterations
+            );
+            assert_ne!(
+                r.status,
+                SolveStatus::Infeasible,
+                "presolve={presolve} eps={eps:.0e}: x=(0,0) is feasible, so \
+                 Infeasible is oracle-false; got obj={:e}",
+                r.objective
+            );
+            assert!(
+                !(r.status == SolveStatus::Unbounded && r.stats.unbounded_ray_certified),
+                "presolve={presolve} eps={eps:.0e}: ray-certified Unbounded must never \
+                 appear on a bounded instance"
+            );
+        }
     }
 }

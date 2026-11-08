@@ -342,6 +342,50 @@ pub(crate) fn verify_unbounded_ray(
     true
 }
 
+/// ray 証書ペイロードの基点 x が元空間で原始実行可能か (componentwise
+/// 後方誤差境界、`verify_unbounded_ray` の退行条件とは別の軸)。
+///
+/// 拡張系 `{A_ext x + s = b_ext, s ≥ 0}` は境界行を行へ展開した形であり、
+/// 元制約・境界を一様に検査できる。反復中は s ≥ 0 が fraction-to-boundary
+/// (solver_loop の 1e-12 クランプ) で構造保証されるため、基点の実行可能性は
+/// x だけの条件へ書ける: `a_ext_i·x ≤ b_i` (等式行は両側) が後方誤差境界
+/// `DETECT_REL_EPS · (‖a_ext_i‖∞·‖x‖₁ + |b_i|)` 以内。不等式行でスラックの
+/// 反復残差を tol に含めないのは、実行可能性の主張が「ある s ≥ 0 と組で
+/// 成立」であり、s_i の KKT ノイズは残差 s_i + r_i = b_i − a_i·x へ吸収
+/// されるため (深い内点は viol < 0 で自動的に通る)。
+///
+/// 係数ゼロ行は特殊扱い不要: b ≥ 0 不等式行は viol = −b ≤ 0、b = 0 等式行は
+/// |0| = 0 で通り、実行不能な係数ゼロ行 (b < 0 / b ≠ 0) はこの検査でも落ちる
+/// (`zero_row_unsatisfiable` と同じ事実の x 側表現)。
+///
+/// 受理ゲート (iter.rs) が検証済み Unbounded のペイロード公開の条件に使う:
+/// 退行 ray 証明は基点の実行可能性と組で初めて「ray 全体が実行可能域に
+/// 留まる」主張を支持する (`RayCertificate` doc の契約の強制点)。
+pub(crate) fn base_point_primal_feasible(
+    x: &[f64],
+    a_ext: &CscMatrix,
+    b_ext: &[f64],
+    is_eq_ext: &[bool],
+    scales: &DetectionScales,
+) -> bool {
+    let x1 = l1(x);
+    let mut a_x = vec![0.0_f64; a_ext.nrows()];
+    for (j, &xj) in x.iter().enumerate() {
+        for ptr in a_ext.col_ptr()[j]..a_ext.col_ptr()[j + 1] {
+            a_x[a_ext.row_ind()[ptr]] += a_ext.values()[ptr] * xj;
+        }
+    }
+    (0..a_ext.nrows()).all(|i| {
+        let tol = dot_tol(scales.a_rows[i], x1) + DETECT_REL_EPS * b_ext[i].abs();
+        let viol = a_x[i] - b_ext[i];
+        if is_eq_ext[i] {
+            viol.abs() <= tol
+        } else {
+            viol <= tol
+        }
+    })
+}
+
 /// 検出器受理時に求める独立 Farkas 証明: 方向 dy を**拡張系全体**
 /// `{A_ext x + s = b_ext, s ≥ 0}` に対する Farkas 証書 y として検証する。
 ///
@@ -1197,6 +1241,88 @@ mod tests {
             verify_unbounded_ray(&dx, &ds, &problem, &a_ext, &b_ext, &is_eq_ext, &scales),
             "exact nullspace direction of rank-1 PSD Q has curvature 0.0 bitwise; \
              the curvature condition must not reject true recession rays"
+        );
+    }
+
+    /// U1 型 (min -x₂ s.t. x₁ = 1、自由境界) を手計算オラクルに使う:
+    /// x=(1,t) が実行可能集合、x=(0,0) は等式行を 1.0 (= tol ~2e-8 の 5e7 倍)
+    /// 違反する。
+    fn u1_eq_problem() -> QpProblem {
+        use crate::problem::ConstraintType;
+        QpProblem::new(
+            CscMatrix::new(2, 2),
+            vec![0.0, -1.0],
+            CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 2).unwrap(),
+            vec![1.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap()
+    }
+
+    /// 基点実行可能性検査の受理側: 等式上の点 (1,-5) と、不等式の深い内点
+    /// (x₁ ≤ 10 に対する x=0、violation = -10 < 0) は通過する。後者は
+    /// 「スラックが残せる」実行可能性の定義そのもの (violation 側のみ検査)。
+    #[test]
+    fn base_point_feasible_accepts_feasible_and_interior_points() {
+        let problem = u1_eq_problem();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        assert!(base_point_primal_feasible(
+            &[1.0, -5.0],
+            &a_ext,
+            &b_ext,
+            &is_eq_ext,
+            &scales
+        ));
+        let boxed = QpProblem::new_all_le(
+            CscMatrix::new(2, 2),
+            vec![0.0, -1.0],
+            CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 2).unwrap(),
+            vec![10.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&boxed);
+        assert!(base_point_primal_feasible(
+            &[0.0, 0.0],
+            &a_ext,
+            &b_ext,
+            &is_eq_ext,
+            &scales
+        ));
+    }
+
+    /// 基点実行可能性検査の棄却側 (手計算オラクル): 等式 x₁ = 1 に対する
+    /// x=(0,0) は違反 1.0 ≫ 後方誤差境界 tol ≤ 1e-8·(1·0+1)+… ~2e-8 で棄却。
+    /// 上側境界 x₁ ≤ 2 に対する x=(3,0) も違反 1.0 で棄却 (境界行も拡張系の
+    /// 行として一様に検査されることの確認)。revert (ゲート除去) では ray
+    /// ペイロードがこれらの基点を「実行可能」として公開する (P1-A)。
+    #[test]
+    fn base_point_feasible_rejects_eq_and_bound_violations() {
+        let problem = u1_eq_problem();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&problem);
+        assert!(
+            !base_point_primal_feasible(&[0.0, 0.0], &a_ext, &b_ext, &is_eq_ext, &scales),
+            "x=(0,0) violates x1=1 by 1.0, far beyond the backward-error tol"
+        );
+        let bounded = QpProblem::new(
+            CscMatrix::new(2, 2),
+            vec![0.0, -1.0],
+            CscMatrix::new(0, 2),
+            vec![],
+            vec![(f64::NEG_INFINITY, 2.0), (f64::NEG_INFINITY, f64::INFINITY)],
+            vec![],
+        )
+        .unwrap();
+        let (a_ext, b_ext, is_eq_ext, scales) = lp_like(&bounded);
+        assert!(
+            a_ext.nrows() >= 1,
+            "upper bound must enter the extended rows"
+        );
+        assert!(
+            !base_point_primal_feasible(&[3.0, 0.0], &a_ext, &b_ext, &is_eq_ext, &scales),
+            "x1=3 exceeds the upper bound 2 by 1.0 — a base point outside the \
+             bounds must not be published as a feasible ray base"
         );
     }
 }
