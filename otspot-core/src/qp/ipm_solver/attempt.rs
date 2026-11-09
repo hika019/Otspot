@@ -4452,4 +4452,170 @@ mod tests {
              (LISWET7 は loose lane で証明する): calls={calls:?}"
         );
     }
+
+    // ── P0 診断: 全 attempt の記録 (plan §3 検証) ────────────────────────────
+
+    static DIAG_LADDER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static DIAG_FALLBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    /// 1 回目は gap 不合格 (未証明)、2 回目以降は証明済み outcome。
+    fn runner_diag_fail_then_proven(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+        _user_eps: f64,
+    ) -> IpmOutcome {
+        let call = DIAG_LADDER_CALLS.fetch_add(1, Ordering::SeqCst);
+        IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![],
+            objective: 0.0,
+            iterations: 2,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: if call == 0 { 1e-3 } else { 0.0 },
+            numerical_failure: false,
+            infeasibility_status: None,
+            infeasibility_proven: false,
+            ray_certificate: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+            termination: IpmTermination::Converged,
+        }
+    }
+
+    /// 初回だけ良い objective の未証明解、以降は悪い objective (fallback 相当)。
+    fn runner_diag_incumbent_then_worse(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+        _user_eps: f64,
+    ) -> IpmOutcome {
+        let call = DIAG_FALLBACK_CALLS.fetch_add(1, Ordering::SeqCst);
+        IpmOutcome {
+            solution: vec![if call == 0 { 0.0 } else { 10.0 }],
+            dual_solution: vec![],
+            bound_duals: vec![],
+            objective: if call == 0 { 0.0 } else { 10.0 },
+            iterations: 3,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 1e-3,
+            numerical_failure: false,
+            infeasibility_status: None,
+            infeasibility_proven: false,
+            ray_certificate: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+            termination: IpmTermination::Converged,
+        }
+    }
+
+    fn diag_gate_problem(presolve: bool, ruiz: bool) -> (QpProblem, SolverOptions) {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        )
+        .unwrap();
+        let mut options = SolverOptions {
+            presolve,
+            use_ruiz_scaling: ruiz,
+            ..SolverOptions::default()
+        };
+        options.ipm.eps = 1e-6;
+        options.ipm.max_iter = MAX_ITER_PER_ATTEMPT * 4 + 2;
+        (prob, options)
+    }
+
+    /// 未採用 attempt も診断件数に残る (best 選択での脱落なし): gap 不合格 →
+    /// 証明済みの 2 attempt 列で、件数・published 直結・kind 分類を検証する。
+    #[test]
+    fn diagnostics_record_all_attempts_including_unpublished() {
+        DIAG_LADDER_CALLS.store(0, Ordering::SeqCst);
+        let (prob, options) = diag_gate_problem(false, false);
+        let ((result, _), diag) = crate::qp::diagnostics::capture_diagnostics(|| {
+            solve_ipm_with_runner(&prob, &options, runner_diag_fail_then_proven)
+        });
+        assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+        assert!(
+            diag.attempts.len() >= 2,
+            "未採用の 1 回目 attempt が診断から脱落している: n={}",
+            diag.attempts.len()
+        );
+        assert_eq!(
+            diag.attempts.iter().filter(|a| a.published).count(),
+            1,
+            "published は採用 attempt のちょうど 1 件"
+        );
+        let pub_id = diag.published_attempt().expect("採用 attempt あり");
+        assert_eq!(
+            diag.attempts[diag.attempts.len() - 1].id,
+            pub_id,
+            "証明済み (最後) attempt が published で結ばれること"
+        );
+        assert_eq!(diag.attempts[0].id, 0, "attempt id は solve 内で 0 始まり");
+        assert!(diag
+            .attempts
+            .iter()
+            .all(|a| a.kind == crate::qp::diagnostics::AttemptKind::Ladder));
+        assert!(diag
+            .attempts
+            .iter()
+            .all(|a| a.termination == Some(IpmTermination::Converged)));
+        // 時間 bucket 合計は count を一切含まない (集計バグの sentinel は
+        // diagnostics.rs の counts_never_enter_time_sums で正面から検証)。
+        let _ = diag.total_counts();
+    }
+
+    /// no-presolve fallback attempt も診断に残り、kind で区別できる。
+    #[test]
+    fn diagnostics_record_fallback_attempt_classified() {
+        DIAG_FALLBACK_CALLS.store(0, Ordering::SeqCst);
+        let (prob, options) = diag_gate_problem(true, true);
+        let ((result, _), diag) = crate::qp::diagnostics::capture_diagnostics(|| {
+            solve_ipm_with_runner(&prob, &options, runner_diag_incumbent_then_worse)
+        });
+        assert_eq!(result.objective, 0.0, "incumbent (良い側) が採用されたこと");
+        assert!(
+            diag.attempts
+                .iter()
+                .any(|a| a.kind == crate::qp::diagnostics::AttemptKind::NoPresolveFallback),
+            "no-presolve fallback が診断件数から見て取れない: kinds={:?}",
+            diag.attempts.iter().map(|a| a.kind).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            diag.published_attempt(),
+            Some(diag.attempts[0].id),
+            "incumbent (最初の試行) が published として結ばれること"
+        );
+    }
+
+    /// best が 1 つも成立しない solve でも、実行された attempt 診断は失われない
+    /// (未証明 infeasibility 全滅経路)。
+    #[test]
+    fn diagnostics_survive_when_nothing_published() {
+        let (prob, options) = unproven_gate_problem_and_opts();
+        let ((result, _), diag) = crate::qp::diagnostics::capture_diagnostics(|| {
+            solve_ipm_with_runner(&prob, &options, runner_always_unproven_infeasible)
+        });
+        assert_eq!(result.status, crate::problem::SolveStatus::NumericalError);
+        assert!(
+            !diag.attempts.is_empty(),
+            "採用 attempt なしの solve でも実行 attempt は残る"
+        );
+        assert!(diag.attempts.iter().all(|a| a.infeasibility_claim));
+        // 採用 candidate があっても published は高々 1 件 (二重 published なし)。
+        assert!(diag.attempts.iter().filter(|a| a.published).count() <= 1);
+    }
 }
