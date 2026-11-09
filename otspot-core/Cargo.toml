@@ -19,3 +19,9 @@ log = "0.4"
 otspot-num.workspace = true
 rayon = "1"
 twofloat = "0.8"
+
+[dev-dependencies]
+# `transpose-count` activates the thread-local transpose counter in otspot-num
+# for the postsolve refine sentinel tests (kind=dev: no shipped binary ever
+# sees the feature; see otspot-num sparse::csc::transpose_count).
+otspot-num = { workspace = true, features = ["transpose-count"] }

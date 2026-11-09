@@ -35,25 +35,21 @@ pub(crate) fn refine_dual_projected_gradient(
         .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
         .collect();
 
-    // y は常に長さ m (project_feasible / caller が保証)、a.transpose().ncols() == a.nrows()
-    // == m なので mat_vec_mul は常に成功する。失敗経路がないため Option でなく値を直接返す。
-    let objective = |y: &[f64]| -> (f64, Vec<f64>) {
-        let aty = if problem.a.nrows() > 0 {
-            problem
-                .a
-                .transpose()
-                .mat_vec_mul(y)
-                .expect("dim validated upstream")
-        } else {
-            vec![0.0_f64; n]
-        };
-        let mut residual = vec![0.0_f64; n];
+    // y は常に長さ m (project_feasible / caller が保証)、Aᵀy の出力は常に長さ
+    // n == a.ncols() なので mat_t_vec_mul_into に失敗経路はない。列内積を元の
+    // CSC から直接計算するため、objective 評価ごとの転置構築が不要になる。
+    let mut ws_aty = vec![0.0_f64; n];
+    // 曲率計算用の workspace (objective クロージャとは共有しない)。
+    let mut ws_aty_grad = vec![0.0_f64; n];
+    let mut objective = |y: &[f64], residual_out: &mut [f64]| -> f64 {
+        otspot_num::sparse::mat_t_vec_mul_into(&problem.a, y, &mut ws_aty)
+            .expect("dim validated upstream");
         let mut obj = 0.0_f64;
         for j in 0..n {
-            residual[j] = aty[j] - target[j];
-            obj += 0.5 * residual[j] * residual[j];
+            residual_out[j] = ws_aty[j] - target[j];
+            obj += 0.5 * residual_out[j] * residual_out[j];
         }
-        (obj, residual)
+        obj
     };
 
     let mut proj_lower = vec![f64::NEG_INFINITY; m];
@@ -151,8 +147,14 @@ pub(crate) fn refine_dual_projected_gradient(
 
     let mut y_start = result.dual_solution.clone();
     project_feasible(&mut y_start);
-    let (mut obj_curr, mut residual_curr) = objective(&y_start);
+    // 反復間再利用する workspace: current / trial の点と残差。受理時にのみ
+    // バッファを swap するため、評価ごとに確保していた aty・y_try・残差の
+    // 再割当が消える (best は current と別保持のまま clone で独立させる)。
+    let mut residual_curr = vec![0.0_f64; n];
+    let mut obj_curr = objective(&y_start, &mut residual_curr);
     let mut y_curr = y_start;
+    let mut y_try = y_curr.clone();
+    let mut residual_try = vec![0.0_f64; n];
     let mut y_best = y_curr.clone();
     let mut obj_best = obj_curr;
     let mut prev_obj = obj_curr;
@@ -181,11 +183,13 @@ pub(crate) fn refine_dual_projected_gradient(
         if !grad_sq.is_finite() || grad_sq < PG_CURV_FLOOR {
             break;
         }
-        let aty_grad = problem.a.transpose().mat_vec_mul(&grad).expect(
-            "a.transpose().ncols() == a.nrows() == grad.len(): grad is always the output \
-             of a.mat_vec_mul(..), whose length is unconditionally a.nrows()",
+        // 曲率 ‖Aᵀ grad‖² も同じ直接列内積カーネルで評価する (専用 workspace)。
+        otspot_num::sparse::mat_t_vec_mul_into(&problem.a, &grad, &mut ws_aty_grad).expect(
+            "a.nrows() == grad.len() and a.ncols() == ws_aty_grad.len(): grad is \
+             always the output of a.mat_vec_mul(..), whose length is unconditionally \
+             a.nrows(), and ws_aty_grad is sized n == a.ncols() by construction",
         );
-        let curvature = aty_grad.iter().map(|v| v * v).sum::<f64>();
+        let curvature = ws_aty_grad.iter().map(|v| v * v).sum::<f64>();
         if !curvature.is_finite() || curvature < PG_CURV_FLOOR {
             break;
         }
@@ -193,16 +197,18 @@ pub(crate) fn refine_dual_projected_gradient(
         let mut accepted = false;
         let mut step = base_step;
         while step > 0.0 {
-            let mut y_try = y_curr.clone();
             for i in 0..m {
-                y_try[i] -= step * grad[i];
+                y_try[i] = y_curr[i] - step * grad[i];
             }
             project_feasible(&mut y_try);
-            let (obj_try, residual_try) = objective(&y_try);
+            let obj_try = objective(&y_try, &mut residual_try);
             if obj_try <= obj_curr + ACCEPT_TOL_REL * (1.0 + obj_curr) {
-                y_curr = y_try;
+                // 受理時にのみ current/trial を swap する。objective が
+                // residual_try 全域を受理判定前に書き終えているので、swap 後
+                // の (y_curr, residual_curr) は同一試行点の組になる。
+                std::mem::swap(&mut y_curr, &mut y_try);
+                std::mem::swap(&mut residual_curr, &mut residual_try);
                 obj_curr = obj_try.min(obj_curr);
-                residual_curr = residual_try;
                 if obj_curr < obj_best {
                     y_best = y_curr.clone();
                     obj_best = obj_curr;

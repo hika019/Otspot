@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3372 testcases, 43 ignored
+# totals: 3386 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1457,6 +1457,11 @@ otspot-core	qp::tests::micro_q_dispatch::explicit_zero_q_value_is_structural_zer
 otspot-core	qp::tests::micro_q_dispatch::micro_q_finite_bound_not_pinned_to_bound	active
 otspot-core	qp::tests::micro_q_dispatch::micro_q_psd_qp_is_bounded_and_routes_to_ipm	active
 otspot-core	qp::tests::micro_q_dispatch::structural_zero_q_keeps_lp_route_and_unbounded	active
+otspot-core	qp::tests::p1_atv_golden::p1_guarded_pg_then_worst_active_bitwise_golden	active
+otspot-core	qp::tests::p1_atv_golden::p1_pg_best_not_current_bitwise_golden	active
+otspot-core	qp::tests::p1_atv_golden::p1_pg_multi_reject_line_search_bitwise_golden	active
+otspot-core	qp::tests::p1_atv_sentinels::p1_postsolve_refine_constructs_zero_transposes	active
+otspot-core	qp::tests::p1_atv_sentinels::p1_transpose_counter_observable	active
 otspot-core	qp::tests::pfeas::test_pfeas_row_norm_false_suboptimal_prevention	active
 otspot-core	qp::tests::pfeas::test_pfeas_row_norm_mixed_scale	active
 otspot-core	qp::tests::pfeas::test_row_infinity_norms_basic	active
@@ -2731,6 +2736,15 @@ otspot-num	sparse::csc::tests::test_mat_vec_mul	active
 otspot-num	sparse::csc::tests::test_mat_vec_mul_dimension_mismatch	active
 otspot-num	sparse::csc::tests::test_sentinel_triplet_non_finite_rejected	active
 otspot-num	sparse::csc::tests::test_transpose	active
+otspot-num	sparse::spmv::tests::aty_accepts_any_csc_matrix_view	active
+otspot-num	sparse::spmv::tests::aty_bitwise_matches_transpose_mat_vec_mul_scans	active
+otspot-num	sparse::spmv::tests::aty_bitwise_matches_transpose_with_stored_zeros	active
+otspot-num	sparse::spmv::tests::aty_empty_rows_empty_cols_zero_dims	active
+otspot-num	sparse::spmv::tests::aty_extreme_scales_bitwise_matches_transpose_path	active
+otspot-num	sparse::spmv::tests::aty_leaves_out_untouched_on_error	active
+otspot-num	sparse::spmv::tests::aty_matches_independent_dense_oracle	active
+otspot-num	sparse::spmv::tests::aty_rectangular_mixed_signs_hand_computed	active
+otspot-num	sparse::spmv::tests::aty_rejects_dimension_mismatch	active
 otspot-num	sparse::vec::tests::test_accessors_match_dense_expansion	active
 otspot-num	sparse::vec::tests::test_from_raw_parts_empty	active
 otspot-num	sparse::vec::tests::test_from_raw_parts_matches_from_dense	active
