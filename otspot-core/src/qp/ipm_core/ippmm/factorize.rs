@@ -95,8 +95,8 @@ pub(super) fn factorize_kkt_with_retry(
         if ctx.timeout_ctx.should_stop() {
             return FactorizeOutcome::Timeout;
         }
-        // 診断: 行列組み立て (materialize / Schur 構築) を assembly bucket に、
-        // 呼び出し回数を count 側に積む (時間合計に回数を入れない)。
+        // 診断: 元順序組み立て (materialize / Schur 構築) を assembly 排他的
+        // 計時・count 側計数へ (review R1。置換済みも同窓 — helper doc 参照)。
         let t_asm = std::time::Instant::now();
         let mat_for_factor = if ctx.use_schur {
             let (s_mat, d_inv) = build_schur_system(
@@ -118,7 +118,7 @@ pub(super) fn factorize_kkt_with_retry(
             if is_schur_build {
                 s.counts.kkt_schur_builds += 1;
             } else {
-                s.counts.kkt_materialize_calls += 1;
+                s.counts.materialize_original_calls += 1;
             }
         });
         if caches.amd_perm.is_none() {
@@ -141,12 +141,22 @@ pub(super) fn factorize_kkt_with_retry(
             let perm_us = t_perm.elapsed().as_micros() as u64;
             with_ippmm_sink(|s| s.ipm.assembly_us += perm_us);
         }
+        // 診断 (R1): 置換済み materialize は行列組み立て (helper の doc に
+        // 境界定義)。ここで計時・計数した後に factor タイマーを開始する。
+        let pre_permuted_opt = if use_pre_permuted {
+            Some(materialize_permuted_in_assembly(
+                ctx,
+                caches,
+                rho_retry,
+                delta_retry,
+            ))
+        } else {
+            None
+        };
         let t_factor = std::time::Instant::now();
         let factor_result = if use_pre_permuted {
-            let permuted_cache = caches.aug_permuted.as_ref().unwrap();
-            let pre_permuted = permuted_cache.materialize(ctx.sigma_vec, rho_retry, delta_retry);
             factorize_kkt_pre_permuted_cached_par(
-                &pre_permuted,
+                pre_permuted_opt.as_ref().unwrap(),
                 &mat_for_factor,
                 perm,
                 ctx.timeout_ctx.deadline,
@@ -156,6 +166,9 @@ pub(super) fn factorize_kkt_with_retry(
                 ctx.par,
             )
         } else {
+            // Schur / DD / (DD からの) 通常経路の wrapper は内部で
+            // `permute_sym_upper` を実行するため factor_us 窓に置換コピーを
+            // 含む (pre-permuted 経路との境界差 — diagnostics.rs doc に明記)。
             factorize_kkt_with_cached_perm_par(
                 &mat_for_factor,
                 perm,
@@ -249,10 +262,13 @@ pub(super) fn factorize_kkt_with_retry(
         );
         let fb_elapsed = t_fb.elapsed();
         total_factorize_ns += fb_elapsed.as_nanos();
+        // 第3防御の構築も元順序 materialize 1 回 + factorize 1 試行 (R1 監査:
+        // assembly 窓の計時は上の t_asm_fb で factor 窓 (t_fb) と排他、回数も
+        // 構築点で materialize_original_calls に計上 — 置換済みは構築しない)。
         with_ippmm_sink(|s| {
             s.ipm.assembly_us += asm_fb_us;
             s.ipm.factor_us += fb_elapsed.as_micros() as u64;
-            s.counts.kkt_materialize_calls += 1;
+            s.counts.materialize_original_calls += 1;
             s.counts.kkt_factorize_attempts += 1;
         });
         match fb_result {
@@ -277,6 +293,33 @@ pub(super) fn factorize_kkt_with_retry(
         },
         _ => FactorizeOutcome::Failure,
     }
+}
+
+/// R1: 置換済み (AMD 順序) cache の materialize。行列組み立てであり数値分解
+/// ではないため assembly の排他的計時へ入れ、構築回数を
+/// `materialize_permuted_calls` に積む。呼び出し側はこれが返ってから factor
+/// タイマーを開始する — これで factor_us 窓は wrapper 内部 (対角符号抽出・
+/// CSC→faer 変換・初回のみ symbolic 解析・数値 LDL・MINRES fallback 構築。
+/// 境界の詳細は `crate::qp::diagnostics::IpmPhaseTimes::factor_us` doc) と
+/// 一致する。
+fn materialize_permuted_in_assembly(
+    ctx: &FactorizeContext<'_>,
+    caches: &FactorizeCaches,
+    rho_retry: f64,
+    delta_retry: f64,
+) -> CscMatrix {
+    let permuted_cache = caches
+        .aug_permuted
+        .as_ref()
+        .expect("caller が permute 後にのみ呼ぶ (use_pre_permuted 経路)");
+    let t_perm_mat = std::time::Instant::now();
+    let pre_permuted = permuted_cache.materialize(ctx.sigma_vec, rho_retry, delta_retry);
+    let perm_mat_us = t_perm_mat.elapsed().as_micros() as u64;
+    with_ippmm_sink(|s| {
+        s.ipm.assembly_us += perm_mat_us;
+        s.counts.materialize_permuted_calls += 1;
+    });
+    pre_permuted
 }
 
 /// (A) ||K·sol−rhs||/||rhs|| ≤ 1e-3 (LDL 大破綻 sanity, eps 独立)
@@ -376,4 +419,231 @@ pub(crate) fn auto_schur_enabled(
         probe_result,
         Err(otspot_num::linalg::ldl::LdlError::WouldExceedBudget { .. })
     )
+}
+
+#[cfg(test)]
+mod r1_materialize_accounting_tests {
+    //! R1 sentinel: 置換済み materialize の時間・回数計装。旧実装 (factor
+    //! タイマー内で置換済み構築をし、回数を積まない) へ revert すると
+    //! `materialize_permuted_calls` 系 assert が fail する。秒数の厳密一致は
+    //! 検証しない (review §2: 計測境界はソース確認、実測差は diag 実行で)。
+
+    use super::*;
+    use crate::qp::diagnostics::{
+        begin_attempt, capture_diagnostics, finish_attempt, AttemptKind, AttemptOutcomeBits,
+    };
+    use crate::qp::ipm_core::kkt::build_extended_constraints;
+    use otspot_num::linalg::timeout::TimeoutCtx;
+
+    struct Fixture {
+        problem: QpProblem,
+        a_ext: CscMatrix,
+        aug_cache: crate::qp::ipm_core::kkt::AugmentedKktCache,
+        sigma_vec: Vec<f64>,
+        is_eq_ext: Vec<bool>,
+        s: Vec<f64>,
+        r_d_pmm: Vec<f64>,
+        r_p_pmm: Vec<f64>,
+    }
+
+    fn fixture(rho_on_diag: bool) -> Fixture {
+        // min (x-1)^2 + (y-2)^2 + 3x+y の対角 Q 版 (R1 経路検証用の手計算不要な
+        // 小 QP: 健全経路は正則化不要、singular 検証は rho=0 で構成する)。
+        let q_diag: f64 = if rho_on_diag { 1.0 } else { 0.0 };
+        let q =
+            otspot_num::sparse::CscMatrix::from_triplets(&[0, 1], &[0, 1], &[q_diag, q_diag], 2, 2)
+                .unwrap();
+        let a = otspot_num::sparse::CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 2).unwrap();
+        let problem = QpProblem::new_all_le(
+            q,
+            vec![3.0, 1.0],
+            a,
+            vec![10.0],
+            vec![(-10.0, 10.0), (-10.0, 10.0)],
+        )
+        .unwrap();
+        let (a_ext, _b_ext, m_ext, _m_orig, _n_lb, is_eq_ext) =
+            build_extended_constraints(&problem);
+        let aug_cache = crate::qp::ipm_core::kkt::build_augmented_cache(&problem.q, &a_ext);
+        Fixture {
+            r_d_pmm: vec![1.0, 1.0],
+            problem,
+            a_ext,
+            aug_cache,
+            sigma_vec: vec![1.0; m_ext],
+            is_eq_ext,
+            s: vec![1.0; m_ext],
+            r_p_pmm: vec![0.1; m_ext],
+        }
+    }
+
+    fn factorize_once(
+        fx: &Fixture,
+        use_schur: bool,
+        dd_ldl: bool,
+        rho_matrix: f64,
+    ) -> (
+        FactorizeOutcome,
+        crate::qp::diagnostics::AttemptDiagnostics,
+        FactorizeCaches,
+    ) {
+        run(fx, use_schur, dd_ldl, rho_matrix, rho_matrix == 0.0)
+    }
+
+    fn run(
+        fx: &Fixture,
+        use_schur: bool,
+        dd_ldl: bool,
+        rho_matrix: f64,
+        singular_setup: bool,
+    ) -> (
+        FactorizeOutcome,
+        crate::qp::diagnostics::AttemptDiagnostics,
+        FactorizeCaches,
+    ) {
+        let timeout_ctx = TimeoutCtx::new(None, None, None);
+        let mut caches = FactorizeCaches::new();
+        let cfg = KktConfig {
+            dd_ldl,
+            ..KktConfig::default()
+        };
+        // singular_setup: σ=0・delta=0・rho=0 で正則化成分を全ゼロにし、
+        // rank 不足な拡張 A (境界行 5 > n=2) により K を恒久的 singular に
+        // する (retry 計数忠実性テスト用)。
+        let sigma_vec: Vec<f64> = if singular_setup {
+            vec![0.0; fx.sigma_vec.len()]
+        } else {
+            fx.sigma_vec.clone()
+        };
+        let ((outcome, rec), _solve_diag) = capture_diagnostics(|| {
+            let ctx = FactorizeContext {
+                problem: &fx.problem,
+                a_ext: &fx.a_ext,
+                aug_cache: &fx.aug_cache,
+                sigma_vec: &sigma_vec,
+                is_eq_ext: &fx.is_eq_ext,
+                s: &fx.s,
+                r_d_pmm: &fx.r_d_pmm,
+                r_p_pmm: &fx.r_p_pmm,
+                rho_matrix,
+                delta_matrix: if singular_setup { 0.0 } else { 1e-4 },
+                inertia_correction: 0.0,
+                use_schur,
+                timeout_ctx: &timeout_ctx,
+                par: faer::Par::Seq,
+                n: fx.problem.num_vars,
+                kkt_cfg: cfg,
+            };
+            let start = begin_attempt(AttemptKind::Ladder, false, 1.0);
+            let out = factorize_kkt_with_retry(&ctx, &mut caches);
+            let rec = finish_attempt(
+                start,
+                AttemptOutcomeBits {
+                    termination: None,
+                    iterations: 0,
+                    numerical_failure: false,
+                    infeasibility_claim: false,
+                },
+            );
+            (out, rec)
+        });
+        (outcome, rec, caches)
+    }
+
+    /// pre-permuted 健全経路: 元順序と置換済みの両構築をカウンタが検知する
+    /// (review §2 検証1)。factorize 1 試行 = 元順序 1 + 置換済み 1。
+    #[test]
+    fn pre_permuted_path_counts_both_materializes() {
+        let fx = fixture(true);
+        let (outcome, rec, _caches) = factorize_once(&fx, false, false, 1.0);
+        assert!(matches!(outcome, FactorizeOutcome::Ok { .. }));
+        let c = &rec.counts;
+        assert_eq!(c.kkt_factorize_attempts, 1);
+        assert_eq!(c.materialize_original_calls, 1, "元順序構築 1 回");
+        assert_eq!(c.materialize_permuted_calls, 1, "置換済み構築 1 回 (R1)");
+        assert_eq!(c.materialize_total_calls(), 2, "総計は導出値");
+        assert_eq!(c.kkt_schur_builds, 0);
+        assert_eq!(c.kkt_health_probes, 1, "健全プローブは 1 試行 1 回");
+    }
+
+    /// Schur 経路: 実行されていない構築 (元順序/置換済み) が加算されない
+    /// (review §2 検証2)。Schur 構築のみが計上される。
+    #[test]
+    fn schur_path_counts_no_materialize_builds() {
+        let fx = fixture(true);
+        let (outcome, rec, caches) = factorize_once(&fx, true, false, 1.0);
+        assert!(matches!(outcome, FactorizeOutcome::Ok { .. }));
+        let c = &rec.counts;
+        assert_eq!(c.kkt_schur_builds, 1);
+        assert_eq!(
+            c.materialize_original_calls, 0,
+            "Schur は元順序を構築しない"
+        );
+        assert_eq!(
+            c.materialize_permuted_calls, 0,
+            "Schur は置換済みも構築しない"
+        );
+        assert!(caches.aug_permuted.is_none(), "pre-permuted cache 不構築");
+    }
+
+    /// DD-LDL 経路: wrapper が pre-permuted 非対応のため置換済み構築は
+    /// 実行されず、元順序のみ計上 (review §2 検証2)。
+    #[test]
+    fn dd_path_counts_only_original_materialize() {
+        let fx = fixture(true);
+        let (outcome, rec, caches) = factorize_once(&fx, false, true, 1.0);
+        assert!(
+            matches!(outcome, FactorizeOutcome::Ok { .. }),
+            "DD 健全経路は Ok"
+        );
+        let c = &rec.counts;
+        assert_eq!(c.kkt_factorize_attempts, 1);
+        assert_eq!(c.materialize_original_calls, 1);
+        assert_eq!(
+            c.materialize_permuted_calls, 0,
+            "DD は置換済み構築を実行しない"
+        );
+        assert!(caches.aug_permuted.is_none());
+    }
+
+    /// 失敗 retry + identity fallback の回数忠実性: 正則化成分を全ゼロにした
+    /// 恒久不良系で、ループ全試行と fallback が「実際に実行された構築」と
+    /// 1:1 で計上されることを検証する (review §2 検証2・§2.2.4)。元順序は全
+    /// factorize 試行 (loop+fallback) で 1:1、置換済みは loop 分のみ —
+    /// fallback が元順序-only 構築であることも同時に pin する。
+    #[test]
+    fn retry_and_identity_fallback_count_builds_actually_run() {
+        // σ=0・delta=0・rho=0 (rho_retry は 0*GROWTH で 0 のまま) で正則化
+        // 成分が消え、rank 不足な拡張 A により K が恒久不良。loop の各試行は
+        // 数値 LDL 上は Ok だが健全プローブが拒否して retry になる (LISWET7
+        // 実測と同じ probe 由来 retry)。identity fallback は delta_fallback
+        // (>= LDL_FALLBACK_DELTA_MIN) 入りの元順序再構築で救済し結果は Ok。
+        let fx = fixture(false);
+        let (outcome, rec, _caches) = factorize_once(&fx, false, false, 0.0);
+        let retry_count = match outcome {
+            FactorizeOutcome::Ok { retry_count, .. } => retry_count,
+            FactorizeOutcome::Timeout | FactorizeOutcome::Failure => {
+                panic!("identity fallback で救済される想定 (Timeout/Failure は非期待)")
+            }
+        };
+        let c = &rec.counts;
+        // loop 10 試行 + fallback 1 試行 = 11。fallback は元順序のみ構築。
+        assert_eq!(retry_count, LDL_REG_RETRY_MAX as u32);
+        assert_eq!(c.kkt_factorize_attempts, LDL_REG_RETRY_MAX as u64 + 1);
+        assert_eq!(
+            c.materialize_original_calls, c.kkt_factorize_attempts,
+            "元順序構築は全 factorize 試行と 1:1 (fallback 含む)"
+        );
+        assert_eq!(
+            c.materialize_permuted_calls,
+            c.kkt_factorize_attempts - 1,
+            "置換済み構築は loop 実行分だけ (fallback 分を数えない)"
+        );
+        // loop の 10 試行は数値的に Ok を返すが健全プローブが全員拒否
+        // (retry の出所は probe 失敗)。fallback 試行にプローブは走らない。
+        assert_eq!(
+            c.kkt_health_probes, LDL_REG_RETRY_MAX as u64,
+            "プローブ拒否 10 回 = retry 回数と一致"
+        );
+    }
 }

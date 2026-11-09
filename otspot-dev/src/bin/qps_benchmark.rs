@@ -201,12 +201,13 @@ fn solve_diagnostics_lines(diag: &otspot_core::qp::diagnostics::SolveDiagnostics
             a.ipm.other_us(),
         ));
         out.push(format!(
-            "      counts iter={} reg={} probe={} factor={} mat={} schur={} psd={} transpose={} pg={} lsq={} ir={} refit={} irls={}",
+            "      counts iter={} reg={} probe={} factor={} mat_o={} mat_p={} schur={} psd={} transpose={} pg={} lsq={} ir={} refit={} irls={}",
             a.counts.ipm_iterations,
             a.counts.kkt_reg_retries,
             a.counts.kkt_health_probes,
             a.counts.kkt_factorize_attempts,
-            a.counts.kkt_materialize_calls,
+            a.counts.materialize_original_calls,
+            a.counts.materialize_permuted_calls,
             a.counts.kkt_schur_builds,
             a.counts.psd_checks,
             a.counts.transpose_constructions,

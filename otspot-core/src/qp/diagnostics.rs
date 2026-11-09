@@ -38,9 +38,20 @@ use crate::qp::ipm_solver::outcome::IpmTermination;
 /// 親 − Σ子 を符号付きで返す。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IpmPhaseTimes {
-    /// KKT 行列の組み立て (materialize / Schur 構築 / AMD / 置換) の累計。
+    /// KKT 行列の組み立ての累計: 元順序 materialize / 置換済み materialize /
+    /// Schur 構築 / AMD / 初回 permute キャッシュ構築をすべて排他的に計上する
+    /// (review R1: pre-permuted 経路の置換済み構築は factor 窓ではなくここ)。
     pub assembly_us: u64,
-    /// 数値 LDL 因子化 (全正則化 retry・identity fallback 含む) の累計。
+    /// 数値因子化 wrapper の呼出窓 (全正則化 retry・identity fallback 含む)。
+    /// pre-permuted 経路では対角符号抽出・CSC→faer 変換・初回のみ symbolic
+    /// 解析 (以降は `symbolic_cholesky` キャッシュ再利用)・数値 LDL・budget
+    /// 超過時の MINRES 構築を含むが置換コピーは含まない。Schur / DD /
+    /// identity-fallback の `factorize_kkt_with_cached_perm_par` は wrapper 内
+    /// で `permute_sym_upper` するためこの経路の factor 窓は置換コピーを
+    /// 含む (otspot-num の API 変更なしには窓分割は不可、境界差はここに明記)。
+    /// 公開 `TimingBreakdown.ipm_factorize_us` は同一窓の ns 集計を IPM 戻り値で
+    /// 返すもので意味が近く、attempt 単位の当フィールドとは採用/棄却の範囲が
+    /// 異なる (親子合計・公開値との混在はしない)。
     pub factor_us: u64,
     /// `probe_ldl_health` 健全性プローブの累計。
     pub probe_us: u64,
@@ -86,9 +97,14 @@ pub struct AttemptCounts {
     pub kkt_health_probes: u64,
     /// `factorize_kkt_*` の試行回数 (retry 1 回 = 1 試行)。
     pub kkt_factorize_attempts: u64,
-    /// `AugmentedKktCache::materialize` / `PermutedAugmentedKkt::materialize`
-    /// 呼び出し回数。
-    pub kkt_materialize_calls: u64,
+    /// `AugmentedKktCache::materialize` (元順序構築) 呼び出し回数。pre-permuted
+    /// 経路では 1 factorize 試行につき元順序 + 置換済みの 2 構築が発生する
+    /// (review R1: 構築点を別カウントにし、総計は [`Self::materialize_total_calls`]
+    /// で導出する。経路混在を無視した固定倍率は取らない)。
+    pub materialize_original_calls: u64,
+    /// `PermutedAugmentedKkt::materialize` (置換済み構築) 呼び出し回数。
+    /// pre-permuted 経路でのみ増加し、Schur / DD-LDL では 0 のまま。
+    pub materialize_permuted_calls: u64,
     /// `build_schur_system` 呼び出し回数。
     pub kkt_schur_builds: u64,
     /// PSD 判定 (`is_q_psd_by_cholesky`) 呼び出し回数 (プロセスカウンタの差分)。
@@ -115,7 +131,8 @@ impl AttemptCounts {
         self.kkt_reg_retries += other.kkt_reg_retries;
         self.kkt_health_probes += other.kkt_health_probes;
         self.kkt_factorize_attempts += other.kkt_factorize_attempts;
-        self.kkt_materialize_calls += other.kkt_materialize_calls;
+        self.materialize_original_calls += other.materialize_original_calls;
+        self.materialize_permuted_calls += other.materialize_permuted_calls;
         self.kkt_schur_builds += other.kkt_schur_builds;
         self.psd_checks += other.psd_checks;
         self.transpose_constructions += other.transpose_constructions;
@@ -124,6 +141,12 @@ impl AttemptCounts {
         self.postsolve_ir_iterations += other.postsolve_ir_iterations;
         self.postsolve_refit_iterations += other.postsolve_refit_iterations;
         self.postsolve_irls_iterations += other.postsolve_irls_iterations;
+    }
+
+    /// KKT 行列構築の総計 (元順序 + 置換済み)。経路が混在しても構築点で
+    /// カウントしているため、固定倍率の推測は不要 (review R1 検証条件)。
+    pub fn materialize_total_calls(&self) -> u64 {
+        self.materialize_original_calls + self.materialize_permuted_calls
     }
 }
 

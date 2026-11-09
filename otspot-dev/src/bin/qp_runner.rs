@@ -275,7 +275,7 @@ fn dump_solve_diagnostics() {
                 );
             for a in &diag.attempts {
                 eprintln!(
-                        "  attempt#{} {} ruiz={} tighten={:.1}{} term={:?} iters={} wall={:.3}s init={:.3}s ipm_total={:.3}s asm={:.3}s factor={:.3}s probe={:.3}s solve={:.3}s resid={:.3}s postsolve={:.3}s verify={:.3}s other={} counts{{iter={},reg={},probe={},factor={},mat={},schur={},psd={},transpose={},pg={},lsq={},ir={},refit={},irls={}}}",
+                        "  attempt#{} {} ruiz={} tighten={:.1}{} term={:?} iters={} wall={:.3}s init={:.3}s ipm_total={:.3}s asm={:.3}s factor={:.3}s probe={:.3}s solve={:.3}s resid={:.3}s postsolve={:.3}s verify={:.3}s other={} counts{{iter={},reg={},probe={},factor={},mat_o={},mat_p={},schur={},psd={},transpose={},pg={},lsq={},ir={},refit={},irls={}}}",
                         a.id,
                         a.kind,
                         a.use_ruiz,
@@ -298,7 +298,8 @@ fn dump_solve_diagnostics() {
                         a.counts.kkt_reg_retries,
                         a.counts.kkt_health_probes,
                         a.counts.kkt_factorize_attempts,
-                        a.counts.kkt_materialize_calls,
+                        a.counts.materialize_original_calls,
+                        a.counts.materialize_permuted_calls,
                         a.counts.kkt_schur_builds,
                         a.counts.psd_checks,
                         a.counts.transpose_constructions,

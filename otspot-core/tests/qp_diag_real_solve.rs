@@ -36,12 +36,13 @@ fn real_solve_publishes_diagnostics_with_exclusive_buckets() {
     assert!(published.termination.is_some());
     assert!(published.iterations > 0);
 
-    // 回数: IPM 反復 > 0、factorize 試行は反復以上、materialize+Schur 構築は
-    // 組み立て呼出回数 (時間 bucket とは別枠であることは型分離で保証)。
+    // 回数: IPM 反復 > 0、factorize 試行は反復以上、materialize (元順序+置換
+    // 済み導出総計)+Schur 構築は組み立て呼出回数 (時間 bucket とは別枠である
+    // ことは型分離で保証)。
     let counts = diag.total_counts();
     assert!(counts.ipm_iterations > 0);
     assert!(counts.kkt_factorize_attempts >= counts.ipm_iterations);
-    assert!(counts.kkt_materialize_calls + counts.kkt_schur_builds >= 1);
+    assert!(counts.materialize_total_calls() + counts.kkt_schur_builds >= 1);
 
     // 集計構造: 全階層で other < 0 (子の合計 > 親) が発生していないこと。
     // 二重計上を導入する revert はここで fail する sentinel。
