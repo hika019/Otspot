@@ -2,6 +2,51 @@ use super::compress::build_compressed_format;
 use super::view::CscMatrixView;
 use crate::SolverError;
 
+/// Test-only accounting for `CscMatrix::transpose()` constructions.
+///
+/// Enabled by the `transpose-count` cargo feature (declared with no runtime
+/// effect in production builds).  The counter is thread-local so a sentinel
+/// test can measure "transposes constructed by this thread" without being
+/// polluted by unrelated transposes running concurrently in other test
+/// threads.  otspot-core uses it to pin that the postsolve refine loops no
+/// longer rebuild a transpose per objective/curvature evaluation (plan P1).
+#[cfg(feature = "transpose-count")]
+mod transpose_count {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CALLS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn bump() {
+        CALLS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Transpose constructions performed on the calling thread since reset.
+    pub fn count() -> u64 {
+        CALLS.with(|c| c.get())
+    }
+
+    /// Zero the calling thread's transpose counter.
+    pub fn reset() {
+        CALLS.with(|c| c.set(0));
+    }
+}
+
+/// Transpose constructions performed on the calling thread since the last
+/// [`reset_transpose_constructions`].  Exists only with the `transpose-count`
+/// feature (test builds via otspot-core's dev-dependency).
+#[cfg(feature = "transpose-count")]
+pub fn transpose_constructions() -> u64 {
+    transpose_count::count()
+}
+
+/// Zero the calling thread's [`transpose_constructions`] counter.
+#[cfg(feature = "transpose-count")]
+pub fn reset_transpose_constructions() {
+    transpose_count::reset();
+}
+
 /// 列圧縮形式（CSC: Compressed Sparse Column）の疎行列
 ///
 /// 非ゼロ要素を列単位で格納する疎行列フォーマット。
@@ -237,6 +282,8 @@ impl CscMatrix {
     /// 元の行列の行と列を入れ替えた行列を返す。
     /// counting sort を使用するため O(nnz) の計算量となる。
     pub fn transpose(&self) -> Self {
+        #[cfg(feature = "transpose-count")]
+        transpose_count::bump();
         let nnz = self.nnz();
         // Transposed matrix: (ncols x nrows)
         // Step 1: count nnz per row of original (= nnz per col of transposed)
