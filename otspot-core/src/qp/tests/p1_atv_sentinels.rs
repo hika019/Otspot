@@ -37,7 +37,8 @@ fn p1_postsolve_refine_constructs_zero_transposes() {
         transpose_constructions(),
         0,
         "refine_dual_projected_gradient must not build a transpose per \
-         objective/curvature evaluation (old path constructs 16 here)"
+         objective/curvature evaluation (old path constructs 18 here, \
+         independently re-measured by base-code revert)"
     );
 
     let (problem, mut result) = fixture_guarded_then_worst_active();
