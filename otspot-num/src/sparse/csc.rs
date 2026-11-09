@@ -236,7 +236,13 @@ impl CscMatrix {
     ///
     /// 元の行列の行と列を入れ替えた行列を返す。
     /// counting sort を使用するため O(nnz) の計算量となる。
+    ///
+    /// 呼び出しのたびに [`transpose_construction_count`] を 1 増やす。これは
+    /// 診断用の単調カウンタで、求解の数値・制御フローには一切関与しない
+    /// (P0 timing diagnostics: 反復内で作られる転置の回数を、時間と分離した
+    /// count 側で追跡するため)。
     pub fn transpose(&self) -> Self {
+        TRANSPOSE_CONSTRUCTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nnz = self.nnz();
         // Transposed matrix: (ncols x nrows)
         // Step 1: count nnz per row of original (= nnz per col of transposed)
@@ -347,6 +353,21 @@ impl CscMatrix {
             ncols: n,
         }
     }
+}
+
+/// Process-wide monotonic count of [`CscMatrix::transpose`] constructions.
+///
+/// Diagnostic-only (P0 timing/attempt diagnostics): timing summaries must never
+/// mix call counts with µs sums, so transpose construction volume is exposed as
+/// a count, and the QP attempt-level diagnostics record per-attempt deltas of
+/// this counter. Callers use deltas (never absolute values) because the counter
+/// is process-wide and shared across solves and threads.
+static TRANSPOSE_CONSTRUCTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Current value of the process-wide [`CscMatrix::transpose`] construction
+/// counter. Take deltas around an instrumented region to count transposes.
+pub fn transpose_construction_count() -> u64 {
+    TRANSPOSE_CONSTRUCTIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(test)]
