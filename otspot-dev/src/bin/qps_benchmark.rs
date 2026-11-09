@@ -457,7 +457,7 @@ fn main() {
             println!("  --known-optimal   Path to known optimal values CSV (default: auto-detect)");
             println!("  --dual-advanced   LP は DualAdvanced simplex を使う (QP は無視)");
             println!(
-                "  --solve-diagnostics 各問題の後に SolveDiagnostics (全 attempt 内訳) を出力"
+                "  --solve-diagnostics 各問題の後に SolveDiagnostics (全 attempt 内訳) を出力\n                    (psd/transpose 回数はプロセス単調カウンタの差分: 1 プロセス内で\n                    問題を逐次実行する場合のみ正確。プロセス内他スレッドの並行 solve が\n                    混在すると差分に混入する)"
             );
             println!(
                 "  --threads         Per-solve factorization parallelism (default: 1 = serial)"

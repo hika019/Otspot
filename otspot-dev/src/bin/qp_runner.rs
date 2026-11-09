@@ -254,6 +254,11 @@ fn main() {
 
 /// P0 診断ダンプ (dev 診断専用)。stdout 契約行を守り stderr へ全 attempt の
 /// 排他的内訳を出す。カウントは時間と行を分けて表示する。
+///
+/// 使用契約: qp_runner は 1 プロセス 1 solve のため、psd/transpose の
+/// プロセス単調カウンタ差分はここで使う分には正確。同一プロセス内で他
+/// スレッドの並行 solve と同時に使う場合、カウンタ差分にはその分の混入が
+/// 出る (時間・attempt 構造はスレッド局所なので影響なし)。
 fn dump_solve_diagnostics() {
     match otspot_core::qp::diagnostics::last_qp_solve_diagnostics() {
         Some(diag) => {
