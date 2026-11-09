@@ -3,6 +3,7 @@
 use super::state::{
     LDL_FALLBACK_DELTA_MIN, LDL_REG_CEILING, LDL_REG_GROWTH, LDL_REG_RETRY_MAX, REG_LIMIT_MIN,
 };
+use crate::qp::diagnostics::with_ippmm_sink;
 use crate::qp::ipm_core::kkt::{build_schur_system, AugmentedKktCache, PermutedAugmentedKkt};
 use crate::qp::problem::QpProblem;
 use faer::Par;
@@ -94,6 +95,9 @@ pub(super) fn factorize_kkt_with_retry(
         if ctx.timeout_ctx.should_stop() {
             return FactorizeOutcome::Timeout;
         }
+        // 診断: 行列組み立て (materialize / Schur 構築) を assembly bucket に、
+        // 呼び出し回数を count 側に積む (時間合計に回数を入れない)。
+        let t_asm = std::time::Instant::now();
         let mat_for_factor = if ctx.use_schur {
             let (s_mat, d_inv) = build_schur_system(
                 &ctx.problem.q,
@@ -108,19 +112,34 @@ pub(super) fn factorize_kkt_with_retry(
             ctx.aug_cache
                 .materialize(ctx.sigma_vec, rho_retry, delta_retry)
         };
+        let (asm_us, is_schur_build) = (t_asm.elapsed().as_micros() as u64, ctx.use_schur);
+        with_ippmm_sink(|s| {
+            s.ipm.assembly_us += asm_us;
+            if is_schur_build {
+                s.counts.kkt_schur_builds += 1;
+            } else {
+                s.counts.kkt_materialize_calls += 1;
+            }
+        });
         if caches.amd_perm.is_none() {
+            let t_amd = std::time::Instant::now();
             caches.amd_perm = Some(amd_with_deadline(
                 mat_for_factor.nrows(),
                 mat_for_factor.col_ptr(),
                 mat_for_factor.row_ind(),
                 ctx.timeout_ctx.deadline,
             ));
+            let amd_us = t_amd.elapsed().as_micros() as u64;
+            with_ippmm_sink(|s| s.ipm.assembly_us += amd_us);
         }
         let perm = caches.amd_perm.as_ref().unwrap();
         // Schur / DD-LDL は pre-permuted 未対応なので通常経路へ。
         let use_pre_permuted = !ctx.use_schur && !ctx.kkt_cfg.dd_ldl;
         if use_pre_permuted && caches.aug_permuted.is_none() {
+            let t_perm = std::time::Instant::now();
             caches.aug_permuted = Some(ctx.aug_cache.permute(perm));
+            let perm_us = t_perm.elapsed().as_micros() as u64;
+            with_ippmm_sink(|s| s.ipm.assembly_us += perm_us);
         }
         let t_factor = std::time::Instant::now();
         let factor_result = if use_pre_permuted {
@@ -146,7 +165,12 @@ pub(super) fn factorize_kkt_with_retry(
                 ctx.par,
             )
         };
-        let iter_factorize_ns = t_factor.elapsed().as_nanos();
+        let iter_factorize = t_factor.elapsed();
+        let iter_factorize_ns = iter_factorize.as_nanos();
+        with_ippmm_sink(|s| {
+            s.ipm.factor_us += iter_factorize.as_micros() as u64;
+            s.counts.kkt_factorize_attempts += 1;
+        });
         if use_pre_permuted && caches.symbolic_cholesky.is_none() {
             if let Ok(ref f) = factor_result {
                 caches.symbolic_cholesky = f.symbolic_arc();
@@ -157,8 +181,10 @@ pub(super) fn factorize_kkt_with_retry(
                 total_factorize_ns += iter_factorize_ns;
                 // Sanity probe: even factorize Ok can yield ill-conditioned K; reject via ||K·sol−rhs||/||rhs||.
                 // Iterative backend has no LDL precision concept, skip.
-                if !f.is_iterative()
-                    && !probe_ldl_health(
+                if !f.is_iterative() {
+                    // 診断: probe は factorize 呼び出し専有時間 (呼出回数は count 側)。
+                    let t_probe = std::time::Instant::now();
+                    let probe_ok = probe_ldl_health(
                         &f,
                         &mat_for_factor,
                         ctx.r_d_pmm,
@@ -166,15 +192,21 @@ pub(super) fn factorize_kkt_with_retry(
                         ctx.s,
                         ctx.is_eq_ext,
                         ctx.n,
-                    )
-                {
-                    retry_count += 1;
-                    if rho_retry >= ldl_reg_ceiling {
-                        break;
+                    );
+                    let probe_us = t_probe.elapsed().as_micros() as u64;
+                    with_ippmm_sink(|s| {
+                        s.ipm.probe_us += probe_us;
+                        s.counts.kkt_health_probes += 1;
+                    });
+                    if !probe_ok {
+                        retry_count += 1;
+                        if rho_retry >= ldl_reg_ceiling {
+                            break;
+                        }
+                        rho_retry = (rho_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
+                        delta_retry = (delta_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
+                        continue;
                     }
-                    rho_retry = (rho_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
-                    delta_retry = (delta_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
-                    continue;
                 }
                 used_iterative = f.is_iterative();
                 fac_opt = Some(f);
@@ -200,9 +232,11 @@ pub(super) fn factorize_kkt_with_retry(
     if fac_opt.is_none() {
         caches.amd_perm = None;
         let delta_fallback = LDL_FALLBACK_DELTA_MIN.max(rho_retry).max(delta_retry);
+        let t_asm_fb = std::time::Instant::now();
         let aug_mat_fb = ctx
             .aug_cache
             .materialize(ctx.sigma_vec, rho_retry, delta_fallback);
+        let asm_fb_us = t_asm_fb.elapsed().as_micros() as u64;
         let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows()).collect();
         let t_fb = std::time::Instant::now();
         let fb_result = factorize_kkt_with_cached_perm_par(
@@ -213,7 +247,14 @@ pub(super) fn factorize_kkt_with_retry(
             Some(ctx.n),
             ctx.par,
         );
-        total_factorize_ns += t_fb.elapsed().as_nanos();
+        let fb_elapsed = t_fb.elapsed();
+        total_factorize_ns += fb_elapsed.as_nanos();
+        with_ippmm_sink(|s| {
+            s.ipm.assembly_us += asm_fb_us;
+            s.ipm.factor_us += fb_elapsed.as_micros() as u64;
+            s.counts.kkt_materialize_calls += 1;
+            s.counts.kkt_factorize_attempts += 1;
+        });
         match fb_result {
             Ok(f) => {
                 used_iterative = f.is_iterative();

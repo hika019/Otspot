@@ -159,6 +159,67 @@ fn phase_timing_note(result: &SolverResult) -> String {
     format!("phase=({})", fields.join(" "))
 }
 
+/// P0 診断ダンプ (dev bench 表示専用)。全 attempt・排他的 bucket・回数を、
+/// 時間行と回数行を分けて描画する (count を µs と混在させない表示側の約束)。
+fn solve_diagnostics_lines(diag: &otspot_core::qp::diagnostics::SolveDiagnostics) -> Vec<String> {
+    let s = |us: u64| format!("{:.3}", us as f64 / 1_000_000.0);
+    let mut out = vec![format!(
+        "  solve_diag total={}s presolve={}s attempts={}s fverify={}s other={} pub={} neg_other_attempts={}",
+        s(diag.total_us),
+        s(diag.presolve_us),
+        s(diag.attempts_wall_sum_us()),
+        s(diag.final_verification_us),
+        diag.other_us(),
+        diag.published_attempt()
+            .map_or("-".to_string(), |i| i.to_string()),
+        diag.inconsistent_attempt_count(),
+    )];
+    for a in &diag.attempts {
+        out.push(format!(
+            "    #{} {} ruiz={} tighten={:.1}{} term={} iters={} wall={}s init={}s postsolve={}s verify={}s other={}",
+            a.id,
+            a.kind,
+            a.use_ruiz,
+            a.tighten,
+            if a.published { "*" } else { "" },
+            a.termination.map_or("-".to_string(), |t| format!("{t:?}")),
+            a.iterations,
+            s(a.wall_us),
+            s(a.init_us),
+            s(a.postsolve_us),
+            s(a.verification_us),
+            a.other_us(),
+        ));
+        out.push(format!(
+            "      ipm total={}s asm={}s factor={}s probe={}s solve={}s resid={}s other={}",
+            s(a.ipm.total_us),
+            s(a.ipm.assembly_us),
+            s(a.ipm.factor_us),
+            s(a.ipm.probe_us),
+            s(a.ipm.linear_solve_us),
+            s(a.ipm.residual_update_us),
+            a.ipm.other_us(),
+        ));
+        out.push(format!(
+            "      counts iter={} reg={} probe={} factor={} mat={} schur={} psd={} transpose={} pg={} lsq={} ir={} refit={} irls={}",
+            a.counts.ipm_iterations,
+            a.counts.kkt_reg_retries,
+            a.counts.kkt_health_probes,
+            a.counts.kkt_factorize_attempts,
+            a.counts.kkt_materialize_calls,
+            a.counts.kkt_schur_builds,
+            a.counts.psd_checks,
+            a.counts.transpose_constructions,
+            a.counts.postsolve_pg_iterations,
+            a.counts.postsolve_lsq_iterations,
+            a.counts.postsolve_ir_iterations,
+            a.counts.postsolve_refit_iterations,
+            a.counts.postsolve_irls_iterations,
+        ));
+    }
+    out
+}
+
 fn append_phase_timing(mut note: String, result: &SolverResult) -> String {
     let timing = phase_timing_note(result);
     if timing.is_empty() {
@@ -374,6 +435,9 @@ fn main() {
     // 引数パース: [data_dir] [--eps <value>] [--timeout <secs>] [--known-optimal <path>] [--dual-advanced]
     let mut data_dir = "data/maros_meszaros".to_string();
     let mut dual_advanced_mode = false;
+    // P0 診断: 各 solve 直後に SolveDiagnostics (全 attempt・排他的 bucket) を
+    // 追加行で出力する。集計書式には干渉しない (dev 診断専用)。
+    let mut solve_diag_mode = false;
     let mut eps: f64 = 1e-6;
     let mut timeout_secs: f64 = 10.0;
     let mut baseline_override: Option<String> = None;
@@ -392,6 +456,9 @@ fn main() {
             println!("  --timeout         Solver timeout in seconds (default: 10.0)");
             println!("  --known-optimal   Path to known optimal values CSV (default: auto-detect)");
             println!("  --dual-advanced   LP は DualAdvanced simplex を使う (QP は無視)");
+            println!(
+                "  --solve-diagnostics 各問題の後に SolveDiagnostics (全 attempt 内訳) を出力\n                    (psd/transpose 回数はプロセス単調カウンタの差分: 1 プロセス内で\n                    問題を逐次実行する場合のみ正確。プロセス内他スレッドの並行 solve が\n                    混在すると差分に混入する)"
+            );
             println!(
                 "  --threads         Per-solve factorization parallelism (default: 1 = serial)"
             );
@@ -418,6 +485,8 @@ fn main() {
             }
         } else if args[i] == "--dual-advanced" {
             dual_advanced_mode = true;
+        } else if args[i] == "--solve-diagnostics" {
+            solve_diag_mode = true;
         } else if !args[i].starts_with("--") {
             data_dir = args[i].clone();
         }
@@ -923,6 +992,16 @@ fn main() {
             "  => solver={} iters={} {} | n={} m={} nnz={}",
             method_label, result.iterations, resid_str, n, m, nnz_before
         );
+        // P0 診断: 採用/未採用を問わない全 attempt の排他的内訳 (--solve-diagnostics)。
+        if solve_diag_mode {
+            if let Some(diag) = otspot_core::qp::diagnostics::last_qp_solve_diagnostics() {
+                for line in solve_diagnostics_lines(&diag) {
+                    println!("{line}");
+                }
+            } else {
+                println!("  solve_diag=(none: QP IPM 経路以外か診断未アクティブ)");
+            }
+        }
     }
 
     println!("{}", "-".repeat(80));

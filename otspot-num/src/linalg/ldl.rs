@@ -398,7 +398,20 @@ fn upper_tri_with_diag_shift(q_upper: &CscMatrix, shift: f64) -> CscMatrix {
 /// `Q=[[0,1],[1,0]]` のような零対角 indefinite を従来は ZeroPivot 経路で PSD 誤判定
 /// していたバグの根治。
 pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
+    PSD_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     is_q_psd_by_cholesky_impl(q, SHIFT_FACTOR, true)
+}
+
+/// Process-wide monotonic count of [`is_q_psd_by_cholesky`] invocations.
+///
+/// Diagnostic-only (P0 timing/attempt diagnostics): PSD verdict volume must be
+/// observable as a count, separate from any µs sum. Read deltas around an
+/// instrumented region — the absolute value spans the whole process/threads.
+static PSD_CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Current value of the process-wide [`is_q_psd_by_cholesky`] call counter.
+pub fn psd_check_count() -> u64 {
+    PSD_CHECKS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Test-only probe: 個別 no-op 実証 (`feedback_sentinel_must_fail_under_noop`) で

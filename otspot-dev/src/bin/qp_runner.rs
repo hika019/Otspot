@@ -241,12 +241,77 @@ fn main() {
     options.ipm.eps = eps;
     let result = solve_qp_with(&problem, &options);
 
+    if std::env::var("OTSPOT_SOLVE_DIAGNOSTICS").is_ok_and(|v| v == "1") {
+        dump_solve_diagnostics();
+    }
     let status_str = status_label(&result.status);
 
     println!(
         "{} {:.10e} {}",
         status_str, result.objective, result.iterations
     );
+}
+
+/// P0 診断ダンプ (dev 診断専用)。stdout 契約行を守り stderr へ全 attempt の
+/// 排他的内訳を出す。カウントは時間と行を分けて表示する。
+///
+/// 使用契約: qp_runner は 1 プロセス 1 solve のため、psd/transpose の
+/// プロセス単調カウンタ差分はここで使う分には正確。同一プロセス内で他
+/// スレッドの並行 solve と同時に使う場合、カウンタ差分にはその分の混入が
+/// 出る (時間・attempt 構造はスレッド局所なので影響なし)。
+fn dump_solve_diagnostics() {
+    match otspot_core::qp::diagnostics::last_qp_solve_diagnostics() {
+        Some(diag) => {
+            eprintln!(
+                    "solve_diag total={:.3}s presolve={:.3}s attempts={:.3}s fverify={:.3}s other={} pub={} inconsistent={}",
+                    diag.total_us as f64 / 1e6,
+                    diag.presolve_us as f64 / 1e6,
+                    diag.attempts_wall_sum_us() as f64 / 1e6,
+                    diag.final_verification_us as f64 / 1e6,
+                    diag.other_us(),
+                    diag.published_attempt()
+                        .map_or("-".to_string(), |i| i.to_string()),
+                    diag.inconsistent_attempt_count(),
+                );
+            for a in &diag.attempts {
+                eprintln!(
+                        "  attempt#{} {} ruiz={} tighten={:.1}{} term={:?} iters={} wall={:.3}s init={:.3}s ipm_total={:.3}s asm={:.3}s factor={:.3}s probe={:.3}s solve={:.3}s resid={:.3}s postsolve={:.3}s verify={:.3}s other={} counts{{iter={},reg={},probe={},factor={},mat={},schur={},psd={},transpose={},pg={},lsq={},ir={},refit={},irls={}}}",
+                        a.id,
+                        a.kind,
+                        a.use_ruiz,
+                        a.tighten,
+                        if a.published { "*" } else { "" },
+                        a.termination,
+                        a.iterations,
+                        a.wall_us as f64 / 1e6,
+                        a.init_us as f64 / 1e6,
+                        a.ipm.total_us as f64 / 1e6,
+                        a.ipm.assembly_us as f64 / 1e6,
+                        a.ipm.factor_us as f64 / 1e6,
+                        a.ipm.probe_us as f64 / 1e6,
+                        a.ipm.linear_solve_us as f64 / 1e6,
+                        a.ipm.residual_update_us as f64 / 1e6,
+                        a.postsolve_us as f64 / 1e6,
+                        a.verification_us as f64 / 1e6,
+                        a.other_us(),
+                        a.counts.ipm_iterations,
+                        a.counts.kkt_reg_retries,
+                        a.counts.kkt_health_probes,
+                        a.counts.kkt_factorize_attempts,
+                        a.counts.kkt_materialize_calls,
+                        a.counts.kkt_schur_builds,
+                        a.counts.psd_checks,
+                        a.counts.transpose_constructions,
+                        a.counts.postsolve_pg_iterations,
+                        a.counts.postsolve_lsq_iterations,
+                        a.counts.postsolve_ir_iterations,
+                        a.counts.postsolve_refit_iterations,
+                        a.counts.postsolve_irls_iterations,
+                    );
+            }
+        }
+        None => eprintln!("solve_diag=(none)"),
+    }
 }
 
 #[cfg(test)]

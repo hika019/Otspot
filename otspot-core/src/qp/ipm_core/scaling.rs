@@ -28,6 +28,10 @@ where
         let n = problem.num_vars;
         let m = problem.num_constraints;
 
+        // 診断: Ruiz scale 構築 + scaled problem 生成 + opts 調整は attempt の
+        // init bucket (inner ループ前の準備)。unscale は solve 後の後始末なので
+        // 意図的に計測せず attempt の other に残す (親から差で出る)。
+        let t_prep = std::time::Instant::now();
         let mut scaler = RuizScaler::new(n, m);
         scaler.compute_with_rhs(&problem.q, &problem.a, &problem.c, &[]);
 
@@ -80,6 +84,9 @@ where
                     }
                 }
 
+                crate::qp::diagnostics::with_ippmm_sink(|s| {
+                    s.init_us += t_prep.elapsed().as_micros() as u64;
+                });
                 let scaled_result =
                     inner_solver(&scaled_problem, &adjusted_opts, options.ipm_eps());
                 return unscale_ipm_result(scaled_result, &scaler, problem);

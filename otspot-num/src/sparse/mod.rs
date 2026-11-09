@@ -5,6 +5,7 @@ mod csc;
 mod vec;
 mod view;
 
+pub use csc::transpose_construction_count;
 pub use csc::CscMatrix;
 pub use vec::SparseVec;
 pub use view::{validate_csc, CscMatrixView};

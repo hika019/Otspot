@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3362 testcases, 43 ignored
+# totals: 3372 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -930,6 +930,10 @@ otspot-core	qp::certificate::tests::prove_optimal_stationarity_fails	active
 otspot-core	qp::certificate::tests::prove_optimal_tol_semantics	active
 otspot-core	qp::certificate::tests::prove_optimal_wrong_sign_dual_fails_dual_sign_check	active
 otspot-core	qp::certificate::tests::prove_optimal_z_length_table_box_constraint	active
+otspot-core	qp::diagnostics::tests::capture_restores_outer_scope	active
+otspot-core	qp::diagnostics::tests::counts_never_enter_time_sums	active
+otspot-core	qp::diagnostics::tests::exclusive_buckets_sum_to_parent_when_complete	active
+otspot-core	qp::diagnostics::tests::negative_other_is_surfaced_not_clamped	active
 otspot-core	qp::global::bound::tests::bilinear_off_diagonal_handled	active
 otspot-core	qp::global::bound::tests::concave_diag_qp_interval_min_at_corner	active
 otspot-core	qp::global::bound::tests::convex_diag_qp_interval_matches_box_min	active
@@ -1171,6 +1175,9 @@ otspot-core	qp::ipm_solver::attempt::tests::candidate_order_unproven_infeasibili
 otspot-core	qp::ipm_solver::attempt::tests::converged_termination_does_not_break_early::converged_termination_runs_full_ladder	active
 otspot-core	qp::ipm_solver::attempt::tests::deep_lane_bit_identical_stall_does_not_skip_loose_lanes	active
 otspot-core	qp::ipm_solver::attempt::tests::deterministic_stall_in_one_lane_does_not_skip_other_lane	active
+otspot-core	qp::ipm_solver::attempt::tests::diagnostics_record_all_attempts_including_unpublished	active
+otspot-core	qp::ipm_solver::attempt::tests::diagnostics_record_fallback_attempt_classified	active
+otspot-core	qp::ipm_solver::attempt::tests::diagnostics_survive_when_nothing_published	active
 otspot-core	qp::ipm_solver::attempt::tests::dual_lane_true_stall_breaks_at_third_occurrence::dual_lane_true_stall_breaks_at_expected_call_count	active
 otspot-core	qp::ipm_solver::attempt::tests::empty_col_mask_noop_proof_in_finalize	active
 otspot-core	qp::ipm_solver::attempt::tests::empty_col_qp_solves_optimal_not_false_demoted	active
@@ -1995,6 +2002,9 @@ otspot-core::memory_budget	conic_socp_route_peak_within_budget	active
 otspot-core::memory_budget	lp_route_peak_within_budget	active
 otspot-core::memory_budget	qcqp_bridge_many_sparse_quad_constraints_peak_within_budget	active
 otspot-core::memory_budget	qp_ipm_route_peak_within_budget	active
+otspot-core::qp_diag_real_solve	concurrent_solves_keep_diagnostics_per_thread	active
+otspot-core::qp_diag_real_solve	non_qp_route_clears_stale_diagnostics	active
+otspot-core::qp_diag_real_solve	real_solve_publishes_diagnostics_with_exclusive_buckets	active
 otspot-dev	audit::tests::no_dead_params_in_production	active
 otspot-dev	audit::tests::no_eprintln_in_production	active
 otspot-dev	audit::tests::no_observation_only_tests	active

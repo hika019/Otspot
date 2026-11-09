@@ -3,6 +3,8 @@
 
 pub(crate) mod aat;
 pub mod certificate;
+/// P0 timing/attempt diagnostics (dev-bin 可視、求解の公開契約ではない)。
+pub mod diagnostics;
 pub mod global;
 pub(crate) mod ipm_core;
 pub mod ipm_solver;
@@ -143,9 +145,16 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     std::thread::scope(|s| {
         let handle = std::thread::Builder::new()
             .stack_size(SOLVE_STACK_SIZE)
-            .spawn_scoped(s, || dispatch_solve_qp(problem, options))
+            .spawn_scoped(s, || {
+                let r = dispatch_solve_qp(problem, options);
+                // 診断スナップショットは solve 完了スレッド (この scoped thread) の
+                // TLS に載る。スレッド消滅前に caller 側へ引き継ぐ。
+                (r, diagnostics::last_qp_solve_diagnostics())
+            })
             .expect("spawn QP solver thread");
-        handle.join().expect("QP solver thread panicked")
+        let (result, diag) = handle.join().expect("QP solver thread panicked");
+        diagnostics::publish_last_qp_solve_diagnostics(diag);
+        result
     })
 }
 
