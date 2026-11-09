@@ -82,14 +82,30 @@ fn should_stop_before_infeas_commit(timeout_ctx: &TimeoutCtx) -> bool {
 /// に実測値) ため、ここが QP/conic 経路のスレッド上限を成立させる唯一の点。
 /// `threads = 1` (既定) はプールを作らずインライン + `Par::Seq` で走るので、
 /// 従来の挙動と完全に同一。
+///
+/// 診断 TLS (review R2): threads>1 の `install` は rayon-core 1.13.0 の
+/// `in_worker_cold` が closure をプールへ inject するため本体が worker
+/// スレッドで走り、caller の `ACTIVE_ATTEMPT` は worker から見えない
+/// (threads=2 CVXQP3_L 実測で sink 系カウンタ全 0・other へ全流出)。worker
+/// 上では [`run_diagnostics_collected`](crate::qp::diagnostics::run_diagnostics_collected)
+/// で新規 sink を設置・回収し、戻ってきた
+/// sink を caller スレッドで
+/// [`merge_worker_attempt_sink`](crate::qp::diagnostics::merge_worker_attempt_sink)
+/// へ加算合併する。
+/// threads<=1 のインライン経路でも同じ設置→回収→合併を通る (加算のみなので
+/// 直接書き込みと同一の終値)。
 pub(crate) fn solve_ippmm_inner(
     problem: &QpProblem,
     options: &SolverOptions,
     eps_orig: f64,
 ) -> SolverResult {
-    with_solver_pool(options.threads, |par| {
-        solve_ippmm_inner_confined(problem, options, eps_orig, par)
-    })
+    let (result, worker_sink) = with_solver_pool(options.threads, |par| {
+        crate::qp::diagnostics::run_diagnostics_collected(|| {
+            solve_ippmm_inner_confined(problem, options, eps_orig, par)
+        })
+    });
+    crate::qp::diagnostics::merge_worker_attempt_sink(worker_sink);
+    result
 }
 
 /// Certificate-acceptance contract: `check_infeasible_or_unbounded`'s

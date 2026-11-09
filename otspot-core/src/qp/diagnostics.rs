@@ -25,6 +25,8 @@
 //! `solve_qp_with` が完了時にスナップショットを caller スレッドへ引き継ぎ、
 //! `last_qp_solve_diagnostics` で読む。dev bin は「1 solve 直後に読む」逐次
 //! 使用を前提とする。多 solve 並列時の対応は未定義。
+//! threads>1 のプール境界で TLS は自動伝播しない (install は worker へ inject、
+//! 収集は `run_diagnostics_collected` / `merge_worker_attempt_sink` の doc 参照)。
 
 use std::cell::RefCell;
 use std::time::Instant;
@@ -299,6 +301,72 @@ pub(crate) struct AttemptSink {
     pub verification_us: u64,
     pub ipm: IpmPhaseTimes,
     pub counts: AttemptCounts,
+}
+
+impl AttemptSink {
+    /// worker 側の sink を加算合併する。全フィールドが累計 µs / 回数であり、
+    /// 直接書き込みと同じ終値を順序によらず作る (review R2 の回収側)。
+    fn merge_from(&mut self, w: &AttemptSink) {
+        self.init_us += w.init_us;
+        self.postsolve_us += w.postsolve_us;
+        self.verification_us += w.verification_us;
+        self.ipm.assembly_us += w.ipm.assembly_us;
+        self.ipm.factor_us += w.ipm.factor_us;
+        self.ipm.probe_us += w.ipm.probe_us;
+        self.ipm.linear_solve_us += w.ipm.linear_solve_us;
+        self.ipm.residual_update_us += w.ipm.residual_update_us;
+        self.ipm.total_us += w.ipm.total_us;
+        self.counts.accumulate(&w.counts);
+    }
+}
+
+/// 現スレッドに新規 AttemptSink を設置して `f` を走らせ、その sink を結果と
+/// ともに回収して返す (外側の `ACTIVE_ATTEMPT` は復元して触れない)。
+///
+/// review R2 の worker 側半分の境界ヘルパ。rayon-core 1.13.0 では非 worker
+/// スレッドからの `ThreadPool::install` が `Registry::in_worker_cold` 経由で
+/// closure をプールへ inject し latch で待つため、IPM 本体はプール worker
+/// 上で走り caller の `ACTIVE_ATTEMPT` は worker から見えない (threads=2 の
+/// CVXQP3_L 実測で sink 側カウンタが全 0、IPM 時間が all other へ流出するの
+/// を確認)。worker 上に新規 sink を設置し、 caller スレッド側で
+/// [`merge_worker_attempt_sink`] へ戻して attempt へ集約する。
+///
+/// 安全契約:
+/// - early return / panic (unwind) でも Drop 内で sink を回収し worker TLS を
+///   設置前の値 (通常 None) へ戻す。worker は再利用されるため、これを怠ると
+///   次の install (別 solve) へ診断が漏れる。
+/// - `f` が panic した場合、回収途中の sink は unwind とともに失われるが
+///   panic はそのまま伝播し solve 自体が失敗するため、診断だけの不整合は
+///   残らない (結果が成立しない solve の診断は存在してよい対象ではない)。
+pub(crate) fn run_diagnostics_collected<R>(f: impl FnOnce() -> R) -> (R, AttemptSink) {
+    struct Collector<'a> {
+        out: &'a RefCell<Option<AttemptSink>>,
+        saved: Option<AttemptSink>,
+    }
+    impl Drop for Collector<'_> {
+        fn drop(&mut self) {
+            let taken = ACTIVE_ATTEMPT.with(|c| c.borrow_mut().take());
+            *self.out.borrow_mut() = taken;
+            ACTIVE_ATTEMPT.with(|c| *c.borrow_mut() = self.saved.take());
+        }
+    }
+    let saved = ACTIVE_ATTEMPT.with(|c| c.borrow_mut().replace(AttemptSink::default()));
+    let out = RefCell::new(None);
+    let guard = Collector { out: &out, saved };
+    let r = f();
+    drop(guard);
+    (r, out.into_inner().unwrap_or_default())
+}
+
+/// worker で回収した sink を caller の進行中 attempt へ加算合併する。
+/// 未アクティブ時は no-op (アクティブ attempt がない経路の直接書き込みと
+/// 同じ意味)。
+pub(crate) fn merge_worker_attempt_sink(w: AttemptSink) {
+    ACTIVE_ATTEMPT.with(|c| {
+        if let Some(s) = c.borrow_mut().as_mut() {
+            s.merge_from(&w);
+        }
+    });
 }
 
 thread_local! {
