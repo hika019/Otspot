@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3386 testcases, 43 ignored
+# totals: 3393 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1076,6 +1076,10 @@ otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_slack_noise_on_vacuo
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_vacuous_eq_row_with_nonzero_rhs	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_zero_row_with_negative_rhs	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_scans_only_rows_present_in_extended_matrix	active
+otspot-core	qp::ipm_core::ippmm::factorize::r1_materialize_accounting_tests::dd_path_counts_only_original_materialize	active
+otspot-core	qp::ipm_core::ippmm::factorize::r1_materialize_accounting_tests::pre_permuted_path_counts_both_materializes	active
+otspot-core	qp::ipm_core::ippmm::factorize::r1_materialize_accounting_tests::retry_and_identity_fallback_count_builds_actually_run	active
+otspot-core	qp::ipm_core::ippmm::factorize::r1_materialize_accounting_tests::schur_path_counts_no_materialize_builds	active
 otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::accepted_ray_dir_only_carries_verified_unbounded_direction	active
 otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::final_structural_check_accepts_ray_guards_cheap_cases	active
 otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::finalize_publishes_ray_payload_only_with_feasible_base	active
@@ -1210,6 +1214,7 @@ otspot-core	qp::ipm_solver::attempt::tests::no_presolve_fallback_does_not_replac
 otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::accuracy_floor_termination_reports_stalled	active
 otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::iteration_budget_termination_reports_max_iterations	active
 otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::stall_termination_reports_stalled_not_suboptimal	active
+otspot-core	qp::ipm_solver::attempt::tests::published_postsolve_is_accepted_only_all_attempt_postsolve_conserved	active
 otspot-core	qp::ipm_solver::attempt::tests::q_diagonal_scaled_runner_receives_user_eps	active
 otspot-core	qp::ipm_solver::attempt::tests::ruiz_flip_pair_does_not_false_trigger_stall::ruiz_flip_pair_does_not_false_trigger_stall_break	active
 otspot-core	qp::ipm_solver::attempt::tests::runner_receives_user_eps_separate_from_attempt_eps	active
@@ -2010,6 +2015,8 @@ otspot-core::memory_budget	qp_ipm_route_peak_within_budget	active
 otspot-core::qp_diag_real_solve	concurrent_solves_keep_diagnostics_per_thread	active
 otspot-core::qp_diag_real_solve	non_qp_route_clears_stale_diagnostics	active
 otspot-core::qp_diag_real_solve	real_solve_publishes_diagnostics_with_exclusive_buckets	active
+otspot-core::qp_diag_real_solve	threads_2_concurrent_solves_keep_diagnostics_isolated	active
+otspot-core::qp_diag_real_solve	threads_gt_1_preserves_ipm_counters_across_pool_boundary	active
 otspot-dev	audit::tests::no_dead_params_in_production	active
 otspot-dev	audit::tests::no_eprintln_in_production	active
 otspot-dev	audit::tests::no_observation_only_tests	active

@@ -163,8 +163,17 @@ fn phase_timing_note(result: &SolverResult) -> String {
 /// 時間行と回数行を分けて描画する (count を µs と混在させない表示側の約束)。
 fn solve_diagnostics_lines(diag: &otspot_core::qp::diagnostics::SolveDiagnostics) -> Vec<String> {
     let s = |us: u64| format!("{:.3}", us as f64 / 1_000_000.0);
+    // R3: 公開 TimingBreakdown.postsolve_us は採用 attempt のみ。全 attempt の
+    // postsolve (棄却・延長・fallback 含む) を並記し、公開値が solve 全体の
+    // postsolve 費用と誤読されるのを防ぐ (SolveDiagnostics の既存値の表示で、
+    // 集計の二重実装はしない)。
+    let postsolve_all_us: u64 = diag.attempts.iter().map(|a| a.postsolve_us).sum();
+    let postsolve_pub_us = diag
+        .published_attempt()
+        .and_then(|id| diag.attempts.iter().find(|a| a.id == id))
+        .map_or(0, |a| a.postsolve_us);
     let mut out = vec![format!(
-        "  solve_diag total={}s presolve={}s attempts={}s fverify={}s other={} pub={} neg_other_attempts={}",
+        "  solve_diag total={}s presolve={}s attempts={}s fverify={}s other={} pub={} neg_other_attempts={} postsolve_pub={}s postsolve_all={}s",
         s(diag.total_us),
         s(diag.presolve_us),
         s(diag.attempts_wall_sum_us()),
@@ -173,6 +182,8 @@ fn solve_diagnostics_lines(diag: &otspot_core::qp::diagnostics::SolveDiagnostics
         diag.published_attempt()
             .map_or("-".to_string(), |i| i.to_string()),
         diag.inconsistent_attempt_count(),
+        s(postsolve_pub_us),
+        s(postsolve_all_us),
     )];
     for a in &diag.attempts {
         out.push(format!(
