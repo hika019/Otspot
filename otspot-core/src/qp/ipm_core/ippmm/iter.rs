@@ -106,6 +106,8 @@ fn solve_ippmm_inner_confined(
     par: Par,
 ) -> SolverResult {
     let n = problem.num_vars;
+    // 診断: init bucket の開始点 (loop 直前までを init とみなす)。
+    let dbg_t0 = std::time::Instant::now();
     let timeout_ctx = TimeoutCtx::new(
         options.deadline,
         options.timeout_secs,
@@ -221,6 +223,13 @@ fn solve_ippmm_inner_confined(
 
     // ループ内 break は Optimal / Timeout / Stalled / NumericalError / Infeasible /
     // Unbounded を設定する。break せず max_iter を使い切った場合のみ MaxIterations。
+    // 診断: init はここで確定、loop total はこの直後から。
+    let mut dbg = IpmLoopDbg {
+        init_us: dbg_t0.elapsed().as_micros() as u64,
+        residual_update_us: 0,
+        linear_solve_us: 0,
+    };
+    let dbg_loop_start = std::time::Instant::now();
     let mut status: Option<SolveStatus> = None;
     let mut iterations_consumed = 0usize;
     let mut final_residuals: Option<(f64, f64, f64)> = None;
@@ -243,6 +252,8 @@ fn solve_ippmm_inner_confined(
     let mut total_reg_retries: u32 = 0;
     let mut any_iterative = false;
     for iter in 0..options.ipm.max_iter {
+        // 診断: フェーズ境界カーソル (residual_update はループ先頭〜sigma 算出まで)。
+        let dbg_cursor = std::time::Instant::now();
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
             break;
@@ -374,6 +385,8 @@ fn solve_ippmm_inner_confined(
 
         // Σ = diag(s_i / y_i) (等式行は0)
         let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, SIGMA_MAX_FALLBACK);
+        // 診断: ループ先頭〜sigma 算出までを residual_update と呼ぶ排他的 bucket に積む。
+        dbg.residual_update_us += dbg_cursor.elapsed().as_micros() as u64;
 
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
@@ -421,7 +434,11 @@ fn solve_ippmm_inner_confined(
                 status = Some(SolveStatus::Timeout);
                 break;
             }
-            FactorizeOutcome::Failure => return numerical_error_result(n),
+            FactorizeOutcome::Failure => {
+                // 診断: 途中で return してもここまでの累計を sink へ戻す。
+                dbg.flush(dbg_loop_start, total_reg_retries, iterations_consumed);
+                return numerical_error_result(n);
+            }
         };
         // MINRES (iterative) backend のみ user eps 由来 η を反映、Direct/DirectDd では no-op。
         fac.set_iterative_tol(inexact_eta);
@@ -640,7 +657,9 @@ fn solve_ippmm_inner_confined(
         let alpha = alpha.min(alpha_tr);
 
         // predictor/corrector + Gondzio 全体の solve 時間を常時収集。
-        total_solve_ns += t_solve.elapsed().as_nanos();
+        let solve_elapsed = t_solve.elapsed();
+        total_solve_ns += solve_elapsed.as_nanos();
+        dbg.linear_solve_us += solve_elapsed.as_micros() as u64;
 
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
         iterations_consumed = iter.saturating_add(1);
@@ -773,6 +792,9 @@ fn solve_ippmm_inner_confined(
         pmm.prev_nr_d = nr_d;
     }
 
+    // 診断: ループ正常終端 (全 break / 予算枯渇) で累計を sink へ flush。
+    dbg.flush(dbg_loop_start, total_reg_retries, iterations_consumed);
+
     finalize_ippmm_result(
         problem,
         &b_ext,
@@ -797,6 +819,31 @@ fn solve_ippmm_inner_confined(
         any_iterative,
         certified,
     )
+}
+
+/// P0 診断: IPM 内部ループの排他的 bucket をローカルに累計し、ループ出口
+/// (break / Failure return 含む) で 1 回だけ sink へ flush する。反復内では
+/// フェーズ境界の時計読み出しのみ (要素ループ内読み出しなし)。assembly /
+/// factor / probe は `factorize_kkt_with_retry` 内から直接 sink へ積まれるため、
+/// ここでは residual_update / linear_solve / loop total / counts だけを扱う。
+struct IpmLoopDbg {
+    init_us: u64,
+    residual_update_us: u64,
+    linear_solve_us: u64,
+}
+
+impl IpmLoopDbg {
+    fn flush(&self, t_loop_start: std::time::Instant, reg_retries: u32, iterations: usize) {
+        let total_us = t_loop_start.elapsed().as_micros() as u64;
+        crate::qp::diagnostics::with_ippmm_sink(|s| {
+            s.init_us += self.init_us;
+            s.ipm.residual_update_us += self.residual_update_us;
+            s.ipm.linear_solve_us += self.linear_solve_us;
+            s.ipm.total_us += total_us;
+            s.counts.kkt_reg_retries += reg_retries as u64;
+            s.counts.ipm_iterations += iterations as u64;
+        });
+    }
 }
 
 /// ループ終端後の後処理: 反復予算枯渇の status 確定 (MaxIterations)、Timeout/

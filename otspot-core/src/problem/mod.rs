@@ -362,9 +362,12 @@ pub struct RayCertificate {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct TimingBreakdown {
     // ── LP simplex 経路 ───────────────────────────────────────────────────────
-    /// Presolve 全体 (run_presolve)
+    /// Presolve 全体 (run_presolve)。QP IPM 経路でも計上 (run_attempt_ladder の
+    /// presolve 窓 wall。以前は QP で未設定だった)。
     pub presolve_us: u64,
-    /// 縮約後 simplex 本体 (solve_without_presolve)
+    /// 縮約後 simplex 本体 (solve_without_presolve)。QP IPM 経路では
+    /// 全 attempt wall 合計 − attempt 内 postsolve 合計 (未採用 attempt 含む
+    /// 求解本体。postsolve は postsolve_us 側で報告され二重計上しない)。
     pub solve_us: u64,
     /// Postsolve 総計 (run_postsolve / QP 経路では下記 4 field の合計)
     pub postsolve_us: u64,

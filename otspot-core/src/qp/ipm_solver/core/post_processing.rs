@@ -217,6 +217,10 @@ pub(super) fn refine_post_processing(
             break;
         }
     }
+    // 診断: refit 外周反復回数を count 側へ (時間 bucket には入れない)。
+    crate::qp::diagnostics::with_ippmm_sink(|s| {
+        s.counts.postsolve_refit_iterations += refit_iters as u64;
+    });
     diag.report("refit-loop", refit_iters);
 
     // 標準 LSQ が componentwise eps を満たさない場合 IRLS で L∞ 風 y を試行。
@@ -299,6 +303,10 @@ pub(super) fn refine_post_processing(
             break;
         }
     }
+    // 診断: IRLS 外周反復回数を count 側へ。
+    crate::qp::diagnostics::with_ippmm_sink(|s| {
+        s.counts.postsolve_irls_iterations += irls_iters as u64;
+    });
     diag.report("irls-loop", irls_iters);
 
     current_kkt
@@ -429,7 +437,8 @@ pub(super) fn refine_krylov_and_projection(
     let view = build_view(orig_problem, eliminated_cols);
     let user_eps = opts.ipm_eps();
     let target_pf = user_eps;
-    crate::qp::refine_kkt_iterative(
+    // 診断: Krylov IR の消費反復数は返り値 (count 側。時間 bucket と別枠)。
+    let ir_iters = crate::qp::refine_kkt_iterative(
         orig_problem,
         final_sol,
         eliminated_cols,
@@ -437,6 +446,9 @@ pub(super) fn refine_krylov_and_projection(
         target_pf,
         opts.deadline,
     );
+    crate::qp::diagnostics::with_ippmm_sink(|s| {
+        s.counts.postsolve_ir_iterations += ir_iters as u64;
+    });
 
     // Stage 3a: extended-precision IR with TwoFloat accumulation.
     // Runs only when standard Krylov IR stalled above eps and the option is enabled.

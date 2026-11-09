@@ -11,6 +11,8 @@ pub(crate) fn refine_dual_projected_gradient(
     deadline: Option<std::time::Instant>,
 ) {
     use twofloat::TwoFloat;
+    // 診断: PG 修正の呼び出し回数 (1 呼出 = Cauchy step 1 走査)。
+    crate::qp::diagnostics::record_postsolve_iteration(|c| &mut c.postsolve_pg_iterations);
     let n = problem.num_vars;
     let m = problem.num_constraints;
     if result.solution.len() != n || result.dual_solution.len() != m {
