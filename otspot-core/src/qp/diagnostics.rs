@@ -290,8 +290,10 @@ thread_local! {
 /// 直近に完了した QP solve の診断スナップショットを返す。
 ///
 /// best-effort・dev 診断専用: スレッド単位で「そのスレッドで完結した最後の
-/// solve」のみ追跡する。並列 multistart / MILP ワーカーの solve を読む保証は
-/// ない (plan §3: 公開求解 API は変更しない)。
+/// `solve_qp_with`」のみ追跡する。最後の solve が QP-IPM 経路以外 (LP 転送 /
+/// conic / 自明 infeasible) の場合は None を返す (前 solve の値は残らない)。
+/// 並列 multistart / MILP ワーカーの solve を読む保証はない (plan §3: 公開
+/// 求解 API は変更しない)。
 pub fn last_qp_solve_diagnostics() -> Option<SolveDiagnostics> {
     LAST_SOLVE_DIAG.with(|c| c.borrow().clone())
 }
@@ -299,10 +301,14 @@ pub fn last_qp_solve_diagnostics() -> Option<SolveDiagnostics> {
 /// `last_qp_solve_diagnostics` で受け取ったスナップショットを現スレッドの
 /// LAST に載せ直す。solve 本体は scoped thread 上で動くため、その TLS に載った
 /// 診断はスレッド消滅前に `solve_qp_with` がここへ引き継ぐ。
+///
+/// `None` も無条件で載せる (直前の solve が QP-IPM 経路以外だった合図)。
+/// None を握りつぶして前 solve の値を残すと、長時間生存するプロセス
+/// (qps_benchmark の 1 プロセス複数問題) で「直前の QP の診断」が次の
+/// 問題の出力に混線して誤帰属するため、LAST は常に見た目の solve の
+/// 診断と一致させる。
 pub fn publish_last_qp_solve_diagnostics(diag: Option<SolveDiagnostics>) {
-    if diag.is_some() {
-        LAST_SOLVE_DIAG.with(|c| *c.borrow_mut() = diag);
-    }
+    LAST_SOLVE_DIAG.with(|c| *c.borrow_mut() = diag);
 }
 
 /// 進行中 solve の診断にアクセスする (solve 計測点専用)。未アクティブ時 no-op。

@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3370 testcases, 43 ignored
+# totals: 3372 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -2002,6 +2002,8 @@ otspot-core::memory_budget	conic_socp_route_peak_within_budget	active
 otspot-core::memory_budget	lp_route_peak_within_budget	active
 otspot-core::memory_budget	qcqp_bridge_many_sparse_quad_constraints_peak_within_budget	active
 otspot-core::memory_budget	qp_ipm_route_peak_within_budget	active
+otspot-core::qp_diag_real_solve	concurrent_solves_keep_diagnostics_per_thread	active
+otspot-core::qp_diag_real_solve	non_qp_route_clears_stale_diagnostics	active
 otspot-core::qp_diag_real_solve	real_solve_publishes_diagnostics_with_exclusive_buckets	active
 otspot-dev	audit::tests::no_dead_params_in_production	active
 otspot-dev	audit::tests::no_eprintln_in_production	active
