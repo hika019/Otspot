@@ -362,11 +362,23 @@ pub struct RayCertificate {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct TimingBreakdown {
     // ── LP simplex 経路 ───────────────────────────────────────────────────────
-    /// Presolve 全体 (run_presolve)
+    /// Presolve 全体 (run_presolve)。QP IPM 経路でも計上 (run_attempt_ladder の
+    /// presolve 窓 wall。以前は QP で未設定だった)。
     pub presolve_us: u64,
-    /// 縮約後 simplex 本体 (solve_without_presolve)
+    /// 縮約後 simplex 本体 (solve_without_presolve)。QP IPM 経路では
+    /// 全 attempt wall 合計 − 全 attempt postsolve 合計 (未採用・延長・
+    /// fallback の attempt も含む求解本体。postsolve は全 attempt 分が
+    /// この窓から除外される)。
+    /// 注意 (review R3): 下の公開 `postsolve_us` は採用 attempt の postsolve
+    /// のみを含むため、未採用 attempt の postsolve は solve_us にも
+    /// postsolve_us にも入らない。公開 2 窓の合計を solve 全体の費用と
+    /// 誤読しないこと。全 attempt の集計は
+    /// `otspot_core::qp::diagnostics::last_qp_solve_diagnostics` (dev 診断)
+    /// を参照。
     pub solve_us: u64,
-    /// Postsolve 総計 (run_postsolve / QP 経路では下記 4 field の合計)
+    /// Postsolve 総計 — LP 経路: run_postsolve 全体の総計。QP IPM 経路:
+    /// 採用された attempt の postsolve のみ (下記 5 field の合計。棄却 attempt
+    /// の postsolve は含まない — 全 attempt 分は SolveDiagnostics 側)。
     pub postsolve_us: u64,
 
     // ── QP IPM 経路: IPM 反復内部 ────────────────────────────────────────────

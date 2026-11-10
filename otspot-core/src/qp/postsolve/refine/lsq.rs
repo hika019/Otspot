@@ -200,6 +200,8 @@ pub(crate) fn refine_dual_lsq_irls(
     const STAGNATE_RATIO: f64 = 0.95;
 
     for irls_iter in 0..max_iters {
+        // 診断: IRLS 外周反復 1 回 (count 側。時間との混在なし)。
+        crate::qp::diagnostics::record_postsolve_iteration(|c| &mut c.postsolve_lsq_iterations);
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
         }

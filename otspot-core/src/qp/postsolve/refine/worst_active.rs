@@ -43,19 +43,14 @@ pub(crate) fn refine_dual_worst_active_block(
         "q.ncols() == solution.len() == num_vars: QpProblem::new() enforces \
          q.ncols() == num_vars, and solution.len() == n is checked above",
     );
-    let aty = if problem.a.nrows() > 0 {
-        problem
-            .a
-            .transpose()
-            .mat_vec_mul(&result.dual_solution)
-            .expect(
-                "a.transpose().ncols() == a.nrows() == num_constraints == dual_solution.len(): \
-             QpProblem::new() enforces a.nrows() == num_constraints, and \
-             dual_solution.len() == m is checked above",
-            )
-    } else {
-        vec![0.0_f64; n]
-    };
+    // Aᵀy は元の CSC の列内積で直接計算する (評価ごとの転置構築を省く)。
+    // a.nrows() == 0 でも全列が空内積となり aty はゼロで埋まる。
+    let mut aty = vec![0.0_f64; n];
+    otspot_num::sparse::mat_t_vec_mul_into(&problem.a, &result.dual_solution, &mut aty).expect(
+        "a.nrows() == num_constraints == dual_solution.len() and a.ncols() == \
+         num_vars == aty.len(): QpProblem::new() enforces a.nrows() == num_constraints \
+         and a.ncols() == num_vars, and dual_solution.len() == m is checked above",
+    );
     let (ax, row_abs_activity) = compute_dual_recovery_row_activity(problem, &result.solution);
     let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, &result.bound_duals);
 

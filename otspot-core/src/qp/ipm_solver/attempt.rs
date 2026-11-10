@@ -16,6 +16,10 @@ use crate::presolve::{
 };
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::certificate::prove_optimal;
+use crate::qp::diagnostics::{
+    begin_attempt, finish_attempt, mark_published_attempt, record_attempt, with_solve_diag,
+    AttemptKind, AttemptOutcomeBits, SolveDiagGuard,
+};
 use crate::qp::problem::QpProblem;
 use crate::tolerances::{Q_DIAG_RANGE_TRIGGER, Q_OFFDIAG_REL, UNDERFLOW_GUARD};
 
@@ -222,6 +226,11 @@ struct ProgressCandidate {
 /// `CONSECUTIVE_IDENTICAL_ATTEMPTS_TO_BREAK` 回続く) と判定した lane の残り attempt を
 /// スキップする (反対 lane は継続。両 lane dead で終了)。
 /// `best`/`progress`/`iter_used` を更新する。
+///
+/// `best_src` は `best` を更新した直近 attempt の診断 id を保持する。実行した
+/// 全 attempt (未採用・break 直前を含む) は `best` 選抜とは独立に診断 record
+/// として必ず残る — 採用 attempt の timing だけが公開されることで失われる
+/// 「実際に走った試行の時間」を拾うための経路 (plan §3.2)。
 #[allow(clippy::too_many_arguments)]
 fn run_attempt_ladder(
     problem: &QpProblem,
@@ -236,6 +245,7 @@ fn run_attempt_ladder(
     best: &mut Option<IpmOutcome>,
     progress: &mut Option<ProgressCandidate>,
     iter_used: &mut usize,
+    best_src: &mut Option<u64>,
 ) {
     // use_ruiz ごとに直前 fingerprint を保持 (index: false=0, true=1)。attempts 列は
     // [(true,t),(false,t),(true,10t),(false,10t),...] と tighten 固定・use_ruiz 反転の
@@ -278,7 +288,22 @@ fn run_attempt_ladder(
         opts.use_ruiz_scaling = use_ruiz;
         opts.ipm.eps = (user_eps / tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
 
+        // 診断: runner 呼び出しを挟んで attempt record を必ず確定する。採用判定・
+        // break より前に record するので、proven break や lane death でも未採用
+        // attempt の時間・回数が取りこぼされない (plan §3.2)。
+        let attempt_start = begin_attempt(AttemptKind::Ladder, use_ruiz, tighten);
+        let rec_id = attempt_start.id;
         let outcome = runner(problem, presolve_result, opts, user_eps);
+        let attempt_rec = finish_attempt(
+            attempt_start,
+            AttemptOutcomeBits {
+                termination: Some(outcome.termination),
+                iterations: outcome.iterations as u64,
+                numerical_failure: outcome.numerical_failure,
+                infeasibility_claim: outcome.infeasibility_status.is_some(),
+            },
+        );
+        record_attempt(attempt_rec);
         let outcome_satisfies = outcome.satisfies_eps(user_eps);
         let outcome_proven = outcome_satisfies && outcome_proves_optimal(&outcome, view, user_eps);
         *iter_used = iter_used.saturating_add(charged_iterations(&outcome, per_attempt_cap));
@@ -302,6 +327,7 @@ fn run_attempt_ladder(
             // eps 許容の prove_optimal mint は、受理部で検証済み (ray/Farkas) の
             // 構造的判定を上書きできない (`finite_mint_may_replace` の doc)。
             *best = Some(outcome);
+            *best_src = Some(rec_id);
             break;
         }
         // 同一 lane (use_ruiz) 内で tighten を変えても bit 同一な run が
@@ -329,9 +355,13 @@ fn run_attempt_ladder(
         };
         prev_by_ruiz[lane] = Some((tighten, AttemptFingerprint::of(&outcome)));
         match &*best {
-            None => *best = Some(outcome),
+            None => {
+                *best = Some(outcome);
+                *best_src = Some(rec_id);
+            }
             Some(prev) if outcome_is_better_candidate(&outcome, prev, view, user_eps) => {
                 *best = Some(outcome);
+                *best_src = Some(rec_id);
             }
             _ => {}
         }
@@ -534,6 +564,10 @@ pub fn solve_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     if options.validate().is_err() {
         return SolverResult::numerical_error();
     }
+    // 診断: solve_ipm 全体 (q-diag scaling・runner・unscale・外側 guard 含む) を
+    // RAII ガードで計時する。drop が全 early return 経路を覆うため、診断は
+    // いつの return でも取りこぼれない (plan §3.1/§3.2)。
+    let _diag_guard = SolveDiagGuard::begin();
     // `eliminated_cols` is structural (q-diag column scaling preserves which columns
     // are A-empty/Q-empty and which presolve removes), so the mask derived inside
     // `solve_ipm_with_runner` on the scaled problem is valid for the guard on the
@@ -772,6 +806,9 @@ fn solve_ipm_with_runner(
     // presolve だけで deadline 予算を食い切り IPM が走れなくなる。この上限は
     // 「presolve に予算を配分するか IPM に回すか」の予算配分ガード (時間予算 proxy)。
     // n か m のどちらかが上限超なら presolve を skip し IPM に予算を残す。
+    // 診断: presolve はトップレベル排他的 bucket の子なので境界時計 1 組だけ
+    // (QP route では元々未設定だった presolve 時間をここで初めて計上する)。
+    let t_presolve = Instant::now();
     let presolve_result = if opts.presolve
         && problem.num_vars <= crate::tolerances::LARGE_PROBLEM_THRESHOLD
         && problem.num_constraints <= crate::tolerances::LARGE_PROBLEM_THRESHOLD
@@ -785,6 +822,7 @@ fn solve_ipm_with_runner(
     } else {
         crate::presolve::QpPresolveResult::no_reduction(problem)
     };
+    with_solve_diag(|d| d.presolve_us += t_presolve.elapsed().as_micros() as u64);
     // presolve が物理削除した col の mask (core.rs::run_ipm_with と同方式)。
     // finalize の prove_optimal と外側 guard_qp_optimal が orig 空間 stationarity を
     // 評価する際、LP-style 完全孤立 EmptyCol (A 列空 AND Q 列空) を kkt_residual_rel が
@@ -815,6 +853,7 @@ fn solve_ipm_with_runner(
     };
 
     if total_deadline.is_some_and(|d| Instant::now() >= d) {
+        let t_final = Instant::now();
         let r = finalize_outcome(
             IpmOutcome::empty(),
             user_eps,
@@ -823,6 +862,7 @@ fn solve_ipm_with_runner(
             false,
             &view,
         );
+        with_solve_diag(|d| d.final_verification_us += t_final.elapsed().as_micros() as u64);
         return (r, eliminated_cols);
     }
 
@@ -830,6 +870,9 @@ fn solve_ipm_with_runner(
     let presolve_did_ruiz = presolve_result.ruiz_scaler.is_some();
     let mut best: Option<IpmOutcome> = None;
     let mut progress: Option<ProgressCandidate> = None;
+    // 診断: best を最後に入れた attempt の id。finalize が採用した outcome の
+    // 発生元を published フラグで結ぶ (未採用 attempt と区別するため)。
+    let mut best_src: Option<u64> = None;
 
     let user_max_iter = options.ipm.max_iter;
     let mut iter_used: usize = 0;
@@ -855,6 +898,7 @@ fn solve_ipm_with_runner(
         &mut best,
         &mut progress,
         &mut iter_used,
+        &mut best_src,
     );
 
     let mut best_ok = best
@@ -883,6 +927,7 @@ fn solve_ipm_with_runner(
             ext_config,
             &mut best,
             &mut iter_used,
+            &mut best_src,
         );
     }
 
@@ -902,11 +947,16 @@ fn solve_ipm_with_runner(
             total_deadline,
             &mut best,
             &mut iter_used,
+            &mut best_src,
         );
     }
 
     let mut outcome = best.unwrap_or_else(IpmOutcome::empty);
 
+    // 診断: finalize (受理判定・status 変換) + Ruiz 歪み guard の wall は
+    // トップレベル final_verification bucket。early な deadline return 経路とは
+    // 別経路なのでここで別途計上する。
+    let t_final = Instant::now();
     // Ruiz 歪みで偽陽性した LocallyOptimal を、元問題 Q の Gershgorin PSD 判定で打ち消す。
     if outcome.is_locally_optimal {
         let ic = crate::qp::ipm_core::kkt::compute_inertia_correction(&problem.q);
@@ -919,8 +969,47 @@ fn solve_ipm_with_runner(
         .cancel_flag
         .as_ref()
         .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
-    let r = finalize_outcome(outcome, user_eps, n_orig, total_deadline, cancelled, &view);
+    let mut r = finalize_outcome(outcome, user_eps, n_orig, total_deadline, cancelled, &view);
+    with_solve_diag(|d| d.final_verification_us += t_final.elapsed().as_micros() as u64);
+    // QP 経路で一度も設定され 0.000s だった presolve_us / solve_us を実測で
+    // R3: 公開 TimingBreakdown の presolve/solve を診断スナップショットから
+    // 填充する (定義は `fill_public_timing_fields` の doc 参照)。
+    fill_public_timing_fields(&mut r);
+    // 採用 attempt の id を結ぶ (best が無かった solve では何も立たない)。
+    if let Some(src) = best_src {
+        mark_published_attempt(src);
+    }
     (r, eliminated_cols)
+}
+
+/// 公開 TimingBreakdown の presolve_us / solve_us を診断 (SolveDiagnostics) の
+/// 全 attempt 集計から填充する。公開フィールドの定義は変更しない (review R3:
+/// 意味の明確化のみ)。
+///
+/// - `solve_us` = 全 attempt wall 合計 − 全 attempt postsolve 合計。全 attempt
+///   (未採用・延長・fallback 含む) の求解本体時間で、caller が「解にかかった
+///   時間」として体感する値から postsolve を除いた窓。
+/// - 公開 `postsolve_us` = 採用 attempt の postsolve のみ (受理 outcome の
+///   TimingBreakdown からそのまま流れ、この填充では触れない)。
+///
+/// したがって未採用 attempt の postsolve は solve_us にも公開 postsolve_us
+/// にも入らず、公開合計 (solve_us + postsolve_us) は solve 全体の費用では
+/// ない。全 attempt の postsolve・回数・排他的内訳は
+/// `qp::diagnostics::last_qp_solve_diagnostics` (SolveDiagnostics) に残り、
+/// dev bin は公開値と並べて postsolve_pub / postsolve_all を表示する。
+fn fill_public_timing_fields(r: &mut crate::problem::SolverResult) {
+    let mut qp_fill = (0u64, 0u64, 0u64);
+    with_solve_diag(|d| {
+        qp_fill.0 = d.presolve_us;
+        qp_fill.1 = d.attempts_wall_sum_us();
+        qp_fill.2 = d.attempts.iter().map(|a| a.postsolve_us).sum();
+    });
+    let (presolve_fill, attempts_wall_us, attempts_postsolve_us) = qp_fill;
+    let tb = r
+        .timing_breakdown
+        .get_or_insert_with(crate::problem::TimingBreakdown::default);
+    tb.presolve_us = presolve_fill;
+    tb.solve_us = attempts_wall_us.saturating_sub(attempts_postsolve_us);
 }
 
 /// `solve_ipm_with_runner` の attempt ループを抜けた時点で best が未証明かつ
@@ -946,6 +1035,7 @@ fn extend_iteration_limit_attempt(
     ext_config: Option<(bool, f64)>,
     best: &mut Option<IpmOutcome>,
     iter_used: &mut usize,
+    best_src: &mut Option<u64>,
 ) -> bool {
     let mut best_ok = false;
     if let (Some((ext_use_ruiz, ext_tighten)), Some(d)) = (ext_config, total_deadline) {
@@ -956,7 +1046,21 @@ fn extend_iteration_limit_attempt(
             opts.ipm.max_iter = remaining_ext;
             opts.use_ruiz_scaling = ext_use_ruiz;
             opts.ipm.eps = (user_eps / ext_tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
+            // 延長 attempt も ladder 試行と同じ診断経路に残す (plan §3.2:
+            // 延長・fallback は採用診断から取りこぼれやすい)。
+            let attempt_start = begin_attempt(AttemptKind::Extension, ext_use_ruiz, ext_tighten);
+            let rec_id = attempt_start.id;
             let ext_outcome = runner(problem, presolve_result, opts, user_eps);
+            let attempt_rec = finish_attempt(
+                attempt_start,
+                AttemptOutcomeBits {
+                    termination: Some(ext_outcome.termination),
+                    iterations: ext_outcome.iterations as u64,
+                    numerical_failure: ext_outcome.numerical_failure,
+                    infeasibility_claim: ext_outcome.infeasibility_status.is_some(),
+                },
+            );
+            record_attempt(attempt_rec);
             let ext_satisfies = ext_outcome.satisfies_eps(user_eps);
             let ext_proven = ext_satisfies && outcome_proves_optimal(&ext_outcome, view, user_eps);
             *iter_used = iter_used.saturating_add(charged_iterations(&ext_outcome, remaining_ext));
@@ -966,6 +1070,7 @@ fn extend_iteration_limit_attempt(
             };
             if (ext_proven && finite_mint_may_replace(best)) || ext_is_better {
                 *best = Some(ext_outcome);
+                *best_src = Some(rec_id);
                 best_ok = ext_proven;
             }
         }
@@ -996,6 +1101,7 @@ fn run_no_presolve_fallback(
     total_deadline: Option<Instant>,
     best: &mut Option<IpmOutcome>,
     iter_used: &mut usize,
+    best_src: &mut Option<u64>,
 ) {
     opts.schur_hint = None;
     let fallback_pre = QpPresolveResult::no_reduction(problem);
@@ -1013,12 +1119,28 @@ fn run_no_presolve_fallback(
         opts.ipm.max_iter = per_attempt_cap;
         opts.use_ruiz_scaling = use_ruiz_fb;
         opts.ipm.eps = (user_eps / base_tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
+        // fallback も ladder と同じ診断経路 (presolve 空間が違うだけで実行された
+        // 試行である事実は同じ)。
+        let attempt_start =
+            begin_attempt(AttemptKind::NoPresolveFallback, use_ruiz_fb, base_tighten);
+        let rec_id = attempt_start.id;
         let fb = runner(problem, &fallback_pre, opts, user_eps);
+        let attempt_rec = finish_attempt(
+            attempt_start,
+            AttemptOutcomeBits {
+                termination: Some(fb.termination),
+                iterations: fb.iterations as u64,
+                numerical_failure: fb.numerical_failure,
+                infeasibility_claim: fb.infeasibility_status.is_some(),
+            },
+        );
+        record_attempt(attempt_rec);
         let fb_satisfies = fb.satisfies_eps(user_eps);
         let fb_proven = fb_satisfies && outcome_proves_optimal(&fb, view, user_eps);
         *iter_used = iter_used.saturating_add(charged_iterations(&fb, per_attempt_cap));
         if fb_proven && finite_mint_may_replace(best) {
             *best = Some(fb);
+            *best_src = Some(rec_id);
             break;
         }
         if best
@@ -1026,6 +1148,7 @@ fn run_no_presolve_fallback(
             .is_some_and(|prev| fallback_can_replace_unproven(&fb, prev, view, user_eps))
         {
             *best = Some(fb);
+            *best_src = Some(rec_id);
         }
     }
 }
@@ -1350,6 +1473,7 @@ mod tests {
             &mut best,
             &mut progress,
             &mut iter_used,
+            &mut None,
         );
         let calls = LANE_LOCAL_CALLS.with(|c| c.borrow().clone());
         // ruiz=true lane は 3 連続 bit 同一で決定的 stall と判定されるが、
@@ -2110,6 +2234,167 @@ mod tests {
             result.status,
             crate::problem::SolveStatus::Optimal,
             "second proven outcome must be the accepted result"
+        );
+    }
+
+    // ── R3: 公開 postsolve と全 attempt postsolve の区別 (sentinel) ──────────
+    //
+    // solve_us = 全 attempt wall − 全 attempt postsolve ながら、公開
+    // postsolve_us は採用 attempt のみという定義関係 (review §4) を、時間を
+    // 注入できる fake runner で検証する。実時間 sleep はしない。旧コメントが
+    // 主張した「postsolve_us 側で全件報告済み」へ revert (未採用 attempt の
+    // postsolve が消えない定義へ変更) すると published/全件 の別関係 assert が
+    // fail する。
+
+    static R3_POSTSOLVE_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    const R3_POSTSOLVE_REJECTED_US: u64 = 3;
+    const R3_POSTSOLVE_ACCEPTED_US: u64 = 1;
+    /// 回数として sink へ注入する値 (µs 合計へ混入しないことの検査用)。
+    const R3_COUNT_POLLUTION: u64 = 999;
+
+    /// 1 回目: 受理ゲート不通過 (gap 失敗) + postsolve 注入の棄却 attempt。
+    /// 2 回目: 受理される postsolve 注入 attempt。各 call で attempt sink へ
+    /// postsolve µs と巨大回数 (reg retries) を書き込む。attempt wall より
+    /// 注入 postsolve が大きくならないよう、sleep なしの純計算で各 attempt に
+    /// 数十 µs 以上の実作業を入れる (秒数の厳密一致は検証しない)。
+    fn runner_postsolve_rejected_then_accepted(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+        _user_eps: f64,
+    ) -> IpmOutcome {
+        use std::hint::black_box;
+        let call = R3_POSTSOLVE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut burn = 0.0_f64;
+        for k in 1..20_000u32 {
+            burn += (k as f64).ln();
+        }
+        black_box(burn);
+        let postsolve_us = if call == 0 {
+            R3_POSTSOLVE_REJECTED_US
+        } else {
+            R3_POSTSOLVE_ACCEPTED_US
+        };
+        crate::qp::diagnostics::with_ippmm_sink(|s| {
+            s.postsolve_us += postsolve_us;
+            s.counts.kkt_reg_retries += R3_COUNT_POLLUTION;
+        });
+        IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0, 0.0],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: if call == 0 { 1e-3 } else { 0.0 },
+            numerical_failure: false,
+            infeasibility_status: None,
+            infeasibility_proven: false,
+            ray_certificate: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: Some(crate::problem::TimingBreakdown {
+                postsolve_us,
+                ..Default::default()
+            }),
+            termination: IpmTermination::Converged,
+        }
+    }
+
+    #[test]
+    fn published_postsolve_is_accepted_only_all_attempt_postsolve_conserved() {
+        use crate::problem::SolveStatus;
+        R3_POSTSOLVE_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        // 内部最优 (x*=0, bounds (-10,10)) の 1 変数 QP: ゼロ dual・ゼロ残差の
+        // fake outcome が本当に prove を通るので受理 attempt で break する
+        // (helper の (0,∞) 版は境界 active で証明不可 → ladder が伸びる)。
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(-10.0, 10.0)],
+        )
+        .unwrap();
+        let mut options = SolverOptions {
+            presolve: false,
+            use_ruiz_scaling: false,
+            ..SolverOptions::default()
+        };
+        options.ipm.eps = 1e-6;
+        options.ipm.max_iter = MAX_ITER_PER_ATTEMPT * 4;
+        let ((result, _mask), diag) = crate::qp::diagnostics::capture_diagnostics(|| {
+            solve_ipm_with_runner(&prob, &options, runner_postsolve_rejected_then_accepted)
+        });
+        assert_eq!(
+            R3_POSTSOLVE_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "1 件目 gap 失敗 → 2 件目受理の 2 attempt"
+        );
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "受理・証明済み iterate が Optimal でない"
+        );
+
+        // 全 attempt (棄却含む) が診断に残り、注入 postsolve が別々で保持される。
+        assert_eq!(
+            diag.attempts.len(),
+            2,
+            "棄却 attempt が診断から脱落している"
+        );
+        assert!(!diag.attempts[0].published && diag.attempts[1].published);
+        assert_eq!(diag.attempts[0].postsolve_us, R3_POSTSOLVE_REJECTED_US);
+        assert_eq!(diag.attempts[1].postsolve_us, R3_POSTSOLVE_ACCEPTED_US);
+        let postsolve_all: u64 = diag.attempts.iter().map(|a| a.postsolve_us).sum();
+        assert_eq!(
+            postsolve_all,
+            R3_POSTSOLVE_REJECTED_US + R3_POSTSOLVE_ACCEPTED_US
+        );
+
+        let tb = result
+            .timing_breakdown
+            .expect("QP solve は timing_breakdown");
+        // 公開 postsolve_us = 採用 attempt のみ (全 attempt 合計ではない)。
+        assert_eq!(
+            tb.postsolve_us, R3_POSTSOLVE_ACCEPTED_US,
+            "公開 postsolve_us は採用 attempt の値でなければならない (review §4)"
+        );
+        assert!(
+            tb.postsolve_us < postsolve_all,
+            "公開値と全 attempt 集計が同一に見える (別窓の区別が崩れた)"
+        );
+
+        // 親子・二重計上関係: solve_us = wall 合計 − 全 attempt postsolve。
+        // 両辺は同じ診断スナップショットから計算するため秒数丸めに依存しない
+        // 代数関係で、厳密一致 assert は計測値一致テストではない。
+        let wall_sum = diag.attempts_wall_sum_us();
+        assert_eq!(
+            tb.solve_us,
+            wall_sum.saturating_sub(postsolve_all),
+            "solve_us の定義 (全 attempt wall − 全 attempt postsolve) から乖離"
+        );
+        assert_eq!(
+            tb.solve_us + postsolve_all,
+            wall_sum,
+            "burn 計算で wall_sum ≫ postsolve_all が成立するはず (二重計上・欠落の検出)"
+        );
+        // 各 attempt の子窓合計 ≤ 親 wall。
+        for a in &diag.attempts {
+            assert!(a.other_us() >= 0, "attempt#{} の子窓合計が wall 超過", a.id);
+        }
+        // 回数 (reg retries) は µs 合計へ混入しない: 注入で全 attempt の
+        // kkt_reg_retries は膨らむが、上記の時間代数関係は不変 (上の assert が
+        // 成立していること自体が混入なしの証拠)。加えて型分離側の集計を確認。
+        assert_eq!(
+            diag.total_counts().kkt_reg_retries,
+            2 * R3_COUNT_POLLUTION,
+            "回数注入が診断側へ保持されていること (時間へは入らない)"
         );
     }
 
@@ -4324,6 +4609,7 @@ mod tests {
             &mut best,
             &mut best_config,
             &mut iter_used,
+            &mut None,
         );
         let calls = DEATH_CALLS.with(|c| c.borrow().clone());
         // exhaust assertion: runner 呼び出し列を bit 列で pin する。深い lane の
@@ -4343,5 +4629,171 @@ mod tests {
             "深い 3 lane の bit 同一 stall で loose lane (tighten=10, 1) が skip された \
              (LISWET7 は loose lane で証明する): calls={calls:?}"
         );
+    }
+
+    // ── P0 診断: 全 attempt の記録 (plan §3 検証) ────────────────────────────
+
+    static DIAG_LADDER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static DIAG_FALLBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    /// 1 回目は gap 不合格 (未証明)、2 回目以降は証明済み outcome。
+    fn runner_diag_fail_then_proven(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+        _user_eps: f64,
+    ) -> IpmOutcome {
+        let call = DIAG_LADDER_CALLS.fetch_add(1, Ordering::SeqCst);
+        IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![],
+            objective: 0.0,
+            iterations: 2,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: if call == 0 { 1e-3 } else { 0.0 },
+            numerical_failure: false,
+            infeasibility_status: None,
+            infeasibility_proven: false,
+            ray_certificate: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+            termination: IpmTermination::Converged,
+        }
+    }
+
+    /// 初回だけ良い objective の未証明解、以降は悪い objective (fallback 相当)。
+    fn runner_diag_incumbent_then_worse(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+        _user_eps: f64,
+    ) -> IpmOutcome {
+        let call = DIAG_FALLBACK_CALLS.fetch_add(1, Ordering::SeqCst);
+        IpmOutcome {
+            solution: vec![if call == 0 { 0.0 } else { 10.0 }],
+            dual_solution: vec![],
+            bound_duals: vec![],
+            objective: if call == 0 { 0.0 } else { 10.0 },
+            iterations: 3,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 1e-3,
+            numerical_failure: false,
+            infeasibility_status: None,
+            infeasibility_proven: false,
+            ray_certificate: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+            termination: IpmTermination::Converged,
+        }
+    }
+
+    fn diag_gate_problem(presolve: bool, ruiz: bool) -> (QpProblem, SolverOptions) {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        )
+        .unwrap();
+        let mut options = SolverOptions {
+            presolve,
+            use_ruiz_scaling: ruiz,
+            ..SolverOptions::default()
+        };
+        options.ipm.eps = 1e-6;
+        options.ipm.max_iter = MAX_ITER_PER_ATTEMPT * 4 + 2;
+        (prob, options)
+    }
+
+    /// 未採用 attempt も診断件数に残る (best 選択での脱落なし): gap 不合格 →
+    /// 証明済みの 2 attempt 列で、件数・published 直結・kind 分類を検証する。
+    #[test]
+    fn diagnostics_record_all_attempts_including_unpublished() {
+        DIAG_LADDER_CALLS.store(0, Ordering::SeqCst);
+        let (prob, options) = diag_gate_problem(false, false);
+        let ((result, _), diag) = crate::qp::diagnostics::capture_diagnostics(|| {
+            solve_ipm_with_runner(&prob, &options, runner_diag_fail_then_proven)
+        });
+        assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+        assert!(
+            diag.attempts.len() >= 2,
+            "未採用の 1 回目 attempt が診断から脱落している: n={}",
+            diag.attempts.len()
+        );
+        assert_eq!(
+            diag.attempts.iter().filter(|a| a.published).count(),
+            1,
+            "published は採用 attempt のちょうど 1 件"
+        );
+        let pub_id = diag.published_attempt().expect("採用 attempt あり");
+        assert_eq!(
+            diag.attempts[diag.attempts.len() - 1].id,
+            pub_id,
+            "証明済み (最後) attempt が published で結ばれること"
+        );
+        assert_eq!(diag.attempts[0].id, 0, "attempt id は solve 内で 0 始まり");
+        assert!(diag
+            .attempts
+            .iter()
+            .all(|a| a.kind == crate::qp::diagnostics::AttemptKind::Ladder));
+        assert!(diag
+            .attempts
+            .iter()
+            .all(|a| a.termination == Some(IpmTermination::Converged)));
+        // 時間 bucket 合計は count を一切含まない (集計バグの sentinel は
+        // diagnostics.rs の counts_never_enter_time_sums で正面から検証)。
+        let _ = diag.total_counts();
+    }
+
+    /// no-presolve fallback attempt も診断に残り、kind で区別できる。
+    #[test]
+    fn diagnostics_record_fallback_attempt_classified() {
+        DIAG_FALLBACK_CALLS.store(0, Ordering::SeqCst);
+        let (prob, options) = diag_gate_problem(true, true);
+        let ((result, _), diag) = crate::qp::diagnostics::capture_diagnostics(|| {
+            solve_ipm_with_runner(&prob, &options, runner_diag_incumbent_then_worse)
+        });
+        assert_eq!(result.objective, 0.0, "incumbent (良い側) が採用されたこと");
+        assert!(
+            diag.attempts
+                .iter()
+                .any(|a| a.kind == crate::qp::diagnostics::AttemptKind::NoPresolveFallback),
+            "no-presolve fallback が診断件数から見て取れない: kinds={:?}",
+            diag.attempts.iter().map(|a| a.kind).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            diag.published_attempt(),
+            Some(diag.attempts[0].id),
+            "incumbent (最初の試行) が published として結ばれること"
+        );
+    }
+
+    /// best が 1 つも成立しない solve でも、実行された attempt 診断は失われない
+    /// (未証明 infeasibility 全滅経路)。
+    #[test]
+    fn diagnostics_survive_when_nothing_published() {
+        let (prob, options) = unproven_gate_problem_and_opts();
+        let ((result, _), diag) = crate::qp::diagnostics::capture_diagnostics(|| {
+            solve_ipm_with_runner(&prob, &options, runner_always_unproven_infeasible)
+        });
+        assert_eq!(result.status, crate::problem::SolveStatus::NumericalError);
+        assert!(
+            !diag.attempts.is_empty(),
+            "採用 attempt なしの solve でも実行 attempt は残る"
+        );
+        assert!(diag.attempts.iter().all(|a| a.infeasibility_claim));
+        // 採用 candidate があっても published は高々 1 件 (二重 published なし)。
+        assert!(diag.attempts.iter().filter(|a| a.published).count() <= 1);
     }
 }

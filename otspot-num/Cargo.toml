@@ -7,6 +7,12 @@ repository.workspace = true
 homepage.workspace = true
 description = "Numerical primitives, pipeline control, and backend contracts for Otspot"
 
+[features]
+# Test-only instrumentation: counts `CscMatrix::transpose()` calls per thread
+# (see `sparse::csc::transpose_count`).  Never enabled by any shipped binary;
+# otspot-core activates it through [dev-dependencies] for sentinel tests only.
+transpose-count = []
+
 [dependencies]
 faer = "0.24.0"
 rayon = "1"

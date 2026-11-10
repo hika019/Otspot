@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3362 testcases, 43 ignored
+# totals: 3393 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -930,6 +930,10 @@ otspot-core	qp::certificate::tests::prove_optimal_stationarity_fails	active
 otspot-core	qp::certificate::tests::prove_optimal_tol_semantics	active
 otspot-core	qp::certificate::tests::prove_optimal_wrong_sign_dual_fails_dual_sign_check	active
 otspot-core	qp::certificate::tests::prove_optimal_z_length_table_box_constraint	active
+otspot-core	qp::diagnostics::tests::capture_restores_outer_scope	active
+otspot-core	qp::diagnostics::tests::counts_never_enter_time_sums	active
+otspot-core	qp::diagnostics::tests::exclusive_buckets_sum_to_parent_when_complete	active
+otspot-core	qp::diagnostics::tests::negative_other_is_surfaced_not_clamped	active
 otspot-core	qp::global::bound::tests::bilinear_off_diagonal_handled	active
 otspot-core	qp::global::bound::tests::concave_diag_qp_interval_min_at_corner	active
 otspot-core	qp::global::bound::tests::convex_diag_qp_interval_matches_box_min	active
@@ -1072,6 +1076,10 @@ otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_slack_noise_on_vacuo
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_vacuous_eq_row_with_nonzero_rhs	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_rejects_zero_row_with_negative_rhs	active
 otspot-core	qp::ipm_core::common::tests::verify_ray_scans_only_rows_present_in_extended_matrix	active
+otspot-core	qp::ipm_core::ippmm::factorize::r1_materialize_accounting_tests::dd_path_counts_only_original_materialize	active
+otspot-core	qp::ipm_core::ippmm::factorize::r1_materialize_accounting_tests::pre_permuted_path_counts_both_materializes	active
+otspot-core	qp::ipm_core::ippmm::factorize::r1_materialize_accounting_tests::retry_and_identity_fallback_count_builds_actually_run	active
+otspot-core	qp::ipm_core::ippmm::factorize::r1_materialize_accounting_tests::schur_path_counts_no_materialize_builds	active
 otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::accepted_ray_dir_only_carries_verified_unbounded_direction	active
 otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::final_structural_check_accepts_ray_guards_cheap_cases	active
 otspot-core	qp::ipm_core::ippmm::iter::gate_ordering_tests::finalize_publishes_ray_payload_only_with_feasible_base	active
@@ -1171,6 +1179,9 @@ otspot-core	qp::ipm_solver::attempt::tests::candidate_order_unproven_infeasibili
 otspot-core	qp::ipm_solver::attempt::tests::converged_termination_does_not_break_early::converged_termination_runs_full_ladder	active
 otspot-core	qp::ipm_solver::attempt::tests::deep_lane_bit_identical_stall_does_not_skip_loose_lanes	active
 otspot-core	qp::ipm_solver::attempt::tests::deterministic_stall_in_one_lane_does_not_skip_other_lane	active
+otspot-core	qp::ipm_solver::attempt::tests::diagnostics_record_all_attempts_including_unpublished	active
+otspot-core	qp::ipm_solver::attempt::tests::diagnostics_record_fallback_attempt_classified	active
+otspot-core	qp::ipm_solver::attempt::tests::diagnostics_survive_when_nothing_published	active
 otspot-core	qp::ipm_solver::attempt::tests::dual_lane_true_stall_breaks_at_third_occurrence::dual_lane_true_stall_breaks_at_expected_call_count	active
 otspot-core	qp::ipm_solver::attempt::tests::empty_col_mask_noop_proof_in_finalize	active
 otspot-core	qp::ipm_solver::attempt::tests::empty_col_qp_solves_optimal_not_false_demoted	active
@@ -1203,6 +1214,7 @@ otspot-core	qp::ipm_solver::attempt::tests::no_presolve_fallback_does_not_replac
 otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::accuracy_floor_termination_reports_stalled	active
 otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::iteration_budget_termination_reports_max_iterations	active
 otspot-core	qp::ipm_solver::attempt::tests::nonconverged_finalize_sentinels::stall_termination_reports_stalled_not_suboptimal	active
+otspot-core	qp::ipm_solver::attempt::tests::published_postsolve_is_accepted_only_all_attempt_postsolve_conserved	active
 otspot-core	qp::ipm_solver::attempt::tests::q_diagonal_scaled_runner_receives_user_eps	active
 otspot-core	qp::ipm_solver::attempt::tests::ruiz_flip_pair_does_not_false_trigger_stall::ruiz_flip_pair_does_not_false_trigger_stall_break	active
 otspot-core	qp::ipm_solver::attempt::tests::runner_receives_user_eps_separate_from_attempt_eps	active
@@ -1450,6 +1462,11 @@ otspot-core	qp::tests::micro_q_dispatch::explicit_zero_q_value_is_structural_zer
 otspot-core	qp::tests::micro_q_dispatch::micro_q_finite_bound_not_pinned_to_bound	active
 otspot-core	qp::tests::micro_q_dispatch::micro_q_psd_qp_is_bounded_and_routes_to_ipm	active
 otspot-core	qp::tests::micro_q_dispatch::structural_zero_q_keeps_lp_route_and_unbounded	active
+otspot-core	qp::tests::p1_atv_golden::p1_guarded_pg_then_worst_active_bitwise_golden	active
+otspot-core	qp::tests::p1_atv_golden::p1_pg_best_not_current_bitwise_golden	active
+otspot-core	qp::tests::p1_atv_golden::p1_pg_multi_reject_line_search_bitwise_golden	active
+otspot-core	qp::tests::p1_atv_sentinels::p1_postsolve_refine_constructs_zero_transposes	active
+otspot-core	qp::tests::p1_atv_sentinels::p1_transpose_counter_observable	active
 otspot-core	qp::tests::pfeas::test_pfeas_row_norm_false_suboptimal_prevention	active
 otspot-core	qp::tests::pfeas::test_pfeas_row_norm_mixed_scale	active
 otspot-core	qp::tests::pfeas::test_row_infinity_norms_basic	active
@@ -1995,6 +2012,11 @@ otspot-core::memory_budget	conic_socp_route_peak_within_budget	active
 otspot-core::memory_budget	lp_route_peak_within_budget	active
 otspot-core::memory_budget	qcqp_bridge_many_sparse_quad_constraints_peak_within_budget	active
 otspot-core::memory_budget	qp_ipm_route_peak_within_budget	active
+otspot-core::qp_diag_real_solve	concurrent_solves_keep_diagnostics_per_thread	active
+otspot-core::qp_diag_real_solve	non_qp_route_clears_stale_diagnostics	active
+otspot-core::qp_diag_real_solve	real_solve_publishes_diagnostics_with_exclusive_buckets	active
+otspot-core::qp_diag_real_solve	threads_2_concurrent_solves_keep_diagnostics_isolated	active
+otspot-core::qp_diag_real_solve	threads_gt_1_preserves_ipm_counters_across_pool_boundary	active
 otspot-dev	audit::tests::no_dead_params_in_production	active
 otspot-dev	audit::tests::no_eprintln_in_production	active
 otspot-dev	audit::tests::no_observation_only_tests	active
@@ -2721,6 +2743,15 @@ otspot-num	sparse::csc::tests::test_mat_vec_mul	active
 otspot-num	sparse::csc::tests::test_mat_vec_mul_dimension_mismatch	active
 otspot-num	sparse::csc::tests::test_sentinel_triplet_non_finite_rejected	active
 otspot-num	sparse::csc::tests::test_transpose	active
+otspot-num	sparse::spmv::tests::aty_accepts_any_csc_matrix_view	active
+otspot-num	sparse::spmv::tests::aty_bitwise_matches_transpose_mat_vec_mul_scans	active
+otspot-num	sparse::spmv::tests::aty_bitwise_matches_transpose_with_stored_zeros	active
+otspot-num	sparse::spmv::tests::aty_empty_rows_empty_cols_zero_dims	active
+otspot-num	sparse::spmv::tests::aty_extreme_scales_bitwise_matches_transpose_path	active
+otspot-num	sparse::spmv::tests::aty_leaves_out_untouched_on_error	active
+otspot-num	sparse::spmv::tests::aty_matches_independent_dense_oracle	active
+otspot-num	sparse::spmv::tests::aty_rectangular_mixed_signs_hand_computed	active
+otspot-num	sparse::spmv::tests::aty_rejects_dimension_mismatch	active
 otspot-num	sparse::vec::tests::test_accessors_match_dense_expansion	active
 otspot-num	sparse::vec::tests::test_from_raw_parts_empty	active
 otspot-num	sparse::vec::tests::test_from_raw_parts_matches_from_dense	active

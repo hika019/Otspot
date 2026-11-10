@@ -6,6 +6,8 @@ mod dual_recovery;
 mod dual_refit;
 mod emptycol_skip;
 mod micro_q_dispatch;
+mod p1_atv_golden;
+mod p1_atv_sentinels;
 mod pfeas;
 mod postsolve;
 mod presolve;
