@@ -9,6 +9,7 @@ pub(crate) fn refine_dual_projected_gradient(
     result: &mut crate::problem::SolverResult,
     eliminated_cols: &[bool],
     deadline: Option<std::time::Instant>,
+    threads: usize,
 ) {
     use twofloat::TwoFloat;
     // 診断: PG 修正の呼び出し回数 (1 呼出 = Cauchy step 1 走査)。
@@ -21,6 +22,12 @@ pub(crate) fn refine_dual_projected_gradient(
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return;
     }
+    // Aᵀy の列分担並列プラン (threads>=2 かつ nnz >= ATY_PAR_MIN_NNZ のとき
+    // のみ生成)。None のとき呼び出し側は逐次 mat_t_vec_mul_into をそのまま
+    // 実行する — threads=1 では rayon を経由しないコード経路そのもの。
+    // 列境界は Cauchy 反復ごとに変わらず、y だけが毎回新しくなるので
+    // プランは 1 呼出に 1 回作ればよい (作成 O(ncols))。
+    let aty_plan = otspot_num::sparse::AtyParallelPlan::new(&problem.a, threads);
     let zero_dd = TwoFloat::from(0.0);
     let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
     for col in 0..n {
@@ -42,8 +49,14 @@ pub(crate) fn refine_dual_projected_gradient(
     // 曲率計算用の workspace (objective クロージャとは共有しない)。
     let mut ws_aty_grad = vec![0.0_f64; n];
     let mut objective = |y: &[f64], residual_out: &mut [f64]| -> f64 {
-        otspot_num::sparse::mat_t_vec_mul_into(&problem.a, y, &mut ws_aty)
-            .expect("dim validated upstream");
+        match &aty_plan {
+            Some(plan) => {
+                otspot_num::sparse::mat_t_vec_mul_into_parallel(&problem.a, y, &mut ws_aty, plan)
+                    .expect("dim validated upstream")
+            }
+            None => otspot_num::sparse::mat_t_vec_mul_into(&problem.a, y, &mut ws_aty)
+                .expect("dim validated upstream"),
+        }
         let mut obj = 0.0_f64;
         for j in 0..n {
             residual_out[j] = ws_aty[j] - target[j];
@@ -184,11 +197,25 @@ pub(crate) fn refine_dual_projected_gradient(
             break;
         }
         // 曲率 ‖Aᵀ grad‖² も同じ直接列内積カーネルで評価する (専用 workspace)。
-        otspot_num::sparse::mat_t_vec_mul_into(&problem.a, &grad, &mut ws_aty_grad).expect(
-            "a.nrows() == grad.len() and a.ncols() == ws_aty_grad.len(): grad is \
-             always the output of a.mat_vec_mul(..), whose length is unconditionally \
-             a.nrows(), and ws_aty_grad is sized n == a.ncols() by construction",
-        );
+        match &aty_plan {
+            Some(plan) => otspot_num::sparse::mat_t_vec_mul_into_parallel(
+                &problem.a,
+                &grad,
+                &mut ws_aty_grad,
+                plan,
+            )
+            .expect(
+                "a.nrows() == grad.len() and a.ncols() == ws_aty_grad.len(): grad is \
+                 always the output of a.mat_vec_mul(..), whose length is unconditionally \
+                 a.nrows(), and ws_aty_grad is sized n == a.ncols() by construction",
+            ),
+            None => otspot_num::sparse::mat_t_vec_mul_into(&problem.a, &grad, &mut ws_aty_grad)
+                .expect(
+                    "a.nrows() == grad.len() and a.ncols() == ws_aty_grad.len(): grad is \
+                     always the output of a.mat_vec_mul(..), whose length is unconditionally \
+                     a.nrows(), and ws_aty_grad is sized n == a.ncols() by construction",
+                ),
+        }
         let curvature = ws_aty_grad.iter().map(|v| v * v).sum::<f64>();
         if !curvature.is_finite() || curvature < PG_CURV_FLOOR {
             break;

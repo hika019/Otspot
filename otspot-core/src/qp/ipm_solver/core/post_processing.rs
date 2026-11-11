@@ -170,6 +170,7 @@ pub(super) fn refine_post_processing(
             final_sol,
             eliminated_cols,
             opts.deadline,
+            opts.threads,
         );
         diag.acc("refit.proj_grad", t);
         let t = diag.tic();
@@ -257,6 +258,7 @@ pub(super) fn refine_post_processing(
             final_sol,
             eliminated_cols,
             opts.deadline,
+            opts.threads,
         );
         crate::qp::refine_dual_worst_active_block(
             orig_problem,
@@ -445,6 +447,7 @@ pub(super) fn refine_krylov_and_projection(
         KRYLOV_MAX_ITERS,
         target_pf,
         opts.deadline,
+        opts.threads,
     );
     crate::qp::diagnostics::with_ippmm_sink(|s| {
         s.counts.postsolve_ir_iterations += ir_iters as u64;
