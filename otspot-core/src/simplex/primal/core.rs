@@ -283,6 +283,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             basis,
             &mut y_dense,
             &mut rc_vec,
+            options.threads,
         );
         if enable_cleanup_stall_bail {
             let current_df = reduced_cost_dual_infeasibility(&rc_vec, &is_basic, n_price);
@@ -364,6 +365,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                                     basis,
                                     &mut y_fresh,
                                     &mut rc_fresh,
+                                    options.threads,
                                 );
                                 reduced_cost_dual_infeasibility(&rc_fresh, &is_basic, n_price)
                             }

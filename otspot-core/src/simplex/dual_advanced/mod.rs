@@ -363,9 +363,11 @@ fn warm_basis_is_dual_feasible(
     n_price: usize,
     m: usize,
     dual_tol: f64,
+    threads: usize,
 ) -> bool {
-    let rc =
-        super::dual_common::compute_reduced_costs(a, c, basis_mgr, is_basic, n_price, m, basis);
+    let rc = super::dual_common::compute_reduced_costs(
+        a, c, basis_mgr, is_basic, n_price, m, basis, threads,
+    );
     rc.iter()
         .enumerate()
         .all(|(j, &r)| is_basic[j] || r >= -dual_tol)
@@ -463,6 +465,7 @@ pub(crate) fn solve_dual_advanced(
                         sf.n_total,
                         m,
                         options.dual_tol,
+                        options.threads,
                     ) {
                         // dual infeasible under new c → cold start
                         bump_legacy_warm_start_dual_infeasible_fallback();
