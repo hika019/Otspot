@@ -130,6 +130,23 @@ impl AtyParallelPlan {
     pub fn column_bounds(&self) -> &[usize] {
         &self.col_bounds
     }
+
+    /// `f` をこの計画の実行プール内で走らせる (プールの内部は公開しない)。
+    ///
+    /// 呼び出し側が Cauchy step のような反復本体ごとプール内で実行したい場合
+    /// 用: 本体をプール外スレッドで走らせると step ごとに外側から
+    /// [`mat_t_vec_mul_into_parallel`] の `install` が入り、ワーカーの
+    /// 睡眠→起床コストが毎ステップ乗って逐次より遅くなる (実測 +13〜25%)。
+    /// 本体を worker 上で実行すると内側 `install` は current-join になり、
+    /// 呼び出し側ワーカー自身が計算に参加するため起床が実質 1 ワーカー分に
+    /// 落ちる (交差点プローブが測った形状)。
+    pub fn install_in_pool<F, T>(&self, f: F) -> T
+    where
+        F: Send + FnOnce() -> T,
+        T: Send,
+    {
+        self.pool.install(f)
+    }
 }
 
 /// 列 nnz が均荷重になるよう列番号空間を `parts` 個の連続区間に切る。

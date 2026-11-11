@@ -28,265 +28,283 @@ pub(crate) fn refine_dual_projected_gradient(
     // 列境界は Cauchy 反復ごとに変わらず、y だけが毎回新しくなるので
     // プランは 1 呼出に 1 回作ればよい (作成 O(ncols))。
     let aty_plan = otspot_num::sparse::AtyParallelPlan::new(&problem.a, threads);
-    let zero_dd = TwoFloat::from(0.0);
-    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
-    for col in 0..n {
-        let xv = result.solution[col];
-        for k in problem.q.col_ptr()[col]..problem.q.col_ptr()[col + 1] {
-            qx_dd[problem.q.row_ind()[k]] += TwoFloat::new_mul(problem.q.values()[k], xv);
-        }
-    }
-    let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
-    let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, &result.bound_duals);
-    let target: Vec<f64> = (0..n)
-        .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
-        .collect();
-
-    // y は常に長さ m (project_feasible / caller が保証)、Aᵀy の出力は常に長さ
-    // n == a.ncols() なので mat_t_vec_mul_into に失敗経路はない。列内積を元の
-    // CSC から直接計算するため、objective 評価ごとの転置構築が不要になる。
-    let mut ws_aty = vec![0.0_f64; n];
-    // 曲率計算用の workspace (objective クロージャとは共有しない)。
-    let mut ws_aty_grad = vec![0.0_f64; n];
-    let mut objective = |y: &[f64], residual_out: &mut [f64]| -> f64 {
-        match &aty_plan {
-            Some(plan) => {
-                otspot_num::sparse::mat_t_vec_mul_into_parallel(&problem.a, y, &mut ws_aty, plan)
-                    .expect("dim validated upstream")
+    // PG 本体をプランのプール内で 1 回だけ走らせる (プローブが ×1.4〜1.9 を
+    // 実測した形状 — 外側 install 1 個の内側で Cauchy step を回す)。本体を
+    // 呼び出し元スレッド (プール外) で走らせると step ごとに外側から install
+    // することになり、ワーカーの睡眠→起床コストが毎ステップ乗って逐次より
+    // 遅くなる (STADAT1 threads=2 +25%・LISWET12 +13% を実測、2026-11-12)。
+    // 本体を worker 上で実行すれば内側 install は current-join になり、呼び
+    // 出し側ワーカー自身が計算に参加するため起床は残り 1 ワーカー分だけ。
+    // ゲート不発 (threads<=1 / nnz 閾値未満) は本体を直接呼ぶ — rayon を
+    // 経由しない逐次経路は完全に不変。
+    let mut body = || {
+        let zero_dd = TwoFloat::from(0.0);
+        let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            let xv = result.solution[col];
+            for k in problem.q.col_ptr()[col]..problem.q.col_ptr()[col + 1] {
+                qx_dd[problem.q.row_ind()[k]] += TwoFloat::new_mul(problem.q.values()[k], xv);
             }
-            None => otspot_num::sparse::mat_t_vec_mul_into(&problem.a, y, &mut ws_aty)
+        }
+        let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
+        let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, &result.bound_duals);
+        let target: Vec<f64> = (0..n)
+            .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
+            .collect();
+
+        // y は常に長さ m (project_feasible / caller が保証)、Aᵀy の出力は常に長さ
+        // n == a.ncols() なので mat_t_vec_mul_into に失敗経路はない。列内積を元の
+        // CSC から直接計算するため、objective 評価ごとの転置構築が不要になる。
+        let mut ws_aty = vec![0.0_f64; n];
+        // 曲率計算用の workspace (objective クロージャとは共有しない)。
+        let mut ws_aty_grad = vec![0.0_f64; n];
+        let mut objective = |y: &[f64], residual_out: &mut [f64]| -> f64 {
+            match &aty_plan {
+                Some(plan) => otspot_num::sparse::mat_t_vec_mul_into_parallel(
+                    &problem.a,
+                    y,
+                    &mut ws_aty,
+                    plan,
+                )
                 .expect("dim validated upstream"),
-        }
-        let mut obj = 0.0_f64;
-        for j in 0..n {
-            residual_out[j] = ws_aty[j] - target[j];
-            obj += 0.5 * residual_out[j] * residual_out[j];
-        }
-        obj
-    };
-
-    let mut proj_lower = vec![f64::NEG_INFINITY; m];
-    let mut proj_upper = vec![f64::INFINITY; m];
-    for (i, ct) in problem.constraint_types.iter().enumerate() {
-        match ct {
-            crate::problem::ConstraintType::Le => proj_lower[i] = 0.0,
-            crate::problem::ConstraintType::Ge => proj_upper[i] = 0.0,
-            crate::problem::ConstraintType::Eq => {}
-        }
-    }
-    for j in 0..n {
-        let cs = problem.a.col_ptr()[j];
-        let ce = problem.a.col_ptr()[j + 1];
-        if ce - cs != 1 {
-            continue;
-        }
-        let row = problem.a.row_ind()[cs];
-        let aij = problem.a.values()[cs];
-        if !aij.is_finite() || aij == 0.0 {
-            continue;
-        }
-        let (lb, ub) = problem.bounds[j];
-        let lb_finite = lb.is_finite();
-        let ub_finite = ub.is_finite();
-        if lb_finite && ub_finite && (lb - ub).abs() < FX_TOL {
-            continue;
-        }
-        let rhs = -(qx[j] + problem.c[j]) / aij;
-        if !rhs.is_finite() {
-            continue;
-        }
-        match (lb_finite, ub_finite) {
-            (true, false) => {
-                if aij > 0.0 {
-                    proj_lower[row] = proj_lower[row].max(rhs);
-                } else {
-                    proj_upper[row] = proj_upper[row].min(rhs);
-                }
+                None => otspot_num::sparse::mat_t_vec_mul_into(&problem.a, y, &mut ws_aty)
+                    .expect("dim validated upstream"),
             }
-            (false, true) => {
-                if aij > 0.0 {
-                    proj_upper[row] = proj_upper[row].min(rhs);
-                } else {
-                    proj_lower[row] = proj_lower[row].max(rhs);
-                }
+            let mut obj = 0.0_f64;
+            for j in 0..n {
+                residual_out[j] = ws_aty[j] - target[j];
+                obj += 0.5 * residual_out[j] * residual_out[j];
             }
-            _ => {}
-        }
-    }
-    for i in 0..m {
-        if proj_lower[i] > proj_upper[i] {
-            let (lo, hi) = match problem.constraint_types[i] {
-                crate::problem::ConstraintType::Le => (0.0, f64::INFINITY),
-                crate::problem::ConstraintType::Ge => (f64::NEG_INFINITY, 0.0),
-                crate::problem::ConstraintType::Eq => (f64::NEG_INFINITY, f64::INFINITY),
-            };
-            proj_lower[i] = lo;
-            proj_upper[i] = hi;
-        }
-    }
+            obj
+        };
 
-    let project_feasible = |y: &mut [f64]| {
+        let mut proj_lower = vec![f64::NEG_INFINITY; m];
+        let mut proj_upper = vec![f64::INFINITY; m];
         for (i, ct) in problem.constraint_types.iter().enumerate() {
             match ct {
-                crate::problem::ConstraintType::Le => y[i] = y[i].max(0.0),
-                crate::problem::ConstraintType::Ge => y[i] = y[i].min(0.0),
+                crate::problem::ConstraintType::Le => proj_lower[i] = 0.0,
+                crate::problem::ConstraintType::Ge => proj_upper[i] = 0.0,
                 crate::problem::ConstraintType::Eq => {}
             }
         }
+        for j in 0..n {
+            let cs = problem.a.col_ptr()[j];
+            let ce = problem.a.col_ptr()[j + 1];
+            if ce - cs != 1 {
+                continue;
+            }
+            let row = problem.a.row_ind()[cs];
+            let aij = problem.a.values()[cs];
+            if !aij.is_finite() || aij == 0.0 {
+                continue;
+            }
+            let (lb, ub) = problem.bounds[j];
+            let lb_finite = lb.is_finite();
+            let ub_finite = ub.is_finite();
+            if lb_finite && ub_finite && (lb - ub).abs() < FX_TOL {
+                continue;
+            }
+            let rhs = -(qx[j] + problem.c[j]) / aij;
+            if !rhs.is_finite() {
+                continue;
+            }
+            match (lb_finite, ub_finite) {
+                (true, false) => {
+                    if aij > 0.0 {
+                        proj_lower[row] = proj_lower[row].max(rhs);
+                    } else {
+                        proj_upper[row] = proj_upper[row].min(rhs);
+                    }
+                }
+                (false, true) => {
+                    if aij > 0.0 {
+                        proj_upper[row] = proj_upper[row].min(rhs);
+                    } else {
+                        proj_lower[row] = proj_lower[row].max(rhs);
+                    }
+                }
+                _ => {}
+            }
+        }
         for i in 0..m {
-            y[i] = y[i].clamp(proj_lower[i], proj_upper[i]);
+            if proj_lower[i] > proj_upper[i] {
+                let (lo, hi) = match problem.constraint_types[i] {
+                    crate::problem::ConstraintType::Le => (0.0, f64::INFINITY),
+                    crate::problem::ConstraintType::Ge => (f64::NEG_INFINITY, 0.0),
+                    crate::problem::ConstraintType::Eq => (f64::NEG_INFINITY, f64::INFINITY),
+                };
+                proj_lower[i] = lo;
+                proj_upper[i] = hi;
+            }
         }
-    };
 
-    /// Lower bound on the projected-gradient iteration count (clamp min).
-    const PG_MIN_ITER: usize = 200;
-    /// Upper bound on the projected-gradient iteration count (clamp max).
-    const PG_MAX_ITER: usize = 2000;
-    /// Gradient ∞-norm below which we declare convergence (no descent direction).
-    const PG_GRAD_INF_TOL: f64 = 1e-14;
-    /// Minimum Cauchy step size; guards against underflow when grad²/curvature
-    /// rounds to zero. Distinct from `PG_GRAD_INF_TOL` so changing the
-    /// convergence threshold does not silently alter the step-size floor.
-    const PG_STEP_MIN: f64 = 1e-14;
-    /// Squared-norm floor for gradient and curvature; below this the Cauchy step
-    /// formula is ill-conditioned and we stop.
-    const PG_CURV_FLOOR: f64 = 1e-28;
-    /// Maximum Cauchy step size; clamps the gradient-descent step to prevent
-    /// overshooting when curvature is very small.
-    const PG_STEP_MAX: f64 = 1e8;
-    /// Per-variable base for objective convergence threshold.
-    /// Scaled by `max(n, 1)` to give absolute tolerance in projected gradient refinement.
-    const PG_OBJ_CONVERGE_BASE: f64 = 1e-16;
+        let project_feasible = |y: &mut [f64]| {
+            for (i, ct) in problem.constraint_types.iter().enumerate() {
+                match ct {
+                    crate::problem::ConstraintType::Le => y[i] = y[i].max(0.0),
+                    crate::problem::ConstraintType::Ge => y[i] = y[i].min(0.0),
+                    crate::problem::ConstraintType::Eq => {}
+                }
+            }
+            for i in 0..m {
+                y[i] = y[i].clamp(proj_lower[i], proj_upper[i]);
+            }
+        };
 
-    let mut y_start = result.dual_solution.clone();
-    project_feasible(&mut y_start);
-    // 反復間再利用する workspace: current / trial の点と残差。受理時にのみ
-    // バッファを swap するため、評価ごとに確保していた aty・y_try・残差の
-    // 再割当が消える (best は current と別保持のまま clone で独立させる)。
-    let mut residual_curr = vec![0.0_f64; n];
-    let mut obj_curr = objective(&y_start, &mut residual_curr);
-    let mut y_curr = y_start;
-    let mut y_try = y_curr.clone();
-    let mut residual_try = vec![0.0_f64; n];
-    let mut y_best = y_curr.clone();
-    let mut obj_best = obj_curr;
-    let mut prev_obj = obj_curr;
+        /// Lower bound on the projected-gradient iteration count (clamp min).
+        const PG_MIN_ITER: usize = 200;
+        /// Upper bound on the projected-gradient iteration count (clamp max).
+        const PG_MAX_ITER: usize = 2000;
+        /// Gradient ∞-norm below which we declare convergence (no descent direction).
+        const PG_GRAD_INF_TOL: f64 = 1e-14;
+        /// Minimum Cauchy step size; guards against underflow when grad²/curvature
+        /// rounds to zero. Distinct from `PG_GRAD_INF_TOL` so changing the
+        /// convergence threshold does not silently alter the step-size floor.
+        const PG_STEP_MIN: f64 = 1e-14;
+        /// Squared-norm floor for gradient and curvature; below this the Cauchy step
+        /// formula is ill-conditioned and we stop.
+        const PG_CURV_FLOOR: f64 = 1e-28;
+        /// Maximum Cauchy step size; clamps the gradient-descent step to prevent
+        /// overshooting when curvature is very small.
+        const PG_STEP_MAX: f64 = 1e8;
+        /// Per-variable base for objective convergence threshold.
+        /// Scaled by `max(n, 1)` to give absolute tolerance in projected gradient refinement.
+        const PG_OBJ_CONVERGE_BASE: f64 = 1e-16;
 
-    let pg_max_iters = m.saturating_mul(2).clamp(PG_MIN_ITER, PG_MAX_ITER);
-    const ACCEPT_TOL_REL: f64 = 1e-12;
-    let obj_converge_thresh = PG_OBJ_CONVERGE_BASE * (n as f64).max(1.0);
-    const STAGNATE_MIN_RATIO: f64 = 1e-7;
+        let mut y_start = result.dual_solution.clone();
+        project_feasible(&mut y_start);
+        // 反復間再利用する workspace: current / trial の点と残差。受理時にのみ
+        // バッファを swap するため、評価ごとに確保していた aty・y_try・残差の
+        // 再割当が消える (best は current と別保持のまま clone で独立させる)。
+        let mut residual_curr = vec![0.0_f64; n];
+        let mut obj_curr = objective(&y_start, &mut residual_curr);
+        let mut y_curr = y_start;
+        let mut y_try = y_curr.clone();
+        let mut residual_try = vec![0.0_f64; n];
+        let mut y_best = y_curr.clone();
+        let mut obj_best = obj_curr;
+        let mut prev_obj = obj_curr;
 
-    for _ in 0..pg_max_iters {
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            break;
-        }
-        if obj_curr < obj_converge_thresh {
-            break;
-        }
-        let grad = problem.a.mat_vec_mul(&residual_curr).expect(
-            "a.ncols() == residual_curr.len() == num_vars: QpProblem::new() enforces \
+        let pg_max_iters = m.saturating_mul(2).clamp(PG_MIN_ITER, PG_MAX_ITER);
+        const ACCEPT_TOL_REL: f64 = 1e-12;
+        let obj_converge_thresh = PG_OBJ_CONVERGE_BASE * (n as f64).max(1.0);
+        const STAGNATE_MIN_RATIO: f64 = 1e-7;
+
+        for _ in 0..pg_max_iters {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                break;
+            }
+            if obj_curr < obj_converge_thresh {
+                break;
+            }
+            let grad = problem.a.mat_vec_mul(&residual_curr).expect(
+                "a.ncols() == residual_curr.len() == num_vars: QpProblem::new() enforces \
              a.ncols() == num_vars, and residual_curr is always sized n by `objective`",
-        );
-        let grad_inf = grad.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        if !grad_inf.is_finite() || grad_inf < PG_GRAD_INF_TOL {
-            break;
-        }
-        let grad_sq = grad.iter().map(|v| v * v).sum::<f64>();
-        if !grad_sq.is_finite() || grad_sq < PG_CURV_FLOOR {
-            break;
-        }
-        // 曲率 ‖Aᵀ grad‖² も同じ直接列内積カーネルで評価する (専用 workspace)。
-        match &aty_plan {
-            Some(plan) => otspot_num::sparse::mat_t_vec_mul_into_parallel(
-                &problem.a,
-                &grad,
-                &mut ws_aty_grad,
-                plan,
-            )
-            .expect(
-                "a.nrows() == grad.len() and a.ncols() == ws_aty_grad.len(): grad is \
-                 always the output of a.mat_vec_mul(..), whose length is unconditionally \
-                 a.nrows(), and ws_aty_grad is sized n == a.ncols() by construction",
-            ),
-            None => otspot_num::sparse::mat_t_vec_mul_into(&problem.a, &grad, &mut ws_aty_grad)
+            );
+            let grad_inf = grad.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            if !grad_inf.is_finite() || grad_inf < PG_GRAD_INF_TOL {
+                break;
+            }
+            let grad_sq = grad.iter().map(|v| v * v).sum::<f64>();
+            if !grad_sq.is_finite() || grad_sq < PG_CURV_FLOOR {
+                break;
+            }
+            // 曲率 ‖Aᵀ grad‖² も同じ直接列内積カーネルで評価する (専用 workspace)。
+            match &aty_plan {
+                Some(plan) => otspot_num::sparse::mat_t_vec_mul_into_parallel(
+                    &problem.a,
+                    &grad,
+                    &mut ws_aty_grad,
+                    plan,
+                )
                 .expect(
                     "a.nrows() == grad.len() and a.ncols() == ws_aty_grad.len(): grad is \
+                 always the output of a.mat_vec_mul(..), whose length is unconditionally \
+                 a.nrows(), and ws_aty_grad is sized n == a.ncols() by construction",
+                ),
+                None => otspot_num::sparse::mat_t_vec_mul_into(&problem.a, &grad, &mut ws_aty_grad)
+                    .expect(
+                        "a.nrows() == grad.len() and a.ncols() == ws_aty_grad.len(): grad is \
                      always the output of a.mat_vec_mul(..), whose length is unconditionally \
                      a.nrows(), and ws_aty_grad is sized n == a.ncols() by construction",
-                ),
-        }
-        let curvature = ws_aty_grad.iter().map(|v| v * v).sum::<f64>();
-        if !curvature.is_finite() || curvature < PG_CURV_FLOOR {
-            break;
-        }
-        let base_step = (grad_sq / curvature).clamp(PG_STEP_MIN, PG_STEP_MAX);
-        let mut accepted = false;
-        let mut step = base_step;
-        while step > 0.0 {
-            for i in 0..m {
-                y_try[i] = y_curr[i] - step * grad[i];
+                    ),
             }
-            project_feasible(&mut y_try);
-            let obj_try = objective(&y_try, &mut residual_try);
-            if obj_try <= obj_curr + ACCEPT_TOL_REL * (1.0 + obj_curr) {
-                // 受理時にのみ current/trial を swap する。objective が
-                // residual_try 全域を受理判定前に書き終えているので、swap 後
-                // の (y_curr, residual_curr) は同一試行点の組になる。
-                std::mem::swap(&mut y_curr, &mut y_try);
-                std::mem::swap(&mut residual_curr, &mut residual_try);
-                obj_curr = obj_try.min(obj_curr);
-                if obj_curr < obj_best {
-                    y_best = y_curr.clone();
-                    obj_best = obj_curr;
+            let curvature = ws_aty_grad.iter().map(|v| v * v).sum::<f64>();
+            if !curvature.is_finite() || curvature < PG_CURV_FLOOR {
+                break;
+            }
+            let base_step = (grad_sq / curvature).clamp(PG_STEP_MIN, PG_STEP_MAX);
+            let mut accepted = false;
+            let mut step = base_step;
+            while step > 0.0 {
+                for i in 0..m {
+                    y_try[i] = y_curr[i] - step * grad[i];
                 }
-                accepted = true;
+                project_feasible(&mut y_try);
+                let obj_try = objective(&y_try, &mut residual_try);
+                if obj_try <= obj_curr + ACCEPT_TOL_REL * (1.0 + obj_curr) {
+                    // 受理時にのみ current/trial を swap する。objective が
+                    // residual_try 全域を受理判定前に書き終えているので、swap 後
+                    // の (y_curr, residual_curr) は同一試行点の組になる。
+                    std::mem::swap(&mut y_curr, &mut y_try);
+                    std::mem::swap(&mut residual_curr, &mut residual_try);
+                    obj_curr = obj_try.min(obj_curr);
+                    if obj_curr < obj_best {
+                        y_best = y_curr.clone();
+                        obj_best = obj_curr;
+                    }
+                    accepted = true;
+                    break;
+                }
+                let next_step = step * 0.5;
+                if next_step == step {
+                    break;
+                }
+                step = next_step;
+            }
+            if !accepted {
                 break;
             }
-            let next_step = step * 0.5;
-            if next_step == step {
+            let relative_improvement = if prev_obj > 0.0 {
+                (prev_obj - obj_curr) / prev_obj
+            } else {
+                0.0
+            };
+            if relative_improvement < STAGNATE_MIN_RATIO {
                 break;
             }
-            step = next_step;
+            prev_obj = obj_curr;
         }
-        if !accepted {
-            break;
-        }
-        let relative_improvement = if prev_obj > 0.0 {
-            (prev_obj - obj_curr) / prev_obj
-        } else {
-            0.0
-        };
-        if relative_improvement < STAGNATE_MIN_RATIO {
-            break;
-        }
-        prev_obj = obj_curr;
-    }
 
-    let mut tmp = result.clone();
-    tmp.dual_solution = y_best;
-    let view = crate::qp::ipm_solver::outcome::ProblemView {
-        q: &problem.q,
-        a: &problem.a,
-        c: &problem.c,
-        b: &problem.b,
-        bounds: &problem.bounds,
-        constraint_types: &problem.constraint_types,
-        eliminated_cols,
+        let mut tmp = result.clone();
+        tmp.dual_solution = y_best;
+        let view = crate::qp::ipm_solver::outcome::ProblemView {
+            q: &problem.q,
+            a: &problem.a,
+            c: &problem.c,
+            b: &problem.b,
+            bounds: &problem.bounds,
+            constraint_types: &problem.constraint_types,
+            eliminated_cols,
+        };
+        let pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            &view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+        let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            &view,
+            &tmp.solution,
+            &tmp.dual_solution,
+            &tmp.bound_duals,
+        );
+        if post < pre {
+            result.dual_solution = tmp.dual_solution;
+        }
     };
-    let pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(
-        &view,
-        &result.solution,
-        &result.dual_solution,
-        &result.bound_duals,
-    );
-    let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
-        &view,
-        &tmp.solution,
-        &tmp.dual_solution,
-        &tmp.bound_duals,
-    );
-    if post < pre {
-        result.dual_solution = tmp.dual_solution;
+    match &aty_plan {
+        Some(plan) => plan.install_in_pool(body),
+        None => body(),
     }
 }
