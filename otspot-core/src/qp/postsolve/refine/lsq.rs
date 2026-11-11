@@ -4,7 +4,7 @@
 //!   DD 残差で改善した場合のみ採用 (退行防止)。
 //! - `refine_dual_lsq_irls`: IRLS で componentwise rel を最小化 (L∞ 漸近)。
 
-use crate::qp::aat::build_aat_upper_csc;
+use crate::qp::aat::build_aat_upper_csc_scaled;
 use crate::qp::kkt_resid;
 use crate::qp::postsolve::postprocess::compute_lsq_dual_y;
 use crate::qp::problem::QpProblem;
@@ -223,25 +223,17 @@ pub(crate) fn refine_dual_lsq_irls(
             }
         }
 
-        let mut a_scaled = problem.a.clone();
-        for k in 0..n {
-            let s = weights[k].sqrt();
-            if (s - 1.0).abs() < 1e-15 {
-                continue;
-            }
-            let cs = a_scaled.col_ptr()[k];
-            let ce = a_scaled.col_ptr()[k + 1];
-            for idx in cs..ce {
-                a_scaled.values_mut()[idx] *= s;
-            }
-        }
-
-        let aat_w = match build_aat_upper_csc(&a_scaled, n, m) {
+        // 重み √w を AAT 構築内で列スケールとして適用する。旧手順の
+        // 「problem.a.clone() → values を in-place で同倍率スケーリング → 無スケール
+        // 構築」に対し、各成分の掛け算・accumulate 順序が一致し結果はビット同一
+        // (build_aat_upper_csc_scaled の doc 参照)。per-iteration の CscMatrix clone を消す。
+        let col_scales: Vec<f64> = (0..n).map(|k| weights[k].sqrt()).collect();
+        let aat_w = match build_aat_upper_csc_scaled(&problem.a, n, m, Some(&col_scales)) {
             Some(mat) => mat,
             None => break,
         };
-        let factor = match otspot_num::linalg::ldl::factorize_budget(
-            &aat_w,
+        let factor = match otspot_num::linalg::ldl::factorize_budget_owned(
+            aat_w,
             otspot_num::linalg::kkt_solver::max_l_nnz_from_budget(),
         ) {
             Ok(f) => f,
