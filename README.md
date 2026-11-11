@@ -135,29 +135,27 @@ GIL release during `solve()`, pickling).
 ## Performance
 
 Solve-rate benchmark on standard public sets via the `otspot-dev` benchmark harness
-(shell scripts — **not** `cargo bench`). Measured 2026-08-08 at commits `e4895ff3`–`e2f184d3`
-(the diff between these commits is docs-only; solver code is identical):
-`jobs = 6`, `timeout = 1000s`, `eps ∈ {1e-6, 1e-8}` (SOCP uses `jobs = 1`; see below).
+(shell scripts — **not** `cargo bench`). QP sets (Maros–Mészáros, QPLIB) measured 2026-11-11 at
+`07dad197` (v0.7.6); LP/MILP sets measured 2026-11-01 at `e6486511` (`lp`/`milp`/`conic` solver code
+is unchanged between the two commits): `jobs = 6`, `timeout = 1000s`, `eps ∈ {1e-6, 1e-8}`
+(SOCP uses `jobs = 1`; see below).
 
 | Problem type | Set | # | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
 | Feasible LP | Netlib | 109 | 109 optimal | 108 optimal, 1 suboptimal |
-| Convex QP | Maros–Mészáros | 138 | 121 optimal, 1 suboptimal, 10 stalled, 2 mismatch, 4 no-ref | 97 optimal, 4 suboptimal, 34 stalled, 1 timeout, 2 no-ref |
-| QCQP | QPLIB | 41 | 12 optimal, 3 suboptimal, 7 stalled, 3 timeout, 11 not-supported, 5 skip | 10 optimal, 4 suboptimal, 7 stalled, 4 timeout, 11 not-supported, 5 skip |
+| Convex QP | Maros–Mészáros | 138 | 131 optimal, 6 stalled, 1 maxiter | 115 optimal, 22 stalled, 1 timeout |
+| QCQP | QPLIB | 47 | 15 optimal, 7 stalled, 9 timeout, 11 not-supported, 5 skip | 15 optimal, 7 stalled, 9 timeout, 11 not-supported, 5 skip |
 | MILP | MIPLIB 2017 small | 20 | 7 optimal, 13 timeout, 0 error | 7 optimal, 13 timeout, 0 error |
 | Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
-**Optimal** = KKT-verified against a known objective (proof-carrying). **Stalled** = the IPM made no further progress before its iteration/time budget and claims no solution. **Suboptimal** = solved but fails the strict optimality certificate. **No-ref** = solved with no published objective to check against.
+**Optimal** = KKT-verified against a known objective (proof-carrying). **Stalled** = the IPM made no further progress before its iteration/time budget and claims no solution. **Suboptimal** = solved but fails the strict optimality certificate. **Maxiter** = hit the iteration limit and claims no solution.
 
 LP: the only miss is `greenbea` (Suboptimal at @1e-8).
 
-QP: named misses are `UBH1` (Suboptimal at both eps) and `POWELL20` (Timeout at @1e-8).
-The `LISWET7` objective mismatch listed here predates the 2026-10 baseline migration to the
-certified c0-inclusive Maros–Mészáros CSV (`docs/baseline-certificate-contract.md`); with the
-current baseline `LISWET7` reaches Optimal and agrees with the certified reference within
-1e-6 (measured 2026-10-30), and the Maros–Mészáros row above (incl. `2 mismatch`,
-`LISWET7`/`LISWET11`) is against the pre-migration CSV and awaits re-measurement.
+QP: at @1e-6 the misses are `AUG2DCQP`, `LISWET8`, `LISWET9`, `LISWET11`, `QPCBOEI2`, `STADAT1` (stalled) and `VALUES` (maxiter); at @1e-8, 22 problems stall (7 of them `LISWET*`) and `POWELL20` times out. `UBH1` and `LISWET7` are optimal at both eps. `VALUES` is reported as maxiter under jobs=6 load; run alone it stalls (iters=168).
+The 2026-10 baseline migration to the certified c0-inclusive Maros–Mészáros CSV
+(`docs/baseline-certificate-contract.md`) removed the earlier `LISWET7`/`LISWET11` objective mismatches.
 Under the certificate contract the CSV now carries 88 of the 138 objective values as
 machine-checkable claims (12 LISWET included, via a regeneration manifest); the other
 50 are explicitly labelled pre-contract reference values, not certified optima.
