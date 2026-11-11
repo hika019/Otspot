@@ -15,6 +15,25 @@ use otspot_num::linalg::kkt_solver::{
 use otspot_num::linalg::timeout::TimeoutCtx;
 use otspot_num::sparse::CscMatrix;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AssemblyTimingKind {
+    OriginalMaterialize,
+    Permutation,
+    PermutedMaterialize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ASSEMBLY_TIMING_TRACE: std::cell::RefCell<Vec<(AssemblyTimingKind, u64)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn trace_assembly_timing(kind: AssemblyTimingKind, elapsed_us: u64) {
+    ASSEMBLY_TIMING_TRACE.with(|trace| trace.borrow_mut().push((kind, elapsed_us)));
+}
+
 /// 反復間で sparsity 不変な構造を保持する。
 pub(super) struct FactorizeCaches {
     pub(super) amd_perm: Option<Vec<usize>>,
@@ -113,6 +132,10 @@ pub(super) fn factorize_kkt_with_retry(
                 .materialize(ctx.sigma_vec, rho_retry, delta_retry)
         };
         let (asm_us, is_schur_build) = (t_asm.elapsed().as_micros() as u64, ctx.use_schur);
+        #[cfg(test)]
+        if !is_schur_build {
+            trace_assembly_timing(AssemblyTimingKind::OriginalMaterialize, asm_us);
+        }
         with_ippmm_sink(|s| {
             if is_schur_build {
                 s.ipm.assembly_us += asm_us;
@@ -130,6 +153,8 @@ pub(super) fn factorize_kkt_with_retry(
                 ctx.timeout_ctx.deadline,
             ));
             let amd_us = t_amd.elapsed().as_micros() as u64;
+            #[cfg(test)]
+            trace_assembly_timing(AssemblyTimingKind::Permutation, amd_us);
             with_ippmm_sink(|s| s.ipm.assembly_us += amd_us);
         }
         let perm = caches.amd_perm.as_ref().unwrap();
@@ -139,6 +164,8 @@ pub(super) fn factorize_kkt_with_retry(
             let t_perm = std::time::Instant::now();
             caches.aug_permuted = Some(ctx.aug_cache.permute(perm));
             let perm_us = t_perm.elapsed().as_micros() as u64;
+            #[cfg(test)]
+            trace_assembly_timing(AssemblyTimingKind::Permutation, perm_us);
             with_ippmm_sink(|s| s.ipm.assembly_us += perm_us);
         }
         // 診断 (R1): 置換済み materialize は行列組み立て (helper の doc に
@@ -250,6 +277,8 @@ pub(super) fn factorize_kkt_with_retry(
             .aug_cache
             .materialize(ctx.sigma_vec, rho_retry, delta_fallback);
         let asm_fb_us = t_asm_fb.elapsed().as_micros() as u64;
+        #[cfg(test)]
+        trace_assembly_timing(AssemblyTimingKind::OriginalMaterialize, asm_fb_us);
         let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows()).collect();
         let t_fb = std::time::Instant::now();
         let fb_result = factorize_kkt_with_cached_perm_par(
@@ -314,6 +343,8 @@ fn materialize_permuted_in_assembly(
     let t_perm_mat = std::time::Instant::now();
     let pre_permuted = permuted_cache.materialize(ctx.sigma_vec, rho_retry, delta_retry);
     let perm_mat_us = t_perm_mat.elapsed().as_micros() as u64;
+    #[cfg(test)]
+    trace_assembly_timing(AssemblyTimingKind::PermutedMaterialize, perm_mat_us);
     with_ippmm_sink(|s| s.record_materialize_permuted(perm_mat_us));
     pre_permuted
 }
@@ -560,6 +591,43 @@ mod r1_materialize_accounting_tests {
         assert_eq!(c.materialize_total_calls(), 2, "総計は導出値");
         assert_eq!(c.kkt_schur_builds, 0);
         assert_eq!(c.kkt_health_probes, 1, "健全プローブは 1 試行 1 回");
+    }
+
+    /// 実際の pre-permuted factorization を走らせ、両 materialize call-site の
+    /// 別カウントと、それぞれの実測時間が assembly bucket に入ることを検証する。
+    /// µs の個別値はクロックに依存するため、独立して採取した各窓の和と突合する。
+    #[test]
+    fn pre_permuted_call_sites_attribute_original_and_permuted_time() {
+        let fx = fixture(true);
+        ASSEMBLY_TIMING_TRACE.with(|trace| trace.borrow_mut().clear());
+        let (outcome, rec, _caches) = factorize_once(&fx, false, false, 1.0);
+        assert!(matches!(outcome, FactorizeOutcome::Ok { .. }));
+        assert_eq!(rec.counts.materialize_original_calls, 1);
+        assert_eq!(rec.counts.materialize_permuted_calls, 1);
+        assert_eq!(rec.counts.kkt_factorize_attempts, 1);
+
+        let trace = ASSEMBLY_TIMING_TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()));
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|entry| entry.0 == AssemblyTimingKind::OriginalMaterialize)
+                .count(),
+            1,
+            "実際の元順序 materialize 窓が 1 回"
+        );
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|entry| entry.0 == AssemblyTimingKind::PermutedMaterialize)
+                .count(),
+            1,
+            "実際の置換済み materialize 窓が 1 回"
+        );
+        let assembly_oracle: u64 = trace.iter().map(|entry| entry.1).sum();
+        assert_eq!(
+            rec.ipm.assembly_us, assembly_oracle,
+            "original/permuted materialize と permutation 構築の実測窓が assembly bucket に計上される"
+        );
     }
 
     /// Schur 経路: 実行されていない構築 (元順序/置換済み) が加算されない

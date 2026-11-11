@@ -15,7 +15,7 @@ use super::outcome::{IpmOutcome, IpmTermination, ProblemView};
 use crate::options::SolverOptions;
 use crate::presolve::{postsolve_qp_with_dual_recovery, QpPresolveResult};
 use crate::problem::{SolveStatus, TimingBreakdown};
-use crate::qp::diagnostics::with_ippmm_sink;
+use crate::qp::diagnostics::{with_ippmm_sink, PostsolveStage};
 use crate::qp::problem::QpProblem;
 use crate::tolerances::any_nonfinite;
 
@@ -76,7 +76,7 @@ fn run_ipm_with(
     // 診断: postsolve / verification の時間を attempt sink の排他的 bucket へ
     // 各 stage 完了時に積む。early return (dims mismatch など) までに走った
     // stage 分は失われない。
-    let sink_postsolve = |us: u64| with_ippmm_sink(|s| s.postsolve_us += us);
+    let sink_postsolve = |stage, us| with_ippmm_sink(|s| s.record_postsolve(stage, us));
     let sink_verify = |us: u64| with_ippmm_sink(|s| s.verification_us += us);
 
     let mut opts_for_ipm = tighten_ipm_eps_for_presolve_scale(opts, presolve_result);
@@ -160,7 +160,7 @@ fn run_ipm_with(
         );
     }
     let postsolve_map_us = t_postsolve_map.elapsed().as_micros() as u64;
-    sink_postsolve(postsolve_map_us);
+    sink_postsolve(PostsolveStage::Map, postsolve_map_us);
     if final_sol.solution.len() != orig_problem.num_vars {
         return IpmOutcome {
             solution: Vec::new(),
@@ -227,7 +227,8 @@ fn run_ipm_with(
         postsolve_recovery_us = t_recovery.elapsed().as_micros() as u64;
     }
     let postsolve_lsq_us = t_lsq.elapsed().as_micros() as u64 - postsolve_recovery_us;
-    sink_postsolve(postsolve_lsq_us + postsolve_recovery_us);
+    sink_postsolve(PostsolveStage::Lsq, postsolve_lsq_us);
+    sink_postsolve(PostsolveStage::Recovery, postsolve_recovery_us);
 
     // 元空間 post-processing 3 段階: (1) primal projection, (2) y/z 交互 refit + IRLS,
     // (3) saddle-point Krylov IR。
@@ -268,7 +269,7 @@ fn run_ipm_with(
         );
     }
     let postsolve_refine_us = t_refine.elapsed().as_micros() as u64;
-    sink_postsolve(postsolve_refine_us);
+    sink_postsolve(PostsolveStage::Refine, postsolve_refine_us);
 
     let t_gate2 = std::time::Instant::now();
     let kkt_pass_after_refine = !lp_crossover_will_certify
@@ -301,7 +302,7 @@ fn run_ipm_with(
         );
     }
     let postsolve_krylov_ir_us = t_krylov.elapsed().as_micros() as u64;
-    sink_postsolve(postsolve_krylov_ir_us);
+    sink_postsolve(PostsolveStage::KrylovIr, postsolve_krylov_ir_us);
     // Sentinel: the IR would run whenever the IPM made progress; this is true iff
     // the gate skipped it. Derived from `run_krylov_ir` (not `kkt_already_pass`)
     // so that dropping the `&& !kkt_already_pass` gate flips this to false.

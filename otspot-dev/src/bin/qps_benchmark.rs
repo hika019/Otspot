@@ -163,10 +163,8 @@ fn phase_timing_note(result: &SolverResult) -> String {
 /// 時間行と回数行を分けて描画する (count を µs と混在させない表示側の約束)。
 fn solve_diagnostics_lines(diag: &otspot_core::qp::diagnostics::SolveDiagnostics) -> Vec<String> {
     let s = |us: u64| format!("{:.3}", us as f64 / 1_000_000.0);
-    // R3: 公開 TimingBreakdown.postsolve_us は採用 attempt のみ。全 attempt の
-    // postsolve (棄却・延長・fallback 含む) を並記し、公開値が solve 全体の
-    // postsolve 費用と誤読されるのを防ぐ (SolveDiagnostics の既存値の表示で、
-    // 集計の二重実装はしない)。
+    // R3: 公開 TimingBreakdown.postsolve_us は全 attempt 合計。診断 record 側の
+    // 合計も併記して、公開集計との一致を確認できるようにする。
     let postsolve_all_us: u64 = diag.attempts.iter().map(|a| a.postsolve_us).sum();
     let postsolve_pub_us = diag
         .published_attempt()

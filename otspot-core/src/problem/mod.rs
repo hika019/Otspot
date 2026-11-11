@@ -369,16 +369,11 @@ pub struct TimingBreakdown {
     /// 全 attempt wall 合計 − 全 attempt postsolve 合計 (未採用・延長・
     /// fallback の attempt も含む求解本体。postsolve は全 attempt 分が
     /// この窓から除外される)。
-    /// 注意 (review R3): 下の公開 `postsolve_us` は採用 attempt の postsolve
-    /// のみを含むため、未採用 attempt の postsolve は solve_us にも
-    /// postsolve_us にも入らない。公開 2 窓の合計を solve 全体の費用と
-    /// 誤読しないこと。全 attempt の集計は
-    /// `otspot_core::qp::diagnostics::last_qp_solve_diagnostics` (dev 診断)
-    /// を参照。
+    /// QP IPM 経路では下の公開 `postsolve_us` も全 attempt を含むため、
+    /// `solve_us + postsolve_us` は attempt wall の合計に対応する。
     pub solve_us: u64,
     /// Postsolve 総計 — LP 経路: run_postsolve 全体の総計。QP IPM 経路:
-    /// 採用された attempt の postsolve のみ (下記 5 field の合計。棄却 attempt
-    /// の postsolve は含まない — 全 attempt 分は SolveDiagnostics 側)。
+    /// 全 attempt の postsolve 合計 (棄却・延長・fallback 含む。下記 5 field の合計)。
     pub postsolve_us: u64,
 
     // ── QP IPM 経路: IPM 反復内部 ────────────────────────────────────────────
@@ -391,7 +386,7 @@ pub struct TimingBreakdown {
     /// MINRES (iterative) backend が 1 回以上使われたか
     pub ipm_used_iterative: bool,
 
-    // ── QP IPM 経路: postsolve 段階別 ────────────────────────────────────────
+    // ── QP IPM 経路: 全 attempt の postsolve 段階別 ────────────────────────────
     /// postsolve_qp_with_dual_recovery (reduced → orig 空間写像)
     pub postsolve_map_us: u64,
     /// refine_postsolve_dual_lsq (元空間 y LSQ refine)
