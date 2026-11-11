@@ -14,13 +14,16 @@ use std::time::Instant;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: lp_solve_diag <file.mps|file.qps> [--timeout <secs>] [--eps <tol>]");
+        eprintln!("usage: lp_solve_diag <file.mps|file.qps> [--timeout <secs>] [--eps <tol>] [--threads <n>]");
         return ExitCode::from(2);
     }
 
     let mut path: Option<String> = None;
     let mut timeout_secs = 100.0_f64;
     let mut eps = 1e-6_f64;
+    // 求解用スレッド予算 (既定 1 = 完全逐次)。LP 全列スイープの列並列化の
+    // A/B 測定用 (dev 診断専用、公開 API 非変更)。
+    let mut threads: usize = 1;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -52,6 +55,20 @@ fn main() -> ExitCode {
                     }
                 }
             }
+            "--threads" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    eprintln!("error: --threads requires a value");
+                    return ExitCode::from(2);
+                };
+                match value.parse::<usize>() {
+                    Ok(v) => threads = v.max(1),
+                    Err(_) => {
+                        eprintln!("error: invalid --threads value: {value}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             other => path = Some(other.to_string()),
         }
         i += 1;
@@ -78,6 +95,7 @@ fn main() -> ExitCode {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(timeout_secs);
     opts.tolerance = Some(Tolerance::Custom(eps));
+    opts.threads = threads;
 
     let profile = otspot_core::diag::lp_scale_profile_enabled();
     if profile {
