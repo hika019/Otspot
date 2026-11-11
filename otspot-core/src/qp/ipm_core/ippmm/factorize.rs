@@ -21,6 +21,8 @@ enum AssemblyTimingKind {
     OriginalMaterialize,
     Permutation,
     PermutedMaterialize,
+    FactorizeWindowStarted,
+    FactorizeWindowElapsed,
 }
 
 #[cfg(test)]
@@ -32,6 +34,13 @@ thread_local! {
 #[cfg(test)]
 fn trace_assembly_timing(kind: AssemblyTimingKind, elapsed_us: u64) {
     ASSEMBLY_TIMING_TRACE.with(|trace| trace.borrow_mut().push((kind, elapsed_us)));
+}
+
+#[inline]
+fn start_factorize_timer() -> std::time::Instant {
+    #[cfg(test)]
+    trace_assembly_timing(AssemblyTimingKind::FactorizeWindowStarted, 0);
+    std::time::Instant::now()
 }
 
 /// 反復間で sparsity 不変な構造を保持する。
@@ -180,7 +189,7 @@ pub(super) fn factorize_kkt_with_retry(
         } else {
             None
         };
-        let t_factor = std::time::Instant::now();
+        let t_factor = start_factorize_timer();
         let factor_result = if use_pre_permuted {
             factorize_kkt_pre_permuted_cached_par(
                 pre_permuted_opt.as_ref().unwrap(),
@@ -207,6 +216,11 @@ pub(super) fn factorize_kkt_with_retry(
         };
         let iter_factorize = t_factor.elapsed();
         let iter_factorize_ns = iter_factorize.as_nanos();
+        #[cfg(test)]
+        trace_assembly_timing(
+            AssemblyTimingKind::FactorizeWindowElapsed,
+            iter_factorize.as_micros() as u64,
+        );
         with_ippmm_sink(|s| {
             s.ipm.factor_us += iter_factorize.as_micros() as u64;
             s.counts.kkt_factorize_attempts += 1;
@@ -594,8 +608,9 @@ mod r1_materialize_accounting_tests {
     }
 
     /// 実際の pre-permuted factorization を走らせ、両 materialize call-site の
-    /// 別カウントと、それぞれの実測時間が assembly bucket に入ることを検証する。
-    /// µs の個別値はクロックに依存するため、独立して採取した各窓の和と突合する。
+    /// 別カウントと、それぞれの実測時間が assembly bucket に入り、factor 窓と
+    /// 重ならないことを検証する。µs の個別値はクロックに依存するため、独立して
+    /// 採取した各窓の和と突合する。
     #[test]
     fn pre_permuted_call_sites_attribute_original_and_permuted_time() {
         let fx = fixture(true);
@@ -623,10 +638,42 @@ mod r1_materialize_accounting_tests {
             1,
             "実際の置換済み materialize 窓が 1 回"
         );
-        let assembly_oracle: u64 = trace.iter().map(|entry| entry.1).sum();
+        let permuted_index = trace
+            .iter()
+            .position(|entry| entry.0 == AssemblyTimingKind::PermutedMaterialize)
+            .expect("置換済み materialize の計測イベント");
+        let factor_start_index = trace
+            .iter()
+            .position(|entry| entry.0 == AssemblyTimingKind::FactorizeWindowStarted)
+            .expect("factorize 窓の開始イベント");
+        assert!(
+            permuted_index < factor_start_index,
+            "置換済み materialize は factorize 窓開始より前 (重複計上しない)"
+        );
+        let assembly_oracle: u64 = trace
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.0,
+                    AssemblyTimingKind::OriginalMaterialize
+                        | AssemblyTimingKind::Permutation
+                        | AssemblyTimingKind::PermutedMaterialize
+                )
+            })
+            .map(|entry| entry.1)
+            .sum();
         assert_eq!(
             rec.ipm.assembly_us, assembly_oracle,
             "original/permuted materialize と permutation 構築の実測窓が assembly bucket に計上される"
+        );
+        let factorize_oracle: u64 = trace
+            .iter()
+            .filter(|entry| entry.0 == AssemblyTimingKind::FactorizeWindowElapsed)
+            .map(|entry| entry.1)
+            .sum();
+        assert_eq!(
+            rec.ipm.factor_us, factorize_oracle,
+            "factor bucket は factorize 窓のみで、materialize 窓を重複計上しない"
         );
     }
 
