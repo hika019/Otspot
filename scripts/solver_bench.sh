@@ -61,6 +61,16 @@ BUILD_FEATURES="parallel"
 if [[ -n "$EXTRA_FEATURES" ]]; then
   BUILD_FEATURES="parallel,$EXTRA_FEATURES"
 fi
+
+# OTSPOT_BENCH_EXTRA_ARGS: bench 起動時に求解バイナリへ追加で渡す flag を
+# 空白区切りで指定する (例: OTSPOT_BENCH_EXTRA_ARGS="--threads 2")。
+# bench_parallel.sh は solver_bench.sh への引数を固定書式で組み立てるため、
+# threads のような A/B 実験用 flag はこの環境変数で注入する (既定は空 =
+# 従来動作と完全一致)。
+if [[ -n "${OTSPOT_BENCH_EXTRA_ARGS:-}" ]]; then
+  # shellcheck disable=SC2206 # 意図的な単語分割: flag 区切りは空白のみ
+  BINARY_ARGS+=(${OTSPOT_BENCH_EXTRA_ARGS})
+fi
 # 必ず cargo build を実行する。cargo の依存追跡 (mtime + Cargo.lock + features) に
 # 任せれば不要な再コンパイルは走らない。
 #
