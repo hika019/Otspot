@@ -304,6 +304,16 @@ pub(crate) struct AttemptSink {
 }
 
 impl AttemptSink {
+    pub(crate) fn record_materialize_original(&mut self, elapsed_us: u64) {
+        self.ipm.assembly_us += elapsed_us;
+        self.counts.materialize_original_calls += 1;
+    }
+
+    pub(crate) fn record_materialize_permuted(&mut self, elapsed_us: u64) {
+        self.ipm.assembly_us += elapsed_us;
+        self.counts.materialize_permuted_calls += 1;
+    }
+
     /// worker 側の sink を加算合併する。全フィールドが累計 µs / 回数であり、
     /// 直接書き込みと同じ終値を順序によらず作る (review R2 の回収側)。
     fn merge_from(&mut self, w: &AttemptSink) {
@@ -650,5 +660,18 @@ mod tests {
             record_attempt(ladder_attempt(50, 10, false));
         });
         assert_eq!(outer.attempts.len(), 1);
+    }
+
+    #[test]
+    fn materialize_durations_are_exclusive_assembly_and_counted_by_order() {
+        let mut sink = AttemptSink::default();
+        sink.record_materialize_original(17);
+        sink.record_materialize_permuted(29);
+
+        assert_eq!(sink.ipm.assembly_us, 46);
+        assert_eq!(sink.ipm.factor_us, 0);
+        assert_eq!(sink.counts.materialize_original_calls, 1);
+        assert_eq!(sink.counts.materialize_permuted_calls, 1);
+        assert_eq!(sink.counts.materialize_total_calls(), 2);
     }
 }

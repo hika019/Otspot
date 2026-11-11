@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3393 testcases, 43 ignored
+# totals: 3400 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -904,6 +904,9 @@ otspot-core	problem::tests::test_lp_problem_new_invalid_c_dimension	active
 otspot-core	problem::tests::test_lp_problem_new_valid	active
 otspot-core	problem::tests::test_solve_status_display	active
 otspot-core	problem::tests::test_solver_result_display	active
+otspot-core	qp::aat::tests::builds_upper_triangle_of_a_at_with_independent_dense_oracle	active
+otspot-core	qp::aat::tests::zero_column_matrix_returns_regularized_diagonal	active
+otspot-core	qp::aat::tests::zero_row_matrix_returns_empty_product	active
 otspot-core	qp::certificate::tests::guard_lp_optimal_demotes_wrong_sign_dual	active
 otspot-core	qp::certificate::tests::guard_lp_optimal_no_false_demote_for_residuals_below_lp_cert_tol	active
 otspot-core	qp::certificate::tests::guard_lp_optimal_passes_correct_result	active
@@ -933,6 +936,7 @@ otspot-core	qp::certificate::tests::prove_optimal_z_length_table_box_constraint	
 otspot-core	qp::diagnostics::tests::capture_restores_outer_scope	active
 otspot-core	qp::diagnostics::tests::counts_never_enter_time_sums	active
 otspot-core	qp::diagnostics::tests::exclusive_buckets_sum_to_parent_when_complete	active
+otspot-core	qp::diagnostics::tests::materialize_durations_are_exclusive_assembly_and_counted_by_order	active
 otspot-core	qp::diagnostics::tests::negative_other_is_surfaced_not_clamped	active
 otspot-core	qp::global::bound::tests::bilinear_off_diagonal_handled	active
 otspot-core	qp::global::bound::tests::concave_diag_qp_interval_min_at_corner	active
@@ -2013,6 +2017,7 @@ otspot-core::memory_budget	lp_route_peak_within_budget	active
 otspot-core::memory_budget	qcqp_bridge_many_sparse_quad_constraints_peak_within_budget	active
 otspot-core::memory_budget	qp_ipm_route_peak_within_budget	active
 otspot-core::qp_diag_real_solve	concurrent_solves_keep_diagnostics_per_thread	active
+otspot-core::qp_diag_real_solve	consecutive_ipm_solves_preserve_diagnostics_for_threads_1_2_4	active
 otspot-core::qp_diag_real_solve	non_qp_route_clears_stale_diagnostics	active
 otspot-core::qp_diag_real_solve	real_solve_publishes_diagnostics_with_exclusive_buckets	active
 otspot-core::qp_diag_real_solve	threads_2_concurrent_solves_keep_diagnostics_isolated	active
@@ -2426,8 +2431,10 @@ otspot-io	qps::tests::test_sentinel_qps_quadobj_undefined_column_is_error	active
 otspot-io	qps::tests::test_solve_qps_basic	active
 otspot-io	qps::tests::test_solve_with_negated_obj_row_rhs	active
 otspot-io	size_limits::tests::check_declared_size_accepts_boundary_and_rejects_above	active
+otspot-io	size_limits::tests::try_vec_filled_initializes_requested_length	active
 otspot-io	size_limits::tests::try_vec_filled_rejects_huge_length_gracefully	active
 otspot-io	size_limits::tests::try_vec_with_capacity_rejects_huge_capacity_gracefully	active
+otspot-io	size_limits::tests::try_vec_with_capacity_reserves_without_eager_filling	active
 otspot-io::bug_repro	test_hs268_dual_residual_diagnose	active
 otspot-io::bug_repro	test_ipm_hs21_cmp_full_solver	active
 otspot-io::bug_repro	test_scsd6_equality_constraints	active

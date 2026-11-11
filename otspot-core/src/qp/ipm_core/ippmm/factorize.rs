@@ -114,11 +114,11 @@ pub(super) fn factorize_kkt_with_retry(
         };
         let (asm_us, is_schur_build) = (t_asm.elapsed().as_micros() as u64, ctx.use_schur);
         with_ippmm_sink(|s| {
-            s.ipm.assembly_us += asm_us;
             if is_schur_build {
+                s.ipm.assembly_us += asm_us;
                 s.counts.kkt_schur_builds += 1;
             } else {
-                s.counts.materialize_original_calls += 1;
+                s.record_materialize_original(asm_us);
             }
         });
         if caches.amd_perm.is_none() {
@@ -266,9 +266,8 @@ pub(super) fn factorize_kkt_with_retry(
         // assembly 窓の計時は上の t_asm_fb で factor 窓 (t_fb) と排他、回数も
         // 構築点で materialize_original_calls に計上 — 置換済みは構築しない)。
         with_ippmm_sink(|s| {
-            s.ipm.assembly_us += asm_fb_us;
+            s.record_materialize_original(asm_fb_us);
             s.ipm.factor_us += fb_elapsed.as_micros() as u64;
-            s.counts.materialize_original_calls += 1;
             s.counts.kkt_factorize_attempts += 1;
         });
         match fb_result {
@@ -315,10 +314,7 @@ fn materialize_permuted_in_assembly(
     let t_perm_mat = std::time::Instant::now();
     let pre_permuted = permuted_cache.materialize(ctx.sigma_vec, rho_retry, delta_retry);
     let perm_mat_us = t_perm_mat.elapsed().as_micros() as u64;
-    with_ippmm_sink(|s| {
-        s.ipm.assembly_us += perm_mat_us;
-        s.counts.materialize_permuted_calls += 1;
-    });
+    with_ippmm_sink(|s| s.record_materialize_permuted(perm_mat_us));
     pre_permuted
 }
 
