@@ -120,6 +120,14 @@ pub(super) fn compute_reduced_costs_into(
 /// slice — byte-for-byte the loop this function has always run. Only a
 /// dedicated-pool dispatch (never the global rayon pool, mirroring
 /// `with_solver_pool`'s under-use-over-overrun fallback policy) may parallelize.
+///
+/// `#[inline(always)]` is load-bearing: without it the extracted sweep loop
+/// cost the default threads=1 path ~+3% wall on rail507/osa-60/pds-30 (diag
+/// A/B 77.7s → 80.0s with plain extraction; pds-30's status even flipped past
+/// the bench deadline). Inlining restores the pre-extraction code shape in
+/// the caller, which is the whole point of the "budget 1 = byte-identical,
+/// speed-identical code path" contract.
+#[inline(always)]
 fn scan_reduced_costs(
     a: &CscMatrix,
     c: &[f64],
@@ -167,7 +175,10 @@ fn scan_reduced_costs(
 /// boundaries cannot reorder. Any change to the accumulation order here
 /// changes every LP trajectory — it is guarded by
 /// `full_sweep_matches_reference_addition_order`.
-#[inline]
+///
+/// `#[inline(always)]`: also required for the speed-identical default path —
+/// see [`scan_reduced_costs`] on why the loop must end up inside the caller.
+#[inline(always)]
 fn scan_reduced_cost_range(
     a: &CscMatrix,
     c: &[f64],
