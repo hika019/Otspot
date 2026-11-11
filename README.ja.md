@@ -132,28 +132,25 @@ Rust の `constraint!` マクロと異なる、スレッド安全性、`solve()`
 
 ## 性能
 
-標準公開セットでの求解率ベンチ。`otspot-dev` の benchmark harness（shell スクリプト — **`cargo bench` ではない**）で計測。2026-08-08 に commits `e4895ff3`–`e2f184d3` 時点（この間の差分は docs のみで、ソルバコードは同一）で実測:
+標準公開セットでの求解率ベンチ。`otspot-dev` の benchmark harness（shell スクリプト — **`cargo bench` ではない**）で計測。QP 系（Maros–Mészáros、QPLIB）は 2026-11-11 に `07dad197`（v0.7.6）、LP/MILP 系は 2026-11-01 に `e6486511` で実測（この間 `lp`/`milp`/`conic` のソルバコードは変更なし）:
 `jobs = 6`、`timeout = 1000s`、`eps ∈ {1e-6, 1e-8}`（SOCP は `jobs = 1`、詳細は後述）。
 
 | 問題種別 | セット | 問題数 | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
 | 実行可能 LP | Netlib | 109 | 最適解 109 | 最適解 108、Suboptimal 1 |
-| 凸 QP | Maros–Mészáros | 138 | 最適解 121、Suboptimal 1、Stalled 10、mismatch 2、no-ref 4 | 最適解 97、Suboptimal 4、Stalled 34、Timeout 1、no-ref 2 |
-| QCQP | QPLIB | 41 | 最適解 12、Suboptimal 3、Stalled 7、Timeout 3、not-supported 11、skip 5 | 最適解 10、Suboptimal 4、Stalled 7、Timeout 4、not-supported 11、skip 5 |
+| 凸 QP | Maros–Mészáros | 138 | 最適解 131、Stalled 6、Maxiter 1 | 最適解 115、Stalled 22、Timeout 1 |
+| QCQP | QPLIB | 47 | 最適解 15、Stalled 7、Timeout 9、not-supported 11、skip 5 | 最適解 15、Stalled 7、Timeout 9、not-supported 11、skip 5 |
 | MILP | MIPLIB 2017 small | 20 | 最適解 7、Timeout 13、error 0 | 最適解 7、Timeout 13、error 0 |
 | 実行不可能 LP | Netlib | 29 | 正答 29 | 正答 29 |
 | 非有界 LP | 合成 | 12 | 正答 12 | 正答 12 |
 
-**最適解** = 既知の目的値と照合済み（proof-carrying KKT 検証）。**Stalled** = IPM が反復・時間予算内でこれ以上進展せず、解を主張しない status。**Suboptimal** = 解いたが厳密な最適性証明には失敗。**no-ref** = 公開された目的値がなく照合できないまま解いた。
+**最適解** = 既知の目的値と照合済み（proof-carrying KKT 検証）。**Stalled** = IPM が反復・時間予算内でこれ以上進展せず、解を主張しない status。**Suboptimal** = 解いたが厳密な最適性証明には失敗。**Maxiter** = 反復上限に達し、解を主張しない status。
 
 LP: ミスは `greenbea`（@1e-8 で Suboptimal）のみ。
 
-QP: 主なミスは `UBH1`（両 eps で Suboptimal）と `POWELL20`（@1e-8 で Timeout）。
-ここに挙がる `LISWET7` の目的値 mismatch は 2026-10 の baseline 移行（c0 込みの認証済み
-Maros–Mészáros CSV、`docs/baseline-certificate-contract.md`）より前の計測によるもの。
-現行 baseline では `LISWET7` は Optimal で認証参照値に 1e-6 以内で一致する（2026-10-30 実測）。
-上表の Maros–Mészáros 行（`mismatch 2` = `LISWET7`/`LISWET11` 含む）は移行前 CSV に対する
-値であり、現行 CSV での再計測は未実施。現行 CSV は 138 件のうち 88 件（LISWET 12 件は
+QP: @1e-6 のミスは `AUG2DCQP`、`LISWET8`、`LISWET9`、`LISWET11`、`QPCBOEI2`、`STADAT1`（Stalled）と `VALUES`（Maxiter）。@1e-8 は 22 問が Stalled（うち 7 問が `LISWET*`）で、`POWELL20` が Timeout。`UBH1` と `LISWET7` は両 eps で最適解。`VALUES` は jobs=6 負荷下で Maxiter、単独実行では Stalled (iters=168)。
+2026-10 の baseline 移行（c0 込みの認証済み Maros–Mészáros CSV、`docs/baseline-certificate-contract.md`）で、以前の `LISWET7`/`LISWET11` の目的値 mismatch は解消した。
+現行 CSV は 138 件のうち 88 件（LISWET 12 件は
 マニフェスト経由の再生成で検証）を機械検証可能な契約主張として保持し、残り 50 件は
 契約前の数値参照であることを source 列で明示している（認証ではない）。検証は
 `python3 scripts/check_baseline_proofs.py`（hermetic 層。data が無い環境では C/E は設計上の SKIP）。
