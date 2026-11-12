@@ -102,6 +102,12 @@ pub(super) struct FactorizeContext<'a> {
     pub kkt_cfg: KktConfig,
 }
 
+struct PreparedFactorization {
+    matrix: CscMatrix,
+    pre_permuted: Option<CscMatrix>,
+    d_inv: Option<Vec<f64>>,
+}
+
 pub(super) fn factorize_kkt_with_retry(
     ctx: &FactorizeContext<'_>,
     caches: &mut FactorizeCaches,
@@ -123,72 +129,14 @@ pub(super) fn factorize_kkt_with_retry(
         if ctx.timeout_ctx.should_stop() {
             return FactorizeOutcome::Timeout;
         }
-        // 診断: 元順序組み立て (materialize / Schur 構築) を assembly 排他的
-        // 計時・count 側計数へ (review R1。置換済みも同窓 — helper doc 参照)。
-        let t_asm = std::time::Instant::now();
-        let mat_for_factor = if ctx.use_schur {
-            let (s_mat, d_inv) = build_schur_system(
-                &ctx.problem.q,
-                ctx.a_ext,
-                ctx.sigma_vec,
-                rho_retry,
-                delta_retry,
-            );
+        let prepared = prepare_factorization(ctx, caches, rho_retry, delta_retry);
+        let mat_for_factor = prepared.matrix;
+        if let Some(d_inv) = prepared.d_inv {
             d_inv_opt = Some(d_inv);
-            s_mat
-        } else {
-            ctx.aug_cache
-                .materialize(ctx.sigma_vec, rho_retry, delta_retry)
-        };
-        let (asm_us, is_schur_build) = (t_asm.elapsed().as_micros() as u64, ctx.use_schur);
-        #[cfg(test)]
-        if !is_schur_build {
-            trace_assembly_timing(AssemblyTimingKind::OriginalMaterialize, asm_us);
         }
-        with_ippmm_sink(|s| {
-            if is_schur_build {
-                s.ipm.assembly_us += asm_us;
-                s.counts.kkt_schur_builds += 1;
-            } else {
-                s.record_materialize_original(asm_us);
-            }
-        });
-        if caches.amd_perm.is_none() {
-            let t_amd = std::time::Instant::now();
-            caches.amd_perm = Some(amd_with_deadline(
-                mat_for_factor.nrows(),
-                mat_for_factor.col_ptr(),
-                mat_for_factor.row_ind(),
-                ctx.timeout_ctx.deadline,
-            ));
-            let amd_us = t_amd.elapsed().as_micros() as u64;
-            #[cfg(test)]
-            trace_assembly_timing(AssemblyTimingKind::Permutation, amd_us);
-            with_ippmm_sink(|s| s.ipm.assembly_us += amd_us);
-        }
+        let pre_permuted_opt = prepared.pre_permuted;
+        let use_pre_permuted = pre_permuted_opt.is_some();
         let perm = caches.amd_perm.as_ref().unwrap();
-        // Schur / DD-LDL は pre-permuted 未対応なので通常経路へ。
-        let use_pre_permuted = !ctx.use_schur && !ctx.kkt_cfg.dd_ldl;
-        if use_pre_permuted && caches.aug_permuted.is_none() {
-            let t_perm = std::time::Instant::now();
-            caches.aug_permuted = Some(ctx.aug_cache.permute(perm));
-            let perm_us = t_perm.elapsed().as_micros() as u64;
-            #[cfg(test)]
-            trace_assembly_timing(AssemblyTimingKind::Permutation, perm_us);
-            with_ippmm_sink(|s| s.ipm.assembly_us += perm_us);
-        }
-        // 診断 (R1): 置換済み materialize は行列組み立て (helper の doc に
-        // 境界定義)。ここで計時・計数した後に factor タイマーを開始する。
-        let pre_permuted_opt = if use_pre_permuted {
-            Some(materialize_permuted_in_assembly(
-                ctx,
-                caches,
-                rho_retry,
-                delta_retry,
-            ))
-        } else {
-            None
-        };
         let t_factor = start_factorize_timer();
         let factor_result = if use_pre_permuted {
             factorize_kkt_pre_permuted_cached_par(
@@ -334,6 +282,76 @@ pub(super) fn factorize_kkt_with_retry(
             factorize_ns: total_factorize_ns,
         },
         _ => FactorizeOutcome::Failure,
+    }
+}
+
+fn prepare_factorization(
+    ctx: &FactorizeContext<'_>,
+    caches: &mut FactorizeCaches,
+    rho_retry: f64,
+    delta_retry: f64,
+) -> PreparedFactorization {
+    // 元順序組み立てを assembly の排他的計時・count 側計数へ積む。
+    let t_asm = std::time::Instant::now();
+    let (matrix, d_inv) = if ctx.use_schur {
+        let (matrix, d_inv) = build_schur_system(
+            &ctx.problem.q,
+            ctx.a_ext,
+            ctx.sigma_vec,
+            rho_retry,
+            delta_retry,
+        );
+        (matrix, Some(d_inv))
+    } else {
+        (
+            ctx.aug_cache
+                .materialize(ctx.sigma_vec, rho_retry, delta_retry),
+            None,
+        )
+    };
+    let asm_us = t_asm.elapsed().as_micros() as u64;
+    #[cfg(test)]
+    if !ctx.use_schur {
+        trace_assembly_timing(AssemblyTimingKind::OriginalMaterialize, asm_us);
+    }
+    with_ippmm_sink(|s| {
+        if ctx.use_schur {
+            s.ipm.assembly_us += asm_us;
+            s.counts.kkt_schur_builds += 1;
+        } else {
+            s.record_materialize_original(asm_us);
+        }
+    });
+
+    if caches.amd_perm.is_none() {
+        let t_amd = std::time::Instant::now();
+        caches.amd_perm = Some(amd_with_deadline(
+            matrix.nrows(),
+            matrix.col_ptr(),
+            matrix.row_ind(),
+            ctx.timeout_ctx.deadline,
+        ));
+        let amd_us = t_amd.elapsed().as_micros() as u64;
+        #[cfg(test)]
+        trace_assembly_timing(AssemblyTimingKind::Permutation, amd_us);
+        with_ippmm_sink(|s| s.ipm.assembly_us += amd_us);
+    }
+    let perm = caches.amd_perm.as_ref().unwrap();
+    let use_pre_permuted = !ctx.use_schur && !ctx.kkt_cfg.dd_ldl;
+    if use_pre_permuted && caches.aug_permuted.is_none() {
+        let t_perm = std::time::Instant::now();
+        caches.aug_permuted = Some(ctx.aug_cache.permute(perm));
+        let perm_us = t_perm.elapsed().as_micros() as u64;
+        #[cfg(test)]
+        trace_assembly_timing(AssemblyTimingKind::Permutation, perm_us);
+        with_ippmm_sink(|s| s.ipm.assembly_us += perm_us);
+    }
+    let pre_permuted = use_pre_permuted
+        .then(|| materialize_permuted_in_assembly(ctx, caches, rho_retry, delta_retry));
+    PreparedFactorization {
+        matrix,
+        pre_permuted,
+        d_inv,
     }
 }
 
