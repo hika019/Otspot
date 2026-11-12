@@ -17,8 +17,48 @@ use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use otspot_num::linalg::parallelism::solver_thread_pool;
 use otspot_num::sparse::{CscMatrix, SparseVec};
+use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Minimum priced-column nnz for one full reduced-cost sweep before the
+/// column-parallel dispatch branch is taken.
+///
+/// Grounds (p2p7_P6 probe, `OTSPOT_P6_PROBE=1` direct measurement): the
+/// legacy full sweep costs ~14.6 ms/pass on rail2586 (~25k nnz/pass,
+/// ~1.7 ns/nnz once scattered `y` reads dominate) while a rayon task spawn
+/// is single-digit µs. Below this threshold the dispatch is the same order
+/// as the kernel itself — the exact regime where the P6 window-scan verdict
+/// measured expected benefit ≤ 0. Small LPs (afiro: 48 nnz/pass) and window
+/// sizes (d6cube: 3.3k nnz/call) stay strictly on the serial branch.
+const PARALLEL_SCAN_MIN_NNZ: usize = 20_000;
+
+/// Chunks created per worker thread by the parallel sweep branch.
+///
+/// Columns have highly uneven nnz (network LPs mix nnz=1 and nnz>500
+/// columns), so one chunk per thread leaves stragglers. A 4× finer chunk
+/// grid feeds rayon's work stealing at an order that absorbs the imbalance;
+/// chunking never affects results because every column is written into its
+/// own `rc_out` slot with an unchanged intra-column dot order.
+const PARALLEL_SCAN_CHUNKS_PER_THREAD: usize = 4;
+
+/// Test-only: number of times the parallel sweep branch actually dispatched.
+/// Sentinels use it to prove (a) budget 1 never leaves the serial branch and
+/// (b) the end-to-end plumbing really reaches the sweep with budget ≥ 2.
+#[cfg(test)]
+static RC_PARALLEL_DISPATCH_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_rc_parallel_dispatch_count() {
+    RC_PARALLEL_DISPATCH_COUNT.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn rc_parallel_dispatch_count() -> u64 {
+    RC_PARALLEL_DISPATCH_COUNT.load(Ordering::Relaxed)
+}
 
 /// y = B^{-T} c_B written into the caller's buffer. `y_out.len()` is the basis
 /// dimension m; the caller owns the allocation so a hot loop can reuse it.
@@ -52,6 +92,11 @@ pub(super) fn compute_dual_vars(
 /// r_j = c_j − y^T a_j written into `rc_out`. Basic columns are zeroed; the
 /// caller must pre-size `rc_out` to `n_price` and supply a `y_buf` of length m
 /// (reused across iterations). `y_buf` is overwritten on every call.
+///
+/// `threads` is the `SolverOptions::threads` budget for the column sweep
+/// after `y` is complete. Budget 1 (the default) runs the identical serial
+/// loop; ≥ 2 may split whole columns across a dedicated pool — see
+/// [`scan_reduced_costs`] for why any split stays bit-exact.
 pub(super) fn compute_reduced_costs_into(
     a: &CscMatrix,
     c: &[f64],
@@ -61,12 +106,91 @@ pub(super) fn compute_reduced_costs_into(
     basis: &[usize],
     y_buf: &mut [f64],
     rc_out: &mut [f64],
+    threads: usize,
 ) {
     debug_assert_eq!(rc_out.len(), n_price);
     compute_dual_vars_into(c, basis_mgr, basis, y_buf);
-    for j in 0..n_price {
+    scan_reduced_costs(a, c, is_basic, n_price, y_buf, rc_out, threads);
+}
+
+/// The column sweep of `r_j = c_j − y^T a_j` for an already-computed `y`.
+///
+/// Serial/parallel split: `threads <= 1` or a sweep below
+/// [`PARALLEL_SCAN_MIN_NNZ`] runs [`scan_reduced_cost_range`] over the whole
+/// slice — byte-for-byte the loop this function has always run. Only a
+/// dedicated-pool dispatch (never the global rayon pool, mirroring
+/// `with_solver_pool`'s under-use-over-overrun fallback policy) may parallelize.
+///
+/// `#[inline(always)]` is load-bearing: without it the extracted sweep loop
+/// cost the default threads=1 path ~+3% wall on rail507/osa-60/pds-30 (diag
+/// A/B 77.7s → 80.0s with plain extraction; pds-30's status even flipped past
+/// the bench deadline). Inlining restores the pre-extraction code shape in
+/// the caller, which is the whole point of the "budget 1 = byte-identical,
+/// speed-identical code path" contract.
+#[inline(always)]
+fn scan_reduced_costs(
+    a: &CscMatrix,
+    c: &[f64],
+    is_basic: &[bool],
+    n_price: usize,
+    y_buf: &[f64],
+    rc_out: &mut [f64],
+    threads: usize,
+) {
+    debug_assert_eq!(rc_out.len(), n_price);
+    let scan_nnz = a.col_ptr()[n_price].saturating_sub(a.col_ptr()[0]);
+    if threads > 1 && n_price > 1 && scan_nnz >= PARALLEL_SCAN_MIN_NNZ {
+        if let Some(pool) = solver_thread_pool(threads) {
+            pool.install(|| {
+                let chunks = (threads * PARALLEL_SCAN_CHUNKS_PER_THREAD).min(n_price);
+                let chunk_cols = n_price.div_ceil(chunks);
+                rc_out
+                    .par_chunks_mut(chunk_cols)
+                    .enumerate()
+                    .for_each(|(chunk_idx, rc_slice)| {
+                        scan_reduced_cost_range(
+                            a,
+                            c,
+                            is_basic,
+                            y_buf,
+                            rc_slice,
+                            chunk_idx * chunk_cols,
+                        );
+                    });
+            });
+            #[cfg(test)]
+            RC_PARALLEL_DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+    scan_reduced_cost_range(a, c, is_basic, y_buf, rc_out, 0);
+}
+
+/// Contiguous-column part of the sweep: writes `rc_out[0..len]` for global
+/// columns `[col_base, col_base + len)`. This is THE loop — serial callers
+/// pass the whole slice at `col_base = 0`, parallel callers pass disjoint
+/// chunks. Bit-exactness of the split rests on two properties of this body:
+/// each output slot is written exactly once, and the dot product for column
+/// `j` accumulates `y[row_k] * val_k` in column-storage order, which chunk
+/// boundaries cannot reorder. Any change to the accumulation order here
+/// changes every LP trajectory — it is guarded by
+/// `full_sweep_matches_reference_addition_order`.
+///
+/// `#[inline(always)]`: also required for the speed-identical default path —
+/// see [`scan_reduced_costs`] on why the loop must end up inside the caller.
+#[inline(always)]
+fn scan_reduced_cost_range(
+    a: &CscMatrix,
+    c: &[f64],
+    is_basic: &[bool],
+    y_buf: &[f64],
+    rc_out: &mut [f64],
+    col_base: usize,
+) {
+    for (offset, rc_slot) in rc_out.iter_mut().enumerate() {
+        let j = col_base + offset;
         if is_basic[j] {
-            rc_out[j] = 0.0;
+            *rc_slot = 0.0;
             continue;
         }
         let (rows, vals) = a.column(j);
@@ -74,13 +198,14 @@ pub(super) fn compute_reduced_costs_into(
         for (k, &row) in rows.iter().enumerate() {
             ya += y_buf[row] * vals[k];
         }
-        rc_out[j] = c[j] - ya;
+        *rc_slot = c[j] - ya;
     }
 }
 
 /// r_j = c_j − y^T a_j with y = B^{-T} c_B. Basic columns are skipped
 /// (r_j ≡ 0). Allocating wrapper used by dual paths that refresh r only after
-/// a refactor.
+/// a refactor. `threads` is forwarded to [`compute_reduced_costs_into`].
+#[allow(clippy::too_many_arguments)]
 pub(super) fn compute_reduced_costs(
     a: &CscMatrix,
     c: &[f64],
@@ -89,6 +214,7 @@ pub(super) fn compute_reduced_costs(
     n_price: usize,
     m: usize,
     basis: &[usize],
+    threads: usize,
 ) -> Vec<f64> {
     let mut y = vec![0.0f64; m];
     let mut reduced_costs = vec![0.0f64; n_price];
@@ -101,6 +227,7 @@ pub(super) fn compute_reduced_costs(
         basis,
         &mut y,
         &mut reduced_costs,
+        threads,
     );
     reduced_costs
 }
@@ -657,7 +784,7 @@ mod tests {
         let (a, c, basis) = make_identity_plus(n, m);
         let is_basic: Vec<bool> = (0..n).map(|j| j < m).collect();
         let mut bm = LuBasis::new(&a, &basis, 32).unwrap();
-        let r = compute_reduced_costs(&a, &c, &mut bm, &is_basic, n, m, &basis);
+        let r = compute_reduced_costs(&a, &c, &mut bm, &is_basic, n, m, &basis, 1);
 
         for j in 0..m {
             assert_eq!(r[j], 0.0);
@@ -685,7 +812,7 @@ mod tests {
         let is_basic: Vec<bool> = (0..n).map(|j| j < m).collect();
         let mut bm = LuBasis::new(&a, &basis, 32).unwrap();
 
-        let r_alloc = compute_reduced_costs(&a, &c, &mut bm, &is_basic, n, m, &basis);
+        let r_alloc = compute_reduced_costs(&a, &c, &mut bm, &is_basic, n, m, &basis, 1);
 
         let mut y_buf = vec![0.0f64; m];
         // Pre-fill rc_out with garbage to ensure basic-slot zeroing happens.
@@ -699,6 +826,7 @@ mod tests {
             &basis,
             &mut y_buf,
             &mut rc_out,
+            1,
         );
         for j in 0..n {
             assert!((rc_out[j] - r_alloc[j]).abs() < 1e-14, "j={}", j);
@@ -716,7 +844,7 @@ mod tests {
         let c = vec![0.0f64; n];
         let is_basic: Vec<bool> = (0..n).map(|j| j < m).collect();
         let mut bm = LuBasis::new(&a, &basis, 32).unwrap();
-        let r = compute_reduced_costs(&a, &c, &mut bm, &is_basic, n, m, &basis);
+        let r = compute_reduced_costs(&a, &c, &mut bm, &is_basic, n, m, &basis, 1);
         for &rj in &r {
             assert!(rj.abs() < 1e-14, "r = {:?} should be all zero", r);
         }
@@ -1180,5 +1308,483 @@ mod tests {
             !verified,
             "preset cancel_flag=true must reject this otherwise-genuine ray"
         );
+    }
+
+    // ====================================================================
+    // wave-2 (perf/w2-lp-fullsweep-par): column-parallel full sweep tests
+    // ====================================================================
+
+    /// Deterministic xorshift64* LCG — fixtures must reproduce byte-for-byte
+    /// on every run so bitwise sentinels are stable across machines.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next_u64() % n as u64) as usize
+        }
+        fn signed_unit(&mut self) -> f64 {
+            let u = (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
+            if self.next_u64() & 1 == 0 {
+                0.5 + u
+            } else {
+                -(0.5 + u)
+            }
+        }
+    }
+
+    /// Random standard-form-shaped sweep fixture: identity basis (cols
+    /// `0..m` basic), nonbasic cols `m..n` with random support, plus
+    /// deliberately pathological shapes — the random block never touches
+    /// row `m - 1` (that row is covered by its own basis column only), the
+    /// last `n_empty_cols` nonbasic columns have no entries at all (rc must
+    /// be exactly `c[j]`), and every column pair `(10k, 10k+1)` above
+    /// `dup_first` duplicates support + values with equal cost (Dantzig
+    /// ties, index order decides).
+    fn make_sweep_fixture(
+        seed: u64,
+        m: usize,
+        n: usize,
+        n_empty_cols: usize,
+        max_col_nnz: usize,
+    ) -> (CscMatrix, Vec<f64>, Vec<usize>, Vec<bool>) {
+        let mut rng = Lcg(seed);
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for j in 0..m {
+            rows.push(j);
+            cols.push(j);
+            vals.push(1.0);
+        }
+        let live_rows = m - 1; // random blocks never touch row m-1
+        let dup_first = m + 10;
+        let mut j = m;
+        while j < n - n_empty_cols {
+            let duplicate = j >= dup_first && j % 10 == 1;
+            if duplicate {
+                // Exact copy of column j-1's stored support and values.
+                let prev_start = cols.iter().position(|&col| col == j - 1).unwrap();
+                let prev_end = cols.iter().rposition(|&col| col == j - 1).unwrap() + 1;
+                for k in prev_start..prev_end {
+                    let r = rows[k];
+                    let v = vals[k];
+                    rows.push(r);
+                    cols.push(j);
+                    vals.push(v);
+                }
+                j += 1;
+                continue;
+            }
+            let nnz = 1 + rng.below(max_col_nnz);
+            let mut picked: Vec<usize> = Vec::with_capacity(nnz);
+            for _ in 0..nnz {
+                let r = rng.below(live_rows);
+                if !picked.contains(&r) {
+                    picked.push(r);
+                    rows.push(r);
+                    cols.push(j);
+                    vals.push(rng.signed_unit());
+                }
+            }
+            j += 1;
+        }
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
+        let basis: Vec<usize> = (0..m).collect();
+        // Pair members (10k, 10k+1) share the cost formula (k/10 is equal
+        // for both), so a duplicated support yields an exact rc tie.
+        let c: Vec<f64> = (0..n)
+            .map(|k| {
+                if k >= dup_first && k % 10 <= 1 {
+                    0.25 * ((k / 10) as f64 + 1.0)
+                } else {
+                    rng.signed_unit()
+                }
+            })
+            .collect();
+        let is_basic: Vec<bool> = (0..n).map(|k| k < m).collect();
+        (a, c, basis, is_basic)
+    }
+
+    fn bits_eq(lhs: &[f64], rhs: &[f64]) -> bool {
+        lhs.len() == rhs.len()
+            && lhs
+                .iter()
+                .zip(rhs.iter())
+                .all(|(x, y)| x.to_bits() == y.to_bits())
+    }
+
+    /// The full sweep under any parallel budget must equal the serial full
+    /// sweep bit-for-bit, on a gate-open fixture (`min_nnz` far above
+    /// `PARALLEL_SCAN_MIN_NNZ` by construction: 4000 cols × avg ~6 nnz) that
+    /// contains empty rows, empty columns, and tied duplicate columns.
+    ///
+    /// The oracle is the serial full sweep itself: per-column outputs have
+    /// no cross-column dependence and each intra-column dot keeps column
+    /// storage order, so a correct split cannot change a single bit.
+    ///
+    /// Sentinel: giving the parallel branch a wrong chunk base offset
+    /// (`chunk_idx` instead of `chunk_idx * chunk_cols` in
+    /// `scan_reduced_costs`) or reordering the accumulation in
+    /// `scan_reduced_cost_range` (`rows.iter().rev()`) fails the bitwise
+    /// comparison for odd-size chunks / tie fixtures.
+    #[test]
+    fn full_sweep_parallel_matches_serial_bitwise_across_budgets() {
+        let m = 96usize;
+        let n = 4_200usize;
+        let (a, c, basis, is_basic) = make_sweep_fixture(0xC0FFEE, m, n, 37, 12);
+        assert!(
+            a.nnz() >= PARALLEL_SCAN_MIN_NNZ,
+            "fixture premise: gate must be open, nnz={}",
+            a.nnz()
+        );
+        let mut bm = LuBasis::new(&a, &basis, 32).unwrap();
+
+        let mut y = vec![0.0f64; m];
+        let mut rc_serial = vec![0.0f64; n];
+        compute_reduced_costs_into(
+            &a,
+            &c,
+            &mut bm,
+            &is_basic,
+            n,
+            &basis,
+            &mut y,
+            &mut rc_serial,
+            1,
+        );
+
+        for budget in [2usize, 3, 8] {
+            reset_rc_parallel_dispatch_count();
+            let mut y2 = vec![0.0f64; m];
+            let mut rc_par = vec![-1.0f64; n];
+            compute_reduced_costs_into(
+                &a,
+                &c,
+                &mut bm,
+                &is_basic,
+                n,
+                &basis,
+                &mut y2,
+                &mut rc_par,
+                budget,
+            );
+            assert!(
+                rc_parallel_dispatch_count() > 0,
+                "budget={budget} on a gate-open fixture must exercise the \
+                 parallel branch (plumbing sentinel; budget 1 must NOT)"
+            );
+            assert!(bits_eq(&y, &y2), "budget={budget}: y diverged");
+            assert!(
+                bits_eq(&rc_serial, &rc_par),
+                "budget={budget}: parallel sweep differs from serial bitwise"
+            );
+        }
+    }
+
+    /// Independent recomputation oracle: the expected `r_j` is rebuilt in
+    /// the test with a plain dense loop over `a.column(j)` in storage order,
+    /// NOT by calling the production scan. This pins the accumulation order
+    /// itself — chunk plumbing that merely permutes columns but changes the
+    /// dot order would pass the serial-vs-parallel test above only if both
+    /// branches shared the new order, and would fail here.
+    #[test]
+    fn full_sweep_matches_reference_addition_order() {
+        let m = 96usize;
+        let n = 4_200usize;
+        let (a, c, basis, is_basic) = make_sweep_fixture(0xBADF00D, m, n, 15, 12);
+        let mut bm = LuBasis::new(&a, &basis, 32).unwrap();
+        let y = compute_dual_vars(&c, &mut bm, &basis, m);
+
+        let mut y_buf = y.clone();
+        let mut rc_par = vec![0.0f64; n];
+        compute_reduced_costs_into(
+            &a,
+            &c,
+            &mut bm,
+            &is_basic,
+            n,
+            &basis,
+            &mut y_buf,
+            &mut rc_par,
+            4,
+        );
+
+        for j in 0..n {
+            let expected = if is_basic[j] {
+                0.0
+            } else {
+                let (rows, vals) = a.column(j);
+                let mut ya = 0.0f64;
+                for (k, &row) in rows.iter().enumerate() {
+                    ya += y[row] * vals[k];
+                }
+                c[j] - ya
+            };
+            assert_eq!(
+                rc_par[j].to_bits(),
+                expected.to_bits(),
+                "j={j} parallel rc {} != reference {} (bitwise)",
+                rc_par[j],
+                expected
+            );
+        }
+        // Pathological shapes really are in the fixture: empty columns must
+        // return c[j] exactly, and row m-1 must never appear in any column.
+        for j in n - 15..n {
+            assert!(a.column(j).0.is_empty(), "col {j} should be empty");
+            assert_eq!(rc_par[j], c[j], "empty col rc must be c[j]");
+        }
+    }
+
+    /// Non-finite `y` (NaN / ±inf from numerical damage) must propagate
+    /// through the parallel sweep exactly as through the serial one, down to
+    /// NaN payload bits. `y_buf` is injected directly via the internal scan
+    /// entry so the fixture does not need a numerically-singular basis.
+    #[test]
+    fn full_sweep_nonfinite_y_matches_serial_bitwise() {
+        let m = 96usize;
+        let n = 4_200usize;
+        let (a, c, _basis, is_basic) = make_sweep_fixture(0x5EED, m, n, 21, 12);
+        let mut y_bad = vec![0.0f64; m];
+        y_bad[3] = f64::NAN;
+        y_bad[7] = f64::INFINITY;
+        y_bad[11] = f64::NEG_INFINITY;
+        y_bad[5] = -0.0;
+        // Row m-1 is touched only by its own (basic) identity column: garbage
+        // there must NOT leak into any nonbasic rc through the split.
+        y_bad[m - 1] = f64::NAN;
+
+        let mut rc_serial = vec![0.0f64; n];
+        scan_reduced_costs(&a, &c, &is_basic, n, &y_bad, &mut rc_serial, 1);
+        reset_rc_parallel_dispatch_count();
+        let mut rc_par = vec![0.0f64; n];
+        scan_reduced_costs(&a, &c, &is_basic, n, &y_bad, &mut rc_par, 2);
+        assert!(rc_parallel_dispatch_count() > 0);
+        assert!(
+            bits_eq(&rc_serial, &rc_par),
+            "non-finite y must propagate identically (NaN payloads included)"
+        );
+        // Columns touching row 3 (NaN row) must actually be NaN — otherwise
+        // the fixture injects damage no column sees and the test proves 0.
+        let touches_nan_row = (0..n).any(|j| a.column(j).0.contains(&3));
+        assert!(touches_nan_row, "fixture premise: NaN row must be hit");
+    }
+
+    /// Gate contract: budget 1 never dispatches regardless of size; budgets
+    /// ≥ 2 below `PARALLEL_SCAN_MIN_NNZ` never dispatch either; the same
+    /// budget on a gate-open sweep does dispatch.
+    #[test]
+    fn sweep_gate_keeps_small_and_default_budget_scans_serial() {
+        let m = 48usize;
+        let n_small = 300usize; // ~3 nnz/col: far below the gate
+        let (a_small, c_small, basis_small, is_basic_small) =
+            make_sweep_fixture(0x1234, m, n_small, 5, 4);
+        let mut bm_small = LuBasis::new(&a_small, &basis_small, 32).unwrap();
+        assert!(
+            a_small.nnz() < PARALLEL_SCAN_MIN_NNZ,
+            "fixture premise: small sweep below gate, nnz={}",
+            a_small.nnz()
+        );
+
+        reset_rc_parallel_dispatch_count();
+        let mut y = vec![0.0f64; m];
+        let mut rc = vec![0.0f64; n_small];
+        compute_reduced_costs_into(
+            &a_small,
+            &c_small,
+            &mut bm_small,
+            &is_basic_small,
+            n_small,
+            &basis_small,
+            &mut y,
+            &mut rc,
+            8,
+        );
+        assert_eq!(
+            rc_parallel_dispatch_count(),
+            0,
+            "sub-gate sweeps must stay serial even with budget 8"
+        );
+
+        let (a_big, c_big, basis_big, is_basic_big) = make_sweep_fixture(0x1235, m, 4_200, 5, 12);
+        let mut bm_big = LuBasis::new(&a_big, &basis_big, 32).unwrap();
+        reset_rc_parallel_dispatch_count();
+        let mut rc_big = vec![0.0f64; 4_200];
+        compute_reduced_costs_into(
+            &a_big,
+            &c_big,
+            &mut bm_big,
+            &is_basic_big,
+            4_200,
+            &basis_big,
+            &mut y,
+            &mut rc_big,
+            1,
+        );
+        assert_eq!(
+            rc_parallel_dispatch_count(),
+            0,
+            "default budget 1 must run the serial branch even gate-open \
+             (no-op proof: swapping the `threads > 1` condition to `> 0` \
+             would make the default path touch the pool)"
+        );
+    }
+
+    /// End-to-end plumbing proof + trajectory bit-identity: the published
+    /// result of a real `solve` must be bitwise identical between budgets
+    /// 1/2/8 on the primal core (full sweep every iteration, gate open at
+    /// this size) AND on the default Auto route. For the primal core the
+    /// parallel branch must actually have been reached (dispatch counter) —
+    /// otherwise the budget never left the QP/MIP paths and the feature is
+    /// a silent no-op. Auto is only held to result identity: its window
+    /// pricing is deliberately NOT parallelized (p2p7_P6 verdict).
+    ///
+    /// Sentinel: passing a hard-coded `1` instead of `options.threads` at
+    /// the primal call site keeps results equal but fails the dispatch-count
+    /// assertion.
+    #[test]
+    fn solve_lp_parallel_budget_matches_serial_publication_bitwise() {
+        use crate::options::SimplexMethod;
+
+        // Priced nnz ≈ 400 rows × 60 entries + 400 slacks > gate.
+        let lp = make_random_lp_for_route(0xA11CE, 400, 800, 60);
+        let mut results = Vec::new();
+        for (method, budget) in [
+            (SimplexMethod::Primal, 1usize),
+            (SimplexMethod::Primal, 2),
+            (SimplexMethod::Primal, 8),
+            (SimplexMethod::Auto, 1),
+            (SimplexMethod::Auto, 2),
+        ] {
+            let opts = SolverOptions {
+                presolve: false,
+                simplex_method: method,
+                threads: budget,
+                max_iters: Some(3_000),
+                ..Default::default()
+            };
+            reset_rc_parallel_dispatch_count();
+            let r = crate::lp::solve_lp_with(&lp, &opts);
+            if matches!(method, SimplexMethod::Primal) {
+                if budget > 1 {
+                    assert!(
+                        rc_parallel_dispatch_count() > 0,
+                        "{method:?} budget={budget}: plumbing dead — the LP \
+                         route never reached the parallel sweep branch"
+                    );
+                } else {
+                    assert_eq!(rc_parallel_dispatch_count(), 0);
+                }
+            }
+            results.push((method, budget, r));
+        }
+        // Identity contract is WITHIN a method (routes legitimately differ
+        // from each other; budgets must not).
+        for method in [SimplexMethod::Primal, SimplexMethod::Auto] {
+            let group: Vec<_> = results.iter().filter(|(m, _, _)| *m == method).collect();
+            let reference = &group[0].2;
+            for (_, budget, r) in &group[1..] {
+                assert_eq!(r.status, reference.status, "{method:?}/{budget}");
+                assert_eq!(r.iterations, reference.iterations, "{method:?}/{budget}");
+                assert_eq!(
+                    r.objective.to_bits(),
+                    reference.objective.to_bits(),
+                    "{method:?}/budget={budget}: objective diverged"
+                );
+                assert!(
+                    bits_eq(&r.solution, &reference.solution),
+                    "{method:?}/budget={budget}: solution diverged"
+                );
+            }
+        }
+    }
+
+    /// `cancel_flag` must stop a budget-2 solve exactly like a budget-1
+    /// solve: the parallel sweep introduced no un-cancellable region and no
+    /// hang (preset flag → both stop at the first loop-top check).
+    #[test]
+    fn solve_lp_parallel_budget_honors_preset_cancel_flag() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let lp = make_random_lp_for_route(0xBEEF, 400, 800, 60);
+        for budget in [1usize, 2] {
+            let opts = SolverOptions {
+                presolve: false,
+                threads: budget,
+                cancel_flag: Some(Arc::new(AtomicBool::new(true))),
+                ..Default::default()
+            };
+            let r = crate::lp::solve_lp_with(&lp, &opts);
+            assert_eq!(
+                r.status,
+                crate::problem::SolveStatus::Timeout,
+                "budget={budget} preset cancel must Timeout"
+            );
+        }
+    }
+
+    /// Preset `deadline` + budget 2 must report Timeout (the pool must not
+    /// keep the solve alive past the external budget).
+    #[test]
+    fn solve_lp_parallel_budget_honors_expired_deadline() {
+        let lp = make_random_lp_for_route(0xDEAD, 400, 800, 60);
+        let opts = SolverOptions {
+            presolve: false,
+            threads: 2,
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+            ..Default::default()
+        };
+        let r = crate::lp::solve_lp_with(&lp, &opts);
+        assert_eq!(
+            r.status,
+            crate::problem::SolveStatus::Timeout,
+            "expired deadline must Timeout at budget 2"
+        );
+    }
+
+    /// Random-but-deterministic LP big enough that its standard-form priced
+    /// matrix opens the parallel gate (`m * density` entries plus slacks),
+    /// with mixed-sign costs so Phase II really pivots (a positive-cost LP
+    /// would terminate at the zero BFS with a single sweep).
+    fn make_random_lp_for_route(
+        seed: u64,
+        m: usize,
+        n: usize,
+        density: usize,
+    ) -> crate::problem::LpProblem {
+        use crate::problem::ConstraintType;
+        let mut rng = Lcg(seed);
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..m {
+            for _ in 0..density {
+                let j = rng.below(n);
+                rows.push(i);
+                cols.push(j);
+                vals.push(rng.signed_unit());
+            }
+        }
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
+        let c: Vec<f64> = (0..n).map(|_| rng.signed_unit()).collect();
+        let b: Vec<f64> = (0..m).map(|_| 1.0 + rng.below(50) as f64).collect();
+        crate::problem::LpProblem::new_general(
+            c,
+            a,
+            b,
+            vec![ConstraintType::Le; m],
+            vec![(0.0, 10.0); n],
+            None,
+        )
+        .unwrap()
     }
 }

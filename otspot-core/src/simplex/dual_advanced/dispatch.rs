@@ -98,6 +98,7 @@ pub(super) fn try_bounded(
                         bsf.n_total,
                         bsf.m,
                         options.dual_tol,
+                        options.threads,
                     )
                 {
                     let state = BoundedDualState {

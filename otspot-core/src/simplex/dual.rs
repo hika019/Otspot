@@ -249,8 +249,16 @@ pub(super) fn dual_simplex_core(
     }
 
     // r_j = c_j - y^T a_j, y = B^{-T} c_B
-    let mut reduced_costs =
-        compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
+    let mut reduced_costs = compute_reduced_costs(
+        a,
+        c,
+        &mut basis_mgr,
+        &is_basic,
+        n_price,
+        m,
+        basis,
+        options.threads,
+    );
 
     let mut leaving_strategy = MostInfeasibleLeaving;
     let mut rho_dense = vec![0.0f64; m];
@@ -339,8 +347,16 @@ pub(super) fn dual_simplex_core(
                 let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }
-            reduced_costs =
-                compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
+            reduced_costs = compute_reduced_costs(
+                a,
+                c,
+                &mut basis_mgr,
+                &is_basic,
+                n_price,
+                m,
+                basis,
+                options.threads,
+            );
             continue;
         }
 
@@ -411,8 +427,16 @@ pub(super) fn dual_simplex_core(
                 let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }
-            reduced_costs =
-                compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
+            reduced_costs = compute_reduced_costs(
+                a,
+                c,
+                &mut basis_mgr,
+                &is_basic,
+                n_price,
+                m,
+                basis,
+                options.threads,
+            );
         }
     }
 

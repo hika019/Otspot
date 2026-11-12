@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3412 testcases, 43 ignored
+# totals: 3419 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1759,6 +1759,9 @@ otspot-core	simplex::dual_common::tests::dse_expired_deadline_during_gamma_loop_
 otspot-core	simplex::dual_common::tests::dual_vars_identity_basis_returns_c_b	active
 otspot-core	simplex::dual_common::tests::dual_vars_into_matches_allocating_and_is_reuse_safe	active
 otspot-core	simplex::dual_common::tests::dual_vars_permuted_basis_uses_basis_indexing	active
+otspot-core	simplex::dual_common::tests::full_sweep_matches_reference_addition_order	active
+otspot-core	simplex::dual_common::tests::full_sweep_nonfinite_y_matches_serial_bitwise	active
+otspot-core	simplex::dual_common::tests::full_sweep_parallel_matches_serial_bitwise_across_budgets	active
 otspot-core	simplex::dual_common::tests::lp_unbounded_ray_verified_distinguishes_genuine_bounded_and_artificial	active
 otspot-core	simplex::dual_common::tests::lp_unbounded_ray_verified_entry_check_skips_lu_setup_when_preset	active
 otspot-core	simplex::dual_common::tests::lp_unbounded_ray_verified_loop_top_check_stops_scan_at_cancellation_point	active
@@ -1771,6 +1774,10 @@ otspot-core	simplex::dual_common::tests::recompute_gamma_truth_cancellation_duri
 otspot-core	simplex::dual_common::tests::reduced_costs_identity_basis_match_closed_form	active
 otspot-core	simplex::dual_common::tests::reduced_costs_into_matches_allocating_and_clears_basic_slots	active
 otspot-core	simplex::dual_common::tests::reduced_costs_zero_cost_yields_zero_vector	active
+otspot-core	simplex::dual_common::tests::solve_lp_parallel_budget_honors_expired_deadline	active
+otspot-core	simplex::dual_common::tests::solve_lp_parallel_budget_honors_preset_cancel_flag	active
+otspot-core	simplex::dual_common::tests::solve_lp_parallel_budget_matches_serial_publication_bitwise	active
+otspot-core	simplex::dual_common::tests::sweep_gate_keeps_small_and_default_budget_scans_serial	active
 otspot-core	simplex::entry::tests::empty_variable_box_is_infeasible_for_all_constraint_counts	active
 otspot-core	simplex::entry::tests::guard_lp_optimal_catches_corrupt_result	active
 otspot-core	simplex::entry::tests::guard_lp_optimal_passthrough_non_optimal	active
