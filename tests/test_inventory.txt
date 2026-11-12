@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3402 testcases, 43 ignored
+# totals: 3412 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -905,6 +905,7 @@ otspot-core	problem::tests::test_lp_problem_new_valid	active
 otspot-core	problem::tests::test_solve_status_display	active
 otspot-core	problem::tests::test_solver_result_display	active
 otspot-core	qp::aat::tests::builds_upper_triangle_of_a_at_with_independent_dense_oracle	active
+otspot-core	qp::aat::tests::scaled_aat_bit_identical_to_clone_scale_build	active
 otspot-core	qp::aat::tests::zero_column_matrix_returns_regularized_diagonal	active
 otspot-core	qp::aat::tests::zero_row_matrix_returns_empty_product	active
 otspot-core	qp::certificate::tests::guard_lp_optimal_demotes_wrong_sign_dual	active
@@ -1550,6 +1551,7 @@ otspot-core	qp::tests::status_dfeas::test_max_iter_exhaustion_reports_honest_sta
 otspot-core	qp::tests::status_dfeas::test_qp_all_vars_fixed	active
 otspot-core	qp::tests::validate_wiring::invalid_options_rejected_at_qp_entry	active
 otspot-core	qp::tests::validate_wiring::invalid_options_rejected_at_qp_entry_lp_path	active
+otspot-core	qp::tests::w2_aty_parallel::w2_pg_threads2_duals_bitwise_equal_to_threads1	active
 otspot-core	sensitivity::tests::bounded_lp_all_interior_ub_slacks_basic	active
 otspot-core	sensitivity::tests::bounded_lp_var_basic_at_ub_has_sensitivity	active
 otspot-core	sensitivity::tests::bounded_lp_with_var_at_ub_has_sensitivity	active
@@ -2680,6 +2682,7 @@ otspot-num	linalg::ldl::tests::factorize_budget_rejects_when_l_nnz_exceeds_max	a
 otspot-num	linalg::ldl::tests::no_op_proof_shift_alone_also_catches_zero_diag_bilinear	active
 otspot-num	linalg::ldl::tests::no_op_proof_shift_required_for_rank1_psd	active
 otspot-num	linalg::ldl::tests::no_op_proof_zeropivot_conservative_required_when_shift_absent	active
+otspot-num	linalg::ldl::tests::owned_factorize_bit_identical_to_borrowed	active
 otspot-num	linalg::ldl::tests::test_factorize_deadline_during_numeric_does_not_detach	active
 otspot-num	linalg::ldl::tests::test_factorize_pd_3x3_solve	active
 otspot-num	linalg::ldl::tests::test_factorize_pd_identity	active
@@ -2759,8 +2762,15 @@ otspot-num	sparse::spmv::tests::aty_empty_rows_empty_cols_zero_dims	active
 otspot-num	sparse::spmv::tests::aty_extreme_scales_bitwise_matches_transpose_path	active
 otspot-num	sparse::spmv::tests::aty_leaves_out_untouched_on_error	active
 otspot-num	sparse::spmv::tests::aty_matches_independent_dense_oracle	active
+otspot-num	sparse::spmv::tests::aty_parallel_bitwise_matches_serial_random	active
+otspot-num	sparse::spmv::tests::aty_parallel_bitwise_matches_serial_skewed_and_nonfinite	active
+otspot-num	sparse::spmv::tests::aty_parallel_bitwise_matches_transpose_oracle	active
+otspot-num	sparse::spmv::tests::aty_parallel_order_sensitive_column	active
+otspot-num	sparse::spmv::tests::aty_parallel_plan_gate_sentinel	active
+otspot-num	sparse::spmv::tests::aty_parallel_rejects_dim_mismatch_like_serial	active
 otspot-num	sparse::spmv::tests::aty_rectangular_mixed_signs_hand_computed	active
 otspot-num	sparse::spmv::tests::aty_rejects_dimension_mismatch	active
+otspot-num	sparse::spmv::tests::split_columns_balanced_covers_columns_exactly	active
 otspot-num	sparse::vec::tests::test_accessors_match_dense_expansion	active
 otspot-num	sparse::vec::tests::test_from_raw_parts_empty	active
 otspot-num	sparse::vec::tests::test_from_raw_parts_matches_from_dense	active

@@ -14,6 +14,7 @@ pub(crate) fn run_dual_recovery_postprocess(
     result: &mut crate::problem::SolverResult,
     deadline: Option<std::time::Instant>,
     comp_tol: f64,
+    threads: usize,
 ) -> f64 {
     let eliminated_cols = view.eliminated_cols;
     let pre_cleanup = result.clone();
@@ -25,7 +26,7 @@ pub(crate) fn run_dual_recovery_postprocess(
     );
     zero_inactive_inequality_duals(problem, result);
     project_duals_from_singleton_columns(problem, result);
-    refine_dual_projected_gradient(problem, result, eliminated_cols, deadline);
+    refine_dual_projected_gradient(problem, result, eliminated_cols, deadline, threads);
     refine_dual_worst_active_block(problem, result, eliminated_cols, deadline);
 
     let pre_z = result.bound_duals.clone();
