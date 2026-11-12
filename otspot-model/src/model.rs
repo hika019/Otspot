@@ -1235,18 +1235,11 @@ impl Model {
             feas_tol: tol,
             ..otspot_core::conic::GlobalOptions::default()
         };
-        // Build the nonconvex spatial-B&B problem (needs a finite McCormick box).
+        // Build the nonconvex spatial-B&B problem. The bound gate is the
+        // shared §3.1 classifier (`require_finite_bounds`): only variables in
+        // the bound-requirement set R must be finite at this entry point.
         // Bounds go into `lb`/`ub`, not `g_lin` — hence the constraint-only rows.
-        let build_nonconvex = || -> Result<otspot_core::conic::NonconvexQcqp, ()> {
-            let mut lb = Vec::with_capacity(n);
-            let mut ub = Vec::with_capacity(n);
-            for &(l, u) in &bounds {
-                if !l.is_finite() || !u.is_finite() {
-                    return Err(());
-                }
-                lb.push(l);
-                ub.push(u);
-            }
+        let build_nonconvex = || -> Result<otspot_core::conic::NonconvexQcqp, String> {
             let g_quad = quad
                 .iter()
                 .map(|qc| otspot_core::conic::GQuadConstraint {
@@ -1254,7 +1247,9 @@ impl Model {
                     q: qc.q.clone(),
                     r: qc.r,
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            let (lb, ub) =
+                otspot_core::conic::require_finite_bounds(n, p0.as_ref(), &g_quad, &bounds)?;
             Ok(otspot_core::conic::NonconvexQcqp {
                 n,
                 p0: p0.clone(),
@@ -1304,12 +1299,16 @@ impl Model {
                             let g = otspot_core::conic::solve_global_qcqp(&nc, &opts, &global_opts);
                             (g.status, g.objective, g.x, SolveRoute::ConicQcqpNonconvex)
                         }
-                        // The global fallback needs a finite box. Without one,
-                        // surface the structural rejection for a bridge-rejected
+                        // The global fallback needs a finite box on the §3.1
+                        // bound-required variables. Without one, surface the
+                        // structural rejection (bridge message plus the
+                        // classifier's R diagnostic) for a bridge-rejected
                         // problem; otherwise the bridge's numerical failure.
-                        Err(()) => {
+                        Err(msg) => {
                             return match convex.status {
-                                SolveStatus::NotSupported(m) => Err(ModelError::NotSupported(m)),
+                                SolveStatus::NotSupported(m) => {
+                                    Err(ModelError::NotSupported(format!("{m}; {msg}")))
+                                }
                                 _ => Err(ModelError::SolveError(SolveError::NumericalError)),
                             };
                         }

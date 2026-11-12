@@ -218,23 +218,14 @@ fn global_result_to_solver_result(res: GlobalResult, obj_offset: f64) -> SolverR
 /// sense and any (possibly indefinite) quadratic matrix: `>=` rows are
 /// sign-flipped and `=` rows become a pair of `<=` rows.
 ///
-/// Requires finite bounds on every variable — the McCormick relaxation needs
-/// a finite box to build valid envelopes and to terminate spatial branching.
+/// Requires finite bounds on the §3.1 bound-requirement set `R` (see
+/// `conic::require_finite_bounds`): variables outside `R` (linear-only terms,
+/// rule-1 convex rows, rule-2 under-diagonals) are not gated here anymore,
+/// while `NonconvexQcqp::validate` remains the second-line guard until the
+/// relaxation itself learns to box only `R` (G2).
 fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
     let n = src.num_vars;
     src.validate().map_err(|e| e.to_string())?;
-    let mut lb = Vec::with_capacity(n);
-    let mut ub = Vec::with_capacity(n);
-    for (j, &(l, u)) in src.bounds.iter().enumerate() {
-        if !l.is_finite() || !u.is_finite() {
-            return Err(format!(
-                "nonconvex QCQP requires finite bounds on every variable for \
-                 McCormick spatial branch-and-bound; variable {j} has bound ({l}, {u})"
-            ));
-        }
-        lb.push(l);
-        ub.push(u);
-    }
 
     // Row-major view of A (O(nnz)): column k of `a_rows` is row k of `src.a`,
     // giving sparse per-constraint access without densifying A.
@@ -339,6 +330,7 @@ fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
     let a_eq = CscMatrix::from_triplets(&ae_r, &ae_c, &ae_v, ae_count, n)
         .map_err(|e| format!("A_eq build: {e:?}"))?;
     let p0 = (!src.is_zero_q()).then(|| src.q.clone());
+    let (lb, ub) = conic::require_finite_bounds(n, p0.as_ref(), &quad, &src.bounds)?;
     Ok(NonconvexQcqp {
         n,
         p0,

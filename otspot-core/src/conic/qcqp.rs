@@ -262,6 +262,16 @@ fn sparse_cholesky_lower(p: &CscMatrix, n: usize) -> Result<(SparseCholCols, boo
     Ok((l_cols, clamped))
 }
 
+/// PSD certificate for the §3.1 row classification (see `qcqp_classify`):
+/// `sparse_cholesky_lower` succeeds on `p` (`n x n`, both triangles stored)
+/// and never clamps a jitter-band pivot. A clamped factorization is
+/// `convexity_unproven` — undecidable, never convex — and `Err` is a
+/// certifiably negative 2x2 minor; both keep the row on the nonconvex side
+/// (conservative).
+pub(crate) fn chol_certifies_psd(p: &CscMatrix, n: usize) -> bool {
+    matches!(sparse_cholesky_lower(p, n), Ok((_, false)))
+}
+
 struct Triplets {
     rows: Vec<usize>,
     cols: Vec<usize>,
