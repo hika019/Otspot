@@ -24,6 +24,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --release --features parallel --profile lib-only
+      # Synthetic QP diagnostics sentinels (R1-R3) need no downloaded benchmark data.
+      - name: Tests (QP diagnostics, synthetic)
+        run: cargo nextest run --release --features parallel -p otspot-core --test qp_diag_real_solve --test-threads 3
 
   test-integration:
     name: Tests (integration, real data)

@@ -298,17 +298,72 @@ impl SolveDiagnostics {
 pub(crate) struct AttemptSink {
     pub init_us: u64,
     pub postsolve_us: u64,
+    postsolve_stages: PostsolveStageTimes,
     pub verification_us: u64,
     pub ipm: IpmPhaseTimes,
     pub counts: AttemptCounts,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PostsolveStageTimes {
+    pub map_us: u64,
+    pub lsq_us: u64,
+    pub recovery_us: u64,
+    pub refine_us: u64,
+    pub krylov_ir_us: u64,
+}
+
+impl PostsolveStageTimes {
+    fn accumulate(&mut self, other: Self) {
+        self.map_us += other.map_us;
+        self.lsq_us += other.lsq_us;
+        self.recovery_us += other.recovery_us;
+        self.refine_us += other.refine_us;
+        self.krylov_ir_us += other.krylov_ir_us;
+    }
+
+    pub(crate) fn total_us(self) -> u64 {
+        self.map_us + self.lsq_us + self.recovery_us + self.refine_us + self.krylov_ir_us
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PostsolveStage {
+    Map,
+    Lsq,
+    Recovery,
+    Refine,
+    KrylovIr,
+}
+
 impl AttemptSink {
+    pub(crate) fn record_materialize_original(&mut self, elapsed_us: u64) {
+        self.ipm.assembly_us += elapsed_us;
+        self.counts.materialize_original_calls += 1;
+    }
+
+    pub(crate) fn record_materialize_permuted(&mut self, elapsed_us: u64) {
+        self.ipm.assembly_us += elapsed_us;
+        self.counts.materialize_permuted_calls += 1;
+    }
+
+    pub(crate) fn record_postsolve(&mut self, stage: PostsolveStage, elapsed_us: u64) {
+        self.postsolve_us += elapsed_us;
+        match stage {
+            PostsolveStage::Map => self.postsolve_stages.map_us += elapsed_us,
+            PostsolveStage::Lsq => self.postsolve_stages.lsq_us += elapsed_us,
+            PostsolveStage::Recovery => self.postsolve_stages.recovery_us += elapsed_us,
+            PostsolveStage::Refine => self.postsolve_stages.refine_us += elapsed_us,
+            PostsolveStage::KrylovIr => self.postsolve_stages.krylov_ir_us += elapsed_us,
+        }
+    }
+
     /// worker 側の sink を加算合併する。全フィールドが累計 µs / 回数であり、
     /// 直接書き込みと同じ終値を順序によらず作る (review R2 の回収側)。
     fn merge_from(&mut self, w: &AttemptSink) {
         self.init_us += w.init_us;
         self.postsolve_us += w.postsolve_us;
+        self.postsolve_stages.accumulate(w.postsolve_stages);
         self.verification_us += w.verification_us;
         self.ipm.assembly_us += w.ipm.assembly_us;
         self.ipm.factor_us += w.ipm.factor_us;
@@ -372,6 +427,8 @@ pub(crate) fn merge_worker_attempt_sink(w: AttemptSink) {
 thread_local! {
     /// 進行中 solve の診断 (`SolveDiagGuard` が有効化)。
     static ACTIVE_SOLVE: RefCell<Option<SolveDiagnostics>> = const { RefCell::new(None) };
+    /// 進行中 solve の全 attempt postsolve 段別累計 (公開 TimingBreakdown へ転送)。
+    static ACTIVE_SOLVE_POSTSOLVE: RefCell<Option<PostsolveStageTimes>> = const { RefCell::new(None) };
     /// 進行中 attempt の sink (`begin_attempt` が有効化)。
     static ACTIVE_ATTEMPT: RefCell<Option<AttemptSink>> = const { RefCell::new(None) };
     /// 直近に完了した solve の診断スナップショット (dev-bin 読み取り用)。
@@ -411,6 +468,10 @@ pub(crate) fn with_solve_diag(f: impl FnOnce(&mut SolveDiagnostics)) {
     });
 }
 
+pub(crate) fn current_solve_postsolve_stages() -> PostsolveStageTimes {
+    ACTIVE_SOLVE_POSTSOLVE.with(|c| c.borrow().unwrap_or_default())
+}
+
 /// 進行中 attempt の sink にアクセスする (IPM/postsolve 計測点専用)。
 /// 未アクティブ時 no-op — 計測なし経路では閉じ構築含め ns オーダー。
 pub(crate) fn with_ippmm_sink(f: impl FnOnce(&mut AttemptSink)) {
@@ -432,6 +493,7 @@ pub(crate) fn record_postsolve_iteration(field: fn(&mut AttemptCounts) -> &mut u
 pub(crate) struct SolveDiagGuard {
     t0: Instant,
     saved: Option<SolveDiagnostics>,
+    saved_postsolve_stages: Option<PostsolveStageTimes>,
     done: bool,
 }
 
@@ -439,9 +501,12 @@ impl SolveDiagGuard {
     /// solve 入口で呼ぶ。ネスト時は内側が drop で外側を復元する。
     pub(crate) fn begin() -> Self {
         let saved = ACTIVE_SOLVE.with(|c| c.borrow_mut().replace(SolveDiagnostics::default()));
+        let saved_postsolve_stages =
+            ACTIVE_SOLVE_POSTSOLVE.with(|c| c.borrow_mut().replace(PostsolveStageTimes::default()));
         Self {
             t0: Instant::now(),
             saved,
+            saved_postsolve_stages,
             done: false,
         }
     }
@@ -457,6 +522,10 @@ impl SolveDiagGuard {
         diag.total_us = self.t0.elapsed().as_micros() as u64;
         LAST_SOLVE_DIAG.with(|c| *c.borrow_mut() = Some(diag.clone()));
         ACTIVE_SOLVE.with(|c| *c.borrow_mut() = self.saved.take());
+        ACTIVE_SOLVE_POSTSOLVE.with(|c| {
+            let _ = c.borrow_mut().take();
+            *c.borrow_mut() = self.saved_postsolve_stages.take();
+        });
         diag
     }
 
@@ -528,6 +597,11 @@ pub(crate) fn finish_attempt(start: AttemptStart, bits: AttemptOutcomeBits) -> A
             std::mem::replace(&mut *slot, start.saved_sink)
         })
         .unwrap_or_default();
+    ACTIVE_SOLVE_POSTSOLVE.with(|c| {
+        if let Some(total) = c.borrow_mut().as_mut() {
+            total.accumulate(sink.postsolve_stages);
+        }
+    });
     let psd_now = otspot_num::linalg::ldl::psd_check_count();
     let transpose_now = otspot_num::sparse::transpose_construction_count();
     let mut counts = sink.counts;
@@ -650,5 +724,18 @@ mod tests {
             record_attempt(ladder_attempt(50, 10, false));
         });
         assert_eq!(outer.attempts.len(), 1);
+    }
+
+    #[test]
+    fn materialize_durations_are_exclusive_assembly_and_counted_by_order() {
+        let mut sink = AttemptSink::default();
+        sink.record_materialize_original(17);
+        sink.record_materialize_permuted(29);
+
+        assert_eq!(sink.ipm.assembly_us, 46);
+        assert_eq!(sink.ipm.factor_us, 0);
+        assert_eq!(sink.counts.materialize_original_calls, 1);
+        assert_eq!(sink.counts.materialize_permuted_calls, 1);
+        assert_eq!(sink.counts.materialize_total_calls(), 2);
     }
 }

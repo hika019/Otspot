@@ -15,7 +15,7 @@ use super::outcome::{IpmOutcome, IpmTermination, ProblemView};
 use crate::options::SolverOptions;
 use crate::presolve::{postsolve_qp_with_dual_recovery, QpPresolveResult};
 use crate::problem::{SolveStatus, TimingBreakdown};
-use crate::qp::diagnostics::with_ippmm_sink;
+use crate::qp::diagnostics::{with_ippmm_sink, PostsolveStage};
 use crate::qp::problem::QpProblem;
 use crate::tolerances::any_nonfinite;
 
@@ -76,7 +76,7 @@ fn run_ipm_with(
     // 診断: postsolve / verification の時間を attempt sink の排他的 bucket へ
     // 各 stage 完了時に積む。early return (dims mismatch など) までに走った
     // stage 分は失われない。
-    let sink_postsolve = |us: u64| with_ippmm_sink(|s| s.postsolve_us += us);
+    let sink_postsolve = |stage, us| with_ippmm_sink(|s| s.record_postsolve(stage, us));
     let sink_verify = |us: u64| with_ippmm_sink(|s| s.verification_us += us);
 
     let mut opts_for_ipm = tighten_ipm_eps_for_presolve_scale(opts, presolve_result);
@@ -160,7 +160,7 @@ fn run_ipm_with(
         );
     }
     let postsolve_map_us = t_postsolve_map.elapsed().as_micros() as u64;
-    sink_postsolve(postsolve_map_us);
+    sink_postsolve(PostsolveStage::Map, postsolve_map_us);
     if final_sol.solution.len() != orig_problem.num_vars {
         return IpmOutcome {
             solution: Vec::new(),
@@ -184,145 +184,25 @@ fn run_ipm_with(
         };
     }
 
-    // bounds clip (Ruiz unscale 増幅由来の微小違反補正)
-    for (xi, &(lb, ub)) in final_sol
-        .solution
-        .iter_mut()
-        .zip(orig_problem.bounds.iter())
-    {
-        if lb.is_finite() {
-            *xi = xi.max(lb);
-        }
-        if ub.is_finite() {
-            *xi = xi.min(ub);
-        }
-    }
-    // presolve metadata から削除 col mask を導出。orig 空間での
-    // kkt_residual_rel / refine 呼出は本 mask を経由してのみ EmptyCol を skip する。
-    let eliminated_cols: Vec<bool> = presolve_result
-        .col_map
-        .iter()
-        .map(|c| c.is_none())
-        .collect();
-
-    // 元空間 dual 一括復元 + Stage 0 (SingletonRow 後退代入)。両方とも IPM が iterate
-    // した場合のみ実施 (cancel/timeout=0 で冷状態 x=0 から後処理が独自解を作らない)。
-    let t_lsq = std::time::Instant::now();
-    let mut postsolve_recovery_us = 0u64;
-    if !lp_crossover_will_certify
-        && presolve_result.was_reduced
-        && !presolve_result.postsolve_stack.steps.is_empty()
-    {
-        refine_postsolve_dual_lsq(orig_problem, &mut final_sol, &eliminated_cols, opts);
-        let t_recovery = std::time::Instant::now();
-        if result.iterations > 0 {
-            refine_postsolve_recovery(
-                orig_problem,
-                presolve_result,
-                &eliminated_cols,
-                &mut final_sol,
-                opts,
-            );
-        }
-        postsolve_recovery_us = t_recovery.elapsed().as_micros() as u64;
-    }
-    let postsolve_lsq_us = t_lsq.elapsed().as_micros() as u64 - postsolve_recovery_us;
-    sink_postsolve(postsolve_lsq_us + postsolve_recovery_us);
-
-    // 元空間 post-processing 3 段階: (1) primal projection, (2) y/z 交互 refit + IRLS,
-    // (3) saddle-point Krylov IR。
-    // IPM が 1 度も iterate しなかった場合 (cancel/timeout=0) は冷状態 x=0 から
-    // 後処理が独自解を作り cancel/Timeout セマンティクスを破壊するため skip。
-    let ipm_made_progress = result.iterations > 0;
-    let allow_primal = allow_primal_projection(orig_problem);
-
-    // 診断: kkt_already_passes ゲート判定は解品質検証であって refine の改善操作
-    // ではない。attempt の verification bucket に積む (既存の refine 計時とは
-    // 独立に、ここだけ囲む)。
-    let t_gate1 = std::time::Instant::now();
-    let kkt_already_pass = !lp_crossover_will_certify
-        && kkt_already_passes(
+    let postsolve_refinement = refine_postsolve_solution(
+        &PostsolveContext {
             orig_problem,
-            &final_sol,
-            &eliminated_cols,
-            result.status == SolveStatus::Optimal,
+            presolve_result,
+            opts,
             user_eps,
-        );
-    sink_verify(t_gate1.elapsed().as_micros() as u64);
-    // Stage 1+2 (primal projection + y/z refit/IRLS): run for side effects on
-    // `final_sol` only when the solution does not already meet the tolerance.
-    // The returned residual is recomputed below as `kkt_final`.
-    let t_refine = std::time::Instant::now();
-    if !final_sol.solution.is_empty()
-        && orig_problem.num_constraints > 0
-        && ipm_made_progress
-        && !lp_crossover_will_certify
-        && !kkt_already_pass
-    {
-        refine_post_processing(
-            orig_problem,
-            &mut final_sol,
-            &eliminated_cols,
-            opts,
-            allow_primal,
-        );
-    }
-    let postsolve_refine_us = t_refine.elapsed().as_micros() as u64;
-    sink_postsolve(postsolve_refine_us);
-
-    let t_gate2 = std::time::Instant::now();
-    let kkt_pass_after_refine = !lp_crossover_will_certify
-        && (kkt_already_pass
-            || kkt_already_passes(
-                orig_problem,
-                &final_sol,
-                &eliminated_cols,
-                result.status == SolveStatus::Optimal,
-                user_eps,
-            ));
-    sink_verify(t_gate2.elapsed().as_micros() as u64);
-
-    // Skip the saddle-point Krylov IR when the solution already meets the
-    // user tolerance (satisfies_eps: kkt + pres + bv + comp + duality_gap all
-    // pass). The IR factorizes the full augmented K = [Q+δI, Aᵀ; A, -δI] (n+m),
-    // which fills catastrophically for dense constraint rows (fit2d: ~7s) yet
-    // performs zero refinement on an already-converged point. This mirrors the
-    // `!kkt_already_pass` gate on `refine_post_processing` above.
-    let run_krylov_ir = !lp_crossover_will_certify
-        && should_run_krylov_ir(ipm_made_progress, kkt_pass_after_refine);
-    let t_krylov = std::time::Instant::now();
-    if run_krylov_ir {
-        refine_krylov_and_projection(
-            orig_problem,
-            &mut final_sol,
-            &eliminated_cols,
-            opts,
-            allow_primal,
-        );
-    }
-    let postsolve_krylov_ir_us = t_krylov.elapsed().as_micros() as u64;
-    sink_postsolve(postsolve_krylov_ir_us);
-    // Sentinel: the IR would run whenever the IPM made progress; this is true iff
-    // the gate skipped it. Derived from `run_krylov_ir` (not `kkt_already_pass`)
-    // so that dropping the `&& !kkt_already_pass` gate flips this to false.
-    let krylov_ir_skipped = ipm_made_progress && !run_krylov_ir;
-
-    // Bound-only QP (num_constraints == 0): all refinement above is gated on
-    // num_constraints > 0 and is therefore skipped. After inertia-corrected IPM,
-    // the converged KKT is (Q+δI)x + z + c = 0, leaving a stationarity residual
-    // of δ*x in the original problem. Refit z directly from Qx+c so that z
-    // satisfies the original stationarity Qx + z + c = 0 unconditionally.
-    if !final_sol.solution.is_empty() && orig_problem.num_constraints == 0 && ipm_made_progress {
-        crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol, opts.ipm_eps());
-    }
-    if ipm_made_progress {
-        cleanup_inactive_dual_complementarity(
-            orig_problem,
-            &mut final_sol,
-            &eliminated_cols,
-            opts.ipm_eps(),
-        );
-    }
+            lp_crossover_will_certify,
+        },
+        &result,
+        &mut final_sol,
+    );
+    let PostsolveRefinement {
+        eliminated_cols,
+        postsolve_lsq_us,
+        postsolve_recovery_us,
+        postsolve_refine_us,
+        postsolve_krylov_ir_us,
+        krylov_ir_skipped,
+    } = postsolve_refinement;
 
     // 診断: 元空間残差・gap・objective の再計算は「検証」であり attempt の
     // verification bucket (refine の改善操作ではない)。
@@ -399,6 +279,165 @@ fn run_ipm_with(
         postsolve_krylov_ir_skipped: krylov_ir_skipped,
         timing: Some(combined_timing),
         termination,
+    }
+}
+
+struct PostsolveContext<'a> {
+    orig_problem: &'a QpProblem,
+    presolve_result: &'a QpPresolveResult,
+    opts: &'a SolverOptions,
+    user_eps: f64,
+    lp_crossover_will_certify: bool,
+}
+
+struct PostsolveRefinement {
+    eliminated_cols: Vec<bool>,
+    postsolve_lsq_us: u64,
+    postsolve_recovery_us: u64,
+    postsolve_refine_us: u64,
+    postsolve_krylov_ir_us: u64,
+    krylov_ir_skipped: bool,
+}
+
+fn refine_postsolve_solution(
+    ctx: &PostsolveContext<'_>,
+    result: &crate::problem::SolverResult,
+    final_sol: &mut crate::problem::SolverResult,
+) -> PostsolveRefinement {
+    let orig_problem = ctx.orig_problem;
+    let presolve_result = ctx.presolve_result;
+    let opts = ctx.opts;
+    let user_eps = ctx.user_eps;
+    let lp_crossover_will_certify = ctx.lp_crossover_will_certify;
+    let sink_postsolve = |stage, us| with_ippmm_sink(|s| s.record_postsolve(stage, us));
+    let sink_verify = |us: u64| with_ippmm_sink(|s| s.verification_us += us);
+
+    // bounds clip (Ruiz unscale 増幅由来の微小違反補正)
+    for (xi, &(lb, ub)) in final_sol
+        .solution
+        .iter_mut()
+        .zip(orig_problem.bounds.iter())
+    {
+        if lb.is_finite() {
+            *xi = xi.max(lb);
+        }
+        if ub.is_finite() {
+            *xi = xi.min(ub);
+        }
+    }
+    // orig 空間の KKT/refine では presolve で削除した列を skip する。
+    let eliminated_cols: Vec<bool> = presolve_result
+        .col_map
+        .iter()
+        .map(|c| c.is_none())
+        .collect();
+
+    // Reduced-space LSQ は元空間残差を悪化させるため、元空間へ戻してから dual を refine。
+    let t_lsq = std::time::Instant::now();
+    let mut postsolve_recovery_us = 0u64;
+    if !lp_crossover_will_certify
+        && presolve_result.was_reduced
+        && !presolve_result.postsolve_stack.steps.is_empty()
+    {
+        refine_postsolve_dual_lsq(orig_problem, final_sol, &eliminated_cols, opts);
+        let t_recovery = std::time::Instant::now();
+        if result.iterations > 0 {
+            refine_postsolve_recovery(
+                orig_problem,
+                presolve_result,
+                &eliminated_cols,
+                final_sol,
+                opts,
+            );
+        }
+        postsolve_recovery_us = t_recovery.elapsed().as_micros() as u64;
+    }
+    let postsolve_lsq_us = t_lsq.elapsed().as_micros() as u64 - postsolve_recovery_us;
+    sink_postsolve(PostsolveStage::Lsq, postsolve_lsq_us);
+    sink_postsolve(PostsolveStage::Recovery, postsolve_recovery_us);
+
+    // Cancel/timeout 前に iterate していない場合、postsolve が独自解を作らない。
+    let ipm_made_progress = result.iterations > 0;
+    let allow_primal = allow_primal_projection(orig_problem);
+    let t_gate1 = std::time::Instant::now();
+    let kkt_already_pass = !lp_crossover_will_certify
+        && kkt_already_passes(
+            orig_problem,
+            final_sol,
+            &eliminated_cols,
+            result.status == SolveStatus::Optimal,
+            user_eps,
+        );
+    sink_verify(t_gate1.elapsed().as_micros() as u64);
+
+    // Stage 1+2 は許容誤差を満たさない解に限って実行し、残差は後で再計算する。
+    let t_refine = std::time::Instant::now();
+    if !final_sol.solution.is_empty()
+        && orig_problem.num_constraints > 0
+        && ipm_made_progress
+        && !lp_crossover_will_certify
+        && !kkt_already_pass
+    {
+        refine_post_processing(
+            orig_problem,
+            final_sol,
+            &eliminated_cols,
+            opts,
+            allow_primal,
+        );
+    }
+    let postsolve_refine_us = t_refine.elapsed().as_micros() as u64;
+    sink_postsolve(PostsolveStage::Refine, postsolve_refine_us);
+
+    let t_gate2 = std::time::Instant::now();
+    let kkt_pass_after_refine = !lp_crossover_will_certify
+        && (kkt_already_pass
+            || kkt_already_passes(
+                orig_problem,
+                final_sol,
+                &eliminated_cols,
+                result.status == SolveStatus::Optimal,
+                user_eps,
+            ));
+    sink_verify(t_gate2.elapsed().as_micros() as u64);
+
+    // 既に許容誤差を満たす解では高コストな saddle-point Krylov IR を省略する。
+    let run_krylov_ir = !lp_crossover_will_certify
+        && should_run_krylov_ir(ipm_made_progress, kkt_pass_after_refine);
+    let t_krylov = std::time::Instant::now();
+    if run_krylov_ir {
+        refine_krylov_and_projection(
+            orig_problem,
+            final_sol,
+            &eliminated_cols,
+            opts,
+            allow_primal,
+        );
+    }
+    let postsolve_krylov_ir_us = t_krylov.elapsed().as_micros() as u64;
+    sink_postsolve(PostsolveStage::KrylovIr, postsolve_krylov_ir_us);
+    let krylov_ir_skipped = ipm_made_progress && !run_krylov_ir;
+
+    // Bound-only QP は慣性修正 delta による stationarity 残差を bound dual で補正する。
+    if !final_sol.solution.is_empty() && orig_problem.num_constraints == 0 && ipm_made_progress {
+        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol, opts.ipm_eps());
+    }
+    if ipm_made_progress {
+        cleanup_inactive_dual_complementarity(
+            orig_problem,
+            final_sol,
+            &eliminated_cols,
+            opts.ipm_eps(),
+        );
+    }
+
+    PostsolveRefinement {
+        eliminated_cols,
+        postsolve_lsq_us,
+        postsolve_recovery_us,
+        postsolve_refine_us,
+        postsolve_krylov_ir_us,
+        krylov_ir_skipped,
     }
 }
 

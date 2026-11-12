@@ -229,8 +229,9 @@ struct ProgressCandidate {
 ///
 /// `best_src` は `best` を更新した直近 attempt の診断 id を保持する。実行した
 /// 全 attempt (未採用・break 直前を含む) は `best` 選抜とは独立に診断 record
-/// として必ず残る — 採用 attempt の timing だけが公開されることで失われる
-/// 「実際に走った試行の時間」を拾うための経路 (plan §3.2)。
+/// として必ず残る。公開 TimingBreakdown は postsolve と solve 窓の合計を持つが、
+/// attempt ごとの wall / init / IPM / verification 内訳と回数はここに保持する
+/// (plan §3.2)。
 #[allow(clippy::too_many_arguments)]
 fn run_attempt_ladder(
     problem: &QpProblem,
@@ -971,9 +972,8 @@ fn solve_ipm_with_runner(
         .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
     let mut r = finalize_outcome(outcome, user_eps, n_orig, total_deadline, cancelled, &view);
     with_solve_diag(|d| d.final_verification_us += t_final.elapsed().as_micros() as u64);
-    // QP 経路で一度も設定され 0.000s だった presolve_us / solve_us を実測で
-    // R3: 公開 TimingBreakdown の presolve/solve を診断スナップショットから
-    // 填充する (定義は `fill_public_timing_fields` の doc 参照)。
+    // R3: QP 経路で未設定だった presolve/solve と受理 outcome 基準だった postsolve
+    // fields を、診断スナップショットの全 attempt 集計で填充する。
     fill_public_timing_fields(&mut r);
     // 採用 attempt の id を結ぶ (best が無かった solve では何も立たない)。
     if let Some(src) = best_src {
@@ -982,21 +982,14 @@ fn solve_ipm_with_runner(
     (r, eliminated_cols)
 }
 
-/// 公開 TimingBreakdown の presolve_us / solve_us を診断 (SolveDiagnostics) の
-/// 全 attempt 集計から填充する。公開フィールドの定義は変更しない (review R3:
-/// 意味の明確化のみ)。
+/// 公開 TimingBreakdown を診断の全 attempt 集計から填充する。postsolve は全 attempt
+/// の段別累計を用い、公開合計と各 stage field の整合性を保つ。
 ///
 /// - `solve_us` = 全 attempt wall 合計 − 全 attempt postsolve 合計。全 attempt
 ///   (未採用・延長・fallback 含む) の求解本体時間で、caller が「解にかかった
 ///   時間」として体感する値から postsolve を除いた窓。
-/// - 公開 `postsolve_us` = 採用 attempt の postsolve のみ (受理 outcome の
-///   TimingBreakdown からそのまま流れ、この填充では触れない)。
-///
-/// したがって未採用 attempt の postsolve は solve_us にも公開 postsolve_us
-/// にも入らず、公開合計 (solve_us + postsolve_us) は solve 全体の費用では
-/// ない。全 attempt の postsolve・回数・排他的内訳は
-/// `qp::diagnostics::last_qp_solve_diagnostics` (SolveDiagnostics) に残り、
-/// dev bin は公開値と並べて postsolve_pub / postsolve_all を表示する。
+/// - 公開 `postsolve_us` と各 postsolve stage は全 attempt の合計 (未採用・延長・
+///   fallback 含む)。
 fn fill_public_timing_fields(r: &mut crate::problem::SolverResult) {
     let mut qp_fill = (0u64, 0u64, 0u64);
     with_solve_diag(|d| {
@@ -1005,11 +998,19 @@ fn fill_public_timing_fields(r: &mut crate::problem::SolverResult) {
         qp_fill.2 = d.attempts.iter().map(|a| a.postsolve_us).sum();
     });
     let (presolve_fill, attempts_wall_us, attempts_postsolve_us) = qp_fill;
+    let postsolve = crate::qp::diagnostics::current_solve_postsolve_stages();
+    debug_assert_eq!(postsolve.total_us(), attempts_postsolve_us);
     let tb = r
         .timing_breakdown
         .get_or_insert_with(crate::problem::TimingBreakdown::default);
     tb.presolve_us = presolve_fill;
     tb.solve_us = attempts_wall_us.saturating_sub(attempts_postsolve_us);
+    tb.postsolve_us = postsolve.total_us();
+    tb.postsolve_map_us = postsolve.map_us;
+    tb.postsolve_lsq_us = postsolve.lsq_us;
+    tb.postsolve_recovery_us = postsolve.recovery_us;
+    tb.postsolve_refine_us = postsolve.refine_us;
+    tb.postsolve_krylov_ir_us = postsolve.krylov_ir_us;
 }
 
 /// `solve_ipm_with_runner` の attempt ループを抜けた時点で best が未証明かつ
@@ -2237,47 +2238,53 @@ mod tests {
         );
     }
 
-    // ── R3: 公開 postsolve と全 attempt postsolve の区別 (sentinel) ──────────
+    // ── R3: 公開 postsolve は全 attempt 合計 (sentinel) ─────────────────────
     //
-    // solve_us = 全 attempt wall − 全 attempt postsolve ながら、公開
-    // postsolve_us は採用 attempt のみという定義関係 (review §4) を、時間を
-    // 注入できる fake runner で検証する。実時間 sleep はしない。旧コメントが
-    // 主張した「postsolve_us 側で全件報告済み」へ revert (未採用 attempt の
-    // postsolve が消えない定義へ変更) すると published/全件 の別関係 assert が
-    // fail する。
+    // 拒否された attempt と採用 attempt に決定的な段別値を注入し、公開合計が
+    // 全件の和で、各 stage も同じ範囲を集計することを検証する。
 
     static R3_POSTSOLVE_CALLS: std::sync::atomic::AtomicUsize =
         std::sync::atomic::AtomicUsize::new(0);
-    const R3_POSTSOLVE_REJECTED_US: u64 = 3;
-    const R3_POSTSOLVE_ACCEPTED_US: u64 = 1;
+    const R3_POSTSOLVE_REJECTED: crate::qp::diagnostics::PostsolveStageTimes =
+        crate::qp::diagnostics::PostsolveStageTimes {
+            map_us: 1,
+            lsq_us: 2,
+            recovery_us: 3,
+            refine_us: 4,
+            krylov_ir_us: 5,
+        };
+    const R3_POSTSOLVE_ACCEPTED: crate::qp::diagnostics::PostsolveStageTimes =
+        crate::qp::diagnostics::PostsolveStageTimes {
+            map_us: 7,
+            lsq_us: 11,
+            recovery_us: 13,
+            refine_us: 17,
+            krylov_ir_us: 19,
+        };
     /// 回数として sink へ注入する値 (µs 合計へ混入しないことの検査用)。
     const R3_COUNT_POLLUTION: u64 = 999;
 
-    /// 1 回目: 受理ゲート不通過 (gap 失敗) + postsolve 注入の棄却 attempt。
-    /// 2 回目: 受理される postsolve 注入 attempt。各 call で attempt sink へ
-    /// postsolve µs と巨大回数 (reg retries) を書き込む。attempt wall より
-    /// 注入 postsolve が大きくならないよう、sleep なしの純計算で各 attempt に
-    /// 数十 µs 以上の実作業を入れる (秒数の厳密一致は検証しない)。
+    /// 1 回目: 受理ゲート不通過 (gap 失敗) + 段別時間を注入する棄却 attempt。
+    /// 2 回目: 受理される段別時間注入 attempt。
     fn runner_postsolve_rejected_then_accepted(
         _problem: &QpProblem,
         _presolve: &QpPresolveResult,
         _options: &SolverOptions,
         _user_eps: f64,
     ) -> IpmOutcome {
-        use std::hint::black_box;
         let call = R3_POSTSOLVE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let mut burn = 0.0_f64;
-        for k in 1..20_000u32 {
-            burn += (k as f64).ln();
-        }
-        black_box(burn);
-        let postsolve_us = if call == 0 {
-            R3_POSTSOLVE_REJECTED_US
+        let stages = if call == 0 {
+            R3_POSTSOLVE_REJECTED
         } else {
-            R3_POSTSOLVE_ACCEPTED_US
+            R3_POSTSOLVE_ACCEPTED
         };
         crate::qp::diagnostics::with_ippmm_sink(|s| {
-            s.postsolve_us += postsolve_us;
+            use crate::qp::diagnostics::PostsolveStage;
+            s.record_postsolve(PostsolveStage::Map, stages.map_us);
+            s.record_postsolve(PostsolveStage::Lsq, stages.lsq_us);
+            s.record_postsolve(PostsolveStage::Recovery, stages.recovery_us);
+            s.record_postsolve(PostsolveStage::Refine, stages.refine_us);
+            s.record_postsolve(PostsolveStage::KrylovIr, stages.krylov_ir_us);
             s.counts.kkt_reg_retries += R3_COUNT_POLLUTION;
         });
         IpmOutcome {
@@ -2297,16 +2304,13 @@ mod tests {
             ray_certificate: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
-            timing: Some(crate::problem::TimingBreakdown {
-                postsolve_us,
-                ..Default::default()
-            }),
+            timing: Some(crate::problem::TimingBreakdown::default()),
             termination: IpmTermination::Converged,
         }
     }
 
     #[test]
-    fn published_postsolve_is_accepted_only_all_attempt_postsolve_conserved() {
+    fn published_postsolve_sums_rejected_and_accepted_attempt_stages() {
         use crate::problem::SolveStatus;
         R3_POSTSOLVE_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
         // 内部最优 (x*=0, bounds (-10,10)) の 1 変数 QP: ゼロ dual・ゼロ残差の
@@ -2349,52 +2353,152 @@ mod tests {
             "棄却 attempt が診断から脱落している"
         );
         assert!(!diag.attempts[0].published && diag.attempts[1].published);
-        assert_eq!(diag.attempts[0].postsolve_us, R3_POSTSOLVE_REJECTED_US);
-        assert_eq!(diag.attempts[1].postsolve_us, R3_POSTSOLVE_ACCEPTED_US);
+        assert_eq!(
+            diag.attempts[0].postsolve_us,
+            R3_POSTSOLVE_REJECTED.total_us()
+        );
+        assert_eq!(
+            diag.attempts[1].postsolve_us,
+            R3_POSTSOLVE_ACCEPTED.total_us()
+        );
         let postsolve_all: u64 = diag.attempts.iter().map(|a| a.postsolve_us).sum();
         assert_eq!(
             postsolve_all,
-            R3_POSTSOLVE_REJECTED_US + R3_POSTSOLVE_ACCEPTED_US
+            R3_POSTSOLVE_REJECTED.total_us() + R3_POSTSOLVE_ACCEPTED.total_us()
         );
 
         let tb = result
             .timing_breakdown
             .expect("QP solve は timing_breakdown");
-        // 公開 postsolve_us = 採用 attempt のみ (全 attempt 合計ではない)。
         assert_eq!(
-            tb.postsolve_us, R3_POSTSOLVE_ACCEPTED_US,
-            "公開 postsolve_us は採用 attempt の値でなければならない (review §4)"
+            tb.postsolve_us, postsolve_all,
+            "公開 postsolve_us は棄却 attempt を含む全件合計"
         );
-        assert!(
-            tb.postsolve_us < postsolve_all,
-            "公開値と全 attempt 集計が同一に見える (別窓の区別が崩れた)"
+        assert_eq!(tb.postsolve_map_us, 8);
+        assert_eq!(tb.postsolve_lsq_us, 13);
+        assert_eq!(tb.postsolve_recovery_us, 16);
+        assert_eq!(tb.postsolve_refine_us, 21);
+        assert_eq!(tb.postsolve_krylov_ir_us, 24);
+        assert_eq!(
+            tb.postsolve_us,
+            tb.postsolve_map_us
+                + tb.postsolve_lsq_us
+                + tb.postsolve_recovery_us
+                + tb.postsolve_refine_us
+                + tb.postsolve_krylov_ir_us,
+            "公開合計と段別内訳が一致する"
         );
 
-        // 親子・二重計上関係: solve_us = wall 合計 − 全 attempt postsolve。
-        // 両辺は同じ診断スナップショットから計算するため秒数丸めに依存しない
-        // 代数関係で、厳密一致 assert は計測値一致テストではない。
-        let wall_sum = diag.attempts_wall_sum_us();
-        assert_eq!(
-            tb.solve_us,
-            wall_sum.saturating_sub(postsolve_all),
-            "solve_us の定義 (全 attempt wall − 全 attempt postsolve) から乖離"
-        );
-        assert_eq!(
-            tb.solve_us + postsolve_all,
-            wall_sum,
-            "burn 計算で wall_sum ≫ postsolve_all が成立するはず (二重計上・欠落の検出)"
-        );
-        // 各 attempt の子窓合計 ≤ 親 wall。
-        for a in &diag.attempts {
-            assert!(a.other_us() >= 0, "attempt#{} の子窓合計が wall 超過", a.id);
-        }
         // 回数 (reg retries) は µs 合計へ混入しない: 注入で全 attempt の
-        // kkt_reg_retries は膨らむが、上記の時間代数関係は不変 (上の assert が
-        // 成立していること自体が混入なしの証拠)。加えて型分離側の集計を確認。
+        // kkt_reg_retries は膨らむが、公開された段別時間は決め打ち値のまま。
         assert_eq!(
             diag.total_counts().kkt_reg_retries,
             2 * R3_COUNT_POLLUTION,
             "回数注入が診断側へ保持されていること (時間へは入らない)"
+        );
+    }
+
+    static R3_ALL_ATTEMPT_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn runner_postsolve_across_extension_and_fallback(
+        _problem: &QpProblem,
+        _presolve: &QpPresolveResult,
+        _options: &SolverOptions,
+        _user_eps: f64,
+    ) -> IpmOutcome {
+        use crate::qp::diagnostics::PostsolveStage;
+        let call = R3_ALL_ATTEMPT_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let call_value = call as u64;
+        crate::qp::diagnostics::with_ippmm_sink(|s| {
+            s.record_postsolve(PostsolveStage::Map, call_value + 1);
+            s.record_postsolve(PostsolveStage::Lsq, call_value + 2);
+            s.record_postsolve(PostsolveStage::Recovery, call_value + 3);
+            s.record_postsolve(PostsolveStage::Refine, call_value + 4);
+            s.record_postsolve(PostsolveStage::KrylovIr, call_value + 5);
+        });
+        IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0, 0.0],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 1.0,
+            primal_residual_rel: 1.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 1.0,
+            duality_gap_rel: 1.0,
+            numerical_failure: false,
+            infeasibility_status: None,
+            infeasibility_proven: false,
+            ray_certificate: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: Some(crate::problem::TimingBreakdown::default()),
+            termination: if call < 7 {
+                IpmTermination::IterationLimit
+            } else {
+                IpmTermination::Stalled
+            },
+        }
+    }
+
+    #[test]
+    fn published_postsolve_includes_extension_and_fallback_attempts() {
+        use crate::qp::diagnostics::AttemptKind;
+        R3_ALL_ATTEMPT_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let (prob, mut options) = diag_gate_problem(true, true);
+        options.ipm.eps = 1e-8;
+        options.ipm.max_iter = MAX_ITER_PER_ATTEMPT * 4 + 2;
+        options.deadline = Some(Instant::now() + std::time::Duration::from_secs(3600));
+
+        let ((result, _), diag) = crate::qp::diagnostics::capture_diagnostics(|| {
+            solve_ipm_with_runner(
+                &prob,
+                &options,
+                runner_postsolve_across_extension_and_fallback,
+            )
+        });
+        assert_eq!(
+            R3_ALL_ATTEMPT_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            5,
+            "2 ladder + 1 extension + 2 no-presolve fallback attempts"
+        );
+        assert_eq!(diag.attempts.len(), 5);
+        assert!(diag.attempts[..2]
+            .iter()
+            .all(|a| a.kind == AttemptKind::Ladder));
+        assert_eq!(diag.attempts[2].kind, AttemptKind::Extension);
+        assert!(diag.attempts[3..]
+            .iter()
+            .all(|a| a.kind == AttemptKind::NoPresolveFallback));
+
+        for (index, attempt) in diag.attempts.iter().enumerate() {
+            let call = index as u64;
+            assert_eq!(attempt.postsolve_us, 5 * call + 15);
+        }
+        let tb = result
+            .timing_breakdown
+            .expect("QP solve は timing_breakdown");
+        assert_eq!(tb.postsolve_map_us, 15);
+        assert_eq!(tb.postsolve_lsq_us, 20);
+        assert_eq!(tb.postsolve_recovery_us, 25);
+        assert_eq!(tb.postsolve_refine_us, 30);
+        assert_eq!(tb.postsolve_krylov_ir_us, 35);
+        assert_eq!(tb.postsolve_us, 125);
+        assert_eq!(
+            tb.postsolve_us,
+            diag.attempts.iter().map(|a| a.postsolve_us).sum(),
+            "公開 postsolve 合計は ladder/extension/fallback 全件の合計"
+        );
+        assert_eq!(
+            tb.postsolve_us,
+            tb.postsolve_map_us
+                + tb.postsolve_lsq_us
+                + tb.postsolve_recovery_us
+                + tb.postsolve_refine_us
+                + tb.postsolve_krylov_ir_us,
+            "公開 stage fields と postsolve 合計が一致"
         );
     }
 

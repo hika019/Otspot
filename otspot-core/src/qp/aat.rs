@@ -62,3 +62,52 @@ pub(crate) fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<C
     }
     Some(CscMatrix::from_raw_parts(m, m, col_ptr, row_ind, values))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_upper_triangle_of_a_at_with_independent_dense_oracle() {
+        let a = CscMatrix::from_triplets(&[0, 1, 1], &[0, 0, 1], &[1.0, 2.0, -1.0], 3, 2).unwrap();
+
+        let aat = build_aat_upper_csc(&a, 2, 3).expect("small Gram matrix fits budget");
+        let reg = AAT_REG_FACTOR * 5.0;
+
+        assert_eq!(aat.nrows(), 3);
+        assert_eq!(aat.ncols(), 3);
+        assert_eq!(aat.col_ptr(), &[0, 1, 3, 4]);
+        assert_eq!(aat.row_ind(), &[0, 0, 1, 2]);
+        let expected = [1.0 + reg, 2.0, 5.0 + reg, reg];
+        for (&actual, expected) in aat.values().iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() <= 1e-14,
+                "A*A^T upper-triangle value {actual} != independent oracle {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_column_matrix_returns_regularized_diagonal() {
+        let a = CscMatrix::new(2, 0);
+
+        let aat = build_aat_upper_csc(&a, 0, 2).expect("empty product fits budget");
+
+        assert_eq!(aat.col_ptr(), &[0, 1, 2]);
+        assert_eq!(aat.row_ind(), &[0, 1]);
+        assert_eq!(aat.values(), &[AAT_REG_FACTOR, AAT_REG_FACTOR]);
+    }
+
+    #[test]
+    fn zero_row_matrix_returns_empty_product() {
+        let a = CscMatrix::new(0, 2);
+
+        let aat = build_aat_upper_csc(&a, 2, 0).expect("empty product fits budget");
+
+        assert_eq!(aat.nrows(), 0);
+        assert_eq!(aat.ncols(), 0);
+        assert_eq!(aat.col_ptr(), &[0]);
+        assert!(aat.row_ind().is_empty());
+        assert!(aat.values().is_empty());
+    }
+}

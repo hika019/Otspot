@@ -108,8 +108,22 @@ mod tests {
     }
 
     #[test]
+    fn try_vec_filled_initializes_requested_length() {
+        assert_eq!(try_vec_filled(0, 7_u8, "empty").unwrap(), []);
+        assert_eq!(try_vec_filled(4, 7_u8, "filled").unwrap(), vec![7; 4]);
+    }
+
+    #[test]
     fn try_vec_with_capacity_rejects_huge_capacity_gracefully() {
         let err = try_vec_with_capacity::<f64>(usize::MAX / 4, "probe").unwrap_err();
         assert!(err.contains("probe"));
+    }
+
+    #[test]
+    fn try_vec_with_capacity_reserves_without_eager_filling() {
+        let out = try_vec_with_capacity::<u8>(4, "buffer").unwrap();
+
+        assert!(out.capacity() >= 4);
+        assert!(out.is_empty());
     }
 }

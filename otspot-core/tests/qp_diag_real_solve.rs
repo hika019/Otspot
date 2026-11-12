@@ -252,6 +252,75 @@ fn threads_2_concurrent_solves_keep_diagnostics_isolated() {
     });
 }
 
+/// R2 sentinel: 連続する実 IPM solve を threads=1/2/4 で切り替えても、各
+/// solve のカウンタ・公開attempt・thread-local診断が対応することを検証する。
+/// サイズとスレッド数を変え、各結果を独立オラクルと照合する。目的値は x=1 が全不等式の
+/// 内部可行点で達する独立オラクル `sum(x_i² - 2x_i) = -n`。
+#[test]
+fn consecutive_ipm_solves_preserve_diagnostics_for_threads_1_2_4() {
+    use otspot_core::options::SolverOptions;
+
+    for (threads, n) in [(1usize, 20usize), (2, 30), (4, 40)] {
+        let prob = dense_qp(n, n + 20);
+        let mut opts = SolverOptions::default();
+        opts.threads = threads;
+        let result = otspot_core::qp::solve_qp_with(&prob, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "threads={threads}, n={n}"
+        );
+        assert!(
+            (result.objective + n as f64).abs() <= 1e-6 * n as f64,
+            "threads={threads}, n={n}: objective {} != oracle {}",
+            result.objective,
+            -(n as f64)
+        );
+
+        let diag = otspot_core::qp::diagnostics::last_qp_solve_diagnostics()
+            .unwrap_or_else(|| panic!("threads={threads}, n={n}: 診断が残らない"));
+        let counts = diag.total_counts();
+        assert!(
+            counts.ipm_iterations > 0,
+            "threads={threads}, n={n}: IPMなし"
+        );
+        assert!(
+            counts.kkt_factorize_attempts >= counts.ipm_iterations,
+            "threads={threads}, n={n}: factorize回数欠落"
+        );
+        assert!(
+            counts.kkt_health_probes > 0,
+            "threads={threads}, n={n}: probe回数欠落"
+        );
+        assert!(
+            counts.materialize_total_calls() + counts.kkt_schur_builds
+                >= counts.kkt_factorize_attempts,
+            "threads={threads}, n={n}: 構築回数がfactorize回数より少ない"
+        );
+        let published_id = diag.published_attempt().expect("採用 attempt あり");
+        let published = diag
+            .attempts
+            .iter()
+            .find(|a| a.id == published_id)
+            .expect("採用 attempt が診断にある");
+        assert_eq!(published.iterations, result.iterations as u64);
+        assert_eq!(
+            counts.ipm_iterations,
+            diag.attempts.iter().map(|a| a.iterations).sum::<u64>(),
+            "threads={threads}, n={n}: カウンタが現在のattempt recordsと一致"
+        );
+        assert!(
+            published.ipm.total_us > 0,
+            "threads={threads}, n={n}: IPM時間欠落"
+        );
+        assert!(published.ipm.other_us() >= 0);
+        assert!(!diag.is_aggregation_inconsistent());
+        for (index, attempt) in diag.attempts.iter().enumerate() {
+            assert_eq!(attempt.id, index as u64, "前solveのattemptが混入");
+        }
+    }
+}
+
 /// 合成密 QP: min ||x-t||² - const (t=1) に密な Le 制約 (x=1 が内部解)。
 /// KKT が (n+m) の密寄り系になり threads>1 の IPM 経路が実際に走る。
 fn dense_qp(n: usize, m: usize) -> otspot_core::qp::QpProblem {
