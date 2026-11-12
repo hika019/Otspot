@@ -87,12 +87,18 @@ if [[ "$bin" == "milp_solve" ]]; then
   KNOWN_OPT_FILE=""
   MIP_TIMEOUT="100"
   MIP_EPS="1e-6"
+  # 上記 3 つは milp_solve 呼び出し組み立て時に消費する (milp_solve 自体は
+  # --known-optimal を取らない)。それ以外の flag — OTSPOT_BENCH_EXTRA_ARGS で
+  # 注入したものを含む — は milp_solve へ素通しする。素通ししないと
+  # --threads 等の実験 flag が MILP 経路だけ黙って無視される (2026-11-12 指摘)。
+  MIP_EXTRA=()
   _idx=0
   while [[ $_idx -lt ${#BINARY_ARGS[@]} ]]; do
     case "${BINARY_ARGS[$_idx]}" in
       --known-optimal) _idx=$(( _idx + 1 )); KNOWN_OPT_FILE="${BINARY_ARGS[$_idx]}" ;;
       --timeout)       _idx=$(( _idx + 1 )); MIP_TIMEOUT="${BINARY_ARGS[$_idx]}" ;;
       --eps)           _idx=$(( _idx + 1 )); MIP_EPS="${BINARY_ARGS[$_idx]}" ;;
+      *)               MIP_EXTRA+=("${BINARY_ARGS[$_idx]}") ;;
     esac
     _idx=$(( _idx + 1 ))
   done
@@ -122,10 +128,10 @@ if [[ "$bin" == "milp_solve" ]]; then
     mps_exit=0
     if [[ -n "$MIP_TIMEOUT_CMD" ]]; then
       mps_out=$("$MIP_TIMEOUT_CMD" "$((MIP_TIMEOUT + 10))" ./target/release/milp_solve "$mps_file" \
-        --timeout "$MIP_TIMEOUT" --eps "$MIP_EPS" 2>/dev/null) || mps_exit=$?
+        --timeout "$MIP_TIMEOUT" --eps "$MIP_EPS" ${MIP_EXTRA[@]+"${MIP_EXTRA[@]}"} 2>/dev/null) || mps_exit=$?
     else
       mps_out=$(./target/release/milp_solve "$mps_file" \
-        --timeout "$MIP_TIMEOUT" --eps "$MIP_EPS" 2>/dev/null) || mps_exit=$?
+        --timeout "$MIP_TIMEOUT" --eps "$MIP_EPS" ${MIP_EXTRA[@]+"${MIP_EXTRA[@]}"} 2>/dev/null) || mps_exit=$?
     fi
 
     status_raw=$(printf '%s\n' "$mps_out" | awk '/^status:/ { print $2; exit }')
