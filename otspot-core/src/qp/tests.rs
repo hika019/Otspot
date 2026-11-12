@@ -16,6 +16,7 @@ mod qcqp_guard;
 mod smoke;
 mod status_dfeas;
 mod validate_wiring;
+mod w2_aty_parallel;
 
 const EPS: f64 = 1e-2;
 

@@ -68,6 +68,7 @@ pub(super) fn refine_postsolve_dual_lsq(
             final_sol,
             eliminated_cols,
             opts.deadline,
+            opts.threads,
         );
         crate::qp::refine_dual_worst_active_block(
             orig_problem,
@@ -156,6 +157,7 @@ pub(super) fn refine_postsolve_recovery(
             final_sol,
             eliminated_cols,
             opts.deadline,
+            opts.threads,
         );
         crate::qp::refine_dual_worst_active_block(
             orig_problem,

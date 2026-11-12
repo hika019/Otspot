@@ -32,7 +32,7 @@ fn p1_postsolve_refine_constructs_zero_transposes() {
     // line search 複数回不受理 (objective 評価 ≥ 17 回) を含む経路を走らせる。
     let (problem, mut result) = fixture_multi_reject_moving();
     reset_transpose_constructions();
-    refine_dual_projected_gradient(&problem, &mut result, &[], None);
+    refine_dual_projected_gradient(&problem, &mut result, &[], None, 1);
     assert_eq!(
         transpose_constructions(),
         0,
@@ -43,7 +43,7 @@ fn p1_postsolve_refine_constructs_zero_transposes() {
 
     let (problem, mut result) = fixture_guarded_then_worst_active();
     reset_transpose_constructions();
-    refine_dual_projected_gradient(&problem, &mut result, &[], None);
+    refine_dual_projected_gradient(&problem, &mut result, &[], None, 1);
     assert_eq!(transpose_constructions(), 0, "PG must stay transpose-free");
     refine_dual_worst_active_block(&problem, &mut result, &[], None);
     assert_eq!(

@@ -220,7 +220,7 @@ fn test_refine_dual_projected_gradient_uses_curvature_scaled_step() {
         ..SolverResult::default()
     };
 
-    refine_dual_projected_gradient(&problem, &mut result, &[], None);
+    refine_dual_projected_gradient(&problem, &mut result, &[], None, 1);
 
     assert!((result.dual_solution[0] - 1.0e-3).abs() < 1e-9);
 }

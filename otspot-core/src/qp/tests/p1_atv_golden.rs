@@ -142,7 +142,7 @@ fn kkt_rel(problem: &QpProblem, result: &SolverResult) -> f64 {
 fn p1_pg_multi_reject_line_search_bitwise_golden() {
     let (problem, mut result) = fixture_multi_reject_moving();
     let pre = kkt_rel(&problem, &result);
-    refine_dual_projected_gradient(&problem, &mut result, &[], None);
+    refine_dual_projected_gradient(&problem, &mut result, &[], None, 1);
     let post = kkt_rel(&problem, &result);
 
     assert_bits(
@@ -174,7 +174,7 @@ fn p1_pg_multi_reject_line_search_bitwise_golden() {
 fn p1_pg_best_not_current_bitwise_golden() {
     let (problem, mut result) = fixture_best_not_current_moving();
     let start_dual = result.dual_solution.clone();
-    refine_dual_projected_gradient(&problem, &mut result, &[], None);
+    refine_dual_projected_gradient(&problem, &mut result, &[], None, 1);
 
     assert_bits(
         &result.dual_solution,
@@ -203,7 +203,7 @@ fn p1_guarded_pg_then_worst_active_bitwise_golden() {
     let (problem, mut result) = fixture_guarded_then_worst_active();
     let start_dual = result.dual_solution.clone();
 
-    refine_dual_projected_gradient(&problem, &mut result, &[], None);
+    refine_dual_projected_gradient(&problem, &mut result, &[], None, 1);
     // KKT ガードが改善を棄却するため dual は開始点のまま (base と同一ビット)。
     assert_bits(
         &result.dual_solution,

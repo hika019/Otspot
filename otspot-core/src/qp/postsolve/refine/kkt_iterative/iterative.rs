@@ -28,6 +28,7 @@ pub(crate) fn refine_kkt_iterative(
     max_iters: usize,
     target_pf: f64,
     deadline: Option<std::time::Instant>,
+    threads: usize,
 ) -> usize {
     use crate::problem::ConstraintType;
     use crate::qp::ipm_solver::kkt::kkt_residual_rel;
@@ -80,7 +81,8 @@ pub(crate) fn refine_kkt_iterative(
             n_dual_total += n_dual;
             outer_made_progress = true;
             // side-effect refit only; KKT score is reused in the else branch via pre/post diff.
-            let _: f64 = run_dual_recovery_postprocess(problem, &view, result, deadline, target_pf);
+            let _: f64 =
+                run_dual_recovery_postprocess(problem, &view, result, deadline, target_pf, threads);
         } else {
             let pre_cleanup_kkt = kkt_residual_rel(
                 &view,
@@ -89,7 +91,7 @@ pub(crate) fn refine_kkt_iterative(
                 &result.bound_duals,
             );
             let post_cleanup_kkt =
-                run_dual_recovery_postprocess(problem, &view, result, deadline, target_pf);
+                run_dual_recovery_postprocess(problem, &view, result, deadline, target_pf, threads);
             if post_cleanup_kkt
                 + dual_recovery_progress_tol(pre_cleanup_kkt, post_cleanup_kkt, target_pf)
                 < pre_cleanup_kkt
@@ -571,7 +573,7 @@ mod tests {
             ..Default::default()
         };
 
-        let n_accepted = super::refine_kkt_iterative(&problem, &mut result, &[], 10, 1e-6, None);
+        let n_accepted = super::refine_kkt_iterative(&problem, &mut result, &[], 10, 1e-6, None, 1);
 
         assert!(n_accepted > 0, "saddle IR must accept at least one step");
 

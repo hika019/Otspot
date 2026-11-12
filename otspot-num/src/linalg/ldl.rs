@@ -163,6 +163,17 @@ fn csc_upper_to_faer_upper(mat: &CscMatrix) -> SparseColMat<usize, f64> {
     SparseColMat::new(symbolic, mat.values.clone())
 }
 
+/// 上三角 CscMatrix を所有権ごと faer SparseColMat（上三角）へ変換する（コピーなし）。
+///
+/// `csc_upper_to_faer_upper` との数値挙動はビット単位で同一（同じ buffer 内容が
+/// faer 側に渡るだけ）。毎回構築される行列をムーブで渡せる呼び出し側
+/// (AAT 直接法の再構築ループ等) で 3 storage の per-call clone を消す目的。
+fn csc_upper_to_faer_upper_owned(mat: CscMatrix) -> SparseColMat<usize, f64> {
+    let n = mat.nrows;
+    let symbolic = SymbolicSparseColMat::new_checked(n, n, mat.col_ptr, None, mat.row_ind);
+    SparseColMat::new(symbolic, mat.values)
+}
+
 /// 対角要素の符号ベクトルを抽出する（LdltRegularization sign-aware 用）。
 ///
 /// 対角が負なら -1、それ以外は +1。CSC 上三角を slice で受けるため、
@@ -225,9 +236,7 @@ fn do_numeric_factorize(
     do_numeric_factorize_with_cache(mat, signs, deadline, max_l_nnz, None, par)
 }
 
-/// `do_numeric_factorize` の symbolic キャッシュ対応版。`cached_symbolic` が `Some` の
-/// ときは `build_symbolic_hl` を skip して numeric 因子化のみ実行する。
-/// pattern 不変な IPM 反復で 5ms/call 程度の symbolic コストを削れる。
+/// `do_numeric_factorize` の借用引数版（faer 変換時に 3 storage をコピー）。
 fn do_numeric_factorize_with_cache(
     mat: &CscMatrix,
     signs: Option<&[i8]>,
@@ -237,6 +246,35 @@ fn do_numeric_factorize_with_cache(
     par: faer::Par,
 ) -> Result<(Arc<SymbolicCholesky<usize>>, Vec<f64>), LdlError> {
     let a_upper = csc_upper_to_faer_upper(mat);
+    do_numeric_factorize_from_upper(a_upper, signs, deadline, max_l_nnz, cached_symbolic, par)
+}
+
+/// `do_numeric_factorize_with_cache` の所有権引数版。
+///
+/// 変換は buffer ムーブのみで、借用版と数値挙動はビット単位で同一。
+fn do_numeric_factorize_owned(
+    mat: CscMatrix,
+    signs: Option<&[i8]>,
+    deadline: Option<Instant>,
+    max_l_nnz: Option<usize>,
+    cached_symbolic: Option<Arc<SymbolicCholesky<usize>>>,
+    par: faer::Par,
+) -> Result<(Arc<SymbolicCholesky<usize>>, Vec<f64>), LdlError> {
+    let a_upper = csc_upper_to_faer_upper_owned(mat);
+    do_numeric_factorize_from_upper(a_upper, signs, deadline, max_l_nnz, cached_symbolic, par)
+}
+
+/// 数値因子化コア。`cached_symbolic` が `Some` のときは `build_symbolic_hl` を
+/// skip して numeric 因子化のみ実行する。pattern 不変な IPM 反復で symbolic
+/// コストを削れる。
+fn do_numeric_factorize_from_upper(
+    a_upper: SparseColMat<usize, f64>,
+    signs: Option<&[i8]>,
+    deadline: Option<Instant>,
+    max_l_nnz: Option<usize>,
+    cached_symbolic: Option<Arc<SymbolicCholesky<usize>>>,
+    par: faer::Par,
+) -> Result<(Arc<SymbolicCholesky<usize>>, Vec<f64>), LdlError> {
     let symbolic: Arc<SymbolicCholesky<usize>> = match cached_symbolic {
         Some(s) => s,
         None => Arc::new(build_symbolic_hl(&a_upper)?),
@@ -578,6 +616,39 @@ pub fn factorize_budget(mat: &CscMatrix, max_l_nnz: usize) -> Result<LdlFactoriz
     })
 }
 
+/// `factorize` の所有権引数版。`factorize(&mat)` と結果はビット単位で同一で、
+/// 変換時の 3 storage コピーが発生しない。毎回構築した行列をムーブで渡す
+/// 呼び出し側用。
+pub fn factorize_owned(mat: CscMatrix) -> Result<LdlFactorization, LdlError> {
+    let n = mat.nrows;
+    let (symbolic, l_values) =
+        do_numeric_factorize_owned(mat, None, None, None, None, DEFAULT_PAR)?;
+    Ok(LdlFactorization {
+        symbolic,
+        l_values,
+        n,
+        par: DEFAULT_PAR,
+    })
+}
+
+/// `factorize_budget` の所有権引数版。`factorize_budget(&mat, max_l_nnz)` と
+/// 結果はビット単位で同一。IRLS の AAT 再構築ループのように毎反復構築する
+/// 行列をムーブで渡す呼び出し側用。
+pub fn factorize_budget_owned(
+    mat: CscMatrix,
+    max_l_nnz: usize,
+) -> Result<LdlFactorization, LdlError> {
+    let n = mat.nrows;
+    let (symbolic, l_values) =
+        do_numeric_factorize_owned(mat, None, None, Some(max_l_nnz), None, DEFAULT_PAR)?;
+    Ok(LdlFactorization {
+        symbolic,
+        l_values,
+        n,
+        par: DEFAULT_PAR,
+    })
+}
+
 /// `factorize` の per-call parallelism 指定版。
 /// `par == Par::Seq` で既存挙動と完全互換。
 pub fn factorize_with_par(mat: &CscMatrix, par: faer::Par) -> Result<LdlFactorization, LdlError> {
@@ -635,7 +706,7 @@ pub fn factorize_quasidefinite_with_cached_perm_budget_par(
     let perm_mat = CscMatrix::from_raw_parts(n, n, new_col_ptr, new_row_ind, new_values);
     let signs = extract_diagonal_signs(n, &perm_mat.col_ptr, &perm_mat.row_ind, &perm_mat.values);
     let (symbolic, l_values) =
-        do_numeric_factorize(&perm_mat, Some(&signs), deadline, max_l_nnz, par)?;
+        do_numeric_factorize_owned(perm_mat, Some(&signs), deadline, max_l_nnz, None, par)?;
     Ok(LdlFactorizationAmd {
         symbolic,
         l_values,
@@ -724,6 +795,59 @@ mod tests {
             }
         }
         CscMatrix::from_raw_parts(n, n, col_ptr, row_ind, values)
+    }
+
+    /// `factorize_owned` / `factorize_budget_owned` は借用版と L 因子・solve 解が
+    /// ビット単位で同一であること (所有権変換は数値挙動を変えない契約)。
+    /// 変換で buffer が並べ替えられる・値が書き換わる等の退行を入れると fail する。
+    #[test]
+    fn owned_factorize_bit_identical_to_borrowed() {
+        let mk = || {
+            upper_tri_csc(
+                4,
+                &[
+                    (0, 0, 4.0),
+                    (0, 1, 1.0),
+                    (1, 1, 3.0),
+                    (1, 2, 0.5),
+                    (2, 2, 5.0),
+                    (0, 3, -0.25),
+                    (2, 3, 1.5),
+                    (3, 3, 6.0),
+                ],
+            )
+        };
+        let rhs = [1.0_f64, -2.0, 0.5, 3.0];
+
+        let ref_f = factorize(&mk()).expect("SPD factorize");
+        let own_f = factorize_owned(mk()).expect("SPD factorize_owned");
+        assert_eq!(own_f.l_values.len(), ref_f.l_values.len());
+        for (i, (a, b)) in ref_f.l_values.iter().zip(own_f.l_values.iter()).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "l_values[{i}] differs bitwise");
+        }
+        let mut s_ref = [0.0_f64; 4];
+        let mut s_own = [0.0_f64; 4];
+        ref_f.solve(&rhs, &mut s_ref);
+        own_f.solve(&rhs, &mut s_own);
+        for i in 0..4 {
+            assert_eq!(
+                s_ref[i].to_bits(),
+                s_own[i].to_bits(),
+                "solve[{i}] differs bitwise"
+            );
+        }
+
+        let big_budget = 1usize << 40;
+        let ref_b = factorize_budget(&mk(), big_budget).expect("budget factorize");
+        let own_b = factorize_budget_owned(mk(), big_budget).expect("budget factorize_owned");
+        assert_eq!(own_b.l_values.len(), ref_b.l_values.len());
+        for (i, (a, b)) in ref_b.l_values.iter().zip(own_b.l_values.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "budget l_values[{i}] differs bitwise"
+            );
+        }
     }
 
     #[test]
