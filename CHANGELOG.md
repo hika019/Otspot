@@ -2,7 +2,17 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.7.5] - 2026-08-12
+## [0.7.6] - 2026-11-11
+
+- BREAKING: MPS/QPS の目的行 RHS を標準どおり目的定数の符号反転 (`-RHS`) として読むよう修正。RHS が非ゼロのファイルは目的値が変わる (LP/MILP/QP 共通)
+- QP IPM の `Unbounded` / `Infeasible` 判定に独立検証を必須化し、有界な QP を `Unbounded` と誤判定する問題を修正
+- 検証済み `Unbounded` の ray を `SolverResult::ray_certificate` で取得できるようにした (presolve 縮約時は `None`)
+- QP IPM が LISWET 系で未収束点を `Optimal` と返す問題と、収束できる問題が `Stalled` で止まる問題を修正
+- QPS パーサが `$` で始まる名前の列を落とす問題を修正
+- QP の postsolve を高速化
+- Python バインディングの PyO3 を 0.30 に更新
+
+## [0.7.5] - 2026-10-18
 
 Python バインディング (`otspot-py`) の追加、キャンセル/deadline 後に未検証の証明を
 返し得た求解経路の正直化、MILP 並列 B&B のスレッド予算実効化を中心としたリリース。
