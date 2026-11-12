@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3419 testcases, 43 ignored
+# totals: 3432 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -84,6 +84,17 @@ otspot-core	conic::nonconvex::tests::validate_rejects_every_mismatched_dimension
 otspot-core	conic::qcqp::tests::qcqp_rejects_objective_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_bridge_rejects_base_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_objective_upper_triangle_is_symmetrized_for_cholesky	active
+otspot-core	conic::qcqp_classify::tests::clamped_jitter_band_row_is_not_certified_convex	active
+otspot-core	conic::qcqp_classify::tests::classify_and_gate_reject_mismatched_dimensions	active
+otspot-core	conic::qcqp_classify::tests::equality_split_moves_psd_quadratic_into_r_via_neg_half	active
+otspot-core	conic::qcqp_classify::tests::negative_flipped_diagonal_vetoes_rule2_and_requires_bound	active
+otspot-core	conic::qcqp_classify::tests::rank_deficient_unclamped_psd_objective_is_convex	active
+otspot-core	conic::qcqp_classify::tests::require_finite_bounds_defers_non_required_variables_to_validate	active
+otspot-core	conic::qcqp_classify::tests::require_finite_bounds_fast_path_passes_finite_box	active
+otspot-core	conic::qcqp_classify::tests::require_finite_bounds_rejects_unbounded_required_variable	active
+otspot-core	conic::qcqp_classify::tests::rule1_psd_constraint_row_needs_no_bounds	active
+otspot-core	conic::qcqp_classify::tests::rule1_psd_objective_and_linear_only_var_need_no_bounds	active
+otspot-core	conic::qcqp_classify::tests::rule2_under_diagonal_excludes_it_from_r	active
 otspot-core	conic::tests::bench_conic_suite	ignored
 otspot-core	conic::tests::cancel_race_before_misocp_final_infeasible_classification_prefers_timeout	active
 otspot-core	conic::tests::cancel_race_before_misocp_optimal_classification_prefers_timeout	active
@@ -3345,6 +3356,8 @@ otspot::postsolve_krylov_ir_gate	gate_skips_krylov_ir_when_already_converged	act
 otspot::proptest_fuzz	prop_nonneg_lp_not_infeasible	active
 otspot::proptest_fuzz	prop_small_lp_no_panic	active
 otspot::proptest_fuzz	prop_zero_objective_always_optimal	active
+otspot::qcqp_classify_qplib_phase0	qcqp_2546_objective_split_adds_rule3_endpoints	active
+otspot::qcqp_classify_qplib_phase0	qcqp_phase0_bound_requirement_reconciliation	active
 otspot::qp_bounded_curvature_ray_rejection	bounded_p1_never_ray_certified_unbounded_cross_eps_presolve	active
 otspot::qp_bounded_curvature_ray_rejection	bounded_p1_status_and_objective_match_oracle_across_configs	active
 otspot::qp_cert_flag_split_sentinel	certified_infeasible_sets_farkas_flag_only	active
