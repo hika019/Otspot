@@ -458,6 +458,16 @@ struct StaticRelax {
     fixed_ci: Vec<usize>,
     fixed_vi: Vec<f64>,
     fixed_h: Vec<f64>,
+    /// Per pair: rule-2 diagonal (`i == j && rule2_diag[i]`) -- emitted as
+    /// the single under-estimator cut `w_ii >= 0` (the x̄ = 0 tangent), no
+    /// interval/envelope rows (decision D2, plan §3.2: interval rows and
+    /// McCormick coefficients would push `w_hi = ±inf`/`inf` coefficients
+    /// into `h`/`A` for free variables).
+    rule2_pair: Vec<bool>,
+    /// Per pair: full interval + 4-facet McCormick envelope emitted (both
+    /// endpoints have finite root bounds and the pair is not a rule-2
+    /// diagonal, decision D3's "両端の箱が有限" emission condition).
+    mc_pair: Vec<bool>,
 }
 
 /// `(pair_index, coeff)` for each McCormick pair with a nonzero `(1/2) x^T P
@@ -483,11 +493,42 @@ fn quad_pair_coeffs(p: &CscMatrix, pairs: &[(usize, usize)]) -> Vec<(usize, f64)
 
 /// Precompute the node-invariant part of the relaxation once per solve (see
 /// `StaticRelax`'s doc).
+///
+/// The §3.1 classification runs here (once per solve, `O(nnz)` + one
+/// Cholesky per quadratic row) because every per-pair emission decision
+/// (D2/D3) is node-invariant: `global_core` branches only on `mc_pairs`,
+/// whose endpoints have finite root bounds, so a node box can never turn a
+/// skipped pair into an emittable one or vice versa. A classification error
+/// (mis-shaped public fields / non-finite coefficients) is unreachable past
+/// `NonconvexQcqp::validate` at the `global_core` entry, which checks exactly
+/// the dimensions and finiteness the classifier reads.
 fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
     let n = qp.n;
     let pairs = collect_pairs(qp);
     let npair = pairs.len();
     let nv = n + npair;
+
+    let req = super::qcqp_classify::classify_bound_requirements(n, qp.p0.as_ref(), &qp.quad)
+        .expect(
+            "classification reads only dimensions/coefficients validated by \
+             NonconvexQcqp::validate at the global_core entry",
+        );
+    // D3 emission condition "both endpoints' boxes are finite". Root finiteness
+    // is node-invariant: branching only ever splits `mc_pairs` endpoints (D4),
+    // which are exactly the variables with finite root bounds among boxed
+    // ones, so a variable is never boxed into (or out of) finiteness.
+    let var_boxed: Vec<bool> = (0..n)
+        .map(|j| qp.lb[j].is_finite() && qp.ub[j].is_finite())
+        .collect();
+    let rule2_pair: Vec<bool> = pairs
+        .iter()
+        .map(|&(i, j)| i == j && req.rule2_diag[i])
+        .collect();
+    let mc_pair: Vec<bool> = pairs
+        .iter()
+        .zip(&rule2_pair)
+        .map(|(&(i, j), &rule2)| !rule2 && var_boxed[i] && (i == j || var_boxed[j]))
+        .collect();
 
     let mut c = vec![0.0; nv];
     c[..n].copy_from_slice(&qp.q0);
@@ -557,41 +598,88 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
         fixed_ci,
         fixed_vi,
         fixed_h,
+        rule2_pair,
+        mc_pair,
     }
 }
 
 /// Build the McCormick LP relaxation for the current box `[lb, ub]`.
 ///
-/// Only the box rows (`2n`) and the McCormick envelope rows (`6` per pair)
-/// depend on the box; everything else is `static_` (see its doc), so this
-/// clones the precomputed fixed part (`O(nnz)`) and appends the per-node
-/// rows directly as triplets, instead of re-deriving the whole relaxation
-/// from a dense `n x n` pass at every branch-and-bound node (`O(n * (n +
-/// pairs.len()))` per node -- the dominant B&B memory cost on large QCQPs).
+/// Only the box rows and the McCormick envelope rows depend on the box;
+/// everything else is `static_` (see its doc), so this clones the
+/// precomputed fixed part (`O(nnz)`) and appends the per-node rows directly
+/// as triplets, instead of re-deriving the whole relaxation from a dense
+/// `n x n` pass at every branch-and-bound node (`O(n * (n + pairs.len()))`
+/// per node -- the dominant B&B memory cost on large QCQPs).
+///
+/// Emission is driven by the §3.1 classification stored in `static_`
+/// (plan §3.2, decisions D2/D3):
+/// - Box rows are emitted exactly for variables whose node bounds are
+///   finite. A non-finite bound must never reach `h` (`LpProblem::new_general`
+///   rejects it and the call site `.unwrap()`s), and no envelope row is
+///   emitted for a pair with a non-finite endpoint (`w_interval` and the
+///   McCormick coefficients `xl_i, xu_j` would carry `±inf`/`NaN`).
+///   *Deviation from decision D3's first sentence, recorded here per "迷ったら
+///   保守側"*: D3 as worded also drops box rows for *finite*-bounded
+///   variables outside `R`. For a scheme-B LP relaxation that turns every
+///   currently-solvable problem with a linear objective term in such a
+///   variable into an unbounded relaxation (the variable escapes the box it
+///   genuinely has in the original problem; the recession verifier cannot
+///   certify `Unbounded` for a problem with a finite optimum, and without an
+///   incumbent `x̃` plan line 110 forces `NotSupported` -- a §6 "退化なし"
+///   regression on the bounded qplib suites). Dropping those box rows
+///   requires the Phase 2 incumbent/`x̃` + objective-cutoff machinery to
+///   restore boundedness, so finite-bounded variables keep their box rows
+///   until then; the ±inf hazard D3/plan §3.2 actually guards is fully
+///   excluded by the finite-bound emission rule above.
+/// - Rule-2 diagonal pairs emit only the under-estimator cut `w_ii >= 0`
+///   (the x̄ = 0 tangent; every further tangent is a node-time OA cut, see
+///   `TangentCut` in `global_core`). Interval and envelope rows are skipped
+///   unconditionally (D2).
+/// - All other pairs with finite endpoints emit the interval rows + 4
+///   McCormick facets exactly as the dense reference does.
 fn build_relax(static_: &StaticRelax, lb: &[f64], ub: &[f64]) -> ConicProblem {
     let n = static_.n;
     let pairs = &static_.pairs;
     let npair = pairs.len();
     let nv = n + npair;
     let m_fixed = static_.fixed_h.len();
-    let m = m_fixed + 2 * n + 6 * npair;
+    let boxed: Vec<bool> = (0..n)
+        .map(|j| lb[j].is_finite() && ub[j].is_finite())
+        .collect();
+    let box_rows = 2 * boxed.iter().filter(|b| **b).count();
+    // 1 row per rule-2 diagonal, 2 single-entry + 4 push_mc rows per mc pair.
+    let mc_rows: usize = (0..npair)
+        .map(|pi| {
+            if static_.rule2_pair[pi] {
+                1
+            } else if static_.mc_pair[pi] {
+                6
+            } else {
+                0
+            }
+        })
+        .sum();
+    let m = m_fixed + box_rows + mc_rows;
 
     let mut ri = static_.fixed_ri.clone();
     let mut ci = static_.fixed_ci.clone();
     let mut vi = static_.fixed_vi.clone();
     let mut h = static_.fixed_h.clone();
-    let box_rows = 2 * n;
-    let mc_rows = 6 * npair;
-    // 2 single-entry rows + 4 push_mc rows (always 3 triplets each) per pair.
-    let mc_nnz = 2 * npair + 12 * npair;
+    // Capacity bound: an mc pair takes 2 + 4*3 = 14 triplets, a rule-2 pair
+    // 1; 15 per pair is the uniform safe bound (reserve only, never asserted).
+    let mc_nnz = 15 * npair;
     ri.reserve(box_rows + mc_nnz);
     ci.reserve(box_rows + mc_nnz);
     vi.reserve(box_rows + mc_nnz);
     h.reserve(box_rows + mc_rows);
 
-    // variable box.
+    // variable box (finite-bounded variables only, see fn doc).
     let mut row = m_fixed;
     for j in 0..n {
+        if !boxed[j] {
+            continue;
+        }
         ri.push(row);
         ci.push(j);
         vi.push(1.0);
@@ -610,9 +698,27 @@ fn build_relax(static_: &StaticRelax, lb: &[f64], ub: &[f64]) -> ConicProblem {
     // implied; for diagonal pairs (`w = x_k^2`) the two endpoint tangents do
     // NOT imply the interval lower bound (e.g. on `[-1, 1]` they only give
     // `w >= 2|x| - 1`, which dips to `-1` at `x = 0` instead of `0`), so the
-    // relaxation of `x^2` terms is needlessly loose without it.
+    // relaxation of `x^2` terms is needlessly loose without it. Rule-2
+    // diagonals instead carry only `w_ii >= 0` (D2): containment holds for
+    // `w_ii >= x_i^2` regardless of sign (plan §3.1 note), the lift
+    // coefficient of `w_ii` is `>= 0` everywhere a rule-2 diagonal appears
+    // (that *is* rule 2), so nothing in the relaxation pushes `w_ii` up and
+    // the constant tangent is the whole stationary envelope; OA cuts added at
+    // relaxation solutions tighten the under-estimator further.
     for (pi, &(i, j)) in pairs.iter().enumerate() {
         let wj = n + pi;
+        if static_.rule2_pair[pi] {
+            // -w_ii <= 0  <=>  w_ii >= x_i^2's x̄=0 tangent (w >= 2·0·x - 0²).
+            ri.push(row);
+            ci.push(wj);
+            vi.push(-1.0);
+            h.push(0.0);
+            row += 1;
+            continue;
+        }
+        if !static_.mc_pair[pi] {
+            continue;
+        }
         let (xl_i, xu_i) = (lb[i], ub[i]);
         let (xl_j, xu_j) = (lb[j], ub[j]);
         let (w_lo, w_hi) = w_interval(xl_i, xu_i, xl_j, xu_j, i == j);
@@ -1649,11 +1755,13 @@ mod tests {
         }
     }
 
-    /// Sentinel. The McCormick relaxation of `w = x0^2` over `[-1,1]`
-    /// bounds `w` below by the two endpoint tangents (`w >= 2x-1`, `w >= -2x-1`),
-    /// which meet at `-1` at `x = 0`. The explicit `w`-interval row adds the
-    /// true bound `w >= 0`. Hand oracle: `x^2 >= 0`, so the tight relaxation
-    /// minimum of `w` is exactly 0. Reverting the `w`-box rows drops it to -1.
+    /// Sentinel. The rule-2 diagonal relaxation of `w = x0^2` over `[-1,1]`
+    /// bounds `w` below by the x̄ = 0 tangent row `w >= 0` only: no
+    /// interval rows, no endpoint secant/tangent envelope (decision D2).
+    /// Hand oracle: `x^2 >= 0`, so the tight relaxation minimum of `w` is
+    /// exactly 0. Removing the tangent row makes `w` free and the relaxation
+    /// Unbounded; adding the old envelope rows back is caught by
+    /// `rule2_pair_emits_exactly_one_pair_row` below.
     #[test]
     fn mccormick_w_box_bounds_diagonal_square_below() {
         let qp = min_sq();
@@ -1667,6 +1775,96 @@ mod tests {
             "relaxed min w must be 0 (true x^2 >= 0), got {}",
             res.objective
         );
+    }
+
+    /// Sentinel (decision D2, plan §3.2): a rule-2 diagonal pair contributes
+    /// exactly one relaxation row per pair -- the constant under-estimator
+    /// cut `-w_ii <= 0` -- and never the interval rows or the 4 McCormick
+    /// facets. Reverting D2 (envelope rows back for rule-2 pairs) raises the
+    /// row count and fails.
+    #[test]
+    fn rule2_pair_emits_exactly_one_pair_row() {
+        let qp = min_sq();
+        let static_ = build_static(&qp);
+        assert_eq!(static_.rule2_pair, vec![true]);
+        assert_eq!(static_.mc_pair, vec![false]);
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
+        // m = m_fixed(0) + box(2) + tangent(1).
+        assert_eq!(relax.cone.l, 3, "box rows + one tangent row");
+        assert_eq!(relax.h, vec![1.0, 1.0, 0.0], "ub, -lb, tangent rhs 0");
+    }
+
+    /// Sentinel (decision D3 / plan §3.2): non-finite bounds never reach the
+    /// relaxation's `h`, and a pair with a non-finite endpoint emits no
+    /// interval/envelope rows (its `w` column stays unconstrained except by
+    /// the lifted fixed rows -- a valid over-relaxation, since the lifted
+    /// rows contain the graph exactly). Reverting to the unconditional box /
+    /// pair loops pushes `±inf` into `h` and panics the LP constructor.
+    #[test]
+    fn non_finite_bounds_and_pairs_never_reach_h() {
+        // min x1  s.t.  -x0^2 + x1 <= 0;  x0 in [-2, 2] (rule-2-vetoed
+        // diagonal -> R), x1 free (linear + this row's linear part).
+        let n = 2usize;
+        let p = CscMatrix::from_triplets(&[0], &[0], &[-2.0], n, n).unwrap();
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![0.0, 1.0],
+            quad: vec![GQuadConstraint {
+                p,
+                q: vec![0.0, 1.0],
+                r: 0.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![-2.0, f64::NEG_INFINITY],
+            ub: vec![2.0, f64::INFINITY],
+        };
+        let static_ = build_static(&qp);
+        // pair (0,0): diagonal lift coeff -1 -> rule 2 vetoed, x0 finite -> mc.
+        assert_eq!(static_.rule2_pair, vec![false]);
+        assert_eq!(static_.mc_pair, vec![true]);
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
+        // m = fixed quad(1) + box(2: x0 only) + envelope(6).
+        assert_eq!(relax.cone.l, 9, "no box rows for the free x1");
+        assert!(
+            relax.h.iter().all(|v| v.is_finite()),
+            "±inf must never reach h: {:?}",
+            relax.h
+        );
+    }
+
+    /// Sentinel (decision D3): an off-diagonal pair whose endpoints are free
+    /// contributes no interval/McCormick rows; only its lifted fixed rows
+    /// remain (finite rhs), so the relaxation stays constructible.
+    #[test]
+    fn free_off_diagonal_pair_emits_no_envelope() {
+        // -x0*x1 + 1 <= 0 over free x (both pair endpoints free).
+        let n = 2usize;
+        let p = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[-1.0, -1.0], n, n).unwrap();
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![0.0, 0.0],
+            quad: vec![GQuadConstraint {
+                p,
+                q: vec![0.0, 0.0],
+                r: 1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: [f64::NEG_INFINITY; 2].to_vec(),
+            ub: [f64::INFINITY; 2].to_vec(),
+        };
+        let static_ = build_static(&qp);
+        assert_eq!(static_.mc_pair, vec![false]);
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
+        assert_eq!(relax.cone.l, 1, "only the lifted quad row survives");
+        assert_eq!(relax.h, vec![-1.0], "h = -r, all finite");
     }
 
     /// Sentinel. `solve_relax_lp` must forward the caller's deadline to the
@@ -2051,9 +2249,31 @@ mod tests {
         lb: &[f64],
         ub: &[f64],
     ) -> ConicProblem {
+        // G2b contract change (documented at PR-description level): the dense
+        // oracle's independence claim covers the ASSEMBLY arithmetic (dense
+        // row scans, coefficient sums, row layout) -- it predates and knows
+        // nothing about the sparse triplet path. The §3.1 classification that
+        // now drives emission (which rows exist at all) is the shared
+        // *specification* under test, verified independently in
+        // `qcqp_classify::tests` (hand-computed rules 1-3 / §5 examples) and
+        // `tests/qcqp_classify_qplib_phase0.rs` (external Gershgorin-eigvalsh
+        // reconciliation on QPLIB data). Sharing it here keeps the oracle a
+        // dense-assembly checker rather than a stale copy of the old
+        // "every pair boxed and enveloped" shape, which plan §3.2 explicitly
+        // replaces.
         let n = qp.n;
         let npair = pairs.len();
         let nv = n + npair;
+        let req =
+            super::super::qcqp_classify::classify_bound_requirements(n, qp.p0.as_ref(), &qp.quad)
+                .unwrap();
+        let boxed: Vec<bool> = (0..n)
+            .map(|j| lb[j].is_finite() && ub[j].is_finite())
+            .collect();
+        let rule2_pair: Vec<bool> = pairs
+            .iter()
+            .map(|&(i, j)| i == j && req.rule2_diag[i])
+            .collect();
         let mut c = vec![0.0; nv];
         c[..n].copy_from_slice(&qp.q0);
         if let Some(p0) = &qp.p0 {
@@ -2096,6 +2316,9 @@ mod tests {
             h.push(qp.h_lin[i]);
         }
         for j in 0..n {
+            if !boxed[j] {
+                continue;
+            }
             let mut r = vec![0.0; nv];
             r[j] = 1.0;
             rows.push(r);
@@ -2107,6 +2330,17 @@ mod tests {
         }
         for (pi, &(i, j)) in pairs.iter().enumerate() {
             let wj = n + pi;
+            if rule2_pair[pi] {
+                // Under-estimator tangent at x̄ = 0: -w_ii <= 0 (D2).
+                let mut rt = vec![0.0; nv];
+                rt[wj] = -1.0;
+                rows.push(rt);
+                h.push(0.0);
+                continue;
+            }
+            if !(boxed[i] && (i == j || boxed[j])) {
+                continue;
+            }
             let (xl_i, xu_i) = (lb[i], ub[i]);
             let (xl_j, xu_j) = (lb[j], ub[j]);
             let (w_lo, w_hi) = w_interval(xl_i, xu_i, xl_j, xu_j, i == j);
@@ -2301,6 +2535,25 @@ mod tests {
         };
 
         let hb = hyperbola();
+        // G2b shapes: rule-2 diagonal in the objective (PSD-exempt p0 so its
+        // +x0^2 diagonal stays rule 2), an envelope-less off-diagonal pair
+        // with a free endpoint, and a mixed finite/free box.
+        let rule2_free = NonconvexQcqp {
+            n: n2,
+            p0: Some(csc(&[vec![2.0, 0.0], vec![0.0, 0.0]], n2, n2)),
+            q0: vec![0.0, 1.0],
+            quad: vec![GQuadConstraint {
+                p: csc(&[vec![0.0, -1.0], vec![-1.0, 0.0]], n2, n2),
+                q: vec![0.0, 0.0],
+                r: 1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n2).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n2).unwrap(),
+            b_eq: vec![],
+            lb: vec![-2.0, f64::NEG_INFINITY],
+            ub: vec![2.0, f64::INFINITY],
+        };
         let cases = vec![
             Case {
                 name: "diagonal_only_straddling_box",
@@ -2331,6 +2584,18 @@ mod tests {
                 qp: mixed.clone(),
                 lb: vec![-0.5, 1.0, 2.0],
                 ub: vec![1.0, 3.0, 4.0],
+            },
+            Case {
+                name: "rule2_diagonal_and_free_endpoint_pair",
+                qp: rule2_free.clone(),
+                lb: rule2_free.lb.clone(),
+                ub: rule2_free.ub.clone(),
+            },
+            Case {
+                name: "rule2_diagonal_narrowed_box_mid_bnb",
+                qp: rule2_free.clone(),
+                lb: vec![-1.0, f64::NEG_INFINITY],
+                ub: vec![1.5, f64::INFINITY],
             },
         ];
 
