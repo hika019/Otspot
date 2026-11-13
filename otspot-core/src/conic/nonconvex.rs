@@ -180,6 +180,13 @@ impl NonconvexQcqp {
 /// `MaxIterations`, `NumericalError` (some region was never certified empty),
 /// `Infeasible` (every region proven empty — only then is infeasibility a
 /// certificate).
+///
+/// Either way, a relaxation `Unbounded` whose verified ray passes the plan
+/// §3.2 recession verification against a base point feasible under the
+/// original `feasible()` contract overrides the search: `status = Unbounded`,
+/// `objective = -inf`, `x` = the verified base point. A ray that cannot be
+/// certified instead yields `NotSupported(reason)` (never `numerical_failures`
+/// counting; plan §3.2 line 111).
 #[derive(Debug, Clone)]
 pub struct GlobalResult {
     /// Termination status (see struct docs for the exact classification).
@@ -324,8 +331,7 @@ struct RelaxResult {
     /// (`simplex::unbounded_ray::lp_ray_payload`、`SolverResult::ray_certificate`
     /// と同一契約・同一型)。未証明 Unbounded、presolve 縮約経由の判定、
     /// 基点の実行可能性検証失敗はすべて `None` (偽証なし)。
-    /// 計画 §3.2 の recession 検証 (G2b) が消費する。現状は未消費。
-    #[allow(dead_code)] // G2a は露出のみが目的 (消費側は G2b で別途実装)。
+    /// 計画 §3.2 の recession 検証 (`verify_recession_unboundedness`) が消費する。
     ray: Option<crate::problem::RayCertificate>,
 }
 
@@ -499,6 +505,11 @@ struct StaticRelax {
     /// `0.5·(lb+ub)` fallback can never return `∓inf` and re-push an
     /// identical box (plan §0.1 line 16 infinite-loop path, §5 sentinel 3).
     mc_pairs: Vec<usize>,
+    /// Raw §3.1 bound-requirement set `R` (per variable). Consumed by the
+    /// `d_R = 0` assertion of the recession verification (plan §3.2 line
+    /// 108) — the relaxation box rows should make it structural, the
+    /// verifier re-checks it against the certificate it consumes.
+    required: Vec<bool>,
 }
 
 /// `(pair_index, coeff)` for each McCormick pair with a nonzero `(1/2) x^T P
@@ -633,6 +644,7 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
         rule2_pair,
         mc_pair,
         mc_pairs,
+        required: req.required,
     }
 }
 
@@ -958,7 +970,7 @@ pub fn solve_global_qcqp(
     opts: &ConicOptions,
     g: &GlobalOptions,
 ) -> GlobalResult {
-    global_core(qp, &[], opts, g)
+    global_core(qp, &[], opts, g, None)
 }
 
 /// Globally optimise a nonconvex mixed-integer QCQP. `integers` lists variable
@@ -970,7 +982,7 @@ pub fn solve_global_miqcp(
     opts: &ConicOptions,
     g: &GlobalOptions,
 ) -> GlobalResult {
-    global_core(qp, integers, opts, g)
+    global_core(qp, integers, opts, g, None)
 }
 
 fn frac_dist(v: f64) -> f64 {
@@ -1036,6 +1048,212 @@ fn validate_integers(n: usize, integers: &[usize]) -> Result<(), String> {
     Ok(())
 }
 
+/// Seed for `global_core`: an initial incumbent and the root box to search.
+///
+/// Plan §3.2 line 112 (decision D7): the search starts at `incumbent =
+/// +inf`, so an upper bound produced by a bound-free local solver (Phase 2)
+/// would never reach prune or gap reporting. Phase 2 also derives bounds that
+/// it deliberately keeps out of `qp.lb`/`qp.ub` (plan §4.2 line 136: rewriting
+/// them would reject incumbents inside `feas_tol`), so the derived root box
+/// travels with the seed. This milestone only wires the plumbing; the public
+/// entry points pass `None` (current behaviour), and the CHANGELOG entry for
+/// the public signature change ships with the Phase 2 / M5 wiring.
+#[derive(Debug, Clone)]
+struct GlobalSeed {
+    /// Feasible point `x̃` (re-validated by `global_core` at `feas_tol`
+    /// before use -- a corrupt seed fails as `NotSupported`, never as a
+    /// trusted incumbent).
+    x: Vec<f64>,
+    /// Objective value at `x`; cross-checked against `objective(qp, x)` and
+    /// the incumbent is always the recomputed value (a stale/mismatched `f`
+    /// fails the seed, it is never trusted as a lower upper-bound).
+    f: f64,
+    root_lb: Vec<f64>,
+    root_ub: Vec<f64>,
+}
+
+/// Zero-decision tolerance for the §3.2 recession verification, after the ray
+/// direction's `x` block is normalised to `‖d‖_inf = 1`: residuals are
+/// compared against `1e-9 * (1 + ‖data‖_inf)`, the same relative backward-
+/// error scale the simplex ray gate uses when it certifies `RayCertificate`
+/// (`simplex::unbounded_ray`), so the nonconvex-side check is neither weaker
+/// nor stricter than the certificate it consumes.
+const RAY_RECESSION_ZERO_TOL: f64 = 1e-9;
+
+/// Descent threshold on `q0^T d` for the §3.2 objective condition (plan line
+/// 107, `q0^T d < 0`): with `‖d‖_inf = 1` a directional slope below
+/// `1e-9` is indistinguishable from zero at the certificate tolerance, so
+/// only strictly-negatives beyond this slack certify unbounded descent.
+const RAY_DESCENT_TOL: f64 = 1e-9;
+
+/// `‖M‖_inf` (max absolute row sum) over a CSC matrix, `O(nnz)`.
+fn max_abs_row_sum(m: &CscMatrix) -> f64 {
+    let cp = m.col_ptr();
+    let ri = m.row_ind();
+    let va = m.values();
+    let mut rows = vec![0.0f64; m.nrows().max(1)];
+    for j in 0..m.ncols() {
+        for k in cp[j]..cp[j + 1] {
+            rows[ri[k]] += va[k].abs();
+        }
+    }
+    rows.into_iter().fold(0.0f64, f64::max)
+}
+
+/// Verify that a relaxation recession ray certifies *original-problem*
+/// unboundedness (plan §3.2 lines 100–111, decision D6). `ray` is the
+/// simplex-verified certificate in relaxation coordinates `[x, w]`; only its
+/// `x` block `d` matters, normalised to `‖d‖_inf = 1`. All coefficients are
+/// the **original** rows (plan line 103: a row convex in the relaxation is
+/// still verified, never waived).
+///
+/// Checks (each `Err`-reasoned; never a panic):
+/// - `d_R = 0` (plan line 108: structural from the box rows, asserted here);
+/// - integer variables `d_k = 0` (a ray direction must live in the integer
+///   lattice; `0` is the only recession direction it admits);
+/// - bounds: finite `lb_j` forces `d_j >= 0`, finite `ub_j` forces `d_j <= 0`;
+/// - linear rows `G d <= 0`, `A_eq d = 0`;
+/// - every quadratic row (PSD or not, `Eq` already split to `±P` upstream so
+///   both sides give `q^T d <= 0` and hence `q^T d = 0` for free, plan 109):
+///   `P_k d = 0` and `q_k^T d <= 0`. Soundness: `P_k d = 0` makes
+///   `f_k(x̃ + t d) = f_k(x̃) + t·q_k^T d` exactly (the `t²` term
+///   `d^T P_k d = d^T(P_k d)` and the cross term `(P_k d)^T x̃` both vanish),
+///   so feasibility degrades at most linearly and stays `<= 0`;
+/// - objective `P0 d = 0` and `q0^T d <= -RAY_DESCENT_TOL`, so
+///   `f0(x̃ + t d) -> -inf`.
+///
+/// Interpretation record: plan line 105 ("規則 2 の変数: `d_i = 0`") is a
+/// device of the line-108 support argument to kill the `d^T P_k d` terms.
+/// Applied literally to *vacuously* rule-2 variables (variables with no
+/// quadratic support at all are vacuously rule 2 per §3.1), it would force
+/// `d = 0` on every free variable and make the plan-line-111 `Unbounded`
+/// return unreachable even for `min -x s.t. x <= 1`-type rays -- the literal
+/// reading contradicts the plan's own return contract. The load-bearing
+/// content (`d^T P_k d = 0` on every row) is enforced *directly* by the `P_k
+/// d = 0` checks above, which subsume line 105 for every variable with
+/// quadratic support (the only ones line 108's argument speaks about) and
+/// change nothing else. Conservative side unchanged: anything not certified
+/// stays `NotSupported`.
+fn verify_recession_unboundedness(
+    qp: &NonconvexQcqp,
+    integers: &[usize],
+    static_: &StaticRelax,
+    ray: &crate::problem::RayCertificate,
+) -> Result<(), String> {
+    let n = qp.n;
+    let nv = n + static_.pairs.len();
+    if ray.direction.len() != nv || ray.base_point.len() != nv {
+        return Err(format!(
+            "ray certificate dimension {} / {} != relaxation dimension {nv}",
+            ray.direction.len(),
+            ray.base_point.len()
+        ));
+    }
+    let norm = ray.direction[..n]
+        .iter()
+        .fold(0.0f64, |a: f64, &v| a.max(v.abs()));
+    if norm == 0.0 || norm.is_nan() {
+        return Err(
+            "ray direction has a zero x-block (only lifted w coordinates drift): \
+             no recession direction of the original problem to verify"
+                .to_string(),
+        );
+    }
+    let d: Vec<f64> = ray.direction[..n].iter().map(|&v| v / norm).collect();
+    let zero = |scale: f64| RAY_RECESSION_ZERO_TOL * (1.0 + scale);
+
+    for (j, &dj) in d.iter().enumerate() {
+        if static_.required[j] && dj.abs() > zero(0.0) {
+            return Err(format!(
+                "ray moves bound-required variable {j} (d[{j}] = {dj}): the box rows \
+                 should have forced d_R = 0 (plan §3.2 line 108)"
+            ));
+        }
+        if qp.lb[j].is_finite() && dj < -zero(0.0) {
+            return Err(format!(
+                "ray decreases bounded variable {j} (d[{j}] = {dj} < 0 with lb = {})",
+                qp.lb[j]
+            ));
+        }
+        if qp.ub[j].is_finite() && dj > zero(0.0) {
+            return Err(format!(
+                "ray increases bounded variable {j} (d[{j}] = {dj} > 0 with ub = {})",
+                qp.ub[j]
+            ));
+        }
+    }
+    for &k in integers {
+        if d[k].abs() > zero(0.0) {
+            return Err(format!(
+                "ray moves integer variable {k} (d[{k}] = {}): the integer lattice \
+                 admits no nonzero recession direction on it",
+                d[k]
+            ));
+        }
+    }
+
+    let check_le = |name: &str, vals: &[f64], scale: f64| -> Result<(), String> {
+        for (i, &v) in vals.iter().enumerate() {
+            if v > zero(scale) {
+                return Err(format!("{name} row {i} grows along the ray ({v} > 0)"));
+            }
+        }
+        Ok(())
+    };
+    let check_eq0 = |name: &str, vals: &[f64], scale: f64| -> Result<(), String> {
+        for (i, &v) in vals.iter().enumerate() {
+            if v.abs() > zero(scale) {
+                return Err(format!("{name} row {i} is not flat along the ray ({v})"));
+            }
+        }
+        Ok(())
+    };
+
+    check_le(
+        "g_lin",
+        &qp.g_lin
+            .mat_vec_mul(&d)
+            .expect("g_lin.ncols() == n: NonconvexQcqp::validate ran at global_core entry"),
+        max_abs_row_sum(&qp.g_lin),
+    )?;
+    check_eq0(
+        "a_eq",
+        &qp.a_eq
+            .mat_vec_mul(&d)
+            .expect("a_eq.ncols() == n: NonconvexQcqp::validate ran at global_core entry"),
+        max_abs_row_sum(&qp.a_eq),
+    )?;
+
+    for (k, qc) in qp.quad.iter().enumerate() {
+        let pd =
+            qc.p.mat_vec_mul(&d)
+                .expect("quad[k].p is (n, n): NonconvexQcqp::validate ran at global_core entry");
+        let scale = max_abs_row_sum(&qc.p);
+        check_eq0(&format!("quad[{k}].p d"), &pd, scale)?;
+        let qd: f64 = qc.q.iter().zip(&d).map(|(a, b)| a * b).sum();
+        let qscale = qc.q.iter().fold(0.0f64, |a: f64, &v| a.max(v.abs()));
+        if qd > zero(qscale) {
+            return Err(format!(
+                "quad[{k}] grows along the ray (q^T d = {qd} > 0): the row is not a \
+                 recession inequality in this direction"
+            ));
+        }
+    }
+    if let Some(p0) = &qp.p0 {
+        let pd = p0
+            .mat_vec_mul(&d)
+            .expect("p0 is (n, n): validated at global_core entry");
+        check_eq0("p0 d", &pd, max_abs_row_sum(p0))?;
+    }
+    let q0d: f64 = qp.q0.iter().zip(&d).map(|(a, b)| a * b).sum();
+    if q0d > -RAY_DESCENT_TOL {
+        return Err(format!(
+            "objective does not descend along the ray (q0^T d = {q0d}, need < -{RAY_DESCENT_TOL})"
+        ));
+    }
+    Ok(())
+}
+
 /// McCormick spatial branch-and-bound core shared by [`solve_global_qcqp`] /
 /// [`solve_global_miqcp`].
 ///
@@ -1054,6 +1272,7 @@ fn global_core(
     integers: &[usize],
     opts: &ConicOptions,
     g: &GlobalOptions,
+    seed: Option<&GlobalSeed>,
 ) -> GlobalResult {
     if let Err(e) = qp
         .validate()
@@ -1072,6 +1291,56 @@ fn global_core(
     let static_ = build_static(qp);
     let mut incumbent = f64::INFINITY;
     let mut inc_x: Vec<f64> = Vec::new();
+    // Root box: the seed's derived box when present (plan §4.2 line 136
+    // keeps derived bounds out of `qp.lb`/`qp.ub`), else the problem box.
+    let mut root_box = (qp.lb.clone(), qp.ub.clone());
+    if let Some(s) = seed {
+        let bad = if s.x.len() != qp.n || s.root_lb.len() != qp.n || s.root_ub.len() != qp.n {
+            Some("seed x/root_lb/root_ub length != n".to_string())
+        } else if s
+            .root_lb
+            .iter()
+            .zip(&s.root_ub)
+            .any(|(l, u)| l.is_nan() || u.is_nan() || l > u)
+        {
+            // Non-finite (`±inf`) box sides are allowed -- they are what the
+            // declared box itself carries for free variables; NaN is not.
+            Some("seed root box must satisfy lb <= ub (no NaN sides)".to_string())
+        } else if s
+            .root_lb
+            .iter()
+            .zip(&s.root_ub)
+            .zip(qp.lb.iter().zip(&qp.ub))
+            .any(|((&l, &u), (&pl, &pu))| l < pl || u > pu)
+        {
+            // The derived box must refine, never widen, the declared box (a
+            // widened side would admit points the public `feasible()`
+            // contract rejects).
+            Some("seed root box widens the declared box".to_string())
+        } else if !feasible(qp, &s.x, g.feas_tol) || !all_integral(&s.x, integers, g.int_tol) {
+            Some("seed x is not feasible for the original problem at feas_tol".to_string())
+        } else {
+            let fx = objective(qp, &s.x);
+            ((s.f - fx).abs() > 1e-9 * (1.0 + fx.abs())).then(|| {
+                format!(
+                    "seed objective mismatch: seed.f = {} vs recomputed {fx}",
+                    s.f
+                )
+            })
+        };
+        if let Some(e) = bad {
+            return GlobalResult {
+                status: SolveStatus::NotSupported(format!("invalid global seed: {e}")),
+                objective: f64::NAN,
+                x: vec![],
+                nodes: 0,
+                gap: f64::INFINITY,
+            };
+        }
+        incumbent = objective(qp, &s.x);
+        inc_x = s.x.clone();
+        root_box = (s.root_lb.clone(), s.root_ub.clone());
+    }
     let mut nodes = 0usize;
     let mut limited = false;
     let mut timed_out = false;
@@ -1083,7 +1352,7 @@ fn global_core(
     // (`-inf` at the root).
     let mut lower_bound = f64::INFINITY;
 
-    let mut stack = vec![(qp.lb.clone(), qp.ub.clone(), f64::NEG_INFINITY)];
+    let mut stack = vec![(root_box.0, root_box.1, f64::NEG_INFINITY)];
 
     while let Some((lb, ub, inherited)) = stack.pop() {
         // `stop_requested` covers both the wall-clock deadline and the
@@ -1117,12 +1386,58 @@ fn global_core(
                 lower_bound = lower_bound.min(inherited);
                 break;
             }
-            // NumericalError, MaxIterations, SuboptimalSolution, Unbounded
-            // (the lifted polytope is a bounded box, so an "unbounded" LP is
-            // a numerical artefact), …: nothing was proven about the region.
-            // Prune it — there is no trustworthy point to branch on — but
-            // record the failure so the search never claims a certificate,
-            // and keep the region's inherited bound in the global bound.
+            // Plan §3.2 lines 98-111 (decision D6): an unbounded relaxation
+            // cannot be fixed by branching (the recession direction lives on
+            // free variables and survives into every child), so branch-free
+            // disposition only: consume the simplex-verified ray against the
+            // ORIGINAL problem data, and require a base point `x̃` that the
+            // original `feasible()` contract accepts -- the relaxation
+            // solution's x-projection is a McCormick point, not a substitute
+            // (plan line 110). Verified + base present => genuinely
+            // Unbounded (return, objective -inf); anything else =>
+            // NotSupported with the reason. Never `numerical_failures`: an
+            // unbounded LP proved something ("the relaxation is
+            // unbounded"), it is not a numerical artefact.
+            SolveStatus::Unbounded => {
+                let verdict = match (&res.ray, inc_x.is_empty()) {
+                    (None, _) => Err("relaxation LP reported Unbounded without a verified ray \
+                         certificate (unproven/presolve-reduced verdict): cannot \
+                         certify original-problem unboundedness"
+                        .to_string()),
+                    (Some(_), true) => Err("relaxation unbounded with a verified ray, but no \
+                         original-problem feasible base point x̃ is at hand (the \
+                         relaxation solution's x-projection is a McCormick point, \
+                         plan §3.2 line 110): unboundedness stays unproven"
+                        .to_string()),
+                    (Some(ray), false) => {
+                        verify_recession_unboundedness(qp, integers, &static_, ray)
+                    }
+                };
+                return match verdict {
+                    Ok(()) => GlobalResult {
+                        status: SolveStatus::Unbounded,
+                        objective: f64::NEG_INFINITY,
+                        x: inc_x,
+                        nodes,
+                        gap: f64::INFINITY,
+                    },
+                    Err(reason) => GlobalResult {
+                        status: SolveStatus::NotSupported(reason),
+                        objective: incumbent,
+                        x: inc_x,
+                        nodes,
+                        gap: f64::INFINITY,
+                    },
+                };
+            }
+            // NumericalError, MaxIterations, SuboptimalSolution, …: nothing
+            // was proven about the region. Prune it — there is no trustworthy
+            // point to branch on — but record the failure so the search never
+            // claims a certificate, and keep the region's inherited bound in
+            // the global bound. (`Unbounded` is handled by its own arm above
+            // since G2b: with free variables the lifted polytope is no longer
+            // a bounded box, so unboundedness is a real verdict to consume,
+            // not a numerical artefact to count.)
             _ => {
                 numerical_failures += 1;
                 lower_bound = lower_bound.min(inherited);
@@ -2163,6 +2478,261 @@ mod tests {
             "base must satisfy x1 − x2 ≤ 0, got {:?}",
             ray.base_point
         );
+    }
+
+    /// Fixture for the §3.2 unbounded-verdict tests: `min −x0  s.t.  x1 <= x0`
+    /// and `x1 <= 1`, with the coupling row carried as a quadratic row with
+    /// `P = 0, q = (−1, 1), r = 0`; `x0` free, `x1 <= 1`. The original
+    /// problem is genuinely unbounded along `d = e0` (`(x0, x1) = (t, 0)`,
+    /// objective `-t -> -inf`). A `P = 0` row stores no quadratic support, so
+    /// nothing lifts: `pairs` is empty, the relaxation is the LP itself
+    /// (`R = ∅`), and every expectation below is hand-computable. The coupling
+    /// row is deliberately not separable per column (LP presolve withholds
+    /// the ray certificate for trivially reduced rows -- G2a contract "no
+    /// false certificate"), so this LP surfaces the verified payload.
+    fn free_ray_qp() -> NonconvexQcqp {
+        let n = 2usize;
+        NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![-1.0, 0.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[], &[], &[], n, n).unwrap(),
+                q: vec![-1.0, 1.0],
+                r: 0.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![f64::NEG_INFINITY, f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY, 1.0],
+        }
+    }
+
+    /// Plan §3.2 line 111 / §5 sentinel 5 (Unbounded half): with a seed base
+    /// point `x̃` (Phase 2's local-solver role, wired via the D7 seed), the
+    /// verified relaxation ray passes the recession verification and the
+    /// search must terminate immediately with `Unbounded`, `objective = -inf`
+    /// and the base point -- not burn nodes, not report `SuboptimalSolution`
+    /// (pre-D6, `Unbounded` fell into the `numerical_failures` arm and the
+    /// seed incumbent surfaced as `SuboptimalSolution`).
+    #[test]
+    fn verified_ray_with_seed_returns_unbounded() {
+        let qp = free_ray_qp();
+        let seed = GlobalSeed {
+            x: vec![0.0, 0.0],
+            f: 0.0,
+            root_lb: vec![f64::NEG_INFINITY, f64::NEG_INFINITY],
+            root_ub: vec![f64::INFINITY, 1.0],
+        };
+        // The seed root box must refine (never widen) the declared box, so
+        // the declared x0 side is given a hair of room for the seed box.
+        let mut qp_boxed = qp.clone();
+        qp_boxed.lb[0] = 0.0;
+        qp_boxed.ub[0] = 0.0;
+        let tight = GlobalSeed {
+            root_lb: vec![0.0, -1e-9],
+            root_ub: vec![0.0, 1.0],
+            ..seed.clone()
+        };
+        // (a) declared box free along x0: root relaxation Unbounded, seed
+        //     verifies -> Unbounded verdict at node 1.
+        let res = global_core(
+            &qp,
+            &[],
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            Some(&seed),
+        );
+        assert_eq!(res.status, SolveStatus::Unbounded, "{res:?}");
+        assert_eq!(res.objective, f64::NEG_INFINITY);
+        assert_eq!(res.x, vec![0.0, 0.0], "x must be the verified base x̃");
+        assert_eq!(res.nodes, 1, "the verdict must not burn nodes: {res:?}");
+        // (b) a box that pins the ray direction makes the LP bounded: the
+        //     seed incumbent is reported normally (search proves Optimal).
+        //     The declared box here is `[0, 0]` on x0, so the seed from (a)
+        //     refines it; optimum is the truncation `x0 = 0, x1 = 1` at −0?
+        //     objective `-x0 = 0` everywhere feasible -> incumbent 0, and the
+        //     relaxation lands there: leaf gap 0, Optimal.
+        let res_boxed = global_core(
+            &qp_boxed,
+            &[],
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            Some(&tight),
+        );
+        assert!(
+            matches!(
+                res_boxed.status,
+                SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+            ),
+            "{res_boxed:?}"
+        );
+        assert!(
+            (res_boxed.objective - 0.0).abs() <= 1e-6,
+            "truncated optimum is 0 (x0 pinned): {res_boxed:?}"
+        );
+    }
+
+    /// Plan §3.2 line 110 / §5 sentinel 5 (NotSupported half, no base point):
+    /// the same unbounded relaxation without any `x̃` must terminate at the
+    /// first node with a *reasoned* `NotSupported` -- never an infinite loop
+    /// (branching cannot remove the ray, plan line 99, and the pre-D6 code
+    /// counted this as a numerical failure instead of a verdict).
+    #[test]
+    fn unbounded_without_base_point_is_reasoned_not_supported() {
+        let qp = free_ray_qp();
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions {
+                max_nodes: 200,
+                ..GlobalOptions::default()
+            },
+        );
+        match &res.status {
+            SolveStatus::NotSupported(reason) => {
+                assert!(
+                    reason.contains("base point") && reason.contains("x̃"),
+                    "reason must name the missing x̃: {reason}"
+                );
+            }
+            other => panic!("expected reasoned NotSupported, got {other:?} in {res:?}"),
+        }
+        assert_eq!(res.nodes, 1, "must verdict at the first node: {res:?}");
+    }
+
+    /// Plan line 103 in action: `min −x s.t. x² <= 1` (plan line 100's
+    /// example). The true set is bounded, but the finite relaxation carries
+    /// only the `x̄ = 0` tangent `w >= 0`, so its polytope IS unbounded; the
+    /// ray's `P_k d = 2d ≠ 0` must veto the `Unbounded` claim (a false
+    /// unboundedness certificate is the worst possible error mode). The M4 OA
+    /// retry removes this ray at a far point; until then the disposition is
+    /// the reasoned `NotSupported`, with `nodes == 1` pinning termination.
+    #[test]
+    fn bounded_set_with_unbounded_relaxation_is_not_false_unbounded() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![-1.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0], &[0], &[2.0], n, n).unwrap(),
+                q: vec![0.0],
+                r: -1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY],
+        };
+        let seed = GlobalSeed {
+            x: vec![0.0],
+            f: 0.0,
+            root_lb: vec![f64::NEG_INFINITY],
+            root_ub: vec![f64::INFINITY],
+        };
+        let res = global_core(
+            &qp,
+            &[],
+            &ConicOptions::default(),
+            &GlobalOptions {
+                max_nodes: 200,
+                ..GlobalOptions::default()
+            },
+            Some(&seed),
+        );
+        assert!(
+            !matches!(res.status, SolveStatus::Unbounded),
+            "false unboundedness certificate: {res:?}"
+        );
+        match &res.status {
+            SolveStatus::NotSupported(reason) => {
+                // Either disposition is sound here: the simplex ray gate may
+                // withhold the certificate outright (e.g. the `w` block is
+                // presolve-reduced, so the verdict arrives unproven -- the
+                // `None`-ray reason), or the certificate arrives and the
+                // `P_k d = 0` check vetoes it (names `quad[0]`). What must
+                // never happen is the `Unbounded` certificate itself.
+                assert!(
+                    reason.contains("ray certificate") || reason.contains("quad[0]"),
+                    "reason must name the withheld certificate or the vetoing row: {reason}"
+                );
+            }
+            other => panic!("expected reasoned NotSupported, got {other:?} in {res:?}"),
+        }
+        assert_eq!(res.nodes, 1, "must verdict at the first node: {res:?}");
+    }
+
+    /// Hand-oracle battery for `verify_recession_unboundedness` (independent
+    /// of the LP solver: the rays below are computed on paper from
+    /// `free_ray_qp`'s data and fed directly, so the verifier's accept half
+    /// cannot be "explained" by a solver bug in either direction).
+    #[test]
+    fn recession_verifier_hand_oracle_cases() {
+        let qp = free_ray_qp();
+        let static_ = build_static(&qp);
+        let cert = |d: &[f64]| crate::problem::RayCertificate {
+            direction: d.to_vec(),
+            base_point: vec![0.0, 0.0],
+        };
+        // Accept: d = e0 (relaxation dim 2: pair (0,0) lifted by collect_pairs
+        // from the quad row's diagonal support? P = 0 stores no diagonal ->
+        // no pair, nv = n = 2).
+        assert!(
+            static_.pairs.is_empty(),
+            "P = 0 rows lift nothing: {:?}",
+            static_.pairs
+        );
+        verify_recession_unboundedness(&qp, &[], &static_, &cert(&[1.0, 0.0]))
+            .expect("genuine recession direction must verify");
+        // Reject: the row `-x0 + x1 <= 0` grows along d = -e0 (q^T d = 1).
+        let err =
+            verify_recession_unboundedness(&qp, &[], &static_, &cert(&[-1.0, 0.0])).unwrap_err();
+        assert!(err.contains("grows along the ray"), "{err}");
+        // Reject: d = -(1,1) is a genuine recession direction (the row stays
+        // flat, both bounds allow it) but the objective ASCENDS (q0^T d = 1).
+        let err =
+            verify_recession_unboundedness(&qp, &[], &static_, &cert(&[-1.0, -1.0])).unwrap_err();
+        assert!(err.contains("does not descend"), "{err}");
+        // Reject: ray increases the upper-bounded x1 (finite ub forces
+        // d1 <= 0). Note `(1, -1)` would NOT be rejected -- decreasing a
+        // half-bounded variable is a genuine recession direction.
+        let err =
+            verify_recession_unboundedness(&qp, &[], &static_, &cert(&[1.0, 1.0])).unwrap_err();
+        assert!(err.contains("bounded variable 1"), "{err}");
+        // Reject: zero x-block (only w drifts is meaningless downstream).
+        let err =
+            verify_recession_unboundedness(&qp, &[], &static_, &cert(&[0.0, 0.0])).unwrap_err();
+        assert!(err.contains("zero x-block"), "{err}");
+        // Reject: movement on an `R` variable (`-x0^2 + x0 <= 0` puts x0 in
+        // R via the rule-2 veto; the box rows should have made d_0 = 0).
+        let r_qp = NonconvexQcqp {
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0], &[0], &[-2.0], 2, 2).unwrap(),
+                q: vec![1.0, 0.0],
+                r: 0.0,
+            }],
+            lb: vec![0.0, f64::NEG_INFINITY],
+            ub: vec![1.0, f64::INFINITY],
+            ..free_ray_qp()
+        };
+        let r_static = build_static(&r_qp);
+        assert!(r_static.required[0] && !r_static.required[1]);
+        // `r_qp` lifts the (0,0) diagonal (P = -2 stores support): relaxation
+        // dimension is 3, so the certificate carries a trailing w slot.
+        let r_cert = crate::problem::RayCertificate {
+            direction: vec![1.0, 1.0, 0.0],
+            base_point: vec![0.0; 3],
+        };
+        let err = verify_recession_unboundedness(&r_qp, &[], &r_static, &r_cert).unwrap_err();
+        assert!(err.contains("bound-required variable 0"), "{err}");
+        // Scale invariance: 1e6 * e0 normalises onto the same verdict.
+        verify_recession_unboundedness(&qp, &[], &static_, &cert(&[1e6, 0.0]))
+            .expect("the certificate direction is scale-free");
     }
 
     /// Sentinel. A failed root relaxation (no certificate) leaves the whole
