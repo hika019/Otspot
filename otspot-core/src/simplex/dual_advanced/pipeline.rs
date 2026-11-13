@@ -1,6 +1,7 @@
 //! Phase pipeline and cold-start driver for dual advanced solver.
 
-use super::super::dual_common::{basic_obj, lp_unbounded_ray_verified};
+use super::super::dual_common::{basic_obj, lp_unbounded_ray_witness};
+use super::super::unbounded_ray::lp_ray_payload;
 use super::bounded_core::{
     bounded_primal_phase1, bounded_primal_phase2_aug, extract_dual_info_bounded,
     extract_solution_bounded, phase2_primal_bounded, BoundedDualState, BoundedOutcome,
@@ -472,15 +473,17 @@ pub(super) fn cold_start_advanced(
     // Gate a Phase II `Unbounded` on a re-derived recession ray (same verified
     // gate as `dual.rs`'s primal Phase II path and the Big-M path). This is a
     // genuine primal-simplex unboundedness exit (`revised_simplex_core`), so
-    // the ray oracle applies directly: an eta-drift false-Unbounded becomes
-    // an honest Stalled instead of a wrong `SolveStatus::Unbounded` verdict.
-    let phase2_outcome = if matches!(phase2_outcome, SimplexOutcome::Unbounded)
-        && (test_force_ray_unverified()
-            || !lp_unbounded_ray_verified(a, &basis, c, m, sf.n_total, sf.n_total, options))
-    {
-        SimplexOutcome::Stalled(basic_obj(c, &basis, &x_b))
+    // the ray oracle applies directly: an eta-drift false-Unbounded becomes an
+    // honest Stalled instead of a wrong `SolveStatus::Unbounded` verdict. A
+    // verified witness additionally mints the original-space `ray_certificate`
+    // payload (see `unbounded_ray` module doc).
+    let (phase2_outcome, ray_witness) = if matches!(phase2_outcome, SimplexOutcome::Unbounded) {
+        match lp_unbounded_ray_witness(a, &basis, c, m, sf.n_total, sf.n_total, options) {
+            Some(w) if !test_force_ray_unverified() => (SimplexOutcome::Unbounded, Some(w)),
+            _ => (SimplexOutcome::Stalled(basic_obj(c, &basis, &x_b)), None),
+        }
     } else {
-        phase2_outcome
+        (phase2_outcome, None)
     };
 
     let mut result = match phase2_outcome {
@@ -512,6 +515,9 @@ pub(super) fn cold_start_advanced(
             reduced_costs: vec![],
             slack: vec![],
             warm_start_basis: None,
+            ray_certificate: ray_witness
+                .as_ref()
+                .and_then(|w| lp_ray_payload(problem, sf, &basis, &x_b, col_scale, w)),
             ..Default::default()
         },
         SimplexOutcome::Timeout(obj) | SimplexOutcome::Stalled(obj) => {

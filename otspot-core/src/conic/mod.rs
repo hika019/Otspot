@@ -10,6 +10,7 @@ mod kkt;
 mod misocp;
 mod nonconvex;
 mod qcqp;
+mod qcqp_classify;
 #[cfg(test)]
 mod tests;
 
@@ -23,6 +24,7 @@ pub use qcqp::{
     qcqp_from_qp_problem, solve_qcqp, solve_qp_problem_as_qcqp, to_conic, QcqpProblem, QcqpResult,
     QuadConstraint,
 };
+pub use qcqp_classify::{classify_bound_requirements, require_finite_bounds, BoundRequirement};
 
 use crate::problem::SolveStatus;
 use otspot_num::sparse::CscMatrix;

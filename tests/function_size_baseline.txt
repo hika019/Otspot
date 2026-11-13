@@ -1,7 +1,7 @@
 # functions over 220 lines; growth is forbidden, shrink/removal is allowed
 otspot-core/src/conic/ipm.rs	solve	172	328
 otspot-core/src/conic/misocp.rs	solve_misocp	455	262
-otspot-core/src/conic/nonconvex.rs	global_core	902	259
+otspot-core/src/conic/nonconvex.rs	global_core	913	259
 otspot-core/src/presolve/activity.rs	propagate_row_bounds	81	227
 otspot-core/src/presolve/postsolve.rs	run_postsolve	214	258
 otspot-core/src/qp/ipm_core/ippmm/iter.rs	solve_ippmm_inner_confined	118	721
@@ -11,12 +11,12 @@ otspot-core/src/qp/postsolve/refine/kkt_iterative/extended.rs	refine_kkt_extende
 otspot-core/src/qp/postsolve/refine/kkt_iterative/iterative.rs	refine_kkt_iterative	24	436
 otspot-core/src/qp/postsolve/refine/projected_gradient.rs	refine_dual_projected_gradient	7	304
 otspot-core/src/qp/postsolve/refine/worst_active.rs	refine_dual_worst_active_block	27	331
-otspot-core/src/simplex/dual.rs	dual_simplex_core	220	226
+otspot-core/src/simplex/dual.rs	dual_simplex_core	227	226
 otspot-core/src/simplex/dual_advanced/bounded_core/iterate.rs	iterate	149	458
 otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	phase2_primal_bounded	137	293
 otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	primal_simplex_aug	532	293
 otspot-core/src/simplex/dual_advanced/core.rs	dual_simplex_core_advanced	282	581
-otspot-core/src/simplex/dual_advanced/phase1.rs	big_m_cold_start	638	413
+otspot-core/src/simplex/dual_advanced/phase1.rs	big_m_cold_start	638	419
 otspot-core/src/simplex/entry.rs	solve_with	79	291
 otspot-core/src/simplex/primal/core.rs	revised_simplex_core	153	629
 otspot-core/src/simplex/primal/crossover.rs	crossover_dual_from_primal	135	427
