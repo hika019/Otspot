@@ -327,10 +327,10 @@ pub fn effective_bound_requirement(
 /// G1 gate boundary: `R` is the raw classification — Phase 2 bound derivation
 /// (FBBT, objective cutoff) does not exist yet, so acceptance is stricter than
 /// §3.2's final rule ("reject only non-finite remaining after derivation") and
-/// the downstream relaxation still boxes every variable, with
-/// `NonconvexQcqp::validate` as the second-line guard for variables outside
-/// `R` (they surface as `NotSupported` there, never as an infinite box in the
-/// relaxation LP).
+/// the downstream relaxation, which is R-aware (decision D8):
+/// `NonconvexQcqp::validate` demands finiteness on exactly `R` as well, and
+/// `build_relax` keeps infinite boxes out of every LP by skipping box rows
+/// and envelope rows on non-finite endpoints.
 ///
 /// The all-finite fast path returns without classification, keeping the
 /// current solver behavior (and cost) bit-identical for problems that the old
@@ -528,9 +528,13 @@ mod tests {
     }
 
     /// A non-finite bound on a variable *outside* `R` (linear-only `x1`)
-    /// passes the G1 gate; the second-line guard is `NonconvexQcqp::validate`
-    /// (asserted here so the relaxation provably never sees an infinite box
-    /// while `build_relax` still boxes every variable).
+    /// passes the G1 gate **and** `NonconvexQcqp::validate` (decision D8):
+    /// the R-aware relaxation (`build_relax` skips box rows on non-finite
+    /// node bounds) is the consumer that keeps infinite boxes out of the LP,
+    /// so free non-`R` variables are a supported input, not a second-line
+    /// rejection. Free variables *inside* `R` stay rejected by both layers
+    /// (`require_finite_bounds_rejects_unbounded_required_variable` and
+    /// `validate_requires_finite_bounds_only_on_r` in nonconvex.rs).
     #[test]
     fn require_finite_bounds_defers_non_required_variables_to_validate() {
         let row = quad_row(2, vec![(0, 0, -2.0)], vec![0.0, 1.0], 0.0);
@@ -550,8 +554,8 @@ mod tests {
             lb,
             ub,
         };
-        let err = nc.validate().unwrap_err();
-        assert!(err.contains("lb[1]") || err.contains("ub[1]"), "{err}");
+        nc.validate()
+            .expect("x1 outside R may stay free end-to-end (D8)");
     }
 
     /// Dimension guards on the public entry: a mismatched `p0`/`bounds` is an
