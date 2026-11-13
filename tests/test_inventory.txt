@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3432 testcases, 43 ignored
+# totals: 3438 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -79,6 +79,7 @@ otspot-core	conic::nonconvex::tests::public_entry_rejects_non_finite_data_and_in
 otspot-core	conic::nonconvex::tests::quad_val_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_expired_deadline	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_fired_cancel_flag	active
+otspot-core	conic::nonconvex::tests::relaxation_lp_unbounded_surfaces_verified_ray	active
 otspot-core	conic::nonconvex::tests::sparse_relax_matches_dense_reference	active
 otspot-core	conic::nonconvex::tests::validate_rejects_every_mismatched_dimension	active
 otspot-core	conic::qcqp::tests::qcqp_rejects_objective_dimension_mismatch	active
@@ -1920,6 +1921,11 @@ otspot-core	simplex::tests_bounded_form::wrap_to_legacy_matches_build_standard_f
 otspot-core	simplex::tests_bounded_form::wrap_to_legacy_matches_build_standard_form_mixed	active
 otspot-core	simplex::tests_dual_advanced::test_dual_advanced_warm_start_larger_rhs_nonreducible	active
 otspot-core	simplex::tests_dual_advanced::test_dual_advanced_warm_start_rhs_change_nonreducible	active
+otspot-core	simplex::unbounded_ray::tests::eq_row_unbounded_maps_split_free_vars_to_original_space	active
+otspot-core	simplex::unbounded_ray::tests::ge_row_unbounded_exposes_certified_ray_at_lp_entry	active
+otspot-core	simplex::unbounded_ray::tests::le_row_unbounded_exposes_certified_ray_at_lp_entry	active
+otspot-core	simplex::unbounded_ray::tests::optimal_lp_has_no_ray_payload	active
+otspot-core	simplex::unbounded_ray::tests::presolve_reduced_unbounded_discards_payload	active
 otspot-core	simplex::warm_start::tests::crash_needing_artificial_returns_none	active
 otspot-core	simplex::warm_start::tests::mismatched_solution_length_returns_none	active
 otspot-core	simplex::warm_start::tests::recovers_well_formed_basis_for_trivial_lp	active

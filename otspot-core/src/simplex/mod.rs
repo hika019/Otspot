@@ -9,6 +9,7 @@ pub mod pricing;
 pub(crate) mod primal;
 mod standard_form;
 mod trace;
+pub(crate) mod unbounded_ray;
 pub(crate) mod warm_start;
 
 #[cfg(test)]

@@ -16,8 +16,9 @@ pub(crate) use reconcile::pivot_out_degenerate_artificials as test_pivot_out_deg
 pub(crate) use reconcile::{extract_solution, reconcile_final_basis_state};
 
 use self::reconcile::{check_eq_feasibility, pivot_out_degenerate_artificials, try_apply_crash};
-use super::dual_common::{basic_obj, lp_unbounded_ray_verified};
+use super::dual_common::{basic_obj, lp_unbounded_ray_witness, LpRayWitness};
 use super::pricing::SteepestEdgePricing;
+use super::unbounded_ray::lp_ray_payload;
 use super::{
     external_stop_requested, extract_dual_info, stall_status, SimplexOutcome, StandardForm,
 };
@@ -129,7 +130,9 @@ thread_local! {
 /// path). An eta-drift false-Unbounded (`B⁻¹a_q` reads ≤ 0 only because of a
 /// stale factorization) becomes an honest Stalled, mirroring the Phase-I Farkas
 /// gate. `n_enter` excludes artificials (`= sf.n_total`); pure-slack callers
-/// pass `n_enter = n_cols`.
+/// pass `n_enter = n_cols`. The verified witness is returned alongside the
+/// (unchanged) outcome so the caller can mint the original-space
+/// `ray_certificate` payload (`super::unbounded_ray::lp_ray_payload`).
 #[allow(clippy::too_many_arguments)]
 fn gate_phase2_unbounded(
     outcome: SimplexOutcome,
@@ -141,13 +144,14 @@ fn gate_phase2_unbounded(
     n_cols: usize,
     n_enter: usize,
     options: &SolverOptions,
-) -> SimplexOutcome {
-    if matches!(outcome, SimplexOutcome::Unbounded)
-        && !lp_unbounded_ray_verified(a, basis, c, m, n_cols, n_enter, options)
-    {
-        SimplexOutcome::Stalled(basic_obj(c, basis, x_b))
+) -> (SimplexOutcome, Option<LpRayWitness>) {
+    if matches!(outcome, SimplexOutcome::Unbounded) {
+        match lp_unbounded_ray_witness(a, basis, c, m, n_cols, n_enter, options) {
+            Some(w) => (SimplexOutcome::Unbounded, Some(w)),
+            None => (SimplexOutcome::Stalled(basic_obj(c, basis, x_b)), None),
+        }
     } else {
-        outcome
+        (outcome, None)
     }
 }
 
@@ -671,7 +675,8 @@ fn finalize_phase2(
         false,
         None,
     );
-    let outcome = gate_phase2_unbounded(outcome, a, basis, c, x_b, m, n_cols, sf.n_total, options);
+    let (outcome, ray_witness) =
+        gate_phase2_unbounded(outcome, a, basis, c, x_b, m, n_cols, sf.n_total, options);
 
     match outcome {
         SimplexOutcome::Optimal(obj, mut y) => {
@@ -737,6 +742,9 @@ fn finalize_phase2(
         SimplexOutcome::Unbounded => SolverResult {
             status: SolveStatus::Unbounded,
             objective: f64::NEG_INFINITY,
+            ray_certificate: ray_witness
+                .as_ref()
+                .and_then(|w| lp_ray_payload(problem, sf, basis, x_b, col_scale, w)),
             iterations: *total_iters,
             ..Default::default()
         },

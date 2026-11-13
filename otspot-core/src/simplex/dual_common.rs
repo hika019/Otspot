@@ -417,7 +417,11 @@ fn test_record_ray_pre_accept_hit() {
 /// (a real positive pivot is a leaving row; the looser tol leaks false Unbounded).
 /// `n_enter` excludes Big-M artificials; pure-slack paths pass `n_enter = n_price`.
 /// Empty witness ⇒ Timeout.
-pub(super) fn lp_unbounded_ray_verified(
+///
+/// The accepted witness carries the entering column and `d_bar = B⁻¹a_q` so the
+/// caller can map the recession direction to original space
+/// ([`crate::simplex::unbounded_ray::lp_ray_payload`]) instead of discarding it.
+pub(super) fn lp_unbounded_ray_witness(
     a: &CscMatrix,
     basis: &[usize],
     c: &[f64],
@@ -425,18 +429,18 @@ pub(super) fn lp_unbounded_ray_verified(
     n_price: usize,
     n_enter: usize,
     options: &SolverOptions,
-) -> bool {
+) -> Option<LpRayWitness> {
     // Entry check (Codex PR #31 re-review): `LuBasis::new_timed` only
     // consults `options.deadline`, not `cancel_flag`, and the BTRAN just
     // below runs unconditionally either way. Without this, a cancel_flag
     // preset before this function is ever called still pays for a full LU
     // factorization + BTRAN before the loop's own checks get a chance.
     if options.external_stop_requested() {
-        return false;
+        return None;
     }
     let mut basis_mgr = match LuBasis::new_timed(a, basis, options.max_etas, options.deadline) {
         Ok(bm) => bm,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let mut in_basis = vec![false; n_price];
     for &col in basis {
@@ -457,7 +461,7 @@ pub(super) fn lp_unbounded_ray_verified(
         // external stop must not wait out a loop whose own cost scales with
         // problem size).
         if options.external_stop_requested() {
-            return false;
+            return None;
         }
         #[cfg(test)]
         test_record_ray_loop_top_hit();
@@ -508,12 +512,44 @@ pub(super) fn lp_unbounded_ray_verified(
             #[cfg(test)]
             test_record_ray_pre_accept_hit();
             if options.external_stop_requested() {
-                return false;
+                return None;
             }
-            return true;
+            return Some(LpRayWitness {
+                entering_col: q,
+                d_bar: d,
+            });
         }
     }
-    false
+    None
+}
+
+/// Verified recession-ray witness from [`lp_unbounded_ray_witness`]: the
+/// improving entering column `q` (nonbasic, `q < n_enter`) and the freshly
+/// factorized `d_bar = B⁻¹a_q` at the exit basis. In the iteration space the
+/// primal ray is `dx[q] = +1`, `dx[basis[i]] = −d_bar[i]`, all other columns 0;
+/// the verifier has already confirmed `rc_q < −dual_tol` and the recession sign
+/// pattern of `d_bar` (structural rows `≤ ray_floor`, artificial rows
+/// `|·| ≤ ray_floor`), so artificial-column components of `d_bar` are
+/// noise-scale and safe to drop when mapping to original space
+/// ([`crate::simplex::unbounded_ray::lp_ray_payload`]).
+pub(crate) struct LpRayWitness {
+    pub entering_col: usize,
+    pub d_bar: Vec<f64>,
+}
+
+/// Boolean view of [`lp_unbounded_ray_witness`] kept for the sentinel tests
+/// that assert the gate verdict itself (production call sites use the witness).
+#[cfg(test)]
+pub(super) fn lp_unbounded_ray_verified(
+    a: &CscMatrix,
+    basis: &[usize],
+    c: &[f64],
+    m: usize,
+    n_price: usize,
+    n_enter: usize,
+    options: &SolverOptions,
+) -> bool {
+    lp_unbounded_ray_witness(a, basis, c, m, n_price, n_enter, options).is_some()
 }
 
 /// c_B^T x_B = Σ c[basis[i]] · x_B[i]. Shared between primal/dual simplex for

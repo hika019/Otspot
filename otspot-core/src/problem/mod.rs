@@ -308,14 +308,23 @@ pub struct SolverResult {
     pub opt_cert: Option<OptimalCertificate>,
     /// 検証済み Unbounded の ray 証書ペイロード (回収方向 + 実行可能基点)。
     ///
-    /// Some となるのは `status == Unbounded` かつ `stats.unbounded_ray_certified
-    /// == true` かつ ray 基点が原始実行可能性検査 (`base_point_primal_feasible`、
-    /// componentwise 後方誤差境界) を通過したときのみ — IPM 受理点の eps-free
-    /// 独立検証器 (`verify_unbounded_ray`) を通過し、かつ検証座標が
-    /// 元問題空間と一致する (presolve 縮約・presolve 側 Ruiz が掛かると内部座標
-    /// が元空間と異なり、回収方向の写像は置換変換を跨ぐため非自明 → ペイロード
-    /// は破棄される) 場合に限定される。未証明判定・Stalled / Infeasible /
-    /// Optimal 等はすべて None。
+    /// 生成経路は 2 つ:
+    ///
+    /// - QP/IPM: `status == Unbounded` かつ `stats.unbounded_ray_certified
+    ///   == true` かつ ray 基点が原始実行可能性検査 (`base_point_primal_feasible`、
+    ///   componentwise 後方誤差境界) を通過したときのみ — IPM 受理点の eps-free
+    ///   独立検証器 (`verify_unbounded_ray`) を通過し、かつ検証座標が
+    ///   元問題空間と一致する (presolve 縮約・presolve 側 Ruiz が掛かると内部座標
+    ///   が元空間と異なり、回収方向の写像は置換変換を跨ぐため非自明 → ペイロード
+    ///   は破棄される) 場合に限定される。
+    /// - LP simplex (`solve_lp*` / B&B 緩和): Phase II ray ゲート
+    ///   (`simplex::dual_common::lp_unbounded_ray_witness`) を通過した基底から
+    ///   回収方向を元問題空間へ写像し、IPM と同じ独立検証器へ `Q = 0` で通して
+    ///   回収・降下・基点実行可能性のすべてを確認できたときのみ
+    ///   (`simplex::unbounded_ray::lp_ray_payload` の doc 参照)。presolve 縮約
+    ///   経由の Unbounded は縮約空間座標を露出させないため破棄 (IPM と同じ扱い)。
+    ///
+    /// 未証明判定・Stalled / Infeasible / Optimal 等はすべて None。
     ///
     /// 検証済み Infeasible の Farkas 証書は現状あえて公開しない: 検証器の dy は
     /// 拡張系 (元行 + 境界行) のソルバ内部行レイアウト・符号慣例で定義され、

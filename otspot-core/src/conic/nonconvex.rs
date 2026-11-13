@@ -297,6 +297,15 @@ struct RelaxResult {
     status: SolveStatus,
     objective: f64,
     x: Vec<f64>,
+    /// 緩和 LP の検証済み recession ray (方向 + 実行可能基点、`[x, w]` の
+    /// 元座標)。`Some` は `status == Unbounded` かつ LP simplex 側が
+    /// Phase II ray ゲート通過後に元問題空間で独立検証したときのみ
+    /// (`simplex::unbounded_ray::lp_ray_payload`、`SolverResult::ray_certificate`
+    /// と同一契約・同一型)。未証明 Unbounded、presolve 縮約経由の判定、
+    /// 基点の実行可能性検証失敗はすべて `None` (偽証なし)。
+    /// 計画 §3.2 の recession 検証 (G2b) が消費する。現状は未消費。
+    #[allow(dead_code)] // G2a は露出のみが目的 (消費側は G2b で別途実装)。
+    ray: Option<crate::problem::RayCertificate>,
 }
 
 #[cfg(test)]
@@ -369,6 +378,7 @@ fn solve_relax_lp(
             status,
             objective: f64::NAN,
             x: vec![],
+            ray: None,
         };
     }
     let n = prob.n();
@@ -423,6 +433,7 @@ fn solve_relax_lp(
         status: res.status,
         objective: res.objective,
         x: res.solution,
+        ray: res.ray_certificate,
     }
 }
 
@@ -1692,6 +1703,51 @@ mod tests {
             SolveStatus::Timeout,
             "fired cancel_flag must abort the node LP, got {:?}",
             res.status
+        );
+    }
+
+    /// G2a wiring sentinel: an Unbounded relaxation LP must surface its
+    /// verified recession ray (`RelaxResult::ray`, direction + base point in
+    /// the relaxation's own coordinates). `solve_relax_lp` runs with default
+    /// options (presolve ON), so the fixture must be one presolve cannot
+    /// decide itself: `min −x1 −x2 s.t. x1 − x2 ≤ 0` (x free) is unbounded
+    /// along `d = (1, 1)` (`d1 − d2 = 0 ≤ 0`, `cᵀd = −2 < 0`). Reverting the
+    /// `ray: res.ray_certificate` forwarding (or the LP-side payload minting)
+    /// makes `ray` None and fails this test.
+    #[test]
+    fn relaxation_lp_unbounded_surfaces_verified_ray() {
+        let g = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, -1.0], 1, 2).unwrap();
+        let relax = ConicProblem {
+            c: vec![-1.0, -1.0],
+            a: CscMatrix::new(0, 2),
+            b: vec![],
+            g,
+            h: vec![0.0],
+            cone: ConeSpec { l: 1, soc: vec![] },
+        };
+        let res = solve_relax_lp(&relax, None, None);
+        assert_eq!(
+            res.status,
+            SolveStatus::Unbounded,
+            "min −x1−x2 s.t. x1 − x2 ≤ 0 must be Unbounded, got {:?}",
+            res.status
+        );
+        let ray = res
+            .ray
+            .expect("verified Unbounded relaxation must carry the ray payload");
+        let d = &ray.direction;
+        assert_eq!(d.len(), 2);
+        assert_eq!(ray.base_point.len(), 2);
+        // Independent recomputation from the hand-written problem data only.
+        assert!(
+            d[0] - d[1] <= 1e-6,
+            "hand oracle recession: d1 − d2 ≤ 0, got {d:?}"
+        );
+        assert!(-d[0] - d[1] < -1e-6, "hand oracle descent: −d1−d2 < 0");
+        assert!(
+            ray.base_point[0] - ray.base_point[1] <= 1e-6,
+            "base must satisfy x1 − x2 ≤ 0, got {:?}",
+            ray.base_point
         );
     }
 

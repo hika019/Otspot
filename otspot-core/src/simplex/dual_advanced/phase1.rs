@@ -1007,11 +1007,15 @@ pub(crate) fn big_m_cold_start(
             // Gate the Unbounded verdict on a re-derived recession ray. A clean LU
             // at the exit basis distinguishes a genuine ray from eta-drift noise.
             // Unverified ⇒ honest Timeout, mirroring the Phase-I Farkas gate that
-            // turns an unproven infeasibility ray into Timeout.
-            if super::super::dual_common::lp_unbounded_ray_verified(
+            // turns an unproven infeasibility ray into Timeout. A verified
+            // witness additionally mints the original-space `ray_certificate`
+            // payload (see `unbounded_ray` module doc); artificial columns in
+            // the Big-M basis are noise-scale in the witness and get dropped by
+            // the mapping.
+            match super::super::dual_common::lp_unbounded_ray_witness(
                 &a_aug, &basis_aug, &c_aug_p2, m, n_aug, n_total, options,
             ) {
-                SolverResult {
+                Some(w) => SolverResult {
                     status: SolveStatus::Unbounded,
                     objective: f64::NEG_INFINITY,
                     solution: vec![],
@@ -1019,11 +1023,13 @@ pub(crate) fn big_m_cold_start(
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
+                    ray_certificate: super::super::unbounded_ray::lp_ray_payload(
+                        problem, sf, &basis_aug, &x_b, col_scale, &w,
+                    ),
                     iterations: total_iters,
                     ..Default::default()
-                }
-            } else {
-                super::super::stop_result_with_incumbent(
+                },
+                None => super::super::stop_result_with_incumbent(
                     sf,
                     problem,
                     &basis_aug,
@@ -1031,7 +1037,7 @@ pub(crate) fn big_m_cold_start(
                     col_scale,
                     total_iters,
                     options,
-                )
+                ),
             }
         }
         SimplexOutcome::Timeout(_) | SimplexOutcome::Stalled(_) => {
