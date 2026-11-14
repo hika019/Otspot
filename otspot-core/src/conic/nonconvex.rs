@@ -835,39 +835,31 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
 
 /// Build the McCormick LP relaxation for the current box `[lb, ub]`.
 ///
-/// Only the box rows and the McCormick envelope rows depend on the box;
-/// everything else is `static_` (see its doc), so this clones the
-/// precomputed fixed part (`O(nnz)`) and appends the per-node rows directly
-/// as triplets, instead of re-deriving the whole relaxation from a dense
-/// `n x n` pass at every branch-and-bound node (`O(n * (n + pairs.len()))`
-/// per node -- the dominant B&B memory cost on large QCQPs).
+/// Box and envelope rows depend on the box; everything else is `static_`
+/// (see its doc), so this clones the fixed part (`O(nnz)`) and appends the
+/// per-node rows as triplets, instead of re-deriving the relaxation from a
+/// dense `n x n` pass at every B&B node (the dominant memory cost).
 ///
 /// Emission is driven by the §3.1 classification stored in `static_`
 /// (plan §3.2, decisions D2/D3):
-/// - Box rows are emitted exactly for variables whose node bounds are
-///   finite. A non-finite bound must never reach `h` (`LpProblem::new_general`
-///   rejects it and the call site `.unwrap()`s), and no envelope row is
-///   emitted for a pair with a non-finite endpoint (`w_interval` and the
-///   McCormick coefficients `xl_i, xu_j` would carry `±inf`/`NaN`).
-///   *Deviation from decision D3's first sentence, recorded here per "迷ったら
-///   保守側"*: D3 as worded also drops box rows for *finite*-bounded
-///   variables outside `R`. For a scheme-B LP relaxation that turns every
-///   currently-solvable problem with a linear objective term in such a
-///   variable into an unbounded relaxation (the variable escapes the box it
-///   genuinely has in the original problem; the recession verifier cannot
-///   certify `Unbounded` for a problem with a finite optimum, and without an
-///   incumbent `x̃` plan line 110 forces `NotSupported` -- a §6 "退化なし"
-///   regression on the bounded qplib suites). Dropping those box rows
-///   requires the Phase 2 incumbent/`x̃` + objective-cutoff machinery to
-///   restore boundedness, so finite-bounded variables keep their box rows
-///   until then; the ±inf hazard D3/plan §3.2 actually guards is fully
-///   excluded by the finite-bound emission rule above.
+/// - Box rows exist exactly for finite node bounds: `±inf` must never reach
+///   `h` or the envelope coefficients (`new_general` rejects them, the call
+///   site unwraps), so pairs with a non-finite endpoint emit no envelope.
 /// - Rule-2 diagonal pairs emit only the under-estimator cut `w_ii >= 0`
 ///   (the x̄ = 0 tangent; every further tangent is a node-time OA cut, see
 ///   `TangentCut` in `global_core`). Interval and envelope rows are skipped
 ///   unconditionally (D2).
 /// - All other pairs with finite endpoints emit the interval rows + 4
 ///   McCormick facets exactly as the dense reference does.
+///
+/// Deviation from D3's first sentence, recorded per "迷ったら保守側":
+/// finite-bounded variables outside `R` keep their box rows. Dropping them
+/// turns every scheme-B problem with a linear objective term in such a
+/// variable unbounded (the variable escapes its genuine box; a finite
+/// optimum cannot certify `Unbounded` and without `x̃` plan line 110 forces
+/// `NotSupported` -- a §6 regression). Restoring boundedness without box
+/// rows is Phase 2's incumbent/cutoff job; the ±inf hazard D3 guards is
+/// fully excluded by the finite-bound rule above.
 fn build_relax(static_: &StaticRelax, lb: &[f64], ub: &[f64]) -> ConicProblem {
     let n = static_.n;
     let pairs = &static_.pairs;
@@ -1150,24 +1142,39 @@ fn objective(qp: &NonconvexQcqp, x: &[f64]) -> f64 {
 }
 
 /// Globally optimise a nonconvex QCQP by spatial branch-and-bound.
+///
+/// `seed` (plan §3.2 line 112, decision D7) starts the search at an
+/// incumbent `(x̃, f)` and a derived root box instead of `incumbent = +inf`
+/// and the declared box — the consumer Phase 2 wires (bound-free local
+/// solver UB, FBBT-derived bounds kept out of `qp.lb`/`qp.ub`). `None` keeps
+/// the pre-existing behaviour exactly. A seed is never trusted blindly:
+/// `global_core` re-validates feasibility of `x̃` at `g.feas_tol`, re-derives
+/// the incumbent from `objective(qp, x̃)`, and rejects a box that widens the
+/// declared box — an invalid seed fails as `NotSupported` with the reason.
 pub fn solve_global_qcqp(
     qp: &NonconvexQcqp,
     opts: &ConicOptions,
     g: &GlobalOptions,
+    seed: Option<&GlobalSeed>,
 ) -> GlobalResult {
-    global_core(qp, &[], opts, g, None)
+    global_core(qp, &[], opts, g, seed)
 }
 
 /// Globally optimise a nonconvex mixed-integer QCQP. `integers` lists variable
 /// indices constrained to integer values; their bounds come from `qp.lb`/`qp.ub`.
 /// Combines integer branching with spatial (McCormick) branching.
+///
+/// `seed` behaves exactly as in [`solve_global_qcqp`]; a seeded `x̃` must
+/// additionally be integral within `g.int_tol` (it is checked with the same
+/// `all_integral` gate as per-node incumbents).
 pub fn solve_global_miqcp(
     qp: &NonconvexQcqp,
     integers: &[usize],
     opts: &ConicOptions,
     g: &GlobalOptions,
+    seed: Option<&GlobalSeed>,
 ) -> GlobalResult {
-    global_core(qp, integers, opts, g, None)
+    global_core(qp, integers, opts, g, seed)
 }
 
 fn frac_dist(v: f64) -> f64 {
@@ -1236,25 +1243,30 @@ fn validate_integers(n: usize, integers: &[usize]) -> Result<(), String> {
 /// Seed for `global_core`: an initial incumbent and the root box to search.
 ///
 /// Plan §3.2 line 112 (decision D7): the search starts at `incumbent =
-/// +inf`, so an upper bound produced by a bound-free local solver (Phase 2)
+/// +inf, so an upper bound produced by a bound-free local solver (Phase 2)
 /// would never reach prune or gap reporting. Phase 2 also derives bounds that
 /// it deliberately keeps out of `qp.lb`/`qp.ub` (plan §4.2 line 136: rewriting
 /// them would reject incumbents inside `feas_tol`), so the derived root box
-/// travels with the seed. This milestone only wires the plumbing; the public
-/// entry points pass `None` (current behaviour), and the CHANGELOG entry for
-/// the public signature change ships with the Phase 2 / M5 wiring.
+/// travels with the seed. M5/D7 exposed the plumbing through the public
+/// entry points (`Option<&GlobalSeed>` on `solve_global_qcqp` /
+/// `solve_global_miqcp`); the internal QP-route callers keep passing `None`
+/// until Phase 2 actually produces seeds.
 #[derive(Debug, Clone)]
-struct GlobalSeed {
+pub struct GlobalSeed {
     /// Feasible point `x̃` (re-validated by `global_core` at `feas_tol`
     /// before use -- a corrupt seed fails as `NotSupported`, never as a
     /// trusted incumbent).
-    x: Vec<f64>,
+    pub x: Vec<f64>,
     /// Objective value at `x`; cross-checked against `objective(qp, x)` and
     /// the incumbent is always the recomputed value (a stale/mismatched `f`
     /// fails the seed, it is never trusted as a lower upper-bound).
-    f: f64,
-    root_lb: Vec<f64>,
-    root_ub: Vec<f64>,
+    pub f: f64,
+    /// Derived root lower bounds (`±inf` allowed for free variables). Must
+    /// refine, never widen, `qp.lb`/`qp.ub` -- a widened side would admit
+    /// points the public `feasible()` contract rejects.
+    pub root_lb: Vec<f64>,
+    /// Derived root upper bounds, same refinement rule as `root_lb`.
+    pub root_ub: Vec<f64>,
 }
 
 /// Zero-decision tolerance for the §3.2 recession verification, after the ray
@@ -1293,32 +1305,24 @@ fn max_abs_row_sum(m: &CscMatrix) -> f64 {
 /// still verified, never waived).
 ///
 /// Checks (each `Err`-reasoned; never a panic):
-/// - `d_R = 0` (plan line 108: structural from the box rows, asserted here);
-/// - integer variables `d_k = 0` (a ray direction must live in the integer
-///   lattice; `0` is the only recession direction it admits);
+/// - `d_R = 0` (plan 108: structural from the box rows, asserted here);
+/// - integer variables `d_k = 0` (the lattice's only recession direction);
 /// - bounds: finite `lb_j` forces `d_j >= 0`, finite `ub_j` forces `d_j <= 0`;
-/// - linear rows `G d <= 0`, `A_eq d = 0`;
-/// - every quadratic row (PSD or not, `Eq` already split to `±P` upstream so
-///   both sides give `q^T d <= 0` and hence `q^T d = 0` for free, plan 109):
-///   `P_k d = 0` and `q_k^T d <= 0`. Soundness: `P_k d = 0` makes
-///   `f_k(x̃ + t d) = f_k(x̃) + t·q_k^T d` exactly (the `t²` term
-///   `d^T P_k d = d^T(P_k d)` and the cross term `(P_k d)^T x̃` both vanish),
-///   so feasibility degrades at most linearly and stays `<= 0`;
+///   linear rows `G d <= 0`, `A_eq d = 0`;
+/// - every quadratic row (`Eq` split to `±P` upstream gives `q^T d = 0` for
+///   free, plan 109): `P_k d = 0` and `q_k^T d <= 0`. Soundness: `P_k d = 0`
+///   kills the `t²` and cross terms, so `f_k(x̃ + t d)` grows at most
+///   linearly with non-positive slope and stays `<= 0`;
 /// - objective `P0 d = 0` and `q0^T d <= -RAY_DESCENT_TOL`, so
 ///   `f0(x̃ + t d) -> -inf`.
 ///
-/// Interpretation record: plan line 105 ("規則 2 の変数: `d_i = 0`") is a
-/// device of the line-108 support argument to kill the `d^T P_k d` terms.
-/// Applied literally to *vacuously* rule-2 variables (variables with no
-/// quadratic support at all are vacuously rule 2 per §3.1), it would force
-/// `d = 0` on every free variable and make the plan-line-111 `Unbounded`
-/// return unreachable even for `min -x s.t. x <= 1`-type rays -- the literal
-/// reading contradicts the plan's own return contract. The load-bearing
-/// content (`d^T P_k d = 0` on every row) is enforced *directly* by the `P_k
-/// d = 0` checks above, which subsume line 105 for every variable with
-/// quadratic support (the only ones line 108's argument speaks about) and
-/// change nothing else. Conservative side unchanged: anything not certified
-/// stays `NotSupported`.
+/// Interpretation record: plan line 105's "規則 2 の変数: `d_i = 0`" is a
+/// device of line 108's support argument; read literally it would also fire
+/// on vacuously rule-2 variables (free linear variables) and make the
+/// plan-line-111 `Unbounded` return unreachable, contradicting the plan's
+/// own contract. Its load-bearing content (`d^T P_k d = 0` per row) is
+/// enforced *directly* by the `P_k d = 0` checks, which subsume line 105
+/// wherever quadratic support exists; uncertified rays stay `NotSupported`.
 fn verify_recession_unboundedness(
     qp: &NonconvexQcqp,
     integers: &[usize],
@@ -1722,21 +1726,17 @@ fn global_core(
         //
         // Candidates are exactly `static_.mc_pairs` (decision D4): pairs with
         // emitted interval + 4-facet envelopes. Rule-2 diagonals are excluded
-        // -- their relaxation `w_ii` sits at the under-estimator by design
-        // (the x̄ = 0 tangent plus OA cuts), so counting `|w_ii − x_i²|` as a
-        // "gap" would branch forever, and on a free `x_i` the fallback split
-        // `0.5·(lb+ub)` returns `∓inf` and re-pushes the identical box
-        // (plan §0.1 line 16). Plan §3.2 line 97's "only variables in R":
-        // every `mc_pair` endpoint is in `R` or is a D1-exempt rule-1 support
-        // variable (finite raw bounds by the D1 filter), and rule-2-vetoed
-        // diagonals are in `R`; all candidates therefore live in finite boxes,
-        // which is the load-bearing property pinned by the sentinel test.
-        //
-        // Decision D5 (recorded): no `w_ii := x_i²` projection is applied to
-        // the leaf gap or incumbent test. The incumbent machinery is
-        // original-problem based throughout (`feasible(qp, x, ·)` and
-        // `objective(qp, x)` read `x` only), and rule-2 pairs are excluded
-        // from the gap by D4, so a projection would have no consumer.
+        // -- their `w_ii` sits at the under-estimator by design (tangent +
+        // OA cuts), so `|w_ii − x_i²|` would branch forever, and on a free
+        // `x_i` the fallback split `0.5·(lb+ub)` is `∓inf` and re-pushes the
+        // identical box (plan §0.1 line 16). Every `mc_pair` endpoint is in
+        // `R` or D1-exempt with finite raw bounds, and rule-2-vetoed
+        // diagonals are in `R`: all candidates live in finite boxes, the
+        // load-bearing property pinned by the sentinel test.
+        // Decision D5 (recorded): no `w_ii := x_i²` projection on the leaf
+        // gap or incumbent test -- `feasible`/`objective` read `x` only, so
+        // a projection would have no consumer (rule-2 pairs leave the gap
+        // via D4 anyway).
         let mut worst_gap = 0.0;
         let mut branch_var = None;
         for &pi in &static_.mc_pairs {
@@ -2081,7 +2081,7 @@ mod tests {
             int_tol: 1e-3,
             ..GlobalOptions::default()
         };
-        let res = solve_global_miqcp(&qp, &[0], &ConicOptions::default(), &g);
+        let res = solve_global_miqcp(&qp, &[0], &ConicOptions::default(), &g, None);
         assert!(
             res.x.is_empty(),
             "a leaf point violating the equality by 5e-5 (50x feas_tol=1e-6, \
@@ -2128,7 +2128,7 @@ mod tests {
             int_tol: f64::NAN,
             ..GlobalOptions::default()
         };
-        let res = solve_global_miqcp(&qp, &[0, 1], &ConicOptions::default(), &g);
+        let res = solve_global_miqcp(&qp, &[0, 1], &ConicOptions::default(), &g, None);
         assert!(
             matches!(res.status, SolveStatus::NotSupported(_)),
             "NaN int_tol must be rejected, got {res:?}"
@@ -2309,6 +2309,168 @@ mod tests {
             .expect("PSD rows over free x must validate (R empty)");
     }
 
+    /// Plan §5 sentinel 1 (full path, M5): an ellipsoid constraint over
+    /// *free* `x` -- plan §3.1 example 1's shape, `R = {}` -- must reach a
+    /// certified optimum through the public entry point, not the pre-D8
+    /// `NotSupported("... bounds ...")` rejection. Fixture: `min −x0 − x1`
+    /// over the unit disk `x0² + x1² <= 1` with the redundant linear guard
+    /// `x0 + x1 <= 2` (√2 < 2, so it changes nothing but keeps every node LP
+    /// bounded: the disposition never depends on whether the simplex exposes
+    /// a ray). Hand oracle, independent of the solver: Cauchy–Schwarz gives
+    /// `x0 + x1 <= √2·‖x‖ <= √2` with equality at `x0 = x1 = 1/√2`, so the
+    /// optimum is exactly `−√2`. `R = {}`: the PSD row is rule 1, its
+    /// diagonals rule 2 (lift coeff +1), no off-diagonal pairs -> no
+    /// `mc_pairs`, so the OA cut pool alone must converge the root.
+    /// Reverting D8 (validate demands finite bounds on *all* variables) makes
+    /// this fail as `NotSupported` before a single node is solved.
+    #[test]
+    fn r_empty_ellipsoid_over_free_x_reaches_optimum_end_to_end() {
+        let n = 2usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![-1.0, -1.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap(),
+                q: vec![0.0, 0.0],
+                r: -1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap(),
+            h_lin: vec![2.0],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![f64::NEG_INFINITY, f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY, f64::INFINITY],
+        };
+        qp.validate()
+            .expect("R = {} over free x must validate (D8)");
+        let g = GlobalOptions {
+            max_nodes: 200,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g, None);
+        assert!(
+            !matches!(res.status, SolveStatus::NotSupported(_)),
+            "free variables outside R must never be a bounds rejection: {res:?}"
+        );
+        let root2 = 2.0f64.sqrt();
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            (res.objective + root2).abs() <= 1e-5,
+            "hand oracle: min over the unit disk is −sqrt(2) at (1/sqrt2, 1/sqrt2): {res:?}"
+        );
+        assert_eq!(res.nodes, 1, "no spatial branch without mc_pairs: {res:?}");
+        assert!(
+            (res.x[0] - 1.0 / root2).abs() <= 1e-3 && (res.x[1] - 1.0 / root2).abs() <= 1e-3,
+            "optimal point x = (1/sqrt2, 1/sqrt2): {:?}",
+            res.x
+        );
+        // D7 public wiring on the same fixture: a valid seed refines the
+        // search start and changes nothing about the certified answer; a
+        // stale seed.f is refused by name, never adopted as a bound.
+        let seed = GlobalSeed {
+            x: vec![0.0, 0.0],
+            f: 0.0,
+            root_lb: qp.lb.clone(),
+            root_ub: qp.ub.clone(),
+        };
+        let seeded = solve_global_qcqp(&qp, &ConicOptions::default(), &g, Some(&seed));
+        assert_eq!(seeded.status, SolveStatus::Optimal, "{seeded:?}");
+        assert!((seeded.objective + root2).abs() <= 1e-5, "{seeded:?}");
+        let stale = GlobalSeed {
+            f: 5.0,
+            ..seed.clone()
+        };
+        let bad = solve_global_qcqp(&qp, &ConicOptions::default(), &g, Some(&stale));
+        match &bad.status {
+            SolveStatus::NotSupported(reason) => {
+                assert!(reason.contains("invalid global seed"), "{reason}");
+                assert!(reason.contains("objective mismatch"), "{reason}");
+            }
+            other => panic!("stale seed.f must fail as NotSupported, got {other:?}"),
+        }
+        assert_eq!(
+            bad.nodes, 0,
+            "the seed gate runs before the search: {bad:?}"
+        );
+    }
+
+    /// Plan §5 sentinel 2 (full path, M5): the flipped `>=` row
+    /// `x0² − x1 >= 0` normalizes to `−x0² + x1 <= 0`, whose diagonal lift
+    /// coefficient is `−1`, so rule 2 must NOT accept it and `x0 ∈ R`.
+    /// (a) free `x0` must fail as `NotSupported` naming the R bound gate --
+    /// the rejection itself is the sentinel payload. (b) with `x0` boxed to
+    /// `[-2, 1]`, the rule-2-vetoed diagonal sits on the McCormick secant
+    /// side and the search reaches the hand oracle `-4` (maximize
+    /// `x1 <= x0²` over the box: `x0 = -2, x1 = 4`; secant exact at the box
+    /// end, so the root itself certifies). Patching rule 2 to accept negative
+    /// diagonal coefficients (the revert this sentinel pins at full path;
+    /// `negative_flipped_diagonal_vetoes_rule2_and_requires_bound` covers the
+    /// classify level) moves `x0` out of `R`: (a) then reports the
+    /// recession/x̃ reason instead of the R rejection and (b) loses the
+    /// secant, so the relaxation runs `x1 -> +inf` and the `-4` certificate
+    /// never arrives -- both halves fail.
+    #[test]
+    fn flipped_negative_diagonal_rejection_names_the_r_bound_gate_end_to_end() {
+        // (1/2)x'Px + q'x + r = -x0^2 + x1 <= 0, i.e. x1 <= x0^2.
+        let row = || GQuadConstraint {
+            p: CscMatrix::from_triplets(&[0], &[0], &[-2.0], 2, 2).unwrap(),
+            q: vec![0.0, 1.0],
+            r: 0.0,
+        };
+        let base = || NonconvexQcqp {
+            n: 2,
+            p0: None,
+            q0: vec![0.0, -1.0],
+            quad: vec![row()],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            b_eq: vec![],
+            lb: vec![-2.0, f64::NEG_INFINITY],
+            ub: vec![1.0, f64::INFINITY],
+        };
+        // (a) x0 free: accepted only to be rejected by the R gate, by name.
+        let mut free_x0 = base();
+        free_x0.lb[0] = f64::NEG_INFINITY;
+        free_x0.ub[0] = f64::INFINITY;
+        let res = solve_global_qcqp(
+            &free_x0,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
+        match &res.status {
+            SolveStatus::NotSupported(reason) => {
+                assert!(
+                    reason.contains("lb[0]") && reason.contains("bound-requirement set R"),
+                    "rejection must name the R-gated variable: {reason}"
+                );
+            }
+            other => {
+                panic!("rule-2 veto puts x0 in R: a free x0 must hit the R gate, got {other:?}")
+            }
+        }
+        assert_eq!(res.nodes, 0, "rejected at validate, not in the search");
+        // (b) x0 boxed: secant side solves to the hand oracle -4.
+        let res = solve_global_qcqp(
+            &base(),
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            (res.objective + 4.0).abs() <= 1e-5,
+            "hand oracle: max x1 = x0^2 on x0 = -2 is 4, objective -4: {res:?}"
+        );
+        assert!(
+            (res.x[0] + 2.0).abs() <= 1e-4 && (res.x[1] - 4.0).abs() <= 1e-4,
+            "optimal point (-2, 4): {:?}",
+            res.x
+        );
+    }
+
     /// Companion to `validate_rejects_every_mismatched_dimension`: the public
     /// entry path (`global_core`, reached via `solve_global_qcqp`/
     /// `solve_global_miqcp`) must surface a mismatched `NonconvexQcqp` as a
@@ -2331,7 +2493,12 @@ mod tests {
             lb: vec![0.0, 0.0],
             ub: vec![1.0, 1.0],
         };
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
         assert!(
             matches!(res.status, SolveStatus::NotSupported(_)),
             "mismatched q0 length must be a clean NotSupported, got {res:?}"
@@ -2359,6 +2526,7 @@ mod tests {
             &non_finite,
             &ConicOptions::default(),
             &GlobalOptions::default(),
+            None,
         );
         assert!(
             matches!(res.status, SolveStatus::NotSupported(_)),
@@ -2370,6 +2538,7 @@ mod tests {
             &[1],
             &ConicOptions::default(),
             &GlobalOptions::default(),
+            None,
         );
         assert!(
             matches!(res.status, SolveStatus::NotSupported(_)),
@@ -2573,7 +2742,7 @@ mod tests {
             max_nodes: 50,
             ..GlobalOptions::default()
         };
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g);
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g, None);
         assert_eq!(
             res.nodes, 1,
             "root must leaf without any spatial branch (pre-D4 this burned the \
@@ -2811,6 +2980,7 @@ mod tests {
                 max_nodes: 200,
                 ..GlobalOptions::default()
             },
+            None,
         );
         match &res.status {
             SolveStatus::NotSupported(reason) => {
@@ -2832,10 +3002,11 @@ mod tests {
     /// bounded `w`), so the simplex presolve withholds the ray certificate
     /// (G2a "no false certificate") -- the M4 OA retry only fires on
     /// *verified* rays (plan line 100: "LP の非有界 ray に沿った遠方点"), and
-    /// the M3 reasoned `NotSupported` stands here. The ray-retry convergence
-    /// path itself is pinned by `oa_ray_retry_resolves_plan100_shape` on a
-    /// fixture whose ray is exposed. Reverting M3 (Unbounded counted as a
-    /// numerical failure) yields `SuboptimalSolution` and fails this test.
+    /// the M3 reasoned `NotSupported` stands here. The ray-retry cut logic
+    /// itself is pinned directly on `oa_retry_cut` by
+    /// `oa_retry_cut_far_point_tangent_and_dedupe` on hand-built
+    /// `RelaxResult`s. Reverting M3 (Unbounded counted as a numerical
+    /// failure) yields `SuboptimalSolution` and fails this test.
     #[test]
     fn bounded_set_with_unbounded_relaxation_is_not_false_unbounded() {
         let n = 1usize;
@@ -3067,7 +3238,12 @@ mod tests {
             lb: vec![f64::NEG_INFINITY, 0.0],
             ub: vec![f64::INFINITY, 5.0],
         };
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
         assert!(
             (res.objective - (-0.25)).abs() <= 1e-5,
             "hand-oracle optimum -1/4 (x = 1/2): {res:?}"
@@ -3147,7 +3323,12 @@ mod tests {
     fn failed_root_relaxation_is_not_false_infeasible() {
         let qp = hyperbola();
         let res = with_relax_plan(vec![Some(SolveStatus::NumericalError)], || {
-            solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default())
+            solve_global_qcqp(
+                &qp,
+                &ConicOptions::default(),
+                &GlobalOptions::default(),
+                None,
+            )
         });
         assert_eq!(res.status, SolveStatus::NumericalError, "{res:?}");
         assert!(res.x.is_empty());
@@ -3166,7 +3347,12 @@ mod tests {
         let mut plan = vec![None; 80];
         plan.extend(std::iter::repeat_n(Some(SolveStatus::NumericalError), 512));
         let res = with_relax_plan(plan, || {
-            solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default())
+            solve_global_qcqp(
+                &qp,
+                &ConicOptions::default(),
+                &GlobalOptions::default(),
+                None,
+            )
         });
         assert_eq!(res.status, SolveStatus::SuboptimalSolution, "{res:?}");
         assert!(
@@ -3188,7 +3374,7 @@ mod tests {
             max_nodes: 80,
             ..GlobalOptions::default()
         };
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g);
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g, None);
         assert_eq!(res.status, SolveStatus::SuboptimalSolution, "{res:?}");
         assert_eq!(res.nodes, 80, "must stop at the node limit");
         assert!(
@@ -3215,7 +3401,7 @@ mod tests {
             cancel_flag: Some(cancel),
             ..ConicOptions::default()
         };
-        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default());
+        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default(), None);
         assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
         assert_eq!(res.nodes, 0, "must stop before processing any node");
     }
@@ -3256,7 +3442,7 @@ mod tests {
             cancel_flag: Some(std::sync::Arc::clone(&cancel)),
             ..ConicOptions::default()
         };
-        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default());
+        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default(), None);
         CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(None));
 
         assert_eq!(
@@ -3285,7 +3471,12 @@ mod tests {
             lb: vec![-10.0],
             ub: vec![10.0],
         };
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
         assert_eq!(
             res.status,
             SolveStatus::Infeasible,
@@ -3315,7 +3506,7 @@ mod tests {
             cancel_flag: Some(std::sync::Arc::clone(&cancel)),
             ..ConicOptions::default()
         };
-        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default());
+        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default(), None);
         CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(None));
 
         assert_eq!(
@@ -3334,7 +3525,12 @@ mod tests {
     #[test]
     fn exhausted_clean_search_certifies_optimal_with_zero_gap() {
         let qp = hyperbola();
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
         assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
         assert!((res.objective - 2.0).abs() < 5e-3, "obj={}", res.objective);
         assert!(

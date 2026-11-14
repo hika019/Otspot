@@ -17,7 +17,7 @@ mod tests;
 pub use misocp::{solve_miqcp, solve_misocp, BbOptions, MisocpProblem, MisocpResult};
 pub use nonconvex::{
     solve_global_miqcp, solve_global_qcqp, GQuadConstraint, GlobalOptions, GlobalResult,
-    NonconvexQcqp,
+    GlobalSeed, NonconvexQcqp,
 };
 pub(crate) use qcqp::qcqp_matrix_to_csc;
 pub use qcqp::{

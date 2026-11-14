@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3438 testcases, 43 ignored
+# totals: 3458 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -59,6 +59,8 @@ otspot-core	conic::misocp::tests::classify_ray_node_cases	active
 otspot-core	conic::misocp::tests::conic_feasible_rejects_nan_equality_activity	active
 otspot-core	conic::misocp::tests::qcqp_true_objective_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::accept_honors_caller_tolerance_after_rounding_not_a_fixed_floor	active
+otspot-core	conic::nonconvex::tests::bounded_set_with_unbounded_relaxation_is_not_false_unbounded	active
+otspot-core	conic::nonconvex::tests::branch_candidates_are_the_envelope_pairs_only	active
 otspot-core	conic::nonconvex::tests::cancel_flag_is_honored_inside_the_bnb_loop	active
 otspot-core	conic::nonconvex::tests::cancel_race_before_final_infeasible_classification_prefers_timeout	active
 otspot-core	conic::nonconvex::tests::cancel_race_before_final_optimal_classification_prefers_timeout	active
@@ -68,6 +70,8 @@ otspot-core	conic::nonconvex::tests::feasible_panics_on_a_eq_dimension_mismatch	
 otspot-core	conic::nonconvex::tests::feasible_panics_on_g_lin_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::feasible_rejects_nan_quad_activity	active
 otspot-core	conic::nonconvex::tests::feasible_rejects_non_finite_input	active
+otspot-core	conic::nonconvex::tests::flipped_negative_diagonal_rejection_names_the_r_bound_gate_end_to_end	active
+otspot-core	conic::nonconvex::tests::free_off_diagonal_pair_emits_no_envelope	active
 otspot-core	conic::nonconvex::tests::global_miqcp_nan_int_tol_is_rejected_not_silently_broken	active
 otspot-core	conic::nonconvex::tests::incumbent_with_failed_node_is_not_optimal	active
 otspot-core	conic::nonconvex::tests::leaf_accept_no_longer_loosens_feas_tol_by_100x	active
@@ -75,18 +79,34 @@ otspot-core	conic::nonconvex::tests::mccormick_w_box_bounds_diagonal_square_belo
 otspot-core	conic::nonconvex::tests::mismatched_dims_returns_not_supported_not_a_panic	active
 otspot-core	conic::nonconvex::tests::no_cancel_still_reports_infeasible_via_global_core	active
 otspot-core	conic::nonconvex::tests::node_limited_with_incumbent_is_suboptimal	active
+otspot-core	conic::nonconvex::tests::non_finite_bounds_and_pairs_never_reach_h	active
+otspot-core	conic::nonconvex::tests::oa_pool_rows_match_hand_computed_tangents	active
+otspot-core	conic::nonconvex::tests::oa_retry_cut_far_point_tangent_and_dedupe	active
+otspot-core	conic::nonconvex::tests::oa_violation_cuts_converge_without_branching	active
 otspot-core	conic::nonconvex::tests::public_entry_rejects_non_finite_data_and_integer_indices	active
 otspot-core	conic::nonconvex::tests::quad_val_panics_on_dimension_mismatch	active
+otspot-core	conic::nonconvex::tests::r_empty_ellipsoid_over_free_x_reaches_optimum_end_to_end	active
+otspot-core	conic::nonconvex::tests::recession_verifier_hand_oracle_cases	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_expired_deadline	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_fired_cancel_flag	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_unbounded_surfaces_verified_ray	active
+otspot-core	conic::nonconvex::tests::rule2_diagonal_is_never_a_branch_candidate	active
+otspot-core	conic::nonconvex::tests::rule2_pair_emits_exactly_one_pair_row	active
 otspot-core	conic::nonconvex::tests::sparse_relax_matches_dense_reference	active
+otspot-core	conic::nonconvex::tests::unbounded_without_base_point_is_reasoned_not_supported	active
+otspot-core	conic::nonconvex::tests::validate_accepts_psd_rows_over_free_variables	active
 otspot-core	conic::nonconvex::tests::validate_rejects_every_mismatched_dimension	active
+otspot-core	conic::nonconvex::tests::validate_requires_finite_bounds_only_on_r	active
+otspot-core	conic::nonconvex::tests::verified_ray_with_seed_returns_unbounded	active
 otspot-core	conic::qcqp::tests::qcqp_rejects_objective_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_bridge_rejects_base_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_objective_upper_triangle_is_symmetrized_for_cholesky	active
 otspot-core	conic::qcqp_classify::tests::clamped_jitter_band_row_is_not_certified_convex	active
 otspot-core	conic::qcqp_classify::tests::classify_and_gate_reject_mismatched_dimensions	active
+otspot-core	conic::qcqp_classify::tests::d1_demotes_psd_objective_with_free_off_diagonal_support	active
+otspot-core	conic::qcqp_classify::tests::d1_demotes_psd_row_with_free_off_diagonal_support	active
+otspot-core	conic::qcqp_classify::tests::d1_keeps_diagonal_only_psd_row_exempt_over_free_vars	active
+otspot-core	conic::qcqp_classify::tests::effective_bound_requirement_rejects_mismatched_bounds	active
 otspot-core	conic::qcqp_classify::tests::equality_split_moves_psd_quadratic_into_r_via_neg_half	active
 otspot-core	conic::qcqp_classify::tests::negative_flipped_diagonal_vetoes_rule2_and_requires_bound	active
 otspot-core	conic::qcqp_classify::tests::rank_deficient_unclamped_psd_objective_is_convex	active

@@ -255,19 +255,16 @@ pub fn classify_bound_requirements(
 /// 非凸側") gates the exemption on raw-bound finiteness of that row's own
 /// off-diagonal support. Diagonal-only PSD rows are never demoted: their
 /// single diagonal pair carries the rule-2 under-estimator `w_ii >= 0` cut,
-/// which needs no box.
-///
-/// Demotion can never flip `rule2_diag` through a *negative* diagonal (a
-/// PSD-certified composed form has `0.5·S_ii >= 0` on its support), but the
-/// minimum scan is still fed so the function does not rely on that lemma.
+/// which needs no box. A demotion can never veto rule 2 through a negative
+/// diagonal (a certified-PSD diagonal is `>= 0`), but the scan is fed anyway.
 ///
 /// The result is the acceptance set for Phase 2 bound derivation ("変数 R 入り
 /// → 最終的に Phase 2 導出後も非有限なら拒否"); the current G2 acceptance gate
 /// (`NonconvexQcqp::validate`, plan §3.2 / decision D8 / §5 sentinel 1) uses
 /// the raw classification so plan §5 example 1 (PSD ellipsoid row over free
-/// variables) is not rejected on the bound requirement itself -- its eventual
-/// NotSupported comes from the missing `x̃` base point (plan line 110), which
-/// is a Phase 2 local-solver obligation, not a bound-requirement error.
+/// variables) is not rejected on the bound requirement itself; its eventual
+/// NotSupported is the missing `x̃` base point (plan line 110), a Phase 2
+/// local-solver obligation, not a bound-requirement error.
 pub fn effective_bound_requirement(
     n: usize,
     p0: Option<&CscMatrix>,
