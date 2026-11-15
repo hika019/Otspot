@@ -722,6 +722,58 @@ fn oa_retry_cut(
     }
 }
 
+/// Node relaxation under the global OA tangent pool: rebuild the relaxation
+/// with the current pool, solve it, and add tangents while they still change
+/// the pool (plan §3.2 lines 96/100; the retry consumes no node count, and
+/// the caller's §3.2 verdict machinery only sees an `Unbounded` once no
+/// further cut can be learned). The re-solves warm-start from the previous
+/// round's basis (`extend_warm_for_appended_cuts`).
+///
+/// `Err(())` = the per-node cut budget was exhausted with the pool still
+/// learning: the caller must stop the search with a reasoned `NotSupported`
+/// (a shape the geometric convergence bound does not describe).
+fn oa_refine_node(
+    static_: &StaticRelax,
+    lb: &[f64],
+    ub: &[f64],
+    g: &GlobalOptions,
+    opts: &ConicOptions,
+    oa_pool: &mut Vec<(usize, f64)>,
+) -> Result<RelaxResult, ()> {
+    let mut rounds = 0usize;
+    // Parent (LP, basis) for the OA re-solve warm start: the tangent
+    // rows only extend the LP at the tail, so the previous round's
+    // basis carries over (see `extend_warm_for_appended_cuts`).
+    // `None` whenever the last solve produced no basis (Unbounded,
+    // numerical failure) — that round just stays cold as before.
+    let mut prev: Option<(crate::problem::LpProblem, crate::options::WarmStartBasis)> = None;
+    loop {
+        // Exit tightness must dominate the acceptance margin `accept`
+        // re-checks at `g.feas_tol`: tangency slacks `t_k` below the
+        // graphs `x_k^2` let the recovered point violate an original
+        // quadratic row by up to the SUM of the slacks of the pairs
+        // appearing in that row, which per-pair caps cannot bound
+        // (two pairs each at `bilinear_tol` = 1e-6 already exceed a
+        // 1e-6 accept margin; the ellipsoid fixture fails accept and
+        // ends `NumericalError` there). Keep the per-pair cut trigger
+        // at `bilinear_tol` and additionally refine while the total
+        // slack exceeds half the accept margin (see `oa_retry_cut`'s
+        // budget arm).
+        let sum_budget = g.feas_tol / 2.0;
+        let relax = build_relax_with_cuts(static_, lb, ub, oa_pool);
+        let parent = prev.as_ref().map(|(lp, ws)| (lp, ws));
+        let solved = solve_relax_lp(&relax, opts.deadline, opts.cancel_flag.as_ref(), parent);
+        if oa_retry_cut(static_, &solved.result, g.bilinear_tol, sum_budget, oa_pool) == 0 {
+            return Ok(solved.result);
+        }
+        prev = solved.result.warm.map(|ws| (solved.lp, ws));
+        rounds += 1;
+        if rounds > OA_MAX_CUT_ROUNDS_PER_NODE {
+            return Err(());
+        }
+    }
+}
+
 /// Node relaxation + the global OA tangent pool (see `oa_add_cut`'s
 /// globality note). Appends `-w_ii + 2c*x_i <= c^2` rows to `build_relax`'s
 /// inequality block; equalities, the objective and every original row are
@@ -1730,62 +1782,21 @@ fn global_core(
         nodes += 1;
         // Solve the node, retrying with OA tangents while they still change
         // the pool (plan §3.2 lines 96/100, integrated per the G2b-D6
-        // milestone note): a rule-2 diagonal violating its under-estimator
-        // at the `Optimal` solution, or a verified ray moving one, buys a
-        // tangent and a re-solve of the SAME node. The retry consumes no
-        // node count, and the §3.2 verdict machinery below only sees a
-        // `Unbounded` once no further cut can be learned.
-        let res = {
-            let mut rounds = 0usize;
-            // Parent (LP, basis) for the OA re-solve warm start: the tangent
-            // rows only extend the LP at the tail, so the previous round's
-            // basis carries over (see `extend_warm_for_appended_cuts`).
-            // `None` whenever the last solve produced no basis (Unbounded,
-            // numerical failure) — that round just stays cold as before.
-            let mut prev: Option<(crate::problem::LpProblem, crate::options::WarmStartBasis)> =
-                None;
-            loop {
-                // Exit tightness must dominate the acceptance margin `accept`
-                // re-checks at `g.feas_tol`: tangency slacks `t_k` below the
-                // graphs `x_k^2` let the recovered point violate an original
-                // quadratic row by up to the SUM of the slacks of the pairs
-                // appearing in that row, which per-pair caps cannot bound
-                // (two pairs each at `bilinear_tol` = 1e-6 already exceed a
-                // 1e-6 accept margin; the ellipsoid fixture fails accept and
-                // ends `NumericalError` there). Keep the per-pair cut trigger
-                // at `bilinear_tol` and additionally refine while the total
-                // slack exceeds half the accept margin, cutting the pair with
-                // the largest gap (see `oa_retry_cut`'s budget arm).
-                let sum_budget = g.feas_tol / 2.0;
-                let relax = build_relax_with_cuts(&static_, &lb, &ub, &oa_pool);
-                let parent = prev.as_ref().map(|(lp, ws)| (lp, ws));
-                let solved =
-                    solve_relax_lp(&relax, opts.deadline, opts.cancel_flag.as_ref(), parent);
-                if oa_retry_cut(
-                    &static_,
-                    &solved.result,
-                    g.bilinear_tol,
-                    sum_budget,
-                    &mut oa_pool,
-                ) == 0
-                {
-                    break solved.result;
-                }
-                prev = solved.result.warm.map(|ws| (solved.lp, ws));
-                rounds += 1;
-                if rounds > OA_MAX_CUT_ROUNDS_PER_NODE {
-                    return GlobalResult {
-                        status: SolveStatus::NotSupported(format!(
-                            "OA tangent retry budget exhausted at node {}: more than \
-                             {} re-solves kept learning new cuts without the relaxation \
-                             settling (plan §3.2 line 96 budget, OA_MAX_CUT_ROUNDS_PER_NODE)",
-                            nodes, OA_MAX_CUT_ROUNDS_PER_NODE
-                        )),
-                        objective: incumbent,
-                        x: inc_x,
-                        nodes,
-                        gap: f64::INFINITY,
-                    };
+        // milestone note): see `oa_refine_node`.
+        let res = match oa_refine_node(&static_, &lb, &ub, g, opts, &mut oa_pool) {
+            Ok(result) => result,
+            Err(()) => {
+                return GlobalResult {
+                    status: SolveStatus::NotSupported(format!(
+                        "OA tangent retry budget exhausted at node {}: more than \
+                     {} re-solves kept learning new cuts without the relaxation \
+                     settling (plan §3.2 line 96 budget, OA_MAX_CUT_ROUNDS_PER_NODE)",
+                        nodes, OA_MAX_CUT_ROUNDS_PER_NODE
+                    )),
+                    objective: incumbent,
+                    x: inc_x,
+                    nodes,
+                    gap: f64::INFINITY,
                 }
             }
         };
