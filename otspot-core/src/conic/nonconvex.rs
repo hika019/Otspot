@@ -449,6 +449,7 @@ fn solve_relax_lp(
     deadline: Option<std::time::Instant>,
     cancel_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     parent: Option<(&crate::problem::LpProblem, &crate::options::WarmStartBasis)>,
+    lift_res_tol: f64,
 ) -> RelaxSolve {
     let n = prob.n();
     let peq = prob.p();
@@ -519,6 +520,12 @@ fn solve_relax_lp(
             deadline,
             cancel_flag: cancel_flag.cloned(),
             presolve: false,
+            // Cut rows carry lift coefficient -1, so simplex's primal
+            // tolerance floors the lift gap the OA budget arms can resolve
+            // (see `oa_lift_res_tol`'s derivation): refine the LP to the
+            // finest threshold the arms can demand when that is finer than
+            // the default pivot tolerance.
+            primal_tol: lift_res_tol.min(crate::tolerances::PIVOT_TOL),
             ..Default::default()
         };
         // OA re-solve warm start (see `extend_warm_for_appended_cuts`): the
@@ -617,6 +624,13 @@ fn oa_add_cut(pool: &mut Vec<(usize, f64)>, pi: usize, c: f64) -> bool {
 /// NEW pool entries (0 = nothing more can be learned: fall through to the
 /// normal status disposition, including the §3.2 recession verdict).
 ///
+/// `viol_tol` is the per-pair cut trigger (plan line 96). The budget arms
+/// (`row_budget`, `obj_budget`) run when no pair breaches it: each sums
+/// COEFFICIENT-WEIGHTED lift gaps `|coeff| · (x̄_i² − w_ii)` -- original-row
+/// / objective units, the units `accept` and the gap certificate check --
+/// so a pair scaled by `1e6` is refined until its ORIGINAL residual, not
+/// its raw gap, is inside budget. `f64::INFINITY` disables an arm.
+///
 /// Progress per round on the plan-100 shape is geometric (>= 2x toward the
 /// feasible cap per re-solve in the traced halving sequence), so the exit
 /// needs `log2((far - x*) / sqrt(viol_tol))` rounds; `OA_RAY_LOOKAHEAD`
@@ -626,7 +640,8 @@ fn oa_retry_cut(
     static_: &StaticRelax,
     res: &RelaxResult,
     viol_tol: f64,
-    sum_budget: f64,
+    row_budget: f64,
+    obj_budget: f64,
     pool: &mut Vec<(usize, f64)>,
 ) -> usize {
     let n = static_.n;
@@ -645,17 +660,18 @@ fn oa_retry_cut(
                     added += usize::from(oa_add_cut(pool, pi, x[i]));
                 }
             }
-            // Accept-margin budget arm: every pair sits inside `viol_tol`,
-            // yet an original quadratic row can still be violated by more
-            // than half the accept margin: the vertex's violation of row r
-            // is bounded by the SUM of the slacks of the pairs appearing in
-            // r (`accept` re-checks the original rows at `feas_tol`). While
-            // some row exceeds `sum_budget`, refine every pair of such a row
-            // whose own slack exceeds its proportional share
-            // `sum_budget / (rule-2 members of the row)`. The threshold is
-            // a constant target, so each pair keeps its geometric slack
-            // decay and the arm stops at the dedupe floor, far below any
-            // sane budget; `f64::INFINITY` disables the arm.
+            // Budget arm: every pair sits inside `viol_tol`, yet a scaled
+            // original row can still be violated by |coeff| times the raw
+            // lift gap -- `accept` re-checks original rows at `feas_tol` and
+            // the gap certificate checks the objective at `gap_tol`, both in
+            // ORIGINAL units. A row's violation at the recovered point is
+            // bounded by the SUM over its pairs of `|coeff| · lift gap`, so
+            // while some row's weighted sum exceeds `row_budget` (or the
+            // objective's weighted lift error exceeds `obj_budget`), refine
+            // every contributing pair whose own weighted gap exceeds its
+            // proportional share (budget / member count). The thresholds are
+            // constants, so each pair keeps its geometric slack decay and
+            // the arm stops at the dedupe floor, far below any sane budget.
             if added == 0 {
                 let np = static_.pairs.len();
                 let mut gaps = vec![0.0f64; np];
@@ -663,29 +679,41 @@ fn oa_retry_cut(
                     .pair_rows
                     .iter()
                     .flatten()
-                    .copied()
+                    .map(|&(r, _)| r)
                     .max()
                     .map_or(0, |m| m + 1);
                 let mut rowsum = vec![0.0f64; nrow];
                 let mut rowcnt = vec![0usize; nrow];
+                let mut objsum = 0.0f64;
+                let mut objcnt = 0usize;
                 for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
                     if !static_.rule2_pair[pi] || i != j {
                         continue;
                     }
                     let gap = (x[i] * x[i] - res.x[n + pi]).max(0.0);
                     gaps[pi] = gap;
-                    for &r in &static_.pair_rows[pi] {
-                        rowsum[r] += gap;
+                    for &(r, coeff) in &static_.pair_rows[pi] {
+                        rowsum[r] += coeff.abs() * gap;
                         rowcnt[r] += 1;
+                    }
+                    // `static_.c[n + pi]` is the pair's lift coefficient in
+                    // the relaxation objective (build_static), i.e. the
+                    // objective row's coefficient in original units.
+                    let oc = static_.c[n + pi].abs();
+                    if oc != 0.0 {
+                        objsum += oc * gap;
+                        objcnt += 1;
                     }
                 }
                 for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
                     if !static_.rule2_pair[pi] || i != j {
                         continue;
                     }
-                    let over = static_.pair_rows[pi].iter().any(|&r| {
-                        rowsum[r] > sum_budget && gaps[pi] > sum_budget / rowcnt[r].max(1) as f64
-                    });
+                    let over = static_.pair_rows[pi].iter().any(|&(r, coeff)| {
+                        rowsum[r] > row_budget
+                            && coeff.abs() * gaps[pi] > row_budget / rowcnt[r].max(1) as f64
+                    }) || (objsum > obj_budget
+                        && static_.c[n + pi].abs() * gaps[pi] > obj_budget / objcnt.max(1) as f64);
                     if over {
                         added += usize::from(oa_add_cut(pool, pi, x[i]));
                     }
@@ -722,6 +750,56 @@ fn oa_retry_cut(
     }
 }
 
+/// Finest raw-lift-gap threshold the `oa_retry_cut` budget arms can demand.
+/// Derivation: a pair is refined while its weighted gap exceeds
+/// `budget / (members of its row)` -- in RAW lift units that threshold is
+/// `budget / (members · |coeff|)` (the arm compares `|coeff| · gap`), and an
+/// OA cut row carries lift coefficient `-1`, so its violation at a vertex IS
+/// the raw lift gap. Simplex treats primal violations up to its
+/// `primal_tol` as satisfied: a threshold below `primal_tol` could never be
+/// resolved and the arm would dedupe-stall above budget (measured: an
+/// `1e6`-scaled objective stalls at a certified gap `4e-3` with the default
+/// `PIVOT_TOL = 1e-8`). Returning the minimum threshold lets the caller
+/// refine the LP to it; `f64::INFINITY` (no budget-relevant pair) keeps the
+/// default tolerance untouched.
+fn oa_lift_res_tol(static_: &StaticRelax, row_budget: f64, obj_budget: f64) -> f64 {
+    let n = static_.n;
+    let nrow = static_
+        .pair_rows
+        .iter()
+        .flatten()
+        .map(|&(r, _)| r)
+        .max()
+        .map_or(0, |m| m + 1);
+    let mut rowcnt = vec![0usize; nrow];
+    let mut objcnt = 0usize;
+    for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
+        if !static_.rule2_pair[pi] || i != j {
+            continue;
+        }
+        for &(r, _) in &static_.pair_rows[pi] {
+            rowcnt[r] += 1;
+        }
+        if static_.c[n + pi] != 0.0 {
+            objcnt += 1;
+        }
+    }
+    let mut best = f64::INFINITY;
+    for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
+        if !static_.rule2_pair[pi] || i != j {
+            continue;
+        }
+        for &(r, coeff) in &static_.pair_rows[pi] {
+            best = best.min(row_budget / (coeff.abs() * rowcnt[r].max(1) as f64));
+        }
+        let oc = static_.c[n + pi].abs();
+        if oc != 0.0 {
+            best = best.min(obj_budget / (oc * objcnt.max(1) as f64));
+        }
+    }
+    best
+}
+
 /// Node relaxation under the global OA tangent pool: rebuild the relaxation
 /// with the current pool, solve it, and add tangents while they still change
 /// the pool (plan §3.2 lines 96/100; the retry consumes no node count, and
@@ -751,19 +829,36 @@ fn oa_refine_node(
         // Exit tightness must dominate the acceptance margin `accept`
         // re-checks at `g.feas_tol`: tangency slacks `t_k` below the
         // graphs `x_k^2` let the recovered point violate an original
-        // quadratic row by up to the SUM of the slacks of the pairs
-        // appearing in that row, which per-pair caps cannot bound
-        // (two pairs each at `bilinear_tol` = 1e-6 already exceed a
-        // 1e-6 accept margin; the ellipsoid fixture fails accept and
-        // ends `NumericalError` there). Keep the per-pair cut trigger
-        // at `bilinear_tol` and additionally refine while the total
-        // slack exceeds half the accept margin (see `oa_retry_cut`'s
-        // budget arm).
-        let sum_budget = g.feas_tol / 2.0;
+        // quadratic row by up to the SUM over its pairs of `|coeff| · gap`
+        // (raw per-pair gaps cannot bound a scaled row: 1e6 · 9.3e-8 is a
+        // 0.09 violation of a row whose raw slack passed every threshold),
+        // and an objective-only rule-2 pair keeps an equally weighted
+        // objective lift error that inflates the certified gap. Keep the
+        // per-pair cut trigger at `bilinear_tol` and additionally refine
+        // while the weighted sums exceed half of `feas_tol` / `gap_tol`
+        // (see `oa_retry_cut`'s budget arms and the derivation of
+        // `OA_BUDGET_MARGIN_FACTOR`).
+        let row_budget = g.feas_tol * OA_BUDGET_MARGIN_FACTOR;
+        let obj_budget = g.gap_tol * OA_BUDGET_MARGIN_FACTOR;
+        let lift_res_tol = oa_lift_res_tol(static_, row_budget, obj_budget);
         let relax = build_relax_with_cuts(static_, lb, ub, oa_pool);
         let parent = prev.as_ref().map(|(lp, ws)| (lp, ws));
-        let solved = solve_relax_lp(&relax, opts.deadline, opts.cancel_flag.as_ref(), parent);
-        if oa_retry_cut(static_, &solved.result, g.bilinear_tol, sum_budget, oa_pool) == 0 {
+        let solved = solve_relax_lp(
+            &relax,
+            opts.deadline,
+            opts.cancel_flag.as_ref(),
+            parent,
+            lift_res_tol,
+        );
+        if oa_retry_cut(
+            static_,
+            &solved.result,
+            g.bilinear_tol,
+            row_budget,
+            obj_budget,
+            oa_pool,
+        ) == 0
+        {
             return Ok(solved.result);
         }
         prev = solved.result.warm.map(|ws| (solved.lp, ws));
@@ -839,6 +934,16 @@ const OA_CENTER_DEDUPE_REL_TOL: f64 = 1e-12;
 /// orders of magnitude away from overflow for LP vertices up to ~1e150.
 const OA_RAY_LOOKAHEAD: f64 = 1e3;
 
+/// Derivation of both `oa_retry_cut` budget arms in `oa_refine_node`: a row
+/// admitted at relaxation level is re-checked by `accept` at `feas_tol`, and
+/// the search certifies the objective gap at `gap_tol` -- the budgets bound
+/// those same quantities (coefficient-weighted lift sums), so halving each
+/// tolerance leaves a factor-2 margin against LP rounding before either
+/// verifier rejects. The targets are constants (not per-round-tightening),
+/// which is what keeps the round count row-bounded, not
+/// pair-count-proportional (a43d851e's budget rationale).
+const OA_BUDGET_MARGIN_FACTOR: f64 = 1.0 / 2.0;
+
 /// Re-solve budget per node for OA cut retries (both the `Optimal`
 /// violation half and the `Unbounded` ray half of `oa_retry_cut`). The
 /// traced convergence on the plan-100 shape is geometric with ratio >= 1/2
@@ -846,11 +951,12 @@ const OA_RAY_LOOKAHEAD: f64 = 1e3;
 /// `log2((L + |x*|)/sqrt(bilinear_tol))` rounds suffice: `L = 1e3`, a vertex
 /// scale of 1e15 and `bilinear_tol = 1e-12` need `log2(1e18) ~ 60`; 64
 /// covers that with margin. The accept-margin budget arm refines the same
-/// geometric sequence (its target `sum_budget <= feas_tol/2` is a constant,
-/// not a tighter tol class), so it shares the bound. A node needing more has
-/// a shape the geometric bound does not describe -- the search stops with a
-/// reasoned `NotSupported` instead of burning the node budget silently (plan
-/// §3.2 "cut 後も ray 残のみ検証" generalized to "no progress within budget").
+/// geometric sequence (its targets `feas_tol / 2` and `gap_tol / 2` are
+/// constants, not a tighter tol class), so it shares the bound. A node
+/// needing more has a shape the geometric bound does not describe -- the
+/// search stops with a reasoned `NotSupported` instead of burning the node
+/// budget silently (plan §3.2 "cut 後も ray 残のみ検証" generalized to
+/// "no progress within budget").
 const OA_MAX_CUT_ROUNDS_PER_NODE: usize = 64;
 
 /// Portions of the McCormick relaxation LP that do not depend on the current
@@ -875,10 +981,12 @@ struct StaticRelax {
     fixed_vi: Vec<f64>,
     fixed_h: Vec<f64>,
     /// For each pair, the quadratic-constraint rows whose `w` column of that
-    /// pair carries a coefficient (a pair is shared across rows only when the
-    /// same (i, j) appears in several rows). The accept-margin budget arm of
-    /// `oa_retry_cut` bounds each row's implied violation with it.
-    pair_rows: Vec<Vec<usize>>,
+    /// pair carries a coefficient, as `(row, coefficient)` (a pair is shared
+    /// across rows only when the same (i, j) appears in several rows). The
+    /// accept-margin budget arm of `oa_retry_cut` bounds each row's implied
+    /// violation as `|coefficient| · lift gap` -- original-row units, which
+    /// is what `accept` re-checks at `feas_tol`.
+    pair_rows: Vec<Vec<(usize, f64)>>,
     /// Per pair: rule-2 diagonal (`i == j && rule2_diag[i]`) -- emitted as
     /// the single under-estimator cut `w_ii >= 0` (the x̄ = 0 tangent), no
     /// interval/envelope rows (decision D2, plan §3.2: interval rows and
@@ -992,7 +1100,7 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
     let a = CscMatrix::from_triplets(&a_ri, &a_ci, &a_vi, peq, nv).unwrap();
 
     // quadratic constraints -> linear rows in [x, w].
-    let mut pair_rows: Vec<Vec<usize>> = vec![Vec::new(); npair];
+    let mut pair_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); npair];
     let mut fixed_ri = Vec::new();
     let mut fixed_ci = Vec::new();
     let mut fixed_vi = Vec::new();
@@ -1009,7 +1117,7 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
             fixed_ri.push(row);
             fixed_ci.push(n + pi);
             fixed_vi.push(coeff);
-            pair_rows[pi].push(row);
+            pair_rows[pi].push((row, coeff));
         }
         fixed_h.push(-qc.r);
     }
@@ -2857,7 +2965,7 @@ mod tests {
         let static_ = build_static(&qp);
         assert_eq!(static_.pairs, vec![(0, 0)]);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
-        let res = solve_relax_lp(&relax, None, None, None).result;
+        let res = solve_relax_lp(&relax, None, None, None, f64::INFINITY).result;
         assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
         assert!(
             res.objective.abs() < 1e-7,
@@ -3049,7 +3157,7 @@ mod tests {
         let static_ = build_static(&qp);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let res = solve_relax_lp(&relax, Some(past), None, None).result;
+        let res = solve_relax_lp(&relax, Some(past), None, None, f64::INFINITY).result;
         assert_eq!(
             res.status,
             SolveStatus::Timeout,
@@ -3067,7 +3175,7 @@ mod tests {
         let static_ = build_static(&qp);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let res = solve_relax_lp(&relax, None, Some(&fired), None).result;
+        let res = solve_relax_lp(&relax, None, Some(&fired), None, f64::INFINITY).result;
         assert_eq!(
             res.status,
             SolveStatus::Timeout,
@@ -3095,7 +3203,7 @@ mod tests {
             h: vec![0.0],
             cone: ConeSpec { l: 1, soc: vec![] },
         };
-        let res = solve_relax_lp(&relax, None, None, None).result;
+        let res = solve_relax_lp(&relax, None, None, None, f64::INFINITY).result;
         assert_eq!(
             res.status,
             SolveStatus::Unbounded,
@@ -3351,7 +3459,14 @@ mod tests {
             warm: None,
         };
         assert_eq!(
-            oa_retry_cut(&static_, &unbounded, 1e-6, f64::INFINITY, &mut pool),
+            oa_retry_cut(
+                &static_,
+                &unbounded,
+                1e-6,
+                f64::INFINITY,
+                f64::INFINITY,
+                &mut pool
+            ),
             1
         );
         assert_eq!(
@@ -3360,7 +3475,14 @@ mod tests {
             "far-point tangent center hand-computed"
         );
         assert_eq!(
-            oa_retry_cut(&static_, &unbounded, 1e-6, f64::INFINITY, &mut pool),
+            oa_retry_cut(
+                &static_,
+                &unbounded,
+                1e-6,
+                f64::INFINITY,
+                f64::INFINITY,
+                &mut pool
+            ),
             0,
             "the same ray re-derives the same center: fall through"
         );
@@ -3377,7 +3499,14 @@ mod tests {
             warm: None,
         };
         assert_eq!(
-            oa_retry_cut(&static_, &w_only, 1e-6, f64::INFINITY, &mut pool),
+            oa_retry_cut(
+                &static_,
+                &w_only,
+                1e-6,
+                f64::INFINITY,
+                f64::INFINITY,
+                &mut pool
+            ),
             0
         );
         // Optimal half: `w < x̄² - viol_tol` cuts at the solution point; a
@@ -3391,7 +3520,14 @@ mod tests {
             warm: None,
         };
         assert_eq!(
-            oa_retry_cut(&static_, &violating, 1e-6, f64::INFINITY, &mut pool),
+            oa_retry_cut(
+                &static_,
+                &violating,
+                1e-6,
+                f64::INFINITY,
+                f64::INFINITY,
+                &mut pool
+            ),
             1
         );
         assert_eq!(pool.last(), Some(&(0, 3.0)));
@@ -3403,8 +3539,98 @@ mod tests {
             warm: None,
         };
         assert_eq!(
-            oa_retry_cut(&static_, &tight, 1e-3, f64::INFINITY, &mut pool),
+            oa_retry_cut(
+                &static_,
+                &tight,
+                1e-3,
+                f64::INFINITY,
+                f64::INFINITY,
+                &mut pool
+            ),
             0
+        );
+    }
+
+    /// PR #84 review F3 sentinel: the accept-margin budget must be in
+    /// ORIGINAL-ROW units. `min −x  s.t.  1e6·x² − 1e6 <= 0, x ∈ [0,2]`
+    /// is exactly `x <= 1` (hand oracle: optimum `−1` at `x = 1`), but an OA
+    /// vertex at `x = 1 + 4.65e−8` has lift gap `≈ 9.29e−8` (under both cut
+    /// thresholds) while the ORIGINAL row is violated by `1e6 · 9.29e−8 =
+    /// 0.0929 ≫ feas_tol` — `accept` rejects it and the raw-gap budget never
+    /// asks for another tangent. Before the weighted-gap fix: leaf
+    /// exhaustion with `NumericalError` and no incumbent.
+    #[test]
+    fn scaled_quad_row_keeps_oa_tangents_until_row_feasible() {
+        let qp = NonconvexQcqp {
+            n: 1,
+            p0: None,
+            q0: vec![-1.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0], &[0], &[2.0e6], 1, 1).unwrap(),
+                q: vec![0.0],
+                r: -1.0e6,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0],
+            ub: vec![2.0],
+        };
+        let g = GlobalOptions {
+            max_nodes: 200,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g, None);
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            (res.objective + 1.0).abs() <= 1e-5,
+            "hand oracle: min −x on x<=1 is −1: {res:?}"
+        );
+        assert!(
+            (res.x[0] - 1.0).abs() <= 1e-4,
+            "optimum is x = 1: {:?}",
+            res.x
+        );
+    }
+
+    /// PR #84 review F4 sentinel: rule-2 pairs appearing ONLY in the
+    /// objective must be refined to the optimality tolerance.
+    /// `min 1e6·x² − 6e5·x` on `[0,1]` = `1e6(x − 0.3)² − 90000` (hand
+    /// oracle: optimum `−90000` at `x = 0.3`). Before the fix the budget
+    /// arm only covered `pair_rows` (quadratic constraints), so the
+    /// objective-only pair was never refined: the OA vertex
+    /// `x = 0.2998046875` has lift gap `≈ 9.54e−7` (under `bilinear_tol`)
+    /// but objective lift error `1e6 · 9.54e−7 ≈ 0.954 ≫ gap_tol`, and the
+    /// search returned `SuboptimalSolution` with that gap.
+    #[test]
+    fn objective_only_rule2_pair_refined_to_gap_tol() {
+        let qp = NonconvexQcqp {
+            n: 1,
+            p0: Some(CscMatrix::from_triplets(&[0], &[0], &[2.0e6], 1, 1).unwrap()),
+            q0: vec![-600_000.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0],
+            ub: vec![1.0],
+        };
+        let g = GlobalOptions {
+            max_nodes: 200,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g, None);
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            (res.objective + 90_000.0).abs() <= 1e-3,
+            "hand oracle: 1e6(x-0.3)^2 - 90000 has min -90000 at x=0.3: {res:?}"
+        );
+        assert!(
+            (res.x[0] - 0.3).abs() <= 1e-3,
+            "optimum is x = 0.3: {:?}",
+            res.x
         );
     }
 
