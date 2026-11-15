@@ -1360,7 +1360,9 @@ fn objective(qp: &NonconvexQcqp, x: &[f64]) -> f64 {
 /// and the declared box — the consumer Phase 2 wires (bound-free local
 /// solver UB, FBBT-derived bounds kept out of `qp.lb`/`qp.ub`). `None` keeps
 /// the pre-existing behaviour exactly. A seed is never trusted blindly:
-/// `global_core` re-validates feasibility of `x̃` at `g.feas_tol`, re-derives
+/// `global_core` requires finite coordinates/`f`, re-validates feasibility
+/// of `x̃` at `g.feas_tol` (integer coordinates are rounded and the rounded
+/// point re-checked, the same contract as ordinary incumbents), re-derives
 /// the incumbent from `objective(qp, x̃)`, and rejects a box that widens the
 /// declared box — an invalid seed fails as `NotSupported` with the reason.
 pub fn solve_global_qcqp(
@@ -1378,7 +1380,10 @@ pub fn solve_global_qcqp(
 ///
 /// `seed` behaves exactly as in [`solve_global_qcqp`]; a seeded `x̃` must
 /// additionally be integral within `g.int_tol` (it is checked with the same
-/// `all_integral` gate as per-node incumbents).
+/// `all_integral` gate as per-node incumbents) and must remain feasible at
+/// `feas_tol` after that rounding, so a seed only installs if the *rounded*
+/// point passes the same round-then-recheck an ordinary incumbent goes
+/// through.
 pub fn solve_global_miqcp(
     qp: &NonconvexQcqp,
     integers: &[usize],
@@ -1465,13 +1470,15 @@ fn validate_integers(n: usize, integers: &[usize]) -> Result<(), String> {
 /// until Phase 2 actually produces seeds.
 #[derive(Debug, Clone)]
 pub struct GlobalSeed {
-    /// Feasible point `x̃` (re-validated by `global_core` at `feas_tol`
-    /// before use -- a corrupt seed fails as `NotSupported`, never as a
-    /// trusted incumbent).
+    /// Feasible point `x̃` with finite coordinates (re-validated by
+    /// `global_core` at `feas_tol` before use -- integer coordinates are
+    /// rounded and re-checked first; a corrupt seed fails as `NotSupported`,
+    /// never as a trusted incumbent).
     pub x: Vec<f64>,
-    /// Objective value at `x`; cross-checked against `objective(qp, x)` and
-    /// the incumbent is always the recomputed value (a stale/mismatched `f`
-    /// fails the seed, it is never trusted as a lower upper-bound).
+    /// Objective value at `x`; must be finite, is cross-checked against
+    /// `objective(qp, x)` and the incumbent is always the recomputed value
+    /// (a stale/mismatched `f` fails the seed, it is never trusted as a
+    /// lower upper-bound).
     pub f: f64,
     /// Derived root lower bounds (`±inf` allowed for free variables). Must
     /// refine, never widen, `qp.lb`/`qp.ub` -- a widened side would admit
@@ -1479,6 +1486,79 @@ pub struct GlobalSeed {
     pub root_lb: Vec<f64>,
     /// Derived root upper bounds, same refinement rule as `root_lb`.
     pub root_ub: Vec<f64>,
+}
+
+/// Relative tolerance for the `GlobalSeed::f` cross-check against
+/// `objective(qp, x)`: disagreement beyond `1e-9 * (1 + |fx|)` marks a
+/// stale/mismatched `f`, not float noise in the recomputation.
+const SEED_F_CROSSCHECK_REL_TOL: f64 = 1e-9;
+
+/// Validate an ingested [`GlobalSeed`] and return the point to install as the
+/// root incumbent; `Err(reason)` means the caller must refuse the seed as
+/// `NotSupported` and search as if no seed had been passed.
+///
+/// The contract is the ordinary-incumbent contract of `accept` (PR #84 review
+/// P1/P2): coordinates and `f` finite (a `±inf` free coordinate passes the
+/// bound comparison of `feasible()` yet turns the recomputed objective into
+/// NaN via `0 * inf`, and every NaN comparison below fails open); feasible at
+/// `feas_tol` and integral at `int_tol`; then integer coordinates are rounded
+/// and the *rounded* point re-passes the original `feasible` at `feas_tol`
+/// (a tight/equality row can be feasible only at the fractional point, which
+/// no integer satisfies). The incumbent is always `objective` at the rounded
+/// point, cross-checked against `seed.f`.
+fn validate_seed(
+    qp: &NonconvexQcqp,
+    integers: &[usize],
+    g: &GlobalOptions,
+    s: &GlobalSeed,
+) -> Result<Vec<f64>, String> {
+    if s.x.len() != qp.n || s.root_lb.len() != qp.n || s.root_ub.len() != qp.n {
+        return Err("seed x/root_lb/root_ub length != n".to_string());
+    }
+    if s.x.iter().any(|v| !v.is_finite()) || !s.f.is_finite() {
+        return Err("seed x coordinates and seed.f must be finite".to_string());
+    }
+    if s.root_lb
+        .iter()
+        .zip(&s.root_ub)
+        .any(|(l, u)| l.is_nan() || u.is_nan() || l > u)
+    {
+        // `±inf` sides are allowed -- the declared box carries them for free
+        // variables; NaN is not.
+        return Err("seed root box must satisfy lb <= ub (no NaN sides)".to_string());
+    }
+    if s.root_lb
+        .iter()
+        .zip(&s.root_ub)
+        .zip(qp.lb.iter().zip(&qp.ub))
+        .any(|((&l, &u), (&pl, &pu))| l < pl || u > pu)
+    {
+        // The derived box must refine, never widen, the declared box.
+        return Err("seed root box widens the declared box".to_string());
+    }
+    if !feasible(qp, &s.x, g.feas_tol) || !all_integral(&s.x, integers, g.int_tol) {
+        return Err("seed x is not feasible for the original problem at feas_tol".to_string());
+    }
+    let mut xr = s.x.clone();
+    for &k in integers {
+        xr[k] = xr[k].round();
+    }
+    if !feasible(qp, &xr, g.feas_tol) {
+        return Err("seed x violates a constraint at feas_tol after integer rounding".to_string());
+    }
+    let fx = objective(qp, &xr);
+    if !fx.is_finite() {
+        return Err(format!(
+            "recomputed seed objective must be finite, got {fx}"
+        ));
+    }
+    if (s.f - fx).abs() > SEED_F_CROSSCHECK_REL_TOL * (1.0 + fx.abs()) {
+        return Err(format!(
+            "seed objective mismatch: seed.f = {} vs recomputed {fx}",
+            s.f
+        ));
+    }
+    Ok(xr)
 }
 
 /// Zero-decision tolerance for the §3.2 recession verification, after the ray
@@ -1696,51 +1776,22 @@ fn global_core(
     // keeps derived bounds out of `qp.lb`/`qp.ub`), else the problem box.
     let mut root_box = (qp.lb.clone(), qp.ub.clone());
     if let Some(s) = seed {
-        let bad = if s.x.len() != qp.n || s.root_lb.len() != qp.n || s.root_ub.len() != qp.n {
-            Some("seed x/root_lb/root_ub length != n".to_string())
-        } else if s
-            .root_lb
-            .iter()
-            .zip(&s.root_ub)
-            .any(|(l, u)| l.is_nan() || u.is_nan() || l > u)
-        {
-            // Non-finite (`±inf`) box sides are allowed -- they are what the
-            // declared box itself carries for free variables; NaN is not.
-            Some("seed root box must satisfy lb <= ub (no NaN sides)".to_string())
-        } else if s
-            .root_lb
-            .iter()
-            .zip(&s.root_ub)
-            .zip(qp.lb.iter().zip(&qp.ub))
-            .any(|((&l, &u), (&pl, &pu))| l < pl || u > pu)
-        {
-            // The derived box must refine, never widen, the declared box (a
-            // widened side would admit points the public `feasible()`
-            // contract rejects).
-            Some("seed root box widens the declared box".to_string())
-        } else if !feasible(qp, &s.x, g.feas_tol) || !all_integral(&s.x, integers, g.int_tol) {
-            Some("seed x is not feasible for the original problem at feas_tol".to_string())
-        } else {
-            let fx = objective(qp, &s.x);
-            ((s.f - fx).abs() > 1e-9 * (1.0 + fx.abs())).then(|| {
-                format!(
-                    "seed objective mismatch: seed.f = {} vs recomputed {fx}",
-                    s.f
-                )
-            })
-        };
-        if let Some(e) = bad {
-            return GlobalResult {
-                status: SolveStatus::NotSupported(format!("invalid global seed: {e}")),
-                objective: f64::NAN,
-                x: vec![],
-                nodes: 0,
-                gap: f64::INFINITY,
-            };
+        match validate_seed(qp, integers, g, s) {
+            Err(e) => {
+                return GlobalResult {
+                    status: SolveStatus::NotSupported(format!("invalid global seed: {e}")),
+                    objective: f64::NAN,
+                    x: vec![],
+                    nodes: 0,
+                    gap: f64::INFINITY,
+                }
+            }
+            Ok(xr) => {
+                incumbent = objective(qp, &xr);
+                inc_x = xr;
+                root_box = (s.root_lb.clone(), s.root_ub.clone());
+            }
         }
-        incumbent = objective(qp, &s.x);
-        inc_x = s.x.clone();
-        root_box = (s.root_lb.clone(), s.root_ub.clone());
     }
     let mut nodes = 0usize;
     let mut limited = false;
@@ -4230,5 +4281,132 @@ mod tests {
             let reference = reference_build_relax(&case.qp, &ref_pairs, &case.lb, &case.ub);
             assert_relax_eq(&sparse, &reference, case.name);
         }
+    }
+
+    /// PR #84 review (P2, "Reject non-finite seed coordinates and objective
+    /// values"): a seed coordinate of `+inf` on a free, constraint-unused
+    /// variable passes `feasible()` (the bound comparison permits `inf`
+    /// against `ub = inf`; the sparse row products never touch `x1`), the
+    /// recomputed objective becomes NaN through `0 * inf` in `q0^T x`, and
+    /// the NaN mismatch comparison is `false`, so the seed installed. Hand
+    /// oracle: `min x0, x0 ∈ [0,1]`, free unused `x1`, seed `x = [0, +inf]`,
+    /// `f = 0` — the seed must be refused as `NotSupported` naming finiteness,
+    /// and a finite `f = +inf` seed likewise. Sentinel: removing the
+    /// finiteness gate in the seed ingestion makes this FAIL (the seed
+    /// installs; the run ends with a non-finite incumbent).
+    #[test]
+    fn nonfinite_seed_coordinates_and_objective_are_refused() {
+        let n = 2usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0, f64::NEG_INFINITY],
+            ub: vec![1.0, f64::INFINITY],
+        };
+        let base = GlobalSeed {
+            x: vec![0.0, 0.0],
+            f: 0.0,
+            root_lb: qp.lb.clone(),
+            root_ub: qp.ub.clone(),
+        };
+        for (bad_x, bad_f) in [
+            (Some(f64::INFINITY), 0.0),
+            (Some(f64::NEG_INFINITY), 0.0),
+            (Some(f64::NAN), 0.0),
+            (None, f64::INFINITY),
+            (None, f64::NAN),
+        ] {
+            let seed = GlobalSeed {
+                x: match bad_x {
+                    Some(v) => vec![0.0, v],
+                    None => vec![0.0, 0.0],
+                },
+                f: bad_f,
+                ..base.clone()
+            };
+            let res = solve_global_qcqp(
+                &qp,
+                &ConicOptions::default(),
+                &GlobalOptions::default(),
+                Some(&seed),
+            );
+            match &res.status {
+                SolveStatus::NotSupported(reason) => {
+                    assert!(reason.contains("invalid global seed"), "{reason}");
+                    assert!(reason.contains("finite"), "{reason}");
+                }
+                other => panic!("non-finite seed must fail as NotSupported, got {other:?}"),
+            }
+            assert_eq!(res.nodes, 0, "the seed gate runs before the search");
+        }
+        // Control: the same fixture with a finite seed installs and certifies
+        // the hand-oracle optimum 0 at x0 = 0 (rejection is about finiteness,
+        // not the fixture).
+        let ok = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            Some(&base),
+        );
+        assert_eq!(ok.status, SolveStatus::Optimal, "{ok:?}");
+        assert!(ok.objective.abs() <= 1e-9, "{ok:?}");
+    }
+
+    /// PR #84 review (P1, "Round and recheck integer seeds before accepting
+    /// them"): an MIQCP seed whose integer coordinate is within `int_tol` but
+    /// whose rounded value violates a constraint at `feas_tol` bypassed
+    /// `accept()`'s round-then-recheck and installed the fractional point.
+    /// Hand oracle: integer `x ∈ [0,2]`, equality `x = 1.0000005`, `min x`,
+    /// `feas_tol = 1e-9`, `int_tol = 1e-6` — no integer satisfies the equality
+    /// at `feas_tol`, so the seed must be refused (`NotSupported` naming the
+    /// rounding recheck) and must never be reported as an `Optimal` incumbent
+    /// with a fractional integer variable. Sentinel: installing the raw seed
+    /// point again (no round-then-recheck) makes this FAIL with
+    /// `Optimal, x = [1.0000005]`.
+    #[test]
+    fn seed_integer_must_survive_round_then_recheck_before_install() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap(),
+            b_eq: vec![1.0000005],
+            lb: vec![0.0],
+            ub: vec![2.0],
+        };
+        let g = GlobalOptions {
+            feas_tol: 1e-9,
+            int_tol: 1e-6,
+            ..GlobalOptions::default()
+        };
+        let seed = GlobalSeed {
+            x: vec![1.0000005],
+            f: 1.0000005,
+            root_lb: vec![0.0],
+            root_ub: vec![2.0],
+        };
+        let res = solve_global_miqcp(&qp, &[0], &ConicOptions::default(), &g, Some(&seed));
+        match &res.status {
+            SolveStatus::NotSupported(reason) => {
+                assert!(reason.contains("invalid global seed"), "{reason}");
+                assert!(reason.contains("round"), "{reason}");
+            }
+            other => panic!(
+                "a seed whose rounded integer violates the equality at feas_tol \
+                 must fail as NotSupported, got {other:?} with x={:?}",
+                res.x
+            ),
+        }
+        assert_eq!(res.nodes, 0, "the seed gate runs before the search");
     }
 }
