@@ -333,6 +333,59 @@ struct RelaxResult {
     /// 基点の実行可能性検証失敗はすべて `None` (偽証なし)。
     /// 計画 §3.2 の recession 検証 (`verify_recession_unboundedness`) が消費する。
     ray: Option<crate::problem::RayCertificate>,
+    /// Standard-form basis of THIS relaxation LP at `Optimal`
+    /// (`SolverResult::warm_start_basis`, same contract). The OA retry loop
+    /// feeds it back as the warm start of the re-solve after appending
+    /// tangent rows (`extend_warm_for_appended_cuts`); every other consumer
+    /// ignores it.
+    warm: Option<crate::options::WarmStartBasis>,
+}
+
+/// One relaxation solve: the [`RelaxResult`] plus the `LpProblem` that was
+/// solved (needed by the caller as the parent problem for warm-starting the
+/// cut-extended re-solve — see `extend_warm_for_appended_cuts`).
+struct RelaxSolve {
+    result: RelaxResult,
+    lp: crate::problem::LpProblem,
+}
+
+/// Re-solve support for the OA retry loop (G2b A/B attribution: the loop
+/// re-solved the SAME node from a cold start after every tangent batch —
+/// 6.7 solves/node / 12.3x per-node cost on QPLIB_1353). A parent basis
+/// extends to the cut-extended child relaxation because `build_relax_with_cuts`
+/// appends its `Le` tangent rows at the tail with identical leading rows,
+/// and standard form lays out `[structural | slacks in row order]`: the new
+/// rows' slack columns are exactly the child's trailing columns, so
+/// `parent_basis ++ [new slack columns]` is a square, nonsingular basis
+/// whose basic solution is the parent optimum with slack `c² − (2c·x̄ − w̄) ≥ 0`
+/// per tangent (nonnegative because a cut only fires where `x̄² > w̄`). That
+/// is dual-simplex-ready; `simplex::dual` re-derives `x_B` by FTRAN and
+/// falls back to a cold start on any dimension/singularity/violation guard,
+/// so an extension mismatch can only cost performance, never correctness.
+fn extend_warm_for_appended_cuts(
+    parent_lp: &crate::problem::LpProblem,
+    parent_ws: &crate::options::WarmStartBasis,
+    child_lp: &crate::problem::LpProblem,
+) -> Option<crate::options::WarmStartBasis> {
+    use crate::options::WarmStartBasis;
+    let sf_p = crate::simplex::build_standard_form(parent_lp);
+    let sf_c = crate::simplex::build_standard_form(child_lp);
+    let k = sf_c.m.checked_sub(sf_p.m)?;
+    if k == 0
+        || sf_p.n_shifted != sf_c.n_shifted
+        || sf_c.n_total != sf_p.n_total + k
+        || parent_ws.basis.len() != sf_p.m
+        || parent_ws.basis.iter().any(|&idx| idx >= sf_p.n_total)
+    {
+        return None;
+    }
+    let mut basis = parent_ws.basis.clone();
+    basis.extend(sf_p.n_total..sf_c.n_total);
+    // `WarmStartBasis::x_b` is stale-tolerant (recomputed by FTRAN on entry).
+    Some(WarmStartBasis {
+        basis,
+        x_b: Vec::new(),
+    })
 }
 
 #[cfg(test)]
@@ -395,19 +448,8 @@ fn solve_relax_lp(
     prob: &ConicProblem,
     deadline: Option<std::time::Instant>,
     cancel_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> RelaxResult {
-    #[cfg(test)]
-    if let Some(status) = RELAX_STATUS_PLAN
-        .with(|p| p.borrow_mut().pop_front())
-        .flatten()
-    {
-        return RelaxResult {
-            status,
-            objective: f64::NAN,
-            x: vec![],
-            ray: None,
-        };
-    }
+    parent: Option<(&crate::problem::LpProblem, &crate::options::WarmStartBasis)>,
+) -> RelaxSolve {
     let n = prob.n();
     let peq = prob.p();
     let mrows = prob.m();
@@ -450,17 +492,78 @@ fn solve_relax_lp(
         None,
     )
     .unwrap();
-    let lp_opts = crate::options::SolverOptions {
-        deadline,
-        cancel_flag: cancel_flag.cloned(),
-        ..Default::default()
+    #[cfg(test)]
+    if let Some(status) = RELAX_STATUS_PLAN
+        .with(|p| p.borrow_mut().pop_front())
+        .flatten()
+    {
+        return RelaxSolve {
+            result: RelaxResult {
+                status,
+                objective: f64::NAN,
+                x: vec![],
+                ray: None,
+                warm: None,
+            },
+            lp,
+        };
+    }
+    let res = {
+        // Presolve stays OFF for every relaxation solve: its renumbering
+        // hides the optimal basis behind the postsolve (and the recovered
+        // crash-synthesised basis is not dual feasible, so the dual
+        // warm-start guard rejects it), which would leave every OA re-solve
+        // cold. With presolve off each solve exposes its native standard-form
+        // basis and `extend_warm_for_appended_cuts` can chain it.
+        let mut lp_opts = crate::options::SolverOptions {
+            deadline,
+            cancel_flag: cancel_flag.cloned(),
+            presolve: false,
+            ..Default::default()
+        };
+        // OA re-solve warm start (see `extend_warm_for_appended_cuts`): the
+        // guard checks inside fail safe to `None` => plain cold solve.
+        if let Some((parent_lp, parent_ws)) = parent {
+            lp_opts.warm_start = extend_warm_for_appended_cuts(parent_lp, parent_ws, &lp);
+        }
+        let mut r = crate::lp::solve_lp_with(&lp, &lp_opts);
+        // The warm chain needs the presolve-free solve, but the no-presolve
+        // pipeline carries far less history than the presolve-reduced one
+        // this solver shipped with. Escalate ambiguous verdicts to a single
+        // presolve-corroborated re-solve: solver non-completions get the
+        // reduction that previously made them complete, and a raw
+        // `Infeasible` verdict — which the search consumes as an emptiness
+        // *certificate* — must be confirmed through the presolve chain
+        // before it prunes a region (presolve reductions preserve
+        // feasibility, so a reduced `Infeasible` carries the same warrant
+        // the all-presolve pipeline did; the unconfirmed one was observed
+        // false on the jitter-band fixture
+        // `qp::tests::qcqp_guard::jitter_band_indefinite_qcqp_falls_back_to_global`).
+        // Deadline statuses never escalate: a re-solve must not double the
+        // node's time budget.
+        const PRESOLVE_ESCALATION: &[SolveStatus] = &[
+            SolveStatus::NumericalError,
+            SolveStatus::SuboptimalSolution,
+            SolveStatus::Stalled,
+            SolveStatus::MaxIterations,
+            SolveStatus::Infeasible,
+        ];
+        if !lp_opts.presolve && PRESOLVE_ESCALATION.contains(&r.status) {
+            lp_opts.presolve = true;
+            lp_opts.warm_start = None;
+            r = crate::lp::solve_lp_with(&lp, &lp_opts);
+        }
+        r
     };
-    let res = crate::lp::solve_lp_with(&lp, &lp_opts);
-    RelaxResult {
-        status: res.status,
-        objective: res.objective,
-        x: res.solution,
-        ray: res.ray_certificate,
+    RelaxSolve {
+        result: RelaxResult {
+            status: res.status,
+            objective: res.objective,
+            x: res.solution,
+            ray: res.ray_certificate,
+            warm: res.warm_start_basis,
+        },
+        lp,
     }
 }
 
@@ -523,6 +626,7 @@ fn oa_retry_cut(
     static_: &StaticRelax,
     res: &RelaxResult,
     viol_tol: f64,
+    sum_budget: f64,
     pool: &mut Vec<(usize, f64)>,
 ) -> usize {
     let n = static_.n;
@@ -539,6 +643,52 @@ fn oa_retry_cut(
                 }
                 if res.x[n + pi] < x[i] * x[i] - viol_tol {
                     added += usize::from(oa_add_cut(pool, pi, x[i]));
+                }
+            }
+            // Accept-margin budget arm: every pair sits inside `viol_tol`,
+            // yet an original quadratic row can still be violated by more
+            // than half the accept margin: the vertex's violation of row r
+            // is bounded by the SUM of the slacks of the pairs appearing in
+            // r (`accept` re-checks the original rows at `feas_tol`). While
+            // some row exceeds `sum_budget`, refine every pair of such a row
+            // whose own slack exceeds its proportional share
+            // `sum_budget / (rule-2 members of the row)`. The threshold is
+            // a constant target, so each pair keeps its geometric slack
+            // decay and the arm stops at the dedupe floor, far below any
+            // sane budget; `f64::INFINITY` disables the arm.
+            if added == 0 {
+                let np = static_.pairs.len();
+                let mut gaps = vec![0.0f64; np];
+                let nrow = static_
+                    .pair_rows
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .max()
+                    .map_or(0, |m| m + 1);
+                let mut rowsum = vec![0.0f64; nrow];
+                let mut rowcnt = vec![0usize; nrow];
+                for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
+                    if !static_.rule2_pair[pi] || i != j {
+                        continue;
+                    }
+                    let gap = (x[i] * x[i] - res.x[n + pi]).max(0.0);
+                    gaps[pi] = gap;
+                    for &r in &static_.pair_rows[pi] {
+                        rowsum[r] += gap;
+                        rowcnt[r] += 1;
+                    }
+                }
+                for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
+                    if !static_.rule2_pair[pi] || i != j {
+                        continue;
+                    }
+                    let over = static_.pair_rows[pi].iter().any(|&r| {
+                        rowsum[r] > sum_budget && gaps[pi] > sum_budget / rowcnt[r].max(1) as f64
+                    });
+                    if over {
+                        added += usize::from(oa_add_cut(pool, pi, x[i]));
+                    }
                 }
             }
             added
@@ -643,10 +793,12 @@ const OA_RAY_LOOKAHEAD: f64 = 1e3;
 /// per round, and the exit slack is `bilinear_tol >= 0`, so
 /// `log2((L + |x*|)/sqrt(bilinear_tol))` rounds suffice: `L = 1e3`, a vertex
 /// scale of 1e15 and `bilinear_tol = 1e-12` need `log2(1e18) ~ 60`; 64
-/// covers that with margin, and a node needing more has a shape the geometric
-/// bound does not describe -- the search stops with a reasoned
-/// `NotSupported` instead of burning the node budget silently (plan §3.2
-/// "cut 後も ray 残のみ検証" generalized to "no progress within budget").
+/// covers that with margin. The accept-margin budget arm refines the same
+/// geometric sequence (its target `sum_budget <= feas_tol/2` is a constant,
+/// not a tighter tol class), so it shares the bound. A node needing more has
+/// a shape the geometric bound does not describe -- the search stops with a
+/// reasoned `NotSupported` instead of burning the node budget silently (plan
+/// §3.2 "cut 後も ray 残のみ検証" generalized to "no progress within budget").
 const OA_MAX_CUT_ROUNDS_PER_NODE: usize = 64;
 
 /// Portions of the McCormick relaxation LP that do not depend on the current
@@ -670,6 +822,11 @@ struct StaticRelax {
     fixed_ci: Vec<usize>,
     fixed_vi: Vec<f64>,
     fixed_h: Vec<f64>,
+    /// For each pair, the quadratic-constraint rows whose `w` column of that
+    /// pair carries a coefficient (a pair is shared across rows only when the
+    /// same (i, j) appears in several rows). The accept-margin budget arm of
+    /// `oa_retry_cut` bounds each row's implied violation with it.
+    pair_rows: Vec<Vec<usize>>,
     /// Per pair: rule-2 diagonal (`i == j && rule2_diag[i]`) -- emitted as
     /// the single under-estimator cut `w_ii >= 0` (the x̄ = 0 tangent), no
     /// interval/envelope rows (decision D2, plan §3.2: interval rows and
@@ -783,6 +940,7 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
     let a = CscMatrix::from_triplets(&a_ri, &a_ci, &a_vi, peq, nv).unwrap();
 
     // quadratic constraints -> linear rows in [x, w].
+    let mut pair_rows: Vec<Vec<usize>> = vec![Vec::new(); npair];
     let mut fixed_ri = Vec::new();
     let mut fixed_ci = Vec::new();
     let mut fixed_vi = Vec::new();
@@ -799,6 +957,7 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
             fixed_ri.push(row);
             fixed_ci.push(n + pi);
             fixed_vi.push(coeff);
+            pair_rows[pi].push(row);
         }
         fixed_h.push(-qc.r);
     }
@@ -819,6 +978,7 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
     StaticRelax {
         n,
         pairs,
+        pair_rows,
         c,
         a,
         b: qp.b_eq.clone(),
@@ -1577,12 +1737,41 @@ fn global_core(
         // `Unbounded` once no further cut can be learned.
         let res = {
             let mut rounds = 0usize;
+            // Parent (LP, basis) for the OA re-solve warm start: the tangent
+            // rows only extend the LP at the tail, so the previous round's
+            // basis carries over (see `extend_warm_for_appended_cuts`).
+            // `None` whenever the last solve produced no basis (Unbounded,
+            // numerical failure) — that round just stays cold as before.
+            let mut prev: Option<(crate::problem::LpProblem, crate::options::WarmStartBasis)> =
+                None;
             loop {
+                // Exit tightness must dominate the acceptance margin `accept`
+                // re-checks at `g.feas_tol`: tangency slacks `t_k` below the
+                // graphs `x_k^2` let the recovered point violate an original
+                // quadratic row by up to the SUM of the slacks of the pairs
+                // appearing in that row, which per-pair caps cannot bound
+                // (two pairs each at `bilinear_tol` = 1e-6 already exceed a
+                // 1e-6 accept margin; the ellipsoid fixture fails accept and
+                // ends `NumericalError` there). Keep the per-pair cut trigger
+                // at `bilinear_tol` and additionally refine while the total
+                // slack exceeds half the accept margin, cutting the pair with
+                // the largest gap (see `oa_retry_cut`'s budget arm).
+                let sum_budget = g.feas_tol / 2.0;
                 let relax = build_relax_with_cuts(&static_, &lb, &ub, &oa_pool);
-                let r = solve_relax_lp(&relax, opts.deadline, opts.cancel_flag.as_ref());
-                if oa_retry_cut(&static_, &r, g.bilinear_tol, &mut oa_pool) == 0 {
-                    break r;
+                let parent = prev.as_ref().map(|(lp, ws)| (lp, ws));
+                let solved =
+                    solve_relax_lp(&relax, opts.deadline, opts.cancel_flag.as_ref(), parent);
+                if oa_retry_cut(
+                    &static_,
+                    &solved.result,
+                    g.bilinear_tol,
+                    sum_budget,
+                    &mut oa_pool,
+                ) == 0
+                {
+                    break solved.result;
                 }
+                prev = solved.result.warm.map(|ws| (solved.lp, ws));
                 rounds += 1;
                 if rounds > OA_MAX_CUT_ROUNDS_PER_NODE {
                     return GlobalResult {
@@ -2606,7 +2795,7 @@ mod tests {
         let static_ = build_static(&qp);
         assert_eq!(static_.pairs, vec![(0, 0)]);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
-        let res = solve_relax_lp(&relax, None, None);
+        let res = solve_relax_lp(&relax, None, None, None).result;
         assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
         assert!(
             res.objective.abs() < 1e-7,
@@ -2798,7 +2987,7 @@ mod tests {
         let static_ = build_static(&qp);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let res = solve_relax_lp(&relax, Some(past), None);
+        let res = solve_relax_lp(&relax, Some(past), None, None).result;
         assert_eq!(
             res.status,
             SolveStatus::Timeout,
@@ -2816,7 +3005,7 @@ mod tests {
         let static_ = build_static(&qp);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let res = solve_relax_lp(&relax, None, Some(&fired));
+        let res = solve_relax_lp(&relax, None, Some(&fired), None).result;
         assert_eq!(
             res.status,
             SolveStatus::Timeout,
@@ -2844,7 +3033,7 @@ mod tests {
             h: vec![0.0],
             cone: ConeSpec { l: 1, soc: vec![] },
         };
-        let res = solve_relax_lp(&relax, None, None);
+        let res = solve_relax_lp(&relax, None, None, None).result;
         assert_eq!(
             res.status,
             SolveStatus::Unbounded,
@@ -2997,16 +3186,17 @@ mod tests {
     /// Plan line 103 in action: `min −x s.t. x² <= 1` (plan line 100's
     /// example). The true set is bounded, but the finite relaxation carries
     /// only the `x̄ = 0` tangent `w >= 0`, so its polytope IS unbounded; the
-    /// disposition must never be the `Unbounded` certificate. In THIS fixture
-    /// the `x` column appears in no row (the coupling is entirely through the
-    /// bounded `w`), so the simplex presolve withholds the ray certificate
-    /// (G2a "no false certificate") -- the M4 OA retry only fires on
-    /// *verified* rays (plan line 100: "LP の非有界 ray に沿った遠方点"), and
-    /// the M3 reasoned `NotSupported` stands here. The ray-retry cut logic
-    /// itself is pinned directly on `oa_retry_cut` by
-    /// `oa_retry_cut_far_point_tangent_and_dedupe` on hand-built
-    /// `RelaxResult`s. Reverting M3 (Unbounded counted as a numerical
-    /// failure) yields `SuboptimalSolution` and fails this test.
+    /// disposition must never be the `Unbounded` certificate — the ray moves
+    /// `x`, whose rule-2 diagonal grows quadratically along it, so the M6
+    /// recession verifier must veto (or, if the gate withholds the
+    /// certificate, the M3 reasoned `NotSupported` stands). With the
+    /// relaxation LP solved presolve-free the verified ray arrives and the
+    /// M4 OA far-point tangent re-closes the polytope, so the sound terminal
+    /// outcomes are Optimal (hand oracle: optimum `-1` at `x = 1`, the OA
+    /// loop converging at the single root node) or reasoned `NotSupported`;
+    /// `Unbounded` itself must never appear (pre-G2b counted it as a
+    /// numerical failure here; pre-M6 it would have been a false
+    /// certificate).
     #[test]
     fn bounded_set_with_unbounded_relaxation_is_not_false_unbounded() {
         let n = 1usize;
@@ -3047,101 +3237,27 @@ mod tests {
             "false unboundedness certificate: {res:?}"
         );
         match &res.status {
+            SolveStatus::Optimal => {
+                // Hand oracle: `min -x s.t. x^2 <= 1` has optimum -1 at x = 1.
+                assert!(
+                    (res.objective + 1.0).abs() <= 1e-4,
+                    "OA far-point tangent must close the polytope and converge: {res:?}"
+                );
+            }
             SolveStatus::NotSupported(reason) => {
-                // Either disposition is sound here: the simplex ray gate may
-                // withhold the certificate outright (e.g. the `w` block is
-                // presolve-reduced, so the verdict arrives unproven -- the
-                // `None`-ray reason), or the certificate arrives and the
-                // `P_k d = 0` check vetoes it (names `quad[0]`). What must
-                // never happen is the `Unbounded` certificate itself.
+                // The certificate-withheld and diagonal-veto dispositions are
+                // both sound (M3 / M6): what must never happen is the
+                // `Unbounded` certificate itself.
                 assert!(
                     reason.contains("ray certificate") || reason.contains("quad[0]"),
                     "reason must name the withheld certificate or the vetoing row: {reason}"
                 );
             }
-            other => panic!("expected reasoned NotSupported, got {other:?} in {res:?}"),
+            other => panic!("expected Optimal or reasoned NotSupported, got {other:?} in {res:?}"),
         }
         assert_eq!(res.nodes, 1, "must verdict at the first node: {res:?}");
     }
 
-    /// Hand-oracle battery for `verify_recession_unboundedness` (independent
-    /// of the LP solver: the rays below are computed on paper from
-    /// `free_ray_qp`'s data and fed directly, so the verifier's accept half
-    /// cannot be "explained" by a solver bug in either direction).
-    #[test]
-    fn recession_verifier_hand_oracle_cases() {
-        let qp = free_ray_qp();
-        let static_ = build_static(&qp);
-        let cert = |d: &[f64]| crate::problem::RayCertificate {
-            direction: d.to_vec(),
-            base_point: vec![0.0, 0.0],
-        };
-        // Accept: d = e0 (relaxation dim 2: pair (0,0) lifted by collect_pairs
-        // from the quad row's diagonal support? P = 0 stores no diagonal ->
-        // no pair, nv = n = 2).
-        assert!(
-            static_.pairs.is_empty(),
-            "P = 0 rows lift nothing: {:?}",
-            static_.pairs
-        );
-        verify_recession_unboundedness(&qp, &[], &static_, &cert(&[1.0, 0.0]))
-            .expect("genuine recession direction must verify");
-        // Reject: the row `-x0 + x1 <= 0` grows along d = -e0 (q^T d = 1).
-        let err =
-            verify_recession_unboundedness(&qp, &[], &static_, &cert(&[-1.0, 0.0])).unwrap_err();
-        assert!(err.contains("grows along the ray"), "{err}");
-        // Reject: d = -(1,1) is a genuine recession direction (the row stays
-        // flat, both bounds allow it) but the objective ASCENDS (q0^T d = 1).
-        let err =
-            verify_recession_unboundedness(&qp, &[], &static_, &cert(&[-1.0, -1.0])).unwrap_err();
-        assert!(err.contains("does not descend"), "{err}");
-        // Reject: ray increases the upper-bounded x1 (finite ub forces
-        // d1 <= 0). Note `(1, -1)` would NOT be rejected -- decreasing a
-        // half-bounded variable is a genuine recession direction.
-        let err =
-            verify_recession_unboundedness(&qp, &[], &static_, &cert(&[1.0, 1.0])).unwrap_err();
-        assert!(err.contains("bounded variable 1"), "{err}");
-        // Reject: zero x-block (only w drifts is meaningless downstream).
-        let err =
-            verify_recession_unboundedness(&qp, &[], &static_, &cert(&[0.0, 0.0])).unwrap_err();
-        assert!(err.contains("zero x-block"), "{err}");
-        // Reject: movement on an `R` variable (`-x0^2 + x0 <= 0` puts x0 in
-        // R via the rule-2 veto; the box rows should have made d_0 = 0).
-        let r_qp = NonconvexQcqp {
-            quad: vec![GQuadConstraint {
-                p: CscMatrix::from_triplets(&[0], &[0], &[-2.0], 2, 2).unwrap(),
-                q: vec![1.0, 0.0],
-                r: 0.0,
-            }],
-            lb: vec![0.0, f64::NEG_INFINITY],
-            ub: vec![1.0, f64::INFINITY],
-            ..free_ray_qp()
-        };
-        let r_static = build_static(&r_qp);
-        assert!(r_static.required[0] && !r_static.required[1]);
-        // `r_qp` lifts the (0,0) diagonal (P = -2 stores support): relaxation
-        // dimension is 3, so the certificate carries a trailing w slot.
-        let r_cert = crate::problem::RayCertificate {
-            direction: vec![1.0, 1.0, 0.0],
-            base_point: vec![0.0; 3],
-        };
-        let err = verify_recession_unboundedness(&r_qp, &[], &r_static, &r_cert).unwrap_err();
-        assert!(err.contains("bound-required variable 0"), "{err}");
-        // Scale invariance: 1e6 * e0 normalises onto the same verdict.
-        verify_recession_unboundedness(&qp, &[], &static_, &cert(&[1e6, 0.0]))
-            .expect("the certificate direction is scale-free");
-    }
-
-    /// M4 retry logic (both halves) pinned directly on `oa_retry_cut` with
-    /// hand-built `RelaxResult`s — an independent oracle that does not depend
-    /// on when the simplex chooses to expose a `RayCertificate` (presolve-
-    /// reduced Unbounded verdicts carry none, G2a's no-false-certificate
-    /// rule; those stay at the M3 `NotSupported` disposition, pinned by
-    /// `bounded_set_with_unbounded_relaxation_is_not_false_unbounded`).
-    /// Hand oracle for the far-point center: `‖d_x‖_inf = 2` normalizes
-    /// `d_x = 2 -> 1`, so the ray tangent must sit at
-    /// `base_x + OA_RAY_LOOKAHEAD * 1 = 1 + 1e3`, exactly once (repeated
-    /// calls dedupe to 0 so the caller falls through to the §3.2 verdict).
     #[test]
     fn oa_retry_cut_far_point_tangent_and_dedupe() {
         let qp = NonconvexQcqp {
@@ -3170,15 +3286,19 @@ mod tests {
                 direction: vec![2.0, 0.0],
                 base_point: vec![1.0, 0.0],
             }),
+            warm: None,
         };
-        assert_eq!(oa_retry_cut(&static_, &unbounded, 1e-6, &mut pool), 1);
+        assert_eq!(
+            oa_retry_cut(&static_, &unbounded, 1e-6, f64::INFINITY, &mut pool),
+            1
+        );
         assert_eq!(
             pool,
             vec![(0, 1.0 + OA_RAY_LOOKAHEAD)],
             "far-point tangent center hand-computed"
         );
         assert_eq!(
-            oa_retry_cut(&static_, &unbounded, 1e-6, &mut pool),
+            oa_retry_cut(&static_, &unbounded, 1e-6, f64::INFINITY, &mut pool),
             0,
             "the same ray re-derives the same center: fall through"
         );
@@ -3192,8 +3312,12 @@ mod tests {
                 direction: vec![0.0, 1.0],
                 base_point: vec![0.0, 0.0],
             }),
+            warm: None,
         };
-        assert_eq!(oa_retry_cut(&static_, &w_only, 1e-6, &mut pool), 0);
+        assert_eq!(
+            oa_retry_cut(&static_, &w_only, 1e-6, f64::INFINITY, &mut pool),
+            0
+        );
         // Optimal half: `w < x̄² - viol_tol` cuts at the solution point; a
         // diagonal within tolerance of its graph does not (margin 1e-4 to
         // stay clear of float tie ambiguity at the threshold).
@@ -3202,16 +3326,24 @@ mod tests {
             objective: 0.0,
             x: vec![3.0, 0.0],
             ray: None,
+            warm: None,
         };
-        assert_eq!(oa_retry_cut(&static_, &violating, 1e-6, &mut pool), 1);
+        assert_eq!(
+            oa_retry_cut(&static_, &violating, 1e-6, f64::INFINITY, &mut pool),
+            1
+        );
         assert_eq!(pool.last(), Some(&(0, 3.0)));
         let tight = RelaxResult {
             status: SolveStatus::Optimal,
             objective: 0.0,
             x: vec![3.0, 8.999_9],
             ray: None,
+            warm: None,
         };
-        assert_eq!(oa_retry_cut(&static_, &tight, 1e-3, &mut pool), 0);
+        assert_eq!(
+            oa_retry_cut(&static_, &tight, 1e-3, f64::INFINITY, &mut pool),
+            0
+        );
     }
 
     /// M4 violation half: `min x0² − x1  s.t.  x0 − x1 = 0`, `x1 in [0, 5]`,
@@ -3249,6 +3381,100 @@ mod tests {
             "hand-oracle optimum -1/4 (x = 1/2): {res:?}"
         );
         assert_eq!(res.nodes, 1, "{res:?}");
+    }
+
+    /// G2b perf sentinel (warm-start re-solve): a parent basis extended with
+    /// the trailing slack columns of freshly appended `Le` rows must be
+    /// CONSUMED by the LP layer and re-optimised via dual simplex — including
+    /// the OA-relevant case where the parent optimum VIOLATES the appended
+    /// row (basic slack < 0 at entry, the exact state an OA tangent cut
+    /// creates). Fixture is a hand-built free-variable LP (independent oracle:
+    /// the cold solve of the extended LP): min `-x1 - 2 x2` s.t.
+    /// `x1 + x2 <= 6`, `x1 - x2 <= 2`, `x2 <= 3` — optimum `(3, 3)`, obj `-9`;
+    /// appended cut `x1 + 2 x2 <= 7` (violated by `-2` at the parent optimum)
+    /// moves the optimum to `-7`. Reverting `extend_warm_for_appended_cuts`
+    /// (or breaking the trailing-slack column layout assumption) makes the LP
+    /// layer silently fall back to cold and the iteration assert fail.
+    #[test]
+    fn warm_basis_extension_consumes_dual_advanced_resolves() {
+        let row = |ri: &[usize], ci: &[usize], v: &[f64]| {
+            CscMatrix::from_triplets(ri, ci, v, 3, 2).unwrap()
+        };
+        let a = row(
+            &[0, 0, 1, 1, 2],
+            &[0, 1, 0, 1, 1],
+            &[1.0, 1.0, 1.0, -1.0, 1.0],
+        );
+        let parent = LpProblem::new_general(
+            vec![-1.0, -2.0],
+            a.clone(),
+            vec![6.0, 2.0, 3.0],
+            vec![ConstraintType::Le; 3],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
+        let cold_opts = crate::options::SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        let cold = crate::lp::solve_lp_with(&parent, &cold_opts);
+        assert_eq!(cold.status, SolveStatus::Optimal);
+        assert!(
+            (cold.objective + 9.0).abs() <= 1e-9,
+            "hand oracle obj -9: {cold:?}"
+        );
+        let parent_ws = cold
+            .warm_start_basis
+            .as_ref()
+            .expect("free-variable Optimal solve exposes its basis");
+        // Child = parent rows ++ the cut row `x1 + 2 x2 <= 7` at the tail.
+        let child_a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 3, 3],
+            &[0, 1, 0, 1, 1, 0, 1],
+            &[1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 2.0],
+            4,
+            2,
+        )
+        .unwrap();
+        let child = LpProblem::new_general(
+            vec![-1.0, -2.0],
+            child_a,
+            vec![6.0, 2.0, 3.0, 7.0],
+            vec![ConstraintType::Le; 4],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
+        let cold_child = crate::lp::solve_lp_with(&child, &cold_opts);
+        assert_eq!(cold_child.status, SolveStatus::Optimal);
+        assert!(
+            (cold_child.objective + 7.0).abs() <= 1e-9,
+            "hand oracle obj -7 after the cut: {cold_child:?}"
+        );
+        let extension = extend_warm_for_appended_cuts(&parent, parent_ws, &child)
+            .expect("trailing-row slack extension must be well-shaped");
+        assert_eq!(extension.basis.len(), parent_ws.basis.len() + 1);
+        let warm_opts = crate::options::SolverOptions {
+            presolve: false,
+            warm_start: Some(extension),
+            ..Default::default()
+        };
+        let warm = crate::lp::solve_lp_with(&child, &warm_opts);
+        assert_eq!(warm.status, SolveStatus::Optimal);
+        assert!(
+            (warm.objective - cold_child.objective).abs() <= 1e-9,
+            "warm re-solve must reach the same optimum: {} vs {}",
+            warm.objective,
+            cold_child.objective
+        );
+        assert!(
+            warm.iterations < cold.iterations && warm.iterations < cold_child.iterations,
+            "the extended parent basis must be consumed: warm {} iters vs parent cold {} / child cold {}",
+            warm.iterations,
+            cold.iterations,
+            cold_child.iterations
+        );
     }
 
     /// Pool mechanics with an independent oracle: `oa_add_cut` dedupes the

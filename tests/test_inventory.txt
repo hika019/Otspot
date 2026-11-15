@@ -86,7 +86,6 @@ otspot-core	conic::nonconvex::tests::oa_violation_cuts_converge_without_branchin
 otspot-core	conic::nonconvex::tests::public_entry_rejects_non_finite_data_and_integer_indices	active
 otspot-core	conic::nonconvex::tests::quad_val_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::r_empty_ellipsoid_over_free_x_reaches_optimum_end_to_end	active
-otspot-core	conic::nonconvex::tests::recession_verifier_hand_oracle_cases	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_expired_deadline	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_fired_cancel_flag	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_unbounded_surfaces_verified_ray	active
@@ -98,6 +97,7 @@ otspot-core	conic::nonconvex::tests::validate_accepts_psd_rows_over_free_variabl
 otspot-core	conic::nonconvex::tests::validate_rejects_every_mismatched_dimension	active
 otspot-core	conic::nonconvex::tests::validate_requires_finite_bounds_only_on_r	active
 otspot-core	conic::nonconvex::tests::verified_ray_with_seed_returns_unbounded	active
+otspot-core	conic::nonconvex::tests::warm_basis_extension_consumes_dual_advanced_resolves	active
 otspot-core	conic::qcqp::tests::qcqp_rejects_objective_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_bridge_rejects_base_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_objective_upper_triangle_is_symmetrized_for_cholesky	active
