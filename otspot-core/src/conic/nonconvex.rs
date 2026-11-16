@@ -5,7 +5,8 @@
 //! required only for the §3.1 bound-requirement set `R` (variables whose lift
 //! pairs enter a McCormick envelope or a rule-2-vetoed diagonal, see
 //! [`NonconvexQcqp::validate`] and [`super::qcqp_classify`]); variables outside `R`
-//! may stay free — the relaxation then omits their box rows and, for every
+//! may stay free — the relaxation then emits a box row per finite box side
+//! (a one-sided bound keeps its finite side) and, for every
 //! pair touching a non-finite endpoint, all envelope rows, so no `±inf`
 //! coefficient ever reaches an LP. Termination on free variables is guarded
 //! by the recession-ray gate on `Unbounded` relaxations (`global_core`).
@@ -119,7 +120,7 @@ impl NonconvexQcqp {
         // lift pairs feed a McCormick envelope or a rule-2-vetoed diagonal).
         // A free variable outside `R` is exactly what plan §5 example 1 (PSD
         // ellipsoid rows over free `x`) must accept; the R-aware relaxation
-        // (skip box rows on non-finite node bounds, emit no envelope rows for
+        // (one box row per finite node-bound side, emit no envelope rows for
         // non-finite pair endpoints) never hands `±inf` to the LP. `NaN`
         // bounds stay rejected for *every* variable: they are corrupt data,
         // not "free", and would poison node boxes with NaN widths.
@@ -1156,19 +1157,18 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
 /// Build the McCormick LP relaxation for the current box `[lb, ub]`.
 ///
 /// Box and envelope rows depend on the box; everything else is `static_`
-/// (see its doc), so this clones the fixed part (`O(nnz)`) and appends the
-/// per-node rows as triplets, instead of re-deriving the relaxation from a
-/// dense `n x n` pass at every B&B node (the dominant memory cost).
+/// (see its doc): clone the fixed part (`O(nnz)`) and append the per-node
+/// rows as triplets, instead of a dense `n x n` re-derivation at each node.
 ///
 /// Emission is driven by the §3.1 classification stored in `static_`
 /// (plan §3.2, decisions D2/D3):
-/// - Box rows exist exactly for finite node bounds: `±inf` must never reach
-///   `h` or the envelope coefficients (`new_general` rejects them, the call
-///   site unwraps), so pairs with a non-finite endpoint emit no envelope.
-/// - Rule-2 diagonal pairs emit only the under-estimator cut `w_ii >= 0`
-///   (the x̄ = 0 tangent; every further tangent is a node-time OA cut, see
-///   `TangentCut` in `global_core`). Interval and envelope rows are skipped
-///   unconditionally (D2).
+/// - Box rows exist exactly for finite node-bound sides: `±inf` must never
+///   reach `h` or the envelope coefficients (`new_general` rejects them), so
+///   one-sided boxes keep their finite side and pairs with a non-finite
+///   endpoint emit no envelope (only the envelope needs both; review F6).
+/// - Rule-2 diagonal pairs emit only the cut `w_ii >= 0` (the x̄ = 0 tangent;
+///   later tangents are node-time OA cuts, see `TangentCut`). Interval and
+///   envelope rows are skipped unconditionally (D2).
 /// - All other pairs with finite endpoints emit the interval rows + 4
 ///   McCormick facets exactly as the dense reference does.
 ///
@@ -1179,17 +1179,19 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
 /// optimum cannot certify `Unbounded` and without `x̃` plan line 110 forces
 /// `NotSupported` -- a §6 regression). Restoring boundedness without box
 /// rows is Phase 2's incumbent/cutoff job; the ±inf hazard D3 guards is
-/// fully excluded by the finite-bound rule above.
+/// fully excluded by the finite-side rule above.
 fn build_relax(static_: &StaticRelax, lb: &[f64], ub: &[f64]) -> ConicProblem {
     let n = static_.n;
     let pairs = &static_.pairs;
     let npair = pairs.len();
     let nv = n + npair;
     let m_fixed = static_.fixed_h.len();
-    let boxed: Vec<bool> = (0..n)
-        .map(|j| lb[j].is_finite() && ub[j].is_finite())
-        .collect();
-    let box_rows = 2 * boxed.iter().filter(|b| **b).count();
+    // Per-side box masks (review F6): a one-sided bound is still a real
+    // constraint of the original problem (root or branch-child box), so each
+    // finite side gets its own row and only the non-finite side is skipped.
+    let box_hi: Vec<bool> = (0..n).map(|j| ub[j].is_finite()).collect();
+    let box_lo: Vec<bool> = (0..n).map(|j| lb[j].is_finite()).collect();
+    let box_rows = box_hi.iter().filter(|b| **b).count() + box_lo.iter().filter(|b| **b).count();
     // 1 row per rule-2 diagonal, 2 single-entry + 4 push_mc rows per mc pair.
     let mc_rows: usize = (0..npair)
         .map(|pi| {
@@ -1216,22 +1218,23 @@ fn build_relax(static_: &StaticRelax, lb: &[f64], ub: &[f64]) -> ConicProblem {
     vi.reserve(box_rows + mc_nnz);
     h.reserve(box_rows + mc_rows);
 
-    // variable box (finite-bounded variables only, see fn doc).
+    // variable box: one row per finite side (see fn doc).
     let mut row = m_fixed;
     for j in 0..n {
-        if !boxed[j] {
-            continue;
+        if box_hi[j] {
+            ri.push(row);
+            ci.push(j);
+            vi.push(1.0);
+            h.push(ub[j]);
+            row += 1;
         }
-        ri.push(row);
-        ci.push(j);
-        vi.push(1.0);
-        h.push(ub[j]);
-        row += 1;
-        ri.push(row);
-        ci.push(j);
-        vi.push(-1.0);
-        h.push(-lb[j]);
-        row += 1;
+        if box_lo[j] {
+            ri.push(row);
+            ci.push(j);
+            vi.push(-1.0);
+            h.push(-lb[j]);
+            row += 1;
+        }
     }
 
     // McCormick envelopes for each pair, plus the interval of `w = x_i x_j`
@@ -3064,6 +3067,127 @@ mod tests {
         assert_eq!(relax.h, vec![-1.0], "h = -r, all finite");
     }
 
+    /// Fixture for the PR #84 review F6 sentinels: `min x0` with the
+    /// one-sided box `x0 in [0, +inf)`, a redundant guard `x0 <= 10` (the
+    /// hand optimum `0` at `x0 = 0` is unaffected by it, and it keeps the
+    /// relaxation matrix non-empty even when the box emission is wrong), and
+    /// an unused free `x1` so nothing lifts: `pairs` is empty, no McCormick
+    /// structure is involved, and every expectation is hand-computable.
+    fn one_sided_min_x() -> NonconvexQcqp {
+        let n = 2usize;
+        NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap(),
+            h_lin: vec![10.0],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0, f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY, f64::INFINITY],
+        }
+    }
+
+    /// Sentinel (PR #84 review F6): each finite side of a variable's box must
+    /// emit its own relaxation row; only the non-finite side may be omitted.
+    /// Reverting to the "both sides finite, else emit neither" mask drops the
+    /// `x0 >= 0` row of the one-sided box `[0, +inf)`, the row count below
+    /// fails, and the relaxation LP turns Unbounded.
+    #[test]
+    fn one_sided_box_sides_emit_independently() {
+        let qp = one_sided_min_x();
+        let static_ = build_static(&qp);
+        assert_eq!(static_.pairs.len(), 0, "McCormick-free by construction");
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
+        // m = fixed guard (1) + finite lower side (1); the `+inf` upper side
+        // emits nothing, and the fully free x1 emits neither side.
+        assert_eq!(relax.cone.l, 2, "one box row per finite box side");
+        assert_eq!(relax.h, vec![10.0, 0.0], "guard rhs, then -lb");
+        assert!(
+            relax.h.iter().all(|v| v.is_finite()),
+            "±inf must never reach h: {:?}",
+            relax.h
+        );
+        let res = solve_relax_lp(&relax, None, None, None, f64::INFINITY).result;
+        assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
+        assert!(
+            res.objective.abs() <= 1e-7,
+            "hand oracle: min x0 over [0, +inf) is 0, got {}",
+            res.objective
+        );
+    }
+
+    /// Sentinel (PR #84 review F6, full path): `min x0` over the one-sided
+    /// box `x0 in [0, +inf)` must certify the hand optimum `0` at `x0 = 0`
+    /// through the public entry. With the both-finite mask the relaxation
+    /// loses `x0 >= 0`, the root LP is Unbounded along `d = -e0`, and decision
+    /// D6 has no original-feasible base point `x̃` at hand, so the search
+    /// reports `NotSupported` — the rejection this sentinel forbids.
+    #[test]
+    fn one_sided_lower_bound_reaches_zero_optimum_end_to_end() {
+        let qp = one_sided_min_x();
+        qp.validate()
+            .expect("a one-sided box outside R must validate");
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            res.objective.abs() <= 1e-7,
+            "hand oracle: min x0 over [0, +inf) is 0: {res:?}"
+        );
+        assert!(res.x[0].abs() <= 1e-7, "the optimum is x0 = 0: {:?}", res.x);
+        assert_eq!(res.nodes, 1, "no mc_pairs: the root is a leaf: {res:?}");
+    }
+
+    /// Sentinel (PR #84 review F6, integer branching half): an integer branch
+    /// child can inherit a genuinely one-sided box (`[2, +inf)` here) and the
+    /// relaxation must keep the child's finite side. Fixture: `min -x0` s.t.
+    /// `x0 + x1 = 1.5`, `x1 in [0, 1]`, `x0` integer over `[0, +inf)`. Hand
+    /// oracle: the equality plus `x1 in [0, 1]` confines `x0` to `[0.5, 1.5]`,
+    /// so the only integer point is `x0 = 1` with objective `-1`. Without
+    /// per-side emission the child `[2, +inf)` loses its `x0 >= 2` row: its
+    /// relaxation coincides with the parent's (`x0 = 1.5`, fractional), the
+    /// integer branch re-pushes the identical box (plan §0.1 line 16), and the
+    /// node budget burns down to `MaxIterations` instead of the certified
+    /// optimum.
+    #[test]
+    fn integer_branch_child_keeps_one_sided_box_side() {
+        let n = 2usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![-1.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap(),
+            b_eq: vec![1.5],
+            lb: vec![0.0, 0.0],
+            ub: vec![f64::INFINITY, 1.0],
+        };
+        let g = GlobalOptions {
+            max_nodes: 50,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_miqcp(&qp, &[0], &ConicOptions::default(), &g, None);
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            (res.objective + 1.0).abs() <= 1e-7,
+            "hand oracle: the only integer point is x0 = 1, obj -1: {res:?}"
+        );
+        assert!((res.x[0] - 1.0).abs() <= 1e-6, "{:?}", res.x);
+        assert!(
+            res.nodes == 3,
+            "the one-sided child must prune at once, not burn the 50-node \
+             budget re-pushing identical boxes: {res:?}"
+        );
+    }
+
     /// Sentinel (decision D4, plan §5 test 3): a rule-2 diagonal `w_ii` must
     /// never be a spatial branching candidate. Fixture: `min x0^2 − x1  s.t.
     /// x0 − x1 = 0`, `x1 in [0, 5]`, `x0` free — the lifted pair (0,0) is a
@@ -4215,18 +4339,22 @@ mod tests {
             rows.push(r);
             h.push(qp.h_lin[i]);
         }
+        // Per-side box rows (PR #84 review F6): each finite node-bound side
+        // gets its own row; the pair mask below stays both-finite because a
+        // McCormick envelope genuinely needs both endpoints boxed.
         for j in 0..n {
-            if !boxed[j] {
-                continue;
+            if ub[j].is_finite() {
+                let mut r = vec![0.0; nv];
+                r[j] = 1.0;
+                rows.push(r);
+                h.push(ub[j]);
             }
-            let mut r = vec![0.0; nv];
-            r[j] = 1.0;
-            rows.push(r);
-            h.push(ub[j]);
-            let mut r2 = vec![0.0; nv];
-            r2[j] = -1.0;
-            rows.push(r2);
-            h.push(-lb[j]);
+            if lb[j].is_finite() {
+                let mut r2 = vec![0.0; nv];
+                r2[j] = -1.0;
+                rows.push(r2);
+                h.push(-lb[j]);
+            }
         }
         for (pi, &(i, j)) in pairs.iter().enumerate() {
             let wj = n + pi;
@@ -4496,6 +4624,15 @@ mod tests {
                 qp: rule2_free.clone(),
                 lb: vec![-1.0, f64::NEG_INFINITY],
                 ub: vec![1.5, f64::INFINITY],
+            },
+            Case {
+                name: "one_sided_box_and_free_var",
+                // x0 one-sided [0, +inf) (finite lower side only), x1 fully
+                // free: pins the per-side box emission (review F6) against
+                // the dense oracle.
+                qp: rule2_free.clone(),
+                lb: vec![0.0, f64::NEG_INFINITY],
+                ub: vec![f64::INFINITY, f64::INFINITY],
             },
         ];
 

@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3462 testcases, 43 ignored
+# totals: 3465 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -74,6 +74,7 @@ otspot-core	conic::nonconvex::tests::flipped_negative_diagonal_rejection_names_t
 otspot-core	conic::nonconvex::tests::free_off_diagonal_pair_emits_no_envelope	active
 otspot-core	conic::nonconvex::tests::global_miqcp_nan_int_tol_is_rejected_not_silently_broken	active
 otspot-core	conic::nonconvex::tests::incumbent_with_failed_node_is_not_optimal	active
+otspot-core	conic::nonconvex::tests::integer_branch_child_keeps_one_sided_box_side	active
 otspot-core	conic::nonconvex::tests::leaf_accept_no_longer_loosens_feas_tol_by_100x	active
 otspot-core	conic::nonconvex::tests::mccormick_w_box_bounds_diagonal_square_below	active
 otspot-core	conic::nonconvex::tests::mismatched_dims_returns_not_supported_not_a_panic	active
@@ -85,6 +86,8 @@ otspot-core	conic::nonconvex::tests::oa_pool_rows_match_hand_computed_tangents	a
 otspot-core	conic::nonconvex::tests::oa_retry_cut_far_point_tangent_and_dedupe	active
 otspot-core	conic::nonconvex::tests::oa_violation_cuts_converge_without_branching	active
 otspot-core	conic::nonconvex::tests::objective_only_rule2_pair_refined_to_gap_tol	active
+otspot-core	conic::nonconvex::tests::one_sided_box_sides_emit_independently	active
+otspot-core	conic::nonconvex::tests::one_sided_lower_bound_reaches_zero_optimum_end_to_end	active
 otspot-core	conic::nonconvex::tests::public_entry_rejects_non_finite_data_and_integer_indices	active
 otspot-core	conic::nonconvex::tests::quad_val_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::r_empty_ellipsoid_over_free_x_reaches_optimum_end_to_end	active
@@ -113,8 +116,8 @@ otspot-core	conic::qcqp_classify::tests::d1_keeps_diagonal_only_psd_row_exempt_o
 otspot-core	conic::qcqp_classify::tests::effective_bound_requirement_rejects_mismatched_bounds	active
 otspot-core	conic::qcqp_classify::tests::equality_split_moves_psd_quadratic_into_r_via_neg_half	active
 otspot-core	conic::qcqp_classify::tests::negative_flipped_diagonal_vetoes_rule2_and_requires_bound	active
+otspot-core	conic::qcqp_classify::tests::non_required_free_variable_passes_gate_and_validate	active
 otspot-core	conic::qcqp_classify::tests::rank_deficient_unclamped_psd_objective_is_convex	active
-otspot-core	conic::qcqp_classify::tests::require_finite_bounds_defers_non_required_variables_to_validate	active
 otspot-core	conic::qcqp_classify::tests::require_finite_bounds_fast_path_passes_finite_box	active
 otspot-core	conic::qcqp_classify::tests::require_finite_bounds_rejects_unbounded_required_variable	active
 otspot-core	conic::qcqp_classify::tests::rule1_psd_constraint_row_needs_no_bounds	active
