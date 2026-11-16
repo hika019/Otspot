@@ -623,7 +623,12 @@ fn nonconvex_bilinear_box_global_min() {
         lb: vec![-1.0, -1.0],
         ub: vec![1.0, 1.0],
     };
-    let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    let res = solve_global_qcqp(
+        &qp,
+        &ConicOptions::default(),
+        &GlobalOptions::default(),
+        None,
+    );
     assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
     assert!(
         (res.objective - (-1.0)).abs() < 1e-3,
@@ -650,7 +655,12 @@ fn nonconvex_concave_max_box() {
         lb: vec![0.0],
         ub: vec![1.0],
     };
-    let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    let res = solve_global_qcqp(
+        &qp,
+        &ConicOptions::default(),
+        &GlobalOptions::default(),
+        None,
+    );
     assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
     assert!(
         (res.objective - (-1.0)).abs() < 1e-3,
@@ -682,7 +692,12 @@ fn nonconvex_constraint_hyperbola() {
         lb: vec![0.1, 0.1],
         ub: vec![3.0, 3.0],
     };
-    let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    let res = solve_global_qcqp(
+        &qp,
+        &ConicOptions::default(),
+        &GlobalOptions::default(),
+        None,
+    );
     assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
     assert!((res.objective - 2.0).abs() < 5e-3, "obj={}", res.objective);
 }
@@ -758,6 +773,7 @@ fn nonconvex_miqcp_integer_bilinear() {
         &[0, 1],
         &ConicOptions::default(),
         &GlobalOptions::default(),
+        None,
     );
     assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
     assert!(
@@ -801,7 +817,12 @@ fn nonconvex_qcqp_rejects_non_finite_q0() {
         lb: vec![0.0],
         ub: vec![1.0],
     };
-    let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    let res = solve_global_qcqp(
+        &qp,
+        &ConicOptions::default(),
+        &GlobalOptions::default(),
+        None,
+    );
     assert!(
         matches!(res.status, SolveStatus::NotSupported(_)),
         "NaN q0 must be rejected, got {res:?}"
@@ -837,7 +858,12 @@ fn nonconvex_qcqp_rejects_non_finite_quad_constant() {
         lb: vec![0.0],
         ub: vec![1.0],
     };
-    let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    let res = solve_global_qcqp(
+        &qp,
+        &ConicOptions::default(),
+        &GlobalOptions::default(),
+        None,
+    );
     assert!(
         matches!(res.status, SolveStatus::NotSupported(_)),
         "infinite quad[].r must be rejected, got {res:?}"
@@ -875,7 +901,7 @@ fn nonconvex_global_qcqp_rejects_invalid_conic_options() {
         tol: f64::NAN,
         ..ConicOptions::default()
     };
-    let res = solve_global_qcqp(&qp, &bad_opts, &GlobalOptions::default());
+    let res = solve_global_qcqp(&qp, &bad_opts, &GlobalOptions::default(), None);
     assert!(
         matches!(res.status, SolveStatus::NotSupported(_)),
         "NaN ConicOptions::tol must be rejected, got {res:?}"
@@ -914,6 +940,7 @@ fn nonconvex_miqcp_rejects_out_of_range_integer_index() {
         &[1], // qp.n == 1, so index 1 is out of range.
         &ConicOptions::default(),
         &GlobalOptions::default(),
+        None,
     );
     assert!(
         matches!(res.status, SolveStatus::NotSupported(_)),

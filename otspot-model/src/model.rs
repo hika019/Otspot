@@ -1296,7 +1296,12 @@ impl Model {
                 } else {
                     match build_nonconvex() {
                         Ok(nc) => {
-                            let g = otspot_core::conic::solve_global_qcqp(&nc, &opts, &global_opts);
+                            let g = otspot_core::conic::solve_global_qcqp(
+                                &nc,
+                                &opts,
+                                &global_opts,
+                                None,
+                            );
                             (g.status, g.objective, g.x, SolveRoute::ConicQcqpNonconvex)
                         }
                         // The global fallback needs a finite box on the §3.1

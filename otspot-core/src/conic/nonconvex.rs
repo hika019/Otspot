@@ -1,8 +1,14 @@
 //! Global optimisation of (possibly nonconvex) QCQP by spatial branch-and-bound
 //! with McCormick relaxations of the bilinear/quadratic terms.
 //!
-//! Handles indefinite objective/constraint matrices. Requires finite variable
-//! bounds `[lb, ub]` (needed for valid McCormick envelopes and termination).
+//! Handles indefinite objective/constraint matrices. Bound finiteness is
+//! required only for the §3.1 bound-requirement set `R` (variables whose lift
+//! pairs enter a McCormick envelope or a rule-2-vetoed diagonal, see
+//! [`NonconvexQcqp::validate`] and [`super::qcqp_classify`]); variables outside `R`
+//! may stay free — the relaxation then omits their box rows and, for every
+//! pair touching a non-finite endpoint, all envelope rows, so no `±inf`
+//! coefficient ever reaches an LP. Termination on free variables is guarded
+//! by the recession-ray gate on `Unbounded` relaxations (`global_core`).
 
 use super::{ConeSpec, ConicOptions, ConicProblem};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
@@ -19,7 +25,9 @@ pub struct GQuadConstraint {
     pub r: f64,
 }
 
-/// A nonconvex QCQP with finite variable bounds.
+/// A (possibly nonconvex) QCQP. Bounds must be finite exactly for the
+/// variables in the §3.1 bound-requirement set `R` (see [`Self::validate`]);
+/// other variables may be free (`±inf`).
 #[derive(Debug, Clone)]
 pub struct NonconvexQcqp {
     /// Number of variables.
@@ -38,9 +46,9 @@ pub struct NonconvexQcqp {
     pub a_eq: CscMatrix,
     /// rhs.
     pub b_eq: Vec<f64>,
-    /// Variable lower bounds (finite).
+    /// Variable lower bounds (`-inf` = free, allowed only outside `R`).
     pub lb: Vec<f64>,
-    /// Variable upper bounds (finite).
+    /// Variable upper bounds (`inf` = free, allowed only outside `R`).
     pub ub: Vec<f64>,
 }
 
@@ -106,17 +114,30 @@ impl NonconvexQcqp {
                 self.b_eq.len()
             ));
         }
-        for (k, &v) in self.lb.iter().enumerate() {
-            if !v.is_finite() {
-                return Err(format!("lb[{k}] is not finite: {v}"));
-            }
-        }
-        for (k, &v) in self.ub.iter().enumerate() {
-            if !v.is_finite() {
-                return Err(format!("ub[{k}] is not finite: {v}"));
-            }
-        }
+        // Decision D8 / plan §3.2: bound finiteness is required only for the
+        // variables in the §3.1 bound-requirement set `R` (variables whose
+        // lift pairs feed a McCormick envelope or a rule-2-vetoed diagonal).
+        // A free variable outside `R` is exactly what plan §5 example 1 (PSD
+        // ellipsoid rows over free `x`) must accept; the R-aware relaxation
+        // (skip box rows on non-finite node bounds, emit no envelope rows for
+        // non-finite pair endpoints) never hands `±inf` to the LP. `NaN`
+        // bounds stay rejected for *every* variable: they are corrupt data,
+        // not "free", and would poison node boxes with NaN widths.
+        let req =
+            super::qcqp_classify::classify_bound_requirements(n, self.p0.as_ref(), &self.quad)?;
         for (k, (&l, &u)) in self.lb.iter().zip(&self.ub).enumerate() {
+            if l.is_nan() {
+                return Err(format!("lb[{k}] is not finite: {l}"));
+            }
+            if u.is_nan() {
+                return Err(format!("ub[{k}] is not finite: {u}"));
+            }
+            if req.required[k] && (!l.is_finite() || !u.is_finite()) {
+                return Err(format!(
+                    "lb[{k}] = {l} / ub[{k}] = {u}: variable is in the bound-requirement \
+                     set R (its lift needs finite McCormick boxes)"
+                ));
+            }
             if l > u {
                 return Err(format!("lb[{k}] = {l} > ub[{k}] = {u}"));
             }
@@ -159,6 +180,13 @@ impl NonconvexQcqp {
 /// `MaxIterations`, `NumericalError` (some region was never certified empty),
 /// `Infeasible` (every region proven empty — only then is infeasibility a
 /// certificate).
+///
+/// Either way, a relaxation `Unbounded` whose verified ray passes the plan
+/// §3.2 recession verification against a base point feasible under the
+/// original `feasible()` contract overrides the search: `status = Unbounded`,
+/// `objective = -inf`, `x` = the verified base point. A ray that cannot be
+/// certified instead yields `NotSupported(reason)` (never `numerical_failures`
+/// counting; plan §3.2 line 111).
 #[derive(Debug, Clone)]
 pub struct GlobalResult {
     /// Termination status (see struct docs for the exact classification).
@@ -303,9 +331,61 @@ struct RelaxResult {
     /// (`simplex::unbounded_ray::lp_ray_payload`、`SolverResult::ray_certificate`
     /// と同一契約・同一型)。未証明 Unbounded、presolve 縮約経由の判定、
     /// 基点の実行可能性検証失敗はすべて `None` (偽証なし)。
-    /// 計画 §3.2 の recession 検証 (G2b) が消費する。現状は未消費。
-    #[allow(dead_code)] // G2a は露出のみが目的 (消費側は G2b で別途実装)。
+    /// 計画 §3.2 の recession 検証 (`verify_recession_unboundedness`) が消費する。
     ray: Option<crate::problem::RayCertificate>,
+    /// Standard-form basis of THIS relaxation LP at `Optimal`
+    /// (`SolverResult::warm_start_basis`, same contract). The OA retry loop
+    /// feeds it back as the warm start of the re-solve after appending
+    /// tangent rows (`extend_warm_for_appended_cuts`); every other consumer
+    /// ignores it.
+    warm: Option<crate::options::WarmStartBasis>,
+}
+
+/// One relaxation solve: the [`RelaxResult`] plus the `LpProblem` that was
+/// solved (needed by the caller as the parent problem for warm-starting the
+/// cut-extended re-solve — see `extend_warm_for_appended_cuts`).
+struct RelaxSolve {
+    result: RelaxResult,
+    lp: crate::problem::LpProblem,
+}
+
+/// Re-solve support for the OA retry loop (G2b A/B attribution: the loop
+/// re-solved the SAME node from a cold start after every tangent batch —
+/// 6.7 solves/node / 12.3x per-node cost on QPLIB_1353). A parent basis
+/// extends to the cut-extended child relaxation because `build_relax_with_cuts`
+/// appends its `Le` tangent rows at the tail with identical leading rows,
+/// and standard form lays out `[structural | slacks in row order]`: the new
+/// rows' slack columns are exactly the child's trailing columns, so
+/// `parent_basis ++ [new slack columns]` is a square, nonsingular basis
+/// whose basic solution is the parent optimum with slack `c² − (2c·x̄ − w̄) ≥ 0`
+/// per tangent (nonnegative because a cut only fires where `x̄² > w̄`). That
+/// is dual-simplex-ready; `simplex::dual` re-derives `x_B` by FTRAN and
+/// falls back to a cold start on any dimension/singularity/violation guard,
+/// so an extension mismatch can only cost performance, never correctness.
+fn extend_warm_for_appended_cuts(
+    parent_lp: &crate::problem::LpProblem,
+    parent_ws: &crate::options::WarmStartBasis,
+    child_lp: &crate::problem::LpProblem,
+) -> Option<crate::options::WarmStartBasis> {
+    use crate::options::WarmStartBasis;
+    let sf_p = crate::simplex::build_standard_form(parent_lp);
+    let sf_c = crate::simplex::build_standard_form(child_lp);
+    let k = sf_c.m.checked_sub(sf_p.m)?;
+    if k == 0
+        || sf_p.n_shifted != sf_c.n_shifted
+        || sf_c.n_total != sf_p.n_total + k
+        || parent_ws.basis.len() != sf_p.m
+        || parent_ws.basis.iter().any(|&idx| idx >= sf_p.n_total)
+    {
+        return None;
+    }
+    let mut basis = parent_ws.basis.clone();
+    basis.extend(sf_p.n_total..sf_c.n_total);
+    // `WarmStartBasis::x_b` is stale-tolerant (recomputed by FTRAN on entry).
+    Some(WarmStartBasis {
+        basis,
+        x_b: Vec::new(),
+    })
 }
 
 #[cfg(test)]
@@ -368,19 +448,8 @@ fn solve_relax_lp(
     prob: &ConicProblem,
     deadline: Option<std::time::Instant>,
     cancel_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> RelaxResult {
-    #[cfg(test)]
-    if let Some(status) = RELAX_STATUS_PLAN
-        .with(|p| p.borrow_mut().pop_front())
-        .flatten()
-    {
-        return RelaxResult {
-            status,
-            objective: f64::NAN,
-            x: vec![],
-            ray: None,
-        };
-    }
+    parent: Option<(&crate::problem::LpProblem, &crate::options::WarmStartBasis)>,
+) -> RelaxSolve {
     let n = prob.n();
     let peq = prob.p();
     let mrows = prob.m();
@@ -423,19 +492,366 @@ fn solve_relax_lp(
         None,
     )
     .unwrap();
-    let lp_opts = crate::options::SolverOptions {
-        deadline,
-        cancel_flag: cancel_flag.cloned(),
-        ..Default::default()
+    #[cfg(test)]
+    if let Some(status) = RELAX_STATUS_PLAN
+        .with(|p| p.borrow_mut().pop_front())
+        .flatten()
+    {
+        return RelaxSolve {
+            result: RelaxResult {
+                status,
+                objective: f64::NAN,
+                x: vec![],
+                ray: None,
+                warm: None,
+            },
+            lp,
+        };
+    }
+    let res = {
+        // Presolve stays OFF for every relaxation solve: its renumbering
+        // hides the optimal basis behind the postsolve (and the recovered
+        // crash-synthesised basis is not dual feasible, so the dual
+        // warm-start guard rejects it), which would leave every OA re-solve
+        // cold. With presolve off each solve exposes its native standard-form
+        // basis and `extend_warm_for_appended_cuts` can chain it.
+        let mut lp_opts = crate::options::SolverOptions {
+            deadline,
+            cancel_flag: cancel_flag.cloned(),
+            presolve: false,
+            ..Default::default()
+        };
+        // OA re-solve warm start (see `extend_warm_for_appended_cuts`): the
+        // guard checks inside fail safe to `None` => plain cold solve.
+        if let Some((parent_lp, parent_ws)) = parent {
+            lp_opts.warm_start = extend_warm_for_appended_cuts(parent_lp, parent_ws, &lp);
+        }
+        let mut r = crate::lp::solve_lp_with(&lp, &lp_opts);
+        // The warm chain needs the presolve-free solve, but the no-presolve
+        // pipeline carries far less history than the presolve-reduced one
+        // this solver shipped with. Escalate ambiguous verdicts to a single
+        // presolve-corroborated re-solve: solver non-completions get the
+        // reduction that previously made them complete, and a raw
+        // `Infeasible` verdict — which the search consumes as an emptiness
+        // *certificate* — must be confirmed through the presolve chain
+        // before it prunes a region (presolve reductions preserve
+        // feasibility, so a reduced `Infeasible` carries the same warrant
+        // the all-presolve pipeline did; the unconfirmed one was observed
+        // false on the jitter-band fixture
+        // `qp::tests::qcqp_guard::jitter_band_indefinite_qcqp_falls_back_to_global`).
+        // Deadline statuses never escalate: a re-solve must not double the
+        // node's time budget.
+        const PRESOLVE_ESCALATION: &[SolveStatus] = &[
+            SolveStatus::NumericalError,
+            SolveStatus::SuboptimalSolution,
+            SolveStatus::Stalled,
+            SolveStatus::MaxIterations,
+            SolveStatus::Infeasible,
+        ];
+        if !lp_opts.presolve && PRESOLVE_ESCALATION.contains(&r.status) {
+            lp_opts.presolve = true;
+            lp_opts.warm_start = None;
+            r = crate::lp::solve_lp_with(&lp, &lp_opts);
+        }
+        r
     };
-    let res = crate::lp::solve_lp_with(&lp, &lp_opts);
-    RelaxResult {
-        status: res.status,
-        objective: res.objective,
-        x: res.solution,
-        ray: res.ray_certificate,
+    RelaxSolve {
+        result: RelaxResult {
+            status: res.status,
+            objective: res.objective,
+            x: res.solution,
+            ray: res.ray_certificate,
+            warm: res.warm_start_basis,
+        },
+        lp,
     }
 }
+
+/// OA tangent cut: `-w_ii + 2c*x_i <= c^2`, the tangent plane of the convex
+/// `w >= x_i^2` at `x_i = c` in the relaxation's `<=` row layout (identical
+/// shape to the `x̄ = 0` seed row `build_relax` emits for rule-2 pairs).
+/// Returns the row's (`rhs`, coefficients) so both `build_relax_with_cuts`
+/// and callers describe one cut, not two encodings.
+fn oa_tangent(c: f64) -> (f64, f64) {
+    (c * c, 2.0 * c)
+}
+
+/// Globality justification + pool design: `w_ii >= 2c*x_i - c^2` is valid for
+/// the *whole* graph `w_ii = x_i^2` for any `c` (tangent of a convex
+/// function), hence for every node box in the tree. Cuts therefore live in
+/// one GLOBAL pool shared by all nodes and all re-solves -- a cut learned at
+/// one node tightens every other relaxation and is never re-added (the
+/// dedupe below), which is what keeps the per-node re-solve budget bounded
+/// across the tree.
+fn oa_add_cut(pool: &mut Vec<(usize, f64)>, pi: usize, c: f64) -> bool {
+    if !c.is_finite() {
+        return false;
+    }
+    // Centers closer than `OA_CENTER_DEDUPE_REL_TOL` (relative) produce
+    // tangents differing by less than the rounding noise of the row
+    // coefficients (`2c` and `c^2`), i.e. the cut adds no tightening beyond
+    // representation error -- adding it would let the retry loop spin on
+    // numerically identical rows instead of falling through to the §3.2
+    // verdict.
+    let dedupe = |&(_, c_prime): &(usize, f64)| {
+        (c - c_prime).abs() <= OA_CENTER_DEDUPE_REL_TOL * (1.0 + c.abs() + c_prime.abs())
+    };
+    if pool
+        .iter()
+        .any(|&(p, c_prime)| p == pi && dedupe(&(pi, c_prime)))
+    {
+        return false;
+    }
+    pool.push((pi, c));
+    true
+}
+
+/// Plan §3.2 line 100 (parent decision D6's retry half, integrated here per
+/// the milestone note): the finite OA polytope can be unbounded even when the
+/// true set is bounded (`min -x s.t. x^2 <= 1`, x free). On `Unbounded` with
+/// a verified ray, add the tangent at a far point `x̃ + L*d` of the ray for
+/// every rule-2 diagonal the ray actually moves; re-solve the SAME node. On
+/// `Optimal`, a rule-2 diagonal sitting below its graph
+/// (`w_ii < x̄_i^2 - bilinear_tol`) gets its tangent at the solution point
+/// (plan line 96: cut and re-solve, do not branch). Returns the number of
+/// NEW pool entries (0 = nothing more can be learned: fall through to the
+/// normal status disposition, including the §3.2 recession verdict).
+///
+/// Progress per round on the plan-100 shape is geometric (>= 2x toward the
+/// feasible cap per re-solve in the traced halving sequence), so the exit
+/// needs `log2((far - x*) / sqrt(viol_tol))` rounds; `OA_RAY_LOOKAHEAD`
+/// bounds the start of that sequence (a tangent at `L` shrinks the surviving
+/// ray to `~w_hi/(2L)`).
+fn oa_retry_cut(
+    static_: &StaticRelax,
+    res: &RelaxResult,
+    viol_tol: f64,
+    sum_budget: f64,
+    pool: &mut Vec<(usize, f64)>,
+) -> usize {
+    let n = static_.n;
+    match &res.status {
+        SolveStatus::Optimal => {
+            let x = &res.x[..n];
+            let mut added = 0usize;
+            for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
+                // Rule-2 diagonals only: off-diagonal pairs keep their exact
+                // McCormick envelope (no convex tangent exists), and other
+                // diagonals are rule 2 by construction of this loop's owner.
+                if !static_.rule2_pair[pi] || i != j {
+                    continue;
+                }
+                if res.x[n + pi] < x[i] * x[i] - viol_tol {
+                    added += usize::from(oa_add_cut(pool, pi, x[i]));
+                }
+            }
+            // Accept-margin budget arm: every pair sits inside `viol_tol`,
+            // yet an original quadratic row can still be violated by more
+            // than half the accept margin: the vertex's violation of row r
+            // is bounded by the SUM of the slacks of the pairs appearing in
+            // r (`accept` re-checks the original rows at `feas_tol`). While
+            // some row exceeds `sum_budget`, refine every pair of such a row
+            // whose own slack exceeds its proportional share
+            // `sum_budget / (rule-2 members of the row)`. The threshold is
+            // a constant target, so each pair keeps its geometric slack
+            // decay and the arm stops at the dedupe floor, far below any
+            // sane budget; `f64::INFINITY` disables the arm.
+            if added == 0 {
+                let np = static_.pairs.len();
+                let mut gaps = vec![0.0f64; np];
+                let nrow = static_
+                    .pair_rows
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .max()
+                    .map_or(0, |m| m + 1);
+                let mut rowsum = vec![0.0f64; nrow];
+                let mut rowcnt = vec![0usize; nrow];
+                for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
+                    if !static_.rule2_pair[pi] || i != j {
+                        continue;
+                    }
+                    let gap = (x[i] * x[i] - res.x[n + pi]).max(0.0);
+                    gaps[pi] = gap;
+                    for &r in &static_.pair_rows[pi] {
+                        rowsum[r] += gap;
+                        rowcnt[r] += 1;
+                    }
+                }
+                for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
+                    if !static_.rule2_pair[pi] || i != j {
+                        continue;
+                    }
+                    let over = static_.pair_rows[pi].iter().any(|&r| {
+                        rowsum[r] > sum_budget && gaps[pi] > sum_budget / rowcnt[r].max(1) as f64
+                    });
+                    if over {
+                        added += usize::from(oa_add_cut(pool, pi, x[i]));
+                    }
+                }
+            }
+            added
+        }
+        SolveStatus::Unbounded => {
+            let Some(ray) = &res.ray else { return 0 };
+            if ray.direction.len() != n + static_.pairs.len() {
+                return 0;
+            }
+            let norm = ray.direction[..n]
+                .iter()
+                .fold(0.0f64, |a: f64, &v| a.max(v.abs()));
+            if norm == 0.0 || norm.is_nan() {
+                return 0;
+            }
+            let mut added = 0usize;
+            for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
+                if !static_.rule2_pair[pi] || i != j {
+                    continue;
+                }
+                let d_i = ray.direction[i] / norm;
+                if d_i == 0.0 {
+                    continue;
+                }
+                let far = ray.base_point[i] + OA_RAY_LOOKAHEAD * d_i;
+                added += usize::from(oa_add_cut(pool, pi, far));
+            }
+            added
+        }
+        _ => 0,
+    }
+}
+
+/// Node relaxation under the global OA tangent pool: rebuild the relaxation
+/// with the current pool, solve it, and add tangents while they still change
+/// the pool (plan §3.2 lines 96/100; the retry consumes no node count, and
+/// the caller's §3.2 verdict machinery only sees an `Unbounded` once no
+/// further cut can be learned). The re-solves warm-start from the previous
+/// round's basis (`extend_warm_for_appended_cuts`).
+///
+/// `Err(())` = the per-node cut budget was exhausted with the pool still
+/// learning: the caller must stop the search with a reasoned `NotSupported`
+/// (a shape the geometric convergence bound does not describe).
+fn oa_refine_node(
+    static_: &StaticRelax,
+    lb: &[f64],
+    ub: &[f64],
+    g: &GlobalOptions,
+    opts: &ConicOptions,
+    oa_pool: &mut Vec<(usize, f64)>,
+) -> Result<RelaxResult, ()> {
+    let mut rounds = 0usize;
+    // Parent (LP, basis) for the OA re-solve warm start: the tangent
+    // rows only extend the LP at the tail, so the previous round's
+    // basis carries over (see `extend_warm_for_appended_cuts`).
+    // `None` whenever the last solve produced no basis (Unbounded,
+    // numerical failure) — that round just stays cold as before.
+    let mut prev: Option<(crate::problem::LpProblem, crate::options::WarmStartBasis)> = None;
+    loop {
+        // Exit tightness must dominate the acceptance margin `accept`
+        // re-checks at `g.feas_tol`: tangency slacks `t_k` below the
+        // graphs `x_k^2` let the recovered point violate an original
+        // quadratic row by up to the SUM of the slacks of the pairs
+        // appearing in that row, which per-pair caps cannot bound
+        // (two pairs each at `bilinear_tol` = 1e-6 already exceed a
+        // 1e-6 accept margin; the ellipsoid fixture fails accept and
+        // ends `NumericalError` there). Keep the per-pair cut trigger
+        // at `bilinear_tol` and additionally refine while the total
+        // slack exceeds half the accept margin (see `oa_retry_cut`'s
+        // budget arm).
+        let sum_budget = g.feas_tol / 2.0;
+        let relax = build_relax_with_cuts(static_, lb, ub, oa_pool);
+        let parent = prev.as_ref().map(|(lp, ws)| (lp, ws));
+        let solved = solve_relax_lp(&relax, opts.deadline, opts.cancel_flag.as_ref(), parent);
+        if oa_retry_cut(static_, &solved.result, g.bilinear_tol, sum_budget, oa_pool) == 0 {
+            return Ok(solved.result);
+        }
+        prev = solved.result.warm.map(|ws| (solved.lp, ws));
+        rounds += 1;
+        if rounds > OA_MAX_CUT_ROUNDS_PER_NODE {
+            return Err(());
+        }
+    }
+}
+
+/// Node relaxation + the global OA tangent pool (see `oa_add_cut`'s
+/// globality note). Appends `-w_ii + 2c*x_i <= c^2` rows to `build_relax`'s
+/// inequality block; equalities, the objective and every original row are
+/// untouched, so the dense-reference oracle tests (which pin `build_relax`
+/// with an empty pool) stay valid.
+fn build_relax_with_cuts(
+    static_: &StaticRelax,
+    lb: &[f64],
+    ub: &[f64],
+    pool: &[(usize, f64)],
+) -> ConicProblem {
+    let mut prob = build_relax(static_, lb, ub);
+    if pool.is_empty() {
+        return prob;
+    }
+    let m0 = prob.g.nrows();
+    let mut ri = Vec::with_capacity(prob.g.nnz() + 2 * pool.len());
+    let mut ci = Vec::with_capacity(prob.g.nnz() + 2 * pool.len());
+    let mut vi = Vec::with_capacity(prob.g.nnz() + 2 * pool.len());
+    let cp = prob.g.col_ptr();
+    let rix = prob.g.row_ind();
+    let val = prob.g.values();
+    let ncols = prob.g.ncols();
+    for j in 0..ncols {
+        for k in cp[j]..cp[j + 1] {
+            ri.push(rix[k]);
+            ci.push(j);
+            vi.push(val[k]);
+        }
+    }
+    let mut h = std::mem::take(&mut prob.h);
+    for (k, &(pi, c)) in pool.iter().enumerate() {
+        let (rhs, two_c) = oa_tangent(c);
+        let row = m0 + k;
+        let i = static_.pairs[pi].0;
+        ri.push(row);
+        ci.push(i);
+        vi.push(two_c);
+        ri.push(row);
+        ci.push(static_.n + pi);
+        vi.push(-1.0);
+        h.push(rhs);
+    }
+    prob.g = CscMatrix::from_triplets(&ri, &ci, &vi, m0 + pool.len(), ncols)
+        .expect("cut triplets are in range and finite (guarded in oa_add_cut)");
+    prob.h = h;
+    prob.cone.l = m0 + pool.len();
+    prob
+}
+
+/// Relative center distance below which two tangents of the same `w_ii` are
+/// numerically the same row (see `oa_add_cut`): the representable distance
+/// between `2c` and `c^2` coefficients at unit scale is ~1e-16, and 1e-12 is
+/// four orders of magnitude of safety above that while staying far below any
+/// geometrically meaningful center spacing (the exit slack needs center
+/// spacings ~sqrt(bilinear_tol) >= 1e-6).
+const OA_CENTER_DEDUPE_REL_TOL: f64 = 1e-12;
+
+/// Ray lookahead for the plan §3.2 line-100 retry, in units of the
+/// normalized (`‖d‖_inf = 1`) ray direction: the tangent at distance `L`
+/// caps the surviving ray shrink at `~w_hi/(2L)`, so each retry buys ~3
+/// decimal digits of progress while `2c = O(L)` and `c^2 = O(L^2)` stay
+/// orders of magnitude away from overflow for LP vertices up to ~1e150.
+const OA_RAY_LOOKAHEAD: f64 = 1e3;
+
+/// Re-solve budget per node for OA cut retries (both the `Optimal`
+/// violation half and the `Unbounded` ray half of `oa_retry_cut`). The
+/// traced convergence on the plan-100 shape is geometric with ratio >= 1/2
+/// per round, and the exit slack is `bilinear_tol >= 0`, so
+/// `log2((L + |x*|)/sqrt(bilinear_tol))` rounds suffice: `L = 1e3`, a vertex
+/// scale of 1e15 and `bilinear_tol = 1e-12` need `log2(1e18) ~ 60`; 64
+/// covers that with margin. The accept-margin budget arm refines the same
+/// geometric sequence (its target `sum_budget <= feas_tol/2` is a constant,
+/// not a tighter tol class), so it shares the bound. A node needing more has
+/// a shape the geometric bound does not describe -- the search stops with a
+/// reasoned `NotSupported` instead of burning the node budget silently (plan
+/// §3.2 "cut 後も ray 残のみ検証" generalized to "no progress within budget").
+const OA_MAX_CUT_ROUNDS_PER_NODE: usize = 64;
 
 /// Portions of the McCormick relaxation LP that do not depend on the current
 /// box `[lb, ub]`: the objective, the equality matrix, and the rows coming
@@ -458,6 +874,36 @@ struct StaticRelax {
     fixed_ci: Vec<usize>,
     fixed_vi: Vec<f64>,
     fixed_h: Vec<f64>,
+    /// For each pair, the quadratic-constraint rows whose `w` column of that
+    /// pair carries a coefficient (a pair is shared across rows only when the
+    /// same (i, j) appears in several rows). The accept-margin budget arm of
+    /// `oa_retry_cut` bounds each row's implied violation with it.
+    pair_rows: Vec<Vec<usize>>,
+    /// Per pair: rule-2 diagonal (`i == j && rule2_diag[i]`) -- emitted as
+    /// the single under-estimator cut `w_ii >= 0` (the x̄ = 0 tangent), no
+    /// interval/envelope rows (decision D2, plan §3.2: interval rows and
+    /// McCormick coefficients would push `w_hi = ±inf`/`inf` coefficients
+    /// into `h`/`A` for free variables).
+    rule2_pair: Vec<bool>,
+    /// Per pair: full interval + 4-facet McCormick envelope emitted (both
+    /// endpoints have finite root bounds and the pair is not a rule-2
+    /// diagonal, decision D3's "両端の箱が有限" emission condition).
+    mc_pair: Vec<bool>,
+    /// Indices of the `mc_pair` entries: the *only* branching candidates and
+    /// leaf-gap terms (decision D4, plan §3.2 line 94). Rule-2 diagonals are
+    /// excluded because the relaxation intentionally under-estimates their
+    /// `w_ii` (`|w_ii − x_i²| > bilinear_tol` would fire forever), and
+    /// envelope-less pairs are excluded because no box-based bound tightens
+    /// them. Both endpoints of every `mc_pair` have finite root bounds, so
+    /// every spatial branch variable lives in a finite box and the
+    /// `0.5·(lb+ub)` fallback can never return `∓inf` and re-push an
+    /// identical box (plan §0.1 line 16 infinite-loop path, §5 sentinel 3).
+    mc_pairs: Vec<usize>,
+    /// Raw §3.1 bound-requirement set `R` (per variable). Consumed by the
+    /// `d_R = 0` assertion of the recession verification (plan §3.2 line
+    /// 108) — the relaxation box rows should make it structural, the
+    /// verifier re-checks it against the certificate it consumes.
+    required: Vec<bool>,
 }
 
 /// `(pair_index, coeff)` for each McCormick pair with a nonzero `(1/2) x^T P
@@ -483,11 +929,43 @@ fn quad_pair_coeffs(p: &CscMatrix, pairs: &[(usize, usize)]) -> Vec<(usize, f64)
 
 /// Precompute the node-invariant part of the relaxation once per solve (see
 /// `StaticRelax`'s doc).
+///
+/// The §3.1 classification runs here (once per solve, `O(nnz)` + one
+/// Cholesky per quadratic row) because every per-pair emission decision
+/// (D2/D3) is node-invariant: `global_core` branches only on `mc_pairs`,
+/// whose endpoints have finite root bounds, so a node box can never turn a
+/// skipped pair into an emittable one or vice versa. A classification error
+/// (mis-shaped public fields / non-finite coefficients) is unreachable past
+/// `NonconvexQcqp::validate` at the `global_core` entry, which checks exactly
+/// the dimensions and finiteness the classifier reads.
 fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
     let n = qp.n;
     let pairs = collect_pairs(qp);
     let npair = pairs.len();
     let nv = n + npair;
+
+    let req = super::qcqp_classify::classify_bound_requirements(n, qp.p0.as_ref(), &qp.quad)
+        .expect(
+            "classification reads only dimensions/coefficients validated by \
+             NonconvexQcqp::validate at the global_core entry",
+        );
+    // D3 emission condition "both endpoints' boxes are finite". Root finiteness
+    // is node-invariant: branching only ever splits `mc_pairs` endpoints (D4),
+    // which are exactly the variables with finite root bounds among boxed
+    // ones, so a variable is never boxed into (or out of) finiteness.
+    let var_boxed: Vec<bool> = (0..n)
+        .map(|j| qp.lb[j].is_finite() && qp.ub[j].is_finite())
+        .collect();
+    let rule2_pair: Vec<bool> = pairs
+        .iter()
+        .map(|&(i, j)| i == j && req.rule2_diag[i])
+        .collect();
+    let mc_pair: Vec<bool> = pairs
+        .iter()
+        .zip(&rule2_pair)
+        .map(|(&(i, j), &rule2)| !rule2 && var_boxed[i] && (i == j || var_boxed[j]))
+        .collect();
+    let mc_pairs: Vec<usize> = (0..npair).filter(|&pi| mc_pair[pi]).collect();
 
     let mut c = vec![0.0; nv];
     c[..n].copy_from_slice(&qp.q0);
@@ -514,6 +992,7 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
     let a = CscMatrix::from_triplets(&a_ri, &a_ci, &a_vi, peq, nv).unwrap();
 
     // quadratic constraints -> linear rows in [x, w].
+    let mut pair_rows: Vec<Vec<usize>> = vec![Vec::new(); npair];
     let mut fixed_ri = Vec::new();
     let mut fixed_ci = Vec::new();
     let mut fixed_vi = Vec::new();
@@ -530,6 +1009,7 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
             fixed_ri.push(row);
             fixed_ci.push(n + pi);
             fixed_vi.push(coeff);
+            pair_rows[pi].push(row);
         }
         fixed_h.push(-qc.r);
     }
@@ -550,6 +1030,7 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
     StaticRelax {
         n,
         pairs,
+        pair_rows,
         c,
         a,
         b: qp.b_eq.clone(),
@@ -557,41 +1038,82 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
         fixed_ci,
         fixed_vi,
         fixed_h,
+        rule2_pair,
+        mc_pair,
+        mc_pairs,
+        required: req.required,
     }
 }
 
 /// Build the McCormick LP relaxation for the current box `[lb, ub]`.
 ///
-/// Only the box rows (`2n`) and the McCormick envelope rows (`6` per pair)
-/// depend on the box; everything else is `static_` (see its doc), so this
-/// clones the precomputed fixed part (`O(nnz)`) and appends the per-node
-/// rows directly as triplets, instead of re-deriving the whole relaxation
-/// from a dense `n x n` pass at every branch-and-bound node (`O(n * (n +
-/// pairs.len()))` per node -- the dominant B&B memory cost on large QCQPs).
+/// Box and envelope rows depend on the box; everything else is `static_`
+/// (see its doc), so this clones the fixed part (`O(nnz)`) and appends the
+/// per-node rows as triplets, instead of re-deriving the relaxation from a
+/// dense `n x n` pass at every B&B node (the dominant memory cost).
+///
+/// Emission is driven by the §3.1 classification stored in `static_`
+/// (plan §3.2, decisions D2/D3):
+/// - Box rows exist exactly for finite node bounds: `±inf` must never reach
+///   `h` or the envelope coefficients (`new_general` rejects them, the call
+///   site unwraps), so pairs with a non-finite endpoint emit no envelope.
+/// - Rule-2 diagonal pairs emit only the under-estimator cut `w_ii >= 0`
+///   (the x̄ = 0 tangent; every further tangent is a node-time OA cut, see
+///   `TangentCut` in `global_core`). Interval and envelope rows are skipped
+///   unconditionally (D2).
+/// - All other pairs with finite endpoints emit the interval rows + 4
+///   McCormick facets exactly as the dense reference does.
+///
+/// Deviation from D3's first sentence, recorded per "迷ったら保守側":
+/// finite-bounded variables outside `R` keep their box rows. Dropping them
+/// turns every scheme-B problem with a linear objective term in such a
+/// variable unbounded (the variable escapes its genuine box; a finite
+/// optimum cannot certify `Unbounded` and without `x̃` plan line 110 forces
+/// `NotSupported` -- a §6 regression). Restoring boundedness without box
+/// rows is Phase 2's incumbent/cutoff job; the ±inf hazard D3 guards is
+/// fully excluded by the finite-bound rule above.
 fn build_relax(static_: &StaticRelax, lb: &[f64], ub: &[f64]) -> ConicProblem {
     let n = static_.n;
     let pairs = &static_.pairs;
     let npair = pairs.len();
     let nv = n + npair;
     let m_fixed = static_.fixed_h.len();
-    let m = m_fixed + 2 * n + 6 * npair;
+    let boxed: Vec<bool> = (0..n)
+        .map(|j| lb[j].is_finite() && ub[j].is_finite())
+        .collect();
+    let box_rows = 2 * boxed.iter().filter(|b| **b).count();
+    // 1 row per rule-2 diagonal, 2 single-entry + 4 push_mc rows per mc pair.
+    let mc_rows: usize = (0..npair)
+        .map(|pi| {
+            if static_.rule2_pair[pi] {
+                1
+            } else if static_.mc_pair[pi] {
+                6
+            } else {
+                0
+            }
+        })
+        .sum();
+    let m = m_fixed + box_rows + mc_rows;
 
     let mut ri = static_.fixed_ri.clone();
     let mut ci = static_.fixed_ci.clone();
     let mut vi = static_.fixed_vi.clone();
     let mut h = static_.fixed_h.clone();
-    let box_rows = 2 * n;
-    let mc_rows = 6 * npair;
-    // 2 single-entry rows + 4 push_mc rows (always 3 triplets each) per pair.
-    let mc_nnz = 2 * npair + 12 * npair;
+    // Capacity bound: an mc pair takes 2 + 4*3 = 14 triplets, a rule-2 pair
+    // 1; 15 per pair is the uniform safe bound (reserve only, never asserted).
+    let mc_nnz = 15 * npair;
     ri.reserve(box_rows + mc_nnz);
     ci.reserve(box_rows + mc_nnz);
     vi.reserve(box_rows + mc_nnz);
     h.reserve(box_rows + mc_rows);
 
-    // variable box.
+    // variable box (finite-bounded variables only, see fn doc).
     let mut row = m_fixed;
     for j in 0..n {
+        if !boxed[j] {
+            continue;
+        }
         ri.push(row);
         ci.push(j);
         vi.push(1.0);
@@ -610,9 +1132,27 @@ fn build_relax(static_: &StaticRelax, lb: &[f64], ub: &[f64]) -> ConicProblem {
     // implied; for diagonal pairs (`w = x_k^2`) the two endpoint tangents do
     // NOT imply the interval lower bound (e.g. on `[-1, 1]` they only give
     // `w >= 2|x| - 1`, which dips to `-1` at `x = 0` instead of `0`), so the
-    // relaxation of `x^2` terms is needlessly loose without it.
+    // relaxation of `x^2` terms is needlessly loose without it. Rule-2
+    // diagonals instead carry only `w_ii >= 0` (D2): containment holds for
+    // `w_ii >= x_i^2` regardless of sign (plan §3.1 note), the lift
+    // coefficient of `w_ii` is `>= 0` everywhere a rule-2 diagonal appears
+    // (that *is* rule 2), so nothing in the relaxation pushes `w_ii` up and
+    // the constant tangent is the whole stationary envelope; OA cuts added at
+    // relaxation solutions tighten the under-estimator further.
     for (pi, &(i, j)) in pairs.iter().enumerate() {
         let wj = n + pi;
+        if static_.rule2_pair[pi] {
+            // -w_ii <= 0  <=>  w_ii >= x_i^2's x̄=0 tangent (w >= 2·0·x - 0²).
+            ri.push(row);
+            ci.push(wj);
+            vi.push(-1.0);
+            h.push(0.0);
+            row += 1;
+            continue;
+        }
+        if !static_.mc_pair[pi] {
+            continue;
+        }
         let (xl_i, xu_i) = (lb[i], ub[i]);
         let (xl_j, xu_j) = (lb[j], ub[j]);
         let (w_lo, w_hi) = w_interval(xl_i, xu_i, xl_j, xu_j, i == j);
@@ -814,24 +1354,39 @@ fn objective(qp: &NonconvexQcqp, x: &[f64]) -> f64 {
 }
 
 /// Globally optimise a nonconvex QCQP by spatial branch-and-bound.
+///
+/// `seed` (plan §3.2 line 112, decision D7) starts the search at an
+/// incumbent `(x̃, f)` and a derived root box instead of `incumbent = +inf`
+/// and the declared box — the consumer Phase 2 wires (bound-free local
+/// solver UB, FBBT-derived bounds kept out of `qp.lb`/`qp.ub`). `None` keeps
+/// the pre-existing behaviour exactly. A seed is never trusted blindly:
+/// `global_core` re-validates feasibility of `x̃` at `g.feas_tol`, re-derives
+/// the incumbent from `objective(qp, x̃)`, and rejects a box that widens the
+/// declared box — an invalid seed fails as `NotSupported` with the reason.
 pub fn solve_global_qcqp(
     qp: &NonconvexQcqp,
     opts: &ConicOptions,
     g: &GlobalOptions,
+    seed: Option<&GlobalSeed>,
 ) -> GlobalResult {
-    global_core(qp, &[], opts, g)
+    global_core(qp, &[], opts, g, seed)
 }
 
 /// Globally optimise a nonconvex mixed-integer QCQP. `integers` lists variable
 /// indices constrained to integer values; their bounds come from `qp.lb`/`qp.ub`.
 /// Combines integer branching with spatial (McCormick) branching.
+///
+/// `seed` behaves exactly as in [`solve_global_qcqp`]; a seeded `x̃` must
+/// additionally be integral within `g.int_tol` (it is checked with the same
+/// `all_integral` gate as per-node incumbents).
 pub fn solve_global_miqcp(
     qp: &NonconvexQcqp,
     integers: &[usize],
     opts: &ConicOptions,
     g: &GlobalOptions,
+    seed: Option<&GlobalSeed>,
 ) -> GlobalResult {
-    global_core(qp, integers, opts, g)
+    global_core(qp, integers, opts, g, seed)
 }
 
 fn frac_dist(v: f64) -> f64 {
@@ -897,6 +1452,209 @@ fn validate_integers(n: usize, integers: &[usize]) -> Result<(), String> {
     Ok(())
 }
 
+/// Seed for `global_core`: an initial incumbent and the root box to search.
+///
+/// Plan §3.2 line 112 (decision D7): the search starts at `incumbent =
+/// +inf, so an upper bound produced by a bound-free local solver (Phase 2)
+/// would never reach prune or gap reporting. Phase 2 also derives bounds that
+/// it deliberately keeps out of `qp.lb`/`qp.ub` (plan §4.2 line 136: rewriting
+/// them would reject incumbents inside `feas_tol`), so the derived root box
+/// travels with the seed. M5/D7 exposed the plumbing through the public
+/// entry points (`Option<&GlobalSeed>` on `solve_global_qcqp` /
+/// `solve_global_miqcp`); the internal QP-route callers keep passing `None`
+/// until Phase 2 actually produces seeds.
+#[derive(Debug, Clone)]
+pub struct GlobalSeed {
+    /// Feasible point `x̃` (re-validated by `global_core` at `feas_tol`
+    /// before use -- a corrupt seed fails as `NotSupported`, never as a
+    /// trusted incumbent).
+    pub x: Vec<f64>,
+    /// Objective value at `x`; cross-checked against `objective(qp, x)` and
+    /// the incumbent is always the recomputed value (a stale/mismatched `f`
+    /// fails the seed, it is never trusted as a lower upper-bound).
+    pub f: f64,
+    /// Derived root lower bounds (`±inf` allowed for free variables). Must
+    /// refine, never widen, `qp.lb`/`qp.ub` -- a widened side would admit
+    /// points the public `feasible()` contract rejects.
+    pub root_lb: Vec<f64>,
+    /// Derived root upper bounds, same refinement rule as `root_lb`.
+    pub root_ub: Vec<f64>,
+}
+
+/// Zero-decision tolerance for the §3.2 recession verification, after the ray
+/// direction's `x` block is normalised to `‖d‖_inf = 1`: residuals are
+/// compared against `1e-9 * (1 + ‖data‖_inf)`, the same relative backward-
+/// error scale the simplex ray gate uses when it certifies `RayCertificate`
+/// (`simplex::unbounded_ray`), so the nonconvex-side check is neither weaker
+/// nor stricter than the certificate it consumes.
+const RAY_RECESSION_ZERO_TOL: f64 = 1e-9;
+
+/// Descent threshold on `q0^T d` for the §3.2 objective condition (plan line
+/// 107, `q0^T d < 0`): with `‖d‖_inf = 1` a directional slope below
+/// `1e-9` is indistinguishable from zero at the certificate tolerance, so
+/// only strictly-negatives beyond this slack certify unbounded descent.
+const RAY_DESCENT_TOL: f64 = 1e-9;
+
+/// `‖M‖_inf` (max absolute row sum) over a CSC matrix, `O(nnz)`.
+fn max_abs_row_sum(m: &CscMatrix) -> f64 {
+    let cp = m.col_ptr();
+    let ri = m.row_ind();
+    let va = m.values();
+    let mut rows = vec![0.0f64; m.nrows().max(1)];
+    for j in 0..m.ncols() {
+        for k in cp[j]..cp[j + 1] {
+            rows[ri[k]] += va[k].abs();
+        }
+    }
+    rows.into_iter().fold(0.0f64, f64::max)
+}
+
+/// Verify that a relaxation recession ray certifies *original-problem*
+/// unboundedness (plan §3.2 lines 100–111, decision D6). `ray` is the
+/// simplex-verified certificate in relaxation coordinates `[x, w]`; only its
+/// `x` block `d` matters, normalised to `‖d‖_inf = 1`. All coefficients are
+/// the **original** rows (plan line 103: a row convex in the relaxation is
+/// still verified, never waived).
+///
+/// Checks (each `Err`-reasoned; never a panic):
+/// - `d_R = 0` (plan 108: structural from the box rows, asserted here);
+/// - integer variables `d_k = 0` (the lattice's only recession direction);
+/// - bounds: finite `lb_j` forces `d_j >= 0`, finite `ub_j` forces `d_j <= 0`;
+///   linear rows `G d <= 0`, `A_eq d = 0`;
+/// - every quadratic row (`Eq` split to `±P` upstream gives `q^T d = 0` for
+///   free, plan 109): `P_k d = 0` and `q_k^T d <= 0`. Soundness: `P_k d = 0`
+///   kills the `t²` and cross terms, so `f_k(x̃ + t d)` grows at most
+///   linearly with non-positive slope and stays `<= 0`;
+/// - objective `P0 d = 0` and `q0^T d <= -RAY_DESCENT_TOL`, so
+///   `f0(x̃ + t d) -> -inf`.
+///
+/// Interpretation record: plan line 105's "規則 2 の変数: `d_i = 0`" is a
+/// device of line 108's support argument; read literally it would also fire
+/// on vacuously rule-2 variables (free linear variables) and make the
+/// plan-line-111 `Unbounded` return unreachable, contradicting the plan's
+/// own contract. Its load-bearing content (`d^T P_k d = 0` per row) is
+/// enforced *directly* by the `P_k d = 0` checks, which subsume line 105
+/// wherever quadratic support exists; uncertified rays stay `NotSupported`.
+fn verify_recession_unboundedness(
+    qp: &NonconvexQcqp,
+    integers: &[usize],
+    static_: &StaticRelax,
+    ray: &crate::problem::RayCertificate,
+) -> Result<(), String> {
+    let n = qp.n;
+    let nv = n + static_.pairs.len();
+    if ray.direction.len() != nv || ray.base_point.len() != nv {
+        return Err(format!(
+            "ray certificate dimension {} / {} != relaxation dimension {nv}",
+            ray.direction.len(),
+            ray.base_point.len()
+        ));
+    }
+    let norm = ray.direction[..n]
+        .iter()
+        .fold(0.0f64, |a: f64, &v| a.max(v.abs()));
+    if norm == 0.0 || norm.is_nan() {
+        return Err(
+            "ray direction has a zero x-block (only lifted w coordinates drift): \
+             no recession direction of the original problem to verify"
+                .to_string(),
+        );
+    }
+    let d: Vec<f64> = ray.direction[..n].iter().map(|&v| v / norm).collect();
+    let zero = |scale: f64| RAY_RECESSION_ZERO_TOL * (1.0 + scale);
+
+    for (j, &dj) in d.iter().enumerate() {
+        if static_.required[j] && dj.abs() > zero(0.0) {
+            return Err(format!(
+                "ray moves bound-required variable {j} (d[{j}] = {dj}): the box rows \
+                 should have forced d_R = 0 (plan §3.2 line 108)"
+            ));
+        }
+        if qp.lb[j].is_finite() && dj < -zero(0.0) {
+            return Err(format!(
+                "ray decreases bounded variable {j} (d[{j}] = {dj} < 0 with lb = {})",
+                qp.lb[j]
+            ));
+        }
+        if qp.ub[j].is_finite() && dj > zero(0.0) {
+            return Err(format!(
+                "ray increases bounded variable {j} (d[{j}] = {dj} > 0 with ub = {})",
+                qp.ub[j]
+            ));
+        }
+    }
+    for &k in integers {
+        if d[k].abs() > zero(0.0) {
+            return Err(format!(
+                "ray moves integer variable {k} (d[{k}] = {}): the integer lattice \
+                 admits no nonzero recession direction on it",
+                d[k]
+            ));
+        }
+    }
+
+    let check_le = |name: &str, vals: &[f64], scale: f64| -> Result<(), String> {
+        for (i, &v) in vals.iter().enumerate() {
+            if v > zero(scale) {
+                return Err(format!("{name} row {i} grows along the ray ({v} > 0)"));
+            }
+        }
+        Ok(())
+    };
+    let check_eq0 = |name: &str, vals: &[f64], scale: f64| -> Result<(), String> {
+        for (i, &v) in vals.iter().enumerate() {
+            if v.abs() > zero(scale) {
+                return Err(format!("{name} row {i} is not flat along the ray ({v})"));
+            }
+        }
+        Ok(())
+    };
+
+    check_le(
+        "g_lin",
+        &qp.g_lin
+            .mat_vec_mul(&d)
+            .expect("g_lin.ncols() == n: NonconvexQcqp::validate ran at global_core entry"),
+        max_abs_row_sum(&qp.g_lin),
+    )?;
+    check_eq0(
+        "a_eq",
+        &qp.a_eq
+            .mat_vec_mul(&d)
+            .expect("a_eq.ncols() == n: NonconvexQcqp::validate ran at global_core entry"),
+        max_abs_row_sum(&qp.a_eq),
+    )?;
+
+    for (k, qc) in qp.quad.iter().enumerate() {
+        let pd =
+            qc.p.mat_vec_mul(&d)
+                .expect("quad[k].p is (n, n): NonconvexQcqp::validate ran at global_core entry");
+        let scale = max_abs_row_sum(&qc.p);
+        check_eq0(&format!("quad[{k}].p d"), &pd, scale)?;
+        let qd: f64 = qc.q.iter().zip(&d).map(|(a, b)| a * b).sum();
+        let qscale = qc.q.iter().fold(0.0f64, |a: f64, &v| a.max(v.abs()));
+        if qd > zero(qscale) {
+            return Err(format!(
+                "quad[{k}] grows along the ray (q^T d = {qd} > 0): the row is not a \
+                 recession inequality in this direction"
+            ));
+        }
+    }
+    if let Some(p0) = &qp.p0 {
+        let pd = p0
+            .mat_vec_mul(&d)
+            .expect("p0 is (n, n): validated at global_core entry");
+        check_eq0("p0 d", &pd, max_abs_row_sum(p0))?;
+    }
+    let q0d: f64 = qp.q0.iter().zip(&d).map(|(a, b)| a * b).sum();
+    if q0d > -RAY_DESCENT_TOL {
+        return Err(format!(
+            "objective does not descend along the ray (q0^T d = {q0d}, need < -{RAY_DESCENT_TOL})"
+        ));
+    }
+    Ok(())
+}
+
 /// McCormick spatial branch-and-bound core shared by [`solve_global_qcqp`] /
 /// [`solve_global_miqcp`].
 ///
@@ -915,6 +1673,7 @@ fn global_core(
     integers: &[usize],
     opts: &ConicOptions,
     g: &GlobalOptions,
+    seed: Option<&GlobalSeed>,
 ) -> GlobalResult {
     if let Err(e) = qp
         .validate()
@@ -933,6 +1692,56 @@ fn global_core(
     let static_ = build_static(qp);
     let mut incumbent = f64::INFINITY;
     let mut inc_x: Vec<f64> = Vec::new();
+    // Root box: the seed's derived box when present (plan §4.2 line 136
+    // keeps derived bounds out of `qp.lb`/`qp.ub`), else the problem box.
+    let mut root_box = (qp.lb.clone(), qp.ub.clone());
+    if let Some(s) = seed {
+        let bad = if s.x.len() != qp.n || s.root_lb.len() != qp.n || s.root_ub.len() != qp.n {
+            Some("seed x/root_lb/root_ub length != n".to_string())
+        } else if s
+            .root_lb
+            .iter()
+            .zip(&s.root_ub)
+            .any(|(l, u)| l.is_nan() || u.is_nan() || l > u)
+        {
+            // Non-finite (`±inf`) box sides are allowed -- they are what the
+            // declared box itself carries for free variables; NaN is not.
+            Some("seed root box must satisfy lb <= ub (no NaN sides)".to_string())
+        } else if s
+            .root_lb
+            .iter()
+            .zip(&s.root_ub)
+            .zip(qp.lb.iter().zip(&qp.ub))
+            .any(|((&l, &u), (&pl, &pu))| l < pl || u > pu)
+        {
+            // The derived box must refine, never widen, the declared box (a
+            // widened side would admit points the public `feasible()`
+            // contract rejects).
+            Some("seed root box widens the declared box".to_string())
+        } else if !feasible(qp, &s.x, g.feas_tol) || !all_integral(&s.x, integers, g.int_tol) {
+            Some("seed x is not feasible for the original problem at feas_tol".to_string())
+        } else {
+            let fx = objective(qp, &s.x);
+            ((s.f - fx).abs() > 1e-9 * (1.0 + fx.abs())).then(|| {
+                format!(
+                    "seed objective mismatch: seed.f = {} vs recomputed {fx}",
+                    s.f
+                )
+            })
+        };
+        if let Some(e) = bad {
+            return GlobalResult {
+                status: SolveStatus::NotSupported(format!("invalid global seed: {e}")),
+                objective: f64::NAN,
+                x: vec![],
+                nodes: 0,
+                gap: f64::INFINITY,
+            };
+        }
+        incumbent = objective(qp, &s.x);
+        inc_x = s.x.clone();
+        root_box = (s.root_lb.clone(), s.root_ub.clone());
+    }
     let mut nodes = 0usize;
     let mut limited = false;
     let mut timed_out = false;
@@ -944,7 +1753,13 @@ fn global_core(
     // (`-inf` at the root).
     let mut lower_bound = f64::INFINITY;
 
-    let mut stack = vec![(qp.lb.clone(), qp.ub.clone(), f64::NEG_INFINITY)];
+    let mut stack = vec![(root_box.0, root_box.1, f64::NEG_INFINITY)];
+    // Global OA tangent pool (`(pair_index, center)`): tangents of rule-2
+    // diagonals `w_ii >= 2c*x_i - c^2`. Global validity: each row is valid
+    // for the whole graph `w_ii = x_i^2`, hence every node box -- see
+    // `oa_add_cut` (plan §3.2 line 96: cut + re-solve, never branch on the
+    // diagonal slack).
+    let mut oa_pool: Vec<(usize, f64)> = Vec::new();
 
     while let Some((lb, ub, inherited)) = stack.pop() {
         // `stop_requested` covers both the wall-clock deadline and the
@@ -965,8 +1780,26 @@ fn global_core(
             break;
         }
         nodes += 1;
-        let relax = build_relax(&static_, &lb, &ub);
-        let res = solve_relax_lp(&relax, opts.deadline, opts.cancel_flag.as_ref());
+        // Solve the node, retrying with OA tangents while they still change
+        // the pool (plan §3.2 lines 96/100, integrated per the G2b-D6
+        // milestone note): see `oa_refine_node`.
+        let res = match oa_refine_node(&static_, &lb, &ub, g, opts, &mut oa_pool) {
+            Ok(result) => result,
+            Err(()) => {
+                return GlobalResult {
+                    status: SolveStatus::NotSupported(format!(
+                        "OA tangent retry budget exhausted at node {}: more than \
+                     {} re-solves kept learning new cuts without the relaxation \
+                     settling (plan §3.2 line 96 budget, OA_MAX_CUT_ROUNDS_PER_NODE)",
+                        nodes, OA_MAX_CUT_ROUNDS_PER_NODE
+                    )),
+                    objective: incumbent,
+                    x: inc_x,
+                    nodes,
+                    gap: f64::INFINITY,
+                }
+            }
+        };
         match res.status {
             SolveStatus::Optimal => {}
             // Empty relaxation => the region holds no feasible point: a
@@ -978,12 +1811,58 @@ fn global_core(
                 lower_bound = lower_bound.min(inherited);
                 break;
             }
-            // NumericalError, MaxIterations, SuboptimalSolution, Unbounded
-            // (the lifted polytope is a bounded box, so an "unbounded" LP is
-            // a numerical artefact), …: nothing was proven about the region.
-            // Prune it — there is no trustworthy point to branch on — but
-            // record the failure so the search never claims a certificate,
-            // and keep the region's inherited bound in the global bound.
+            // Plan §3.2 lines 98-111 (decision D6): an unbounded relaxation
+            // cannot be fixed by branching (the recession direction lives on
+            // free variables and survives into every child), so branch-free
+            // disposition only: consume the simplex-verified ray against the
+            // ORIGINAL problem data, and require a base point `x̃` that the
+            // original `feasible()` contract accepts -- the relaxation
+            // solution's x-projection is a McCormick point, not a substitute
+            // (plan line 110). Verified + base present => genuinely
+            // Unbounded (return, objective -inf); anything else =>
+            // NotSupported with the reason. Never `numerical_failures`: an
+            // unbounded LP proved something ("the relaxation is
+            // unbounded"), it is not a numerical artefact.
+            SolveStatus::Unbounded => {
+                let verdict = match (&res.ray, inc_x.is_empty()) {
+                    (None, _) => Err("relaxation LP reported Unbounded without a verified ray \
+                         certificate (unproven/presolve-reduced verdict): cannot \
+                         certify original-problem unboundedness"
+                        .to_string()),
+                    (Some(_), true) => Err("relaxation unbounded with a verified ray, but no \
+                         original-problem feasible base point x̃ is at hand (the \
+                         relaxation solution's x-projection is a McCormick point, \
+                         plan §3.2 line 110): unboundedness stays unproven"
+                        .to_string()),
+                    (Some(ray), false) => {
+                        verify_recession_unboundedness(qp, integers, &static_, ray)
+                    }
+                };
+                return match verdict {
+                    Ok(()) => GlobalResult {
+                        status: SolveStatus::Unbounded,
+                        objective: f64::NEG_INFINITY,
+                        x: inc_x,
+                        nodes,
+                        gap: f64::INFINITY,
+                    },
+                    Err(reason) => GlobalResult {
+                        status: SolveStatus::NotSupported(reason),
+                        objective: incumbent,
+                        x: inc_x,
+                        nodes,
+                        gap: f64::INFINITY,
+                    },
+                };
+            }
+            // NumericalError, MaxIterations, SuboptimalSolution, …: nothing
+            // was proven about the region. Prune it — there is no trustworthy
+            // point to branch on — but record the failure so the search never
+            // claims a certificate, and keep the region's inherited bound in
+            // the global bound. (`Unbounded` is handled by its own arm above
+            // since G2b: with free variables the lifted polytope is no longer
+            // a bounded box, so unboundedness is a real verdict to consume,
+            // not a numerical artefact to count.)
             _ => {
                 numerical_failures += 1;
                 lower_bound = lower_bound.min(inherited);
@@ -1043,10 +1922,25 @@ fn global_core(
             continue;
         }
 
-        // (2) spatial branching on the worst McCormick term gap.
+        // (2) Spatial branching on the worst McCormick term gap.
+        //
+        // Candidates are exactly `static_.mc_pairs` (decision D4): pairs with
+        // emitted interval + 4-facet envelopes. Rule-2 diagonals are excluded
+        // -- their `w_ii` sits at the under-estimator by design (tangent +
+        // OA cuts), so `|w_ii − x_i²|` would branch forever, and on a free
+        // `x_i` the fallback split `0.5·(lb+ub)` is `∓inf` and re-pushes the
+        // identical box (plan §0.1 line 16). Every `mc_pair` endpoint is in
+        // `R` or D1-exempt with finite raw bounds, and rule-2-vetoed
+        // diagonals are in `R`: all candidates live in finite boxes, the
+        // load-bearing property pinned by the sentinel test.
+        // Decision D5 (recorded): no `w_ii := x_i²` projection on the leaf
+        // gap or incumbent test -- `feasible`/`objective` read `x` only, so
+        // a projection would have no consumer (rule-2 pairs leave the gap
+        // via D4 anyway).
         let mut worst_gap = 0.0;
         let mut branch_var = None;
-        for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
+        for &pi in &static_.mc_pairs {
+            let &(i, j) = &static_.pairs[pi];
             let wv = res.x[qp.n + pi];
             let gap = (wv - x[i] * x[j]).abs();
             if gap > worst_gap {
@@ -1387,7 +2281,7 @@ mod tests {
             int_tol: 1e-3,
             ..GlobalOptions::default()
         };
-        let res = solve_global_miqcp(&qp, &[0], &ConicOptions::default(), &g);
+        let res = solve_global_miqcp(&qp, &[0], &ConicOptions::default(), &g, None);
         assert!(
             res.x.is_empty(),
             "a leaf point violating the equality by 5e-5 (50x feas_tol=1e-6, \
@@ -1434,7 +2328,7 @@ mod tests {
             int_tol: f64::NAN,
             ..GlobalOptions::default()
         };
-        let res = solve_global_miqcp(&qp, &[0, 1], &ConicOptions::default(), &g);
+        let res = solve_global_miqcp(&qp, &[0, 1], &ConicOptions::default(), &g, None);
         assert!(
             matches!(res.status, SolveStatus::NotSupported(_)),
             "NaN int_tol must be rejected, got {res:?}"
@@ -1522,16 +2416,259 @@ mod tests {
 
         let mut bad = base();
         bad.lb = vec![f64::NAN, 0.0];
-        assert!(bad.validate().is_err(), "non-finite lb must be rejected");
-
-        let mut bad = base();
-        bad.ub = vec![f64::INFINITY, 1.0];
-        assert!(bad.validate().is_err(), "non-finite ub must be rejected");
+        assert!(bad.validate().is_err(), "NaN lb must be rejected");
 
         let mut bad = base();
         bad.lb = vec![5.0, 0.0];
         bad.ub = vec![1.0, 1.0];
         assert!(bad.validate().is_err(), "lb > ub must be rejected");
+    }
+
+    /// Decision D8 replacement pair for the old "non-finite ub must be
+    /// rejected" assertion (removed per the delete-and-add rule): finiteness
+    /// is now demanded exactly on `R`.
+    ///
+    /// Sentinel (plan §5 sentinel 1 direction): with `x0` in `R` (an
+    /// indefinite constraint row touches it) a free `x0` must still be
+    /// rejected naming variable 0; a free `x1` outside `R` must be accepted.
+    /// Reverting `validate` to the old all-finite rule fails the accept half;
+    /// dropping the `R` gate fails the reject half.
+    #[test]
+    fn validate_requires_finite_bounds_only_on_r() {
+        // quad[0]: -x0^2 + x0 <= 0 (composed diagonal -1 < 0 -> rule-2 veto
+        // marks x0; nothing touches x1) => R = {x0}.
+        let base = || NonconvexQcqp {
+            n: 2,
+            p0: None,
+            q0: vec![0.0, 0.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0], &[0], &[-2.0], 2, 2).unwrap(),
+                q: vec![1.0, 0.0],
+                r: 0.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0, 0.0],
+            ub: vec![1.0, 1.0],
+        };
+        assert!(base().validate().is_ok());
+
+        let mut free_r = base();
+        free_r.lb = vec![f64::NEG_INFINITY, 0.0];
+        free_r.ub = vec![f64::INFINITY, 1.0];
+        let err = free_r.validate().unwrap_err();
+        assert!(
+            err.contains("lb[0]") && err.contains('R'),
+            "free x0 in R must be rejected by name: {err}"
+        );
+
+        let mut free_out = base();
+        free_out.lb = vec![0.0, f64::NEG_INFINITY];
+        free_out.ub = vec![1.0, f64::INFINITY];
+        assert!(
+            free_out.validate().is_ok(),
+            "free x1 outside R must be accepted"
+        );
+
+        // NaN bounds are corrupt data, not "free": rejected everywhere.
+        let mut nan_free = base();
+        nan_free.ub = vec![1.0, f64::NAN];
+        assert!(
+            nan_free.validate().is_err(),
+            "NaN ub outside R rejected too"
+        );
+    }
+
+    /// Plan §5 sentinel 1 (validate level): plan §3.1 example 1 — free
+    /// `x`, PSD ellipsoid-style rows — must clear `validate` (the classifier
+    /// exempts PSD rows, so `R` is empty). Full end-to-end (no
+    /// `NotSupported("... not finite ...")`) is pinned in the M5 suite.
+    #[test]
+    fn validate_accepts_psd_rows_over_free_variables() {
+        // min x1  s.t.  x0^2 + x1^2 - 1 <= 0, x free.
+        let n = 2usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![0.0, 1.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap(),
+                q: vec![0.0, 0.0],
+                r: -1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![f64::NEG_INFINITY, f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY, f64::INFINITY],
+        };
+        qp.validate()
+            .expect("PSD rows over free x must validate (R empty)");
+    }
+
+    /// Plan §5 sentinel 1 (full path, M5): an ellipsoid constraint over
+    /// *free* `x` -- plan §3.1 example 1's shape, `R = {}` -- must reach a
+    /// certified optimum through the public entry point, not the pre-D8
+    /// `NotSupported("... bounds ...")` rejection. Fixture: `min −x0 − x1`
+    /// over the unit disk `x0² + x1² <= 1` with the redundant linear guard
+    /// `x0 + x1 <= 2` (√2 < 2, so it changes nothing but keeps every node LP
+    /// bounded: the disposition never depends on whether the simplex exposes
+    /// a ray). Hand oracle, independent of the solver: Cauchy–Schwarz gives
+    /// `x0 + x1 <= √2·‖x‖ <= √2` with equality at `x0 = x1 = 1/√2`, so the
+    /// optimum is exactly `−√2`. `R = {}`: the PSD row is rule 1, its
+    /// diagonals rule 2 (lift coeff +1), no off-diagonal pairs -> no
+    /// `mc_pairs`, so the OA cut pool alone must converge the root.
+    /// Reverting D8 (validate demands finite bounds on *all* variables) makes
+    /// this fail as `NotSupported` before a single node is solved.
+    #[test]
+    fn r_empty_ellipsoid_over_free_x_reaches_optimum_end_to_end() {
+        let n = 2usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![-1.0, -1.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap(),
+                q: vec![0.0, 0.0],
+                r: -1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap(),
+            h_lin: vec![2.0],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![f64::NEG_INFINITY, f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY, f64::INFINITY],
+        };
+        qp.validate()
+            .expect("R = {} over free x must validate (D8)");
+        let g = GlobalOptions {
+            max_nodes: 200,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g, None);
+        assert!(
+            !matches!(res.status, SolveStatus::NotSupported(_)),
+            "free variables outside R must never be a bounds rejection: {res:?}"
+        );
+        let root2 = 2.0f64.sqrt();
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            (res.objective + root2).abs() <= 1e-5,
+            "hand oracle: min over the unit disk is −sqrt(2) at (1/sqrt2, 1/sqrt2): {res:?}"
+        );
+        assert_eq!(res.nodes, 1, "no spatial branch without mc_pairs: {res:?}");
+        assert!(
+            (res.x[0] - 1.0 / root2).abs() <= 1e-3 && (res.x[1] - 1.0 / root2).abs() <= 1e-3,
+            "optimal point x = (1/sqrt2, 1/sqrt2): {:?}",
+            res.x
+        );
+        // D7 public wiring on the same fixture: a valid seed refines the
+        // search start and changes nothing about the certified answer; a
+        // stale seed.f is refused by name, never adopted as a bound.
+        let seed = GlobalSeed {
+            x: vec![0.0, 0.0],
+            f: 0.0,
+            root_lb: qp.lb.clone(),
+            root_ub: qp.ub.clone(),
+        };
+        let seeded = solve_global_qcqp(&qp, &ConicOptions::default(), &g, Some(&seed));
+        assert_eq!(seeded.status, SolveStatus::Optimal, "{seeded:?}");
+        assert!((seeded.objective + root2).abs() <= 1e-5, "{seeded:?}");
+        let stale = GlobalSeed {
+            f: 5.0,
+            ..seed.clone()
+        };
+        let bad = solve_global_qcqp(&qp, &ConicOptions::default(), &g, Some(&stale));
+        match &bad.status {
+            SolveStatus::NotSupported(reason) => {
+                assert!(reason.contains("invalid global seed"), "{reason}");
+                assert!(reason.contains("objective mismatch"), "{reason}");
+            }
+            other => panic!("stale seed.f must fail as NotSupported, got {other:?}"),
+        }
+        assert_eq!(
+            bad.nodes, 0,
+            "the seed gate runs before the search: {bad:?}"
+        );
+    }
+
+    /// Plan §5 sentinel 2 (full path, M5): the flipped `>=` row
+    /// `x0² − x1 >= 0` normalizes to `−x0² + x1 <= 0`, whose diagonal lift
+    /// coefficient is `−1`, so rule 2 must NOT accept it and `x0 ∈ R`.
+    /// (a) free `x0` must fail as `NotSupported` naming the R bound gate --
+    /// the rejection itself is the sentinel payload. (b) with `x0` boxed to
+    /// `[-2, 1]`, the rule-2-vetoed diagonal sits on the McCormick secant
+    /// side and the search reaches the hand oracle `-4` (maximize
+    /// `x1 <= x0²` over the box: `x0 = -2, x1 = 4`; secant exact at the box
+    /// end, so the root itself certifies). Patching rule 2 to accept negative
+    /// diagonal coefficients (the revert this sentinel pins at full path;
+    /// `negative_flipped_diagonal_vetoes_rule2_and_requires_bound` covers the
+    /// classify level) moves `x0` out of `R`: (a) then reports the
+    /// recession/x̃ reason instead of the R rejection and (b) loses the
+    /// secant, so the relaxation runs `x1 -> +inf` and the `-4` certificate
+    /// never arrives -- both halves fail.
+    #[test]
+    fn flipped_negative_diagonal_rejection_names_the_r_bound_gate_end_to_end() {
+        // (1/2)x'Px + q'x + r = -x0^2 + x1 <= 0, i.e. x1 <= x0^2.
+        let row = || GQuadConstraint {
+            p: CscMatrix::from_triplets(&[0], &[0], &[-2.0], 2, 2).unwrap(),
+            q: vec![0.0, 1.0],
+            r: 0.0,
+        };
+        let base = || NonconvexQcqp {
+            n: 2,
+            p0: None,
+            q0: vec![0.0, -1.0],
+            quad: vec![row()],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            b_eq: vec![],
+            lb: vec![-2.0, f64::NEG_INFINITY],
+            ub: vec![1.0, f64::INFINITY],
+        };
+        // (a) x0 free: accepted only to be rejected by the R gate, by name.
+        let mut free_x0 = base();
+        free_x0.lb[0] = f64::NEG_INFINITY;
+        free_x0.ub[0] = f64::INFINITY;
+        let res = solve_global_qcqp(
+            &free_x0,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
+        match &res.status {
+            SolveStatus::NotSupported(reason) => {
+                assert!(
+                    reason.contains("lb[0]") && reason.contains("bound-requirement set R"),
+                    "rejection must name the R-gated variable: {reason}"
+                );
+            }
+            other => {
+                panic!("rule-2 veto puts x0 in R: a free x0 must hit the R gate, got {other:?}")
+            }
+        }
+        assert_eq!(res.nodes, 0, "rejected at validate, not in the search");
+        // (b) x0 boxed: secant side solves to the hand oracle -4.
+        let res = solve_global_qcqp(
+            &base(),
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            (res.objective + 4.0).abs() <= 1e-5,
+            "hand oracle: max x1 = x0^2 on x0 = -2 is 4, objective -4: {res:?}"
+        );
+        assert!(
+            (res.x[0] + 2.0).abs() <= 1e-4 && (res.x[1] - 4.0).abs() <= 1e-4,
+            "optimal point (-2, 4): {:?}",
+            res.x
+        );
     }
 
     /// Companion to `validate_rejects_every_mismatched_dimension`: the public
@@ -1556,7 +2693,12 @@ mod tests {
             lb: vec![0.0, 0.0],
             ub: vec![1.0, 1.0],
         };
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
         assert!(
             matches!(res.status, SolveStatus::NotSupported(_)),
             "mismatched q0 length must be a clean NotSupported, got {res:?}"
@@ -1584,6 +2726,7 @@ mod tests {
             &non_finite,
             &ConicOptions::default(),
             &GlobalOptions::default(),
+            None,
         );
         assert!(
             matches!(res.status, SolveStatus::NotSupported(_)),
@@ -1595,6 +2738,7 @@ mod tests {
             &[1],
             &ConicOptions::default(),
             &GlobalOptions::default(),
+            None,
         );
         assert!(
             matches!(res.status, SolveStatus::NotSupported(_)),
@@ -1649,24 +2793,199 @@ mod tests {
         }
     }
 
-    /// Sentinel. The McCormick relaxation of `w = x0^2` over `[-1,1]`
-    /// bounds `w` below by the two endpoint tangents (`w >= 2x-1`, `w >= -2x-1`),
-    /// which meet at `-1` at `x = 0`. The explicit `w`-interval row adds the
-    /// true bound `w >= 0`. Hand oracle: `x^2 >= 0`, so the tight relaxation
-    /// minimum of `w` is exactly 0. Reverting the `w`-box rows drops it to -1.
+    /// Sentinel. The rule-2 diagonal relaxation of `w = x0^2` over `[-1,1]`
+    /// bounds `w` below by the x̄ = 0 tangent row `w >= 0` only: no
+    /// interval rows, no endpoint secant/tangent envelope (decision D2).
+    /// Hand oracle: `x^2 >= 0`, so the tight relaxation minimum of `w` is
+    /// exactly 0. Removing the tangent row makes `w` free and the relaxation
+    /// Unbounded; adding the old envelope rows back is caught by
+    /// `rule2_pair_emits_exactly_one_pair_row` below.
     #[test]
     fn mccormick_w_box_bounds_diagonal_square_below() {
         let qp = min_sq();
         let static_ = build_static(&qp);
         assert_eq!(static_.pairs, vec![(0, 0)]);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
-        let res = solve_relax_lp(&relax, None, None);
+        let res = solve_relax_lp(&relax, None, None, None).result;
         assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
         assert!(
             res.objective.abs() < 1e-7,
             "relaxed min w must be 0 (true x^2 >= 0), got {}",
             res.objective
         );
+    }
+
+    /// Sentinel (decision D2, plan §3.2): a rule-2 diagonal pair contributes
+    /// exactly one relaxation row per pair -- the constant under-estimator
+    /// cut `-w_ii <= 0` -- and never the interval rows or the 4 McCormick
+    /// facets. Reverting D2 (envelope rows back for rule-2 pairs) raises the
+    /// row count and fails.
+    #[test]
+    fn rule2_pair_emits_exactly_one_pair_row() {
+        let qp = min_sq();
+        let static_ = build_static(&qp);
+        assert_eq!(static_.rule2_pair, vec![true]);
+        assert_eq!(static_.mc_pair, vec![false]);
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
+        // m = m_fixed(0) + box(2) + tangent(1).
+        assert_eq!(relax.cone.l, 3, "box rows + one tangent row");
+        assert_eq!(relax.h, vec![1.0, 1.0, 0.0], "ub, -lb, tangent rhs 0");
+    }
+
+    /// Sentinel (decision D3 / plan §3.2): non-finite bounds never reach the
+    /// relaxation's `h`, and a pair with a non-finite endpoint emits no
+    /// interval/envelope rows (its `w` column stays unconstrained except by
+    /// the lifted fixed rows -- a valid over-relaxation, since the lifted
+    /// rows contain the graph exactly). Reverting to the unconditional box /
+    /// pair loops pushes `±inf` into `h` and panics the LP constructor.
+    #[test]
+    fn non_finite_bounds_and_pairs_never_reach_h() {
+        // min x1  s.t.  -x0^2 + x1 <= 0;  x0 in [-2, 2] (rule-2-vetoed
+        // diagonal -> R), x1 free (linear + this row's linear part).
+        let n = 2usize;
+        let p = CscMatrix::from_triplets(&[0], &[0], &[-2.0], n, n).unwrap();
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![0.0, 1.0],
+            quad: vec![GQuadConstraint {
+                p,
+                q: vec![0.0, 1.0],
+                r: 0.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![-2.0, f64::NEG_INFINITY],
+            ub: vec![2.0, f64::INFINITY],
+        };
+        let static_ = build_static(&qp);
+        // pair (0,0): diagonal lift coeff -1 -> rule 2 vetoed, x0 finite -> mc.
+        assert_eq!(static_.rule2_pair, vec![false]);
+        assert_eq!(static_.mc_pair, vec![true]);
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
+        // m = fixed quad(1) + box(2: x0 only) + envelope(6).
+        assert_eq!(relax.cone.l, 9, "no box rows for the free x1");
+        assert!(
+            relax.h.iter().all(|v| v.is_finite()),
+            "±inf must never reach h: {:?}",
+            relax.h
+        );
+    }
+
+    /// Sentinel (decision D3): an off-diagonal pair whose endpoints are free
+    /// contributes no interval/McCormick rows; only its lifted fixed rows
+    /// remain (finite rhs), so the relaxation stays constructible.
+    #[test]
+    fn free_off_diagonal_pair_emits_no_envelope() {
+        // -x0*x1 + 1 <= 0 over free x (both pair endpoints free).
+        let n = 2usize;
+        let p = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[-1.0, -1.0], n, n).unwrap();
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![0.0, 0.0],
+            quad: vec![GQuadConstraint {
+                p,
+                q: vec![0.0, 0.0],
+                r: 1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: [f64::NEG_INFINITY; 2].to_vec(),
+            ub: [f64::INFINITY; 2].to_vec(),
+        };
+        let static_ = build_static(&qp);
+        assert_eq!(static_.mc_pair, vec![false]);
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
+        assert_eq!(relax.cone.l, 1, "only the lifted quad row survives");
+        assert_eq!(relax.h, vec![-1.0], "h = -r, all finite");
+    }
+
+    /// Sentinel (decision D4, plan §5 test 3): a rule-2 diagonal `w_ii` must
+    /// never be a spatial branching candidate. Fixture: `min x0^2 − x1  s.t.
+    /// x0 − x1 = 0`, `x1 in [0, 5]`, `x0` free — the lifted pair (0,0) is a
+    /// rule-2 diagonal with a *free* box. Pre-D4 (branching scanned all
+    /// pairs), the root relaxation lands at `x0 = x1 = 5, w = 0`, the term gap
+    /// `|w − x0²| = 25` selects `x0` as branch variable, the relaxation point
+    /// sits exactly at the child box's finite end, the fallback split
+    /// `0.5·(lb+ub) = 0.5·(5 + inf)` is `+inf`, and the re-pushed child has
+    /// the identical `[5, inf]` box — the search consumes the whole node
+    /// budget without progress (plan §0.1 line 16). Post-D4 the root is an
+    /// immediate leaf: exactly one node is processed.
+    #[test]
+    fn rule2_diagonal_is_never_a_branch_candidate() {
+        let n = 2usize;
+        let p = CscMatrix::from_triplets(&[0], &[0], &[2.0], n, n).unwrap();
+        let qp = NonconvexQcqp {
+            n,
+            p0: Some(p),
+            q0: vec![0.0, -1.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, -1.0], 1, n).unwrap(),
+            b_eq: vec![0.0],
+            lb: vec![f64::NEG_INFINITY, 0.0],
+            ub: vec![f64::INFINITY, 5.0],
+        };
+        let static_ = build_static(&qp);
+        assert_eq!(
+            static_.mc_pairs,
+            Vec::<usize>::new(),
+            "the only pair is a rule-2 diagonal (free x0, diagonal coeff +1)"
+        );
+        let g = GlobalOptions {
+            max_nodes: 50,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g, None);
+        assert_eq!(
+            res.nodes, 1,
+            "root must leaf without any spatial branch (pre-D4 this burned the \
+             50-node budget re-pushing identical infinite boxes): {res:?}"
+        );
+        assert!(
+            !matches!(res.status, SolveStatus::NotSupported(_)),
+            "{res:?}"
+        );
+    }
+
+    /// Companion pin for `rule2_diagonal_is_never_a_branch_candidate`: with a
+    /// genuine McCormick pair present, branching proceeds on its (finite-box)
+    /// endpoints while the rule-2 diagonal stays out of the candidate set.
+    #[test]
+    fn branch_candidates_are_the_envelope_pairs_only() {
+        // min x0^2 + x0*x1 s.t. x in [-1,2]^2: pair (0,0) rule 2, pair (0,1)
+        // off-diagonal (indefinite objective -> R = {x0, x1}, both boxed).
+        let n = 2usize;
+        let p = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 0], &[2.0, 1.0, 1.0], n, n).unwrap();
+        let qp = NonconvexQcqp {
+            n,
+            p0: Some(p),
+            q0: vec![0.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![-1.0, -1.0],
+            ub: vec![2.0, 2.0],
+        };
+        let static_ = build_static(&qp);
+        // pairs sorted ascending: (0,0) then (0,1).
+        assert_eq!(static_.rule2_pair, vec![true, false]);
+        assert_eq!(static_.mc_pairs, vec![1], "only the off-diagonal pair");
+        assert!(static_.mc_pairs.iter().all(|&pi| {
+            let (i, j) = static_.pairs[pi];
+            qp.lb[i].is_finite()
+                && qp.ub[i].is_finite()
+                && qp.lb[j].is_finite()
+                && qp.ub[j].is_finite()
+        }));
     }
 
     /// Sentinel. `solve_relax_lp` must forward the caller's deadline to the
@@ -1679,7 +2998,7 @@ mod tests {
         let static_ = build_static(&qp);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let res = solve_relax_lp(&relax, Some(past), None);
+        let res = solve_relax_lp(&relax, Some(past), None, None).result;
         assert_eq!(
             res.status,
             SolveStatus::Timeout,
@@ -1697,7 +3016,7 @@ mod tests {
         let static_ = build_static(&qp);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let res = solve_relax_lp(&relax, None, Some(&fired));
+        let res = solve_relax_lp(&relax, None, Some(&fired), None).result;
         assert_eq!(
             res.status,
             SolveStatus::Timeout,
@@ -1725,7 +3044,7 @@ mod tests {
             h: vec![0.0],
             cone: ConeSpec { l: 1, soc: vec![] },
         };
-        let res = solve_relax_lp(&relax, None, None);
+        let res = solve_relax_lp(&relax, None, None, None).result;
         assert_eq!(
             res.status,
             SolveStatus::Unbounded,
@@ -1751,6 +3070,488 @@ mod tests {
         );
     }
 
+    /// Fixture for the §3.2 unbounded-verdict tests: `min −x0  s.t.  x1 <= x0`
+    /// and `x1 <= 1`, with the coupling row carried as a quadratic row with
+    /// `P = 0, q = (−1, 1), r = 0`; `x0` free, `x1 <= 1`. The original
+    /// problem is genuinely unbounded along `d = e0` (`(x0, x1) = (t, 0)`,
+    /// objective `-t -> -inf`). A `P = 0` row stores no quadratic support, so
+    /// nothing lifts: `pairs` is empty, the relaxation is the LP itself
+    /// (`R = ∅`), and every expectation below is hand-computable. The coupling
+    /// row is deliberately not separable per column (LP presolve withholds
+    /// the ray certificate for trivially reduced rows -- G2a contract "no
+    /// false certificate"), so this LP surfaces the verified payload.
+    fn free_ray_qp() -> NonconvexQcqp {
+        let n = 2usize;
+        NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![-1.0, 0.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[], &[], &[], n, n).unwrap(),
+                q: vec![-1.0, 1.0],
+                r: 0.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![f64::NEG_INFINITY, f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY, 1.0],
+        }
+    }
+
+    /// Plan §3.2 line 111 / §5 sentinel 5 (Unbounded half): with a seed base
+    /// point `x̃` (Phase 2's local-solver role, wired via the D7 seed), the
+    /// verified relaxation ray passes the recession verification and the
+    /// search must terminate immediately with `Unbounded`, `objective = -inf`
+    /// and the base point -- not burn nodes, not report `SuboptimalSolution`
+    /// (pre-D6, `Unbounded` fell into the `numerical_failures` arm and the
+    /// seed incumbent surfaced as `SuboptimalSolution`).
+    #[test]
+    fn verified_ray_with_seed_returns_unbounded() {
+        let qp = free_ray_qp();
+        let seed = GlobalSeed {
+            x: vec![0.0, 0.0],
+            f: 0.0,
+            root_lb: vec![f64::NEG_INFINITY, f64::NEG_INFINITY],
+            root_ub: vec![f64::INFINITY, 1.0],
+        };
+        // The seed root box must refine (never widen) the declared box, so
+        // the declared x0 side is given a hair of room for the seed box.
+        let mut qp_boxed = qp.clone();
+        qp_boxed.lb[0] = 0.0;
+        qp_boxed.ub[0] = 0.0;
+        let tight = GlobalSeed {
+            root_lb: vec![0.0, -1e-9],
+            root_ub: vec![0.0, 1.0],
+            ..seed.clone()
+        };
+        // (a) declared box free along x0: root relaxation Unbounded, seed
+        //     verifies -> Unbounded verdict at node 1.
+        let res = global_core(
+            &qp,
+            &[],
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            Some(&seed),
+        );
+        assert_eq!(res.status, SolveStatus::Unbounded, "{res:?}");
+        assert_eq!(res.objective, f64::NEG_INFINITY);
+        assert_eq!(res.x, vec![0.0, 0.0], "x must be the verified base x̃");
+        assert_eq!(res.nodes, 1, "the verdict must not burn nodes: {res:?}");
+        // (b) a box that pins the ray direction makes the LP bounded: the
+        //     seed incumbent is reported normally (search proves Optimal).
+        //     The declared box here is `[0, 0]` on x0, so the seed from (a)
+        //     refines it; optimum is the truncation `x0 = 0, x1 = 1` at −0?
+        //     objective `-x0 = 0` everywhere feasible -> incumbent 0, and the
+        //     relaxation lands there: leaf gap 0, Optimal.
+        let res_boxed = global_core(
+            &qp_boxed,
+            &[],
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            Some(&tight),
+        );
+        assert!(
+            matches!(
+                res_boxed.status,
+                SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+            ),
+            "{res_boxed:?}"
+        );
+        assert!(
+            (res_boxed.objective - 0.0).abs() <= 1e-6,
+            "truncated optimum is 0 (x0 pinned): {res_boxed:?}"
+        );
+    }
+
+    /// Plan §3.2 line 110 / §5 sentinel 5 (NotSupported half, no base point):
+    /// the same unbounded relaxation without any `x̃` must terminate at the
+    /// first node with a *reasoned* `NotSupported` -- never an infinite loop
+    /// (branching cannot remove the ray, plan line 99, and the pre-D6 code
+    /// counted this as a numerical failure instead of a verdict).
+    #[test]
+    fn unbounded_without_base_point_is_reasoned_not_supported() {
+        let qp = free_ray_qp();
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions {
+                max_nodes: 200,
+                ..GlobalOptions::default()
+            },
+            None,
+        );
+        match &res.status {
+            SolveStatus::NotSupported(reason) => {
+                assert!(
+                    reason.contains("base point") && reason.contains("x̃"),
+                    "reason must name the missing x̃: {reason}"
+                );
+            }
+            other => panic!("expected reasoned NotSupported, got {other:?} in {res:?}"),
+        }
+        assert_eq!(res.nodes, 1, "must verdict at the first node: {res:?}");
+    }
+
+    /// Plan line 103 in action: `min −x s.t. x² <= 1` (plan line 100's
+    /// example). The true set is bounded, but the finite relaxation carries
+    /// only the `x̄ = 0` tangent `w >= 0`, so its polytope IS unbounded; the
+    /// disposition must never be the `Unbounded` certificate — the ray moves
+    /// `x`, whose rule-2 diagonal grows quadratically along it, so the M6
+    /// recession verifier must veto (or, if the gate withholds the
+    /// certificate, the M3 reasoned `NotSupported` stands). With the
+    /// relaxation LP solved presolve-free the verified ray arrives and the
+    /// M4 OA far-point tangent re-closes the polytope, so the sound terminal
+    /// outcomes are Optimal (hand oracle: optimum `-1` at `x = 1`, the OA
+    /// loop converging at the single root node) or reasoned `NotSupported`;
+    /// `Unbounded` itself must never appear (pre-G2b counted it as a
+    /// numerical failure here; pre-M6 it would have been a false
+    /// certificate).
+    #[test]
+    fn bounded_set_with_unbounded_relaxation_is_not_false_unbounded() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![-1.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0], &[0], &[2.0], n, n).unwrap(),
+                q: vec![0.0],
+                r: -1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY],
+        };
+        let seed = GlobalSeed {
+            x: vec![0.0],
+            f: 0.0,
+            root_lb: vec![f64::NEG_INFINITY],
+            root_ub: vec![f64::INFINITY],
+        };
+        let res = global_core(
+            &qp,
+            &[],
+            &ConicOptions::default(),
+            &GlobalOptions {
+                max_nodes: 200,
+                ..GlobalOptions::default()
+            },
+            Some(&seed),
+        );
+        assert!(
+            !matches!(res.status, SolveStatus::Unbounded),
+            "false unboundedness certificate: {res:?}"
+        );
+        match &res.status {
+            SolveStatus::Optimal => {
+                // Hand oracle: `min -x s.t. x^2 <= 1` has optimum -1 at x = 1.
+                assert!(
+                    (res.objective + 1.0).abs() <= 1e-4,
+                    "OA far-point tangent must close the polytope and converge: {res:?}"
+                );
+            }
+            SolveStatus::NotSupported(reason) => {
+                // The certificate-withheld and diagonal-veto dispositions are
+                // both sound (M3 / M6): what must never happen is the
+                // `Unbounded` certificate itself.
+                assert!(
+                    reason.contains("ray certificate") || reason.contains("quad[0]"),
+                    "reason must name the withheld certificate or the vetoing row: {reason}"
+                );
+            }
+            other => panic!("expected Optimal or reasoned NotSupported, got {other:?} in {res:?}"),
+        }
+        assert_eq!(res.nodes, 1, "must verdict at the first node: {res:?}");
+    }
+
+    #[test]
+    fn oa_retry_cut_far_point_tangent_and_dedupe() {
+        let qp = NonconvexQcqp {
+            n: 1,
+            p0: None,
+            q0: vec![0.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap(),
+                q: vec![0.0],
+                r: -1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b_eq: vec![],
+            lb: vec![f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY],
+        };
+        let static_ = build_static(&qp);
+        let mut pool: Vec<(usize, f64)> = Vec::new();
+        let unbounded = RelaxResult {
+            status: SolveStatus::Unbounded,
+            objective: f64::NEG_INFINITY,
+            x: vec![0.0, 0.0],
+            ray: Some(crate::problem::RayCertificate {
+                direction: vec![2.0, 0.0],
+                base_point: vec![1.0, 0.0],
+            }),
+            warm: None,
+        };
+        assert_eq!(
+            oa_retry_cut(&static_, &unbounded, 1e-6, f64::INFINITY, &mut pool),
+            1
+        );
+        assert_eq!(
+            pool,
+            vec![(0, 1.0 + OA_RAY_LOOKAHEAD)],
+            "far-point tangent center hand-computed"
+        );
+        assert_eq!(
+            oa_retry_cut(&static_, &unbounded, 1e-6, f64::INFINITY, &mut pool),
+            0,
+            "the same ray re-derives the same center: fall through"
+        );
+        // A ray that does not move the diagonal variable (only `w` grows) is
+        // not helped by any tangent -- no cut, straight to the verdict.
+        let w_only = RelaxResult {
+            status: SolveStatus::Unbounded,
+            objective: f64::NEG_INFINITY,
+            x: vec![0.0, 0.0],
+            ray: Some(crate::problem::RayCertificate {
+                direction: vec![0.0, 1.0],
+                base_point: vec![0.0, 0.0],
+            }),
+            warm: None,
+        };
+        assert_eq!(
+            oa_retry_cut(&static_, &w_only, 1e-6, f64::INFINITY, &mut pool),
+            0
+        );
+        // Optimal half: `w < x̄² - viol_tol` cuts at the solution point; a
+        // diagonal within tolerance of its graph does not (margin 1e-4 to
+        // stay clear of float tie ambiguity at the threshold).
+        let violating = RelaxResult {
+            status: SolveStatus::Optimal,
+            objective: 0.0,
+            x: vec![3.0, 0.0],
+            ray: None,
+            warm: None,
+        };
+        assert_eq!(
+            oa_retry_cut(&static_, &violating, 1e-6, f64::INFINITY, &mut pool),
+            1
+        );
+        assert_eq!(pool.last(), Some(&(0, 3.0)));
+        let tight = RelaxResult {
+            status: SolveStatus::Optimal,
+            objective: 0.0,
+            x: vec![3.0, 8.999_9],
+            ray: None,
+            warm: None,
+        };
+        assert_eq!(
+            oa_retry_cut(&static_, &tight, 1e-3, f64::INFINITY, &mut pool),
+            0
+        );
+    }
+
+    /// M4 violation half: `min x0² − x1  s.t.  x0 − x1 = 0`, `x1 in [0, 5]`,
+    /// `x0` free (the D4 sentinel's fixture, optimum `-1/4` at `x = 1/2`).
+    /// The root lands at `x0 = x1 = 5, w = 0` -- a rule-2 diagonal far below
+    /// its graph -- and the OA pool alone (tangents at each new relaxation
+    /// point, valid globally) must converge the search to the true optimum
+    /// at the single root node. Hand oracle: `min x² − x` on `[0, 5]` is
+    /// `-1/4` at `x = 1/2` (complete square), verified independently of the
+    /// solver.
+    #[test]
+    fn oa_violation_cuts_converge_without_branching() {
+        let n = 2usize;
+        let p = CscMatrix::from_triplets(&[0], &[0], &[2.0], n, n).unwrap();
+        let qp = NonconvexQcqp {
+            n,
+            p0: Some(p),
+            q0: vec![0.0, -1.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, -1.0], 1, n).unwrap(),
+            b_eq: vec![0.0],
+            lb: vec![f64::NEG_INFINITY, 0.0],
+            ub: vec![f64::INFINITY, 5.0],
+        };
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
+        assert!(
+            (res.objective - (-0.25)).abs() <= 1e-5,
+            "hand-oracle optimum -1/4 (x = 1/2): {res:?}"
+        );
+        assert_eq!(res.nodes, 1, "{res:?}");
+    }
+
+    /// G2b perf sentinel (warm-start re-solve): a parent basis extended with
+    /// the trailing slack columns of freshly appended `Le` rows must be
+    /// CONSUMED by the LP layer and re-optimised via dual simplex — including
+    /// the OA-relevant case where the parent optimum VIOLATES the appended
+    /// row (basic slack < 0 at entry, the exact state an OA tangent cut
+    /// creates). Fixture is a hand-built free-variable LP (independent oracle:
+    /// the cold solve of the extended LP): min `-x1 - 2 x2` s.t.
+    /// `x1 + x2 <= 6`, `x1 - x2 <= 2`, `x2 <= 3` — optimum `(3, 3)`, obj `-9`;
+    /// appended cut `x1 + 2 x2 <= 7` (violated by `-2` at the parent optimum)
+    /// moves the optimum to `-7`. Reverting `extend_warm_for_appended_cuts`
+    /// (or breaking the trailing-slack column layout assumption) makes the LP
+    /// layer silently fall back to cold and the iteration assert fail.
+    #[test]
+    fn warm_basis_extension_consumes_dual_advanced_resolves() {
+        let row = |ri: &[usize], ci: &[usize], v: &[f64]| {
+            CscMatrix::from_triplets(ri, ci, v, 3, 2).unwrap()
+        };
+        let a = row(
+            &[0, 0, 1, 1, 2],
+            &[0, 1, 0, 1, 1],
+            &[1.0, 1.0, 1.0, -1.0, 1.0],
+        );
+        let parent = LpProblem::new_general(
+            vec![-1.0, -2.0],
+            a.clone(),
+            vec![6.0, 2.0, 3.0],
+            vec![ConstraintType::Le; 3],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
+        let cold_opts = crate::options::SolverOptions {
+            presolve: false,
+            ..Default::default()
+        };
+        let cold = crate::lp::solve_lp_with(&parent, &cold_opts);
+        assert_eq!(cold.status, SolveStatus::Optimal);
+        assert!(
+            (cold.objective + 9.0).abs() <= 1e-9,
+            "hand oracle obj -9: {cold:?}"
+        );
+        let parent_ws = cold
+            .warm_start_basis
+            .as_ref()
+            .expect("free-variable Optimal solve exposes its basis");
+        // Child = parent rows ++ the cut row `x1 + 2 x2 <= 7` at the tail.
+        let child_a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 3, 3],
+            &[0, 1, 0, 1, 1, 0, 1],
+            &[1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 2.0],
+            4,
+            2,
+        )
+        .unwrap();
+        let child = LpProblem::new_general(
+            vec![-1.0, -2.0],
+            child_a,
+            vec![6.0, 2.0, 3.0, 7.0],
+            vec![ConstraintType::Le; 4],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
+        let cold_child = crate::lp::solve_lp_with(&child, &cold_opts);
+        assert_eq!(cold_child.status, SolveStatus::Optimal);
+        assert!(
+            (cold_child.objective + 7.0).abs() <= 1e-9,
+            "hand oracle obj -7 after the cut: {cold_child:?}"
+        );
+        let extension = extend_warm_for_appended_cuts(&parent, parent_ws, &child)
+            .expect("trailing-row slack extension must be well-shaped");
+        assert_eq!(extension.basis.len(), parent_ws.basis.len() + 1);
+        let warm_opts = crate::options::SolverOptions {
+            presolve: false,
+            warm_start: Some(extension),
+            ..Default::default()
+        };
+        let warm = crate::lp::solve_lp_with(&child, &warm_opts);
+        assert_eq!(warm.status, SolveStatus::Optimal);
+        assert!(
+            (warm.objective - cold_child.objective).abs() <= 1e-9,
+            "warm re-solve must reach the same optimum: {} vs {}",
+            warm.objective,
+            cold_child.objective
+        );
+        assert!(
+            warm.iterations < cold.iterations && warm.iterations < cold_child.iterations,
+            "the extended parent basis must be consumed: warm {} iters vs parent cold {} / child cold {}",
+            warm.iterations,
+            cold.iterations,
+            cold_child.iterations
+        );
+    }
+
+    /// Pool mechanics with an independent oracle: `oa_add_cut` dedupes the
+    /// same tangent (pair + center) but never across pairs, rejects
+    /// non-finite centers, and `build_relax_with_cuts` appends exactly the
+    /// hand-computed tangent rows `-w_ii + 2c*x_i <= c^2` (coefficients read
+    /// back entry-wise, not string-compared), leaving equalities and the
+    /// objective untouched.
+    #[test]
+    fn oa_pool_rows_match_hand_computed_tangents() {
+        let qp = NonconvexQcqp {
+            n: 1,
+            p0: None,
+            q0: vec![0.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap(),
+                q: vec![0.0],
+                r: -1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b_eq: vec![],
+            lb: vec![-2.0],
+            ub: vec![2.0],
+        };
+        let static_ = build_static(&qp);
+        assert!(static_.rule2_pair[0]);
+        let mut pool: Vec<(usize, f64)> = Vec::new();
+        assert!(oa_add_cut(&mut pool, 0, 3.0));
+        assert!(!oa_add_cut(&mut pool, 0, 3.0), "same center re-added");
+        assert!(
+            !oa_add_cut(&mut pool, 0, 3.0 + 1e-15),
+            "numerically identical center re-added"
+        );
+        assert!(oa_add_cut(&mut pool, 0, 3.5), "distinct center blocked");
+        assert!(!oa_add_cut(&mut pool, 0, f64::NAN));
+        assert_eq!(pool.len(), 2);
+
+        let base = build_relax(&static_, &[-2.0], &[2.0]);
+        let cut = build_relax_with_cuts(&static_, &[-2.0], &[2.0], &pool);
+        assert_eq!(cut.g.nrows(), base.g.nrows() + 2);
+        assert_eq!(cut.h.len(), base.h.len() + 2);
+        assert_eq!(cut.cone.l, base.cone.l + 2);
+        assert_eq!(cut.a.nnz(), base.a.nnz(), "equalities untouched");
+        assert_eq!(cut.c, base.c, "objective untouched");
+        // Hand oracle: tangent at c = 3 is `-w + 6*x <= 9`, at c = 3.5 it is
+        // `-w + 7*x <= 12.25`; w column is relaxation index n + 0 = 1.
+        let row = |r: usize, col: usize| -> f64 {
+            let cp = cut.g.col_ptr();
+            let ri = cut.g.row_ind();
+            let va = cut.g.values();
+            (cp[col]..cp[col + 1])
+                .filter(|&k| ri[k] == r)
+                .map(|k| va[k])
+                .sum()
+        };
+        let r0 = base.g.nrows();
+        assert_eq!(row(r0, 0), 6.0, "2c coefficient on x");
+        assert_eq!(row(r0, 1), -1.0, "w coefficient");
+        assert_eq!(cut.h[r0], 9.0);
+        assert_eq!(row(r0 + 1, 0), 7.0);
+        assert_eq!(row(r0 + 1, 1), -1.0);
+        assert_eq!(cut.h[r0 + 1], 12.25);
+    }
+
     /// Sentinel. A failed root relaxation (no certificate) leaves the whole
     /// feasible region unexplored: the search must report `NumericalError`, not
     /// a false `Infeasible`. Reverting to the blanket `continue` (no failure
@@ -1759,7 +3560,12 @@ mod tests {
     fn failed_root_relaxation_is_not_false_infeasible() {
         let qp = hyperbola();
         let res = with_relax_plan(vec![Some(SolveStatus::NumericalError)], || {
-            solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default())
+            solve_global_qcqp(
+                &qp,
+                &ConicOptions::default(),
+                &GlobalOptions::default(),
+                None,
+            )
         });
         assert_eq!(res.status, SolveStatus::NumericalError, "{res:?}");
         assert!(res.x.is_empty());
@@ -1778,7 +3584,12 @@ mod tests {
         let mut plan = vec![None; 80];
         plan.extend(std::iter::repeat_n(Some(SolveStatus::NumericalError), 512));
         let res = with_relax_plan(plan, || {
-            solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default())
+            solve_global_qcqp(
+                &qp,
+                &ConicOptions::default(),
+                &GlobalOptions::default(),
+                None,
+            )
         });
         assert_eq!(res.status, SolveStatus::SuboptimalSolution, "{res:?}");
         assert!(
@@ -1800,7 +3611,7 @@ mod tests {
             max_nodes: 80,
             ..GlobalOptions::default()
         };
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g);
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g, None);
         assert_eq!(res.status, SolveStatus::SuboptimalSolution, "{res:?}");
         assert_eq!(res.nodes, 80, "must stop at the node limit");
         assert!(
@@ -1827,7 +3638,7 @@ mod tests {
             cancel_flag: Some(cancel),
             ..ConicOptions::default()
         };
-        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default());
+        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default(), None);
         assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
         assert_eq!(res.nodes, 0, "must stop before processing any node");
     }
@@ -1868,7 +3679,7 @@ mod tests {
             cancel_flag: Some(std::sync::Arc::clone(&cancel)),
             ..ConicOptions::default()
         };
-        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default());
+        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default(), None);
         CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(None));
 
         assert_eq!(
@@ -1897,7 +3708,12 @@ mod tests {
             lb: vec![-10.0],
             ub: vec![10.0],
         };
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
         assert_eq!(
             res.status,
             SolveStatus::Infeasible,
@@ -1927,7 +3743,7 @@ mod tests {
             cancel_flag: Some(std::sync::Arc::clone(&cancel)),
             ..ConicOptions::default()
         };
-        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default());
+        let res = solve_global_qcqp(&qp, &opts, &GlobalOptions::default(), None);
         CANCEL_AFTER_FINAL_CLASSIFICATION_COMMIT.with(|c| c.set(None));
 
         assert_eq!(
@@ -1946,7 +3762,12 @@ mod tests {
     #[test]
     fn exhausted_clean_search_certifies_optimal_with_zero_gap() {
         let qp = hyperbola();
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
         assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
         assert!((res.objective - 2.0).abs() < 5e-3, "obj={}", res.objective);
         assert!(
@@ -2051,9 +3872,31 @@ mod tests {
         lb: &[f64],
         ub: &[f64],
     ) -> ConicProblem {
+        // G2b contract change (documented at PR-description level): the dense
+        // oracle's independence claim covers the ASSEMBLY arithmetic (dense
+        // row scans, coefficient sums, row layout) -- it predates and knows
+        // nothing about the sparse triplet path. The §3.1 classification that
+        // now drives emission (which rows exist at all) is the shared
+        // *specification* under test, verified independently in
+        // `qcqp_classify::tests` (hand-computed rules 1-3 / §5 examples) and
+        // `tests/qcqp_classify_qplib_phase0.rs` (external Gershgorin-eigvalsh
+        // reconciliation on QPLIB data). Sharing it here keeps the oracle a
+        // dense-assembly checker rather than a stale copy of the old
+        // "every pair boxed and enveloped" shape, which plan §3.2 explicitly
+        // replaces.
         let n = qp.n;
         let npair = pairs.len();
         let nv = n + npair;
+        let req =
+            super::super::qcqp_classify::classify_bound_requirements(n, qp.p0.as_ref(), &qp.quad)
+                .unwrap();
+        let boxed: Vec<bool> = (0..n)
+            .map(|j| lb[j].is_finite() && ub[j].is_finite())
+            .collect();
+        let rule2_pair: Vec<bool> = pairs
+            .iter()
+            .map(|&(i, j)| i == j && req.rule2_diag[i])
+            .collect();
         let mut c = vec![0.0; nv];
         c[..n].copy_from_slice(&qp.q0);
         if let Some(p0) = &qp.p0 {
@@ -2096,6 +3939,9 @@ mod tests {
             h.push(qp.h_lin[i]);
         }
         for j in 0..n {
+            if !boxed[j] {
+                continue;
+            }
             let mut r = vec![0.0; nv];
             r[j] = 1.0;
             rows.push(r);
@@ -2107,6 +3953,17 @@ mod tests {
         }
         for (pi, &(i, j)) in pairs.iter().enumerate() {
             let wj = n + pi;
+            if rule2_pair[pi] {
+                // Under-estimator tangent at x̄ = 0: -w_ii <= 0 (D2).
+                let mut rt = vec![0.0; nv];
+                rt[wj] = -1.0;
+                rows.push(rt);
+                h.push(0.0);
+                continue;
+            }
+            if !(boxed[i] && (i == j || boxed[j])) {
+                continue;
+            }
             let (xl_i, xu_i) = (lb[i], ub[i]);
             let (xl_j, xu_j) = (lb[j], ub[j]);
             let (w_lo, w_hi) = w_interval(xl_i, xu_i, xl_j, xu_j, i == j);
@@ -2301,6 +4158,25 @@ mod tests {
         };
 
         let hb = hyperbola();
+        // G2b shapes: rule-2 diagonal in the objective (PSD-exempt p0 so its
+        // +x0^2 diagonal stays rule 2), an envelope-less off-diagonal pair
+        // with a free endpoint, and a mixed finite/free box.
+        let rule2_free = NonconvexQcqp {
+            n: n2,
+            p0: Some(csc(&[vec![2.0, 0.0], vec![0.0, 0.0]], n2, n2)),
+            q0: vec![0.0, 1.0],
+            quad: vec![GQuadConstraint {
+                p: csc(&[vec![0.0, -1.0], vec![-1.0, 0.0]], n2, n2),
+                q: vec![0.0, 0.0],
+                r: 1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n2).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n2).unwrap(),
+            b_eq: vec![],
+            lb: vec![-2.0, f64::NEG_INFINITY],
+            ub: vec![2.0, f64::INFINITY],
+        };
         let cases = vec![
             Case {
                 name: "diagonal_only_straddling_box",
@@ -2331,6 +4207,18 @@ mod tests {
                 qp: mixed.clone(),
                 lb: vec![-0.5, 1.0, 2.0],
                 ub: vec![1.0, 3.0, 4.0],
+            },
+            Case {
+                name: "rule2_diagonal_and_free_endpoint_pair",
+                qp: rule2_free.clone(),
+                lb: rule2_free.lb.clone(),
+                ub: rule2_free.ub.clone(),
+            },
+            Case {
+                name: "rule2_diagonal_narrowed_box_mid_bnb",
+                qp: rule2_free.clone(),
+                lb: vec![-1.0, f64::NEG_INFINITY],
+                ub: vec![1.5, f64::INFINITY],
             },
         ];
 

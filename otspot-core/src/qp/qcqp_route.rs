@@ -65,7 +65,7 @@ pub(crate) fn solve_qcqp_via_conic(problem: &QpProblem, options: &SolverOptions)
         }
     };
     let g_opts = global_options(options);
-    let global = conic::solve_global_qcqp(&nc_qp, &c_opts, &g_opts);
+    let global = conic::solve_global_qcqp(&nc_qp, &c_opts, &g_opts, None);
     global_result_to_solver_result(global, problem.obj_offset)
 }
 

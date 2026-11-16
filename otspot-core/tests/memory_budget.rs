@@ -824,7 +824,12 @@ fn conic_nonconvex_route_peak_within_budget() {
     let (qp, expected_obj) = build_diag_nonconvex_qcqp(NCQCQP_N);
 
     reset_peak();
-    let r = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default());
+    let r = solve_global_qcqp(
+        &qp,
+        &ConicOptions::default(),
+        &GlobalOptions::default(),
+        None,
+    );
     maybe_inject_dense_blowup(NCQCQP_PEAK_BUDGET_BYTES);
     let peak = peak_bytes();
     eprintln!(

@@ -239,16 +239,95 @@ pub fn classify_bound_requirements(
     })
 }
 
+/// D1-conservative rule-1 exemption: [`classify_bound_requirements`] trusts a
+/// PSD-certified row/objective to need no bounds; this filter additionally
+/// requires every variable of the row's off-diagonal lift support to have a
+/// finite raw bound. A row failing that test is demoted to the nonconvex side
+/// (rule 3 marks its off-diagonal endpoints, its diagonals feed the rule-2
+/// minimum scan), so its support joins `R`.
+///
+/// Plan §3.1 footnote ("同じ変数が他の行で持ち上げられても包含は崩れない") only
+/// covers variables *other* rows already lift: the shared `w` column is
+/// constrained only where interval/McCormick rows exist, and an exempt PSD row
+/// over a variable with a non-finite raw bound lifts pairs that emit no such
+/// rows (`build_relax` skips envelope rows for non-finite endpoints, plan
+/// §3.2), so the parent-approved conservative reading (decision D1: "迷ったら
+/// 非凸側") gates the exemption on raw-bound finiteness of that row's own
+/// off-diagonal support. Diagonal-only PSD rows are never demoted: their
+/// single diagonal pair carries the rule-2 under-estimator `w_ii >= 0` cut,
+/// which needs no box. A demotion can never veto rule 2 through a negative
+/// diagonal (a certified-PSD diagonal is `>= 0`), but the scan is fed anyway.
+///
+/// The result is the acceptance set for Phase 2 bound derivation ("変数 R 入り
+/// → 最終的に Phase 2 導出後も非有限なら拒否"); the current G2 acceptance gate
+/// (`NonconvexQcqp::validate`, plan §3.2 / decision D8 / §5 sentinel 1) uses
+/// the raw classification so plan §5 example 1 (PSD ellipsoid row over free
+/// variables) is not rejected on the bound requirement itself; its eventual
+/// NotSupported is the missing `x̃` base point (plan line 110), a Phase 2
+/// local-solver obligation, not a bound-requirement error.
+pub fn effective_bound_requirement(
+    n: usize,
+    p0: Option<&CscMatrix>,
+    quad: &[GQuadConstraint],
+    lb: &[f64],
+    ub: &[f64],
+) -> Result<BoundRequirement, String> {
+    if lb.len() != n {
+        return Err(format!("lb length {} != n {n}", lb.len()));
+    }
+    if ub.len() != n {
+        return Err(format!("ub length {} != n {n}", ub.len()));
+    }
+    let mut req = classify_bound_requirements(n, p0, quad)?;
+    let mut min_diag = vec![0.0f64; n];
+    let has_free_support = |coeffs: &BTreeMap<(usize, usize), f64>| {
+        coeffs.iter().any(|(key, _)| {
+            let &(i, j) = key;
+            i != j
+                && !(lb[i].is_finite()
+                    && ub[i].is_finite()
+                    && lb[j].is_finite()
+                    && ub[j].is_finite())
+        })
+    };
+    for (k, qc) in quad.iter().enumerate() {
+        if !req.convex_rows[k] {
+            continue;
+        }
+        let coeffs = lift_coeffs(&qc.p);
+        if !has_free_support(&coeffs) {
+            continue;
+        }
+        req.convex_rows[k] = false;
+        mark_nonconvex_terms(&coeffs, n, &mut req.required, &mut min_diag)?;
+    }
+    if let Some(p0) = p0 {
+        let coeffs = lift_coeffs(p0);
+        if has_free_support(&coeffs) {
+            mark_nonconvex_terms(&coeffs, n, &mut req.required, &mut min_diag)?;
+        }
+    }
+    for (i, under) in req.rule2_diag.iter_mut().enumerate() {
+        *under &= min_diag[i] >= 0.0;
+    }
+    for (i, &under) in req.rule2_diag.iter().enumerate() {
+        if !under {
+            req.required[i] = true;
+        }
+    }
+    Ok(req)
+}
+
 /// Split `bounds` into `lb`/`ub`, rejecting the problem when any variable of
 /// the §3.1 bound-requirement set `R` has a non-finite bound.
 ///
 /// G1 gate boundary: `R` is the raw classification — Phase 2 bound derivation
 /// (FBBT, objective cutoff) does not exist yet, so acceptance is stricter than
 /// §3.2's final rule ("reject only non-finite remaining after derivation") and
-/// the downstream relaxation still boxes every variable, with
-/// `NonconvexQcqp::validate` as the second-line guard for variables outside
-/// `R` (they surface as `NotSupported` there, never as an infinite box in the
-/// relaxation LP).
+/// the downstream relaxation, which is R-aware (decision D8):
+/// `NonconvexQcqp::validate` demands finiteness on exactly `R` as well, and
+/// `build_relax` keeps infinite boxes out of every LP by skipping box rows
+/// and envelope rows on non-finite endpoints.
 ///
 /// The all-finite fast path returns without classification, keeping the
 /// current solver behavior (and cost) bit-identical for problems that the old
@@ -446,9 +525,13 @@ mod tests {
     }
 
     /// A non-finite bound on a variable *outside* `R` (linear-only `x1`)
-    /// passes the G1 gate; the second-line guard is `NonconvexQcqp::validate`
-    /// (asserted here so the relaxation provably never sees an infinite box
-    /// while `build_relax` still boxes every variable).
+    /// passes the G1 gate **and** `NonconvexQcqp::validate` (decision D8):
+    /// the R-aware relaxation (`build_relax` skips box rows on non-finite
+    /// node bounds) is the consumer that keeps infinite boxes out of the LP,
+    /// so free non-`R` variables are a supported input, not a second-line
+    /// rejection. Free variables *inside* `R` stay rejected by both layers
+    /// (`require_finite_bounds_rejects_unbounded_required_variable` and
+    /// `validate_requires_finite_bounds_only_on_r` in nonconvex.rs).
     #[test]
     fn require_finite_bounds_defers_non_required_variables_to_validate() {
         let row = quad_row(2, vec![(0, 0, -2.0)], vec![0.0, 1.0], 0.0);
@@ -468,8 +551,8 @@ mod tests {
             lb,
             ub,
         };
-        let err = nc.validate().unwrap_err();
-        assert!(err.contains("lb[1]") || err.contains("ub[1]"), "{err}");
+        nc.validate()
+            .expect("x1 outside R may stay free end-to-end (D8)");
     }
 
     /// Dimension guards on the public entry: a mismatched `p0`/`bounds` is an
@@ -489,5 +572,77 @@ mod tests {
         let small: [(f64, f64); 1] = [(0.0, 1.0)];
         let err = require_finite_bounds(2, None, &[], &small).unwrap_err();
         assert!(err.contains("bounds length"), "{err}");
+    }
+
+    /// D1: a PSD row whose *off-diagonal* support touches a non-finite raw
+    /// bound is demoted to the nonconvex side and its endpoints join `R`
+    /// (plan §3.1 footnote guards only variables other rows already lift; the
+    /// parent decision D1 takes the conservative "迷ったら非凸側" reading).
+    #[test]
+    fn d1_demotes_psd_row_with_free_off_diagonal_support() {
+        // (x0 - x1)^2 <= 1: PSD, off-diagonal support {x0, x1}.
+        let row = quad_row(
+            2,
+            vec![(0, 0, 2.0), (1, 1, 2.0), (0, 1, -2.0), (1, 0, -2.0)],
+            vec![0.0, 0.0],
+            -1.0,
+        );
+        let free = [f64::NEG_INFINITY; 2];
+        let finite = [-1.0; 2];
+        let eff = effective_bound_requirement(2, None, std::slice::from_ref(&row), &free, &finite)
+            .unwrap();
+        assert_eq!(eff.convex_rows, vec![false], "free endpoint demotes row");
+        assert_eq!(eff.required, vec![true, true], "demoted endpoints join R");
+        // With finite raw bounds the exemption stands (raw classification).
+        let kept =
+            effective_bound_requirement(2, None, std::slice::from_ref(&row), &finite, &finite)
+                .unwrap();
+        assert_eq!(kept, classify_bound_requirements(2, None, &[row]).unwrap());
+    }
+
+    /// D1: a diagonal-only PSD row is never demoted -- its single diagonal
+    /// pair carries the rule-2 `w_ii >= 0` cut, which needs no box. This is
+    /// what keeps plan §3.0-B's `min -x s.t. x^2 <= 1` (x free) admissible.
+    #[test]
+    fn d1_keeps_diagonal_only_psd_row_exempt_over_free_vars() {
+        // x0^2 - 1 <= 0: PSD (diag-only), x0 free.
+        let row = quad_row(2, vec![(0, 0, 2.0)], vec![0.0, 0.0], -1.0);
+        let free = [(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let eff = effective_bound_requirement(
+            2,
+            None,
+            std::slice::from_ref(&row),
+            &[free[0].0, -1.0],
+            &[free[0].1, 1.0],
+        )
+        .unwrap();
+        assert_eq!(eff.convex_rows, vec![true]);
+        assert_eq!(eff.required, vec![false, false]);
+        assert!(eff.rule2_diag[0], "diagonal +1 stays rule 2");
+    }
+
+    /// D1 applies to a PSD objective the same way: a rank-deficient PSD
+    /// objective with free off-diagonal support is demoted (its endpoints join
+    /// `R`); the diagonal-only PSD objective stays exempt.
+    #[test]
+    fn d1_demotes_psd_objective_with_free_off_diagonal_support() {
+        let p0 = dense(2, vec![(0, 0, 1.0), (1, 1, 1.0), (0, 1, 1.0), (1, 0, 1.0)]);
+        let free = [(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let lb: Vec<f64> = free.iter().map(|&(l, _)| l).collect();
+        let ub: Vec<f64> = free.iter().map(|&(_, u)| u).collect();
+        let eff = effective_bound_requirement(2, Some(&p0), &[], &lb, &ub).unwrap();
+        assert_eq!(eff.required, vec![true, true]);
+        let diag = dense(2, vec![(0, 0, 2.0)]);
+        let kept = effective_bound_requirement(2, Some(&diag), &[], &lb, &ub).unwrap();
+        assert_eq!(kept.required, vec![false, false]);
+    }
+
+    /// Dimension guard of the D1 entry itself.
+    #[test]
+    fn effective_bound_requirement_rejects_mismatched_bounds() {
+        let err = effective_bound_requirement(2, None, &[], &[0.0], &[0.0, 1.0]).unwrap_err();
+        assert!(err.contains("lb length"), "{err}");
+        let err = effective_bound_requirement(2, None, &[], &[0.0, 0.0], &[1.0]).unwrap_err();
+        assert!(err.contains("ub length"), "{err}");
     }
 }

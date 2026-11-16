@@ -17,14 +17,17 @@ mod tests;
 pub use misocp::{solve_miqcp, solve_misocp, BbOptions, MisocpProblem, MisocpResult};
 pub use nonconvex::{
     solve_global_miqcp, solve_global_qcqp, GQuadConstraint, GlobalOptions, GlobalResult,
-    NonconvexQcqp,
+    GlobalSeed, NonconvexQcqp,
 };
 pub(crate) use qcqp::qcqp_matrix_to_csc;
 pub use qcqp::{
     qcqp_from_qp_problem, solve_qcqp, solve_qp_problem_as_qcqp, to_conic, QcqpProblem, QcqpResult,
     QuadConstraint,
 };
-pub use qcqp_classify::{classify_bound_requirements, require_finite_bounds, BoundRequirement};
+pub use qcqp_classify::{
+    classify_bound_requirements, effective_bound_requirement, require_finite_bounds,
+    BoundRequirement,
+};
 
 use crate::problem::SolveStatus;
 use otspot_num::sparse::CscMatrix;
