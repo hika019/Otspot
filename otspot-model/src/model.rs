@@ -2937,13 +2937,17 @@ mod tests {
 
         // (name, q_diag, (lb,ub), c)
         let cases: &[(&str, [f64; 2], (f64, f64), [f64; 2])] = &[
-            // Convex PSD Q=2I, c=[-4,-4]. IPM converges (residuals ~1e-6) but
-            // Custom(1e-200) makes satisfies_eps always false → SuboptimalSolution.
+            // Convex PSD Q=2I, c=[-4,-4/3] → x*=(2, 2/3)。x* が仮数に非表現
+            // (2/3 は循環二進) なので最終残差は 0 にならず、Custom(1e-200) は
+            // 到達不能のまま → Stalled。c=[-4,-4] (x*=(2,2) と f64 厳密) だと
+            // box 化 inner solve が残差 0.0 を達成し satisfies_eps(1e-200) が
+            // 真成了 — 「到達不能 tol では解を返さない」前提が崩れるため、
+            // 前提を成立させる係数へ更新した (assert 側の論理は不変)。
             (
                 "convex_2x2_tight_tol",
                 [2.0, 2.0],
                 (0.0, f64::INFINITY),
-                [-4.0, -4.0],
+                [-4.0, -4.0 / 3.0],
             ),
             // Convex PSD Q=4I, c=[0,-2] with box bounds.
             ("convex_box_tight_tol", [4.0, 4.0], (0.0, 3.0), [0.0, -2.0]),

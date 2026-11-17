@@ -23,8 +23,8 @@ use crate::qp::ipm_core::kkt::{
     build_extended_constraints, collapse_extended_dual, norm_inf, spmtv, spmv,
 };
 use crate::qp::ipm_core::solver_loop::{
-    compute_sigma_vec, corrector_step, corrector_step_schur, gondzio_correctors,
-    gondzio_correctors_schur, predictor_step, predictor_step_schur, update_variables,
+    compute_sigma_vec, corrector_boxed, gondzio_correctors_boxed, predictor_boxed,
+    update_variables, BoxedBackend, BoxedSolve,
 };
 use crate::qp::problem::QpProblem;
 use crate::tolerances::any_nonfinite;
@@ -149,13 +149,27 @@ fn solve_ippmm_inner_confined(
         return solve_unconstrained(problem, &timeout_ctx);
     }
 
+    // box 化: 境界行は augmented KKT から正確 Schur で消去される。KKT 求解が
+    // 見る行列は次元 n + m_real (実制約のみ) + x 対角の境界寄与 D_b で、
+    // `a_ext` は残差・証書・終端の extended レイアウト ([元行 | lb | ub]) 専用
+    // になる (受理ゲートの独立検証器は無変更で box 化を知らない)。
+    let (a_base, b_base, is_eq_base) = crate::qp::ipm_core::kkt::build_base_constraints(problem);
+    let bound = crate::qp::ipm_core::kkt::build_bound_box(problem);
+    let m_real = m_orig;
+    // 保持境界行 (lb==ub 退化対) を含む系行定義 [実制約 | 保持境界] と
+    // extended レイアウトへの対応表 (BoxedSolve の gather/scatter と求解行列が共有)。
+    let a_sys = crate::qp::ipm_core::kkt::build_boxed_system_matrix(&a_base, &bound);
+    let sys_ext_rows = bound.system_ext_rows(m_orig);
+
     let scales = crate::qp::ipm_core::common::DetectionScales::compute(problem, &a_ext, &b_ext);
     // 受理部が通過した証書 (None = 未受理)。ray variant は受理時点基点の
     // 原始実行可能性ゲートビットを運び、終端の stats / ray ペイロード組立
     // (finalize) で消費する。
     let mut certified: Option<AcceptedCert> = None;
 
-    let eq_count = is_eq_ext.iter().filter(|&&v| v).count();
+    // m_ineq は box 化前後で不変: 境界行は常に不等式・実等式行区間は先頭連続
+    // なので is_eq_base と is_eq_ext の等式行集合は行数ベースで一致する。
+    let eq_count = is_eq_base.iter().filter(|&&v| v).count();
     let m_ineq = m_ext - eq_count;
 
     let init = build_initial_point(
@@ -164,12 +178,16 @@ fn solve_ippmm_inner_confined(
         &a_ext,
         &b_ext,
         &is_eq_ext,
+        &a_base,
+        &b_base,
+        &is_eq_base,
+        &bound,
         m_orig,
         m_ext,
         &timeout_ctx,
         par,
     );
-    let (mut x, mut s, mut y, warm_mu) = (init.x, init.s, init.y, init.warm_mu);
+    let (mut x, mut s, mut y, warm_mu) = (init.x, init.s_full, init.y, init.warm_mu);
 
     let (rho_init, delta_init) = match warm_mu {
         // warm start: μ 規模に揃えた rho/delta で出発し proximal pull を最小化。
@@ -226,8 +244,9 @@ fn solve_ippmm_inner_confined(
     let mut dy = vec![0.0f64; m_ext];
     let mut ds = vec![0.0f64; m_ext];
 
-    // 反復間で sparsity 不変な構造はキャッシュ。
-    let aug_cache = crate::qp::ipm_core::kkt::build_augmented_cache(&problem.q, &a_ext);
+    // 反復間で sparsity 不変な構造はキャッシュ (box 化: 実制約行 + 境界対角寄与)。
+    let aug_cache =
+        crate::qp::ipm_core::kkt::build_boxed_augmented_cache(&problem.q, &a_base, &bound);
     let mut factor_caches = FactorizeCaches::new();
 
     let inexact_eta = inexact_eta_for_eps(eps_orig);
@@ -235,7 +254,7 @@ fn solve_ippmm_inner_confined(
     // augmented LDL が memory budget 超過なら Schur (n×n SPD) に切替。
     let use_schur = options
         .schur_hint
-        .unwrap_or_else(|| auto_schur_enabled(problem, &a_ext, m_ext, options, &timeout_ctx, par));
+        .unwrap_or_else(|| auto_schur_enabled(problem, options, &timeout_ctx, par));
 
     // ループ内 break は Optimal / Timeout / Stalled / NumericalError / Infeasible /
     // Unbounded を設定する。break せず max_iter を使い切った場合のみ MaxIterations。
@@ -276,14 +295,27 @@ fn solve_ippmm_inner_confined(
         }
 
         spmv(&a_ext, &x, &mut ax);
+        // box 化境界スラックの従属導出 (s_t = b_t − a_t x、床内蔵)。KKT・σ・μ・RHS が
+        // 常に現在の x と一致する (構成上 idempotent)。保持境界行は独立スラック
+        // なので fill_slacks がスロットをスキップし、update_variables の ds 積分が使う。
+        bound.fill_slacks(&x, &mut s[m_real..]);
         spmtv(&a_ext, &y, &mut aty);
         spmv(&problem.q, &x, &mut qx);
 
         for i in 0..n {
             r_d[i] = -(qx[i] + problem.c[i] + aty[i]);
         }
-        for i in 0..m_ext {
+        // 実制約行・保持境界行は full 表現 r_p = b − Ax − s。box 化境界行は
+        // s_t = b_t − a_t x より構造的 0 (求解層は RHS 変換 a_t·d_t·r_p_t = 0 としてのみ参照する)。
+        for i in 0..m_real {
             r_p[i] = b_ext[i] - ax[i] - s[i];
+        }
+        for i in m_real..m_ext {
+            r_p[i] = if bound.eliminated[i - m_real] {
+                0.0
+            } else {
+                b_ext[i] - ax[i] - s[i]
+            };
         }
 
         // μ = sᵀy / m_ineq (等式行除外)
@@ -412,6 +444,8 @@ fn solve_ippmm_inner_confined(
         let fact_ctx = FactorizeContext {
             problem,
             a_ext: &a_ext,
+            a_base: &a_base,
+            bound: &bound,
             aug_cache: &aug_cache,
             sigma_vec: &sigma_vec,
             is_eq_ext: &is_eq_ext,
@@ -432,7 +466,8 @@ fn solve_ippmm_inner_confined(
             },
         };
         let factorize_outcome = factorize_kkt_with_retry(&fact_ctx, &mut factor_caches);
-        let (mut fac, aug_mat, d_inv_opt) = match factorize_outcome {
+        // _delta_used: ループ側では消費しない (box 対角は δ_d = 0 設計)。
+        let (mut fac, aug_mat, d_inv_opt, _delta_used) = match factorize_outcome {
             FactorizeOutcome::Ok {
                 factor,
                 aug_mat,
@@ -440,11 +475,12 @@ fn solve_ippmm_inner_confined(
                 retry_count,
                 used_iterative,
                 factorize_ns,
+                delta_used: _delta_used,
             } => {
                 total_factorize_ns += factorize_ns;
                 total_reg_retries += retry_count;
                 any_iterative |= used_iterative;
-                (factor, aug_mat, d_inv)
+                (factor, aug_mat, d_inv, _delta_used)
             }
             FactorizeOutcome::Timeout => {
                 status = Some(SolveStatus::Timeout);
@@ -459,128 +495,88 @@ fn solve_ippmm_inner_confined(
         // MINRES (iterative) backend のみ user eps 由来 η を反映、Direct/DirectDd では no-op。
         fac.set_iterative_tol(inexact_eta);
 
-        let t_solve = std::time::Instant::now();
-        let (alpha, r_c_corr) = if use_schur {
-            let d_inv = d_inv_opt
+        // 境界行後退代入係数 d_t。KKT 対角 D_b と同一関数・δ_d = 0 (理由:
+        // `bound_row_dual_scale` の doc。δ 適用は μ 停止 deadlock)。
+        let d_b: Vec<f64> = sigma_vec[m_real..]
+            .iter()
+            .map(|&sg| crate::qp::ipm_core::kkt::bound_row_dual_scale(sg, 0.0))
+            .collect();
+        let boxed_solver = if use_schur {
+            let d_inv_real = d_inv_opt
                 .as_ref()
-                .expect("d_inv must be set when use_schur");
-            let pred = predictor_step_schur(
-                &s,
-                &y,
-                &is_eq_ext,
-                m_ineq,
-                &r_d_pmm,
-                &r_p_pmm,
-                &sigma_vec,
-                &fac,
-                d_inv,
-                &a_ext,
-                m_ext,
-                mu,
-                timeout_ctx.deadline,
-            );
-            corrector_step_schur(
-                &s,
-                &y,
-                &is_eq_ext,
-                &pred,
-                mu,
-                &r_d_pmm,
-                &r_p_pmm,
-                &sigma_vec,
-                &fac,
-                d_inv,
-                &a_ext,
-                m_ext,
-                &mut dx,
-                &mut dy,
-                &mut ds,
-                timeout_ctx.deadline,
-            )
+                .expect("d_inv (system rows) must be set when use_schur");
+            BoxedSolve {
+                backend: BoxedBackend::Schur {
+                    s_fac: &fac,
+                    a_real: &a_sys,
+                    d_inv_real,
+                },
+                bound: &bound,
+                d_b: &d_b,
+                m_real,
+                sys_ext_rows: &sys_ext_rows,
+            }
         } else {
-            let pred = predictor_step(
-                &s,
-                &y,
-                &is_eq_ext,
-                m_ineq,
-                &r_d_pmm,
-                &r_p_pmm,
-                &sigma_vec,
-                &fac,
-                &aug_mat,
-                n,
-                m_ext,
-                mu,
-                timeout_ctx.deadline,
-            );
-            corrector_step(
-                &s,
-                &y,
-                &is_eq_ext,
-                &pred,
-                mu,
-                &r_d_pmm,
-                &r_p_pmm,
-                &sigma_vec,
-                &fac,
-                &aug_mat,
-                n,
-                m_ext,
-                &mut dx,
-                &mut dy,
-                &mut ds,
-                timeout_ctx.deadline,
-            )
+            BoxedSolve {
+                backend: BoxedBackend::Aug {
+                    fac: &fac,
+                    mat: &aug_mat,
+                },
+                bound: &bound,
+                d_b: &d_b,
+                m_real,
+                sys_ext_rows: &sys_ext_rows,
+            }
         };
+
+        let t_solve = std::time::Instant::now();
+        let pred = predictor_boxed(
+            &s,
+            &y,
+            &is_eq_ext,
+            m_ineq,
+            &r_d_pmm,
+            &r_p_pmm,
+            &sigma_vec,
+            &boxed_solver,
+            mu,
+            timeout_ctx.deadline,
+        );
+        let (alpha, r_c_corr) = corrector_boxed(
+            &s,
+            &y,
+            &is_eq_ext,
+            &pred,
+            mu,
+            &r_d_pmm,
+            &r_p_pmm,
+            &sigma_vec,
+            &boxed_solver,
+            &mut dx,
+            &mut dy,
+            &mut ds,
+            timeout_ctx.deadline,
+        );
 
         let mut alpha = alpha;
         if alpha < GONDZIO_ALPHA_TRIGGER {
-            alpha = if use_schur {
-                let d_inv = d_inv_opt
-                    .as_ref()
-                    .expect("d_inv must be set when use_schur");
-                gondzio_correctors_schur(
-                    &s,
-                    &y,
-                    &is_eq_ext,
-                    m_ineq,
-                    &r_d_pmm,
-                    &r_p_pmm,
-                    &r_c_corr,
-                    &sigma_vec,
-                    &fac,
-                    d_inv,
-                    &a_ext,
-                    m_ext,
-                    options.ipm.max_correctors,
-                    alpha,
-                    &mut dx,
-                    &mut dy,
-                    &mut ds,
-                    timeout_ctx.deadline,
-                )
-            } else {
-                gondzio_correctors(
-                    &s,
-                    &y,
-                    &is_eq_ext,
-                    m_ineq,
-                    &r_d_pmm,
-                    &r_p_pmm,
-                    &r_c_corr,
-                    &sigma_vec,
-                    &fac,
-                    &aug_mat,
-                    n,
-                    m_ext,
-                    options.ipm.max_correctors,
-                    alpha,
-                    &mut dx,
-                    &mut dy,
-                    &mut ds,
-                    timeout_ctx.deadline,
-                )
-            };
+            alpha = gondzio_correctors_boxed(
+                &s,
+                &y,
+                &is_eq_ext,
+                m_ineq,
+                &r_d_pmm,
+                &r_p_pmm,
+                &r_c_corr,
+                &sigma_vec,
+                &boxed_solver,
+                options.ipm.max_correctors,
+                alpha,
+                &mut dx,
+                &mut dy,
+                &mut ds,
+                timeout_ctx.deadline,
+            );
         }
 
         // NaN/Inf または finite-but-huge は LDL blow-up とみなし best-so-far で復帰。
@@ -678,6 +674,10 @@ fn solve_ippmm_inner_confined(
         dbg.linear_solve_us += solve_elapsed.as_micros() as u64;
 
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
+        // 境界スラックの従属同一性を再確立。box 化では s_t の状態は x の従属量で、
+        // update_variables の ds_t 更新 (Newton 方向) は床・丸めで漂移しうるため、
+        // x から組み直す (fill_slacks は床 BOUND_SLACK_FLOOR 内蔵・冪等)。
+        bound.fill_slacks(&x, &mut s[m_real..]);
         iterations_consumed = iter.saturating_add(1);
 
         // alpha=0 持続 = line search 停止 = 数値飽和 / null-space 漂流。best-so-far で復帰。

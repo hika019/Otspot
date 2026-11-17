@@ -945,12 +945,21 @@ fn verify_normalized_farkas(
     // 厳密な非負部分 y⁺ = max(y, 0) で検証する。IPM の僅かな負 slack を許容しても
     // y⁺ ≥ 0 が厳密に成り立つので Farkas の健全性 (dᵀy⁺ ≤ xᵀCᵀy⁺) を崩さない。
     let yp = |col: usize| y[col].max(0.0);
-    let rhs_dot = cert_rhs
-        .iter()
-        .enumerate()
-        .map(|(col, &d)| d * yp(col))
-        .sum::<f64>();
-    if !rhs_dot.is_finite() || rhs_dot < 1.0 - FARKAS_NORM_TOL {
+    let mut rhs_dot = 0.0_f64;
+    let mut rhs_term_mag = 0.0_f64;
+    let mut rhs_terms = 0usize;
+    for (col, &d) in cert_rhs.iter().enumerate() {
+        let term = d * yp(col);
+        rhs_dot += term;
+        rhs_term_mag += term.abs();
+        rhs_terms += 1;
+    }
+    // dᵀy⁺ は K 倍率で丸め noise を増幅する: |Cᵀy| が y 自身の 1 ulp 内
+    // (aty ≤ aty 丸め floor 通過) でも、K·ulp が rhs_dot≥1 を満たしうる
+    // (実測: x1+x2=1e13 で y≈1000 の疑似 ray、aty=ulp(1000)=1.14e-13、
+    // dᵀy⁺=1137)。rhs 側にも同じ丸め境界を課し、K 非依存に健全化する。
+    let rhs_noise_floor = (rhs_terms as f64) * FARKAS_CTY_ROUNDOFF_PER_TERM * rhs_term_mag;
+    if !rhs_dot.is_finite() || rhs_dot < 1.0 - FARKAS_NORM_TOL || rhs_dot <= rhs_noise_floor {
         return false;
     }
     for j in 0..problem.num_vars {

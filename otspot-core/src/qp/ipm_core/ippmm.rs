@@ -21,7 +21,6 @@ pub(crate) fn probe_schur_decision(
     problem: &crate::qp::problem::QpProblem,
     options: &crate::options::SolverOptions,
 ) -> bool {
-    use crate::qp::ipm_core::kkt::build_extended_constraints;
     use otspot_num::linalg::parallelism::with_solver_pool;
     use otspot_num::linalg::timeout::TimeoutCtx;
     let timeout_ctx = TimeoutCtx::new(
@@ -29,13 +28,12 @@ pub(crate) fn probe_schur_decision(
         options.timeout_secs,
         options.cancel_flag.clone(),
     );
-    let (a_ext, _, m_ext, _, _, _) = build_extended_constraints(problem);
     // Same confinement as `solve_ippmm_inner`: this probe factorizes the KKT
     // system too, so it must respect the same thread budget. The `par` comes
     // from the confinement, never computed alongside it — see
     // `with_solver_pool`.
     with_solver_pool(options.threads, |par| {
-        factorize::auto_schur_enabled(problem, &a_ext, m_ext, options, &timeout_ctx, par)
+        factorize::auto_schur_enabled(problem, options, &timeout_ctx, par)
     })
 }
 

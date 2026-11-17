@@ -2936,8 +2936,14 @@ mod tests {
             ..GlobalOptimizationConfig::default()
         };
         let (_, stats) = solve_qp_global_with_stats(&p, &opts(10.0), &cfg);
+        // 境界行 box 化 (dual damping δ を境界行へ適用しない正確 barrier 対角) で
+        // inner solve が厳密化し、左枝 infeasible 領域の発見が早まって探索木が
+        // 6 ノードで尽きるようになった (box 化前は 10)。本値は doc 通りテスト
+        // 自身で実測確定したスナップショット (同一バイナリ 2 回実走で 6 に一致)
+        // であり、cancel sentinel との対比 (1 vs 6) は「1 で止まる fixture の
+        // 偽物でない」要件を維持する。
         assert_eq!(
-            stats.nodes_processed, 10,
+            stats.nodes_processed, 6,
             "baseline (no cancel): fixture must exhaust well past 1 node when \
              nothing interrupts the loop, got {}",
             stats.nodes_processed
