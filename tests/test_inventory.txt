@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3458 testcases, 43 ignored
+# totals: 3476 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -60,6 +60,7 @@ otspot-core	conic::misocp::tests::conic_feasible_rejects_nan_equality_activity	a
 otspot-core	conic::misocp::tests::qcqp_true_objective_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::accept_honors_caller_tolerance_after_rounding_not_a_fixed_floor	active
 otspot-core	conic::nonconvex::tests::bounded_set_with_unbounded_relaxation_is_not_false_unbounded	active
+otspot-core	conic::nonconvex::tests::box_only_seed_validation_matches_full_seed	active
 otspot-core	conic::nonconvex::tests::branch_candidates_are_the_envelope_pairs_only	active
 otspot-core	conic::nonconvex::tests::cancel_flag_is_honored_inside_the_bnb_loop	active
 otspot-core	conic::nonconvex::tests::cancel_race_before_final_infeasible_classification_prefers_timeout	active
@@ -86,6 +87,7 @@ otspot-core	conic::nonconvex::tests::oa_violation_cuts_converge_without_branchin
 otspot-core	conic::nonconvex::tests::public_entry_rejects_non_finite_data_and_integer_indices	active
 otspot-core	conic::nonconvex::tests::quad_val_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::r_empty_ellipsoid_over_free_x_reaches_optimum_end_to_end	active
+otspot-core	conic::nonconvex::tests::r_free_in_roots_box_rejected_at_entry_but_seed_finitizes_it	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_expired_deadline	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_fired_cancel_flag	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_unbounded_surfaces_verified_ray	active
@@ -94,8 +96,8 @@ otspot-core	conic::nonconvex::tests::rule2_pair_emits_exactly_one_pair_row	activ
 otspot-core	conic::nonconvex::tests::sparse_relax_matches_dense_reference	active
 otspot-core	conic::nonconvex::tests::unbounded_without_base_point_is_reasoned_not_supported	active
 otspot-core	conic::nonconvex::tests::validate_accepts_psd_rows_over_free_variables	active
+otspot-core	conic::nonconvex::tests::validate_keeps_shape_and_nan_checks_allows_free_bounds	active
 otspot-core	conic::nonconvex::tests::validate_rejects_every_mismatched_dimension	active
-otspot-core	conic::nonconvex::tests::validate_requires_finite_bounds_only_on_r	active
 otspot-core	conic::nonconvex::tests::verified_ray_with_seed_returns_unbounded	active
 otspot-core	conic::nonconvex::tests::warm_basis_extension_consumes_dual_advanced_resolves	active
 otspot-core	conic::qcqp::tests::qcqp_rejects_objective_dimension_mismatch	active
@@ -116,6 +118,17 @@ otspot-core	conic::qcqp_classify::tests::require_finite_bounds_rejects_unbounded
 otspot-core	conic::qcqp_classify::tests::rule1_psd_constraint_row_needs_no_bounds	active
 otspot-core	conic::qcqp_classify::tests::rule1_psd_objective_and_linear_only_var_need_no_bounds	active
 otspot-core	conic::qcqp_classify::tests::rule2_under_diagonal_excludes_it_from_r	active
+otspot-core	conic::qcqp_fbbt::tests::completing_the_square_bounds_free_vars_of_ellipsoid_equality	active
+otspot-core	conic::qcqp_fbbt::tests::contradiction_rows_are_counted_never_reported	active
+otspot-core	conic::qcqp_fbbt::tests::fixed_zero_times_free_term_no_false_infeasible	active
+otspot-core	conic::qcqp_fbbt::tests::fixpoint_cap_terminates_long_chain	active
+otspot-core	conic::qcqp_fbbt::tests::linear_rows_derive_hand_computed_bounds	active
+otspot-core	conic::qcqp_fbbt::tests::never_widens_and_reports_no_change	active
+otspot-core	conic::qcqp_fbbt::tests::outward_rounding_contains_feasible_amplified_point	active
+otspot-core	conic::qcqp_fbbt::tests::quadratic_linear_part_never_propagated_as_linear	active
+otspot-core	conic::qcqp_fbbt::tests::rows_with_offdiag_entries_are_skipped_entirely	active
+otspot-core	conic::qcqp_fbbt::tests::tangent_clamp_survives_accumulated_roundoff	active
+otspot-core	conic::qcqp_fbbt::tests::tangent_clamps_to_point_bound	active
 otspot-core	conic::tests::bench_conic_suite	ignored
 otspot-core	conic::tests::cancel_race_before_misocp_final_infeasible_classification_prefers_timeout	active
 otspot-core	conic::tests::cancel_race_before_misocp_optimal_classification_prefers_timeout	active
@@ -1439,11 +1452,16 @@ otspot-core	qp::problem::tests::set_quadratic_constraints_valid_accepted	active
 otspot-core	qp::problem::tests::valid_qp_accepted	active
 otspot-core	qp::problem::tests::validate_catches_nonfinite_and_dim_from_direct_assignment	active
 otspot-core	qp::problem::tests::validate_matches_setter_length_invariant	active
+otspot-core	qp::qcqp_route::tests::audit_root_seed_rejects_widened_nan_crossed	active
+otspot-core	qp::qcqp_route::tests::circle_equality_all_free_routes_through_derived_gate	active
 otspot-core	qp::qcqp_route::tests::global_options_feas_tol_always_tracks_eps	active
 otspot-core	qp::qcqp_route::tests::global_options_feas_tol_does_not_relax_with_cfg	active
+otspot-core	qp::qcqp_route::tests::indefinite_row_with_free_objective_var_solves_via_root_fbbt	active
+otspot-core	qp::qcqp_route::tests::no_op_derivation_attaches_no_seed	active
 otspot-core	qp::qcqp_route::tests::nonconvex_from_qp_problem_matches_hand_built_split	active
 otspot-core	qp::qcqp_route::tests::nonconvex_from_qp_problem_rejects_long_quadratic_constraints	active
 otspot-core	qp::qcqp_route::tests::nonconvex_from_qp_problem_rejects_short_quadratic_constraints	active
+otspot-core	qp::qcqp_route::tests::residual_rejection_reports_root_fbbt_ran	active
 otspot-core	qp::tests::api::test_a2t03_qp_no_deadline_converges	active
 otspot-core	qp::tests::api::test_a3c01_cancel_flag_concurrent_returns_timeout	active
 otspot-core	qp::tests::api::test_a3c02_cancel_flag_preset_qp_returns_timeout	active

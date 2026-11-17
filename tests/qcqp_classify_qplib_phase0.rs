@@ -1,7 +1,12 @@
 //! §3.1 分類器と Phase 0 実測 b1 表 (`/tmp/opencode/qcqp_phase0/REPORT.md`) の
 //! 突合 sentinel。4 実データ問 (2546 / 8595 / 8605 / 8685) を実パーサ経由で
-//! `solve_qp_with` に入力し、G1 の拒否メッセージが報告する bound 要求集合 `R`
-//! のサイズを抽出して、Phase 0 の b1 との一致/乖離を固定する。
+//! `qcqp_route::build_nonconvex_raw` に通し、分類器 `effective_bound_requirement`
+//! を直接呼んで bound 要求集合 `R` のサイズを Phase 0 の b1 と突合する。
+//! (元実装はルート解決経由の拒否メッセージ観測だったが、Phase 2 の受理ゲート
+//! 移動で 8595/8605 は解決経路に進むためメッセージが観測不能になった。
+//! 突合数値 415/2500/5000/772 は同一のまま分類器 direct へ移設した —
+//! 削除+追加。メッセージ書式のピン留めは `qcqp_route` の
+//! `residual_rejection_reports_root_fbbt_ran` が引継ぐ。)
 //!
 //! ## 突合の判定基準 (計画書 §3.1「PSD 判定は sparse_cholesky_lower と契約を
 //! 共有、convexity_unproven は凸扱いしない」)
@@ -24,10 +29,11 @@
 //! 数えるが、repo 契約 (`convexity_unproven` を凸扱いしない) はこれを凸にしない
 //! — 想定内の乖離。
 
+use otspot::conic::effective_bound_requirement;
 use otspot::io::qplib::{parse_qplib, QplibProblem};
 use otspot::options::SolverOptions;
 use otspot::problem::{SolveStatus, SolverResult};
-use otspot::qp::{solve_qp_with, QpProblem};
+use otspot::qp::{qcqp_route::build_nonconvex_raw, solve_qp_with, QpProblem};
 use otspot::sparse::CscMatrix;
 use std::path::Path;
 
@@ -85,13 +91,17 @@ fn without_objective_quadratic(problem: &QpProblem) -> QpProblem {
     p
 }
 
-/// 突合本体。各行: (問, Phase 0 b1, 実測 |R| 全体, 実測 |R| 制約由来のみ)。
-/// 2546 のみ分類器が保守側へ食い違い (上のノート)、残りは b1 と一致する。
+/// 突合本体 (分類器 direct、削除+追加で移設)。各行: (問, Phase 0 b1,
+/// 実測 |R| 全体, 実測 |R| 制約由来のみ)。2546 のみ分類器が保守側へ食い違い
+/// (上のノート)、残りは b1 と一致する。`bad_raw` は生箱で R 内非有限の数 —
+/// Phase-2 の受理ゲート移動後もこの 4 問は生箱が全非有限なので
+/// 「every R variable has a raw non-finite bound」は分類器側で依然固定する
+/// (受理可否ではなく集合の同一性がここの契約。8595/8605 が FBBT で
+/// finitize される事実は `qcqp_route` の受理テストと Phase-0 CSV が固定)。
 ///
-/// Sentinel: 全変数 finite 判定 (G1 前のゲート) を戻すと、メッセージが旧書式に
-/// なり `r_gate_counts` が None → panic で fail する (計画 §5 sentinel 1 の
-/// 実データ版)。逆に分類器が非対角規則 (規則 3) を落とすと |R| が減少して
-/// assert が崩れる。
+/// Sentinel: 分類器が非対角規則 (規則 3) を落とすと |R| が減少して assert が
+/// 崩れる。R 判定を「全変数 finite」へ後退させると r_full が全変数数に
+/// なって同じく崩れる (計画 §5 sentinel 1 の実データ版)。
 #[test]
 fn qcqp_phase0_bound_requirement_reconciliation() {
     // (id, phase0_b1, r_full, r_constraints_only)
@@ -103,19 +113,28 @@ fn qcqp_phase0_bound_requirement_reconciliation() {
     ];
     for (id, b1, r_full, r_quad) in cases {
         let problem = load_qplib_q(id);
-        let res = solve_expect_structural_rejection(&problem, id, "raw");
-        let (bad_full, r) = r_gate_counts(&res)
-            .unwrap_or_else(|| panic!("{id}: raw bounds did not hit the R gate: {:?}", res.status));
+        let nc = build_nonconvex_raw(&problem).unwrap_or_else(|e| panic!("{id}: raw build: {e}"));
+        let req = effective_bound_requirement(nc.n, nc.p0.as_ref(), &nc.quad, &nc.lb, &nc.ub)
+            .unwrap_or_else(|e| panic!("{id}: classifier: {e}"));
+        let r = req.required.iter().filter(|b| **b).count();
+        let bad_raw = req
+            .required
+            .iter()
+            .enumerate()
+            .filter(|(j, need)| **need && (!nc.lb[*j].is_finite() || !nc.ub[*j].is_finite()))
+            .count();
         assert_eq!(r, r_full, "{id}: |R| from the classifier");
         assert_eq!(
-            bad_full, r_full,
+            bad_raw, r_full,
             "{id}: every R variable has a raw non-finite bound in these instances"
         );
 
         let no_obj = without_objective_quadratic(&problem);
-        let res = solve_expect_structural_rejection(&no_obj, id, "no-obj-quad");
-        let (_, r_con) = r_gate_counts(&res)
-            .unwrap_or_else(|| panic!("{id}: no-obj variant did not hit the R gate"));
+        let nc2 =
+            build_nonconvex_raw(&no_obj).unwrap_or_else(|e| panic!("{id}: no-obj raw build: {e}"));
+        let req2 = effective_bound_requirement(nc2.n, nc2.p0.as_ref(), &nc2.quad, &nc2.lb, &nc2.ub)
+            .unwrap_or_else(|e| panic!("{id}: no-obj classifier: {e}"));
+        let r_con = req2.required.iter().filter(|b| **b).count();
         assert_eq!(
             r_con, r_quad,
             "{id}: constraint-derived |R| must match Phase 0 b1 ({b1})"

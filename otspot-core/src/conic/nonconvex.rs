@@ -1666,6 +1666,95 @@ fn verify_recession_unboundedness(
     Ok(())
 }
 
+/// Phase 2 acceptance rule (plan §3.2 line 89): `R` finiteness is judged on
+/// the EFFECTIVE root box -- the declared box refined by the seed -- not on
+/// the raw `qp.lb`/`qp.ub`. This is the single gate that replaces the old
+/// `NonconvexQcqp::validate` raw check: root-stage FBBT (plan §4.1) derives
+/// bounds into the seed box, and a variable still non-finite here cannot be
+/// branched on (branch midpoint of an infinite interval, plan §0.1 line 16).
+/// Message wording is inherited from the old validate clause so route-level
+/// rejections keep naming the offending variable. (Size-only extraction from
+/// `global_core`; contract and message bytes unchanged.)
+fn required_free_rejection(
+    static_: &StaticRelax,
+    root_box: &(Vec<f64>, Vec<f64>),
+) -> Option<GlobalResult> {
+    for (j, (&l, &u)) in root_box.0.iter().zip(&root_box.1).enumerate() {
+        if static_.required[j] && (!l.is_finite() || !u.is_finite()) {
+            return Some(GlobalResult {
+                status: SolveStatus::NotSupported(format!(
+                    "lb[{j}] = {l} / ub[{j}] = {u}: variable is in the bound-requirement \
+                     set R and has no finite root-box bound even after root bound \
+                     derivation (its lift needs finite McCormick boxes)"
+                )),
+                objective: f64::NAN,
+                x: vec![],
+                nodes: 0,
+                gap: f64::INFINITY,
+            });
+        }
+    }
+    None
+}
+
+/// Seed trust audit for `global_core` (shape, box-only contract, refine-only
+/// box, feasibility/objective consistency of a full seed). `Some(msg)` = the
+/// rejection reason rendered as `invalid global seed: {msg}`; `None` = the
+/// seed is trusted. (Size-only extraction; every message and check order is
+/// byte-identical to the pre-extraction inline chain.)
+fn seed_rejection(
+    s: &GlobalSeed,
+    qp: &NonconvexQcqp,
+    integers: &[usize],
+    g: &GlobalOptions,
+) -> Option<String> {
+    let box_only = s.x.is_empty();
+    if (!box_only && s.x.len() != qp.n) || s.root_lb.len() != qp.n || s.root_ub.len() != qp.n {
+        return Some("seed x/root_lb/root_ub length != n".to_string());
+    }
+    if box_only && s.f != f64::INFINITY {
+        // A box-only seed (root FBBT output) has no incumbent; a finite
+        // `f` next to an empty `x` is corrupt data, never a trusted UB.
+        return Some(format!(
+            "box-only seed (empty x) must carry f = +inf, got {}",
+            s.f
+        ));
+    }
+    if s.root_lb
+        .iter()
+        .zip(&s.root_ub)
+        .any(|(l, u)| l.is_nan() || u.is_nan() || l > u)
+    {
+        // Non-finite (`±inf`) box sides are allowed -- they are what the
+        // declared box itself carries for free variables; NaN is not.
+        return Some("seed root box must satisfy lb <= ub (no NaN sides)".to_string());
+    }
+    if s.root_lb
+        .iter()
+        .zip(&s.root_ub)
+        .zip(qp.lb.iter().zip(&qp.ub))
+        .any(|((&l, &u), (&pl, &pu))| l < pl || u > pu)
+    {
+        // The derived box must refine, never widen, the declared box (a
+        // widened side would admit points the public `feasible()`
+        // contract rejects).
+        return Some("seed root box widens the declared box".to_string());
+    }
+    if box_only {
+        return None;
+    }
+    if !feasible(qp, &s.x, g.feas_tol) || !all_integral(&s.x, integers, g.int_tol) {
+        return Some("seed x is not feasible for the original problem at feas_tol".to_string());
+    }
+    let fx = objective(qp, &s.x);
+    ((s.f - fx).abs() > 1e-9 * (1.0 + fx.abs())).then(|| {
+        format!(
+            "seed objective mismatch: seed.f = {} vs recomputed {fx}",
+            s.f
+        )
+    })
+}
+
 /// McCormick spatial branch-and-bound core shared by [`solve_global_qcqp`] /
 /// [`solve_global_miqcp`].
 ///
@@ -1707,49 +1796,7 @@ fn global_core(
     // keeps derived bounds out of `qp.lb`/`qp.ub`), else the problem box.
     let mut root_box = (qp.lb.clone(), qp.ub.clone());
     if let Some(s) = seed {
-        let box_only = s.x.is_empty();
-        let bad = if (!box_only && s.x.len() != qp.n)
-            || s.root_lb.len() != qp.n
-            || s.root_ub.len() != qp.n
-        {
-            Some("seed x/root_lb/root_ub length != n".to_string())
-        } else if box_only && s.f != f64::INFINITY {
-            // A box-only seed (root FBBT output) has no incumbent; a finite
-            // `f` next to an empty `x` is corrupt data, never a trusted UB.
-            Some(format!("box-only seed (empty x) must carry f = +inf, got {}", s.f))
-        } else if s
-            .root_lb
-            .iter()
-            .zip(&s.root_ub)
-            .any(|(l, u)| l.is_nan() || u.is_nan() || l > u)
-        {
-            // Non-finite (`±inf`) box sides are allowed -- they are what the
-            // declared box itself carries for free variables; NaN is not.
-            Some("seed root box must satisfy lb <= ub (no NaN sides)".to_string())
-        } else if s
-            .root_lb
-            .iter()
-            .zip(&s.root_ub)
-            .zip(qp.lb.iter().zip(&qp.ub))
-            .any(|((&l, &u), (&pl, &pu))| l < pl || u > pu)
-        {
-            // The derived box must refine, never widen, the declared box (a
-            // widened side would admit points the public `feasible()`
-            // contract rejects).
-            Some("seed root box widens the declared box".to_string())
-        } else if box_only {
-            None
-        } else if !feasible(qp, &s.x, g.feas_tol) || !all_integral(&s.x, integers, g.int_tol) {
-            Some("seed x is not feasible for the original problem at feas_tol".to_string())
-        } else {
-            let fx = objective(qp, &s.x);
-            ((s.f - fx).abs() > 1e-9 * (1.0 + fx.abs())).then(|| {
-                format!(
-                    "seed objective mismatch: seed.f = {} vs recomputed {fx}",
-                    s.f
-                )
-            })
-        };
+        let bad = seed_rejection(s, qp, integers, g);
         if let Some(e) = bad {
             return GlobalResult {
                 status: SolveStatus::NotSupported(format!("invalid global seed: {e}")),
@@ -1759,35 +1806,14 @@ fn global_core(
                 gap: f64::INFINITY,
             };
         }
-        if !box_only {
+        if !s.x.is_empty() {
             incumbent = objective(qp, &s.x);
             inc_x = s.x.clone();
         }
         root_box = (s.root_lb.clone(), s.root_ub.clone());
     }
-    // Phase 2 acceptance rule (plan §3.2 line 89): `R` finiteness is judged
-    // on the EFFECTIVE root box -- the declared box refined by the seed --
-    // not on the raw `qp.lb`/`qp.ub`. This is the single gate that replaces
-    // the old `NonconvexQcqp::validate` raw check: root-stage FBBT (plan
-    // §4.1) derives bounds into the seed box, and a variable still
-    // non-finite here cannot be branched on (branch midpoint of an
-    // infinite interval, plan §0.1 line 16). Message wording is inherited
-    // from the old validate clause so route-level rejections keep naming
-    // the offending variable.
-    for (j, (&l, &u)) in root_box.0.iter().zip(&root_box.1).enumerate() {
-        if static_.required[j] && (!l.is_finite() || !u.is_finite()) {
-            return GlobalResult {
-                status: SolveStatus::NotSupported(format!(
-                    "lb[{j}] = {l} / ub[{j}] = {u}: variable is in the bound-requirement \
-                     set R and has no finite root-box bound even after root bound \
-                     derivation (its lift needs finite McCormick boxes)"
-                )),
-                objective: f64::NAN,
-                x: vec![],
-                nodes: 0,
-                gap: f64::INFINITY,
-            };
-        }
+    if let Some(res) = required_free_rejection(&static_, &root_box) {
+        return res;
     }
     let mut nodes = 0usize;
     let mut limited = false;
@@ -2560,7 +2586,12 @@ mod tests {
             ub: vec![f64::INFINITY, f64::INFINITY],
         };
         let qp = mk();
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default(), None);
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
         match &res.status {
             SolveStatus::NotSupported(msg) => {
                 assert!(msg.contains("lb[0]"), "gate must name the variable: {msg}");
@@ -2651,7 +2682,12 @@ mod tests {
             root_ub: vec![f64::INFINITY, 2.0],
             ..base
         };
-        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default(), Some(&widened));
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            Some(&widened),
+        );
         assert!(
             matches!(&res.status, SolveStatus::NotSupported(m) if m.contains("widens")),
             "{res:?}"

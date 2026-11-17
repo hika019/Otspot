@@ -5,8 +5,10 @@
 //! finitizes (routes forward). No solves run — parse, classify, propagate.
 //!
 //! Usage:
-//! `qcqp_fbbt_phase0 [--out F.csv] DIR [DIR ...]`
+//! `qcqp_fbbt_phase0 [--out F.csv] [--vars DIR] DIR [DIR ...]`
 //! (defaults: `--out qcqp_fbbt_phase0.csv`, dirs = `data/qplib`).
+//! `--vars DIR` additionally dumps one `R`-variable row per problem
+//! (`<id>.vars.csv`: raw/derived endpoints) for the branch-history × width join.
 
 use otspot_core::conic::{
     classify_bound_requirements, derive_root_box, effective_bound_requirement, GlobalOptions,
@@ -61,7 +63,7 @@ struct RowStats {
     contradiction_rows: usize,
 }
 
-fn measure(path: &Path) -> Result<RowStats, String> {
+fn measure(path: &Path, vars_dir: Option<&Path>) -> Result<RowStats, String> {
     let id = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -110,6 +112,25 @@ fn measure(path: &Path) -> Result<RowStats, String> {
     }
     raw_ws.sort_by(|a, b| a.partial_cmp(b).unwrap());
     der_ws.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // Per-variable dump (branch-history × width join, research doc §5 P0-2):
+    // one row per `R` variable with raw and derived endpoints, so a run's
+    // BRANCH records (variable index) can be priced against the box widths
+    // the search actually saw.
+    if let Some(dir) = vars_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let mut lines = String::from("idx,raw_lb,raw_ub,der_lb,der_ub\n");
+        for j in 0..nc.n {
+            if !eff.required[j] {
+                continue;
+            }
+            lines.push_str(&format!(
+                "{},{},{},{},{}\n",
+                j, nc.lb[j], nc.ub[j], box_.lb[j], box_.ub[j]
+            ));
+        }
+        let file = dir.join(format!("{id}.vars.csv"));
+        let _ = std::fs::write(file, lines);
+    }
     Ok(RowStats {
         id,
         n: nc.n,
@@ -137,12 +158,17 @@ fn measure(path: &Path) -> Result<RowStats, String> {
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut out = PathBuf::from("qcqp_fbbt_phase0.csv");
+    let mut vars_dir: Option<PathBuf> = None;
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut i = 0;
     while i < argv.len() {
         match argv[i].as_str() {
             "--out" => {
                 out = PathBuf::from(&argv[i + 1]);
+                i += 2;
+            }
+            "--vars" => {
+                vars_dir = Some(PathBuf::from(&argv[i + 1]));
                 i += 2;
             }
             a => {
@@ -166,7 +192,7 @@ fn main() {
             .collect();
         files.sort();
         for path in files {
-            match measure(&path) {
+            match measure(&path, vars_dir.as_deref()) {
                 Ok(r) => {
                     let line = format!(
                         "{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{}\n",

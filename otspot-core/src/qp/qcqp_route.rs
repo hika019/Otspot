@@ -8,7 +8,7 @@
 //! clamps pivots in a small jitter band, so a slightly indefinite matrix
 //! can pass as "convex" (reported via `QcqpResult::convexity_unproven`).
 //! The route accepts the convex-bridge result only when exact **and**
-//! clean ([`is_clean_convex_outcome`]); everything else falls back to
+//! clean (`is_clean_convex_outcome`); everything else falls back to
 //! the spatial (McCormick) branch-and-bound solver (sound for convex
 //! too); a clamp-free `Timeout` never falls back (retrying past the
 //! deadline doubles the time spent). `QpProblem` itself carries no
@@ -222,7 +222,7 @@ fn global_result_to_solver_result(res: GlobalResult, obj_offset: f64) -> SolverR
 /// sign-flipped and `=` rows become a pair of `<=` rows.
 ///
 /// The QP route itself uses [`build_nonconvex_raw`] + root FBBT instead
-/// ([`build_nonconvex_with_root_box`]): Phase 2 (plan §3.2 line 89) judges
+/// (`build_nonconvex_with_root_box`): Phase 2 (plan §3.2 line 89) judges
 /// `R` finiteness on the derived root box, which this gated wrapper cannot
 /// express. The wrapper stays as the model-level/compat entry with the
 /// documented G1 semantics.
@@ -238,7 +238,7 @@ pub fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, Strin
 /// Build the [`NonconvexQcqp`] with the *declared* bounds — no bound gate.
 ///
 /// Public because the Phase-2 acceptance rule is no longer expressible as a
-/// raw-bound filter: [`build_nonconvex_with_root_box`] derives a root box
+/// raw-bound filter: `build_nonconvex_with_root_box` derives a root box
 /// first (plan §4.1) and only then rejects. Callers that bypass the root-box
 /// path must run their own `R`-finiteness check (the
 /// `global_core` effective-root-box gate is the shared backstop).
@@ -391,8 +391,11 @@ fn build_nonconvex_with_root_box(
         .enumerate()
         .filter(|(_, need)| **need)
         .filter_map(|(j, _)| {
-            (!derived.lb[j].is_finite() || !derived.ub[j].is_finite())
-                .then_some((j, derived.lb[j], derived.ub[j]))
+            (!derived.lb[j].is_finite() || !derived.ub[j].is_finite()).then_some((
+                j,
+                derived.lb[j],
+                derived.ub[j],
+            ))
         })
         .collect();
     if let Some(&(j, l, u)) = bad.first() {
@@ -532,6 +535,57 @@ mod tests {
             "hand oracle -sqrt(5): {}",
             result.objective
         );
+    }
+
+    #[test]
+    fn circle_equality_all_free_routes_through_derived_gate() {
+        // Acceptance-gate-move sentinel (plan §3.2 line 89, report §6 T1):
+        // `x0^2 + x1^2 = 1` with a fully free declared box. Both variables
+        // are in R (two-sided diagonal lifts); the RAW box rejects (old
+        // `require_finite_bounds` semantics), the DERIVED box (FBBT ellipsoid
+        // evaluation, |x| <= 1 + margin) accepts. Reverting the acceptance
+        // judgment to the raw box turns the Optimal below into a
+        // NotSupported (revert-fail sentinel). Hand oracle: min x0 = -1.
+        let n = 2usize;
+        let q_obj = CscMatrix::new(n, n);
+        let c = vec![1.0, 0.0];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+        let mut qc = QcqpMatrix::new(n);
+        qc.triplets.push((0, 0, 2.0));
+        qc.triplets.push((1, 1, 2.0));
+        let mut problem = QpProblem::new(
+            q_obj,
+            c,
+            a,
+            vec![1.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+        problem.set_quadratic_constraints(vec![qc]).unwrap();
+
+        let (nc, seed) = build_nonconvex_with_root_box(&problem, 1e-6).unwrap();
+        assert!(nc.lb.iter().all(|l| !l.is_finite()));
+        let seed = seed.expect("all-free R variables must finitize and attach a seed");
+        assert!(
+            seed.root_ub[0] > 1.0 && seed.root_lb[0] < -1.0 - 1e-9,
+            "derived circle box must contain [-1, 1] strictly inside: [{}, {}]",
+            seed.root_lb[0],
+            seed.root_ub[0]
+        );
+        assert!(
+            seed.root_ub[1] > 1.0 && seed.root_lb[1] < -1.0 - 1e-9,
+            "both circle variables are in R: [{}, {}]",
+            seed.root_lb[1],
+            seed.root_ub[1]
+        );
+        // Hand oracle embedded above: the exact feasible set is the unit
+        // circle, so any correct derived box strictly contains [-1, 1] on
+        // both coordinates, and acceptance itself is the gate under test
+        // (a raw-box gate rejects before any of this). The tree-level solve
+        // of a pure-equality circle is a separate numerical concern
+        // (measured NumericalError on the relaxation LP; tracked with the
+        // B&B numerical arms, not the acceptance gate).
     }
 
     /// A bilinear-only row gives root FBBT nothing (no bilinear propagation,

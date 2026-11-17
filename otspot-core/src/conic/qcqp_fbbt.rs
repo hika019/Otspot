@@ -246,11 +246,7 @@ fn diag_terms(p: &CscMatrix, q: &[f64], r: f64) -> Option<DiagQuadRow> {
         }
     }
     for &(v, a) in &diag[next..] {
-        terms.push(DiagTerm {
-            var: v,
-            a,
-            b: q[v],
-        });
+        terms.push(DiagTerm { var: v, a, b: q[v] });
     }
     Some(DiagQuadRow { terms, r })
 }
@@ -274,7 +270,9 @@ fn term_min(a: f64, b: f64, l: f64, u: f64) -> (f64, i8) {
             (f64::INFINITY, 1)
         } else if a < 0.0 {
             (f64::NEG_INFINITY, -1)
-        } else if b > 0.0 || b < 0.0 {
+        } else if b != 0.0 {
+            // `b` is finite and nonzero here (`diag_terms` rejects non-finite
+            // coefficients), so the sign of `b * x` decides.
             let v = b * x;
             (v, if v > 0.0 { 1 } else { -1 })
         } else {
@@ -321,7 +319,10 @@ struct CompSum {
 
 impl CompSum {
     fn new() -> Self {
-        CompSum { sum: 0.0, comp: 0.0 }
+        CompSum {
+            sum: 0.0,
+            comp: 0.0,
+        }
     }
     fn add(&mut self, x: f64) {
         let t = self.sum + x;
@@ -487,12 +488,7 @@ pub fn derive_root_box(qp: &NonconvexQcqp, feas_tol: f64) -> RootFbbtBox {
     };
     let lin_rows = build_lin_rows(qp);
     let quad_rows = build_diag_quad_rows(qp);
-    let mut bounds: Vec<(f64, f64)> = qp
-        .lb
-        .iter()
-        .zip(&qp.ub)
-        .map(|(&l, &u)| (l, u))
-        .collect();
+    let mut bounds: Vec<(f64, f64)> = qp.lb.iter().zip(&qp.ub).map(|(&l, &u)| (l, u)).collect();
     let mut moved_vars = vec![false; qp.n];
     let mut contradictions = 0usize;
     let mut rounds = 0usize;
@@ -535,7 +531,6 @@ pub fn derive_root_box(qp: &NonconvexQcqp, feas_tol: f64) -> RootFbbtBox {
 mod tests {
     use super::*;
     use crate::conic::GQuadConstraint;
-    use std::f64::{INFINITY, NEG_INFINITY};
 
     fn csc(n: usize, entries: Vec<(usize, usize, f64)>) -> CscMatrix {
         let mut rows = Vec::new();
@@ -601,7 +596,13 @@ mod tests {
         GQuadConstraint { p, q, r }
     }
 
-    fn lin_qp(n: usize, g_lin: CscMatrix, h_lin: Vec<f64>, lb: Vec<f64>, ub: Vec<f64>) -> NonconvexQcqp {
+    fn lin_qp(
+        n: usize,
+        g_lin: CscMatrix,
+        h_lin: Vec<f64>,
+        lb: Vec<f64>,
+        ub: Vec<f64>,
+    ) -> NonconvexQcqp {
         NonconvexQcqp {
             n,
             p0: None,
@@ -624,15 +625,25 @@ mod tests {
     #[test]
     fn linear_rows_derive_hand_computed_bounds() {
         let n = 2;
-        let g_lin = linc(2, n, vec![(0, 0, 1.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, -1.0)]);
-        let qp = lin_qp(n, g_lin, vec![6.0, 2.0], vec![NEG_INFINITY, 0.0], vec![INFINITY, 4.0]);
+        let g_lin = linc(
+            2,
+            n,
+            vec![(0, 0, 1.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, -1.0)],
+        );
+        let qp = lin_qp(
+            n,
+            g_lin,
+            vec![6.0, 2.0],
+            vec![f64::NEG_INFINITY, 0.0],
+            vec![f64::INFINITY, 4.0],
+        );
         let out = derive_root_box(&qp, 1e-6);
         assert!(
             out.ub[0] >= 6.0 && out.ub[0] <= 6.0 + 1e-4,
             "hand oracle: x0 <= 6 (outward-rounded only): {:?}",
             out.ub
         );
-        assert_eq!(out.lb[0], NEG_INFINITY, "no row bounds x0 below");
+        assert_eq!(out.lb[0], f64::NEG_INFINITY, "no row bounds x0 below");
         assert_eq!(out.tightened, 1);
         // One productive pass plus one stable pass (the cap never fires here).
         assert_eq!(out.rounds, 2);
@@ -649,7 +660,12 @@ mod tests {
     fn quadratic_linear_part_never_propagated_as_linear() {
         let n = 2;
         let row = diag_row(n, &[(0, -1.0, 0.0), (1, 0.0, 1.0)], 0.0);
-        let qp = qcqp(n, vec![row], vec![1.0, NEG_INFINITY], vec![2.0, INFINITY]);
+        let qp = qcqp(
+            n,
+            vec![row],
+            vec![1.0, f64::NEG_INFINITY],
+            vec![2.0, f64::INFINITY],
+        );
         let out = derive_root_box(&qp, 1e-6);
         assert!(
             out.ub[1] >= 4.0,
@@ -662,7 +678,7 @@ mod tests {
             "the completed-square bound x1 <= 4 must be derived: ub[1] = {}",
             out.ub[1]
         );
-        assert_eq!(out.lb[1], NEG_INFINITY);
+        assert_eq!(out.lb[1], f64::NEG_INFINITY);
         assert_eq!(out.tightened, 1);
     }
 
@@ -675,7 +691,12 @@ mod tests {
         let n = 3;
         let plus = diag_row(n, &[(0, 1.0, 0.0), (1, 1.0, 0.0), (2, 1.0, 0.0)], -0.5);
         let minus = diag_row(n, &[(0, -1.0, 0.0), (1, -1.0, 0.0), (2, -1.0, 0.0)], 0.5);
-        let qp = qcqp(n, vec![plus, minus], vec![NEG_INFINITY; n], vec![INFINITY; n]);
+        let qp = qcqp(
+            n,
+            vec![plus, minus],
+            vec![f64::NEG_INFINITY; n],
+            vec![f64::INFINITY; n],
+        );
         let out = derive_root_box(&qp, 1e-6);
         let root = 0.5f64.sqrt();
         for j in 0..n {
@@ -702,7 +723,12 @@ mod tests {
     fn fixed_zero_times_free_term_no_false_infeasible() {
         let n = 2;
         let row = diag_row(n, &[(0, 1.0, 0.0), (1, 1.0, 0.0)], -1.0);
-        let qp = qcqp(n, vec![row], vec![0.0, NEG_INFINITY], vec![0.0, INFINITY]);
+        let qp = qcqp(
+            n,
+            vec![row],
+            vec![0.0, f64::NEG_INFINITY],
+            vec![0.0, f64::INFINITY],
+        );
         let out = derive_root_box(&qp, 1e-6);
         assert_eq!(out.contradiction_rows, 0, "no false contradiction");
         assert!(out.ub[1] >= 1.0 && out.ub[1] < 1.0 + 1e-3, "{:?}", out.ub);
@@ -757,14 +783,14 @@ mod tests {
             trip.push((n - 2 - k, k, 1.0));
             trip.push((n - 2 - k, k + 1, -1.0));
         }
-        let mut lb = vec![NEG_INFINITY; n];
+        let mut lb = vec![f64::NEG_INFINITY; n];
         lb[0] = 5.0;
         let qp = lin_qp(
             n,
             linc(n - 1, n, trip),
             vec![0.0; n - 1],
             lb,
-            vec![INFINITY; n],
+            vec![f64::INFINITY; n],
         );
         let out = derive_root_box(&qp, 1e-6);
         assert_eq!(out.rounds, ROOT_FBBT_MAX_ROUNDS);
@@ -775,7 +801,7 @@ mod tests {
         );
         assert_eq!(
             out.lb[ROOT_FBBT_MAX_ROUNDS + 2],
-            NEG_INFINITY,
+            f64::NEG_INFINITY,
             "cap must stop before full convergence on this adversarial chain"
         );
     }
@@ -826,12 +852,70 @@ mod tests {
         let qp = qcqp(
             n,
             vec![row],
-            vec![NEG_INFINITY, 1.0],
-            vec![INFINITY, 1.0],
+            vec![f64::NEG_INFINITY, 1.0],
+            vec![f64::INFINITY, 1.0],
         );
         let out = derive_root_box(&qp, 1e-6);
         assert!(out.lb[0] <= 0.0 && out.ub[0] >= 0.0);
         assert!(out.lb[0].is_finite() && out.ub[0].is_finite());
         assert_eq!(out.contradiction_rows, 0);
+    }
+
+    #[test]
+    fn rows_with_offdiag_entries_are_skipped_entirely() {
+        // `diag_terms` refuses any row with a stored off-diagonal entry
+        // (composed-zero cancellation counts as off-diagonal — plan §4.1:
+        // no bilinear/w-ij propagation this phase). Removing the refusal
+        // makes this row masquerade as two diagonal terms and fabricate a
+        // bound out of `-2 x0 x1` (revert-fail sentinel, report §6 S2).
+        let n = 2;
+        let p = csc(n, vec![(1, 0, 2.0), (0, 1, 2.0)]);
+        let row = GQuadConstraint {
+            p,
+            q: vec![0.0, 0.0],
+            r: 0.0,
+        };
+        let qp = qcqp(
+            n,
+            vec![row],
+            vec![f64::NEG_INFINITY; n],
+            vec![f64::INFINITY; n],
+        );
+        let out = derive_root_box(&qp, 1e-6);
+        assert_eq!(out.quad_diag_rows, 0, "off-diagonal rows must not be read");
+        assert_eq!(out.tightened, 0, "a skipped row cannot move any bound");
+        assert_eq!(out.lb, vec![f64::NEG_INFINITY; n]);
+        assert_eq!(out.ub, vec![f64::INFINITY; n]);
+    }
+
+    #[test]
+    fn tangent_clamp_survives_accumulated_roundoff() {
+        // Same tangent shape as `tangent_clamps_to_point_bound`, but the
+        // fixed side `s = sqrt(0.7)` squares to `0.7000000000000001`, so the
+        // compensated row budget `K = 0.7 - s^2` lands a few ulp *below* zero
+        // through rounding alone. The `ROOT_FBBT_DISCRIM_SLACK` arm is what
+        // keeps this a tangent (clamped `D = 0`, one-point fixing) instead of
+        // a row contradiction: with the slack removed the assertions below
+        // fail (revert-fail sentinel, report §6 T3).
+        let n = 2;
+        let s = 0.7f64.sqrt();
+        let row = diag_row(n, &[(0, 1.0, 0.0), (1, 1.0, 0.0)], -0.7);
+        let qp = qcqp(
+            n,
+            vec![row],
+            vec![f64::NEG_INFINITY, s],
+            vec![f64::INFINITY, s],
+        );
+        let out = derive_root_box(&qp, 1e-6);
+        assert_eq!(
+            out.contradiction_rows, 0,
+            "a ulp-negative row budget is the tangent case, never a contradiction"
+        );
+        assert!(
+            out.lb[0].is_finite() && out.ub[0].is_finite(),
+            "tangent fixing lost: [{}, {}]",
+            out.lb[0],
+            out.ub[0]
+        );
     }
 }
