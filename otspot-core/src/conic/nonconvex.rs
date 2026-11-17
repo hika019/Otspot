@@ -1637,8 +1637,9 @@ const SEED_F_CROSSCHECK_REL_TOL: f64 = 1e-9;
 /// `feas_tol` and integral at `int_tol`; then integer coordinates are rounded
 /// and the *rounded* point re-passes the original `feasible` at `feas_tol`
 /// (a tight/equality row can be feasible only at the fractional point, which
-/// no integer satisfies). The incumbent is always `objective` at the rounded
-/// point, cross-checked against `seed.f`.
+/// no integer satisfies). `seed.f` is cross-checked against the objective at
+/// the SEED point (its documented contract); the installed incumbent is always
+/// the independent recomputation at the rounded point.
 fn validate_seed(
     qp: &NonconvexQcqp,
     integers: &[usize],
@@ -1679,17 +1680,31 @@ fn validate_seed(
     if !feasible(qp, &xr, g.feas_tol) {
         return Err("seed x violates a constraint at feas_tol after integer rounding".to_string());
     }
-    let fx = objective(qp, &xr);
+    let fx = objective(qp, &s.x);
     if !fx.is_finite() {
         return Err(format!(
             "recomputed seed objective must be finite, got {fx}"
         ));
     }
+    // The documented `GlobalSeed::f` contract is the objective at the SEED
+    // point, so the stale-`f` cross-check evaluates at `s.x`. Evaluating it at
+    // the ROUNDED point conflates the int_tol coordinate shift (legitimate for
+    // an integral-within-tol seed) with a stale/forged `f`: rounding `min x`
+    // at `x = 1.0000005` moves the objective by 5e-7 — far beyond the
+    // `SEED_F_CROSSCHECK_REL_TOL * (1 + |fx|)` noise bound — and a valid seed
+    // would abort the whole solve as `NotSupported` (PR #85 review P2).
     if (s.f - fx).abs() > SEED_F_CROSSCHECK_REL_TOL * (1.0 + fx.abs()) {
         return Err(format!(
             "seed objective mismatch: seed.f = {} vs recomputed {fx}",
             s.f
         ));
+    }
+    // The installed incumbent stays the INDEPENDENT recomputation at the
+    // rounded, re-verified point — never `seed.f` itself (PR #84 review
+    // P1/P2: a stale/mismatched `f` is never trusted as an upper bound).
+    let fxr = objective(qp, &xr);
+    if !fxr.is_finite() {
+        return Err(format!("rounded seed objective must be finite, got {fxr}"));
     }
     Ok(xr)
 }
@@ -4881,5 +4896,52 @@ mod tests {
             ),
         }
         assert_eq!(res.nodes, 0, "the seed gate runs before the search");
+    }
+
+    /// Review P2 (PR #85): a seed integral *within* `int_tol` but not exactly
+    /// integral (`x = [1.0000005]`, `f` consistent at that same point) must be
+    /// ACCEPTED: `GlobalSeed::f` is documented as the objective at the seed
+    /// point, so the stale-`f` cross-check runs at `s.x`, while the incumbent
+    /// stays the independent recomputation at the rounded point (the int_tol
+    /// coordinate shift moves the incumbent, it is not a seed mismatch).
+    /// Sentinel: cross-checking `seed.f` against the rounded objective again
+    /// makes this FAIL as `NotSupported("objective mismatch")` because
+    /// rounding moves `min x` by 5e-7 > `SEED_F_CROSSCHECK_REL_TOL * (1+1)`.
+    #[test]
+    fn seed_integral_within_int_tol_is_accepted_at_original_point_f() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0],
+            ub: vec![2.0],
+        };
+        let g = GlobalOptions {
+            feas_tol: 1e-9,
+            int_tol: 1e-6,
+            ..GlobalOptions::default()
+        };
+        let seed = GlobalSeed {
+            x: vec![1.0000005],
+            f: 1.0000005,
+            root_lb: vec![0.0],
+            root_ub: vec![2.0],
+        };
+        let res = solve_global_miqcp(&qp, &[0], &ConicOptions::default(), &g, Some(&seed));
+        assert!(
+            !matches!(res.status, SolveStatus::NotSupported(_)),
+            "a valid approximate-integer seed must not abort the solve: {res:?}"
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            res.objective.abs() <= 1e-6,
+            "min x over [0,2] is 0: {res:?}"
+        );
     }
 }
