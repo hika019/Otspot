@@ -321,13 +321,13 @@ pub fn effective_bound_requirement(
 /// Split `bounds` into `lb`/`ub`, rejecting the problem when any variable of
 /// the §3.1 bound-requirement set `R` has a non-finite bound.
 ///
-/// G1 gate boundary: `R` is the raw classification — Phase 2 bound derivation
-/// (FBBT, objective cutoff) does not exist yet, so acceptance is stricter than
-/// §3.2's final rule ("reject only non-finite remaining after derivation") and
-/// the downstream relaxation, which is R-aware (decision D8):
-/// `NonconvexQcqp::validate` demands finiteness on exactly `R` as well, and
-/// `build_relax` keeps infinite boxes out of every LP by skipping box rows
-/// and envelope rows on non-finite endpoints.
+/// G1 gate: `R` is the raw classification and the verdict is on the RAW
+/// bounds. The QCQP route no longer calls this — Phase 2 (plan §3.2 line 89,
+/// `crate::qp::qcqp_route::build_nonconvex_with_root_box`) rejects only on
+/// what stays non-finite after root FBBT derivation, on the
+/// [`effective_bound_requirement`] set. This gate remains the acceptance
+/// rule for the `otspot-model` QCQP fallback entry and for
+/// [`crate::qp::qcqp_route::nonconvex_from_qp_problem`].
 ///
 /// The all-finite fast path returns without classification, keeping the
 /// current solver behavior (and cost) bit-identical for problems that the old

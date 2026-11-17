@@ -20,6 +20,10 @@ name = "bench_qplib"
 path = "src/bin/bench_qplib.rs"
 
 [[bin]]
+name = "qcqp_fbbt_phase0"
+path = "src/bin/qcqp_fbbt_phase0.rs"
+
+[[bin]]
 name = "qps_benchmark"
 path = "src/bin/qps_benchmark.rs"
 

@@ -4,7 +4,10 @@
 //! Handles indefinite objective/constraint matrices. Bound finiteness is
 //! required only for the §3.1 bound-requirement set `R` (variables whose lift
 //! pairs enter a McCormick envelope or a rule-2-vetoed diagonal, see
-//! [`NonconvexQcqp::validate`] and [`super::qcqp_classify`]); variables outside `R`
+//! [`super::qcqp_classify`]), and it is judged on the **effective root box**:
+//! the declared box refined by an optional [`GlobalSeed`] (`global_core`'s
+//! Phase-2 acceptance check, plan §3.2 line 89 — root FBBT derives bounds
+//! into the seed box, never into `qp.lb`/`qp.ub`); variables outside `R`
 //! may stay free — the relaxation then omits their box rows and, for every
 //! pair touching a non-finite endpoint, all envelope rows, so no `±inf`
 //! coefficient ever reaches an LP. Termination on free variables is guarded
@@ -25,9 +28,11 @@ pub struct GQuadConstraint {
     pub r: f64,
 }
 
-/// A (possibly nonconvex) QCQP. Bounds must be finite exactly for the
-/// variables in the §3.1 bound-requirement set `R` (see [`Self::validate`]);
-/// other variables may be free (`±inf`).
+/// A (possibly nonconvex) QCQP. `lb`/`ub` carry the *declared* box (`±inf` =
+/// free); `R`-finiteness (`super::qcqp_classify`) is demanded at
+/// `global_core` entry on the effective root box — the declared box refined
+/// by an optional [`GlobalSeed`] — not on the raw fields (Phase 2, plan
+/// §3.2 line 89 / §4.1).
 #[derive(Debug, Clone)]
 pub struct NonconvexQcqp {
     /// Number of variables.
@@ -123,20 +128,20 @@ impl NonconvexQcqp {
         // non-finite pair endpoints) never hands `±inf` to the LP. `NaN`
         // bounds stay rejected for *every* variable: they are corrupt data,
         // not "free", and would poison node boxes with NaN widths.
-        let req =
-            super::qcqp_classify::classify_bound_requirements(n, self.p0.as_ref(), &self.quad)?;
+        //
+        // Phase 2 (plan §3.2 line 89 / §4.1) moved the `R` finiteness verdict
+        // from here to `global_core`'s effective ROOT-BOX check: a raw
+        // `±inf` side inside `R` is admissible whenever the seed's derived box
+        // (root-stage FBBT output, plan §4.2 line 136 — derived bounds travel
+        // in `GlobalSeed`, never rewritten into `lb`/`ub`) makes it finite.
+        // `validate` still owns the shape guards and the NaN/crossed-side
+        // checks, which no seed can legitimately repair.
         for (k, (&l, &u)) in self.lb.iter().zip(&self.ub).enumerate() {
             if l.is_nan() {
                 return Err(format!("lb[{k}] is not finite: {l}"));
             }
             if u.is_nan() {
                 return Err(format!("ub[{k}] is not finite: {u}"));
-            }
-            if req.required[k] && (!l.is_finite() || !u.is_finite()) {
-                return Err(format!(
-                    "lb[{k}] = {l} / ub[{k}] = {u}: variable is in the bound-requirement \
-                     set R (its lift needs finite McCormick boxes)"
-                ));
             }
             if l > u {
                 return Err(format!("lb[{k}] = {l} > ub[{k}] = {u}"));
@@ -1461,17 +1466,23 @@ fn validate_integers(n: usize, integers: &[usize]) -> Result<(), String> {
 /// them would reject incumbents inside `feas_tol`), so the derived root box
 /// travels with the seed. M5/D7 exposed the plumbing through the public
 /// entry points (`Option<&GlobalSeed>` on `solve_global_qcqp` /
-/// `solve_global_miqcp`); the internal QP-route callers keep passing `None`
-/// until Phase 2 actually produces seeds.
+/// `solve_global_miqcp`); the QP route now passes a box-only seed whenever
+/// root-stage FBBT tightens the box (Phase 2, plan §4.1).
+///
+/// Box-only seeds: `x = vec![]` with `f = +inf` carries the derived root box
+/// without an incumbent (root FBBT alone cannot produce a feasible point —
+/// that is the local-solver obligation, plan §4.2). An empty `x` paired with
+/// a finite `f` is corrupt input and fails the seed validation.
 #[derive(Debug, Clone)]
 pub struct GlobalSeed {
     /// Feasible point `x̃` (re-validated by `global_core` at `feas_tol`
-    /// before use -- a corrupt seed fails as `NotSupported`, never as a
-    /// trusted incumbent).
+    /// before use — a corrupt seed fails as `NotSupported`, never as a
+    /// trusted incumbent), or empty for a box-only seed (no incumbent).
     pub x: Vec<f64>,
     /// Objective value at `x`; cross-checked against `objective(qp, x)` and
     /// the incumbent is always the recomputed value (a stale/mismatched `f`
-    /// fails the seed, it is never trusted as a lower upper-bound).
+    /// fails the seed, it is never trusted as a lower upper-bound). Must be
+    /// `+inf` when `x` is empty.
     pub f: f64,
     /// Derived root lower bounds (`±inf` allowed for free variables). Must
     /// refine, never widen, `qp.lb`/`qp.ub` -- a widened side would admit
@@ -1696,8 +1707,16 @@ fn global_core(
     // keeps derived bounds out of `qp.lb`/`qp.ub`), else the problem box.
     let mut root_box = (qp.lb.clone(), qp.ub.clone());
     if let Some(s) = seed {
-        let bad = if s.x.len() != qp.n || s.root_lb.len() != qp.n || s.root_ub.len() != qp.n {
+        let box_only = s.x.is_empty();
+        let bad = if (!box_only && s.x.len() != qp.n)
+            || s.root_lb.len() != qp.n
+            || s.root_ub.len() != qp.n
+        {
             Some("seed x/root_lb/root_ub length != n".to_string())
+        } else if box_only && s.f != f64::INFINITY {
+            // A box-only seed (root FBBT output) has no incumbent; a finite
+            // `f` next to an empty `x` is corrupt data, never a trusted UB.
+            Some(format!("box-only seed (empty x) must carry f = +inf, got {}", s.f))
         } else if s
             .root_lb
             .iter()
@@ -1718,6 +1737,8 @@ fn global_core(
             // widened side would admit points the public `feasible()`
             // contract rejects).
             Some("seed root box widens the declared box".to_string())
+        } else if box_only {
+            None
         } else if !feasible(qp, &s.x, g.feas_tol) || !all_integral(&s.x, integers, g.int_tol) {
             Some("seed x is not feasible for the original problem at feas_tol".to_string())
         } else {
@@ -1738,9 +1759,35 @@ fn global_core(
                 gap: f64::INFINITY,
             };
         }
-        incumbent = objective(qp, &s.x);
-        inc_x = s.x.clone();
+        if !box_only {
+            incumbent = objective(qp, &s.x);
+            inc_x = s.x.clone();
+        }
         root_box = (s.root_lb.clone(), s.root_ub.clone());
+    }
+    // Phase 2 acceptance rule (plan §3.2 line 89): `R` finiteness is judged
+    // on the EFFECTIVE root box -- the declared box refined by the seed --
+    // not on the raw `qp.lb`/`qp.ub`. This is the single gate that replaces
+    // the old `NonconvexQcqp::validate` raw check: root-stage FBBT (plan
+    // §4.1) derives bounds into the seed box, and a variable still
+    // non-finite here cannot be branched on (branch midpoint of an
+    // infinite interval, plan §0.1 line 16). Message wording is inherited
+    // from the old validate clause so route-level rejections keep naming
+    // the offending variable.
+    for (j, (&l, &u)) in root_box.0.iter().zip(&root_box.1).enumerate() {
+        if static_.required[j] && (!l.is_finite() || !u.is_finite()) {
+            return GlobalResult {
+                status: SolveStatus::NotSupported(format!(
+                    "lb[{j}] = {l} / ub[{j}] = {u}: variable is in the bound-requirement \
+                     set R and has no finite root-box bound even after root bound \
+                     derivation (its lift needs finite McCormick boxes)"
+                )),
+                objective: f64::NAN,
+                x: vec![],
+                nodes: 0,
+                gap: f64::INFINITY,
+            };
+        }
     }
     let mut nodes = 0usize;
     let mut limited = false;
@@ -2425,16 +2472,16 @@ mod tests {
     }
 
     /// Decision D8 replacement pair for the old "non-finite ub must be
-    /// rejected" assertion (removed per the delete-and-add rule): finiteness
-    /// is now demanded exactly on `R`.
+    /// rejected" assertion (removed per the delete-and-add rule): `R`
+    /// finiteness is now judged by `global_core` on the EFFECTIVE root box
+    /// (Phase 2, plan §3.2 line 89), so `validate` keeps only the checks no
+    /// seed can repair: shapes, NaN sides, crossed declared intervals.
     ///
-    /// Sentinel (plan §5 sentinel 1 direction): with `x0` in `R` (an
-    /// indefinite constraint row touches it) a free `x0` must still be
-    /// rejected naming variable 0; a free `x1` outside `R` must be accepted.
-    /// Reverting `validate` to the old all-finite rule fails the accept half;
-    /// dropping the `R` gate fails the reject half.
+    /// Replaces `validate_requires_finite_bounds_only_on_r`: the accept half
+    /// (free outside `R`) is unchanged, the reject half moved to
+    /// `r_free_in_roots_box_rejected_at_entry_but_seed_finitizes_it`.
     #[test]
-    fn validate_requires_finite_bounds_only_on_r() {
+    fn validate_keeps_shape_and_nan_checks_allows_free_bounds() {
         // quad[0]: -x0^2 + x0 <= 0 (composed diagonal -1 < 0 -> rule-2 veto
         // marks x0; nothing touches x1) => R = {x0}.
         let base = || NonconvexQcqp {
@@ -2455,21 +2502,14 @@ mod tests {
         };
         assert!(base().validate().is_ok());
 
+        // A free side INSIDE R now validates: whether it is accepted is the
+        // effective-root-box gate's call (seed may fix it), not validate's.
         let mut free_r = base();
         free_r.lb = vec![f64::NEG_INFINITY, 0.0];
         free_r.ub = vec![f64::INFINITY, 1.0];
-        let err = free_r.validate().unwrap_err();
         assert!(
-            err.contains("lb[0]") && err.contains('R'),
-            "free x0 in R must be rejected by name: {err}"
-        );
-
-        let mut free_out = base();
-        free_out.lb = vec![0.0, f64::NEG_INFINITY];
-        free_out.ub = vec![1.0, f64::INFINITY];
-        assert!(
-            free_out.validate().is_ok(),
-            "free x1 outside R must be accepted"
+            free_r.validate().is_ok(),
+            "Phase 2: raw R-freeness is a seed question, not a validate error"
         );
 
         // NaN bounds are corrupt data, not "free": rejected everywhere.
@@ -2478,6 +2518,143 @@ mod tests {
         assert!(
             nan_free.validate().is_err(),
             "NaN ub outside R rejected too"
+        );
+
+        // Crossed declared intervals stay rejected (a seed refines, never
+        // un-crosses, an empty declared box).
+        let mut crossed = base();
+        crossed.lb = vec![2.0, 0.0];
+        assert!(crossed.validate().is_err());
+    }
+
+    /// The moved `R`-finiteness gate (Phase 2 acceptance, plan §3.2 line 89),
+    /// sentinel pair: (a) a free variable inside `R` without a seed must be
+    /// rejected AT SEARCH ENTRY naming the variable and citing R (previously
+    /// `validate`'s job — reverting the gate to raw `validate` alone keeps
+    /// this message but loses (b)); (b) the same problem with a box-only seed
+    /// that finitizes `R` must SEARCH and prove the hand oracle optimum.
+    ///
+    /// Fixture: `min x0  s.t.  x0*x1 >= 1`, both variables free. The
+    /// bilinear pair is in `R` for both variables (McCormick envelopes need
+    /// finite endpoints — no D1 exemption is possible), so the raw-free
+    /// problem must be rejected; with the seed box `[1, 10]²` the optimum is
+    /// `x0 = 1` (independent oracle: any `x0 >= 1` feasible at `x1 = 1/x0`,
+    /// attained at the box's own lower end).
+    #[test]
+    fn r_free_in_roots_box_rejected_at_entry_but_seed_finitizes_it() {
+        let mk = || NonconvexQcqp {
+            n: 2,
+            p0: None,
+            q0: vec![1.0, 0.0],
+            quad: vec![GQuadConstraint {
+                // row value `0.5 x^T P x = -x0*x1`, so `-x0*x1 + 1 <= 0`.
+                p: CscMatrix::from_triplets(&[0, 1], &[1, 0], &[-1.0, -1.0], 2, 2).unwrap(),
+                q: vec![0.0, 0.0],
+                r: 1.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            b_eq: vec![],
+            lb: vec![f64::NEG_INFINITY, f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY, f64::INFINITY],
+        };
+        let qp = mk();
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default(), None);
+        match &res.status {
+            SolveStatus::NotSupported(msg) => {
+                assert!(msg.contains("lb[0]"), "gate must name the variable: {msg}");
+                assert!(msg.contains('R'), "gate must cite the R set: {msg}");
+            }
+            other => panic!("free x0 in R without a seed must be rejected: {other:?}"),
+        }
+
+        // (b) a box-only seed that finitizes both `R` members: the search
+        // must run and prove the oracle optimum 1 at (1, 1).
+        let seed = GlobalSeed {
+            x: Vec::new(),
+            f: f64::INFINITY,
+            root_lb: vec![1.0, 1.0],
+            root_ub: vec![10.0, 10.0],
+        };
+        let g = GlobalOptions {
+            max_nodes: 400,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g, Some(&seed));
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            (res.objective - 1.0).abs() <= 1e-6,
+            "hand oracle 1: {res:?}"
+        );
+    }
+
+    /// Box-only seed contract sentinels: empty `x` with a finite `f` is
+    /// corrupt (rejected), and the NaN / widened-box rejections from the
+    /// non-empty-seed suite apply to box-only seeds identically.
+    #[test]
+    fn box_only_seed_validation_matches_full_seed() {
+        let base = GlobalSeed {
+            x: Vec::new(),
+            f: f64::INFINITY,
+            root_lb: vec![f64::NEG_INFINITY, 0.0],
+            root_ub: vec![f64::INFINITY, 1.0],
+        };
+        let qp = NonconvexQcqp {
+            n: 2,
+            p0: None,
+            q0: vec![1.0, 0.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0], &[0], &[2.0], 2, 2).unwrap(),
+                q: vec![0.0, -1.0],
+                r: 0.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
+            b_eq: vec![],
+            lb: vec![f64::NEG_INFINITY, 0.0],
+            ub: vec![f64::INFINITY, 1.0],
+        };
+        // Corrupt: incumbent-less seed carrying a finite UB claim.
+        let corrupt = GlobalSeed {
+            f: 5.0,
+            ..base.clone()
+        };
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            Some(&corrupt),
+        );
+        assert!(
+            matches!(&res.status, SolveStatus::NotSupported(m) if m.contains("box-only")),
+            "finite f with empty x must fail as corrupt: {res:?}"
+        );
+        // NaN side rejected.
+        let nanned = GlobalSeed {
+            root_ub: vec![f64::NAN, 1.0],
+            ..base.clone()
+        };
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            Some(&nanned),
+        );
+        assert!(
+            matches!(&res.status, SolveStatus::NotSupported(m) if m.contains("NaN")),
+            "{res:?}"
+        );
+        // Widened side rejected (declared ub[1] = 1.0, seed claims 2.0).
+        let widened = GlobalSeed {
+            root_ub: vec![f64::INFINITY, 2.0],
+            ..base
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &GlobalOptions::default(), Some(&widened));
+        assert!(
+            matches!(&res.status, SolveStatus::NotSupported(m) if m.contains("widens")),
+            "{res:?}"
         );
     }
 

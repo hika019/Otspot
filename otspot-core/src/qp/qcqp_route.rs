@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use crate::conic::{
     self, qcqp_matrix_to_csc, ConicOptions, GQuadConstraint, GlobalOptions, GlobalResult,
-    NonconvexQcqp, QcqpResult,
+    GlobalSeed, NonconvexQcqp, QcqpResult,
 };
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolveRoute, SolveStatus, SolverResult};
@@ -50,13 +50,16 @@ pub(crate) fn solve_qcqp_via_conic(problem: &QpProblem, options: &SolverOptions)
         return qcqp_stop_result(SolveRoute::ConicQcqpNonconvex);
     }
 
-    let nc_qp = match nonconvex_from_qp_problem(problem) {
-        Ok(qp) => qp,
+    let g_opts = global_options(options);
+    let (nc_qp, seed) = match build_nonconvex_with_root_box(problem, g_opts.feas_tol) {
+        Ok(pair) => pair,
         Err(e) => {
-            // The global fallback needs a finite box. Without one, report the
-            // structural rejection for a bridge-rejected problem; for a bridge
-            // numerical failure, report NumericalError rather than fabricating
-            // a result from the failed convexified solve.
+            // The global fallback needs a finite box on the bound-required
+            // set R (after root FBBT had its chance — plan §3.2 line 89).
+            // Without one, report the structural rejection for a
+            // bridge-rejected problem; for a bridge numerical failure, report
+            // NumericalError rather than fabricating a result from the
+            // failed convexified solve.
             return if matches!(convex.status, SolveStatus::NotSupported(_)) {
                 SolverResult::not_supported(e)
             } else {
@@ -64,8 +67,7 @@ pub(crate) fn solve_qcqp_via_conic(problem: &QpProblem, options: &SolverOptions)
             };
         }
     };
-    let g_opts = global_options(options);
-    let global = conic::solve_global_qcqp(&nc_qp, &c_opts, &g_opts, None);
+    let global = conic::solve_global_qcqp(&nc_qp, &c_opts, &g_opts, seed.as_ref());
     global_result_to_solver_result(global, problem.obj_offset)
 }
 
@@ -211,19 +213,36 @@ fn global_result_to_solver_result(res: GlobalResult, obj_offset: f64) -> SolverR
 }
 
 /// Convert a continuous [`QpProblem`] QCQP into a [`NonconvexQcqp`] for the
-/// spatial branch-and-bound global solver.
+/// spatial branch-and-bound global solver, keeping the G1 raw-bound gate
+/// (`conic::require_finite_bounds`).
 ///
 /// Unlike the convex conic bridge (which rejects quadratic `>=`/`=`
 /// constraints as unable to certify convexity), this accepts any constraint
 /// sense and any (possibly indefinite) quadratic matrix: `>=` rows are
 /// sign-flipped and `=` rows become a pair of `<=` rows.
 ///
-/// Requires finite bounds on the §3.1 bound-requirement set `R` (see
-/// `conic::require_finite_bounds`): variables outside `R` (linear-only terms,
-/// rule-1 convex rows, rule-2 under-diagonals) are not gated here anymore,
-/// while `NonconvexQcqp::validate` remains the second-line guard until the
-/// relaxation itself learns to box only `R` (G2).
-fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
+/// The QP route itself uses [`build_nonconvex_raw`] + root FBBT instead
+/// ([`build_nonconvex_with_root_box`]): Phase 2 (plan §3.2 line 89) judges
+/// `R` finiteness on the derived root box, which this gated wrapper cannot
+/// express. The wrapper stays as the model-level/compat entry with the
+/// documented G1 semantics.
+pub fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
+    let nc = build_nonconvex_raw(src)?;
+    let (lb, ub) = conic::require_finite_bounds(nc.n, nc.p0.as_ref(), &nc.quad, &src.bounds)?;
+    let mut nc = nc;
+    nc.lb = lb;
+    nc.ub = ub;
+    Ok(nc)
+}
+
+/// Build the [`NonconvexQcqp`] with the *declared* bounds — no bound gate.
+///
+/// Public because the Phase-2 acceptance rule is no longer expressible as a
+/// raw-bound filter: [`build_nonconvex_with_root_box`] derives a root box
+/// first (plan §4.1) and only then rejects. Callers that bypass the root-box
+/// path must run their own `R`-finiteness check (the
+/// `global_core` effective-root-box gate is the shared backstop).
+pub fn build_nonconvex_raw(src: &QpProblem) -> Result<NonconvexQcqp, String> {
     let n = src.num_vars;
     src.validate().map_err(|e| e.to_string())?;
 
@@ -330,7 +349,8 @@ fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
     let a_eq = CscMatrix::from_triplets(&ae_r, &ae_c, &ae_v, ae_count, n)
         .map_err(|e| format!("A_eq build: {e:?}"))?;
     let p0 = (!src.is_zero_q()).then(|| src.q.clone());
-    let (lb, ub) = conic::require_finite_bounds(n, p0.as_ref(), &quad, &src.bounds)?;
+    let lb = src.bounds.iter().map(|&(l, _)| l).collect();
+    let ub = src.bounds.iter().map(|&(_, u)| u).collect();
     Ok(NonconvexQcqp {
         n,
         p0,
@@ -345,12 +365,286 @@ fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, String> {
     })
 }
 
+/// Phase-2 route preparation (plan §4.1/§4.3, research doc §4 steps 2+5):
+/// build the raw [`NonconvexQcqp`], run root-stage FBBT on it, and apply the
+/// Phase-2 acceptance rule "reject only when a bound-required variable is
+/// still non-finite after derivation" (plan §3.2 line 89) on the
+/// [`conic::effective_bound_requirement`] set — the D1 acceptance set the
+/// classifier module documents for exactly this purpose.
+///
+/// Derived bounds travel *only* in the returned box-only
+/// [`GlobalSeed`] (plan §4.2 line 136: `qp.lb`/`qp.ub`, the box `feasible()`
+/// reads, are never rewritten). When FBBT changes nothing, no seed is
+/// attached, keeping the downstream path bit-identical to the pre-Phase-2
+/// solver. The seed is audited by [`audit_root_seed`] before it leaves here —
+/// widened/NaN boxes are rejected here rather than at `global_core`.
+fn build_nonconvex_with_root_box(
+    src: &QpProblem,
+    feas_tol: f64,
+) -> Result<(NonconvexQcqp, Option<GlobalSeed>), String> {
+    let nc = build_nonconvex_raw(src)?;
+    let req = conic::effective_bound_requirement(nc.n, nc.p0.as_ref(), &nc.quad, &nc.lb, &nc.ub)?;
+    let derived = conic::derive_root_box(&nc, feas_tol);
+    let bad: Vec<(usize, f64, f64)> = req
+        .required
+        .iter()
+        .enumerate()
+        .filter(|(_, need)| **need)
+        .filter_map(|(j, _)| {
+            (!derived.lb[j].is_finite() || !derived.ub[j].is_finite())
+                .then_some((j, derived.lb[j], derived.ub[j]))
+        })
+        .collect();
+    if let Some(&(j, l, u)) = bad.first() {
+        return Err(format!(
+            "nonconvex QCQP requires finite bounds on every bound-required \
+             variable set R (plan §3.1); {} of the {} required variables \
+             have a non-finite bound even after root FBBT derivation \
+             (first: variable {j} with derived bounds ({l}, {u}))",
+            bad.len(),
+            req.required.iter().filter(|b| **b).count()
+        ));
+    }
+    if !derived.is_tightening(&nc) {
+        return Ok((nc, None));
+    }
+    let seed = GlobalSeed {
+        x: Vec::new(),
+        f: f64::INFINITY,
+        root_lb: derived.lb,
+        root_ub: derived.ub,
+    };
+    audit_root_seed(&nc, &seed)?;
+    Ok((nc, Some(seed)))
+}
+
+/// Audit a derived root seed with the same checks `global_core` runs on any
+/// incoming seed (`validate_seed` semantics: NaN sides, crossed intervals,
+/// widened sides), so a derivation bug fails at the route with a precise
+/// message instead of turning the search into a `NotSupported("invalid
+/// global seed")` far from the cause. FBBT is refine-only by construction;
+/// this is the belt-and-braces gate the task's proof contract requires.
+fn audit_root_seed(qp: &NonconvexQcqp, seed: &GlobalSeed) -> Result<(), String> {
+    if seed.root_lb.len() != qp.n || seed.root_ub.len() != qp.n {
+        return Err(format!(
+            "derived root box length {} / {} != n {}",
+            seed.root_lb.len(),
+            seed.root_ub.len(),
+            qp.n
+        ));
+    }
+    if seed.f != f64::INFINITY || !seed.x.is_empty() {
+        return Err(format!(
+            "root FBBT must emit a box-only seed (x empty, f = +inf), got \
+             x.len() = {} and f = {}",
+            seed.x.len(),
+            seed.f
+        ));
+    }
+    for (k, ((&l, &u), (&pl, &pu))) in seed
+        .root_lb
+        .iter()
+        .zip(&seed.root_ub)
+        .zip(qp.lb.iter().zip(&qp.ub))
+        .enumerate()
+    {
+        if l.is_nan() || u.is_nan() {
+            return Err(format!("derived bound[{k}] is NaN (l = {l}, u = {u})"));
+        }
+        if l > u {
+            return Err(format!("derived bound[{k}] is empty ({l} > {u})"));
+        }
+        if l < pl || u > pu {
+            return Err(format!(
+                "derived bound[{k}] = [{l}, {u}] widens the declared box [{pl}, {pu}]"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::options::{GlobalOptimizationConfig, Tolerance};
     use crate::qp::{solve_qp_with, QcqpMatrix};
     use otspot_num::sparse::CscMatrix;
+
+    /// Phase-2 headline (plan §4.1 line 123): an indefinite QCQP row over a
+    /// **free** objective variable. Pre-Phase-2 this died at the raw-bound
+    /// gate (`R` contains the free `x0`, plan §3.1); the completed-square row
+    /// minimum (`rest_min = min -x1² over [-2,2] = -4`) is what finitizes
+    /// `x0` into the derived root box the search enters with.
+    ///
+    /// `min x0  s.t.  x0² - x1² <= 1`, `x0` free, `x1 ∈ [-2, 2]`.
+    /// Independent oracle: `x0² <= 1 + x1² <= 5` gives `x0 >= -sqrt(5)`,
+    /// attained at `x1 = ±2, x0 = -sqrt(5)` (row value `5 - 4 = 1`).
+    /// The bridge cannot take this row (indefinite `P`), so the solve runs on
+    /// the spatial B&B with the derived box.
+    ///
+    /// (Pure-equality instances like `x0² + 2x1² = 2` with free `x` are
+    /// finitized at the derivation level too —
+    /// `qcqp_fbbt::completing_the_square_bounds_free_vars_of_ellipsoid_equality`
+    /// pins the hand oracle `|x_i| <= sqrt(c)` there — but such instances
+    /// stop in `global_core`'s leaf handling (rule-2 diagonals are not branch
+    /// candidates, plan D4): a G2 search limitation independent of FBBT.)
+    #[test]
+    fn indefinite_row_with_free_objective_var_solves_via_root_fbbt() {
+        let n = 2usize;
+        let q_obj = CscMatrix::new(n, n);
+        let c = vec![1.0, 0.0];
+        // Row 0: `x0² - x1² <= 1` (zero linear part).
+        let a = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+        let mut qc = QcqpMatrix::new(n);
+        qc.triplets.push((0, 0, 2.0));
+        qc.triplets.push((1, 1, -2.0));
+        let mut problem = QpProblem::new(
+            q_obj,
+            c,
+            a,
+            vec![1.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY), (-2.0, 2.0)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+        problem.set_quadratic_constraints(vec![qc]).unwrap();
+
+        let g_opts = conic::GlobalOptions::default();
+        let (nc, seed) = build_nonconvex_with_root_box(&problem, g_opts.feas_tol).unwrap();
+        let root5 = 5.0f64.sqrt();
+        let seed = seed.expect("free x0 in R must be finitized and attached as seed");
+        assert!(
+            seed.root_lb[0] < -root5 && seed.root_ub[0] > root5,
+            "derived box must contain +/-sqrt(5) with outward margin: \
+             [{}, {}]",
+            seed.root_lb[0],
+            seed.root_ub[0]
+        );
+        // Declared sides are never touched (refine-only): the raw box of x1
+        // stays exactly [-2, 2] and x0 stays raw-free in `nc`.
+        assert_eq!((nc.lb[1], nc.ub[1]), (-2.0, 2.0));
+        assert!(nc.lb[0] == f64::NEG_INFINITY && nc.ub[0] == f64::INFINITY);
+        let result = solve_qp_with(&problem, &SolverOptions::default());
+        assert_eq!(result.status, SolveStatus::Optimal, "{:?}", result.status);
+        assert_eq!(result.stats.route, SolveRoute::ConicQcqpNonconvex);
+        assert!(
+            (result.objective + root5).abs() < 1e-6,
+            "hand oracle -sqrt(5): {}",
+            result.objective
+        );
+    }
+
+    /// A bilinear-only row gives root FBBT nothing (no bilinear propagation,
+    /// L5 restriction), so the Phase-2 gate still rejects — but the message
+    /// must say the derivation had its chance (and name the variable).
+    /// Companion of `qcqp_guard::nonconvex_qcqp_with_unbounded_variable_
+    /// stays_not_supported`, which pins the status half.
+    #[test]
+    fn residual_rejection_reports_root_fbbt_ran() {
+        let n = 2usize;
+        let q_obj = CscMatrix::new(n, n);
+        let c = vec![1.0, 1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let mut qc = QcqpMatrix::new(n);
+        qc.triplets.push((0, 1, 1.0));
+        qc.triplets.push((1, 0, 1.0));
+        let a1 = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+        let mut problem =
+            QpProblem::new(q_obj, c, a1, vec![1.0], bounds, vec![ConstraintType::Ge]).unwrap();
+        problem.set_quadratic_constraints(vec![qc]).unwrap();
+
+        let result = solve_qp_with(&problem, &SolverOptions::default());
+        match &result.status {
+            SolveStatus::NotSupported(msg) => {
+                assert!(
+                    msg.contains("even after root FBBT derivation"),
+                    "message must report the derivation ran: {msg}"
+                );
+                assert!(msg.contains("variable 0"), "first bad variable: {msg}");
+            }
+            other => panic!("expected NotSupported, got {other:?}"),
+        }
+    }
+
+    /// No-op derivation attaches no seed: with every variable already boxed
+    /// and only a bilinear (skipped) row, the derived box equals the declared
+    /// box and the solver path stays the pre-Phase-2 seedless one.
+    #[test]
+    fn no_op_derivation_attaches_no_seed() {
+        let n = 2usize;
+        let q_obj = CscMatrix::new(n, n);
+        let c = vec![1.0, 1.0];
+        let bounds = vec![(0.1, 3.0), (0.1, 3.0)];
+        let mut qc = QcqpMatrix::new(n);
+        qc.triplets.push((0, 1, 1.0));
+        qc.triplets.push((1, 0, 1.0));
+        let a1 = CscMatrix::from_triplets(&[], &[], &[], 1, n).unwrap();
+        let mut problem =
+            QpProblem::new(q_obj, c, a1, vec![1.0], bounds, vec![ConstraintType::Ge]).unwrap();
+        problem.set_quadratic_constraints(vec![qc]).unwrap();
+
+        let (_nc, seed) = build_nonconvex_with_root_box(&problem, 1e-6).unwrap();
+        assert!(seed.is_none(), "nothing tightened -> no seed");
+    }
+
+    /// Proof contract (task item e/6): `audit_root_seed` must reject the
+    /// same corrupt boxes `global_core`'s seed validation rejects —
+    /// widened sides, NaN sides, crossed intervals — plus the box-only shape
+    /// itself. FBBT is refine-only by construction, so these sentinels fail
+    /// only if the construction AND the audit are both removed.
+    #[test]
+    fn audit_root_seed_rejects_widened_nan_crossed() {
+        let qp = NonconvexQcqp {
+            n: 2,
+            p0: None,
+            q0: vec![0.0; 2],
+            quad: vec![],
+            g_lin: CscMatrix::new(0, 2),
+            h_lin: vec![],
+            a_eq: CscMatrix::new(0, 2),
+            b_eq: vec![],
+            lb: vec![0.0, -1.0],
+            ub: vec![1.0, 1.0],
+        };
+        let ok = GlobalSeed {
+            x: Vec::new(),
+            f: f64::INFINITY,
+            root_lb: vec![0.0, -1.0],
+            root_ub: vec![1.0, 1.0],
+        };
+        assert!(audit_root_seed(&qp, &ok).is_ok());
+
+        let widened = GlobalSeed {
+            root_ub: vec![1.5, 1.0],
+            ..ok.clone()
+        };
+        assert!(audit_root_seed(&qp, &widened)
+            .unwrap_err()
+            .contains("widens"));
+        let nanned = GlobalSeed {
+            root_lb: vec![f64::NAN, -1.0],
+            ..ok.clone()
+        };
+        assert!(audit_root_seed(&qp, &nanned).unwrap_err().contains("NaN"));
+        let crossed = GlobalSeed {
+            root_lb: vec![0.0, 0.5],
+            root_ub: vec![1.0, 0.25],
+            x: Vec::new(),
+            f: f64::INFINITY,
+        };
+        assert!(audit_root_seed(&qp, &crossed)
+            .unwrap_err()
+            .contains("empty"));
+        let with_incumbent = GlobalSeed {
+            x: vec![0.5, 0.0],
+            f: 0.5,
+            root_lb: vec![0.0, -1.0],
+            root_ub: vec![1.0, 1.0],
+        };
+        assert!(audit_root_seed(&qp, &with_incumbent)
+            .unwrap_err()
+            .contains("box-only"));
+    }
 
     /// PR #25 review ("Keep gap tolerance out of feasibility checks"): the
     /// optimality-gap search budget (`cfg.gap_tol`) and the incumbent

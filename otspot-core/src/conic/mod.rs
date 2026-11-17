@@ -11,6 +11,7 @@ mod misocp;
 mod nonconvex;
 mod qcqp;
 mod qcqp_classify;
+mod qcqp_fbbt;
 #[cfg(test)]
 mod tests;
 
@@ -28,6 +29,7 @@ pub use qcqp_classify::{
     classify_bound_requirements, effective_bound_requirement, require_finite_bounds,
     BoundRequirement,
 };
+pub use qcqp_fbbt::{derive_root_box, RootFbbtBox, ROOT_FBBT_MAX_ROUNDS, ROOT_FBBT_ULP_SLACK};
 
 use crate::problem::SolveStatus;
 use otspot_num::sparse::CscMatrix;
