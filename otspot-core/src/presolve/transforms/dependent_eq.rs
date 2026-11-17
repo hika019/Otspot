@@ -17,9 +17,11 @@
 //! columns into the remaining rows' `b` and coefficients), so it transports
 //! back through the LIFO postsolve chain without referencing removed columns.
 //! Every ambiguous outcome keeps the row (fail-open — feasibility preservation):
-//! a dependent row with inconsistent RHS is not removed and not reported
-//! infeasible; a fill-aborted row is kept and not registered in the basis.
-//! See the tolerance constants below for the numerical thresholds.
+//! a dependent row whose surviving residual coefficients cannot be shown
+//! harmless against the variables' finite slack ranges is not removed (see
+//! `removal_effect_bounded`); a dependent row with inconsistent RHS is not
+//! removed and not reported infeasible; a fill-aborted row is kept and not
+//! registered in the basis. See the tolerance constants below.
 
 use super::state::{PostsolveStep, PresolveState, PresolveStatus};
 use crate::problem::ConstraintType;
@@ -46,6 +48,20 @@ const DEP_EQ_RANK_REL_TOL: f64 = 1e-9;
 /// keep the row, which is the fail-open side of the feasibility-preservation
 /// contract.
 const DEP_EQ_RHS_REL_TOL: f64 = 1e-9;
+
+/// Relative threshold for the bound-aware residual-effect test (see
+/// `removal_effect_bounded`): removal is admissible only when every
+/// surviving residual coefficient `a_j` satisfies
+/// `|a_j| * (ub_j - lb_j) <= DEP_EQ_BOUND_EFFECT_REL_TOL * (1 + rhs_scale)`.
+///
+/// Same magnitude and rationale as `DEP_EQ_RHS_REL_TOL`: the bound term
+/// upper-bounds the two-sided violation the removed row can suffer at a
+/// reduced-system solution, so a term at this scale leaves the removed row
+/// satisfied to within the same slack the RHS test already tolerates, far
+/// below the downstream 1e-5..1e-4 feasibility gates. Raising it makes
+/// removal *more* aggressive; the fail-open direction is protected by
+/// keeping it small.
+const DEP_EQ_BOUND_EFFECT_REL_TOL: f64 = 1e-9;
 
 /// Per-row fill budget for the elimination working row, as a multiple of the
 /// candidate row's original nnz. Beyond it the rank verdict for that row is
@@ -77,8 +93,15 @@ struct BasisRow {
 /// Outcome of reducing one candidate Eq row against the registered basis.
 enum Verdict {
     /// Matrix entries fully reduced to numerical zero; carries the RHS
-    /// residual magnitude and the accumulated RHS elimination scale.
-    Dependent { rhs_residual: f64, rhs_scale: f64 },
+    /// residual magnitude, the accumulated RHS elimination scale, and the
+    /// surviving residual coefficients `(col, val)` that were pinned to
+    /// numerical zero (exactly-zero entries are omitted — they cannot
+    /// contribute a bound effect).
+    Dependent {
+        rhs_residual: f64,
+        rhs_scale: f64,
+        residual: Vec<(usize, f64)>,
+    },
     /// Row is independent: normalized support entries and pivot column.
     Independent {
         pivot_col: usize,
@@ -191,9 +214,16 @@ impl ElimTracker {
             }
         }
         if pivot_col == usize::MAX {
+            let mut residual = Vec::new();
+            for &col in &self.touched {
+                if self.w[col] != 0.0 {
+                    residual.push((col, self.w[col]));
+                }
+            }
             return Verdict::Dependent {
                 rhs_residual: self.b_acc.abs(),
                 rhs_scale: self.b_scale,
+                residual,
             };
         }
         let pv = self.w[pivot_col];
@@ -210,6 +240,33 @@ impl ElimTracker {
             rhs: self.b_acc / pv,
         }
     }
+}
+
+/// Bound-aware admissibility test for a numerically-zero candidate row.
+///
+/// After elimination the candidate row is `a^T x = r` with every `|a_j|`
+/// below the rank tolerance. Removing it lets a reduced-system solution
+/// violate that row by `a^T x' - r`, which postsolve and the simplex
+/// feasibility gates see two-sided; the objective direction is not known
+/// here, so no one-sided (sign-exploiting) argument can cap the violation
+/// from above or below. For a coefficient `a_j` on a variable with both
+/// bounds finite, the variable's contribution to `|a^T x' - r|` is at most
+/// `|a_j| * (ub_j - lb_j)` (the row is satisfied at some point of the box —
+/// the original system's solution — so the deviation from that point is
+/// bounded by the box's image width). If a bound is missing, that side of
+/// the violation is unbounded: a small `|a_j|` is then not evidence of
+/// harmlessness, because the variable can exploit it without limit (the
+/// 1e-10-on-free-`w` case turns a bounded LP into an unbounded one). Hence
+/// every nonzero residual coefficient must have a finite slack range with
+/// the term below the tolerance, else the row is kept (fail-open). Uses
+/// *current* bounds: earlier steps only tighten them soundly, so a tighter
+/// range can only make admissible removals visible.
+fn removal_effect_bounded(st: &PresolveState, residual: &[(usize, f64)], rhs_scale: f64) -> bool {
+    let limit = DEP_EQ_BOUND_EFFECT_REL_TOL * (1.0 + rhs_scale);
+    residual.iter().all(|&(col, a)| {
+        let (lb, ub) = st.bounds[col];
+        lb.is_finite() && ub.is_finite() && a.abs() * (ub - lb) <= limit
+    })
 }
 
 pub(super) fn step12_dependent_equations(
@@ -243,8 +300,11 @@ pub(super) fn step12_dependent_equations(
             Verdict::Dependent {
                 rhs_residual,
                 rhs_scale,
+                residual,
             } => {
-                if rhs_residual <= DEP_EQ_RHS_REL_TOL * (1.0 + rhs_scale) {
+                if rhs_residual <= DEP_EQ_RHS_REL_TOL * (1.0 + rhs_scale)
+                    && removal_effect_bounded(st, &residual, rhs_scale)
+                {
                     st.removed_rows[row] = true;
                     st.postsolve_stack
                         .push(PostsolveStep::DependentEquation { orig_row: row });

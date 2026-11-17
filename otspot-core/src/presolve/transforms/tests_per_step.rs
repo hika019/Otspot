@@ -1651,6 +1651,171 @@ mod step12_dependent_eq {
         );
     }
 
+    fn reviewer_state(w_ub: f64) -> super::super::state::PresolveState {
+        // The reviewer's P1 repro: min -w, x,y,z,w >= 0,
+        //   r0: x -  y +  z          = 0
+        //   r1: x - 2y + 3z          = 0
+        //   r2: 2x - 3y + 4z + 1e-10*w = 0    (r0 + r1 = 2x - 3y + 4z)
+        make_state(
+            vec![0.0, 0.0, 0.0, -1.0],
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2, 2],
+            &[0, 1, 2, 0, 1, 2, 0, 1, 2, 3],
+            &[1.0, -1.0, 1.0, 1.0, -2.0, 3.0, 2.0, -3.0, 4.0, 1e-10],
+            3,
+            4,
+            vec![0.0, 0.0, 0.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF), (0.0, INF), (0.0, INF), (0.0, w_ub)],
+        )
+    }
+
+    fn reviewer_lp() -> LpProblem {
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2, 2],
+            &[0, 1, 2, 0, 1, 2, 0, 1, 2, 3],
+            &[1.0, -1.0, 1.0, 1.0, -2.0, 3.0, 2.0, -3.0, 4.0, 1e-10],
+            3,
+            4,
+        )
+        .unwrap();
+        LpProblem::new_general(
+            vec![0.0, 0.0, 0.0, -1.0],
+            a,
+            vec![0.0, 0.0, 0.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF); 4],
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    // SolverOptions is #[non_exhaustive]: mutation is the only way to flip
+    // `presolve` (same workaround as qp/ipm_solver/core precedent).
+    #[allow(clippy::field_reassign_with_default)]
+    fn step12_bound_aware_keeps_row_with_small_residual_on_unbounded_var() {
+        // Sentinel (reviewer's P1 repro): eliminating r0/r1 from r2 leaves a
+        // 1e-10 residual coefficient on unbounded `w`. The coefficient-only
+        // rank test called that dependent and removed the row, turning a
+        // mathematically bounded LP (r0 + r1 - r2 forces w = 0, oracle opt 0)
+        // into a truly unbounded reduced problem whose Err(Unbounded)
+        // bypasses the postsolve feasibility check. The bound-aware
+        // criterion keeps the row because |a| * range_w is infinite.
+        // NOTE: the end-to-end Optimal-0 check lives in
+        // `step12_bound_aware_scaled_equivalent_solves_optimal_zero` — on
+        // THIS exact LP the revised simplex reports Unbounded for BOTH
+        // presolve sides (a 1e-10 entering column is below PIVOT_TOL=1e-8,
+        // an independent simplex limitation outside step12), so the
+        // step12-level assertions below are the fail-on-revert evidence here.
+        let mut st = reviewer_state(INF);
+        step12_dependent_equations(&mut st, None).unwrap();
+        assert!(
+            !st.removed_rows.iter().any(|&r| r),
+            "residual 1e-10 on an unbounded variable must keep the row"
+        );
+        assert!(count_dependent(&st).is_empty());
+        let lp = reviewer_lp();
+        let on = run_presolve_with_flags(&lp, None, 3, None, PresolveFlags::default()).unwrap();
+        let off = run_presolve_with_flags(
+            &lp,
+            None,
+            3,
+            None,
+            PresolveFlags {
+                enable_dependent_eq: false,
+                ..PresolveFlags::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            on.reduced_problem.num_constraints, off.reduced_problem.num_constraints,
+            "step12 must not drop the r2 row through the full driver either"
+        );
+        // Whatever the simplex's status on this sub-pivot-tolerance LP,
+        // step12 must not make its answer differ from presolve-off.
+        let r_on = solve_lp_with(&lp, &SolverOptions::default());
+        let mut r_off_opts = SolverOptions::default();
+        r_off_opts.presolve = false;
+        let r_off = solve_lp_with(&lp, &r_off_opts);
+        assert_eq!(
+            r_on.status, r_off.status,
+            "step12 must preserve solve-status invariance on the reviewer LP"
+        );
+    }
+
+    #[test]
+    fn step12_bound_aware_scaled_equivalent_solves_optimal_zero() {
+        // Same feasible set as the reviewer's LP with r2 scaled by 1e8 (exact
+        // row scaling; residual coefficient 1e-2 stays far below the
+        // rank tolerance *relative* to the 4e8 row scale, and range_w is
+        // still infinite). With the bound-aware criterion the row survives
+        // presolve and the simplex — now able to see the 1e-2 entering
+        // column — proves the LP bounded: Optimal with objective 0 (oracle:
+        // w = 0 forced, x = y = z = w = 0 feasible). Reverting to the
+        // coefficient-only test removes r2, the reduced LP is TRULY
+        // unbounded along w, and both assertions below fail with Unbounded.
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2, 2],
+            &[0, 1, 2, 0, 1, 2, 0, 1, 2, 3],
+            &[1.0, -1.0, 1.0, 1.0, -2.0, 3.0, 2e8, -3e8, 4e8, 1e-2],
+            3,
+            4,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0, 0.0, 0.0, -1.0],
+            a,
+            vec![0.0, 0.0, 0.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF); 4],
+            None,
+        )
+        .unwrap();
+        let on = run_presolve_with_flags(&lp, None, 3, None, PresolveFlags::default()).unwrap();
+        let off = run_presolve_with_flags(
+            &lp,
+            None,
+            3,
+            None,
+            PresolveFlags {
+                enable_dependent_eq: false,
+                ..PresolveFlags::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            on.reduced_problem.num_constraints, off.reduced_problem.num_constraints,
+            "row-scaled reviewer LP: step12 must keep r2 (unbounded-variable residual)"
+        );
+        let res = solve_lp_with(&lp, &SolverOptions::default());
+        assert_eq!(
+            res.status,
+            SolveStatus::Optimal,
+            "bounded LP (w forced to 0) must solve Optimal, not {:?}",
+            res.status
+        );
+        assert!(
+            res.objective.abs() < 1e-6,
+            "oracle opt = 0, got {}",
+            res.objective
+        );
+        assert!(
+            res.solution[3].abs() < 1e-6,
+            "r2 forces w = 0, got w = {}",
+            res.solution[3]
+        );
+    }
+
+    #[test]
+    fn step12_bound_aware_removes_row_when_residual_effect_bounded() {
+        // Control for the same criterion: with w in [0, 1] the bound effect
+        // 1e-10 * 1 is below DEP_EQ_BOUND_EFFECT_REL_TOL, so removal stays
+        // admissible — the fix is bound-aware, not "never remove".
+        let mut st = reviewer_state(1.0);
+        step12_dependent_equations(&mut st, None).unwrap();
+        assert_eq!(count_dependent(&st), vec![2]);
+    }
+
     #[test]
     fn step12_work_budget_uses_factor_and_abs_cap() {
         // Factor branch: small rows budget at 8x their nnz.
