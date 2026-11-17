@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3478 testcases, 43 ignored
+# totals: 3479 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -570,6 +570,7 @@ otspot-core	mip::tests::invalid_options_rejected_at_milp_entry	active
 otspot-core	mip::tests::invalid_options_rejected_at_miqp_entry	active
 otspot-core	mip::tests::knapsack_truncated_has_no_bound_gap_cert	active
 otspot-core	mip::tests::max_lp_iters_deterministically_stops_before_max_nodes	active
+otspot-core	mip::tests::milp_preset_cancel_returns_timeout_before_solving	active
 otspot-core	mip::tests::mip_descendant_nodes_skip_repeated_lp_ruiz_scaling	active
 otspot-core	mip::tests::mip_descendant_scaling_retry_runs_and_accounts_first_attempt_timing	active
 otspot-core	mip::tests::mip_nodes_disable_lp_crash_basis_before_relaxation_solve	active

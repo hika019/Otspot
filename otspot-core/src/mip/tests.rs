@@ -5599,3 +5599,43 @@ fn root_presolve_fully_pinned_publishes_pinned_point() {
     assert_eq!(stats.nodes_processed, 0, "no search is needed");
     assert_eq!(stats.root_presolve_fallbacks, 0);
 }
+
+/// A *preset* cancel flag must stop the MILP route immediately, even for a
+/// problem the root presolve reduces to a trivial box: the reduced search
+/// finishes before the per-node LP path ever polls the flag, so the entry
+/// gate is the only reliably-reached check.
+///
+/// Sentinel: with the entry check removed (revert), this fixture is fully
+/// pinned and returns Optimal before any cancel poll → FAIL.
+#[test]
+fn milp_preset_cancel_returns_timeout_before_solving() {
+    // The fully-pinned fixture above: without the entry gate the reduction
+    // path completes with zero cancel polls.
+    let lp = build_lp(
+        vec![1.0, 1.0],
+        &[0, 1, 1, 2],
+        &[1, 0, 1, 0],
+        &[1.0, 1.0, -1.0, 1.0],
+        3,
+        vec![5.0, 0.0, 5.0],
+        vec![ConstraintType::Eq, ConstraintType::Ge, ConstraintType::Le],
+        vec![(0.0, 10.0), (0.0, 10.0)],
+    );
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let options = SolverOptions {
+        cancel_flag: Some(std::sync::Arc::clone(&flag)),
+        ..opts()
+    };
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &options, &MipConfig::default());
+    assert_eq!(
+        r.status,
+        SolveStatus::Timeout,
+        "a preset cancel must not be answered with a completed solve"
+    );
+    assert!(r.solution.is_empty());
+    assert_eq!(stats.nodes_processed, 0);
+    assert_eq!(
+        stats.root_presolve_cols_removed, 0,
+        "nothing must run after a preset cancel"
+    );
+}
