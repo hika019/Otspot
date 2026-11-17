@@ -308,9 +308,11 @@ impl ConicOptions {
 /// unscale + postsolve, with the result re-verified against `problem`'s
 /// *original* data before it is returned. The solve sees well-conditioned
 /// (possibly smaller) data, but every returned status/certificate is backed
-/// by an original-space verification, and any verification failure re-solves
-/// the original problem without presolve — exact up to rounding, changes
-/// neither optimum nor feasible set.
+/// by an original-space verification, and any verification failure OR
+/// inconclusive reduced-solve outcome (budget exhaustion, numerical failure,
+/// timeout) re-solves the original problem without presolve — exact up to
+/// rounding, changes neither optimum nor feasible set, and never reports a
+/// status worse than the presolve-free path.
 ///
 /// When presolve is active, `iterations`/`residuals` describe the reduced
 /// problem's solve (the reduced IPM tolerance is tightened by the reduction's
@@ -391,10 +393,22 @@ pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
                 res.primal_ray = None;
                 res.infeas_cert = None;
             }
-            // A tightened-tolerance `MaxIterations` must not regress the
-            // status the loose tolerance would have reached: re-solve
-            // unpresolvecised rather than report a spurious budget failure.
-            if res.status != SolveStatus::MaxIterations {
+            // Presolve must never regress the final status. Only terminal
+            // statuses (`Optimal` / `Infeasible` / `Unbounded`) — and only
+            // when the original-space re-verification gate below accepts
+            // them — are accepted from the reduced solve. Any inconclusive
+            // outcome (tightened-tolerance `MaxIterations`, a
+            // `NumericalError` demotion by the reduced-space honesty gate,
+            // `Timeout`) discards the reduced result and re-solves the
+            // ORIGINAL problem below, so the reported status is never worse
+            // than the presolve-free path would have achieved (bench nql60:
+            // the unreduced solve reaches `Optimal` in <1 s while the
+            // reduced solve stalled at the tightened tolerance — reporting
+            // the reduced `NumericalError` here was a status regression).
+            if matches!(
+                res.status,
+                SolveStatus::Optimal | SolveStatus::Infeasible | SolveStatus::Unbounded
+            ) {
                 if let Some(mut mapped) = red.postsolve(problem, reduced, &res, gate) {
                     mapped.objective = match mapped.status {
                         SolveStatus::Infeasible => f64::INFINITY,
@@ -404,8 +418,14 @@ pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
                     return mapped;
                 }
             }
+            if opts.stop_requested() {
+                // Honor the cancel contract without paying for the fallback
+                // pipeline on data nobody will wait for (same rationale as
+                // the up-front stop check).
+                return invalid_result(problem, SolveStatus::Timeout);
+            }
             // Fall through: original-space verification rejected the
-            // postsolved map (or the tightened solve ran out of budget) —
+            // postsolved map, or the reduced solve was inconclusive —
             // re-solve the original problem below.
         }
         _ => {}
