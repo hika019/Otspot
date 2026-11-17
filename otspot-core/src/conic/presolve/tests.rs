@@ -335,6 +335,47 @@ fn unbounded_ray_maps_to_original_space() {
     );
 }
 
+/// Re-verification gate sentinel: a fabricated (wrong) reduced-space
+/// optimum must be REJECTED by `postsolve`'s original-space re-check
+/// (`None`), never mapped back into original space as if it were real.
+/// Removing the `verify_conic_point` gate (or the primal replay) makes
+/// this FAIL by returning `Some`.
+#[test]
+fn fabricated_reduced_solution_is_rejected_by_gate() {
+    // Same shape as `substitution_dual_chain_matches_hand_computed`:
+    // `min x1 + 2·x2 s.t. x1 = 1, x1 + x2 = 3` (+ slack column x3 >= 0).
+    // The true reduced optimum keeps `x = (2, 0)`; claim `(0, 0)` instead —
+    // row 1 (`x1 + x2 = 3`) is then violated in the ORIGINAL space by 3.
+    let a = csc(2, 3, &[(0, 0, 1.0), (1, 0, 1.0), (1, 1, 1.0)]);
+    let g = csc(1, 3, &[(0, 2, -1.0)]);
+    let problem = prob(
+        vec![1.0, 2.0, 0.0],
+        a,
+        vec![1.0, 3.0],
+        g,
+        vec![0.0],
+        ConeSpec { l: 1, soc: vec![] },
+    );
+    let red = ConicReduction::reduce(&problem).expect("substitution engages");
+    let reduced = red.reduced().unwrap();
+    let fake = ConicResult {
+        status: SolveStatus::Optimal,
+        objective: 0.0,
+        x: vec![0.0, 0.0],
+        y: vec![0.0],
+        z: vec![0.0],
+        s: reduced.h.clone(),
+        iterations: 0,
+        residuals: (0.0, 0.0, 0.0),
+        primal_ray: None,
+        infeas_cert: None,
+    };
+    assert!(
+        red.postsolve(&problem, reduced, &fake, 1e-6).is_none(),
+        "gate must reject a fabricated optimum"
+    );
+}
+
 /// `tightened_tol`: σ = 1 ⇒ unchanged; σ = 0.5 ⇒ 2·tol; σ clamped into
 /// [`EPS_SIGMA_CLAMP`, 1]; floor at [`CONIC_PRESOLVE_EPS_FLOOR`].
 #[test]
