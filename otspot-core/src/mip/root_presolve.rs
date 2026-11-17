@@ -22,6 +22,7 @@
 //! - reduced unbounded ⇒ original unbounded,
 //! - the postsolved incumbent is integer-feasible for the *original* problem
 //!   with the same objective value.
+//!
 //! Rules implemented: fixed-column removal, empty/redundant row removal,
 //! forcing rows (activity bound pinned to the rhs), singleton rows (equality
 //! with an integrality/divisibility guard), parallel/duplicate row merging
@@ -294,7 +295,9 @@ pub(crate) enum ReduceOutcome {
     /// empty (0-var) MILP — the caller must use [`PostsolveMap::construct`]
     /// with an empty slice rather than branch-and-bound.
     Reduced {
-        reduced: MilpProblem,
+        /// Boxed: the variant otherwise dwarfs the others (clippy
+        /// large_enum_variant) — NotApplied/Infeasible carry only counters.
+        reduced: Box<MilpProblem>,
         map: PostsolveMap,
         info: RootPresolveInfo,
     },
@@ -1055,7 +1058,7 @@ fn finalize(problem: &MilpProblem, st: RedState) -> ReduceOutcome {
         Err(_) => return ReduceOutcome::NotApplied { info },
     };
     ReduceOutcome::Reduced {
-        reduced,
+        reduced: Box::new(reduced),
         map: PostsolveMap {
             kept,
             pinned: st.pinned,
@@ -1147,7 +1150,7 @@ pub(crate) fn apply(
             return Err(Box::new((SolverResult::infeasible(), stats)));
         }
         ReduceOutcome::NotApplied { .. } => (input, None),
-        ReduceOutcome::Reduced { reduced, map, .. } => (reduced, Some(map)),
+        ReduceOutcome::Reduced { reduced, map, .. } => (*reduced, Some(map)),
     };
     // Fully pinned: the reduced search space is empty — the pinned point is
     // the only candidate, so symmetry/FP/cuts/B&B are all skipped.
