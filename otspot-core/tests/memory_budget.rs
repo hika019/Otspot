@@ -995,3 +995,196 @@ fn qcqp_bridge_many_sparse_quad_constraints_peak_within_budget() {
         QCQP_PEAK_BUDGET_BYTES as f64 / 1_048_576.0
     );
 }
+
+// ---------------------------------------------------------------------------
+// Nonconvex QCQP route: bound-gate rejection of all-equality DCQ must happen
+// BEFORE the dense row conversion (QPLIB_8585/8683/8803/8810 shape class)
+// ---------------------------------------------------------------------------
+
+/// Rows `DENSE_DCQ_M`, vars `DENSE_DCQ_N`. Row `k` is the quadratic equality
+/// `x_(2k) * x_(2k+1) = 0` (`nnz = 2`, empty linear row), every variable bound
+/// free. Every variable is a rule-3 off-diagonal endpoint, so `|R| = n` and
+/// every R variable has a non-finite bound — `require_finite_bounds` must
+/// reject. The pre-fix `nonconvex_from_qp_problem` densified each equality
+/// row (two `vec![0.0; n]` linear parts plus the `row_neg`/`p.clone()`/
+/// `scale_values` intermediates) before it ever consulted the gate.
+const DENSE_DCQ_N: usize = 10_000;
+const DENSE_DCQ_M: usize = 5_000;
+
+/// Peak allocation fence for the pre-conversion bound gate on a
+/// rejected-class all-equality DCQ. The equality split emits `2*M` quad rows,
+/// each *retaining* a dense linear part (`8*N` bytes) and a stored `p` CSC
+/// `col_ptr` (`8*(N+1)` bytes): `10_000 * 160_008` bytes = 1.49 GB (1.39 GiB)
+/// of retained dense state on a problem the route rejects anyway — the exact
+/// failure mode measured on QPLIB_8585 (12 GiB self-kill within 3-5 s at
+/// `n = 99_999`, `m_q = 49_999`).
+///
+/// Measured pre-fix (RED, release, this machine): peak 1528.81 MB in 0.994 s
+/// of dense conversion, ending in the very same NotSupported rejection —
+/// proving the dense expansion ran BEFORE the gate. Measured post-fix:
+/// 0.49 MB peak, 6.5 ms wall (this test's `eprintln`). Budget 128 MB keeps
+/// the pre-fix peak at 11.9x margin (>= 5x requirement): reverting the gate
+/// order fails the peak assert, not merely runs slower, and the fixed path
+/// has 260x headroom for allocator noise (non-flaky).
+const DENSE_DCQ_PEAK_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+
+/// All-free-bounds quadratic-equality bilinear DCQ (shape above). No expected
+/// optimum: the problem is rejected by the §3.1 bound gate, and the rejection
+/// message (independent oracle: the gate's documented R semantics — every
+/// variable is a rule-3 endpoint, none has a finite bound) is asserted
+/// byte-identically against the literal message template.
+fn build_all_equality_dcq(n: usize, m: usize) -> QpProblem {
+    let q_obj = CscMatrix::new(n, n);
+    let c = vec![0.0; n];
+    let a = CscMatrix::from_triplets(&[], &[], &[], m, n)
+        .expect("empty A: every quadratic equality row has no linear term");
+    let b = vec![0.0; m];
+    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
+    let ctypes = vec![ConstraintType::Eq; m];
+    let mut problem = QpProblem::new(q_obj, c, a, b, bounds, ctypes).expect("dcq shape");
+    let mut quad = Vec::with_capacity(m);
+    for k in 0..m {
+        let mut qc = QcqpMatrix::new(n);
+        qc.triplets.push((2 * k, 2 * k + 1, 1.0));
+        qc.triplets.push((2 * k + 1, 2 * k, 1.0));
+        quad.push(qc);
+    }
+    problem
+        .set_quadratic_constraints(quad)
+        .expect("quadratic equality rows");
+    problem
+}
+
+/// Peak allocation fence for the bound-requirement rejection on the
+/// nonconvex QCQP route: a rejected all-equality DCQ must be rejected from
+/// sparse data in `O(input)` — without the `O(n * m_q)` dense row conversion
+/// that the pre-fix path performed first.
+///
+/// **No-op failure guarantee**: moving `require_finite_bounds` back behind
+/// the conversion loop (the pre-fix order) makes this FAIL: the peak assert
+/// is pinned at >= 5x margin below the 1.39 GiB retained dense demand the
+/// old order allocates before the same rejection (measured pre-fix peak and
+/// the RED run are recorded in the commit message; the rejection string
+/// assert must still pass pre-fix — only the peak is the sentinel).
+#[test]
+fn qcqp_route_rejects_dense_dcq_before_densifying() {
+    let _serial = lock_measurement();
+    let problem = build_all_equality_dcq(DENSE_DCQ_N, DENSE_DCQ_M);
+
+    reset_peak();
+    let start = std::time::Instant::now();
+    let r = solve_qp_with(&problem, &SolverOptions::default());
+    let wall = start.elapsed();
+    let peak = peak_bytes();
+    eprintln!(
+        "qcqp_route dense_dcq peak={peak} bytes ({:.2} MB), wall={wall:?}, status={:?}",
+        peak as f64 / 1_048_576.0,
+        r.status
+    );
+
+    // Byte-identity: the rejection reason contract (public-facing message of
+    // `conic::require_finite_bounds`) must be unchanged — only its TIMING
+    // moved before the dense conversion. Literal built from the gate's
+    // documented template, not captured from the implementation under test.
+    let SolveStatus::NotSupported(msg) = &r.status else {
+        panic!(
+            "expected NotSupported bound-gate rejection, got {:?}",
+            r.status
+        );
+    };
+    let expected = format!(
+        "nonconvex QCQP requires finite bounds on every bound-required variable set R \
+         (plan §3.1); {n} of the {n} required variables have a non-finite bound \
+         (first: variable 0 with bounds ({}, {}))",
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        n = DENSE_DCQ_N,
+    );
+    assert_eq!(msg, &expected, "rejection reason byte-identity");
+
+    assert!(
+        peak <= DENSE_DCQ_PEAK_BUDGET_BYTES,
+        "qcqp_route dense_dcq peak {:.1} MB exceeds {:.1} MB budget (n={DENSE_DCQ_N}, \
+         m={DENSE_DCQ_M}) — the bound-requirement gate must reject from sparse data \
+         BEFORE any dense row conversion (pre-fix retained demand was 1.39 GiB)",
+        peak as f64 / 1_048_576.0,
+        DENSE_DCQ_PEAK_BUDGET_BYTES as f64 / 1_048_576.0,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Nonconvex QCQP route: accepted-class dense-conversion sizing gate
+// ---------------------------------------------------------------------------
+
+/// Vars `BUDGET_GATE_N`, all-equality quadratic rows `BUDGET_GATE_M` (bounds
+/// finite, so the bound gate passes on its all-finite fast path). The split
+/// emits `2*M = 40_000` quad rows; the retained dense demand is
+/// `2*M * (8*N + 8*(N+1) + 16*2)` = 6.40 GB (5.96 GiB), strictly above the
+/// 4 GiB `kkt_solver::memory_budget_bytes()` sizing gate, so the route must
+/// refuse with `ResourceExhausted` before allocating any of it.
+const BUDGET_GATE_N: usize = 10_000;
+const BUDGET_GATE_M: usize = 20_000;
+
+/// Peak allocation fence for the pre-conversion sizing gate: an accepted-
+/// class problem whose dense-conversion estimate exceeds the solver memory
+/// budget must be refused with `ResourceExhausted` in `O(input)`, without
+/// materializing any dense row.
+///
+/// Measured pre-fix (RED, release, this machine): status `Optimal` after
+/// 6176.37 MB of tracked allocation in 81 s — the full 5.96 GiB dense
+/// expansion really ran, then the B&B solved it. Measured post-fix: 0.53 MB
+/// peak, 7 ms wall, `ResourceExhausted` (this test's `eprintln`).
+///
+/// **No-op failure guarantee**: removing the sizing gate makes this FAIL on
+/// the status assert alone (the pre-fix run returns `Optimal` after
+/// allocating 6176 MB, far past the 128 MB budget too) — no crash-dependent
+/// pass path.
+#[test]
+fn qcqp_route_dense_sizing_gate_refuses_before_allocating() {
+    let _serial = lock_measurement();
+    let n = BUDGET_GATE_N;
+    let m = BUDGET_GATE_M;
+
+    let q_obj = CscMatrix::new(n, n);
+    let c = vec![0.0; n];
+    let a = CscMatrix::from_triplets(&[], &[], &[], m, n).expect("empty A");
+    let b = vec![0.0; m];
+    let bounds = vec![(0.0, 10.0); n];
+    let ctypes = vec![ConstraintType::Eq; m];
+    let mut problem = QpProblem::new(q_obj, c, a, b, bounds, ctypes).expect("gate shape");
+    let mut quad = Vec::with_capacity(m);
+    for k in 0..m {
+        let mut qc = QcqpMatrix::new(n);
+        qc.triplets.push((2 * k % n, (2 * k + 1) % n, 1.0));
+        qc.triplets.push(((2 * k + 1) % n, 2 * k % n, 1.0));
+        quad.push(qc);
+    }
+    problem
+        .set_quadratic_constraints(quad)
+        .expect("quadratic equality rows");
+
+    reset_peak();
+    let r = solve_qp_with(&problem, &SolverOptions::default());
+    let peak = peak_bytes();
+    eprintln!(
+        "qcqp_route sizing_gate peak={peak} bytes ({:.2} MB), status={:?}",
+        peak as f64 / 1_048_576.0,
+        r.status
+    );
+
+    assert_eq!(
+        r.status,
+        SolveStatus::ResourceExhausted,
+        "accepted-class problem over the dense-conversion budget must report \
+         ResourceExhausted, got {:?}",
+        r.status
+    );
+    assert!(
+        peak <= DENSE_DCQ_PEAK_BUDGET_BYTES,
+        "qcqp_route sizing_gate peak {:.1} MB exceeds {:.1} MB budget (n={n}, m={m}) — \
+         the sizing gate must refuse BEFORE materializing any dense row (demand \
+         estimate is 5.96 GiB)",
+        peak as f64 / 1_048_576.0,
+        DENSE_DCQ_PEAK_BUDGET_BYTES as f64 / 1_048_576.0,
+    );
+}
