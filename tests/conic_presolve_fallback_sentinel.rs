@@ -18,6 +18,18 @@ use otspot_core::conic::{solve_socp, ConicOptions, ConicProblem};
 use otspot_core::problem::SolveStatus;
 use otspot_io::cbf::{parse_cbf, CbfProblem};
 
+/// Solve tolerance used by this sentinel and by the ground-truth oracle
+/// runs: the bench-harness standard `eps = 1e-6` (AGENTS.md 基準値). The
+/// oracle (`nql60,Optimal,-9.3505285040e-1,20,0.905`, pre-presolve binary)
+/// was produced under this tolerance; `ConicOptions::default()` is tighter
+/// (1e-9) and nql60 does NOT terminate at 1e-9 even on the presolve-free
+/// path (the direct solve stalls and the honesty gate demotes to
+/// `NumericalError` — verified on this branch, where the fallback IS
+/// bit-for-bit the `origin/main` pipeline), so asserting `Optimal` at 1e-9
+/// would demand more than the oracle supports. The sentinel's revert-fail
+/// property holds at 1e-6: the pre-fix build produced
+/// `NumericalError,...,22,70.471` here (real-run log, 2026-11-17 23:28).
+const NQL60_BENCH_TOL: f64 = 1e-6;
 /// Legacy (pre-presolve) optimum, [measured] above; the slack covers two
 /// independent `1e-6`-tol solves plus the postsolve round-trip.
 const NQL60_LEGACY_OBJ: f64 = -9.3505285040e-1;
@@ -63,7 +75,11 @@ fn nql60_inconclusive_reduced_solve_falls_back_to_optimal() {
     let CbfProblem::Socp { problem, .. } = parse_cbf(path).expect("parse nql60") else {
         panic!("nql60 must be a continuous SOCP");
     };
-    let res = solve_socp(&problem, &ConicOptions::default());
+    let opts = ConicOptions {
+        tol: NQL60_BENCH_TOL,
+        ..ConicOptions::default()
+    };
+    let res = solve_socp(&problem, &opts);
     assert_eq!(
         res.status,
         SolveStatus::Optimal,
