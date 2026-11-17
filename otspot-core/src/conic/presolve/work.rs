@@ -263,11 +263,11 @@ impl Workspace {
     /// elimination (called on the merged, post-update row data).
     fn track_touched_growth(&mut self, a_rows_touched: &[usize], g_rows_touched: &[usize]) {
         for &i in a_rows_touched {
-            let norm = merged(&self.a_rows[i as usize].entries)
+            let norm = merged(&self.a_rows[i].entries)
                 .into_iter()
                 .map(|(_, v)| v.abs())
                 .fold(0.0f64, f64::max);
-            self.note_growth(norm, self.a_rows[i as usize].orig_norm);
+            self.note_growth(norm, self.a_rows[i].orig_norm);
         }
         for &k in g_rows_touched {
             let norm = merged(&self.g_rows[k].entries)
@@ -555,7 +555,7 @@ impl Workspace {
                 continue;
             };
             if self.n_active_cols() <= REDUCED_DIM_MIN_COLS
-                || self.active_a_rows() <= REDUCED_DIM_MIN_ROWS
+                || self.active_a_rows() == REDUCED_DIM_MIN_ROWS
                 || self.nnz_budget_exceeded()
             {
                 break;

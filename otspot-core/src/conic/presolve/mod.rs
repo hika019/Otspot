@@ -203,9 +203,7 @@ impl ConicReduction {
         if let Some(conf) = conflict {
             // Witnesses must carry original row identity for an
             // original-space certificate; otherwise decline (caller solves).
-            if infeas_certificate(&conf, problem).is_none() {
-                return None;
-            }
+            infeas_certificate(&conf, problem)?;
             stats.sigma = sigma;
             return Some(ConicReduction {
                 reduced: None,
@@ -313,10 +311,10 @@ pub(crate) fn materialize_bounds(
     h.extend_from_slice(&problem.h[l0..]);
     let mut g_soc: Vec<Option<usize>> = vec![None; l0 + shift];
     for (bi, &dim) in problem.cone.soc.iter().enumerate() {
-        g_soc.extend(std::iter::repeat(Some(bi)).take(dim));
+        g_soc.extend(std::iter::repeat_n(Some(bi), dim));
     }
     let mut g_orig: Vec<Option<usize>> = (0..l0).map(Some).collect();
-    g_orig.extend(std::iter::repeat(None).take(shift));
+    g_orig.extend(std::iter::repeat_n(None, shift));
     g_orig.extend((l0..m0).map(Some));
     let mut rows: Vec<usize> = Vec::new();
     let mut cols: Vec<usize> = Vec::new();
