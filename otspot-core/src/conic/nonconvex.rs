@@ -428,6 +428,25 @@ fn test_maybe_cancel_before_final_classification(opts: &ConicOptions) {
     }
 }
 
+/// Numerical floor for the budget-derived `primal_tol` of a relaxation LP.
+///
+/// `GlobalOptions::gap_tol` / `feas_tol` are search *budgets* (acceptance
+/// margins), not solver tolerances: `GlobalOptions::validate` contractually
+/// accepts `0` ("no slack wanted"), and `oa_lift_res_tol` then legitimately
+/// returns `0.0`. Handing that through as `SolverOptions::primal_tol` fails
+/// `SolverOptions::validate` (strictly positive required) and the root LP
+/// answers `NumericalError` — even on `min x²` over `[0,1]`. A
+/// budget-derived threshold below this floor could never be resolved
+/// anyway: the simplex entry layer keys its authoritative empty-box check on
+/// `ZERO_TOL` and documents the invariant `ZERO_TOL <= primal_tol`
+/// (`simplex::entry::solve_without_presolve_inner`), so
+/// [`crate::tolerances::ZERO_TOL`] (1e-12) is the finest primal tolerance the
+/// solver may be handed. A zero budget maps to this floor — the LP is still
+/// refined to the finest resolvable threshold while `accept` keeps honoring
+/// the literal zero margin — and budgets whose threshold is at or above the
+/// floor are unchanged.
+const RELAX_LP_TOL_FLOOR: f64 = crate::tolerances::ZERO_TOL;
+
 /// McCormick relaxations are pure LPs. Use the mature simplex LP path rather
 /// than the generic conic IPM, which is intentionally small and aimed at SOC
 /// blocks. The caller's wall-clock deadline is forwarded so a single node LP
@@ -525,8 +544,11 @@ fn solve_relax_lp(
             // tolerance floors the lift gap the OA budget arms can resolve
             // (see `oa_lift_res_tol`'s derivation): refine the LP to the
             // finest threshold the arms can demand when that is finer than
-            // the default pivot tolerance.
-            primal_tol: lift_res_tol.min(crate::tolerances::PIVOT_TOL),
+            // the default pivot tolerance, clamped into
+            // `[RELAX_LP_TOL_FLOOR, PIVOT_TOL]` so a zero budget (a valid
+            // "no slack" acceptance margin) cannot reach
+            // `SolverOptions::validate` as an illegal 0.
+            primal_tol: lift_res_tol.clamp(RELAX_LP_TOL_FLOOR, crate::tolerances::PIVOT_TOL),
             ..Default::default()
         };
         // OA re-solve warm start (see `extend_warm_for_appended_cuts`): the
@@ -4178,11 +4200,90 @@ mod tests {
         );
     }
 
+    /// PR #85 review (P1, "Preserve valid LP options when a global
+    /// tolerance is zero"): `gap_tol`/`feas_tol` are search *budgets*, and
+    /// `GlobalOptions::validate` contractually accepts `0` ("no slack
+    /// wanted"). Feeding the zero budget through `oa_lift_res_tol` into
+    /// `SolverOptions::primal_tol` made the root LP fail
+    /// `SolverOptions::validate` (which demands a strictly positive primal
+    /// tolerance) and return `NumericalError` on the trivial problem below.
+    /// Hand oracle: `min x0²` over `[0,1]` has optimum `0` at `x0 = 0`
+    /// (exact rational point, no LP noise). Sentinel: reverting the
+    /// `RELAX_LP_TOL_FLOOR` guard in `solve_relax_lp` restores the
+    /// `NumericalError` and fails this test.
+    #[test]
+    fn zero_global_budgets_still_certify_objective_rule2_optimum() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: Some(csc(&[vec![2.0]], n, n)),
+            q0: vec![0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0],
+            ub: vec![1.0],
+        };
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions {
+                gap_tol: 0.0,
+                feas_tol: 0.0,
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(res.objective.abs() < 1e-9, "obj={}", res.objective);
+    }
+
+    /// Companion to the sentinel above for the *row* arm of
+    /// `oa_lift_res_tol`: a zero `feas_tol` with a rule-2 diagonal appearing
+    /// in a quadratic constraint row zeroed `row_budget`, poisoning the same
+    /// `primal_tol` even when `gap_tol` is positive. Hand oracle:
+    /// `min x0` s.t. `x0² <= 4` over `[-3,3]` has optimum `-2` at `x0 = -2`
+    /// (constraint active, violation exactly `0 <= feas_tol`). Sentinel:
+    /// reverting the floor fails with `NumericalError` here as well.
+    #[test]
+    fn zero_feas_tol_budget_still_certifies_rule2_constraint_row_optimum() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0],
+            quad: vec![GQuadConstraint {
+                p: csc(&[vec![2.0]], n, n),
+                q: vec![0.0],
+                r: -4.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![-3.0],
+            ub: vec![3.0],
+        };
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions {
+                feas_tol: 0.0,
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!((res.objective + 2.0).abs() < 1e-6, "obj={}", res.objective);
+    }
+
     // -----------------------------------------------------------------
     // Independent oracle: the pre-fix dense implementation, kept
     // self-contained here purely as a reference for
-    // `sparse_relax_matches_dense_reference` below. Production code must
-    // never call these again.
+    // `sparse_relax_matches_dense_per_side_box_oracle` below. Production
+    // code must never call these again.
     // -----------------------------------------------------------------
 
     fn reference_dense(a: &CscMatrix) -> Vec<Vec<f64>> {
@@ -4486,16 +4587,25 @@ mod tests {
         CscMatrix::from_triplets(&ri, &ci, &vi, nrows, ncols).unwrap()
     }
 
-    /// Sentinel (independent-oracle equivalence): the sparse `build_static` +
-    /// `build_relax` must construct byte-for-byte the same relaxation as the
-    /// pre-fix dense reference above, across a spread of objective/constraint
+    /// Sentinel (independent-oracle equivalence, per-side box contract): the
+    /// sparse `build_static` + `build_relax` must construct byte-for-byte the
+    /// same relaxation as the dense reference above -- whose box emission is
+    /// one row per finite side -- across a spread of objective/constraint
     /// shapes (diagonal-only, off-diagonal, asymmetric-storage quadratic
     /// matrices, straddling/non-straddling boxes, existing equalities/
-    /// inequalities, and a narrowed mid-branch-and-bound box). Reintroducing
-    /// a row/column indexing mistake in the sparse rewrite changes `c`/`a`/
-    /// `g`/`h` here and fails this test without needing a full LP solve.
+    /// inequalities, a narrowed mid-branch-and-bound box, and a one-sided
+    /// box). This identity replaces `sparse_relax_matches_dense_reference`:
+    /// b49fe842 changed the reference's box emission from the both-finite
+    /// mask to per-side emission, and per the AGENTS.md rule against
+    /// modifying an existing test's assertions that change is expressed as
+    /// the deletion of that name plus this one (PR #85 review "Give the
+    /// changed dense-oracle contract a new test identity"; same pattern the
+    /// branch already applied to the D8 acceptance test). Reintroducing a
+    /// row/column indexing mistake in the sparse rewrite -- or re-masking a
+    /// box side behind the both-finite condition -- changes `c`/`a`/`g`/`h`
+    /// here and fails this test without needing a full LP solve.
     #[test]
-    fn sparse_relax_matches_dense_reference() {
+    fn sparse_relax_matches_dense_per_side_box_oracle() {
         struct Case {
             name: &'static str,
             qp: NonconvexQcqp,

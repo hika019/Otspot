@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3465 testcases, 43 ignored
+# totals: 3467 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -98,13 +98,15 @@ otspot-core	conic::nonconvex::tests::rule2_diagonal_is_never_a_branch_candidate	
 otspot-core	conic::nonconvex::tests::rule2_pair_emits_exactly_one_pair_row	active
 otspot-core	conic::nonconvex::tests::scaled_quad_row_keeps_oa_tangents_until_row_feasible	active
 otspot-core	conic::nonconvex::tests::seed_integer_must_survive_round_then_recheck_before_install	active
-otspot-core	conic::nonconvex::tests::sparse_relax_matches_dense_reference	active
+otspot-core	conic::nonconvex::tests::sparse_relax_matches_dense_per_side_box_oracle	active
 otspot-core	conic::nonconvex::tests::unbounded_without_base_point_is_reasoned_not_supported	active
 otspot-core	conic::nonconvex::tests::validate_accepts_psd_rows_over_free_variables	active
 otspot-core	conic::nonconvex::tests::validate_rejects_every_mismatched_dimension	active
 otspot-core	conic::nonconvex::tests::validate_requires_finite_bounds_only_on_r	active
 otspot-core	conic::nonconvex::tests::verified_ray_with_seed_returns_unbounded	active
 otspot-core	conic::nonconvex::tests::warm_basis_extension_consumes_dual_advanced_resolves	active
+otspot-core	conic::nonconvex::tests::zero_feas_tol_budget_still_certifies_rule2_constraint_row_optimum	active
+otspot-core	conic::nonconvex::tests::zero_global_budgets_still_certify_objective_rule2_optimum	active
 otspot-core	conic::qcqp::tests::qcqp_rejects_objective_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_bridge_rejects_base_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_objective_upper_triangle_is_symmetrized_for_cholesky	active
