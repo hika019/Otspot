@@ -28,6 +28,7 @@ pub use qcqp_classify::{
     classify_bound_requirements, effective_bound_requirement, require_finite_bounds,
     BoundRequirement,
 };
+pub(crate) use qcqp_classify::{require_finite_bounds_from_coo, CooQuadRow};
 
 use crate::problem::SolveStatus;
 use otspot_num::sparse::CscMatrix;
