@@ -390,3 +390,231 @@ fn presolve_invariance_curated_clean_known_with_constant() {
         "curated clean invariance must check >=4 problems, got {checked}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Step 12 (dependent Eq rows) family.
+// ---------------------------------------------------------------------------
+
+use otspot_core::presolve::{run_presolve_with_flags, PresolveFlags};
+use otspot_core::problem::LpProblem;
+
+/// QpProblem (Q = 0 only) -> LpProblem, mirroring `qp/lp_dispatch.rs`.
+/// Returns `None` for any nonzero quadratic part (never happens for the LP
+/// suites; the guard keeps the test honest if one ever lands in the dir).
+fn lp_from_qp(prob: &QpProblem) -> Option<LpProblem> {
+    if prob.q.values().iter().any(|v| *v != 0.0) || !prob.quadratic_constraints.is_empty() {
+        return None;
+    }
+    LpProblem::new_general(
+        prob.c.clone(),
+        prob.a.clone(),
+        prob.b.clone(),
+        prob.constraint_types.clone(),
+        prob.bounds.clone(),
+        None,
+    )
+    .ok()
+}
+
+/// Reduced row counts with step12 disabled vs enabled: `(off, on)`.
+/// `on < off` is direct evidence that rank discovery removed at least one
+/// linearly dependent Eq row on this instance.
+fn dependent_eq_row_delta(prob: &QpProblem) -> Option<(usize, usize)> {
+    let lp = lp_from_qp(prob)?;
+    let max_pass = SolverOptions::default().presolve_max_pass;
+    let on = run_presolve_with_flags(&lp, None, max_pass, None, PresolveFlags::default()).ok()?;
+    let off = run_presolve_with_flags(
+        &lp,
+        None,
+        max_pass,
+        None,
+        PresolveFlags {
+            enable_dependent_eq: false,
+            ..PresolveFlags::default()
+        },
+    )
+    .ok()?;
+    Some((
+        off.reduced_problem.num_constraints,
+        on.reduced_problem.num_constraints,
+    ))
+}
+
+/// Sweep for step12's footprint: for every LP in `lp_problems`, compare the
+/// presolve-reduced row count with `enable_dependent_eq` off vs on, list the
+/// rank-deficient instances, then re-solve each detected instance ON vs OFF
+/// and require objective/feasibility invariance (same contract as the other
+/// sweeps in this file).
+///
+/// Revert-fail sentinel: the `assert!(!detected.is_empty())` at the end fails
+/// the moment step12 stops removing rows (reverted or short-circuited),
+/// because these Netlib instances genuinely contain dependent Eq rows.
+///
+/// Heavy (≈ presolve-only sweep over 109 files + solves of the detected few).
+/// Run under the heavy profile or the raw binary, like `presolve_invariance_full_sweep_known_with_constant`.
+#[test]
+#[ignore = "tier-2: dependent-Eq detection sweep over lp_problems, run under --profile heavy or raw binary"]
+fn presolve_dependent_eq_detection_sweep() {
+    let timeout: f64 = std::env::var("PRESOLVE_SWEEP_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8.0);
+    let known = load_known();
+
+    let mut files: Vec<_> = std::fs::read_dir(data_dir(LP_SUBDIR))
+        .expect("read lp_problems")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case("qps"))
+        })
+        .collect();
+    files.sort();
+
+    let mut detected: Vec<(String, usize, usize)> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for path in &files {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
+        if STEP7_HANGERS.contains(&name.as_str()) {
+            continue;
+        }
+        let prob = parse_qps(path).expect("parse");
+        let Some((m_off, m_on)) = dependent_eq_row_delta(&prob) else {
+            continue;
+        };
+        if m_on < m_off {
+            eprintln!(
+                "[{name}] rank-deficient: rows off={m_off} on={m_on} (-{})",
+                m_off - m_on
+            );
+            detected.push((name, m_off, m_on));
+        }
+    }
+
+    for (name, m_off, m_on) in &detected {
+        let prob = parse_required(&data_dir(LP_SUBDIR), name);
+        let r = solve_on_off(&prob, timeout);
+        // Same convention as the sibling sweeps: an ON/OFF status mismatch is
+        // only a failure when presolve is the WORSE side (ON non-Optimal).
+        // ON=Optimal while OFF=Timeout is presolve doing its job (family
+        // precedent: bgindy/gosh in `presolve_infeasible_sweep`).
+        if r.on.status != SolveStatus::Optimal {
+            errors.push(format!(
+                "{name}: status ON={:?} OFF={:?}",
+                r.on.status, r.off.status
+            ));
+            continue;
+        }
+        if r.on_pf >= 1e-5 || r.on_bf >= 1e-5 {
+            errors.push(format!(
+                "{name}: ON solution infeasible pf={:.1e} bf={:.1e}",
+                r.on_pf, r.on_bf
+            ));
+        }
+        if r.off.status == SolveStatus::Optimal {
+            let rel = (r.on.objective - r.off.objective).abs() / r.off.objective.abs().max(1.0);
+            if rel >= 1e-6 {
+                errors.push(format!(
+                    "{name}: ON obj={:.6e} | OFF obj={:.6e} | rel={:.2e}",
+                    r.on.objective, r.off.objective, rel
+                ));
+            }
+        }
+        if let Some(&k) = known.get(name.as_str()) {
+            let s = k.abs().max(1.0);
+            if (r.on.objective - k).abs() / s >= 1e-4 {
+                errors.push(format!(
+                    "{name}: ON obj={:.6e} known={:.6e}",
+                    r.on.objective, k
+                ));
+            }
+        }
+        let _ = (*m_off, *m_on);
+    }
+
+    eprintln!("detected rank-deficient instances: {}", detected.len());
+    assert!(
+        !detected.is_empty(),
+        "step12 must detect dependent Eq rows on at least one lp_problems \
+         instance; empty detection means the rank pass became a no-op"
+    );
+    assert!(
+        errors.is_empty(),
+        "step12-touched solves must be invariant (ON==OFF, feasible, match \
+         known): {}",
+        errors.join("\n")
+    );
+}
+
+/// Curated tier-1 subset of `presolve_dependent_eq_detection_sweep`: the
+/// instances where the flag comparison measurably drops rows (populated from
+/// the detection sweep output on this machine). Each is re-solved ON vs OFF;
+/// objective agreement, feasibility including the removed dependent rows, and
+/// the known-optimal constant are all required.
+#[test]
+fn presolve_dependent_eq_curated_known() {
+    const CURATED: &[&str] = &[
+        // Detected by `presolve_dependent_eq_detection_sweep` on this machine
+        // (rows off->on): degen2 380->378, scorpion 206->183, pds-02
+        // 2177->2166, sierra 997->987, ken-07 947->898. Small/fast enough
+        // for the tier-1 budget; cre-*/ken-11 stay in the tier-2 sweep.
+        "degen2", "scorpion", "pds-02", "sierra", "ken-07",
+    ];
+    assert!(!CURATED.is_empty());
+    let known = load_known();
+    let mut errors: Vec<String> = Vec::new();
+    for name in CURATED {
+        let prob = parse_required(&data_dir(LP_SUBDIR), name);
+        let (m_off, m_on) = dependent_eq_row_delta(&prob)
+            .unwrap_or_else(|| panic!("{name}: must be an LP convertible to LpProblem"));
+        assert!(
+            m_on < m_off,
+            "{name}: curated rank-deficient instance must still lose rows to \
+             step12 (off={m_off} on={m_on})"
+        );
+        let r = solve_on_off(&prob, 8.0);
+        // Lenient status convention as in the tier-2 sweep: only ON being
+        // worse than OFF is a presolve fault.
+        if r.on.status != SolveStatus::Optimal {
+            errors.push(format!(
+                "{name}: status ON={:?} OFF={:?}",
+                r.on.status, r.off.status
+            ));
+            continue;
+        }
+        if r.on_pf >= 1e-5 || r.on_bf >= 1e-5 {
+            errors.push(format!(
+                "{name}: ON solution infeasible pf={:.1e} bf={:.1e}",
+                r.on_pf, r.on_bf
+            ));
+        }
+        if r.off.status == SolveStatus::Optimal {
+            let rel = (r.on.objective - r.off.objective).abs() / r.off.objective.abs().max(1.0);
+            if rel >= 1e-6 {
+                errors.push(format!(
+                    "{name}: ON obj={:.6e} | OFF obj={:.6e} | rel={:.2e}",
+                    r.on.objective, r.off.objective, rel
+                ));
+            }
+        }
+        if let Some(&k) = known.get(*name) {
+            let s = k.abs().max(1.0);
+            if (r.on.objective - k).abs() / s >= 1e-4 {
+                errors.push(format!(
+                    "{name}: ON obj={:.6e} known={:.6e}",
+                    r.on.objective, k
+                ));
+            }
+        }
+    }
+    assert!(
+        errors.is_empty(),
+        "curated dependent-Eq invariance broken: {errors:?}"
+    );
+}

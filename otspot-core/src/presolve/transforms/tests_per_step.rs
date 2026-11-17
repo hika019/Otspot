@@ -1488,3 +1488,266 @@ fn step2b_forcing_le_infeasible_unbounded_ub() {
         Err(PresolveStatus::Infeasible)
     );
 }
+
+// -----------------------------------------------------------
+// Step 12: dependent Eq-row removal (rank discovery)
+// -----------------------------------------------------------
+
+#[cfg(test)]
+mod step12_dependent_eq {
+    //! Direct-call sentinels for `dependent_eq::step12_dependent_equations`.
+    //! Each test exercises one decision of the rank pass: remove on a proven
+    //! dependency with consistent RHS, keep (fail-open) when the RHS or the
+    //! rank verdict is ambiguous, never touch inequalities, respect the fill
+    //! budget, and a driver-level flag sentinel proving the step gates on
+    //! `PresolveFlags::enable_dependent_eq`.
+    use super::super::dependent_eq::{step12_dependent_equations, work_over_budget};
+    use super::super::driver::run_presolve_with_flags;
+    use super::super::state::{PostsolveStep, PresolveFlags};
+    use super::make_state;
+    use crate::lp::solve_lp_with;
+    use crate::options::SolverOptions;
+    use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+    use otspot_num::sparse::CscMatrix;
+
+    const INF: f64 = f64::INFINITY;
+
+    fn count_dependent(st: &super::super::state::PresolveState) -> Vec<usize> {
+        st.postsolve_stack
+            .iter()
+            .filter_map(|s| match s {
+                PostsolveStep::DependentEquation { orig_row } => Some(*orig_row),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn lp3x3(c: Vec<f64>, b: Vec<f64>) -> super::super::state::PresolveState {
+        // r0: x0 + x1        = 2
+        // r1:      x1 + x2   = 3
+        // r2: x0 + 2x1 + x2  = b2  (row r0 + row r1 + [0 0 0 | b2-5])
+        make_state(
+            c,
+            &[0, 0, 1, 1, 2, 2, 2],
+            &[0, 1, 1, 2, 0, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0],
+            3,
+            3,
+            b,
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF); 3],
+        )
+    }
+
+    #[test]
+    fn step12_removes_dependent_eq_row_keeps_witnesses() {
+        let mut st = lp3x3(vec![0.0, 0.0, -1.0], vec![2.0, 3.0, 5.0]);
+        step12_dependent_equations(&mut st, None).unwrap();
+        assert!(
+            !st.removed_rows[0] && !st.removed_rows[1],
+            "witness rows must survive"
+        );
+        assert!(st.removed_rows[2], "r2 = r0 + r1 must be removed");
+        assert_eq!(count_dependent(&st), vec![2]);
+    }
+
+    #[test]
+    fn step12_keeps_dependent_row_with_inconsistent_rhs() {
+        // Same dependency in A but b2 = 6 (combination wants 5): the system is
+        // (truly) infeasible; step12 must keep the row and stay Ok — proving
+        // infeasibility is the simplex stage's job (fail-open).
+        let mut st = lp3x3(vec![0.0, 0.0, -1.0], vec![2.0, 3.0, 6.0]);
+        step12_dependent_equations(&mut st, None).unwrap();
+        assert!(
+            !st.removed_rows.iter().any(|&r| r),
+            "ambiguous/inconsistent rows must never be removed"
+        );
+        assert!(count_dependent(&st).is_empty());
+    }
+
+    #[test]
+    fn step12_keeps_independent_eq_rows() {
+        // r0/r1/r2: x0+x1=2, x1+x2=3, x0+x2=4 — full rank 3.
+        let mut st = make_state(
+            vec![0.0; 3],
+            &[0, 0, 1, 1, 2, 2],
+            &[0, 1, 1, 2, 0, 2],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            3,
+            3,
+            vec![2.0, 3.0, 4.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF); 3],
+        );
+        step12_dependent_equations(&mut st, None).unwrap();
+        assert!(!st.removed_rows.iter().any(|&r| r));
+    }
+
+    #[test]
+    fn step12_never_removes_inequality_rows() {
+        // r0 Eq x0+x1=2; r1 Le x0+x1<=5 (span-consistent as an equation but a
+        // Le row — removable only as an Eq); r2 Eq duplicate of r0.
+        let mut st = make_state(
+            vec![0.0; 2],
+            &[0, 0, 1, 1, 2, 2],
+            &[0, 1, 0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            3,
+            2,
+            vec![2.0, 5.0, 2.0],
+            vec![ConstraintType::Eq, ConstraintType::Le, ConstraintType::Eq],
+            vec![(0.0, INF); 2],
+        );
+        step12_dependent_equations(&mut st, None).unwrap();
+        assert!(
+            !st.removed_rows[1],
+            "Le row must never be removed by step12"
+        );
+        assert_eq!(
+            count_dependent(&st),
+            vec![2],
+            "duplicate Eq row must be removed"
+        );
+    }
+
+    #[test]
+    fn step12_removes_scaled_combination_row() {
+        // r2 = 1000*(r0 + r1): rank tolerance is relative to the running row
+        // scale, so a large-multiple witness must still cancel.
+        let mut st = make_state(
+            vec![0.0; 3],
+            &[0, 0, 1, 1, 2, 2, 2],
+            &[0, 1, 1, 2, 0, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0, 1000.0, 2000.0, 1000.0],
+            3,
+            3,
+            vec![2.0, 3.0, 5000.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF); 3],
+        );
+        step12_dependent_equations(&mut st, None).unwrap();
+        assert_eq!(count_dependent(&st), vec![2]);
+    }
+
+    #[test]
+    fn step12_keeps_near_dependent_row_outside_tolerance() {
+        // r2 differs from r0+r1 by 1e-7 on x3: far above the 1e-9 relative
+        // rank tolerance, so the row is genuinely independent and must stay.
+        let mut st = make_state(
+            vec![0.0; 4],
+            &[0, 0, 1, 1, 2, 2, 2, 2],
+            &[0, 1, 1, 2, 0, 1, 2, 3],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1e-7],
+            3,
+            4,
+            vec![2.0, 3.0, 5.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF); 4],
+        );
+        step12_dependent_equations(&mut st, None).unwrap();
+        assert!(
+            !st.removed_rows.iter().any(|&r| r),
+            "a 1e-7 relative perturbation must NOT be classified as dependent"
+        );
+    }
+
+    #[test]
+    fn step12_work_budget_uses_factor_and_abs_cap() {
+        // Factor branch: small rows budget at 8x their nnz.
+        assert!(!work_over_budget(8 * 3, 3));
+        assert!(work_over_budget(8 * 3 + 1, 3));
+        // Abs-cap branch: long rows are still capped at DEP_EQ_ABS_WORK_CAP=4096.
+        assert!(!work_over_budget(4096, 100_000));
+        assert!(work_over_budget(4097, 100_000));
+    }
+
+    fn driver_lp() -> LpProblem {
+        // Every Eq row has nnz >= 3: steps 2/6 cannot touch it, no pair is
+        // parallel, so ONLY step12 can reduce this LP.
+        // r0: x0+x1+x2 = 3; r1: x0+x2+x3 = 4; r2: 2x0+x1+2x2+x3 = 7 (= r0+r1).
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2, 2],
+            &[0, 1, 2, 0, 2, 3, 0, 1, 2, 3],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 2.0, 1.0],
+            3,
+            4,
+        )
+        .unwrap();
+        LpProblem::new_general(
+            vec![1.0, 0.0, 0.0, 0.0],
+            a,
+            vec![3.0, 4.0, 7.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF); 4],
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn step12_flag_gate_reduces_row_count_only_when_enabled() {
+        let lp = driver_lp();
+        let on = run_presolve_with_flags(&lp, None, 3, None, PresolveFlags::default()).unwrap();
+        let off = run_presolve_with_flags(
+            &lp,
+            None,
+            3,
+            None,
+            PresolveFlags {
+                enable_dependent_eq: false,
+                ..PresolveFlags::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            off.reduced_problem.num_constraints, 3,
+            "with the flag off no step here can touch the LP (baseline)"
+        );
+        assert_eq!(
+            on.reduced_problem.num_constraints, 2,
+            "flag on must drop the dependent row (r2 = r0 + r1)"
+        );
+    }
+
+    #[test]
+    fn step12_e2e_solve_satisfies_removed_row_and_zeroes_its_dual() {
+        // Oracle (hand-computed): min x0 s.t. the driver_lp rows, x >= 0.
+        // r2 is redundant, so x0 >= 0 and x0 = 0 is attainable
+        // (x = (0, 3, 0, 4) or the basis-equivalent the simplex picks): opt = 0.
+        let lp = driver_lp();
+        let res = solve_lp_with(&lp, &SolverOptions::default());
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert!(
+            res.objective.abs() < 1e-6,
+            "optimal objective must be 0, got {}",
+            res.objective
+        );
+        // Primal: the REMOVED dependent row must still hold after postsolve.
+        let mut ax = [0.0f64; 3];
+        for j in 0..4 {
+            let (rows, vals) = lp.a.column(j);
+            for (k, &row) in rows.iter().enumerate() {
+                ax[row] += vals[k] * res.solution[j];
+            }
+        }
+        for i in 0..3 {
+            assert!(
+                (ax[i] - lp.b[i]).abs() < 1e-6,
+                "row {i} violated after postsolve: Ax={} b={}",
+                ax[i],
+                lp.b[i]
+            );
+        }
+        // Dual of the rank-removed row must be exactly 0 (postsolve contract).
+        assert!(
+            res.dual_solution[2].abs() < 1e-9,
+            "dual of dependent removed row must be 0, got {}",
+            res.dual_solution[2]
+        );
+        assert!(
+            res.postsolve_dfeas.unwrap_or(f64::INFINITY) <= 1e-6,
+            "postsolve dual must be feasible, got {:?}",
+            res.postsolve_dfeas
+        );
+    }
+}
