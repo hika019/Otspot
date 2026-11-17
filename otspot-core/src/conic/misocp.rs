@@ -361,6 +361,7 @@ fn build_relaxation(
     let a = CscMatrix::from_triplets(&a_ri, &a_ci, &a_vi, new_p, n).unwrap();
 
     ConicProblem {
+        var_bounds: Vec::new(),
         c: base.c.clone(),
         a,
         b,
@@ -847,6 +848,7 @@ mod tests {
     #[test]
     fn conic_feasible_rejects_nan_equality_activity() {
         let prob = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![1.0, 1.0],
             a: CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1e308, -1e308], 1, 2).unwrap(),
             b: vec![0.0],
@@ -1035,6 +1037,7 @@ mod tests {
             CscMatrix::from_triplets(&ri, &ci, &vi, rows.len(), n).unwrap()
         };
         ConicProblem {
+            var_bounds: Vec::new(),
             c: base.c.clone(),
             a: to_csc(&eq_rows),
             b,
@@ -1102,6 +1105,7 @@ mod tests {
             Case {
                 name: "no_integers",
                 base: ConicProblem {
+                    var_bounds: Vec::new(),
                     c: vec![1.0, -1.0],
                     a: csc(&[vec![1.0, 1.0]], 1, 2),
                     b: vec![2.0],
@@ -1116,6 +1120,7 @@ mod tests {
             Case {
                 name: "free_borders_only_l_zero",
                 base: ConicProblem {
+                    var_bounds: Vec::new(),
                     c: vec![-1.0, -1.0],
                     a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
                     b: vec![],
@@ -1130,6 +1135,7 @@ mod tests {
             Case {
                 name: "free_borders_with_existing_l",
                 base: ConicProblem {
+                    var_bounds: Vec::new(),
                     c: vec![1.0, 0.5, -2.0],
                     a: csc(&[vec![1.0, 1.0, 1.0]], 1, 3),
                     b: vec![3.0],
@@ -1153,6 +1159,7 @@ mod tests {
             Case {
                 name: "fixed_only",
                 base: ConicProblem {
+                    var_bounds: Vec::new(),
                     c: vec![1.0],
                     a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
                     b: vec![],
@@ -1167,6 +1174,7 @@ mod tests {
             Case {
                 name: "mixed_fixed_and_free_with_prior_equalities",
                 base: ConicProblem {
+                    var_bounds: Vec::new(),
                     c: vec![1.0, 2.0, 3.0, 4.0],
                     a: csc(&[vec![1.0, 0.0, 1.0, 0.0], vec![0.0, 1.0, 0.0, 1.0]], 2, 4),
                     b: vec![1.0, 2.0],

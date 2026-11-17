@@ -1368,6 +1368,7 @@ fn build_relax(static_: &StaticRelax, lb: &[f64], ub: &[f64]) -> ConicProblem {
 
     let g = CscMatrix::from_triplets(&ri, &ci, &vi, m, nv).unwrap();
     ConicProblem {
+        var_bounds: Vec::new(),
         c: static_.c.clone(),
         a: static_.a.clone(),
         b: static_.b.clone(),
@@ -3590,6 +3591,7 @@ mod tests {
     fn relaxation_lp_unbounded_surfaces_verified_ray() {
         let g = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, -1.0], 1, 2).unwrap();
         let relax = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![-1.0, -1.0],
             a: CscMatrix::new(0, 2),
             b: vec![],
@@ -4792,6 +4794,7 @@ mod tests {
         }
         let g = CscMatrix::from_triplets(&gt.0, &gt.1, &gt.2, m, nv).unwrap();
         ConicProblem {
+            var_bounds: Vec::new(),
             c,
             a,
             b: qp.b_eq.clone(),

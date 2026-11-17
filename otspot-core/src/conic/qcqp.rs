@@ -477,6 +477,7 @@ pub fn to_conic(qp: &QcqpProblem) -> Result<(ConicProblem, usize, bool), String>
         .map_err(|e| format!("G build: {e:?}"))?;
     let cone = ConeSpec { l: ml, soc };
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c,
         a,
         b: qp.b_eq.clone(),
@@ -1078,6 +1079,7 @@ pub(crate) fn qp_problem_to_conic(src: &QpProblem) -> Result<(ConicProblem, usiz
         .map_err(|e| format!("G build: {e:?}"))?;
     let cone = ConeSpec { l: ml, soc };
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c,
         a,
         b: be,

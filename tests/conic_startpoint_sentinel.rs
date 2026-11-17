@@ -49,6 +49,7 @@ fn ball_box(k: usize, u: f64, r: f64) -> (ConicProblem, f64) {
     let g = CscMatrix::from_triplets(&rows, &cols, &vals, m, k).unwrap();
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, k).unwrap();
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![-1.0; k],
         a,
         b: vec![],

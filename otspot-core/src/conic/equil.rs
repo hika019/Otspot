@@ -253,6 +253,7 @@ impl Equilibrator {
             .collect();
 
         ConicProblem {
+            var_bounds: Vec::new(),
             c,
             a,
             b,
@@ -467,6 +468,7 @@ mod tests {
         let h = vec![5.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let a = csc(&[vec![1.0, 1.0, 1.0, 1.0, 1.0]], 1, n);
         ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![1.0, 2.0, 3.0, 4.0, 5.0],
             a,
             b: vec![10.0],
@@ -624,6 +626,7 @@ mod tests {
         let g = csc(&[vec![-1.0, 0.0], vec![0.0, -1.0]], 2, 2);
         let a = csc(&[vec![0.0, 1.0]], 1, 2);
         let prob = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![1.0, 0.0],
             a,
             b: vec![1.0],
@@ -675,6 +678,7 @@ mod tests {
         );
         let a = csc(&[vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]], 2, 3);
         let base = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![1.0, 0.0, 0.0],
             a,
             b: vec![3.0, 4.0],
@@ -697,6 +701,7 @@ mod tests {
             out
         };
         let badly_scaled = ConicProblem {
+            var_bounds: Vec::new(),
             c: base.c.iter().enumerate().map(|(j, &v)| v * t[j]).collect(),
             a: scale_col(&base.a),
             b: base.b.clone(),
@@ -767,6 +772,7 @@ mod tests {
             2,
         );
         let base = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![-1.0, -1.0],
             a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
             b: vec![],

@@ -9,11 +9,14 @@ mod ipm;
 mod kkt;
 mod misocp;
 mod nonconvex;
+pub mod presolve;
 mod qcqp;
 mod qcqp_classify;
 mod qcqp_fbbt;
 #[cfg(test)]
 mod tests;
+
+pub use presolve::{kkt_dim, tightened_tol, ConicReduction, ReductionStats};
 
 pub use misocp::{solve_miqcp, solve_misocp, BbOptions, MisocpProblem, MisocpResult};
 pub use nonconvex::{
@@ -104,6 +107,19 @@ pub struct ConicProblem {
     pub h: Vec<f64>,
     /// Cone specification.
     pub cone: ConeSpec,
+    /// Per-variable domain bounds `lb <= x_j <= ub` (length `n`), or empty
+    /// for "all variables free". This is the *domain representation* of
+    /// bound-type rows: the conic tier-1 presolve
+    /// ([`presolve`]) absorbs singleton orthant identity rows (`±x_j + s_k =
+    /// h_k`, the CBF `VAR L+`/`L-`/`L=` encoding) into this field so that
+    /// fixed variables and domain conflicts become reductions instead of
+    /// staying matrix rows. The IPM itself does not consume this field yet
+    /// (consuming it natively is the tier-2 "variable cones/bounds"
+    /// formulation work in the research report; out of scope here):
+    /// [`solve_socp`] therefore re-materializes any non-empty `var_bounds`
+    /// into orthant rows before handing the problem to the IPM, keeping the
+    /// solve equivalent.
+    pub var_bounds: Vec<(f64, f64)>,
 }
 
 impl ConicProblem {
@@ -144,6 +160,17 @@ impl ConicProblem {
         for &d in &self.cone.soc {
             if d == 0 {
                 return Err("second-order cone dim must be >= 1".into());
+            }
+        }
+        if !self.var_bounds.is_empty() && self.var_bounds.len() != self.n() {
+            return Err("var_bounds length must be 0 (all free) or n".into());
+        }
+        for (j, &(lb, ub)) in self.var_bounds.iter().enumerate() {
+            if lb.is_nan() || ub.is_nan() {
+                return Err(format!("var_bounds[{j}] is NaN"));
+            }
+            if lb > ub {
+                return Err(format!("var_bounds[{j}]: lb {lb} > ub {ub}"));
             }
         }
         find_non_finite("c", &self.c)?;
@@ -275,10 +302,20 @@ impl ConicOptions {
 
 /// Solve a second-order cone program in standard form.
 ///
-/// Equilibrates the data first (cone-block-respecting Ruiz scaling) so the
-/// IPM sees well-conditioned magnitudes, then maps the
-/// solution/duals/certificates back to `problem`'s original space. Exact up
-/// to rounding — changes neither optimum nor feasible set.
+/// Pipeline: validate → tier-1 presolve ([`presolve`]: equality
+/// substitution, fixed-variable elimination, domain identity-row absorption)
+/// → equilibration (cone-block-respecting Ruiz scaling) → `ipm::solve` →
+/// unscale + postsolve, with the result re-verified against `problem`'s
+/// *original* data before it is returned. The solve sees well-conditioned
+/// (possibly smaller) data, but every returned status/certificate is backed
+/// by an original-space verification, and any verification failure re-solves
+/// the original problem without presolve — exact up to rounding, changes
+/// neither optimum nor feasible set.
+///
+/// When presolve is active, `iterations`/`residuals` describe the reduced
+/// problem's solve (the reduced IPM tolerance is tightened by the reduction's
+/// growth factor, see [`presolve::tightened_tol`]); `x`/`y`/`z`/`s` and the
+/// objective are always original-space.
 pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     // Validate before equilibrating: the Ruiz sweeps assume `validate()`'s
     // shape invariants, so reject an invalid problem here (ipm::solve keeps
@@ -289,15 +326,98 @@ pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     if let Err(e) = opts.validate() {
         return invalid_result(problem, SolveStatus::NotSupported(e));
     }
-    // Check the stop condition before paying for equilibration (`O(EQUIL_SWEEPS
-    // * nnz)` Ruiz sweeps) and `ipm::solve`'s KKT symbolic factorization: an
-    // already-expired deadline or a preset cancel flag must return `Timeout`
-    // immediately, not after that up-front work runs on data nobody will use
-    // (PR #25 review: on a 2M-variable orthant problem this up-front work
-    // alone measured multi-second wall time before this check existed).
+    // Check the stop condition before paying for presolve, equilibration
+    // (`EQUIL_SWEEPS * nnz` Ruiz sweeps) and `ipm::solve`'s KKT symbolic
+    // factorization: an already-expired deadline or a preset cancel flag must
+    // return `Timeout` immediately, not after that up-front work runs on data
+    // nobody will use (PR #25 review: on a 2M-variable orthant problem this
+    // up-front work alone measured multi-second wall time before this check
+    // existed).
     if opts.stop_requested() {
         return invalid_result(problem, SolveStatus::Timeout);
     }
+    // Input domain bounds (`var_bounds`) are a row-equivalent representation;
+    // the tier-1 IPM consumes rows only, so materialize them into orthant
+    // rows once up front — every stage below (presolve, equilibration, the
+    // re-verification gate) then runs on that equivalent explicit form.
+    // Empty `var_bounds` — every current in-repo caller — is identity.
+    let materialized = if problem.var_bounds.is_empty() {
+        None
+    } else {
+        Some(presolve::materialize_bounds(problem).0)
+    };
+    let problem = materialized.as_ref().unwrap_or(problem);
+    let gate = (opts.tol * presolve::VERIFY_KKT_SLACK).max(opts.tol);
+    match presolve::ConicReduction::reduce(problem) {
+        Some(red) if red.conflict().is_some() => {
+            if let Some((y, z)) = red.conflict_certificate(problem) {
+                // Bound absorption proved `lb > ub`: emit the exact Farkas
+                // pair, verified against original data (mirrors the
+                // honesty-first certificate policy of `unscale_result`).
+                if crate::conic::equil::verify_infeas_cert(problem, &y, &z, gate) {
+                    let mut res = invalid_result(problem, SolveStatus::Timeout);
+                    if opts.stop_requested() {
+                        return res;
+                    }
+                    res.status = SolveStatus::Infeasible;
+                    res.objective = f64::INFINITY;
+                    res.y = y.clone();
+                    res.z = z.clone();
+                    res.infeas_cert = Some((y, z));
+                    return res;
+                }
+            }
+        }
+        Some(red) if red.reduced().is_some() => {
+            let reduced = red.reduced().expect("checked by guard");
+            let stats = red.stats();
+            let opts_red = ConicOptions {
+                tol: presolve::tightened_tol(opts.tol, stats.sigma),
+                ..opts.clone()
+            };
+            if opts_red.stop_requested() {
+                return invalid_result(problem, SolveStatus::Timeout);
+            }
+            let eq = equil::Equilibrator::compute(reduced);
+            let scaled = eq.scale_problem(reduced);
+            let res = ipm::solve(&scaled, &opts_red, true);
+            #[cfg(test)]
+            test_maybe_cancel_after_ipm_solve(opts);
+            let mut res = eq.unscale_result(reduced, opts_red.tol, res);
+            if matches!(res.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
+                && opts.stop_requested()
+            {
+                res.status = SolveStatus::Timeout;
+                res.primal_ray = None;
+                res.infeas_cert = None;
+            }
+            // A tightened-tolerance `MaxIterations` must not regress the
+            // status the loose tolerance would have reached: re-solve
+            // unpresolvecised rather than report a spurious budget failure.
+            if res.status != SolveStatus::MaxIterations {
+                if let Some(mut mapped) = red.postsolve(problem, reduced, &res, gate) {
+                    mapped.objective = match mapped.status {
+                        SolveStatus::Infeasible => f64::INFINITY,
+                        SolveStatus::Unbounded => f64::NEG_INFINITY,
+                        _ => mapped.objective,
+                    };
+                    return mapped;
+                }
+            }
+            // Fall through: original-space verification rejected the
+            // postsolved map (or the tightened solve ran out of budget) —
+            // re-solve the original problem below.
+        }
+        _ => {}
+    }
+    solve_socp_direct(problem, opts)
+}
+
+/// The presolve-free conic pipeline: equilibrate → `ipm::solve` → unscale +
+/// original-space certificate re-verification. This is both the default path
+/// (nothing reduced) and the fallback when a presolved result fails the
+/// original-space re-verification gate.
+fn solve_socp_direct(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     let eq = equil::Equilibrator::compute(problem);
     let scaled = eq.scale_problem(problem);
     let res = ipm::solve(&scaled, opts, true);

@@ -35,6 +35,7 @@ fn tiny_socp_hand_optimum() {
     let g = csc(&[vec![-1.0, 0.0], vec![0.0, -1.0]], 2, 2);
     let a = csc(&[vec![0.0, 1.0]], 1, 2);
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![1.0, 0.0],
         a,
         b: vec![1.0],
@@ -99,6 +100,7 @@ fn lp_as_socp_matches_simplex() {
         let m = grows.len();
         let g = csc(&grows, m, n);
         let prob = ConicProblem {
+            var_bounds: Vec::new(),
             c: c.clone(),
             a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
             b: vec![],
@@ -330,6 +332,7 @@ fn unbounded_lp_detected() {
     // min -x0 s.t. x0 >= 0  (orthant: -x0 <= 0)  => unbounded below.
     let g = csc(&[vec![-1.0]], 1, 1);
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![-1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -346,6 +349,7 @@ fn infeasible_lp_detected() {
     // x0 <= -1 (row x0 + s = -1, s>=0) and x0 >= 0 (-x0 + s = 0) => infeasible.
     let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![0.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -365,16 +369,22 @@ fn infeasible_lp_detected() {
 /// Sentinel: reverting the `opts.stop_requested()` check placed after
 /// `unscale_result` in `solve_socp` makes this FAIL with `Infeasible`
 /// instead of `Timeout`.
+///
+/// The infeasible shape uses two-entry rows so the tier-1 conic presolve
+/// declines it (singleton identity rows would be absorbed and short-circuit
+/// the IPM, bypassing the post-solve window this test observes).
 #[test]
 fn cancel_race_during_unscale_window_prefers_timeout_over_infeasible() {
     POST_SOLVE_COMMIT_COUNT.with(|c| c.set(0));
     CANCEL_AFTER_POST_SOLVE_COMMIT.with(|c| c.set(Some(1)));
 
-    // Same shape as `infeasible_lp_detected`.
-    let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
+    // Infeasible without any singleton identity row: x0 - x1 <= -1 together
+    // with x0 - x1 >= 0 (as -x0 + x1 <= 0).
+    let g = csc(&[vec![1.0, -1.0], vec![-1.0, 1.0]], 2, 2);
     let prob = ConicProblem {
-        c: vec![0.0],
-        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        var_bounds: Vec::new(),
+        c: vec![0.0, 0.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
         b: vec![],
         g,
         h: vec![-1.0, 0.0],
@@ -395,6 +405,32 @@ fn cancel_race_during_unscale_window_prefers_timeout_over_infeasible() {
     );
 }
 
+/// Presolve-side twin: a bound conflict proven by the tier-1 conic presolve
+/// must still yield `Timeout` when cancellation is already requested (the
+/// exact Farkas pair is worth nothing over honoring the cancel contract).
+/// Sentinel: deleting the `stop_requested` check in the conflict branch of
+/// `solve_socp` makes this FAIL with `Infeasible`.
+#[test]
+fn cancel_before_solve_prefers_timeout_over_presolve_proved_infeasible() {
+    let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
+    let prob = ConicProblem {
+        var_bounds: Vec::new(),
+        c: vec![0.0],
+        a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+        b: vec![],
+        g,
+        h: vec![-1.0, 0.0],
+        cone: ConeSpec { l: 2, soc: vec![] },
+    };
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let opts = ConicOptions {
+        cancel_flag: Some(std::sync::Arc::clone(&cancel)),
+        ..ConicOptions::default()
+    };
+    let res = solve_socp(&prob, &opts);
+    assert_eq!(res.status, SolveStatus::Timeout, "{res:?}");
+}
+
 #[test]
 fn misocp_ball_integer_optimum() {
     // max x0 + x1  (min -x0 -x1)  s.t. ||(x0,x1)|| <= sqrt(2.5), x in {0,1,2}^2.
@@ -404,6 +440,7 @@ fn misocp_ball_integer_optimum() {
     // SOC dim 3: s = (r, x0, x1) in Q3.
     let g = csc(&[vec![0.0, 0.0], vec![-1.0, 0.0], vec![0.0, -1.0]], 3, 2);
     let base = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![-1.0, -1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
         b: vec![],
@@ -504,6 +541,7 @@ fn bench_conic_suite() {
         }
         let g = csc(&grows, n + 1, n);
         let prob = ConicProblem {
+            var_bounds: Vec::new(),
             c: c.clone(),
             a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
             b: vec![],
@@ -954,6 +992,7 @@ fn unbounded_certificate_is_improving_ray() {
     // min -x0 s.t. x0 >= 0  => unbounded; ray d has c·d < 0.
     let g = csc(&[vec![-1.0]], 1, 1);
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![-1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -974,6 +1013,7 @@ fn infeasible_certificate_is_farkas() {
     // A^T y + G^T z ≈ 0, z >= 0.
     let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![0.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -1009,6 +1049,7 @@ fn infeasible_certificate_is_farkas() {
 fn half_int_lp() -> MisocpProblem {
     let g = csc(&[vec![-1.0]], 1, 1);
     let base = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -1028,6 +1069,7 @@ fn half_int_lp() -> MisocpProblem {
 fn infeasible_int_lp() -> MisocpProblem {
     let g = csc(&[vec![1.0, 0.0], vec![-1.0, 0.0]], 2, 2);
     let base = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![0.0, 0.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
         b: vec![],
@@ -1220,6 +1262,7 @@ fn cancel_race_before_misocp_unbounded_return_prefers_timeout() {
 
     let n = 2usize;
     let base = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![-1.0, 0.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
         b: vec![],
@@ -1289,6 +1332,7 @@ fn misocp_rounds_and_rechecks_integer_incumbent() {
     // x=0, so the near-integer relaxation must be branched rather than
     // reported as the optimum.
     let base = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![-1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -1339,6 +1383,7 @@ fn misocp_mid_search_deadline_keeps_incumbent() {
     }
     let g = csc(&grows, n + 1, n);
     let base = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![-1.0; n],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
         b: vec![],
@@ -1404,6 +1449,7 @@ fn misocp_mid_search_deadline_keeps_incumbent() {
 fn misocp_unbounded_relaxation_before_integer_fixing_does_not_certify_unbounded() {
     let n = 2usize;
     let base = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![0.0, -1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
         b: vec![],
@@ -1494,6 +1540,7 @@ fn socp_degenerate_fixed_var_infeasible_gets_certificate() {
     // NumericalError, so branch-and-bound could not prune this node soundly.
     let g = csc(&[vec![-1.0], vec![1.0], vec![-1.0]], 3, 1);
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -1525,6 +1572,7 @@ fn socp_fixed_var_soc_infeasible_gets_certificate() {
     let h = vec![2.0, -2.0, 2.0, 0.0, r, 0.0, 0.0];
     let g = csc(&rows, 7, 2);
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![-1.0, -1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
         b: vec![],
@@ -1610,6 +1658,7 @@ fn cone_membership_rejects_non_finite_slack() {
 fn box_lp(v: f64) -> ConicProblem {
     let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
     ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![-1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -1657,6 +1706,7 @@ fn misocp_fixed_integer_at_large_scale_solves() {
     let v = 1e10f64;
     let g = csc(&[vec![1.0]], 1, 1);
     let base = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -1689,6 +1739,7 @@ fn socp_large_scale_true_infeasible_gets_certificate() {
     for margin in [1e-6 * v, v] {
         let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
         let prob = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![0.0],
             a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
             b: vec![],
@@ -2233,6 +2284,7 @@ fn empty_cone_equality_only_socp() {
     // IPM with every cone-block loop empty.
     // min x0 + x1 s.t. x0 = 3, x1 = 4.
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![1.0, 1.0],
         a: CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap(),
         b: vec![3.0, 4.0],
@@ -3569,6 +3621,7 @@ fn conic_solve_matches_dense_schur_oracle_full_solve() {
         (
             "tiny_socp",
             ConicProblem {
+                var_bounds: Vec::new(),
                 c: vec![1.0, 0.0],
                 a: csc(&[vec![0.0, 1.0]], 1, 2),
                 b: vec![1.0],
@@ -3580,6 +3633,7 @@ fn conic_solve_matches_dense_schur_oracle_full_solve() {
         (
             "orthant_box",
             ConicProblem {
+                var_bounds: Vec::new(),
                 c: vec![1.0, 2.0],
                 a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
                 b: vec![],
@@ -3612,6 +3666,7 @@ fn conic_solve_matches_dense_schur_oracle_full_solve() {
         problems.push((
             "random_soc3",
             ConicProblem {
+                var_bounds: Vec::new(),
                 c,
                 a,
                 b,
@@ -3689,6 +3744,7 @@ fn soc_border_threshold_crossover() {
         let mut c = vec![0.0; n];
         c[1] = -1.0;
         let prob = ConicProblem {
+            var_bounds: Vec::new(),
             c,
             a,
             b: vec![1.0],
@@ -4740,6 +4796,7 @@ fn qp_problem_to_conic_bridges_fixed_bound_to_equality_row() {
 fn valid_box_socp() -> ConicProblem {
     let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
     ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -4815,6 +4872,7 @@ fn conic_problem_validate_rejects_wrong_a_ncols_even_when_p_is_zero() {
     // panic inside `solve_socp`. Exact repro: `c.len()=2`, `A` is `0x0`, `b=[]`.
     let g = csc(&[vec![1.0, 0.0], vec![0.0, 1.0]], 2, 2);
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![1.0, 1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 0).unwrap(),
         b: vec![],
@@ -4890,6 +4948,7 @@ fn solve_socp_canonicalizes_non_optimal_objective() {
     // `solve_socp_preserves_real_iterate_objective_when_inconclusive`.
     let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
     let infeasible = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![0.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -4903,6 +4962,7 @@ fn solve_socp_canonicalizes_non_optimal_objective() {
 
     let g = csc(&[vec![-1.0]], 1, 1);
     let unbounded = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![-1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -4939,6 +4999,7 @@ fn solve_socp_preserves_real_iterate_objective_when_inconclusive() {
         h.push(0.0);
     }
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: c.clone(),
         a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
         b: vec![],
@@ -4975,6 +5036,7 @@ fn solve_socp_preserves_real_iterate_objective_when_inconclusive() {
 fn valid_int_lp() -> MisocpProblem {
     let g = csc(&[vec![1.0], vec![-1.0]], 2, 1);
     let base = ConicProblem {
+        var_bounds: Vec::new(),
         c: vec![1.0],
         a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
         b: vec![],
@@ -5395,6 +5457,7 @@ fn solve_socp_checks_deadline_before_equilibration() {
     let h = vec![1.0; n];
     let c = vec![1.0; n];
     let problem = ConicProblem {
+        var_bounds: Vec::new(),
         c,
         a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
         b: vec![],
@@ -5436,6 +5499,7 @@ fn solve_socp_checks_cancel_flag_before_equilibration() {
     let h = vec![1.0; n];
     let c = vec![1.0; n];
     let problem = ConicProblem {
+        var_bounds: Vec::new(),
         c,
         a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
         b: vec![],
@@ -5485,6 +5549,7 @@ mod solve_socp_x_length_invariant {
         // rejects before any solve, returning through `invalid_result`.
         let n = 3usize;
         let prob = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![1.0; n],
             a: CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap(),
             b: vec![],
@@ -5511,6 +5576,7 @@ mod solve_socp_x_length_invariant {
         let n = 1usize;
         let g = csc(&[vec![1.0], vec![-1.0]], 2, n);
         let prob = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![0.0],
             a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
             b: vec![],
@@ -5534,6 +5600,7 @@ mod solve_socp_x_length_invariant {
         let g = csc(&[vec![-1.0, 0.0], vec![0.0, -1.0]], 2, n);
         let a = csc(&[vec![0.0, 1.0]], 1, n);
         let prob = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![1.0, 0.0],
             a,
             b: vec![1.0],
@@ -5570,6 +5637,7 @@ mod solve_socp_x_length_invariant {
         let g = csc(&[vec![-1.0, 0.0], vec![0.0, -1.0]], 2, n);
         let a = csc(&[vec![0.0, 1.0]], 1, n);
         let prob = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![1.0, 0.0],
             a,
             b: vec![1.0],
@@ -5615,6 +5683,7 @@ mod solve_misocp_x_length_invariant {
         // `validate()` gate rejects before any node is visited, returning
         // through misocp.rs's first `x: vec![]` site.
         let base = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![0.0],
             a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
             b: vec![],
@@ -5648,6 +5717,7 @@ mod solve_misocp_x_length_invariant {
         // without ever bisecting.
         let n = 2usize;
         let base = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![-1.0, 0.0],
             a: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
             b: vec![],

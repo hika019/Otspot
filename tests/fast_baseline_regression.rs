@@ -211,6 +211,7 @@ fn unit_ball_socp(c: &[f64]) -> (ConicProblem, f64) {
     let mut h = vec![0.0; k + 1];
     h[0] = 1.0;
     let prob = ConicProblem {
+        var_bounds: Vec::new(),
         c: c.to_vec(),
         a,
         b: vec![],

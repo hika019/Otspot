@@ -679,6 +679,7 @@ mod tests {
         // loop must establish Optimal rather than treating initializer absence
         // as either a solution or an unclassified numerical failure.
         let problem = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![1.0],
             a: CscMatrix::new(0, 1),
             b: vec![],
@@ -722,6 +723,7 @@ mod tests {
         use otspot_num::sparse::CscMatrix;
 
         let problem = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![1.0, 0.0],
             a: CscMatrix::from_triplets(&[0], &[1], &[1.0], 1, 2).unwrap(),
             b: vec![1.0],
@@ -767,6 +769,7 @@ mod tests {
 
         let g = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, 1).unwrap();
         let problem = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![0.0],
             a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
             b: vec![],
@@ -802,6 +805,7 @@ mod tests {
 
         let g = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, 1).unwrap();
         let problem = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![0.0],
             a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
             b: vec![],
@@ -836,6 +840,7 @@ mod tests {
 
         let g = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap();
         let problem = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![-1.0],
             a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
             b: vec![],
@@ -869,6 +874,7 @@ mod tests {
 
         let g = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap();
         let problem = ConicProblem {
+            var_bounds: Vec::new(),
             c: vec![-1.0],
             a: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
             b: vec![],

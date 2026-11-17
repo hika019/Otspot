@@ -218,6 +218,7 @@ impl ConicBuilder {
             .map_err(|e| CbfError::ParseError(format!("conic matrix: {e}")))?;
 
         Ok(ConicProblem {
+            var_bounds: Vec::new(),
             c,
             a,
             b: b_eq,

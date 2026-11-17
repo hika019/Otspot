@@ -412,6 +412,7 @@ fn build_many_soc_socp(num_blocks: usize) -> (ConicProblem, f64) {
     let b = vec![1.0; num_blocks];
 
     let problem = ConicProblem {
+        var_bounds: Vec::new(),
         c,
         a,
         b,
@@ -506,6 +507,7 @@ fn build_single_huge_soc_socp(d: usize) -> (ConicProblem, f64) {
     let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).expect("huge SOC A");
     let b = vec![1.0];
     let problem = ConicProblem {
+        var_bounds: Vec::new(),
         c,
         a,
         b,
@@ -645,6 +647,7 @@ fn build_misocp_with_many_blocks(num_blocks: usize) -> (MisocpProblem, f64) {
     let b_vec = vec![1.0; num_blocks];
 
     let base = ConicProblem {
+        var_bounds: Vec::new(),
         c,
         a,
         b: b_vec,
