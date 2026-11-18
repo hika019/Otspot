@@ -1321,12 +1321,17 @@ pub(crate) fn verify_original_solution(orig: &MilpProblem, x: &[f64], int_feas_t
     if x.len() != orig.lp.num_vars {
         return false;
     }
+    // Membership via boolean mask: `integer_vars.contains(&j)` inside
+    // this loop is O(n · |integer_vars|) — 1174 ms for one verify call
+    // on a fully-pinned 100k-column model (measured pre-fix). The mask
+    // makes the scan O(n + |integer_vars|).
+    let is_integer = super::integer_mask(orig.lp.num_vars, &orig.integer_vars);
     for (j, &(lb, ub)) in orig.lp.bounds.iter().enumerate() {
         let slack = ROOT_PRESOLVE_VERIFY_ABS_TOL + ROOT_PRESOLVE_VERIFY_REL_TOL * x[j].abs();
         if x[j] < lb - slack || x[j] > ub + slack {
             return false;
         }
-        if orig.integer_vars.contains(&j) {
+        if is_integer[j] {
             let r = x[j].round();
             if (x[j] - r).abs() > int_feas_tol.max(ROOT_PRESOLVE_VERIFY_ABS_TOL) {
                 return false;
@@ -1847,6 +1852,45 @@ mod tests {
         assert_eq!(res.objective, 1.0);
         assert_eq!(res.solution, vec![0.0, 1.0]);
         assert!(res.reduced_costs.is_empty() || res.reduced_costs.len() == 2);
+    }
+
+    /// Postsolve verification is linear in the variable count: the
+    /// integrality check consults a boolean mask, not `Vec::contains`
+    /// over `integer_vars`.
+    ///
+    /// Pre-fix the check was O(n · |integer_vars|): one
+    /// `verify_original_solution` call on a fully-pinned 100k-column
+    /// model measured 1174 ms here (290 ms at 50k). The cap of 500 ms is
+    /// 2.3× BELOW the measured quadratic cost at n = 100k and >100×
+    /// ABOVE the linear cost (~10 ms), so ordinary machine load cannot
+    /// flip the verdict either way. The test is not `#[ignore]`d: its
+    /// post-fix runtime stays far inside the nextest slow-timeout window.
+    #[test]
+    fn postsolve_verify_is_linear_in_variable_count() {
+        let n = 100_000usize;
+        let p = build_milp(
+            vec![0.0; n],
+            &[],
+            0,
+            vec![],
+            vec![],
+            vec![(0.0, 10.0); n],
+            (0..n).collect(),
+        );
+        let x = match reduce(&p, None) {
+            ReduceOutcome::Reduced { reduced, map, .. } => {
+                assert_eq!(reduced.lp.num_vars, 0, "zero-cost empty columns all pin");
+                map.construct(&[], 1e-6).expect("fully-pinned point")
+            }
+            _ => panic!("the all-empty model must fully pin"),
+        };
+        let t = Instant::now();
+        assert!(verify_original_solution(&p, &x, 1e-6));
+        let dt = t.elapsed();
+        assert!(
+            dt < std::time::Duration::from_millis(500),
+            "verify at n = 100k took {dt:?} (pre-fix quadratic cost was ~1.2 s)"
+        );
     }
 
     /// `verify_original_solution` rejects a wrong point (row violation) —
