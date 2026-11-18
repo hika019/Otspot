@@ -961,3 +961,80 @@ fn test_fixed_bound_pair_raw_solve_optimal() {
     close(result.solution[1], 5.0, "x1 (ub1 活性)");
     close(result.solution[2], 2.0, "x2 (固定)");
 }
+
+/// SENTINEL (cold-init 射影の境界行重み): 手計算オラクル x = 3/4 + m/4。
+///
+/// Fixture: min 0 (Q=0) s.t. x = 1 (等式)、x ∈ [0, 2]、raw 起点 x0 = 0 (lb 上)。
+/// cold start は `strict_interior_shift` で x0 を m = range·WARM_BOUND_REL_MARGIN
+/// (= 2e-6) へ押し込んでから射影する。box 系射影 (σ=0、ρ=δ=1、境界行 lb/ub
+/// 2 本とも box 化) は 2×2 系
+///   [[1 + 2W, 1], [1, −1]] [dx, dy]ᵀ = [2 − 2m, 1 − m]ᵀ、W = 1/(0 + δ_d^bound)
+/// (x 対角 = δ_p·1 + lb/ub 行の対角寄与 d_t。右辺 x 成分 =
+///  Σ_t a_t(b_t − a_t·x0s) = (ub − x0s) − (x0s − lb) = 2 − 2m。系行は等式 1 本
+/// で対角 −(0+δ) = −1、右辺 r_p = 1 − m)。2 式を足して dx = 3(1−m)/(2+2W)、
+/// 終点は x = m + dx = 3/4 + m/4 (m ≪ 1 で射影後の clamp は非発動)。設計契約は
+/// δ_d^bound = INIT_PROJECTION_REGULARIZATION = 1 (旧 extended 射影との
+/// 代数同値 — `bound_row_dual_scale` / `materialize` の doc)。
+///
+/// Revert-fail (確認済み、2 系統): (a) init 経路の materialize 4 引数を反復
+/// 経路と同じ 0 に戻すと W = 床により 1/ε_machine = 4.5e15、dx ≃ 3.3e-16 で
+/// 終点は m のまま → FAIL。(b) `strict_interior_shift` を撤去すると m = 0 で
+/// 終点 0.75 には来るが LASSO 系 budget sentinel (diag_qp_ill_scaled_eps_floor)
+/// が境界始点の barrier 対角 O(1e12) で FAIL — 両契約を同時に固定する。
+#[test]
+fn sentinel_cold_init_projection_bound_weight_oracle() {
+    use super::init::build_initial_point;
+    use super::state::WARM_BOUND_REL_MARGIN;
+    use crate::qp::ipm_core::kkt::{build_base_constraints, build_bound_box};
+    use otspot_num::linalg::timeout::TimeoutCtx;
+
+    /// strict-interior 押し込み量: lb 上の raw 始点が range·WARM_BOUND_REL_MARGIN
+    /// だけ内側へ動く (helper と同一契約、range = 2)。
+    const INIT_SHIFT_MARGIN: f64 = 2.0 * WARM_BOUND_REL_MARGIN;
+    /// 手計算オラクル: x = m + 3(1−m)/(2+2·1) = 3/4 + m/4 (導出は上の doc)。
+    const ORACLE_COLD_INIT_X: f64 = 0.75 + 0.25 * INIT_SHIFT_MARGIN;
+    /// 2×2 系は f64 因子化でこの桁まで一意 (条件数 ~6)。因子化残余の余裕。
+    const ORACLE_COLD_INIT_TOL: f64 = 1e-9;
+
+    let problem = QpProblem::new(
+        CscMatrix::new(1, 1),
+        vec![0.0],
+        CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap(),
+        vec![1.0],
+        vec![(0.0_f64, 2.0)],
+        vec![ConstraintType::Eq],
+    )
+    .unwrap();
+    let (a_ext, b_ext, m_ext, m_orig, _n_lb, is_eq_ext) = build_extended_constraints(&problem);
+    let (a_base, b_base, is_eq_base) = build_base_constraints(&problem);
+    let bound = build_bound_box(&problem);
+    assert_eq!(bound.count(), 2, "lb/ub 各 1 行 (box 化 2 行)");
+    assert!(
+        bound.eliminated.iter().all(|&e| e),
+        "退化対でないので全行 box 化"
+    );
+
+    let opts = default_opts();
+    let timeout_ctx = TimeoutCtx::new(None, opts.timeout_secs, None);
+    let init = build_initial_point(
+        &problem,
+        &opts,
+        &a_ext,
+        &b_ext,
+        &is_eq_ext,
+        &a_base,
+        &b_base,
+        &is_eq_base,
+        &bound,
+        m_orig,
+        m_ext,
+        &timeout_ctx,
+        faer::Par::Seq,
+    );
+    assert!(
+        (init.x[0] - ORACLE_COLD_INIT_X).abs() <= ORACLE_COLD_INIT_TOL,
+        "cold-init 射影が手計算オラクル 3/(2+2·1)=0.75 と不一致: x0=0 + dx = {} \
+         (境界行重みが反復経路の δ=0 に逆戻りし、床 1/ε=4.5e15/行で歩幅が潰れた疑い)",
+        init.x[0]
+    );
+}

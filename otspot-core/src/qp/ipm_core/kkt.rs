@@ -164,6 +164,12 @@ pub(crate) fn build_extended_constraints(
 /// fraction-to-boundary の α が瞬時に 0 へ張り付く (x が内側へ戻れない)。
 /// 床は数値ガードであり、双対 y は s と独立に保持されるためbarrier力学は
 /// σ_t = s_t/y_t 側の床 (δ_d 下限) で制御される。
+///
+/// 設計メモ (B3 調査記録): この床が受理病理 (微正スラック受理の隠蔽) の原因か
+/// を検証した。tight-tol fixture 系で Custom(1e-13) は Optimal/110 反復で解け、
+/// s ∈ (0, 床付近) の微正スラック受理は実測されなかった — α 張り付きの機構は
+/// 実在するが「受理を覆す」帰結は再現せず。床は上記の数値ガードとして維持し、
+/// 受理病理の真因としては扱わない (再検証時は反復数・受理残差を記録すること)。
 pub(crate) const BOUND_SLACK_FLOOR: f64 = 1e-12;
 
 /// 境界行 Schur 対角寄与 1/(σ_t + δ_d) の分母床。
@@ -179,17 +185,30 @@ pub(crate) const BOUND_DUAL_DENOM_FLOOR: f64 = f64::EPSILON;
 /// `AugmentedKktCache::materialize` とループ側の dy_bound 復元が同一関数を
 /// 共有し、KKT 対角の D_b と後退代入の除算の一致を保証する。
 ///
-/// box 化境界行には必ず δ_d = 0 を渡すこと。dual damping δ は extended 系の
-/// 独立スラック行 (実制約行・lb==ub 退化対の保持行) だけの正則化で、box 化行
-/// に δ を混ぜると σ_t ≪ δ の区間で対角寄与が 1/δ の定数に潰え、境界制約が
-/// KKT 系から消える。その系は box を無視する的方向 (発散方向) を作り、
-/// fraction-to-boundary が α≈0 で x を壁に押さえつけ、δ 減衰の燃料である
-/// μ 低下が止まる自己閉鎖 deadlock になる (実測: 幅 3e-3 の box・Q=I で
-/// δ=8 固定のまま 52 反復 Stalled、δ 非適用で Optimal/5 反復)。
+/// 反復経路では box 化境界行へ δ_d = 0 を渡すこと。dual damping δ は
+/// extended 系の独立スラック行 (実制約行・lb==ub 退化対の保持行) だけの
+/// 正則化で、box 化行に δ を混ぜると σ_t ≪ δ の区間で対角寄与が 1/δ の
+/// 定数に潰え、境界制約が KKT 系から消える。その系は box を無視する方向
+/// (発散方向) を作り、fraction-to-boundary が α≈0 で x を壁に押さえつけ、
+/// δ 減衰の燃料である μ 低下が止まる自己閉鎖 deadlock になる (実測: 幅
+/// 3e-3 の box・Q=I で δ=8 固定のまま 52 反復 Stalled、δ 非適用で
+/// Optimal/5 反復 — sentinel: `sentinel_narrow_box_corner_mu_deadlock`)。
+/// 例外は cold-init の Mehrotra 射影で、σ_t = 0 の下で実制約行と同じ δ (=1)
+/// を渡す: 旧 extended 射影は境界行が明示行で、その正確 Schur 集約の極限が
+/// 1/(0+1) = 1 (init.rs の代数同値契約)。init で δ 非適用だと床により
+/// 1/ε_machine = 4.5e15/行が x 対角へ流れ、可行性射影の歩幅が ~1e-16 に
+/// 潰えて初期点が境界に取り残される
+/// (sentinel: `sentinel_cold_init_projection_bound_weight_oracle`)。
 #[inline]
 pub(crate) fn bound_row_dual_scale(sigma_t: f64, delta_d: f64) -> f64 {
     1.0 / (sigma_t + delta_d).max(BOUND_DUAL_DENOM_FLOOR)
 }
+
+/// 反復経路が box 化境界行へ渡す dual damping。正値は μ 停止 deadlock を
+/// 再現するため 0 のみ合法 (`bound_row_dual_scale` の doc。revert すると
+/// `sentinel_narrow_box_corner_mu_deadlock` が Stalled で FAIL)。cold-init
+/// 射影は自身の正則化 (init.rs `INIT_PROJECTION_REGULARIZATION`) を使う。
+pub(crate) const BOUND_ROW_DELTA_D_ITERATION: f64 = 0.0;
 
 /// box 化 KKT がeliminateする境界行メタデータ。
 ///
@@ -401,9 +420,19 @@ impl AugmentedKktCache {
         self.bound_var.as_deref()
     }
 
-    /// 反復毎に呼ぶ: σ/δ_p/δ_d を template に反映した CscMatrix を返す。
+    /// 反復毎に呼ぶ: σ/δ_p/δ_d/δ_d_bound を template に反映した CscMatrix を返す。
     /// O(nnz + n + m_ext) — sort/compress を行わないため `from_triplets` より大幅に速い。
-    pub(crate) fn materialize(&self, sigma_vec: &[f64], delta_p: f64, delta_d: f64) -> CscMatrix {
+    ///
+    /// `delta_d_bound` は box 化境界行の対角寄与専用の dual damping。反復経路は
+    /// `BOUND_ROW_DELTA_D_ITERATION` (=0)、cold-init 射影は実制約行と同じ δ を
+    /// 渡す (`bound_row_dual_scale` の doc の使い分け契約)。
+    pub(crate) fn materialize(
+        &self,
+        sigma_vec: &[f64],
+        delta_p: f64,
+        delta_d: f64,
+        delta_d_bound: f64,
+    ) -> CscMatrix {
         debug_assert_eq!(sigma_vec.len(), self.sigma_len());
         let mut values = self.static_values.clone();
         for j in 0..self.n {
@@ -417,7 +446,7 @@ impl AugmentedKktCache {
             // を x ブロック対角へ加算する (kkt.rs 上部 doc の box-ification 設計)。
             for (t, &j) in bound_var.iter().enumerate() {
                 values[self.diag_var_slot[j]] +=
-                    bound_row_dual_scale(sigma_vec[self.bound_sigma_idx[t]], 0.0);
+                    bound_row_dual_scale(sigma_vec[self.bound_sigma_idx[t]], delta_d_bound);
             }
         }
         let total = self.n + self.m_rows;
@@ -529,7 +558,16 @@ pub(crate) struct PermutedAugmentedKkt {
 }
 
 impl PermutedAugmentedKkt {
-    pub(crate) fn materialize(&self, sigma_vec: &[f64], delta_p: f64, delta_d: f64) -> CscMatrix {
+    /// `AugmentedKktCache::materialize` の AMD 置換版 (対角 slot 写像のみ差異)。
+    /// `delta_d_bound` の使い分け契約も親と同じ (反復経路は
+    /// `BOUND_ROW_DELTA_D_ITERATION`)。
+    pub(crate) fn materialize(
+        &self,
+        sigma_vec: &[f64],
+        delta_p: f64,
+        delta_d: f64,
+        delta_d_bound: f64,
+    ) -> CscMatrix {
         debug_assert_eq!(
             sigma_vec.len(),
             self.m_rows + self.bound_var.as_ref().map_or(0, |v| v.len())
@@ -544,7 +582,7 @@ impl PermutedAugmentedKkt {
         if let Some(bound_var) = &self.bound_var {
             for (t, &j) in bound_var.iter().enumerate() {
                 values[self.diag_var_slot[j]] +=
-                    bound_row_dual_scale(sigma_vec[self.bound_sigma_idx[t]], 0.0);
+                    bound_row_dual_scale(sigma_vec[self.bound_sigma_idx[t]], delta_d_bound);
             }
         }
         let total = self.n + self.m_rows;
@@ -854,7 +892,7 @@ pub(crate) fn build_boxed_schur_system(
     let eliminated = bound.eliminated_rows();
     let mut d_b = vec![0.0_f64; bound.count()];
     for &t in &eliminated {
-        d_b[t] = bound_row_dual_scale(sigma_full[a_base.nrows() + t], 0.0);
+        d_b[t] = bound_row_dual_scale(sigma_full[a_base.nrows() + t], BOUND_ROW_DELTA_D_ITERATION);
     }
 
     let a_t = a_sys.transpose();
@@ -1381,7 +1419,9 @@ mod tests {
         // --- box 化 augmented: 次元 sentinel + 解の一致 ---
         let cache = build_boxed_augmented_cache(&q, &a_base, &bound);
         assert_eq!(cache.sigma_len(), sigma_full.len());
-        let mat_box = cache.materialize(&sigma_full, rho, delta);
+        // 反復経路の契約 (δ_d_bound = 0) で materialize する oracle 検証
+        // (init 射影側の重みは ippmm/tests.rs の cold-init sentinel が固定)。
+        let mat_box = cache.materialize(&sigma_full, rho, delta, BOUND_ROW_DELTA_D_ITERATION);
         assert_eq!(
             mat_box.nrows(),
             n + m_real,
@@ -1390,7 +1430,7 @@ mod tests {
 
         let d_b: Vec<f64> = sigma_full[m_real..]
             .iter()
-            .map(|&s| bound_row_dual_scale(s, 0.0))
+            .map(|&s| bound_row_dual_scale(s, BOUND_ROW_DELTA_D_ITERATION))
             .collect();
         let mut rhs_x_box = r_d.clone();
         for t in 0..n_bound {
@@ -1417,8 +1457,8 @@ mod tests {
         }
 
         // --- 対角 D_b の畳み込みを手計算で直接検証 (変数 2: lb+ub 両方) ---
-        let d_lb_2 = bound_row_dual_scale(sigma_full[m_real + 1], 0.0);
-        let d_ub_2 = bound_row_dual_scale(sigma_full[m_real + 3], 0.0);
+        let d_lb_2 = bound_row_dual_scale(sigma_full[m_real + 1], BOUND_ROW_DELTA_D_ITERATION);
+        let d_ub_2 = bound_row_dual_scale(sigma_full[m_real + 3], BOUND_ROW_DELTA_D_ITERATION);
         let dense_box = dense_sym(&mat_box);
         let want_22 = q_diag(&q, 2) + rho + d_lb_2 + d_ub_2;
         assert!(

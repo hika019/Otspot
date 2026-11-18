@@ -31,7 +31,40 @@ pub(super) struct InitialPoint {
 /// Mehrotra cold-init の射影 KKT が使う正則化 (ρ=δ=1)。
 /// 旧 extended 版 `build_augmented_system(q_zero, a_ext, σ=0, 1.0, 1.0)` と同一値で、
 /// 境界行の対角寄与は 1/(0+1) = 1 ずつ x 対角へ入る (soft projection)。
+/// 境界行用の dual damping も実制約行と同じこの値を渡す — 旧 extended 射影は
+/// 境界行が明示行で δ=1 を受けていたため、代数同値契約の極限 1/(0+1) = 1 に
+/// 一致するのは δ 適用側のみ (δ 非適用なら床の 1/ε_machine になる)。
 const INIT_PROJECTION_REGULARIZATION: f64 = 1.0;
+
+/// cold start 点を box の strict-interior 余白へ押し込む (余白契約は warm
+/// start / 射影後 clamp と同一)。
+///
+/// box 化は境界行スラックを独立状態にせず s_t = b_t − a_t x の従属量にする
+/// ため、x が境界上のままで反復に入ると barrier 対角が
+/// 1/σ_t = y_t/(b_t − a_t x) ≳ y_t/BOUND_SLACK_FLOOR = O(1e12)/行 に張り付く
+/// (実測: LASSO 列 D-scaling 系・t ≥ 0 の全 lb 行が x0 = 0 = lb 起点で反復数
+/// 17-23 → 70-100 に膨張、diag_qp_ill_scaled_eps_floor の budget sentinel が
+/// 検出)。旧 extended 系は境界行スラックを s ≥ 1 にクランプした独立量として
+/// 持つ設計で、この始点 interior 性へ依存していなかった。押し込みは clamp で
+/// 境界上の点のみ動く (内部の始点・固定変数・非有界変数は不変)。
+fn strict_interior_shift(bounds: &[(f64, f64)], x: &mut [f64]) {
+    for ((lb, ub), xj) in bounds.iter().zip(x.iter_mut()) {
+        match (lb.is_finite(), ub.is_finite()) {
+            (true, true) => {
+                let range = ub - lb;
+                let margin = range * WARM_BOUND_REL_MARGIN;
+                *xj = if range > 2.0 * margin {
+                    xj.clamp(lb + margin, ub - margin)
+                } else {
+                    0.5 * (lb + ub)
+                };
+            }
+            (true, false) => *xj = xj.max(lb + warm_bound_margin(*lb)),
+            (false, true) => *xj = xj.min(ub - warm_bound_margin(*ub)),
+            (false, false) => {}
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_initial_point(
@@ -53,7 +86,7 @@ pub(super) fn build_initial_point(
     let m_real = m_orig;
 
     // 巨大 |ub|=1e11 で midpoint 起点だと pf が抜けないため、0 が bounds 内なら 0 を優先。
-    let x0: Vec<f64> = problem
+    let mut x0: Vec<f64> = problem
         .bounds
         .iter()
         .map(|&(lb, ub)| {
@@ -73,6 +106,9 @@ pub(super) fn build_initial_point(
             }
         })
         .collect();
+    // cold start 点を常に strict interior 化 (射影の有無と独立。理由:
+    // `strict_interior_shift` の doc — 境界始点だと barrier 対角が床側 O(1e12))。
+    strict_interior_shift(&problem.bounds, &mut x0);
 
     // s0 = b_base − A_base·x0。等式行は s=0、不等式行は s≥1 にクランプ。
     // 境界行スラックは従属量なので状態として持たない (y の初期値のみ構築)。
@@ -216,6 +252,7 @@ fn mehrotra_cold_init_boxed(
             &sigma_zero,
             INIT_PROJECTION_REGULARIZATION,
             INIT_PROJECTION_REGULARIZATION,
+            INIT_PROJECTION_REGULARIZATION,
         );
         let perm_init = amd_with_deadline(
             k_init.nrows(),
@@ -254,24 +291,11 @@ fn mehrotra_cold_init_boxed(
             {
                 let dx_inf = sol_init[..n].iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
                 if dx_inf.is_finite() && dx_inf < 1e15 {
+                    // 射影後の interior 化は cold start と同一 helper (二重実装禁止)。
                     for j in 0..n {
-                        let x_new = x[j] + sol_init[j];
-                        let (lb, ub) = problem.bounds[j];
-                        x[j] = match (lb.is_finite(), ub.is_finite()) {
-                            (true, true) => {
-                                let range = ub - lb;
-                                let margin = range * WARM_BOUND_REL_MARGIN;
-                                if range > 2.0 * margin {
-                                    x_new.clamp(lb + margin, ub - margin)
-                                } else {
-                                    0.5 * (lb + ub)
-                                }
-                            }
-                            (true, false) => x_new.max(lb + warm_bound_margin(lb)),
-                            (false, true) => x_new.min(ub - warm_bound_margin(ub)),
-                            (false, false) => x_new,
-                        };
+                        x[j] += sol_init[j];
                     }
+                    strict_interior_shift(&problem.bounds, x);
                 }
             }
         }

@@ -20,7 +20,8 @@ use crate::qp::ipm_core::common::{
     check_infeasible_or_unbounded, numerical_error_result, solve_unconstrained, timeout_result,
 };
 use crate::qp::ipm_core::kkt::{
-    build_extended_constraints, collapse_extended_dual, norm_inf, spmtv, spmv,
+    bound_row_dual_scale, build_extended_constraints, collapse_extended_dual, norm_inf, spmtv,
+    spmv, BOUND_ROW_DELTA_D_ITERATION,
 };
 use crate::qp::ipm_core::solver_loop::{
     compute_sigma_vec, corrector_boxed, gondzio_correctors_boxed, predictor_boxed,
@@ -495,11 +496,11 @@ fn solve_ippmm_inner_confined(
         // MINRES (iterative) backend のみ user eps 由来 η を反映、Direct/DirectDd では no-op。
         fac.set_iterative_tol(inexact_eta);
 
-        // 境界行後退代入係数 d_t。KKT 対角 D_b と同一関数・δ_d = 0 (理由:
-        // `bound_row_dual_scale` の doc。δ 適用は μ 停止 deadlock)。
+        // 境界行後退代入係数 d_t。KKT 対角 D_b と同一関数・同一 δ_d
+        // (`BOUND_ROW_DELTA_D_ITERATION` の doc。δ 適用は μ 停止 deadlock)。
         let d_b: Vec<f64> = sigma_vec[m_real..]
             .iter()
-            .map(|&sg| crate::qp::ipm_core::kkt::bound_row_dual_scale(sg, 0.0))
+            .map(|&sg| bound_row_dual_scale(sg, BOUND_ROW_DELTA_D_ITERATION))
             .collect();
         let boxed_solver = if use_schur {
             let d_inv_real = d_inv_opt

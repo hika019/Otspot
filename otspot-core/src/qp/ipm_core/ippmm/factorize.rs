@@ -6,6 +6,7 @@ use super::state::{
 use crate::qp::diagnostics::with_ippmm_sink;
 use crate::qp::ipm_core::kkt::{
     build_boxed_schur_system, build_schur_system, AugmentedKktCache, PermutedAugmentedKkt,
+    BOUND_ROW_DELTA_D_ITERATION,
 };
 use crate::qp::problem::QpProblem;
 use faer::Par;
@@ -77,10 +78,12 @@ pub(super) enum FactorizeOutcome {
         used_iterative: bool,
         /// 数値 LDL 因子化の所要時間 (全 retry 合計、ナノ秒)。
         factorize_ns: u128,
-        /// 採用行列に実際に使われた対角正則化 δ (retry/fallback 後の最終値)。
-        /// box 化ループはこれと同一の δ で境界行後退代入係数
-        /// `bound_row_dual_scale(σ_t, δ_used)` を算出し、KKT 対角の D_b と
-        /// 後退代入の除算を一致させる (一致しないと dy_bound が方程式の解でなくなる)。
+        /// 採用された対角正則化 δ (retry/fallback 後の最終値)。系行 (実制約行・
+        /// 退化対保持行) の後退代入 d_inv = 1/(σ_k+δ) はこの値と一致させる。
+        /// box 化境界行は設計上 δ を受けず `BOUND_ROW_DELTA_D_ITERATION` (=0) で
+        /// `bound_row_dual_scale` を評価する (KKT 対角 D_b と後退代入の除算を
+        /// 同一値に保つ。δ を box 行へ適用すると μ 停止 deadlock —
+        /// `bound_row_dual_scale` の doc)。
         delta_used: f64,
     },
     Timeout,
@@ -253,9 +256,12 @@ pub(super) fn factorize_kkt_with_retry(
         let delta_fallback = LDL_FALLBACK_DELTA_MIN.max(rho_retry).max(delta_retry);
         delta_fallback_value = delta_fallback;
         let t_asm_fb = std::time::Instant::now();
-        let aug_mat_fb = ctx
-            .aug_cache
-            .materialize(ctx.sigma_vec, rho_retry, delta_fallback);
+        let aug_mat_fb = ctx.aug_cache.materialize(
+            ctx.sigma_vec,
+            rho_retry,
+            delta_fallback,
+            BOUND_ROW_DELTA_D_ITERATION,
+        );
         let asm_fb_us = t_asm_fb.elapsed().as_micros() as u64;
         #[cfg(test)]
         trace_assembly_timing(AssemblyTimingKind::OriginalMaterialize, asm_fb_us);
@@ -347,8 +353,12 @@ fn prepare_factorization(
         }
     } else {
         (
-            ctx.aug_cache
-                .materialize(ctx.sigma_vec, rho_retry, delta_retry),
+            ctx.aug_cache.materialize(
+                ctx.sigma_vec,
+                rho_retry,
+                delta_retry,
+                BOUND_ROW_DELTA_D_ITERATION,
+            ),
             None,
         )
     };
@@ -416,7 +426,12 @@ fn materialize_permuted_in_assembly(
         .as_ref()
         .expect("caller が permute 後にのみ呼ぶ (use_pre_permuted 経路)");
     let t_perm_mat = std::time::Instant::now();
-    let pre_permuted = permuted_cache.materialize(ctx.sigma_vec, rho_retry, delta_retry);
+    let pre_permuted = permuted_cache.materialize(
+        ctx.sigma_vec,
+        rho_retry,
+        delta_retry,
+        BOUND_ROW_DELTA_D_ITERATION,
+    );
     let perm_mat_us = t_perm_mat.elapsed().as_micros() as u64;
     #[cfg(test)]
     trace_assembly_timing(AssemblyTimingKind::PermutedMaterialize, perm_mat_us);
@@ -506,7 +521,12 @@ pub(crate) fn auto_schur_enabled(
     let probe_cache =
         crate::qp::ipm_core::kkt::build_boxed_augmented_cache(&problem.q, &a_base, &bound);
     let probe_sigma: Vec<f64> = vec![1.0; probe_cache.sigma_len()];
-    let probe_aug = probe_cache.materialize(&probe_sigma, probe_rho, probe_rho);
+    let probe_aug = probe_cache.materialize(
+        &probe_sigma,
+        probe_rho,
+        probe_rho,
+        BOUND_ROW_DELTA_D_ITERATION,
+    );
     let probe_perm = amd_with_deadline(
         probe_aug.nrows(),
         probe_aug.col_ptr(),
