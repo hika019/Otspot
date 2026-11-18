@@ -2242,20 +2242,20 @@ mod tests {
         assert_eq!(res.solution, vec![1.0, 1.0]);
     }
 
-    /// Over-tightening / wrong-side guard (twin of the F1/F2 controls):
-    /// GENUINE forcing keeps these single-point models pinned at the RIGHT
-    /// endpoint with the right objective, whatever the margin formula
-    /// becomes. These rows have forcing slack exactly 0, which any rounding
-    /// budget accepts.
+    /// Over-tightening control (twin of the F1/F2 controls): GENUINE
+    /// forcing — zero-slack single-point rows of scale 1 and 1e-10 — keeps
+    /// these models pinned at the right endpoint with the right published
+    /// objective, whatever the margin formula becomes.
     ///
-    /// sentinel: a forcing rule that measures the slack from the wrong
-    /// extreme (e.g. swapping the Eq lo/hi side tests) pins the opposite
-    /// endpoints — the (0, 0) / (1, 1) pin assertions below flip → FAIL.
-    /// (On this MILP path the propagation layer already induces most of
-    /// these pins — like the equality_row_forces sibling — so this guard
-    /// pins down endpoint SELECTION; the margin itself is revert-fail-tested
-    /// by `tiny_coefficient_redundant_row_does_not_force_endpoints` and, on
-    /// the LP path, by `test_forcing_tiny_coefficient_scale_*`.)
+    /// control: no margin rule may change these published objectives/pins
+    /// — a change that moves them broke genuine forcing. This is NOT the
+    /// margin formula's own revert-fail target: the MILP root propagates
+    /// zero-slack rows to the same pins before `row_pass` decides (as the
+    /// equality_row_forces sibling's comment records; an all-forcing-margins
+    /// `−1.0` revert was measured here green). Revert-fail coverage of the
+    /// margin lives in `tiny_coefficient_redundant_row_does_not_force_
+    /// endpoints` and `tiny_scale_forcing_mirrors_are_scale_aware` (here)
+    /// and `test_forcing_tiny_coefficient_scale_*` (LP path).
     #[test]
     fn genuine_forcing_rows_still_force_endpoints() {
         // Le: x + y ≤ 0 over the binary box has exactly one feasible point.
