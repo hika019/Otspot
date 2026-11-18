@@ -2059,6 +2059,7 @@ fn tree_cut_node_gate_depth_node_boundary_decision_table() {
     }
 }
 
+/// sentinel: (depth=0, node_index=0) が tree-cut ゲートを誤通過する off-by-one 回帰の張 — ゲートが root 受理に転じると fail
 #[test]
 fn tree_cut_gate_rejects_zero_depth_zero_node_sentinel() {
     assert!(
