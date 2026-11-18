@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3479 testcases, 43 ignored
+# totals: 3484 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -527,10 +527,15 @@ otspot-core	mip::root_presolve::tests::doubleton_substitution_reconstructs_integ
 otspot-core	mip::root_presolve::tests::duplicate_eq_rows_contradiction_is_infeasible	active
 otspot-core	mip::root_presolve::tests::duplicate_eq_rows_with_identical_rhs_collapse	active
 otspot-core	mip::root_presolve::tests::eq_merge_rhs_gap_inside_margin_is_fail_open	active
+otspot-core	mip::root_presolve::tests::equality_row_forces_only_the_side_equal_to_rhs	active
 otspot-core	mip::root_presolve::tests::fully_pinned_reduction_reconstructs_the_only_point	active
 otspot-core	mip::root_presolve::tests::infinite_bound_column_is_never_pinned	active
 otspot-core	mip::root_presolve::tests::merge_uses_live_entries_after_pinned_column	active
+otspot-core	mip::root_presolve::tests::postsolve_verify_is_linear_in_variable_count	active
+otspot-core	mip::root_presolve::tests::publish_scrubs_reduced_coordinate_payloads	active
+otspot-core	mip::root_presolve::tests::redundant_large_magnitude_row_does_not_force_endpoints	active
 otspot-core	mip::root_presolve::tests::verify_original_solution_rejects_row_violation	active
+otspot-core	mip::root_presolve::tests::wide_integer_interval_at_large_magnitude_is_not_pinned	active
 otspot-core	mip::stats::tests::merge_worker_sums_private_conflict_clause_counts	active
 otspot-core	mip::symmetry::tests::appends_lex_rows_for_orbit	active
 otspot-core	mip::symmetry::tests::detects_identical_binary_columns	active
