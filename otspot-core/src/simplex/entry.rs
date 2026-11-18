@@ -227,6 +227,15 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 // be called: it would fill solution/dual vectors from the postsolve stack
                 // (e.g. SingletonRow fixed values), producing a spurious non-empty
                 // solution with Infeasible/Unbounded status.
+                //
+                // This propagation skips the postsolve acceptance below, so any
+                // presolve transform that corrupts feasibility/unboundedness of
+                // the reduced LP shows up here unchecked. Both dependent-Eq P1s
+                // (`step12_rhs_rounding_model_rejects_inconsistent_1e12_rhs`,
+                // `step12_exact_witness_registration_solves_f3_repro_optimal_zero`)
+                // reached users through this bypass. Redesigning acceptance is
+                // out of scope; the transform-side fixes and those sentinels
+                // carry the guarantee.
                 if matches!(raw.status, SolveStatus::Infeasible | SolveStatus::Unbounded) {
                     let objective = if raw.status == SolveStatus::Infeasible {
                         f64::INFINITY

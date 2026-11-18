@@ -1915,4 +1915,194 @@ mod step12_dependent_eq {
             res.postsolve_dfeas
         );
     }
+
+    #[test]
+    // SolverOptions is #[non_exhaustive]: mutation is the only way to flip
+    // `presolve` (same workaround as `step12_bound_aware_...` precedent).
+    #[allow(clippy::field_reassign_with_default)]
+    fn step12_rhs_rounding_model_rejects_inconsistent_1e12_rhs() {
+        // Sentinel (F2 repro): min -z, x,y,z >= 0,
+        //   r0:  x -  y +  z =  1e12
+        //   r1:  x - 2y + 3z = -1e12
+        //   r2: 2x - 3y + 4z =  1
+        // Oracle: r0 + r1 - r2 gives 0 = -1, so the system is Infeasible.
+        // Reducing r2 against r0/r1 cancels the matrix EXACTLY and leaves
+        // b_acc = 1.0 over an accumulated RHS scale of ~4e12. The old
+        // `1e-9 * (1 + rhs_scale)` limit (~4000) called that consistent,
+        // removed r2, and the reduced LP is truly Unbounded along (1,2,1) —
+        // a status that bypasses postsolve acceptance, so the user silently
+        // got Unbounded for an Infeasible LP. The rounding-error model
+        // (`rhs_rounding_bound`) bounds |b_acc| at ~7e-3 on this scale, so
+        // the row survives and the simplex reports the truth. Reverting the
+        // RHS threshold flips every ON-side assertion below to Unbounded.
+        let st = make_state(
+            vec![0.0, 0.0, -1.0],
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2],
+            &[0, 1, 2, 0, 1, 2, 0, 1, 2],
+            &[1.0, -1.0, 1.0, 1.0, -2.0, 3.0, 2.0, -3.0, 4.0],
+            3,
+            3,
+            vec![1e12, -1e12, 1.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF); 3],
+        );
+        let mut st = st;
+        step12_dependent_equations(&mut st, None).unwrap();
+        assert!(
+            !st.removed_rows.iter().any(|&r| r),
+            "residual 1.0 over scale 4e12 is ~2 orders above the rounding bound; \
+             the row must survive (step12 must not call this RHS consistent)"
+        );
+        assert!(count_dependent(&st).is_empty());
+
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2],
+            &[0, 1, 2, 0, 1, 2, 0, 1, 2],
+            &[1.0, -1.0, 1.0, 1.0, -2.0, 3.0, 2.0, -3.0, 4.0],
+            3,
+            3,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0, 0.0, -1.0],
+            a,
+            vec![1e12, -1e12, 1.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF); 3],
+            None,
+        )
+        .unwrap();
+        let on = run_presolve_with_flags(&lp, None, 3, None, PresolveFlags::default()).unwrap();
+        let off = run_presolve_with_flags(
+            &lp,
+            None,
+            3,
+            None,
+            PresolveFlags {
+                enable_dependent_eq: false,
+                ..PresolveFlags::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            on.reduced_problem.num_constraints, off.reduced_problem.num_constraints,
+            "step12 must keep the inconsistent row through the full driver too"
+        );
+        let res_on = solve_lp_with(&lp, &SolverOptions::default());
+        assert_eq!(
+            res_on.status,
+            SolveStatus::Infeasible,
+            "oracle: r0 + r1 - r2 forces 0 = -1, got {:?}",
+            res_on.status
+        );
+        let mut off_opts = SolverOptions::default();
+        off_opts.presolve = false;
+        let res_off = solve_lp_with(&lp, &off_opts);
+        assert_eq!(
+            res_off.status,
+            SolveStatus::Infeasible,
+            "presolve-off agrees with the hand oracle, got {:?}",
+            res_off.status
+        );
+    }
+
+    #[test]
+    // SolverOptions is #[non_exhaustive]: mutation is the only way to flip
+    // `presolve` (same workaround as `step12_bound_aware_...` precedent).
+    #[allow(clippy::field_reassign_with_default)]
+    fn step12_exact_witness_registration_solves_f3_repro_optimal_zero() {
+        // Sentinel (F3 repro): min -w, x,y,z,w >= 0,
+        //   r0: 1e8*x - 1e8*y + 0.01*w = 0
+        //   r1: x - 2y + z = 0
+        //   r2: 2x - 3y + z = 0
+        // Oracle: r2 - r1 gives x = y; r0 then forces 0.01*w = 0, so w = 0
+        // is the optimum (objective 0, attained at the origin) — bounded.
+        // The old registration truncated r0's witness to {x:1, y:-1}: the
+        // 0.01/1e8 = 1e-10 entry sat below the cut (rank tol 1e-9 × row
+        // scale 1e8 → 0.1), so against that mangled witness the exactly
+        // independent r2 reduced to zero and was removed — the reduced LP
+        // is truly Unbounded along w. Exact registration keeps the 1e-10
+        // coefficient, r2's reduction leaves a -1e-10 residual on the
+        // unbounded w column, and `removal_effect_bounded` fails open.
+        // Reverting exact registration flips every assertion below to Unbounded.
+        let st = make_state(
+            vec![0.0, 0.0, 0.0, -1.0],
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2],
+            &[0, 1, 3, 0, 1, 2, 0, 1, 2],
+            &[1e8, -1e8, 0.01, 1.0, -2.0, 1.0, 2.0, -3.0, 1.0],
+            3,
+            4,
+            vec![0.0, 0.0, 0.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF); 4],
+        );
+        let mut st = st;
+        step12_dependent_equations(&mut st, None).unwrap();
+        assert!(
+            !st.removed_rows.iter().any(|&r| r),
+            "r2 is exactly independent (w coefficient of r0 must be in its \
+             witness span); no row may be removed on this LP"
+        );
+        assert!(count_dependent(&st).is_empty());
+
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2],
+            &[0, 1, 3, 0, 1, 2, 0, 1, 2],
+            &[1e8, -1e8, 0.01, 1.0, -2.0, 1.0, 2.0, -3.0, 1.0],
+            3,
+            4,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0, 0.0, 0.0, -1.0],
+            a,
+            vec![0.0, 0.0, 0.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, INF); 4],
+            None,
+        )
+        .unwrap();
+        let on = run_presolve_with_flags(&lp, None, 3, None, PresolveFlags::default()).unwrap();
+        let off = run_presolve_with_flags(
+            &lp,
+            None,
+            3,
+            None,
+            PresolveFlags {
+                enable_dependent_eq: false,
+                ..PresolveFlags::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            on.reduced_problem.num_constraints, off.reduced_problem.num_constraints,
+            "step12 must keep r2 (its reduction residual sits on unbounded w)"
+        );
+        let res_on = solve_lp_with(&lp, &SolverOptions::default());
+        let mut off_opts = SolverOptions::default();
+        off_opts.presolve = false;
+        let res_off = solve_lp_with(&lp, &off_opts);
+        assert_eq!(
+            res_on.status,
+            SolveStatus::Optimal,
+            "w = 0 is forced (bounded LP), ON got {:?}",
+            res_on.status
+        );
+        assert_eq!(
+            res_off.status,
+            SolveStatus::Optimal,
+            "presolve-off oracle status",
+        );
+        assert!(
+            res_on.objective.abs() < 1e-6 && res_off.objective.abs() < 1e-6,
+            "oracle opt = 0, got ON={} OFF={}",
+            res_on.objective,
+            res_off.objective
+        );
+        assert!(
+            res_on.solution[3].abs() < 1e-6,
+            "r0 + (r2 - r1) forces w = 0, got w = {}",
+            res_on.solution[3]
+        );
+    }
 }

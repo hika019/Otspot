@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3478 testcases, 44 ignored
+# totals: 3480 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -862,6 +862,7 @@ otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_bo
 otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_bound_aware_removes_row_when_residual_effect_bounded	active
 otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_bound_aware_scaled_equivalent_solves_optimal_zero	active
 otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_e2e_solve_satisfies_removed_row_and_zeroes_its_dual	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_exact_witness_registration_solves_f3_repro_optimal_zero	active
 otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_flag_gate_reduces_row_count_only_when_enabled	active
 otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_keeps_dependent_row_with_inconsistent_rhs	active
 otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_keeps_independent_eq_rows	active
@@ -869,6 +870,7 @@ otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_ke
 otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_never_removes_inequality_rows	active
 otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_removes_dependent_eq_row_keeps_witnesses	active
 otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_removes_scaled_combination_row	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_rhs_rounding_model_rejects_inconsistent_1e12_rhs	active
 otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_work_budget_uses_factor_and_abs_cap	active
 otspot-core	presolve::transforms::tests_per_step::step1_detects_lb_gt_ub	active
 otspot-core	presolve::transforms::tests_per_step::step1_fixed_negative_value_updates_b_and_offset	active
