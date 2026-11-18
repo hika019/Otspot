@@ -287,6 +287,7 @@ pub fn classify_bound_requirements(
 /// unconverted problems, where materializing each row as a `GQuadConstraint`
 /// (`p` CSC `col_ptr` and dense `q`, both `O(n)`) would itself cost
 /// `O(n * m_q)` — the exact blow-up the bound gate exists to avoid.
+#[derive(Clone, Copy)]
 pub(crate) struct CooQuadRow<'a> {
     /// Raw triplets in source order (no pre-filtering; `lift_coeffs_from_coo`
     /// applies the same stored-zero filter as `qcqp_matrix_to_csc`).
@@ -304,7 +305,9 @@ pub(crate) struct CooQuadRow<'a> {
 /// behind `pub(super)`; the shared contract is pinned by
 /// `coo_gate_rejection_matches_materialized_gate` (both paths must produce
 /// identical composed coefficients, including for cancellation runs).
-fn merge_sorted_coo(entries: &mut [(usize, usize, f64)]) -> usize {
+/// Reused by [`coo_quad_row_diag_support`], whose stored-entry view of a raw
+/// row must be the same one `qcqp_matrix_to_csc` materializes.
+pub(crate) fn merge_sorted_coo(entries: &mut [(usize, usize, f64)]) -> usize {
     if entries.is_empty() {
         return 0;
     }
@@ -444,22 +447,12 @@ pub fn effective_bound_requirement(
     }
     let mut req = classify_bound_requirements(n, p0, quad)?;
     let mut min_diag = vec![0.0f64; n];
-    let has_free_support = |coeffs: &BTreeMap<(usize, usize), f64>| {
-        coeffs.iter().any(|(key, _)| {
-            let &(i, j) = key;
-            i != j
-                && !(lb[i].is_finite()
-                    && ub[i].is_finite()
-                    && lb[j].is_finite()
-                    && ub[j].is_finite())
-        })
-    };
     for (k, qc) in quad.iter().enumerate() {
         if !req.convex_rows[k] {
             continue;
         }
         let coeffs = lift_coeffs(&qc.p);
-        if !has_free_support(&coeffs) {
+        if !lift_has_free_support(&coeffs, lb, ub) {
             continue;
         }
         req.convex_rows[k] = false;
@@ -467,7 +460,7 @@ pub fn effective_bound_requirement(
     }
     if let Some(p0) = p0 {
         let coeffs = lift_coeffs(p0);
-        if has_free_support(&coeffs) {
+        if lift_has_free_support(&coeffs, lb, ub) {
             mark_nonconvex_terms(&coeffs, n, &mut req.required, &mut min_diag)?;
         }
     }
@@ -480,6 +473,103 @@ pub fn effective_bound_requirement(
         }
     }
     Ok(req)
+}
+
+/// D1 demotion predicate of [`effective_bound_requirement`]: the lift
+/// support holds an off-diagonal pair with a non-finite declared bound.
+/// Shared verbatim with [`effective_bound_requirement_from_coo`] so the
+/// COO twin demotes exactly the rows the materialized gate demotes.
+fn lift_has_free_support(coeffs: &BTreeMap<(usize, usize), f64>, lb: &[f64], ub: &[f64]) -> bool {
+    coeffs.iter().any(|(key, _)| {
+        let &(i, j) = key;
+        i != j
+            && !(lb[i].is_finite() && ub[i].is_finite() && lb[j].is_finite() && ub[j].is_finite())
+    })
+}
+
+/// [`effective_bound_requirement`] over unconverted sparse rows (see
+/// [`CooQuadRow`]): same fold ([`classify_bound_requirements_from_coo`],
+/// so identical `required`/`convex_rows`/`rule2_diag` by shared code), same
+/// D1 demotion predicate ([`lift_has_free_support`]) fed by the
+/// bit-identical [`lift_coeffs_from_coo`], and the same `p0` demotion and
+/// rule-2 tail. Evaluated on the RAW bounds, exactly as the root-box route
+/// evaluates the materialized gate on `nc.lb`/`nc.ub` (the declared split),
+/// so the two verdicts are identical for the same problem when the row
+/// stream matches the conversion order and multiplicity
+/// (`quad_coo_rows` guarantees it; sentinel
+/// `coo_effective_requirement_matches_materialized_root_box_gate`). Lets
+/// the route run the Phase-2 rejection decision in `O(input)` before its
+/// `O(n * m_q)` dense row conversion.
+pub(crate) fn effective_bound_requirement_from_coo<'a>(
+    n: usize,
+    p0: Option<&CscMatrix>,
+    rows: &[CooQuadRow<'a>],
+    bounds: &[(f64, f64)],
+) -> Result<BoundRequirement, String> {
+    check_bounds_length(n, bounds)?;
+    let lb: Vec<f64> = bounds.iter().map(|&(l, _)| l).collect();
+    let ub: Vec<f64> = bounds.iter().map(|&(_, u)| u).collect();
+    let mut req = classify_bound_requirements_from_coo(n, p0, rows.iter().copied())?;
+    let mut min_diag = vec![0.0f64; n];
+    for (k, row) in rows.iter().enumerate() {
+        if !req.convex_rows[k] {
+            continue;
+        }
+        let coeffs = lift_coeffs_from_coo(row, n)?;
+        if !lift_has_free_support(&coeffs, &lb, &ub) {
+            continue;
+        }
+        req.convex_rows[k] = false;
+        mark_nonconvex_terms(&coeffs, n, &mut req.required, &mut min_diag)?;
+    }
+    if let Some(p0) = p0 {
+        let coeffs = lift_coeffs(p0);
+        if lift_has_free_support(&coeffs, &lb, &ub) {
+            mark_nonconvex_terms(&coeffs, n, &mut req.required, &mut min_diag)?;
+        }
+    }
+    for (i, under) in req.rule2_diag.iter_mut().enumerate() {
+        *under &= min_diag[i] >= 0.0;
+    }
+    for (i, &under) in req.rule2_diag.iter().enumerate() {
+        if !under {
+            req.required[i] = true;
+        }
+    }
+    Ok(req)
+}
+
+/// The diagonal variables of a raw COO row in the exact sense root FBBT
+/// propagates on it: `Some(diags)` when the row's *stored* CSC
+/// representation (`qcqp_matrix_to_csc`'s filter + [`merge_sorted_coo`], the
+/// same steps 1–3 as [`lift_coeffs_from_coo`]) holds no off-diagonal entry
+/// and no non-finite coefficient, `None` when such an entry survives — the
+/// row-skip semantics of `qcqp_fbbt::diag_terms` (composed-zero-cancelled
+/// bilinear runs vanish with the merge, surviving `P_ij`/`P_ji` pairs do
+/// not). The linear members of a `Some` row are the row's own `A` entries;
+/// `diag_terms` also skips rows with a non-finite `r` or linear part, which
+/// the caller checks (they live on `src`, not on the `p` COO). Precondition:
+/// `QpProblem::validate` (index range); an out-of-range index still yields
+/// `None` (conservative skip) rather than trusting the read.
+pub(crate) fn coo_quad_row_diag_support(
+    triplets: &[(usize, usize, f64)],
+    n: usize,
+) -> Option<Vec<usize>> {
+    let mut entries: Vec<(usize, usize, f64)> = triplets
+        .iter()
+        .filter(|&&(_, _, v)| v != 0.0)
+        .map(|&(i, j, v)| (j, i, v))
+        .collect();
+    entries.sort_unstable_by_key(|&(maj, min, _)| (maj, min));
+    let len = merge_sorted_coo(&mut entries);
+    let mut diags = Vec::new();
+    for &(col, row, v) in entries.iter().take(len) {
+        if col != row || row >= n || !v.is_finite() {
+            return None;
+        }
+        diags.push(col);
+    }
+    Some(diags)
 }
 
 /// Split `bounds` into `lb`/`ub`, rejecting the problem when any variable of

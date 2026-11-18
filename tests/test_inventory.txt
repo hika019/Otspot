@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3481 testcases, 43 ignored
+# totals: 3484 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1454,7 +1454,9 @@ otspot-core	qp::problem::tests::validate_catches_nonfinite_and_dim_from_direct_a
 otspot-core	qp::problem::tests::validate_matches_setter_length_invariant	active
 otspot-core	qp::qcqp_route::tests::audit_root_seed_rejects_widened_nan_crossed	active
 otspot-core	qp::qcqp_route::tests::circle_equality_all_free_routes_through_derived_gate	active
+otspot-core	qp::qcqp_route::tests::coo_effective_requirement_matches_materialized_root_box_gate	active
 otspot-core	qp::qcqp_route::tests::coo_gate_rejection_matches_materialized_gate	active
+otspot-core	qp::qcqp_route::tests::fbbt_derivable_support_contains_root_box_movers	active
 otspot-core	qp::qcqp_route::tests::global_options_feas_tol_always_tracks_eps	active
 otspot-core	qp::qcqp_route::tests::global_options_feas_tol_does_not_relax_with_cfg	active
 otspot-core	qp::qcqp_route::tests::indefinite_row_with_free_objective_var_solves_via_root_fbbt	active
@@ -1464,6 +1466,7 @@ otspot-core	qp::qcqp_route::tests::nonconvex_from_qp_problem_rejects_long_quadra
 otspot-core	qp::qcqp_route::tests::nonconvex_from_qp_problem_rejects_short_quadratic_constraints	active
 otspot-core	qp::qcqp_route::tests::nonconvex_gate_rejects_all_equality_dcq	active
 otspot-core	qp::qcqp_route::tests::residual_rejection_reports_root_fbbt_ran	active
+otspot-core	qp::qcqp_route::tests::root_box_pre_gate_agrees_with_materialized_root_box	active
 otspot-core	qp::qcqp_route::tests::sizing_gate_refuses_over_budget_before_converting	active
 otspot-core	qp::tests::api::test_a2t03_qp_no_deadline_converges	active
 otspot-core	qp::tests::api::test_a3c01_cancel_flag_concurrent_returns_timeout	active
@@ -2085,7 +2088,7 @@ otspot-core::memory_budget	conic_socp_route_peak_within_budget	active
 otspot-core::memory_budget	lp_route_peak_within_budget	active
 otspot-core::memory_budget	qcqp_bridge_many_sparse_quad_constraints_peak_within_budget	active
 otspot-core::memory_budget	qcqp_route_dense_sizing_gate_refuses_before_allocating	active
-otspot-core::memory_budget	qcqp_route_rejects_dense_dcq_before_densifying	active
+otspot-core::memory_budget	qcqp_route_rejects_dense_dcq_at_sparse_root_gate	active
 otspot-core::memory_budget	qp_ipm_route_peak_within_budget	active
 otspot-core::qp_diag_real_solve	concurrent_solves_keep_diagnostics_per_thread	active
 otspot-core::qp_diag_real_solve	consecutive_ipm_solves_preserve_diagnostics_for_threads_1_2_4	active

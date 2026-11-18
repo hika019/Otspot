@@ -29,7 +29,10 @@ pub use qcqp_classify::{
     classify_bound_requirements, effective_bound_requirement, require_finite_bounds,
     BoundRequirement,
 };
-pub(crate) use qcqp_classify::{require_finite_bounds_from_coo, CooQuadRow};
+pub(crate) use qcqp_classify::{
+    coo_quad_row_diag_support, effective_bound_requirement_from_coo,
+    require_finite_bounds_from_coo, CooQuadRow,
+};
 pub use qcqp_fbbt::{derive_root_box, RootFbbtBox, ROOT_FBBT_MAX_ROUNDS, ROOT_FBBT_ULP_SLACK};
 
 use crate::problem::SolveStatus;

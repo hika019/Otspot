@@ -239,7 +239,7 @@ pub enum QcqpConversionError {
     /// `require_finite_bounds`-family message builder).
     Rejection(String),
     /// Accepted-class refusal: the dense-conversion demand estimate of
-    /// [`dense_conversion_demand_bytes`] exceeds the shared solver memory
+    /// `dense_conversion_demand_bytes` (private) exceeds the shared solver memory
     /// budget, so performing the conversion would be an unbounded OOM rather
     /// than a solve. The payload names the estimate, the demand formula's
     /// inputs and the gate/budget. This is a resource-limit refusal, not a
@@ -599,10 +599,22 @@ pub fn build_nonconvex_raw(src: &QpProblem) -> Result<NonconvexQcqp, QcqpConvers
 /// rejection is a `Rejection` carrying the "even after root FBBT derivation"
 /// message — so the route can report the resource limit as
 /// `ResourceExhausted` and the structural refusal as `NotSupported`.
+///
+/// Rejected-class problems never reach the dense conversion: the sparse
+/// pre-gate [`sparse_root_box_rejection`] makes the identical acceptance
+/// decision from the raw COO rows in `O(input)` (PR #86's
+/// reject-from-sparse-data invariant, which the acceptance-gate move must
+/// not silently drop).
 fn build_nonconvex_with_root_box(
     src: &QpProblem,
     feas_tol: f64,
 ) -> Result<(NonconvexQcqp, Option<GlobalSeed>), QcqpConversionError> {
+    // The bound-requirement rejection, run BEFORE `build_nonconvex_raw`'s
+    // O(n * m_q) dense rows exist: same verdict, same message, from sparse
+    // data (docs on `sparse_root_box_rejection`).
+    if let Some(msg) = sparse_root_box_rejection(src) {
+        return Err(QcqpConversionError::Rejection(msg));
+    }
     let nc = build_nonconvex_raw(src)?;
     let req = conic::effective_bound_requirement(nc.n, nc.p0.as_ref(), &nc.quad, &nc.lb, &nc.ub)
         .map_err(QcqpConversionError::Rejection)?;
@@ -621,13 +633,10 @@ fn build_nonconvex_with_root_box(
         })
         .collect();
     if let Some(&(j, l, u)) = bad.first() {
-        return Err(QcqpConversionError::Rejection(format!(
-            "nonconvex QCQP requires finite bounds on every bound-required \
-             variable set R (plan §3.1); {} of the {} required variables \
-             have a non-finite bound even after root FBBT derivation \
-             (first: variable {j} with derived bounds ({l}, {u}))",
+        return Err(QcqpConversionError::Rejection(root_box_rejection_message(
+            (j, l, u),
             bad.len(),
-            req.required.iter().filter(|b| **b).count()
+            req.required.iter().filter(|b| **b).count(),
         )));
     }
     if !derived.is_tightening(&nc) {
@@ -641,6 +650,138 @@ fn build_nonconvex_with_root_box(
     };
     audit_root_seed(&nc, &seed).map_err(QcqpConversionError::Rejection)?;
     Ok((nc, Some(seed)))
+}
+
+/// The single Phase-2 rejection-message builder, shared by the materialized
+/// acceptance gate in [`build_nonconvex_with_root_box`] and the sparse
+/// pre-gate [`sparse_root_box_rejection`] — byte-identity of the two paths'
+/// public-facing reason string is structural, not duplicated text (same
+/// pattern as `qcqp_classify::split_bounds_or_reject`).
+fn root_box_rejection_message(
+    first_bad: (usize, f64, f64),
+    bad_count: usize,
+    required_count: usize,
+) -> String {
+    let (j, l, u) = first_bad;
+    format!(
+        "nonconvex QCQP requires finite bounds on every bound-required \
+         variable set R (plan §3.1); {bad_count} of the {required_count} \
+         required variables have a non-finite bound even after root FBBT \
+         derivation (first: variable {j} with derived bounds ({l}, {u}))"
+    )
+}
+
+/// Over-approximation of the variables root FBBT can move on `src`'s rows,
+/// computed from sparse data: a variable FBBT bounds must be a member of a
+/// row FBBT propagates on — a linear row's `A` entry (`build_lin_rows` +
+/// `propagate_row_bounds` only ever update row members), or a diagonal
+/// member / linear member of a diagonal-only quadratic row (`diag_quad_pass`
+/// only updates row terms; [`conic::coo_quad_row_diag_support`] reproduces
+/// `diag_terms`' stored-entry skip semantics, and the non-finite `r` /
+/// linear-part skips are the `src`-side checks below). Variables outside
+/// this set provably keep their declared bounds in
+/// `derive_root_box` — that is what makes [`sparse_root_box_rejection`]'s
+/// early verdict sound. Sentinels:
+/// `fbbt_derivable_support_contains_root_box_movers` (every actually-moved
+/// variable is marked) and `root_box_pre_gate_agrees_with_materialized_root_box`.
+fn fbbt_derivable_support(src: &QpProblem) -> Vec<bool> {
+    let mut derivable = vec![false; src.num_vars];
+    // Same row-major view as `build_nonconvex_raw` (O(nnz), no densification).
+    let a_rows = src.a.transpose();
+    let has_qc = !src.quadratic_constraints.is_empty();
+    for k in 0..src.num_constraints {
+        let qmat = has_qc
+            .then(|| &src.quadratic_constraints[k])
+            .filter(|qc| qc.nnz() > 0);
+        let (row_idx, row_val) = a_rows.column(k);
+        match qmat {
+            None => {
+                for &j in row_idx.iter() {
+                    derivable[j] = true;
+                }
+            }
+            Some(qc) => {
+                // `diag_terms` skips the whole row when `r = ∓b[k]` or a
+                // stored linear member is non-finite — nothing is derivable
+                // through a skipped row, its members included.
+                if !src.b[k].is_finite() || row_val.iter().any(|&v| !v.is_finite()) {
+                    continue;
+                }
+                if let Some(diags) = conic::coo_quad_row_diag_support(&qc.triplets, src.num_vars) {
+                    for &j in row_idx.iter() {
+                        derivable[j] = true;
+                    }
+                    for j in diags {
+                        derivable[j] = true;
+                    }
+                }
+            }
+        }
+    }
+    derivable
+}
+
+/// The Phase-2 bound-gate decision on sparse data, before the first dense
+/// row exists (PR #86 invariant: a rejected-class all-equality DCQ — the
+/// QPLIB_8585/8683/8803/8810 shape class — must be rejected in `O(input)`,
+/// not after paying `O(n * m_q)` for rows the route never uses).
+///
+/// Returns `Some(message)` only when the full path (
+/// [`build_nonconvex_raw`] → [`conic::effective_bound_requirement`] →
+/// [`conic::derive_root_box`] → finiteness check) is guaranteed to reject
+/// with the byte-identical [`root_box_rejection_message`]: the effective
+/// set `R` is identical by shared classification code
+/// ([`conic::effective_bound_requirement_from_coo`] over `quad_coo_rows`,
+/// which mirrors the conversion's order/multiplicity/sign), and every bad
+/// member is a variable `fbbt_derivable_support` proves FBBT cannot move,
+/// so its derived side equals its declared side and the full path's `bad`
+/// set equals this pre-gate's. A bad member that any propagatable row
+/// touches makes the pre-gate abstain (`None`) — the materialized path then
+/// judges it exactly as before (conservative: FBBT might finitize it, which
+/// is Phase 2's whole point, e.g. `circle_equality_all_free_routes_through_derived_gate`).
+/// Any precondition failure (invalid problem, classifier error) abstains
+/// too, leaving the materialized path's error reporting byte-identical.
+fn sparse_root_box_rejection(src: &QpProblem) -> Option<String> {
+    // The gate's own all-finite fast path (mirrors
+    // `require_finite_bounds_from_coo`): no bad candidate exists, so no
+    // classification cost for the common boxed problem.
+    if src
+        .bounds
+        .iter()
+        .all(|&(l, u)| l.is_finite() && u.is_finite())
+    {
+        return None;
+    }
+    src.validate().ok()?;
+    let p0 = (!src.is_zero_q()).then_some(&src.q);
+    let coo_rows: Vec<conic::CooQuadRow> = quad_coo_rows(src).collect();
+    let req = conic::effective_bound_requirement_from_coo(src.num_vars, p0, &coo_rows, &src.bounds)
+        .ok()?;
+    let bad: Vec<(usize, f64, f64)> = req
+        .required
+        .iter()
+        .enumerate()
+        .filter(|(_, need)| **need)
+        .filter_map(|(j, _)| {
+            let (l, u) = src.bounds[j];
+            (!(l.is_finite() && u.is_finite())).then_some((j, l, u))
+        })
+        .collect();
+    if bad.is_empty() {
+        return None;
+    }
+    let derivable = fbbt_derivable_support(src);
+    // One touchable bad variable abstains: FBBT may shrink `bad`, which
+    // would change the rejection's counts — only an all-untouchable `bad`
+    // guarantees the identical message.
+    if bad.iter().any(|&(j, _, _)| derivable[j]) {
+        return None;
+    }
+    Some(root_box_rejection_message(
+        bad[0],
+        bad.len(),
+        req.required.iter().filter(|b| **b).count(),
+    ))
 }
 
 /// Audit a derived root seed with the same checks `global_core` runs on any
@@ -840,6 +981,411 @@ mod tests {
             }
             other => panic!("expected NotSupported, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Sparse root-box pre-gate (`sparse_root_box_rejection`) soundness:
+    // corpus-wide agreement with the materialized Phase-2 gate.
+    // ---------------------------------------------------------------------
+
+    fn all_free_bounds(n: usize) -> Vec<(f64, f64)> {
+        vec![(f64::NEG_INFINITY, f64::INFINITY); n]
+    }
+
+    fn bilinear_pair(n: usize, i: usize, j: usize) -> QcqpMatrix {
+        let mut qc = QcqpMatrix::new(n);
+        qc.triplets.push((i, j, 1.0));
+        qc.triplets.push((j, i, 1.0));
+        qc
+    }
+
+    fn empty_a(m: usize, n: usize) -> CscMatrix {
+        CscMatrix::from_triplets(&[], &[], &[], m, n).unwrap()
+    }
+
+    /// Shape classes the sparse pre-gate must judge identically to the
+    /// materialized root-box gate: pure bilinear rejects (`R` = rule-3
+    /// endpoints, nothing derivable), DCQ equality splits, D1-demoted PSD
+    /// rows over free support, DROP_TOL/exact bilinear cancellations
+    /// (stored-p-empty rows carry no derivable support), and conservative
+    /// abstentions where a bad member sits in a propagatable row (linear
+    /// rows, diagonal-only rows — including the accepted circle/indefinite
+    /// FBBT fixtures and the `coo_gate` rule-2 fixture).
+    fn root_box_gate_agreement_corpus() -> Vec<(&'static str, QpProblem)> {
+        let mut corpus: Vec<(&'static str, QpProblem)> = Vec::new();
+
+        // 1. Bilinear `Ge` row, all free: the `residual_rejection_reports_
+        // root_fbbt_ran` shape — rule-3 endpoints, pre-gate must reject.
+        {
+            let n = 2usize;
+            let mut p = QpProblem::new(
+                CscMatrix::new(n, n),
+                vec![1.0, 1.0],
+                empty_a(1, n),
+                vec![1.0],
+                all_free_bounds(n),
+                vec![ConstraintType::Ge],
+            )
+            .unwrap();
+            p.set_quadratic_constraints(vec![bilinear_pair(n, 0, 1)])
+                .unwrap();
+            corpus.push(("bilinear_ge_all_free", p));
+        }
+        // 2. DCQ equality split (8595 class at unit scale), all free.
+        {
+            let n = 4usize;
+            let mut p = QpProblem::new(
+                CscMatrix::new(n, n),
+                vec![0.0; n],
+                empty_a(2, n),
+                vec![0.0; 2],
+                all_free_bounds(n),
+                vec![ConstraintType::Eq; 2],
+            )
+            .unwrap();
+            p.set_quadratic_constraints(vec![bilinear_pair(n, 0, 1), bilinear_pair(n, 2, 3)])
+                .unwrap();
+            corpus.push(("dense_dcq_eq_mini", p));
+        }
+        // 3. Circle equality, all free: FBBT finitizes — must ACCEPT
+        // (`circle_equality_all_free_routes_through_derived_gate` shape).
+        {
+            let n = 2usize;
+            let mut qc = QcqpMatrix::new(n);
+            qc.triplets.push((0, 0, 2.0));
+            qc.triplets.push((1, 1, 2.0));
+            let mut p = QpProblem::new(
+                CscMatrix::new(n, n),
+                vec![1.0, 0.0],
+                empty_a(1, n),
+                vec![1.0],
+                all_free_bounds(n),
+                vec![ConstraintType::Eq],
+            )
+            .unwrap();
+            p.set_quadratic_constraints(vec![qc]).unwrap();
+            corpus.push(("circle_eq_all_free", p));
+        }
+        // 4. Indefinite diagonal `Le` row, free x0: accepted via derivation
+        // (`indefinite_row_with_free_objective_var_solves_via_root_fbbt`).
+        {
+            let n = 2usize;
+            let mut qc = QcqpMatrix::new(n);
+            qc.triplets.push((0, 0, 2.0));
+            qc.triplets.push((1, 1, -2.0));
+            let mut p = QpProblem::new(
+                CscMatrix::new(n, n),
+                vec![1.0, 0.0],
+                empty_a(1, n),
+                vec![1.0],
+                vec![(f64::NEG_INFINITY, f64::INFINITY), (-2.0, 2.0)],
+                vec![ConstraintType::Le],
+            )
+            .unwrap();
+            p.set_quadratic_constraints(vec![qc]).unwrap();
+            corpus.push(("indefinite_diag_free_x0", p));
+        }
+        // 5. PSD row over free support: the D1 conservative demotion puts
+        // its off-diagonal endpoints in `R`; the row is FBBT-skipped (stored
+        // off-diagonal), so the pre-gate must reject. `certifiably_psd`
+        // holds by strict diagonal dominance (composed diag 2 > off 1).
+        {
+            let n = 2usize;
+            let mut qc = QcqpMatrix::new(n);
+            qc.triplets
+                .extend([(0, 0, 4.0), (1, 1, 4.0), (0, 1, 1.0), (1, 0, 1.0)]);
+            let mut p = QpProblem::new(
+                CscMatrix::new(n, n),
+                vec![1.0, 1.0],
+                empty_a(1, n),
+                vec![1.0],
+                all_free_bounds(n),
+                vec![ConstraintType::Le],
+            )
+            .unwrap();
+            p.set_quadratic_constraints(vec![qc]).unwrap();
+            corpus.push(("psd_row_free_support", p));
+        }
+        // 6. Linear equality row + nonconvex objective `p0` over free vars:
+        // `R` from `p0` rule 3, but both members touch a linear row the
+        // FBBT fixpoint reads — the pre-gate must ABSTAIN (the full path's
+        // propagation failure, not the pre-gate's, decides). The quad rows
+        // vector carries an all-zero (nnz 0) row: the row converts as
+        // linear, and the corpus stays a valid route input (the raw
+        // builder's per-row demand walk indexes `quadratic_constraints`).
+        {
+            let n = 2usize;
+            let p0 = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[1.0, 1.0], n, n).unwrap();
+            let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+            let mut p = QpProblem::new(
+                p0,
+                vec![0.0; n],
+                a,
+                vec![1.0],
+                all_free_bounds(n),
+                vec![ConstraintType::Eq],
+            )
+            .unwrap();
+            p.set_quadratic_constraints(vec![QcqpMatrix::new(n)])
+                .unwrap();
+            corpus.push(("linear_row_free_p0", p));
+        }
+        // 7. The `coo_gate_rejection_matches_materialized_gate` fixture
+        // verbatim: rule-2 veto puts free `x3` in `R`; `x3` sits in a
+        // diagonal-only flipped-`Ge` row → pre-gate abstains, the full path
+        // rejects. Also exercises DROP_TOL / stored-zero / duplicate-merge
+        // COO fidelity on the effective gate.
+        {
+            let n = 4usize;
+            let q_obj = CscMatrix::from_triplets(&[0, 2], &[2, 0], &[3.0, 3.0], n, n).unwrap();
+            let mut p = QpProblem::new(
+                q_obj,
+                vec![0.0; n],
+                empty_a(6, n),
+                vec![0.0; 6],
+                vec![(0.0, 1.0); n],
+                vec![
+                    ConstraintType::Le,
+                    ConstraintType::Le,
+                    ConstraintType::Ge,
+                    ConstraintType::Eq,
+                    ConstraintType::Ge,
+                    ConstraintType::Eq,
+                ],
+            )
+            .unwrap();
+            let mut q1 = QcqpMatrix::new(n);
+            q1.triplets.extend([(0, 1, 2.0), (1, 0, 2.0), (0, 1, -2.0)]);
+            let mut q2 = QcqpMatrix::new(n);
+            q2.triplets.push((3, 3, 2.0));
+            let mut q3 = QcqpMatrix::new(n);
+            q3.triplets.push((0, 0, 1e-16));
+            let mut q4 = QcqpMatrix::new(n);
+            q4.triplets.push((1, 1, 0.0));
+            let mut q5 = QcqpMatrix::new(n);
+            q5.triplets
+                .extend([(1, 2, 1.0), (2, 1, 1.0), (1, 2, 1e-16)]);
+            p.set_quadratic_constraints(vec![QcqpMatrix::new(n), q1, q2, q3, q4, q5])
+                .unwrap();
+            p.bounds[3] = (f64::NEG_INFINITY, f64::INFINITY);
+            corpus.push(("coo_gate_rule2_fixture", p));
+        }
+        // 8. Exact bilinear cancellation (merged stored `p` empty) with a
+        // nonconvex `p0` over free vars: the canceled pair is NOT derivable
+        // support (an empty row moves nothing), so the pre-gate must reject.
+        {
+            let n = 2usize;
+            let p0 = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[1.0, 1.0], n, n).unwrap();
+            let mut qc = QcqpMatrix::new(n);
+            qc.triplets
+                .extend([(0, 1, 1.0), (0, 1, -1.0), (1, 0, 1.0), (1, 0, -1.0)]);
+            let mut p = QpProblem::new(
+                p0,
+                vec![1.0, 1.0],
+                empty_a(1, n),
+                vec![1.0],
+                all_free_bounds(n),
+                vec![ConstraintType::Le],
+            )
+            .unwrap();
+            p.set_quadratic_constraints(vec![qc]).unwrap();
+            corpus.push(("exact_cancel_bilinear_p0", p));
+        }
+        // 9. Same shape, `DROP_TOL` cancellation instead of exact zero
+        // (single 1e-16 runs merge away): identical verdict required.
+        {
+            let n = 2usize;
+            let p0 = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[1.0, 1.0], n, n).unwrap();
+            let mut qc = QcqpMatrix::new(n);
+            qc.triplets.extend([(0, 1, 1e-16), (1, 0, -1e-16)]);
+            let mut p = QpProblem::new(
+                p0,
+                vec![1.0, 1.0],
+                empty_a(1, n),
+                vec![1.0],
+                all_free_bounds(n),
+                vec![ConstraintType::Le],
+            )
+            .unwrap();
+            p.set_quadratic_constraints(vec![qc]).unwrap();
+            corpus.push(("drop_tol_cancel_bilinear_p0", p));
+        }
+        // 10. Diagonal-only `Le` row with a linear member (`x0 + x1² <= 1`)
+        // + nonconvex `p0` on (x0, x2): `x0` is derivable (FBBT's completed
+        // square bounds it — an actual mover), `x2` is not (sole member of
+        // the objective only). Bad set is mixed → pre-gate abstains and the
+        // full path rejects naming `x2`.
+        {
+            let n = 3usize;
+            let p0 = CscMatrix::from_triplets(&[0, 2], &[2, 0], &[1.0, 1.0], n, n).unwrap();
+            let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap();
+            let mut qc = QcqpMatrix::new(n);
+            qc.triplets.push((1, 1, 2.0));
+            let mut p = QpProblem::new(
+                p0,
+                vec![1.0, 0.0, 0.0],
+                a,
+                vec![1.0],
+                all_free_bounds(n),
+                vec![ConstraintType::Le],
+            )
+            .unwrap();
+            p.set_quadratic_constraints(vec![qc]).unwrap();
+            corpus.push(("diag_row_linear_member_p0", p));
+        }
+        corpus
+    }
+
+    /// The materialized Phase-2 gate as an independent oracle: exactly the
+    /// judgment of `build_nonconvex_with_root_box` WITHOUT the sparse
+    /// pre-gate (raw build → materialized `R` → derived box → finiteness
+    /// check → shared message builder). Fidelity of this oracle against the
+    /// shipped route is itself asserted per fixture (the pre-gate abstention
+    /// branch runs the materialized path verbatim).
+    fn materialized_root_box_rejection(src: &QpProblem) -> Option<String> {
+        let nc = build_nonconvex_raw(src).expect("corpus problems convert raw");
+        let req =
+            conic::effective_bound_requirement(nc.n, nc.p0.as_ref(), &nc.quad, &nc.lb, &nc.ub)
+                .expect("corpus classifies materialized");
+        let derived = conic::derive_root_box(&nc, 1e-6);
+        let bad: Vec<(usize, f64, f64)> = req
+            .required
+            .iter()
+            .enumerate()
+            .filter(|(_, need)| **need)
+            .filter_map(|(j, _)| {
+                (!derived.lb[j].is_finite() || !derived.ub[j].is_finite()).then_some((
+                    j,
+                    derived.lb[j],
+                    derived.ub[j],
+                ))
+            })
+            .collect();
+        let &first = bad.first()?;
+        Some(root_box_rejection_message(
+            first,
+            bad.len(),
+            req.required.iter().filter(|b| **b).count(),
+        ))
+    }
+
+    /// The shipped route's `Rejection` message (the materialized path, when
+    /// the pre-gate abstained; the pre-gate's own, when it fired).
+    fn route_root_box_rejection(src: &QpProblem) -> Option<String> {
+        match build_nonconvex_with_root_box(src, 1e-6) {
+            Ok(_) => None,
+            Err(QcqpConversionError::Rejection(msg)) => Some(msg),
+            Err(QcqpConversionError::DenseBudgetExceeded(msg)) => {
+                panic!("corpus problems are unit-scale, sizing gate must not fire: {msg}")
+            }
+        }
+    }
+
+    /// Soundness, part 1: the COO twin of the effective set equals the
+    /// materialized gate's classification field-for-field (`R`, the per-row
+    /// convexity verdicts, the rule-2 diagonals) on every corpus shape —
+    /// by shared fold code, pinned against drift in `lift_coeffs_from_coo`
+    /// or `quad_coo_rows`' order/multiplicity/sign mirroring.
+    #[test]
+    fn coo_effective_requirement_matches_materialized_root_box_gate() {
+        for (name, p) in root_box_gate_agreement_corpus() {
+            let nc = build_nonconvex_raw(&p).expect("corpus converts raw");
+            let coo_rows: Vec<conic::CooQuadRow> = quad_coo_rows(&p).collect();
+            let coo = conic::effective_bound_requirement_from_coo(
+                p.num_vars,
+                (!p.is_zero_q()).then_some(&p.q),
+                &coo_rows,
+                &p.bounds,
+            )
+            .expect("corpus classifies on COO");
+            let mat =
+                conic::effective_bound_requirement(nc.n, nc.p0.as_ref(), &nc.quad, &nc.lb, &nc.ub)
+                    .expect("corpus classifies materialized");
+            assert_eq!(coo.required, mat.required, "{name}: R membership drift");
+            assert_eq!(
+                coo.convex_rows, mat.convex_rows,
+                "{name}: convex-row verdict drift (row stream must mirror the conversion order)"
+            );
+            assert_eq!(coo.rule2_diag, mat.rule2_diag, "{name}: rule-2 drift");
+        }
+    }
+
+    /// Soundness, part 2: whenever the sparse pre-gate rejects, the
+    /// materialized Phase-2 gate rejects with the byte-identical message;
+    /// the pre-gate never rejects where the full path accepts (that would
+    /// regress a Phase-2 FBBT acceptance); and on every fixture where the
+    /// pre-gate abstains, the shipped route's rejection equals the oracle's
+    /// (the materialized path runs verbatim there). The corpus must cover
+    /// both the fire branch and the conservative-abstention-with-eventual-
+    /// rejection branch, or the agreement is vacuous.
+    #[test]
+    fn root_box_pre_gate_agrees_with_materialized_root_box() {
+        let mut pre_fires = 0usize;
+        let mut abstained_full_rejections = 0usize;
+        for (name, p) in root_box_gate_agreement_corpus() {
+            let pre = sparse_root_box_rejection(&p);
+            let oracle = materialized_root_box_rejection(&p);
+            match (&pre, &oracle) {
+                (Some(a), Some(b)) => {
+                    assert_eq!(
+                        a, b,
+                        "{name}: pre-gate message must equal the materialized gate's byte-for-byte"
+                    );
+                    pre_fires += 1;
+                }
+                (Some(a), None) => panic!(
+                    "{name}: unsound pre-rejection — materialized path accepts, pre-gate says {a}"
+                ),
+                (None, Some(_)) => abstained_full_rejections += 1,
+                (None, None) => {}
+            }
+            if pre.is_none() {
+                let route = route_root_box_rejection(&p);
+                assert_eq!(
+                    route.as_ref(),
+                    oracle.as_ref(),
+                    "{name}: oracle must describe the shipped materialized path"
+                );
+            }
+        }
+        assert!(
+            pre_fires >= 5,
+            "corpus must exercise the fire branch on >= 5 shapes, got {pre_fires}"
+        );
+        assert!(
+            abstained_full_rejections >= 3,
+            "corpus must cover the conservative abstention that still rejects \
+             (touchable bad members) on >= 3 shapes, got {abstained_full_rejections}"
+        );
+    }
+
+    /// Soundness, part 3 (`fbbt_derivable_support` contract): every
+    /// variable `derive_root_box` actually moves is marked derivable, so a
+    /// variable the support builder calls untouchable provably keeps its
+    /// declared bounds — the pre-gate's `derived == declared` premise.
+    /// Coverage: the corpus must contain real movers (accepted fixtures and
+    /// the completed-square diagonal row), not just unmoved rejections.
+    #[test]
+    fn fbbt_derivable_support_contains_root_box_movers() {
+        let mut movers = 0usize;
+        for (name, p) in root_box_gate_agreement_corpus() {
+            let nc = build_nonconvex_raw(&p).expect("corpus converts raw");
+            let derived = conic::derive_root_box(&nc, 1e-6);
+            let derivable = fbbt_derivable_support(&p);
+            for j in 0..nc.n {
+                if nc.lb[j] != derived.lb[j] || nc.ub[j] != derived.ub[j] {
+                    assert!(
+                        derivable[j],
+                        "{name}: x{j} moved by root FBBT but not marked derivable"
+                    );
+                    movers += 1;
+                }
+            }
+        }
+        assert!(
+            movers >= 3,
+            "corpus must exercise actually-moved variables, got {movers}"
+        );
     }
 
     /// No-op derivation attaches no seed: with every variable already boxed
@@ -1369,17 +1915,21 @@ mod tests {
     }
 
     /// 8595-class shape pinned at unit scale (all-equality bilinear DCQ over
-    /// free variables): the route-level rejection text after the gate moved
-    /// in front of the conversion loop. Independent oracle: every variable is
-    /// a rule-3 off-diagonal endpoint (`|R| = 4`), none has a finite bound
-    /// (`bad = 4`, first index 0), so the full string is hand-derivable from
-    /// the gate's documented template — the literal below was captured from
-    /// the PRE-fix code (same input, dense path, `QPLIB_8585`-era message
-    /// builder) and re-verified against the template.
-    ///
-    /// Sentinel: the timing sentinel is
-    /// `qcqp_route_rejects_dense_dcq_before_densifying` (peak RSS); this test
-    /// pins the reason string that sentinel's rejection asserts build on.
+    /// free variables): the COMPAT WRAPPER's rejection text — the pre-Phase-2
+    /// raw-bound message, which the wrapper (`nonconvex_from_qp_problem`,
+    /// the `otspot-model` fallback entry) keeps byte-identical because its
+    /// G1 gate stays in front of the conversion loop (PR #86 fence, intact).
+    /// The QP ROUTE's Phase-2 verdict ("even after root FBBT derivation") is
+    /// pinned at route scale by `residual_rejection_reports_root_fbbt_ran`
+    /// and, with the peak-RSS timing sentinel, by the integration test
+    /// `qcqp_route_rejects_dense_dcq_at_sparse_root_gate`
+    /// (successor of `qcqp_route_rejects_dense_dcq_before_densifying`).
+    /// Independent oracle: every variable is a rule-3 off-diagonal endpoint
+    /// (`|R| = 4`), none has a finite bound (`bad = 4`, first index 0), so
+    /// the full string is hand-derivable from the gate's documented template
+    /// — the literal below was captured from the PRE-fix code (same input,
+    /// dense path, `QPLIB_8585`-era message builder) and re-verified against
+    /// the template.
     #[test]
     fn nonconvex_gate_rejects_all_equality_dcq() {
         let n = 4usize;
