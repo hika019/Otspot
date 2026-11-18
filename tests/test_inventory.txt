@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3471 testcases, 43 ignored
+# totals: 3472 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1167,6 +1167,7 @@ otspot-core	qp::ipm_core::ippmm::tests::test_warm_start_both_finite_bound_scale_
 otspot-core	qp::ipm_core::ippmm::tests::test_warm_start_half_finite_bound_scale_tracking	active
 otspot-core	qp::ipm_core::kkt::tests::sentinel_boxed_kkt_exact_schur_vs_extended_oracle	active
 otspot-core	qp::ipm_core::kkt::tests::sentinel_degenerate_bound_pair_kept_as_system_row	active
+otspot-core	qp::ipm_core::kkt::tests::sentinel_dependent_slack_passes_small_positive_values	active
 otspot-core	qp::ipm_core::kkt::tests::sentinel_inertia_psd_no_over_correction	active
 otspot-core	qp::ipm_core::kkt::tests::sentinel_inertia_zero_diag_indefinite_multi_pattern	active
 otspot-core	qp::ipm_core::kkt::tests::test_build_extended_constraints_bound_rows	active

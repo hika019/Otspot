@@ -253,10 +253,23 @@ impl BoundBox {
             .collect()
     }
 
-    /// 従属スラック s_t(x) = b_t − a_t·x_j (床 `BOUND_SLACK_FLOOR` 適用)。
+    /// 従属スラック s_t(x) = b_t − a_t·x_j。
+    ///
+    /// 床は **非正時だけ**の符号ガード (legacy `update_variables` の
+    /// `if s <= 0 { FLOOR }` と同一契約)。`raw.max(FLOOR)` 式は 0 < s < FLOOR の
+    /// 正常な中心路上値を捏造し、σ = s/y を汚染する — 活性境界を持つ
+    /// noise-floor eps 問題 (lasso 系・eps≈2e-14) では収束過程で必ず発火し、
+    /// sminb が FLOOR に張り付いて相補残差が μ に対して非減少となり μ が
+    /// 平台化して収束しない (実測: box 化 lasso/qscagr7/qbore3d 系で
+    /// sminb==1e-12 が最終 attempt の大半反復、μ 平台 5e-16 で budget 超過)。
     #[inline]
     pub(crate) fn slack(&self, t: usize, x: &[f64]) -> f64 {
-        (self.rhs[t] - self.sign[t] * x[self.var[t]]).max(BOUND_SLACK_FLOOR)
+        let raw = self.rhs[t] - self.sign[t] * x[self.var[t]];
+        if raw > 0.0 {
+            raw
+        } else {
+            BOUND_SLACK_FLOOR
+        }
     }
 
     /// s_full の尾部 [m_orig..m_ext] へ従属スラックを書き込む。
@@ -1016,6 +1029,33 @@ mod tests {
         let cols: Vec<usize> = entries.iter().map(|&(_, c, _)| c).collect();
         let vals: Vec<f64> = entries.iter().map(|&(_, _, v)| v).collect();
         CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap()
+    }
+
+    /// Sentinel: 従属スラックは 0 < s < FLOOR の中心路上値をそのまま返すこと。
+    /// `slack()` を `.max(BOUND_SLACK_FLOOR)` 式に戻すと 1つ目の assert が fail
+    /// (5e-13 が 1e-12 に捏造される)。非正値の床は legacy 符号ガードと同一契約
+    /// であることを併せて固定。
+    #[test]
+    fn sentinel_dependent_slack_passes_small_positive_values() {
+        let bb = BoundBox {
+            var: vec![0, 0],
+            sign: vec![-1.0, 1.0],
+            rhs: vec![0.0, 6.0],
+            eliminated: vec![true, true],
+        };
+        let x_tiny = [5e-13_f64];
+        assert!(
+            (bb.slack(0, &x_tiny) - 5e-13).abs() <= 5e-22,
+            "正常な従属スラックが床にクランプされた: {}",
+            bb.slack(0, &x_tiny)
+        );
+        let x_neg = [-1e-9_f64];
+        assert_eq!(bb.slack(0, &x_neg), BOUND_SLACK_FLOOR);
+        let x_over = [6.0 + 3e-9];
+        assert_eq!(bb.slack(1, &x_over), BOUND_SLACK_FLOOR);
+        let x_ok = [1.5_f64];
+        assert_eq!(bb.slack(0, &x_ok), 1.5);
+        assert_eq!(bb.slack(1, &x_ok), 4.5);
     }
 
     /// PSD 行列 (det>0) では Gershgorin の誤検出を避け δ=0 を返すこと。
