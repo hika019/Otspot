@@ -50,10 +50,17 @@ jobs:
       # 計画のみ (cargo 実行なし)。新規マーカー付きテストが 0 件なら、以降の
       # data 取得・toolchain・ビルドをすべてスキップして job を成功させる
       # (sentinel を追加しない PR のコストは checkout と dry-run のみ)。
+      # UNVERIFIABLE>0 (張りが本番コードと混在するファイルにある) は計画不完全
+      # として data 取得の前に fail させる — overlay 契約上 base 検証できない
+      # (scripts/sentinel_red_green.py の docstring)。
       - name: plan (dry-run)
         id: plan
         run: |
           python3 scripts/sentinel_red_green.py --mode red | tee plan.log
+          if grep -qE '^SENTINEL_UNVERIFIABLE=[1-9]' plan.log; then
+            echo "::error::overlay 契約違反: 新規マーカー付きテストが本番コードと同一ファイルにある — 張りを tests/ か tests.rs へ移すこと"
+            exit 1
+          fi
           if grep -q '^SENTINEL_PLAN_COUNT=0$' plan.log; then
             echo "has_targets=0" >> "$GITHUB_OUTPUT"
           else

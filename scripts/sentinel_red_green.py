@@ -32,22 +32,35 @@ CLAUDE.md「実装」の「修正には sentinel test を付ける (revert す�
 lint  : 静的検査のみ (cargo 不要)。マーカー書式・テスト関数への束縛・
         inventory membership を検査する。
 red   : PR の BASE_SHA に対して新規マーカー付きテストを抽出し、base worktree
-        へテスト定義ファイルを overlay して `cargo nextest run` を実行する。
+        へ「テスト定義ファイル」のみ overlay して `cargo nextest run` を実行する。
+        overlay 契約: 書き換えるのはテスト定義ファイル (.rs のうち tests/
+        ディレクトリ直下、または tests.rs テストモジュール) だけ。これらは
+        本番コードを含まないので、HEAD 版を丸ごと置いても base の本番コードが
+        保たれる (本番修正が base に混入すると red 検証は意味を失う)。マーカー
+        付きテストが本番コードと同一ファイル (混在ファイル) にある場合は
+        区別できないため overlay 不可 — UNVERIFIABLE として報告し
+        (機械行 SENTINEL_UNVERIFIABLE=<件数>)、計画不完全として exit 1。
+        張りの主張は検証可能な位置 (テスト定義ファイル) へ移すこと。
         red 判定基準は「exit code != 0」(テスト fail でもビルド error でも
         red)。exit 0 = base では pass する = 回帰を張れていない = VIOLATION。
         実行は環境変数 SENTINEL_CI_RUN=1 のときだけ (GitHub runner 限定)。
         それ以外は --dry-run 扱いで計画 (新テスト集合・overlay 対象ファイル・
         nextest コマンド) を表示するだけ。ローカル開発では cargo を走らせない。
+        明示的な --dry-run は SENTINEL_CI_RUN=1 より優先 (flag を付けたら
+        いかなる環境でも cargo を実行しない)。
+        base worktree の data/ は git 追跡の baseline を保持したまま、HEAD
+        checkout のデータセットサブディレクトリだけを symlink で共有する
+        (ci.yml と同一のダウンロード済みデータを使わせる)。
 --self-test : 合成 git repository を一時ディレクトリに作り、lint/red の抽出・
         判定ロジックを実検査する (cargo 不要。SENTINEL_CI_FAKE_RESULT で
         nextest の exit code をスタブして判定経路も検証する)。
 
 既知の限界 (正直な記録)
 ========================
-- overlay は「PR が触った、テスト fn を含むファイル」のみ。本番コードは base
-  のままなので、テストが PR 新規の内部 API に依存すると base でビルド error
-  になる。これは exit != 0 として RED OK に数えられるが、真の「テスト fail」
-  の証拠ではない (判定は exit code のみが見える)。出力上は区別できない。
+- overlay はテスト定義ファイルのみ。テストが PR 新規の API に依存すると base
+  でビルド error になる。これは exit != 0 として RED OK に数えられるが、真の
+  「テスト fail」の証拠ではない (判定は exit code のみが見える)。出力上は
+  区別できない。
 - nextest のセレクタが 0 件だと cargo nextest は非ゼロ終了するため、同じく
   「0 件による red」と「fail による red」は本ゲートでは区別しない。
 - inventory の status が active から ignored へ変わったテストは新規扱いに
@@ -87,6 +100,22 @@ FN_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:default\s+)?(?:const\s+)?(?
 
 # GitHub Actions が計画有無を機械判定するための行 (workflow との契約)。
 PLAN_COUNT_PREFIX = "SENTINEL_PLAN_COUNT="
+# overlay 不可 (混在ファイル) の件数。>0 なら計画不完全 = workflow が fail させ、
+# 高コストな data 取得の前に制止する (workflow との契約)。
+UNVERIFIABLE_PREFIX = "SENTINEL_UNVERIFIABLE="
+
+# overlay してよい「テスト定義ファイル」の判定: tests/ ディレクトリ直下の
+# .rs (統合テスト) か tests.rs テストモジュール (src 配下の専用テストファイル)。
+# どちらも本番コードを含まない约定であり、HEAD 版の丸ごと overlay が base の
+# 本番コードを保持する根拠になる。それ以外は混在ファイル (本番修正が同一 diff
+# に乗り込む) とみなし overlay 対象から除外する。
+TEST_DEF_DIR_RE = re.compile(r"(^|/)tests/")
+TEST_DEF_MODULE_SUFFIX = "/tests.rs"
+
+
+def is_test_definition_file(rel: str) -> bool:
+    """rel が本番コードを含まないテスト定義ファイルか (overlay 契約の判定)。"""
+    return bool(TEST_DEF_DIR_RE.search(rel)) or rel.endswith(TEST_DEF_MODULE_SUFFIX)
 
 
 class GateError(RuntimeError):
@@ -251,28 +280,33 @@ def mode_lint(root: Path) -> int:
 
 def new_marked_tests(
     root: Path, base: str
-) -> tuple[list[tuple[str, str]], list[str], dict[tuple[str, str], list[str]]]:
+) -> tuple[list[tuple[str, str]], list[dict], dict[tuple[str, str], list[str]]]:
     """base..HEAD で追加されたマーカー付きテストを返す。
 
-    戻り値: (新規マーカー付き (binary, name) 列, PR が触った .rs, overlay 対象 map)
+    戻り値: (overlay 実行可能な (binary, name) 列, UNVERIFIABLE 混在ファイル
+    エントリ [{bid, name, files}], overlay 対象 map)。混在ファイル (本番コード
+    を含む .rs) に束縛する張りは、HEAD 版の overlay が本番修正を base へ運び
+    red 検証を無意味にするため実行対象にしない (docstring の overlay 契約)。
     """
     base_inv = inventory_at(root, base)
     head_inv = inventory_at(root, "HEAD")
     new_ids = sorted(head_inv - base_inv)
     entries, _errs = scan_markers(root)
     marked_fns = {e["fn"] for e in entries}
-    targets = [(b, n) for (b, n) in new_ids if fn_segment(n) in marked_fns]
+    all_targets = [(b, n) for (b, n) in new_ids if fn_segment(n) in marked_fns]
 
-    if not targets:
-        return targets, [], {}
+    untestable: list[dict] = []
+    overlays: dict[tuple[str, str], list[str]] = {}
+    if not all_targets:
+        return [], untestable, overlays
 
     changed_raw = run_git(
         ["diff", "--name-only", base, "HEAD", "--"], root
     ).splitlines()
     changed = [p for p in changed_raw if p.endswith(".rs")]
 
-    overlays: dict[tuple[str, str], list[str]] = {}
-    for bid, name in targets:
+    targets: list[tuple[str, str]] = []
+    for bid, name in all_targets:
         fn = fn_segment(name)
         # HEAD のツリーから fn を定義する .rs を探す (working tree dirty 対策で
         # 明示的に rev 指定)。
@@ -282,16 +316,27 @@ def new_marked_tests(
             check=False,
         )
         containers = [ln.split(":", 1)[1] for ln in out.splitlines() if ":" in ln]
-        overlay = sorted(set(containers) & set(changed))
-        if not overlay:
+        candidates = sorted(set(containers) & set(changed))
+        mixed = [p for p in candidates if not is_test_definition_file(p)]
+        if mixed:
+            untestable.append({"bid": bid, "name": name, "files": mixed})
+            print(
+                f"警告: {name} は本番コードと混在するファイル ({', '.join(mixed)})"
+                " に束縛 — HEAD 版 overlay が本番修正を base へ運ぶため base 検証"
+                " 不可 (UNVERIFIABLE)。張りを tests/ か tests.rs へ移すこと",
+                file=sys.stderr,
+            )
+            continue
+        if not candidates:
             print(
                 f"警告: {name} の定義ファイル ({containers}) が PR で変更されて"
                 "いない — overlay 対象なし (マクロ生成テスト等の境界ケース。"
                 "base 側では 0 セレクション => red として扱われる)",
                 file=sys.stderr,
             )
-        overlays[(bid, name)] = overlay
-    return targets, changed, overlays
+        overlays[(bid, name)] = candidates
+        targets.append((bid, name))
+    return targets, untestable, overlays
 
 
 def nextest_filter(bid: str, name: str) -> str:
@@ -344,21 +389,22 @@ def red_exit_code(cmd: list[str], wt: Path) -> int:
 
 def mode_red(root: Path, base: str, dry: bool) -> int:
     try:
-        targets, _changed, overlays = new_marked_tests(root, base)
+        targets, untestable, overlays = new_marked_tests(root, base)
     except GateError as e:
         print(f"red: {e}", file=sys.stderr)
         return EXIT_ENV
 
     print(f"=== sentinel red (base={base[:12]}) ===")
     print(f"{PLAN_COUNT_PREFIX}{len(targets)}")
-    if not targets:
+    print(f"{UNVERIFIABLE_PREFIX}{len(untestable)}")
+    if not targets and not untestable:
         print("新規マーカー付きテストなし — base 検証はスキップ (VIOLATION なし)")
         print("sentinel red: OK (対象 0 件)")
         return EXIT_OK
 
     run = (not dry) and os.environ.get("SENTINEL_CI_RUN") == "1"
     if not run:
-        print("(dry-run: 計画表示のみ。実行には SENTINEL_CI_RUN=1)")
+        print("(dry-run: 計画表示のみ。実行には SENTINEL_CI_RUN=1 かつ --dry-run 未指定)")
 
     tmpdir: Path | None = None
     wt: Path | None = None
@@ -406,10 +452,21 @@ def mode_red(root: Path, base: str, dry: bool) -> int:
         v = next((x for x in violations if x[0] == bid and x[1] == name), None)
         verdict = f"VIOLATION (exit {v[2]})" if v else ("RED OK" if run else "計画のみ")
         print(f"{bid} :: {name:<.50} | {verdict}")
+    for ent in untestable:
+        print(f"{ent['bid']} :: {ent['name']:<.50} | UNVERIFIABLE (混在ファイル: "
+              f"{', '.join(ent['files'])})")
     print(
         f"=== 結果: 対象 {len(targets)} 件 / RED OK {reds} 件 / "
-        f"VIOLATION {len(violations)} 件 ==="
+        f"VIOLATION {len(violations)} 件 / UNVERIFIABLE {len(untestable)} 件 ==="
     )
+    if untestable:
+        print(
+            "sentinel red: FAIL — 上の張りは本番コードと同一ファイルにあり、"
+            "base の本番コードを保持したまま overlay できない (計画不完全)。"
+            "マーカー付きテストを tests/ か tests.rs へ移して検証可能にすること。",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
     if violations:
         print(
             "sentinel red: FAIL — 上のテストは base commit で pass する。"
@@ -455,17 +512,31 @@ mod tests {
         assert_eq!(add(1, 2), 3);
     }
 
-    /// sentinel: add が減算へ逆戻りすると fail — 回帰張りそのものの合成例
-    #[test]
-    fn add_guard_sentinel() {
-        assert_eq!(add(2, 3), 5);
-    }
-
     #[test]
     fn new_unmarked_test() {
         assert_eq!(add(0, 0), 0);
     }
 }
+"""
+
+# overlay 契約 (docstring): 張りはテスト定義ファイルに置く。統合テスト側の実体。
+# 本体 crate を build しない合成 repo なので、本体 API 参照でなく独立オラクル
+# (リテラル計算) で張っている。
+GUARD_TEST_RS = """\
+mod tests {
+    /// sentinel: add が減算へ逆戻りすると fail — 回帰張りそのものの合成例
+    #[test]
+    fn add_guard_sentinel() {
+        assert_eq!(2 + 3, 5);
+    }
+}
+"""
+
+# src 配下の専用テストモジュール (tests.rs) も overlay 対象のテスト定義ファイル。
+UNIT_GUARD_RS = """\
+/// sentinel: src 専用テストモジュール (tests.rs) の合成張り
+#[test]
+fn unit_guard_sentinel() {}
 """
 
 INV_HEADER = (
@@ -478,8 +549,18 @@ def _git(repo: Path, *args: str) -> str:
     return run_git(list(args), repo)
 
 
-def _make_synthetic_repo(root: Path, extra_bad: str = "") -> str:
-    """base commit と HEAD commit を持つ合成 repo を作り base sha を返す。"""
+def _make_synthetic_repo(
+    root: Path,
+    extra_bad: str = "",
+    unit_guard: bool = False,
+    extra_inv: str = "",
+) -> str:
+    """base commit と HEAD commit を持つ合成 repo を作り base sha を返す。
+
+    extra_bad: HEAD の src/lib.rs 末尾に追記 (malformed / 混在ファイル用例)。
+    unit_guard: HEAD に src/calc/tests.rs (専用テストモジュール) を追加。
+    extra_inv: HEAD inventory への追加行 (mixed-file 用例の登録用)。
+    """
     root.mkdir(parents=True)
     (root / "src").mkdir()
     (root / "tests").mkdir()
@@ -494,13 +575,22 @@ def _make_synthetic_repo(root: Path, extra_bad: str = "") -> str:
     _git(root, "commit", "-q", "-m", "base")
     base_sha = _git(root, "rev-parse", "HEAD").strip()
     (root / "src" / "lib.rs").write_text(HEAD_LIB + extra_bad)
-    (root / "tests" / "test_inventory.txt").write_text(
+    (root / "tests" / "test_guard.rs").write_text(GUARD_TEST_RS)
+    head_inv = (
         INV_HEADER
         + "synthetic\ttests::add_works\tactive\n"
         + "synthetic\ttests::add_guard_sentinel\tactive\n"
         + "synthetic\ttests::new_unmarked_test\tactive\n"
+        + extra_inv
     )
-    _git(root, "add", "src/lib.rs", "tests/test_inventory.txt")
+    added = ["src/lib.rs", "tests/test_inventory.txt", "tests/test_guard.rs"]
+    if unit_guard:
+        (root / "src" / "calc").mkdir()
+        (root / "src" / "calc" / "tests.rs").write_text(UNIT_GUARD_RS)
+        head_inv += "synthetic\tcalc_tests::unit_guard_sentinel\tactive\n"
+        added.append("src/calc/tests.rs")
+    (root / "tests" / "test_inventory.txt").write_text(head_inv)
+    _git(root, "add", *added)
     _git(root, "commit", "-q", "-m", "head: 張りを追加")
     return base_sha
 
@@ -551,7 +641,12 @@ def self_test() -> int:
         check("red(dry): exit 0", rc == EXIT_OK, out)
         check("red(dry): 新規マーカー付きを抽出", "add_guard_sentinel" in out)
         check("red(dry): 無印の新規テストは対象外", "new_unmarked_test" not in out)
-        check("red(dry): overlay 対象ファイル検出", "src/lib.rs" in out)
+        check(
+            "red(dry): overlay 対象はテスト定義ファイルのみ",
+            "overlay 対象: tests/test_guard.rs" in out,
+            out,
+        )
+        check("red(dry): 本番修正ファイルは overlay 非対象", "src/lib.rs" not in out)
         check("red(dry): nextest コマンド計画", "cargo nextest run --release --features parallel -E binary_id(synthetic) & test(/^tests::add_guard_sentinel$/)" in out)
         check("red(dry): 機械判定行", "SENTINEL_PLAN_COUNT=1" in out)
 
@@ -607,6 +702,58 @@ def self_test() -> int:
         rc = mode_lint(repo4)
         out = cap.close()
         check("lint: inventory 欠落マーカーで exit 1", rc == EXIT_FAIL, out)
+
+        # 8) P1a: overlay は base の本番コードを保持する (helper 直接検証)。
+        #    codex 指摘の合成再現: 本番修正を含む HEAD ファイルを base へ
+        #    置くのと違い、テスト定義ファイル overlay では lib.rs が base 版の
+        #    ままでなければならない。
+        p1a_dir = tmp / "p1a-wt"
+        p1a_wt = build_base_worktree(repo, base_sha, p1a_dir)
+        try:
+            overlay_files(repo, p1a_wt, ["tests/test_guard.rs"])
+            check(
+                "P1a: overlay 後も base の本番コードが保持される",
+                (p1a_wt / "src" / "lib.rs").read_text(encoding="utf-8") == BASE_LIB,
+            )
+            check(
+                "P1a: テスト定義ファイルは HEAD 版が置かれる",
+                (p1a_wt / "tests" / "test_guard.rs").read_text(encoding="utf-8")
+                == GUARD_TEST_RS,
+            )
+        finally:
+            _git(repo, "worktree", "remove", "--force", str(p1a_wt))
+            shutil.rmtree(p1a_dir, ignore_errors=True)
+
+        # 9) P1a: src 専用テストモジュール (tests.rs) も overlay 対象 (混在で
+        #    ないことを new_marked_tests が正しく判定する)
+        repo_c = tmp / "unitguard"
+        base_c = _make_synthetic_repo(repo_c, unit_guard=True)
+        targets_c, untest_c, overlays_c = new_marked_tests(repo_c, base_c)
+        check("P1a: tests.rs が混在扱いされない", not untest_c, str(untest_c))
+        check(
+            "P1a: tests.rs / tests/ 両方の overlay 対象判定",
+            overlays_c.get(("synthetic", "tests::add_guard_sentinel"))
+            == ["tests/test_guard.rs"]
+            and overlays_c.get(("synthetic", "calc_tests::unit_guard_sentinel"))
+            == ["src/calc/tests.rs"],
+            str(overlays_c),
+        )
+
+        # 10) P1a: 混在ファイル (本番コードと同じ .rs) の張りは UNVERIFIABLE
+        #     => 計画不完全として exit 1、実行対象には含めない
+        repo_b = tmp / "embedded"
+        base_b = _make_synthetic_repo(
+            repo_b,
+            extra_bad="\n/// sentinel: 本番ファイルに埋め込まれた張り\n#[test]\nfn embedded_guard() {}\n",
+            extra_inv="synthetic\tembedded::embedded_guard\tactive\n",
+        )
+        cap = _Captured()
+        rc = mode_red(repo_b, base_b, dry=True)
+        out = cap.close()
+        check("P1a: 混在ファイルの張りで exit 1 (計画不完全)", rc == EXIT_FAIL, out)
+        check("P1a: UNVERIFIABLE 機械行", "SENTINEL_UNVERIFIABLE=1" in out)
+        check("P1a: 実行可能分だけの PLAN_COUNT", "SENTINEL_PLAN_COUNT=1" in out)
+        check("P1a: 混在ファイル名を報告", "src/lib.rs" in out)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
