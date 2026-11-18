@@ -120,14 +120,11 @@ impl NonconvexQcqp {
             ));
         }
         // Decision D8 / plan §3.2: bound finiteness is required only for the
-        // variables in the §3.1 bound-requirement set `R` (variables whose
-        // lift pairs feed a McCormick envelope or a rule-2-vetoed diagonal).
-        // A free variable outside `R` is exactly what plan §5 example 1 (PSD
-        // ellipsoid rows over free `x`) must accept; the R-aware relaxation
-        // (skip box rows on non-finite node bounds, emit no envelope rows for
-        // non-finite pair endpoints) never hands `±inf` to the LP. `NaN`
-        // bounds stay rejected for *every* variable: they are corrupt data,
-        // not "free", and would poison node boxes with NaN widths.
+        // variables in the §3.1 bound-requirement set `R` (lift pairs feeding
+        // a McCormick envelope or a rule-2-vetoed diagonal). A free variable
+        // outside `R` is exactly what plan §5 example 1 (PSD ellipsoid rows
+        // over free `x`) must accept; the R-aware relaxation never hands
+        // `±inf` to the LP. `NaN` bounds stay rejected for *every* variable.
         //
         // Phase 2 (plan §3.2 line 89 / §4.1) moved the `R` finiteness verdict
         // from here to `global_core`'s effective ROOT-BOX check: a raw

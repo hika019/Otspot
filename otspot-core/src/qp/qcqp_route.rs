@@ -379,12 +379,10 @@ fn quad_coo_rows(src: &QpProblem) -> impl Iterator<Item = conic::CooQuadRow<'_>>
 
 /// Convert a continuous [`QpProblem`] QCQP into a [`NonconvexQcqp`] for the
 /// spatial branch-and-bound global solver, keeping the G1 raw-bound gate
-/// (`conic::require_finite_bounds`).
-///
-/// Unlike the convex conic bridge (which rejects quadratic `>=`/`=`
-/// constraints as unable to certify convexity), this accepts any constraint
-/// sense and any (possibly indefinite) quadratic matrix: `>=` rows are
-/// sign-flipped and `=` rows become a pair of `<=` rows.
+/// (`conic::require_finite_bounds`). Any constraint sense and any (possibly
+/// indefinite) quadratic matrix is accepted: `>=` rows are sign-flipped and
+/// `=` rows become a pair of `<=` rows (the convex conic bridge instead
+/// rejects quadratic `>=`/`=` as unable to certify convexity).
 ///
 /// The QP route itself uses root FBBT instead
 /// (`build_nonconvex_with_root_box`): Phase 2 (plan §3.2 line 89) judges
@@ -396,14 +394,12 @@ fn quad_coo_rows(src: &QpProblem) -> impl Iterator<Item = conic::CooQuadRow<'_>>
 /// is allocated, so the QPLIB_8585/8683/8803/8810 class (all-equality DCQ
 /// whose `R` members lack finite bounds) is rejected in `O(input)` —
 /// measured pre-gate behavior was ~3.2 GiB/s RSS growth into a 12 GiB
-/// self-kill on QPLIB_8585 (`n = 99_999`, `49_999` quadratic equality rows)
-/// for a problem the gate rejects anyway. The rejection string is
-/// byte-identical to the post-conversion gate's for the same input — both
-/// come from the single `qcqp_classify` message builder — only the timing
-/// moved (sentinels: `coo_gate_rejection_matches_materialized_gate`,
-/// `nonconvex_gate_rejects_all_equality_dcq`). The bound gate also precedes
-/// the sizing gate inside [`build_nonconvex_raw`]: a rejected-class problem
-/// is never reported as a resource limit
+/// self-kill on QPLIB_8585 (`n = 99_999`) for a problem the gate rejects
+/// anyway. The rejection string is byte-identical to the post-conversion
+/// gate's for the same input (single `qcqp_classify` message builder;
+/// sentinels: `coo_gate_rejection_matches_materialized_gate`,
+/// `nonconvex_gate_rejects_all_equality_dcq`) — only the timing moved. The
+/// bound gate also precedes the sizing gate inside [`build_nonconvex_raw`]
 /// (`sizing_gate_refuses_over_budget_before_converting`).
 pub fn nonconvex_from_qp_problem(src: &QpProblem) -> Result<NonconvexQcqp, QcqpConversionError> {
     src.validate()

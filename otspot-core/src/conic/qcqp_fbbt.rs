@@ -1,54 +1,29 @@
 //! Root-stage feasibility-based bound tightening (FBBT) for the nonconvex
-//! QCQP route (Phase 2, plan §4.1).
+//! QCQP route (Phase 2, plan §4.1). [`derive_root_box`] propagates the
+//! declared box through the *true* constraint rows and returns a derived
+//! root box: it never rewrites `qp.lb`/`qp.ub` (plan §4.2) and the derived
+//! box is an interval-wise subset of the declared box by construction, so
+//! an incumbent inside `feas_tol` of the declared box is never rejected.
+//! Two row families are propagated (plan §4.1 / research §4):
 //!
-//! [`derive_root_box`] propagates the declared box through the problem's
-//! *true* constraint rows and returns a derived root box. It never rewrites
-//! `qp.lb`/`qp.ub` (plan §4.2 line 136: derived bounds travel only in
-//! `GlobalSeed.root_lb`/`root_ub`, so an incumbent inside `feas_tol` of the
-//! declared box is never rejected by `feasible()`), and it never widens: the
-//! derived box is an interval-wise subset of the declared box by construction.
+//! - **Zero-quadratic linear rows** (`nnz() == 0` rows — a quadratic row's
+//!   linear part can never masquerade as linear, plan §4.1 warning). The
+//!   shared [`crate::presolve::activity::propagate_row_bounds`] machinery
+//!   runs with the continuous (no-integer-rounding) mask.
+//! - **Diagonal-only quadratic rows**: Σᵢ (aᵢxᵢ² + bᵢxᵢ) + r ≤ 0 is evaluated
+//!   with the completed-square batch rule (plan §4.1 line 122: per-term
+//!   interval propagation cannot bound a free `x` — the 8605 `Σ aᵢxᵢ² = c`
+//!   shape needs the row-as-ellipsoid). Rows with any off-diagonal entry are
+//!   skipped (research §3.3 L5: no `w_ij`/bilinear propagation).
 //!
-//! Two row families are propagated (plan §4.1 / research doc §4 step 2):
-//!
-//! - **Zero-quadratic linear rows** (`g_lin` / `a_eq` — the route only puts a
-//!   constraint here when its `QcqpMatrix` has `nnz() == 0`, so a quadratic
-//!   row's linear part can never masquerade as linear; plan §4.1 warning,
-//!   `qcqp_route.rs:239-241`). Propagation reuses the shared linear machinery
-//!   `crate::presolve::activity::propagate_row_bounds` — the same row
-//!   arithmetic `mip::presolve::tighten_bounds_linear` runs — with the
-//!   continuous (no-integer-rounding) mask, and each implied bound is
-//!   outward-rounded before it is stored (see below).
-//! - **Single-variable (diagonal-only) quadratic rows** from `quad`: rows
-//!   whose stored quadratic part carries no off-diagonal entry are evaluated
-//!   as Σᵢ (aᵢ xᵢ² + bᵢ xᵢ) + r ≤ 0 with the completed-square batch rule
-//!   (plan §4.1 line 122: per-term interval propagation cannot bound a free
-//!   `x` — the 8605 `Σ aᵢ xᵢ² = c` shape needs the row-as-ellipsoid
-//!   evaluation). Rows with any off-diagonal entry are skipped entirely (no
-//!   bilinear / `w_ij` propagation: the L5 subsolver-dependence warning,
-//!   research doc §3.3, forbids it in this phase).
-//!
-//! Soundness contract:
-//!
-//! - Every stored implied bound is relaxed outward by
-//!   `feas_tol·(1+|v|) + ROOT_FBBT_ULP_SLACK·|v|` before use, so the derived
-//!   box always contains the declared-box-feasible set up to `feas_tol`
-//!   (propagation amplifies a row violation by `1/|a_j|`, which is exactly
-//!   why the plan keeps the derived box out of `qp.lb`/`qp.ub` and why the
-//!   margin must be there; plan §4.1 line 124).
-//! - **No infeasibility is ever reported.** A row whose implied bound crosses
-//!   the current box, or whose completed-square discriminant is genuinely
-//!   negative, marks the row as a *contradiction* and contributes no
-//!   tightening; the returned type has no infeasible state. False
-//!   `Infeasible` verdicts have a measured precedent in this solver's LP
-//!   layer (the `PRESOLVE_ESCALATION` audit in `nonconvex.rs` exists because
-//!   of one), and root FBBT ships no equivalent audit — so per research doc
-//!   §3.3 the only admissible contract is to *refuse* the verdict: the B&B
-//!   relaxation, with its own escalation-audited infeasible arm, remains the
-//!   sole emptiness certificate. Contradictions are only counted in
-//!   [`RootFbbtBox::contradiction_rows`] for measurement.
-//! - Fixed-point rounds are capped by [`ROOT_FBBT_MAX_ROUNDS`]; a box that
-//!   has not converged by then is returned partially tightened (sound, just
-//!   less tight) — termination is never delegated to "run until stable".
+//! Soundness: every stored bound is relaxed outward by
+//! `feas_tol·(1+|v|) + ROOT_FBBT_ULP_SLACK·|v|`, absorbing the `1/|a_j|`
+//! amplification the plan warns about (§4.1 line 124). **Infeasibility is
+//! never reported** — a contradicted row contributes no tightening and is
+//! only counted in [`RootFbbtBox::contradiction_rows`]: this layer ships no
+//! `PRESOLVE_ESCALATION`-style audit, so the sole emptiness certificate
+//! remains the B&B relaxation's own audited arm. Rounds cap at
+//! [`ROOT_FBBT_MAX_ROUNDS`]; an unconverged box is sound, just less tight.
 
 use super::nonconvex::NonconvexQcqp;
 use crate::presolve::activity::propagate_row_bounds;
