@@ -490,6 +490,7 @@ mod bound_active_tol_tests {
     /// `at_lb_tol(lb=1e6) ≈ 1.0`, so the same deviation is correctly at-lb.
     ///
     /// Regresses if `at_lb_tol` reverts to the old absolute 1e-6.
+    /// sentinel: at_lb_tol が絶対 1e-6 へ逆戻りする張 — 大尺度 lb で内部誤分類となり相補性 slack 違反を検出できず fail
     #[test]
     fn test_sentinel_c4_large_scale_bound_active_tol() {
         let lb = 1e6_f64;
