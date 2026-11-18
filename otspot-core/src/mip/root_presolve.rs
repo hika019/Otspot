@@ -74,21 +74,45 @@ use std::time::Instant;
 /// [`RootPresolveInfo::hit_round_cap`].
 const ROOT_PRESOLVE_MAX_ROUNDS: usize = 12;
 
-/// Relative width tolerance for treating `[lb, ub]` as pinned: a column is
-/// fixed when `ub − lb ≤ tol · (1 + max(|lb|,|ub|))`. The relative term keeps
-/// large-magnitude MPS bounds (data like 1e6 with exact pinning) from being
-/// mis-read as floating-point slack of 1e-9.
+/// Relative width tolerance for treating a **continuous** `[lb, ub]` as
+/// pinned: a column is fixed when `ub − lb ≤ tol · (1 + max(|lb|,|ub|))`.
+/// The relative term keeps large-magnitude MPS bounds (data like 1e6 with
+/// exact pinning) from being mis-read as floating-point slack of 1e-9.
+/// Integer columns are NOT judged by this test — a width of 1 at 1e9 fits
+/// inside `tol · scale` while the interval still holds two integers, and
+/// pinning then deletes an integer point (PR #89 finding F1). Integer
+/// pinning uses [`unique_integer_in_bounds`] instead.
 const ROOT_PRESOLVE_PIN_TOL: f64 = 1e-9;
 
-/// Absolute part of the activity-vs-rhs margin used by redundant-row,
-/// forcing-row, and infeasibility detection: `tol = ABS + REL · scale` where
-/// `scale` is the sum of finite activity contributions plus `|rhs|`. Row
-/// activity sums over `nnz` terms, so a pure absolute tolerance would flag
-/// rows with large coefficients as "equal" when their floating-point
-/// accumulation error exceeds it.
+/// ULP budget for the integer pinning uniqueness test
+/// ([`unique_integer_in_bounds`]): the interval is widened by
+/// `ROOT_PRESOLVE_INT_UNIQUE_ULPS · f64::EPSILON · max(|lb|,|ub|)`, i.e.
+/// 1–2 ulps of the bound magnitude per unit. `ceil` and `floor` are
+/// exact on f64, so this eps only pays for the widening subtractions
+/// themselves. Any magnitude-scaled *decimal* tolerance (1e-9-class) is
+/// ~7 orders larger than ulp at 1e9 and would accept intervals spanning
+/// two integers.
+const ROOT_PRESOLVE_INT_UNIQUE_ULPS: f64 = 4.0;
+
+/// Absolute part of the activity-vs-rhs margin used by redundant-row and
+/// infeasibility detection: `tol = ABS + REL · scale` where `scale` is the
+/// sum of finite activity contributions plus `|rhs|`. Row activity sums
+/// over `nnz` terms, so a pure absolute tolerance would flag rows with
+/// large coefficients as "equal" when their floating-point accumulation
+/// error exceeds it. This is also the cap on genuine forcing slack —
+/// forcing decisions compare against the ABSOLUTE term only (see
+/// `row_pass`), never the inflated `tol`.
 const ROOT_PRESOLVE_ACT_ABS_TOL: f64 = 1e-9;
-/// Relative part of [`ROOT_PRESOLVE_ACT_ABS_TOL`]'s margin.
-const ROOT_PRESOLVE_ACT_REL_TOL: f64 = 1e-9;
+/// Relative part of [`ROOT_PRESOLVE_ACT_ABS_TOL`]'s margin: a real
+/// rounding-error bound for the activity sum, `64 · f64::EPSILON ·
+/// Σ|a_j · bound_j|`-class (the γ_k ≤ k·2⁻⁵³/Σ bound for rows of tens of
+/// terms with ~2 digits of safety). The previous 1e-9 looked like parse
+/// noise allowance but is ≈ 1.0 at 1e9-scale rows — ~7 orders above the
+/// ulp of the accumulated sum (ulp(2e9) ≈ 2.4e-7) — and let merely
+/// redundant rows read as forcing (PR #89 finding F2). Parse-noise
+/// tolerance belongs to data comparisons (`merge_pass` rhs bit checks),
+/// not to activity-vs-rhs decisions.
+const ROOT_PRESOLVE_ACT_REL_TOL: f64 = 64.0 * f64::EPSILON;
 
 /// Minimum `|a2|` accepted as a substitution pivot. Dividing by a smaller
 /// pivot amplifies round-off into the reconstructed value and into the
@@ -350,6 +374,25 @@ fn is_pinned(lb: f64, ub: f64) -> bool {
     (ub - lb) <= ROOT_PRESOLVE_PIN_TOL * (1.0 + lb.abs().max(ub.abs()))
 }
 
+/// The unique integer inside `[lb − eps, ub + eps]`, or `None` when the
+/// interval contains no integer or more than one. This is the sound
+/// integer-pinning criterion: removing the column is a bijection on
+/// integer points exactly when its integer-feasible set is a single
+/// point, which a width-vs-scale test cannot decide at large magnitude
+/// (F1: `[1e9, 1e9 + 1]` passes `1e-9 · scale` yet holds two integers;
+/// pinning loses one of them). The eps is ULP-scale
+/// ([`ROOT_PRESOLVE_INT_UNIQUE_ULPS`]), so exact integer data decides
+/// exactly and parse noise below a few ulps still pins as before.
+fn unique_integer_in_bounds(lb: f64, ub: f64) -> Option<f64> {
+    if !lb.is_finite() || !ub.is_finite() || lb > ub {
+        return None;
+    }
+    let eps = ROOT_PRESOLVE_INT_UNIQUE_ULPS * f64::EPSILON * lb.abs().max(ub.abs());
+    let lo = (lb - eps).ceil();
+    let hi = (ub + eps).floor();
+    (lo == hi).then_some(lo)
+}
+
 fn activity_margin(scale: f64) -> f64 {
     ROOT_PRESOLVE_ACT_ABS_TOL + ROOT_PRESOLVE_ACT_REL_TOL * scale
 }
@@ -494,29 +537,30 @@ impl RedState {
         if bounds != self.bounds {
             self.bounds = bounds;
         }
-        let mut infeasible = false;
         let mut pinned_any = false;
         for j in 0..self.bounds.len() {
-            if !self.alive_col[j] || !is_pinned(self.bounds[j].0, self.bounds[j].1) {
+            if !self.alive_col[j] {
                 continue;
             }
             let (lb, ub) = self.bounds[j];
-            let v = if self.integer[j] {
-                match integer_in_bounds(lb, ub) {
-                    Some(v) => v,
-                    None => {
-                        infeasible = true;
-                        continue;
-                    }
+            if self.integer[j] {
+                // Integer columns pin only on a UNIQUE integer in the
+                // interval (F1): the continuous width-vs-scale test would
+                // pin `[1e9, 1e9 + 1]` and delete an integer point. An
+                // interval containing no integer is left alone —
+                // `propagation_pass` already ceils/floors integer bounds
+                // and reports the empty-interval infeasibility there
+                // (fail-open here: keeping a column is always sound).
+                if let Some(v) = unique_integer_in_bounds(lb, ub) {
+                    self.pin_column(j, v);
+                    pinned_any = true;
                 }
-            } else {
-                pinned_point(lb, ub)
-            };
-            self.pin_column(j, v);
-            pinned_any = true;
-        }
-        if infeasible {
-            return None;
+                continue;
+            }
+            if is_pinned(lb, ub) {
+                self.pin_column(j, pinned_point(lb, ub));
+                pinned_any = true;
+            }
         }
         changed |= pinned_any;
         Some((changed, false))
@@ -546,8 +590,12 @@ impl RedState {
             if self.integer[j] && !is_integer_valued(endpoint) {
                 return None;
             }
-            let (cur_l, cur_u) = self.bounds[j];
-            if !is_pinned(cur_l, cur_u) {
+            // Already at the single point? Compare exactly: the continuous
+            // `is_pinned` scale test would call `[1e9, 1e9 + 1]` "pinned"
+            // and let the row be removed while this member keeps a full
+            // unit of width (F1 family). Writing equal bounds again is
+            // harmless, so this is purely the `changed` bookkeeping skip.
+            if lb != ub {
                 self.bounds[j] = (endpoint, endpoint);
                 *changed = true;
             }
@@ -626,12 +674,16 @@ impl RedState {
                         return (changed, true);
                     }
                     if max_act <= rhs + tol {
-                        // Row implied over the box. If the activity is also
-                        // pinned from below (forcing), every member is forced
-                        // to its min-activity endpoint; removal without that
-                        // pinning would be unsound, so keep the row when the
-                        // pin is refused.
-                        let forcing = min_act >= rhs - tol;
+                        // Row implied over the box. Pinning is only sound
+                        // for GENUINE forcing: the real slack `rhs −
+                        // min_act` below the absolute activity tolerance
+                        // means no feasible point can lift any member off
+                        // its min-activity endpoint. The scaled `tol`
+                        // bounds accumulation error, not forcing slack:
+                        // at 1e9-scale rows it is O(1)-wide and would
+                        // "force" endpoints of a merely redundant row,
+                        // deleting integer points (F2).
+                        let forcing = rhs - min_act <= ROOT_PRESOLVE_ACT_ABS_TOL;
                         if !forcing || self.force_endpoints(&entries, true, &mut changed).is_some()
                         {
                             self.rows[i].alive = false;
@@ -645,7 +697,8 @@ impl RedState {
                         return (changed, true);
                     }
                     if min_act >= rhs - tol {
-                        let forcing = max_act <= rhs + tol;
+                        // Mirror of the Le forcing rule above.
+                        let forcing = max_act - rhs <= ROOT_PRESOLVE_ACT_ABS_TOL;
                         if !forcing
                             || self
                                 .force_endpoints(&entries, false, &mut changed)
@@ -661,9 +714,23 @@ impl RedState {
                     if min_act > rhs + tol || max_act < rhs - tol {
                         return (changed, true);
                     }
-                    if max_act <= rhs + tol && min_act >= rhs - tol {
+                    // Per-side forcing (F2's equality analogue): pin only
+                    // when one extreme of the activity window coincides
+                    // with the rhs within the ABSOLUTE tolerance — then
+                    // every feasible point attains that extreme, so every
+                    // member sits at its endpoint for it. Pinning the
+                    // opposite extreme (the old scale-inflated test, which
+                    // fired whenever both sides were within `tol`) puts
+                    // the members at an endpoint whose activity misses
+                    // the rhs by up to 2·tol and drops feasible points.
+                    let lo_force = (min_act - rhs).abs() <= ROOT_PRESOLVE_ACT_ABS_TOL;
+                    let hi_force = (max_act - rhs).abs() <= ROOT_PRESOLVE_ACT_ABS_TOL;
+                    if lo_force || hi_force {
+                        // Pin the extreme that equals the rhs; if both do
+                        // (window collapsed onto it), prefer the closer.
+                        let at_min = lo_force && rhs - min_act <= max_act - rhs;
                         if self
-                            .force_endpoints(&entries, max_act - rhs <= rhs - min_act, &mut changed)
+                            .force_endpoints(&entries, at_min, &mut changed)
                             .is_some()
                         {
                             self.rows[i].alive = false;
@@ -671,12 +738,16 @@ impl RedState {
                             changed = true;
                         }
                     } else if max_act <= rhs + tol {
-                        // Upper side is the only binding one: the Eq's other
-                        // side is redundant over the box.
-                        self.rows[i].ctype = ConstraintType::Le;
+                        // The ≤ side holds over the whole box, so it is
+                        // the redundant half of the equality; keep the
+                        // ≥ side (the only one that can cut the box).
+                        // (The pre-fix form set Le here, keeping the
+                        // satisfied side and silently dropping the
+                        // binding constraint — same root cause, F2-adjacent.)
+                        self.rows[i].ctype = ConstraintType::Ge;
                         changed = true;
                     } else if min_act >= rhs - tol {
-                        self.rows[i].ctype = ConstraintType::Ge;
+                        self.rows[i].ctype = ConstraintType::Le;
                         changed = true;
                     }
                 }
@@ -1523,6 +1594,173 @@ mod tests {
             ),
             ReduceOutcome::Infeasible { .. } => panic!("an unbounded box is feasible"),
         }
+    }
+
+    /// Solve with default options/config (root presolve ON) for the
+    /// end-to-end review sentinels below.
+    fn solve_default(p: &MilpProblem) -> SolverResult {
+        let (res, _stats) =
+            crate::mip::solve_milp_with_stats(p, &SolverOptions::default(), &MipConfig::default());
+        res
+    }
+
+    /// An integer interval holding two integers is never pinned: removing
+    /// the column must be a bijection on integer points, and `[1e9,
+    /// 1e9 + 1]` has two of them.
+    ///
+    /// Pre-fix, the width-vs-scale pin test (`1e-9 · (1 + |b|) ≈ 1.0` at
+    /// this magnitude) pinned the column to 1e9 and published Optimal
+    /// obj −1e15 — the true optimum is −1e6·(1e9+1), a loss of exactly
+    /// 1e6 (PR #89 finding F1).
+    ///
+    /// Sentinel: restoring width-vs-scale integer pinning reproduces the
+    /// pinned point and the 1e6 objective loss → FAIL.
+    #[test]
+    fn wide_integer_interval_at_large_magnitude_is_not_pinned() {
+        // min −1e6·x, x integer in [1e9, 1e9+1], no rows.
+        let p = build_milp(
+            vec![-1e6],
+            &[],
+            0,
+            vec![],
+            vec![],
+            vec![(1e9, 1e9 + 1.0)],
+            vec![0],
+        );
+        assert!(
+            matches!(reduce(&p, None), ReduceOutcome::NotApplied { .. }),
+            "an integer interval with two integers must not reduce"
+        );
+        let res = solve_default(&p);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, -1e6 * (1e9_f64 + 1.0));
+        assert_eq!(res.solution, vec![1e9 + 1.0]);
+
+        // Control: a single-integer interval (sub-ulp parse slack) must
+        // still pin — the fix is uniqueness, not "never pin".
+        let q = build_milp(
+            vec![-1e6],
+            &[],
+            0,
+            vec![],
+            vec![],
+            vec![(1e9, 1e9 + 1e-9)],
+            vec![0],
+        );
+        match reduce(&q, None) {
+            ReduceOutcome::Reduced { reduced, .. } => assert_eq!(reduced.lp.num_vars, 0),
+            _ => panic!("a single-integer interval must pin"),
+        }
+        let res = solve_default(&q);
+        assert_eq!(res.objective, -1e15);
+        assert_eq!(res.solution, vec![1e9]);
+    }
+
+    /// A row that is merely redundant at 1e9 scale must not force its
+    /// members to endpoints.
+    ///
+    /// Pre-fix, forcing tested `min_act ≥ rhs − tol` with the scale-
+    /// inflated margin (`tol ≈ 4.000000009` for this row), so a real
+    /// slack of 4 — ten orders above the row's fp accumulation error
+    /// (ulp(2e9) ≈ 2.4e-7) — read as forcing: both columns pinned to 1e9
+    /// and Optimal obj −2e15 published, a 4e6 objective loss (PR #89
+    /// finding F2). Forcing now compares the real slack against the
+    /// absolute activity tolerance only.
+    ///
+    /// Sentinel: restoring the scale-relative forcing margin reproduces
+    /// the pins and the 4e6 loss → FAIL.
+    #[test]
+    fn redundant_large_magnitude_row_does_not_force_endpoints() {
+        // min −1e6·(x+y) s.t. x+y ≤ rhs; x, y integer in [1e9, 1e9+2].
+        // max activity is 2e9+4: any rhs ≥ that is redundant, never forcing.
+        let mk = |rhs: f64| {
+            build_milp(
+                vec![-1e6, -1e6],
+                &[(0, 0, 1.0), (0, 1, 1.0)],
+                1,
+                vec![rhs],
+                vec![ConstraintType::Le],
+                vec![(1e9, 1e9 + 2.0), (1e9, 1e9 + 2.0)],
+                vec![0, 1],
+            )
+        };
+        for rhs in [2e9 + 4.0, 2e9 + 8.0] {
+            let p = mk(rhs);
+            match reduce(&p, None) {
+                ReduceOutcome::Reduced { map, .. } => {
+                    assert!(
+                        map.pinned.iter().all(Option::is_none),
+                        "no member of a redundant row may be pinned (rhs = {rhs})"
+                    );
+                }
+                ReduceOutcome::NotApplied { .. } => {}
+                ReduceOutcome::Infeasible { .. } => panic!("the row is redundant, not infeasible"),
+            }
+            let res = solve_default(&p);
+            assert_eq!(res.status, SolveStatus::Optimal);
+            assert_eq!(res.objective, -2e6 * (1e9_f64 + 2.0));
+            assert_eq!(res.solution, vec![1e9 + 2.0, 1e9 + 2.0]);
+        }
+    }
+
+    /// An equality row pins members to the extreme whose activity EQUALS
+    /// the rhs (within the absolute forcing tolerance), and a one-side-
+    /// redundant equality weakens to the BINDING side.
+    ///
+    /// Pre-fix, an Eq row whose activity window sat within the scaled
+    /// `tol` of the rhs on both sides pinned every member to the side
+    /// picked by `max_act − rhs ≤ rhs − min_act` — at large magnitude
+    /// that is the extreme whose activity misses the rhs by up to 2·tol
+    /// (window [2e9, 2e9+4] with rhs 2e9+4 pinned the MIN endpoints, an
+    /// equality violation of 4 and a 4e6 objective loss). The one-side
+    /// weakening also kept the side it had just proven redundant,
+    /// dropping the binding constraint (usually rescued by the
+    /// verification fallback, so it degraded to a re-run rather than a
+    /// wrong answer). The rewrite is a regression guard: propagation
+    /// resolves these rows first, which is why no wrong-published
+    /// counterexample exists for this branch today.
+    ///
+    /// Sentinel: restoring the old side selection / weakening changes
+    /// the reduced structure or the published point → FAIL.
+    #[test]
+    fn equality_row_forces_only_the_side_equal_to_rhs() {
+        // x + y = 10, x in [0,8] int, y in [0,2] int, z = 3: the max
+        // activity equals the rhs, so the only feasible point is (8, 2).
+        let p = build_milp(
+            vec![1.0, 0.0, 0.0],
+            &[(0, 0, 1.0), (0, 1, 1.0), (1, 2, 1.0)],
+            2,
+            vec![10.0, 3.0],
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+            vec![(0.0, 8.0), (0.0, 2.0), (0.0, 5.0)],
+            vec![0, 1, 2],
+        );
+        let res = solve_default(&p);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, 8.0);
+        assert_eq!(res.solution, vec![8.0, 2.0, 3.0]);
+
+        let mk = |rhs: f64, c: f64| {
+            build_milp(
+                vec![c, c, 0.0],
+                &[(0, 0, 1.0), (0, 1, 1.0), (1, 2, 1.0)],
+                2,
+                vec![rhs, 3.0],
+                vec![ConstraintType::Eq, ConstraintType::Eq],
+                vec![(1e9, 1e9 + 2.0), (1e9, 1e9 + 2.0), (0.0, 5.0)],
+                vec![0, 1, 2],
+            )
+        };
+        // Upper extreme reaches 2e9+4 exactly: x = y = 1e9+2 is forced.
+        let res = solve_default(&mk(2e9 + 4.0, -1e6));
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, -2e6 * (1e9_f64 + 2.0));
+        assert_eq!(res.solution, vec![1e9 + 2.0, 1e9 + 2.0, 3.0]);
+        // Lower extreme reaches 2e9 exactly: x = y = 1e9 is forced.
+        let res = solve_default(&mk(2e9, 1e6));
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, 2e6 * 1e9);
+        assert_eq!(res.solution, vec![1e9, 1e9, 3.0]);
     }
 
     /// `verify_original_solution` rejects a wrong point (row violation) —
