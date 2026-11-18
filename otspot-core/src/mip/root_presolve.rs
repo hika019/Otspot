@@ -272,6 +272,27 @@ impl PostsolveMap {
         int_feas_tol: f64,
     ) -> Option<SolverResult> {
         let mut out = res.clone();
+        // Coordinate-dependent payloads are stated in the REDUCED space
+        // (its column and row numbering). Reconstructing them needs a
+        // full presolve inverse — the prices of removed rows for kept
+        // reduced costs, per-pinned-column dual products for the rest —
+        // which this root pass does not carry, and a wrong-length or
+        // wrong-space vector is worse than none. The `SolverResult`
+        // field contract is "coordinates of the problem the result
+        // describes", so the class is cleared, ray certificate and
+        // certificates included; `status` / `objective` / `solution` /
+        // `iterations` and `bound_gap_cert` (objective-space scalars,
+        // invariant under the bijection's constant offset) carry over.
+        // Unbounded status itself still holds (reduced unbounded ⇒
+        // original unbounded by the bijection contract), just without a
+        // ray this pass cannot re-derive in original coordinates.
+        out.reduced_costs = Vec::new();
+        out.dual_solution = Vec::new();
+        out.slack = Vec::new();
+        out.bound_duals = Vec::new();
+        out.warm_start_basis = None;
+        out.ray_certificate = None;
+        out.opt_cert = None;
         if self.kept.is_empty() {
             // Fully pinned: nothing was solved; the caller's placeholder
             // carries status/objective, the pinned point replaces the empty
@@ -1761,6 +1782,71 @@ mod tests {
         assert_eq!(res.status, SolveStatus::Optimal);
         assert_eq!(res.objective, 2e6 * 1e9);
         assert_eq!(res.solution, vec![1e9, 1e9, 3.0]);
+    }
+
+    /// `publish` must not leak reduced-space coordinate payloads into a
+    /// result that claims original-space lengths.
+    ///
+    /// Pre-fix, `publish` cloned the reduced result and remapped only
+    /// `solution`: a 2-variable problem (integer column pinned,
+    /// continuous kept) published a length-1 `reduced_costs` next to a
+    /// length-2 `solution`, and the unbounded path would do the same for
+    /// a ray certificate. Duals / reduced costs / slacks of the reduced
+    /// matrix have no free reconstruction (removed rows carry the
+    /// prices), so the whole payload class is cleared — the documented
+    /// contract for `SolverResult` fields is the problem they describe.
+    ///
+    /// Sentinel: removing the scrub restores the length-1 payloads → FAIL.
+    #[test]
+    fn publish_scrubs_reduced_coordinate_payloads() {
+        // min y s.t. y + x ≥ 1; x integer fixed at 0, y continuous.
+        let p = build_milp(
+            vec![0.0, 1.0],
+            &[(0, 0, 1.0), (0, 1, 1.0)],
+            1,
+            vec![1.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 0.0), (0.0, 10.0)],
+            vec![0],
+        );
+        let map = match reduce(&p, None) {
+            ReduceOutcome::Reduced { map, .. } => map,
+            _ => panic!("the pinned integer column must reduce the problem"),
+        };
+        // Reduced-space result (one kept column) carrying length-1
+        // coordinate payloads — exactly what the B&B layer hands over.
+        let crafted = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 2.0,
+            solution: vec![2.0],
+            reduced_costs: vec![0.0],
+            dual_solution: vec![1.0],
+            slack: vec![1.0],
+            bound_duals: vec![0.0],
+            ray_certificate: Some(crate::problem::RayCertificate {
+                direction: vec![-1.0],
+                base_point: vec![0.0],
+            }),
+            ..SolverResult::default()
+        };
+        let out = map
+            .publish(&crafted, &p, 1e-6)
+            .expect("the mapping verifies the pinned point");
+        assert_eq!(out.solution, vec![0.0, 2.0]);
+        assert!(out.reduced_costs.is_empty(), "reduced coords must not leak");
+        assert!(out.dual_solution.is_empty());
+        assert!(out.slack.is_empty());
+        assert!(out.bound_duals.is_empty());
+        assert!(out.ray_certificate.is_none());
+        assert!(out.opt_cert.is_none());
+
+        // End to end on the same model: no reduced-length vector is
+        // published beside an original-space solution.
+        let res = solve_default(&p);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, 1.0);
+        assert_eq!(res.solution, vec![0.0, 1.0]);
+        assert!(res.reduced_costs.is_empty() || res.reduced_costs.len() == 2);
     }
 
     /// `verify_original_solution` rejects a wrong point (row violation) —
