@@ -938,6 +938,7 @@ minimize
     ///
     /// **No-op failure guarantee**: removing `drop(a_triplets)` raises peak to
     /// ~129 MB → assertion fires. Threshold calibrated: Vec path ~100.4 MB; limit 115 MB.
+    /// sentinel: drop 漏れによる三重確保の再導入の張 — drop(a_triplets) を消すとピーク ~129MB が上限 115MB を超え fail
     #[test]
     fn test_memory_sentinel_no_double_hashmap_qplib8500() {
         let path = data_path("data/qplib/QPLIB_8500.qplib");
@@ -996,6 +997,7 @@ minimize
     ///
     /// **No-op failure guarantee**: reverting to `CscMatrix::from_triplets(..., n, n)`
     /// causes OOM before this assertion.
+    /// sentinel: filled slot 毎の CscMatrix::from_triplets への逆戻り (O(n^2) 確保) の張 — 逆戻りすると 224GB 確保で fail
     #[test]
     fn test_memory_sentinel_qplib8683_qcqp() {
         let path = data_path("data/qplib/QPLIB_8683.qplib");

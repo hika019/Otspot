@@ -518,6 +518,7 @@ fn test_box_only_nondiag_q_stall_reproducer() {
 /// No-op check: if the AND gate is reverted to OR (either_improved → fast decrease), ruiz=true
 /// will return SuboptimalSolution instead of Optimal, failing the assertion below.
 /// That is, this test MUST fail when the fix is removed.
+/// sentinel: PEU 停止判定の AND ゲートを OR へ逆戻りする張 — fast-decrease 単独停止へ戻すと SuboptimalSolution 判定に転じ fail
 #[test]
 #[allow(clippy::type_complexity)]
 fn test_peu_and_gate_box_only_nondiag_stall_sentinel() {
