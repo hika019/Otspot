@@ -74,15 +74,36 @@ use std::time::Instant;
 /// [`RootPresolveInfo::hit_round_cap`].
 const ROOT_PRESOLVE_MAX_ROUNDS: usize = 12;
 
-/// Relative width tolerance for treating a **continuous** `[lb, ub]` as
-/// pinned: a column is fixed when `ub − lb ≤ tol · (1 + max(|lb|,|ub|))`.
-/// The relative term keeps large-magnitude MPS bounds (data like 1e6 with
-/// exact pinning) from being mis-read as floating-point slack of 1e-9.
-/// Integer columns are NOT judged by this test — a width of 1 at 1e9 fits
-/// inside `tol · scale` while the interval still holds two integers, and
-/// pinning then deletes an integer point (PR #89 finding F1). Integer
-/// pinning uses [`unique_integer_in_bounds`] instead.
+/// Absolute part of the **continuous** pin width test ([`is_pinned`]):
+/// `ub − lb ≤ PIN_TOL + k · EPSILON · max(|lb|,|ub|)` with `k` from
+/// [`ROOT_PRESOLVE_ROUNDING_ULPS`]. The absolute floor absorbs parse /
+/// round-trip noise on ordinary-magnitude MPS bounds exactly as before;
+/// the magnitude-relative form this replaces (`1e-9 · (1 + |b|)`) grew
+/// to ≈ 1.0 at 1e9 and pinned real interval widths (PR #89 P1, see
+/// [`is_pinned`]). Integer columns are NOT judged by this test —
+/// pinning on a width-vs-scale test deletes integer points (PR #89
+/// finding F1); integer pinning uses [`unique_integer_in_bounds`].
 const ROOT_PRESOLVE_PIN_TOL: f64 = 1e-9;
+
+/// Shared ULP coefficient (k = 4) for every rounding-error budget that
+/// guards a **single computed f64 value** in this module: the
+/// continuous pin width ([`is_pinned`]), the singleton-equality
+/// integer-valued test, and the induced-bound loosening margin in
+/// [`RedState::eliminate_doubleton`]. Derivation of k: each guarded
+/// quantity is at most a few correctly-rounded operations on exact or
+/// already-budgeted operands — `ub − lb` is exact by Sterbenz for
+/// same-scale bounds (else the width exceeds any ulp guard by orders);
+/// `rhs / a` is one division (≤ 0.5 ulp); `(rhs − a2 · b2) / a1` is
+/// multiply + subtract + divide with every intermediate within 2× of
+/// the result (≤ 1.5 ulp) — so ≤ 2 ulps of true slack; k = 4 doubles
+/// that as headroom. Deliberately the twin value of
+/// [`ROOT_PRESOLVE_INT_UNIQUE_ULPS`] (4.0, same rounding-budget
+/// rationale from a different test; kept as a separate const because
+/// the two guard different decisions and may need to diverge). At 1e9
+/// the guard is `4 · 2⁻⁵³ · 1e9 ≈ 8.9e-7 ≪ 1`: a real unit-scale width
+/// survives, while any magnitude-scaled *decimal* tolerance (1e-6 /
+/// 1e-9 class) sits ~7 orders above the ulp there and swallows it.
+const ROOT_PRESOLVE_ROUNDING_ULPS: f64 = 4.0;
 
 /// ULP budget for the integer pinning uniqueness test
 /// ([`unique_integer_in_bounds`]): the interval is widened by
@@ -120,11 +141,16 @@ const ROOT_PRESOLVE_ACT_REL_TOL: f64 = 64.0 * f64::EPSILON;
 /// (same magnitude floor the simplex uses for pivots, `PIVOT_TOL`-class).
 const ROOT_PRESOLVE_SUBST_MIN_PIVOT: f64 = 1e-8;
 
-/// Safety loosening applied to the bound induced on `x1` by eliminating
-/// `x2` before integer rounding: `new_ub += margin · (1 + |new_ub|)`
-/// (symmetrically for `lb`). The induced bound is exact arithmetic on exact
-/// MPS data; the margin only pays for f64 round-off in the division and
-/// cannot cut off a true optimum by more than the solver's own tolerances.
+/// Absolute floor of the safety loosening applied to the bound induced
+/// on `x1` by eliminating `x2`: each induced side becomes `cap +
+/// MARGIN + k · EPSILON · |cap|` (symmetrically `cap − …`) with `k`
+/// from [`ROOT_PRESOLVE_ROUNDING_ULPS`]. The induced bound is exact
+/// arithmetic on exact MPS data; the margin only pays for f64 round-off
+/// in `(rhs − a2 · b2) / a1` (≤ 1.5 ulp). The
+/// magnitude-relative form this replaced (`1e-9 · (1 + |cap|)`, ≈ ±1.0
+/// at 1e9) is direction-conservative — it loosens, never cuts off a
+/// true optimum — but at 1e9 it forfeited the induced tightening
+/// entirely (PR #89 P1 latent class).
 const ROOT_PRESOLVE_SUBST_BOUND_MARGIN: f64 = 1e-9;
 
 /// Tolerance for testing whether a coefficient / rhs is integer-valued when
@@ -381,6 +407,16 @@ fn pinned_point(lb: f64, ub: f64) -> f64 {
     }
 }
 
+/// Continuous pin test: the interval is floating-point slack around one
+/// point when its width is inside the rounding budget — absolute floor
+/// for parse noise plus a ULP term for fp-derived bounds
+/// (`ub − lb ≤ PIN_TOL + k · EPSILON · max(|lb|,|ub|)`). The previous
+/// magnitude-relative form `1e-9 · (1 + max(|lb|,|ub|))` reached ≈ 1.0
+/// at 1e9 and pinned `[1e9, 1e9 + 1]` to its lower endpoint: the column
+/// of real width 1 vanished and the published optimum lost exactly 1e6
+/// of objective — postsolve verification cannot see this damage, the
+/// pinned point is perfectly feasible (PR #89 P1, continuous twin of
+/// F1). At 1e9 the guard here is ≈ 8.9e-7: real widths survive.
 fn is_pinned(lb: f64, ub: f64) -> bool {
     // Both sides must be finite: an infinite bound is never "pinned"
     // (the width-vs-scale test alone degenerates because
@@ -392,7 +428,8 @@ fn is_pinned(lb: f64, ub: f64) -> bool {
     if lb > ub {
         return false;
     }
-    (ub - lb) <= ROOT_PRESOLVE_PIN_TOL * (1.0 + lb.abs().max(ub.abs()))
+    let scale = lb.abs().max(ub.abs());
+    (ub - lb) <= ROOT_PRESOLVE_PIN_TOL + ROOT_PRESOLVE_ROUNDING_ULPS * f64::EPSILON * scale
 }
 
 /// The unique integer inside `[lb − eps, ub + eps]`, or `None` when the
@@ -670,7 +707,20 @@ impl RedState {
                 let v = rhs / a;
                 if self.integer[j] {
                     let r = v.round();
-                    if (v - r).abs() > ROOT_PRESOLVE_INT_DATA_TOL * (1.0 + v.abs()) {
+                    // Integer-valued test on the quotient: an exactly
+                    // integer rhs/a misses round(v) by ≤ 0.5 ulp (one
+                    // correctly-rounded division), so the budget is the
+                    // parse-noise floor plus the shared ULP term. The
+                    // magnitude-relative form (`1e-6 · (1 + |v|)` ≈
+                    // ±1000 at 1e9) "rounded" any fractional quotient
+                    // to an integer there (PR #89 P1 latent site:
+                    // propagation's integer ceil/floor collapses the
+                    // box before this line fires in practice, so this
+                    // is hardening, not a live counterexample).
+                    if (v - r).abs()
+                        > ROOT_PRESOLVE_INT_DATA_TOL
+                            + ROOT_PRESOLVE_ROUNDING_ULPS * f64::EPSILON * v.abs()
+                    {
                         return (changed, true);
                     }
                     let (lb, ub) = self.bounds[j];
@@ -855,7 +905,12 @@ impl RedState {
                 is_lower_for_x1
             };
             let cap = (rhs - a2 * bound2) / a1;
-            let m = ROOT_PRESOLVE_SUBST_BOUND_MARGIN * (1.0 + cap.abs());
+            // Rounding budget for `cap`, not a relative bound slack
+            // (see ROOT_PRESOLVE_SUBST_BOUND_MARGIN: the old
+            // magnitude-relative margin was ±1.0 at 1e9 and silently
+            // forfeited the induced tightening).
+            let m = ROOT_PRESOLVE_SUBST_BOUND_MARGIN
+                + ROOT_PRESOLVE_ROUNDING_ULPS * f64::EPSILON * cap.abs();
             if a1 > 0.0 {
                 // cap is the direct bound on x1.
                 if hi_side {
@@ -1913,6 +1968,162 @@ mod tests {
         assert!(
             !verify_original_solution(&p, &[3.5, 0.5], 1e-6),
             "fractional point on integer columns must be rejected"
+        );
+    }
+
+    /// Continuous twin of the F1 sentinel: an interval of *real* width 1
+    /// at 1e9 magnitude is not floating-point slack around one point.
+    ///
+    /// Pre-fix (PR #89 finding P1), `is_pinned`'s magnitude-relative
+    /// test (`1e-9 · (1 + |b|) ≈ 1.0` at 1e9) pinned the continuous
+    /// column to its lower endpoint and postsolve verification could not
+    /// see the damage — the pinned point is perfectly feasible, only
+    /// the objective silently lost exactly 1e6 (the N1 repro published
+    /// Optimal obj 0 for the 1e15-shifted form of this model).
+    ///
+    /// Sentinel: restoring the relative width test reproduces the pin
+    /// and the 1e6 objective loss → FAIL.
+    #[test]
+    fn wide_continuous_interval_at_large_magnitude_is_not_pinned() {
+        // Unit level: real width survives, ULP slack still pins (the
+        // fix is a rounding budget, not "never pin"), and the absolute
+        // floor keeps ordinary-magnitude parse noise pinned.
+        assert!(!is_pinned(1e9, 1e9 + 1.0), "width 1 at 1e9 is real");
+        assert!(
+            is_pinned(1e9, 1e9 + 4.0 * f64::EPSILON * 1e9),
+            "ulp-scale slack must still pin"
+        );
+        assert!(
+            is_pinned(1.0, 1.0 + 1e-10),
+            "absolute floor must keep small-scale parse noise pinned"
+        );
+        // N1 repro (mod the constant 1e15): min −1e6·x with x continuous
+        // in [1e9, 1e9+1] and an integer column z fixed at 0, no rows.
+        let p = build_milp(
+            vec![-1e6, 0.0],
+            &[],
+            0,
+            vec![],
+            vec![],
+            vec![(1e9, 1e9 + 1.0), (0.0, 0.0)],
+            vec![1],
+        );
+        match reduce(&p, None) {
+            ReduceOutcome::Reduced { reduced, map, .. } => {
+                assert!(
+                    map.pinned[0].is_none(),
+                    "the width-1 column must stay alive"
+                );
+                assert_eq!(reduced.lp.num_vars, 1, "only the fixed z may be removed");
+            }
+            ReduceOutcome::NotApplied { .. } => panic!("the fixed integer column must reduce"),
+            ReduceOutcome::Infeasible { .. } => panic!("the box is feasible"),
+        }
+        let res = solve_default(&p);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, -1e6 * (1e9_f64 + 1.0));
+        assert_eq!(res.solution, vec![1e9 + 1.0, 0.0]);
+    }
+
+    /// A singleton equality fixing an integer column at a fractional
+    /// value of 1e9 magnitude stays Infeasible end to end.
+    ///
+    /// Regression guard with LIMITED discriminating power (like the
+    /// equality-side forcing sibling): `propagate_and_fix` runs before
+    /// `row_pass` in every round, and the propagator's integer
+    /// ceil/floor collapses the box well before the singleton rounding
+    /// line fires — the pre-fix ±(1e-6·(1+|v|)) ≈ ±1000 tolerance was
+    /// already masked in practice, so this site is latent hardening and
+    /// reverting the tolerance change may still pass here. What this
+    /// test must never do is flip: the problem has no integer solution.
+    ///
+    /// Sentinel: over-tightening the rounding budget so an exact
+    /// integer singleton stops pinning (control case), or any flip of
+    /// the infeasible verdict → FAIL.
+    #[test]
+    fn fractional_singleton_equality_at_large_magnitude_stays_infeasible() {
+        // x integer in [0, 2e9], row x = 1e9 + 0.5: no integer solution.
+        let p = build_milp(
+            vec![1.0],
+            &[(0, 0, 1.0)],
+            1,
+            vec![1e9 + 0.5],
+            vec![ConstraintType::Eq],
+            vec![(0.0, 2e9)],
+            vec![0],
+        );
+        assert!(
+            matches!(reduce(&p, None), ReduceOutcome::Infeasible { .. }),
+            "x = 1e9 + 0.5 for integer x is infeasible"
+        );
+        let res = solve_default(&p);
+        assert_eq!(res.status, SolveStatus::Infeasible);
+
+        // Control: the exactly-integer singleton still pins cleanly at
+        // the same magnitude (the budget accepts exact division).
+        let q = build_milp(
+            vec![1.0],
+            &[(0, 0, 1.0)],
+            1,
+            vec![1e9],
+            vec![ConstraintType::Eq],
+            vec![(0.0, 2e9)],
+            vec![0],
+        );
+        match reduce(&q, None) {
+            ReduceOutcome::Reduced { map, .. } => {
+                assert_eq!(map.pinned, vec![Some(1e9)], "exact singleton must pin");
+            }
+            ReduceOutcome::NotApplied { .. } => panic!("the singleton row must reduce"),
+            ReduceOutcome::Infeasible { .. } => panic!("x = 1e9 is feasible"),
+        }
+        let res = solve_default(&q);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, 1e9);
+        assert_eq!(res.solution, vec![1e9]);
+    }
+
+    /// The induced-bound loosening margin of a doubleton substitution is
+    /// a ULP rounding budget, not a magnitude-relative bound slack.
+    ///
+    /// The margin is direction-conservative (it only ever loosens the
+    /// induced bound, never cuts off a true optimum), but the
+    /// pre-fix form `1e-9 · (1 + |cap|)` reached ≈ ±1.0 at 1e9-scale
+    /// caps and silently forfeited the tightening entirely (PR #89 P1
+    /// latent class). Called directly so the propagator — which
+    /// re-derives the same bound exactly and would mask the margin in a
+    /// full `reduce` — is bypassed.
+    ///
+    /// Sentinel: restoring the relative margin leaves the induced upper
+    /// bound at 1e9 + 1.0 instead of 1e9 + O(ulp) → FAIL.
+    #[test]
+    fn subst_induced_margin_is_ulp_scale_not_magnitude_relative() {
+        // x1 continuous in [0, 2e9], x2 continuous in [0, 1e9];
+        // eliminate x2 from x1 + x2 = 1e9 → x1 ≤ 1e9 + margin.
+        let p = build_milp(
+            vec![-1.0, 0.0],
+            &[(0, 0, 1.0), (0, 1, 1.0)],
+            1,
+            vec![1e9],
+            vec![ConstraintType::Eq],
+            vec![(0.0, 2e9), (0.0, 1e9)],
+            vec![],
+        );
+        let mut st = RedState::new(&p);
+        assert!(
+            st.eliminate_doubleton(1, 1.0, 1e9, 0, 1.0),
+            "continuous doubleton must fire"
+        );
+        assert!(!st.alive_col[1]);
+        assert_eq!(st.bounds[0].0, 0.0, "the lower cap 0 − m must not cut 0");
+        let slack = st.bounds[0].1 - 1e9;
+        assert!(slack > 0.0, "margin loosens outward, never cuts");
+        assert!(
+            slack
+                <= ROOT_PRESOLVE_SUBST_BOUND_MARGIN
+                    + ROOT_PRESOLVE_ROUNDING_ULPS * f64::EPSILON * 1e9,
+            "induced slack {slack} at cap 1e9 must be a ulp budget (pre-fix \
+             magnitude-relative margin was ≈ 1.0)"
         );
     }
 }
