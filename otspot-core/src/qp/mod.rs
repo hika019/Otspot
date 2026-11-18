@@ -13,7 +13,7 @@ pub(crate) mod lp_dispatch;
 pub mod multistart;
 pub(crate) mod postsolve;
 mod problem;
-pub(crate) mod qcqp_route;
+pub mod qcqp_route;
 pub use global::{solve_qp_global, solve_qp_global_with_stats, GlobalStats};
 #[doc(hidden)]
 /// Returns `true` when an LP of size `(n, m)` will be routed via IPM-first
