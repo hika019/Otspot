@@ -1090,6 +1090,7 @@ fn build_all_equality_dcq(n: usize, m: usize) -> QpProblem {
 /// point: the pre-gate moves *when* the decision is made, never *what* it
 /// is (corpus-wide equivalence:
 /// `root_box_pre_gate_agrees_with_materialized_root_box`).
+/// sentinel: root box の却下判定が密行変換前の疎入力で発火する張 — 密変換後発動へ戻すと dense DCQ のピーク確保が上限を超過し fail
 #[test]
 fn qcqp_route_rejects_dense_dcq_at_sparse_root_gate() {
     let _serial = lock_measurement();

@@ -323,6 +323,7 @@ fn faer_par_threads_sweep_monotone() {
 /// `par_thread_count == 1` の assert が FAIL する。
 /// 1-thread pool 内で `Par::Rayon(N)` が使われた場合も rayon 設計上デッドロックはしないが
 /// エンコーディング assert で検出される。
+/// sentinel: threads=1 で Par::Rayon(N>1) を選ぶ回帰の張 — solver_par_from_threads(1) が Rayon を返すと fail
 #[test]
 fn ipm_threads_1_par_seq_budget_sentinel() {
     use otspot_core::options::SolverOptions;
@@ -383,6 +384,7 @@ fn ipm_threads_1_par_seq_budget_sentinel() {
 ///
 /// 失敗条件: `solver_par_from_threads(2)` が `Par::Seq` を返すよう改変すると
 /// `par_thread_count == 2` の assert が FAIL する。
+/// sentinel: threads=2 が Par::Seq へ退化する回帰の張 — solver_par_from_threads(2) が Seq を返すと fail
 #[test]
 fn ipm_threads_2_par_rayon_budget_sentinel() {
     use otspot_core::options::SolverOptions;

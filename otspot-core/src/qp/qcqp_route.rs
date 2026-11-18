@@ -1282,6 +1282,7 @@ mod tests {
     /// convexity verdicts, the rule-2 diagonals) on every corpus shape —
     /// by shared fold code, pinned against drift in `lift_coeffs_from_coo`
     /// or `quad_coo_rows`' order/multiplicity/sign mirroring.
+    /// sentinel: COO から導出した境界要求が materialized 版と一致する張 — quad_coo_rows の走査順序/多重度/符号が崩れると fail
     #[test]
     fn coo_effective_requirement_matches_materialized_root_box_gate() {
         for (name, p) in root_box_gate_agreement_corpus() {
@@ -1314,6 +1315,7 @@ mod tests {
     /// (the materialized path runs verbatim there). The corpus must cover
     /// both the fire branch and the conservative-abstention-with-eventual-
     /// rejection branch, or the agreement is vacuous.
+    /// sentinel: 疎入力の事前ゲートが materialized 版ゲートと意味一致する張 — 事前ゲートが oracle と分岐して受理/却下が反転すると fail
     #[test]
     fn root_box_pre_gate_agrees_with_materialized_root_box() {
         let mut pre_fires = 0usize;
