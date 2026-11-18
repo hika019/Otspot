@@ -1020,6 +1020,117 @@ fn test_forcing_not_triggered_when_slack() {
     assert_eq!(result.reduced_problem.num_constraints, 1, "row stays");
 }
 
+/// sentinel: restoring the scale-free `± ZERO_TOL` forcing slack on the Le /
+/// Ge / Eq sides makes every case below take a `PostsolveStep::ForcingRow`
+/// (both columns pinned to 0) → FAIL.
+#[test]
+fn test_forcing_tiny_coefficient_scale_is_not_forcing() {
+    // The MILP root-presolve P1 class on the LP path. Coefficients live
+    // just above the state-build pruning floor (|a| < ZERO_TOL is dropped
+    // in `PresolveState::from_problem`, a separate same-family site — see
+    // the PR #89 census), so rows reach step2b with every slack of the
+    // row below ZERO_TOL: the absolute 1e-12 reads them as forcing and
+    // pins members that still have a 0.05-wide feasible move (a·width =
+    // 2e-11 ≫ rhs).
+    let no_forcing = |vals: &[f64], b: f64, ct: ConstraintType, why: &str| {
+        let lp = make_lp_general(
+            vec![-1.0, -1.0],
+            &[0, 0],
+            &[0, 1],
+            vals,
+            1,
+            2,
+            vec![b],
+            vec![ct],
+            vec![(0.0, 1.0), (0.0, 1.0)],
+        );
+        let result = run_presolve(&lp, None).unwrap();
+        assert!(
+            !result
+                .postsolve_stack
+                .iter()
+                .any(|s| matches!(s, PostsolveStep::ForcingRow { .. })),
+            "{why}: a row whose whole activity window is below ZERO_TOL must \
+             not force (later steps may legitimately drop it, but never by pinning)"
+        );
+    };
+    // (a) Le: 1e-11·x + 1e-11·y ≤ 5e-13 (⟺ x + y ≤ 0.05): the rhs is 20×
+    // below the row's full width, yet the old `row_lb ≥ rhs − ZERO_TOL`
+    // fired because the slack 5e-13 < 1e-12.
+    no_forcing(
+        &[1e-11, 1e-11],
+        5e-13,
+        ConstraintType::Le,
+        "Le redundant-scale row",
+    );
+    // (b) Ge mirror: −1e-11·x − 1e-11·y ≥ −5e-13 (⟺ x + y ≤ 0.05).
+    no_forcing(
+        &[-1e-11, -1e-11],
+        -5e-13,
+        ConstraintType::Ge,
+        "Ge mirror redundant-scale row",
+    );
+    // (c) Eq interior: 1e-11·x + 1e-11·y = 5e-13 (⟺ x + y = 0.05) — the
+    // rhs is strictly inside the activity window [0, 2e-11].
+    no_forcing(
+        &[1e-11, 1e-11],
+        5e-13,
+        ConstraintType::Eq,
+        "Eq with rhs inside the window",
+    );
+}
+
+/// sentinel: tightening the forcing margin below zero slack (or disabling
+/// the forcing rule) drops these genuine pins → FAIL.
+#[test]
+fn test_forcing_tiny_coefficient_scale_genuine_still_forces() {
+    // Genuinely forcing rows at this scale keep zero slack, which any
+    // rounding budget accepts.
+    // (a) Le: 1e-11·x + 1e-11·y ≤ 0 — only (0, 0) is feasible.
+    let lp = make_lp_general(
+        vec![-1.0, -1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1e-11, 1e-11],
+        1,
+        2,
+        vec![0.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 1.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(
+        result
+            .postsolve_stack
+            .iter()
+            .any(|s| matches!(s, PostsolveStep::ForcingRow { .. })),
+        "x + y ≤ 0 must still force both columns to 0"
+    );
+
+    // (b) Eq from above: 1e-11·x + 1e-11·y = 2e-11 (⟺ x + y = 2) — only
+    // (1, 1) is feasible; the objective transfer must carry −2.
+    let lp = make_lp_general(
+        vec![-1.0, -1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1e-11, 1e-11],
+        1,
+        2,
+        vec![2e-11],
+        vec![ConstraintType::Eq],
+        vec![(0.0, 1.0), (0.0, 1.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert_eq!(
+        result.reduced_problem.num_vars, 0,
+        "x + y = 2 must still force both columns to 1"
+    );
+    assert!(
+        (result.obj_offset + 2.0).abs() < 1e-12,
+        "the forced point (1, 1) carries the full objective"
+    );
+}
+
 // -----------------------------------------------------------
 // P1-1: ForcingRow dual recovery with prior FixedVariable
 // -----------------------------------------------------------

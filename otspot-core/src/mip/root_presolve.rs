@@ -120,9 +120,11 @@ const ROOT_PRESOLVE_INT_UNIQUE_ULPS: f64 = 4.0;
 /// sum of finite activity contributions plus `|rhs|`. Row activity sums
 /// over `nnz` terms, so a pure absolute tolerance would flag rows with
 /// large coefficients as "equal" when their floating-point accumulation
-/// error exceeds it. This is also the cap on genuine forcing slack —
-/// forcing decisions compare against the ABSOLUTE term only (see
-/// `row_pass`), never the inflated `tol`.
+/// error exceeds it. The FORCING decisions do NOT compare against this
+/// margin (nor its absolute term): pinning endpoints needs the
+/// coefficient-aware [`forcing_margin`], and the F2 fix's use of this
+/// absolute term as the forcing cap failed at small coefficient scale
+/// (PR #89 P1 — see [`forcing_margin`]).
 const ROOT_PRESOLVE_ACT_ABS_TOL: f64 = 1e-9;
 /// Relative part of [`ROOT_PRESOLVE_ACT_ABS_TOL`]'s margin: a real
 /// rounding-error bound for the activity sum, `64 · f64::EPSILON ·
@@ -455,6 +457,61 @@ fn activity_margin(scale: f64) -> f64 {
     ROOT_PRESOLVE_ACT_ABS_TOL + ROOT_PRESOLVE_ACT_REL_TOL * scale
 }
 
+/// Coefficient-aware margin for the **forcing** decision on one side
+/// (`at_min` = the min-activity endpoint). Pinning a member to its
+/// activity endpoint is sound only when no *distinct* f64 point of that
+/// member's interval keeps the row feasible: moving member `j` one
+/// representable step into its interval raises the row activity by
+/// `|a_j| · δ`, and the smallest step representable AT THAT ENDPOINT is
+/// `PIN_TOL + k · EPSILON · |endpoint_j|` — the same ULP budget
+/// [`is_pinned`] uses to call a width real, evaluated at the endpoint the
+/// pin would write (`at_min` selects the side; the opposite, possibly
+/// infinite bound plays no role here — it is never the landing point).
+/// The row forces only when the slack cannot pay even the cheapest such
+/// move: `slack ≤ min_j |a_j|·quantum_j`, plus the rounding budget of the
+/// activity sum itself (`REL · scale`, the [`ROOT_PRESOLVE_ROUNDING_ULPS`]
+/// rationale scaled to a whole sum — without it a genuinely forcing row
+/// whose `min_act` carries accumulation error could never decide at large
+/// magnitude). A scale-free constant fails at BOTH ends: the original
+/// `1e-9 · scale` read rows with slack 4 at 1e9 magnitude as forcing
+/// (finding F2), and its replacement — the absolute 1e-9 — is *5× an
+/// entire row* at 1e-10 coefficient scale, turning that row's redundant
+/// rows into endpoint pins (PR #89 P1 small-scale finding:
+/// `1e-10·x + 1e-10·y ≤ 2e-10` with binary x, y pinned both to 0 and
+/// published Optimal obj 0 against the true −2 at (1, 1)). Both failures
+/// are the same decision comparing a row slack to a quantity unrelated to
+/// the row's own coefficients.
+fn forcing_margin(
+    entries: &[(usize, f64)],
+    bounds: &[(f64, f64)],
+    scale: f64,
+    at_min: bool,
+) -> f64 {
+    let quantum = entries
+        .iter()
+        .map(|&(j, a)| {
+            let (lb, ub) = bounds[j];
+            // The endpoint `force_endpoints` would write for this member
+            // (mirrors its `(a > 0) == at_min` choice). A non-finite
+            // endpoint cannot be pinned at all — `force_endpoints` keeps
+            // the row in that case — so the member must not gate the
+            // margin with an infinite quantum.
+            let endpoint = if (a > 0.0) == at_min { lb } else { ub };
+            if !endpoint.is_finite() {
+                return f64::INFINITY;
+            }
+            a.abs()
+                * (ROOT_PRESOLVE_PIN_TOL
+                    + ROOT_PRESOLVE_ROUNDING_ULPS * f64::EPSILON * endpoint.abs())
+        })
+        .fold(f64::INFINITY, f64::min);
+    // When NO member has a finite landing endpoint no pin can ever be
+    // written (`force_endpoints` returns `None` for the caller), so the
+    // movement term drops out of the gate entirely.
+    let movement = if quantum.is_finite() { quantum } else { 0.0 };
+    ROOT_PRESOLVE_ACT_REL_TOL * scale + movement
+}
+
 /// Min/max activity of a row over the current box. `None` when the needed
 /// side is unbounded (∞ coefficients — the caller skips activity rules).
 fn row_activity_bounds(entries: &[(usize, f64)], bounds: &[(f64, f64)]) -> Option<(f64, f64)> {
@@ -746,15 +803,17 @@ impl RedState {
                     }
                     if max_act <= rhs + tol {
                         // Row implied over the box. Pinning is only sound
-                        // for GENUINE forcing: the real slack `rhs −
-                        // min_act` below the absolute activity tolerance
-                        // means no feasible point can lift any member off
-                        // its min-activity endpoint. The scaled `tol`
-                        // bounds accumulation error, not forcing slack:
-                        // at 1e9-scale rows it is O(1)-wide and would
-                        // "force" endpoints of a merely redundant row,
-                        // deleting integer points (F2).
-                        let forcing = rhs - min_act <= ROOT_PRESOLVE_ACT_ABS_TOL;
+                        // for GENUINE forcing: no member may be able to pay
+                        // for its cheapest in-interval move out of the real
+                        // slack `rhs − min_act` (see [`forcing_margin`]).
+                        // The scaled `tol` bounds accumulation error, not
+                        // forcing slack: at 1e9-scale rows it is O(1)-wide
+                        // and "forced" endpoints of merely redundant rows
+                        // (F2); the previous absolute 1e-9 then did the
+                        // mirror damage at small coefficient scale, where
+                        // 1e-9 is larger than the entire row (P1).
+                        let forcing =
+                            rhs - min_act <= forcing_margin(&entries, &self.bounds, scale, true);
                         if !forcing || self.force_endpoints(&entries, true, &mut changed).is_some()
                         {
                             self.rows[i].alive = false;
@@ -768,8 +827,11 @@ impl RedState {
                         return (changed, true);
                     }
                     if min_act >= rhs - tol {
-                        // Mirror of the Le forcing rule above.
-                        let forcing = max_act - rhs <= ROOT_PRESOLVE_ACT_ABS_TOL;
+                        // Mirror of the Le forcing rule above: the slack
+                        // below the max-activity endpoint measured against
+                        // the same [`forcing_margin`] (max-activity side).
+                        let forcing =
+                            max_act - rhs <= forcing_margin(&entries, &self.bounds, scale, false);
                         if !forcing
                             || self
                                 .force_endpoints(&entries, false, &mut changed)
@@ -787,15 +849,18 @@ impl RedState {
                     }
                     // Per-side forcing (F2's equality analogue): pin only
                     // when one extreme of the activity window coincides
-                    // with the rhs within the ABSOLUTE tolerance — then
-                    // every feasible point attains that extreme, so every
-                    // member sits at its endpoint for it. Pinning the
-                    // opposite extreme (the old scale-inflated test, which
-                    // fired whenever both sides were within `tol`) puts
-                    // the members at an endpoint whose activity misses
-                    // the rhs by up to 2·tol and drops feasible points.
-                    let lo_force = (min_act - rhs).abs() <= ROOT_PRESOLVE_ACT_ABS_TOL;
-                    let hi_force = (max_act - rhs).abs() <= ROOT_PRESOLVE_ACT_ABS_TOL;
+                    // with the rhs within the coefficient-aware forcing
+                    // margin of THAT side ([`forcing_margin`]) — then every
+                    // feasible point attains that extreme, so every member
+                    // sits at its endpoint for it. Pinning the opposite
+                    // extreme (the old scale-inflated test, which fired
+                    // whenever both sides were within `tol`) puts the
+                    // members at an endpoint whose activity misses the rhs
+                    // by up to 2·tol and drops feasible points.
+                    let lo_force = (min_act - rhs).abs()
+                        <= forcing_margin(&entries, &self.bounds, scale, true);
+                    let hi_force = (max_act - rhs).abs()
+                        <= forcing_margin(&entries, &self.bounds, scale, false);
                     if lo_force || hi_force {
                         // Pin the extreme that equals the rhs; if both do
                         // (window collapsed onto it), prefer the closer.
@@ -1785,8 +1850,8 @@ mod tests {
     }
 
     /// An equality row pins members to the extreme whose activity EQUALS
-    /// the rhs (within the absolute forcing tolerance), and a one-side-
-    /// redundant equality weakens to the BINDING side.
+    /// the rhs (within the coefficient-aware forcing margin), and a
+    /// one-side-redundant equality weakens to the BINDING side.
     ///
     /// Pre-fix, an Eq row whose activity window sat within the scaled
     /// `tol` of the rhs on both sides pinned every member to the side
@@ -2125,5 +2190,244 @@ mod tests {
             "induced slack {slack} at cap 1e9 must be a ulp budget (pre-fix \
              magnitude-relative margin was ≈ 1.0)"
         );
+    }
+
+    /// P1 (PR #89, small-coefficient-scale twin of F2): a row that is merely
+    /// redundant at 1e-10 coefficient scale must not force its members to
+    /// endpoints.
+    ///
+    /// Pre-fix, forcing tested `rhs − min_act ≤ ROOT_PRESOLVE_ACT_ABS_TOL` —
+    /// an absolute 1e-9 that is 5× the ENTIRE row here (coefficients 1e-10,
+    /// rhs 2e-10): the redundant row `1e-10·x + 1e-10·y ≤ 2e-10` with binary
+    /// x, y read as forcing, pinned both to 0, and the fully-pinned path
+    /// published Optimal obj 0 while (1, 1) is feasible with objective −2 —
+    /// and postsolve verification accepts the inferior point (it is
+    /// perfectly feasible; only the objective is wrong). A scale-free
+    /// constant cannot separate "slack is rounding noise" from "slack is
+    /// the whole row": the forcing margin must scale with the row's own
+    /// [`forcing_margin`] (the per-member movement floor plus the activity
+    /// sum's rounding budget).
+    ///
+    /// sentinel: restoring `rhs − min_act ≤ ROOT_PRESOLVE_ACT_ABS_TOL`
+    /// reproduces the pins, the row removal and the Optimal-obj-0
+    /// publication → FAIL.
+    #[test]
+    fn tiny_coefficient_redundant_row_does_not_force_endpoints() {
+        // min −x−y s.t. 1e-10·x + 1e-10·y ≤ 2e-10; x, y binary. The whole
+        // box satisfies the row (max activity 2e-10 = rhs), so removing it
+        // without pinning is the only sound reduction.
+        let p = build_milp(
+            vec![-1.0, -1.0],
+            &[(0, 0, 1e-10), (0, 1, 1e-10)],
+            1,
+            vec![2e-10],
+            vec![ConstraintType::Le],
+            vec![(0.0, 1.0), (0.0, 1.0)],
+            vec![0, 1],
+        );
+        match reduce(&p, None) {
+            ReduceOutcome::Reduced { map, .. } => {
+                assert!(
+                    map.pinned.iter().all(Option::is_none),
+                    "no member of a row redundant at 1e-10 scale may be pinned \
+                     (slack 2e-10 is 5× the row itself, not forcing slack)"
+                );
+            }
+            ReduceOutcome::NotApplied { .. } => {}
+            ReduceOutcome::Infeasible { .. } => panic!("the box is feasible"),
+        }
+        let res = solve_default(&p);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, -2.0, "the true optimum is (1, 1)");
+        assert_eq!(res.solution, vec![1.0, 1.0]);
+    }
+
+    /// Over-tightening / wrong-side guard (twin of the F1/F2 controls):
+    /// GENUINE forcing keeps these single-point models pinned at the RIGHT
+    /// endpoint with the right objective, whatever the margin formula
+    /// becomes. These rows have forcing slack exactly 0, which any rounding
+    /// budget accepts.
+    ///
+    /// sentinel: a forcing rule that measures the slack from the wrong
+    /// extreme (e.g. swapping the Eq lo/hi side tests) pins the opposite
+    /// endpoints — the (0, 0) / (1, 1) pin assertions below flip → FAIL.
+    /// (On this MILP path the propagation layer already induces most of
+    /// these pins — like the equality_row_forces sibling — so this guard
+    /// pins down endpoint SELECTION; the margin itself is revert-fail-tested
+    /// by `tiny_coefficient_redundant_row_does_not_force_endpoints` and, on
+    /// the LP path, by `test_forcing_tiny_coefficient_scale_*`.)
+    #[test]
+    fn genuine_forcing_rows_still_force_endpoints() {
+        // Le: x + y ≤ 0 over the binary box has exactly one feasible point.
+        // Propagation pins it via the induced bound x ≤ 0.
+        let le = build_milp(
+            vec![-1.0, -1.0],
+            &[(0, 0, 1.0), (0, 1, 1.0)],
+            1,
+            vec![0.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 1.0), (0.0, 1.0)],
+            vec![0, 1],
+        );
+        match reduce(&le, None) {
+            ReduceOutcome::Reduced { map, .. } => {
+                assert_eq!(
+                    map.pinned,
+                    vec![Some(0.0), Some(0.0)],
+                    "x + y ≤ 0 forces (0, 0)"
+                )
+            }
+            _ => panic!("x + y ≤ 0 over binary x, y must reduce to the single point"),
+        }
+        let res = solve_default(&le);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, 0.0);
+
+        // Eq forced from below: x + y = 0 → the min-activity endpoint equals
+        // the rhs, so forcing takes (0, 0) and the row goes away.
+        let eq0 = build_milp(
+            vec![-1.0, -1.0],
+            &[(0, 0, 1.0), (0, 1, 1.0)],
+            1,
+            vec![0.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, 1.0), (0.0, 1.0)],
+            vec![0, 1],
+        );
+        match reduce(&eq0, None) {
+            ReduceOutcome::Reduced { map, .. } => {
+                assert_eq!(
+                    map.pinned,
+                    vec![Some(0.0), Some(0.0)],
+                    "x + y = 0 forces (0, 0)"
+                )
+            }
+            _ => panic!("x + y = 0 over binary x, y must reduce to the single point"),
+        }
+        let res = solve_default(&eq0);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, 0.0);
+
+        // Eq forced from above: x + y = 2 → the max-activity endpoint equals
+        // the rhs, forcing (1, 1) with objective −2.
+        let eq2 = build_milp(
+            vec![-1.0, -1.0],
+            &[(0, 0, 1.0), (0, 1, 1.0)],
+            1,
+            vec![2.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, 1.0), (0.0, 1.0)],
+            vec![0, 1],
+        );
+        match reduce(&eq2, None) {
+            ReduceOutcome::Reduced { map, .. } => {
+                assert_eq!(
+                    map.pinned,
+                    vec![Some(1.0), Some(1.0)],
+                    "x + y = 2 forces (1, 1)"
+                )
+            }
+            _ => panic!("x + y = 2 over binary x, y must reduce to the single point"),
+        }
+        let res = solve_default(&eq2);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, -2.0);
+    }
+
+    /// Mirrored paths (PR #89 P1 class): the Ge side and both Eq sides use
+    /// the same coefficient-aware margin — at 1e-10 scale the absolute 1e-9
+    /// false-forced the Ge mirror, while genuine zero-slack forcing on those
+    /// same paths must survive.
+    ///
+    /// sentinel: restoring `(max_act − rhs) ≤ ACT_ABS` (Ge) or the
+    /// `(min_act − rhs).abs() / (max_act − rhs).abs() ≤ ACT_ABS` pair (Eq)
+    /// reproduces the mirrored pins → FAIL.
+    #[test]
+    fn tiny_scale_forcing_mirrors_are_scale_aware() {
+        let mk = |b: f64, ctype: ConstraintType, coeff: f64| {
+            build_milp(
+                vec![-1.0, -1.0],
+                &[(0, 0, coeff), (0, 1, coeff)],
+                1,
+                vec![b],
+                vec![ctype],
+                vec![(0.0, 1.0), (0.0, 1.0)],
+                vec![0, 1],
+            )
+        };
+        let no_pin = |p: &MilpProblem, why: &str| match reduce(p, None) {
+            ReduceOutcome::Reduced { map, .. } => {
+                assert!(map.pinned.iter().all(Option::is_none), "{why}");
+            }
+            ReduceOutcome::NotApplied { .. } => {}
+            ReduceOutcome::Infeasible { .. } => panic!("{why}: the box is feasible"),
+        };
+
+        // Ge mirror of the P1 repro: −1e-10·x − 1e-10·y ≥ −2e-10 ⟺
+        // x + y ≤ 2 — every box point satisfies it, yet the old absolute
+        // margin read the max-activity slack 2e-10 as forcing and pinned
+        // (0, 0), publishing obj 0 against the true −2 at (1, 1).
+        let ge = mk(-2e-10, ConstraintType::Ge, -1e-10);
+        no_pin(&ge, "Ge row redundant at 1e-10 scale must not pin");
+        let res = solve_default(&ge);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, -2.0);
+        assert_eq!(res.solution, vec![1.0, 1.0]);
+
+        // Ge genuine forcing at the same scale: −1e-10·x − 1e-10·y ≥ 0 ⟺
+        // x + y ≤ 0 — (0, 0) is the only feasible point and must stay forced.
+        let ge0 = mk(0.0, ConstraintType::Ge, -1e-10);
+        match reduce(&ge0, None) {
+            ReduceOutcome::Reduced { map, .. } => {
+                assert_eq!(
+                    map.pinned,
+                    vec![Some(0.0), Some(0.0)],
+                    "x + y ≤ 0 forces (0, 0)"
+                )
+            }
+            _ => panic!("x + y ≤ 0 must reduce to the single point"),
+        }
+        let res = solve_default(&ge0);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, 0.0);
+
+        // Eq interior: 1e-10·x + 1e-10·y = 1e-10 ⟺ x + y = 1 — neither
+        // extreme equals the rhs (window [0, 2e-10]), yet the old
+        // `(min_act − rhs).abs() ≤ ACT_ABS` pinned (0, 0) and published
+        // obj 0. Post-fix the row weakens to its ≥ side (the ≤ side is
+        // tolerance-redundant over the box — the activity-margin family,
+        // whose absolute floor is the solver's row-feasibility contract and
+        // deliberately NOT part of this finding), so the published
+        // objective is the weakened model's optimum. The P1 discriminator
+        // is the absence of pins and an objective no worse than the exact
+        // optimum −1 — not obj 0.
+        let eq = mk(1e-10, ConstraintType::Eq, 1e-10);
+        no_pin(&eq, "Eq with rhs inside the window must not pin");
+        let res = solve_default(&eq);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert!(
+            res.objective <= -1.0,
+            "the false (0, 0) pin published obj 0; the weakened row must do \
+             no worse than the exact optimum −1 (got {})",
+            res.objective
+        );
+
+        // Eq genuine forcing at the same scale: 1e-10·x + 1e-10·y = 2e-10
+        // ⟺ x + y = 2 — the max endpoint equals the rhs exactly: forced.
+        let eq2 = mk(2e-10, ConstraintType::Eq, 1e-10);
+        match reduce(&eq2, None) {
+            ReduceOutcome::Reduced { map, .. } => {
+                assert_eq!(
+                    map.pinned,
+                    vec![Some(1.0), Some(1.0)],
+                    "x + y = 2 forces (1, 1)"
+                )
+            }
+            _ => panic!("x + y = 2 must reduce to the single point"),
+        }
+        let res = solve_default(&eq2);
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert_eq!(res.objective, -2.0);
+        assert_eq!(res.solution, vec![1.0, 1.0]);
     }
 }
