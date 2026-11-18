@@ -355,13 +355,28 @@ def build_base_worktree(root: Path, base: str, tmpdir: Path) -> Path:
     if wt.exists():
         raise GateError(f"worktree 先が既にある: {wt}")
     run_git(["worktree", "add", "--detach", str(wt), base], root)
-    # data/ は gitignored で base worktree に現れない。HEAD 側に実体があれば
-    # symlink で共有する (ci.yml の test-integration と同じ data を使わせる)。
-    src_data = root / "data"
-    dst_data = wt / "data"
-    if src_data.is_dir() and not dst_data.exists():
-        os.symlink(str(src_data.resolve()), str(dst_data))
+    share_data_subdirs(root / "data", wt / "data")
     return wt
+
+
+def share_data_subdirs(src_data: Path, dst_data: Path) -> None:
+    """HEAD checkout の data/ サブディレクトリを base worktree へ symlink 共有。
+
+    base checkout は git 追跡の data/baseline_objectives/ を持つため、data/
+    全体を symlink はできない (追跡 baseline が覆い隠される)。gitignored の
+    データセットサブディレクトリのみ、未存在分を共有する (otspot-wt-new.sh
+    と同じ shape。workflow が HEAD 側へダウンロードした ci-subset を
+    base worktree からも見えるようにし、再ダウンロードを課さない)。
+    """
+    if not src_data.is_dir():
+        return
+    dst_data.mkdir(exist_ok=True)
+    for child in sorted(src_data.iterdir()):
+        if not child.is_dir():
+            continue
+        if (dst_data / child.name).exists():
+            continue
+        os.symlink(str(child.resolve()), str(dst_data / child.name))
 
 
 def overlay_files(root: Path, wt: Path, files: list[str]) -> None:
@@ -571,7 +586,12 @@ def _make_synthetic_repo(
     (root / "tests" / "test_inventory.txt").write_text(
         INV_HEADER + "synthetic\ttests::add_works\tactive\n"
     )
-    _git(root, "add", "src/lib.rs", "tests/test_inventory.txt")
+    # git 追跡 baseline と gitignored データセットの同居 (CI の data/ と同じ
+    # shape)。suite_synthetic は commit せずに untracked のまま置く。
+    (root / "data" / "baseline_objectives").mkdir(parents=True)
+    (root / "data" / "baseline_objectives" / "expected.csv").write_text("add_works,3\n")
+    _git(root, "add", "src/lib.rs", "tests/test_inventory.txt",
+         "data/baseline_objectives/expected.csv")
     _git(root, "commit", "-q", "-m", "base")
     base_sha = _git(root, "rev-parse", "HEAD").strip()
     (root / "src" / "lib.rs").write_text(HEAD_LIB + extra_bad)
@@ -592,6 +612,8 @@ def _make_synthetic_repo(
     (root / "tests" / "test_inventory.txt").write_text(head_inv)
     _git(root, "add", *added)
     _git(root, "commit", "-q", "-m", "head: 張りを追加")
+    (root / "data" / "suite_synthetic").mkdir()
+    (root / "data" / "suite_synthetic" / "sample.txt").write_text("synthetic dataset\n")
     return base_sha
 
 
@@ -720,6 +742,22 @@ def self_test() -> int:
                 (p1a_wt / "tests" / "test_guard.rs").read_text(encoding="utf-8")
                 == GUARD_TEST_RS,
             )
+            # P1b: base checkout は data/baseline_objectives を追跡している
+            # ため data/ 全体 symlink は不可。追跡 baseline を保持し、
+            # untracked データセットだけ共有されていること。
+            check(
+                "P1b: base 追跡 baseline を保持 (symlink で隠さない)",
+                (p1a_wt / "data" / "baseline_objectives" / "expected.csv").is_file()
+                and not (p1a_wt / "data" / "baseline_objectives").is_symlink(),
+            )
+            check(
+                "P1b: untracked データセットを symlink 共有",
+                (p1a_wt / "data" / "suite_synthetic").is_symlink()
+                and (p1a_wt / "data" / "suite_synthetic" / "sample.txt").read_text(
+                    encoding="utf-8"
+                )
+                == "synthetic dataset\n",
+            )
         finally:
             _git(repo, "worktree", "remove", "--force", str(p1a_wt))
             shutil.rmtree(p1a_dir, ignore_errors=True)
@@ -754,6 +792,38 @@ def self_test() -> int:
         check("P1a: UNVERIFIABLE 機械行", "SENTINEL_UNVERIFIABLE=1" in out)
         check("P1a: 実行可能分だけの PLAN_COUNT", "SENTINEL_PLAN_COUNT=1" in out)
         check("P1a: 混在ファイル名を報告", "src/lib.rs" in out)
+
+        # 11) P2: 明示的な --dry-run は SENTINEL_CI_RUN=1 より優先 (main の
+        #     CLI 契約)。FAKE_RESULT=0 なので優先順が壊れていれば実行されて
+        #     VIOLATION exit 1 になる。
+        os.environ["SENTINEL_CI_RUN"] = "1"
+        os.environ["SENTINEL_CI_FAKE_RESULT"] = "0"
+        cwd0 = Path.cwd()
+        try:
+            os.chdir(repo)
+            cap = _Captured()
+            rc = main(
+                ["sentinel_red_green", "--mode", "red", "--base", base_sha, "--dry-run"]
+            )
+            out = cap.close()
+            check("P2: RUN=1 でも --dry-run が優先され exit 0", rc == EXIT_OK, out)
+            check(
+                "P2: --dry-run は計画表示のみ (実行しない)",
+                "(dry-run: 計画表示のみ" in out and "base checkout での実行結果" not in out,
+                out,
+            )
+            cap = _Captured()
+            rc = main(["sentinel_red_green", "--mode", "red", "--base", base_sha])
+            out = cap.close()
+            check(
+                "P2: RUN=1 で --dry-run 未指定なら実行される (対照)",
+                rc == EXIT_FAIL and "VIOLATION" in out,
+                out,
+            )
+        finally:
+            os.chdir(cwd0)
+            del os.environ["SENTINEL_CI_RUN"]
+            del os.environ["SENTINEL_CI_FAKE_RESULT"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -801,7 +871,10 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return EXIT_ENV
-    return mode_red(root, base, dry=not (os.environ.get("SENTINEL_CI_RUN") == "1"))
+    # 明示的な --dry-run は SENTINEL_CI_RUN=1 より優先 (--help の
+    # 「cargo を実行しない」は CLI 契約。実行有効環境でも計画のみで安全)。
+    dry = args.dry_run or os.environ.get("SENTINEL_CI_RUN") != "1"
+    return mode_red(root, base, dry=dry)
 
 
 if __name__ == "__main__":
