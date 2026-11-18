@@ -1,7 +1,7 @@
 # functions over 220 lines; growth is forbidden, shrink/removal is allowed
 otspot-core/src/conic/ipm.rs	solve	172	328
 otspot-core/src/conic/misocp.rs	solve_misocp	455	262
-otspot-core/src/conic/nonconvex.rs	global_core	1671	395
+otspot-core/src/conic/nonconvex.rs	global_core	1768	368
 otspot-core/src/presolve/activity.rs	propagate_row_bounds	81	227
 otspot-core/src/presolve/postsolve.rs	run_postsolve	214	258
 otspot-core/src/qp/ipm_core/ippmm/iter.rs	solve_ippmm_inner_confined	118	721
