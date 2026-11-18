@@ -416,3 +416,66 @@ fn kkt_dim_formula() {
     );
     assert_eq!(kkt_dim(&problem), 3 + 2 + 5);
 }
+
+/// Band routing table: the routing gate must send exactly the measured
+/// converging-attempt sizes to `AttemptReduced` and the measured stalling
+/// size to `LegacyDirect`. Fixtures are the *measured* CBLIB KKT dims from
+/// the real runs (report §4.1/§4.4: dense 8N² footprints 0.28 / 1.41 / 1.46
+/// GiB converged in 21 / 21 / 11 iterations; nql60's 25,895 → 5.0 GiB
+/// stalled at the tightened tolerance and fell back after 64.6 s). Reverting
+/// the gate (threshold to infinity) flips the nql60 row to `AttemptReduced`
+/// and fails this sentinel — the same routing the band re-measurement
+/// validated end-to-end (`tests/conic_presolve_routing_gate.rs`).
+#[test]
+fn routing_gate_decision_table_matches_measured_band() {
+    let stats = |kkt0: usize, kkt1: usize| ReductionStats {
+        n0: kkt0,
+        n1: kkt1,
+        p0: 0,
+        p1: 0,
+        m0: 0,
+        m1: 0,
+        kkt0,
+        kkt1,
+        sigma: 0.05,
+        m_domain_absorbed: 0,
+        n_fixed: 0,
+        n_substituted: 0,
+    };
+    let table: &[(&str, ReductionStats, PresolveRoute)] = &[
+        ("nql30", stats(10_881, 6_105), PresolveRoute::AttemptReduced),
+        (
+            "qssp30",
+            stats(18_820, 13_772),
+            PresolveRoute::AttemptReduced,
+        ),
+        (
+            "chainsing-1000-1",
+            stats(31_940, 13_976),
+            PresolveRoute::AttemptReduced,
+        ),
+        ("nql60", stats(43_361, 25_895), PresolveRoute::LegacyDirect),
+    ];
+    for (name, s, want) in table {
+        assert_eq!(
+            route_reduction(s),
+            *want,
+            "{name}: routing gate decision wrong"
+        );
+    }
+    // Threshold boundary is inclusive at exactly the cap's KKT dim
+    // (8·16,384² = 2 GiB) and exclusive one above it.
+    assert_eq!(dense_kkt_gib(16_384), PRESOLVE_ATTEMPT_DENSE_KKT_GIB_MAX);
+    assert_eq!(
+        route_reduction(&stats(20_000, 16_384)),
+        PresolveRoute::AttemptReduced
+    );
+    assert_eq!(
+        route_reduction(&stats(20_000, 16_385)),
+        PresolveRoute::LegacyDirect
+    );
+    // Dense-8N² model reproduces the research report's size predictions on
+    // the nql60 pair (14.0 GiB unreduced / 5.0 GiB reduced).
+    assert!((dense_kkt_gib(43_361) - 14.0).abs() < 0.1);
+    assert!((dense_kkt_gib(25_895) - 5.0).abs() < 0.1);
+}

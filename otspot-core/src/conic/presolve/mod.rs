@@ -61,6 +61,69 @@ pub const EPS_SIGMA_CLAMP: f64 = 1e-3;
 /// the IPM's divergence checks keep seeing a meaningful loop).
 pub const CONIC_PRESOLVE_EPS_FLOOR: f64 = 1e-12;
 
+/// Dense-equivalent KKT footprint (GiB) the routing gate will still hand to
+/// the REDUCED conic solve; above it, [`route_reduction`] sends the problem
+/// straight to the presolve-free pipeline.
+///
+/// Measured boundary (CBLIB band, `solve_cbf --eps 1e-6`, 12 GiB cgroup,
+/// 2026-11-17/18 real runs): reduced attempts at dense footprints
+/// 0.28 / 1.41 / 1.46 GiB (nql30 / qssp30 / chainsing-1000-1, reduced KKT
+/// dims 6,105 / 13,772 / 13,976) converged at the eps-tightened tolerance
+/// in 21 / 21 / 11 iterations (0.22–0.86 s wall). The first measured attempt
+/// above that band — nql60, reduced KKT 25,895 → 5.0 GiB — stalled at the
+/// tightened tolerance (22 iterations, honesty-gate demotion) and paid the
+/// full legacy re-solve on top: 64.6 s vs 0.9 s for the unreduced solve.
+/// 2.0 GiB sits ≈37% above the highest measured converging attempt and
+/// ≈2.5× below the measured stalling one, so the band verdicts are robust
+/// to modest re-reduction. This is not a symptom-hiding cap: it encodes the
+/// problem sizes at which the tightened-tolerance reduced solve has actually
+/// been demonstrated to close; a mis-prediction still falls back to the
+/// unreduced solve with the status-floor contract intact (see `solve_socp`).
+pub const PRESOLVE_ATTEMPT_DENSE_KKT_GIB_MAX: f64 = 2.0;
+
+/// Routing decision for the conic presolve stage (see [`route_reduction`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresolveRoute {
+    /// Attempt the reduced solve at the tightened tolerance (postsolve /
+    /// re-verification / fallback contract unchanged).
+    AttemptReduced,
+    /// Do not attempt: solve the unreduced problem, the presolve-free
+    /// (`origin/main`) pipeline.
+    LegacyDirect,
+}
+
+/// Dense-8N² memory model of the conic KKT factorization in GiB: an
+/// `N × N` f64 factorization costs `8·N²` bytes if dense. The research
+/// report's size predictions (and the mem-gate knowledge for the `*_w`
+/// classes) use this model; the routing gate reuses it so gate units and
+/// research predictions are the same quantity (sparse LDLᵀ + AMD makes it
+/// a generous upper bound in practice — see report §4.3).
+pub fn dense_kkt_gib(kkt: usize) -> f64 {
+    let bytes = 8.0 * (kkt as f64) * (kkt as f64);
+    bytes / (1u64 << 30) as f64
+}
+
+/// Pre-attempt routing gate: decide reduced-vs-legacy from the *reduced*
+/// problem's predicted size, before any IPM work is spent.
+///
+/// Rationale (measured, see [`PRESOLVE_ATTEMPT_DENSE_KKT_GIB_MAX`]): the
+/// reduced solve's stall cost scales with the reduced KKT dimension (per-
+/// iteration factorization on an `N1`-dim system at the eps-tightened
+/// tolerance, then the full legacy re-solve as fallback cost), while the
+/// legacy solve on the unreduced data was measured fast for every runnable
+/// band instance whose reduced dense footprint crossed the threshold. The
+/// decision is pure over [`ReductionStats`] (which `reduce()` produces
+/// cheaply, before equilibration/factorization), so nothing is attempted
+/// then discarded: above the threshold the problem never enters the
+/// reduced-attempt path at all.
+pub fn route_reduction(stats: &ReductionStats) -> PresolveRoute {
+    if dense_kkt_gib(stats.kkt1) <= PRESOLVE_ATTEMPT_DENSE_KKT_GIB_MAX {
+        PresolveRoute::AttemptReduced
+    } else {
+        PresolveRoute::LegacyDirect
+    }
+}
+
 /// Cap on presolve driver rounds (absorption → fixing → substitution). Each
 /// changing round strictly removes at least one row/column, so the cap only
 /// guards against a logic bug cycling, not against slow convergence; on

@@ -16,7 +16,10 @@ mod qcqp_fbbt;
 #[cfg(test)]
 mod tests;
 
-pub use presolve::{kkt_dim, tightened_tol, ConicReduction, ReductionStats};
+pub use presolve::{
+    dense_kkt_gib, kkt_dim, route_reduction, tightened_tol, ConicReduction, PresolveRoute,
+    ReductionStats, PRESOLVE_ATTEMPT_DENSE_KKT_GIB_MAX,
+};
 
 pub use misocp::{solve_miqcp, solve_misocp, BbOptions, MisocpProblem, MisocpResult};
 pub use nonconvex::{
@@ -304,21 +307,43 @@ impl ConicOptions {
 ///
 /// Pipeline: validate → tier-1 presolve ([`presolve`]: equality
 /// substitution, fixed-variable elimination, domain identity-row absorption)
-/// → equilibration (cone-block-respecting Ruiz scaling) → `ipm::solve` →
-/// unscale + postsolve, with the result re-verified against `problem`'s
-/// *original* data before it is returned. The solve sees well-conditioned
-/// (possibly smaller) data, but every returned status/certificate is backed
-/// by an original-space verification, and any verification failure OR
-/// inconclusive reduced-solve outcome (budget exhaustion, numerical failure,
-/// timeout) re-solves the original problem without presolve — exact up to
-/// rounding, changes neither optimum nor feasible set, and never reports a
-/// status worse than the presolve-free path.
+/// → **routing gate** ([`route_reduction`]: problems whose reduced model
+/// still exceeds [`presolve::PRESOLVE_ATTEMPT_DENSE_KKT_GIB_MAX`] dense-KKT
+/// go straight through the presolve-free pipeline — measured stall cost, see
+/// the constant) → equilibration (cone-block-respecting Ruiz scaling) →
+/// `ipm::solve` → unscale + postsolve, with the result re-verified against
+/// `problem`'s *original* data before it is returned. The solve sees
+/// well-conditioned (possibly smaller) data, but every returned
+/// status/certificate is backed by an original-space verification, and any
+/// verification failure OR inconclusive reduced-solve outcome (budget
+/// exhaustion, numerical failure, timeout) re-solves the original problem
+/// without presolve — exact up to rounding, changes neither optimum nor
+/// feasible set, and never reports a status worse than the presolve-free
+/// path.
 ///
 /// When presolve is active, `iterations`/`residuals` describe the reduced
 /// problem's solve (the reduced IPM tolerance is tightened by the reduction's
 /// growth factor, see [`presolve::tightened_tol`]); `x`/`y`/`z`/`s` and the
 /// objective are always original-space.
 pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
+    solve_socp_route(problem, opts, None)
+}
+
+/// [`solve_socp`] with an explicit route override: `Some(route)` pins the
+/// presolve stage to that route instead of measuring the routing gate
+/// (`None`). `Some(PresolveRoute::LegacyDirect)` skips the presolve stage
+/// entirely — the bit-for-bit `origin/main` pipeline on (materialized)
+/// input; `Some(PresolveRoute::AttemptReduced)` forces the reduced attempt
+/// even where the gate would decline it, with the full postsolve /
+/// re-verification / fallback contract still applying. The override exists
+/// for oracle and bench verification (measuring both routes on one
+/// fixture, exercising the fallback semantics the gate bypasses on
+/// gate-routed instances); production callers use [`solve_socp`].
+pub fn solve_socp_route(
+    problem: &ConicProblem,
+    opts: &ConicOptions,
+    forced: Option<PresolveRoute>,
+) -> ConicResult {
     // Validate before equilibrating: the Ruiz sweeps assume `validate()`'s
     // shape invariants, so reject an invalid problem here (ipm::solve keeps
     // its own guard as second line of defense).
@@ -350,85 +375,103 @@ pub fn solve_socp(problem: &ConicProblem, opts: &ConicOptions) -> ConicResult {
     };
     let problem = materialized.as_ref().unwrap_or(problem);
     let gate = (opts.tol * presolve::VERIFY_KKT_SLACK).max(opts.tol);
-    match presolve::ConicReduction::reduce(problem) {
-        Some(red) if red.conflict().is_some() => {
-            if let Some((y, z)) = red.conflict_certificate(problem) {
-                // Bound absorption proved `lb > ub`: emit the exact Farkas
-                // pair, verified against original data (mirrors the
-                // honesty-first certificate policy of `unscale_result`).
-                if crate::conic::equil::verify_infeas_cert(problem, &y, &z, gate) {
-                    let mut res = invalid_result(problem, SolveStatus::Timeout);
-                    if opts.stop_requested() {
+    // `LegacyDirect` override: skip the presolve stage entirely (the bit-for-bit
+    // `origin/main` pipeline, conflict proofs included).
+    if forced != Some(PresolveRoute::LegacyDirect) {
+        match presolve::ConicReduction::reduce(problem) {
+            Some(red) if red.conflict().is_some() => {
+                if let Some((y, z)) = red.conflict_certificate(problem) {
+                    // Bound absorption proved `lb > ub`: emit the exact Farkas
+                    // pair, verified against original data (mirrors the
+                    // honesty-first certificate policy of `unscale_result`).
+                    if crate::conic::equil::verify_infeas_cert(problem, &y, &z, gate) {
+                        let mut res = invalid_result(problem, SolveStatus::Timeout);
+                        if opts.stop_requested() {
+                            return res;
+                        }
+                        res.status = SolveStatus::Infeasible;
+                        res.objective = f64::INFINITY;
+                        res.y = y.clone();
+                        res.z = z.clone();
+                        res.infeas_cert = Some((y, z));
                         return res;
                     }
-                    res.status = SolveStatus::Infeasible;
-                    res.objective = f64::INFINITY;
-                    res.y = y.clone();
-                    res.z = z.clone();
-                    res.infeas_cert = Some((y, z));
-                    return res;
                 }
             }
-        }
-        Some(red) if red.reduced().is_some() => {
-            let reduced = red.reduced().expect("checked by guard");
-            let stats = red.stats();
-            let opts_red = ConicOptions {
-                tol: presolve::tightened_tol(opts.tol, stats.sigma),
-                ..opts.clone()
-            };
-            if opts_red.stop_requested() {
-                return invalid_result(problem, SolveStatus::Timeout);
-            }
-            let eq = equil::Equilibrator::compute(reduced);
-            let scaled = eq.scale_problem(reduced);
-            let res = ipm::solve(&scaled, &opts_red, true);
-            #[cfg(test)]
-            test_maybe_cancel_after_ipm_solve(opts);
-            let mut res = eq.unscale_result(reduced, opts_red.tol, res);
-            if matches!(res.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
-                && opts.stop_requested()
-            {
-                res.status = SolveStatus::Timeout;
-                res.primal_ray = None;
-                res.infeas_cert = None;
-            }
-            // Presolve must never regress the final status. Only terminal
-            // statuses (`Optimal` / `Infeasible` / `Unbounded`) — and only
-            // when the original-space re-verification gate below accepts
-            // them — are accepted from the reduced solve. Any inconclusive
-            // outcome (tightened-tolerance `MaxIterations`, a
-            // `NumericalError` demotion by the reduced-space honesty gate,
-            // `Timeout`) discards the reduced result and re-solves the
-            // ORIGINAL problem below, so the reported status is never worse
-            // than the presolve-free path would have achieved (bench nql60:
-            // the unreduced solve reaches `Optimal` in <1 s while the
-            // reduced solve stalled at the tightened tolerance — reporting
-            // the reduced `NumericalError` here was a status regression).
-            if matches!(
-                res.status,
-                SolveStatus::Optimal | SolveStatus::Infeasible | SolveStatus::Unbounded
-            ) {
-                if let Some(mut mapped) = red.postsolve(problem, reduced, &res, gate) {
-                    mapped.objective = match mapped.status {
-                        SolveStatus::Infeasible => f64::INFINITY,
-                        SolveStatus::Unbounded => f64::NEG_INFINITY,
-                        _ => mapped.objective,
+            Some(red) if red.reduced().is_some() => {
+                let reduced = red.reduced().expect("checked by guard");
+                let stats = red.stats();
+                // Routing gate, decided BEFORE any attempt (see
+                // `route_reduction`): above the measured dense-KKT threshold the
+                // reduced solve's stall-then-fallback cost is documented worse
+                // than the presolve-free solve (bench nql60: 64.6 s attempt +
+                // re-solve vs 0.9 s direct), so the problem never enters the
+                // attempt path. A caller-pinned route overrides the gate.
+                let route = match forced {
+                    Some(route) => route,
+                    None => presolve::route_reduction(&stats),
+                };
+                if route == PresolveRoute::AttemptReduced {
+                    let opts_red = ConicOptions {
+                        tol: presolve::tightened_tol(opts.tol, stats.sigma),
+                        ..opts.clone()
                     };
-                    return mapped;
+                    if opts_red.stop_requested() {
+                        return invalid_result(problem, SolveStatus::Timeout);
+                    }
+                    let eq = equil::Equilibrator::compute(reduced);
+                    let scaled = eq.scale_problem(reduced);
+                    let res = ipm::solve(&scaled, &opts_red, true);
+                    #[cfg(test)]
+                    test_maybe_cancel_after_ipm_solve(opts);
+                    let mut res = eq.unscale_result(reduced, opts_red.tol, res);
+                    if matches!(res.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
+                        && opts.stop_requested()
+                    {
+                        res.status = SolveStatus::Timeout;
+                        res.primal_ray = None;
+                        res.infeas_cert = None;
+                    }
+                    // Presolve must never regress the final status. Only terminal
+                    // statuses (`Optimal` / `Infeasible` / `Unbounded`) — and only
+                    // when the original-space re-verification gate below accepts
+                    // them — are accepted from the reduced solve. Any inconclusive
+                    // outcome (tightened-tolerance `MaxIterations`, a
+                    // `NumericalError` demotion by the reduced-space honesty gate,
+                    // `Timeout`) discards the reduced result and re-solves the
+                    // ORIGINAL problem below, so the reported status is never worse
+                    // than the presolve-free path would have achieved (bench nql60:
+                    // the unreduced solve reaches `Optimal` in <1 s while the
+                    // reduced solve stalled at the tightened tolerance — reporting
+                    // the reduced `NumericalError` here was a status regression).
+                    if matches!(
+                        res.status,
+                        SolveStatus::Optimal | SolveStatus::Infeasible | SolveStatus::Unbounded
+                    ) {
+                        if let Some(mut mapped) = red.postsolve(problem, reduced, &res, gate) {
+                            mapped.objective = match mapped.status {
+                                SolveStatus::Infeasible => f64::INFINITY,
+                                SolveStatus::Unbounded => f64::NEG_INFINITY,
+                                _ => mapped.objective,
+                            };
+                            return mapped;
+                        }
+                    }
+                    if opts.stop_requested() {
+                        // Honor the cancel contract without paying for the fallback
+                        // pipeline on data nobody will wait for (same rationale as
+                        // the up-front stop check).
+                        return invalid_result(problem, SolveStatus::Timeout);
+                    }
+                    // Fall through: original-space verification rejected the
+                    // postsolved map, or the reduced solve was inconclusive —
+                    // re-solve the original problem below.
                 }
+                // route == LegacyDirect (gate-measured or forced): the reduced
+                // solve was never entered; fall straight through.
             }
-            if opts.stop_requested() {
-                // Honor the cancel contract without paying for the fallback
-                // pipeline on data nobody will wait for (same rationale as
-                // the up-front stop check).
-                return invalid_result(problem, SolveStatus::Timeout);
-            }
-            // Fall through: original-space verification rejected the
-            // postsolved map, or the reduced solve was inconclusive —
-            // re-solve the original problem below.
+            _ => {}
         }
-        _ => {}
     }
     solve_socp_direct(problem, opts)
 }
