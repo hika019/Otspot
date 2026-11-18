@@ -4,6 +4,26 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+- 非凸 QCQP QP 経路に root-stage FBBT (境界ベース bound 導出) を追加 (計画 §4.1 / 調査 doc §4 step 2)。
+   二次部ゼロの線形行 (`g_lin`/`a_eq` に限る。二次行の線形部を線形伝播に混ぜない構造保証を
+   `qcqp_fbbt::build_lin_rows` が持つ) と、対角専用二次行の平方完成一括評価
+   (`Σ aᵢxᵢ² = c` 型を楕円体として全変数に有限区間を与える。非対角を含む行は全面スキップ、
+   `w_ij` への明示伝播は行わない) を定点反復 (`ROOT_FBBT_MAX_ROUNDS = 10`、named const 根拠 doc 付き)
+   で合成する。誘導 bound は外向き丸め + `feas_tol·(1+|v|)` + ULP slack を**保存前**に適用し、
+   宣言箱を狭める方向にのみ適用 (拡張・空区間生成・NaN 一切なし)。**矛盾行を検出しても
+   Infeasible は返さない** (空領域の証明は緩和側のエスカレーション監査経路に専属。
+   偽 Infeasible の実測先例 `PRESOLVE_ESCALATION` と同じ結論。矛盾行数は計測用のみ公開)。
+   誘導箱は `GlobalSeed.root_lb/root_ub` (refine-only) だけで運び、`qp.lb`/`qp.ub` は書き換えない
+   (計画 line 136)。誘導が何も変えない問題は seed を添付せず従来経路と bit-identical。
+   受理判定を「生 bound で R 内 finite 必須」から「root FBBT 後も非有限が残る変数があれば拒否」
+   (計画 §3.2 line 89、判定集合は `effective_bound_requirement`) へ移動したため、単変数二次行で
+   有限化できる自由変数 (8605 型・自由目的変数 + 不定行など) が NOT_SUPPORTED から救済される。
+   `GlobalSeed` は箱専用 seed (`x` 空・`f = +inf`) を受理 (空 `x` に有限 `f` は corrupt として拒否)。
+   センチネル: `indefinite_row_with_free_objective_var_solves_via_root_fbbt` (ハンドオラクル
+   -√5) / `quadratic_linear_part_never_propagated_as_linear` (計画 §5 sentinel 7) /
+   `outward_rounding_contains_feasible_amplified_point` (丸め・マージン除去で fail) /
+   `fixpoint_cap_terminates_long_chain` / `contradiction_rows_are_counted_never_reported` (task e)。
+   範囲外 (本変更なし): 目的 cutoff・OBBT・ノード時再適用・`w_ij` 伝播
 - 非凸 QCQP 大域解法の OA tangent カット再 solve を親 LP の基底再利用 (温開始) に変更。
    従来はカット追加ごとに `LpProblem` をコールドスタートで再構築・再 solve しており、
    A/B ノード probe で QPLIB_1353 にノードあたり solve 6.67 倍 × solve 単価 1.85 倍 =
