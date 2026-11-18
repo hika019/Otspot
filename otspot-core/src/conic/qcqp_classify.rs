@@ -581,7 +581,10 @@ pub(crate) fn coo_quad_row_diag_support(
 /// what stays non-finite after root FBBT derivation, on the
 /// [`effective_bound_requirement`] set. This gate remains the acceptance
 /// rule for the `otspot-model` QCQP fallback entry and for
-/// [`crate::qp::qcqp_route::nonconvex_from_qp_problem`].
+/// [`crate::qp::qcqp_route::nonconvex_from_qp_problem`]. The downstream
+/// relaxation is R-aware (decision D8): `build_relax` keeps infinite bounds
+/// out of every LP by emitting one box row per finite box side and no
+/// envelope rows on non-finite endpoints.
 ///
 /// The all-finite fast path returns without classification, keeping the
 /// current solver behavior (and cost) bit-identical for problems that the old
@@ -817,16 +820,20 @@ mod tests {
         assert!(err.contains("variable 0"), "{err}");
     }
 
-    /// A non-finite bound on a variable *outside* `R` (linear-only `x1`)
-    /// passes the G1 gate **and** `NonconvexQcqp::validate` (decision D8):
-    /// the R-aware relaxation (`build_relax` skips box rows on non-finite
-    /// node bounds) is the consumer that keeps infinite boxes out of the LP,
-    /// so free non-`R` variables are a supported input, not a second-line
-    /// rejection. Free variables *inside* `R` stay rejected by both layers
-    /// (`require_finite_bounds_rejects_unbounded_required_variable` and
-    /// `validate_requires_finite_bounds_only_on_r` in nonconvex.rs).
+    /// Decision D8, acceptance half (PR #84 review F5: added under a new name
+    /// after deleting the pre-§3.1 contract test
+    /// `require_finite_bounds_defers_non_required_variables_to_validate`,
+    /// which asserted the old second-line rejection at this identity). A
+    /// non-finite bound on a variable *outside* `R` (linear-only `x1`) passes
+    /// the G1 gate **and** `NonconvexQcqp::validate`: the R-aware relaxation
+    /// (`build_relax` emits a box row per finite box side, never `±inf`) is
+    /// the consumer that keeps infinite bounds out of the LP, so free non-`R`
+    /// variables are a supported input, not a second-line rejection. The
+    /// rejection halves of the new contract live under their own names:
+    /// `require_finite_bounds_rejects_unbounded_required_variable` (this gate)
+    /// and `validate_requires_finite_bounds_only_on_r` (nonconvex.rs).
     #[test]
-    fn require_finite_bounds_defers_non_required_variables_to_validate() {
+    fn non_required_free_variable_passes_gate_and_validate() {
         let row = quad_row(2, vec![(0, 0, -2.0)], vec![0.0, 1.0], 0.0);
         let bounds = [(-2.0, 2.0), (f64::NEG_INFINITY, f64::INFINITY)];
         let (lb, ub) = require_finite_bounds(2, None, std::slice::from_ref(&row), &bounds).unwrap();

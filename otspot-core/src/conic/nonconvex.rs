@@ -8,7 +8,8 @@
 //! the declared box refined by an optional [`GlobalSeed`] (`global_core`'s
 //! Phase-2 acceptance check, plan §3.2 line 89 — root FBBT derives bounds
 //! into the seed box, never into `qp.lb`/`qp.ub`); variables outside `R`
-//! may stay free — the relaxation then omits their box rows and, for every
+//! may stay free — the relaxation then emits a box row per finite box side
+//! (a one-sided bound keeps its finite side) and, for every
 //! pair touching a non-finite endpoint, all envelope rows, so no `±inf`
 //! coefficient ever reaches an LP. Termination on free variables is guarded
 //! by the recession-ray gate on `Unbounded` relaxations (`global_core`).
@@ -122,17 +123,17 @@ impl NonconvexQcqp {
         // Decision D8 / plan §3.2: bound finiteness is required only for the
         // variables in the §3.1 bound-requirement set `R` (lift pairs feeding
         // a McCormick envelope or a rule-2-vetoed diagonal). A free variable
-        // outside `R` is exactly what plan §5 example 1 (PSD ellipsoid rows
-        // over free `x`) must accept; the R-aware relaxation never hands
-        // `±inf` to the LP. `NaN` bounds stay rejected for *every* variable.
+        // outside `R` is exactly what plan §5 example 1 (PSD ellipsoid rows on
+        // free `x`) must accept; the R-aware relaxation (one box row per finite
+        // node-bound side, no envelope rows on non-finite endpoints) never
+        // hands `±inf` to the LP; `NaN` bounds stay rejected for every variable.
         //
         // Phase 2 (plan §3.2 line 89 / §4.1) moved the `R` finiteness verdict
-        // from here to `global_core`'s effective ROOT-BOX check: a raw
-        // `±inf` side inside `R` is admissible whenever the seed's derived box
-        // (root-stage FBBT output, plan §4.2 line 136 — derived bounds travel
-        // in `GlobalSeed`, never rewritten into `lb`/`ub`) makes it finite.
-        // `validate` still owns the shape guards and the NaN/crossed-side
-        // checks, which no seed can legitimately repair.
+        // from here to `global_core`'s effective ROOT-BOX check: a raw `±inf`
+        // side inside `R` is admissible whenever the seed's derived box (root
+        // FBBT output, plan §4.2 line 136: travels in `GlobalSeed`, never
+        // rewritten into `lb`/`ub`) makes it finite. `validate` keeps the shape
+        // guards and the NaN/crossed-side checks no seed can repair.
         for (k, (&l, &u)) in self.lb.iter().zip(&self.ub).enumerate() {
             if l.is_nan() {
                 return Err(format!("lb[{k}] is not finite: {l}"));
@@ -429,6 +430,25 @@ fn test_maybe_cancel_before_final_classification(opts: &ConicOptions) {
     }
 }
 
+/// Numerical floor for the budget-derived `primal_tol` of a relaxation LP.
+///
+/// `GlobalOptions::gap_tol` / `feas_tol` are search *budgets* (acceptance
+/// margins), not solver tolerances: `GlobalOptions::validate` contractually
+/// accepts `0` ("no slack wanted"), and `oa_lift_res_tol` then legitimately
+/// returns `0.0`. Handing that through as `SolverOptions::primal_tol` fails
+/// `SolverOptions::validate` (strictly positive required) and the root LP
+/// answers `NumericalError` — even on `min x²` over `[0,1]`. A
+/// budget-derived threshold below this floor could never be resolved
+/// anyway: the simplex entry layer keys its authoritative empty-box check on
+/// `ZERO_TOL` and documents the invariant `ZERO_TOL <= primal_tol`
+/// (`simplex::entry::solve_without_presolve_inner`), so
+/// [`crate::tolerances::ZERO_TOL`] (1e-12) is the finest primal tolerance the
+/// solver may be handed. A zero budget maps to this floor — the LP is still
+/// refined to the finest resolvable threshold while `accept` keeps honoring
+/// the literal zero margin — and budgets whose threshold is at or above the
+/// floor are unchanged.
+const RELAX_LP_TOL_FLOOR: f64 = crate::tolerances::ZERO_TOL;
+
 /// McCormick relaxations are pure LPs. Use the mature simplex LP path rather
 /// than the generic conic IPM, which is intentionally small and aimed at SOC
 /// blocks. The caller's wall-clock deadline is forwarded so a single node LP
@@ -451,6 +471,7 @@ fn solve_relax_lp(
     deadline: Option<std::time::Instant>,
     cancel_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     parent: Option<(&crate::problem::LpProblem, &crate::options::WarmStartBasis)>,
+    lift_res_tol: f64,
 ) -> RelaxSolve {
     let n = prob.n();
     let peq = prob.p();
@@ -521,6 +542,15 @@ fn solve_relax_lp(
             deadline,
             cancel_flag: cancel_flag.cloned(),
             presolve: false,
+            // Cut rows carry lift coefficient -1, so simplex's primal
+            // tolerance floors the lift gap the OA budget arms can resolve
+            // (see `oa_lift_res_tol`'s derivation): refine the LP to the
+            // finest threshold the arms can demand when that is finer than
+            // the default pivot tolerance, clamped into
+            // `[RELAX_LP_TOL_FLOOR, PIVOT_TOL]` so a zero budget (a valid
+            // "no slack" acceptance margin) cannot reach
+            // `SolverOptions::validate` as an illegal 0.
+            primal_tol: lift_res_tol.clamp(RELAX_LP_TOL_FLOOR, crate::tolerances::PIVOT_TOL),
             ..Default::default()
         };
         // OA re-solve warm start (see `extend_warm_for_appended_cuts`): the
@@ -619,6 +649,13 @@ fn oa_add_cut(pool: &mut Vec<(usize, f64)>, pi: usize, c: f64) -> bool {
 /// NEW pool entries (0 = nothing more can be learned: fall through to the
 /// normal status disposition, including the §3.2 recession verdict).
 ///
+/// `viol_tol` is the per-pair cut trigger (plan line 96). The budget arms
+/// (`row_budget`, `obj_budget`) run when no pair breaches it: each sums
+/// COEFFICIENT-WEIGHTED lift gaps `|coeff| · (x̄_i² − w_ii)` -- original-row
+/// / objective units, the units `accept` and the gap certificate check --
+/// so a pair scaled by `1e6` is refined until its ORIGINAL residual, not
+/// its raw gap, is inside budget. `f64::INFINITY` disables an arm.
+///
 /// Progress per round on the plan-100 shape is geometric (>= 2x toward the
 /// feasible cap per re-solve in the traced halving sequence), so the exit
 /// needs `log2((far - x*) / sqrt(viol_tol))` rounds; `OA_RAY_LOOKAHEAD`
@@ -628,7 +665,8 @@ fn oa_retry_cut(
     static_: &StaticRelax,
     res: &RelaxResult,
     viol_tol: f64,
-    sum_budget: f64,
+    row_budget: f64,
+    obj_budget: f64,
     pool: &mut Vec<(usize, f64)>,
 ) -> usize {
     let n = static_.n;
@@ -647,17 +685,18 @@ fn oa_retry_cut(
                     added += usize::from(oa_add_cut(pool, pi, x[i]));
                 }
             }
-            // Accept-margin budget arm: every pair sits inside `viol_tol`,
-            // yet an original quadratic row can still be violated by more
-            // than half the accept margin: the vertex's violation of row r
-            // is bounded by the SUM of the slacks of the pairs appearing in
-            // r (`accept` re-checks the original rows at `feas_tol`). While
-            // some row exceeds `sum_budget`, refine every pair of such a row
-            // whose own slack exceeds its proportional share
-            // `sum_budget / (rule-2 members of the row)`. The threshold is
-            // a constant target, so each pair keeps its geometric slack
-            // decay and the arm stops at the dedupe floor, far below any
-            // sane budget; `f64::INFINITY` disables the arm.
+            // Budget arm: every pair sits inside `viol_tol`, yet a scaled
+            // original row can still be violated by |coeff| times the raw
+            // lift gap -- `accept` re-checks original rows at `feas_tol` and
+            // the gap certificate checks the objective at `gap_tol`, both in
+            // ORIGINAL units. A row's violation at the recovered point is
+            // bounded by the SUM over its pairs of `|coeff| · lift gap`, so
+            // while some row's weighted sum exceeds `row_budget` (or the
+            // objective's weighted lift error exceeds `obj_budget`), refine
+            // every contributing pair whose own weighted gap exceeds its
+            // proportional share (budget / member count). The thresholds are
+            // constants, so each pair keeps its geometric slack decay and
+            // the arm stops at the dedupe floor, far below any sane budget.
             if added == 0 {
                 let np = static_.pairs.len();
                 let mut gaps = vec![0.0f64; np];
@@ -665,29 +704,41 @@ fn oa_retry_cut(
                     .pair_rows
                     .iter()
                     .flatten()
-                    .copied()
+                    .map(|&(r, _)| r)
                     .max()
                     .map_or(0, |m| m + 1);
                 let mut rowsum = vec![0.0f64; nrow];
                 let mut rowcnt = vec![0usize; nrow];
+                let mut objsum = 0.0f64;
+                let mut objcnt = 0usize;
                 for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
                     if !static_.rule2_pair[pi] || i != j {
                         continue;
                     }
                     let gap = (x[i] * x[i] - res.x[n + pi]).max(0.0);
                     gaps[pi] = gap;
-                    for &r in &static_.pair_rows[pi] {
-                        rowsum[r] += gap;
+                    for &(r, coeff) in &static_.pair_rows[pi] {
+                        rowsum[r] += coeff.abs() * gap;
                         rowcnt[r] += 1;
+                    }
+                    // `static_.c[n + pi]` is the pair's lift coefficient in
+                    // the relaxation objective (build_static), i.e. the
+                    // objective row's coefficient in original units.
+                    let oc = static_.c[n + pi].abs();
+                    if oc != 0.0 {
+                        objsum += oc * gap;
+                        objcnt += 1;
                     }
                 }
                 for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
                     if !static_.rule2_pair[pi] || i != j {
                         continue;
                     }
-                    let over = static_.pair_rows[pi].iter().any(|&r| {
-                        rowsum[r] > sum_budget && gaps[pi] > sum_budget / rowcnt[r].max(1) as f64
-                    });
+                    let over = static_.pair_rows[pi].iter().any(|&(r, coeff)| {
+                        rowsum[r] > row_budget
+                            && coeff.abs() * gaps[pi] > row_budget / rowcnt[r].max(1) as f64
+                    }) || (objsum > obj_budget
+                        && static_.c[n + pi].abs() * gaps[pi] > obj_budget / objcnt.max(1) as f64);
                     if over {
                         added += usize::from(oa_add_cut(pool, pi, x[i]));
                     }
@@ -724,6 +775,56 @@ fn oa_retry_cut(
     }
 }
 
+/// Finest raw-lift-gap threshold the `oa_retry_cut` budget arms can demand.
+/// Derivation: a pair is refined while its weighted gap exceeds
+/// `budget / (members of its row)` -- in RAW lift units that threshold is
+/// `budget / (members · |coeff|)` (the arm compares `|coeff| · gap`), and an
+/// OA cut row carries lift coefficient `-1`, so its violation at a vertex IS
+/// the raw lift gap. Simplex treats primal violations up to its
+/// `primal_tol` as satisfied: a threshold below `primal_tol` could never be
+/// resolved and the arm would dedupe-stall above budget (measured: an
+/// `1e6`-scaled objective stalls at a certified gap `4e-3` with the default
+/// `PIVOT_TOL = 1e-8`). Returning the minimum threshold lets the caller
+/// refine the LP to it; `f64::INFINITY` (no budget-relevant pair) keeps the
+/// default tolerance untouched.
+fn oa_lift_res_tol(static_: &StaticRelax, row_budget: f64, obj_budget: f64) -> f64 {
+    let n = static_.n;
+    let nrow = static_
+        .pair_rows
+        .iter()
+        .flatten()
+        .map(|&(r, _)| r)
+        .max()
+        .map_or(0, |m| m + 1);
+    let mut rowcnt = vec![0usize; nrow];
+    let mut objcnt = 0usize;
+    for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
+        if !static_.rule2_pair[pi] || i != j {
+            continue;
+        }
+        for &(r, _) in &static_.pair_rows[pi] {
+            rowcnt[r] += 1;
+        }
+        if static_.c[n + pi] != 0.0 {
+            objcnt += 1;
+        }
+    }
+    let mut best = f64::INFINITY;
+    for (pi, &(i, j)) in static_.pairs.iter().enumerate() {
+        if !static_.rule2_pair[pi] || i != j {
+            continue;
+        }
+        for &(r, coeff) in &static_.pair_rows[pi] {
+            best = best.min(row_budget / (coeff.abs() * rowcnt[r].max(1) as f64));
+        }
+        let oc = static_.c[n + pi].abs();
+        if oc != 0.0 {
+            best = best.min(obj_budget / (oc * objcnt.max(1) as f64));
+        }
+    }
+    best
+}
+
 /// Node relaxation under the global OA tangent pool: rebuild the relaxation
 /// with the current pool, solve it, and add tangents while they still change
 /// the pool (plan §3.2 lines 96/100; the retry consumes no node count, and
@@ -753,19 +854,36 @@ fn oa_refine_node(
         // Exit tightness must dominate the acceptance margin `accept`
         // re-checks at `g.feas_tol`: tangency slacks `t_k` below the
         // graphs `x_k^2` let the recovered point violate an original
-        // quadratic row by up to the SUM of the slacks of the pairs
-        // appearing in that row, which per-pair caps cannot bound
-        // (two pairs each at `bilinear_tol` = 1e-6 already exceed a
-        // 1e-6 accept margin; the ellipsoid fixture fails accept and
-        // ends `NumericalError` there). Keep the per-pair cut trigger
-        // at `bilinear_tol` and additionally refine while the total
-        // slack exceeds half the accept margin (see `oa_retry_cut`'s
-        // budget arm).
-        let sum_budget = g.feas_tol / 2.0;
+        // quadratic row by up to the SUM over its pairs of `|coeff| · gap`
+        // (raw per-pair gaps cannot bound a scaled row: 1e6 · 9.3e-8 is a
+        // 0.09 violation of a row whose raw slack passed every threshold),
+        // and an objective-only rule-2 pair keeps an equally weighted
+        // objective lift error that inflates the certified gap. Keep the
+        // per-pair cut trigger at `bilinear_tol` and additionally refine
+        // while the weighted sums exceed half of `feas_tol` / `gap_tol`
+        // (see `oa_retry_cut`'s budget arms and the derivation of
+        // `OA_BUDGET_MARGIN_FACTOR`).
+        let row_budget = g.feas_tol * OA_BUDGET_MARGIN_FACTOR;
+        let obj_budget = g.gap_tol * OA_BUDGET_MARGIN_FACTOR;
+        let lift_res_tol = oa_lift_res_tol(static_, row_budget, obj_budget);
         let relax = build_relax_with_cuts(static_, lb, ub, oa_pool);
         let parent = prev.as_ref().map(|(lp, ws)| (lp, ws));
-        let solved = solve_relax_lp(&relax, opts.deadline, opts.cancel_flag.as_ref(), parent);
-        if oa_retry_cut(static_, &solved.result, g.bilinear_tol, sum_budget, oa_pool) == 0 {
+        let solved = solve_relax_lp(
+            &relax,
+            opts.deadline,
+            opts.cancel_flag.as_ref(),
+            parent,
+            lift_res_tol,
+        );
+        if oa_retry_cut(
+            static_,
+            &solved.result,
+            g.bilinear_tol,
+            row_budget,
+            obj_budget,
+            oa_pool,
+        ) == 0
+        {
             return Ok(solved.result);
         }
         prev = solved.result.warm.map(|ws| (solved.lp, ws));
@@ -841,6 +959,16 @@ const OA_CENTER_DEDUPE_REL_TOL: f64 = 1e-12;
 /// orders of magnitude away from overflow for LP vertices up to ~1e150.
 const OA_RAY_LOOKAHEAD: f64 = 1e3;
 
+/// Derivation of both `oa_retry_cut` budget arms in `oa_refine_node`: a row
+/// admitted at relaxation level is re-checked by `accept` at `feas_tol`, and
+/// the search certifies the objective gap at `gap_tol` -- the budgets bound
+/// those same quantities (coefficient-weighted lift sums), so halving each
+/// tolerance leaves a factor-2 margin against LP rounding before either
+/// verifier rejects. The targets are constants (not per-round-tightening),
+/// which is what keeps the round count row-bounded, not
+/// pair-count-proportional (a43d851e's budget rationale).
+const OA_BUDGET_MARGIN_FACTOR: f64 = 1.0 / 2.0;
+
 /// Re-solve budget per node for OA cut retries (both the `Optimal`
 /// violation half and the `Unbounded` ray half of `oa_retry_cut`). The
 /// traced convergence on the plan-100 shape is geometric with ratio >= 1/2
@@ -848,11 +976,12 @@ const OA_RAY_LOOKAHEAD: f64 = 1e3;
 /// `log2((L + |x*|)/sqrt(bilinear_tol))` rounds suffice: `L = 1e3`, a vertex
 /// scale of 1e15 and `bilinear_tol = 1e-12` need `log2(1e18) ~ 60`; 64
 /// covers that with margin. The accept-margin budget arm refines the same
-/// geometric sequence (its target `sum_budget <= feas_tol/2` is a constant,
-/// not a tighter tol class), so it shares the bound. A node needing more has
-/// a shape the geometric bound does not describe -- the search stops with a
-/// reasoned `NotSupported` instead of burning the node budget silently (plan
-/// §3.2 "cut 後も ray 残のみ検証" generalized to "no progress within budget").
+/// geometric sequence (its targets `feas_tol / 2` and `gap_tol / 2` are
+/// constants, not a tighter tol class), so it shares the bound. A node
+/// needing more has a shape the geometric bound does not describe -- the
+/// search stops with a reasoned `NotSupported` instead of burning the node
+/// budget silently (plan §3.2 "cut 後も ray 残のみ検証" generalized to
+/// "no progress within budget").
 const OA_MAX_CUT_ROUNDS_PER_NODE: usize = 64;
 
 /// Portions of the McCormick relaxation LP that do not depend on the current
@@ -877,10 +1006,12 @@ struct StaticRelax {
     fixed_vi: Vec<f64>,
     fixed_h: Vec<f64>,
     /// For each pair, the quadratic-constraint rows whose `w` column of that
-    /// pair carries a coefficient (a pair is shared across rows only when the
-    /// same (i, j) appears in several rows). The accept-margin budget arm of
-    /// `oa_retry_cut` bounds each row's implied violation with it.
-    pair_rows: Vec<Vec<usize>>,
+    /// pair carries a coefficient, as `(row, coefficient)` (a pair is shared
+    /// across rows only when the same (i, j) appears in several rows). The
+    /// accept-margin budget arm of `oa_retry_cut` bounds each row's implied
+    /// violation as `|coefficient| · lift gap` -- original-row units, which
+    /// is what `accept` re-checks at `feas_tol`.
+    pair_rows: Vec<Vec<(usize, f64)>>,
     /// Per pair: rule-2 diagonal (`i == j && rule2_diag[i]`) -- emitted as
     /// the single under-estimator cut `w_ii >= 0` (the x̄ = 0 tangent), no
     /// interval/envelope rows (decision D2, plan §3.2: interval rows and
@@ -994,7 +1125,7 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
     let a = CscMatrix::from_triplets(&a_ri, &a_ci, &a_vi, peq, nv).unwrap();
 
     // quadratic constraints -> linear rows in [x, w].
-    let mut pair_rows: Vec<Vec<usize>> = vec![Vec::new(); npair];
+    let mut pair_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); npair];
     let mut fixed_ri = Vec::new();
     let mut fixed_ci = Vec::new();
     let mut fixed_vi = Vec::new();
@@ -1011,7 +1142,7 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
             fixed_ri.push(row);
             fixed_ci.push(n + pi);
             fixed_vi.push(coeff);
-            pair_rows[pi].push(row);
+            pair_rows[pi].push((row, coeff));
         }
         fixed_h.push(-qc.r);
     }
@@ -1050,19 +1181,18 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
 /// Build the McCormick LP relaxation for the current box `[lb, ub]`.
 ///
 /// Box and envelope rows depend on the box; everything else is `static_`
-/// (see its doc), so this clones the fixed part (`O(nnz)`) and appends the
-/// per-node rows as triplets, instead of re-deriving the relaxation from a
-/// dense `n x n` pass at every B&B node (the dominant memory cost).
+/// (see its doc): clone the fixed part (`O(nnz)`) and append the per-node
+/// rows as triplets, instead of a dense `n x n` re-derivation at each node.
 ///
 /// Emission is driven by the §3.1 classification stored in `static_`
 /// (plan §3.2, decisions D2/D3):
-/// - Box rows exist exactly for finite node bounds: `±inf` must never reach
-///   `h` or the envelope coefficients (`new_general` rejects them, the call
-///   site unwraps), so pairs with a non-finite endpoint emit no envelope.
-/// - Rule-2 diagonal pairs emit only the under-estimator cut `w_ii >= 0`
-///   (the x̄ = 0 tangent; every further tangent is a node-time OA cut, see
-///   `TangentCut` in `global_core`). Interval and envelope rows are skipped
-///   unconditionally (D2).
+/// - Box rows exist exactly for finite node-bound sides: `±inf` must never
+///   reach `h` or the envelope coefficients (`new_general` rejects them), so
+///   one-sided boxes keep their finite side and pairs with a non-finite
+///   endpoint emit no envelope (only the envelope needs both; review F6).
+/// - Rule-2 diagonal pairs emit only the cut `w_ii >= 0` (the x̄ = 0 tangent;
+///   later tangents are node-time OA cuts, see `TangentCut`). Interval and
+///   envelope rows are skipped unconditionally (D2).
 /// - All other pairs with finite endpoints emit the interval rows + 4
 ///   McCormick facets exactly as the dense reference does.
 ///
@@ -1073,17 +1203,19 @@ fn build_static(qp: &NonconvexQcqp) -> StaticRelax {
 /// optimum cannot certify `Unbounded` and without `x̃` plan line 110 forces
 /// `NotSupported` -- a §6 regression). Restoring boundedness without box
 /// rows is Phase 2's incumbent/cutoff job; the ±inf hazard D3 guards is
-/// fully excluded by the finite-bound rule above.
+/// fully excluded by the finite-side rule above.
 fn build_relax(static_: &StaticRelax, lb: &[f64], ub: &[f64]) -> ConicProblem {
     let n = static_.n;
     let pairs = &static_.pairs;
     let npair = pairs.len();
     let nv = n + npair;
     let m_fixed = static_.fixed_h.len();
-    let boxed: Vec<bool> = (0..n)
-        .map(|j| lb[j].is_finite() && ub[j].is_finite())
-        .collect();
-    let box_rows = 2 * boxed.iter().filter(|b| **b).count();
+    // Per-side box masks (review F6): a one-sided bound is still a real
+    // constraint of the original problem (root or branch-child box), so each
+    // finite side gets its own row and only the non-finite side is skipped.
+    let box_hi: Vec<bool> = (0..n).map(|j| ub[j].is_finite()).collect();
+    let box_lo: Vec<bool> = (0..n).map(|j| lb[j].is_finite()).collect();
+    let box_rows = box_hi.iter().filter(|b| **b).count() + box_lo.iter().filter(|b| **b).count();
     // 1 row per rule-2 diagonal, 2 single-entry + 4 push_mc rows per mc pair.
     let mc_rows: usize = (0..npair)
         .map(|pi| {
@@ -1110,22 +1242,23 @@ fn build_relax(static_: &StaticRelax, lb: &[f64], ub: &[f64]) -> ConicProblem {
     vi.reserve(box_rows + mc_nnz);
     h.reserve(box_rows + mc_rows);
 
-    // variable box (finite-bounded variables only, see fn doc).
+    // variable box: one row per finite side (see fn doc).
     let mut row = m_fixed;
     for j in 0..n {
-        if !boxed[j] {
-            continue;
+        if box_hi[j] {
+            ri.push(row);
+            ci.push(j);
+            vi.push(1.0);
+            h.push(ub[j]);
+            row += 1;
         }
-        ri.push(row);
-        ci.push(j);
-        vi.push(1.0);
-        h.push(ub[j]);
-        row += 1;
-        ri.push(row);
-        ci.push(j);
-        vi.push(-1.0);
-        h.push(-lb[j]);
-        row += 1;
+        if box_lo[j] {
+            ri.push(row);
+            ci.push(j);
+            vi.push(-1.0);
+            h.push(-lb[j]);
+            row += 1;
+        }
     }
 
     // McCormick envelopes for each pair, plus the interval of `w = x_i x_j`
@@ -1362,9 +1495,13 @@ fn objective(qp: &NonconvexQcqp, x: &[f64]) -> f64 {
 /// and the declared box — the consumer Phase 2 wires (bound-free local
 /// solver UB, FBBT-derived bounds kept out of `qp.lb`/`qp.ub`). `None` keeps
 /// the pre-existing behaviour exactly. A seed is never trusted blindly:
-/// `global_core` re-validates feasibility of `x̃` at `g.feas_tol`, re-derives
-/// the incumbent from `objective(qp, x̃)`, and rejects a box that widens the
-/// declared box — an invalid seed fails as `NotSupported` with the reason.
+/// `global_core` accepts either a box-only carrier (`x = []`, `f = +inf`,
+/// the root FBBT output) or a full seed with finite coordinates/`f`,
+/// re-validates feasibility of `x̃` at `g.feas_tol` (integer coordinates are
+/// rounded and the rounded point re-checked, the same contract as ordinary
+/// incumbents), re-derives the incumbent from `objective(qp, x̃)`, and rejects
+/// a box that widens the declared box — an invalid seed fails as
+/// `NotSupported` with the reason.
 pub fn solve_global_qcqp(
     qp: &NonconvexQcqp,
     opts: &ConicOptions,
@@ -1380,7 +1517,10 @@ pub fn solve_global_qcqp(
 ///
 /// `seed` behaves exactly as in [`solve_global_qcqp`]; a seeded `x̃` must
 /// additionally be integral within `g.int_tol` (it is checked with the same
-/// `all_integral` gate as per-node incumbents).
+/// `all_integral` gate as per-node incumbents) and must remain feasible at
+/// `feas_tol` after that rounding, so a seed only installs if the *rounded*
+/// point passes the same round-then-recheck an ordinary incumbent goes
+/// through.
 pub fn solve_global_miqcp(
     qp: &NonconvexQcqp,
     integers: &[usize],
@@ -1472,14 +1612,17 @@ fn validate_integers(n: usize, integers: &[usize]) -> Result<(), String> {
 /// a finite `f` is corrupt input and fails the seed validation.
 #[derive(Debug, Clone)]
 pub struct GlobalSeed {
-    /// Feasible point `x̃` (re-validated by `global_core` at `feas_tol`
-    /// before use — a corrupt seed fails as `NotSupported`, never as a
-    /// trusted incumbent), or empty for a box-only seed (no incumbent).
+    /// Feasible point `x̃` with finite coordinates (re-validated by
+    /// `global_core` at `feas_tol` before use — integer coordinates are
+    /// rounded and re-checked first; a corrupt seed fails as `NotSupported`,
+    /// never as a trusted incumbent), or empty for a box-only seed (no
+    /// incumbent).
     pub x: Vec<f64>,
-    /// Objective value at `x`; cross-checked against `objective(qp, x)` and
-    /// the incumbent is always the recomputed value (a stale/mismatched `f`
-    /// fails the seed, it is never trusted as a lower upper-bound). Must be
-    /// `+inf` when `x` is empty.
+    /// Objective value at `x`; for a non-empty seed it must be finite and is
+    /// cross-checked against `objective(qp, x)`, and the incumbent is always
+    /// the recomputed value (a stale/mismatched `f` fails the seed, it is
+    /// never trusted as a lower upper-bound). Must be `+inf` when `x` is
+    /// empty.
     pub f: f64,
     /// Derived root lower bounds (`±inf` allowed for free variables). Must
     /// refine, never widen, `qp.lb`/`qp.ub` -- a widened side would admit
@@ -1487,6 +1630,150 @@ pub struct GlobalSeed {
     pub root_lb: Vec<f64>,
     /// Derived root upper bounds, same refinement rule as `root_lb`.
     pub root_ub: Vec<f64>,
+}
+
+/// Relative tolerance for the `GlobalSeed::f` cross-check against
+/// `objective(qp, x)`: disagreement beyond `1e-9 * (1 + |fx|)` marks a
+/// stale/mismatched `f`, not float noise in the recomputation.
+const SEED_F_CROSSCHECK_REL_TOL: f64 = 1e-9;
+
+/// Validate an ingested [`GlobalSeed`] and return the point to install as the
+/// root incumbent; `Ok(None)` is an accepted box-only seed (root FBBT output:
+/// it carries the derived root box but no incumbent, plan §4.2), `Err(reason)`
+/// means the caller must refuse the seed as `NotSupported` and search as if
+/// no seed had been passed.
+///
+/// A box-only seed (`x = vec![]`) must carry `f = +inf` — a finite `f` next
+/// to an empty `x` is corrupt data, never a trusted UB. A full seed follows
+/// the ordinary-incumbent contract of `accept` (PR #84 review P1/P2):
+/// coordinates and `f` finite (a `±inf` free coordinate passes the bound
+/// comparison of `feasible()` yet turns the recomputed objective into NaN via
+/// `0 * inf`, and every NaN comparison below fails open); feasible at
+/// `feas_tol` and integral at `int_tol`; then integer coordinates are rounded
+/// and the *rounded* point re-passes the original `feasible` at `feas_tol`
+/// (a tight/equality row can be feasible only at the fractional point, which
+/// no integer satisfies). `seed.f` is cross-checked against the objective at
+/// the SEED point (its documented contract); the installed incumbent is always
+/// the independent recomputation at the rounded point. Both seed kinds share
+/// the box checks: no NaN sides, and refine-never-widen of the declared box.
+fn validate_seed(
+    qp: &NonconvexQcqp,
+    integers: &[usize],
+    g: &GlobalOptions,
+    s: &GlobalSeed,
+) -> Result<Option<Vec<f64>>, String> {
+    let box_only = s.x.is_empty();
+    if (!box_only && s.x.len() != qp.n) || s.root_lb.len() != qp.n || s.root_ub.len() != qp.n {
+        return Err("seed x/root_lb/root_ub length != n".to_string());
+    }
+    if box_only && s.f != f64::INFINITY {
+        return Err(format!(
+            "box-only seed (empty x) must carry f = +inf, got {}",
+            s.f
+        ));
+    }
+    if !box_only && (s.x.iter().any(|v| !v.is_finite()) || !s.f.is_finite()) {
+        return Err("seed x coordinates and seed.f must be finite".to_string());
+    }
+    if s.root_lb
+        .iter()
+        .zip(&s.root_ub)
+        .any(|(l, u)| l.is_nan() || u.is_nan() || l > u)
+    {
+        // `±inf` sides are allowed -- the declared box carries them for free
+        // variables; NaN is not.
+        return Err("seed root box must satisfy lb <= ub (no NaN sides)".to_string());
+    }
+    if s.root_lb
+        .iter()
+        .zip(&s.root_ub)
+        .zip(qp.lb.iter().zip(&qp.ub))
+        .any(|((&l, &u), (&pl, &pu))| l < pl || u > pu)
+    {
+        // The derived box must refine, never widen, the declared box.
+        return Err("seed root box widens the declared box".to_string());
+    }
+    if box_only {
+        return Ok(None);
+    }
+    if !feasible(qp, &s.x, g.feas_tol) || !all_integral(&s.x, integers, g.int_tol) {
+        return Err("seed x is not feasible for the original problem at feas_tol".to_string());
+    }
+    let mut xr = s.x.clone();
+    for &k in integers {
+        xr[k] = xr[k].round();
+    }
+    if !feasible(qp, &xr, g.feas_tol) {
+        return Err("seed x violates a constraint at feas_tol after integer rounding".to_string());
+    }
+    let fx = objective(qp, &s.x);
+    if !fx.is_finite() {
+        return Err(format!(
+            "recomputed seed objective must be finite, got {fx}"
+        ));
+    }
+    // The documented `GlobalSeed::f` contract is the objective at the SEED
+    // point, so the stale-`f` cross-check evaluates at `s.x`. Evaluating it at
+    // the ROUNDED point conflates the int_tol coordinate shift (legitimate for
+    // an integral-within-tol seed) with a stale/forged `f`: rounding `min x`
+    // at `x = 1.0000005` moves the objective by 5e-7 — far beyond the
+    // `SEED_F_CROSSCHECK_REL_TOL * (1 + |fx|)` noise bound — and a valid seed
+    // would abort the whole solve as `NotSupported` (PR #85 review P2).
+    if (s.f - fx).abs() > SEED_F_CROSSCHECK_REL_TOL * (1.0 + fx.abs()) {
+        return Err(format!(
+            "seed objective mismatch: seed.f = {} vs recomputed {fx}",
+            s.f
+        ));
+    }
+    // The installed incumbent stays the INDEPENDENT recomputation at the
+    // rounded, re-verified point — never `seed.f` itself (PR #84 review
+    // P1/P2: a stale/mismatched `f` is never trusted as an upper bound).
+    let fxr = objective(qp, &xr);
+    if !fxr.is_finite() {
+        return Err(format!("rounded seed objective must be finite, got {fxr}"));
+    }
+    Ok(Some(xr))
+}
+
+/// Root state installed by an accepted [`GlobalSeed`] (see [`apply_root_seed`]).
+struct SeedRoot {
+    /// Root incumbent objective; `+inf` for a box-only seed (no incumbent).
+    incumbent: f64,
+    /// Root incumbent point; empty for a box-only seed.
+    inc_x: Vec<f64>,
+    /// Effective root box: the seed's derived box.
+    root_box: (Vec<f64>, Vec<f64>),
+}
+
+/// Install a validated [`GlobalSeed`] at the root of `global_core`: on
+/// rejection returns the rendered `NotSupported` result to return verbatim;
+/// on acceptance returns the [`SeedRoot`] to install — a box-only seed keeps
+/// `incumbent = +inf` with an empty `inc_x` (plan §4.2), a full seed installs
+/// the independent recomputation at the rounded point. (Size-only extraction
+/// from `global_core`; contract and message bytes unchanged.)
+fn apply_root_seed(
+    qp: &NonconvexQcqp,
+    integers: &[usize],
+    g: &GlobalOptions,
+    s: &GlobalSeed,
+) -> Result<SeedRoot, GlobalResult> {
+    match validate_seed(qp, integers, g, s) {
+        Err(e) => Err(GlobalResult {
+            status: SolveStatus::NotSupported(format!("invalid global seed: {e}")),
+            objective: f64::NAN,
+            x: vec![],
+            nodes: 0,
+            gap: f64::INFINITY,
+        }),
+        Ok(xr) => Ok(SeedRoot {
+            incumbent: xr
+                .as_ref()
+                .map(|x| objective(qp, x))
+                .unwrap_or(f64::INFINITY),
+            inc_x: xr.unwrap_or_default(),
+            root_box: (s.root_lb.clone(), s.root_ub.clone()),
+        }),
+    }
 }
 
 /// Zero-decision tolerance for the §3.2 recession verification, after the ray
@@ -1694,64 +1981,6 @@ fn required_free_rejection(
     None
 }
 
-/// Seed trust audit for `global_core` (shape, box-only contract, refine-only
-/// box, feasibility/objective consistency of a full seed). `Some(msg)` = the
-/// rejection reason rendered as `invalid global seed: {msg}`; `None` = the
-/// seed is trusted. (Size-only extraction; every message and check order is
-/// byte-identical to the pre-extraction inline chain.)
-fn seed_rejection(
-    s: &GlobalSeed,
-    qp: &NonconvexQcqp,
-    integers: &[usize],
-    g: &GlobalOptions,
-) -> Option<String> {
-    let box_only = s.x.is_empty();
-    if (!box_only && s.x.len() != qp.n) || s.root_lb.len() != qp.n || s.root_ub.len() != qp.n {
-        return Some("seed x/root_lb/root_ub length != n".to_string());
-    }
-    if box_only && s.f != f64::INFINITY {
-        // A box-only seed (root FBBT output) has no incumbent; a finite
-        // `f` next to an empty `x` is corrupt data, never a trusted UB.
-        return Some(format!(
-            "box-only seed (empty x) must carry f = +inf, got {}",
-            s.f
-        ));
-    }
-    if s.root_lb
-        .iter()
-        .zip(&s.root_ub)
-        .any(|(l, u)| l.is_nan() || u.is_nan() || l > u)
-    {
-        // Non-finite (`±inf`) box sides are allowed -- they are what the
-        // declared box itself carries for free variables; NaN is not.
-        return Some("seed root box must satisfy lb <= ub (no NaN sides)".to_string());
-    }
-    if s.root_lb
-        .iter()
-        .zip(&s.root_ub)
-        .zip(qp.lb.iter().zip(&qp.ub))
-        .any(|((&l, &u), (&pl, &pu))| l < pl || u > pu)
-    {
-        // The derived box must refine, never widen, the declared box (a
-        // widened side would admit points the public `feasible()`
-        // contract rejects).
-        return Some("seed root box widens the declared box".to_string());
-    }
-    if box_only {
-        return None;
-    }
-    if !feasible(qp, &s.x, g.feas_tol) || !all_integral(&s.x, integers, g.int_tol) {
-        return Some("seed x is not feasible for the original problem at feas_tol".to_string());
-    }
-    let fx = objective(qp, &s.x);
-    ((s.f - fx).abs() > 1e-9 * (1.0 + fx.abs())).then(|| {
-        format!(
-            "seed objective mismatch: seed.f = {} vs recomputed {fx}",
-            s.f
-        )
-    })
-}
-
 /// McCormick spatial branch-and-bound core shared by [`solve_global_qcqp`] /
 /// [`solve_global_miqcp`].
 ///
@@ -1793,21 +2022,14 @@ fn global_core(
     // keeps derived bounds out of `qp.lb`/`qp.ub`), else the problem box.
     let mut root_box = (qp.lb.clone(), qp.ub.clone());
     if let Some(s) = seed {
-        let bad = seed_rejection(s, qp, integers, g);
-        if let Some(e) = bad {
-            return GlobalResult {
-                status: SolveStatus::NotSupported(format!("invalid global seed: {e}")),
-                objective: f64::NAN,
-                x: vec![],
-                nodes: 0,
-                gap: f64::INFINITY,
-            };
+        match apply_root_seed(qp, integers, g, s) {
+            Err(rejected) => return rejected,
+            Ok(root) => {
+                incumbent = root.incumbent;
+                inc_x = root.inc_x;
+                root_box = root.root_box;
+            }
         }
-        if !s.x.is_empty() {
-            incumbent = objective(qp, &s.x);
-            inc_x = s.x.clone();
-        }
-        root_box = (s.root_lb.clone(), s.root_ub.clone());
     }
     if let Some(res) = required_free_rejection(&static_, &root_box) {
         return res;
@@ -3016,7 +3238,7 @@ mod tests {
         let static_ = build_static(&qp);
         assert_eq!(static_.pairs, vec![(0, 0)]);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
-        let res = solve_relax_lp(&relax, None, None, None).result;
+        let res = solve_relax_lp(&relax, None, None, None, f64::INFINITY).result;
         assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
         assert!(
             res.objective.abs() < 1e-7,
@@ -3115,6 +3337,127 @@ mod tests {
         assert_eq!(relax.h, vec![-1.0], "h = -r, all finite");
     }
 
+    /// Fixture for the PR #84 review F6 sentinels: `min x0` with the
+    /// one-sided box `x0 in [0, +inf)`, a redundant guard `x0 <= 10` (the
+    /// hand optimum `0` at `x0 = 0` is unaffected by it, and it keeps the
+    /// relaxation matrix non-empty even when the box emission is wrong), and
+    /// an unused free `x1` so nothing lifts: `pairs` is empty, no McCormick
+    /// structure is involved, and every expectation is hand-computable.
+    fn one_sided_min_x() -> NonconvexQcqp {
+        let n = 2usize;
+        NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap(),
+            h_lin: vec![10.0],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0, f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY, f64::INFINITY],
+        }
+    }
+
+    /// Sentinel (PR #84 review F6): each finite side of a variable's box must
+    /// emit its own relaxation row; only the non-finite side may be omitted.
+    /// Reverting to the "both sides finite, else emit neither" mask drops the
+    /// `x0 >= 0` row of the one-sided box `[0, +inf)`, the row count below
+    /// fails, and the relaxation LP turns Unbounded.
+    #[test]
+    fn one_sided_box_sides_emit_independently() {
+        let qp = one_sided_min_x();
+        let static_ = build_static(&qp);
+        assert_eq!(static_.pairs.len(), 0, "McCormick-free by construction");
+        let relax = build_relax(&static_, &qp.lb, &qp.ub);
+        // m = fixed guard (1) + finite lower side (1); the `+inf` upper side
+        // emits nothing, and the fully free x1 emits neither side.
+        assert_eq!(relax.cone.l, 2, "one box row per finite box side");
+        assert_eq!(relax.h, vec![10.0, 0.0], "guard rhs, then -lb");
+        assert!(
+            relax.h.iter().all(|v| v.is_finite()),
+            "±inf must never reach h: {:?}",
+            relax.h
+        );
+        let res = solve_relax_lp(&relax, None, None, None, f64::INFINITY).result;
+        assert_eq!(res.status, SolveStatus::Optimal, "{:?}", res.status);
+        assert!(
+            res.objective.abs() <= 1e-7,
+            "hand oracle: min x0 over [0, +inf) is 0, got {}",
+            res.objective
+        );
+    }
+
+    /// Sentinel (PR #84 review F6, full path): `min x0` over the one-sided
+    /// box `x0 in [0, +inf)` must certify the hand optimum `0` at `x0 = 0`
+    /// through the public entry. With the both-finite mask the relaxation
+    /// loses `x0 >= 0`, the root LP is Unbounded along `d = -e0`, and decision
+    /// D6 has no original-feasible base point `x̃` at hand, so the search
+    /// reports `NotSupported` — the rejection this sentinel forbids.
+    #[test]
+    fn one_sided_lower_bound_reaches_zero_optimum_end_to_end() {
+        let qp = one_sided_min_x();
+        qp.validate()
+            .expect("a one-sided box outside R must validate");
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            None,
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            res.objective.abs() <= 1e-7,
+            "hand oracle: min x0 over [0, +inf) is 0: {res:?}"
+        );
+        assert!(res.x[0].abs() <= 1e-7, "the optimum is x0 = 0: {:?}", res.x);
+        assert_eq!(res.nodes, 1, "no mc_pairs: the root is a leaf: {res:?}");
+    }
+
+    /// Sentinel (PR #84 review F6, integer branching half): an integer branch
+    /// child can inherit a genuinely one-sided box (`[2, +inf)` here) and the
+    /// relaxation must keep the child's finite side. Fixture: `min -x0` s.t.
+    /// `x0 + x1 = 1.5`, `x1 in [0, 1]`, `x0` integer over `[0, +inf)`. Hand
+    /// oracle: the equality plus `x1 in [0, 1]` confines `x0` to `[0.5, 1.5]`,
+    /// so the only integer point is `x0 = 1` with objective `-1`. Without
+    /// per-side emission the child `[2, +inf)` loses its `x0 >= 2` row: its
+    /// relaxation coincides with the parent's (`x0 = 1.5`, fractional), the
+    /// integer branch re-pushes the identical box (plan §0.1 line 16), and the
+    /// node budget burns down to `MaxIterations` instead of the certified
+    /// optimum.
+    #[test]
+    fn integer_branch_child_keeps_one_sided_box_side() {
+        let n = 2usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![-1.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap(),
+            b_eq: vec![1.5],
+            lb: vec![0.0, 0.0],
+            ub: vec![f64::INFINITY, 1.0],
+        };
+        let g = GlobalOptions {
+            max_nodes: 50,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_miqcp(&qp, &[0], &ConicOptions::default(), &g, None);
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            (res.objective + 1.0).abs() <= 1e-7,
+            "hand oracle: the only integer point is x0 = 1, obj -1: {res:?}"
+        );
+        assert!((res.x[0] - 1.0).abs() <= 1e-6, "{:?}", res.x);
+        assert!(
+            res.nodes == 3,
+            "the one-sided child must prune at once, not burn the 50-node \
+             budget re-pushing identical boxes: {res:?}"
+        );
+    }
+
     /// Sentinel (decision D4, plan §5 test 3): a rule-2 diagonal `w_ii` must
     /// never be a spatial branching candidate. Fixture: `min x0^2 − x1  s.t.
     /// x0 − x1 = 0`, `x1 in [0, 5]`, `x0` free — the lifted pair (0,0) is a
@@ -3208,7 +3551,7 @@ mod tests {
         let static_ = build_static(&qp);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let res = solve_relax_lp(&relax, Some(past), None, None).result;
+        let res = solve_relax_lp(&relax, Some(past), None, None, f64::INFINITY).result;
         assert_eq!(
             res.status,
             SolveStatus::Timeout,
@@ -3226,7 +3569,7 @@ mod tests {
         let static_ = build_static(&qp);
         let relax = build_relax(&static_, &qp.lb, &qp.ub);
         let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let res = solve_relax_lp(&relax, None, Some(&fired), None).result;
+        let res = solve_relax_lp(&relax, None, Some(&fired), None, f64::INFINITY).result;
         assert_eq!(
             res.status,
             SolveStatus::Timeout,
@@ -3254,7 +3597,7 @@ mod tests {
             h: vec![0.0],
             cone: ConeSpec { l: 1, soc: vec![] },
         };
-        let res = solve_relax_lp(&relax, None, None, None).result;
+        let res = solve_relax_lp(&relax, None, None, None, f64::INFINITY).result;
         assert_eq!(
             res.status,
             SolveStatus::Unbounded,
@@ -3510,7 +3853,14 @@ mod tests {
             warm: None,
         };
         assert_eq!(
-            oa_retry_cut(&static_, &unbounded, 1e-6, f64::INFINITY, &mut pool),
+            oa_retry_cut(
+                &static_,
+                &unbounded,
+                1e-6,
+                f64::INFINITY,
+                f64::INFINITY,
+                &mut pool
+            ),
             1
         );
         assert_eq!(
@@ -3519,7 +3869,14 @@ mod tests {
             "far-point tangent center hand-computed"
         );
         assert_eq!(
-            oa_retry_cut(&static_, &unbounded, 1e-6, f64::INFINITY, &mut pool),
+            oa_retry_cut(
+                &static_,
+                &unbounded,
+                1e-6,
+                f64::INFINITY,
+                f64::INFINITY,
+                &mut pool
+            ),
             0,
             "the same ray re-derives the same center: fall through"
         );
@@ -3536,7 +3893,14 @@ mod tests {
             warm: None,
         };
         assert_eq!(
-            oa_retry_cut(&static_, &w_only, 1e-6, f64::INFINITY, &mut pool),
+            oa_retry_cut(
+                &static_,
+                &w_only,
+                1e-6,
+                f64::INFINITY,
+                f64::INFINITY,
+                &mut pool
+            ),
             0
         );
         // Optimal half: `w < x̄² - viol_tol` cuts at the solution point; a
@@ -3550,7 +3914,14 @@ mod tests {
             warm: None,
         };
         assert_eq!(
-            oa_retry_cut(&static_, &violating, 1e-6, f64::INFINITY, &mut pool),
+            oa_retry_cut(
+                &static_,
+                &violating,
+                1e-6,
+                f64::INFINITY,
+                f64::INFINITY,
+                &mut pool
+            ),
             1
         );
         assert_eq!(pool.last(), Some(&(0, 3.0)));
@@ -3562,8 +3933,98 @@ mod tests {
             warm: None,
         };
         assert_eq!(
-            oa_retry_cut(&static_, &tight, 1e-3, f64::INFINITY, &mut pool),
+            oa_retry_cut(
+                &static_,
+                &tight,
+                1e-3,
+                f64::INFINITY,
+                f64::INFINITY,
+                &mut pool
+            ),
             0
+        );
+    }
+
+    /// PR #84 review F3 sentinel: the accept-margin budget must be in
+    /// ORIGINAL-ROW units. `min −x  s.t.  1e6·x² − 1e6 <= 0, x ∈ [0,2]`
+    /// is exactly `x <= 1` (hand oracle: optimum `−1` at `x = 1`), but an OA
+    /// vertex at `x = 1 + 4.65e−8` has lift gap `≈ 9.29e−8` (under both cut
+    /// thresholds) while the ORIGINAL row is violated by `1e6 · 9.29e−8 =
+    /// 0.0929 ≫ feas_tol` — `accept` rejects it and the raw-gap budget never
+    /// asks for another tangent. Before the weighted-gap fix: leaf
+    /// exhaustion with `NumericalError` and no incumbent.
+    #[test]
+    fn scaled_quad_row_keeps_oa_tangents_until_row_feasible() {
+        let qp = NonconvexQcqp {
+            n: 1,
+            p0: None,
+            q0: vec![-1.0],
+            quad: vec![GQuadConstraint {
+                p: CscMatrix::from_triplets(&[0], &[0], &[2.0e6], 1, 1).unwrap(),
+                q: vec![0.0],
+                r: -1.0e6,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0],
+            ub: vec![2.0],
+        };
+        let g = GlobalOptions {
+            max_nodes: 200,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g, None);
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            (res.objective + 1.0).abs() <= 1e-5,
+            "hand oracle: min −x on x<=1 is −1: {res:?}"
+        );
+        assert!(
+            (res.x[0] - 1.0).abs() <= 1e-4,
+            "optimum is x = 1: {:?}",
+            res.x
+        );
+    }
+
+    /// PR #84 review F4 sentinel: rule-2 pairs appearing ONLY in the
+    /// objective must be refined to the optimality tolerance.
+    /// `min 1e6·x² − 6e5·x` on `[0,1]` = `1e6(x − 0.3)² − 90000` (hand
+    /// oracle: optimum `−90000` at `x = 0.3`). Before the fix the budget
+    /// arm only covered `pair_rows` (quadratic constraints), so the
+    /// objective-only pair was never refined: the OA vertex
+    /// `x = 0.2998046875` has lift gap `≈ 9.54e−7` (under `bilinear_tol`)
+    /// but objective lift error `1e6 · 9.54e−7 ≈ 0.954 ≫ gap_tol`, and the
+    /// search returned `SuboptimalSolution` with that gap.
+    #[test]
+    fn objective_only_rule2_pair_refined_to_gap_tol() {
+        let qp = NonconvexQcqp {
+            n: 1,
+            p0: Some(CscMatrix::from_triplets(&[0], &[0], &[2.0e6], 1, 1).unwrap()),
+            q0: vec![-600_000.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0],
+            ub: vec![1.0],
+        };
+        let g = GlobalOptions {
+            max_nodes: 200,
+            ..GlobalOptions::default()
+        };
+        let res = solve_global_qcqp(&qp, &ConicOptions::default(), &g, None);
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            (res.objective + 90_000.0).abs() <= 1e-3,
+            "hand oracle: 1e6(x-0.3)^2 - 90000 has min -90000 at x=0.3: {res:?}"
+        );
+        assert!(
+            (res.x[0] - 0.3).abs() <= 1e-3,
+            "optimum is x = 0.3: {:?}",
+            res.x
         );
     }
 
@@ -3987,11 +4448,90 @@ mod tests {
         );
     }
 
+    /// PR #85 review (P1, "Preserve valid LP options when a global
+    /// tolerance is zero"): `gap_tol`/`feas_tol` are search *budgets*, and
+    /// `GlobalOptions::validate` contractually accepts `0` ("no slack
+    /// wanted"). Feeding the zero budget through `oa_lift_res_tol` into
+    /// `SolverOptions::primal_tol` made the root LP fail
+    /// `SolverOptions::validate` (which demands a strictly positive primal
+    /// tolerance) and return `NumericalError` on the trivial problem below.
+    /// Hand oracle: `min x0²` over `[0,1]` has optimum `0` at `x0 = 0`
+    /// (exact rational point, no LP noise). Sentinel: reverting the
+    /// `RELAX_LP_TOL_FLOOR` guard in `solve_relax_lp` restores the
+    /// `NumericalError` and fails this test.
+    #[test]
+    fn zero_global_budgets_still_certify_objective_rule2_optimum() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: Some(csc(&[vec![2.0]], n, n)),
+            q0: vec![0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0],
+            ub: vec![1.0],
+        };
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions {
+                gap_tol: 0.0,
+                feas_tol: 0.0,
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(res.objective.abs() < 1e-9, "obj={}", res.objective);
+    }
+
+    /// Companion to the sentinel above for the *row* arm of
+    /// `oa_lift_res_tol`: a zero `feas_tol` with a rule-2 diagonal appearing
+    /// in a quadratic constraint row zeroed `row_budget`, poisoning the same
+    /// `primal_tol` even when `gap_tol` is positive. Hand oracle:
+    /// `min x0` s.t. `x0² <= 4` over `[-3,3]` has optimum `-2` at `x0 = -2`
+    /// (constraint active, violation exactly `0 <= feas_tol`). Sentinel:
+    /// reverting the floor fails with `NumericalError` here as well.
+    #[test]
+    fn zero_feas_tol_budget_still_certifies_rule2_constraint_row_optimum() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0],
+            quad: vec![GQuadConstraint {
+                p: csc(&[vec![2.0]], n, n),
+                q: vec![0.0],
+                r: -4.0,
+            }],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![-3.0],
+            ub: vec![3.0],
+        };
+        let res = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions {
+                feas_tol: 0.0,
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!((res.objective + 2.0).abs() < 1e-6, "obj={}", res.objective);
+    }
+
     // -----------------------------------------------------------------
     // Independent oracle: the pre-fix dense implementation, kept
     // self-contained here purely as a reference for
-    // `sparse_relax_matches_dense_reference` below. Production code must
-    // never call these again.
+    // `sparse_relax_matches_dense_per_side_box_oracle` below. Production
+    // code must never call these again.
     // -----------------------------------------------------------------
 
     fn reference_dense(a: &CscMatrix) -> Vec<Vec<f64>> {
@@ -4148,18 +4688,22 @@ mod tests {
             rows.push(r);
             h.push(qp.h_lin[i]);
         }
+        // Per-side box rows (PR #84 review F6): each finite node-bound side
+        // gets its own row; the pair mask below stays both-finite because a
+        // McCormick envelope genuinely needs both endpoints boxed.
         for j in 0..n {
-            if !boxed[j] {
-                continue;
+            if ub[j].is_finite() {
+                let mut r = vec![0.0; nv];
+                r[j] = 1.0;
+                rows.push(r);
+                h.push(ub[j]);
             }
-            let mut r = vec![0.0; nv];
-            r[j] = 1.0;
-            rows.push(r);
-            h.push(ub[j]);
-            let mut r2 = vec![0.0; nv];
-            r2[j] = -1.0;
-            rows.push(r2);
-            h.push(-lb[j]);
+            if lb[j].is_finite() {
+                let mut r2 = vec![0.0; nv];
+                r2[j] = -1.0;
+                rows.push(r2);
+                h.push(-lb[j]);
+            }
         }
         for (pi, &(i, j)) in pairs.iter().enumerate() {
             let wj = n + pi;
@@ -4291,16 +4835,25 @@ mod tests {
         CscMatrix::from_triplets(&ri, &ci, &vi, nrows, ncols).unwrap()
     }
 
-    /// Sentinel (independent-oracle equivalence): the sparse `build_static` +
-    /// `build_relax` must construct byte-for-byte the same relaxation as the
-    /// pre-fix dense reference above, across a spread of objective/constraint
+    /// Sentinel (independent-oracle equivalence, per-side box contract): the
+    /// sparse `build_static` + `build_relax` must construct byte-for-byte the
+    /// same relaxation as the dense reference above -- whose box emission is
+    /// one row per finite side -- across a spread of objective/constraint
     /// shapes (diagonal-only, off-diagonal, asymmetric-storage quadratic
     /// matrices, straddling/non-straddling boxes, existing equalities/
-    /// inequalities, and a narrowed mid-branch-and-bound box). Reintroducing
-    /// a row/column indexing mistake in the sparse rewrite changes `c`/`a`/
-    /// `g`/`h` here and fails this test without needing a full LP solve.
+    /// inequalities, a narrowed mid-branch-and-bound box, and a one-sided
+    /// box). This identity replaces `sparse_relax_matches_dense_reference`:
+    /// b49fe842 changed the reference's box emission from the both-finite
+    /// mask to per-side emission, and per the AGENTS.md rule against
+    /// modifying an existing test's assertions that change is expressed as
+    /// the deletion of that name plus this one (PR #85 review "Give the
+    /// changed dense-oracle contract a new test identity"; same pattern the
+    /// branch already applied to the D8 acceptance test). Reintroducing a
+    /// row/column indexing mistake in the sparse rewrite -- or re-masking a
+    /// box side behind the both-finite condition -- changes `c`/`a`/`g`/`h`
+    /// here and fails this test without needing a full LP solve.
     #[test]
-    fn sparse_relax_matches_dense_reference() {
+    fn sparse_relax_matches_dense_per_side_box_oracle() {
         struct Case {
             name: &'static str,
             qp: NonconvexQcqp,
@@ -4430,6 +4983,15 @@ mod tests {
                 lb: vec![-1.0, f64::NEG_INFINITY],
                 ub: vec![1.5, f64::INFINITY],
             },
+            Case {
+                name: "one_sided_box_and_free_var",
+                // x0 one-sided [0, +inf) (finite lower side only), x1 fully
+                // free: pins the per-side box emission (review F6) against
+                // the dense oracle.
+                qp: rule2_free.clone(),
+                lb: vec![0.0, f64::NEG_INFINITY],
+                ub: vec![f64::INFINITY, f64::INFINITY],
+            },
         ];
 
         for case in &cases {
@@ -4440,5 +5002,179 @@ mod tests {
             let reference = reference_build_relax(&case.qp, &ref_pairs, &case.lb, &case.ub);
             assert_relax_eq(&sparse, &reference, case.name);
         }
+    }
+
+    /// PR #84 review (P2, "Reject non-finite seed coordinates and objective
+    /// values"): a seed coordinate of `+inf` on a free, constraint-unused
+    /// variable passes `feasible()` (the bound comparison permits `inf`
+    /// against `ub = inf`; the sparse row products never touch `x1`), the
+    /// recomputed objective becomes NaN through `0 * inf` in `q0^T x`, and
+    /// the NaN mismatch comparison is `false`, so the seed installed. Hand
+    /// oracle: `min x0, x0 ∈ [0,1]`, free unused `x1`, seed `x = [0, +inf]`,
+    /// `f = 0` — the seed must be refused as `NotSupported` naming finiteness,
+    /// and a finite `f = +inf` seed likewise. Sentinel: removing the
+    /// finiteness gate in the seed ingestion makes this FAIL (the seed
+    /// installs; the run ends with a non-finite incumbent).
+    #[test]
+    fn nonfinite_seed_coordinates_and_objective_are_refused() {
+        let n = 2usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0, 0.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0, f64::NEG_INFINITY],
+            ub: vec![1.0, f64::INFINITY],
+        };
+        let base = GlobalSeed {
+            x: vec![0.0, 0.0],
+            f: 0.0,
+            root_lb: qp.lb.clone(),
+            root_ub: qp.ub.clone(),
+        };
+        for (bad_x, bad_f) in [
+            (Some(f64::INFINITY), 0.0),
+            (Some(f64::NEG_INFINITY), 0.0),
+            (Some(f64::NAN), 0.0),
+            (None, f64::INFINITY),
+            (None, f64::NAN),
+        ] {
+            let seed = GlobalSeed {
+                x: match bad_x {
+                    Some(v) => vec![0.0, v],
+                    None => vec![0.0, 0.0],
+                },
+                f: bad_f,
+                ..base.clone()
+            };
+            let res = solve_global_qcqp(
+                &qp,
+                &ConicOptions::default(),
+                &GlobalOptions::default(),
+                Some(&seed),
+            );
+            match &res.status {
+                SolveStatus::NotSupported(reason) => {
+                    assert!(reason.contains("invalid global seed"), "{reason}");
+                    assert!(reason.contains("finite"), "{reason}");
+                }
+                other => panic!("non-finite seed must fail as NotSupported, got {other:?}"),
+            }
+            assert_eq!(res.nodes, 0, "the seed gate runs before the search");
+        }
+        // Control: the same fixture with a finite seed installs and certifies
+        // the hand-oracle optimum 0 at x0 = 0 (rejection is about finiteness,
+        // not the fixture).
+        let ok = solve_global_qcqp(
+            &qp,
+            &ConicOptions::default(),
+            &GlobalOptions::default(),
+            Some(&base),
+        );
+        assert_eq!(ok.status, SolveStatus::Optimal, "{ok:?}");
+        assert!(ok.objective.abs() <= 1e-9, "{ok:?}");
+    }
+
+    /// PR #84 review (P1, "Round and recheck integer seeds before accepting
+    /// them"): an MIQCP seed whose integer coordinate is within `int_tol` but
+    /// whose rounded value violates a constraint at `feas_tol` bypassed
+    /// `accept()`'s round-then-recheck and installed the fractional point.
+    /// Hand oracle: integer `x ∈ [0,2]`, equality `x = 1.0000005`, `min x`,
+    /// `feas_tol = 1e-9`, `int_tol = 1e-6` — no integer satisfies the equality
+    /// at `feas_tol`, so the seed must be refused (`NotSupported` naming the
+    /// rounding recheck) and must never be reported as an `Optimal` incumbent
+    /// with a fractional integer variable. Sentinel: installing the raw seed
+    /// point again (no round-then-recheck) makes this FAIL with
+    /// `Optimal, x = [1.0000005]`.
+    #[test]
+    fn seed_integer_must_survive_round_then_recheck_before_install() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap(),
+            b_eq: vec![1.0000005],
+            lb: vec![0.0],
+            ub: vec![2.0],
+        };
+        let g = GlobalOptions {
+            feas_tol: 1e-9,
+            int_tol: 1e-6,
+            ..GlobalOptions::default()
+        };
+        let seed = GlobalSeed {
+            x: vec![1.0000005],
+            f: 1.0000005,
+            root_lb: vec![0.0],
+            root_ub: vec![2.0],
+        };
+        let res = solve_global_miqcp(&qp, &[0], &ConicOptions::default(), &g, Some(&seed));
+        match &res.status {
+            SolveStatus::NotSupported(reason) => {
+                assert!(reason.contains("invalid global seed"), "{reason}");
+                assert!(reason.contains("round"), "{reason}");
+            }
+            other => panic!(
+                "a seed whose rounded integer violates the equality at feas_tol \
+                 must fail as NotSupported, got {other:?} with x={:?}",
+                res.x
+            ),
+        }
+        assert_eq!(res.nodes, 0, "the seed gate runs before the search");
+    }
+
+    /// Review P2 (PR #85): a seed integral *within* `int_tol` but not exactly
+    /// integral (`x = [1.0000005]`, `f` consistent at that same point) must be
+    /// ACCEPTED: `GlobalSeed::f` is documented as the objective at the seed
+    /// point, so the stale-`f` cross-check runs at `s.x`, while the incumbent
+    /// stays the independent recomputation at the rounded point (the int_tol
+    /// coordinate shift moves the incumbent, it is not a seed mismatch).
+    /// Sentinel: cross-checking `seed.f` against the rounded objective again
+    /// makes this FAIL as `NotSupported("objective mismatch")` because
+    /// rounding moves `min x` by 5e-7 > `SEED_F_CROSSCHECK_REL_TOL * (1+1)`.
+    #[test]
+    fn seed_integral_within_int_tol_is_accepted_at_original_point_f() {
+        let n = 1usize;
+        let qp = NonconvexQcqp {
+            n,
+            p0: None,
+            q0: vec![1.0],
+            quad: vec![],
+            g_lin: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            h_lin: vec![],
+            a_eq: CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap(),
+            b_eq: vec![],
+            lb: vec![0.0],
+            ub: vec![2.0],
+        };
+        let g = GlobalOptions {
+            feas_tol: 1e-9,
+            int_tol: 1e-6,
+            ..GlobalOptions::default()
+        };
+        let seed = GlobalSeed {
+            x: vec![1.0000005],
+            f: 1.0000005,
+            root_lb: vec![0.0],
+            root_ub: vec![2.0],
+        };
+        let res = solve_global_miqcp(&qp, &[0], &ConicOptions::default(), &g, Some(&seed));
+        assert!(
+            !matches!(res.status, SolveStatus::NotSupported(_)),
+            "a valid approximate-integer seed must not abort the solve: {res:?}"
+        );
+        assert_eq!(res.status, SolveStatus::Optimal, "{res:?}");
+        assert!(
+            res.objective.abs() <= 1e-6,
+            "min x over [0,2] is 0: {res:?}"
+        );
     }
 }
