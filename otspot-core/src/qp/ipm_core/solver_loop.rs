@@ -938,15 +938,20 @@ mod tests {
         }
     }
 
-    /// Schur path must forward deadline into `solve_with_deadline`.
+    /// 削除した `schur_solve_honors_expired_deadline` の named successor
+    /// (helper の契約変更をその場の assert 編集ではなく、削除 + 新規追加で
+    /// 表現している)。
     ///
-    /// Load-bearing for timeout propagation on iteration-0 / Schur paths:
-    /// with an iterative backend and an already-expired deadline, the inner solve
-    /// must fail immediately and this helper must zero the direction buffers.
-    /// If deadline were dropped (`None`), the same call would return non-zero
-    /// directions on this tiny 1x1 system.
+    /// 旧契約が変わった理由: 旧 `solve_kkt_via_schur` は戻り値なしで、期限切れ
+    /// deadline 時に helper 内部で dx/dy をゼロ化する契約だった。境界行 box 化で
+    /// 求解経路が `BoxedSolve::solve` に統合され、helper (`try_solve_kkt_via_schur`)
+    /// は失敗を Err で返し、バッファのゼロ化は呼び出し側 (BoxedSolve) の責務に
+    /// 移った。ゼロ化契約自体は同ファイルの
+    /// `boxed_solve_failure_zeroes_bound_rows` が実装と同時に固定するため、本
+    /// successor は「期限切れ → Err 伝播」と「生存 deadline では非自明な方向が
+    /// 出る (no-op proof)」の 2 点だけを固定する。
     #[test]
-    fn schur_solve_honors_expired_deadline() {
+    fn try_schur_solve_reports_expired_deadline_failure() {
         let s_mat = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let s_fac = otspot_num::linalg::kkt_solver::KktFactor::Iterative(
             otspot_num::linalg::kkt_solver::PreconditionedMinres::new(s_mat),
