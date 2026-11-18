@@ -1,0 +1,102 @@
+name: Sentinel Red/Green
+
+# 「sentinel test は revert すると fail する」を人の手を介さず検証する。
+# 新規に `/// sentinel:` マーカーを付けたテストは、PR base commit のツリーへ
+# テスト定義を overlay して実行したときに fail しなければならない (red)。
+# base で pass する = 回帰を張れていない = VIOLATION で PR を red にする。
+# 規約の詳細は scripts/sentinel_red_green.py の docstring (一次ソース)。
+
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: sentinel lint (static, no cargo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # 3.14 既定ランナーで pin 済み Python 依存を source build しないよう固定 (ci.yml 同様)。
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: marker lint
+        run: python3 scripts/sentinel_red_green.py --mode lint
+      # Hermetic gate-logic sentinel (audit.yml の inventory gate 自検と同等の
+      # 位置づけ)。合成 git repository 上で抽出・判定ロジックを検証するため
+      # cargo ビルドは発生しない。
+      - name: gate self-test (synthetic repo)
+        run: python3 scripts/sentinel_red_green.py --self-test
+
+  red:
+    name: sentinel red (fail-on-base proof)
+    runs-on: ubuntu-latest
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # base..HEAD の inventory diff と base worktree 作成に全履歴が必要。
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # 計画のみ (cargo 実行なし)。新規マーカー付きテストが 0 件なら、以降の
+      # data 取得・toolchain・ビルドをすべてスキップして job を成功させる
+      # (sentinel を追加しない PR のコストは checkout と dry-run のみ)。
+      - name: plan (dry-run)
+        id: plan
+        run: |
+          python3 scripts/sentinel_red_green.py --mode red | tee plan.log
+          if grep -q '^SENTINEL_PLAN_COUNT=0$' plan.log; then
+            echo "has_targets=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_targets=1" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Restore cached bench data
+        if: steps.plan.outputs.has_targets == '1'
+        uses: actions/cache@v6
+        id: cache
+        with:
+          # ci.yml test-integration と同一 key (同一 data shape) を共有する。
+          path: data/
+          key: bench-data-v3
+          restore-keys: |
+            bench-data-
+      - name: Restore git-tracked baselines (cache 上書き対策)
+        if: steps.plan.outputs.has_targets == '1'
+        run: git checkout HEAD -- data/baseline_objectives/
+      - name: Bootstrap secure pip and certifi (eMudhra CA incident)
+        if: steps.plan.outputs.has_targets == '1'
+        run: python -m pip install --upgrade 'pip>=26.2.2' 'certifi>=2026.10.19'
+      - name: Install python deps for data generation
+        if: steps.plan.outputs.has_targets == '1'
+        run: python -m pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*'
+      - name: Build emps decoder (Netlib LP data 変換用)
+        if: steps.plan.outputs.has_targets == '1' && steps.cache.outputs.cache-hit != 'true'
+        run: bash scripts/ensure_emps.sh
+      # 対象テストの data 前提 (data 欠落時 early-return で偽 green になる
+      # 設計の sentinel がある) を ci.yml と同じ subset で満たす。
+      - name: Download CI subset (~1.2 GiB)
+        if: steps.plan.outputs.has_targets == '1'
+        run: bash scripts/download_all_bench_data.sh --ci-subset
+      - name: Set up Rust toolchain
+        if: steps.plan.outputs.has_targets == '1'
+        uses: dtolnay/rust-toolchain@1.95.0
+      - name: Rust cache
+        if: steps.plan.outputs.has_targets == '1'
+        uses: Swatinem/rust-cache@v2
+      - name: Install nextest
+        if: steps.plan.outputs.has_targets == '1'
+        uses: taiki-e/install-action@nextest
+      # base worktree (一時目录、git worktree add --detach) へテスト定義のみ
+      # overlay して選択実行する。exit 0 = base で pass = VIOLATION。
+      - name: red run (marked new tests must fail on base)
+        if: steps.plan.outputs.has_targets == '1'
+        run: SENTINEL_CI_RUN=1 python3 scripts/sentinel_red_green.py --mode red
