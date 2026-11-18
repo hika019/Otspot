@@ -182,6 +182,66 @@ fn check_shape(field: &str, p: &CscMatrix, n: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// Shared fold state of both §3.1 entry points ([`classify_bound_requirements`]
+/// over converted rows, [`classify_bound_requirements_from_coo`] over raw COO
+/// rows): the `required` mask, the rule-2 running diagonal minimum, and the
+/// per-constraint-row convexity verdicts. Row order and fold order are the
+/// callers', so both paths share every accumulation step verbatim.
+struct BoundFold {
+    n: usize,
+    required: Vec<bool>,
+    min_diag: Vec<f64>,
+    convex_rows: Vec<bool>,
+}
+
+impl BoundFold {
+    fn new(n: usize, row_capacity: usize) -> Self {
+        Self {
+            n,
+            required: vec![false; n],
+            min_diag: vec![0.0f64; n],
+            convex_rows: Vec::with_capacity(row_capacity),
+        }
+    }
+
+    /// Rule-1 exemption pushes the verdict; nonconvex rows lift (rule 3
+    /// endpoints join `R`, diagonals feed the rule-2 minimum).
+    fn fold_constraint_row(
+        &mut self,
+        coeffs: &BTreeMap<(usize, usize), f64>,
+    ) -> Result<(), String> {
+        if certifiably_psd(coeffs)? {
+            self.convex_rows.push(true);
+            return Ok(());
+        }
+        self.convex_rows.push(false);
+        mark_nonconvex_terms(coeffs, self.n, &mut self.required, &mut self.min_diag)
+    }
+
+    /// The objective lifts like a row but is not a row: no `convex_rows` entry.
+    fn fold_objective_row(&mut self, coeffs: &BTreeMap<(usize, usize), f64>) -> Result<(), String> {
+        if certifiably_psd(coeffs)? {
+            return Ok(());
+        }
+        mark_nonconvex_terms(coeffs, self.n, &mut self.required, &mut self.min_diag)
+    }
+
+    fn finish(self) -> BoundRequirement {
+        let rule2_diag: Vec<bool> = self.min_diag.iter().map(|&c| c >= 0.0).collect();
+        let mut required = self.required;
+        for (i, &under) in rule2_diag.iter().enumerate() {
+            if !under {
+                required[i] = true;
+            }
+        }
+        BoundRequirement {
+            required,
+            convex_rows: self.convex_rows,
+            rule2_diag,
+        }
+    }
+}
+
 /// Classify the quadratic terms of a normalized (all `<=` rows, minimize
 /// objective) nonconvex QCQP per the module-doc rules and return the bound
 /// requirement. Dimension mismatches are reported rather than trusted: this
@@ -206,37 +266,141 @@ pub fn classify_bound_requirements(
     p0: Option<&CscMatrix>,
     quad: &[GQuadConstraint],
 ) -> Result<BoundRequirement, String> {
-    let mut required = vec![false; n];
-    let mut min_diag = vec![0.0f64; n];
-    let mut convex_rows = Vec::with_capacity(quad.len());
+    let mut fold = BoundFold::new(n, quad.len());
     for (k, qc) in quad.iter().enumerate() {
         check_shape(&format!("quad[{k}].p"), &qc.p, n)?;
         let coeffs = lift_coeffs(&qc.p);
-        if certifiably_psd(&coeffs)? {
-            convex_rows.push(true);
-            continue;
-        }
-        convex_rows.push(false);
-        mark_nonconvex_terms(&coeffs, n, &mut required, &mut min_diag)?;
+        fold.fold_constraint_row(&coeffs)?;
     }
     if let Some(p0) = p0 {
         check_shape("p0", p0, n)?;
         let coeffs = lift_coeffs(p0);
-        if !certifiably_psd(&coeffs)? {
-            mark_nonconvex_terms(&coeffs, n, &mut required, &mut min_diag)?;
+        fold.fold_objective_row(&coeffs)?;
+    }
+    Ok(fold.finish())
+}
+
+/// One quadratic constraint row *before* conversion: the raw symmetrized COO
+/// triplets as stored in `QpProblem::quadratic_constraints[k].triplets`, plus
+/// the normalization sign the conversion would apply (`Ge` rows and the `-P`
+/// half of an `Eq` split are negated). Lets the §3.1 classifier run on
+/// unconverted problems, where materializing each row as a `GQuadConstraint`
+/// (`p` CSC `col_ptr` and dense `q`, both `O(n)`) would itself cost
+/// `O(n * m_q)` — the exact blow-up the bound gate exists to avoid.
+pub(crate) struct CooQuadRow<'a> {
+    /// Raw triplets in source order (no pre-filtering; `lift_coeffs_from_coo`
+    /// applies the same stored-zero filter as `qcqp_matrix_to_csc`).
+    pub(crate) triplets: &'a [(usize, usize, f64)],
+    /// `true` = the row enters the classification negated (`-P`).
+    pub(crate) negate: bool,
+}
+
+/// In-place duplicate merge, a byte-for-byte mirror of
+/// `otspot_num::sparse::compress::merge_sorted_inplace` (the private
+/// duplicate-summing step of `CscMatrix::from_triplets`): sums runs of equal
+/// `(major, minor)` keys in stream order and drops a run when the *merged*
+/// sum has `|sum| <= DROP_TOL`. Returns the logical length; the caller reads
+/// `entries[..ret]`. Kept local because the sparse crate only exposes it
+/// behind `pub(super)`; the shared contract is pinned by
+/// `coo_gate_rejection_matches_materialized_gate` (both paths must produce
+/// identical composed coefficients, including for cancellation runs).
+fn merge_sorted_coo(entries: &mut [(usize, usize, f64)]) -> usize {
+    if entries.is_empty() {
+        return 0;
+    }
+    let (mut cur_maj, mut cur_min, mut cur_val) = entries[0];
+    let mut write = 0usize;
+    for read in 1..entries.len() {
+        let (maj, min, v) = entries[read];
+        if maj == cur_maj && min == cur_min {
+            cur_val += v;
+        } else {
+            if cur_val.abs() > otspot_num::DROP_TOL {
+                entries[write] = (cur_maj, cur_min, cur_val);
+                write += 1;
+            }
+            cur_maj = maj;
+            cur_min = min;
+            cur_val = v;
         }
     }
-    let rule2_diag: Vec<bool> = min_diag.iter().map(|&c| c >= 0.0).collect();
-    for (i, &under) in rule2_diag.iter().enumerate() {
-        if !under {
-            required[i] = true;
-        }
+    if cur_val.abs() > otspot_num::DROP_TOL {
+        entries[write] = (cur_maj, cur_min, cur_val);
+        write += 1;
     }
-    Ok(BoundRequirement {
-        required,
-        convex_rows,
-        rule2_diag,
-    })
+    write
+}
+
+/// Lift coefficients of one raw COO row, bit-identical to
+/// `lift_coeffs(&qcqp_matrix_to_csc(row))`:
+/// 1. stored-zero filter `val != 0.0` in triplet order (`qcqp_matrix_to_csc`);
+/// 2. `(col, row, val)` collect + `sort_unstable_by_key((maj, min))` — same
+///    initial stream order and same deterministic pdqsort as
+///    `build_compressed_format`, hence the same permutation for duplicate keys;
+/// 3. [`merge_sorted_coo`] (identical sum order and `DROP_TOL` filter);
+/// 4. the sign of the conversion (`scale_values(-1.0)` negates the *merged*
+///    value; `x * -1.0 == -x` is exact, and IEEE addition is sign-symmetric,
+///    so negating early composes to the identical bit pattern);
+/// 5. `+= 0.5 * v` into the composed `(min(i,j), max(i,j))` `BTreeMap` in
+///    stream order — which is the column-major `(col, row)` order
+///    `lift_coeffs` walks over the stored CSC — and the same
+///    retain-composed-nonzero drop.
+fn lift_coeffs_from_coo(
+    row: &CooQuadRow<'_>,
+    n: usize,
+) -> Result<BTreeMap<(usize, usize), f64>, String> {
+    let mut entries: Vec<(usize, usize, f64)> = row
+        .triplets
+        .iter()
+        .filter(|&&(_, _, v)| v != 0.0)
+        .map(|&(i, j, v)| (j, i, v))
+        .collect();
+    entries.sort_unstable_by_key(|&(maj, min, _)| (maj, min));
+    let len = merge_sorted_coo(&mut entries);
+    let mut coeffs: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+    for &(col, row_idx, v) in entries.iter().take(len) {
+        if row_idx >= n || col >= n {
+            return Err(format!(
+                "quadratic index ({row_idx}, {col}) out of range for n = {n}"
+            ));
+        }
+        let neg = if row.negate { -v } else { v };
+        *coeffs
+            .entry(if row_idx <= col {
+                (row_idx, col)
+            } else {
+                (col, row_idx)
+            })
+            .or_insert(0.0) += 0.5 * neg;
+    }
+    coeffs.retain(|_, v| *v != 0.0);
+    Ok(coeffs)
+}
+
+/// §3.1 classification over unconverted sparse rows. Same rules, fold order
+/// and `R` semantics as [`classify_bound_requirements`]; the per-row lift
+/// coefficients come from [`lift_coeffs_from_coo`], so `R` — and therefore
+/// every rejection message built from it — is identical to the converted
+/// problem's, without any `O(n)`-per-row materialization. `QpProblem::validate`
+/// is the caller's index/finite precondition (`nonconvex_from_qp_problem`
+/// runs it first); the in-range check here is the second-line guard, mirroring
+/// `mark_nonconvex_terms`' own range error.
+pub(crate) fn classify_bound_requirements_from_coo<'a>(
+    n: usize,
+    p0: Option<&CscMatrix>,
+    rows: impl IntoIterator<Item = CooQuadRow<'a>>,
+) -> Result<BoundRequirement, String> {
+    let mut fold = BoundFold::new(n, 0);
+    for row in rows {
+        let coeffs = lift_coeffs_from_coo(&row, n)?;
+        fold.fold_constraint_row(&coeffs)?;
+    }
+    if let Some(p0) = p0 {
+        check_shape("p0", p0, n)?;
+        let coeffs = lift_coeffs(p0);
+        fold.fold_objective_row(&coeffs)?;
+    }
+    Ok(fold.finish())
 }
 
 /// D1-conservative rule-1 exemption: [`classify_bound_requirements`] trusts a
@@ -339,15 +503,56 @@ pub fn require_finite_bounds(
     quad: &[GQuadConstraint],
     bounds: &[(f64, f64)],
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
+    check_bounds_length(n, bounds)?;
+    if bounds.iter().all(|&(l, u)| l.is_finite() && u.is_finite()) {
+        return Ok(split_bounds(bounds));
+    }
+    let req = classify_bound_requirements(n, p0, quad)?;
+    split_bounds_or_reject(&req, bounds)
+}
+
+/// [`require_finite_bounds`] over unconverted sparse rows (see
+/// [`CooQuadRow`]): identical length guard, identical all-finite fast path
+/// (the row iterator is not even consumed there), identical classifier rules
+/// ([`classify_bound_requirements_from_coo`]), and the same
+/// [`split_bounds_or_reject`] message builder — so for the same problem the
+/// rejection string is byte-identical to the converted path's by shared code,
+/// not by coincidence. Lets `nonconvex_from_qp_problem` run the gate in
+/// `O(input)` before its `O(n * m_q)` dense row conversion.
+pub(crate) fn require_finite_bounds_from_coo<'a>(
+    n: usize,
+    p0: Option<&CscMatrix>,
+    rows: impl IntoIterator<Item = CooQuadRow<'a>>,
+    bounds: &[(f64, f64)],
+) -> Result<(Vec<f64>, Vec<f64>), String> {
+    check_bounds_length(n, bounds)?;
+    if bounds.iter().all(|&(l, u)| l.is_finite() && u.is_finite()) {
+        return Ok(split_bounds(bounds));
+    }
+    let req = classify_bound_requirements_from_coo(n, p0, rows)?;
+    split_bounds_or_reject(&req, bounds)
+}
+
+fn check_bounds_length(n: usize, bounds: &[(f64, f64)]) -> Result<(), String> {
     if bounds.len() != n {
         return Err(format!("bounds length {} != n {n}", bounds.len()));
     }
-    if bounds.iter().all(|&(l, u)| l.is_finite() && u.is_finite()) {
-        let lb = bounds.iter().map(|&(l, _)| l).collect();
-        let ub = bounds.iter().map(|&(_, u)| u).collect();
-        return Ok((lb, ub));
-    }
-    let req = classify_bound_requirements(n, p0, quad)?;
+    Ok(())
+}
+
+fn split_bounds(bounds: &[(f64, f64)]) -> (Vec<f64>, Vec<f64>) {
+    let lb = bounds.iter().map(|&(l, _)| l).collect();
+    let ub = bounds.iter().map(|&(_, u)| u).collect();
+    (lb, ub)
+}
+
+/// The single rejection-message builder both bound gates share (byte-identity
+/// of the public-facing reason string is structural, not duplicated text):
+/// number of non-finite variables inside `R` and the first such index.
+fn split_bounds_or_reject(
+    req: &BoundRequirement,
+    bounds: &[(f64, f64)],
+) -> Result<(Vec<f64>, Vec<f64>), String> {
     let bad: Vec<(usize, f64, f64)> = bounds
         .iter()
         .enumerate()
@@ -363,9 +568,7 @@ pub fn require_finite_bounds(
             req.required.iter().filter(|b| **b).count()
         ));
     }
-    let lb = bounds.iter().map(|&(l, _)| l).collect();
-    let ub = bounds.iter().map(|&(_, u)| u).collect();
-    Ok((lb, ub))
+    Ok(split_bounds(bounds))
 }
 
 #[cfg(test)]
