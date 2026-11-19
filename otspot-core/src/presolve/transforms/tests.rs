@@ -1080,8 +1080,10 @@ fn test_forcing_tiny_coefficient_scale_is_not_forcing() {
     );
 }
 
-/// sentinel: tightening the forcing margin below zero slack (or disabling
-/// the forcing rule) drops these genuine pins → FAIL.
+/// control (not a sentinel): guards over-tightening of the margin — genuine
+/// pins must survive. Unmarked by design: the base (scale-free absolute tol)
+/// also forces these rows, so it passes on base and a marker there would be a
+/// false fail-on-base promise (convention per e6fc58cc / e3863465).
 #[test]
 fn test_forcing_tiny_coefficient_scale_genuine_still_forces() {
     // Genuinely forcing rows at this scale keep zero slack, which any
