@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3523 testcases, 43 ignored
+# totals: 3525 testcases, 43 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -551,6 +551,7 @@ otspot-core	mip::root_presolve::tests::duplicate_eq_rows_contradiction_is_infeas
 otspot-core	mip::root_presolve::tests::duplicate_eq_rows_with_identical_rhs_collapse	active
 otspot-core	mip::root_presolve::tests::eq_merge_rhs_gap_inside_margin_is_fail_open	active
 otspot-core	mip::root_presolve::tests::equality_row_forces_only_the_side_equal_to_rhs	active
+otspot-core	mip::root_presolve::tests::forcing_margin_pin_level_twin	active
 otspot-core	mip::root_presolve::tests::fractional_singleton_equality_at_large_magnitude_stays_infeasible	active
 otspot-core	mip::root_presolve::tests::fully_pinned_reduction_reconstructs_the_only_point	active
 otspot-core	mip::root_presolve::tests::genuine_forcing_rows_still_force_endpoints	active
@@ -560,8 +561,6 @@ otspot-core	mip::root_presolve::tests::postsolve_verify_is_linear_in_variable_co
 otspot-core	mip::root_presolve::tests::publish_scrubs_reduced_coordinate_payloads	active
 otspot-core	mip::root_presolve::tests::redundant_large_magnitude_row_does_not_force_endpoints	active
 otspot-core	mip::root_presolve::tests::subst_induced_margin_is_ulp_scale_not_magnitude_relative	active
-otspot-core	mip::root_presolve::tests::tiny_coefficient_redundant_row_does_not_force_endpoints	active
-otspot-core	mip::root_presolve::tests::tiny_scale_forcing_mirrors_are_scale_aware	active
 otspot-core	mip::root_presolve::tests::verify_original_solution_rejects_row_violation	active
 otspot-core	mip::root_presolve::tests::wide_continuous_interval_at_large_magnitude_is_not_pinned	active
 otspot-core	mip::root_presolve::tests::wide_integer_interval_at_large_magnitude_is_not_pinned	active
@@ -2129,6 +2128,9 @@ otspot-core::memory_budget	qcqp_bridge_many_sparse_quad_constraints_peak_within_
 otspot-core::memory_budget	qcqp_route_dense_sizing_gate_refuses_before_allocating	active
 otspot-core::memory_budget	qcqp_route_rejects_dense_dcq_at_sparse_root_gate	active
 otspot-core::memory_budget	qp_ipm_route_peak_within_budget	active
+otspot-core::milp_forcing_margin_sentinel	genuine_forcing_rows_still_force_endpoints_public	active
+otspot-core::milp_forcing_margin_sentinel	tiny_coefficient_redundant_row_does_not_force_endpoints	active
+otspot-core::milp_forcing_margin_sentinel	tiny_scale_forcing_mirrors_are_scale_aware	active
 otspot-core::qp_diag_real_solve	concurrent_solves_keep_diagnostics_per_thread	active
 otspot-core::qp_diag_real_solve	consecutive_ipm_solves_preserve_diagnostics_for_threads_1_2_4	active
 otspot-core::qp_diag_real_solve	non_qp_route_clears_stale_diagnostics	active

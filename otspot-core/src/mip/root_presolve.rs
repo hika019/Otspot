@@ -2192,55 +2192,14 @@ mod tests {
         );
     }
 
-    /// P1 (PR #89, small-coefficient-scale twin of F2): a row that is merely
-    /// redundant at 1e-10 coefficient scale must not force its members to
-    /// endpoints.
-    ///
-    /// Pre-fix, forcing tested `rhs − min_act ≤ ROOT_PRESOLVE_ACT_ABS_TOL` —
-    /// an absolute 1e-9 that is 5× the ENTIRE row here (coefficients 1e-10,
-    /// rhs 2e-10): the redundant row `1e-10·x + 1e-10·y ≤ 2e-10` with binary
-    /// x, y read as forcing, pinned both to 0, and the fully-pinned path
-    /// published Optimal obj 0 while (1, 1) is feasible with objective −2 —
-    /// and postsolve verification accepts the inferior point (it is
-    /// perfectly feasible; only the objective is wrong). A scale-free
-    /// constant cannot separate "slack is rounding noise" from "slack is
-    /// the whole row": the forcing margin must scale with the row's own
-    /// [`forcing_margin`] (the per-member movement floor plus the activity
-    /// sum's rounding budget).
-    ///
-    /// sentinel: restoring `rhs − min_act ≤ ROOT_PRESOLVE_ACT_ABS_TOL`
-    /// reproduces the pins, the row removal and the Optimal-obj-0
-    /// publication → FAIL.
-    #[test]
-    fn tiny_coefficient_redundant_row_does_not_force_endpoints() {
-        // min −x−y s.t. 1e-10·x + 1e-10·y ≤ 2e-10; x, y binary. The whole
-        // box satisfies the row (max activity 2e-10 = rhs), so removing it
-        // without pinning is the only sound reduction.
-        let p = build_milp(
-            vec![-1.0, -1.0],
-            &[(0, 0, 1e-10), (0, 1, 1e-10)],
-            1,
-            vec![2e-10],
-            vec![ConstraintType::Le],
-            vec![(0.0, 1.0), (0.0, 1.0)],
-            vec![0, 1],
-        );
-        match reduce(&p, None) {
-            ReduceOutcome::Reduced { map, .. } => {
-                assert!(
-                    map.pinned.iter().all(Option::is_none),
-                    "no member of a row redundant at 1e-10 scale may be pinned \
-                     (slack 2e-10 is 5× the row itself, not forcing slack)"
-                );
-            }
-            ReduceOutcome::NotApplied { .. } => {}
-            ReduceOutcome::Infeasible { .. } => panic!("the box is feasible"),
-        }
-        let res = solve_default(&p);
-        assert_eq!(res.status, SolveStatus::Optimal);
-        assert_eq!(res.objective, -2.0, "the true optimum is (1, 1)");
-        assert_eq!(res.solution, vec![1.0, 1.0]);
-    }
+    // The marked guard for the 1e-10-scale redundant-row false-pinning
+    // (`tiny_coefficient_redundant_row_does_not_force_endpoints`) lives in
+    // `otspot-core/tests/milp_forcing_margin_sentinel.rs` (public solver
+    // path, sentinel-gate overlayable); its unmarked pin-level twin is at
+    // the end of this module. A scale-free constant cannot separate "slack
+    // is rounding noise" from "slack is the whole row": the forcing margin
+    // must scale with the row's own [`forcing_margin`] (the per-member
+    // movement floor plus the activity sum's rounding budget).
 
     /// Over-tightening control (twin of the F1/F2 controls): GENUINE
     /// forcing — zero-slack single-point rows of scale 1 and 1e-10 — keeps
@@ -2254,8 +2213,10 @@ mod tests {
     /// equality_row_forces sibling's comment records; an all-forcing-margins
     /// `−1.0` revert was measured here green). Revert-fail coverage of the
     /// margin lives in `tiny_coefficient_redundant_row_does_not_force_
-    /// endpoints` and `tiny_scale_forcing_mirrors_are_scale_aware` (here)
-    /// and `test_forcing_tiny_coefficient_scale_*` (LP path).
+    /// endpoints` and `tiny_scale_forcing_mirrors_are_scale_aware`
+    /// (`otspot-core/tests/milp_forcing_margin_sentinel.rs`, public path),
+    /// in the unmarked pin-level twin at the end of this module, and in
+    /// `test_forcing_tiny_coefficient_scale_*` (LP path).
     #[test]
     fn genuine_forcing_rows_still_force_endpoints() {
         // Le: x + y ≤ 0 over the binary box has exactly one feasible point.
@@ -2334,16 +2295,17 @@ mod tests {
         assert_eq!(res.objective, -2.0);
     }
 
-    /// Mirrored paths (PR #89 P1 class): the Ge side and both Eq sides use
-    /// the same coefficient-aware margin — at 1e-10 scale the absolute 1e-9
-    /// false-forced the Ge mirror, while genuine zero-slack forcing on those
-    /// same paths must survive.
-    ///
-    /// sentinel: restoring `(max_act − rhs) ≤ ACT_ABS` (Ge) or the
-    /// `(min_act − rhs).abs() / (max_act − rhs).abs() ≤ ACT_ABS` pair (Eq)
-    /// reproduces the mirrored pins → FAIL.
+    /// Pin-level twin of the two marked public-path sentinels in
+    /// `otspot-core/tests/milp_forcing_margin_sentinel.rs`, kept unmarked on
+    /// purpose: it asserts `map.pinned` from `reduce()` directly — an
+    /// intermediate that the public solver path exposes no handle on, so a
+    /// false pin silently rescued by postsolve (published objective back on
+    /// the oracle value) would stay green end-to-end and must not stay
+    /// green here. The sentinel-gate contract (red-on-base overlay) is
+    /// carried by the marked integration tests; this twin adds local
+    /// introspective coverage the gate cannot run against a base checkout.
     #[test]
-    fn tiny_scale_forcing_mirrors_are_scale_aware() {
+    fn forcing_margin_pin_level_twin() {
         let mk = |b: f64, ctype: ConstraintType, coeff: f64| {
             build_milp(
                 vec![-1.0, -1.0],
@@ -2362,72 +2324,43 @@ mod tests {
             ReduceOutcome::NotApplied { .. } => {}
             ReduceOutcome::Infeasible { .. } => panic!("{why}: the box is feasible"),
         };
-
-        // Ge mirror of the P1 repro: −1e-10·x − 1e-10·y ≥ −2e-10 ⟺
-        // x + y ≤ 2 — every box point satisfies it, yet the old absolute
-        // margin read the max-activity slack 2e-10 as forcing and pinned
-        // (0, 0), publishing obj 0 against the true −2 at (1, 1).
-        let ge = mk(-2e-10, ConstraintType::Ge, -1e-10);
-        no_pin(&ge, "Ge row redundant at 1e-10 scale must not pin");
-        let res = solve_default(&ge);
-        assert_eq!(res.status, SolveStatus::Optimal);
-        assert_eq!(res.objective, -2.0);
-        assert_eq!(res.solution, vec![1.0, 1.0]);
-
-        // Ge genuine forcing at the same scale: −1e-10·x − 1e-10·y ≥ 0 ⟺
-        // x + y ≤ 0 — (0, 0) is the only feasible point and must stay forced.
-        let ge0 = mk(0.0, ConstraintType::Ge, -1e-10);
-        match reduce(&ge0, None) {
+        let force_zero = |p: &MilpProblem, why: &str| match reduce(p, None) {
             ReduceOutcome::Reduced { map, .. } => {
-                assert_eq!(
-                    map.pinned,
-                    vec![Some(0.0), Some(0.0)],
-                    "x + y ≤ 0 forces (0, 0)"
-                )
+                assert_eq!(map.pinned, vec![Some(0.0), Some(0.0)], "{why}");
             }
-            _ => panic!("x + y ≤ 0 must reduce to the single point"),
-        }
-        let res = solve_default(&ge0);
-        assert_eq!(res.status, SolveStatus::Optimal);
-        assert_eq!(res.objective, 0.0);
+            _ => panic!("{why}: must reduce to the single point"),
+        };
+        let force_one = |p: &MilpProblem, why: &str| match reduce(p, None) {
+            ReduceOutcome::Reduced { map, .. } => {
+                assert_eq!(map.pinned, vec![Some(1.0), Some(1.0)], "{why}");
+            }
+            _ => panic!("{why}: must reduce to the single point"),
+        };
 
-        // Eq interior: 1e-10·x + 1e-10·y = 1e-10 ⟺ x + y = 1 — neither
-        // extreme equals the rhs (window [0, 2e-10]), yet the old
-        // `(min_act − rhs).abs() ≤ ACT_ABS` pinned (0, 0) and published
-        // obj 0. Post-fix the row weakens to its ≥ side (the ≤ side is
-        // tolerance-redundant over the box — the activity-margin family,
-        // whose absolute floor is the solver's row-feasibility contract and
-        // deliberately NOT part of this finding), so the published
-        // objective is the weakened model's optimum. The P1 discriminator
-        // is the absence of pins and an objective no worse than the exact
-        // optimum −1 — not obj 0.
-        let eq = mk(1e-10, ConstraintType::Eq, 1e-10);
-        no_pin(&eq, "Eq with rhs inside the window must not pin");
-        let res = solve_default(&eq);
-        assert_eq!(res.status, SolveStatus::Optimal);
-        assert!(
-            res.objective <= -1.0,
-            "the false (0, 0) pin published obj 0; the weakened row must do \
-             no worse than the exact optimum −1 (got {})",
-            res.objective
+        // Le redundant at 1e-10 scale: slack 2e-10 is 5× the row itself.
+        no_pin(
+            &mk(2e-10, ConstraintType::Le, 1e-10),
+            "Le row redundant at 1e-10 scale must not pin",
         );
-
-        // Eq genuine forcing at the same scale: 1e-10·x + 1e-10·y = 2e-10
-        // ⟺ x + y = 2 — the max endpoint equals the rhs exactly: forced.
-        let eq2 = mk(2e-10, ConstraintType::Eq, 1e-10);
-        match reduce(&eq2, None) {
-            ReduceOutcome::Reduced { map, .. } => {
-                assert_eq!(
-                    map.pinned,
-                    vec![Some(1.0), Some(1.0)],
-                    "x + y = 2 forces (1, 1)"
-                )
-            }
-            _ => panic!("x + y = 2 must reduce to the single point"),
-        }
-        let res = solve_default(&eq2);
-        assert_eq!(res.status, SolveStatus::Optimal);
-        assert_eq!(res.objective, -2.0);
-        assert_eq!(res.solution, vec![1.0, 1.0]);
+        // Ge mirror of the P1 repro (⟺ x + y ≤ 2 over the whole box).
+        no_pin(
+            &mk(-2e-10, ConstraintType::Ge, -1e-10),
+            "Ge row redundant at 1e-10 scale must not pin",
+        );
+        // Eq interior (⟺ x + y = 1): the rhs is strictly inside the
+        // activity window [0, 2e-10]; neither side may pin.
+        no_pin(
+            &mk(1e-10, ConstraintType::Eq, 1e-10),
+            "Eq with rhs inside the window must not pin",
+        );
+        // Genuine zero-slack forcing on each side survives.
+        force_zero(
+            &mk(0.0, ConstraintType::Ge, -1e-10),
+            "x + y ≤ 0 forces (0, 0)",
+        );
+        force_one(
+            &mk(2e-10, ConstraintType::Eq, 1e-10),
+            "x + y = 2 forces (1, 1)",
+        );
     }
 }
