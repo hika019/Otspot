@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3494 testcases, 43 ignored
+# totals: 3511 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -824,6 +824,7 @@ otspot-core	presolve::scaling::tests::test_ruiz_scale_unbalanced	active
 otspot-core	presolve::transforms::driver::failure_tests::invalid_rebuild_rolls_back_instead_of_substituting_zero_matrix	active
 otspot-core	presolve::transforms::driver::failure_tests::invalid_reduced_model_rolls_back_without_leaking_postsolve_state	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::cancel_signal_stops_pass_before_all_steps_run_via_run_step	active
+otspot-core	presolve::transforms::driver::per_step_control_tests::dependent_eq_flag_off_skips_step12	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::no_interrupt_runs_all_steps_of_one_pass	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::pass_limit_hit_true_when_nonzero_budget_exhausted	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::presolve_max_pass_0_disables_the_iterative_loop	active
@@ -880,6 +881,20 @@ otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_
 otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_restores_infinite_lb_but_keeps_original	active
 otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_restores_infinite_ub_but_keeps_original	active
 otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_skips_fixed_variable	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_bound_aware_keeps_row_with_small_residual_on_unbounded_var	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_bound_aware_removes_row_when_residual_effect_bounded	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_bound_aware_scaled_equivalent_solves_optimal_zero	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_e2e_solve_satisfies_removed_row_and_zeroes_its_dual	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_exact_witness_registration_solves_f3_repro_optimal_zero	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_flag_gate_reduces_row_count_only_when_enabled	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_keeps_dependent_row_with_inconsistent_rhs	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_keeps_independent_eq_rows	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_keeps_near_dependent_row_outside_tolerance	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_never_removes_inequality_rows	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_removes_dependent_eq_row_keeps_witnesses	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_removes_scaled_combination_row	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_rhs_rounding_model_rejects_inconsistent_1e12_rhs	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_work_budget_uses_factor_and_abs_cap	active
 otspot-core	presolve::transforms::tests_per_step::step1_detects_lb_gt_ub	active
 otspot-core	presolve::transforms::tests_per_step::step1_fixed_negative_value_updates_b_and_offset	active
 otspot-core	presolve::transforms::tests_per_step::step2_singleton_ge_infeasible	active
@@ -2526,6 +2541,8 @@ otspot-io::bug_repro	test_ubh1_q_psd_diagnose	active
 otspot-io::cbf_cblib_integration	cblib_socp_files_parse_and_validate	active
 otspot-io::israel_objective_mismatch	parse_fidelity_matches_raw_qps	active
 otspot-io::israel_objective_mismatch	presolve_objective_invariance	active
+otspot-io::presolve_correctness_sweep	presolve_dependent_eq_curated_known	active
+otspot-io::presolve_correctness_sweep	presolve_dependent_eq_detection_sweep	ignored
 otspot-io::presolve_correctness_sweep	presolve_infeasible_sweep	ignored
 otspot-io::presolve_correctness_sweep	presolve_invariance_curated_clean_known_with_constant	active
 otspot-io::presolve_correctness_sweep	presolve_invariance_full_sweep_known_with_constant	ignored

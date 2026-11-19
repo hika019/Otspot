@@ -1,4 +1,4 @@
-//! LP presolve: collects 12 reductions and the inverse metadata for postsolve.
+//! LP presolve: collects 13 reductions and the inverse metadata for postsolve.
 //!
 //! Fixpoint loop (shared `otspot_num::run_fixpoint`) over up to
 //! `SolverOptions::presolve_max_pass` passes of:
@@ -12,8 +12,10 @@
 //! 7. Free-variable substitution (R15)
 //! 8. Free singleton column (R5)
 //!    9–11 live in `transforms_dominance.rs` (parallel row / dup-dom col / dual fixing).
+//! 12. Dependent Eq rows (rank discovery, `dependent_eq.rs`).
 
 mod bounds;
+mod dependent_eq;
 mod doubleton;
 mod driver;
 mod empty_redundant;

@@ -222,33 +222,10 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     };
                     return solve_without_presolve(problem, fb);
                 }
-                // Infeasible/Unbounded on the reduced LP propagates directly to the
-                // original (presolve is feasibility-preserving). run_postsolve must not
-                // be called: it would fill solution/dual vectors from the postsolve stack
-                // (e.g. SingletonRow fixed values), producing a spurious non-empty
-                // solution with Infeasible/Unbounded status.
-                if matches!(raw.status, SolveStatus::Infeasible | SolveStatus::Unbounded) {
-                    let objective = if raw.status == SolveStatus::Infeasible {
-                        f64::INFINITY
-                    } else {
-                        f64::NEG_INFINITY
-                    };
-                    return SolverResult {
-                        status: raw.status,
-                        objective,
-                        solution: vec![],
-                        dual_solution: vec![],
-                        reduced_costs: vec![],
-                        slack: vec![],
-                        warm_start_basis: None,
-                        timing_breakdown: Some(crate::problem::TimingBreakdown {
-                            presolve_us,
-                            solve_us,
-                            postsolve_us: 0,
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    };
+                if let Some(propagated) =
+                    reduced_infeasible_unbounded_result(raw.status.clone(), presolve_us, solve_us)
+                {
+                    return propagated;
                 }
                 let mut res = presolve::postsolve::run_postsolve(
                     &raw,
@@ -366,6 +343,53 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
         });
     }
     result
+}
+
+/// Propagate an `Infeasible`/`Unbounded` reduced-LP status directly to the
+/// original problem (presolve is feasibility-preserving). run_postsolve must
+/// not be called on this path: it would fill solution/dual vectors from the
+/// postsolve stack (e.g. SingletonRow fixed values), producing a spurious
+/// non-empty solution with Infeasible/Unbounded status.
+///
+/// This propagation skips the caller's postsolve acceptance, so any presolve
+/// transform that corrupts feasibility/unboundedness of the reduced LP shows
+/// up here unchecked. Both dependent-Eq P1s
+/// (`step12_rhs_rounding_model_rejects_inconsistent_1e12_rhs`,
+/// `step12_exact_witness_registration_solves_f3_repro_optimal_zero`) reached
+/// users through this bypass. Redesigning acceptance is out of scope; the
+/// transform-side fixes and those sentinels carry the guarantee.
+///
+/// Returns `Some` (empty solution vectors, phase timings preserved) when
+/// `status` is Infeasible or Unbounded, `None` otherwise.
+fn reduced_infeasible_unbounded_result(
+    status: SolveStatus,
+    presolve_us: u64,
+    solve_us: u64,
+) -> Option<SolverResult> {
+    if !matches!(status, SolveStatus::Infeasible | SolveStatus::Unbounded) {
+        return None;
+    }
+    let objective = if status == SolveStatus::Infeasible {
+        f64::INFINITY
+    } else {
+        f64::NEG_INFINITY
+    };
+    Some(SolverResult {
+        status,
+        objective,
+        solution: vec![],
+        dual_solution: vec![],
+        reduced_costs: vec![],
+        slack: vec![],
+        warm_start_basis: None,
+        timing_breakdown: Some(crate::problem::TimingBreakdown {
+            presolve_us,
+            solve_us,
+            postsolve_us: 0,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
 }
 
 /// Solve without presolve.
