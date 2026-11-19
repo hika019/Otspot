@@ -1,6 +1,7 @@
-//! Orchestrator: fixpoint loop over Steps 1–11 and the final reduced-problem build.
+//! Orchestrator: fixpoint loop over Steps 1–12 and the final reduced-problem build.
 
 use super::bounds::step5_bounds_tightening;
+use super::dependent_eq::step12_dependent_equations;
 use super::doubleton::step6_doubleton_equation;
 use super::empty_redundant::{step3a_empty_row, step3b_empty_column, step4_redundant_constraint};
 use super::fixed::step1_fixed_variable;
@@ -147,6 +148,12 @@ pub fn run_presolve_with_flags(
                 &mut new_fixed_by_step5,
                 deadline
             ));
+        }
+        // Rank discovery is the most expensive step; it runs last in the pass
+        // so the cheap transforms shrink the Eq system before elimination,
+        // and row removals feed back into the next pass's fixpoint.
+        if flags.enable_dependent_eq {
+            run_or_stop!(step12_dependent_equations(&mut st, deadline));
         }
 
         let curr_removed = st.removed_cols.iter().filter(|&&r| r).count()
@@ -398,7 +405,15 @@ mod per_step_control_tests {
     }
 
     /// Sentinel: without any interruption, all baseline steps of one pass run
-    /// (parallel-row / dup-dom-col / dual-fixing enabled by default too).
+    /// (parallel-row / dup-dom-col / dual-fixing / dependent-eq enabled by
+    /// default too).
+    ///
+    /// Re-added (delete + add-new per AGENTS.md, count 13 -> 14) when Step 12
+    /// `dependent_eq` joined the pass: the old assertion pinned the step count
+    /// at 13 and every macro-wired step increments the counter, so an extra
+    /// always-on step necessarily moves the exact-count sentinel. The
+    /// semantics ("a full default pass runs exactly all baseline steps, no
+    /// more, no fewer") are unchanged.
     #[test]
     fn no_interrupt_runs_all_steps_of_one_pass() {
         STEPS_EXECUTED_TOTAL.with(|c| c.set(0));
@@ -408,9 +423,40 @@ mod per_step_control_tests {
 
         let executed = STEPS_EXECUTED_TOTAL.with(|c| c.get());
         assert_eq!(
+            executed, 14,
+            "one full pass with default flags runs 10 unconditional + 4 \
+             flag-gated steps (parallel-row, dup-dom-col, dual-fixing, \
+             dependent-eq)"
+        );
+    }
+
+    /// Sentinel: `enable_dependent_eq` is a real gate — with the flag off,
+    /// Step 12 must not execute even though every other default flag is on.
+    /// Pairs with `no_interrupt_runs_all_steps_of_one_pass` (14) to pin the
+    /// flag-to-step wiring: mutation that drops the `if` guard flips this
+    /// count to 14, mutation that severs the call flips the sibling to 13.
+    #[test]
+    fn dependent_eq_flag_off_skips_step12() {
+        STEPS_EXECUTED_TOTAL.with(|c| c.set(0));
+
+        let lp = any_lp();
+        let _ = run_presolve_with_flags(
+            &lp,
+            None,
+            1,
+            None,
+            PresolveFlags {
+                enable_dependent_eq: false,
+                ..PresolveFlags::default()
+            },
+        )
+        .unwrap();
+
+        let executed = STEPS_EXECUTED_TOTAL.with(|c| c.get());
+        assert_eq!(
             executed, 13,
-            "one full pass with default flags runs 10 unconditional + 3 \
-             flag-gated steps (parallel-row, dup-dom-col, dual-fixing)"
+            "with enable_dependent_eq=false the pass must run one step fewer \
+             than the full default pass (14), got {executed}"
         );
     }
 

@@ -38,6 +38,10 @@ fn flags_only(parallel: bool, dup: bool, dual: bool) -> PresolveFlags {
         enable_parallel_row: parallel,
         enable_dup_dom_col: dup,
         enable_dual_fixing: dual,
+        // "flags_only" = the other transforms are off by intent, keeping the
+        // three toggled flags isolated (step12 added later; all call sites
+        // here predate it and reason about the three-flag baseline).
+        enable_dependent_eq: false,
     }
 }
 

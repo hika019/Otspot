@@ -441,6 +441,7 @@ mod tests {
                 enable_parallel_row: false,
                 enable_dup_dom_col: false,
                 enable_dual_fixing: false,
+                enable_dependent_eq: false,
             },
         )
         .unwrap();

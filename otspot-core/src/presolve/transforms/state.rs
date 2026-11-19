@@ -49,6 +49,15 @@ pub(crate) enum PostsolveStep {
     RedundantConstraint {
         orig_row: usize,
     },
+    /// Eq row removed by rank discovery (Step 12): it lies in the span of the
+    /// other surviving Eq rows with a consistent RHS, so the feasible set is
+    /// unchanged. Postsolve sets its dual to 0: the reduced dual stays
+    /// dual-feasible for the original (stationarity rows are identical with
+    /// y=0 added), the removed row binds always and Eq duals are sign-free
+    /// (complementarity holds), and the dual objective is unchanged.
+    DependentEquation {
+        orig_row: usize,
+    },
     BoundsTightened,
     /// Variable eliminated via a pivot Eq row. Shared by R6 (doubleton), R15 (free-var),
     /// and R5 (free-singleton-col). Postsolve restores
@@ -109,6 +118,8 @@ pub struct PresolveFlags {
     pub enable_parallel_row: bool,
     pub enable_dup_dom_col: bool,
     pub enable_dual_fixing: bool,
+    /// Step 12: rank-based removal of linearly dependent Eq rows.
+    pub enable_dependent_eq: bool,
 }
 
 impl Default for PresolveFlags {
@@ -117,6 +128,7 @@ impl Default for PresolveFlags {
             enable_parallel_row: true,
             enable_dup_dom_col: true,
             enable_dual_fixing: true,
+            enable_dependent_eq: true,
         }
     }
 }
@@ -127,6 +139,7 @@ impl PresolveFlags {
             enable_parallel_row: false,
             enable_dup_dom_col: false,
             enable_dual_fixing: false,
+            enable_dependent_eq: false,
         }
     }
 }
