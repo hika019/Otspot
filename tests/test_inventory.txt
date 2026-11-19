@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3511 testcases, 44 ignored
+# totals: 3542 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -415,6 +415,7 @@ otspot-core	mip::heuristics::local_branching::tests::local_branching_reports_sub
 otspot-core	mip::heuristics::local_branching::tests::local_branching_reports_sub_mip_nodes_processed	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_accepts_feasible_timeout_incumbent	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_disables_root_cuts_recursively	active
+otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_disables_root_presolve_recursively	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_disables_tree_cuts_and_symmetry_recursively	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_passes_recursive_sub_mip_config	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_skips_on_expired_deadline	active
@@ -430,6 +431,7 @@ otspot-core	mip::heuristics::rens::tests::rens_reports_sub_mip_iters_processed	a
 otspot-core	mip::heuristics::rens::tests::rens_reports_sub_mip_nodes_processed	active
 otspot-core	mip::heuristics::rens::tests::rens_run_path_accepts_feasible_timeout_incumbent	active
 otspot-core	mip::heuristics::rens::tests::rens_run_path_disables_root_cuts_recursively	active
+otspot-core	mip::heuristics::rens::tests::rens_run_path_disables_root_presolve_recursively	active
 otspot-core	mip::heuristics::rens::tests::rens_run_path_disables_tree_cuts_and_symmetry_recursively	active
 otspot-core	mip::heuristics::rens::tests::rens_run_path_passes_recursive_sub_mip_config	active
 otspot-core	mip::heuristics::rens::tests::rens_skips_integral_lp_point	active
@@ -453,6 +455,7 @@ otspot-core	mip::heuristics::rins::tests::rins_skips_on_expired_deadline	active
 otspot-core	mip::heuristics::rins::tests::rins_skips_when_no_agreement	active
 otspot-core	mip::heuristics::rins::tests::rins_skips_when_remaining_share_budget_is_below_min	active
 otspot-core	mip::heuristics::rins::tests::rins_skips_when_remaining_share_budget_is_zero	active
+otspot-core	mip::heuristics::rins::tests::rins_sub_mip_config_disables_root_presolve	active
 otspot-core	mip::heuristics::rins::tests::rins_sub_mip_config_sets_the_provided_lp_iters_cap	active
 otspot-core	mip::heuristics::rins::tests::rins_sub_mip_deadline_is_min_of_parent_and_fixed_cap	active
 otspot-core	mip::heuristics::rins::tests::rins_sub_mip_disables_recursive_primal_heuristics	active
@@ -543,6 +546,24 @@ otspot-core	mip::queue::tests::is_empty_requires_both_structures_empty	active
 otspot-core	mip::queue::tests::pops_smallest_lower_bound_first	active
 otspot-core	mip::queue::tests::start_dive_end_dive_roundtrip	active
 otspot-core	mip::queue::tests::ties_break_fifo	active
+otspot-core	mip::root_presolve::tests::doubleton_substitution_reconstructs_integer_point	active
+otspot-core	mip::root_presolve::tests::duplicate_eq_rows_contradiction_is_infeasible	active
+otspot-core	mip::root_presolve::tests::duplicate_eq_rows_with_identical_rhs_collapse	active
+otspot-core	mip::root_presolve::tests::eq_merge_rhs_gap_inside_margin_is_fail_open	active
+otspot-core	mip::root_presolve::tests::equality_row_forces_only_the_side_equal_to_rhs	active
+otspot-core	mip::root_presolve::tests::forcing_margin_pin_level_twin	active
+otspot-core	mip::root_presolve::tests::fractional_singleton_equality_at_large_magnitude_stays_infeasible	active
+otspot-core	mip::root_presolve::tests::fully_pinned_reduction_reconstructs_the_only_point	active
+otspot-core	mip::root_presolve::tests::genuine_forcing_rows_still_force_endpoints	active
+otspot-core	mip::root_presolve::tests::infinite_bound_column_is_never_pinned	active
+otspot-core	mip::root_presolve::tests::merge_uses_live_entries_after_pinned_column	active
+otspot-core	mip::root_presolve::tests::postsolve_verify_is_linear_in_variable_count	active
+otspot-core	mip::root_presolve::tests::publish_scrubs_reduced_coordinate_payloads	active
+otspot-core	mip::root_presolve::tests::redundant_large_magnitude_row_does_not_force_endpoints	active
+otspot-core	mip::root_presolve::tests::subst_induced_margin_is_ulp_scale_not_magnitude_relative	active
+otspot-core	mip::root_presolve::tests::verify_original_solution_rejects_row_violation	active
+otspot-core	mip::root_presolve::tests::wide_continuous_interval_at_large_magnitude_is_not_pinned	active
+otspot-core	mip::root_presolve::tests::wide_integer_interval_at_large_magnitude_is_not_pinned	active
 otspot-core	mip::stats::tests::merge_worker_sums_private_conflict_clause_counts	active
 otspot-core	mip::symmetry::tests::appends_lex_rows_for_orbit	active
 otspot-core	mip::symmetry::tests::detects_identical_binary_columns	active
@@ -582,6 +603,7 @@ otspot-core	mip::tests::invalid_options_rejected_at_milp_entry	active
 otspot-core	mip::tests::invalid_options_rejected_at_miqp_entry	active
 otspot-core	mip::tests::knapsack_truncated_has_no_bound_gap_cert	active
 otspot-core	mip::tests::max_lp_iters_deterministically_stops_before_max_nodes	active
+otspot-core	mip::tests::milp_preset_cancel_returns_timeout_before_solving	active
 otspot-core	mip::tests::mip_descendant_nodes_skip_repeated_lp_ruiz_scaling	active
 otspot-core	mip::tests::mip_descendant_scaling_retry_runs_and_accounts_first_attempt_timing	active
 otspot-core	mip::tests::mip_nodes_disable_lp_crash_basis_before_relaxation_solve	active
@@ -631,6 +653,10 @@ otspot-core	mip::tests::rens_with_incumbent_waits_for_regular_interval	active
 otspot-core	mip::tests::rins_disabled_still_optimal	active
 otspot-core	mip::tests::rins_stats_improvements_le_calls	active
 otspot-core	mip::tests::rins_stats_zero_for_single_node_problem	active
+otspot-core	mip::tests::root_presolve_flag_off_leaves_counters_zero	active
+otspot-core	mip::tests::root_presolve_fully_pinned_publishes_pinned_point	active
+otspot-core	mip::tests::root_presolve_infeasible_agrees_with_unreduced_run	active
+otspot-core	mip::tests::root_presolve_wiring_reduces_postsolves_and_keeps_optimum	active
 otspot-core	mip::tests::root_probing_and_symmetry_us_are_populated_via_forced_min_elapsed	active
 otspot-core	mip::tests::round_integers_rejects_out_of_range_index	active
 otspot-core	mip::tests::scaling_retry_caps_retry_max_iters_by_remaining_budget	active
@@ -864,6 +890,8 @@ otspot-core	presolve::transforms::tests::test_forcing_row_dual_le_mixed_sign_wit
 otspot-core	presolve::transforms::tests::test_forcing_row_dual_le_multiple_prior_fixed_vars	active
 otspot-core	presolve::transforms::tests::test_forcing_row_dual_le_with_prior_fixed_variable	active
 otspot-core	presolve::transforms::tests::test_forcing_row_dual_multirow_with_prior_fixed_variable	active
+otspot-core	presolve::transforms::tests::test_forcing_tiny_coefficient_scale_genuine_still_forces	active
+otspot-core	presolve::transforms::tests::test_forcing_tiny_coefficient_scale_is_not_forcing	active
 otspot-core	presolve::transforms::tests::test_pre001_deadline_fires_immediately	active
 otspot-core	presolve::transforms::tests::test_presolve_detects_lb_gt_ub	active
 otspot-core	presolve::transforms::tests::test_presolve_singleton_le_netlib_like	active
@@ -2115,6 +2143,9 @@ otspot-core::memory_budget	qcqp_bridge_many_sparse_quad_constraints_peak_within_
 otspot-core::memory_budget	qcqp_route_dense_sizing_gate_refuses_before_allocating	active
 otspot-core::memory_budget	qcqp_route_rejects_dense_dcq_at_sparse_root_gate	active
 otspot-core::memory_budget	qp_ipm_route_peak_within_budget	active
+otspot-core::milp_forcing_margin_sentinel	genuine_forcing_rows_still_force_endpoints_public	active
+otspot-core::milp_forcing_margin_sentinel	tiny_coefficient_redundant_row_does_not_force_endpoints	active
+otspot-core::milp_forcing_margin_sentinel	tiny_scale_forcing_mirrors_are_scale_aware	active
 otspot-core::qp_diag_real_solve	concurrent_solves_keep_diagnostics_per_thread	active
 otspot-core::qp_diag_real_solve	consecutive_ipm_solves_preserve_diagnostics_for_threads_1_2_4	active
 otspot-core::qp_diag_real_solve	non_qp_route_clears_stale_diagnostics	active

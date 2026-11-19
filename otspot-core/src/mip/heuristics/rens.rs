@@ -134,6 +134,10 @@ pub(crate) fn run_rens(
     sub_cfg.tree_cuts = false;
     sub_cfg.symmetry = false;
     sub_cfg.cuts = false;
+    // Root structural presolve would run the reduce/postsolve machinery
+    // again per sub-MIP call for a neighborhood search already boxed by
+    // fixings — same overhead-avoidance policy as the three above.
+    sub_cfg.root_presolve = false;
 
     let mut sub_opts = parent_opts.clone();
     sub_opts.deadline = Some(super::sub_mip_deadline(deadline, sub_timeout));
@@ -422,6 +426,42 @@ mod tests {
         assert!(
             !sub_cfg.symmetry,
             "recursive symmetry breaking must be disabled"
+        );
+    }
+
+    /// NEW (root presolve): the root structural presolve flag is also turned
+    /// off for the recursive sub-MIP.
+    ///
+    /// Sentinel: removing `sub_cfg.root_presolve = false` from `run_rens`
+    /// fails this test via the recorded sub-MIP config.
+    #[test]
+    fn rens_run_path_disables_root_presolve_recursively() {
+        let problem = knap2([-1.0, -1.0], 1.0);
+        let cfg = MipConfig {
+            max_nodes: 99_999,
+            ..MipConfig::default()
+        };
+        let x_lp = vec![0.5, 0.5];
+
+        super::super::clear_recorded_sub_mip_configs();
+        let (result, _sub_mip_nodes, _sub_mip_iters) = run_rens(
+            &problem,
+            &x_lp,
+            &cfg,
+            &None,
+            u64::MAX,
+            &SolverOptions::default(),
+        );
+        let configs = super::super::take_recorded_sub_mip_configs();
+
+        assert!(
+            result.is_some(),
+            "test premise: RENS must call the recursive sub-MIP"
+        );
+        assert_eq!(configs.len(), 1, "RENS must solve exactly one sub-MIP");
+        assert!(
+            !configs[0].root_presolve,
+            "sub-MIP root presolve must be disabled"
         );
     }
 

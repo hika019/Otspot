@@ -79,7 +79,11 @@ fn build_rows(n: usize, a: &CscMatrix, m: usize) -> Vec<Vec<(usize, f64)>> {
 ///
 /// Updates `bounds` in-place. Returns `None` on infeasibility,
 /// `Some(count)` where count is the number of variables tightened.
-fn propagation_pass(
+///
+/// `pub(super)`: also drives the fixpoint of [`super::root_presolve`]'s
+/// reduction loop (same node semantics, applied on the mutable reduction
+/// state instead of the original CSC).
+pub(super) fn propagation_pass(
     rows: &[Vec<(usize, f64)>],
     constraint_types: &[ConstraintType],
     b: &[f64],

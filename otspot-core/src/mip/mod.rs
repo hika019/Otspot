@@ -16,6 +16,7 @@ pub(crate) mod parallel;
 pub(crate) mod presolve;
 mod problem;
 pub(crate) mod queue;
+pub(crate) mod root_presolve;
 pub(crate) mod stats;
 pub(crate) mod symmetry;
 
@@ -56,6 +57,11 @@ pub(crate) trait Relaxation {
     /// so per-node presolve is redundant and its variable renumbering drops the
     /// propagated warm-start basis. False (default) for MIQP, whose IPM relies on
     /// presolve's Ruiz scaling for per-node conditioning.
+    ///
+    /// This argument covers *per-node re-execution* only — the one-shot root
+    /// structural reduction (`root_presolve`) is a separate MIP-layer path that
+    /// runs before the tree exists; every node LP then shares the single
+    /// reduced matrix, so this warm-start contract is preserved unchanged.
     fn skip_node_presolve(&self) -> bool {
         false
     }
@@ -231,6 +237,26 @@ pub fn solve_milp_with_stats(
             MipStats::default(),
         );
     }
+    // A preset cancel must stop the MILP route the same way a preset deadline
+    // expiry does. The root stages (bound probing, root structural presolve,
+    // FP, root cuts) never poll the flag, and the reduction can shrink the
+    // relaxation until the LP path takes its trivial-box shortcut and never
+    // reaches simplex's first-iteration cancel check — so the entry point is
+    // the earliest gate that is reliably on the route regardless of how easy
+    // the problem turned out to be.
+    if options
+        .cancel_flag
+        .as_deref()
+        .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    {
+        return (
+            SolverResult {
+                status: SolveStatus::Timeout,
+                ..SolverResult::default()
+            },
+            MipStats::default(),
+        );
+    }
     // Establish a shared deadline before FP so that FP and B&B draw from the same
     // budget.  Without this, each LP in FP gets a fresh `timeout_secs` window and
     // `solve_mip_core` resets the clock again — allowing up to (MAX_FP_ITER + 1)×
@@ -249,8 +275,9 @@ pub fn solve_milp_with_stats(
     // handled inside the generic driver). Non-empty integer_vars with infeasible
     // integer rounding return early here before entering the B&B.
     if !problem.integer_vars.is_empty() {
-        let mask = integer_mask(problem.lp.num_vars, &problem.integer_vars);
-        // Root presolve: multi-pass propagation + probing tightens integer bounds.
+        // Root presolve: multi-pass propagation + probing tightens integer
+        // bounds. (The integer mask is computed further below, after the root
+        // structural reduction — it can remove/renumber columns.)
         let mut tightened = problem.lp.bounds.clone();
         let presolve_t0 = std::time::Instant::now();
         let presolve_ok = presolve::tighten_bounds_with_probing(
@@ -291,6 +318,30 @@ pub fn solve_milp_with_stats(
             }
             Some(_) => problem.clone(),
         };
+        // Root-only structural presolve (SCIP-style B&B integration): one
+        // row/column reduction pass here, after bound propagation/probing and
+        // before symmetry/FP/cuts/B&B. Everything below — symmetry rows, FP,
+        // root cuts, the tree search, tree cuts and the RINS/RENS/LB sub-MIP
+        // parent space — works on the reduced matrix; only the final result
+        // is postsolved and independently verified against the ORIGINAL
+        // problem (see `root_presolve` module docs for the bijection
+        // contract). Err ⇒ the stage produced a terminal result (proved
+        // infeasible, or the fully-pinned point) and we return it directly.
+        let step = match root_presolve::apply(
+            problem_bt,
+            problem,
+            &opts_with_dl,
+            cfg,
+            deadline,
+            presolve_ms,
+            presolve_us,
+        ) {
+            Err(early) => return *early,
+            Ok(step) => step,
+        };
+        let problem_bt = step.problem;
+        let postsolve = step.postsolve;
+        let mask = integer_mask(problem_bt.lp.num_vars, &problem_bt.integer_vars);
         // Static symmetry breaking: append lex-leader ordering rows for orbits
         // of interchangeable binary variables. The rows preserve at least one
         // optimal representative per orbit (objective unchanged) while shrinking
@@ -331,6 +382,20 @@ pub fn solve_milp_with_stats(
         stats.root_cut_us = root_cut_us;
         stats.root_probing_us = presolve_us;
         stats.root_symmetry_us = symmetry_us;
+        stats.root_presolve_us = step.rp_us;
+        stats.root_presolve_rows_removed = step.info.rows_removed;
+        stats.root_presolve_cols_removed = step.info.cols_removed;
+        stats.root_presolve_substitutions = step.info.substitutions;
+        if let Some(map) = &postsolve {
+            // Postsolve the final incumbent into the original space and
+            // verify it there before publishing (fail-closed on any doubt).
+            return match map.publish(&res, problem, cfg.integer_feas_tol) {
+                Some(mapped) => (mapped, stats),
+                None => {
+                    root_presolve::rerun_without_root_presolve(problem, &opts_with_dl, cfg, &stats)
+                }
+            };
+        }
         return (res, stats);
     }
     solve_mip_with_stats(problem, &opts_with_dl, cfg)

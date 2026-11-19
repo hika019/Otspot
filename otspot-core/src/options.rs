@@ -220,6 +220,14 @@ pub const DEFAULT_MAX_CUT_ROUNDS: usize = 5;
 pub const DEFAULT_MIP_SYMMETRY: bool = true;
 /// Default in-tree cut separation state.
 pub const DEFAULT_MIP_TREE_CUTS: bool = true;
+/// Default root-only structural presolve state (MILP only; see
+/// `mip::root_presolve` for the reduction rules and the postsolve /
+/// verification contract). ON by default: the reductions are bijections on
+/// integer feasible points, the final solution is verified against the
+/// *original* problem before being published, and a verification failure
+/// falls back to an unreduced re-run, so the default-on cannot turn a wrong
+/// solution into a silent wrong proof.
+pub const DEFAULT_MIP_ROOT_PRESOLVE: bool = true;
 
 /// MILP/MIQP branch-and-bound config.
 ///
@@ -277,6 +285,16 @@ pub struct MipConfig {
     /// orbit, so the optimum is unchanged while the tree shrinks. Default ON
     /// (see [`DEFAULT_MIP_SYMMETRY`]).
     pub symmetry: bool,
+    /// Root-only structural presolve for MILP: one row/column reduction pass
+    /// before symmetry/FP/cuts/B&B, B&B then runs on the reduced matrix and
+    /// only the final solution is mapped back (and independently verified —
+    /// on verification failure the solve re-runs unreduced). Per-node LP
+    /// presolve stays skipped (warm-start contract), this is a distinct,
+    /// root-only mechanism. Default ON (see [`DEFAULT_MIP_ROOT_PRESOLVE`]).
+    /// Ignored by MIQP (the reductions are MILP-specific) and by sub-MIP
+    /// calls of RINS/RENS/local-branching (overhead-avoidance, same policy
+    /// as `symmetry`/`cuts`).
+    pub root_presolve: bool,
     /// Enable the RENS (Relaxation Enforced Neighborhood Search) heuristic.
     pub rens_enabled: bool,
     /// Enable the local-branching primal heuristic.
@@ -297,6 +315,7 @@ impl Default for MipConfig {
             tree_cuts: DEFAULT_MIP_TREE_CUTS,
             rins_enabled: true,
             symmetry: DEFAULT_MIP_SYMMETRY,
+            root_presolve: DEFAULT_MIP_ROOT_PRESOLVE,
             rens_enabled: true,
             local_branching_enabled: true,
         }

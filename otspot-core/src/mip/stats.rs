@@ -103,6 +103,27 @@ pub struct MipStats {
     /// Wall-clock microseconds spent in root static symmetry breaking
     /// (`symmetry::break_symmetry`) before branch-and-bound.
     pub root_symmetry_us: u64,
+    /// Wall-clock microseconds spent in root-only structural presolve
+    /// (the MILP row/column reduction of the `root_presolve` module) before
+    /// symmetry/FP/cuts. Counted even when the reduction proves infeasible
+    /// or applies nothing (the work was still spent); zero when
+    /// `MipConfig::root_presolve` is off.
+    pub root_presolve_us: u64,
+    /// Rows removed by root-only structural presolve (empty / redundant /
+    /// forcing / merged / substituted).
+    pub root_presolve_rows_removed: usize,
+    /// Columns removed by root-only structural presolve (fixed / empty /
+    /// substituted).
+    pub root_presolve_cols_removed: usize,
+    /// Doubleton substitutions applied by root-only structural presolve.
+    pub root_presolve_substitutions: usize,
+    /// Times the postsolved final solution failed independent verification
+    /// against the original problem, triggering a full unreduced re-run
+    /// (fail-closed escape hatch). Non-zero means a reduction produced an
+    /// unusable result and the reported answer comes from the unreduced
+    /// fallback; the wall time of the discarded reduced search is otherwise
+    /// unattributed (its root-phase buckets are carried over).
+    pub root_presolve_fallbacks: usize,
 
     /// Objective of the first trusted (Optimal) root relaxation, i.e. the root LP
     /// bound used to start branch-and-bound. With cuts enabled this reflects the
@@ -282,6 +303,11 @@ impl MipStats {
             root_cut_us,
             root_probing_us,
             root_symmetry_us,
+            root_presolve_us,
+            root_presolve_rows_removed,
+            root_presolve_cols_removed,
+            root_presolve_substitutions,
+            root_presolve_fallbacks,
             root_lp_bound,
             rins_calls,
             rins_improvements,
@@ -385,6 +411,11 @@ impl MipStats {
         self.root_cut_us = self.root_cut_us.saturating_add(root_cut_us);
         self.root_probing_us = self.root_probing_us.saturating_add(root_probing_us);
         self.root_symmetry_us = self.root_symmetry_us.saturating_add(root_symmetry_us);
+        self.root_presolve_us = self.root_presolve_us.saturating_add(root_presolve_us);
+        self.root_presolve_rows_removed += root_presolve_rows_removed;
+        self.root_presolve_cols_removed += root_presolve_cols_removed;
+        self.root_presolve_substitutions += root_presolve_substitutions;
+        self.root_presolve_fallbacks += root_presolve_fallbacks;
         self.fp_incumbent_found |= fp_incumbent_found;
 
         // Per-worker extremes / per-worker constants.

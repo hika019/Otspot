@@ -188,6 +188,20 @@ fn main() -> ExitCode {
         println!("root_cut_us: {}", stats.root_cut_us);
         println!("root_probing_us: {}", stats.root_probing_us);
         println!("root_symmetry_us: {}", stats.root_symmetry_us);
+        println!("root_presolve_us: {}", stats.root_presolve_us);
+        println!(
+            "root_presolve_rows_removed: {}",
+            stats.root_presolve_rows_removed
+        );
+        println!(
+            "root_presolve_cols_removed: {}",
+            stats.root_presolve_cols_removed
+        );
+        println!(
+            "root_presolve_substitutions: {}",
+            stats.root_presolve_substitutions
+        );
+        println!("root_presolve_fallbacks: {}", stats.root_presolve_fallbacks);
         println!("strong_branch_calls: {}", stats.strong_branch_calls);
         println!(
             "strong_branch_candidates: {}",
@@ -260,6 +274,7 @@ fn root_inclusive_attribution_covered_us(loop_covered_us: u64, stats: &MipStats)
         .saturating_add(stats.root_cut_us)
         .saturating_add(stats.root_probing_us)
         .saturating_add(stats.root_symmetry_us)
+        .saturating_add(stats.root_presolve_us)
 }
 
 #[derive(Debug, Clone, PartialEq)]
