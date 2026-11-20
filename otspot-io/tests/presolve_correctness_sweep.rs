@@ -483,6 +483,22 @@ fn dependent_eq_row_delta(prob: &QpProblem) -> Option<(usize, usize)> {
 /// not hidden.
 const DEP_EQ_BORDERLINE_BUDGET: &[&str] = &["cre-b", "cre-d", "degen3"];
 
+/// The budget-cut status family: the ONLY outcomes a deadline can produce on
+/// a deterministic solve — the deadline cutting the iterations yields
+/// `Timeout`, cutting the postsolve dual certificate yields
+/// `SuboptimalSolution`, and finishing yields `Optimal`. Any other status is
+/// a solver verdict about the problem (Infeasible, Unbounded, Stalled,
+/// NumericalError, ...), never a budget artifact, so a borderline instance's
+/// pair must not be tolerated unless BOTH statuses are in this family (a
+/// mixed pair with an in-family Optimal/Timeout is still a budget artifact
+/// on the Timeout side; a pair containing an out-of-family status always
+/// has a non-budget explanation on at least one side and is a violation).
+const DEP_EQ_BUDGET_CUT_FAMILY: &[SolveStatus] = &[
+    SolveStatus::Optimal,
+    SolveStatus::SuboptimalSolution,
+    SolveStatus::Timeout,
+];
+
 /// Per-instance outcome of the step12 ON/OFF invariance decision.
 enum DepEqOutcome {
     /// Full strict invariance held (both Optimal, all cross-checks passed).
@@ -518,7 +534,11 @@ struct DepEqPairObs<'a> {
 /// known Netlib optimum is checked against ON whenever ON returned a finite
 /// point and at least one side proved Optimal. A Timeout side's objective is
 /// +inf by construction (`Timeout` early-returns) and never participates in
-/// a comparison.
+/// a comparison. The tolerance is family-bounded: if either status is outside
+/// `DEP_EQ_BUDGET_CUT_FAMILY` the pair is a violation even for allowlisted
+/// instances (sentinel `dep_eq_pair_rejects_out_of_family_pair`) — an
+/// out-of-family status is a solver verdict, not something the deadline can
+/// cause.
 fn classify_degen_eq_pair(borderline: bool, o: &DepEqPairObs<'_>) -> DepEqOutcome {
     let DepEqPairObs {
         on_status,
@@ -548,6 +568,22 @@ fn classify_degen_eq_pair(borderline: bool, o: &DepEqPairObs<'_>) -> DepEqOutcom
         return DepEqOutcome::Violation(format!(
             "status ON={on_status:?} OFF={off_status:?} (require ON == OFF == Optimal \
              unless a documented budget-cut borderline pair)"
+        ));
+    }
+    // Budget-cut tolerance is family-bounded: a borderline pair is only a
+    // budget artifact when BOTH statuses are in `DEP_EQ_BUDGET_CUT_FAMILY`.
+    // An out-of-family status (Infeasible, NumericalError, Stalled, ...) is a
+    // solver verdict the deadline cannot cause, so such a pair is a violation
+    // even for allowlisted instances — without this gate, `ON=Timeout
+    // OFF=Infeasible` or `ON=Optimal OFF=NumericalError` reached the terminal
+    // BorderlineTolerated below (Codex review P1 on PR #92).
+    if borderline
+        && !(DEP_EQ_BUDGET_CUT_FAMILY.contains(on_status)
+            && DEP_EQ_BUDGET_CUT_FAMILY.contains(off_status))
+    {
+        return DepEqOutcome::Violation(format!(
+            "status ON={on_status:?} OFF={off_status:?} outside budget-cut family \
+             {DEP_EQ_BUDGET_CUT_FAMILY:?} (borderline tolerance is budget-only)"
         ));
     }
     // ON must not present an infeasible point as an incumbent. A Timeout side
@@ -611,9 +647,17 @@ fn classify_degen_eq_pair(borderline: bool, o: &DepEqPairObs<'_>) -> DepEqOutcom
 ///
 /// Heavy (≈ presolve-only sweep over 109 files + solves of the detected few).
 /// Run under the heavy profile or the raw binary, like `presolve_invariance_full_sweep_known_with_constant`.
+///
+/// Naming per AGENTS.md ("既存テストの assert・ロジックは変更しない、削除 +
+/// 新規追加で表現"): PR #92 first widened the tolerance *inside* the old test
+/// `presolve_dependent_eq_detection_sweep`, which rewrote an existing test's
+/// decision logic under its name. That old name is now deleted and this new
+/// name carries the budget-cut-family contract; the pre-PR-#92 both-Timeout-only
+/// contract is intentionally NOT kept under the old name because it fails
+/// legitimately on the budget-borderline instances documented above.
 #[test]
 #[ignore = "tier-2: dependent-Eq detection sweep over lp_problems, run under --profile heavy or raw binary"]
-fn presolve_dependent_eq_detection_sweep() {
+fn presolve_dependent_eq_detection_sweep_budget_family() {
     let timeout: f64 = std::env::var("PRESOLVE_SWEEP_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -862,7 +906,99 @@ fn dep_eq_pair_tolerates_budget_cut_family() {
     ));
 }
 
-/// Curated tier-1 subset of `presolve_dependent_eq_detection_sweep`: the
+/// Sentinel for the `DEP_EQ_BUDGET_CUT_FAMILY` gate in `classify_degen_eq_pair`
+/// (the P1 fix from the Codex review of PR #92). Reverting the family gate
+/// classifies EVERY `out-of-family` fixture below as `BorderlineTolerated` and
+/// fails these assertions; over-tightening the gate (e.g. back to
+/// both-Timeout-only, or rejecting a legitimate mixed in-family split) fails
+/// the in-family assertions at the end.
+#[test]
+fn dep_eq_pair_rejects_out_of_family_pair() {
+    let opt = SolveStatus::Optimal;
+    let sub = SolveStatus::SuboptimalSolution;
+    let tout = SolveStatus::Timeout;
+    let known = Some(-9.87294e2_f64);
+    let best = -9.872940e2_f64;
+    let (pf_ok, bf_ok) = (6.4e-14_f64, 2.5e-14_f64);
+    let nan = f64::NAN;
+
+    let borderline_pair =
+        |on_s: &SolveStatus, off_s: &SolveStatus, on_o: f64, off_o: f64, pf: f64, bf: f64| {
+            classify_degen_eq_pair(
+                true,
+                &DepEqPairObs {
+                    on_status: on_s,
+                    off_status: off_s,
+                    on_obj: on_o,
+                    off_obj: off_o,
+                    on_pf: pf,
+                    on_bf: bf,
+                    known,
+                },
+            )
+        };
+
+    // Out-of-family statuses are violations even on an allowlisted borderline
+    // instance: none of these pairs is something the deadline can cause, and
+    // the pre-gate code classified ALL FOUR as BorderlineTolerated.
+    // 1. OFF=Infeasible is a solver verdict; ON=Timeout hides it from every
+    //    value comparison (Timeout carries +inf obj and NaN residuals).
+    assert!(matches!(
+        borderline_pair(
+            &tout,
+            &SolveStatus::Infeasible,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            nan,
+            nan
+        ),
+        DepEqOutcome::Violation(_)
+    ));
+    // 2. ON=Optimal agrees with the known optimum, yet OFF=NumericalError is
+    //    a numerical breakdown, not a budget outcome.
+    assert!(matches!(
+        borderline_pair(&opt, &SolveStatus::NumericalError, best, best, pf_ok, bf_ok),
+        DepEqOutcome::Violation(_)
+    ));
+    // 3. ON=Stalled (non-converged iterate, no solution claim) is explicitly
+    //    NOT the budget-cut SuboptimalSolution even when the diagnostic
+    //    iterate happens to match the proven optimum.
+    assert!(matches!(
+        borderline_pair(&SolveStatus::Stalled, &opt, best, best, pf_ok, bf_ok),
+        DepEqOutcome::Violation(_)
+    ));
+    // 4. OFF=Unbounded is a problem verdict that no value check observes
+    //    (neither side Optimal, so no comparison fires).
+    assert!(matches!(
+        borderline_pair(
+            &sub,
+            &SolveStatus::Unbounded,
+            best,
+            f64::NEG_INFINITY,
+            pf_ok,
+            bf_ok
+        ),
+        DepEqOutcome::Violation(_)
+    ));
+
+    // In-family shapes stay classified as before (guards against
+    // over-tightening): mixed in-family split tolerated, both-Timeout
+    // tolerated, both-Optimal strict-ok.
+    assert!(!matches!(
+        borderline_pair(&sub, &tout, best, f64::INFINITY, pf_ok, bf_ok),
+        DepEqOutcome::Violation(_)
+    ));
+    assert!(matches!(
+        borderline_pair(&tout, &tout, f64::INFINITY, f64::INFINITY, nan, nan),
+        DepEqOutcome::BorderlineTolerated
+    ));
+    assert!(matches!(
+        borderline_pair(&opt, &opt, best, best, pf_ok, bf_ok),
+        DepEqOutcome::StrictOk
+    ));
+}
+
+/// Curated tier-1 subset of `presolve_dependent_eq_detection_sweep_budget_family`: the
 /// instances where the flag comparison measurably drops rows (populated from
 /// the detection sweep output on this machine). Each is re-solved ON vs OFF;
 /// objective agreement, feasibility including the removed dependent rows, and
@@ -870,7 +1006,7 @@ fn dep_eq_pair_tolerates_budget_cut_family() {
 #[test]
 fn presolve_dependent_eq_curated_known() {
     const CURATED: &[&str] = &[
-        // Detected by `presolve_dependent_eq_detection_sweep` on this machine
+        // Detected by `presolve_dependent_eq_detection_sweep_budget_family` on this machine
         // (rows off->on): degen2 380->378, scorpion 206->183, pds-02
         // 2177->2166, sierra 997->987, ken-07 947->898. Small/fast enough
         // for the tier-1 budget; cre-*/ken-11 stay in the tier-2 sweep.
