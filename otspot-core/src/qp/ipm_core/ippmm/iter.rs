@@ -223,7 +223,7 @@ fn solve_ippmm_inner_confined(
     };
     // rank-deficient Q + c≈0 で rho が floor に張り付き proximal 項が df を支配する病理を回避する適応 floor。
     let c_max = problem.c.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-    let allow_adaptive_reg = c_max < ADAPTIVE_REG_C_MAX_THRESH;
+    let adaptive = c_max < ADAPTIVE_REG_C_MAX_THRESH;
     let mut reg_limit = initial_reg_limit;
     // KKT 行列正則化の絶対下限 (reg_limit の適応引下げとは独立)。
     let matrix_reg_floor = matrix_reg_floor_for_lp(is_lp);
@@ -755,7 +755,7 @@ fn solve_ippmm_inner_confined(
         // 下げて IPM が boundary を探索できるようにする。
         if (pmm.rho - reg_limit).abs() < reg_limit * 0.01 && reg_limit > REG_LIMIT_MIN {
             let mut should_lower = false;
-            if allow_adaptive_reg {
+            if adaptive {
                 let prox_d_inf = x
                     .iter()
                     .zip(pmm.x_ref.iter())
@@ -787,7 +787,7 @@ fn solve_ippmm_inner_confined(
         let box_only = m_orig == 0;
         let both_improved = primal_improved && dual_improved;
         let either_improved = primal_improved || dual_improved;
-        let use_fast_rate = if box_only {
+        let fast = if box_only {
             both_improved
         } else {
             either_improved
@@ -797,26 +797,10 @@ fn solve_ippmm_inner_confined(
             pmm.y_ref.copy_from_slice(&y);
             pmm.x_ref.copy_from_slice(&x);
         }
-        // 近接正則化の μ 追従 floor (state.rs PROX_MU_TRACK_RATIO 参照)。μ 急上昇
-        // 反復 (PC が中心性を大幅に悪化させた = 方向がパスから外れている) では
-        // ρ,δ を μ スケール未満へ減衰させない。reg_limit だけの絶対 floor だと
-        // ρ/μ → 0 で素の Mehrotra PC に退化し、箱化 dt 型で 4 周期ループに陥る
-        // (sentinel: dt_qp_ge_box_interior)。健全問題では非発火。
-        let prox_floor = if !allow_adaptive_reg
-            && pmm.rho <= reg_limit * (1.0 + REG_FLOOR_BIND_TOL)
-            && mu_new > mu * PATH_MU_RISE_FACTOR
-        {
-            (PROX_MU_TRACK_RATIO * mu_new).max(reg_limit)
-        } else {
-            reg_limit
-        };
-        if use_fast_rate {
-            pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(prox_floor);
-            pmm.rho = (pmm.rho * (1.0 - mu_rate)).max(prox_floor);
-        } else {
-            pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(prox_floor);
-            pmm.rho = (pmm.rho * (1.0 - PMM_SLOW_RATE * mu_rate)).max(prox_floor);
-        }
+        let mu_spiked = mu_new > mu * PATH_MU_RISE_FACTOR;
+        prox_schedule(
+            &mut pmm, fast, mu_rate, reg_limit, mu_new, mu_spiked, adaptive,
+        );
 
         pmm.prev_nr_p = nr_p;
         pmm.prev_nr_d = nr_d;
@@ -907,6 +891,36 @@ enum InfeasGate {
     Break,
     Stall,
     Continue,
+}
+
+/// 近接正則化 ρ,δ のスケジュール更新 (state.rs PROX_MU_TRACK_RATIO に根拠)。
+///
+/// μ 急上昇反復 (PC が中心性を大幅に悪化させた = 方向がパスから外れている) では
+/// ρ,δ を μ スケール未満へ減衰させない。reg_limit だけの絶対 floor だと ρ/μ → 0
+/// で素の Mehrotra PC に退化し、箱化 dt 型で 4 周期ループに陥る (sentinel:
+/// dt_qp_ge_box_interior)。健全問題では非発火。
+fn prox_schedule(
+    pmm: &mut PmmState,
+    use_fast_rate: bool,
+    mu_rate: f64,
+    reg_limit: f64,
+    mu_new: f64,
+    mu_spiked: bool,
+    allow_adaptive_reg: bool,
+) {
+    let prox_floor =
+        if !allow_adaptive_reg && pmm.rho <= reg_limit * (1.0 + REG_FLOOR_BIND_TOL) && mu_spiked {
+            (PROX_MU_TRACK_RATIO * mu_new).max(reg_limit)
+        } else {
+            reg_limit
+        };
+    let decay = if use_fast_rate {
+        1.0 - mu_rate
+    } else {
+        1.0 - PMM_SLOW_RATE * mu_rate
+    };
+    pmm.delta = (pmm.delta * decay).max(prox_floor);
+    pmm.rho = (pmm.rho * decay).max(prox_floor);
 }
 
 /// 検証 PASS 済み受理から ray 証書の方向だけを抽出する (finalize 呼び出し
