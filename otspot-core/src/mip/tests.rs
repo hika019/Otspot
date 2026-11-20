@@ -5443,3 +5443,199 @@ fn solve_miqp_rejects_out_of_range_integer_var() {
         res.status
     );
 }
+
+// ---------------------------------------------------------------------------
+// root-only structural presolve wiring (solve_milp_with_stats)
+// ---------------------------------------------------------------------------
+
+/// Wiring sentinel for the root structural presolve: on a problem where the
+/// reduction provably fires, the counters must be populated, the final
+/// incumbent must come back in the ORIGINAL variable space (postsolve), and
+/// the optimum must be unchanged.
+///
+/// Sentinel: unwiring `root_presolve::reduce` from `solve_milp_with_stats`
+/// (or hard-forcing `NotApplied`) zeroes the counters → FAIL.
+#[test]
+fn root_presolve_wiring_reduces_postsolves_and_keeps_optimum() {
+    // min x0 + 2·x1  s.t.  x0 + x1 = 4;  x0 in [0,3] int, x1 in [0,5] int.
+    // Reduction: x0 (lock-1, unimodular) is substituted away; the search
+    // solves a 1-variable LP and the incumbent maps back to (3, 1).
+    let lp = build_lp(
+        vec![1.0, 2.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![4.0],
+        vec![ConstraintType::Eq],
+        vec![(0.0, 3.0), (0.0, 5.0)],
+    );
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert_eq!(
+        r.solution.len(),
+        2,
+        "solution must be reported in the ORIGINAL variable space"
+    );
+    assert!(
+        (r.solution[0] - 3.0).abs() < 1e-6 && (r.solution[1] - 1.0).abs() < 1e-6,
+        "postsolved incumbent must be the original optimum, got {:?}",
+        r.solution
+    );
+    assert!(
+        (r.objective - 5.0).abs() < 1e-6,
+        "objective must equal the original-space value, got {}",
+        r.objective
+    );
+    assert_eq!(stats.root_presolve_cols_removed, 1);
+    assert_eq!(stats.root_presolve_substitutions, 1);
+    assert!(stats.root_presolve_rows_removed >= 1);
+    assert_eq!(
+        stats.root_presolve_fallbacks, 0,
+        "postsolve verification must pass on this fixture"
+    );
+}
+
+/// `MipConfig::root_presolve = false` must restore the unreduced path: same
+/// optimum, zero counters. This flag is distinct from the per-node LP
+/// presolve skip (which stays unconditional for MILP).
+///
+/// Sentinel: ignoring the flag (always reducing) makes the counters
+/// non-zero → FAIL.
+#[test]
+fn root_presolve_flag_off_leaves_counters_zero() {
+    let lp = build_lp(
+        vec![1.0, 2.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![4.0],
+        vec![ConstraintType::Eq],
+        vec![(0.0, 3.0), (0.0, 5.0)],
+    );
+    let cfg = MipConfig {
+        root_presolve: false,
+        ..MipConfig::default()
+    };
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &cfg);
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!(
+        (r.solution[0] - 3.0).abs() < 1e-6 && (r.solution[1] - 1.0).abs() < 1e-6,
+        "flag-off path keeps the same optimum, got {:?}",
+        r.solution
+    );
+    assert_eq!(stats.root_presolve_cols_removed, 0);
+    assert_eq!(stats.root_presolve_rows_removed, 0);
+    assert_eq!(stats.root_presolve_substitutions, 0);
+    assert_eq!(stats.root_presolve_us, 0);
+}
+
+/// Proof invariant on a duplicate-Eq contradiction: the reduced verdict
+/// (Infeasible via the merge contradiction check) must match the verdict of
+/// a run without any reduction. Both verdicts come from feasibility-
+/// preserving steps only, so "reduced infeasible ⇒ original infeasible" is
+/// observable end-to-end here.
+#[test]
+fn root_presolve_infeasible_agrees_with_unreduced_run() {
+    let problem = || {
+        let lp = build_lp(
+            vec![1.0, 1.0],
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0],
+            2,
+            vec![1.0, 3.0],
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+            vec![(-100.0, 100.0), (-100.0, 100.0)],
+        );
+        milp(lp, vec![0, 1])
+    };
+    let (r_on, _) = solve_milp_with_stats(&problem(), &opts(), &MipConfig::default());
+    let cfg_off = MipConfig {
+        root_presolve: false,
+        ..MipConfig::default()
+    };
+    let (r_off, _) = solve_milp_with_stats(&problem(), &opts(), &cfg_off);
+    assert_eq!(r_off.status, SolveStatus::Infeasible);
+    assert_eq!(
+        r_on.status, r_off.status,
+        "reduced path must not change the feasibility verdict"
+    );
+}
+
+/// Fully-pinned wiring: probing + reduction fix every column, the pipeline
+/// skips B&B entirely, and the reconstructed pinned point is published
+/// through the same verification path as a mapped incumbent.
+///
+/// Sentinel: dispatching the empty reduced problem into B&B (instead of the
+/// pinned-point early return) loses the solution → FAIL.
+#[test]
+fn root_presolve_fully_pinned_publishes_pinned_point() {
+    // x1 = 5; x0 − x1 ≥ 0; x0 ≤ 5 ⇒ x0 = 5. min x0 + x1 → 10.
+    let lp = build_lp(
+        vec![1.0, 1.0],
+        &[0, 1, 1, 2],
+        &[1, 0, 1, 0],
+        &[1.0, 1.0, -1.0, 1.0],
+        3,
+        vec![5.0, 0.0, 5.0],
+        vec![ConstraintType::Eq, ConstraintType::Ge, ConstraintType::Le],
+        vec![(0.0, 10.0), (0.0, 10.0)],
+    );
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!(
+        (r.solution[0] - 5.0).abs() < 1e-6 && (r.solution[1] - 5.0).abs() < 1e-6,
+        "pinned point must be published in the original space, got {:?}",
+        r.solution
+    );
+    assert!(
+        (r.objective - 10.0).abs() < 1e-6,
+        "objective recomputed on the pinned point, got {}",
+        r.objective
+    );
+    assert_eq!(stats.root_presolve_cols_removed, 2);
+    assert_eq!(stats.nodes_processed, 0, "no search is needed");
+    assert_eq!(stats.root_presolve_fallbacks, 0);
+}
+
+/// A *preset* cancel flag must stop the MILP route immediately, even for a
+/// problem the root presolve reduces to a trivial box: the reduced search
+/// finishes before the per-node LP path ever polls the flag, so the entry
+/// gate is the only reliably-reached check.
+///
+/// Sentinel: with the entry check removed (revert), this fixture is fully
+/// pinned and returns Optimal before any cancel poll → FAIL.
+#[test]
+fn milp_preset_cancel_returns_timeout_before_solving() {
+    // The fully-pinned fixture above: without the entry gate the reduction
+    // path completes with zero cancel polls.
+    let lp = build_lp(
+        vec![1.0, 1.0],
+        &[0, 1, 1, 2],
+        &[1, 0, 1, 0],
+        &[1.0, 1.0, -1.0, 1.0],
+        3,
+        vec![5.0, 0.0, 5.0],
+        vec![ConstraintType::Eq, ConstraintType::Ge, ConstraintType::Le],
+        vec![(0.0, 10.0), (0.0, 10.0)],
+    );
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let options = SolverOptions {
+        cancel_flag: Some(std::sync::Arc::clone(&flag)),
+        ..opts()
+    };
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &options, &MipConfig::default());
+    assert_eq!(
+        r.status,
+        SolveStatus::Timeout,
+        "a preset cancel must not be answered with a completed solve"
+    );
+    assert!(r.solution.is_empty());
+    assert_eq!(stats.nodes_processed, 0);
+    assert_eq!(
+        stats.root_presolve_cols_removed, 0,
+        "nothing must run after a preset cancel"
+    );
+}

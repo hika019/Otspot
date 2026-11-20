@@ -203,6 +203,41 @@ fn recover_removed_row_dual(
     stationarity_dual(orig_problem, i, &row_entries, solution, dual_solution)
 }
 
+/// Dual-feasibility metric: max per-column KKT violation.
+/// at lb only: max(0, -rc); at ub only: max(0, rc); interior: |rc|.
+///
+/// Free function rather than a closure in `run_postsolve`: identical
+/// semantics, but keeps `run_postsolve` inside its registered size budget.
+fn dfeas_bound(orig_problem: &LpProblem, solution: &[f64], y: &[f64]) -> f64 {
+    let mut max_viol = 0.0f64;
+    for j in 0..solution.len() {
+        let (lb_j, ub_j) = orig_problem.bounds[j];
+        let fixed =
+            lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
+        if fixed {
+            continue;
+        }
+        let at_lb = lb_j.is_finite() && (solution[j] - lb_j).abs() < at_lb_tol(lb_j);
+        let at_ub = ub_j.is_finite() && (solution[j] - ub_j).abs() < at_ub_tol(ub_j);
+        let mut rc = orig_problem.c[j];
+        let (rows, vals) = orig_problem.a.column(j);
+        for (k, &row) in rows.iter().enumerate() {
+            rc -= vals[k] * y[row];
+        }
+        let viol = if at_lb && !at_ub {
+            f64::max(0.0, -rc)
+        } else if at_ub && !at_lb {
+            f64::max(0.0, rc)
+        } else {
+            rc.abs()
+        };
+        if viol > max_viol {
+            max_viol = viol;
+        }
+    }
+    max_viol
+}
+
 /// Lift the reduced-problem solution back into the original variable / constraint space.
 ///
 /// Does not synthesise `warm_start_basis`: presolve renumbers variables and
@@ -279,6 +314,13 @@ pub fn run_postsolve(
                 dual_solution[*orig_row] = (c_orig - sum_ay) / coeff;
             }
             PostsolveStep::RedundantConstraint { orig_row } => {
+                dual_solution[*orig_row] = 0.0;
+            }
+            PostsolveStep::DependentEquation { orig_row } => {
+                // See the variant's doc in transforms/state.rs: the reduced
+                // dual with y[orig_row] = 0 is an optimal dual of the
+                // original (same feasible set, unchanged stationarity and
+                // dual objective).
                 dual_solution[*orig_row] = 0.0;
             }
             PostsolveStep::BoundsTightened => {}
@@ -380,42 +422,10 @@ pub fn run_postsolve(
     }
 
     // Compute dual-recovery candidates (y_loop, crossover) and adopt the one
-    // with the smallest bound-aware dual-feasibility violation.
+    // with the smallest bound-aware dual-feasibility violation (`dfeas_bound`).
     let y_loop = dual_solution.clone();
 
-    // Dual-feasibility metric: max per-column KKT violation.
-    // at lb only: max(0, -rc); at ub only: max(0, rc); interior: |rc|.
-    let dfeas_bound = |y: &[f64]| -> f64 {
-        let mut max_viol = 0.0f64;
-        for j in 0..n {
-            let (lb_j, ub_j) = orig_problem.bounds[j];
-            let fixed =
-                lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
-            if fixed {
-                continue;
-            }
-            let at_lb = lb_j.is_finite() && (solution[j] - lb_j).abs() < at_lb_tol(lb_j);
-            let at_ub = ub_j.is_finite() && (solution[j] - ub_j).abs() < at_ub_tol(ub_j);
-            let mut rc = orig_problem.c[j];
-            let (rows, vals) = orig_problem.a.column(j);
-            for (k, &row) in rows.iter().enumerate() {
-                rc -= vals[k] * y[row];
-            }
-            let viol = if at_lb && !at_ub {
-                f64::max(0.0, -rc)
-            } else if at_ub && !at_lb {
-                f64::max(0.0, rc)
-            } else {
-                rc.abs()
-            };
-            if viol > max_viol {
-                max_viol = viol;
-            }
-        }
-        max_viol
-    };
-
-    let df_loop = dfeas_bound(&y_loop);
+    let df_loop = dfeas_bound(orig_problem, &solution, &y_loop);
 
     // Try crossover at Optimal status when loop candidate is dual-infeasible.
     // Crossover reconstructs a globally dual-feasible y = B⁻ᵀc_B at the primal
@@ -431,7 +441,9 @@ pub fn run_postsolve(
     } else {
         None
     };
-    let df_xover = crossover.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
+    let df_xover = crossover
+        .as_ref()
+        .map_or(f64::INFINITY, |y| dfeas_bound(orig_problem, &solution, y));
 
     // Select candidate with lowest dual infeasibility.
     if df_loop <= df_xover {
@@ -450,7 +462,7 @@ pub fn run_postsolve(
             *rc -= vals[k] * dual_solution[row];
         }
     }
-    let postsolve_dfeas_recomputed = dfeas_bound(&dual_solution);
+    let postsolve_dfeas_recomputed = dfeas_bound(orig_problem, &solution, &dual_solution);
 
     let objective = result.objective + presolve_result.obj_offset;
 
@@ -490,6 +502,7 @@ mod bound_active_tol_tests {
     /// `at_lb_tol(lb=1e6) ≈ 1.0`, so the same deviation is correctly at-lb.
     ///
     /// Regresses if `at_lb_tol` reverts to the old absolute 1e-6.
+    /// sentinel: at_lb_tol が絶対 1e-6 へ逆戻りする張 — 大尺度 lb で内部誤分類となり相補性 slack 違反を検出できず fail
     #[test]
     fn test_sentinel_c4_large_scale_bound_active_tol() {
         let lb = 1e6_f64;

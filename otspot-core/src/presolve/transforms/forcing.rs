@@ -5,6 +5,52 @@ use super::state::{PostsolveStep, PresolveState, PresolveStatus};
 use crate::problem::ConstraintType;
 use crate::tolerances::ZERO_TOL;
 
+/// Relative rounding budget for the forcing decision: the activity-range
+/// endpoint is a floating-point sum over the row's terms, so the slack a
+/// forcing test may accept must scale with the row's own magnitude
+/// (k·2⁻⁵³ accumulation with ~2 digits of safety; the twin of the MILP
+/// root presolve's `ROOT_PRESOLVE_ACT_REL_TOL`). A scale-free constant
+/// fails at both ends — see [`forcing_margin`] and the PR #89 P1 finding
+/// in `mip::root_presolve` (`1e-13`-scale rows below read as forcing when
+/// ZERO_TOL alone gates the slack).
+const FORCING_SLACK_REL_TOL: f64 = 64.0 * f64::EPSILON;
+
+/// ULP coefficient of the per-member movement floor (twin of
+/// `ROOT_PRESOLVE_ROUNDING_ULPS`).
+const FORCING_MOVE_ULPS: f64 = 4.0;
+
+/// Coefficient-aware forcing margin for one side (`at_min` = force toward
+/// the min-activity endpoints): the slack must not even pay for the
+/// cheapest representable in-interval move of any member —
+/// `min_j |a_j|·(ZERO_TOL + k·EPSILON·|endpoint_j|)`, the endpoint being
+/// the bound the pin would write for that member — plus the rounding
+/// budget of the activity sum itself (`FORCING_SLACK_REL_TOL · scale`).
+/// Mirrors `mip::root_presolve::forcing_margin` (same rationale,
+/// documented there). NOTE: the infeasibility test in [`step2b_forcing_row`]
+/// deliberately keeps the plain `ZERO_TOL` gate — loosening it would trade
+/// false-Infeasible claims for published points violating exactly-evaluable
+/// rows; its sound scale-aware form needs an exact activity-evaluation
+/// analysis (separate finding).
+fn forcing_margin(active: &[(usize, f64)], bounds: &[(f64, f64)], rhs: f64, at_min: bool) -> f64 {
+    let mut scale = rhs.abs();
+    let mut quantum = f64::INFINITY;
+    for &(j, a) in active {
+        let (lb, ub) = bounds[j];
+        if !(lb.is_finite() && ub.is_finite()) {
+            // Rows with an infinite contributing bound fail the all-finite
+            // guard below anyway; they must not set the movement gate.
+            continue;
+        }
+        // The bound the pin would write for this member.
+        let endpoint = if (a > 0.0) == at_min { lb } else { ub };
+        scale += a.abs() * lb.abs().max(ub.abs());
+        quantum =
+            quantum.min(a.abs() * (ZERO_TOL + FORCING_MOVE_ULPS * f64::EPSILON * endpoint.abs()));
+    }
+    let movement = if quantum.is_finite() { quantum } else { 0.0 };
+    FORCING_SLACK_REL_TOL * scale + movement
+}
+
 pub(super) fn step2b_forcing_row(
     st: &mut PresolveState,
     deadline: Option<std::time::Instant>,
@@ -27,7 +73,8 @@ pub(super) fn step2b_forcing_row(
         let rhs = st.b[i];
         let ct = st.constraint_types[i];
 
-        // Detect infeasibility before checking forcing.
+        // Detect infeasibility before checking forcing. (Plain ZERO_TOL on
+        // purpose — see [`forcing_margin`]'s NOTE.)
         let infeasible = match ct {
             ConstraintType::Le => lb_fin && row_lb > rhs + ZERO_TOL,
             ConstraintType::Ge => ub_fin && row_ub < rhs - ZERO_TOL,
@@ -40,17 +87,21 @@ pub(super) fn step2b_forcing_row(
         }
 
         // Forcing: the activity bound equals rhs, so all variables are at their
-        // contributing bounds.
-        // - Le: a_min >= b - eps (min already reaches rhs)
-        // - Ge: a_max <= b + eps (max already reaches rhs)
-        // - Eq: a_min >= b - eps (forced from below) OR a_max <= b + eps (forced from above),
-        //       but only when the bound approximately equals rhs (infeasibility already excluded).
+        // contributing bounds. The equality must hold within a margin that
+        // scales with the row itself ([`forcing_margin`] at
+        // `mip::root_presolve` for the full rationale): a scale-free
+        // ZERO_TOL false-forces rows whose every coefficient is below it,
+        // pinning members off the true optimum (PR #89 P1 class).
+        // - Le: a_min >= b - margin (min already reaches rhs)
+        // - Ge: a_max <= b + margin (max already reaches rhs)
+        // - Eq: either side may force (infeasibility already excluded above
+        //   bounds the miss distance of the chosen side by the margin).
+        let lo_force = lb_fin && rhs - row_lb <= forcing_margin(&active, &st.bounds, rhs, true);
+        let hi_force = ub_fin && row_ub - rhs <= forcing_margin(&active, &st.bounds, rhs, false);
         let forcing = match ct {
-            ConstraintType::Le => lb_fin && row_lb >= rhs - ZERO_TOL,
-            ConstraintType::Ge => ub_fin && row_ub <= rhs + ZERO_TOL,
-            ConstraintType::Eq => {
-                (lb_fin && row_lb >= rhs - ZERO_TOL) || (ub_fin && row_ub <= rhs + ZERO_TOL)
-            }
+            ConstraintType::Le => lo_force,
+            ConstraintType::Ge => hi_force,
+            ConstraintType::Eq => lo_force || hi_force,
         };
 
         if !forcing {
@@ -60,10 +111,14 @@ pub(super) fn step2b_forcing_row(
         // Determine which bound direction forces: for Le (or Eq forced from below)
         // the min-activity achieves the rhs, so each variable is at its lb-contributing
         // bound. For Ge (or Eq forced from above) the max-activity achieves the rhs.
+        // When both Eq extremes are within the margin, pin the CLOSER one
+        // (mirrors the MILP root-presolve Eq rule): the farther extreme's
+        // activity misses the rhs by more, dropping a wider slice of the
+        // feasible window.
         let force_to_min = match ct {
             ConstraintType::Le => true,
             ConstraintType::Ge => false,
-            ConstraintType::Eq => lb_fin && row_lb >= rhs - ZERO_TOL,
+            ConstraintType::Eq => lo_force && !(hi_force && rhs - row_lb > row_ub - rhs),
         };
 
         // Check that all contributing bounds are finite.

@@ -151,6 +151,10 @@ fn rins_sub_mip_config(cfg: &MipConfig, max_lp_iters: u64) -> MipConfig {
     sub_cfg.tree_cuts = false;
     sub_cfg.symmetry = false;
     sub_cfg.cuts = false;
+    // Root structural presolve would run the reduce/postsolve machinery
+    // again per sub-MIP call for a neighborhood search already boxed by
+    // fixings — same overhead-avoidance policy as the three above.
+    sub_cfg.root_presolve = false;
     sub_cfg
 }
 
@@ -774,5 +778,21 @@ mod tests {
     #[test]
     fn remaining_budget_no_deadline_is_infinity() {
         assert!(remaining_budget(&None).is_infinite());
+    }
+
+    /// The sub-MIP config must also disable the root structural presolve:
+    /// reduce/postsolve per heuristic call pays the root-phase overhead
+    /// inside neighborhood searches that are already boxed by fixings —
+    /// same policy as tree_cuts/symmetry/cuts above.
+    ///
+    /// Sentinel: removing `sub_cfg.root_presolve = false` from
+    /// `rins_sub_mip_config` fails this test.
+    #[test]
+    fn rins_sub_mip_config_disables_root_presolve() {
+        let sub_cfg = rins_sub_mip_config(&MipConfig::default(), 1000);
+        assert!(
+            !sub_cfg.root_presolve,
+            "sub-MIP root presolve must be disabled"
+        );
     }
 }

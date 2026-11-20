@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3472 testcases, 43 ignored
+# totals: 3551 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -60,6 +60,7 @@ otspot-core	conic::misocp::tests::conic_feasible_rejects_nan_equality_activity	a
 otspot-core	conic::misocp::tests::qcqp_true_objective_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::accept_honors_caller_tolerance_after_rounding_not_a_fixed_floor	active
 otspot-core	conic::nonconvex::tests::bounded_set_with_unbounded_relaxation_is_not_false_unbounded	active
+otspot-core	conic::nonconvex::tests::box_only_seed_validation_matches_full_seed	active
 otspot-core	conic::nonconvex::tests::branch_candidates_are_the_envelope_pairs_only	active
 otspot-core	conic::nonconvex::tests::cancel_flag_is_honored_inside_the_bnb_loop	active
 otspot-core	conic::nonconvex::tests::cancel_race_before_final_infeasible_classification_prefers_timeout	active
@@ -74,30 +75,41 @@ otspot-core	conic::nonconvex::tests::flipped_negative_diagonal_rejection_names_t
 otspot-core	conic::nonconvex::tests::free_off_diagonal_pair_emits_no_envelope	active
 otspot-core	conic::nonconvex::tests::global_miqcp_nan_int_tol_is_rejected_not_silently_broken	active
 otspot-core	conic::nonconvex::tests::incumbent_with_failed_node_is_not_optimal	active
+otspot-core	conic::nonconvex::tests::integer_branch_child_keeps_one_sided_box_side	active
 otspot-core	conic::nonconvex::tests::leaf_accept_no_longer_loosens_feas_tol_by_100x	active
 otspot-core	conic::nonconvex::tests::mccormick_w_box_bounds_diagonal_square_below	active
 otspot-core	conic::nonconvex::tests::mismatched_dims_returns_not_supported_not_a_panic	active
 otspot-core	conic::nonconvex::tests::no_cancel_still_reports_infeasible_via_global_core	active
 otspot-core	conic::nonconvex::tests::node_limited_with_incumbent_is_suboptimal	active
 otspot-core	conic::nonconvex::tests::non_finite_bounds_and_pairs_never_reach_h	active
+otspot-core	conic::nonconvex::tests::nonfinite_seed_coordinates_and_objective_are_refused	active
 otspot-core	conic::nonconvex::tests::oa_pool_rows_match_hand_computed_tangents	active
 otspot-core	conic::nonconvex::tests::oa_retry_cut_far_point_tangent_and_dedupe	active
 otspot-core	conic::nonconvex::tests::oa_violation_cuts_converge_without_branching	active
+otspot-core	conic::nonconvex::tests::objective_only_rule2_pair_refined_to_gap_tol	active
+otspot-core	conic::nonconvex::tests::one_sided_box_sides_emit_independently	active
+otspot-core	conic::nonconvex::tests::one_sided_lower_bound_reaches_zero_optimum_end_to_end	active
 otspot-core	conic::nonconvex::tests::public_entry_rejects_non_finite_data_and_integer_indices	active
 otspot-core	conic::nonconvex::tests::quad_val_panics_on_dimension_mismatch	active
 otspot-core	conic::nonconvex::tests::r_empty_ellipsoid_over_free_x_reaches_optimum_end_to_end	active
+otspot-core	conic::nonconvex::tests::r_free_in_roots_box_rejected_at_entry_but_seed_finitizes_it	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_expired_deadline	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_honors_fired_cancel_flag	active
 otspot-core	conic::nonconvex::tests::relaxation_lp_unbounded_surfaces_verified_ray	active
 otspot-core	conic::nonconvex::tests::rule2_diagonal_is_never_a_branch_candidate	active
 otspot-core	conic::nonconvex::tests::rule2_pair_emits_exactly_one_pair_row	active
-otspot-core	conic::nonconvex::tests::sparse_relax_matches_dense_reference	active
+otspot-core	conic::nonconvex::tests::scaled_quad_row_keeps_oa_tangents_until_row_feasible	active
+otspot-core	conic::nonconvex::tests::seed_integer_must_survive_round_then_recheck_before_install	active
+otspot-core	conic::nonconvex::tests::seed_integral_within_int_tol_is_accepted_at_original_point_f	active
+otspot-core	conic::nonconvex::tests::sparse_relax_matches_dense_per_side_box_oracle	active
 otspot-core	conic::nonconvex::tests::unbounded_without_base_point_is_reasoned_not_supported	active
 otspot-core	conic::nonconvex::tests::validate_accepts_psd_rows_over_free_variables	active
+otspot-core	conic::nonconvex::tests::validate_keeps_shape_and_nan_checks_allows_free_bounds	active
 otspot-core	conic::nonconvex::tests::validate_rejects_every_mismatched_dimension	active
-otspot-core	conic::nonconvex::tests::validate_requires_finite_bounds_only_on_r	active
 otspot-core	conic::nonconvex::tests::verified_ray_with_seed_returns_unbounded	active
 otspot-core	conic::nonconvex::tests::warm_basis_extension_consumes_dual_advanced_resolves	active
+otspot-core	conic::nonconvex::tests::zero_feas_tol_budget_still_certifies_rule2_constraint_row_optimum	active
+otspot-core	conic::nonconvex::tests::zero_global_budgets_still_certify_objective_rule2_optimum	active
 otspot-core	conic::qcqp::tests::qcqp_rejects_objective_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_bridge_rejects_base_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_objective_upper_triangle_is_symmetrized_for_cholesky	active
@@ -109,13 +121,24 @@ otspot-core	conic::qcqp_classify::tests::d1_keeps_diagonal_only_psd_row_exempt_o
 otspot-core	conic::qcqp_classify::tests::effective_bound_requirement_rejects_mismatched_bounds	active
 otspot-core	conic::qcqp_classify::tests::equality_split_moves_psd_quadratic_into_r_via_neg_half	active
 otspot-core	conic::qcqp_classify::tests::negative_flipped_diagonal_vetoes_rule2_and_requires_bound	active
+otspot-core	conic::qcqp_classify::tests::non_required_free_variable_passes_gate_and_validate	active
 otspot-core	conic::qcqp_classify::tests::rank_deficient_unclamped_psd_objective_is_convex	active
-otspot-core	conic::qcqp_classify::tests::require_finite_bounds_defers_non_required_variables_to_validate	active
 otspot-core	conic::qcqp_classify::tests::require_finite_bounds_fast_path_passes_finite_box	active
 otspot-core	conic::qcqp_classify::tests::require_finite_bounds_rejects_unbounded_required_variable	active
 otspot-core	conic::qcqp_classify::tests::rule1_psd_constraint_row_needs_no_bounds	active
 otspot-core	conic::qcqp_classify::tests::rule1_psd_objective_and_linear_only_var_need_no_bounds	active
 otspot-core	conic::qcqp_classify::tests::rule2_under_diagonal_excludes_it_from_r	active
+otspot-core	conic::qcqp_fbbt::tests::completing_the_square_bounds_free_vars_of_ellipsoid_equality	active
+otspot-core	conic::qcqp_fbbt::tests::contradiction_rows_are_counted_never_reported	active
+otspot-core	conic::qcqp_fbbt::tests::fixed_zero_times_free_term_no_false_infeasible	active
+otspot-core	conic::qcqp_fbbt::tests::fixpoint_cap_terminates_long_chain	active
+otspot-core	conic::qcqp_fbbt::tests::linear_rows_derive_hand_computed_bounds	active
+otspot-core	conic::qcqp_fbbt::tests::never_widens_and_reports_no_change	active
+otspot-core	conic::qcqp_fbbt::tests::outward_rounding_contains_feasible_amplified_point	active
+otspot-core	conic::qcqp_fbbt::tests::quadratic_linear_part_never_propagated_as_linear	active
+otspot-core	conic::qcqp_fbbt::tests::rows_with_offdiag_entries_are_skipped_entirely	active
+otspot-core	conic::qcqp_fbbt::tests::tangent_clamp_survives_accumulated_roundoff	active
+otspot-core	conic::qcqp_fbbt::tests::tangent_clamps_to_point_bound	active
 otspot-core	conic::tests::bench_conic_suite	ignored
 otspot-core	conic::tests::cancel_race_before_misocp_final_infeasible_classification_prefers_timeout	active
 otspot-core	conic::tests::cancel_race_before_misocp_optimal_classification_prefers_timeout	active
@@ -392,6 +415,7 @@ otspot-core	mip::heuristics::local_branching::tests::local_branching_reports_sub
 otspot-core	mip::heuristics::local_branching::tests::local_branching_reports_sub_mip_nodes_processed	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_accepts_feasible_timeout_incumbent	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_disables_root_cuts_recursively	active
+otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_disables_root_presolve_recursively	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_disables_tree_cuts_and_symmetry_recursively	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_run_path_passes_recursive_sub_mip_config	active
 otspot-core	mip::heuristics::local_branching::tests::local_branching_skips_on_expired_deadline	active
@@ -407,6 +431,7 @@ otspot-core	mip::heuristics::rens::tests::rens_reports_sub_mip_iters_processed	a
 otspot-core	mip::heuristics::rens::tests::rens_reports_sub_mip_nodes_processed	active
 otspot-core	mip::heuristics::rens::tests::rens_run_path_accepts_feasible_timeout_incumbent	active
 otspot-core	mip::heuristics::rens::tests::rens_run_path_disables_root_cuts_recursively	active
+otspot-core	mip::heuristics::rens::tests::rens_run_path_disables_root_presolve_recursively	active
 otspot-core	mip::heuristics::rens::tests::rens_run_path_disables_tree_cuts_and_symmetry_recursively	active
 otspot-core	mip::heuristics::rens::tests::rens_run_path_passes_recursive_sub_mip_config	active
 otspot-core	mip::heuristics::rens::tests::rens_skips_integral_lp_point	active
@@ -430,6 +455,7 @@ otspot-core	mip::heuristics::rins::tests::rins_skips_on_expired_deadline	active
 otspot-core	mip::heuristics::rins::tests::rins_skips_when_no_agreement	active
 otspot-core	mip::heuristics::rins::tests::rins_skips_when_remaining_share_budget_is_below_min	active
 otspot-core	mip::heuristics::rins::tests::rins_skips_when_remaining_share_budget_is_zero	active
+otspot-core	mip::heuristics::rins::tests::rins_sub_mip_config_disables_root_presolve	active
 otspot-core	mip::heuristics::rins::tests::rins_sub_mip_config_sets_the_provided_lp_iters_cap	active
 otspot-core	mip::heuristics::rins::tests::rins_sub_mip_deadline_is_min_of_parent_and_fixed_cap	active
 otspot-core	mip::heuristics::rins::tests::rins_sub_mip_disables_recursive_primal_heuristics	active
@@ -520,6 +546,24 @@ otspot-core	mip::queue::tests::is_empty_requires_both_structures_empty	active
 otspot-core	mip::queue::tests::pops_smallest_lower_bound_first	active
 otspot-core	mip::queue::tests::start_dive_end_dive_roundtrip	active
 otspot-core	mip::queue::tests::ties_break_fifo	active
+otspot-core	mip::root_presolve::tests::doubleton_substitution_reconstructs_integer_point	active
+otspot-core	mip::root_presolve::tests::duplicate_eq_rows_contradiction_is_infeasible	active
+otspot-core	mip::root_presolve::tests::duplicate_eq_rows_with_identical_rhs_collapse	active
+otspot-core	mip::root_presolve::tests::eq_merge_rhs_gap_inside_margin_is_fail_open	active
+otspot-core	mip::root_presolve::tests::equality_row_forces_only_the_side_equal_to_rhs	active
+otspot-core	mip::root_presolve::tests::forcing_margin_pin_level_twin	active
+otspot-core	mip::root_presolve::tests::fractional_singleton_equality_at_large_magnitude_stays_infeasible	active
+otspot-core	mip::root_presolve::tests::fully_pinned_reduction_reconstructs_the_only_point	active
+otspot-core	mip::root_presolve::tests::genuine_forcing_rows_still_force_endpoints	active
+otspot-core	mip::root_presolve::tests::infinite_bound_column_is_never_pinned	active
+otspot-core	mip::root_presolve::tests::merge_uses_live_entries_after_pinned_column	active
+otspot-core	mip::root_presolve::tests::postsolve_verify_is_linear_in_variable_count	active
+otspot-core	mip::root_presolve::tests::publish_scrubs_reduced_coordinate_payloads	active
+otspot-core	mip::root_presolve::tests::redundant_large_magnitude_row_does_not_force_endpoints	active
+otspot-core	mip::root_presolve::tests::subst_induced_margin_is_ulp_scale_not_magnitude_relative	active
+otspot-core	mip::root_presolve::tests::verify_original_solution_rejects_row_violation	active
+otspot-core	mip::root_presolve::tests::wide_continuous_interval_at_large_magnitude_is_not_pinned	active
+otspot-core	mip::root_presolve::tests::wide_integer_interval_at_large_magnitude_is_not_pinned	active
 otspot-core	mip::stats::tests::merge_worker_sums_private_conflict_clause_counts	active
 otspot-core	mip::symmetry::tests::appends_lex_rows_for_orbit	active
 otspot-core	mip::symmetry::tests::detects_identical_binary_columns	active
@@ -559,6 +603,7 @@ otspot-core	mip::tests::invalid_options_rejected_at_milp_entry	active
 otspot-core	mip::tests::invalid_options_rejected_at_miqp_entry	active
 otspot-core	mip::tests::knapsack_truncated_has_no_bound_gap_cert	active
 otspot-core	mip::tests::max_lp_iters_deterministically_stops_before_max_nodes	active
+otspot-core	mip::tests::milp_preset_cancel_returns_timeout_before_solving	active
 otspot-core	mip::tests::mip_descendant_nodes_skip_repeated_lp_ruiz_scaling	active
 otspot-core	mip::tests::mip_descendant_scaling_retry_runs_and_accounts_first_attempt_timing	active
 otspot-core	mip::tests::mip_nodes_disable_lp_crash_basis_before_relaxation_solve	active
@@ -608,6 +653,10 @@ otspot-core	mip::tests::rens_with_incumbent_waits_for_regular_interval	active
 otspot-core	mip::tests::rins_disabled_still_optimal	active
 otspot-core	mip::tests::rins_stats_improvements_le_calls	active
 otspot-core	mip::tests::rins_stats_zero_for_single_node_problem	active
+otspot-core	mip::tests::root_presolve_flag_off_leaves_counters_zero	active
+otspot-core	mip::tests::root_presolve_fully_pinned_publishes_pinned_point	active
+otspot-core	mip::tests::root_presolve_infeasible_agrees_with_unreduced_run	active
+otspot-core	mip::tests::root_presolve_wiring_reduces_postsolves_and_keeps_optimum	active
 otspot-core	mip::tests::root_probing_and_symmetry_us_are_populated_via_forced_min_elapsed	active
 otspot-core	mip::tests::round_integers_rejects_out_of_range_index	active
 otspot-core	mip::tests::scaling_retry_caps_retry_max_iters_by_remaining_budget	active
@@ -801,6 +850,7 @@ otspot-core	presolve::scaling::tests::test_ruiz_scale_unbalanced	active
 otspot-core	presolve::transforms::driver::failure_tests::invalid_rebuild_rolls_back_instead_of_substituting_zero_matrix	active
 otspot-core	presolve::transforms::driver::failure_tests::invalid_reduced_model_rolls_back_without_leaking_postsolve_state	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::cancel_signal_stops_pass_before_all_steps_run_via_run_step	active
+otspot-core	presolve::transforms::driver::per_step_control_tests::dependent_eq_flag_off_skips_step12	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::no_interrupt_runs_all_steps_of_one_pass	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::pass_limit_hit_true_when_nonzero_budget_exhausted	active
 otspot-core	presolve::transforms::driver::per_step_control_tests::presolve_max_pass_0_disables_the_iterative_loop	active
@@ -840,6 +890,8 @@ otspot-core	presolve::transforms::tests::test_forcing_row_dual_le_mixed_sign_wit
 otspot-core	presolve::transforms::tests::test_forcing_row_dual_le_multiple_prior_fixed_vars	active
 otspot-core	presolve::transforms::tests::test_forcing_row_dual_le_with_prior_fixed_variable	active
 otspot-core	presolve::transforms::tests::test_forcing_row_dual_multirow_with_prior_fixed_variable	active
+otspot-core	presolve::transforms::tests::test_forcing_tiny_coefficient_scale_genuine_still_forces	active
+otspot-core	presolve::transforms::tests::test_forcing_tiny_coefficient_scale_is_not_forcing	active
 otspot-core	presolve::transforms::tests::test_pre001_deadline_fires_immediately	active
 otspot-core	presolve::transforms::tests::test_presolve_detects_lb_gt_ub	active
 otspot-core	presolve::transforms::tests::test_presolve_singleton_le_netlib_like	active
@@ -857,6 +909,20 @@ otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_
 otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_restores_infinite_lb_but_keeps_original	active
 otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_restores_infinite_ub_but_keeps_original	active
 otspot-core	presolve::transforms::tests_per_step::revert_redundant_added_bounds_skips_fixed_variable	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_bound_aware_keeps_row_with_small_residual_on_unbounded_var	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_bound_aware_removes_row_when_residual_effect_bounded	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_bound_aware_scaled_equivalent_solves_optimal_zero	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_e2e_solve_satisfies_removed_row_and_zeroes_its_dual	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_exact_witness_registration_solves_f3_repro_optimal_zero	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_flag_gate_reduces_row_count_only_when_enabled	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_keeps_dependent_row_with_inconsistent_rhs	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_keeps_independent_eq_rows	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_keeps_near_dependent_row_outside_tolerance	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_never_removes_inequality_rows	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_removes_dependent_eq_row_keeps_witnesses	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_removes_scaled_combination_row	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_rhs_rounding_model_rejects_inconsistent_1e12_rhs	active
+otspot-core	presolve::transforms::tests_per_step::step12_dependent_eq::step12_work_budget_uses_factor_and_abs_cap	active
 otspot-core	presolve::transforms::tests_per_step::step1_detects_lb_gt_ub	active
 otspot-core	presolve::transforms::tests_per_step::step1_fixed_negative_value_updates_b_and_offset	active
 otspot-core	presolve::transforms::tests_per_step::step2_singleton_ge_infeasible	active
@@ -1448,13 +1514,21 @@ otspot-core	qp::problem::tests::set_quadratic_constraints_valid_accepted	active
 otspot-core	qp::problem::tests::valid_qp_accepted	active
 otspot-core	qp::problem::tests::validate_catches_nonfinite_and_dim_from_direct_assignment	active
 otspot-core	qp::problem::tests::validate_matches_setter_length_invariant	active
+otspot-core	qp::qcqp_route::tests::audit_root_seed_rejects_widened_nan_crossed	active
+otspot-core	qp::qcqp_route::tests::circle_equality_all_free_routes_through_derived_gate	active
+otspot-core	qp::qcqp_route::tests::coo_effective_requirement_matches_materialized_root_box_gate	active
 otspot-core	qp::qcqp_route::tests::coo_gate_rejection_matches_materialized_gate	active
+otspot-core	qp::qcqp_route::tests::fbbt_derivable_support_contains_root_box_movers	active
 otspot-core	qp::qcqp_route::tests::global_options_feas_tol_always_tracks_eps	active
 otspot-core	qp::qcqp_route::tests::global_options_feas_tol_does_not_relax_with_cfg	active
+otspot-core	qp::qcqp_route::tests::indefinite_row_with_free_objective_var_solves_via_root_fbbt	active
+otspot-core	qp::qcqp_route::tests::no_op_derivation_attaches_no_seed	active
 otspot-core	qp::qcqp_route::tests::nonconvex_from_qp_problem_matches_hand_built_split	active
 otspot-core	qp::qcqp_route::tests::nonconvex_from_qp_problem_rejects_long_quadratic_constraints	active
 otspot-core	qp::qcqp_route::tests::nonconvex_from_qp_problem_rejects_short_quadratic_constraints	active
 otspot-core	qp::qcqp_route::tests::nonconvex_gate_rejects_all_equality_dcq	active
+otspot-core	qp::qcqp_route::tests::residual_rejection_reports_root_fbbt_ran	active
+otspot-core	qp::qcqp_route::tests::root_box_pre_gate_agrees_with_materialized_root_box	active
 otspot-core	qp::qcqp_route::tests::sizing_gate_refuses_over_budget_before_converting	active
 otspot-core	qp::tests::api::test_a2t03_qp_no_deadline_converges	active
 otspot-core	qp::tests::api::test_a3c01_cancel_flag_concurrent_returns_timeout	active
@@ -2076,8 +2150,11 @@ otspot-core::memory_budget	conic_socp_route_peak_within_budget	active
 otspot-core::memory_budget	lp_route_peak_within_budget	active
 otspot-core::memory_budget	qcqp_bridge_many_sparse_quad_constraints_peak_within_budget	active
 otspot-core::memory_budget	qcqp_route_dense_sizing_gate_refuses_before_allocating	active
-otspot-core::memory_budget	qcqp_route_rejects_dense_dcq_before_densifying	active
+otspot-core::memory_budget	qcqp_route_rejects_dense_dcq_at_sparse_root_gate	active
 otspot-core::memory_budget	qp_ipm_route_peak_within_budget	active
+otspot-core::milp_forcing_margin_sentinel	genuine_forcing_rows_still_force_endpoints_public	active
+otspot-core::milp_forcing_margin_sentinel	tiny_coefficient_redundant_row_does_not_force_endpoints	active
+otspot-core::milp_forcing_margin_sentinel	tiny_scale_forcing_mirrors_are_scale_aware	active
 otspot-core::qp_diag_real_solve	concurrent_solves_keep_diagnostics_per_thread	active
 otspot-core::qp_diag_real_solve	consecutive_ipm_solves_preserve_diagnostics_for_threads_1_2_4	active
 otspot-core::qp_diag_real_solve	non_qp_route_clears_stale_diagnostics	active
@@ -2504,6 +2581,8 @@ otspot-io::bug_repro	test_ubh1_q_psd_diagnose	active
 otspot-io::cbf_cblib_integration	cblib_socp_files_parse_and_validate	active
 otspot-io::israel_objective_mismatch	parse_fidelity_matches_raw_qps	active
 otspot-io::israel_objective_mismatch	presolve_objective_invariance	active
+otspot-io::presolve_correctness_sweep	presolve_dependent_eq_curated_known	active
+otspot-io::presolve_correctness_sweep	presolve_dependent_eq_detection_sweep	ignored
 otspot-io::presolve_correctness_sweep	presolve_infeasible_sweep	ignored
 otspot-io::presolve_correctness_sweep	presolve_invariance_curated_clean_known_with_constant	active
 otspot-io::presolve_correctness_sweep	presolve_invariance_full_sweep_known_with_constant	ignored

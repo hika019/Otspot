@@ -1004,35 +1004,45 @@ fn qcqp_bridge_many_sparse_quad_constraints_peak_within_budget() {
 /// Rows `DENSE_DCQ_M`, vars `DENSE_DCQ_N`. Row `k` is the quadratic equality
 /// `x_(2k) * x_(2k+1) = 0` (`nnz = 2`, empty linear row), every variable bound
 /// free. Every variable is a rule-3 off-diagonal endpoint, so `|R| = n` and
-/// every R variable has a non-finite bound — `require_finite_bounds` must
-/// reject. The pre-fix `nonconvex_from_qp_problem` densified each equality
-/// row (two `vec![0.0; n]` linear parts plus the `row_neg`/`p.clone()`/
-/// `scale_values` intermediates) before it ever consulted the gate.
+/// every R variable has a non-finite bound — and no row is one root FBBT
+/// propagates on (bilinear-only, no linear rows), so the sparse root-box
+/// pre-gate must reject. Densifying first costs two dense copies per
+/// equality split: `qcqp_route`'s `build_nonconvex_raw` keeps each split row
+/// a dense linear part (`8*N` bytes) plus a stored `p` CSC `col_ptr`
+/// (`8*(N+1)` bytes).
 const DENSE_DCQ_N: usize = 10_000;
 const DENSE_DCQ_M: usize = 5_000;
 
-/// Peak allocation fence for the pre-conversion bound gate on a
-/// rejected-class all-equality DCQ. The equality split emits `2*M` quad rows,
-/// each *retaining* a dense linear part (`8*N` bytes) and a stored `p` CSC
-/// `col_ptr` (`8*(N+1)` bytes): `10_000 * 160_008` bytes = 1.49 GB (1.39 GiB)
-/// of retained dense state on a problem the route rejects anyway — the exact
-/// failure mode measured on QPLIB_8585 (12 GiB self-kill within 3-5 s at
-/// `n = 99_999`, `m_q = 49_999`).
+/// Peak allocation fence shared by the route's two PRE-densification gates:
+/// the Phase-2 bound gate (successor fence,
+/// `qcqp_route_rejects_dense_dcq_at_sparse_root_gate` — successor of
+/// `qcqp_route_rejects_dense_dcq_before_densifying`, deleted with its
+/// raw-message assert because Phase 2 re-judges `R` on the derived box) and
+/// the sizing gate (`qcqp_route_dense_sizing_gate_refuses_before_allocating`).
 ///
-/// Measured pre-fix (RED, release, this machine): peak 1528.81 MB in 0.994 s
-/// of dense conversion, ending in the very same NotSupported rejection —
-/// proving the dense expansion ran BEFORE the gate. Measured post-fix:
-/// 0.49 MB peak, 6.5 ms wall (this test's `eprintln`). Budget 128 MB keeps
-/// the pre-fix peak at 11.9x margin (>= 5x requirement): reverting the gate
-/// order fails the peak assert, not merely runs slower, and the fixed path
-/// has 260x headroom for allocator noise (non-flaky).
+/// The retained-demand math is unchanged: the equality split emits `2*M`
+/// quad rows, each *retaining* a dense linear part (`8*N` bytes) and a
+/// stored `p` CSC `col_ptr` (`8*(N+1)` bytes): `10_000 * 160_008` bytes =
+/// 1.49 GB (1.39 GiB) of dense state on a problem the route rejects anyway
+/// — the QPLIB_8585 failure mode (12 GiB self-kill within 3-5 s at
+/// `n = 99_999`, `m_q = 49_999`). At HEAD a54b2596 (pre-gate, RED, release,
+/// this machine) the route paid exactly that before its FBBT-phrased
+/// rejection: peak 1,603,430,502 bytes (1529.15 MB) in 1.02 s. Measured
+/// post-fix (`sparse_root_box_rejection`, this machine): 1,033,578 bytes
+/// (0.99 MB) peak, 11 ms wall (the bound test's `eprintln`); the sizing
+/// refusal measures ~0.5 MB too. Budget 128 MB keeps the 1.39 GiB demands
+/// at 11.9x margin (>= 5x requirement): reverting either gate fails the
+/// peak assert, not merely runs slower, and the gated paths have 128x
+/// headroom for allocator noise (non-flaky).
 const DENSE_DCQ_PEAK_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
 /// All-free-bounds quadratic-equality bilinear DCQ (shape above). No expected
-/// optimum: the problem is rejected by the §3.1 bound gate, and the rejection
-/// message (independent oracle: the gate's documented R semantics — every
-/// variable is a rule-3 endpoint, none has a finite bound) is asserted
-/// byte-identically against the literal message template.
+/// optimum: the problem is rejected by the Phase-2 root-box gate (root FBBT
+/// derives nothing from bilinear-only rows, so the derived box equals the
+/// free declared box), and the rejection message (independent oracle: the
+/// gate's documented R semantics — every variable is a rule-3 endpoint, none
+/// has a finite bound, and `derived == declared` for an untouchable variable)
+/// is asserted byte-identically against the literal message template.
 fn build_all_equality_dcq(n: usize, m: usize) -> QpProblem {
     let q_obj = CscMatrix::new(n, n);
     let c = vec![0.0; n];
@@ -1055,19 +1065,34 @@ fn build_all_equality_dcq(n: usize, m: usize) -> QpProblem {
     problem
 }
 
-/// Peak allocation fence for the bound-requirement rejection on the
+/// Peak allocation fence for the Phase-2 bound-requirement rejection on the
 /// nonconvex QCQP route: a rejected all-equality DCQ must be rejected from
 /// sparse data in `O(input)` — without the `O(n * m_q)` dense row conversion
-/// that the pre-fix path performed first.
+/// `build_nonconvex_raw` performs. Successor of
+/// `qcqp_route_rejects_dense_dcq_before_densifying`, whose contract survives
+/// the acceptance-gate move in three re-derived asserts:
 ///
-/// **No-op failure guarantee**: moving `require_finite_bounds` back behind
-/// the conversion loop (the pre-fix order) makes this FAIL: the peak assert
-/// is pinned at >= 5x margin below the 1.39 GiB retained dense demand the
-/// old order allocates before the same rejection (measured pre-fix peak and
-/// the RED run are recorded in the commit message; the rejection string
-/// assert must still pass pre-fix — only the peak is the sentinel).
+/// 1. Typed rejection: `SolveStatus::NotSupported` (structural refusal —
+///    not `ResourceExhausted`, not `NumericalError`) — same as the old test.
+/// 2. Reason byte-identity: the route's message keeps naming the offending
+///    variable index and its `(-inf, inf)` bounds, in the Phase-2 phrasing
+///    ("even after root FBBT derivation … derived bounds"), built from the
+///    documented template — the old raw-bound phrasing is now the compat
+///    wrapper's contract, pinned by `nonconvex_gate_rejects_all_equality_dcq`.
+/// 3. Peak budget: no per-row `m_q × n` dense materialization happened
+///    before the rejection (the assert below; the old test's assert, with
+///    the same 128 MB budget and the RED peak re-measured for this HEAD).
+///
+/// **No-op failure guarantee**: deleting `sparse_root_box_rejection` makes
+/// this FAIL twice over — the peak assert (the route then densifies first:
+/// 1529.15 MB measured at HEAD a54b2596 for the identical rejection), and
+/// nothing else about the observable verdict changes, which is exactly the
+/// point: the pre-gate moves *when* the decision is made, never *what* it
+/// is (corpus-wide equivalence:
+/// `root_box_pre_gate_agrees_with_materialized_root_box`).
+/// sentinel: root box の却下判定が密行変換前の疎入力で発火する張 — 密変換後発動へ戻すと dense DCQ のピーク確保が上限を超過し fail
 #[test]
-fn qcqp_route_rejects_dense_dcq_before_densifying() {
+fn qcqp_route_rejects_dense_dcq_at_sparse_root_gate() {
     let _serial = lock_measurement();
     let problem = build_all_equality_dcq(DENSE_DCQ_N, DENSE_DCQ_M);
 
@@ -1077,15 +1102,16 @@ fn qcqp_route_rejects_dense_dcq_before_densifying() {
     let wall = start.elapsed();
     let peak = peak_bytes();
     eprintln!(
-        "qcqp_route dense_dcq peak={peak} bytes ({:.2} MB), wall={wall:?}, status={:?}",
+        "qcqp_route dense_dcq root-gate peak={peak} bytes ({:.2} MB), wall={wall:?}, status={:?}",
         peak as f64 / 1_048_576.0,
         r.status
     );
 
     // Byte-identity: the rejection reason contract (public-facing message of
-    // `conic::require_finite_bounds`) must be unchanged — only its TIMING
-    // moved before the dense conversion. Literal built from the gate's
-    // documented template, not captured from the implementation under test.
+    // the Phase-2 root-box gate) must name the first bad variable and its
+    // non-finite derived bounds — the sparse pre-gate only moves the
+    // timing, never the text. Literal built from the gate's documented
+    // template, not captured from the implementation under test.
     let SolveStatus::NotSupported(msg) = &r.status else {
         panic!(
             "expected NotSupported bound-gate rejection, got {:?}",
@@ -1095,7 +1121,7 @@ fn qcqp_route_rejects_dense_dcq_before_densifying() {
     let expected = format!(
         "nonconvex QCQP requires finite bounds on every bound-required variable set R \
          (plan §3.1); {n} of the {n} required variables have a non-finite bound \
-         (first: variable 0 with bounds ({}, {}))",
+         even after root FBBT derivation (first: variable 0 with derived bounds ({}, {}))",
         f64::NEG_INFINITY,
         f64::INFINITY,
         n = DENSE_DCQ_N,
@@ -1105,8 +1131,9 @@ fn qcqp_route_rejects_dense_dcq_before_densifying() {
     assert!(
         peak <= DENSE_DCQ_PEAK_BUDGET_BYTES,
         "qcqp_route dense_dcq peak {:.1} MB exceeds {:.1} MB budget (n={DENSE_DCQ_N}, \
-         m={DENSE_DCQ_M}) — the bound-requirement gate must reject from sparse data \
-         BEFORE any dense row conversion (pre-fix retained demand was 1.39 GiB)",
+         m={DENSE_DCQ_M}) — the Phase-2 bound gate must reject from sparse data \
+         BEFORE any dense row conversion (pre-gate demand at this HEAD was 1.39 GiB \
+         = 1,603,430,502 tracked bytes)",
         peak as f64 / 1_048_576.0,
         DENSE_DCQ_PEAK_BUDGET_BYTES as f64 / 1_048_576.0,
     );
