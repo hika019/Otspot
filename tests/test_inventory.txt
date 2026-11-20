@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3542 testcases, 44 ignored
+# totals: 3552 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1134,7 +1134,7 @@ otspot-core	qp::global::tests::polish_deadline_repairs_exhausted_budget	active
 otspot-core	qp::global::tests::proptest_seed_43b5a909_subbox_duals_recovered	active
 otspot-core	qp::global::tests::proptest_seed_a46bde58_kkt_regression	active
 otspot-core	qp::global::tests::qp_global_finalize_backstop_demotes_cancelled_complete_search	active
-otspot-core	qp::global::tests::qp_global_loop_baseline_processes_both_children_without_cancel	active
+otspot-core	qp::global::tests::qp_global_loop_baseline_boxed_tree_exhausts_at_six_nodes	active
 otspot-core	qp::global::tests::qp_global_loop_honors_cancel_flag_not_only_deadline	active
 otspot-core	qp::global::tests::qp_global_proven_convex_has_bound_gap_cert	active
 otspot-core	qp::global::tests::qp_global_proven_nonconvex_has_bound_gap_cert	active
@@ -1210,8 +1210,13 @@ otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_fires_for_liswe
 otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_requires_nonzero_history	active
 otspot-core	qp::ipm_core::ippmm::tests::cancel_race_before_infeasible_certificate_prefers_timeout	active
 otspot-core	qp::ipm_core::ippmm::tests::no_cancel_still_reports_infeasible_via_inner_solver	active
+otspot-core	qp::ipm_core::ippmm::tests::sentinel_box_no_boundary_overshoot	active
+otspot-core	qp::ipm_core::ippmm::tests::sentinel_cold_init_projection_bound_weight_oracle	active
+otspot-core	qp::ipm_core::ippmm::tests::sentinel_narrow_box_corner_mu_deadlock	active
+otspot-core	qp::ipm_core::ippmm::tests::sentinel_stationary_point_not_frozen	active
 otspot-core	qp::ipm_core::ippmm::tests::test_box_only_nondiag_q_multi_pattern	active
 otspot-core	qp::ipm_core::ippmm::tests::test_box_only_nondiag_q_stall_reproducer	active
+otspot-core	qp::ipm_core::ippmm::tests::test_fixed_bound_pair_raw_solve_optimal	active
 otspot-core	qp::ipm_core::ippmm::tests::test_ippmm_basic_2d	active
 otspot-core	qp::ipm_core::ippmm::tests::test_ippmm_box_constrained	active
 otspot-core	qp::ipm_core::ippmm::tests::test_ippmm_empty_constraints	active
@@ -1226,6 +1231,9 @@ otspot-core	qp::ipm_core::ippmm::tests::test_peu_and_gate_box_only_nondiag_stall
 otspot-core	qp::ipm_core::ippmm::tests::test_warm_bound_margin_scale_tracking	active
 otspot-core	qp::ipm_core::ippmm::tests::test_warm_start_both_finite_bound_scale_tracking	active
 otspot-core	qp::ipm_core::ippmm::tests::test_warm_start_half_finite_bound_scale_tracking	active
+otspot-core	qp::ipm_core::kkt::tests::sentinel_boxed_kkt_exact_schur_vs_extended_oracle	active
+otspot-core	qp::ipm_core::kkt::tests::sentinel_degenerate_bound_pair_kept_as_system_row	active
+otspot-core	qp::ipm_core::kkt::tests::sentinel_dependent_slack_passes_small_positive_values	active
 otspot-core	qp::ipm_core::kkt::tests::sentinel_inertia_psd_no_over_correction	active
 otspot-core	qp::ipm_core::kkt::tests::sentinel_inertia_zero_diag_indefinite_multi_pattern	active
 otspot-core	qp::ipm_core::kkt::tests::test_build_extended_constraints_bound_rows	active
@@ -1243,12 +1251,13 @@ otspot-core	qp::ipm_core::scaling::tests::compute_amplification_includes_dual_si
 otspot-core	qp::ipm_core::scaling::tests::compute_amplification_primal_dominant	active
 otspot-core	qp::ipm_core::scaling::tests::unscale_is_pure_and_status_preserving	active
 otspot-core	qp::ipm_core::scaling::tests::unscale_passes_through_empty_solution	active
-otspot-core	qp::ipm_core::solver_loop::tests::schur_solve_honors_expired_deadline	active
+otspot-core	qp::ipm_core::solver_loop::tests::boxed_solve_failure_zeroes_bound_rows	active
 otspot-core	qp::ipm_core::solver_loop::tests::test_compute_sigma_vec_eq_row_is_zero	active
-otspot-core	qp::ipm_core::solver_loop::tests::test_gondzio_schur_stop_additive_sentinel	active
+otspot-core	qp::ipm_core::solver_loop::tests::test_gondzio_boxed_stop_additive_sentinel	active
 otspot-core	qp::ipm_core::solver_loop::tests::test_schur_matches_augmented	active
 otspot-core	qp::ipm_core::solver_loop::tests::test_schur_matches_augmented_realistic	active
 otspot-core	qp::ipm_core::solver_loop::tests::test_update_variables_alpha_one	active
+otspot-core	qp::ipm_core::solver_loop::tests::try_schur_solve_reports_expired_deadline_failure	active
 otspot-core	qp::ipm_core::tests::test_a2t02_ipm_timeout_zero_returns_immediately	active
 otspot-core	qp::ipm_core::tests::test_a5s01_scaling_solution_equivalence_constrained	active
 otspot-core	qp::ipm_core::tests::test_a5s02_post_verify_no_false_optimal	active
@@ -2124,6 +2133,7 @@ otspot-core::blackbox_qp	pw_qp_ge_box_min_unit_degen	active
 otspot-core::blackbox_qp	pw_qp_le_box_min_unit_nondeg	active
 otspot-core::blackbox_qp	pw_qp_le_fixed_min_unit	active
 otspot-core::blackbox_qp	pw_qp_le_lbonly_min_unit_nondeg	active
+otspot-core::blackbox_qp	regression_prox_mu_floor_box_interior_no_cycle	active
 otspot-core::blackbox_qp	st_qp_ge_feasible_to_infeasible	active
 otspot-core::blackbox_qp	st_qp_le_inactive_to_active	active
 otspot-core::linalg_par_sentinel	faer_par_speedup_arrowhead_pd	active
@@ -2666,7 +2676,7 @@ otspot-model	model::tests::test_model_qp_ge_constraint	active
 otspot-model	model::tests::test_model_qp_locally_optimal_proof	active
 otspot-model	model::tests::test_model_qp_maximize	active
 otspot-model	model::tests::test_model_qp_timeout	active
-otspot-model	model::tests::test_model_qp_unreachable_tolerance_errs_stalled	active
+otspot-model	model::tests::test_model_qp_unreachable_tolerance_stalled_unrepresentable_argmin	active
 otspot-model	model::tests::test_no_objective_error	active
 otspot-model	model::tests::test_result_index_and_value_agree	active
 otspot-model	model::tests::test_set_presolve_false_reaches_qp_solve_path	active

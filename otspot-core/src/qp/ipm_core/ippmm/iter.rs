@@ -9,10 +9,10 @@ use super::state::{
     alpha_stall_eps_for, duality_gap, matrix_reg_floor_for_lp, pf_stuck_should_lower_reg_limit,
     ConvergenceMeasures, PmmState, ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N,
     DELTA_INIT, DIRECTION_BLOWUP_THRESHOLD, GONDZIO_ALPHA_TRIGGER, INFEAS_DETECTOR_DISTRUST_SCORE,
-    MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PF_HISTORY_LEN, PMM_IMPROVE_THRESHOLD,
-    PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN,
-    REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT, SIGMA_MAX_FALLBACK,
-    STEP_REL_CAP,
+    MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PATH_MU_RISE_FACTOR, PF_HISTORY_LEN,
+    PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO, PROX_MU_TRACK_RATIO,
+    REG_FLOOR_BIND_TOL, REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP,
+    RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT, SIGMA_MAX_FALLBACK, STEP_REL_CAP,
 };
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
@@ -20,11 +20,12 @@ use crate::qp::ipm_core::common::{
     check_infeasible_or_unbounded, numerical_error_result, solve_unconstrained, timeout_result,
 };
 use crate::qp::ipm_core::kkt::{
-    build_extended_constraints, collapse_extended_dual, norm_inf, spmtv, spmv,
+    bound_row_dual_scale, build_extended_constraints, collapse_extended_dual, norm_inf, spmtv,
+    spmv, BOUND_ROW_DELTA_D_ITERATION,
 };
 use crate::qp::ipm_core::solver_loop::{
-    compute_sigma_vec, corrector_step, corrector_step_schur, gondzio_correctors,
-    gondzio_correctors_schur, predictor_step, predictor_step_schur, update_variables,
+    compute_sigma_vec, corrector_boxed, gondzio_correctors_boxed, predictor_boxed,
+    update_variables, BoxedBackend, BoxedSolve,
 };
 use crate::qp::problem::QpProblem;
 use crate::tolerances::any_nonfinite;
@@ -149,13 +150,27 @@ fn solve_ippmm_inner_confined(
         return solve_unconstrained(problem, &timeout_ctx);
     }
 
+    // box 化: 境界行は augmented KKT から正確 Schur で消去される。KKT 求解が
+    // 見る行列は次元 n + m_real (実制約のみ) + x 対角の境界寄与 D_b で、
+    // `a_ext` は残差・証書・終端の extended レイアウト ([元行 | lb | ub]) 専用
+    // になる (受理ゲートの独立検証器は無変更で box 化を知らない)。
+    let (a_base, b_base, is_eq_base) = crate::qp::ipm_core::kkt::build_base_constraints(problem);
+    let bound = crate::qp::ipm_core::kkt::build_bound_box(problem);
+    let m_real = m_orig;
+    // 保持境界行 (lb==ub 退化対) を含む系行定義 [実制約 | 保持境界] と
+    // extended レイアウトへの対応表 (BoxedSolve の gather/scatter と求解行列が共有)。
+    let a_sys = crate::qp::ipm_core::kkt::build_boxed_system_matrix(&a_base, &bound);
+    let sys_ext_rows = bound.system_ext_rows(m_orig);
+
     let scales = crate::qp::ipm_core::common::DetectionScales::compute(problem, &a_ext, &b_ext);
     // 受理部が通過した証書 (None = 未受理)。ray variant は受理時点基点の
     // 原始実行可能性ゲートビットを運び、終端の stats / ray ペイロード組立
     // (finalize) で消費する。
     let mut certified: Option<AcceptedCert> = None;
 
-    let eq_count = is_eq_ext.iter().filter(|&&v| v).count();
+    // m_ineq は box 化前後で不変: 境界行は常に不等式・実等式行区間は先頭連続
+    // なので is_eq_base と is_eq_ext の等式行集合は行数ベースで一致する。
+    let eq_count = is_eq_base.iter().filter(|&&v| v).count();
     let m_ineq = m_ext - eq_count;
 
     let init = build_initial_point(
@@ -164,12 +179,16 @@ fn solve_ippmm_inner_confined(
         &a_ext,
         &b_ext,
         &is_eq_ext,
+        &a_base,
+        &b_base,
+        &is_eq_base,
+        &bound,
         m_orig,
         m_ext,
         &timeout_ctx,
         par,
     );
-    let (mut x, mut s, mut y, warm_mu) = (init.x, init.s, init.y, init.warm_mu);
+    let (mut x, mut s, mut y, warm_mu) = (init.x, init.s_full, init.y, init.warm_mu);
 
     let (rho_init, delta_init) = match warm_mu {
         // warm start: μ 規模に揃えた rho/delta で出発し proximal pull を最小化。
@@ -204,7 +223,7 @@ fn solve_ippmm_inner_confined(
     };
     // rank-deficient Q + c≈0 で rho が floor に張り付き proximal 項が df を支配する病理を回避する適応 floor。
     let c_max = problem.c.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-    let allow_adaptive_reg = c_max < ADAPTIVE_REG_C_MAX_THRESH;
+    let adaptive = c_max < ADAPTIVE_REG_C_MAX_THRESH;
     let mut reg_limit = initial_reg_limit;
     // KKT 行列正則化の絶対下限 (reg_limit の適応引下げとは独立)。
     let matrix_reg_floor = matrix_reg_floor_for_lp(is_lp);
@@ -226,8 +245,9 @@ fn solve_ippmm_inner_confined(
     let mut dy = vec![0.0f64; m_ext];
     let mut ds = vec![0.0f64; m_ext];
 
-    // 反復間で sparsity 不変な構造はキャッシュ。
-    let aug_cache = crate::qp::ipm_core::kkt::build_augmented_cache(&problem.q, &a_ext);
+    // 反復間で sparsity 不変な構造はキャッシュ (box 化: 実制約行 + 境界対角寄与)。
+    let aug_cache =
+        crate::qp::ipm_core::kkt::build_boxed_augmented_cache(&problem.q, &a_base, &bound);
     let mut factor_caches = FactorizeCaches::new();
 
     let inexact_eta = inexact_eta_for_eps(eps_orig);
@@ -235,7 +255,7 @@ fn solve_ippmm_inner_confined(
     // augmented LDL が memory budget 超過なら Schur (n×n SPD) に切替。
     let use_schur = options
         .schur_hint
-        .unwrap_or_else(|| auto_schur_enabled(problem, &a_ext, m_ext, options, &timeout_ctx, par));
+        .unwrap_or_else(|| auto_schur_enabled(problem, options, &timeout_ctx, par));
 
     // ループ内 break は Optimal / Timeout / Stalled / NumericalError / Infeasible /
     // Unbounded を設定する。break せず max_iter を使い切った場合のみ MaxIterations。
@@ -276,14 +296,27 @@ fn solve_ippmm_inner_confined(
         }
 
         spmv(&a_ext, &x, &mut ax);
+        // box 化境界スラックの従属導出 (s_t = b_t − a_t x、床内蔵)。KKT・σ・μ・RHS が
+        // 常に現在の x と一致する (構成上 idempotent)。保持境界行は独立スラック
+        // なので fill_slacks がスロットをスキップし、update_variables の ds 積分が使う。
+        bound.fill_slacks(&x, &mut s[m_real..]);
         spmtv(&a_ext, &y, &mut aty);
         spmv(&problem.q, &x, &mut qx);
 
         for i in 0..n {
             r_d[i] = -(qx[i] + problem.c[i] + aty[i]);
         }
-        for i in 0..m_ext {
+        // 実制約行・保持境界行は full 表現 r_p = b − Ax − s。box 化境界行は
+        // s_t = b_t − a_t x より構造的 0 (求解層は RHS 変換 a_t·d_t·r_p_t = 0 としてのみ参照する)。
+        for i in 0..m_real {
             r_p[i] = b_ext[i] - ax[i] - s[i];
+        }
+        for i in m_real..m_ext {
+            r_p[i] = if bound.eliminated[i - m_real] {
+                0.0
+            } else {
+                b_ext[i] - ax[i] - s[i]
+            };
         }
 
         // μ = sᵀy / m_ineq (等式行除外)
@@ -412,6 +445,8 @@ fn solve_ippmm_inner_confined(
         let fact_ctx = FactorizeContext {
             problem,
             a_ext: &a_ext,
+            a_base: &a_base,
+            bound: &bound,
             aug_cache: &aug_cache,
             sigma_vec: &sigma_vec,
             is_eq_ext: &is_eq_ext,
@@ -432,7 +467,8 @@ fn solve_ippmm_inner_confined(
             },
         };
         let factorize_outcome = factorize_kkt_with_retry(&fact_ctx, &mut factor_caches);
-        let (mut fac, aug_mat, d_inv_opt) = match factorize_outcome {
+        // _delta_used: ループ側では消費しない (box 対角は δ_d = 0 設計)。
+        let (mut fac, aug_mat, d_inv_opt, _delta_used) = match factorize_outcome {
             FactorizeOutcome::Ok {
                 factor,
                 aug_mat,
@@ -440,11 +476,12 @@ fn solve_ippmm_inner_confined(
                 retry_count,
                 used_iterative,
                 factorize_ns,
+                delta_used: _delta_used,
             } => {
                 total_factorize_ns += factorize_ns;
                 total_reg_retries += retry_count;
                 any_iterative |= used_iterative;
-                (factor, aug_mat, d_inv)
+                (factor, aug_mat, d_inv, _delta_used)
             }
             FactorizeOutcome::Timeout => {
                 status = Some(SolveStatus::Timeout);
@@ -459,128 +496,88 @@ fn solve_ippmm_inner_confined(
         // MINRES (iterative) backend のみ user eps 由来 η を反映、Direct/DirectDd では no-op。
         fac.set_iterative_tol(inexact_eta);
 
-        let t_solve = std::time::Instant::now();
-        let (alpha, r_c_corr) = if use_schur {
-            let d_inv = d_inv_opt
+        // 境界行後退代入係数 d_t。KKT 対角 D_b と同一関数・同一 δ_d
+        // (`BOUND_ROW_DELTA_D_ITERATION` の doc。δ 適用は μ 停止 deadlock)。
+        let d_b: Vec<f64> = sigma_vec[m_real..]
+            .iter()
+            .map(|&sg| bound_row_dual_scale(sg, BOUND_ROW_DELTA_D_ITERATION))
+            .collect();
+        let boxed_solver = if use_schur {
+            let d_inv_real = d_inv_opt
                 .as_ref()
-                .expect("d_inv must be set when use_schur");
-            let pred = predictor_step_schur(
-                &s,
-                &y,
-                &is_eq_ext,
-                m_ineq,
-                &r_d_pmm,
-                &r_p_pmm,
-                &sigma_vec,
-                &fac,
-                d_inv,
-                &a_ext,
-                m_ext,
-                mu,
-                timeout_ctx.deadline,
-            );
-            corrector_step_schur(
-                &s,
-                &y,
-                &is_eq_ext,
-                &pred,
-                mu,
-                &r_d_pmm,
-                &r_p_pmm,
-                &sigma_vec,
-                &fac,
-                d_inv,
-                &a_ext,
-                m_ext,
-                &mut dx,
-                &mut dy,
-                &mut ds,
-                timeout_ctx.deadline,
-            )
+                .expect("d_inv (system rows) must be set when use_schur");
+            BoxedSolve {
+                backend: BoxedBackend::Schur {
+                    s_fac: &fac,
+                    a_real: &a_sys,
+                    d_inv_real,
+                },
+                bound: &bound,
+                d_b: &d_b,
+                m_real,
+                sys_ext_rows: &sys_ext_rows,
+            }
         } else {
-            let pred = predictor_step(
-                &s,
-                &y,
-                &is_eq_ext,
-                m_ineq,
-                &r_d_pmm,
-                &r_p_pmm,
-                &sigma_vec,
-                &fac,
-                &aug_mat,
-                n,
-                m_ext,
-                mu,
-                timeout_ctx.deadline,
-            );
-            corrector_step(
-                &s,
-                &y,
-                &is_eq_ext,
-                &pred,
-                mu,
-                &r_d_pmm,
-                &r_p_pmm,
-                &sigma_vec,
-                &fac,
-                &aug_mat,
-                n,
-                m_ext,
-                &mut dx,
-                &mut dy,
-                &mut ds,
-                timeout_ctx.deadline,
-            )
+            BoxedSolve {
+                backend: BoxedBackend::Aug {
+                    fac: &fac,
+                    mat: &aug_mat,
+                },
+                bound: &bound,
+                d_b: &d_b,
+                m_real,
+                sys_ext_rows: &sys_ext_rows,
+            }
         };
+
+        let t_solve = std::time::Instant::now();
+        let pred = predictor_boxed(
+            &s,
+            &y,
+            &is_eq_ext,
+            m_ineq,
+            &r_d_pmm,
+            &r_p_pmm,
+            &sigma_vec,
+            &boxed_solver,
+            mu,
+            timeout_ctx.deadline,
+        );
+        let (alpha, r_c_corr) = corrector_boxed(
+            &s,
+            &y,
+            &is_eq_ext,
+            &pred,
+            mu,
+            &r_d_pmm,
+            &r_p_pmm,
+            &sigma_vec,
+            &boxed_solver,
+            &mut dx,
+            &mut dy,
+            &mut ds,
+            timeout_ctx.deadline,
+        );
 
         let mut alpha = alpha;
         if alpha < GONDZIO_ALPHA_TRIGGER {
-            alpha = if use_schur {
-                let d_inv = d_inv_opt
-                    .as_ref()
-                    .expect("d_inv must be set when use_schur");
-                gondzio_correctors_schur(
-                    &s,
-                    &y,
-                    &is_eq_ext,
-                    m_ineq,
-                    &r_d_pmm,
-                    &r_p_pmm,
-                    &r_c_corr,
-                    &sigma_vec,
-                    &fac,
-                    d_inv,
-                    &a_ext,
-                    m_ext,
-                    options.ipm.max_correctors,
-                    alpha,
-                    &mut dx,
-                    &mut dy,
-                    &mut ds,
-                    timeout_ctx.deadline,
-                )
-            } else {
-                gondzio_correctors(
-                    &s,
-                    &y,
-                    &is_eq_ext,
-                    m_ineq,
-                    &r_d_pmm,
-                    &r_p_pmm,
-                    &r_c_corr,
-                    &sigma_vec,
-                    &fac,
-                    &aug_mat,
-                    n,
-                    m_ext,
-                    options.ipm.max_correctors,
-                    alpha,
-                    &mut dx,
-                    &mut dy,
-                    &mut ds,
-                    timeout_ctx.deadline,
-                )
-            };
+            alpha = gondzio_correctors_boxed(
+                &s,
+                &y,
+                &is_eq_ext,
+                m_ineq,
+                &r_d_pmm,
+                &r_p_pmm,
+                &r_c_corr,
+                &sigma_vec,
+                &boxed_solver,
+                options.ipm.max_correctors,
+                alpha,
+                &mut dx,
+                &mut dy,
+                &mut ds,
+                timeout_ctx.deadline,
+            );
         }
 
         // NaN/Inf または finite-but-huge は LDL blow-up とみなし best-so-far で復帰。
@@ -678,6 +675,10 @@ fn solve_ippmm_inner_confined(
         dbg.linear_solve_us += solve_elapsed.as_micros() as u64;
 
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
+        // 境界スラックの従属同一性を再確立。box 化では s_t の状態は x の従属量で、
+        // update_variables の ds_t 更新 (Newton 方向) は床・丸めで漂移しうるため、
+        // x から組み直す (fill_slacks は床 BOUND_SLACK_FLOOR 内蔵・冪等)。
+        bound.fill_slacks(&x, &mut s[m_real..]);
         iterations_consumed = iter.saturating_add(1);
 
         // alpha=0 持続 = line search 停止 = 数値飽和 / null-space 漂流。best-so-far で復帰。
@@ -754,7 +755,7 @@ fn solve_ippmm_inner_confined(
         // 下げて IPM が boundary を探索できるようにする。
         if (pmm.rho - reg_limit).abs() < reg_limit * 0.01 && reg_limit > REG_LIMIT_MIN {
             let mut should_lower = false;
-            if allow_adaptive_reg {
+            if adaptive {
                 let prox_d_inf = x
                     .iter()
                     .zip(pmm.x_ref.iter())
@@ -786,7 +787,7 @@ fn solve_ippmm_inner_confined(
         let box_only = m_orig == 0;
         let both_improved = primal_improved && dual_improved;
         let either_improved = primal_improved || dual_improved;
-        let use_fast_rate = if box_only {
+        let fast = if box_only {
             both_improved
         } else {
             either_improved
@@ -796,13 +797,10 @@ fn solve_ippmm_inner_confined(
             pmm.y_ref.copy_from_slice(&y);
             pmm.x_ref.copy_from_slice(&x);
         }
-        if use_fast_rate {
-            pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(reg_limit);
-            pmm.rho = (pmm.rho * (1.0 - mu_rate)).max(reg_limit);
-        } else {
-            pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
-            pmm.rho = (pmm.rho * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
-        }
+        let mu_spiked = mu_new > mu * PATH_MU_RISE_FACTOR;
+        prox_schedule(
+            &mut pmm, fast, mu_rate, reg_limit, mu_new, mu_spiked, adaptive,
+        );
 
         pmm.prev_nr_p = nr_p;
         pmm.prev_nr_d = nr_d;
@@ -893,6 +891,36 @@ enum InfeasGate {
     Break,
     Stall,
     Continue,
+}
+
+/// 近接正則化 ρ,δ のスケジュール更新 (state.rs PROX_MU_TRACK_RATIO に根拠)。
+///
+/// μ 急上昇反復 (PC が中心性を大幅に悪化させた = 方向がパスから外れている) では
+/// ρ,δ を μ スケール未満へ減衰させない。reg_limit だけの絶対 floor だと ρ/μ → 0
+/// で素の Mehrotra PC に退化し、箱化 dt 型で 4 周期ループに陥る (sentinel:
+/// dt_qp_ge_box_interior)。健全問題では非発火。
+fn prox_schedule(
+    pmm: &mut PmmState,
+    use_fast_rate: bool,
+    mu_rate: f64,
+    reg_limit: f64,
+    mu_new: f64,
+    mu_spiked: bool,
+    allow_adaptive_reg: bool,
+) {
+    let prox_floor =
+        if !allow_adaptive_reg && pmm.rho <= reg_limit * (1.0 + REG_FLOOR_BIND_TOL) && mu_spiked {
+            (PROX_MU_TRACK_RATIO * mu_new).max(reg_limit)
+        } else {
+            reg_limit
+        };
+    let decay = if use_fast_rate {
+        1.0 - mu_rate
+    } else {
+        1.0 - PMM_SLOW_RATE * mu_rate
+    };
+    pmm.delta = (pmm.delta * decay).max(prox_floor);
+    pmm.rho = (pmm.rho * decay).max(prox_floor);
 }
 
 /// 検証 PASS 済み受理から ray 証書の方向だけを抽出する (finalize 呼び出し

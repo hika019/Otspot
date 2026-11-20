@@ -4,7 +4,10 @@ use super::state::{
     LDL_FALLBACK_DELTA_MIN, LDL_REG_CEILING, LDL_REG_GROWTH, LDL_REG_RETRY_MAX, REG_LIMIT_MIN,
 };
 use crate::qp::diagnostics::with_ippmm_sink;
-use crate::qp::ipm_core::kkt::{build_schur_system, AugmentedKktCache, PermutedAugmentedKkt};
+use crate::qp::ipm_core::kkt::{
+    build_boxed_schur_system, build_schur_system, AugmentedKktCache, PermutedAugmentedKkt,
+    BOUND_ROW_DELTA_D_ITERATION,
+};
 use crate::qp::problem::QpProblem;
 use faer::Par;
 use otspot_num::linalg::amd::amd_with_deadline;
@@ -75,6 +78,13 @@ pub(super) enum FactorizeOutcome {
         used_iterative: bool,
         /// 数値 LDL 因子化の所要時間 (全 retry 合計、ナノ秒)。
         factorize_ns: u128,
+        /// 採用された対角正則化 δ (retry/fallback 後の最終値)。系行 (実制約行・
+        /// 退化対保持行) の後退代入 d_inv = 1/(σ_k+δ) はこの値と一致させる。
+        /// box 化境界行は設計上 δ を受けず `BOUND_ROW_DELTA_D_ITERATION` (=0) で
+        /// `bound_row_dual_scale` を評価する (KKT 対角 D_b と後退代入の除算を
+        /// 同一値に保つ。δ を box 行へ適用すると μ 停止 deadlock —
+        /// `bound_row_dual_scale` の doc)。
+        delta_used: f64,
     },
     Timeout,
     Failure,
@@ -85,6 +95,12 @@ pub(super) enum FactorizeOutcome {
 pub(super) struct FactorizeContext<'a> {
     pub problem: &'a QpProblem,
     pub a_ext: &'a CscMatrix,
+    /// 実制約行のみ行列 (`build_base_constraints` の生成物)。box 化 Schur 分岐は
+    /// これと bound から `build_boxed_system_matrix` で系行列を組む (求解側の
+    /// `a_sys` と単一生成物を共有)。
+    pub a_base: &'a CscMatrix,
+    /// box 化メタデータ (Schur 系の対角畳み込みと σ gather に必要)。
+    pub bound: &'a crate::qp::ipm_core::kkt::BoundBox,
     pub aug_cache: &'a AugmentedKktCache,
     pub sigma_vec: &'a [f64],
     pub is_eq_ext: &'a [bool],
@@ -231,13 +247,21 @@ pub(super) fn factorize_kkt_with_retry(
     }
 
     // 第3防御: identity perm + 大きな delta で再試行。
+    // fallback 採用時は行列に焼かれる δ が delta_retry とズレるため、採用 δ を
+    // 記録して Outcome 経由でループの box 化後退代入に返す。
+    let mut delta_fallback_used = false;
+    let mut delta_fallback_value = 0.0;
     if fac_opt.is_none() {
         caches.amd_perm = None;
         let delta_fallback = LDL_FALLBACK_DELTA_MIN.max(rho_retry).max(delta_retry);
+        delta_fallback_value = delta_fallback;
         let t_asm_fb = std::time::Instant::now();
-        let aug_mat_fb = ctx
-            .aug_cache
-            .materialize(ctx.sigma_vec, rho_retry, delta_fallback);
+        let aug_mat_fb = ctx.aug_cache.materialize(
+            ctx.sigma_vec,
+            rho_retry,
+            delta_fallback,
+            BOUND_ROW_DELTA_D_ITERATION,
+        );
         let asm_fb_us = t_asm_fb.elapsed().as_micros() as u64;
         #[cfg(test)]
         trace_assembly_timing(AssemblyTimingKind::OriginalMaterialize, asm_fb_us);
@@ -263,6 +287,7 @@ pub(super) fn factorize_kkt_with_retry(
         });
         match fb_result {
             Ok(f) => {
+                delta_fallback_used = true;
                 used_iterative = f.is_iterative();
                 fac_opt = Some(f);
                 aug_mat_opt = Some(aug_mat_fb);
@@ -280,6 +305,14 @@ pub(super) fn factorize_kkt_with_retry(
             retry_count,
             used_iterative,
             factorize_ns: total_factorize_ns,
+            // loop 成功時は delta_retry、identity fallback 採用時は delta_fallback
+            // が行列に焼かれている値。fallback は fac_opt を上書きするため、
+            // fallback 発動有無で選択する。
+            delta_used: if delta_fallback_used {
+                delta_fallback_value
+            } else {
+                delta_retry
+            },
         },
         _ => FactorizeOutcome::Failure,
     }
@@ -294,18 +327,38 @@ fn prepare_factorization(
     // 元順序組み立てを assembly の排他的計時・count 側計数へ積む。
     let t_asm = std::time::Instant::now();
     let (matrix, d_inv) = if ctx.use_schur {
-        let (matrix, d_inv) = build_schur_system(
-            &ctx.problem.q,
-            ctx.a_ext,
-            ctx.sigma_vec,
-            rho_retry,
-            delta_retry,
-        );
-        (matrix, Some(d_inv))
+        if let Some(_bound_var) = ctx.aug_cache.bound_var() {
+            // box 化 Schur: S = (Q + ρI + D_b) + A_sysᵀ D⁻¹ A_sys。box 化境界行は
+            // build_boxed_schur_system 内部で対角へ畳み込まれ、保持境界行
+            // (lb==ub 退化対) は A_sys の系行として残る。境界行 d_b は呼び出し側が
+            // delta_used から同一関数で再計算するためここでは廃棄する。
+            let (matrix, d_inv_sys, _d_b) = build_boxed_schur_system(
+                &ctx.problem.q,
+                ctx.a_base,
+                ctx.sigma_vec,
+                ctx.bound,
+                rho_retry,
+                delta_retry,
+            );
+            (matrix, Some(d_inv_sys))
+        } else {
+            let (matrix, d_inv) = build_schur_system(
+                &ctx.problem.q,
+                ctx.a_ext,
+                ctx.sigma_vec,
+                rho_retry,
+                delta_retry,
+            );
+            (matrix, Some(d_inv))
+        }
     } else {
         (
-            ctx.aug_cache
-                .materialize(ctx.sigma_vec, rho_retry, delta_retry),
+            ctx.aug_cache.materialize(
+                ctx.sigma_vec,
+                rho_retry,
+                delta_retry,
+                BOUND_ROW_DELTA_D_ITERATION,
+            ),
             None,
         )
     };
@@ -373,7 +426,12 @@ fn materialize_permuted_in_assembly(
         .as_ref()
         .expect("caller が permute 後にのみ呼ぶ (use_pre_permuted 経路)");
     let t_perm_mat = std::time::Instant::now();
-    let pre_permuted = permuted_cache.materialize(ctx.sigma_vec, rho_retry, delta_retry);
+    let pre_permuted = permuted_cache.materialize(
+        ctx.sigma_vec,
+        rho_retry,
+        delta_retry,
+        BOUND_ROW_DELTA_D_ITERATION,
+    );
     let perm_mat_us = t_perm_mat.elapsed().as_micros() as u64;
     #[cfg(test)]
     trace_assembly_timing(AssemblyTimingKind::PermutedMaterialize, perm_mat_us);
@@ -444,23 +502,31 @@ fn probe_ldl_health(
     !unhealthy
 }
 
-/// Schur auto-detect (probe).
+/// Schur auto-detect (probe)。
+///
+/// box 化適用後は box 系 (次元 n + m_real + 境界対角 D_b) を probe する。
+/// σ は全行 1 (実行・境界行共通)、ρ/δ は adaptive reg_limit の最終 floor
+/// (REG_LIMIT_MIN) — 実際の反復で正則化がそこまで下がりうるため fill-in 予測が
+/// 最悪ケースを反映する。境界行はある cache に畳み込まれるので probe 次元は
+/// extended (n + m_ext) より小さい (box 化利得を反映した判定になる)。
 pub(crate) fn auto_schur_enabled(
     problem: &QpProblem,
-    a_ext: &CscMatrix,
-    m_ext: usize,
     options: &crate::options::SolverOptions,
     timeout_ctx: &TimeoutCtx,
     par: Par,
 ) -> bool {
-    use crate::qp::ipm_core::kkt::build_augmented_system;
-    let probe_sigma: Vec<f64> = vec![1.0; m_ext];
-    // adaptive reg_limit の最終 floor (REG_LIMIT_MIN) で probe する。旧実装は
-    // 廃止された固定 options.ipm.delta_min (1e-8) を使っていたが、実際の反復では
-    // 正則化がそこまで下がりうるため、fill-in 予測が最悪ケースを反映するよう
-    // 最小値で probe する。
     let probe_rho = REG_LIMIT_MIN;
-    let probe_aug = build_augmented_system(&problem.q, a_ext, &probe_sigma, probe_rho, probe_rho);
+    let (a_base, _, _) = crate::qp::ipm_core::kkt::build_base_constraints(problem);
+    let bound = crate::qp::ipm_core::kkt::build_bound_box(problem);
+    let probe_cache =
+        crate::qp::ipm_core::kkt::build_boxed_augmented_cache(&problem.q, &a_base, &bound);
+    let probe_sigma: Vec<f64> = vec![1.0; probe_cache.sigma_len()];
+    let probe_aug = probe_cache.materialize(
+        &probe_sigma,
+        probe_rho,
+        probe_rho,
+        BOUND_ROW_DELTA_D_ITERATION,
+    );
     let probe_perm = amd_with_deadline(
         probe_aug.nrows(),
         probe_aug.col_ptr(),
@@ -497,6 +563,8 @@ mod r1_materialize_accounting_tests {
     struct Fixture {
         problem: QpProblem,
         a_ext: CscMatrix,
+        a_base: CscMatrix,
+        bound: crate::qp::ipm_core::kkt::BoundBox,
         aug_cache: crate::qp::ipm_core::kkt::AugmentedKktCache,
         sigma_vec: Vec<f64>,
         is_eq_ext: Vec<bool>,
@@ -523,10 +591,21 @@ mod r1_materialize_accounting_tests {
         .unwrap();
         let (a_ext, _b_ext, m_ext, _m_orig, _n_lb, is_eq_ext) =
             build_extended_constraints(&problem);
-        let aug_cache = crate::qp::ipm_core::kkt::build_augmented_cache(&problem.q, &a_ext);
+        // 空 BoundBox の box 化キャッシュ = 従来 extended キャッシュと代数同値
+        // (境界対角寄与ゼロ)。未 box 化コンストラクタは production から削除済み。
+        let empty_bound = crate::qp::ipm_core::kkt::BoundBox {
+            var: vec![],
+            sign: vec![],
+            rhs: vec![],
+            eliminated: vec![],
+        };
+        let aug_cache =
+            crate::qp::ipm_core::kkt::build_boxed_augmented_cache(&problem.q, &a_ext, &empty_bound);
         Fixture {
             r_d_pmm: vec![1.0, 1.0],
             problem,
+            a_base: a_ext.clone(),
+            bound: empty_bound,
             a_ext,
             aug_cache,
             sigma_vec: vec![1.0; m_ext],
@@ -578,6 +657,8 @@ mod r1_materialize_accounting_tests {
             let ctx = FactorizeContext {
                 problem: &fx.problem,
                 a_ext: &fx.a_ext,
+                a_base: &fx.a_base,
+                bound: &fx.bound,
                 aug_cache: &fx.aug_cache,
                 sigma_vec: &sigma_vec,
                 is_eq_ext: &fx.is_eq_ext,

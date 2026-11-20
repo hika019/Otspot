@@ -2914,18 +2914,23 @@ mod tests {
         .unwrap()
     }
 
-    /// Baseline/control for `qp_global_loop_honors_cancel_flag_not_only_deadline`:
-    /// same fixture, generous `max_nodes`/`timeout_secs`, no cancel injected.
-    /// The `x0>=0.1` constraint is invisible to the interval/α-BB bounds, so
-    /// the infeasible-left-child region keeps getting re-split (each split
-    /// discovers infeasibility only once box-restricted local solves are
-    /// attempted) before the search fully exhausts. Value confirmed by this
-    /// test itself (not hand-derived): establishes that this fixture keeps
-    /// the loop busy well past root when nothing interrupts it, so the
-    /// sentinel's contrast (1 vs 10) is not an artifact of a fixture that
-    /// would have stopped at 1 anyway.
+    /// 削除した `qp_global_loop_baseline_processes_both_children_without_cancel`
+    /// の named successor (旧テストの assert をその場で編集せず、削除 + 新規追加で
+    /// 契約変更を表現している)。
+    ///
+    /// 旧契約が変わった理由: 境界行 box 化 (境界行へ dual damping δ を適用しない
+    /// 正確 barrier 対角) で inner solve が厳密化し、左枝 infeasible 領域の発見が
+    /// 早まって探索木が 6 ノードで尽きるようになった。旧値 10 は旧 KKT 系の契約
+    /// のスナップショットで、現系では再現しない (10 → 6)。
+    ///
+    /// fixture の趣旨は旧テストと不変: `x0>=0.1` 制約は interval/α-BB bounds に
+    /// invisible なので infeasible 領域の分割が尽きるまで続き、cancel なしでは
+    /// root を大きく超えてループが稼働する。値 6 は同一バイナリ 2 回実走で一致
+    /// した実測スナップショット (手導出不可)。対比先である
+    /// `qp_global_loop_honors_cancel_flag_not_only_deadline` の停止点 1 との差は、
+    /// 「もともと 1 で止まる fixture の偽物でない」要件を維持する。
     #[test]
-    fn qp_global_loop_baseline_processes_both_children_without_cancel() {
+    fn qp_global_loop_baseline_boxed_tree_exhausts_at_six_nodes() {
         let p = x0_ge_0p1_concave_2d();
         let cfg = GlobalOptimizationConfig {
             gap_tol: 1e-12,
@@ -2937,9 +2942,9 @@ mod tests {
         };
         let (_, stats) = solve_qp_global_with_stats(&p, &opts(10.0), &cfg);
         assert_eq!(
-            stats.nodes_processed, 10,
-            "baseline (no cancel): fixture must exhaust well past 1 node when \
-             nothing interrupts the loop, got {}",
+            stats.nodes_processed, 6,
+            "baseline (no cancel): box 化系で fixture は 6 ノードで尽く (旧系の契約値は 10)。 \
+             1 ノードで止まる fixture の偽物でないことは cancel sentinel との対比で保証される。got {}",
             stats.nodes_processed
         );
     }

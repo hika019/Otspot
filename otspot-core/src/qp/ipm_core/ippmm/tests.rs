@@ -112,6 +112,72 @@ fn test_ippmm_box_constrained() {
     close(result.objective, -6.0, "IPPMM-T4: objective");
 }
 
+/// 境界超過許容幅 (revert sentinel 用)。eps=1e-6 運用の実行可能判定と同オーダー。
+/// 境界超過がこれを越えたら fraction-to-boundary が realized 変位と不一致。
+const SENTINEL_MAX_BOUND_OVERSHOOT: f64 = 1e-6;
+
+/// T4 の反復数上限 (revert sentinel 用)。BASE extended 系および box 化実装は
+/// 数十反復で収束。境界超過→床マスク→漂流パスは 3×10⁵ 反復まで張り付くため
+/// この上限で検出できる (両側から根拠ある余裕)。
+const SENTINEL_BOX_MAX_ITERS: usize = 500;
+
+/// IPPMM-T4b (revert sentinel): 上境界収束で x が境界を絶対に超過しないこと。
+///
+/// box 化で fraction-to-boundary・μ 予測が realized 従属率 ds_t = −a_t·dx と
+/// 一致しない実装 (extended Newton ds を α に使う) へ revert すると、
+/// δ_d·dy_t < 0 の反復で s 減少を過小評価し x が ub を 0.17 超過、床マスクで
+/// 検出不能なまま漂流する (実測: x=1.1718, 3.07×10⁵ iters, Timeout)。
+#[test]
+fn sentinel_box_no_boundary_overshoot() {
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+    let c = vec![-4.0, -4.0];
+    let a = CscMatrix::new(0, 2);
+    let b = vec![];
+    let bounds = vec![(0.0_f64, 1.0_f64); 2];
+    let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+    let result = solve_ippmm_inner(&problem, &default_opts(), default_opts().ipm_eps());
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "IPPMM-T4b: revert 時に漂流→Timeout"
+    );
+    assert!(
+        result.iterations < SENTINEL_BOX_MAX_ITERS,
+        "IPPMM-T4b: 反復数 {} が漂流を示唆",
+        result.iterations
+    );
+    for (i, &xv) in result.solution.iter().enumerate() {
+        assert!(
+            (-SENTINEL_MAX_BOUND_OVERSHOOT..=1.0 + SENTINEL_MAX_BOUND_OVERSHOOT).contains(&xv),
+            "IPPMM-T4b: x[{i}] = {xv} が境界 [0,1] を超過",
+        );
+    }
+}
+
+/// IPPMM-T4c (revert sentinel): 停留点初期化で境界行 dy が凍結しないこと。
+///
+/// min −x²+y² s.t. −1≤x,y≤1 の初期点 x=0 は正確な停留点 (鞍点)。箱化 solve が
+/// 解の値から失敗を推論するヒューリスティク (dx 全ゼロ⇒失敗) へ revert すると
+/// dy が凍結して 51 反復で Stalled になり、外層が鞍点を Optimal と誤認証する。
+/// 正実装は収束し、不定 QP として LocallyOptimal に降格する (BASE と同型)。
+#[test]
+fn sentinel_stationary_point_not_frozen() {
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, 2.0], 2, 2).unwrap();
+    let c = vec![0.0; 2];
+    let a = CscMatrix::new(0, 2);
+    let b = vec![];
+    let bounds = vec![(-1.0_f64, 1.0_f64); 2];
+    let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+    let result = solve_ippmm_inner(&problem, &default_opts(), default_opts().ipm_eps());
+    assert_eq!(
+        result.status,
+        SolveStatus::LocallyOptimal,
+        "IPPMM-T4c: revert 時に Stalled (dy 凍結)"
+    );
+}
+
 /// IPPMM-T5: タイムアウト動作確認
 #[test]
 fn test_ippmm_timeout() {
@@ -803,4 +869,173 @@ fn apply_warm_and_extract_x(problem: &QpProblem, xj_warm: f64) -> f64 {
     );
     assert!(mu.is_some(), "apply_qp_warm_start dropped (dim mismatch?)");
     x[0]
+}
+
+/// SENTINEL (box 化境界行へ δ 非適用): 狭幅 corner box の μ 停止 deadlock。
+///
+/// min ½‖x‖² − 1ᵀx s.t. x ∈ [0,3e-3]×[0,5e-3] (制約なし純 box)。box 幅
+/// (3e-3,5e-3) < 初期 μ (~4e-3)・δ=DELTA_INIT=8 ≫ 全 σ_t (≤2.5e-3) の領域で
+/// box 行へ dual damping を適用すると d_t = 1/(σ_t+δ) ≈ 1/δ に潰え、境界制約が
+/// KKT 系から消える (box を無視する発散方向が出る) → fraction-to-boundary が
+/// α≈0 で x を壁に固定 → μ が 1 桁も下がらず δ も減衰しない自己閉鎖 deadlock
+/// (実測: 52 反復 Stalled、μ=4e-3 固定、x は最適点から 1.5e-3 手前で凍結)。
+/// δ 非適用 (d_t = 1/σ_t) では同一問題が Optimal。
+///
+/// Revert-fail (確認済み): box 行の `bound_row_dual_scale(σ, 0.0)` を
+/// `(σ, delta_used)` / `(σ, delta_d)` に戻すと本テストは Stalled で FAIL する。
+#[test]
+fn sentinel_narrow_box_corner_mu_deadlock() {
+    use crate::qp::solve_qp_with;
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
+    let problem = QpProblem::new(
+        q,
+        vec![-1.0, -1.0],
+        CscMatrix::new(0, 2),
+        vec![],
+        vec![(0.0_f64, 3.0e-3), (0.0, 5.0e-3)],
+        vec![],
+    )
+    .unwrap();
+    for eps in [1.0e-6, 1.0e-8, 1.0e-9] {
+        let opts = SolverOptions {
+            presolve: false,
+            ipm: crate::options::IpmOptions {
+                eps,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "eps={eps:E} box 幅 < μ の corner が δ 適用で μ 停止した疑い: {:?}",
+            result.status
+        );
+        close(result.solution[0], 3.0e-3, &format!("eps={eps:E} x0 (ub0)"));
+        close(result.solution[1], 5.0e-3, &format!("eps={eps:E} x1 (ub1)"));
+        // bound_duals layout = [lb0, lb1, ub0, ub1]。非活性 lb 双対は 0、
+        // 活性 ub 双対は定数オラクル c_j − x_j·Q_jj (= 1 − ub_j) に一致。
+        close(result.bound_duals[0], 0.0, &format!("eps={eps:E} y_lb0"));
+        close(result.bound_duals[1], 0.0, &format!("eps={eps:E} y_lb1"));
+        close(
+            result.bound_duals[2],
+            1.0 - 3.0e-3,
+            &format!("eps={eps:E} y_ub0"),
+        );
+        close(
+            result.bound_duals[3],
+            1.0 - 5.0e-3,
+            &format!("eps={eps:E} y_ub1"),
+        );
+    }
+}
+
+/// 退化対 (lb==ub 固定変数) を含む raw 系 (presolve off) が Optimal に到達する
+/// ことの回帰。box 化で固定対まで従属スラック化すると (revert: kkt.rs の
+/// `bound_pair_is_degenerate` guard 撤去)、床張り付き 2 スラックの dx noise で
+/// α が全局的に潰れ 51 反復 Stalled・双対 ~3e6 爆発 (revertfail/REVERT_B.log
+/// 実測)。構造 sentinel は kkt.rs の
+/// `sentinel_degenerate_bound_pair_kept_as_system_row`、本テストは同じ病理の
+/// 求解挙動側を固定する。
+#[test]
+fn test_fixed_bound_pair_raw_solve_optimal() {
+    use crate::qp::solve_qp_with;
+    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], 3, 3).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 3).unwrap();
+    let problem = QpProblem::new(
+        q,
+        vec![-1.0, -1.0, 1.0],
+        a,
+        vec![10.0],
+        vec![(0.0_f64, 3.0), (0.0, 5.0), (2.0, 2.0)],
+        vec![ConstraintType::Le],
+    )
+    .unwrap();
+    let opts = SolverOptions {
+        presolve: false,
+        ..Default::default()
+    };
+    let result = solve_qp_with(&problem, &opts);
+    assert_eq!(result.status, SolveStatus::Optimal, "raw 固定対系が停留");
+    close(result.solution[0], 3.0, "x0 (ub0 活性)");
+    close(result.solution[1], 5.0, "x1 (ub1 活性)");
+    close(result.solution[2], 2.0, "x2 (固定)");
+}
+
+/// SENTINEL (cold-init 射影の境界行重み): 手計算オラクル x = 3/4 + m/4。
+///
+/// Fixture: min 0 (Q=0) s.t. x = 1 (等式)、x ∈ [0, 2]、raw 起点 x0 = 0 (lb 上)。
+/// cold start は `strict_interior_shift` で x0 を m = range·WARM_BOUND_REL_MARGIN
+/// (= 2e-6) へ押し込んでから射影する。box 系射影 (σ=0、ρ=δ=1、境界行 lb/ub
+/// 2 本とも box 化) は 2×2 系
+///   [[1 + 2W, 1], [1, −1]] [dx, dy]ᵀ = [2 − 2m, 1 − m]ᵀ、W = 1/(0 + δ_d^bound)
+/// (x 対角 = δ_p·1 + lb/ub 行の対角寄与 d_t。右辺 x 成分 =
+///  Σ_t a_t(b_t − a_t·x0s) = (ub − x0s) − (x0s − lb) = 2 − 2m。系行は等式 1 本
+/// で対角 −(0+δ) = −1、右辺 r_p = 1 − m)。2 式を足して dx = 3(1−m)/(2+2W)、
+/// 終点は x = m + dx = 3/4 + m/4 (m ≪ 1 で射影後の clamp は非発動)。設計契約は
+/// δ_d^bound = INIT_PROJECTION_REGULARIZATION = 1 (旧 extended 射影との
+/// 代数同値 — `bound_row_dual_scale` / `materialize` の doc)。
+///
+/// Revert-fail (確認済み、2 系統): (a) init 経路の materialize 4 引数を反復
+/// 経路と同じ 0 に戻すと W = 床により 1/ε_machine = 4.5e15、dx ≃ 3.3e-16 で
+/// 終点は m のまま → FAIL。(b) `strict_interior_shift` を撤去すると m = 0 で
+/// 終点 0.75 には来るが LASSO 系 budget sentinel (diag_qp_ill_scaled_eps_floor)
+/// が境界始点の barrier 対角 O(1e12) で FAIL — 両契約を同時に固定する。
+#[test]
+fn sentinel_cold_init_projection_bound_weight_oracle() {
+    use super::init::build_initial_point;
+    use super::state::WARM_BOUND_REL_MARGIN;
+    use crate::qp::ipm_core::kkt::{build_base_constraints, build_bound_box};
+    use otspot_num::linalg::timeout::TimeoutCtx;
+
+    /// strict-interior 押し込み量: lb 上の raw 始点が range·WARM_BOUND_REL_MARGIN
+    /// だけ内側へ動く (helper と同一契約、range = 2)。
+    const INIT_SHIFT_MARGIN: f64 = 2.0 * WARM_BOUND_REL_MARGIN;
+    /// 手計算オラクル: x = m + 3(1−m)/(2+2·1) = 3/4 + m/4 (導出は上の doc)。
+    const ORACLE_COLD_INIT_X: f64 = 0.75 + 0.25 * INIT_SHIFT_MARGIN;
+    /// 2×2 系は f64 因子化でこの桁まで一意 (条件数 ~6)。因子化残余の余裕。
+    const ORACLE_COLD_INIT_TOL: f64 = 1e-9;
+
+    let problem = QpProblem::new(
+        CscMatrix::new(1, 1),
+        vec![0.0],
+        CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap(),
+        vec![1.0],
+        vec![(0.0_f64, 2.0)],
+        vec![ConstraintType::Eq],
+    )
+    .unwrap();
+    let (a_ext, b_ext, m_ext, m_orig, _n_lb, is_eq_ext) = build_extended_constraints(&problem);
+    let (a_base, b_base, is_eq_base) = build_base_constraints(&problem);
+    let bound = build_bound_box(&problem);
+    assert_eq!(bound.count(), 2, "lb/ub 各 1 行 (box 化 2 行)");
+    assert!(
+        bound.eliminated.iter().all(|&e| e),
+        "退化対でないので全行 box 化"
+    );
+
+    let opts = default_opts();
+    let timeout_ctx = TimeoutCtx::new(None, opts.timeout_secs, None);
+    let init = build_initial_point(
+        &problem,
+        &opts,
+        &a_ext,
+        &b_ext,
+        &is_eq_ext,
+        &a_base,
+        &b_base,
+        &is_eq_base,
+        &bound,
+        m_orig,
+        m_ext,
+        &timeout_ctx,
+        faer::Par::Seq,
+    );
+    assert!(
+        (init.x[0] - ORACLE_COLD_INIT_X).abs() <= ORACLE_COLD_INIT_TOL,
+        "cold-init 射影が手計算オラクル 3/(2+2·1)=0.75 と不一致: x0=0 + dx = {} \
+         (境界行重みが反復経路の δ=0 に逆戻りし、床 1/ε=4.5e15/行で歩幅が潰れた疑い)",
+        init.x[0]
+    );
 }

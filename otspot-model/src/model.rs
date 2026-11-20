@@ -2922,28 +2922,33 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // 到達不能な精度 (Custom(1e-200)) は「検証済み解」を偽装できない: IPM は
-    // 有限残差まで収束するが satisfies_eps(1e-200) は常に false → Stalled →
-    // Model API は Err(SolveError::Stalled) を返す (table-driven)。
-    //
-    // Sentinel: finalize_outcome の非収束→SuboptimalSolution 変換 (旧 attempt.rs)
-    // を復活させると Ok(FeasibleUnproven) になりこのテストが FAIL する。
-    // -----------------------------------------------------------------------
+    /// 削除した `test_model_qp_unreachable_tolerance_errs_stalled` の named
+    /// successor (fixture 係数をその場で編集せず、削除 + 新規追加で契約変更を
+    /// 表現している)。不変の趣旨: 到達不能な精度 (Custom(1e-200)) では
+    /// satisfies_eps が常に false → Stalled → Err となり、Model API は
+    /// 「検証済み解」を偽装しない。finalize_outcome の非収束→
+    /// SuboptimalSolution 変換 (旧 attempt.rs) を復活させると
+    /// Ok(FeasibleUnproven) になって FAIL する sentinel でもある。
+    ///
+    /// 旧契約が変わった理由: 旧 fixture c=[-4,-4] の最適解 x*=(2,2) は f64 厳密
+    /// (2 = 2¹) で、境界行 box 化後の inner solve は残差 0.0 を達成してしまい、
+    /// satisfies_eps(1e-200) が真成了 — 「到達不能 tol では解を返さない」前提が
+    /// 旧係数では成立しない。x* が仮数に非表現 (循環二進) な c=[-4,-4/3]
+    /// (x*=(2, 2/3)) に変更し、前提を回復した。assert 側の論理は旧テストと不変。
     #[test]
     #[allow(clippy::type_complexity)]
-    fn test_model_qp_unreachable_tolerance_errs_stalled() {
+    fn test_model_qp_unreachable_tolerance_stalled_unrepresentable_argmin() {
         use otspot_core::options::Tolerance;
 
         // (name, q_diag, (lb,ub), c)
         let cases: &[(&str, [f64; 2], (f64, f64), [f64; 2])] = &[
-            // Convex PSD Q=2I, c=[-4,-4]. IPM converges (residuals ~1e-6) but
-            // Custom(1e-200) makes satisfies_eps always false → SuboptimalSolution.
+            // 上記 doc のとおり x* が非表現な係数 (旧 fixture [-4,-4] は box 化で
+            // 残差 0 到達となり、この fixture の前提を壊したため差し替え)。
             (
                 "convex_2x2_tight_tol",
                 [2.0, 2.0],
                 (0.0, f64::INFINITY),
-                [-4.0, -4.0],
+                [-4.0, -4.0 / 3.0],
             ),
             // Convex PSD Q=4I, c=[0,-2] with box bounds.
             ("convex_box_tight_tol", [4.0, 4.0], (0.0, 3.0), [0.0, -2.0]),
