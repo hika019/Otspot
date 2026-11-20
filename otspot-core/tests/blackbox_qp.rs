@@ -375,6 +375,55 @@ fn dt_qp_ge_box_interior() {
     assert_x(r.solution[1], 5.0, "dt_qp_ge_interior y*=5");
 }
 
+/// 近接スケジューリングの μ 追従 floor リグレッション sentinel (QP88-R1)。
+///
+/// dt (Ge + box、内部解) では最適点で Ge 行が非活性 (y_Ge→0) で、箱化直後は
+/// 活性行が Ge 1 行のみになり相補性積が大きく分散する。reg_limit 由来の絶対
+/// floor まで ρ,δ が減衰して ρ/μ → 0 になると Newton 方向の近接正則化が消え、
+/// 大域収束しない素の Mehrotra PC に退化する。この系では predictor の μ_aff が
+/// 壁近傍の box 行で水増しされ σ=(μ_aff/μ)^3 が中心化をサボり、corrector の y が
+/// 1 ステップで 1000 倍跳ねる発散を誰にも咎められず、4 周期環 (x: 5.05↔7.55、
+/// μ≈0.2–0.8 往復) に閉じ込められて全試行が予算を枯らす (revert 実測は台帳
+/// qp88r1.md §3)。修正 (ρ が reg floor 張り付き中に μ が ×1.5 以上上昇した反復
+/// では ρ,δ を μ スケール未満へ下げない) により Optimal、x*=y*=5、obj=-50
+/// (手計算オラクル) へ 24 反復で収束する。
+///
+/// 反復予算 sentinel: 環が残ると周期的往復で反復が水増しされ、Optimal でも超過。
+const SENTINEL_ITER_BUDGET_BOX_INTERIOR: usize = 40;
+
+#[test]
+fn regression_prox_mu_floor_box_interior_no_cycle() {
+    // min x^2 + y^2 - 10x - 10y  s.t. x + y >= 8, 0 <= x,y <= 6。
+    // 手計算オラクル: 無制約停留点 (5,5) が x+y=10>=8 で厳密成立、box 内点。
+    // KKT: ∇=2(x-5)=0、y_Ge=0、obj = 25+25-50-50 = -50。
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+    let qp = QpProblem::new(
+        q,
+        vec![-10.0, -10.0],
+        a,
+        vec![8.0],
+        vec![(0.0, 6.0), (0.0, 6.0)],
+        vec![ConstraintType::Ge],
+    )
+    .unwrap();
+    let r = solve_qp_with(&qp, &opts());
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "近接 floor sentinel: 4 周期環に陥ると Stalled になる (status)"
+    );
+    assert_obj(r.objective, -50.0, "近接 floor sentinel obj=-50");
+    assert_x(r.solution[0], 5.0, "近接 floor sentinel x*=5");
+    assert_x(r.solution[1], 5.0, "近接 floor sentinel y*=5");
+    assert!(
+        r.iterations <= SENTINEL_ITER_BUDGET_BOX_INTERIOR,
+        "近接 floor sentinel: iterations={} > budget={}",
+        r.iterations,
+        SENTINEL_ITER_BUDGET_BOX_INTERIOR,
+    );
+}
+
 /// DT: Ge + box + min, constraint active (optimum pushed off interior).
 ///
 /// Problem: min (x-1)^2+(y-1)^2  s.t. x+y>=6, 0<=x,y<=5.

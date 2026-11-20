@@ -23,6 +23,26 @@ pub(super) const WARM_SY_MIN: f64 = 1e-8;
 pub(super) const PMM_IMPROVE_THRESHOLD: f64 = 0.95;
 pub(super) const PMM_SLOW_RATE: f64 = 2.0 / 3.0;
 
+/// 近接パラメータ ρ,δ の μ 追従 floor 比率 (μ が上昇した反復のみ適用)。
+///
+/// Mehrotra PC ステップが中心性を悪化させた (μ が 1 反復で係数 1.5 以上上昇)
+/// 反復では、近接重みを μ
+/// スケール未満へ減衰させない (ρ,δ ≥ κ·μ)。素の PC は大域収束せず、相補性積が
+/// 分散する箱化問題 (dt 型: 死んだ box 行で μ・σ が水増しされ row-0 の y が暴走)
+/// では ρ/μ → 0 の減衰が 4 周期ループに収束する (実測: μ=0.2↔0.8 振動 30 反復
+/// 以上脱出せず)。μ 単調減少の健全問題では一度も発火せず、スケジュールは HEAD
+/// とビット同一になる。replica 分岐実験で κ<1 は一部初期点でループ残留 (43-48
+/// 反復)、κ=1 で初期点 5 種すべて 9-14 反収束、κ=2 で 10-21 (過減衰)。
+pub(super) const PROX_MU_TRACK_RATIO: f64 = 1.0;
+
+/// μ 急上昇の判定係数。単発のノイズ的ばらつき (数 % 程度) ではなく、path
+/// following が破綻した上昇 (dt 実測: ×2〜×4) のみ拾う。
+pub(super) const PATH_MU_RISE_FACTOR: f64 = 1.5;
+
+/// ρ が reg_limit フロアに張り付いている判定の相対猶予。健全問題の μ  transient
+/// (初期相の ×10 級 μ 上昇) は ρ がまだフロア到達前なので発火しない。
+pub(super) const REG_FLOOR_BIND_TOL: f64 = 1e-6;
+
 /// μ が実質 0 と判定する境界 (機械精度直上)。
 pub(super) const MU_ZERO_THRESHOLD: f64 = 1e-15;
 

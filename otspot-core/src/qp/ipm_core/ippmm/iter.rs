@@ -9,10 +9,10 @@ use super::state::{
     alpha_stall_eps_for, duality_gap, matrix_reg_floor_for_lp, pf_stuck_should_lower_reg_limit,
     ConvergenceMeasures, PmmState, ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N,
     DELTA_INIT, DIRECTION_BLOWUP_THRESHOLD, GONDZIO_ALPHA_TRIGGER, INFEAS_DETECTOR_DISTRUST_SCORE,
-    MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PF_HISTORY_LEN, PMM_IMPROVE_THRESHOLD,
-    PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN,
-    REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT, SIGMA_MAX_FALLBACK,
-    STEP_REL_CAP,
+    MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PATH_MU_RISE_FACTOR, PF_HISTORY_LEN,
+    PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO, PROX_MU_TRACK_RATIO,
+    REG_FLOOR_BIND_TOL, REG_LIMIT_INIT_LP, REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP,
+    RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT, SIGMA_MAX_FALLBACK, STEP_REL_CAP,
 };
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
@@ -797,12 +797,25 @@ fn solve_ippmm_inner_confined(
             pmm.y_ref.copy_from_slice(&y);
             pmm.x_ref.copy_from_slice(&x);
         }
-        if use_fast_rate {
-            pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(reg_limit);
-            pmm.rho = (pmm.rho * (1.0 - mu_rate)).max(reg_limit);
+        // 近接正則化の μ 追従 floor (state.rs PROX_MU_TRACK_RATIO 参照)。μ 急上昇
+        // 反復 (PC が中心性を大幅に悪化させた = 方向がパスから外れている) では
+        // ρ,δ を μ スケール未満へ減衰させない。reg_limit だけの絶対 floor だと
+        // ρ/μ → 0 で素の Mehrotra PC に退化し、箱化 dt 型で 4 周期ループに陥る
+        // (sentinel: dt_qp_ge_box_interior)。健全問題では非発火。
+        let prox_floor = if !allow_adaptive_reg
+            && pmm.rho <= reg_limit * (1.0 + REG_FLOOR_BIND_TOL)
+            && mu_new > mu * PATH_MU_RISE_FACTOR
+        {
+            (PROX_MU_TRACK_RATIO * mu_new).max(reg_limit)
         } else {
-            pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
-            pmm.rho = (pmm.rho * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
+            reg_limit
+        };
+        if use_fast_rate {
+            pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(prox_floor);
+            pmm.rho = (pmm.rho * (1.0 - mu_rate)).max(prox_floor);
+        } else {
+            pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(prox_floor);
+            pmm.rho = (pmm.rho * (1.0 - PMM_SLOW_RATE * mu_rate)).max(prox_floor);
         }
 
         pmm.prev_nr_p = nr_p;
