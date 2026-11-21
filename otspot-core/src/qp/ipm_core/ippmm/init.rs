@@ -5,7 +5,7 @@
 //! (次元 n + m_real、境界対角寄与 d_t = 1/(σ_t+δ) を Q 対角へ畳み込む) で解く
 //! — 旧 extended 射影の正確 Schur 補集約と代数同値 (境界行 σ=0・δ=1 の極限)。
 
-use super::state::{warm_bound_margin, WARM_BOUND_REL_MARGIN};
+use super::state::{COLD_BOUND_ABS_MARGIN, COLD_BOUND_REL_MARGIN};
 use super::warm_start::apply_qp_warm_start;
 use crate::options::SolverOptions;
 use crate::qp::ipm_core::kkt::{build_boxed_augmented_cache, BoundBox};
@@ -36,8 +36,13 @@ pub(super) struct InitialPoint {
 /// 一致するのは δ 適用側のみ (δ 非適用なら床の 1/ε_machine になる)。
 const INIT_PROJECTION_REGULARIZATION: f64 = 1.0;
 
-/// cold start 点を box の strict-interior 余白へ押し込む (余白契約は warm
-/// start / 射影後 clamp と同一)。
+/// cold start 点を box の strict-interior 余白へ押し込む。
+///
+/// 余白政策は cold 専用 (`COLD_BOUND_REL_MARGIN` / `COLD_BOUND_ABS_MARGIN`、
+/// cd94b80b 直前の cold init literal の復元)。warm 用 `warm_bound_margin`
+/// (相対 1e-6) は warm 点 を最大限尊重する目的の値で、cold x0 に適用すると
+/// box 行スラックが初期から boundary に張り付き barrier 対角 y_t/s_t が発散する
+/// (実測: qgfrdxpn で初期 s·y/μ min 3.7e-9、445 行が slack<1e-3)。
 ///
 /// box 化は境界行スラックを独立状態にせず s_t = b_t − a_t x の従属量にする
 /// ため、x が境界上のままで反復に入ると barrier 対角が
@@ -47,20 +52,20 @@ const INIT_PROJECTION_REGULARIZATION: f64 = 1.0;
 /// 検出)。旧 extended 系は境界行スラックを s ≥ 1 にクランプした独立量として
 /// 持つ設計で、この始点 interior 性へ依存していなかった。押し込みは clamp で
 /// 境界上の点のみ動く (内部の始点・固定変数・非有界変数は不変)。
-fn strict_interior_shift(bounds: &[(f64, f64)], x: &mut [f64]) {
+pub(super) fn strict_interior_shift(bounds: &[(f64, f64)], x: &mut [f64]) {
     for ((lb, ub), xj) in bounds.iter().zip(x.iter_mut()) {
         match (lb.is_finite(), ub.is_finite()) {
             (true, true) => {
                 let range = ub - lb;
-                let margin = range * WARM_BOUND_REL_MARGIN;
+                let margin = (range * COLD_BOUND_REL_MARGIN).min(COLD_BOUND_ABS_MARGIN);
                 *xj = if range > 2.0 * margin {
                     xj.clamp(lb + margin, ub - margin)
                 } else {
                     0.5 * (lb + ub)
                 };
             }
-            (true, false) => *xj = xj.max(lb + warm_bound_margin(*lb)),
-            (false, true) => *xj = xj.min(ub - warm_bound_margin(*ub)),
+            (true, false) => *xj = xj.max(lb + COLD_BOUND_ABS_MARGIN),
+            (false, true) => *xj = xj.min(ub - COLD_BOUND_ABS_MARGIN),
             (false, false) => {}
         }
     }
@@ -98,9 +103,9 @@ pub(super) fn build_initial_point(
             } else if lb_fin && ub_fin {
                 (lb + ub) / 2.0
             } else if lb_fin {
-                lb + 1.0
+                lb + COLD_BOUND_ABS_MARGIN
             } else if ub_fin {
-                ub - 1.0
+                ub - COLD_BOUND_ABS_MARGIN
             } else {
                 0.0
             }

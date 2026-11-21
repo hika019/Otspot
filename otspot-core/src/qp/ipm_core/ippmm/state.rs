@@ -16,6 +16,15 @@ pub(super) const WARM_BOUND_REL_MARGIN: f64 = 1e-6;
 pub(super) fn warm_bound_margin(bound: f64) -> f64 {
     WARM_BOUND_REL_MARGIN * bound.abs().max(1.0)
 }
+
+/// cold start 点の strict-interior 余白 (range 比率)。warm 用 1e-6 は
+/// warm 点 を最大限尊重する値で、cold x0 に使うと box 行スラック分布が劣化する
+/// (実測: qgfrdxpn 規模で初期 s·y/μ min 3.7e-9)。cd94b80b 直前の cold init
+/// 政策 `(range * 0.01).min(1.0)` の復元。
+pub(super) const COLD_BOUND_REL_MARGIN: f64 = 1e-2;
+/// 両端有限 box の余白の絶対上限、および片側有限 bound の cold 余白。
+/// cd94b80b 直前の literal (cap 1.0 / `lb + 1.0` / `ub - 1.0`) と同一値。
+pub(super) const COLD_BOUND_ABS_MARGIN: f64 = 1.0;
 /// 不等式行 s, y の boundary 上で σ=s/y が発散するため両側を floor。
 pub(super) const WARM_SY_MIN: f64 = 1e-8;
 

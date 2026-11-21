@@ -963,11 +963,67 @@ fn test_fixed_bound_pair_raw_solve_optimal() {
     close(result.solution[2], 2.0, "x2 (固定)");
 }
 
-/// SENTINEL (cold-init 射影の境界行重み): 手計算オラクル x = 3/4 + m/4。
+/// SENTINEL (cold 政策 vs warm 用マージン): `strict_interior_shift` は cold 政策
+/// (両端有限 `(range·COLD_BOUND_REL_MARGIN).min(COLD_BOUND_ABS_MARGIN)`、
+/// 片側有限 `COLD_BOUND_ABS_MARGIN`) で押し込む。warm 専用 1e-6 相対
+/// (`warm_bound_margin` / `range·WARM_BOUND_REL_MARGIN`) を cold 始点に適用すると
+/// box 行スラックが初期から boundary に張り付き barrier 対角が発散する
+/// (cold x0 への誤用が修正対象の病理そのもの)。
 ///
-/// Fixture: min 0 (Q=0) s.t. x = 1 (等式)、x ∈ [0, 2]、raw 起点 x0 = 0 (lb 上)。
-/// cold start は `strict_interior_shift` で x0 を m = range·WARM_BOUND_REL_MARGIN
-/// (= 2e-6) へ押し込んでから射影する。box 系射影 (σ=0、ρ=δ=1、境界行 lb/ub
+/// Revert-fail (実測 coldboyd_revert_fail.log): helper のマージン政策を warm 用
+/// 1e-6 に戻すと (1) の押し込みが −4.999995 ≠ −4.0、(2) が 1e-4 ≠ 1.0 で FAIL。
+#[test]
+fn sentinel_strict_interior_shift_uses_cold_policy_not_warm_margin() {
+    use super::init::strict_interior_shift;
+
+    /// 押し込み量の実測は clamp 境界の f64 同一性なので余裕は機械_EPS 級で足りるが、
+    /// 境界演算の丸め (加算・clamp) に備えて 1e-12。
+    const SHIFT_TOL: f64 = 1e-12;
+
+    /// (ラベル, bounds, 始点, cold 政策の期待終点)。
+    type ShiftCase = (&'static str, Vec<(f64, f64)>, Vec<f64>, Vec<f64>);
+
+    let cases: Vec<ShiftCase> = vec![
+        // (1) 片側 lb=−5 上の始点: cold 絶対 1.0 → −4.0 (warm 1e-6·|−5| なら −4.999995)
+        (
+            "one-sided-lb",
+            vec![(-5.0, f64::INFINITY)],
+            vec![-5.0],
+            vec![-4.0],
+        ),
+        // (2) 両端 [0,100]: range·1e-2 = 1.0 が cap 1.0 (warm 相対 1e-6 なら 1e-4)
+        ("both-capped", vec![(0.0, 100.0)], vec![0.0], vec![1.0]),
+        // (3) 両端 [0,1]: range·1e-2 = 0.01 (warm 相対なら 1e-6)
+        ("both-rel", vec![(0.0, 1.0)], vec![0.0], vec![0.01]),
+        // 不変条件: 内部始点・非有界・固定変数は動かさない
+        (
+            "unchanged",
+            vec![(0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY), (2.0, 2.0)],
+            vec![5.0, -1e9, 2.0],
+            vec![5.0, -1e9, 2.0],
+        ),
+    ];
+    for (label, bounds, x0, expect) in cases {
+        let mut x = x0.clone();
+        strict_interior_shift(&bounds, &mut x);
+        for (i, (got, want)) in x.iter().zip(expect.iter()).enumerate() {
+            assert!(
+                (got - want).abs() <= SHIFT_TOL,
+                "{label}[{i}]: shifted {got} != cold 政策の期待値 {want} \
+                 (warm 用 1e-6 マージンの cold 誤用に逆戻りした疑い)"
+            );
+        }
+    }
+}
+
+/// SENTINEL (cold-init 射影の境界行重み・cold 政策): 手計算オラクル x = 3/4 + m/4。
+///
+/// Fixture・導出は旧 `sentinel_cold_init_projection_bound_weight_oracle` から不変
+/// (削除+再追加は cold 政策分離で期待 m が変わったため、assert 直接変更禁止規約準拠)。
+/// min 0 (Q=0) s.t. x = 1 (等式)、x ∈ [0, 2]、raw 起点 x0 = 0 (lb 上)。
+/// cold start は `strict_interior_shift` で x0 を cold 政策
+/// m = (range·COLD_BOUND_REL_MARGIN).min(COLD_BOUND_ABS_MARGIN) = 0.02 (range = 2)
+/// へ押し込んでから射影する。box 系射影 (σ=0、ρ=δ=1、境界行 lb/ub
 /// 2 本とも box 化) は 2×2 系
 ///   [[1 + 2W, 1], [1, −1]] [dx, dy]ᵀ = [2 − 2m, 1 − m]ᵀ、W = 1/(0 + δ_d^bound)
 /// (x 対角 = δ_p·1 + lb/ub 行の対角寄与 d_t。右辺 x 成分 =
@@ -977,21 +1033,27 @@ fn test_fixed_bound_pair_raw_solve_optimal() {
 /// δ_d^bound = INIT_PROJECTION_REGULARIZATION = 1 (旧 extended 射影との
 /// 代数同値 — `bound_row_dual_scale` / `materialize` の doc)。
 ///
-/// Revert-fail (確認済み、2 系統): (a) init 経路の materialize 4 引数を反復
-/// 経路と同じ 0 に戻すと W = 床により 1/ε_machine = 4.5e15、dx ≃ 3.3e-16 で
-/// 終点は m のまま → FAIL。(b) `strict_interior_shift` を撤去すると m = 0 で
-/// 終点 0.75 には来るが LASSO 系 budget sentinel (diag_qp_ill_scaled_eps_floor)
-/// が境界始点の barrier 対角 O(1e12) で FAIL — 両契約を同時に固定する。
+/// 期待 m は named const 導出だと revert で期待値も動く自己参照になるため
+/// literal 0.02 固定 + 出所 assert を併置する。
+///
+/// Revert-fail (実測 coldboyd_revert_fail.log): cold 政策を warm 用 1e-6 に戻すと
+/// m = 2e-6 で終点 0.755 → 0.7500005、出所 assert も 0.02 ≠ 2e-6 で FAIL。
 #[test]
-fn sentinel_cold_init_projection_bound_weight_oracle() {
+fn sentinel_cold_init_projection_bound_weight_oracle_cold_policy() {
     use super::init::build_initial_point;
-    use super::state::WARM_BOUND_REL_MARGIN;
+    use super::state::{COLD_BOUND_ABS_MARGIN, COLD_BOUND_REL_MARGIN};
     use crate::qp::ipm_core::kkt::{build_base_constraints, build_bound_box};
     use otspot_num::linalg::timeout::TimeoutCtx;
 
-    /// strict-interior 押し込み量: lb 上の raw 始点が range·WARM_BOUND_REL_MARGIN
-    /// だけ内側へ動く (helper と同一契約、range = 2)。
-    const INIT_SHIFT_MARGIN: f64 = 2.0 * WARM_BOUND_REL_MARGIN;
+    /// strict-interior 押し込み量: cold 政策の literal 固定 (range = 2 で
+    /// (2·1e-2).min(1.0) = 0.02)。導出禁止の理由は上記 doc。
+    const INIT_SHIFT_MARGIN: f64 = 0.02;
+    // 出所固定: named const の方が literal とズレたら本 test を直せ、という合図。
+    assert_eq!(
+        (2.0 * COLD_BOUND_REL_MARGIN).min(COLD_BOUND_ABS_MARGIN),
+        INIT_SHIFT_MARGIN,
+        "cold 政策 const が sentinel の期待 m と不一致 (政策変更時は literal も更新)"
+    );
     /// 手計算オラクル: x = m + 3(1−m)/(2+2·1) = 3/4 + m/4 (導出は上の doc)。
     const ORACLE_COLD_INIT_X: f64 = 0.75 + 0.25 * INIT_SHIFT_MARGIN;
     /// 2×2 系は f64 因子化でこの桁まで一意 (条件数 ~6)。因子化残余の余裕。

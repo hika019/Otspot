@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3552 testcases, 44 ignored
+# totals: 3555 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1211,9 +1211,10 @@ otspot-core	qp::ipm_core::ippmm::state::pf_stuck_tests::pf_stuck_requires_nonzer
 otspot-core	qp::ipm_core::ippmm::tests::cancel_race_before_infeasible_certificate_prefers_timeout	active
 otspot-core	qp::ipm_core::ippmm::tests::no_cancel_still_reports_infeasible_via_inner_solver	active
 otspot-core	qp::ipm_core::ippmm::tests::sentinel_box_no_boundary_overshoot	active
-otspot-core	qp::ipm_core::ippmm::tests::sentinel_cold_init_projection_bound_weight_oracle	active
+otspot-core	qp::ipm_core::ippmm::tests::sentinel_cold_init_projection_bound_weight_oracle_cold_policy	active
 otspot-core	qp::ipm_core::ippmm::tests::sentinel_narrow_box_corner_mu_deadlock	active
 otspot-core	qp::ipm_core::ippmm::tests::sentinel_stationary_point_not_frozen	active
+otspot-core	qp::ipm_core::ippmm::tests::sentinel_strict_interior_shift_uses_cold_policy_not_warm_margin	active
 otspot-core	qp::ipm_core::ippmm::tests::test_box_only_nondiag_q_multi_pattern	active
 otspot-core	qp::ipm_core::ippmm::tests::test_box_only_nondiag_q_stall_reproducer	active
 otspot-core	qp::ipm_core::ippmm::tests::test_fixed_bound_pair_raw_solve_optimal	active
@@ -2933,6 +2934,8 @@ otspot::api_correctness	qp_ineq_constrained	active
 otspot::api_correctness	qp_infeasible	active
 otspot::api_correctness	qp_unconstrained_quadratic	active
 otspot::api_correctness	qp_with_linear	active
+otspot::boyd1_independent_recompute	boyd1_reported_objective_matches_independent_recompute	active
+otspot::boyd1_independent_recompute	boyd2_reported_objective_matches_independent_recompute	active
 otspot::boyd_gap_noise_floor_sentinel	boyd1_inner_gap_gate_respects_evaluation_noise	active
 otspot::boyd_gap_noise_floor_sentinel	boyd2_inner_gap_gate_respects_evaluation_noise	active
 otspot::cbf_feasibility	classical_20_0_root_relaxation_is_feasible	active
