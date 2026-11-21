@@ -5,7 +5,7 @@
 //! (次元 n + m_real、境界対角寄与 d_t = 1/(σ_t+δ) を Q 対角へ畳み込む) で解く
 //! — 旧 extended 射影の正確 Schur 補集約と代数同値 (境界行 σ=0・δ=1 の極限)。
 
-use super::state::{COLD_BOUND_ABS_MARGIN, COLD_BOUND_REL_MARGIN};
+use super::state::{cold_one_sided_margin, COLD_BOUND_ABS_MARGIN, COLD_BOUND_REL_MARGIN};
 use super::warm_start::apply_qp_warm_start;
 use crate::options::SolverOptions;
 use crate::qp::ipm_core::kkt::{build_boxed_augmented_cache, BoundBox};
@@ -38,10 +38,12 @@ const INIT_PROJECTION_REGULARIZATION: f64 = 1.0;
 
 /// cold start 点を box の strict-interior 余白へ押し込む。
 ///
-/// 余白政策は cold 専用 (`COLD_BOUND_REL_MARGIN` / `COLD_BOUND_ABS_MARGIN`、
-/// cd94b80b 直前の cold init literal の復元)。warm 用 `warm_bound_margin`
-/// (相対 1e-6) は warm 点 を最大限尊重する目的の値で、cold x0 に適用すると
-/// box 行スラックが初期から boundary に張り付き barrier 対角 y_t/s_t が発散する
+/// 余白政策は cold 専用。両端有限 box は `(range·COLD_BOUND_REL_MARGIN).min(
+/// COLD_BOUND_ABS_MARGIN)` (cd94b80b 直前の cold init literal の復元)、片側有限
+/// bound は `cold_one_sided_margin` の scale 追従式 (cd94b80b 式を維持、根拠は
+/// `COLD_BOUND_ONE_SIDED_REL_MARGIN` の doc)。cold x0 に warm 用相対 1e-6
+/// (`warm_bound_margin` / `range·WARM_BOUND_REL_MARGIN`) を適用すると box 行
+/// スラックが初期から boundary に張り付き barrier 対角 y_t/s_t が発散する
 /// (実測: qgfrdxpn で初期 s·y/μ min 3.7e-9、445 行が slack<1e-3)。
 ///
 /// box 化は境界行スラックを独立状態にせず s_t = b_t − a_t x の従属量にする
@@ -64,8 +66,8 @@ pub(super) fn strict_interior_shift(bounds: &[(f64, f64)], x: &mut [f64]) {
                     0.5 * (lb + ub)
                 };
             }
-            (true, false) => *xj = xj.max(lb + COLD_BOUND_ABS_MARGIN),
-            (false, true) => *xj = xj.min(ub - COLD_BOUND_ABS_MARGIN),
+            (true, false) => *xj = xj.max(lb + cold_one_sided_margin(*lb)),
+            (false, true) => *xj = xj.min(ub - cold_one_sided_margin(*ub)),
             (false, false) => {}
         }
     }

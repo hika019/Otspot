@@ -1134,7 +1134,7 @@ otspot-core	qp::global::tests::polish_deadline_repairs_exhausted_budget	active
 otspot-core	qp::global::tests::proptest_seed_43b5a909_subbox_duals_recovered	active
 otspot-core	qp::global::tests::proptest_seed_a46bde58_kkt_regression	active
 otspot-core	qp::global::tests::qp_global_finalize_backstop_demotes_cancelled_complete_search	active
-otspot-core	qp::global::tests::qp_global_loop_baseline_boxed_tree_exhausts_at_six_nodes	active
+otspot-core	qp::global::tests::qp_global_loop_baseline_boxed_tree_exhausts_at_fourteen_nodes	active
 otspot-core	qp::global::tests::qp_global_loop_honors_cancel_flag_not_only_deadline	active
 otspot-core	qp::global::tests::qp_global_proven_convex_has_bound_gap_cert	active
 otspot-core	qp::global::tests::qp_global_proven_nonconvex_has_bound_gap_cert	active
@@ -1147,7 +1147,7 @@ otspot-core	qp::global::tests::solve_qp_global_cold_vs_global_separation	active
 otspot-core	qp::global::tests::solve_qp_global_empty_box_lb_gt_ub_is_infeasible	active
 otspot-core	qp::global::tests::solve_qp_global_finds_corner_minimum_concave_1d	active
 otspot-core	qp::global::tests::unbranchable_root_exit_reports_root_lower_bound	active
-otspot-core	qp::global::tests::unusable_node_can_be_non_infeasible_with_large_primal_residual	active
+otspot-core	qp::global::tests::unusable_node_at_20_iterations_is_non_infeasible_with_large_primal_residual	active
 otspot-core	qp::global::tests::update_incumbent_rejects_non_finite_candidate	active
 otspot-core	qp::global::tree::tests::best_lower_bound_matches_top	active
 otspot-core	qp::global::tree::tests::pop_returns_smallest_lower_bound_first	active
@@ -1214,7 +1214,7 @@ otspot-core	qp::ipm_core::ippmm::tests::sentinel_box_no_boundary_overshoot	activ
 otspot-core	qp::ipm_core::ippmm::tests::sentinel_cold_init_projection_bound_weight_oracle_cold_policy	active
 otspot-core	qp::ipm_core::ippmm::tests::sentinel_narrow_box_corner_mu_deadlock	active
 otspot-core	qp::ipm_core::ippmm::tests::sentinel_stationary_point_not_frozen	active
-otspot-core	qp::ipm_core::ippmm::tests::sentinel_strict_interior_shift_uses_cold_policy_not_warm_margin	active
+otspot-core	qp::ipm_core::ippmm::tests::sentinel_strict_interior_shift_cold_box_relative_and_one_sided_scale	active
 otspot-core	qp::ipm_core::ippmm::tests::test_box_only_nondiag_q_multi_pattern	active
 otspot-core	qp::ipm_core::ippmm::tests::test_box_only_nondiag_q_stall_reproducer	active
 otspot-core	qp::ipm_core::ippmm::tests::test_fixed_bound_pair_raw_solve_optimal	active

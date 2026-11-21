@@ -17,14 +17,33 @@ pub(super) fn warm_bound_margin(bound: f64) -> f64 {
     WARM_BOUND_REL_MARGIN * bound.abs().max(1.0)
 }
 
-/// cold start 点の strict-interior 余白 (range 比率)。warm 用 1e-6 は
+/// cold start 点の strict-interior 余白 (両端有限 box: range 比率)。warm 用 1e-6 は
 /// warm 点 を最大限尊重する値で、cold x0 に使うと box 行スラック分布が劣化する
 /// (実測: qgfrdxpn 規模で初期 s·y/μ min 3.7e-9)。cd94b80b 直前の cold init
 /// 政策 `(range * 0.01).min(1.0)` の復元。
 pub(super) const COLD_BOUND_REL_MARGIN: f64 = 1e-2;
-/// 両端有限 box の余白の絶対上限、および片側有限 bound の cold 余白。
-/// cd94b80b 直前の literal (cap 1.0 / `lb + 1.0` / `ub - 1.0`) と同一値。
+/// 両端有限 box の cold 余白の絶対上限、および cold x0 片側 seed
+/// (`build_initial_point` の `lb + 1.0` / `ub - 1.0`) と同一の絶対値。
+/// cd94b80b 直前の literal と同一値。`strict_interior_shift` の片側有限 bound
+/// の押し込みはこれを使わない (→ `cold_one_sided_margin`)。
 pub(super) const COLD_BOUND_ABS_MARGIN: f64 = 1.0;
+/// cold 片側有限 bound の strict-interior 余白の相対係数
+/// (scale 追従式 `COLD_BOUND_ONE_SIDED_REL_MARGIN · max(|bound|, 1)`)。
+/// cd94b80b 直前の literal は絶対 1.0 (`lb + 1.0` / `ub - 1.0`) だったが、box
+/// アーキテクチャでは cold x0 が 0 優先 (BOYD 系の最適点は境界 x=0.1 上) で、
+/// 絶対 1.0 の押し込みは始点を最优点から 1.0 離す。実測 (BOYD、台帳
+/// /tmp/opencode/presolve_impl/trioc.md §BOYD): 絶対 1.0 構成は BOYD1 iters 109
+/// (Optimal)・BOYD2 は 164 iter で SuboptimalSolution (obj +5.9e-6 / 相対 2.8e-7
+/// vs 独立オラクル)、scale 追従式に戻すと BOYD1 96 / BOYD2 88 でいずれも
+/// Optimal。よって片側は cd94b80b の scale 追従式を維持する (係数は warm 用
+/// 値の single-source エイリアスで、cold 政策として別名で固定)。
+pub(super) const COLD_BOUND_ONE_SIDED_REL_MARGIN: f64 = WARM_BOUND_REL_MARGIN;
+/// cold 片側有限 bound の strict-interior 余白。絶対固定だと |b|≫1 で相対 0、
+/// |b|≪1 で過剰押し込みの両極が出るため `warm_bound_margin` と同一構造で
+/// |bound| scale 追従させる (根拠は `COLD_BOUND_ONE_SIDED_REL_MARGIN` の doc)。
+pub(super) fn cold_one_sided_margin(bound: f64) -> f64 {
+    COLD_BOUND_ONE_SIDED_REL_MARGIN * bound.abs().max(1.0)
+}
 /// 不等式行 s, y の boundary 上で σ=s/y が発散するため両側を floor。
 pub(super) const WARM_SY_MIN: f64 = 1e-8;
 

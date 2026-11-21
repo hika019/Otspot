@@ -2829,8 +2829,17 @@ mod tests {
     /// (n=40 中 39 変数は自由、target はその box 内で到達可能な値を選定)、旧実装が
     /// これを無音 discard していたら偽の「完全探索」を生みうる、という P1-1 の
     /// 前提が絵空事でないことを示す。
+    ///
+    /// 削除した `unusable_node_can_be_non_infeasible_with_large_primal_residual` の
+    /// named successor (イテレーション予算 30 → 20、assert その場の編集はしていない)。
+    /// 予算が変わった理由: cold init strict-interior 政策分離で同一 fixture の局所
+    /// solve の収束が約 2 倍速くなり、30 反復では iterate が実用可能 (pf_rel 1.39e-7、
+    /// HEAD では 4.56e-2) に到達してしまった (予算 1〜60 の実測スキャン:
+    /// HEAD は 30 反復まで pf_rel ≥ 4.56e-2・60 で 1.66e-15、cold 政策分離系は 20 まで
+    /// 4.45e-2・30 で 1.39e-7)。本テストの契約は「非 Infeasible の unusable node が
+    /// 存在する」こと自体で、その現象は 20 反復予算でそのまま成立する (以下)。
     #[test]
-    fn unusable_node_can_be_non_infeasible_with_large_primal_residual() {
+    fn unusable_node_at_20_iterations_is_non_infeasible_with_large_primal_residual() {
         let n = 40usize;
         let mut qi = vec![];
         let mut qj = vec![];
@@ -2861,7 +2870,7 @@ mod tests {
         )
         .unwrap();
         let mut o = SolverOptions::default();
-        o.ipm.max_iter = 30;
+        o.ipm.max_iter = 20;
         o.timeout_secs = Some(15.0);
         let res = solve_local_upper_bound(&p, &p.bounds.clone(), &o, None);
         assert_eq!(
@@ -2914,23 +2923,26 @@ mod tests {
         .unwrap()
     }
 
-    /// 削除した `qp_global_loop_baseline_processes_both_children_without_cancel`
-    /// の named successor (旧テストの assert をその場で編集せず、削除 + 新規追加で
+    /// 削除した `qp_global_loop_baseline_boxed_tree_exhausts_at_six_nodes` の
+    /// named successor (旧テストの assert をその場で編集せず、削除 + 新規追加で
     /// 契約変更を表現している)。
     ///
-    /// 旧契約が変わった理由: 境界行 box 化 (境界行へ dual damping δ を適用しない
-    /// 正確 barrier 対角) で inner solve が厳密化し、左枝 infeasible 領域の発見が
-    /// 早まって探索木が 6 ノードで尽きるようになった。旧値 10 は旧 KKT 系の契約
-    /// のスナップショットで、現系では再現しない (10 → 6)。
+    /// 契約値履歴: 10 (旧 KKT 系) → 6 (境界行 box 化、infeasible 領域発見が早い) →
+    /// 14 (cold init strict-interior 政策分離: cold x-shift が初期点を変え分岐列を
+    /// 合法に動かす)。スナップショット値は手導出不可 (同一バイナリ実測のみ)。fixture
+    /// の趣旨は不変: `x0>=0.1` は interval bounds に invisible なので分割が尽きるまで
+    /// 続き、cancel なしでは root を大きく超えてループが稼働する (対比先
+    /// `qp_global_loop_honors_cancel_flag_not_only_deadline` の停止点 1 との差が
+    /// 「1 で止まる fixture の偽物でない」要件を維持)。
     ///
-    /// fixture の趣旨は旧テストと不変: `x0>=0.1` 制約は interval/α-BB bounds に
-    /// invisible なので infeasible 領域の分割が尽きるまで続き、cancel なしでは
-    /// root を大きく超えてループが稼働する。値 6 は同一バイナリ 2 回実走で一致
-    /// した実測スナップショット (手導出不可)。対比先である
-    /// `qp_global_loop_honors_cancel_flag_not_only_deadline` の停止点 1 との差は、
-    /// 「もともと 1 で止まる fixture の偽物でない」要件を維持する。
+    /// 6→14 の独立検証 (drift 合法性、trioc 台帳実測): 14 ノード木の最終解は
+    /// obj = -2.000000000000e0 で手計算大域最適 -2 (min -(x0²+x1²)、x0=1、x1=±1)
+    /// と一致、status=NonconvexGlobal (indefinite Q の証明完結値)、remaining_lb=+inf
+    /// (未証明領域ゼロ)。HEAD 331b839f の 6 ノード実走とこれらの品質項目がすべて
+    /// 一致し、max_depth 3→7 / pruned 5→13 のみ漂移 = 証明の劣化ではなく分岐列の
+    /// 移動。よって契約値を 14 へ更新し、品質 (obj・証明完結) を本テストで同時固定する。
     #[test]
-    fn qp_global_loop_baseline_boxed_tree_exhausts_at_six_nodes() {
+    fn qp_global_loop_baseline_boxed_tree_exhausts_at_fourteen_nodes() {
         let p = x0_ge_0p1_concave_2d();
         let cfg = GlobalOptimizationConfig {
             gap_tol: 1e-12,
@@ -2940,12 +2952,29 @@ mod tests {
             use_mccormick: false,
             ..GlobalOptimizationConfig::default()
         };
-        let (_, stats) = solve_qp_global_with_stats(&p, &opts(10.0), &cfg);
+        let (result, stats) = solve_qp_global_with_stats(&p, &opts(10.0), &cfg);
         assert_eq!(
-            stats.nodes_processed, 6,
-            "baseline (no cancel): box 化系で fixture は 6 ノードで尽く (旧系の契約値は 10)。 \
-             1 ノードで止まる fixture の偽物でないことは cancel sentinel との対比で保証される。got {}",
+            stats.nodes_processed, 14,
+            "baseline (no cancel): cold init 政策分離系で fixture は 14 ノードで尽く \
+             (契約値履歴 10 → 6 → 14、doc 参照)。1 ノードで止まる fixture の偽物でない \
+             ことは cancel sentinel との対比で保証される。got {}",
             stats.nodes_processed
+        );
+        assert_eq!(
+            result.status,
+            SolveStatus::NonconvexGlobal,
+            "Q indefinite の証明完結 status でない (品質ピン留め、doc 参照)"
+        );
+        assert!(
+            (result.objective + 2.0).abs() <= 1e-6,
+            "最終解 obj={} が手計算大域最適 -2 と不一致 (ノード数漂移で品質が\
+             壊れた場合はここで検出)",
+            result.objective
+        );
+        assert!(
+            stats.remaining_lb.is_infinite() && stats.remaining_lb.is_sign_positive(),
+            "探索木が完結していない (未証明領域残存): remaining_lb={}",
+            stats.remaining_lb
         );
     }
 

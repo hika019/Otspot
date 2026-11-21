@@ -963,17 +963,16 @@ fn test_fixed_bound_pair_raw_solve_optimal() {
     close(result.solution[2], 2.0, "x2 (固定)");
 }
 
-/// SENTINEL (cold 政策 vs warm 用マージン): `strict_interior_shift` は cold 政策
-/// (両端有限 `(range·COLD_BOUND_REL_MARGIN).min(COLD_BOUND_ABS_MARGIN)`、
-/// 片側有限 `COLD_BOUND_ABS_MARGIN`) で押し込む。warm 専用 1e-6 相対
-/// (`warm_bound_margin` / `range·WARM_BOUND_REL_MARGIN`) を cold 始点に適用すると
-/// box 行スラックが初期から boundary に張り付き barrier 対角が発散する
-/// (cold x0 への誤用が修正対象の病理そのもの)。
-///
-/// Revert-fail (実測 coldboyd_revert_fail.log): helper のマージン政策を warm 用
-/// 1e-6 に戻すと (1) の押し込みが −4.999995 ≠ −4.0、(2) が 1e-4 ≠ 1.0 で FAIL。
+/// SENTINEL (cold 政策の strict-interior 押し込み): `strict_interior_shift` は
+/// 両端有限 box を cold 相対 `(range·COLD_BOUND_REL_MARGIN).min(COLD_BOUND_ABS_MARGIN)`
+/// で、片側有限 bound を scale 追従 `COLD_BOUND_ONE_SIDED_REL_MARGIN·max(|b|,1)`
+/// (`cold_one_sided_margin`) で押し込む (variant C 契約)。
+/// warm 用相対 1e-6 を両端 box に適用すると box 行スラックが初期から boundary に
+/// 張り付き barrier 対角が発散する (cold x0 への誤用が修正対象の病理そのもの)。
+/// 片側を絶対 1.0 (cd94b80b 直前 literal、variant A) に戻すと BOYD1/BOYD2 が
+/// 劣化する (根拠: `COLD_BOUND_ONE_SIDED_REL_MARGIN` の doc の実測)。
 #[test]
-fn sentinel_strict_interior_shift_uses_cold_policy_not_warm_margin() {
+fn sentinel_strict_interior_shift_cold_box_relative_and_one_sided_scale() {
     use super::init::strict_interior_shift;
 
     /// 押し込み量の実測は clamp 境界の f64 同一性なので余裕は機械_EPS 級で足りるが、
@@ -984,16 +983,33 @@ fn sentinel_strict_interior_shift_uses_cold_policy_not_warm_margin() {
     type ShiftCase = (&'static str, Vec<(f64, f64)>, Vec<f64>, Vec<f64>);
 
     let cases: Vec<ShiftCase> = vec![
-        // (1) 片側 lb=−5 上の始点: cold 絶対 1.0 → −4.0 (warm 1e-6·|−5| なら −4.999995)
+        // (1) 片側 lb=−5 上の始点: scale 追従 1e-6·max(|−5|,1) → −4.999995
+        //     (絶対 1.0 = variant A なら −4.0、押し込み無しなら −5.0)
         (
-            "one-sided-lb",
+            "one-sided-lb-scale",
             vec![(-5.0, f64::INFINITY)],
             vec![-5.0],
-            vec![-4.0],
+            vec![-4.999995],
         ),
-        // (2) 両端 [0,100]: range·1e-2 = 1.0 が cap 1.0 (warm 相対 1e-6 なら 1e-4)
-        ("both-capped", vec![(0.0, 100.0)], vec![0.0], vec![1.0]),
-        // (3) 両端 [0,1]: range·1e-2 = 0.01 (warm 相対なら 1e-6)
+        // (2) 片側 ub=+5 上の始点: 対称側も同一式 → 4.999995
+        (
+            "one-sided-ub-scale",
+            vec![(f64::NEG_INFINITY, 5.0)],
+            vec![5.0],
+            vec![4.999995],
+        ),
+        // (3) 片側 lb=0: max(|0|,1)=1 の floor で 1e-6 (絶対固定なら原点系で過剰
+        //     押し込み、floor 無しなら余白 0 に退化)
+        (
+            "one-sided-floor-at-0",
+            vec![(0.0, f64::INFINITY)],
+            vec![0.0],
+            vec![1e-6],
+        ),
+        // (4) 両端 [0,1000]: range·1e-2 = 10 が cap 1.0 に張る
+        //     (warm 相対 1e-6 の cold 誤用なら 1e-3、cap 撤去なら 10.0)
+        ("both-capped", vec![(0.0, 1000.0)], vec![0.0], vec![1.0]),
+        // (5) 両端 [0,1]: range·1e-2 = 0.01 (warm 相対なら 1e-6)
         ("both-rel", vec![(0.0, 1.0)], vec![0.0], vec![0.01]),
         // 不変条件: 内部始点・非有界・固定変数は動かさない
         (
@@ -1010,7 +1026,8 @@ fn sentinel_strict_interior_shift_uses_cold_policy_not_warm_margin() {
             assert!(
                 (got - want).abs() <= SHIFT_TOL,
                 "{label}[{i}]: shifted {got} != cold 政策の期待値 {want} \
-                 (warm 用 1e-6 マージンの cold 誤用に逆戻りした疑い)"
+                 (両端 box の warm 用 1e-6 相対への逆戻り、または片側の絶対 1.0 \
+                 (variant A) への逆戻りの疑い)"
             );
         }
     }
