@@ -207,7 +207,10 @@ pub(crate) fn refine_kkt_extended_precision(
     let factor = {
         let mut dp = DELTA_P;
         let mut dd = DELTA_D;
-        let mut cur_k = k_mat.clone();
+        // k_mat はこの時点以降どこからも参照されない (penalty 適用済み)。
+        // clone だと K 行列 (nnz = nnzQ + 2nnzA + n + m、24 B/nnz) が IR ループ
+        // 期間中二重常駐になるため、所有権をそのまま move する (数値は同一)。
+        let mut cur_k = k_mat;
         let mut factor_result: Option<otspot_num::linalg::ldl::LdlFactorizationAmd> = None;
         let mut retries = 0usize;
         loop {
