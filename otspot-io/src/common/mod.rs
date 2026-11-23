@@ -48,6 +48,111 @@ pub(crate) fn objective_offset_from_rhs(rhs: f64, maximize: bool) -> f64 {
     offset + 0.0
 }
 
+/// A name-to-`u32` interning table shared by the row / column / vector stores.
+///
+/// The parsers reference every entry by interned id instead of by `String`:
+/// a name is owned only per *distinct name* (a hash key plus an id-indexed
+/// slot; no per-entry copies) while the per-entry records stay fixed-size.
+/// Measured on the bench corpus, the per-entry `String` copies dominated
+/// parse-time residency (137-262 bytes per sparse entry, most of it duplicated
+/// name bytes); ids cut that to the 12-16 bytes of the record itself.
+#[derive(Default)]
+pub(crate) struct NameTable {
+    ids: std::collections::HashMap<String, u32>,
+    names: Vec<String>,
+}
+
+impl NameTable {
+    /// Id of `name`, appending it to the table on first sight.
+    pub(crate) fn intern(&mut self, name: &str) -> u32 {
+        if let Some(&id) = self.ids.get(name) {
+            return id;
+        }
+        // `u32` ids assume a file cannot declare more than 4 billion distinct
+        // names; the byte count such a file would carry exceeds any machine
+        // this parser runs on, so the truncation cast is unreachable in
+        // practice rather than a silent overflow.
+        debug_assert!(self.names.len() < u32::MAX as usize);
+        let id = self.names.len() as u32;
+        self.names.push(name.to_string());
+        self.ids.insert(name.to_string(), id);
+        id
+    }
+
+    /// Id of `name` if this table has seen it; never inserts.
+    pub(crate) fn lookup(&self, name: &str) -> Option<u32> {
+        self.ids.get(name).copied()
+    }
+
+    /// The name behind an id (error messages resolve ids back through here).
+    pub(crate) fn name(&self, id: u32) -> &str {
+        &self.names[id as usize]
+    }
+
+    /// Number of distinct names interned so far.
+    pub(crate) fn len(&self) -> usize {
+        self.names.len()
+    }
+}
+
+/// A [`NameTable`] plus the subset of its ids a parser has seen **declared**
+/// (in a ROWS / COLUMNS section) as opposed to merely **referenced** (from
+/// RHS / RANGES / BOUNDS / QUADOBJ).
+///
+/// Declaration and reference can arrive in any file order — a BOUNDS line may
+/// name a column that COLUMNS declares later — so "declared" is a flag per id,
+/// not a prefix of ids, and strict-reference validation checks the flags after
+/// the whole file is read (exactly where the name-string implementation did).
+#[derive(Default)]
+pub(crate) struct NameRegistry {
+    table: NameTable,
+    declared: Vec<bool>,
+}
+
+impl NameRegistry {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Intern `name` as a reference; does not mark it declared.
+    pub(crate) fn intern_ref(&mut self, name: &str) -> u32 {
+        self.table.intern(name)
+    }
+
+    /// Intern `name` and mark it declared; the bool reports whether it was
+    /// already declared (a duplicate declaration the caller must reject).
+    pub(crate) fn intern_declared(&mut self, name: &str) -> (u32, bool) {
+        let id = self.table.intern(name);
+        if (id as usize) >= self.declared.len() {
+            self.declared.resize(self.table.len(), false);
+        }
+        let already = std::mem::replace(&mut self.declared[id as usize], true);
+        (id, already)
+    }
+
+    /// Whether `id` was marked declared.
+    pub(crate) fn is_declared(&self, id: u32) -> bool {
+        self.declared.get(id as usize).copied().unwrap_or(false)
+    }
+
+    /// Whether `name` was interned AND marked declared.
+    pub(crate) fn is_declared_name(&self, name: &str) -> bool {
+        self.table
+            .lookup(name)
+            .is_some_and(|id| self.is_declared(id))
+    }
+
+    /// The name behind an id.
+    pub(crate) fn name(&self, id: u32) -> &str {
+        self.table.name(id)
+    }
+
+    /// Number of distinct names (declared or not).
+    pub(crate) fn len(&self) -> usize {
+        self.table.len()
+    }
+}
+
 /// Layout of a data line, decided once for the whole file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Format {
@@ -508,28 +613,6 @@ pub(crate) fn parse_columns_entry(
     }
 }
 
-/// Lazily-built row-name membership index used to spot RHS/RANGES lines that
-/// omit the vector name (see `parse_vector_entry`).
-///
-/// ROWS always precedes RHS/RANGES in a well-formed file (`SectionState`'s
-/// duplicate-section check keeps ROWS from reappearing), so the set is frozen
-/// by the time it is queried; building it once avoids an O(rows) rescan per
-/// RHS/RANGES line.
-#[derive(Default)]
-pub(crate) struct RowNameIndex(Option<std::collections::HashSet<String>>);
-
-impl RowNameIndex {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn contains(&mut self, rows: &[(String, RowType)], name: &str) -> bool {
-        self.0
-            .get_or_insert_with(|| rows.iter().map(|(n, _)| n.clone()).collect())
-            .contains(name)
-    }
-}
-
 /// `(vector_name, (row_name, value) pairs)` — see `parse_vector_entry`.
 pub(crate) type VectorEntry = Result<(Option<String>, Vec<(String, f64)>), String>;
 
@@ -559,15 +642,14 @@ pub(crate) fn parse_vector_entry(
     line: &str,
     tokens: &[&str],
     format: Format,
-    rows: &[(String, RowType)],
-    row_index: &mut RowNameIndex,
+    is_declared_row: &dyn Fn(&str) -> bool,
     line_num: usize,
     section: &str,
     allow_nonfinite_for_row: Option<&str>,
 ) -> VectorEntry {
     match format {
         Format::Free => {
-            let has_vector_name = !tokens.is_empty() && !row_index.contains(rows, tokens[0]);
+            let has_vector_name = !tokens.is_empty() && !is_declared_row(tokens[0]);
             let (vector_name, pair_tokens) = if has_vector_name {
                 (Some(tokens[0].to_string()), &tokens[1..])
             } else {
@@ -875,8 +957,8 @@ fn pairs_from_fixed_fields(
     Ok(pairs)
 }
 
-/// Tracks `(vector_name, row_name)` pairs seen in a repeatable-vector section
-/// (RHS or RANGES), and which vector's values are actually applied.
+/// Tracks `(vector, row)` id pairs seen in a repeatable-vector section (RHS or
+/// RANGES), and which vector's values are actually applied.
 ///
 /// The standard allows a section to carry multiple named vectors, each free to
 /// reuse the same row names. Only the FIRST vector encountered is applied
@@ -889,65 +971,84 @@ fn pairs_from_fixed_fields(
 /// unnamed entries is rejected: the two readings (same vector, or a second
 /// vector whose entries must then be discarded) differ in the values that reach
 /// the model, and picking either silently would drop data.
+///
+/// Rows enter as interned ids owned by the caller's row table (the name is
+/// passed along only to format error messages); vector names are interned here
+/// because their count is bounded by the number of vectors in the section, not
+/// by the number of entries.
 #[derive(Default)]
 pub(crate) struct VectorSectionState {
-    seen: std::collections::HashSet<(String, String)>,
-    first_vector: Option<String>,
+    vectors: NameTable,
+    /// Id the anonymous vector gets in `vectors` (see `ANONYMOUS_VECTOR`).
+    anonymous: u32,
+    seen: std::collections::HashSet<(u32, u32)>,
+    first_vector: Option<u32>,
 }
 
 /// Identity given to entries written before any vector name appears. It can
 /// never collide with a real vector name, which is never empty when present.
 const ANONYMOUS_VECTOR: &str = "";
 
+/// Marker stored in compact-index arrays (`col_index`, `row_index`) for an
+/// interned id that has no compact problem index — e.g. a name only ever
+/// referenced (never declared). Ids are `u32` and a real index never reaches
+/// `u32::MAX`, so the sentinel cannot collide with a valid index.
+pub(crate) const NO_INDEX: u32 = u32::MAX;
+
 impl VectorSectionState {
     pub(crate) fn new() -> Self {
-        Self::default()
+        let mut state = Self::default();
+        state.anonymous = state.vectors.intern(ANONYMOUS_VECTOR);
+        state
     }
 
-    /// Row names referenced by *any* vector this section has seen, including
-    /// ones discarded because they weren't the first vector.
+    /// Row ids referenced by *any* vector this section has seen, including ones
+    /// discarded because they weren't the first vector.
     ///
     /// `record` only writes a discarded vector's entries into `seen`, never
     /// into `target` (the RHS/RANGES map `validate_references` otherwise
     /// checks) — a row name that appears solely in a later vector would
     /// therefore never reach a "row not declared" check, letting a typo'd row
     /// name in a discarded vector slip past strict-reference validation.
-    pub(crate) fn referenced_rows(&self) -> impl Iterator<Item = &str> {
-        self.seen.iter().map(|(_, row)| row.as_str())
+    pub(crate) fn referenced_rows(&self) -> impl Iterator<Item = u32> + '_ {
+        self.seen.iter().map(|(_, row)| *row)
     }
 
-    /// Records `row_name -> value` into `target` (only when the entry belongs to
+    /// Records `row_id -> value` into `target` (only when the entry belongs to
     /// the first vector this section opened). Returns an error when
     /// `(vector, row)` repeats, or when a named entry follows unnamed ones.
+    /// `row_name` is only read on the error path, for the message.
     pub(crate) fn record(
         &mut self,
-        target: &mut std::collections::HashMap<String, f64>,
+        target: &mut std::collections::HashMap<u32, f64>,
         section: &str,
         vector_name: Option<&str>,
-        row_name: String,
+        row_id: u32,
+        row_name: &str,
         value: f64,
     ) -> Result<(), String> {
-        let vector = match (self.first_vector.as_deref(), vector_name) {
-            (Some(ANONYMOUS_VECTOR), Some(named)) => {
+        let vector = match (self.first_vector, vector_name) {
+            (Some(open), Some(named)) if open == self.anonymous => {
                 return Err(format!(
                     "{section}: vector '{named}' is named after unnamed entries were already \
                      read; the section is ambiguous (one vector with the name omitted earlier, \
                      or a second vector whose entries must be discarded)"
                 ))
             }
-            (_, Some(named)) => named.to_string(),
-            (Some(open), None) => open.to_string(),
-            (None, None) => ANONYMOUS_VECTOR.to_string(),
+            (_, Some(named)) => self.vectors.intern(named),
+            (Some(open), None) => open,
+            (None, None) => self.anonymous,
         };
 
-        if !self.seen.insert((vector.clone(), row_name.clone())) {
+        if !self.seen.insert((vector, row_id)) {
             return Err(format!(
-                "{section}: duplicate entry for row '{row_name}' in vector '{vector}'"
+                "{section}: duplicate entry for row '{row_name}' in vector '{}'",
+                self.vectors.name(vector)
             ));
         }
-        let is_first_vector = self.first_vector.get_or_insert_with(|| vector.clone()) == &vector;
+        let is_first_vector = *self.first_vector.get_or_insert(vector) == vector;
         if is_first_vector {
-            target.insert(row_name, value);
+            target.insert(row_id, value);
         }
         Ok(())
     }

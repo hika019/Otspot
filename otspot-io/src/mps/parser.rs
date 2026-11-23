@@ -12,26 +12,30 @@ use super::types::{
 use crate::common::{
     objective_offset_from_rhs, parse_bounds_entry, parse_columns_entry, parse_objsense_value,
     parse_row_decl, parse_vector_entry, parse_with_format_fallback, Format, LineSource,
-    ReaderSource, RowNameIndex, RowType, SectionState, VectorSectionState,
+    NameRegistry, ReaderSource, RowType, SectionState, VectorSectionState, NO_INDEX,
 };
 
+/// Per-entry state uses interned name ids, not `String`s: `columns` holds
+/// (column id, row id, value) fixed-size records and `bounds` likewise, so
+/// parse-time residency per sparse entry no longer depends on how long the
+/// referenced names are (the QPS parser mirrors this).
 pub(super) struct MpsParser {
     format: Format,
     /// Line reached by this reading; reported alongside a failure so the caller
     /// can tell which of the two format readings engaged with more of the file.
     progress: usize,
     problem_name: Option<String>,
-    rows: Vec<(String, RowType)>,
-    row_names: HashSet<String>,
-    columns: Vec<(String, String, f64)>,
-    rhs: HashMap<String, f64>,
-    ranges: HashMap<String, f64>,
+    rows: Vec<(u32, RowType)>,
+    row_names: NameRegistry,
+    col_names: NameRegistry,
+    columns: Vec<(u32, u32, f64)>,
+    rhs: HashMap<u32, f64>,
+    ranges: HashMap<u32, f64>,
     rhs_vectors: VectorSectionState,
     ranges_vectors: VectorSectionState,
-    row_index: RowNameIndex,
-    bounds: Vec<(BoundType, String, Option<f64>)>,
-    obj_row: Option<String>,
-    integer_cols: HashSet<String>,
+    bounds: Vec<(BoundType, u32, Option<f64>)>,
+    obj_row: Option<u32>,
+    integer_cols: HashSet<u32>,
     in_integer_marker: bool,
     maximize: bool,
 }
@@ -43,13 +47,13 @@ impl MpsParser {
             progress: 0,
             problem_name: None,
             rows: Vec::new(),
-            row_names: HashSet::new(),
+            row_names: NameRegistry::new(),
+            col_names: NameRegistry::new(),
             columns: Vec::new(),
             rhs: HashMap::new(),
             ranges: HashMap::new(),
             rhs_vectors: VectorSectionState::new(),
             ranges_vectors: VectorSectionState::new(),
-            row_index: RowNameIndex::new(),
             bounds: Vec::new(),
             obj_row: None,
             integer_cols: HashSet::new(),
@@ -189,16 +193,17 @@ impl MpsParser {
 
         // Two rows sharing a name would make every reference to it ambiguous and
         // silently resolve to whichever landed in the index last.
-        if !self.row_names.insert(row_name.clone()) {
+        let (row_id, already_declared) = self.row_names.intern_declared(&row_name);
+        if already_declared {
             return Err(MpsError::ParseError {
                 line: line_num,
                 message: format!("ROWS: duplicate row name '{}'", row_name),
             });
         }
         if matches!(row_type, RowType::N) && self.obj_row.is_none() {
-            self.obj_row = Some(row_name.clone());
+            self.obj_row = Some(row_id);
         }
-        self.rows.push((row_name, row_type));
+        self.rows.push((row_id, row_type));
         Ok(())
     }
 
@@ -221,11 +226,16 @@ impl MpsParser {
                 }
             })?;
 
+        // A COLUMNS line always carries at least one (row, value) pair, so
+        // marking the column declared here matches the old "declared = appears
+        // in `columns`" set exactly.
+        let col_id = self.col_names.intern_declared(&col_name).0;
         if self.in_integer_marker {
-            self.integer_cols.insert(col_name.clone());
+            self.integer_cols.insert(col_id);
         }
         for (row_name, value) in pairs {
-            self.columns.push((col_name.clone(), row_name, value));
+            let row_id = self.row_names.intern_ref(&row_name);
+            self.columns.push((col_id, row_id, value));
         }
         Ok(())
     }
@@ -246,8 +256,7 @@ impl MpsParser {
             line,
             tokens,
             self.format,
-            &self.rows,
-            &mut self.row_index,
+            &|name| self.row_names.is_declared_name(name),
             line_num,
             section,
             None,
@@ -257,14 +266,22 @@ impl MpsParser {
             message,
         })?;
 
-        let (state, target) = if section == "RHS" {
-            (&mut self.rhs_vectors, &mut self.rhs)
-        } else {
-            (&mut self.ranges_vectors, &mut self.ranges)
-        };
         for (row_name, value) in pairs {
+            let row_id = self.row_names.intern_ref(&row_name);
+            let (state, target) = if section == "RHS" {
+                (&mut self.rhs_vectors, &mut self.rhs)
+            } else {
+                (&mut self.ranges_vectors, &mut self.ranges)
+            };
             state
-                .record(target, section, vector_name.as_deref(), row_name, value)
+                .record(
+                    target,
+                    section,
+                    vector_name.as_deref(),
+                    row_id,
+                    &row_name,
+                    value,
+                )
                 .map_err(|message| MpsError::ParseError {
                     line: line_num,
                     message,
@@ -310,10 +327,11 @@ impl MpsParser {
                 },
             )?;
 
+        let col_id = self.col_names.intern_ref(&col_name);
         if matches!(bound_type, BoundType::BV | BoundType::LI | BoundType::UI) {
-            self.integer_cols.insert(col_name.clone());
+            self.integer_cols.insert(col_id);
         }
-        self.bounds.push((bound_type, col_name, value));
+        self.bounds.push((bound_type, col_id, value));
         Ok(())
     }
 
@@ -324,30 +342,27 @@ impl MpsParser {
     /// the model. Erroring out is also what lets the caller detect a wrong
     /// layout guess and retry the file as fixed-column.
     fn validate_references(&self) -> Result<(), MpsError> {
-        let declared_cols: HashSet<&str> =
-            self.columns.iter().map(|(c, _, _)| c.as_str()).collect();
-
-        for row_name in self
+        for row_id in self
             .columns
             .iter()
-            .map(|(_, row, _)| row.as_str())
-            .chain(self.rhs.keys().map(String::as_str))
-            .chain(self.ranges.keys().map(String::as_str))
+            .map(|&(_, row, _)| row)
+            .chain(self.rhs.keys().copied())
+            .chain(self.ranges.keys().copied())
             .chain(self.rhs_vectors.referenced_rows())
             .chain(self.ranges_vectors.referenced_rows())
         {
-            if !self.row_names.contains(row_name) {
+            if !self.row_names.is_declared(row_id) {
                 return Err(MpsError::UndefinedReference {
                     kind: "row".to_string(),
-                    name: row_name.to_string(),
+                    name: self.row_names.name(row_id).to_string(),
                 });
             }
         }
-        for (_, col_name, _) in &self.bounds {
-            if !declared_cols.contains(col_name.as_str()) {
+        for &(_, col, _) in &self.bounds {
+            if !self.col_names.is_declared(col) {
                 return Err(MpsError::UndefinedReference {
                     kind: "column".to_string(),
-                    name: col_name.clone(),
+                    name: self.col_names.name(col).to_string(),
                 });
             }
         }
@@ -357,25 +372,25 @@ impl MpsParser {
     fn build_lp_problem(&self) -> Result<(LpProblem, Vec<usize>), MpsError> {
         // Only constraint rows get an index. N rows (the objective and any
         // further free row) are declared but never become constraints, so
-        // giving them a `row_map` slot would desynchronise the row indices from
-        // `constraint_types` / `rhs_vec`.
-        let mut row_map: HashMap<&str, usize> = HashMap::new();
+        // giving them a `row_index` slot would desynchronise the row indices
+        // from `constraint_types` / `rhs_vec`.
+        let mut row_index = vec![NO_INDEX; self.row_names.len()];
         let mut constraint_types = Vec::new();
         let mut rhs_vec = Vec::new();
-        for (row_name, row_type) in &self.rows {
+        for &(row_id, row_type) in &self.rows {
             if !row_type.is_constraint() {
                 continue;
             }
-            row_map.insert(row_name.as_str(), row_map.len());
+            row_index[row_id as usize] = constraint_types.len() as u32;
             constraint_types.push(match row_type {
                 RowType::L => ConstraintType::Le,
                 RowType::G => ConstraintType::Ge,
                 RowType::E => ConstraintType::Eq,
                 RowType::N => unreachable!("N rows are skipped above"),
             });
-            rhs_vec.push(self.rhs.get(row_name).copied().unwrap_or(0.0));
+            rhs_vec.push(self.rhs.get(&row_id).copied().unwrap_or(0.0));
         }
-        let base_num_constraints = row_map.len();
+        let base_num_constraints = constraint_types.len();
 
         // RANGES: expand interval constraints to Le + Ge pairs (IBM convention).
         //   L: b - |r| <= Ax <= b
@@ -387,20 +402,22 @@ impl MpsParser {
         // iterating the map would order the appended rows by hash, making the
         // constraint indices — and therefore the built matrix — differ between
         // runs of the same input.
-        let mut range_row_map: HashMap<&str, usize> = HashMap::new();
+        let mut range_row_index = vec![NO_INDEX; self.row_names.len()];
         let mut range_lowers: Vec<f64> = Vec::new();
-        for (row_name, _) in &self.rows {
-            let Some(&range_val) = self.ranges.get(row_name) else {
+        for &(row_id, _) in &self.rows {
+            let Some(&range_val) = self.ranges.get(&row_id) else {
                 continue;
             };
             // A RANGES entry on a declared free (N) row has no constraint to
             // widen; the standard ignores it.
-            let Some(&idx) = row_map.get(row_name.as_str()) else {
+            let base_idx = row_index[row_id as usize];
+            if base_idx == NO_INDEX {
                 continue;
-            };
-            let b = rhs_vec[idx];
+            }
+            let base_idx = base_idx as usize;
+            let b = rhs_vec[base_idx];
             let abs_r = range_val.abs();
-            let (lower, upper) = match constraint_types[idx] {
+            let (lower, upper) = match constraint_types[base_idx] {
                 ConstraintType::Le => (b - abs_r, b),
                 ConstraintType::Ge => (b, b + abs_r),
                 ConstraintType::Eq => {
@@ -412,9 +429,9 @@ impl MpsParser {
                 }
                 _ => continue,
             };
-            constraint_types[idx] = ConstraintType::Le;
-            rhs_vec[idx] = upper;
-            range_row_map.insert(row_name.as_str(), base_num_constraints + range_lowers.len());
+            constraint_types[base_idx] = ConstraintType::Le;
+            rhs_vec[base_idx] = upper;
+            range_row_index[row_id as usize] = (base_num_constraints + range_lowers.len()) as u32;
             range_lowers.push(lower);
         }
         for lower in &range_lowers {
@@ -423,30 +440,40 @@ impl MpsParser {
         }
         let num_constraints = base_num_constraints + range_lowers.len();
 
-        let mut col_map: HashMap<&str, usize> = HashMap::new();
-        for (col_name, _, _) in &self.columns {
-            let next = col_map.len();
-            col_map.entry(col_name.as_str()).or_insert(next);
+        // Compact column indices in first-appearance order — the numbering the
+        // name-keyed `col_map` used to produce.
+        let mut col_index = vec![NO_INDEX; self.col_names.len()];
+        let mut num_vars = 0usize;
+        for &(col, _, _) in &self.columns {
+            if col_index[col as usize] == NO_INDEX {
+                col_index[col as usize] = num_vars as u32;
+                num_vars += 1;
+            }
         }
-        let num_vars = col_map.len();
 
-        let obj_row = self.obj_row.as_deref();
+        let obj_row = self.obj_row;
         let mut c = vec![0.0; num_vars];
-        let mut triplets = Vec::new();
-        for (col_name, row_name, value) in &self.columns {
-            let col_idx = col_map[col_name.as_str()];
-            if Some(row_name.as_str()) == obj_row {
-                c[col_idx] += *value;
+        let mut a_rows: Vec<usize> = Vec::with_capacity(self.columns.len());
+        let mut a_cols: Vec<usize> = Vec::with_capacity(self.columns.len());
+        let mut a_vals: Vec<f64> = Vec::with_capacity(self.columns.len());
+        for &(col, row, value) in &self.columns {
+            let col_idx = col_index[col as usize] as usize;
+            if Some(row) == obj_row {
+                c[col_idx] += value;
                 continue;
             }
             // Declared free (N) rows other than the objective carry no
             // constraint; the standard ignores their coefficients.
-            let Some(&row_idx) = row_map.get(row_name.as_str()) else {
+            if row_index[row as usize] == NO_INDEX {
                 continue;
-            };
-            triplets.push((row_idx, col_idx, *value));
-            if let Some(&range_row_idx) = range_row_map.get(row_name.as_str()) {
-                triplets.push((range_row_idx, col_idx, *value));
+            }
+            a_rows.push(row_index[row as usize] as usize);
+            a_cols.push(col_idx);
+            a_vals.push(value);
+            if range_row_index[row as usize] != NO_INDEX {
+                a_rows.push(range_row_index[row as usize] as usize);
+                a_cols.push(col_idx);
+                a_vals.push(value);
             }
         }
         // Normalize MAX → MIN by negating the objective.
@@ -458,25 +485,24 @@ impl MpsParser {
 
         // Finiteness of the objective-row RHS is guaranteed at parse time.
         let obj_offset = match obj_row {
-            Some(name) => {
-                objective_offset_from_rhs(self.rhs.get(name).copied().unwrap_or(0.0), self.maximize)
+            Some(id) => {
+                objective_offset_from_rhs(self.rhs.get(&id).copied().unwrap_or(0.0), self.maximize)
             }
             None => 0.0,
         };
 
-        let rows: Vec<usize> = triplets.iter().map(|&(r, _, _)| r).collect();
-        let cols: Vec<usize> = triplets.iter().map(|&(_, c, _)| c).collect();
-        let vals: Vec<f64> = triplets.iter().map(|&(_, _, v)| v).collect();
-        let a = CscMatrix::from_triplets(&rows, &cols, &vals, num_constraints, num_vars).map_err(
-            |e| MpsError::ParseError {
+        let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, num_constraints, num_vars)
+            .map_err(|e| MpsError::ParseError {
                 line: 0,
                 message: format!("Failed to build matrix: {}", e),
-            },
-        )?;
+            })?;
 
         let mut bounds = vec![(0.0, f64::INFINITY); num_vars];
-        for (bound_type, col_name, value) in &self.bounds {
-            let col_idx = col_map[col_name.as_str()];
+        for (bound_type, col, value) in &self.bounds {
+            // Undefined column references were rejected by
+            // `validate_references` before this runs in `run`, so the compact
+            // index exists.
+            let col_idx = col_index[*col as usize] as usize;
             // LO/UP/FX/LI/UI are value_required at parse time
             // (`parse_bounds_entry`), so `value` is guaranteed `Some` here. The
             // `ok_or_else` is defense against that invariant regressing: it must
@@ -487,7 +513,8 @@ impl MpsParser {
                     message: format!(
                         "BOUNDS: {:?} entry for column '{}' requires a value but none was \
                          recorded",
-                        bound_type, col_name
+                        bound_type,
+                        self.col_names.name(*col)
                     ),
                 })
             };
@@ -509,15 +536,15 @@ impl MpsParser {
 
         // Integer variables with no explicit BOUNDS entry default to binary
         // [0, 1] (classical OSL/CPLEX/HiGHS convention).
-        let explicitly_bounded: HashSet<&str> = self
-            .bounds
-            .iter()
-            .map(|(_, name, _)| name.as_str())
-            .collect();
+        let mut explicitly_bounded = vec![false; self.col_names.len()];
+        for &(_, col, _) in &self.bounds {
+            explicitly_bounded[col as usize] = true;
+        }
         let mut integer_vars: Vec<usize> = Vec::with_capacity(self.integer_cols.len());
-        for col_name in &self.integer_cols {
-            if let Some(&col_idx) = col_map.get(col_name.as_str()) {
-                if !explicitly_bounded.contains(col_name.as_str()) {
+        for &col in &self.integer_cols {
+            if col_index[col as usize] != NO_INDEX {
+                let col_idx = col_index[col as usize] as usize;
+                if !explicitly_bounded[col as usize] {
                     bounds[col_idx].1 = INTEGER_DEFAULT_UPPER_BINARY;
                 }
                 integer_vars.push(col_idx);
@@ -543,6 +570,11 @@ impl MpsParser {
 }
 
 /// Parse `source`, retrying as fixed-column MPS if the free-format read fails.
+///
+/// The retry re-streams the source from the start (`LineSource` is replayable
+/// by contract); nothing from the failed free-format reading is carried over,
+/// which is what lets the parser drop its intermediates as it goes instead of
+/// holding them until a fallback decision is possible.
 fn parse_source<S: LineSource>(source: &S) -> Result<(LpProblem, Vec<usize>), MpsError> {
     parse_with_format_fallback(source, |source, format| {
         let mut parser = MpsParser::new(format);
@@ -590,10 +622,10 @@ mod tests {
     /// invariant as a hard error instead of fabricating a bound.
     fn parser_with_dangling_bound(bound_type: BoundType) -> MpsParser {
         let mut parser = MpsParser::new(Format::Free);
-        parser
-            .columns
-            .push(("x".to_string(), "obj".to_string(), 1.0));
-        parser.bounds.push((bound_type, "x".to_string(), None));
+        let col_x = parser.col_names.intern_ref("x");
+        let row_obj = parser.row_names.intern_ref("obj");
+        parser.columns.push((col_x, row_obj, 1.0));
+        parser.bounds.push((bound_type, col_x, None));
         parser
     }
 
@@ -643,5 +675,104 @@ mod tests {
                 "valueless bound type {bound_type:?} must not require a value"
             );
         }
+    }
+
+    /// Row / column counts and per-column row references of the synthetic MPS
+    /// residency file (see the QPS parser's identically named constants for
+    /// the rationale; the sizes are chosen so both sides peak in the MB range).
+    const RESIDENCY_ROWS: usize = 256;
+    const RESIDENCY_COLS: usize = 4096;
+    const RESIDENCY_REFS_PER_COL: usize = 32;
+    /// Extra bytes appended to every name in the long-name variant.
+    const NAME_PAD: usize = 56;
+    /// Allowed long-vs-short peak growth per entry: names are owned by the
+    /// intern tables only, so name length may grow residency per *distinct
+    /// name*, never per entry.
+    const NAME_LENGTH_TOLERANCE_BYTES: usize = 10;
+    /// Absolute per-entry budget plus fixed slack for the long-name peak.
+    const PARSE_PEAK_BUDGET_BYTES: usize = 160;
+    const PARSE_PEAK_FIXED_SLACK: usize = 2 * 1024 * 1024;
+
+    /// A well-formed MPS text whose names carry `pad` filler bytes beyond the
+    /// index (inside an INTORG block so `integer_cols` is exercised too), plus
+    /// the number of COLUMNS entries it declares.
+    fn synthetic_mps(pad: usize) -> (String, usize) {
+        let row_name = |i: usize| format!("r{i:05}{}", "z".repeat(pad));
+        let col_name = |j: usize| format!("c{j:05}{}", "z".repeat(pad));
+        let mut text = String::from("NAME RESIDENCY\nROWS\n N obj\n");
+        for i in 0..RESIDENCY_ROWS {
+            text.push_str(&format!(" L {}\n", row_name(i)));
+        }
+        text.push_str("COLUMNS\n");
+        text.push_str("    'x'    'MARKER'    'INTORG'\n");
+        let mut nnz = 0usize;
+        for j in 0..RESIDENCY_COLS {
+            text.push_str(&format!(" {} obj 1.0", col_name(j)));
+            nnz += 1;
+            for k in 0..RESIDENCY_REFS_PER_COL {
+                text.push_str(&format!(" {} 1.0", row_name((j + k) % RESIDENCY_ROWS)));
+                nnz += 1;
+            }
+            text.push('\n');
+        }
+        text.push_str("    'x'    'MARKER'    'INTEND'\n");
+        text.push_str("RHS\n rhs");
+        for i in 0..RESIDENCY_ROWS {
+            text.push_str(&format!(" {} 2.0", row_name(i)));
+        }
+        text.push('\n');
+        text.push_str("BOUNDS\n");
+        for j in 0..RESIDENCY_COLS / 2 {
+            text.push_str(&format!(" UP bnd {} 10.0\n", col_name(j)));
+        }
+        text.push_str("ENDATA\n");
+        (text, nnz)
+    }
+
+    /// Sentinel (residency, MPS side of the same fix as the QPS parser):
+    /// parse-time allocation per sparse entry must not depend on name length.
+    /// See the QPS parser's test of the same name for the full rationale.
+    #[test]
+    fn parse_retention_independent_of_name_length() {
+        let (short, nnz) = synthetic_mps(0);
+        let (long, nnz_long) = synthetic_mps(NAME_PAD);
+        assert_eq!(nnz, nnz_long);
+
+        crate::peak_alloc::begin();
+        let parsed_short = crate::mps::parse_mps(&short).expect("short-name file must parse");
+        let peak_short = crate::peak_alloc::peak_bytes();
+
+        crate::peak_alloc::begin();
+        let parsed_long = crate::mps::parse_mps(&long).expect("long-name file must parse");
+        let peak_long = crate::peak_alloc::peak_bytes();
+
+        assert_eq!(parsed_long.num_vars, parsed_short.num_vars);
+        assert_eq!(parsed_long.num_constraints, parsed_short.num_constraints);
+        assert_eq!(parsed_long.c, parsed_short.c);
+        assert_eq!(parsed_long.b, parsed_short.b);
+        assert_eq!(
+            parsed_long.a.col_ptr().last(),
+            parsed_short.a.col_ptr().last()
+        );
+
+        let tolerance = NAME_LENGTH_TOLERANCE_BYTES * nnz;
+        assert!(
+            peak_long.saturating_sub(peak_short) <= tolerance,
+            "long-name parse peaked {} bytes above short-name; tolerance {} bytes \
+             ({} B/entry × {nnz} entries). Per-entry residency must not depend on \
+             name length — names belong in the intern table only.",
+            peak_long.saturating_sub(peak_short),
+            tolerance,
+            NAME_LENGTH_TOLERANCE_BYTES,
+        );
+        let budget = PARSE_PEAK_BUDGET_BYTES * nnz + PARSE_PEAK_FIXED_SLACK;
+        assert!(
+            peak_long <= budget,
+            "long-name parse peaked {} bytes, budget {} bytes ({} B/entry + {} fixed)",
+            peak_long,
+            budget,
+            PARSE_PEAK_BUDGET_BYTES,
+            PARSE_PEAK_FIXED_SLACK,
+        );
     }
 }
